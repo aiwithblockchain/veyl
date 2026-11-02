@@ -1,6 +1,7 @@
+import { useEffect, useRef, useState } from "react";
 import type { ApprovalDecision, ApprovalScope, NextAction } from "../agent/protocol";
 import { PRODUCT_NAME } from "../brand";
-import type { ApprovalEntry, ChatMessage, ToolCall } from "../state/chatStore";
+import type { ApprovalEntry, ChatMessage, TimelineItem, ToolCall } from "../state/chatStore";
 import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
 import { ThinkingBlock } from "./ThinkingBlock";
@@ -31,6 +32,12 @@ export function MessageItem({ message, toolCalls, approvals, onDecide, onNextAct
       </div>
     );
   }
+
+  // 只拼正文文本块：思考块、工具卡、token 计数都不进剪贴板。
+  const bodyText = message.items
+    .filter((item): item is Extract<TimelineItem, { kind: "text" }> => item.kind === "text")
+    .map((item) => item.content)
+    .join("\n\n");
 
   return (
     <div className="msg msg--assistant">
@@ -85,6 +92,118 @@ export function MessageItem({ message, toolCalls, approvals, onDecide, onNextAct
           }
         })}
       </div>
+
+      {!message.streaming ? <CopyAnswerButton text={bodyText} /> : null}
     </div>
+  );
+}
+
+type CopyState = "idle" | "copied" | "failed";
+
+/** 整条回答一个按钮：拼接所有正文文本块，不含思考与工具卡。 */
+function CopyAnswerButton({ text }: { text: string }) {
+  const [state, setState] = useState<CopyState>("idle");
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timer.current) clearTimeout(timer.current);
+    };
+  }, []);
+
+  if (!text.trim()) return null;
+
+  const resetLater = () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setState("idle"), 2000);
+  };
+
+  const handleCopy = async () => {
+    const ok = await copyToClipboard(text);
+    setState(ok ? "copied" : "failed");
+    resetLater();
+  };
+
+  const label = state === "copied" ? "已复制" : state === "failed" ? "复制失败" : "复制回答";
+
+  return (
+    <div className={`msg__actions ${state !== "idle" ? "is-active" : ""}`}>
+      <button
+        type="button"
+        className={`msg__copy msg__copy--${state}`}
+        title={label}
+        aria-label={label}
+        onClick={() => void handleCopy()}
+      >
+        {state === "copied" ? <CheckIcon /> : <CopyIcon />}
+        {state !== "idle" ? <span className="msg__copy-label">{label}</span> : null}
+      </button>
+    </div>
+  );
+}
+
+/** clipboard API 优先，不可用时退回 textarea + execCommand。 */
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 落到下面的兜底，不要把异常抛给界面。
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-9999px";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+
+  try {
+    textarea.select();
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
+function CopyIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="9" y="9" width="12" height="12" rx="2" />
+      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
   );
 }
