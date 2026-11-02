@@ -9,6 +9,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::runtime::RuntimeError;
 use crate::runtime::RuntimeResult;
 use backup::{BackupStore, Endpoint, FileBackupStore, ProxyBackup};
 
@@ -20,6 +21,12 @@ pub trait PlatformProxy: Send + Sync {
     fn apply(&self, port: u16) -> RuntimeResult<()>;
     fn restore(&self, payload: &serde_json::Value) -> RuntimeResult<()>;
     fn current(&self) -> RuntimeResult<Option<String>>;
+
+    /// 当前所有已启用的系统代理端点（`server:port`）。退出前用它确认
+    /// 我们写进去的端口已经没有任何服务在用。默认只查主代理。
+    fn active_endpoints(&self) -> RuntimeResult<Vec<String>> {
+        Ok(self.current()?.into_iter().collect())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -122,11 +129,44 @@ impl ProxyController {
     }
 
     pub fn disable(&self) -> RuntimeResult<()> {
+        // 仅 debug 构建：验收「退出时撤代理失败必须中止退出」用的故障注入。
+        // release 构建里整段被编掉，运行时完全不认这个变量。
+        #[cfg(debug_assertions)]
+        if std::env::var("VEYL_FAULT_PROXY_DISABLE").ok().as_deref() == Some("1") {
+            log::warn!(
+                "故障注入已生效：VEYL_FAULT_PROXY_DISABLE=1，disable() 直接失败且未执行任何 networksetup"
+            );
+            return Err(RuntimeError::Proxy(
+                "fault injection: VEYL_FAULT_PROXY_DISABLE=1".into(),
+            ));
+        }
+
         let Some(backup) = self.store.load()? else {
             return Ok(());
         };
         self.backend.restore(&backup.payload)?;
         self.store.clear()
+    }
+
+    /// 我们最近一次写进系统的代理端点；没有备份时为 `None`。
+    pub fn applied_endpoint(&self) -> RuntimeResult<Option<Endpoint>> {
+        Ok(self.store.load()?.map(|backup| backup.applied))
+    }
+
+    /// 仍在使用指定端点的网络服务列表。退出流程用它做「确实已恢复」的校验。
+    pub fn endpoint_in_use(&self, endpoint: &Endpoint) -> RuntimeResult<Vec<String>> {
+        let target = endpoint.to_string();
+        Ok(self
+            .backend
+            .active_endpoints()?
+            .into_iter()
+            .filter(|value| value == &target)
+            .collect())
+    }
+
+    /// 当前系统代理端点（`server:port`），用于修复后的复读校验。
+    pub fn current_endpoint(&self) -> RuntimeResult<Option<String>> {
+        self.backend.current()
     }
 
     /// 启动时调用：只有当前代理仍是我们设的值才恢复，用户改过就只报告。
@@ -329,5 +369,35 @@ mod tests {
         assert!(ctrl.enable(2080).is_err());
         assert_eq!(ctrl.recover_stale().unwrap(), RecoveryOutcome::Nothing);
         assert!(!ctrl.status().unwrap().has_backup);
+    }
+
+    #[test]
+    fn endpoint_in_use_follows_the_applied_endpoint() {
+        let fake = Box::leak(Box::new(Fake {
+            current: Mutex::new(None),
+            applied: Mutex::new(vec![]),
+            fail_apply: false,
+        }));
+        let ctrl = controller(fake);
+        ctrl.enable(4321).unwrap();
+
+        assert_eq!(
+            ctrl.applied_endpoint().unwrap(),
+            Some(Endpoint::loopback(4321))
+        );
+        assert_eq!(
+            ctrl.endpoint_in_use(&Endpoint::loopback(4321)).unwrap().len(),
+            1
+        );
+        assert!(ctrl
+            .endpoint_in_use(&Endpoint::loopback(9999))
+            .unwrap()
+            .is_empty());
+
+        ctrl.disable().unwrap();
+        assert!(ctrl
+            .endpoint_in_use(&Endpoint::loopback(4321))
+            .unwrap()
+            .is_empty());
     }
 }

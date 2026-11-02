@@ -148,6 +148,50 @@ pub fn delete_session(conn: &Connection, session_id: &str) -> StoreResult<()> {
     Ok(())
 }
 
+/// 删除会话及其全部消息与工具调用记录。
+///
+/// `tool_calls.session_id` 只有索引、没有外键，必须显式删；三张表在同一事务里，
+/// 返回前再核一遍确实没有残留。会话不存在返回 `Ok(false)`。
+pub fn delete_session_cascade(conn: &Connection, session_id: &str) -> StoreResult<bool> {
+    let existed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chat_sessions WHERE id = ?1)",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    if !existed {
+        return Ok(false);
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM tool_calls WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM chat_messages WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM chat_sessions WHERE id = ?1",
+        params![session_id],
+    )?;
+
+    let remaining: i64 = tx.query_row(
+        "SELECT (SELECT COUNT(*) FROM tool_calls WHERE session_id = ?1)
+              + (SELECT COUNT(*) FROM chat_messages WHERE session_id = ?1)
+              + (SELECT COUNT(*) FROM chat_sessions WHERE id = ?1)",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    if remaining != 0 {
+        return Err(StoreError::Invalid(format!(
+            "会话 {session_id} 仍有 {remaining} 条残留记录"
+        )));
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
 /// 消息主键：纳秒 + 进程内自增，避免同毫秒重复。
 pub fn new_message_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -172,6 +216,42 @@ fn default_title(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_a_session_removes_messages_and_tool_calls() {
+        let store = super::super::db::Store::open_in_memory().unwrap();
+        let conn = store.conn();
+
+        ensure_session(&conn, "ses_del", "要删的会话").unwrap();
+        append_message(&conn, "msg_a", "ses_del", "user", "你好", None).unwrap();
+        crate::store::tool_calls::begin(
+            &conn,
+            &crate::store::NewCall {
+                id: "call_1",
+                session_id: Some("ses_del"),
+                request_id: Some("req_1"),
+                tool_name: "RuntimeStatus",
+                args: &serde_json::json!({}),
+            },
+        )
+        .unwrap();
+
+        assert!(delete_session_cascade(&conn, "ses_del").unwrap());
+
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM tool_calls WHERE session_id='ses_del')
+                      + (SELECT COUNT(*) FROM chat_messages WHERE session_id='ses_del')
+                      + (SELECT COUNT(*) FROM chat_sessions WHERE id='ses_del')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "消息、工具调用、会话都必须删干净");
+
+        // 再删一次：会话不存在，返回 false 而不是报错。
+        assert!(!delete_session_cascade(&conn, "ses_del").unwrap());
+    }
 
     #[test]
     fn messages_round_trip_in_order() {

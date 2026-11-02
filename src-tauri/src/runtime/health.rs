@@ -160,6 +160,51 @@ pub fn parse_exit_ip(body: &str) -> Option<std::net::IpAddr> {
     body.trim().parse::<std::net::IpAddr>().ok()
 }
 
+/// 直连出口 IP 的探测地址。与出口探测用同一个纯文本服务。
+pub const DEFAULT_DIRECT_IP_PROBE: &str = "https://ifconfig.me/ip";
+
+/// 不经任何代理，直接测本机公网出口。用于与 `exit_ip` 对照。
+#[derive(Clone)]
+pub struct DirectIpProbe {
+    url: String,
+    http: reqwest::Client,
+}
+
+impl DirectIpProbe {
+    pub fn new(url: impl Into<String>) -> RuntimeResult<Self> {
+        // no_proxy：不读环境变量、不碰系统代理，拿到的才是直连出口。
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| RuntimeError::ClashApi(format!("direct ip client: {e}")))?;
+        Ok(Self {
+            url: url.into(),
+            http,
+        })
+    }
+
+    pub async fn check(&self) -> RuntimeResult<Option<String>> {
+        let response = self
+            .http
+            .get(&self.url)
+            .send()
+            .await
+            .map_err(|e| RuntimeError::ClashApi(format!("direct ip probe: {e}")))?;
+        if !response.status().is_success() {
+            return Err(RuntimeError::ClashApi(format!(
+                "direct ip probe returned HTTP {}",
+                response.status()
+            )));
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|e| RuntimeError::ClashApi(format!("direct ip probe body: {e}")))?;
+        Ok(parse_exit_ip(&body).map(|ip| ip.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

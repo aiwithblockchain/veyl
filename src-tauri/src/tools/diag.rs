@@ -24,8 +24,9 @@ impl Tool for DiagRunTool {
     }
 
     fn description(&self) -> &str {
-        "跑一次最小诊断：运行时、进程、控制面、配置、系统代理、目录可达性、出口 IP。\
-         连接失败时用它定位原因。"
+        "跑一次网络诊断：运行时/进程/控制面/数据面、系统代理逐服务、DNS、默认路由、\
+         出口 IP、默认源/GitHub/DeepSeek 可达性、当前配置与默认配置版本。\
+         每项带 ok、detail、remediation 与可点击 action。连接失败时用它定位原因。"
     }
 
     fn permission_level(&self) -> PermissionLevel {

@@ -6,6 +6,7 @@
 pub mod catalog_cache;
 pub mod chat;
 pub mod db;
+pub mod default_profile;
 pub mod error;
 pub mod migrations;
 pub mod profiles;

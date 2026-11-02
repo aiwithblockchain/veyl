@@ -212,6 +212,7 @@ async fn run_e2e(args: &Args) -> StepResult {
         clash_secret: secret.clone(),
         mixed_port,
         profile_id: Some("selftest".into()),
+        profile_name: None,
     };
     let status = manager.start(plan).await.map_err(|e| {
         let mut detail = e.to_string();
@@ -441,6 +442,7 @@ async fn run_fault(args: &Args) -> StepResult {
         clash_secret: secret,
         mixed_port,
         profile_id: Some("fault".into()),
+        profile_name: None,
     };
 
     step(1, "启动假 sing-box（2 秒后自杀）");

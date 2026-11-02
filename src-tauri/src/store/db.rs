@@ -95,12 +95,14 @@ mod tests {
                 [],
             )
             .unwrap();
-            // 退回到 v1，模拟一个已存在的旧库。
+            // 退回到 v1，模拟一个已存在的旧库。default_profile 在 v1 还不存在，
+            // 重建它，避免 004 的 ALTER 在已迁移的表上重复加列。
+            conn.execute("DROP TABLE IF EXISTS default_profile", []).unwrap();
             conn.pragma_update(None, "user_version", 1i64).unwrap();
         }
 
         let reopened = Store::open(&path).unwrap();
-        assert_eq!(reopened.schema_version().unwrap(), 2);
+        assert_eq!(reopened.schema_version().unwrap(), 4);
         let migrated: i64 = reopened
             .conn()
             .query_row("SELECT installed_at FROM runtime_versions", [], |row| row.get(0))

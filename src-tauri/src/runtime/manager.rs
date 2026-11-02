@@ -9,11 +9,11 @@ use tokio::sync::{broadcast, Mutex, Notify};
 use tokio::time::Instant;
 
 use super::error::{RuntimeError, RuntimeResult};
-use super::health::{ClashApi, DataPlaneProbe, ExitIpProbe, DEFAULT_EXIT_IP_PROBE};
+use super::health::{ClashApi, DataPlaneProbe, DirectIpProbe, ExitIpProbe, DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE};
 use super::process::{self, SpawnOptions};
 
-pub const CONTRACT_VERSION: &str = "1.0.10";
-pub const EVENT_CONTRACT_VERSION: &str = "1.0.10";
+pub const CONTRACT_VERSION: &str = "1.1.0";
+pub const EVENT_CONTRACT_VERSION: &str = "1.1.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
 pub const DEFAULT_DATA_PLANE_PROBE: &str = "http://cp.cloudflare.com/generate_204";
@@ -119,6 +119,11 @@ pub struct RuntimeStatus {
     pub upstream_version: Option<String>,
     pub uptime_seconds: Option<u64>,
     pub profile_id: Option<String>,
+    pub mixed_port: Option<u16>,
+    pub profile_name: Option<String>,
+    pub connected_since: Option<String>,
+    pub latency_ms: Option<u64>,
+    pub direct_ip: Option<String>,
     pub config_hash: Option<String>,
     pub system_proxy_enabled: bool,
     pub health: HealthSnapshot,
@@ -127,8 +132,32 @@ pub struct RuntimeStatus {
     /// P2 才采集；P1 恒为 null。
     pub connections: Option<u32>,
     pub restart_count: u32,
-    pub last_error: Option<String>,
+    pub last_error: Option<RuntimeErrorInfo>,
     pub last_transition_at: String,
+}
+
+/// 契约里的 `AivpnError` 形状（`docs/contracts/runtime.md` §2.5）。
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeErrorInfo {
+    pub contract_version: &'static str,
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    pub details: Option<serde_json::Value>,
+    pub request_id: String,
+}
+
+impl RuntimeErrorInfo {
+    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            contract_version: CONTRACT_VERSION,
+            code: code.into(),
+            message: message.into(),
+            retryable: false,
+            details: None,
+            request_id: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,6 +169,7 @@ pub struct RuntimeStateChangedPayload {
     pub pid: Option<u32>,
     pub upstream_version: Option<String>,
     pub reason: Option<String>,
+    pub error: Option<RuntimeErrorInfo>,
     pub emitted_at: String,
 }
 
@@ -175,6 +205,8 @@ pub struct RuntimeConfig {
     pub data_plane_probe: Option<String>,
     /// 连接成功后探测一次出口 IP 的纯文本地址；`None` 表示不探测。
     pub exit_ip_probe: Option<String>,
+    /// 连接成功后探测一次直连 IP 的地址（不走任何代理）。
+    pub direct_ip_probe: Option<String>,
 }
 
 impl RuntimeConfig {
@@ -190,6 +222,7 @@ impl RuntimeConfig {
             degraded_restart_after: Duration::from_secs(30),
             data_plane_probe: Some(DEFAULT_DATA_PLANE_PROBE.to_string()),
             exit_ip_probe: Some(DEFAULT_EXIT_IP_PROBE.to_string()),
+            direct_ip_probe: Some(DEFAULT_DIRECT_IP_PROBE.to_string()),
         }
     }
 
@@ -215,6 +248,7 @@ pub struct StartPlan {
     pub clash_secret: String,
     pub mixed_port: u16,
     pub profile_id: Option<String>,
+    pub profile_name: Option<String>,
 }
 
 impl std::fmt::Debug for StartPlan {
@@ -229,6 +263,7 @@ impl std::fmt::Debug for StartPlan {
             .field("clash_secret", &"<redacted>")
             .field("mixed_port", &self.mixed_port)
             .field("profile_id", &self.profile_id)
+            .field("profile_name", &self.profile_name)
             .finish()
     }
 }
@@ -266,16 +301,19 @@ struct Inner {
     pid: Option<u32>,
     version: Option<String>,
     restart_count: u32,
-    last_error: Option<String>,
+    last_error: Option<RuntimeErrorInfo>,
     generation: u64,
     desired_stop: bool,
     running_since: Option<Instant>,
+    connected_since: Option<String>,
     last_transition_at: String,
     config_hash: Option<String>,
     system_proxy_enabled: bool,
     health: HealthSnapshot,
     /// 最近一次成功探测出口 IP 的往返耗时；`health.exit_ip` 为空时视为无效。
     last_exit_ip_latency_ms: Option<u64>,
+    /// 不经代理测得的直连出口 IP；连接期间才有效。
+    direct_ip: Option<String>,
 }
 
 impl Inner {
@@ -291,17 +329,21 @@ impl Inner {
             generation: 0,
             desired_stop: false,
             running_since: None,
+            connected_since: None,
             last_transition_at: now_iso(),
             config_hash: None,
             system_proxy_enabled: false,
             health: HealthSnapshot::default(),
             last_exit_ip_latency_ms: None,
+            direct_ip: None,
         }
     }
 
     fn snapshot(&self) -> RuntimeStatus {
         let terminal = self.state.terminal();
         let running = !terminal && self.state != RuntimeState::Idle;
+        // runtime.md §2.5.1：这些字段只在 running / degraded 下非 null。
+        let connected = matches!(self.state, RuntimeState::Running | RuntimeState::Degraded);
 
         RuntimeStatus {
             contract_version: CONTRACT_VERSION,
@@ -314,7 +356,32 @@ impl Inner {
             pid: if terminal { None } else { self.pid },
             upstream_version: if terminal { None } else { self.version.clone() },
             uptime_seconds: self.running_since.map(|since| since.elapsed().as_secs()),
-            profile_id: self.plan.as_ref().and_then(|p| p.profile_id.clone()),
+            profile_id: if terminal {
+                None
+            } else {
+                self.plan.as_ref().and_then(|p| p.profile_id.clone())
+            },
+            mixed_port: if connected {
+                self.plan.as_ref().map(|p| p.mixed_port)
+            } else {
+                None
+            },
+            profile_name: if terminal {
+                None
+            } else {
+                self.plan.as_ref().and_then(|p| p.profile_name.clone())
+            },
+            connected_since: if connected {
+                self.connected_since.clone()
+            } else {
+                None
+            },
+            latency_ms: if connected && self.health.exit_ip.is_some() {
+                self.last_exit_ip_latency_ms
+            } else {
+                None
+            },
+            direct_ip: if connected { self.direct_ip.clone() } else { None },
             config_hash: self.config_hash.clone(),
             system_proxy_enabled: self.system_proxy_enabled,
             health: self.health.clone(),
@@ -487,7 +554,9 @@ impl RuntimeManager {
             inner.desired_stop = false;
             inner.restart_count = 0;
             inner.last_error = None;
+            inner.direct_ip = None;
             inner.running_since = None;
+            inner.connected_since = None;
             inner.health = HealthSnapshot::default();
             inner.config_hash = hash_file(&plan.config_path);
             inner.version = Some(plan.version.clone());
@@ -550,6 +619,7 @@ impl RuntimeManager {
             pid: None,
             upstream_version: None,
             reason: None,
+            error: None,
             emitted_at: now_iso(),
         }));
 
@@ -573,8 +643,10 @@ impl RuntimeManager {
             inner.child = None;
             // plan 指向的配置文件已被断开清理删掉，留着只会让 restart 拿死路径去启动。
             inner.plan = None;
+            inner.connected_since = None;
             // 断开后不能还显示上一个节点的出口地址。
             inner.health.exit_ip = None;
+            inner.direct_ip = None;
             inner.last_transition_at = now_iso();
             inner.snapshot()
         };
@@ -587,6 +659,7 @@ impl RuntimeManager {
             pid: None,
             upstream_version: None,
             reason: None,
+            error: None,
             emitted_at: now_iso(),
         }));
         // exit_ip 已在上面清空；推一次健康事件，否则面板会一直显示上一个节点的地址。
@@ -723,7 +796,7 @@ impl RuntimeManager {
             let child = match process::spawn(&options).await {
                 Ok(child) => child,
                 Err(e) => {
-                    self.fail(gen, e.to_string()).await;
+                    self.fail(gen, e.code(), e.to_string()).await;
                     return;
                 }
             };
@@ -740,7 +813,12 @@ impl RuntimeManager {
                     .unwrap_or_else(|| "runtime did not become ready".into());
                 self.kill_child().await;
                 // 契约：starting + CRASH → failed，启动失败不重试。
-                self.fail(gen, reason).await;
+                let code = if reason.contains("timed out") {
+                    "RUNTIME_START_TIMEOUT"
+                } else {
+                    "RUNTIME_EXITED"
+                };
+                self.fail(gen, code, reason).await;
                 return;
             }
 
@@ -969,6 +1047,7 @@ impl RuntimeManager {
             let from = inner.state;
             inner.state = RuntimeState::Running;
             inner.running_since = Some(Instant::now());
+            inner.connected_since = Some(now_iso());
             inner.pid = inner.child.as_ref().and_then(|c| c.id());
             inner.last_transition_at = now_iso();
 
@@ -992,6 +1071,46 @@ impl RuntimeManager {
             tokio::spawn(async move {
                 manager.probe_exit_ip(gen, plan).await;
             });
+        }
+
+        // 直连 IP 也只探一次，用于和出口 IP 对照「是否真的走了代理」。
+        let direct = Arc::clone(self);
+        tokio::spawn(async move {
+            direct.probe_direct_ip(gen).await;
+        });
+    }
+
+    /// 不经代理探测直连出口 IP。失败只记日志，不影响连接。
+    async fn probe_direct_ip(self: Arc<Self>, gen: u64) {
+        let Some(url) = self.cfg.direct_ip_probe.clone() else {
+            return;
+        };
+        let probe = match DirectIpProbe::new(url) {
+            Ok(probe) => probe,
+            Err(error) => {
+                log::warn!("直连 IP 探测器创建失败：{error}");
+                return;
+            }
+        };
+
+        let result = probe.check().await;
+
+        let still_running = {
+            let inner = self.inner.lock().await;
+            inner.generation == gen
+                && matches!(inner.state, RuntimeState::Running | RuntimeState::Degraded)
+        };
+        if !still_running {
+            return;
+        }
+
+        match result {
+            Ok(Some(ip)) => {
+                log::info!("直连 IP：{ip}");
+                self.inner.lock().await.direct_ip = Some(ip);
+            }
+            Ok(None) => log::warn!("直连 IP 探测返回的不是 IP，忽略（direct_ip 保持未知）"),
+            Err(error) => log::warn!("直连 IP 探测失败：{error}（direct_ip 保持未知）"),
         }
     }
 
@@ -1036,13 +1155,13 @@ impl RuntimeManager {
         }
     }
 
-    async fn fail(&self, gen: u64, reason: String) {
+    async fn fail(&self, gen: u64, code: &'static str, reason: String) {
         {
             let mut inner = self.inner.lock().await;
             if inner.generation != gen {
                 return;
             }
-            inner.last_error = Some(reason.clone());
+            inner.last_error = Some(RuntimeErrorInfo::new(code, &reason));
         }
         self.transition(gen, RuntimeState::Failed, RuntimeEventKind::Crash, Some(reason))
             .await;
@@ -1054,7 +1173,7 @@ impl RuntimeManager {
             if inner.generation != gen {
                 return;
             }
-            inner.last_error = Some(reason.clone());
+            inner.last_error = Some(RuntimeErrorInfo::new("RUNTIME_EXITED", &reason));
         }
         self.transition(gen, RuntimeState::Failed, RuntimeEventKind::GiveUp, Some(reason))
             .await;
@@ -1067,7 +1186,7 @@ impl RuntimeManager {
         event: RuntimeEventKind,
         reason: Option<String>,
     ) {
-        let payload = {
+        let (mut payload, error) = {
             let mut inner = self.inner.lock().await;
             if inner.generation != gen {
                 return;
@@ -1078,26 +1197,37 @@ impl RuntimeManager {
             if to.terminal() {
                 inner.pid = None;
                 inner.running_since = None;
+                inner.connected_since = None;
                 inner.health.exit_ip = None;
+                inner.direct_ip = None;
                 // 配置可能已被 guard 删除；清掉 plan，restart 会返回 InvalidState，
                 // 而不是拿死路径去启动、报一个用户看不懂的底层错误。
                 inner.plan = None;
                 // pid 文件由 kill_child / stop 按「进程是否真的退出」决定是否删除，
                 // 这里不能再无条件清掉，否则 D-23 的回收记录会丢。
             }
-            state_payload(
-                from,
-                to,
-                event,
-                reason,
-                if to.terminal() { None } else { inner.pid },
-                if to.terminal() {
-                    None
-                } else {
-                    inner.version.clone()
-                },
+            let error = if to == RuntimeState::Failed {
+                inner.last_error.clone()
+            } else {
+                None
+            };
+            (
+                state_payload(
+                    from,
+                    to,
+                    event,
+                    reason,
+                    if to.terminal() { None } else { inner.pid },
+                    if to.terminal() {
+                        None
+                    } else {
+                        inner.version.clone()
+                    },
+                ),
+                error,
             )
         };
+        payload.error = error;
         self.emit(RuntimeEvent::StateChanged(payload));
         if to == RuntimeState::Failed {
             // 锁已释放：钩子可以安全地做同步 IO（例如还原系统代理）。
@@ -1168,11 +1298,21 @@ impl RuntimeManager {
     }
 
     async fn record_error(&self, reason: String) {
-        self.inner.lock().await.last_error = Some(reason);
+        let code = if reason.contains("timed out") {
+            "RUNTIME_START_TIMEOUT"
+        } else {
+            "RUNTIME_EXITED"
+        };
+        self.inner.lock().await.last_error = Some(RuntimeErrorInfo::new(code, reason));
     }
 
     async fn last_error(&self) -> Option<String> {
-        self.inner.lock().await.last_error.clone()
+        self.inner
+            .lock()
+            .await
+            .last_error
+            .as_ref()
+            .map(|error| error.message.clone())
     }
 
     async fn wait_settled(&self, gen: u64, budget: Duration) -> RuntimeResult<RuntimeStatus> {
@@ -1190,7 +1330,8 @@ impl RuntimeManager {
                         return Err(RuntimeError::Process(
                             inner
                                 .last_error
-                                .clone()
+                                .as_ref()
+                                .map(|error| error.message.clone())
                                 .unwrap_or_else(|| "runtime failed to start".into()),
                         ))
                     }
@@ -1231,6 +1372,7 @@ fn state_payload(
         pid,
         upstream_version,
         reason,
+        error: None,
         emitted_at: now_iso(),
     }
 }
@@ -1297,6 +1439,7 @@ mod tests {
             clash_secret: "secret".into(),
             mixed_port: 1,
             profile_id: Some("profile-1".into()),
+            profile_name: None,
         }
     }
 
@@ -1357,6 +1500,7 @@ mod tests {
             clash_secret: "new-secret".into(),
             mixed_port: 4321,
             profile_id: Some("profile-2".into()),
+            profile_name: None,
         };
 
         {
@@ -1405,6 +1549,7 @@ mod tests {
             clash_secret: "secret".into(),
             mixed_port: 4321,
             profile_id: Some("profile-1".into()),
+            profile_name: None,
         };
 
         let first = manager.start(start_plan.clone()).await.unwrap();
@@ -1503,6 +1648,15 @@ mod tests {
         assert!(status.pid.is_none());
         assert!(status.upstream_version.is_none());
         assert!(status.last_error.is_some());
+        assert_eq!(
+            status.last_error.as_ref().unwrap().code,
+            "RUNTIME_EXITED",
+            "last_error 必须是结构化对象"
+        );
+        assert_eq!(
+            status.last_error.as_ref().unwrap().contract_version,
+            "1.1.0"
+        );
 
         let mut restarts = 0;
         while let Ok(event) = events.try_recv() {
@@ -1517,6 +1671,12 @@ mod tests {
                 );
                 if payload.to == RuntimeState::Restarting {
                     restarts += 1;
+                }
+                if payload.to == RuntimeState::Failed {
+                    assert!(
+                        payload.error.is_some(),
+                        "failed 迁移必须带上结构化 error"
+                    );
                 }
             }
         }
@@ -1775,6 +1935,38 @@ mod tests {
 
         let _ = child.kill().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_carries_live_connection_fields() {
+        let mut inner = Inner::new();
+        inner.state = RuntimeState::Running;
+        let mut current = plan(PathBuf::from("/tmp/sing-box"), std::path::Path::new("/tmp"));
+        current.mixed_port = 4321;
+        current.profile_name = Some("东京 01".into());
+        inner.plan = Some(current);
+        inner.connected_since = Some("2026-11-02T00:00:00Z".into());
+        inner.health.exit_ip = Some("203.0.113.10".into());
+        inner.direct_ip = Some("198.51.100.7".into());
+        inner.last_exit_ip_latency_ms = Some(123);
+
+        let snapshot = inner.snapshot();
+        assert_eq!(snapshot.mixed_port, Some(4321));
+        assert_eq!(snapshot.profile_name.as_deref(), Some("东京 01"));
+        assert_eq!(
+            snapshot.connected_since.as_deref(),
+            Some("2026-11-02T00:00:00Z")
+        );
+        assert_eq!(snapshot.latency_ms, Some(123));
+        assert_eq!(snapshot.direct_ip.as_deref(), Some("198.51.100.7"));
+
+        inner.state = RuntimeState::Failed;
+        let snapshot = inner.snapshot();
+        assert!(snapshot.mixed_port.is_none());
+        assert!(snapshot.profile_name.is_none());
+        assert!(snapshot.connected_since.is_none());
+        assert!(snapshot.latency_ms.is_none());
+        assert!(snapshot.direct_ip.is_none());
     }
 
     #[test]

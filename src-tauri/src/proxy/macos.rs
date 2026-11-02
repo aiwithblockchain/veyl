@@ -118,6 +118,19 @@ impl PlatformProxy for MacProxy {
         }
         Ok(None)
     }
+
+    fn active_endpoints(&self) -> RuntimeResult<Vec<String>> {
+        let mut endpoints = Vec::new();
+        for service in list_services()? {
+            for kind in [Kind::Http, Kind::Https, Kind::Socks] {
+                let setting = read(&service, kind)?;
+                if setting.enabled && setting.port != 0 {
+                    endpoints.push(format!("{}:{}", setting.server, setting.port));
+                }
+            }
+        }
+        Ok(endpoints)
+    }
 }
 
 fn list_services() -> RuntimeResult<Vec<String>> {

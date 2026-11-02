@@ -146,6 +146,14 @@ impl AppState {
         self.active_requests.lock().remove(request_id);
     }
 
+    /// 该会话是否还有进行中的 AI 请求（删除会话前必须为空）。
+    pub fn has_active_request_for_session(&self, session_id: &str) -> bool {
+        self.active_requests
+            .lock()
+            .values()
+            .any(|value| value == session_id)
+    }
+
     /// 取消时由 request_id 找回会话；找不到说明这一轮已经结束。
     pub async fn session_for_request(&self, request_id: &str) -> Option<Arc<AivpnSession>> {
         let session_id = self.active_requests.lock().get(request_id).cloned()?;

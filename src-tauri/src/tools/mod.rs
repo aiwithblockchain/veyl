@@ -9,6 +9,7 @@ pub mod deepseek;
 pub mod diag;
 pub mod envelope;
 pub mod job;
+pub mod net;
 pub mod policy;
 pub mod runtime;
 pub mod services;
@@ -41,6 +42,10 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(deepseek::DeepseekSetupKeyTool),
         Box::new(deepseek::DeepseekSaveKeyTool::new(Arc::clone(&services))),
         Box::new(job::JobGetTool::new(Arc::clone(&services))),
+        Box::new(net::NetConfigGetTool::new(Arc::clone(&services))),
+        Box::new(net::NetRepairTool::new(Arc::clone(&services))),
+        Box::new(net::CatalogRefreshTool::new(Arc::clone(&services))),
+        Box::new(net::DefaultProfileStatusTool::new(Arc::clone(&services))),
         Box::new(claurst_tools::AskUserQuestionTool),
     ]
 }

@@ -8,7 +8,9 @@ pub mod manifest;
 pub mod process;
 
 pub use error::{RuntimeError, RuntimeResult};
-pub use health::{ClashApi, DataPlaneProbe, VersionInfo};
+pub use health::{
+    ClashApi, DataPlaneProbe, DirectIpProbe, VersionInfo, DEFAULT_DIRECT_IP_PROBE,
+};
 pub use install::{
     InstallProgress, Installer, InstalledRuntime, ProgressFn, RuntimeStateFile, BINARY_NAME,
 };

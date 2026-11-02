@@ -69,6 +69,346 @@ pub async fn runtime_status(state: State<'_, Arc<AppState>>) -> Result<Value, St
         .map_err(|error| error.to_string())
 }
 
+/// 服务层错误已经是结构化的 `ServiceError`；还原成契约里的 AivpnError 形状。
+fn error_value(error: anyhow::Error) -> Value {
+    if let Some(service) = error.downcast_ref::<crate::tools::services::ServiceError>() {
+        return json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": service.code,
+            "message": service.message,
+            "retryable": service.retryable,
+            "details": service.details,
+            "request_id": "",
+        });
+    }
+
+    let text = error.to_string();
+    match text.split_once(": ") {
+        Some((code, message))
+            if !code.is_empty()
+                && code
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_') =>
+        {
+            json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "code": code,
+                "message": message,
+                "retryable": false,
+                "details": null,
+                "request_id": "",
+            })
+        }
+        _ => json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "INTERNAL",
+            "message": text,
+            "retryable": false,
+            "details": null,
+            "request_id": "",
+        }),
+    }
+}
+
+/// 面板主按钮：连接。`profileId` 省略时用当前激活配置。
+#[tauri::command]
+pub async fn runtime_start(
+    state: State<'_, Arc<AppState>>,
+    profile_id: Option<String>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .runtime_start(profile_id)
+        .await
+        .map_err(error_value)
+}
+
+/// 面板主按钮：断开。
+#[tauri::command]
+pub async fn runtime_stop(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state.services.runtime_stop(false).await.map_err(error_value)
+}
+
+/// 节点切换列表。与工具通道同名同序：`profile_id` + `active_profile_id` + `node_id`。
+#[tauri::command]
+pub async fn profile_list(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    let data = state.services.profile_list().await.map_err(error_value)?;
+    let mut profiles = data
+        .get("profiles")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // 与工具一致：created_at 升序。
+    profiles.sort_by(|left, right| {
+        let left = left.get("created_at").and_then(Value::as_str).unwrap_or("");
+        let right = right.get("created_at").and_then(Value::as_str).unwrap_or("");
+        left.cmp(right)
+    });
+
+    Ok(json!({
+        "profiles": profiles
+            .iter()
+            .map(|profile| json!({
+                "profile_id": profile.get("profile_id").cloned().unwrap_or(Value::Null),
+                "node_id": profile.get("node_id").cloned().unwrap_or(Value::Null),
+                "name": profile.get("name").cloned().unwrap_or(Value::Null),
+                "protocol": profile.get("protocol").cloned().unwrap_or(Value::Null),
+                "region": profile.get("region").cloned().unwrap_or(Value::Null),
+                "is_active": profile.get("is_active").cloned().unwrap_or(Value::Bool(false)),
+                "created_at": profile.get("created_at").cloned().unwrap_or(Value::Null),
+            }))
+            .collect::<Vec<_>>(),
+        "active_profile_id": data.get("active_profile_id").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+/// 面板三级折叠里的「打开日志」：用系统文件管理器定位到日志文件。
+/// 不接受路径参数，避免变成任意文件打开入口。
+#[tauri::command]
+pub async fn open_log_dir() -> Result<Value, Value> {
+    let logs_dir = crate::runtime::default_app_data_dir().join("logs");
+    let Some(target) = latest_log_file(&logs_dir) else {
+        return Err(json!({
+            "code": "NOT_FOUND",
+            "message": "还没有日志，先连接一次",
+            "details": { "hint": "还没有日志，先连接一次" },
+        }));
+    };
+    reveal_in_file_manager(&target)
+        .map_err(|error| json!({ "code": "INTERNAL", "message": error }))?;
+    Ok(json!({ "path": target.to_string_lossy() }))
+}
+
+fn latest_log_file(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() {
+                return None;
+            }
+            let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok())?;
+            Some((modified, path))
+        })
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
+}
+
+fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .status();
+    #[cfg(windows)]
+    let status = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .status();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = std::process::Command::new("xdg-open")
+        .arg(path.parent().unwrap_or(path))
+        .status();
+
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("文件管理器返回 {status}")),
+        Err(error) => Err(format!("启动文件管理器失败：{error}")),
+    }
+}
+
+/// 默认配置包状态（离线可读，不联网）。
+#[tauri::command]
+pub async fn default_profile_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state
+        .services
+        .default_profile_status()
+        .await
+        .map_err(error_value)
+}
+
+/// 拉取并应用默认配置包；在线时只标记新版本，不打断连接。
+#[tauri::command]
+pub async fn default_profile_refresh(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state
+        .services
+        .default_profile_refresh()
+        .await
+        .map_err(error_value)
+}
+
+/// 受限网络修复。与 AI 工具 NetRepair 共用同一份实现。
+#[tauri::command]
+pub async fn net_repair(
+    state: State<'_, Arc<AppState>>,
+    action: String,
+    port: Option<u16>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .net_repair(&action, port)
+        .await
+        .map_err(error_value)
+}
+
+/// 删除会话及其全部消息与工具调用记录（同事务）。有进行中的请求时拒绝。
+#[tauri::command]
+pub async fn chat_delete(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<Value, Value> {
+    if state.has_active_request_for_session(&session_id) {
+        return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "PRECONDITION_FAILED",
+            "message": "会话有进行中的请求，先停止再删除",
+            "retryable": false,
+            "details": { "reason": "active_request" },
+            "request_id": "",
+        }));
+    }
+
+    let Some(store) = crate::store::global() else {
+        return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "INTERNAL",
+            "message": "本地数据库不可用",
+            "retryable": false,
+            "details": null,
+            "request_id": "",
+        }));
+    };
+
+    let deleted = {
+        // 连接守卫不能跨 await：先完成删除，再更新内存会话。
+        let conn = store.conn();
+        crate::store::chat::delete_session_cascade(&conn, &session_id)
+    };
+    match deleted {
+        Ok(true) => {
+            // 内存里的会话也要丢掉，否则下一次发送会往已删除的会话写消息。
+            state.drop_session(&session_id).await;
+            Ok(json!({ "ok": true }))
+        }
+        Ok(false) => Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "NOT_FOUND",
+            "message": "会话不存在",
+            "retryable": false,
+            "details": null,
+            "request_id": "",
+        })),
+        Err(error) => Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": error.code(),
+            "message": error.to_string(),
+            "retryable": false,
+            "details": null,
+            "request_id": "",
+        })),
+    }
+}
+
+/// 用系统浏览器打开白名单内的链接（目前只有 DeepSeek 开放平台）。
+/// 域名写死在这里，避免变成任意 URL 打开器。
+#[tauri::command]
+pub async fn open_external(
+    app: tauri::AppHandle,
+    url: String,
+) -> Result<Value, Value> {
+    use tauri_plugin_opener::OpenerExt;
+
+    const ALLOWED_PREFIX: &str = "https://platform.deepseek.com/";
+    if !url.starts_with(ALLOWED_PREFIX) {
+        return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "INVALID_ARGUMENT",
+            "message": "只允许打开 DeepSeek 开放平台的链接",
+            "retryable": false,
+            "details": { "reason": "url_not_allowed" },
+            "request_id": "",
+        }));
+    }
+
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|error| json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "INTERNAL",
+            "message": format!("打开浏览器失败：{error}"),
+            "retryable": false,
+            "details": null,
+            "request_id": "",
+        }))?;
+    Ok(json!({ "opened": true }))
+}
+
+/// 引导是否需要展示。`completed` 由设置表持久化。
+#[tauri::command]
+pub async fn onboarding_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    let completed = crate::store::global()
+        .map(|store| {
+            let conn = store.conn();
+            crate::store::settings::get(&conn, "onboarding_completed")
+                .ok()
+                .flatten()
+                .map(|value| {
+                    // 全库约定时间戳是毫秒；兼容早期写过的 "true"。
+                    value == "true"
+                        || value
+                            .parse::<i64>()
+                            .map(|millis| millis > 0)
+                            .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+
+    let profile_count = state
+        .services
+        .profile_list()
+        .await
+        .ok()
+        .and_then(|data| {
+            data.get("profiles")
+                .and_then(Value::as_array)
+                .map(|profiles| profiles.len())
+        })
+        .unwrap_or(0);
+
+    Ok(json!({
+        "completed": completed,
+        "has_key": state.has_credentials(),
+        "profile_count": profile_count,
+    }))
+}
+
+/// 标记引导完成。`skipped_key` 只入库备查，不参与判定。
+#[tauri::command]
+pub async fn onboarding_complete(
+    skipped_key: Option<bool>,
+) -> Result<Value, Value> {
+    let Some(store) = crate::store::global() else {
+        return Err(json!({ "code": "INTERNAL", "message": "本地数据库不可用" }));
+    };
+    let conn = store.conn();
+    let skipped = skipped_key.unwrap_or(false);
+    // 全库约定：完成时刻存 Unix 毫秒。
+    crate::store::settings::set(
+        &conn,
+        "onboarding_completed",
+        &crate::store::now_ms().to_string(),
+    )
+    .map_err(|error| json!({ "code": "INTERNAL", "message": error.to_string() }))?;
+    crate::store::settings::set(
+        &conn,
+        "onboarding_skipped_key",
+        if skipped { "true" } else { "false" },
+    )
+    .map_err(|error| json!({ "code": "INTERNAL", "message": error.to_string() }))?;
+    Ok(json!({ "ok": true }))
+}
+
 /// 无 AI 模式的删除配置入口。审批已移除，直接执行；
 /// 「不能删活动配置」的前置校验仍在服务层（`active_profile_id`）。
 #[tauri::command]

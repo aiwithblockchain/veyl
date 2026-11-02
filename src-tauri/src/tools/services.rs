@@ -33,6 +33,14 @@ pub trait VpnToolServices: Send + Sync {
 
     async fn profile_delete(&self, profile_id: &str) -> anyhow::Result<Value>;
 
+    async fn default_profile_status(&self) -> anyhow::Result<Value>;
+    async fn default_profile_refresh(&self) -> anyhow::Result<Value>;
+    async fn default_profile_tool_status(&self) -> anyhow::Result<Value>;
+    async fn catalog_refresh(&self, force: bool) -> anyhow::Result<Value>;
+
+    async fn net_config_get(&self) -> anyhow::Result<Value>;
+    async fn net_repair(&self, action: &str, port: Option<u16>) -> anyhow::Result<Value>;
+
     async fn vpn_connect(
         &self,
         target: ConnectTarget,
@@ -63,17 +71,22 @@ fn not_wired<T>(what: &str) -> anyhow::Result<T> {
 
 fn idle_snapshot() -> Value {
     json!({
-        "contract_version": "1.0.10",
+        "contract_version": crate::runtime::CONTRACT_VERSION,
         "state": "idle",
         "mode": "system_proxy",
         "pid": null,
         "upstream_version": null,
         "uptime_seconds": null,
         "profile_id": null,
+        "mixed_port": null,
+        "profile_name": null,
+        "connected_since": null,
+        "latency_ms": null,
+        "direct_ip": null,
         "config_hash": null,
         "system_proxy_enabled": false,
         "health": {
-            "contract_version": "1.0.10",
+            "contract_version": crate::runtime::CONTRACT_VERSION,
             "process": false,
             "clash_api": false,
             "data_plane": false,
@@ -145,6 +158,30 @@ impl VpnToolServices for NotWiredServices {
         not_wired("删除配置")
     }
 
+    async fn default_profile_status(&self) -> anyhow::Result<Value> {
+        not_wired("默认配置状态")
+    }
+
+    async fn default_profile_refresh(&self) -> anyhow::Result<Value> {
+        not_wired("刷新默认配置")
+    }
+
+    async fn default_profile_tool_status(&self) -> anyhow::Result<Value> {
+        not_wired("默认配置状态")
+    }
+
+    async fn catalog_refresh(&self, _force: bool) -> anyhow::Result<Value> {
+        not_wired("刷新默认配置")
+    }
+
+    async fn net_config_get(&self) -> anyhow::Result<Value> {
+        not_wired("读取系统网络")
+    }
+
+    async fn net_repair(&self, _action: &str, _port: Option<u16>) -> anyhow::Result<Value> {
+        not_wired("修复系统网络")
+    }
+
     async fn vpn_connect(&self, _target: ConnectTarget, _strategy: &str) -> anyhow::Result<Value> {
         not_wired("连接")
     }
@@ -181,8 +218,43 @@ use crate::runtime::{Installer, RuntimeManager, StartPlan};
 use crate::store::Store;
 
 /// 服务层错误统一带契约错误码前缀（`CODE: 说明`），由信封层转成 `AivpnError`。
+/// 结构化的服务层错误。命令层用 downcast 还原 code / details / retryable。
+#[derive(Debug)]
+pub struct ServiceError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    pub details: Option<Value>,
+}
+
+impl std::fmt::Display for ServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for ServiceError {}
+
 fn svc_error(code: impl std::fmt::Display, message: impl std::fmt::Display) -> anyhow::Error {
-    anyhow::anyhow!("{code}: {message}")
+    anyhow::Error::new(ServiceError {
+        code: code.to_string(),
+        message: message.to_string(),
+        retryable: false,
+        details: None,
+    })
+}
+
+fn svc_error_with_details(
+    code: impl std::fmt::Display,
+    message: impl std::fmt::Display,
+    details: Value,
+) -> anyhow::Error {
+    anyhow::Error::new(ServiceError {
+        code: code.to_string(),
+        message: message.to_string(),
+        retryable: false,
+        details: Some(details),
+    })
 }
 
 /// 连接只有真的进入 running 才算成功。
@@ -197,6 +269,80 @@ fn require_running_state(state: crate::runtime::RuntimeState) -> anyhow::Result<
             "PRECONDITION_FAILED",
             format!("运行时未进入 running（当前 {}），连接已中止", state.as_str()),
         ))
+    }
+}
+
+fn catalog_result(store: &Store, changed: bool, offline: bool, detail: &str) -> Value {
+    match crate::default_profile::status(store) {
+        Some(status) => json!({
+            "changed": changed,
+            "offline": offline,
+            "package_id": status.package_id,
+            "version": status.version,
+            "applied_at": status.applied_at,
+            "node_count": status.node_count,
+            "new_version_available": status.new_version_available,
+            "detail": detail,
+        }),
+        None => json!({
+            "changed": false,
+            "offline": offline,
+            "package_id": null,
+            "version": null,
+            "applied_at": null,
+            "node_count": 0,
+            "new_version_available": false,
+            "detail": detail,
+        }),
+    }
+}
+
+fn diag_check(
+    name: &str,
+    group: &str,
+    ok: bool,
+    detail: String,
+    remediation: Option<&str>,
+    action: Option<Value>,
+) -> Value {
+    json!({
+        "name": name,
+        "group": group,
+        "ok": ok,
+        "detail": detail,
+        "remediation": remediation,
+        "action": action,
+    })
+}
+
+async fn http_reachable(url: &str) -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    else {
+        return false;
+    };
+    client.get(url).send().await.is_ok()
+}
+
+fn default_profile_status_json(store: &Store) -> Value {
+    match crate::default_profile::status(store) {
+        Some(status) => json!({
+            "package_id": status.package_id,
+            "name": status.name,
+            "version": status.version,
+            "applied_at": status.applied_at,
+            "new_version_available": status.new_version_available,
+            "node_count": status.node_count,
+        }),
+        None => json!({
+            "package_id": null,
+            "name": null,
+            "version": null,
+            "applied_at": null,
+            "new_version_available": false,
+            "node_count": 0,
+        }),
     }
 }
 
@@ -487,22 +633,29 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn runtime_start(&self, profile_id: Option<String>) -> anyhow::Result<Value> {
-        let target = match profile_id {
-            Some(id) => ConnectTarget::Profile(id),
-            None => ConnectTarget::Profile(
-                self.active_profile_id()
-                    .ok_or_else(|| svc_error("PRECONDITION_FAILED", "没有活动配置"))?,
-            ),
-        };
-        self.connect(target).await
+        match profile_id {
+            Some(id) => self.connect(ConnectTarget::Profile(id)).await,
+            None => {
+                if let Some(active) = self.active_profile_id() {
+                    self.connect(ConnectTarget::Profile(active)).await
+                } else if crate::default_profile::status(&self.store).is_some() {
+                    // 没有本地 profile 但有默认配置包：用它连。
+                    self.connect_default_package().await
+                } else {
+                    Err(svc_error(
+                        "PRECONDITION_FAILED",
+                        "还没有可用节点：先获取默认配置或导入节点文件",
+                    ))
+                }
+            }
+        }
     }
 
     async fn runtime_stop(&self, _force: bool) -> anyhow::Result<Value> {
         // 先记下要清理的 profile：断开后 active 会被清空。
         let active = self.active_profile_id();
-        if let Err(error) = self.proxy.disable() {
-            log::warn!("断开时解除系统代理失败：{error}");
-        }
+        // 撤代理失败必须中止断开，不能留下指向死端口的系统代理。
+        self.restore_system_proxy()?;
         self.manager.set_system_proxy_enabled(false).await;
         let status = self
             .manager
@@ -515,6 +668,8 @@ impl VpnToolServices for WiredServices {
         if let Some(profile_id) = active {
             vpn_config::remove_profile_config(&self.config_dir(), &profile_id);
         }
+        // 默认配置包的渲染文件用固定键，也一起清掉。
+        vpn_config::remove_profile_config(&self.config_dir(), "default");
         serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
     }
 
@@ -759,16 +914,304 @@ impl VpnToolServices for WiredServices {
 
     async fn diag_run(&self, include_logs: bool) -> anyhow::Result<Value> {
         let status = self.manager.status().await;
-        let proxy = self.proxy.status().ok();
-        let logs = if include_logs {
-            self.runtime_logs(50, None).await?.get("lines").cloned()
+        let running = matches!(
+            status.state,
+            crate::runtime::RuntimeState::Running | crate::runtime::RuntimeState::Degraded
+        );
+        let installed = self.installer.active().ok().flatten().is_some();
+        let net = tokio::task::spawn_blocking(crate::netcfg::read)
+            .await
+            .ok()
+            .and_then(|result| result.ok());
+        let default_status = crate::default_profile::status(&self.store);
+
+        let mut checks = Vec::new();
+
+        checks.push(diag_check(
+            "app.runtime_installed",
+            "app",
+            installed,
+            if installed { "运行时已安装".into() } else { "运行时未安装".into() },
+            if installed { None } else { Some("安装运行时后再试") },
+            if installed { None } else { Some(json!({ "kind": "reconnect" })) },
+        ));
+        checks.push(diag_check(
+            "app.process_alive",
+            "app",
+            status.health.process,
+            if status.health.process { "sing-box 进程存活".into() } else { "sing-box 进程未运行".into() },
+            None,
+            if running && !status.health.process { Some(json!({ "kind": "reconnect" })) } else { None },
+        ));
+        let version = status.upstream_version.clone().or_else(|| {
+            self.installer.active().ok().flatten().map(|runtime| runtime.version)
+        });
+        checks.push(diag_check(
+            "app.version",
+            "app",
+            version.is_some(),
+            version.clone().map(|value| format!("运行时版本 {value}")).unwrap_or_else(|| "没有可用的运行时版本".into()),
+            None,
+            None,
+        ));
+        checks.push(diag_check(
+            "app.config_valid",
+            "app",
+            !running || status.config_hash.is_some(),
+            if running {
+                status.config_hash.clone().unwrap_or_else(|| "缺少配置摘要".into())
+            } else {
+                "未连接，无活动配置".into()
+            },
+            None,
+            None,
+        ));
+        checks.push(diag_check(
+            "app.clash_api",
+            "app",
+            !running || status.health.clash_api,
+            if status.health.clash_api { "控制面可用".into() } else { "控制面不可用".into() },
+            if running && !status.health.clash_api { Some("重新连接后再试") } else { None },
+            None,
+        ));
+        checks.push(diag_check(
+            "app.data_plane",
+            "app",
+            !running || status.health.data_plane,
+            if status.health.data_plane { "数据面可用".into() } else { "数据面不可用".into() },
+            if running && !status.health.data_plane { Some("换个节点或稍后重试") } else { None },
+            None,
+        ));
+
+        match net.as_ref() {
+            Some(net) => {
+                let mut endpoints = Vec::new();
+                for service in &net.proxies {
+                    for entry in [&service.http, &service.https, &service.socks] {
+                        if entry.enabled {
+                            if let (Some(server), Some(port)) = (&entry.server, entry.port) {
+                                endpoints.push(format!("{server}:{port}"));
+                            }
+                        }
+                    }
+                }
+                let expected = status.mixed_port.map(|port| format!("127.0.0.1:{port}"));
+                let dead_loopback = endpoints.iter().any(|endpoint| {
+                    let (host, port) = endpoint.rsplit_once(':').unwrap_or((endpoint, ""));
+                    let loopback = matches!(host, "127.0.0.1" | "localhost" | "[::1]");
+                    let port: u16 = port.parse().unwrap_or(0);
+                    loopback && !net.listeners.iter().any(|listener| listener.port == port)
+                });
+                let (ok, detail) = if running {
+                    let matches_runtime = expected
+                        .as_ref()
+                        .map(|expected| !endpoints.is_empty() && endpoints.iter().all(|item| item == expected))
+                        .unwrap_or(false);
+                    (
+                        matches_runtime && !dead_loopback,
+                        if endpoints.is_empty() {
+                            "系统代理未接管".to_string()
+                        } else {
+                            format!("{} 个服务指向 {}", endpoints.len(), endpoints[0])
+                        },
+                    )
+                } else if dead_loopback {
+                    (false, "系统代理指向未监听的本地端口".to_string())
+                } else {
+                    (true, format!("{} 个服务启用了代理", endpoints.len()))
+                };
+                checks.push(diag_check(
+                    "system.proxy_services",
+                    "system",
+                    ok,
+                    detail,
+                    if ok { None } else { Some("点『恢复网络』撤掉代理后再试") },
+                    if ok { None } else { Some(json!({ "kind": "restore_network" })) },
+                ));
+
+                checks.push(diag_check(
+                    "system.dns",
+                    "system",
+                    net.dns.resolvable,
+                    format!(
+                        "{} 个解析器，{} {}",
+                        net.dns.servers.len(),
+                        net.dns.probe_domain,
+                        if net.dns.resolvable { "可解析" } else { "无法解析" }
+                    ),
+                    if net.dns.resolvable { None } else { Some("刷新 DNS 缓存后重试") },
+                    if net.dns.resolvable { None } else { Some(json!({ "kind": "flush_dns" })) },
+                ));
+
+                let route_ok = net.route.default_interface.is_some();
+                checks.push(diag_check(
+                    "system.default_route",
+                    "system",
+                    route_ok,
+                    match (&net.route.default_interface, &net.route.default_gateway) {
+                        (Some(interface), Some(gateway)) => format!("默认接口 {interface}，网关 {gateway}"),
+                        (Some(interface), None) => format!("默认接口 {interface}"),
+                        _ => "没有默认路由".to_string(),
+                    },
+                    if route_ok { None } else { Some("检查本机网络连接") },
+                    None,
+                ));
+            }
+            None => checks.push(diag_check(
+                "system.proxy_services",
+                "system",
+                false,
+                "当前平台无法读取系统网络".into(),
+                None,
+                None,
+            )),
+        }
+
+        let exit_ip = status.health.exit_ip.clone();
+        checks.push(diag_check(
+            "network.exit_ip",
+            "network",
+            !running || exit_ip.is_some(),
+            exit_ip.clone().map(|ip| format!("代理出口 {ip}")).unwrap_or_else(|| "未探测到出口 IP".into()),
+            if running && exit_ip.is_none() { Some("重新连接以重新探测") } else { None },
+            if running && exit_ip.is_none() { Some(json!({ "kind": "reconnect" })) } else { None },
+        ));
+
+        let source_reachable = http_reachable(&crate::default_profile::source_url()).await;
+        checks.push(diag_check(
+            "network.reachable_default_source",
+            "network",
+            source_reachable,
+            if source_reachable { "默认配置源可达".into() } else { "默认配置源不可达".into() },
+            if source_reachable { None } else { Some("连上网络后刷新默认配置") },
+            if source_reachable { None } else { Some(json!({ "kind": "refresh_default_profile" })) },
+        ));
+        let github = http_reachable("https://github.com").await;
+        checks.push(diag_check(
+            "network.reachable_github",
+            "network",
+            github,
+            if github { "GitHub 可达".into() } else { "GitHub 不可达".into() },
+            None,
+            None,
+        ));
+        let deepseek = http_reachable("https://api.deepseek.com").await;
+        checks.push(diag_check(
+            "network.reachable_deepseek",
+            "network",
+            deepseek,
+            if deepseek { "DeepSeek API 可达".into() } else { "DeepSeek API 不可达".into() },
+            None,
+            None,
+        ));
+
+        let has_profile = status.profile_id.is_some() || running;
+        checks.push(diag_check(
+            "config.current_profile",
+            "config",
+            has_profile || default_status.is_some(),
+            status
+                .profile_name
+                .clone()
+                .or_else(|| status.profile_id.clone())
+                .or_else(|| default_status.as_ref().map(|status| format!("默认配置 {}", status.version)))
+                .unwrap_or_else(|| "还没有可用配置".into()),
+            if has_profile || default_status.is_some() { None } else { Some("获取默认配置或导入节点文件") },
+            if has_profile || default_status.is_some() { None } else { Some(json!({ "kind": "open_default_profile" })) },
+        ));
+
+        let package_ok = default_status.is_some();
+        checks.push(diag_check(
+            "config.default_package",
+            "config",
+            package_ok,
+            default_status
+                .as_ref()
+                .map(|status| format!("默认配置 {} · {} 个节点", status.version, status.node_count))
+                .unwrap_or_else(|| "没有默认配置".into()),
+            if package_ok { None } else { Some("刷新默认配置") },
+            if package_ok { None } else { Some(json!({ "kind": "refresh_default_profile" })) },
+        ));
+
+        let stale = crate::default_profile::last_checked_ms(&self.store)
+            .map(|checked| {
+                crate::store::now_ms().saturating_sub(checked)
+                    > crate::default_profile::REFRESH_INTERVAL.as_millis() as i64
+            })
+            .unwrap_or(false);
+        checks.push(diag_check(
+            "config.package_stale",
+            "config",
+            !stale,
+            if default_status.is_some() {
+                if stale { "默认配置超过 6 小时未更新".into() } else { "默认配置较新".into() }
+            } else {
+                "没有默认配置".into()
+            },
+            if stale { Some("刷新默认配置") } else { None },
+            if stale { Some(json!({ "kind": "refresh_default_profile" })) } else { None },
+        ));
+
+        let total = checks.len();
+        let ok_count = checks
+            .iter()
+            .filter(|check| check.get("ok").and_then(Value::as_bool).unwrap_or(false))
+            .count();
+        let failed = total - ok_count;
+        let verdict = if failed == 0 {
+            "网络状态正常".to_string()
         } else {
-            None
+            format!("发现 {failed} 项需要处理")
         };
+
+        let labels = [
+            ("app", "应用"),
+            ("system", "系统"),
+            ("network", "网络"),
+            ("config", "配置"),
+        ];
+        let groups: Vec<Value> = labels
+            .iter()
+            .map(|(group, label)| {
+                json!({
+                    "group": group,
+                    "label": label,
+                    "checks": checks
+                        .iter()
+                        .filter(|check| check.get("group").and_then(Value::as_str) == Some(*group))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        let log_excerpt = if include_logs {
+            self.runtime_logs(50, None)
+                .await
+                .ok()
+                .and_then(|value| value.get("lines").cloned())
+                .and_then(|lines| lines.as_array().cloned())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         Ok(json!({
+            "contract_version": "1.1.0",
+            "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "platform": crate::netcfg::platform_name(),
+            "arch": std::env::consts::ARCH,
             "runtime": status,
-            "system_proxy": proxy,
-            "logs": logs,
+            "summary": {
+                "total": total,
+                "ok": ok_count,
+                "failed": failed,
+                "verdict": verdict,
+            },
+            "groups": groups,
+            "checks": checks,
+            "log_excerpt": log_excerpt,
         }))
     }
 
@@ -793,6 +1236,113 @@ impl VpnToolServices for WiredServices {
 
     async fn job_get(&self, _job_id: &str) -> anyhow::Result<Value> {
         Err(svc_error("NOT_FOUND", "P1 没有长任务"))
+    }
+
+    async fn default_profile_status(&self) -> anyhow::Result<Value> {
+        Ok(default_profile_status_json(&self.store))
+    }
+
+    async fn default_profile_refresh(&self) -> anyhow::Result<Value> {
+        let state = self.manager.status().await.state;
+        let running = matches!(
+            state,
+            crate::runtime::RuntimeState::Running | crate::runtime::RuntimeState::Degraded
+        );
+        crate::default_profile::refresh(&self.store, running)
+            .await
+            .map_err(|error| svc_error("UPSTREAM_ERROR", error))?;
+        Ok(default_profile_status_json(&self.store))
+    }
+
+    async fn default_profile_tool_status(&self) -> anyhow::Result<Value> {
+        Ok(crate::default_profile::tool_status(&self.store))
+    }
+
+    async fn catalog_refresh(&self, force: bool) -> anyhow::Result<Value> {
+        if !force {
+            if let Some(checked) = crate::default_profile::last_checked_ms(&self.store) {
+                let now = crate::store::now_ms();
+                let interval = crate::default_profile::REFRESH_INTERVAL.as_millis() as i64;
+                if now.saturating_sub(checked) < interval {
+                    return Ok(catalog_result(
+                        &self.store,
+                        false,
+                        false,
+                        "6 小时内已检查过，未重复拉取",
+                    ));
+                }
+            }
+        }
+
+        let state = self.manager.status().await.state;
+        let running = matches!(
+            state,
+            crate::runtime::RuntimeState::Running | crate::runtime::RuntimeState::Degraded
+        );
+        match crate::default_profile::refresh(&self.store, running).await {
+            Ok(outcome) => {
+                let changed = matches!(outcome, crate::default_profile::RefreshOutcome::Updated { .. });
+                let detail = if changed && running {
+                    "已更新默认配置，下次连接生效"
+                } else if changed {
+                    "已更新默认配置"
+                } else {
+                    "默认配置已是最新"
+                };
+                Ok(catalog_result(&self.store, changed, false, detail))
+            }
+            Err(error) => {
+                // 有缓存时拉取失败不算错：离线是正常场景。
+                if crate::default_profile::status(&self.store).is_some() {
+                    let age_days = crate::default_profile::last_checked_ms(&self.store)
+                        .map(|checked| {
+                            (crate::store::now_ms().saturating_sub(checked) / 86_400_000).max(0)
+                        })
+                        .unwrap_or(0);
+                    Ok(catalog_result(
+                        &self.store,
+                        false,
+                        true,
+                        &format!("离线，沿用本地缓存（上次更新 {age_days} 天前）"),
+                    ))
+                } else {
+                    Err(svc_error(
+                        "UPSTREAM_ERROR",
+                        format!(
+                            "现在无法访问默认配置源，这在未连接时是正常的。请先导入本地配置文件并连接，再检查更新。（{error}）"
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+
+    async fn net_config_get(&self) -> anyhow::Result<Value> {
+        let config = tokio::task::spawn_blocking(crate::netcfg::read)
+            .await
+            .map_err(|error| svc_error("INTERNAL", error))?
+            .map_err(|error| {
+                let code = if error.starts_with("UNSUPPORTED") {
+                    "UNSUPPORTED"
+                } else {
+                    "INTERNAL"
+                };
+                svc_error(code, error)
+            })?;
+        serde_json::to_value(config).map_err(|error| svc_error("INTERNAL", error))
+    }
+
+    async fn net_repair(&self, action: &str, port: Option<u16>) -> anyhow::Result<Value> {
+        match action {
+            "restore_direct" => self.repair_restore_direct(port).await,
+            "flush_dns" => self.repair_flush_dns(port).await,
+            "set_proxy" => self.repair_set_proxy(port).await,
+            "clear_proxy" => self.repair_clear_proxy(port).await,
+            other => Err(svc_error(
+                "INVALID_ARGUMENT",
+                format!("不支持的修复动作：{other}"),
+            )),
+        }
     }
 }
 
@@ -836,6 +1386,38 @@ impl WiredServices {
         error
     }
 
+    /// 撤系统代理并校验：没有任何网络服务仍指向我们写进去的端点。
+    ///
+    /// 失败返回 `PRECONDITION_FAILED / proxy_restore_failed`；调用方**不得**继续停运行时，
+    /// 否则就是「界面说已断开、代理还指着死端口」。
+    fn restore_system_proxy(&self) -> anyhow::Result<()> {
+        let applied = self.proxy.applied_endpoint().ok().flatten();
+        if let Err(error) = self.proxy.disable() {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                format!("撤销系统代理失败：{error}"),
+                json!({ "reason": "proxy_restore_failed" }),
+            ));
+        }
+        if let Some(endpoint) = applied {
+            let still = self.proxy.endpoint_in_use(&endpoint).map_err(|error| {
+                svc_error_with_details(
+                    "INTERNAL",
+                    format!("校验系统代理失败：{error}"),
+                    json!({ "reason": "proxy_restore_failed" }),
+                )
+            })?;
+            if !still.is_empty() {
+                return Err(svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    format!("{endpoint} 仍被 {} 个网络服务使用", still.len()),
+                    json!({ "reason": "proxy_restore_failed", "services": still }),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// enable 失败时回滚：先把系统代理还原，再停运行时。
     ///
     /// macOS 的 apply 是逐个网络服务写的，中途失败会留下「半开着」的状态；
@@ -861,6 +1443,13 @@ impl WiredServices {
     /// 渲染出的配置文件含明文凭据，只在连接期间存在：断开、连接失败、应用退出都会删除。
     /// 不能复用磁盘上的旧文件，否则 secrets.enc 的加密等于白做。
     async fn connect(&self, target: ConnectTarget) -> anyhow::Result<Value> {
+        // §4.6 第 1 步：退出流程开始后拒绝新的连接请求。
+        if crate::lifecycle::is_quitting() {
+            return Err(svc_error(
+                "PRECONDITION_FAILED",
+                "应用正在退出，不能再发起连接",
+            ));
+        }
         let profile = self.resolve_profile(&target)?;
         let installed = self.ensure_runtime_installed()?;
 
@@ -898,16 +1487,38 @@ impl WiredServices {
             }
         };
 
+        self.start_connection(
+            &installed,
+            &profile.id,
+            Some(profile.id.clone()),
+            Some(profile.name.clone()),
+            &value,
+            etag.as_deref(),
+        )
+        .await
+    }
+
+    /// 渲染 → 启动 → 设代理 → 等出口 IP 的公共尾巴。
+    /// `config_key` 决定落盘文件名：普通 profile 用 profile_id，默认配置包用 "default"。
+    async fn start_connection(
+        &self,
+        installed: &crate::runtime::InstalledRuntime,
+        config_key: &str,
+        db_profile_id: Option<String>,
+        profile_name: Option<String>,
+        value: &Value,
+        etag: Option<&str>,
+    ) -> anyhow::Result<Value> {
         // guard 先于 install_profile 建立：它中途失败时明文可能已经落盘。
         // 删除幂等，文件不存在会走 NotFound 分支，提前建不会误删别的东西。
-        let guard = RenderedConfigGuard::new(self.config_dir(), profile.id.clone());
+        let guard = RenderedConfigGuard::new(self.config_dir(), config_key.to_string());
 
         let path = vpn_config::install_profile(
             &installed.binary,
             &self.config_dir(),
-            &profile.id,
-            &value,
-            etag.as_deref(),
+            config_key,
+            value,
+            etag,
         )
         .await
         .map_err(|e| svc_error(e.code(), e))?;
@@ -928,8 +1539,23 @@ impl WiredServices {
             clash_addr: format!("127.0.0.1:{clash_port}"),
             clash_secret: secret,
             mixed_port,
-            profile_id: Some(profile.id.clone()),
+            profile_id: db_profile_id.clone(),
+            profile_name,
         };
+
+        // 切节点/重连：先撤旧代理，避免旧进程已停、代理还指着旧端口。
+        // 撤不掉就中止，保持旧连接原样。
+        let state = self.manager.status().await.state;
+        if matches!(
+            state,
+            crate::runtime::RuntimeState::Running
+                | crate::runtime::RuntimeState::Degraded
+                | crate::runtime::RuntimeState::Starting
+                | crate::runtime::RuntimeState::Restarting
+        ) {
+            self.restore_system_proxy()?;
+            self.manager.set_system_proxy_enabled(false).await;
+        }
 
         let started = match self.manager.start(plan).await {
             Ok(status) => status,
@@ -951,9 +1577,9 @@ impl WiredServices {
         }
         self.manager.set_system_proxy_enabled(true).await;
 
-        {
+        if let Some(profile_id) = db_profile_id.as_deref() {
             let conn = self.store.conn();
-            let _ = crate::store::profiles::set_active(&conn, &profile.id);
+            let _ = crate::store::profiles::set_active(&conn, profile_id);
         }
 
         // 出口 IP 在进入 running 后才探测；按契约 4.11 第 6 步在这里等结果。
@@ -977,8 +1603,218 @@ impl WiredServices {
         data["exit_ip"] = exit_ip.map(Value::String).unwrap_or(Value::Null);
         // 契约要求这个键永远存在；测不到就显式 null，别留 undefined。
         data["latency_ms"] = latency_ms.map(Value::from).unwrap_or(Value::Null);
+
+        if config_key == "default" {
+            // 新版本从这次连接起生效，「有新版本」徽标可以消掉。
+            crate::default_profile::mark_applied(&self.store);
+        }
         guard.disarm();
         Ok(data)
+    }
+
+    /// 用默认配置包连接：适配 tun→mixed 后走正常渲染/启动流程。
+    /// 新包渲染失败时回退上一版并重试一次。
+    async fn connect_default_package(&self) -> anyhow::Result<Value> {
+        if crate::lifecycle::is_quitting() {
+            return Err(svc_error(
+                "PRECONDITION_FAILED",
+                "应用正在退出，不能再发起连接",
+            ));
+        }
+        let installed = self.ensure_runtime_installed()?;
+        // 默认配置与普通 profile 互斥：先把上一个 profile 的明文配置清掉。
+        if let Some(previous) = self.active_profile_id() {
+            vpn_config::remove_profile_config(&self.config_dir(), &previous);
+        }
+
+        let attempt = self.try_default_once(&installed).await;
+        match attempt {
+            Ok(data) => Ok(data),
+            Err(first) => {
+                // 只有配置本身不可用时才回退；启动/代理失败回退也救不了。
+                let text = first.to_string();
+                if !text.contains("RUNTIME_CONFIG_INVALID") && !text.contains("INVALID_ARGUMENT") {
+                    return Err(first);
+                }
+                if !crate::default_profile::rollback(&self.store) {
+                    return Err(first);
+                }
+                log::warn!("默认配置包不可用，已回退上一版并重试：{text}");
+                self.try_default_once(&installed).await.map_err(|_| first)
+            }
+        }
+    }
+
+    async fn try_default_once(
+        &self,
+        installed: &crate::runtime::InstalledRuntime,
+    ) -> anyhow::Result<Value> {
+        let Some((_row, package)) = crate::default_profile::load_package(&self.store) else {
+            return Err(svc_error(
+                "PRECONDITION_FAILED",
+                "还没有默认配置，先获取默认配置或导入节点",
+            ));
+        };
+
+        let mixed_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
+        let clash_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
+        let clash_secret = vpn_config::random_secret();
+
+        let adapted = crate::default_profile::adapt(
+            &package,
+            mixed_port,
+            clash_port,
+            &clash_secret,
+            None,
+        )
+        .map_err(|error| svc_error("RUNTIME_CONFIG_INVALID", error))?;
+
+        // 上一次的 default 配置可能还在；先删，保证不复用旧明文。
+        vpn_config::remove_profile_config(&self.config_dir(), "default");
+
+        self.start_connection(
+            installed,
+            "default",
+            None,
+            Some("默认配置".to_string()),
+            &adapted,
+            None,
+        )
+        .await
+    }
+
+    async fn repair_restore_direct(&self, port: Option<u16>) -> anyhow::Result<Value> {
+        if port.is_some() {
+            return Err(svc_error("INVALID_ARGUMENT", "restore_direct 不接受 port"));
+        }
+        let applied = self.proxy.applied_endpoint().ok().flatten();
+        let mut verified = self.proxy.disable().is_ok();
+        if let Some(endpoint) = applied {
+            verified = verified
+                && self
+                    .proxy
+                    .endpoint_in_use(&endpoint)
+                    .map(|in_use| in_use.is_empty())
+                    .unwrap_or(false);
+        }
+        let _ = self.manager.stop().await;
+        crate::config::remove_all_profile_configs(&self.config_dir());
+        verified =
+            verified && self.manager.status().await.state == crate::runtime::RuntimeState::Idle;
+
+        let exit_ip = match crate::runtime::DirectIpProbe::new(crate::runtime::DEFAULT_DIRECT_IP_PROBE)
+        {
+            Ok(probe) => probe.check().await.ok().flatten(),
+            Err(_) => None,
+        };
+        let detail = if verified {
+            match &exit_ip {
+                Some(ip) => format!("已恢复直连，当前出口 IP {ip}"),
+                None => "已恢复直连".to_string(),
+            }
+        } else {
+            "网络设置未能完全恢复，请重试".to_string()
+        };
+        Ok(json!({
+            "ok": verified,
+            "action": "restore_direct",
+            "detail": detail,
+            "exit_ip": exit_ip,
+            "verified": verified,
+        }))
+    }
+
+    async fn repair_flush_dns(&self, port: Option<u16>) -> anyhow::Result<Value> {
+        if port.is_some() {
+            return Err(svc_error("INVALID_ARGUMENT", "flush_dns 不接受 port"));
+        }
+        tokio::task::spawn_blocking(crate::netcfg::flush_dns)
+            .await
+            .map_err(|error| svc_error("INTERNAL", error))?
+            .map_err(|error| svc_error("INTERNAL", error))?;
+        let verified = tokio::task::spawn_blocking(crate::netcfg::dns_resolvable)
+            .await
+            .unwrap_or(false);
+        Ok(json!({
+            "ok": verified,
+            "action": "flush_dns",
+            "detail": if verified {
+                "DNS 缓存已刷新，探针域名可解析"
+            } else {
+                "DNS 缓存已刷新，但探针域名仍无法解析"
+            },
+            "exit_ip": Value::Null,
+            "verified": verified,
+        }))
+    }
+
+    async fn repair_set_proxy(&self, port: Option<u16>) -> anyhow::Result<Value> {
+        let Some(port) = port else {
+            return Err(svc_error(
+                "INVALID_ARGUMENT",
+                "set_proxy 需要 port（reason=port_required）",
+            ));
+        };
+        let Some(plan) = self.manager.current_plan().await else {
+            return Err(svc_error(
+                "INVALID_ARGUMENT",
+                "当前没有运行中的配置（reason=port_not_owned）",
+            ));
+        };
+        let state = self.manager.status().await.state;
+        if plan.mixed_port != port
+            || !matches!(
+                state,
+                crate::runtime::RuntimeState::Running | crate::runtime::RuntimeState::Degraded
+            )
+        {
+            return Err(svc_error(
+                "INVALID_ARGUMENT",
+                "端口不属于当前运行时（reason=port_not_owned）",
+            ));
+        }
+        if let Err(error) = self.proxy.enable(port) {
+            return Err(svc_error("INTERNAL", format!("设置系统代理失败：{error}")));
+        }
+        self.manager.set_system_proxy_enabled(true).await;
+        let expected = format!("127.0.0.1:{port}");
+        let verified = self
+            .proxy
+            .current_endpoint()
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(expected.as_str());
+        Ok(json!({
+            "ok": verified,
+            "action": "set_proxy",
+            "detail": if verified { "系统代理已指向 Veyl" } else { "系统代理未能生效" },
+            "exit_ip": Value::Null,
+            "verified": verified,
+        }))
+    }
+
+    async fn repair_clear_proxy(&self, port: Option<u16>) -> anyhow::Result<Value> {
+        if port.is_some() {
+            return Err(svc_error("INVALID_ARGUMENT", "clear_proxy 不接受 port"));
+        }
+        let applied = self.proxy.applied_endpoint().ok().flatten();
+        let mut verified = self.proxy.disable().is_ok();
+        if let Some(endpoint) = applied {
+            verified = verified
+                && self
+                    .proxy
+                    .endpoint_in_use(&endpoint)
+                    .map(|in_use| in_use.is_empty())
+                    .unwrap_or(false);
+        }
+        Ok(json!({
+            "ok": verified,
+            "action": "clear_proxy",
+            "detail": if verified { "系统代理已撤销" } else { "系统代理未能完全撤销，请重试" },
+            "exit_ip": Value::Null,
+            "verified": verified,
+        }))
     }
 
     /// 启动时的崩溃恢复：有残留代理备份就恢复并清掉。
@@ -1122,6 +1958,32 @@ mod proxy_rollback_tests {
 
     static SUCCEEDING: SucceedingApplyProxy = SucceedingApplyProxy;
 
+    struct FailingRestoreProxy;
+
+    impl PlatformProxy for FailingRestoreProxy {
+        fn platform(&self) -> &'static str {
+            "test"
+        }
+
+        fn capture(&self) -> RuntimeResult<Value> {
+            Ok(serde_json::json!({ "http": "original:8080" }))
+        }
+
+        fn apply(&self, _port: u16) -> RuntimeResult<()> {
+            Ok(())
+        }
+
+        fn restore(&self, _payload: &Value) -> RuntimeResult<()> {
+            Err(RuntimeError::Proxy("restore failed".into()))
+        }
+
+        fn current(&self) -> RuntimeResult<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    static FAILING_RESTORE: FailingRestoreProxy = FailingRestoreProxy;
+
     fn services_with_proxy(
         dir: &std::path::Path,
         backend: &'static dyn PlatformProxy,
@@ -1153,6 +2015,35 @@ mod proxy_rollback_tests {
             1,
             "enable 失败后必须还原系统代理"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn stopping_aborts_when_the_proxy_cannot_be_restored() {
+        let dir = std::env::temp_dir().join(format!("veyl-proxy-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let services = services_with_proxy(&dir, &FAILING_RESTORE);
+
+        // 先让备份存在，模拟「已连接」。
+        services.proxy.enable(4321).unwrap();
+
+        let error = services.runtime_stop(false).await.unwrap_err();
+        let service = error
+            .downcast_ref::<ServiceError>()
+            .expect("必须是结构化错误");
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "proxy_restore_failed"
+        );
+        // 撤代理失败时不能继续停运行时，运行时保持原状态。
+        assert_eq!(
+            services.manager.status().await.state,
+            crate::runtime::RuntimeState::Idle
+        );
+        // 备份仍在，下一次可以重试恢复。
+        assert!(services.proxy.applied_endpoint().unwrap().is_some());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

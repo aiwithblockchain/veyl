@@ -4,8 +4,15 @@ use super::error::StoreResult;
 
 /// 每段迁移只追加、不修改；`PRAGMA user_version` 记录已执行到第几段。
 pub const MIGRATION_002: &str = include_str!("migrations/002_timestamps_ms.sql");
+pub const MIGRATION_003: &str = include_str!("migrations/003_default_profile.sql");
+pub const MIGRATION_004: &str = include_str!("migrations/004_default_profile_content_hash.sql");
 
-pub const MIGRATIONS: &[&str] = &[include_str!("migrations/001_init.sql"), MIGRATION_002];
+pub const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/001_init.sql"),
+    MIGRATION_002,
+    MIGRATION_003,
+    MIGRATION_004,
+];
 
 pub fn migrate(conn: &Connection) -> StoreResult<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
