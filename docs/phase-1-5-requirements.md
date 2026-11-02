@@ -329,6 +329,7 @@
 - 内置预设一键填充：DeepSeek、OpenAI、Anthropic、Moonshot、Ollama（本地）。
 - 「测试连接」发一个最小请求，显示耗时或可读的失败原因。
 - 保存后新会话立即使用新 provider；**不打断正在进行中的请求**。
+- **保存只保存，不改变当前 provider**；唯一例外是当前没有任何 provider 时，保存的第一个自动成为当前。切换只能通过「设为当前」——编辑一个备用 provider 不该让对话流量悄悄换端点，这和「节点连不上不得悄悄回退默认包」是同一条原则。
 - 切换「当前」provider 前必须已有可用 Key（Ollama 例外）。
 - Base URL 提示随 API 类型变化：`openai` 提示 `/v1/chat/completions` 兼容；`anthropic` 提示 `/v1/messages` 兼容。
 
