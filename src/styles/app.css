@@ -1475,3 +1475,39 @@ pre {
   font-size: 12px;
   line-height: 1.55;
 }
+
+/* ---------- sidebar rename ---------- */
+
+.sidebar__item-wrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar__item.is-editing {
+  cursor: text;
+  padding: 3px 4px;
+}
+
+.sidebar__edit-input {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid rgba(224, 137, 95, 0.42);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(224, 137, 95, 0.08);
+}
+
+.sidebar__edit-input:disabled {
+  opacity: 0.6;
+}
+
+.sidebar__edit-error {
+  margin: 1px 4px 5px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--danger);
+}

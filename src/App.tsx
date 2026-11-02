@@ -83,7 +83,8 @@ export default function App() {
     };
   }, [bridge]);
 
-  const handleSelectSession = (sessionId: string) => {    dispatch({ type: "select_session", sessionId });
+  const handleSelectSession = (sessionId: string) => {
+    dispatch({ type: "select_session", sessionId });
 
     // DB 恢复出来的会话：首次选中时才拉消息，避免启动时把所有会话都读一遍。
     const target = state.sessions.find((item) => item.id === sessionId);
@@ -92,6 +93,26 @@ export default function App() {
     void bridge.getChatHistory(sessionId).then((history) => {
       dispatch({ type: "session_messages_loaded", sessionId, messages: history.messages });
     });
+  };
+
+  // 重命名：不乐观更新，成功后才用后端返回的标题落库。
+  const handleRenameSession = async (
+    sessionId: string,
+    title: string,
+  ): Promise<RenameResult> => {
+    try {
+      const updated = await bridge.renameSession(sessionId, title);
+      dispatch({ type: "session_renamed", sessionId: updated.id, title: updated.title });
+      return { ok: true };
+    } catch (error) {
+      const bridgeError = toBridgeError(error);
+
+      if (bridgeError.code === "NOT_FOUND") {
+        dispatch({ type: "session_removed", sessionId });
+        return { ok: false, removed: true, message: "这个会话已经不存在了" };
+      }
+      return { ok: false, message: describeRenameError(bridgeError) };
+    }
   };
 
   const handleSend = (text: string) => {
@@ -162,6 +183,7 @@ export default function App() {
         onSelect={handleSelectSession}
         onNew={() => dispatch({ type: "new_session" })}
         onOpenSettings={() => setSettingsOpen(true)}
+        onRenameSession={handleRenameSession}
       />
 
       <main className="main">
@@ -212,6 +234,16 @@ function errorMessage(error: unknown): string {
     return String((error as { message: unknown }).message);
   }
   return "删除失败";
+}
+
+function describeRenameError(error: BridgeError): string {
+  if (error.code === "INVALID_ARGUMENT") {
+    const reason = error.details?.reason;
+    if (reason === "empty_title") return "标题不能为空";
+    if (reason === "title_too_long") return "标题最多 80 个字符";
+  }
+  if (error.code === "NOT_FOUND") return "这个会话已经不存在了";
+  return "保存失败，请重试";
 }
 
 function pillText(state: RuntimeView["state"]): string {
