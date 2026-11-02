@@ -174,6 +174,7 @@
 
 - 同一用户只允许一个 Veyl 进程。
 - 第二次启动（双击 App、Dock 再次点击、`open -a Veyl`）不创建新进程，而是唤起已有窗口。
+- **第二实例在确认「已有实例」之前，不得执行任何崩溃恢复**——撤系统代理、回收 sing-box、清理明文配置这三件事会直接拆掉正在运行的那个实例。这是本阶段最容易漏、后果最重的一条：用户从 Dock 再点一次应用，后台连接就没了。
 - 理由：两个实例会争抢 `runtime.pid`、系统代理备份与配置文件，属于必然损坏。
 
 **验收**：连续启动两次 → 只有一个进程；第二次启动把窗口带到前台。
@@ -290,13 +291,57 @@
 - 侧边栏每个会话项提供删除入口（悬停出现或右键菜单，二选一）。
 - 删除前必须二次确认，文案写清「删除后无法恢复」，并显示会话标题。
 - 删除的是该会话本身**和它的全部消息**，不影响其他会话、不影响配置与 Key。
+- 该会话的工具调用记录必须一并删除。`tool_calls.session_id` **没有外键级联**，必须显式删除，否则参数与结果会留在库里，形成「界面删了、数据还在」的半删除。
+- 若该会话有正在进行的 AI 请求：**由 UI 先取消并等到请求结束**，再发起删除；Host 在仍有进行中的请求时拒绝删除（`PRECONDITION_FAILED / active_request`）。这样能避免「取消信号还没到、删除已执行、迟到的流式分片又把消息写回来」的竞态。
 - 若删除的是当前正在看的会话：自动切到下一个会话；没有别的会话时回到**总览**（控制台空态）。
-- 删除时若该会话有正在进行的 AI 请求：先取消请求，再删除。
 - 删除失败要提示原因，列表不得出现「界面上没了、数据库里还在」的半删除状态。
 
 **不做**：回收站、撤销删除、批量删除。删除即不可恢复，靠二次确认兜底。
 
 **验收**：删除最后一个会话后，界面回到总览，侧边栏对话列表为空；重启应用后仍然是空的（确认不是只改了前端状态）。
+
+### 5.8 R32 API 设置：基础 / 高级
+
+**目的**：默认只需要一个 DeepSeek Key；愿意折腾的用户可以接任意兼容端点。
+
+#### 基础模式（默认）
+
+- 只有一个输入框：DeepSeek API Key。
+- 保存后自动生成一个内置 provider：`openai` 兼容、`https://api.deepseek.com`、模型 `deepseek-chat`。
+- 沿用现有的保存、验证、掩码、清除流程，不新增概念。
+- 首次引导只走基础模式，高级模式藏在「高级设置」里。
+
+#### 高级模式
+
+参考 TweetPilot 的 provider 配置方式，字段与行为对齐：
+
+| 字段 | 说明 |
+|---|---|
+| 名称 | 用户可读，列表展示用 |
+| API 类型 | `openai` 兼容 / `anthropic` 兼容 |
+| Base URL | 可空；空则用该类型的官方地址 |
+| API Key | 可空，仅当端点是本机 Ollama 时允许 |
+| 模型 | 必填，例如 `deepseek-chat`、`claude-sonnet-4-6` |
+
+行为：
+
+- Provider 列表：新增、编辑、删除、**设为当前**；同一时刻只有一个「当前」。
+- 内置预设一键填充：DeepSeek、OpenAI、Anthropic、Moonshot、Ollama（本地）。
+- 「测试连接」发一个最小请求，显示耗时或可读的失败原因。
+- 保存后新会话立即使用新 provider；**不打断正在进行中的请求**。
+- 切换「当前」provider 前必须已有可用 Key（Ollama 例外）。
+- Base URL 提示随 API 类型变化：`openai` 提示 `/v1/chat/completions` 兼容；`anthropic` 提示 `/v1/messages` 兼容。
+
+#### 约束
+
+- Base URL 只允许 `http` / `https`；`http` **仅限** `localhost` / `127.0.0.1`，用于本地模型。
+- 不允许把 Key 拼进 URL，也不允许在日志、错误信息、界面回显完整 Key。
+- 多 provider 的 Key 全部进 `secrets.enc`；名称、类型、URL、模型等非敏感字段进 settings。
+- 删除 provider 必须同时删除它的 Key；不允许留下孤儿密钥。
+- 高级模式界面要有一句风险提示：**请求会发往你填写的端点，请确认你信任它**。
+- 已有的单一 DeepSeek Key 必须无损迁移为列表里的一个 provider，基础模式仍显示它。
+
+**验收**：详见 §11 的 H1–H5。
 
 ---
 
@@ -388,6 +433,7 @@
 | 节点可轮换 | 有后台轮换机制；泄漏后能在 1 小时内换掉且不要求用户重装 |
 | 可归因 | 能按用户/设备识别连接来源，用于滥用处置（内测期可以没有） |
 | 分发可回滚 | 公开源可下线，且不导致已安装用户完全不可用（本地缓存 + 手动导入兜底） |
+| **来源可认证** | 发布方提供可验证的签名或 sha256 摘要。在这之前，我们只能证明「走的是固定域名的 HTTPS」和「内容与上次不同」，**不能证明这个包是官方发的**。与「凭据不得公开」同一档，对外发布前必须解决 |
 
 **本阶段的要求**：代码层面不把「公开凭据」写死。适配器、存储、刷新都要按「凭据是敏感数据」设计，这样将来换成签发模式时只改取数来源，不动上层。
 
@@ -535,7 +581,8 @@ AI **不再承担**主连接流程：连接/断开/导入/刷新都必须有纯 
 | 类型 | 变更 | 版本 |
 |---|---|---|
 | `RuntimeStatus` | 新增 `mixed_port`、`profile_name`、`connected_since`、`latency_ms` | 1.1.0 |
-| Tauri 命令 | 新增 `runtime_start`、`runtime_stop`、`profile_list`、`chat_delete`、`default_profile_refresh`、`default_profile_status`、`net_repair`、`onboarding_*` | 1.1.0 |
+| Tauri 命令 | 新增 `runtime_start`、`runtime_stop`、`profile_list`、`chat_delete`、`llm_provider_list`、`llm_provider_save`、`llm_provider_delete`、`llm_provider_activate`、`llm_provider_test`、`default_profile_refresh`、`default_profile_status`、`net_repair`、`onboarding_*` | 1.1.0 |
+| 存储 | `secrets.enc` 新增 `llm:<provider_id>`；settings 新增 `llm_providers`（非敏感字段 JSON）与 `llm_active_provider`；旧的 `deepseek_key` 迁移成 provider | 1.1.0 |
 | AI 工具 | 新增 `NetConfigGet`、`NetRepair`、`CatalogRefresh`、`DefaultProfileStatus`；扩展 `DiagRun` 输出 | 1.1.0 |
 | 事件 | 新增 `app-lifecycle-changed`（foreground/background）、`default-profile-updated` | 1.1.0 |
 
@@ -574,6 +621,11 @@ AI **不再承担**主连接流程：连接/断开/导入/刷新都必须有纯 
 | F3 | 面板切换节点 | 平滑切换，无「假已连接」中间态 |
 | F4 | 面板端口显示 | 与实际 mixed 端口一致，不再是 2080 |
 | G1 | 删除最后一个会话 | 回到总览，对话列表为空；重启后仍为空；其他配置与 Key 不受影响 |
+| H1 | 基础模式 | 全新安装只填 DeepSeek Key → 能正常对话；高级设置不出现也能用 |
+| H2 | 高级模式 · OpenAI 兼容 | 新增自定义端点 → 测试连接成功 → 设为当前 → 新会话走该端点 |
+| H3 | 高级模式 · Anthropic 兼容 | 配置 Anthropic 兼容端点 → 能完成一次对话 |
+| H4 | 删除 provider | 删除后列表消失、Key 同时清除、重启后不复活 |
+| H5 | 旧 Key 迁移 | 升级前只有 DeepSeek Key → 升级后基础模式仍显示该 Key，能直接对话 |
 
 ---
 
@@ -646,6 +698,11 @@ AI **不再承担**主连接流程：连接/断开/导入/刷新都必须有纯 
 | 34 | 控制台（默认首页）与侧边栏「总览」入口 | P0 |
 | 35 | `chat_delete` 命令与会话级联删除（当前只能重命名，不能删） | P0 |
 | 36 | 侧边栏会话删除入口、二次确认、删完回总览 | P0 |
+| 37 | Provider 配置模型：多 provider 存储、当前 provider、旧 DeepSeek Key 迁移 | P0 |
+| 38 | `llm_provider_*` 五个命令与「测试连接」 | P0 |
+| 39 | 设置页基础 / 高级切换、provider 列表与编辑表单、预设 | P0 |
+| 40 | 自定义 Base URL 的校验与风险提示（仅 http/https、本地 http 例外） | P0 |
+| 41 | 高级模式下 Anthropic 兼容通道的装配与端到端验证 | P1 |
 
 ---
 
