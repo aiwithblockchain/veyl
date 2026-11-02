@@ -89,6 +89,8 @@ pub fn run() {
             agent::commands::runtime_status,
             agent::commands::profile_delete,
             agent::commands::chat_history,
+            agent::commands::deepseek_save_key,
+            agent::commands::deepseek_key_status,
         ])
         .run(tauri::generate_context!())
         .expect("Veyl 启动失败");

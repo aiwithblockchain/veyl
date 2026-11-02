@@ -515,19 +515,19 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn save_deepseek_key(&self, key: &str) -> anyhow::Result<Value> {
-        // 只进系统钥匙串：不写 SQLite、不写配置文件、不进日志。
-        crate::secrets::set_deepseek_key(key).map_err(|e| svc_error(e.code(), e))?;
-
-        let stored = crate::secrets::get_deepseek_key().map_err(|e| svc_error(e.code(), e))?;
-        if stored.as_deref() != Some(key.trim()) {
-            return Err(svc_error("INTERNAL", "写入钥匙串后回读不一致"));
-        }
-
-        let (validation, detail) = validate_deepseek_key(key.trim()).await;
+        // 与 `deepseek_save_key` 命令共用 secrets::save_deepseek_key，不维护第二套逻辑。
+        let outcome = crate::secrets::save_deepseek_key(key).await.map_err(|error| {
+            // 工具信封只认契约错误码，把 UI 用的细分码折进去。
+            let code = match error.ui_code() {
+                "INVALID_KEY" => "INVALID_ARGUMENT",
+                _ => "INTERNAL",
+            };
+            svc_error(code, error.message())
+        })?;
         Ok(json!({
             "saved": true,
-            "validation": validation,
-            "validation_detail": detail,
+            "validation": outcome.validation,
+            "validation_detail": outcome.validation_detail,
         }))
     }
 
@@ -536,34 +536,6 @@ impl VpnToolServices for WiredServices {
     }
 }
 
-
-/// 只回答「Key 是否有效」：2xx 或余额不足算有效，401/403 算无效，连不上算未验证。
-async fn validate_deepseek_key(key: &str) -> (&'static str, Option<&'static str>) {
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return ("unverified", Some("network")),
-    };
-
-    let response = client
-        .get("https://api.deepseek.com/models")
-        .bearer_auth(key)
-        .send()
-        .await;
-
-    match response {
-        Ok(response) => match response.status().as_u16() {
-            200..=299 => ("ok", None),
-            401 | 403 => ("invalid", None),
-            402 => ("ok", Some("insufficient_balance")),
-            _ => ("unverified", Some("network")),
-        },
-        Err(error) if error.is_timeout() => ("unverified", Some("timeout")),
-        Err(_) => ("unverified", Some("network")),
-    }
-}
 
 impl WiredServices {
     /// 目录详情 → 生成配置 → 写到 config/profile-<id>.json（0600）→ sing-box check。

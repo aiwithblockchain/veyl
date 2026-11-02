@@ -162,3 +162,39 @@ pub async fn chat_history(session_id: Option<String>) -> Result<Value, String> {
             .collect::<Vec<_>>(),
     }))
 }
+
+/// 设置页保存 DeepSeek Key。与工具路径共用 `secrets::save_deepseek_key`。
+/// 返回值绝不包含明文 Key。
+#[tauri::command]
+pub async fn deepseek_save_key(key: String) -> Result<Value, Value> {
+    match crate::secrets::save_deepseek_key(&key).await {
+        Ok(outcome) => {
+            if outcome.validation == "invalid" {
+                return Err(json!({
+                    "code": "INVALID_KEY",
+                    "message": "DeepSeek 鉴权失败，Key 可能无效或已被吊销",
+                }));
+            }
+            Ok(json!({
+                "masked": outcome.masked,
+                "verified": outcome.validation == "ok",
+            }))
+        }
+        Err(error) => Err(json!({
+            "code": error.ui_code(),
+            "message": error.message(),
+        })),
+    }
+}
+
+/// 设置页显示当前是否已配置；只回掩码。
+#[tauri::command]
+pub async fn deepseek_key_status() -> Result<Value, Value> {
+    match crate::secrets::key_status() {
+        Ok((configured, masked)) => Ok(json!({ "configured": configured, "masked": masked })),
+        Err(error) => Err(json!({
+            "code": "KEYCHAIN",
+            "message": error.to_string(),
+        })),
+    }
+}
