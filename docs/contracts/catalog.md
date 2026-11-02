@@ -1,6 +1,6 @@
 # 契约：节点目录服务（Catalog）
 
-> 契约版本：`1.0.9`
+> 契约版本：`1.0.10`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.8、§5.2
 > 实现方：Rust（Catalog Client）与 TypeScript / Hono（服务端）
@@ -39,7 +39,7 @@
 
 ```ts
 type ApiOk<T> = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   ok: true;
   request_id: string;
   data: T;
@@ -50,7 +50,7 @@ type ApiOk<T> = {
 
 ```ts
 type ApiError = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   ok: false;
   request_id: string;
   error: {
@@ -64,7 +64,7 @@ type ApiError = {
 
 HTTP 状态码与错误码**同时**存在：状态码给网关与监控看，错误码给客户端逻辑用。客户端分支只认错误码。
 
-> 与 `AivpnError` 的关系：`ApiError.error` 是传输层简化形式，不含 `contract_version` 与 `request_id`（后者在 `ApiError` 顶层）。Catalog Client 把它转成 `AivpnError` 时补上 `contract_version: "1.0.9"` 与 `request_id`，`details` 原样带过。Agent 看到的永远只有 `AivpnError`。
+> 与 `AivpnError` 的关系：`ApiError.error` 是传输层简化形式，不含 `contract_version` 与 `request_id`（后者在 `ApiError` 顶层）。Catalog Client 把它转成 `AivpnError` 时补上 `contract_version: "1.0.10"` 与 `request_id`，`details` 原样带过。Agent 看到的永远只有 `AivpnError`。
 
 ---
 
@@ -80,7 +80,7 @@ HTTP 状态码与错误码**同时**存在：状态码给网关与监控看，�
 
 ```ts
 type RegisterDeviceRequest = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   platform: "darwin" | "windows" | "linux";
   arch: "arm64" | "x86_64";
   app_version: string;        // semver，例 "0.1.0"
@@ -302,7 +302,7 @@ type NodeDescriptor = NodeSummary & {
 
 ```ts
 type HealthReportRequest = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   device_id: string;
   node_id: string;
   ok: boolean;
@@ -484,6 +484,13 @@ Retry-After: 12
 ---
 
 ## 12. 变更记录
+
+### 1.0.10（2026-11-02）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | `contract_version` 升到 `1.0.10` | 元数据 |
+| 2 | 无接口变更；与 events 的 `import_seed_json` 同步版本 | 同步 |
 
 ### 1.0.9（2026-11-02，N-03）
 

@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`1.0.9`
+> 契约版本：`1.0.10`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.3、§4.4、§5.1
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -62,7 +62,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -229,8 +229,8 @@ type CallSource = "ui" | "agent";
 | 5 | `RuntimeLogs` | `RuntimeLogsTool` | 拉取脱敏日志 | `ReadOnly` | 只读 |
 | 6 | `CoreListVersions` | `CoreListVersionsTool` | 已安装/可安装版本 | `ReadOnly` | 只读 |
 | 7 | `CoreInstall` | `CoreInstallTool` | 下载并安装运行时 | `Execute` | 高 |
-| 8 | `CatalogSearch` | `CatalogSearchTool` | 查询节点目录 | `ReadOnly` | 只读 |
-| 9 | `ProfileList` | `ProfileListTool` | 本地配置列表 | `ReadOnly` | 只读 |
+| 8 | `CatalogSearch` | `CatalogSearchTool` | 查询**远端**节点目录（不含本地导入） | `ReadOnly` | 只读 |
+| 9 | `ProfileList` | `ProfileListTool` | 列**本地**已保存配置（含种子导入） | `ReadOnly` | 只读 |
 | 10 | `ProfileImport` | `ProfileImportTool` | 把节点导入为本地配置 | `Write` | 低 |
 | 11 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 | `Execute` | 高 |
 | 12 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
@@ -511,6 +511,8 @@ type CoreInstallData = {
 }
 ```
 
+`protocol` 枚举含 `shadowsocks`（1.0.9 起）。
+
 `data`：
 
 ```ts
@@ -521,6 +523,10 @@ type CatalogSearchData = {
   stale: boolean;                // true 表示来自缓存
 };
 ```
+
+**数据源：只有远端目录。** 本工具查的是服务端下发的 catalog，**不包含用户本地导入的配置** —— 种子文件导入的节点不在其中。
+
+这条边界必须写进工具描述，因为它被实测踩过：模型只调 `CatalogSearch`，用户自己导入的节点因此完全不可见，模型回答「没有这个节点」。用户用名称指代「我自己导入的那个」时，应改用 `ProfileList` 匹配出 `profile_id`。
 
 错误：`CATALOG_UNAVAILABLE`、`RATE_LIMITED`、`DEVICE_TOKEN_INVALID`。
 
@@ -554,6 +560,19 @@ type ProfileListData = {
 ```
 
 不含任何凭据或配置原文。
+
+**数据源：本地已保存配置。** 包括目录导入与种子文件导入的**全部** profile，每条都带 `profile_id`。
+
+`CatalogSearch` 与 `ProfileList` **数据源不同，不可互相替代**：
+
+| 工具 | 查什么 | 有 `profile_id` 吗 |
+|---|---|---|
+| `CatalogSearch` | 只查远端目录 | 没有（是 `node_id`） |
+| `ProfileList` | 只列本地已保存配置（含种子导入） | 有 |
+
+用户用名称指代某个节点时，先 `ProfileList` 匹配名称拿到 `profile_id`，再 `VpnConnect({ profile_id })`；**不要凭名称猜 id**，也不要假设它一定在远端目录里。
+
+只有 `CatalogSearch` 会让种子导入的节点完全不可见 —— 这是实测暴露过的缺陷形态。
 
 ---
 
@@ -612,7 +631,7 @@ type ProfileImportData = {
 type VpnConnectData = {
   state: "running";
   profile_id: string;
-  exit_ip: string;
+  exit_ip: string | null;        // null = 已连接但出口尚未测到，不是失败
   latency_ms: number | null;
   upstream_version: string;
   system_proxy_enabled: boolean;
@@ -626,8 +645,19 @@ type VpnConnectData = {
 3. 生成配置 → `sing-box check`。
 4. 启动或热更新。
 5. 设置系统代理（无确认点，直接执行）。
-6. 通过代理查出口 IP。
+6. 异步探测出口 IP（**不阻塞返回**；超时或未测到时 `exit_ip` 为 `null`，后台测到后经健康事件推给 UI）。
 7. 任一步失败：关闭系统代理，按 `docs/phase-1-technical-design.md` §6.5 分类返回。
+
+**连接是否成功只看 `state`，不看 `exit_ip`。**
+
+| 字段 | 含义 |
+|---|---|
+| `state = "running"` | 已连上。**这是唯一判定依据** |
+| `exit_ip = null` | 已连接，出口 IP 还没测到。**不代表连接失败**，可用 `RuntimeStatus` 再查 |
+
+把「出口未知」判成失败，会让模型在连接其实好着的时候反复重连、换节点，用户看到的是「明明能用却被反复断开」。因此工具描述里必须原句写明这条。
+
+出口 IP 的探测方式：经本地 mixed 入站代理发一次 HTTP 请求，响应体必须是**合法 IP 字面量**才回填；门户页、错误串、`host:port`、多行内容一律丢弃，`exit_ip` 保持 `null`。探测失败只记日志，**不改运行时状态**。
 
 错误：`PRECONDITION_FAILED`、`TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`UPSTREAM_ERROR`。
 
@@ -680,7 +710,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -806,7 +836,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -955,6 +985,19 @@ CatalogSearch → ProfileImport → VpnConnect
 ---
 
 ## 8. 变更记录
+
+### 1.0.10（2026-11-02）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | `contract_version` 升到 `1.0.10` | 元数据 |
+| 2 | 无接口变更；与 events 的 `import_seed_file` 同步版本 | 同步 |
+| 3 | `CatalogSearch` 描述明确「只查远端目录，不含本地导入配置」 | 语义澄清 |
+| 4 | `ProfileList` 描述明确「列本地已保存配置（含种子导入）」；补充两工具数据源对照表 | 语义澄清 |
+| 5 | `VpnConnectData.exit_ip` 由 `string` 改为 `string \| null` —— 实现早已可能返回 `null`，契约此前写窄了 | 类型修正 |
+| 6 | `VpnConnect` 明确「`state = running` 即已连上；`exit_ip = null` 不代表失败」；补充出口 IP 探测方式 | 语义澄清 |
+
+> 第 3–6 条是**文档追平已实现行为**，不是新增接口。1.0.10 尚未提交、尚未对外冻结，故不再单开 1.0.11；四个契约文件保持同版本号。若 1.0.10 在本次改动前已经被人拿去实现，则应升 1.0.11 —— 实际情况是四处改动都能在 `src-tauri/src/tools/` 里找到对应代码。
 
 ### 1.0.9（2026-11-02，N-03）
 

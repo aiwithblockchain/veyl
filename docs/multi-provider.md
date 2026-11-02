@@ -2,7 +2,7 @@
 
 > 版本：v1.1
 > 日期：2026-11-02
-> 参考：`/Users/wesley/ai/TweetPilot/src-tauri/src/services/claurst_provider.rs`、`ai_config.rs`、`src/types/ai-settings.ts`
+> 参考：TweetPilot 工程的 `src-tauri/src/services/`（`claurst_provider.rs`、`ai_config.rs`）与 `src/types/ai-settings.ts`
 > 范围：只做设计，不改代码
 
 ---

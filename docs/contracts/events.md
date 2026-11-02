@@ -1,6 +1,6 @@
 # 契约：事件与 UI ↔ Host 调用
 
-> 契约版本：`1.0.9`
+> 契约版本：`1.0.10`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.2、§4.3
 > 实现方：Rust（Host 发送）、TypeScript（UI 订阅）
@@ -78,7 +78,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -100,7 +100,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -118,7 +118,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -160,7 +160,7 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 
 ```ts
 type ToolCallEndPayload = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -200,7 +200,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -239,7 +239,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -267,7 +267,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -305,7 +305,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -328,7 +328,7 @@ UI 处理：更新状态栏；`to = "failed"` 时显示诊断入口。
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   health: HealthSnapshot;
   emitted_at: string;
 };
@@ -344,7 +344,7 @@ UI 处理：更新延迟/出口 IP/健康灯；`degraded` 时在状态栏加黄�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "1.0.9";
+  contract_version: "1.0.10";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -382,36 +382,63 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 | `profile_delete` | `{ profile_id }` | `ProfileDeleteData` | 无 AI 模式；无确认点 |
 | `vpn_connect` | `{ profile_id }` | `VpnConnectData` | 无 AI 模式 |
 | `vpn_disconnect` | `{}` | `VpnDisconnectData` | 无 AI 模式 |
-| `settings_get` | `{}` | `SettingsSnapshot` | 设置页 |
-| `settings_set` | `{ key, value }` | `{ ok: boolean }` | 设置页 |
+| `import_seed_file` | `{ path }` | `ImportSeedResult` | 导入节点文件（拖放或选择文件）；**不含 password** |
 | `rename_session` | `{ session_id, title }` | `{ id, title, created_at }` | 重命名历史会话；`created_at` 为 ISO 8601 |
 
 > 无 AI 模式（`phase-1-requirements.md` FR-2.7）必须能在不经过 Agent 的情况下走完「选节点 → 连接 → 断开」。上表后半段就是为此存在的，行为与对应工具一致，**共用同一份 Host 实现**，不允许两套逻辑。
 
 **来源标记**：每个 invoke 命令在 Host 侧自动带 `source = "ui"`，工具调用入口自动带 `source = "agent"`。UI **不能**在参数里传 `source`（传了按 `INVALID_ARGUMENT` 拒绝）。破坏性操作（`vpn_connect`、`profile_delete`、安装运行时）无论来源都必须审批——用户自己点的也要确认，审批不能因为「是他自己点的」而跳过。
 
-例外：`settings_set` / `settings_get` 不涉及破坏性操作，不做来源校验。
+例外：`runtime_status` / `catalog_list_nodes` 等只读命令不做来源校验。
 
 `profile_delete` 的**前置校验先于删除**：目标是 active profile 时，Host 直接返回 `PRECONDITION_FAILED`，不产生任何删除副作用。
 
-`ai_send_message` 的 `request_id` 由 Host 生成（UUID v4），UI 之后所有事件都按它过滤。
+### 5.2 `import_seed_file` 的语义
 
-### 5.1 `rename_session` 的校验语义
+两条 UI 入口，**一个命令、一套实现**：
 
-| 输入 | 结果 |
+| 入口 | 前端怎么拿路径 |
 |---|---|
-| 两侧空白去掉后为空 | `INVALID_ARGUMENT`，`details.reason = "empty_title"` |
-| 去掉空白后长度 > 80（Unicode 标量数） | `INVALID_ARGUMENT`，`details.reason = "title_too_long"`，`details.max = 80`、`details.actual = N` |
-| `session_id` 不存在 | `NOT_FOUND` |
-| 存储写入失败 | `INTERNAL` |
+| 窗口级拖放 | `getCurrentWebview().onDragDropEvent()` |
+| 设置页「选择文件」按钮 | `@tauri-apps/plugin-dialog` 的 `open()`，只授 `dialog:allow-open` |
+
+两种方式拿到的都是**绝对路径**，之后走同一条链路；用户取消时 `open()` 返回 `null`，前端直接返回，**不调用本命令**。
+
+```ts
+type ImportSeedResult = {
+  imported: number;
+  skipped: Array<{ name: string; reason: string }>;
+  profiles: Array<{ id: string; name: string; server: string; server_port: number; method: string }>;
+};
+```
+
+Host 侧：
+
+1. 校验扩展名 `.json`、大小 ≤ 1 MB、路径存在且可读
+2. 读文本 → `seed_import::parse` → `plan` → `apply`
+3. 返回上述结构
 
 规则：
 
-- **先 trim 再校验、再存**。存进去的是 trim 后的值，UI 不需要自己再处理。
-- 长度按 **Unicode 标量数**（Rust `chars().count()`），**不是字节数** —— 80 个汉字和 80 个英文字母同样合法。
-- 80 是**存储上限**，不是显示宽度。侧边栏怎么截断是 UI 的事，与本命令无关。
-- **不新增专用错误码**。`INVALID_ARGUMENT` + `details.reason` 是本项目既有的模式（`ProfileDelete` 的 `ACTIVE_PROFILE_IN_USE` 同理），比为一个两值校验再发明一个 `INVALID_TITLE` 更省。
-- 不触发事件、不写 `tool_calls`。这是纯 UI 操作，没有 Agent 参与。
+- **只接受 shadowsocks 出站**，method 白名单 `aes-256-gcm`。
+- **部分成功不算失败**：有任一节点导入成功即返回成功，其余进 `skipped[]` 附原因；一个都没导入才报错。
+- **返回值与日志永不含 `password`**；日志只记 `pw_fp = sha256(profile_id ‖ password)[:8]`。
+- 这条命令 `source = "ui"`，**不经过 Agent**，密码不会进入模型上下文。
+- 读文件失败时**不要回显文件内容**，也不要回显完整路径中的用户名等无关信息。
+
+错误分类：
+
+| 错误码 | `details.reason` | 场景 |
+|---|---|---|
+| `INVALID_ARGUMENT` | `not_json_file` | 扩展名不是 `.json` |
+| `INVALID_ARGUMENT` | `file_too_large` | 超过 1 MB，`details.max_bytes` |
+| `INVALID_ARGUMENT` | `file_unreadable` | 路径不存在或不可读 |
+| `INVALID_ARGUMENT` | `invalid_json` | 内容不是合法 JSON / 结构不符 |
+| `INVALID_ARGUMENT` | `no_importable_nodes` | 解析成功但无可导入节点 |
+| `UNSUPPORTED` | — | method 不在白名单，`details.method` |
+| `SECRET_STORE` | — | `secrets.enc` 写入失败 |
+
+> 自动化（CI / 测试）走 `veyl-runtime-selftest import-seeds --file <path> --data-dir <dir>`，不经过这条命令。
 
 ---
 
@@ -504,6 +531,20 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 1.0.10（2026-11-02，N-03 导入通道最终定为拖拽）
+
+> 本版本在定稿前改过三次（环境变量 → 开发版 CLI → 设置页 UI → 固定路径自动导入），均未发布。最终定为**拖拽导入**：用户把 JSON 拖进窗口，零额外界面。
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.0.10` | 元数据 | PM |
+| 2 | §5 新增 `import_seed_file({ path })` | 新增命令 | 用户：内测用户需自行加载节点文件 |
+| 3 | 新增 §5.2 语义：四类校验、部分成功不算失败、返回值与日志不含 password | 新增 | 同上 |
+| 4 | 自动化仍走 `veyl-runtime-selftest import-seeds`，不经过该命令 | 说明 | CI 与测试需要 |
+| 5 | 移除 `settings_get` / `settings_set` —— 契约里列着但 Host 从未实现，且当前无调用方 | 移除 | 无实现、无调用方，留着会误导 |
+| 6 | `ImportSeedResult.profiles[]` 增加 `server_port` —— UI 要显示 `server:port`，只有 `server` 时只能显示半截 | 字段新增 | 实现时发现，纯新增不破坏现有类型 |
+| 7 | §5.2 明确两条 UI 入口（窗口拖放 + 设置页「选择文件」）**共用一个命令**；取消返回 `null` 时不调用本命令 | 语义澄清 | 用户追加要求从目录选文件 |
 
 ### 1.0.9（2026-11-02）
 

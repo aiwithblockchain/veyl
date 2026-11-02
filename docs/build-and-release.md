@@ -2,7 +2,7 @@
 
 > 版本：v1.0
 > 日期：2026-11-02
-> 参考：`/Users/wesley/ai/TweetPilot/scripts`（只读审计，不复制产物与密钥）
+> 参考：TweetPilot 工程的 `scripts/` 目录（只读审计，不复制产物与密钥）
 > 适用：P1 双平台构建、本地验证、GitHub Release 发布；P5 补 Windows 签名
 
 ---
@@ -36,7 +36,7 @@
 | Windows | P1/P2 只构建 MSI **不签名**；脚本预留签名 hook，P5 启用 |
 | 发布渠道 | GitHub Releases；**P1 无 updater、无 Cloudflare Worker、无官网同步** |
 | 密钥 | 一律从 keychain profile / 环境变量读，**不落仓库、不落文档、不落日志**；详见 §5.2（硬约束） |
-| 路径 | 脚本内只用相对路径 + `$(dirname "$0")` 推导，**禁止写死 `/Users/...`** |
+| 路径 | 脚本内只用相对路径 + `$(dirname "$0")` 推导，**禁止写死本机绝对路径** |
 | 破坏性操作 | 发布、删除、覆盖类脚本默认支持 `--dry-run`，正式执行要二次确认 |
 
 ---
@@ -360,7 +360,7 @@ npm run icons
 
 #### 5.2.3 仓库卫生
 
-- 不写死本机绝对路径（`/Users/wesley/...`、`C:\Users\...`），一律用 `$(dirname "$0")` 或 `$PROJECT_ROOT` 推导。
+- 不写死本机绝对路径（家目录展开后的具体值、`C:\Users\...` 的具体值），一律用 `$(dirname "$0")` 或 `$PROJECT_ROOT` 推导。
 - **禁止 `git add -A` / `git add .`**：只按文件名添加，避免把未跟踪的密钥、产物、日志扫进去。
 - `.gitignore` 只是兜底，**不是防线**；真正的防线是 §5.3 的提交前检查。
 
