@@ -5,7 +5,10 @@
 ## 快速开始
 
 ```bash
-# 1) 起三个 mock 服务并自检（CI 第一步就跑这个）
+# 0) 契约一致性（CI 第一步，几秒出结果）
+node tests/contracts/check-contracts.mjs
+
+# 1) 起三个 mock 服务并自检
 bash tests/run-mocks.sh --selftest
 
 # 2) 起一个真实的本地 sing-box 节点（需要先下载内核）
@@ -25,6 +28,7 @@ python3 -I tests/fixtures/make_archives.py
 | `mock-llm/server.mjs` | OpenAI 兼容接口，按剧本返回 `tool_calls` |
 | `echo/server.mjs` | 回显服务，验证代理链路 |
 | `local-node/setup.sh` | 真实 sing-box 服务端 + 客户端（VLESS Reality），带自检 |
+| `contracts/check-contracts.mjs` | 契约一致性检查：事件名、chatStore 覆盖、快照字段 |
 | `fixtures/nodes.json` | 节点数据（含不可达、凭证失效、注入载荷三种异常节点） |
 | `fixtures/llm-scenarios/*.json` | 剧本：用户说什么 → 依次返回什么工具调用 |
 | `fixtures/manifest-*.json` | 运行时清单：正常 / 坏 sha / 坏 URL / 路径穿越 / 假内核 |
@@ -57,6 +61,8 @@ python3 -I tests/fixtures/make_archives.py
 
 观测接口：`GET /__stats`（各类请求计数，用于断言「没有重复注册设备」）、`GET /__health`、`GET /__reset`。
 
+下载接口：`GET /__file?name=<asset>` 下发 `fixtures/generated/` 里的归档（含恶意归档与假内核）。
+
 ## mock LLM 的剧本机制
 
 请求里最后一条 user 消息带 `[scenario:connect-jp]` 即选择该剧本；未带则用默认剧本（`connect-jp`）。
@@ -64,6 +70,8 @@ python3 -I tests/fixtures/make_archives.py
 
 剧本里的工具名目前按 `phase-1-technical-design.md` §5.1 的契约写成 `catalog_search` / `vpn_connect` 这样的小写形式。
 **W1 需要 Alice 确认 `Tool::name()` 的实际返回值**；如果实现用 `CatalogSearch` 这类 PascalCase，改 `fixtures/llm-scenarios/*.json` 即可，代码不用动。
+
+观测接口：`GET /__stats`（请求计数）、`GET /__reset`、**`GET /__last_request`**（最近一次请求的完整消息数组，用于断言「节点凭据没有进入模型上下文」，对应 TC-CAT-012）。
 
 ## 本地节点的已知边界
 

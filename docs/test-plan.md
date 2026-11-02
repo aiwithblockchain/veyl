@@ -253,6 +253,9 @@ E2E 不能依赖真实模型。`tests/fixtures/llm-scenarios/*.json` 定义「�
 | 8 | 系统代理写入/恢复封装成可替换的 trait，集成测试用真实实现，单元测试用假实现 | Bob | 代理备份/恢复逻辑要能跑单测 |
 | 9 | `Tool::name()` 的确切取值在 W1 定死 | Alice | mock LLM 剧本依赖它 |
 | 10 | 提供一个「跳过 Keychain、直接注入 Key」的测试构建开关 | 两人 | CI 上 Keychain 交互不可靠 |
+| 11 | 审批判定必须在**工具分发层**执行，不能只靠 UI 隐藏按钮 | Alice | TC-EXC-031 要求「绕过 UI 直接调用也被拒」；只做 UI 拦截等于没做 |
+| 12 | `CoreInstall` 不走 remember 规则 | Alice | 安装会落可执行文件，每次都要问；TC-EXC-032 / 033 依赖这一点 |
+| 13 | 节点详情（含凭据）只允许 `ConfigBuilder` 读取，不得进入任何 `ToolResult` | Bob | TC-CAT-011 / 012 要能断言「凭据没进模型上下文」 |
 
 ---
 
@@ -260,10 +263,12 @@ E2E 不能依赖真实模型。`tests/fixtures/llm-scenarios/*.json` 定义「�
 
 | 触发 | 跑什么 |
 |---|---|
-| 每次 push | `cargo test`（U 层）+ `tsc --noEmit` + lint |
+| 每次 push | **契约一致性检查**（`node tests/contracts/check-contracts.mjs`）+ `cargo test`（U 层）+ `tsc --noEmit` + lint |
 | PR 合并前 | U + I 层（`tests/run-mocks.sh` 起 mock，跑 `cargo test --test integration`） |
 | 每日夜间 | E + 手工脚本（代理值写入/恢复、崩溃重启），双平台 |
 | 打 tag / RC | 全量 + `TC-DIST-*` 脚本 + 手工矩阵清单 |
+
+**契约检查放在最前面**：事件名与快照字段写错不会导致编译失败，只会让事件被静默丢弃、让内部地址混进 UI。这类问题靠人眼审不出来，必须在 CI 第一步拦住。检查脚本直接读契约文档与源码，不依赖构建产物，几秒内出结果。
 
 CI 不跑真实节点、不跑真实 LLM、不跑 Gatekeeper/SmartScreen。
 
@@ -292,3 +297,4 @@ CI 不跑真实节点、不跑真实 LLM、不跑 Gatekeeper/SmartScreen。
 3. **Clash API 的延迟测试对不可达节点返回** `{"message":"An error occurred in the delay test"}`（非 200）。FR-7.3 的延迟测试应以这个接口为准，而不是自己发起 TCP 连接。
 4. **端口被占用时** sing-box 直接 `FATAL` 并退出（退出码 1），日志形如 `listen tcp 127.0.0.1:12080: bind: address already in use`。Runtime Manager 必须把这条识别为 `port_in_use`，而不是笼统的启动失败。
 5. **`sing-box check` 只做 schema 校验，不做语义校验**：缺少 `uuid` 的 VLESS 出站仍返回退出码 0。因此「配置校验通过」不能等同于「配置可用」，Config Builder 必须自己校验必填字段，测试要同时断言这两层。
+6. **契约一致性检查已跑出两处真实偏差**（2026-11-02）：`src/agent/protocol.ts` 的事件名仍是 `ai-` 前缀且缺 4 个应用事件；`RuntimeStatus` 仍带 `clash_addr`。详见 `test-cases/README.md`「当前契约偏差」。这两条要由实现方修，检查不放宽。

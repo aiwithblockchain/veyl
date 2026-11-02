@@ -25,6 +25,7 @@ if (existsSync(SCENARIO_DIR)) {
 }
 
 const stats = { requests: 0, byScenario: {}, authFailures: 0 };
+let lastRequest = null;
 const DEFAULT_SCENARIO = process.env.MOCK_LLM_DEFAULT_SCENARIO || "connect-jp";
 
 function lastUserText(messages) {
@@ -69,10 +70,16 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { "content-type": "application/json" });
     return res.end(JSON.stringify(stats));
   }
+  // 最近一次请求的原始消息数组：用于断言「节点凭据没有进入模型上下文」
+  if (url.pathname === "/__last_request") {
+    res.writeHead(200, { "content-type": "application/json" });
+    return res.end(JSON.stringify(lastRequest ?? { messages: null }));
+  }
   if (url.pathname === "/__reset") {
     stats.requests = 0;
     stats.byScenario = {};
     stats.authFailures = 0;
+    lastRequest = null;
     res.writeHead(200, { "content-type": "application/json" });
     return res.end('{"ok":true}');
   }
@@ -110,6 +117,7 @@ const server = http.createServer((req, res) => {
     }
 
     const messages = payload.messages || [];
+    lastRequest = { at: Date.now(), model: payload.model, messages };
     const { name, scenario } = pickScenario(messages);
     stats.requests++;
     stats.byScenario[name] = (stats.byScenario[name] || 0) + 1;

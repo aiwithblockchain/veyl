@@ -26,6 +26,8 @@
 | **TC-SEC-007** | I | FR-4.1 | 运行中 | 1) 从另一台机器访问 `http://<本机IP>:<clash_port>/version` | 连接被拒绝（不可达）；本机访问返回 200 | P0 |
 | **TC-SEC-008** | I | §3.3 可测性开关 | release 构建 | 1) 设置 `AIVPN_LLM_BASE=http://127.0.0.1:18091`；2) 启动 release 包；3) 观察请求去向 | release 构建**忽略**该变量，仍访问真实 endpoint。测试开关泄漏到发布版本 = 可被劫持，属 S1 | P0 |
 | **TC-SEC-009** | I | 7 安全设计 | mock 记录请求 | 1) 完成一次连接 | 外发请求只包含：设备注册、目录查询、（可选）匿名健康上报；**不含**对话内容、目标域名、节点凭证 | P0 |
+| **TC-SEC-020** | U + I | `docs/contracts/runtime.md` §11 | 运行中 | 1) 取 `RuntimeStatus` 快照并 `serde_json::to_value`；2) 断言顶层键集合；3) 再取 `runtime_status` 工具的 `ToolResult.data` | 序列化结果**不含** `clash_addr`，也**不含** `clash_secret`；其余字段（`state` / `version` / `pid` / `started_at` / `restarts` / `last_error`）保留。工具返回的 `data` 同样不含二者 | P0 |
+| **TC-SEC-021** | U | 同上 | — | 1) 跑 `node tests/contracts/check-contracts.mjs` | 静态检查在结构体层面就拦住 `clash_addr`（防止有人加回来但没走运行时路径） | P1 |
 
 ---
 

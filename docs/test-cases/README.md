@@ -11,14 +11,14 @@
 | 文件 | 内容 | 用例数 |
 |---|---|---|
 | [01-main-flow.md](01-main-flow.md) | 首次启动 → 配 Key → 连接 → 断开 | 8 |
-| [02-exception.md](02-exception.md) | 7 类异常路径 + 附加失败路径 | 30 |
+| [02-exception.md](02-exception.md) | 7 类异常路径 + 安装审批 + 附加失败路径 | 33 |
 | [03-runtime-config.md](03-runtime-config.md) | 运行时管理、安装校验、配置生成 | 30 |
-| [04-ui-agent.md](04-ui-agent.md) | 外壳、对话、工具卡、设置、诊断、体验指标 | 29 |
-| [05-proxy-catalog.md](05-proxy-catalog.md) | 系统代理（macOS/Windows）、节点目录客户端 | 25 |
-| [06-security.md](06-security.md) | 密钥、暴露面、提示注入、完整性、崩溃隔离 | 19 |
+| [04-ui-agent.md](04-ui-agent.md) | 外壳、对话、工具卡、事件契约、设置、诊断、体验指标 | 32 |
+| [05-proxy-catalog.md](05-proxy-catalog.md) | 系统代理（macOS/Windows）、节点目录客户端 | 27 |
+| [06-security.md](06-security.md) | 密钥、暴露面、提示注入、完整性、崩溃隔离 | 21 |
 | [07-distribution.md](07-distribution.md) | 安装包、签名、公证、发布清单 | 19 |
 | [99-p2-backlog.md](99-p2-backlog.md) | 明确留到后续阶段的项 | — |
-| **合计** | | **160** |
+| **合计** | | **170** |
 
 ---
 
@@ -31,9 +31,9 @@
 
 | 层 | 大致数量 | 谁执行 |
 |---|---|---|
-| U 单元 | 约 35 | `cargo test`，Alice / Bob 编写 |
-| I 集成 | 约 75 | `cargo test --test integration` + `tests/` mock 服务 |
-| E E2E | 约 25 | tauri-driver |
+| U 单元 | 约 40 | `cargo test` / 前端单测 / 契约检查脚本，Alice / Bob 编写 |
+| I 集成 | 约 78 | `cargo test --test integration` + `tests/` mock 服务 |
+| E E2E | 约 27 | tauri-driver |
 | M 手工 | 约 20 | Clerk，W5 集中执行 |
 | D 发布脚本 | 约 8 | Clerk |
 
@@ -51,7 +51,7 @@
 | FR-2.1 | TC-CHAT-001 |
 | FR-2.2 | TC-CHAT-002、TC-CHAT-007 |
 | FR-2.3 | TC-CHAT-003 |
-| FR-2.4 | TC-CHAT-004、TC-EXC-030 |
+| FR-2.4 | TC-CHAT-004、TC-EXC-030、TC-EXC-031、TC-EXC-032、TC-EXC-033 |
 | FR-2.5 | TC-SHELL-005 |
 | FR-2.6 | TC-CHAT-005、TC-CHAT-006、TC-CHAT-009、TC-EXC-029 |
 | FR-2.7 | TC-MAIN-002、TC-MAIN-007、TC-EXC-001、TC-EXC-002 |
@@ -72,7 +72,7 @@
 | FR-4.5 | TC-CFG-006、TC-SEC-011 |
 | FR-5.1 | TC-CAT-001、TC-CAT-002 |
 | FR-5.2 | TC-CAT-003 |
-| FR-5.3 | TC-CAT-004、TC-CAT-010 |
+| FR-5.3 | TC-CAT-004、TC-CAT-010、TC-CAT-011、TC-CAT-012 |
 | FR-5.4 | TC-CAT-007 |
 | FR-5.5 | TC-CAT-005、TC-CAT-006、TC-EXC-026、TC-DIAG-004 |
 | FR-5.6 | TC-EXC-026、TC-EXC-027 |
@@ -100,6 +100,9 @@
 | 9.3 验收 | TC-SEC-001 ~ 009 |
 | 9.4 验收 | TC-DIST-001 ~ 017 |
 | 9.5 验收 | TC-PERF-001 ~ 004 |
+| `docs/contracts/events.md` | TC-CHAT-010 ~ 012 |
+| `docs/contracts/runtime.md` §11 | TC-SEC-020、TC-SEC-021 |
+| `docs/contracts/tools.md` / `catalog.md` | TC-CAT-004、TC-CAT-011、TC-CAT-012 |
 
 ---
 
@@ -115,3 +118,18 @@
 | 9.5「首次连接成功率 ≥ 90%」 | 需要真实用户样本 | W5 dogfood 统计，测试只提供采集口径 |
 | 9.2「应用被强杀」 | macOS 可脚本化；Windows 需要任务管理器或 `taskkill /F` | 手工执行，记录证据 |
 | Hysteria2 连通性 | P1 只在配置生成层验证，无本地 Hysteria2 服务端 | 若 Bob 需要真实验证，需补一个本地 Hysteria2 节点（TLS 自签即可） |
+
+---
+
+## 当前契约偏差（`node tests/contracts/check-contracts.mjs` 实测，2026-11-02）
+
+检查脚本已跑过，报出两处**实现与已冻结契约不一致**。这两条不是用例写得不对，是实现要改：
+
+| # | 偏差 | 契约要求 | 归属 |
+|---|---|---|---|
+| 1 | `src/agent/protocol.ts` 仍是 `ai-message-chunk` / `ai-thinking-chunk` / `ai-tool-call-start` / `ai-tool-call-end`，且缺 `runtime-state-changed`、`runtime-health-changed`、`job-progress`、`approval-requested` 四个应用事件 | `docs/contracts/events.md`：前四个去 `ai-` 前缀；应用事件必须同时订阅 | Alice |
+| 2 | `RuntimeStatus` 仍有 `pub clash_addr: Option<String>` 且 derive `Serialize` | `docs/contracts/runtime.md` §11：`clash_addr` 从 UI 快照中移除 | Bob |
+
+`protocol.ts` 的注释自己写着「等契约文档到位后整体替换」——契约已于 2026-11-02 冻结，现在差的是这一步替换。替换后 TC-CHAT-010 会转绿。
+
+这两条**不需要放宽检查**。检查脚本是防线，不是指标：它现在失败，说明它有效。
