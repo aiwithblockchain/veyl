@@ -126,6 +126,8 @@ fi
 
 **每轮操作前记下时间戳**，`date +%H:%M:%S`。后面所有 SQL 都靠它过滤出「刚才那次操作」的记录，否则会和历史数据混在一起。
 
+**注意时间列的单位**：库里存的是**毫秒**，取证 SQL 要写 `datetime(created_at/1000,'unixepoch')`。写成不除 1000 会**静默返回空**——不报错，只有一列空值。详见 §2 开头的警示。
+
 ---
 
 ## 2. 证据采集速查
@@ -134,12 +136,27 @@ fi
 DB="$HOME/Library/Application Support/Veyl/veyl.db"
 ```
 
+> ⚠️ **时间列的单位：库里存毫秒，不是秒。**
+>
+> `tool_calls` / `chat_sessions` / `chat_messages` / `proxy_backup` / `runtime_versions` 的时间列都是 **Unix 毫秒**（`store/db.rs` 的 `now_ms()`）。契约对外给的是 ISO 8601 字符串，由 `iso_from_ms()` 在出口转换，已经处理好了。
+>
+> 但**取证 SQL 必须自己除 1000**：
+>
+> ```sql
+> datetime(created_at/1000, 'unixepoch', 'localtime')   -- ✅
+> datetime(created_at,      'unixepoch', 'localtime')   -- ❌ 把毫秒当秒
+> ```
+>
+> **写错的表现是「静默返回空」**：SQLite 不报错，只是算出一个公元 5 万年的日期或 NULL。看到时间列是空，先怀疑单位，不要第一反应认为「字段没写」。
+>
+> 下面所有 SQL 都已按毫秒修正。
+
 **最近 20 条工具调用**
 
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT tool_name, approved, is_error,
-       datetime(created_at,'unixepoch','localtime') AS at
+       datetime(created_at/1000,'unixepoch','localtime') AS at
 FROM tool_calls ORDER BY created_at DESC LIMIT 20;"
 ```
 
@@ -163,8 +180,8 @@ WHERE config_json LIKE '%\"uuid\"%' OR config_json LIKE '%\"password\"%'
 
 ```bash
 sqlite3 -header -column "$DB" "SELECT id,name,protocol,region,is_active FROM profiles;"
-sqlite3 -header -column "$DB" "SELECT version,state,datetime(installed_at,'unixepoch','localtime') FROM runtime_versions;"
-sqlite3 -header -column "$DB" "SELECT platform,endpoint,datetime(created_at,'unixepoch','localtime') FROM proxy_backup;"
+sqlite3 -header -column "$DB" "SELECT version,state,datetime(installed_at/1000,'unixepoch','localtime') FROM runtime_versions;"
+sqlite3 -header -column "$DB" "SELECT platform,endpoint,datetime(created_at/1000,'unixepoch','localtime') FROM proxy_backup;"
 ```
 
 **会话落库**
@@ -285,7 +302,7 @@ node tests/contracts/check-contracts.mjs
 
 ```bash
 sqlite3 -header -column "$DB" "
-SELECT tool_name, approved, datetime(created_at,'unixepoch','localtime') AS at
+SELECT tool_name, approved, datetime(created_at/1000,'unixepoch','localtime') AS at
 FROM tool_calls WHERE tool_name LIKE '%VpnConnect%' ORDER BY created_at;"
 ```
 

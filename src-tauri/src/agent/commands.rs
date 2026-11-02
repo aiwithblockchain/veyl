@@ -19,6 +19,20 @@ pub async fn ai_send_message(
         .await
         .map_err(|error| error.to_string())?;
 
+    // 用户输入在入口落库：claurst 只对 assistant/results 发 MessageCommitted，
+    // 不依赖事件补写，避免重复。
+    if let Some(store) = crate::store::global() {
+        let conn = store.conn();
+        let _ = crate::store::chat::append_message(
+            &conn,
+            &crate::store::chat::new_message_id(),
+            &session_id,
+            "user",
+            &text,
+            None,
+        );
+    }
+
     let request_id = AppState::next_request_id();
     state.track_request(&request_id, &session_id);
 

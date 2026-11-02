@@ -465,7 +465,8 @@ fn persist_committed_message(session_id: &str, message: &Message) {
     };
 
     let role = match message.role {
-        claurst_core::Role::User => "user",
+        // 用户消息由 `ai_send_message` 入口写一次；这里跳过，避免两条路径各写一遍。
+        claurst_core::Role::User => return,
         claurst_core::Role::Assistant => "assistant",
     };
     let text = match &message.content {
@@ -560,17 +561,29 @@ mod audit_tests {
     }
 
     #[test]
-    fn a_committed_message_is_persisted() {
+    fn a_committed_assistant_message_is_persisted() {
         install_store();
         let store = crate::store::global().expect("全局库已安装");
 
-        let message = Message::user("连到日本");
+        let message = Message::assistant("已连接到东京 01");
         persist_committed_message("ses_chat", &message);
 
         let conn = store.conn();
         let messages = crate::store::chat::messages(&conn, "ses_chat").unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[0].content, "连到日本");
+        let last = messages.last().expect("至少有一条");
+        assert_eq!(last.role, "assistant");
+        assert!(last.content.contains("东京"));
+    }
+
+    #[test]
+    fn user_messages_are_not_written_twice() {
+        install_store();
+        let store = crate::store::global().expect("全局库已安装");
+
+        // 用户消息由 ai_send_message 入口写；事件路径必须跳过它。
+        persist_committed_message("ses_dup", &Message::user("连到日本"));
+
+        let conn = store.conn();
+        assert!(crate::store::chat::messages(&conn, "ses_dup").unwrap().is_empty());
     }
 }

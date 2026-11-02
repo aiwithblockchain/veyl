@@ -18,7 +18,9 @@
 | ID | 名称 | 通道 | 判定 | 说明 |
 |---|---|---|---|---|
 | AC-B1 | 应用启动与窗口 | A | **PASS** | 17:12:57，标题 `Veyl`，三栏完整 |
-| P-1 | DeepSeek Key 能存（准入） | A | **PASS** | 17:43 假 Key 写入钥匙串、明确警告无效、重启后仍在 |
+| P-1 | DeepSeek Key 能存（准入） | A | **待复测（新方案）** | 17:43 旧钥匙串方案 PASS 已作废；18:10 改用 `secrets.enc` 加密文件，需重测 |
+| P-2 | 工具调用能落库（准入） | A | **PASS** | 18:39 `RuntimeStatus` 落 1 行，`approved=NULL`、`is_error=0`，与真实状态一致 |
+| P-3 | 对话能落库（准入） | A | **PASS** | 18:54 会话含 user + assistant 两条、顺序正确；首轮曾漏 user 见 D-05 |
 | AC-D1 | 下载 + SHA256 校验 | C | **PASS** | e2e `[2]` |
 | AC-D2 | 解压路径穿越被拒 | C | **PASS** | 6 条归档单测全绿 |
 | AC-D3 | 启动 → 停止 → 重启 | C | **PASS** | e2e `[5]`→`[7]`，pid 53642，结束后无残留 |
@@ -70,19 +72,56 @@
 
 - `acceptance-p1.md` 原写 `proxy_backup.json`，实际是 `proxy-backup.json`（连字符，`src-tauri/src/proxy/backup.rs:77`）。17:35 已改。
 
-### D-03 保存 Key 后不热更新，必须重启应用才生效（**中**，归属 Bob）
+### D-03 保存 Key 后不热更新，必须重启应用才生效（**中**，归属 Bob）→ **已在 `ab76ef2` 修复，待运行时验证**
 
-- **发现**：2026-11-02 18:02。用户在设置页保存**真实** Key（钥匙串 `mdat` 更新到 18:01:49），随后在对话里收到 `API error: [openai] Authentication failed: Authentication Fails (governor)`。
-- **根因**：`AppState::new`（`src-tauri/src/agent/mod.rs:28-34`）在**应用启动时**把 Key 读进 `credentials: RwLock<Option<DeepSeekCredentials>>` 并常驻内存。代码里提供了 `set_credentials`（`agent/mod.rs:45`），但**全仓库无任何调用方**（`grep -rn set_credentials src-tauri/src/` 除定义外为空）。`deepseek_save_key`（`agent/commands.rs:169`）只写钥匙串，不通知 `AppState`。
-- **后果**：应用在 17:43:58 启动时读到的还是 17:43:36 写入的**假** Key；18:01:49 保存的真 Key 只进了钥匙串，内存里仍是假 Key，于是对话调用模型时鉴权失败。用户看到的是「刚存了 Key 却说鉴权失败」，极易误判成 Key 本身有问题。
-- **临时规避**：保存 Key 后**重启应用**。
-- **建议修复**：`deepseek_save_key` 注入 `State<AppState>`，保存成功后调用 `app_state.set_credentials(DeepSeekCredentials::new(key))`。注意此时 `validation == "invalid"` 应仍写入凭据（让用户能看到鉴权失败的具体反馈）还是回滚，需要产品确认——但无论哪种，都不该让内存与钥匙串长期不一致。
+- **发现**：2026-11-02 18:02，针对 **`f4085cf`** 构建。用户在设置页保存**真实** Key（之后对话仍报 `API error: [openai] Authentication failed: Authentication Fails (governor)`）。
+- **当时根因**：`AppState::new`（`agent/mod.rs:28-34`）在应用启动时把 Key 读进 `credentials: RwLock<...>` 常驻内存；当时提供的 `set_credentials` **全仓库无调用方**，`deepseek_save_key` 只写钥匙串、不通知内存。应用 17:43:58 启动时读到的是 17:43:36 写入的**假** Key，18:01:49 保存的真 Key 只进了钥匙串 → 对话鉴权失败。用户看到的是「刚存了 Key 却说鉴权失败」，极易误判成 Key 本身有问题。
+- **修复（`ab76ef2`）**：新增 `apply_credentials`，并在 `deepseek_save_key`（`agent/commands.rs:176`）、工具路径（`tools/services.rs:528`）、清除路径（`commands.rs:209`）调用；`credential_generation: AtomicU64` 让已建会话在下次取用时按新代数重建，旧 Key 不会被继续使用。
+- **遗留小问题**：`commands.rs:175` 的注释仍写「钥匙串写成功后」，与新的 `secrets.enc` 方案不符，属文档性笔误。
+- **验证状态**：代码已具备，**尚未在运行时验证**（需在新方案下复测：保存真 Key 后**不重启**直接对话应成功）。
 
 ### D-04（观察项）运行时日志文件始终为 0 字节
-
 - `~/Library/Application Support/Veyl/logs/app-2026-11-02.log` 在应用启动 18 分钟后仍为 **0 字节**；`build/logs/dev-*.log` 里也没有任何 `veyl=` 前缀的应用日志，只有一条 macOS 输入法警告。
 - 说明 `logging.rs` 虽有实现，但实际没有产出可观测的日志。**这会让后续所有缺陷排查失去日志依据**，建议 Bob 核实初始化是否被执行、默认级别是什么。
 - 目前只是观察，未确认根因。
+
+### D-05 用户消息不落库，只落助手消息（**高**，归属 Bob）→ **已在工作区修复，待提交**
+
+- **发现**：2026-11-02 18:39，针对 **`ab76ef2`**。用户问「现在什么状态」，`chat_sessions` 建了 1 条、`chat_messages` 落 1 条，但**该条 `role = 'assistant'`**，用户那句提问没有入库。
+- **当时证据**：
+
+```
+chat_messages:
+  msg_18e434379af69d18  session_mvz4luwa_1  assistant  「当前状态：运行时处于 **idle** 状态…」
+  （无 role = 'user' 的行）
+```
+
+- **当时根因**：`persist_committed_message`（`claurst_session/mod.rs:461`）只在收到 `QueryEvent::MessageCommitted` 时写库。该事件由 claurst 查询循环发出，只覆盖 `assistant_msg` / `results_msg` / `feedback`，**用户的输入消息不会触发该事件**。后果是重启后聊天记录只剩助手回答，用户的问题消失 —— **AC-F1 必然失败**。
+- **修复（工作区，未提交）**：`ai_send_message` 入口（`agent/commands.rs:24-34`）直接落库 user 消息，注释写明「claurst 只对 assistant/results 发 MessageCommitted，不依赖事件补写，避免重复」。应用在 18:44:51 重建（二进制 18:44:54）。
+- **修复后验证（18:54）**：
+
+```
+session_mvz4tzg9_1  你好
+  user       你好
+  assistant  你好，我是 Veyl 的助手。我可以帮你：…
+```
+
+user 与 assistant 两条都在，顺序正确。
+- **版本边界**：本次验证跑的是**工作区代码**（相对 `ab76ef2` 有 3 个文件未提交改动）。D-05 在 HEAD `ab76ef2` 上仍然存在，提交后需要重新确认。
+
+### D-06 时间戳单位与验收文档不一致，文档里的 SQL 全部失效（**中**，文档/实现双方）
+
+- `tool_calls` / `chat_sessions` / `chat_messages` 的 `created_at` 存的是**毫秒**（例：`1793615964078`）。
+- 而 `docs/acceptance-p1.md` §2 的所有证据 SQL 都写成 `datetime(created_at,'unixepoch','localtime')`，按**秒**解析 —— 结果是时间列**静默显示为空**，不会报错。
+- 实测对照：
+
+```
+datetime(created_at,'unixepoch')        → （空）
+datetime(created_at/1000,'unixepoch')   → 2026-11-02 18:39:24  ✅
+```
+
+- **后果**：测试人员按文档取证据时会看到空时间列，轻则困惑、重则误判「没有数据」。
+- **建议**：二选一定死 —— 要么库统一存秒，要么文档 SQL 改成 `created_at/1000`。文档里所有依赖时间过滤的用例（AC-C1/C2/F1/F2 等）都受影响。
 
 ---
 
@@ -291,7 +330,11 @@ MeshFlux               webpr=No 127.0.0.1:2080  secur=No 127.0.0.1:2080  socks=N
 
 ---
 
-## 5. P-1 复测结果 → **PASS**（17:43，通道 A）
+## 5. P-1 复测
+
+> **⚠️ 方案已更换，17:43 那轮证据作废。** `ab76ef2` 把密钥存储从 macOS 钥匙串整体改为机器绑定的本地加密文件 `secrets.enc`（AES-256-GCM，PBKDF2 10 万次，`grep -r keyring src-tauri/` 已为空）。下面的 17:43 记录保留作历史，**新的判定要点见 §5.2**。
+
+### 5.1 历史：17:43 旧方案（钥匙串）—— 已作废
 
 17:12 判 P-1 为「功能未实现」时，设置页无入口、后端无命令。17:30 静态复核发现三项都已补齐，17:43 用户在 Tauri 窗口里完成运行时复测。
 
@@ -334,9 +377,53 @@ MeshFlux               webpr=No 127.0.0.1:2080  secur=No 127.0.0.1:2080  socks=N
 
 用户确认两项均被拒绝、测试通过。**提示原文未逐字留存**，这是本次记录的证据缺口；按契约 §4.15 的 `minLength: 20`，`abc123` 应在 schema 层被拒。
 
-### 结论
+### 5.2 现行方案：`ab76ef2` 本地加密存储 —— **待复测**
 
-P-1 **PASS**。存储路径、验证语义、重启持久化三条都成立，假 Key 只覆盖到 `invalid` 分支（真实有效 Key 返回 `ok` 的分支未测，需真实 Key，属 AC-B2 前置）。
+**代码核对（18:12，静态）**
+
+| 检查点 | 状态 |
+|---|---|
+| `keyring` 依赖与调用 | ✅ 已完全移除（`grep -rn keyring src-tauri/` 为空） |
+| 存储位置与格式 | `<data_dir>/secrets.enc`，0600，AES-256-GCM，PBKDF2-HMAC-SHA256 10 万次，写入走临时文件 + fsync + rename |
+| `__verify` 双失败区分 | ✅ 单条损坏 → 删该条保留其余；`__verify` 解不开 → 保留文件仅报错 |
+| 保存后热更新内存 | ✅ `apply_credentials` 在 `commands.rs:176`、`services.rs:528`；`credential_generation` 让旧会话失效 |
+
+**判定要点（在原三态之外新增两条，PM 指定）**
+
+| # | 要点 | 期望 |
+|---|---|---|
+| 1 | 保存/读取全程无 macOS 密码授权弹窗 | **不得出现任何系统密码框** |
+| 2 | `~/Library/Application Support/Veyl/secrets.enc` | 存在、权限 `0600`、内容为密文（搜不到明文 Key） |
+| 3 | 空值保存 | 拒绝 |
+| 4 | `abc123`（<20 字符） | 拒绝 |
+| 5 | 假 Key | 提示「校验失败」，**不得**出现「配置成功」 |
+| 6 | 真 Key 保存后**不重启**直接对话 | **应成功**（验证 D-03 的修复） |
+| 7 | 重启后打开设置 | 仍显示已保存 |
+
+> 要点 6 是本次新增的关键项：它同时验证 D-03。旧方案下这一项是失败的。
+>
+> 17:43 旧方案下「空值 / 格式非法 被拒绝」当时由用户口头确认、未留存提示原文，本轮请留意原文。
+
+**已知残留（建议收尾处理）**：迁移到 `secrets.enc` 后，**系统钥匙串里的旧条目没有被清理**。18:12 实测 `io.github.aiwithblockchain.veyl / deepseek_api_key` 仍存在，`mdat` = 2026-11-02 18:01:49Z —— 即 18:01 保存的**真实 Key** 仍留在钥匙串里。新方案不再读它，但任何能访问该钥匙串条目的进程仍可取到。
+建议顺序：先确认新方案读写正常，再删除旧条目（`security delete-generic-password -s io.github.aiwithblockchain.veyl -a deepseek_api_key`），避免先删导致真 Key 丢失。
+
+**18:43 实测（新方案已跑起来）**
+
+```
+-rw-------  211  Nov 2 18:39  ~/Library/Application Support/Veyl/secrets.enc
+grep -a 'sk-' secrets.enc  → 未命中
+文件结构: {"version": 0, "__verify": "<base64 密文>"}
+应用进程启动时间: 18:38:30
+```
+
+| 判定要点 | 结果 |
+|---|---|
+| 文件存在、权限 0600 | ✅ |
+| 内容为密文、无明文 Key | ✅（`sk-` 未命中；文件为 `version` + `__verify` 两项的密文 JSON） |
+| 保存后**不重启**即生效（D-03） | ✅ 应用 18:38:30 启动，`secrets.enc` 18:39 才创建，随后对话成功 —— 密钥是启动之后才写入的，能成功说明热更新生效 |
+| 无 macOS 密码弹窗 / 空值 / `abc123` / 假 Key 提示 / 重启保持 | 待用户逐项确认 |
+
+**待补确认**：五项 UI 行为需用户在窗口里逐条回报原文（尤其「全程无系统密码弹窗」和「重启后仍显示已保存」）。
 
 ---
 
