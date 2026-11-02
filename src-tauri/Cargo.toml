@@ -56,6 +56,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

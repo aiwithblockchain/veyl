@@ -87,6 +87,26 @@ pub fn record_approval(conn: &Connection, id: &str, approval: Approval) -> Store
     Ok(())
 }
 
+/// 按 (session, tool) 找到最近一条尚未定论的调用并回填审批结果。
+/// UI 的审批命令拿不到 tool_id，只能这样关联。
+pub fn record_approval_for(
+    conn: &Connection,
+    session_id: &str,
+    tool_name: &str,
+    approval: Approval,
+) -> StoreResult<usize> {
+    let changed = conn.execute(
+        "UPDATE tool_calls SET approved = ?1
+          WHERE id = (
+              SELECT id FROM tool_calls
+               WHERE session_id = ?2 AND tool_name = ?3 AND approved IS NULL
+               ORDER BY created_at DESC LIMIT 1
+          )",
+        params![approval.as_code(), session_id, tool_name],
+    )?;
+    Ok(changed)
+}
+
 pub fn finish(conn: &Connection, id: &str, result: &Value, is_error: bool) -> StoreResult<()> {
     let changed = conn.execute(
         "UPDATE tool_calls SET result_json = ?1, is_error = ?2, finished_at = ?3 WHERE id = ?4",
@@ -221,6 +241,29 @@ mod tests {
         let record = get(&conn, "call_3").unwrap().unwrap();
         assert_eq!(record.approved, Some(Approval::Denied));
         assert!(record.is_error);
+    }
+
+    #[test]
+    fn record_approval_for_targets_the_open_call() {
+        let store = super::super::db::Store::open_in_memory().unwrap();
+        let conn = store.conn();
+
+        begin_sample(&conn, "call_1");
+        let changed =
+            record_approval_for(&conn, "ses_1", "VpnConnect", Approval::Session).unwrap();
+        assert_eq!(changed, 1);
+        assert_eq!(
+            get(&conn, "call_1").unwrap().unwrap().approved,
+            Some(Approval::Session)
+        );
+
+        // 已经定论的调用不会被第二次改写。
+        let again = record_approval_for(&conn, "ses_1", "VpnConnect", Approval::Denied).unwrap();
+        assert_eq!(again, 0);
+        assert_eq!(
+            get(&conn, "call_1").unwrap().unwrap().approved,
+            Some(Approval::Session)
+        );
     }
 
     #[test]

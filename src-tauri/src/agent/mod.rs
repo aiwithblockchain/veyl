@@ -26,9 +26,11 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(services: Arc<dyn VpnToolServices>) -> Self {
+        // 环境变量优先（便于测试），否则读系统钥匙串。
         let credentials = std::env::var("DEEPSEEK_API_KEY")
             .ok()
             .filter(|key| !key.trim().is_empty())
+            .or_else(|| crate::secrets::get_deepseek_key().ok().flatten())
             .map(DeepSeekCredentials::new);
 
         Self {

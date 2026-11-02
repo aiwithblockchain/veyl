@@ -186,6 +186,7 @@ impl AivpnSession {
                         tool_started = Instant::now();
 
                         let parsed = serde_json::from_str::<Value>(input_json).ok();
+                        record_tool_call_start(&session_id, &tool_id, &tool_name, parsed.as_ref());
                         let schema = tools_snapshot
                             .iter()
                             .find(|(name, _, _)| name == tool_name)
@@ -223,6 +224,8 @@ impl AivpnSession {
                             .and_then(|outcome| outcome.error.as_ref())
                             .map(|error| error.code.clone());
 
+                        record_tool_call_end(&tool_call_id, &result, *is_error);
+
                         consumer_emitter.tool_end(
                             &tool_call_id,
                             tool_name,
@@ -259,12 +262,14 @@ impl AivpnSession {
                             Some(record.tokens_after),
                         );
                     }
+                    QueryEvent::MessageCommitted(message) => {
+                        persist_committed_message(&session_id, &message);
+                    }
                     QueryEvent::TurnComplete { .. }
                     | QueryEvent::Error(_)
                     | QueryEvent::TokenWarning { .. }
                     | QueryEvent::RateLimits { .. }
                     | QueryEvent::InputInjected(_)
-                    | QueryEvent::MessageCommitted(_)
                     | QueryEvent::MaxTurnsReached { .. } => {}
                 }
             }
@@ -414,6 +419,78 @@ fn describe_tool_call(tool: &str, input: Option<&Value>) -> String {
 
 /// 上一轮被中断时，历史里可能留下「发了 tool_use 但没有 tool_result」的
 /// assistant 消息，下一轮请求会被上游以 400 拒绝。发新消息前先清掉。
+
+/// 工具审计：请求开始写一行，`approved` 留空等审批结果回填。
+fn record_tool_call_start(
+    session_id: &str,
+    tool_id: &str,
+    tool_name: &str,
+    args: Option<&Value>,
+) {
+    let Some(store) = crate::store::global() else {
+        return;
+    };
+    let request_id = policy::current_request_id(session_id);
+    let conn = store.conn();
+    let _ = crate::store::tool_calls::begin(
+        &conn,
+        &crate::store::NewCall {
+            id: tool_id,
+            session_id: Some(session_id),
+            request_id: request_id.as_deref(),
+            tool_name,
+            args: args.unwrap_or(&Value::Null),
+        },
+    );
+}
+
+/// 工具审计：执行结束回填结果与是否出错。
+fn record_tool_call_end(tool_id: &str, result: &str, is_error: bool) {
+    let Some(store) = crate::store::global() else {
+        return;
+    };
+    let conn = store.conn();
+    let _ = crate::store::tool_calls::finish(
+        &conn,
+        tool_id,
+        &Value::String(result.to_string()),
+        is_error,
+    );
+}
+
+/// 会话消息落库：重启后聊天记录还在。
+fn persist_committed_message(session_id: &str, message: &Message) {
+    let Some(store) = crate::store::global() else {
+        return;
+    };
+
+    let role = match message.role {
+        claurst_core::Role::User => "user",
+        claurst_core::Role::Assistant => "assistant",
+    };
+    let text = match &message.content {
+        claurst_core::MessageContent::Text(text) => text.clone(),
+        claurst_core::MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                claurst_core::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    if text.trim().is_empty() {
+        return;
+    }
+
+    let id = format!("msg_{:x}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0));
+    let conn = store.conn();
+    let _ = crate::store::chat::append_message(&conn, &id, session_id, role, &text, None);
+}
+
 fn drop_dangling_tool_use(messages: &mut Vec<Message>) {
     use claurst_core::{ContentBlock, MessageContent};
 
@@ -442,4 +519,58 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "unknown panic".to_string());
     format!("agent panic: {detail}")
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn install_store() {
+        if crate::store::global().is_none() {
+            let store = Arc::new(crate::store::Store::open_in_memory().expect("内存库"));
+            crate::store::install_global(store);
+        }
+    }
+
+    #[test]
+    fn a_tool_call_writes_and_finishes_a_row() {
+        install_store();
+        let store = crate::store::global().expect("全局库已安装");
+
+        record_tool_call_start("ses_audit", "call_audit", "RuntimeStatus", Some(&json!({ "x": 1 })));
+        {
+            let conn = store.conn();
+            let row = crate::store::tool_calls::get(&conn, "call_audit")
+                .unwrap()
+                .expect("请求开始即应有行");
+            assert_eq!(row.tool_name, "RuntimeStatus");
+            assert_eq!(row.session_id.as_deref(), Some("ses_audit"));
+            assert_eq!(row.approved, None, "未审批前必须是 NULL");
+            assert!(row.finished_at.is_none());
+        }
+
+        record_tool_call_end("call_audit", "{\"ok\":true}", false);
+        let conn = store.conn();
+        let row = crate::store::tool_calls::get(&conn, "call_audit")
+            .unwrap()
+            .unwrap();
+        assert!(row.finished_at.is_some());
+        assert!(!row.is_error);
+    }
+
+    #[test]
+    fn a_committed_message_is_persisted() {
+        install_store();
+        let store = crate::store::global().expect("全局库已安装");
+
+        let message = Message::user("连到日本");
+        persist_committed_message("ses_chat", &message);
+
+        let conn = store.conn();
+        let messages = crate::store::chat::messages(&conn, "ses_chat").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "连到日本");
+    }
 }

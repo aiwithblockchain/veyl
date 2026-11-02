@@ -58,8 +58,28 @@ pub async fn ai_approval_decision(
         return Err(format!("未知的授权范围：{scope}"));
     }
 
-    let ok = crate::tools::policy::resolve(&approval_id, &decision, &scope);
-    Ok(json!({ "ok": ok }))
+    let resolved = crate::tools::policy::resolve(&approval_id, &decision, &scope);
+
+    if let Some(resolved) = &resolved {
+        if let Some(store) = crate::store::global() {
+            let approval = if !resolved.granted {
+                crate::store::Approval::Denied
+            } else if resolved.scope == "session" {
+                crate::store::Approval::Session
+            } else {
+                crate::store::Approval::Once
+            };
+            let conn = store.conn();
+            let _ = crate::store::tool_calls::record_approval_for(
+                &conn,
+                &resolved.session_id,
+                &resolved.tool,
+                approval,
+            );
+        }
+    }
+
+    Ok(json!({ "ok": resolved.is_some() }))
 }
 
 /// 状态快照；事件不可达时 UI 的兜底（契约 §5）。
@@ -99,4 +119,46 @@ pub async fn profile_delete(
         .profile_delete(&profile_id)
         .await
         .map_err(|error| json!(crate::tools::AivpnError::new("INTERNAL", error.to_string())))
+}
+
+/// 重启后恢复会话：不传 `session_id` 时取最近一个会话。
+#[tauri::command]
+pub async fn chat_history(session_id: Option<String>) -> Result<Value, String> {
+    let Some(store) = crate::store::global() else {
+        return Ok(json!({ "sessions": [], "active_session_id": null, "messages": [] }));
+    };
+    let conn = store.conn();
+
+    let sessions = crate::store::chat::list_sessions(&conn).map_err(|e| e.to_string())?;
+    let active = match session_id {
+        Some(id) => Some(id),
+        None => crate::store::chat::latest_session(&conn)
+            .map_err(|e| e.to_string())?
+            .map(|session| session.id),
+    };
+    let messages = match &active {
+        Some(id) => crate::store::chat::messages(&conn, id).map_err(|e| e.to_string())?,
+        None => Vec::new(),
+    };
+
+    Ok(json!({
+        "sessions": sessions
+            .iter()
+            .map(|session| json!({
+                "id": session.id,
+                "title": session.title,
+                "created_at": crate::store::iso_from_ms(session.created_at),
+            }))
+            .collect::<Vec<_>>(),
+        "active_session_id": active,
+        "messages": messages
+            .iter()
+            .map(|message| json!({
+                "id": message.id,
+                "role": message.role,
+                "content": message.content,
+                "created_at": crate::store::iso_from_ms(message.created_at),
+            }))
+            .collect::<Vec<_>>(),
+    }))
 }

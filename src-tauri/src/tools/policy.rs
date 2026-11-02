@@ -96,6 +96,10 @@ pub fn clear_current_request(session_id: &str) {
     current_requests().lock().remove(session_id);
 }
 
+pub fn current_request_id(session_id: &str) -> Option<String> {
+    current_request(session_id)
+}
+
 fn current_request(session_id: &str) -> Option<String> {
     current_requests().lock().get(session_id).cloned()
 }
@@ -139,6 +143,7 @@ pub fn require(
         ApprovalPolicy::Always => {}
         ApprovalPolicy::FirstTimePerSession => {
             if gate().lock().grants.contains(&(session_id.clone(), tool.to_string())) {
+                record_auto_approval(&session_id, tool, crate::store::Approval::Session);
                 return None;
             }
         }
@@ -169,11 +174,15 @@ pub fn require(
             .is_some();
 
         if matched {
-            if policy == ApprovalPolicy::FirstTimePerSession {
+            let auto = if policy == ApprovalPolicy::FirstTimePerSession {
                 gate_state
                     .grants
                     .insert((session_id.clone(), tool.to_string()));
-            }
+                crate::store::Approval::Session
+            } else {
+                crate::store::Approval::Once
+            };
+            record_auto_approval(&session_id, tool, auto);
             return None;
         }
     }
@@ -249,27 +258,49 @@ pub fn guard(
     Some(envelope::finish(ctx, tool, outcome))
 }
 
-/// UI 的审批结果。返回 false 表示这个 approval_id 已失效。
-pub fn resolve(approval_id: &str, decision: &str, scope: &str) -> bool {
+#[derive(Debug, Clone)]
+pub struct ResolvedApproval {
+    pub session_id: String,
+    pub tool: String,
+    pub granted: bool,
+    pub scope: String,
+}
+
+/// UI 的审批结果。`None` 表示这个 approval_id 已失效。
+pub fn resolve(approval_id: &str, decision: &str, scope: &str) -> Option<ResolvedApproval> {
     let mut gate_state = gate().lock();
-    let Some(pending) = gate_state.pending.remove(approval_id) else {
-        return false;
+    let pending = gate_state.pending.remove(approval_id)?;
+
+    let granted = decision != "deny";
+    let resolved = ResolvedApproval {
+        session_id: pending.session_id.clone(),
+        tool: pending.tool.clone(),
+        granted,
+        scope: scope.to_string(),
     };
 
-    if decision == "deny" {
+    if granted {
+        if scope == "session" {
+            gate_state
+                .grants
+                .insert((pending.session_id.clone(), pending.tool.clone()));
+        }
+        gate_state.approved.insert(approval_id.to_string(), pending);
+    } else {
         gate_state
             .denied
             .insert((pending.session_id, pending.tool));
-        return true;
     }
+    Some(resolved)
+}
 
-    if scope == "session" {
-        gate_state
-            .grants
-            .insert((pending.session_id.clone(), pending.tool.clone()));
-    }
-    gate_state.approved.insert(approval_id.to_string(), pending);
-    true
+/// 自动放行也要落审计：记 2（会话内允许），不能留空。
+fn record_auto_approval(session_id: &str, tool: &str, approval: crate::store::Approval) {
+    let Some(store) = crate::store::global() else {
+        return;
+    };
+    let conn = store.conn();
+    let _ = crate::store::tool_calls::record_approval_for(&conn, session_id, tool, approval);
 }
 
 /// 会话结束时清空该会话的授权与否定缓存（契约 §2.2 铁律）。
@@ -330,7 +361,7 @@ mod tests {
         assert_eq!(first.code, "APPROVAL_REQUIRED");
 
         let approval_id = approval_id_of(&first);
-        assert!(resolve(&approval_id, "allow", "session"), "允许后应可以重试");
+        assert!(resolve(&approval_id, "allow", "session").is_some(), "允许后应可以重试");
 
         // 同会话内第二次：不带 approval_id 也应直接放行（Grant 命中）
         assert!(
@@ -345,7 +376,7 @@ mod tests {
         let error = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
             .expect("首次应要求批准");
         let approval_id = approval_id_of(&error);
-        assert!(resolve(&approval_id, "allow", "call"));
+        assert!(resolve(&approval_id, "allow", "call").is_some());
 
         let retry = json!({ "node_id": "seed-jp-01", "approval_id": approval_id });
         assert!(require(&session, "VpnConnect", &retry, "连接", "high").is_none());
@@ -357,7 +388,7 @@ mod tests {
         let error = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
             .expect("首次应要求批准");
         let approval_id = approval_id_of(&error);
-        assert!(resolve(&approval_id, "allow", "call"));
+        assert!(resolve(&approval_id, "allow", "call").is_some());
 
         // 用户看到的是 node_id=seed-jp-01，重试时被换成别的节点 → 必须重新确认
         let tampered = json!({ "node_id": "seed-jp-99", "approval_id": approval_id });
@@ -371,7 +402,7 @@ mod tests {
         let session = sess("deny");
         let error = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
             .expect("首次应要求批准");
-        assert!(resolve(&approval_id_of(&error), "deny", "call"));
+        assert!(resolve(&approval_id_of(&error), "deny", "call").is_some());
 
         let again = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
             .expect("拒绝后不应放行");
@@ -384,7 +415,7 @@ mod tests {
         let error = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
             .expect("首次应要求批准");
         let approval_id = approval_id_of(&error);
-        assert!(resolve(&approval_id, "allow", "session"));
+        assert!(resolve(&approval_id, "allow", "session").is_some());
         assert!(require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high").is_none());
 
         clear_session(&session);
@@ -400,7 +431,7 @@ mod tests {
         let first = require(&session, "CoreInstall", &json!({ "version": "1.14.4" }), "安装", "medium")
             .expect("每次都要确认");
         let approval_id = approval_id_of(&first);
-        assert!(resolve(&approval_id, "allow", "call"));
+        assert!(resolve(&approval_id, "allow", "call").is_some());
 
         let retry = json!({ "version": "1.14.4", "approval_id": approval_id });
         assert!(require(&session, "CoreInstall", &retry, "安装", "medium").is_none());
@@ -418,7 +449,7 @@ mod tests {
         let error = require(&session, "ProfileDelete", &json!({ "profile_id": "prf_1" }), "删除", "medium")
             .expect("每次都要确认");
         let approval_id = approval_id_of(&error);
-        assert!(resolve(&approval_id, "allow", "session"));
+        assert!(resolve(&approval_id, "allow", "session").is_some());
 
         let again = require(&session, "ProfileDelete", &json!({ "profile_id": "prf_1" }), "删除", "medium")
             .expect("always 类工具不受 grants 影响");

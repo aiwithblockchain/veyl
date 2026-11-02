@@ -8,6 +8,7 @@ pub mod claurst_session;
 pub mod config;
 pub mod proxy;
 pub mod runtime;
+pub mod secrets;
 pub mod store;
 pub mod tools;
 
@@ -44,6 +45,8 @@ pub fn run() {
             Arc::new(Store::open_in_memory().expect("内存数据库也打不开"))
         }
     };
+
+    crate::store::install_global(Arc::clone(&store));
 
     let manager = RuntimeManager::new(RuntimeConfig::new(&data_dir));
     let proxy = Arc::new(ProxyController::new(Box::new(SqliteBackupStore::new(
@@ -85,6 +88,7 @@ pub fn run() {
             agent::commands::ai_approval_decision,
             agent::commands::runtime_status,
             agent::commands::profile_delete,
+            agent::commands::chat_history,
         ])
         .run(tauri::generate_context!())
         .expect("Veyl 启动失败");
