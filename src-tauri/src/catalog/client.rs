@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::error::{CatalogError, CatalogResult};
 use super::types::{NodeDetailResponse, NodeListResponse, NodeProtocol};
 
-pub const CATALOG_CONTRACT_VERSION: &str = "1.0.9";
+pub const CATALOG_CONTRACT_VERSION: &str = "1.0.10";
 
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -519,7 +519,7 @@ mod tests {
     #[test]
     fn a_list_payload_drops_credentials_even_if_the_server_sends_them() {
         let payload = r#"{
-            "contract_version": "1.0.9", "ok": true, "request_id": "req_1",
+            "contract_version": "1.0.10", "ok": true, "request_id": "req_1",
             "data": {
                 "etag": "v12",
                 "nodes": [{

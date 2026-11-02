@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type {
   AgentEvent,
   NextAction,
@@ -6,9 +7,11 @@ import type {
 } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, snapshotToView } from "./agent";
+import { isTauri } from "./agent/bridge";
+import type { ImportSeedResult } from "./agent/bridge";
 import { BridgeError, toBridgeError } from "./agent/errors";
 import { ChatView } from "./components/ChatView";
-import { Settings } from "./components/Settings";
+import { Settings, describeImportError } from "./components/Settings";
 import { Sidebar, type RenameResult } from "./components/Sidebar";
 import { StatusPanel, type DeleteNotice } from "./components/StatusPanel";
 import { activeSession, chatReducer, createInitialState, nextId } from "./state/chatStore";
@@ -31,6 +34,12 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [runtime, setRuntime] = useState<RuntimeView>(() => emptyRuntimeView());
   const [deleteNotice, setDeleteNotice] = useState<DeleteNotice | null>(null);
+  const [appNotice, setAppNotice] = useState<AppNotice | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<ImportSeedResult | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const importingRef = useRef(false);
   const sessionRef = useRef(state.activeSessionId);
   sessionRef.current = state.activeSessionId;
   // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
@@ -50,6 +59,74 @@ export default function App() {
       );
     });
   }, [bridge]);
+
+  // 全应用唯一的导入入口：拖放和「选择文件」都走这里，两条路径行为不分叉。
+  const importPath = useCallback(
+    async (path: string) => {
+      if (!/\.json$/i.test(path)) {
+        setAppNotice({ level: "error", text: "只支持 .json 格式的节点文件，请换一个文件。" });
+        return;
+      }
+      if (importingRef.current) return;
+
+      importingRef.current = true;
+      setImporting(true);
+      setImportError(null);
+      setImportResult(null);
+      try {
+        const result = await bridge.importSeedFile(path);
+        setImportResult(result);
+        setAppNotice({ level: "info", text: `已导入 ${result.imported} 个节点` });
+      } catch (error) {
+        const message = describeImportError(error);
+        setImportError(message);
+        setAppNotice({ level: "error", text: message });
+      } finally {
+        importingRef.current = false;
+        setImporting(false);
+      }
+    },
+    [bridge],
+  );
+
+  // 窗口级拖放：注册在 App，设置页没开也能接收。全应用只此一处。
+  useEffect(() => {
+    if (!isTauri()) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter" || payload.type === "over") {
+          setDragging(true);
+        } else if (payload.type === "leave") {
+          setDragging(false);
+        } else if (payload.type === "drop") {
+          setDragging(false);
+          // 多文件不静默丢弃：明确拒绝，让用户知道只处理一个。
+          if (payload.paths.length > 1) {
+            setAppNotice({
+              level: "error",
+              text: `一次只能导入一个文件，你拖入了 ${payload.paths.length} 个，请逐个拖入。`,
+            });
+            return;
+          }
+          const path = payload.paths[0];
+          if (path) void importPath(path);
+        }
+      })
+      .then((off) => {
+        if (disposed) off();
+        else unlisten = off;
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [importPath]);
 
   useEffect(() => {
     return bridge.subscribe((event) => {
@@ -192,6 +269,20 @@ export default function App() {
           </div>
         </header>
 
+        {appNotice ? (
+          <div className={`notice-bar notice-bar--${appNotice.level}`} role="status">
+            <span className="notice-bar__text">{appNotice.text}</span>
+            <button
+              type="button"
+              className="notice-bar__close"
+              aria-label="关闭提示"
+              onClick={() => setAppNotice(null)}
+            >
+              ×
+            </button>
+          </div>
+        ) : null}
+
         <ChatView
           session={session}
           onSend={handleSend}
@@ -210,7 +301,17 @@ export default function App() {
         />
       ) : null}
 
-      <Settings open={settingsOpen} bridge={bridge} onClose={() => setSettingsOpen(false)} />
+      <Settings
+        open={settingsOpen}
+        bridge={bridge}
+        onClose={() => setSettingsOpen(false)}
+        onNotice={setAppNotice}
+        importing={importing}
+        dragging={settingsOpen && dragging}
+        importResult={importResult}
+        importError={importError}
+        onImportPath={importPath}
+      />
     </div>
   );
 }
@@ -221,6 +322,12 @@ function errorMessage(error: unknown): string {
     return String((error as { message: unknown }).message);
   }
   return "删除失败";
+}
+
+/** 顶栏下方的提示条：导入结果这类一次性反馈。 */
+interface AppNotice {
+  level: "info" | "error";
+  text: string;
 }
 
 function describeRenameError(error: BridgeError): string {

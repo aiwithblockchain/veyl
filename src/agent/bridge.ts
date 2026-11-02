@@ -40,6 +40,21 @@ export interface RenamedSession {
   createdAt: number;
 }
 
+/** `import_seed_file` 的返回。**永远不含 password**。 */
+export interface ImportedProfile {
+  id: string;
+  name: string;
+  server: string;
+  server_port?: number;
+  method: string;
+}
+
+export interface ImportSeedResult {
+  imported: number;
+  skipped: { name: string; reason: string }[];
+  profiles: ImportedProfile[];
+}
+
 export interface AgentBridge {
   readonly mode: BridgeMode;
   /** 订阅全部事件（AI 会话 + 应用事件）；返回取消订阅函数。 */
@@ -54,6 +69,8 @@ export interface AgentBridge {
   getChatHistory(sessionId?: string): Promise<ChatHistory>;
   /** 重命名会话；标题的 trim 与长度校验都由后端做。 */
   renameSession(sessionId: string, title: string): Promise<RenamedSession>;
+  /** 拖拽导入：只传路径，文件内容由 Host 读，WebView 不碰明文密码。 */
+  importSeedFile(path: string): Promise<ImportSeedResult>;
   /** 读取 Key 的配置状态（只返回打码值，永不返回明文）。 */
   getDeepSeekKey(): Promise<DeepSeekKeyState>;
   /** 保存 Key；只进本机加密存储。 */

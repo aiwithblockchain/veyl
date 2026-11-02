@@ -106,6 +106,60 @@ impl DataPlaneProbe {
     }
 }
 
+/// 出口 IP 探测地址：纯文本返回，body 就是 IP 本身。
+/// 不能复用数据面探测的 URL——`generate_204` 没有 body，拿不到 IP。
+pub const DEFAULT_EXIT_IP_PROBE: &str = "https://ifconfig.me/ip";
+
+/// 经本地 mixed 入站访问纯文本 IP 服务，取得当前公网出口地址。
+#[derive(Clone)]
+pub struct ExitIpProbe {
+    url: String,
+    http: reqwest::Client,
+}
+
+impl ExitIpProbe {
+    pub fn new(url: impl Into<String>, mixed_port: u16) -> RuntimeResult<Self> {
+        let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{mixed_port}"))
+            .map_err(|e| RuntimeError::ClashApi(format!("invalid exit ip proxy: {e}")))?;
+        let http = reqwest::Client::builder()
+            .proxy(proxy)
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| RuntimeError::ClashApi(format!("exit ip client: {e}")))?;
+        Ok(Self {
+            url: url.into(),
+            http,
+        })
+    }
+
+    /// `Ok(None)` 表示响应不是 IP（门户页、错误串等），按没拿到处理。
+    pub async fn check(&self) -> RuntimeResult<Option<String>> {
+        let response = self
+            .http
+            .get(&self.url)
+            .send()
+            .await
+            .map_err(|e| RuntimeError::ClashApi(format!("exit ip probe: {e}")))?;
+        if !response.status().is_success() {
+            return Err(RuntimeError::ClashApi(format!(
+                "exit ip probe returned HTTP {}",
+                response.status()
+            )));
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|e| RuntimeError::ClashApi(format!("exit ip probe body: {e}")))?;
+        Ok(parse_exit_ip(&body).map(|ip| ip.to_string()))
+    }
+}
+
+/// 只接受纯 IP：允许首尾空白（ifconfig.me 会带换行），
+/// HTML、错误串、`ip:port`、多行内容一律拒绝，避免把垃圾写进状态。
+pub fn parse_exit_ip(body: &str) -> Option<std::net::IpAddr> {
+    body.trim().parse::<std::net::IpAddr>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +173,37 @@ mod tests {
     #[test]
     fn probe_rejects_unusable_proxy_address() {
         assert!(DataPlaneProbe::new("https://example.com", 2080).is_ok());
+    }
+
+    #[test]
+    fn parses_plain_ipv4_and_ipv6() {
+        assert_eq!(
+            parse_exit_ip("203.0.113.10").map(|ip| ip.to_string()).as_deref(),
+            Some("203.0.113.10")
+        );
+        assert!(parse_exit_ip("2001:db8::1").is_some());
+    }
+
+    #[test]
+    fn tolerates_surrounding_whitespace() {
+        assert_eq!(
+            parse_exit_ip("  203.0.113.10\r\n").map(|ip| ip.to_string()).as_deref(),
+            Some("203.0.113.10")
+        );
+    }
+
+    #[test]
+    fn rejects_anything_that_is_not_a_bare_ip() {
+        for body in [
+            "",
+            "   \n",
+            "<html><body>login</body></html>",
+            "error: upstream timeout",
+            "203.0.113.10:8080",
+            "203.0.113.10\nYOUR_IP",
+            "not-an-ip",
+        ] {
+            assert!(parse_exit_ip(body).is_none(), "不该接受 {body:?}");
+        }
     }
 }

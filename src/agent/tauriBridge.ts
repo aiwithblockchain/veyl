@@ -4,6 +4,7 @@ import type {
   AgentBridge,
   ChatHistory,
   DeepSeekKeyState,
+  ImportSeedResult,
   RenamedSession,
   StoredChatMessage,
   StoredSessionSummary,
@@ -114,6 +115,15 @@ export class TauriAgentBridge implements AgentBridge {
       id: raw.id,
       title: raw.title,
       createdAt: Number.isFinite(parsed) ? parsed : Date.now(),
+    };
+  }
+
+  async importSeedFile(path: string): Promise<ImportSeedResult> {
+    const raw = await call<ImportSeedResult>("import_seed_file", { path });
+    return {
+      imported: raw.imported ?? 0,
+      skipped: raw.skipped ?? [],
+      profiles: raw.profiles ?? [],
     };
   }
 

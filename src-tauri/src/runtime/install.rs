@@ -122,7 +122,12 @@ impl Installer {
     }
 
     pub fn read_state(&self) -> RuntimeResult<RuntimeStateFile> {
-        Ok(fsutil::read_json(&self.state_path())?.unwrap_or_default())
+        let mut state: RuntimeStateFile = fsutil::read_json(&self.state_path())?.unwrap_or_default();
+        // D-06 尾巴：旧版本的 runtime-state.json 里 installed_at 是秒，读的时候归一成毫秒。
+        for install in state.installs.values_mut() {
+            install.installed_at = normalize_to_ms(install.installed_at);
+        }
+        Ok(state)
     }
 
     pub fn active(&self) -> RuntimeResult<Option<InstalledRuntime>> {
@@ -310,6 +315,15 @@ impl Installer {
     }
 }
 
+/// 秒级时间戳（< 1e11）换算成毫秒；已经是毫秒的原样返回。
+fn normalize_to_ms(value: i64) -> i64 {
+    if value > 0 && value < 100_000_000_000 {
+        value * 1000
+    } else {
+        value
+    }
+}
+
 fn locate_binary(root: &Path) -> Option<PathBuf> {
     let direct = root.join(BINARY_NAME);
     if direct.is_file() {
@@ -411,6 +425,37 @@ mod tests {
         fsutil::ensure_dir(&dir).unwrap();
         let installer = Installer::new(&dir);
         assert!(installer.active().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn normalizes_legacy_second_timestamps() {
+        let dir = std::env::temp_dir().join(format!("veyl-state-{:016x}", rand::random::<u64>()));
+        fsutil::ensure_dir(&dir).unwrap();
+        let installer = Installer::new(&dir);
+
+        let legacy = serde_json::json!({
+            "schema": 1,
+            "active_version": "1.14.4",
+            "installs": {
+                "1.14.4": {
+                    "version": "1.14.4",
+                    "dir": "/tmp/a",
+                    "binary": "/tmp/a/sing-box",
+                    "sha256": "x",
+                    "installed_at": 1_700_000_000i64
+                }
+            }
+        });
+        std::fs::write(installer.state_path(), legacy.to_string()).unwrap();
+
+        let state = installer.read_state().unwrap();
+        assert_eq!(
+            state.installs["1.14.4"].installed_at,
+            1_700_000_000_000,
+            "旧文件里的秒级时间戳读取时应归一成毫秒"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -278,7 +278,7 @@ async fn run_import_seeds(args: &Args) -> StepResult {
     let store = veyl_lib::store::Store::open(veyl_lib::store::default_db_path(&args.data_dir))
         .map_err(|e| format!("打开本地库失败：{e}"))?;
 
-    let written = veyl_lib::seed_import::apply(&store, &plan)?;
+    let written = veyl_lib::seed_import::apply(&store, &plan).map_err(|e| e.to_string())?;
 
     println!("import-seeds: 读取 {}", file.display());
     println!("  导入 {} 个，跳过 {} 个", written, plan.skipped.len());
@@ -450,6 +450,12 @@ async fn run_fault(args: &Args) -> StepResult {
         return Err(format!("expected running, got {}", status.state.as_str()));
     }
 
+    let pid_file = dir.join("runtime.pid");
+    if !pid_file.is_file() {
+        return Err("进入 running 后应写出 runtime.pid".to_string());
+    }
+    println!("    runtime.pid: {}", std::fs::read_to_string(&pid_file).unwrap_or_default());
+
     step(2, "等待重启预算耗尽");
     let deadline = std::time::Instant::now() + Duration::from_secs(40);
     loop {
@@ -495,6 +501,10 @@ async fn run_fault(args: &Args) -> StepResult {
         return Err(format!(
             "expected 2 restarting events, got {restarting_events}"
         ));
+    }
+
+    if pid_file.exists() {
+        return Err("进入 failed 后应清理 runtime.pid".to_string());
     }
 
     println!("\nFAULT INJECTION PASSED");

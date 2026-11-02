@@ -183,9 +183,18 @@ pub fn fingerprint(profile_id: &str, password: &str) -> String {
     hex::encode(hasher.finalize())[..8].to_string()
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ApplyError {
+    #[error("写入 profile 失败：{0}")]
+    Profile(#[from] crate::store::StoreError),
+
+    #[error("写入凭据失败：{0}")]
+    Secret(#[from] crate::secrets::SecretError),
+}
+
 /// 落库：profile 走 SQLite（不含凭据），密码走 `secrets.enc` 的 `node:<id>`。
 /// 幂等：同 id 覆盖。
-pub fn apply(store: &Store, plan: &ImportPlan) -> Result<usize, String> {
+pub fn apply(store: &Store, plan: &ImportPlan) -> Result<usize, ApplyError> {
     let mut written = 0;
 
     for node in &plan.imported {
@@ -197,7 +206,19 @@ pub fn apply(store: &Store, plan: &ImportPlan) -> Result<usize, String> {
             "mux": Value::Null,
         });
 
-        {
+        let secret: Value = json!({
+            "server": node.server,
+            "server_port": node.server_port,
+            "protocol": "shadowsocks",
+            "method": node.method,
+            "password": node.password,
+            "name": node.name,
+        });
+        // 先写凭据再写 profile 行：反过来一旦凭据写失败，库里会留下一条连不上的配置。
+        let secret_key = format!("node:{}", node.id);
+        crate::secrets::set_secret(&secret_key, &secret.to_string())?;
+
+        let upsert = {
             let conn = store.conn();
             crate::store::profiles::upsert(
                 &conn,
@@ -210,19 +231,12 @@ pub fn apply(store: &Store, plan: &ImportPlan) -> Result<usize, String> {
                     config: &config,
                 },
             )
-            .map_err(|e| format!("写入 profile 失败：{e}"))?;
+        };
+        if let Err(error) = upsert {
+            // 行没写进去，凭据也不该留下。
+            let _ = crate::secrets::delete_secret(&secret_key);
+            return Err(error.into());
         }
-
-        let secret: Value = json!({
-            "server": node.server,
-            "server_port": node.server_port,
-            "protocol": "shadowsocks",
-            "method": node.method,
-            "password": node.password,
-            "name": node.name,
-        });
-        crate::secrets::set_secret(&format!("node:{}", node.id), &secret.to_string())
-            .map_err(|e| format!("写入凭据失败：{e}"))?;
 
         written += 1;
     }

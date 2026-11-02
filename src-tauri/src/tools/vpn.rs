@@ -25,7 +25,8 @@ impl Tool for VpnConnectTool {
 
     fn description(&self) -> &str {
         "连接到指定节点或配置并设置系统代理。node_id 与 profile_id 必须且只能提供一个。\
-         只有返回 state=running 且有 exit_ip 时才算连上。"
+         state=running 即已连上；exit_ip 为 null 表示已连接但出口尚未测到，\
+         不代表连接失败，可用 RuntimeStatus 再查。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -74,12 +75,13 @@ impl Tool for VpnConnectTool {
 
         let outcome = match self.services.vpn_connect(target, strategy).await {
             Ok(data) => {
-                let exit_ip = data
-                    .get("exit_ip")
-                    .and_then(Value::as_str)
-                    .unwrap_or("未知")
-                    .to_string();
-                ToolOutcome::ok(format!("已连接，出口 IP {exit_ip}。"), data).with_next(
+                // 超时/探测失败时 exit_ip 为 null，但 state 仍是 running：如实说明「还在测」，
+                // 不要说成失败，后台探测到了会通过健康事件推给 UI。
+                let summary = match data.get("exit_ip").and_then(Value::as_str) {
+                    Some(ip) => format!("已连接，出口 IP {ip}。"),
+                    None => "已连接，出口 IP 仍在探测中。".to_string(),
+                };
+                ToolOutcome::ok(summary, data).with_next(
                     NextAction {
                         label: "断开连接".to_string(),
                         tool: "VpnDisconnect".to_string(),

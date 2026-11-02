@@ -63,7 +63,7 @@ fn not_wired<T>(what: &str) -> anyhow::Result<T> {
 
 fn idle_snapshot() -> Value {
     json!({
-        "contract_version": "1.0.9",
+        "contract_version": "1.0.10",
         "state": "idle",
         "mode": "system_proxy",
         "pid": null,
@@ -73,7 +73,7 @@ fn idle_snapshot() -> Value {
         "config_hash": null,
         "system_proxy_enabled": false,
         "health": {
-            "contract_version": "1.0.9",
+            "contract_version": "1.0.10",
             "process": false,
             "clash_api": false,
             "data_plane": false,
@@ -183,6 +183,21 @@ use crate::store::Store;
 /// 服务层错误统一带契约错误码前缀（`CODE: 说明`），由信封层转成 `AivpnError`。
 fn svc_error(code: impl std::fmt::Display, message: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!("{code}: {message}")
+}
+
+/// 连接只有真的进入 running 才算成功。
+///
+/// `manager.start` 在并发 stop 或退出时会返回 `Ok(Idle)`；这时继续设置系统代理
+/// 会把流量指向没人监听的端口，用户会直接断网。
+fn require_running_state(state: crate::runtime::RuntimeState) -> anyhow::Result<()> {
+    if state == crate::runtime::RuntimeState::Running {
+        Ok(())
+    } else {
+        Err(svc_error(
+            "PRECONDITION_FAILED",
+            format!("运行时未进入 running（当前 {}），连接已中止", state.as_str()),
+        ))
+    }
 }
 
 
@@ -433,10 +448,6 @@ impl WiredServices {
         ))
     }
 
-    fn profile_config_path(&self, profile_id: &str) -> PathBuf {
-        self.config_dir().join(format!("profile-{profile_id}.json"))
-    }
-
     fn resolve_profile(&self, target: &ConnectTarget) -> anyhow::Result<crate::store::Profile> {
         let conn = self.store.conn();
         let found = match target {
@@ -487,7 +498,11 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn runtime_stop(&self, _force: bool) -> anyhow::Result<Value> {
-        let _ = self.proxy.disable();
+        // 先记下要清理的 profile：断开后 active 会被清空。
+        let active = self.active_profile_id();
+        if let Err(error) = self.proxy.disable() {
+            log::warn!("断开时解除系统代理失败：{error}");
+        }
         self.manager.set_system_proxy_enabled(false).await;
         let status = self
             .manager
@@ -496,6 +511,10 @@ impl VpnToolServices for WiredServices {
             .map_err(|e| svc_error(e.code(), e))?;
         let conn = self.store.conn();
         let _ = crate::store::profiles::clear_active(&conn);
+        // 断开即删明文配置：它只在连接期间允许存在。
+        if let Some(profile_id) = active {
+            vpn_config::remove_profile_config(&self.config_dir(), &profile_id);
+        }
         serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
     }
 
@@ -595,13 +614,24 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn catalog_search(&self, query: CatalogQuery) -> anyhow::Result<Value> {
+        // 未知取值不能当成「不过滤」：那会让模型传错值时静默拿到全部节点。
+        let protocol = match query.protocol.as_deref() {
+            None => None,
+            Some("vless_reality") => Some(crate::catalog::NodeProtocol::VlessReality),
+            Some("hysteria2") => Some(crate::catalog::NodeProtocol::Hysteria2),
+            Some("shadowsocks") => Some(crate::catalog::NodeProtocol::Shadowsocks),
+            Some(other) => {
+                return Err(svc_error(
+                    "INVALID_ARGUMENT",
+                    format!(
+                        "不支持的协议 {other}，可选值：vless_reality、hysteria2、shadowsocks"
+                    ),
+                ))
+            }
+        };
         let query = crate::catalog::NodeQuery {
             region: query.region,
-            protocol: query.protocol.as_deref().and_then(|value| match value {
-                "vless_reality" => Some(crate::catalog::NodeProtocol::VlessReality),
-                "hysteria2" => Some(crate::catalog::NodeProtocol::Hysteria2),
-                _ => None,
-            }),
+            protocol,
             limit: query.limit.map(|limit| limit.min(50) as u8),
             cursor: query.cursor,
         };
@@ -610,6 +640,8 @@ impl VpnToolServices for WiredServices {
             "nodes": response.nodes,
             "next_cursor": response.next_cursor,
             "fetched_at": response.fetched_at,
+            // P1 没有本地节点缓存，每次都是实时拉取；键必须存在。
+            "stale": false,
         }))
     }
 
@@ -620,7 +652,7 @@ impl VpnToolServices for WiredServices {
             .iter()
             .map(|profile| {
                 json!({
-                    "id": profile.id,
+                    "profile_id": profile.id,
                     "node_id": profile.node_id,
                     "name": profile.name,
                     "protocol": profile.protocol,
@@ -664,16 +696,13 @@ impl VpnToolServices for WiredServices {
             }
         };
 
-        if created {
-            // 顺手把完整配置（含凭据）写到 0600 磁盘文件，下次离线也能连。
-            if let Ok(Some(installed)) = self.installer.active() {
-                let _ = self
-                    .write_profile_config(&installed, &id, &detail.node, Some(&detail.etag))
-                    .await;
-            }
-        }
-
-        Ok(json!({ "profile_id": id, "name": display, "created": created }))
+        Ok(json!({
+            "profile_id": id,
+            "name": display,
+            "protocol": detail.node.summary.protocol.as_str(),
+            "region": detail.node.summary.region,
+            "already_existed": !created,
+        }))
     }
 
     async fn profile_delete(&self, profile_id: &str) -> anyhow::Result<Value> {
@@ -686,24 +715,34 @@ impl VpnToolServices for WiredServices {
                 ));
             }
         }
-        {
+        let existed = {
             let conn = self.store.conn();
+            let existed = crate::store::profiles::get(&conn, profile_id)
+                .map_err(|e| svc_error(e.code(), e))?
+                .is_some();
             crate::store::profiles::delete(&conn, profile_id)
                 .map_err(|e| svc_error(e.code(), e))?;
-        }
+            existed
+        };
 
         // 删配置时必须把带凭据的文件和 secrets 条目一起清掉，否则磁盘上会留下孤儿密文。
-        let config_path = self.profile_config_path(profile_id);
-        if std::fs::remove_file(&config_path).is_ok() {
-            log::info!("active_config removed path={}", config_path.display());
-        }
-        let _ = std::fs::remove_file(
-            self.config_dir()
-                .join(format!("profile-{profile_id}.meta.json")),
-        );
+        vpn_config::remove_profile_config(&self.config_dir(), profile_id);
         let _ = crate::secrets::delete_secret(&format!("node:{profile_id}"));
 
-        Ok(json!({ "deleted": true }))
+        let active_after = {
+            let conn = self.store.conn();
+            crate::store::profiles::active(&conn)
+                .ok()
+                .flatten()
+                .map(|profile| profile.id)
+        };
+
+        Ok(json!({
+            "profile_id": profile_id,
+            "deleted": existed,
+            "already_absent": !existed,
+            "active_profile_id": active_after,
+        }))
     }
 
     async fn vpn_connect(
@@ -758,72 +797,120 @@ impl VpnToolServices for WiredServices {
 }
 
 
-impl WiredServices {
-    /// 目录详情 → 生成配置 → 写到 config/profile-<id>.json（0600）→ sing-box check。
-    async fn write_profile_config(
-        &self,
-        installed: &crate::runtime::InstalledRuntime,
-        profile_id: &str,
-        node: &crate::catalog::NodeDescriptor,
-        etag: Option<&str>,
-    ) -> anyhow::Result<PathBuf> {
-        let mixed_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
-        let clash_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
-        let secret = vpn_config::random_secret();
+/// 连接期间才允许存在的明文配置：中途任何失败都把它删掉。
+struct RenderedConfigGuard {
+    config_dir: PathBuf,
+    profile_id: String,
+    armed: bool,
+}
 
-        let input = node
-            .clone()
-            .into_build_input(mixed_port, clash_port, secret)
-            .map_err(|e| svc_error(e.code(), e))?;
-        let value = vpn_config::build(&input).map_err(|e| svc_error(e.code(), e))?;
-
-        vpn_config::install_profile(&installed.binary, &self.config_dir(), profile_id, &value, etag)
-            .await
-            .map_err(|e| svc_error(e.code(), e))
+impl RenderedConfigGuard {
+    fn new(config_dir: PathBuf, profile_id: String) -> Self {
+        Self {
+            config_dir,
+            profile_id,
+            armed: true,
+        }
     }
 
-    /// 连接：优先用磁盘上已渲染的完整配置（含凭据，0600），没有才联网重拉。
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RenderedConfigGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            vpn_config::remove_profile_config(&self.config_dir, &self.profile_id);
+        }
+    }
+}
+
+impl WiredServices {
+
+    /// 连接在启动阶段中止：先把可能还开着的系统代理（切换节点时是上一个的）撤掉。
+    fn abort_connection(&self, error: anyhow::Error) -> anyhow::Error {
+        if let Err(disable_error) = self.proxy.disable() {
+            log::warn!("连接中止后撤销系统代理失败：{disable_error}");
+        }
+        error
+    }
+
+    /// enable 失败时回滚：先把系统代理还原，再停运行时。
+    ///
+    /// macOS 的 apply 是逐个网络服务写的，中途失败会留下「半开着」的状态；
+    /// 只停运行时会留下指向死端口的代理，本会话内用户直接断网。
+    async fn rollback_proxy_after_enable_failure(&self) {
+        if let Err(error) = self.proxy.disable() {
+            log::warn!("回滚系统代理失败：{error}");
+        }
+        let _ = self.manager.stop().await;
+    }
+
+    /// 切换 profile 时清掉上一个 profile 的明文配置；目标自己不能删。
+    fn drop_previous_rendered_config(&self, target_profile_id: &str) {
+        if let Some(previous) = self.active_profile_id() {
+            if previous != target_profile_id {
+                vpn_config::remove_profile_config(&self.config_dir(), &previous);
+            }
+        }
+    }
+
+    /// 连接：每次都从凭据源重新渲染配置。
+    ///
+    /// 渲染出的配置文件含明文凭据，只在连接期间存在：断开、连接失败、应用退出都会删除。
+    /// 不能复用磁盘上的旧文件，否则 secrets.enc 的加密等于白做。
     async fn connect(&self, target: ConnectTarget) -> anyhow::Result<Value> {
         let profile = self.resolve_profile(&target)?;
         let installed = self.ensure_runtime_installed()?;
 
-        let config_path = self.profile_config_path(&profile.id);
-        let path = if config_path.is_file() {
-            config_path
-        } else {
-            // 凭据来源三级回退：目录服务 → 本地 node:<profile_id> → 明确报错。
-            let mixed_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
-            let clash_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
-            let clash_secret = vpn_config::random_secret();
+        // 切换 profile：先删上一个的明文配置，别每切一次就多留一份。
+        self.drop_previous_rendered_config(&profile.id);
 
-            let value = match profile.node_id.clone() {
-                Some(node_id) => {
-                    let detail = self.catalog_detail(&node_id).await?;
-                    let input = detail
-                        .node
-                        .clone()
-                        .into_build_input(mixed_port, clash_port, clash_secret)
-                        .map_err(|e| svc_error(e.code(), e))?;
-                    vpn_config::build(&input).map_err(|e| svc_error(e.code(), e))?
-                }
-                None => {
-                    let input = self
-                        .seed_build_input(&profile.id, mixed_port, clash_port, clash_secret)
-                        .map_err(|e| svc_error("PRECONDITION_FAILED", e))?;
-                    vpn_config::build(&input).map_err(|e| svc_error(e.code(), e))?
-                }
-            };
+        // 凭据来源按 profile 类型二选一：
+        // - 有 node_id：走目录详情，要求目录服务可达，凭据只进内存与 0600 配置；
+        // - 无 node_id（种子导入）：读本地 node:<profile_id>，缺失就明确报错。
+        let mixed_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
+        let clash_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
+        let clash_secret = vpn_config::random_secret();
 
-            vpn_config::install_profile(
-                &installed.binary,
-                &self.config_dir(),
-                &profile.id,
-                &value,
-                None,
-            )
-            .await
-            .map_err(|e| svc_error(e.code(), e))?
+        let (value, etag) = match profile.node_id.clone() {
+            Some(node_id) => {
+                let detail = self.catalog_detail(&node_id).await?;
+                let input = detail
+                    .node
+                    .clone()
+                    .into_build_input(mixed_port, clash_port, clash_secret)
+                    .map_err(|e| svc_error(e.code(), e))?;
+                (
+                    vpn_config::build(&input).map_err(|e| svc_error(e.code(), e))?,
+                    Some(detail.etag.clone()),
+                )
+            }
+            None => {
+                let input = self
+                    .seed_build_input(&profile.id, mixed_port, clash_port, clash_secret)
+                    .map_err(|e| svc_error("PRECONDITION_FAILED", e))?;
+                (
+                    vpn_config::build(&input).map_err(|e| svc_error(e.code(), e))?,
+                    None,
+                )
+            }
         };
+
+        // guard 先于 install_profile 建立：它中途失败时明文可能已经落盘。
+        // 删除幂等，文件不存在会走 NotFound 分支，提前建不会误删别的东西。
+        let guard = RenderedConfigGuard::new(self.config_dir(), profile.id.clone());
+
+        let path = vpn_config::install_profile(
+            &installed.binary,
+            &self.config_dir(),
+            &profile.id,
+            &value,
+            etag.as_deref(),
+        )
+        .await
+        .map_err(|e| svc_error(e.code(), e))?;
 
         let text = std::fs::read_to_string(&path)
             .map_err(|e| svc_error("PRECONDITION_FAILED", format!("读取本地配置失败：{e}")))?;
@@ -844,14 +931,20 @@ impl WiredServices {
             profile_id: Some(profile.id.clone()),
         };
 
-        let status = self
+        let started = self
             .manager
             .start(plan)
             .await
             .map_err(|e| svc_error(e.code(), e))?;
 
+        // start() 在并发 stop（含退出）时会返回 Ok(Idle)，那不是连上。
+        // 不拦的话会继续写系统代理，把流量指向没人监听的端口。
+        if let Err(error) = require_running_state(started.state) {
+            return Err(self.abort_connection(error));
+        }
+
         if let Err(error) = self.proxy.enable(mixed_port) {
-            let _ = self.manager.stop().await;
+            self.rollback_proxy_after_enable_failure().await;
             return Err(svc_error("INTERNAL", format!("设置系统代理失败：{error}")));
         }
         self.manager.set_system_proxy_enabled(true).await;
@@ -861,7 +954,29 @@ impl WiredServices {
             let _ = crate::store::profiles::set_active(&conn, &profile.id);
         }
 
-        serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
+        // 出口 IP 在进入 running 后才探测；按契约 4.11 第 6 步在这里等结果。
+        // 最多等 3 秒：正常 1 秒内能回，再久说明探测链路本身有问题，不该拖住对话。
+        // 超时只是留空，连接本身照常成功。
+        let awaited_ip = self
+            .manager
+            .await_exit_ip(std::time::Duration::from_secs(3))
+            .await;
+
+        // 等待期间状态可能已经变化，返回最新的快照而不是启动瞬间的。
+        let status = self.manager.status().await;
+        // 快照里的值可能已被后台探测回填，优先用它；没有再退回等待的结果。
+        let exit_ip = status.health.exit_ip.clone().or(awaited_ip);
+        let latency_ms = if exit_ip.is_some() {
+            self.manager.exit_ip_latency_ms().await
+        } else {
+            None
+        };
+        let mut data = serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))?;
+        data["exit_ip"] = exit_ip.map(Value::String).unwrap_or(Value::Null);
+        // 契约要求这个键永远存在；测不到就显式 null，别留 undefined。
+        data["latency_ms"] = latency_ms.map(Value::from).unwrap_or(Value::Null);
+        guard.disarm();
+        Ok(data)
     }
 
     /// 启动时的崩溃恢复：有残留代理备份就恢复并清掉。
@@ -935,5 +1050,341 @@ mod registration_gate_tests {
         gate.ensure(|| async { Ok::<(), String>(()) }).await.unwrap();
         gate.reset();
         assert!(!gate.is_ready());
+    }
+}
+
+#[cfg(test)]
+mod proxy_rollback_tests {
+    use super::*;
+    use crate::proxy::backup::MemoryBackupStore;
+    use crate::proxy::{PlatformProxy, ProxyController};
+    use crate::runtime::{RuntimeError, RuntimeResult};
+    use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static RESTORE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    struct FailingProxy;
+
+    impl PlatformProxy for FailingProxy {
+        fn platform(&self) -> &'static str {
+            "test"
+        }
+
+        fn capture(&self) -> RuntimeResult<Value> {
+            Ok(serde_json::json!({ "http": "original:8080" }))
+        }
+
+        fn apply(&self, _port: u16) -> RuntimeResult<()> {
+            Err(RuntimeError::Proxy("apply failed".into()))
+        }
+
+        fn restore(&self, _payload: &Value) -> RuntimeResult<()> {
+            RESTORE_CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn current(&self) -> RuntimeResult<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    static FAILING: FailingProxy = FailingProxy;
+
+    static ABORT_RESTORES: AtomicUsize = AtomicUsize::new(0);
+
+    struct SucceedingApplyProxy;
+
+    impl PlatformProxy for SucceedingApplyProxy {
+        fn platform(&self) -> &'static str {
+            "test"
+        }
+
+        fn capture(&self) -> RuntimeResult<Value> {
+            Ok(serde_json::json!({ "http": "original:8080" }))
+        }
+
+        fn apply(&self, _port: u16) -> RuntimeResult<()> {
+            Ok(())
+        }
+
+        fn restore(&self, _payload: &Value) -> RuntimeResult<()> {
+            ABORT_RESTORES.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn current(&self) -> RuntimeResult<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    static SUCCEEDING: SucceedingApplyProxy = SucceedingApplyProxy;
+
+    fn services_with_proxy(
+        dir: &std::path::Path,
+        backend: &'static dyn PlatformProxy,
+    ) -> WiredServices {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let manager =
+            crate::runtime::RuntimeManager::new(crate::runtime::RuntimeConfig::new(dir));
+        let proxy =
+            Arc::new(ProxyController::with_backend(
+                Box::new(MemoryBackupStore::new()),
+                backend,
+            ));
+        let catalog = Arc::new(CatalogClient::new("http://127.0.0.1:9/v1"));
+        WiredServices::new(store, manager, proxy, catalog, dir)
+    }
+
+    #[tokio::test]
+    async fn a_failed_enable_rolls_the_proxy_back() {
+        let dir = std::env::temp_dir().join(format!("veyl-proxy-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let services = services_with_proxy(&dir, &FAILING);
+
+        RESTORE_CALLS.store(0, Ordering::SeqCst);
+        assert!(services.proxy.enable(1234).is_err(), "假的 apply 必须失败");
+        services.rollback_proxy_after_enable_failure().await;
+
+        assert_eq!(
+            RESTORE_CALLS.load(Ordering::SeqCst),
+            1,
+            "enable 失败后必须还原系统代理"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn aborting_a_connection_disables_the_proxy() {
+        let dir = std::env::temp_dir().join(format!("veyl-proxy-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let services = services_with_proxy(&dir, &SUCCEEDING);
+
+        services.proxy.enable(1234).unwrap();
+        ABORT_RESTORES.store(0, Ordering::SeqCst);
+
+        let error = services.abort_connection(anyhow::anyhow!("runtime not running"));
+
+        assert_eq!(
+            ABORT_RESTORES.load(Ordering::SeqCst),
+            1,
+            "连接中止时必须撤掉可能还开着的代理"
+        );
+        assert!(error.to_string().contains("runtime not running"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod connect_guard_tests {
+    use super::*;
+    use crate::runtime::RuntimeState;
+
+    #[test]
+    fn only_running_counts_as_connected() {
+        assert!(require_running_state(RuntimeState::Running).is_ok());
+
+        for state in [
+            RuntimeState::Idle,
+            RuntimeState::Starting,
+            RuntimeState::Stopping,
+            RuntimeState::Failed,
+        ] {
+            let error = require_running_state(state).unwrap_err();
+            assert!(
+                error.to_string().contains("未进入 running"),
+                "{state:?} 必须被拒绝：{error}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod rendered_config_tests {
+    use super::*;
+
+    fn write_rendered(dir: &std::path::Path, profile_id: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("profile-{profile_id}.json")), "{}").unwrap();
+        std::fs::write(
+            dir.join(format!("profile-{profile_id}.meta.json")),
+            "{}",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_guard_deletes_the_rendered_config_on_failure() {
+        let dir =
+            std::env::temp_dir().join(format!("veyl-guard-{:016x}", rand::random::<u64>()));
+        write_rendered(&dir, "p1");
+
+        {
+            let _guard = RenderedConfigGuard::new(dir.clone(), "p1".to_string());
+        }
+
+        assert!(!dir.join("profile-p1.json").exists(), "失败路径必须删掉明文配置");
+        assert!(!dir.join("profile-p1.meta.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_disarmed_guard_keeps_the_config_for_the_connection() {
+        let dir =
+            std::env::temp_dir().join(format!("veyl-guard-{:016x}", rand::random::<u64>()));
+        write_rendered(&dir, "p1");
+
+        RenderedConfigGuard::new(dir.clone(), "p1".to_string()).disarm();
+
+        assert!(dir.join("profile-p1.json").exists(), "连接成功时配置要继续可用");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[tokio::test]
+    async fn a_failed_install_leaves_no_rendered_config_behind() {
+        let dir =
+            std::env::temp_dir().join(format!("veyl-guard-{:016x}", rand::random::<u64>()));
+        let config_dir = dir.join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        // 模拟上一轮遗留的元数据。
+        std::fs::write(config_dir.join("profile-p1.meta.json"), "{}").unwrap();
+
+        // guard 必须早于 install_profile 建立，它失败时才能清掉已落盘的文件。
+        let guard = RenderedConfigGuard::new(config_dir.clone(), "p1".to_string());
+        let result = vpn_config::install_profile(
+            std::path::Path::new("/nonexistent/sing-box"),
+            &config_dir,
+            "p1",
+            &serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert!(result.is_err(), "无效二进制必须让安装失败");
+        drop(guard);
+
+        assert!(
+            !config_dir.join("profile-p1.json").exists(),
+            "安装失败后不能留明文配置"
+        );
+        assert!(
+            !config_dir.join("profile-p1.meta.json").exists(),
+            "安装失败后不能留元数据"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod profile_shape_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn services(dir: &Path) -> WiredServices {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let manager = crate::runtime::RuntimeManager::new(crate::runtime::RuntimeConfig::new(dir));
+        let proxy = Arc::new(crate::proxy::ProxyController::new(Box::new(
+            crate::proxy::backup::MemoryBackupStore::new(),
+        )));
+        let catalog = Arc::new(CatalogClient::new("http://127.0.0.1:9/v1"));
+        WiredServices::new(store, manager, proxy, catalog, dir)
+    }
+
+    #[tokio::test]
+    async fn profile_list_uses_profile_id_not_id() {
+        let dir = std::env::temp_dir().join(format!("veyl-svc-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let services = services(&dir);
+
+        {
+            let conn = services.store.conn();
+            crate::store::profiles::create(
+                &conn,
+                &crate::store::NewProfile {
+                    id: "prf_1",
+                    node_id: Some("seed-jp-01"),
+                    name: "东京 01",
+                    protocol: Some("vless_reality"),
+                    region: Some("jp"),
+                    config: &serde_json::json!({ "server": "203.0.113.10" }),
+                },
+            )
+            .unwrap();
+        }
+
+        let data = services.profile_list().await.unwrap();
+        let first = &data["profiles"][0];
+        assert_eq!(first["profile_id"], "prf_1");
+        assert!(first.get("id").is_none(), "契约里叫 profile_id：{first}");
+        for field in ["name", "node_id", "protocol", "region", "created_at", "is_active"] {
+            assert!(first.get(field).is_some(), "缺少字段 {field}：{first}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switching_profiles_removes_only_the_previous_rendered_config() {
+        let dir = std::env::temp_dir().join(format!("veyl-svc-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let services = services(&dir);
+
+        {
+            let conn = services.store.conn();
+            for (id, name) in [("prf_a", "A"), ("prf_b", "B")] {
+                crate::store::profiles::create(
+                    &conn,
+                    &crate::store::NewProfile {
+                        id,
+                        node_id: None,
+                        name,
+                        protocol: Some("shadowsocks"),
+                        region: None,
+                        config: &serde_json::json!({}),
+                    },
+                )
+                .unwrap();
+            }
+            crate::store::profiles::set_active(&conn, "prf_a").unwrap();
+        }
+
+        let config_dir = dir.join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        for id in ["prf_a", "prf_b"] {
+            std::fs::write(config_dir.join(format!("profile-{id}.json")), "{}").unwrap();
+            std::fs::write(
+                config_dir.join(format!("profile-{id}.meta.json")),
+                "{}",
+            )
+            .unwrap();
+        }
+
+        services.drop_previous_rendered_config("prf_b");
+
+        assert!(
+            !config_dir.join("profile-prf_a.json").exists(),
+            "切换前那个 profile 的明文配置必须删掉"
+        );
+        assert!(!config_dir.join("profile-prf_a.meta.json").exists());
+        assert!(
+            config_dir.join("profile-prf_b.json").exists(),
+            "目标 profile 自己不能被误删"
+        );
+        assert!(config_dir.join("profile-prf_b.meta.json").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn profile_delete_reports_absence_and_active_profile() {
+        let dir = std::env::temp_dir().join(format!("veyl-svc-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let services = services(&dir);
+
+        let data = services.profile_delete("prf_missing").await.unwrap();
+        assert_eq!(data["profile_id"], "prf_missing");
+        assert_eq!(data["deleted"], false);
+        assert_eq!(data["already_absent"], true);
+        assert!(data["active_profile_id"].is_null());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

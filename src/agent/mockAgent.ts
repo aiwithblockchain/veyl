@@ -1,4 +1,10 @@
-import type { AgentBridge, ChatHistory, DeepSeekKeyState, RenamedSession } from "./bridge";
+import type {
+  AgentBridge,
+  ChatHistory,
+  DeepSeekKeyState,
+  ImportSeedResult,
+  RenamedSession,
+} from "./bridge";
 import { maskKey } from "./bridge";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
@@ -497,6 +503,14 @@ export class MockAgentBridge implements AgentBridge {
       };
     }
     return { id: sessionId, title: trimmed, createdAt: Date.now() };
+  }
+
+  async importSeedFile(_path: string): Promise<ImportSeedResult> {
+    // 浏览器通道没有窗口级拖拽事件，也没有本地文件系统。
+    throw {
+      code: "UNSUPPORTED",
+      message: "浏览器通道不支持拖拽导入，请在桌面应用里试",
+    };
   }
 
   async getChatHistory(_sessionId?: string): Promise<ChatHistory> {

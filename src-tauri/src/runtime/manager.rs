@@ -9,11 +9,11 @@ use tokio::sync::{broadcast, Mutex, Notify};
 use tokio::time::Instant;
 
 use super::error::{RuntimeError, RuntimeResult};
-use super::health::{ClashApi, DataPlaneProbe};
+use super::health::{ClashApi, DataPlaneProbe, ExitIpProbe, DEFAULT_EXIT_IP_PROBE};
 use super::process::{self, SpawnOptions};
 
-pub const CONTRACT_VERSION: &str = "1.0.9";
-pub const EVENT_CONTRACT_VERSION: &str = "1.0.9";
+pub const CONTRACT_VERSION: &str = "1.0.10";
+pub const EVENT_CONTRACT_VERSION: &str = "1.0.10";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
 pub const DEFAULT_DATA_PLANE_PROBE: &str = "http://cp.cloudflare.com/generate_204";
@@ -173,6 +173,8 @@ pub struct RuntimeConfig {
     pub degraded_restart_after: Duration,
     /// 关闭（`None`）时不做数据面探测。
     pub data_plane_probe: Option<String>,
+    /// 连接成功后探测一次出口 IP 的纯文本地址；`None` 表示不探测。
+    pub exit_ip_probe: Option<String>,
 }
 
 impl RuntimeConfig {
@@ -187,6 +189,7 @@ impl RuntimeConfig {
             restart_count_reset_after: Duration::from_secs(60),
             degraded_restart_after: Duration::from_secs(30),
             data_plane_probe: Some(DEFAULT_DATA_PLANE_PROBE.to_string()),
+            exit_ip_probe: Some(DEFAULT_EXIT_IP_PROBE.to_string()),
         }
     }
 
@@ -236,6 +239,15 @@ impl StartPlan {
     }
 }
 
+/// 持久化的运行中进程，用于下次启动时回收（应用崩溃/被强杀时 child handle 会丢）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RunningPid {
+    pid: u32,
+    binary: String,
+    config: String,
+    started_at: i64,
+}
+
 struct Inner {
     state: RuntimeState,
     plan: Option<StartPlan>,
@@ -251,6 +263,8 @@ struct Inner {
     config_hash: Option<String>,
     system_proxy_enabled: bool,
     health: HealthSnapshot,
+    /// 最近一次成功探测出口 IP 的往返耗时；`health.exit_ip` 为空时视为无效。
+    last_exit_ip_latency_ms: Option<u64>,
 }
 
 impl Inner {
@@ -270,6 +284,7 @@ impl Inner {
             config_hash: None,
             system_proxy_enabled: false,
             health: HealthSnapshot::default(),
+            last_exit_ip_latency_ms: None,
         }
     }
 
@@ -311,6 +326,8 @@ pub struct RuntimeManager {
     inner: Mutex<Inner>,
     events: broadcast::Sender<RuntimeEvent>,
     wake: Notify,
+    /// 进入 Failed 时回调宿主（例如撤销系统代理）；运行时不认识代理模块。
+    terminal_failure_hook: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl RuntimeManager {
@@ -321,7 +338,27 @@ impl RuntimeManager {
             inner: Mutex::new(Inner::new()),
             events,
             wake: Notify::new(),
+            terminal_failure_hook: std::sync::Mutex::new(None),
         })
+    }
+
+    /// 运行时进入终态失败时触发。钩子自己负责容错，不能影响状态机。
+    pub fn set_terminal_failure_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut slot) = self.terminal_failure_hook.lock() {
+            *slot = Some(hook);
+        }
+    }
+
+    fn notify_terminal_failure(&self) {
+        // 先取出钩子再调用：钩子可能做同步 IO，不能在持锁时跑。
+        let hook = self
+            .terminal_failure_hook
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> {
@@ -342,6 +379,36 @@ impl RuntimeManager {
         let mut inner = self.inner.lock().await;
         inner.health.exit_ip = exit_ip;
         inner.health.checked_at = now_iso();
+    }
+
+    /// 连接编排层用：短暂等待异步探测的结果，让 `VpnConnect` 能带回出口 IP。
+    ///
+    /// 超时、探测失败或中途断开都返回 `None`——这不影响连接本身。
+    pub async fn await_exit_ip(&self, timeout: Duration) -> Option<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let inner = self.inner.lock().await;
+                if let Some(ip) = inner.health.exit_ip.clone() {
+                    return Some(ip);
+                }
+                if !matches!(inner.state, RuntimeState::Running | RuntimeState::Degraded) {
+                    return None;
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// 最近一次出口 IP 探测的往返耗时（毫秒），供 `VpnConnect` 的 `latency_ms` 使用。
+    /// 没有出口 IP 时不返回陈旧值。
+    pub async fn exit_ip_latency_ms(&self) -> Option<u64> {
+        let inner = self.inner.lock().await;
+        inner.health.exit_ip.as_ref()?;
+        inner.last_exit_ip_latency_ms
     }
 
     /// 正在使用（含启动、切换、停止中）的 profile；`None` 表示没有活动连接。
@@ -432,6 +499,8 @@ impl RuntimeManager {
         let (child, from) = {
             let mut inner = self.inner.lock().await;
             if inner.state == RuntimeState::Idle && inner.child.is_none() {
+                // 配置可能已被断开清理删掉，旧的 plan 不能再用于重启。
+                inner.plan = None;
                 return Ok(inner.snapshot());
             }
             let from = inner.state;
@@ -454,8 +523,16 @@ impl RuntimeManager {
             emitted_at: now_iso(),
         }));
 
+        let child_pid = child.as_ref().and_then(|child| child.id());
         if let Some(mut child) = child {
             let _ = process::terminate(&mut child, self.cfg.stop_grace).await;
+        }
+        // 确认进程真的死了才删记录；SIGKILL 也可能落空，那时留给下次启动回收。
+        match child_pid {
+            Some(pid) if process::is_alive(pid) => {
+                log::warn!("sing-box pid={pid} 未能终止，保留 runtime.pid 等下次启动回收");
+            }
+            _ => self.clear_running_pid(),
         }
 
         let snapshot = {
@@ -464,6 +541,10 @@ impl RuntimeManager {
             inner.pid = None;
             inner.running_since = None;
             inner.child = None;
+            // plan 指向的配置文件已被断开清理删掉，留着只会让 restart 拿死路径去启动。
+            inner.plan = None;
+            // 断开后不能还显示上一个节点的出口地址。
+            inner.health.exit_ip = None;
             inner.last_transition_at = now_iso();
             inner.snapshot()
         };
@@ -478,6 +559,8 @@ impl RuntimeManager {
             reason: None,
             emitted_at: now_iso(),
         }));
+        // exit_ip 已在上面清空；推一次健康事件，否则面板会一直显示上一个节点的地址。
+        self.emit_health().await;
 
         Ok(snapshot)
     }
@@ -495,6 +578,94 @@ impl RuntimeManager {
 
         self.stop().await?;
         self.start(plan).await
+    }
+
+
+    fn running_pid_path(&self) -> PathBuf {
+        self.cfg.app_data_dir.join("runtime.pid")
+    }
+
+    /// spawn 成功后立刻接管 child 并把 pid 落盘。
+    ///
+    /// 不能等到 `enter_running` 再写：`wait_until_ready` 最长要等 `startup_timeout`，
+    /// 这个窗口里被强杀的话，下次启动只能靠 pid 文件找到孤儿。
+    async fn adopt_child(&self, gen: u64, child: Child) -> Result<(), Child> {
+        let pid = child.id();
+        let mut inner = self.inner.lock().await;
+        if inner.generation != gen || inner.desired_stop {
+            return Err(child);
+        }
+        inner.pid = pid;
+        inner.child = Some(child);
+        if let (Some(pid), Some(plan)) = (pid, inner.plan.clone()) {
+            self.record_running_pid(&plan, pid);
+        }
+        Ok(())
+    }
+
+    fn record_running_pid(&self, plan: &StartPlan, pid: u32) {
+        let record = RunningPid {
+            pid,
+            binary: plan.binary.to_string_lossy().into_owned(),
+            config: plan.config_path.to_string_lossy().into_owned(),
+            started_at: crate::store::db::now_ms(),
+        };
+        if let Err(error) =
+            crate::runtime::fsutil::write_atomic_json(&self.running_pid_path(), &record)
+        {
+            log::warn!("写入 runtime.pid 失败：{error}");
+        }
+    }
+
+    fn clear_running_pid(&self) {
+        let _ = std::fs::remove_file(self.running_pid_path());
+    }
+
+    /// 启动时回收上一次没来得及带走的 sing-box。
+    ///
+    /// 只回收「还在跑、且命令行确实是我们启动的那个进程」——pid 会被系统复用，
+    /// 认错就会误杀别人的程序。宁可漏掉一个孤儿，也不能杀错用户进程。
+    pub async fn reclaim_stale(&self) -> RuntimeResult<Option<u32>> {
+        let path = self.running_pid_path();
+        let Some(record) = crate::runtime::fsutil::read_json::<RunningPid>(&path)? else {
+            return Ok(None);
+        };
+
+        if !process::is_alive(record.pid) {
+            self.clear_running_pid();
+            return Ok(None);
+        }
+
+        match process::command_line(record.pid) {
+            Some(command)
+                if process::matches_launch(&command, &record.binary, &record.config) => {}
+            Some(_) => {
+                log::warn!(
+                    "pid={} 的命令行无法确认是我们启动的 sing-box，跳过回收（保留 runtime.pid 供排查）",
+                    record.pid
+                );
+                return Ok(None);
+            }
+            None => {
+                log::warn!(
+                    "无法确认 pid={} 的命令行，跳过回收（不冒险杀未知进程）",
+                    record.pid
+                );
+                return Ok(None);
+            }
+        }
+
+        let pid = record.pid;
+        let exited = process::terminate_pid(pid, self.cfg.stop_grace).await;
+        if exited {
+            self.clear_running_pid();
+            log::warn!("回收了上次遗留的 sing-box pid={pid}");
+            Ok(Some(pid))
+        } else {
+            // 进程没死就保留记录，下次启动的 reclaim_stale 再试一次。
+            log::error!("遗留 sing-box pid={pid} 未能终止，保留 runtime.pid 等下次重试");
+            Ok(None)
+        }
     }
 
     async fn engine(self: Arc<Self>, gen: u64) {
@@ -519,7 +690,7 @@ impl RuntimeManager {
                 log_path: plan.log_path.clone(),
             };
 
-            let mut child = match process::spawn(&options).await {
+            let child = match process::spawn(&options).await {
                 Ok(child) => child,
                 Err(e) => {
                     self.fail(gen, e.to_string()).await;
@@ -527,16 +698,9 @@ impl RuntimeManager {
                 }
             };
 
-            let pid = child.id();
-            {
-                let mut inner = self.inner.lock().await;
-                if inner.generation != gen || inner.desired_stop {
-                    drop(inner);
-                    let _ = process::terminate(&mut child, Duration::from_secs(1)).await;
-                    return;
-                }
-                inner.pid = pid;
-                inner.child = Some(child);
+            if let Err(mut child) = self.adopt_child(gen, child).await {
+                let _ = process::terminate(&mut child, Duration::from_secs(1)).await;
+                return;
             }
 
             if !self.wait_until_ready(gen, &plan).await {
@@ -686,6 +850,7 @@ impl RuntimeManager {
             if let Some(reason) = exited {
                 self.update_health(|health| {
                     health.process = false;
+                    health.exit_ip = None;
                     health.checked_at = now_iso();
                 })
                 .await;
@@ -719,6 +884,10 @@ impl RuntimeManager {
                         health.process = true;
                         health.clash_api = false;
                         health.consecutive_failures = failures;
+                        // 连续失败判定为不健康：出口 IP 已不可信，清掉避免展示陈旧地址。
+                        if failures >= 3 {
+                            health.exit_ip = None;
+                        }
                         health.checked_at = now_iso();
                     })
                     .await;
@@ -761,8 +930,8 @@ impl RuntimeManager {
         }
     }
 
-    async fn enter_running(&self, gen: u64) {
-        let payload = {
+    async fn enter_running(self: &Arc<Self>, gen: u64) {
+        let (payload, plan) = {
             let mut inner = self.inner.lock().await;
             if inner.generation != gen || inner.desired_stop {
                 return;
@@ -772,16 +941,69 @@ impl RuntimeManager {
             inner.running_since = Some(Instant::now());
             inner.pid = inner.child.as_ref().and_then(|c| c.id());
             inner.last_transition_at = now_iso();
-            state_payload(
-                from,
-                RuntimeState::Running,
-                RuntimeEventKind::ProcessReady,
-                None,
-                inner.pid,
-                inner.version.clone(),
+
+            (
+                state_payload(
+                    from,
+                    RuntimeState::Running,
+                    RuntimeEventKind::ProcessReady,
+                    None,
+                    inner.pid,
+                    inner.version.clone(),
+                ),
+                inner.plan.clone(),
             )
         };
         self.emit(RuntimeEvent::StateChanged(payload));
+
+        // 出口 IP 只探一次，不放进每 10 秒的健康循环。
+        if let Some(plan) = plan {
+            let manager = Arc::clone(self);
+            tokio::spawn(async move {
+                manager.probe_exit_ip(gen, plan).await;
+            });
+        }
+    }
+
+    /// 经本地 mixed 入站探测出口 IP。失败只记日志，不影响连接状态。
+    async fn probe_exit_ip(self: Arc<Self>, gen: u64, plan: StartPlan) {
+        let Some(url) = self.cfg.exit_ip_probe.clone() else {
+            return;
+        };
+        let probe = match ExitIpProbe::new(url, plan.mixed_port) {
+            Ok(probe) => probe,
+            Err(error) => {
+                log::warn!("出口 IP 探测器创建失败：{error}");
+                return;
+            }
+        };
+
+        let started = Instant::now();
+        let result = probe.check().await;
+        // 这次请求经 mixed 入站打到远端，往返耗时就是天然的出口延迟。
+        let latency_ms = started.elapsed().as_millis() as u64;
+
+        // 探测是异步的：这期间可能已经断开或切了节点，只有仍是同一代且仍在运行才回填。
+        let still_running = {
+            let inner = self.inner.lock().await;
+            inner.generation == gen
+                && matches!(inner.state, RuntimeState::Running | RuntimeState::Degraded)
+        };
+        if !still_running {
+            return;
+        }
+
+        match result {
+            Ok(Some(ip)) => {
+                log::info!("出口 IP：{ip}（{latency_ms}ms）");
+                // 先记延迟再写 exit_ip：await_exit_ip 以 exit_ip 出现为信号。
+                self.inner.lock().await.last_exit_ip_latency_ms = Some(latency_ms);
+                self.set_exit_ip(Some(ip)).await;
+                self.emit_health().await;
+            }
+            Ok(None) => log::warn!("出口 IP 探测返回的不是 IP，忽略（exit_ip 保持未知）"),
+            Err(error) => log::warn!("出口 IP 探测失败：{error}（exit_ip 保持未知）"),
+        }
     }
 
     async fn fail(&self, gen: u64, reason: String) {
@@ -826,6 +1048,12 @@ impl RuntimeManager {
             if to.terminal() {
                 inner.pid = None;
                 inner.running_since = None;
+                inner.health.exit_ip = None;
+                // 配置可能已被 guard 删除；清掉 plan，restart 会返回 InvalidState，
+                // 而不是拿死路径去启动、报一个用户看不懂的底层错误。
+                inner.plan = None;
+                // pid 文件由 kill_child / stop 按「进程是否真的退出」决定是否删除，
+                // 这里不能再无条件清掉，否则 D-23 的回收记录会丢。
             }
             state_payload(
                 from,
@@ -841,6 +1069,14 @@ impl RuntimeManager {
             )
         };
         self.emit(RuntimeEvent::StateChanged(payload));
+        if to == RuntimeState::Failed {
+            // 锁已释放：钩子可以安全地做同步 IO（例如还原系统代理）。
+            self.notify_terminal_failure();
+        }
+        if to.terminal() {
+            // 失败也是断开：同步清掉面板上的出口 IP。
+            self.emit_health().await;
+        }
     }
 
     async fn update_health(&self, update: impl FnOnce(&mut HealthSnapshot)) {
@@ -873,9 +1109,17 @@ impl RuntimeManager {
     }
 
     async fn kill_child(&self) {
-        let child = { self.inner.lock().await.child.take() };
-        if let Some(mut child) = child {
-            let _ = process::terminate(&mut child, self.cfg.stop_grace).await;
+        let Some(mut child) = self.inner.lock().await.child.take() else {
+            return;
+        };
+        let pid = child.id();
+        let _ = process::terminate(&mut child, self.cfg.stop_grace).await;
+        // 确认死了才删 pid 文件；还活着就留着，让下次启动的 reclaim_stale 再试。
+        match pid {
+            Some(pid) if process::is_alive(pid) => {
+                log::warn!("sing-box pid={pid} 未能终止，保留 runtime.pid 等下次启动回收");
+            }
+            _ => self.clear_running_pid(),
         }
     }
 
@@ -1058,6 +1302,34 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn entering_failed_fires_the_terminal_hook_once() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = temp_dir("terminal-hook");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-sing-box");
+        std::fs::write(&fake, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut cfg = RuntimeConfig::new(&dir);
+        cfg.startup_timeout = Duration::from_millis(300);
+        let manager = RuntimeManager::new(cfg);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        manager.set_terminal_failure_hook(Arc::new(move || {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let _ = manager.start(plan(fake, &dir)).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "进入 Failed 必须触发一次钩子");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_startup_crash_goes_straight_to_failed() {
         use std::os::unix::fs::PermissionsExt;
@@ -1135,6 +1407,224 @@ mod tests {
         );
 
         assert!(manager.ensure_profile_not_active("profile-2").await.is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_after_a_failed_start_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("restart-after-failed-start");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-sing-box");
+        std::fs::write(&fake, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut cfg = RuntimeConfig::new(&dir);
+        cfg.startup_timeout = Duration::from_millis(300);
+        let manager = RuntimeManager::new(cfg);
+
+        let _ = manager.start(plan(fake, &dir)).await;
+        assert_eq!(manager.status().await.state, RuntimeState::Failed);
+
+        let err = manager.restart().await.unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::InvalidState { .. }),
+            "失败后 plan 已清，重启必须是 InvalidState：{err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn restart_after_disconnect_is_rejected() {
+        let dir = temp_dir("restart-after-stop");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.state = RuntimeState::Running;
+            inner.plan = Some(plan(PathBuf::from("/nonexistent"), &dir));
+        }
+
+        manager.stop().await.unwrap();
+        assert_eq!(manager.status().await.state, RuntimeState::Idle);
+
+        let err = manager.restart().await.unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::InvalidState { .. }),
+            "配置已删，重启必须是 InvalidState：{err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_pid_file_is_written_and_cleared() {
+        let dir = temp_dir("pidfile");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+        let plan = plan(PathBuf::from("/tmp/veyl/sing-box"), &dir);
+
+        manager.record_running_pid(&plan, 4242);
+        let raw = std::fs::read_to_string(dir.join("runtime.pid")).unwrap();
+        assert!(raw.contains("4242"), "{raw}");
+        assert!(raw.contains("sing-box"), "{raw}");
+
+        manager.clear_running_pid();
+        assert!(!dir.join("runtime.pid").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_pid_is_recorded_as_soon_as_the_child_starts() {
+        let dir = temp_dir("pid-spawn");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.generation = 1;
+            inner.state = RuntimeState::Starting;
+            inner.plan = Some(plan(PathBuf::from("/usr/bin/tail"), &dir));
+        }
+
+        let child = tokio::process::Command::new("/usr/bin/tail")
+            .args(["-f", "/dev/null"])
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+
+        manager
+            .adopt_child(1, child)
+            .await
+            .expect("spawn 后应立即接管");
+
+        let record: RunningPid =
+            crate::runtime::fsutil::read_json(&manager.running_pid_path())
+                .unwrap()
+                .unwrap();
+        assert_eq!(record.pid, pid, "spawn 后必须立刻有 pid 文件");
+        assert_eq!(record.binary, "/usr/bin/tail");
+
+        manager.kill_child().await;
+        assert!(!manager.running_pid_path().exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reclaiming_without_a_pid_file_is_a_noop() {
+        let dir = temp_dir("reclaim-empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+        assert_eq!(manager.reclaim_stale().await.unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_leftover_sing_box_is_reclaimed() {
+        let dir = temp_dir("reclaim");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 用 sh 起一个真正的孤儿进程（父进程立刻退出），模拟上次应用遗留的 sing-box；
+        // 直接 spawn 的话它是测试进程的子进程，被杀后会变僵尸，kill(pid,0) 仍返回存活。
+        // argv[0] 与配置路径都必须和记录一致，否则会被新的严格校验跳过。
+        let config = dir.join("config.json");
+        std::fs::write(&config, "{}").unwrap();
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "nohup /usr/bin/tail -f {} >/dev/null 2>&1 & echo $!",
+                config.display()
+            ))
+            .output()
+            .unwrap();
+        let pid: u32 = String::from_utf8_lossy(&output.stdout).trim().parse().unwrap();
+
+        let record = RunningPid {
+            pid,
+            binary: "/usr/bin/tail".into(),
+            config: config.to_string_lossy().into_owned(),
+            started_at: 1,
+        };
+        crate::runtime::fsutil::write_atomic_json(&dir.join("runtime.pid"), &record).unwrap();
+
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+        assert_eq!(manager.reclaim_stale().await.unwrap(), Some(pid));
+        assert!(!process::is_alive(pid), "遗留进程必须被终止");
+        assert!(!dir.join("runtime.pid").exists(), "pid 文件应清理掉");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reused_pid_is_not_killed() {
+        let dir = temp_dir("reclaim-reuse");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // pid 指向测试进程自己，但记录里的 binary 是 sing-box：
+        // 命令行对不上，绝不能杀。
+        let record = RunningPid {
+            pid: std::process::id(),
+            binary: "/opt/veyl/sing-box".into(),
+            config: "/tmp/whatever.json".into(),
+            started_at: 1,
+        };
+        crate::runtime::fsutil::write_atomic_json(&dir.join("runtime.pid"), &record).unwrap();
+
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+        assert_eq!(manager.reclaim_stale().await.unwrap(), None);
+        assert!(
+            dir.join("runtime.pid").exists(),
+            "无法确认身份的记录保留供排查，不静默清除"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_line_that_only_mentions_sing_box_is_not_killed() {
+        let dir = temp_dir("reclaim-lookalike");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("sing-box.log");
+        std::fs::write(&log, "").unwrap();
+
+        // 命令行里有 sing-box，但 argv[0] 是 tail：这是用户进程，绝不能杀。
+        let mut child = tokio::process::Command::new("/usr/bin/tail")
+            .arg("-f")
+            .arg(&log)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+
+        let record = RunningPid {
+            pid,
+            binary: "/opt/veyl/sing-box".into(),
+            config: dir.join("config.json").to_string_lossy().into_owned(),
+            started_at: 1,
+        };
+        crate::runtime::fsutil::write_atomic_json(&dir.join("runtime.pid"), &record).unwrap();
+
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+        assert_eq!(manager.reclaim_stale().await.unwrap(), None);
+        assert!(
+            process::is_alive(pid),
+            "命令行只是含 sing-box 的用户进程不能被杀"
+        );
+        assert!(
+            manager.running_pid_path().exists(),
+            "无法确认的记录不能被静默清除"
+        );
+
+        let _ = child.kill().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 

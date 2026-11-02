@@ -285,3 +285,237 @@ mod title_tests {
         assert!(normalise_title(&mixed).is_ok());
     }
 }
+
+/// 拖拽导入节点文件（设置页）。只做校验、错误分类与脱敏，解析/写入复用 `seed_import`。
+///
+/// 校验顺序固定：扩展名 → 大小 → 可读 → 内容。先校验再读，别把大文件读进内存。
+/// 返回值、日志、错误信息都不含 password，也不回显文件内容。
+#[tauri::command]
+pub async fn import_seed_file(path: String) -> Result<Value, Value> {
+    const MAX_BYTES: u64 = 1024 * 1024;
+
+    fn invalid(reason: &str, message: &str) -> Value {
+        json!({
+            "code": "INVALID_ARGUMENT",
+            "message": message,
+            "details": { "reason": reason },
+        })
+    }
+
+    let file_path = std::path::Path::new(&path);
+
+    let is_json = file_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    if !is_json {
+        return Err(invalid("not_json_file", "只支持 .json 文件"));
+    }
+
+    let metadata = match std::fs::metadata(file_path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return Err(invalid("file_unreadable", "文件不存在或无法读取")),
+    };
+    if metadata.len() > MAX_BYTES {
+        return Err(json!({
+            "code": "INVALID_ARGUMENT",
+            "message": "文件超过 1 MB",
+            "details": { "reason": "file_too_large", "max_bytes": MAX_BYTES },
+        }));
+    }
+
+    let bytes = match std::fs::read(file_path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(invalid("file_unreadable", "文件不存在或无法读取")),
+    };
+    let contents = match String::from_utf8(bytes) {
+        Ok(contents) => contents,
+        Err(_) => return Err(invalid("invalid_json", "文件不是合法的 UTF-8 文本")),
+    };
+
+    let package = match crate::seed_import::parse(&contents) {
+        Ok(package) => package,
+        Err(error) => {
+            // 只记 serde 的行列信息，不记原文——原文里是密码。
+            log::warn!("seed import: invalid json: {error}");
+            return Err(invalid("invalid_json", "文件不是合法的节点 JSON"));
+        }
+    };
+
+    let plan = crate::seed_import::plan(&package);
+    if plan.imported.is_empty() {
+        if let Some(method) = plan
+            .skipped
+            .iter()
+            .find_map(|skip| skip.reason.strip_prefix("unsupported method: "))
+        {
+            return Err(json!({
+                "code": "UNSUPPORTED",
+                "message": format!("不支持的加密方式：{method}"),
+                "details": { "method": method },
+            }));
+        }
+        let mut error = invalid("no_importable_nodes", "文件里没有可导入的节点");
+        error["details"]["skipped"] = serde_json::json!(plan.skipped.len());
+        return Err(error);
+    }
+
+    let Some(store) = crate::store::global() else {
+        return Err(json!({ "code": "INTERNAL", "message": "本地数据库不可用" }));
+    };
+
+    match crate::seed_import::apply(&store, &plan) {
+        Ok(_) => {
+            for node in &plan.imported {
+                log::info!("seed import: {} pw_fp={}", node.id, node.password_fingerprint);
+            }
+            Ok(json!({
+                "imported": plan.imported.len(),
+                "skipped": plan.skipped.iter().map(|skip| json!({
+                    "name": skip.tag,
+                    "reason": skip.reason,
+                })).collect::<Vec<_>>(),
+                "profiles": plan.imported.iter().map(|node| json!({
+                    "id": node.id,
+                    "name": node.name,
+                    "server": node.server,
+                    // 契约里没有，但验收要求「列出名称与 server:port」，补一个端口字段（纯新增）。
+                    "server_port": node.server_port,
+                    "method": node.method,
+                })).collect::<Vec<_>>(),
+            }))
+        }
+        Err(crate::seed_import::ApplyError::Secret(error)) => Err(json!({
+            "code": "SECRET_STORE",
+            "message": error.to_string(),
+        })),
+        Err(error) => Err(json!({ "code": "INTERNAL", "message": error.to_string() })),
+    }
+}
+
+#[cfg(test)]
+mod seed_command_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    const GOOD: &str = r#"{"provider_id":"p","name":"Demo","config":{"outbounds":[
+        {"type":"shadowsocks","tag":"Tokyo-01","server":"203.0.113.5","server_port":8388,
+         "method":"aes-256-gcm","password":"pw-secret-tokyo"},
+        {"type":"direct","tag":"direct"}]}}"#;
+
+    fn temp_file(name: &str, contents: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("veyl-seed-cmd-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    fn ensure_runtime() {
+        static ONCE: OnceLock<()> = OnceLock::new();
+        ONCE.get_or_init(|| {
+            if crate::store::global().is_none() {
+                let store = std::sync::Arc::new(crate::store::Store::open_in_memory().unwrap());
+                crate::store::install_global(store);
+            }
+            let dir = std::env::temp_dir().join("veyl-seed-command-secrets");
+            let _ = std::fs::create_dir_all(&dir);
+            crate::secrets::install(&dir);
+        });
+    }
+
+    #[tokio::test]
+    async fn only_json_files_are_accepted() {
+        let path = temp_file("seeds.txt", GOOD);
+        let error = import_seed_file(path.to_string_lossy().into_owned())
+            .await
+            .unwrap_err();
+        assert_eq!(error["code"], "INVALID_ARGUMENT");
+        assert_eq!(error["details"]["reason"], "not_json_file");
+    }
+
+    #[tokio::test]
+    async fn a_missing_file_is_unreadable() {
+        let path = std::env::temp_dir().join("veyl-does-not-exist-xyz.json");
+        let error = import_seed_file(path.to_string_lossy().into_owned())
+            .await
+            .unwrap_err();
+        assert_eq!(error["details"]["reason"], "file_unreadable");
+    }
+
+    #[tokio::test]
+    async fn files_over_one_megabyte_are_rejected_before_reading() {
+        let dir = std::env::temp_dir().join(format!("veyl-seed-big-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.json");
+        std::fs::write(&path, vec![b'a'; 1024 * 1024 + 1]).unwrap();
+
+        let error = import_seed_file(path.to_string_lossy().into_owned())
+            .await
+            .unwrap_err();
+        assert_eq!(error["details"]["reason"], "file_too_large");
+        assert_eq!(error["details"]["max_bytes"], 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn invalid_json_is_reported_without_echoing_the_file() {
+        let path = temp_file("bad.json", r#"{"password":"pw-leak-me""#);
+        let error = import_seed_file(path.to_string_lossy().into_owned())
+            .await
+            .unwrap_err();
+        assert_eq!(error["details"]["reason"], "invalid_json");
+        assert!(!error.to_string().contains("pw-leak-me"), "{error}");
+        assert!(
+            !error.to_string().contains(&path.file_name().unwrap().to_string_lossy().to_string()),
+            "错误信息不应回显路径：{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_method_is_unsupported_not_invalid() {
+        let body = r#"{"provider_id":"p","name":"Demo","config":{"outbounds":[
+            {"type":"shadowsocks","tag":"x","server":"203.0.113.5","server_port":8388,
+             "method":"rc4-md5","password":"pw"}]}}"#;
+        let path = temp_file("rc4.json", body);
+        let error = import_seed_file(path.to_string_lossy().into_owned())
+            .await
+            .unwrap_err();
+        assert_eq!(error["code"], "UNSUPPORTED");
+        assert_eq!(error["details"]["method"], "rc4-md5");
+    }
+
+    #[tokio::test]
+    async fn nothing_importable_is_reported_separately() {
+        let body = r#"{"provider_id":"p","name":"Demo","config":{"outbounds":[
+            {"type":"direct","tag":"direct"}]}}"#;
+        let path = temp_file("direct.json", body);
+        let error = import_seed_file(path.to_string_lossy().into_owned())
+            .await
+            .unwrap_err();
+        assert_eq!(error["details"]["reason"], "no_importable_nodes");
+        assert_eq!(error["details"]["skipped"], 1, "UI 需要这个数字来写「已跳过 M 个」");
+    }
+
+    #[tokio::test]
+    async fn a_partial_import_succeeds_and_never_returns_passwords() {
+        ensure_runtime();
+        let path = temp_file("good.json", GOOD);
+        let response = import_seed_file(path.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+
+        assert_eq!(response["imported"], 1);
+        assert_eq!(response["skipped"].as_array().unwrap().len(), 1);
+        let profiles = response["profiles"].as_array().unwrap();
+        assert_eq!(profiles[0]["method"], "aes-256-gcm");
+        assert_eq!(profiles[0]["server"], "203.0.113.5");
+        assert_eq!(profiles[0]["server_port"], 8388);
+        assert!(profiles[0]["id"].as_str().unwrap().starts_with("seed-"));
+
+        let text = response.to_string();
+        assert!(!text.contains("pw-secret-tokyo"), "{text}");
+        assert!(!text.contains("password"), "{text}");
+    }
+}
