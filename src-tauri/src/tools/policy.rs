@@ -80,6 +80,26 @@ fn gate() -> &'static Mutex<Gate> {
     GATE.get_or_init(|| Mutex::new(Gate::default()))
 }
 
+/// session_id → 当前 request_id。审批事件需要带上它，而工具拿不到。
+fn current_requests() -> &'static Mutex<HashMap<String, String>> {
+    static CURRENT: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CURRENT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn set_current_request(session_id: &str, request_id: &str) {
+    current_requests()
+        .lock()
+        .insert(session_id.to_string(), request_id.to_string());
+}
+
+pub fn clear_current_request(session_id: &str) {
+    current_requests().lock().remove(session_id);
+}
+
+fn current_request(session_id: &str) -> Option<String> {
+    current_requests().lock().get(session_id).cloned()
+}
+
 fn args_hash(input: &Value) -> u64 {
     let mut hasher = DefaultHasher::new();
     let mut keys: Vec<&String> = input
@@ -182,10 +202,11 @@ pub fn guard(
 
     let risk = risk.to_string();
     let summary_owned = summary.to_string();
+    let request_id = current_request(&ctx.session_id);
     let payload = json!({
         "contract_version": envelope::CONTRACT_VERSION,
         "approval_id": approval_id.clone(),
-        "request_id": Value::Null,
+        "request_id": request_id,
         "session_id": session_id,
         "tool": tool,
         "summary": summary_owned,

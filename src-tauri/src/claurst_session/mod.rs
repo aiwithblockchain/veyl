@@ -127,6 +127,9 @@ impl AivpnSession {
         drop_dangling_tool_use(&mut messages);
         messages.push(Message::user(text));
 
+        // 审批事件要从工具里带出 request_id（工具拿不到它）。
+        crate::tools::policy::set_current_request(&self.session_id, &request_id);
+
         let started = Instant::now();
         let emitter = SessionEmitter::new(request_id.clone(), format!("asst_{request_id}"));
         let (tx, mut rx) = mpsc::unbounded_channel::<QueryEvent>();
@@ -288,6 +291,7 @@ impl AivpnSession {
 
         drop(messages);
         let streamed_text = consumer.await.unwrap_or_default();
+        crate::tools::policy::clear_current_request(&self.session_id);
         *self.cancel.lock().await = None;
 
         let duration_ms = started.elapsed().as_millis() as u64;

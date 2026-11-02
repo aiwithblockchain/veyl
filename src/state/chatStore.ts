@@ -169,8 +169,22 @@ function withAssistant(
   return { ...session, messages, updatedAt: Date.now() };
 }
 
-function appendText(items: TimelineItem[], content: string): TimelineItem[] {
-  const last = items[items.length - 1];
+/** 没有 request_id 的事件（UI 直连）挂到最近一条助手消息上。 */
+function attachToLastAssistant(
+  session: Session,
+  update: (message: Extract<ChatMessage, { role: "assistant" }>) => ChatMessage,
+): Session {
+  const messages = [...session.messages];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const candidate = messages[i];
+    if (candidate.role !== "assistant") continue;
+    messages[i] = update(candidate);
+    return { ...session, messages, updatedAt: Date.now() };
+  }
+  return session;
+}
+
+function appendText(items: TimelineItem[], content: string): TimelineItem[] {  const last = items[items.length - 1];
   if (last && last.kind === "text") {
     return [...items.slice(0, -1), { ...last, content: last.content + content }];
   }
@@ -377,18 +391,23 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
         case AGENT_EVENTS.approvalRequested:
           return patchSession(state, current.id, (session) => {
-            const withItem = withAssistant(
-              session,
-              "",
-              event.payload.request_id ?? "",
-              (message) => ({
-                ...message,
-                items: [
-                  ...closeOpenThinking(message.items),
-                  { kind: "approval", id: nextId("approval"), approvalId: event.payload.approval_id },
-                ],
-              }),
-            );
+            const addItem = (message: Extract<ChatMessage, { role: "assistant" }>) => ({
+              ...message,
+              items: [
+                ...closeOpenThinking(message.items),
+                {
+                  kind: "approval" as const,
+                  id: nextId("approval"),
+                  approvalId: event.payload.approval_id,
+                },
+              ],
+            });
+
+            // request_id 为 null 表示 UI 直连发起（契约 §4.4），没有可挂的消息时丢弃。
+            const withItem = event.payload.request_id
+              ? withAssistant(session, "", event.payload.request_id, addItem)
+              : attachToLastAssistant(session, addItem);
+
             return {
               ...withItem,
               approvals: {
