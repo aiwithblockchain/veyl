@@ -8,6 +8,7 @@ pub mod claurst_session;
 pub mod config;
 pub mod default_profile;
 pub mod lifecycle;
+pub mod llm;
 pub mod logging;
 pub mod netcfg;
 pub mod proxy;
@@ -59,6 +60,8 @@ pub fn run() {
     };
 
     crate::store::install_global(Arc::clone(&store));
+    // 多 provider 元数据迁移：只在首次写入时补内置 DeepSeek，重复启动幂等。
+    crate::llm::ensure_migrated(&store);
 
     let manager = RuntimeManager::new(RuntimeConfig::new(&data_dir));
     let proxy = Arc::new(ProxyController::new(Box::new(SqliteBackupStore::new(
@@ -195,6 +198,11 @@ pub fn run() {
             agent::commands::deepseek_save_key,
             agent::commands::deepseek_key_status,
             agent::commands::deepseek_clear_key,
+            agent::commands::llm_provider_list,
+            agent::commands::llm_provider_save,
+            agent::commands::llm_provider_delete,
+            agent::commands::llm_provider_activate,
+            agent::commands::llm_provider_test,
             agent::commands::rename_session,
             agent::commands::import_seed_file,
         ])

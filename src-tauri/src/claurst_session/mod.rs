@@ -31,7 +31,7 @@ use crate::tools::{
 };
 
 use self::events::{SessionEmitter, CONTRACT_VERSION};
-use self::provider::DeepSeekCredentials;
+use self::provider::LlmCredentials;
 
 const SYSTEM_PROMPT: &str = r#"你是 Veyl 的助手，只能通过提供的工具操作应用。
 
@@ -59,7 +59,7 @@ pub struct AivpnSession {
 impl AivpnSession {
     pub fn new(
         session_id: String,
-        credentials: &DeepSeekCredentials,
+        credentials: &LlmCredentials,
         services: Arc<dyn VpnToolServices>,
         working_dir: PathBuf,
     ) -> anyhow::Result<Arc<Self>> {

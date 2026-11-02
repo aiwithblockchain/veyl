@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use tokio::sync::Mutex;
 
-use crate::claurst_session::provider::DeepSeekCredentials;
+use crate::claurst_session::provider::LlmCredentials;
 use crate::claurst_session::AivpnSession;
 use crate::tools::VpnToolServices;
 
@@ -20,7 +20,7 @@ pub struct AppState {
     sessions: Mutex<HashMap<String, SessionEntry>>,
     /// request_id → session_id，用于取消。
     active_requests: parking_lot::Mutex<HashMap<String, String>>,
-    credentials: parking_lot::RwLock<Option<DeepSeekCredentials>>,
+    credentials: parking_lot::RwLock<Option<LlmCredentials>>,
     /// 凭据每变一次 +1；已经建好的会话拿着旧凭据，下次取用时按代数重建。
     credential_generation: AtomicU64,
     working_dir: PathBuf,
@@ -58,7 +58,7 @@ impl AppState {
 
     fn build(
         services: Arc<dyn VpnToolServices>,
-        credentials: Option<DeepSeekCredentials>,
+        credentials: Option<LlmCredentials>,
     ) -> Self {
         Self {
             services,
@@ -70,13 +70,18 @@ impl AppState {
         }
     }
 
-    /// 保存或清除 Key 的唯一入口：更新内存凭据并让已建会话失效。
-    /// 下次发消息时按新的代数重建会话，旧的 Key 不会继续被用。
+    /// 保存或清除 DeepSeek Key 后更新内存凭据（兼容旧入口）。
+    /// 注意：只有在当前 active provider 是 DeepSeek 时才应调用；否则用 `refresh_credentials`。
     pub fn apply_credentials(&self, api_key: Option<String>) {
         let credentials = api_key
             .map(|key| key.trim().to_string())
             .filter(|key| !key.is_empty())
-            .map(DeepSeekCredentials::new);
+            .map(LlmCredentials::deepseek);
+        self.apply_provider(credentials);
+    }
+
+    /// 切换当前 provider 后更新内存凭据；不打断进行中的请求（下次建会话生效）。
+    pub fn apply_provider(&self, credentials: Option<LlmCredentials>) {
         *self.credentials.write() = credentials;
         self.credential_generation.fetch_add(1, Ordering::SeqCst);
     }
@@ -176,12 +181,23 @@ impl AppState {
 }
 
 /// 启动时取一次凭据：环境变量优先（便于测试），否则读系统钥匙串。
-fn load_initial_credentials() -> Option<DeepSeekCredentials> {
-    std::env::var("DEEPSEEK_API_KEY")
+fn load_initial_credentials() -> Option<LlmCredentials> {
+    if let Some(key) = std::env::var("DEEPSEEK_API_KEY")
         .ok()
         .filter(|key| !key.trim().is_empty())
-        .or_else(|| crate::secrets::get_deepseek_key().ok().flatten())
-        .map(DeepSeekCredentials::new)
+    {
+        return Some(LlmCredentials::deepseek(key));
+    }
+    crate::store::global().and_then(|store| crate::llm::credentials(store))
+}
+
+/// 切 provider / 改 Key 后，从 settings 重新解析当前凭据。
+pub fn refresh_credentials() {
+    let Some(state) = APP_STATE.get().and_then(|weak| weak.upgrade()) else {
+        return;
+    };
+    let credentials = crate::store::global().and_then(|store| crate::llm::credentials(store));
+    state.apply_provider(credentials);
 }
 
 /// 会话工作目录：P1 W1 先用用户主目录下的 `.veyl/sessions`，W3 起改用平台数据目录。

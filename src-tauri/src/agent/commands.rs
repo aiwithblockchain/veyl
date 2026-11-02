@@ -309,6 +309,123 @@ pub async fn chat_delete(
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* 多 provider 模型 API 设置（R32）                                     */
+/* ------------------------------------------------------------------ */
+
+fn llm_error((reason, message): (String, String)) -> Value {
+    let code = match reason.as_str() {
+        "not_found" => "NOT_FOUND",
+        "SECRET_STORE" => "SECRET_STORE",
+        "INTERNAL" => "INTERNAL",
+        _ => "INVALID_ARGUMENT",
+    };
+    json!({
+        "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+        "code": code,
+        "message": message,
+        "retryable": false,
+        "details": { "reason": reason },
+        "request_id": "",
+    })
+}
+
+fn global_store() -> Result<&'static Arc<crate::store::Store>, Value> {
+    crate::store::global().ok_or_else(|| {
+        json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "INTERNAL",
+            "message": "本地数据库不可用",
+            "retryable": false,
+            "details": null,
+            "request_id": "",
+        })
+    })
+}
+
+#[tauri::command]
+pub async fn llm_provider_list() -> Result<Value, Value> {
+    let store = global_store()?;
+    crate::llm::ensure_migrated(store);
+    Ok(crate::llm::list_json(store))
+}
+
+#[tauri::command]
+pub async fn llm_provider_save(
+    provider_id: Option<String>,
+    name: String,
+    protocol: String,
+    base_url: Option<String>,
+    model: String,
+    api_key: Option<String>,
+) -> Result<Value, Value> {
+    let store = global_store()?;
+    crate::llm::ensure_migrated(store);
+    let input = crate::llm::ProviderInput {
+        provider_id,
+        name,
+        protocol,
+        base_url,
+        model,
+        api_key,
+    };
+    match crate::llm::save(store, input) {
+        Ok(value) => {
+            // 保存即设为当前：新请求立即用新 provider，旧请求不受影响。
+            crate::agent::refresh_credentials();
+            Ok(value)
+        }
+        Err(error) => Err(llm_error(error)),
+    }
+}
+
+#[tauri::command]
+pub async fn llm_provider_delete(provider_id: String) -> Result<Value, Value> {
+    let store = global_store()?;
+    match crate::llm::delete(store, &provider_id) {
+        Ok(()) => {
+            crate::agent::refresh_credentials();
+            Ok(json!({ "ok": true }))
+        }
+        Err(error) => Err(llm_error(error)),
+    }
+}
+
+#[tauri::command]
+pub async fn llm_provider_activate(provider_id: String) -> Result<Value, Value> {
+    let store = global_store()?;
+    match crate::llm::activate(store, &provider_id) {
+        Ok(()) => {
+            crate::agent::refresh_credentials();
+            Ok(json!({ "active_provider_id": provider_id }))
+        }
+        Err(error) => Err(llm_error(error)),
+    }
+}
+
+/// 测试连接：只传 providerId 时用已存配置与 Key；带字段时按草稿测。
+#[tauri::command]
+pub async fn llm_provider_test(
+    provider_id: Option<String>,
+    name: Option<String>,
+    protocol: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+) -> Result<Value, Value> {
+    let store = global_store()?;
+    crate::llm::ensure_migrated(store);
+    let input = crate::llm::ProviderInput {
+        provider_id,
+        name: name.unwrap_or_default(),
+        protocol: protocol.unwrap_or_default(),
+        base_url,
+        model: model.unwrap_or_default(),
+        api_key,
+    };
+    crate::llm::test(store, input).await.map_err(llm_error)
+}
+
 /// 用系统浏览器打开白名单内的链接（目前只有 DeepSeek 开放平台）。
 /// 域名写死在这里，避免变成任意 URL 打开器。
 #[tauri::command]
@@ -376,9 +493,13 @@ pub async fn onboarding_status(state: State<'_, Arc<AppState>>) -> Result<Value,
         })
         .unwrap_or(0);
 
+    let has_key = state.has_credentials()
+        || crate::store::global()
+            .map(|store| crate::llm::has_any_usable(store))
+            .unwrap_or(false);
     Ok(json!({
         "completed": completed,
-        "has_key": state.has_credentials(),
+        "has_key": has_key,
         "profile_count": profile_count,
     }))
 }
@@ -476,13 +597,13 @@ pub async fn chat_history(session_id: Option<String>) -> Result<Value, String> {
 /// 返回值绝不包含明文 Key。
 #[tauri::command]
 pub async fn deepseek_save_key(
-    state: State<'_, Arc<AppState>>,
+    _state: State<'_, Arc<AppState>>,
     key: String,
 ) -> Result<Value, Value> {
     match crate::secrets::save_deepseek_key(&key).await {
         Ok(outcome) => {
-            // 钥匙串写成功后立刻热更新内存，下一次对话就用新 Key。
-            state.apply_credentials(Some(key.trim().to_string()));
+            // 热更新内存凭据：只有当前 active provider 是 DeepSeek 时才会换 key。
+            crate::agent::refresh_credentials();
             if outcome.validation == "invalid" {
                 return Err(json!({
                     "code": "INVALID_KEY",
@@ -501,21 +622,23 @@ pub async fn deepseek_save_key(
     }
 }
 
-/// 设置页显示当前是否已配置；读内存，保证与「保存后立即生效」一致。
+/// 设置页显示当前是否已配置 DeepSeek（基础模式专用，不随 active provider 变化）。
 #[tauri::command]
 pub async fn deepseek_key_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    let _ = state;
+    let key = crate::secrets::get_deepseek_key().ok().flatten();
     Ok(json!({
-        "configured": state.has_credentials(),
-        "masked": state.masked_key(),
+        "configured": key.is_some(),
+        "masked": key.as_deref().map(crate::secrets::mask),
     }))
 }
 
 /// 清除 Key：钥匙串与内存一起清，避免「钥匙串没了但内存还留着」。
 #[tauri::command]
-pub async fn deepseek_clear_key(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+pub async fn deepseek_clear_key(_state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
     match crate::secrets::delete_deepseek_key() {
         Ok(()) => {
-            state.apply_credentials(None);
+            crate::agent::refresh_credentials();
             Ok(json!({ "cleared": true }))
         }
         Err(error) => Err(json!({
