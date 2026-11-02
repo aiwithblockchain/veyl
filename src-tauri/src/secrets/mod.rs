@@ -300,6 +300,10 @@ pub fn get_device_token() -> SecretResult<Option<String>> {
     get_secret(DEVICE_TOKEN)
 }
 
+pub fn delete_device_token() -> SecretResult<()> {
+    delete_secret(DEVICE_TOKEN)
+}
+
 /// 机器稳定标识：macOS `IOPlatformUUID`、Windows `MachineGuid`、Linux `/etc/machine-id`。
 pub fn machine_id() -> Option<String> {
     #[cfg(target_os = "macos")]

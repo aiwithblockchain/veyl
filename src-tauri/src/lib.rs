@@ -21,7 +21,7 @@ use crate::store::Store;
 use crate::tools::VpnToolServices;
 use crate::tools::services::WiredServices;
 
-const DEFAULT_CATALOG_URL: &str = "http://127.0.0.1:18080/v1";
+const DEFAULT_CATALOG_URL: &str = "http://127.0.0.1:18090/v1";
 
 fn catalog_base_url(store: &Store) -> String {
     if let Ok(url) = std::env::var("VEYL_CATALOG_URL") {

@@ -32,7 +32,8 @@
 | AC-E2 | 代理残留恢复 | C | **PASS（HEAD `f4085cf`）** | recover 前 2081 → 后 2080，可判别 |
 | P-4 | 二进制不早于源码（新准入） | 静态 | **通过** | 17:31 一度 ❌（源码 17:30:34 晚于二进制 17:28:04），重建后 ✅ |
 | AC-B3 | 事件到达且无 `ai-` 前缀 | 脚本 | **PASS** | `check-contracts.mjs` 5 项通过、退出码 0、无 FAIL（18:56） |
-| AC-B2 / B4 | 对话流式 / 工具卡渲染 | A | **待测** | 准入已通，可开跑 |
+| AC-B2 | 对话流式输出 | A | **PASS** | 回复分三段落库（19:09:32 / :33 / :37），中间夹工具调用，非一次性整段 |
+| AC-B4 | 工具卡渲染与脱敏 | A | **部分 PASS** | 脱敏已过（`args_json` 无凭据）；工具卡渲染待 D-10 修后一并判 |
 | AC-C1 ~ C5d | 审批语义与四态落库 | A | **待测** | 准入已通，可开跑 |
 | AC-F1 / F2 | 对话落库与重启一致 | A | **PASS**（F1，`2dc223e`） | 19:06 重启后侧边栏显示 2 个历史会话，消息成对、顺序正确 |
 
@@ -124,7 +125,7 @@ datetime(created_at/1000,'unixepoch')   → 2026-11-02 18:39:24  ✅
 - **后果**：测试人员按文档取证据时会看到空时间列，轻则困惑、重则误判「没有数据」。
 - **建议**：二选一定死 —— 要么库统一存秒，要么文档 SQL 改成 `created_at/1000`。文档里所有依赖时间过滤的用例（AC-C1/C2/F1/F2 等）都受影响。
 
-### D-08 历史会话不显示：前端从未调用 `chat_history`（**高**，归属 Alice）→ AC-F1 失败
+### D-08 历史会话不显示：前端从未调用 `chat_history`（**高**，归属 Alice）→ **已修复并验证（`2dc223e`），AC-F1 转 PASS**
 
 - **现象**：2026-11-02 18:58，用户重启后左侧会话列表里看不到任何历史会话，尽管数据库里已有 2 个会话 / 5 条消息。
 - **证据（数据库确实有数据）**：
@@ -157,7 +158,51 @@ session_mvz4tzg9_1  18:54  4 msgs（user/assistant 成对）
 - **实现校验**：`normalise_title`（`agent/commands.rs:239`）先 trim 再判空、再按 `MAX_TITLE_CHARS = 80`（`commands.rs:234`）判长度，超限返回 `INVALID_ARGUMENT` + `details.reason = "title_too_long"`。
 - **附带发现（与 D-05 相关）**：`session_mvz4luwa_1` 原来自动标题是「当前状态：运行时处于 \*\*idle\*\* 状态（未连接），si…」—— 因为它建会话时用户消息还没落库（D-05），首条消息是助手回复，标题取到了助手的话。D-05 修复后新会话标题改取用户消息；已有历史可用改名入口自行修正。
 
-### D-07 发送消息后输入框消失（**阻断 AC-B2/B4/C/F**，归属 Alice）
+### D-09 默认目录服务端口指向 18080，与 mock 的 catalog 端口 18090 不一致（**中**，归属 Bob）
+
+- **现象**：2026-11-02 19:09 用户发「连到日本」，`CatalogSearch` 连续失败两次：
+
+```
+CatalogSearch is_error=1  UPSTREAM_ERROR: catalog transport: error sending request
+  for url (http://127.0.0.1:18080/v1/catalog/nodes?region=jp&limit=10)
+CatalogSearch is_error=1  ... (http://127.0.0.1:18080/v1/catalog/nodes?region=jp)
+```
+
+- **根因**：`DEFAULT_CATALOG_URL = "http://127.0.0.1:18080/v1"`（`src-tauri/src/lib.rs:24`），而 `tests/run-mocks.sh` 里 **catalog 跑在 18090**、**echo 才在 18080**。默认值指到了另一个服务的端口上。
+- **覆盖链**：`VEYL_CATALOG_URL` 环境变量 > `settings.catalog_base_url` > 默认值（`lib.rs:26-38`）。所以可绕过，但默认值是错的。
+- **后果**：不额外配置时，任何依赖目录的功能（`CatalogSearch`、以及后续 `ProfileImport`/`VpnConnect`）都会失败。**流程走不到 `CoreInstall`，也就走不到审批 —— AC-C1/C2/C3/C5 全部被卡住。**
+- **建议**：默认值改成 18090，或让 `run-mocks.sh` 的 catalog 用 18080 并与 echo 分离端口。二者定一个，别让默认值和 mock 编排各说各话。
+
+### D-10 目录服务设备注册未接线，`CatalogSearch` 必然 401（**阻断 AC-C 组**，归属 Bob）
+
+- **现象**：把目录地址改到正确的 18090 后，mock catalog 仍拒绝请求：
+
+```
+GET /v1/catalog/nodes?region=jp&limit=10  →  401  {"error":"invalid_device_token"}
+```
+
+- **根因**：`CatalogClient` 需要 `Authorization: Bearer <device_token>`（`tests/mock-catalog/server.mjs:92` 校验），客户端也具备完整能力 —— `register_device`（`catalog/client.rs:158`）、`set_token`、`with_token`、`secrets::get_device_token`（`secrets/mod.rs:299`）都存在。但**全部没有调用方**：
+
+```
+grep -rn 'set_token\|with_token\|get_device_token' src-tauri/src/ | grep -v 'fn '
+→ 空（除定义外零命中）
+grep -rn 'register_device' src-tauri/src/ | grep -v 'fn register_device'
+→ 空
+```
+
+- **后果**：应用永远不会去 `POST /v1/devices` 换取令牌，也不会把已存的令牌注入客户端，因此 `CatalogSearch` 恒为 401 → `ProfileImport` / `VpnConnect` 无从触发 → **`CoreInstall` 审批不出现 → AC-C1/C2/C3/C5a~d 全都无法执行**。
+- **与 D-03/D-08 同一类问题**：能力已实现，但没有接到调用链上。
+- **建议**：首次使用时若 `secrets::get_device_token()` 为空则调 `register_device` 并把 token 写入 `secrets.enc`；启动或首次请求时用 `set_token` 注入。
+
+### D-11 mock catalog 返回字段与契约不一致，修好 D-10 也会失败（**中**，归属 Bob）
+
+- **发现**：PM 复核 D-10 时发现，测试人员已核实。
+- **证据**：`tests/mock-catalog/server.mjs:85` 返回 `{ device_id: id, token }`；而契约 §2.1 与客户端 `RegisterDeviceResponse`（`catalog/client.rs:79-88`）都要求 `device_token`。
+- **后果**：即使把 D-10 的注册接线补上，`serde` 反序列化 `RegisterDeviceResponse` 时会因缺 `device_token` 而失败，**修复会白做**。
+- **决定（PM）**：改 mock，不改客户端 —— 契约是准绳。
+- **连带提醒**：D-10 + D-11 必须一起修，只修一个仍然无法取到令牌。
+
+### D-07 发送消息后输入框消失（**阻断 AC-B2/B4/C/F**，归属 Alice）→ **已修复并验证（`2dc223e`）**
 
 - **发现**：2026-11-02 19:00，用户在 Tauri 窗口发「你好，介绍一下你自己」后，**输入框不可见**，无法继续对话。
 - **已排除**：`Composer` 在 `ChatView` 里是**无条件渲染**（`ChatView.tsx:83`），组件内部也没有按 `streaming` 隐藏 `textarea` 的分支（`streaming` 只影响「停止」按钮和「发送」按钮的 disabled）。所以不是逻辑隐藏。
@@ -181,6 +226,31 @@ session_mvz4tzg9_1  18:54  4 msgs（user/assistant 成对）
 ---
 
 ## 3. 证据
+
+### AC-B2 — 流式输出 → **PASS**
+
+用户发「连到日本」后，助手的一条回答在库里被拆成**三段**，时间戳本身即证据：
+
+```
+assistant [19:09:32]  我先查看当前运行状态和可用的日本节点。
+assistant [19:09:33]  节点目录查询失败了：本地目录服务（127.0.0.1:18080）没响应…
+                      我重试一次目录查询，确认是不是偶发问题。
+assistant [19:09:37]  目前还连不上日本节点，原因有两个，都与节点本身无关：…
+```
+
+三段之间夹着 4 次工具调用，说明文本是**随工具执行分段产出**的，不是结束时一次性整段返回。对照 AC-B2 的失败判定「一次性整段出现（流式失效）」，本条不成立。
+
+**附带确认（诚实性）**：回复中明确写「没有目录数据，我就无法提供节点，**也不会自己编造节点**」，并区分了「`DiagRun` 报告通过但只覆盖控制面」与目录错误。没有把失败包装成成功，符合契约对错误汇报的要求。
+
+> 说明：本条回答的内容受 D-10 影响（目录 401，流程未走完），但**流式这一维度是独立可判的**，不与 D-10 混为一谈。
+
+### AC-B4 — 工具卡与脱敏 → **部分 PASS**
+
+| 子项 | 结果 | 证据 |
+|---|---|---|
+| 参数脱敏 | **PASS** | `args_json`：`{"include_traffic":true}` / `{"limit":10,"region":"jp"}` / `{"region":"jp"}` / `{"include_logs":true}` —— 无任何 `uuid` / `password` / `key` |
+| 工具卡渲染（名称/状态/耗时） | 待判 | 用户看到 `CatalogSearch region=jp 1ms 失败` 形式的内联卡片，但完整渲染需 D-10 修复后串起正常流程再判 |
+| 审批卡内联 | 待判 | 本轮未出现审批卡（这些工具都无需审批） |
 
 ### AC-D1 / D3 / D5 — e2e
 

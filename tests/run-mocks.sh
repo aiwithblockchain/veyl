@@ -88,7 +88,7 @@ selftest() {
   local admin
   admin="$(curl -s -X POST "http://127.0.0.1:$CATALOG_PORT/v1/devices" -H 'content-type: application/json' -d '{}')"
   local token
-  token="$(printf '%s' "$admin" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
+  token="$(printf '%s' "$admin" | sed -n 's/.*"device_token":"\([^"]*\)".*/\1/p')"
   check "设备注册返回 token" "yes" "$([ -n "$token" ] && echo yes || echo no)"
 
   check "未带 token 的目录查询 401" "401" \

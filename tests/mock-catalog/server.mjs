@@ -41,6 +41,32 @@ function send(res, code, body, headers = {}) {
   res.end(payload);
 }
 
+let requestSeq = 0;
+function envelope(res, code, data, headers = {}) {
+  requestSeq += 1;
+  return send(
+    res,
+    code,
+    {
+      contract_version: "1.0.7",
+      ok: true,
+      request_id: `mock_${requestSeq}`,
+      data,
+    },
+    headers,
+  );
+}
+
+function failEnvelope(res, code, errorCode, message, details = null) {
+  requestSeq += 1;
+  return send(res, code, {
+    contract_version: "1.0.7",
+    ok: false,
+    request_id: `mock_${requestSeq}`,
+    error: { code: errorCode, message, retryable: false, details },
+  });
+}
+
 function faultOf(req, url) {
   return url.searchParams.get("_fault") || req.headers["x-mock-fault"] || null;
 }
@@ -66,7 +92,7 @@ const server = http.createServer((req, res) => {
     setTimeout(() => res.socket?.destroy(), 30000);
     return;
   }
-  if (fault === "500") return send(res, 500, { error: "mock_internal_error" });
+  if (fault === "500") return failEnvelope(res, 500, "INTERNAL", "mock_internal_error");
   if (fault === "malformed") return send(res, 200, '{"nodes": [', { "content-type": "application/json" });
   if (fault === "slow") {
     const ms = Number(url.searchParams.get("ms") || 3000);
@@ -82,7 +108,13 @@ const server = http.createServer((req, res) => {
       const id = `dev_${String(stats.devices).padStart(6, "0")}`;
       const token = `tok_${createHash("sha256").update(id + Date.now()).digest("hex").slice(0, 32)}`;
       devices.set(token, id);
-      return send(res, 201, { device_id: id, token });
+      const now = new Date();
+      return envelope(res, 201, {
+        device_id: id,
+        device_token: token,
+        issued_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 180 * 86400_000).toISOString(),
+      });
     }
 
     // 节点列表：不返回 server / credentials / tls
@@ -90,9 +122,9 @@ const server = http.createServer((req, res) => {
       stats.catalog++;
       const auth = req.headers.authorization || "";
       if (!auth.startsWith("Bearer ") || !devices.has(auth.slice(7))) {
-        return send(res, 401, { error: "invalid_device_token" });
+        return failEnvelope(res, 401, "DEVICE_TOKEN_INVALID", "设备 token 无效或已撤销");
       }
-      if (req.headers["if-none-match"] === etag) {
+      if (req.headers["if-none-match"] === `"${etag}"` || req.headers["if-none-match"] === etag) {
         res.writeHead(304, { etag });
         return res.end();
       }
@@ -105,16 +137,29 @@ const server = http.createServer((req, res) => {
       if (protocol) list = list.filter((n) => n.protocol === protocol);
       list = list.slice(0, limit).map(publicNode);
 
-      return send(res, 200, { etag, nodes: list }, { etag });
+      return envelope(
+        res,
+        200,
+        { etag, nodes: list, next_cursor: null, fetched_at: new Date().toISOString() },
+        { etag },
+      );
     }
 
-    // 完整节点（profile_import 用）
-    const nodeMatch = path.match(/^\/v1\/nodes\/([^/]+)$/);
+    // 完整节点（profile_import / vpn_connect 用）；契约路径是 /v1/catalog/nodes/{id}
+    const nodeMatch = path.match(/^\/v1\/(?:catalog\/)?nodes\/([^/]+)$/);
     if (req.method === "GET" && nodeMatch) {
       stats.nodeFetches++;
+      const auth = req.headers.authorization || "";
+      if (!auth.startsWith("Bearer ") || !devices.has(auth.slice(7))) {
+        return failEnvelope(res, 401, "DEVICE_TOKEN_INVALID", "设备 token 无效或已撤销");
+      }
       const node = allNodes.find((n) => n.id === decodeURIComponent(nodeMatch[1]));
-      if (!node) return send(res, 404, { error: "node_not_found" });
-      return send(res, 200, node);
+      if (!node) return failEnvelope(res, 404, "NODE_NOT_FOUND", "节点不存在或已下线");
+      return envelope(res, 200, {
+        etag,
+        node,
+        fetched_at: new Date().toISOString(),
+      });
     }
 
     if (req.method === "POST" && path === "/v1/health/report") {
@@ -139,7 +184,7 @@ const server = http.createServer((req, res) => {
       return send(res, 404, { error: "asset_not_found" });
     }
 
-    send(res, 404, { error: "not_found", path });
+    failEnvelope(res, 404, "NOT_FOUND", "not_found", { path });
   });
 });
 

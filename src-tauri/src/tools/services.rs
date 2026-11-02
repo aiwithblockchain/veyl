@@ -171,6 +171,7 @@ impl VpnToolServices for NotWiredServices {
 // ---------------------------------------------------------------------------
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::catalog::CatalogClient;
@@ -191,6 +192,10 @@ pub struct WiredServices {
     catalog: Arc<CatalogClient>,
     installer: Installer,
     data_dir: PathBuf,
+    /// 设备 token 是否已就绪；避免每次目录调用都读一次凭据文件。
+    device_token_ready: AtomicBool,
+    /// 注册/换 token 串行化，避免并发重复注册。
+    device_register: tokio::sync::Mutex<()>,
 }
 
 impl WiredServices {
@@ -209,6 +214,8 @@ impl WiredServices {
             proxy,
             catalog,
             data_dir,
+            device_token_ready: AtomicBool::new(false),
+            device_register: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -222,6 +229,101 @@ impl WiredServices {
             .ok()
             .flatten()
             .map(|profile| profile.id)
+    }
+
+
+    /// 首次目录调用前确保有设备 token：先读本地，没有就注册一次。
+    /// 注册失败不阻塞应用启动——只是这次目录查询会失败并给出可读错误。
+    async fn ensure_device_token(&self) -> anyhow::Result<()> {
+        if self.device_token_ready.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let _guard = self.device_register.lock().await;
+        if self.device_token_ready.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        match crate::secrets::get_device_token() {
+            Ok(Some(token)) => {
+                self.catalog.set_token(Some(token));
+                self.device_token_ready.store(true, Ordering::SeqCst);
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(error) => log::warn!("读取本地设备 token 失败：{error}"),
+        }
+
+        self.register_device().await
+    }
+
+    /// 401 之后：清掉本地 token，重新注册一次（只在调用方重试一次，不会死循环）。
+    async fn reauthenticate(&self) -> anyhow::Result<()> {
+        let _guard = self.device_register.lock().await;
+        let _ = crate::secrets::delete_device_token();
+        self.catalog.set_token(None);
+        self.device_token_ready.store(false, Ordering::SeqCst);
+        self.register_device().await
+    }
+
+    async fn register_device(&self) -> anyhow::Result<()> {
+        let machine_id = crate::catalog::machine_fingerprint()
+            .unwrap_or_else(|| format!("unknown-{:016x}", rand::random::<u64>()));
+        let request = crate::catalog::RegisterDeviceRequest::new(
+            crate::catalog::device_fingerprint(&machine_id),
+        );
+
+        let response = self
+            .catalog
+            .register_device(&request)
+            .await
+            .map_err(|e| svc_error(e.code.clone(), format!("设备注册失败：{e}")))?;
+
+        if let Err(error) = crate::secrets::set_device_token(&response.device_token) {
+            log::warn!("设备 token 写本地失败（本次运行仍可用）：{error}");
+        }
+        self.catalog.set_token(Some(response.device_token.clone()));
+        self.device_token_ready.store(true, Ordering::SeqCst);
+        log::info!("目录服务设备已注册：{}", response.device_id);
+        Ok(())
+    }
+
+    async fn catalog_list(
+        &self,
+        query: &crate::catalog::NodeQuery,
+    ) -> anyhow::Result<crate::catalog::NodeListResponse> {
+        self.ensure_device_token().await?;
+        match self.catalog.list_nodes(query).await {
+            Ok(response) => Ok(response),
+            Err(error) if error.is_unauthorized() => {
+                log::warn!("目录查询 401，重新注册设备后重试一次");
+                self.reauthenticate().await?;
+                self.catalog
+                    .list_nodes(query)
+                    .await
+                    .map_err(|e| svc_error(e.code.clone(), e))
+            }
+            Err(error) => Err(svc_error(error.code.clone(), error)),
+        }
+    }
+
+    async fn catalog_detail(
+        &self,
+        node_id: &str,
+    ) -> anyhow::Result<crate::catalog::NodeDetailResponse> {
+        self.ensure_device_token().await?;
+        match self.catalog.node_detail(node_id).await {
+            Ok(detail) => Ok(detail),
+            Err(error) if error.is_unauthorized() => {
+                log::warn!("节点详情 401，重新注册设备后重试一次");
+                self.reauthenticate().await?;
+                self.catalog
+                    .node_detail(node_id)
+                    .await
+                    .map_err(|e| svc_error(e.code.clone(), e))
+            }
+            Err(error) => Err(svc_error(error.code.clone(), error)),
+        }
     }
 
     fn profile_config_path(&self, profile_id: &str) -> PathBuf {
@@ -390,11 +492,7 @@ impl VpnToolServices for WiredServices {
             limit: query.limit.map(|limit| limit.min(50) as u8),
             cursor: query.cursor,
         };
-        let response = self
-            .catalog
-            .list_nodes(&query)
-            .await
-            .map_err(|e| svc_error(e.code.clone(), e))?;
+        let response = self.catalog_list(&query).await?;
         Ok(json!({
             "nodes": response.nodes,
             "next_cursor": response.next_cursor,
@@ -424,11 +522,7 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn profile_import(&self, node_id: &str, name: Option<String>) -> anyhow::Result<Value> {
-        let detail = self
-            .catalog
-            .node_detail(node_id)
-            .await
-            .map_err(|e| svc_error(e.code.clone(), e))?;
+        let detail = self.catalog_detail(node_id).await?;
 
         let snapshot = detail.node.non_secret_config();
         let id = format!("prf_{node_id}");
