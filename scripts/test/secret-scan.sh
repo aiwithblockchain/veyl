@@ -92,8 +92,13 @@ cb_password() {
   # 只取紧跟在关键字后面的那个值，避免抓到同一行其它带引号的字符串。
   matched="$(printf '%s\n' "$line" | grep -oE "$PASSWORD_RE" | head -n1)"
   val="$(printf '%s' "$matched" | grep -oE "[\"'][^\"']*[\"']$" | head -n1 | sed -E "s/^[\"']//; s/[\"']$//")"
+  # 测试夹具的封闭清单：只有完全相等才放行。
+  # 新增一条都要人工判断一次 —— 不用前缀/子串/形态这类可自动套用的模式，
+  # 否则 correct-horse-battery-staple 这种口令短语会被整类放过。
   case "$val" in
-    pw-*|test-*|fake-*|dummy-*|example-*|*not-real*|*leak-me*|*placeholder*) return 0 ;;
+    new-secret|pw-tokyo|pw-osaka|pw-secret-tokyo|pw-leak-me|\
+    test-password-not-real|test-secret|test-secret-123|\
+    dummy-secret|not-a-real-secret|placeholder-secret) return 0 ;;
     \$*) return 0 ;;        # $CLASH_SECRET / $(printf ...) 这类变量或命令替换
     *[a-z]*) : ;;           # 含小写字母，继续按真实值判定
     *) return 0 ;;          # 全大写数字下划线：环境变量名风格（RANDOM_SECRET）
