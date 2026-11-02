@@ -12,8 +12,8 @@ use super::error::{RuntimeError, RuntimeResult};
 use super::health::{ClashApi, DataPlaneProbe};
 use super::process::{self, SpawnOptions};
 
-pub const CONTRACT_VERSION: &str = "1.0.7";
-pub const EVENT_CONTRACT_VERSION: &str = "1.0.7";
+pub const CONTRACT_VERSION: &str = "1.0.8";
+pub const EVENT_CONTRACT_VERSION: &str = "1.0.8";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
 pub const DEFAULT_DATA_PLANE_PROBE: &str = "http://cp.cloudflare.com/generate_204";

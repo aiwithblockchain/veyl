@@ -63,7 +63,7 @@ fn not_wired<T>(what: &str) -> anyhow::Result<T> {
 
 fn idle_snapshot() -> Value {
     json!({
-        "contract_version": "1.0.7",
+        "contract_version": "1.0.8",
         "state": "idle",
         "mode": "system_proxy",
         "pid": null,
@@ -73,7 +73,7 @@ fn idle_snapshot() -> Value {
         "config_hash": null,
         "system_proxy_enabled": false,
         "health": {
-            "contract_version": "1.0.7",
+            "contract_version": "1.0.8",
             "process": false,
             "clash_api": false,
             "data_plane": false,
@@ -564,7 +564,7 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn profile_delete(&self, profile_id: &str) -> anyhow::Result<Value> {
-        // 准入检查必须在审批之前：命中活动配置直接拒绝，不弹审批卡。
+        // 准入检查先于执行：命中活动配置直接拒绝。
         if let Some(active) = self.manager.active_profile_id().await {
             if active == profile_id {
                 return Err(svc_error(

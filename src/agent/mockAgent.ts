@@ -4,8 +4,6 @@ import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
   AgentEvent,
   AiStatusPhase,
-  ApprovalDecision,
-  ApprovalScope,
   NextAction,
   RuntimeSnapshot,
   RuntimeState,
@@ -18,12 +16,6 @@ const CHUNK_INTERVAL = 16;
 
 /** mock 通道固定出口 IP，方便自动化断言。 */
 export const MOCK_EXIT_IP = "203.0.113.7";
-
-/**
- * 会话内首次确认的工具（契约 tools.md §2.2）。
- * 其余需要确认的工具都是 `always`，每次都弹。
- */
-const SESSION_SCOPED_TOOLS = new Set(["VpnConnect"]);
 
 function splitForStreaming(text: string): string[] {
   const chars = Array.from(text);
@@ -41,27 +33,9 @@ export class MockAgentBridge implements AgentBridge {
 
   private listeners = new Set<(event: AgentEvent) => void>();
   private cancelled = new Set<string>();
-  private approvals = new Map<string, (decision: ApprovalDecision) => void>();
   private activeRequests = new Set<string>();
-  /** 会话级授权：sessionId → 已放行的工具名。只存内存，新会话用新的 key。 */
-  private grants = new Map<string, Set<string>>();
   /** 装过一次就不再走安装流程（真实链路同理，已安装时不重复装）。 */
   private installed = false;
-
-  private hasGrant(sessionId: string, tool: string): boolean {
-    return this.grants.get(sessionId)?.has(tool) ?? false;
-  }
-
-  private addGrant(sessionId: string, tool: string): void {
-    const granted = this.grants.get(sessionId) ?? new Set<string>();
-    granted.add(tool);
-    this.grants.set(sessionId, granted);
-  }
-
-  /** 会话销毁时调用；界面上开新会话会拿到新的 sessionId，天然隔离。 */
-  clearSessionGrants(sessionId: string): void {
-    this.grants.delete(sessionId);
-  }
 
   private runtime: RuntimeSnapshot = {
     contract_version: CONTRACT_VERSION,
@@ -192,7 +166,6 @@ export class MockAgentBridge implements AgentBridge {
     result: string,
     options: {
       permissionLevel?: ToolPermissionLevel;
-      approvalPolicy?: "never" | "always" | "first_time_per_session";
       argsPreview?: Record<string, unknown>;
       nextActions?: NextAction[];
       errorCode?: string | null;
@@ -209,7 +182,6 @@ export class MockAgentBridge implements AgentBridge {
         tool,
         action,
         permission_level: options.permissionLevel ?? "read_only",
-        approval_policy: options.approvalPolicy ?? "never",
         source: "agent",
         args_preview: options.argsPreview,
         emitted_at: now(),
@@ -236,10 +208,6 @@ export class MockAgentBridge implements AgentBridge {
       },
     });
     return !cancelled;
-  }
-
-  private waitApproval(approvalId: string): Promise<ApprovalDecision> {
-    return new Promise((resolve) => this.approvals.set(approvalId, resolve));
   }
 
   private finish(
@@ -337,19 +305,6 @@ export class MockAgentBridge implements AgentBridge {
         return this.finish(requestId, assistantId, "cancelled", null);
       }
 
-      const approved = await this.requestApproval(
-        sessionId,
-        requestId,
-        "CoreInstall",
-        "下载并安装 sing-box 1.14.4（约 28 MB）",
-        "call",
-        "medium",
-      );
-      if (!approved) {
-        await this.type(requestId, assistantId, "好的，先不安装。需要的时候跟我说「安装运行时」。");
-        return this.finish(requestId, assistantId, "success", "已取消安装");
-      }
-
       if (
         !(await this.tool(
           requestId,
@@ -360,7 +315,6 @@ export class MockAgentBridge implements AgentBridge {
           "已安装 sing-box 1.14.4。",
           {
             permissionLevel: "execute",
-            approvalPolicy: "always",
             argsPreview: { version: "1.14.4" },
           },
         ))
@@ -390,19 +344,6 @@ export class MockAgentBridge implements AgentBridge {
       return this.finish(requestId, assistantId, "cancelled", null);
     }
 
-    const connectApproved = await this.requestApproval(
-      sessionId,
-      requestId,
-      "VpnConnect",
-      "连接到 东京 01",
-      "session",
-      "high",
-    );
-    if (!connectApproved) {
-      await this.type(requestId, assistantId, "已取消连接。需要换节点再告诉我。");
-      return this.finish(requestId, assistantId, "success", "已取消连接");
-    }
-
     if (
       !(await this.tool(
         requestId,
@@ -413,7 +354,6 @@ export class MockAgentBridge implements AgentBridge {
         "已连接到 东京 01，出口 IP 203.0.113.7，延迟 42ms。",
         {
           permissionLevel: "execute",
-          approvalPolicy: "first_time_per_session",
           argsPreview: { node_id: "seed-jp-01", strategy: "latency" },
           nextActions: [{ label: "断开连接", tool: "VpnDisconnect", args: {} }],
         },
@@ -442,50 +382,6 @@ export class MockAgentBridge implements AgentBridge {
     const reply = `已连接到「东京 01」，出口 IP ${MOCK_EXIT_IP}，系统代理已生效。要换节点随时说。`;
     await this.type(requestId, assistantId, reply);
     this.finish(requestId, assistantId, "success", reply);
-  }
-
-  private async requestApproval(
-    sessionId: string,
-    requestId: string,
-    tool: string,
-    summary: string,
-    scope: ApprovalScope,
-    risk: "low" | "medium" | "high",
-    argsPreview?: Record<string, unknown>,
-  ): Promise<boolean> {
-    if (this.cancelled.has(requestId)) return false;
-
-    // 会话内首次：已授权就直接放行，不再弹卡。
-    const sessionScoped = SESSION_SCOPED_TOOLS.has(tool);
-    if (sessionScoped && this.hasGrant(sessionId, tool)) {
-      return true;
-    }
-
-    const approvalId = `apr_${Math.random().toString(36).slice(2, 9)}`;
-    this.status(requestId, assistantIdFor(requestId), `等待确认：${summary}`, "waiting_permission");
-    this.emit({
-      name: AGENT_EVENTS.approvalRequested,
-      payload: {
-        contract_version: CONTRACT_VERSION,
-        approval_id: approvalId,
-        request_id: requestId,
-        session_id: sessionId,
-        tool,
-        args_preview: argsPreview,
-        summary,
-        risk,
-        scope,
-        expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
-        emitted_at: now(),
-      },
-    });
-
-    const decision = await this.waitApproval(approvalId);
-    const allowed = decision === "allow" && !this.cancelled.has(requestId);
-
-    // 只有「允许」才记授权；拒绝不记，下次仍然弹（验收口径）。
-    if (allowed && sessionScoped) this.addGrant(sessionId, tool);
-    return allowed;
   }
 
   // 演示「全字段被脱敏 → 整个 args_preview 省略」：卡片上不出现参数行。
@@ -525,22 +421,8 @@ export class MockAgentBridge implements AgentBridge {
     this.finish(requestId, assistantId, "success", reply);
   }
 
-  // `always` 类工具：每次都要确认，不查也不写 Grant。
-  private async installOnlyFlow(sessionId: string, requestId: string, assistantId: string) {
+  private async installOnlyFlow(_sessionId: string, requestId: string, assistantId: string) {
     this.status(requestId, assistantId, "准备安装运行时", "preparing_tool");
-
-    const approved = await this.requestApproval(
-      sessionId,
-      requestId,
-      "CoreInstall",
-      "下载并安装 sing-box 1.14.4（约 28 MB）",
-      "call",
-      "medium",
-    );
-    if (!approved) {
-      await this.type(requestId, assistantId, "好的，不装了。");
-      return this.finish(requestId, assistantId, "success", "已取消安装");
-    }
 
     if (
       !(await this.tool(
@@ -552,7 +434,6 @@ export class MockAgentBridge implements AgentBridge {
         "已安装 sing-box 1.14.4。",
         {
           permissionLevel: "execute",
-          approvalPolicy: "always",
           argsPreview: { version: "1.14.4" },
         },
       ))
@@ -595,19 +476,6 @@ export class MockAgentBridge implements AgentBridge {
 
   async cancel(requestId: string): Promise<void> {
     this.cancelled.add(requestId);
-    for (const resolve of this.approvals.values()) resolve("deny");
-    this.approvals.clear();
-  }
-
-  async respondApproval(
-    approvalId: string,
-    decision: ApprovalDecision,
-    _scope: ApprovalScope,
-  ): Promise<void> {
-    const resolve = this.approvals.get(approvalId);
-    if (!resolve) return;
-    this.approvals.delete(approvalId);
-    resolve(decision);
   }
 
   async renameSession(sessionId: string, title: string): Promise<RenamedSession> {
@@ -685,11 +553,5 @@ export class MockAgentBridge implements AgentBridge {
 
   dispose(): void {
     this.listeners.clear();
-    this.approvals.clear();
-    this.grants.clear();
   }
-}
-
-function assistantIdFor(requestId: string): string {
-  return `asst_${requestId}`;
 }

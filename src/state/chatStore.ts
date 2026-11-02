@@ -1,10 +1,6 @@
 import { AGENT_EVENTS } from "../agent/protocol";
 import type {
   AiStatusPhase,
-  ApprovalDecision,
-  ApprovalPolicy,
-  ApprovalRequestedPayload,
-  ApprovalScope,
   CallSource,
   NextAction,
   RequestResult,
@@ -19,7 +15,6 @@ export interface ToolCall {
   tool: string;
   action: string;
   permissionLevel: ToolPermissionLevel;
-  approvalPolicy: ApprovalPolicy;
   source: CallSource;
   argsPreview?: Record<string, unknown>;
   state: ToolCallState;
@@ -34,7 +29,6 @@ export type TimelineItem =
   | { kind: "text"; id: string; content: string }
   | { kind: "thinking"; id: string; content: string; complete: boolean }
   | { kind: "tool"; id: string; callId: string }
-  | { kind: "approval"; id: string; approvalId: string }
   | { kind: "notice"; id: string; text: string };
 
 export type ChatMessage =
@@ -51,10 +45,6 @@ export type ChatMessage =
     }
   | { id: string; role: "system"; level: "info" | "error"; text: string; at: number };
 
-export interface ApprovalEntry extends ApprovalRequestedPayload {
-  decision?: ApprovalDecision;
-}
-
 export interface Session {
   id: string;
   title: string;
@@ -62,7 +52,6 @@ export interface Session {
   updatedAt: number;
   messages: ChatMessage[];
   toolCalls: Record<string, ToolCall>;
-  approvals: Record<string, ApprovalEntry>;
   status: { text: string; phase: AiStatusPhase } | null;
   activeRequestId: string | null;
   requesting: boolean;
@@ -82,7 +71,6 @@ export type ChatAction =
   | { type: "request_started"; requestId: string }
   | { type: "request_failed"; message: string }
   | { type: "agent_event"; event: import("../agent/protocol").AgentEvent }
-  | { type: "approval_decision"; approvalId: string; decision: ApprovalDecision; scope: ApprovalScope }
   | { type: "cancel_request" }
   | { type: "hydrate_history"; history: import("../agent/bridge").ChatHistory }
   | {
@@ -107,7 +95,6 @@ export function createSession(now = Date.now()): Session {
     updatedAt: now,
     messages: [],
     toolCalls: {},
-    approvals: {},
     status: null,
     activeRequestId: null,
     requesting: false,
@@ -180,22 +167,8 @@ function withAssistant(
   return { ...session, messages, updatedAt: Date.now() };
 }
 
-/** 没有 request_id 的事件（UI 直连）挂到最近一条助手消息上。 */
-function attachToLastAssistant(
-  session: Session,
-  update: (message: Extract<ChatMessage, { role: "assistant" }>) => ChatMessage,
-): Session {
-  const messages = [...session.messages];
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const candidate = messages[i];
-    if (candidate.role !== "assistant") continue;
-    messages[i] = update(candidate);
-    return { ...session, messages, updatedAt: Date.now() };
-  }
-  return session;
-}
-
-function appendText(items: TimelineItem[], content: string): TimelineItem[] {  const last = items[items.length - 1];
+function appendText(items: TimelineItem[], content: string): TimelineItem[] {
+  const last = items[items.length - 1];
   if (last && last.kind === "text") {
     return [...items.slice(0, -1), { ...last, content: last.content + content }];
   }
@@ -372,7 +345,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
                 tool,
                 action: label,
                 permissionLevel: event.payload.permission_level,
-                approvalPolicy: event.payload.approval_policy,
                 source: event.payload.source,
                 argsPreview: event.payload.args_preview,
                 state: "running",
@@ -393,7 +365,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
               tool: event.payload.tool,
               action: "",
               permissionLevel: "read_only" as ToolPermissionLevel,
-              approvalPolicy: "never" as ApprovalPolicy,
               source: "agent" as CallSource,
               state: "running" as ToolCallState,
               nextActions: [],
@@ -433,35 +404,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
               ],
             })),
           );
-
-        case AGENT_EVENTS.approvalRequested:
-          return patchSession(state, current.id, (session) => {
-            const addItem = (message: Extract<ChatMessage, { role: "assistant" }>) => ({
-              ...message,
-              items: [
-                ...closeOpenThinking(message.items),
-                {
-                  kind: "approval" as const,
-                  id: nextId("approval"),
-                  approvalId: event.payload.approval_id,
-                },
-              ],
-            });
-
-            // request_id 为 null 表示 UI 直连发起（契约 §4.4），没有可挂的消息时丢弃。
-            const withItem = event.payload.request_id
-              ? withAssistant(session, "", event.payload.request_id, addItem)
-              : attachToLastAssistant(session, addItem);
-
-            return {
-              ...withItem,
-              approvals: {
-                ...withItem.approvals,
-                [event.payload.approval_id]: event.payload,
-              },
-              status: { text: "等待你的确认", phase: "waiting_permission" },
-            };
-          });
 
         case AGENT_EVENTS.requestEnd: {
           const { result, error, usage, duration_ms } = event.payload;
@@ -517,22 +459,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }
     }
 
-    case "approval_decision": {
-      const entry = current.approvals[action.approvalId];
-      if (!entry) return state;
-      return patchSession(state, current.id, (session) => ({
-        ...session,
-        approvals: {
-          ...session.approvals,
-          [action.approvalId]: { ...entry, decision: action.decision },
-        },
-        status:
-          action.decision === "deny"
-            ? { text: "已拒绝，等待模型调整", phase: "thinking" }
-            : { text: "已允许，继续执行", phase: "preparing_tool" },
-      }));
-    }
-
     case "cancel_request":
       return patchSession(state, current.id, (session) => ({
         ...session,
@@ -556,7 +482,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         updatedAt: parseTime(summary.created_at),
         messages: [],
         toolCalls: {},
-        approvals: {},
         status: null,
         activeRequestId: null,
         requesting: false,

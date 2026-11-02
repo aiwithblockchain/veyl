@@ -5,7 +5,6 @@ use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
 use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
-use super::policy;
 use super::services::{ConnectTarget, VpnToolServices};
 
 pub struct VpnConnectTool {
@@ -26,7 +25,7 @@ impl Tool for VpnConnectTool {
 
     fn description(&self) -> &str {
         "连接到指定节点或配置并设置系统代理。node_id 与 profile_id 必须且只能提供一个。\
-         会话内第一次调用需要用户确认；只有返回 state=running 且有 exit_ip 时才算连上。"
+         只有返回 state=running 且有 exit_ip 时才算连上。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -43,8 +42,7 @@ impl Tool for VpnConnectTool {
             "properties": {
                 "node_id": { "type": "string" },
                 "profile_id": { "type": "string" },
-                "strategy": { "type": "string", "enum": ["latency"], "default": "latency" },
-                "approval_id": { "type": "string" }
+                "strategy": { "type": "string", "enum": ["latency"], "default": "latency" }
             },
             "additionalProperties": false
         })
@@ -68,14 +66,6 @@ impl Tool for VpnConnectTool {
                 )
             }
         };
-
-        let label = match &target {
-            ConnectTarget::Node(id) => format!("连接到节点 {id}"),
-            ConnectTarget::Profile(id) => format!("连接到配置 {id}"),
-        };
-        if let Some(result) = policy::guard(ctx, "VpnConnect", &input, &label, "high") {
-            return result;
-        }
 
         let strategy = input
             .get("strategy")

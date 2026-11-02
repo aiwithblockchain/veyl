@@ -1,6 +1,6 @@
 //! 全局 AppHandle 句柄。
 //!
-//! 审批事件是从工具实现里发出的（`tools/policy.rs`），而工具拿不到 AppHandle，
+//! 工具事件（如 tool-call-start）是从工具实现里发出的，而工具拿不到 AppHandle，
 //! 所以启动时注入一次。P1 单窗口，够用；多窗口时改成按 session 查表。
 
 use std::sync::OnceLock;

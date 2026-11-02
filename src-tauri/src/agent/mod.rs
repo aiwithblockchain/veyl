@@ -1,4 +1,4 @@
-//! Agent 层：会话注册表、审批路由与对前端的命令面。
+//! Agent 层：会话注册表与对前端的命令面。
 
 pub mod app_handle;
 pub mod commands;
@@ -152,10 +152,8 @@ impl AppState {
         self.existing(&session_id).await
     }
 
-    /// 新会话或删除会话时清掉该会话的审批授权（契约 §2.2）。
     pub async fn drop_session(&self, session_id: &str) {
         self.sessions.lock().await.remove(session_id);
-        crate::tools::policy::clear_session(session_id);
     }
 
     pub fn next_request_id() -> String {

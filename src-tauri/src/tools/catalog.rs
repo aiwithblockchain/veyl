@@ -5,7 +5,6 @@ use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
 use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
-use super::policy;
 use super::services::{CatalogQuery, VpnToolServices};
 
 pub struct CatalogSearchTool {
@@ -244,7 +243,7 @@ impl Tool for ProfileDeleteTool {
     }
 
     fn description(&self) -> &str {
-        "删除本地配置。破坏性操作，每次都需要用户确认；调用时先不带 approval_id。"
+        "删除本地配置。删除后不可恢复。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -259,8 +258,7 @@ impl Tool for ProfileDeleteTool {
         json!({
             "type": "object",
             "properties": {
-                "profile_id": { "type": "string" },
-                "approval_id": { "type": "string" }
+                "profile_id": { "type": "string" }
             },
             "required": ["profile_id"],
             "additionalProperties": false
@@ -275,11 +273,6 @@ impl Tool for ProfileDeleteTool {
                 ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "profile_id 不能为空")),
             );
         };
-
-        let summary = format!("删除本地配置 {profile_id}");
-        if let Some(result) = policy::guard(ctx, "ProfileDelete", &input, &summary, "medium") {
-            return result;
-        }
 
         let outcome = match self.services.profile_delete(profile_id).await {
             Ok(data) => ToolOutcome::ok("配置已删除。", data),

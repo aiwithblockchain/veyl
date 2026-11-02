@@ -1,7 +1,7 @@
 //! P1 工具集：Agent 操作应用的全部入口。
 //!
 //! 每个工具实现 Claurst 的 `Tool` trait，直接跑在主进程里（不走 MCP）。
-//! 结果信封、审批策略、错误码见 `docs/contracts/tools.md`。
+//! 结果信封、权限级别、错误码见 `docs/contracts/tools.md`。
 
 pub mod catalog;
 pub mod core;

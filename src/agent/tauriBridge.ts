@@ -11,7 +11,7 @@ import type {
 import { toBridgeError } from "./errors";
 import { createListenerManager } from "./listeners";
 import { AGENT_EVENTS, APP_EVENT_NAMES, AI_EVENT_NAMES } from "./protocol";
-import type { AgentEvent, ApprovalScope, RuntimeSnapshot } from "./protocol";
+import type { AgentEvent, RuntimeSnapshot } from "./protocol";
 
 const EVENT_NAMES = [...AI_EVENT_NAMES, ...APP_EVENT_NAMES];
 
@@ -79,14 +79,6 @@ export class TauriAgentBridge implements AgentBridge {
 
   async cancel(requestId: string): Promise<void> {
     await call("ai_cancel", { requestId });
-  }
-
-  async respondApproval(
-    approvalId: string,
-    decision: "allow" | "deny",
-    scope: ApprovalScope,
-  ): Promise<void> {
-    await call("ai_approval_decision", { approvalId, decision, scope });
   }
 
   async deleteProfile(profileId: string): Promise<void> {

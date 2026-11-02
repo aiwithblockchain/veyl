@@ -39,7 +39,7 @@
 
 | 通道 | 入口 | 经过 Rust Host | 能测什么 |
 |---|---|---|---|
-| **A. Tauri 窗口** | 用户用 `dev-with-log.sh` 启动的应用 | ✅ | 工具调用、审批、落库、重启一致性 —— **本轮主战场** |
+| **A. Tauri 窗口** | 用户用 `dev-with-log.sh` 启动的应用 | ✅ | 工具调用、落库、重启一致性 —— **本轮主战场** |
 | **C. CLI selftest** | `cargo run --manifest-path src-tauri/Cargo.toml --bin veyl-runtime-selftest -- <cmd>`（**由用户执行**） | 只到 Runtime Manager | 下载/校验/启停/崩溃/代理 |
 
 **判定纪律**：只有通道 A 的结论算「真实验收」。通道 C 不经过工具层与 UI，只能证明运行时本身没问题。证据里必须写明是哪条通道。
@@ -51,10 +51,10 @@
 `docs/test-cases/` 是**需求级全集**，覆盖 FR-1 到 FR-9，其中大量是 U/I 层、要开发补单测。本轮只做**用户能亲手验证的那部分**：
 
 - **复用**（直接照 `test-cases/` 里的步骤执行）：标了对应 TC 编号的用例
-- **收敛**：把多条目合并成一条可执行验收（例如「审批矩阵」13 条 TC 收敛为 AC-C1~C4）
+- **收敛**：把多条目合并成一条可执行验收
 - **不重复**：U/I 层的单测不列进来，它们由 `cargo test` 88 项覆盖
 
-本轮 **21 条验收 + 4 条准入检查**，其中自动 8 条、手工 13 条。
+本轮 **16 条验收 + 4 条准入检查**（审批相关的 7 条已移除，新增 2 条），其中自动 8 条、手工 8 条。
 
 ---
 
@@ -91,7 +91,7 @@ bash scripts/ci.sh --quick
 | ID | 检查 | 做法 | 不通的后果 |
 |---|---|---|---|
 | **P-1** | DeepSeek Key 能存 | 用户执行：在设置页输入任意 Key 保存。若返回 `UNSUPPORTED` / 「尚未接线」→ **停** | AC-B2 / B4 / C1 / C2 / C3 / F1 全部无效 |
-| **P-2** | 工具调用能落库 | 在窗口里说「现在什么状态」，然后查 `SELECT COUNT(*) FROM tool_calls;` 应 ≥ 1。若为 0 → **停** | AC-C5a~d 整组无效，且无法区分「逻辑错」和「根本没写」 |
+| **P-2** | 工具调用能落库 | 在窗口里说「现在什么状态」，然后查 `SELECT COUNT(*) FROM tool_calls;` 应 ≥ 1。若为 0 → **停** | AC-N1 / N2 无法判定，且无法区分「逻辑错」和「根本没写」 |
 | **P-3** | 对话能落库 | 发一句话后查 `SELECT COUNT(*) FROM chat_messages;` 应 ≥ 1。若为 0 → **停** | AC-F1 必红 |
 | **P-4** | **二进制是新的** | 见下方命令。若二进制早于最新源码 → **先重建，不能拿旧二进制下结论** | D/E 组的全部结论作废 |
 
@@ -160,7 +160,7 @@ SELECT tool_name, approved, is_error,
 FROM tool_calls ORDER BY created_at DESC LIMIT 20;"
 ```
 
-**审批值分布**（这是 C5 的核心证据）
+**`approved` 分布**（AC-N2 的核心证据：应只有 NULL）
 
 ```bash
 sqlite3 -header -column "$DB" "
@@ -201,14 +201,10 @@ FROM chat_sessions s LEFT JOIN chat_messages m ON m.session_id=s.id GROUP BY s.i
 | AC-B1 | 应用启动与窗口 | A | 手工 | 是 | TC-MAIN-001 |
 | AC-B2 | 对话流式输出 | A | 手工 | 是 | TC-CHAT-001 |
 | AC-B3 | 事件到达且无 `ai-` 前缀 | 脚本 | 半自动 | 是 | TC-CHAT-010~012 |
-| AC-B4 | 工具卡与审批卡渲染 | A | 手工 | 是 | TC-CHAT-002/007 |
-| AC-C1 | 首次弹卡、允许后同会话放行 | A | 手工 | 是 | TC-EXC-030~033 |
-| AC-C2 | 拒绝后仍会弹 | A | 手工 | 是 | TC-EXC-034 |
-| AC-C3 | `CoreInstall` 每次都弹 | A | 手工 | 是 | TC-EXC-036 |
-| AC-C5a | 拒绝 → `approved = 0` | A+SQL | 手工 | 是 | TC-EXC-042 |
-| AC-C5b | 允许一次 → `approved = 1` | A+SQL | 手工 | 是 | TC-EXC-042 |
-| AC-C5c | 会话放行 → `approved = 2` | A+SQL | 手工 | 是 | TC-EXC-042 |
-| AC-C5d | 只读工具 → `approved IS NULL` | A+SQL | 手工 | 是 | — |
+| AC-B4 | 工具卡渲染 | A | 手工 | 是 | TC-CHAT-002/007 |
+| ~~AC-C1 / C2 / C3 / C5a~d~~ | ~~审批相关七条~~ | — | — | — | **已移除，见 §4.0** |
+| AC-N1 | 无弹窗直接连接 | A+SQL | 手工 | 是 | 新增 |
+| AC-N2 | `approved` 恒为 NULL（无残留审批写入） | SQL | 半自动 | 是 | 新增 |
 | AC-F1 | 对话落库并重启恢复 | A+SQL | 手工 | 是 | TC-SHELL-005 |
 | AC-F2 | 重启后运行时状态一致 | A+SQL | 手工 | 否 | — |
 | AC-D1 | 下载 + SHA256 校验 | C | 自动 | 是 | TC-RT-004 |
@@ -270,102 +266,73 @@ node tests/contracts/check-contracts.mjs
 
 ---
 
-### AC-B4 工具卡与审批卡渲染
+### AC-B4 工具卡渲染
 
 - **方式**：手工 ｜ **阻断**：是
 - **前置**：同 AC-B2
 - **步骤**：
   1. 说「连到日本」
   2. 观察是否出现工具卡（名称 + 状态 + 耗时），点开能否看到参数
-  3. 观察是否出现审批卡，按钮文案是什么
 - **预期**：
   - 工具卡显示 `VpnConnect` / `CoreInstall` 等名字，状态从「运行中」变「成功/失败」
   - 参数预览里 `node_id` / `region` 可见，**没有** `uuid`、`password`、`key`
-  - 审批卡内联在对话流里，不是全局弹窗
-- **失败判定**：卡片不出现；参数里出现凭据；审批用弹窗遮住整个界面
+  - **不应出现任何确认卡**（审批已移除）
+- **失败判定**：卡片不出现；参数里出现凭据；出现任何确认卡
 - **证据**：截屏（卡片展开态）+ 对照 `docs/contracts/tools.md` §2.5
 
 ---
 
-### AC-C1 首次弹卡、允许后同会话放行
+### 4.0 审批相关用例已移除（2026-11-02）
 
-- **方式**：手工 ｜ **阻断**：是 ｜ **本轮最关键的一条**
-- **前置**：同 AC-B2；**不要切换会话**
-- **步骤**：
-  1. 说「连到日本」→ 出现 `VpnConnect` 审批卡 → 点「允许（本会话内不再询问）」
-  2. 记录时间 `T1`
-  3. 同一会话再说「换到新加坡」或「重新连一次」
-  4. 记录时间 `T2`
-- **预期**：第二次**不再弹审批卡**，直接开始执行
-- **失败判定**：第二次仍弹卡（说明 Grant 没生效）
-- **证据**：
+> **产品决策：彻底移除审批机制，所有工具默认放行。** 不是「默认放行但可开启」，是没有开关。
+>
+> 以下用例**不再执行**，也不判 FAIL、不作为缺陷：
+> AC-C1（首次弹卡）、AC-C2（拒绝后仍弹）、AC-C3（`CoreInstall` 每次都弹）、
+> AC-C5a~d（`approved` 四态）。
+>
+> 契约依据：`docs/contracts/tools.md` §2.1；历史用例见 `docs/test-cases/02-exception.md` §8。
 
-```bash
-sqlite3 -header -column "$DB" "
-SELECT tool_name, approved, datetime(created_at/1000,'unixepoch','localtime') AS at
-FROM tool_calls WHERE tool_name LIKE '%VpnConnect%' ORDER BY created_at;"
-```
-
-预期：第一条 `approved=2`，第二条也是 `2`（Grant 自动放行）。两条都在 `T1`、`T2` 附近。
-
-> **只断言这两行 `VpnConnect`**。说「换到新加坡」会顺带产生 `CatalogSearch`、`ProfileImport` 等行，它们不是「第二次连接」，不要混进来判。所以 SQL 里必须带 `WHERE tool_name LIKE '%VpnConnect%'`。
-
-> 如果第二次没弹卡但 `approved` 是 `1` 或 `NULL`，说明落库映射错了 —— 这也是失败。
-
----
-
-### AC-C2 拒绝后仍会弹
-
-- **方式**：手工 ｜ **阻断**：是
-- **前置**：新开一个会话（保证没有历史 Grant）
-- **步骤**：
-  1. 说「连到日本」→ 审批卡点**拒绝**
-  2. 记录时间
-  3. 同一会话再说「连到日本」
-- **预期**：第二次**仍然弹卡**（拒绝不产生 Grant）
-- **失败判定**：拒绝后第二次直接执行（等于拒绝被忽略）
-- **证据**：`SELECT tool_name, approved FROM tool_calls ORDER BY created_at DESC LIMIT 5;` → 第一条 `0`，第二条仍有审批记录
-
----
-
-### AC-C3 `CoreInstall` 每次都弹
-
-- **方式**：手工 ｜ **阻断**：是
-- **前置**：运行时**尚未安装**（`SELECT COUNT(*) FROM runtime_versions;` 应为 0）
-- **若已安装**：由用户在设置页点「卸载运行时」。**如果设置页没有这个入口，本条记为「未验证」并作为缺口上报** —— 不要用「换数据目录」「删数据库行」「手工删版本目录」代替，那既不是用户路径，也可能把环境弄坏。
-- **步骤**：
-  1. 说「连到日本」→ 出现 `CoreInstall` 卡 → 点允许 → 等安装完成
-  2. 让用户先卸载运行时，再在同一会话里再说一次「连到日本」
-- **预期**：**两次都弹卡**，两行 `approved` 都是 `1`
-- **失败判定**：第二次因为「同会话已授权」而被跳过（那说明 `always` 被实现成了 `first_time_per_session`）
-- **证据**：见 AC-C5a~d 的 SQL
-
----
-
-### AC-C5a~d `approved` 落库四态
+### AC-N1 无弹窗直接连接
 
 - **方式**：手工 + SQL ｜ **阻断**：是
-- **前置**：完成 AC-C1（产生 `2`）、AC-C2（产生 `0`）、AC-C3（产生 `1`）
-- **步骤**：按上表跑一次只读工具（如「看看现在什么状态」→ `RuntimeStatus`）
+- **前置**：DeepSeek Key 已配置；运行时已安装
+- **步骤**：
+  1. 在 Tauri 窗口输入「连到日本」
+  2. 全程观察界面
+  3. 记录时间戳
 - **预期**：
-
-| 场景 | 期望 `approved` |
-|---|---|
-| 用户拒绝 | `0` |
-| 允许一次（`CoreInstall`） | `1` |
-| 会话授权后的后续调用（含 Grant 自动放行） | `2` |
-| 只读工具（`RuntimeStatus` / `CatalogSearch` / `ProfileList`） | `NULL` |
-
-- **失败判定**：只读工具记成 `1`（用「允许」冒充「不需要审批」）；或拒绝记成 `NULL`
+  - **从头到尾不出现任何确认卡/权限卡/弹窗**
+  - 工具卡正常出现（`CatalogSearch` → `ProfileImport` → `VpnConnect`）
+  - 最终连上，状态面板显示 running
+- **失败判定**：
+  - 出现任何形式的确认卡 → 残留
+  - 卡在「等待你的确认」状态 → 残留（有地方还在等一个不会来的决定）
+  - 连接成功但界面上有一步没反应 → 可能有代码在等 `approval-requested`
 - **证据**：
 
-```bash
-sqlite3 -header -column "$DB" "
-SELECT tool_name, COALESCE(approved,'NULL') AS approved, COUNT(*) AS n
-FROM tool_calls GROUP BY 1,2 ORDER BY 1,2;"
+```sql
+SELECT tool_name, COALESCE(approved,'NULL') AS approved,
+       datetime(created_at/1000,'unixepoch','localtime') AS at
+FROM tool_calls ORDER BY created_at DESC LIMIT 10;
 ```
 
-必须能同时看到 `0`、`1`、`2`、`NULL` 四种。
+预期：`approved` 全部为 `NULL`；每个工具**只有一条**记录（模型不再重试）。
+
+### AC-N2 `approved` 无残留写入
+
+- **方式**：SQL ｜ **阻断**：是 ｜ **半自动**
+- **步骤**：跑完 AC-N1 后执行
+- **预期**：
+
+```sql
+SELECT tool_name, COALESCE(approved,'NULL') AS approved, COUNT(*) AS n
+FROM tool_calls GROUP BY 1,2 ORDER BY 1,2;
+```
+
+`approved` 列**只应出现 `NULL`**。
+
+- **失败判定**：出现 `0` / `1` / `2` → **有旧路径还在写审批值**，是残留缺陷
+- **证据**：上述查询输出
 
 ---
 
@@ -373,7 +340,7 @@ FROM tool_calls GROUP BY 1,2 ORDER BY 1,2;"
 
 - **方式**：手工 + SQL ｜ **阻断**：是
 - **步骤**：
-  1. 在一个会话里完成 AC-C1 的对话，记下会话标题
+  1. 在一个会话里完成 AC-N1 的对话，记下会话标题
   2. 完全退出应用（Cmd+Q，不是关窗口）
   3. 重新启动
   4. 看左侧会话列表里是否还有这个会话，点开看消息是否还在
@@ -576,7 +543,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin veyl-runtime-selftest -- pr
 
 | 项 | 原因 | 谁能解锁 |
 |---|---|---|
-| **C4 `ProfileDelete` 审批** | UI 没有删除按钮；mock 剧本也没写这个工具。`profile_delete` 命令存在但无入口可点 | Alice 补 UI 入口 |
+| **`ProfileDelete` 行为** | UI 没有删除按钮；mock 剧本也没写这个工具。命令存在但无入口可点，模型也不会主动删配置 | Alice 补 UI 入口；在那之前标「无入口，未验证」 |
 | **F1 删除 active profile 被拒** | 需要先有一个 active profile（要走 CatalogSearch → ProfileImport），依赖真实 Key + 可用目录 | 有真实节点后 |
 | **E3 出口 IP 真实值** | mock 环境无真实出口；契约 FR-7.2 要求显示真实 IP | 需要真实节点 |
 | **Hysteria2 连通性** | 无本地 Hysteria2 服务端 | Bob 起一个自签 TLS 的本地节点 |
@@ -600,10 +567,10 @@ D2 不需要真的投递恶意归档：单测已经覆盖 `..` 与绝对路径�
 
 | 条件 | 要求 |
 |---|---|
-| 阻断级用例 | AC-B1~B4、AC-C1~C5d、AC-F1、AC-D1~D6、AC-E1/E2 **全部通过** |
+| 阻断级用例 | AC-B1~B4、AC-N1、AC-N2、AC-F1、AC-D1~D6、AC-E1/E2 **全部通过** |
 | 条件级 | AC-F2 允许失败，但必须记录现象 |
 | 数据完整性 | §2「凭据泄漏自查」恒为空 |
-| 审批四态 | 必须能同时看到 `0` / `1` / `2` / `NULL` |
+| 无残留审批 | `SELECT approved FROM tool_calls` 只能出现 `NULL`；出现 `0/1/2` 即为残留缺陷 |
 | 证据 | 每条用例都有：时间戳 + SQL 输出或截屏 + 通道标注（A/C）；命令类用例注明「由用户执行」 |
 
 任一条阻断级失败 → **不进下一阶段**，写缺陷单（现象 / 复现 / 归属 / 阻断等级）。

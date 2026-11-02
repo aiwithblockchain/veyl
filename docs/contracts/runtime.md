@@ -1,6 +1,6 @@
 # 契约：Runtime Manager
 
-> 契约版本：`1.0.7`
+> 契约版本：`1.0.8`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 冻结前评审：PM / Alice / Bob
 > 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5
@@ -100,7 +100,7 @@ type HealthCheckName =
   | "traffic";
 
 type HealthSnapshot = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   process: boolean;
   clash_api: boolean;
   data_plane: boolean;
@@ -126,7 +126,7 @@ type TrafficStats = {
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
@@ -154,7 +154,7 @@ type RuntimeSnapshot = {
 
 ```ts
 type AivpnError = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   code: AivpnErrorCode;
   message: string;        // 面向用户，可本地化
   retryable: boolean;
@@ -369,7 +369,6 @@ type ClashConnections = {
 | `CONFLICT` | 状态冲突（正在启动/停止） | 是 |
 | `PRECONDITION_FAILED` | 前置条件不满足 | 否 |
 | `PERMISSION_DENIED` | 无权限或审批被拒 | 否 |
-| `APPROVAL_REQUIRED` | 需要用户确认 | 确认后重试 |
 | `UNSUPPORTED` | 平台/版本不支持 | 否 |
 | `TIMEOUT` | 超时 | 是 |
 | `CANCELLED` | 用户取消 | 否 |
@@ -425,7 +424,7 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 
 ```json
 {
-  "contract_version": "1.0.7",
+  "contract_version": "1.0.8",
   "state": "running",
   "pid": 1234,
   "upstream_version": "1.14.4",
@@ -513,6 +512,14 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 ---
 
 ## 12. 变更记录
+
+### 1.0.8（2026-11-02，用户决定移除审批）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.0.8` | 元数据 | PM |
+| 2 | 通用错误码表删除 `APPROVAL_REQUIRED` —— 审批机制移除后 Host 不再产生该码 | 移除 | 用户：彻底移除审批 |
+| 3 | 其余接口不变；与 tools / events / catalog 保持版本一致 | 同步 | 同上 |
 
 ### 1.0.7（2026-11-02）
 

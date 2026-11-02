@@ -86,14 +86,13 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Arc::clone(&state))
         .setup(|app| {
-            // 审批事件从工具实现里发出，需要全局句柄。
+            // 工具事件（tool-call-start 等）需要全局句柄。
             agent::app_handle::set(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             agent::commands::ai_send_message,
             agent::commands::ai_cancel,
-            agent::commands::ai_approval_decision,
             agent::commands::runtime_status,
             agent::commands::profile_delete,
             agent::commands::chat_history,

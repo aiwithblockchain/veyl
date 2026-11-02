@@ -32,7 +32,7 @@ pub use error::{StoreError, StoreResult};
 pub use profiles::{NewProfile, Profile};
 pub use proxy_backup::ProxyBackupRow;
 pub use runtime::RuntimeVersionRow;
-pub use tool_calls::{Approval, NewCall, ToolCallRecord};
+pub use tool_calls::{NewCall, ToolCallRecord};
 
 /// 应用数据目录下的库文件名。
 pub const DB_FILE_NAME: &str = "veyl.db";

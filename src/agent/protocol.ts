@@ -1,12 +1,12 @@
 /**
  * 事件与 UI → Host 调用的前端契约。
  *
- * 唯一来源：`docs/contracts/events.md` v1.0.7（已冻结）。
+ * 唯一来源：`docs/contracts/events.md` v1.0.8（已冻结）。
  * 本文件是事件名常量的唯一来源——组件、store、bridge 只能引用
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "1.0.7" as const;
+export const CONTRACT_VERSION = "1.0.8" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -16,7 +16,6 @@ export const AGENT_EVENTS = {
   status: "ai-status",
   compact: "ai-compact",
   requestEnd: "ai-request-end",
-  approvalRequested: "approval-requested",
   runtimeStateChanged: "runtime-state-changed",
   runtimeHealthChanged: "runtime-health-changed",
   jobProgress: "job-progress",
@@ -33,7 +32,6 @@ export const AI_EVENT_NAMES = [
   AGENT_EVENTS.status,
   AGENT_EVENTS.compact,
   AGENT_EVENTS.requestEnd,
-  AGENT_EVENTS.approvalRequested,
 ] as const;
 
 export const APP_EVENT_NAMES = [
@@ -52,7 +50,6 @@ export type AivpnErrorCode =
   | "CONFLICT"
   | "PRECONDITION_FAILED"
   | "PERMISSION_DENIED"
-  | "APPROVAL_REQUIRED"
   | "UNSUPPORTED"
   | "TIMEOUT"
   | "CANCELLED"
@@ -103,7 +100,6 @@ export interface MessageChunkPayload {
 export type ThinkingChunkPayload = MessageChunkPayload;
 
 export type ToolPermissionLevel = "none" | "read_only" | "write" | "execute";
-export type ApprovalPolicy = "never" | "always" | "first_time_per_session";
 export type CallSource = "ui" | "agent";
 
 export interface ToolCallStartPayload {
@@ -114,7 +110,6 @@ export interface ToolCallStartPayload {
   tool: string;
   action: string;
   permission_level: ToolPermissionLevel;
-  approval_policy: ApprovalPolicy;
   source: CallSource;
   args_preview?: Record<string, unknown>;
   emitted_at: string;
@@ -183,24 +178,6 @@ export interface AiRequestEndPayload {
   error: AivpnError | null;
   usage: TokenUsage | null;
   duration_ms: number;
-  emitted_at: string;
-}
-
-export type ApprovalScope = "call" | "session";
-export type ApprovalRisk = "low" | "medium" | "high";
-export type ApprovalDecision = "allow" | "deny";
-
-export interface ApprovalRequestedPayload {
-  contract_version: typeof CONTRACT_VERSION;
-  approval_id: string;
-  request_id: string | null;
-  session_id: string;
-  tool: string;
-  args_preview?: Record<string, unknown>;
-  summary: string;
-  risk: ApprovalRisk;
-  scope: ApprovalScope;
-  expires_at: string;
   emitted_at: string;
 }
 
@@ -284,7 +261,6 @@ export interface AgentEventMap {
   [AGENT_EVENTS.status]: AiStatusPayload;
   [AGENT_EVENTS.compact]: AiCompactPayload;
   [AGENT_EVENTS.requestEnd]: AiRequestEndPayload;
-  [AGENT_EVENTS.approvalRequested]: ApprovalRequestedPayload;
   [AGENT_EVENTS.runtimeStateChanged]: RuntimeStateChangedPayload;
   [AGENT_EVENTS.runtimeHealthChanged]: RuntimeHealthChangedPayload;
   [AGENT_EVENTS.jobProgress]: JobProgressPayload;

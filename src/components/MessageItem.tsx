@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { ApprovalDecision, ApprovalScope, NextAction } from "../agent/protocol";
+import type { NextAction } from "../agent/protocol";
 import { PRODUCT_NAME } from "../brand";
-import type { ApprovalEntry, ChatMessage, TimelineItem, ToolCall } from "../state/chatStore";
-import { ApprovalCard } from "./ApprovalCard";
+import type { ChatMessage, TimelineItem, ToolCall } from "../state/chatStore";
 import { Markdown } from "./Markdown";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallCard } from "./ToolCallCard";
@@ -10,12 +9,10 @@ import { ToolCallCard } from "./ToolCallCard";
 interface Props {
   message: ChatMessage;
   toolCalls: Record<string, ToolCall>;
-  approvals: Record<string, ApprovalEntry>;
-  onDecide: (approvalId: string, decision: ApprovalDecision, scope: ApprovalScope) => void;
   onNextAction: (action: NextAction) => void;
 }
 
-export function MessageItem({ message, toolCalls, approvals, onDecide, onNextAction }: Props) {
+export function MessageItem({ message, toolCalls, onNextAction }: Props) {
   if (message.role === "user") {
     return (
       <div className="msg msg--user">
@@ -68,18 +65,6 @@ export function MessageItem({ message, toolCalls, approvals, onDecide, onNextAct
               const call = toolCalls[item.callId];
               if (!call) return null;
               return <ToolCallCard key={item.id} call={call} onNextAction={onNextAction} />;
-            }
-            case "approval": {
-              const request = approvals[item.approvalId];
-              if (!request) return null;
-              return (
-                <ApprovalCard
-                  key={item.id}
-                  request={request}
-                  decision={request.decision}
-                  onDecide={(decision, scope) => onDecide(item.approvalId, decision, scope)}
-                />
-              );
             }
             case "notice":
               return (

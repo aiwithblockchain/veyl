@@ -5,7 +5,6 @@ use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
 use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
-use super::policy;
 use super::services::VpnToolServices;
 
 pub struct CoreListVersionsTool {
@@ -77,8 +76,8 @@ impl Tool for CoreInstallTool {
     }
 
     fn description(&self) -> &str {
-        "下载并安装指定版本的官方 sing-box。会引入一个可执行二进制，每次都需要用户确认；\
-         调用时先不带 approval_id，被拒绝时按返回的 approval_id 重试。"
+        "下载并安装指定版本的官方 sing-box。会引入一个可执行二进制。\
+         安装后即可用于启动运行时。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -94,8 +93,7 @@ impl Tool for CoreInstallTool {
             "type": "object",
             "properties": {
                 "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
-                "channel": { "type": "string", "enum": ["stable"], "default": "stable" },
-                "approval_id": { "type": "string" }
+                "channel": { "type": "string", "enum": ["stable"], "default": "stable" }
             },
             "required": ["version"],
             "additionalProperties": false
@@ -110,11 +108,6 @@ impl Tool for CoreInstallTool {
                 ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 version 参数")),
             );
         };
-
-        let summary = format!("下载并安装 sing-box {version}（约 28 MB）");
-        if let Some(result) = policy::guard(ctx, "CoreInstall", &input, &summary, "medium") {
-            return result;
-        }
 
         let outcome = match self.services.core_install(version).await {
             Ok(data) => {

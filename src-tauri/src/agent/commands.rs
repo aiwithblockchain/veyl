@@ -59,43 +59,6 @@ pub async fn ai_cancel(state: State<'_, Arc<AppState>>, request_id: String) -> R
     }
 }
 
-#[tauri::command]
-pub async fn ai_approval_decision(
-    approval_id: String,
-    decision: String,
-    scope: String,
-) -> Result<Value, String> {
-    if decision != "allow" && decision != "deny" {
-        return Err(format!("未知的确认结果：{decision}"));
-    }
-    if scope != "call" && scope != "session" {
-        return Err(format!("未知的授权范围：{scope}"));
-    }
-
-    let resolved = crate::tools::policy::resolve(&approval_id, &decision, &scope);
-
-    if let Some(resolved) = &resolved {
-        if let Some(store) = crate::store::global() {
-            let approval = if !resolved.granted {
-                crate::store::Approval::Denied
-            } else if resolved.scope == "session" {
-                crate::store::Approval::Session
-            } else {
-                crate::store::Approval::Once
-            };
-            let conn = store.conn();
-            let _ = crate::store::tool_calls::record_approval_for(
-                &conn,
-                &resolved.session_id,
-                &resolved.tool,
-                approval,
-            );
-        }
-    }
-
-    Ok(json!({ "ok": resolved.is_some() }))
-}
-
 /// 状态快照；事件不可达时 UI 的兜底（契约 §5）。
 #[tauri::command]
 pub async fn runtime_status(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
@@ -106,8 +69,8 @@ pub async fn runtime_status(state: State<'_, Arc<AppState>>) -> Result<Value, St
         .map_err(|error| error.to_string())
 }
 
-/// 无 AI 模式的删除配置入口。破坏性操作，无论来源都要审批（events.md §5）。
-/// UI 直连没有会话上下文，`session_id` 取固定的 "ui"；ProfileDelete 恒为 call 级。
+/// 无 AI 模式的删除配置入口。审批已移除，直接执行；
+/// 「不能删活动配置」的前置校验仍在服务层（`active_profile_id`）。
 #[tauri::command]
 pub async fn profile_delete(
     state: State<'_, Arc<AppState>>,
@@ -118,14 +81,6 @@ pub async fn profile_delete(
             "INVALID_ARGUMENT",
             "profile_id 不能为空"
         )));
-    }
-
-    let input = json!({ "profile_id": profile_id });
-    let summary = format!("删除本地配置 {profile_id}");
-    if let Some(error) =
-        crate::tools::policy::require("ui", "ProfileDelete", &input, &summary, "medium")
-    {
-        return Err(json!(error));
     }
 
     state

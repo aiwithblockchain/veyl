@@ -1,6 +1,6 @@
 # 契约：事件与 UI ↔ Host 调用
 
-> 契约版本：`1.0.7`
+> 契约版本：`1.0.8`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.2、§4.3
 > 实现方：Rust（Host 发送）、TypeScript（UI 订阅）
@@ -39,7 +39,6 @@
 | 8 | `runtime-state-changed` | Host → UI | `RuntimeStateChangedPayload` | 运行时状态迁移 |
 | 9 | `runtime-health-changed` | Host → UI | `RuntimeHealthChangedPayload` | 健康快照变化 |
 | 10 | `job-progress` | Host → UI | `JobProgressPayload` | 长任务进度 |
-| 11 | `approval-requested` | Host → UI | `ApprovalRequestedPayload` | 需要用户确认 |
 
 1–7 是 AI 会话事件，8–11 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
 
@@ -79,7 +78,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -101,7 +100,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -119,14 +118,13 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
   tool: string;                 // 模型可见名，PascalCase，例 "VpnConnect"
   action: string;               // 人类可读的一行，例 "连接到 东京 01"
   permission_level: "none" | "read_only" | "write" | "execute";
-  approval_policy: "never" | "always" | "first_time_per_session";
   source: "ui" | "agent";        // 调用来源，由 Host 通道注入
   args_preview?: Record<string, unknown>;  // 默认展示；全被脱敏时省略
   emitted_at: string;
@@ -162,7 +160,7 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 
 ```ts
 type ToolCallEndPayload = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -184,7 +182,7 @@ type ToolCallEndPayload = {
 UI 处理：
 
 - 更新卡片状态 `ok` / `error`。
-- 渲染 `next_actions` 为一到两个按钮，点击等价于用户发出对应工具调用意图（**不直接执行工具**，要做成一条用户消息或一次授权确认，取决于该工具的 `approval_policy`）。
+- 渲染 `next_actions` 为一到两个按钮，点击等价于用户发出对应工具调用意图（**不直接执行工具**，要做成一条用户消息）。
 
 ---
 
@@ -202,7 +200,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -241,7 +239,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -269,7 +267,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -307,7 +305,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -330,7 +328,7 @@ UI 处理：更新状态栏；`to = "failed"` 时显示诊断入口。
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   health: HealthSnapshot;
   emitted_at: string;
 };
@@ -346,7 +344,7 @@ UI 处理：更新延迟/出口 IP/健康灯；`degraded` 时在状态栏加黄�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -364,34 +362,9 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 
 ---
 
-### 4.4 `approval-requested`
+### 4.4 已移除：`approval-requested`
 
-```ts
-type ApprovalRequestedPayload = {
-  contract_version: "1.0.7";
-  approval_id: string;
-  request_id: string;            // 所属 AI 请求；UI 直连发起的为 null
-  session_id: string;            // 会话作用域的隔离键
-  tool: string;
-  args_preview?: Record<string, unknown>;   // 规则同 §3.3：默认展示，全脱敏时省略
-  summary: string;               // 例 "下载并安装 sing-box 1.14.4（约 28 MB）"
-  risk: "low" | "medium" | "high";
-  scope: "call" | "session";     // session = 用户这次允许后，本会话内该工具不再询问
-  expires_at: string;            // approval_id 的有效期（call 级，5 分钟）
-  emitted_at: string;
-};
-```
-
-触发：`ApprovalPolicy` 判定为 `Ask`。
-
-UI 处理：
-
-- 渲染确认卡。
-- `scope = "session"` 时，确认按钮文案为「允许（本会话内不再询问）」，并在卡片上标明「仅对当前会话有效」。
-- `scope = "call"` 时，按钮为「允许 / 拒绝」。
-- 结果通过 `invoke("ai_approval_decision", { approval_id, decision, scope })` 回传；`decision` 取 `"allow" | "deny"`。
-
-> 与 TweetPilot 的差异：TweetPilot 的权限交互走 Claurst `ManagedInteractivePermissionHandler` 的回调；Veyl 增加一层显式事件，好处是 UI 不需要理解 Claurst 内部协议，代价是 Host 要做双向映射。**取舍理由**：UI 层不应依赖第三方 crate 的内部结构。
+> 2026-11-02 用户决定彻底移除审批机制，本事件随之删除。详见 `tools.md` §2.1。事件总数由 11 降为 10。
 
 ---
 
@@ -403,11 +376,10 @@ UI 处理：
 |---|---|---|---|
 | `ai_send_message` | `{ session_id, text, attachments? }` | `{ request_id }` | 发起一轮对话 |
 | `ai_cancel` | `{ request_id }` | `{ cancelled: boolean }` | 停止生成 |
-| `ai_approval_decision` | `{ approval_id, decision: "allow"\|"deny", scope: "call"\|"session" }` | `{ ok: boolean }` | 审批结果；`allow` + `scope: "session"` 时 Host 写入会话级 Grant |
 | `runtime_status` | `{}` | `RuntimeSnapshot` | 状态快照（含应用事件不可达时的兜底） |
 | `catalog_list_nodes` | `{ region?, protocol?, limit?, cursor? }` | `CatalogSearchData` | 无 AI 模式下的手动选节点 |
 | `profile_import_node` | `{ node_id }` | `ProfileImportData` | 无 AI 模式 |
-| `profile_delete` | `{ profile_id }` | `ProfileDeleteData` | 无 AI 模式；**仍需审批** |
+| `profile_delete` | `{ profile_id }` | `ProfileDeleteData` | 无 AI 模式；无确认点 |
 | `vpn_connect` | `{ profile_id }` | `VpnConnectData` | 无 AI 模式 |
 | `vpn_disconnect` | `{}` | `VpnDisconnectData` | 无 AI 模式 |
 | `settings_get` | `{}` | `SettingsSnapshot` | 设置页 |
@@ -420,7 +392,7 @@ UI 处理：
 
 例外：`settings_set` / `settings_get` 不涉及破坏性操作，不做来源校验。
 
-`profile_delete` 的 **前置校验先于审批**：目标是 active profile 时，Host 直接返回 `PRECONDITION_FAILED`，**不生成 `approval_id`、也不发 `approval-requested` 事件**。UI 因此不会看到一张点了也没用的确认卡。
+`profile_delete` 的**前置校验先于删除**：目标是 active profile 时，Host 直接返回 `PRECONDITION_FAILED`，不产生任何删除副作用。
 
 `ai_send_message` 的 `request_id` 由 Host 生成（UUID v4），UI 之后所有事件都按它过滤。
 
@@ -486,7 +458,7 @@ idle
 | 事件名是否带 `ai-` 前缀 | **统一不带前缀**：`message-chunk` / `thinking-chunk` / `tool-call-start` / `tool-call-end` / `ai-status` / `ai-compact` / `ai-request-end` | §1、§9 |
 | 事件名常量的唯一来源 | `src/agent/protocol.ts` 的 `AGENT_EVENTS` 是**唯一常量源**，组件与 store 不得出现裸字符串 | §9 |
 | `ai-status.text` 是否本地化 | **P1 由 Host 生成中文 `text`**；`text_key` + `params` 留到 P2 | §3.5 |
-| 审批作用域 | `ApprovalRequestedPayload` 增加 `scope` / `session_id` / `tool`；`ai_approval_decision` 用 `scope` 取代 `remember` | §4.4、§5 |
+| 审批事件 | ~~审批作用域~~ → **审批机制整体移除，`approval-requested` 与 `ai_approval_decision` 均删除**（2026-11-02） | §4.4、§5 |
 | `next_actions` 点击语义 | 等价于用户发一条消息给 Agent（label + args），**UI 不得直接执行工具**，可预填输入框 | §3.4、`tools.md` §1.3 |
 | `args_preview` 是否保留 | **保留**，默认展示非敏感字段；`sensitive` / 黑名单字段打码；脱敏后无可展示字段才省略整个字段 | §3.3、§4.4 |
 | 无 AI 模式的来源校验 | Host 边界注入 `source: "ui" \| "agent"`，不可由参数传入；破坏性操作无论来源都要审批 | §5、`tools.md` §2.4 |
@@ -516,22 +488,31 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 | 文件 | 现状 | 改为 |
 |---|---|---|
 | `src/agent/protocol.ts` | `AGENT_EVENTS.messageChunk = "ai-message-chunk"` 等 4 个带 `ai-` 前缀 | `"message-chunk"` / `"thinking-chunk"` / `"tool-call-start"` / `"tool-call-end"` |
-| `src/agent/protocol.ts` | `permissionRequest: "ai-permission-request"` | `approvalRequested: "approval-requested"`，payload 换成 `ApprovalRequestedPayload` |
+| `src/agent/protocol.ts` | 有 `permissionRequest: "ai-permission-request"` | **整条删除** —— 审批机制已移除，UI 不再有确认卡 |
 | `src/agent/protocol.ts` | `ToolCallEndPayload.status: "success"\|"error"` + `summary` | `success: boolean` + `result` + `error_code` + `next_actions` |
 | `src/agent/protocol.ts` | `RequestEndPayload.outcome`（5 值枚举） | `result: "success"\|"error"\|"cancelled"` + 结构化 `error: AivpnError` |
 | `src/agent/protocol.ts` | `RuntimeStatus.version`、`last_error: string` | `upstream_version`、`last_error: AivpnError \| null`，并补 `contract_version` / `config_hash` / `traffic` / `connections` / `restart_count` / `last_transition_at` |
 | `src/agent/protocol.ts` | `health` 为扁平三字段，`exit_ip` 在顶层 | `health` 为 `HealthSnapshot`（含 `exit_ip`、`consecutive_failures`、`checked_at`） |
 | `src/agent/protocol.ts` | `ToolCallStartPayload` 只有 `action`，无来源与可选预览 | 增加 `source`；`args_preview` 改为可选（无 `sensitive` 声明时省略） |
-| `src/agent/protocol.ts` | `PermissionRequestPayload` 用 `permission_id` / `remember_options` | 换成 `approval-requested` 的 `approval_id` / `scope` / `session_id` |
+| `src/agent/protocol.ts` | `PermissionRequestPayload` 类型 | **整条删除** |
 | `src/state/chatStore.ts` | `switch` 的 `case` 用**字符串字面量**（如 `case "ai-request-end":`），只有 `chatStore.ts:278` 用了裸串 | 全部改用 `AGENT_EVENTS.*` 常量；否则改名后 `switch` 会**静默不匹配**，不报编译错 |
 
 > 最后一行是真实的踩坑点：`AGENT_EVENTS` 改名不会导致 TypeScript 报错，因为 `switch` 分支是裸字符串。改名时必须同步搜索全仓字面量。
 
-新增事件（`runtime-state-changed`、`runtime-health-changed`、`job-progress`、`approval-requested`）需要 `AgentEventMap` 扩项与 `bridge.ts` 的 `subscribe` 分发；`subscribeRuntimeStatus` 可以直接由 `runtime-state-changed` + `runtime-health-changed` 合成，不必单独开一条通道。
+新增事件（`runtime-state-changed`、`runtime-health-changed`、`job-progress`）需要 `AgentEventMap` 扩项与 `bridge.ts` 的 `subscribe` 分发；`subscribeRuntimeStatus` 可以直接由 `runtime-state-changed` + `runtime-health-changed` 合成，不必单独开一条通道。
 
 ---
 
 ## 10. 变更记录
+
+### 1.0.8（2026-11-02，用户决定移除审批）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.0.8` | 元数据 | PM |
+| 2 | **移除 `approval-requested` 事件**（事件总数 11 → 10） | 移除 | 用户：彻底移除审批 |
+| 3 | **移除 `ai_approval_decision` invoke 命令**（命令总数 11 → 10） | 移除 | 同上 |
+| 4 | `tool-call-start` / `tool-call-end` 的载荷不变 | 确认 | 同上 |
 
 ### 1.0.7（2026-11-02，新增需求 N-01）
 

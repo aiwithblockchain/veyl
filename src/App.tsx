@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type {
   AgentEvent,
-  ApprovalDecision,
-  ApprovalScope,
   NextAction,
   RuntimeView,
 } from "./agent/protocol";
@@ -24,7 +22,6 @@ const AI_EVENTS = new Set<AgentEvent["name"]>([
   AGENT_EVENTS.status,
   AGENT_EVENTS.compact,
   AGENT_EVENTS.requestEnd,
-  AGENT_EVENTS.approvalRequested,
 ]);
 
 export default function App() {
@@ -136,15 +133,6 @@ export default function App() {
     if (requestId) void bridge.cancel(requestId);
   };
 
-  const handleDecide = (
-    approvalId: string,
-    decision: ApprovalDecision,
-    scope: ApprovalScope,
-  ) => {
-    dispatch({ type: "approval_decision", approvalId, decision, scope });
-    void bridge.respondApproval(approvalId, decision, scope);
-  };
-
   // next_actions 点击 = 用户发一条消息给 Agent，UI 不直接执行工具（契约 §1.3）。
   const handleNextAction = (action: NextAction) => {
     const args = Object.keys(action.args).length > 0 ? `（参数：${JSON.stringify(action.args)}）` : "";
@@ -208,7 +196,6 @@ export default function App() {
           session={session}
           onSend={handleSend}
           onStop={handleStop}
-          onDecide={handleDecide}
           onNextAction={handleNextAction}
         />
       </main>

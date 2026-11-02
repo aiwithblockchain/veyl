@@ -85,6 +85,16 @@
 
 ### 8. 权限审批
 
+> ## ⚠️ 本节已废弃（2026-11-02）
+>
+> **原因**：产品决策移除审批机制，所有工具默认放行。`ApprovalPolicy`、`ApprovalGrant`、`approval_id`、审批卡 UI 与 `approved` 三态取值全部取消，`tool_calls.approved` 恒为 `NULL`。
+>
+> **影响范围**：本节全部用例（TC-EXC-030 ~ TC-EXC-043）不再执行，**不判 FAIL，也不作为缺陷**。另外 **TC-EXC-045**（在第 9 节，前置条件为「本会话已批准过一次删除」）同因失效，见该条注释。
+>
+> **原文保留**：以下内容**不删除**，作为历史留档。若将来恢复审批能力，本节可直接复用；届时需同步核对 `docs/contracts/tools.md` 的版本与 `tool_calls` schema。
+>
+> **替代回归项**：`AC-C5d`（改写后）—— 每次工具调用都应在 `tool_calls` 落一行且 `approved` 为 `NULL`，用于确认审计字段仍在写入。
+
 依据 `docs/contracts/tools.md` §2.2，审批有两层，**作用域不同，不要混用**：
 
 | 概念 | 作用域 | 绑定对象 | 生命周期 | 存在哪 |
@@ -178,6 +188,10 @@
 |---|---|---|---|---|---|---|
 | **TC-EXC-044** | I | contracts/tools §4.17 | 本地 0 个 profile；新会话 | 1) 直接调 `ProfileDelete({"profile_id":"prf_not_exist"})`（无 `approval_id`）；2) 批准后再调一次 | 第一次返回 `APPROVAL_REQUIRED`——`always` 对任何 id 都先问，**包括不存在的**；批准后 `ok=true`、`deleted=false`、`already_absent=true`；`tool_calls.approved == 1`；日志为 info，不得 error | P1 |
 | **TC-EXC-045** | I | 同上 | 有 1 个 profile `prf_1`；本会话此前已批准过一次删除 | 1) 删除 `prf_1`；2) 再删一次 `prf_1` | 两次都 `ok=true`；第一次 `deleted=true`、`already_absent=false`；第二次 `deleted=false`、`already_absent=true`；**第二次仍弹审批**（`always` 不放行）；`profiles` 表最终无该行 | P1 |
+> **TC-EXC-045 已改写（2026-11-02，审批移除）**：原前置条件「本会话此前已批准过一次删除」作废。去掉该前置后，本条**仍然有效**，验的是删除幂等性 —— 第一次 `deleted=true`、第二次 `deleted=false`，两次都 `ok=true`。执行时跳过与审批有关的准备步骤即可。
+>
+> **TC-EXC-047 同理**：步骤 2「观察是否弹审批卡」作废，其余（前置条件优先于任何网关、拒绝路径、系统代理不动）仍然有效。
+
 | **TC-EXC-046** | I | 同上、FR-6.4 | 已连接到 `prf_1` 的节点 | 1) 删除 `prf_1`；2) 立刻检查系统代理、sing-box 进程、浏览器能否上网 | **不变式**：系统代理与实际连通性必须一致——要么都断（代理已恢复、进程已停），要么都保持（代理仍有效、流量仍能出去）。**不得**出现「配置已删、代理指向已失效端口、用户断网」 | P0 |
 | **TC-EXC-047** | I + E | contracts/tools §4.17（1.0.5 定案） | 已连接到 `prf_1` 的节点 | 1) 调 `ProfileDelete({"profile_id":"prf_1"})`；2) 观察是否弹审批卡；3) 查库与连接状态 | 返回 `ok=false`，`error.code == "PRECONDITION_FAILED"`，`details` 指明 `ACTIVE_PROFILE_IN_USE`；**不弹审批卡**——Host 在审批网关之前就拦截；`tool_calls.approved` 不写值；连接不受影响（进程仍在、代理仍有效）；`profiles` 表仍有该行；`content` 提示「请先断开或切换到其他配置」 | P1 |
 | **TC-EXC-048** | I | contracts/tools §4.17 | 有 `prf_1`（active）与 `prf_2`，**当前未连接**（与 TC-EXC-047 的区别就在这里） | 1) 删除 `prf_1`；2) 查 `active_profile_id`；3) 观察是否改用 `prf_2` | 删除成功；`active_profile_id == null`；**不自动切换**到 `prf_2`，也不发起连接（避免用户没要求的重连） | P1 |

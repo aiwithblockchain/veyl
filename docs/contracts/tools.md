@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`1.0.7`
+> 契约版本：`1.0.8`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.3、§4.4、§5.1
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -62,7 +62,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -93,12 +93,12 @@ type NextAction = {
 用户点「换到东京 02」
   → 生成用户消息："换到东京 02"（args 作为结构化附注）
   → 交给 Agent，由它正常发起 VpnConnect 工具调用
-  → 走完整审批流程（若该工具需要）
+  → 直接执行（P1 无审批）
 ```
 
 - UI **不得**直接 invoke 工具、不得绕过 Agent。
 - UI **可以**把 `label` 预填进输入框，由用户确认后发送。
-- 目的：Agent 始终是唯一决策者，工具调用与审批链路不被绕过。
+- 目的：Agent 始终是唯一决策者，工具调用链路不被绕过。
 
 ### 1.4 错误对象
 
@@ -106,109 +106,44 @@ type NextAction = {
 
 ---
 
-## 2. 权限与审批
+## 2. 权限与调用来源
 
-### 2.1 两层机制
+### 2.1 没有审批机制（P1）
 
-| 层 | 作用 | 归属 |
+> **2026-11-02 用户决定：彻底移除权限卡，所有工具默认放行。** 不是「默认放行但可开启」，是没有开关。
+
+这意味着：
+
+| 工具 | 行为 | 风险 |
 |---|---|---|
-| `PermissionLevel` | Claurst 的粗粒度信号，只区分「只读 / 非只读」 | `claurst-tools` |
-| `ApprovalPolicy` | Veyl 自己的审批策略（本文第 3 列） | Host，包在 `PermissionHandler` 外 |
+| `CoreInstall` | 直接下载并执行二进制 | 无拦截点 |
+| `VpnConnect` | 直接修改系统代理 | 无拦截点 |
+| `ProfileDelete` | 直接删除本地配置 | 无拦截点 |
 
-`PermissionLevel` 的取值（来自 `claurst-tools`）：`None` / `ReadOnly` / `Write` / `Execute` / `Dangerous` / `Forbidden`。
+**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ProfileList`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`）在 `PermissionMode::Default` 下直接允许；其余工具由 Host 的 `PermissionHandler` 一律返回 `Allow`。
 
-Veyl **不使用** `Dangerous` / `Forbidden`（我们没有 shell 工具，用不上）。
+不再存在的东西：
 
-### 2.2 `ApprovalPolicy` 与 `ApprovalScope`
+- `ApprovalPolicy` / `ApprovalScope` / `ApprovalGrant`
+- `approval_id`、审批卡、`APPROVAL_REQUIRED`
+- 「本会话内首次确认」「每次确认」这类策略
 
-```ts
-type ApprovalPolicy =
-  | "never"                    // 直接执行
-  | "always"                   // 每次都要用户确认（scope 恒为 "call"）
-  | "first_time_per_session";  // 同一会话内首次确认，之后不再打扰（scope 为 "session"）
+`tool_calls.approved` 列**保留**，P1 恒为 `NULL`，表示「审批机制不适用」。保留原因是将来若要恢复审批，不需要再改 schema。
 
-type ApprovalScope =
-  | "call"      // 只授权本次这一组参数，执行完即失效
-  | "session";  // 授权「该工具在本会话内可自动执行」，与参数无关
-```
+#### 2.1.1 已知产品风险（用户已知情并接受）
 
-两者是**不同层级**，不要混用：
+> 这一节记录的是**用户明确接受的取舍**，不是疏忽。后来者若要重新引入审批，从这里读起。
 
-| 概念 | 作用域 | 绑定对象 | 生命周期 | 存在哪 |
-|---|---|---|---|---|
-| `ApprovalGrant` | `session` | `(session_id, tool_name)` | 会话结束即失效 | 内存 |
-| `approval_id` | `call` | `(tool_name, sha256(canonical_args))` | 5 分钟 | 内存 |
+去掉拦截点后，以下情况没有任何保护：
 
-判定顺序（`AivpnPermissionHandler`）：
+1. **模型误判**：Agent 把「看看现在什么状态」理解成「连上节点」，`VpnConnect` 会直接改系统代理，用户来不及阻止。
+2. **参数误传**：模型构造的 `node_id` / `profile_id` 有误时，`ProfileDelete` 会直接删掉配置，没有确认步骤。
+3. **误触**：UI 上的删除按钮点错，立即生效，没有「确定要删除吗」。
+4. **下载执行**：`CoreInstall` 直接下载并运行一个来自网络的二进制。虽然有 SHA256 校验与签名清单，但那防的是「内容被篡改」，不防「Agent 决定装了一个用户没想要的版本」。
 
-```
-1. 内层 ManagedInteractivePermissionHandler 判 Allow（只读工具）→ 放行
-2. policy == "never" → 放行
-3. policy == "always" → Ask（scope = "call"）
-4. policy == "first_time_per_session"
-     ├ Grant 表中存在 (session_id, tool_name) → 放行
-     └ 不存在 → Ask（scope = "session"）
-```
+P1 的定位是「早期内测、使用者是开发者本人」，这些风险在可接受范围内。**对外发布前需要重新评估**——尤其是 `CoreInstall` 与 `ProfileDelete`。
 
-```rust
-pub struct ApprovalGrant {
-    pub session_id: String,
-    pub tool: String,
-    pub granted_at: String,   // ISO 8601 UTC
-}
-```
-
-**Grant 表的铁律**：
-
-- 只存内存，**不落 SQLite、不落配置文件**。应用重启后清空。
-- 会话结束（用户点「新会话」或会话被删除）时，删除该 `session_id` 的所有 Grant。
-- **不使用** Claurst 自己的 allow-rule 持久化机制：Claurst 的规则是 workspace 级、按工具参数模式匹配，语义与本契约不同，两套并存会出现「以为要问却不问」。Veyl 的审批判定只由本节的 Grant 表决定。
-
-### 2.3 审批协议
-
-```
-1. Agent 调 CoreInstall({ version: "1.14.4" })
-2. Handler 判 Ask → 工具返回 APPROVAL_REQUIRED
-   { ok:false, error:{ code:"APPROVAL_REQUIRED",
-       details:{
-         approval_id:"apr_x",
-         tool:"CoreInstall",
-         summary:"下载并安装 sing-box 1.14.4（约 28 MB）",
-         risk:"medium",
-         scope:"session",
-         session_id:"ses_01J...",
-         expires_at:"2026-11-02T09:20:03Z"
-       } } }
-3. UI 渲染确认卡，按钮为「允许 / 拒绝」；scope="session" 时按钮文案为「允许（本会话内不再询问）」
-4. 用户点「允许」
-5. Host 记录 approval_id（call 级，绑定参数哈希），
-   scope="session" 时同时写入 Grant 表 (session_id, tool)
-6. Agent 重试 CoreInstall({ version: "1.14.4", approval_id: "apr_x" })
-7. Host 校验 approval_id 与参数哈希一致 → 执行
-```
-
-约束：
-
-- `approval_id` 绑定 `(tool_name, sha256(canonical_args))`，**参数变了就不认**。它只管「这一次执行」，与 session 授权是两回事。
-- 只有**创建授权的那一次**必须带 `approval_id`。之后同会话同工具直接放行，不需要也不校验 `approval_id`。
-- `approval_id` TTL 5 分钟。超时且 Grant 已存在时，Host 自动重签一个，不再打扰用户；Grant 不存在时重新返回 `APPROVAL_REQUIRED`。
-- 用户拒绝返回 `PERMISSION_DENIED`，**写入否定缓存**：同会话同工具不再弹第二次，直接 `PERMISSION_DENIED`。
-- 审批记录写 `tool_calls.approved`：
-  | 值 | 含义 |
-  |---|---|
-  | `0` | 用户拒绝 |
-  | `1` | 用户允许**这一次**（`always` 策略下的正常结果） |
-  | `2` | 用户允许**本会话**，或本次调用由 Grant 自动放行 |
-  | `NULL` | **该工具不需要审批**（只读、或策略为 `never`） |
-
-  实现备注：`NULL` 是「没有审批这回事」，不是「审批结果未知」。不要用 `1` 冒充无需审批的调用，否则审计表无法区分「用户点过允许」和「本来就不用问」。
-
-  **同会话内第二次及以后由 Grant 自动放行的调用，同样记 `2`**。这样审计表能看出「这次没有弹卡，是因为会话授权」，而不是「没审批就执行了」。Clerk 的 TC-EXC-042 依赖这条语义。
-- session 授权**只对同一 `session_id` 生效**；新会话重新确认，这是 PM 与用户明确要的行为。
-
-> 为什么 `approval_id` 仍要绑定参数：session 授权回答的是「这个工具能不能自动跑」，而单次执行仍要防止 Agent 把用户看到的参数偷偷换掉。两层各管一件事。
-
-### 2.4 调用来源校验
+### 2.2 调用来源校验
 
 ```ts
 type CallSource = "ui" | "agent";
@@ -225,14 +160,12 @@ type CallSource = "ui" | "agent";
 
 1. `source` 由 Host 在构造 `ToolContext` 时写入，工具实现只读不改。
 2. 工具 schema 里**没有** `source` 字段；如果模型传了，按 `INVALID_ARGUMENT` 拒绝（`additionalProperties: false` 已保证）。
-3. 破坏性工具（`CoreInstall`、`ProfileDelete`、`VpnConnect`）**无论 `source` 是什么都必须审批**。UI 直接点「连接」同样要弹确认卡，不能因为「是用户自己点的」就跳过。
-4. 非破坏性写操作（`RuntimeStart` / `RuntimeStop` / `RuntimeRestart` / `VpnDisconnect` / `DeepseekSaveKey`）对两种来源都放行，不做来源区分。
-5. 只读工具对两种来源都放行。
-6. `source` 写入 `tool_calls` 审计表，便于排查「这个删除是谁点的」。
+3. P1 **不区分来源的业务后果** —— 两种来源走同一条执行路径，都不需要确认。
+4. `source` 仍写入 `tool_calls` 审计表，用于事后排查「这个删除是 UI 点的还是 Agent 发起的」。
 
 > 为什么不能从参数传：Agent 能构造任意参数，把 `source` 放进 schema 等于让模型自证身份。来源必须由不可伪造的调用通道给出。
 
-### 2.5 `args_preview` 与 `sensitive` 字段
+### 2.3 `args_preview` 与 `sensitive` 字段
 
 工具卡片要展示参数摘要，但不能泄露凭据。**默认展示，敏感字段打码**：
 
@@ -287,30 +220,30 @@ type CallSource = "ui" | "agent";
 
 模型可见名用 **PascalCase**（与 Claurst 内置工具一致），Rust 类型名加 `Tool` 后缀。
 
-| # | 模型可见名 | Rust 类型 | 用途 | PermissionLevel | ApprovalPolicy | 风险 |
-|---|---|---|---|---|---|---|
-| 1 | `RuntimeStatus` | `RuntimeStatusTool` | 运行时状态快照 | `ReadOnly` | `never` | 只读 |
-| 2 | `RuntimeStart` | `RuntimeStartTool` | 启动运行时进程 | `Write` | `never` | 中 |
-| 3 | `RuntimeStop` | `RuntimeStopTool` | 停止运行时进程 | `Write` | `never` | 中 |
-| 4 | `RuntimeRestart` | `RuntimeRestartTool` | 重启运行时进程 | `Write` | `never` | 中 |
-| 5 | `RuntimeLogs` | `RuntimeLogsTool` | 拉取脱敏日志 | `ReadOnly` | `never` | 只读 |
-| 6 | `CoreListVersions` | `CoreListVersionsTool` | 已安装/可安装版本 | `ReadOnly` | `never` | 只读 |
-| 7 | `CoreInstall` | `CoreInstallTool` | 下载并安装运行时 | `Execute` | `always` | 高 |
-| 8 | `CatalogSearch` | `CatalogSearchTool` | 查询节点目录 | `ReadOnly` | `never` | 只读 |
-| 9 | `ProfileList` | `ProfileListTool` | 本地配置列表 | `ReadOnly` | `never` | 只读 |
-| 10 | `ProfileImport` | `ProfileImportTool` | 把节点导入为本地配置 | `Write` | `never` | 低 |
-| 11 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 | `Execute` | `first_time_per_session` | 高 |
-| 12 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | `never` | 中 |
-| 13 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | `never` | 只读 |
-| 14 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | `never` | 低 |
-| 15 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | `never` | 中 |
-| 16 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | `never` | 只读 |
-| 17 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | `never` | 低 |
-| 18 | `ProfileDelete` | `ProfileDeleteTool` | 删除本地配置 | `Write` | `always` | 中 |
+| # | 模型可见名 | Rust 类型 | 用途 | PermissionLevel | 风险 |
+|---|---|---|---|---|---|
+| 1 | `RuntimeStatus` | `RuntimeStatusTool` | 运行时状态快照 | `ReadOnly` | 只读 |
+| 2 | `RuntimeStart` | `RuntimeStartTool` | 启动运行时进程 | `Write` | 中 |
+| 3 | `RuntimeStop` | `RuntimeStopTool` | 停止运行时进程 | `Write` | 中 |
+| 4 | `RuntimeRestart` | `RuntimeRestartTool` | 重启运行时进程 | `Write` | 中 |
+| 5 | `RuntimeLogs` | `RuntimeLogsTool` | 拉取脱敏日志 | `ReadOnly` | 只读 |
+| 6 | `CoreListVersions` | `CoreListVersionsTool` | 已安装/可安装版本 | `ReadOnly` | 只读 |
+| 7 | `CoreInstall` | `CoreInstallTool` | 下载并安装运行时 | `Execute` | 高 |
+| 8 | `CatalogSearch` | `CatalogSearchTool` | 查询节点目录 | `ReadOnly` | 只读 |
+| 9 | `ProfileList` | `ProfileListTool` | 本地配置列表 | `ReadOnly` | 只读 |
+| 10 | `ProfileImport` | `ProfileImportTool` | 把节点导入为本地配置 | `Write` | 低 |
+| 11 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 | `Execute` | 高 |
+| 12 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
+| 13 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
+| 14 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
+| 15 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
+| 16 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
+| 17 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
+| 18 | `ProfileDelete` | `ProfileDeleteTool` | 删除本地配置 | `Write` | 中 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
-**破坏性工具（destructive）**：`CoreInstall`、`ProfileDelete`、`VpnConnect`（会改系统代理）。这三个无论调用来源是 UI 还是 Agent，都必须走审批；`VpnConnect` 例外地采用会话内首次（见 §3.2），另两个恒为 `always`。
+**破坏性工具（destructive）**：`CoreInstall`、`ProfileDelete`、`VpnConnect`（会改系统代理）。P1 **对三者均无确认点**，直接执行；风险评估见 §2.1.1。
 
 ### 3.1 注册清单（照抄）
 
@@ -337,27 +270,14 @@ let tools: Vec<Box<dyn Tool>> = vec![
 ];
 ```
 
-### 3.2 `VpnConnect` 的审批策略（已定：会话内首次）
+### 3.2 `VpnConnect` 与 `CoreInstall` 没有确认点
 
-**结论（2026-11-02 用户拍板）**：`ApprovalPolicy = first_time_per_session`，`ApprovalScope = "session"`。
+P1 移除审批后，这两个工具直接执行：
 
-行为：
+- `VpnConnect` 会修改系统代理，不弹确认卡
+- `CoreInstall` 会下载并执行二进制，不弹确认卡
 
-| 场景 | 是否弹确认卡 |
-|---|---|
-| 同一会话里第一次调 `VpnConnect` | 弹一次 |
-| 同会话里后续换节点、重连、换 profile | **不再弹** |
-| 新建会话后第一次连接 | 重新弹一次 |
-| 应用重启后（会话未变） | 视为新会话，重新弹 —— Grant 表只在内存 |
-| 用户第一次就点「拒绝」 | 本会话不再弹，后续直接 `PERMISSION_DENIED` |
-
-实现要点：
-
-1. `PermissionLevel` 固定 `Execute`；审批判定由 §2.2 的 Grant 表完成，与参数无关。
-2. 工具接受 `approval_id` 入参；同会话第二次调用时 Host 已放行，Agent 可以不带 `approval_id` 直接调用。
-3. 用户手动断开再连接，仍属同一会话，不再弹。
-4. 若以后要求「每个节点首次确认」，是给 `ApprovalPolicy` 加一个值、在 Grant 表里把 `tool` 换成 `(tool, profile_id)`，不改工具实现。
-5. 策略值从 `ApprovalPolicyStore` 读取（可被设置页覆盖），当前默认即 `first_time_per_session`。
+它们仍然是**需要用户明确意图**的操作 —— 区别只在于这个意图由 Agent 的判断代替用户点击。风险记录见 §2.1.1。
 
 ---
 
@@ -550,8 +470,7 @@ type CoreListVersionsData = {
   "type": "object",
   "properties": {
     "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
-    "channel": { "type": "string", "enum": ["stable"], "default": "stable" },
-    "approval_id": { "type": "string" }
+    "channel": { "type": "string", "enum": ["stable"], "default": "stable" }
   },
   "required": ["version"],
   "additionalProperties": false
@@ -569,9 +488,9 @@ type CoreInstallData = {
 
 异步：立即返回 `job_id`，进度经 `job-progress` 事件推送（`events.md` §3.2），也可用 `JobGet` 轮询。
 
-错误：`APPROVAL_REQUIRED`、`UNSUPPORTED`（平台无该版本）、`RUNTIME_VERSION_UNSUPPORTED`。
+错误：`UNSUPPORTED`（平台无该版本）、`RUNTIME_VERSION_UNSUPPORTED`。
 
-**审批语义（已定）**：`ApprovalPolicy = always`，`ApprovalScope = "call"`。**每次安装都要确认**，即使同一会话里已经装过一次、即使会打断「一句话一条龙」。理由：安装是引入一个可执行二进制，风险等级高于普通写操作，不做会话内放行。
+**无确认点**：安装会直接下载并执行二进制，没有确认卡。见 §2.1.1 的风险记录。
 
 安装阶段：`downloading → verifying → unpacking → probing → activating → done`。
 
@@ -679,8 +598,7 @@ type ProfileImportData = {
   "properties": {
     "node_id": { "type": "string" },
     "profile_id": { "type": "string" },
-    "strategy": { "type": "string", "enum": ["latency"], "default": "latency" },
-    "approval_id": { "type": "string" }
+    "strategy": { "type": "string", "enum": ["latency"], "default": "latency" }
   },
   "additionalProperties": false
 }
@@ -703,19 +621,19 @@ type VpnConnectData = {
 
 语义（按顺序）：
 
-1. 确保运行时已安装；未安装 → `RUNTIME_NOT_INSTALLED`（**不自动安装**，因为安装要审批；`next_actions` 给出 `CoreInstall`）。
+1. 确保运行时已安装；未安装 → `RUNTIME_NOT_INSTALLED`（**不自动安装**，安装是用户的显式决定；`next_actions` 给出 `CoreInstall`）。
 2. 解析出 profile（`node_id` 时先导入或复用）。
 3. 生成配置 → `sing-box check`。
 4. 启动或热更新。
-5. 设置系统代理（会话内首次需审批）。
+5. 设置系统代理（无确认点，直接执行）。
 6. 通过代理查出口 IP。
 7. 任一步失败：关闭系统代理，按 `docs/phase-1-technical-design.md` §6.5 分类返回。
 
-错误：`APPROVAL_REQUIRED`、`PRECONDITION_FAILED`、`TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`UPSTREAM_ERROR`。
+错误：`PRECONDITION_FAILED`、`TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`UPSTREAM_ERROR`。
 
 失败时的 `next_actions` 必须给出替代方案（同地区其他节点 / `DiagRun`）。
 
-**审批语义**：`ApprovalPolicy = first_time_per_session`。同一 `session_id` 内第一次调用弹确认卡，之后换节点、重连、断开再连都不再弹；新会话重新确认。Grant 表只在内存，应用重启后清空。详见 §2.2 与 §3.2。
+**无确认点**：直接修改系统代理，没有确认卡。见 §2.1.1 的风险记录。
 
 ---
 
@@ -762,7 +680,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -888,7 +806,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "1.0.7";
+  contract_version: "1.0.8";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -912,8 +830,7 @@ type Job = {
 {
   "type": "object",
   "properties": {
-    "profile_id": { "type": "string" },
-    "approval_id": { "type": "string" }
+    "profile_id": { "type": "string" }
   },
   "required": ["profile_id"],
   "additionalProperties": false
@@ -943,22 +860,22 @@ type ProfileDeleteData = {
     "details": { "reason": "ACTIVE_PROFILE_IN_USE", "active_profile_id": "prf_1" }
   }
   ```
-  **前置校验必须在弹审批卡之前执行**：命中就不弹卡，直接返回错误。用户不该点了「允许」才发现删不了，也不能留下悬挂引用。
+  **前置校验在执行之前完成**：命中直接返回错误，不产生任何副作用。
   
   测试断言：错误码看 `error.code == "PRECONDITION_FAILED"`，具体原因看 `error.details.reason == "ACTIVE_PROFILE_IN_USE"`。两者都要匹配。
 - 删除成功后 `active_profile_id` **保持不变**（因为 active 的永远删不掉）。要换 active，走「先 `VpnDisconnect` 或 `VpnConnect` 到别的 profile」。
 - 删除该 profile 关联的配置文件与 `profile-<id>.meta.json`；不删节点缓存。
 
-实现注意：审批在 `AivpnPermissionHandler` 里判定，而这个校验属于**业务前置条件**。Host 二选一：
+实现注意：这个校验属于**业务前置条件**，必须在删除动作之前完成。
 
 1. 给 `Tool` trait 增加可选 `precheck(input, ctx) -> Result<(), AivpnError>`，Handler 在返回 `Ask` 之前调用；
 2. 在 Handler 内为 `ProfileDelete` 内联同一份检查逻辑。
 
-两种都要保证：**校验失败 → 不产生 `approval_id`、不发 `approval-requested` 事件**。
+必须保证：**校验失败 → 不产生任何删除副作用**。
 
-审批：`PermissionLevel = Write`，`ApprovalPolicy = always`（scope `call`）。破坏性操作，每次都要确认，**不做会话内放行**。
+无确认点：`PermissionLevel = Write`，直接执行。见 §2.1.1 的风险记录。
 
-错误：`PRECONDITION_FAILED`（`details.reason = "ACTIVE_PROFILE_IN_USE"`，**不弹审批**）、`APPROVAL_REQUIRED`（非 active 且未授权）、`INVALID_ARGUMENT`（`profile_id` 为空）、`INTERNAL`（磁盘删除失败）。
+错误：`PRECONDITION_FAILED`（`details.reason = "ACTIVE_PROFILE_IN_USE"`）、`INVALID_ARGUMENT`（`profile_id` 为空）、`INTERNAL`（磁盘删除失败）。
 
 ---
 
@@ -970,7 +887,7 @@ type ProfileDeleteData = {
 CatalogSearch → ProfileImport → VpnConnect
 ```
 
-`VpnConnect` **不隐式调用** `CoreInstall`：安装需要审批，静默安装会让审批卡失去意义。
+`VpnConnect` **不隐式调用** `CoreInstall`：静默安装会让用户不知道自己的机器上多了一个二进制。
 
 ### 5.2 幂等矩阵
 
@@ -980,7 +897,7 @@ CatalogSearch → ProfileImport → VpnConnect
 | `RuntimeStart` | 已 `running` → `ok: true`，`already_running: true` |
 | `RuntimeStop` / `VpnDisconnect` | 已 `idle` → `ok: true` |
 | `ProfileImport` | 同节点 → 返回已有 profile，`already_existed: true` |
-| `ProfileDelete` | 已不存在 → `ok: true`，`deleted: false`，`already_absent: true`；**active profile → `PRECONDITION_FAILED`，不弹审批** |
+| `ProfileDelete` | 已不存在 → `ok: true`，`deleted: false`，`already_absent: true`；**active profile → `PRECONDITION_FAILED`** |
 | `CoreInstall` | 同版本已在装或已装 → `CONFLICT`，`details.job_id` 指向进行中的任务 |
 | `VpnConnect` | 已连同一节点 → `ok: true`，不重复设置代理 |
 
@@ -1004,9 +921,9 @@ CatalogSearch → ProfileImport → VpnConnect
 |---|---|---|---|---|
 | 1 | `phase-1-technical-design.md` §4.4 | 自造 `ToolResult { ok, summary, data, next_actions }` | 真实 `ToolResult` 是 `{ content, is_error, metadata, images }`；我们的信封放 `metadata.aivpn` | 现有写法与实际 crate API 不符，按它实现无法编译 |
 | 2 | 同上 §4.3 | `fn name(&self) -> &str { "VpnConnect" }` | 一致（PascalCase），但其他章节写 snake_case（`vpn_connect`） | 统一为 PascalCase，与 Claurst 内置工具（`AskUserQuestion`、`CronCreate`）一致 |
-| 3 | `phase-1-requirements.md` §5 | 16 个工具，`core_install` 审批=「是」，`vpn_connect` 审批=「否」 | 18 个（+`AskUserQuestion`、`ProfileDelete`）；`CoreInstall` / `ProfileDelete` 恒需审批，`VpnConnect` 会话内首次审批 | 同文档 FR-2.4 明确「安装运行时、修改系统代理」都要确认，与 §5 表冲突 |
+| 3 | `phase-1-requirements.md` §5 | 16 个工具，`core_install` / `vpn_connect` 均需确认 | 18 个（+`AskUserQuestion`、`ProfileDelete`）；**P1 全部无确认点** | 2026-11-02 用户决定彻底移除审批，见 §2.1 |
 | 4 | `phase-1-requirements.md` §5 | 有 `profile_list`、`deepseek_setup_key`、`deepseek_save_key`、`job_get` | 保留 | 但 `phase-1-technical-design.md` §4.3 的注册清单漏了这 4 个，以本契约为准 |
-| 5 | `architecture.md` §4.5 | 权限矩阵里 `core_install` 不需要审批、`core_upgrade` 需要 | `CoreInstall` 需要审批；P1 无 `core_upgrade` | P1 没有升级场景，安装即高风险 |
+| 5 | `architecture.md` §4.5 | 权限矩阵带审批列 | **P1 无审批矩阵** | 用户决定移除，见 §2.1 |
 | 6 | `architecture.md` §4.7 | `vpn_connect` 入参是 `profile_id` | 允许 `node_id` 或 `profile_id` 二选一 | `phase-1-technical-design.md` §5.1 用的是 `node_id`；两者都出现，合并为二选一 |
 | 7 | `architecture.md` §4.2 | 工具返回带 `ok/data/summary` 顶层字段 | 顶层是 `content`，信封在 `metadata` | 同 #1 |
 
@@ -1019,15 +936,15 @@ CatalogSearch → ProfileImport → VpnConnect
 | 议题 | 决议 | 落点 |
 |---|---|---|
 | 结构化信封放哪 | `metadata.aivpn`；模型只读 `content` | §1 |
-| `CoreInstall` 是否需要审批 | **恒需审批**（`always`，scope `call`），不做会话内放行 | §3 表第 7 行、§4.7 |
+| `CoreInstall` 是否需要审批 | ~~恒需审批~~ → **已移除审批，直接执行**（2026-11-02 用户决定） | §2.1、§4.7 |
 | `VpnConnect` 入参 | `profile_id` / `node_id` 二选一 | §4.11 |
 | `ProfileList` / `DeepseekSetupKey` / `DeepseekSaveKey` / `JobGet` 是否保留 | 保留 | §3 表 |
-| `ProfileDelete` 是否加入 P1 | **加入**，`Write` + `always`（scope `call`）；不存在时幂等 `ok: true`；**不允许删 active profile**，命中直接 `PRECONDITION_FAILED` 且不弹审批 | §3 表第 18 行、§4.17 |
-| `VpnConnect` 审批粒度 | **会话内首次**（`first_time_per_session` + scope `session`），新会话重新确认 | §2.2、§3.2 |
+| `ProfileDelete` 是否加入 P1 | **加入**，`Write`、**无确认点**；不存在时幂等 `ok: true`；**不允许删 active profile**，命中直接 `PRECONDITION_FAILED` | §3 表第 18 行、§4.17 |
+| `VpnConnect` 审批粒度 | ~~会话内首次~~ → **已移除审批，直接执行** | §2.1、§3.2 |
 | `DeepseekSaveKey` 的 `ok` 语义 | **存储成功即 `ok: true`**；Key 有效性用 `data.validation` 表达，且 **`validation` 只回答 Key 是否有效**——余额不足归 `validation = "ok"` + `validation_detail = "insufficient_balance"` | §4.15 |
 | `next_actions` 点击语义 | 等价于用户发一条消息给 Agent，**不由 UI 直接执行** | §1.3 |
 | `args_preview` 是否保留 | 保留，**默认展示非敏感字段**；`sensitive` / 黑名单字段打码；脱敏后无可展示字段才省略 | §2.5 |
-| 无 AI 模式的来源校验 | Host 边界注入 `source: "ui" \| "agent"`，不可由参数传入；破坏性工具无论来源都要审批 | §2.4 |
+| 无 AI 模式的来源校验 | Host 边界注入 `source: "ui" \| "agent"`，不可由参数传入；P1 不因来源不同而改变执行路径 | §2.2 |
 
 ### 7.2 仍需 PM 决定
 
@@ -1038,6 +955,21 @@ CatalogSearch → ProfileImport → VpnConnect
 ---
 
 ## 8. 变更记录
+
+### 1.0.8（2026-11-02，用户决定移除审批）
+
+> 本版本原计划为 D-13 / D-14 的审批流程重构（工具内阻塞等待 + `approval_state` 列），**未发布即撤回**。用户决定**彻底移除审批机制**，改为默认放行。
+>
+> 若将来恢复审批，有两条已验证的结论可以省时间：**(1)** 不能用 `CancellationToken` 终止 turn —— 它会被 UI 渲染成「用户主动取消」；**(2)** SQLite 不支持修改已存在的 CHECK 约束，想用 `-1` 表示 pending 必须重建表，加独立列则只需一行 `ALTER TABLE ADD COLUMN`。
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.0.8` | 元数据 | PM |
+| 2 | **移除全部审批机制**：删除 `ApprovalPolicy`、`ApprovalScope`、`ApprovalGrant`、`approval_id`、两阶段审批协议 | 移除 | 用户：「把权限卡的逻辑全部去掉，默认就是 bypass」 |
+| 3 | 工具总表删除 `ApprovalPolicy` 列 | 表结构 | 同上 |
+| 4 | `CoreInstall` / `ProfileDelete` / `VpnConnect` **不再有确认点** | 行为变更 | 同上 |
+| 5 | `tool_calls.approved` 列**保留**，P1 恒为 `NULL`，含义改为「审批机制不适用」；将来恢复审批不必改 schema | 保留 | 同上 |
+| 6 | 新增 §2.1.1「已知产品风险」，记录无拦截点下误判/误触/下载执行的后果 | 新增 | PM：风险要留痕 |
 
 ### 1.0.7（2026-11-02）
 

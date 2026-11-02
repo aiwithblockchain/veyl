@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { ApprovalDecision, ApprovalScope, NextAction } from "../agent/protocol";
+import type { NextAction } from "../agent/protocol";
 import type { Session } from "../state/chatStore";
 import { Composer } from "./Composer";
 import { MessageItem } from "./MessageItem";
@@ -9,13 +9,12 @@ interface Props {
   session: Session;
   onSend: (text: string) => void;
   onStop: () => void;
-  onDecide: (approvalId: string, decision: ApprovalDecision, scope: ApprovalScope) => void;
   onNextAction: (action: NextAction) => void;
 }
 
 const SUGGESTIONS = ["连到日本", "现在是什么状态", "断开连接"];
 
-export function ChatView({ session, onSend, onStop, onDecide, onNextAction }: Props) {
+export function ChatView({ session, onSend, onStop, onNextAction }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
 
@@ -71,8 +70,6 @@ export function ChatView({ session, onSend, onStop, onDecide, onNextAction }: Pr
                 key={message.id}
                 message={message}
                 toolCalls={session.toolCalls}
-                approvals={session.approvals}
-                onDecide={onDecide}
                 onNextAction={onNextAction}
               />
             ))}

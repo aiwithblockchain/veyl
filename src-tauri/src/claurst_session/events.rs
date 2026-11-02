@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::agent::app_handle;
 use crate::tools::{AivpnError, NextAction};
 
-pub const CONTRACT_VERSION: &str = "1.0.7";
+pub const CONTRACT_VERSION: &str = "1.0.8";
 
 pub const EV_MESSAGE_CHUNK: &str = "message-chunk";
 pub const EV_THINKING_CHUNK: &str = "thinking-chunk";
@@ -17,7 +17,6 @@ pub const EV_TOOL_CALL_END: &str = "tool-call-end";
 pub const EV_STATUS: &str = "ai-status";
 pub const EV_COMPACT: &str = "ai-compact";
 pub const EV_REQUEST_END: &str = "ai-request-end";
-pub const EV_APPROVAL_REQUESTED: &str = "approval-requested";
 pub const EV_RUNTIME_STATE_CHANGED: &str = "runtime-state-changed";
 pub const EV_RUNTIME_HEALTH_CHANGED: &str = "runtime-health-changed";
 pub const EV_JOB_PROGRESS: &str = "job-progress";
@@ -93,7 +92,6 @@ impl SessionEmitter {
         tool: &str,
         action: &str,
         permission_level: &str,
-        approval_policy: &str,
         args_preview: Option<Value>,
     ) {
         let mut payload = self.base();
@@ -101,7 +99,6 @@ impl SessionEmitter {
         payload["tool"] = Value::String(tool.to_string());
         payload["action"] = Value::String(action.to_string());
         payload["permission_level"] = Value::String(permission_level.to_string());
-        payload["approval_policy"] = Value::String(approval_policy.to_string());
         payload["source"] = Value::String("agent".to_string());
         if let Some(preview) = args_preview {
             payload["args_preview"] = preview;

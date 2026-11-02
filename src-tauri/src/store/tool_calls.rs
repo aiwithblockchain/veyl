@@ -4,38 +4,6 @@ use serde_json::Value;
 use super::db::now_ms;
 use super::error::{StoreError, StoreResult};
 
-/// `tool_calls.approved` 的三值语义。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Approval {
-    Denied,
-    Once,
-    Session,
-}
-
-impl Approval {
-    pub fn as_code(self) -> i64 {
-        match self {
-            Approval::Denied => 0,
-            Approval::Once => 1,
-            Approval::Session => 2,
-        }
-    }
-
-    pub fn from_code(code: i64) -> Option<Self> {
-        match code {
-            0 => Some(Approval::Denied),
-            1 => Some(Approval::Once),
-            2 => Some(Approval::Session),
-            _ => None,
-        }
-    }
-
-    /// 同会话内由 Grant 自动放行的调用也记 2，审计表能看出「没弹卡是因为会话授权」。
-    pub fn auto_granted() -> Self {
-        Approval::Session
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct NewCall<'a> {
     pub id: &'a str,
@@ -52,14 +20,15 @@ pub struct ToolCallRecord {
     pub request_id: Option<String>,
     pub tool_name: String,
     pub args: Value,
-    pub approved: Option<Approval>,
+    /// 审批已移除，恒为 NULL；保留字段供审计表兼容。
+    pub approved: Option<i64>,
     pub result: Option<Value>,
     pub is_error: bool,
     pub created_at: i64,
     pub finished_at: Option<i64>,
 }
 
-/// 请求开始时写入一行；`approved` 留空，等审批结果再回填。
+/// 请求开始时写入一行；审批已移除，`approved` 恒为 NULL。
 pub fn begin(conn: &Connection, call: &NewCall<'_>) -> StoreResult<()> {
     conn.execute(
         "INSERT INTO tool_calls (id, session_id, request_id, tool_name, args_json, approved, is_error, created_at)
@@ -74,37 +43,6 @@ pub fn begin(conn: &Connection, call: &NewCall<'_>) -> StoreResult<()> {
         ],
     )?;
     Ok(())
-}
-
-pub fn record_approval(conn: &Connection, id: &str, approval: Approval) -> StoreResult<()> {
-    let changed = conn.execute(
-        "UPDATE tool_calls SET approved = ?1 WHERE id = ?2",
-        params![approval.as_code(), id],
-    )?;
-    if changed == 0 {
-        return Err(StoreError::NotFound(id.to_string()));
-    }
-    Ok(())
-}
-
-/// 按 (session, tool) 找到最近一条尚未定论的调用并回填审批结果。
-/// UI 的审批命令拿不到 tool_id，只能这样关联。
-pub fn record_approval_for(
-    conn: &Connection,
-    session_id: &str,
-    tool_name: &str,
-    approval: Approval,
-) -> StoreResult<usize> {
-    let changed = conn.execute(
-        "UPDATE tool_calls SET approved = ?1
-          WHERE id = (
-              SELECT id FROM tool_calls
-               WHERE session_id = ?2 AND tool_name = ?3 AND approved IS NULL
-               ORDER BY created_at DESC LIMIT 1
-          )",
-        params![approval.as_code(), session_id, tool_name],
-    )?;
-    Ok(changed)
 }
 
 pub fn finish(conn: &Connection, id: &str, result: &Value, is_error: bool) -> StoreResult<()> {
@@ -153,7 +91,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord> {
         request_id: row.get(2)?,
         tool_name: row.get(3)?,
         args: serde_json::from_str(&args_json).unwrap_or(Value::Null),
-        approved: approved.and_then(Approval::from_code),
+        approved,
         result: result_json.and_then(|text| serde_json::from_str(&text).ok()),
         is_error: row.get::<_, i64>(7)? == 1,
         created_at: row.get(8)?,
@@ -181,89 +119,22 @@ mod tests {
     }
 
     #[test]
-    fn approval_codes_match_the_contract() {
-        assert_eq!(Approval::Denied.as_code(), 0);
-        assert_eq!(Approval::Once.as_code(), 1);
-        assert_eq!(Approval::Session.as_code(), 2);
-        assert_eq!(Approval::from_code(2), Some(Approval::Session));
-        assert_eq!(Approval::from_code(7), None);
-    }
-
-    #[test]
-    fn a_call_starts_without_an_approval_and_finishes_with_a_result() {
+    fn a_call_is_recorded_and_finished_without_an_approval() {
         let store = super::super::db::Store::open_in_memory().unwrap();
         let conn = store.conn();
 
         begin_sample(&conn, "call_1");
         let record = get(&conn, "call_1").unwrap().unwrap();
-        assert_eq!(record.approved, None);
+        assert_eq!(record.approved, None, "审批已移除，始终为 NULL");
         assert!(record.finished_at.is_none());
 
-        record_approval(&conn, "call_1", Approval::Once).unwrap();
         finish(&conn, "call_1", &json!({ "ok": true }), false).unwrap();
 
         let record = get(&conn, "call_1").unwrap().unwrap();
-        assert_eq!(record.approved, Some(Approval::Once));
+        assert_eq!(record.approved, None, "执行结束后仍为 NULL（语义：不适用）");
         assert!(!record.is_error);
         assert_eq!(record.result.unwrap()["ok"], true);
         assert!(record.finished_at.is_some());
-    }
-
-    #[test]
-    fn session_grants_are_recorded_as_two() {
-        let store = super::super::db::Store::open_in_memory().unwrap();
-        let conn = store.conn();
-
-        begin_sample(&conn, "call_2");
-        record_approval(&conn, "call_2", Approval::auto_granted()).unwrap();
-
-        assert_eq!(
-            get(&conn, "call_2").unwrap().unwrap().approved,
-            Some(Approval::Session)
-        );
-    }
-
-    #[test]
-    fn rejecting_a_call_is_recorded_as_zero() {
-        let store = super::super::db::Store::open_in_memory().unwrap();
-        let conn = store.conn();
-
-        begin_sample(&conn, "call_3");
-        record_approval(&conn, "call_3", Approval::Denied).unwrap();
-        finish(
-            &conn,
-            "call_3",
-            &json!({ "ok": false, "error": { "code": "PERMISSION_DENIED" } }),
-            true,
-        )
-        .unwrap();
-
-        let record = get(&conn, "call_3").unwrap().unwrap();
-        assert_eq!(record.approved, Some(Approval::Denied));
-        assert!(record.is_error);
-    }
-
-    #[test]
-    fn record_approval_for_targets_the_open_call() {
-        let store = super::super::db::Store::open_in_memory().unwrap();
-        let conn = store.conn();
-
-        begin_sample(&conn, "call_1");
-        let changed =
-            record_approval_for(&conn, "ses_1", "VpnConnect", Approval::Session).unwrap();
-        assert_eq!(changed, 1);
-        assert_eq!(
-            get(&conn, "call_1").unwrap().unwrap().approved,
-            Some(Approval::Session)
-        );
-
-        // 已经定论的调用不会被第二次改写。
-        let again = record_approval_for(&conn, "ses_1", "VpnConnect", Approval::Denied).unwrap();
-        assert_eq!(again, 0);
-        assert_eq!(
-            get(&conn, "call_1").unwrap().unwrap().approved,
-            Some(Approval::Session)
-        );
     }
 
     #[test]

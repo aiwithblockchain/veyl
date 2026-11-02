@@ -82,8 +82,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     request_id  TEXT,
     tool_name   TEXT NOT NULL,
     args_json   TEXT NOT NULL,
-    -- 0 拒绝 / 1 允许一次 / 2 允许本会话（含 Grant 自动放行）；
-    -- NULL = 该工具不需要审批（只读或策略为 never），不能用 1 冒充。
+    -- 审批机制已移除：该列保留给审计，写入恒为 NULL。
     approved    INTEGER CHECK (approved IN (0, 1, 2)),
     result_json TEXT,
     is_error    INTEGER NOT NULL DEFAULT 0 CHECK (is_error IN (0, 1)),

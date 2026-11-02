@@ -1,52 +1,14 @@
-//! 审批策略与授权表（`docs/contracts/tools.md` §2.2 / §2.3）。
+//! 工具元数据：权限级别展示 + 当前请求关联。
 //!
-//! 判定顺序：
-//! 1. 只读工具由 Claurst 权限层直接放行；
-//! 2. `never` → 放行；
-//! 3. `always` → 每次都要确认；
-//! 4. `first_time_per_session` → 本会话已有 Grant 则放行，否则确认一次。
-//!
-//! Grant 只存内存，应用重启即清空；`approval_id` 绑定参数哈希，只管一次执行。
+//! **审批已移除**（2026-11-02 用户拍板）：所有工具默认放行，Host 不再拦截、
+//! 不再生成 `approval_id`、也不再维护 Grant / 待确认队列。
+//! 审计仍然保留：`tool_calls.approved` 恒为 NULL（语义是「不适用」）。
 
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
-use claurst_tools::{PermissionLevel, ToolContext, ToolResult};
+use claurst_tools::PermissionLevel;
 use parking_lot::Mutex;
-use serde_json::{json, Value};
-
-use super::envelope::{self, AivpnError, ToolOutcome};
-
-pub const APPROVAL_TTL: Duration = Duration::from_secs(300);
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalPolicy {
-    Never,
-    Always,
-    FirstTimePerSession,
-}
-
-impl ApprovalPolicy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ApprovalPolicy::Never => "never",
-            ApprovalPolicy::Always => "always",
-            ApprovalPolicy::FirstTimePerSession => "first_time_per_session",
-        }
-    }
-}
-
-/// 模型可见名 → 审批策略（`tools.md` §3 总表）。
-pub fn policy_for(tool: &str) -> ApprovalPolicy {
-    match tool {
-        "CoreInstall" | "ProfileDelete" => ApprovalPolicy::Always,
-        "VpnConnect" => ApprovalPolicy::FirstTimePerSession,
-        _ => ApprovalPolicy::Never,
-    }
-}
 
 pub fn permission_level_str(level: PermissionLevel) -> &'static str {
     match level {
@@ -58,29 +20,7 @@ pub fn permission_level_str(level: PermissionLevel) -> &'static str {
     }
 }
 
-struct Pending {
-    tool: String,
-    session_id: String,
-    args_hash: u64,
-    created_at: Instant,
-}
-
-#[derive(Default)]
-struct Gate {
-    grants: HashSet<(String, String)>,
-    denied: HashSet<(String, String)>,
-    /// 已弹卡、等用户点按钮。
-    pending: HashMap<String, Pending>,
-    /// 用户已允许、等 Agent 带 approval_id 重试。
-    approved: HashMap<String, Pending>,
-}
-
-fn gate() -> &'static Mutex<Gate> {
-    static GATE: OnceLock<Mutex<Gate>> = OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(Gate::default()))
-}
-
-/// session_id → 当前 request_id。审批事件需要带上它，而工具拿不到。
+/// session_id → 当前 request_id，供工具审计把调用记到对应请求上。
 fn current_requests() -> &'static Mutex<HashMap<String, String>> {
     static CURRENT: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     CURRENT.get_or_init(|| Mutex::new(HashMap::new()))
@@ -97,376 +37,26 @@ pub fn clear_current_request(session_id: &str) {
 }
 
 pub fn current_request_id(session_id: &str) -> Option<String> {
-    current_request(session_id)
-}
-
-fn current_request(session_id: &str) -> Option<String> {
     current_requests().lock().get(session_id).cloned()
-}
-
-fn args_hash(input: &Value) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    let mut keys: Vec<&String> = input
-        .as_object()
-        .map(|object| object.keys().filter(|key| *key != "approval_id").collect())
-        .unwrap_or_default();
-    keys.sort();
-    for key in keys {
-        key.hash(&mut hasher);
-        input[key].to_string().hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn new_approval_id(tool: &str) -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or(0);
-    format!("apr_{tool}_{nanos:x}")
-}
-
-/// 审批判定：需要确认时返回错误对象（并已发出 `approval-requested` 事件），
-/// `None` 表示放行。UI 直连的命令也走这里，保证「无论来源都要审批」。
-pub fn require(
-    session_id: &str,
-    tool: &str,
-    input: &Value,
-    summary: &str,
-    risk: &str,
-) -> Option<AivpnError> {
-    let policy = policy_for(tool);
-    let session_id = session_id.to_string();
-
-    match policy {
-        ApprovalPolicy::Never => return None,
-        ApprovalPolicy::Always => {}
-        ApprovalPolicy::FirstTimePerSession => {
-            if gate().lock().grants.contains(&(session_id.clone(), tool.to_string())) {
-                record_auto_approval(&session_id, tool, crate::store::Approval::Session);
-                return None;
-            }
-        }
-    }
-
-    if gate()
-        .lock()
-        .denied
-        .contains(&(session_id.clone(), tool.to_string()))
-    {
-        return Some(AivpnError::new(
-            "PERMISSION_DENIED",
-            format!("用户本会话已拒绝 {tool}，不再重复询问"),
-        ));
-    }
-
-    // 带 approval_id 的重试：校验参数哈希一致后放行。
-    if let Some(approval_id) = input.get("approval_id").and_then(Value::as_str) {
-        let mut gate_state = gate().lock();
-        let matched = gate_state
-            .approved
-            .remove(approval_id)
-            .filter(|pending| {
-                pending.tool == tool
-                    && pending.args_hash == args_hash(input)
-                    && pending.created_at.elapsed() < APPROVAL_TTL
-            })
-            .is_some();
-
-        if matched {
-            let auto = if policy == ApprovalPolicy::FirstTimePerSession {
-                gate_state
-                    .grants
-                    .insert((session_id.clone(), tool.to_string()));
-                crate::store::Approval::Session
-            } else {
-                crate::store::Approval::Once
-            };
-            record_auto_approval(&session_id, tool, auto);
-            return None;
-        }
-    }
-
-    let approval_id = new_approval_id(tool);
-    let scope = if policy == ApprovalPolicy::FirstTimePerSession {
-        "session"
-    } else {
-        "call"
-    };
-    let expires_at = chrono::Utc::now() + chrono::Duration::from_std(APPROVAL_TTL).unwrap();
-
-    gate().lock().pending.insert(
-        approval_id.clone(),
-        Pending {
-            tool: tool.to_string(),
-            session_id: session_id.clone(),
-            args_hash: args_hash(input),
-            created_at: Instant::now(),
-        },
-    );
-
-    let risk = risk.to_string();
-    let summary_owned = summary.to_string();
-    let request_id = current_request(&session_id);
-    let payload = json!({
-        "contract_version": envelope::CONTRACT_VERSION,
-        "approval_id": approval_id.clone(),
-        "request_id": request_id,
-        "session_id": session_id.clone(),
-        "tool": tool,
-        "summary": summary_owned,
-        "risk": risk,
-        "scope": scope,
-        "expires_at": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "emitted_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    });
-    crate::agent::app_handle::emit(crate::claurst_session::events::EV_APPROVAL_REQUESTED, payload);
-
-    let mut error = AivpnError::new(
-        "APPROVAL_REQUIRED",
-        format!("{summary} 需要用户确认后才能执行"),
-    );
-    error.details = Some(json!({
-        "approval_id": approval_id,
-        "tool": tool,
-        "summary": summary,
-        "risk": risk,
-        "scope": scope,
-        "session_id": session_id,
-        "expires_at": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    }));
-
-    Some(error)
-}
-
-/// 工具入口的包装：需要确认时转成可直接返回给模型的 `ToolResult`。
-pub fn guard(
-    ctx: &ToolContext,
-    tool: &str,
-    input: &Value,
-    summary: &str,
-    risk: &str,
-) -> Option<ToolResult> {
-    let error = require(&ctx.session_id, tool, input, summary, risk)?;
-
-    let mut outcome = ToolOutcome::fail(error);
-    outcome.next_actions.push(super::envelope::NextAction {
-        label: "允许后重试".to_string(),
-        tool: tool.to_string(),
-        args: json!({}),
-    });
-    Some(envelope::finish(ctx, tool, outcome))
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedApproval {
-    pub session_id: String,
-    pub tool: String,
-    pub granted: bool,
-    pub scope: String,
-}
-
-/// UI 的审批结果。`None` 表示这个 approval_id 已失效。
-pub fn resolve(approval_id: &str, decision: &str, scope: &str) -> Option<ResolvedApproval> {
-    let mut gate_state = gate().lock();
-    let pending = gate_state.pending.remove(approval_id)?;
-
-    let granted = decision != "deny";
-    let resolved = ResolvedApproval {
-        session_id: pending.session_id.clone(),
-        tool: pending.tool.clone(),
-        granted,
-        scope: scope.to_string(),
-    };
-
-    if granted {
-        if scope == "session" {
-            gate_state
-                .grants
-                .insert((pending.session_id.clone(), pending.tool.clone()));
-        }
-        gate_state.approved.insert(approval_id.to_string(), pending);
-    } else {
-        gate_state
-            .denied
-            .insert((pending.session_id, pending.tool));
-    }
-    Some(resolved)
-}
-
-/// 自动放行也要落审计：记 2（会话内允许），不能留空。
-fn record_auto_approval(session_id: &str, tool: &str, approval: crate::store::Approval) {
-    let Some(store) = crate::store::global() else {
-        return;
-    };
-    let conn = store.conn();
-    let _ = crate::store::tool_calls::record_approval_for(&conn, session_id, tool, approval);
-}
-
-/// 会话结束时清空该会话的授权与否定缓存（契约 §2.2 铁律）。
-pub fn clear_session(session_id: &str) {
-    let mut gate_state = gate().lock();
-    gate_state.grants.retain(|(sid, _)| sid != session_id);
-    gate_state.denied.retain(|(sid, _)| sid != session_id);
-    gate_state.pending.retain(|_, p| p.session_id != session_id);
-    gate_state.approved.retain(|_, p| p.session_id != session_id);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 每个用例用独立 session_id：Grant / 否定缓存都按 session 存，
-    /// 这样并行跑测试时互不干扰，也不用额外加串行锁。
-    fn sess(tag: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or(0);
-        format!("test_{tag}_{nanos}")
-    }
-
-    fn approval_id_of(error: &AivpnError) -> String {
-        error
-            .details
-            .as_ref()
-            .and_then(|details| details.get("approval_id"))
-            .and_then(Value::as_str)
-            .expect("APPROVAL_REQUIRED 必须带 approval_id")
-            .to_string()
+    #[test]
+    fn permission_levels_map_to_contract_strings() {
+        assert_eq!(permission_level_str(PermissionLevel::ReadOnly), "read_only");
+        assert_eq!(permission_level_str(PermissionLevel::Write), "write");
+        assert_eq!(permission_level_str(PermissionLevel::Execute), "execute");
+        assert_eq!(permission_level_str(PermissionLevel::Dangerous), "execute");
     }
 
     #[test]
-    fn policy_for_matches_contract_table() {
-        // 用 as_str 比较，避免给枚举加 Debug（实现文件尽量少动）
-        assert_eq!(policy_for("CoreInstall").as_str(), "always");
-        assert_eq!(policy_for("ProfileDelete").as_str(), "always");
-        assert_eq!(policy_for("VpnConnect").as_str(), "first_time_per_session");
-        assert_eq!(policy_for("RuntimeStatus").as_str(), "never");
-        assert_eq!(policy_for("VpnDisconnect").as_str(), "never");
-        assert_eq!(policy_for("CatalogSearch").as_str(), "never");
-    }
-
-    #[test]
-    fn never_policy_passes_without_approval() {
-        let session = sess("never");
-        assert!(require(&session, "RuntimeStatus", &json!({}), "查询状态", "low").is_none());
-    }
-
-    #[test]
-    fn first_time_per_session_prompts_once_then_allows() {
-        let session = sess("fts");
-        let first = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
-            .expect("首次应要求批准");
-        assert_eq!(first.code, "APPROVAL_REQUIRED");
-
-        let approval_id = approval_id_of(&first);
-        assert!(resolve(&approval_id, "allow", "session").is_some(), "允许后应可以重试");
-
-        // 同会话内第二次：不带 approval_id 也应直接放行（Grant 命中）
-        assert!(
-            require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-02" }), "连接", "high").is_none(),
-            "同会话第二次连接不应再弹卡"
-        );
-    }
-
-    #[test]
-    fn approved_retry_with_matching_id_passes() {
-        let session = sess("retry");
-        let error = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
-            .expect("首次应要求批准");
-        let approval_id = approval_id_of(&error);
-        assert!(resolve(&approval_id, "allow", "call").is_some());
-
-        let retry = json!({ "node_id": "seed-jp-01", "approval_id": approval_id });
-        assert!(require(&session, "VpnConnect", &retry, "连接", "high").is_none());
-    }
-
-    #[test]
-    fn approval_id_is_bound_to_arguments() {
-        let session = sess("args");
-        let error = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
-            .expect("首次应要求批准");
-        let approval_id = approval_id_of(&error);
-        assert!(resolve(&approval_id, "allow", "call").is_some());
-
-        // 用户看到的是 node_id=seed-jp-01，重试时被换成别的节点 → 必须重新确认
-        let tampered = json!({ "node_id": "seed-jp-99", "approval_id": approval_id });
-        let again = require(&session, "VpnConnect", &tampered, "连接", "high")
-            .expect("参数变了就不能复用授权");
-        assert_eq!(again.code, "APPROVAL_REQUIRED");
-    }
-
-    #[test]
-    fn deny_blocks_without_second_prompt() {
-        let session = sess("deny");
-        let error = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
-            .expect("首次应要求批准");
-        assert!(resolve(&approval_id_of(&error), "deny", "call").is_some());
-
-        let again = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
-            .expect("拒绝后不应放行");
-        assert_eq!(again.code, "PERMISSION_DENIED", "拒绝后应直接拒绝，不再弹卡");
-    }
-
-    #[test]
-    fn clear_session_drops_grant_and_denial() {
-        let session = sess("clear");
-        let error = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
-            .expect("首次应要求批准");
-        let approval_id = approval_id_of(&error);
-        assert!(resolve(&approval_id, "allow", "session").is_some());
-        assert!(require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high").is_none());
-
-        clear_session(&session);
-
-        let after = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
-            .expect("会话结束后应重新确认");
-        assert_eq!(after.code, "APPROVAL_REQUIRED");
-    }
-
-    #[test]
-    fn always_policy_prompts_on_every_call() {
-        let session = sess("always");
-        let first = require(&session, "CoreInstall", &json!({ "version": "1.14.4" }), "安装", "medium")
-            .expect("每次都要确认");
-        let approval_id = approval_id_of(&first);
-        assert!(resolve(&approval_id, "allow", "call").is_some());
-
-        let retry = json!({ "version": "1.14.4", "approval_id": approval_id });
-        assert!(require(&session, "CoreInstall", &retry, "安装", "medium").is_none());
-
-        // 第三次是全新调用 → 仍然要问
-        let third = require(&session, "CoreInstall", &json!({ "version": "1.14.4" }), "安装", "medium")
-            .expect("always 不产生 Grant，下一次仍要确认");
-        assert_eq!(third.code, "APPROVAL_REQUIRED");
-    }
-
-    #[test]
-    fn always_policy_ignores_session_grants() {
-        let session = sess("always_grant");
-        // 即使 UI 误传 scope=session，always 类工具也不应被 Grant 放行
-        let error = require(&session, "ProfileDelete", &json!({ "profile_id": "prf_1" }), "删除", "medium")
-            .expect("每次都要确认");
-        let approval_id = approval_id_of(&error);
-        assert!(resolve(&approval_id, "allow", "session").is_some());
-
-        let again = require(&session, "ProfileDelete", &json!({ "profile_id": "prf_1" }), "删除", "medium")
-            .expect("always 类工具不受 grants 影响");
-        assert_eq!(again.code, "APPROVAL_REQUIRED");
-    }
-
-    #[test]
-    fn approval_scope_reflects_policy() {
-        let session = sess("scope");
-        let session_scoped = require(&session, "VpnConnect", &json!({ "node_id": "seed-jp-01" }), "连接", "high")
-            .expect("首次应要求批准");
-        let details = session_scoped.details.as_ref().expect("应带 details");
-        assert_eq!(details["scope"], "session", "VpnConnect 是会话级授权");
-
-        let call_scoped = require(&session, "CoreInstall", &json!({ "version": "1.14.4" }), "安装", "medium")
-            .expect("每次都要确认");
-        let details = call_scoped.details.as_ref().expect("应带 details");
-        assert_eq!(details["scope"], "call", "CoreInstall 是单次授权");
+    fn request_registry_round_trips() {
+        set_current_request("ses_req", "req_1");
+        assert_eq!(current_request_id("ses_req").as_deref(), Some("req_1"));
+        clear_current_request("ses_req");
+        assert!(current_request_id("ses_req").is_none());
     }
 }

@@ -46,11 +46,6 @@ export interface AgentBridge {
   subscribe(listener: (event: AgentEvent) => void): () => void;
   sendMessage(sessionId: string, text: string): Promise<{ requestId: string }>;
   cancel(requestId: string): Promise<void>;
-  respondApproval(
-    approvalId: string,
-    decision: "allow" | "deny",
-    scope: "call" | "session",
-  ): Promise<void>;
   /** 事件不可达时的兜底快照（契约 §5 `runtime_status`）。 */
   getRuntimeSnapshot(): Promise<RuntimeSnapshot | null>;
   /** 无 AI 模式的删除配置入口（契约 §5 `profile_delete`）。 */
