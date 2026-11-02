@@ -63,7 +63,7 @@ fn not_wired<T>(what: &str) -> anyhow::Result<T> {
 
 fn idle_snapshot() -> Value {
     json!({
-        "contract_version": "1.0.4",
+        "contract_version": "1.0.5",
         "state": "idle",
         "mode": "system_proxy",
         "pid": null,
@@ -73,7 +73,7 @@ fn idle_snapshot() -> Value {
         "config_hash": null,
         "system_proxy_enabled": false,
         "health": {
-            "contract_version": "1.0.4",
+            "contract_version": "1.0.5",
             "process": false,
             "clash_api": false,
             "data_plane": false,
