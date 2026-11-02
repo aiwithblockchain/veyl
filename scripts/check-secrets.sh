@@ -6,6 +6,7 @@
 #   bash scripts/check-secrets.sh --help
 #
 # 规则见 docs/build-and-release.md §5.3。命中即 exit 1，列出文件与行号。
+# 职责边界：只查凭据文件本身（文件名 / 私钥 / 令牌形态）。信息泄漏（IP、路径、节点 id）见 scripts/test/secret-scan.sh。
 # 只读：不联网、不上传、不修改任何文件（--install-hook 除外，它只写 .git/hooks/pre-commit）。
 #
 # 退出码：0 干净 / 1 发现疑似凭据 / 2 用法或环境错误
