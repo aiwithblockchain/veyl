@@ -244,6 +244,8 @@ pub fn validate(input: &ProviderInput, has_existing_key: bool) -> Result<(), (St
 }
 
 pub fn save(store: &Store, input: ProviderInput) -> Result<Value, (String, String)> {
+    // 保存不改变当前：只有此前完全没有 active 时，第一个保存的才成为 active。
+    let had_active = active_id(store).is_some();
     let mut list = records(store);
     let existing_index = input
         .provider_id
@@ -288,8 +290,10 @@ pub fn save(store: &Store, input: ProviderInput) -> Result<Value, (String, Strin
         None => list.push(record.clone()),
     }
     save_records(store, &list).map_err(|error| ("INTERNAL".to_string(), error))?;
-    // 保存即设为当前（需求 §5.8）。
-    set_active_id(store, Some(&provider_id)).map_err(|error| ("INTERNAL".to_string(), error))?;
+    if !had_active {
+        // 否则用户配完了还发不出消息。
+        set_active_id(store, Some(&provider_id)).map_err(|error| ("INTERNAL".to_string(), error))?;
+    }
 
     Ok(public_json(store, &record))
 }
@@ -310,8 +314,8 @@ pub fn delete(store: &Store, provider_id: &str) -> Result<(), (String, String)> 
         .map_err(|error| ("SECRET_STORE".to_string(), error.to_string()))?;
 
     if active_id(store).as_deref() == Some(provider_id) {
-        let next = list.iter().find(|record| usable(record)).map(|record| record.provider_id.clone());
-        set_active_id(store, next.as_deref()).map_err(|error| ("INTERNAL".to_string(), error))?;
+        // 切换只能显式发生：删掉当前 provider 后留空，不自动挑下一个。
+        set_active_id(store, None).map_err(|error| ("INTERNAL".to_string(), error))?;
     }
     Ok(())
 }
@@ -611,15 +615,66 @@ mod tests {
     }
 
     #[test]
-    fn saving_a_new_provider_makes_it_active() {
+    fn saving_never_switches_the_active_provider() {
+        ensure_secrets();
+        let store = store();
+        ensure_migrated(&store); // active = deepseek
+
+        let saved = save(
+            &store,
+            input("anthropic", Some("https://api.anthropic.com"), Some("sk-a")),
+        )
+        .unwrap();
+        let id = saved["provider_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            active_id(&store).as_deref(),
+            Some(PROVIDER_DEEPSEEK),
+            "保存第二个 provider 不能改变 active"
+        );
+
+        // 编辑非当前 provider：active 仍不变。
+        let edit_other = ProviderInput {
+            provider_id: Some(id),
+            ..input("anthropic", Some("https://api.anthropic.com"), None)
+        };
+        save(&store, edit_other).unwrap();
+        assert_eq!(active_id(&store).as_deref(), Some(PROVIDER_DEEPSEEK));
+
+        // 编辑当前 provider：仍是当前。
+        let edit_active = ProviderInput {
+            provider_id: Some(PROVIDER_DEEPSEEK.to_string()),
+            ..input("openai", Some(DEEPSEEK_BASE_URL), Some("sk-edit"))
+        };
+        save(&store, edit_active).unwrap();
+        assert_eq!(active_id(&store).as_deref(), Some(PROVIDER_DEEPSEEK));
+    }
+
+    #[test]
+    fn the_first_saved_provider_becomes_active_when_none_exists() {
         ensure_secrets();
         let store = store();
         ensure_migrated(&store);
-        let _ = save(&store, input("anthropic", Some("https://api.anthropic.com"), Some("sk-new"))).unwrap();
-        let list = records(&store);
-        assert_eq!(list.len(), 2);
-        let active = active_id(&store).unwrap();
-        assert_eq!(active, list[1].provider_id);
+        set_active_id(&store, None).unwrap();
+
+        let saved = save(
+            &store,
+            input("openai", Some("https://api.openai.com"), Some("sk-first")),
+        )
+        .unwrap();
+        let id = saved["provider_id"].as_str().unwrap().to_string();
+        assert_eq!(active_id(&store).as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn deleting_the_active_provider_leaves_no_active() {
+        ensure_secrets();
+        let store = store();
+        ensure_migrated(&store); // active = deepseek
+        delete(&store, PROVIDER_DEEPSEEK).unwrap();
+        assert!(
+            active_id(&store).is_none(),
+            "删除当前 provider 后必须留空，不能自动挑下一个"
+        );
     }
 
     #[test]
