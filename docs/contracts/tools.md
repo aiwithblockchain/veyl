@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`1.0.10`
+> 契约版本：`1.1.0`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.3、§4.4、§5.1
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -62,7 +62,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -240,10 +240,14 @@ type CallSource = "ui" | "agent";
 | 16 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
 | 17 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
 | 18 | `ProfileDelete` | `ProfileDeleteTool` | 删除本地配置 | `Write` | 中 |
+| 19 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口（1.1.0） | `ReadOnly` | 只读 |
+| 20 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理（1.1.0） | `Execute` | 高 |
+| 21 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包（1.1.0） | `Write` | 中 |
+| 22 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 默认配置包版本与状态（1.1.0） | `ReadOnly` | 只读 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
-**破坏性工具（destructive）**：`CoreInstall`、`ProfileDelete`、`VpnConnect`（会改系统代理）。P1 **对三者均无确认点**，直接执行；风险评估见 §2.1.1。
+**破坏性工具（destructive）**：`CoreInstall`、`ProfileDelete`、`VpnConnect`（会改系统代理）、**`NetRepair`（会改系统网络设置，1.1.0 新增）**。P1.5 **对四者均无确认点**，直接执行；风险评估见 §2.1.1。
 
 ### 3.1 注册清单（照抄）
 
@@ -267,6 +271,11 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(DeepseekSaveKeyTool::new(keychain.clone())),
     Box::new(JobGetTool::new(jobs.clone())),
     Box::new(AskUserQuestionTool::new()),  // claurst-tools
+    // 1.1.0
+    Box::new(NetConfigGetTool::new(proxy.clone())),
+    Box::new(NetRepairTool::new(proxy.clone(), rt.clone())),
+    Box::new(CatalogRefreshTool::new(default_source.clone(), store.clone(), secrets.clone())),
+    Box::new(DefaultProfileStatusTool::new(store.clone())),
 ];
 ```
 
@@ -650,6 +659,9 @@ type VpnConnectData = {
 
 **连接是否成功只看 `state`，不看 `exit_ip`。**
 
+> `latency_ms` 的语义固定为**出口 IP 探测的往返耗时**，与 `runtime.md` §2.5.1 的同名字段同源。
+> 它不是「到节点的 ping / 握手延迟」——那是另一个指标，将来要用**不同的字段名**（例如 `node_latency_ms`）单独采集。两个含义共用一个名字，会让状态面板的数字无法解释。
+
 | 字段 | 含义 |
 |---|---|
 | `state = "running"` | 已连上。**这是唯一判定依据** |
@@ -702,37 +714,86 @@ type VpnDisconnectData = {
 `data`：
 
 ```ts
+type DiagGroup = "app" | "system" | "network" | "config";
+
+type DiagAction =
+  | { kind: "reconnect" }
+  | { kind: "refresh_default_profile" }
+  | { kind: "restore_network" }
+  | { kind: "switch_profile" }
+  | { kind: "flush_dns" }
+  | { kind: "open_default_profile" };
+
 type DiagCheck = {
-  name: "runtime_installed" | "process_alive" | "clash_api" | "config_valid"
-      | "system_proxy" | "catalog_reachable" | "exit_ip";
+  // 稳定标识：<group>.<check>，一旦发布不得改名
+  name:
+    // app
+    | "app.runtime_installed" | "app.process_alive" | "app.version"
+    | "app.config_valid" | "app.clash_api" | "app.data_plane"
+    // system
+    | "system.proxy_services" | "system.dns" | "system.default_route"
+    // network
+    | "network.exit_ip" | "network.reachable_default_source"
+    | "network.reachable_github" | "network.reachable_deepseek"
+    // config
+    | "config.current_profile" | "config.default_package" | "config.package_stale";
+  group: DiagGroup;
   ok: boolean;
-  detail: string;            // 一句人类可读，已脱敏
+  detail: string;              // 实测值或失败原因，已脱敏
+  remediation: string | null;  // 一句建议动作；无需动作时为 null
+  action: DiagAction | null;   // 可直接渲染成按钮的动作
 };
 
 type DiagReport = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
   arch: string;
   runtime: RuntimeSnapshot;
-  proxy: {
-    backend: "macos_networksetup" | "windows_registry";
-    enabled: boolean;
-    server: string | null;
-    backup_present: boolean;
+  summary: {
+    total: number;
+    ok: number;
+    failed: number;
+    verdict: string;           // 一句话结论，由 Host 生成，模型可改写
   };
-  catalog: {
-    reachable: boolean;
-    last_success_at: string | null;
-    cache_stale: boolean;
-  };
-  checks: DiagCheck[];
+  groups: Array<{ group: DiagGroup; label: string; checks: DiagCheck[] }>;
+  checks: DiagCheck[];         // 扁平版，顺序与 groups 展开一致，便于模型读
   log_excerpt: string[];
 };
 ```
 
 `include_logs = false` 时 `log_excerpt` 为空数组。`log_excerpt` 同样脱敏。
+
+**相对 1.0.x 的扩展（1.1.0）**：
+
+| 变化 | 说明 |
+|---|---|
+| `checks[].name` 从裸名改为 `<group>.<check>` | 旧值与新值的映射见下表；**旧值不再返回** |
+| 新增 `group` / `remediation` / `action` | 需求 §8.3 要求「每项都有 ok / detail / remediation」 |
+| 新增 `summary` | UI 直接渲染结论，不必自己数 |
+| 新增 `groups` | 按分组渲染；`checks` 保留扁平版给模型 |
+| **移除** `proxy` / `catalog` 两个子对象 | 它们的字段已并入 `system.proxy_services` / `network.reachable_default_source` 与 `config.*` 的 check 里。保两份会互相打架 |
+
+旧名 → 新名映射：
+
+| 1.0.x | 1.1.0 |
+|---|---|
+| `runtime_installed` | `app.runtime_installed` |
+| `process_alive` | `app.process_alive` |
+| `clash_api` | `app.clash_api` |
+| `config_valid` | `app.config_valid` |
+| `system_proxy` | `system.proxy_services` |
+| `catalog_reachable` | `network.reachable_default_source` |
+| `exit_ip` | `network.exit_ip` |
+
+**`remediation` 的写法约束**：
+
+- 一句祈使句，面向非技术用户，例：「点『恢复网络』撤掉代理后再试」。
+- 不得包含凭据、完整路径、内网地址。
+- 无动作可说时写 `null`，不要写「无」「N/A」这类占位。
+
+**`action` 与 `remediation` 的关系**：`action` 是 `remediation` 的可点击形式，两者要么都为空，要么同时有值且语义一致。UI 只渲染 `action`，模型读 `remediation`。
 
 ---
 
@@ -836,7 +897,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -906,6 +967,176 @@ type ProfileDeleteData = {
 无确认点：`PermissionLevel = Write`，直接执行。见 §2.1.1 的风险记录。
 
 错误：`PRECONDITION_FAILED`（`details.reason = "ACTIVE_PROFILE_IN_USE"`）、`INVALID_ARGUMENT`（`profile_id` 为空）、`INTERNAL`（磁盘删除失败）。
+
+---
+
+### 4.18 `NetConfigGet`（1.1.0 新增）
+
+纯只读。用于解释「为什么连不上」，不修改任何系统设置。
+
+```json
+{ "type": "object", "properties": {}, "additionalProperties": false }
+```
+
+`data`：
+
+```ts
+type ProxyEntry = { enabled: boolean; server: string | null; port: number | null };
+
+type NetConfigData = {
+  platform: "darwin" | "windows" | "linux";
+  proxies: Array<{
+    service: string;                 // macOS 网络服务名 / Windows 连接名
+    http: ProxyEntry;
+    https: ProxyEntry;
+    socks: ProxyEntry;
+  }>;
+  dns: {
+    servers: string[];
+    probe_domain: string;            // 固定 "platform.deepseek.com"
+    resolvable: boolean;
+  };
+  route: {
+    default_interface: string | null;
+    default_gateway: string | null;
+  };
+  interfaces: Array<{ name: string; addresses: string[]; up: boolean }>;
+  listeners: Array<{ port: number; loopback_only: boolean; process: string | null }>;
+};
+```
+
+边界（**必须实现**，否则这个工具会变成「系统侦察器」）：
+
+- `listeners` 只列**回环地址上处于 LISTEN 的端口**，最多 50 条，按端口升序。不列外网监听、不列已建立连接。
+- `interfaces` 只给名称、地址与 up 状态，**不给 MAC、不给 DHCP 租约、不给 Wi-Fi SSID**。
+- 所有地址可以原样返回——它们是本机地址，不是凭据；但不得写入日志。
+
+错误：`UNSUPPORTED`（平台后端不支持时）、`INTERNAL`。
+
+---
+
+### 4.19 `NetRepair`（1.1.0 新增）
+
+**受限写**。只允许四种动作，不做通用 shell。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["restore_direct", "flush_dns", "set_proxy", "clear_proxy"]
+    },
+    "port": { "type": "integer", "minimum": 1024, "maximum": 65535 }
+  },
+  "required": ["action"],
+  "additionalProperties": false
+}
+```
+
+| action | 行为 | 是否需要 `port` |
+|---|---|---|
+| `restore_direct` | 撤掉 Veyl 设置的系统代理并恢复备份 → 停运行时 → 删渲染配置 → 不带代理探测一次出口 IP | 否（给 `port` 按 `INVALID_ARGUMENT` 拒绝） |
+| `flush_dns` | macOS：`dscacheutil -flushcache` + `killall -HUP mDNSResponder`；Windows：`ipconfig /flushdns`。**不动代理、不停运行时** | 否 |
+| `set_proxy` | 把系统代理指向 **Veyl 自己的** mixed 端口 | **必填** |
+| `clear_proxy` | 撤掉系统代理并恢复备份（不停运行时），等价于 `restore_direct` 的第 1 步 | 否 |
+
+`data`：
+
+```ts
+type NetRepairData = {
+  ok: boolean;
+  action: "restore_direct" | "flush_dns" | "set_proxy" | "clear_proxy";
+  detail: string;            // 一句完成说明，不含凭据
+  exit_ip: string | null;    // 仅 restore_direct 后带直连出口；其余为 null
+  verified: boolean;         // 动作后复读系统设置，是否与预期一致
+};
+```
+
+**三条硬约束**：
+
+1. **任何写动作前必须已有可回滚快照**。`set_proxy` 在动手前先 `capture()` 并落备份；没有备份就不许写。
+2. **动作后必须复读校验**，`verified` 反映校验结果。`verified = false` 时 `ok` 也必须为 `false` —— 「命令返回成功但设置没生效」是最难排查的故障，不能算成功。
+3. `set_proxy` 的 `port` **必须等于当前运行时的 mixed 端口**；不相等一律 `INVALID_ARGUMENT`（`details.reason = "port_not_owned"`）。这条防止工具被用来把用户流量导向任意本地服务。
+
+**工具描述里必须原句包含**：`不要用本工具修改与 Veyl 无关的网络配置。`
+
+权限：`Execute`。无确认点（见 §2.1.1）。
+
+错误：`PRECONDITION_FAILED`（`details.reason = "no_rollback_snapshot"`）、`INVALID_ARGUMENT`（`port_not_owned` / `port_required`）、`UNSUPPORTED`、`INTERNAL`。
+
+---
+
+### 4.20 `CatalogRefresh`（1.1.0 新增）
+
+拉取并应用默认配置包（需求 §6.2）。
+
+```json
+{
+  "type": "object",
+  "properties": { "force": { "type": "boolean", "default": false } },
+  "additionalProperties": false
+}
+```
+
+`data`：
+
+```ts
+type CatalogRefreshData = {
+  changed: boolean;                // 本次是否真的应用了新包
+  offline: boolean;                // true = 拉取失败但沿用了本地缓存
+  package_id: string | null;
+  version: string | null;          // source_updated_at 或 package_hash 前 8 位
+  applied_at: string | null;       // ISO 8601
+  node_count: number;
+  new_version_available: boolean;
+  detail: string;
+};
+```
+
+语义：
+
+- **不打断在线连接**（需求 §6.5）：新包只写库与加密文件，下一次连接才生效。正在连接时返回 `new_version_available = true`，`detail` 写明「下次连接生效」。
+- **有可用缓存时，拉取失败不算错误**：返回 `ok`、`offline = true`、`changed = false`，`detail` 写成「离线，沿用本地缓存（上次更新 X 天前）」。这是需求 R13「不打扰用户」的落点。
+- **无任何可用缓存且拉取失败** → 返回错误 `UPSTREAM_ERROR`，`retryable = true`，`details.hint` 必须用需求 R20 的话术：**「现在无法访问默认配置源，这在未连接时是正常的。请先导入本地配置文件并连接，再检查更新。」**
+- `force = true` 时跳过「6 小时内不重复拉取」的节流。
+- **`package_hash` 不是哈希**，实测是发布方的版本标签（如 `seed-dynamic-tag-test-20260313`）。**不要用它做校验，也不要在日志或返回值里写「哈希校验通过」**。完整性判断用客户端对**原始响应体**算的 `content_sha256`（只用于「与上次是否相同」，不可对外展示）。
+- 结构校验：必填字段齐全；`status != "active"` 的包拒绝应用（需求 §6.4）。
+
+权限：`Write`（改本地缓存与加密包，不改系统网络）。
+
+错误：`UPSTREAM_ERROR`、`INVALID_ARGUMENT`（包结构不符，`details.reason = "package_invalid"`）、`SECRET_STORE`。
+
+---
+
+### 4.21 `DefaultProfileStatus`（1.1.0 新增）
+
+纯只读，**不联网**。
+
+```json
+{ "type": "object", "properties": {}, "additionalProperties": false }
+```
+
+`data`：
+
+```ts
+type DefaultProfileStatusData = {
+  package_id: string | null;
+  version: string | null;          // 优先 source_updated_at；缺失时用 package_hash（发布方标签）
+  applied_at: string | null;       // ISO 8601，最近一次被用于连接的时刻
+  fetched_at: string | null;       // ISO 8601，本地缓存拉取时间
+  node_count: number;
+  stale: boolean;                  // 距上次成功拉取超过 6 小时
+  offline_capable: boolean;        // 是否有可用的加密包体（离线也能连）
+};
+```
+
+- `version` 是**给人看的**：能用 `source_updated_at` 就用它，否则回退到 `package_hash` 这个发布方标签。**不要把内部自算的 `content_sha256` 暴露出去**——它每次内容变化都变，对用户没有意义，还会被误当成签名。
+
+- `package_id` 取 `provider_id` 的尾段用于展示（需求 §6.6 的「种子V21」）。
+- `stale` 只表示「可能不是最新」，不代表不可用。
+
+权限：`ReadOnly`。
 
 ---
 
@@ -985,6 +1216,21 @@ CatalogSearch → ProfileImport → VpnConnect
 ---
 
 ## 8. 变更记录
+
+### 1.1.0（2026-11-02，P1.5 wave1 → wave2 契约）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.1.0` | 元数据 | PM |
+| 2 | 新增 `NetConfigGet`（只读）—— 系统代理逐服务、DNS、路由、接口、回环监听 | 新增工具 | 需求 §8.4 |
+| 3 | 新增 `NetRepair`（受限写，四种动作）—— 每条写动作前必须有回滚快照，动作后必须复读校验 | 新增工具 | 需求 §8.4 |
+| 4 | 新增 `CatalogRefresh` / `DefaultProfileStatus` —— 默认配置包的拉取与状态 | 新增工具 | 需求 §6.2、§6.6 |
+| 5 | `DiagRun` 输出扩展：`checks[].name` 改为 `<group>.<check>`；新增 `group` / `remediation` / `action` / `summary` / `groups`；移除 `proxy` / `catalog` 子对象 | 结构变更 | 需求 §8.3 |
+| 6 | 工具总数 18 → 22；破坏性工具增加 `NetRepair` | 计数 | 同上 |
+
+**为什么 `DiagRun` 的输出是破坏性变更却只升 minor**：`checks[].name` 的取值改变了，但字段本身仍在，消费方是模型与尚未实现的 UI。旧值到新值的映射表已写在 §4.13，实现方按表迁移即可。若将来有外部消费方依赖旧值，届时再用 `schema` 字段做版本分流。
+
+**与 `commands.md` 的对应**：`net_repair` 这条 invoke 与 `NetRepair` 工具**共用同一份实现**，动作集合也一致（四种）；UI 只用其中 `restore_direct` / `flush_dns` 两种。
 
 ### 1.0.10（2026-11-02）
 

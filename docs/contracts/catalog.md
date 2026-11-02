@@ -6,6 +6,14 @@
 > 实现方：Rust（Catalog Client）与 TypeScript / Hono（服务端）
 > 变更记录：见 §12
 
+> 🔒 **本文件的版本独立于应用契约，永远不要跟着 `runtime.md` / `events.md` / `tools.md` 一起升。**
+>
+> 这个版本号是**和服务端协商的协议版本**：`src-tauri/src/catalog/client.rs` 的 `contract_compatible()` 用 `major.minor` **精确相等**去比对服务端返回的 `contract_version`，不相等直接 `UNSUPPORTED_CONTRACT_VERSION`。
+>
+> 客户端升到 `1.1` 而服务端还在 `1.0.x`，结果就是：目录请求全部失败、节点列表空白、连接不可用。
+>
+> 要改这里，顺序必须是「服务端先支持新版本并保持旧版本兼容 → 客户端再升」。
+
 ---
 
 ## 0. 本契约的地位
@@ -484,6 +492,25 @@ Retry-After: 12
 ---
 
 ## 12. 变更记录
+
+### 1.1.0（2026-11-02，P1.5 wave1 · 本文件**不得**跟随升级）
+
+> **版本号保持 `1.0.10`。这不是遗漏，是硬约束。**
+
+`catalog.md` 的版本是**与服务端协商**的协议版本，不是应用内部版本：
+
+```rust
+// src-tauri/src/catalog/client.rs:388-400
+fn contract_compatible(server_version: &str) -> bool {
+    // 精确比较 major.minor：server == client
+}
+```
+
+客户端用 `CATALOG_CONTRACT_VERSION` 的 major.minor 去比对**服务端**返回的 `contract_version`，不相等直接 `UNSUPPORTED_CONTRACT_VERSION`、目录不可用。
+
+因此：**只要服务端还停在 1.0.x，客户端就一个字都不能把 `CATALOG_CONTRACT_VERSION` 改成 1.1.0**，否则所有目录请求当场失败、节点列表空白、连接不可用。
+
+P1.5 没有改任何目录接口。将来真要改，顺序必须是：服务端先支持 1.1.x 并保持 1.0.x 兼容 → 客户端再升。
 
 ### 1.0.10（2026-11-02）
 

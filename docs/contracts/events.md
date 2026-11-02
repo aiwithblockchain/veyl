@@ -1,8 +1,9 @@
-# 契约：事件与 UI ↔ Host 调用
+# 契约：事件（Host → UI）
 
-> 契约版本：`1.0.10`
-> 状态：已冻结（PM 审核通过，2026-11-02）
-> 上游：`docs/phase-1-technical-design.md` §4.2、§4.3
+> 契约版本：`1.1.0`
+> 状态：已冻结（P1.5 wave1，2026-11-02）
+> 上游：`docs/phase-1-technical-design.md` §4.2、§4.3、`docs/phase-1-5-requirements.md` §4.1
+> 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，1.1.0 起独立成文）
 > 实现方：Rust（Host 发送）、TypeScript（UI 订阅）
 > 参考实现：`TweetPilot/src-tauri/src/claurst_session.rs`
 > 变更记录：见 §10
@@ -39,8 +40,10 @@
 | 8 | `runtime-state-changed` | Host → UI | `RuntimeStateChangedPayload` | 运行时状态迁移 |
 | 9 | `runtime-health-changed` | Host → UI | `RuntimeHealthChangedPayload` | 健康快照变化 |
 | 10 | `job-progress` | Host → UI | `JobProgressPayload` | 长任务进度 |
+| 11 | `app-lifecycle-changed` | Host → UI | `AppLifecycleChangedPayload` | 应用进程状态变化（1.1.0） |
+| 12 | `default-profile-updated` | Host → UI | `DefaultProfileUpdatedPayload` | 默认配置包变化（1.1.0 定名，wave2 接线） |
 
-1–7 是 AI 会话事件，8–11 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
+1–7 是 AI 会话事件，8–12 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
 
 ---
 
@@ -78,7 +81,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -100,7 +103,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -118,7 +121,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -160,7 +163,7 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 
 ```ts
 type ToolCallEndPayload = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -200,7 +203,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -239,7 +242,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -267,7 +270,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -305,7 +308,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -328,7 +331,7 @@ UI 处理：更新状态栏；`to = "failed"` 时显示诊断入口。
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   health: HealthSnapshot;
   emitted_at: string;
 };
@@ -344,7 +347,7 @@ UI 处理：更新延迟/出口 IP/健康灯；`degraded` 时在状态栏加黄�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -364,81 +367,92 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 
 ### 4.4 已移除：`approval-requested`
 
-> 2026-11-02 用户决定彻底移除审批机制，本事件随之删除。详见 `tools.md` §2.1。事件总数由 11 降为 10。
+> 2026-11-02 用户决定彻底移除审批机制，本事件随之删除。详见 `tools.md` §2.1。
+
+---
+
+### 4.5 `app-lifecycle-changed`（1.1.0 新增）
+
+```ts
+type AppLifecycleState = "foreground" | "background";
+
+type AppLifecycleChangedPayload = {
+  contract_version: "1.1.0";
+  state: AppLifecycleState;
+  previous: AppLifecycleState | null;   // 首次发出时为 null
+  emitted_at: string;
+};
+```
+
+触发：应用进程状态变化，**每次变化都发**，不去重。UI 用它决定是否收起/恢复自己的临时状态（例如正在打字的草稿、展开的面板）。
+
+> **该事件不承载连接状态。** 连接状态仍由 `runtime-state-changed` + `runtime-health-changed` 表达——两者正交（需求 §4.1）。UI 不得用 `background` 推导「已断开」。
+
+进程状态机与「事件 → 窗口 / 进程 / 连接」的完整对应表见 §4.7。
+
+### 4.6 `default-profile-updated`（1.1.0 定名，wave2 接线）
+
+```ts
+type DefaultProfileUpdatedPayload = {
+  contract_version: "1.1.0";
+  package_id: string;
+  version: string;                  // 本次应用的配置包版本
+  applied_at: string;               // ISO 8601 UTC
+  new_version_available: boolean;   // 应用后是否还有更新版本
+  emitted_at: string;
+};
+```
+
+触发：默认配置包被应用（首次拉取或刷新）之后。**不打断在线连接**（需求 §6.5）：事件只通知「有新版」，真正生效发生在下一次连接。
+
+> wave2 实现。1.1.0 只冻结名字与载荷，不要求当前代码 emit。
+
+### 4.7 应用生命周期（1.1.0 新增，规范性）
+
+本节的表与需求文档 §4.1 一一对应，实现与验收都照这张表。
+
+#### 4.7.1 进程状态
+
+| 状态 | 含义 | 窗口 | 托盘 |
+|---|---|---|---|
+| `foreground` | 用户正在使用 | 显示 | 存在 |
+| `background` | 用户关掉窗口，进程仍在跑 | 隐藏 | 存在 |
+| `quitting` | 正在执行退出流程（需求 §4.6） | 任意 | 存在，直到进程结束 |
+
+`quitting` **不是** `app-lifecycle-changed` 的取值：它是内部状态，UI 无从得知，也不该依赖。对外只发 `foreground` / `background`。
+
+#### 4.7.2 事件 → 窗口 / 进程 / 连接
+
+| 事件 | 窗口 | 进程 | 连接 | 是否提示 | 发出的事件 |
+|---|---|---|---|---|---|
+| 点窗口关闭按钮 / Cmd+W | 隐藏 | 存活 | 保持 | 否 | `app-lifecycle-changed{state:"background"}` |
+| Cmd+Q / 菜单「退出 Veyl」 | 不变 | 等用户选择 | 保持 | **是，阻塞对话框** | 无（UI 状态不变） |
+| 对话框选「后台运行」 | 隐藏 | 存活 | 保持 | — | `app-lifecycle-changed{state:"background"}` |
+| 对话框选「退出」 | 关闭 | 结束 | 断开 | 仅断开失败时 | 无（进程即将结束） |
+| 托盘「显示 Veyl」 | 显示并聚焦 | 存活 | 保持 | — | `app-lifecycle-changed{state:"foreground"}` |
+| 托盘「退出」 | 关闭 | 结束 | 断开 | 仅断开失败时 | 无 |
+| 再次启动（单实例唤起） | 显示并聚焦 | 存活 | 保持 | — | `app-lifecycle-changed{state:"foreground"}` |
+
+#### 4.7.3 不变量
+
+- **连接与进程正交**：进程进入 `background` 时连接必须保持；不得因为窗口隐藏而断开。
+- **`quitting` 期间拒绝新的连接请求**：`runtime_start` 返回 `PRECONDITION_FAILED`，`details.reason = "quitting"`。
+- **`foreground` / `background` 只在值变化时发**，重复设置不重复发。
 
 ---
 
 ## 5. UI → Host 调用（invoke）
 
-事件是 Host → UI 的单向流。UI 主动操作走 Tauri `invoke`。以下命令名冻结：
-
-| 命令 | 入参 | 返回 | 说明 |
-|---|---|---|---|
-| `ai_send_message` | `{ session_id, text, attachments? }` | `{ request_id }` | 发起一轮对话 |
-| `ai_cancel` | `{ request_id }` | `{ cancelled: boolean }` | 停止生成 |
-| `runtime_status` | `{}` | `RuntimeSnapshot` | 状态快照（含应用事件不可达时的兜底） |
-| `catalog_list_nodes` | `{ region?, protocol?, limit?, cursor? }` | `CatalogSearchData` | 无 AI 模式下的手动选节点 |
-| `profile_import_node` | `{ node_id }` | `ProfileImportData` | 无 AI 模式 |
-| `profile_delete` | `{ profile_id }` | `ProfileDeleteData` | 无 AI 模式；无确认点 |
-| `vpn_connect` | `{ profile_id }` | `VpnConnectData` | 无 AI 模式 |
-| `vpn_disconnect` | `{}` | `VpnDisconnectData` | 无 AI 模式 |
-| `import_seed_file` | `{ path }` | `ImportSeedResult` | 导入节点文件（拖放或选择文件）；**不含 password** |
-| `rename_session` | `{ session_id, title }` | `{ id, title, created_at }` | 重命名历史会话；`created_at` 为 ISO 8601 |
-
-> 无 AI 模式（`phase-1-requirements.md` FR-2.7）必须能在不经过 Agent 的情况下走完「选节点 → 连接 → 断开」。上表后半段就是为此存在的，行为与对应工具一致，**共用同一份 Host 实现**，不允许两套逻辑。
-
-**来源标记**：每个 invoke 命令在 Host 侧自动带 `source = "ui"`，工具调用入口自动带 `source = "agent"`。UI **不能**在参数里传 `source`（传了按 `INVALID_ARGUMENT` 拒绝）。破坏性操作（`vpn_connect`、`profile_delete`、安装运行时）无论来源都必须审批——用户自己点的也要确认，审批不能因为「是他自己点的」而跳过。
-
-例外：`runtime_status` / `catalog_list_nodes` 等只读命令不做来源校验。
-
-`profile_delete` 的**前置校验先于删除**：目标是 active profile 时，Host 直接返回 `PRECONDITION_FAILED`，不产生任何删除副作用。
-
-### 5.2 `import_seed_file` 的语义
-
-两条 UI 入口，**一个命令、一套实现**：
-
-| 入口 | 前端怎么拿路径 |
-|---|---|
-| 窗口级拖放 | `getCurrentWebview().onDragDropEvent()` |
-| 设置页「选择文件」按钮 | `@tauri-apps/plugin-dialog` 的 `open()`，只授 `dialog:allow-open` |
-
-两种方式拿到的都是**绝对路径**，之后走同一条链路；用户取消时 `open()` 返回 `null`，前端直接返回，**不调用本命令**。
-
-```ts
-type ImportSeedResult = {
-  imported: number;
-  skipped: Array<{ name: string; reason: string }>;
-  profiles: Array<{ id: string; name: string; server: string; server_port: number; method: string }>;
-};
-```
-
-Host 侧：
-
-1. 校验扩展名 `.json`、大小 ≤ 1 MB、路径存在且可读
-2. 读文本 → `seed_import::parse` → `plan` → `apply`
-3. 返回上述结构
-
-规则：
-
-- **只接受 shadowsocks 出站**，method 白名单 `aes-256-gcm`。
-- **部分成功不算失败**：有任一节点导入成功即返回成功，其余进 `skipped[]` 附原因；一个都没导入才报错。
-- **返回值与日志永不含 `password`**；日志只记 `pw_fp = sha256(profile_id ‖ password)[:8]`。
-- 这条命令 `source = "ui"`，**不经过 Agent**，密码不会进入模型上下文。
-- 读文件失败时**不要回显文件内容**，也不要回显完整路径中的用户名等无关信息。
-
-错误分类：
-
-| 错误码 | `details.reason` | 场景 |
-|---|---|---|
-| `INVALID_ARGUMENT` | `not_json_file` | 扩展名不是 `.json` |
-| `INVALID_ARGUMENT` | `file_too_large` | 超过 1 MB，`details.max_bytes` |
-| `INVALID_ARGUMENT` | `file_unreadable` | 路径不存在或不可读 |
-| `INVALID_ARGUMENT` | `invalid_json` | 内容不是合法 JSON / 结构不符 |
-| `INVALID_ARGUMENT` | `no_importable_nodes` | 解析成功但无可导入节点 |
-| `UNSUPPORTED` | — | method 不在白名单，`details.method` |
-| `SECRET_STORE` | — | `secrets.enc` 写入失败 |
-
-> 自动化（CI / 测试）走 `veyl-runtime-selftest import-seeds --file <path> --data-dir <dir>`，不经过这条命令。
+> **1.1.0 起全部迁到 `docs/contracts/commands.md`。** 本节只保留迁移说明，不再维护命令表。
+>
+> 原因：命令属于「UI → Host」方向，与本文档「Host → UI 的事件」是两个方向，混在一份文件里导致参数命名约定（camelCase）长期写错。
+>
+> 迁移时一并纠正的三处：
+> 1. invoke 参数名是 **camelCase**（`profileId` / `sessionId`），不是 snake_case。
+> 2. `catalog_list_nodes` / `profile_import_node` / `vpn_connect` / `vpn_disconnect` 从未在 `invoke_handler` 注册（「文档有、代码没有」）。
+> 3. `chat_history` / `deepseek_key_status` / `deepseek_save_key` / `deepseek_clear_key` 已实现但从未入契约（「代码有、文档没有」）。
+>
+> `import_seed_file` 的完整语义（两条 UI 入口、错误分类、脱敏要求）见 `commands.md` §3.8。
 
 ---
 
@@ -450,10 +464,10 @@ idle
        ├─ message-chunk / thinking-chunk ──► streaming
        ├─ tool-call-start ──► tool_running
        │     └─ tool-call-end ──► streaming
-       ├─ ai-status(waiting_permission) ──► waiting_permission
-       │     └─ 用户决策 ──► streaming
        └─ ai-request-end ──► idle | error
 ```
+
+> 1.0.8 起审批机制整体移除，原图里的 `ai-status(waiting_permission)` 分支已删除。`AiStatusPhase` 仍保留该取值以兼容历史事件，但**不应当再出现**；UI 收到时按 `thinking` 处理并记一条 warning。
 
 规则：
 
@@ -488,7 +502,7 @@ idle
 | 审批事件 | ~~审批作用域~~ → **审批机制整体移除，`approval-requested` 与 `ai_approval_decision` 均删除**（2026-11-02） | §4.4、§5 |
 | `next_actions` 点击语义 | 等价于用户发一条消息给 Agent（label + args），**UI 不得直接执行工具**，可预填输入框 | §3.4、`tools.md` §1.3 |
 | `args_preview` 是否保留 | **保留**，默认展示非敏感字段；`sensitive` / 黑名单字段打码；脱敏后无可展示字段才省略整个字段 | §3.3、§4.4 |
-| 无 AI 模式的来源校验 | Host 边界注入 `source: "ui" \| "agent"`，不可由参数传入；破坏性操作无论来源都要审批 | §5、`tools.md` §2.4 |
+| 无 AI 模式的来源校验 | Host 边界注入 `source: "ui" \| "agent"`，不可由参数传入；**没有审批机制，破坏性操作无论来源都直接执行**（1.0.8 起） | §5、`tools.md` §2.4 |
 
 ### 8.2 仍需 PM 决定
 
@@ -531,6 +545,21 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 1.1.0（2026-11-02，P1.5 wave1）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.1.0` | 元数据 | PM |
+| 2 | 新增事件 `app-lifecycle-changed`（事件总数 10 → 12） | 新增事件 | 需求 §4.1 |
+| 3 | 新增事件 `default-profile-updated`（wave2 实现，先冻结名字与载荷） | 预留 | 需求 §6、§10 |
+| 4 | 新增 §4.7 应用生命周期（进程状态、事件→窗口/进程/连接对应表、不变量） | 新增 | 需求 §4.1 |
+| 5 | **§5 的 invoke 全部迁到 `commands.md`**，本节只留迁移说明 | 结构调整 | 命令与事件分开维护 |
+| 6 | 纠正「1–7 AI 事件 / 8–11 应用事件」的计数笔误（应为 8–12） | 修正 | 事件数已变化 |
+| 7 | 新事件载荷均带 `contract_version` 与 `emitted_at`，与 §2.3 一致 | 约束 | 全契约统一 |
+| 8 | 清理 1.0.8 遗留的审批残影：§6 前端状态机删除 `waiting_permission` 分支；§8.1「破坏性操作都要审批」改为「无审批机制」 | 修正 | 文档与已移除的机制自相矛盾 |
+
+> **对实现的立即影响**：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 尚未包含这两个事件，因此 `node tests/contracts/check-contracts.mjs` 的第 1 项会报「契约有、代码没有」。这是契约先行时的**预期红色**，由 Alice 补 `AGENT_EVENTS` + `chatStore` 的 `switch` 分支后转绿。不要为了让检查变绿而回退契约。
 
 ### 1.0.10（2026-11-02，N-03 导入通道最终定为拖拽）
 

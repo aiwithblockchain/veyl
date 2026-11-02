@@ -156,3 +156,22 @@ PM 2026-11-02 定案。契约文件当前仍是 1.0.4，落笔后本表清空：
 > 用例已按定案写，1.0.5 落地后不需要再改。若 1.0.5 与上表有出入，改用例去对齐契约，不要反过来让契约迁就用例。
 
 1.0.2 那两处缺口早已解决：`ProfileDelete` 是第 18 个工具（`Write` + `always`），`DeepseekSaveKey` 改为 `saved` + `validation` + `validation_detail`。
+
+---
+
+## P1.5 wave1（独立索引）
+
+> 覆盖 `docs/phase-1-5-requirements.md` §4 / §5 / §9 与 §11 的 A1–A7、B1–B5、F1–F4。
+> **与上面的 P1 用例分开计时、分开判定**；编号沿用需求文档的 A/B/F 前缀，不占用 `TC-*` 号段。
+
+| 文件 | 内容 | 用例数 |
+|---|---|---|
+| [08-lifecycle.md](08-lifecycle.md) | 常驻与生命周期：关闭到后台、Cmd+Q 两个分支、托盘、退出失败、单实例 | 7 |
+| [09-onboarding.md](09-onboarding.md) | 首次使用引导：进引导、打开平台、无效 Key、跳过 Key、重启不再弹 | 5 |
+| [10-console-panel.md](10-console-panel.md) | 右侧状态面板：连接、断开、切换节点、端口真实值 | 4 |
+| [13-sessions.md](13-sessions.md) | 会话管理：删除会话（含生成中删除、半删除检测） | 1 |
+| [14-llm-providers.md](14-llm-providers.md) | LLM provider：基础/高级模式、迁移、删除、Key 不泄漏 | 10 |
+| [RUNBOOK-p1.5.md](RUNBOOK-p1.5.md) | 执行手册：启动/退出/断网恢复/批次表/记录格式 | — |
+
+执行要求：**应用一律由用户手动启动**；每条用例都要能在不读代码的前提下照着做完。
+其中 F3（切换节点）必须附采样日志，否则只能记「未验证」。

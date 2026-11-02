@@ -1,6 +1,6 @@
 # 契约：Runtime Manager
 
-> 契约版本：`1.0.10`
+> 契约版本：`1.1.0`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 冻结前评审：PM / Alice / Bob
 > 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5
@@ -100,7 +100,7 @@ type HealthCheckName =
   | "traffic";
 
 type HealthSnapshot = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   process: boolean;
   clash_api: boolean;
   data_plane: boolean;
@@ -126,13 +126,18 @@ type TrafficStats = {
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
   upstream_version: string | null;   // 例 "1.14.4"；未启动时 null
   uptime_seconds: number | null;
   profile_id: string | null;
+  profile_name: string | null;       // 1.1.0 新增：active profile 的显示名
+  connected_since: string | null;    // 1.1.0 新增：本次进入 running 的 ISO 8601 UTC 时刻
+  mixed_port: number | null;         // 1.1.0 新增：本地 mixed 入站实际监听端口
+  latency_ms: number | null;         // 1.1.0 新增：出口 IP 探测往返耗时
+  direct_ip: string | null;          // 1.1.0 新增：不经代理的直连出口 IP（架构补入）
   config_hash: string | null;        // "sha256:<hex>"，配置文件的摘要
   system_proxy_enabled: boolean;
   health: HealthSnapshot;
@@ -150,11 +155,29 @@ type RuntimeSnapshot = {
 - `traffic` 在 `idle` / `failed` 下为 `null`；其余状态不得为 `null`。
 - `config_hash` 用于 UI 判断「配置是否变化」，不是安全校验手段。
 
+#### 2.5.1 1.1.0 新增字段的语义（**每条都必须按此实现**）
+
+| 字段 | 取值 | 不变量 |
+|---|---|---|
+| `profile_name` | 当前连接的显示名 | 用 profile 连接时 = 该 profile 的 `name`，与 `profile_id` 同生同灭；**用默认配置包连接时 `profile_id` 为 `null` 而 `profile_name` 非空**（包内节点名，当前实现为 `"默认配置"`）；未连接时为 `null` |
+| `connected_since` | 本次进入 `running` 的时刻，ISO 8601 UTC | 仅在 `running` / `degraded` 下非 `null`；与 `uptime_seconds` **同源**：`uptime_seconds ≈ now − connected_since`。两者不得互相矛盾 |
+| `mixed_port` | 本次实际监听的本地 mixed 入站端口 | 仅在 `running` / `degraded` 下非 `null`。**禁止写常量**（1.0.10 的缺陷是把 2080 硬编码在 UI 里，而实际端口每次随机） |
+| `latency_ms` | 最近一次**出口 IP 探测**的往返耗时（毫秒） | 与 `VpnConnectData.latency_ms` 同源同义；未探测/探测失败为 `null`。**不是**节点 ping 延迟 |
+| `direct_ip` | 不经代理测得的**直连**出口 IP | 与 `exit_ip` 配对展示，用于让用户判断「是否真的走了代理」。未测到为 `null`。**不得**在探测时带上系统代理，否则两个值会相同、失去意义 |
+
+**`latency_ms` 的定义必须固定为「出口 IP 探测往返耗时」**，理由是它已经有实现、有含义，且能在没有额外网络请求的前提下反映链路质量。
+
+> 若产品要展示的是「到节点的 ping / 握手延迟」，那是另一个指标，需要单独采集（wave2 起再定），**不能复用这个字段名**。两个不同含义共用 `latency_ms` 会让状态面板的数字无法解释。
+
+**字段恒存在**：四个新字段在任何状态下都必须出现在 JSON 里，不可省略键。没有值写 `null`——省略键会让 TypeScript 消费方拿到 `undefined`，绕过类型检查、静默失败。
+
+**与 `last_transition_at` 的区别**：`last_transition_at` 是**任何**状态迁移的时刻（含 `stopping`），`connected_since` 只在进入 `running` 时刷新。断开再连，`connected_since` 变新，`last_transition_at` 也变——两者不同源，不要互相推导。
+
 ### 2.6 错误对象（全契约共用）
 
 ```ts
 type AivpnError = {
-  contract_version: "1.0.10";
+  contract_version: "1.1.0";
   code: AivpnErrorCode;
   message: string;        // 面向用户，可本地化
   retryable: boolean;
@@ -424,7 +447,7 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 
 ```json
 {
-  "contract_version": "1.0.10",
+  "contract_version": "1.1.0",
   "state": "running",
   "pid": 1234,
   "upstream_version": "1.14.4",
@@ -513,12 +536,24 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 
 ## 12. 变更记录
 
+### 1.1.0（2026-11-02，P1.5 wave1）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.1.0` | 元数据 | PM |
+| 2 | `RuntimeSnapshot` 新增 `mixed_port` / `profile_name` / `connected_since` / `latency_ms` 四个字段 | 字段新增 | 需求 §9.6、§10 |
+| 2b | **架构补入** `direct_ip`：需求 §9.2 要求「出口 IP 与直连 IP 都要显示」，而 PM 的四字段清单里没有它 | 字段新增 | 需求 §9.2；待 PM 确认 |
+| 3 | 新增 §2.5.1 固定四个新字段的语义与不变量（含 `latency_ms` = 出口 IP 探测耗时，**不是**节点 ping） | 语义定案 | 架构 |
+| 4 | 明确「四个新字段在任何状态下都必须出现，无值写 `null`，不得省略键」 | 约束 | 省略键会让 TS 侧拿到 `undefined` |
+| 5 | `connected_since` 与 `uptime_seconds` 同源；与 `last_transition_at` 不同源，不得互相推导 | 约束 | 防止两套时间互相打架 |
+| 6 | `profile_name` 的不变量放宽：默认配置包连接时 `profile_id` 为 `null` 而 `profile_name` 非空 | 语义修正 | `runtime_start` 支持无 profile 时用默认包连接 |
+
 ### 1.0.10（2026-11-02）
 
 | # | 变更 | 类型 |
 |---|---|---|
 | 1 | `contract_version` 升到 `1.0.10` | 元数据 |
-| 2 | 无接口变更；与 events 的 `import_seed_json` 同步版本 | 同步 |
+| 2 | 无接口变更；与 events 的 `import_seed_file` 同步版本 | 同步 |
 
 ### 1.0.9（2026-11-02）
 

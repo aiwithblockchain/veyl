@@ -582,7 +582,7 @@ AI **不再承担**主连接流程：连接/断开/导入/刷新都必须有纯 
 |---|---|---|
 | `RuntimeStatus` | 新增 `mixed_port`、`profile_name`、`connected_since`、`latency_ms` | 1.1.0 |
 | Tauri 命令 | 新增 `runtime_start`、`runtime_stop`、`profile_list`、`chat_delete`、`llm_provider_list`、`llm_provider_save`、`llm_provider_delete`、`llm_provider_activate`、`llm_provider_test`、`default_profile_refresh`、`default_profile_status`、`net_repair`、`onboarding_*` | 1.1.0 |
-| 存储 | `secrets.enc` 新增 `llm:<provider_id>`；settings 新增 `llm_providers`（非敏感字段 JSON）与 `llm_active_provider`；旧的 `deepseek_key` 迁移成 provider | 1.1.0 |
+| 存储 | `secrets.enc` **复用已有的** `provider:<provider_id>` 前缀（内置 DeepSeek 就是 `provider:deepseek`，不新造键名）；settings 新增 `llm_providers`（非敏感字段 JSON）与 `llm_active_provider`；迁移只补一条内置 provider 的元数据，**不搬密钥** | 1.1.0 |
 | AI 工具 | 新增 `NetConfigGet`、`NetRepair`、`CatalogRefresh`、`DefaultProfileStatus`；扩展 `DiagRun` 输出 | 1.1.0 |
 | 事件 | 新增 `app-lifecycle-changed`（foreground/background）、`default-profile-updated` | 1.1.0 |
 
