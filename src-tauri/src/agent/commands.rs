@@ -166,9 +166,14 @@ pub async fn chat_history(session_id: Option<String>) -> Result<Value, String> {
 /// 设置页保存 DeepSeek Key。与工具路径共用 `secrets::save_deepseek_key`。
 /// 返回值绝不包含明文 Key。
 #[tauri::command]
-pub async fn deepseek_save_key(key: String) -> Result<Value, Value> {
+pub async fn deepseek_save_key(
+    state: State<'_, Arc<AppState>>,
+    key: String,
+) -> Result<Value, Value> {
     match crate::secrets::save_deepseek_key(&key).await {
         Ok(outcome) => {
+            // 钥匙串写成功后立刻热更新内存，下一次对话就用新 Key。
+            state.apply_credentials(Some(key.trim().to_string()));
             if outcome.validation == "invalid" {
                 return Err(json!({
                     "code": "INVALID_KEY",
@@ -187,11 +192,23 @@ pub async fn deepseek_save_key(key: String) -> Result<Value, Value> {
     }
 }
 
-/// 设置页显示当前是否已配置；只回掩码。
+/// 设置页显示当前是否已配置；读内存，保证与「保存后立即生效」一致。
 #[tauri::command]
-pub async fn deepseek_key_status() -> Result<Value, Value> {
-    match crate::secrets::key_status() {
-        Ok((configured, masked)) => Ok(json!({ "configured": configured, "masked": masked })),
+pub async fn deepseek_key_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    Ok(json!({
+        "configured": state.has_credentials(),
+        "masked": state.masked_key(),
+    }))
+}
+
+/// 清除 Key：钥匙串与内存一起清，避免「钥匙串没了但内存还留着」。
+#[tauri::command]
+pub async fn deepseek_clear_key(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    match crate::secrets::delete_deepseek_key() {
+        Ok(()) => {
+            state.apply_credentials(None);
+            Ok(json!({ "cleared": true }))
+        }
         Err(error) => Err(json!({
             "code": "KEYCHAIN",
             "message": error.to_string(),

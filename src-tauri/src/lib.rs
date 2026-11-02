@@ -41,6 +41,8 @@ pub fn run() {
     let data_dir = crate::runtime::default_app_data_dir();
     // 日志最先初始化：后面每一步失败都要能落盘。
     crate::logging::init(&data_dir);
+    // 本地加密凭据文件；不访问系统钥匙串。
+    crate::secrets::install(&data_dir);
 
     let store = match Store::open(crate::store::default_db_path(&data_dir)) {
         Ok(store) => Arc::new(store),
@@ -78,6 +80,8 @@ pub fn run() {
         &data_dir,
     ));
     let state = Arc::new(agent::AppState::new(services));
+    // 工具路径没有 AppState 句柄，热更新凭据靠这个弱引用。
+    agent::install_app_state(&state);
 
     tauri::Builder::default()
         .manage(Arc::clone(&state))
@@ -95,6 +99,7 @@ pub fn run() {
             agent::commands::chat_history,
             agent::commands::deepseek_save_key,
             agent::commands::deepseek_key_status,
+            agent::commands::deepseek_clear_key,
         ])
         .run(tauri::generate_context!())
         .expect("Veyl 启动失败");

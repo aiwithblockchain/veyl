@@ -89,7 +89,7 @@ export function Settings({ open, bridge, onClose }: Props) {
       await bridge.clearDeepSeekKey();
       setState({ masked: null, verified: false, validation: "unverified" });
       setEditing(true);
-      setFeedback({ kind: "ok", text: "已从系统钥匙串移除。" });
+      setFeedback({ kind: "ok", text: "已从本机移除。" });
     } catch (error) {
       setFeedback({ kind: "error", text: describeClearError(error) });
     }
@@ -126,6 +126,11 @@ export function Settings({ open, bridge, onClose }: Props) {
                 void save();
               }}
             >
+              {state.masked ? (
+                <p className="settings-warning">
+                  更换 Key 会重建当前会话，对话上下文将清空。
+                </p>
+              ) : null}
               <div className="settings-input">
                 <input
                   ref={inputRef}
@@ -190,8 +195,7 @@ export function Settings({ open, bridge, onClose }: Props) {
           ) : null}
 
           <p className="settings-note">
-            Key 只保存在本机系统钥匙串（macOS Keychain / Windows 凭据管理器），不上传、不写日志、
-            不进入对话内容。界面上只显示打码后的末四位。
+            Key 加密保存在本机，仅用于调用模型接口；建议使用可随时吊销的 Key。界面只显示打码后的末四位。
           </p>
         </section>
       </div>
@@ -207,10 +211,11 @@ function describeKeyError(error: unknown): string {
     case "INVALID_ARGUMENT":
       return "Key 格式不对：应以 sk- 开头，长度至少 20 位。";
     case "INVALID_KEY":
-      // 后端语义：Key 已写入钥匙串，只是鉴权没过。
-      return "Key 已写入本机钥匙串，但 DeepSeek 鉴权失败（可能无效或已被吊销）。请重新输入一个有效的 Key。";
-    case "KEYCHAIN":
-      return "没能写入系统钥匙串，请检查系统权限后重试。";
+      // 后端语义：Key 已落盘，只是鉴权没过。
+      return "Key 已保存在本机，但 DeepSeek 鉴权失败（可能无效或已被吊销）。请重新输入一个有效的 Key。";
+    case "SECRET_STORE":
+      // 契约 1.0.6：凭据存本地加密文件 secrets.enc，失败统一用这个码。
+      return "本地加密凭据文件写入失败（secrets.enc），请检查磁盘权限或空间后重试。";
     case "NETWORK":
     case "TIMEOUT":
       return "网络不通，没能验证 Key。稍后再试一次。";
@@ -223,11 +228,12 @@ function describeKeyError(error: unknown): string {
 }
 
 function describeClearError(error: unknown): string {
-  const message = readMessage(error);
-  if (message && /not found|unknown command/i.test(message)) {
-    return "当前版本还不支持清除 Key，请向开发者反馈。";
+  const code = readCode(error);
+  if (code === "SECRET_STORE") {
+    return "本地加密凭据文件删除失败（secrets.enc），请检查磁盘权限后重试。";
   }
-  return "清除失败，请稍后重试。";
+  const message = readMessage(error);
+  return message ? `清除失败：${message}` : "清除失败，请稍后重试。";
 }
 
 function readCode(error: unknown): string {

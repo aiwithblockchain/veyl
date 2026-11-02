@@ -93,7 +93,7 @@ export class TauriAgentBridge implements AgentBridge {
       );
       return {
         masked: raw.configured ? raw.masked ?? null : null,
-        // 钥匙串里存着只能说明「配置过」，是否仍然有效要再验一次才知道。
+        // 本机存着只能说明「配置过」，是否仍然有效要再验一次才知道。
         verified: false,
         validation: "unverified",
       };

@@ -17,7 +17,7 @@
 - 不做 TUN，只设置系统代理。
 - P1 不做支付、不做账号、不做自建节点。
 - Agent 只能通过注册的 VPN 工具操作应用，不能执行 shell。
-- 所有密钥进系统钥匙串，日志脱敏。
+- 所有密钥存本地加密文件 `<data_dir>/secrets.enc`（0600），日志脱敏。**不碰系统钥匙串**——正式版也不能弹系统密码框。
 
 ---
 
@@ -35,7 +35,7 @@
 │                              │  ├ Config Builder          │  │
 │                              │  ├ Proxy Controller        │  │
 │                              │  ├ Catalog Client          │  │
-│                              │  └ SQLite / Keychain       │  │
+│                              │  └ SQLite / secrets.enc     │  │
 │                              └───────┬───────────────────┘  │
 └──────────────────────────────────────┼──────────────────────┘
                                        │ HTTP 127.0.0.1:<port>
@@ -205,7 +205,7 @@ pub struct AivpnSession {
 
 - `Config::default()`，设置 `project_dir`、`permission_mode = Default`、auto-compact 参数。
 - `QueryConfig::from_config`，设置 `model`、`max_turns`、`system_prompt`、`effort_level`、`working_directory`、`provider_registry`。
-- Provider：通过 `claurst-api` 的 OpenAI 兼容适配接 DeepSeek（`base_url = https://api.deepseek.com/v1`，`provider_protocol = "openai"`），Key 从 Keychain 读取。
+- Provider：通过 `claurst-api` 的 OpenAI 兼容适配接 DeepSeek（`base_url = https://api.deepseek.com/v1`，`provider_protocol = "openai"`），Key 从 `secrets.enc` 解密读取。
 - 工具注册：`Vec<Box<dyn Tool>>`，按会话类型注入。
 - 权限：`PermissionManager` + `ManagedInteractivePermissionHandler`；前端只负责展示和采集决策，不维护第二套权限语义。
 
@@ -333,7 +333,7 @@ type ToolEnvelope = {
 | `ProfileListTool` / `ProfileImportTool` / `ProfileDeleteTool` | SQLite |
 | `VpnConnectTool` / `VpnDisconnectTool` | Connection Orchestrator |
 | `DiagRunTool` | Runtime Manager + Proxy Controller |
-| `DeepseekSetupKeyTool` / `DeepseekSaveKeyTool` | Keychain + 系统浏览器 |
+| `DeepseekSetupKeyTool` / `DeepseekSaveKeyTool` | `secrets.enc` + 系统浏览器 |
 
 ### 4.5 Runtime Manager
 
@@ -504,7 +504,7 @@ render → 写 <appdata>/tmp/config-<uuid>.json (0600)
 
 ### 4.8 Catalog Client
 
-- 首次启动 `POST /v1/devices`，保存 `device_id` 与 token（token 存钥匙串）。
+- 首次启动 `POST /v1/devices`，保存 `device_id` 与 token（token 与 API Key 一起存 `secrets.enc`）。
 - `GET /v1/catalog/nodes?region=&protocol=`，带 `If-None-Match`。
 - 缓存响应到 SQLite，记录 ETag 与时间。
 - 请求超时 5 秒，失败用缓存并标注。
@@ -526,12 +526,21 @@ tool_calls(id TEXT PRIMARY KEY, session_id TEXT, tool TEXT, args_json TEXT,
 proxy_backup(id INTEGER PRIMARY KEY, platform TEXT, payload_json TEXT, created_at INTEGER);
 ```
 
-**Keychain**
+**密钥存储：`<data_dir>/secrets.enc`（0600）**
+
+> 2026-11-02 变更：不再使用系统钥匙串。用户要求正式版也不能弹系统密码框。
 
 | 键 | 内容 |
 |---|---|
-| `veyl.deepseek_key` | DeepSeek API Key |
-| `veyl.device_token` | 目录服务设备 token |
+| `provider:deepseek` | DeepSeek API Key |
+| `device_token` | 目录服务设备 token |
+
+- AES-256-GCM 加密，密钥由 PBKDF2-HMAC-SHA256 从机器标识 + 固定盐派生。
+- 所有密钥放**同一个文件**，一个 JSON 映射 `{ "<键>": "<base64(nonce‖ciphertext)>" }`。
+- 原子写：临时文件 + `fsync` + `rename`，与 `runtime-state.json` 同一套。
+- 写入失败 / 解密失败 / 文件损坏 → 错误码 `SECRET_STORE`，**不 panic、不回落成明文**。
+
+威胁模型见 §7.1。
 
 ---
 
@@ -753,7 +762,7 @@ P1 打包在应用内，随版本发布：
 ```
 App 启动
  → 读 SQLite 设置
- → 无 device_id：POST /v1/devices，token 存钥匙串
+ → 无 device_id：POST /v1/devices，token 存 secrets.enc
  → GET /v1/catalog/nodes（缓存）
  → 检查运行时是否已安装
  → 显示引导：配置 DeepSeek Key → 选择节点 → 连接
@@ -762,7 +771,7 @@ App 启动
 ### 6.2 保存 DeepSeek Key
 
 ```
-UI 输入 Key → Host 校验格式 → 存 Keychain
+UI 输入 Key → Host 校验格式 → 存 secrets.enc
  → 发一次最小请求（models 或 1 token chat）验证
  → 成功：关闭引导；失败：提示错误类型（401/余额/网络）
  → 日志只记录 "key saved"，不记录值
@@ -820,7 +829,7 @@ vpn_connect 失败
 
 | 风险 | 措施 |
 |---|---|
-| 密钥泄露 | 只存 Keychain；日志脱敏；不上传 |
+| 密钥泄露 | 存本地加密文件（见 §7.1）；日志脱敏；不上传 |
 | 二进制投毒 | SHA256 固定；只从官方 Release 或我们的镜像下载 |
 | 解压攻击 | 拒绝 `..`、绝对路径、外部符号链接 |
 | 控制 API 暴露 | 只绑 `127.0.0.1`，随机端口 + 随机 secret |
@@ -834,6 +843,32 @@ vpn_connect 失败
 - `uuid`、`password`、`private_key`、`short_id`、`token`、`key` 的值替换为 `***`。
 - 不记录完整请求头。
 - 不记录访问的目标域名/IP。
+
+### 7.1 本地密钥存储的威胁模型
+
+`secrets.enc` 用机器绑定的密钥加密。**说清楚它能防什么、不能防什么，避免被误读成硬件级保护。**
+
+**防住的：**
+
+| 攻击 | 为什么防得住 |
+|---|---|
+| 文件被拷到另一台机器 | 机器标识不同，派生不出同一个密钥 |
+| 云备份 / 同步盘被翻看 | 只看到密文 |
+| 误把 `secrets.enc` 发出去或提交进仓库 | 只泄露密文 |
+| 同机的其他用户账户 | 文件 0600，且读不到当前用户的用户目录 |
+
+**防不住的：**
+
+| 攻击 | 说明 |
+|---|---|
+| **以同一用户身份运行的恶意程序** | 它能读文件、能读机器标识、还能直接调我们的解密函数。加密对它无效 |
+| 内存抓取 / 调试器附加 | Key 在进程内存里必然是明文 |
+| root / 管理员权限 | 可读任意用户文件，也可读机器标识 |
+| 物理接触 + 已解锁的会话 | 同第一行 |
+
+**这意味着什么**：本地加密解决的是「文件离开了这台机器就没有价值」，不是「攻击者拿不到 Key」。桌面端没有不打扰用户的更强方案 —— 真正的硬件级保护（Secure Enclave / TPM）需要每次访问都有用户交互，正是用户明确拒绝的。
+
+**用户侧的唯一强补偿是**：使用可随时吊销的 API Key。Key 一旦泄露，在服务商控制台删除重建即可，损失可控。这一点应写进 README 与设置页说明，而不是靠加密承诺安全。
 
 ---
 

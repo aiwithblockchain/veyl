@@ -496,15 +496,15 @@ export class MockAgentBridge implements AgentBridge {
         requestId,
         assistantId,
         "DeepseekSaveKey",
-        "保存到系统钥匙串",
+        "保存到本机",
         520,
-        "Key 已保存到系统钥匙串，并验证可用。",
+        "Key 已保存到本机，并验证可用。",
         { permissionLevel: "write", argsPreview: undefined },
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
     }
-    const reply = "Key 已经存进系统钥匙串了，之后不会再让你输入。";
+    const reply = "Key 已经保存在本机了，之后不会再让你输入。";
     await this.type(requestId, assistantId, reply);
     this.finish(requestId, assistantId, "success", reply);
   }
@@ -642,7 +642,7 @@ export class MockAgentBridge implements AgentBridge {
     }
 
     // 假 Key 走「已写入但鉴权失败」这条路径，和后端语义一致：
-    // 失败码 INVALID_KEY 时 Key 其实已经落进钥匙串了。
+    // 失败码 INVALID_KEY 时 Key 其实已经落进本地凭据文件了。
     if (/test/i.test(trimmed) || trimmed.length < 30) {
       this.keyMasked = maskKey(trimmed);
       throw { code: "INVALID_KEY", message: "DeepSeek 鉴权失败，Key 可能无效或已被吊销" };

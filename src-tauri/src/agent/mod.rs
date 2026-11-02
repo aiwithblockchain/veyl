@@ -7,7 +7,7 @@ pub mod permission_handler;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 use tokio::sync::Mutex;
 
@@ -17,24 +17,52 @@ use crate::tools::VpnToolServices;
 
 pub struct AppState {
     pub services: Arc<dyn VpnToolServices>,
-    sessions: Mutex<HashMap<String, Arc<AivpnSession>>>,
+    sessions: Mutex<HashMap<String, SessionEntry>>,
     /// request_id → session_id，用于取消。
     active_requests: parking_lot::Mutex<HashMap<String, String>>,
     credentials: parking_lot::RwLock<Option<DeepSeekCredentials>>,
+    /// 凭据每变一次 +1；已经建好的会话拿着旧凭据，下次取用时按代数重建。
+    credential_generation: AtomicU64,
     working_dir: PathBuf,
+}
+
+struct SessionEntry {
+    generation: u64,
+    session: Arc<AivpnSession>,
+}
+
+/// 进程级句柄：工具路径（`tools::services`）拿不到 `AppState`，通过它热更新凭据。
+static APP_STATE: OnceLock<Weak<AppState>> = OnceLock::new();
+
+pub fn install_app_state(state: &Arc<AppState>) {
+    let _ = APP_STATE.set(Arc::downgrade(state));
+}
+
+/// 保存/清除 Key 后统一从这里更新内存凭据。
+pub fn update_credentials(api_key: Option<String>) {
+    if let Some(state) = APP_STATE.get().and_then(|weak| weak.upgrade()) {
+        state.apply_credentials(api_key);
+    }
 }
 
 impl AppState {
     pub fn new(services: Arc<dyn VpnToolServices>) -> Self {
-        // 环境变量优先（便于测试），否则读系统钥匙串。
-        let credentials = std::env::var("DEEPSEEK_API_KEY")
-            .ok()
-            .filter(|key| !key.trim().is_empty())
-            .or_else(|| crate::secrets::get_deepseek_key().ok().flatten())
-            .map(DeepSeekCredentials::new);
+        Self::build(services, load_initial_credentials())
+    }
 
+    /// 测试用：完全不碰系统钥匙串。
+    /// `cargo test` 里如果读钥匙串，macOS 会每次弹授权框。
+    pub fn new_without_keychain(services: Arc<dyn VpnToolServices>) -> Self {
+        Self::build(services, None)
+    }
+
+    fn build(
+        services: Arc<dyn VpnToolServices>,
+        credentials: Option<DeepSeekCredentials>,
+    ) -> Self {
         Self {
             services,
+            credential_generation: AtomicU64::new(0),
             sessions: Mutex::new(HashMap::new()),
             active_requests: parking_lot::Mutex::new(HashMap::new()),
             credentials: parking_lot::RwLock::new(credentials),
@@ -42,22 +70,47 @@ impl AppState {
         }
     }
 
-    pub fn set_credentials(&self, credentials: DeepSeekCredentials) {
-        *self.credentials.write() = Some(credentials);
+    /// 保存或清除 Key 的唯一入口：更新内存凭据并让已建会话失效。
+    /// 下次发消息时按新的代数重建会话，旧的 Key 不会继续被用。
+    pub fn apply_credentials(&self, api_key: Option<String>) {
+        let credentials = api_key
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .map(DeepSeekCredentials::new);
+        *self.credentials.write() = credentials;
+        self.credential_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn has_credentials(&self) -> bool {
         self.credentials.read().is_some()
     }
 
+    /// 设置页展示用；只返回掩码。
+    pub fn masked_key(&self) -> Option<String> {
+        self.credentials
+            .read()
+            .as_ref()
+            .map(|credentials| crate::secrets::mask(&credentials.api_key))
+    }
+
     pub async fn existing(&self, session_id: &str) -> Option<Arc<AivpnSession>> {
-        self.sessions.lock().await.get(session_id).cloned()
+        self.sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|entry| Arc::clone(&entry.session))
     }
 
     pub async fn session(&self, session_id: &str) -> anyhow::Result<Arc<AivpnSession>> {
         let mut sessions = self.sessions.lock().await;
-        if let Some(existing) = sessions.get(session_id) {
-            return Ok(Arc::clone(existing));
+        let generation = self.credential_generation.load(Ordering::SeqCst);
+
+        if let Some(entry) = sessions.get(session_id) {
+            if entry.generation == generation {
+                return Ok(Arc::clone(&entry.session));
+            }
+            // 凭据换过了：丢掉旧会话，下面用新 Key 重建。
+            sessions.remove(session_id);
         }
 
         let credentials = self
@@ -73,7 +126,13 @@ impl AppState {
             self.working_dir.clone(),
         )?;
 
-        sessions.insert(session_id.to_string(), Arc::clone(&session));
+        sessions.insert(
+            session_id.to_string(),
+            SessionEntry {
+                generation,
+                session: Arc::clone(&session),
+            },
+        );
         Ok(session)
     }
 
@@ -110,6 +169,15 @@ impl AppState {
     }
 }
 
+/// 启动时取一次凭据：环境变量优先（便于测试），否则读系统钥匙串。
+fn load_initial_credentials() -> Option<DeepSeekCredentials> {
+    std::env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| crate::secrets::get_deepseek_key().ok().flatten())
+        .map(DeepSeekCredentials::new)
+}
+
 /// 会话工作目录：P1 W1 先用用户主目录下的 `.veyl/sessions`，W3 起改用平台数据目录。
 fn working_dir() -> PathBuf {
     let home = std::env::var("HOME")
@@ -120,4 +188,63 @@ fn working_dir() -> PathBuf {
     let dir = home.join(".veyl").join("sessions");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::NotWiredServices;
+
+    fn app_state() -> Arc<AppState> {
+        Arc::new(AppState::new_without_keychain(Arc::new(NotWiredServices)))
+    }
+
+    #[test]
+    fn saving_a_key_updates_memory_immediately() {
+        let state = app_state();
+        state.apply_credentials(Some(" sk-abcdefgh1234 ".into()));
+        assert!(state.has_credentials());
+        assert_eq!(state.masked_key().as_deref(), Some("sk-****1234"));
+    }
+
+    #[test]
+    fn clearing_a_key_empties_memory() {
+        let state = app_state();
+        state.apply_credentials(Some("sk-abcdefgh1234".into()));
+        state.apply_credentials(None);
+        assert!(!state.has_credentials());
+        assert!(state.masked_key().is_none());
+    }
+
+    #[test]
+    fn a_blank_key_counts_as_cleared() {
+        let state = app_state();
+        state.apply_credentials(Some("sk-abcdefgh1234".into()));
+        state.apply_credentials(Some("   ".into()));
+        assert!(!state.has_credentials());
+    }
+
+    #[tokio::test]
+    async fn changing_the_key_rebuilds_the_session() {
+        let state = app_state();
+        state.apply_credentials(Some("sk-first-key-1111".into()));
+        let first = state.session("ses_hot_reload").await.unwrap();
+
+        state.apply_credentials(Some("sk-second-key-2222".into()));
+        let second = state.session("ses_hot_reload").await.unwrap();
+
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "换 Key 后必须重建会话，否则对话仍用旧 Key"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_survive_an_unchanged_key() {
+        let state = app_state();
+        state.apply_credentials(Some("sk-stable-key-3333".into()));
+        let first = state.session("ses_stable").await.unwrap();
+        let second = state.session("ses_stable").await.unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "Key 没变就不该重建会话");
+    }
 }

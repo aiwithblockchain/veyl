@@ -1,6 +1,6 @@
 # 契约：事件与 UI ↔ Host 调用
 
-> 契约版本：`1.0.5`
+> 契约版本：`1.0.6`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.2、§4.3
 > 实现方：Rust（Host 发送）、TypeScript（UI 订阅）
@@ -79,7 +79,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -101,7 +101,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -119,7 +119,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -162,7 +162,7 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 
 ```ts
 type ToolCallEndPayload = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -202,7 +202,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -241,7 +241,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -269,7 +269,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -307,7 +307,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -330,7 +330,7 @@ UI 处理：更新状态栏；`to = "failed"` 时显示诊断入口。
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   health: HealthSnapshot;
   emitted_at: string;
 };
@@ -346,7 +346,7 @@ UI 处理：更新延迟/出口 IP/健康灯；`degraded` 时在状态栏加黄�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -368,7 +368,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 
 ```ts
 type ApprovalRequestedPayload = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   approval_id: string;
   request_id: string;            // 所属 AI 请求；UI 直连发起的为 null
   session_id: string;            // 会话作用域的隔离键
@@ -514,6 +514,13 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 1.0.6（2026-11-02）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | `contract_version` 升到 `1.0.6` | 元数据 |
+| 2 | 无接口变更；与 tools / catalog / runtime 保持版本一致 | 同步 |
 
 ### 1.0.5（2026-11-02，PM 定案）
 

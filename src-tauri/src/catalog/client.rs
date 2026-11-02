@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::error::{CatalogError, CatalogResult};
 use super::types::{NodeDetailResponse, NodeListResponse, NodeProtocol};
 
-pub const CATALOG_CONTRACT_VERSION: &str = "1.0.5";
+pub const CATALOG_CONTRACT_VERSION: &str = "1.0.6";
 
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -456,33 +456,9 @@ fn host_platform() -> (String, String) {
     (platform.to_string(), arch.to_string())
 }
 
-/// 机器稳定标识；抓不到时返回 None，调用方应改用持久化的随机 UUID。
+/// 机器稳定标识；统一走 `secrets::machine_id()`，只维护一份实现。
 pub fn machine_fingerprint() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = std::process::Command::new("ioreg")
-            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
-            .output()
-            .ok()?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        return text.lines().find_map(|line| {
-            let (_, rest) = line.split_once("IOPlatformUUID")?;
-            let value = rest.split('"').nth(1)?;
-            Some(value.to_string())
-        });
-    }
-
-    #[cfg(windows)]
-    {
-        use winreg::enums::HKEY_LOCAL_MACHINE;
-        let key = winreg::RegKey::predef(HKEY_LOCAL_MACHINE)
-            .open_subkey(r"SOFTWARE\Microsoft\Cryptography")
-            .ok()?;
-        return key.get_value::<String, _>("MachineGuid").ok();
-    }
-
-    #[allow(unreachable_code)]
-    None
+    crate::secrets::machine_id()
 }
 
 /// `base64url(sha256(platform|arch|machine_id))`
@@ -543,7 +519,7 @@ mod tests {
     #[test]
     fn a_list_payload_drops_credentials_even_if_the_server_sends_them() {
         let payload = r#"{
-            "contract_version": "1.0.5", "ok": true, "request_id": "req_1",
+            "contract_version": "1.0.6", "ok": true, "request_id": "req_1",
             "data": {
                 "etag": "v12",
                 "nodes": [{

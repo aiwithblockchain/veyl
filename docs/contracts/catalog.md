@@ -1,6 +1,6 @@
 # 契约：节点目录服务（Catalog）
 
-> 契约版本：`1.0.5`
+> 契约版本：`1.0.6`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.8、§5.2
 > 实现方：Rust（Catalog Client）与 TypeScript / Hono（服务端）
@@ -39,7 +39,7 @@
 
 ```ts
 type ApiOk<T> = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   ok: true;
   request_id: string;
   data: T;
@@ -50,7 +50,7 @@ type ApiOk<T> = {
 
 ```ts
 type ApiError = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   ok: false;
   request_id: string;
   error: {
@@ -64,7 +64,7 @@ type ApiError = {
 
 HTTP 状态码与错误码**同时**存在：状态码给网关与监控看，错误码给客户端逻辑用。客户端分支只认错误码。
 
-> 与 `AivpnError` 的关系：`ApiError.error` 是传输层简化形式，不含 `contract_version` 与 `request_id`（后者在 `ApiError` 顶层）。Catalog Client 把它转成 `AivpnError` 时补上 `contract_version: "1.0.5"` 与 `request_id`，`details` 原样带过。Agent 看到的永远只有 `AivpnError`。
+> 与 `AivpnError` 的关系：`ApiError.error` 是传输层简化形式，不含 `contract_version` 与 `request_id`（后者在 `ApiError` 顶层）。Catalog Client 把它转成 `AivpnError` 时补上 `contract_version: "1.0.6"` 与 `request_id`，`details` 原样带过。Agent 看到的永远只有 `AivpnError`。
 
 ---
 
@@ -80,7 +80,7 @@ HTTP 状态码与错误码**同时**存在：状态码给网关与监控看，�
 
 ```ts
 type RegisterDeviceRequest = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   platform: "darwin" | "windows" | "linux";
   arch: "arm64" | "x86_64";
   app_version: string;        // semver，例 "0.1.0"
@@ -102,7 +102,7 @@ type RegisterDeviceResponse = ApiOk<{
 客户端要求：
 
 1. `device_id` 存 SQLite（明文）。
-2. `device_token` 存**系统钥匙串**（`veyl.device_token`），不得落 SQLite、不得进日志、不得进模型上下文。
+2. `device_token` 存**本地加密文件** `<data_dir>/secrets.enc`（键 `device_token`，0600，AES-256-GCM）。不使用系统钥匙串——正式版不能弹系统密码框。不得落 SQLite 明文、不得进日志、不得进模型上下文。
 3. 注册失败不阻塞应用启动：进入离线模式，用缓存节点列表（若有），否则提示手动导入。
 
 ### 2.2 `GET /v1/devices/me`（P2）
@@ -142,7 +142,7 @@ device_fingerprint = base64url(sha256(
 | 有效期 | **180 天** |
 | 续期方式 | **滑动续期**：任一带鉴权的成功调用都会把 `expires_at` 往后推 180 天，服务端在响应头回填 `X-Device-Token-Expires-At` |
 | 主动轮换 | P1 **不做** `POST /v1/devices/token` |
-| 失效处理 | 返回 `DEVICE_TOKEN_EXPIRED`，客户端清钥匙串并重新注册（§2.1） |
+| 失效处理 | 返回 `DEVICE_TOKEN_EXPIRED`，客户端清除 `secrets.enc` 中的 `device_token` 并重新注册（§2.1） |
 | 客户端缓存 | 收到 `X-Device-Token-Expires-At` 时更新本地记录；距到期 < 7 天在设置页提示「需要重新连接以续期」 |
 
 滑动续期的实现要求：
@@ -278,7 +278,7 @@ type NodeDescriptor = NodeSummary & {
 约束：
 
 - `credentials` 与 `tls` **只在详情接口返回**，且要求 Bearer token 有效。
-- 客户端拿到后只能写进内存与 `0600` 临时配置，**不得写日志、不得返回给模型、不得写 SQLite 明文**（需要缓存时用钥匙串或加密）。
+- 客户端拿到后只能写进内存与 `0600` 临时配置，**不得写日志、不得返回给模型、不得写 SQLite 明文**（需要缓存时用 `secrets.enc`）。
 - `NodeTls.mode = "reality"` 时 `reality_public_key` 必填且非空。
 
 ### 4.2 凭据轮换
@@ -299,7 +299,7 @@ type NodeDescriptor = NodeSummary & {
 
 ```ts
 type HealthReportRequest = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   device_id: string;
   node_id: string;
   ok: boolean;
@@ -438,7 +438,7 @@ Retry-After: 12
 |---|---|
 | 凭据进模型上下文 | 列表接口不返回凭据；详情接口结果直接交给 Config Builder，不经 `ToolResult.content` |
 | 提示注入 | `name` / `city` / `tags` 按不可信数据处理，只能用于展示与排序，禁止拼进系统提示 |
-| token 泄露 | 只存钥匙串；日志脱敏；不上传 |
+| token 泄露 | 只存本地加密文件（机器绑定，拷走无效）；日志脱敏；不上传 |
 | 重放 | 所有写接口要求 `X-Request-Id`；服务端对同一 `request_id` 幂等 |
 | 中间人 | TLS 1.2+；客户端不做证书 pinning（P1），但拒绝系统时间异常下的连接 |
 | 白嫖 | device token + 分层限流 + 健康分降权 |
@@ -481,6 +481,13 @@ Retry-After: 12
 ---
 
 ## 12. 变更记录
+
+### 1.0.6（2026-11-02，用户要求）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.0.6` | 元数据 | 用户 |
+| 2 | `device_token` 从「系统钥匙串」改为本地加密文件 `secrets.enc` 的 `device_token` 键（§2.1、§2.4、§4.1、§9） | 实现约束 | 用户：正式版不能弹系统密码框 |
 
 ### 1.0.5（2026-11-02，PM 定案）
 

@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`1.0.5`
+> 契约版本：`1.0.6`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.3、§4.4、§5.1
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -62,7 +62,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -303,7 +303,7 @@ type CallSource = "ui" | "agent";
 | 12 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | `never` | 中 |
 | 13 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | `never` | 只读 |
 | 14 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | `never` | 低 |
-| 15 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到钥匙串 | `Write` | `never` | 中 |
+| 15 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | `never` | 中 |
 | 16 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | `never` | 只读 |
 | 17 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | `never` | 低 |
 | 18 | `ProfileDelete` | `ProfileDeleteTool` | 删除本地配置 | `Write` | `always` | 中 |
@@ -762,7 +762,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -839,8 +839,8 @@ type DeepseekSaveKeyData = {
 
 | `ok` | 含义 | `data` |
 |---|---|---|
-| `true` | Key 已写入钥匙串（无论是否验证通过） | `saved: true` + `validation` |
-| `false` | **只有**钥匙串写入失败才为 `false` | 错误码 `INTERNAL` |
+| `true` | Key 已写入本地加密文件（无论是否验证通过） | `saved: true` + `validation` |
+| `false` | **只有**加密文件写入失败才为 `false` | 错误码 `SECRET_STORE` |
 
 `validation` 三态（**只回答「Key 本身是否有效」**）：
 
@@ -864,7 +864,7 @@ type DeepseekSaveKeyData = {
 铁律：
 
 - 返回的 `data`、`content`、日志、事件**一律不含 Key**。
-- 验证失败**不**导致 `ok: false`，避免 Agent 反复重试导致多次写钥匙串。
+- 验证失败**不**导致 `ok: false`，避免 Agent 反复重试导致多次写加密文件。
 - `content` 必须与 `validation` **和** `validation_detail` 同时一致：
   - `invalid` → 要有「Key 无效」字样
   - `unverified` → 要有「未验证」字样
@@ -888,7 +888,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "1.0.5";
+  contract_version: "1.0.6";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -1038,6 +1038,14 @@ CatalogSearch → ProfileImport → VpnConnect
 ---
 
 ## 8. 变更记录
+
+### 1.0.6（2026-11-02，用户要求）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.0.6` | 元数据 | 用户 |
+| 2 | Key 存储从系统钥匙串改为本地加密文件 `<data_dir>/secrets.enc`（AES-256-GCM，机器绑定）。涉及 §3 表第 15 行、§4.15 的三处「钥匙串」表述 | 实现约束 | 用户：正式版不能弹系统密码框 |
+| 3 | 「钥匙串写入失败」的错误码由 `INTERNAL` 改为 `SECRET_STORE` | 错误码 | 同上 |
 
 ### 1.0.5（2026-11-02，PM 定案）
 

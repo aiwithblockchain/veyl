@@ -30,9 +30,9 @@ export interface AgentBridge {
   deleteProfile(profileId: string): Promise<void>;
   /** 读取 Key 的配置状态（只返回打码值，永不返回明文）。 */
   getDeepSeekKey(): Promise<DeepSeekKeyState>;
-  /** 保存 Key；只进系统钥匙串。 */
+  /** 保存 Key；只进本机加密存储。 */
   saveDeepSeekKey(key: string): Promise<DeepSeekKeyState>;
-  /** 从钥匙串删除 Key。 */
+  /** 从本机存储删除 Key。 */
   clearDeepSeekKey(): Promise<void>;
   dispose(): void;
 }
