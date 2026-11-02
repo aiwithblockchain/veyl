@@ -140,6 +140,8 @@ DB="$HOME/Library/Application Support/Veyl/veyl.db"
 >
 > `tool_calls` / `chat_sessions` / `chat_messages` / `proxy_backup` / `runtime_versions` 的时间列都是 **Unix 毫秒**（`store/db.rs` 的 `now_ms()`）。契约对外给的是 ISO 8601 字符串，由 `iso_from_ms()` 在出口转换，已经处理好了。
 >
+> 历史提示：`runtime_versions.installed_at` 在 2026-11-02 之前用的是**秒**，与其它表不一致，已由迁移统一为毫秒。**如果你的数据目录是迁移前创建的**，跑验收前先确认迁移跑过（`PRAGMA user_version`），否则那一列除 1000 会算成 1970 年。
+>
 > 但**取证 SQL 必须自己除 1000**：
 >
 > ```sql

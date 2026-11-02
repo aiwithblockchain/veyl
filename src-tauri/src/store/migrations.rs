@@ -3,7 +3,9 @@ use rusqlite::Connection;
 use super::error::StoreResult;
 
 /// 每段迁移只追加、不修改；`PRAGMA user_version` 记录已执行到第几段。
-pub const MIGRATIONS: &[&str] = &[include_str!("migrations/001_init.sql")];
+pub const MIGRATION_002: &str = include_str!("migrations/002_timestamps_ms.sql");
+
+pub const MIGRATIONS: &[&str] = &[include_str!("migrations/001_init.sql"), MIGRATION_002];
 
 pub fn migrate(conn: &Connection) -> StoreResult<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;

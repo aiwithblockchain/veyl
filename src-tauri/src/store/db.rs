@@ -81,6 +81,115 @@ pub fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn migration_two_converts_legacy_seconds_exactly_once() {
+        let dir = std::env::temp_dir().join(format!("veyl-mig-{:016x}", rand::random::<u64>()));
+        let path = dir.join("veyl.db");
+
+        {
+            let store = Store::open(&path).unwrap();
+            let conn = store.conn();
+            conn.execute(
+                "INSERT INTO runtime_versions (version, path, binary_path, sha256, state, installed_at)
+                 VALUES ('1.14.4', '/a', '/a/b', 'x', 'active', 1700000000)",
+                [],
+            )
+            .unwrap();
+            // 退回到 v1，模拟一个已存在的旧库。
+            conn.pragma_update(None, "user_version", 1i64).unwrap();
+        }
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), 2);
+        let migrated: i64 = reopened
+            .conn()
+            .query_row("SELECT installed_at FROM runtime_versions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(migrated, 1_700_000_000_000, "秒级时间戳应被换算成毫秒");
+
+        // 再跑一次 002：下界保护保证不会二次放大。
+        reopened.conn().execute_batch(crate::store::migrations::MIGRATION_002).unwrap();
+        let again: i64 = reopened
+            .conn()
+            .query_row("SELECT installed_at FROM runtime_versions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(again, migrated, "重复执行必须幂等");
+
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_time_column_is_in_milliseconds() {
+        use crate::store::{chat, profiles, proxy_backup, runtime, tool_calls};
+
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+
+        profiles::create(
+            &conn,
+            &profiles::NewProfile {
+                id: "prf_1",
+                node_id: None,
+                name: "p",
+                protocol: None,
+                region: None,
+                config: &serde_json::json!({ "server": "203.0.113.10" }),
+            },
+        )
+        .unwrap();
+
+        tool_calls::begin(
+            &conn,
+            &tool_calls::NewCall {
+                id: "call_1",
+                session_id: Some("ses_1"),
+                request_id: None,
+                tool_name: "RuntimeStatus",
+                args: &serde_json::json!({}),
+            },
+        )
+        .unwrap();
+
+        chat::append_message(&conn, "msg_1", "ses_1", "user", "hi", None).unwrap();
+        proxy_backup::save(&conn, "macos", "127.0.0.1:2080", &serde_json::json!({})).unwrap();
+        runtime::upsert_version(
+            &conn,
+            &runtime::RuntimeVersionRow {
+                version: "1.14.4".into(),
+                path: "/a".into(),
+                binary_path: "/a/b".into(),
+                sha256: "x".into(),
+                state: "active".into(),
+                installed_at: crate::store::db::now_ms(),
+            },
+        )
+        .unwrap();
+        crate::store::catalog_cache::put(&conn, "k", None, &serde_json::json!({}), 200).unwrap();
+
+        let columns = [
+            ("profiles", "created_at"),
+            ("tool_calls", "created_at"),
+            ("chat_messages", "created_at"),
+            ("proxy_backup", "created_at"),
+            ("runtime_versions", "installed_at"),
+            ("catalog_cache", "fetched_at"),
+        ];
+
+        for (table, column) in columns {
+            let value: i64 = conn
+                .query_row(&format!("SELECT {column} FROM {table} LIMIT 1"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert!(
+                value >= 1_000_000_000_000 && value < 10_000_000_000_000,
+                "{table}.{column} = {value}，不是毫秒量级"
+            );
+        }
+    }
+
+
     use super::*;
 
     #[test]

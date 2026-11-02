@@ -526,6 +526,12 @@ tool_calls(id TEXT PRIMARY KEY, session_id TEXT, tool TEXT, args_json TEXT,
 proxy_backup(id INTEGER PRIMARY KEY, platform TEXT, payload_json TEXT, created_at INTEGER);
 ```
 
+> **时间列约定（2026-11-02 统一）**：库里**所有**时间列一律存 **Unix 毫秒**（`store::db::now_ms()`），出口统一用 `iso_from_ms()` 转成 ISO 8601 UTC + `Z`。
+>
+> 这是硬约定，不是风格偏好 —— 同一个库里混用秒和毫秒，会让按秒写的取证 SQL **静默返回空**（SQLite 不报错，只算出公元 5 万年或 NULL），排查时极易误判成「字段没写」。
+>
+> 历史：`runtime_versions.installed_at` 曾用秒，已由迁移统一。新增任何时间列都必须跟随这条。
+
 **密钥存储：`<data_dir>/secrets.enc`（0600）**
 
 > 2026-11-02 变更：不再使用系统钥匙串。用户要求正式版也不能弹系统密码框。

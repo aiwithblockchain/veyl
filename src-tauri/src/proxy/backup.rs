@@ -52,7 +52,7 @@ impl ProxyBackup {
             payload,
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
+                .map(|d| d.as_millis() as i64)
                 .unwrap_or(0),
         }
     }

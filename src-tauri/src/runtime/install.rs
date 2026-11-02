@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -212,7 +212,7 @@ impl Installer {
                 .find(|p| p.is_file()),
             dir: final_dir,
             sha256: digest,
-            installed_at: now_unix(),
+            installed_at: crate::store::db::now_ms(),
         };
 
         let mut state = self.read_state()?;
@@ -361,12 +361,6 @@ pub async fn verify_binary_version(binary: &Path, expected: &str) -> RuntimeResu
     Ok(reported)
 }
 
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 #[cfg(test)]
 mod tests {
