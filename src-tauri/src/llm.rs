@@ -306,12 +306,16 @@ pub fn delete(store: &Store, provider_id: &str) -> Result<(), (String, String)> 
     else {
         return Err(("not_found".into(), "provider 不存在".into()));
     };
-    list.remove(index);
-    save_records(store, &list).map_err(|error| ("INTERNAL".to_string(), error))?;
+    if list[index].is_builtin {
+        return Err(("builtin_provider".into(), "内置 provider 不能删除".into()));
+    }
 
-    // Key 必须一起删，不能留孤儿密钥。
+    // 先删 Key：失败就中止，记录保持不动，避免留下孤儿密钥。
     crate::secrets::delete_secret(&secret_key(provider_id))
         .map_err(|error| ("SECRET_STORE".to_string(), error.to_string()))?;
+
+    list.remove(index);
+    save_records(store, &list).map_err(|error| ("INTERNAL".to_string(), error))?;
 
     if active_id(store).as_deref() == Some(provider_id) {
         // 切换只能显式发生：删掉当前 provider 后留空，不自动挑下一个。
@@ -542,11 +546,36 @@ fn describe_http_error(status: u16, detail: &str) -> String {
         429 => "请求被限流（429）",
         _ => "请求失败",
     };
-    if detail.trim().is_empty() {
+    let detail = redact_secrets(detail.trim());
+    if detail.is_empty() {
         format!("{base}（HTTP {status}）")
     } else {
-        format!("{base}（HTTP {status}）：{}", detail.trim())
+        format!("{base}（HTTP {status}）：{detail}")
     }
+}
+
+/// 响应体可能回显请求里的 Key（OpenAI 风格 401 常见），返回给 UI 前统一脱敏。
+fn redact_secrets(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(index) = rest.find("sk-") {
+        out.push_str(&rest[..index]);
+        let tail = &rest[index + 3..];
+        let token: String = tail
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        if token.chars().count() >= 8 {
+            out.push_str("sk-***");
+        } else {
+            out.push_str("sk-");
+            out.push_str(&token);
+        }
+        rest = &tail[token.len()..];
+    }
+    out.push_str(rest);
+    // 只给用户一句可读说明，不把整段响应体带出去。
+    out.chars().take(200).collect()
 }
 
 #[cfg(test)]
@@ -596,9 +625,10 @@ mod tests {
         ensure_secrets();
         let store = store();
         ensure_migrated(&store);
-        delete(&store, PROVIDER_DEEPSEEK).unwrap();
+        let error = delete(&store, PROVIDER_DEEPSEEK).unwrap_err();
+        assert_eq!(error.0, "builtin_provider");
         ensure_migrated(&store);
-        assert!(records(&store).is_empty());
+        assert_eq!(records(&store).len(), 1, "内置 provider 不能被删，也不会重复");
     }
 
     #[test]
@@ -670,11 +700,27 @@ mod tests {
         ensure_secrets();
         let store = store();
         ensure_migrated(&store); // active = deepseek
-        delete(&store, PROVIDER_DEEPSEEK).unwrap();
+        let saved = save(
+            &store,
+            input("openai", Some("https://api.openai.com"), Some("sk-custom")),
+        )
+        .unwrap();
+        let id = saved["provider_id"].as_str().unwrap().to_string();
+        activate(&store, &id).unwrap();
+        assert_eq!(active_id(&store).as_deref(), Some(id.as_str()));
+
+        delete(&store, &id).unwrap();
         assert!(
             active_id(&store).is_none(),
             "删除当前 provider 后必须留空，不能自动挑下一个"
         );
+    }
+
+    #[test]
+    fn http_error_details_are_redacted() {
+        let text = describe_http_error(401, "Incorrect API key provided: sk-abcdefgh12345678");
+        assert!(!text.contains("abcdefgh12345678"), "{text}");
+        assert!(text.contains("sk-***"), "{text}");
     }
 
     #[test]

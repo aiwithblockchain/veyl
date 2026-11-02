@@ -1226,7 +1226,7 @@ impl VpnToolServices for WiredServices {
             svc_error(code, error.message())
         })?;
         // 与 UI 命令共用同一个更新函数，工具存档后对话也立刻用新 Key。
-        crate::agent::refresh_credentials();
+        crate::agent::refresh_credentials_if_active(crate::llm::PROVIDER_DEEPSEEK);
         Ok(json!({
             "saved": true,
             "validation": outcome.validation,

@@ -60,8 +60,6 @@ pub fn run() {
     };
 
     crate::store::install_global(Arc::clone(&store));
-    // 多 provider 元数据迁移：只在首次写入时补内置 DeepSeek，重复启动幂等。
-    crate::llm::ensure_migrated(&store);
 
     let manager = RuntimeManager::new(RuntimeConfig::new(&data_dir));
     let proxy = Arc::new(ProxyController::new(Box::new(SqliteBackupStore::new(
@@ -115,6 +113,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(Arc::clone(&state))
         .setup(move |app| {
+            // 旧 Key 迁移只补元数据，幂等；放在 setup 里，第二实例不会执行。
+            crate::llm::ensure_migrated(&setup_store);
+            crate::agent::refresh_credentials();
+
             // 恢复动作只能放在这里：第二实例在插件 setup 就退出了，
             // 不会撤掉第一实例的代理、杀它的 sing-box、删它的配置。
             match recovery_parts.proxy.recover_stale() {

@@ -318,6 +318,7 @@ fn llm_error((reason, message): (String, String)) -> Value {
         "not_found" => "NOT_FOUND",
         "SECRET_STORE" => "SECRET_STORE",
         "INTERNAL" => "INTERNAL",
+        "builtin_provider" | "no_key" => "PRECONDITION_FAILED",
         _ => "INVALID_ARGUMENT",
     };
     json!({
@@ -369,10 +370,16 @@ pub async fn llm_provider_save(
         model,
         api_key,
     };
+    let active_before = crate::llm::active_id(store);
     match crate::llm::save(store, input) {
         Ok(value) => {
-            // 保存即设为当前：新请求立即用新 provider，旧请求不受影响。
-            crate::agent::refresh_credentials();
+            // 只在 active 真的变化、或改的就是当前 provider 时才重建凭据；
+            // 否则编辑备用 provider 会让凭据代数 +1、丢掉当前会话上下文。
+            let active_after = crate::llm::active_id(store);
+            let saved_id = value.get("provider_id").and_then(Value::as_str);
+            if active_after != active_before || saved_id == active_after.as_deref() {
+                crate::agent::refresh_credentials();
+            }
             Ok(value)
         }
         Err(error) => Err(llm_error(error)),
@@ -382,9 +389,12 @@ pub async fn llm_provider_save(
 #[tauri::command]
 pub async fn llm_provider_delete(provider_id: String) -> Result<Value, Value> {
     let store = global_store()?;
+    let active_before = crate::llm::active_id(store);
     match crate::llm::delete(store, &provider_id) {
         Ok(()) => {
-            crate::agent::refresh_credentials();
+            if crate::llm::active_id(store) != active_before {
+                crate::agent::refresh_credentials();
+            }
             Ok(json!({ "ok": true }))
         }
         Err(error) => Err(llm_error(error)),
@@ -602,8 +612,8 @@ pub async fn deepseek_save_key(
 ) -> Result<Value, Value> {
     match crate::secrets::save_deepseek_key(&key).await {
         Ok(outcome) => {
-            // 热更新内存凭据：只有当前 active provider 是 DeepSeek 时才会换 key。
-            crate::agent::refresh_credentials();
+            // 热更新内存凭据：只有当前 active provider 是 DeepSeek 时才换 key。
+            crate::agent::refresh_credentials_if_active(crate::llm::PROVIDER_DEEPSEEK);
             if outcome.validation == "invalid" {
                 return Err(json!({
                     "code": "INVALID_KEY",
@@ -638,7 +648,7 @@ pub async fn deepseek_key_status(state: State<'_, Arc<AppState>>) -> Result<Valu
 pub async fn deepseek_clear_key(_state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
     match crate::secrets::delete_deepseek_key() {
         Ok(()) => {
-            crate::agent::refresh_credentials();
+            crate::agent::refresh_credentials_if_active(crate::llm::PROVIDER_DEEPSEEK);
             Ok(json!({ "cleared": true }))
         }
         Err(error) => Err(json!({

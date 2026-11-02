@@ -200,6 +200,14 @@ pub fn refresh_credentials() {
     state.apply_provider(credentials);
 }
 
+/// 只有改动的是当前 provider 时才重建凭据，避免无关改动丢掉会话上下文。
+pub fn refresh_credentials_if_active(provider_id: &str) {
+    let active = crate::store::global().and_then(|store| crate::llm::active_id(store));
+    if active.as_deref() == Some(provider_id) {
+        refresh_credentials();
+    }
+}
+
 /// 会话工作目录：P1 W1 先用用户主目录下的 `.veyl/sessions`，W3 起改用平台数据目录。
 fn working_dir() -> PathBuf {
     let home = std::env::var("HOME")
