@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`1.0.6`
+> 契约版本：`1.0.7`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.3、§4.4、§5.1
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -62,7 +62,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -762,7 +762,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -888,7 +888,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -1038,6 +1038,13 @@ CatalogSearch → ProfileImport → VpnConnect
 ---
 
 ## 8. 变更记录
+
+### 1.0.7（2026-11-02）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | `contract_version` 升到 `1.0.7` | 元数据 |
+| 2 | 无接口变更；与 events / runtime / catalog 保持版本一致 | 同步 |
 
 ### 1.0.6（2026-11-02，用户要求）
 

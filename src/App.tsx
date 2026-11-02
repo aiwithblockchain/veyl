@@ -8,9 +8,10 @@ import type {
 } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, snapshotToView } from "./agent";
+import { BridgeError, toBridgeError } from "./agent/errors";
 import { ChatView } from "./components/ChatView";
 import { Settings } from "./components/Settings";
-import { Sidebar } from "./components/Sidebar";
+import { Sidebar, type RenameResult } from "./components/Sidebar";
 import { StatusPanel, type DeleteNotice } from "./components/StatusPanel";
 import { activeSession, chatReducer, createInitialState, nextId } from "./state/chatStore";
 import "./styles/app.css";
@@ -70,6 +71,28 @@ export default function App() {
   useEffect(() => {
     refreshSnapshot();
   }, [refreshSnapshot]);
+
+  // 重启后恢复会话：数据库为空时 hydrate 是空操作，保持「新建空会话」。
+  useEffect(() => {
+    let cancelled = false;
+    void bridge.getChatHistory().then((history) => {
+      if (!cancelled) dispatch({ type: "hydrate_history", history });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge]);
+
+  const handleSelectSession = (sessionId: string) => {    dispatch({ type: "select_session", sessionId });
+
+    // DB 恢复出来的会话：首次选中时才拉消息，避免启动时把所有会话都读一遍。
+    const target = state.sessions.find((item) => item.id === sessionId);
+    if (!target || target.historyLoaded) return;
+
+    void bridge.getChatHistory(sessionId).then((history) => {
+      dispatch({ type: "session_messages_loaded", sessionId, messages: history.messages });
+    });
+  };
 
   const handleSend = (text: string) => {
     const localRequestId = nextId("local");
@@ -136,7 +159,7 @@ export default function App() {
         sessions={state.sessions}
         activeSessionId={state.activeSessionId}
         mode={bridge.mode}
-        onSelect={(sessionId) => dispatch({ type: "select_session", sessionId })}
+        onSelect={handleSelectSession}
         onNew={() => dispatch({ type: "new_session" })}
         onOpenSettings={() => setSettingsOpen(true)}
       />

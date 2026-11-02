@@ -1,6 +1,6 @@
 # 契约：事件与 UI ↔ Host 调用
 
-> 契约版本：`1.0.6`
+> 契约版本：`1.0.7`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.2、§4.3
 > 实现方：Rust（Host 发送）、TypeScript（UI 订阅）
@@ -79,7 +79,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -101,7 +101,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -119,7 +119,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -162,7 +162,7 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 
 ```ts
 type ToolCallEndPayload = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -202,7 +202,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -241,7 +241,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -269,7 +269,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -307,7 +307,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -330,7 +330,7 @@ UI 处理：更新状态栏；`to = "failed"` 时显示诊断入口。
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   health: HealthSnapshot;
   emitted_at: string;
 };
@@ -346,7 +346,7 @@ UI 处理：更新延迟/出口 IP/健康灯；`degraded` 时在状态栏加黄�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -368,7 +368,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 
 ```ts
 type ApprovalRequestedPayload = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   approval_id: string;
   request_id: string;            // 所属 AI 请求；UI 直连发起的为 null
   session_id: string;            // 会话作用域的隔离键
@@ -412,6 +412,7 @@ UI 处理：
 | `vpn_disconnect` | `{}` | `VpnDisconnectData` | 无 AI 模式 |
 | `settings_get` | `{}` | `SettingsSnapshot` | 设置页 |
 | `settings_set` | `{ key, value }` | `{ ok: boolean }` | 设置页 |
+| `rename_session` | `{ session_id, title }` | `{ id, title, created_at }` | 重命名历史会话；`created_at` 为 ISO 8601 |
 
 > 无 AI 模式（`phase-1-requirements.md` FR-2.7）必须能在不经过 Agent 的情况下走完「选节点 → 连接 → 断开」。上表后半段就是为此存在的，行为与对应工具一致，**共用同一份 Host 实现**，不允许两套逻辑。
 
@@ -422,6 +423,23 @@ UI 处理：
 `profile_delete` 的 **前置校验先于审批**：目标是 active profile 时，Host 直接返回 `PRECONDITION_FAILED`，**不生成 `approval_id`、也不发 `approval-requested` 事件**。UI 因此不会看到一张点了也没用的确认卡。
 
 `ai_send_message` 的 `request_id` 由 Host 生成（UUID v4），UI 之后所有事件都按它过滤。
+
+### 5.1 `rename_session` 的校验语义
+
+| 输入 | 结果 |
+|---|---|
+| 两侧空白去掉后为空 | `INVALID_ARGUMENT`，`details.reason = "empty_title"` |
+| 去掉空白后长度 > 80（Unicode 标量数） | `INVALID_ARGUMENT`，`details.reason = "title_too_long"`，`details.max = 80`、`details.actual = N` |
+| `session_id` 不存在 | `NOT_FOUND` |
+| 存储写入失败 | `INTERNAL` |
+
+规则：
+
+- **先 trim 再校验、再存**。存进去的是 trim 后的值，UI 不需要自己再处理。
+- 长度按 **Unicode 标量数**（Rust `chars().count()`），**不是字节数** —— 80 个汉字和 80 个英文字母同样合法。
+- 80 是**存储上限**，不是显示宽度。侧边栏怎么截断是 UI 的事，与本命令无关。
+- **不新增专用错误码**。`INVALID_ARGUMENT` + `details.reason` 是本项目既有的模式（`ProfileDelete` 的 `ACTIVE_PROFILE_IN_USE` 同理），比为一个两值校验再发明一个 `INVALID_TITLE` 更省。
+- 不触发事件、不写 `tool_calls`。这是纯 UI 操作，没有 Agent 参与。
 
 ---
 
@@ -514,6 +532,14 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 1.0.7（2026-11-02，新增需求 N-01）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.0.7` | 元数据 | PM |
+| 2 | §5 的 invoke 清单新增 `rename_session({ session_id, title })` | 新增命令 | 用户：允许修改历史对话标题 |
+| 3 | 新增 §5.1 校验语义：trim → 非空 → ≤80 Unicode 标量；`INVALID_ARGUMENT` + `details.reason` | 新增 | PM 派单，架构师定接口 |
 
 ### 1.0.6（2026-11-02）
 

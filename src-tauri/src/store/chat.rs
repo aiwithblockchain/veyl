@@ -99,6 +99,34 @@ pub fn messages(conn: &Connection, session_id: &str) -> StoreResult<Vec<ChatMess
     rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
 }
 
+/// 改会话标题；调用方负责 trim 与长度校验。
+pub fn rename_session(
+    conn: &Connection,
+    session_id: &str,
+    title: &str,
+) -> StoreResult<ChatSession> {
+    let changed = conn.execute(
+        "UPDATE chat_sessions SET title = ?2 WHERE id = ?1",
+        params![session_id, title],
+    )?;
+    if changed == 0 {
+        return Err(StoreError::NotFound(session_id.to_string()));
+    }
+
+    conn.query_row(
+        "SELECT id, title, created_at FROM chat_sessions WHERE id = ?1",
+        params![session_id],
+        |row| {
+            Ok(ChatSession {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        },
+    )
+    .map_err(StoreError::from)
+}
+
 pub fn latest_session(conn: &Connection) -> StoreResult<Option<ChatSession>> {
     conn.query_row(
         "SELECT id, title, created_at FROM chat_sessions ORDER BY created_at DESC LIMIT 1",
@@ -252,6 +280,25 @@ mod tests {
 
         // 再查一次不会凭空多出行。
         assert_eq!(messages(&conn, "ses_turn").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn renaming_a_session_updates_the_row() {
+        let store = super::super::db::Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        ensure_session(&conn, "ses_rename", "旧标题").unwrap();
+
+        let updated = rename_session(&conn, "ses_rename", "新标题").unwrap();
+        assert_eq!(updated.id, "ses_rename");
+        assert_eq!(updated.title, "新标题");
+        assert_eq!(list_sessions(&conn).unwrap()[0].title, "新标题");
+    }
+
+    #[test]
+    fn renaming_a_missing_session_is_not_found() {
+        let store = super::super::db::Store::open_in_memory().unwrap();
+        let error = rename_session(&store.conn(), "ses_missing", "新标题").unwrap_err();
+        assert!(matches!(error, StoreError::NotFound(_)));
     }
 
     #[test]

@@ -100,6 +100,7 @@ pub fn run() {
             agent::commands::deepseek_save_key,
             agent::commands::deepseek_key_status,
             agent::commands::deepseek_clear_key,
+            agent::commands::rename_session,
         ])
         .run(tauri::generate_context!())
         .expect("Veyl 启动失败");

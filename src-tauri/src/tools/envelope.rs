@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub const CONTRACT_VERSION: &str = "1.0.6";
+pub const CONTRACT_VERSION: &str = "1.0.7";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AivpnError {

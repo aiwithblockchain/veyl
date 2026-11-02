@@ -1,4 +1,4 @@
-import type { AgentBridge, DeepSeekKeyState } from "./bridge";
+import type { AgentBridge, ChatHistory, DeepSeekKeyState, RenamedSession } from "./bridge";
 import { maskKey } from "./bridge";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
@@ -608,6 +608,32 @@ export class MockAgentBridge implements AgentBridge {
     if (!resolve) return;
     this.approvals.delete(approvalId);
     resolve(decision);
+  }
+
+  async renameSession(sessionId: string, title: string): Promise<RenamedSession> {
+    await sleep(250);
+    // mock 扮演后端：trim 与长度校验都在这边做，前端只管显示错误码对应的文案。
+    const trimmed = title.trim();
+    if (!trimmed) {
+      throw {
+        code: "INVALID_ARGUMENT",
+        message: "标题不能为空",
+        details: { reason: "empty_title" },
+      };
+    }
+    if (Array.from(trimmed).length > 80) {
+      throw {
+        code: "INVALID_ARGUMENT",
+        message: "标题最多 80 个字符",
+        details: { reason: "title_too_long", max: 80 },
+      };
+    }
+    return { id: sessionId, title: trimmed, createdAt: Date.now() };
+  }
+
+  async getChatHistory(_sessionId?: string): Promise<ChatHistory> {
+    // 浏览器通道没有本地数据库，恢复历史只在 Tauri 里生效。
+    return { sessions: [], activeSessionId: null, messages: [] };
   }
 
   async deleteProfile(profileId: string): Promise<void> {

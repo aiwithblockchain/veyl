@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::agent::app_handle;
 use crate::tools::{AivpnError, NextAction};
 
-pub const CONTRACT_VERSION: &str = "1.0.6";
+pub const CONTRACT_VERSION: &str = "1.0.7";
 
 pub const EV_MESSAGE_CHUNK: &str = "message-chunk";
 pub const EV_THINKING_CHUNK: &str = "thinking-chunk";

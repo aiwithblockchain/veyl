@@ -229,3 +229,104 @@ pub async fn deepseek_clear_key(state: State<'_, Arc<AppState>>) -> Result<Value
         })),
     }
 }
+
+
+pub const MAX_TITLE_CHARS: usize = 80;
+
+/// 先 trim 再校验：空标题、超长都返回契约里的 INVALID_ARGUMENT + details.reason。
+/// 80 是 Unicode 标量数，不是字节数——80 个汉字与 80 个字母同样合法。
+fn normalise_title(title: &str) -> Result<&str, Value> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err(json!({
+            "code": "INVALID_ARGUMENT",
+            "message": "标题不能为空",
+            "details": { "reason": "empty_title" },
+        }));
+    }
+
+    let length = trimmed.chars().count();
+    if length > MAX_TITLE_CHARS {
+        return Err(json!({
+            "code": "INVALID_ARGUMENT",
+            "message": format!("标题最多 {MAX_TITLE_CHARS} 个字符"),
+            "details": {
+                "reason": "title_too_long",
+                "max": MAX_TITLE_CHARS,
+                "actual": length,
+            },
+        }));
+    }
+
+    Ok(trimmed)
+}
+
+/// 会话重命名。先 trim 再校验、再落库；契约 events.md §5.1。
+#[tauri::command]
+pub async fn rename_session(session_id: String, title: String) -> Result<Value, Value> {
+    let trimmed = normalise_title(&title)?;
+
+    let Some(store) = crate::store::global() else {
+        return Err(json!({
+            "code": "INTERNAL",
+            "message": "本地数据库不可用",
+        }));
+    };
+
+    let conn = store.conn();
+    match crate::store::chat::rename_session(&conn, &session_id, trimmed) {
+        Ok(session) => Ok(json!({
+            "id": session.id,
+            "title": session.title,
+            "created_at": crate::store::iso_from_ms(session.created_at),
+        })),
+        Err(crate::store::StoreError::NotFound(_)) => Err(json!({
+            "code": "NOT_FOUND",
+            "message": "会话不存在",
+        })),
+        Err(error) => Err(json!({
+            "code": "INTERNAL",
+            "message": error.to_string(),
+        })),
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn trims_surrounding_whitespace() {
+        assert_eq!(normalise_title("  东京节点  ").unwrap(), "东京节点");
+    }
+
+    #[test]
+    fn an_empty_or_blank_title_is_rejected() {
+        for candidate in ["", "   ", "\n\t"] {
+            let error = normalise_title(candidate).unwrap_err();
+            assert_eq!(error["code"], "INVALID_ARGUMENT");
+            assert_eq!(error["details"]["reason"], "empty_title");
+        }
+    }
+
+    #[test]
+    fn eighty_unicode_scalars_are_allowed_and_eighty_one_are_not() {
+        let allowed = "汉".repeat(MAX_TITLE_CHARS);
+        assert_eq!(normalise_title(&allowed).unwrap(), allowed);
+
+        let too_long = "汉".repeat(MAX_TITLE_CHARS + 1);
+        let error = normalise_title(&too_long).unwrap_err();
+        assert_eq!(error["code"], "INVALID_ARGUMENT");
+        assert_eq!(error["details"]["reason"], "title_too_long");
+        assert_eq!(error["details"]["max"], MAX_TITLE_CHARS);
+        assert_eq!(error["details"]["actual"], MAX_TITLE_CHARS + 1);
+    }
+
+    #[test]
+    fn length_counts_scalars_not_bytes() {
+        // 80 个汉字是 240 字节，按字节算会被误判成超长。
+        let mixed = "汉".repeat(40) + &"a".repeat(40);
+        assert_eq!(mixed.len(), 160);
+        assert!(normalise_title(&mixed).is_ok());
+    }
+}

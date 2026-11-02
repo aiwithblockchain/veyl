@@ -76,6 +76,8 @@ pre {
 .app {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr) 296px;
+  /* Grid 子项默认 min-height:auto，长对话会把整行撑高、把输入框顶出可视区。 */
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
 }
@@ -88,6 +90,7 @@ pre {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   background: var(--bg);
   border-left: 1px solid var(--border);
   border-right: 1px solid var(--border);

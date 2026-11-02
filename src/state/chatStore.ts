@@ -66,6 +66,8 @@ export interface Session {
   status: { text: string; phase: AiStatusPhase } | null;
   activeRequestId: string | null;
   requesting: boolean;
+  /** 消息是否已从本地库加载过；DB 里恢复出来的会话首次选中时才加载。 */
+  historyLoaded: boolean;
 }
 
 export interface ChatState {
@@ -81,7 +83,15 @@ export type ChatAction =
   | { type: "request_failed"; message: string }
   | { type: "agent_event"; event: import("../agent/protocol").AgentEvent }
   | { type: "approval_decision"; approvalId: string; decision: ApprovalDecision; scope: ApprovalScope }
-  | { type: "cancel_request" };
+  | { type: "cancel_request" }
+  | { type: "hydrate_history"; history: import("../agent/bridge").ChatHistory }
+  | {
+      type: "session_messages_loaded";
+      sessionId: string;
+      messages: import("../agent/bridge").StoredChatMessage[];
+    }
+  | { type: "session_renamed"; sessionId: string; title: string }
+  | { type: "session_removed"; sessionId: string };
 
 let idSeq = 0;
 export function nextId(prefix: string): string {
@@ -101,6 +111,7 @@ export function createSession(now = Date.now()): Session {
     status: null,
     activeRequestId: null,
     requesting: false,
+    historyLoaded: true,
   };
 }
 
@@ -205,6 +216,40 @@ function closeOpenThinking(items: TimelineItem[]): TimelineItem[] {
     return [...items.slice(0, -1), { ...last, complete: true }];
   }
   return items;
+}
+
+function parseTime(iso: string): number {
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+/** 本地库只存 role + content，恢复成消息流：assistant 的正文包成一条文本块。 */
+export function messagesFromStored(
+  stored: import("../agent/bridge").StoredChatMessage[],
+): ChatMessage[] {
+  return stored.flatMap((message): ChatMessage[] => {
+    const at = parseTime(message.created_at);
+    const id = `db_${message.id}`;
+
+    if (message.role === "user") {
+      return [{ id, role: "user", text: message.content, at }];
+    }
+    if (message.role === "assistant") {
+      return [
+        {
+          id,
+          role: "assistant",
+          requestId: "",
+          items: message.content
+            ? [{ kind: "text", id: `${id}_t`, content: message.content }]
+            : [],
+          streaming: false,
+          at,
+        },
+      ];
+    }
+    return [{ id, role: "system", level: "info", text: message.content, at }];
+  });
 }
 
 export function titleFromText(text: string): string {
@@ -493,6 +538,81 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...session,
         status: { text: "正在停止", phase: "thinking" },
       }));
+
+    case "hydrate_history": {
+      const { history } = action;
+      // 空库：保持现在的「一个新建空会话」，不报错。
+      if (history.sessions.length === 0) return state;
+      // 已经有内容或有请求在跑：不拿历史覆盖，避免打断正在进行的对话。
+      const busy = state.sessions.some(
+        (session) => session.activeRequestId !== null || session.messages.length > 0,
+      );
+      if (busy) return state;
+
+      const sessions: Session[] = history.sessions.map((summary) => ({
+        id: summary.id,
+        title: summary.title || "未命名会话",
+        createdAt: parseTime(summary.created_at),
+        updatedAt: parseTime(summary.created_at),
+        messages: [],
+        toolCalls: {},
+        approvals: {},
+        status: null,
+        activeRequestId: null,
+        requesting: false,
+        historyLoaded: false,
+      }));
+
+      const active =
+        (history.activeSessionId
+          ? sessions.find((session) => session.id === history.activeSessionId)
+          : undefined) ?? sessions[0];
+
+      const messages = messagesFromStored(history.messages);
+      active.messages = messages;
+      active.historyLoaded = true;
+      const last = messages[messages.length - 1];
+      if (last) active.updatedAt = Math.max(active.updatedAt, last.at);
+
+      return { sessions, activeSessionId: active.id };
+    }
+
+    case "session_messages_loaded":
+      return patchSession(state, action.sessionId, (session) => {
+        // 加载期间用户已经发过消息：以现场为准，只标记已加载。
+        if (session.historyLoaded || session.messages.length > 0) {
+          return { ...session, historyLoaded: true };
+        }
+        const messages = messagesFromStored(action.messages);
+        const last = messages[messages.length - 1];
+        return {
+          ...session,
+          messages,
+          historyLoaded: true,
+          updatedAt: last ? Math.max(session.updatedAt, last.at) : session.updatedAt,
+        };
+      });
+
+    case "session_renamed":
+      return patchSession(state, action.sessionId, (session) => ({
+        ...session,
+        title: action.title,
+      }));
+
+    case "session_removed": {
+      const remaining = state.sessions.filter((session) => session.id !== action.sessionId);
+      if (remaining.length === 0) {
+        const fresh = createSession();
+        return { sessions: [fresh], activeSessionId: fresh.id };
+      }
+      return {
+        sessions: remaining,
+        activeSessionId:
+          state.activeSessionId === action.sessionId
+            ? remaining[0].id
+            : state.activeSessionId,
+      };
+    }
 
     default:
       return state;

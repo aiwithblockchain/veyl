@@ -13,6 +13,33 @@ export interface DeepSeekKeyState {
   validation: "ok" | "invalid" | "unverified";
 }
 
+/** `chat_history` 的返回：DB 里的会话摘要与消息（时间为 ISO 8601）。 */
+export interface StoredSessionSummary {
+  id: string;
+  title: string;
+  created_at: string;
+}
+
+export interface StoredChatMessage {
+  id: string;
+  role: string;
+  content: string;
+  created_at: string;
+}
+
+export interface ChatHistory {
+  sessions: StoredSessionSummary[];
+  activeSessionId: string | null;
+  messages: StoredChatMessage[];
+}
+
+/** `rename_session` 的返回；标题以返回值给的内容为准，不做本地推测。 */
+export interface RenamedSession {
+  id: string;
+  title: string;
+  createdAt: number;
+}
+
 export interface AgentBridge {
   readonly mode: BridgeMode;
   /** 订阅全部事件（AI 会话 + 应用事件）；返回取消订阅函数。 */
@@ -28,6 +55,10 @@ export interface AgentBridge {
   getRuntimeSnapshot(): Promise<RuntimeSnapshot | null>;
   /** 无 AI 模式的删除配置入口（契约 §5 `profile_delete`）。 */
   deleteProfile(profileId: string): Promise<void>;
+  /** 重启后恢复会话：不传 sessionId 时取最近一个会话。 */
+  getChatHistory(sessionId?: string): Promise<ChatHistory>;
+  /** 重命名会话；标题的 trim 与长度校验都由后端做。 */
+  renameSession(sessionId: string, title: string): Promise<RenamedSession>;
   /** 读取 Key 的配置状态（只返回打码值，永不返回明文）。 */
   getDeepSeekKey(): Promise<DeepSeekKeyState>;
   /** 保存 Key；只进本机加密存储。 */

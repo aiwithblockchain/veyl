@@ -1,6 +1,6 @@
 # 契约：Runtime Manager
 
-> 契约版本：`1.0.6`
+> 契约版本：`1.0.7`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 冻结前评审：PM / Alice / Bob
 > 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5
@@ -100,7 +100,7 @@ type HealthCheckName =
   | "traffic";
 
 type HealthSnapshot = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   process: boolean;
   clash_api: boolean;
   data_plane: boolean;
@@ -126,7 +126,7 @@ type TrafficStats = {
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
@@ -154,7 +154,7 @@ type RuntimeSnapshot = {
 
 ```ts
 type AivpnError = {
-  contract_version: "1.0.6";
+  contract_version: "1.0.7";
   code: AivpnErrorCode;
   message: string;        // 面向用户，可本地化
   retryable: boolean;
@@ -425,7 +425,7 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 
 ```json
 {
-  "contract_version": "1.0.6",
+  "contract_version": "1.0.7",
   "state": "running",
   "pid": 1234,
   "upstream_version": "1.14.4",
@@ -513,6 +513,13 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 ---
 
 ## 12. 变更记录
+
+### 1.0.7（2026-11-02）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | `contract_version` 升到 `1.0.7` | 元数据 |
+| 2 | 无接口变更；与 events / tools / catalog 保持版本一致 | 同步 |
 
 ### 1.0.6（2026-11-02）
 

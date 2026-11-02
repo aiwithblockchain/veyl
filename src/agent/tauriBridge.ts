@@ -1,6 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AgentBridge, DeepSeekKeyState } from "./bridge";
+import type {
+  AgentBridge,
+  ChatHistory,
+  DeepSeekKeyState,
+  RenamedSession,
+  StoredChatMessage,
+  StoredSessionSummary,
+} from "./bridge";
 import { toBridgeError } from "./errors";
 import { createListenerManager } from "./listeners";
 import { AGENT_EVENTS, APP_EVENT_NAMES, AI_EVENT_NAMES } from "./protocol";
@@ -84,6 +91,38 @@ export class TauriAgentBridge implements AgentBridge {
 
   async deleteProfile(profileId: string): Promise<void> {
     await call("profile_delete", { profileId });
+  }
+
+  async getChatHistory(sessionId?: string): Promise<ChatHistory> {
+    try {
+      const raw = await call<{
+        sessions: StoredSessionSummary[];
+        active_session_id: string | null;
+        messages: StoredChatMessage[];
+      }>("chat_history", sessionId ? { sessionId } : undefined);
+
+      return {
+        sessions: raw.sessions ?? [],
+        activeSessionId: raw.active_session_id ?? null,
+        messages: raw.messages ?? [],
+      };
+    } catch {
+      // 读历史失败不该拦住应用启动，降级成「没有历史」。
+      return { sessions: [], activeSessionId: null, messages: [] };
+    }
+  }
+
+  async renameSession(sessionId: string, title: string): Promise<RenamedSession> {
+    const raw = await call<{ id: string; title: string; created_at: string }>("rename_session", {
+      sessionId,
+      title,
+    });
+    const parsed = Date.parse(raw.created_at);
+    return {
+      id: raw.id,
+      title: raw.title,
+      createdAt: Number.isFinite(parsed) ? parsed : Date.now(),
+    };
   }
 
   async getDeepSeekKey(): Promise<DeepSeekKeyState> {
