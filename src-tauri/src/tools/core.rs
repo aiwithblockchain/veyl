@@ -37,26 +37,70 @@ impl Tool for CoreListVersionsTool {
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match self.services.core_list_versions().await {
-            Ok(data) => {
-                let installed = data
-                    .get("installed")
-                    .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or(0);
-                let available = data
-                    .get("available")
-                    .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or(0);
-                ToolOutcome::ok(
-                    format!("已安装 {installed} 个版本，可安装 {available} 个。"),
-                    data,
-                )
-            }
+            Ok(data) => ToolOutcome::ok(summarise_versions(&data), data),
             Err(error) => ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string())),
         };
         envelope::finish(ctx, "CoreListVersions", outcome)
     }
+}
+
+
+/// 把版本清单渲染成模型可直接引用的形式。
+/// 只写计数的话，模型只能猜版本号，紧接着的 CoreInstall 必然 NOT_FOUND。
+fn summarise_versions(data: &Value) -> String {
+    let installed: Vec<&str> = data
+        .get("installed")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("version").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let available: Vec<(&str, &str)> = data
+        .get("available")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let version = item.get("version").and_then(Value::as_str)?;
+                    let channel = item
+                        .get("channel")
+                        .and_then(Value::as_str)
+                        .unwrap_or("stable");
+                    Some((version, channel))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut lines = Vec::new();
+    if installed.is_empty() {
+        lines.push("已安装：无".to_string());
+    } else {
+        lines.push(format!("已安装：{}", installed.join("、")));
+    }
+
+    if available.is_empty() {
+        lines.push("可安装：无（内置清单里没有当前平台可用的版本）".to_string());
+        if !installed.is_empty() {
+            lines.push("已安装的版本可以直接调用 RuntimeStart。".to_string());
+        }
+    } else {
+        lines.push("可安装：".to_string());
+        for (version, channel) in &available {
+            lines.push(format!("- {version} ({channel})"));
+        }
+        lines.push(format!(
+            "使用版本号调用 CoreInstall，例如 CoreInstall(\"{}\")。",
+            available[0].0
+        ));
+    }
+
+    lines.join("\n")
 }
 
 pub struct CoreInstallTool {
@@ -127,5 +171,52 @@ impl Tool for CoreInstallTool {
             Err(error) => ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string())),
         };
         envelope::finish(ctx, "CoreInstall", outcome)
+    }
+}
+
+#[cfg(test)]
+mod version_summary_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn lists_versions_instead_of_counting_them() {
+        let data = json!({
+            "active_version": null,
+            "installed": [],
+            "available": [
+                { "version": "1.14.4", "channel": "stable" },
+                { "version": "1.13.0", "channel": "stable" }
+            ]
+        });
+
+        let text = summarise_versions(&data);
+        assert!(text.contains("已安装：无"), "{text}");
+        assert!(text.contains("- 1.14.4 (stable)"), "{text}");
+        assert!(text.contains("- 1.13.0 (stable)"), "{text}");
+        // 引导语里必须出现模型下一步要用的标识符。
+        assert!(text.contains("CoreInstall(\"1.14.4\")"), "{text}");
+    }
+
+    #[test]
+    fn shows_installed_versions_when_there_are_any() {
+        let data = json!({
+            "installed": [{ "version": "1.14.4", "state": "active" }],
+            "available": [{ "version": "1.14.4", "channel": "stable" }]
+        });
+        let text = summarise_versions(&data);
+        assert!(text.contains("已安装：1.14.4"), "{text}");
+        assert!(text.contains("CoreInstall(\"1.14.4\")"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_catalog_still_says_what_to_do_next() {
+        let data = json!({
+            "installed": [{ "version": "1.14.4", "state": "active" }],
+            "available": []
+        });
+        let text = summarise_versions(&data);
+        assert!(text.contains("可安装：无"), "{text}");
+        assert!(text.contains("RuntimeStart"), "{text}");
     }
 }

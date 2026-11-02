@@ -145,18 +145,46 @@ impl Tool for ProfileListTool {
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match self.services.profile_list().await {
-            Ok(data) => {
-                let count = data
-                    .get("profiles")
-                    .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or(0);
-                ToolOutcome::ok(format!("本地有 {count} 个配置。"), data)
-            }
+            Ok(data) => ToolOutcome::ok(summarise_profiles(&data), data),
             Err(error) => ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string())),
         };
         envelope::finish(ctx, "ProfileList", outcome)
     }
+}
+
+
+/// 配置列表同样要给出可引用的 id；只报数量会让模型接着猜 profile_id。
+fn summarise_profiles(data: &Value) -> String {
+    let profiles: Vec<&Value> = data
+        .get("profiles")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().collect())
+        .unwrap_or_default();
+
+    if profiles.is_empty() {
+        return "本地还没有配置。可以先用 CatalogSearch 找节点，再 ProfileImport 导入。".to_string();
+    }
+
+    let mut lines = vec![format!("本地有 {} 个配置：", profiles.len())];
+    for profile in &profiles {
+        let id = profile.get("id").and_then(Value::as_str).unwrap_or("-");
+        let name = profile
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("(未命名)");
+        let protocol = profile
+            .get("protocol")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let active = profile
+            .get("is_active")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let suffix = if active { " | 使用中" } else { "" };
+        lines.push(format!("- {id} | {name} | {protocol}{suffix}"));
+    }
+    lines.push("使用配置 id 调用 VpnConnect 连接，或 ProfileDelete 删除。".to_string());
+    lines.join("\n")
 }
 
 pub struct ProfileImportTool {
@@ -337,5 +365,35 @@ mod summarise_tests {
     fn an_empty_result_says_so() {
         let text = summarise_nodes(&json!({ "nodes": [] }));
         assert!(text.contains("没有找到匹配节点"));
+    }
+}
+
+#[cfg(test)]
+mod profile_summary_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn lists_profile_ids_and_marks_the_active_one() {
+        let data = json!({
+            "active_profile_id": "prf_1",
+            "profiles": [
+                { "id": "prf_1", "name": "东京 01", "protocol": "vless_reality", "is_active": true },
+                { "id": "prf_2", "name": "新加坡 01", "protocol": "hysteria2", "is_active": false }
+            ]
+        });
+
+        let text = summarise_profiles(&data);
+        assert!(text.contains("prf_1"), "{text}");
+        assert!(text.contains("prf_2"), "{text}");
+        assert!(text.contains("使用中"), "{text}");
+        assert!(text.contains("VpnConnect"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_profile_list_explains_the_next_step() {
+        let text = summarise_profiles(&json!({ "profiles": [] }));
+        assert!(text.contains("本地还没有配置"), "{text}");
+        assert!(text.contains("CatalogSearch"), "{text}");
     }
 }

@@ -143,6 +143,27 @@ lifecycle_tool!(
     None
 );
 
+
+/// 日志类工具只报行数没有意义——模型看不到内容就没法诊断。
+fn format_logs(data: &Value) -> String {
+    let lines: Vec<&str> = data
+        .get("lines")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+
+    if lines.is_empty() {
+        return "运行时日志为空（还没有启动过运行时，或日志文件已被清空）。".to_string();
+    }
+
+    let mut text = format!("最近 {} 行运行时日志：\n", lines.len());
+    for line in &lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text
+}
+
 pub struct RuntimeLogsTool {
     services: Arc<dyn VpnToolServices>,
 }
@@ -190,16 +211,30 @@ impl Tool for RuntimeLogsTool {
             .map(str::to_string);
 
         let outcome = match self.services.runtime_logs(lines, level).await {
-            Ok(data) => {
-                let count = data
-                    .get("lines")
-                    .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or(0);
-                ToolOutcome::ok(format!("读取了 {count} 行日志。"), data)
-            }
+            Ok(data) => ToolOutcome::ok(format_logs(&data), data),
             Err(error) => failure(error),
         };
         envelope::finish(ctx, "RuntimeLogs", outcome)
+    }
+}
+
+#[cfg(test)]
+mod log_format_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn includes_the_actual_lines() {
+        let data = json!({ "lines": ["sing-box started", "inbound mixed started"] });
+        let text = format_logs(&data);
+        assert!(text.contains("sing-box started"), "{text}");
+        assert!(text.contains("inbound mixed started"), "{text}");
+        assert!(text.contains("最近 2 行"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_log_says_so() {
+        let text = format_logs(&json!({ "lines": [] }));
+        assert!(text.contains("日志为空"), "{text}");
     }
 }

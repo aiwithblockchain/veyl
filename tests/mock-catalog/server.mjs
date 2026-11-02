@@ -48,7 +48,7 @@ function envelope(res, code, data, headers = {}) {
     res,
     code,
     {
-      contract_version: "1.0.7",
+      contract_version: "1.0.8",
       ok: true,
       request_id: `mock_${requestSeq}`,
       data,
@@ -60,7 +60,7 @@ function envelope(res, code, data, headers = {}) {
 function failEnvelope(res, code, errorCode, message, details = null) {
   requestSeq += 1;
   return send(res, code, {
-    contract_version: "1.0.7",
+    contract_version: "1.0.8",
     ok: false,
     request_id: `mock_${requestSeq}`,
     error: { code: errorCode, message, retryable: false, details },

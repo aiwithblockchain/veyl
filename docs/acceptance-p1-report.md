@@ -170,6 +170,15 @@ session_mvz4tzg9_1  18:54  4 msgs（user/assistant 成对）
   - 系统消息（`msg--system`，含错误）不提供
 - **待确认**：TweetPilot 的复制按钮具体交互（hover 显示 / 常驻图标 / tooltip 文案）需 Alice 参考原项目，测试人员无从判断视觉一致性。
 
+### N-03 支持 Shadowsocks 协议（**新增需求，用户已决定纳入**）
+
+- **提出**：2026-11-02，用户希望用现成的真实服务器做连通性验证，提供 `/Users/wesley/ai/openmesh-cli/seeds.json`（2 个 shadowsocks 节点，`aes-256-gcm`）。
+- **现状**：`NodeProtocol` 只枚举 `vless_reality` / `hysteria2`（`catalog/types.rs:9-14`），`config/builder.rs` 只构建这两种出站，契约未定义 shadowsocks。
+- **底层不是障碍（已实测）**：sing-box 1.14.4 对三种协议都接受 —— 分别用带 `reality` 的 vless、`hysteria2`、`shadowsocks(aes-256-gcm)` 的配置跑 `sing-box check`，**三次均 exit 0**。构建标签含 `with_quic`（Hysteria2 依赖）与 `with_utls`（REALITY 指纹依赖），`generate reality-keypair` 可用。
+- **需改动**：`NodeProtocol` 枚举、`config/builder.rs` 出站构建、`docs/contracts/catalog.md` + `tools.md` 的协议枚举与节点字段、契约版本号。
+- **收益**：用户现有服务器可直接用于真实链路验证（出口 IP、延迟、真实 sing-box 启动），比纯 mock 更接近 P1 §9 的验收要求。
+- **安全约束**：seeds.json 含真实密码。**不得复制进仓库、不得提交、不得出现在日志或报告中**。导入路径必须走 `secrets.enc` 或运行时注入，不能硬编码。
+
 ### N-01 会话标题可编辑（**新增需求，已实现并验证**）
 
 - **提出**：2026-11-02，用户提出「应该允许修改历史对话的标题」。

@@ -185,6 +185,61 @@ fn svc_error(code: impl std::fmt::Display, message: impl std::fmt::Display) -> a
     anyhow::anyhow!("{code}: {message}")
 }
 
+
+/// 首次注册的串行闸门。
+///
+/// 并发调用 `ensure` 时只有一个会真正执行注册，其余等它结束后直接返回；
+/// 注册失败则不置位，下一次调用可以重试。
+pub struct RegistrationGate {
+    ready: AtomicBool,
+    lock: tokio::sync::Mutex<()>,
+}
+
+impl Default for RegistrationGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RegistrationGate {
+    pub fn new() -> Self {
+        Self {
+            ready: AtomicBool::new(false),
+            lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+    }
+
+    /// 让下一次 `ensure` 重新执行注册（401 后调用）。
+    pub fn reset(&self) {
+        self.ready.store(false, Ordering::SeqCst);
+    }
+
+    pub async fn ensure<F, Fut, E>(&self, register: F) -> Result<(), E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), E>>,
+    {
+        if self.is_ready() {
+            return Ok(());
+        }
+
+        let _guard = self.lock.lock().await;
+        if self.is_ready() {
+            return Ok(());
+        }
+
+        let result = register().await;
+        if result.is_ok() {
+            self.ready.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+}
+
 pub struct WiredServices {
     store: Arc<Store>,
     manager: Arc<RuntimeManager>,
@@ -192,10 +247,8 @@ pub struct WiredServices {
     catalog: Arc<CatalogClient>,
     installer: Installer,
     data_dir: PathBuf,
-    /// 设备 token 是否已就绪；避免每次目录调用都读一次凭据文件。
-    device_token_ready: AtomicBool,
-    /// 注册/换 token 串行化，避免并发重复注册。
-    device_register: tokio::sync::Mutex<()>,
+    /// 首次注册的串行闸门：并发调用只会真正注册一次。
+    device_gate: RegistrationGate,
 }
 
 impl WiredServices {
@@ -214,8 +267,7 @@ impl WiredServices {
             proxy,
             catalog,
             data_dir,
-            device_token_ready: AtomicBool::new(false),
-            device_register: tokio::sync::Mutex::new(()),
+            device_gate: RegistrationGate::new(),
         }
     }
 
@@ -233,37 +285,29 @@ impl WiredServices {
 
 
     /// 首次目录调用前确保有设备 token：先读本地，没有就注册一次。
-    /// 注册失败不阻塞应用启动——只是这次目录查询会失败并给出可读错误。
+    /// `RegistrationGate` 保证并发调用只注册一次；注册失败不阻塞其它功能。
     async fn ensure_device_token(&self) -> anyhow::Result<()> {
-        if self.device_token_ready.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-
-        let _guard = self.device_register.lock().await;
-        if self.device_token_ready.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-
-        match crate::secrets::get_device_token() {
-            Ok(Some(token)) => {
-                self.catalog.set_token(Some(token));
-                self.device_token_ready.store(true, Ordering::SeqCst);
-                return Ok(());
-            }
-            Ok(None) => {}
-            Err(error) => log::warn!("读取本地设备 token 失败：{error}"),
-        }
-
-        self.register_device().await
+        self.device_gate
+            .ensure(|| async {
+                match crate::secrets::get_device_token() {
+                    Ok(Some(token)) => {
+                        self.catalog.set_token(Some(token));
+                        return Ok(());
+                    }
+                    Ok(None) => {}
+                    Err(error) => log::warn!("读取本地设备 token 失败：{error}"),
+                }
+                self.register_device().await
+            })
+            .await
     }
 
-    /// 401 之后：清掉本地 token，重新注册一次（只在调用方重试一次，不会死循环）。
+    /// 401 之后：清掉本地 token，重新注册一次（只重试一次，不会死循环）。
     async fn reauthenticate(&self) -> anyhow::Result<()> {
-        let _guard = self.device_register.lock().await;
+        self.device_gate.reset();
         let _ = crate::secrets::delete_device_token();
         self.catalog.set_token(None);
-        self.device_token_ready.store(false, Ordering::SeqCst);
-        self.register_device().await
+        self.ensure_device_token().await
     }
 
     async fn register_device(&self) -> anyhow::Result<()> {
@@ -283,7 +327,6 @@ impl WiredServices {
             log::warn!("设备 token 写本地失败（本次运行仍可用）：{error}");
         }
         self.catalog.set_token(Some(response.device_token.clone()));
-        self.device_token_ready.store(true, Ordering::SeqCst);
         log::info!("目录服务设备已注册：{}", response.device_id);
         Ok(())
     }
@@ -423,7 +466,13 @@ impl VpnToolServices for WiredServices {
             .releases
             .iter()
             .filter(|release| release.platform == platform && release.arch == arch && !release.yanked)
-            .map(|release| json!({ "version": release.upstream_version, "license": release.license }))
+            .map(|release| {
+                json!({
+                    "version": release.upstream_version,
+                    "channel": manifest.channel,
+                    "license": release.license,
+                })
+            })
             .collect();
         let versions = crate::store::runtime::list_versions(&self.store.conn())
             .map_err(|e| svc_error(e.code(), e))?;
@@ -725,5 +774,71 @@ impl WiredServices {
         self.proxy
             .recover_stale()
             .map_err(|e| svc_error("INTERNAL", e))
+    }
+}
+
+#[cfg(test)]
+mod registration_gate_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn concurrent_callers_register_only_once() {
+        let gate = Arc::new(RegistrationGate::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let gate = Arc::clone(&gate);
+            let calls = Arc::clone(&calls);
+            handles.push(tokio::spawn(async move {
+                gate.ensure(|| async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    Ok::<(), String>(())
+                })
+                .await
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "并发只应注册一次");
+        assert!(gate.is_ready());
+    }
+
+    #[tokio::test]
+    async fn a_failed_registration_leaves_the_gate_open_for_retry() {
+        let gate = RegistrationGate::new();
+        let attempts = AtomicUsize::new(0);
+
+        let first = gate
+            .ensure(|| async {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err::<(), String>("boom".into())
+            })
+            .await;
+        assert!(first.is_err());
+        assert!(!gate.is_ready());
+
+        let second = gate
+            .ensure(|| async {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), String>(())
+            })
+            .await;
+        assert!(second.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(gate.is_ready());
+    }
+
+    #[tokio::test]
+    async fn reset_allows_registering_again() {
+        let gate = RegistrationGate::new();
+        gate.ensure(|| async { Ok::<(), String>(()) }).await.unwrap();
+        gate.reset();
+        assert!(!gate.is_ready());
     }
 }
