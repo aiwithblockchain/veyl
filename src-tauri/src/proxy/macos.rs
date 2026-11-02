@@ -51,6 +51,14 @@ impl Kind {
         }
     }
 
+    fn label(self) -> &'static str {
+        match self {
+            Kind::Http => "HTTP 代理",
+            Kind::Https => "HTTPS 代理",
+            Kind::Socks => "SOCKS 代理",
+        }
+    }
+
     fn state_arg(self) -> &'static str {
         match self {
             Kind::Http => "-setwebproxystate",
@@ -153,19 +161,68 @@ fn read(service: &str, kind: Kind) -> RuntimeResult<Setting> {
     Ok(setting)
 }
 
-fn write(service: &str, kind: Kind, server: &str, port: u16) -> RuntimeResult<()> {
+/// 只写 server/port，不动开关。
+fn set_endpoint(service: &str, kind: Kind, server: &str, port: u16) -> RuntimeResult<()> {
     run(&[kind.set_arg(), service, server, &port.to_string()])?;
-    run(&[kind.state_arg(), service, "on"])?;
     Ok(())
 }
 
-fn restore_one(service: &str, kind: Kind, setting: &Setting) -> RuntimeResult<()> {
-    if setting.enabled && !setting.server.is_empty() && setting.port != 0 {
-        write(service, kind, &setting.server, setting.port)
-    } else {
-        run(&[kind.state_arg(), service, "off"])?;
-        Ok(())
+fn set_state(service: &str, kind: Kind, on: bool) -> RuntimeResult<()> {
+    run(&[kind.state_arg(), service, if on { "on" } else { "off" }])?;
+    Ok(())
+}
+
+fn write(service: &str, kind: Kind, server: &str, port: u16) -> RuntimeResult<()> {
+    set_endpoint(service, kind, server, port)?;
+    set_state(service, kind, true)
+}
+
+/// 还原时要做的事：照备份逐项复现，不再按 `enabled` 分两类。
+/// - `endpoint = Some(..)`：备份有地址，原样写回
+/// - `clear`：备份既没地址也没开启（用户从没配过），把我们写进去的地址清掉
+/// - `incomplete`：备份 enabled=true 但没有地址，捕获状态不完整——不伪造地址、
+///   也不静默改成 off，只按原状态保持开启并告警
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RestorePlan {
+    endpoint: Option<(String, u16)>,
+    enable: bool,
+    clear: bool,
+    incomplete: bool,
+}
+
+fn plan_restore(setting: &Setting) -> RestorePlan {
+    let has_endpoint = !setting.server.is_empty() && setting.port != 0;
+    RestorePlan {
+        endpoint: if has_endpoint {
+            Some((setting.server.clone(), setting.port))
+        } else {
+            None
+        },
+        enable: setting.enabled,
+        clear: !has_endpoint && !setting.enabled,
+        incomplete: !has_endpoint && setting.enabled,
     }
+}
+
+fn restore_one(service: &str, kind: Kind, setting: &Setting) -> RuntimeResult<()> {
+    let plan = plan_restore(setting);
+
+    if let Some((server, port)) = &plan.endpoint {
+        set_endpoint(service, kind, server, *port)?;
+    } else {
+        // 备份里没有地址：清空，不要把我们写进去的端口留在用户机器上
+        //（否则断开后代理还指着一个已关闭的端口，整机会断网）。
+        set_endpoint(service, kind, "", 0)?;
+        if plan.incomplete {
+            log::warn!(
+                "{service} 的 {} 备份状态不完整（Enabled: Yes 但无地址），已按原状态保持开启；该服务的代理仍处于「开启但无地址」状态，如不需要请在系统设置中关闭",
+                kind.label()
+            );
+        }
+    }
+
+    // 必须在写地址之后：`-setwebproxy` 会顺带把开关打开。
+    set_state(service, kind, plan.enable)
 }
 
 fn run(args: &[&str]) -> RuntimeResult<String> {
@@ -201,6 +258,66 @@ fn explain(command: &str, detail: &str) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn setting(enabled: bool, server: &str, port: u16) -> Setting {
+        Setting {
+            enabled,
+            server: server.to_string(),
+            port,
+        }
+    }
+
+    #[test]
+    fn a_disabled_backup_restores_its_endpoint_and_stays_off() {
+        assert_eq!(
+            plan_restore(&setting(false, "127.0.0.1", 2080)),
+            RestorePlan {
+                endpoint: Some(("127.0.0.1".into(), 2080)),
+                enable: false,
+                clear: false,
+                incomplete: false,
+            }
+        );
+    }
+
+    #[test]
+    fn an_enabled_backup_restores_its_endpoint_and_stays_on() {
+        assert_eq!(
+            plan_restore(&setting(true, "10.0.0.2", 8080)),
+            RestorePlan {
+                endpoint: Some(("10.0.0.2".into(), 8080)),
+                enable: true,
+                clear: false,
+                incomplete: false,
+            }
+        );
+    }
+
+    #[test]
+    fn an_enabled_backup_without_an_endpoint_is_kept_on_and_flagged() {
+        assert_eq!(
+            plan_restore(&setting(true, "", 0)),
+            RestorePlan {
+                endpoint: None,
+                enable: true,
+                clear: false,
+                incomplete: true,
+            }
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_backup_clears_the_endpoint() {
+        assert_eq!(
+            plan_restore(&setting(false, "", 0)),
+            RestorePlan {
+                endpoint: None,
+                enable: false,
+                clear: true,
+                incomplete: false,
+            }
+        );
+    }
 
     #[test]
     fn parses_a_proxy_block() {
