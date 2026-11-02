@@ -421,11 +421,17 @@ type LlmProvider = {
 ### 3.14 `llm_provider_delete { providerId }` → `{ ok: true }`
 
 - **同一个操作里删两样**：settings 里的条目 + `secrets.enc` 的 `provider:<provider_id>`。不允许留下孤儿密钥（需求 §5.8）。
-- **不能删除当前激活的 provider**：`PRECONDITION_FAILED`，`details.reason = "active_provider"`。先切到别的再删，否则用户会在下一次对话时才发现没有可用 Key。
 - **不能删除内置 provider**：`PRECONDITION_FAILED`，`details.reason = "builtin_provider"`。内置的 `deepseek` 是基础模式的载体，删了基础模式就没有落点。用户可以改它的 Key 与模型，但删不掉。
 - 不存在 → `NOT_FOUND`。**这里有意不做幂等**：与 `profile_delete` 不同，provider 是用户点名删除的对象，报"不存在"能暴露 UI 状态不同步；静默成功会掩盖问题。
 
-错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`active_provider` / `builtin_provider`）、`INTERNAL`。
+**删除当前激活的 provider 是允许的**（2026-11-02 修订）：
+
+- 删除后 `settings.llm_active_provider` **置空**，返回值仍是 `{ ok: true }`。
+- **不自动挑选下一个**。自动挑一个属于「静默切换」——和「节点连不上不得悄悄回退默认包」是同一条原则：不静默改变请求去向。
+- 删空后由 UI 提示「没有当前 provider，请选择一个」，引导用户显式调 `llm_provider_activate`。
+- 此时若有进行中的对话，**不打断**；下一次请求会因为找不到 active provider 返回 `PRECONDITION_FAILED`，`details.reason = "no_active_provider"`。
+
+错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`builtin_provider`）、`INTERNAL`。
 
 ### 3.15 `llm_provider_activate { providerId }` → `{ active_provider_id: string }`
 
@@ -474,7 +480,16 @@ type LlmTestResult = {
 - 草稿校验与 `llm_provider_save` **共用 §3.12 的同一套规则**（含 base_url 拒绝 userinfo、http 仅限回环）。
 - 草稿的 Key 只用于本次请求，**不写盘、不进日志**。
 - **只有入参非法才返回 `Err`**；端点不可达、Key 错误、模型不存在、超时一律 `ok: false` + `error`。测试连接失败是它的正常输出，不该抛成异常让调用方分流。
-- `error` 必须**脱敏**：上游报错原文里经常带着 Key（有的服务在 401 响应里回显），返回前要剔除该 provider 的实际 Key 值，以及任何形如 `sk-[A-Za-z0-9_-]{8,}` 的串。日志同理。
+- `error` 必须**脱敏**。上游报错原文里经常带着 Key（有的服务在 401 响应里回显），也可能带上完整请求信息。规则：
+
+  | 要求 | 说明 |
+  |---|---|
+  | 剔除该 provider 的**实际 Key 值** | 精确串替换，不是模糊匹配 |
+  | 任何形如 `sk-[A-Za-z0-9_-]{8,}` 的片段**一律替换** | 覆盖"不是本 provider 的 Key 但也是 Key"的情况 |
+  | 替换而不是删除整段 | 把 Key 换成 `<redacted>`，保留其余信息，用户才看得懂错误 |
+  | 同样适用于日志与 `detail` 字段 | 「不显示在界面上」不等于"不落到磁盘" |
+
+  `describe_http_error` 这类把上游响应体转成文案的函数是**主要泄漏点**——响应体的 `error.message` 常常把 `Authorization` 头或请求体回显出来。它必须走同一套脱敏，不能因为「只是拼个字符串」就跳过。
 
 **测试连接必须走与真实对话完全相同的装配路径**（技术设计 §12.4）——用另一套代码测出来的「通」，不能代表对话能通。
 
@@ -562,3 +577,5 @@ type LlmTestResult = {
 | 19 | 「有 active 但连不上不回退」由行为描述升级为不变量，并给出可执行的测试断言 | 约束强化 | PM 要求写成不变量 |
 | 20 | `llm_provider_test` 去掉嵌套 `draft`，参数平铺到顶层；新增 §1.1.1「不要用嵌套对象传参」 | 修正 | Tauri 只对顶层参数做 camelCase 转换，嵌套键不会转 |
 | 21 | `llm_provider_save` 明确「只保存、不改 active」，唯一例外是没有 active 时的第一个；切换只能走 `activate` | 不变量 | 不静默改变请求去向 |
+| 22 | `llm_provider_delete`：**允许删除当前激活项**，删后 active 置空、不自动挑下一个 | 语义修订 | 删除是显式操作；自动挑选属于静默切换 |
+| 23 | `llm_provider_test` 的 `error` 补脱敏细则（精确串 + `sk-` 片段 + 替换而非删除 + 同样适用日志） | 安全约束 | 上游响应体是主要泄漏点 |
