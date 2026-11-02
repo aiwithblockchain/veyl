@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "channel": "stable",
+  "generated_at": "2026-11-02T00:00:00Z",
+  "releases": [
+    {
+      "upstream_version": "1.14.4",
+      "platform": "darwin",
+      "arch": "arm64",
+      "artifact": {
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-darwin-arm64.tar.gz",
+        "sha256": "0d8c7f5ed5d587b0f1a5e9772a708ec3bfa4ac4c9329604b01d8d9c2ba406838",
+        "size": 29186204,
+        "format": "tar.gz"
+      },
+      "upstream_asset": "sing-box-1.14.4-darwin-arm64.tar.gz",
+      "source_url": "https://github.com/SagerNet/sing-box/tree/v1.14.4",
+      "license": "GPL-3.0-or-later",
+      "config_schema": { "min": 1, "max": 2 },
+      "breaking": false,
+      "yanked": false,
+      "published_at": "2026-10-30T00:00:00Z"
+    },
+    {
+      "upstream_version": "1.14.4",
+      "platform": "darwin",
+      "arch": "x86_64",
+      "artifact": {
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-darwin-amd64.tar.gz",
+        "sha256": "eae86b9b033bba50b7c44ab719e4bfac0aca05efd28483390ed3aa510f32db25",
+        "size": 31503132,
+        "format": "tar.gz"
+      },
+      "upstream_asset": "sing-box-1.14.4-darwin-amd64.tar.gz",
+      "source_url": "https://github.com/SagerNet/sing-box/tree/v1.14.4",
+      "license": "GPL-3.0-or-later",
+      "config_schema": { "min": 1, "max": 2 },
+      "breaking": false,
+      "yanked": false,
+      "published_at": "2026-10-30T00:00:00Z"
+    },
+    {
+      "upstream_version": "1.14.4",
+      "platform": "windows",
+      "arch": "x86_64",
+      "artifact": {
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip",
+        "sha256": "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df",
+        "size": 32891280,
+        "format": "zip"
+      },
+      "upstream_asset": "sing-box-1.14.4-windows-amd64.zip",
+      "source_url": "https://github.com/SagerNet/sing-box/tree/v1.14.4",
+      "license": "GPL-3.0-or-later",
+      "config_schema": { "min": 1, "max": 2 },
+      "breaking": false,
+      "yanked": false,
+      "published_at": "2026-10-30T00:00:00Z"
+    }
+  ]
+}

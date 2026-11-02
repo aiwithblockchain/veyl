@@ -66,20 +66,27 @@
 | **TC-SET-006** | E | FR-8.5 | 有配置与日志 | 1) 点清除本地数据；2) 选择保留 Key | 配置、日志、缓存被清除；Key 仍保留；会话历史按实现清除并提示 | P1 |
 | **TC-SET-007** | E | FR-8.5 | 同上 | 1) 清除时选择删除 Key | 需要二次确认；确认后 Keychain 条目消失 | P1 |
 
-### 4.1 `DeepseekSaveKey`：存下去，但可能验证不过
+### 4.1 `DeepseekSaveKey`：存下去了，但 Key 不一定能用
 
-契约 §4.15 的铁律是「**Key 先存下来，验证失败也返回 `ok: true`**」，靠 `verified` + `failure_reason` 表达真实结果。理由是反过来会诱导 Agent 反复重试、多次写钥匙串。
+契约 1.0.4 §4.15：`ok: true` 表示 **Key 已写入钥匙串**，能不能用由 `validation` 表达。反过来会诱导 Agent 反复重试、多次写钥匙串。
+
+| 字段 | 取值 |
+|---|---|
+| `saved` | 恒 `true`；`ok: false` **只**用于钥匙串写入失败 |
+| `validation` | `"ok"` / `"invalid"` / `"unverified"` |
+| `validation_detail` | `"insufficient_balance"` / `"network"` / `"timeout"` / `null` |
 
 | ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
 |---|---|---|---|---|---|---|
-| **TC-SET-008** | I + E | FR-8.1、contracts/tools §4.15 | mock LLM 对含 `invalid` 的 Key 返回 401 | 1) 调 `DeepseekSaveKey({"key":"sk-test-invalid"})`；2) 查返回值、钥匙串、界面文案 | `ok=true`；`data.saved=true`；`data.verified=false`；`data.failure_reason="invalid_key"`；Key **已写入钥匙串**；**UI 与 Agent 都必须提示「已保存，但该 Key 无效」**，只显示「已保存」算失败；不得自动重试保存 | P0 |
-| **TC-SET-009** | I | 同上 | mock LLM 不可达 | 1) 保存 | `ok=true`、`verified=false`、`failure_reason="network"`；提示区分「网络问题」与「Key 无效」，不引导用户去换 Key | P1 |
-| **TC-SET-010** | I | 同上 | mock 返回余额不足（402） | 1) 保存 | `failure_reason="insufficient_balance"`；提示去充值，而不是让用户重新申请 Key | P1 |
-| **TC-SET-011** | I | 同上、9.3 | 上述任一场景之后 | 1) 查 `data` / `content` / 事件 payload / 日志 | Key 明文出现 **0 次**；`failure_reason` 是枚举值，**不得**把上游错误响应原文透传给模型或 UI | P0 |
+| **TC-SET-008** | I + E | FR-8.1、contracts/tools §4.15 | mock LLM 对含 `invalid` 的 Key 返回 401 | 1) 调 `DeepseekSaveKey({"key":"sk-test-invalid"})`；2) 查返回值、钥匙串、界面文案 | `ok=true`、`saved=true`、`validation="invalid"`；Key **已写入钥匙串**；`content` 含「Key 无效」字样；**UI 与 Agent 都必须把 invalid 当警告说出来**，只说「已保存」算失败；不得自动重试保存 | P0 |
+| **TC-SET-009** | I | 同上 | LLM 不可达 / 超时 | 1) 保存 | `validation="unverified"`；`validation_detail` 为 `network` 或 `timeout`；`content` 含「未验证」字样；提示可稍后重试验证，不引导换 Key | P1 |
+| **TC-SET-010** | I | 同上（1.0.5 定案） | mock 返回 402 余额不足 | 1) 保存 | `validation="ok"`、`validation_detail="insufficient_balance"`——**Key 本身有效、验证是过的**，缺的是余额；`content` 提示去充值，**不得**说「Key 无效」 | P1 |
+| **TC-SET-011** | I | 同上 | 模拟钥匙串写入失败 | 1) 保存 | `ok=false`，错误码 `INTERNAL`；界面提示存储失败，而不是 Key 无效 | P1 |
+| **TC-SET-012** | I | 同上、9.3 | 上述任一场景之后 | 1) 查 `data` / `content` / 事件 payload / 日志 | Key 明文出现 **0 次**；`content` 与 `validation` **逐场景一致**；`validation_detail` 是枚举，不得透传上游错误原文 | P0 |
 
-> **字段名对齐提醒**：PM 指令里写的是「`validation=invalid`」，契约 `tools.md` §4.15 的实际字段是 `verified: boolean` + `failure_reason: "invalid_key" | "insufficient_balance" | "network" | null`。用例按契约写。若产品确实想要 `validation` 这个字段名，要先改契约再改用例，不要两边各写一套。
-
----
+> **`content` 必须与 `validation` 一致**，这是最容易漏的一条：`data` 给 UI，`content` 才是模型看到的。两者不一致时会出现「界面写着失败、Agent 对用户说已配置好」——正是系统提示第 1 条禁止的谎报。
+>
+> **`insufficient_balance` 已定案（契约 1.0.5）**：`validation = "ok"`、`validation_detail = "insufficient_balance"`。语义是「Key 验证通过、余额不足」。实现若写成 `invalid`，Agent 就会引导用户去重新申请 Key——那是在解决一个不存在的问题。
 
 ## 5. 诊断
 

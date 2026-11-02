@@ -153,7 +153,7 @@
 | **TC-EXC-042** | I | contracts/tools §2.3 | 新会话；`VpnConnect` 首次弹卡后点「允许」；随后同会话再连接一次 | 1) 查第一次与第二次的 `tool_calls` 行 | 第一次 `approved == 2`；第二次同样为 `2`（表示「在会话授权下执行」）。两次都不得为 `1`——把会话授权记成一次性会让复盘误判用户只同意了一次 | P0 |
 | **TC-EXC-043** | I | contracts/tools §2.3 | 无审批路径的只读工具（如 `RuntimeStatus`） | 1) 调用一次；2) 查 `tool_calls` | 不产生审批记录（`approved` 为 `NULL` 或该行不写审批语义），不得凭空写 `1` | P1 |
 
-> **TC-EXC-042 后半段的口径**：契约只规定了「创建授权的那一次」写什么，没说后续自动放行怎么记。本用例取 `2`，理由是「授权来源仍是会话」；若实现选择别的记法，必须在 `docs/contracts/tools.md` §2.3 写清楚，否则这条永远测不了。
+> **TC-EXC-042 的口径已定**：PM 决定「后续自动放行同样记 `2`」，并写入 `docs/contracts/tools.md` §2.3。架构师落笔后本用例不需要再改——它的作用就是把这句决定变成可执行的断言。
 
 ### 9. 其他失败路径
 
@@ -168,16 +168,21 @@
 
 ---
 
-### 10. 幂等：`ProfileDelete`
+### 10. `ProfileDelete`：幂等与删除正在使用的配置
 
-删除是最容易被写成「找不到就报错」的工具。用户重复点、Agent 重试、恢复会话后重放，都会触发「删不存在的东西」。**幂等要求：结果只取决于最终状态，不取决于调用次数。**
+契约 §4.17（1.0.4 起纳入；1.0.5 调整了「正在使用」时的行为）：`Write` + `always`（scope `call`），**每次删除都要确认**，不做会话内放行。
+
+`data` 字段：`profile_id` / `deleted` / `already_absent` / `active_profile_id`。
 
 | ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
 |---|---|---|---|---|---|---|
-| **TC-EXC-044** | I | PM 决议 2026-11-02 | 本地 0 个 profile | 1) 调 `ProfileDelete`，`profile_id` 为不存在的 `prf_not_exist`；2) 查库与日志 | `ok=true`；返回值明确区分「本就不存在」（如 `deleted: false`）；**不返回** `PROFILE_NOT_FOUND` 之类的错误；日志为 info/warn，不得是 error；不产生新记录 | P1 |
-| **TC-EXC-045** | I | 同上 | 有 1 个 profile `prf_1` | 1) 删除 `prf_1`；2) 再删一次 `prf_1` | 两次都 `ok=true`；第一次 `deleted: true`，第二次 `deleted: false`；`profiles` 表中该行最终不存在；第二次不触发任何副作用 | P1 |
-| **TC-EXC-046** | I + E | 同上、FR-6.4 | 已连接到 `prf_1` 的节点 | 1) 调 `ProfileDelete({profile_id:"prf_1"})` | **不得静默成功**：要么拒绝并提示「请先断开」，要么先断开、恢复系统代理、再删除。二者择一，但**结束后系统代理一定是已恢复状态**，且返回结果说清做了什么。绝不允许「配置删了、代理还指着一个不存在的端口」 | P0 |
+| **TC-EXC-044** | I | contracts/tools §4.17 | 本地 0 个 profile；新会话 | 1) 直接调 `ProfileDelete({"profile_id":"prf_not_exist"})`（无 `approval_id`）；2) 批准后再调一次 | 第一次返回 `APPROVAL_REQUIRED`——`always` 对任何 id 都先问，**包括不存在的**；批准后 `ok=true`、`deleted=false`、`already_absent=true`；`tool_calls.approved == 1`；日志为 info，不得 error | P1 |
+| **TC-EXC-045** | I | 同上 | 有 1 个 profile `prf_1`；本会话此前已批准过一次删除 | 1) 删除 `prf_1`；2) 再删一次 `prf_1` | 两次都 `ok=true`；第一次 `deleted=true`、`already_absent=false`；第二次 `deleted=false`、`already_absent=true`；**第二次仍弹审批**（`always` 不放行）；`profiles` 表最终无该行 | P1 |
+| **TC-EXC-046** | I | 同上、FR-6.4 | 已连接到 `prf_1` 的节点 | 1) 删除 `prf_1`；2) 立刻检查系统代理、sing-box 进程、浏览器能否上网 | **不变式**：系统代理与实际连通性必须一致——要么都断（代理已恢复、进程已停），要么都保持（代理仍有效、流量仍能出去）。**不得**出现「配置已删、代理指向已失效端口、用户断网」 | P0 |
+| **TC-EXC-047** | I + E | contracts/tools §4.17（1.0.5 定案） | 已连接到 `prf_1` 的节点 | 1) 调 `ProfileDelete({"profile_id":"prf_1"})`；2) 观察是否弹审批卡；3) 查库与连接状态 | 返回 `ok=false`，`error.code == "PRECONDITION_FAILED"`，`details` 指明 `ACTIVE_PROFILE_IN_USE`；**不弹审批卡**——Host 在审批网关之前就拦截；`tool_calls.approved` 不写值；连接不受影响（进程仍在、代理仍有效）；`profiles` 表仍有该行；`content` 提示「请先断开或切换到其他配置」 | P1 |
+| **TC-EXC-048** | I | contracts/tools §4.17 | 有 `prf_1`（active）与 `prf_2`，**当前未连接**（与 TC-EXC-047 的区别就在这里） | 1) 删除 `prf_1`；2) 查 `active_profile_id`；3) 观察是否改用 `prf_2` | 删除成功；`active_profile_id == null`；**不自动切换**到 `prf_2`，也不发起连接（避免用户没要求的重连） | P1 |
+| **TC-EXC-049** | I | contracts/tools §4.17 | — | 1) 调 `ProfileDelete({"profile_id":""})` | 返回 `INVALID_ARGUMENT`；**不触发审批**（参数非法不必打扰用户）；不产生删除 | P2 |
 
-> **契约缺口（需 PM 处理）**：`docs/contracts/tools.md` §3 的 P1 工具总表里**没有 `ProfileDelete`**（共 17 个工具），§8 第 2 条把它列为开放问题：「P1 清单里没有，用户只能覆盖不能删除」。PM 现在要求测它的幂等，说明决定要加。
+> **已定案（契约 1.0.5）**：删除正在使用的配置走**拒绝**路径——`PRECONDITION_FAILED` / `ACTIVE_PROFILE_IN_USE`，Host 在审批前拦截、不弹卡。TC-EXC-046 的不变式保留：拒绝同样满足「不能出现配置已删、代理指向失效端口」。
 >
-> 执行前需要先在契约里补齐：模型可见名、Rust 类型、`PermissionLevel`、`ApprovalPolicy`（建议 `never`，删除本地配置无系统级副作用）、以及 `ProfileDeleteData` 的字段（至少要能区分 `deleted: true/false`）。**在补进契约之前，这三条用例无法执行**——没有工具可调。
+> **这条同时钉住了实现顺序**：前置条件检查必须在审批网关**之前**。反过来的话，用户先被问「是否删除」、点了允许才被告知「删不了」，白打扰一次，`approved` 也会被写脏。

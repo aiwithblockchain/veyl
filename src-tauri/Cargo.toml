@@ -1,0 +1,72 @@
+[package]
+name = "aivpn"
+version = "0.1.0"
+description = "AIVPN — 用对话操作 VPN 的桌面客户端"
+edition = "2021"
+rust-version = "1.77"
+# 多出一个 selftest bin 时，tauri dev 的 `cargo run` 需要这个才能选中主程序。
+default-run = "aivpn"
+
+[lib]
+name = "aivpn_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "aivpn-runtime-selftest"
+path = "src/bin/runtime_selftest.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+parking_lot = "0.12"
+async-trait = "0.1"
+anyhow = "1"
+futures = "0.3"
+log = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Claurst 以 crate 链接进主进程（git submodule，固定 commit，不修改源码）。
+# 必须放在 [dependencies] 段内——放到后面任何 [target.'cfg(..)'.dependencies]
+# 段之后，会变成平台专属依赖，macOS 上直接链接不到。
+claurst-core = { path = "claurst/src-rust/crates/core" }
+claurst-api = { path = "claurst/src-rust/crates/api" }
+claurst-query = { path = "claurst/src-rust/crates/query" }
+claurst-tools = { path = "claurst/src-rust/crates/tools" }
+
+# 运行时与网络层（runtime / config / proxy）
+thiserror = "2"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+rand = "0.8"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "stream",
+    "http2",
+    "json",
+] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinInet",
+] }
+
+# 注意：release profile 不要设置 panic = "abort"。
+# agent 的 run_query_loop 用 catch_unwind 隔离 panic，abort 会让整个应用退出。
+[profile.release]
+panic = "unwind"

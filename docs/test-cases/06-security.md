@@ -31,16 +31,22 @@
 
 ---
 
-## 2.1 事件载荷（`args_preview`）
+## 2.1 事件载荷与调用来源
 
-工具调用事件会带着参数在 UI 里渲染成卡片，也会被写进会话记录。**这是凭据最容易漏出去的地方**——它不经过日志脱敏那条链路。
+工具调用事件会带参数在 UI 渲染成卡片，也会进会话记录。**这是凭据最容易漏出去的地方**——它不走日志脱敏那条链路。规则见契约 1.0.4 §2.4 / §2.5。
 
 | ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
 |---|---|---|---|---|---|---|
-| **TC-SEC-022** | U + I | contracts/events §3 | 触发 `ProfileImport`（含 `node_id`）与 `VpnConnect` | 1) 抓取 `tool-call-start` 事件；2) 检查 `args_preview` | `key` / `uuid` / `password` / `token` / `short_id` 的值一律为 `***`；非敏感字段（`node_id`、`region`）保留原值；`args_preview` 只含白名单内的少量字段，**不是**完整入参 | P0 |
-| **TC-SEC-023** | U | contracts/events §3 | 构造嵌套三层的参数 `{node:{credentials:{uuid:"…"}}}` 与数组 `[{password:"…"}]` | 1) 生成 `args_preview` | 脱敏是**递归**的：任意层级、数组元素里的敏感键都被替换；不得只处理顶层键 | P0 |
-| **TC-SEC-024** | U | contracts/events §3 | 触发 `VpnConnect`（内部会生成完整 sing-box 配置） | 1) 抓取该轮全部 `tool-call-start` / `tool-call-end` payload；2) 搜索 `"outbounds"` / `"inbounds"` / `config_json` | **完整配置不出现在任何事件里**；工具结果只带摘要与少量结构化字段（状态、出口 IP、延迟）；配置只落本地文件，不进事件，也不进模型上下文 | P0 |
-| **TC-SEC-025** | U | contracts/events §3 | 键名变体：`apiKey` / `API_KEY` / `Password` / `accessToken` / `secret` | 1) 生成 `args_preview` | 匹配**大小写不敏感**；白名单之外的键默认**不输出**（宁可少显示，也不要「不认识的敏感键就原样带出去」） | P1 |
+| **TC-SEC-022** | U + I | contracts/tools §2.5 | 触发 `CatalogSearch({region:"jp",limit:10})` 与 `DeepseekSaveKey({key:"sk-…"})` | 1) 抓 `tool-call-start` 的 `args_preview` | `CatalogSearch` 正常展示两字段；`DeepseekSaveKey` 的 `args_preview` **整个被省略**（唯一字段被打码时不发只有 `***` 的对象）；保留的敏感字段**键名在、值为 `***`** | P0 |
+| **TC-SEC-023** | U | 同上 | 构造 `{node:{credentials:{uuid:"…"}}, list:[{password:"…"}]}` | 1) 生成 preview | 递归处理到任意层级；`credentials` / `tls` 类字段**整段替换**为 `***`；数组元素同样处理 | P0 |
+| **TC-SEC-024** | U | 同上 | 触发 `VpnConnect`（内部生成完整 sing-box 配置） | 1) 抓该轮全部 `tool-call-start` / `tool-call-end` payload；2) 搜索 `"outbounds"` / `"inbounds"` / `config_json` | **完整配置不出现在任何事件里**；工具结果只带摘要与少量结构化字段（状态、出口 IP、延迟）；配置只落本地文件，不进事件、不进模型上下文 | P0 |
+| **TC-SEC-025** | U | 同上 | 构造**漏标** `sensitive` 的字段：`auth` / `apikey` / `api_key` / `secret` | 1) 生成 preview | **兜底黑名单**命中，照样打码。它防的正是「新加字段忘了标注」 | P0 |
+| **TC-SEC-026** | U | 同上 | 字段数 12 个；其中一个值 300 字符 | 1) 生成 preview | 最多 8 个字段；单值超 200 字符截断并追加 `…` | P1 |
+| **TC-SEC-027** | U | 同上 | 把工具 schema 交给模型前 | 1) 读 mock LLM 的 `/__last_request`；2) 搜索 `"sensitive"` | schema 中**不含** `sensitive` 关键字——它是 AIVPN 自有 vendor 关键字，上游 provider 遇到未知关键字可能直接报错 | P0 |
+| **TC-SEC-028** | U + I | contracts/tools §2.4 | 构造一次工具调用，参数里塞 `{"source":"ui"}` | 1) 执行；2) 查 `tool_calls.source` | 参数被 `additionalProperties: false` 拒绝，或 `source` 被忽略；**不得**因为它写了 `ui` 就免审批；实际记录的来源由调用通道决定 | P0 |
+| **TC-SEC-029** | I | contracts/tools §2.4 | 无 AI 模式下，UI 直接点「连接」（不经过 Agent） | 1) 观察是否弹审批卡 | **UI 直连同样要确认**：`VpnConnect` / `CoreInstall` / `ProfileDelete` 三个破坏性工具，无论来源是 UI 还是 Agent 都弹卡；`tool_calls.source == "ui"` 可查 | P0 |
+
+> **为什么 `source` 不能放进 schema**：Agent 能构造任意参数，把来源放进参数等于让模型自证身份。来源必须由不可伪造的调用通道给出（§2.4）。
 
 ---
 

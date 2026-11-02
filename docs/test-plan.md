@@ -261,6 +261,10 @@ E2E 不能依赖真实模型。`tests/fixtures/llm-scenarios/*.json` 定义「�
 | 16 | `args_preview` 的脱敏在 **Host 侧、emit 之前**完成：递归、大小写不敏感、白名单之外的键不输出 | Alice | TC-SEC-022 ~ 025；等 UI 拿到再脱敏就已经晚了（会话记录里已有明文） |
 | 17 | `next_actions` 的点击由前端转成一条用户消息，**不得**直接 invoke 工具或复用上一轮的调用 | Alice | TC-CHAT-013 / 014；这是审批能否生效的前提 |
 | 18 | `tool_calls.approved` 三值（0 / 1 / 2）必须在数据库里可直接查询，且对无审批路径的工具留空 | Alice + Bob | TC-EXC-040 ~ 043 |
+| 19 | `tool_calls` 表同时记录 `source`（`ui` / `agent`），由 Host 调用通道注入 | Alice | TC-SEC-028 / 029、TC-MAIN-007；排查「这次删除是谁点的」只能靠它 |
+| 20 | `ProfileDelete` 返回 `deleted` / `already_absent` / `active_profile_id` 三个字段 | Bob | 只返回 `ok` 无法区分「删掉了」和「本来就没有」，TC-EXC-044/045 依赖这个区分 |
+| 21 | `sensitive: true` 是 schema 里的 vendor 关键字，交给模型前必须剥离 | Alice | TC-SEC-027；带出去可能让 provider 直接报错 |
+| 22 | `DeepseekSaveKey` 的 `content` 与 `validation` 逐场景一致 | Bob | TC-SET-012；Agent 只读 `content`，写错就会对用户谎报 |
 
 ---
 

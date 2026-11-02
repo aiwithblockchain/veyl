@@ -11,14 +11,14 @@
 | 文件 | 内容 | 用例数 |
 |---|---|---|
 | [01-main-flow.md](01-main-flow.md) | 首次启动 → 配 Key → 连接 → 断开 | 9 |
-| [02-exception.md](02-exception.md) | 7 类异常路径 + 审批矩阵 + 幂等 | 46 |
+| [02-exception.md](02-exception.md) | 7 类异常路径 + 审批矩阵 + `ProfileDelete` | 49 |
 | [03-runtime-config.md](03-runtime-config.md) | 运行时管理、安装校验、配置生成 | 30 |
-| [04-ui-agent.md](04-ui-agent.md) | 外壳、对话、工具卡、事件契约、设置、诊断、体验指标 | 38 |
+| [04-ui-agent.md](04-ui-agent.md) | 外壳、对话、工具卡、事件契约、设置、诊断、体验指标 | 39 |
 | [05-proxy-catalog.md](05-proxy-catalog.md) | 系统代理（macOS/Windows）、节点目录客户端 | 27 |
-| [06-security.md](06-security.md) | 密钥、暴露面、事件载荷、提示注入、完整性、崩溃隔离 | 25 |
+| [06-security.md](06-security.md) | 密钥、暴露面、事件载荷与调用来源、提示注入、完整性、崩溃隔离 | 29 |
 | [07-distribution.md](07-distribution.md) | 安装包、签名、公证、发布清单 | 19 |
 | [99-p2-backlog.md](99-p2-backlog.md) | 明确留到后续阶段的项 | — |
-| **合计** | | **194** |
+| **合计** | | **202** |
 
 ---
 
@@ -51,7 +51,7 @@
 | FR-2.1 | TC-CHAT-001 |
 | FR-2.2 | TC-CHAT-002、TC-CHAT-007 |
 | FR-2.3 | TC-CHAT-003 |
-| FR-2.4 | TC-MAIN-003、TC-CHAT-004、TC-CHAT-014、TC-EXC-030 ~ TC-EXC-043 |
+| FR-2.4 | TC-MAIN-003、TC-MAIN-007、TC-CHAT-004、TC-CHAT-014、TC-EXC-030 ~ TC-EXC-043 |
 | FR-2.5 | TC-SHELL-005 |
 | FR-2.6 | TC-CHAT-005、TC-CHAT-006、TC-CHAT-009、TC-CHAT-013、TC-EXC-029 |
 | FR-2.7 | TC-MAIN-002、TC-MAIN-007、TC-EXC-001、TC-EXC-002 |
@@ -87,7 +87,7 @@
 | FR-7.3 | TC-EXC-005 |
 | FR-7.4 | 错误分类枚举表、TC-EXC-004、TC-EXC-007、TC-EXC-013 |
 | FR-7.5 | TC-MAIN-005、TC-MAIN-006、TC-EXC-004 |
-| FR-8.1 | TC-MAIN-002、TC-SET-001、TC-SET-008 ~ 011、TC-EXC-001、TC-EXC-003、TC-SEC-005 |
+| FR-8.1 | TC-MAIN-002、TC-SET-001、TC-SET-008 ~ 012、TC-EXC-001、TC-EXC-003、TC-SEC-005 |
 | FR-8.2 | TC-SET-002、TC-SET-003 |
 | FR-8.3 | TC-SET-004 |
 | FR-8.4 | TC-SET-005、TC-EXC-018 |
@@ -100,13 +100,14 @@
 | 9.3 验收 | TC-SEC-001 ~ 009 |
 | 9.4 验收 | TC-DIST-001 ~ 017 |
 | 9.5 验收 | TC-PERF-001 ~ 004 |
-| `docs/contracts/events.md` §3 载荷 | TC-SEC-022 ~ 025 |
+| `docs/contracts/tools.md` §2.4 调用来源 | TC-SEC-028、TC-SEC-029、TC-MAIN-007 |
+| `docs/contracts/tools.md` §2.5 `args_preview` | TC-SEC-022 ~ 027 |
 | `docs/contracts/events.md` §4 交互 | TC-CHAT-013、TC-CHAT-014 |
 | `docs/contracts/events.md` 事件名 | TC-CHAT-010 ~ 012 |
 | `docs/contracts/runtime.md` §11 | TC-SEC-020、TC-SEC-021 |
 | `docs/contracts/tools.md` §2.3 审批 | TC-EXC-030 ~ TC-EXC-043 |
-| `docs/contracts/tools.md` §4.15 `DeepseekSaveKey` | TC-SET-008 ~ 011 |
-| `docs/contracts/tools.md` `ProfileDelete`（**待补进契约**） | TC-EXC-044 ~ 046 |
+| `docs/contracts/tools.md` §4.15 `DeepseekSaveKey` | TC-SET-008 ~ 012 |
+| `docs/contracts/tools.md` §4.17 `ProfileDelete` | TC-EXC-044 ~ 049 |
 | `docs/contracts/catalog.md` | TC-CAT-004、TC-CAT-011、TC-CAT-012 |
 
 ---
@@ -126,30 +127,32 @@
 
 ---
 
-## 当前契约偏差（`node tests/contracts/check-contracts.mjs`，2026-11-02 最后一次运行）
+## 契约一致性检查
 
-四条检查、一条不通过：
+`node tests/contracts/check-contracts.mjs`（2026-11-02 最近一次运行）：**4 项全部通过**。
 
-| # | 检查项 | 状态 |
-|---|---|---|
-| 1 | `AGENT_EVENTS` 与 `docs/contracts/events.md` 事件总表一致 | **不通过** |
-| 2 | `AGENT_EVENTS` 全部被 `chatStore` 的 switch 覆盖 | 通过 |
-| 3 | `RuntimeStatus` / `RuntimeSnapshot` 不含 `clash_addr` | 通过（Bob 已修） |
-| 4 | mock 剧本的工具名都在契约工具总表 | 通过 |
+| # | 检查项 |
+|---|---|
+| 1 | `AGENT_EVENTS` 与 `docs/contracts/events.md` 事件总表一致 |
+| 2 | `AGENT_EVENTS` 全部被 `chatStore` 的 switch 覆盖 |
+| 3 | `RuntimeStatus` / `RuntimeSnapshot` 不含 `clash_addr` |
+| 4 | mock 剧本的工具名都在契约工具总表 |
 
-剩余偏差：`src/agent/protocol.ts` 仍是 `ai-message-chunk` / `ai-thinking-chunk` / `ai-tool-call-start` / `ai-tool-call-end`，且缺 `runtime-state-changed`、`runtime-health-changed`、`job-progress`、`approval-requested` 四个应用事件。契约 `events.md` 1.0.1 起就要求前四个去掉 `ai-` 前缀。
+这道检查的价值在于**它真的红过**：先后抓出 `protocol.ts` 的事件名前缀偏差（4 个事件带 `ai-`、缺 4 个应用事件）和 `RuntimeStatus.clash_addr` 泄漏，两条都已修掉。以后改事件名或快照字段，CI 第一步就会拦住。
 
-`protocol.ts` 的注释自己写着「等契约文档到位后整体替换」——契约已于 2026-11-02 冻结，差的就是这一步。替换后 TC-CHAT-010 转绿。
-
-> 这个表是快照，随实现推进变化。以 `node tests/contracts/check-contracts.mjs` 的当次输出为准。
+> 这是快照，以脚本当次输出为准。
 
 ---
 
-## 契约 1.0.2 的两处缺口（需要 PM 补，不是实现改）
+## 两处已定案，待契约 1.0.5 落地
 
-| # | 缺口 | 影响 |
+PM 2026-11-02 定案。契约文件当前仍是 1.0.4，落笔后本表清空：
+
+| # | 定案 | 用例 |
 |---|---|---|
-| 1 | `ProfileDelete` **不在** `docs/contracts/tools.md` §3 的 17 个工具里，§8 第 2 条把它列为开放问题（「P1 清单里没有，用户只能覆盖不能删除」） | TC-EXC-044 ~ 046 无法执行——没有工具可调。需先补齐模型可见名、`PermissionLevel`、`ApprovalPolicy`、`ProfileDeleteData` 字段 |
-| 2 | PM 指令里的 `validation=invalid` 在契约里实际是 `verified: boolean` + `failure_reason` 枚举 | TC-SET-008 ~ 011 按契约写。若要改成 `validation`，先改契约再用例，否则实现与测试各拿一套字段名 |
+| 1 | 删除正在使用的 profile → **拒绝**：`PRECONDITION_FAILED` / `ACTIVE_PROFILE_IN_USE`，Host 在审批前拦截、**不弹审批卡** | TC-EXC-047（TC-EXC-046 的不变式不变） |
+| 2 | `insufficient_balance` → `validation = "ok"`、`validation_detail = "insufficient_balance"` | TC-SET-010 |
 
-> 这两条与「当前契约偏差」性质不同：那一条是实现落后于契约，这两条是**需求跑在契约前面**。两种情况都要在合并前收敛到同一份文档，区别只是改哪一边。
+> 用例已按定案写，1.0.5 落地后不需要再改。若 1.0.5 与上表有出入，改用例去对齐契约，不要反过来让契约迁就用例。
+
+1.0.2 那两处缺口早已解决：`ProfileDelete` 是第 18 个工具（`Write` + `always`），`DeepseekSaveKey` 改为 `saved` + `validation` + `validation_detail`。
