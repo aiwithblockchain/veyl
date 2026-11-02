@@ -4,7 +4,15 @@ import type {
   AgentBridge,
   ChatHistory,
   DeepSeekKeyState,
+  DefaultProfileStatus,
   ImportSeedResult,
+  LlmProvider,
+  LlmProviderInput,
+  LlmProviderTestResult,
+  NetRepairAction,
+  NetRepairResult,
+  OnboardingStatus,
+  ProfileListData,
   RenamedSession,
   StoredChatMessage,
   StoredSessionSummary,
@@ -15,6 +23,59 @@ import { AGENT_EVENTS, APP_EVENT_NAMES, AI_EVENT_NAMES } from "./protocol";
 import type { AgentEvent, RuntimeSnapshot } from "./protocol";
 
 const EVENT_NAMES = [...AI_EVENT_NAMES, ...APP_EVENT_NAMES];
+
+/** 契约（commands.md §3.3）冻结的线格式：只认 `profile_id` / `node_id`。 */
+interface RawProfile {
+  profile_id?: string;
+  node_id?: string | null;
+  name?: string;
+  protocol?: string;
+  method?: string;
+  region?: string | null;
+  created_at?: string;
+}
+
+interface RawDefaultProfile {
+  package_id?: string | null;
+  version?: string | null;
+  applied_at?: string | null;
+  new_version_available?: boolean;
+  node_count?: number;
+}
+
+function normalizeDefaultProfile(raw: RawDefaultProfile): DefaultProfileStatus {
+  return {
+    packageId: raw.package_id ?? null,
+    version: raw.version ?? null,
+    appliedAt: raw.applied_at ?? null,
+    newVersionAvailable: raw.new_version_available === true,
+    nodeCount: raw.node_count ?? 0,
+  };
+}
+
+interface RawLlmProvider {
+  provider_id?: string;
+  name?: string;
+  protocol?: string;
+  base_url?: string;
+  model?: string;
+  has_key?: boolean;
+  is_active?: boolean;
+  is_builtin?: boolean;
+}
+
+function normalizeProvider(raw: RawLlmProvider): LlmProvider {
+  return {
+    providerId: raw.provider_id ?? "",
+    name: raw.name ?? "未命名",
+    protocol: raw.protocol === "anthropic" ? "anthropic" : "openai",
+    baseUrl: raw.base_url ?? "",
+    model: raw.model ?? "",
+    hasKey: raw.has_key === true,
+    isActive: raw.is_active === true,
+    isBuiltin: raw.is_builtin === true,
+  };
+}
 
 /** 统一的 invoke 包装：失败一律抛 `BridgeError`，调用方只需要看 code / message。 */
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -73,6 +134,90 @@ export class TauriAgentBridge implements AgentBridge {
     }
   }
 
+  async runtimeStart(profileId?: string): Promise<void> {
+    await call("runtime_start", profileId ? { profileId } : undefined);
+  }
+
+  async runtimeStop(): Promise<void> {
+    await call("runtime_stop");
+  }
+
+  async profileList(): Promise<ProfileListData> {
+    const raw = await call<{
+      profiles?: RawProfile[];
+      active_profile_id?: string | null;
+    }>("profile_list");
+    const profiles = (raw.profiles ?? [])
+      .map((item) => ({
+        id: item.profile_id ?? "",
+        name: item.name ?? "未命名节点",
+        protocol: item.protocol ?? item.method ?? "",
+        region: item.region ?? null,
+        createdAt: item.created_at ?? "",
+        nodeId: item.node_id ?? null,
+      }))
+      .filter((item) => item.id.length > 0)
+      // 后端按 created_at 升序返回；UI 要「最新在前」。
+      .sort((a, b) => {
+        const left = Date.parse(a.createdAt);
+        const right = Date.parse(b.createdAt);
+        if (!Number.isFinite(left) || !Number.isFinite(right)) return 0;
+        return right - left;
+      });
+
+    return { profiles, activeProfileId: raw.active_profile_id ?? null };
+  }
+
+  async onboardingStatus(): Promise<OnboardingStatus> {
+    const raw = await call<{ completed?: boolean; has_key?: boolean; profile_count?: number }>(
+      "onboarding_status",
+    );
+    return {
+      completed: raw.completed === true,
+      hasKey: raw.has_key === true,
+      profileCount: raw.profile_count ?? 0,
+    };
+  }
+
+  async onboardingComplete(skippedKey: boolean): Promise<void> {
+    await call("onboarding_complete", { skippedKey });
+  }
+
+  async defaultProfileStatus(): Promise<DefaultProfileStatus> {
+    const raw = await call<RawDefaultProfile>("default_profile_status");
+    return normalizeDefaultProfile(raw);
+  }
+
+  async defaultProfileRefresh(): Promise<DefaultProfileStatus> {
+    const raw = await call<RawDefaultProfile>("default_profile_refresh");
+    return normalizeDefaultProfile(raw);
+  }
+
+  async netRepair(action: NetRepairAction): Promise<NetRepairResult> {
+    const raw = await call<{
+      ok?: boolean;
+      detail?: string;
+      exit_ip?: string | null;
+      verified?: boolean;
+    }>("net_repair", { action });
+    return {
+      ok: raw.ok === true,
+      action,
+      detail: raw.detail ?? "",
+      exitIp: raw.exit_ip ?? null,
+      verified: raw.verified === true,
+    };
+  }
+
+  async openLogDir(): Promise<void> {
+    await call("open_log_dir");
+  }
+
+  async openExternal(url: string): Promise<void> {
+    // Host 已接 opener；命令本身只允许 DeepSeek 平台域名，前端不做白名单判断。
+    await call("open_external", { url });
+  }
+
   async sendMessage(sessionId: string, text: string): Promise<{ requestId: string }> {
     const response = await call<{ request_id: string }>("ai_send_message", { sessionId, text });
     return { requestId: response.request_id };
@@ -105,8 +250,7 @@ export class TauriAgentBridge implements AgentBridge {
     }
   }
 
-  async renameSession(sessionId: string, title: string): Promise<RenamedSession> {
-    const raw = await call<{ id: string; title: string; created_at: string }>("rename_session", {
+  async renameSession(sessionId: string, title: string): Promise<RenamedSession> {    const raw = await call<{ id: string; title: string; created_at: string }>("rename_session", {
       sessionId,
       title,
     });
@@ -116,6 +260,10 @@ export class TauriAgentBridge implements AgentBridge {
       title: raw.title,
       createdAt: Number.isFinite(parsed) ? parsed : Date.now(),
     };
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    await call("chat_delete", { sessionId });
   }
 
   async importSeedFile(path: string): Promise<ImportSeedResult> {
@@ -156,6 +304,64 @@ export class TauriAgentBridge implements AgentBridge {
 
   async clearDeepSeekKey(): Promise<void> {
     await call("deepseek_clear_key");
+  }
+
+  async llmProviderList(): Promise<{
+    providers: LlmProvider[];
+    activeProviderId: string | null;
+  }> {
+    const raw = await call<{
+      providers?: RawLlmProvider[];
+      active_provider_id?: string | null;
+    }>("llm_provider_list");
+    return {
+      providers: (raw.providers ?? []).map(normalizeProvider),
+      activeProviderId: raw.active_provider_id ?? null,
+    };
+  }
+
+  async llmProviderSave(input: LlmProviderInput): Promise<LlmProvider> {
+    // 扁平 camelCase 参数：Tauri 会转成 Rust 的 snake_case 形参；嵌套对象不转。
+    const args: Record<string, unknown> = {
+      name: input.name,
+      protocol: input.protocol,
+      baseUrl: input.baseUrl,
+      model: input.model,
+    };
+    if (input.providerId) args.providerId = input.providerId;
+    // 空 Key 表示「沿用已存的」：省略而不是传空串，避免覆盖。
+    if (input.apiKey.trim()) args.apiKey = input.apiKey;
+    const raw = await call<RawLlmProvider>("llm_provider_save", args);
+    return normalizeProvider(raw);
+  }
+
+  async llmProviderDelete(providerId: string): Promise<void> {
+    await call("llm_provider_delete", { providerId });
+  }
+
+  async llmProviderActivate(providerId: string): Promise<void> {
+    await call("llm_provider_activate", { providerId });
+  }
+
+  async llmProviderTest(input: LlmProviderInput): Promise<LlmProviderTestResult> {
+    const args: Record<string, unknown> = {
+      name: input.name,
+      protocol: input.protocol,
+      baseUrl: input.baseUrl,
+      model: input.model,
+    };
+    if (input.providerId) args.providerId = input.providerId;
+    if (input.apiKey.trim()) args.apiKey = input.apiKey;
+    const raw = await call<{
+      ok?: boolean;
+      latency_ms?: number | null;
+      error?: string | null;
+    }>("llm_provider_test", args);
+    return {
+      ok: raw.ok === true,
+      latencyMs: raw.latency_ms ?? null,
+      error: raw.error ?? undefined,
+    };
   }
 
   dispose(): void {

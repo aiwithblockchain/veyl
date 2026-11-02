@@ -2,10 +2,18 @@ import type {
   AgentBridge,
   ChatHistory,
   DeepSeekKeyState,
+  DefaultProfileStatus,
   ImportSeedResult,
+  LlmProvider,
+  LlmProviderInput,
+  LlmProviderTestResult,
+  NetRepairAction,
+  NetRepairResult,
+  OnboardingStatus,
   RenamedSession,
+  RuntimeProfile,
 } from "./bridge";
-import { maskKey } from "./bridge";
+import { isLocalEndpoint, maskKey } from "./bridge";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
   AgentEvent,
@@ -22,6 +30,8 @@ const CHUNK_INTERVAL = 16;
 
 /** mock 通道固定出口 IP，方便自动化断言。 */
 export const MOCK_EXIT_IP = "203.0.113.7";
+/** 直连出口：与代理出口不同，面板才能看出代理真的生效。 */
+export const MOCK_DIRECT_IP = "198.51.100.9";
 
 function splitForStreaming(text: string): string[] {
   const chars = Array.from(text);
@@ -42,6 +52,28 @@ export class MockAgentBridge implements AgentBridge {
   private activeRequests = new Set<string>();
   /** 装过一次就不再走安装流程（真实链路同理，已安装时不重复装）。 */
   private installed = false;
+  /** mock 的节点目录：让控制台与面板的节点切换可以离线演示。 */
+  private profiles: RuntimeProfile[] = [
+    {
+      id: "prf_1",
+      name: "东京 01",
+      protocol: "shadowsocks",
+      region: "日本",
+      createdAt: "2026-11-01T08:00:00.000Z",
+      nodeId: null,
+    },
+    {
+      id: "prf_2",
+      name: "新加坡 02",
+      protocol: "shadowsocks",
+      region: "新加坡",
+      createdAt: "2026-11-01T09:00:00.000Z",
+      nodeId: "seed-sg-02",
+    },
+  ];
+  private onboarded =
+    typeof localStorage !== "undefined" &&
+    localStorage.getItem("veyl.mock.onboarding") === "1";
 
   private runtime: RuntimeSnapshot = {
     contract_version: CONTRACT_VERSION,
@@ -51,6 +83,7 @@ export class MockAgentBridge implements AgentBridge {
     upstream_version: null,
     uptime_seconds: null,
     profile_id: null,
+    profile_name: null,
     config_hash: null,
     system_proxy_enabled: false,
     health: {
@@ -67,6 +100,10 @@ export class MockAgentBridge implements AgentBridge {
     restart_count: 0,
     last_error: null,
     last_transition_at: now(),
+    mixed_port: null,
+    connected_since: null,
+    latency_ms: null,
+    direct_ip: MOCK_DIRECT_IP,
   };
 
   subscribe(listener: (event: AgentEvent) => void): () => void {
@@ -80,13 +117,147 @@ export class MockAgentBridge implements AgentBridge {
     return this.runtime;
   }
 
+  async runtimeStart(profileId?: string): Promise<void> {
+    const profile =
+      this.profiles.find((item) => item.id === profileId) ??
+      this.profiles.find((item) => item.id === this.runtime.profile_id) ??
+      this.profiles[0];
+    if (!profile) {
+      throw { code: "PRECONDITION_FAILED", message: "还没有可用的节点" };
+    }
+
+    const switching = this.runtime.state === "running" || this.runtime.state === "degraded";
+    this.transition(switching ? "restarting" : "starting", switching ? "restart_req" : "start_req", {
+      profile_id: profile.id,
+      profile_name: profile.name,
+      connected_since: null,
+      latency_ms: null,
+    });
+
+    await sleep(switching ? 1400 : 1000);
+    this.health({
+      process: true,
+      clash_api: true,
+      data_plane: true,
+      exit_ip: MOCK_EXIT_IP,
+      consecutive_failures: 0,
+    });
+    this.transition("running", "process_ready", {
+      pid: 48213,
+      uptime_seconds: 0,
+      profile_id: profile.id,
+      profile_name: profile.name,
+      mixed_port: 2080,
+      connected_since: now(),
+      latency_ms: profile.id === "prf_2" ? 68 : 42,
+      direct_ip: MOCK_DIRECT_IP,
+      system_proxy_enabled: true,
+      connections: 2,
+    });
+  }
+
+  async runtimeStop(): Promise<void> {
+    if (this.runtime.state === "idle") return;
+    this.transition("stopping", "stop_req");
+    await sleep(700);
+    this.health({ process: false, clash_api: false, data_plane: false, exit_ip: null });
+    this.transition("idle", "stopped", {
+      pid: null,
+      uptime_seconds: null,
+      profile_id: null,
+      profile_name: null,
+      mixed_port: null,
+      connected_since: null,
+      latency_ms: null,
+      system_proxy_enabled: false,
+      connections: null,
+    });
+  }
+
+  async profileList(): Promise<{ profiles: RuntimeProfile[]; activeProfileId: string | null }> {
+    // 与后端一致：按 created_at 升序给，排序交给 UI。
+    const ordered = [...this.profiles].sort(
+      (a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt),
+    );
+    return {
+      profiles: ordered.map((profile) => ({ ...profile })),
+      activeProfileId: this.runtime.profile_id ?? this.profiles[0]?.id ?? null,
+    };
+  }
+
+  async onboardingStatus(): Promise<OnboardingStatus> {
+    return {
+      completed: this.onboarded,
+      hasKey: this.keyMasked !== null,
+      profileCount: this.profiles.length,
+    };
+  }
+
+  async onboardingComplete(_skippedKey: boolean): Promise<void> {
+    this.onboarded = true;
+    try {
+      localStorage.setItem("veyl.mock.onboarding", "1");
+    } catch {
+      // 隐私模式下写不了 localStorage，只在本次进程内记住。
+    }
+  }
+
+  private defaultProfile: DefaultProfileStatus = {
+    packageId: "pkg_demo",
+    version: "2026.11.1",
+    appliedAt: "2026-11-01T00:00:00.000Z",
+    newVersionAvailable: false,
+    nodeCount: this.profiles.length,
+  };
+
+  async defaultProfileStatus(): Promise<DefaultProfileStatus> {
+    return { ...this.defaultProfile, nodeCount: this.profiles.length };
+  }
+
+  async defaultProfileRefresh(): Promise<DefaultProfileStatus> {
+    await sleep(900);
+    const next: DefaultProfileStatus = {
+      packageId: "pkg_demo",
+      version: "2026.11.2",
+      appliedAt: now(),
+      // 模拟「刷新拿到新包，但下次连接才生效」。
+      newVersionAvailable: this.defaultProfile.version !== "2026.11.2",
+      nodeCount: this.profiles.length,
+    };
+    this.defaultProfile = next;
+    return { ...next };
+  }
+
+  async netRepair(action: NetRepairAction): Promise<NetRepairResult> {
+    await sleep(600);
+    if (action === "restore_direct") {
+      await this.runtimeStop();
+      return {
+        ok: true,
+        action,
+        detail: "已撤销系统代理并停止运行时，网络恢复直连。",
+        exitIp: MOCK_DIRECT_IP,
+        verified: true,
+      };
+    }
+    return { ok: true, action, detail: "已刷新本地 DNS 缓存。", exitIp: null, verified: true };
+  }
+
+  async openLogDir(): Promise<void> {
+    // 浏览器通道没有文件管理器；mock 里视为成功。
+  }
+
+  async openExternal(_url: string): Promise<void> {
+    // 浏览器通道没有系统浏览器调用能力；mock 里视为成功。
+  }
+
   private emit(event: AgentEvent) {
     for (const listener of this.listeners) listener(event);
   }
 
   private transition(
     to: RuntimeState,
-    event: "start_req" | "process_ready" | "stop_req" | "stopped",
+    event: "start_req" | "process_ready" | "stop_req" | "stopped" | "restart_req",
     patch: Partial<RuntimeSnapshot> = {},
   ) {
     const from = this.runtime.state;
@@ -381,6 +552,11 @@ export class MockAgentBridge implements AgentBridge {
       pid: 48213,
       uptime_seconds: 1,
       profile_id: "prf_1",
+      profile_name: "东京 01",
+      mixed_port: 2080,
+      connected_since: now(),
+      latency_ms: 42,
+      direct_ip: MOCK_DIRECT_IP,
       system_proxy_enabled: true,
       connections: 3,
     });
@@ -421,7 +597,7 @@ export class MockAgentBridge implements AgentBridge {
       return this.finish(requestId, assistantId, "cancelled", null);
     }
     const reply = running
-      ? `当前已连接，出口 IP ${this.runtime.health.exit_ip}，本地代理监听 127.0.0.1:2080。`
+      ? `当前已连接，出口 IP ${this.runtime.health.exit_ip}，本地代理监听 127.0.0.1:${this.runtime.mixed_port ?? "未知"}。`
       : "当前没有连接。要连的话直接说地区，例如「连到日本」。";
     await this.type(requestId, assistantId, reply);
     this.finish(requestId, assistantId, "success", reply);
@@ -471,6 +647,11 @@ export class MockAgentBridge implements AgentBridge {
     this.transition("idle", "stopped", {
       pid: null,
       uptime_seconds: null,
+      profile_id: null,
+      profile_name: null,
+      mixed_port: null,
+      connected_since: null,
+      latency_ms: null,
       system_proxy_enabled: false,
       connections: null,
     });
@@ -484,8 +665,7 @@ export class MockAgentBridge implements AgentBridge {
     this.cancelled.add(requestId);
   }
 
-  async renameSession(sessionId: string, title: string): Promise<RenamedSession> {
-    await sleep(250);
+  async renameSession(sessionId: string, title: string): Promise<RenamedSession> {    await sleep(250);
     // mock 扮演后端：trim 与长度校验都在这边做，前端只管显示错误码对应的文案。
     const trimmed = title.trim();
     if (!trimmed) {
@@ -503,6 +683,11 @@ export class MockAgentBridge implements AgentBridge {
       };
     }
     return { id: sessionId, title: trimmed, createdAt: Date.now() };
+  }
+
+  async deleteSession(_sessionId: string): Promise<void> {
+    // mock 没有本地库：会话状态由前端 reducer 维护，这里只模拟成功。
+    await sleep(150);
   }
 
   async importSeedFile(_path: string): Promise<ImportSeedResult> {
@@ -526,6 +711,45 @@ export class MockAgentBridge implements AgentBridge {
   }
 
   private keyMasked: string | null = null;
+  private llmProviders: LlmProvider[] = [];
+  private llmActiveId: string | null = null;
+  private providerMigrated = false;
+
+  /** 旧的单一 Key 迁移成内置 DeepSeek provider（R32），只做一次。 */
+  private ensureProviders() {
+    if (this.providerMigrated) return;
+    this.providerMigrated = true;
+    if (this.keyMasked) this.createBuiltinProvider();
+  }
+
+  private createBuiltinProvider() {
+    this.llmProviders = [
+      {
+        providerId: "builtin_deepseek",
+        name: "DeepSeek",
+        protocol: "openai",
+        baseUrl: "https://api.deepseek.com",
+        model: "deepseek-chat",
+        hasKey: this.keyMasked !== null,
+        isActive: true,
+        isBuiltin: true,
+      },
+    ];
+    this.llmActiveId = "builtin_deepseek";
+  }
+
+  private syncBuiltinProvider() {
+    if (!this.keyMasked) return;
+    const builtin = this.llmProviders.find((provider) => provider.isBuiltin);
+    if (builtin) {
+      builtin.hasKey = true;
+      return;
+    }
+    if (this.llmProviders.length === 0) {
+      this.providerMigrated = true;
+      this.createBuiltinProvider();
+    }
+  }
 
   async getDeepSeekKey(): Promise<DeepSeekKeyState> {
     return {
@@ -546,6 +770,7 @@ export class MockAgentBridge implements AgentBridge {
     // 含 offline 的 Key 模拟「保存成功但网络不可达，没能验证」。
     if (/offline/i.test(trimmed)) {
       this.keyMasked = maskKey(trimmed);
+      this.syncBuiltinProvider();
       return { masked: this.keyMasked, verified: false, validation: "unverified" };
     }
 
@@ -553,16 +778,142 @@ export class MockAgentBridge implements AgentBridge {
     // 失败码 INVALID_KEY 时 Key 其实已经落进本地凭据文件了。
     if (/test/i.test(trimmed) || trimmed.length < 30) {
       this.keyMasked = maskKey(trimmed);
+      this.syncBuiltinProvider();
       throw { code: "INVALID_KEY", message: "DeepSeek 鉴权失败，Key 可能无效或已被吊销" };
     }
 
     this.keyMasked = maskKey(trimmed);
+    this.syncBuiltinProvider();
     return { masked: this.keyMasked, verified: true, validation: "ok" };
   }
 
   async clearDeepSeekKey(): Promise<void> {
     await sleep(200);
     this.keyMasked = null;
+    this.llmProviders = this.llmProviders.map((provider) =>
+      provider.isBuiltin ? { ...provider, hasKey: false } : provider,
+    );
+  }
+
+  async llmProviderList(): Promise<{
+    providers: LlmProvider[];
+    activeProviderId: string | null;
+  }> {
+    this.ensureProviders();
+    return {
+      providers: this.llmProviders.map((provider) => ({ ...provider })),
+      activeProviderId: this.llmActiveId,
+    };
+  }
+
+  async llmProviderSave(input: LlmProviderInput): Promise<LlmProvider> {
+    this.ensureProviders();
+    await sleep(350);
+
+    const model = input.model.trim();
+    if (!model) {
+      throw { code: "INVALID_ARGUMENT", message: "模型不能为空" };
+    }
+
+    const providerId = input.providerId ?? `prv_${Math.random().toString(36).slice(2, 8)}`;
+    const existing = this.llmProviders.find((provider) => provider.providerId === providerId);
+    const hasKey = input.apiKey.trim().length > 0 ? true : existing?.hasKey ?? false;
+    if (!hasKey && !isLocalEndpoint(input.baseUrl)) {
+      throw {
+        code: "INVALID_ARGUMENT",
+        message: "请填写 API Key；只有本机端点（localhost / 127.0.0.1）可以免 Key",
+      };
+    }
+
+    const saved: LlmProvider = {
+      providerId,
+      name: input.name.trim() || model,
+      protocol: input.protocol,
+      baseUrl: input.baseUrl.trim(),
+      model,
+      hasKey,
+      isActive: true,
+      isBuiltin: existing?.isBuiltin ?? false,
+    };
+
+    // 保存即设为当前：新会话立刻使用它，但不影响正在进行中的请求。
+    this.llmProviders = [
+      ...this.llmProviders
+        .filter((provider) => provider.providerId !== providerId)
+        .map((provider) => ({ ...provider, isActive: false })),
+      saved,
+    ];
+    this.llmActiveId = providerId;
+    return { ...saved };
+  }
+
+  async llmProviderDelete(providerId: string): Promise<void> {
+    this.ensureProviders();
+    await sleep(200);
+    const target = this.llmProviders.find((provider) => provider.providerId === providerId);
+    if (!target) {
+      throw { code: "NOT_FOUND", message: "provider 不存在" };
+    }
+
+    this.llmProviders = this.llmProviders.filter(
+      (provider) => provider.providerId !== providerId,
+    );
+    // 删除 provider 必须同时删掉它的 Key，不留孤儿密钥。
+    if (target.isBuiltin) this.keyMasked = null;
+
+    if (this.llmActiveId === providerId) {
+      const next =
+        this.llmProviders.find((provider) => provider.hasKey) ?? this.llmProviders[0] ?? null;
+      this.llmActiveId = next?.providerId ?? null;
+      this.llmProviders = this.llmProviders.map((provider) => ({
+        ...provider,
+        isActive: provider.providerId === this.llmActiveId,
+      }));
+    }
+  }
+
+  async llmProviderActivate(providerId: string): Promise<void> {
+    this.ensureProviders();
+    const target = this.llmProviders.find((provider) => provider.providerId === providerId);
+    if (!target) {
+      throw { code: "NOT_FOUND", message: "provider 不存在" };
+    }
+    if (!target.hasKey && !isLocalEndpoint(target.baseUrl)) {
+      throw {
+        code: "PRECONDITION_FAILED",
+        message: "这个 provider 还没有可用的 API Key",
+      };
+    }
+
+    this.llmActiveId = providerId;
+    this.llmProviders = this.llmProviders.map((provider) => ({
+      ...provider,
+      isActive: provider.providerId === providerId,
+    }));
+  }
+
+  async llmProviderTest(input: LlmProviderInput): Promise<LlmProviderTestResult> {
+    await sleep(420);
+
+    if (!input.model.trim()) {
+      return { ok: false, latencyMs: null, error: "模型不能为空" };
+    }
+    const baseUrl = input.baseUrl.trim();
+    if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
+      return { ok: false, latencyMs: null, error: "Base URL 必须以 http:// 或 https:// 开头" };
+    }
+
+    const existing = this.llmProviders.find(
+      (provider) => provider.providerId === input.providerId,
+    );
+    const hasKey = input.apiKey.trim().length > 0 || existing?.hasKey === true;
+    if (!hasKey && !isLocalEndpoint(baseUrl)) {
+      return { ok: false, latencyMs: null, error: "缺少 API Key" };
+    }
+    if (/invalid|fail/i.test(input.baseUrl)) {
+      return { ok: false, latencyMs: null, error: "无法连接到该端点" };
+    }
+    return { ok: true, latencyMs: 180 + Math.floor(Math.random() * 220) };
   }
 
   dispose(): void {

@@ -10,11 +10,20 @@ interface Props {
   onSend: (text: string) => void;
   onStop: () => void;
   onNextAction: (action: NextAction) => void;
+  hasKey: boolean;
+  onConfigureKey: () => void;
 }
 
 const SUGGESTIONS = ["连到日本", "现在是什么状态", "断开连接"];
 
-export function ChatView({ session, onSend, onStop, onNextAction }: Props) {
+export function ChatView({
+  session,
+  onSend,
+  onStop,
+  onNextAction,
+  hasKey,
+  onConfigureKey,
+}: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
 
@@ -82,6 +91,8 @@ export function ChatView({ session, onSend, onStop, onNextAction }: Props) {
         statusText={session.status?.text ?? null}
         onSend={onSend}
         onStop={onStop}
+        disabled={!hasKey}
+        onConfigure={onConfigureKey}
       />
     </div>
   );

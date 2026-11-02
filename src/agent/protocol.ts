@@ -1,12 +1,12 @@
 /**
  * 事件与 UI → Host 调用的前端契约。
  *
- * 唯一来源：`docs/contracts/events.md` v1.0.10（已冻结）。
+ * 唯一来源：`docs/contracts/events.md` v1.1.0（已冻结）。
  * 本文件是事件名常量的唯一来源——组件、store、bridge 只能引用
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "1.0.10" as const;
+export const CONTRACT_VERSION = "1.1.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -19,6 +19,8 @@ export const AGENT_EVENTS = {
   runtimeStateChanged: "runtime-state-changed",
   runtimeHealthChanged: "runtime-health-changed",
   jobProgress: "job-progress",
+  appLifecycleChanged: "app-lifecycle-changed",
+  defaultProfileUpdated: "default-profile-updated",
 } as const;
 
 export type AgentEventName = (typeof AGENT_EVENTS)[keyof typeof AGENT_EVENTS];
@@ -38,6 +40,8 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.runtimeStateChanged,
   AGENT_EVENTS.runtimeHealthChanged,
   AGENT_EVENTS.jobProgress,
+  AGENT_EVENTS.appLifecycleChanged,
+  AGENT_EVENTS.defaultProfileUpdated,
 ] as const;
 
 /* ------------------------------------------------------------------ */
@@ -249,6 +253,25 @@ export interface JobProgressPayload {
   emitted_at: string;
 }
 
+export type AppLifecycleState = "foreground" | "background";
+
+export interface AppLifecycleChangedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  state: AppLifecycleState;
+  /** 首次发出时为 null。 */
+  previous: AppLifecycleState | null;
+  emitted_at: string;
+}
+
+export interface DefaultProfileUpdatedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  package_id: string;
+  version: string;
+  applied_at: string;
+  new_version_available: boolean;
+  emitted_at: string;
+}
+
 /* ------------------------------------------------------------------ */
 /* 事件联合类型                                                        */
 /* ------------------------------------------------------------------ */
@@ -264,6 +287,8 @@ export interface AgentEventMap {
   [AGENT_EVENTS.runtimeStateChanged]: RuntimeStateChangedPayload;
   [AGENT_EVENTS.runtimeHealthChanged]: RuntimeHealthChangedPayload;
   [AGENT_EVENTS.jobProgress]: JobProgressPayload;
+  [AGENT_EVENTS.appLifecycleChanged]: AppLifecycleChangedPayload;
+  [AGENT_EVENTS.defaultProfileUpdated]: DefaultProfileUpdatedPayload;
 }
 
 export type AgentEvent = {
@@ -289,7 +314,9 @@ export interface RuntimeSnapshot {
   pid: number | null;
   upstream_version: string | null;
   uptime_seconds: number | null;
+  /** 当前配置（profile）。1.1.0 起随 profile_name / latency 一起提供给 UI。 */
   profile_id: string | null;
+  profile_name: string | null;
   config_hash: string | null;
   system_proxy_enabled: boolean;
   health: HealthSnapshot;
@@ -298,6 +325,13 @@ export interface RuntimeSnapshot {
   restart_count: number;
   last_error: AivpnError | null;
   last_transition_at: string;
+  /** 本地 mixed 入口端口；每次连接可能不同，UI 不得硬编码。 */
+  mixed_port: number | null;
+  /** 连接成功时刻（ISO 8601）；未连接为 null。 */
+  connected_since: string | null;
+  latency_ms: number | null;
+  /** 不经代理测得的直连出口 IP（1.1.0）；用于对照「是否真的走了代理」。 */
+  direct_ip: string | null;
 }
 
 /** 状态面板的合并视图：runtime_status 快照 + 实时应用事件。 */
@@ -307,9 +341,15 @@ export interface RuntimeView {
   upstream_version: string | null;
   uptime_seconds: number | null;
   profile_id: string | null;
+  profile_name: string | null;
+  config_hash: string | null;
   system_proxy_enabled: boolean;
   health: HealthSnapshot;
   connections: number | null;
   restart_count: number;
   last_error: AivpnError | null;
+  mixed_port: number | null;
+  connected_since: string | null;
+  latency_ms: number | null;
+  direct_ip: string | null;
 }

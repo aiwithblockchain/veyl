@@ -5,9 +5,21 @@ interface Props {
   statusText: string | null;
   onSend: (text: string) => void;
   onStop: () => void;
+  placeholder?: string;
+  /** 没有 DeepSeek Key 时禁用输入，并给出配置入口。 */
+  disabled?: boolean;
+  onConfigure?: () => void;
 }
 
-export function Composer({ streaming, statusText, onSend, onStop }: Props) {
+export function Composer({
+  streaming,
+  statusText,
+  onSend,
+  onStop,
+  placeholder = "说「连到日本」，或者问我现在什么状态",
+  disabled = false,
+  onConfigure,
+}: Props) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -20,19 +32,20 @@ export function Composer({ streaming, statusText, onSend, onStop }: Props) {
 
   const submit = () => {
     const text = value.trim();
-    if (!text || streaming) return;
+    if (!text || streaming || disabled) return;
     setValue("");
     onSend(text);
   };
 
   return (
-    <div className="composer">
+    <div className={`composer ${disabled ? "is-disabled" : ""}`}>
       <div className="composer__box">
         <textarea
           ref={textareaRef}
           value={value}
           rows={1}
-          placeholder="说「连到日本」，或者问我现在什么状态"
+          placeholder={disabled ? "配置 DeepSeek Key 后可以直接对话" : placeholder}
+          disabled={disabled}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
@@ -50,7 +63,7 @@ export function Composer({ streaming, statusText, onSend, onStop }: Props) {
           <button
             type="button"
             className="btn btn--primary btn--send"
-            disabled={streaming || value.trim().length === 0}
+            disabled={disabled || streaming || value.trim().length === 0}
             onClick={submit}
           >
             发送
@@ -59,7 +72,13 @@ export function Composer({ streaming, statusText, onSend, onStop }: Props) {
       </div>
       <div className="composer__hint">
         {statusText ? <span className="composer__status">{statusText}</span> : null}
-        <span>Enter 发送 · Shift + Enter 换行</span>
+        {disabled && onConfigure ? (
+          <button type="button" className="composer__configure" onClick={onConfigure}>
+            去配置 Key
+          </button>
+        ) : (
+          <span>Enter 发送 · Shift + Enter 换行</span>
+        )}
       </div>
     </div>
   );

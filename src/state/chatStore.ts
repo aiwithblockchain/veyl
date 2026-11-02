@@ -67,7 +67,8 @@ export interface ChatState {
 export type ChatAction =
   | { type: "select_session"; sessionId: string }
   | { type: "new_session" }
-  | { type: "send_user_message"; text: string; localRequestId: string }
+  | { type: "add_session"; session: Session }
+  | { type: "send_user_message"; sessionId: string; text: string; localRequestId: string }
   | { type: "request_started"; requestId: string }
   | { type: "request_failed"; message: string }
   | { type: "agent_event"; event: import("../agent/protocol").AgentEvent }
@@ -103,12 +104,14 @@ export function createSession(now = Date.now()): Session {
 }
 
 export function createInitialState(): ChatState {
-  const session = createSession();
-  return { sessions: [session], activeSessionId: session.id };
+  // 允许「没有任何会话」：删除最后一个会话后回到总览空态（R31）。
+  return { sessions: [], activeSessionId: "" };
 }
 
-export function activeSession(state: ChatState): Session {
-  return state.sessions.find((s) => s.id === state.activeSessionId) ?? state.sessions[0];
+export function activeSession(state: ChatState): Session | undefined {
+  return (
+    state.sessions.find((s) => s.id === state.activeSessionId) ?? state.sessions[0]
+  );
 }
 
 function patchSession(
@@ -248,9 +251,19 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { sessions: [session, ...state.sessions], activeSessionId: session.id };
     }
 
+    case "add_session":
+      return {
+        sessions: [action.session, ...state.sessions],
+        activeSessionId: action.session.id,
+      };
+
     case "send_user_message": {
+      const target =
+        state.sessions.find((session) => session.id === action.sessionId) ?? current;
+      if (!target) return state;
+
       const now = Date.now();
-      const isFirst = current.messages.length === 0;
+      const isFirst = target.messages.length === 0;
       const assistant: ChatMessage = {
         id: `pending_${action.localRequestId}`,
         role: "assistant",
@@ -259,7 +272,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         streaming: true,
         at: now,
       };
-      return patchSession(state, current.id, (session) => ({
+      return patchSession(state, target.id, (session) => ({
         ...session,
         title: isFirst ? titleFromText(action.text) : session.title,
         updatedAt: now,
@@ -274,6 +287,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     }
 
     case "request_started":
+      if (!current) return state;
       return patchSession(state, current.id, (session) => ({
         ...session,
         activeRequestId: action.requestId,
@@ -288,6 +302,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }));
 
     case "request_failed":
+      if (!current) return state;
       return patchSession(state, current.id, (session) => ({
         ...session,
         requesting: false,
@@ -307,6 +322,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
     case "agent_event": {
       const { event } = action;
+      if (!current) return state;
 
       switch (event.name) {
         case AGENT_EVENTS.messageChunk:
@@ -452,6 +468,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         case AGENT_EVENTS.runtimeStateChanged:
         case AGENT_EVENTS.runtimeHealthChanged:
         case AGENT_EVENTS.jobProgress:
+        case AGENT_EVENTS.appLifecycleChanged:
+        case AGENT_EVENTS.defaultProfileUpdated:
           return state;
 
         default:
@@ -460,6 +478,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     }
 
     case "cancel_request":
+      if (!current) return state;
       return patchSession(state, current.id, (session) => ({
         ...session,
         status: { text: "正在停止", phase: "thinking" },
@@ -527,8 +546,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case "session_removed": {
       const remaining = state.sessions.filter((session) => session.id !== action.sessionId);
       if (remaining.length === 0) {
-        const fresh = createSession();
-        return { sessions: [fresh], activeSessionId: fresh.id };
+        // 删光就回到「没有任何对话」的空态，不偷偷补一个空会话。
+        return { sessions: [], activeSessionId: "" };
       }
       return {
         sessions: remaining,
