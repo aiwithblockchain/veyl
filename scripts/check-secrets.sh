@@ -135,7 +135,7 @@ for f in "${FILES[@]}"; do
   case "$base" in
     *.key|*.p12|*.pfx|*.pem|*.cer|*.mobileprovision|*.keystore|notary-profile*|.env*)
       if grep -q "$ALLOW_MARKER" "$f" 2>/dev/null; then :; else
-        print_hit "文件名：$f（匹配 $(printf '%s' "$NAME_PATTERNS")）"
+        print_hit "文件名：${f}（匹配 $(printf '%s' "$NAME_PATTERNS")）"
         continue
       fi
       ;;

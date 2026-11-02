@@ -51,10 +51,10 @@ for arg in "$@"; do
     --major) MODE="major" ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
-    -*) die "未知参数：$arg（见 --help）" ;;
+    -*) die "未知参数：${arg}（见 --help）" ;;
     *)
       if [ -n "$TARGET" ]; then
-        die "只能指定一个版本号（已有 $TARGET，又收到 $arg）"
+        die "只能指定一个版本号（已有 ${TARGET}，又收到 ${arg}）"
       fi
       TARGET="$arg"
       ;;

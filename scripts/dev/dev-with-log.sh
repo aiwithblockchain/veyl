@@ -67,7 +67,7 @@ print_log_path() {
 
 trap 'print_log_path' EXIT
 
-echo "启动 Veyl（RUST_LOG：$RUST_LOG_SOURCE）"
+echo "启动 Veyl（RUST_LOG：${RUST_LOG_SOURCE}）"
 echo "日志：$LOG_FILE"
 echo
 

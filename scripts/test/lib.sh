@@ -45,7 +45,7 @@ ci_step() {
 
   local took=$(( $(date +%s) - started ))
   printf '✗ %-28s %3ds\n' "$name" "$took"
-  printf '%s\n' "--- $name 输出（$log）---"
+  printf '%s\n' "--- $name 输出（${log}）---"
   cat "$log"
   printf '%s\n' "--- $name 输出结束 ---"
   return 1

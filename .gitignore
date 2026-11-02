@@ -42,7 +42,7 @@ notary-profile*
 
 # Packaging artifacts
 scripts/packaging/output/
-release/
+/release/
 *.dmg
 *.msi
 

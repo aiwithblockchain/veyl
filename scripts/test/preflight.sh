@@ -152,7 +152,7 @@ SUMS="$PKG_DIR/SHA256SUMS"
 
 if [ "$DRY_RUN" = "1" ]; then
   echo
-  echo "（--dry-run）将写入 $SUMS："
+  echo "（--dry-run）将写入 ${SUMS}："
   cat "$SUMS.new"
   rm -f "$SUMS.new"
 else
