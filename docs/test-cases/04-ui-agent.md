@@ -31,6 +31,10 @@
 | **TC-CHAT-007** | E | FR-2.2 | 同一请求内连续 3 个工具调用 | 1) 观察渲染性能 | 每个工具卡独立出现，顺序与调用顺序一致；滚动不卡顿（Chrome DevTools 无长任务 > 200ms） | P1 |
 | **TC-CHAT-008** | E | 4.3 设计（事件映射） | 构造思考内容 | 1) 发送 | 思考区默认折叠；展开可看；思考内容**不混入**正文气泡 | P2 |
 | **TC-CHAT-009** | E | FR-2.6、4.3 设计 | 流式中途停止 | 1) 停止后立即发新消息；2) 观察日志 | 新请求不因悬空 `tool_use` 被模型 API 拒绝（无 400）；日志有 `drop_dangling_tool_use` 或等效记录 | P1 |
+| **TC-CHAT-013** | E | contracts/events §4、FR-2.6 | 某次工具失败，返回的 `next_actions` 含「换到新加坡 01」；mock LLM 的 `/__stats` 可读 | 1) 点击该按钮；2) 观察请求计数与工具卡 | 点击**产生一条用户消息**（内容为该意图），不是直接调用工具；随后到达 mock LLM 的请求计数 +1；工具调用由 Agent 发起（`tool-call-start` 出现在一次新的 `request_id` 下）；**不得**出现「点了按钮就冒出一张 running 工具卡」 | P0 |
+| **TC-CHAT-014** | E | contracts/events §4、FR-2.4 | `next_actions` 指向 `CoreInstall`（`RUNTIME_NOT_INSTALLED` 场景） | 1) 点击；2) 观察是否先出确认卡 | 点击走「用户消息 → Agent → 审批卡」：**先出现确认卡**，未点「允许」前下载计数为 0；不得因为「用户点了按钮」就跳过审批 | P0 |
+
+> **为什么 `next_actions` 不能直连工具**：按钮只是给用户省打字，它不构成一次授权。直连会让「审批」形同虚设——用户点的是「换个节点」，实际执行的是模型决定的那次调用。契约 events §4 明确要求「不直接执行工具」，这条用例就是它的执行性断言。
 
 ---
 
@@ -61,6 +65,19 @@
 | **TC-SET-005** | M | FR-8.4 | 系统代理处于异常状态 | 1) 点「恢复系统代理」 | 恢复到备份值；若备份不存在则关闭代理；操作后有明确结果提示 | P0 |
 | **TC-SET-006** | E | FR-8.5 | 有配置与日志 | 1) 点清除本地数据；2) 选择保留 Key | 配置、日志、缓存被清除；Key 仍保留；会话历史按实现清除并提示 | P1 |
 | **TC-SET-007** | E | FR-8.5 | 同上 | 1) 清除时选择删除 Key | 需要二次确认；确认后 Keychain 条目消失 | P1 |
+
+### 4.1 `DeepseekSaveKey`：存下去，但可能验证不过
+
+契约 §4.15 的铁律是「**Key 先存下来，验证失败也返回 `ok: true`**」，靠 `verified` + `failure_reason` 表达真实结果。理由是反过来会诱导 Agent 反复重试、多次写钥匙串。
+
+| ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
+|---|---|---|---|---|---|---|
+| **TC-SET-008** | I + E | FR-8.1、contracts/tools §4.15 | mock LLM 对含 `invalid` 的 Key 返回 401 | 1) 调 `DeepseekSaveKey({"key":"sk-test-invalid"})`；2) 查返回值、钥匙串、界面文案 | `ok=true`；`data.saved=true`；`data.verified=false`；`data.failure_reason="invalid_key"`；Key **已写入钥匙串**；**UI 与 Agent 都必须提示「已保存，但该 Key 无效」**，只显示「已保存」算失败；不得自动重试保存 | P0 |
+| **TC-SET-009** | I | 同上 | mock LLM 不可达 | 1) 保存 | `ok=true`、`verified=false`、`failure_reason="network"`；提示区分「网络问题」与「Key 无效」，不引导用户去换 Key | P1 |
+| **TC-SET-010** | I | 同上 | mock 返回余额不足（402） | 1) 保存 | `failure_reason="insufficient_balance"`；提示去充值，而不是让用户重新申请 Key | P1 |
+| **TC-SET-011** | I | 同上、9.3 | 上述任一场景之后 | 1) 查 `data` / `content` / 事件 payload / 日志 | Key 明文出现 **0 次**；`failure_reason` 是枚举值，**不得**把上游错误响应原文透传给模型或 UI | P0 |
+
+> **字段名对齐提醒**：PM 指令里写的是「`validation=invalid`」，契约 `tools.md` §4.15 的实际字段是 `verified: boolean` + `failure_reason: "invalid_key" | "insufficient_balance" | "network" | null`。用例按契约写。若产品确实想要 `validation` 这个字段名，要先改契约再改用例，不要两边各写一套。
 
 ---
 

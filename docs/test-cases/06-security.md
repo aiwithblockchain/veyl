@@ -31,6 +31,19 @@
 
 ---
 
+## 2.1 事件载荷（`args_preview`）
+
+工具调用事件会带着参数在 UI 里渲染成卡片，也会被写进会话记录。**这是凭据最容易漏出去的地方**——它不经过日志脱敏那条链路。
+
+| ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
+|---|---|---|---|---|---|---|
+| **TC-SEC-022** | U + I | contracts/events §3 | 触发 `ProfileImport`（含 `node_id`）与 `VpnConnect` | 1) 抓取 `tool-call-start` 事件；2) 检查 `args_preview` | `key` / `uuid` / `password` / `token` / `short_id` 的值一律为 `***`；非敏感字段（`node_id`、`region`）保留原值；`args_preview` 只含白名单内的少量字段，**不是**完整入参 | P0 |
+| **TC-SEC-023** | U | contracts/events §3 | 构造嵌套三层的参数 `{node:{credentials:{uuid:"…"}}}` 与数组 `[{password:"…"}]` | 1) 生成 `args_preview` | 脱敏是**递归**的：任意层级、数组元素里的敏感键都被替换；不得只处理顶层键 | P0 |
+| **TC-SEC-024** | U | contracts/events §3 | 触发 `VpnConnect`（内部会生成完整 sing-box 配置） | 1) 抓取该轮全部 `tool-call-start` / `tool-call-end` payload；2) 搜索 `"outbounds"` / `"inbounds"` / `config_json` | **完整配置不出现在任何事件里**；工具结果只带摘要与少量结构化字段（状态、出口 IP、延迟）；配置只落本地文件，不进事件，也不进模型上下文 | P0 |
+| **TC-SEC-025** | U | contracts/events §3 | 键名变体：`apiKey` / `API_KEY` / `Password` / `accessToken` / `secret` | 1) 生成 `args_preview` | 匹配**大小写不敏感**；白名单之外的键默认**不输出**（宁可少显示，也不要「不认识的敏感键就原样带出去」） | P1 |
+
+---
+
 ## 3. 工具与提示注入
 
 | ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
