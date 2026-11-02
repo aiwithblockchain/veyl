@@ -83,7 +83,60 @@
 | **TC-EXC-022** | I | FR-3.9 | 启动一个不响应 Clash API 的进程 | 1) 连接 | 10 秒后判为 `runtime_not_ready`；进程被终止；系统代理未设置 | P1 |
 | **TC-EXC-023** | E | 4.3 设计 | Agent 运行中构造一次 panic（测试构建注入） | 1) 触发 panic；2) 观察应用与连接 | **应用不退出**；sing-box 连接不受影响（状态仍 running）；UI 提示「助手已重启」；可以继续发消息 | P1 |
 
-### 附加：其他失败路径
+### 8. 权限审批
+
+依据 `docs/contracts/tools.md` §2.2，审批有两层，**作用域不同，不要混用**：
+
+| 概念 | 作用域 | 绑定对象 | 生命周期 | 存在哪 |
+|---|---|---|---|---|
+| `ApprovalGrant` | 会话 | `(session_id, tool)` | 会话结束即失效 | 内存 |
+| `approval_id` | 单次调用 | `(tool, sha256(canonical_args))` | 5 分钟 | 内存 |
+
+| 工具 | `ApprovalPolicy` | 何时弹 | `tool_calls.approved` |
+|---|---|---|---|
+| `CoreInstall` | `always` | **每次** | `0` 拒绝 / `1` 允许一次 |
+| `VpnConnect` | `first_time_per_session` | **每会话首次** | `0` 拒绝 / `2` 允许本会话 |
+| `VpnDisconnect` | `never` | 不弹 | — |
+| 只读工具（`RuntimeStatus` / `CatalogSearch` / `RuntimeLogs` / `CoreListVersions` / `DiagnosticRun`） | `never` | 不弹 | — |
+
+判据不是「工具名」，而是「失败后用户能不能自己收拾干净」：装错版本会留下来源不明的可执行文件，用户无法自行判断；连错节点只需要断开。
+
+#### 8.1 `CoreInstall`（恒需审批）
+
+`CoreInstall` 的 policy 是 `always`，scope 恒为 `call`：**不存在「记住选择」**，同一次会话里第二次安装仍然要弹卡。
+
+| ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
+|---|---|---|---|---|---|---|
+| **TC-EXC-031** | I | FR-2.4、contracts/tools §2.3 | 运行时未安装；**绕过 UI** 直接走工具分发层调用 `CoreInstall`（无 Grant、无 `approval_id`） | 1) 发起调用；2) 观察结果；3) 查看 mock 下载请求计数 | 返回 `ok=false`，`error.code == "APPROVAL_REQUIRED"`；`details` 含 `approval_id` / `tool` / `summary` / `risk` / `scope:"call"` / `session_id` / `expires_at`；**下载请求计数为 0**；版本目录未创建；不留下半截文件 | P0 |
+| **TC-EXC-032** | E | FR-2.4 | 运行时未安装 | 1) 触发 `CoreInstall`；2) 卡上点「允许」；3) 等待完成 | 允许后 Host 记录 `approval_id`（绑定参数哈希）；工具带 `approval_id` 重试成功；`runtime_installs` 有记录；`tool_calls.approved == 1`；工具卡 waiting → running → ok | P0 |
+| **TC-EXC-033** | E | FR-2.4 | 已安装 1.14.4，再次触发安装 | 1) 再次调用 `CoreInstall`；2) 观察是否弹卡 | **仍然弹卡**（`always` 不产生 Grant）；本次授权不影响下一次 | P0 |
+| **TC-EXC-039** | I | contracts/tools §2.3 | 已拿到一次合法 `approval_id`（参数为 `{"version":"1.14.4"}`） | 1) 用同一 `approval_id` 调用 `{"version":"1.15.0"}`；2) 观察 | 被拒绝（`APPROVAL_REQUIRED` 或 `PERMISSION_DENIED`），**不得执行**：`approval_id` 绑定参数哈希，参数变了就不认；下载计数不增加 | P0 |
+
+#### 8.2 `VpnConnect`（会话内首次审批）
+
+连接会改系统代理，policy 是 `first_time_per_session`：第一次要问；批准后本会话内换节点、重连都不再打断。
+
+| ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
+|---|---|---|---|---|---|---|
+| **TC-EXC-034** | E | FR-2.4、contracts/tools §3.2 | 新会话；运行时已装；从未连接过 | 1) 输入「连到日本」；2) 观察卡片 | 弹出 `VpnConnect` 确认卡：显示目标节点、「将修改系统代理」、风险等级；`scope == "session"`，按钮文案为**「允许（本会话内不再询问）」**；卡片出现前不得启动 sing-box、不得改代理（断言进程与代理值为空） | P0 |
+| **TC-EXC-035** | E | FR-2.4 | 同会话已批准过一次，随后断开 | 1) 输入「连到新加坡」；2) 观察 | **不弹卡**，直接执行（Grant 命中，与参数无关）；调用**不需要带 `approval_id`**；`tool_calls.approved == 2`；切换成功 | P0 |
+| **TC-EXC-036** | E | FR-2.4 | 同会话已批准过 | 1) 新建会话；2) 输入「连到日本」 | **重新弹卡**：Grant 按 `session_id` 存，不跨会话继承；批准后正常连接 | P0 |
+
+#### 8.3 拒绝与授权失效
+
+| ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
+|---|---|---|---|---|---|---|
+| **TC-EXC-030** | E | FR-2.4、contracts/tools §2.3 | 新会话；`CoreInstall` 弹卡 | 1) 点「拒绝」；2) 观察 | 返回 `PERMISSION_DENIED`；下载计数为 0；进程与代理均未变动；**写入否定缓存**；`tool_calls.approved == 0` | P0 |
+| **TC-EXC-037** | E | contracts/tools §2.3 | 同会话刚拒绝过 `CoreInstall`（或 `VpnConnect`） | 1) 再次发起同一工具；2) 观察 | 同会话内**不再弹卡**，直接返回 `PERMISSION_DENIED`（否定缓存生效）；不执行任何动作 | P0 |
+| **TC-EXC-038** | E | contracts/tools §2.2、FR-2.5 | 同会话已批准过；随后退出应用 | 1) 重启并恢复该会话；2) 再连接 | **重新弹卡**：Grant **只存内存**，不落 SQLite、不随会话历史持久化；会话恢复的是消息记录，不是权限 | P0 |
+
+> **否定缓存与 Grant 的区别**：Grant 是「本会话允许」，否定缓存是「本会话别再问」。两者都只在内存、都随会话结束清空；新会话里一切重来。
+>
+> **批准不跳过校验**：批准的是「这个工具可以在本会话自动跑」，不是「跳过配置校验」。每次连接仍要生成配置、跑 `sing-box check`、验证出口 IP。
+>
+> **实现提醒**：所有审批判定必须在工具分发层完成，不能只靠 UI 隐藏按钮——否则绕过 UI 直接调用工具就能免审批（TC-EXC-031 测的就是这条）。
+
+### 9. 其他失败路径
 
 | ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
 |---|---|---|---|---|---|---|
@@ -93,16 +146,3 @@
 | **TC-EXC-027** | I | FR-5.6 | 目录服务返回 500 | 1) 查询节点 | 提示服务不可用；可重试；缓存仍可用 | P1 |
 | **TC-EXC-028** | M | FR-6.5 | macOS：拒绝 `networksetup` 的授权弹窗 | 1) 连接 | 不静默失败；给出「系统设置 → 网络 → 代理」的手动指引；sing-box 可保持运行或回滚，二者择一但必须**状态一致** | P1 |
 | **TC-EXC-029** | E | FR-2.6 | Agent 正在流式输出 | 1) 点停止；2) 再发一条新消息 | 停止后 loading 解除；**下一轮请求不被模型 API 以 400 拒绝**（悬空 `tool_use` 已被清理）；新消息正常响应 | P1 |
-| **TC-EXC-030** | E | FR-2.4 | 用户拒绝 `core_install` 权限卡 | 1) 输入「连到日本」；2) 在权限卡点「拒绝」 | 连接流程停止；助手说明需要安装运行时，不重复弹同一张卡超过 2 次；状态回到 idle；无残留进程 | P1 |
-
-### 8. 安装审批（`CoreInstall` 恒需审批）
-
-`CoreInstall` 是唯一会写磁盘、下载可执行文件的工具，**不存在「记住选择」**：同一次会话里第二次安装仍然要弹卡。下面三条把这条约束钉死。
-
-| ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
-|---|---|---|---|---|---|---|
-| **TC-EXC-031** | I | FR-2.4、4.3 权限映射 | 运行时未安装；构造一次**未经审批**直接执行的 `CoreInstall` 调用（绕过 UI，直接走工具分发层） | 1) 发起调用；2) 观察结果与磁盘；3) 查看 mock 的下载请求计数 | 返回 `ok=false`，`error_code=permission_denied`；**没有任何下载请求**（mock 计数为 0）；版本目录未创建；不留下半截文件；错误里给出「需要用户确认」而不是「内部错误」 | P0 |
-| **TC-EXC-032** | E | FR-2.4 | 运行时未安装 | 1) 触发 `CoreInstall`；2) 在卡上点「允许」；3) 等待完成 | 审批通过后工具**重试并成功**；`approval_id` 一次性，重放同一 `approval_id` 被拒绝；安装完成后 `runtime_installs` 有记录；工具卡状态从 waiting → running → ok | P0 |
-| **TC-EXC-033** | E | FR-2.4 | 已安装 1.14.4，再次触发安装（例如换版本或重装） | 1) 再次调用 `CoreInstall`；2) 观察是否弹卡 | **仍然弹权限卡**（不得因「上次已允许」而静默执行）；本次授权不影响下一次 | P0 |
-
-> **与其它工具的区别**：`VpnConnect` / `VpnDisconnect` 属于低风险，可按 `PermissionMode` 决策甚至记住；`CoreInstall` 每次都要问。判定依据是「是否会在用户机器上落一个新可执行文件」。

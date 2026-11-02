@@ -10,15 +10,15 @@
 
 | 文件 | 内容 | 用例数 |
 |---|---|---|
-| [01-main-flow.md](01-main-flow.md) | 首次启动 → 配 Key → 连接 → 断开 | 8 |
-| [02-exception.md](02-exception.md) | 7 类异常路径 + 安装审批 + 附加失败路径 | 33 |
+| [01-main-flow.md](01-main-flow.md) | 首次启动 → 配 Key → 连接 → 断开 | 9 |
+| [02-exception.md](02-exception.md) | 7 类异常路径 + 审批矩阵 + 附加失败路径 | 39 |
 | [03-runtime-config.md](03-runtime-config.md) | 运行时管理、安装校验、配置生成 | 30 |
 | [04-ui-agent.md](04-ui-agent.md) | 外壳、对话、工具卡、事件契约、设置、诊断、体验指标 | 32 |
 | [05-proxy-catalog.md](05-proxy-catalog.md) | 系统代理（macOS/Windows）、节点目录客户端 | 27 |
 | [06-security.md](06-security.md) | 密钥、暴露面、提示注入、完整性、崩溃隔离 | 21 |
 | [07-distribution.md](07-distribution.md) | 安装包、签名、公证、发布清单 | 19 |
 | [99-p2-backlog.md](99-p2-backlog.md) | 明确留到后续阶段的项 | — |
-| **合计** | | **170** |
+| **合计** | | **177** |
 
 ---
 
@@ -51,7 +51,7 @@
 | FR-2.1 | TC-CHAT-001 |
 | FR-2.2 | TC-CHAT-002、TC-CHAT-007 |
 | FR-2.3 | TC-CHAT-003 |
-| FR-2.4 | TC-CHAT-004、TC-EXC-030、TC-EXC-031、TC-EXC-032、TC-EXC-033 |
+| FR-2.4 | TC-MAIN-003、TC-CHAT-004、TC-EXC-030 ~ TC-EXC-039 |
 | FR-2.5 | TC-SHELL-005 |
 | FR-2.6 | TC-CHAT-005、TC-CHAT-006、TC-CHAT-009、TC-EXC-029 |
 | FR-2.7 | TC-MAIN-002、TC-MAIN-007、TC-EXC-001、TC-EXC-002 |
@@ -83,7 +83,7 @@
 | FR-6.4 | TC-EXC-016、TC-EXC-017、TC-EXC-018、TC-PXY-013 ~ 015 |
 | FR-6.5 | TC-EXC-028、TC-EXC-013 |
 | FR-7.1 | TC-MAIN-003 |
-| FR-7.2 | TC-MAIN-004 |
+| FR-7.2 | TC-MAIN-004、TC-MAIN-009 |
 | FR-7.3 | TC-EXC-005 |
 | FR-7.4 | 错误分类枚举表、TC-EXC-004、TC-EXC-007、TC-EXC-013 |
 | FR-7.5 | TC-MAIN-005、TC-MAIN-006、TC-EXC-004 |

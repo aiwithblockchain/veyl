@@ -110,7 +110,7 @@ selftest() {
   reply="$(curl -s -X POST "http://127.0.0.1:$LLM_PORT/v1/chat/completions" \
     -H 'Authorization: Bearer sk-test-valid' -H 'content-type: application/json' \
     -d '{"model":"deepseek-chat","stream":false,"messages":[{"role":"user","content":"连到日本 [scenario:connect-jp]"}]}')"
-  check "剧本首轮返回 catalog_search" "yes" "$(printf '%s' "$reply" | grep -q 'catalog_search' && echo yes || echo no)"
+  check "剧本首轮返回 CatalogSearch" "yes" "$(printf '%s' "$reply" | grep -q 'CatalogSearch' && echo yes || echo no)"
 
   echo "[selftest] echo"
   check "回显内容" "AIVPN_ECHO_OK" "$(curl -s "http://127.0.0.1:$ECHO_PORT/" | tr -d '\n')"

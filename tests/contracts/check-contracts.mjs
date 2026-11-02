@@ -9,7 +9,7 @@
 //   2. AGENT_EVENTS 的每个取值都被 src/state/chatStore.ts 的 switch 覆盖
 //   3. RuntimeStatus / RuntimeSnapshot 的序列化字段不含 clash_addr（契约 runtime.md §11）
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -101,6 +101,27 @@ check("RuntimeStatus / RuntimeSnapshot 快照不含 clash_addr", () => {
 
   if (!/pub struct Runtime(?:Status|Snapshot)\s*\{/.test(rust)) {
     problems.push("未找到 RuntimeStatus / RuntimeSnapshot 定义，检查脚本需要更新");
+  }
+  return problems;
+});
+
+// --- 4：剧本里的工具名必须是契约里的模型可见名 ---
+
+check("mock LLM 剧本的工具名都在 docs/contracts/tools.md 的工具总表里", () => {
+  const md = read("docs/contracts/tools.md");
+  const known = new Set();
+  for (const m of md.matchAll(/^\|\s*\d+\s*\|\s*`([A-Za-z]+)`\s*\|\s*`[A-Za-z]+`\s*\|/gm)) known.add(m[1]);
+  if (known.size === 0) throw new Error("未能从 docs/contracts/tools.md §3 解析出工具名");
+
+  const dir = join(ROOT, "tests", "fixtures", "llm-scenarios");
+  const problems = [];
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+    const scenario = JSON.parse(readFileSync(join(dir, f), "utf8"));
+    for (const turn of scenario.turns || []) {
+      for (const tc of turn.tool_calls || []) {
+        if (!known.has(tc.name)) problems.push(`${f} 里的工具名 "${tc.name}" 不在契约工具总表中`);
+      }
+    }
   }
   return problems;
 });

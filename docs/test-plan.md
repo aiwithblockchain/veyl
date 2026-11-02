@@ -251,11 +251,13 @@ E2E 不能依赖真实模型。`tests/fixtures/llm-scenarios/*.json` 定义「�
 | 6 | `core_install` 返回 `job_id` 且可轮询阶段（`downloading` / `verifying` / `extracting` / `installing` / `done`） | Bob | 下载失败用例要能停在中途 |
 | 7 | 测试构建暴露一个 `--no-tray` 或等效开关 | Alice | CI 无托盘环境 |
 | 8 | 系统代理写入/恢复封装成可替换的 trait，集成测试用真实实现，单元测试用假实现 | Bob | 代理备份/恢复逻辑要能跑单测 |
-| 9 | `Tool::name()` 的确切取值在 W1 定死 | Alice | mock LLM 剧本依赖它 |
+| 9 | `Tool::name()` 取契约里的 PascalCase 模型可见名（`CoreInstall` / `VpnConnect` / `CatalogSearch` …） | Alice | 已由 `docs/contracts/tools.md` §3 定死；mock 剧本与契约检查都按这个值校验 |
 | 10 | 提供一个「跳过 Keychain、直接注入 Key」的测试构建开关 | 两人 | CI 上 Keychain 交互不可靠 |
 | 11 | 审批判定必须在**工具分发层**执行，不能只靠 UI 隐藏按钮 | Alice | TC-EXC-031 要求「绕过 UI 直接调用也被拒」；只做 UI 拦截等于没做 |
 | 12 | `CoreInstall` 不走 remember 规则 | Alice | 安装会落可执行文件，每次都要问；TC-EXC-032 / 033 依赖这一点 |
 | 13 | 节点详情（含凭据）只允许 `ConfigBuilder` 读取，不得进入任何 `ToolResult` | Bob | TC-CAT-011 / 012 要能断言「凭据没进模型上下文」 |
+| 14 | `VpnConnect` 的授权按**会话**保存在内存：首次弹、会话内不再弹、新会话重置；拒绝写否定缓存（同会话不再弹）；两者都不写盘、不跨重启 | Alice | TC-EXC-034 ~ 038；写盘等于把一次同意变成永久同意 |
+| 15 | 出口 IP 检查在 P1 没有开关，默认设置下始终执行 | Bob | TC-MAIN-009；隐私模式不在 P1 范围 |
 
 ---
 

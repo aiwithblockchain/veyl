@@ -68,8 +68,8 @@ python3 -I tests/fixtures/make_archives.py
 请求里最后一条 user 消息带 `[scenario:connect-jp]` 即选择该剧本；未带则用默认剧本（`connect-jp`）。
 轮次由「请求里已有多少条 assistant 消息」决定，服务端无状态，便于并发测试。
 
-剧本里的工具名目前按 `phase-1-technical-design.md` §5.1 的契约写成 `catalog_search` / `vpn_connect` 这样的小写形式。
-**W1 需要 Alice 确认 `Tool::name()` 的实际返回值**；如果实现用 `CatalogSearch` 这类 PascalCase，改 `fixtures/llm-scenarios/*.json` 即可，代码不用动。
+剧本里的工具名使用契约规定的 **PascalCase 模型可见名**（`CatalogSearch` / `VpnConnect` / `CoreInstall` …，见 `docs/contracts/tools.md` §3）。
+`tests/contracts/check-contracts.mjs` 会校验剧本里的每个工具名都存在于契约工具总表，改名时不会再出现「剧本和实现对不上但没人发现」。
 
 观测接口：`GET /__stats`（请求计数）、`GET /__reset`、**`GET /__last_request`**（最近一次请求的完整消息数组，用于断言「节点凭据没有进入模型上下文」，对应 TC-CAT-012）。
 
