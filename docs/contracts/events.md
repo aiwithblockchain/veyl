@@ -391,7 +391,7 @@ UI 处理：
 - `scope = "call"` 时，按钮为「允许 / 拒绝」。
 - 结果通过 `invoke("ai_approval_decision", { approval_id, decision, scope })` 回传；`decision` 取 `"allow" | "deny"`。
 
-> 与 TweetPilot 的差异：TweetPilot 的权限交互走 Claurst `ManagedInteractivePermissionHandler` 的回调；AIVPN 增加一层显式事件，好处是 UI 不需要理解 Claurst 内部协议，代价是 Host 要做双向映射。**取舍理由**：UI 层不应依赖第三方 crate 的内部结构。
+> 与 TweetPilot 的差异：TweetPilot 的权限交互走 Claurst `ManagedInteractivePermissionHandler` 的回调；Veyl 增加一层显式事件，好处是 UI 不需要理解 Claurst 内部协议，代价是 Host 要做双向映射。**取舍理由**：UI 层不应依赖第三方 crate 的内部结构。
 
 ---
 
@@ -455,7 +455,7 @@ idle
 | 3 | 同上 | `ai-request-end` 只带 `result` 与字符串 `error` | 增加 `assistant_message_id`、结构化 `AivpnError`、`usage`、`duration_ms` | UI 需要按消息落库、需要区分错误类型 |
 | 4 | 同上 | 无 `runtime-state-changed` 等应用事件 | 新增 4 个应用事件 | 只有 AI 事件的话，非 AI 路径（崩溃重启、无 AI 模式）UI 拿不到状态 |
 | 5 | 同上 | 无 UI → Host 命令清单 | 新增 §5 | Alice 与 Bob 需要一份命令名，否则各写各的 |
-| 6 | `architecture.md` §4.8 | 通知用 JSON-RPC `notifications/aivpn.runtime_state` | 应用内用 Tauri event，JSON-RPC 仅留给 P2 的外部 MCP 宿主 | 进程内不需要 JSON-RPC 包装 |
+| 6 | `architecture.md` §4.8 | 通知用 JSON-RPC `notifications/veyl.runtime_state` | 应用内用 Tauri event，JSON-RPC 仅留给 P2 的外部 MCP 宿主 | 进程内不需要 JSON-RPC 包装 |
 
 ---
 

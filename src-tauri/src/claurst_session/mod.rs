@@ -33,7 +33,7 @@ use crate::tools::{
 use self::events::{SessionEmitter, CONTRACT_VERSION};
 use self::provider::DeepSeekCredentials;
 
-const SYSTEM_PROMPT: &str = r#"你是 AIVPN 的助手，只能通过提供的工具操作应用。
+const SYSTEM_PROMPT: &str = r#"你是 Veyl 的助手，只能通过提供的工具操作应用。
 
 规则：
 1. 不得声称连接成功，除非 RuntimeStatus 返回 running 且有出口 IP。

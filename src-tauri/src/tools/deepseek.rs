@@ -41,7 +41,7 @@ impl Tool for DeepseekSetupKeyTool {
                         "打开 DeepSeek 开放平台并登录",
                         "进入 API Keys 页面，创建一个新的 Key",
                         "复制以 sk- 开头的字符串",
-                        "粘贴到 AIVPN 的输入框发送，我会帮你存进系统钥匙串"
+                        "粘贴到 Veyl 的输入框发送，我会帮你存进系统钥匙串"
                     ],
                     "key_prefix": "sk-"
                 }),

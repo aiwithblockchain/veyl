@@ -17,12 +17,22 @@ const portIdx = args.indexOf("--port");
 const PORT = portIdx >= 0 ? Number(args[portIdx + 1]) : 18091;
 
 const scenarios = new Map();
-if (existsSync(SCENARIO_DIR)) {
-  for (const f of readdirSync(SCENARIO_DIR).filter((f) => f.endsWith(".json"))) {
-    const s = JSON.parse(readFileSync(join(SCENARIO_DIR, f), "utf8"));
-    scenarios.set(s.name, s);
+
+// 递归加载：llm-scenarios/*.json 与 llm-scenarios/errors/*.json 都算
+function loadScenarios(dir) {
+  if (!existsSync(dir)) return;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) {
+      loadScenarios(p);
+    } else if (e.name.endsWith(".json")) {
+      const s = JSON.parse(readFileSync(p, "utf8"));
+      if (s.name) scenarios.set(s.name, s);
+    }
   }
 }
+
+loadScenarios(SCENARIO_DIR);
 
 const stats = { requests: 0, byScenario: {}, authFailures: 0 };
 let lastRequest = null;

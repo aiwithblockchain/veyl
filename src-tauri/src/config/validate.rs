@@ -57,6 +57,40 @@ pub async fn install(
     Ok(active)
 }
 
+
+/// 按 profile 落盘**完整**配置（含凭据），权限 0600。
+/// SQLite 里永远不存凭据，完整配置只在这类磁盘文件里。
+pub async fn install_profile(
+    binary: &Path,
+    config_dir: &Path,
+    profile_id: &str,
+    value: &Value,
+    etag: Option<&str>,
+) -> RuntimeResult<PathBuf> {
+    fsutil::ensure_dir(config_dir)?;
+    let final_path = config_dir.join(format!("profile-{profile_id}.json"));
+
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| RuntimeError::Config(format!("serialize config: {e}")))?;
+    fsutil::write_atomic(&final_path, &bytes)?;
+
+    if let Err(error) = check(binary, &final_path).await {
+        let _ = std::fs::remove_file(&final_path);
+        return Err(error);
+    }
+    fsutil::set_private(&final_path)?;
+
+    let meta = serde_json::json!({
+        "schema": 1,
+        "profile_id": profile_id,
+        "etag": etag,
+        "written_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    });
+    fsutil::write_atomic_json(&config_dir.join(format!("profile-{profile_id}.meta.json")), &meta)?;
+
+    Ok(final_path)
+}
+
 fn truncate(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_string();

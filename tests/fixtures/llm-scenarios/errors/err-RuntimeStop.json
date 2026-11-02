@@ -1,0 +1,21 @@
+{
+  "name": "err-RuntimeStop",
+  "tool": "RuntimeStop",
+  "expect_error_code": "RUNTIME_EXITED",
+  "expect_ok": false,
+  "contract_backed": true,
+  "description": "进程已自行退出后再停止",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "RuntimeStop",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "text": "停止失败：运行时进程已经退出，无需停止。"
+    }
+  ]
+}

@@ -30,6 +30,7 @@ pub trait VpnToolServices: Send + Sync {
     async fn catalog_search(&self, query: CatalogQuery) -> anyhow::Result<Value>;
     async fn profile_list(&self) -> anyhow::Result<Value>;
     async fn profile_import(&self, node_id: &str, name: Option<String>) -> anyhow::Result<Value>;
+
     async fn profile_delete(&self, profile_id: &str) -> anyhow::Result<Value>;
 
     async fn vpn_connect(
@@ -162,5 +163,460 @@ impl VpnToolServices for NotWiredServices {
 
     async fn job_get(&self, _job_id: &str) -> anyhow::Result<Value> {
         not_wired("长任务查询")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 真实实现：store + RuntimeManager + ProxyController + CatalogClient
+// ---------------------------------------------------------------------------
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::catalog::CatalogClient;
+use crate::config::{self as vpn_config};
+use crate::proxy::{ProxyController, RecoveryOutcome};
+use crate::runtime::{Installer, RuntimeManager, StartPlan};
+use crate::store::Store;
+
+/// 服务层错误统一带契约错误码前缀（`CODE: 说明`），由信封层转成 `AivpnError`。
+fn svc_error(code: impl std::fmt::Display, message: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!("{code}: {message}")
+}
+
+pub struct WiredServices {
+    store: Arc<Store>,
+    manager: Arc<RuntimeManager>,
+    proxy: Arc<ProxyController>,
+    catalog: Arc<CatalogClient>,
+    installer: Installer,
+    data_dir: PathBuf,
+}
+
+impl WiredServices {
+    pub fn new(
+        store: Arc<Store>,
+        manager: Arc<RuntimeManager>,
+        proxy: Arc<ProxyController>,
+        catalog: Arc<CatalogClient>,
+        data_dir: impl Into<PathBuf>,
+    ) -> Self {
+        let data_dir = data_dir.into();
+        Self {
+            installer: Installer::new(&data_dir),
+            store,
+            manager,
+            proxy,
+            catalog,
+            data_dir,
+        }
+    }
+
+    fn config_dir(&self) -> PathBuf {
+        self.data_dir.join("config")
+    }
+
+    fn active_profile_id(&self) -> Option<String> {
+        let conn = self.store.conn();
+        crate::store::profiles::active(&conn)
+            .ok()
+            .flatten()
+            .map(|profile| profile.id)
+    }
+
+    fn profile_config_path(&self, profile_id: &str) -> PathBuf {
+        self.config_dir().join(format!("profile-{profile_id}.json"))
+    }
+
+    fn resolve_profile(&self, target: &ConnectTarget) -> anyhow::Result<crate::store::Profile> {
+        let conn = self.store.conn();
+        let found = match target {
+            ConnectTarget::Profile(id) => crate::store::profiles::get(&conn, id)
+                .map_err(|e| svc_error(e.code(), e))?,
+            ConnectTarget::Node(node_id) => crate::store::profiles::list(&conn)
+                .map_err(|e| svc_error(e.code(), e))?
+                .into_iter()
+                .find(|profile| profile.node_id.as_deref() == Some(node_id.as_str())),
+        };
+        found.ok_or_else(|| svc_error("NOT_FOUND", "找不到对应的本地配置，先导入节点"))
+    }
+
+    fn ensure_runtime_installed(&self) -> anyhow::Result<crate::runtime::InstalledRuntime> {
+        self.installer
+            .active()
+            .map_err(|e| svc_error(e.code(), e))?
+            .ok_or_else(|| svc_error("RUNTIME_NOT_INSTALLED", "还没有安装 sing-box，先调用 CoreInstall"))
+    }
+
+    /// 磁盘配置里读回端口与 secret；配置损坏时返回 None。
+    fn config_endpoints(value: &Value) -> Option<(u16, u16, String)> {
+        let mixed = value.get("inbounds")?.as_array()?.first()?.get("listen_port")?.as_u64()? as u16;
+        let clash = value.get("experimental")?.get("clash_api")?;
+        let controller = clash.get("external_controller")?.as_str()?;
+        let clash_port = controller.rsplit(':').next()?.parse().ok()?;
+        let secret = clash.get("secret")?.as_str()?.to_string();
+        Some((mixed, clash_port, secret))
+    }
+}
+
+#[async_trait]
+impl VpnToolServices for WiredServices {
+    async fn runtime_status(&self) -> anyhow::Result<Value> {
+        let status = self.manager.status().await;
+        serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
+    }
+
+    async fn runtime_start(&self, profile_id: Option<String>) -> anyhow::Result<Value> {
+        let target = match profile_id {
+            Some(id) => ConnectTarget::Profile(id),
+            None => ConnectTarget::Profile(
+                self.active_profile_id()
+                    .ok_or_else(|| svc_error("PRECONDITION_FAILED", "没有活动配置"))?,
+            ),
+        };
+        self.connect(target).await
+    }
+
+    async fn runtime_stop(&self, _force: bool) -> anyhow::Result<Value> {
+        let _ = self.proxy.disable();
+        self.manager.set_system_proxy_enabled(false).await;
+        let status = self
+            .manager
+            .stop()
+            .await
+            .map_err(|e| svc_error(e.code(), e))?;
+        let conn = self.store.conn();
+        let _ = crate::store::profiles::clear_active(&conn);
+        serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
+    }
+
+    async fn runtime_restart(&self, _reason: Option<String>) -> anyhow::Result<Value> {
+        let status = self
+            .manager
+            .restart()
+            .await
+            .map_err(|e| svc_error(e.code(), e))?;
+        serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
+    }
+
+    async fn runtime_logs(&self, lines: u32, _level: Option<String>) -> anyhow::Result<Value> {
+        let status = self.manager.status().await;
+        let content = match status.upstream_version {
+            Some(version) => {
+                let path = StartPlan::log_path(&self.manager.cfg, &version);
+                std::fs::read_to_string(path).unwrap_or_default()
+            }
+            None => String::new(),
+        };
+        let tail: Vec<&str> = content.lines().rev().take(lines as usize).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        Ok(json!({ "lines": tail, "truncated": false, "redacted_fields": ["uuid", "password"] }))
+    }
+
+    async fn core_list_versions(&self) -> anyhow::Result<Value> {
+        let manifest = crate::runtime::RuntimeManifest::builtin()
+            .map_err(|e| svc_error(e.code(), e))?;
+        let (platform, arch) = crate::runtime::RuntimeManifest::host_platform();
+        let available: Vec<Value> = manifest
+            .releases
+            .iter()
+            .filter(|release| release.platform == platform && release.arch == arch && !release.yanked)
+            .map(|release| json!({ "version": release.upstream_version, "license": release.license }))
+            .collect();
+        let versions = crate::store::runtime::list_versions(&self.store.conn())
+            .map_err(|e| svc_error(e.code(), e))?;
+        let active = versions
+            .iter()
+            .find(|row| row.state == "active")
+            .map(|row| row.version.clone());
+        let installed: Vec<Value> = versions
+            .into_iter()
+            .map(|row| json!({ "version": row.version, "state": row.state }))
+            .collect();
+        Ok(json!({
+            "active_version": active,
+            "installed": installed,
+            "available": available,
+            "manifest_source": "bundled",
+            "manifest_stale": false,
+        }))
+    }
+
+    async fn core_install(&self, version: &str) -> anyhow::Result<Value> {
+        let manifest = crate::runtime::RuntimeManifest::builtin()
+            .map_err(|e| svc_error(e.code(), e))?;
+        let release = manifest
+            .releases
+            .iter()
+            .find(|release| release.upstream_version == version && !release.yanked)
+            .ok_or_else(|| svc_error("NOT_FOUND", format!("清单里没有版本 {version}")))?
+            .clone();
+
+        let installed = self
+            .installer
+            .install(&release)
+            .await
+            .map_err(|e| svc_error(e.code(), e))?;
+
+        let row = crate::store::RuntimeVersionRow {
+            version: installed.version.clone(),
+            path: installed.dir.to_string_lossy().into_owned(),
+            binary_path: installed.binary.to_string_lossy().into_owned(),
+            sha256: installed.sha256.clone(),
+            state: "active".into(),
+            installed_at: installed.installed_at,
+        };
+        {
+            let conn = self.store.conn();
+            crate::store::runtime::upsert_version(&conn, &row)
+                .map_err(|e| svc_error(e.code(), e))?;
+        }
+
+        Ok(json!({
+            "version": installed.version,
+            "path": installed.binary.to_string_lossy(),
+            "installed": true,
+        }))
+    }
+
+    async fn catalog_search(&self, query: CatalogQuery) -> anyhow::Result<Value> {
+        let query = crate::catalog::NodeQuery {
+            region: query.region,
+            protocol: query.protocol.as_deref().and_then(|value| match value {
+                "vless_reality" => Some(crate::catalog::NodeProtocol::VlessReality),
+                "hysteria2" => Some(crate::catalog::NodeProtocol::Hysteria2),
+                _ => None,
+            }),
+            limit: query.limit.map(|limit| limit.min(50) as u8),
+            cursor: query.cursor,
+        };
+        let response = self
+            .catalog
+            .list_nodes(&query)
+            .await
+            .map_err(|e| svc_error(e.code.clone(), e))?;
+        Ok(json!({
+            "nodes": response.nodes,
+            "next_cursor": response.next_cursor,
+            "fetched_at": response.fetched_at,
+        }))
+    }
+
+    async fn profile_list(&self) -> anyhow::Result<Value> {
+        let conn = self.store.conn();
+        let profiles = crate::store::profiles::list(&conn).map_err(|e| svc_error(e.code(), e))?;
+        let items: Vec<Value> = profiles
+            .iter()
+            .map(|profile| {
+                json!({
+                    "id": profile.id,
+                    "node_id": profile.node_id,
+                    "name": profile.name,
+                    "protocol": profile.protocol,
+                    "region": profile.region,
+                    "is_active": profile.is_active,
+                    "created_at": crate::store::iso_from_ms(profile.created_at),
+                })
+            })
+            .collect();
+        let active = profiles.iter().find(|p| p.is_active).map(|p| p.id.clone());
+        Ok(json!({ "profiles": items, "active_profile_id": active }))
+    }
+
+    async fn profile_import(&self, node_id: &str, name: Option<String>) -> anyhow::Result<Value> {
+        let detail = self
+            .catalog
+            .node_detail(node_id)
+            .await
+            .map_err(|e| svc_error(e.code.clone(), e))?;
+
+        let snapshot = detail.node.non_secret_config();
+        let id = format!("prf_{node_id}");
+
+        // 数据库操作全部在这个块里完成，不跨 await 持有连接。
+        let (display, created) = {
+            let conn = self.store.conn();
+            match crate::store::profiles::get(&conn, &id).map_err(|e| svc_error(e.code(), e))? {
+                Some(existing) => (existing.name, false),
+                None => {
+                    let display = name.unwrap_or_else(|| detail.node.summary.name.clone());
+                    crate::store::profiles::create(
+                        &conn,
+                        &crate::store::NewProfile {
+                            id: &id,
+                            node_id: Some(node_id),
+                            name: &display,
+                            protocol: Some(detail.node.summary.protocol.as_str()),
+                            region: Some(detail.node.summary.region.as_str()),
+                            config: &snapshot,
+                        },
+                    )
+                    .map_err(|e| svc_error(e.code(), e))?;
+                    (display, true)
+                }
+            }
+        };
+
+        if created {
+            // 顺手把完整配置（含凭据）写到 0600 磁盘文件，下次离线也能连。
+            if let Ok(Some(installed)) = self.installer.active() {
+                let _ = self
+                    .write_profile_config(&installed, &id, &detail.node, Some(&detail.etag))
+                    .await;
+            }
+        }
+
+        Ok(json!({ "profile_id": id, "name": display, "created": created }))
+    }
+
+    async fn profile_delete(&self, profile_id: &str) -> anyhow::Result<Value> {
+        // 准入检查必须在审批之前：命中活动配置直接拒绝，不弹审批卡。
+        if let Some(active) = self.manager.active_profile_id().await {
+            if active == profile_id {
+                return Err(svc_error(
+                    "PRECONDITION_FAILED",
+                    "ACTIVE_PROFILE_IN_USE",
+                ));
+            }
+        }
+        {
+            let conn = self.store.conn();
+            crate::store::profiles::delete(&conn, profile_id)
+                .map_err(|e| svc_error(e.code(), e))?;
+        }
+        Ok(json!({ "deleted": true }))
+    }
+
+    async fn vpn_connect(
+        &self,
+        target: ConnectTarget,
+        _strategy: &str,
+    ) -> anyhow::Result<Value> {
+        self.connect(target).await
+    }
+
+    async fn vpn_disconnect(&self) -> anyhow::Result<Value> {
+        self.runtime_stop(false).await
+    }
+
+    async fn diag_run(&self, include_logs: bool) -> anyhow::Result<Value> {
+        let status = self.manager.status().await;
+        let proxy = self.proxy.status().ok();
+        let logs = if include_logs {
+            self.runtime_logs(50, None).await?.get("lines").cloned()
+        } else {
+            None
+        };
+        Ok(json!({
+            "runtime": status,
+            "system_proxy": proxy,
+            "logs": logs,
+        }))
+    }
+
+    async fn save_deepseek_key(&self, _key: &str) -> anyhow::Result<Value> {
+        Err(svc_error(
+            "UNSUPPORTED",
+            "DeepSeek Key 由钥匙串层保存，尚未接线",
+        ))
+    }
+
+    async fn job_get(&self, _job_id: &str) -> anyhow::Result<Value> {
+        Err(svc_error("NOT_FOUND", "P1 没有长任务"))
+    }
+}
+
+impl WiredServices {
+    /// 目录详情 → 生成配置 → 写到 config/profile-<id>.json（0600）→ sing-box check。
+    async fn write_profile_config(
+        &self,
+        installed: &crate::runtime::InstalledRuntime,
+        profile_id: &str,
+        node: &crate::catalog::NodeDescriptor,
+        etag: Option<&str>,
+    ) -> anyhow::Result<PathBuf> {
+        let mixed_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
+        let clash_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
+        let secret = vpn_config::random_secret();
+
+        let input = node
+            .clone()
+            .into_build_input(mixed_port, clash_port, secret)
+            .map_err(|e| svc_error(e.code(), e))?;
+        let value = vpn_config::build(&input).map_err(|e| svc_error(e.code(), e))?;
+
+        vpn_config::install_profile(&installed.binary, &self.config_dir(), profile_id, &value, etag)
+            .await
+            .map_err(|e| svc_error(e.code(), e))
+    }
+
+    /// 连接：优先用磁盘上已渲染的完整配置（含凭据，0600），没有才联网重拉。
+    async fn connect(&self, target: ConnectTarget) -> anyhow::Result<Value> {
+        let profile = self.resolve_profile(&target)?;
+        let installed = self.ensure_runtime_installed()?;
+
+        let config_path = self.profile_config_path(&profile.id);
+        let path = if config_path.is_file() {
+            config_path
+        } else {
+            let node_id = profile.node_id.clone().ok_or_else(|| {
+                svc_error(
+                    "PRECONDITION_FAILED",
+                    "本地没有可用配置，需要联网刷新一次",
+                )
+            })?;
+            let detail = self
+                .catalog
+                .node_detail(&node_id)
+                .await
+                .map_err(|e| svc_error(e.code.clone(), e))?;
+            self.write_profile_config(&installed, &profile.id, &detail.node, Some(&detail.etag))
+                .await?
+        };
+
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| svc_error("PRECONDITION_FAILED", format!("读取本地配置失败：{e}")))?;
+        let value: Value = serde_json::from_str(&text)
+            .map_err(|e| svc_error("PRECONDITION_FAILED", format!("本地配置损坏：{e}")))?;
+        let (mixed_port, clash_port, secret) = Self::config_endpoints(&value)
+            .ok_or_else(|| svc_error("PRECONDITION_FAILED", "本地配置缺少端口或 secret"))?;
+
+        let plan = StartPlan {
+            version: installed.version.clone(),
+            binary: installed.binary.clone(),
+            config_path: path,
+            work_dir: installed.dir.clone(),
+            log_path: StartPlan::log_path(&self.manager.cfg, &installed.version),
+            clash_addr: format!("127.0.0.1:{clash_port}"),
+            clash_secret: secret,
+            mixed_port,
+            profile_id: Some(profile.id.clone()),
+        };
+
+        let status = self
+            .manager
+            .start(plan)
+            .await
+            .map_err(|e| svc_error(e.code(), e))?;
+
+        if let Err(error) = self.proxy.enable(mixed_port) {
+            let _ = self.manager.stop().await;
+            return Err(svc_error("INTERNAL", format!("设置系统代理失败：{error}")));
+        }
+        self.manager.set_system_proxy_enabled(true).await;
+
+        {
+            let conn = self.store.conn();
+            let _ = crate::store::profiles::set_active(&conn, &profile.id);
+        }
+
+        serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
+    }
+
+    /// 启动时的崩溃恢复：有残留代理备份就恢复并清掉。
+    pub fn recover_after_crash(&self) -> anyhow::Result<RecoveryOutcome> {
+        self.proxy
+            .recover_stale()
+            .map_err(|e| svc_error("INTERNAL", e))
     }
 }

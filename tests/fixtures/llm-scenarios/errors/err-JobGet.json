@@ -1,0 +1,23 @@
+{
+  "name": "err-JobGet",
+  "tool": "JobGet",
+  "expect_error_code": "NOT_FOUND",
+  "expect_ok": false,
+  "contract_backed": true,
+  "description": "查询不存在或已过期的任务",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "JobGet",
+          "arguments": {
+            "job_id": "job-not-exist"
+          }
+        }
+      ]
+    },
+    {
+      "text": "该任务不存在或已超过 24 小时保留期。"
+    }
+  ]
+}

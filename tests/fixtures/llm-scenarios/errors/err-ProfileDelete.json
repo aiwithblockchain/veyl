@@ -1,0 +1,23 @@
+{
+  "name": "err-ProfileDelete",
+  "tool": "ProfileDelete",
+  "expect_error_code": "PRECONDITION_FAILED",
+  "expect_ok": false,
+  "contract_backed": true,
+  "description": "删除正在使用的配置（契约 §4.17，1.0.5 起拒绝）",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "ProfileDelete",
+          "arguments": {
+            "profile_id": "prf_active"
+          }
+        }
+      ]
+    },
+    {
+      "text": "这条配置正在被当前连接使用，请先断开或切换到其他配置再删除。"
+    }
+  ]
+}

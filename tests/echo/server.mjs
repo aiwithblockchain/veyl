@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 回显服务：用于验证「代理链路是否真的通」。
 // 启动：node tests/echo/server.mjs --port 18080
-// 断言方式：通过 mixed 入站请求 / 返回 AIVPN_ECHO_OK；直连时同样返回，
+// 断言方式：通过 mixed 入站请求 / 返回 VEYL_ECHO_OK；直连时同样返回，
 // 因此判断是否走了代理要看 sing-box 日志里的 inbound/outbound 行，而不是响应内容。
 
 import http from "node:http";
@@ -18,11 +18,11 @@ const server = http.createServer((req, res) => {
   if (req.url.startsWith("/slow")) {
     return setTimeout(() => {
       res.writeHead(200, { "content-type": "text/plain" });
-      res.end("AIVPN_ECHO_SLOW\n");
+      res.end("VEYL_ECHO_SLOW\n");
     }, 8000);
   }
   res.writeHead(200, { "content-type": "text/plain" });
-  res.end("AIVPN_ECHO_OK\n");
+  res.end("VEYL_ECHO_OK\n");
 });
 
 server.listen(PORT, "127.0.0.1", () => {

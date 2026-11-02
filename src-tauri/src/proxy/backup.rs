@@ -106,9 +106,7 @@ impl BackupStore for FileBackupStore {
 #[derive(Default)]
 pub struct MemoryBackupStore {
     inner: Mutex<Option<ProxyBackup>>,
-}
-
-impl MemoryBackupStore {
+}impl MemoryBackupStore {
     pub fn new() -> Self {
         Self::default()
     }
@@ -152,5 +150,59 @@ mod tests {
         assert!(store.load().unwrap().is_none());
         store.clear().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// 与 `store::proxy_backup` 表打交道；异常退出后恢复系统代理的唯一依据。
+pub struct SqliteBackupStore {
+    store: std::sync::Arc<crate::store::Store>,
+}
+
+impl SqliteBackupStore {
+    pub fn new(store: std::sync::Arc<crate::store::Store>) -> Self {
+        Self { store }
+    }
+}
+
+impl BackupStore for SqliteBackupStore {
+    fn load(&self) -> RuntimeResult<Option<ProxyBackup>> {
+        let conn = self.store.conn();
+        let row = crate::store::proxy_backup::load(&conn)
+            .map_err(|e| RuntimeError::State(format!("读取 proxy_backup: {e}")))?;
+        Ok(row.map(|row| ProxyBackup {
+            schema: 1,
+            platform: row.platform,
+            applied: Endpoint {
+                server: row
+                    .endpoint
+                    .rsplit_once(':')
+                    .map(|(server, _)| server.to_string())
+                    .unwrap_or_else(|| "127.0.0.1".to_string()),
+                port: row
+                    .endpoint
+                    .rsplit_once(':')
+                    .and_then(|(_, port)| port.parse().ok())
+                    .unwrap_or(0),
+            },
+            payload: row.payload,
+            created_at: row.created_at,
+        }))
+    }
+
+    fn save(&self, backup: &ProxyBackup) -> RuntimeResult<()> {
+        let conn = self.store.conn();
+        crate::store::proxy_backup::save(
+            &conn,
+            &backup.platform,
+            &backup.applied.to_string(),
+            &backup.payload,
+        )
+        .map_err(|e| RuntimeError::State(format!("写入 proxy_backup: {e}")))
+    }
+
+    fn clear(&self) -> RuntimeResult<()> {
+        let conn = self.store.conn();
+        crate::store::proxy_backup::clear(&conn)
+            .map_err(|e| RuntimeError::State(format!("清理 proxy_backup: {e}")))
     }
 }

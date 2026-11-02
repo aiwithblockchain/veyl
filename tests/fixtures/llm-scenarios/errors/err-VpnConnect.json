@@ -1,0 +1,23 @@
+{
+  "name": "err-VpnConnect",
+  "tool": "VpnConnect",
+  "expect_error_code": "PRECONDITION_FAILED",
+  "expect_ok": false,
+  "contract_backed": true,
+  "description": "未导入配置就连接",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "VpnConnect",
+          "arguments": {
+            "node_id": "seed-not-exist"
+          }
+        }
+      ]
+    },
+    {
+      "text": "连接失败：还没有该节点的本地配置，先导入再连接。"
+    }
+  ]
+}

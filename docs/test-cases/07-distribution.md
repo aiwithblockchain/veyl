@@ -32,15 +32,17 @@ Windows 签名一旦启用，本文件 §3 的用例从 P2 升级为 P0。
 
 | ID | 层 | 追溯 | 步骤 | 预期 | 优先级 |
 |---|---|---|---|---|---|
-| **TC-DIST-005** | D | 9.4 | `codesign --verify --deep --strict --verbose=2 AIVPN.app` | 退出码 0；无 `code object is not signed at all` | P0 |
-| **TC-DIST-006** | D | 9.4 | `spctl -a -vv AIVPN.app` | 输出 `accepted`；`source=Notarized Developer ID` | P0 |
-| **TC-DIST-007** | D | 9.4 | `codesign -dv --verbose=4 AIVPN.app` | `Authority=Developer ID Application: <公司名>`；`Timestamp` 存在；`Runtime Version` 存在（hardened runtime 已开） | P0 |
-| **TC-DIST-008** | D | 9.4 | `xcrun stapler validate AIVPN.dmg` | 输出 `The validate action worked!` | P0 |
+| **TC-DIST-005** | D | 9.4 | `codesign --verify --deep --strict --verbose=2 Veyl.app` | 退出码 0；无 `code object is not signed at all` | P0 |
+| **TC-DIST-006** | D | 9.4 | `spctl -a -vv Veyl.app` | 输出 `accepted`；`source=Notarized Developer ID` | P0 |
+| **TC-DIST-007** | D | 9.4 | `codesign -dv --verbose=4 Veyl.app` | `Authority=Developer ID Application: <公司名>`；`Timestamp` 存在；`Runtime Version` 存在（hardened runtime 已开） | P0 |
+| **TC-DIST-008** | D | 9.4 | `xcrun stapler validate Veyl.dmg` | 输出 `The validate action worked!` | P0 |
 | **TC-DIST-009** | M | 9.4 | 1) 在一台**从未安装过**的 Mac 上从浏览器下载 DMG；2) 双击打开；3) 拖入 Applications；4) 首次启动 | 不出现「无法验证开发者」；不出现「已损坏」；首次启动不被 Gatekeeper 阻止 | P0 |
 | **TC-DIST-010** | M | 9.4 | 上述机器**断网**后再启动一次 | 仍能启动（staple 生效，无需联网校验票据） | P0 |
-| **TC-DIST-011** | D | 双架构 | `lipo -archs AIVPN.app/Contents/MacOS/aivpn` | 同时含 `arm64` 与 `x86_64` | P0 |
+| **TC-DIST-011** | D | 双架构 | `lipo -archs Veyl.app/Contents/MacOS/veyl` | 同时含 `arm64` 与 `x86_64` | P0 |
 | **TC-DIST-012** | D | 嵌套二进制 | 1) 列出 `.app/Contents` 内所有 Mach-O；2) 逐个 `codesign --verify` | 全部已签名；无「未签名的嵌套二进制」 | P0 |
 | **TC-DIST-013** | M | 9.4 | 在 x86_64 Mac 或 Rosetta 下运行 | 正常运行；`uname -m` 与运行时架构匹配；下载的是 `amd64` 版本的 sing-box | P1 |
+
+> **可执行文件名以打包脚本为准**：`.app` 与安装包名跟随 `productName`（`Veyl`），但 `.app/Contents/MacOS/` 下的二进制名取决于 cargo crate 名，`veyl.exe` 同理取决于 Windows 的 crate 名。用例里写的是改名后的预期值；若 Bob 保留 `aivpn` 这个 crate 名，把命令里的 `veyl` / `veyl.exe` 换成 `aivpn` / `aivpn.exe` 即可——**这是唯一会随打包脚本变化的地方**。
 
 ---
 
@@ -51,9 +53,9 @@ Windows 签名一旦启用，本文件 §3 的用例从 P2 升级为 P0。
 | **TC-DIST-014** | M | 9.4 | 1) 干净 Win10 / Win11 从浏览器下载 MSI；2) 双击安装 | 安装可完成；出现 SmartScreen「Windows 已保护你的电脑」时，按文档步骤「更多信息 → 仍要运行」可继续 | P0 |
 | **TC-DIST-015** | M | 9.4 | 检查发布文档 | 文档中**存在**「更多信息 → 仍要运行」的图文说明；存在 `SHA256SUMS` 并提供校验命令 | P0 |
 | **TC-DIST-016** | M | 9.4 | 1) 安装后启动；2) 完成一次连接 | 功能与 macOS 一致（单测覆盖不到的路径在这里发现） | P0 |
-| **TC-DIST-017** | D | 9.4 | `Get-FileHash AIVPN-<ver>-x64.msi -Algorithm SHA256` 与 `SHA256SUMS` 比对 | 一致 | P0 |
+| **TC-DIST-017** | D | 9.4 | `Get-FileHash Veyl-<ver>-x64.msi -Algorithm SHA256` 与 `SHA256SUMS` 比对 | 一致 | P0 |
 | **TC-DIST-018** | M | 已知限制 | 1) 在启用 AppLocker/WDAC 策略的机器上安装 | 记录实际表现（预期：可能被拦截）。这是**已知限制**，需写进文档，不作为 P1 缺陷 | P2 |
-| **TC-DIST-019** | M | P5（签名启用后） | `signtool verify /pa /v AIVPN-<ver>-x64.msi` 及 `aivpn.exe` | 均通过；安装时显示公司发布者名称 | P2 → 启用签名后升 P0 |
+| **TC-DIST-019** | M | P5（签名启用后） | `signtool verify /pa /v Veyl-<ver>-x64.msi` 及 `veyl.exe` | 均通过；安装时显示公司发布者名称 | P2 → 启用签名后升 P0 |
 
 ---
 

@@ -1,18 +1,18 @@
 [package]
-name = "aivpn"
+name = "veyl"
 version = "0.1.0"
 description = "AIVPN — 用对话操作 VPN 的桌面客户端"
 edition = "2021"
 rust-version = "1.77"
 # 多出一个 selftest bin 时，tauri dev 的 `cargo run` 需要这个才能选中主程序。
-default-run = "aivpn"
+default-run = "veyl"
 
 [lib]
-name = "aivpn_lib"
+name = "veyl_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "aivpn-runtime-selftest"
+name = "veyl-runtime-selftest"
 path = "src/bin/runtime_selftest.rs"
 
 [build-dependencies]
@@ -55,6 +55,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

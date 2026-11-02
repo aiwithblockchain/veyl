@@ -82,7 +82,7 @@ pub struct Installer {
 impl Installer {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let http = reqwest::Client::builder()
-            .user_agent(concat!("aivpn/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("veyl/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))
             .build()

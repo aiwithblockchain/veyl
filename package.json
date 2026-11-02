@@ -1,5 +1,5 @@
 {
-  "name": "aivpn",
+  "name": "veyl",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
+    "icons": "python3 scripts/generate_icons.py",
     "app:dev": "tauri dev",
     "app:build": "tauri build"
   },

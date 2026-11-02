@@ -27,7 +27,7 @@
 
 | 项 | 值 |
 |---|---|
-| Base URL | `https://api.aivpn.<tld>/v1` |
+| Base URL | `https://api.veyl.<tld>/v1` |
 | 传输 | HTTPS only，最低 TLS 1.2 |
 | 内容类型 | `application/json; charset=utf-8` |
 | 鉴权 | `Authorization: Bearer <device_token>` |
@@ -102,7 +102,7 @@ type RegisterDeviceResponse = ApiOk<{
 客户端要求：
 
 1. `device_id` 存 SQLite（明文）。
-2. `device_token` 存**系统钥匙串**（`aivpn.device_token`），不得落 SQLite、不得进日志、不得进模型上下文。
+2. `device_token` 存**系统钥匙串**（`veyl.device_token`），不得落 SQLite、不得进日志、不得进模型上下文。
 3. 注册失败不阻塞应用启动：进入离线模式，用缓存节点列表（若有），否则提示手动导入。
 
 ### 2.2 `GET /v1/devices/me`（P2）

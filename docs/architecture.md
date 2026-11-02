@@ -1,4 +1,4 @@
-# AIVPN 架构文档
+# Veyl 架构文档
 
 > 版本：v0.2
 > 日期：2026-10-30
@@ -26,7 +26,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ aivpn-app（Tauri 主进程，Rust + WebView）                     │
+│ veyl-app（Tauri 主进程，Rust + WebView）                     │
 │                                                              │
 │  ┌────────────────┐   Tauri invoke   ┌────────────────────┐  │
 │  │ WebView (TS)   │ ◄──────────────► │ Rust Host          │  │
@@ -53,9 +53,9 @@
 
 | 进程 | 语言 | 职责 | 崩溃影响 | 谁负责重启 |
 |---|---|---|---|---|
-| `aivpn-app` | Rust + TS | UI、Agent（Claurst crates）、工具、Runtime Manager、审批、存储 | 全部结束 | 用户 / 系统 |
+| `veyl-app` | Rust + TS | UI、Agent（Claurst crates）、工具、Runtime Manager、审批、存储 | 全部结束 | 用户 / 系统 |
 | `sing-box` | Go（官方） | 代理数据面、Clash API、V2Ray Stats API | 连接中断，UI 仍可用 | Runtime Manager |
-| `aivpn-mcp`（P2） | Rust | 外部宿主的 MCP 桥 | 外部 Agent 中断 | 外部宿主 |
+| `veyl-mcp`（P2） | Rust | 外部宿主的 MCP 桥 | 外部 Agent 中断 | 外部宿主 |
 
 **设计约束**
 
@@ -73,8 +73,8 @@
 | UI ↔ Host | Tauri invoke / events | 进程内 | 无 |
 | Agent ↔ 工具 | 直接函数调用（Claurst `Tool` trait） | 进程内 | 无 |
 | Host ↔ sing-box | HTTP over TCP | `127.0.0.1:<随机端口>` | `Authorization: Bearer <随机 secret>` |
-| 外部宿主 ↔ Host（P2） | MCP stdio → 本地 JSON-RPC | `aivpn.sock`（0600） | 文件权限 + 一次性握手 Token |
-| Host ↔ 控制面 | HTTPS + WebSocket | `api.aivpn.*` | 钱包签名会话 |
+| 外部宿主 ↔ Host（P2） | MCP stdio → 本地 JSON-RPC | `veyl.sock`（0600） | 文件权限 + 一次性握手 Token |
+| Host ↔ 控制面 | HTTPS + WebSocket | `api.veyl.*` | 钱包签名会话 |
 
 > 注意：sing-box 的 Clash API 官方只支持 TCP 监听地址，**不支持 Unix socket**。因此控制通道用回环 TCP：端口随机、`secret` 每次启动随机生成、只绑 `127.0.0.1`。
 
@@ -257,9 +257,9 @@ Profile（用户配置）
 ### 3.1 分发结构
 
 ```
-https://cdn.aivpn.local/runtime/{channel}/{platform}-{arch}/manifest.json
-https://cdn.aivpn.local/runtime/{channel}/{platform}-{arch}/manifest.json.sig
-https://cdn.aivpn.local/runtime/artifacts/{upstream_version}/{platform}-{arch}.{ext}
+https://cdn.veyl.local/runtime/{channel}/{platform}-{arch}/manifest.json
+https://cdn.veyl.local/runtime/{channel}/{platform}-{arch}/manifest.json.sig
+https://cdn.veyl.local/runtime/artifacts/{upstream_version}/{platform}-{arch}.{ext}
 ```
 
 - `channel`：`stable` | `beta`
@@ -274,14 +274,14 @@ https://cdn.aivpn.local/runtime/artifacts/{upstream_version}/{platform}-{arch}.{
   "schema": 1,
   "channel": "stable",
   "generated_at": "2026-10-30T12:00:00Z",
-  "key_id": "aivpn-2026-01",
+  "key_id": "veyl-2026-01",
   "releases": [
     {
       "upstream_version": "1.14.4",
       "platform": "darwin",
       "arch": "arm64",
       "artifact": {
-        "url": "https://cdn.aivpn.local/runtime/artifacts/1.14.4/darwin-arm64.tar.gz",
+        "url": "https://cdn.veyl.local/runtime/artifacts/1.14.4/darwin-arm64.tar.gz",
         "sha256": "3f9a...c21e",
         "size": 29186204,
         "format": "tar.gz"
@@ -326,7 +326,7 @@ https://cdn.aivpn.local/runtime/artifacts/{upstream_version}/{platform}-{arch}.{
 
 ```json
 {
-  "key_id": "aivpn-2026-01",
+  "key_id": "veyl-2026-01",
   "alg": "ed25519",
   "signature": "base64..."
 }
@@ -383,7 +383,7 @@ https://cdn.aivpn.local/runtime/artifacts/{upstream_version}/{platform}-{arch}.{
 
 > **已冻结**：P1 工具清单、入参 schema、返回结构、权限与审批以 `docs/contracts/tools.md` v1.0.5 为准；Tauri 事件以 `docs/contracts/events.md` v1.0.5 为准。
 >
-> **重要更正**：Claurst 的 `ToolResult` 实际是 `{ content, is_error, metadata, images }`，不是本节 §4.2 写的 `{ ok, data, summary, next_actions }`。AIVPN 的结构化信封放在 `metadata.aivpn`，模型只读 `content`。本节 §4.2 仅作为「信封内容长什么样」的示意，不是 Rust 类型。
+> **重要更正**：Claurst 的 `ToolResult` 实际是 `{ content, is_error, metadata, images }`，不是本节 §4.2 写的 `{ ok, data, summary, next_actions }`。Veyl 的结构化信封放在 `metadata.aivpn`，模型只读 `content`。本节 §4.2 仅作为「信封内容长什么样」的示意，不是 Rust 类型。
 
 ### 4.1 传输与命名
 
@@ -678,7 +678,7 @@ https://cdn.aivpn.local/runtime/artifacts/{upstream_version}/{platform}-{arch}.{
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "notifications/aivpn.runtime_state",
+  "method": "notifications/veyl.runtime_state",
   "params": {
     "state": "degraded",
     "version": "1.14.4",
@@ -693,7 +693,7 @@ https://cdn.aivpn.local/runtime/artifacts/{upstream_version}/{platform}-{arch}.{
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "notifications/aivpn.job_progress",
+  "method": "notifications/veyl.job_progress",
   "params": {
     "job_id": "job_01J...",
     "stage": "downloading",
@@ -857,9 +857,9 @@ guide_verify → 有 Token 查 API；无则等控制面注册/探测 IP:22
 
 | 平台 | 路径 |
 |---|---|
-| macOS | `~/Library/Application Support/AIVPN/` |
-| Windows | `%LOCALAPPDATA%\AIVPN\` |
-| Linux | `~/.local/share/aivpn/` |
+| macOS | `~/Library/Application Support/Veyl/` |
+| Windows | `%LOCALAPPDATA%\Veyl\` |
+| Linux | `~/.local/share/veyl/` |
 
 **原子性**：`runtime-state.json` 与 active 指针必须写临时文件后 `rename`。
 

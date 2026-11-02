@@ -1,5 +1,11 @@
 import type { RuntimeView } from "../agent/protocol";
 
+export interface DeleteNotice {
+  text: string;
+  /** 有值时渲染「仍要删除」按钮（配置正在被连接使用）。 */
+  confirmProfileId?: string;
+}
+
 const STATE_LABEL: Record<RuntimeView["state"], string> = {
   idle: "未连接",
   starting: "启动中",
@@ -20,15 +26,24 @@ function formatUptime(seconds: number | null): string {
 export function StatusPanel({
   status,
   onCollapse,
+  onDeleteProfile,
+  onConfirmDelete,
+  deleteNotice,
 }: {
   status: RuntimeView;
   onCollapse: () => void;
+  onDeleteProfile: (profileId: string) => void;
+  onConfirmDelete: (profileId: string) => void;
+  deleteNotice: DeleteNotice | null;
 }) {
   const checks = [
     { label: "进程", ok: status.health.process },
     { label: "控制面", ok: status.health.clash_api },
     { label: "数据面", ok: status.health.data_plane },
   ];
+
+  // 空串也算「取不到」，统一显示「未知」，不要留空白。
+  const exitIp = status.health.exit_ip?.trim() || null;
 
   return (
     <aside className="status-panel">
@@ -50,7 +65,7 @@ export function StatusPanel({
           <div className="status-hero__state">{STATE_LABEL[status.state]}</div>
           <div className="status-hero__detail">
             {status.state === "running"
-              ? `出口 ${status.health.exit_ip ?? "未知"}`
+              ? `出口 ${exitIp ?? "未知"}`
               : status.system_proxy_enabled
                 ? "系统代理仍指向本地"
                 : "系统代理未改动"}
@@ -112,7 +127,18 @@ export function StatusPanel({
           </div>
           <div>
             <dt>配置</dt>
-            <dd>{status.profile_id ?? "—"}</dd>
+            <dd className="status-rows__with-action">
+              {status.profile_id ?? "—"}
+              {status.profile_id ? (
+                <button
+                  type="button"
+                  className="status-rows__danger"
+                  onClick={() => onDeleteProfile(status.profile_id as string)}
+                >
+                  删除
+                </button>
+              ) : null}
+            </dd>
           </div>
           <div>
             <dt>连接数</dt>
@@ -120,6 +146,22 @@ export function StatusPanel({
           </div>
         </dl>
       </section>
+
+      {deleteNotice ? (
+        <section className="status-section">
+          <div className="status-section__label">提示</div>
+          <p className="status-section__hint">{deleteNotice.text}</p>
+          {deleteNotice.confirmProfileId ? (
+            <button
+              type="button"
+              className="status-confirm"
+              onClick={() => onConfirmDelete(deleteNotice.confirmProfileId as string)}
+            >
+              仍要删除
+            </button>
+          ) : null}
+        </section>
+      ) : null}
 
       {status.last_error ? (
         <section className="status-section status-section--error">

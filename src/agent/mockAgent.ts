@@ -15,6 +15,15 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = () => new Date().toISOString();
 const CHUNK_INTERVAL = 16;
 
+/** mock 通道固定出口 IP，方便自动化断言。 */
+export const MOCK_EXIT_IP = "203.0.113.7";
+
+/**
+ * 会话内首次确认的工具（契约 tools.md §2.2）。
+ * 其余需要确认的工具都是 `always`，每次都弹。
+ */
+const SESSION_SCOPED_TOOLS = new Set(["VpnConnect"]);
+
 function splitForStreaming(text: string): string[] {
   const chars = Array.from(text);
   const out: string[] = [];
@@ -33,6 +42,25 @@ export class MockAgentBridge implements AgentBridge {
   private cancelled = new Set<string>();
   private approvals = new Map<string, (decision: ApprovalDecision) => void>();
   private activeRequests = new Set<string>();
+  /** 会话级授权：sessionId → 已放行的工具名。只存内存，新会话用新的 key。 */
+  private grants = new Map<string, Set<string>>();
+  /** 装过一次就不再走安装流程（真实链路同理，已安装时不重复装）。 */
+  private installed = false;
+
+  private hasGrant(sessionId: string, tool: string): boolean {
+    return this.grants.get(sessionId)?.has(tool) ?? false;
+  }
+
+  private addGrant(sessionId: string, tool: string): void {
+    const granted = this.grants.get(sessionId) ?? new Set<string>();
+    granted.add(tool);
+    this.grants.set(sessionId, granted);
+  }
+
+  /** 会话销毁时调用；界面上开新会话会拿到新的 sessionId，天然隔离。 */
+  clearSessionGrants(sessionId: string): void {
+    this.grants.delete(sessionId);
+  }
 
   private runtime: RuntimeSnapshot = {
     contract_version: CONTRACT_VERSION,
@@ -266,7 +294,8 @@ export class MockAgentBridge implements AgentBridge {
   private async run(sessionId: string, requestId: string, assistantId: string, text: string) {
     if (text.includes("断开")) return this.disconnectFlow(requestId, assistantId);
     if (text.includes("状态")) return this.statusFlow(requestId, assistantId);
-    if (text.includes("安装")) return this.installOnlyFlow(requestId, assistantId);
+    if (text.includes("安装")) return this.installOnlyFlow(sessionId, requestId, assistantId);
+    if (/key/i.test(text)) return this.saveKeyFlow(requestId, assistantId);
 
     if (!this.status(requestId, assistantId, "正在理解你的意图", "thinking")) return;
     if (
@@ -280,6 +309,9 @@ export class MockAgentBridge implements AgentBridge {
     }
 
     this.status(requestId, assistantId, "检查 sing-box 运行时", "preparing_tool");
+    const versionSummary = this.installed
+      ? "已安装 1.14.4（active）"
+      : "未安装，可安装 1.14.4";
     if (
       !(await this.tool(
         requestId,
@@ -287,58 +319,62 @@ export class MockAgentBridge implements AgentBridge {
         "CoreListVersions",
         "查询可用版本",
         640,
-        "已安装 0 个版本，可安装 1.14.4。",
+        versionSummary,
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
     }
 
-    if (
-      !(await this.type(
-        requestId,
-        assistantId,
-        "本地还没有安装 sing-box。我先装一个官方版本，再帮你连到日本。",
-      ))
-    ) {
-      return this.finish(requestId, assistantId, "cancelled", null);
-    }
+    if (!this.installed) {
+      if (
+        !(await this.type(
+          requestId,
+          assistantId,
+          "本地还没有安装 sing-box。我先装一个官方版本，再帮你连到日本。",
+        ))
+      ) {
+        return this.finish(requestId, assistantId, "cancelled", null);
+      }
 
-    const approved = await this.requestApproval(
-      sessionId,
-      requestId,
-      "CoreInstall",
-      "下载并安装 sing-box 1.14.4（约 28 MB）",
-      "call",
-      "medium",
-    );
-    if (!approved) {
-      await this.type(requestId, assistantId, "好的，先不安装。需要的时候跟我说「安装运行时」。");
-      return this.finish(requestId, assistantId, "success", "已取消安装");
-    }
-
-    if (
-      !(await this.tool(
+      const approved = await this.requestApproval(
+        sessionId,
         requestId,
-        assistantId,
         "CoreInstall",
-        "安装 1.14.4",
-        1900,
-        "已安装 sing-box 1.14.4。",
-        {
-          permissionLevel: "execute",
-          approvalPolicy: "always",
-          argsPreview: { version: "1.14.4" },
-        },
-      ))
-    ) {
-      return this.finish(requestId, assistantId, "cancelled", null);
-    }
-    this.transition("idle", "process_ready", {
-      upstream_version: "1.14.4",
-      pid: null,
-    });
+        "下载并安装 sing-box 1.14.4（约 28 MB）",
+        "call",
+        "medium",
+      );
+      if (!approved) {
+        await this.type(requestId, assistantId, "好的，先不安装。需要的时候跟我说「安装运行时」。");
+        return this.finish(requestId, assistantId, "success", "已取消安装");
+      }
 
-    await this.type(requestId, assistantId, "运行时装好了。正在查日本节点。");
+      if (
+        !(await this.tool(
+          requestId,
+          assistantId,
+          "CoreInstall",
+          "安装 1.14.4",
+          1900,
+          "已安装 sing-box 1.14.4。",
+          {
+            permissionLevel: "execute",
+            approvalPolicy: "always",
+            argsPreview: { version: "1.14.4" },
+          },
+        ))
+      ) {
+        return this.finish(requestId, assistantId, "cancelled", null);
+      }
+      this.installed = true;
+      this.transition("idle", "process_ready", {
+        upstream_version: "1.14.4",
+        pid: null,
+      });
+
+      await this.type(requestId, assistantId, "运行时装好了。正在查日本节点。");
+    }
+
     if (
       !(await this.tool(
         requestId,
@@ -385,6 +421,15 @@ export class MockAgentBridge implements AgentBridge {
       return this.finish(requestId, assistantId, "cancelled", null);
     }
 
+    // 先写健康快照再切状态：状态变更会触发 UI 重拉 runtime_status，
+    // 反过来的话快照里 exit_ip 还是旧值，面板会短暂显示「未知」。
+    this.health({
+      process: true,
+      clash_api: true,
+      data_plane: true,
+      exit_ip: MOCK_EXIT_IP,
+      consecutive_failures: 0,
+    });
     this.transition("running", "process_ready", {
       pid: 48213,
       uptime_seconds: 1,
@@ -392,16 +437,8 @@ export class MockAgentBridge implements AgentBridge {
       system_proxy_enabled: true,
       connections: 3,
     });
-    this.health({
-      process: true,
-      clash_api: true,
-      data_plane: true,
-      exit_ip: "203.0.113.7",
-      consecutive_failures: 0,
-    });
 
-    const reply =
-      "已连接到「东京 01」，出口 IP 203.0.113.7，系统代理已生效。要换节点随时说。";
+    const reply = `已连接到「东京 01」，出口 IP ${MOCK_EXIT_IP}，系统代理已生效。要换节点随时说。`;
     await this.type(requestId, assistantId, reply);
     this.finish(requestId, assistantId, "success", reply);
   }
@@ -416,6 +453,12 @@ export class MockAgentBridge implements AgentBridge {
     argsPreview?: Record<string, unknown>,
   ): Promise<boolean> {
     if (this.cancelled.has(requestId)) return false;
+
+    // 会话内首次：已授权就直接放行，不再弹卡。
+    const sessionScoped = SESSION_SCOPED_TOOLS.has(tool);
+    if (sessionScoped && this.hasGrant(sessionId, tool)) {
+      return true;
+    }
 
     const approvalId = `apr_${Math.random().toString(36).slice(2, 9)}`;
     this.status(requestId, assistantIdFor(requestId), `等待确认：${summary}`, "waiting_permission");
@@ -437,7 +480,32 @@ export class MockAgentBridge implements AgentBridge {
     });
 
     const decision = await this.waitApproval(approvalId);
-    return decision === "allow" && !this.cancelled.has(requestId);
+    const allowed = decision === "allow" && !this.cancelled.has(requestId);
+
+    // 只有「允许」才记授权；拒绝不记，下次仍然弹（验收口径）。
+    if (allowed && sessionScoped) this.addGrant(sessionId, tool);
+    return allowed;
+  }
+
+  // 演示「全字段被脱敏 → 整个 args_preview 省略」：卡片上不出现参数行。
+  private async saveKeyFlow(requestId: string, assistantId: string) {
+    this.status(requestId, assistantId, "保存 Key", "preparing_tool");
+    if (
+      !(await this.tool(
+        requestId,
+        assistantId,
+        "DeepseekSaveKey",
+        "保存到系统钥匙串",
+        520,
+        "Key 已保存到系统钥匙串，并验证可用。",
+        { permissionLevel: "write", argsPreview: undefined },
+      ))
+    ) {
+      return this.finish(requestId, assistantId, "cancelled", null);
+    }
+    const reply = "Key 已经存进系统钥匙串了，之后不会再让你输入。";
+    await this.type(requestId, assistantId, reply);
+    this.finish(requestId, assistantId, "success", reply);
   }
 
   private async statusFlow(requestId: string, assistantId: string) {
@@ -456,23 +524,45 @@ export class MockAgentBridge implements AgentBridge {
     this.finish(requestId, assistantId, "success", reply);
   }
 
-  private async installOnlyFlow(requestId: string, assistantId: string) {
+  // `always` 类工具：每次都要确认，不查也不写 Grant。
+  private async installOnlyFlow(sessionId: string, requestId: string, assistantId: string) {
     this.status(requestId, assistantId, "准备安装运行时", "preparing_tool");
+
+    const approved = await this.requestApproval(
+      sessionId,
+      requestId,
+      "CoreInstall",
+      "下载并安装 sing-box 1.14.4（约 28 MB）",
+      "call",
+      "medium",
+    );
+    if (!approved) {
+      await this.type(requestId, assistantId, "好的，不装了。");
+      return this.finish(requestId, assistantId, "success", "已取消安装");
+    }
+
     if (
       !(await this.tool(
         requestId,
         assistantId,
-        "RuntimeStart",
-        "启动运行时",
-        900,
-        "运行时已启动，PID 48213。",
-        { permissionLevel: "write" },
+        "CoreInstall",
+        "安装 1.14.4",
+        1900,
+        "已安装 sing-box 1.14.4。",
+        {
+          permissionLevel: "execute",
+          approvalPolicy: "always",
+          argsPreview: { version: "1.14.4" },
+        },
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
     }
-    await this.type(requestId, assistantId, "运行时已经启动了。");
-    this.finish(requestId, assistantId, "success", "运行时已启动");
+
+    this.installed = true;
+    const reply = "运行时已经装好了，随时可以连节点。";
+    await this.type(requestId, assistantId, reply);
+    this.finish(requestId, assistantId, "success", reply);
   }
 
   private async disconnectFlow(requestId: string, assistantId: string) {
@@ -493,7 +583,6 @@ export class MockAgentBridge implements AgentBridge {
     this.transition("idle", "stopped", {
       pid: null,
       uptime_seconds: null,
-      profile_id: null,
       system_proxy_enabled: false,
       connections: null,
     });
@@ -520,9 +609,17 @@ export class MockAgentBridge implements AgentBridge {
     resolve(decision);
   }
 
+  async deleteProfile(profileId: string): Promise<void> {
+    if (this.runtime.state === "running" && this.runtime.profile_id === profileId) {
+      throw new Error("当前连接仍在使用这个配置，请先断开再删除。");
+    }
+    this.runtime = { ...this.runtime, profile_id: null };
+  }
+
   dispose(): void {
     this.listeners.clear();
     this.approvals.clear();
+    this.grants.clear();
   }
 }
 

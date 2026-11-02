@@ -64,6 +64,10 @@ export class TauriAgentBridge implements AgentBridge {
     await invoke("ai_approval_decision", { approvalId, decision, scope });
   }
 
+  async deleteProfile(profileId: string): Promise<void> {
+    await invoke("profile_delete", { profileId });
+  }
+
   dispose(): void {
     for (const off of this.unlisten) off();
     this.unlisten = [];

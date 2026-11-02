@@ -127,7 +127,7 @@ pub struct CatalogClient {
 impl CatalogClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
-            .user_agent(concat!("aivpn/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("veyl/", env!("CARGO_PKG_VERSION")))
             .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap_or_default();

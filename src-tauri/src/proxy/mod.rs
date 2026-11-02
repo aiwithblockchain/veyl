@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::runtime::RuntimeResult;
 use backup::{BackupStore, Endpoint, FileBackupStore, ProxyBackup};
 
-pub use backup::{BackupStore as ProxyBackupStore, Endpoint as ProxyEndpoint, ProxyBackup as ProxyBackupSnapshot};
+pub use backup::{BackupStore as ProxyBackupStore, Endpoint as ProxyEndpoint, ProxyBackup as ProxyBackupSnapshot, SqliteBackupStore};
 
 pub trait PlatformProxy: Send + Sync {
     fn platform(&self) -> &'static str;
@@ -282,6 +282,40 @@ mod tests {
             }
         );
         assert_eq!(fake.current().unwrap(), None);
+    }
+
+    #[test]
+    fn a_leftover_backup_in_sqlite_is_recovered_on_startup() {
+        use std::sync::Arc;
+
+        let store = Arc::new(crate::store::Store::open_in_memory().unwrap());
+        let fake = Box::leak(Box::new(Fake {
+            current: Mutex::new(Some("corp-proxy:8080".into())),
+            applied: Mutex::new(vec![]),
+            fail_apply: false,
+        }));
+
+        let first = ProxyController::with_backend(
+            Box::new(crate::proxy::SqliteBackupStore::new(Arc::clone(&store))),
+            fake,
+        );
+        first.enable(2080).unwrap();
+        assert_eq!(fake.current().unwrap().as_deref(), Some("127.0.0.1:2080"));
+        // 模拟异常退出：不调用 disable，直接构造新的控制器走启动恢复。
+        drop(first);
+
+        let second = ProxyController::with_backend(
+            Box::new(crate::proxy::SqliteBackupStore::new(store)),
+            fake,
+        );
+        assert_eq!(
+            second.recover_stale().unwrap(),
+            RecoveryOutcome::Recovered {
+                endpoint: "127.0.0.1:2080".into()
+            }
+        );
+        assert_eq!(fake.current().unwrap().as_deref(), Some("corp-proxy:8080"));
+        assert!(!second.status().unwrap().has_backup);
     }
 
     #[test]

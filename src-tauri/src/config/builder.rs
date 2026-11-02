@@ -313,3 +313,92 @@ mod tests {
         assert!(text.contains("<redacted>"));
     }
 }
+
+/// 补充的负向用例：已有模块覆盖了结构形状与端口冲突，
+/// 这里补「关键字段缺失」和「产品标识不落配置」两类——
+/// 前者是 `sing-box check` 拦不住的（它只做 schema 校验）。
+#[cfg(test)]
+mod negative_tests {
+    use super::*;
+
+    fn node_with(protocol: ProtocolConfig) -> NodeDescriptor {
+        NodeDescriptor {
+            id: "jp-01".into(),
+            name: "东京 01".into(),
+            server: "203.0.113.10".into(),
+            server_port: 443,
+            protocol,
+        }
+    }
+
+    fn vless_protocol() -> ProtocolConfig {
+        ProtocolConfig::VlessReality {
+            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            flow: Some("xtls-rprx-vision".into()),
+            server_name: "www.example.com".into(),
+            public_key: "PUBLIC_KEY".into(),
+            short_id: "ab12".into(),
+            fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn rejects_empty_uuid_before_sing_box_check() {
+        // TC-CFG-003：实测 `sing-box check` 会放过缺 uuid 的 vless 出站，
+        // 所以生成阶段必须自己拦住。
+        let mut protocol = vless_protocol();
+        if let ProtocolConfig::VlessReality { uuid, .. } = &mut protocol {
+            *uuid = String::new();
+        }
+        let error = build(&BuildInput::new(
+            node_with(protocol),
+            2080,
+            19090,
+            "secret".into(),
+        ))
+        .expect_err("缺 uuid 必须在生成阶段报错");
+        assert!(format!("{error}").contains("uuid"), "错误信息应指向 uuid");
+    }
+
+    #[test]
+    fn rejects_blank_public_key() {
+        let mut protocol = vless_protocol();
+        if let ProtocolConfig::VlessReality { public_key, .. } = &mut protocol {
+            *public_key = "   ".into();
+        }
+        assert!(build(&BuildInput::new(
+            node_with(protocol),
+            2080,
+            19090,
+            "secret".into()
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_zero_ports_and_blank_secret() {
+        assert!(build(&BuildInput::new(node_with(vless_protocol()), 0, 19090, "s".into())).is_err());
+        assert!(build(&BuildInput::new(node_with(vless_protocol()), 2080, 0, "s".into())).is_err());
+        assert!(
+            build(&BuildInput::new(node_with(vless_protocol()), 2080, 19090, "  ".into())).is_err(),
+            "空 clash secret 必须拒绝"
+        );
+    }
+
+    #[test]
+    fn config_contains_no_product_identity() {
+        // TC-CFG-006：配置里不得出现我们的标识或遥测字段。
+        let config = build(&BuildInput::new(
+            node_with(vless_protocol()),
+            2080,
+            19090,
+            "secret".into(),
+        ))
+        .unwrap();
+        let text = serde_json::to_string(&config).unwrap();
+        for needle in ["veyl", "Veyl", "aivpn", "AIVPN", "telemetry", "device_id"] {
+            assert!(!text.contains(needle), "配置里不应出现 {needle}");
+        }
+        assert!(!text.contains("东京 01"), "节点名称不应写进配置");
+    }
+}

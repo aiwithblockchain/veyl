@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veyl — 用对话操作 VPN</title>
+<meta name="description" content="Veyl 是一个开源桌面 VPN 客户端。连接、切换节点、查看状态，全部通过对话完成。">
+<link rel="icon" href="favicon.png" type="image/png">
+<style>
+  :root {
+    --bg: #0b0c0e;
+    --surface: #14161a;
+    --border: #24272e;
+    --text: #e6e8ec;
+    --muted: #9aa0aa;
+    --accent: #6ee7b7;
+    --accent-dim: #2f6f57;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #fbfbfc;
+      --surface: #ffffff;
+      --border: #e3e5e9;
+      --text: #17181b;
+      --muted: #5d636d;
+      --accent: #0f766e;
+      --accent-dim: #a7d9cf;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header { padding: 28px 0; }
+  header .wrap { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    width: 28px; height: 28px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+    flex: none;
+  }
+  .brand { font-weight: 650; letter-spacing: .02em; }
+  header nav { margin-left: auto; display: flex; gap: 20px; font-size: 14px; }
+  header nav a { color: var(--muted); }
+  header nav a:hover { color: var(--text); text-decoration: none; }
+  @media (max-width: 480px) {
+    header .wrap { flex-wrap: wrap; }
+    header nav { width: 100%; margin-left: 0; gap: 18px; font-size: 13px; }
+  }
+
+  section { padding: 40px 0; border-top: 1px solid var(--border); }
+  section:first-of-type { border-top: 0; }
+
+  h1 { font-size: 40px; line-height: 1.2; letter-spacing: -.02em; margin: 0 0 16px; }
+  h2 { font-size: 20px; margin: 0 0 20px; letter-spacing: -.01em; }
+  p.lead { font-size: 18px; color: var(--muted); margin: 0 0 32px; max-width: 60ch; }
+
+  .badge {
+    display: inline-block; font: 12px/1 var(--mono);
+    padding: 6px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted);
+    margin-bottom: 20px;
+  }
+
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
+  .card p { margin: 0; color: var(--muted); font-size: 14px; }
+
+  .dl { display: grid; gap: 12px; }
+  .dl a {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px 20px; color: var(--text);
+  }
+  .dl a:hover { border-color: var(--accent-dim); text-decoration: none; }
+  .dl .name { font-weight: 600; font-size: 15px; }
+  .dl .meta { color: var(--muted); font: 13px/1.4 var(--mono); text-align: right; }
+  .soon { opacity: .55; pointer-events: none; }
+
+  code {
+    font: 13px/1.5 var(--mono);
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 2px 6px; border-radius: 6px;
+  }
+  pre {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px; overflow-x: auto;
+    font: 13px/1.6 var(--mono); margin: 16px 0 0;
+  }
+
+  ul.plain { margin: 0; padding-left: 20px; color: var(--muted); }
+  ul.plain li { margin: 6px 0; }
+
+  footer {
+    padding: 40px 0 64px; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 13px;
+  }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <span class="logo" aria-hidden="true"></span>
+    <span class="brand">Veyl</span>
+    <nav>
+      <a href="#what">是什么</a>
+      <a href="#download">下载</a>
+      <a href="#faq">说明</a>
+      <a href="https://github.com/aiwithblockchain/veyl">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <section>
+    <div class="wrap">
+      <span class="badge">早期开发中 · P1</span>
+      <h1>用对话操作 VPN</h1>
+      <p class="lead">
+        不需要看懂协议，也不需要点一长串设置。对着输入框说「连到日本」，
+        Veyl 会挑节点、生成配置、启动内核，然后把出口 IP 告诉你。
+      </p>
+      <a href="#download">下载</a>
+    </div>
+  </section>
+
+  <section id="what">
+    <div class="wrap">
+      <h2>它解决什么</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>对话即操作</h3>
+          <p>连接、换节点、断开、看状态，都是说一句话。界面上一张工具卡，过程看得见。</p>
+        </div>
+        <div class="card">
+          <h3>用自己的 Key</h3>
+          <p>AI 走你自己的 DeepSeek API Key，存在系统钥匙串里。我们不转发、不代理你的调用。</p>
+        </div>
+        <div class="card">
+          <h3>不中转流量</h3>
+          <p>客户端直连节点，我们不经过你的数据。平台只负责给你一份可用节点清单。</p>
+        </div>
+        <div class="card">
+          <h3>内核是官方的</h3>
+          <p>客户端下载 sing-box 官方发行版并校验哈希，不修改源码。版本由应用管理。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="download">
+    <div class="wrap">
+      <h2>下载</h2>
+      <div class="dl">
+        <a class="soon" href="#">
+          <span>
+            <span class="name">macOS</span><br>
+            <span class="meta">Apple Silicon + Intel · 通用二进制</span>
+          </span>
+          <span class="meta">即将发布</span>
+        </a>
+        <a class="soon" href="#">
+          <span>
+            <span class="name">Windows</span><br>
+            <span class="meta">x64 · MSI</span>
+          </span>
+          <span class="meta">即将发布</span>
+        </a>
+      </div>
+      <p style="color:var(--muted);font-size:14px;margin-top:20px">
+        发布后安装包在
+        <a href="https://github.com/aiwithblockchain/veyl/releases">GitHub Releases</a>
+        提供。当前尚未对外发布，没有可下载版本。
+      </p>
+    </div>
+  </section>
+
+  <section id="faq">
+    <div class="wrap">
+      <h2>你需要知道的</h2>
+      <ul class="plain">
+        <li>需要自己准备一个 DeepSeek API Key。没有 Key 也能用，只是要手动选节点。</li>
+        <li>P1 只设置系统代理，不接管全局流量。不走系统代理的程序不受影响。</li>
+        <li>P1 只支持有公网 IP 的节点。家庭宽带节点要等后续版本。</li>
+        <li>客户端完全开源。内核是 GPL-3.0 的 sing-box，以其原始形式分发。</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>从源码构建</h2>
+      <pre>git clone --recurse-submodules https://github.com/aiwithblockchain/veyl.git
+cd veyl
+npm install
+npm run app:dev</pre>
+      <p style="color:var(--muted);font-size:14px;margin-top:16px">
+        需要 Rust 1.77+、Node 18+。构建与打包见
+        <a href="https://github.com/aiwithblockchain/veyl/blob/main/docs/build-and-release.md">docs/build-and-release.md</a>。
+      </p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Veyl · 开源桌面 VPN 客户端</span>
+    <a href="https://github.com/aiwithblockchain/veyl">源码</a>
+    <a href="https://github.com/aiwithblockchain/veyl/releases">发布记录</a>
+    <a href="https://github.com/SagerNet/sing-box">sing-box</a>
+  </div>
+</footer>
+
+</body>
+</html>

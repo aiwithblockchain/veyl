@@ -562,13 +562,15 @@ impl RuntimeManager {
                         self.set_restart_count(0).await;
                     }
 
-                    restarts += 1;
-                    self.set_restart_count(restarts).await;
-
-                    if restarts > self.cfg.max_restarts {
+                    if restarts >= self.cfg.max_restarts {
+                        // 预算用尽：restart_count 保持已执行的重启次数，不再累加。
+                        self.set_restart_count(restarts).await;
                         self.give_up(gen, reason).await;
                         return;
                     }
+
+                    restarts += 1;
+                    self.set_restart_count(restarts).await;
 
                     self.transition(
                         gen,
@@ -978,28 +980,28 @@ pub fn default_app_data_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join("Library/Application Support/AIVPN");
+            return PathBuf::from(home).join("Library/Application Support/Veyl");
         }
     }
 
     #[cfg(windows)]
     {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            return PathBuf::from(local).join("AIVPN");
+            return PathBuf::from(local).join("Veyl");
         }
     }
 
     #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-            return PathBuf::from(xdg).join("aivpn");
+            return PathBuf::from(xdg).join("veyl");
         }
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".local/share/aivpn");
+            return PathBuf::from(home).join(".local/share/veyl");
         }
     }
 
-    std::env::temp_dir().join("aivpn")
+    std::env::temp_dir().join("veyl")
 }
 
 #[cfg(test)]
@@ -1007,7 +1009,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("aivpn-{tag}-{:016x}", rand::random::<u64>()))
+        std::env::temp_dir().join(format!("veyl-{tag}-{:016x}", rand::random::<u64>()))
     }
 
     fn plan(binary: PathBuf, dir: &std::path::Path) -> StartPlan {

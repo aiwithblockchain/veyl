@@ -1,0 +1,51 @@
+name: Pages
+
+# 只发布 site/ 目录。站点是纯静态文件，没有构建步骤。
+# 发布地址：https://aiwithblockchain.github.io/veyl/
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查站点文件
+        run: |
+          set -euo pipefail
+          test -f site/index.html || { echo "缺少 site/index.html" >&2; exit 1; }
+          # 防止把密钥或大文件带进产物
+          if find site -type f \( -name "*.key" -o -name "*.p12" -o -name "*.pfx" \
+               -o -name "*.pem" -o -name ".env*" \) | grep -q .; then
+            echo "site/ 里出现疑似凭据文件，已中止" >&2
+            exit 1
+          fi
+          du -sh site
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

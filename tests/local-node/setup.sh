@@ -229,7 +229,7 @@ selftest() {
     "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $CLASH_SECRET" "http://127.0.0.1:$CLASH_PORT/version")"
   check "无 secret 401" "401" \
     "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$CLASH_PORT/version")"
-  check "经代理访问回显" "AIVPN_ECHO_OK" \
+  check "经代理访问回显" "VEYL_ECHO_OK" \
     "$(curl -s -m 5 -x "http://127.0.0.1:$MIXED_PORT" "http://127.0.0.1:$ECHO_PORT/" | tr -d '\n')"
 
   # 停掉服务端后，经代理应得到 502（节点不可达的可观测信号）

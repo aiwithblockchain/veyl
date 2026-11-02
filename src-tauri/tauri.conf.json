@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AIVPN",
+  "productName": "Veyl",
   "version": "0.1.0",
-  "identifier": "com.aivpn.desktop",
+  "identifier": "io.github.aiwithblockchain.veyl",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:1430",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "AIVPN",
+        "title": "Veyl",
         "width": 1200,
         "height": 800,
         "minWidth": 900,

@@ -46,7 +46,7 @@
 
 | ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
 |---|---|---|---|---|---|---|
-| **TC-EXC-008** | I | FR-3.2、9.2 | `AIVPN_MANIFEST_PATH=manifest-bad-url.json`（URL 返回 404） | 1) `core_install("1.14.4")`；2) 轮询 `job_id` 至结束 | 返回 `error_code=download_failed`；消息中**包含 HTTP 404**；`runtime_installs` 中该版本仍为未安装；临时文件被删除；可再次调用 `core_install` 重试 | P0 |
+| **TC-EXC-008** | I | FR-3.2、9.2 | `VEYL_MANIFEST_PATH=manifest-bad-url.json`（URL 返回 404） | 1) `core_install("1.14.4")`；2) 轮询 `job_id` 至结束 | 返回 `error_code=download_failed`；消息中**包含 HTTP 404**；`runtime_installs` 中该版本仍为未安装；临时文件被删除；可再次调用 `core_install` 重试 | P0 |
 | **TC-EXC-009** | I | FR-3.2 | 清单 URL 指向一个连接后立即断开的地址 | 1) 安装；2) 观察 | 归类为 `download_failed`，消息含「网络中断」类原因；**不产生半截文件**留在版本目录 | P1 |
 | **TC-EXC-010** | I | FR-3.2 | mock 服务对下载限速并延迟 30 秒 | 1) 安装；2) 观察阶段与取消 | 阶段依次为 `downloading` → `verifying` → `extracting` → `installing`；取消后进程与临时文件被清理；不留下锁死的后续任务 | P1 |
 
@@ -54,14 +54,14 @@
 
 | ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
 |---|---|---|---|---|---|---|
-| **TC-EXC-011** | I | FR-3.3、9.2 | `AIVPN_MANIFEST_PATH=manifest-bad-sha.json` | 1) `core_install("1.14.4")`；2) 观察结果与磁盘 | `ok=false`，`error_code=checksum_mismatch`；**下载文件已被删除**（断言版本目录为空）；`sing-box` **从未被执行**（即使是个可执行文件也不得运行）；状态回到 `not_installed` | P0 |
+| **TC-EXC-011** | I | FR-3.3、9.2 | `VEYL_MANIFEST_PATH=manifest-bad-sha.json` | 1) `core_install("1.14.4")`；2) 观察结果与磁盘 | `ok=false`，`error_code=checksum_mismatch`；**下载文件已被删除**（断言版本目录为空）；`sing-box` **从未被执行**（即使是个可执行文件也不得运行）；状态回到 `not_installed` | P0 |
 | **TC-EXC-012** | U | FR-3.3 | 大小正确但内容被篡改的归档 | 1) 跑校验函数 | 校验失败；错误信息包含期望值与实际值的前 8 位（便于排查），但**不得**包含完整清单内容 | P1 |
 
 ### 5. 端口占用
 
 | ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
 |---|---|---|---|---|---|---|
-| **TC-EXC-013** | I | FR-7.4、FR-6.5、9.2 | 先用一个进程占用 `12080`；`AIVPN_MIXED_PORT=12080` | 1) `vpn_connect`；2) 观察 | `error_code=port_in_use`；提示中**包含端口号 12080**；**应用不崩溃**；系统代理未被设置；提供「换端口」的下一步 | P0 |
+| **TC-EXC-013** | I | FR-7.4、FR-6.5、9.2 | 先用一个进程占用 `12080`；`VEYL_MIXED_PORT=12080` | 1) `vpn_connect`；2) 观察 | `error_code=port_in_use`；提示中**包含端口号 12080**；**应用不崩溃**；系统代理未被设置；提供「换端口」的下一步 | P0 |
 | **TC-EXC-014** | I | FR-4.1、FR-7.4 | 占用 Clash API 端口 `19090` | 1) 连接 | 启动前探测到占用 → 换一个空闲端口重试（Clash 端口本就随机）；若两次均失败才归类为 `port_in_use`；**不出现** sing-box 直接 FATAL 退出后无人处理 | P1 |
 | **TC-EXC-015** | I | FR-3.9 | 端口冲突导致的启动失败 | 1) 观察 Runtime Manager 状态机 | 日志应出现 sing-box 原文 `bind: address already in use` 且被识别；状态从 `starting` → `failed`（**不得**在 10 秒超时后才判失败） | P1 |
 

@@ -1,4 +1,4 @@
-//! AIVPN host library.
+//! Veyl host library.
 //!
 //! 模块由 PM 统一接线；此文件只声明模块与 Tauri 启动入口。
 
@@ -8,16 +8,68 @@ pub mod claurst_session;
 pub mod config;
 pub mod proxy;
 pub mod runtime;
+pub mod store;
 pub mod tools;
 
 use std::sync::Arc;
 
+use crate::proxy::{ProxyController, SqliteBackupStore};
+use crate::runtime::{RuntimeConfig, RuntimeManager};
+use crate::store::Store;
 use crate::tools::VpnToolServices;
+use crate::tools::services::WiredServices;
+
+const DEFAULT_CATALOG_URL: &str = "http://127.0.0.1:18080/v1";
+
+fn catalog_base_url(store: &Store) -> String {
+    if let Ok(url) = std::env::var("VEYL_CATALOG_URL") {
+        if !url.trim().is_empty() {
+            return url;
+        }
+    }
+    let conn = store.conn();
+    crate::store::settings::get(&conn, "catalog_base_url")
+        .ok()
+        .flatten()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CATALOG_URL.to_string())
+}
 
 pub fn run() {
-    // P1 W1–W2：真实后端尚未接线，工具返回明确的「尚未接线」错误。
-    // W3 换成 Runtime Manager + Connection Orchestrator 的实现即可，工具层不用动。
-    let services: Arc<dyn VpnToolServices> = Arc::new(crate::tools::NotWiredServices);
+    let data_dir = crate::runtime::default_app_data_dir();
+    let store = match Store::open(crate::store::default_db_path(&data_dir)) {
+        Ok(store) => Arc::new(store),
+        Err(error) => {
+            eprintln!("本地数据库打开失败，改用内存库：{error}");
+            Arc::new(Store::open_in_memory().expect("内存数据库也打不开"))
+        }
+    };
+
+    let manager = RuntimeManager::new(RuntimeConfig::new(&data_dir));
+    let proxy = Arc::new(ProxyController::new(Box::new(SqliteBackupStore::new(
+        Arc::clone(&store),
+    ))));
+
+    // 异常退出后不留系统代理：启动时先看 proxy_backup，有残留就恢复。
+    match proxy.recover_stale() {
+        Ok(crate::proxy::RecoveryOutcome::Recovered { endpoint }) => {
+            eprintln!("已恢复上次异常退出遗留的系统代理（{endpoint}）");
+        }
+        Ok(crate::proxy::RecoveryOutcome::LeftAlone { current, .. }) => {
+            eprintln!("检测到未清理的代理备份，但当前代理是 {current}，按用户设置保留");
+        }
+        Ok(crate::proxy::RecoveryOutcome::Nothing) => {}
+        Err(error) => eprintln!("系统代理恢复失败：{error}"),
+    }
+
+    let catalog = Arc::new(crate::catalog::CatalogClient::new(catalog_base_url(&store)));
+    let services: Arc<dyn VpnToolServices> = Arc::new(WiredServices::new(
+        Arc::clone(&store),
+        manager,
+        proxy,
+        catalog,
+        &data_dir,
+    ));
     let state = Arc::new(agent::AppState::new(services));
 
     tauri::Builder::default()
@@ -32,7 +84,8 @@ pub fn run() {
             agent::commands::ai_cancel,
             agent::commands::ai_approval_decision,
             agent::commands::runtime_status,
+            agent::commands::profile_delete,
         ])
         .run(tauri::generate_context!())
-        .expect("AIVPN 启动失败");
+        .expect("Veyl 启动失败");
 }

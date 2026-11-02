@@ -1,0 +1,23 @@
+{
+  "name": "err-CatalogSearch",
+  "tool": "CatalogSearch",
+  "expect_error_code": "CATALOG_UNAVAILABLE",
+  "expect_ok": false,
+  "contract_backed": true,
+  "description": "目录服务不可达（mock 加 ?_fault=500 或停掉服务）",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "CatalogSearch",
+          "arguments": {
+            "region": "jp"
+          }
+        }
+      ]
+    },
+    {
+      "text": "节点目录服务暂时不可用，可以稍后重试；本地缓存仍可使用。"
+    }
+  ]
+}

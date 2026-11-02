@@ -166,7 +166,7 @@ P1 只有 `core_install` 与系统代理变更需要审批。审批通过后 Hos
 - 工具调用默认折叠成一行（名称 + 状态 + 耗时），点开看参数与结果。
 - 权限卡内联在对话流里，不弹全局模态。
 - 风格克制：低饱和、等宽字体用于工具输出、少装饰。
-- 不做 TweetPilot 那种多功能侧栏；AIVPN 的侧栏只放会话。
+- 不做 TweetPilot 那种多功能侧栏；Veyl 的侧栏只放会话。
 
 > 参考的是布局与交互节奏，不复用其素材、图标或文案。
 
@@ -264,7 +264,7 @@ P1 注册：`CatalogSearchTool`、`ProfileImportTool`、`ProfileDeleteTool`、`V
 **系统提示要点（P1）**
 
 ```
-你是 AIVPN 的助手，只能通过提供的工具操作应用。
+你是 Veyl 的助手，只能通过提供的工具操作应用。
 规则：
 1. 不得声称连接成功，除非 RuntimeStatus 返回 running 且有出口 IP。
 2. 不得编造节点；节点只能来自 CatalogSearch。
@@ -530,8 +530,8 @@ proxy_backup(id INTEGER PRIMARY KEY, platform TEXT, payload_json TEXT, created_a
 
 | 键 | 内容 |
 |---|---|
-| `aivpn.deepseek_key` | DeepSeek API Key |
-| `aivpn.device_token` | 目录服务设备 token |
+| `veyl.deepseek_key` | DeepSeek API Key |
+| `veyl.device_token` | 目录服务设备 token |
 
 ---
 
@@ -952,7 +952,7 @@ vpn_connect 失败
 | 可执行文件 | `sing-box` | `sing-box.exe` |
 | 系统代理 | `networksetup` | 注册表 + `InternetSetOption` |
 | 代理生效 | 立即 | 部分应用需重启或重新登录 |
-| 路径 | `~/Library/Application Support/AIVPN` | `%LOCALAPPDATA%\AIVPN` |
+| 路径 | `~/Library/Application Support/Veyl` | `%LOCALAPPDATA%\Veyl` |
 | 打包 | `.dmg` | `.msi` / NSIS |
 
 ### 10.1 签名与公证
@@ -992,7 +992,7 @@ vpn_connect 失败
 对内部 dogfood 和早期开源用户，这些可以接受。等对外大规模分发或企业客户要求时，再补签名：
 
 - 证书：云 HSM（Azure Trusted Signing / DigiCert KeyLocker）或 EV。
-- 顺序：构建 → 签 `aivpn.exe` → 打包 MSI → 签 MSI → `signtool verify /pa /v`。
+- 顺序：构建 → 签 `veyl.exe` → 打包 MSI → 签 MSI → `signtool verify /pa /v`。
 - 只签我们自己的二进制，**不签 bundled 的 sing-box**。
 - SmartScreen 声誉需要时间积累，签名后仍可能短期提示。
 
@@ -1004,7 +1004,7 @@ P1–P4 可以不签；Windows 签名与分发作为最终收尾任务，在公�
 |---|---|
 | 主体 | ✅ 已确认：使用公司主体申请 |
 | 证书 | 首选 Azure Trusted Signing；资格不满足则 OV + 云 HSM（DigiCert KeyLocker / SSL.com eSigner）；EV 可选 |
-| 签名对象 | `aivpn.exe` + MSI |
+| 签名对象 | `veyl.exe` + MSI |
 | 顺序 | 签 exe → 打包 → 签 MSI → `signtool verify /pa /v` |
 | 提前量 | 证书申请 1–3 周，需在发布前一个月启动 |
 | 兜底 | 未签名版本只做内测，不对外分发；可用 `SHA256SUMS` + GPG 提供完整性校验 |
@@ -1026,7 +1026,7 @@ P1–P4 可以不签；Windows 签名与分发作为最终收尾任务，在公�
 
 **零成本选项的资格边界**
 
-| 渠道 | 资格要求 | 对 AIVPN 的含义 |
+| 渠道 | 资格要求 | 对 Veyl 的含义 |
 |---|---|---|
 | **SignPath Foundation** | 全部组件使用 OSI 开源许可证；**不允许商业双许可**；不允许专有组件；只签自己源码构建的产物；要求构建可验证、源码可公开核查；可捆绑未签名的第三方 OSS 二进制 | 客户端若保持纯 GPL、无专有组件、仓库可公开，可以申请；服务端与市场不进入签名产物 |
 | **Certum Open Source Code Signing** | **只发给个人**；要求项目**公开可达**；**仅限非商业**，用于商业分发会被吊销 | 公司主体 + 商业化项目基本不适用，不建议依赖 |
@@ -1075,4 +1075,4 @@ P1–P4 可以不签；Windows 签名与分发作为最终收尾任务，在公�
 4. 种子节点放在哪些地区、由谁承担合规。
 5. 免费额度限制策略（设备/IP/时长）。
 6. 是否需要 P1 就支持手动导入订阅链接。
-7. 是否复用 TweetPilot 的 AI 存储 / 会话表结构，还是为 AIVPN 重新设计？
+7. 是否复用 TweetPilot 的 AI 存储 / 会话表结构，还是为 Veyl 重新设计？

@@ -38,7 +38,7 @@ pub struct ToolResult {
 }
 ```
 
-### 1.2 AIVPN 的映射
+### 1.2 Veyl 的映射
 
 | 字段 | 用法 |
 |---|---|
@@ -113,11 +113,11 @@ type NextAction = {
 | 层 | 作用 | 归属 |
 |---|---|---|
 | `PermissionLevel` | Claurst 的粗粒度信号，只区分「只读 / 非只读」 | `claurst-tools` |
-| `ApprovalPolicy` | AIVPN 自己的审批策略（本文第 3 列） | Host，包在 `PermissionHandler` 外 |
+| `ApprovalPolicy` | Veyl 自己的审批策略（本文第 3 列） | Host，包在 `PermissionHandler` 外 |
 
 `PermissionLevel` 的取值（来自 `claurst-tools`）：`None` / `ReadOnly` / `Write` / `Execute` / `Dangerous` / `Forbidden`。
 
-AIVPN **不使用** `Dangerous` / `Forbidden`（我们没有 shell 工具，用不上）。
+Veyl **不使用** `Dangerous` / `Forbidden`（我们没有 shell 工具，用不上）。
 
 ### 2.2 `ApprovalPolicy` 与 `ApprovalScope`
 
@@ -162,7 +162,7 @@ pub struct ApprovalGrant {
 
 - 只存内存，**不落 SQLite、不落配置文件**。应用重启后清空。
 - 会话结束（用户点「新会话」或会话被删除）时，删除该 `session_id` 的所有 Grant。
-- **不使用** Claurst 自己的 allow-rule 持久化机制：Claurst 的规则是 workspace 级、按工具参数模式匹配，语义与本契约不同，两套并存会出现「以为要问却不问」。AIVPN 的审批判定只由本节的 Grant 表决定。
+- **不使用** Claurst 自己的 allow-rule 持久化机制：Claurst 的规则是 workspace 级、按工具参数模式匹配，语义与本契约不同，两套并存会出现「以为要问却不问」。Veyl 的审批判定只由本节的 Grant 表决定。
 
 ### 2.3 审批协议
 
@@ -199,6 +199,9 @@ pub struct ApprovalGrant {
   | `0` | 用户拒绝 |
   | `1` | 用户允许**这一次**（`always` 策略下的正常结果） |
   | `2` | 用户允许**本会话**，或本次调用由 Grant 自动放行 |
+  | `NULL` | **该工具不需要审批**（只读、或策略为 `never`） |
+
+  实现备注：`NULL` 是「没有审批这回事」，不是「审批结果未知」。不要用 `1` 冒充无需审批的调用，否则审计表无法区分「用户点过允许」和「本来就不用问」。
 
   **同会话内第二次及以后由 Grant 自动放行的调用，同样记 `2`**。这样审计表能看出「这次没有弹卡，是因为会话授权」，而不是「没审批就执行了」。Clerk 的 TC-EXC-042 依赖这条语义。
 - session 授权**只对同一 `session_id` 生效**；新会话重新确认，这是 PM 与用户明确要的行为。
@@ -266,7 +269,7 @@ type CallSource = "ui" | "agent";
 
 其他要求：
 
-- `sensitive: true` 是 AIVPN 自有的 vendor 关键字，**Host 在把 schema 交给模型前必须剥离**，避免上游 provider 因未知关键字报错。
+- `sensitive: true` 是 Veyl 自有的 vendor 关键字，**Host 在把 schema 交给模型前必须剥离**，避免上游 provider 因未知关键字报错。
 - 凭据、API Key、完整 sing-box 配置**一律不出现**在 `args_preview`，包括嵌套对象。
 
 当前需要标注 `sensitive: true` 的字段：
@@ -305,7 +308,7 @@ type CallSource = "ui" | "agent";
 | 17 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | `never` | 低 |
 | 18 | `ProfileDelete` | `ProfileDeleteTool` | 删除本地配置 | `Write` | `always` | 中 |
 
-> `AskUserQuestion` 由 `claurst-tools` 提供，AIVPN 只负责注册与 UI 渲染，不重写。
+> `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
 **破坏性工具（destructive）**：`CoreInstall`、`ProfileDelete`、`VpnConnect`（会改系统代理）。这三个无论调用来源是 UI 还是 Agent，都必须走审批；`VpnConnect` 例外地采用会话内首次（见 §3.2），另两个恒为 `always`。
 

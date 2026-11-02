@@ -3,6 +3,7 @@
 #
 # 用法：
 #   bash tests/run-mocks.sh              # 前台启动，Ctrl-C 退出
+#   bash tests/run-mocks.sh --start      # 后台启动后立即返回（供 smoke.sh 编排）
 #   bash tests/run-mocks.sh --selftest   # 启动 → 自检 → 退出（CI 第一步跑这个）
 #   bash tests/run-mocks.sh --stop       # 停掉残留进程
 #
@@ -113,7 +114,7 @@ selftest() {
   check "剧本首轮返回 CatalogSearch" "yes" "$(printf '%s' "$reply" | grep -q 'CatalogSearch' && echo yes || echo no)"
 
   echo "[selftest] echo"
-  check "回显内容" "AIVPN_ECHO_OK" "$(curl -s "http://127.0.0.1:$ECHO_PORT/" | tr -d '\n')"
+  check "回显内容" "VEYL_ECHO_OK" "$(curl -s "http://127.0.0.1:$ECHO_PORT/" | tr -d '\n')"
 
   echo
   if [ "$fail" -eq 0 ]; then
@@ -128,6 +129,12 @@ case "${1:-}" in
   --stop)
     stop_all
     echo "[run-mocks] 已停止"
+    exit 0
+    ;;
+  --start)
+    # 非阻塞启动：给 smoke.sh 之类的编排脚本用，结束后由调用方 --stop
+    stop_all
+    start_all
     exit 0
     ;;
   --selftest)

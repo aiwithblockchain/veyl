@@ -71,3 +71,32 @@ pub async fn runtime_status(state: State<'_, Arc<AppState>>) -> Result<Value, St
         .await
         .map_err(|error| error.to_string())
 }
+
+/// 无 AI 模式的删除配置入口。破坏性操作，无论来源都要审批（events.md §5）。
+/// UI 直连没有会话上下文，`session_id` 取固定的 "ui"；ProfileDelete 恒为 call 级。
+#[tauri::command]
+pub async fn profile_delete(
+    state: State<'_, Arc<AppState>>,
+    profile_id: String,
+) -> Result<Value, Value> {
+    if profile_id.trim().is_empty() {
+        return Err(json!(crate::tools::AivpnError::new(
+            "INVALID_ARGUMENT",
+            "profile_id 不能为空"
+        )));
+    }
+
+    let input = json!({ "profile_id": profile_id });
+    let summary = format!("删除本地配置 {profile_id}");
+    if let Some(error) =
+        crate::tools::policy::require("ui", "ProfileDelete", &input, &summary, "medium")
+    {
+        return Err(json!(error));
+    }
+
+    state
+        .services
+        .profile_delete(&profile_id)
+        .await
+        .map_err(|error| json!(crate::tools::AivpnError::new("INTERNAL", error.to_string())))
+}

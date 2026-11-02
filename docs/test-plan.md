@@ -71,16 +71,16 @@ Windows 的虚拟机可以用，但**系统代理生效验证必须在物理机�
 
 | 变量 | 作用 | 缺失影响 |
 |---|---|---|
-| `AIVPN_DATA_DIR` | 覆盖应用数据目录，实现测试隔离与「脏状态」构造 | 无法并行跑测试，会污染开发者本地数据 |
-| `AIVPN_CATALOG_BASE` | 覆盖目录服务地址 | 目录相关用例只能打真实服务 |
-| `AIVPN_LLM_BASE` | 覆盖 LLM endpoint | E2E 必须真调 DeepSeek，不稳定且花钱 |
-| `AIVPN_LLM_KEY` | 覆盖 Keychain 读取（仅测试构建） | 每台测试机都要手工配 Key |
-| `AIVPN_MANIFEST_PATH` | 覆盖内置运行时清单 | 无法注入错误 sha256 / 坏 URL |
-| `AIVPN_MIXED_PORT` | 覆盖默认 2080 | 端口冲突用例无法构造 |
-| `AIVPN_CLASH_PORT` | 固定 Clash API 端口 | 无法断言 Clash API 行为 |
-| `AIVPN_LOG_DIR` | 覆盖日志目录 | 日志断言依赖平台默认路径，易碎 |
+| `VEYL_DATA_DIR` | 覆盖应用数据目录，实现测试隔离与「脏状态」构造 | 无法并行跑测试，会污染开发者本地数据 |
+| `VEYL_CATALOG_BASE` | 覆盖目录服务地址 | 目录相关用例只能打真实服务 |
+| `VEYL_LLM_BASE` | 覆盖 LLM endpoint | E2E 必须真调 DeepSeek，不稳定且花钱 |
+| `VEYL_LLM_KEY` | 覆盖 Keychain 读取（仅测试构建） | 每台测试机都要手工配 Key |
+| `VEYL_MANIFEST_PATH` | 覆盖内置运行时清单 | 无法注入错误 sha256 / 坏 URL |
+| `VEYL_MIXED_PORT` | 覆盖默认 2080 | 端口冲突用例无法构造 |
+| `VEYL_CLASH_PORT` | 固定 Clash API 端口 | 无法断言 Clash API 行为 |
+| `VEYL_LOG_DIR` | 覆盖日志目录 | 日志断言依赖平台默认路径，易碎 |
 
-这些变量只在 `debug` 构建或存在 `AIVPN_TEST_MODE=1` 时生效；**release 构建必须忽略**，否则是攻击面。验收方式见 `TC-SEC-008`。
+这些变量只在 `debug` 构建或存在 `VEYL_TEST_MODE=1` 时生效；**release 构建必须忽略**，否则是攻击面。验收方式见 `TC-SEC-008`。
 
 ### 3.4 数据隔离与干净状态
 
@@ -88,13 +88,13 @@ Windows 的虚拟机可以用，但**系统代理生效验证必须在物理机�
 
 | 状态 | 构造方式 | 用途 |
 |---|---|---|
-| 全新安装 | 删除 `AIVPN_DATA_DIR` 整个目录；清空测试 Keychain 条目 | 首次启动、引导流程 |
+| 全新安装 | 删除 `VEYL_DATA_DIR` 整个目录；清空测试 Keychain 条目 | 首次启动、引导流程 |
 | 已配 Key 未装运行时 | 预置 `settings` 表 + Keychain，`runtime_installs` 为空 | 连接时触发安装 |
 | 运行时已装未连接 | 预置 `runtime_installs`，指向本地已解压的 sing-box | 连接主流程 |
 | 代理残留 | 手工写入 `proxy_backup` 且把系统代理指向 `127.0.0.1:12080` | 崩溃恢复 |
 | 脏会话 | 预置含悬空 `tool_use` 的 `chat_messages` | 中断恢复 |
 
-> Keychain 在测试中使用独立 service 名（`aivpn-test`），避免污染真实条目。这条需要 Bob 在 Keychain 封装层支持。
+> Keychain 在测试中使用独立 service 名（`veyl-test`），避免污染真实条目。这条需要 Bob 在 Keychain 封装层支持。
 
 ---
 
@@ -194,7 +194,7 @@ E2E 不能依赖真实模型。`tests/fixtures/llm-scenarios/*.json` 定义「�
 ### 7.1 准入（开始测试的前提）
 
 - CI 在 macOS arm64/x86_64 与 Windows x64 上构建通过。
-- `AIVPN_DATA_DIR` 等 §3.3 的开关已实现，否则 E2E 与集成测试无法隔离。
+- `VEYL_DATA_DIR` 等 §3.3 的开关已实现，否则 E2E 与集成测试无法隔离。
 - mock 目录服务、mock LLM、本地回显可一键启动（`tests/run-mocks.sh`）。
 - 至少一个平台能手工走完「安装运行时 → 启动 → 设代理」。
 
@@ -272,12 +272,14 @@ E2E 不能依赖真实模型。`tests/fixtures/llm-scenarios/*.json` 定义「�
 
 | 触发 | 跑什么 |
 |---|---|
-| 每次 push | **契约一致性检查**（`node tests/contracts/check-contracts.mjs`）+ `cargo test`（U 层）+ `tsc --noEmit` + lint |
-| PR 合并前 | U + I 层（`tests/run-mocks.sh` 起 mock，跑 `cargo test --test integration`） |
-| 每日夜间 | E + 手工脚本（代理值写入/恢复、崩溃重启），双平台 |
-| 打 tag / RC | 全量 + `TC-DIST-*` 脚本 + 手工矩阵清单 |
+| 每次 push | `bash scripts/ci.sh --quick` —— typecheck + `cargo test` + 契约检查（热缓存约 4 秒） |
+| PR 合并前 | `bash scripts/ci.sh` —— 再加 runtime selftest 与 mock selftest 两步 |
+| 每日夜间 | `bash scripts/test/smoke.sh --with-singbox` —— mock 链路 + 真实 sing-box 的连接/状态/断开；外加手工脚本（代理值写入/恢复、崩溃重启），双平台 |
+| 打 tag / RC | `bash scripts/test/preflight.sh` + `TC-DIST-*` + 手工矩阵清单 |
 
 **契约检查放在最前面**：事件名与快照字段写错不会导致编译失败，只会让事件被静默丢弃、让内部地址混进 UI。这类问题靠人眼审不出来，必须在 CI 第一步拦住。检查脚本直接读契约文档与源码，不依赖构建产物，几秒内出结果。
+
+每步的完整输出在 `build/logs/<step>.log`；失败时 `ci.sh` 会把该步原始输出原样打印出来，不需要再翻日志。
 
 CI 不跑真实节点、不跑真实 LLM、不跑 Gatekeeper/SmartScreen。
 
@@ -289,7 +291,7 @@ CI 不跑真实节点、不跑真实 LLM、不跑 Gatekeeper/SmartScreen。
 
 | 风险 | 应对 |
 |---|---|
-| `AIVPN_*` 开关没做，E2E 全部阻塞 | W1 第一件事就是确认 §10 第 1 项；未做则先用手工层兜底 |
+| `VEYL_*` 开关没做，E2E 全部阻塞 | W1 第一件事就是确认 §10 第 1 项；未做则先用手工层兜底 |
 | `sing-box check` 通过但运行期失败 | 见下条实测发现；配置生成必须自带语义校验，测试两层都断言 |
 | 系统代理用例在 CI 上不可靠 | 只把「写入/恢复的值」放集成层，真机效果留手工层 |
 | mock LLM 与真实 DeepSeek 行为差异导致 E2E 假绿 | E2E 只验应用侧链路；模型能不能正确选工具另做一次真实 Key 的手工冒烟 |

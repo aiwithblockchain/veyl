@@ -1,0 +1,21 @@
+{
+  "name": "err-CoreListVersions",
+  "tool": "CoreListVersions",
+  "expect_error_code": "INTERNAL",
+  "expect_ok": false,
+  "contract_backed": false,
+  "description": "内置清单损坏（契约 §4.6 未列出错误码）",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "CoreListVersions",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "text": "无法读取可用版本清单，请重试或重新安装应用。"
+    }
+  ]
+}

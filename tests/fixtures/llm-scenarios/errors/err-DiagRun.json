@@ -1,0 +1,21 @@
+{
+  "name": "err-DiagRun",
+  "tool": "DiagRun",
+  "expect_error_code": "INTERNAL",
+  "expect_ok": false,
+  "contract_backed": false,
+  "description": "诊断过程内部失败（契约 §4.13 未列出错误码）",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "DiagRun",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "text": "诊断执行失败，请稍后重试。"
+    }
+  ]
+}

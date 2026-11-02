@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type {
   AgentEvent,
   ApprovalDecision,
@@ -10,7 +10,7 @@ import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, snapshotToView } from "./agent";
 import { ChatView } from "./components/ChatView";
 import { Sidebar } from "./components/Sidebar";
-import { StatusPanel } from "./components/StatusPanel";
+import { StatusPanel, type DeleteNotice } from "./components/StatusPanel";
 import { activeSession, chatReducer, createInitialState, nextId } from "./state/chatStore";
 import "./styles/app.css";
 
@@ -30,25 +30,44 @@ export default function App() {
   const [state, dispatch] = useReducer(chatReducer, undefined, createInitialState);
   const [statusOpen, setStatusOpen] = useState(true);
   const [runtime, setRuntime] = useState<RuntimeView>(() => emptyRuntimeView());
+  const [deleteNotice, setDeleteNotice] = useState<DeleteNotice | null>(null);
   const sessionRef = useRef(state.activeSessionId);
   sessionRef.current = state.activeSessionId;
+  // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
+  const healthVersion = useRef(0);
 
   const session = activeSession(state);
 
+  const refreshSnapshot = useCallback(() => {
+    const versionAtRequest = healthVersion.current;
+    void bridge.getRuntimeSnapshot().then((snapshot) => {
+      if (!snapshot) return;
+      const base = snapshotToView(snapshot);
+      setRuntime((current) =>
+        versionAtRequest === healthVersion.current
+          ? base
+          : { ...base, health: current.health },
+      );
+    });
+  }, [bridge]);
+
   useEffect(() => {
     return bridge.subscribe((event) => {
+      if (event.name === AGENT_EVENTS.runtimeHealthChanged) healthVersion.current += 1;
       setRuntime((view) => applyRuntimeEvent(view, event));
       if (AI_EVENTS.has(event.name)) {
         dispatch({ type: "agent_event", event });
       }
+      // profile_id / uptime / 连接数 只在快照里，状态迁移后补拉一次。
+      if (event.name === AGENT_EVENTS.runtimeStateChanged) {
+        refreshSnapshot();
+      }
     });
-  }, [bridge]);
+  }, [bridge, refreshSnapshot]);
 
   useEffect(() => {
-    void bridge.getRuntimeSnapshot().then((snapshot) => {
-      if (snapshot) setRuntime(snapshotToView(snapshot));
-    });
-  }, [bridge]);
+    refreshSnapshot();
+  }, [refreshSnapshot]);
 
   const handleSend = (text: string) => {
     const localRequestId = nextId("local");
@@ -84,6 +103,29 @@ export default function App() {
   const handleNextAction = (action: NextAction) => {
     const args = Object.keys(action.args).length > 0 ? `（参数：${JSON.stringify(action.args)}）` : "";
     handleSend(`${action.label}${args}`);
+  };
+
+  // 删除配置：正在使用的配置先给提示，确认后再删（不自动断开连接）。
+  const handleDeleteProfile = (profileId: string) => {
+    if (runtime.state === "running" && runtime.profile_id === profileId) {
+      setDeleteNotice({
+        text: "当前连接仍在使用这个配置，删除不会断开连接，断开后该配置将不再可用。",
+        confirmProfileId: profileId,
+      });
+      return;
+    }
+    void removeProfile(profileId);
+  };
+
+  const removeProfile = (profileId: string) => {
+    setDeleteNotice(null);
+    void bridge.deleteProfile(profileId).then(
+      () => {
+        setDeleteNotice({ text: "配置已删除。" });
+        refreshSnapshot();
+      },
+      (error: unknown) => setDeleteNotice({ text: errorMessage(error) }),
+    );
   };
 
   return (
@@ -124,10 +166,24 @@ export default function App() {
       </main>
 
       {statusOpen ? (
-        <StatusPanel status={runtime} onCollapse={() => setStatusOpen(false)} />
+        <StatusPanel
+          status={runtime}
+          onCollapse={() => setStatusOpen(false)}
+          onDeleteProfile={handleDeleteProfile}
+          onConfirmDelete={removeProfile}
+          deleteNotice={deleteNotice}
+        />
       ) : null}
     </div>
   );
+}
+
+function errorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  return "删除失败";
 }
 
 function pillText(state: RuntimeView["state"]): string {

@@ -1,0 +1,21 @@
+{
+  "name": "err-RuntimeStart",
+  "tool": "RuntimeStart",
+  "expect_error_code": "RUNTIME_NOT_INSTALLED",
+  "expect_ok": false,
+  "contract_backed": true,
+  "description": "运行时未安装就启动",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "RuntimeStart",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "text": "启动失败：sing-box 运行时尚未安装。要我现在安装吗？"
+    }
+  ]
+}

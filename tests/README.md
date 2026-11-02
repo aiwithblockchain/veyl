@@ -19,11 +19,13 @@ bash tests/local-node/setup.sh --selftest
 python3 -I tests/fixtures/make_archives.py
 ```
 
+CI 入口在 `scripts/`：`bash scripts/ci.sh`（完整 5 步）、`bash scripts/test/smoke.sh`（mock + 真实链路）。本目录只提供可运行的部件，编排在那边。
+
 ## 目录
 
 | 路径 | 内容 |
 |---|---|
-| `run-mocks.sh` | 一键启动/停止 mock 服务；`--selftest` 做健康检查 |
+| `run-mocks.sh` | 一键启动/停止 mock 服务；`--start` 后台启动供编排脚本用，`--selftest` 做健康检查 |
 | `mock-catalog/server.mjs` | 节点目录服务（设备注册、节点列表、故障注入、本地文件下发） |
 | `mock-llm/server.mjs` | OpenAI 兼容接口，按剧本返回 `tool_calls` |
 | `echo/server.mjs` | 回显服务，验证代理链路 |
@@ -31,6 +33,7 @@ python3 -I tests/fixtures/make_archives.py
 | `contracts/check-contracts.mjs` | 契约一致性检查：事件名、chatStore 覆盖、快照字段 |
 | `fixtures/nodes.json` | 节点数据（含不可达、凭证失效、注入载荷三种异常节点） |
 | `fixtures/llm-scenarios/*.json` | 剧本：用户说什么 → 依次返回什么工具调用 |
+| `fixtures/llm-scenarios/errors/*.json` | 18 个工具各一条错误路径剧本（见该目录 README） |
 | `fixtures/manifest-*.json` | 运行时清单：正常 / 坏 sha / 坏 URL / 路径穿越 / 假内核 |
 | `fixtures/make_archives.py` | 生成归档与清单（sha 自动计算，不手填） |
 
@@ -66,6 +69,7 @@ python3 -I tests/fixtures/make_archives.py
 ## mock LLM 的剧本机制
 
 请求里最后一条 user 消息带 `[scenario:connect-jp]` 即选择该剧本；未带则用默认剧本（`connect-jp`）。
+剧本从 `fixtures/llm-scenarios/` 与 `fixtures/llm-scenarios/errors/` **递归加载**，当前共 24 条。
 轮次由「请求里已有多少条 assistant 消息」决定，服务端无状态，便于并发测试。
 
 剧本里的工具名使用契约规定的 **PascalCase 模型可见名**（`CatalogSearch` / `VpnConnect` / `CoreInstall` …，见 `docs/contracts/tools.md` §3）。
@@ -83,4 +87,4 @@ python3 -I tests/fixtures/make_archives.py
 
 - `local-node/out/` 每次运行都会重新生成密钥与配置，**不要提交**（已在 `tests/.gitignore` 中忽略）。
 - `fixtures/generated/` 里的归档与 `manifest-*.json` 由脚本生成，**要一起提交**：manifest 里的 sha256 与归档内容绑定，单独改一边会导致用例假失败。
-- 测试 Keychain 用独立 service 名 `aivpn-test`，不要用生产 service 名。
+- 测试 Keychain 用独立 service 名 `veyl-test`，不要用生产 service 名。

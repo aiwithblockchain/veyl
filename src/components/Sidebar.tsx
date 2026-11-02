@@ -1,4 +1,6 @@
 import type { Session } from "../state/chatStore";
+import logo from "../assets/logo.png";
+import { PRODUCT_NAME } from "../brand";
 
 interface Props {
   sessions: Session[];
@@ -21,8 +23,8 @@ export function Sidebar({ sessions, activeSessionId, mode, onSelect, onNew }: Pr
   return (
     <aside className="sidebar">
       <div className="sidebar__brand">
-        <span className="sidebar__mark" aria-hidden />
-        <span className="sidebar__wordmark">AIVPN</span>
+        <img className="sidebar__mark" src={logo} alt={PRODUCT_NAME} />
+        <span className="sidebar__wordmark">{PRODUCT_NAME}</span>
       </div>
 
       <button type="button" className="sidebar__new" onClick={onNew}>

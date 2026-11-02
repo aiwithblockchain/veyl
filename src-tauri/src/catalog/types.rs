@@ -112,6 +112,50 @@ impl fmt::Debug for Credentials {
 }
 
 impl NodeDescriptor {
+    /// 可落库的非凭据快照：server / port / tls / flow / mux。
+    /// `credentials` 永远不进这个结构，这是 profiles.config_json 的唯一来源。
+    pub fn non_secret_config(&self) -> serde_json::Value {
+        use serde_json::json;
+
+        let tls = match &self.tls {
+            NodeTls::Reality {
+                server_name,
+                utls_fingerprint,
+                reality_public_key,
+                reality_short_id,
+            } => json!({
+                "mode": "reality",
+                "server_name": server_name,
+                "utls_fingerprint": utls_fingerprint,
+                "reality_public_key": reality_public_key,
+                "reality_short_id": reality_short_id,
+            }),
+            NodeTls::Tls {
+                server_name,
+                utls_fingerprint,
+            } => json!({
+                "mode": "tls",
+                "server_name": server_name,
+                "utls_fingerprint": utls_fingerprint,
+            }),
+            NodeTls::Insecure { server_name } => json!({
+                "mode": "insecure",
+                "server_name": server_name,
+            }),
+        };
+
+        json!({
+            "server": self.server,
+            "server_port": self.server_port,
+            "tls": tls,
+            "flow": self.flow,
+            "mux": self.mux.as_ref().map(|mux| json!({
+                "enabled": mux.enabled,
+                "concurrency": mux.concurrency,
+            })),
+        })
+    }
+
     pub fn tls_mode(&self) -> &'static str {
         match self.tls {
             NodeTls::Reality { .. } => "reality",

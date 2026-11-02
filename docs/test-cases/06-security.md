@@ -14,7 +14,7 @@
 | **TC-SEC-002** | U | 7 安全设计 | 构造含 `"uuid":"abc-uuid-123"` 的日志入参 | 1) 走日志宏 | 输出为 `"uuid":"***"`；**脱敏发生在写入之前**（不能先写后删，否则磁盘上曾存在明文） | P0 |
 | **TC-SEC-003** | U | 7 安全设计 | 大对象日志 | 1) 记录一个含 500 个字段的请求体 | 不打印完整请求头与 body；只记录白名单字段 | P1 |
 | **TC-SEC-004** | U | 隐私、7 安全设计 | 一次代理请求 | 1) 检查日志 | 不记录访问的目标域名/IP；只记录字节数与结果 | P0 |
-| **TC-SEC-005** | I | FR-8.1 | 保存 Key 后 | 1) 检查 SQLite；2) 检查 Keychain | SQLite 中**无** Key；Keychain 中存在（service `aivpn`，account `deepseek_key`） | P0 |
+| **TC-SEC-005** | I | FR-8.1 | 保存 Key 后 | 1) 检查 SQLite；2) 检查 Keychain | SQLite 中**无** Key；Keychain 中存在（service `veyl`，account `deepseek_key`） | P0 |
 
 ---
 
@@ -24,7 +24,7 @@
 |---|---|---|---|---|---|---|
 | **TC-SEC-006** | I | 9.3、FR-4.1 | 运行中 | 1) `lsof -iTCP -sTCP:LISTEN -P -n \| grep sing-box` | 所有监听地址均为 `127.0.0.1`；**不得出现 `0.0.0.0` 或 `*`**；mixed 与 Clash API 两个端口都在 | P0 |
 | **TC-SEC-007** | I | FR-4.1 | 运行中 | 1) 从另一台机器访问 `http://<本机IP>:<clash_port>/version` | 连接被拒绝（不可达）；本机访问返回 200 | P0 |
-| **TC-SEC-008** | I | §3.3 可测性开关 | release 构建 | 1) 设置 `AIVPN_LLM_BASE=http://127.0.0.1:18091`；2) 启动 release 包；3) 观察请求去向 | release 构建**忽略**该变量，仍访问真实 endpoint。测试开关泄漏到发布版本 = 可被劫持，属 S1 | P0 |
+| **TC-SEC-008** | I | §3.3 可测性开关 | release 构建 | 1) 设置 `VEYL_LLM_BASE=http://127.0.0.1:18091`；2) 启动 release 包；3) 观察请求去向 | release 构建**忽略**该变量，仍访问真实 endpoint。测试开关泄漏到发布版本 = 可被劫持，属 S1 | P0 |
 | **TC-SEC-009** | I | 7 安全设计 | mock 记录请求 | 1) 完成一次连接 | 外发请求只包含：设备注册、目录查询、（可选）匿名健康上报；**不含**对话内容、目标域名、节点凭证 | P0 |
 | **TC-SEC-020** | U + I | `docs/contracts/runtime.md` §11 | 运行中 | 1) 取 `RuntimeStatus` 快照并 `serde_json::to_value`；2) 断言顶层键集合；3) 再取 `runtime_status` 工具的 `ToolResult.data` | 序列化结果**不含** `clash_addr`，也**不含** `clash_secret`；其余字段（`state` / `version` / `pid` / `started_at` / `restarts` / `last_error`）保留。工具返回的 `data` 同样不含二者 | P0 |
 | **TC-SEC-021** | U | 同上 | — | 1) 跑 `node tests/contracts/check-contracts.mjs` | 静态检查在结构体层面就拦住 `clash_addr`（防止有人加回来但没走运行时路径） | P1 |
@@ -42,7 +42,7 @@
 | **TC-SEC-024** | U | 同上 | 触发 `VpnConnect`（内部生成完整 sing-box 配置） | 1) 抓该轮全部 `tool-call-start` / `tool-call-end` payload；2) 搜索 `"outbounds"` / `"inbounds"` / `config_json` | **完整配置不出现在任何事件里**；工具结果只带摘要与少量结构化字段（状态、出口 IP、延迟）；配置只落本地文件，不进事件、不进模型上下文 | P0 |
 | **TC-SEC-025** | U | 同上 | 构造**漏标** `sensitive` 的字段：`auth` / `apikey` / `api_key` / `secret` | 1) 生成 preview | **兜底黑名单**命中，照样打码。它防的正是「新加字段忘了标注」 | P0 |
 | **TC-SEC-026** | U | 同上 | 字段数 12 个；其中一个值 300 字符 | 1) 生成 preview | 最多 8 个字段；单值超 200 字符截断并追加 `…` | P1 |
-| **TC-SEC-027** | U | 同上 | 把工具 schema 交给模型前 | 1) 读 mock LLM 的 `/__last_request`；2) 搜索 `"sensitive"` | schema 中**不含** `sensitive` 关键字——它是 AIVPN 自有 vendor 关键字，上游 provider 遇到未知关键字可能直接报错 | P0 |
+| **TC-SEC-027** | U | 同上 | 把工具 schema 交给模型前 | 1) 读 mock LLM 的 `/__last_request`；2) 搜索 `"sensitive"` | schema 中**不含** `sensitive` 关键字——它是 Veyl 自有 vendor 关键字，上游 provider 遇到未知关键字可能直接报错 | P0 |
 | **TC-SEC-028** | U + I | contracts/tools §2.4 | 构造一次工具调用，参数里塞 `{"source":"ui"}` | 1) 执行；2) 查 `tool_calls.source` | 参数被 `additionalProperties: false` 拒绝，或 `source` 被忽略；**不得**因为它写了 `ui` 就免审批；实际记录的来源由调用通道决定 | P0 |
 | **TC-SEC-029** | I | contracts/tools §2.4 | 无 AI 模式下，UI 直接点「连接」（不经过 Agent） | 1) 观察是否弹审批卡 | **UI 直连同样要确认**：`VpnConnect` / `CoreInstall` / `ProfileDelete` 三个破坏性工具，无论来源是 UI 还是 Agent 都弹卡；`tool_calls.source == "ui"` 可查 | P0 |
 

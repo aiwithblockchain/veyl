@@ -1,4 +1,4 @@
-import { AGENT_EVENTS } from "./protocol";
+import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type { AgentEvent, RuntimeSnapshot, RuntimeView } from "./protocol";
 
 export type BridgeMode = "tauri" | "mock";
@@ -16,6 +16,8 @@ export interface AgentBridge {
   ): Promise<void>;
   /** 事件不可达时的兜底快照（契约 §5 `runtime_status`）。 */
   getRuntimeSnapshot(): Promise<RuntimeSnapshot | null>;
+  /** 无 AI 模式的删除配置入口（契约 §5 `profile_delete`）。 */
+  deleteProfile(profileId: string): Promise<void>;
   dispose(): void;
 }
 
@@ -24,7 +26,7 @@ export function isTauri(): boolean {
 }
 
 export const EMPTY_HEALTH = {
-  contract_version: "1.0.4",
+  contract_version: CONTRACT_VERSION,
   process: false,
   clash_api: false,
   data_plane: false,

@@ -1,0 +1,21 @@
+{
+  "name": "err-VpnDisconnect",
+  "tool": "VpnDisconnect",
+  "expect_error_code": "PRECONDITION_FAILED",
+  "expect_ok": false,
+  "contract_backed": false,
+  "description": "未连接时断开（契约 §4.12 未列出错误码）",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "VpnDisconnect",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "text": "当前没有连接，无需断开。"
+    }
+  ]
+}

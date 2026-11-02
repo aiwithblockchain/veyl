@@ -1,0 +1,21 @@
+{
+  "name": "err-DeepseekSetupKey",
+  "tool": "DeepseekSetupKey",
+  "expect_error_code": null,
+  "expect_ok": true,
+  "contract_backed": true,
+  "description": "离线时仍应返回取 Key 的步骤，不报错（契约 §4.14 明确）",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "DeepseekSetupKey",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "text": "这是获取 DeepSeek API Key 的步骤（当前离线也能查看）。"
+    }
+  ]
+}

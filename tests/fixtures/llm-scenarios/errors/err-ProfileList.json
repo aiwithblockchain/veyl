@@ -1,0 +1,21 @@
+{
+  "name": "err-ProfileList",
+  "tool": "ProfileList",
+  "expect_error_code": "INTERNAL",
+  "expect_ok": false,
+  "contract_backed": false,
+  "description": "本地数据库损坏（契约 §4.9 未列出错误码）",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "ProfileList",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "text": "读取本地配置列表失败，本地数据可能已损坏。"
+    }
+  ]
+}

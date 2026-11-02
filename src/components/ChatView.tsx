@@ -3,6 +3,7 @@ import type { ApprovalDecision, ApprovalScope, NextAction } from "../agent/proto
 import type { Session } from "../state/chatStore";
 import { Composer } from "./Composer";
 import { MessageItem } from "./MessageItem";
+import logo from "../assets/logo.png";
 
 interface Props {
   session: Session;
@@ -38,7 +39,9 @@ export function ChatView({ session, onSend, onStop, onDecide, onNextAction }: Pr
       >
         {session.messages.length === 0 ? (
           <div className="empty">
-            <div className="empty__mark" aria-hidden />
+            <div className="empty__mark">
+              <img src={logo} alt="" />
+            </div>
             <h1 className="empty__title">用一句话连上网络</h1>
             <p className="empty__sub">
               告诉我要去哪儿，剩下的交给它：下载运行时、挑选节点、连接、设置系统代理。

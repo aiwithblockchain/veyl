@@ -1,0 +1,21 @@
+{
+  "name": "err-RuntimeStatus",
+  "tool": "RuntimeStatus",
+  "expect_error_code": "INTERNAL",
+  "expect_ok": false,
+  "contract_backed": true,
+  "description": "状态快照读取失败（需故障注入：快照文件损坏/权限不足）",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "RuntimeStatus",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "text": "读取运行时状态失败，请重试；若持续失败请运行诊断。"
+    }
+  ]
+}

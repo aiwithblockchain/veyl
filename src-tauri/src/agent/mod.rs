@@ -108,14 +108,14 @@ impl AppState {
     }
 }
 
-/// 会话工作目录：P1 W1 先用用户主目录下的 `.aivpn/sessions`，W3 起改用平台数据目录。
+/// 会话工作目录：P1 W1 先用用户主目录下的 `.veyl/sessions`，W3 起改用平台数据目录。
 fn working_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
 
-    let dir = home.join(".aivpn").join("sessions");
+    let dir = home.join(".veyl").join("sessions");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }

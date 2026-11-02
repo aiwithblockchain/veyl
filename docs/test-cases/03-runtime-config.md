@@ -47,7 +47,7 @@
 | **TC-CFG-003** | U | FR-4.1 | 缺失 `uuid` | 1) 生成 | **生成阶段即报错**（`config_invalid`，字段 `outbounds[0].uuid`）。实测 `sing-box check` 会放过这类配置，所以不能只靠 `check` | P0 |
 | **TC-CFG-004** | U | FR-4.1 | 缺失 `reality.public_key` | 1) 生成 | 报错并指出字段路径 | P0 |
 | **TC-CFG-005** | U | FR-4.1 | 端口为 0 / 70000 / 字符串 | 1) 生成 | 三种均被拒绝，错误指明字段 | P1 |
-| **TC-CFG-006** | U | FR-4.5、9.3 | 任意节点 | 1) 生成配置；2) grep 全文本 | 配置中**不含** `aivpn`、平台标识、遥测字段、设备 ID；节点名称不写进配置（不需要） | P0 |
+| **TC-CFG-006** | U | FR-4.5、9.3 | 任意节点 | 1) 生成配置；2) grep 全文本 | 配置中**不含** `veyl`、平台标识、遥测字段、设备 ID；节点名称不写进配置（不需要） | P0 |
 | **TC-CFG-007** | I | FR-4.2 | 生成成功 | 1) 检查临时文件权限 | 临时文件未移入 `config/active.json` 之前权限为 `0600`；`active.json` 同样 `0600`；临时文件在成功后不残留 | P1 |
 | **TC-CFG-008** | U | FR-4.1 | 指定 `mixed_port=12080` | 1) 生成 | 生成结果里 `listen_port == 12080`（端口可配置性） | P1 |
 | **TC-CFG-009** | U | FR-4.1 | 两次生成同一节点 | 1) 比较配置 | `clash_api.secret` **每次不同**；其余字段一致 | P0 |
@@ -59,5 +59,5 @@
 
 | ID | 层 | 追溯 | 前置 | 步骤 | 预期 | 优先级 |
 |---|---|---|---|---|---|---|
-| **TC-RT-019** | I | 测试环境 | `tests/local-node/setup.sh` 首次运行 | 1) 运行脚本；2) 脚本自检 | 生成 `client.json` / `server.json` 并各自 `sing-box check` 通过；启动后 `GET /version` 返回 200；通过 mixed 入站访问回显返回 `AIVPN_ECHO_OK` | P0 |
+| **TC-RT-019** | I | 测试环境 | `tests/local-node/setup.sh` 首次运行 | 1) 运行脚本；2) 脚本自检 | 生成 `client.json` / `server.json` 并各自 `sing-box check` 通过；启动后 `GET /version` 返回 200；通过 mixed 入站访问回显返回 `VEYL_ECHO_OK` | P0 |
 | **TC-RT-020** | I | 测试环境 | 本地节点已启动 | 1) 停掉服务端；2) 通过 mixed 入站请求回显 | 返回 **502 Bad Gateway**（实测）；Host 应把它归为 `node_unreachable` | P0 |

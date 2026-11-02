@@ -1,0 +1,23 @@
+{
+  "name": "err-ProfileImport",
+  "tool": "ProfileImport",
+  "expect_error_code": "NODE_NOT_FOUND",
+  "expect_ok": false,
+  "contract_backed": true,
+  "description": "导入不存在的节点",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "ProfileImport",
+          "arguments": {
+            "node_id": "seed-not-exist"
+          }
+        }
+      ]
+    },
+    {
+      "text": "导入失败：节点不存在，可能已下线。要换一个吗？"
+    }
+  ]
+}

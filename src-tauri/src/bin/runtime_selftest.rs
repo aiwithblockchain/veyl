@@ -4,10 +4,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use aivpn_lib::config::{self, BuildInput, NodeDescriptor, ProtocolConfig};
-use aivpn_lib::proxy::{ProxyController, RecoveryOutcome};
-use aivpn_lib::runtime::{
-    current_release, default_app_data_dir, ClashApi, Installer, RuntimeConfig, RuntimeManager,
+use veyl_lib::config::{self, BuildInput, NodeDescriptor, ProtocolConfig};
+use veyl_lib::proxy::{ProxyController, RecoveryOutcome};
+use veyl_lib::runtime::{
+    current_release, default_app_data_dir, ClashApi, Installer, RuntimeConfig, RuntimeEvent,
+    RuntimeManager,
     RuntimeState, StartPlan,
 };
 
@@ -67,6 +68,7 @@ async fn main() -> ExitCode {
         "e2e" => run_e2e(&args).await,
         "install" => run_install(&args).await,
         "status" => run_status(&args).await,
+        "fault" => run_fault(&args).await,
         "proxy-status" => run_proxy_status(&args),
         "proxy-recover" => run_proxy_recover(&args),
         "proxy-enable" => run_proxy_enable(&args),
@@ -74,7 +76,7 @@ async fn main() -> ExitCode {
         other => {
             eprintln!("unknown command: {other}");
             eprintln!(
-                "commands: e2e | install | status | proxy-status | proxy-enable | proxy-disable | proxy-recover"
+                "commands: e2e | install | status | fault | proxy-status | proxy-enable | proxy-disable | proxy-recover"
             );
             return ExitCode::from(2);
         }
@@ -246,6 +248,158 @@ async fn run_e2e(args: &Args) -> StepResult {
     println!("\nE2E PASSED");
     Ok(())
 }
+
+/// 故障注入：假 sing-box 提供 `/version` 后自杀，验证
+/// 「running → crash → 退避重启 → 重试耗尽 → failed」整条链路。
+async fn run_fault(args: &Args) -> StepResult {
+    let dir = args.data_dir.join("fault");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let clash_port = config::pick_free_port().map_err(|e| e.to_string())?;
+    let mixed_port = config::pick_free_port().map_err(|e| e.to_string())?;
+    let secret = config::random_secret();
+
+    let config_path = dir.join("config.json");
+    let config = serde_json::json!({
+        "log": { "level": "error" },
+        "inbounds": [],
+        "outbounds": [{ "type": "direct", "tag": "direct" }],
+        "route": { "final": "direct" },
+        "experimental": {
+            "clash_api": {
+                "external_controller": format!("127.0.0.1:{clash_port}"),
+                "secret": secret,
+            }
+        },
+    });
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).unwrap_or_default(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let fake = dir.join("fake-sing-box");
+    std::fs::write(&fake, FAKE_SING_BOX).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+    }
+
+    let mut cfg = RuntimeConfig::new(&dir);
+    cfg.startup_timeout = Duration::from_secs(5);
+    cfg.max_restarts = 2;
+    cfg.health_interval = Duration::from_secs(30);
+    cfg.data_plane_probe = None;
+
+    let manager = RuntimeManager::new(cfg);
+    let mut events = manager.subscribe();
+    let plan = StartPlan {
+        version: "fake".into(),
+        binary: fake,
+        config_path,
+        work_dir: dir.clone(),
+        log_path: dir.join("runtime.log"),
+        clash_addr: format!("127.0.0.1:{clash_port}"),
+        clash_secret: secret,
+        mixed_port,
+        profile_id: Some("fault".into()),
+    };
+
+    step(1, "启动假 sing-box（2 秒后自杀）");
+    let status = manager.start(plan).await.map_err(|e| e.to_string())?;
+    println!("    state: {}", status.state.as_str());
+    if status.state != RuntimeState::Running {
+        return Err(format!("expected running, got {}", status.state.as_str()));
+    }
+
+    step(2, "等待重启预算耗尽");
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
+    loop {
+        let current = manager.status().await;
+        if current.state == RuntimeState::Failed {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(format!(
+                "still {} after 40s (restart_count={})",
+                current.state.as_str(),
+                current.restart_count
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    step(3, "校验失败状态与重启次数");
+    let status = manager.status().await;
+    println!(
+        "    state={} restart_count={} last_error={:?}",
+        status.state.as_str(),
+        status.restart_count,
+        status.last_error
+    );
+    if status.restart_count != 2 {
+        return Err(format!(
+            "expected restart_count=2, got {}",
+            status.restart_count
+        ));
+    }
+
+    let mut restarting_events = 0;
+    while let Ok(event) = events.try_recv() {
+        if let RuntimeEvent::StateChanged(payload) = event {
+            if payload.to == RuntimeState::Restarting {
+                restarting_events += 1;
+            }
+        }
+    }
+    println!("    restarting events: {restarting_events}");
+    if restarting_events != 2 {
+        return Err(format!(
+            "expected 2 restarting events, got {restarting_events}"
+        ));
+    }
+
+    println!("\nFAULT INJECTION PASSED");
+    Ok(())
+}
+
+const FAKE_SING_BOX: &str = r#"#!/usr/bin/env python3
+import json, sys, threading, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+argv = sys.argv[1:]
+config_path = argv[argv.index("-c") + 1]
+with open(config_path, encoding="utf-8") as fh:
+    config = json.load(fh)
+clash = config["experimental"]["clash_api"]
+port = int(clash["external_controller"].rsplit(":", 1)[1])
+secret = clash["secret"]
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/version" and self.headers.get("Authorization") == f"Bearer {secret}":
+            body = b'{"version":"fake-1.0.0"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+server = HTTPServer(("127.0.0.1", port), Handler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+time.sleep(2)
+sys.exit(1)
+"#;
 
 fn demo_node() -> NodeDescriptor {
     NodeDescriptor {

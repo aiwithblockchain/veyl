@@ -1,0 +1,21 @@
+{
+  "name": "err-RuntimeRestart",
+  "tool": "RuntimeRestart",
+  "expect_error_code": "RUNTIME_NOT_INSTALLED",
+  "expect_ok": false,
+  "contract_backed": false,
+  "description": "运行时未安装就重启（契约 §4.4 未列出错误码，按 RUNTIME_NOT_INSTALLED 假定）",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "RuntimeRestart",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "text": "重启失败：运行时尚未安装。"
+    }
+  ]
+}

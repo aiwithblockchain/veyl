@@ -1,0 +1,27 @@
+{
+  "name": "err-AskUserQuestion",
+  "tool": "AskUserQuestion",
+  "expect_error_code": "USER_DISMISSED",
+  "expect_ok": false,
+  "contract_backed": false,
+  "description": "用户关闭/忽略提问（Claurst 内置工具，错误码未在契约中定义）",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "AskUserQuestion",
+          "arguments": {
+            "questions": [
+              {
+                "question": "继续吗？"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "你没有回答问题，我先按取消处理。"
+    }
+  ]
+}

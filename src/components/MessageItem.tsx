@@ -1,4 +1,5 @@
 import type { ApprovalDecision, ApprovalScope, NextAction } from "../agent/protocol";
+import { PRODUCT_NAME } from "../brand";
 import type { ApprovalEntry, ChatMessage, ToolCall } from "../state/chatStore";
 import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
@@ -35,7 +36,7 @@ export function MessageItem({ message, toolCalls, approvals, onDecide, onNextAct
     <div className="msg msg--assistant">
       <div className="msg__role">
         <span className="msg__avatar" aria-hidden />
-        <span>AIVPN</span>
+        <span>{PRODUCT_NAME}</span>
         {message.streaming ? <span className="msg__streaming">输出中</span> : null}
         {message.usage?.output_tokens ? (
           <span className="msg__usage">{message.usage.output_tokens} tokens</span>

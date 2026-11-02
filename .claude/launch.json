@@ -2,10 +2,25 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "aivpn-web",
+      "name": "veyl-web",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
-      "port": 1420
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
+      "port": 1430
+    },
+    {
+      "name": "veyl-site",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "4173",
+        "--directory",
+        "site"
+      ],
+      "port": 4173
     }
   ]
 }

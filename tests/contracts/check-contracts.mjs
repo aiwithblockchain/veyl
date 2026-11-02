@@ -9,7 +9,7 @@
 //   2. AGENT_EVENTS 的每个取值都被 src/state/chatStore.ts 的 switch 覆盖
 //   3. RuntimeStatus / RuntimeSnapshot 的序列化字段不含 clash_addr（契约 runtime.md §11）
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -17,17 +17,36 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..", "..");
 
 const results = [];
-function check(name, fn) {
+function check(name, fn, opts = {}) {
   try {
     const problems = fn() || [];
-    results.push({ name, problems });
+    results.push({ name, problems, advisory: !!opts.advisory });
   } catch (err) {
-    results.push({ name, problems: [`检查本身出错：${err.message}`] });
+    results.push({ name, problems: [`检查本身出错：${err.message}`], advisory: !!opts.advisory });
   }
 }
 
 function read(rel) {
   return readFileSync(join(ROOT, rel), "utf8");
+}
+
+// 递归加载剧本（含 errors/ 子目录），并给每条打上来源文件名
+function loadScenarios(dir) {
+  const out = [];
+  function walk(d) {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) {
+        walk(p);
+      } else if (e.name.endsWith(".json")) {
+        const s = JSON.parse(readFileSync(p, "utf8"));
+        s.__file = p.slice(ROOT.length + 1);
+        out.push(s);
+      }
+    }
+  }
+  if (existsSync(dir)) walk(dir);
+  return out;
 }
 
 // --- 1 & 2：事件名 ---
@@ -110,40 +129,93 @@ check("RuntimeStatus / RuntimeSnapshot 快照不含 clash_addr", () => {
 check("mock LLM 剧本的工具名都在 docs/contracts/tools.md 的工具总表里", () => {
   const md = read("docs/contracts/tools.md");
   const known = new Set();
-  for (const m of md.matchAll(/^\|\s*\d+\s*\|\s*`([A-Za-z]+)`\s*\|\s*`[A-Za-z]+`\s*\|/gm)) known.add(m[1]);
+  for (const m of md.matchAll(/^\|\s*\d+\s*\|\s*`([A-Za-z]+)`\s*\|/gm)) known.add(m[1]);
   if (known.size === 0) throw new Error("未能从 docs/contracts/tools.md §3 解析出工具名");
 
   const dir = join(ROOT, "tests", "fixtures", "llm-scenarios");
   const problems = [];
-  for (const f of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
-    const scenario = JSON.parse(readFileSync(join(dir, f), "utf8"));
+  for (const scenario of loadScenarios(dir)) {
     for (const turn of scenario.turns || []) {
       for (const tc of turn.tool_calls || []) {
-        if (!known.has(tc.name)) problems.push(`${f} 里的工具名 "${tc.name}" 不在契约工具总表中`);
+        if (!known.has(tc.name)) problems.push(`${scenario.__file} 里的工具名 "${tc.name}" 不在契约工具总表中`);
       }
     }
   }
   return problems;
 });
 
+// --- 5：实现里的 contract_version 与契约文档一致（advisory） ---
+//
+// 这一项默认只报 WARN，不阻断 CI：契约升版后实现往往滞后一版，先把偏差摆出来，
+// 由架构师决定何时收紧。用 AIVPN_CONTRACT_STRICT=1（contracts.sh --strict）可当失败处理。
+
+function walkRs(dir, out = []) {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) walkRs(p, out);
+    else if (e.name.endsWith(".rs")) out.push(p);
+  }
+  return out;
+}
+
+function docContractVersion() {
+  const md = read("docs/contracts/tools.md");
+  const m = md.match(/契约版本：`([\d.]+)`/);
+  if (!m) throw new Error("未能从 docs/contracts/tools.md 读出契约版本");
+  return m[1];
+}
+
+check(
+  "实现里的 contract_version 与契约文档一致",
+  () => {
+    const expected = docContractVersion();
+    const srcDir = join(ROOT, "src-tauri", "src");
+    if (!existsSync(srcDir)) return [];
+    const problems = [];
+
+    for (const file of walkRs(srcDir)) {
+      const lines = readFileSync(file, "utf8").split("\n");
+      lines.forEach((line, i) => {
+        if (!/CONTRACT_VERSION|contract_version/.test(line)) return;
+        for (const m of line.matchAll(/"(\d+\.\d+\.\d+)"/g)) {
+          if (m[1] === expected) continue;
+          const rel = file.slice(ROOT.length + 1);
+          problems.push(`${rel}:${i + 1} 是 ${m[1]}，契约是 ${expected}`);
+        }
+      });
+    }
+    return problems;
+  },
+  { advisory: true }
+);
+
 // --- 输出 ---
 
+const strict = process.env.AIVPN_CONTRACT_STRICT === "1";
 let failed = 0;
-for (const { name, problems } of results) {
+let warned = 0;
+
+for (const { name, problems, advisory } of results) {
   if (problems.length === 0) {
     console.log(`  ok   ${name}`);
-  } else {
-    failed++;
-    console.log(`  FAIL ${name}`);
-    for (const p of problems) console.log(`       - ${p}`);
+    continue;
   }
+  if (advisory) {
+    warned++;
+    console.log(`  WARN ${name}（advisory${strict ? "，严格模式下算失败" : "，不阻断"}）`);
+    for (const p of problems) console.log(`       - ${p}`);
+    continue;
+  }
+  failed++;
+  console.log(`  FAIL ${name}`);
+  for (const p of problems) console.log(`       - ${p}`);
 }
 
 console.log();
-if (failed === 0) {
-  console.log(`[contracts] ${results.length} 项全部通过`);
+if (failed === 0 && (!strict || warned === 0)) {
+  const extra = warned > 0 ? `，${warned} 项 advisory 待处理` : "";
+  console.log(`[contracts] ${results.length} 项检查通过${extra}`);
   process.exit(0);
-} else {
-  console.log(`[contracts] ${failed}/${results.length} 项不通过`);
-  process.exit(1);
 }
+console.log(`[contracts] ${failed} 项不通过${warned > 0 ? `，${warned} 项 advisory` : ""}`);
+process.exit(1);

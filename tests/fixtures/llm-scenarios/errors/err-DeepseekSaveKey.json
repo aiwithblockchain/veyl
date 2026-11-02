@@ -1,0 +1,23 @@
+{
+  "name": "err-DeepseekSaveKey",
+  "tool": "DeepseekSaveKey",
+  "expect_error_code": "INVALID_ARGUMENT",
+  "expect_ok": false,
+  "contract_backed": true,
+  "description": "Key 长度不足（schema minLength 20）",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "DeepseekSaveKey",
+          "arguments": {
+            "key": "sk-short"
+          }
+        }
+      ]
+    },
+    {
+      "text": "这个 Key 看起来不完整，请检查是否复制了全部内容。"
+    }
+  ]
+}
