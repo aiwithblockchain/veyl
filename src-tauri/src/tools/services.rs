@@ -931,11 +931,13 @@ impl WiredServices {
             profile_id: Some(profile.id.clone()),
         };
 
-        let started = self
-            .manager
-            .start(plan)
-            .await
-            .map_err(|e| svc_error(e.code(), e))?;
+        let started = match self.manager.start(plan).await {
+            Ok(status) => status,
+            Err(error) => {
+                // 切换时 start 可能已经停掉旧节点；旧代理还指着死端口，必须撤掉。
+                return Err(self.abort_connection(svc_error(error.code(), error)));
+            }
+        };
 
         // start() 在并发 stop（含退出）时会返回 Ok(Idle)，那不是连上。
         // 不拦的话会继续写系统代理，把流量指向没人监听的端口。

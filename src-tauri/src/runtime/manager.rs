@@ -237,6 +237,17 @@ impl StartPlan {
     pub fn log_path(cfg: &RuntimeConfig, version: &str) -> PathBuf {
         cfg.log_dir().join(format!("runtime-{version}.log"))
     }
+
+    /// 是否是同一份启动计划。端口、配置路径、二进制、版本、控制面都必须一致；
+    /// 换节点时这些都是新值，绝不能只比配置路径（同一 profile 重连路径不变）。
+    fn same_launch(&self, other: &Self) -> bool {
+        self.binary == other.binary
+            && self.config_path == other.config_path
+            && self.version == other.version
+            && self.mixed_port == other.mixed_port
+            && self.clash_addr == other.clash_addr
+            && self.clash_secret == other.clash_secret
+    }
 }
 
 /// 持久化的运行中进程，用于下次启动时回收（应用崩溃/被强杀时 child handle 会丢）。
@@ -365,6 +376,11 @@ impl RuntimeManager {
         self.events.subscribe()
     }
 
+    /// 当前运行计划（含本次分配的真实端口），用于诊断与测试。
+    pub async fn current_plan(&self) -> Option<StartPlan> {
+        self.inner.lock().await.plan.clone()
+    }
+
     pub async fn status(&self) -> RuntimeStatus {
         self.inner.lock().await.snapshot()
     }
@@ -436,18 +452,32 @@ impl RuntimeManager {
     }
 
     pub async fn start(self: &Arc<Self>, plan: StartPlan) -> RuntimeResult<RuntimeStatus> {
+        // 同一份 plan 已经在跑：保持现状（并发重复启动的保护）。
+        // plan 不同（换节点/换端口）必须先停掉旧进程再启动，
+        // 否则新端口没人监听，系统代理会指向死端口、用户整机断网。
+        let replace = {
+            let inner = self.inner.lock().await;
+            match inner.state {
+                RuntimeState::Starting
+                | RuntimeState::Running
+                | RuntimeState::Degraded
+                | RuntimeState::Restarting => match inner.plan.as_ref() {
+                    Some(current) if current.same_launch(&plan) => {
+                        return Ok(inner.snapshot());
+                    }
+                    _ => true,
+                },
+                RuntimeState::Stopping => true,
+                _ => false,
+            }
+        };
+        if replace {
+            // 启动途中切换也一样：先完整停下，不并发替换。
+            self.stop().await?;
+        }
+
         let (stale_child, gen, from, version) = {
             let mut inner = self.inner.lock().await;
-            if matches!(
-                inner.state,
-                RuntimeState::Starting
-                    | RuntimeState::Running
-                    | RuntimeState::Degraded
-                    | RuntimeState::Restarting
-            ) {
-                return Ok(inner.snapshot());
-            }
-
             if !plan.binary.is_file() {
                 return Err(RuntimeError::NotInstalled);
             }
@@ -1268,6 +1298,125 @@ mod tests {
             mixed_port: 1,
             profile_id: Some("profile-1".into()),
         }
+    }
+
+    /// 只回 `/version` 的假 Clash API，让 wait_until_ready 能通过。
+    async fn fake_clash_server() -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    let body = r#"{"version":"test","meta":false,"premium":false}"#;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                });
+            }
+        });
+        (port, handle)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn switching_to_a_different_plan_replaces_the_running_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("switch-plan");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-sing-box");
+        std::fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (clash_port, server) = fake_clash_server().await;
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+
+        // 旧连接：一个真实的活进程 + Running 状态。
+        let old = tokio::process::Command::new("/usr/bin/tail")
+            .args(["-f", "/dev/null"])
+            .spawn()
+            .unwrap();
+        let old_pid = old.id().unwrap();
+
+        let new_plan = StartPlan {
+            binary: fake.clone(),
+            config_path: dir.join("config-new.json"),
+            version: "0.0.0".into(),
+            work_dir: dir.clone(),
+            log_path: dir.join("runtime.log"),
+            clash_addr: format!("127.0.0.1:{clash_port}"),
+            clash_secret: "new-secret".into(),
+            mixed_port: 4321,
+            profile_id: Some("profile-2".into()),
+        };
+
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.state = RuntimeState::Running;
+            inner.plan = Some(plan(fake, &dir));
+            inner.pid = Some(old_pid);
+            inner.child = Some(old);
+        }
+
+        let status = manager.start(new_plan.clone()).await.unwrap();
+
+        assert_eq!(status.state, RuntimeState::Running);
+        assert_ne!(status.pid, Some(old_pid), "切换必须换成新进程");
+        assert!(!process::is_alive(old_pid), "旧 child 必须先被终止");
+        let current = manager.current_plan().await.unwrap();
+        assert_eq!(current.mixed_port, 4321, "新 plan 的端口必须生效");
+        assert_eq!(current.config_path, new_plan.config_path);
+
+        manager.stop().await.unwrap();
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn starting_the_same_plan_does_not_restart_the_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("same-plan");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-sing-box");
+        std::fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (clash_port, server) = fake_clash_server().await;
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+
+        let start_plan = StartPlan {
+            binary: fake,
+            config_path: dir.join("config.json"),
+            version: "0.0.0".into(),
+            work_dir: dir.clone(),
+            log_path: dir.join("runtime.log"),
+            clash_addr: format!("127.0.0.1:{clash_port}"),
+            clash_secret: "secret".into(),
+            mixed_port: 4321,
+            profile_id: Some("profile-1".into()),
+        };
+
+        let first = manager.start(start_plan.clone()).await.unwrap();
+        let pid = first.pid.expect("第一次启动应有 pid");
+
+        let second = manager.start(start_plan).await.unwrap();
+        assert_eq!(second.pid, Some(pid), "同一 plan 不应重启进程");
+        assert!(process::is_alive(pid), "原进程必须继续运行");
+
+        manager.stop().await.unwrap();
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
