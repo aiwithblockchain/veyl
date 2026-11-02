@@ -144,7 +144,12 @@ check("mock LLM 剧本的工具名都在 docs/contracts/tools.md 的工具总表
   return problems;
 });
 
-// --- 5：实现里的 contract_version 与契约文档一致（advisory） ---
+// --- 5：实现里的 contract_version 与对应契约文档一致（advisory） ---
+//
+// 契约拆成多份之后，各文件的版本**独立演进**，不能再用一个全局版本号去套：
+//   - catalog.md 是和服务端协商的协议版本（client.rs 的 contract_compatible 精确比对）
+//   - tools.md / runtime.md / events.md 是应用内部版本，各自升
+// 所以这里按「实现目录 → 契约文件」逐段映射。
 //
 // 这一项默认只报 WARN，不阻断 CI：契约升版后实现往往滞后一版，先把偏差摆出来，
 // 由架构师决定何时收紧。用 AIVPN_CONTRACT_STRICT=1（contracts.sh --strict）可当失败处理。
@@ -158,29 +163,50 @@ function walkRs(dir, out = []) {
   return out;
 }
 
-function docContractVersion() {
-  const md = read("docs/contracts/tools.md");
+// 顺序有意义：先按完整路径精确匹配，再按目录前缀匹配。
+const VERSION_MAP = [
+  { file: "src-tauri/src/claurst_session/events.rs", doc: "docs/contracts/events.md" },
+  { prefix: "src-tauri/src/tools/", doc: "docs/contracts/tools.md" },
+  { prefix: "src-tauri/src/runtime/", doc: "docs/contracts/runtime.md" },
+  { prefix: "src-tauri/src/catalog/", doc: "docs/contracts/catalog.md" },
+];
+
+function docForFile(rel) {
+  const exact = VERSION_MAP.find((e) => e.file === rel);
+  if (exact) return exact.doc;
+  const byPrefix = VERSION_MAP.find((e) => e.prefix && rel.startsWith(e.prefix));
+  return byPrefix ? byPrefix.doc : null;
+}
+
+const docVersionCache = new Map();
+function docContractVersion(relDoc) {
+  if (docVersionCache.has(relDoc)) return docVersionCache.get(relDoc);
+  const md = read(relDoc);
   const m = md.match(/契约版本：`([\d.]+)`/);
-  if (!m) throw new Error("未能从 docs/contracts/tools.md 读出契约版本");
+  if (!m) throw new Error(`未能从 ${relDoc} 读出契约版本`);
+  docVersionCache.set(relDoc, m[1]);
   return m[1];
 }
 
 check(
-  "实现里的 contract_version 与契约文档一致",
+  "实现里的 contract_version 与对应契约文档一致",
   () => {
-    const expected = docContractVersion();
     const srcDir = join(ROOT, "src-tauri", "src");
     if (!existsSync(srcDir)) return [];
     const problems = [];
 
     for (const file of walkRs(srcDir)) {
+      const rel = file.slice(ROOT.length + 1);
+      const doc = docForFile(rel);
+      // 未映射的文件不参与检查（例如 agent/ 下的命令层，不携带契约版本语义）。
+      if (!doc) continue;
+      const expected = docContractVersion(doc);
       const lines = readFileSync(file, "utf8").split("\n");
       lines.forEach((line, i) => {
         if (!/CONTRACT_VERSION|contract_version/.test(line)) return;
-        for (const m of line.matchAll(/"(\d+\.\d+\.\d+)"/g)) {
+        for (const m of line.matchAll(/"([\d.]+\.[\d.]+)"/g)) {
           if (m[1] === expected) continue;
-          const rel = file.slice(ROOT.length + 1);
-          problems.push(`${rel}:${i + 1} 是 ${m[1]}，契约是 ${expected}`);
+          problems.push(`${rel}:${i + 1} 是 ${m[1]}，${doc} 是 ${expected}`);
         }
       });
     }
