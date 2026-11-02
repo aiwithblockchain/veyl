@@ -20,6 +20,7 @@ struct Args {
     data_dir: PathBuf,
     probe_url: Option<String>,
     port: u16,
+    file: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
@@ -27,6 +28,7 @@ fn parse_args() -> Args {
     let mut data_dir = std::env::temp_dir().join("aivpn-selftest");
     let mut probe_url = None;
     let mut port = 2080u16;
+    let mut file = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -35,6 +37,7 @@ fn parse_args() -> Args {
                 data_dir = PathBuf::from(args.next().expect("--data-dir needs a value"));
             }
             "--probe-url" => probe_url = args.next(),
+            "--file" => file = args.next().map(PathBuf::from),
             "--port" => {
                 port = args
                     .next()
@@ -57,6 +60,7 @@ fn parse_args() -> Args {
         data_dir,
         probe_url,
         port,
+        file,
     }
 }
 
@@ -73,6 +77,7 @@ async fn main() -> ExitCode {
         "status" => run_status(&args).await,
         "fault" => run_fault(&args).await,
         "catalog" => run_catalog(&args).await,
+        "import-seeds" => run_import_seeds(&args).await,
         "proxy-status" => run_proxy_status(&args),
         "proxy-recover" => run_proxy_recover(&args),
         "proxy-enable" => run_proxy_enable(&args),
@@ -80,7 +85,7 @@ async fn main() -> ExitCode {
         other => {
             eprintln!("unknown command: {other}");
             eprintln!(
-                "commands: e2e | install | status | fault | catalog | proxy-status | proxy-enable | proxy-disable | proxy-recover"
+                "commands: e2e | install | status | fault | catalog | import-seeds | proxy-status | proxy-enable | proxy-disable | proxy-recover"
             );
             return ExitCode::from(2);
         }
@@ -250,6 +255,42 @@ async fn run_e2e(args: &Args) -> StepResult {
     );
 
     println!("\nE2E PASSED");
+    Ok(())
+}
+
+/// 种子包导入（开发专用，不进发布版）。
+///
+/// 只取 outbounds 里的 shadowsocks 节点，配置由我们自己重新生成。
+/// 摘要打印 `pw_fp`（sha256 前 8 位）而不是密码本身。
+async fn run_import_seeds(args: &Args) -> StepResult {
+    let file = args
+        .file
+        .clone()
+        .ok_or_else(|| "需要 --file <种子文件>".to_string())?;
+
+    let contents = std::fs::read_to_string(&file)
+        .map_err(|e| format!("读取 {} 失败：{e}", file.display()))?;
+    let package = veyl_lib::seed_import::parse(&contents)?;
+    let plan = veyl_lib::seed_import::plan(&package);
+
+    std::fs::create_dir_all(&args.data_dir).map_err(|e| e.to_string())?;
+    veyl_lib::secrets::install(&args.data_dir);
+    let store = veyl_lib::store::Store::open(veyl_lib::store::default_db_path(&args.data_dir))
+        .map_err(|e| format!("打开本地库失败：{e}"))?;
+
+    let written = veyl_lib::seed_import::apply(&store, &plan)?;
+
+    println!("import-seeds: 读取 {}", file.display());
+    println!("  导入 {} 个，跳过 {} 个", written, plan.skipped.len());
+    for node in &plan.imported {
+        println!(
+            "  ✓ {} ({}:{}, {}, pw_fp={})",
+            node.name, node.server, node.server_port, node.method, node.password_fingerprint
+        );
+    }
+    for skip in &plan.skipped {
+        println!("  – {}: {}", skip.tag, skip.reason);
+    }
     Ok(())
 }
 

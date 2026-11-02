@@ -63,7 +63,7 @@ fn not_wired<T>(what: &str) -> anyhow::Result<T> {
 
 fn idle_snapshot() -> Value {
     json!({
-        "contract_version": "1.0.8",
+        "contract_version": "1.0.9",
         "state": "idle",
         "mode": "system_proxy",
         "pid": null,
@@ -73,7 +73,7 @@ fn idle_snapshot() -> Value {
         "config_hash": null,
         "system_proxy_enabled": false,
         "health": {
-            "contract_version": "1.0.8",
+            "contract_version": "1.0.9",
             "process": false,
             "clash_api": false,
             "data_plane": false,
@@ -369,6 +369,70 @@ impl WiredServices {
         }
     }
 
+
+    /// 种子导入的 profile 没有 node_id：凭据存在 `secrets.enc` 的 `node:<profile_id>`。
+    /// 这里是唯一读取它的地方，返回值不落盘、不序列化。
+    fn seed_build_input(
+        &self,
+        profile_id: &str,
+        mixed_port: u16,
+        clash_port: u16,
+        clash_secret: String,
+    ) -> Result<crate::config::BuildInput, &'static str> {
+        let raw = crate::secrets::get_secret(&format!("node:{profile_id}"))
+            .map_err(|_| "credentials_missing")?
+            .ok_or("credentials_missing")?;
+
+        let value: Value = serde_json::from_str(&raw).map_err(|_| "credentials_missing")?;
+        let server = value
+            .get("server")
+            .and_then(Value::as_str)
+            .ok_or("credentials_missing")?;
+        let server_port = value
+            .get("server_port")
+            .and_then(Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or("credentials_missing")?;
+        let name = value
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("种子节点");
+
+        let protocol = match value.get("protocol").and_then(Value::as_str).unwrap_or("shadowsocks") {
+            "shadowsocks" => {
+                let password = value
+                    .get("password")
+                    .and_then(Value::as_str)
+                    .ok_or("credentials_missing")?;
+                let method = value
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .ok_or("credentials_missing")?;
+                if !crate::catalog::SUPPORTED_METHODS.contains(&method) {
+                    return Err("unsupported_method");
+                }
+                crate::config::ProtocolConfig::Shadowsocks {
+                    password: password.to_string(),
+                    method: method.to_string(),
+                }
+            }
+            _ => return Err("unsupported_protocol"),
+        };
+
+        Ok(crate::config::BuildInput::new(
+            crate::config::NodeDescriptor {
+                id: profile_id.to_string(),
+                name: name.to_string(),
+                server: server.to_string(),
+                server_port,
+                protocol,
+            },
+            mixed_port,
+            clash_port,
+            clash_secret,
+        ))
+    }
+
     fn profile_config_path(&self, profile_id: &str) -> PathBuf {
         self.config_dir().join(format!("profile-{profile_id}.json"))
     }
@@ -627,6 +691,18 @@ impl VpnToolServices for WiredServices {
             crate::store::profiles::delete(&conn, profile_id)
                 .map_err(|e| svc_error(e.code(), e))?;
         }
+
+        // 删配置时必须把带凭据的文件和 secrets 条目一起清掉，否则磁盘上会留下孤儿密文。
+        let config_path = self.profile_config_path(profile_id);
+        if std::fs::remove_file(&config_path).is_ok() {
+            log::info!("active_config removed path={}", config_path.display());
+        }
+        let _ = std::fs::remove_file(
+            self.config_dir()
+                .join(format!("profile-{profile_id}.meta.json")),
+        );
+        let _ = crate::secrets::delete_secret(&format!("node:{profile_id}"));
+
         Ok(json!({ "deleted": true }))
     }
 
@@ -715,19 +791,38 @@ impl WiredServices {
         let path = if config_path.is_file() {
             config_path
         } else {
-            let node_id = profile.node_id.clone().ok_or_else(|| {
-                svc_error(
-                    "PRECONDITION_FAILED",
-                    "本地没有可用配置，需要联网刷新一次",
-                )
-            })?;
-            let detail = self
-                .catalog
-                .node_detail(&node_id)
-                .await
-                .map_err(|e| svc_error(e.code.clone(), e))?;
-            self.write_profile_config(&installed, &profile.id, &detail.node, Some(&detail.etag))
-                .await?
+            // 凭据来源三级回退：目录服务 → 本地 node:<profile_id> → 明确报错。
+            let mixed_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
+            let clash_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
+            let clash_secret = vpn_config::random_secret();
+
+            let value = match profile.node_id.clone() {
+                Some(node_id) => {
+                    let detail = self.catalog_detail(&node_id).await?;
+                    let input = detail
+                        .node
+                        .clone()
+                        .into_build_input(mixed_port, clash_port, clash_secret)
+                        .map_err(|e| svc_error(e.code(), e))?;
+                    vpn_config::build(&input).map_err(|e| svc_error(e.code(), e))?
+                }
+                None => {
+                    let input = self
+                        .seed_build_input(&profile.id, mixed_port, clash_port, clash_secret)
+                        .map_err(|e| svc_error("PRECONDITION_FAILED", e))?;
+                    vpn_config::build(&input).map_err(|e| svc_error(e.code(), e))?
+                }
+            };
+
+            vpn_config::install_profile(
+                &installed.binary,
+                &self.config_dir(),
+                &profile.id,
+                &value,
+                None,
+            )
+            .await
+            .map_err(|e| svc_error(e.code(), e))?
         };
 
         let text = std::fs::read_to_string(&path)

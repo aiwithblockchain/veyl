@@ -33,21 +33,22 @@
 | P-4 | 二进制不早于源码（新准入） | 静态 | **通过** | 17:31 一度 ❌（源码 17:30:34 晚于二进制 17:28:04），重建后 ✅ |
 | AC-B3 | 事件到达且无 `ai-` 前缀 | 脚本 | **PASS** | `check-contracts.mjs` 5 项通过、退出码 0、无 FAIL（18:56） |
 | AC-B2 | 对话流式输出 | A | **PASS** | 回复分三段落库（19:09:32 / :33 / :37），中间夹工具调用，非一次性整段 |
-| AC-B4 | 工具卡渲染与脱敏 | A | **部分 PASS** | 脱敏 ✅；工具卡完整态待 D-12 修复后复验。**审批卡子项已随范围变更作废** |
+| AC-B4 | 工具卡渲染与脱敏 | A | **PASS** | 脱敏 ✅；20:15 全链路 10 次调用均渲染为工具卡（名称/状态/耗时） |
 | AC-C1 | 首次弹卡、允许后放行 | A | **范围变更，不再适用** | 审批机制已移除 |
 | AC-C2 | 拒绝后仍会弹 | A | **范围变更，不再适用** | 同上 |
 | AC-C3 | `CoreInstall` 每次都弹 | A | **范围变更，不再适用** | 同上 |
 | AC-C5a | 拒绝 → `approved = 0` | A+SQL | **范围变更，不再适用** | 同上 |
 | AC-C5b | 允许一次 → `approved = 1` | A+SQL | **范围变更，不再适用** | 同上 |
 | AC-C5c | 会话放行 → `approved = 2` | A+SQL | **范围变更，不再适用** | 同上 |
-| AC-C5d | 审计字段仍写入 | A+SQL | **待验（改写）** | 判据改为：每次调用都有行且 `approved` 为 `NULL` |
-| **AC-N1** | 无弹窗直接连接（新增） | A+SQL | **部分 PASS** | 19:57 全程**无任何确认卡**，`CoreInstall` 直接执行 ✅；但未连上（D-15 阻断安装） |
-| **AC-N2** | `approved` 无残留写入（新增） | SQL | **PASS** | 16+8 条调用全部 `approved IS NULL`，无 `1`/`2` 残留 |
+| AC-C5d | 审计字段仍写入 | A+SQL | **PASS** | 34 条调用每一条都有行、`approved` 为 `NULL`（与 AC-N2 同源证据） |
+| **AC-N1** | 无弹窗直接连接（新增） | A+SQL | **PASS** | 20:15 全链路走通：装 1.14.4 → 导入 → 连接成功，全程无确认卡 |
+| **AC-N2** | `approved` 无残留写入（新增） | SQL | **PASS** | 34 条调用全部 `approved IS NULL`，无 `1`/`2` 残留 |
+| **AC-N3** | 种子导入的 SS 节点真实连通（待 N-03 落地） | C+SQL | **未开始** | 正向连通 + 4 条负向断言（指纹 grep、删凭据必失败、node_id 为空、config_json 无凭据） |
 | AC-F1 / F2 | 对话落库与重启一致 | A | **PASS**（F1，`2dc223e`） | 19:06 重启后侧边栏显示 2 个历史会话，消息成对、顺序正确 |
 
 **放行结论（范围变更后重新计算）：未通过，仍在进行中。**
 
-剩余**必过项**：准入 P-1~P-4、AC-B2（已 PASS）、AC-B4（工具卡 + 脱敏，工具卡待复验）、AC-F2（未开始）、AC-C5d（改写后待验）。
+剩余**必过项**：**AC-F2（未开始）**。其余必过项均已 PASS：准入 P-1~P-4、AC-B2、AC-B4、AC-C5d、AC-N1、AC-N2。
 已通过：AC-B1、AC-B2、AC-B3、AC-D1~D6、AC-E1/E2、AC-F1、P-1/P-2/P-3、N-01、P-4。
 已移出范围：AC-C1/C2/C3/C5a/C5b/C5c（6 条）。
 改写：AC-C5d（审批四态 → 审计字段回归）。
@@ -98,10 +99,14 @@
 - **遗留小问题**：`commands.rs:175` 的注释仍写「钥匙串写成功后」，与新的 `secrets.enc` 方案不符，属文档性笔误。
 - **验证状态**：代码已具备，**尚未在运行时验证**（需在新方案下复测：保存真 Key 后**不重启**直接对话应成功）。
 
-### D-04（观察项）运行时日志文件始终为 0 字节
+### D-04（观察项）运行时日志文件始终为 0 字节 → **已恢复正常（20:15 复测），不记缺陷**
 - `~/Library/Application Support/Veyl/logs/app-2026-11-02.log` 在应用启动 18 分钟后仍为 **0 字节**；`build/logs/dev-*.log` 里也没有任何 `veyl=` 前缀的应用日志，只有一条 macOS 输入法警告。
-- 说明 `logging.rs` 虽有实现，但实际没有产出可观测的日志。**这会让后续所有缺陷排查失去日志依据**，建议 Bob 核实初始化是否被执行、默认级别是什么。
-- 目前只是观察，未确认根因。
+- **20:15 复测**：日志已有内容，且格式符合架构师要求：
+  ```
+  2026-11-02 19:26:31 INFO  veyl_lib::tools::services  目录服务设备已注册：dev_000003
+  2026-11-02 20:15:38 INFO  veyl_lib::config::validate active_config path=…/profile-prf_seed-jp-01.json mode=0600
+  ```
+- **定性**：当时可能只是「尚无事件可记录」，而非 logger 未初始化。**不再作为缺陷**，保留记录备查。
 
 ### D-05 用户消息不落库，只落助手消息（**高**，归属 Bob）→ **已在工作区修复，待提交**
 
@@ -177,7 +182,64 @@ session_mvz4tzg9_1  18:54  4 msgs（user/assistant 成对）
 - **底层不是障碍（已实测）**：sing-box 1.14.4 对三种协议都接受 —— 分别用带 `reality` 的 vless、`hysteria2`、`shadowsocks(aes-256-gcm)` 的配置跑 `sing-box check`，**三次均 exit 0**。构建标签含 `with_quic`（Hysteria2 依赖）与 `with_utls`（REALITY 指纹依赖），`generate reality-keypair` 可用。
 - **需改动**：`NodeProtocol` 枚举、`config/builder.rs` 出站构建、`docs/contracts/catalog.md` + `tools.md` 的协议枚举与节点字段、契约版本号。
 - **收益**：用户现有服务器可直接用于真实链路验证（出口 IP、延迟、真实 sing-box 启动），比纯 mock 更接近 P1 §9 的验收要求。
-- **安全约束**：seeds.json 含真实密码。**不得复制进仓库、不得提交、不得出现在日志或报告中**。导入路径必须走 `secrets.enc` 或运行时注入，不能硬编码。
+- **架构定稿（架构师 20:20，见 `docs/shadowsocks.md` §5.5）**：
+  - **共用内部模型已存在**：`catalog/types.rs` 的 `NodeDescriptor` 与 seed 文件的 sing-box outbound 是两种 wire 格式，都映射到 `config/builder.rs` 的 `ProtocolConfig` + `Credentials`。将来切回目录服务只需**删掉 seed 适配器**，不动 builder / 存储 / connect 路径。
+  - **导入通道用 `veyl-runtime-selftest import-seeds` 子命令**，不用 `VEYL_SEED_FILE` 环境变量 —— 后者会编进发布版，形成「设个环境变量就能注入任意节点」的路径；selftest 二进制不进安装包。
+  - **不给模型文件读写能力**：那会拆掉「凭据只在 Host 内部流转」这条不变式，而审批已移除，最不该依赖模型判断来做访问控制。
+  - `ProfileImport` 接受粘贴配置属于 P2，且**必须复用同一个适配层**，不得另写解析。
+- **术语纠正（重要）**：
+  - `device_token` = **访问目录服务的凭据**（证明这台机器是合法客户端）
+  - 节点凭据（uuid / password）= **使用该节点的凭据**，存 `secrets.enc` 的 `node:<profile_id>` 键
+  - 两者是不同东西。P1 里两者都存在，只是节点来自 seed 文件而非目录服务。
+- **安全约束（硬性条款，必须遵守）**：
+  1. `seeds.json` 及其中的**真实密码不得进入仓库**——不提交、不复制、不加进 `.gitignore` 之外的任何受版本控制的位置
+  2. **不得出现在日志、报告、测试输出、截图或聊天记录中**；测试人员只允许读取字段名与 `method`，不得打印密码值
+  3. **导入时只写入 `secrets.enc`**（或等价的加密凭据存储），不得硬编码进代码、契约示例、mock 数据或配置模板
+  4. 需要示例值时一律用占位符（如 `dummy-password`），不得用真实值
+  5. 违反上述任一条，按凭据泄漏处理：立即轮换该节点密码并上报 PM
+
+**AC-N3 的可证伪断言（架构师 20:25 补充）**
+
+正向「连上了」证明不了「凭据没泄漏」，也证明不了「走的是 seed 路径而不是别处兜底」。因此 AC-N3 必须包含以下负向断言：
+
+1. **指纹可 grep**：harness 摘要里打印 `pw_fp = sha256(profile_id ‖ password)[:8]`（按节点加盐，单向；同一密码在不同节点指纹不同，不能跨节点比对）。
+   **密码出现在某些位置是正常的，不是泄漏** —— 必须分两组断言，否则检查永远红、然后就没人看了：
+
+   | 组 | 位置 | 期望 |
+   |---|---|---|
+   | **允许出现** | 用户的 `seeds.json`、`secrets.enc`、sing-box 的 active 配置 | 命中指纹，**且文件权限 0600、父目录 0700** |
+   | **不应出现** | 日志、`profiles.config_json`、DB 其他表、错误信息、报告 | 指纹**零命中** |
+
+   ```bash
+   # 不应出现 —— 应全空
+   grep -rn "$FP" build/logs/ "$HOME/Library/Application Support/Veyl/logs/"
+   sqlite3 "$DB" "SELECT id FROM profiles WHERE config_json LIKE '%$FP%';"
+
+   # 允许出现 —— 应命中，且权限必须正确
+   stat -f "%Sp %N" "$HOME/Library/Application Support/Veyl/secrets.enc"
+   stat -f "%Sp %N" "$HOME/Library/Application Support/Veyl/config"
+   ```
+
+   > `stat -f "%Sp"` 比 `ls -l` 更稳（macOS 上 `ls -l` 显示 `-rw-------`，脚本化断言容易出错）。
+   > **只验文件权限**，期望 `-rw-------`。**目录权限不作为断言** —— 实测 `~/Library` 与 `~/Library/Application Support` 均为 `0700`，`Veyl` 目录虽为 `0755` 但外层已隔离，不构成泄漏；若照抄「目录也要 0700」去查，会报出一条误报，反而削弱报告可信度。
+   > 目录权限只作**可选观察项**记一句：「`Veyl` 目录 `0755`，父目录 `0700` 已隔离」。Windows 侧 `%LOCALAPPDATA%` 按用户 ACL 隔离，无需单独核对。
+   > 架构师已要求 Bob 在 connect 阶段打结构化日志：`active_config path=<…> mode=0600` 与 `active_config removed`（只打路径与权限，不打内容），验收时核对这两行即可。
+2. **删凭据必须失败**：连上之后，从 `secrets.enc` 删除 `node:<profile_id>` 再连接，必须报 `PRECONDITION_FAILED` + `details.reason = "credentials_missing"`；恢复条目后应恢复连通。
+   **若删了凭据还能连上，说明密码还藏在别处**（`config_json` 或内存缓存），违反 §5.5 第三条不变式。
+3. **`profiles.node_id` 必须为空**：seed 导入的 profile 不应有 `node_id`，否则说明走了目录路径。
+   ```sql
+   SELECT id, name, node_id FROM profiles WHERE id LIKE 'seed-%';   -- 期望 node_id IS NULL
+   ```
+4. **`config_json` 无凭据字段**：
+   ```sql
+   SELECT id FROM profiles WHERE config_json LIKE '%"password"%' OR config_json LIKE '%"uuid"%';  -- 期望空
+   ```
+
+**已知盲区（如实标注，不写成已验证）**：「凭据未进入模型上下文」**无法用 grep 证明**，因为模型上下文不落盘。能做的只有：
+- 验证 `ProfileList` 返回里没有 `password`/`uuid` 字段（那是 Agent 能看到的唯一入口）
+- 人工阅读一次对话输出，确认模型没有复述任何凭据
+
+此项在报告中只能记为「依赖人工观察」。
 
 ### N-01 会话标题可编辑（**新增需求，已实现并验证**）
 
@@ -255,12 +317,22 @@ grep -rn 'register_device' src-tauri/src/ | grep -v 'fn register_device'
 
   白名单只取 id / city / region / protocol / latency_ms / health_score，`server`/`credentials` 不出现。模型据此正确说出「最好的是 `seed-jp-01`（东京，42ms，健康 98）」。**D-12 关闭。**
 
-### D-15 `CoreListVersions` 同样只给计数，不列版本号，导致核心装不上（**高**，归属 Bob）
+### D-15 `CoreListVersions` 同样只给计数，不列版本号，导致核心装不上（**高**，归属 Bob）→ **已修复并验证（`8b79e8c`）**
 
-- **现象**：19:57 模型拿到 `"已安装 0 个版本，可安装 1 个。"`，没有任何版本号，于是猜了 `1.10.0` 和 `1.9.0`，两次都 `NOT_FOUND: 清单里没有版本 1.10.0 / 1.9.0`。模型自己说：「`CoreListVersions` 只返回『可安装 1 个』，却不列出具体版本号……按照规则，我不再继续猜测版本。」
-- **根因**：`src-tauri/src/tools/core.rs:52` —— `format!("已安装 {installed} 个版本，可安装 {available} 个。", data)`，与 D-12 修掉的是**同一种写法**，结构化 `data` 没进 content。
-- **后果**：**核心安装链路完全走不通** → 没有 sing-box → 无法连接 → AC-N1「连到日本并连上」不可能通过。
-- **建议**：content 里列出可安装版本号（如 `1.14.4 (stable)`），已安装的版本同样列出。**建议顺带排查其余工具是否有同样的「只给计数不给内容」写法**——这已经是第三次。
+- **原现象**：19:57 模型拿到 `"已安装 0 个版本，可安装 1 个。"`，没有版本号，猜 `1.10.0` / `1.9.0` 两次 `NOT_FOUND`。
+- **原根因**：`tools/core.rs:52` 与 D-12 同一种写法。
+- **修复验证（20:15）**：`summarise_versions` 生效，模型现在拿到：
+
+```
+已安装：无
+可安装：
+- 1.14.4 (stable)
+使用版本号调用 CoreInstall，例如 CoreInstall("1.14.4")。
+```
+
+  随后 `CoreInstall {"version":"1.14.4"}` 一次成功。**D-15 关闭。**
+
+- **连带修复**：PM 说同类排查又找到 `ProfileList` 与 `RuntimeLogs` 两处只给计数，已一并改为列出 id 与日志正文。本轮 `ProfileList` 返回正常。
 
 ### D-16（观察项）首轮两次 `CatalogSearch` 报设备注册 transport 错误，随后自愈
 
@@ -717,3 +789,64 @@ chat_sessions  0
 三项全为 0 —— 说明此前从未落过库，这也正好是一个干净的起点：走完 P-2/P-3 后，计数应变为 ≥ 1，无需按时间戳过滤历史数据。
 
 **结论：P-2 / P-3 的阻塞点同样已从代码层面消除，但未做运行时验证。** 仍需在窗口里实际操作一次并查库确认。
+
+---
+
+## 7. AC-N1 / AC-N2 结果（20:15，`8b79e8c`）
+
+### AC-N1 无弹窗直接连接 → **PASS**
+
+一条「连到日本」走通了完整链路，全程**未出现任何确认卡**：
+
+```
+20:15:22  CatalogSearch     {"limit":10,"region":"jp"}   ok   找到 5 个节点（含 id/城市/协议/延迟/健康）
+20:15:23  CoreListVersions  {}                            ok   可安装：- 1.14.4 (stable)
+20:15:24  CoreInstall       {"version":"1.14.4"}          ok   已开始安装 sing-box 1.14.4
+20:15:36  CoreListVersions  {}                            ok
+20:15:37  VpnConnect        —                             FAIL 尚无 profile
+20:15:38  ProfileImport     —                             ok
+20:15:39  ProfileList       {}                            ok
+20:15:40  VpnConnect        —                             ok   连接成功
+20:15:43  RuntimeStatus     {}                            ok
+20:15:43  DiagRun           {"include_logs":true}         ok
+```
+
+落地状态：
+
+| 项 | 值 |
+|---|---|
+| `runtime_versions` | `1.14.4 / active` |
+| sing-box 进程 | 运行中，配置 `config/profile-prf_seed-jp-01.json` |
+| `profiles` | `prf_seed-jp-01` / `seed-jp-01` / `JP Tokyo 01` / `vless_reality` / `is_active=1` |
+| 系统代理 | `Enabled: Yes / 127.0.0.1:60095` |
+| `active_config` 权限 | 文件 `-rw-------`(0600)、目录 `drwx------`(0700) |
+| 应用结构化日志 | `active_config path=…/profile-prf_seed-jp-01.json mode=0600` ✅（架构师要求的格式） |
+
+`VpnConnect` 在 20:15:37 失败一次（此时还没有 profile），导入后 20:15:40 成功 —— 属正常重试，**不是审批重试**。
+
+### AC-N2 `approved` 无残留写入 → **PASS**
+
+`tool_calls` 共 **34 条，`approved` 全部为 `NULL`**，未出现 `1` 或 `2`。
+
+### 凭据分离核对（部分完成）
+
+| 检查 | 结果 |
+|---|---|
+| `profiles.config_json` 含 `"uuid"` | **0 条** ✅ |
+| `profiles.config_json` 含 `"password"` | **0 条** ✅ |
+| `config_json` 实际字段 | `flow / mux / server / server_port / tls{mode, reality_public_key, reality_short_id, server_name, utls_fingerprint}` |
+| `active_config` 含 `uuid` | 有（36 位），**该文件 0600**，属「允许出现」组 |
+
+> `reality_public_key` / `reality_short_id` 是**公开值**（要发给服务端），不算凭据。我最初的 SQL 用 `LIKE '%public_key%'` 会误命中，已改成精确匹配 `"uuid"` / `"password"`。
+
+### 观察：凭据来源三级回退（设计行为，非缺陷）
+
+`services.rs:794` 写明「凭据来源三级回退：目录服务 → 本地 `node:<profile_id>` → 明确报错」。
+
+本轮 profile 带 `node_id = seed-jp-01`，因此凭据走**第一级（目录服务）**，`secrets.enc` 里**没有** `node:prf_seed-jp-01` 条目 —— 这是设计如此，不是漏存。
+
+**影响**：AC-N3 的「删掉 `node:<profile_id>` 必须失败」断言只适用于 **seed 导入（无 `node_id`）** 的 profile；对目录导入的 profile 不成立。写用例时必须区分这两类，否则会测出假失败。
+
+### 新发现：D-06 扩展到跨表不一致
+
+`tool_calls.created_at` = `1793621743874`（**毫秒**），`runtime_versions.installed_at` = `1793621735`（**秒**）。同一数据库里两种单位并存，比文档不一致更严重 —— 任何跨表的时间比较都会错。建议统一，并在契约里写明单位。

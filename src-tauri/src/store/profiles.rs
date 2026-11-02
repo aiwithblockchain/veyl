@@ -47,6 +47,31 @@ pub fn create(conn: &Connection, new: &NewProfile<'_>) -> StoreResult<Profile> {
     get(conn, new.id)?.ok_or_else(|| StoreError::NotFound(new.id.to_string()))
 }
 
+/// 幂等写入：同 id 覆盖字段，但**不改变** `is_active`（不会把用户正在用的配置顶掉）。
+pub fn upsert(conn: &Connection, new: &NewProfile<'_>) -> StoreResult<Profile> {
+    ensure_no_credentials(new.config)?;
+    conn.execute(
+        "INSERT INTO profiles (id, node_id, name, protocol, region, config_json, is_active, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+             node_id = excluded.node_id,
+             name = excluded.name,
+             protocol = excluded.protocol,
+             region = excluded.region,
+             config_json = excluded.config_json",
+        params![
+            new.id,
+            new.node_id,
+            new.name,
+            new.protocol,
+            new.region,
+            new.config.to_string(),
+            now_ms()
+        ],
+    )?;
+    get(conn, new.id)?.ok_or_else(|| StoreError::NotFound(new.id.to_string()))
+}
+
 pub fn get(conn: &Connection, id: &str) -> StoreResult<Option<Profile>> {
     conn.query_row(
         "SELECT id, node_id, name, protocol, region, config_json, is_active, created_at

@@ -11,6 +11,8 @@ pub enum NodeProtocol {
     VlessReality,
     #[serde(rename = "hysteria2")]
     Hysteria2,
+    #[serde(rename = "shadowsocks")]
+    Shadowsocks,
 }
 
 impl NodeProtocol {
@@ -18,6 +20,7 @@ impl NodeProtocol {
         match self {
             NodeProtocol::VlessReality => "vless_reality",
             NodeProtocol::Hysteria2 => "hysteria2",
+            NodeProtocol::Shadowsocks => "shadowsocks",
         }
     }
 }
@@ -48,7 +51,9 @@ pub struct NodeDescriptor {
     pub server: String,
     pub server_port: u16,
     pub credentials: Credentials,
-    pub tls: NodeTls,
+    /// shadowsocks 没有 TLS；其余协议在 `validate()` 里要求存在。
+    #[serde(default)]
+    pub tls: Option<NodeTls>,
     #[serde(default)]
     pub flow: Option<String>,
     #[serde(default)]
@@ -58,9 +63,21 @@ pub struct NodeDescriptor {
 #[derive(Clone, Deserialize)]
 #[serde(untagged)]
 pub enum Credentials {
-    VlessReality { uuid: String },
-    Hysteria2 { password: String },
+    VlessReality {
+        uuid: String,
+    },
+    // 放在 Hysteria2 之前：shadowsocks 的 {password, method} 也能匹配 "只有 password" 的变体。
+    Shadowsocks {
+        password: String,
+        method: String,
+    },
+    Hysteria2 {
+        password: String,
+    },
 }
+
+/// P1 只支持这一种加密方式；没测过的算法不声明支持。
+pub const SUPPORTED_METHODS: &[&str] = &["aes-256-gcm"];
 
 #[derive(Clone, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -106,6 +123,7 @@ impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Credentials::VlessReality { .. } => f.write_str("VlessReality(<redacted>)"),
+            Credentials::Shadowsocks { .. } => f.write_str("Shadowsocks(<redacted>)"),
             Credentials::Hysteria2 { .. } => f.write_str("Hysteria2(<redacted>)"),
         }
     }
@@ -117,28 +135,29 @@ impl NodeDescriptor {
     pub fn non_secret_config(&self) -> serde_json::Value {
         use serde_json::json;
 
-        let tls = match &self.tls {
-            NodeTls::Reality {
+        let tls = match self.tls.as_ref() {
+            None => serde_json::Value::Null,
+            Some(NodeTls::Reality {
                 server_name,
                 utls_fingerprint,
                 reality_public_key,
                 reality_short_id,
-            } => json!({
+            }) => json!({
                 "mode": "reality",
                 "server_name": server_name,
                 "utls_fingerprint": utls_fingerprint,
                 "reality_public_key": reality_public_key,
                 "reality_short_id": reality_short_id,
             }),
-            NodeTls::Tls {
+            Some(NodeTls::Tls {
                 server_name,
                 utls_fingerprint,
-            } => json!({
+            }) => json!({
                 "mode": "tls",
                 "server_name": server_name,
                 "utls_fingerprint": utls_fingerprint,
             }),
-            NodeTls::Insecure { server_name } => json!({
+            Some(NodeTls::Insecure { server_name }) => json!({
                 "mode": "insecure",
                 "server_name": server_name,
             }),
@@ -157,10 +176,11 @@ impl NodeDescriptor {
     }
 
     pub fn tls_mode(&self) -> &'static str {
-        match self.tls {
-            NodeTls::Reality { .. } => "reality",
-            NodeTls::Tls { .. } => "tls",
-            NodeTls::Insecure { .. } => "insecure",
+        match self.tls.as_ref() {
+            None => "none",
+            Some(NodeTls::Reality { .. }) => "reality",
+            Some(NodeTls::Tls { .. }) => "tls",
+            Some(NodeTls::Insecure { .. }) => "insecure",
         }
     }
 
@@ -169,22 +189,50 @@ impl NodeDescriptor {
             (&self.summary.protocol, &self.credentials),
             (NodeProtocol::VlessReality, Credentials::VlessReality { .. })
                 | (NodeProtocol::Hysteria2, Credentials::Hysteria2 { .. })
+                | (NodeProtocol::Shadowsocks, Credentials::Shadowsocks { .. })
         );
         if !matches_protocol {
             return Err(RuntimeError::Config(
                 "node protocol does not match its credentials".into(),
             ));
         }
-        if let NodeTls::Reality {
-            reality_public_key, ..
-        } = &self.tls
-        {
-            if reality_public_key.trim().is_empty() {
+
+        match (&self.summary.protocol, self.tls.as_ref()) {
+            (NodeProtocol::VlessReality, Some(NodeTls::Reality { reality_public_key, .. })) => {
+                if reality_public_key.trim().is_empty() {
+                    return Err(RuntimeError::Config(
+                        "reality node is missing reality_public_key".into(),
+                    ));
+                }
+            }
+            (NodeProtocol::VlessReality, _) => {
                 return Err(RuntimeError::Config(
-                    "reality node is missing reality_public_key".into(),
-                ));
+                    "P1 only supports VLESS with reality TLS".into(),
+                ))
+            }
+            (NodeProtocol::Hysteria2, Some(_)) => {}
+            (NodeProtocol::Hysteria2, None) => {
+                return Err(RuntimeError::Config(
+                    "hysteria2 node is missing its TLS settings".into(),
+                ))
+            }
+            (NodeProtocol::Shadowsocks, _) => {}
+        }
+
+        if let (NodeProtocol::Shadowsocks, Credentials::Shadowsocks { method, .. }) =
+            (&self.summary.protocol, &self.credentials)
+        {
+            if !SUPPORTED_METHODS.contains(&method.as_str()) {
+                return Err(RuntimeError::Unsupported {
+                    message: format!("shadowsocks method {method} is not supported"),
+                    details: serde_json::json!({
+                        "method": method,
+                        "supported": SUPPORTED_METHODS,
+                    }),
+                });
             }
         }
+
         Ok(())
     }
 
@@ -197,16 +245,16 @@ impl NodeDescriptor {
     ) -> RuntimeResult<BuildInput> {
         self.validate()?;
 
-        let protocol = match (&self.summary.protocol, &self.credentials, &self.tls) {
+        let protocol = match (&self.summary.protocol, &self.credentials, self.tls.as_ref()) {
             (
                 NodeProtocol::VlessReality,
                 Credentials::VlessReality { uuid },
-                NodeTls::Reality {
+                Some(NodeTls::Reality {
                     server_name,
                     utls_fingerprint,
                     reality_public_key,
                     reality_short_id,
-                },
+                }),
             ) => ProtocolConfig::VlessReality {
                 uuid: uuid.clone(),
                 flow: self.flow.clone(),
@@ -220,12 +268,27 @@ impl NodeDescriptor {
                     "P1 only supports VLESS with reality TLS".into(),
                 ))
             }
+            (NodeProtocol::Shadowsocks, Credentials::Shadowsocks { password, method }, _) => {
+                ProtocolConfig::Shadowsocks {
+                    password: password.clone(),
+                    method: method.clone(),
+                }
+            }
+            (NodeProtocol::Shadowsocks, _, _) => {
+                return Err(RuntimeError::Config(
+                    "shadowsocks node is missing its method or password".into(),
+                ))
+            }
             (NodeProtocol::Hysteria2, Credentials::Hysteria2 { password }, tls) => {
                 let (server_name, insecure) = match tls {
-                    NodeTls::Reality { server_name, .. } | NodeTls::Tls { server_name, .. } => {
-                        (server_name.clone(), false)
+                    Some(NodeTls::Reality { server_name, .. })
+                    | Some(NodeTls::Tls { server_name, .. }) => (server_name.clone(), false),
+                    Some(NodeTls::Insecure { server_name }) => (server_name.clone(), true),
+                    None => {
+                        return Err(RuntimeError::Config(
+                            "hysteria2 node is missing its TLS settings".into(),
+                        ))
                     }
-                    NodeTls::Insecure { server_name } => (server_name.clone(), true),
                 };
                 ProtocolConfig::Hysteria2 {
                     password: password.clone(),
@@ -352,6 +415,48 @@ mod tests {
             }
             _ => panic!("expected a hysteria2 outbound"),
         }
+    }
+
+    const SHADOWSOCKS: &str = r#"{
+        "id": "seed-hk-01", "name": "香港 01", "region": "hk", "city": "Hong Kong",
+        "protocol": "shadowsocks", "health_score": 1.0, "tags": [],
+        "server": "198.51.100.9", "server_port": 8388,
+        "credentials": { "password": "p@ss", "method": "aes-256-gcm" }
+    }"#;
+
+    #[test]
+    fn shadowsocks_descriptor_maps_to_a_build_input() {
+        let node: NodeDescriptor = serde_json::from_str(SHADOWSOCKS).unwrap();
+        assert_eq!(node.tls_mode(), "none");
+        let input = node.into_build_input(2080, 19090, "secret".into()).unwrap();
+        match input.node.protocol {
+            ProtocolConfig::Shadowsocks { password, method } => {
+                assert_eq!(password, "p@ss");
+                assert_eq!(method, "aes-256-gcm");
+            }
+            _ => panic!("expected a shadowsocks outbound"),
+        }
+    }
+
+    #[test]
+    fn an_unsupported_shadowsocks_method_is_rejected_with_details() {
+        let json = SHADOWSOCKS.replace("aes-256-gcm", "chacha20-ietf-poly1305");
+        let node: NodeDescriptor = serde_json::from_str(&json).unwrap();
+        let error = node.into_build_input(2080, 19090, "secret".into()).unwrap_err();
+        assert_eq!(error.code(), "UNSUPPORTED");
+        let details = error.details().unwrap();
+        assert_eq!(details["method"], "chacha20-ietf-poly1305");
+        assert_eq!(details["supported"][0], "aes-256-gcm");
+    }
+
+    #[test]
+    fn shadowsocks_credentials_never_reach_the_non_secret_snapshot() {
+        let node: NodeDescriptor = serde_json::from_str(SHADOWSOCKS).unwrap();
+        let snapshot = node.non_secret_config().to_string();
+        assert!(!snapshot.contains("p@ss"), "{snapshot}");
+        assert!(!snapshot.contains("password"), "{snapshot}");
+        assert!(!snapshot.contains("method"), "{snapshot}");
+        assert!(snapshot.contains("198.51.100.9"), "{snapshot}");
     }
 
     #[test]

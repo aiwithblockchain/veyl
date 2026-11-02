@@ -1,6 +1,6 @@
 # 契约：节点目录服务（Catalog）
 
-> 契约版本：`1.0.8`
+> 契约版本：`1.0.9`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.8、§5.2
 > 实现方：Rust（Catalog Client）与 TypeScript / Hono（服务端）
@@ -39,7 +39,7 @@
 
 ```ts
 type ApiOk<T> = {
-  contract_version: "1.0.8";
+  contract_version: "1.0.9";
   ok: true;
   request_id: string;
   data: T;
@@ -50,7 +50,7 @@ type ApiOk<T> = {
 
 ```ts
 type ApiError = {
-  contract_version: "1.0.8";
+  contract_version: "1.0.9";
   ok: false;
   request_id: string;
   error: {
@@ -64,7 +64,7 @@ type ApiError = {
 
 HTTP 状态码与错误码**同时**存在：状态码给网关与监控看，错误码给客户端逻辑用。客户端分支只认错误码。
 
-> 与 `AivpnError` 的关系：`ApiError.error` 是传输层简化形式，不含 `contract_version` 与 `request_id`（后者在 `ApiError` 顶层）。Catalog Client 把它转成 `AivpnError` 时补上 `contract_version: "1.0.8"` 与 `request_id`，`details` 原样带过。Agent 看到的永远只有 `AivpnError`。
+> 与 `AivpnError` 的关系：`ApiError.error` 是传输层简化形式，不含 `contract_version` 与 `request_id`（后者在 `ApiError` 顶层）。Catalog Client 把它转成 `AivpnError` 时补上 `contract_version: "1.0.9"` 与 `request_id`，`details` 原样带过。Agent 看到的永远只有 `AivpnError`。
 
 ---
 
@@ -80,7 +80,7 @@ HTTP 状态码与错误码**同时**存在：状态码给网关与监控看，�
 
 ```ts
 type RegisterDeviceRequest = {
-  contract_version: "1.0.8";
+  contract_version: "1.0.9";
   platform: "darwin" | "windows" | "linux";
   arch: "arm64" | "x86_64";
   app_version: string;        // semver，例 "0.1.0"
@@ -162,7 +162,7 @@ device_fingerprint = base64url(sha256(
 | 参数 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `region` | string | — | ISO 3166-1 alpha-2 小写，例 `jp` |
-| `protocol` | string | — | `vless_reality` \| `hysteria2` |
+| `protocol` | string | — | `vless_reality` \| `hysteria2` \| `shadowsocks` |
 | `limit` | int | 10 | 1–50 |
 | `cursor` | string | — | 上一页返回的 `next_cursor` |
 
@@ -197,7 +197,7 @@ type NodeListResponse = ApiOk<{
 ### 3.2 `NodeSummary`
 
 ```ts
-type NodeProtocol = "vless_reality" | "hysteria2";
+type NodeProtocol = "vless_reality" | "hysteria2" | "shadowsocks";
 
 type NodeSummary = {
   id: string;                // "seed-jp-01"
@@ -246,6 +246,7 @@ type NodeDescriptorResponse = ApiOk<{
 ```ts
 type VlessRealityCredentials = { uuid: string };
 type Hysteria2Credentials = { password: string };
+type ShadowsocksCredentials = { password: string; method: string };
 
 type NodeTls =
   | {
@@ -268,7 +269,7 @@ type NodeTls =
 type NodeDescriptor = NodeSummary & {
   server: string;                     // 域名或 IP
   server_port: number;                // 1–65535
-  credentials: VlessRealityCredentials | Hysteria2Credentials;
+  credentials: VlessRealityCredentials | Hysteria2Credentials | ShadowsocksCredentials;
   tls: NodeTls;
   flow: string | null;                // VLESS 专用，例 "xtls-rprx-vision"
   mux: { enabled: boolean; concurrency: number } | null;
@@ -280,6 +281,8 @@ type NodeDescriptor = NodeSummary & {
 - `credentials` 与 `tls` **只在详情接口返回**，且要求 Bearer token 有效。
 - 客户端拿到后只能写进内存与 `0600` 临时配置，**不得写日志、不得返回给模型、不得写 SQLite 明文**（需要缓存时用 `secrets.enc`）。
 - `NodeTls.mode = "reality"` 时 `reality_public_key` 必填且非空。
+- **Shadowsocks 的 `method` 白名单**：P1 **只接受 `aes-256-gcm`**。其它 method（如 `chacha20-ietf-poly1305`、`aes-128-gcm`）返回 `UNSUPPORTED`，`details = { "method": "<原值>", "supported": ["aes-256-gcm"] }`，**不降级、不猜测、不尝试**。
+- Shadowsocks 节点必须有 `server`、`server_port`、`credentials.password`、`credentials.method`；`tls` 字段对 shadowsocks 无意义，客户端必须忽略。
 
 ### 4.2 凭据轮换
 
@@ -299,7 +302,7 @@ type NodeDescriptor = NodeSummary & {
 
 ```ts
 type HealthReportRequest = {
-  contract_version: "1.0.8";
+  contract_version: "1.0.9";
   device_id: string;
   node_id: string;
   ok: boolean;
@@ -481,6 +484,15 @@ Retry-After: 12
 ---
 
 ## 12. 变更记录
+
+### 1.0.9（2026-11-02，N-03）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.0.9` | 元数据 | PM |
+| 2 | `NodeProtocol` 增加 `"shadowsocks"`（§3.1 查询参数、§3.2 类型） | 枚举扩展 | 用户：手上有真实 SS 节点需验证 |
+| 3 | 新增 `ShadowsocksCredentials { password, method }`，并入 `NodeDescriptor.credentials` 联合类型 | 类型新增 | 同上 |
+| 4 | 新增 method 白名单：**P1 只接受 `aes-256-gcm`**，其余 `UNSUPPORTED` 且不降级 | 约束 | 无测试覆盖的加密方式不得声明支持 |
 
 ### 1.0.8（2026-11-02）
 

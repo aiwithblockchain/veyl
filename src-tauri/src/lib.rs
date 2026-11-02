@@ -10,6 +10,7 @@ pub mod logging;
 pub mod proxy;
 pub mod runtime;
 pub mod secrets;
+pub mod seed_import;
 pub mod store;
 pub mod tools;
 

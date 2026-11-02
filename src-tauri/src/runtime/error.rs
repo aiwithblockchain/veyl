@@ -63,6 +63,12 @@ pub enum RuntimeError {
     #[error("state file error: {0}")]
     State(String),
 
+    #[error("unsupported: {message}")]
+    Unsupported {
+        message: String,
+        details: serde_json::Value,
+    },
+
     #[error("precondition failed ({reason}): {message}")]
     Precondition {
         reason: &'static str,
@@ -99,6 +105,7 @@ impl RuntimeError {
             RuntimeError::Proxy(_) => "INTERNAL",
             RuntimeError::InstallAborted => "CANCELLED",
             RuntimeError::Precondition { .. } => "PRECONDITION_FAILED",
+            RuntimeError::Unsupported { .. } => "UNSUPPORTED",
         }
     }
 
@@ -109,6 +116,7 @@ impl RuntimeError {
                 Some(serde_json::json!({ "reason": reason }))
             }
             RuntimeError::NotInstalled => Some(serde_json::json!({ "hint": "call CoreInstall" })),
+            RuntimeError::Unsupported { details, .. } => Some(details.clone()),
             _ => None,
         }
     }

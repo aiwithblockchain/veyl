@@ -39,6 +39,7 @@ notary-profile*
 .env
 .env.*
 !.env.example
+*seeds*.json
 
 # Packaging artifacts
 scripts/packaging/output/
@@ -48,3 +49,6 @@ scripts/packaging/output/
 
 # 打包脚本自产出（DMG / MSI / 签名日志）
 build/
+
+# 种子节点文件（含真实密码，绝不入库）
+*seeds*.json

@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`1.0.8`
+> 契约版本：`1.0.9`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.3、§4.4、§5.1
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -62,7 +62,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "1.0.8";
+  contract_version: "1.0.9";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -503,7 +503,7 @@ type CoreInstallData = {
   "type": "object",
   "properties": {
     "region": { "type": "string", "pattern": "^[a-z]{2}$" },
-    "protocol": { "type": "string", "enum": ["vless_reality", "hysteria2"] },
+    "protocol": { "type": "string", "enum": ["vless_reality", "hysteria2", "shadowsocks"] },
     "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
     "cursor": { "type": "string" }
   },
@@ -680,7 +680,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "1.0.8";
+  contract_version: "1.0.9";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -806,7 +806,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "1.0.8";
+  contract_version: "1.0.9";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -955,6 +955,13 @@ CatalogSearch → ProfileImport → VpnConnect
 ---
 
 ## 8. 变更记录
+
+### 1.0.9（2026-11-02，N-03）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | `contract_version` 升到 `1.0.9` | 元数据 |
+| 2 | `CatalogSearch` 入参的 `protocol` 枚举增加 `shadowsocks` | 枚举扩展 |
 
 ### 1.0.8（2026-11-02，用户决定移除审批）
 

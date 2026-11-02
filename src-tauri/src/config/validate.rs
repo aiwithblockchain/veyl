@@ -67,7 +67,8 @@ pub async fn install_profile(
     value: &Value,
     etag: Option<&str>,
 ) -> RuntimeResult<PathBuf> {
-    fsutil::ensure_dir(config_dir)?;
+    // 这里会落明文凭据，目录用 0700。
+    fsutil::ensure_private_dir(config_dir)?;
     let final_path = config_dir.join(format!("profile-{profile_id}.json"));
 
     let bytes = serde_json::to_vec_pretty(value)
@@ -76,9 +77,15 @@ pub async fn install_profile(
 
     if let Err(error) = check(binary, &final_path).await {
         let _ = std::fs::remove_file(&final_path);
+        log::info!("active_config removed path={} reason=check_failed", final_path.display());
         return Err(error);
     }
     fsutil::set_private(&final_path)?;
+    // 只打路径与权限，绝不打内容。
+    log::info!(
+        "active_config path={} mode=0600",
+        final_path.display()
+    );
 
     let meta = serde_json::json!({
         "schema": 1,

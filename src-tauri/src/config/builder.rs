@@ -32,6 +32,10 @@ pub enum ProtocolConfig {
         #[serde(default)]
         insecure: bool,
     },
+    Shadowsocks {
+        password: String,
+        method: String,
+    },
 }
 
 #[derive(Clone)]
@@ -66,6 +70,11 @@ impl std::fmt::Debug for ProtocolConfig {
             ProtocolConfig::Hysteria2 { server_name, .. } => f
                 .debug_struct("Hysteria2")
                 .field("server_name", server_name)
+                .field("password", &"<redacted>")
+                .finish(),
+            ProtocolConfig::Shadowsocks { method, .. } => f
+                .debug_struct("Shadowsocks")
+                .field("method", method)
                 .field("password", &"<redacted>")
                 .finish(),
         }
@@ -137,6 +146,27 @@ pub fn build(input: &BuildInput) -> RuntimeResult<Value> {
                 }
             }
             outbound
+        }
+        ProtocolConfig::Shadowsocks { password, method } => {
+            require(password, "password")?;
+            require(method, "method")?;
+            if !crate::catalog::SUPPORTED_METHODS.contains(&method.as_str()) {
+                return Err(RuntimeError::Unsupported {
+                    message: format!("shadowsocks method {method} is not supported"),
+                    details: serde_json::json!({
+                        "method": method,
+                        "supported": crate::catalog::SUPPORTED_METHODS,
+                    }),
+                });
+            }
+            json!({
+                "type": "shadowsocks",
+                "tag": PROXY_TAG,
+                "server": input.node.server,
+                "server_port": input.node.server_port,
+                "method": method,
+                "password": password,
+            })
         }
         ProtocolConfig::Hysteria2 {
             password,
@@ -282,6 +312,60 @@ mod tests {
         assert_eq!(config["outbounds"][0]["type"], "hysteria2");
         assert_eq!(config["outbounds"][0]["tls"]["enabled"], true);
         assert_eq!(config["outbounds"][0]["tls"]["server_name"], "hy.example.com");
+    }
+
+    #[test]
+    fn shadowsocks_outbound_matches_the_template() {
+        let node = NodeDescriptor {
+            id: "seed-hk-01".into(),
+            name: "香港 01".into(),
+            server: "198.51.100.9".into(),
+            server_port: 8388,
+            protocol: ProtocolConfig::Shadowsocks {
+                password: "p@ss".into(),
+                method: "aes-256-gcm".into(),
+            },
+        };
+        let config = build(&input(node)).unwrap();
+        assert_eq!(config["outbounds"][0]["type"], "shadowsocks");
+        assert_eq!(config["outbounds"][0]["method"], "aes-256-gcm");
+        assert_eq!(config["outbounds"][0]["server_port"], 8388);
+        assert_eq!(config["outbounds"][0]["password"], "p@ss");
+        // shadowsocks 没有 TLS 块。
+        assert!(config["outbounds"][0].get("tls").is_none());
+    }
+
+    #[test]
+    fn an_unsupported_shadowsocks_method_is_rejected() {
+        let node = NodeDescriptor {
+            id: "seed-hk-01".into(),
+            name: "香港 01".into(),
+            server: "198.51.100.9".into(),
+            server_port: 8388,
+            protocol: ProtocolConfig::Shadowsocks {
+                password: "p@ss".into(),
+                method: "rc4-md5".into(),
+            },
+        };
+        let error = build(&input(node)).unwrap_err();
+        assert_eq!(error.code(), "UNSUPPORTED");
+    }
+
+    #[test]
+    fn shadowsocks_debug_output_redacts_the_password() {
+        let node = NodeDescriptor {
+            id: "seed-hk-01".into(),
+            name: "香港 01".into(),
+            server: "198.51.100.9".into(),
+            server_port: 8388,
+            protocol: ProtocolConfig::Shadowsocks {
+                password: "p@ss".into(),
+                method: "aes-256-gcm".into(),
+            },
+        };
+        let text = format!("{:?}", input(node));
+        assert!(!text.contains("p@ss"), "{text}");
+        assert!(text.contains("<redacted>"), "{text}");
     }
 
     #[test]

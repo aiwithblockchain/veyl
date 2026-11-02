@@ -9,5 +9,5 @@ pub use client::{
 pub use error::{CatalogError, CatalogResult};
 pub use types::{
     Credentials, Mux, NodeDescriptor, NodeDetailResponse, NodeListResponse, NodeProtocol,
-    NodeSummary, NodeTls,
+    NodeSummary, NodeTls, SUPPORTED_METHODS,
 };
