@@ -222,6 +222,7 @@ FROM chat_sessions s LEFT JOIN chat_messages m ON m.session_id=s.id GROUP BY s.i
 | AC-G3 | **真实出口 IP 变化** | C | 手工+命令 | 是 | FR-7.2 / 新增 |
 | AC-G4 | 断开后出口与代理还原 | A+C | 手工+命令 | 是 | TC-PXY-006 |
 | AC-G5 | 连接后返回真实 `exit_ip`（D-20 复测） | A+SQL | 手工 | 是 | 新增（D-20） |
+| AC-G6 | 不断开直接切换节点 | A+C | 手工+命令 | 是 | 新增（D-36） |
 | AC-H1 | 二进制来源记录（含未提交改动） | 静态 | 半自动 | 是 | P-4 |
 | AC-H2 | `runtime.pid` 落盘且与进程一致 | C | 手工 | 是 | 新增（D-17） |
 | AC-H3 | 强杀重启后回收遗留进程 | A+C | 手工 | 是 | TC-EXC-019 / D-17 |
@@ -822,6 +823,39 @@ curl -sS --max-time 15 --proxy "http://127.0.0.1:${PORT}" https://ifconfig.me/ip
 > **报告写法**：结论里只写「与经代理出口一致」，**不写 IP 字面值** —— Shadowsocks 的出口 IP 就是节点服务器地址，写进仓库等于公开节点地址。
 
 > **为什么这条是阻断**：出口 IP 是用户唯一能在应用内自证「代理确实生效」的手段。没有它，用户只能相信界面上的「已连接」四个字 —— 而 D-17 已经证明过，「已连接」和后台真实状态可能不一致。
+
+---
+
+### AC-G6 不断开直接切换节点
+
+- **方式**：手工 + 命令 ｜ **阻断**：是
+- **背景**：D-36 —— 修复前，切换后工具仍报告「已连接」，但运行时没真的换过去，**提示成功、网络是断的**。
+- **前置**：已连接节点 A，系统代理生效
+- **步骤**：
+  1. 在对话里**直接**让它连节点 B（不先说断开）
+  2. 等返回后立即检查进程、端口、代理与配置目录
+- **命令**：
+
+```bash
+PID=$(pgrep -f 'sing-box run' | head -1)
+echo "pid=$PID"; ps -o lstart= -p "$PID"
+lsof -nP -iTCP -sTCP:LISTEN -a -p "$PID" | awk 'NR>1{print $9}'
+scutil --proxy | grep -E 'HTTPEnable|HTTPPort'
+ls -1 "$HOME/Library/Application Support/Veyl/config"
+python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/Library/Application Support/Veyl/runtime.pid'))))"
+```
+
+- **断言**：
+  - 两次 `VpnConnect` 返回的出口**不同**（比较返回值，不必记录地址）
+  - sing-box **pid 变了**，启动时间对应第二次连接
+  - **系统代理端口 = 新进程 `mixed` 监听端口** —— 这是最关键的一条
+  - `config/` 只剩 B 的 json 与 meta，**A 的已删除**
+  - `runtime.pid` 的 pid 与运行进程一致，`started_at` 为 13 位
+- **失败判定**：
+  - 出口没变 → 没真的换
+  - **代理端口与新进程监听不一致** → 报告与现实脱节，等于 D-36 复发
+  - A 的配置仍在 → D-27 复发
+- **证据**：上述命令输出 + 两次 `VpnConnect` 的返回（不含地址字面值）
 
 ---
 
