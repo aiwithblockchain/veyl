@@ -1,31 +1,51 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AgentBridge } from "./bridge";
+import { listen } from "@tauri-apps/api/event";
+import type { AgentBridge, DeepSeekKeyState } from "./bridge";
+import { toBridgeError } from "./errors";
+import { createListenerManager } from "./listeners";
 import { AGENT_EVENTS, APP_EVENT_NAMES, AI_EVENT_NAMES } from "./protocol";
 import type { AgentEvent, ApprovalScope, RuntimeSnapshot } from "./protocol";
 
 const EVENT_NAMES = [...AI_EVENT_NAMES, ...APP_EVENT_NAMES];
 
-/** Host 侧 Tauri 通道。命令名与事件名均已冻结合同，见 docs/contracts/events.md §1、§5。 */
+/** 统一的 invoke 包装：失败一律抛 `BridgeError`，调用方只需要看 code / message。 */
+async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    throw toBridgeError(error);
+  }
+}
+
+/**
+ * Host 侧 Tauri 通道。命令名与事件名以 `docs/contracts/events.md` 为准（已冻结）；
+ * 监听器生命周期与错误归一化的写法对齐 TweetPilot 的 `services/ai/tauri.ts`。
+ */
 export class TauriAgentBridge implements AgentBridge {
   readonly mode = "tauri" as const;
 
   private listeners = new Set<(event: AgentEvent) => void>();
-  private unlisten: UnlistenFn[] = [];
+  private manager = createListenerManager();
+  private bootstrapped = false;
 
   constructor() {
     void this.bootstrap();
   }
 
   private async bootstrap() {
+    if (this.bootstrapped) return;
+    this.bootstrapped = true;
+
     for (const name of EVENT_NAMES) {
-      const off = await listen<unknown>(name, (event) => {
-        const payload = event.payload as AgentEvent["payload"];
-        for (const listener of this.listeners) {
-          listener({ name, payload } as AgentEvent);
-        }
-      });
-      this.unlisten.push(off);
+      await this.manager.listen(
+        name,
+        listen<unknown>(name, (event) => {
+          const payload = event.payload as AgentEvent["payload"];
+          for (const listener of this.listeners) {
+            listener({ name, payload } as AgentEvent);
+          }
+        }),
+      );
     }
   }
 
@@ -38,22 +58,20 @@ export class TauriAgentBridge implements AgentBridge {
 
   async getRuntimeSnapshot(): Promise<RuntimeSnapshot | null> {
     try {
-      return await invoke<RuntimeSnapshot>("runtime_status");
+      return await call<RuntimeSnapshot>("runtime_status");
     } catch {
+      // 状态面板拿不到快照时保持 idle，不打断对话。
       return null;
     }
   }
 
   async sendMessage(sessionId: string, text: string): Promise<{ requestId: string }> {
-    const response = await invoke<{ request_id: string }>("ai_send_message", {
-      sessionId,
-      text,
-    });
+    const response = await call<{ request_id: string }>("ai_send_message", { sessionId, text });
     return { requestId: response.request_id };
   }
 
   async cancel(requestId: string): Promise<void> {
-    await invoke("ai_cancel", { requestId });
+    await call("ai_cancel", { requestId });
   }
 
   async respondApproval(
@@ -61,16 +79,46 @@ export class TauriAgentBridge implements AgentBridge {
     decision: "allow" | "deny",
     scope: ApprovalScope,
   ): Promise<void> {
-    await invoke("ai_approval_decision", { approvalId, decision, scope });
+    await call("ai_approval_decision", { approvalId, decision, scope });
   }
 
   async deleteProfile(profileId: string): Promise<void> {
-    await invoke("profile_delete", { profileId });
+    await call("profile_delete", { profileId });
+  }
+
+  async getDeepSeekKey(): Promise<DeepSeekKeyState> {
+    try {
+      const raw = await call<{ configured: boolean; masked: string | null }>(
+        "deepseek_key_status",
+      );
+      return {
+        masked: raw.configured ? raw.masked ?? null : null,
+        // 钥匙串里存着只能说明「配置过」，是否仍然有效要再验一次才知道。
+        verified: false,
+        validation: "unverified",
+      };
+    } catch {
+      return { masked: null, verified: false, validation: "unverified" };
+    }
+  }
+
+  async saveDeepSeekKey(key: string): Promise<DeepSeekKeyState> {
+    const raw = await call<{ masked?: string; verified?: boolean }>("deepseek_save_key", { key });
+    const verified = raw.verified === true;
+    // 只用后端给的 masked，不在前端拼 Key。
+    return {
+      masked: raw.masked ?? null,
+      verified,
+      validation: verified ? "ok" : "unverified",
+    };
+  }
+
+  async clearDeepSeekKey(): Promise<void> {
+    await call("deepseek_clear_key");
   }
 
   dispose(): void {
-    for (const off of this.unlisten) off();
-    this.unlisten = [];
+    this.manager.dispose();
     this.listeners.clear();
   }
 }

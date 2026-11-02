@@ -9,6 +9,7 @@ import type {
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, snapshotToView } from "./agent";
 import { ChatView } from "./components/ChatView";
+import { Settings } from "./components/Settings";
 import { Sidebar } from "./components/Sidebar";
 import { StatusPanel, type DeleteNotice } from "./components/StatusPanel";
 import { activeSession, chatReducer, createInitialState, nextId } from "./state/chatStore";
@@ -29,6 +30,7 @@ export default function App() {
   const bridge = useMemo(() => getAgentBridge(), []);
   const [state, dispatch] = useReducer(chatReducer, undefined, createInitialState);
   const [statusOpen, setStatusOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [runtime, setRuntime] = useState<RuntimeView>(() => emptyRuntimeView());
   const [deleteNotice, setDeleteNotice] = useState<DeleteNotice | null>(null);
   const sessionRef = useRef(state.activeSessionId);
@@ -136,6 +138,7 @@ export default function App() {
         mode={bridge.mode}
         onSelect={(sessionId) => dispatch({ type: "select_session", sessionId })}
         onNew={() => dispatch({ type: "new_session" })}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <main className="main">
@@ -174,6 +177,8 @@ export default function App() {
           deleteNotice={deleteNotice}
         />
       ) : null}
+
+      <Settings open={settingsOpen} bridge={bridge} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

@@ -54,7 +54,7 @@
 - **收敛**：把多条目合并成一条可执行验收（例如「审批矩阵」13 条 TC 收敛为 AC-C1~C4）
 - **不重复**：U/I 层的单测不列进来，它们由 `cargo test` 88 项覆盖
 
-本轮 **21 条验收 + 3 条准入检查**，其中自动 8 条、手工 13 条。
+本轮 **21 条验收 + 4 条准入检查**，其中自动 8 条、手工 13 条。
 
 ---
 
@@ -93,8 +93,32 @@ bash scripts/ci.sh --quick
 | **P-1** | DeepSeek Key 能存 | 用户执行：在设置页输入任意 Key 保存。若返回 `UNSUPPORTED` / 「尚未接线」→ **停** | AC-B2 / B4 / C1 / C2 / C3 / F1 全部无效 |
 | **P-2** | 工具调用能落库 | 在窗口里说「现在什么状态」，然后查 `SELECT COUNT(*) FROM tool_calls;` 应 ≥ 1。若为 0 → **停** | AC-C5a~d 整组无效，且无法区分「逻辑错」和「根本没写」 |
 | **P-3** | 对话能落库 | 发一句话后查 `SELECT COUNT(*) FROM chat_messages;` 应 ≥ 1。若为 0 → **停** | AC-F1 必红 |
+| **P-4** | **二进制是新的** | 见下方命令。若二进制早于最新源码 → **先重建，不能拿旧二进制下结论** | D/E 组的全部结论作废 |
 
 三条都不通时的处置：不是测试失败，是**被测功能未实现**。写进报告「准入未通过，验收无法开始」，不要硬跑后面的用例假装有结论。
+
+### P-4：二进制新鲜度（这条是被一次真实乌龙逼出来的）
+
+**2026-11-02 实例**：Clerk 17:21 跑 E1，用的是 16:57 构建的 `veyl-runtime-selftest`，而源码在 17:24–17:27 改过。结论对旧二进制成立，对当前代码不成立 —— 一条 FAIL 白报，一轮 PASS 白跑。
+
+**执行任何 selftest / e2e 之前先跑这条**（只读，测试人员可直接执行）：
+
+```bash
+BIN=src-tauri/target/debug/veyl-runtime-selftest
+STALE=$(find src-tauri/src -name '*.rs' -newer "$BIN" 2>/dev/null | head -3)
+if [ -n "$STALE" ]; then
+  echo "❌ 二进制过期，以下源码比它新："
+  echo "$STALE"
+else
+  echo "✅ 二进制不早于源码"
+fi
+```
+
+不满足 → 请用户重建（`cargo build --manifest-path src-tauri/Cargo.toml --bin veyl-runtime-selftest`），然后重跑这条确认。
+
+**报告里必须写明二进制时间**。等 build.rs 注入构建戳之后，改用打印出来的构建时间，不再靠 mtime 推断 —— mtime 会因为 checkout、rsync、时钟漂移而不准。
+
+> **D-01 的定性**：它是 HEAD（465c047）上的**真实缺陷**，不是误报。17:24–17:27 修复，当前构建重测 PASS。报告里请这么写，不要写成「作废」——「作废」会让后来的人以为当初的判断错了。
 
 > 2026-11-02 已知：P-1 与 P-2、P-3 目前大概率不通 —— `tools/services.rs` 里 `save_deepseek_key` 还是 `not_wired`，`store/tool_calls.rs` 与 `chat_*` 没有调用点。等接线后重跑准入。
 
@@ -499,10 +523,13 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin veyl-runtime-selftest -- pr
 ```
 
 - **预期**：enable 后系统代理生效；disable 后**恢复成开测前的值**，不是简单关闭
-- **失败判定**：disable 后变成「全部关闭」而不是恢复原值（备份没生效）
+- **必须逐项比对**（这是 D-01 的判定点）：系统设置里 **Enabled 勾选框、Server、Port 三个值都要和开测前一致**。只看勾选框变灰是不够的 —— 勾选框关了但 Server 还留着 `127.0.0.1:2080`，就是缺陷
+- **失败判定**：
+  - disable 后变成「全部关闭」而不是恢复原值
+  - 或勾选框已关，但 Server/Port 仍是我们写进去的值
 - **证据**：每一步的系统设置截屏 + `proxy-status` 输出
 
-> **证据来自哪份库**：`--data-dir /tmp/veyl-proxy` 会另建一份数据目录，`proxy_backup.json` 写在 `/tmp/veyl-proxy/` 下，**不在 App 的 `~/Library/Application Support/Veyl/`**。去 App 库查 `proxy_backup` 表查不到东西是正常的，不要误判为「备份没写」。
+> **证据来自哪份库**：`--data-dir /tmp/veyl-proxy` 会另建一份数据目录，`proxy-backup.json`（**连字符**，见 `src-tauri/src/proxy/backup.rs:77`）写在 `/tmp/veyl-proxy/` 下，**不在 App 的 `~/Library/Application Support/Veyl/`**。去 App 库查 `proxy_backup` 表查不到东西是正常的，不要误判为「备份没写」。
 
 > ⚠️ 这条会真的改动用户的系统代理。**执行前先确认用户知道**，测完必须还原。
 

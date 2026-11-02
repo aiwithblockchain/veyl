@@ -6,6 +6,7 @@ pub mod agent;
 pub mod catalog;
 pub mod claurst_session;
 pub mod config;
+pub mod logging;
 pub mod proxy;
 pub mod runtime;
 pub mod secrets;
@@ -38,10 +39,13 @@ fn catalog_base_url(store: &Store) -> String {
 
 pub fn run() {
     let data_dir = crate::runtime::default_app_data_dir();
+    // 日志最先初始化：后面每一步失败都要能落盘。
+    crate::logging::init(&data_dir);
+
     let store = match Store::open(crate::store::default_db_path(&data_dir)) {
         Ok(store) => Arc::new(store),
         Err(error) => {
-            eprintln!("本地数据库打开失败，改用内存库：{error}");
+            log::error!("本地数据库打开失败，改用内存库：{error}");
             Arc::new(Store::open_in_memory().expect("内存数据库也打不开"))
         }
     };
@@ -56,13 +60,13 @@ pub fn run() {
     // 异常退出后不留系统代理：启动时先看 proxy_backup，有残留就恢复。
     match proxy.recover_stale() {
         Ok(crate::proxy::RecoveryOutcome::Recovered { endpoint }) => {
-            eprintln!("已恢复上次异常退出遗留的系统代理（{endpoint}）");
+            log::warn!("已恢复上次异常退出遗留的系统代理（{endpoint}）");
         }
         Ok(crate::proxy::RecoveryOutcome::LeftAlone { current, .. }) => {
-            eprintln!("检测到未清理的代理备份，但当前代理是 {current}，按用户设置保留");
+            log::warn!("检测到未清理的代理备份，但当前代理是 {current}，按用户设置保留");
         }
         Ok(crate::proxy::RecoveryOutcome::Nothing) => {}
-        Err(error) => eprintln!("系统代理恢复失败：{error}"),
+        Err(error) => log::error!("系统代理恢复失败：{error}"),
     }
 
     let catalog = Arc::new(crate::catalog::CatalogClient::new(catalog_base_url(&store)));

@@ -3,6 +3,16 @@ import type { AgentEvent, RuntimeSnapshot, RuntimeView } from "./protocol";
 
 export type BridgeMode = "tauri" | "mock";
 
+/** DeepSeek Key 的保存结果。后端可能只回 `{saved, validation}`，由 bridge 归一化。 */
+export interface DeepSeekKeyState {
+  /** 打码后的 Key，形如 `sk-****abcd`；未配置为 null。 */
+  masked: string | null;
+  /** 后端明确验证通过才为 true；未验证 / 校验失败都是 false。 */
+  verified: boolean;
+  /** 三态校验结果，与 tools.md §4.15 对齐。 */
+  validation: "ok" | "invalid" | "unverified";
+}
+
 export interface AgentBridge {
   readonly mode: BridgeMode;
   /** 订阅全部事件（AI 会话 + 应用事件）；返回取消订阅函数。 */
@@ -18,7 +28,20 @@ export interface AgentBridge {
   getRuntimeSnapshot(): Promise<RuntimeSnapshot | null>;
   /** 无 AI 模式的删除配置入口（契约 §5 `profile_delete`）。 */
   deleteProfile(profileId: string): Promise<void>;
+  /** 读取 Key 的配置状态（只返回打码值，永不返回明文）。 */
+  getDeepSeekKey(): Promise<DeepSeekKeyState>;
+  /** 保存 Key；只进系统钥匙串。 */
+  saveDeepSeekKey(key: string): Promise<DeepSeekKeyState>;
+  /** 从钥匙串删除 Key。 */
+  clearDeepSeekKey(): Promise<void>;
   dispose(): void;
+}
+
+/** 打码：只留前缀与末四位，永不回显明文。 */
+export function maskKey(key: string): string {
+  const trimmed = key.trim();
+  const tail = trimmed.slice(-4);
+  return `sk-****${tail}`;
 }
 
 export function isTauri(): boolean {

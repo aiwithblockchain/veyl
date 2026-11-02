@@ -28,7 +28,7 @@ parking_lot = "0.12"
 async-trait = "0.1"
 anyhow = "1"
 futures = "0.3"
-log = "0.4"
+log = { version = "0.4", features = ["std"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Claurst 以 crate 链接进主进程（git submodule，固定 commit，不修改源码）。

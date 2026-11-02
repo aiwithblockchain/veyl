@@ -1,4 +1,5 @@
-import type { AgentBridge } from "./bridge";
+import type { AgentBridge, DeepSeekKeyState } from "./bridge";
+import { maskKey } from "./bridge";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
   AgentEvent,
@@ -614,6 +615,46 @@ export class MockAgentBridge implements AgentBridge {
       throw new Error("当前连接仍在使用这个配置，请先断开再删除。");
     }
     this.runtime = { ...this.runtime, profile_id: null };
+  }
+
+  private keyMasked: string | null = null;
+
+  async getDeepSeekKey(): Promise<DeepSeekKeyState> {
+    return {
+      masked: this.keyMasked,
+      verified: false,
+      validation: this.keyMasked ? "unverified" : "unverified",
+    };
+  }
+
+  async saveDeepSeekKey(key: string): Promise<DeepSeekKeyState> {
+    await sleep(600);
+    const trimmed = key.trim();
+
+    if (!trimmed.startsWith("sk-") || trimmed.length < 12) {
+      throw { code: "INVALID_ARGUMENT", message: "Key 格式看起来不对，应以 sk- 开头" };
+    }
+
+    // 含 offline 的 Key 模拟「保存成功但网络不可达，没能验证」。
+    if (/offline/i.test(trimmed)) {
+      this.keyMasked = maskKey(trimmed);
+      return { masked: this.keyMasked, verified: false, validation: "unverified" };
+    }
+
+    // 假 Key 走「已写入但鉴权失败」这条路径，和后端语义一致：
+    // 失败码 INVALID_KEY 时 Key 其实已经落进钥匙串了。
+    if (/test/i.test(trimmed) || trimmed.length < 30) {
+      this.keyMasked = maskKey(trimmed);
+      throw { code: "INVALID_KEY", message: "DeepSeek 鉴权失败，Key 可能无效或已被吊销" };
+    }
+
+    this.keyMasked = maskKey(trimmed);
+    return { masked: this.keyMasked, verified: true, validation: "ok" };
+  }
+
+  async clearDeepSeekKey(): Promise<void> {
+    await sleep(200);
+    this.keyMasked = null;
   }
 
   dispose(): void {

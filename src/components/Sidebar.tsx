@@ -8,6 +8,7 @@ interface Props {
   mode: string;
   onSelect: (sessionId: string) => void;
   onNew: () => void;
+  onOpenSettings: () => void;
 }
 
 function relativeTime(at: number): string {
@@ -19,7 +20,7 @@ function relativeTime(at: number): string {
   return new Date(at).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
 }
 
-export function Sidebar({ sessions, activeSessionId, mode, onSelect, onNew }: Props) {
+export function Sidebar({ sessions, activeSessionId, mode, onSelect, onNew, onOpenSettings }: Props) {
   return (
     <aside className="sidebar">
       <div className="sidebar__brand">
@@ -50,7 +51,12 @@ export function Sidebar({ sessions, activeSessionId, mode, onSelect, onNew }: Pr
 
       <div className="sidebar__footer">
         <span className={`sidebar__mode sidebar__mode--${mode}`}>{mode === "mock" ? "MOCK 事件源" : "已连接 Host"}</span>
-        <button type="button" className="sidebar__settings" title="设置（P1 W3 接入）">
+        <button
+          type="button"
+          className="sidebar__settings"
+          title="设置"
+          onClick={onOpenSettings}
+        >
           设置
         </button>
       </div>
