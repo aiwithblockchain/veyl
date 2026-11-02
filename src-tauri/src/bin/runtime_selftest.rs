@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use veyl_lib::config::{self, BuildInput, NodeDescriptor, ProtocolConfig};
 use veyl_lib::proxy::{ProxyController, RecoveryOutcome};
+use veyl_lib::catalog::CatalogClient;
+use veyl_lib::tools::services::WiredServices;
+use veyl_lib::tools::{CatalogQuery, VpnToolServices};
 use veyl_lib::runtime::{
     current_release, default_app_data_dir, ClashApi, Installer, RuntimeConfig, RuntimeEvent,
     RuntimeManager,
@@ -69,6 +72,7 @@ async fn main() -> ExitCode {
         "install" => run_install(&args).await,
         "status" => run_status(&args).await,
         "fault" => run_fault(&args).await,
+        "catalog" => run_catalog(&args).await,
         "proxy-status" => run_proxy_status(&args),
         "proxy-recover" => run_proxy_recover(&args),
         "proxy-enable" => run_proxy_enable(&args),
@@ -76,7 +80,7 @@ async fn main() -> ExitCode {
         other => {
             eprintln!("unknown command: {other}");
             eprintln!(
-                "commands: e2e | install | status | fault | proxy-status | proxy-enable | proxy-disable | proxy-recover"
+                "commands: e2e | install | status | fault | catalog | proxy-status | proxy-enable | proxy-disable | proxy-recover"
             );
             return ExitCode::from(2);
         }
@@ -246,6 +250,97 @@ async fn run_e2e(args: &Args) -> StepResult {
     );
 
     println!("\nE2E PASSED");
+    Ok(())
+}
+
+/// 目录联调：走真实 `WiredServices`，验证「无 token 自动注册 → 落盘 → 列表成功」。
+async fn run_catalog(args: &Args) -> StepResult {
+    let base = std::env::var("VEYL_CATALOG_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:18090/v1".to_string());
+
+    let dir = args.data_dir.join("catalog");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    veyl_lib::secrets::install(&dir);
+
+    let store = std::sync::Arc::new(
+        veyl_lib::store::Store::open(veyl_lib::store::default_db_path(&dir))
+            .map_err(|e| e.to_string())?,
+    );
+    let manager = veyl_lib::runtime::RuntimeManager::new(
+        veyl_lib::runtime::RuntimeConfig::new(&dir),
+    );
+    let proxy = std::sync::Arc::new(veyl_lib::proxy::ProxyController::new(Box::new(
+        veyl_lib::proxy::SqliteBackupStore::new(std::sync::Arc::clone(&store)),
+    )));
+    let catalog = std::sync::Arc::new(CatalogClient::new(base.clone()));
+    let services = WiredServices::new(
+        std::sync::Arc::clone(&store),
+        manager,
+        proxy,
+        catalog,
+        &dir,
+    );
+
+    println!("目录服务：{base}");
+    step(1, "初始状态：本地不应有设备 token");
+    println!(
+        "    device_token: {:?}",
+        veyl_lib::secrets::get_device_token().map(|token| token.is_some())
+    );
+
+    step(2, "调用 catalog_search（无 token 时应自动注册）");
+    let response = services
+        .catalog_search(CatalogQuery::default())
+        .await
+        .map_err(|e| format!("目录查询失败：{e}"))?;
+    let nodes = response
+        .get("nodes")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    println!("    {} 个节点", nodes.len());
+    if nodes.is_empty() {
+        return Err("目录返回空列表".to_string());
+    }
+    println!(
+        "    首个节点：{}",
+        nodes[0].get("id").and_then(|v| v.as_str()).unwrap_or("?")
+    );
+
+    step(3, "确认 token 已落到 secrets.enc");
+    let token = veyl_lib::secrets::get_device_token().map_err(|e| e.to_string())?;
+    if token.is_none() {
+        return Err("注册后仍没有 device_token".to_string());
+    }
+    let secrets_path = dir.join(veyl_lib::secrets::SECRETS_FILE);
+    let raw = std::fs::read_to_string(&secrets_path).map_err(|e| e.to_string())?;
+    if !raw.contains("device_token") {
+        return Err("secrets.enc 里没有 device_token 字段".to_string());
+    }
+    if let Some(value) = &token {
+        if raw.contains(value) {
+            return Err("secrets.enc 里出现了明文 token".to_string());
+        }
+    }
+    println!("    {} 已写入，且为密文", secrets_path.display());
+
+    step(4, "再次查询：应复用 token，不重复注册");
+    let again = services
+        .catalog_search(CatalogQuery::default())
+        .await
+        .map_err(|e| format!("第二次查询失败：{e}"))?;
+    println!(
+        "    {} 个节点",
+        again
+            .get("nodes")
+            .and_then(|value| value.as_array())
+            .map(|nodes| nodes.len())
+            .unwrap_or(0)
+    );
+
+    println!("\nCATALOG PASSED");
     Ok(())
 }
 

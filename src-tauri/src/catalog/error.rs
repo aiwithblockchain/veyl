@@ -56,3 +56,16 @@ impl std::fmt::Display for CatalogError {
 }
 
 impl std::error::Error for CatalogError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_token_errors_trigger_the_reauth_path() {
+        assert!(CatalogError::new("DEVICE_TOKEN_INVALID", "x", false).is_unauthorized());
+        assert!(CatalogError::new("DEVICE_TOKEN_EXPIRED", "x", false).is_unauthorized());
+        assert!(!CatalogError::new("NODE_NOT_FOUND", "x", false).is_unauthorized());
+        assert!(!CatalogError::new("RATE_LIMITED", "x", true).is_unauthorized());
+    }
+}
