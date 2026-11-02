@@ -816,7 +816,10 @@ export class MockAgentBridge implements AgentBridge {
     }
 
     const providerId = input.providerId ?? `prv_${Math.random().toString(36).slice(2, 8)}`;
-    const existing = this.llmProviders.find((provider) => provider.providerId === providerId);
+    const existingIndex = this.llmProviders.findIndex(
+      (provider) => provider.providerId === providerId,
+    );
+    const existing = existingIndex >= 0 ? this.llmProviders[existingIndex] : undefined;
     const hasKey = input.apiKey.trim().length > 0 ? true : existing?.hasKey ?? false;
     if (!hasKey && !isLocalEndpoint(input.baseUrl)) {
       throw {
@@ -825,6 +828,12 @@ export class MockAgentBridge implements AgentBridge {
       };
     }
 
+    const hadActive =
+      this.llmActiveId !== null &&
+      this.llmProviders.some((provider) => provider.providerId === this.llmActiveId);
+    // 保存只保存：只有「本来就没有当前 provider」时才自动成为当前。
+    const becomesActive = existing?.isActive === true || !hadActive;
+
     const saved: LlmProvider = {
       providerId,
       name: input.name.trim() || model,
@@ -832,18 +841,25 @@ export class MockAgentBridge implements AgentBridge {
       baseUrl: input.baseUrl.trim(),
       model,
       hasKey,
-      isActive: true,
+      isActive: becomesActive,
       isBuiltin: existing?.isBuiltin ?? false,
     };
 
-    // 保存即设为当前：新会话立刻使用它，但不影响正在进行中的请求。
-    this.llmProviders = [
-      ...this.llmProviders
-        .filter((provider) => provider.providerId !== providerId)
-        .map((provider) => ({ ...provider, isActive: false })),
-      saved,
-    ];
-    this.llmActiveId = providerId;
+    if (becomesActive) {
+      this.llmProviders = this.llmProviders.map((provider) =>
+        provider.providerId === providerId ? provider : { ...provider, isActive: false },
+      );
+      this.llmActiveId = providerId;
+    }
+
+    if (existingIndex >= 0) {
+      this.llmProviders = this.llmProviders.map((provider) =>
+        provider.providerId === providerId ? saved : provider,
+      );
+    } else {
+      this.llmProviders = [...this.llmProviders, saved];
+    }
+
     return { ...saved };
   }
 
@@ -862,12 +878,11 @@ export class MockAgentBridge implements AgentBridge {
     if (target.isBuiltin) this.keyMasked = null;
 
     if (this.llmActiveId === providerId) {
-      const next =
-        this.llmProviders.find((provider) => provider.hasKey) ?? this.llmProviders[0] ?? null;
-      this.llmActiveId = next?.providerId ?? null;
+      // 不静默切到另一个端点；由用户再点「设为当前」。
+      this.llmActiveId = null;
       this.llmProviders = this.llmProviders.map((provider) => ({
         ...provider,
-        isActive: provider.providerId === this.llmActiveId,
+        isActive: false,
       }));
     }
   }

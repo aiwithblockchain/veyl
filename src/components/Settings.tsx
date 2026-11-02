@@ -311,10 +311,16 @@ export function Settings({
 
     setProviderSaving(true);
     setProviderError(null);
+    // 保存不再自动切换当前 provider；只有原本没有当前项时，第一个才会成为当前。
+    const hadActive =
+      activeProviderId !== null || providers.some((provider) => provider.isActive);
     try {
       await bridge.llmProviderSave(input);
       setProviderForm(null);
-      setProviderNotice({ kind: "ok", text: "已保存，并设为当前 provider。" });
+      setProviderNotice({
+        kind: "ok",
+        text: hadActive ? "已保存。" : "已保存，并设为当前。",
+      });
       await refreshProviders();
       refresh();
     } catch (error) {

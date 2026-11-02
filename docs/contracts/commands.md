@@ -402,8 +402,19 @@ type LlmProvider = {
 | `apiKey` 非空 | 写入 `secrets.enc` 的 `provider:<provider_id>`，覆盖旧值 |
 
 - 返回值**永远不含 Key**，`has_key` 只给布尔。
-- 保存后**不自动设为当前**；设为当前走 §3.15。需要这个分离，否则用户改一下模型名就把正在用的 provider 换掉了。
 - 保存**不打断正在进行中的请求**（需求 §5.8）：进行中的会话仍用启动时的 provider，新的下一次请求才生效。
+
+**不变量：保存不改变当前 provider。**
+
+> **`llm_provider_save` 只保存，不改变 active。切换只能通过 `llm_provider_activate`。**
+> 唯一例外：**当前没有任何 active provider 时**，保存的第一个自动成为 active（否则全新安装存完 Key 仍然没有可用 provider，用户会以为没保存成功）。
+
+需要这条的理由：用户编辑一个**备用** provider（只改模型名）并保存，不应该让正在用的对话流量悄悄换到另一个端点。与「节点连不上不得悄悄回退默认包」是同一条原则——**不静默改变请求的去向**。
+
+由此推出的两条约束：
+
+- 编辑**当前激活的** provider 时，保存后仍是 active（值没变，但配置已更新，下一次请求即生效）。
+- `llm_provider_activate` 是**唯一**能改 active 的命令；UI 上「保存」与「设为当前」必须是两个独立动作。
 
 错误：`INVALID_ARGUMENT`（§3.12 的 1–6）、`PRECONDITION_FAILED`（`api_key_required`）、`NOT_FOUND`、`SECRET_STORE`。
 
@@ -550,3 +561,4 @@ type LlmTestResult = {
 | 18 | 密钥键由 `llm:<provider_id>` 改为 `provider:<provider_id>`，复用已有的 `provider:deepseek`；迁移只补元数据、不搬密钥 | 修正 | 现有约定能复用就别新造 |
 | 19 | 「有 active 但连不上不回退」由行为描述升级为不变量，并给出可执行的测试断言 | 约束强化 | PM 要求写成不变量 |
 | 20 | `llm_provider_test` 去掉嵌套 `draft`，参数平铺到顶层；新增 §1.1.1「不要用嵌套对象传参」 | 修正 | Tauri 只对顶层参数做 camelCase 转换，嵌套键不会转 |
+| 21 | `llm_provider_save` 明确「只保存、不改 active」，唯一例外是没有 active 时的第一个；切换只能走 `activate` | 不变量 | 不静默改变请求去向 |
