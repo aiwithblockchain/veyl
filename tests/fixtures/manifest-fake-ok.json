@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "releases": [
+    {
+      "upstream_version": "1.14.4",
+      "platform": "darwin",
+      "arch": "arm64",
+      "url": "http://127.0.0.1:18090/__file?name=fake-ok.tar.gz",
+      "sha256": "fdd9631e5f4be7bc2d6c1ad7e0addcde1f50ed9c75ff163ca29fcf295c495412",
+      "size": 248,
+      "source_url": "local",
+      "license": "GPL-3.0-or-later"
+    }
+  ]
+}

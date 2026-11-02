@@ -1,0 +1,10 @@
+{
+  "name": "connect-fail-then-retry",
+  "description": "异常：首选节点不可达，自动换同地区节点（只允许重试 1 次）",
+  "turns": [
+    { "tool_calls": [{ "name": "catalog_search", "arguments": { "region": "jp" } }] },
+    { "tool_calls": [{ "name": "vpn_connect", "arguments": { "node_id": "seed-dead-01" } }] },
+    { "tool_calls": [{ "name": "vpn_connect", "arguments": { "node_id": "seed-jp-02" } }] },
+    { "text": "东京 99 不可达，已改连到 东京 02，出口 IP 203.0.113.7。" }
+  ]
+}

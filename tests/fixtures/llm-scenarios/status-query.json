@@ -1,0 +1,8 @@
+{
+  "name": "status-query",
+  "description": "状态查询：验证 runtime_status 返回字段完整（TC-MAIN-004 / TC-RT-017）",
+  "turns": [
+    { "tool_calls": [{ "name": "runtime_status", "arguments": {} }] },
+    { "text": "当前运行中，sing-box 1.14.4，延迟 42 ms，出口 IP 203.0.113.7。" }
+  ]
+}

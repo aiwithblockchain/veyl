@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "releases": [
+    {
+      "upstream_version": "1.14.4",
+      "platform": "darwin",
+      "arch": "arm64",
+      "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-darwin-arm64.tar.gz",
+      "sha256": "0d8c7f5ed5d587b0f1a5e9772a708ec3bfa4ac4c9329604b01d8d9c2ba406838",
+      "size": 29186204,
+      "source_url": "https://github.com/SagerNet/sing-box/tree/v1.14.4",
+      "license": "GPL-3.0-or-later"
+    }
+  ]
+}

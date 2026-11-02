@@ -1,0 +1,8 @@
+{
+  "name": "disconnect",
+  "description": "主流程：断开",
+  "turns": [
+    { "tool_calls": [{ "name": "vpn_disconnect", "arguments": {} }] },
+    { "text": "已断开，系统代理已恢复。" }
+  ]
+}

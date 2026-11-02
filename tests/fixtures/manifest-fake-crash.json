@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "releases": [
+    {
+      "upstream_version": "1.14.4",
+      "platform": "darwin",
+      "arch": "arm64",
+      "url": "http://127.0.0.1:18090/__file?name=fake-crash.tar.gz",
+      "sha256": "bf2a9f77374f6f54f8dfbd2727090a514dddf6ed0793d6126c74aee2b7e384ac",
+      "size": 268,
+      "source_url": "local",
+      "license": "GPL-3.0-or-later"
+    }
+  ]
+}

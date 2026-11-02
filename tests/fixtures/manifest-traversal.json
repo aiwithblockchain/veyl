@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "releases": [
+    {
+      "upstream_version": "1.14.4",
+      "platform": "darwin",
+      "arch": "arm64",
+      "url": "http://127.0.0.1:18090/__file?name=evil.tar.gz",
+      "sha256": "4dee8945d7e0019330c3bbe585fe971f22a6d482799a6304ebd45f6bd7287407",
+      "size": 120,
+      "source_url": "local",
+      "license": "GPL-3.0-or-later"
+    }
+  ]
+}

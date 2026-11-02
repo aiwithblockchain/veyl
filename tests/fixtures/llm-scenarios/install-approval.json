@@ -1,0 +1,11 @@
+{
+  "name": "install-approval",
+  "description": "运行时未安装：触发 core_install 审批后完成连接",
+  "turns": [
+    { "tool_calls": [{ "name": "core_install", "arguments": { "version": "1.14.4" } }] },
+    { "tool_calls": [{ "name": "catalog_search", "arguments": { "region": "jp" } }] },
+    { "tool_calls": [{ "name": "profile_import", "arguments": { "node_id": "seed-jp-01" } }] },
+    { "tool_calls": [{ "name": "vpn_connect", "arguments": { "node_id": "seed-jp-01" } }] },
+    { "text": "运行时已安装并连接成功，出口 IP 203.0.113.7。" }
+  ]
+}

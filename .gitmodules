@@ -1,0 +1,3 @@
+[submodule "src-tauri/claurst"]
+	path = src-tauri/claurst
+	url = https://github.com/Kuberwastaken/claurst.git
