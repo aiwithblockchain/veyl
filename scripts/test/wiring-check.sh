@@ -8,6 +8,14 @@
 #   D-03 set_credentials 无调用方 / D-08 chat_history 前端不调 / D-10 device token 三件套无调用方
 #
 # 它只检查**手工维护的关键能力清单**，不扫全部 pub fn —— 全扫的噪音会让人直接忽略它。
+#
+# 维护（Clerk）：
+#   - 新增一项能力：往 CAPABILITIES 里加源码里的**实际符号名**。加了就代表承诺它有调用方。
+#   - 删掉一项能力：删清单条目；若只是重命名，改成新名字即可（旧名字会报「定义未找到」）。
+#   - 切换门禁：`ci.sh` 里现在是 `|| true`（advisory）。观察一段时间、确认没有误报后，
+#     改成 `bash scripts/test/wiring-check.sh --strict` 即可纳入硬性门禁。
+#   - 误报处理：trait 对象 / 字符串反射 / 宏生成间接调用会被算成零引用。
+#     优先加一行注释说明并临时移出清单，不要为此引入解析器。
 
 set -uo pipefail
 

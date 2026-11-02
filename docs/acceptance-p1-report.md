@@ -33,7 +33,7 @@
 | P-4 | 二进制不早于源码（新准入） | 静态 | **通过** | 17:31 一度 ❌（源码 17:30:34 晚于二进制 17:28:04），重建后 ✅ |
 | AC-B3 | 事件到达且无 `ai-` 前缀 | 脚本 | **PASS** | `check-contracts.mjs` 5 项通过、退出码 0、无 FAIL（18:56） |
 | AC-B2 | 对话流式输出 | A | **PASS** | 回复分三段落库（19:09:32 / :33 / :37），中间夹工具调用，非一次性整段 |
-| AC-B4 | 工具卡渲染与脱敏 | A | **部分 PASS** | 脱敏已过（`args_json` 无凭据）；工具卡渲染待 D-10 修后一并判 |
+| AC-B4 | 工具卡渲染与脱敏 | A | **部分 PASS** | 脱敏 ✅、审批卡内联渲染 ✅；工具卡完整态待 D-12/D-13 修复后复验 |
 | AC-C1 ~ C5d | 审批语义与四态落库 | A | **待测** | 准入已通，可开跑 |
 | AC-F1 / F2 | 对话落库与重启一致 | A | **PASS**（F1，`2dc223e`） | 19:06 重启后侧边栏显示 2 个历史会话，消息成对、顺序正确 |
 
@@ -142,6 +142,19 @@ session_mvz4tzg9_1  18:54  4 msgs（user/assistant 成对）
 - **后果**：每次启动侧边栏只有一个新会话，历史对话永远不可见。**AC-F1「重启后会话列表里是否还有这个会话」直接失败**；AC-F2 也无法验证。
 - **修复建议**：应用启动时调用一次 `chat_history`，用返回的 `sessions` 覆盖初始状态、用 `active_session_id` 选中最近会话、并加载该会话的 `messages`。
 
+### N-02 复制 AI 输出按钮（**新增需求，待 PM 决策**）
+
+- **提出**：2026-11-02，用户要求「增加一个复制当前 AI 输出的按钮，参考 TweetPilot 的复制按钮」。
+- **现状**：前端完全没有复制能力 —— `grep -rni 'copy|复制|clipboard' src/` 零命中。
+- **建议位置**：`MessageItem.tsx:37` 的 `msg__role` 行右侧，与 `msg__usage`（token 计数）同一行。这一行目前已有头像、流式指示、token 数，是天然的操作区。
+- **建议规格**（供 Alice 参考，以架构师定稿为准）：
+  - 只对 `role === "assistant"` 的消息显示
+  - 复制内容为**该条消息的纯文本 / Markdown 原文**，不含工具卡与耗时
+  - 点击后短暂显示「已复制」，约 1.5–2 秒恢复
+  - `message.streaming === true` 时禁用，避免复制到半截内容
+  - 系统消息（`msg--system`，含错误）不提供
+- **待确认**：TweetPilot 的复制按钮具体交互（hover 显示 / 常驻图标 / tooltip 文案）需 Alice 参考原项目，测试人员无从判断视觉一致性。
+
 ### N-01 会话标题可编辑（**新增需求，已实现并验证**）
 
 - **提出**：2026-11-02，用户提出「应该允许修改历史对话的标题」。
@@ -202,6 +215,26 @@ grep -rn 'register_device' src-tauri/src/ | grep -v 'fn register_device'
 - **决定（PM）**：改 mock，不改客户端 —— 契约是准绳。
 - **连带提醒**：D-10 + D-11 必须一起修，只修一个仍然无法取到令牌。
 
+### D-12 `CatalogSearch` 只把「找到 N 个节点」交给模型，节点详情丢失（**高**，归属 Bob）
+
+- **证据**：19:26 两次 `CatalogSearch` 的 `result_json` 都是 `"找到 5 个节点。"`，模型在 `AskUserQuestion` 里明确说：「查询结果没带回节点详情（id、延迟等只显示条数），我这边拿不到可以确认的节点 id」。
+- **根因**：`src-tauri/src/tools/catalog.rs:73` —— `ToolOutcome::ok(format!("找到 {count} 个节点。"), data)`，结构化 `data` 没进模型可读的 content。
+- **后果**：模型无法拿到真实 `node_id`，只能**凭空猜** `"jp-1"` 再调用 `VpnConnect`。后续 `VpnConnect` / `ProfileImport` 都会因节点不存在而失败，AC-B4 与整条连接链路无法成立。
+- **建议**：content 里带上节点摘要（id、region、protocol、延迟），或至少列出 id 列表。
+
+### D-13 模型收到 `APPROVAL_REQUIRED` 后立即用 `approval_id` 重试，导致重复审批卡（**高**，归属 Bob）
+
+- **证据**：19:26:33 `VpnConnect` 被拦截（`APPROVAL_REQUIRED`）→ 1 秒后 19:26:35 模型又发了一次 `VpnConnect`，参数里带着 `{"approval_id":"6d2b3a5b-…"}`，结果**仍是同一个错误**。用户因此看到**两张一模一样的审批卡**，并反馈「有重复的内容出现」。
+- **根因**：审批门在 `tools/policy.rs:225-239` 返回 `APPROVAL_REQUIRED` 并把 `approval_id` 放进 `details`，但**没有任何机制让模型知道「应当停下来等用户决定」**。模型把它当成可重试的普通错误，立刻带着 id 重放，而用户此时还没点任何按钮，`resolve()` 自然失败，于是再弹一次。
+- **对照**：`policy.rs` 的测试（`approval.rs:381`）假设「先 resolve 再重试」，真实流程里模型抢先重试，这个假设不成立。
+- **建议**：`APPROVAL_REQUIRED` 的 content 明确写「已向用户发出审批请求，请停止本轮，等待用户决定后再继续」；或在 Host 侧收到该错误时直接结束 turn，不把控制权交回模型。
+
+### D-14 被审批拦截的工具调用落库为 `approved = NULL`，与契约语义冲突（**中**，归属 Bob）
+
+- **证据**：两次 `VpnConnect` 都是 `approved = NULL`、`is_error = 1`，而 `VpnConnect` 的策略是 `first_time_per_session`，**属于需要审批的工具**。
+- **冲突**：契约（`store/tool_calls.rs` 表注释、`docs/contracts/tools.md`）定义 `NULL = 该工具不需要审批（只读或策略为 never）`，且明确「不能用 1 冒充」。把「已拦截等待用户决定」也记成 `NULL`，会让 AC-C5 的四态判定失真 —— 与 `RuntimeStatus` 的 `NULL` 无法区分。
+- **建议**：为「已拦截、用户尚未决定」引入明确表示（如 `approved` 保持 NULL 但 `is_error=1` 且 result 标注 `APPROVAL_REQUIRED`，并写入契约说明），或先落一行 `0` 再在放行后更新。**必须落到契约里**，否则验收无法判。
+
 ### D-07 发送消息后输入框消失（**阻断 AC-B2/B4/C/F**，归属 Alice）→ **已修复并验证（`2dc223e`）**
 
 - **发现**：2026-11-02 19:00，用户在 Tauri 窗口发「你好，介绍一下你自己」后，**输入框不可见**，无法继续对话。
@@ -244,13 +277,15 @@ assistant [19:09:37]  目前还连不上日本节点，原因有两个，都与�
 
 > 说明：本条回答的内容受 D-10 影响（目录 401，流程未走完），但**流式这一维度是独立可判的**，不与 D-10 混为一谈。
 
-### AC-B4 — 工具卡与脱敏 → **部分 PASS**
+### AC-B4 — 工具卡与脱敏 → **部分 PASS**（渲染与脱敏已判，工具卡细节待 D-12/D-13 修复后复验）
 
 | 子项 | 结果 | 证据 |
 |---|---|---|
-| 参数脱敏 | **PASS** | `args_json`：`{"include_traffic":true}` / `{"limit":10,"region":"jp"}` / `{"region":"jp"}` / `{"include_logs":true}` —— 无任何 `uuid` / `password` / `key` |
-| 工具卡渲染（名称/状态/耗时） | 待判 | 用户看到 `CatalogSearch region=jp 1ms 失败` 形式的内联卡片，但完整渲染需 D-10 修复后串起正常流程再判 |
-| 审批卡内联 | 待判 | 本轮未出现审批卡（这些工具都无需审批） |
+| 参数脱敏 | **PASS** | 六次调用的 `args_json` 均无 `uuid` / `password` / `key`：`{"include_traffic":false}`、`{"region":"jp"}`、`{"limit":5,"region":"jp"}`、`{"node_id":"jp-1","strategy":"latency"}`、`{"include_logs":true}`、`{"lines":100}` |
+| 审批卡渲染 | **PASS**（19:26） | 内联在对话流中，**不遮罩界面**；含 `需要你的确认` / `高风险` / 工具名 `VpnConnect` / 摘要「连接到节点 jp-1」/ 范围说明「仅对当前会话有效，新会话会重新确认」/ 两个按钮「允许（本会话内不再询问）」「拒绝」 |
+| 工具卡渲染（名称/状态/耗时） | 待复验 | 已见 `CatalogSearch region=jp 1ms 失败` 形式的内联卡片；完整态需 D-12/D-13 修复后串起正常流程再判 |
+
+> 按 PM 口径：D-13 修好后重测的是「只弹一张卡」和「模型不再自动重试」，**不重复验渲染**。
 
 ### AC-D1 / D3 / D5 — e2e
 
@@ -430,6 +465,41 @@ MeshFlux               webpr=No 127.0.0.1:2080  secur=No 127.0.0.1:2080  socks=N
 17:29 在 17:28:04 构建上跑过同一流程，`recovered from 127.0.0.1:2081`，备份内容为 4 服务 `false/127.0.0.1/2080` + TB `false/''/0`，恢复后逐项一致，同样可判别。
 
 17:22 那轮跑在更早的旧构建上，`recovered from` 同样成立，但当时系统已停在 2081（被 E1 的旧 D-01 残留污染），前后不可判别，故当时记为「待复测」。两轮均已由 HEAD 的这次重跑取代。
+
+---
+
+## 范围变更（2026-11-02 19:35，用户决定）
+
+**用户决定：彻底移除审批机制，所有工具默认放行。**
+
+### 作废的验收项
+
+| 项 | 原状态 | 变更后 |
+|---|---|---|
+| AC-C1 首次弹卡、允许后放行 | 阻断级 | **作废** |
+| AC-C2 拒绝后仍会弹 | 阻断级 | **作废** |
+| AC-C3 `CoreInstall` 每次都弹 | 阻断级 | **作废** |
+| AC-C5a 拒绝 → `approved=0` | 阻断级 | **作废** |
+| AC-C5b 允许一次 → `approved=1` | 阻断级 | **作废** |
+| AC-C5c 会话放行 → `approved=2` | 阻断级 | **作废** |
+| AC-C5d 只读工具 → `approved IS NULL` | 阻断级 | **恒为真**（所有工具都不需审批，`NULL` 成为唯一取值） |
+| D-13 模型收到 APPROVAL_REQUIRED 后重试 | 高 | **作废**（不再有该错误） |
+| D-14 被拦截的调用落库 NULL | 中 | **作废** |
+
+### 需要连带修改的资产
+
+- `docs/contracts/tools.md`：34 处审批相关定义（`ApprovalPolicy`、`approval_id`、审批矩阵、§2.5 等）
+- `docs/test-cases/02-exception.md`：11 条审批用例
+- `src-tauri/src/tools/policy.rs`：策略判定与审批门
+- `src/components/ApprovalCard.tsx` + `ai_approval_decision` 命令 + 前端协议
+- `tool_calls.approved` 列：建议**保留列**（避免 schema 回退），但取值恒为 `NULL`
+
+### 测试人员的意见（供 PM 参考，不构成决定）
+
+1. **风险**：`ProfileDelete`（删除配置）、`VpnConnect`（改系统代理）、`CoreInstall`（下载可执行文件）都会变成无确认执行。用户误触或模型误判时没有拦截点。
+2. **建议保留列与契约章节**：即使不做 UI，也建议在契约里保留 `approved` 字段定义并注明「P1 恒为 NULL」，否则将来恢复审批时要再改一次 schema。
+3. **AC-C5d 可以保留**：它验的是「不需要审批的工具记 NULL」，移除审批后仍然成立，可作为回归项。
+4. 本变更**缩小 P1 范围**，放行标准需要 PM 重新确认。
 
 ---
 
