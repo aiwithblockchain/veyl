@@ -167,6 +167,10 @@ fn set_tray_icon<R: Runtime>(app: &AppHandle<R>, state: TrayState) {
 
 /// Cmd+Q / 应用菜单「退出 Veyl」被拦截后调用。
 pub fn on_exit_requested<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
+    log::info!(
+        "ExitRequested 收到，quitting={}",
+        QUITTING.load(Ordering::SeqCst)
+    );
     request_quit(app, parts, true);
 }
 
@@ -178,6 +182,7 @@ pub fn request_quit<R: Runtime>(app: &AppHandle<R>, parts: Parts, confirm: bool)
     if QUITTING.load(Ordering::SeqCst) || EXIT_PROMPT_OPEN.swap(true, Ordering::SeqCst) {
         return;
     }
+    log::info!("开始退出流程 confirm={confirm}");
     let app = app.clone();
     let recovery_app = app.clone();
     let scheduled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -245,6 +250,7 @@ fn start_shutdown<R: Runtime>(
     applied: Option<crate::proxy::ProxyEndpoint>,
 ) {
     QUITTING.store(true, Ordering::SeqCst);
+    log::info!("进入退出流程：撤代理 → 停运行时 → 清明文配置");
     // 停运行时与 networksetup 都是同步调用，放到阻塞线程里跑，不占用事件循环。
     tauri::async_runtime::spawn_blocking(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -346,6 +352,7 @@ fn perform_shutdown(
         .proxy
         .disable()
         .map_err(|error| format!("撤销系统代理失败：{error}"))?;
+    log::info!("系统代理已撤销");
 
     // 只校验我们写进去的那个端点：用户本来就可能自建本地代理，不能一律拦截。
     if let Some(endpoint) = applied.as_ref() {
@@ -363,8 +370,11 @@ fn perform_shutdown(
 
     if let Err(error) = tauri::async_runtime::block_on(parts.manager.stop()) {
         log::warn!("退出时停止运行时失败（启动回收会兜底）：{error}");
+    } else {
+        log::info!("运行时已停止");
     }
     crate::config::remove_all_profile_configs(&parts.config_dir);
+    log::info!("退出清理完成");
     Ok(())
 }
 

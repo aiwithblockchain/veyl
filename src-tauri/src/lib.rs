@@ -88,6 +88,7 @@ pub fn run() {
     let tray_parts = lifecycle_parts.clone();
     let exit_parts = lifecycle_parts.clone();
     let recovery_parts = lifecycle_parts.clone();
+    let menu_parts = lifecycle_parts.clone();
 
     let catalog = Arc::new(crate::catalog::CatalogClient::new(catalog_base_url(&store)));
     let services: Arc<dyn VpnToolServices> = Arc::new(WiredServices::new(
@@ -112,10 +113,22 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Arc::clone(&state))
-        .setup(move |app| {
-            // 旧 Key 迁移只补元数据，幂等；放在 setup 里，第二实例不会执行。
+        .setup(move |app| {            // 旧 Key 迁移只补元数据，幂等；放在 setup 里，第二实例不会执行。
             crate::llm::ensure_migrated(&setup_store);
             crate::agent::refresh_credentials();
+
+            // 自建应用菜单：Cmd+Q 必须由我们接管。
+            // macOS 默认 Quit 走 NSApp terminate，会绕过 ExitRequested。
+            if let Err(error) = install_app_menu(app.handle()) {
+                log::error!("应用菜单创建失败，Cmd+Q 仍由 ExitRequested 兜底：{error}");
+            }
+            // 菜单事件必须在 setup 里注册（对齐 TweetPilot 的写法）。
+            app.on_menu_event(move |app, event| {
+                if event.id().as_ref() == "app-quit" {
+                    log::info!("菜单退出被拦截");
+                    lifecycle::on_exit_requested(app, menu_parts.clone());
+                }
+            });
 
             // 恢复动作只能放在这里：第二实例在插件 setup 就退出了，
             // 不会撤掉第一实例的代理、杀它的 sing-box、删它的配置。
@@ -222,4 +235,49 @@ pub fn run() {
             lifecycle::on_exit_requested(handle, exit_parts.clone());
         }
     });
+}
+
+/// 自建应用菜单：接管 Cmd+Q，并保留常用编辑/窗口快捷键。
+/// 结构对齐 TweetPilot 的 main.rs（File / Edit / View / Window / Help）。
+fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+    let quit = MenuItemBuilder::with_id("app-quit", "退出 Veyl")
+        .accelerator("CmdOrCtrl+Q")
+        .build(app)?;
+
+    let file_menu = SubmenuBuilder::new(app, "文件")
+        .close_window()
+        .separator()
+        .item(&quit)
+        .build()?;
+
+    let edit_menu = SubmenuBuilder::new(app, "编辑")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
+    let view_menu = SubmenuBuilder::new(app, "显示").build()?;
+
+    let window_menu = SubmenuBuilder::new(app, "窗口")
+        .minimize()
+        .maximize()
+        .build()?;
+
+    let help_menu = SubmenuBuilder::new(app, "帮助").build()?;
+
+    let menu = MenuBuilder::new(app)
+        .item(&file_menu)
+        .item(&edit_menu)
+        .item(&view_menu)
+        .item(&window_menu)
+        .item(&help_menu)
+        .build()?;
+    app.set_menu(menu)?;
+    Ok(())
 }
