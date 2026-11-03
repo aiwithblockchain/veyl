@@ -195,7 +195,7 @@ https://meshnetprotocol.github.io/veyl_seed.json
 
 - 会持续保证这个 URL 可达，必要时调整
 - 首次分发时，如果某个用户拉不到，通过其它渠道把种子给他
-- 实测（2026-11-03，关 VPN、系统代理全关）：上游 `bootstrap.json` 直连 `HTTP 200`，330ms，4.6KB。`veyl_seed.json` 发布后需再测一次
+- 实测见 §10：无需代理即可直连
 
 ### 拉不到怎么办
 
@@ -275,9 +275,10 @@ https://meshnetprotocol.github.io/veyl_seed.json
 
 国内网络、VPN 关闭、系统代理全关、`--noproxy '*'`：
 
-```
-HTTP 200 · DNS 4ms · 建连 63ms · TLS 272ms · 总计 330ms · 4686 字节
-```
+| 文件 | 结果 |
+|---|---|
+| `veyl_seed.json`（客户端消费） | HTTP 200 · 484ms · 421 字节 |
+| `bootstrap.json`（上游） | HTTP 200 · 330ms · 4686 字节 |
 
 阿里 DNS（223.5.5.5）直接解析出 `185.199.108-111.153`（GitHub Pages 官方地址段），19ms 返回 `NOERROR`。
 
