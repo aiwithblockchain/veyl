@@ -5,18 +5,14 @@ import { PRODUCT_NAME } from "../brand";
 
 export interface RenameResult {
   ok: boolean;
-  /** 失败时给用户看的文案。 */
   message?: string;
-  /** 会话已不存在、可以从列表里移除。 */
   removed?: boolean;
 }
 
 interface Props {
   sessions: Session[];
   activeSessionId: string;
-  /** overview = 控制台；chat = 对话。 */
   view: "overview" | "chat";
-  mode: string;
   onSelect: (sessionId: string) => void;
   onSelectOverview: () => void;
   onNew: () => void;
@@ -38,7 +34,6 @@ export function Sidebar({
   sessions,
   activeSessionId,
   view,
-  mode,
   onSelect,
   onSelectOverview,
   onNew,
@@ -80,7 +75,6 @@ export function Sidebar({
     inputRef.current?.select();
   }, [editingId]);
 
-  // 编辑中的会话被删掉/切走时，退出编辑态。
   useEffect(() => {
     if (editingId && !sessions.some((session) => session.id === editingId)) {
       setEditingId(null);
@@ -88,25 +82,20 @@ export function Sidebar({
     }
   }, [sessions, editingId]);
 
-  // 确认框里的会话被别处删掉时，关掉确认框。
   useEffect(() => {
     if (confirming && !sessions.some((session) => session.id === confirming.id)) {
       setConfirming(null);
     }
   }, [sessions, confirming]);
 
-  const submitDelete = async () => {
-    if (!confirming || deleting) return;
-    setDeleting(true);
-    setDeleteError(null);
-    const result = await onDeleteSession(confirming.id);
-    setDeleting(false);
-    if (result.ok) {
-      setConfirming(null);
-    } else {
-      setDeleteError(result.message ?? "删除失败，请重试");
-    }
-  };
+  useEffect(() => {
+    if (!confirming) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !deleting) setConfirming(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirming, deleting]);
 
   const startEditing = (session: Session) => {
     setEditingId(session.id);
@@ -123,13 +112,10 @@ export function Sidebar({
 
   const submit = async () => {
     if (!editingId || saving) return;
-
     setSaving(true);
     setError(null);
-    // 标题原样交给后端：trim 与长度校验只在后端做一次。
     const result = await onRenameSession(editingId, draft);
     setSaving(false);
-
     if (result.ok) {
       setEditingId(null);
       return;
@@ -138,25 +124,34 @@ export function Sidebar({
     if (result.removed) setEditingId(null);
   };
 
+  const submitDelete = async () => {
+    if (!confirming || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    const result = await onDeleteSession(confirming.id);
+    setDeleting(false);
+    if (result.ok) setConfirming(null);
+    else setDeleteError(result.message ?? "删除失败，请重试");
+  };
+
   return (
     <aside className="sidebar">
       <div className="sidebar__brand">
-        <img className="sidebar__mark" src={logo} alt={PRODUCT_NAME} />
+        <img className="sidebar__mark" src={logo} alt="" />
         <span className="sidebar__wordmark">{PRODUCT_NAME}</span>
       </div>
 
       <button
         type="button"
-        className={`sidebar__item sidebar__overview ${view === "overview" ? "is-active" : ""}`}
+        className={`sidebar__overview ${view === "overview" ? "is-active" : ""}`}
         onClick={onSelectOverview}
       >
-        <span className="sidebar__item-title">总览</span>
-        <span className="sidebar__item-time">控制台</span>
+        总览
       </button>
 
       <button type="button" className="sidebar__new" onClick={onNew}>
-        <span aria-hidden>+</span>
-        新会话
+        <span aria-hidden>＋</span>
+        新建对话
       </button>
 
       <div className="sidebar__section-label">
@@ -164,78 +159,74 @@ export function Sidebar({
           <span aria-hidden>{chatCollapsed ? "▸" : "▾"}</span> 对话 · {sessions.length}
         </button>
       </div>
+
       {chatCollapsed ? null : (
-      <nav className="sidebar__list">
-        {sessions.map((session) => {
-          const editing = session.id === editingId;
+        <nav className="sidebar__list">
+          {sessions.map((session) => {
+            const editing = session.id === editingId;
+            const active = view === "chat" && session.id === activeSessionId;
 
-          return (
-            <div key={session.id} className="sidebar__item-wrap">
-              {editing ? (
-                <div className={`sidebar__item is-editing ${view === "chat" && session.id === activeSessionId ? "is-active" : ""}`}>
-                  <input
-                    ref={inputRef}
-                    className="sidebar__edit-input"
-                    value={draft}
-                    aria-label="会话标题"
-                    onChange={(event) => setDraft(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        void submit();
-                      } else if (event.key === "Escape") {
-                        event.preventDefault();
-                        cancelEditing();
-                      }
-                    }}
-                    disabled={saving}
-                  />
-                </div>
-              ) : (
-                <div className="sidebar__item-row">
-                  <button
-                    type="button"
-                    className={`sidebar__item ${view === "chat" && session.id === activeSessionId ? "is-active" : ""}`}
-                    title="双击重命名"
-                    onClick={() => onSelect(session.id)}
-                    onDoubleClick={() => startEditing(session)}
-                  >
-                    <span className="sidebar__item-title">{session.title}</span>
-                    <span className="sidebar__item-time">{relativeTime(session.updatedAt)}</span>
-                    {session.activeRequestId ? (
-                      <span className="sidebar__item-live" aria-hidden />
-                    ) : null}
-                  </button>
-                  <button
-                    type="button"
-                    className="sidebar__item-delete"
-                    title={`删除「${session.title}」`}
-                    aria-label={`删除会话 ${session.title}`}
-                    onClick={() => {
-                      setConfirming(session);
-                      setDeleteError(null);
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
-              )}
+            return (
+              <div key={session.id} className="sidebar__item-wrap">
+                {editing ? (
+                  <div className={`sidebar__item is-editing ${active ? "is-active" : ""}`}>
+                    <input
+                      ref={inputRef}
+                      className="sidebar__edit-input"
+                      value={draft}
+                      aria-label="会话标题"
+                      onChange={(event) => setDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void submit();
+                        } else if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelEditing();
+                        }
+                      }}
+                      disabled={saving}
+                    />
+                  </div>
+                ) : (
+                  <div className="sidebar__item-row">
+                    <button
+                      type="button"
+                      className={`sidebar__item ${active ? "is-active" : ""}`}
+                      title="双击重命名"
+                      onClick={() => onSelect(session.id)}
+                      onDoubleClick={() => startEditing(session)}
+                    >
+                      <span className="sidebar__item-title">{session.title}</span>
+                      <span className="sidebar__item-time">{relativeTime(session.updatedAt)}</span>
+                      {session.activeRequestId ? (
+                        <span className="sidebar__item-live" aria-hidden />
+                      ) : null}
+                    </button>
+                    <button
+                      type="button"
+                      className="sidebar__item-delete"
+                      title={`删除「${session.title}」`}
+                      aria-label={`删除会话 ${session.title}`}
+                      onClick={() => {
+                        setConfirming(session);
+                        setDeleteError(null);
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
 
-              {editing && error ? <p className="sidebar__edit-error">{error}</p> : null}
-            </div>
-          );
-        })}
-      </nav>
+                {editing && error ? <p className="sidebar__edit-error">{error}</p> : null}
+              </div>
+            );
+          })}
+        </nav>
       )}
 
       <div className="sidebar__footer">
-        <span className={`sidebar__mode sidebar__mode--${mode}`}>{mode === "mock" ? "MOCK 事件源" : "已连接 Host"}</span>
-        <button
-          type="button"
-          className="sidebar__settings"
-          title="设置"
-          onClick={onOpenSettings}
-        >
+        <button type="button" className="sidebar__settings" onClick={onOpenSettings}>
           设置
         </button>
       </div>
@@ -256,7 +247,7 @@ export function Sidebar({
           >
             <header className="modal__head">
               <h2 id="delete-session-title" className="modal__title">
-                删除会话
+                删除对话
               </h2>
             </header>
             <p className="confirm__text">「{confirming.title}」删除后无法恢复。</p>
@@ -272,7 +263,7 @@ export function Sidebar({
               </button>
               <button
                 type="button"
-                className="btn btn--danger"
+                className="btn btn--danger-ghost"
                 onClick={() => void submitDelete()}
                 disabled={deleting}
               >

@@ -3,33 +3,46 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type {
   AgentBridge,
   DeepSeekKeyState,
+  DefaultProfileStatus,
   ImportSeedResult,
   LlmProtocol,
   LlmProvider,
   LlmProviderInput,
 } from "../agent/bridge";
 import { isHttpUrl, isLocalEndpoint } from "../agent/bridge";
+import type { RuntimeView } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
+import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
+import { useFocusTrap } from "../ui/focus";
+import { formatPort, formatDate } from "../format";
+
+const DEFAULT_SOURCE_URL = "https://meshnetprotocol.github.io/bootstrap.json";
+const APP_VERSION = "0.1.0";
 
 interface Props {
   open: boolean;
   bridge: AgentBridge;
+  runtime: RuntimeView;
+  defaultProfile: DefaultProfileStatus | null;
   onClose: () => void;
-  /** 一次性结果反馈，显示在顶栏下方的提示条里。 */
   onNotice: (notice: { level: "info" | "error"; text: string }) => void;
-  /** 拖放与「选择文件」都由 App 统一发起，这里只渲染状态。 */
   importing: boolean;
   dragging: boolean;
   importResult: ImportSeedResult | null;
   importError: string | null;
   onImportPath: (path: string) => void;
-  /** 重新运行首次引导；不删除已有 Key 与配置。 */
   onRestartOnboarding: () => void;
+  onOpenLogs: () => void;
+  onOpenDiagnosis: () => void;
+  onRestoreNetwork: () => void;
+  onAskAi: (text: string) => void;
+  /** 从导入入口进来时直接落到「网络」；默认「账号与 AI」。 */
+  initialSection?: SectionId;
 }
 
 type Feedback = { kind: "ok" | "warn" | "error"; text: string } | null;
-
 type ApiMode = "basic" | "advanced";
+type SectionId = "ai" | "network" | "advanced" | "about";
 
 interface ProviderForm {
   providerId?: string;
@@ -38,14 +51,17 @@ interface ProviderForm {
   baseUrl: string;
   model: string;
   apiKey: string;
-  /** 已保存过 Key：编辑时留空表示不修改。 */
   hasKey: boolean;
 }
 
-type TestState = {
-  state: "idle" | "running" | "ok" | "error";
-  text: string;
-};
+type TestState = { state: "idle" | "running" | "ok" | "error"; text: string };
+
+const SECTIONS: Array<{ id: SectionId; label: string }> = [
+  { id: "ai", label: "账号与 AI" },
+  { id: "network", label: "网络" },
+  { id: "advanced", label: "高级" },
+  { id: "about", label: "关于" },
+];
 
 const PRESETS: Array<{
   id: string;
@@ -102,19 +118,14 @@ function protocolLabel(protocol: LlmProtocol): string {
 }
 
 function emptyForm(): ProviderForm {
-  return {
-    name: "",
-    protocol: "openai",
-    baseUrl: "",
-    model: "",
-    apiKey: "",
-    hasKey: false,
-  };
+  return { name: "", protocol: "openai", baseUrl: "", model: "", apiKey: "", hasKey: false };
 }
 
 export function Settings({
   open,
   bridge,
+  runtime,
+  defaultProfile,
   onClose,
   onNotice,
   importing,
@@ -123,7 +134,13 @@ export function Settings({
   importError,
   onImportPath,
   onRestartOnboarding,
+  onOpenLogs,
+  onOpenDiagnosis,
+  onRestoreNetwork,
+  onAskAi,
+  initialSection = "ai",
 }: Props) {
+  const [section, setSection] = useState<SectionId>("ai");
   const [state, setState] = useState<DeepSeekKeyState>({
     masked: null,
     verified: false,
@@ -148,7 +165,10 @@ export function Settings({
   const [providerError, setProviderError] = useState<string | null>(null);
   const [providerTest, setProviderTest] = useState<TestState>({ state: "idle", text: "" });
   const [pendingDelete, setPendingDelete] = useState<LlmProvider | null>(null);
+  const [diagnosticNotice, setDiagnosticNotice] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(open, dialogRef);
 
   const refreshProviders = useCallback(async () => {
     setProvidersLoading(true);
@@ -176,6 +196,7 @@ export function Settings({
 
   useEffect(() => {
     if (!open) return;
+    setSection(initialSection);
     setFeedback(null);
     setValue("");
     setReveal(false);
@@ -185,9 +206,10 @@ export function Settings({
     setProviderError(null);
     setProviderTest({ state: "idle", text: "" });
     setPendingDelete(null);
+    setDiagnosticNotice(null);
     void refreshProviders();
     refresh();
-  }, [open, refresh, refreshProviders]);
+  }, [open, refresh, refreshProviders, initialSection]);
 
   useEffect(() => {
     if (!open) return;
@@ -211,9 +233,7 @@ export function Settings({
     try {
       const next = await bridge.saveDeepSeekKey(key);
       setState(next);
-      // 后端一定回 masked；万一是 null，就留在输入态，别假装保存成功。
       setEditing(next.masked === null);
-      // 明文立刻从组件状态里清掉，不留在内存里等下一次渲染。
       setValue("");
       setReveal(false);
       setFeedback(
@@ -311,7 +331,6 @@ export function Settings({
 
     setProviderSaving(true);
     setProviderError(null);
-    // 保存不再自动切换当前 provider；只有原本没有当前项时，第一个才会成为当前。
     const hadActive =
       activeProviderId !== null || providers.some((provider) => provider.isActive);
     try {
@@ -373,12 +392,15 @@ export function Settings({
   };
 
   const deleteProvider = async (provider: LlmProvider) => {
+    const wasActive = provider.isActive || provider.providerId === activeProviderId;
     try {
       await bridge.llmProviderDelete(provider.providerId);
       setPendingDelete(null);
       setProviderNotice({
         kind: "ok",
-        text: "已删除，同时清除了该 provider 的 Key。",
+        text: wasActive
+          ? "已删除，同时清除了该 provider 的 Key。没有当前 provider，请选择一个。"
+          : "已删除，同时清除了该 provider 的 Key。",
       });
       await refreshProviders();
       refresh();
@@ -388,7 +410,31 @@ export function Settings({
     }
   };
 
-  // 选择文件走 App 的统一导入入口，与拖放完全一致。
+  const askAi = (field: string, value: string) => {
+    onAskAi(advancedPrompt(field, value));
+  };
+
+  const copyDiagnostics = async () => {
+    const payload = {
+      app: APP_VERSION,
+      eventSource: bridge.mode,
+      runtimeState: runtime.state,
+      singBox: runtime.upstream_version,
+      mixedPort: runtime.mixed_port,
+      pid: runtime.pid,
+      profiles: runtime.profile_id,
+      configHash: runtime.config_hash,
+      latencyMs: runtime.latency_ms,
+      lastError: runtime.last_error?.code ?? null,
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      setDiagnosticNotice("诊断信息已复制，可直接粘贴给支持人员。");
+    } catch {
+      setDiagnosticNotice("复制失败，请检查系统剪贴板权限。");
+    }
+  };
+
   const pickFile = useCallback(async () => {
     try {
       const path = await openDialog({
@@ -396,20 +442,19 @@ export function Settings({
         directory: false,
         filters: [{ name: "节点配置", extensions: ["json"] }],
       });
-      // 取消时返回 null，不能直接当字符串用。
       if (typeof path === "string") onImportPath(path);
     } catch (error) {
       onNotice({ level: "error", text: describePickerError(error) });
     }
   }, [onImportPath, onNotice]);
 
-  // 提前返回放在所有 hook 之后：否则关闭/打开两个状态调用的 hook 数量不同，React 会判定顺序变化。
   if (!open) return null;
 
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div
-        className="modal"
+        ref={dialogRef}
+        className="modal modal--settings"
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
@@ -424,455 +469,687 @@ export function Settings({
           </button>
         </header>
 
-        <section className="settings-section">
-          <h3 className="settings-section__title">模型 API</h3>
-
-          <div className="settings-mode" role="tablist" aria-label="API 设置模式">
+        <nav className="settings-nav" aria-label="设置分区">
+          {SECTIONS.map((item) => (
             <button
+              key={item.id}
               type="button"
-              role="tab"
-              aria-selected={apiMode === "basic"}
-              className={apiMode === "basic" ? "is-active" : ""}
-              onClick={() => setApiMode("basic")}
+              className={section === item.id ? "is-active" : ""}
+              aria-current={section === item.id}
+              onClick={() => setSection(item.id)}
             >
-              基础
+              {item.label}
             </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={apiMode === "advanced"}
-              className={apiMode === "advanced" ? "is-active" : ""}
-              onClick={() => {
-                setApiMode("advanced");
-                void refreshProviders();
-              }}
-            >
-              高级
-            </button>
-          </div>
+          ))}
+        </nav>
 
-          {apiMode === "basic" ? (
-            <>
-              {loading ? (
-                <p className="settings-muted">读取当前配置…</p>
-              ) : editing ? (
-                <form
-                  className="settings-form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void save();
+        {section === "ai" ? (
+          <section className="settings-section">
+            <div className="settings-section__head">
+              <h3 className="settings-section__title">模型 API</h3>
+              <div className="settings-mode" role="tablist" aria-label="API 设置模式">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={apiMode === "basic"}
+                  className={apiMode === "basic" ? "is-active" : ""}
+                  onClick={() => setApiMode("basic")}
+                >
+                  基础
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={apiMode === "advanced"}
+                  className={apiMode === "advanced" ? "is-active" : ""}
+                  onClick={() => {
+                    setApiMode("advanced");
+                    void refreshProviders();
                   }}
                 >
-                  {state.masked ? (
-                    <p className="settings-warning">
-                      更换 Key 会重建当前会话，对话上下文将清空。
-                    </p>
-                  ) : null}
-                  <div className="settings-input">
-                    <input
-                      ref={inputRef}
-                      type={reveal ? "text" : "password"}
-                      value={value}
-                      onChange={(event) => setValue(event.target.value)}
-                      placeholder="sk-..."
-                      autoComplete="off"
-                      autoCorrect="off"
-                      spellCheck={false}
-                      aria-label="DeepSeek API Key"
-                    />
-                    <button
-                      type="button"
-                      className="settings-reveal"
-                      onClick={() => setReveal((shown) => !shown)}
-                    >
-                      {reveal ? "隐藏" : "显示"}
-                    </button>
-                  </div>
-                  <div className="settings-actions">
-                    <button
-                      type="submit"
-                      className="btn btn--primary"
-                      disabled={saving || value.trim().length === 0}
-                    >
-                      {saving ? "保存中…" : "保存"}
-                    </button>
+                  高级
+                </button>
+              </div>
+            </div>
+
+            {apiMode === "basic" ? (
+              <>
+                {loading ? (
+                  <p className="settings-muted">读取当前配置…</p>
+                ) : editing ? (
+                  <form
+                    className="settings-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void save();
+                    }}
+                  >
                     {state.masked ? (
+                      <p className="settings-warning">
+                        更换 Key 会重建当前会话，对话上下文将清空。
+                      </p>
+                    ) : null}
+                    <div className="settings-input">
+                      <input
+                        ref={inputRef}
+                        type={reveal ? "text" : "password"}
+                        value={value}
+                        onChange={(event) => setValue(event.target.value)}
+                        placeholder="sk-..."
+                        autoComplete="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        aria-label="DeepSeek API Key"
+                      />
+                      <button
+                        type="button"
+                        className="settings-reveal"
+                        onClick={() => setReveal((shown) => !shown)}
+                      >
+                        {reveal ? "隐藏" : "显示"}
+                      </button>
+                    </div>
+                    <div className="settings-actions">
+                      <button
+                        type="submit"
+                        className="btn btn--primary"
+                        disabled={saving || value.trim().length === 0}
+                      >
+                        {saving ? "保存中…" : "保存"}
+                      </button>
+                      {state.masked ? (
+                        <button
+                          type="button"
+                          className="btn btn--ghost"
+                          onClick={() => {
+                            setEditing(false);
+                            setValue("");
+                            setFeedback(null);
+                          }}
+                        >
+                          取消
+                        </button>
+                      ) : null}
+                    </div>
+                  </form>
+                ) : (
+                  <div className="settings-saved">
+                    <code className="settings-key">{state.masked}</code>
+                    <div className="settings-actions">
                       <button
                         type="button"
                         className="btn btn--ghost"
-                        onClick={() => {
-                          setEditing(false);
-                          setValue("");
-                          setFeedback(null);
-                        }}
+                        onClick={() => setEditing(true)}
                       >
-                        取消
+                        更换
                       </button>
-                    ) : null}
-                  </div>
-                </form>
-              ) : (
-                <div className="settings-saved">
-                  <code className="settings-key">{state.masked}</code>
-                  <div className="settings-actions">
-                    <button type="button" className="btn btn--ghost" onClick={() => setEditing(true)}>
-                      更换
-                    </button>
-                    <button type="button" className="btn btn--danger-ghost" onClick={() => void clear()}>
-                      清除
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {feedback ? (
-                <p className={`settings-feedback settings-feedback--${feedback.kind}`}>
-                  {feedback.text}
-                </p>
-              ) : null}
-
-              <p className="settings-note">
-                Key 加密保存在本机，仅用于调用模型接口；建议使用可随时吊销的 Key。界面只显示打码后的末四位。
-              </p>
-            </>
-          ) : (
-            <div className="settings-providers">
-              <p className="settings-risk">请求会发往你填写的端点，请确认你信任它。</p>
-
-              {providersLoading ? (
-                <p className="settings-muted">读取 provider…</p>
-              ) : providers.length === 0 ? (
-                <p className="settings-muted">还没有 provider。可以用下面的预设一键填充。</p>
-              ) : (
-                <ul className="provider-list">
-                  {providers.map((provider) => {
-                    const isActive =
-                      provider.providerId === activeProviderId || provider.isActive;
-                    const canActivate =
-                      provider.hasKey || isLocalEndpoint(provider.baseUrl);
-
-                    return (
-                      <li
-                        key={provider.providerId}
-                        className={`provider-item ${isActive ? "is-active" : ""}`}
+                      <button
+                        type="button"
+                        className="btn btn--danger-ghost"
+                        onClick={() => void clear()}
                       >
-                        <div className="provider-item__head">
-                          <span className="provider-item__name">{provider.name}</span>
-                          {isActive ? <span className="provider-item__badge">当前</span> : null}
-                          {provider.isBuiltin ? (
-                            <span className="provider-item__tag">内置</span>
-                          ) : null}
-                        </div>
-                        <div className="provider-item__meta">
-                          {protocolLabel(provider.protocol)} · {provider.model}
-                          {provider.hasKey ? "" : " · 无 Key"}
-                        </div>
-                        <code className="provider-item__url">
-                          {provider.baseUrl || "官方默认地址"}
-                        </code>
-                        <div className="provider-item__actions">
-                          {!isActive ? (
+                        清除
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {feedback ? (
+                  <p className={`settings-feedback settings-feedback--${feedback.kind}`}>
+                    {feedback.text}
+                  </p>
+                ) : null}
+
+                <p className="settings-note">
+                  Key 加密保存在本机，仅用于调用模型接口；界面只显示打码后的末四位。
+                </p>
+              </>
+            ) : (
+              <div className="settings-providers">
+                <p className="settings-risk">请求会发往你填写的端点，请确认你信任它。</p>
+
+                {providersLoading ? (
+                  <p className="settings-muted">读取 provider…</p>
+                ) : providers.length === 0 ? (
+                  <p className="settings-muted">还没有 provider。可以用下面的预设一键填充。</p>
+                ) : (
+                  <ul className="provider-list">
+                    {providers.map((provider) => {
+                      const isActive =
+                        provider.providerId === activeProviderId || provider.isActive;
+                      const canActivate =
+                        provider.hasKey || isLocalEndpoint(provider.baseUrl);
+
+                      return (
+                        <li
+                          key={provider.providerId}
+                          className={`provider-item ${isActive ? "is-active" : ""}`}
+                        >
+                          <div className="provider-item__head">
+                            <span className="provider-item__name">{provider.name}</span>
+                            {isActive ? <span className="provider-item__badge">当前</span> : null}
+                            {provider.isBuiltin ? (
+                              <span className="provider-item__tag">内置</span>
+                            ) : null}
+                          </div>
+                          <div className="provider-item__meta">
+                            {protocolLabel(provider.protocol)} · {provider.model}
+                            {provider.hasKey ? "" : " · 无 Key"}
+                          </div>
+                          <code className="provider-item__url">
+                            {provider.baseUrl || "官方默认地址"}
+                          </code>
+                          <div className="provider-item__actions">
+                            {!isActive ? (
+                              <button
+                                type="button"
+                                className="btn btn--ghost provider-item__btn"
+                                onClick={() => void activateProvider(provider)}
+                                disabled={!canActivate}
+                                title={canActivate ? undefined : "先编辑并保存 API Key"}
+                              >
+                                设为当前
+                              </button>
+                            ) : null}
                             <button
                               type="button"
                               className="btn btn--ghost provider-item__btn"
-                              onClick={() => void activateProvider(provider)}
-                              disabled={!canActivate}
-                              title={canActivate ? undefined : "先编辑并保存 API Key"}
+                              onClick={() => openEditProvider(provider)}
                             >
-                              设为当前
+                              编辑
                             </button>
-                          ) : null}
-                          <button
-                            type="button"
-                            className="btn btn--ghost provider-item__btn"
-                            onClick={() => openEditProvider(provider)}
-                          >
-                            编辑
-                          </button>
-                          <button
-                            type="button"
-                            className="btn btn--danger-ghost provider-item__btn"
-                            onClick={() => setPendingDelete(provider)}
-                          >
-                            删除
-                          </button>
-                        </div>
-
-                        {pendingDelete?.providerId === provider.providerId ? (
-                          <div className="provider-item__confirm">
-                            <p>删除「{provider.name}」会同时删除它的 Key，无法恢复。</p>
-                            <div className="settings-actions">
-                              <button
-                                type="button"
-                                className="btn btn--ghost"
-                                onClick={() => setPendingDelete(null)}
-                              >
-                                取消
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn--danger"
-                                onClick={() => void deleteProvider(provider)}
-                              >
-                                确认删除
-                              </button>
-                            </div>
+                            <button
+                              type="button"
+                              className="btn btn--danger-ghost provider-item__btn"
+                              onClick={() => setPendingDelete(provider)}
+                              disabled={provider.isBuiltin}
+                              title={provider.isBuiltin ? "内置 provider 不可删除" : undefined}
+                            >
+                              删除
+                            </button>
                           </div>
-                        ) : null}
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
 
-              <div className="settings-actions">
-                <button type="button" className="btn btn--ghost" onClick={openNewProvider}>
-                  新增 Provider
+                          {pendingDelete?.providerId === provider.providerId ? (
+                            <div className="provider-item__confirm">
+                              <p>删除「{provider.name}」会同时删除它的 Key，无法恢复。</p>
+                              <div className="settings-actions">
+                                <button
+                                  type="button"
+                                  className="btn btn--ghost"
+                                  onClick={() => setPendingDelete(null)}
+                                >
+                                  取消
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn--danger-ghost"
+                                  onClick={() => void deleteProvider(provider)}
+                                >
+                                  确认删除
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+
+                <div className="settings-actions">
+                  <button type="button" className="btn btn--ghost" onClick={openNewProvider}>
+                    新增 Provider
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => void refreshProviders()}
+                  >
+                    刷新
+                  </button>
+                </div>
+
+                {providerNotice ? (
+                  <p className={`settings-feedback settings-feedback--${providerNotice.kind}`}>
+                    {providerNotice.text}
+                  </p>
+                ) : null}
+
+                {providerForm ? (
+                  <form
+                    className="provider-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void saveProvider();
+                    }}
+                  >
+                    <h4 className="provider-form__title">
+                      {providerForm.providerId ? "编辑 Provider" : "新增 Provider"}
+                    </h4>
+
+                    <div className="provider-form__presets">
+                      {PRESETS.map((preset) => (
+                        <button
+                          type="button"
+                          key={preset.id}
+                          className="chip chip--small"
+                          onClick={() => applyPreset(preset)}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <label className="provider-field">
+                      <span>名称</span>
+                      <input
+                        value={providerForm.name}
+                        onChange={(event) =>
+                          setProviderForm({ ...providerForm, name: event.target.value })
+                        }
+                        placeholder="例如 我的 DeepSeek"
+                      />
+                    </label>
+
+                    <div className="provider-field">
+                      <span className="provider-field__label">
+                        API 类型
+                        <button
+                          type="button"
+                          className="ask-ai"
+                          onClick={() =>
+                            askAi(
+                              ADVANCED_FIELDS.apiProtocol,
+                              `${providerForm.protocol === "anthropic" ? "anthropic 兼容" : "openai 兼容"} / ${providerForm.baseUrl || "官方地址"}`,
+                            )
+                          }
+                        >
+                          问 AI
+                        </button>
+                      </span>
+                      <select
+                        value={providerForm.protocol}
+                        onChange={(event) =>
+                          setProviderForm({
+                            ...providerForm,
+                            protocol: event.target.value as LlmProtocol,
+                          })
+                        }
+                      >
+                        <option value="openai">OpenAI 兼容</option>
+                        <option value="anthropic">Anthropic 兼容</option>
+                      </select>
+                    </div>
+
+                    <label className="provider-field">
+                      <span>Base URL</span>
+                      <input
+                        value={providerForm.baseUrl}
+                        onChange={(event) =>
+                          setProviderForm({ ...providerForm, baseUrl: event.target.value })
+                        }
+                        placeholder={
+                          providerForm.protocol === "anthropic"
+                            ? "https://api.anthropic.com"
+                            : "https://api.deepseek.com"
+                        }
+                      />
+                    </label>
+                    <p className="provider-form__hint">
+                      {providerForm.protocol === "anthropic"
+                        ? "需要兼容 /v1/messages；留空则使用官方地址。"
+                        : "需要兼容 /v1/chat/completions；留空则使用官方地址。"}
+                    </p>
+
+                    <div className="provider-field">
+                      <span className="provider-field__label">
+                        模型 *
+                        <button
+                          type="button"
+                          className="ask-ai"
+                          onClick={() =>
+                            askAi(ADVANCED_FIELDS.model, providerForm.model || "（空）")
+                          }
+                        >
+                          问 AI
+                        </button>
+                      </span>
+                      <input
+                        value={providerForm.model}
+                        onChange={(event) =>
+                          setProviderForm({ ...providerForm, model: event.target.value })
+                        }
+                        placeholder="deepseek-chat"
+                      />
+                    </div>
+
+                    <label className="provider-field">
+                      <span>API Key</span>
+                      <input
+                        type="password"
+                        value={providerForm.apiKey}
+                        onChange={(event) =>
+                          setProviderForm({ ...providerForm, apiKey: event.target.value })
+                        }
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder={providerForm.hasKey ? "已保存，留空不修改" : "sk-..."}
+                      />
+                    </label>
+                    <p className="provider-form__hint">
+                      本机 Ollama 可免 Key；http 仅允许 localhost / 127.0.0.1。
+                    </p>
+
+                    {providerError ? (
+                      <p className="settings-feedback settings-feedback--error">{providerError}</p>
+                    ) : null}
+                    {providerTest.state !== "idle" ? (
+                      <p
+                        className={`settings-feedback settings-feedback--${
+                          providerTest.state === "ok"
+                            ? "ok"
+                            : providerTest.state === "error"
+                              ? "error"
+                              : "warn"
+                        }`}
+                      >
+                        {providerTest.text}
+                      </p>
+                    ) : null}
+
+                    <div className="settings-actions">
+                      <button
+                        type="submit"
+                        className="btn btn--primary"
+                        disabled={providerSaving}
+                      >
+                        {providerSaving ? "保存中…" : "保存"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--ghost"
+                        onClick={() => void testProvider()}
+                        disabled={providerTest.state === "running"}
+                      >
+                        {providerTest.state === "running" ? "测试中…" : "测试连接"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--ghost"
+                        onClick={() => setProviderForm(null)}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </form>
+                ) : null}
+              </div>
+            )}
+          </section>
+        ) : null}
+
+        {section === "network" ? (
+          <section className="settings-section">
+            <h3 className="settings-section__title">网络</h3>
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">代理模式</div>
+                <div className="settings-row__value">系统代理</div>
+              </div>
+              <div className="settings-row__aside">
+                <span className="settings-tag">TUN 暂不支持</span>
+                <button
+                  type="button"
+                  className="ask-ai"
+                  onClick={() => askAi(ADVANCED_FIELDS.proxyMode, "系统代理")}
+                >
+                  问 AI
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">本地端口</div>
+                <div className="settings-row__value num">
+                  {formatPort(runtime.mixed_port)}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="ask-ai"
+                onClick={() =>
+                  askAi(
+                    ADVANCED_FIELDS.mixedPort,
+                    runtime.mixed_port === null ? "（未连接）" : String(runtime.mixed_port),
+                  )
+                }
+              >
+                问 AI
+              </button>
+            </div>
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">默认配置源</div>
+                <div className="settings-row__value">
+                  {defaultProfile?.version
+                    ? `v${defaultProfile.version} · ${defaultProfile.nodeCount} 个节点 · 更新于 ${formatDate(defaultProfile.appliedAt)}`
+                    : "未启用"}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="ask-ai"
+                onClick={() =>
+                  askAi(
+                    ADVANCED_FIELDS.defaultSource,
+                    defaultProfile?.version ? `v${defaultProfile.version}` : "未启用",
+                  )
+                }
+              >
+                问 AI
+              </button>
+            </div>
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">网络自检</div>
+                <div className="settings-row__value">
+                  检查进程、端口、系统代理与出口；不依赖 AI。
+                </div>
+              </div>
+              <button type="button" className="btn btn--ghost" onClick={onOpenDiagnosis}>
+                打开自检
+              </button>
+            </div>
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">恢复网络</div>
+                <div className="settings-row__value">
+                  撤销系统代理并停止运行时，适合连不上网时使用。
+                </div>
+              </div>
+              <button type="button" className="btn btn--ghost" onClick={onRestoreNetwork}>
+                恢复网络
+              </button>
+            </div>
+
+            <div className="settings-subhead">导入节点文件</div>
+            <div
+              className={`dropzone ${dragging ? "is-dragging" : ""} ${
+                importing ? "is-busy" : ""
+              }`}
+            >
+              {importing
+                ? "正在导入…"
+                : dragging
+                  ? "松手即可导入"
+                  : `拖入文件，或选择`}{" "}
+              {dragging ? null : (
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => void pickFile()}
+                  disabled={importing}
+                >
+                  选择文件
+                </button>
+              )}
+            </div>
+
+            {importResult ? (
+              <div className="settings-import">
+                <p className="settings-feedback settings-feedback--ok">
+                  已导入 {importResult.imported} 个节点
+                </p>
+                <ul className="settings-import__list">
+                  {importResult.profiles.map((profile) => (
+                    <li key={profile.id}>
+                      <span className="settings-import__name">{profile.name}</span>
+                      <code>
+                        {profile.server}
+                        {profile.server_port ? `:${profile.server_port}` : ""}
+                      </code>
+                    </li>
+                  ))}
+                </ul>
+                {importResult.skipped.length > 0 ? (
+                  <ul className="settings-import__skipped">
+                    {importResult.skipped.map((item) => (
+                      <li key={`${item.name}-${item.reason}`}>
+                        {item.name}：{item.reason}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
+
+            {importError ? (
+              <p className="settings-feedback settings-feedback--error">{importError}</p>
+            ) : null}
+
+            <p className="settings-note">
+              没有网络也能导入：文件在本地解析，不依赖默认配置源。默认源暂时不可达属于正常现象。
+            </p>
+            <p className="settings-note">这份文件包含共享凭据，请勿外传。</p>
+          </section>
+        ) : null}
+
+        {section === "advanced" ? (
+          <section className="settings-section">
+            <h3 className="settings-section__title">高级</h3>
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">默认配置源地址</div>
+                <div className="settings-row__value num">{DEFAULT_SOURCE_URL}</div>
+              </div>
+              <button
+                type="button"
+                className="ask-ai"
+                onClick={() => askAi(ADVANCED_FIELDS.defaultSource, DEFAULT_SOURCE_URL)}
+              >
+                问 AI
+              </button>
+            </div>
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">日志级别</div>
+                <div className="settings-row__value">info（固定）</div>
+              </div>
+              <button
+                type="button"
+                className="ask-ai"
+                onClick={() => askAi("日志级别", "info")}
+              >
+                问 AI
+              </button>
+            </div>
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">诊断信息</div>
+                <div className="settings-row__value">
+                  复制当前状态，便于排查问题；不包含 Key。
+                </div>
+              </div>
+              <div className="settings-row__aside">
+                <button
+                  type="button"
+                  className="ask-ai"
+                  onClick={() => askAi("诊断信息", "当前应用与运行时状态")}
+                >
+                  问 AI
                 </button>
                 <button
                   type="button"
                   className="btn btn--ghost"
-                  onClick={() => void refreshProviders()}
+                  onClick={() => void copyDiagnostics()}
                 >
-                  刷新
+                  复制诊断信息
                 </button>
               </div>
-
-              {providerNotice ? (
-                <p className={`settings-feedback settings-feedback--${providerNotice.kind}`}>
-                  {providerNotice.text}
-                </p>
-              ) : null}
-
-              {providerForm ? (
-                <form
-                  className="provider-form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void saveProvider();
-                  }}
-                >
-                  <h4 className="provider-form__title">
-                    {providerForm.providerId ? "编辑 Provider" : "新增 Provider"}
-                  </h4>
-
-                  <div className="provider-form__presets">
-                    {PRESETS.map((preset) => (
-                      <button
-                        type="button"
-                        key={preset.id}
-                        className="chip chip--small"
-                        onClick={() => applyPreset(preset)}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  <label className="provider-field">
-                    <span>名称</span>
-                    <input
-                      value={providerForm.name}
-                      onChange={(event) =>
-                        setProviderForm({ ...providerForm, name: event.target.value })
-                      }
-                      placeholder="例如 我的 DeepSeek"
-                    />
-                  </label>
-
-                  <label className="provider-field">
-                    <span>API 类型</span>
-                    <select
-                      value={providerForm.protocol}
-                      onChange={(event) =>
-                        setProviderForm({
-                          ...providerForm,
-                          protocol: event.target.value as LlmProtocol,
-                        })
-                      }
-                    >
-                      <option value="openai">OpenAI 兼容</option>
-                      <option value="anthropic">Anthropic 兼容</option>
-                    </select>
-                  </label>
-
-                  <label className="provider-field">
-                    <span>Base URL</span>
-                    <input
-                      value={providerForm.baseUrl}
-                      onChange={(event) =>
-                        setProviderForm({ ...providerForm, baseUrl: event.target.value })
-                      }
-                      placeholder={
-                        providerForm.protocol === "anthropic"
-                          ? "https://api.anthropic.com"
-                          : "https://api.deepseek.com"
-                      }
-                    />
-                  </label>
-                  <p className="provider-form__hint">
-                    {providerForm.protocol === "anthropic"
-                      ? "需要兼容 /v1/messages；留空则使用官方地址。"
-                      : "需要兼容 /v1/chat/completions；留空则使用官方地址。"}
-                  </p>
-
-                  <label className="provider-field">
-                    <span>模型 *</span>
-                    <input
-                      value={providerForm.model}
-                      onChange={(event) =>
-                        setProviderForm({ ...providerForm, model: event.target.value })
-                      }
-                      placeholder="deepseek-chat"
-                    />
-                  </label>
-
-                  <label className="provider-field">
-                    <span>API Key</span>
-                    <input
-                      type="password"
-                      value={providerForm.apiKey}
-                      onChange={(event) =>
-                        setProviderForm({ ...providerForm, apiKey: event.target.value })
-                      }
-                      autoComplete="off"
-                      spellCheck={false}
-                      placeholder={providerForm.hasKey ? "已保存，留空不修改" : "sk-..."}
-                    />
-                  </label>
-                  <p className="provider-form__hint">
-                    本机 Ollama 可免 Key；http 仅允许 localhost / 127.0.0.1。
-                  </p>
-
-                  {providerError ? (
-                    <p className="settings-feedback settings-feedback--error">{providerError}</p>
-                  ) : null}
-                  {providerTest.state !== "idle" ? (
-                    <p
-                      className={`settings-feedback settings-feedback--${
-                        providerTest.state === "ok"
-                          ? "ok"
-                          : providerTest.state === "error"
-                            ? "error"
-                            : "warn"
-                      }`}
-                    >
-                      {providerTest.text}
-                    </p>
-                  ) : null}
-
-                  <div className="settings-actions">
-                    <button
-                      type="submit"
-                      className="btn btn--primary"
-                      disabled={providerSaving}
-                    >
-                      {providerSaving ? "保存中…" : "保存"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={() => void testProvider()}
-                      disabled={providerTest.state === "running"}
-                    >
-                      {providerTest.state === "running" ? "测试中…" : "测试连接"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={() => setProviderForm(null)}
-                    >
-                      取消
-                    </button>
-                  </div>
-                </form>
-              ) : null}
             </div>
-          )}
-        </section>
+            {diagnosticNotice ? (
+              <p className="settings-feedback settings-feedback--ok">{diagnosticNotice}</p>
+            ) : null}
+          </section>
+        ) : null}
 
-        <section className="settings-section">
-          <h3 className="settings-section__title">导入节点文件</h3>
+        {section === "about" ? (
+          <section className="settings-section">
+            <h3 className="settings-section__title">关于</h3>
 
-          <div
-            className={`dropzone ${dragging ? "is-dragging" : ""} ${
-              importing ? "is-busy" : ""
-            }`}
-          >
-            {importing
-              ? "正在导入…"
-              : dragging
-                ? "松手即可导入"
-                : "拖入文件，或"}{" "}
-            {dragging ? null : (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => void pickFile()}
-                disabled={importing}
-              >
-                选择文件
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">版本</div>
+                <div className="settings-row__value num">v{APP_VERSION}</div>
+              </div>
+            </div>
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">事件源</div>
+                <div className="settings-row__value">
+                  {bridge.mode === "mock" ? "MOCK 事件源" : "已连接 Host"}
+                </div>
+              </div>
+            </div>
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">首次引导</div>
+                <div className="settings-row__value">
+                  重新走一遍两步引导，不会删除已有 Key 或节点。
+                </div>
+              </div>
+              <button type="button" className="btn btn--ghost" onClick={onRestartOnboarding}>
+                重新运行
               </button>
-            )}
-          </div>
-
-          {importResult ? (
-            <div className="settings-import">
-              <p className="settings-feedback settings-feedback--ok">
-                已导入 {importResult.imported} 个节点
-              </p>
-              <ul className="settings-import__list">
-                {importResult.profiles.map((profile) => (
-                  <li key={profile.id}>
-                    <span className="settings-import__name">{profile.name}</span>
-                    <code>
-                      {profile.server}
-                      {profile.server_port ? `:${profile.server_port}` : ""}
-                    </code>
-                  </li>
-                ))}
-              </ul>
-              {importResult.skipped.length > 0 ? (
-                <ul className="settings-import__skipped">
-                  {importResult.skipped.map((item) => (
-                    <li key={`${item.name}-${item.reason}`}>
-                      {item.name}：{item.reason}
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
             </div>
-          ) : null}
 
-          {importError ? (
-            <p className="settings-feedback settings-feedback--error">{importError}</p>
-          ) : null}
-
-          <p className="settings-note">
-            没有网络也能导入：文件在本地解析，不依赖默认配置源。默认源暂时不可达属于正常现象。
-          </p>
-          <p className="settings-note">这份文件包含共享凭据，请勿外传。</p>
-        </section>
-
-        <section className="settings-section">
-          <h3 className="settings-section__title">首次引导</h3>
-          <p className="settings-note">
-            重新走一遍三步引导，用来看清当前缺哪一步。不会删除已有的 Key 或节点。
-          </p>
-          <div className="settings-actions">
-            <button type="button" className="btn btn--ghost" onClick={onRestartOnboarding}>
-              重新运行首次引导
-            </button>
-          </div>
-        </section>
-
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">日志</div>
+                <div className="settings-row__value">在文件管理器中定位最近的日志文件。</div>
+              </div>
+              <button type="button" className="btn btn--ghost" onClick={onOpenLogs}>
+                打开日志目录
+              </button>
+            </div>
+          </section>
+        ) : null}
       </div>
     </div>
   );
 }
 
-/** 后端错误对象形如 `{ code, message }`；这里翻成用户能行动的话，不甩原始报错。 */
-function describeProviderError(error: unknown): string {
+export function describeProviderError(error: unknown): string {
   const bridgeError = toBridgeError(error);
   if (/not found|unknown command/i.test(bridgeError.message)) {
     return "provider 命令还没有接入当前版本，请稍后再试。";
@@ -881,7 +1158,10 @@ function describeProviderError(error: unknown): string {
     return "这个 provider 已经不存在了。";
   }
   if (bridgeError.code === "PRECONDITION_FAILED") {
-    return bridgeError.message || "这个 provider 还不能设为当前。";
+    const reason = bridgeError.details?.reason;
+    if (reason === "builtin_provider") return "内置 provider 不可删除";
+    if (reason === "no_active_provider") return "没有可用的 AI 服务，请到设置里选择一个";
+    return bridgeError.message || "这个操作暂时不可用。";
   }
   return bridgeError.message || "操作失败，请重试";
 }
@@ -893,10 +1173,8 @@ export function describeKeyError(error: unknown): string {
     case "INVALID_ARGUMENT":
       return "Key 格式不对：应以 sk- 开头，长度至少 20 位。";
     case "INVALID_KEY":
-      // 后端语义：Key 已落盘，只是鉴权没过。
       return "Key 已保存在本机，但 DeepSeek 鉴权失败（可能无效或已被吊销）。请重新输入一个有效的 Key。";
     case "SECRET_STORE":
-      // 契约 1.0.6：凭据存本地加密文件 secrets.enc，失败统一用这个码。
       return "本地加密凭据文件写入失败（secrets.enc），请检查磁盘权限或空间后重试。";
     case "NETWORK":
     case "TIMEOUT":
@@ -936,9 +1214,8 @@ function readMessage(error: unknown): string {
 
 function describePickerError(error: unknown): string {
   const message = readMessage(error);
-  // 临时状态：Rust 侧 dialog 插件还没注册时，调用会直接抛错。
   if (/plugin dialog|dialog\|open|__TAURI_INTERNALS__/i.test(message)) {
-    return "文件选择器暂不可用，请把文件直接拖进窗口。";
+    return "文件选择器暂时不可用，请把文件直接拖进窗口。";
   }
   return "无法打开文件选择器，请把文件直接拖进窗口。";
 }
@@ -957,7 +1234,6 @@ export function describeImportError(error: unknown): string {
     case "invalid_json":
       return "这个文件不是有效的节点文件。";
     case "no_importable_nodes": {
-      // 只有这一种错误带 skipped：其余几条在解析到 outbounds 之前就返回了。
       const skipped = bridgeError.details?.skipped;
       return typeof skipped === "number"
         ? `已跳过 ${skipped} 个，但没有可导入的节点。`

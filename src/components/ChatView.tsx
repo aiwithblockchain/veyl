@@ -16,6 +16,17 @@ interface Props {
 
 const SUGGESTIONS = ["连到日本", "现在是什么状态", "断开连接"];
 
+function hasEverConnected(): boolean {
+  try {
+    return (
+      localStorage.getItem("veyl.hasEverConnected") === "1" ||
+      localStorage.getItem("veyl.hasConnected") === "1"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function ChatView({
   session,
   onSend,
@@ -34,6 +45,7 @@ export function ChatView({
   }, [session.messages, session.toolCalls]);
 
   const streaming = session.activeRequestId !== null || session.requesting;
+  const learned = hasEverConnected();
 
   return (
     <div className="chat">
@@ -46,6 +58,11 @@ export function ChatView({
         }}
       >
         {session.messages.length === 0 ? (
+          learned ? (
+            <div className="empty empty--plain">
+              <p className="empty__plain">问点什么，或者让我诊断网络</p>
+            </div>
+          ) : (
           <div className="empty">
             <div className="empty__mark">
               <img src={logo} alt="" />
@@ -72,6 +89,7 @@ export function ChatView({
               <span>③ 连接</span>
             </div>
           </div>
+          )
         ) : (
           <div className="chat__list">
             {session.messages.map((message) => (
