@@ -273,6 +273,8 @@ DeepSeek 主路径只是这个表单的预设：OpenAI 兼容 + `https://api.dee
 
 **第二问（单选，仅当第一问选 2）**：
 
+> 两问都通过 Claurst 的 `AskUserQuestion` 通道下发（单选、选项按钮、答案回传给模型），不用「看起来像问题、实际只是发一条消息」的假按钮。契约见 1.2.0 的 `ask-user-question` 事件与 `reply_user_question` 命令。
+
 ```
 1. 我自己会配置 APP 的 proxy 代理
 2. 我不知道如何配置 proxy 代理
