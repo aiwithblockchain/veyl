@@ -1,9 +1,9 @@
 # 契约：Runtime Manager
 
-> 契约版本：`1.1.0`
-> 状态：已冻结（PM 审核通过，2026-11-02）
+> 契约版本：`2.0.0`
+> 状态：待 PM 审核（批 0 · 契约与数据模型，2026-11-03）
 > 冻结前评审：PM / Alice / Bob
-> 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5
+> 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5、`docs/tun-mode.md`
 > 实现方：Rust（Host）与 TypeScript（UI）共用本文件
 > 变更记录：见 §12
 
@@ -19,6 +19,8 @@
 - `contract_version` 出现在每一个对外结构里；破坏性变更必须升次版本号并同步本文档。
 
 **P1 范围**：单版本、单进程、系统代理模式。多版本并行、TUN、外部 MCP 宿主不在本契约内。
+
+> **2.0 范围变化**：`tun` 模式进入契约（批 5 接线），`profile` 概念换成 `config` + `node`。多版本并行与外部 MCP 宿主仍不在范围内。
 
 ---
 
@@ -84,10 +86,23 @@ pub enum RuntimeState {
 ### 2.2 运行模式
 
 ```ts
-type RuntimeMode = "system_proxy";
+type RuntimeMode = "system_proxy" | "tun";
 ```
 
-P1 只有一种模式。`disabled`（只起进程不设代理）保留给诊断用，不出现在工具入参里。
+| 取值 | 含义 | 进入条件 |
+|---|---|---|
+| `system_proxy` | 起 mixed 入站 + 设置系统代理 | 配置的 `connection_mode = "system_proxy"` |
+| `tun` | 起 TUN 入站，接管全部流量 | 配置的 `connection_mode = "tun"`（批 5；特权助手不可用时报 `tun_helper_missing`） |
+
+`disabled`（只起进程不设代理）保留给诊断用，不出现在工具入参里。
+
+**两种模式的字段差异**
+
+| 字段 | `system_proxy` | `tun` |
+|---|---|---|
+| `mixed_port` | 非空（实际监听端口） | `null`（没有代理入站） |
+| `system_proxy_enabled` | 连接后为 `true` | 恒为 `false` |
+| `proxy_params` 命令 | `available = true` | `available = false`，`reason = "tun_mode"` |
 
 ### 2.3 健康快照
 
@@ -100,7 +115,7 @@ type HealthCheckName =
   | "traffic";
 
 type HealthSnapshot = {
-  contract_version: "1.1.0";
+  contract_version: "2.0.0";
   process: boolean;
   clash_api: boolean;
   data_plane: boolean;
@@ -126,18 +141,20 @@ type TrafficStats = {
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "1.1.0";
+  contract_version: "2.0.0";
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
   upstream_version: string | null;   // 例 "1.14.4"；未启动时 null
   uptime_seconds: number | null;
-  profile_id: string | null;
-  profile_name: string | null;       // 1.1.0 新增：active profile 的显示名
-  connected_since: string | null;    // 1.1.0 新增：本次进入 running 的 ISO 8601 UTC 时刻
-  mixed_port: number | null;         // 1.1.0 新增：本地 mixed 入站实际监听端口
-  latency_ms: number | null;         // 1.1.0 新增：出口 IP 探测往返耗时
-  direct_ip: string | null;          // 1.1.0 新增：不经代理的直连出口 IP（架构补入）
+  config_id: string | null;          // 2.0：原 profile_id
+  config_name: string | null;        // 2.0：原 profile_name
+  node_id: string | null;            // 2.0 新增：本次实际连接的节点
+  node_name: string | null;          // 2.0 新增
+  connected_since: string | null;    // 本次进入 running 的 ISO 8601 UTC 时刻
+  mixed_port: number | null;         // 本地 mixed 入站实际监听端口；tun 模式为 null
+  latency_ms: number | null;         // 出口 IP 探测往返耗时
+  direct_ip: string | null;          // 不经代理的直连出口 IP
   config_hash: string | null;        // "sha256:<hex>"，配置文件的摘要
   system_proxy_enabled: boolean;
   health: HealthSnapshot;
@@ -154,22 +171,24 @@ type RuntimeSnapshot = {
 - `pid` / `upstream_version` / `uptime_seconds` 在 `idle` 与 `failed` 下**必须为 `null`**，不得为 0 或空串。
 - `traffic` 在 `idle` / `failed` 下为 `null`；其余状态不得为 `null`。
 - `config_hash` 用于 UI 判断「配置是否变化」，不是安全校验手段。
+- `mode` 在 `idle` / `failed` 下为 `null`；在 `starting` / `running` / `restarting` / `degraded` / `stopping` 下非 `null`。
 
-#### 2.5.1 1.1.0 新增字段的语义（**每条都必须按此实现**）
+#### 2.5.1 字段语义（**每条都必须按此实现**）
 
 | 字段 | 取值 | 不变量 |
 |---|---|---|
-| `profile_name` | 当前连接的显示名 | 用 profile 连接时 = 该 profile 的 `name`，与 `profile_id` 同生同灭；**用默认配置包连接时 `profile_id` 为 `null` 而 `profile_name` 非空**（包内节点名，当前实现为 `"默认配置"`）；未连接时为 `null` |
+| `config_id` / `config_name` | 当前连接所用的配置 | 与 `node_id` 同生同灭；未连接时为 `null`。2.0 之前叫 `profile_id` / `profile_name`，**没有默认配置包的特殊情形**——没有配置就报 `no_config`，不存在 `config_id = null` 但 `config_name` 非空的合法状态 |
+| `node_id` / `node_name` | 本次实际连接的节点 | 未连接时为 `null`；连接中切换节点后立即变新值（热切换不重启进程） |
 | `connected_since` | 本次进入 `running` 的时刻，ISO 8601 UTC | 仅在 `running` / `degraded` 下非 `null`；与 `uptime_seconds` **同源**：`uptime_seconds ≈ now − connected_since`。两者不得互相矛盾 |
-| `mixed_port` | 本次实际监听的本地 mixed 入站端口 | 仅在 `running` / `degraded` 下非 `null`。**禁止写常量**（1.0.10 的缺陷是把 2080 硬编码在 UI 里，而实际端口每次随机） |
-| `latency_ms` | 最近一次**出口 IP 探测**的往返耗时（毫秒） | 与 `VpnConnectData.latency_ms` 同源同义；未探测/探测失败为 `null`。**不是**节点 ping 延迟 |
+| `mixed_port` | 本次实际监听的本地 mixed 入站端口 | `mode = "system_proxy"` 且状态为 `running` / `degraded` 时非 `null`；`tun` 模式恒为 `null`。**禁止写常量**（1.0.10 的缺陷是把 2080 硬编码在 UI 里，而实际端口每次随机） |
+| `latency_ms` | 最近一次**出口 IP 探测**的往返耗时（毫秒） | 未探测/探测失败为 `null`。**不是**节点 ping 延迟 |
 | `direct_ip` | 不经代理测得的**直连**出口 IP | 与 `exit_ip` 配对展示，用于让用户判断「是否真的走了代理」。未测到为 `null`。**不得**在探测时带上系统代理，否则两个值会相同、失去意义 |
 
 **`latency_ms` 的定义必须固定为「出口 IP 探测往返耗时」**，理由是它已经有实现、有含义，且能在没有额外网络请求的前提下反映链路质量。
 
-> 若产品要展示的是「到节点的 ping / 握手延迟」，那是另一个指标，需要单独采集（wave2 起再定），**不能复用这个字段名**。两个不同含义共用 `latency_ms` 会让状态面板的数字无法解释。
+> 若产品要展示的是「到节点的 ping / 握手延迟」，那是另一个指标（`node_probe` 的 `latency_ms`），**不能复用这个字段名**。两个不同含义共用 `latency_ms` 会让状态面板的数字无法解释。
 
-**字段恒存在**：四个新字段在任何状态下都必须出现在 JSON 里，不可省略键。没有值写 `null`——省略键会让 TypeScript 消费方拿到 `undefined`，绕过类型检查、静默失败。
+**字段恒存在**：所有字段在任何状态下都必须出现在 JSON 里，不可省略键。没有值写 `null`——省略键会让 TypeScript 消费方拿到 `undefined`，绕过类型检查、静默失败。
 
 **与 `last_transition_at` 的区别**：`last_transition_at` 是**任何**状态迁移的时刻（含 `stopping`），`connected_since` 只在进入 `running` 时刷新。断开再连，`connected_since` 变新，`last_transition_at` 也变——两者不同源，不要互相推导。
 
@@ -177,7 +196,7 @@ type RuntimeSnapshot = {
 
 ```ts
 type AivpnError = {
-  contract_version: "1.1.0";
+  contract_version: "2.0.0";
   code: AivpnErrorCode;
   message: string;        // 面向用户，可本地化
   retryable: boolean;
@@ -420,6 +439,7 @@ type ClashConnections = {
 | `RUNTIME_HEALTH_FAILED` | 连续健康检查失败 | 是 | `{ "failing_checks": ["clash_api"] }` |
 | `RUNTIME_EXITED` | 进程已退出 | 视情况 | `{ "exit_code": 1, "signal": null }` |
 | `RUNTIME_STOP_TIMEOUT` | 优雅停止 5s 超时 | 是 | `{ "pid": 1234 }` |
+| `RUNTIME_SWITCH_FAILED` | 在线切换节点失败（进程未重启，出口未变） | 是 | `{ "from_node_id": "...", "to_node_id": "..." }` |
 
 ### 6.3 错误码命名规则
 
@@ -434,10 +454,12 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 
 | 事件 | 时机 | 载荷 |
 |---|---|---|
-| `runtime-state-changed` | 任意状态迁移 | `RuntimeStateChangedPayload` |
+| `runtime-state-changed` | 任意状态迁移 | `RuntimeStateChangedPayload`，**必须带 `snapshot`**（`events.md` §4.1） |
 | `runtime-health-changed` | 健康快照变化（去抖 ≥ 1s） | `RuntimeHealthChangedPayload` |
 
 去抖要求：同一秒内的多次健康变化只发一次，`health.checked_at` 取最新值。
+
+**在线切换节点不发 `runtime-state-changed`**：进程没停、状态没迁移，只是出口换了。它由 `node-switched`（`events.md` §4.11）表达，载荷里带切换后的 `RuntimeSnapshot`。
 
 ---
 
@@ -447,11 +469,13 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 
 ```json
 {
-  "contract_version": "1.1.0",
+  "contract_version": "2.0.0",
   "state": "running",
+  "mode": "system_proxy",
   "pid": 1234,
   "upstream_version": "1.14.4",
-  "profile_id": "prf_1",
+  "config_id": "cfg_1a2b3c4d5e6f7788",
+  "node_id": "nod_1a2b3c4d5e6f7788",
   "config_hash": "sha256:9a1c...",
   "restart_intent": false,
   "restart_count": 1,
@@ -525,7 +549,7 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 | `started_at: Option<i64>` | `uptime_seconds` + `last_transition_at` | UI 不需要 unix 时间戳，需要「运行多久」 |
 | `last_error: Option<String>` | `last_error: AivpnError \| null` | 字符串无法让 UI 分流（例如区分「端口占用」与「配置错误」） |
 | `clash_addr: Option<String>` | **从 UI 快照中移除** | Clash API 地址与 secret 只应在 Host 内部可见；出现在快照里就有被写进日志或事件的风险 |
-| 缺 | `mode` / `profile_id` / `config_hash` / `health` / `traffic` / `connections` / `last_transition_at` | 按 §2.5 补齐 |
+| 缺 | `mode` / `config_id` / `node_id` / `config_hash` / `health` / `traffic` / `connections` / `last_transition_at` | 按 §2.5 补齐 |
 | `RuntimeEvent::StateChanged { state, detail }` | `runtime-state-changed` payload 的 `from` / `to` / `event` / `error` | `detail` 拆成结构化的 `reason` 与 `error` |
 | `RuntimeEvent::Restarting { attempt, reason }` | 用 `runtime-state-changed` 表达（`to = "starting"`，`reason` 带退避说明） | 不为重启单独开事件，UI 少一条分支 |
 | `RuntimeEvent::Failed { reason }` | `runtime-state-changed`（`to = "failed"`，`error: AivpnError`） | 同上 |
@@ -535,6 +559,20 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 ---
 
 ## 12. 变更记录
+
+### 2.0.0（2026-11-03，批 0 · 契约与数据模型）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.0.0` | 元数据 | 数据单位从 profile 换成 config + node |
+| 2 | `RuntimeMode` 扩展为 `"system_proxy" \| "tun"`，并写明两种模式的字段差异 | 枚举扩展 | `docs/tun-mode.md`；批 5 接线 |
+| 3 | `RuntimeSnapshot.profile_id` / `profile_name` 改名 `config_id` / `config_name` | 不兼容 | 同一实体只能有一个名字 |
+| 4 | 新增 `node_id` / `node_name`：本次实际连接的节点 | 字段新增 | `node_switch` 需要表达「连的是哪台」 |
+| 5 | 删除「默认配置包连接时 `profile_id = null` 而 `profile_name` 非空」的特例 | 语义修正 | `runtime_start` 不再有无配置回退（`commands.md` §7.1） |
+| 6 | `mixed_port` 不变量改为「`system_proxy` 且 running/degraded 时非空；`tun` 恒为 null」 | 语义修正 | TUN 没有代理入站 |
+| 7 | 新增错误码 `RUNTIME_SWITCH_FAILED` | 新增错误码 | 在线换节点失败必须可区分于「启动失败」 |
+| 8 | §7 明确在线切换节点不发 `runtime-state-changed` | 澄清 | 进程没迁移，只有出口变了 |
+| 9 | `runtime-state.json` 字段同步改名 | 持久化 | 崩溃恢复 |
 
 ### 1.1.0（2026-11-02，P1.5 wave1）
 

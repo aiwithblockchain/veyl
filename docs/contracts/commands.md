@@ -35,18 +35,17 @@
 
 产品还没有用户，**不做迁移、不留兼容层**（`docs/implementation-plan.md` §1）。所有旧命令直接删除，数据库整体重建，详见 §10 与 `data-model.md` §6。
 
-### 0.2 跨文件影响（本批未改，但必须同步）
+### 0.2 跨文件一致性（批 0 已完成）
 
-本文件是 2.0.0，而 `runtime.md`（1.1.0）与 `tools.md`（1.2.0）**尚未升级**，在当前状态下与本文不一致。必须由后续任务补齐，否则 Bob 会照着旧字段名实现：
-
-| 文件 | 需要改成 | 影响 |
+| 文件 | 状态 | 关键变化 |
 |---|---|---|
-| `runtime.md` §2.2 | `RuntimeMode = "system_proxy" \| "tun"` | 现在只有 `system_proxy` |
-| `runtime.md` §2.5 | `profile_id` / `profile_name` → `config_id` / `config_name`，新增 `node_id` / `node_name` | 旧字段名在新模型里没有对应物 |
-| `runtime.md` §8.1 | 持久化文件同样改名 | 崩溃恢复表 |
-| `tools.md` §3 / §4 | `ProfileList` → `ConfigList`，`ProfileImport` → `NodeImportUrl`，`ProfileDelete` → `ConfigDelete`；新增 `ConfigDetail` / `NodeSwitch` / `NodeProbe` / `ProbeRun` / `ProxyParams` / `IssueList` / `IssueHandoff` / `IssueResolve` / `IssueIgnore`；`VpnConnect` 的 `profile_id` → `config_id` | AI 侧能力与 UI 侧命令必须同源 |
+| `events.md` | **2.0.0** | 配置 / 节点 / 问题 / 布局四类新事件 |
+| `runtime.md` | **2.0.0** | `profile_*` → `config_*`，新增 `node_*`，`mode` 增加 `tun` |
+| `tools.md` | **3.0.0** | 工具改名与新增，AI 侧与 UI 侧同源 |
+| `data-model.md` | **1** | 6 张表 DDL、索引、`secrets.enc` 关系 |
+| `catalog.md` | 1.x | 不动（与服务端协商的独立版本） |
 
-**在两张表补齐之前，任何按本文实现的代码都只能对 UI 侧成立。** 这是契约先行的预期红色，不要为了让它一致而回退本文。
+**四份的应用侧契约现在是同一套词汇：`config` / `node` / `issue` / `layout`。** 任何一份出现 `profile` 都视为错误（历史变更记录除外）。
 
 ### 0.3 批 0 的 PM 裁定（2026-11-03）
 
@@ -56,6 +55,7 @@
 | OPEN-06 | `configs` 表必须承载 DNS 候选与 TUN 内网排除网段，用 JSON 列（一组值、无独立生命周期，不需要子表） | §3.0、`data-model.md` §3.2 |
 | OPEN-03 | 命令名以本文件为准；`capabilities.md` 由 PM 维护，本文件只标注能力 ID | §11 |
 | — | 「测试连通」新增能力 **D6 测试单个节点连通性** | §11.1 的 `node_probe` |
+| — | 新增 **K 组「配置管理」K1–K5**（配置级能力，与 B 组节点级分开） | §11.1 |
 
 ---
 
@@ -702,7 +702,7 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 ### 7.3 `runtime_status {}` → `RuntimeSnapshot`
 
-2.0 的 `RuntimeSnapshot`（`runtime.md` §2.5 的待升级版本）：
+2.0 的 `RuntimeSnapshot`（与 `runtime.md` §2.5 的 2.0.0 一致）：
 
 ```ts
 type RuntimeSnapshot = {
@@ -1024,16 +1024,16 @@ type PendingQuestion = {
 
 | 命令 | 能力 ID | 界面元素 / 块 | 说明 |
 |---|---|---|---|
-| `config_list` | **无（导航级）** | 左栏配置列表 | ⚠️ 见 §11.3 缺口 1 |
-| `config_create` | **C1** 使用官方默认配置 / **B4** 导入配置文件 | `source_choice` | 块本身只负责「用我们的 / 用我自己的」两个选项；落库是本命令 |
-| `config_detail` | **B1** 列出节点 | 底部节点详情 + 节点下拉 | 固定骨架元素 |
-| `config_update` | **G1** 查看当前分流方式（持久化侧） | 设置页 / 左栏编辑 | 在线切换是 G2，批 3 |
-| `config_delete` | **B3** 删除配置 | 左栏项操作 | 旧表 B3 写的是「删除节点配置」，2.0 语义即删配置 |
-| `config_activate` | **无（导航级）** | 左栏切换 | ⚠️ 见 §11.3 缺口 1 |
+| `config_list` | **K1** 列出与查看配置 | 左栏配置列表 | 配置级导航；节点级是 B1 |
+| `config_create` | **K2** 新建配置（数据来源：C1 / B4） | `source_choice` | 块只负责「用我们的 / 用我自己的」两个选项；落库是本命令 |
+| `config_detail` | **K1** 列出与查看配置 / **B1** 列出节点 | 底部节点详情 + 节点下拉 | 固定骨架元素 |
+| `config_update` | **K4** 编辑配置（分流持久化侧：G1） | 设置页 / 左栏编辑 | 在线切换是 G2，批 3 |
+| `config_delete` | **K5** 删除配置（破坏性，需二次确认） | 左栏项操作 | |
+| `config_activate` | **K3** 切换配置 | 左栏切换 | 与 B2「切换节点」是两个层级，不可混用 |
 | `node_import_url` | **B4** 导入配置文件 | 导入按钮 / `source_choice` 后置 | |
 | `node_create` | **B4** 导入配置文件 | 手动编辑表单 | |
 | `node_switch` | **B2** 切换节点 | 底部「切换到此节点」 | ⚠️ 旧映射写 `runtime_start(profile_id)`，见表后说明 |
-| `node_probe` | **D6** 测试单个节点连通性 | 底部「测试连通」 | D6 由 PM 在批 0 审查时新增 | |
+| `node_probe` | **D6** 测试单个节点连通性 | 底部「测试连通」 | D6 由 PM 在批 0 审查时新增 |
 | `proxy_params` | **A5** 代理参数 | `proxy_card` | |
 | `probe_run` | **D1** 本地基础自检 / **D4** 采集结构化诊断包 | `reachability` 块 + 诊断卡 | |
 | `issue_list` / `issue_get` | **J2** 查看问题列表 | 问题列表 | |
@@ -1067,13 +1067,14 @@ type PendingQuestion = {
 
 | # | 缺口 | 建议 |
 |---|---|---|
-| 1 | **没有「列出配置」「切换配置」的能力 ID**。左栏是导航级界面，不是 AI 编排块；但 AI 需要知道用户有几套配置才能编排。 | PM 已确认按本文件的命令名同步能力表；本表暂记为「导航级」，建议在 B 组补 **B5 列出配置** / **B6 切换配置** |
+| 1 | ~~没有「列出配置」「切换配置」的能力 ID~~ | **已解决**：PM 新增 K 组「配置管理」K1–K5，已并入 §11.1 |
 | 2 | **B2 的实现方式变了**。旧表写 `runtime_start(profile_id)`，2.0 拆出 `node_switch`。 | 把 B2 的「实现状态」改成 `node_switch`。拆分理由：未连接时「切换到此节点」只改选择、**不应启动 VPN**；用 `runtime_start` 会把「看」与「连」混成一个动作 |
 | 3 | **J1 没有命令**。 | 保持现状：J1 是内部行为。若将来要让 UI 手动「重新检测」并登记，再加 `issue_collect`，不要暴露 `issue_create` |
 | 4 | **布局写入没有能力 ID。** | 布局属于编排协议（`center-panel.md` §3），不是用户可点能力，不需要能力 ID。写入路径是 AI 工具（批 4），UI 只读 |
 | 5 | **`config_update` 的「改分流」在 G 组没有对应 ID。** | G1 是「查看」、G2 是「切换（在线）」。持久化修改分流策略建议归入 G2 的配置侧，或新增 G5。本批先按 G1 的持久化侧登记 |
 | 6 | **D2 完整诊断（14 项）没有独立命令。** | 仍由 AI 工具 `DiagRun` 承担；`probe_run` 只覆盖连接后的四项。若 UI 要独立按钮，批 6 再补 `diag_run` |
 | 7 | 「测试连通」的能力 | **已解决**：PM 新增 **D6**，`node_probe` 已标 D6 |
+| 8 | **B3「删除节点配置」在新模型里没有对应命令** | 删除的对象从「节点」变成了「配置」→ **K5**。本期不提供「从节点池删除单个节点」的能力；若需要，建议新增 B5「删除节点」，不要复用 K5 |
 
 ---
 
@@ -1086,18 +1087,23 @@ type PendingQuestion = {
 | `runtime_status` | `RuntimeStatus` | **必须** |
 | `config_list` | `ConfigList`（2.0 新增） | **必须** |
 | `config_detail` | `ConfigDetail`（2.0 新增） | **必须** |
+| `config_create` | `ConfigCreate`（2.0 新增） | **必须** |
+| `config_update` | `ConfigUpdate`（2.0 新增） | **必须** |
 | `node_switch` | `NodeSwitch`（2.0 新增） | **必须** |
 | `node_probe` | `NodeProbe`（2.0 新增） | **必须** |
 | `probe_run` | `ProbeRun`（2.0 新增） | **必须** |
 | `proxy_params` | `ProxyParams`（2.0 新增） | **必须** |
 | `node_import_url` | `NodeImportUrl`（2.0 新增，取代 `ProfileImport`） | **必须** |
+| `node_create` | `NodeCreate`（2.0 新增） | **必须** |
 | `config_delete` | `ConfigDelete`（2.0 改名） | **必须** |
-| `issue_list` / `issue_handoff` / `issue_resolve` / `issue_ignore` | 同名工具（2.0 新增） | **必须** |
+| `issue_list` | `IssueList`（2.0 新增） | **必须** |
+| `issue_get` | `IssueGet`（2.0 新增） | **必须** |
+| `issue_handoff` / `issue_resolve` / `issue_ignore` | `IssueHandoff` / `IssueResolve` / `IssueIgnore`（2.0 新增） | **必须** |
 | `net_repair` | `NetRepair` | **必须** |
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
-`tools.md` 尚未升级到 2.0（§0.2），上表的工具名是**要求**，不是现状。
+`tools.md` 已升到 3.0.0，上表的工具名与它一一对应（§0.2）。
 
 ---
 
@@ -1109,10 +1115,11 @@ type PendingQuestion = {
 | 2 | 删除 active 配置是否允许 | **允许**（未连接时），删后回到空态。与「不设不可删除特例」一致；只拦「正在连接」 | **建议采纳** |
 | 3 | `config_create` 自动激活的条件 | 未连接时自动激活；已连接时不自动切 | **建议采纳** |
 | 4 | `config_activate` 的确认参数 | `confirmDisconnect: true`，每次都要重新确认，不记忆 | **建议采纳** |
-| 5 | `node_switch` 是否新增（而不是复用 `runtime_start`） | **新增**。理由见 §11.3 缺口 2 | **需 PM 拍板** |
-| 6 | 是否在 `capabilities.md` 增 B5 / B6 | 建议增补，本文件已按「导航级」临时处理 | **需 PM 决定** |
+| 5 | `node_switch` 是否新增（而不是复用 `runtime_start`） | **新增**。理由见 §11.3 缺口 2 | **已拍板**（2026-11-03） |
+| 6 | 配置级能力 ID | **已拍板**：新增 K 组 K1–K5，见 §11.1 | **已解决** |
 | 7 | `seed_id` 常量命名 | `"veyl_seed"` | 待确认 |
 | 8 | `import_seed_file` 保留（语义收窄为「只并节点」） | **保留**，理由见 §8.3 | **建议采纳** |
+| 9 | 删除配置的二次确认由谁做 | **UI**。`config_delete` 命中「正在连接」时拒绝；其余情况 Host 不再拦，确认框是界面职责（K5 标了破坏性） | 待确认 |
 
 ---
 
@@ -1134,7 +1141,7 @@ type PendingQuestion = {
 | 对象 | 旧 | 新 | 兼容性 |
 |---|---|---|---|
 | `runtime_start` 参数 | `profileId` | `configId`（+ 可选 `nodeId`） | **不兼容**，参数名变了 Tauri 侧会直接拿不到 |
-| `RuntimeSnapshot` 字段 | `profile_id` / `profile_name` | `config_id` / `config_name`，新增 `node_id` / `node_name` | **不兼容**，需同步改 `runtime.md` |
+| `RuntimeSnapshot` 字段 | `profile_id` / `profile_name` | `config_id` / `config_name`，新增 `node_id` / `node_name` | **不兼容**，`runtime.md` 2.0.0 已同步 |
 | `RuntimeSnapshot.mode` | 只有 `"system_proxy"` | 增加 `"tun"` | 新增取值（旧值不变） |
 | `DefaultProfileResult.package_id` | 上游包 id | `seed_id: "veyl_seed"` | **不兼容** |
 | `DefaultProfileResult.applied_at` | ISO 8601 字符串 | Unix 毫秒 | **不兼容** |
@@ -1156,22 +1163,20 @@ type PendingQuestion = {
 - 数据库文件**整体重建**，`profiles` / `default_profile` 表删除，新增 `configs` / `nodes` / `config_nodes` / `layouts` / `issues` / `seed_meta`。
 - 旧库存在时：启动检测 schema 代际不一致 → **删除数据库文件并重建**（对话历史一并丢失）。产品还没有用户，这是刻意选择，不是缺陷。
 
-### 14.5 连带的未完成项
+### 14.5 连带的升级（已完成）
 
-**契约版本矩阵（批 0 交付后）**
+**契约版本矩阵**
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
 | `contracts/commands.md` | **2.0.0** | 本批已升级 |
 | `contracts/events.md` | **2.0.0** | 本批已升级 |
+| `contracts/runtime.md` | **2.0.0** | 本批已升级（字段改名 + `mode` 增加 `tun`） |
+| `contracts/tools.md` | **3.0.0** | 本批已升级（工具改名与新增） |
 | `data-model.md` | **1**（schema 基线） | 本批新建 |
-| `contracts/runtime.md` | 1.1.0 | **待升 2.0.0**：字段改名 + `mode` 增加 `tun` |
-| `contracts/tools.md` | 1.2.0 | **待升 3.0.0**：工具改名与新增 |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
 
-- `runtime.md` 1.1.0 → 2.0.0（字段改名与 `mode` 扩展）。
-- `tools.md` 1.2.0 → 3.0.0（工具改名与新增）。
-- **在这两份升级前，Bob 不得按本文单独实现后端**——否则会出现「命令是 config、内部仍是 profile」的半迁移状态。
+四份应用侧契约现在可以同时按 2.0 词汇实现，不再有「命令是 config、内部仍是 profile」的半迁移状态。
 
 ---
 
@@ -1195,4 +1200,4 @@ type PendingQuestion = {
 | 12 | 新增 §11 能力 ↔ 命令 ↔ 块映射，并列出 6 处对不上的地方 | 新增 | 三条硬约束要求一一对应 |
 | 13 | 补录 `open_external`（1.2.0 代码有、契约没有） | 补录 | 白名单实现已存在 |
 | 14 | 明确「先撤代理再停运行时」「连接失败不回退」等旧不变量在新模型下继续有效 | 约束 | 不改原则，只改数据单位 |
-| 15 | 新增 §0.2：`runtime.md` / `tools.md` 的连带升级未完成，不得半迁移实现 | 约束 | 防止 Bob 按旧字段名开工 |
+| 15 | 同步升级 `runtime.md` 2.0.0 与 `tools.md` 3.0.0，四份应用侧契约统一为 config / node 词汇 | 同步 | 防止半迁移实现 |

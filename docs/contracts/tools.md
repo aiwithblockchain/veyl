@@ -1,8 +1,8 @@
 # 契约：P1 工具清单
 
-> 契约版本：`1.2.0`
-> 状态：已冻结（PM 审核通过，2026-11-02）
-> 上游：`docs/phase-1-technical-design.md` §4.3、§4.4、§5.1
+> 契约版本：`3.0.0`
+> 状态：待 PM 审核（批 0 · 契约与数据模型，2026-11-03）
+> 上游：`docs/contracts/commands.md` 2.0.0、`docs/contracts/runtime.md` 2.0.0、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
 > 变更记录：见 §8
@@ -19,7 +19,9 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**、错误码 **大写下划线**。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。
+
+> **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
 ---
 
@@ -62,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "1.2.0";
+  contract_version: "3.0.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -117,10 +119,10 @@ type NextAction = {
 | 工具 | 行为 | 风险 |
 |---|---|---|
 | `CoreInstall` | 直接下载并执行二进制 | 无拦截点 |
-| `VpnConnect` | 直接修改系统代理 | 无拦截点 |
-| `ProfileDelete` | 直接删除本地配置 | 无拦截点 |
+| `VpnConnect` | 直接修改系统代理 / 路由 | 无拦截点 |
+| `ConfigDelete` | 直接删除一套配置（含其节点关系与问题记录） | 无拦截点 |
 
-**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ProfileList`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`）在 `PermissionMode::Default` 下直接允许；其余工具由 Host 的 `PermissionHandler` 一律返回 `Allow`。
+**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigList`、`ConfigDetail`、`NodeProbe`、`ProxyParams`、`IssueList`、`IssueGet`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`）在 `PermissionMode::Default` 下直接允许；其余工具由 Host 的 `PermissionHandler` 一律返回 `Allow`。
 
 不再存在的东西：
 
@@ -137,11 +139,11 @@ type NextAction = {
 去掉拦截点后，以下情况没有任何保护：
 
 1. **模型误判**：Agent 把「看看现在什么状态」理解成「连上节点」，`VpnConnect` 会直接改系统代理，用户来不及阻止。
-2. **参数误传**：模型构造的 `node_id` / `profile_id` 有误时，`ProfileDelete` 会直接删掉配置，没有确认步骤。
+2. **参数误传**：模型构造的 `node_id` / `config_id` 有误时，`ConfigDelete` 会直接删掉一套配置，没有确认步骤。
 3. **误触**：UI 上的删除按钮点错，立即生效，没有「确定要删除吗」。
 4. **下载执行**：`CoreInstall` 直接下载并运行一个来自网络的二进制。虽然有 SHA256 校验与签名清单，但那防的是「内容被篡改」，不防「Agent 决定装了一个用户没想要的版本」。
 
-P1 的定位是「早期内测、使用者是开发者本人」，这些风险在可接受范围内。**对外发布前需要重新评估**——尤其是 `CoreInstall` 与 `ProfileDelete`。
+P1 的定位是「早期内测、使用者是开发者本人」，这些风险在可接受范围内。**对外发布前需要重新评估**——尤其是 `CoreInstall` 与 `ConfigDelete`。
 
 ### 2.2 调用来源校验
 
@@ -194,11 +196,12 @@ type CallSource = "ui" | "agent";
 
 | 工具 | input | `args_preview` |
 |---|---|---|
-| `VpnConnect` | `{ "node_id": "seed-jp-01" }` | `{ "node_id": "seed-jp-01" }` |
-| `VpnConnect` | `{ "profile_id": "prf_1", "strategy": "latency" }` | `{ "profile_id": "prf_1", "strategy": "latency" }` |
+| `VpnConnect` | `{ "node_id": "nod_1a2b" }` | `{ "node_id": "nod_1a2b" }` |
+| `VpnConnect` | `{ "config_id": "cfg_1a2b", "node_id": "nod_3c4d" }` | `{ "config_id": "cfg_1a2b", "node_id": "nod_3c4d" }` |
 | `DeepseekSaveKey` | `{ "key": "sk-abc…" }` | **省略**（唯一字段被打码） |
 | `CatalogSearch` | `{ "region": "jp", "limit": 10 }` | `{ "region": "jp", "limit": 10 }` |
-| `ProfileDelete` | `{ "profile_id": "prf_1" }` | `{ "profile_id": "prf_1" }` |
+| `ConfigDelete` | `{ "config_id": "cfg_1a2b" }` | `{ "config_id": "cfg_1a2b" }` |
+| `NodeCreate` | `{ "name": "洛杉矶", "server": "203.0.113.7", "port": 8388, "method": "aes-256-gcm", "password": "…" }` | 其余字段展示，`password` 显示为 `"***"` |
 
 其他要求：
 
@@ -230,24 +233,37 @@ type CallSource = "ui" | "agent";
 | 6 | `CoreListVersions` | `CoreListVersionsTool` | 已安装/可安装版本 | `ReadOnly` | 只读 |
 | 7 | `CoreInstall` | `CoreInstallTool` | 下载并安装运行时 | `Execute` | 高 |
 | 8 | `CatalogSearch` | `CatalogSearchTool` | 查询**远端**节点目录（不含本地导入） | `ReadOnly` | 只读 |
-| 9 | `ProfileList` | `ProfileListTool` | 列**本地**已保存配置（含种子导入） | `ReadOnly` | 只读 |
-| 10 | `ProfileImport` | `ProfileImportTool` | 把节点导入为本地配置 | `Write` | 低 |
-| 11 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 | `Execute` | 高 |
-| 12 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
-| 13 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
-| 14 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
-| 15 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
-| 16 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
-| 17 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
-| 18 | `ProfileDelete` | `ProfileDeleteTool` | 删除本地配置 | `Write` | 中 |
-| 19 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口（1.1.0） | `ReadOnly` | 只读 |
-| 20 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理（1.1.0） | `Execute` | 高 |
-| 21 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包（1.1.0） | `Write` | 中 |
-| 22 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 默认配置包版本与状态（1.1.0） | `ReadOnly` | 只读 |
+| 9 | `ConfigList` | `ConfigListTool` | 列**本地**全部配置 | `ReadOnly` | 只读 |
+| 10 | `ConfigDetail` | `ConfigDetailTool` | 一套配置的节点集、DNS、端口、布局 | `ReadOnly` | 只读 |
+| 11 | `ConfigCreate` | `ConfigCreateTool` | 新建一套配置（种子 / 空 / 指定节点） | `Write` | 中 |
+| 12 | `ConfigUpdate` | `ConfigUpdateTool` | 编辑配置（名称 / 分流 / DNS / 端口 / 节点集） | `Write` | 中 |
+| 13 | `ConfigDelete` | `ConfigDeleteTool` | 删除一套配置 | `Write` | 中 |
+| 14 | `NodeImportUrl` | `NodeImportUrlTool` | 从订阅 URL 解析并导入节点 | `Write` | 中 |
+| 15 | `NodeCreate` | `NodeCreateTool` | 手动创建一个节点 | `Write` | 中 |
+| 16 | `NodeSwitch` | `NodeSwitchTool` | 切换某套配置的当前节点 | `Execute` | 中 |
+| 17 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `ReadOnly` | 只读 |
+| 18 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 / TUN | `Execute` | 高 |
+| 19 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
+| 20 | `ProxyParams` | `ProxyParamsTool` | 本机代理地址与端口（A5） | `ReadOnly` | 只读 |
+| 21 | `ProbeRun` | `ProbeRunTool` | 连接后四项探测，失败登记问题 | `Write` | 低 |
+| 22 | `IssueList` | `IssueListTool` | 列出问题记录 | `ReadOnly` | 只读 |
+| 23 | `IssueGet` | `IssueGetTool` | 单条问题的诊断包 | `ReadOnly` | 只读 |
+| 24 | `IssueHandoff` | `IssueHandoffTool` | 把问题转交 AI 会话 | `Write` | 低 |
+| 25 | `IssueResolve` | `IssueResolveTool` | 复测通过后标记已解决 | `Write` | 低 |
+| 26 | `IssueIgnore` | `IssueIgnoreTool` | 忽略 / 恢复问题 | `Write` | 低 |
+| 27 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
+| 28 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
+| 29 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
+| 30 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
+| 31 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
+| 32 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口 | `ReadOnly` | 只读 |
+| 33 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
+| 34 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
+| 35 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
-**破坏性工具（destructive）**：`CoreInstall`、`ProfileDelete`、`VpnConnect`（会改系统代理）、**`NetRepair`（会改系统网络设置，1.1.0 新增）**。P1.5 **对四者均无确认点**，直接执行；风险评估见 §2.1.1。
+**破坏性工具（destructive）**：`CoreInstall`、`ConfigDelete`、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。**均无确认点**，直接执行；风险评估见 §2.1.1。
 
 ### 3.1 注册清单（照抄）
 
@@ -261,20 +277,35 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(CoreListVersionsTool::new(installer.clone())),
     Box::new(CoreInstallTool::new(installer.clone())),
     Box::new(CatalogSearchTool::new(catalog.clone())),
-    Box::new(ProfileListTool::new(store.clone())),
-    Box::new(ProfileImportTool::new(catalog.clone(), store.clone())),
-    Box::new(ProfileDeleteTool::new(store.clone())),
-    Box::new(VpnConnectTool::new(rt.clone(), catalog.clone(), store.clone(), proxy.clone())),
+    // 2.0：配置与节点
+    Box::new(ConfigListTool::new(store.clone())),
+    Box::new(ConfigDetailTool::new(store.clone())),
+    Box::new(ConfigCreateTool::new(store.clone(), seed.clone())),
+    Box::new(ConfigUpdateTool::new(store.clone())),
+    Box::new(ConfigDeleteTool::new(store.clone())),
+    Box::new(NodeImportUrlTool::new(store.clone(), secrets.clone())),
+    Box::new(NodeCreateTool::new(store.clone(), secrets.clone())),
+    Box::new(NodeSwitchTool::new(rt.clone(), store.clone())),
+    Box::new(NodeProbeTool::new(rt.clone(), store.clone())),
+    Box::new(VpnConnectTool::new(rt.clone(), store.clone(), proxy.clone())),
     Box::new(VpnDisconnectTool::new(rt.clone(), proxy.clone())),
-    Box::new(DiagRunTool::new(rt.clone(), proxy.clone(), catalog.clone())),
+    Box::new(ProxyParamsTool::new(rt.clone(), store.clone())),
+    Box::new(ProbeRunTool::new(rt.clone(), store.clone())),
+    // 2.0：问题管理
+    Box::new(IssueListTool::new(store.clone())),
+    Box::new(IssueGetTool::new(store.clone())),
+    Box::new(IssueHandoffTool::new(store.clone(), agent.clone())),
+    Box::new(IssueResolveTool::new(store.clone(), rt.clone())),
+    Box::new(IssueIgnoreTool::new(store.clone())),
+    // 诊断与其它
+    Box::new(DiagRunTool::new(rt.clone(), proxy.clone(), store.clone())),
     Box::new(DeepseekSetupKeyTool::new()),
     Box::new(DeepseekSaveKeyTool::new(keychain.clone())),
     Box::new(JobGetTool::new(jobs.clone())),
     Box::new(AskUserQuestionTool::new()),  // claurst-tools
-    // 1.1.0
     Box::new(NetConfigGetTool::new(proxy.clone())),
     Box::new(NetRepairTool::new(proxy.clone(), rt.clone())),
-    Box::new(CatalogRefreshTool::new(default_source.clone(), store.clone(), secrets.clone())),
+    Box::new(CatalogRefreshTool::new(seed.clone(), store.clone(), secrets.clone())),
     Box::new(DefaultProfileStatusTool::new(store.clone())),
 ];
 ```
@@ -310,7 +341,7 @@ P1 移除审批后，这两个工具直接执行：
 
 | 当前状态 | 建议动作 |
 |---|---|
-| `idle` | `VpnConnect`（若已有 profile）/ `CatalogSearch` |
+| `idle` | `VpnConnect`（若已有配置）/ `ConfigCreate` |
 | `running` | `VpnDisconnect` |
 | `failed` | `DiagRun` |
 | `starting` / `restarting` / `stopping` | 空 |
@@ -325,30 +356,27 @@ P1 移除审批后，这两个工具直接执行：
 {
   "type": "object",
   "properties": {
-    "profile_id": { "type": "string" },
-    "mode": { "type": "string", "enum": ["system_proxy"], "default": "system_proxy" }
+    "config_id": { "type": "string" },
+    "node_id": { "type": "string" }
   },
   "additionalProperties": false
 }
 ```
 
-- `profile_id` 省略时用当前 active profile。
-- 无 profile → `PRECONDITION_FAILED`，`details.hint = "先调用 CatalogSearch 与 ProfileImport"`。
+- `config_id` 省略时用当前 active 配置；没有任何配置 → `PRECONDITION_FAILED / no_config`。
+- `node_id` 省略时用该配置的 `current_node_id`，为空时用节点集第一个。
+- **没有 `mode` 参数**：代理还是 TUN 由配置的 `connection_mode` 决定，不由调用方临时指定。
+- 与 `VpnConnect` 的区别：本工具只起进程，**不设置系统代理**。要用户可用请用 `VpnConnect`。
 
 `data`：
 
 ```ts
-type RuntimeStartData = {
-  state: RuntimeState;          // 期望 "running"
-  pid: number;
-  upstream_version: string;
+type RuntimeStartData = RuntimeSnapshot & {
   already_running: boolean;     // 幂等命中时为 true
 };
 ```
 
-错误：`RUNTIME_BUSY`（`starting`/`restarting` 中）、`RUNTIME_NOT_INSTALLED`、`RUNTIME_START_TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`。
-
-> 注意：`RuntimeStart` **不设置系统代理**。需要代理请用 `VpnConnect`。
+错误：`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `tun_helper_missing`）、`NOT_FOUND`、`RUNTIME_BUSY`、`RUNTIME_NOT_INSTALLED`、`RUNTIME_START_TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`。
 
 ---
 
@@ -533,9 +561,9 @@ type CatalogSearchData = {
 };
 ```
 
-**数据源：只有远端目录。** 本工具查的是服务端下发的 catalog，**不包含用户本地导入的配置** —— 种子文件导入的节点不在其中。
+**数据源：只有远端目录。** 本工具查的是服务端下发的 catalog，**不包含用户本地保存的节点与配置**。
 
-这条边界必须写进工具描述，因为它被实测踩过：模型只调 `CatalogSearch`，用户自己导入的节点因此完全不可见，模型回答「没有这个节点」。用户用名称指代「我自己导入的那个」时，应改用 `ProfileList` 匹配出 `profile_id`。
+这条边界必须写进工具描述，因为它被实测踩过：模型只调 `CatalogSearch`，用户自己导入的节点因此完全不可见，模型回答「没有这个节点」。用户用名称指代「我自己导入的那个」时，应改用 `ConfigList` / `ConfigDetail` 在本地匹配。
 
 错误：`CATALOG_UNAVAILABLE`、`RATE_LIMITED`、`DEVICE_TOKEN_INVALID`。
 
@@ -543,78 +571,45 @@ type CatalogSearchData = {
 
 ---
 
-### 4.9 `ProfileList`
+### 4.9 `ConfigList`
 
 ```json
 { "type": "object", "properties": {}, "additionalProperties": false }
 ```
 
-`data`：
+`data`：`ConfigListData`（`commands.md` §3.1）。
 
-```ts
-type ProfileSummary = {
-  profile_id: string;
-  name: string;
-  node_id: string | null;
-  protocol: NodeProtocol | null;
-  region: string | null;
-  created_at: string;
-  is_active: boolean;
-};
+- 数据源只有本地库，**不联网**；空列表是合法状态。
+- 排序为 `last_used_at DESC NULLS LAST` → `created_at ASC`，与 UI 左栏一致，模型不需要再排。
+- 用户用名称指代一套配置时，先 `ConfigList` 匹配名称拿到 `config_id`，再 `ConfigDetail` 或 `VpnConnect({ config_id })`；**不要凭名称猜 id**。
+- 不含节点明细与任何凭据；要节点走 `ConfigDetail`。
 
-type ProfileListData = {
-  profiles: ProfileSummary[];
-  active_profile_id: string | null;
-};
-```
-
-不含任何凭据或配置原文。
-
-**数据源：本地已保存配置。** 包括目录导入与种子文件导入的**全部** profile，每条都带 `profile_id`。
-
-`CatalogSearch` 与 `ProfileList` **数据源不同，不可互相替代**：
-
-| 工具 | 查什么 | 有 `profile_id` 吗 |
-|---|---|---|
-| `CatalogSearch` | 只查远端目录 | 没有（是 `node_id`） |
-| `ProfileList` | 只列本地已保存配置（含种子导入） | 有 |
-
-用户用名称指代某个节点时，先 `ProfileList` 匹配名称拿到 `profile_id`，再 `VpnConnect({ profile_id })`；**不要凭名称猜 id**，也不要假设它一定在远端目录里。
-
-只有 `CatalogSearch` 会让种子导入的节点完全不可见 —— 这是实测暴露过的缺陷形态。
+`CatalogSearch` 与 `ConfigList` 数据源不同：前者只查远端目录，后者只列本地。用户说的「我的配置」永远在后者里。
 
 ---
 
-### 4.10 `ProfileImport`
+### 4.10 `NodeImportUrl`
 
 ```json
 {
   "type": "object",
   "properties": {
-    "node_id": { "type": "string" },
-    "name": { "type": "string", "maxLength": 60 }
+    "url": { "type": "string", "format": "uri" },
+    "config_id": { "type": "string" }
   },
-  "required": ["node_id"],
+  "required": ["url"],
   "additionalProperties": false
 }
 ```
 
-`data`：
+`data`：`NodeImportResult`（`commands.md` §4.1）。
 
-```ts
-type ProfileImportData = {
-  profile_id: string;
-  name: string;
-  protocol: NodeProtocol;
-  region: string | null;
-  already_existed: boolean;
-};
-```
+- 仅 `https`；只解析 base64 编码的 `ss://` 多节点列表；只解析，**不自动连接**。
+- 密码只进 `secrets.enc`，**不进 `data`、不进 `content`、不进 `args_preview`**。
+- `config_id` 省略时只把节点放进池子，不绑定任何配置。
+- 解析结果必须**复述给用户确认**，尤其是 `method` 与 `port`——这两个错了连不上但看不出原因。
 
-- Host 内部调用 `GET /v1/catalog/nodes/{node_id}` 取完整描述；凭据只进内存与 `0600` 配置，**不进 `data`、不进 `content`**。
-- 同名节点重复导入 → 返回已有 profile，`already_existed = true`。
-
-错误：`NODE_NOT_FOUND`、`NODE_DISABLED`、`NODE_UNSUPPORTED_PROTOCOL`、`CATALOG_UNAVAILABLE`。
+错误：`INVALID_ARGUMENT`（`insecure_url`、`invalid_url`、`not_subscription`）、`NOT_FOUND`、`UPSTREAM_ERROR`、`TIMEOUT`、`SECRET_STORE`。
 
 ---
 
@@ -624,43 +619,48 @@ type ProfileImportData = {
 {
   "type": "object",
   "properties": {
-    "node_id": { "type": "string" },
-    "profile_id": { "type": "string" },
-    "strategy": { "type": "string", "enum": ["latency"], "default": "latency" }
+    "config_id": { "type": "string" },
+    "node_id": { "type": "string" }
   },
   "additionalProperties": false
 }
 ```
 
-约束：`node_id` 与 `profile_id` **必须且只能提供一个**，否则 `INVALID_ARGUMENT`。
+约束：
+
+- `config_id` 省略 → 用 active 配置；没有任何配置 → `PRECONDITION_FAILED / no_config`。
+- `node_id` 省略 → 用该配置的 `current_node_id`，为空时用节点集第一个。
+- `node_id` 必须属于该配置 → 否则 `NOT_FOUND / node_not_in_config`。
+- 节点集为空 → `PRECONDITION_FAILED / no_nodes`。
 
 `data`：
 
 ```ts
 type VpnConnectData = {
   state: "running";
-  profile_id: string;
+  config_id: string;
+  node_id: string;
   exit_ip: string | null;        // null = 已连接但出口尚未测到，不是失败
   latency_ms: number | null;
   upstream_version: string;
-  system_proxy_enabled: boolean;
+  system_proxy_enabled: boolean; // tun 模式恒为 false
 };
 ```
 
 语义（按顺序）：
 
-1. 确保运行时已安装；未安装 → `RUNTIME_NOT_INSTALLED`（**不自动安装**，安装是用户的显式决定；`next_actions` 给出 `CoreInstall`）。
-2. 解析出 profile（`node_id` 时先导入或复用）。
-3. 生成配置 → `sing-box check`。
+1. 确保运行时已安装；未安装 → `RUNTIME_NOT_INSTALLED`（**不自动安装**；`next_actions` 给出 `CoreInstall`）。
+2. 解析配置与节点。
+3. 生成配置 → `sing-box check`；`connection_mode = "tun"` 时先确认特权助手可用，否则 `PRECONDITION_FAILED / tun_helper_missing`。
 4. 启动或热更新。
-5. 设置系统代理（无确认点，直接执行）。
-6. 异步探测出口 IP（**不阻塞返回**；超时或未测到时 `exit_ip` 为 `null`，后台测到后经健康事件推给 UI）。
+5. 设置系统代理（`system_proxy` 模式；无确认点，直接执行）。
+6. 异步探测出口 IP（**不阻塞返回**；未测到时 `exit_ip` 为 `null`，后台测到后经健康事件推给 UI）。
 7. 任一步失败：关闭系统代理，按 `docs/phase-1-technical-design.md` §6.5 分类返回。
 
 **连接是否成功只看 `state`，不看 `exit_ip`。**
 
-> `latency_ms` 的语义固定为**出口 IP 探测的往返耗时**，与 `runtime.md` §2.5.1 的同名字段同源。
-> 它不是「到节点的 ping / 握手延迟」——那是另一个指标，将来要用**不同的字段名**（例如 `node_latency_ms`）单独采集。两个含义共用一个名字，会让状态面板的数字无法解释。
+> `latency_ms` 的语义固定为**出口 IP 探测的往返耗时**，与 `runtime.md` §2.5 的同名字段同源。
+> 它不是「到节点的 ping / 握手延迟」——那个指标属于 `NodeProbe.latency_ms`，**不同的字段、不同的命令**。两个含义共用一个名字，会让状态面板的数字无法解释。
 
 | 字段 | 含义 |
 |---|---|
@@ -671,11 +671,11 @@ type VpnConnectData = {
 
 出口 IP 的探测方式：经本地 mixed 入站代理发一次 HTTP 请求，响应体必须是**合法 IP 字面量**才回填；门户页、错误串、`host:port`、多行内容一律丢弃，`exit_ip` 保持 `null`。探测失败只记日志，**不改运行时状态**。
 
-错误：`PRECONDITION_FAILED`、`TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`UPSTREAM_ERROR`。
+错误：`PRECONDITION_FAILED`、`NOT_FOUND`、`TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`UPSTREAM_ERROR`。
 
-失败时的 `next_actions` 必须给出替代方案（同地区其他节点 / `DiagRun`）。
+失败时的 `next_actions` 必须给出替代方案（同配置的其他节点 / `DiagRun`）。
 
-**无确认点**：直接修改系统代理，没有确认卡。见 §2.1.1 的风险记录。
+**无确认点**：直接修改系统代理或路由，没有确认卡。见 §2.1.1 的风险记录。
 
 ---
 
@@ -718,11 +718,11 @@ type DiagGroup = "app" | "system" | "network" | "config";
 
 type DiagAction =
   | { kind: "reconnect" }
-  | { kind: "refresh_default_profile" }
+  | { kind: "refresh_seed" }
   | { kind: "restore_network" }
-  | { kind: "switch_profile" }
+  | { kind: "switch_config" }
   | { kind: "flush_dns" }
-  | { kind: "open_default_profile" };
+  | { kind: "open_seed" };
 
 type DiagCheck = {
   // 稳定标识：<group>.<check>，一旦发布不得改名
@@ -736,7 +736,7 @@ type DiagCheck = {
     | "network.exit_ip" | "network.reachable_default_source"
     | "network.reachable_github" | "network.reachable_deepseek"
     // config
-    | "config.current_profile" | "config.default_package" | "config.package_stale";
+    | "config.current_config" | "config.seed" | "config.seed_stale";
   group: DiagGroup;
   ok: boolean;
   detail: string;              // 实测值或失败原因，已脱敏
@@ -745,7 +745,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "1.2.0";
+  contract_version: "3.0.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -764,6 +764,17 @@ type DiagReport = {
 ```
 
 `include_logs = false` 时 `log_excerpt` 为空数组。`log_excerpt` 同样脱敏。
+
+**3.0.0 的改名**（因为这些标识从未对外发布，直接改，不保留旧值）：
+
+| 2.0 之前 | 3.0.0 |
+|---|---|
+| `refresh_default_profile` | `refresh_seed` |
+| `switch_profile` | `switch_config` |
+| `open_default_profile` | `open_seed` |
+| `config.current_profile` | `config.current_config` |
+| `config.default_package` | `config.seed` |
+| `config.package_stale` | `config.seed_stale` |
 
 **相对 1.0.x 的扩展（1.1.0）**：
 
@@ -897,7 +908,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "1.2.0";
+  contract_version: "3.0.0";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -915,58 +926,32 @@ type Job = {
 
 ---
 
-### 4.17 `ProfileDelete`
+### 4.17 `ConfigDelete`
 
 ```json
 {
   "type": "object",
   "properties": {
-    "profile_id": { "type": "string" }
+    "config_id": { "type": "string" }
   },
-  "required": ["profile_id"],
+  "required": ["config_id"],
   "additionalProperties": false
 }
 ```
 
-`data`：
+`data`：`ConfigDeleteData`（`commands.md` §3.4）。
 
-```ts
-type ProfileDeleteData = {
-  profile_id: string;
-  deleted: boolean;        // 实际是否发生了删除
-  already_absent: boolean; // true 表示本次调用前就不存在
-  active_profile_id: string | null;  // 删除完成后仍然有效的 active profile（不会被本次删除改变）
-};
-```
+- **幂等**：配置不存在 → `ok: true`，`deleted: false`，`already_absent: true`。
+- **正在连接的配置不能删**：`PRECONDITION_FAILED`，`details.reason = "connected"`。Host 不替用户断网；模型应先用 `VpnDisconnect`，或换一套配置。
+- **active 但未连接时可以删**：删除后 `active_config_id = null`，回到空态。这是「不设不可删除特例」的直接结果（`docs/configs-and-nav.md` §2.1）。
+- 级联删除该配置的节点关系、布局与**配置范围内的问题记录**；节点本身留在共享池里，不删。
+- 删除前**不做**任何磁盘清理之外的动作；错误码看 `error.code`，具体原因看 `error.details.reason`。
 
-语义：
-
-- **幂等**：profile 不存在 → `ok: true`，`deleted: false`，`already_absent: true`。
-- **不允许删除 active profile**：`profile_id == active_profile_id` 时直接拒绝，返回：
-  ```json
-  {
-    "code": "PRECONDITION_FAILED",
-    "message": "当前正在使用该配置，请先断开或切换到其它节点",
-    "retryable": false,
-    "details": { "reason": "ACTIVE_PROFILE_IN_USE", "active_profile_id": "prf_1" }
-  }
-  ```
-  **前置校验在执行之前完成**：命中直接返回错误，不产生任何副作用。
-  
-  测试断言：错误码看 `error.code == "PRECONDITION_FAILED"`，具体原因看 `error.details.reason == "ACTIVE_PROFILE_IN_USE"`。两者都要匹配。
-- 删除成功后 `active_profile_id` **保持不变**（因为 active 的永远删不掉）。要换 active，走「先 `VpnDisconnect` 或 `VpnConnect` 到别的 profile」。
-- 删除该 profile 关联的配置文件与 `profile-<id>.meta.json`；不删节点缓存。
-
-实现注意：这个校验属于**业务前置条件**，必须在删除动作之前完成。
-
-1. 给 `Tool` trait 增加可选 `precheck(input, ctx) -> Result<(), AivpnError>`，Handler 在返回 `Ask` 之前调用；
-2. 在 Handler 内为 `ProfileDelete` 内联同一份检查逻辑。
-
-必须保证：**校验失败 → 不产生任何删除副作用**。
+> 2.0 之前这里叫 `ProfileDelete`，且不允许删除 active。那条规则属于单节点模型：active 就是唯一配置，删了就没有任何东西可用。新模型允许空态，空态本身有「新建配置」的出口。
 
 无确认点：`PermissionLevel = Write`，直接执行。见 §2.1.1 的风险记录。
 
-错误：`PRECONDITION_FAILED`（`details.reason = "ACTIVE_PROFILE_IN_USE"`）、`INVALID_ARGUMENT`（`profile_id` 为空）、`INTERNAL`（磁盘删除失败）。
+错误：`PRECONDITION_FAILED`（`connected`）、`INVALID_ARGUMENT`（`config_id` 为空）、`INTERNAL`。
 
 ---
 
@@ -1109,32 +1094,32 @@ type CatalogRefreshData = {
 
 ---
 
-### 4.21 `DefaultProfileStatus`（1.1.0 新增）
+### 4.21 `DefaultProfileStatus`
 
-纯只读，**不联网**。
+纯只读，**不联网**。2.0 起数据源是 `veyl_seed.json`。
 
 ```json
 { "type": "object", "properties": {}, "additionalProperties": false }
 ```
 
-`data`：
+`data`：`DefaultProfileResult`（`commands.md` §8.1）。要点：
 
 ```ts
 type DefaultProfileStatusData = {
-  package_id: string | null;
-  version: string | null;          // 优先 source_updated_at；缺失时用 package_hash（发布方标签）
-  applied_at: string | null;       // ISO 8601，最近一次被用于连接的时刻
-  fetched_at: string | null;       // ISO 8601，本地缓存拉取时间
+  seed_id: "veyl_seed";
+  version: string | null;          // 文件里的 version，仅展示
+  content_sha256: string | null;   // 判断是否变化的唯一依据
   node_count: number;
-  stale: boolean;                  // 距上次成功拉取超过 6 小时
-  offline_capable: boolean;        // 是否有可用的加密包体（离线也能连）
+  applied_at: number | null;       // Unix 毫秒
+  checked_at: number | null;       // Unix 毫秒
+  new_version_available: boolean;
 };
 ```
 
-- `version` 是**给人看的**：能用 `source_updated_at` 就用它，否则回退到 `package_hash` 这个发布方标签。**不要把内部自算的 `content_sha256` 暴露出去**——它每次内容变化都变，对用户没有意义，还会被误当成签名。
-
-- `package_id` 取 `provider_id` 的尾段用于展示（需求 §6.6 的「种子V21」）。
-- `stale` 只表示「可能不是最新」，不代表不可用。
+- `version` 是**给人看的**；变化判定永远看 `content_sha256`——`version` 要人手动改，「改了文件忘了改版本号」正是 TweetPilot 那次事故的根因。
+- `stale` 概念取消：是否该刷新由 Host 的定时器与「连接失败且当前用种子节点」两条规则决定，不需要模型判断。
+- `applied_at` 是「最近一次被用于建立配置的时刻」，不是拉取时刻；拉取时刻在 `checked_at`。
+- 若 `version` 为 `null`（文件没写），照常工作。
 
 权限：`ReadOnly`。
 
@@ -1162,35 +1147,373 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 
 ---
 
+### 4.23 `ConfigDetail`
+
+```json
+{
+  "type": "object",
+  "properties": { "config_id": { "type": "string" } },
+  "required": ["config_id"],
+  "additionalProperties": false
+}
+```
+
+`data`：`ConfigDetail`（`commands.md` §3.0），含 `nodes` / `dns` / `tun_excludes` / `layout`。
+
+- 节点按配置内顺序返回，**不重排**。
+- **不含密码**；要判断连通性用 `NodeProbe`，不要试图从详情里推断。
+- 配置不存在 → `NOT_FOUND`。
+
+权限：`ReadOnly`。
+
+---
+
+### 4.24 `ConfigCreate`
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": { "type": "string", "maxLength": 40 },
+    "connect_mode": { "type": "string", "enum": ["system_proxy", "tun"] },
+    "routing_mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
+    "source": { "type": "string", "enum": ["seed", "empty"] },
+    "node_ids": { "type": "array", "items": { "type": "string" } },
+    "listen_port": { "type": "integer", "minimum": 1000, "maximum": 65535 },
+    "dns": { "type": "object" },
+    "tun_excludes": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["name", "connect_mode", "routing_mode"],
+  "additionalProperties": false
+}
+```
+
+`data`：`ConfigDetail`。
+
+- `source = "seed"` 绑定**当前种子的全部节点**；种子为空 → `PRECONDITION_FAILED / seed_unavailable`。与 `node_ids` 互斥。
+- `source = "empty"` 或不传 → 创建空节点集的配置；可以存在，但 `VpnConnect` 会报 `no_nodes`。
+- `routing_mode = "proxy_selected"` 在批 3 前 → `UNSUPPORTED / route_mode_not_ready`。
+- `listen_port` 只允许 `system_proxy`；`tun` 传了 → `INVALID_ARGUMENT / listen_port_not_allowed`。
+- **连接方式不给默认值**：`system_proxy` 与 `tun` 是两种接管方式，模型必须显式选。
+- 未连接时新建的配置会自动成为 active；已连接时不自动切换（与 `commands.md` §3.2 一致）。
+
+`next_actions`：创建成功后给出 `VpnConnect`（一级/二级）或 `ProxyParams`（三级）。
+
+错误：`INVALID_ARGUMENT`、`CONFLICT`（`duplicate_name`）、`NOT_FOUND`、`PRECONDITION_FAILED`、`UNSUPPORTED`。
+
+---
+
+### 4.25 `ConfigUpdate`
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "config_id": { "type": "string" },
+    "name": { "type": "string", "maxLength": 40 },
+    "routing_mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
+    "listen_port": { "type": "integer", "minimum": 1000, "maximum": 65535 },
+    "dns": { "type": "object" },
+    "tun_excludes": { "type": "array", "items": { "type": "string" } },
+    "node_ids": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["config_id"],
+  "additionalProperties": false
+}
+```
+
+`data`：`ConfigDetail`。
+
+- **没有 `connect_mode`**：改接管方式必须新建配置。带上 → `INVALID_ARGUMENT / connect_mode_immutable`。
+- `node_ids` 是**整体替换**，不是增量追加；顺序即新顺序。
+- 修改不打断当前连接，下一次连接生效。
+- 意图是「换节点」而不是「换节点集」时，用 `NodeSwitch`，不要用本工具。
+
+错误：`INVALID_ARGUMENT`、`NOT_FOUND`、`CONFLICT`、`UNSUPPORTED`。
+
+---
+
+### 4.26 `NodeCreate`
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": { "type": "string", "maxLength": 64 },
+    "server": { "type": "string" },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "method": { "type": "string" },
+    "password": { "type": "string", "sensitive": true, "maxLength": 256 },
+    "config_id": { "type": "string" }
+  },
+  "required": ["name", "server", "port", "method", "password"],
+  "additionalProperties": false
+}
+```
+
+`data`：`NodeSummary`（`commands.md` §3.0）。
+
+- `password` 标 `sensitive`，`args_preview` 里打码；返回值与 `content` 永不含密码。
+- 手动模式允许私网地址（用户可能连自己的内网服务器）。
+- `config_id` 指定时追加到该配置；不指定只进节点池。
+- 不自动连接、不触发探测。
+
+错误：`INVALID_ARGUMENT`（`invalid_name` / `invalid_server` / `invalid_port` / `unsupported_method` / `invalid_password`）、`NOT_FOUND`、`SECRET_STORE`。
+
+---
+
+### 4.27 `NodeSwitch`
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "config_id": { "type": "string" },
+    "node_id": { "type": "string" }
+  },
+  "required": ["config_id", "node_id"],
+  "additionalProperties": false
+}
+```
+
+`data`：`NodeSwitchData`（`commands.md` §4.3）。
+
+| 当前状态 | 行为 |
+|---|---|
+| 未连接 | 只改 `current_node_id`；**不启动 VPN** |
+| 已连接、这套配置正在跑 | selector 热切换，进程不重启 |
+| 已连接、但不是这套配置 | `PRECONDITION_FAILED / config_not_running` |
+| 节点不属于该配置 | `NOT_FOUND / node_not_in_config` |
+
+- **「选中」不是「切换」**：模型不要为了「看看别的节点」调用本工具——那会真的改出口。
+- 热切换失败 → `PRECONDITION_FAILED / runtime_switch_failed`，`current_node_id` 不变。
+- 不要用 `VpnConnect({ node_id })` 表达切换：那会在未连接时启动 VPN，与用户意图不符。
+
+错误：`NOT_FOUND`、`PRECONDITION_FAILED`、`TIMEOUT`。
+
+---
+
+### 4.28 `NodeProbe`（D6）
+
+```json
+{
+  "type": "object",
+  "properties": { "node_id": { "type": "string" } },
+  "required": ["node_id"],
+  "additionalProperties": false
+}
+```
+
+`data`：`NodeProbeData`（`commands.md` §4.4）。
+
+- 已连接且测的是当前节点 → 走 Clash delay，测的是**真实可用性**（含密码与加密方式）。
+- 其余情况 → TCP 握手，只能说明端口活着。
+- **节点不可达不是工具错误**：返回 `ok: true` + `reachable: false` + `error`。只有 `node_id` 不存在才是 `Err`。
+- 不登记问题（J1）：单节点手动测试失败不等于用户被阻断。
+
+权限：`ReadOnly`。
+
+---
+
+### 4.29 `ProxyParams`（A5）
+
+```json
+{ "type": "object", "properties": {}, "additionalProperties": false }
+```
+
+`data`：`ProxyParams`（`commands.md` §4.5）。
+
+- 三级用户问「填什么地址」时用它；`host` 恒为 `127.0.0.1`，`protocols` 恒为 HTTP + SOCKS5 同端口。
+- `port_source = "runtime"` 时才是可用的实际端口；`pending` 时**不要编一个端口给用户**。
+- `reason = "tun_mode"` 时说明当前配置不需要代理地址，不要引导用户去填。
+
+权限：`ReadOnly`。
+
+---
+
+### 4.30 `ProbeRun`
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "config_id": { "type": "string" },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": { "type": "string" },
+          "url": { "type": "string" }
+        },
+        "required": ["label", "url"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
+```
+
+`data`：`ProbeReport`（`commands.md` §5.1）。
+
+- 固定顺序：DNS → 出口 IP → 出口与直连不同 → 各 target 可达。
+- `targets` 的服务名到 URL 的翻译由模型用分类目录（I1）完成，Host 不猜。
+- 失败会登记/合并问题；`issue_ids` 给出对应记录，模型可以用 `IssueGet` 取证据。
+- 未连接 → `PRECONDITION_FAILED / not_running`。这不是诊断工具，是连接后的验证。
+
+---
+
+### 4.31 `IssueList`（J2）
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "state": { "type": "string", "enum": ["open", "handed_off", "resolved", "ignored"] },
+    "severity": { "type": "string", "enum": ["P0", "P1", "P2"] },
+    "config_id": { "type": "string" },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+    "offset": { "type": "integer", "minimum": 0, "default": 0 }
+  },
+  "additionalProperties": false
+}
+```
+
+`data`：`{ issues: IssueSummary[], total }`。
+
+- 排序 `severity ASC`（P0 在前）→ `last_seen` 降序。
+- 不返回证据；要证据用 `IssueGet`。
+- 问题列表的展示**不依赖 AI**，模型只是读取者。
+
+权限：`ReadOnly`。
+
+---
+
+### 4.32 `IssueGet`（J2）
+
+```json
+{
+  "type": "object",
+  "properties": { "issue_id": { "type": "string" } },
+  "required": ["issue_id"],
+  "additionalProperties": false
+}
+```
+
+`data`：`IssueDetail`（`commands.md` §6.0），含脱敏后的 `evidence` 与 `actions`。
+
+- 不存在 → `NOT_FOUND`。
+- `evidence` 是采集时保存的，不是现在现采——它反映问题发生时的状态。
+
+权限：`ReadOnly`。
+
+---
+
+### 4.33 `IssueHandoff`（J3）
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "issue_id": { "type": "string" },
+    "session_id": { "type": "string" }
+  },
+  "required": ["issue_id"],
+  "additionalProperties": false
+}
+```
+
+`data`：`IssueHandoffData`（`commands.md` §6.3）。
+
+- 一次性投喂诊断包，不做多轮追问。
+- 没有可用 provider → `PRECONDITION_FAILED / no_provider`。
+- 已有转交会话时复用；`session_id` 可显式指定。
+- **投喂的不是凭据**：内容与 `IssueGet.evidence` 完全一致。
+
+---
+
+### 4.34 `IssueResolve`（J4）
+
+```json
+{
+  "type": "object",
+  "properties": { "issue_id": { "type": "string" } },
+  "required": ["issue_id"],
+  "additionalProperties": false
+}
+```
+
+`data`：`IssueResolveData`（`commands.md` §6.4）。
+
+- **模型说「修好了」不算数**：Host 自己复测，通过才 `resolved`。
+- 复测失败返回 `ok: true` + `verified: false`，不是错误。
+- 不可复测的权限类问题只校验前置条件。
+
+---
+
+### 4.35 `IssueIgnore`（J4）
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "issue_id": { "type": "string" },
+    "ignored": { "type": "boolean", "default": true }
+  },
+  "required": ["issue_id"],
+  "additionalProperties": false
+}
+```
+
+`data`：`IssueIgnoreData`（`commands.md` §6.5）。
+
+- `ignored = false` 表示恢复为 `open`，不是删除。
+- 幂等。
+
+---
+
 ## 5. 工具间协作约定
 
 ### 5.1 标准连接链路
 
 ```
-CatalogSearch → ProfileImport → VpnConnect
+用我们提供的：  ConfigCreate(source = "seed") → VpnConnect
+用我自己的：    NodeImportUrl / NodeCreate → ConfigCreate(node_ids) → VpnConnect
+换节点：        NodeSwitch
+换一套方案：    ConfigCreate → ConfigActivate（UI）/ VpnConnect({ config_id })
 ```
 
-`VpnConnect` **不隐式调用** `CoreInstall`：静默安装会让用户不知道自己的机器上多了一个二进制。
+`VpnConnect` **不隐式调用** `CoreInstall`：静默安装会让用户不知道自己的机器上多了一个二进制。也不隐式创建配置——没有配置时报 `no_config`，由 AI 走 `source_choice` 询问。
 
 ### 5.2 幂等矩阵
 
 | 工具 | 重复调用行为 |
 |---|---|
-| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ProfileList` / `JobGet` | 纯读取，天然幂等 |
-| `RuntimeStart` | 已 `running` → `ok: true`，`already_running: true` |
+| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ConfigList` / `ConfigDetail` / `NodeProbe` / `ProxyParams` / `IssueList` / `IssueGet` / `JobGet` | 纯读取，天然幂等 |
+| `RuntimeStart` | 已 `running` 且目标一致 → `ok: true`，`already_running: true` |
 | `RuntimeStop` / `VpnDisconnect` | 已 `idle` → `ok: true` |
-| `ProfileImport` | 同节点 → 返回已有 profile，`already_existed: true` |
-| `ProfileDelete` | 已不存在 → `ok: true`，`deleted: false`，`already_absent: true`；**active profile → `PRECONDITION_FAILED`** |
+| `ConfigCreate` | **不幂等**：同名 → `CONFLICT / duplicate_name` |
+| `ConfigUpdate` | 参数与现状一致 → `ok: true`，不发事件 |
+| `ConfigDelete` | 已不存在 → `ok: true`，`deleted: false`，`already_absent: true`；**正在连接 → `PRECONDITION_FAILED`** |
+| `NodeImportUrl` / `NodeCreate` | 同 `(source, source_key)` → 不新建，计入 `skipped`（`duplicate`）；`data` 仍返回已有节点 |
+| `NodeSwitch` | 目标就是当前节点 → `ok: true`，不发事件 |
 | `CoreInstall` | 同版本已在装或已装 → `CONFLICT`，`details.job_id` 指向进行中的任务 |
-| `VpnConnect` | 已连同一节点 → `ok: true`，不重复设置代理 |
+| `VpnConnect` | 已连同一配置同一节点 → `ok: true`，不重复设置代理 |
+| `ProbeRun` | 每次都是真实探测，不缓存；会刷新 `last_seen` |
+| `IssueHandoff` | 重复转交 → 复用会话，`last_handoff_at` 刷新，计数不变 |
+| `IssueResolve` / `IssueIgnore` | 状态已是目标值 → `ok: true`，不发事件 |
 
 ### 5.3 超时预算
 
 | 工具 | 同步超时 |
 |---|---|
 | 只读工具 | 3s |
+| `NodeProbe` | 5s（TCP 3s + 余量） |
+| `NodeImportUrl` | 15s（抓取 10s + 解析） |
 | `RuntimeStart` | 15s（含 10s 启动） |
 | `VpnConnect` | 30s |
+| `ProbeRun` | 30s（四项顺序执行） |
 | `RuntimeStop` / `VpnDisconnect` | 10s |
 | `CoreInstall` | 立即返回 `job_id` |
 
@@ -1199,6 +1522,8 @@ CatalogSearch → ProfileImport → VpnConnect
 ---
 
 ## 6. 与现有文档的差异
+
+> 本表记录 **1.x 时代**与旧文档的差异，保留作历史依据。2.0 之后的改名（profile → config/node）以 §8 的 3.0.0 变更记录为准，不再逐条回填本表。
 
 | # | 位置 | 现有文档写法 | 本契约写法 | 理由 |
 |---|---|---|---|---|
@@ -1220,9 +1545,9 @@ CatalogSearch → ProfileImport → VpnConnect
 |---|---|---|
 | 结构化信封放哪 | `metadata.aivpn`；模型只读 `content` | §1 |
 | `CoreInstall` 是否需要审批 | ~~恒需审批~~ → **已移除审批，直接执行**（2026-11-02 用户决定） | §2.1、§4.7 |
-| `VpnConnect` 入参 | `profile_id` / `node_id` 二选一 | §4.11 |
-| `ProfileList` / `DeepseekSetupKey` / `DeepseekSaveKey` / `JobGet` 是否保留 | 保留 | §3 表 |
-| `ProfileDelete` 是否加入 P1 | **加入**，`Write`、**无确认点**；不存在时幂等 `ok: true`；**不允许删 active profile**，命中直接 `PRECONDITION_FAILED` | §3 表第 18 行、§4.17 |
+| `VpnConnect` 入参 | `config_id`（省略用 active）+ `node_id`（省略用当前节点） | §4.11 |
+| 配置 / 节点 / 问题工具的保留 | 全部保留并新增；`ProfileList` → `ConfigList`，`ProfileImport` → `NodeImportUrl`，`ProfileDelete` → `ConfigDelete` | §3 表 |
+| `ConfigDelete` 是否允许删 active | **允许**（未连接时），删后回到空态；只拦「正在连接」 | §4.17 |
 | `VpnConnect` 审批粒度 | ~~会话内首次~~ → **已移除审批，直接执行** | §2.1、§3.2 |
 | `DeepseekSaveKey` 的 `ok` 语义 | **存储成功即 `ok: true`**；Key 有效性用 `data.validation` 表达，且 **`validation` 只回答 Key 是否有效**——余额不足归 `validation = "ok"` + `validation_detail = "insufficient_balance"` | §4.15 |
 | `next_actions` 点击语义 | 等价于用户发一条消息给 Agent，**不由 UI 直接执行** | §1.3 |
@@ -1233,11 +1558,28 @@ CatalogSearch → ProfileImport → VpnConnect
 
 **无。** 工具层的开放问题已全部收敛。
 
-其他三份的开放项也已关闭：`runtime.md` §10.2 只剩一个**待实测**项（`POST /close` 是否在 sing-box 1.14 可用，Bob W1 验证，不是待拍板）；`catalog.md` §11.2 为「无」；`events.md` §8.2 为「无」。
+其他契约的开放项：`runtime.md` §10.2 只剩一个**待实测**项（`POST /close` 是否在 sing-box 1.14 可用，Bob W1 验证，不是待拍板）；`catalog.md` §11.2 为「无」；`commands.md` §13 还剩 `seed_id` 命名与 `import_seed_file` 保留两条建议。
 
 ---
 
 ## 8. 变更记录
+
+### 3.0.0（2026-11-03，批 0 · 契约与数据模型）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.0.0` | 元数据 | 数据单位从 profile 换成 config + node |
+| 2 | `ProfileList` → `ConfigList`，`ProfileImport` → `NodeImportUrl`，`ProfileDelete` → `ConfigDelete` | 改名 | `commands.md` 2.0.0 |
+| 3 | 新增 `ConfigDetail` / `ConfigCreate` / `ConfigUpdate` / `NodeCreate` / `NodeSwitch` / `NodeProbe` / `ProxyParams` / `ProbeRun` | 新增工具 | 批 0 契约；`capabilities.md` A5 / B2 / B4 / D6 / K1–K5 |
+| 4 | 新增 `IssueList` / `IssueGet` / `IssueHandoff` / `IssueResolve` / `IssueIgnore` | 新增工具 | `issue-management.md` J2–J4 |
+| 5 | `VpnConnect` 入参 `profile_id` → `config_id`，新增 `node_id`；删除 `strategy`（没有第二种取值） | 不兼容 | 新模型 |
+| 6 | `VpnConnect` 不再有「用默认配置包」的隐式回退；没有配置报 `no_config` | 行为变更 | 不静默替用户选线路 |
+| 7 | `ConfigDelete` 允许删未连接的 active 配置 | 行为变更 | 新模型允许空态，且空态有新建出口 |
+| 8 | `DefaultProfileStatus` 改为种子模型（`seed_id` / `content_sha256` / 毫秒时间） | 不兼容 | `veyl_seed.json` |
+| 9 | 工具总数 22 → 35 | 计数 | — |
+| 10 | 注册清单同步更新；破坏性工具改为 `CoreInstall` / `ConfigDelete` / `VpnConnect` / `NetRepair` | 清单 | §3.1 |
+
+> 只读工具的判定以 §2.1 的列表为准；`NodeProbe` 与 `ProxyParams` 是只读，即使它们会发起网络请求。
 
 ### 1.2.0（2026-11-03，AskUserQuestion 接通）
 
