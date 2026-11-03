@@ -1,9 +1,9 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`1.2.0`
-> 状态：已冻结（P1.5 wave1，2026-11-02）
-> 上游：`docs/phase-1-technical-design.md` §4.2、§4.3、`docs/phase-1-5-requirements.md` §4.1
-> 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，1.1.0 起独立成文）
+> 契约版本：`2.0.0`
+> 状态：待 PM 审核（批 0 · 契约与数据模型，2026-11-03）
+> 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
+> 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，2.0.0）
 > 实现方：Rust（Host 发送）、TypeScript（UI 订阅）
 > 参考实现：`TweetPilot/src-tauri/src/claurst_session.rs`
 > 变更记录：见 §10
@@ -18,7 +18,8 @@
 
 - 事件名 **kebab-case**，与 TweetPilot 保持一致，便于复用前端经验。
 - payload 字段 **snake_case**。
-- 时间字段 **ISO 8601 UTC + `Z`**。
+- 事件信封的 `emitted_at`：**ISO 8601 UTC + `Z`**。
+- **落库实体字段的时间戳**（`created_at` / `first_seen` / `last_seen` / `checked_at` 等）：**Unix 毫秒整数**，与 `data-model.md` 的列类型一致。见 §2.3。
 - 错误码 **大写下划线**。
 - 所有 payload 带 `contract_version`。
 
@@ -37,14 +38,21 @@
 | 5 | `ai-status` | Host → UI | `AiStatusPayload` | 阶段状态变化 |
 | 6 | `ai-compact` | Host → UI | `AiCompactPayload` | 上下文压缩 |
 | 7 | `ai-request-end` | Host → UI | `AiRequestEndPayload` | 本轮请求结束 |
-| 8 | `runtime-state-changed` | Host → UI | `RuntimeStateChangedPayload` | 运行时状态迁移 |
-| 9 | `runtime-health-changed` | Host → UI | `RuntimeHealthChangedPayload` | 健康快照变化 |
-| 10 | `job-progress` | Host → UI | `JobProgressPayload` | 长任务进度 |
-| 11 | `app-lifecycle-changed` | Host → UI | `AppLifecycleChangedPayload` | 应用进程状态变化（1.1.0） |
-| 12 | `default-profile-updated` | Host → UI | `DefaultProfileUpdatedPayload` | 默认配置包变化（1.1.0 定名，wave2 接线） |
-| 13 | `ask-user-question` | Host → UI | `AskUserQuestionPayload` | 模型向用户提问，等待选择（1.2.0） |
+| 8 | `ask-user-question` | Host → UI | `AskUserQuestionPayload` | 模型向用户提问，等待选择 |
+| 9 | `runtime-state-changed` | Host → UI | `RuntimeStateChangedPayload` | 运行时状态迁移 |
+| 10 | `runtime-health-changed` | Host → UI | `RuntimeHealthChangedPayload` | 健康快照变化 |
+| 11 | `job-progress` | Host → UI | `JobProgressPayload` | 长任务进度 |
+| 12 | `app-lifecycle-changed` | Host → UI | `AppLifecycleChangedPayload` | 应用进程状态变化 |
+| 13 | `default-profile-updated` | Host → UI | `DefaultProfileUpdatedPayload` | 种子节点层变化 |
+| 14 | `config-changed` | Host → UI | `ConfigChangedPayload` | **2.0 新增**：配置增删改激活 |
+| 15 | `node-list-changed` | Host → UI | `NodeListChangedPayload` | **2.0 新增**：节点池或配置节点集变化 |
+| 16 | `node-switched` | Host → UI | `NodeSwitchedPayload` | **2.0 新增**：当前节点变化 |
+| 17 | `issue-changed` | Host → UI | `IssueChangedPayload` | **2.0 新增**：问题新增或状态变化 |
+| 18 | `layout-updated` | Host → UI | `LayoutUpdatedPayload` | **2.0 新增**：中间区域编排布局落库 |
 
-1–7 与 13 是 AI 会话事件，8–12 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
+1–8 是 AI 会话事件，9–18 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
+
+> **事件与命令成对**：每个改变持久状态的命令都必须有一条对应事件。没有事件的变更只允许发生在「只读命令」上。例外是 `probe_run`——它不改状态，但探测失败的副作用（登记问题）由 `issue-changed` 表达。
 
 ---
 
@@ -68,7 +76,12 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 每个 payload 都有 `emitted_at`（ISO 8601 UTC）。**这是相对 TweetPilot 的新增字段**，用于前端排查顺序问题；TweetPilot 的前端不读它，可以安全忽略。
 
-> **唯一例外**：`ask-user-question` 的 `created_at` / `expires_at` 用 Unix 毫秒（前端要做倒计时算术）。理由见 §4.8.5。
+> **两类例外**：
+>
+> 1. `ask-user-question` 的 `created_at` / `expires_at` 用 Unix 毫秒（前端要做倒计时算术）。理由见 §4.8.5。
+> 2. **2.0 起，所有直接来自数据库实体的时间戳都用 Unix 毫秒**：`config.created_at` / `updated_at` / `last_used_at`、`issue.first_seen` / `last_seen`、`probe.checked_at` 等。这些字段的值就是 SQLite 列里的整数，转换成 ISO 只会在 Host 里多做一次反序列化、在 UI 里多做一次 `Date.parse`，而且会让「毫秒整数」与「ISO 字符串」两种格式在同一条 payload 里并存。
+>
+> 判据：**这个时间是要落库的实体字段，还是信封/实时观测值？** 实体字段用毫秒，`emitted_at` 与运行时快照时间（`connected_since` / `last_transition_at` / `health.checked_at`）用 ISO。`data-model.md` §1 有完整说明。
 
 ### 2.4 大小限制
 
@@ -84,7 +97,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -106,7 +119,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -124,7 +137,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -166,7 +179,7 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 
 ```ts
 type ToolCallEndPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -206,7 +219,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -245,7 +258,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -273,7 +286,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -311,7 +324,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -320,13 +333,22 @@ type RuntimeStateChangedPayload = {
   upstream_version: string | null;
   reason: string | null;         // 人类可读，例 "clash_api_timeout"
   error: AivpnError | null;
+  snapshot: RuntimeSnapshot;     // 2.0 新增：迁移后的完整快照
   emitted_at: string;
 };
 ```
 
 触发：`runtime.md` §3.2 的每一条迁移，**每次都发**，不去重。
 
-UI 处理：更新状态栏；`to = "failed"` 时显示诊断入口。
+**为什么带 `snapshot`**：UI 需要的不只是「变成 running 了」，还需要「实际监听在哪个端口、连的是哪套配置、哪个节点」。不带快照的话，每个消费者都要在收到事件后再 `runtime_status()` 一次，而这两次调用之间状态可能又变了——代理卡片会短暂显示上一个端口。把快照挂在迁移事件上，顺序天然一致。
+
+不变量：
+
+- `snapshot.state === to`。不一致说明有人绕过了单写者，属于实现缺陷。
+- `snapshot.mixed_port` 是 `to = "running" | "degraded"` 时 `proxy_card` 的唯一端口来源（`proxy_params` 的 `runtime` 来源）。
+- payload ≤ 64 KB；`RuntimeSnapshot` 本身远小于上限，不需要截断。
+
+UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断入口；用 `snapshot.mixed_port` 重渲染代理卡。
 
 ---
 
@@ -334,7 +356,7 @@ UI 处理：更新状态栏；`to = "failed"` 时显示诊断入口。
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   health: HealthSnapshot;
   emitted_at: string;
 };
@@ -350,7 +372,7 @@ UI 处理：更新延迟/出口 IP/健康灯；`degraded` 时在状态栏加黄�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -380,7 +402,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -393,22 +415,26 @@ type AppLifecycleChangedPayload = {
 
 进程状态机与「事件 → 窗口 / 进程 / 连接」的完整对应表见 §4.7。
 
-### 4.6 `default-profile-updated`（1.1.0 定名，wave2 接线）
+### 4.6 `default-profile-updated`
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "1.2.0";
-  package_id: string;
-  version: string;                  // 本次应用的配置包版本
-  applied_at: string;               // ISO 8601 UTC
+  contract_version: "2.0.0";
+  seed_id: "veyl_seed";
+  content_sha256: string;           // 2.0：变化判定依据
+  version: string | null;           // 文件里的 version，仅展示
+  node_count: number;               // 2.0 新增：应用后的种子节点总数
   new_version_available: boolean;   // 应用后是否还有更新版本
+  applied_at: number;               // Unix 毫秒
   emitted_at: string;
 };
 ```
 
-触发：默认配置包被应用（首次拉取或刷新）之后。**不打断在线连接**（需求 §6.5）：事件只通知「有新版」，真正生效发生在下一次连接。
+触发：`veyl_seed.json` 被应用（首次拉取、刷新、或 `import_seed_file` 合并）之后。**不打断在线连接**：事件只通知「节点层变了」，真正生效发生在下一次连接。
 
-> wave2 实现。1.1.0 只冻结名字与载荷，不要求当前代码 emit。
+> 名称保留 `default-profile-*`：它对应能力 C 组的「官方默认配置」，与命令 `default_profile_*` 同名。2.0 只改载荷字段，不改事件名——事件名与命令名必须能互相找到。
+>
+> 节点增删同时会伴随一条 `node-list-changed`（`reason = "seed_refreshed"`）。两者不重复：本事件表达「种子版本层变了」，`node-list-changed` 表达「节点池的内容变了」，后者在 URL 导入、手动添加时也会发。
 
 ### 4.7 应用生命周期（1.1.0 新增，规范性）
 
@@ -448,7 +474,7 @@ type DefaultProfileUpdatedPayload = {
 
 ```ts
 type AskUserQuestionPayload = {
-  contract_version: "1.2.0";
+  contract_version: "2.0.0";
   session_id: string;
   request_id: string;
   question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
@@ -517,6 +543,164 @@ tool-call-end    (同一 request_id)
 3. 收到同一 `request_id` 的 `tool-call-end` 或 `ai-request-end` → **立即移除**该请求下所有未答浮层（此时 Host 已作废它们，再点只会得到 `question_not_pending`）。
 4. 窗口重载 / 切换会话后回来 → 调 `list_pending_questions({ sessionId })` 重建浮层。
 
+### 4.9 `config-changed`（2.0 新增）
+
+配置的增、删、改、激活。**左栏列表、中间底部节点详情、顶部按钮可用性都靠它刷新。**
+
+```ts
+type ConfigChangedPayload = {
+  contract_version: "2.0.0";
+  change: "created" | "updated" | "deleted" | "activated";
+  config_id: string;
+  config: ConfigSummary | null;      // deleted 时为 null；类型见 commands.md §3.0
+  active_config_id: string | null;   // 变更后的 active（可能为 null）
+  emitted_at: string;
+};
+```
+
+| `change` | 触发时机 | 额外说明 |
+|---|---|---|
+| `created` | `config_create` 事务提交后 | 若自动激活，紧跟一条 `activated` |
+| `updated` | `config_update` 提交后；`node_import_url` / `node_create` 追加节点到配置后 | 同一秒内多次更新合并为一条（以最后一次为准） |
+| `deleted` | `config_delete` 提交后 | `config = null`；`active_config_id` 可能变成 `null` |
+| `activated` | `config_activate` 提交后（含自动激活） | 切换前若已连接，**先收到 `runtime-state-changed`（stopped）再收到本事件** |
+
+规则：
+
+- **事务提交后才发**。事件早于提交，UI 会拿着还没落库的状态去渲染，下一次读又弹回去。
+- `config` 里**不含节点明细**。收到事件后 UI 若正在展示该配置，调 `config_detail` 取新节点集；否则只更新左栏那一行。
+- 切换配置时 `active_config_id` 是最终值，不是「上一个」。
+- 本事件**不承载连接状态**。连接状态只由 `runtime-state-changed` 表达（§4.7.3 的同一条原则）。
+
+### 4.10 `node-list-changed`（2.0 新增）
+
+节点池的内容，或某套配置的节点集发生变化。
+
+```ts
+type NodeListChangedReason =
+  | "seed_refreshed"          // 种子重新拉取并应用
+  | "url_import"              // node_import_url 新增节点
+  | "manual_create"           // node_create 新增节点
+  | "node_deleted"            // 种子刷新删掉了不再存在的节点
+  | "bindings_changed";       // config_update 整体替换了节点集
+
+type NodeListChangedPayload = {
+  contract_version: "2.0.0";
+  reason: NodeListChangedReason;
+  config_id: string | null;        // 只有 bindings_changed 时非空
+  node_count_total: number;        // 节点池总数
+  changed_node_ids: string[];      // 本次新增或删除的节点；> 200 时给空数组
+  emitted_at: string;
+};
+```
+
+规则：
+
+- **`changed_node_ids` 超过 200 条时返回空数组**，UI 收到空数组一律整表重拉。给一个被截断的列表比给空更糟——UI 会以为自己已经同步了。
+- 节点池的变化不等于当前配置的变化：种子刷新添加了节点，不会自动把它们绑进任何配置。绑不绑由配置的 `source = "seed"` 决定（见 `commands.md` §3.2）。
+- 当前节点的变化**不走本事件**，走 `node-switched`。
+- 种子刷新删除节点时，若被删的是某套配置的 `current_node_id`，数据库外键把它置 `null`，随后该配置的 `config-changed(updated)` 也会发出——UI 应从 `config_detail` 重新取，而不是用旧 id。
+
+### 4.11 `node-switched`（2.0 新增）
+
+一套配置的当前节点变了。
+
+```ts
+type NodeSwitchedPayload = {
+  contract_version: "2.0.0";
+  config_id: string;
+  from_node_id: string | null;
+  to_node_id: string;
+  connected: boolean;              // 是否同时做了在线热切换
+  runtime: RuntimeSnapshot | null; // connected = false 时为 null；类型见 commands.md §7.3
+  emitted_at: string;
+};
+```
+
+触发：
+
+| 场景 | `connected` | 说明 |
+|---|---|---|
+| `node_switch` 时未连接 | `false` | 只改了选择，网络没动 |
+| `node_switch` 时已连接 | `true` | 通过 selector 热切换，进程不重启；`runtime` 里是切换后的快照 |
+| `runtime_start` 带了 `nodeId` | `true` | 与连接同时发生 |
+
+- **热切换不产生 `runtime-state-changed`**：进程没停、状态没迁移，只是出口换了。UI 不能靠运行时状态去推断节点变了。
+- 切换失败不发本事件（`node_switch` 返回错误，`current_node_id` 保持不变）。
+- 「选中」与「切换」是两件事（`docs/center-panel.md` §2.1）：底部下拉里点一下只是本地 UI 状态，**不产生任何事件**；按下「切换到此节点」才调用命令并收到本事件。
+
+### 4.12 `issue-changed`（2.0 新增）
+
+问题记录新增或状态变化。**中间区域的问题卡由它驱动，且不依赖 AI。**
+
+```ts
+type IssueChangedPayload = {
+  contract_version: "2.0.0";
+  change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
+  issue: IssueSummary;                  // 变更后的状态
+  blocking_issue_id: string | null;     // 当前应插卡的那一条；null = 中间不插卡
+  open_counts: { P0: number; P1: number; P2: number };
+  emitted_at: string;
+};
+```
+
+| `change` | 触发时机 |
+|---|---|
+| `created` | 新问题登记（`probe_run` 失败、运行时异常退出、启动自检） |
+| `updated` | 同类问题再次出现：`count + 1`、`last_seen` 刷新、`severity` 可能升级 |
+| `handed_off` | `issue_handoff` 成功投喂 AI |
+| `resolved` | `issue_resolve` 复测通过 |
+| `ignored` | `issue_ignore(ignored = true)` |
+| `reopened` | 已 `resolved` / `ignored` 的同类问题再次出现，或 `issue_ignore(ignored = false)` |
+
+**`blocking_issue_id` 的计算规则（Host 唯一实现，UI 不重算）**：
+
+```
+存在 P0 → 取 first_seen 最早的 P0
+否则存在 P1 → 取 first_seen 最早的 P1
+否则 → null
+```
+
+- 中间区域**同一时刻最多一张问题卡**（`docs/issue-management.md` §4），这张卡就是 `blocking_issue_id` 指向的那条。
+- 多个 P0 同时存在时，其余收进「还有 N 个问题」——UI 用 `open_counts` 减去卡上那一条得到 N。
+- `ignored` 与 `resolved` **都从候选里排除**；P2 永远不进候选。
+- 本事件在**采集时**发出，不要求 AI 可用。AI 只是卡片上「让 AI 定位」按钮的处理者。
+- 本地规则插卡不写 `layouts` 表：`issue_card` 是**叠加渲染**，不是布局的一部分。这样 AI 编排的布局与故障卡互不覆盖。
+
+### 4.13 `layout-updated`（2.0 新增）
+
+当前配置的中间区域编排布局落库。
+
+```ts
+type LayoutUpdatedPayload = {
+  contract_version: "2.0.0";
+  config_id: string;
+  revision: number;            // 每配置单调递增，从 1 开始
+  layout: Layout;              // 见 commands.md §3.0
+  emitted_at: string;
+};
+```
+
+触发：AI 产出的布局通过校验并写入 `layouts` 表之后（批 4 接线）。
+
+规则：
+
+- **`revision` 单调递增**。UI 收到 `revision <= 已渲染的 revision` 时丢弃——网络/线程调度可能导致旧布局后到，覆盖新布局会让中间区域闪回上一个版本。
+- **块类型必须在封闭词汇表内**（`docs/center-panel.md` §2.5 的六个块 + 未来登记过的块）。不在表里的块由 Host **过滤掉并记日志**，不写库、不发事件里的那一项；整份布局全是非法块时**不覆盖旧布局**。
+- AI 不能改样式：`props` 只承载内容与参数，样式永远由设计规范决定。
+- **本地规则不写布局**（见 §4.12）。因此本事件只有 AI 编排一个来源，没有 `source` 字段。
+- 切换配置时**不重发本事件**：`config-changed(activated)` 之后 UI 调 `config_detail`，布局随详情一起返回。
+
+### 4.14 应用事件的顺序约定
+
+Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
+
+1. **配置先于连接**：`config-changed(activated)` 一定在随之而来的 `runtime-state-changed(starting)` 之前。
+2. **断开先于切换**：`config_activate` 带 `confirmDisconnect` 时，`runtime-state-changed(→ stopping/stopped)` 先于 `config-changed(activated)`。
+3. **节点切换不发运行时事件**（§4.11）。
+4. **问题事件与运行时事件互不阻塞**：一次崩溃可能同时产生 `runtime-state-changed(failed)` 与 `issue-changed(created)`，两者没有先后要求；UI 必须能处理任意顺序。
+5. **布局按 `revision` 丢弃旧值**（§4.13），不依赖到达顺序。
+
 ---
 
 ## 5. UI → Host 调用（invoke）
@@ -526,11 +710,11 @@ tool-call-end    (同一 request_id)
 > 原因：命令属于「UI → Host」方向，与本文档「Host → UI 的事件」是两个方向，混在一份文件里导致参数命名约定（camelCase）长期写错。
 >
 > 迁移时一并纠正的三处：
-> 1. invoke 参数名是 **camelCase**（`profileId` / `sessionId`），不是 snake_case。
+> 1. invoke 参数名是 **camelCase**（`configId` / `sessionId`），不是 snake_case。
 > 2. `catalog_list_nodes` / `profile_import_node` / `vpn_connect` / `vpn_disconnect` 从未在 `invoke_handler` 注册（「文档有、代码没有」）。
 > 3. `chat_history` / `deepseek_key_status` / `deepseek_save_key` / `deepseek_clear_key` 已实现但从未入契约（「代码有、文档没有」）。
 >
-> `import_seed_file` 的完整语义（两条 UI 入口、错误分类、脱敏要求）见 `commands.md` §3.8。
+> 2.0 起命令表以 `commands.md` 为唯一来源；`import_seed_file` 的完整语义见 `commands.md` §8.3。
 
 ---
 
@@ -584,7 +768,11 @@ idle
 
 ### 8.2 仍需 PM 决定
 
-**无。** 事件层的开放问题已全部收敛。
+| # | 议题 | 我的建议 | 状态 |
+|---|---|---|---|
+| 1 | `node-list-changed` 是否需要节流 | **不需要**。种子刷新一次一条、导入一次一条，量级远低于健康事件；给导入加节流反而会让「刚加的节点没出现」 | 待确认 |
+| 2 | `issue-changed` 是否在 `ignored` 时也带 `blocking_issue_id` | **带**。忽略一条 P0 后，中间该出现下一条 P0 或不再插卡，这个计算必须由 Host 一次给出，UI 不重算 | 待确认 |
+| 3 | `runtime-state-changed` 携带完整 `snapshot` 是否可接受 | **可接受**。payload 远小于 64 KB，换来的是端口/配置/节点三者的顺序一致性 | 待确认 |
 
 ---
 
@@ -623,6 +811,21 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.0.0（2026-11-03，批 0 · 契约与数据模型）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.0.0` | 元数据 | 数据模型换成「配置 + 节点池 + 问题」 |
+| 2 | 新增 `config-changed`（事件总数 13 → 18 之一） | 新增事件 | 左栏与配置状态必须能推 |
+| 3 | 新增 `node-list-changed` / `node-switched` | 新增事件 | 节点池与「切换到此节点」是两件事 |
+| 4 | 新增 `issue-changed`，带 `blocking_issue_id` 与 `open_counts` | 新增事件 | 中间最多一张问题卡，计算放 Host |
+| 5 | 新增 `layout-updated`，按 `revision` 丢弃旧值 | 新增事件 | AI 布局落库后要推给 UI |
+| 6 | `runtime-state-changed` 增加 `snapshot` | 字段新增 | 端口/配置/节点必须与状态迁移同序到达 |
+| 7 | `default-profile-updated` 改为种子模型：`seed_id` / `content_sha256` / `node_count`，`applied_at` 改毫秒 | 不兼容 | `veyl_seed.json` 取代 `bootstrap.json` |
+| 8 | 时间约定：落库实体字段用 Unix 毫秒，信封与运行时观测值用 ISO | 约定 | 与 `data-model.md` 列类型一致 |
+| 9 | 新增 §4.14 应用事件顺序约定 | 新增 | 新增事件之间必须有明确顺序 |
+| 10 | §5 的命令迁移说明改指 2.0 的 `commands.md` | 文档 | 命令版本已升 |
 
 ### 1.2.0（2026-11-03，P1.5 · AI 主动提问）
 

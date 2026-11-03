@@ -1,10 +1,10 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`1.2.0`
-> 状态：已冻结（P1.5 wave1，2026-11-02）
-> 上游：`docs/phase-1-5-requirements.md` §4、§5、§9
-> 相关：`events.md`（Host → UI 的反向通道）、`runtime.md` §2.5（`RuntimeStatus`）、`tools.md`（AI 工具）
-> 变更记录：见 §7
+> 契约版本：`2.0.0`
+> 状态：待 PM 审核（批 0 · 契约与数据模型，2026-11-03）
+> 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
+> 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
+> 变更记录：见 §15
 
 > ⚠️ **本文件的版本号不代表整个契合同步升级。**
 > 契约拆成多份之后，每份的版本各自独立：`catalog.md` 是**与服务端协商**的协议版本（改它会中断目录服务，见该文件变更记录），`tools.md` / `runtime.md` / `events.md` / 本文件是应用内部版本。
@@ -21,9 +21,45 @@
 
 **一个命令与一个 AI 工具如果语义相同，必须共用同一份 Host 实现**（`tools.md` §5）。UI 路径和模型路径出现两套逻辑，是本项目已经踩过的缺陷来源。
 
+### 0.1 2.0.0 为什么是一次大版本
+
+1.x 的数据单位是**一个节点 = 一条 profile**。2.0 换成**一套配置 = 一套完整的网络方案，挂多个节点**（`docs/configs-and-nav.md` §3）。这不是加字段能兼容的：
+
+| 1.x | 2.0 |
+|---|---|
+| `profile` = 一个节点 | `config` = 一套方案；`node` = 一台服务器 |
+| 一个节点只属于一条 profile | 一个节点可被多套配置引用 |
+| `runtime_start(profileId)` | `runtime_start(configId, nodeId?)` |
+| 没有任何「问题」实体 | `issue` 有状态、可计数、可转交 |
+| 没有布局持久化 | `layout` 按配置存 |
+
+产品还没有用户，**不做迁移、不留兼容层**（`docs/implementation-plan.md` §1）。所有旧命令直接删除，数据库整体重建，详见 §10 与 `data-model.md` §6。
+
+### 0.2 跨文件影响（本批未改，但必须同步）
+
+本文件是 2.0.0，而 `runtime.md`（1.1.0）与 `tools.md`（1.2.0）**尚未升级**，在当前状态下与本文不一致。必须由后续任务补齐，否则 Bob 会照着旧字段名实现：
+
+| 文件 | 需要改成 | 影响 |
+|---|---|---|
+| `runtime.md` §2.2 | `RuntimeMode = "system_proxy" \| "tun"` | 现在只有 `system_proxy` |
+| `runtime.md` §2.5 | `profile_id` / `profile_name` → `config_id` / `config_name`，新增 `node_id` / `node_name` | 旧字段名在新模型里没有对应物 |
+| `runtime.md` §8.1 | 持久化文件同样改名 | 崩溃恢复表 |
+| `tools.md` §3 / §4 | `ProfileList` → `ConfigList`，`ProfileImport` → `NodeImportUrl`，`ProfileDelete` → `ConfigDelete`；新增 `ConfigDetail` / `NodeSwitch` / `NodeProbe` / `ProbeRun` / `ProxyParams` / `IssueList` / `IssueHandoff` / `IssueResolve` / `IssueIgnore`；`VpnConnect` 的 `profile_id` → `config_id` | AI 侧能力与 UI 侧命令必须同源 |
+
+**在两张表补齐之前，任何按本文实现的代码都只能对 UI 侧成立。** 这是契约先行的预期红色，不要为了让它一致而回退本文。
+
+### 0.3 批 0 的 PM 裁定（2026-11-03）
+
+| # | 裁定 | 落点 |
+|---|---|---|
+| OPEN-05 | 问题状态统一 `open` / `handed_off` / `resolved` / `ignored`；严重度统一 `P0` / `P1` / `P2` | §6、`data-model.md` §3.6 |
+| OPEN-06 | `configs` 表必须承载 DNS 候选与 TUN 内网排除网段，用 JSON 列（一组值、无独立生命周期，不需要子表） | §3.0、`data-model.md` §3.2 |
+| OPEN-03 | 命令名以本文件为准；`capabilities.md` 由 PM 维护，本文件只标注能力 ID | §11 |
+| — | 「测试连通」新增能力 **D6 测试单个节点连通性** | §11.1 的 `node_probe` |
+
 ---
 
-## 1. 命名与参数约定（**这一节是本节契约最容易被写错的地方**）
+## 1. 命名与参数约定
 
 ### 1.1 命令名用 snake_case，参数名用 camelCase
 
@@ -31,15 +67,14 @@ Tauri 2 的 `#[tauri::command]` 默认把 JS 侧的 **camelCase 参数**映射�
 
 | 侧 | 写法 | 例子 |
 |---|---|---|
-| 命令名（invoke 第一个参数） | snake_case | `runtime_start`、`import_seed_file` |
-| 参数键（args 对象的键） | **camelCase** | `profileId`、`sessionId`、`text` |
-| Rust 形参 | snake_case | `profile_id: Option<String>` |
-| 返回值字段 | snake_case | `request_id`、`profile_id` |
+| 命令名（invoke 第一个参数） | snake_case | `config_create`、`node_import_url` |
+| 参数键（args 对象的键） | **camelCase** | `configId`、`nodeId`、`sessionId` |
+| Rust 形参 | snake_case | `config_id: Option<String>` |
+| 返回值字段 | snake_case | `config_id`、`node_count` |
 
 **现存证据**（不要按旧文档改）：
 
 ```
-src/agent/tauriBridge.ts:86   call("profile_delete", { profileId })
 src/agent/tauriBridge.ts:77   call("ai_send_message", { sessionId, text })
 src-tauri/src/agent/commands.rs:14   session_id: String
 ```
@@ -57,7 +92,9 @@ invoke("llm_provider_test", { draft: { baseUrl: "..." } })
 
 Rust 侧从嵌套结构体里按什么名字取 `baseUrl`，取决于它有没有 `rename_all`。写错了**编译不报错、运行不报错**，只是那个字段永远是 `None`——表现是「参数传了但没生效」，排查成本极高。
 
-要用可选字段就**平铺到顶层**（见 §3.16），要么在嵌套结构体上显式写 `#[serde(rename_all = "camelCase")]` 并在契约里注明。本项目选前者。
+要用可选字段就**平铺到顶层**（见 §9.4），要么在嵌套结构体上显式写 `#[serde(rename_all = "camelCase")]` 并在契约里注明。本项目选前者。
+
+**例外**：数组元素里的对象（如 `probe_run.targets[]`、`layout.blocks[]`）是数据而非命令参数，字段名仍用 snake_case，由各自结构体显式声明。
 
 ### 1.2 返回值与错误
 
@@ -73,152 +110,634 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 
 标了「幂等」的命令重复调用不产生额外副作用，返回值反映最终状态而非本次动作。
 
+### 1.5 时间与标识（2.0 新增）
+
+| 对象 | 规则 |
+|---|---|
+| **落库实体的时间戳** | **Unix 毫秒整数**（`number`）。配置、节点、问题、布局返回与事件里一律是毫秒，不做 ISO 转换 |
+| **事件信封的 `emitted_at`** | 仍是 ISO 8601 UTC，见 `events.md` §2.3 |
+| **运行时快照的时间**（`connected_since` / `last_transition_at` / `health.checked_at`） | 仍是 ISO 8601 UTC，由 `runtime.md` 定义。运行时状态是**实时观测值**，不是落库实体 |
+| **id** | 不透明字符串，前缀区分类型：`cfg_` / `nod_` / `iss_` / `prb_` / `q_` / `p_`，后接 16 位小写十六进制。**UI 不得从 id 推导任何信息**，也不得跨类型混用 |
+
+> 为什么实体时间用毫秒：这些值直接来自 SQLite 列，用 ISO 要在 Host 里做两次转换、在前端再做一次解析，且排序与「第几次出现」的算术都在毫秒上更直接。唯一需要人读的地方是 UI，由 UI 格式化。
+
 ---
 
 ## 2. 命令总表
 
 | # | 命令 | 入参 | 返回 | 状态 |
 |---|---|---|---|---|
-| 1 | `ai_send_message` | `{ sessionId, text, attachments? }` | `{ request_id }` | 已接线 |
-| 2 | `ai_cancel` | `{ requestId }` | `{ cancelled: boolean }` | 已接线 |
-| 3 | `runtime_status` | `{}` | `RuntimeStatus` | 已接线 |
-| 4 | `runtime_start` | `{ profileId?: string }` | `RuntimeStatus` | **1.1.0 新增** |
-| 5 | `runtime_stop` | `{}` | `RuntimeStatus` | **1.1.0 新增** |
-| 6 | `profile_list` | `{}` | `ProfileListData` | **1.1.0 新增** |
-| 7 | `profile_delete` | `{ profileId }` | `ProfileDeleteData` | 已接线 |
-| 8 | `chat_history` | `{ sessionId? }` | `ChatHistory` | 已接线（此前未入契约，1.1.0 补录） |
-| 9 | `rename_session` | `{ sessionId, title }` | `{ id, title, created_at }` | 已接线 |
-| 10 | `import_seed_file` | `{ path }` | `ImportSeedResult` | 已接线 |
-| 11 | `deepseek_key_status` | `{}` | `{ configured, masked }` | 已接线（补录） |
-| 12 | `deepseek_save_key` | `{ key }` | `{ masked, verified }` | 已接线（补录） |
-| 13 | `deepseek_clear_key` | `{}` | `{ ok: true }` | 已接线（补录） |
-| 14 | `onboarding_status` | `{}` | `OnboardingStatus` | **1.1.0 新增** |
-| 15 | `onboarding_complete` | `{ skippedKey: boolean }` | `{ ok: true }` | **1.1.0 新增** |
-| 16 | `net_repair` | `{ action }` | `NetRepairResult` | **1.1.0 新增（wave2 实现）** |
-| 17 | `default_profile_refresh` | `{}` | `DefaultProfileResult` | **1.1.0 预留（wave2 实现）** |
-| 18 | `default_profile_status` | `{}` | `DefaultProfileResult` | **1.1.0 预留（wave2 实现）** |
-| 19 | `open_log_dir` | `{}` | `{ path: string }` | **1.1.0 新增** |
-| 20 | `chat_delete` | `{ sessionId }` | `{ ok: true }` | **1.1.0 新增** |
-| 21 | `llm_provider_list` | `{}` | `LlmProviderList` | **1.1.0 新增** |
-| 22 | `llm_provider_save` | `{ providerId?, name, protocol, baseUrl?, model, apiKey? }` | `LlmProvider` | **1.1.0 新增** |
-| 23 | `llm_provider_delete` | `{ providerId }` | `{ ok: true }` | **1.1.0 新增** |
-| 24 | `llm_provider_activate` | `{ providerId }` | `{ active_provider_id }` | **1.1.0 新增** |
-| 25 | `llm_provider_test` | `{ providerId?, name?, protocol?, baseUrl?, model?, apiKey? }` | `LlmTestResult` | **1.1.0 新增** |
-| 26 | `reply_user_question` | `{ sessionId, questionId, answer }` | `{ ok: true }` | **1.2.0 新增** |
-| 27 | `list_pending_questions` | `{ sessionId }` | `{ questions: PendingQuestion[] }` | **1.2.0 新增** |
-| — | `catalog_list_nodes` | — | — | **未接线**，见 §4 |
-| — | `profile_import_node` | — | — | **未接线**，见 §4 |
-| — | `vpn_connect` | — | — | **1.1.0 作废**，由 `runtime_start` 取代 |
-| — | `vpn_disconnect` | — | — | **1.1.0 作废**，由 `runtime_stop` 取代 |
+| 1 | `config_list` | `{}` | `ConfigListData` | **2.0 新增** |
+| 2 | `config_create` | `{ name, connectMode, routeMode, source?, nodeIds?, listenPort?, dns?, tunExcludes? }` | `ConfigDetail` | **2.0 新增** |
+| 3 | `config_update` | `{ configId, name?, routeMode?, listenPort?, dns?, tunExcludes?, nodeIds? }` | `ConfigDetail` | **2.0 新增** |
+| 4 | `config_delete` | `{ configId }` | `ConfigDeleteData` | **2.0 新增** |
+| 5 | `config_activate` | `{ configId, confirmDisconnect? }` | `ConfigActivateData` | **2.0 新增** |
+| 6 | `config_detail` | `{ configId }` | `ConfigDetail` | **2.0 新增** |
+| 7 | `node_import_url` | `{ url, configId? }` | `NodeImportResult` | **2.0 新增** |
+| 8 | `node_create` | `{ name, server, port, method, password, configId? }` | `NodeSummary` | **2.0 新增** |
+| 9 | `node_switch` | `{ configId, nodeId }` | `NodeSwitchData` | **2.0 新增** |
+| 10 | `node_probe` | `{ nodeId }` | `NodeProbeData` | **2.0 新增** |
+| 11 | `proxy_params` | `{}` | `ProxyParams` | **2.0 新增** |
+| 12 | `probe_run` | `{ configId?, targets? }` | `ProbeReport` | **2.0 新增** |
+| 13 | `issue_list` | `{ state?, severity?, configId?, limit?, offset? }` | `{ issues, total }` | **2.0 新增** |
+| 14 | `issue_get` | `{ issueId }` | `IssueDetail` | **2.0 新增** |
+| 15 | `issue_handoff` | `{ issueId, sessionId? }` | `IssueHandoffData` | **2.0 新增** |
+| 16 | `issue_resolve` | `{ issueId }` | `IssueResolveData` | **2.0 新增** |
+| 17 | `issue_ignore` | `{ issueId, ignored? }` | `IssueIgnoreData` | **2.0 新增** |
+| 18 | `runtime_status` | `{}` | `RuntimeSnapshot` | 保留（字段 2.0 改） |
+| 19 | `runtime_start` | `{ configId?, nodeId? }` | `RuntimeSnapshot` | 保留（参数 2.0 改） |
+| 20 | `runtime_stop` | `{}` | `RuntimeSnapshot` | 保留 |
+| 21 | `net_repair` | `{ action, port? }` | `NetRepairResult` | 保留 |
+| 22 | `default_profile_status` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
+| 23 | `default_profile_refresh` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
+| 24 | `import_seed_file` | `{ path }` | `SeedImportResult` | 保留（语义 2.0 改） |
+| 25 | `ai_send_message` | `{ sessionId, text, attachments? }` | `{ request_id }` | 保留 |
+| 26 | `ai_cancel` | `{ requestId }` | `{ cancelled: boolean }` | 保留 |
+| 27 | `chat_history` | `{ sessionId? }` | `ChatHistory` | 保留 |
+| 28 | `chat_delete` | `{ sessionId }` | `{ ok: true }` | 保留 |
+| 29 | `rename_session` | `{ sessionId, title }` | `{ id, title, created_at }` | 保留 |
+| 30 | `reply_user_question` | `{ sessionId, questionId, answer }` | `{ ok: true }` | 保留 |
+| 31 | `list_pending_questions` | `{ sessionId }` | `{ questions: PendingQuestion[] }` | 保留 |
+| 32 | `llm_provider_list` | `{}` | `LlmProviderList` | 保留 |
+| 33 | `llm_provider_save` | `{ providerId?, name, protocol, baseUrl?, model, apiKey? }` | `LlmProvider` | 保留 |
+| 34 | `llm_provider_delete` | `{ providerId }` | `{ ok: true }` | 保留 |
+| 35 | `llm_provider_activate` | `{ providerId }` | `{ active_provider_id }` | 保留 |
+| 36 | `llm_provider_test` | `{ providerId?, name?, protocol?, baseUrl?, model?, apiKey? }` | `LlmTestResult` | 保留 |
+| 37 | `deepseek_key_status` | `{}` | `{ configured, masked }` | 保留 |
+| 38 | `deepseek_save_key` | `{ key }` | `{ masked, verified }` | 保留 |
+| 39 | `deepseek_clear_key` | `{}` | `{ ok: true }` | 保留 |
+| 40 | `open_log_dir` | `{}` | `{ path: string }` | 保留 |
+| 41 | `open_external` | `{ url }` | `{ ok: true }` | 保留（1.2.0 漏记，2.0 补录） |
 
-> 「已接线」= 当前 `invoke_handler` 里注册了。`invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
+> 「状态」三列含义：**新增** = 2.0 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
+> `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
 
 ---
 
-## 3. 逐条语义
+## 3. 配置
 
-### 3.1 `runtime_start { profileId?: string }` → `RuntimeStatus`
+一套配置 = 一套完整的网络方案：连接方式、分流策略、节点集、当前节点、DNS、端口、内网排除（`docs/configs-and-nav.md` §3）。这些是一整套，**不拆开单独切换**。
 
-无 AI 模式的主行动。与 AI 工具 `RuntimeStart` **共用同一份 Host 实现**。
+### 3.0 共用类型
+
+```ts
+type ConfigMode = "system_proxy" | "tun";
+type RouteMode = "direct" | "proxy_all" | "proxy_selected";
+
+// DNS 候选：local 直连查询，remote 经代理查询。
+// 空数组表示「由生成器按用户国家自动选」，落库时也是空数组，不预填常量——
+// 常量会被当成用户的选择，从此不再跟随国家变化。
+type DnsConfig = {
+  mode: "auto" | "custom";
+  local: string[];     // 0–3 条
+  remote: string[];    // 0–2 条
+};
+
+type ConfigSummary = {
+  config_id: string;
+  name: string;
+  connect_mode: ConfigMode;          // system_proxy = 只给代理地址；tun = 接管全部
+  route_mode: RouteMode;
+  node_count: number;
+  listen_port: number | null;        // system_proxy：本机代理端口；null = 自动。tun 恒为 null
+  is_active: boolean;
+  current_node_id: string | null;    // 节点集为空时为 null
+  created_at: number;                // Unix 毫秒
+  updated_at: number;                // Unix 毫秒
+  last_used_at: number | null;       // 最近一次以它发起连接的时刻
+};
+
+type NodeSummary = {
+  node_id: string;
+  name: string;
+  server: string;
+  port: number;
+  method: string;
+  protocol: "shadowsocks";           // 本阶段唯一取值
+  source: "seed" | "url" | "manual";
+  created_at: number;                // Unix 毫秒
+};
+
+type Layout = {
+  version: 1;
+  blocks: Array<{ type: BlockType; props?: Record<string, unknown> }>;
+};
+
+type ConfigDetail = ConfigSummary & {
+  nodes: NodeSummary[];              // 按配置内顺序，不是创建顺序
+  dns: DnsConfig;                    // 本地 / 境外 DNS 候选
+  tun_excludes: string[];            // 仅 tun；system_proxy 恒为空数组
+  layout: Layout | null;             // null = 这个配置还没有编排布局
+};
+```
+
+**任何返回值都不含节点密码。** `NodeSummary` 里没有密码字段，`config_detail` 也没有。密码只在 `secrets.enc` 里，键为 `node:<node_id>`（`data-model.md` §5）。
+
+**不变量（必须实现）**
+
+1. 同一时刻最多一个 `is_active = true` 的配置（数据库层用部分唯一索引兜底）。
+2. `node_count` 是 `config_nodes` 的实时计数，不是缓存列。
+3. `current_node_id` 必须是该配置节点集里的一个；节点被删时置 `null`。
+4. `connect_mode = "tun"` 时 `listen_port` 恒为 `null`；`system_proxy` 时 `listen_port` 可为配置值或 `null`（自动）。`tun_excludes` 只在 `tun` 下允许非空。
+
+### 3.1 `config_list {}` → `ConfigListData`
+
+```ts
+type ConfigListData = {
+  configs: ConfigSummary[];
+  active_config_id: string | null;
+};
+```
+
+- 数据源只有本地库，**不联网**。
+- 排序：`last_used_at DESC NULLS LAST`，再按 `created_at ASC`。后端给的就是这个顺序，UI 不另排。
+- 空列表是合法状态，返回 `configs: []`，**不报错**。空态由 UI 渲染（`docs/configs-and-nav.md` §2.1）。
+- 列表里**不返回节点明细**，避免左栏为 N 个配置各拉一遍；要节点看 `config_detail`。
+
+### 3.2 `config_create { name, connectMode, routeMode, source?, nodeIds?, listenPort?, dns?, tunExcludes? }` → `ConfigDetail`
+
+| 参数 | 必填 | 规则 |
+|---|---|---|
+| `name` | 是 | trim 后非空、≤ 40 字符；**不允许重名**（trim 后逐字节比较）。重复 → `CONFLICT`，`details.reason = "duplicate_name"` |
+| `connectMode` | 是 | `"system_proxy"` / `"tun"`。**故意没有默认值**——连接方式是用户明确选的，见下 |
+| `routeMode` | 是 | `"direct"` / `"proxy_all"`。`"proxy_selected"` 本批返回 `UNSUPPORTED`，`details.reason = "route_mode_not_ready"`（自定义规则在批 3） |
+| `source` | 否 | `"seed"`：绑定当前种子里的全部节点；与 `nodeIds` **互斥** |
+| `nodeIds` | 否 | 绑定已有节点，顺序即节点顺序 |
+| `listenPort` | 否 | 仅 `system_proxy`；1000–65535。`tun` 传了 → `INVALID_ARGUMENT`，`details.reason = "listen_port_not_allowed"` |
+| `dns` | 否 | `DnsConfig`；省略 = `{ mode: "auto", local: [], remote: [] }`。`custom` 时 `local` 至少 1 条，地址必须是合法 IP |
+| `tunExcludes` | 否 | 仅 `tun`；CIDR 字符串数组，≤ 32 项。格式非法 → `INVALID_ARGUMENT`，`details.reason = "invalid_cidr"` |
+
+规则：
+
+- `source = "seed"` 且种子为空 → `PRECONDITION_FAILED`，`details.reason = "seed_unavailable"`，`details.hint = "先刷新默认配置或手动添加节点"`。
+- `nodeIds` 里有不存在的 id → `NOT_FOUND`，`details.node_ids` 列出全部无效项（一次报全，不让用户试错）。
+- **不传 `source` 也不传 `nodeIds`** → 允许，创建空节点集的配置。空配置可以存在、可以在左栏看到、可以激活，但**不能连接**（`runtime_start` 报 `no_nodes`）。这是给「先建壳子、稍后导入」用的。
+- `current_node_id` 取节点集里的第一个。
+- 新建后是否自动激活：
+
+  | 当前状态 | 行为 |
+  |---|---|
+  | 没有 active 配置 | **自动成为 active**（全新安装的第一套必须能直接连） |
+  | 有 active、当前**未连接** | **自动成为 active**（与左栏「未连接时直接切，无感」同一条规则） |
+  | 有 active、当前**已连接** | **不自动激活**，返回 `is_active = false`；UI 提示「已创建，从左侧切换」 |
+
+  > 已连接时静默改 active 等于静默换网络，和「节点连不上不得悄悄回退默认包」是同一条原则。
+
+- 成功后发 `config-changed`（`change = "created"`，若自动激活再发一条 `"activated"`），见 `events.md` §4.9。
+
+错误：`INVALID_ARGUMENT`、`CONFLICT`、`NOT_FOUND`、`PRECONDITION_FAILED`、`UNSUPPORTED`、`INTERNAL`。
+
+### 3.3 `config_update { configId, name?, routeMode?, listenPort?, dns?, tunExcludes?, nodeIds? }` → `ConfigDetail`
+
+| 字段 | 可改 | 说明 |
+|---|---|---|
+| `name` | ✅ | 同样的非空 / ≤ 40 / 不重名校验 |
+| `routeMode` | ✅ | 只影响下一次生成配置；**不在线切换**（在线换分流是 G2，批 3 走 selector） |
+| `listenPort` | ✅ | 仅 `system_proxy` 配置；改端口在下一次连接生效 |
+| `dns` | ✅ | 整体替换；`custom` 的校验同 §3.2 |
+| `tunExcludes` | ✅ | 仅 `tun` 配置 |
+| `nodeIds` | ✅ | **整体替换**节点集，顺序即新顺序；`current_node_id` 不在新集合里时落到第一个 |
+| `connectMode` | ❌ | **没有这个参数**。带上它 → `INVALID_ARGUMENT`，`details.reason = "connect_mode_immutable"` |
+
+- **改连接方式必须新建一套配置**（`docs/configs-and-nav.md` §4）：system_proxy 与 tun 是两种完全不同的接管方式，就地改会让「我刚才明明配好了」变成「它自己变了」。
+- `routeMode = "proxy_selected"` 同 §3.2，本批 `UNSUPPORTED`。
+- 修改**不打断当前连接**：新值只写库；下一次连接或下一次切换节点时生效。UI 需要提示「下次连接生效」时，用返回值与当前 `RuntimeSnapshot` 自行比较，Host 不额外发信号。
+- 改的是 active 配置且当前已连接 → `runtime_status.config_hash` 与新配置不一致，但**不自动重连**。
+- 幂等：参数与现状完全一致时仍返回同一份 `ConfigDetail`，不发事件。
+- 成功后发 `config-changed`（`change = "updated"`）。
+
+错误：`INVALID_ARGUMENT`、`NOT_FOUND`、`CONFLICT`、`UNSUPPORTED`、`INTERNAL`。
+
+### 3.4 `config_delete { configId }` → `ConfigDeleteData`
+
+```ts
+type ConfigDeleteData = {
+  config_id: string;
+  deleted: boolean;              // true = 本次真的删掉了
+  already_absent: boolean;       // true = 本来就不存在（幂等命中）
+  active_config_id: string | null;
+};
+```
+
+| 情况 | 结果 |
+|---|---|
+| 不存在 | 幂等：`deleted = false`、`already_absent = true`，不报错 |
+| 是当前正在连接的配置 | `PRECONDITION_FAILED`，`details.reason = "connected"`。**UI 先断开再删**，Host 不替用户断网 |
+| 是 active 但未连接 | 允许删除；`active_config_id` 变为 `null`（回到空态，空态可再新建） |
+| 有配置引用的节点 | **不删节点**，只删 `config_nodes` 关系（节点是共享的） |
+
+- 级联删除：该配置的 `config_nodes`、`layouts`、**该配置范围内的问题记录**（`issues.config_id` 外键级联）。问题记录的删除是刻意的：配置都没了，挂在它上面的诊断没有意义，留着会在问题列表里出现指向不存在配置的卡片。
+- 成功后发 `config-changed`（`change = "deleted"`）。
+- **不设「默认配置不可删除」的特例**（`docs/configs-and-nav.md` §2.1）：删光之后回到空态，从空态能重新生成。
+
+错误：`PRECONDITION_FAILED`（`connected`）、`INTERNAL`。
+
+### 3.5 `config_activate { configId, confirmDisconnect? }` → `ConfigActivateData`
+
+```ts
+type ConfigActivateData = {
+  active_config_id: string;
+  reconnect: "not_running" | "reconnected" | "reconnect_failed" | "skipped_no_nodes";
+  runtime: RuntimeSnapshot | null;   // not_running / skipped_no_nodes 时为 null
+};
+```
+
+| 当前状态 | 行为 |
+|---|---|
+| 未连接 | 直接切 active，无感；`reconnect = "not_running"` |
+| 已连接、目标就是当前配置 | 幂等返回，不发事件 |
+| 已连接、换到另一套、**没带 `confirmDisconnect`** | `PRECONDITION_FAILED`，`details.reason = "will_disconnect"`，`details.connected_config_id` 给出当前连接的是哪套。**不静默切换** |
+| 已连接、带 `confirmDisconnect: true` | 先 `runtime_stop` → 改 active → 用新配置 `runtime_start`（自动重连），`reconnect = "reconnected"` 或 `"reconnect_failed"` |
+| 目标配置节点集为空 | 允许激活，但不自动重连（`reconnect = "skipped_no_nodes"`）；UI 应在左栏标「无节点」 |
+
+- **确认的粒度是「这一次切换」**：`confirmDisconnect` 不记忆、不复用。每次换配置都要重新确认。
+- `reconnect_failed` **不抛错**：切换本身成功了，失败的是重连。`runtime` 里带失败后的快照，`last_error` 说明原因；这样 UI 能同时表达「已切到新配置」和「没连上」，而不是笼统报一个错误让用户不知道 active 变没变。
+- 成功后发 `config-changed`（`change = "activated"`）。
+
+错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`will_disconnect`、`quitting`）、`INTERNAL`。
+
+### 3.6 `config_detail { configId }` → `ConfigDetail`
+
+- 中间底部节点详情与节点下拉的数据源（`docs/center-panel.md` §2.5.1：固定骨架「底部节点详情 / 下拉」→ B1）。
+- `nodes` 按配置内顺序返回；UI **不重排、不按名字排序**——用户拖过的顺序就是顺序。
+- `layout` 随配置一起返回：切配置后 UI 立即拿到该配置的布局，不需要再发一次请求。布局写入走 AI 编排（批 4），UI 没有写布局的命令。
+- 不存在 → `NOT_FOUND`。
+- 只读，不联网，不发事件。
+
+---
+
+## 4. 节点
+
+节点是**全局池**里的服务器，一套配置通过 `config_nodes` 引用若干节点。同一个节点可以被多套配置引用（`docs/configs-and-nav.md` §7）。
+
+### 4.1 `node_import_url { url, configId? }` → `NodeImportResult`
+
+```ts
+type NodeImportResult = {
+  imported: number;
+  skipped: Array<{ name: string | null; reason: ImportSkipReason }>;
+  nodes: NodeSummary[];          // 本次新增的（已存在的不会出现在这里）
+};
+
+type ImportSkipReason =
+  | "unsupported_scheme"         // 不是 ss://
+  | "unsupported_method"         // method 不在白名单
+  | "malformed"                  // 结构不合法
+  | "duplicate"                  // 池里已有相同 server+port+method+name
+  | "subscription_empty";        // 整段解码后没有任何有效行
+```
+
+| 边界 | 要求 |
+|---|---|
+| 协议 | **仅 `https`**。`http` 一律 `INVALID_ARGUMENT`，`details.reason = "insecure_url"`——订阅链接里通常直接含节点密码，明文传输等于把它交给链路上的每一个人 |
+| 支持的格式 | base64 编码的 `ss://` 多行列表；或直接是换行的 `ss://` 列表。两种 SIP002 形态都要认：`ss://base64(method:password)@host:port#name` 与整段 base64 的 `ss://base64(method:password@host:port)#name` |
+| SSRF | 只允许解析到**公网**地址；禁止重定向到内网；最多 3 次重定向；响应 ≤ 1 MB；超时 10 s。用户填的 URL 由我们发起请求，不设限就能访问本机与内网服务 |
+| 拉不到 | `UPSTREAM_ERROR`，`details.reason = "fetch_failed"`，**不保存空配置、不创建节点** |
+| 自动连接 | **不做**。拉下来的东西来自任何地方，用户确认之后才生效 |
+
+- 节点去重键：`server` + `port` + `method` + `name`。命中已有节点时计入 `skipped`（`reason = "duplicate"`），**不新建记录**。
+- 传了 `configId` → 新节点按解析顺序追加到该配置节点集末尾；配置已有 `current_node_id` 时不动它，没有时取第一个。发 `node-list-changed`（`reason = "url_import"`）+ `config-changed`（`change = "updated"`）。
+- 不传 `configId` → 只进节点池，不绑定任何配置。
+- 返回值与日志**永不含密码**，不回显订阅内容。
+- 本阶段**只做 Shadowsocks**，method 白名单由 Host 常量维护（`nodes::SUPPORTED_METHODS`，覆盖 sing-box 支持的 Shadowsocks 方法）；白名单变化不要求改表结构。
+
+错误：`INVALID_ARGUMENT`（`insecure_url`、`invalid_url`、`not_subscription`）、`NOT_FOUND`（`configId`）、`UPSTREAM_ERROR`、`TIMEOUT`、`SECRET_STORE`、`INTERNAL`。
+
+### 4.2 `node_create { name, server, port, method, password, configId? }` → `NodeSummary`
+
+手动编辑一个节点。只有五个字段，与 `docs/config-execution.md` §6 一致。
+
+| 字段 | 规则 |
+|---|---|
+| `name` | trim 后非空、≤ 64 字符 |
+| `server` | 主机名或 IP，**不带 scheme、不带端口、不含空白**。手动模式**允许**私网地址（用户可能连自己的内网服务器），与 URL 抓取的 SSRF 限制不冲突 |
+| `port` | 1–65535 |
+| `method` | 白名单内（当前 `aes-256-gcm`） |
+| `password` | 非空、≤ 256 字符。**只进 `secrets.enc`**，不落库、不进日志、不进错误信息 |
+
+- 写入顺序：先写 `secrets.enc` 的 `node:<新 id>`，再在事务里写 `nodes` + 可选 `config_nodes`。行写入失败 → 删除刚写的密钥，不留孤儿。
+- `configId` 指定时追加到该配置；语义与 §4.1 相同。
+- 成功后发 `node-list-changed`（`reason = "manual_create"`），有 `configId` 再发 `config-changed`（`change = "updated"`）。
+- **不自动连接**，不触发探测。
+
+错误：`INVALID_ARGUMENT`（`invalid_name`、`invalid_server`、`invalid_port`、`unsupported_method`、`invalid_password`）、`NOT_FOUND`、`SECRET_STORE`、`INTERNAL`。
+
+### 4.3 `node_switch { configId, nodeId }` → `NodeSwitchData`
+
+底部「切换到此节点」（B2）。**这是唯一改变当前节点的命令。**
+
+```ts
+type NodeSwitchData = {
+  config_id: string;
+  node_id: string;
+  previous_node_id: string | null;
+  connected: boolean;            // true = 同时做了在线热切换
+  runtime: RuntimeSnapshot | null;
+};
+```
+
+| 当前状态 | 行为 |
+|---|---|
+| 未连接 | 只改 `configs.current_node_id` → `connected = false`、`runtime = null`。**不启动 VPN** |
+| 已连接、这套配置就是当前连接的配置 | 通过 selector 热切换（`runtime.md` §5.3 的 `PUT /configs?force=true` 或 Clash 选择器），不重启进程 → `connected = true` |
+| 已连接、但这套配置不是当前连接的配置 | `PRECONDITION_FAILED`，`details.reason = "config_not_running"`。先切配置还是先切节点，是两个动作，不合并 |
+| `nodeId` 不属于该配置 | `NOT_FOUND`，`details.reason = "node_not_in_config"` |
+
+- 热切换失败 → `PRECONDITION_FAILED` / `runtime_switch_failed`，**`current_node_id` 不变**：库里记的必须是实际在跑的那个节点，否则重启后用户会连到另一台而不知道为什么。
+- `nodeId` 就是当前节点 → 幂等返回，不发事件。
+- 成功后发 `node-switched`（`events.md` §4.11）。
+
+错误：`NOT_FOUND`、`PRECONDITION_FAILED`、`TIMEOUT`、`INTERNAL`。
+
+### 4.4 `node_probe { nodeId }` → `NodeProbeData`
+
+底部「测试连通」（A4 / D1 的界面入口）。
+
+```ts
+type NodeProbeData = {
+  node_id: string;
+  reachable: boolean;
+  latency_ms: number | null;
+  probe_method: "clash_delay" | "tcp";
+  checked_at: number;            // Unix 毫秒
+  error: { code: string; message: string } | null;
+};
+```
+
+| 条件 | 方法 |
+|---|---|
+| 运行时在跑，且该节点属于当前连接的配置 | `clash_delay`：`GET /proxies/node-<id>/delay`，**真实可用性**（含密码与加密方式是否正确） |
+| 其余情况 | `tcp`：对 `server:port` 做 TCP 握手，3 s 超时。只能说明端口活着，**不能说明握手能过** |
+
+- **失败不是错误**：节点不可达返回 `reachable = false` + `error`，命令本身 `Ok`。与 `llm_provider_test` 同一条原则：测试失败是测试的正常输出，不该抛成异常让调用方分流。
+- 只有入参非法（`nodeId` 不存在）才返回 `Err(NOT_FOUND)`。
+- **不登记问题**（J1）：单节点手动测试失败不等于用户被阻断；登记问题会把它变成中间区域的打扰。连接链路上的失败才登记（§5.2）。
+
+### 4.5 `proxy_params {}` → `ProxyParams`
+
+三级用户要的代理地址与端口（A5），`proxy_card` 的数据源。
+
+```ts
+type ProxyParams = {
+  available: boolean;            // 是否有可展示的代理端点
+  host: "127.0.0.1";
+  port: number | null;
+  protocols: ["http", "socks5"]; // 单端口双协议，恒定
+  port_source: "runtime" | "configured" | "pending";
+  config_id: string | null;
+  reason: "tun_mode" | "not_running" | "no_config" | null;
+};
+```
+
+- `host` **恒为 `127.0.0.1`**，不给局域网开关（`docs/user-flows.md`「选只给我一个代理地址之后给什么」）。
+- `port_source`：
+  - `runtime`：运行时在跑，`port` 是**实际监听**的端口（`RuntimeSnapshot.mixed_port`）。这是唯一能拿去填软件的值。
+  - `configured`：未连接，但配置里显式设了 `listenPort`。
+  - `pending`：未连接且端口是自动分配，此刻**不存在**可用端口，`port = null`。
+- `reason`：`tun_mode`（active 配置是接管全部，不需要代理地址）、`not_running`、`no_config`。
+- **端口被占用时自动顺延，并如实回显**：`runtime` 来源必须是实际值，不得回显配置里的期望值。卡片写一个、实际跑另一个，是三级用户会直接踩进去的坑。
+- 成功后**不发事件**。端口变化由 `runtime-state-changed` 的 `snapshot.mixed_port` 推送，UI 收到后重渲染卡片，不再轮询本命令。
+
+---
+
+## 5. 探测
+
+### 5.1 `probe_run { configId?, targets? }` → `ProbeReport`
+
+连接后的连通性探测（D1 本地自检 / D4 结构化诊断包），`reachability` 块与问题采集的数据源。
+
+```ts
+type ProbeTarget = { label: string; url: string };
+
+type ProbeCheck = {
+  name: "dns" | "egress_ip" | "egress_differs" | "target";
+  target: string | null;         // 仅 name = "target" 时非空
+  ok: boolean;
+  latency_ms: number | null;
+  error_code: string | null;
+  detail: string;                // 面向用户的一句话，已脱敏
+};
+
+type ProbeReport = {
+  probe_id: string;
+  config_id: string;
+  checked_at: number;            // Unix 毫秒
+  ok: boolean;                   // 全部通过
+  checks: ProbeCheck[];
+  issue_ids: string[];           // 本次触发或合并的问题记录
+};
+```
+
+固定顺序（`docs/config-execution.md` §8）：
+
+| # | `name` | 判定 |
+|---|---|---|
+| 1 | `dns` | 解析一个境外基准域名成功 |
+| 2 | `egress_ip` | 通过代理拿到出口 IP |
+| 3 | `egress_differs` | 出口 IP ≠ 直连 IP（分流真的生效了） |
+| 4 | `target`（每个 target 一条） | 目标站点能打开 |
+
+- 前两项决定「能不能用」，后两项决定「用得对不对」。四项都过才 `ok = true`。
+- `targets` 省略 → 只跑前三项。`targets` 由 AI 用分类目录（I1）把用户说的服务名翻成域名后填入，Host **不做服务名解析**。
+- 任意一项失败 → Host 按 J1 **登记或合并问题**（`docs/issue-management.md` §3），并发出 `issue-changed`。这就是 `issue_ids` 的来源。
+- 运行时未在跑 → `PRECONDITION_FAILED`，`details.reason = "not_running"`（未连接时没有「连通性」可言）。
+- `configId` 省略时用 active 配置；指定但不是当前连接的配置 → `PRECONDITION_FAILED / not_running`。
+- **D2 完整诊断（14 项）不在本命令范围内**，仍由 AI 工具 `DiagRun` 承担。本命令只做连接后这四类，够插卡与诊断包用。
+- 探测本身**不修改网络状态**、不重启运行时。
+
+错误：`PRECONDITION_FAILED`、`NOT_FOUND`、`TIMEOUT`、`INTERNAL`。
+
+---
+
+## 6. 问题管理（J 组）
+
+问题的生命周期见 `docs/issue-management.md`。**采集与展示不依赖 AI，转交才依赖。**
+
+### 6.0 共用类型
+
+```ts
+type IssueSeverity = "P0" | "P1" | "P2";   // PM 裁定 OPEN-05
+type IssueState = "open" | "handed_off" | "resolved" | "ignored";
+
+type IssueSummary = {
+  issue_id: string;
+  type: string;                  // dns_fail / no_route / udp_blocked / auth_failed /
+                                 // tun_denied / helper_missing / probe_timeout / rule_stale / ...
+  target: string;                // 目标域名 / 节点 id / 空串
+  title: string;                 // Host 按 type 从固定文案表取，**不接受外部传入**
+  severity: IssueSeverity;
+  mode: "system_proxy" | "tun";   // 文档里的 proxy 即 system_proxy
+  state: IssueState;
+  count: number;
+  first_seen: number;            // Unix 毫秒
+  last_seen: number;             // Unix 毫秒
+  config_id: string | null;      // 全局问题（如 helper_missing）为 null
+  session_id: string | null;     // 最近一次转交的 AI 会话
+};
+
+type IssueAction = "retry" | "handoff" | "reset_network" | "ignore";
+
+type IssueDetail = IssueSummary & {
+  evidence: DiagnosticBundle;
+  actions: IssueAction[];        // 由 type 决定，见 docs/issue-management.md §6
+  last_handoff_at: number | null;
+  resolved_at: number | null;
+};
+```
+
+`actions` 是给 UI 的按钮提示，不是命令：`retry` → 重试 `runtime_start`；`handoff` → `issue_handoff`；`reset_network` → 批 6 的 E3；`ignore` → `issue_ignore`。列表由 `type` 决定（`docs/issue-management.md` §6），Host 给的就是最终结果，UI 不再按类型自己判断。
+
+**没有 `issue_create` 命令。** J1（登记）是 Host 内部行为，由 `probe_run`、运行时事件、启动自检触发。UI 与 AI 都不能凭空造一条问题——否则「问题列表」会变成第二个随便写文案的地方，而它存在的意义恰恰是不依赖 AI 也能说清发生了什么。
+
+### 6.1 `issue_list { state?, severity?, configId?, limit?, offset? }` → `{ issues: IssueSummary[], total }`
+
+- `state` / `severity` / `configId` 都是过滤条件，省略 = 不过滤。
+- 排序：`severity ASC`（p0 在前）→ `last_seen DESC`。
+- `limit` 默认 50、上限 200；`offset` 默认 0。`total` 是过滤后的总数，用于分页。
+- 不返回 `evidence`（可能含大量日志），要明细走 `issue_get`。
+- 只读，不发事件。
+
+### 6.2 `issue_get { issueId }` → `IssueDetail`
+
+- 不存在 → `NOT_FOUND`。
+- `evidence` 在**采集时就已生成并保存**，这里只是读出来（`docs/issue-management.md` §5：问题发生时的情况事后往往复现不出来）。
+- 返回值已脱敏：不含密码、订阅原文、完整配置。
+
+### 6.3 `issue_handoff { issueId, sessionId? }` → `IssueHandoffData`
+
+```ts
+type IssueHandoffData = {
+  issue_id: string;
+  state: "handed_off";
+  session_id: string;
+  request_id: string;      // 本次投喂对应的 AI 请求
+};
+```
+
+- 依赖 AI：没有可用 provider → `PRECONDITION_FAILED`，`details.reason = "no_provider"`。
+- `sessionId` 省略时：该问题已有转交会话 → **复用**；没有 → 新建一个会话。
+- **一次性投喂**：把 `evidence` 整包作为一条消息交给会话，不做多轮追问。投喂后状态置 `handed_off`，发 `issue-changed`。
+- 同一问题可以重复转交（用户再点一次）：`count` 不变，`last_handoff_at` 刷新。
+- 投喂内容**不包含凭据**，与 `issue_get` 返回的 `evidence` 完全相同。
+
+错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`no_provider`、`provider_unavailable`）、`INTERNAL`。
+
+### 6.4 `issue_resolve { issueId }` → `IssueResolveData`
+
+```ts
+type IssueResolveData = {
+  issue_id: string;
+  state: IssueState;        // 通过 = "resolved"；没通过 = 维持原状态
+  verified: boolean;
+  probe: ProbeReport | null; // 复测结果；问题类型无法复测时为 null
+};
+```
+
+- **AI 说「修好了」不算数**：本命令由 UI 在用户点「已解决 / 重试通过」后调用，Host **自己跑一次同样的探测**，通过才置 `resolved`（J4）。
+- 复测失败 → `verified = false`，`state` 保持原值（不抛错），`probe` 里带失败原因。
+- 可复测的类型（`dns_fail` / `no_route` / `probe_timeout` / `auth_failed`）→ 重跑 `probe_run` 的对应项；不可复测的类型（`tun_denied` / `helper_missing`，本质是权限）→ 只校验对应前置条件（helper 是否已安装、授权是否已给）。
+- **resolved 不是删除**：记录保留；同类问题再次出现时由 J1 重开并计数。
+
+### 6.5 `issue_ignore { issueId, ignored? }` → `IssueIgnoreData`
+
+```ts
+type IssueIgnoreData = { issue_id: string; state: IssueState };
+```
+
+- `ignored` 默认 `true` → `state = "ignored"`；传 `false` → 恢复到 `"open"`（列表里能找回并恢复，`docs/issue-management.md` §6）。
+- 对 `resolved` 的记录调用 `ignored = true` 也允许，不影响历史。
+- 幂等。
+- 发 `issue-changed`（`change = "ignored"` 或 `"reopened"`）。
+
+---
+
+## 7. 运行时与系统
+
+### 7.1 `runtime_start { configId?, nodeId? }` → `RuntimeSnapshot`
+
+无 AI 模式的主行动（A1 建立连接）。与 AI 工具 `RuntimeStart` **共用同一份 Host 实现**。
 
 | 项 | 规则 |
 |---|---|
-| `profileId` 指定 | 解析该 profile；不存在 → `NOT_FOUND` |
-| `profileId` 省略 | 按顺序三级回退（见下） |
-| 已在连接中 | **不报错**：换到目标（平滑切换，见技术设计 §4）；目标就是当前连接 → 直接返回当前快照 |
-| 成功后 | 系统代理已设置、运行时 `state = running`；返回的 `RuntimeStatus` 必须满足 §3.1.1 |
+| `configId` 指定 | 解析该配置；不存在 → `NOT_FOUND` |
+| `configId` 省略 | 用 active 配置；**没有任何配置** → `PRECONDITION_FAILED`，`details.reason = "no_config"` |
+| `nodeId` 指定 | 用该节点启动，并把它设为该配置的 `current_node_id`；不属于该配置 → `NOT_FOUND / node_not_in_config` |
+| `nodeId` 省略 | 用 `config.current_node_id`；为空时用节点集第一个 |
+| 节点集为空 | `PRECONDITION_FAILED`，`details.reason = "no_nodes"` |
+| 连接方式为 `tun` 且特权助手不可用 | `PRECONDITION_FAILED`，`details.reason = "tun_helper_missing"`（批 5） |
+| 已在连接中 | **不报错**：目标一致 → 返回当前快照；目标不同 → 平滑切换（见技术设计 §4） |
+| 成功后 | 系统代理已按连接方式设置、运行时 `state = running`；返回的 `RuntimeSnapshot` 必须满足 §7.4 |
+| `last_used_at` | 成功后刷新为该配置的当前毫秒时间 |
 
-**`profileId` 省略时的三级回退**（PM 拍板）：
+**2.0 删掉了「没有 active 就用默认配置包」的第二级回退。**
 
-```
-1. 有 active profile            → 用它
-2. 否则有可用的默认配置包        → 用默认配置包连（profile_id 为 null）
-3. 两者都没有                   → PRECONDITION_FAILED，details.reason = "no_active_profile"
-```
+> 旧回退存在的理由是「全新安装没有 profile，只有默认包」。新模型里默认节点必须落成一套配置才会出现在左栏，全新安装的空态是「还没有配置」，此时**应该引导用户新建，而不是替他连一条他没选过的线路**。没有配置就报 `no_config`，由 UI 的空态与 AI 的 `source_choice` 接住。
 
-- **第 2 级必须有**：全新安装的用户没有导入过任何节点，只有默认配置包。若这里直接报错，「装好就能连」的产品目标就不成立（需求 §6 的整个 C 组验收依赖它）。
 **不变量（必须实现，不是行为描述）**
 
-> **默认配置包只在「没有任何 active profile」时才被选中。连接失败不得触发回退。**
+> **连接失败不得回退到任何其它配置或节点。** 有 active 配置但连不上（凭据缺失、节点下线、握手失败）时，错误如实返回。
 
-有 active profile 但连不上（凭据缺失、节点下线、握手失败）时，错误如实返回，**不得**改走默认配置包。理由：静默换成默认包会让用户以为自己连的是选中的那个节点，而实际流量走了另一条线路——「悄悄换了出口」比连不上更危险，用户会用错误的出口做敏感操作。
+理由不变：静默换成别的出口会让用户以为自己连的是选中的那台，而实际流量走了另一条线路——「悄悄换了出口」比连不上更危险。
 
-测试断言：让一个 active profile 必定失败（例如把它的 server 指向 `127.0.0.1:1`），同时保证默认包可用，点连接 → 必须是 `Err`，且 `diag`/日志里没有默认包的连接记录。
-- 走第 2 级时渲染配置的键固定为 `"default"`，与 profile 的 `profile-<id>.json` 分开，断开时一并删除。
-
-**3.1.1 返回状态的不变量**
+**7.1.1 返回状态的不变量**
 
 - `state` 只可能是 `running` 或 `degraded`；其它状态一律视为失败并返回错误。**不允许「返回成功但 state 不是 running」**（这是 1.0.10 的 D-36 缺陷）。
 - `mixed_port` 必须是本次实际监听的端口，不得为常量或 `null`。
-- `profile_id` / `profile_name` 与目标一致；**用默认配置包连接时 `profile_id` 为 `null`**，`profile_name` 为包内节点名（当前实现固定为 `"默认配置"`）。
-- `connected_since` 为本次进入 running 的时刻。
+- `config_id` / `config_name` / `node_id` / `node_name` 与目标一致；**未连接时四者为 `null`**。
+- `connected_since` 为本次进入 running 的时刻（ISO 8601）。
 - `exit_ip` / `latency_ms` 允许为 `null`（探测是异步的），**不代表连接失败**。
 
-错误码：`RUNTIME_NOT_INSTALLED`、`PRECONDITION_FAILED`、`NOT_FOUND`、`CATALOG_UNAVAILABLE`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`TIMEOUT`、`UPSTREAM_ERROR`、`INTERNAL`。
+错误码：`RUNTIME_NOT_INSTALLED`、`PRECONDITION_FAILED`、`NOT_FOUND`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`TIMEOUT`、`UPSTREAM_ERROR`、`INTERNAL`。
 
-### 3.2 `runtime_stop {}` → `RuntimeStatus`
+### 7.2 `runtime_stop {}` → `RuntimeSnapshot`
 
 | 项 | 规则 |
 |---|---|
 | 顺序 | **先撤系统代理，再停运行时**。顺序不可交换 |
 | 代理撤销失败 | **中止断开**，运行时保持运行，返回 `PRECONDITION_FAILED`，`details.reason = "proxy_restore_failed"`。不可以在代理没撤掉的情况下停掉 sing-box——那等于把用户直接断网 |
 | 已经断开 | 幂等：返回当前快照（`state = "idle"`），不报错 |
-| 成功后 | `state = "idle"`，`mixed_port` / `profile_name` / `connected_since` / `exit_ip` / `latency_ms` 全为 `null`，渲染配置已删除 |
+| 成功后 | `state = "idle"`，`mixed_port` / `config_id` / `node_id` / `connected_since` / `exit_ip` / `latency_ms` 全为 `null`，渲染配置已删除 |
 
-> 这条规则与退出流程（技术设计 §3）一致：**宁可断开失败，也不能留下指向死端口的系统代理**。
+> 这条规则与退出流程一致：**宁可断开失败，也不能留下指向死端口的系统代理**。
 
-### 3.3 `profile_list {}` → `ProfileListData`
+### 7.3 `runtime_status {}` → `RuntimeSnapshot`
 
-**与 AI 工具 `ProfileList` 逐字一致**（同一份实现、同一组字段、同一种排序）。命令层只做搬运。
+2.0 的 `RuntimeSnapshot`（`runtime.md` §2.5 的待升级版本）：
 
 ```ts
-type ProfileListData = {
-  profiles: Array<{
-    profile_id: string;
-    node_id: string | null;  // null = 种子文件导入，没有远端节点 id
-    name: string;
-    protocol: string | null; // "vless_reality" | "hysteria2" | "shadowsocks"
-    region: string | null;
-    is_active: boolean;
-    created_at: string;      // ISO 8601 UTC，毫秒精度
-  }>;
-  active_profile_id: string | null;
+type RuntimeSnapshot = {
+  contract_version: "2.0.0";
+  state: RuntimeState;                // runtime.md §2.1，七态不变
+  mode: "system_proxy" | "tun" | null;
+  pid: number | null;
+  upstream_version: string | null;
+  uptime_seconds: number | null;
+  config_id: string | null;           // 2.0：原 profile_id
+  config_name: string | null;         // 2.0：原 profile_name
+  node_id: string | null;             // 2.0 新增：当前实际连接的节点
+  node_name: string | null;           // 2.0 新增
+  connected_since: string | null;     // ISO 8601 UTC
+  mixed_port: number | null;
+  latency_ms: number | null;          // 出口 IP 探测耗时，不是节点 ping
+  direct_ip: string | null;           // 不经代理测得的直连出口 IP
+  config_hash: string | null;         // "sha256:<hex>"
+  system_proxy_enabled: boolean;
+  health: HealthSnapshot;
+  traffic: TrafficStats | null;
+  connections: number | null;
+  restart_count: number;
+  last_error: AivpnError | null;
+  last_transition_at: string;         // ISO 8601 UTC
 };
 ```
 
-- 数据源是**本地已保存配置**（含种子导入），**不含远端目录**。
-- 排序：`created_at ASC`（与 `store::profiles::list` 的 `ORDER BY` 一致）。要「最新在前」由 UI 自己排，**后端不另立一套排序**。
-- `node_id` 保留，用于区分来源（目录导入 / 本地导入）；PM 拍板时的示例漏了它，但「逐字一致」要求包含。
-- 不含任何凭据或配置原文。
+- `mode` 在 2.0 扩展为 `"system_proxy" | "tun"`；`tun` 在批 5 接线前不会出现。
+- `pid` / `upstream_version` / `uptime_seconds` 在 `idle` 与 `failed` 下**必须为 `null`**。
+- `traffic` 在 `idle` / `failed` 下为 `null`，其余状态不得为 `null`。
+- `config_id` / `node_id` 与 `connected_since` 同生同灭：只在 `running` / `degraded` 下非 `null`。
+- 字段恒存在，无值写 `null`，**不得省略键**。
 
-### 3.4 `onboarding_status {}` → `OnboardingStatus`
-
-```ts
-type OnboardingStatus = {
-  completed: boolean;     // settings.onboarding_completed 存在即 true
-  has_key: boolean;       // 存在非空的 DeepSeek Key（**不要求已验证**）
-  profile_count: number;  // 本地 profile 数量
-};
-```
-
-判定「是否进入首次引导」由 UI 做（需求 §5.1）：
-
-```ts
-const needsOnboarding = !completed && (!has_key || profile_count === 0);
-```
-
-**是「或」不是「与」**：只配了 Key 没有配置、或有配置但没配 Key，都应该进引导。
-`completed` 是唯一的短路条件——完成过一次之后，无论 Key 和配置处于什么状态，都不再自动弹引导。
-
-> `has_key` 与 `deepseek_key_status` 的 `configured` 同义，**不得出现第三种叫法**。两者都由同一个 `secrets` 查询得出。
-
-### 3.5 `onboarding_complete { skippedKey: boolean }` → `{ ok: true }`
-
-- 写入 `settings.onboarding_completed`（值为完成时刻的 Unix 毫秒）。**无论是否跳过 Key 都写**，否则用户每次启动都会被再次拉进引导。
-- `skippedKey` 仅用于记录，不影响判定；不得因为 `skippedKey = true` 而删除已有 Key。
-- 幂等：重复调用只更新时间戳。
-
-### 3.6 `net_repair { action, port? }` → `NetRepairResult`（wave2 实现）
+### 7.4 `net_repair { action, port? }` → `NetRepairResult`
 
 与 AI 工具 `NetRepair` **共用同一份实现、同一组动作**（`tools.md` §4.19）。UI 只用前两种。
 
@@ -236,8 +755,8 @@ type NetRepairResult = {
 
 | action | 行为 | UI 是否使用 |
 |---|---|---|
-| `restore_direct` | 撤系统代理（含复核）→ 停运行时 → 删渲染配置 → 不带代理探测出口 IP | ✅ 「恢复网络」 |
-| `flush_dns` | macOS：`dscacheutil -flushcache` + `killall -HUP mDNSResponder`；Windows：`ipconfig /flushdns` | ✅ 诊断页 |
+| `restore_direct` | 撤系统代理（含复核）→ 停运行时 → 删渲染配置 → 不带代理探测出口 IP | ✅「恢复网络」（E1） |
+| `flush_dns` | macOS：`dscacheutil -flushcache` + `killall -HUP mDNSResponder`；Windows：`ipconfig /flushdns` | ✅ 诊断页（E2） |
 | `set_proxy` | 把系统代理指向 Veyl 自己的 mixed 端口，`port` 必填且必须等于当前运行时的端口 | ❌ 留给模型 |
 | `clear_proxy` | 撤代理并恢复备份，不停运行时 | ❌ 留给模型 |
 
@@ -246,117 +765,125 @@ type NetRepairResult = {
 - `ok = false` 时 `detail` 必须说明卡在哪一步；可重试的操作不要把用户引向「重装」。
 - 未知 `action` → `INVALID_ARGUMENT`，`details.supported` 列出四个取值。
 
-### 3.7 `default_profile_refresh {}` / `default_profile_status {}`（wave2 实现）```ts
-type DefaultProfileResult = {
-  package_id: string | null;
-  version: string | null;             // 当前已应用的配置包版本
-  applied_at: string | null;          // ISO 8601
-  new_version_available: boolean;     // refresh 之后才可能为 true
-  node_count: number;
-};
-```
+> **E3 重置网络（高破坏性，需二次确认）** 在批 6 落地，届时新增 `reset_network` 动作（五步顺序见 `docs/capabilities.md` §3），与卸载清理共用同一段代码。本批不下发该动作，避免「契约里有、实现里没有」。
 
-- `status` **只读**，不联网；`refresh` 会拉取并应用新包。
-- 刷新**不打断在线连接**（需求 §6.5）：新包只写库与文件，下一次连接才生效。若正在连接，`new_version_available = true`，由 UI 提示「下次连接生效」。
+### 7.5 `open_log_dir {}` → `{ path: string }`
 
-### 3.7.1 `open_log_dir {}` → `{ path: string }`
-
-定位当前日志文件，供状态面板的「打开日志」使用（需求 §9.5）。
+定位当前日志文件，供「打开日志」使用（E4）。
 
 - **不接受任何路径参数**。签名就是空对象，Host 自己决定打开哪里——防止被调用方指定任意目录，把「打开日志」变成「浏览文件系统」。
 - 行为是**用系统文件管理器定位到日志文件**（macOS `open -R`，Windows `/select`），**不是**用编辑器打开、也不是 `open` 整个目录。
-- 返回 `path` 便于 UI 把路径显示出来（面板上的三级信息里会用到）。
-- 文件不存在 → 返回 `NOT_FOUND`，`details.hint = "还没有日志，先连接一次"`；不要临时创建一个空文件来「让它成功」。
+- 返回 `path` 便于 UI 把路径显示出来。
+- 文件不存在 → `NOT_FOUND`，`details.hint = "还没有日志，先连接一次"`；不要临时创建一个空文件来「让它成功」。
 
-### 3.8 `import_seed_file { path }` → `ImportSeedResult`
+### 7.6 `open_external { url }` → `{ ok: true }`
 
-（1.0.10 起不变，从 `events.md` §5.2 迁入本节。）
+用系统浏览器打开一个外链。**不是通用 URL 打开器。**
 
-两条 UI 入口，**一个命令、一套实现**：窗口级拖放（`onDragDropEvent`）与设置页「选择文件」（`plugin-dialog` 的 `open()`，只授 `dialog:allow-open`）。用户取消时 `open()` 返回 `null`，前端直接返回，**不调用本命令**。
+- 只允许 **`https`**，且 host 命中 Host 侧白名单常量。当前白名单只有 DeepSeek 平台域名（用于「怎么拿 Key」的引导）。
+- 不在白名单 → `INVALID_ARGUMENT`，`details.reason = "url_not_allowed"`。
+- 不跟随、不代理、不预取；只把 URL 交给系统 opener。
+- 加域名必须改 Host 常量并同步本节——**不允许由前端或模型传任意域名**。
+
+---
+
+## 8. 种子（官方默认配置，C 组）
+
+`veyl_seed.json`（只含节点）是客户端唯一消费的种子格式（`docs/config-execution.md` §9）。种子是**运维资源**，分流是**用户偏好**，两者永远分开：种子更新只动节点层。
+
+### 8.1 `default_profile_status {}` → `DefaultProfileResult`
 
 ```ts
-type ImportSeedResult = {
-  imported: number;
-  skipped: Array<{ name: string; reason: string }>;
-  profiles: Array<{ id: string; name: string; server: string; server_port: number; method: string }>;
+type DefaultProfileResult = {
+  seed_id: "veyl_seed";
+  version: string | null;          // 文件里的 version 字段，**仅用于展示**
+  content_sha256: string | null;   // 判断是否变化的唯一依据
+  node_count: number;
+  applied_at: number | null;       // Unix 毫秒
+  checked_at: number | null;       // Unix 毫秒
+  new_version_available: boolean;  // 只有 refresh 之后才可能为 true
 };
 ```
 
-Host 侧顺序固定：扩展名 `.json` → 大小 ≤ 1 MB → 存在且可读 → 解析 → 落库。
+- **只读，不联网**。
+- 变化判定用**内容哈希**，不依赖 `version` 字段：`version` 要人手动改，「改了文件忘了改版本号」正是 TweetPilot 那次事故的根因（`docs/issues/tweetpilot-resource-version-gap.md`）。
+- `seed_id` 是常量：上游的 provider 元数据我们不再消费（`bootstrap.json` 只作为我们的上游来源，不是客户端契约）。
+
+### 8.2 `default_profile_refresh {}` → `DefaultProfileResult`
+
+- 拉取 `https://meshnetprotocol.github.io/veyl_seed.json`，**直接拉全文自己算哈希**；先带 `If-None-Match`，304 直接结束。
+- **同一时刻只允许一个请求在飞**，避免并发写坏缓存（`docs/config-execution.md` §10）。
+- 成功且哈希变化 → 原子替换种子节点层：按 `source_key` upsert，删掉新文件里不存在的 seed 节点。
+- **不打断在线连接**：缓存照换；当前连接的进程不动；下一次连接生效。若正在连接，`new_version_available = true`，由 UI 提示「下次连接生效」。
+- 新版本里没有当前正在用的节点 → 缓存照换，`configs.current_node_id` 因节点删除置 `null`，下次连接落到新列表第一个可用节点。**当前连接保持到用户主动断开。**
+- 拉取失败 / 校验不过 → 保留旧缓存，返回 `UPSTREAM_ERROR` 或 `INVALID_ARGUMENT`，`new_version_available = false`。
+- 发 `default-profile-updated` 与 `node-list-changed`（`reason = "seed_refreshed"`）。
+
+### 8.3 `import_seed_file { path }` → `SeedImportResult`
+
+**保留，但语义收窄：不再创建配置，只并节点。**
+
+```ts
+type SeedImportResult = {
+  imported: number;
+  skipped: Array<{ name: string | null; reason: string }>;
+  nodes: NodeSummary[];
+};
+```
+
+为什么仍然需要它：
+
+1. **离线兜底**：`docs/config-execution.md` §9 写明「首次分发时如果某个用户拉不到，通过其它渠道把种子给他」——给的就是这个格式的文件。
+2. **开发与测试**：CI 与本地没有稳定外网时，用文件注入同一份种子。
+
+规则：
+
+- 只接受 `veyl_seed.json` 结构（`{ version, updated_at, nodes[] }`），扩展名 `.json`、≤ 1 MB、存在且可读。
+- 节点以 `source = "seed"` 合并进节点池，**只增不删**：手工导入不删除种子拉取层已有的节点，避免一次误操作把用户正在用的节点删掉。
+- 仍是两项 UI 入口、一个命令：窗口级拖放（`onDragDropEvent`）与设置页「选择文件」（`plugin-dialog` 的 `open()`，只授 `dialog:allow-open`）。用户取消时 `open()` 返回 `null`，前端直接返回，**不调用本命令**。
+- 只接受 shadowsocks 出站、method 白名单；部分成功不算失败；返回值与日志**永不含 password**；不回显文件内容。
 
 | 错误码 | `details.reason` | 场景 |
 |---|---|---|
 | `INVALID_ARGUMENT` | `not_json_file` | 扩展名不是 `.json` |
 | `INVALID_ARGUMENT` | `file_too_large` | 超过 1 MB，`details.max_bytes` |
 | `INVALID_ARGUMENT` | `file_unreadable` | 路径不存在或不可读 |
-| `INVALID_ARGUMENT` | `invalid_json` | 内容不是合法 JSON / 结构不符 |
+| `INVALID_ARGUMENT` | `invalid_json` | 不是合法 JSON / 结构不符（不是 seed 格式） |
 | `INVALID_ARGUMENT` | `no_importable_nodes` | 解析成功但无可导入节点，`details.skipped` |
 | `UNSUPPORTED` | — | method 不在白名单，`details.method` |
 | `SECRET_STORE` | — | `secrets.enc` 写入失败 |
 
-规则：只接受 shadowsocks 出站、method 白名单 `aes-256-gcm`；部分成功不算失败；返回值与日志**永不含 password**；不回显文件内容。
-
-### 3.9 `rename_session { sessionId, title }` → `{ id, title, created_at }`
-
-标题校验：trim → 非空 → ≤ 80 Unicode 标量。失败 `INVALID_ARGUMENT`，`details.reason ∈ {empty_title, title_too_long}`。
-
-### 3.10 `profile_delete { profileId }` → `ProfileDeleteData`
-
-```ts
-type ProfileDeleteData = {
-  profile_id: string;
-  deleted: boolean;            // true = 本次真的删掉了
-  already_absent: boolean;     // true = 本来就不存在（幂等命中）
-  active_profile_id: string | null;
-};
-```
-
-- **前置校验先于删除**：目标是 active profile → `PRECONDITION_FAILED`，不产生任何副作用。
-- 删除时一并清掉该 profile 的渲染配置与 `node:<profile_id>` 凭据条目。
-
 ---
 
-### 3.11 `chat_delete { sessionId }` → `{ ok: true }`
+## 9. AI、设置与系统（语义沿用 1.2.0）
 
-删除一个会话及其全部消息（需求 R31 / 验收 G1）。**不可恢复**，靠 UI 的二次确认兜底 —— Host 不做回收站。
+以下命令在 2.0 **不变**，只在这里保留完整语义，避免实现方回到历史版本里翻。
 
-```ts
-type ChatDeleteResult = { ok: true };
-```
+### 9.1 `ai_send_message { sessionId, text, attachments? }` → `{ request_id }`
 
-| 情况 | 结果 |
-|---|---|
-| 会话不存在 | `NOT_FOUND` |
-| 该会话有进行中的 AI 请求 | `PRECONDITION_FAILED`，`details.reason = "active_request"` |
-| 正常删除 | `{ ok: true }` |
+发送一条用户消息，返回本轮请求 id。事件见 `events.md` §3。`attachments` 本阶段不使用，传了按 `INVALID_ARGUMENT` 拒绝。
 
-**事务内删除，三张表一起删：**
+### 9.2 `ai_cancel { requestId }` → `{ cancelled: boolean }`
 
-```sql
-BEGIN;
-DELETE FROM tool_calls    WHERE session_id = ?1;
-DELETE FROM chat_sessions WHERE id = ?1;   -- chat_messages 由外键 ON DELETE CASCADE 带走
-COMMIT;
-```
+取消进行中的请求。已经结束 → `cancelled: false`，不报错。
 
-**为什么必须显式删 `tool_calls`**：`chat_messages.session_id` 有外键 `ON DELETE CASCADE`，但 **`tool_calls.session_id` 没有外键**（`001_init.sql:79`，只有索引）。只删会话的话，工具调用记录会变成孤儿——用户以为「对话删干净了」，实际上参数与结果还留在库里，验收命令 `SELECT COUNT(*) FROM tool_calls` 也仍然数得到旧行。这是需求里「不得出现半删除状态」的直接后果。
+### 9.3 `chat_history { sessionId? }` / `chat_delete { sessionId }` / `rename_session { sessionId, title }`
 
-**为什么 Host 拒绝而不是自动取消**：需求 §5.7 写的是「先取消请求，再删除」。这一步由 **UI** 完成：
+- `chat_history`：省略 `sessionId` 返回最近会话；只读。
+- `chat_delete`：**不可恢复**，Host 不做回收站。事务内三张表一起删：
 
-```
-点击删除 → 二次确认 → 若该会话正在生成：先 ai_cancel，等 ai-request-end
-                     → 再调用 chat_delete
-```
+  ```sql
+  BEGIN;
+  DELETE FROM tool_calls    WHERE session_id = ?1;
+  DELETE FROM chat_sessions WHERE id = ?1;   -- chat_messages 由外键 ON DELETE CASCADE 带走
+  COMMIT;
+  ```
 
-Host 侧硬拒绝是为了避免「取消信号还在路上、删除已经执行、迟到的 chunk 又把消息写回来」这种竞态。把取消留给 UI 做，Host 只需要保证「删的时候一定是静止的」。
+  **为什么必须显式删 `tool_calls`**：`chat_messages.session_id` 有外键级联，但 `tool_calls.session_id` **没有外键**（只有索引）。只删会话会留下孤儿，用户以为「对话删干净了」，参数与结果还在库里。
+  该会话有进行中的 AI 请求 → `PRECONDITION_FAILED`，`details.reason = "active_request"`。**取消由 UI 先做**，Host 只保证「删的时候一定是静止的」。
+- `rename_session`：trim → 非空 → ≤ 80 Unicode 标量；失败 `INVALID_ARGUMENT`，`details.reason ∈ {empty_title, title_too_long}`。
 
-**成功后 UI 的跳转**（需求 §5.7）：删的是当前会话 → 切到下一个；没有下一个 → 回**总览**（控制台空态）。跳转属于 UI 职责，Host 只返回 `{ ok: true }`。
-
-错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`active_request`）、`INTERNAL`（事务失败，此时**不得**留下部分删除）。
-
----
-
-### 3.12 LLM Provider：共用类型与校验（R32）
+### 9.4 LLM Provider（F 组）
 
 五个命令共用同一份校验，**不允许各写一套**。
 
@@ -364,14 +891,14 @@ Host 侧硬拒绝是为了避免「取消信号还在路上、删除已经执行
 type LlmProtocol = "openai" | "anthropic";
 
 type LlmProvider = {
-  provider_id: string;          // 稳定 id，创建后不变
-  name: string;                 // 用户可读
+  provider_id: string;
+  name: string;
   protocol: LlmProtocol;
   base_url: string | null;      // null = 用该协议的官方地址
   model: string;
   has_key: boolean;             // 只表示"有/没有"，永不返回值本身
   is_active: boolean;
-  is_builtin: boolean;          // 内置 provider（迁移产生的 deepseek）
+  is_builtin: boolean;
 };
 ```
 
@@ -385,121 +912,60 @@ type LlmProvider = {
 | 4 | `base_url` 为空/null，或能解析为 `http` / `https` | `INVALID_ARGUMENT`，`details.reason = "invalid_base_url"` |
 | 5 | `base_url` **含 userinfo（`user:pass@host`）一律拒绝** | `INVALID_ARGUMENT`，`details.reason = "base_url_has_credentials"` |
 | 6 | `http` 的 host 必须是 `localhost` / `127.0.0.1` / `::1` | `INVALID_ARGUMENT`，`details.reason = "insecure_base_url"` |
-| 7 | 非本机端点必须有 Key（见 §3.13 的"保留原 Key"规则） | `PRECONDITION_FAILED`，`details.reason = "api_key_required"` |
+| 7 | 非本机端点必须有 Key（见下「保留原 Key」） | `PRECONDITION_FAILED`，`details.reason = "api_key_required"` |
 
-**第 5 条的理由**：`https://sk-xxx@api.example.com` 这种 URL 会把密钥放在 URL 里，它会被写进日志、错误信息、以及任何打印 URL 的地方。需求 §5.8 明确禁止"把 Key 拼进 URL"，校验层必须挡住，而不是靠 UI 不填。
+第 5 条的理由：`https://sk-xxx@api.example.com` 会把密钥写进日志、错误信息、以及任何打印 URL 的地方。
 
-**「本机端点」的判定**：只看解析后的 host，不看字符串。`http://127.0.0.1:11434`、`http://localhost:11434`、`http://[::1]:11434` 是本机；`http://192.168.1.10:11434` 不是——局域网里的 Ollama 也必须走 https 或者不接受。原因是 http 明文会把 Key 和对话内容暴露在网络上。
+**「本机端点」的判定**：只看解析后的 host，不看字符串。`http://127.0.0.1:11434`、`http://localhost:11434`、`http://[::1]:11434` 是本机；`http://192.168.1.10:11434` 不是。
 
-**`base_url` 的规范化**：存储保留用户输入的原样（去掉首尾空白与末尾 `/`），**拼接由 Host 负责**；用户如果填了以 `/v1` 结尾的地址，Host 在装配时去掉，避免拼出 `/v1/v1`（技术设计 §12.2）。
+**`base_url` 的规范化**：存储保留用户输入原样（去掉首尾空白与末尾 `/`），拼接由 Host 负责；填了以 `/v1` 结尾的地址，Host 装配时去掉，避免拼出 `/v1/v1`。
 
-### 3.13 `llm_provider_save { providerId?, name, protocol, baseUrl?, model, apiKey? }` → `LlmProvider`
+**`llm_provider_save { providerId?, name, protocol, baseUrl?, model, apiKey? }`**
 
 | 情况 | 行为 |
 |---|---|
-| `providerId` 省略 | **新建**，Host 生成 `provider_id`（`p_` + 随机十六进制），`is_builtin = false` |
-| `providerId` 指定 | **更新**该 provider；不存在 → `NOT_FOUND` |
-| `apiKey` 省略或空串，且该 provider 已有 Key | **保留原 Key**，不覆盖 |
-| `apiKey` 省略或空串，且没有 Key | 仅当 base_url 是本机端点时允许（Ollama）；否则 `PRECONDITION_FAILED / api_key_required` |
+| `providerId` 省略 | **新建**，Host 生成 `p_` id，`is_builtin = false` |
+| `providerId` 指定 | 更新；不存在 → `NOT_FOUND` |
+| `apiKey` 省略或空串，且已有 Key | **保留原 Key**，不覆盖 |
+| `apiKey` 省略或空串，且没有 Key | 仅当 base_url 是本机端点时允许；否则 `PRECONDITION_FAILED / api_key_required` |
 | `apiKey` 非空 | 写入 `secrets.enc` 的 `provider:<provider_id>`，覆盖旧值 |
 
-- 返回值**永远不含 Key**，`has_key` 只给布尔。
-- 保存**不打断正在进行中的请求**（需求 §5.8）：进行中的会话仍用启动时的 provider，新的下一次请求才生效。
+- 返回值**永远不含 Key**。
+- **保存不改变当前 provider**。唯一例外：当前没有任何 active provider 时，保存的第一个自动成为 active。
+- 编辑当前激活的 provider，保存后仍是 active；下一次请求生效，不打断进行中的请求。
 
-**不变量：保存不改变当前 provider。**
+**`llm_provider_delete { providerId }`**
 
-> **`llm_provider_save` 只保存，不改变 active。切换只能通过 `llm_provider_activate`。**
-> 唯一例外：**当前没有任何 active provider 时**，保存的第一个自动成为 active（否则全新安装存完 Key 仍然没有可用 provider，用户会以为没保存成功）。
+- 同一个操作里删两样：条目 + `secrets.enc` 的 `provider:<provider_id>`，不留孤儿密钥。
+- 不能删除内置 provider → `PRECONDITION_FAILED / builtin_provider`。
+- 不存在 → `NOT_FOUND`。**这里有意不做幂等**：provider 是用户点名删除的对象，报「不存在」能暴露 UI 状态不同步。
+- **允许删除当前激活项**：删后 active 置空，**不自动挑下一个**（自动挑选属于静默切换）。
 
-需要这条的理由：用户编辑一个**备用** provider（只改模型名）并保存，不应该让正在用的对话流量悄悄换到另一个端点。与「节点连不上不得悄悄回退默认包」是同一条原则——**不静默改变请求的去向**。
+**`llm_provider_activate { providerId }`**：目标必须有可用 Key（本机端点除外）；成功后新会话立即使用；已经是当前 → 幂等；不存在 → `NOT_FOUND`。
 
-由此推出的两条约束：
-
-- 编辑**当前激活的** provider 时，保存后仍是 active（值没变，但配置已更新，下一次请求即生效）。
-- `llm_provider_activate` 是**唯一**能改 active 的命令；UI 上「保存」与「设为当前」必须是两个独立动作。
-
-错误：`INVALID_ARGUMENT`（§3.12 的 1–6）、`PRECONDITION_FAILED`（`api_key_required`）、`NOT_FOUND`、`SECRET_STORE`。
-
-### 3.14 `llm_provider_delete { providerId }` → `{ ok: true }`
-
-- **同一个操作里删两样**：settings 里的条目 + `secrets.enc` 的 `provider:<provider_id>`。不允许留下孤儿密钥（需求 §5.8）。
-- **不能删除内置 provider**：`PRECONDITION_FAILED`，`details.reason = "builtin_provider"`。内置的 `deepseek` 是基础模式的载体，删了基础模式就没有落点。用户可以改它的 Key 与模型，但删不掉。
-- 不存在 → `NOT_FOUND`。**这里有意不做幂等**：与 `profile_delete` 不同，provider 是用户点名删除的对象，报"不存在"能暴露 UI 状态不同步；静默成功会掩盖问题。
-
-**删除当前激活的 provider 是允许的**（2026-11-02 修订）：
-
-- 删除后 `settings.llm_active_provider` **置空**，返回值仍是 `{ ok: true }`。
-- **不自动挑选下一个**。自动挑一个属于「静默切换」——和「节点连不上不得悄悄回退默认包」是同一条原则：不静默改变请求去向。
-- 删空后由 UI 提示「没有当前 provider，请选择一个」，引导用户显式调 `llm_provider_activate`。
-- 此时若有进行中的对话，**不打断**；下一次请求会因为找不到 active provider 返回 `PRECONDITION_FAILED`，`details.reason = "no_active_provider"`。
-
-错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`builtin_provider`）、`INTERNAL`。
-
-### 3.15 `llm_provider_activate { providerId }` → `{ active_provider_id: string }`
-
-- 目标必须有可用 Key（本机端点除外）：没有 → `PRECONDITION_FAILED`，`details.reason = "api_key_required"`。
-- 成功后写 `settings.llm_active_provider`，**新会话立即使用**；进行中的请求不打断。
-- 已经是当前 provider → 幂等返回。
-- 不存在 → `NOT_FOUND`。
-
-### 3.16 `llm_provider_test { providerId?, name?, protocol?, baseUrl?, model?, apiKey? }` → `LlmTestResult`
-
-**参数是扁平的，没有嵌套 `draft` 对象。**
-
-> 为什么不能用嵌套：Tauri 只对**命令的顶层参数**做 camelCase → snake_case 转换，嵌套对象里的键按各自的 serde 规则走。写 `{ draft: { baseUrl } }` 时 Rust 侧拿到的字段名取决于嵌套结构体有没有 `rename_all`，`baseUrl` 与 `base_url` 会变成两个不同的东西——而这个错误在编译期和运行期都不会报，只是字段恒为 `None`。
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "providerId": { "type": "string" },
-    "name": { "type": "string", "maxLength": 60 },
-    "protocol": { "type": "string", "enum": ["openai", "anthropic"] },
-    "baseUrl": { "type": "string" },
-    "model": { "type": "string" },
-    "apiKey": { "type": "string" }
-  },
-  "additionalProperties": false
-}
-```
+**`llm_provider_test { providerId?, name?, protocol?, baseUrl?, model?, apiKey? }`**（参数平铺，没有嵌套 `draft`）
 
 ```ts
-type LlmTestResult = {
-  ok: boolean;
-  latency_ms: number | null;   // 成功时的往返耗时；失败为 null
-  error?: string;              // 失败时的可读原因，**已脱敏**
-};
+type LlmTestResult = { ok: boolean; latency_ms: number | null; error?: string };
 ```
-
-**三种用法**（判据按顺序）：
 
 | 传入 | 行为 |
 |---|---|
 | 只有 `providerId` | 用已保存的配置与已存的 Key 测试 |
-| 给了 `protocol` / `model` / `baseUrl` / `name` 中任一 | 视为**草稿**，不落库；`apiKey` 省略且 `providerId` 存在时，**用已存的 Key** |
+| 给了 `protocol` / `model` / `baseUrl` / `name` 任一 | 视为**草稿**，不落库；`apiKey` 省略且 `providerId` 存在时用已存的 Key |
 | `providerId` 与草稿字段都缺，或草稿缺 `protocol` / `model` | `INVALID_ARGUMENT` |
 
-- 草稿校验与 `llm_provider_save` **共用 §3.12 的同一套规则**（含 base_url 拒绝 userinfo、http 仅限回环）。
-- 草稿的 Key 只用于本次请求，**不写盘、不进日志**。
-- **只有入参非法才返回 `Err`**；端点不可达、Key 错误、模型不存在、超时一律 `ok: false` + `error`。测试连接失败是它的正常输出，不该抛成异常让调用方分流。
-- `error` 必须**脱敏**。上游报错原文里经常带着 Key（有的服务在 401 响应里回显），也可能带上完整请求信息。规则：
+- **只有入参非法才返回 `Err`**；端点不可达、Key 错误、模型不存在、超时一律 `ok: false` + `error`。
+- `error` 必须**脱敏**：精确替换该 provider 的实际 Key；任何 `sk-[A-Za-z0-9_-]{8,}` 片段替换为 `<redacted>`（替换而非删除）；同样适用于日志与 `detail`。`describe_http_error` 这类把上游响应体转成文案的函数是主要泄漏点。
 
-  | 要求 | 说明 |
-  |---|---|
-  | 剔除该 provider 的**实际 Key 值** | 精确串替换，不是模糊匹配 |
-  | 任何形如 `sk-[A-Za-z0-9_-]{8,}` 的片段**一律替换** | 覆盖"不是本 provider 的 Key 但也是 Key"的情况 |
-  | 替换而不是删除整段 | 把 Key 换成 `<redacted>`，保留其余信息，用户才看得懂错误 |
-  | 同样适用于日志与 `detail` 字段 | 「不显示在界面上」不等于"不落到磁盘" |
+### 9.5 DeepSeek（F1 / F2）
 
-  `describe_http_error` 这类把上游响应体转成文案的函数是**主要泄漏点**——响应体的 `error.message` 常常把 `Authorization` 头或请求体回显出来。它必须走同一套脱敏，不能因为「只是拼个字符串」就跳过。
+`deepseek_key_status {}` → `{ configured: boolean, masked: string | null }`；
+`deepseek_save_key { key }` → `{ masked: string, verified: boolean }`（**保存成功即成功**，Key 是否有效由 `verified` 表达）；
+`deepseek_clear_key {}` → `{ ok: true }`。
+密钥键固定 `provider:deepseek`，与多 provider 复用同一个内置项。
 
-**测试连接必须走与真实对话完全相同的装配路径**（技术设计 §12.4）——用另一套代码测出来的「通」，不能代表对话能通。
-
-错误：`INVALID_ARGUMENT`（入参）、`NOT_FOUND`（`providerId` 不存在）、`PRECONDITION_FAILED`（非本机端点缺 Key）。
-
----
-
-### 3.17 `reply_user_question { sessionId, questionId, answer }` → `{ ok: true }`
+### 9.6 `reply_user_question { sessionId, questionId, answer }` → `{ ok: true }`
 
 回答 `ask-user-question`（`events.md` §4.8）。**同步返回**：回答一旦送达模型，工具就从阻塞中恢复继续跑。
 
@@ -507,7 +973,7 @@ type LlmTestResult = {
 |---|---|
 | `answer` 取值 | 必须是该问题 `options` 之一，**逐字节相等**（不 trim、不归一大小写）；空字符串 = 跳过 |
 | 一个 `questionId` 只能回答一次 | 第二次及以后 → `NOT_FOUND / question_not_pending` |
-| 超时后 | 同上，`question_not_pending`（Host 已代答空串） |
+| 超时后 | 同上（Host 已代答空串） |
 | 会话不匹配 | **同样返回 `question_not_pending`**，不区分「不存在」与「属于别的会话」——否则这个命令会变成跨会话探测问题的工具 |
 
 ```ts
@@ -518,110 +984,215 @@ type PendingQuestion = {
   question: string;
   options: string[];
   created_at: number;   // Unix 毫秒
-  expires_at: number;   // Unix 毫秒 = created_at + 300_000，与该问题的事件载荷一致
+  expires_at: number;   // Unix 毫秒 = created_at + 300_000
 };
 ```
 
-错误：
-
-| 错误码 | `details.reason` | 场景 |
-|---|---|---|
-| `NOT_FOUND` | `question_not_pending` | 不存在 / 已回答 / 已超时 / 已作废 / 会话不匹配 |
-| `INVALID_ARGUMENT` | `answer_not_in_options` | `answer` 非空且不在 `options` 中 |
-
-### 3.18 `list_pending_questions { sessionId }` → `{ questions: PendingQuestion[] }`
+### 9.7 `list_pending_questions { sessionId }` → `{ questions: PendingQuestion[] }`
 
 返回该会话**当前未回答**的问题，用于窗口重载、切走再切回时重建浮层。
 
-- 返回值统一套 `{ questions: [...] }` 外壳，与 `profile_list` / `llm_provider_list` 一致——留出加字段（例如 `server_time`）的位置，也避免前端为个别命令写特例。
-- 只返回**未答且未超时**的；Host 已作废的问题不会出现。
-- 会话不存在时返回空数组，不报错（这个命令是恢复用的，不是查询会话是否存在）。
+- 返回值统一套 `{ questions: [...] }` 外壳。
+- 只返回未答且未超时的；会话不存在时返回空数组，不报错。
 - 顺序不保证；UI 需要稳定顺序时按 `created_at` 自己排。
 
 ---
 
-## 4. 未接线与已作废
+## 10. 已删除与已作废
 
 | 命令 | 处置 | 理由 |
 |---|---|---|
-| `catalog_list_nodes` | **未接线**，1.1.0 暂留 | 需求 §5.5 的面板与引导走 `profile_list` + 默认配置源，不浏览远端目录。保留是因为「换节点」若将来要展示远端列表会用到。**若 P1.5 结束仍未实现，1.2.0 删除** |
-| `profile_import_node` | **未接线**，1.1.0 暂留 | 同上。种子导入已覆盖离线分发（需求 D1） |
-| `vpn_connect` | **作废** | 与 `runtime_start` 语义重复。两套入口必然分叉，删除 |
-| `vpn_disconnect` | **作废** | 与 `runtime_stop` 语义重复，删除 |
-| `chat_delete` | **未接线**（1.1.0 新增） | 契约已冻结，等实现。当前只能重命名会话，不能删（需求 §12.6 第 35 条） |
-| `llm_provider_list` / `_save` / `_delete` / `_activate` / `_test` | **未接线**（1.1.0 新增） | 契约已冻结，等实现（需求 §12.6 第 38 条）。当前只有单一的 DeepSeek Key，没有 provider 概念 |
-| `settings_get` / `settings_set` | 1.0.10 已删除 | 从未实现 |
+| `profile_list` | **2.0 删除** | 单节点模型不存在；由 `config_list` + `config_detail` 取代 |
+| `profile_delete` | **2.0 删除** | 由 `config_delete` 取代（删除的对象从「节点」变成「配置」） |
+| `onboarding_status` | **2.0 删除** | 旧首次引导整体删除（`implementation-plan.md` §1）；首启由 AI 对话 + `source_choice` 承担 |
+| `onboarding_complete` | **2.0 删除** | 同上 |
+| `catalog_list_nodes` | **2.0 删除** | 从未接线；新模型不浏览远端目录 |
+| `profile_import_node` | **2.0 删除** | 从未接线；节点导入走 `node_import_url` / `node_create` |
+| `vpn_connect` / `vpn_disconnect` | 1.1.0 已作废 | 由 `runtime_start` / `runtime_stop` 取代 |
 
-> **只作废 invoke 命令，不作废 AI 工具。**
-> 聊天通道里的 `VpnConnect` / `VpnDisconnect` 两个工具**继续存在**（`tools.md` §4.11、§4.12），模型仍然可以调用它们。作废的是「UI 直接 invoke」这条重复路径。
+> **只作废 invoke 命令，不作废 AI 工具。** 聊天通道里的工具（`VpnConnect` 等）继续存在，见 `tools.md`。两条通道最终落到同一份 Host 实现，差别只在「谁发起」。
 >
-> 两个通道的关系：
->
-> | 通道 | 入口 | 现状 |
-> |---|---|---|
-> | UI → Host | `runtime_start` / `runtime_stop` | 无 AI 主路径，面板与引导用它 |
-> | 模型 → Host | `VpnConnect` / `VpnDisconnect` 工具 | 保留，聊天里说「连到日本」仍然走这条 |
->
-> 两条通道最终都落到同一份 Host 实现（§5），差别只在「谁发起」。
-
-> 作废命令的旧文档写法保留在 `events.md` §10 的 1.0.x 变更记录里，仅作历史参考。
+> `tools.md` 的工具名在 2.0 需要同步改名（§0.2），否则 AI 侧仍会按 `profile` 概念调用。
 
 ---
 
-## 5. 与 AI 工具的对应关系
+## 11. 能力 ↔ 命令 ↔ 块 映射
+
+这是本文与 `docs/capabilities.md`、`docs/center-panel.md` §2.5.1 对齐的**唯一表格**。任何一行对不上，实现就是错的。
+
+### 11.1 新增与变更的命令
+
+| 命令 | 能力 ID | 界面元素 / 块 | 说明 |
+|---|---|---|---|
+| `config_list` | **无（导航级）** | 左栏配置列表 | ⚠️ 见 §11.3 缺口 1 |
+| `config_create` | **C1** 使用官方默认配置 / **B4** 导入配置文件 | `source_choice` | 块本身只负责「用我们的 / 用我自己的」两个选项；落库是本命令 |
+| `config_detail` | **B1** 列出节点 | 底部节点详情 + 节点下拉 | 固定骨架元素 |
+| `config_update` | **G1** 查看当前分流方式（持久化侧） | 设置页 / 左栏编辑 | 在线切换是 G2，批 3 |
+| `config_delete` | **B3** 删除配置 | 左栏项操作 | 旧表 B3 写的是「删除节点配置」，2.0 语义即删配置 |
+| `config_activate` | **无（导航级）** | 左栏切换 | ⚠️ 见 §11.3 缺口 1 |
+| `node_import_url` | **B4** 导入配置文件 | 导入按钮 / `source_choice` 后置 | |
+| `node_create` | **B4** 导入配置文件 | 手动编辑表单 | |
+| `node_switch` | **B2** 切换节点 | 底部「切换到此节点」 | ⚠️ 旧映射写 `runtime_start(profile_id)`，见表后说明 |
+| `node_probe` | **D6** 测试单个节点连通性 | 底部「测试连通」 | D6 由 PM 在批 0 审查时新增 | |
+| `proxy_params` | **A5** 代理参数 | `proxy_card` | |
+| `probe_run` | **D1** 本地基础自检 / **D4** 采集结构化诊断包 | `reachability` 块 + 诊断卡 | |
+| `issue_list` / `issue_get` | **J2** 查看问题列表 | 问题列表 | |
+| `issue_handoff` | **J3** 把问题转交 AI | `issue_card` 的「让 AI 定位」 | |
+| `issue_resolve` / `issue_ignore` | **J4** 标记已解决 / 忽略 | 问题列表操作 | |
+| `runtime_start` | **A1** 建立连接 / **A3** 取消重连 | 顶部主按钮 | |
+| `runtime_stop` | **A2** 断开连接 / **A3** | 顶部主按钮 | |
+| `runtime_status` | **A4** 连接状态 | 顶部状态文字 | 配合 `runtime-state-changed` |
+| `net_repair` | **E1** 恢复直连 / **E2** 刷新 DNS | `issue_card`、设置页 | |
+| `open_log_dir` | **E4** 打开日志目录 | 状态区链接 | |
+| `default_profile_status` / `_refresh` | **C1** / **C2** / **C3** | `update_hint`、`source_choice` | |
+
+### 11.2 固定骨架与块的完整对应
+
+| 骨架元素 / 块 | 依赖能力 | 命令 |
+|---|---|---|
+| 顶部 `启动 VPN` | A1 | `runtime_start` |
+| 顶部 `断开 VPN` | A2 | `runtime_stop` |
+| 顶部状态文字 | A4 | `runtime_status` + 状态事件 |
+| 底部节点详情 / 下拉 | B1 | `config_detail` |
+| `切换到此节点` | B2 | `node_switch` |
+| `测试连通` | D6 | `node_probe` |
+| `empty_hint` | 无（纯文本） | — |
+| `proxy_card` | A5 | `proxy_params` |
+| `source_choice` | C1 / B4 | `config_create`（选「用我们的」带 `source: "seed"`） |
+| `reachability` | D1 | `probe_run` |
+| `issue_card` | J1–J4 / E1–E3 | `issue_*`、`net_repair` |
+| `update_hint` | C2 / C3 | `default_profile_status` |
+
+### 11.3 对不上的地方（需要 PM 在 `capabilities.md` 增补或改口径）
+
+| # | 缺口 | 建议 |
+|---|---|---|
+| 1 | **没有「列出配置」「切换配置」的能力 ID**。左栏是导航级界面，不是 AI 编排块；但 AI 需要知道用户有几套配置才能编排。 | PM 已确认按本文件的命令名同步能力表；本表暂记为「导航级」，建议在 B 组补 **B5 列出配置** / **B6 切换配置** |
+| 2 | **B2 的实现方式变了**。旧表写 `runtime_start(profile_id)`，2.0 拆出 `node_switch`。 | 把 B2 的「实现状态」改成 `node_switch`。拆分理由：未连接时「切换到此节点」只改选择、**不应启动 VPN**；用 `runtime_start` 会把「看」与「连」混成一个动作 |
+| 3 | **J1 没有命令**。 | 保持现状：J1 是内部行为。若将来要让 UI 手动「重新检测」并登记，再加 `issue_collect`，不要暴露 `issue_create` |
+| 4 | **布局写入没有能力 ID。** | 布局属于编排协议（`center-panel.md` §3），不是用户可点能力，不需要能力 ID。写入路径是 AI 工具（批 4），UI 只读 |
+| 5 | **`config_update` 的「改分流」在 G 组没有对应 ID。** | G1 是「查看」、G2 是「切换（在线）」。持久化修改分流策略建议归入 G2 的配置侧，或新增 G5。本批先按 G1 的持久化侧登记 |
+| 6 | **D2 完整诊断（14 项）没有独立命令。** | 仍由 AI 工具 `DiagRun` 承担；`probe_run` 只覆盖连接后的四项。若 UI 要独立按钮，批 6 再补 `diag_run` |
+| 7 | 「测试连通」的能力 | **已解决**：PM 新增 **D6**，`node_probe` 已标 D6 |
+
+---
+
+## 12. 与 AI 工具的对应关系
 
 | 命令 | AI 工具 | 是否共用实现 |
 |---|---|---|
 | `runtime_start` | `RuntimeStart` | **必须** |
 | `runtime_stop` | `RuntimeStop` | **必须** |
-| `profile_list` | `ProfileList` | **必须**（但返回字段名不同，见 §3.3 的已知不一致） |
-| `profile_delete` | `ProfileDelete` | **必须** |
-| `net_repair` | `NetRepair`（1.1.0 新增，wave2） | **必须** |
+| `runtime_status` | `RuntimeStatus` | **必须** |
+| `config_list` | `ConfigList`（2.0 新增） | **必须** |
+| `config_detail` | `ConfigDetail`（2.0 新增） | **必须** |
+| `node_switch` | `NodeSwitch`（2.0 新增） | **必须** |
+| `node_probe` | `NodeProbe`（2.0 新增） | **必须** |
+| `probe_run` | `ProbeRun`（2.0 新增） | **必须** |
+| `proxy_params` | `ProxyParams`（2.0 新增） | **必须** |
+| `node_import_url` | `NodeImportUrl`（2.0 新增，取代 `ProfileImport`） | **必须** |
+| `config_delete` | `ConfigDelete`（2.0 改名） | **必须** |
+| `issue_list` / `issue_handoff` / `issue_resolve` / `issue_ignore` | 同名工具（2.0 新增） | **必须** |
+| `net_repair` | `NetRepair` | **必须** |
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
+`tools.md` 尚未升级到 2.0（§0.2），上表的工具名是**要求**，不是现状。
+
 ---
 
-## 6. 待 PM 拍板
+## 13. 待 PM / 产品确认
 
 | # | 议题 | 我的建议 | 状态 |
 |---|---|---|---|
-| 1 | ~~`profile_list` 用 `id` 还是 `profile_id`~~ | 统一为 `profile_id`，与工具逐字一致 | **已定**：用 `profile_id`，见 §3.3 |
-| 2 | `catalog_list_nodes` / `profile_import_node` 是否 1.2.0 删除 | 删除，减少「文档里有、代码里没有」的条目 | 待定 |
-| 3 | `default_profile_*` 的返回形状是否为 wave2 定稿 | 先按 §3.7 冻结，wave2 若需扩展只加字段 | 待定 |
+| 1 | `node_import_url` 是否只接受 `https` | **只接受 https**。订阅链接含节点密码，明文 http 等于把凭据交给链路上的所有人。代价是少数只提供 http 的机场用不了 | **建议采纳** |
+| 2 | 删除 active 配置是否允许 | **允许**（未连接时），删后回到空态。与「不设不可删除特例」一致；只拦「正在连接」 | **建议采纳** |
+| 3 | `config_create` 自动激活的条件 | 未连接时自动激活；已连接时不自动切 | **建议采纳** |
+| 4 | `config_activate` 的确认参数 | `confirmDisconnect: true`，每次都要重新确认，不记忆 | **建议采纳** |
+| 5 | `node_switch` 是否新增（而不是复用 `runtime_start`） | **新增**。理由见 §11.3 缺口 2 | **需 PM 拍板** |
+| 6 | 是否在 `capabilities.md` 增 B5 / B6 | 建议增补，本文件已按「导航级」临时处理 | **需 PM 决定** |
+| 7 | `seed_id` 常量命名 | `"veyl_seed"` | 待确认 |
+| 8 | `import_seed_file` 保留（语义收窄为「只并节点」） | **保留**，理由见 §8.3 | **建议采纳** |
 
 ---
 
-## 7. 变更记录
+## 14. 破坏性变更清单（1.2.0 → 2.0.0）
 
-### 1.1.0（2026-11-02，P1.5 wave1）
+### 14.1 删除
+
+| 对象 | 类型 | 影响 |
+|---|---|---|
+| `profile_list` | 命令 | 前端左栏与对话侧全部改 `config_list` / `config_detail` |
+| `profile_delete` | 命令 | 改 `config_delete`；参数 `profileId` → `configId` |
+| `onboarding_status` / `onboarding_complete` | 命令 | 删除引导页后无调用方 |
+| `catalog_list_nodes` / `profile_import_node` | 命令（从未接线） | 无运行时影响，仅文档清理 |
+| `profiles` 表 | 数据库 | 整个库重建，见 `data-model.md` §6 |
+| `settings.onboarding_completed` | 数据 | 不迁移 |
+
+### 14.2 改名 / 改形状
+
+| 对象 | 旧 | 新 | 兼容性 |
+|---|---|---|---|
+| `runtime_start` 参数 | `profileId` | `configId`（+ 可选 `nodeId`） | **不兼容**，参数名变了 Tauri 侧会直接拿不到 |
+| `RuntimeSnapshot` 字段 | `profile_id` / `profile_name` | `config_id` / `config_name`，新增 `node_id` / `node_name` | **不兼容**，需同步改 `runtime.md` |
+| `RuntimeSnapshot.mode` | 只有 `"system_proxy"` | 增加 `"tun"` | 新增取值（旧值不变） |
+| `DefaultProfileResult.package_id` | 上游包 id | `seed_id: "veyl_seed"` | **不兼容** |
+| `DefaultProfileResult.applied_at` | ISO 8601 字符串 | Unix 毫秒 | **不兼容** |
+| `import_seed_file` 返回 | `profiles[]` | `nodes[]`，且不再创建配置 | **不兼容** |
+| `import_seed_file` 语义 | 创建 profile | 只并节点池 | **不兼容** |
+| `runtime_start` 回退链 | active → 默认配置包 → 报错 | active → 报错（`no_config`） | 行为变更：全新安装不再能「直接连」 |
+
+### 14.3 新增
+
+17 个命令：
+
+- 配置 6 条：`config_list` / `config_create` / `config_update` / `config_delete` / `config_activate` / `config_detail`
+- 节点 4 条：`node_import_url` / `node_create` / `node_switch` / `node_probe`
+- 代理与探测 2 条：`proxy_params` / `probe_run`
+- 问题 5 条：`issue_list` / `issue_get` / `issue_handoff` / `issue_resolve` / `issue_ignore`
+
+### 14.4 数据结构
+
+- 数据库文件**整体重建**，`profiles` / `default_profile` 表删除，新增 `configs` / `nodes` / `config_nodes` / `layouts` / `issues` / `seed_meta`。
+- 旧库存在时：启动检测 schema 代际不一致 → **删除数据库文件并重建**（对话历史一并丢失）。产品还没有用户，这是刻意选择，不是缺陷。
+
+### 14.5 连带的未完成项
+
+**契约版本矩阵（批 0 交付后）**
+
+| 文件 | 版本 | 状态 |
+|---|---|---|
+| `contracts/commands.md` | **2.0.0** | 本批已升级 |
+| `contracts/events.md` | **2.0.0** | 本批已升级 |
+| `data-model.md` | **1**（schema 基线） | 本批新建 |
+| `contracts/runtime.md` | 1.1.0 | **待升 2.0.0**：字段改名 + `mode` 增加 `tun` |
+| `contracts/tools.md` | 1.2.0 | **待升 3.0.0**：工具改名与新增 |
+| `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
+
+- `runtime.md` 1.1.0 → 2.0.0（字段改名与 `mode` 扩展）。
+- `tools.md` 1.2.0 → 3.0.0（工具改名与新增）。
+- **在这两份升级前，Bob 不得按本文单独实现后端**——否则会出现「命令是 config、内部仍是 profile」的半迁移状态。
+
+---
+
+## 15. 变更记录
+
+### 2.0.0（2026-11-03，批 0 · 契约与数据模型）
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
-| 1 | 本文件新建，接管 `events.md` §5 的全部 invoke 定义 | 结构调整 | 命令与事件分开维护 |
-| 2 | 参数名统一为 **camelCase**（Tauri 2 默认），纠正 1.0.10 写成 snake_case 的错误 | 修正 | 实测 `profileDelete`/`sessionId` |
-| 3 | 新增 `runtime_start` / `runtime_stop` / `profile_list` | 新增命令 | 需求 §9.3、§9.4 |
-| 4 | 新增 `onboarding_status` / `onboarding_complete` | 新增命令 | 需求 §5 |
-| 5 | 新增 `net_repair`（wave2）、`default_profile_refresh` / `default_profile_status`（wave2） | 预留 | 需求 §10 |
-| 5b | `net_repair` 的动作由 2 种扩到 4 种，与 AI 工具 `NetRepair` 齐平，避免两套动作集 | 修正 | 共用实现的前提是动作集一致 |
-| 6 | 补录 `chat_history` / `deepseek_*` 三条已接线但从未入契约的命令 | 补录 | 实现早于文档 |
-| 7 | `vpn_connect` / `vpn_disconnect` 作废，由 `runtime_start` / `runtime_stop` 取代 | 移除 | 语义重复 |
-| 8 | `runtime_stop` 明确「代理撤销失败则中止断开」 | 语义定案 | 需求 §4.6 的同一条原则 |
-| 9 | `profile_list` 的 `id` 改为 `profile_id`，补 `active_profile_id` 与 `node_id`，排序改为 `created_at ASC`，与 `ProfileList` 工具逐字一致 | 修正 | PM 拍板；`services.rs:1302` 的回归测试已钉住 `profile_id` |
-| 10 | 新增 `open_log_dir {}`（不接受路径参数，用文件管理器定位而非打开编辑器） | 新增命令 | 需求 §9.5「打开日志」 |
-| 11 | 明确「作废 invoke 命令 ≠ 作废 AI 工具」：`VpnConnect` / `VpnDisconnect` 工具保留 | 澄清 | PM 提醒 |
-| 12 | 文件顶部加「各契约版本独立，不要批量改」的提醒 | 约束 | catalog 的版本协商不能跟着应用版本走 |
-| 13 | 新增 `chat_delete { sessionId }`；明确事务内同时删 `tool_calls`（该表没有外键，不会级联）、Host 拒绝 `active_request` 而由 UI 先取消 | 新增命令 | 需求 R31 / 验收 G1 |
-| 14 | 新增 `llm_provider_list` / `_save` / `_delete` / `_activate` / `_test` 五个命令与共用校验（§3.12–§3.16） | 新增命令 | 需求 R32 / 验收 H1–H5 |
-| 15 | 明确 `base_url` 拒绝 userinfo（防止 Key 被拼进 URL）、http 仅限本机回环 | 安全约束 | 需求 §5.8 约束 |
-| 16 | `llm_provider_test` 只在入参非法时返回 `Err`，连接失败一律 `ok:false` + 脱敏 `error` | 语义定案 | 失败是「测试」的正常输出 |
-| 17 | `runtime_start` 省略 `profileId` 时改为三级回退：active profile → 默认配置包 → 报错；明确「有 active 但连不上时不回退」 | 语义修正 | PM 拍板；全新安装没有 profile，只有默认包 |
-| 18 | 密钥键由 `llm:<provider_id>` 改为 `provider:<provider_id>`，复用已有的 `provider:deepseek`；迁移只补元数据、不搬密钥 | 修正 | 现有约定能复用就别新造 |
-| 19 | 「有 active 但连不上不回退」由行为描述升级为不变量，并给出可执行的测试断言 | 约束强化 | PM 要求写成不变量 |
-| 20 | `llm_provider_test` 去掉嵌套 `draft`，参数平铺到顶层；新增 §1.1.1「不要用嵌套对象传参」 | 修正 | Tauri 只对顶层参数做 camelCase 转换，嵌套键不会转 |
-| 21 | `llm_provider_save` 明确「只保存、不改 active」，唯一例外是没有 active 时的第一个；切换只能走 `activate` | 不变量 | 不静默改变请求去向 |
-| 22 | `llm_provider_delete`：**允许删除当前激活项**，删后 active 置空、不自动挑下一个 | 语义修订 | 删除是显式操作；自动挑选属于静默切换 |
-| 23 | `llm_provider_test` 的 `error` 补脱敏细则（精确串 + `sk-` 片段 + 替换而非删除 + 同样适用日志） | 安全约束 | 上游响应体是主要泄漏点 |
-| 24 | 新增 `reply_user_question` / `list_pending_questions`（1.2.0），配合 `ask-user-question` 事件 | 新增命令 | 产品负责人：AI 在对话里提问并给选项 |
-| 25 | 明确回答只接受一次、超时/作废/会话不匹配统一返回 `question_not_pending` | 语义定案 | 避免该命令被用作跨会话探测 |
-| 26 | `list_pending_questions` 返回 `{ questions: [...] }`，不再用裸数组 | 修正 | 新命令一开始就破例会让例外越积越多 |
+| 1 | `contract_version` 升到 `2.0.0` | 元数据 | 数据模型从「单节点 profile」换成「配置 + 节点池」 |
+| 2 | 删除 `profile_list` / `profile_delete`，新增 `config_*` 六条 | 替换 | `implementation-plan.md` 批 1 |
+| 3 | 新增节点命令 `node_import_url` / `node_create` / `node_switch` / `node_probe` | 新增 | `config-execution.md` §6、`center-panel.md` §2.5.1 |
+| 4 | 新增 `proxy_params`（A5，单端口双协议） | 新增 | `capabilities.md` A5、`center-panel.md` `proxy_card` |
+| 5 | 新增 `probe_run`（D1 / D4，连接后四项探测） | 新增 | `config-execution.md` §8、`issue-management.md` §5 |
+| 6 | 新增 `issue_*` 五条（J2–J4）；**不提供 `issue_create`**，J1 只由 Host 内部触发 | 新增 | `issue-management.md` §2、§3 |
+| 7 | `runtime_start` 参数 `profileId` → `configId`，新增 `nodeId`；删掉「默认配置包」二级回退 | 不兼容 | 新模型没有「没有配置也能连」的状态 |
+| 8 | `RuntimeSnapshot` 的 `profile_*` 改名 `config_*`，新增 `node_*`，`mode` 增加 `tun` | 不兼容 | 同一实体只能有一个名字 |
+| 9 | `default_profile_*` 语义改为 `veyl_seed.json`，`package_id` → `seed_id`，时间改毫秒 | 不兼容 | `config-execution.md` §9–§10 |
+| 10 | `import_seed_file` 保留但收窄为「只并节点池」，不再创建配置 | 不兼容 | 离线兜底与开发注入仍需要它 |
+| 11 | 新增 §1.5：落库实体时间统一 Unix 毫秒；事件信封 `emitted_at` 仍是 ISO | 约定 | 与 `data-model.md` 的列类型一致 |
+| 12 | 新增 §11 能力 ↔ 命令 ↔ 块映射，并列出 6 处对不上的地方 | 新增 | 三条硬约束要求一一对应 |
+| 13 | 补录 `open_external`（1.2.0 代码有、契约没有） | 补录 | 白名单实现已存在 |
+| 14 | 明确「先撤代理再停运行时」「连接失败不回退」等旧不变量在新模型下继续有效 | 约束 | 不改原则，只改数据单位 |
+| 15 | 新增 §0.2：`runtime.md` / `tools.md` 的连带升级未完成，不得半迁移实现 | 约束 | 防止 Bob 按旧字段名开工 |
