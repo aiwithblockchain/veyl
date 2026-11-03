@@ -52,3 +52,10 @@ build/
 
 # 种子节点文件（含真实密码，绝不入库）
 *seeds*.json
+
+# 第三方参考 skill（按需重装，见 .claude/skills/README.md）
+.claude/skills/*/
+!.claude/skills/veyl-ui/
+
+# 图标生成的中间产物（由 npm run icons 重新生成）
+src-tauri/icons/AppIcon.iconset/
