@@ -99,11 +99,13 @@ https://github.com/<owner>/<repo>/releases/latest/download/latest.json
 
 理由：提示词是产品资产，用户没有判断两版提示词优劣的信息，给他一个回退按钮只会制造焦虑。
 
-### 3.5 例外：默认配置的种子包
+### 3.5 例外：默认节点的种子包
 
-`bootstrap.json` **不走随包基线**，只从 `meshnetprotocol.github.io` 拉取并缓存。原因见 `docs/config-execution.md` §9——打包进安装包的节点凭据会被提取滥用。
+`veyl_seed.json` **不走随包基线**，只从 `meshnetprotocol.github.io` 拉取并缓存。原因见 `docs/config-execution.md` §9——打包进安装包的节点凭据会被提取滥用。
 
-它不是节点清单而是一个配置包：含服务商元数据、节点、默认分流规则。变更检测用 `package_hash`，文件里没有 `version` 字段。
+它**只含节点**，421 字节，由 4.6KB 的 `bootstrap.json` 抽取而来。**分流规则不进种子**——那是 AI 在对话里问出来的用户偏好，覆盖种子时不能动它。
+
+文件很小，变更检测直接比对内容哈希，不依赖手写的 `version` 字段。
 
 ---
 

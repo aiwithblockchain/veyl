@@ -174,7 +174,7 @@ Method    aes-256-gcm
 **决定：不随包，只从种子 URL 拉。**
 
 ```
-https://meshnetprotocol.github.io/bootstrap.json
+https://meshnetprotocol.github.io/veyl_seed.json
 ```
 
 | 项 | 做法 |
@@ -195,7 +195,7 @@ https://meshnetprotocol.github.io/bootstrap.json
 
 - 会持续保证这个 URL 可达，必要时调整
 - 首次分发时，如果某个用户拉不到，通过其它渠道把种子给他
-- 实测（2026-11-03，关 VPN、系统代理全关）：直连 `HTTP 200`，0.54s，4.6KB
+- 实测（2026-11-03，关 VPN、系统代理全关）：上游 `bootstrap.json` 直连 `HTTP 200`，330ms，4.6KB。`veyl_seed.json` 发布后需再测一次
 
 ### 拉不到怎么办
 
@@ -234,32 +234,42 @@ https://meshnetprotocol.github.io/bootstrap.json
 
 ### 怎么拉
 
-- 先带 `If-None-Match` 发条件请求，返回 304 就直接结束，不重复下载
-- 变更检测用 **`package_hash`**——这份文件里**没有 `version` 字段**，不要去找它
+- **每次直接拉全文，自己算内容哈希比对**，不依赖 `version` 字段
+- 理由：`version` 要人手动改，「改了文件忘了改版本号」正是 TweetPilot 那次事故的根因（`docs/issues/tweetpilot-resource-version-gap.md`）。文件才 421 字节，没必要为省这点流量冒这个险
+- 先带 `If-None-Match` 发条件请求，304 就直接结束——服务器说没变就不用下
 - **同一时刻只允许一个请求在飞**，避免并发写坏缓存
 
-### 这份文件里有什么
+### 我们消费的文件
 
-实测（2026-11-03）顶层字段：
+`veyl_seed.json`，421 字节：
 
+```json
+{
+  "version": 1,
+  "updated_at": "2026-11-03T13:53:52Z",
+  "nodes": [
+    { "name": "meshflux69 [美国]", "server": "...", "port": 13774,
+      "method": "aes-256-gcm", "password": "..." }
+  ]
+}
 ```
-provider_id  name  description  tags  author
-visibility   status
-updated_at   source_updated_at   package_hash
-config       routing_rules
-```
 
-所以它不是一个「节点清单」，而是**一个完整配置包**：
+上游是 `bootstrap.json`（4686 字节，含服务商元数据、完整 sing-box 配置、`routing_rules`）。我们从中**只抽取节点**，生成这个精简文件。
 
-| 字段 | 用途 |
-|---|---|
-| `provider_id` / `name` / `description` / `tags` / `author` / `visibility` / `status` | 服务商元数据。将来接服务商市场时直接复用 |
-| `package_hash` | 变更检测的唯一依据 |
-| `updated_at` / `source_updated_at` | 我们发布时间 / 上游改动时间 |
-| `config` | 节点与连接参数 |
-| `routing_rules` | 默认分流规则 |
+### 分流不在这里
 
-**这意味着「种子」不只提供节点，还提供默认分流。** 所以 `routing_rules` 的更新也要走同一套覆盖逻辑，不能只换节点不换规则。
+种子**只给节点，没有分流规则。**
+
+分流由 AI 在对话里问出来（第四问：本地直连 / 全部走 VPN / 指定服务），在本机生成。
+
+理由：**分流是用户的偏好，种子是运维资源。** 把偏好混进运维文件，每次覆盖种子就会把用户的改动一起冲掉——而且他不会知道为什么。
+
+两层永远分开：
+
+| 层 | 来源 | 覆盖种子时 |
+|---|---|---|
+| 节点 | `veyl_seed.json` | 整层替换 |
+| 分流 | AI 对话 + 用户手动调整 | **永不动** |
 
 ### 可达性实测（2026-11-03）
 
