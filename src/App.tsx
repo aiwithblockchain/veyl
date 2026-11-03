@@ -20,7 +20,7 @@ import { Settings, describeImportError } from "./components/Settings";
 import { Sidebar, type RenameResult } from "./components/Sidebar";
 import { StatusPanel } from "./components/StatusPanel";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
-import { statusSentence, statusTone, toLinkState, toneClass } from "./ui/status";
+import { primaryAction, statusSentence, statusTone, toLinkState, toneClass } from "./ui/status";
 import { useFocusTrap } from "./ui/focus";
 import "./styles/app.css";
 
@@ -646,9 +646,29 @@ export default function App() {
     !setupDismissed &&
     (!hasKey || (profilesLoaded && profiles.length === 0));
 
+  const hasMessages = Boolean(session && session.messages.length > 0);
   const dockOpen = !narrow && panelPreferred;
   const overlayOpenNow = narrow && overlayOpen;
+  const panelShown = dockOpen || overlayOpenNow;
   useFocusTrap(overlayOpenNow, overlayRef);
+
+  // 跨 1100px 断点时复位浮层，避免宽度变化后面板突然重弹。
+  useEffect(() => {
+    setOverlayOpen(false);
+  }, [narrow]);
+
+  const quickAction = primaryAction({
+    state: runtime.state,
+    hasProfiles: profiles.length > 0,
+    pending: runtimeAction,
+    defaultBusy,
+  });
+  const runQuickAction = () => {
+    if (quickAction.kind === "default") handleUseDefault();
+    else if (quickAction.kind === "stop") handleDisconnect();
+    else handleConnect();
+  };
+  const quickLabel = quickAction.kind === "default" ? "连接" : quickAction.label;
 
   useEffect(() => {
     if (!overlayOpenNow) return;
@@ -689,7 +709,8 @@ export default function App() {
       profiles={profiles}
       activeProfileId={activeProfileId}
       pending={runtimeAction}
-      showPrimary={Boolean(session) || hasEverConnected}
+      showPrimary
+      lightPrimary={!hasMessages}
       compact={compact}
       onCollapse={closePanel}
       onConnect={handleConnect}
@@ -746,6 +767,16 @@ export default function App() {
                 {statusSentence(link, topbarNode, degraded, stopping)}
               </span>
             </button>
+            {!panelShown && (hasMessages || hasEverConnected) ? (
+              <button
+                type="button"
+                className="btn btn--ghost topbar__connect"
+                onClick={runQuickAction}
+                disabled={quickAction.disabled}
+              >
+                {quickLabel}
+              </button>
+            ) : null}
             <button
               type="button"
               className="topbar__panel-toggle"
@@ -798,7 +829,7 @@ export default function App() {
           </div>
         ) : null}
 
-        {session ? (
+        {hasMessages && session ? (
           <ChatView
             session={session}
             onSend={handleSend}
@@ -827,7 +858,13 @@ export default function App() {
       {dockOpen ? statusPanel(false) : null}
 
       {overlayOpenNow ? (
-        <div className="panel-overlay" onMouseDown={() => setOverlayOpen(false)}>
+        <div
+          className="panel-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="连接状态"
+          onMouseDown={() => setOverlayOpen(false)}
+        >
           <div
             className="panel-overlay__inner"
             ref={overlayRef}

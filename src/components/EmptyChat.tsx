@@ -53,25 +53,30 @@ export function EmptyChat({
     else onConnect();
   };
 
+  const stopping = runtime.state === "stopping";
+
   let headline: string;
-  if (connected) headline = "已就绪，聊点什么";
+  if (stopping) headline = "正在断开…";
+  else if (runtime.state === "starting" || runtime.state === "restarting") {
+    headline = "正在连接…";
+  } else if (connected) headline = "已就绪，聊点什么";
   else if (failed) headline = "这次没连上";
   else headline = "先连上，再聊。";
 
   let detail: string;
-  if (connected) {
+  if (stopping) {
+    detail = "正在恢复系统代理，稍等片刻。";
+  } else if (runtime.state === "starting" || runtime.state === "restarting") {
+    detail = "正在建立安全通道，不会改动系统代理。";
+  } else if (connected) {
     detail = "需要换节点时，打开右上角的状态面板。";
   } else if (failed) {
     detail = "可以重试，或打开状态面板查看原因。";
-  } else if (connecting) {
-    detail = "正在建立安全通道，不会改动系统代理。";
-  } else if (noProfiles) {
-    detail = "用官方提供的节点，点一下就能用。";
   } else {
     detail = "用官方提供的节点，点一下就能用。";
   }
 
-  const showSuggestions = !hasEverConnected;
+  const showSuggestions = !hasEverConnected && !stopping && !connecting;
 
   return (
     <div className="chat empty-chat">

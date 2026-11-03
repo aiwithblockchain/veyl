@@ -28,6 +28,8 @@ interface Props {
   activeProfileId: string | null;
   pending: RuntimeAction | null;
   showPrimary: boolean;
+  /** 空对话时右栏只用描边按钮，实心主按钮留给中间区域。 */
+  lightPrimary?: boolean;
   compact?: boolean;
   onCollapse: () => void;
   onConnect: () => void;
@@ -46,6 +48,7 @@ export function StatusPanel({
   activeProfileId,
   pending,
   showPrimary,
+  lightPrimary = false,
   compact = false,
   onCollapse,
   onConnect,
@@ -148,7 +151,7 @@ export function StatusPanel({
       {showPrimary ? (
         <button
           type="button"
-          className="btn btn--primary panel-primary"
+          className={`btn ${lightPrimary ? "btn--ghost" : "btn--primary"} panel-primary`}
           onClick={runPrimary}
           disabled={action.disabled}
         >
