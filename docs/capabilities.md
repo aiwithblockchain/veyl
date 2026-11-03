@@ -73,7 +73,8 @@ H 组是**给 AI 提供确定性事实**的工具，不是给界面用的。
 | `preferred_languages` | 系统语言偏好 | 否 |
 | `egress_ip` | 本机出口 IP | 是（未连接为 null） |
 | `egress_country` | 出口 IP 归属 | 是（未知为 null） |
-| `behind_proxy` | 当前是否已有代理 | 否 |
+| `behind_proxy` | 当前系统代理是否已开启 | 否 |
+| `other_vpn_active` | 是否有别的 VPN / 代理在运行：系统代理指向了非本机端口、存在 utun 接口、或常见 VPN 进程在跑 | 否 |
 | `runtime_version` | 本地 sing-box 版本 | 否 |
 
 AI 拿到之后的动作只有三种：一致就确认、不一致就问、为空就问。不需要推理过程。
