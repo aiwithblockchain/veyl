@@ -164,11 +164,25 @@ function walkRs(dir, out = []) {
 }
 
 // 顺序有意义：先按完整路径精确匹配，再按目录前缀匹配。
+//
+// 但**目录不等于归属**：`runtime/manager.rs` 里的 `EVENT_CONTRACT_VERSION` 服务的是
+// 事件载荷与命令错误信封，版本应由 events.md / commands.md 决定，而不是 runtime.md
+// （runtime.md 只管 runtime 自己的能力版本）。按目录一刀切会把这类「写在 A 目录、
+// 服务于 B 契约」的常量判给错误的文档，产出假 advisory。
+// 因此再加一条按**常量名**判定的规则，优先级高于目录。
 const VERSION_MAP = [
   { file: "src-tauri/src/claurst_session/events.rs", doc: "docs/contracts/events.md" },
+  // 这个文件只 emit 事件载荷，没有 runtime 能力版本。
+  { file: "src-tauri/src/default_profile.rs", doc: "docs/contracts/events.md" },
   { prefix: "src-tauri/src/tools/", doc: "docs/contracts/tools.md" },
   { prefix: "src-tauri/src/runtime/", doc: "docs/contracts/runtime.md" },
   { prefix: "src-tauri/src/catalog/", doc: "docs/contracts/catalog.md" },
+];
+
+// 常量名 → 契约文件。命中即用，不看目录。顺序：更具体的名字放前面。
+const SYMBOL_MAP = [
+  { symbol: "EVENT_CONTRACT_VERSION", doc: "docs/contracts/events.md" },
+  { symbol: "CATALOG_CONTRACT_VERSION", doc: "docs/contracts/catalog.md" },
 ];
 
 function docForFile(rel) {
@@ -176,6 +190,12 @@ function docForFile(rel) {
   if (exact) return exact.doc;
   const byPrefix = VERSION_MAP.find((e) => e.prefix && rel.startsWith(e.prefix));
   return byPrefix ? byPrefix.doc : null;
+}
+
+function docForLine(rel, line) {
+  const bySymbol = SYMBOL_MAP.find((e) => line.includes(e.symbol));
+  if (bySymbol) return bySymbol.doc;
+  return docForFile(rel);
 }
 
 const docVersionCache = new Map();
@@ -197,13 +217,14 @@ check(
 
     for (const file of walkRs(srcDir)) {
       const rel = file.slice(ROOT.length + 1);
-      const doc = docForFile(rel);
-      // 未映射的文件不参与检查（例如 agent/ 下的命令层，不携带契约版本语义）。
-      if (!doc) continue;
-      const expected = docContractVersion(doc);
       const lines = readFileSync(file, "utf8").split("\n");
       lines.forEach((line, i) => {
         if (!/CONTRACT_VERSION|contract_version/.test(line)) return;
+        // 归属按行判定：常量名优先于目录（见 VERSION_MAP 上方的说明）。
+        const doc = docForLine(rel, line);
+        // 未映射的文件/行不参与检查（例如 agent/ 下的命令层，不携带契约版本语义）。
+        if (!doc) return;
+        const expected = docContractVersion(doc);
         for (const m of line.matchAll(/"([\d.]+\.[\d.]+)"/g)) {
           if (m[1] === expected) continue;
           problems.push(`${rel}:${i + 1} 是 ${m[1]}，${doc} 是 ${expected}`);

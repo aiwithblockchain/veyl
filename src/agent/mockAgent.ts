@@ -795,6 +795,18 @@ export class MockAgentBridge implements AgentBridge {
     );
   }
 
+  async replyUserQuestion(
+    _sessionId: string,
+    _questionId: string,
+    _answer: string,
+  ): Promise<void> {
+    // 浏览器事件源没有提问通道；调用即视为完成。
+  }
+
+  async listPendingQuestions(_sessionId: string): Promise<never[]> {
+    return [];
+  }
+
   async llmProviderList(): Promise<{
     providers: LlmProvider[];
     activeProviderId: string | null;

@@ -12,6 +12,7 @@ import type {
   NetRepairAction,
   NetRepairResult,
   OnboardingStatus,
+  PendingQuestion,
   ProfileListData,
   RenamedSession,
   StoredChatMessage,
@@ -33,6 +34,16 @@ interface RawProfile {
   method?: string;
   region?: string | null;
   created_at?: string;
+}
+
+interface RawPendingQuestion {
+  question_id?: string;
+  session_id?: string;
+  request_id?: string;
+  question?: string;
+  options?: string[];
+  created_at?: number;
+  expires_at?: number;
 }
 
 interface RawDefaultProfile {
@@ -304,6 +315,31 @@ export class TauriAgentBridge implements AgentBridge {
 
   async clearDeepSeekKey(): Promise<void> {
     await call("deepseek_clear_key");
+  }
+
+  async replyUserQuestion(
+    sessionId: string,
+    questionId: string,
+    answer: string,
+  ): Promise<void> {
+    await call("reply_user_question", { sessionId, questionId, answer });
+  }
+
+  async listPendingQuestions(sessionId: string): Promise<PendingQuestion[]> {
+    const raw = await call<{ questions?: RawPendingQuestion[] }>("list_pending_questions", {
+      sessionId,
+    });
+    return (raw.questions ?? [])
+      .map((item) => ({
+        questionId: item.question_id ?? "",
+        sessionId: item.session_id ?? sessionId,
+        requestId: item.request_id ?? "",
+        question: item.question ?? "",
+        options: item.options ?? [],
+        createdAt: item.created_at ?? 0,
+        expiresAt: item.expires_at ?? item.created_at ?? 0,
+      }))
+      .filter((item) => item.questionId.length > 0);
   }
 
   async llmProviderList(): Promise<{

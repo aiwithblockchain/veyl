@@ -82,6 +82,17 @@ export interface OnboardingStatus {
   profileCount: number;
 }
 
+/** 模型提出、尚未回答的问题（1.2.0）。 */
+export interface PendingQuestion {
+  questionId: string;
+  sessionId: string;
+  requestId: string;
+  question: string;
+  options: string[];
+  createdAt: number;
+  expiresAt: number;
+}
+
 /** UI 发起的连接/断开正在进行中；按钮据此禁用，防止重复提交。 */
 export type RuntimeAction = "start" | "stop";
 
@@ -216,6 +227,10 @@ export interface AgentBridge {
   saveDeepSeekKey(key: string): Promise<DeepSeekKeyState>;
   /** 从本机存储删除 Key。 */
   clearDeepSeekKey(): Promise<void>;
+  /** 回答模型的提问：answer 必须是选项之一，空字符串表示跳过。 */
+  replyUserQuestion(sessionId: string, questionId: string, answer: string): Promise<void>;
+  /** 会话里尚未回答的问题（重连恢复用）。 */
+  listPendingQuestions(sessionId: string): Promise<PendingQuestion[]>;
   /** 模型端点列表与当前项（R32 高级模式）。 */
   llmProviderList(): Promise<{ providers: LlmProvider[]; activeProviderId: string | null }>;
   llmProviderSave(input: LlmProviderInput): Promise<LlmProvider>;

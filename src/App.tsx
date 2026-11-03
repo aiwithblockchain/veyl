@@ -8,10 +8,12 @@ import type {
   DeepSeekKeyState,
   DefaultProfileStatus,
   ImportSeedResult,
+  PendingQuestion,
   RuntimeAction,
   RuntimeProfile,
 } from "./agent/bridge";
 import { BridgeError, toBridgeError } from "./agent/errors";
+import { AskQuestionDialog } from "./components/AskQuestionDialog";
 import { ChatView } from "./components/ChatView";
 import { DiagnosisSheet } from "./components/DiagnosisSheet";
 import { EmptyChat } from "./components/EmptyChat";
@@ -91,10 +93,22 @@ export default function App() {
   const [defaultProfile, setDefaultProfile] = useState<DefaultProfileStatus | null>(null);
   const [defaultBusy, setDefaultBusy] = useState(false);
   const [repairing, setRepairing] = useState(false);
+  const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const importingRef = useRef(false);
   const runtimeActionRef = useRef(false);
   const connectTestRef = useRef(false);
   const endWaiters = useRef(new Map<string, () => void>());
+  // 已经回答/超时/作废的问题 id：防止重连或重试路径把旧问题再插回来。
+  const settledQuestionIds = useRef(new Set<string>());
+
+  const markQuestionSettled = (questionId: string) => {
+    const settled = settledQuestionIds.current;
+    settled.add(questionId);
+    if (settled.size > 200) {
+      const oldest = settled.values().next().value;
+      if (oldest) settled.delete(oldest);
+    }
+  };
   // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
   const healthVersion = useRef(0);
 
@@ -219,10 +233,33 @@ export default function App() {
       if (AI_EVENTS.has(event.name)) {
         dispatch({ type: "agent_event", event });
       }
+      if (event.name === AGENT_EVENTS.askUserQuestion) {
+        const payload = event.payload;
+        if (settledQuestionIds.current.has(payload.question_id)) return;
+        setPendingQuestions((current) => [
+          ...current.filter((item) => item.questionId !== payload.question_id),
+          {
+            questionId: payload.question_id,
+            sessionId: payload.session_id,
+            requestId: payload.request_id,
+            question: payload.question,
+            options: payload.options ?? [],
+            createdAt: payload.created_at,
+            expiresAt: payload.expires_at,
+          },
+        ]);
+      }
       if (event.name === AGENT_EVENTS.requestEnd) {
-        const finish = endWaiters.current.get(event.payload.request_id);
+        const requestId = event.payload.request_id;
+        setPendingQuestions((current) => {
+          for (const item of current) {
+            if (item.requestId === requestId) markQuestionSettled(item.questionId);
+          }
+          return current.filter((item) => item.requestId !== requestId);
+        });
+        const finish = endWaiters.current.get(requestId);
         if (finish) {
-          endWaiters.current.delete(event.payload.request_id);
+          endWaiters.current.delete(requestId);
           finish();
         }
       }
@@ -272,6 +309,33 @@ export default function App() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  // 切换 / 恢复会话时，把该会话未回答的问题拉回来。
+  useEffect(() => {
+    const sessionId = session?.id;
+    if (!sessionId) return;
+    let cancelled = false;
+    void bridge
+      .listPendingQuestions(sessionId)
+      .then((items) => {
+        if (cancelled) return;
+        setPendingQuestions((current) => {
+          const byId = new Map(current.map((item) => [item.questionId, item]));
+          for (const item of items) {
+            if (!settledQuestionIds.current.has(item.questionId)) {
+              byId.set(item.questionId, item);
+            }
+          }
+          return [...byId.values()];
+        });
+      })
+      .catch(() => {
+        // 命令未接线或网络问题：保持现有列表。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge, session?.id]);
 
   // 第一次成功连接后，界面不再出现任何引导。
   useEffect(() => {
@@ -361,6 +425,9 @@ export default function App() {
         // NOT_FOUND 或命令未接入都不影响本地状态。
       }
       dispatch({ type: "session_removed", sessionId });
+      setPendingQuestions((current) =>
+        current.filter((item) => item.sessionId !== sessionId),
+      );
       return { ok: true };
     }
 
@@ -384,6 +451,9 @@ export default function App() {
       const bridgeError = toBridgeError(error);
       if (bridgeError.code === "NOT_FOUND") {
         dispatch({ type: "session_removed", sessionId });
+        setPendingQuestions((current) =>
+          current.filter((item) => item.sessionId !== sessionId),
+        );
         return { ok: true };
       }
       if (bridgeError.code === "PRECONDITION_FAILED") {
@@ -396,6 +466,9 @@ export default function App() {
     }
 
     dispatch({ type: "session_removed", sessionId });
+    setPendingQuestions((current) =>
+      current.filter((item) => item.sessionId !== sessionId),
+    );
     return { ok: true };
   };
 
@@ -647,6 +720,44 @@ export default function App() {
     (!hasKey || (profilesLoaded && profiles.length === 0));
 
   const hasMessages = Boolean(session && session.messages.length > 0);
+  const currentQuestion = session
+    ? pendingQuestions.find((item) => item.sessionId === session.id) ?? null
+    : null;
+
+  const handleQuestionExpired = () => {
+    if (!currentQuestion) return;
+    const { sessionId, questionId } = currentQuestion;
+    markQuestionSettled(questionId);
+    setPendingQuestions((current) =>
+      current.filter((item) => item.questionId !== questionId),
+    );
+    // 前端墙钟可能先于后端单调计时到期：回空串把后端也解开。
+    // 正常情况后端已超时，会返回 NOT_FOUND，静默忽略。
+    void bridge.replyUserQuestion(sessionId, questionId, "").catch(() => undefined);
+  };
+
+  const handleAnswerQuestion = async (answer: string) => {
+    if (!currentQuestion) return;
+    const { sessionId, questionId } = currentQuestion;
+    try {
+      await bridge.replyUserQuestion(sessionId, questionId, answer);
+      markQuestionSettled(questionId);
+      setPendingQuestions((current) =>
+        current.filter((item) => item.questionId !== questionId),
+      );
+    } catch (error) {
+      if (toBridgeError(error).code === "NOT_FOUND") {
+        // 已经回答或随请求作废：本地关掉浮层即可，不弹错误。
+        markQuestionSettled(questionId);
+        setPendingQuestions((current) =>
+          current.filter((item) => item.questionId !== questionId),
+        );
+        return;
+      }
+      throw error;
+    }
+  };
+
   const dockOpen = !narrow && panelPreferred;
   const overlayOpenNow = narrow && overlayOpen;
   const panelShown = dockOpen || overlayOpenNow;
@@ -874,6 +985,12 @@ export default function App() {
           </div>
         </div>
       ) : null}
+
+      <AskQuestionDialog
+        question={currentQuestion}
+        onAnswer={handleAnswerQuestion}
+        onExpire={handleQuestionExpired}
+      />
 
       <DiagnosisSheet
         open={diagnosisOpen}

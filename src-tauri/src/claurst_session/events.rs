@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::agent::app_handle;
 use crate::tools::{AivpnError, NextAction};
 
-pub const CONTRACT_VERSION: &str = "1.1.0";
+pub const CONTRACT_VERSION: &str = "1.2.0";
 
 pub const EV_MESSAGE_CHUNK: &str = "message-chunk";
 pub const EV_THINKING_CHUNK: &str = "thinking-chunk";
@@ -20,6 +20,7 @@ pub const EV_REQUEST_END: &str = "ai-request-end";
 pub const EV_RUNTIME_STATE_CHANGED: &str = "runtime-state-changed";
 pub const EV_RUNTIME_HEALTH_CHANGED: &str = "runtime-health-changed";
 pub const EV_JOB_PROGRESS: &str = "job-progress";
+pub const EV_ASK_USER_QUESTION: &str = "ask-user-question";
 
 const RESULT_LIMIT: usize = 8 * 1024;
 

@@ -288,16 +288,21 @@ pub async fn chat_delete(
         Ok(true) => {
             // 内存里的会话也要丢掉，否则下一次发送会往已删除的会话写消息。
             state.drop_session(&session_id).await;
+            crate::agent::questions::cleanup_session(&session_id);
             Ok(json!({ "ok": true }))
         }
-        Ok(false) => Err(json!({
+        Ok(false) => {
+            // DB 里已经没有了，也要清掉该会话可能残留的待答问题。
+            crate::agent::questions::cleanup_session(&session_id);
+            Err(json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "NOT_FOUND",
             "message": "会话不存在",
             "retryable": false,
             "details": null,
             "request_id": "",
-        })),
+            }))
+        }
         Err(error) => Err(json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": error.code(),
@@ -434,6 +439,37 @@ pub async fn llm_provider_test(
         api_key,
     };
     crate::llm::test(store, input).await.map_err(llm_error)
+}
+
+/// AskUserQuestion 的回答。answer 必须是选项之一，空字符串表示跳过。
+#[tauri::command]
+pub async fn reply_user_question(
+    session_id: String,
+    question_id: String,
+    answer: String,
+) -> Result<Value, Value> {
+    crate::agent::questions::reply(&session_id, &question_id, &answer).map_err(|(reason, message)| {
+        let code = match reason.as_str() {
+            "question_not_pending" => "NOT_FOUND",
+            "answer_not_in_options" => "INVALID_ARGUMENT",
+            _ => "INTERNAL",
+        };
+        json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": code,
+            "message": message,
+            "retryable": false,
+            "details": { "reason": reason },
+            "request_id": "",
+        })
+    })?;
+    Ok(json!({ "ok": true }))
+}
+
+/// 当前会话未回答的问题（重连后恢复提问浮层）。
+#[tauri::command]
+pub async fn list_pending_questions(session_id: String) -> Result<Value, Value> {
+    Ok(crate::agent::questions::list_pending(&session_id))
 }
 
 /// 用系统浏览器打开白名单内的链接（目前只有 DeepSeek 开放平台）。

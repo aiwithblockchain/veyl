@@ -470,6 +470,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         case AGENT_EVENTS.jobProgress:
         case AGENT_EVENTS.appLifecycleChanged:
         case AGENT_EVENTS.defaultProfileUpdated:
+        case AGENT_EVENTS.askUserQuestion:
           return state;
 
         default:

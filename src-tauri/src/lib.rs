@@ -210,6 +210,8 @@ pub fn run() {
             agent::commands::open_external,
             agent::commands::chat_history,
             agent::commands::chat_delete,
+            agent::commands::reply_user_question,
+            agent::commands::list_pending_questions,
             agent::commands::deepseek_save_key,
             agent::commands::deepseek_key_status,
             agent::commands::deepseek_clear_key,

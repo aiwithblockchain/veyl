@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`1.1.0`
+> 契约版本：`1.2.0`
 > 状态：已冻结（P1.5 wave1，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.2、§4.3、`docs/phase-1-5-requirements.md` §4.1
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，1.1.0 起独立成文）
@@ -42,8 +42,9 @@
 | 10 | `job-progress` | Host → UI | `JobProgressPayload` | 长任务进度 |
 | 11 | `app-lifecycle-changed` | Host → UI | `AppLifecycleChangedPayload` | 应用进程状态变化（1.1.0） |
 | 12 | `default-profile-updated` | Host → UI | `DefaultProfileUpdatedPayload` | 默认配置包变化（1.1.0 定名，wave2 接线） |
+| 13 | `ask-user-question` | Host → UI | `AskUserQuestionPayload` | 模型向用户提问，等待选择（1.2.0） |
 
-1–7 是 AI 会话事件，8–12 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
+1–7 与 13 是 AI 会话事件，8–12 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
 
 ---
 
@@ -67,6 +68,8 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 每个 payload 都有 `emitted_at`（ISO 8601 UTC）。**这是相对 TweetPilot 的新增字段**，用于前端排查顺序问题；TweetPilot 的前端不读它，可以安全忽略。
 
+> **唯一例外**：`ask-user-question` 的 `created_at` / `expires_at` 用 Unix 毫秒（前端要做倒计时算术）。理由见 §4.8.5。
+
 ### 2.4 大小限制
 
 - 单个事件 payload ≤ 64 KB。
@@ -81,7 +84,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -103,7 +106,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -121,7 +124,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -163,7 +166,7 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 
 ```ts
 type ToolCallEndPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -203,7 +206,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -242,7 +245,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -270,7 +273,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -308,7 +311,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -331,7 +334,7 @@ UI 处理：更新状态栏；`to = "failed"` 时显示诊断入口。
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   health: HealthSnapshot;
   emitted_at: string;
 };
@@ -347,7 +350,7 @@ UI 处理：更新延迟/出口 IP/健康灯；`degraded` 时在状态栏加黄�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -377,7 +380,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -394,7 +397,7 @@ type AppLifecycleChangedPayload = {
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   package_id: string;
   version: string;                  // 本次应用的配置包版本
   applied_at: string;               // ISO 8601 UTC
@@ -438,6 +441,81 @@ type DefaultProfileUpdatedPayload = {
 - **连接与进程正交**：进程进入 `background` 时连接必须保持；不得因为窗口隐藏而断开。
 - **`quitting` 期间拒绝新的连接请求**：`runtime_start` 返回 `PRECONDITION_FAILED`，`details.reason = "quitting"`。
 - **`foreground` / `background` 只在值变化时发**，重复设置不重复发。
+
+### 4.8 `ask-user-question`（1.2.0 新增）
+
+模型通过 `AskUserQuestion` 工具（`tools.md` §4.22）向用户提问时发出。**发出后该工具阻塞等待回答**，直到用户作答、超时或请求结束。
+
+```ts
+type AskUserQuestionPayload = {
+  contract_version: "1.2.0";
+  session_id: string;
+  request_id: string;
+  question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
+  question: string;         // 问题正文
+  options: string[];        // 单选选项；**数组非空，且每项都是非空字符串**
+  created_at: number;       // Unix 毫秒，问题生成时刻
+  expires_at: number;       // Unix 毫秒，= created_at + 300_000
+  emitted_at: string;       // ISO 8601 UTC
+};
+```
+
+#### 4.8.1 语义
+
+- **单选**：`answer` 必须是 `options` 中的一个字符串，**逐字节相等**（不做 trim、不做大小写归一）。
+- **跳过**：`answer` 为空字符串表示用户跳过，模型会收到"用户跳过了这个问题"。
+- **没有多选**：Claurst 的通道不支持。需要多选时只能连续提问，或另立工具（本期不做）。
+- **`options` 必须非空，且每一项都是非空字符串**：
+  - `options` 缺失或为空数组 → **不发事件**，直接把这次工具调用以 `INVALID_ARGUMENT` 结束，模型据此改用带选项的方式重问。
+  - `options` 里存在空字符串、或去掉首尾空白后为空的项 → **同样按无效提问处理**（同上，不发事件）。
+  - 为什么必须挡住：空白项会渲染成一个空白按钮。用户点它，回传的 `answer` 是空串，**恰好等于「跳过」**——两种完全不同的意图撞在一起，用户只会看到自己的问题被莫名其妙地跳过。
+  - `answer` 与选项的比对是逐字节的（见第一条），所以 Host **不做 trim**：要么选项本身就是干净的，要么这次提问不成立。在 Host 侧把空白项 trim 成有效选项，会让「用户选了什么」与「模型收到什么」不再逐字对应。
+
+#### 4.8.2 与其它事件的顺序
+
+```
+tool-call-start  (tool = "AskUserQuestion")
+      ↓
+ask-user-question          ← 工具在此阻塞
+      ↓  （用户作答 / 300s 超时 / 请求取消）
+tool-call-end    (同一 request_id)
+```
+
+- `ask-user-question` **一定**在同一个 `request_id` 的 `tool-call-start` 之后、`tool-call-end` 之前。
+- 同一个 `request_id` 下可能有多个问题（模型连续提问），它们**串行**出现：上一个 `tool-call-end` 之后才会开始下一个。
+- **不带 `tool_call_id`**：事件与工具卡之间不建立显式关联。UI 按 `question_id` 独立渲染浮层，不要假设能嵌进工具卡。若将来要把问题嵌进卡片，再加该字段。
+
+#### 4.8.3 超时
+
+- Host 负责计时：`created_at + 300s`。
+- 超时后 Host 以**空字符串**回复工具（等同用户跳过），`tool-call-end` 正常到达，对话继续。
+- **不发额外事件**。理由：超时在界面上与"用户跳过"是同一状态——按钮都要消失；为此单开一个事件，UI 还得为它写和"跳过"完全一样的处理，属于重复。
+- UI 用 `expires_at` **置灰或移除**按钮，不要自己按 `created_at + 300` 算——那等于把超时值在前后端各写一份，Host 改了 UI 不会跟着改（§4.8.5）。
+
+#### 4.8.4 作废（必须有，否则 oneshot 永远挂着）
+
+请求结束、请求取消、会话删除时，该范围内**未回答**的问题必须作废：
+
+| 触发 | 范围 |
+|---|---|
+| `ai-request-end`（正常结束 / 取消） | 该 `request_id` 的全部未答问题 |
+| `chat_delete` / 会话被删 | 该 `session_id` 的全部未答问题 |
+| 应用退出 | 全部 |
+
+**作废的动作是「回空字符串再移除」，不是直接丢弃 sender。** 直接丢弃会让工具侧收到 channel-closed，被当成"工具执行失败"，模型可能因此重试一个已经不存在的问题；回空串则是正常的"用户跳过"。
+
+#### 4.8.5 时间字段为什么是毫秒而不是 ISO
+
+本契约 §0 约定时间字段用 ISO 8601。这里的 `created_at` / `expires_at` 是**唯一例外**，因为它们唯一的用途是前端做倒计时算术（`expires_at - Date.now()`）。转成 ISO 只会让每个消费者各写一次 `Date.parse`，且更容易写错。
+
+除这两个字段外，事件里的时间一律 ISO 8601。
+
+#### 4.8.6 UI 处理
+
+1. 收到事件 → 按 `question_id` 建浮层，渲染 `question` 与 `options` 按钮。
+2. 用户点击 → `reply_user_question({ sessionId, questionId, answer })`。
+3. 收到同一 `request_id` 的 `tool-call-end` 或 `ai-request-end` → **立即移除**该请求下所有未答浮层（此时 Host 已作废它们，再点只会得到 `question_not_pending`）。
+4. 窗口重载 / 切换会话后回来 → 调 `list_pending_questions({ sessionId })` 重建浮层。
 
 ---
 
@@ -545,6 +623,18 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 1.2.0（2026-11-03，P1.5 · AI 主动提问）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.2.0` | 元数据 | PM |
+| 2 | 新增事件 `ask-user-question`（事件总数 12 → 13） | 新增事件 | 产品负责人：首启两问需要选项按钮 |
+| 3 | 载荷补 `contract_version` / `emitted_at` / `expires_at`，与 §2.3 的既有约定对齐 | 字段补齐 | 初稿缺前两个，`expires_at` 用于避免前端重复写死 300 秒 |
+| 4 | 明确「`options` 必须非空；空则不发事件、直接以 `INVALID_ARGUMENT` 结束工具调用」 | 语义定案 | 空选项会让任何非空回答都被拒，问题实际无法回答 |
+| 5 | 明确作废动作为「回空字符串再移除」，不是丢弃 sender | 语义定案 | 丢弃会被工具侧当成执行失败，模型可能重试已不存在的问题 |
+| 6 | 明确超时不发额外事件 | 语义定案 | 与「用户跳过」在界面上是同一状态 |
+| 7 | `created_at` / `expires_at` 用 Unix 毫秒，作为 ISO 约定的**唯一例外**并在 §2.3 标注 | 例外 | 倒计时算术需要数值 |
 
 ### 1.1.0（2026-11-02，P1.5 wave1）
 

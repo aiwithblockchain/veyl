@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`1.1.0`
+> 契约版本：`1.2.0`
 > 状态：已冻结（PM 审核通过，2026-11-02）
 > 上游：`docs/phase-1-technical-design.md` §4.3、§4.4、§5.1
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -62,7 +62,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -745,7 +745,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -897,7 +897,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "1.1.0";
+  contract_version: "1.2.0";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -1140,6 +1140,28 @@ type DefaultProfileStatusData = {
 
 ---
 
+### 4.22 `AskUserQuestion`（Claurst 内置，1.2.0 起接通）
+
+Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `claurst-tools` 提供（`crates/tools/src/lib.rs:109-116`）。
+
+行为：
+
+| 项 | 内容 |
+|---|---|
+| 阻塞 | 调用后整个查询循环暂停，直到用户作答、超时或请求结束 |
+| 通道 | `UserQuestionEvent { question, options, reply_tx }` → `ask-user-question` 事件（`events.md` §4.8） |
+| 回答 | 用户通过 `reply_user_question` 回传；`answer` 必须是 `options` 之一，空串 = 跳过 |
+| 超时 | 300 秒未答 → Host 代回空串（等同跳过） |
+| 多选 | **不支持**（Claurst 通道本身不支持） |
+
+**`options` 必须非空，且每一项都是非空字符串**：`options` 缺失、为空数组、或含全空白项时，**不发事件**，直接把这次工具调用以 `INVALID_ARGUMENT` 结束。
+
+> 为什么：我们的回答校验是「空串，或必须是 `options` 之一」。空 `options` 配合这条规则，会让任何非空回答都被拒——问题实际上无法回答，只能跳过。与其把这种情况显示给用户，不如当场告诉模型"请带上选项再问"。
+
+这与 `tools.md` §3 表格里「Veyl 只负责注册与 UI 渲染」一致；本节补充的是**接通之后的可观测行为**。
+
+---
+
 ## 5. 工具间协作约定
 
 ### 5.1 标准连接链路
@@ -1216,6 +1238,14 @@ CatalogSearch → ProfileImport → VpnConnect
 ---
 
 ## 8. 变更记录
+
+### 1.2.0（2026-11-03，AskUserQuestion 接通）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `1.2.0` | 元数据 | PM |
+| 2 | 新增 §4.22：`AskUserQuestion` 从「只注册」变为「可观测行为」，写明阻塞、超时、空选项处理 | 补充 | 产品负责人：AI 主动提问 |
+| 3 | 工具形状未变（仍是 Claurst 内置），本文件只补行为说明 | 说明 | — |
 
 ### 1.1.0（2026-11-02，P1.5 wave1 → wave2 契约）
 

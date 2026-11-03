@@ -169,7 +169,7 @@ pub async fn refresh(store: &Store, running: bool) -> Result<RefreshOutcome, Str
     crate::agent::app_handle::emit(
         "default-profile-updated",
         json!({
-            "contract_version": "1.1.0",
+            "contract_version": "1.2.0",
             "package_id": row.provider_id,
             "version": row.version_label(),
             "applied_at": store::iso_from_ms(row.applied_at),

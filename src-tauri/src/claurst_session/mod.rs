@@ -83,6 +83,9 @@ impl AivpnSession {
 
         let cost_tracker = CostTracker::with_model(&credentials.model);
 
+        let (question_tx, mut question_rx) =
+            mpsc::unbounded_channel::<claurst_tools::UserQuestionEvent>();
+
         let context = ToolContext {
             working_dir: working_dir.clone(),
             permission_mode: PermissionMode::BypassPermissions,
@@ -98,10 +101,38 @@ impl AivpnSession {
             completion_notifier: None,
             pending_permissions: None,
             permission_manager: None,
-            user_question_tx: None,
+            user_question_tx: Some(question_tx),
             cancel_token: CancellationToken::new(),
             batch_rejection: Default::default(),
         };
+
+        let pump_session_id = session_id.clone();
+        tokio::spawn(async move {
+            while let Some(event) = question_rx.recv().await {
+                match crate::tools::policy::current_request_id(&pump_session_id) {
+                    Some(request_id) => {
+                        crate::agent::questions::register(
+                            &pump_session_id,
+                            &request_id,
+                            event,
+                        );
+                        // register 期间请求可能已结束：复查一次，避免留下无人可答的 pending。
+                        if crate::tools::policy::current_request_id(&pump_session_id).as_deref()
+                            != Some(request_id.as_str())
+                        {
+                            crate::agent::questions::cleanup_request(
+                                &pump_session_id,
+                                &request_id,
+                            );
+                        }
+                    }
+                    None => {
+                        // 请求已结束：不要再弹问题，直接让工具按「跳过」继续。
+                        let _ = event.reply_tx.send(String::new());
+                    }
+                }
+            }
+        });
 
         Ok(Arc::new(Self {
             session_id,
@@ -123,6 +154,7 @@ impl AivpnSession {
         let cancel = CancellationToken::new();
         *self.cancel.lock().await = Some(cancel.clone());
 
+        let request_session_id = self.session_id.clone();
         let mut messages = self.messages.lock().await;
         drop_dangling_tool_use(&mut messages);
         messages.push(Message::user(text));
@@ -295,7 +327,9 @@ impl AivpnSession {
 
         drop(messages);
         let streamed_text = consumer.await.unwrap_or_default();
+        // 先清当前请求，再作废问题：反过来时提问泵可能读到旧 request_id 又 register 一次。
         crate::tools::policy::clear_current_request(&self.session_id);
+        crate::agent::questions::cleanup_request(&request_session_id, &request_id);
         *self.cancel.lock().await = None;
 
         let duration_ms = started.elapsed().as_millis() as u64;

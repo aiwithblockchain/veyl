@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`1.1.0`
+> 契约版本：`1.2.0`
 > 状态：已冻结（P1.5 wave1，2026-11-02）
 > 上游：`docs/phase-1-5-requirements.md` §4、§5、§9
 > 相关：`events.md`（Host → UI 的反向通道）、`runtime.md` §2.5（`RuntimeStatus`）、`tools.md`（AI 工具）
@@ -104,6 +104,8 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 23 | `llm_provider_delete` | `{ providerId }` | `{ ok: true }` | **1.1.0 新增** |
 | 24 | `llm_provider_activate` | `{ providerId }` | `{ active_provider_id }` | **1.1.0 新增** |
 | 25 | `llm_provider_test` | `{ providerId?, name?, protocol?, baseUrl?, model?, apiKey? }` | `LlmTestResult` | **1.1.0 新增** |
+| 26 | `reply_user_question` | `{ sessionId, questionId, answer }` | `{ ok: true }` | **1.2.0 新增** |
+| 27 | `list_pending_questions` | `{ sessionId }` | `{ questions: PendingQuestion[] }` | **1.2.0 新增** |
 | — | `catalog_list_nodes` | — | — | **未接线**，见 §4 |
 | — | `profile_import_node` | — | — | **未接线**，见 §4 |
 | — | `vpn_connect` | — | — | **1.1.0 作废**，由 `runtime_start` 取代 |
@@ -497,6 +499,47 @@ type LlmTestResult = {
 
 ---
 
+### 3.17 `reply_user_question { sessionId, questionId, answer }` → `{ ok: true }`
+
+回答 `ask-user-question`（`events.md` §4.8）。**同步返回**：回答一旦送达模型，工具就从阻塞中恢复继续跑。
+
+| 规则 | 说明 |
+|---|---|
+| `answer` 取值 | 必须是该问题 `options` 之一，**逐字节相等**（不 trim、不归一大小写）；空字符串 = 跳过 |
+| 一个 `questionId` 只能回答一次 | 第二次及以后 → `NOT_FOUND / question_not_pending` |
+| 超时后 | 同上，`question_not_pending`（Host 已代答空串） |
+| 会话不匹配 | **同样返回 `question_not_pending`**，不区分「不存在」与「属于别的会话」——否则这个命令会变成跨会话探测问题的工具 |
+
+```ts
+type PendingQuestion = {
+  question_id: string;
+  session_id: string;
+  request_id: string;
+  question: string;
+  options: string[];
+  created_at: number;   // Unix 毫秒
+  expires_at: number;   // Unix 毫秒 = created_at + 300_000，与该问题的事件载荷一致
+};
+```
+
+错误：
+
+| 错误码 | `details.reason` | 场景 |
+|---|---|---|
+| `NOT_FOUND` | `question_not_pending` | 不存在 / 已回答 / 已超时 / 已作废 / 会话不匹配 |
+| `INVALID_ARGUMENT` | `answer_not_in_options` | `answer` 非空且不在 `options` 中 |
+
+### 3.18 `list_pending_questions { sessionId }` → `{ questions: PendingQuestion[] }`
+
+返回该会话**当前未回答**的问题，用于窗口重载、切走再切回时重建浮层。
+
+- 返回值统一套 `{ questions: [...] }` 外壳，与 `profile_list` / `llm_provider_list` 一致——留出加字段（例如 `server_time`）的位置，也避免前端为个别命令写特例。
+- 只返回**未答且未超时**的；Host 已作废的问题不会出现。
+- 会话不存在时返回空数组，不报错（这个命令是恢复用的，不是查询会话是否存在）。
+- 顺序不保证；UI 需要稳定顺序时按 `created_at` 自己排。
+
+---
+
 ## 4. 未接线与已作废
 
 | 命令 | 处置 | 理由 |
@@ -579,3 +622,6 @@ type LlmTestResult = {
 | 21 | `llm_provider_save` 明确「只保存、不改 active」，唯一例外是没有 active 时的第一个；切换只能走 `activate` | 不变量 | 不静默改变请求去向 |
 | 22 | `llm_provider_delete`：**允许删除当前激活项**，删后 active 置空、不自动挑下一个 | 语义修订 | 删除是显式操作；自动挑选属于静默切换 |
 | 23 | `llm_provider_test` 的 `error` 补脱敏细则（精确串 + `sk-` 片段 + 替换而非删除 + 同样适用日志） | 安全约束 | 上游响应体是主要泄漏点 |
+| 24 | 新增 `reply_user_question` / `list_pending_questions`（1.2.0），配合 `ask-user-question` 事件 | 新增命令 | 产品负责人：AI 在对话里提问并给选项 |
+| 25 | 明确回答只接受一次、超时/作废/会话不匹配统一返回 `question_not_pending` | 语义定案 | 避免该命令被用作跨会话探测 |
+| 26 | `list_pending_questions` 返回 `{ questions: [...] }`，不再用裸数组 | 修正 | 新命令一开始就破例会让例外越积越多 |

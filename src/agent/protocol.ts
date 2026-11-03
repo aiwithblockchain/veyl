@@ -6,7 +6,7 @@
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "1.1.0" as const;
+export const CONTRACT_VERSION = "1.2.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -21,6 +21,7 @@ export const AGENT_EVENTS = {
   jobProgress: "job-progress",
   appLifecycleChanged: "app-lifecycle-changed",
   defaultProfileUpdated: "default-profile-updated",
+  askUserQuestion: "ask-user-question",
 } as const;
 
 export type AgentEventName = (typeof AGENT_EVENTS)[keyof typeof AGENT_EVENTS];
@@ -42,6 +43,7 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.jobProgress,
   AGENT_EVENTS.appLifecycleChanged,
   AGENT_EVENTS.defaultProfileUpdated,
+  AGENT_EVENTS.askUserQuestion,
 ] as const;
 
 /* ------------------------------------------------------------------ */
@@ -272,6 +274,20 @@ export interface DefaultProfileUpdatedPayload {
   emitted_at: string;
 }
 
+/** 模型向用户提问（1.2.0）：answer 必须是 options 之一，空串 = 跳过。 */
+export interface AskUserQuestionPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  session_id: string;
+  request_id: string;
+  question_id: string;
+  question: string;
+  options: string[];
+  created_at: number;
+  /** Unix 毫秒，= created_at + 300_000；前端只读这个值做倒计时。 */
+  expires_at: number;
+  emitted_at: string;
+}
+
 /* ------------------------------------------------------------------ */
 /* 事件联合类型                                                        */
 /* ------------------------------------------------------------------ */
@@ -289,6 +305,7 @@ export interface AgentEventMap {
   [AGENT_EVENTS.jobProgress]: JobProgressPayload;
   [AGENT_EVENTS.appLifecycleChanged]: AppLifecycleChangedPayload;
   [AGENT_EVENTS.defaultProfileUpdated]: DefaultProfileUpdatedPayload;
+  [AGENT_EVENTS.askUserQuestion]: AskUserQuestionPayload;
 }
 
 export type AgentEvent = {
