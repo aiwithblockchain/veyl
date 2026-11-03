@@ -22,6 +22,7 @@
 | `provider-integration.md` | 第三方服务商接入（后期） | 接服务商时 |
 | `contracts/*.md` | 命令 / 事件 / 运行时 / 工具 / 分类契约 | 改接口时 |
 | `issues/tweetpilot-resource-version-gap.md` | 外部项目的参考问题单 | 做资源版本管理时 |
+| `review-checklist.md` | 每批的验收门禁与专项检查 | 提交前自检、交叉 review |
 
 ## 存档文档（不要照着实现）
 
