@@ -13,14 +13,15 @@ import type {
 } from "./agent/bridge";
 import { BridgeError, toBridgeError } from "./agent/errors";
 import { ChatView } from "./components/ChatView";
-import { ConsoleView } from "./components/ConsoleView";
 import { DiagnosisSheet } from "./components/DiagnosisSheet";
+import { EmptyChat } from "./components/EmptyChat";
 import { Onboarding } from "./components/Onboarding";
 import { Settings, describeImportError } from "./components/Settings";
 import { Sidebar, type RenameResult } from "./components/Sidebar";
 import { StatusPanel } from "./components/StatusPanel";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
-import { statusPillLabel, statusTone, toLinkState, toneClass } from "./ui/status";
+import { statusSentence, statusTone, toLinkState, toneClass } from "./ui/status";
+import { useFocusTrap } from "./ui/focus";
 import "./styles/app.css";
 
 const AI_EVENTS = new Set<AgentEvent["name"]>([
@@ -43,7 +44,7 @@ type SettingsSection = "ai" | "network" | "advanced" | "about";
 
 const EVER_CONNECTED_KEY = "veyl.hasEverConnected";
 const PANEL_KEY = "veyl.ui.panelOpen";
-const NARROW_WIDTH = 1240;
+const NARROW_WIDTH = 1100;
 
 function readEverConnected(): boolean {
   try {
@@ -57,16 +58,15 @@ function readEverConnected(): boolean {
 export default function App() {
   const bridge = useMemo(() => getAgentBridge(), []);
   const [state, dispatch] = useReducer(chatReducer, undefined, createInitialState);
-  const [view, setView] = useState<"overview" | "chat">("overview");
   const [panelPreferred, setPanelPreferred] = useState(() => {
     try {
-      const stored = localStorage.getItem(PANEL_KEY);
-      return stored === null ? true : stored === "1";
+      return localStorage.getItem(PANEL_KEY) === "1";
     } catch {
-      return true;
+      return false;
     }
   });
   const [overlayOpen, setOverlayOpen] = useState(false);
+  const overlayRef = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(
     () => typeof window !== "undefined" && window.innerWidth < NARROW_WIDTH,
   );
@@ -326,7 +326,6 @@ export default function App() {
       await Promise.all([refreshKeyState(), refreshDefaultProfile()]);
       setShowOnboarding(false);
       setOnboardingLoaded(true);
-      setView("overview");
     } finally {
       connectTestRef.current = false;
     }
@@ -397,21 +396,15 @@ export default function App() {
     }
 
     dispatch({ type: "session_removed", sessionId });
-    const remaining = state.sessions.filter((item) => item.id !== sessionId);
-    if (state.activeSessionId === sessionId && remaining.length === 0) {
-      setView("overview");
-    }
     return { ok: true };
   };
 
   const handleSelectSession = (sessionId: string) => {
-    setView("chat");
     dispatch({ type: "select_session", sessionId });
   };
 
   // 删除当前会话后会切到剩余的第一个：它可能还没拉过历史，这里统一补拉。
   useEffect(() => {
-    if (view !== "chat") return;
     const current = activeSession(state);
     if (!current || current.historyLoaded || current.messages.length > 0) return;
 
@@ -428,7 +421,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [view, state, bridge]);
+  }, [state, bridge]);
 
   const handleRenameSession = async (
     sessionId: string,
@@ -474,13 +467,12 @@ export default function App() {
       });
   };
 
-  const handleConsoleSend = (text: string) => {
+  const handleEmptySend = (text: string) => {
     let target = session;
     if (!target) {
       target = createSession();
       dispatch({ type: "add_session", session: target });
     }
-    setView("chat");
     sendToSession(target.id, text);
   };
 
@@ -492,7 +484,6 @@ export default function App() {
     }
     const fresh = createSession();
     dispatch({ type: "add_session", session: fresh });
-    setView("chat");
     sendToSession(fresh.id, text);
   };
 
@@ -604,7 +595,7 @@ export default function App() {
   };
 
   const handleAskAiDiagnosis = () => {
-    handleConsoleSend("诊断网络");
+    handleEmptySend("诊断网络");
   };
 
   // 删除配置：后端拒绝删除当前激活/内置项，这里只做引导。
@@ -638,29 +629,58 @@ export default function App() {
 
   const link = toLinkState(runtime.state);
   const degraded = runtime.state === "degraded";
+  const connected = runtime.state === "running" || runtime.state === "degraded";
+  const stopping = runtime.state === "stopping";
   const tone = statusTone(link, degraded);
+  const currentProfileId =
+    runtime.profile_id ?? (connected ? null : activeProfileId);
+  const topbarNode =
+    runtime.profile_name ??
+    profiles.find((profile) => profile.id === currentProfileId)?.name ??
+    null;
+
   const showSetupHint =
     onboardingLoaded &&
     !showOnboarding &&
+    !hasEverConnected &&
     !setupDismissed &&
     (!hasKey || (profilesLoaded && profiles.length === 0));
 
   const dockOpen = !narrow && panelPreferred;
   const overlayOpenNow = narrow && overlayOpen;
-  const togglePanel = () => {
-    if (narrow) {
-      setOverlayOpen((open) => !open);
-      return;
+  useFocusTrap(overlayOpenNow, overlayRef);
+
+  useEffect(() => {
+    if (!overlayOpenNow) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOverlayOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [overlayOpenNow]);
+
+  const persistPanel = (open: boolean) => {
+    setPanelPreferred(open);
+    try {
+      localStorage.setItem(PANEL_KEY, open ? "1" : "0");
+    } catch {
+      // 存不了就只在本次会话里记住。
     }
-    setPanelPreferred((open) => {
-      const next = !open;
-      try {
-        localStorage.setItem(PANEL_KEY, next ? "1" : "0");
-      } catch {
-        // 存不了就只在本次会话里记住。
-      }
-      return next;
-    });
+  };
+
+  const openPanel = () => {
+    if (narrow) setOverlayOpen(true);
+    else persistPanel(true);
+  };
+
+  const closePanel = () => {
+    if (narrow) setOverlayOpen(false);
+    else persistPanel(false);
+  };
+
+  const togglePanel = () => {
+    if (narrow) setOverlayOpen((open) => !open);
+    else persistPanel(!panelPreferred);
   };
 
   const statusPanel = (compact: boolean) => (
@@ -669,25 +689,16 @@ export default function App() {
       profiles={profiles}
       activeProfileId={activeProfileId}
       pending={runtimeAction}
-      showPrimary={view === "chat"}
+      showPrimary={Boolean(session) || hasEverConnected}
       compact={compact}
-      onCollapse={() => {
-        if (compact) setOverlayOpen(false);
-        else {
-          setPanelPreferred(false);
-          try {
-            localStorage.setItem(PANEL_KEY, "0");
-          } catch {
-            // 忽略。
-          }
-        }
-      }}
+      onCollapse={closePanel}
       onConnect={handleConnect}
       onDisconnect={handleDisconnect}
       onUseDefault={handleUseDefault}
       onSwitchProfile={handleSwitchProfile}
       onImport={() => openSettings("network")}
       onOpenLogs={handleOpenLogs}
+      onOpenDiagnosis={() => setDiagnosisOpen(true)}
       onDeleteProfile={handleDeleteProfile}
     />
   );
@@ -709,17 +720,12 @@ export default function App() {
   }
 
   return (
-    <div className={`app ${dockOpen ? "" : "app--panel-collapsed"}`}>
+    <div className={`app ${dockOpen ? "app--panel-open" : ""}`}>
       <Sidebar
         sessions={state.sessions}
         activeSessionId={state.activeSessionId}
-        view={view}
         onSelect={handleSelectSession}
-        onSelectOverview={() => setView("overview")}
-        onNew={() => {
-          dispatch({ type: "new_session" });
-          setView("chat");
-        }}
+        onNew={() => dispatch({ type: "new_session" })}
         onOpenSettings={() => openSettings("ai")}
         onRenameSession={handleRenameSession}
         onDeleteSession={handleDeleteSession}
@@ -727,19 +733,30 @@ export default function App() {
 
       <main className="main">
         <header className="topbar">
-          <span className="topbar__title">
-            {view === "overview" ? "总览" : session?.title ?? "新对话"}
-          </span>
-          <button
-            type="button"
-            className={`topbar__pill ${toneClass(tone)}`}
-            onClick={togglePanel}
-            aria-expanded={narrow ? overlayOpen : dockOpen}
-            title={narrow ? "展开状态面板" : "收起 / 展开状态面板"}
-          >
-            <span className="topbar__pill-dot" aria-hidden />
-            {statusPillLabel(link, degraded, runtime.state === "stopping")}
-          </button>
+          <span className="topbar__title">{session?.title ?? "Veyl"}</span>
+          <div className="topbar__right">
+            <button
+              type="button"
+              className={`topbar__status ${toneClass(tone)}`}
+              onClick={openPanel}
+              title="连接状态"
+            >
+              <span className="topbar__status-dot" aria-hidden />
+              <span className="topbar__status-text">
+                {statusSentence(link, topbarNode, degraded, stopping)}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="topbar__panel-toggle"
+              onClick={togglePanel}
+              aria-label="状态面板"
+              aria-expanded={narrow ? overlayOpen : dockOpen}
+              title="状态面板"
+            >
+              ⧉
+            </button>
+          </div>
         </header>
 
         {appNotice ? (
@@ -781,29 +798,7 @@ export default function App() {
           </div>
         ) : null}
 
-        {view === "overview" || !session ? (
-          <ConsoleView
-            runtime={runtime}
-            profiles={profiles}
-            hasKey={hasKey}
-            pending={runtimeAction}
-            streaming={Boolean(session?.activeRequestId) || session?.requesting === true}
-            statusText={session?.status?.text ?? null}
-            hasEverConnected={hasEverConnected}
-            sessionCount={state.sessions.length}
-            defaultProfile={defaultProfile}
-            defaultBusy={defaultBusy}
-            onConnect={handleConnect}
-            onDisconnect={handleDisconnect}
-            onUseDefault={handleUseDefault}
-            onRefreshDefault={() => void handleRefreshDefault()}
-            onImport={() => openSettings("network")}
-            onConfigureKey={() => openSettings("ai")}
-            onOpenDiagnosis={() => setDiagnosisOpen(true)}
-            onSend={handleConsoleSend}
-            onStop={handleStop}
-          />
-        ) : (
+        {session ? (
           <ChatView
             session={session}
             onSend={handleSend}
@@ -811,6 +806,20 @@ export default function App() {
             onNextAction={handleNextAction}
             hasKey={hasKey}
             onConfigureKey={() => openSettings("ai")}
+          />
+        ) : (
+          <EmptyChat
+            runtime={runtime}
+            profiles={profiles}
+            hasKey={hasKey}
+            pending={runtimeAction}
+            hasEverConnected={hasEverConnected}
+            defaultBusy={defaultBusy}
+            onConnect={handleConnect}
+            onDisconnect={handleDisconnect}
+            onUseDefault={handleUseDefault}
+            onConfigureKey={() => openSettings("ai")}
+            onSend={handleEmptySend}
           />
         )}
       </main>
@@ -821,6 +830,7 @@ export default function App() {
         <div className="panel-overlay" onMouseDown={() => setOverlayOpen(false)}>
           <div
             className="panel-overlay__inner"
+            ref={overlayRef}
             onMouseDown={(event) => event.stopPropagation()}
           >
             {statusPanel(true)}

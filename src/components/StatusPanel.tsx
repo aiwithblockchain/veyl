@@ -36,6 +36,7 @@ interface Props {
   onSwitchProfile: (profileId: string) => void;
   onImport: () => void;
   onOpenLogs: () => void;
+  onOpenDiagnosis: () => void;
   onDeleteProfile: (profileId: string) => void;
 }
 
@@ -53,6 +54,7 @@ export function StatusPanel({
   onSwitchProfile,
   onImport,
   onOpenLogs,
+  onOpenDiagnosis,
   onDeleteProfile,
 }: Props) {
   const [nodeOpen, setNodeOpen] = useState(false);
@@ -259,6 +261,13 @@ export function StatusPanel({
               </div>
             ) : null}
             <div className="panel-details__actions">
+              <button
+                type="button"
+                className="panel-details__action"
+                onClick={onOpenDiagnosis}
+              >
+                网络自检
+              </button>
               <button type="button" className="panel-details__action" onClick={onOpenLogs}>
                 打开日志
               </button>

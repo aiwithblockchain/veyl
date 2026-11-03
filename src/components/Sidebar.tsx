@@ -12,9 +12,7 @@ export interface RenameResult {
 interface Props {
   sessions: Session[];
   activeSessionId: string;
-  view: "overview" | "chat";
   onSelect: (sessionId: string) => void;
-  onSelectOverview: () => void;
   onNew: () => void;
   onOpenSettings: () => void;
   onRenameSession: (sessionId: string, title: string) => Promise<RenameResult>;
@@ -33,9 +31,7 @@ function relativeTime(at: number): string {
 export function Sidebar({
   sessions,
   activeSessionId,
-  view,
   onSelect,
-  onSelectOverview,
   onNew,
   onOpenSettings,
   onRenameSession,
@@ -141,14 +137,6 @@ export function Sidebar({
         <span className="sidebar__wordmark">{PRODUCT_NAME}</span>
       </div>
 
-      <button
-        type="button"
-        className={`sidebar__overview ${view === "overview" ? "is-active" : ""}`}
-        onClick={onSelectOverview}
-      >
-        总览
-      </button>
-
       <button type="button" className="sidebar__new" onClick={onNew}>
         <span aria-hidden>＋</span>
         新建对话
@@ -164,7 +152,7 @@ export function Sidebar({
         <nav className="sidebar__list">
           {sessions.map((session) => {
             const editing = session.id === editingId;
-            const active = view === "chat" && session.id === activeSessionId;
+            const active = session.id === activeSessionId;
 
             return (
               <div key={session.id} className="sidebar__item-wrap">
