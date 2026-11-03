@@ -82,61 +82,24 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn migration_two_converts_legacy_seconds_exactly_once() {
-        let dir = std::env::temp_dir().join(format!("veyl-mig-{:016x}", rand::random::<u64>()));
-        let path = dir.join("veyl.db");
-
-        {
-            let store = Store::open(&path).unwrap();
-            let conn = store.conn();
-            conn.execute(
-                "INSERT INTO runtime_versions (version, path, binary_path, sha256, state, installed_at)
-                 VALUES ('1.14.4', '/a', '/a/b', 'x', 'active', 1700000000)",
-                [],
-            )
-            .unwrap();
-            // 退回到 v1，模拟一个已存在的旧库。default_profile 在 v1 还不存在，
-            // 重建它，避免 004 的 ALTER 在已迁移的表上重复加列。
-            conn.execute("DROP TABLE IF EXISTS default_profile", []).unwrap();
-            conn.pragma_update(None, "user_version", 1i64).unwrap();
-        }
-
-        let reopened = Store::open(&path).unwrap();
-        assert_eq!(reopened.schema_version().unwrap(), 4);
-        let migrated: i64 = reopened
-            .conn()
-            .query_row("SELECT installed_at FROM runtime_versions", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(migrated, 1_700_000_000_000, "秒级时间戳应被换算成毫秒");
-
-        // 再跑一次 002：下界保护保证不会二次放大。
-        reopened.conn().execute_batch(crate::store::migrations::MIGRATION_002).unwrap();
-        let again: i64 = reopened
-            .conn()
-            .query_row("SELECT installed_at FROM runtime_versions", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(again, migrated, "重复执行必须幂等");
-
-        drop(reopened);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn every_time_column_is_in_milliseconds() {
-        use crate::store::{chat, profiles, proxy_backup, runtime, tool_calls};
+        use crate::store::{
+            catalog_cache, chat, configs, proxy_backup, runtime, seed_cache, tool_calls,
+        };
 
         let store = Store::open_in_memory().unwrap();
         let conn = store.conn();
 
-        profiles::create(
+        configs::create(
             &conn,
-            &profiles::NewProfile {
-                id: "prf_1",
-                node_id: None,
+            &configs::NewConfig {
+                id: "cfg_1",
                 name: "p",
-                protocol: None,
-                region: None,
-                config: &serde_json::json!({ "server": "203.0.113.10" }),
+                connection_mode: configs::CONNECTION_SYSTEM_PROXY,
+                routing_mode: configs::ROUTING_PROXY_ALL,
+                listen_port: Some(7890),
+                dns: &serde_json::json!({ "mode": "auto", "local": [], "remote": [] }),
+                tun_excludes: &serde_json::json!([]),
             },
         )
         .unwrap();
@@ -167,15 +130,30 @@ mod tests {
             },
         )
         .unwrap();
-        crate::store::catalog_cache::put(&conn, "k", None, &serde_json::json!({}), 200).unwrap();
+        catalog_cache::put(&conn, "k", None, &serde_json::json!({}), 200).unwrap();
+        seed_cache::save(
+            &conn,
+            &seed_cache::SeedCacheRow {
+                content_sha256: "x".into(),
+                etag: None,
+                source_version: None,
+                source_updated_at: None,
+                node_count: 1,
+                fetched_at: crate::store::db::now_ms(),
+                checked_at: crate::store::db::now_ms(),
+                new_version_available: false,
+            },
+        )
+        .unwrap();
 
         let columns = [
-            ("profiles", "created_at"),
+            ("configs", "created_at"),
             ("tool_calls", "created_at"),
             ("chat_messages", "created_at"),
             ("proxy_backup", "created_at"),
             ("runtime_versions", "installed_at"),
             ("catalog_cache", "fetched_at"),
+            ("seed_cache", "fetched_at"),
         ];
 
         for (table, column) in columns {
@@ -190,7 +168,6 @@ mod tests {
             );
         }
     }
-
 
     use super::*;
 

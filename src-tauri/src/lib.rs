@@ -6,17 +6,21 @@ pub mod agent;
 pub mod catalog;
 pub mod claurst_session;
 pub mod config;
-pub mod default_profile;
 pub mod lifecycle;
 pub mod llm;
 pub mod logging;
 pub mod netcfg;
+pub mod nodes;
 pub mod proxy;
+pub mod public_http;
 pub mod runtime;
 pub mod secrets;
-pub mod seed_import;
+pub mod seed;
 pub mod store;
 pub mod tools;
+
+#[cfg(test)]
+mod test_support;
 
 use std::sync::Arc;
 
@@ -158,22 +162,31 @@ pub fn run() {
             // 工具事件（tool-call-start 等）需要全局句柄。
             agent::app_handle::set(app.handle().clone());
 
-            // 默认配置包刷新：启动后一次，之后每 6 小时；在线时只标记新版本。
+            // 默认节点刷新：首次没有缓存时立即拉取；有缓存时启动 5 分钟后
+            // 再检查，之后每 6 小时一次。失败保留缓存，不阻塞启动。
             let refresh_store = Arc::clone(&setup_store);
             let refresh_manager = Arc::clone(&recovery_parts.manager);
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let has_cache = {
+                    let conn = refresh_store.conn();
+                    crate::store::seed_cache::load(&conn).ok().flatten().is_some()
+                };
+                if has_cache {
+                    tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+                }
                 loop {
                     let running = matches!(
                         refresh_manager.status().await.state,
                         crate::runtime::RuntimeState::Running
                             | crate::runtime::RuntimeState::Degraded
                     );
-                    match crate::default_profile::refresh(&refresh_store, running).await {
-                        Ok(outcome) => log::info!("默认配置刷新：{outcome:?}"),
-                        Err(error) => log::warn!("默认配置刷新失败（保留缓存）：{error}"),
+                    match crate::seed::refresh(&refresh_store, running, false).await {
+                        crate::seed::RefreshOutcome::Offline { cached, error } => {
+                            log::warn!("默认节点刷新失败（cached={cached}）：{error}")
+                        }
+                        outcome => log::info!("默认节点刷新：{outcome:?}"),
                     }
-                    tokio::time::sleep(crate::default_profile::REFRESH_INTERVAL).await;
+                    tokio::time::sleep(crate::seed::REFRESH_INTERVAL).await;
                 }
             });
 
@@ -199,10 +212,17 @@ pub fn run() {
             agent::commands::runtime_status,
             agent::commands::runtime_start,
             agent::commands::runtime_stop,
-            agent::commands::profile_list,
-            agent::commands::profile_delete,
+            agent::commands::config_list,
+            agent::commands::config_detail,
+            agent::commands::config_create,
+            agent::commands::config_update,
+            agent::commands::config_delete,
+            agent::commands::config_activate,
+            agent::commands::node_import_url,
+            agent::commands::node_create,
             agent::commands::default_profile_status,
             agent::commands::default_profile_refresh,
+            agent::commands::import_seed_file,
             agent::commands::net_repair,
             agent::commands::onboarding_status,
             agent::commands::onboarding_complete,
@@ -221,7 +241,6 @@ pub fn run() {
             agent::commands::llm_provider_activate,
             agent::commands::llm_provider_test,
             agent::commands::rename_session,
-            agent::commands::import_seed_file,
         ])
         .build(tauri::generate_context!())
         .expect("Veyl 启动失败");

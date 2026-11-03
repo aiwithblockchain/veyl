@@ -5,7 +5,7 @@ use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
 use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
-use super::services::{ConnectTarget, VpnToolServices};
+use super::services::VpnToolServices;
 
 pub struct VpnConnectTool {
     services: Arc<dyn VpnToolServices>,
@@ -24,7 +24,8 @@ impl Tool for VpnConnectTool {
     }
 
     fn description(&self) -> &str {
-        "连接到指定节点或配置并设置系统代理。node_id 与 profile_id 必须且只能提供一个。\
+        "连接一套配置并设置系统代理。省略 config_id 时使用当前激活配置；\
+         可选的 node_id 会同时切换当前节点。\
          state=running 即已连上；exit_ip 为 null 表示已连接但出口尚未测到，\
          不代表连接失败，可用 RuntimeStatus 再查。"
     }
@@ -41,42 +42,25 @@ impl Tool for VpnConnectTool {
         json!({
             "type": "object",
             "properties": {
-                "node_id": { "type": "string" },
-                "profile_id": { "type": "string" },
-                "strategy": { "type": "string", "enum": ["latency"], "default": "latency" }
+                "config_id": { "type": "string" },
+                "node_id": { "type": "string" }
             },
             "additionalProperties": false
         })
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let node_id = input.get("node_id").and_then(Value::as_str);
-        let profile_id = input.get("profile_id").and_then(Value::as_str);
-
-        let target = match (node_id, profile_id) {
-            (Some(node), None) => ConnectTarget::Node(node.to_string()),
-            (None, Some(profile)) => ConnectTarget::Profile(profile.to_string()),
-            _ => {
-                return envelope::finish(
-                    ctx,
-                    "VpnConnect",
-                    ToolOutcome::fail(AivpnError::new(
-                        "INVALID_ARGUMENT",
-                        "node_id 与 profile_id 必须且只能提供一个",
-                    )),
-                )
-            }
-        };
-
-        let strategy = input
-            .get("strategy")
+        let config_id = input
+            .get("config_id")
             .and_then(Value::as_str)
-            .unwrap_or("latency");
+            .map(str::to_string);
+        let node_id = input
+            .get("node_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
 
-        let outcome = match self.services.vpn_connect(target, strategy).await {
+        let outcome = match self.services.vpn_connect(config_id, node_id).await {
             Ok(data) => {
-                // 超时/探测失败时 exit_ip 为 null，但 state 仍是 running：如实说明「还在测」，
-                // 不要说成失败，后台探测到了会通过健康事件推给 UI。
                 let summary = match data.get("exit_ip").and_then(Value::as_str) {
                     Some(ip) => format!("已连接，出口 IP {ip}。"),
                     None => "已连接，出口 IP 仍在探测中。".to_string(),

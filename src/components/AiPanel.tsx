@@ -1,0 +1,362 @@
+import { useEffect, useRef, useState } from "react";
+import type { NextAction } from "../agent/protocol";
+import type { Session } from "../state/chatStore";
+import { ChatView } from "./ChatView";
+import { Composer } from "./Composer";
+
+export interface RenameResult {
+  ok: boolean;
+  message?: string;
+  removed?: boolean;
+}
+
+type View = "chat" | "history";
+
+interface Props {
+  session: Session | null;
+  sessions: Session[];
+  activeSessionId: string;
+  hasKey: boolean;
+  hasEverConnected: boolean;
+  onSelectSession: (sessionId: string) => void;
+  onNewSession: () => void;
+  onRenameSession: (sessionId: string, title: string) => Promise<RenameResult>;
+  onDeleteSession: (sessionId: string) => Promise<{ ok: boolean; message?: string }>;
+  onSend: (text: string) => void;
+  onEmptySend: (text: string) => void;
+  onStop: () => void;
+  onNextAction: (action: NextAction) => void;
+  onOpenSettings: () => void;
+  onConfigureKey: () => void;
+}
+
+const SUGGESTIONS = ["为什么我打不开某个网站？", "检查我的网络配置"];
+
+function relativeTime(at: number): string {
+  const diff = Date.now() - at;
+  const minute = 60_000;
+  if (diff < minute) return "刚刚";
+  if (diff < 60 * minute) return `${Math.floor(diff / minute)} 分钟前`;
+  if (diff < 24 * 60 * minute) return `${Math.floor(diff / (60 * minute))} 小时前`;
+  return new Date(at).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+}
+
+/** 右栏：一级是对话，二级是历史会话。设置沿用现有设置页。 */
+export function AiPanel({
+  session,
+  sessions,
+  activeSessionId,
+  hasKey,
+  hasEverConnected,
+  onSelectSession,
+  onNewSession,
+  onRenameSession,
+  onDeleteSession,
+  onSend,
+  onEmptySend,
+  onStop,
+  onNextAction,
+  onOpenSettings,
+  onConfigureKey,
+}: Props) {
+  const [view, setView] = useState<View>("chat");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [confirming, setConfirming] = useState<Session | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const editRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!editingId) return;
+    editRef.current?.focus();
+    editRef.current?.select();
+  }, [editingId]);
+
+  useEffect(() => {
+    if (editingId && !sessions.some((item) => item.id === editingId)) {
+      setEditingId(null);
+      setEditError(null);
+    }
+  }, [sessions, editingId]);
+
+  useEffect(() => {
+    if (confirming && !sessions.some((item) => item.id === confirming.id)) {
+      setConfirming(null);
+    }
+  }, [sessions, confirming]);
+
+  useEffect(() => {
+    if (!confirming) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !deleting) setConfirming(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirming, deleting]);
+
+  const startEdit = (item: Session) => {
+    setEditingId(item.id);
+    setDraft(item.title);
+    setEditError(null);
+    setSaving(false);
+  };
+
+  const submitRename = async () => {
+    if (!editingId || saving) return;
+    setSaving(true);
+    setEditError(null);
+    const result = await onRenameSession(editingId, draft);
+    setSaving(false);
+    if (result.ok) {
+      setEditingId(null);
+      return;
+    }
+    setEditError(result.message ?? "保存失败，请重试");
+    if (result.removed) setEditingId(null);
+  };
+
+  const submitDelete = async () => {
+    if (!confirming || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    const result = await onDeleteSession(confirming.id);
+    setDeleting(false);
+    if (result.ok) setConfirming(null);
+    else setDeleteError(result.message ?? "删除失败，请重试");
+  };
+
+  const hasMessages = Boolean(session && session.messages.length > 0);
+  const title = view === "history" ? "历史会话" : session?.title || "新对话";
+
+  return (
+    <aside className="ai-panel" aria-label="AI 对话">
+      <header className="ai-panel__head">
+        <div className="ai-panel__head-left">
+          {view === "history" ? (
+            <button
+              type="button"
+              className="ai-panel__icon"
+              onClick={() => setView("chat")}
+              aria-label="返回对话"
+              title="返回对话"
+            >
+              ‹
+            </button>
+          ) : null}
+          <span className="ai-panel__title" title={title}>
+            {title}
+          </span>
+        </div>
+        <div className="ai-panel__head-right">
+          <button
+            type="button"
+            className="ai-panel__icon"
+            onClick={() => {
+              onNewSession();
+              setView("chat");
+            }}
+            aria-label="新建对话"
+            title="新建对话"
+          >
+            ＋
+          </button>
+          {view === "chat" ? (
+            <button
+              type="button"
+              className="ai-panel__icon"
+              onClick={() => setView("history")}
+              aria-label="历史会话"
+              title="历史会话"
+            >
+              ☰
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="ai-panel__icon"
+            onClick={onOpenSettings}
+            aria-label="设置"
+            title="设置"
+          >
+            ⚙
+          </button>
+        </div>
+      </header>
+
+      {!hasKey ? (
+        <div className="ai-panel__banner">
+          还没有配置 AI，现在只能手动操作网络。
+          <button type="button" className="ai-panel__banner-action" onClick={onOpenSettings}>
+            去配置
+          </button>
+        </div>
+      ) : null}
+
+      <div className="ai-panel__body">
+        {view === "history" ? (
+          <div className="ai-history">
+            {sessions.length === 0 ? (
+              <p className="ai-history__empty">还没有对话。新建一个，或者直接问我。</p>
+            ) : (
+              <ul className="ai-history__list">
+                {sessions.map((item) => (
+                  <li key={item.id}>
+                    {editingId === item.id ? (
+                      <div className="ai-history__edit">
+                        <input
+                          ref={editRef}
+                          className="ai-history__input"
+                          value={draft}
+                          aria-label="会话标题"
+                          disabled={saving}
+                          onChange={(event) => {
+                            setDraft(event.target.value);
+                            setEditError(null);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void submitRename();
+                            } else if (event.key === "Escape") {
+                              event.preventDefault();
+                              setEditingId(null);
+                              setEditError(null);
+                            }
+                          }}
+                        />
+                        {editError ? (
+                          <p className="ai-history__error">{editError}</p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div className="ai-history__row">
+                        <button
+                          type="button"
+                          className={`ai-history__item ${
+                            item.id === activeSessionId ? "is-active" : ""
+                          }`}
+                          title="双击改名"
+                          onClick={() => {
+                            onSelectSession(item.id);
+                            setView("chat");
+                          }}
+                          onDoubleClick={() => startEdit(item)}
+                        >
+                          <span className="ai-history__title">{item.title}</span>
+                          <span className="ai-history__time">
+                            {relativeTime(item.updatedAt)}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="ai-history__delete"
+                          aria-label={`删除会话 ${item.title}`}
+                          title={`删除「${item.title}」`}
+                          onClick={() => {
+                            setConfirming(item);
+                            setDeleteError(null);
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ) : hasMessages && session ? (
+          <ChatView
+            session={session}
+            onSend={onSend}
+            onStop={onStop}
+            onNextAction={onNextAction}
+            hasKey={hasKey}
+            onConfigureKey={onConfigureKey}
+          />
+        ) : (
+          <>
+            <div className="ai-empty">
+              <p className="ai-empty__line">
+                {hasEverConnected ? "问点什么，或者让我诊断网络" : "先连上，再聊。"}
+              </p>
+              {!hasEverConnected ? (
+                <p className="ai-empty__text">连接在中间；需要我帮你配好，就在下面说。</p>
+              ) : null}
+              {!hasEverConnected && hasKey ? (
+                <div className="ai-empty__suggest">
+                  <span className="ai-empty__suggest-label">或者问我：</span>
+                  {SUGGESTIONS.map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      type="button"
+                      onClick={() => onEmptySend(suggestion)}
+                    >
+                      · {suggestion}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+            <Composer
+              streaming={false}
+              statusText={null}
+              onSend={onEmptySend}
+              onStop={onStop}
+              disabled={!hasKey}
+              onConfigure={onConfigureKey}
+              placeholder="告诉我要去哪儿，或者让我诊断网络问题"
+            />
+          </>
+        )}
+      </div>
+
+      {confirming ? (
+        <div
+          className="modal-backdrop"
+          onMouseDown={() => {
+            if (!deleting) setConfirming(null);
+          }}
+        >
+          <div
+            className="modal modal--confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ai-delete-session-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="modal__head">
+              <h2 id="ai-delete-session-title" className="modal__title">
+                删除对话
+              </h2>
+            </header>
+            <p className="confirm__text">「{confirming.title}」删除后无法恢复。</p>
+            {deleteError ? <p className="confirm__error">{deleteError}</p> : null}
+            <div className="confirm__actions">
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => setConfirming(null)}
+                disabled={deleting}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn btn--danger-ghost"
+                onClick={() => void submitDelete()}
+                disabled={deleting}
+              >
+                {deleting ? "删除中…" : "删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </aside>
+  );
+}

@@ -178,8 +178,8 @@ impl Tool for CatalogRefreshTool {
     }
 
     fn description(&self) -> &str {
-        "拉取并应用官方默认配置包。有本地缓存时离线不算错误；\
-         在线时新版本只写库，下次连接才生效。"
+        "拉取并应用默认节点（veyl_seed.json）。有本地缓存时离线不算错误；\
+         按内容哈希判断是否变化，不依赖 version 字段。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -196,14 +196,13 @@ impl Tool for CatalogRefreshTool {
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let force = input.get("force").and_then(Value::as_bool).unwrap_or(false);
-        let outcome = match self.services.catalog_refresh(force).await {
+        let outcome = match self.services.default_profile_refresh(force).await {
             Ok(data) => {
-                let detail = data
-                    .get("detail")
-                    .and_then(Value::as_str)
-                    .unwrap_or("已检查默认配置")
-                    .to_string();
-                ToolOutcome::ok(detail, data)
+                let node_count = data
+                    .get("node_count")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                ToolOutcome::ok(format!("默认节点已检查（{node_count} 个）"), data)
             }
             Err(error) => ToolOutcome::fail(tool_error(error)),
         };
@@ -228,7 +227,7 @@ impl Tool for DefaultProfileStatusTool {
     }
 
     fn description(&self) -> &str {
-        "读取默认配置包状态（不联网）：版本、节点数、缓存时间、是否过期、离线是否可用。"
+        "读取默认节点缓存状态（不联网）：节点数、内容哈希、检查时间。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -240,30 +239,23 @@ impl Tool for DefaultProfileStatusTool {
     }
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
-        let outcome = match self.services.default_profile_tool_status().await {
+        let outcome = match self.services.default_profile_status().await {
             Ok(data) => {
-                let summary = match data.get("version").and_then(Value::as_str) {
-                    Some(version) => format!(
-                        "默认配置 {} · 版本 {} · {} 个节点{}{}",
-                        data.get("package_id").and_then(Value::as_str).unwrap_or("-"),
-                        version,
+                let available = data
+                    .get("content_sha256")
+                    .and_then(Value::as_str)
+                    .is_some();
+                let summary = if available {
+                    format!(
+                        "默认节点 {} 个{}",
                         data.get("node_count").and_then(Value::as_i64).unwrap_or(0),
-                        if data.get("stale").and_then(Value::as_bool).unwrap_or(false) {
-                            " · 可能不是最新"
-                        } else {
-                            ""
-                        },
-                        if data
-                            .get("offline_capable")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                        {
-                            " · 可离线连接"
-                        } else {
-                            ""
-                        }
-                    ),
-                    None => "还没有默认配置，先运行 CatalogRefresh 或导入节点文件。".to_string(),
+                        data.get("checked_at")
+                            .and_then(Value::as_i64)
+                            .map(|at| format!(" · 检查于 {at}"))
+                            .unwrap_or_default()
+                    )
+                } else {
+                    "还没有默认节点缓存，先运行 CatalogRefresh。".to_string()
                 };
                 ToolOutcome::ok(summary, data)
             }

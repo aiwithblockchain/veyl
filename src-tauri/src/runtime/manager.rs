@@ -12,8 +12,8 @@ use super::error::{RuntimeError, RuntimeResult};
 use super::health::{ClashApi, DataPlaneProbe, DirectIpProbe, ExitIpProbe, DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE};
 use super::process::{self, SpawnOptions};
 
-pub const CONTRACT_VERSION: &str = "1.1.0";
-pub const EVENT_CONTRACT_VERSION: &str = "1.2.0";
+pub const CONTRACT_VERSION: &str = "2.0.0";
+pub const EVENT_CONTRACT_VERSION: &str = "2.0.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
 pub const DEFAULT_DATA_PLANE_PROBE: &str = "http://cp.cloudflare.com/generate_204";
@@ -118,9 +118,11 @@ pub struct RuntimeStatus {
     pub pid: Option<u32>,
     pub upstream_version: Option<String>,
     pub uptime_seconds: Option<u64>,
-    pub profile_id: Option<String>,
+    pub config_id: Option<String>,
     pub mixed_port: Option<u16>,
-    pub profile_name: Option<String>,
+    pub config_name: Option<String>,
+    pub node_id: Option<String>,
+    pub node_name: Option<String>,
     pub connected_since: Option<String>,
     pub latency_ms: Option<u64>,
     pub direct_ip: Option<String>,
@@ -247,8 +249,10 @@ pub struct StartPlan {
     pub clash_addr: String,
     pub clash_secret: String,
     pub mixed_port: u16,
-    pub profile_id: Option<String>,
-    pub profile_name: Option<String>,
+    pub config_id: Option<String>,
+    pub config_name: Option<String>,
+    pub node_id: Option<String>,
+    pub node_name: Option<String>,
 }
 
 impl std::fmt::Debug for StartPlan {
@@ -262,8 +266,10 @@ impl std::fmt::Debug for StartPlan {
             .field("clash_addr", &self.clash_addr)
             .field("clash_secret", &"<redacted>")
             .field("mixed_port", &self.mixed_port)
-            .field("profile_id", &self.profile_id)
-            .field("profile_name", &self.profile_name)
+            .field("config_id", &self.config_id)
+            .field("config_name", &self.config_name)
+            .field("node_id", &self.node_id)
+            .field("node_name", &self.node_name)
             .finish()
     }
 }
@@ -356,20 +362,30 @@ impl Inner {
             pid: if terminal { None } else { self.pid },
             upstream_version: if terminal { None } else { self.version.clone() },
             uptime_seconds: self.running_since.map(|since| since.elapsed().as_secs()),
-            profile_id: if terminal {
+            config_id: if terminal {
                 None
             } else {
-                self.plan.as_ref().and_then(|p| p.profile_id.clone())
+                self.plan.as_ref().and_then(|p| p.config_id.clone())
             },
             mixed_port: if connected {
                 self.plan.as_ref().map(|p| p.mixed_port)
             } else {
                 None
             },
-            profile_name: if terminal {
+            config_name: if terminal {
                 None
             } else {
-                self.plan.as_ref().and_then(|p| p.profile_name.clone())
+                self.plan.as_ref().and_then(|p| p.config_name.clone())
+            },
+            node_id: if terminal {
+                None
+            } else {
+                self.plan.as_ref().and_then(|p| p.node_id.clone())
+            },
+            node_name: if terminal {
+                None
+            } else {
+                self.plan.as_ref().and_then(|p| p.node_name.clone())
             },
             connected_since: if connected {
                 self.connected_since.clone()
@@ -494,25 +510,25 @@ impl RuntimeManager {
         inner.last_exit_ip_latency_ms
     }
 
-    /// 正在使用（含启动、切换、停止中）的 profile；`None` 表示没有活动连接。
-    pub async fn active_profile_id(&self) -> Option<String> {
+    /// 正在使用（含启动、切换、停止中）的配置；`None` 表示没有活动连接。
+    pub async fn active_config_id(&self) -> Option<String> {
         let inner = self.inner.lock().await;
         match inner.state {
             RuntimeState::Starting
             | RuntimeState::Running
             | RuntimeState::Degraded
             | RuntimeState::Restarting
-            | RuntimeState::Stopping => inner.plan.as_ref().and_then(|p| p.profile_id.clone()),
+            | RuntimeState::Stopping => inner.plan.as_ref().and_then(|p| p.config_id.clone()),
             _ => None,
         }
     }
 
-    /// ProfileDelete 的准入检查：active profile 一律拒绝，不自动断开。
-    pub async fn ensure_profile_not_active(&self, profile_id: &str) -> RuntimeResult<()> {
-        match self.active_profile_id().await {
-            Some(active) if active == profile_id => Err(RuntimeError::Precondition {
-                reason: "ACTIVE_PROFILE_IN_USE",
-                message: format!("profile {profile_id} is in use; disconnect before deleting"),
+    /// ConfigDelete 的准入检查：正在连接的配置一律拒绝，不自动断开。
+    pub async fn ensure_config_not_active(&self, config_id: &str) -> RuntimeResult<()> {
+        match self.active_config_id().await {
+            Some(active) if active == config_id => Err(RuntimeError::Precondition {
+                reason: "ACTIVE_CONFIG_IN_USE",
+                message: format!("config {config_id} is in use; disconnect before deleting"),
             }),
             _ => Ok(()),
         }
@@ -1438,8 +1454,10 @@ mod tests {
             clash_addr: "127.0.0.1:1".into(),
             clash_secret: "secret".into(),
             mixed_port: 1,
-            profile_id: Some("profile-1".into()),
-            profile_name: None,
+            config_id: Some("profile-1".into()),
+            config_name: None,
+            node_id: None,
+            node_name: None,
         }
     }
 
@@ -1499,8 +1517,10 @@ mod tests {
             clash_addr: format!("127.0.0.1:{clash_port}"),
             clash_secret: "new-secret".into(),
             mixed_port: 4321,
-            profile_id: Some("profile-2".into()),
-            profile_name: None,
+            config_id: Some("profile-2".into()),
+            config_name: None,
+            node_id: None,
+            node_name: None,
         };
 
         {
@@ -1548,8 +1568,10 @@ mod tests {
             clash_addr: format!("127.0.0.1:{clash_port}"),
             clash_secret: "secret".into(),
             mixed_port: 4321,
-            profile_id: Some("profile-1".into()),
-            profile_name: None,
+            config_id: Some("profile-1".into()),
+            config_name: None,
+            node_id: None,
+            node_name: None,
         };
 
         let first = manager.start(start_plan.clone()).await.unwrap();
@@ -1655,7 +1677,7 @@ mod tests {
         );
         assert_eq!(
             status.last_error.as_ref().unwrap().contract_version,
-            "1.1.0"
+            "2.0.0"
         );
 
         let mut restarts = 0;
@@ -1691,8 +1713,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
 
-        assert!(manager.active_profile_id().await.is_none());
-        assert!(manager.ensure_profile_not_active("profile-1").await.is_ok());
+        assert!(manager.active_config_id().await.is_none());
+        assert!(manager.ensure_config_not_active("profile-1").await.is_ok());
 
         {
             let mut inner = manager.inner.lock().await;
@@ -1701,21 +1723,21 @@ mod tests {
         }
 
         assert_eq!(
-            manager.active_profile_id().await.as_deref(),
+            manager.active_config_id().await.as_deref(),
             Some("profile-1")
         );
 
         let err = manager
-            .ensure_profile_not_active("profile-1")
+            .ensure_config_not_active("profile-1")
             .await
             .unwrap_err();
         assert_eq!(err.code(), "PRECONDITION_FAILED");
         assert_eq!(
             err.details().unwrap()["reason"],
-            serde_json::json!("ACTIVE_PROFILE_IN_USE")
+            serde_json::json!("ACTIVE_CONFIG_IN_USE")
         );
 
-        assert!(manager.ensure_profile_not_active("profile-2").await.is_ok());
+        assert!(manager.ensure_config_not_active("profile-2").await.is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1943,7 +1965,7 @@ mod tests {
         inner.state = RuntimeState::Running;
         let mut current = plan(PathBuf::from("/tmp/sing-box"), std::path::Path::new("/tmp"));
         current.mixed_port = 4321;
-        current.profile_name = Some("东京 01".into());
+        current.config_name = Some("东京 01".into());
         inner.plan = Some(current);
         inner.connected_since = Some("2026-11-02T00:00:00Z".into());
         inner.health.exit_ip = Some("203.0.113.10".into());
@@ -1952,7 +1974,7 @@ mod tests {
 
         let snapshot = inner.snapshot();
         assert_eq!(snapshot.mixed_port, Some(4321));
-        assert_eq!(snapshot.profile_name.as_deref(), Some("东京 01"));
+        assert_eq!(snapshot.config_name.as_deref(), Some("东京 01"));
         assert_eq!(
             snapshot.connected_since.as_deref(),
             Some("2026-11-02T00:00:00Z")
@@ -1963,7 +1985,7 @@ mod tests {
         inner.state = RuntimeState::Failed;
         let snapshot = inner.snapshot();
         assert!(snapshot.mixed_port.is_none());
-        assert!(snapshot.profile_name.is_none());
+        assert!(snapshot.config_name.is_none());
         assert!(snapshot.connected_since.is_none());
         assert!(snapshot.latency_ms.is_none());
         assert!(snapshot.direct_ip.is_none());

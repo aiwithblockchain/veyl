@@ -143,3 +143,29 @@ export function primaryAction(options: {
     note: null,
   };
 }
+
+/** 控制台的连接状态只有这四种；批 2 由假数据驱动，接上运行时后沿用同一套文案。 */
+export type ConsoleConnectionState = "idle" | "starting" | "connected" | "stopping";
+
+export function consoleStatus(
+  state: ConsoleConnectionState,
+  hasConfig: boolean,
+  hasNodes: boolean,
+): { text: string; tone: StatusTone } {
+  if (state === "connected") return { text: "已连接", tone: "ok" };
+  if (state === "starting") return { text: "正在启动…", tone: "warn" };
+  if (state === "stopping") return { text: "正在断开…", tone: "warn" };
+  if (!hasConfig) return { text: "还没有配置", tone: "muted" };
+  if (!hasNodes) return { text: "这套配置还没有节点", tone: "muted" };
+  return { text: "未连接", tone: "muted" };
+}
+
+export function consolePrimary(
+  state: ConsoleConnectionState,
+  canConnect: boolean,
+): { label: string; disabled: boolean; stop: boolean } {
+  if (state === "starting") return { label: "正在启动…", disabled: true, stop: false };
+  if (state === "connected") return { label: "断开 VPN", disabled: false, stop: true };
+  if (state === "stopping") return { label: "正在断开…", disabled: true, stop: true };
+  return { label: "启动 VPN", disabled: !canConnect, stop: false };
+}

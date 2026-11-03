@@ -471,6 +471,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         case AGENT_EVENTS.appLifecycleChanged:
         case AGENT_EVENTS.defaultProfileUpdated:
         case AGENT_EVENTS.askUserQuestion:
+        // 配置 / 节点 / 问题 / 布局事件由各自的视图消费，不进对话流。
+        case AGENT_EVENTS.configChanged:
+        case AGENT_EVENTS.nodeListChanged:
+        case AGENT_EVENTS.nodeSwitched:
+        case AGENT_EVENTS.issueChanged:
+        case AGENT_EVENTS.layoutUpdated:
           return state;
 
         default:

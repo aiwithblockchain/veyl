@@ -33,7 +33,6 @@ interface Props {
   onImportPath: (path: string) => void;
   onRestartOnboarding: () => void;
   onOpenLogs: () => void;
-  onOpenDiagnosis: () => void;
   onRestoreNetwork: () => void;
   onAskAi: (text: string) => void;
   /** 从导入入口进来时直接落到「网络」；默认「账号与 AI」。 */
@@ -135,7 +134,6 @@ export function Settings({
   onImportPath,
   onRestartOnboarding,
   onOpenLogs,
-  onOpenDiagnosis,
   onRestoreNetwork,
   onAskAi,
   initialSection = "ai",
@@ -950,18 +948,6 @@ export function Settings({
                 }
               >
                 问 AI
-              </button>
-            </div>
-
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">网络自检</div>
-                <div className="settings-row__value">
-                  检查进程、端口、系统代理与出口；不依赖 AI。
-                </div>
-              </div>
-              <button type="button" className="btn btn--ghost" onClick={onOpenDiagnosis}>
-                打开自检
               </button>
             </div>
 

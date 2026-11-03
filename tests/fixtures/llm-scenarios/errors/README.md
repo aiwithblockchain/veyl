@@ -1,6 +1,6 @@
 # 工具错误路径剧本
 
-每个工具一条失败剧本，覆盖 `docs/contracts/tools.md` §3 的 18 个工具。用途：让 E2E 能稳定复现「工具失败 → Agent 给出可执行建议」这条路径，而不是靠手工制造故障。
+18 条失败剧本，覆盖 `docs/contracts/tools.md` 3.0.0 里常见的工具失败路径。用途：让 E2E 能稳定复现「工具失败 → Agent 给出可执行建议」这条路径，而不是靠手工制造故障。
 
 ## 怎么用
 
@@ -34,8 +34,8 @@ curl -s -X POST http://127.0.0.1:18091/v1/chat/completions \
 | 6 | `CoreListVersions` | `INTERNAL` | **无** | 内置清单损坏 |
 | 7 | `CoreInstall` | `APPROVAL_REQUIRED` | §4.7 | 未审批直接调用 |
 | 8 | `CatalogSearch` | `CATALOG_UNAVAILABLE` | §4.8 | 目录服务不可达 |
-| 9 | `ProfileList` | `INTERNAL` | **无** | 本地数据库损坏 |
-| 10 | `ProfileImport` | `NODE_NOT_FOUND` | §4.10 | 导入不存在的节点 |
+| 9 | `ConfigList` | `INTERNAL` | **无** | 本地数据库损坏 |
+| 10 | `NodeImportUrl` | `UPSTREAM_ERROR` | §4.10 | 订阅地址当前拉不到 |
 | 11 | `VpnConnect` | `PRECONDITION_FAILED` | §4.11 | 未导入配置就连接 |
 | 12 | `VpnDisconnect` | `PRECONDITION_FAILED` | **无** | 未连接时断开 |
 | 13 | `DiagRun` | `INTERNAL` | **无** | 诊断内部失败 |
@@ -43,7 +43,7 @@ curl -s -X POST http://127.0.0.1:18091/v1/chat/completions \
 | 15 | `DeepseekSaveKey` | `INVALID_ARGUMENT` | §4.15（schema `minLength: 20`） | Key 长度不足 |
 | 16 | `JobGet` | `NOT_FOUND` | §4.16 | 查询不存在或过期的 job |
 | 17 | `AskUserQuestion` | `USER_DISMISSED` | **无**（Claurst 内置） | 用户关闭提问 |
-| 18 | `ProfileDelete` | `PRECONDITION_FAILED` | §4.17 | 删除正在使用的配置 |
+| 18 | `ConfigDelete` | `PRECONDITION_FAILED` | §4.17 | 删除正在连接的配置 |
 
 ## 需要架构师补契约的 7 处
 
@@ -54,9 +54,9 @@ curl -s -X POST http://127.0.0.1:18091/v1/chat/completions \
 | `RuntimeRestart` | 错误码列表（大概率与 `RuntimeStart` 相同，但没写） |
 | `RuntimeLogs` | 错误码列表（日志文件缺失时返回什么） |
 | `CoreListVersions` | 错误码列表（清单损坏时返回什么） |
-| `ProfileList` | 错误码列表（本地库损坏时返回什么） |
+| `ConfigList` | 错误码列表（本地库损坏时返回什么） |
 | `VpnDisconnect` | 错误码列表（未连接时是否报错，还是幂等成功） |
 | `DiagRun` | 错误码列表（部分检查失败算 `ok:false` 还是 `ok:true` + 明细） |
 | `AskUserQuestion` | 用户忽略提问时的语义（Claurst 内置，需确认其 `ToolResult` 形状） |
 
-> `DeepseekSetupKey` 不是缺口：契约 §4.14 明确「离线时仍可返回步骤，不报错」，所以它没有失败剧本，只有一条「成功」剧本。这是 18 个工具里唯一的例外，不是漏写。
+> `DeepseekSetupKey` 不是缺口：契约 §4.14 明确「离线时仍可返回步骤，不报错」，所以它没有失败剧本，只有一条「成功」剧本。这是 18 条剧本里唯一的例外，不是漏写。

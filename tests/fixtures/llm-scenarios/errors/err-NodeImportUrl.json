@@ -1,0 +1,23 @@
+{
+  "name": "err-NodeImportUrl",
+  "tool": "NodeImportUrl",
+  "expect_error_code": "UPSTREAM_ERROR",
+  "expect_ok": false,
+  "contract_backed": true,
+  "description": "订阅地址当前拉不到",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "NodeImportUrl",
+          "arguments": {
+            "url": "https://example.invalid/sub"
+          }
+        }
+      ]
+    },
+    {
+      "text": "这条订阅现在拿不到，等能上网再试。"
+    }
+  ]
+}

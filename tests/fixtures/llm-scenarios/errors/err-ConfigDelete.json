@@ -1,0 +1,23 @@
+{
+  "name": "err-ConfigDelete",
+  "tool": "ConfigDelete",
+  "expect_error_code": "PRECONDITION_FAILED",
+  "expect_ok": false,
+  "contract_backed": true,
+  "description": "删除正在连接的配置",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "ConfigDelete",
+          "arguments": {
+            "config_id": "cfg_active"
+          }
+        }
+      ]
+    },
+    {
+      "text": "这套配置正在被当前连接使用，请先断开再删除。"
+    }
+  ]
+}

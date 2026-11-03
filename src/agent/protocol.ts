@@ -22,11 +22,16 @@ export const AGENT_EVENTS = {
   appLifecycleChanged: "app-lifecycle-changed",
   defaultProfileUpdated: "default-profile-updated",
   askUserQuestion: "ask-user-question",
+  configChanged: "config-changed",
+  nodeListChanged: "node-list-changed",
+  nodeSwitched: "node-switched",
+  issueChanged: "issue-changed",
+  layoutUpdated: "layout-updated",
 } as const;
 
 export type AgentEventName = (typeof AGENT_EVENTS)[keyof typeof AGENT_EVENTS];
 
-/** AI 会话事件（1–7）与应用事件（8–11）分开，UI 两组都要订阅。 */
+/** AI 会话事件（1–7）与应用事件（8–18）分开，UI 两组都要订阅。 */
 export const AI_EVENT_NAMES = [
   AGENT_EVENTS.messageChunk,
   AGENT_EVENTS.thinkingChunk,
@@ -44,6 +49,11 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.appLifecycleChanged,
   AGENT_EVENTS.defaultProfileUpdated,
   AGENT_EVENTS.askUserQuestion,
+  AGENT_EVENTS.configChanged,
+  AGENT_EVENTS.nodeListChanged,
+  AGENT_EVENTS.nodeSwitched,
+  AGENT_EVENTS.issueChanged,
+  AGENT_EVENTS.layoutUpdated,
 ] as const;
 
 /* ------------------------------------------------------------------ */
@@ -289,6 +299,119 @@ export interface AskUserQuestionPayload {
 }
 
 /* ------------------------------------------------------------------ */
+/* 配置 / 节点 / 问题 / 布局事件（events.md §4.9–4.13）                 */
+/* ------------------------------------------------------------------ */
+
+export type ConfigConnectMode = "system_proxy" | "tun";
+export type ConfigRouteMode = "direct" | "proxy_all" | "proxy_selected";
+
+/** commands.md §3.0；不含节点明细与凭据。 */
+export interface ConfigSummary {
+  config_id: string;
+  name: string;
+  connect_mode: ConfigConnectMode;
+  route_mode: ConfigRouteMode;
+  node_count: number;
+  listen_port: number | null;
+  is_active: boolean;
+  current_node_id: string | null;
+  created_at: number;
+  updated_at: number;
+  last_used_at: number | null;
+}
+
+export interface ConfigChangedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  change: "created" | "updated" | "deleted" | "activated";
+  config_id: string;
+  /** deleted 时为 null。 */
+  config: ConfigSummary | null;
+  active_config_id: string | null;
+  emitted_at: string;
+}
+
+export type NodeListChangedReason =
+  | "seed_refreshed"
+  | "url_import"
+  | "manual_create"
+  | "node_deleted"
+  | "bindings_changed";
+
+export interface NodeListChangedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  reason: NodeListChangedReason;
+  /** 只有 bindings_changed 时非空。 */
+  config_id: string | null;
+  node_count_total: number;
+  /** 超过 200 条时给空数组。 */
+  changed_node_ids: string[];
+  emitted_at: string;
+}
+
+export interface NodeSwitchedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  config_id: string;
+  from_node_id: string | null;
+  to_node_id: string;
+  /** 是否同时做了在线热切换。 */
+  connected: boolean;
+  /** connected = false 时为 null。 */
+  runtime: RuntimeSnapshot | null;
+  emitted_at: string;
+}
+
+export type IssueSeverity = "P0" | "P1" | "P2";
+export type IssueState = "open" | "handed_off" | "resolved" | "ignored";
+
+/** commands.md §6.0。 */
+export interface IssueSummary {
+  issue_id: string;
+  type: string;
+  target: string;
+  title: string;
+  severity: IssueSeverity;
+  mode: "system_proxy" | "tun";
+  state: IssueState;
+  count: number;
+  first_seen: number;
+  last_seen: number;
+  config_id: string | null;
+  session_id: string | null;
+}
+
+export interface IssueChangedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
+  issue: IssueSummary;
+  /** 当前应插卡的那一条；null = 中间不插卡。 */
+  blocking_issue_id: string | null;
+  open_counts: { P0: number; P1: number; P2: number };
+  emitted_at: string;
+}
+
+export type BlockType =
+  | "empty_hint"
+  | "proxy_card"
+  | "source_choice"
+  | "reachability"
+  | "issue_card"
+  | "update_hint";
+
+export interface Layout {
+  version: 1;
+  blocks: Array<{ type: BlockType; props?: Record<string, unknown> }>;
+}
+
+export interface LayoutUpdatedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  config_id: string;
+  /** 每配置单调递增，从 1 开始。 */
+  revision: number;
+  layout: Layout;
+  emitted_at: string;
+}
+
+/* ------------------------------------------------------------------ */
 /* 事件联合类型                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -306,6 +429,11 @@ export interface AgentEventMap {
   [AGENT_EVENTS.appLifecycleChanged]: AppLifecycleChangedPayload;
   [AGENT_EVENTS.defaultProfileUpdated]: DefaultProfileUpdatedPayload;
   [AGENT_EVENTS.askUserQuestion]: AskUserQuestionPayload;
+  [AGENT_EVENTS.configChanged]: ConfigChangedPayload;
+  [AGENT_EVENTS.nodeListChanged]: NodeListChangedPayload;
+  [AGENT_EVENTS.nodeSwitched]: NodeSwitchedPayload;
+  [AGENT_EVENTS.issueChanged]: IssueChangedPayload;
+  [AGENT_EVENTS.layoutUpdated]: LayoutUpdatedPayload;
 }
 
 export type AgentEvent = {

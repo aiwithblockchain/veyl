@@ -69,7 +69,7 @@ async function main() {
 
   // --- LLM 剧本 ---
   let messages = [{ role: "user", content: "连到日本 [scenario:connect-jp]" }];
-  const expected = ["CatalogSearch", "ProfileImport", "VpnConnect", null];
+  const expected = ["ConfigCreate", "VpnConnect", null];
   for (let i = 0; i < expected.length; i++) {
     const r = await getJSON(`${LLM}/v1/chat/completions`, {
       method: "POST",

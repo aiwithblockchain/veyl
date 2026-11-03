@@ -1,24 +1,16 @@
 {
   "name": "connect-jp",
-  "description": "主流程：查节点 → 导入 → 连接 → 汇报",
+  "description": "主流程：用默认节点建配置 → 连接 → 汇报",
   "turns": [
     {
       "tool_calls": [
         {
-          "name": "CatalogSearch",
+          "name": "ConfigCreate",
           "arguments": {
-            "region": "jp",
-            "limit": 10
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "ProfileImport",
-          "arguments": {
-            "node_id": "seed-jp-01"
+            "name": "默认配置",
+            "connect_mode": "system_proxy",
+            "route_mode": "proxy_all",
+            "source": "seed"
           }
         }
       ]
@@ -28,8 +20,7 @@
         {
           "name": "VpnConnect",
           "arguments": {
-            "node_id": "seed-jp-01",
-            "strategy": "latency"
+            "config_id": "cfg_seed"
           }
         }
       ]

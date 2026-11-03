@@ -116,14 +116,42 @@ macro_rules! lifecycle_tool {
     };
 }
 
-lifecycle_tool!(
-    RuntimeStartTool,
-    "RuntimeStart",
-    "启动 sing-box 运行时进程。不设置系统代理；需要代理请用 VpnConnect。",
-    "运行时已启动。",
-    runtime_start,
-    None
-);
+pub struct RuntimeStartTool {
+    services: Arc<dyn VpnToolServices>,
+}
+
+impl RuntimeStartTool {
+    pub fn new(services: Arc<dyn VpnToolServices>) -> Self {
+        Self { services }
+    }
+}
+
+#[async_trait]
+impl Tool for RuntimeStartTool {
+    fn name(&self) -> &str {
+        "RuntimeStart"
+    }
+
+    fn description(&self) -> &str {
+        "启动 sing-box 运行时进程（使用当前激活配置）。不设置系统代理；需要代理请用 VpnConnect。"
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Write
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {}, "additionalProperties": false })
+    }
+
+    async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
+        let outcome = match self.services.runtime_start(None, None).await {
+            Ok(data) => ToolOutcome::ok("运行时已启动。", data),
+            Err(error) => failure(error),
+        };
+        envelope::finish(ctx, "RuntimeStart", outcome)
+    }
+}
 
 lifecycle_tool!(
     RuntimeStopTool,

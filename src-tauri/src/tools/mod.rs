@@ -4,6 +4,7 @@
 //! 结果信封、权限级别、错误码见 `docs/contracts/tools.md`。
 
 pub mod catalog;
+pub mod configs;
 pub mod core;
 pub mod deepseek;
 pub mod diag;
@@ -22,7 +23,10 @@ use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::Value;
 
 pub use envelope::{AivpnError, NextAction, ToolOutcome};
-pub use services::{CatalogQuery, ConnectTarget, NotWiredServices, VpnToolServices};
+pub use services::{
+    CatalogQuery, ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, NotWiredServices,
+    VpnToolServices,
+};
 
 /// AskUserQuestion 的护栏：契约要求 options 非空，否则直接把这次工具调用
 /// 作为 INVALID_ARGUMENT 结束，让模型带选项重问（不能静默丢弃成「跳过」）。
@@ -105,9 +109,13 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(core::CoreListVersionsTool::new(Arc::clone(&services))),
         Box::new(core::CoreInstallTool::new(Arc::clone(&services))),
         Box::new(catalog::CatalogSearchTool::new(Arc::clone(&services))),
-        Box::new(catalog::ProfileListTool::new(Arc::clone(&services))),
-        Box::new(catalog::ProfileImportTool::new(Arc::clone(&services))),
-        Box::new(catalog::ProfileDeleteTool::new(Arc::clone(&services))),
+        Box::new(configs::ConfigListTool::new(Arc::clone(&services))),
+        Box::new(configs::ConfigDetailTool::new(Arc::clone(&services))),
+        Box::new(configs::ConfigCreateTool::new(Arc::clone(&services))),
+        Box::new(configs::ConfigUpdateTool::new(Arc::clone(&services))),
+        Box::new(configs::ConfigDeleteTool::new(Arc::clone(&services))),
+        Box::new(configs::NodeImportUrlTool::new(Arc::clone(&services))),
+        Box::new(configs::NodeCreateTool::new(Arc::clone(&services))),
         Box::new(vpn::VpnConnectTool::new(Arc::clone(&services))),
         Box::new(vpn::VpnDisconnectTool::new(Arc::clone(&services))),
         Box::new(diag::DiagRunTool::new(Arc::clone(&services))),

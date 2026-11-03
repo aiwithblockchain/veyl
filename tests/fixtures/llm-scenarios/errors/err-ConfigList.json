@@ -1,15 +1,15 @@
 {
-  "name": "err-ProfileList",
-  "tool": "ProfileList",
+  "name": "err-ConfigList",
+  "tool": "ConfigList",
   "expect_error_code": "INTERNAL",
   "expect_ok": false,
   "contract_backed": false,
-  "description": "本地数据库损坏（契约 §4.9 未列出错误码）",
+  "description": "本地数据库损坏",
   "turns": [
     {
       "tool_calls": [
         {
-          "name": "ProfileList",
+          "name": "ConfigList",
           "arguments": {}
         }
       ]

@@ -110,15 +110,16 @@ fn error_value(error: anyhow::Error) -> Value {
     }
 }
 
-/// 面板主按钮：连接。`profileId` 省略时用当前激活配置。
+/// 面板主按钮：连接。`configId` 省略时用当前激活配置。
 #[tauri::command]
 pub async fn runtime_start(
     state: State<'_, Arc<AppState>>,
-    profile_id: Option<String>,
+    config_id: Option<String>,
+    node_id: Option<String>,
 ) -> Result<Value, Value> {
     state
         .services
-        .runtime_start(profile_id)
+        .runtime_start(config_id, node_id)
         .await
         .map_err(error_value)
 }
@@ -129,37 +130,182 @@ pub async fn runtime_stop(state: State<'_, Arc<AppState>>) -> Result<Value, Valu
     state.services.runtime_stop(false).await.map_err(error_value)
 }
 
-/// 节点切换列表。与工具通道同名同序：`profile_id` + `active_profile_id` + `node_id`。
+/// 配置列表（`ConfigListData`）。不返回节点明细，要节点用 config_detail。
 #[tauri::command]
-pub async fn profile_list(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
-    let data = state.services.profile_list().await.map_err(error_value)?;
-    let mut profiles = data
-        .get("profiles")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    // 与工具一致：created_at 升序。
-    profiles.sort_by(|left, right| {
-        let left = left.get("created_at").and_then(Value::as_str).unwrap_or("");
-        let right = right.get("created_at").and_then(Value::as_str).unwrap_or("");
-        left.cmp(right)
-    });
+pub async fn config_list(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state.services.config_list().await.map_err(error_value)
+}
 
-    Ok(json!({
-        "profiles": profiles
-            .iter()
-            .map(|profile| json!({
-                "profile_id": profile.get("profile_id").cloned().unwrap_or(Value::Null),
-                "node_id": profile.get("node_id").cloned().unwrap_or(Value::Null),
-                "name": profile.get("name").cloned().unwrap_or(Value::Null),
-                "protocol": profile.get("protocol").cloned().unwrap_or(Value::Null),
-                "region": profile.get("region").cloned().unwrap_or(Value::Null),
-                "is_active": profile.get("is_active").cloned().unwrap_or(Value::Bool(false)),
-                "created_at": profile.get("created_at").cloned().unwrap_or(Value::Null),
-            }))
-            .collect::<Vec<_>>(),
-        "active_profile_id": data.get("active_profile_id").cloned().unwrap_or(Value::Null),
-    }))
+#[tauri::command]
+pub async fn config_detail(
+    state: State<'_, Arc<AppState>>,
+    config_id: String,
+) -> Result<Value, Value> {
+    state
+        .services
+        .config_detail(&config_id)
+        .await
+        .map_err(error_value)
+}
+
+/// 新建一套配置。`source = "seed"` 时绑定当前种子的全部节点。
+#[tauri::command]
+pub async fn config_create(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+    connect_mode: String,
+    route_mode: String,
+    source: Option<String>,
+    node_ids: Option<Vec<String>>,
+    listen_port: Option<u16>,
+    dns: Option<Value>,
+    tun_excludes: Option<Vec<String>>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .config_create(crate::tools::ConfigCreateInput {
+            name,
+            connect_mode,
+            route_mode,
+            source,
+            node_ids,
+            listen_port,
+            dns,
+            tun_excludes,
+        })
+        .await
+        .map_err(error_value)
+}
+
+/// 就地更新一套配置。改连接方式必须新建，`connectMode` 会被拒绝。
+#[tauri::command]
+pub async fn config_update(
+    state: State<'_, Arc<AppState>>,
+    config_id: String,
+    name: Option<String>,
+    route_mode: Option<String>,
+    listen_port: Option<u16>,
+    dns: Option<Value>,
+    tun_excludes: Option<Vec<String>>,
+    node_ids: Option<Vec<String>>,
+    connect_mode: Option<String>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .config_update(
+            &config_id,
+            crate::tools::ConfigUpdateInput {
+                name,
+                route_mode,
+                listen_port,
+                dns,
+                tun_excludes,
+                node_ids,
+                connect_mode,
+            },
+        )
+        .await
+        .map_err(error_value)
+}
+
+#[tauri::command]
+pub async fn config_delete(
+    state: State<'_, Arc<AppState>>,
+    config_id: String,
+) -> Result<Value, Value> {
+    state
+        .services
+        .config_delete(&config_id)
+        .await
+        .map_err(error_value)
+}
+
+/// 切换激活配置。已连接且换到另一套时必须带 `confirmDisconnect`。
+#[tauri::command]
+pub async fn config_activate(
+    state: State<'_, Arc<AppState>>,
+    config_id: String,
+    confirm_disconnect: Option<bool>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .config_activate(&config_id, confirm_disconnect.unwrap_or(false))
+        .await
+        .map_err(error_value)
+}
+
+/// URL 模式：拉取 base64 多节点订阅并解析，只解析、不连接。
+#[tauri::command]
+pub async fn node_import_url(
+    state: State<'_, Arc<AppState>>,
+    url: String,
+    config_id: Option<String>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .node_import_url(config_id, &url)
+        .await
+        .map_err(error_value)
+}
+
+/// 手动模式：五个字段创建节点。密码只进 secrets.enc。
+#[tauri::command]
+pub async fn node_create(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+    server: String,
+    port: u16,
+    password: String,
+    method: String,
+    config_id: Option<String>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .node_create(crate::tools::NodeCreateInput {
+            config_id,
+            name,
+            server,
+            port,
+            password,
+            method,
+        })
+        .await
+        .map_err(error_value)
+}
+
+/// 默认节点缓存状态（离线可读，不联网）。
+#[tauri::command]
+pub async fn default_profile_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state
+        .services
+        .default_profile_status()
+        .await
+        .map_err(error_value)
+}
+
+/// 拉取并应用默认节点；有缓存时离线沿用缓存，不报死错。
+#[tauri::command]
+pub async fn default_profile_refresh(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .default_profile_refresh(false)
+        .await
+        .map_err(error_value)
+}
+
+/// 离线兜底：把一份 `veyl_seed.json` 合并进节点池（只增不删）。
+#[tauri::command]
+pub async fn import_seed_file(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> Result<Value, Value> {
+    state
+        .services
+        .import_seed_file(&path)
+        .await
+        .map_err(error_value)
 }
 
 /// 面板三级折叠里的「打开日志」：用系统文件管理器定位到日志文件。
@@ -215,26 +361,6 @@ fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
         Ok(status) => Err(format!("文件管理器返回 {status}")),
         Err(error) => Err(format!("启动文件管理器失败：{error}")),
     }
-}
-
-/// 默认配置包状态（离线可读，不联网）。
-#[tauri::command]
-pub async fn default_profile_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
-    state
-        .services
-        .default_profile_status()
-        .await
-        .map_err(error_value)
-}
-
-/// 拉取并应用默认配置包；在线时只标记新版本，不打断连接。
-#[tauri::command]
-pub async fn default_profile_refresh(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
-    state
-        .services
-        .default_profile_refresh()
-        .await
-        .map_err(error_value)
 }
 
 /// 受限网络修复。与 AI 工具 NetRepair 共用同一份实现。
@@ -527,15 +653,15 @@ pub async fn onboarding_status(state: State<'_, Arc<AppState>>) -> Result<Value,
         })
         .unwrap_or(false);
 
-    let profile_count = state
+    let config_count = state
         .services
-        .profile_list()
+        .config_list()
         .await
         .ok()
         .and_then(|data| {
-            data.get("profiles")
+            data.get("configs")
                 .and_then(Value::as_array)
-                .map(|profiles| profiles.len())
+                .map(|configs| configs.len())
         })
         .unwrap_or(0);
 
@@ -546,7 +672,7 @@ pub async fn onboarding_status(state: State<'_, Arc<AppState>>) -> Result<Value,
     Ok(json!({
         "completed": completed,
         "has_key": has_key,
-        "profile_count": profile_count,
+        "config_count": config_count,
     }))
 }
 
@@ -574,27 +700,6 @@ pub async fn onboarding_complete(
     )
     .map_err(|error| json!({ "code": "INTERNAL", "message": error.to_string() }))?;
     Ok(json!({ "ok": true }))
-}
-
-/// 无 AI 模式的删除配置入口。审批已移除，直接执行；
-/// 「不能删活动配置」的前置校验仍在服务层（`active_profile_id`）。
-#[tauri::command]
-pub async fn profile_delete(
-    state: State<'_, Arc<AppState>>,
-    profile_id: String,
-) -> Result<Value, Value> {
-    if profile_id.trim().is_empty() {
-        return Err(json!(crate::tools::AivpnError::new(
-            "INVALID_ARGUMENT",
-            "profile_id 不能为空"
-        )));
-    }
-
-    state
-        .services
-        .profile_delete(&profile_id)
-        .await
-        .map_err(|error| json!(crate::tools::AivpnError::new("INTERNAL", error.to_string())))
 }
 
 /// 重启后恢复会话：不传 `session_id` 时取最近一个会话。
@@ -795,236 +900,3 @@ mod title_tests {
     }
 }
 
-/// 拖拽导入节点文件（设置页）。只做校验、错误分类与脱敏，解析/写入复用 `seed_import`。
-///
-/// 校验顺序固定：扩展名 → 大小 → 可读 → 内容。先校验再读，别把大文件读进内存。
-/// 返回值、日志、错误信息都不含 password，也不回显文件内容。
-#[tauri::command]
-pub async fn import_seed_file(path: String) -> Result<Value, Value> {
-    const MAX_BYTES: u64 = 1024 * 1024;
-
-    fn invalid(reason: &str, message: &str) -> Value {
-        json!({
-            "code": "INVALID_ARGUMENT",
-            "message": message,
-            "details": { "reason": reason },
-        })
-    }
-
-    let file_path = std::path::Path::new(&path);
-
-    let is_json = file_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("json"))
-        .unwrap_or(false);
-    if !is_json {
-        return Err(invalid("not_json_file", "只支持 .json 文件"));
-    }
-
-    let metadata = match std::fs::metadata(file_path) {
-        Ok(metadata) if metadata.is_file() => metadata,
-        _ => return Err(invalid("file_unreadable", "文件不存在或无法读取")),
-    };
-    if metadata.len() > MAX_BYTES {
-        return Err(json!({
-            "code": "INVALID_ARGUMENT",
-            "message": "文件超过 1 MB",
-            "details": { "reason": "file_too_large", "max_bytes": MAX_BYTES },
-        }));
-    }
-
-    let bytes = match std::fs::read(file_path) {
-        Ok(bytes) => bytes,
-        Err(_) => return Err(invalid("file_unreadable", "文件不存在或无法读取")),
-    };
-    let contents = match String::from_utf8(bytes) {
-        Ok(contents) => contents,
-        Err(_) => return Err(invalid("invalid_json", "文件不是合法的 UTF-8 文本")),
-    };
-
-    let package = match crate::seed_import::parse(&contents) {
-        Ok(package) => package,
-        Err(error) => {
-            // 只记 serde 的行列信息，不记原文——原文里是密码。
-            log::warn!("seed import: invalid json: {error}");
-            return Err(invalid("invalid_json", "文件不是合法的节点 JSON"));
-        }
-    };
-
-    let plan = crate::seed_import::plan(&package);
-    if plan.imported.is_empty() {
-        if let Some(method) = plan
-            .skipped
-            .iter()
-            .find_map(|skip| skip.reason.strip_prefix("unsupported method: "))
-        {
-            return Err(json!({
-                "code": "UNSUPPORTED",
-                "message": format!("不支持的加密方式：{method}"),
-                "details": { "method": method },
-            }));
-        }
-        let mut error = invalid("no_importable_nodes", "文件里没有可导入的节点");
-        error["details"]["skipped"] = serde_json::json!(plan.skipped.len());
-        return Err(error);
-    }
-
-    let Some(store) = crate::store::global() else {
-        return Err(json!({ "code": "INTERNAL", "message": "本地数据库不可用" }));
-    };
-
-    match crate::seed_import::apply(&store, &plan) {
-        Ok(_) => {
-            for node in &plan.imported {
-                log::info!("seed import: {} pw_fp={}", node.id, node.password_fingerprint);
-            }
-            Ok(json!({
-                "imported": plan.imported.len(),
-                "skipped": plan.skipped.iter().map(|skip| json!({
-                    "name": skip.tag,
-                    "reason": skip.reason,
-                })).collect::<Vec<_>>(),
-                "profiles": plan.imported.iter().map(|node| json!({
-                    "id": node.id,
-                    "name": node.name,
-                    "server": node.server,
-                    // 契约里没有，但验收要求「列出名称与 server:port」，补一个端口字段（纯新增）。
-                    "server_port": node.server_port,
-                    "method": node.method,
-                })).collect::<Vec<_>>(),
-            }))
-        }
-        Err(crate::seed_import::ApplyError::Secret(error)) => Err(json!({
-            "code": "SECRET_STORE",
-            "message": error.to_string(),
-        })),
-        Err(error) => Err(json!({ "code": "INTERNAL", "message": error.to_string() })),
-    }
-}
-
-#[cfg(test)]
-mod seed_command_tests {
-    use super::*;
-    use std::path::PathBuf;
-    use std::sync::OnceLock;
-
-    const GOOD: &str = r#"{"provider_id":"p","name":"Demo","config":{"outbounds":[
-        {"type":"shadowsocks","tag":"Tokyo-01","server":"203.0.113.5","server_port":8388,
-         "method":"aes-256-gcm","password":"pw-secret-tokyo"},
-        {"type":"direct","tag":"direct"}]}}"#;
-
-    fn temp_file(name: &str, contents: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("veyl-seed-cmd-{:016x}", rand::random::<u64>()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, contents).unwrap();
-        path
-    }
-
-    fn ensure_runtime() {
-        static ONCE: OnceLock<()> = OnceLock::new();
-        ONCE.get_or_init(|| {
-            if crate::store::global().is_none() {
-                let store = std::sync::Arc::new(crate::store::Store::open_in_memory().unwrap());
-                crate::store::install_global(store);
-            }
-            let dir = std::env::temp_dir().join("veyl-seed-command-secrets");
-            let _ = std::fs::create_dir_all(&dir);
-            crate::secrets::install(&dir);
-        });
-    }
-
-    #[tokio::test]
-    async fn only_json_files_are_accepted() {
-        let path = temp_file("seeds.txt", GOOD);
-        let error = import_seed_file(path.to_string_lossy().into_owned())
-            .await
-            .unwrap_err();
-        assert_eq!(error["code"], "INVALID_ARGUMENT");
-        assert_eq!(error["details"]["reason"], "not_json_file");
-    }
-
-    #[tokio::test]
-    async fn a_missing_file_is_unreadable() {
-        let path = std::env::temp_dir().join("veyl-does-not-exist-xyz.json");
-        let error = import_seed_file(path.to_string_lossy().into_owned())
-            .await
-            .unwrap_err();
-        assert_eq!(error["details"]["reason"], "file_unreadable");
-    }
-
-    #[tokio::test]
-    async fn files_over_one_megabyte_are_rejected_before_reading() {
-        let dir = std::env::temp_dir().join(format!("veyl-seed-big-{:016x}", rand::random::<u64>()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("big.json");
-        std::fs::write(&path, vec![b'a'; 1024 * 1024 + 1]).unwrap();
-
-        let error = import_seed_file(path.to_string_lossy().into_owned())
-            .await
-            .unwrap_err();
-        assert_eq!(error["details"]["reason"], "file_too_large");
-        assert_eq!(error["details"]["max_bytes"], 1024 * 1024);
-    }
-
-    #[tokio::test]
-    async fn invalid_json_is_reported_without_echoing_the_file() {
-        let path = temp_file("bad.json", r#"{"password":"pw-leak-me""#);
-        let error = import_seed_file(path.to_string_lossy().into_owned())
-            .await
-            .unwrap_err();
-        assert_eq!(error["details"]["reason"], "invalid_json");
-        assert!(!error.to_string().contains("pw-leak-me"), "{error}");
-        assert!(
-            !error.to_string().contains(&path.file_name().unwrap().to_string_lossy().to_string()),
-            "错误信息不应回显路径：{error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unsupported_method_is_unsupported_not_invalid() {
-        let body = r#"{"provider_id":"p","name":"Demo","config":{"outbounds":[
-            {"type":"shadowsocks","tag":"x","server":"203.0.113.5","server_port":8388,
-             "method":"rc4-md5","password":"pw"}]}}"#;
-        let path = temp_file("rc4.json", body);
-        let error = import_seed_file(path.to_string_lossy().into_owned())
-            .await
-            .unwrap_err();
-        assert_eq!(error["code"], "UNSUPPORTED");
-        assert_eq!(error["details"]["method"], "rc4-md5");
-    }
-
-    #[tokio::test]
-    async fn nothing_importable_is_reported_separately() {
-        let body = r#"{"provider_id":"p","name":"Demo","config":{"outbounds":[
-            {"type":"direct","tag":"direct"}]}}"#;
-        let path = temp_file("direct.json", body);
-        let error = import_seed_file(path.to_string_lossy().into_owned())
-            .await
-            .unwrap_err();
-        assert_eq!(error["details"]["reason"], "no_importable_nodes");
-        assert_eq!(error["details"]["skipped"], 1, "UI 需要这个数字来写「已跳过 M 个」");
-    }
-
-    #[tokio::test]
-    async fn a_partial_import_succeeds_and_never_returns_passwords() {
-        ensure_runtime();
-        let path = temp_file("good.json", GOOD);
-        let response = import_seed_file(path.to_string_lossy().into_owned())
-            .await
-            .unwrap();
-
-        assert_eq!(response["imported"], 1);
-        assert_eq!(response["skipped"].as_array().unwrap().len(), 1);
-        let profiles = response["profiles"].as_array().unwrap();
-        assert_eq!(profiles[0]["method"], "aes-256-gcm");
-        assert_eq!(profiles[0]["server"], "203.0.113.5");
-        assert_eq!(profiles[0]["server_port"], 8388);
-        assert!(profiles[0]["id"].as_str().unwrap().starts_with("seed-"));
-
-        let text = response.to_string();
-        assert!(!text.contains("pw-secret-tokyo"), "{text}");
-        assert!(!text.contains("password"), "{text}");
-    }
-}

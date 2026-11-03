@@ -9,21 +9,19 @@ import type {
   DefaultProfileStatus,
   ImportSeedResult,
   PendingQuestion,
-  RuntimeAction,
-  RuntimeProfile,
 } from "./agent/bridge";
 import { BridgeError, toBridgeError } from "./agent/errors";
+import { ActivityBar } from "./components/ActivityBar";
+import { AiPanel, type RenameResult } from "./components/AiPanel";
 import { AskQuestionDialog } from "./components/AskQuestionDialog";
-import { ChatView } from "./components/ChatView";
-import { DiagnosisSheet } from "./components/DiagnosisSheet";
-import { EmptyChat } from "./components/EmptyChat";
+import { ConfigRail } from "./components/ConfigRail";
+import { Console } from "./components/Console";
 import { Onboarding } from "./components/Onboarding";
 import { Settings, describeImportError } from "./components/Settings";
-import { Sidebar, type RenameResult } from "./components/Sidebar";
-import { StatusPanel } from "./components/StatusPanel";
+import type { ConnectMode } from "./config/model";
+import { useConfigs } from "./config/useConfigs";
+import { useMockConnection } from "./config/useMockConnection";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
-import { primaryAction, statusSentence, statusTone, toLinkState, toneClass } from "./ui/status";
-import { useFocusTrap } from "./ui/focus";
 import "./styles/app.css";
 
 const AI_EVENTS = new Set<AgentEvent["name"]>([
@@ -46,7 +44,24 @@ type SettingsSection = "ai" | "network" | "advanced" | "about";
 
 const EVER_CONNECTED_KEY = "veyl.hasEverConnected";
 const PANEL_KEY = "veyl.ui.panelOpen";
-const NARROW_WIDTH = 1100;
+const PANEL_CLOSED_BY_USER_KEY = "veyl.ui.panelClosedByUser";
+const PANEL_AUTO_OPENED_KEY = "veyl.ui.panelAutoOpened";
+
+function readFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeFlag(key: string): void {
+  try {
+    localStorage.setItem(key, "1");
+  } catch {
+    // 存不了就只在本次会话里记住。
+  }
+}
 
 function readEverConnected(): boolean {
   try {
@@ -60,21 +75,8 @@ function readEverConnected(): boolean {
 export default function App() {
   const bridge = useMemo(() => getAgentBridge(), []);
   const [state, dispatch] = useReducer(chatReducer, undefined, createInitialState);
-  const [panelPreferred, setPanelPreferred] = useState(() => {
-    try {
-      return localStorage.getItem(PANEL_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
-  const [overlayOpen, setOverlayOpen] = useState(false);
-  const overlayRef = useRef<HTMLDivElement>(null);
-  const [narrow, setNarrow] = useState(
-    () => typeof window !== "undefined" && window.innerWidth < NARROW_WIDTH,
-  );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("ai");
-  const [diagnosisOpen, setDiagnosisOpen] = useState(false);
   const [runtime, setRuntime] = useState<RuntimeView>(() => emptyRuntimeView());
   const [appNotice, setAppNotice] = useState<AppNotice | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -82,24 +84,28 @@ export default function App() {
   const [importResult, setImportResult] = useState<ImportSeedResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [keyState, setKeyState] = useState<DeepSeekKeyState>(EMPTY_KEY_STATE);
-  const [profiles, setProfiles] = useState<RuntimeProfile[]>([]);
-  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
-  const [profilesLoaded, setProfilesLoaded] = useState(false);
-  const [runtimeAction, setRuntimeAction] = useState<RuntimeAction | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingLoaded, setOnboardingLoaded] = useState(false);
-  const [setupDismissed, setSetupDismissed] = useState(false);
   const [hasEverConnected, setHasEverConnected] = useState(readEverConnected);
+  const [panelOpen, setPanelOpen] = useState(() => readFlag(PANEL_KEY));
+  const [aiUnread, setAiUnread] = useState(false);
   const [defaultProfile, setDefaultProfile] = useState<DefaultProfileStatus | null>(null);
-  const [defaultBusy, setDefaultBusy] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
+  const [pendingConfigId, setPendingConfigId] = useState<string | null>(null);
+  const { configs, activeConfig, activeConfigId, createConfig, selectConfig, setCurrentNode } =
+    useConfigs();
+  const connection = useMockConnection();
   const importingRef = useRef(false);
   const runtimeActionRef = useRef(false);
   const connectTestRef = useRef(false);
   const endWaiters = useRef(new Map<string, () => void>());
   // 已经回答/超时/作废的问题 id：防止重连或重试路径把旧问题再插回来。
   const settledQuestionIds = useRef(new Set<string>());
+  const panelOpenRef = useRef(panelOpen);
+  const panelClosedByUserRef = useRef(readFlag(PANEL_CLOSED_BY_USER_KEY));
+  const panelAutoOpenedRef = useRef(readFlag(PANEL_AUTO_OPENED_KEY));
+  const aiConfiguredRef = useRef(false);
 
   const markQuestionSettled = (questionId: string) => {
     const settled = settledQuestionIds.current;
@@ -141,17 +147,6 @@ export default function App() {
     }
   }, [bridge]);
 
-  const refreshProfiles = useCallback(async () => {
-    try {
-      const data = await bridge.profileList();
-      setProfiles(data.profiles);
-      setActiveProfileId(data.activeProfileId);
-      setProfilesLoaded(true);
-    } catch {
-      // 后端命令未就绪时保持空列表，也不据此提示「没有节点」。
-    }
-  }, [bridge]);
-
   const refreshDefaultProfile = useCallback(async () => {
     try {
       setDefaultProfile(await bridge.defaultProfileStatus());
@@ -159,6 +154,36 @@ export default function App() {
       // wave2 命令未接线时不显示默认配置信息，不影响主流程。
     }
   }, [bridge]);
+
+  // 右栏第一次配置 AI 成功后自动展开一次；用户手动关过就不再自动开。
+  const maybeAutoOpenPanel = useCallback(() => {
+    if (panelClosedByUserRef.current || panelAutoOpenedRef.current) return;
+    panelAutoOpenedRef.current = true;
+    writeFlag(PANEL_AUTO_OPENED_KEY);
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
+  }, []);
+
+  const refreshAiStatus = useCallback(async () => {
+    try {
+      const status = await bridge.onboardingStatus();
+      const wasConfigured = aiConfiguredRef.current;
+      aiConfiguredRef.current = status.hasKey;
+      if (!wasConfigured && status.hasKey) maybeAutoOpenPanel();
+    } catch {
+      // 命令未就绪时不据此自动展开。
+    }
+  }, [bridge, maybeAutoOpenPanel]);
+
+  useEffect(() => {
+    panelOpenRef.current = panelOpen;
+    try {
+      localStorage.setItem(PANEL_KEY, panelOpen ? "1" : "0");
+    } catch {
+      // 存不了就只在本次会话里记住。
+    }
+  }, [panelOpen]);
 
   const importPath = useCallback(
     async (path: string) => {
@@ -176,7 +201,6 @@ export default function App() {
         const result = await bridge.importSeedFile(path);
         setImportResult(result);
         setAppNotice({ level: "info", text: `已导入 ${result.imported} 个节点` });
-        void refreshProfiles();
       } catch (error) {
         const message = describeImportError(error);
         setImportError(message);
@@ -186,7 +210,7 @@ export default function App() {
         setImporting(false);
       }
     },
-    [bridge, refreshProfiles],
+    [bridge],
   );
 
   // 窗口级拖放：整个应用只此一处。
@@ -230,6 +254,12 @@ export default function App() {
     return bridge.subscribe((event) => {
       if (event.name === AGENT_EVENTS.runtimeHealthChanged) healthVersion.current += 1;
       setRuntime((view) => applyRuntimeEvent(view, event));
+      if (
+        (AI_EVENTS.has(event.name) || event.name === AGENT_EVENTS.askUserQuestion) &&
+        !panelOpenRef.current
+      ) {
+        setAiUnread(true);
+      }
       if (AI_EVENTS.has(event.name)) {
         dispatch({ type: "agent_event", event });
       }
@@ -287,10 +317,11 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      await Promise.all([refreshKeyState(), refreshProfiles(), refreshDefaultProfile()]);
+      await Promise.all([refreshKeyState(), refreshDefaultProfile()]);
       try {
         const status = await bridge.onboardingStatus();
         if (cancelled) return;
+        aiConfiguredRef.current = status.hasKey;
         setShowOnboarding(!status.completed && (!status.hasKey || status.profileCount === 0));
       } catch {
         if (!cancelled) setShowOnboarding(false);
@@ -301,14 +332,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [bridge, refreshKeyState, refreshProfiles, refreshDefaultProfile]);
-
-  // 窗口宽度决定右栏是停靠还是浮层。
-  useEffect(() => {
-    const onResize = () => setNarrow(window.innerWidth < NARROW_WIDTH);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
+  }, [bridge, refreshKeyState, refreshDefaultProfile]);
 
   // 切换 / 恢复会话时，把该会话未回答的问题拉回来。
   useEffect(() => {
@@ -338,15 +362,16 @@ export default function App() {
   }, [bridge, session?.id]);
 
   // 第一次成功连接后，界面不再出现任何引导。
+  const connectedOnce = runtime.state === "running" || connection.state === "connected";
   useEffect(() => {
-    if (runtime.state !== "running" || hasEverConnected) return;
+    if (!connectedOnce || hasEverConnected) return;
     setHasEverConnected(true);
     try {
       localStorage.setItem(EVER_CONNECTED_KEY, "1");
     } catch {
       // 存不了就只在本次会话里记住。
     }
-  }, [runtime.state, hasEverConnected]);
+  }, [connectedOnce, hasEverConnected]);
 
   const completeOnboarding = async (skippedKey: boolean) => {
     try {
@@ -356,7 +381,7 @@ export default function App() {
     }
     setShowOnboarding(false);
     setOnboardingLoaded(true);
-    await Promise.all([refreshKeyState(), refreshProfiles(), refreshDefaultProfile()]);
+    await Promise.all([refreshKeyState(), refreshDefaultProfile(), refreshAiStatus()]);
   };
 
   const finishOnboarding = (skippedKey: boolean) => {
@@ -380,14 +405,13 @@ export default function App() {
       } catch (error) {
         setAppNotice({ level: "error", text: describeDefaultProfileError(error) });
       }
-      await refreshProfiles();
       try {
         await bridge.onboardingComplete(keyState.masked === null);
       } catch {
         // 命令未就绪也允许继续。
       }
       await runRuntimeAction("start");
-      await Promise.all([refreshKeyState(), refreshDefaultProfile()]);
+      await Promise.all([refreshKeyState(), refreshDefaultProfile(), refreshAiStatus()]);
       setShowOnboarding(false);
       setOnboardingLoaded(true);
     } finally {
@@ -397,7 +421,20 @@ export default function App() {
 
   const closeSettings = () => {
     setSettingsOpen(false);
-    void Promise.all([refreshKeyState(), refreshProfiles()]);
+    void refreshKeyState();
+    void refreshAiStatus();
+  };
+
+  const togglePanel = () => {
+    const next = !panelOpen;
+    setPanelOpen(next);
+    panelOpenRef.current = next;
+    if (next) {
+      setAiUnread(false);
+    } else {
+      panelClosedByUserRef.current = true;
+      writeFlag(PANEL_CLOSED_BY_USER_KEY);
+    }
   };
 
   const waitForRequestEnd = (requestId: string, timeoutMs = 5000): Promise<void> =>
@@ -571,75 +608,21 @@ export default function App() {
     handleSend(`${action.label}${args}`);
   };
 
-  const runRuntimeAction = async (kind: RuntimeAction, profileId?: string) => {
+  const runRuntimeAction = async (kind: "start" | "stop") => {
     if (runtimeActionRef.current) return;
     runtimeActionRef.current = true;
-    setRuntimeAction(kind);
     try {
       if (kind === "start") {
-        await bridge.runtimeStart(profileId ?? runtime.profile_id ?? undefined);
+        await bridge.runtimeStart(runtime.profile_id ?? undefined);
       } else {
         await bridge.runtimeStop();
       }
       refreshSnapshot();
-      void refreshProfiles();
     } catch (error) {
       setAppNotice({ level: "error", text: describeRuntimeError(error) });
     } finally {
       runtimeActionRef.current = false;
-      setRuntimeAction(null);
     }
-  };
-
-  const handleConnect = () => {
-    void runRuntimeAction("start");
-  };
-
-  const handleDisconnect = () => {
-    void runRuntimeAction("stop");
-  };
-
-  const handleSwitchProfile = (profileId: string) => {
-    void runRuntimeAction("start", profileId);
-  };
-
-  const handleRefreshDefault = async () => {
-    if (defaultBusy) return;
-    setDefaultBusy(true);
-    try {
-      const next = await bridge.defaultProfileRefresh();
-      setDefaultProfile(next);
-      setAppNotice({
-        level: "info",
-        text: next.newVersionAvailable
-          ? "已获取新的默认配置，下次连接生效。"
-          : `默认配置已是最新（${next.nodeCount} 个节点）。`,
-      });
-      void refreshProfiles();
-    } catch (error) {
-      setAppNotice({ level: "error", text: describeDefaultProfileError(error) });
-    } finally {
-      setDefaultBusy(false);
-    }
-  };
-
-  // 控制台/右栏的「使用测试节点」：刷新默认包后立即连接。
-  // 离线时刷新会失败，但本地可能已有缓存包；不能因为刷新失败就放弃连接。
-  const handleUseDefault = () => {
-    if (defaultBusy) return;
-    void (async () => {
-      setDefaultBusy(true);
-      try {
-        const next = await bridge.defaultProfileRefresh();
-        setDefaultProfile(next);
-      } catch (error) {
-        setAppNotice({ level: "error", text: describeDefaultProfileError(error) });
-      } finally {
-        setDefaultBusy(false);
-      }
-      await refreshProfiles();
-      await runRuntimeAction("start");
-    })();
   };
 
   // 恢复网络不依赖 AI：撤代理 → 停运行时 → 清明文配置。
@@ -653,7 +636,6 @@ export default function App() {
         text: result.detail || (result.ok ? "网络已恢复直连。" : "恢复网络失败，请重试。"),
       });
       refreshSnapshot();
-      void refreshProfiles();
     } catch (error) {
       setAppNotice({ level: "error", text: describeCommandError(error, "恢复网络") });
     } finally {
@@ -667,59 +649,6 @@ export default function App() {
     });
   };
 
-  const handleAskAiDiagnosis = () => {
-    handleEmptySend("诊断网络");
-  };
-
-  // 删除配置：后端拒绝删除当前激活/内置项，这里只做引导。
-  const handleDeleteProfile = (profileId: string) => {
-    const connectedToProfile =
-      runtime.profile_id !== null && profileId === runtime.profile_id;
-    const idleActive = runtime.state === "idle" && profileId === activeProfileId;
-    if (connectedToProfile || idleActive) {
-      setAppNotice({ level: "info", text: "这个配置仍在使用，先断开连接再删除。" });
-      return;
-    }
-    void bridge.deleteProfile(profileId).then(
-      () => {
-        setAppNotice({ level: "info", text: "配置已删除。" });
-        refreshSnapshot();
-        void refreshProfiles();
-      },
-      (error: unknown) => {
-        const bridgeError = toBridgeError(error);
-        if (
-          bridgeError.code === "PRECONDITION_FAILED" &&
-          /ACTIVE_PROFILE_IN_USE/i.test(bridgeError.message)
-        ) {
-          setAppNotice({ level: "info", text: "这个配置仍在使用，先断开连接再删除。" });
-          return;
-        }
-        setAppNotice({ level: "error", text: errorMessage(error) });
-      },
-    );
-  };
-
-  const link = toLinkState(runtime.state);
-  const degraded = runtime.state === "degraded";
-  const connected = runtime.state === "running" || runtime.state === "degraded";
-  const stopping = runtime.state === "stopping";
-  const tone = statusTone(link, degraded);
-  const currentProfileId =
-    runtime.profile_id ?? (connected ? null : activeProfileId);
-  const topbarNode =
-    runtime.profile_name ??
-    profiles.find((profile) => profile.id === currentProfileId)?.name ??
-    null;
-
-  const showSetupHint =
-    onboardingLoaded &&
-    !showOnboarding &&
-    !hasEverConnected &&
-    !setupDismissed &&
-    (!hasKey || (profilesLoaded && profiles.length === 0));
-
-  const hasMessages = Boolean(session && session.messages.length > 0);
   const currentQuestion = session
     ? pendingQuestions.find((item) => item.sessionId === session.id) ?? null
     : null;
@@ -758,82 +687,39 @@ export default function App() {
     }
   };
 
-  const dockOpen = !narrow && panelPreferred;
-  const overlayOpenNow = narrow && overlayOpen;
-  const panelShown = dockOpen || overlayOpenNow;
-  useFocusTrap(overlayOpenNow, overlayRef);
-
-  // 跨 1100px 断点时复位浮层，避免宽度变化后面板突然重弹。
-  useEffect(() => {
-    setOverlayOpen(false);
-  }, [narrow]);
-
-  const quickAction = primaryAction({
-    state: runtime.state,
-    hasProfiles: profiles.length > 0,
-    pending: runtimeAction,
-    defaultBusy,
-  });
-  const runQuickAction = () => {
-    if (quickAction.kind === "default") handleUseDefault();
-    else if (quickAction.kind === "stop") handleDisconnect();
-    else handleConnect();
+  const handleCreateConfig = (name: string, mode: ConnectMode) => {
+    createConfig(name, mode);
   };
-  const quickLabel = quickAction.kind === "default" ? "连接" : quickAction.label;
 
-  useEffect(() => {
-    if (!overlayOpenNow) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOverlayOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [overlayOpenNow]);
-
-  const persistPanel = (open: boolean) => {
-    setPanelPreferred(open);
-    try {
-      localStorage.setItem(PANEL_KEY, open ? "1" : "0");
-    } catch {
-      // 存不了就只在本次会话里记住。
+  // 已连接时换配置：先说清会断一次，确认后再切并重新连上。
+  const handleSelectConfig = (configId: string) => {
+    if (configId === activeConfigId) return;
+    if (connection.state === "connected" || connection.state === "starting") {
+      setPendingConfigId(configId);
+      return;
     }
+    selectConfig(configId);
   };
 
-  const openPanel = () => {
-    if (narrow) setOverlayOpen(true);
-    else persistPanel(true);
+  const confirmConfigSwitch = () => {
+    if (!pendingConfigId) return;
+    selectConfig(pendingConfigId);
+    connection.start(pendingConfigId);
+    setPendingConfigId(null);
   };
 
-  const closePanel = () => {
-    if (narrow) setOverlayOpen(false);
-    else persistPanel(false);
+  const handleStart = () => {
+    if (!activeConfig) return;
+    connection.start(activeConfig.config_id);
   };
 
-  const togglePanel = () => {
-    if (narrow) setOverlayOpen((open) => !open);
-    else persistPanel(!panelPreferred);
+  const handleSwitchNode = (nodeId: string) => {
+    if (!activeConfig) return;
+    setCurrentNode(activeConfig.config_id, nodeId);
   };
 
-  const statusPanel = (compact: boolean) => (
-    <StatusPanel
-      status={runtime}
-      profiles={profiles}
-      activeProfileId={activeProfileId}
-      pending={runtimeAction}
-      showPrimary
-      lightPrimary={!hasMessages}
-      compact={compact}
-      onCollapse={closePanel}
-      onConnect={handleConnect}
-      onDisconnect={handleDisconnect}
-      onUseDefault={handleUseDefault}
-      onSwitchProfile={handleSwitchProfile}
-      onImport={() => openSettings("network")}
-      onOpenLogs={handleOpenLogs}
-      onOpenDiagnosis={() => setDiagnosisOpen(true)}
-      onDeleteProfile={handleDeleteProfile}
-    />
-  );
+  const pendingConfig =
+    configs.find((config) => config.config_id === pendingConfigId) ?? null;
 
   if (!onboardingLoaded) {
     return <div className="app-boot" aria-hidden />;
@@ -852,136 +738,88 @@ export default function App() {
   }
 
   return (
-    <div className={`app ${dockOpen ? "app--panel-open" : ""}`}>
-      <Sidebar
-        sessions={state.sessions}
-        activeSessionId={state.activeSessionId}
-        onSelect={handleSelectSession}
-        onNew={() => dispatch({ type: "new_session" })}
-        onOpenSettings={() => openSettings("ai")}
-        onRenameSession={handleRenameSession}
-        onDeleteSession={handleDeleteSession}
+    <div className={`app ${panelOpen ? "app--panel-open" : ""}`}>
+      <ActivityBar />
+      <ConfigRail
+        configs={configs}
+        activeConfigId={activeConfigId}
+        connectedConfigId={connection.connectedConfigId}
+        onSelect={handleSelectConfig}
+        onCreate={handleCreateConfig}
       />
+      <Console
+        config={activeConfig}
+        connection={connection.state}
+        onStart={handleStart}
+        onStop={connection.stop}
+        onSwitchNode={handleSwitchNode}
+        panelOpen={panelOpen}
+        aiUnread={aiUnread}
+        onTogglePanel={togglePanel}
+      />
+      {panelOpen ? (
+        <AiPanel
+          session={session ?? null}
+          sessions={state.sessions}
+          activeSessionId={state.activeSessionId}
+          hasKey={hasKey}
+          hasEverConnected={hasEverConnected}
+          onSelectSession={handleSelectSession}
+          onNewSession={() => dispatch({ type: "new_session" })}
+          onRenameSession={handleRenameSession}
+          onDeleteSession={handleDeleteSession}
+          onSend={handleSend}
+          onEmptySend={handleEmptySend}
+          onStop={handleStop}
+          onNextAction={handleNextAction}
+          onOpenSettings={() => openSettings("ai")}
+          onConfigureKey={() => openSettings("ai")}
+        />
+      ) : null}
 
-      <main className="main">
-        <header className="topbar">
-          <span className="topbar__title">{session?.title ?? "Veyl"}</span>
-          <div className="topbar__right">
-            <button
-              type="button"
-              className={`topbar__status ${toneClass(tone)}`}
-              onClick={openPanel}
-              title="连接状态"
-            >
-              <span className="topbar__status-dot" aria-hidden />
-              <span className="topbar__status-text">
-                {statusSentence(link, topbarNode, degraded, stopping)}
-              </span>
-            </button>
-            {!panelShown && (hasMessages || hasEverConnected) ? (
-              <button
-                type="button"
-                className="btn btn--ghost topbar__connect"
-                onClick={runQuickAction}
-                disabled={quickAction.disabled}
-              >
-                {quickLabel}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              className="topbar__panel-toggle"
-              onClick={togglePanel}
-              aria-label="状态面板"
-              aria-expanded={narrow ? overlayOpen : dockOpen}
-              title="状态面板"
-            >
-              ⧉
-            </button>
-          </div>
-        </header>
+      {appNotice ? (
+        <div className={`app-toast app-toast--${appNotice.level}`} role="status">
+          <span className="app-toast__text">{appNotice.text}</span>
+          <button
+            type="button"
+            className="app-toast__close"
+            aria-label="关闭提示"
+            onClick={() => setAppNotice(null)}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
 
-        {appNotice ? (
-          <div className={`notice-bar notice-bar--${appNotice.level}`} role="status">
-            <span className="notice-bar__text">{appNotice.text}</span>
-            <button
-              type="button"
-              className="notice-bar__close"
-              aria-label="关闭提示"
-              onClick={() => setAppNotice(null)}
-            >
-              ×
-            </button>
-          </div>
-        ) : null}
-
-        {showSetupHint ? (
-          <div className="setup-bar" role="status">
-            <span className="setup-bar__text">
-              {!hasKey
-                ? "还没有配置 DeepSeek Key；不配置也能连接。"
-                : "还没有节点：导入配置文件或使用测试节点。"}
-            </span>
-            <button
-              type="button"
-              className="setup-bar__action"
-              onClick={() => openSettings(hasKey ? "network" : "ai")}
-            >
-              {!hasKey ? "去配置" : "导入"}
-            </button>
-            <button
-              type="button"
-              className="setup-bar__close"
-              aria-label="关闭提示"
-              onClick={() => setSetupDismissed(true)}
-            >
-              ×
-            </button>
-          </div>
-        ) : null}
-
-        {hasMessages && session ? (
-          <ChatView
-            session={session}
-            onSend={handleSend}
-            onStop={handleStop}
-            onNextAction={handleNextAction}
-            hasKey={hasKey}
-            onConfigureKey={() => openSettings("ai")}
-          />
-        ) : (
-          <EmptyChat
-            runtime={runtime}
-            profiles={profiles}
-            hasKey={hasKey}
-            pending={runtimeAction}
-            hasEverConnected={hasEverConnected}
-            defaultBusy={defaultBusy}
-            onConnect={handleConnect}
-            onDisconnect={handleDisconnect}
-            onUseDefault={handleUseDefault}
-            onConfigureKey={() => openSettings("ai")}
-            onSend={handleEmptySend}
-          />
-        )}
-      </main>
-
-      {dockOpen ? statusPanel(false) : null}
-
-      {overlayOpenNow ? (
-        <div
-          className="panel-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-label="连接状态"
-          onMouseDown={() => setOverlayOpen(false)}
-        >
+      {pendingConfig ? (
+        <div className="modal-backdrop" onMouseDown={() => setPendingConfigId(null)}>
           <div
-            className="panel-overlay__inner"
-            ref={overlayRef}
+            className="modal modal--confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="switch-config-title"
             onMouseDown={(event) => event.stopPropagation()}
           >
-            {statusPanel(true)}
+            <header className="modal__head">
+              <h2 id="switch-config-title" className="modal__title">
+                切换配置
+              </h2>
+            </header>
+            <p className="confirm__text">
+              切到「{pendingConfig.name}」会先断开当前连接，再按新配置重新连上。
+            </p>
+            <div className="confirm__actions">
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => setPendingConfigId(null)}
+              >
+                取消
+              </button>
+              <button type="button" className="btn btn--primary" onClick={confirmConfigSwitch}>
+                切换
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
@@ -990,23 +828,6 @@ export default function App() {
         question={currentQuestion}
         onAnswer={handleAnswerQuestion}
         onExpire={handleQuestionExpired}
-      />
-
-      <DiagnosisSheet
-        open={diagnosisOpen}
-        runtime={runtime}
-        profiles={profiles}
-        activeProfileId={activeProfileId}
-        hasKey={hasKey}
-        pending={runtimeAction}
-        defaultBusy={defaultBusy}
-        repairing={repairing}
-        onClose={() => setDiagnosisOpen(false)}
-        onConnect={handleConnect}
-        onSwitchProfile={handleSwitchProfile}
-        onRefreshDefault={() => void handleRefreshDefault()}
-        onRestoreNetwork={() => void handleRestoreNetwork()}
-        onAskAi={handleAskAiDiagnosis}
       />
 
       <Settings
@@ -1027,10 +848,6 @@ export default function App() {
         }}
         initialSection={settingsSection}
         onOpenLogs={handleOpenLogs}
-        onOpenDiagnosis={() => {
-          setSettingsOpen(false);
-          setDiagnosisOpen(true);
-        }}
         onRestoreNetwork={() => {
           setSettingsOpen(false);
           void handleRestoreNetwork();
@@ -1042,14 +859,6 @@ export default function App() {
       />
     </div>
   );
-}
-
-function errorMessage(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object" && "message" in error) {
-    return String((error as { message: unknown }).message);
-  }
-  return "操作失败";
 }
 
 /** 连接/断开的失败说法：区分「代理没恢复」和「没有节点」这两种要用户动手的情况。 */
