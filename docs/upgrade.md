@@ -99,6 +99,12 @@ https://github.com/<owner>/<repo>/releases/latest/download/latest.json
 
 理由：提示词是产品资产，用户没有判断两版提示词优劣的信息，给他一个回退按钮只会制造焦虑。
 
+### 3.5 例外：默认节点的种子配置
+
+`bootstrap.json` **不走随包基线**，只从 `meshnetprotocol.github.io` 拉取并缓存。原因见 `docs/config-execution.md` §9——打包进安装包的节点凭据会被提取滥用。
+
+版本机制与本节其余资源相同，只是数据源不同。
+
 ---
 
 ## 4. 生效时机
