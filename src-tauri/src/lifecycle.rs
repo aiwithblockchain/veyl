@@ -124,18 +124,34 @@ fn state_to_tray(state: RuntimeState) -> TrayState {
     }
 }
 
+/// macOS 用 32×32 template（黑 + alpha），剪影分别是盾 / 勾 / 三角。
+#[cfg(target_os = "macos")]
 fn tray_icon(state: TrayState) -> Image<'static> {
     let bytes: &'static [u8] = match state {
-        TrayState::Idle => include_bytes!("../icons/tray-idle.png").as_slice(),
-        TrayState::Connected => include_bytes!("../icons/tray-connected.png").as_slice(),
-        TrayState::Error => include_bytes!("../icons/tray-error.png").as_slice(),
+        TrayState::Idle => include_bytes!("../icons/tray-idle-mac.png").as_slice(),
+        TrayState::Connected => include_bytes!("../icons/tray-connected-mac.png").as_slice(),
+        TrayState::Error => include_bytes!("../icons/tray-error-mac.png").as_slice(),
+    };
+    Image::from_bytes(bytes).expect("内置托盘图标必须是合法 PNG")
+}
+
+/// Windows（及 Linux 兜底）用彩色图；32px 供高 DPI 缩放，16/20/24 也在仓库里。
+#[cfg(not(target_os = "macos"))]
+fn tray_icon(state: TrayState) -> Image<'static> {
+    let bytes: &'static [u8] = match state {
+        TrayState::Idle => include_bytes!("../icons/tray-idle-win-32.png").as_slice(),
+        TrayState::Connected => include_bytes!("../icons/tray-connected-win-32.png").as_slice(),
+        TrayState::Error => include_bytes!("../icons/tray-error-win-32.png").as_slice(),
     };
     Image::from_bytes(bytes).expect("内置托盘图标必须是合法 PNG")
 }
 
 fn set_tray_icon<R: Runtime>(app: &AppHandle<R>, state: TrayState) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        if let Err(error) = tray.set_icon(Some(tray_icon(state))) {
+        // 原子设置图标与 template：单独 set_icon 会丢掉 template，macOS 下会显示成黑块或闪烁。
+        if let Err(error) =
+            tray.set_icon_with_as_template(Some(tray_icon(state)), cfg!(target_os = "macos"))
+        {
             log::warn!("更新托盘图标失败：{error}");
         }
     }
