@@ -213,16 +213,12 @@ pub fn run() {
 
     app.run(move |handle, event| {
         if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-            // 我们自己调 app.exit(0) 时 code 是 Some，直接放行。
-            if code.is_some() {
+            // 实测 Cmd+Q 也可能带 Some(0)，不能用 code 区分来源。
+            // 只认自己的 QUITTING：app.exit(0) 前已置位，二次触发时放行。
+            if !lifecycle::should_intercept_exit(lifecycle::is_quitting(), code) {
                 return;
             }
-            // 用户发起的退出一律先拦下：退出流程正在跑就不重复弹窗，
-            // 否则交给阻塞对话框决定。
             api.prevent_exit();
-            if lifecycle::is_quitting() {
-                return;
-            }
             lifecycle::on_exit_requested(handle, exit_parts.clone());
         }
     });

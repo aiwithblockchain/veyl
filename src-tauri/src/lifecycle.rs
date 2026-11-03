@@ -43,6 +43,14 @@ pub fn is_quitting() -> bool {
     QUITTING.load(Ordering::SeqCst)
 }
 
+/// `true` = 拦下并进入确认流程；`false` = 放行。
+///
+/// **不要用 `code` 判断来源**：实测 macOS Cmd+Q 也可能带 `Some(0)`。
+/// 只认我们自己的 `QUITTING`：`app.exit(0)` 之前已置位，二次触发正好放行。
+pub fn should_intercept_exit(quitting: bool, _code: Option<i32>) -> bool {
+    !quitting
+}
+
 pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     #[cfg(target_os = "macos")]
     {
@@ -171,17 +179,27 @@ pub fn request_quit<R: Runtime>(app: &AppHandle<R>, parts: Parts, confirm: bool)
         return;
     }
     let app = app.clone();
-    if confirm {
-        let dialog_app = app.clone();
-        ask_exit(&dialog_app, move |choice| match choice {
-            ExitChoice::Background => {
-                EXIT_PROMPT_OPEN.store(false, Ordering::SeqCst);
-                hide_main_window(&app);
-            }
-            ExitChoice::Quit => start_shutdown(app, parts, None),
-        });
-    } else {
-        start_shutdown(app, parts, None);
+    let recovery_app = app.clone();
+    let scheduled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        if confirm {
+            let dialog_app = app.clone();
+            ask_exit(&dialog_app, move |choice| match choice {
+                ExitChoice::Background => {
+                    EXIT_PROMPT_OPEN.store(false, Ordering::SeqCst);
+                    hide_main_window(&app);
+                }
+                ExitChoice::Quit => start_shutdown(app, parts, None),
+            });
+        } else {
+            start_shutdown(app, parts, None);
+        }
+    }));
+    if scheduled.is_err() {
+        // 弹窗都失败时不能把进程留在「QUITTING 但没退出」的状态。
+        log::error!("退出确认流程 panic，保持后台运行");
+        QUITTING.store(false, Ordering::SeqCst);
+        EXIT_PROMPT_OPEN.store(false, Ordering::SeqCst);
+        hide_main_window(&recovery_app);
     }
 }
 
@@ -228,7 +246,18 @@ fn start_shutdown<R: Runtime>(
 ) {
     QUITTING.store(true, Ordering::SeqCst);
     // 停运行时与 networksetup 都是同步调用，放到阻塞线程里跑，不占用事件循环。
-    tauri::async_runtime::spawn_blocking(move || run_shutdown(app, parts, applied));
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_shutdown(app.clone(), parts, applied);
+        }));
+        if result.is_err() {
+            // 绝不带着已经撤了一半的代理直接退出；留后台，让用户可以重试或恢复网络。
+            log::error!("退出流程 panic，已中止退出并恢复后台运行");
+            QUITTING.store(false, Ordering::SeqCst);
+            EXIT_PROMPT_OPEN.store(false, Ordering::SeqCst);
+            hide_main_window(&app);
+        }
+    });
 }
 
 fn run_shutdown<R: Runtime>(
@@ -353,6 +382,16 @@ fn force_cleanup(parts: &Parts) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_interception_never_trusts_the_code() {
+        // 实测 Cmd+Q 可能带 Some(0)：仍然要拦。
+        assert!(should_intercept_exit(false, Some(0)));
+        assert!(should_intercept_exit(false, None));
+        // 我们自己 app.exit(0) 前已置位 QUITTING：放行。
+        assert!(!should_intercept_exit(true, Some(0)));
+        assert!(!should_intercept_exit(true, None));
+    }
 
     #[test]
     fn tray_states_follow_the_runtime_state() {
