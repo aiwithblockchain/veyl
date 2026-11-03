@@ -235,8 +235,43 @@ https://meshnetprotocol.github.io/bootstrap.json
 ### 怎么拉
 
 - 先带 `If-None-Match` 发条件请求，返回 304 就直接结束，不重复下载
-- ETag 或 `version` 变了才拉全文
+- 变更检测用 **`package_hash`**——这份文件里**没有 `version` 字段**，不要去找它
 - **同一时刻只允许一个请求在飞**，避免并发写坏缓存
+
+### 这份文件里有什么
+
+实测（2026-11-03）顶层字段：
+
+```
+provider_id  name  description  tags  author
+visibility   status
+updated_at   source_updated_at   package_hash
+config       routing_rules
+```
+
+所以它不是一个「节点清单」，而是**一个完整配置包**：
+
+| 字段 | 用途 |
+|---|---|
+| `provider_id` / `name` / `description` / `tags` / `author` / `visibility` / `status` | 服务商元数据。将来接服务商市场时直接复用 |
+| `package_hash` | 变更检测的唯一依据 |
+| `updated_at` / `source_updated_at` | 我们发布时间 / 上游改动时间 |
+| `config` | 节点与连接参数 |
+| `routing_rules` | 默认分流规则 |
+
+**这意味着「种子」不只提供节点，还提供默认分流。** 所以 `routing_rules` 的更新也要走同一套覆盖逻辑，不能只换节点不换规则。
+
+### 可达性实测（2026-11-03）
+
+国内网络、VPN 关闭、系统代理全关、`--noproxy '*'`：
+
+```
+HTTP 200 · DNS 4ms · 建连 63ms · TLS 272ms · 总计 330ms · 4686 字节
+```
+
+阿里 DNS（223.5.5.5）直接解析出 `185.199.108-111.153`（GitHub Pages 官方地址段），19ms 返回 `NOERROR`。
+
+**结论：无需代理即可直连。** 这是「不随包」这个决定能成立的前提，所以要定期复测；一旦哪天不通了，这个决定就必须重新评估。
 
 ### 自动覆盖的边界
 
