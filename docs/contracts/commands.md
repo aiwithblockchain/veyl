@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.2.0`
+> 契约版本：`2.3.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -151,7 +151,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 22 | `default_profile_status` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
 | 23 | `default_profile_refresh` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
 | 24 | `import_seed_file` | `{ path }` | `SeedImportResult` | 保留（语义 2.0 改） |
-| 25 | `ai_send_message` | `{ sessionId, text, attachments? }` | `{ request_id }` | 保留 |
+| 25 | `ai_send_message` | `{ sessionId, text, hidden? }` | `{ request_id }` | 保留（2.3 增 `hidden`，删 `attachments`） |
 | 26 | `ai_cancel` | `{ requestId }` | `{ cancelled: boolean }` | 保留 |
 | 27 | `chat_history` | `{ sessionId? }` | `ChatHistory` | 保留 |
 | 28 | `chat_delete` | `{ sessionId }` | `{ ok: true }` | 保留 |
@@ -870,9 +870,25 @@ type SeedImportResult = {
 
 以下命令在 2.0 **不变**，只在这里保留完整语义，避免实现方回到历史版本里翻。
 
-### 9.1 `ai_send_message { sessionId, text, attachments? }` → `{ request_id }`
+### 9.1 `ai_send_message { sessionId, text, hidden? }` → `{ request_id }`
 
-发送一条用户消息，返回本轮请求 id。事件见 `events.md` §3。`attachments` 本阶段不使用，传了按 `INVALID_ARGUMENT` 拒绝。
+发送一条用户消息，返回本轮请求 id。事件见 `events.md` §3。
+
+| 参数 | 规则 |
+|---|---|
+| `sessionId` | 必须存在；不存在 → `NOT_FOUND`。本命令**不创建会话** |
+| `text` | trim 后非空；为空 → `INVALID_ARGUMENT`，`details.reason = "empty_text"` |
+| `hidden` | 可选，默认 `false` |
+
+`hidden` 的语义：
+
+- `false` / 缺省：与旧行为**逐字一致**，用户消息写入 `chat_messages`。
+- `true`：**系统代发**的触发消息（引导页配好 Key 后自动发起第一轮对话），**不写 `chat_messages`**，文本仍照常送给模型。
+- 只影响「用户消息是否落库」：助手回复、`message-chunk` / `tool-call-*` / `ai-request-end` 等事件、assistant 消息的落库、`request_id` 的生命周期都不变。
+- 不影响来源标记：`source` 仍是 `ui`，UI 不能借 `hidden` 改变权限或绕过命令入口。
+- 允许其它场景使用，但调用方应能解释为什么这条用户消息不该出现在历史里。
+
+> **`attachments` 已删除（2.3.0）。** 它自 1.0 起只在本命令里声明过：Rust 形参从未接收、前端从未传、`docs/` 里没有任何需求、UI 或存储设计。属于「声明了但从未实现、也没有计划」的字段，留着会让契约与实现永久对不上。将来要做附件，按新能力重新设计，不复用这个占位。
 
 ### 9.2 `ai_cancel { requestId }` → `{ cancelled: boolean }`
 
@@ -1275,7 +1291,7 @@ type RulesStatus = {
 
 ---
 
-## 15. 破坏性变更清单（1.2.0 → 2.1.0）
+## 15. 破坏性变更清单（1.2.0 → 2.3.0）
 
 ### 15.1 删除
 
@@ -1321,7 +1337,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.2.0** | 批 0 + 批 3 + 批 3 修订 |
+| `contracts/commands.md` | **2.3.0** | 批 0 + 批 3 + `ai_send_message.hidden` |
 | `contracts/events.md` | **2.1.0** | 批 0 + 批 3 |
 | `contracts/runtime.md` | **2.1.0** | 批 0 + `applied_route_revision` |
 | `contracts/tools.md` | **3.2.0** | 批 0 + 批 3 工具 + 批 3 修订 |
@@ -1338,6 +1354,14 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.3.0（2026-11-04，`ai_send_message` 补 `hidden`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.3.0` | 元数据 | 引导页自动开场需要系统代发消息 |
+| 2 | `ai_send_message` 增加可选 `hidden`：为 true 时用户消息不写 `chat_messages`，文本仍送模型 | 字段新增 | 前端/后端已实现并测试 |
+| 3 | 删除 `attachments`：自 1.0 声明以来从未实现、无需求/UI/存储设计 | 字段删除 | 契约检查器长期对不上；判定为死字段 |
 
 ### 2.2.0（2026-11-04，批 3 修订）
 

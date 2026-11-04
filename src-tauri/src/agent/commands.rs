@@ -7,30 +7,40 @@ use tauri::State;
 
 use super::AppState;
 
+/// 用户输入落库。
+///
+/// `hidden` 为真时是**系统代发**的开场触发（引导页配好 Key 之后自动发起），
+/// 不能出现在聊天记录里。文本仍照常送给模型，只是不写 `chat_messages`。
+fn record_user_message(store: &crate::store::Store, session_id: &str, text: &str, hidden: bool) {
+    if hidden {
+        return;
+    }
+    let conn = store.conn();
+    let _ = crate::store::chat::append_message(
+        &conn,
+        &crate::store::chat::new_message_id(),
+        session_id,
+        "user",
+        text,
+        None,
+    );
+}
+
 /// 发起一轮对话。立即返回 request_id，事件在后台推。
 #[tauri::command]
 pub async fn ai_send_message(
     state: State<'_, Arc<AppState>>,
     session_id: String,
     text: String,
+    hidden: Option<bool>,
 ) -> Result<Value, String> {
     let session = state
         .session(&session_id)
         .await
         .map_err(|error| error.to_string())?;
 
-    // 用户输入在入口落库：claurst 只对 assistant/results 发 MessageCommitted，
-    // 不依赖事件补写，避免重复。
     if let Some(store) = crate::store::global() {
-        let conn = store.conn();
-        let _ = crate::store::chat::append_message(
-            &conn,
-            &crate::store::chat::new_message_id(),
-            &session_id,
-            "user",
-            &text,
-            None,
-        );
+        record_user_message(store, &session_id, &text, hidden.unwrap_or(false));
     }
 
     let request_id = AppState::next_request_id();
@@ -996,3 +1006,35 @@ mod title_tests {
     }
 }
 
+#[cfg(test)]
+mod hidden_message_tests {
+    use super::record_user_message;
+    use crate::store::Store;
+
+    /// 系统代发的开场触发不能出现在聊天记录里。
+    #[test]
+    fn hidden_messages_are_not_persisted() {
+        let store = Store::open_in_memory().unwrap();
+        record_user_message(&store, "ses_hidden", "系统代发的开场", true);
+
+        let conn = store.conn();
+        assert!(
+            crate::store::chat::messages(&conn, "ses_hidden")
+                .unwrap()
+                .is_empty(),
+            "hidden=true 时不该落库"
+        );
+    }
+
+    /// 缺省（不传 hidden）必须和以前逐字一致：照常落库。
+    #[test]
+    fn visible_messages_are_persisted() {
+        let store = Store::open_in_memory().unwrap();
+        record_user_message(&store, "ses_visible", "你好", false);
+
+        let conn = store.conn();
+        let messages = crate::store::chat::messages(&conn, "ses_visible").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "你好");
+    }
+}

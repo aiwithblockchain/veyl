@@ -28,6 +28,7 @@ interface Props {
   activeSessionId: string;
   aiReady: boolean;
   hasEverConnected: boolean;
+  hasConfigs: boolean;
   onSelectSession: (sessionId: string) => void;
   onNewSession: () => void;
   onRenameSession: (sessionId: string, title: string) => Promise<RenameResult>;
@@ -58,6 +59,7 @@ export function AiPanel({
   activeSessionId,
   aiReady,
   hasEverConnected,
+  hasConfigs,
   onSelectSession,
   onNewSession,
   onRenameSession,
@@ -141,6 +143,7 @@ export function AiPanel({
   };
 
   const hasMessages = Boolean(session && session.messages.length > 0);
+  const needsFirstConfig = aiReady && !hasEverConnected && !hasConfigs;
   const title = view === "history" ? "历史会话" : session?.title || "新对话";
 
   return (
@@ -305,9 +308,13 @@ export function AiPanel({
           <>
             <div className="ai-empty">
               <p className="ai-empty__line">
-                {hasEverConnected ? "问点什么，或者让我诊断网络" : "先连上，再聊。"}
+                {needsFirstConfig
+                  ? "还没有配置。直接跟我说你想怎么用，我来帮你建一套。"
+                  : hasEverConnected
+                    ? "问点什么，或者让我诊断网络"
+                    : "先连上，再聊。"}
               </p>
-              {!hasEverConnected ? (
+              {!hasEverConnected && !needsFirstConfig ? (
                 <p className="ai-empty__text">连接在中间；需要我帮你配好，就在下面说。</p>
               ) : null}
               {!hasEverConnected && aiReady ? (

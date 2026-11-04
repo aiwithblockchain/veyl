@@ -206,7 +206,11 @@ export interface AgentBridge {
   readonly mode: BridgeMode;
   /** 订阅全部事件（AI 会话 + 应用事件）；返回取消订阅函数。 */
   subscribe(listener: (event: AgentEvent) => void): () => void;
-  sendMessage(sessionId: string, text: string): Promise<{ requestId: string }>;
+  sendMessage(
+    sessionId: string,
+    text: string,
+    options?: { hidden?: boolean },
+  ): Promise<{ requestId: string }>;
   cancel(requestId: string): Promise<void>;
   /** 事件不可达时的兜底快照（契约 §5 `runtime_status`）。 */
   getRuntimeSnapshot(): Promise<RuntimeSnapshot | null>;

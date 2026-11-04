@@ -215,8 +215,16 @@ export class TauriAgentBridge implements AgentBridge {
     await call("open_external", { url });
   }
 
-  async sendMessage(sessionId: string, text: string): Promise<{ requestId: string }> {
-    const response = await call<{ request_id: string }>("ai_send_message", { sessionId, text });
+  async sendMessage(
+    sessionId: string,
+    text: string,
+    options?: { hidden?: boolean },
+  ): Promise<{ requestId: string }> {
+    const response = await call<{ request_id: string }>("ai_send_message", {
+      sessionId,
+      text,
+      ...(options?.hidden ? { hidden: true } : {}),
+    });
     return { requestId: response.request_id };
   }
 

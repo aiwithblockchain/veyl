@@ -19,7 +19,7 @@ import { IconClose } from "./components/icons";
 import { Onboarding } from "./components/Onboarding";
 import { Settings, describeImportError } from "./components/Settings";
 import type { ConnectMode } from "./config/model";
-import { isAiReady, shouldShowOnboarding } from "./config/onboarding";
+import { FIRST_RUN_KICKOFF, isAiReady, shouldKickOffFirstRun, shouldShowOnboarding } from "./config/onboarding";
 import { useVpnSession } from "./config/useVpnSession";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import { useFocusTrap } from "./ui/focus";
@@ -104,6 +104,8 @@ export default function App() {
   const panelAutoOpenedRef = useRef(readFlag(PANEL_AUTO_OPENED_KEY));
   const aiConfiguredRef = useRef(false);
   const onboardingSkippedRef = useRef(readFlag(ONBOARDING_SKIPPED_KEY));
+  const kickoffStartedRef = useRef(false);
+  const kickoffSessionCreatedRef = useRef(false);
   const confirmConfigRef = useRef<HTMLDivElement>(null);
   useFocusTrap(Boolean(pendingConfigId), confirmConfigRef);
 
@@ -378,6 +380,51 @@ export default function App() {
     if (vpn.connection !== "idle") setVpnActionFailed(false);
   }, [vpn.connection]);
 
+  // 首启自动发起第一轮；hidden 消息不显示成用户气泡，会话里只出现 AI 的回复。
+  useEffect(() => {
+    if (!onboardingLoaded || showOnboarding || !aiReady || hasEverConnected) return;
+    if (vpn.loading || vpn.configs.length > 0) return;
+
+    if (!session) {
+      if (kickoffSessionCreatedRef.current) return;
+      kickoffSessionCreatedRef.current = true;
+      dispatch({ type: "add_session", session: createSession() });
+      return;
+    }
+
+    if (kickoffStartedRef.current) return;
+    if (
+      !shouldKickOffFirstRun({
+        aiReady,
+        hasEverConnected,
+        configCount: vpn.configs.length,
+        messageCount: session.messages.length,
+      })
+    ) {
+      return;
+    }
+
+    kickoffStartedRef.current = true;
+    void bridge
+      .sendMessage(session.id, FIRST_RUN_KICKOFF, { hidden: true })
+      .then(({ requestId }) => dispatch({ type: "request_started", requestId }))
+      .catch((error: unknown) => {
+        const message =
+          toBridgeError(error).message || "AI 没能开始第一轮对话，请稍后重试。";
+        dispatch({ type: "request_failed", message });
+        setAppNotice({ level: "error", text: message });
+      });
+  }, [
+    onboardingLoaded,
+    showOnboarding,
+    aiReady,
+    hasEverConnected,
+    vpn.loading,
+    vpn.configs.length,
+    session,
+    bridge,
+  ]);
+
   useEffect(() => {
     if (!pendingConfigId) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -397,6 +444,11 @@ export default function App() {
     if (skipped) {
       onboardingSkippedRef.current = true;
       writeFlag(ONBOARDING_SKIPPED_KEY);
+    } else {
+      // 首启成功无条件打开右栏，不受「只自动开一次」或「用户关过」影响。
+      panelOpenRef.current = true;
+      setPanelOpen(true);
+      setAiUnread(false);
     }
     void completeOnboarding();
   };
@@ -764,6 +816,7 @@ export default function App() {
           activeSessionId={state.activeSessionId}
           aiReady={aiReady}
           hasEverConnected={hasEverConnected}
+          hasConfigs={vpn.configs.length > 0}
           onSelectSession={handleSelectSession}
           onNewSession={() => dispatch({ type: "new_session" })}
           onRenameSession={handleRenameSession}

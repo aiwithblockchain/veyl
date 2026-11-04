@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAiReady, shouldShowOnboarding } from "./onboarding";
+import { isAiReady, shouldKickOffFirstRun, shouldShowOnboarding } from "./onboarding";
 
 const key = { masked: "sk-****abcd" };
 const noKey = { masked: null };
@@ -96,5 +96,34 @@ describe("shouldShowOnboarding", () => {
     expect(
       shouldShowOnboarding({ key, providers: null, skipped: true }),
     ).toBe(false);
+  });
+});
+
+describe("shouldKickOffFirstRun", () => {
+  const base = {
+    aiReady: true,
+    hasEverConnected: false,
+    configCount: 0,
+    messageCount: 0,
+  };
+
+  it("四个条件都满足时触发", () => {
+    expect(shouldKickOffFirstRun(base)).toBe(true);
+  });
+
+  it("没有可用 AI 不触发", () => {
+    expect(shouldKickOffFirstRun({ ...base, aiReady: false })).toBe(false);
+  });
+
+  it("连接过就不触发", () => {
+    expect(shouldKickOffFirstRun({ ...base, hasEverConnected: true })).toBe(false);
+  });
+
+  it("已有配置不触发", () => {
+    expect(shouldKickOffFirstRun({ ...base, configCount: 1 })).toBe(false);
+  });
+
+  it("当前会话已有消息不触发", () => {
+    expect(shouldKickOffFirstRun({ ...base, messageCount: 1 })).toBe(false);
   });
 });

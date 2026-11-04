@@ -418,7 +418,12 @@ export class MockAgentBridge implements AgentBridge {
     });
   }
 
-  async sendMessage(sessionId: string, text: string): Promise<{ requestId: string }> {
+  async sendMessage(
+    sessionId: string,
+    text: string,
+    _options?: { hidden?: boolean },
+  ): Promise<{ requestId: string }> {
+    // 浏览器 mock 不落历史，hidden 与普通消息没有区别。
     const requestId = `req_${Math.random().toString(36).slice(2, 10)}`;
     const assistantId = `asst_${requestId}`;
     this.cancelled.delete(requestId);
