@@ -1,12 +1,12 @@
 /**
  * 事件与 UI → Host 调用的前端契约。
  *
- * 唯一来源：`docs/contracts/events.md` v1.1.0（已冻结）。
+ * 唯一来源：`docs/contracts/events.md` v2.1.0。
  * 本文件是事件名常量的唯一来源——组件、store、bridge 只能引用
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "1.2.0" as const;
+export const CONTRACT_VERSION = "2.1.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -236,6 +236,8 @@ export interface RuntimeStateChangedPayload {
   upstream_version: string | null;
   reason: string | null;
   error: AivpnError | null;
+  /** 迁移后的完整快照；state 必须等于 to。 */
+  snapshot: RuntimeSnapshot;
   emitted_at: string;
 }
 
@@ -281,10 +283,14 @@ export interface AppLifecycleChangedPayload {
 
 export interface DefaultProfileUpdatedPayload {
   contract_version: typeof CONTRACT_VERSION;
-  package_id: string;
-  version: string;
-  applied_at: string;
+  seed_id: "veyl_seed";
+  content_sha256: string;
+  /** 文件里的 version，仅展示。 */
+  version: string | null;
+  node_count: number;
   new_version_available: boolean;
+  /** Unix 毫秒。 */
+  applied_at: number;
   emitted_at: string;
 }
 
@@ -439,6 +445,31 @@ export interface LayoutUpdatedPayload {
   emitted_at: string;
 }
 
+export interface RoutingChangedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  config_id: string;
+  routing_mode: ConfigRouteMode;
+  applied_mode: ConfigRouteMode | null;
+  targets: string[];
+  route_revision: number;
+  applied_revision: number | null;
+  change: "mode" | "targets" | "custom_rule";
+  hot_switched: boolean;
+  reconnect_required: boolean;
+  emitted_at: string;
+}
+
+export interface RulesChangedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  active_version: string;
+  previous_version: string | null;
+  geosite_tag: string | null;
+  geoip_tag: string | null;
+  item_count: number;
+  effective: "next_connect";
+  emitted_at: string;
+}
+
 /* ------------------------------------------------------------------ */
 /* 事件联合类型                                                        */
 /* ------------------------------------------------------------------ */
@@ -462,8 +493,8 @@ export interface AgentEventMap {
   [AGENT_EVENTS.nodeSwitched]: NodeSwitchedPayload;
   [AGENT_EVENTS.issueChanged]: IssueChangedPayload;
   [AGENT_EVENTS.layoutUpdated]: LayoutUpdatedPayload;
-  [AGENT_EVENTS.routingChanged]: Record<string, unknown>;
-  [AGENT_EVENTS.rulesChanged]: Record<string, unknown>;
+  [AGENT_EVENTS.routingChanged]: RoutingChangedPayload;
+  [AGENT_EVENTS.rulesChanged]: RulesChangedPayload;
 }
 
 export type AgentEvent = {
@@ -507,6 +538,8 @@ export interface RuntimeSnapshot {
   /** 连接成功时刻（ISO 8601）；未连接为 null。 */
   connected_since: string | null;
   latency_ms: number | null;
+  /** 本次连接生成配置时的 route_revision；未连接为 null。 */
+  applied_route_revision: number | null;
   /** 不经代理测得的直连出口 IP（1.1.0）；用于对照「是否真的走了代理」。 */
   direct_ip: string | null;
 }
@@ -530,5 +563,6 @@ export interface RuntimeView {
   mixed_port: number | null;
   connected_since: string | null;
   latency_ms: number | null;
+  applied_route_revision: number | null;
   direct_ip: string | null;
 }

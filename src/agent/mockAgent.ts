@@ -114,6 +114,7 @@ export class MockAgentBridge implements AgentBridge {
     mixed_port: null,
     connected_since: null,
     latency_ms: null,
+    applied_route_revision: null,
     direct_ip: MOCK_DIRECT_IP,
   };
 
@@ -262,6 +263,7 @@ export class MockAgentBridge implements AgentBridge {
         upstream_version: this.runtime.upstream_version,
         reason: null,
         error: null,
+        snapshot: this.runtime,
         emitted_at: now(),
       },
     });

@@ -303,6 +303,7 @@ export function emptyRuntimeView(): RuntimeView {
     mixed_port: null,
     connected_since: null,
     latency_ms: null,
+    applied_route_revision: null,
     direct_ip: null,
   };
 }
@@ -351,6 +352,7 @@ export function snapshotToView(snapshot: RuntimeSnapshot): RuntimeView {
     mixed_port: snapshot.mixed_port ?? null,
     connected_since: snapshot.connected_since ?? null,
     latency_ms: snapshot.latency_ms ?? null,
+    applied_route_revision: snapshot.applied_route_revision ?? null,
     direct_ip: snapshot.direct_ip ?? null,
   };
 }
