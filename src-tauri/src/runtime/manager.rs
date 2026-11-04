@@ -9,7 +9,7 @@ use tokio::sync::{broadcast, Mutex, Notify};
 use tokio::time::Instant;
 
 use super::error::{RuntimeError, RuntimeResult};
-use super::health::{ClashApi, DataPlaneProbe, DirectIpProbe, ExitIpProbe, TrafficTotals, DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE};
+use super::health::{ClashApi, ConnectionSample, DataPlaneProbe, DirectIpProbe, ExitIpProbe, DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE};
 use super::process::{self, SpawnOptions};
 
 pub const CONTRACT_VERSION: &str = "2.1.0";
@@ -130,9 +130,9 @@ pub struct RuntimeStatus {
     pub config_hash: Option<String>,
     pub system_proxy_enabled: bool,
     pub health: HealthSnapshot,
-    /// P2 才采集；P1 恒为 null。
+    /// 每 2s 随健康检查从 `/connections` 采样；未连接或采不到时为 null。
     pub traffic: Option<serde_json::Value>,
-    /// P2 才采集；P1 恒为 null。
+    /// 活跃连接数，与 `traffic` 同一次采样；未连接时 null。
     pub connections: Option<u32>,
     pub restart_count: u32,
     pub last_error: Option<RuntimeErrorInfo>,
@@ -330,6 +330,8 @@ struct Inner {
     /// 最近一次成功采到的流量快照；未连接或没采到时为 None。
     /// 字段形状见 `docs/contracts/runtime.md` §2.4。
     traffic: Option<serde_json::Value>,
+    /// 活跃连接数，来自同一次 `/connections` 采样。
+    connections: Option<u32>,
 }
 
 impl Inner {
@@ -351,6 +353,7 @@ impl Inner {
             system_proxy_enabled: false,
             health: HealthSnapshot::default(),
             traffic: None,
+            connections: None,
             last_exit_ip_latency_ms: None,
             direct_ip: None,
         }
@@ -418,7 +421,7 @@ impl Inner {
             system_proxy_enabled: self.system_proxy_enabled,
             health: self.health.clone(),
             traffic: if connected { self.traffic.clone() } else { None },
-            connections: None,
+            connections: if connected { self.connections } else { None },
             restart_count: self.restart_count,
             last_error: self.last_error.clone(),
             last_transition_at: self.last_transition_at.clone(),
@@ -505,16 +508,17 @@ impl RuntimeManager {
         inner.health.checked_at = now_iso();
     }
 
-    /// 记录一次流量采样。速率由两次采样的差值 / 时间间隔算出。
-    async fn set_traffic(&self, totals: TrafficTotals, up_rate: u64, down_rate: u64) {
+    /// 记录一次采样：流量与活跃连接数来自同一个 `/connections` 响应。
+    async fn set_traffic(&self, sample: ConnectionSample, up_rate: u64, down_rate: u64) {
         let mut inner = self.inner.lock().await;
         inner.traffic = Some(serde_json::json!({
-            "up_bytes": totals.up_bytes,
-            "down_bytes": totals.down_bytes,
+            "up_bytes": sample.up_bytes,
+            "down_bytes": sample.down_bytes,
             "up_rate": up_rate,
             "down_rate": down_rate,
             "sampled_at": now_iso(),
         }));
+        inner.connections = Some(sample.active);
     }
 
     /// 连接编排层用：短暂等待异步探测的结果，让 `VpnConnect` 能带回出口 IP。
@@ -611,8 +615,9 @@ impl RuntimeManager {
             inner.running_since = None;
             inner.connected_since = None;
             inner.health = HealthSnapshot::default();
-            // 上一次连接的流量不能带进这一次。
+            // 上一次连接的流量与连接数不能带进这一次。
             inner.traffic = None;
+            inner.connections = None;
             inner.config_hash = hash_file(&plan.config_path);
             inner.version = Some(plan.version.clone());
             inner.plan = Some(plan.clone());
@@ -703,6 +708,7 @@ impl RuntimeManager {
             inner.health.exit_ip = None;
             inner.direct_ip = None;
             inner.traffic = None;
+            inner.connections = None;
             inner.last_transition_at = now_iso();
             inner.snapshot()
         };
@@ -1037,7 +1043,7 @@ impl RuntimeManager {
         let mut next_health = Instant::now() + self.cfg.health_interval;
         let mut next_probe = Instant::now() + Duration::from_secs(10);
         // 上一次流量采样，用来算速率。
-        let mut last_traffic: Option<(TrafficTotals, Instant)> = None;
+        let mut last_traffic: Option<(ConnectionSample, Instant)> = None;
 
         loop {
             tokio::select! {
@@ -1096,25 +1102,26 @@ impl RuntimeManager {
 
                     // 流量与健康检查同频（默认 2s）。采不到就保留上一次的值，
                     // **不要写 0**：UI 会把它当成「这次真的没流量」。
-                    if let Ok(totals) = api.traffic_totals().await {
+                    if let Ok(sample) = api.connection_sample().await {
                         let sampled_at = Instant::now();
                         let (up_rate, down_rate) = match last_traffic {
                             Some((previous, at)) => {
                                 let seconds =
                                     sampled_at.duration_since(at).as_secs_f64().max(0.001);
                                 (
-                                    ((totals.up_bytes.saturating_sub(previous.up_bytes)) as f64
+                                    ((sample.up_bytes.saturating_sub(previous.up_bytes)) as f64
                                         / seconds)
                                         .round() as u64,
-                                    ((totals.down_bytes.saturating_sub(previous.down_bytes)) as f64
+                                    ((sample.down_bytes.saturating_sub(previous.down_bytes))
+                                        as f64
                                         / seconds)
                                         .round() as u64,
                                 )
                             }
                             None => (0, 0),
                         };
-                        last_traffic = Some((totals, sampled_at));
-                        self.set_traffic(totals, up_rate, down_rate).await;
+                        last_traffic = Some((sample, sampled_at));
+                        self.set_traffic(sample, up_rate, down_rate).await;
                     }
                 } else {
                     failures += 1;
@@ -2140,13 +2147,20 @@ mod tests {
             inner.snapshot().traffic.is_none(),
             "未连接时不能带流量：0 字节和没有数据要能区分"
         );
+        assert!(
+            inner.snapshot().connections.is_none(),
+            "未连接时连接数必须是 null"
+        );
 
         inner.state = RuntimeState::Running;
+        inner.connections = Some(3);
         let snapshot = inner.snapshot();
         assert_eq!(snapshot.traffic.unwrap()["down_bytes"], 2048);
+        assert_eq!(snapshot.connections, Some(3));
 
         inner.state = RuntimeState::Failed;
         assert!(inner.snapshot().traffic.is_none(), "失败后不能留着上次的流量");
+        assert!(inner.snapshot().connections.is_none());
     }
 
     #[test]

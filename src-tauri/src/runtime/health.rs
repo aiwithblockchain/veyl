@@ -68,12 +68,12 @@ impl ClashApi {
         self.version().await.is_ok()
     }
 
-    /// `/connections` 里的累计流量。
+    /// `/connections` 的一次采样：累计流量 + 当前活跃连接数。
     ///
     /// Clash 的字段名是 `uploadTotal` / `downloadTotal`，单位字节、从进程启动起累加。
     /// 速率由两次采样的差值算——`/traffic` 那条流式端点更适合做每秒速率，
     /// 但我们要和健康检查同频（2s），轮询一次 `/connections` 已经够用。
-    pub async fn traffic_totals(&self) -> RuntimeResult<TrafficTotals> {
+    pub async fn connection_sample(&self) -> RuntimeResult<ConnectionSample> {
         let response = self
             .http
             .get(format!("{}/connections", self.base))
@@ -94,18 +94,20 @@ impl ClashApi {
             .json()
             .await
             .map_err(|e| RuntimeError::ClashApi(format!("GET /connections body: {e}")))?;
-        Ok(TrafficTotals {
+        Ok(ConnectionSample {
             up_bytes: body.upload_total,
             down_bytes: body.download_total,
+            active: body.connections.len() as u32,
         })
     }
 }
 
-/// 本次运行的累计上下行字节。
+/// 一次 `/connections` 采样：累计上下行字节 + 活跃连接数。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TrafficTotals {
+pub struct ConnectionSample {
     pub up_bytes: u64,
     pub down_bytes: u64,
+    pub active: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,7 +116,10 @@ struct ConnectionsResponse {
     upload_total: u64,
     #[serde(default, rename = "downloadTotal")]
     download_total: u64,
+    #[serde(default)]
+    connections: Vec<serde_json::Value>,
 }
+
 
 /// 通过本地 mixed 入站访问一个轻量 URL，验证数据面真的能出网。
 #[derive(Clone)]
@@ -266,23 +271,26 @@ mod tests {
     #[test]
     fn connections_totals_read_the_clash_field_names() {
         let body: ConnectionsResponse = serde_json::from_str(
-            r#"{"uploadTotal": 12, "downloadTotal": 34, "connections": []}"#,
+            r#"{"uploadTotal": 12, "downloadTotal": 34, "connections": [{}, {}]}"#,
         )
         .unwrap();
         assert_eq!(
-            TrafficTotals {
+            ConnectionSample {
                 up_bytes: body.upload_total,
                 down_bytes: body.download_total,
+                active: body.connections.len() as u32,
             },
-            TrafficTotals {
+            ConnectionSample {
                 up_bytes: 12,
                 down_bytes: 34,
+                active: 2,
             }
         );
 
         let empty: ConnectionsResponse = serde_json::from_str("{}").unwrap();
         assert_eq!(empty.upload_total, 0);
         assert_eq!(empty.download_total, 0);
+        assert_eq!(empty.connections.len(), 0);
     }
 
     #[test]

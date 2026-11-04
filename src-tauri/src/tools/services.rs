@@ -1496,6 +1496,10 @@ impl VpnToolServices for WiredServices {
                 "mixed_port": null,
                 "system_proxy_enabled": false,
                 "helper": self.tun.launcher_kind(),
+                // TUN 的进程不归 RuntimeManager 管，流量与连接数都采不到。
+                // 显式给 null（不是缺字段）：UI 要能区分「没有数据」和「0 B」。
+                "traffic": null,
+                "connections": null,
             }));
         }
         let status = self.manager.status().await;
@@ -4299,6 +4303,24 @@ mod config_service_tests {
             error.to_string().contains("读不到它用的是哪套配置"),
             "{error}"
         );
+    }
+
+    /// TUN 下流量与连接数采不到：字段必须在、值必须是 null，
+    /// 不能缺字段（前端会读到 undefined），更不能是 0（看起来像「没走流量」）。
+    #[tokio::test]
+    async fn a_tun_connection_reports_traffic_and_connections_as_null() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        services.tun.force_running_for_test(5151, Some("cfg_tun"));
+
+        let status = services.runtime_status().await.unwrap();
+        assert_eq!(status["mode"], "tun");
+        assert!(
+            status.get("traffic").is_some(),
+            "字段不能缺，缺了前端拿到的是 undefined"
+        );
+        assert!(status["traffic"].is_null(), "没有数据必须是 null");
+        assert!(status["connections"].is_null(), "没有数据必须是 null");
     }
 }
 
