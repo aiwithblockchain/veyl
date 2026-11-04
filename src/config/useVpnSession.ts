@@ -5,6 +5,7 @@ import { AGENT_EVENTS } from "../agent/protocol";
 import type { ConfigDetail, ConfigSummary, RuntimeSnapshot } from "../agent/protocol";
 import type { ConnectMode } from "./model";
 import { createMockConfig, summarizeConfig } from "./model";
+import { deleteConfigWithDisconnect, withoutConfig } from "./deleteConfig";
 
 export type VpnConnectionState = "idle" | "starting" | "connected" | "stopping";
 
@@ -34,6 +35,7 @@ export interface VpnSession {
   nodeSwitchAvailable: boolean;
   nodeProbeAvailable: boolean;
   createConfig: (name: string, mode: ConnectMode) => Promise<ActionResult>;
+  deleteConfig: (configId: string) => Promise<ActionResult>;
   selectConfig: (configId: string, confirmDisconnect?: boolean) => Promise<ActionResult>;
   switchNode: (nodeId: string) => Promise<ActionResult>;
   start: () => Promise<ActionResult>;
@@ -385,6 +387,36 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     }
   };
 
+  const deleteConfig = async (configId: string): Promise<ActionResult> => {
+    if (mock) {
+      const store = mockStore.current;
+      if (!store.configs.some((config) => config.config_id === configId)) {
+        return { ok: true };
+      }
+      if (connectedConfigId === configId) {
+        clearTimer();
+        setConnection("idle");
+        setConnectedConfigId(null);
+      }
+      const next = withoutConfig(store.configs, store.activeId, configId);
+      commitMock({ configs: next.configs, activeId: next.activeId });
+      return { ok: true };
+    }
+
+    return deleteConfigWithDisconnect({
+      configId,
+      connectedConfigId,
+      disconnect: stop,
+      remove: async () => {
+        const result = await bridge.configDelete(configId);
+        setActiveConfigId(result.active_config_id);
+        if (result.active_config_id === null) setActiveConfig(null);
+        await refreshReal();
+        return result;
+      },
+    });
+  };
+
   const probe = async (nodeId: string): Promise<ProbeResult> => {
     if (mock) {
       await new Promise((resolve) => window.setTimeout(resolve, 600));
@@ -430,6 +462,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     nodeSwitchAvailable,
     nodeProbeAvailable,
     createConfig,
+    deleteConfig,
     selectConfig,
     switchNode,
     start,

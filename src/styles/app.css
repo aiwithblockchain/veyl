@@ -2164,6 +2164,12 @@ pre {
   flex: none;
   font-size: var(--fs-label);
   color: var(--ok-text);
+  transition: opacity 120ms ease-out;
+}
+
+.config-list__row:hover .config-list__status,
+.config-list__row:focus-within .config-list__status {
+  opacity: 0;
 }
 
 .config-list__dot {

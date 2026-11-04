@@ -84,6 +84,13 @@ export interface ConfigActivateResult {
   runtime: RuntimeSnapshot | null;
 }
 
+export interface ConfigDeleteData {
+  config_id: string;
+  deleted: boolean;
+  already_absent: boolean;
+  active_config_id: string | null;
+}
+
 export interface NodeSwitchResult {
   config_id: string;
   node_id: string;
@@ -223,6 +230,8 @@ export interface AgentBridge {
   /** 中间底部节点详情的数据源。 */
   configDetail(configId: string): Promise<ConfigDetail>;
   configCreate(input: ConfigCreateInput): Promise<ConfigDetail>;
+  /** 删除一套配置；正在连接的配置由 UI 先断开。 */
+  configDelete(configId: string): Promise<ConfigDeleteData>;
   /** 切换 active 配置；已连接时需带 confirmDisconnect。 */
   configActivate(configId: string, confirmDisconnect?: boolean): Promise<ConfigActivateResult>;
   /** 切换某套配置的当前节点；已连接时由 Host 热切换，不断流。 */

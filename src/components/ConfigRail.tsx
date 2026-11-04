@@ -1,5 +1,8 @@
+import { useEffect, useRef, useState } from "react";
 import type { ConfigSummary } from "../agent/protocol";
 import { portLabel } from "../config/model";
+import { useFocusTrap } from "../ui/focus";
+import { IconClose, IconTrash } from "./icons";
 
 interface Props {
   configs: ConfigSummary[];
@@ -10,6 +13,7 @@ interface Props {
   error?: string | null;
   onSelect: (configId: string) => void;
   onNewConfig: () => void;
+  onDelete: (configId: string) => Promise<{ ok: boolean; message?: string }>;
 }
 
 export function ConfigRail({
@@ -20,7 +24,38 @@ export function ConfigRail({
   error = null,
   onSelect,
   onNewConfig,
+  onDelete,
 }: Props) {
+  const [confirming, setConfirming] = useState<ConfigSummary | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const confirmRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(Boolean(confirming), confirmRef);
+
+  useEffect(() => {
+    if (confirming && !configs.some((config) => config.config_id === confirming.config_id)) {
+      setConfirming(null);
+    }
+  }, [configs, confirming]);
+
+  useEffect(() => {
+    if (!confirming) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !deleting) setConfirming(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirming, deleting]);
+
+  const submitDelete = async () => {
+    if (!confirming || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    const result = await onDelete(confirming.config_id);
+    setDeleting(false);
+    if (result.ok) setConfirming(null);
+    else setDeleteError(result.message ?? "删除失败，请重试");
+  };
 
   return (
     <aside className="config-rail" aria-label="配置列表">
@@ -83,26 +118,42 @@ export function ConfigRail({
               const port = portLabel(config);
               return (
                 <li key={config.config_id}>
-                  <button
-                    type="button"
-                    className={`config-list__item ${active ? "is-active" : ""}`}
-                    aria-current={active ? "true" : undefined}
-                    onClick={() => onSelect(config.config_id)}
-                  >
-                    <span className="config-list__top">
-                      <span className="config-list__name">{config.name}</span>
-                      {connected ? (
-                        <span className="config-list__status">
-                          <span className="config-list__dot" aria-hidden />
-                          已连接
-                        </span>
-                      ) : null}
-                    </span>
-                    <span className="config-list__meta">
-                      {config.node_count} 个节点 ·{" "}
-                      {/^\d+$/.test(port) ? <span className="num">{port}</span> : port}
-                    </span>
-                  </button>
+                  <div className="config-list__row ai-history__row">
+                    <button
+                      type="button"
+                      className={`config-list__item ${active ? "is-active" : ""}`}
+                      aria-current={active ? "true" : undefined}
+                      onClick={() => onSelect(config.config_id)}
+                    >
+                      <span className="config-list__top">
+                        <span className="config-list__name">{config.name}</span>
+                        {connected ? (
+                          <span className="config-list__status">
+                            <span className="config-list__dot" aria-hidden />
+                            已连接
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="config-list__meta">
+                        {config.node_count} 个节点 ·{" "}
+                        {/^\d+$/.test(port) ? <span className="num">{port}</span> : port}
+                      </span>
+                    </button>
+                    <div className="ai-history__actions">
+                      <button
+                        type="button"
+                        className="ai-history__action ai-history__action--danger"
+                        aria-label={`删除配置 ${config.name}`}
+                        title={`删除「${config.name}」`}
+                        onClick={() => {
+                          setConfirming(config);
+                          setDeleteError(null);
+                        }}
+                      >
+                        <IconTrash size={13} />
+                      </button>
+                    </div>
+                  </div>
                 </li>
               );
             })}
@@ -115,6 +166,63 @@ export function ConfigRail({
           </button>
         </>
       )}
+
+      {confirming ? (
+        <div
+          className="modal-backdrop"
+          onMouseDown={() => {
+            if (!deleting) setConfirming(null);
+          }}
+        >
+          <div
+            ref={confirmRef}
+            className="modal modal--confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-config-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="modal__head">
+              <h2 id="delete-config-title" className="modal__title">
+                删除配置
+              </h2>
+              <button
+                type="button"
+                className="modal__close"
+                onClick={() => setConfirming(null)}
+                disabled={deleting}
+                aria-label="关闭"
+              >
+                <IconClose size={14} />
+              </button>
+            </header>
+            <p className="confirm__text">
+              {confirming.config_id === connectedConfigId
+                ? "这套配置正在连接。删除会先断开连接，然后再删除。"
+                : `「${confirming.name}」删除后无法恢复。`}
+            </p>
+            {deleteError ? <p className="confirm__error">{deleteError}</p> : null}
+            <div className="confirm__actions">
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => setConfirming(null)}
+                disabled={deleting}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn btn--danger-ghost"
+                onClick={() => void submitDelete()}
+                disabled={deleting}
+              >
+                {deleting ? "删除中…" : "删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </aside>
   );
 }

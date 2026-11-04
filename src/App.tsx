@@ -896,6 +896,7 @@ export default function App() {
         error={vpn.error}
         onSelect={handleSelectConfig}
         onNewConfig={() => setNewConfigOpen(true)}
+        onDelete={vpn.deleteConfig}
       />
       <Console
         config={vpn.activeConfig}

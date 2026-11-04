@@ -3,6 +3,7 @@ import type {
   ChatHistory,
   ConfigActivateResult,
   ConfigCreateInput,
+  ConfigDeleteData,
   ConfigListData,
   DeepSeekKeyState,
   DefaultProfileStatus,
@@ -714,6 +715,16 @@ export class MockAgentBridge implements AgentBridge {
 
   async configCreate(_input: ConfigCreateInput): Promise<ConfigDetail> {
     throw this.unsupportedConfigCommand("config_create");
+  }
+
+  async configDelete(configId: string): Promise<ConfigDeleteData> {
+    // 浏览器通道的配置列表由 useVpnSession 的 mock 分支维护；这里只满足接口。
+    return {
+      config_id: configId,
+      deleted: true,
+      already_absent: false,
+      active_config_id: null,
+    };
   }
 
   async configActivate(

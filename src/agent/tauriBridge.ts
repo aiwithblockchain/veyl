@@ -5,6 +5,7 @@ import type {
   ChatHistory,
   ConfigActivateResult,
   ConfigCreateInput,
+  ConfigDeleteData,
   ConfigListData,
   DeepSeekKeyState,
   DefaultProfileStatus,
@@ -160,6 +161,10 @@ export class TauriAgentBridge implements AgentBridge {
     return call<ConfigDetail>("config_create", {
       ...input,
     } as unknown as Record<string, unknown>);
+  }
+
+  async configDelete(configId: string): Promise<ConfigDeleteData> {
+    return call<ConfigDeleteData>("config_delete", { configId });
   }
 
   async configActivate(
