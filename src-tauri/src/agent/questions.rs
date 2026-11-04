@@ -45,11 +45,16 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// 「用 Veyl 提供的默认节点」这个选项里一定会出现的词。
+/// 节点来源那一问的规范选项。**只认这一串，逐字相等**。
 ///
-/// 选项文案由模型生成，可能写成「使用 Veyl 的默认节点」「用默认节点」，
-/// 所以按语义片段认，不按整串相等——认错方向只会多问一次，不会少问。
-const SEED_OPTION_MARKER: &str = "默认节点";
+/// 曾经用「答案包含『默认节点』」判断，模型问「不使用默认节点」、用户选了它，
+/// 也会被记成同意——门槛形同虚设。问题里没给这个规范选项的，一律不算。
+const SEED_OPTION: &str = "用 Veyl 提供的默认节点";
+
+/// 这次回答算不算「同意用默认节点」：问题确实给了规范选项，且用户选的正是它。
+fn grants_seed_consent(options: &[String], answer: &str) -> bool {
+    options.iter().any(|option| option == SEED_OPTION) && answer.trim() == SEED_OPTION
+}
 
 /// 用户已明确选择默认节点的记录，键是 (session_id, request_id)。
 ///
@@ -58,6 +63,20 @@ const SEED_OPTION_MARKER: &str = "默认节点";
 fn seed_consents() -> &'static Mutex<HashSet<(String, String)>> {
     static CONSENTS: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
     CONSENTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn record_seed_consent(session_id: &str, request_id: &str) {
+    seed_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert((session_id.to_string(), request_id.to_string()));
+}
+
+fn revoke_seed_consent(session_id: &str, request_id: &str) {
+    seed_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&(session_id.to_string(), request_id.to_string()));
 }
 
 /// 本请求里用户是否明确选过「用 Veyl 提供的默认节点」。
@@ -167,15 +186,17 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
         ));
     }
 
-    if !settle(question_id, answer.to_string()) {
-        return Err(not_pending());
+    // 先记同意、再唤醒模型：反过来的话，模型可能抢在记录之前调 ConfigCreate，
+    // 白白失败一次。settle 失败说明问题已被别处处理，把记录回滚掉。
+    let granted = grants_seed_consent(&options, answer);
+    if granted {
+        record_seed_consent(session_id, &request_id);
     }
-    // 记在 settle 之后：同一问题被并发答两次时，失败的那次不该留下同意记录。
-    if !answer.is_empty() && answer.contains(SEED_OPTION_MARKER) {
-        seed_consents()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert((session_id.to_string(), request_id));
+    if !settle(question_id, answer.to_string()) {
+        if granted {
+            revoke_seed_consent(session_id, &request_id);
+        }
+        return Err(not_pending());
     }
     Ok(())
 }
@@ -348,8 +369,7 @@ mod memory_tests {
     }
 
     #[tokio::test]
-    async fn choosing_own_nodes_does_not_grant_consent() {
-        let (event, _rx) = event(
+    async fn choosing_own_nodes_does_not_grant_consent() {        let (event, _rx) = event(
             "节点从哪来？",
             &["用 Veyl 提供的默认节点", "用我自己的节点"],
         );
@@ -380,5 +400,41 @@ mod memory_tests {
         reply("ses_skip", &id, "").unwrap();
         assert!(!seed_consent_granted("ses_skip", "req_skip"));
         cleanup_request("ses_skip", "req_skip");
+    }
+
+    /// 否定选项不能被当成同意：「不使用默认节点」里也有那四个字。
+    #[tokio::test]
+    async fn a_negative_option_never_grants_consent() {
+        let (event, _rx) = event("节点从哪来？", &["使用默认节点", "不使用默认节点"]);
+        register("ses_neg", "req_neg", event);
+        let id = list_pending("ses_neg")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        reply("ses_neg", &id, "不使用默认节点").unwrap();
+        assert!(!seed_consent_granted("ses_neg", "req_neg"));
+        cleanup_request("ses_neg", "req_neg");
+    }
+
+    /// 只认逐字等于规范选项的那一个；加了「（推荐）」之类的变体都不算。
+    #[tokio::test]
+    async fn only_the_canonical_option_grants_consent() {
+        let (event, _rx) = event(
+            "节点从哪来？",
+            &["用 Veyl 提供的默认节点（推荐）", "用我自己的节点"],
+        );
+        register("ses_variant", "req_variant", event);
+        let id = list_pending("ses_variant")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        reply("ses_variant", &id, "用 Veyl 提供的默认节点（推荐）").unwrap();
+        assert!(
+            !seed_consent_granted("ses_variant", "req_variant"),
+            "变体选项不能授权：同意必须对应提示词规定的那个选项"
+        );
+        cleanup_request("ses_variant", "req_variant");
     }
 }

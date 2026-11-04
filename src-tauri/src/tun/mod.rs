@@ -22,26 +22,60 @@ pub const TUN_ADDRESS: &str = "172.19.0.1/30";
 /// helper 的 start 只做 sing-box check + spawn 就返回，不等 TUN 设备与路由表就绪。
 /// 设备出现是「流量真的被接管」的第一手证据；没有它就不能对用户说接管成功。
 pub fn device_is_up(addrs: &[LocalAddr]) -> bool {
-    let tun_ip = TUN_ADDRESS.split('/').next().unwrap_or(TUN_ADDRESS);
-    addrs.iter().any(|addr| addr.address.to_string() == tun_ip)
+    device_name(addrs).is_some()
 }
 
-/// 轮询等 TUN 设备出现，最多等 `timeout`。返回是否等到。
-pub async fn wait_until_device_up(timeout: std::time::Duration) -> bool {
+/// 带 TUN 地址的接口名（`utunN`）。设备没起来时是 None。
+pub fn device_name(addrs: &[LocalAddr]) -> Option<String> {
+    let tun_ip = TUN_ADDRESS.split('/').next().unwrap_or(TUN_ADDRESS);
+    addrs
+        .iter()
+        .find(|addr| addr.address.to_string() == tun_ip)
+        .map(|addr| addr.name.clone())
+}
+
+/// 轮询等 TUN 设备出现，最多等 `timeout`。等到就返回接口名。
+pub async fn wait_until_device_up(timeout: std::time::Duration) -> Option<String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         // `collect()` 会起 `ifconfig`，别占着 async 的执行线程。
-        let up = tokio::task::spawn_blocking(|| device_is_up(&collect()))
+        let found = tokio::task::spawn_blocking(|| device_name(&collect()))
             .await
-            .unwrap_or(false);
-        if up {
-            return true;
+            .unwrap_or(None);
+        if found.is_some() {
+            return found;
         }
         if tokio::time::Instant::now() >= deadline {
-            return false;
+            return None;
         }
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
+}
+
+/// 默认路由是否指向指定的 TUN 接口。
+///
+/// 设备存在只证明 utun 接口建好了，不证明流量真的被送进去。
+/// `proxy_all` 想对用户说「全部接管」，必须有这条路由证据。
+pub fn default_route_goes_through(tun_name: &str) -> bool {
+    let Ok(output) = crate::netcfg::run("/usr/sbin/netstat", &["-rn", "-f", "inet"]) else {
+        return false;
+    };
+    parse_default_route_interface(&output)
+        .map(|iface| iface == tun_name)
+        .unwrap_or(false)
+}
+
+/// 从 `netstat -rn -f inet` 里取默认路由的接口名。
+///
+/// macOS 的行长这样：`default  192.168.1.1  UGScg  en0`（少数带 Expire 列）。
+pub(crate) fn parse_default_route_interface(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.first() != Some(&"default") || tokens.len() < 4 {
+            return None;
+        }
+        Some(tokens[3].to_string())
+    })
 }
 
 /// `dns` 必须在列表里，否则 `hijack-dns` 规则不会命中（`tun-mode.md` §3）。
@@ -395,5 +429,50 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
         assert_eq!(mask_v6(addr, 64).to_string(), "2001:db8:abcd:1234::");
         assert_eq!(mask_v6(addr, 32).to_string(), "2001:db8::");
         assert_eq!(mask_v6(addr, 0).to_string(), "::");
+    }
+
+    #[test]
+    fn the_tun_device_is_found_by_its_fixed_address() {
+        let addrs = vec![
+            LocalAddr::new("en0", v4("192.168.1.23"), 24),
+            LocalAddr::new("utun6", v4("172.19.0.1"), 30),
+        ];
+        assert_eq!(device_name(&addrs).as_deref(), Some("utun6"));
+        assert!(device_is_up(&addrs));
+
+        let without_tun = vec![LocalAddr::new("en0", v4("192.168.1.23"), 24)];
+        assert_eq!(device_name(&without_tun), None);
+        assert!(!device_is_up(&without_tun));
+    }
+
+    #[test]
+    fn the_default_route_interface_is_read_from_netstat() {
+        let output = "\
+Routing tables
+
+Internet:
+Destination        Gateway            Flags        Netif Expire
+default            192.168.1.1        UGScg          en0
+10/8               link#4             UCSIg          en0
+";
+        assert_eq!(
+            parse_default_route_interface(output).as_deref(),
+            Some("en0")
+        );
+    }
+
+    #[test]
+    fn a_default_route_on_the_tun_interface_is_recognised() {
+        let output = "default            link#20            UGScIg         utun6\n";
+        assert_eq!(
+            parse_default_route_interface(output).as_deref(),
+            Some("utun6")
+        );
+    }
+
+    #[test]
+    fn a_missing_default_route_is_not_mistaken_for_one() {
+        let output = "Destination        Gateway            Flags        Netif\n10/8  link#4  UCSIg  en0\n";
+        assert_eq!(parse_default_route_interface(output), None);
     }
 }

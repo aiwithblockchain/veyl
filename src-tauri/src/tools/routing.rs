@@ -79,6 +79,11 @@ fn summarise_route_change(data: &Value) -> String {
                         "分流模式已保存为 {mode}{targets}，自动重连失败，\
                          运行时已失败（state=failed），当前没有连上。"
                     ),
+                    // helper 接受了启动请求，但 TUN 设备没起来：接管可能根本没发生。
+                    "tun_unconfirmed" => format!(
+                        "分流模式已保存为 {mode}{targets}，但 TUN 启动后没确认接管\
+                         （设备没起来），当前可能没有真正接管流量，需要重新连接。"
+                    ),
                     _ => format!(
                         "分流模式已保存为 {mode}{targets}，自动重连失败，\
                          运行时状态未知，是否生效要用 RuntimeStatus 确认。"
@@ -495,5 +500,17 @@ mod tests {
         let text = changed(json!({ "reconnect": "reconnect_failed" }));
         assert!(text.contains("状态未知"), "{text}");
         assert!(!text.contains("没有连上"), "{text}");
+    }
+
+    /// TUN 的 Ok 只说明 helper 收下了启动请求：设备没起来就不能说重连成功。
+    #[test]
+    fn an_unconfirmed_tun_reconnect_does_not_claim_success() {
+        let text = changed(json!({
+            "reconnect": "reconnect_failed",
+            "runtime_state": "tun_unconfirmed",
+        }));
+        assert!(text.contains("没确认接管"), "{text}");
+        assert!(!text.contains("已重新连接生效"), "{text}");
+        assert!(!text.contains("没有连上"), "没证据就不能断言断开：{text}");
     }
 }

@@ -114,8 +114,10 @@ fn connect_summary(data: &Value) -> String {
 
 /// TUN 的摘要不能说假话：
 /// - helper 的 start 只保证 sing-box 起来了，不等 TUN 设备与路由表；
+/// - 设备存在只证明 utun 建好了，不证明流量被送了进去——「全部接管」还要
+///   默认路由真的指到这个接口上；
 /// - `proxy_selected` 只接管选定的服务，不能说「全部」；
-/// - 没有设备证据时，只能说「还没确认接管」，出口 IP 单独也不能证明全量接管。
+/// - 没有证据时，只能说「还没确认接管」，出口 IP 单独也不能证明全量接管。
 fn tun_summary(data: &Value) -> String {
     let name = data
         .get("config_name")
@@ -134,10 +136,22 @@ fn tun_summary(data: &Value) -> String {
         .get("tun_device_up")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let default_route = data
+        .get("tun_default_route")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if !device_up {
         parts.push("但还没确认接管（没看到 TUN 设备），不要告诉用户已经接管".to_string());
     } else if routing == "proxy_all" {
-        parts.push("TUN 设备已就绪，全部流量已接管".to_string());
+        if default_route {
+            parts.push("TUN 设备已就绪、默认路由已指过来，全部流量已接管".to_string());
+        } else {
+            parts.push(
+                "TUN 设备已就绪，但默认路由还没指过来，接管尚未确认，\
+                 不要告诉用户已经全部接管"
+                    .to_string(),
+            );
+        }
     } else if routing == "direct" {
         parts.push("TUN 设备已就绪，但当前分流模式是直连，流量没有走进 VPN".to_string());
     } else {
@@ -202,16 +216,31 @@ mod tests {
     }
 
     #[test]
-    fn proxy_all_with_the_device_up_may_claim_full_takeover() {
+    fn proxy_all_with_the_device_and_route_up_may_claim_full_takeover() {
         let text = connect_summary(&json!({
             "mode": "tun",
             "config_name": "C",
             "routing_mode": "proxy_all",
             "mixed_port": null,
             "tun_device_up": true,
+            "tun_default_route": true,
         }));
         assert!(text.contains("全部流量已接管"), "{text}");
         assert!(text.contains("出口尚未确认"), "{text}");
+    }
+
+    /// 设备在、默认路由没指过来：流量可能还从物理网卡出去，不能说「全部」。
+    #[test]
+    fn a_device_without_the_default_route_is_not_full_takeover() {
+        let text = connect_summary(&json!({
+            "mode": "tun",
+            "config_name": "C",
+            "routing_mode": "proxy_all",
+            "tun_device_up": true,
+            "tun_default_route": false,
+        }));
+        assert!(!text.contains("全部流量已接管"), "{text}");
+        assert!(text.contains("接管尚未确认"), "{text}");
     }
 
     /// 只接管选定服务时，「全部」这两个字一次都不能出现。

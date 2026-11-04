@@ -1268,6 +1268,10 @@ impl WiredServices {
     }
 
     async fn connected_config_id(&self) -> Option<String> {
+        // TUN 的进程不在 manager 里，只看 current_plan 会漏掉一整个连接方式。
+        if let Some(id) = self.tun.connected_config_id() {
+            return Some(id);
+        }
         self.manager
             .current_plan()
             .await
@@ -1437,6 +1441,9 @@ impl VpnToolServices for WiredServices {
                 "state": "running",
                 "mode": "tun",
                 "pid": pid,
+                // 前端要靠它判断「连的是哪套配置」，删除守卫也靠它。
+                // App 重启后接手的老连接没有 id，这里是 null。
+                "config_id": self.tun.connected_config_id(),
                 "mixed_port": null,
                 "system_proxy_enabled": false,
                 "helper": self.tun.launcher_kind(),
@@ -1472,9 +1479,8 @@ impl VpnToolServices for WiredServices {
         let connected = self.connected_config_id().await;
         // TUN 的 sing-box 是 helper 的子进程，manager 的 stop 碰不到它，单独停。
         // 幂等：本来就没在跑时直接返回。
-        if let Err(error) = self.tun.stop() {
-            log::warn!("停止 TUN 运行时失败：{error}");
-        }
+        // 停不掉不能吞：界面上显示已停、流量却还在被接管，比报错糟得多。
+        let tun_stop_error = self.tun.stop().err();
         self.restore_system_proxy()?;
         self.manager.set_system_proxy_enabled(false).await;
         let status = self
@@ -1485,6 +1491,13 @@ impl VpnToolServices for WiredServices {
         // 断开即删明文配置：它只在连接期间允许存在。
         if let Some(config_id) = connected {
             vpn_config::remove_profile_config(&self.config_dir(), &config_id);
+        }
+        if let Some(error) = tun_stop_error {
+            return Err(svc_error_with_details(
+                "INTERNAL",
+                format!("特权连接没有停掉：{}", error.message),
+                json!({ "reason": "tun_stop_failed", "detail": error.code }),
+            ));
         }
         serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
     }
@@ -1963,6 +1976,19 @@ impl VpnToolServices for WiredServices {
             return Err(svc_error_with_details(
                 "PRECONDITION_FAILED",
                 "这套配置正在连接中，先断开再删除",
+                json!({ "reason": "connected" }),
+            ));
+        }
+        // App 重启后接手的 TUN 连接没有配置 id：不知道在跑的这套是不是要删的那套，
+        // 一律拒绝——放过去就是「数据库删了、sing-box 还在接管、界面停不掉」。
+        if matches!(
+            self.tun.status(),
+            crate::tun::session::TunState::Running { .. }
+        ) && self.tun.connected_config_id().is_none()
+        {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "有一个接管连接在运行，但读不到它用的是哪套配置，先断开再删除",
                 json!({ "reason": "connected" }),
             ));
         }
@@ -2660,7 +2686,22 @@ impl VpnToolServices for WiredServices {
         }
 
         match self.runtime_start(Some(updated.id.clone())).await {
-            Ok(_) => {
+            Ok(started) => {
+                // TUN 的 Ok 只说明 helper 接受了启动请求，不代表接管成功。
+                let tun_unconfirmed = started.get("mode").and_then(Value::as_str) == Some("tun")
+                    && !started
+                        .get("tun_device_up")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                if tun_unconfirmed {
+                    log::warn!("分流切换后 TUN 已启动，但没确认接管");
+                    self.emit_routing_changed(&updated, "mode", None, None, false);
+                    let mut data = self.route_state_json(&updated, None, None);
+                    data["hot_switched"] = json!(false);
+                    data["reconnect"] = json!("reconnect_failed");
+                    data["runtime_state"] = json!("tun_unconfirmed");
+                    return Ok(data);
+                }
                 let status = self.manager.status().await;
                 self.emit_routing_changed(
                     &updated,
@@ -3355,7 +3396,7 @@ impl WiredServices {
         self.manager.set_system_proxy_enabled(false).await;
 
         log::debug!("连接 TUN 配置已生成");
-        let pid = match self.tun.launch(&config_json) {
+        let pid = match self.tun.launch(&config_json, &config.id) {
             Ok(started) => {
                 log::info!("连接 TUN 运行时已启动 pid={}", started.pid);
                 started.pid
@@ -3376,13 +3417,31 @@ impl WiredServices {
 
         log::info!("TUN 已连接 pid={pid} config={}", config.id);
         // helper 只等 sing-box check + spawn，不等 TUN 设备与路由表。
-        // 再看一眼本机接口：设备没出现，就不能对用户说接管成功。
-        let tun_device_up =
+        // 设备出现 + 默认路由指过来，才算「流量真的被接管」。
+        let tun_device =
             crate::tun::wait_until_device_up(std::time::Duration::from_millis(1500)).await;
-        if tun_device_up {
-            log::info!("TUN 设备已就绪 pid={pid}");
-        } else {
+        let tun_device_up = tun_device.is_some();
+        let tun_default_route = match (&tun_device, config.routing_mode.as_str()) {
+            // 只有「全部走 VPN」才该把默认路由抢过来；按服务分流时默认路由留在物理网卡。
+            (Some(name), configs::ROUTING_PROXY_ALL) => {
+                let name = name.clone();
+                tokio::task::spawn_blocking(move || crate::tun::default_route_goes_through(&name))
+                    .await
+                    .unwrap_or(false)
+            }
+            _ => false,
+        };
+        if !tun_device_up {
             log::warn!("TUN 已启动 pid={pid}，但 1.5s 内没看到 TUN 设备，接管状态待确认");
+        } else if config.routing_mode == configs::ROUTING_PROXY_ALL && !tun_default_route {
+            log::warn!(
+                "TUN 设备已就绪 pid={pid}，但默认路由没指过来，「全部接管」尚不能确认"
+            );
+        } else {
+            log::info!(
+                "TUN 接管已确认 pid={pid} device={:?} default_route={tun_default_route}",
+                tun_device
+            );
         }
         Ok(json!({
             "contract_version": crate::runtime::CONTRACT_VERSION,
@@ -3399,6 +3458,7 @@ impl WiredServices {
             "connected_since": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "system_proxy_enabled": false,
             "tun_device_up": tun_device_up,
+            "tun_default_route": tun_default_route,
             "exit_ip": Value::Null,
         }))
     }
@@ -4079,6 +4139,45 @@ mod config_service_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TUN 在跑的时候删配置：数据库删了、helper 里的 sing-box 还在接管，界面停不掉。
+    #[tokio::test]
+    async fn a_config_in_use_by_a_running_tun_connection_cannot_be_deleted() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("A")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        services.tun.force_running_for_test(4242, Some(&config_id));
+        let error = services.config_delete(&config_id).await.unwrap_err();
+        assert!(
+            error.to_string().contains("正在连接中"),
+            "TUN 正在用这套配置，必须拒绝删除：{error}"
+        );
+
+        // 连的是别的配置时不影响：不能因为「TUN 在跑」就什么都删不了。
+        services.tun.force_running_for_test(4242, Some("cfg_other"));
+        assert!(
+            services.config_delete(&config_id).await.is_ok(),
+            "TUN 用的是另一套配置，这套可以删"
+        );
+    }
+
+    /// App 重启后接手的 TUN 连接没有配置 id：不知道是哪套，一律拒绝。
+    #[tokio::test]
+    async fn a_tun_connection_without_a_known_config_blocks_deletion() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("A")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        services.tun.force_running_for_test(4343, None);
+        let error = services.config_delete(&config_id).await.unwrap_err();
+        assert!(
+            error.to_string().contains("读不到它用的是哪套配置"),
+            "{error}"
+        );
     }
 }
 

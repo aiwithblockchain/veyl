@@ -35,6 +35,8 @@ pub struct TunSession {
     /// 上次成功 start 拿到的 pid。**刻意不每次读 XPC**：
     /// `runtime_status` 是热路径，同步 XPC 会把它拖慢。
     pid: Mutex<Option<u32>>,
+    /// 这次连的是哪套配置。manager 不知道 TUN 的存在，删配置的守卫只能靠它。
+    config_id: Mutex<Option<String>>,
     /// App 崩溃重启后 TUN 还活着，这时内存里没有 pid。
     /// 首次查状态时向 helper 问一次，之后不再重复。
     #[cfg(target_os = "macos")]
@@ -46,6 +48,7 @@ impl TunSession {
         Self {
             registration,
             pid: Mutex::new(None),
+            config_id: Mutex::new(None),
             #[cfg(target_os = "macos")]
             probed: AtomicBool::new(false),
         }
@@ -57,7 +60,7 @@ impl TunSession {
 
     /// 起 TUN。顺序不可换：**先确认 helper 已被批准**再发请求，
     /// 否则连不上时用户只会看到一个无意义的超时。
-    pub fn launch(&self, config: &str) -> Result<Started, PrivilegeError> {
+    pub fn launch(&self, config: &str, config_id: &str) -> Result<Started, PrivilegeError> {
         self.registration.ensure_registered()?;
 
         #[cfg(target_os = "macos")]
@@ -69,6 +72,7 @@ impl TunSession {
                     clash_secret,
                 }) => {
                     *self.pid.lock().unwrap() = Some(pid);
+                    *self.config_id.lock().unwrap() = Some(config_id.to_string());
                     Ok(Started {
                         pid,
                         clash_addr,
@@ -85,9 +89,25 @@ impl TunSession {
 
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = config;
+            let _ = config_id;
             Err(unsupported_platform())
         }
+    }
+
+    /// 正在接管的配置。只有 TUN 确实在跑时才回答；
+    /// App 重启后接手的老连接没有配置 id，这里返回 None（调用方按「身份未知」处理）。
+    pub fn connected_config_id(&self) -> Option<String> {
+        if !matches!(self.status(), TunState::Running { .. }) {
+            return None;
+        }
+        self.config_id.lock().unwrap().clone()
+    }
+
+    /// 测试用：直接摆出「正在跑 + 记得是哪套配置」的状态，不碰 helper。
+    #[cfg(test)]
+    pub fn force_running_for_test(&self, pid: u32, config_id: Option<&str>) {
+        *self.pid.lock().unwrap() = Some(pid);
+        *self.config_id.lock().unwrap() = config_id.map(str::to_string);
     }
 
     /// 幂等。本来就没起过时不发 XPC——否则每次断开代理连接都要等一次超时。
@@ -101,12 +121,18 @@ impl TunSession {
                 Ok(_) => Ok(()),
                 Err(error) => Err(map_xpc_error(error)),
             };
-            *self.pid.lock().unwrap() = None;
+            // 只有真的停掉了才清状态：停失败还清掉，界面会显示已断开，
+            // 而 helper 里的 sing-box 还在接管流量。
+            if result.is_ok() {
+                *self.pid.lock().unwrap() = None;
+                *self.config_id.lock().unwrap() = None;
+            }
             return result;
         }
         #[cfg(not(target_os = "macos"))]
         {
             *self.pid.lock().unwrap() = None;
+            *self.config_id.lock().unwrap() = None;
             Ok(())
         }
     }
@@ -226,7 +252,7 @@ mod tests {
     fn a_rejected_registration_stops_before_any_xpc_call() {
         // 没被批准时 launch 必须立刻失败，而不是去连一个不存在的服务。
         let session = TunSession::new(Arc::new(FakeRegistration { ready: false }));
-        let error = session.launch("{}").unwrap_err();
+        let error = session.launch("{}", "cfg_test").unwrap_err();
         assert_eq!(error.code, ERR_TUN_DENIED);
     }
 
@@ -258,5 +284,21 @@ mod tests {
         let mut report = CleanupReport::default();
         report.failures.push("还原系统代理失败".into());
         assert!(!report.is_clean());
+    }
+
+    /// 运行中的 TUN 必须记得自己连的是哪套配置——删配置的守卫靠它。
+    #[test]
+    fn a_running_session_remembers_which_config_it_launched() {
+        let session = TunSession::new(Arc::new(FakeRegistration { ready: true }));
+        assert!(session.connected_config_id().is_none(), "没跑的时候没有归属");
+
+        session.force_running_for_test(42, Some("cfg_a"));
+        assert_eq!(session.connected_config_id().as_deref(), Some("cfg_a"));
+
+        session.force_running_for_test(42, None);
+        assert!(
+            session.connected_config_id().is_none(),
+            "重启后接手的老连接读不到 id，必须如实返回 None"
+        );
     }
 }
