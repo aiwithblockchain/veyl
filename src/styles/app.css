@@ -2449,9 +2449,14 @@ body[data-resizing] .pane-handle,
   white-space: nowrap;
 }
 
-.console-summary__sep {
-  color: var(--ink-3);
+.console-summary__item::after {
+  content: "·";
+  margin-left: 8px;
   opacity: 0.55;
+}
+
+.console-summary > :last-child::after {
+  content: none;
 }
 
 .console-top__primary {
@@ -2703,6 +2708,7 @@ body[data-resizing] .pane-handle,
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-height: 140px;
 }
 
 .console-node__skeleton-facts {
@@ -2836,6 +2842,9 @@ body[data-resizing] .pane-handle,
 
 .console-node__tech .console-node__facts {
   margin-top: 12px;
+  max-height: min(40vh, calc(100vh - 320px));
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .console-node__facts dd.console-node__copy-row {

@@ -35,20 +35,23 @@ const NODES: NodeSummary[] = [
   },
 ];
 
-function makeConfig(currentNodeId: string | null): ConfigDetail {
+function makeConfig(
+  currentNodeId: string | null,
+  nodes: NodeSummary[] = NODES,
+): ConfigDetail {
   return {
     config_id: "cfg-1",
     name: "测试配置",
     connect_mode: "proxy",
     routing_mode: "rule",
-    node_count: NODES.length,
+    node_count: nodes.length,
     listen_port: 2080,
     is_active: true,
     current_node_id: currentNodeId,
     created_at: 0,
     updated_at: 0,
     last_used_at: null,
-    nodes: NODES,
+    nodes,
     dns: { mode: "auto", servers: [] },
     tun_excludes: [],
     layout: null,
@@ -62,14 +65,15 @@ function makeRuntime(over: Partial<RuntimeView> = {}): RuntimeView {
 const noop = () => {};
 const never = async () => ({ ok: false, latencyMs: null, unreachable: false });
 
-function renderConsole(opts: {
+interface RenderOptions {
   connection?: "idle" | "starting" | "connected" | "stopping";
   runtime?: RuntimeView;
   config?: ConfigDetail | null;
   loading?: boolean;
-}) {
-  const config = opts.config === undefined ? makeConfig("n-tokyo") : opts.config;
-  const utils = render(
+}
+
+function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
+  return (
     <Console
       config={config}
       connection={opts.connection ?? "idle"}
@@ -90,8 +94,13 @@ function renderConsole(opts: {
       onNewConfig={noop}
       loading={opts.loading}
       runtime={opts.runtime ?? makeRuntime()}
-    />,
+    />
   );
+}
+
+function renderConsole(opts: RenderOptions) {
+  const config = opts.config === undefined ? makeConfig("n-tokyo") : opts.config;
+  const utils = render(consoleElement(config, opts));
   const summary = utils.container.querySelector(".console-summary");
   return {
     ...utils,
@@ -117,11 +126,16 @@ describe("状态矩阵", () => {
     expect(r.cardText).not.toContain("已用");
   });
 
-  it("2 连接中：无摘要行，卡片仍写未连接", () => {
+  it("2 连接中：无摘要行，卡片写正在连接", () => {
     const r = renderConsole({ connection: "starting" });
     expect(r.summary).toBeNull();
-    console.log("[state 2] card:", r.cardText);
-    expect(r.offline?.textContent).toBe("未连接");
+    expect(r.offline?.textContent).toBe("正在连接");
+  });
+
+  it("2b 断开中：无摘要行，卡片写正在断开", () => {
+    const r = renderConsole({ connection: "stopping" });
+    expect(r.summary).toBeNull();
+    expect(r.offline?.textContent).toBe("正在断开");
   });
 
   it("3 刚连上：四个占位都在", () => {
@@ -251,5 +265,27 @@ describe("状态矩阵", () => {
     const r = renderConsole({ loading: true });
     expect(r.container.querySelector(".console-node__skeleton")).not.toBeNull();
     expect(r.tech).toBeNull();
+  });
+
+  it("9 选中的节点消失：回退到当前节点", () => {
+    const r = renderConsole({});
+    fireEvent.click(r.container.querySelector(".console-node__name")!);
+    const items = Array.from(
+      r.container.querySelectorAll<HTMLButtonElement>(".node-picker__item"),
+    );
+    fireEvent.click(items.find((el) => el.textContent?.includes("大阪 02"))!);
+    expect(r.container.querySelector(".console-node__current")).not.toBeNull();
+
+    r.rerender(consoleElement(makeConfig("n-tokyo", NODES.slice(0, 1)), {}));
+    const cardText = (
+      r.container.querySelector(".console-node")?.textContent ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    expect(cardText).toContain("东京 01");
+    expect(cardText).not.toContain("还没有节点");
+    expect(r.container.querySelector(".console-node__badge")?.textContent).toBe(
+      "当前使用",
+    );
   });
 });

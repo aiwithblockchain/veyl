@@ -140,7 +140,11 @@ export function Console({
   }, [pickerOpen]);
 
   const selectedNode: NodeSummary | null =
-    config?.nodes.find((node) => node.node_id === selectedId) ?? null;
+    config?.nodes.find((node) => node.node_id === selectedId) ??
+    config?.nodes.find((node) => node.node_id === config.current_node_id) ??
+    config?.nodes[0] ??
+    null;
+  const selectedNodeId = selectedNode?.node_id ?? null;
   const currentNode: NodeSummary | null =
     config?.nodes.find((node) => node.node_id === config.current_node_id) ?? null;
   const canPick = (config?.nodes.length ?? 0) > 1;
@@ -198,12 +202,18 @@ export function Console({
   const trafficLabel = usedBytes === null ? "—" : formatTraffic(usedBytes);
   const latencyLabel =
     runtime.latency_ms === null ? "确认中…" : `${runtime.latency_ms} 毫秒`;
+  const linkStateLabel =
+    connection === "starting"
+      ? "正在连接"
+      : connection === "stopping"
+        ? "正在断开"
+        : "未连接";
   const currentLineName = currentNode?.name ?? runtime.node_name ?? "当前节点";
   const currentLineText = connected
     ? [currentLineName, durationLabel, trafficLabel === "—" ? null : trafficLabel]
         .filter(Boolean)
         .join(" · ")
-    : `${currentLineName} · 未连接`;
+    : `${currentLineName} · ${linkStateLabel}`;
   const sampleTime = formatSampleTime(
     runtime.traffic?.sampled_at ?? runtime.health.checked_at,
   );
@@ -298,18 +308,9 @@ export function Console({
         {connected ? (
           <div className="console-summary">
             <span className="console-summary__item">{durationLabel}</span>
-            <span className="console-summary__sep" aria-hidden>
-              ·
-            </span>
             <span className="console-summary__item">已用 {trafficLabel}</span>
-            <span className="console-summary__sep" aria-hidden>
-              ·
-            </span>
             <span className="console-summary__item">
               {runtime.latency_ms === null ? "延迟确认中…" : `延迟 ${latencyLabel}`}
-            </span>
-            <span className="console-summary__sep" aria-hidden>
-              ·
             </span>
             {exitAddress ? (
               <button
@@ -450,9 +451,9 @@ export function Console({
                     key={node.node_id}
                     type="button"
                     role="option"
-                    aria-selected={node.node_id === selectedId}
+                    aria-selected={node.node_id === selectedNodeId}
                     className={`node-picker__item ${
-                      node.node_id === selectedId ? "is-selected" : ""
+                      node.node_id === selectedNodeId ? "is-selected" : ""
                     }`}
                     onClick={() => selectNode(node.node_id)}
                   >
@@ -478,7 +479,7 @@ export function Console({
                   </div>
                 </dl>
               ) : (
-                <p className="console-node__offline">未连接</p>
+                <p className="console-node__offline">{linkStateLabel}</p>
               )
             ) : (
               <p className="console-node__current">
