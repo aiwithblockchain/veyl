@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.2.0`
+> 契约版本：`3.2.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md` 2.0.0、`docs/contracts/runtime.md` 2.0.0、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -1661,8 +1661,8 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 ### 5.1 标准连接链路
 
 ```
-用我们提供的：  ConfigCreate(source = "seed") → VpnConnect
-用我自己的：    NodeImportUrl / NodeCreate → ConfigCreate(node_ids) → VpnConnect
+用测试节点：    ConfigCreate(source = "seed") → VpnConnect
+用我自己的节点：NodeImportUrl / NodeCreate → ConfigCreate(node_ids) → VpnConnect
 换节点：        NodeSwitch
 换一套方案：    ConfigCreate → ConfigActivate（UI）/ VpnConnect({ config_id })
 ```
@@ -1755,6 +1755,13 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 ---
 
 ## 8. 变更记录
+
+### 3.2.1（2026-11-04，节点来源对外叫「测试节点」）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.2.1` | 元数据 | 产品口径统一 |
+| 2 | §5.1 连接链路里「用我们提供的」改为「用测试节点」；`source: "seed"` 不变 | 措辞 | 产品负责人：我们提供的节点只供测试 |
 
 ### 3.2.0（2026-11-04，批 3 修订）
 

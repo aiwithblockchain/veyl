@@ -477,7 +477,7 @@ grep -rn "app_data_dir\|veyl.db" src-tauri/src/store/db.rs | head
 | 编号 | 验证项 | 怎么验 | 通过标准 |
 |---|---|---|---|
 | B4-01 | 提问次数按用户类型 | 界面：一级走一次、二级走一次、三级走合流追问 | 与 `implementation-plan.md` 批 4 一致；问题数不超 |
-| B4-02 | `source_choice` 出现条件 | 界面：面板已生成但还没节点 | 出现「用我们提供的 / 用我自己的」；已有节点后不再出现 |
+| B4-02 | `source_choice` 出现条件 | 界面：面板已生成但还没节点 | 出现「用 Veyl 提供的测试节点（仅供试用）/ 用我自己的节点」；已有节点后不再出现 |
 | B4-03 | 六个块都能渲染 | 界面：逐个触发六种块的显示条件 | 六种都渲染正确，样式来自设计规范（`center-panel.md` §2.5） |
 | B4-04 | 未知块被忽略并记日志 | 自动：mock-llm 剧本返回 `{ "type": "banner" }` | 界面不崩、不渲染该块；日志有一行 ignore 记录（`center-panel.md` §3） |
 | B4-05 | 布局持久化并还原 | 读文件 + 界面：`sqlite3 <db> "select * from layout"`；重启应用 | 布局已落库；重启后中间区与关闭前一致，不再走一遍提问（`center-panel.md` §3） |

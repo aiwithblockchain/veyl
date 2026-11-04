@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.3.1`
+> 契约版本：`2.3.2`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -682,7 +682,7 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 **2.0 删掉了「没有 active 就用默认配置包」的第二级回退。**
 
-> 旧回退存在的理由是「全新安装没有 profile，只有默认包」。新模型里默认节点必须落成一套配置才会出现在左栏，全新安装的空态是「还没有配置」，此时**应该引导用户新建，而不是替他连一条他没选过的线路**。没有配置就报 `no_config`，由 UI 的空态与 AI 的 `source_choice` 接住。
+> 旧回退存在的理由是「全新安装没有 profile，只有默认包」。新模型里测试节点也必须落成一套配置才会出现在左栏，全新安装的空态是「还没有配置」，此时**应该引导用户新建，而不是替他连一条他没选过的线路**。没有配置就报 `no_config`，由 UI 的空态与 AI 的 `source_choice` 接住。
 
 **不变量（必须实现，不是行为描述）**
 
@@ -1181,7 +1181,7 @@ type RulesStatus = {
 | 命令 | 能力 ID | 界面元素 / 块 | 说明 |
 |---|---|---|---|
 | `config_list` | **K1** 列出与查看配置 | 左栏配置列表 | 配置级导航；节点级是 B1 |
-| `config_create` | **K2** 新建配置（数据来源：C1 / B4） | `source_choice` | 块只负责「用我们的 / 用我自己的」两个选项；落库是本命令 |
+| `config_create` | **K2** 新建配置（数据来源：C1 / B4） | `source_choice` | 块只负责「用测试节点 / 用我自己的节点」两个选项；落库是本命令 |
 | `config_detail` | **K1** 列出与查看配置 / **B1** 列出节点 | 底部节点详情 + 节点下拉 | 固定骨架元素 |
 | `config_update` | **K4** 编辑配置（分流持久化侧：G1） | 设置页 / 左栏编辑 | 在线切换是 G2，批 3 |
 | `config_delete` | **K5** 删除配置（破坏性，需二次确认） | 左栏项操作 | |
@@ -1221,7 +1221,7 @@ type RulesStatus = {
 | `测试连通` | D6 | `node_probe` |
 | `empty_hint` | 无（纯文本） | — |
 | `proxy_card` | A5 | `proxy_params` |
-| `source_choice` | C1 / B4 | `config_create`（选「用我们的」带 `source: "seed"`） |
+| `source_choice` | C1 / B4 | `config_create`（选「用测试节点」带 `source: "seed"`） |
 | `reachability` | D1 | `probe_run` |
 | `issue_card` | J1–J4 / E1–E3 | `issue_*`、`net_repair` |
 | `update_hint` | C2 / C3 | `default_profile_status` |
@@ -1339,10 +1339,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.3.1** | 批 0 + 批 3 + `ai_send_message.hidden` |
+| `contracts/commands.md` | **2.3.2** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 |
 | `contracts/events.md` | **2.1.0** | 批 0 + 批 3 |
 | `contracts/runtime.md` | **2.1.0** | 批 0 + `applied_route_revision` |
-| `contracts/tools.md` | **3.2.0** | 批 0 + 批 3 工具 + 批 3 修订 |
+| `contracts/tools.md` | **3.2.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 |
 | `data-model.md` | **3** | 批 0 + 批 3 表 + 种子排除表 |
 | `contracts/routing.md` | **1.0.0** | 批 3 设计依据 |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
@@ -1356,6 +1356,13 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.3.2（2026-11-04，节点来源对外叫「测试节点」）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.3.2` | 元数据 | 产品口径统一 |
+| 2 | §7.1 说明里的「默认节点」改为「测试节点」；`source: "seed"` 等机制名不变 | 措辞 | 产品负责人：我们提供的节点只供测试，长期方向是用户自建与供应商接入 |
 
 ### 2.3.1（2026-11-04，`hidden` 与历史回放的约束）
 
