@@ -95,7 +95,7 @@ afterEach(() => {
 });
 
 describe("PaneHandle 事件接线", () => {
-  it("真实手柄：pointerdown → pointermove → pointerup 改变宽度并持久化", () => {
+  it("真实手柄：pointerdown → pointermove → pointerup 改变宽度、捕获指针并持久化", () => {
     localStorage.setItem("veyl.ui.panelWidth", "560");
     renderHarness(1200);
     const handle = panelHandle();
@@ -104,6 +104,7 @@ describe("PaneHandle 事件接线", () => {
     expect(handle.getAttribute("aria-valuemax")).toBe("484");
 
     fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 500 });
+    expect(Element.prototype.setPointerCapture).toHaveBeenCalledWith(1);
     fireEvent.pointerMove(handle, { pointerId: 1, clientX: 540 });
     expect(screen.getByTestId("panel-width").textContent).toBe("444");
     expect(handle.getAttribute("aria-valuenow")).toBe("444");
@@ -111,6 +112,19 @@ describe("PaneHandle 事件接线", () => {
     fireEvent.pointerUp(handle, { pointerId: 1, clientX: 540 });
     expect(screen.getByTestId("panel-width").textContent).toBe("444");
     expect(localStorage.getItem("veyl.ui.panelWidth")).toBe("444");
+  });
+
+  it("真实手柄：pointerdown → pointerup 无移动不写存储", () => {
+    localStorage.setItem("veyl.ui.panelWidth", "400");
+    renderHarness(1100);
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const handle = panelHandle();
+
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 500 });
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 500 });
+
+    expect(screen.getByTestId("panel-width").textContent).toBe("384");
+    expect(setItem).not.toHaveBeenCalled();
   });
 
   it("真实手柄：pointerdown → Esc 回到按下宽度且不写存储", () => {
