@@ -17,6 +17,33 @@ pub mod xpc;
 /// macOS 只接受 `utunN` 形式（或留空让系统分配），固定私有段。
 pub const TUN_ADDRESS: &str = "172.19.0.1/30";
 
+/// TUN 设备是否真的起来了：本机接口里能看到我们固定的 TUN 地址。
+///
+/// helper 的 start 只做 sing-box check + spawn 就返回，不等 TUN 设备与路由表就绪。
+/// 设备出现是「流量真的被接管」的第一手证据；没有它就不能对用户说接管成功。
+pub fn device_is_up(addrs: &[LocalAddr]) -> bool {
+    let tun_ip = TUN_ADDRESS.split('/').next().unwrap_or(TUN_ADDRESS);
+    addrs.iter().any(|addr| addr.address.to_string() == tun_ip)
+}
+
+/// 轮询等 TUN 设备出现，最多等 `timeout`。返回是否等到。
+pub async fn wait_until_device_up(timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        // `collect()` 会起 `ifconfig`，别占着 async 的执行线程。
+        let up = tokio::task::spawn_blocking(|| device_is_up(&collect()))
+            .await
+            .unwrap_or(false);
+        if up {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+}
+
 /// `dns` 必须在列表里，否则 `hijack-dns` 规则不会命中（`tun-mode.md` §3）。
 pub const SNIFFERS: [&str; 4] = ["http", "tls", "quic", "dns"];
 pub const SNIFF_TIMEOUT: &str = "300ms";

@@ -2678,9 +2678,13 @@ impl VpnToolServices for WiredServices {
             Err(error) => {
                 log::warn!("分流模式切换后自动重连失败：{error}");
                 self.emit_routing_changed(&updated, "mode", None, None, false);
+                // `abort_connection` 只撤系统代理、不停 runtime，引擎可能还在
+                // Starting/Running。摘要必须按真实状态说，不能写死「未连接」。
+                let status = self.manager.status().await;
                 let mut data = self.route_state_json(&updated, None, None);
                 data["hot_switched"] = json!(false);
                 data["reconnect"] = json!("reconnect_failed");
+                data["runtime_state"] = json!(status.state.as_str());
                 Ok(data)
             }
         }
@@ -3371,6 +3375,15 @@ impl WiredServices {
         };
 
         log::info!("TUN 已连接 pid={pid} config={}", config.id);
+        // helper 只等 sing-box check + spawn，不等 TUN 设备与路由表。
+        // 再看一眼本机接口：设备没出现，就不能对用户说接管成功。
+        let tun_device_up =
+            crate::tun::wait_until_device_up(std::time::Duration::from_millis(1500)).await;
+        if tun_device_up {
+            log::info!("TUN 设备已就绪 pid={pid}");
+        } else {
+            log::warn!("TUN 已启动 pid={pid}，但 1.5s 内没看到 TUN 设备，接管状态待确认");
+        }
         Ok(json!({
             "contract_version": crate::runtime::CONTRACT_VERSION,
             "state": "running",
@@ -3379,11 +3392,14 @@ impl WiredServices {
             "mixed_port": null,
             "config_id": config.id,
             "config_name": config.name,
+            "routing_mode": config.routing_mode,
             "node_id": current.id,
             "node_name": current.name,
             "applied_route_revision": config.route_revision,
             "connected_since": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "system_proxy_enabled": false,
+            "tun_device_up": tun_device_up,
+            "exit_ip": Value::Null,
         }))
     }
 

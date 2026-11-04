@@ -59,9 +59,32 @@ fn summarise_route_change(data: &Value) -> String {
             Some("reconnected") => {
                 format!("分流模式已切换为 {mode}{targets}，已重新连接生效。")
             }
-            Some("reconnect_failed") => format!(
-                "分流模式已保存为 {mode}{targets}，但自动重连失败，当前未连接，需要重新连接。"
-            ),
+            Some("reconnect_failed") => {
+                // 切换后的重连失败不代表已经断开：`abort_connection` 只撤代理、
+                // 不停 runtime，引擎可能还在 Running/Starting。按真实 state 说。
+                let state = data
+                    .get("runtime_state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                match state {
+                    "running" | "degraded" | "starting" | "restarting" => format!(
+                        "分流模式已保存为 {mode}{targets}，但自动重连时报错；\
+                         运行时当前 state={state}，是否生效要用 RuntimeStatus 确认。"
+                    ),
+                    "idle" | "stopping" => format!(
+                        "分流模式已保存为 {mode}{targets}，自动重连失败，\
+                         运行时已停止（state={state}），当前没有连上。"
+                    ),
+                    "failed" => format!(
+                        "分流模式已保存为 {mode}{targets}，自动重连失败，\
+                         运行时已失败（state=failed），当前没有连上。"
+                    ),
+                    _ => format!(
+                        "分流模式已保存为 {mode}{targets}，自动重连失败，\
+                         运行时状态未知，是否生效要用 RuntimeStatus 确认。"
+                    ),
+                }
+            }
             _ => format!("分流模式已设为 {mode}{targets}，下一次连接生效。"),
         }
     }
@@ -394,5 +417,83 @@ impl Tool for RulesStatusTool {
             Err(error) => ToolOutcome::fail(failure(error)),
         };
         envelope::finish(ctx, "RulesStatus", outcome)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn changed(extra: serde_json::Value) -> String {
+        let mut data = json!({
+            "routing_mode": "proxy_all",
+            "targets": [],
+            "hot_switched": false,
+            "reconnect": null,
+        });
+        // 用对象插入而不是下标赋值：`Value` 只保证实现了 `Index<&str>`。
+        if let (Some(target), Some(source)) = (data.as_object_mut(), extra.as_object()) {
+            for (key, value) in source {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        summarise_route_change(&data)
+    }
+
+    #[test]
+    fn a_hot_switch_says_the_connection_was_not_interrupted() {
+        let text = changed(json!({ "hot_switched": true }));
+        assert!(text.contains("热切换"), "{text}");
+        assert!(text.contains("连接未中断"), "{text}");
+    }
+
+    #[test]
+    fn the_new_mode_is_always_named() {
+        let text = changed(json!({ "reconnect": "not_running" }));
+        assert!(text.contains("proxy_all"), "{text}");
+        assert!(text.contains("下一次连接生效"), "{text}");
+    }
+
+    #[test]
+    fn selected_categories_are_listed() {
+        let text = changed(json!({
+            "routing_mode": "proxy_selected",
+            "targets": ["social", "streaming"],
+            "reconnect": "not_running",
+        }));
+        assert!(text.contains("目标分类：social、streaming"), "{text}");
+    }
+
+    /// 重连失败时 `abort_connection` 只撤代理、不停 runtime：
+    /// 引擎还在 running 就不能说「没有连上」。
+    #[test]
+    fn a_failed_reconnect_does_not_invent_a_disconnection() {
+        let text = changed(json!({
+            "reconnect": "reconnect_failed",
+            "runtime_state": "running",
+        }));
+        assert!(!text.contains("没有连上"), "{text}");
+        assert!(text.contains("state=running"), "{text}");
+        assert!(text.contains("RuntimeStatus"), "要给出确认途径：{text}");
+    }
+
+    #[test]
+    fn a_failed_reconnect_with_a_dead_runtime_says_so() {
+        for state in ["idle", "failed"] {
+            let text = changed(json!({
+                "reconnect": "reconnect_failed",
+                "runtime_state": state,
+            }));
+            assert!(text.contains("没有连上"), "{state}: {text}");
+            assert!(text.contains(&format!("state={state}")), "{state}: {text}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_runtime_state_is_reported_as_unknown() {
+        let text = changed(json!({ "reconnect": "reconnect_failed" }));
+        assert!(text.contains("状态未知"), "{text}");
+        assert!(!text.contains("没有连上"), "{text}");
     }
 }

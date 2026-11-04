@@ -261,6 +261,35 @@ impl Tool for ConfigCreateTool {
             );
         };
 
+        let source = match super::optional_string(&input, "source") {
+            Ok(value) => value,
+            Err(error) => return envelope::finish(ctx, "ConfigCreate", ToolOutcome::fail(error)),
+        };
+        // 唯一的硬门禁：`seed` 会把用户接到我们的服务器上，必须先问过并得到明确选择。
+        // 空配置与 nodeIds 这两条目前只有提示词约束——它们不涉及我们的服务器，
+        // 加门禁的成本大于收益（见 `SAFETY_RULES` 第 2 条）。
+        if source.as_deref() == Some("seed") {
+            let granted = crate::tools::policy::current_request_id(&ctx.session_id)
+                .map(|request_id| {
+                    crate::agent::questions::seed_consent_granted(&ctx.session_id, &request_id)
+                })
+                .unwrap_or(false);
+            if !granted {
+                return envelope::finish(
+                    ctx,
+                    "ConfigCreate",
+                    ToolOutcome::fail(
+                        AivpnError::new(
+                            "PRECONDITION_FAILED",
+                            "还没有确认节点来源：先用 AskUserQuestion 问用户「节点从哪来」，\
+                             用户选了「用 Veyl 提供的默认节点」之后才能用默认节点",
+                        )
+                        .with_details(json!({ "reason": "seed_source_not_confirmed" })),
+                    ),
+                );
+            }
+        }
+
         let node_ids = input.get("node_ids").and_then(Value::as_array).map(|items| {
             items
                 .iter()
@@ -275,12 +304,7 @@ impl Tool for ConfigCreateTool {
                 name: name.to_string(),
                 connect_mode: connect_mode.to_string(),
                 routing_mode: routing_mode.to_string(),
-                source: match super::optional_string(&input, "source") {
-                    Ok(value) => value,
-                    Err(error) => {
-                        return envelope::finish(ctx, "ConfigCreate", ToolOutcome::fail(error))
-                    }
-                },
+                source,
                 node_ids,
                 targets: input.get("targets").and_then(Value::as_array).map(|items| {
                     items
@@ -785,5 +809,64 @@ impl Tool for NodeCreateTool {
             Err(error) => ToolOutcome::fail(failure(error)),
         };
         envelope::finish(ctx, "NodeCreate", outcome)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// seed：绑定当前种子的全部节点，摘要要给出 id 和节点名，
+    /// 否则模型只能再调一次 `ConfigList` 去找 id。
+    #[test]
+    fn a_seed_configuration_summary_names_the_id_and_its_nodes() {
+        let text = summarise_created(&json!({
+            "config_id": "cfg_3f9a",
+            "name": "浏览器代理",
+            "nodes": [{ "name": "meshflux69" }, { "name": "meshflux10" }],
+        }));
+        assert!(text.contains("cfg_3f9a"), "{text}");
+        assert!(text.contains("浏览器代理"), "{text}");
+        assert!(text.contains("2 个节点"), "{text}");
+        assert!(text.contains("meshflux69、meshflux10"), "{text}");
+    }
+
+    /// empty：先建空配置再加节点，摘要要说明还没有节点。
+    #[test]
+    fn an_empty_configuration_summary_says_it_has_no_nodes() {
+        let text = summarise_created(&json!({
+            "config_id": "cfg_empty",
+            "name": "我的节点",
+            "nodes": [],
+        }));
+        assert!(text.contains("cfg_empty"), "{text}");
+        assert!(text.contains("暂未添加节点"), "{text}");
+        assert!(!text.contains("个节点（"), "{text}");
+    }
+
+    /// nodeIds：用户自己挑了几个节点建配置。
+    #[test]
+    fn a_node_ids_configuration_summary_lists_the_picked_node() {
+        let text = summarise_created(&json!({
+            "config_id": "cfg_own",
+            "name": "自己的",
+            "nodes": [{ "name": "tokyo-1" }],
+        }));
+        assert!(text.contains("1 个节点（tokyo-1）"), "{text}");
+    }
+
+    #[test]
+    fn a_long_seed_list_is_truncated_instead_of_flooding_the_summary() {
+        let nodes: Vec<Value> = (0..6)
+            .map(|index| json!({ "name": format!("node{index}") }))
+            .collect();
+        let text = summarise_created(&json!({
+            "config_id": "cfg_many",
+            "name": "C",
+            "nodes": nodes,
+        }));
+        assert!(text.contains("6 个节点"), "{text}");
+        assert!(text.contains("等 6 个"), "{text}");
+        assert!(!text.contains("node5"), "超过 3 个就不该再点名：{text}");
     }
 }

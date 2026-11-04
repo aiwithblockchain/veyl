@@ -3,7 +3,7 @@
 //! 语义（契约 1.2.0）：单选，answer 必须是 options 之一；空字符串表示跳过。
 //! 300 秒未答由 Host 自动回空串；请求结束 / 取消 / 会话删除时清理，避免 oneshot 永远挂着。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -43,6 +43,29 @@ fn pending() -> &'static Mutex<HashMap<String, PendingQuestion>> {
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// 「用 Veyl 提供的默认节点」这个选项里一定会出现的词。
+///
+/// 选项文案由模型生成，可能写成「使用 Veyl 的默认节点」「用默认节点」，
+/// 所以按语义片段认，不按整串相等——认错方向只会多问一次，不会少问。
+const SEED_OPTION_MARKER: &str = "默认节点";
+
+/// 用户已明确选择默认节点的记录，键是 (session_id, request_id)。
+///
+/// 只为一件事存在：挡住绕开提示词、直接 `ConfigCreate(source:"seed")` 的路径。
+/// 请求结束就清掉——下一个请求要重新问，用户没答过就不能用我们的服务器。
+fn seed_consents() -> &'static Mutex<HashSet<(String, String)>> {
+    static CONSENTS: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    CONSENTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 本请求里用户是否明确选过「用 Veyl 提供的默认节点」。
+pub fn seed_consent_granted(session_id: &str, request_id: &str) -> bool {
+    seed_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&(session_id.to_string(), request_id.to_string()))
 }
 
 /// 收到 Claurst 的提问：登记 pending、发事件、启动超时。
@@ -130,11 +153,11 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
             Some(question) if question.session_id != session_id => {
                 return Err(not_pending());
             }
-            Some(question) => Some(question.options.clone()),
+            Some(question) => Some((question.options.clone(), question.request_id.clone())),
         }
     };
 
-    let Some(options) = matched else {
+    let Some((options, request_id)) = matched else {
         return Err(not_pending());
     };
     if !answer.is_empty() && !options.iter().any(|option| option == answer) {
@@ -146,6 +169,13 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
 
     if !settle(question_id, answer.to_string()) {
         return Err(not_pending());
+    }
+    // 记在 settle 之后：同一问题被并发答两次时，失败的那次不该留下同意记录。
+    if !answer.is_empty() && answer.contains(SEED_OPTION_MARKER) {
+        seed_consents()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert((session_id.to_string(), request_id));
     }
     Ok(())
 }
@@ -192,6 +222,12 @@ pub fn cleanup_request(session_id: &str, request_id: &str) {
     for id in ids {
         settle(&id, String::new());
     }
+    seed_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(session, request)| {
+            !(session.as_str() == session_id && request.as_str() == request_id)
+        });
 }
 
 /// 会话删除：作废该会话所有未答问题。
@@ -207,6 +243,10 @@ pub fn cleanup_session(session_id: &str) {
     for id in ids {
         settle(&id, String::new());
     }
+    seed_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(session, _)| session.as_str() != session_id);
 }
 
 #[cfg(test)]
@@ -277,5 +317,68 @@ mod memory_tests {
             1,
             "被拒绝的回答不能让问题消失"
         );
+    }
+
+    /// 选了「用 Veyl 提供的默认节点」才留下同意记录，且只对当前请求有效。
+    #[tokio::test]
+    async fn choosing_the_default_nodes_grants_consent_until_the_request_ends() {
+        let (event, _rx) = event(
+            "节点从哪来？",
+            &["用 Veyl 提供的默认节点", "用我自己的节点"],
+        );
+        register("ses_seed", "req_seed", event);
+        let id = list_pending("ses_seed")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert!(!seed_consent_granted("ses_seed", "req_seed"));
+        reply("ses_seed", &id, "用 Veyl 提供的默认节点").unwrap();
+        assert!(seed_consent_granted("ses_seed", "req_seed"));
+        assert!(
+            !seed_consent_granted("ses_seed", "req_other"),
+            "同意只属于当前请求"
+        );
+
+        cleanup_request("ses_seed", "req_seed");
+        assert!(
+            !seed_consent_granted("ses_seed", "req_seed"),
+            "请求结束后必须清掉：下一次要重新问"
+        );
+    }
+
+    #[tokio::test]
+    async fn choosing_own_nodes_does_not_grant_consent() {
+        let (event, _rx) = event(
+            "节点从哪来？",
+            &["用 Veyl 提供的默认节点", "用我自己的节点"],
+        );
+        register("ses_own", "req_own", event);
+        let id = list_pending("ses_own")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        reply("ses_own", &id, "用我自己的节点").unwrap();
+        assert!(!seed_consent_granted("ses_own", "req_own"));
+        cleanup_request("ses_own", "req_own");
+    }
+
+    /// 超时自动跳过不算同意。
+    #[tokio::test]
+    async fn skipping_the_question_does_not_grant_consent() {
+        let (event, _rx) = event(
+            "节点从哪来？",
+            &["用 Veyl 提供的默认节点", "用我自己的节点"],
+        );
+        register("ses_skip", "req_skip", event);
+        let id = list_pending("ses_skip")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        reply("ses_skip", &id, "").unwrap();
+        assert!(!seed_consent_granted("ses_skip", "req_skip"));
+        cleanup_request("ses_skip", "req_skip");
     }
 }

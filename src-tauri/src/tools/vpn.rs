@@ -82,6 +82,12 @@ impl Tool for VpnConnectTool {
 /// 连接成功后的摘要：模型下一步就要向用户报「用的哪条线路、代理地址、出口 IP」。
 /// 少给一样它就得再调一次 `RuntimeStatus`，首启的轮次预算经不起这么花。
 fn connect_summary(data: &Value) -> String {
+    // 判断模式只看 `mode`。以前用 `mixed_port` 是否为 null 猜 TUN，
+    // 而 TUN 的 payload 里 mixed_port 恰好也是 null——猜对了纯属巧合。
+    if data.get("mode").and_then(Value::as_str) == Some("tun") {
+        return tun_summary(data);
+    }
+
     let name = data
         .get("config_name")
         .and_then(Value::as_str)
@@ -92,8 +98,7 @@ fn connect_summary(data: &Value) -> String {
     }
     match data.get("mixed_port").and_then(Value::as_u64) {
         Some(port) => parts.push(format!("代理地址 127.0.0.1:{port}")),
-        // TUN 模式不监听本机端口，接管靠路由表。
-        None => parts.push("全部流量已接管".to_string()),
+        None => parts.push("本机代理端口未拿到".to_string()),
     }
     match data.get("exit_ip").and_then(Value::as_str) {
         Some(ip) => {
@@ -105,6 +110,135 @@ fn connect_summary(data: &Value) -> String {
         None => parts.push("出口 IP 仍在探测中".to_string()),
     }
     format!("{}。", parts.join("，"))
+}
+
+/// TUN 的摘要不能说假话：
+/// - helper 的 start 只保证 sing-box 起来了，不等 TUN 设备与路由表；
+/// - `proxy_selected` 只接管选定的服务，不能说「全部」；
+/// - 没有设备证据时，只能说「还没确认接管」，出口 IP 单独也不能证明全量接管。
+fn tun_summary(data: &Value) -> String {
+    let name = data
+        .get("config_name")
+        .and_then(Value::as_str)
+        .unwrap_or("当前配置");
+    let mut parts = vec![format!("已启动 TUN：配置「{name}」")];
+    if let Some(node) = data.get("node_name").and_then(Value::as_str) {
+        parts.push(format!("节点「{node}」"));
+    }
+
+    let routing = data
+        .get("routing_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let device_up = data
+        .get("tun_device_up")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !device_up {
+        parts.push("但还没确认接管（没看到 TUN 设备），不要告诉用户已经接管".to_string());
+    } else if routing == "proxy_all" {
+        parts.push("TUN 设备已就绪，全部流量已接管".to_string());
+    } else if routing == "direct" {
+        parts.push("TUN 设备已就绪，但当前分流模式是直连，流量没有走进 VPN".to_string());
+    } else {
+        parts.push("TUN 设备已就绪，按分流规则接管选定服务".to_string());
+    }
+
+    match data.get("exit_ip").and_then(Value::as_str) {
+        Some(ip) => parts.push(format!("出口 IP {ip}")),
+        None => parts.push("出口尚未确认".to_string()),
+    }
+    format!("{}。", parts.join("，"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_proxy_connection_reports_address_ip_and_latency() {
+        let text = connect_summary(&json!({
+            "mode": "system_proxy",
+            "config_name": "浏览器代理",
+            "node_name": "meshflux69",
+            "mixed_port": 63486,
+            "exit_ip": "203.0.113.7",
+            "latency_ms": 252,
+        }));
+        assert!(text.starts_with("已连接"), "{text}");
+        assert!(text.contains("127.0.0.1:63486"), "{text}");
+        assert!(text.contains("203.0.113.7"), "{text}");
+        assert!(text.contains("252ms"), "{text}");
+    }
+
+    #[test]
+    fn a_proxy_connection_without_exit_ip_stays_pending() {
+        let text = connect_summary(&json!({
+            "mode": "system_proxy",
+            "config_name": "C",
+            "mixed_port": 7890,
+            "exit_ip": null,
+        }));
+        assert!(text.contains("仍在探测中"), "{text}");
+    }
+
+    /// helper 只等 sing-box 起来，不等 TUN 设备。没看到设备就不能说接管了。
+    #[test]
+    fn a_tun_start_without_a_device_never_claims_takeover() {
+        let text = connect_summary(&json!({
+            "mode": "tun",
+            "config_name": "C",
+            "routing_mode": "proxy_all",
+            "mixed_port": null,
+            "tun_device_up": false,
+        }));
+        assert!(text.contains("还没确认接管"), "{text}");
+        assert!(!text.contains("全部"), "设备没起来不能声称任何接管：{text}");
+        assert!(
+            !text.starts_with("已连接"),
+            "TUN 只能说「已启动」，不能说「已连接」：{text}"
+        );
+    }
+
+    #[test]
+    fn proxy_all_with_the_device_up_may_claim_full_takeover() {
+        let text = connect_summary(&json!({
+            "mode": "tun",
+            "config_name": "C",
+            "routing_mode": "proxy_all",
+            "mixed_port": null,
+            "tun_device_up": true,
+        }));
+        assert!(text.contains("全部流量已接管"), "{text}");
+        assert!(text.contains("出口尚未确认"), "{text}");
+    }
+
+    /// 只接管选定服务时，「全部」这两个字一次都不能出现。
+    #[test]
+    fn proxy_selected_never_claims_all_traffic() {
+        let text = connect_summary(&json!({
+            "mode": "tun",
+            "config_name": "C",
+            "routing_mode": "proxy_selected",
+            "mixed_port": null,
+            "tun_device_up": true,
+        }));
+        assert!(!text.contains("全部"), "{text}");
+        assert!(text.contains("按分流规则接管选定服务"), "{text}");
+    }
+
+    #[test]
+    fn a_direct_routing_mode_does_not_pretend_traffic_goes_through_the_vpn() {
+        let text = connect_summary(&json!({
+            "mode": "tun",
+            "config_name": "C",
+            "routing_mode": "direct",
+            "tun_device_up": true,
+        }));
+        assert!(text.contains("没有走进 VPN"), "{text}");
+        assert!(!text.contains("全部流量已接管"), "{text}");
+    }
 }
 
 pub struct VpnDisconnectTool {

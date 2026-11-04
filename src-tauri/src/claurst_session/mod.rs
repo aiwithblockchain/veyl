@@ -77,9 +77,10 @@ const SAFETY_RULES: &str = "\
 # 安全底线（任何情况下都不能违背）
 
 1. 不得声称连接成功，除非运行时状态返回 running 且有出口 IP。
-2. **节点来源有三个**：默认节点（`ConfigCreate` 的 `source: \"seed\"`）、
-   用户自己提供的（订阅链接或手动填写的五个字段）、以及节点目录 `CatalogSearch`
-   （可选来源，没有可用后端时不要依赖它）。
+2. **节点来源只有两个**：默认节点（`ConfigCreate` 的 `source: \"seed\"`）和
+   用户自己提供的（订阅链接或手动填写的五个字段）。
+   `CatalogSearch` 只读参考——它拿不到可用凭据，`ConfigCreate` 也不接受它，
+   **不能当作创建配置的来源**，更不能拿「目录里找一个」当理由跳过询问。
    **在用户明确选择「用 Veyl 提供的默认节点」之前，不得以任何来源创建配置**——
    不得直接 `source: \"seed\"`，也不得先建空配置再默默塞进默认节点。没问过就先问。
    **来源之外一律不得编造**：不得虚构服务器地址、端口、密码或节点名。
@@ -89,12 +90,28 @@ const SAFETY_RULES: &str = "\
 5. 失败时给出下一步建议，不要重复同样的失败调用超过两次。
 6. 用户的语言优先，默认用中文回答，简洁、不堆砌参数。";
 
-/// 单轮对话最多几轮「模型 → 工具 → 模型」。
+/// 本地是否已经有配置。读不到存储时按「有」处理——
+/// 30 轮只该给确定的首启，判断不了就别放宽。
+fn has_any_config() -> bool {
+    let Some(store) = crate::store::global() else {
+        return true;
+    };
+    let conn = store.conn();
+    match crate::store::configs::list(&conn) {
+        Ok(configs) => !configs.is_empty(),
+        Err(_) => true,
+    }
+}
+
+/// 普通对话每轮最多几次「模型 → 工具 → 模型」。
 ///
-/// 首启这一段光必要步骤就有 7 步（两问 + 确认 + 建配置 + 设分流 + 连接 + 报告），
+/// 回访对话一般几轮就结束；模型跑偏时，上限就是 token 的闸门。
+const MAX_TURNS: u32 = 12;
+
+/// 首启放宽到 30：两问 + 确认 + 建配置 + 设分流 + 连接 + 报告就有 7 步，
 /// 再加合理的校验/重试，12 会在连上之前耗尽——配置建出来了但没连上。
-/// 30 只给首启这种一次性流程用；回访对话一般几轮就结束，不会真的跑到 30。
-const MAX_TURNS: u32 = 30;
+/// 只在「新会话且本地还没有任何配置」时启用，见 `send_message`。
+const FIRST_RUN_MAX_TURNS: u32 = 30;
 
 pub struct AivpnSession {
     session_id: String,
@@ -208,11 +225,19 @@ impl AivpnSession {
         *self.cancel.lock().await = Some(cancel.clone());
 
         let request_session_id = self.session_id.clone();
+        // 首启 = 新会话 + 本地还没有任何配置。只在这种时候放宽轮次上限：
+        // 普通对话放 30 轮，模型跑偏时会成倍烧 token。
+        let first_run = !has_any_config();
         let mut messages = self.messages.lock().await;
         drop_dangling_tool_use(&mut messages);
+        let first_run = first_run && messages.is_empty();
         // 只记长度，不记内容——用户输入不进日志。
         log::debug!("AI 收到用户消息 {} 字", text.chars().count());
         messages.push(Message::user(text));
+
+        // 每轮按场景选上限，不改会话默认值。
+        let mut query_config = self.query_config.clone();
+        query_config.max_turns = if first_run { FIRST_RUN_MAX_TURNS } else { MAX_TURNS };
 
         // 工具审计要把调用记到当前请求上（工具自己拿不到 request_id）。
         crate::tools::policy::set_current_request(&self.session_id, &request_id);
@@ -378,7 +403,7 @@ impl AivpnSession {
             &mut messages,
             &self.tools,
             &self.context,
-            &self.query_config,
+            &query_config,
             Arc::clone(&self.cost_tracker),
             Some(tx),
             cancel.clone(),
