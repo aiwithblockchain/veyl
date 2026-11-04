@@ -1,12 +1,12 @@
 /**
  * 事件与 UI → Host 调用的前端契约。
  *
- * 唯一来源：`docs/contracts/events.md` v2.1.0。
+ * 唯一来源：`docs/contracts/events.md` v2.2.0。
  * 本文件是事件名常量的唯一来源——组件、store、bridge 只能引用
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.1.0" as const;
+export const CONTRACT_VERSION = "2.2.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -256,6 +256,10 @@ export interface RuntimeHealthChangedPayload {
   health: HealthSnapshot;
   /** 运行时流量统计；旧版后端不返回，UI 保留占位。 */
   traffic?: TrafficStats | null;
+  /** 活跃连接数；旧版后端不返回。 */
+  connections?: number | null;
+  /** 当前节点延迟；旧版后端不返回。 */
+  latency_ms?: number | null;
   emitted_at: string;
 }
 

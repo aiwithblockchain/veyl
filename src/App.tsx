@@ -148,6 +148,8 @@ export default function App() {
   };
   // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
   const healthVersion = useRef(0);
+  // 快照请求的单调序号：只接受最新一次请求，避免旧快照晚到覆盖新状态。
+  const snapshotSeq = useRef(0);
 
   const session = activeSession(state);
 
@@ -157,14 +159,21 @@ export default function App() {
   };
 
   const refreshSnapshot = useCallback(() => {
+    const requestId = ++snapshotSeq.current;
     const versionAtRequest = healthVersion.current;
     void bridge.getRuntimeSnapshot().then((snapshot) => {
-      if (!snapshot) return;
+      if (!snapshot || requestId !== snapshotSeq.current) return;
       const base = snapshotToView(snapshot);
       setRuntime((current) =>
         versionAtRequest === healthVersion.current
           ? base
-          : { ...base, health: current.health, traffic: current.traffic },
+          : {
+              ...base,
+              health: current.health,
+              traffic: current.traffic,
+              connections: current.connections,
+              latency_ms: current.latency_ms,
+            },
       );
     });
   }, [bridge]);

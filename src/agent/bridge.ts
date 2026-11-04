@@ -338,15 +338,37 @@ export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): Runtime
         connected_since: keepConnection ? view.connected_since : null,
         latency_ms: keepConnection ? view.latency_ms : null,
         traffic: keepConnection ? view.traffic : null,
+        connections: keepConnection ? view.connections : null,
       };
     }
-    case AGENT_EVENTS.runtimeHealthChanged:
+    case AGENT_EVENTS.runtimeHealthChanged: {
+      const online = view.state === "running" || view.state === "degraded";
+      const payload = event.payload;
+      const traffic = online
+        ? "traffic" in payload
+          ? payload.traffic ?? null
+          : view.traffic
+        : null;
+      const connections = online
+        ? "connections" in payload
+          ? payload.connections ?? null
+          : view.connections
+        : null;
+      const latency = online
+        ? "latency_ms" in payload
+          ? payload.latency_ms ?? null
+          : view.latency_ms
+        : null;
       return {
         ...view,
-        health: event.payload.health,
-        traffic:
-          "traffic" in event.payload ? event.payload.traffic ?? null : view.traffic,
+        health: payload.health
+          ? { ...EMPTY_HEALTH, ...payload.health }
+          : view.health,
+        traffic,
+        connections,
+        latency_ms: latency,
       };
+    }
     default:
       return view;
   }
@@ -365,8 +387,10 @@ export function snapshotToView(snapshot: RuntimeSnapshot): RuntimeView {
     node_name: snapshot.node_name ?? null,
     config_hash: snapshot.config_hash ?? null,
     system_proxy_enabled: snapshot.system_proxy_enabled,
-    health: snapshot.health,
-    connections: snapshot.connections,
+    health: snapshot.health
+      ? { ...EMPTY_HEALTH, ...snapshot.health }
+      : { ...EMPTY_HEALTH },
+    connections: snapshot.connections ?? null,
     restart_count: snapshot.restart_count,
     last_error: snapshot.last_error,
     mixed_port: snapshot.mixed_port ?? null,
