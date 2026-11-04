@@ -14,7 +14,13 @@ use tokio::sync::oneshot;
 use super::app_handle;
 use crate::claurst_session::events::{now, EV_ASK_USER_QUESTION};
 
-const ANSWER_TIMEOUT_MS: i64 = 300_000;
+/// 等用户回答的时限。
+///
+/// 首启那两个问题是产品主流程，5 分钟不够——用户去倒杯水回来就没了。
+/// 但也不能永不超时：这一轮对话会一直挂着等一个 oneshot。
+/// 15 分钟是「人可能离开」与「别把会话挂死」之间的折中；
+/// 而且超时之后问题仍然可以恢复，代价是可控的。
+const ANSWER_TIMEOUT_MS: i64 = 15 * 60 * 1000;
 
 /// 提问工具的注册名。恢复时靠它在 `tool_calls` 里认人。
 const ASK_TOOL: &str = "AskUserQuestion";
@@ -171,7 +177,7 @@ fn reply_recovered(
     };
     if row.session_id.as_deref() != Some(session_id)
         || row.tool_name != ASK_TOOL
-        || row.finished_at.is_some()
+        || !crate::store::tool_calls::is_unanswered(&row)
     {
         return Err(not_pending());
     }
@@ -202,11 +208,15 @@ fn question_options(args: &Value) -> Vec<String> {
 fn recovered_questions(store: &crate::store::Store, session_id: &str) -> Vec<Value> {
     let row = {
         let conn = store.conn();
-        crate::store::tool_calls::latest_unfinished(&conn, session_id, ASK_TOOL).ok().flatten()
+        crate::store::tool_calls::latest(&conn, session_id, ASK_TOOL).ok().flatten()
     };
     let Some(row) = row else {
         return Vec::new();
     };
+    // 最新那条就是这笔提问；它带着答案就不再恢复。
+    if !crate::store::tool_calls::is_unanswered(&row) {
+        return Vec::new();
+    }
     let options = question_options(&row.args);
     if options.is_empty() {
         return Vec::new();
@@ -217,6 +227,8 @@ fn recovered_questions(store: &crate::store::Store, session_id: &str) -> Vec<Val
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    // `expires_at` 必须是一个**还没到**的时间：前端拿到 past 值会立刻把它关掉。
+    // 这条问题本来就是超时过或被重启打断的，重新展示就重新计时。
     vec![json!({
         "question_id": row.id,
         "session_id": session_id,
@@ -224,7 +236,7 @@ fn recovered_questions(store: &crate::store::Store, session_id: &str) -> Vec<Val
         "question": question,
         "options": options,
         "created_at": row.created_at,
-        "expires_at": row.created_at + ANSWER_TIMEOUT_MS,
+        "expires_at": now_ms() + ANSWER_TIMEOUT_MS,
     })]
 }
 
@@ -376,5 +388,99 @@ mod recovery_tests {
         let store = store_with_question("ses_e", "toolu_5", false);
         assert!(recovered_questions(&store, "ses_other").is_empty());
         assert!(reply_recovered(&store, "ses_other", "toolu_5", "").is_err());
+    }
+
+    /// 超时路径的真实形态：`finish()` 被调用、`finished_at` 有值、结果是个空串。
+    fn store_with_timed_out_question(session: &str, tool_id: &str) -> Store {
+        let store = Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn();
+            crate::store::tool_calls::begin(
+                &conn,
+                &crate::store::tool_calls::NewCall {
+                    id: tool_id,
+                    session_id: Some(session),
+                    request_id: Some("req_1"),
+                    tool_name: ASK_TOOL,
+                    args: &json!({
+                        "question": "你主要想用它做什么？",
+                        "options": ["仅使用网页浏览网站", "APP 也需要使用 VPN", "其它服务"]
+                    }),
+                },
+            )
+            .unwrap();
+            // 300 秒到点时就是这么写的：空串 + finished_at
+            crate::store::tool_calls::finish(
+                &conn,
+                tool_id,
+                &Value::String(String::new()),
+                false,
+            )
+            .unwrap();
+        }
+        store
+    }
+
+    /// **判据必须看结果内容，不能看 `finished_at`。**
+    /// 超时会写 `finished_at` 但结果是空串，按 `finished_at` 判就再也恢复不出来。
+    #[test]
+    fn a_timed_out_question_is_still_restored() {
+        let store = store_with_timed_out_question("ses_t", "toolu_t");
+        let restored = recovered_questions(&store, "ses_t");
+        assert_eq!(restored.len(), 1, "超时没人答的问题重启后仍应出现");
+        assert_eq!(restored[0]["question_id"], "toolu_t");
+    }
+
+    /// 超时之后再回来点选项，也算数。
+    #[test]
+    fn answering_a_timed_out_question_writes_the_answer() {
+        let store = store_with_timed_out_question("ses_u", "toolu_u");
+        reply_recovered(&store, "ses_u", "toolu_u", "仅使用网页浏览网站").unwrap();
+
+        assert!(recovered_questions(&store, "ses_u").is_empty(), "答过之后不该再出现");
+        let conn = store.conn();
+        let row = crate::store::tool_calls::get(&conn, "toolu_u").unwrap().unwrap();
+        assert_eq!(row.result, Some(Value::String("仅使用网页浏览网站".into())));
+    }
+
+    /// 已经有新答案的那条不该因为「更早那条是空的」而被翻出来。
+    #[test]
+    fn only_the_latest_question_of_a_session_is_considered() {
+        let store = store_with_timed_out_question("ses_v", "toolu_old");
+        {
+            let conn = store.conn();
+            crate::store::tool_calls::begin(
+                &conn,
+                &crate::store::tool_calls::NewCall {
+                    id: "toolu_new",
+                    session_id: Some("ses_v"),
+                    request_id: Some("req_2"),
+                    tool_name: ASK_TOOL,
+                    args: &json!({ "question": "第二个问题", "options": ["A", "B"] }),
+                },
+            )
+            .unwrap();
+            crate::store::tool_calls::finish(&conn, "toolu_new", &Value::String("A".into()), false)
+                .unwrap();
+        }
+        assert!(
+            recovered_questions(&store, "ses_v").is_empty(),
+            "最新一条已经答过，更早那条超时的不能再冒出来"
+        );
+    }
+
+    /// 恢复出来的提问必须带一个**未来**的过期时间：
+    /// 前端 `expiresAt <= now` 会立刻把它关掉，给原始的 createdAt+超时 等于白恢复。
+    #[test]
+    fn a_restored_question_gets_a_fresh_expiry() {
+        let store = store_with_timed_out_question("ses_w", "toolu_w");
+        let restored = recovered_questions(&store, "ses_w");
+        assert_eq!(restored.len(), 1);
+        let expires_at = restored[0]["expires_at"].as_i64().unwrap();
+        let now = now_ms();
+        assert!(
+            expires_at > now,
+            "过期时间必须在未来（现在 {now}，给的是 {expires_at}）"
+        );
     }
 }
