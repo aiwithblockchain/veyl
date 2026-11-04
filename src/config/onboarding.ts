@@ -49,6 +49,24 @@ export function shouldKickOffFirstRun(input: {
   );
 }
 
+/**
+ * 零配置时右栏必须摆到用户面前——会话里是不是已经有开场白不影响这一点。
+ * 本次运行内手动关过就不替他打开；下次启动仍是零配置会再展开一次。
+ */
+export function shouldOpenPanelForEmptyConfigs(input: {
+  aiReady: boolean;
+  loading: boolean;
+  configCount: number;
+  closedThisRun: boolean;
+}): boolean {
+  return (
+    input.aiReady &&
+    !input.loading &&
+    input.configCount === 0 &&
+    !input.closedThisRun
+  );
+}
+
 /** 首启页只在「没有可用 AI 且用户也没选择过不用 AI」时出现。 */
 export function shouldShowOnboarding(input: OnboardingInput): boolean {
   return !isAiReady(input) && !input.skipped;

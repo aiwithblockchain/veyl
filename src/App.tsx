@@ -19,7 +19,13 @@ import { IconClose } from "./components/icons";
 import { Onboarding } from "./components/Onboarding";
 import { Settings, describeImportError } from "./components/Settings";
 import type { ConnectMode } from "./config/model";
-import { FIRST_RUN_KICKOFF, isAiReady, shouldKickOffFirstRun, shouldShowOnboarding } from "./config/onboarding";
+import {
+  FIRST_RUN_KICKOFF,
+  isAiReady,
+  shouldKickOffFirstRun,
+  shouldOpenPanelForEmptyConfigs,
+  shouldShowOnboarding,
+} from "./config/onboarding";
 import { useVpnSession } from "./config/useVpnSession";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import { useFocusTrap } from "./ui/focus";
@@ -388,6 +394,24 @@ export default function App() {
     if (vpn.connection !== "idle") setVpnActionFailed(false);
   }, [vpn.connection]);
 
+  // 零配置时右栏必须可见；kickoff 只管「AI 开不开口」，不管「用户看不看得到」。
+  useEffect(() => {
+    if (!onboardingLoaded || showOnboarding) return;
+    if (
+      !shouldOpenPanelForEmptyConfigs({
+        aiReady,
+        loading: vpn.loading,
+        configCount: vpn.configs.length,
+        closedThisRun: panelClosedThisRunRef.current,
+      })
+    ) {
+      return;
+    }
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
+  }, [onboardingLoaded, showOnboarding, aiReady, vpn.loading, vpn.configs.length]);
+
   // 首启自动发起第一轮；hidden 消息不显示成用户气泡，会话里只出现 AI 的回复。
   useEffect(() => {
     if (!onboardingLoaded || showOnboarding || !aiReady) return;
@@ -418,12 +442,6 @@ export default function App() {
     kickoffStartedRef.current = true;
     // 先标记 requestId 未知的 pending，删除保护与历史覆盖判断才会认为「有请求在跑」。
     dispatch({ type: "request_pending", sessionId: session.id });
-    // 本次运行内用户手动关过右栏，就不替他打开；否则让第一句话可见。
-    if (!panelClosedThisRunRef.current) {
-      panelOpenRef.current = true;
-      setPanelOpen(true);
-      setAiUnread(false);
-    }
     void bridge
       .sendMessage(session.id, FIRST_RUN_KICKOFF, { hidden: true })
       .then(({ requestId }) =>

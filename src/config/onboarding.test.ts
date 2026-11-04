@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { isAiReady, shouldKickOffFirstRun, shouldShowOnboarding } from "./onboarding";
+import {
+  isAiReady,
+  shouldKickOffFirstRun,
+  shouldOpenPanelForEmptyConfigs,
+  shouldShowOnboarding,
+} from "./onboarding";
 
 const key = { masked: "sk-****abcd" };
 const noKey = { masked: null };
@@ -96,6 +101,43 @@ describe("shouldShowOnboarding", () => {
     expect(
       shouldShowOnboarding({ key, providers: null, skipped: true }),
     ).toBe(false);
+  });
+});
+
+describe("shouldOpenPanelForEmptyConfigs", () => {
+  const base = {
+    aiReady: true,
+    loading: false,
+    configCount: 0,
+    closedThisRun: false,
+  };
+
+  it("零配置且本次未手动关闭时展开右栏", () => {
+    expect(shouldOpenPanelForEmptyConfigs(base)).toBe(true);
+  });
+
+  it("零配置但本次手动关过右栏时不展开", () => {
+    expect(
+      shouldOpenPanelForEmptyConfigs({ ...base, closedThisRun: true }),
+    ).toBe(false);
+  });
+
+  it("有配置时不展开", () => {
+    expect(shouldOpenPanelForEmptyConfigs({ ...base, configCount: 1 })).toBe(
+      false,
+    );
+  });
+
+  it("配置还在加载时不展开", () => {
+    expect(shouldOpenPanelForEmptyConfigs({ ...base, loading: true })).toBe(
+      false,
+    );
+  });
+
+  it("没有可用 AI 时不展开", () => {
+    expect(shouldOpenPanelForEmptyConfigs({ ...base, aiReady: false })).toBe(
+      false,
+    );
   });
 });
 
