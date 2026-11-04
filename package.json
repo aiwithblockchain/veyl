@@ -14,8 +14,9 @@
     "rules:fetch": "node scripts/rules/fetch-rules.mjs",
     "runtime:fetch": "node scripts/runtime/fetch-runtime.mjs",
     "rules:verify": "node scripts/rules/verify-rules.mjs",
-    "app:dev": "tauri dev",
-    "app:build": "tauri build"
+    "app:dev": "node scripts/dev/run-with-logs.mjs",
+    "app:build": "tauri build",
+    "app:dev:plain": "tauri dev"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",

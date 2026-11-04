@@ -1,3 +1,6 @@
+# 注意：日常启动请用 `npm run app:dev`（scripts/dev/run-with-logs.mjs），
+# 它会在启动前归档 logs/ 里的旧文件。本脚本保留给脚本化场景。
+#
 # 日常开发启动（Windows）：跑 `tauri dev`，同时把输出落到 build\logs\dev-<时间戳>.log。
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\dev\dev-with-log.ps1
