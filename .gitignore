@@ -63,3 +63,6 @@ src-tauri/icons/AppIcon.iconset/
 # 规则数据：构建时下载并打包，不入库（scripts/rules/fetch-rules.mjs）
 /src-tauri/resources/rules/*
 !/src-tauri/resources/rules/.gitkeep
+
+# 运行时二进制：构建时下载并打包，不入库（scripts/runtime/fetch-runtime.mjs）
+/src-tauri/resources/runtime/*
