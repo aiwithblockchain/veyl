@@ -17,6 +17,10 @@ pub mod runtime;
 pub mod services;
 pub mod vpn;
 
+/// 输入边界测试：`input` 是模型生成的不可信 JSON，见该文件头注释。
+#[cfg(test)]
+mod boundary_tests;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

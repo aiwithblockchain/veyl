@@ -4032,3 +4032,394 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// 主流程：新建配置（带一个节点）→ 激活 → 连接 → 查询状态 → 断开。
+///
+/// 只测主流程，异常分支不在这里。目标是把整条链路真的走一遍：
+/// 节点落库 → 渲染 sing-box 配置 → 起进程 → Clash API 就绪 → 设系统代理
+/// → 断开 → 撤代理 → 回收进程。
+///
+/// **降级说明（重要，别把它当成真的测了）**：
+/// 仓库里没有可提交的 sing-box 二进制（`resources/runtime/*` 是 gitignore 的），
+/// 所以这里用 `/bin/sh` 脚本冒充内核：`check` 直接退 0，`run` 变成 `sleep`。
+/// 因此下面这些是**真跑的**：配置文件真的被渲染并落盘、进程真的被 spawn 并被回收、
+/// 系统代理真的被调用（走假 backend）、端口真的被挑出来并被监听。
+/// 而「sing-box 会不会接受这份配置」「mixed 端口上是不是 sing-box 在服务」
+/// 这两件事**没有验证**——那需要真实二进制，属于 `tests/generated_config_check.rs` 的职责。
+#[cfg(test)]
+mod main_flow_tests {
+    use super::*;
+    use crate::proxy::backup::MemoryBackupStore;
+    use crate::proxy::PlatformProxy;
+    use crate::runtime::{RuntimeConfig, RuntimeManager, RuntimeResult};
+    use serde_json::{json, Value};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    // ---------- 记录型系统代理后端 ----------
+
+    #[derive(Default)]
+    struct ProxyCalls {
+        applied: Vec<u16>,
+        restored: usize,
+    }
+
+    struct RecordingProxy {
+        calls: Arc<Mutex<ProxyCalls>>,
+    }
+
+    impl PlatformProxy for RecordingProxy {
+        fn platform(&self) -> &'static str {
+            "test"
+        }
+
+        fn capture(&self) -> RuntimeResult<Value> {
+            Ok(json!({ "services": [] }))
+        }
+
+        fn apply(&self, port: u16) -> RuntimeResult<()> {
+            self.calls.lock().unwrap().applied.push(port);
+            Ok(())
+        }
+
+        fn restore(&self, _payload: &Value) -> RuntimeResult<()> {
+            self.calls.lock().unwrap().restored += 1;
+            Ok(())
+        }
+
+        fn current(&self) -> RuntimeResult<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    // ---------- 假运行时 ----------
+
+    /// 写一个冒充 sing-box 的脚本，并把它登记成「已安装且 active」。
+    ///
+    /// 用 `/bin/sh` 而不是现写复杂脚本：`check` 立即退 0，`run` 直接 exec 成
+    /// `sleep`，不额外 fork 一层，负载下也不会卡住。
+    fn install_fake_runtime(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let runtime_dir = dir.join("runtime").join("test");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        let binary = runtime_dir.join("sing-box");
+        std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = check ]; then exit 0; fi\nexec sleep 120\n")
+            .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let state = json!({
+            "schema": 1,
+            "active_version": "test",
+            "installs": {
+                "test": {
+                    "version": "test",
+                    "dir": runtime_dir,
+                    "binary": binary,
+                    "license": Value::Null,
+                    "sha256": "test",
+                    "installed_at": crate::store::now_ms(),
+                }
+            }
+        });
+        std::fs::write(
+            dir.join(crate::runtime::install::STATE_FILE),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        binary
+    }
+
+    // ---------- 端口监听：冒充运行时把端口占住 ----------
+
+    /// 盯着渲染出来的配置，读到端口后把 mixed 与 clash 两个端口占上。
+    ///
+    /// 用**普通线程 + 阻塞 socket**，不用 tokio：在这台机器上 tokio 的 socket
+    /// 轮询和 reqwest 的系统代理探测一起会把进程带进 `_xpc_api_misuse`（SIGTRAP），
+    /// 与要测的连接逻辑无关。阻塞实现更笨，但不会干扰被测代码。
+    fn spawn_port_watcher(data_dir: PathBuf) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let config_dir = data_dir.join("config");
+            loop {
+                if let Ok(entries) = std::fs::read_dir(&config_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if !name.starts_with("profile-") || !name.ends_with(".json") {
+                            continue;
+                        }
+                        let Ok(text) = std::fs::read_to_string(&path) else {
+                            continue;
+                        };
+                        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                            continue;
+                        };
+                        let Some(mixed) = value
+                            .pointer("/inbounds/0/listen_port")
+                            .and_then(Value::as_u64)
+                        else {
+                            continue;
+                        };
+                        let Some(clash_port) = value
+                            .pointer("/experimental/clash_api/external_controller")
+                            .and_then(Value::as_str)
+                            .and_then(|addr| addr.rsplit(':').next())
+                            .and_then(|port| port.parse::<u16>().ok())
+                        else {
+                            continue;
+                        };
+
+                        let Ok(clash_listener) = std::net::TcpListener::bind(("127.0.0.1", clash_port))
+                        else {
+                            continue;
+                        };
+                        let Ok(mixed_listener) =
+                            std::net::TcpListener::bind(("127.0.0.1", mixed as u16))
+                        else {
+                            continue;
+                        };
+
+                        // mixed：只要「有人能连上」就够了，假的 sing-box 不转发。
+                        std::thread::spawn(move || {
+                            for socket in mixed_listener.incoming() {
+                                drop(socket);
+                            }
+                        });
+                        serve_clash(clash_listener);
+                        return;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        })
+    }
+
+    /// 只回 `/version` 的假 Clash API，让 manager 认为运行时已就绪。
+    fn serve_clash(listener: std::net::TcpListener) {
+        use std::io::{Read, Write};
+        for socket in listener.incoming() {
+            let Ok(mut socket) = socket else { return };
+            let mut buf = [0u8; 2048];
+            let _ = socket.read(&mut buf);
+            let body = r#"{"version":"test","meta":false,"premium":false}"#;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes());
+            let _ = socket.write_all(body.as_bytes());
+        }
+    }
+
+    // ---------- 组装 ----------
+
+    struct Harness {
+        services: WiredServices,
+        proxy_calls: Arc<Mutex<ProxyCalls>>,
+        dir: PathBuf,
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn harness() -> Harness {
+        crate::test_support::install_test_secrets();
+
+        let dir = std::env::temp_dir().join(format!("veyl-main-flow-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        // 规则数据是连接的前置条件（`rules_not_ready` 会直接挡住 connect）。
+        // 用随包归档离线安装，和 App 首次启动走同一条路径。
+        crate::rules::install_bundled(&store, &dir, None).expect("随包规则归档应当可用");
+        install_fake_runtime(&dir);
+
+        let proxy_calls = Arc::new(Mutex::new(ProxyCalls::default()));
+        let backend: &'static dyn PlatformProxy = Box::leak(Box::new(RecordingProxy {
+            calls: Arc::clone(&proxy_calls),
+        }));
+        let proxy = Arc::new(crate::proxy::ProxyController::with_backend(
+            Box::new(MemoryBackupStore::new()),
+            backend,
+        ));
+
+        let store = Arc::new(store);
+        let mut cfg = RuntimeConfig::new(&dir);
+        // 关掉三个外网探测：它们要出网，测试环境里既慢又没意义，
+        // 而且 reqwest 的系统代理自动探测在这台机器上会触发 XPC 误用（SIGTRAP）。
+        // 连接生命周期本身不依赖它们。
+        cfg.data_plane_probe = None;
+        cfg.exit_ip_probe = None;
+        cfg.direct_ip_probe = None;
+        let manager = RuntimeManager::new(cfg);
+        let catalog = Arc::new(CatalogClient::new("http://127.0.0.1:9/v1"));
+        let services = WiredServices::new(store, manager, proxy, catalog, &dir);
+
+        Harness {
+            services,
+            proxy_calls,
+            dir,
+        }
+    }
+
+    fn auto_port_input(name: &str) -> ConfigCreateInput {
+        ConfigCreateInput {
+            name: name.into(),
+            connect_mode: configs::CONNECTION_SYSTEM_PROXY.into(),
+            routing_mode: configs::ROUTING_PROXY_ALL.into(),
+            source: None,
+            node_ids: None,
+            targets: None,
+            // 自动挑端口：这条断言才有意义（写死的端口测不出「状态里的是不是真端口」）。
+            listen_port: None,
+            dns: None,
+            tun_excludes: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_activate_connect_status_disconnect() {
+        let h = harness();
+        let dir = h.dir.clone();
+        // 端口监听必须在连接之前起：配置一落盘它就去占 mixed / clash 两个端口。
+        let watcher = spawn_port_watcher(dir.clone());
+
+        // ---- 1. 新建配置 + 一个节点 ----
+        let created = h
+            .services
+            .config_create(auto_port_input("主流程"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        assert!(created["listen_port"].is_null(), "不指定时应当留给连接时自动挑");
+
+        let node = h
+            .services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "东京".into(),
+                server: "198.51.100.20".into(),
+                port: 8388,
+                password: "pw-main-flow".into(),
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let node_id = node["node_id"].as_str().unwrap().to_string();
+
+        let list = h.services.config_list().await.unwrap();
+        let configs = list["configs"].as_array().unwrap();
+        assert_eq!(configs.len(), 1, "新建后列表里应当只有这一套");
+        assert_eq!(configs[0]["config_id"], config_id.as_str());
+        assert_eq!(configs[0]["node_count"], 1);
+        assert_eq!(
+            configs[0]["current_node_id"], node_id.as_str(),
+            "唯一节点应当自动成为当前节点"
+        );
+        // 第一套配置会**自动激活**（还没有别的配置可比）。这里把这条行为钉住，
+        // 后面的 `config_activate` 因此测的是「重新激活并重连」而不是「从无到有」。
+        assert_eq!(
+            list["active_config_id"], config_id.as_str(),
+            "第一套配置应当自动成为 active"
+        );
+
+        // ---- 2. 激活 ----
+        // 从「未连接」切过来不会顺带连接：替用户连等于替他做决定。
+        // 已经连着的时候才会重连（`reconnect: "reconnected"`）。
+        let activated = h
+            .services
+            .config_activate(&config_id, false)
+            .await
+            .unwrap();
+        assert_eq!(activated["active_config_id"], config_id.as_str());
+        assert_eq!(activated["reconnect"], "not_running", "{activated}");
+        assert!(activated["runtime"].is_null());
+
+        let list = h.services.config_list().await.unwrap();
+        assert_eq!(
+            list["active_config_id"], config_id.as_str(),
+            "激活后 active_config_id 要指向它"
+        );
+        let actives: Vec<&Value> = list["configs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["is_active"] == true)
+            .collect();
+        assert_eq!(actives.len(), 1, "只能有一个 active");
+
+        // ---- 3. 连接 ----
+        let connected = h
+            .services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(connected["state"], "running", "{connected}");
+
+        // ---- 4. 查询状态 ----
+        //
+        // **降级**：这里不走 `WiredServices::runtime_status`（命令层），而是直接读
+        // `manager.status()`。原因是命令层第一步会调 `TunSession::status()`，
+        // 它在内存里没有 pid 时无条件向特权助手发一次 XPC；测试进程里没有那个
+        // mach service，`xpc_connection_send_message_with_reply_sync` 会触发
+        // `_xpc_api_misuse` 直接 SIGTRAP 把进程打死。这是 `src-tauri/src/tun/` 的问题，
+        // 不在本次范围，已单独报给 PM。除这一步外其余断言都是真的。
+        let status = serde_json::to_value(h.services.manager.status().await).unwrap();
+        assert_eq!(status["state"], "running", "{status}");
+        assert_eq!(status["config_id"], config_id.as_str());
+        assert_eq!(status["node_id"], node_id.as_str());
+        assert_eq!(status["node_name"], "东京");
+        assert_eq!(status["mode"], "system_proxy");
+
+        let mixed_port = status["mixed_port"]
+            .as_u64()
+            .expect("已连接时 mixed_port 必须非空") as u16;
+
+        // 端口必须真的是被监听着的：连一下。
+        tokio::net::TcpStream::connect(("127.0.0.1", mixed_port))
+            .await
+            .unwrap_or_else(|e| panic!("状态里报的 mixed_port {mixed_port} 没人监听：{e}"));
+
+        // 系统代理必须被设过，而且用的是同一个端口（不是配置里随手写的值）。
+        {
+            let calls = h.proxy_calls.lock().unwrap();
+            assert_eq!(
+                calls.applied,
+                vec![mixed_port],
+                "设置系统代理必须只调用一次，且端口与状态一致"
+            );
+        }
+        assert_eq!(status["system_proxy_enabled"], true);
+
+        // ---- 5. 断开 ----
+        //
+        // **降级**：同样绕开 `WiredServices::runtime_stop`，因为它的第一件事也是
+        // `self.tun.stop()` → `TunSession::status()` → 同一个 XPC 陷阱。
+        // 这里按 `runtime_stop` 的顺序手工做同样的三步：撤系统代理、清标志、停运行时。
+        // 少掉的是「删除明文配置」——那一步在 `runtime_stop` 里，受同一条阻断。
+        let pid = status["pid"].as_u64().expect("运行中应有 pid") as u32;
+        h.services.restore_system_proxy().unwrap();
+        h.services.manager.set_system_proxy_enabled(false).await;
+        let stopped = serde_json::to_value(h.services.manager.stop().await.unwrap()).unwrap();
+        assert_eq!(stopped["state"], "idle", "{stopped}");
+        assert!(stopped["mixed_port"].is_null(), "断开后不应再报端口");
+        assert_eq!(stopped["system_proxy_enabled"], false);
+
+        {
+            let calls = h.proxy_calls.lock().unwrap();
+            assert_eq!(calls.restored, 1, "断开必须撤销一次系统代理");
+        }
+
+        // 假运行时进程必须真的被回收，不能留孤儿。
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !crate::runtime::process::is_alive(pid),
+            "断开后运行时进程 {pid} 仍然活着"
+        );
+
+        drop(watcher);
+    }
+}
