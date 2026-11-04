@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import type { ConfigSummary } from "../agent/protocol";
-import { portLabel } from "../config/model";
 import { useFocusTrap } from "../ui/focus";
 import { IconClose, IconTrash } from "./icons";
 
@@ -127,7 +126,6 @@ export function ConfigRail({
             {configs.map((config) => {
               const active = config.config_id === activeConfigId;
               const connected = config.config_id === connectedConfigId;
-              const port = portLabel(config);
               return (
                 <li key={config.config_id}>
                   <div className="config-list__row ai-history__row">
@@ -147,8 +145,7 @@ export function ConfigRail({
                         ) : null}
                       </span>
                       <span className="config-list__meta">
-                        {config.node_count} 个节点 ·{" "}
-                        {/^\d+$/.test(port) ? <span className="num">{port}</span> : port}
+                        {config.node_count} 个节点
                       </span>
                     </button>
                     <div className="ai-history__actions">

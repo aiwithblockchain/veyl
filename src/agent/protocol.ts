@@ -254,6 +254,8 @@ export interface HealthSnapshot {
 export interface RuntimeHealthChangedPayload {
   contract_version: typeof CONTRACT_VERSION;
   health: HealthSnapshot;
+  /** 运行时流量统计；旧版后端不返回，UI 保留占位。 */
+  traffic?: TrafficStats | null;
   emitted_at: string;
 }
 
@@ -557,6 +559,7 @@ export interface RuntimeView {
   config_hash: string | null;
   system_proxy_enabled: boolean;
   health: HealthSnapshot;
+  traffic: TrafficStats | null;
   connections: number | null;
   restart_count: number;
   last_error: AivpnError | null;

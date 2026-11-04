@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { ConfigDetail, NodeSummary } from "../agent/protocol";
+import type { ConfigDetail, NodeSummary, RuntimeView } from "../agent/protocol";
 import type { ProbeResult, VpnConnectionState } from "../config/useVpnSession";
 import {
   runZeroConfigPrimaryAction,
@@ -7,6 +7,7 @@ import {
   zeroConfigContent,
   zeroConfigMode,
 } from "../ui/consoleActions";
+import { formatDuration, formatSampleTime, formatTraffic } from "../ui/format";
 import { consolePrimary, consoleStatus } from "../ui/status";
 
 interface Props {
@@ -28,7 +29,7 @@ interface Props {
   onAskAi: () => void;
   onNewConfig: () => void;
   loading?: boolean;
-  exitIp: string | null;
+  runtime: RuntimeView;
 }
 
 type Probe =
@@ -79,7 +80,7 @@ export function Console({
   onAskAi,
   onNewConfig,
   loading = false,
-  exitIp,
+  runtime,
 }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(
     config?.current_node_id ?? null,
@@ -87,19 +88,28 @@ export function Console({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [probe, setProbe] = useState<Probe | null>(null);
   const [exitCopy, setExitCopy] = useState<"idle" | "copied" | "failed">("idle");
+  const [techCopy, setTechCopy] = useState<"idle" | "copied" | "failed">("idle");
+  const [now, setNow] = useState(() => Date.now());
   const copyTimer = useRef<number | null>(null);
+  const techCopyTimer = useRef<number | null>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const configId = config?.config_id ?? null;
   const currentNodeId = config?.current_node_id ?? null;
-  const exitAddress = exitIp?.trim() || null;
+  const exitAddress = runtime.health.exit_ip?.trim() || null;
+  const proxyAddress = runtime.mixed_port ? `127.0.0.1:${runtime.mixed_port}` : null;
 
   useEffect(() => {
     setExitCopy("idle");
   }, [exitAddress, connection]);
 
+  useEffect(() => {
+    setTechCopy("idle");
+  }, [proxyAddress]);
+
   useEffect(
     () => () => {
       if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      if (techCopyTimer.current !== null) window.clearTimeout(techCopyTimer.current);
     },
     [],
   );
@@ -131,6 +141,8 @@ export function Console({
 
   const selectedNode: NodeSummary | null =
     config?.nodes.find((node) => node.node_id === selectedId) ?? null;
+  const currentNode: NodeSummary | null =
+    config?.nodes.find((node) => node.node_id === config.current_node_id) ?? null;
   const canPick = (config?.nodes.length ?? 0) > 1;
   const switching = Boolean(
     selectedNode && config && selectedNode.node_id !== config.current_node_id,
@@ -164,12 +176,52 @@ export function Console({
   const canConnect = Boolean(config && config.nodes.length > 0);
   const connected = connection === "connected";
 
+  // 时长只在前端按 30 秒粒度刷新；连接时刻来自 runtime，不轮询快照。
+  useEffect(() => {
+    if (!connected) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [connected]);
+
+  const connectedAt = runtime.connected_since
+    ? Date.parse(runtime.connected_since)
+    : NaN;
+  const durationSeconds = Number.isFinite(connectedAt)
+    ? Math.max(0, Math.floor((now - connectedAt) / 1000))
+    : null;
+  const durationLabel =
+    durationSeconds === null ? "刚刚" : formatDuration(durationSeconds);
+  const usedBytes = runtime.traffic
+    ? runtime.traffic.up_bytes + runtime.traffic.down_bytes
+    : null;
+  const trafficLabel = usedBytes === null ? "—" : formatTraffic(usedBytes);
+  const latencyLabel =
+    runtime.latency_ms === null ? "确认中…" : `${runtime.latency_ms} 毫秒`;
+  const currentLineName = currentNode?.name ?? runtime.node_name ?? "当前节点";
+  const currentLineText = connected
+    ? [currentLineName, durationLabel, trafficLabel === "—" ? null : trafficLabel]
+        .filter(Boolean)
+        .join(" · ")
+    : `${currentLineName} · 未连接`;
+  const sampleTime = formatSampleTime(
+    runtime.traffic?.sampled_at ?? runtime.health.checked_at,
+  );
+
   const copyExit = async () => {
     if (!exitAddress) return;
     const ok = await copyText(exitAddress);
     setExitCopy(ok ? "copied" : "failed");
     if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
     copyTimer.current = window.setTimeout(() => setExitCopy("idle"), 2000);
+  };
+
+  const copyProxy = async () => {
+    if (!proxyAddress) return;
+    const ok = await copyText(proxyAddress);
+    setTechCopy(ok ? "copied" : "failed");
+    if (techCopyTimer.current !== null) window.clearTimeout(techCopyTimer.current);
+    techCopyTimer.current = window.setTimeout(() => setTechCopy("idle"), 2000);
   };
 
   useEffect(() => {
@@ -182,16 +234,16 @@ export function Console({
     : consoleStatus(connection, Boolean(config), canConnect);
 
   let probeLabel: string | null = null;
-  if (probe?.status === "testing") probeLabel = "测试中…";
+  if (probe?.status === "testing") probeLabel = "检查中…";
   else if (probe?.status === "ok") {
-    probeLabel = probe.latency === null ? "可达" : `延迟 ${probe.latency}ms`;
+    probeLabel = probe.latency === null ? "可达" : `延迟 ${probe.latency} 毫秒`;
   } else if (probe?.status === "fail") {
-    probeLabel = probe.unreachable ? "连不上" : "测试失败";
+    probeLabel = probe.unreachable ? "连不上" : "检查失败";
   }
 
   let probeHint: string | null = null;
-  if (!nodeProbeAvailable) probeHint = "这个版本还不能测试";
-  else if (!connected) probeHint = "连接后可以测试";
+  if (!nodeProbeAvailable) probeHint = "这个版本还不能检查";
+  else if (!connected) probeHint = "连接后可以检查";
   const probeText = nodeProbeAvailable && connected ? probeLabel : probeHint;
 
   const zeroMode = zeroConfigMode(aiReady, justOnboarded, zeroConfigSettled);
@@ -201,66 +253,87 @@ export function Console({
   return (
     <main className="console">
       <header className="console-top">
-        <button
-          type="button"
-          className="btn btn--primary console-top__primary"
-          disabled={primary.disabled}
-          onClick={primary.stop ? onStop : onStart}
-        >
-          {primary.label}
-        </button>
-        <div className={`console-status is-${status.tone}`} role="status">
-          <span className="console-status__dot" aria-hidden />
-          <span className="console-status__text">{status.text}</span>
-        </div>
-        {connected && exitAddress ? (
+        <div className="console-top__bar">
           <button
             type="button"
-            className={`console-exit ${
-              exitCopy === "copied" ? "is-copied" : exitCopy === "failed" ? "is-failed" : ""
-            }`}
-            onClick={() => void copyExit()}
-            title={`出口 ${exitAddress}，点击复制`}
-            aria-label={`出口 ${exitAddress}，点击复制`}
+            className="btn btn--primary console-top__primary"
+            disabled={primary.disabled}
+            onClick={primary.stop ? onStop : onStart}
           >
-            <span className="console-exit__label">出口</span>
-            <span className="console-exit__ip num" title={exitAddress}>
-              {exitAddress}
-            </span>
-            <span className="console-exit__action" aria-live="polite">
-              {exitCopy === "copied" ? "已复制" : exitCopy === "failed" ? "复制失败" : "复制"}
-            </span>
+            {primary.label}
           </button>
-        ) : connected ? (
-          <span className="console-exit-pending">正在确认出口…</span>
+          <div className={`console-status is-${status.tone}`} role="status">
+            <span className="console-status__dot" aria-hidden />
+            <span className="console-status__text">{status.text}</span>
+          </div>
+          <button
+            type="button"
+            className={`console-panel-toggle ${panelOpen ? "is-active" : ""}`}
+            onClick={onTogglePanel}
+            aria-label={
+              panelOpen
+                ? "收起 AI 对话"
+                : aiUnread
+                  ? "展开 AI 对话，有新消息"
+                  : "展开 AI 对话"
+            }
+            aria-expanded={panelOpen}
+            title="AI 对话"
+          >
+            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
+              <path
+                d="M4 4.5A1.5 1.5 0 0 1 5.5 3h9A1.5 1.5 0 0 1 16 4.5v6a1.5 1.5 0 0 1-1.5 1.5H9l-3 2.5V12H5.5A1.5 1.5 0 0 1 4 10.5z"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinejoin="round"
+              />
+            </svg>
+            {aiUnread && !panelOpen ? (
+              <span className="console-panel-toggle__dot" aria-hidden />
+            ) : null}
+          </button>
+        </div>
+
+        {connected ? (
+          <div className="console-summary">
+            <span className="console-summary__item">{durationLabel}</span>
+            <span className="console-summary__sep" aria-hidden>
+              ·
+            </span>
+            <span className="console-summary__item">已用 {trafficLabel}</span>
+            <span className="console-summary__sep" aria-hidden>
+              ·
+            </span>
+            <span className="console-summary__item">
+              {runtime.latency_ms === null ? "延迟确认中…" : `延迟 ${latencyLabel}`}
+            </span>
+            <span className="console-summary__sep" aria-hidden>
+              ·
+            </span>
+            {exitAddress ? (
+              <button
+                type="button"
+                className={`console-exit ${
+                  exitCopy === "copied" ? "is-copied" : exitCopy === "failed" ? "is-failed" : ""
+                }`}
+                onClick={() => void copyExit()}
+                title={`出口 ${exitAddress}，点击复制`}
+                aria-label={`出口 ${exitAddress}，点击复制`}
+              >
+                <span className="console-exit__label">出口</span>
+                <span className="console-exit__ip num" title={exitAddress}>
+                  {exitAddress}
+                </span>
+                <span className="console-exit__action" aria-live="polite">
+                  {exitCopy === "copied" ? "已复制" : exitCopy === "failed" ? "复制失败" : "复制"}
+                </span>
+              </button>
+            ) : (
+              <span className="console-summary__item">正在确认出口…</span>
+            )}
+          </div>
         ) : null}
-        <button
-          type="button"
-          className={`console-panel-toggle ${panelOpen ? "is-active" : ""}`}
-          onClick={onTogglePanel}
-          aria-label={
-            panelOpen
-              ? "收起 AI 对话"
-              : aiUnread
-                ? "展开 AI 对话，有新消息"
-                : "展开 AI 对话"
-          }
-          aria-expanded={panelOpen}
-          title="AI 对话"
-        >
-          <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
-            <path
-              d="M4 4.5A1.5 1.5 0 0 1 5.5 3h9A1.5 1.5 0 0 1 16 4.5v6a1.5 1.5 0 0 1-1.5 1.5H9l-3 2.5V12H5.5A1.5 1.5 0 0 1 4 10.5z"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              strokeLinejoin="round"
-            />
-          </svg>
-          {aiUnread && !panelOpen ? (
-            <span className="console-panel-toggle__dot" aria-hidden />
-          ) : null}
-        </button>
       </header>
 
       <section className="console-mid">
@@ -307,14 +380,7 @@ export function Console({
               ) : null}
             </div>
           </div>
-        ) : (
-          <div className="console-mid__hint">
-            <p className="console-mid__title">没有需要你决定的事</p>
-            <p className="console-mid__text">
-              AI 有需要你确认的步骤时，会出现在这里。
-            </p>
-          </div>
-        )}
+        ) : null}
       </section>
 
       <footer className="console-node">
@@ -329,91 +395,96 @@ export function Console({
             <div className="console-node__skeleton-facts" aria-hidden>
               <span className="skeleton skeleton--fact" />
               <span className="skeleton skeleton--fact" />
-              <span className="skeleton skeleton--fact" />
             </div>
+            <div className="console-node__skeleton-actions" aria-hidden>
+              <span className="skeleton skeleton--button" />
+              <span className="skeleton skeleton--button" />
+            </div>
+            <span className="skeleton skeleton--detail" aria-hidden />
           </div>
         ) : !hasConfigs ? null : !config ? (
           <p className="console-node__empty">在左侧选一套配置。</p>
         ) : !selectedNode ? (
           <p className="console-node__empty">这套配置还没有节点。</p>
         ) : (
-          <>
-            <div className="console-node__detail" ref={detailRef}>
-              <div className="console-node__heading">
-                {canPick ? (
-                  <button
-                    type="button"
-                    className="console-node__name"
-                    aria-haspopup="listbox"
-                    aria-expanded={pickerOpen}
-                    onClick={() => setPickerOpen((open) => !open)}
+          <div className="console-node__detail" ref={detailRef}>
+            <div className="console-node__heading">
+              {canPick ? (
+                <button
+                  type="button"
+                  className="console-node__name"
+                  aria-haspopup="listbox"
+                  aria-expanded={pickerOpen}
+                  onClick={() => setPickerOpen((open) => !open)}
+                >
+                  {selectedNode.name}
+                  <svg
+                    className={`console-node__chevron ${pickerOpen ? "is-open" : ""}`}
+                    viewBox="0 0 12 12"
+                    width="12"
+                    height="12"
+                    aria-hidden
                   >
-                    {selectedNode.name}
-                    <svg
-                      className={`console-node__chevron ${pickerOpen ? "is-open" : ""}`}
-                      viewBox="0 0 12 12"
-                      width="12"
-                      height="12"
-                      aria-hidden
-                    >
-                      <path
-                        d="M3 4.5 6 7.5 9 4.5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.4"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  </button>
-                ) : (
-                  <span className="console-node__name is-static">{selectedNode.name}</span>
-                )}
-                {selectedNode.node_id === config.current_node_id ? (
-                  <span className="console-node__badge">当前使用</span>
-                ) : null}
-              </div>
-
-              {pickerOpen ? (
-                <div className="node-picker" role="listbox" aria-label="这个配置里的节点">
-                  {config.nodes.map((node) => (
-                    <button
-                      key={node.node_id}
-                      type="button"
-                      role="option"
-                      aria-selected={node.node_id === selectedId}
-                      className={`node-picker__item ${
-                        node.node_id === selectedId ? "is-selected" : ""
-                      }`}
-                      onClick={() => selectNode(node.node_id)}
-                    >
-                      <span className="node-picker__name">{node.name}</span>
-                      <span className="node-picker__meta num">
-                        {node.server}:{node.port}
-                      </span>
-                      {node.node_id === config.current_node_id ? (
-                        <span className="node-picker__badge">当前</span>
-                      ) : null}
-                    </button>
-                  ))}
-                </div>
+                    <path
+                      d="M3 4.5 6 7.5 9 4.5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              ) : (
+                <span className="console-node__name is-static">{selectedNode.name}</span>
+              )}
+              {selectedNode.node_id === config.current_node_id ? (
+                <span className="console-node__badge">当前使用</span>
               ) : null}
-
-              <dl className="console-node__facts">
-                <div>
-                  <dt>地址</dt>
-                  <dd className="num">{selectedNode.server}</dd>
-                </div>
-                <div>
-                  <dt>端口</dt>
-                  <dd className="num">{selectedNode.port}</dd>
-                </div>
-                <div>
-                  <dt>加密方式</dt>
-                  <dd className="num">{selectedNode.method}</dd>
-                </div>
-              </dl>
             </div>
+
+            {pickerOpen ? (
+              <div className="node-picker" role="listbox" aria-label="这个配置里的节点">
+                {config.nodes.map((node) => (
+                  <button
+                    key={node.node_id}
+                    type="button"
+                    role="option"
+                    aria-selected={node.node_id === selectedId}
+                    className={`node-picker__item ${
+                      node.node_id === selectedId ? "is-selected" : ""
+                    }`}
+                    onClick={() => selectNode(node.node_id)}
+                  >
+                    <span className="node-picker__name">{node.name}</span>
+                    {node.node_id === config.current_node_id ? (
+                      <span className="node-picker__badge">当前</span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
+            {selectedNode.node_id === config.current_node_id ? (
+              connected ? (
+                <dl className="console-node__stats">
+                  <div>
+                    <dt>已用流量</dt>
+                    <dd className="num">{trafficLabel}</dd>
+                  </div>
+                  <div>
+                    <dt>延迟</dt>
+                    <dd className="num">{latencyLabel}</dd>
+                  </div>
+                </dl>
+              ) : (
+                <p className="console-node__offline">未连接</p>
+              )
+            ) : (
+              <p className="console-node__current">
+                当前线路：<strong>{currentLineText}</strong>
+              </p>
+            )}
 
             <div className="console-node__actions">
               <button
@@ -422,7 +493,7 @@ export function Console({
                 disabled={!switching || busy || !nodeSwitchAvailable}
                 onClick={() => onSwitchNode(selectedNode.node_id)}
               >
-                切换到此节点
+                用这个节点
               </button>
               <button
                 type="button"
@@ -432,7 +503,7 @@ export function Console({
                 }
                 onClick={() => void runProbe()}
               >
-                测试连通
+                检查连接
               </button>
               {probeText ? (
                 <span
@@ -457,11 +528,60 @@ export function Console({
             {switching ? (
               <p className="console-node__hint">
                 {nodeSwitchAvailable
-                  ? "选中只会改这里的详情；按「切换到此节点」才会真正切换。"
+                  ? "点上面的按钮才会真正切换。"
                   : "这个版本还不能切换节点。"}
               </p>
             ) : null}
-          </>
+
+            <details className="console-node__tech">
+              <summary>技术详情</summary>
+              <dl className="console-node__facts">
+                <div>
+                  <dt>服务器地址</dt>
+                  <dd className="num">{selectedNode.server}</dd>
+                </div>
+                <div>
+                  <dt>服务器端口</dt>
+                  <dd className="num">{selectedNode.port}</dd>
+                </div>
+                <div>
+                  <dt>加密方式</dt>
+                  <dd className="num">{selectedNode.method}</dd>
+                </div>
+                <div>
+                  <dt>本机代理地址</dt>
+                  <dd className="console-node__copy-row">
+                    <span className="num">{proxyAddress ?? "—"}</span>
+                    {proxyAddress ? (
+                      <button
+                        type="button"
+                        className="console-node__copy"
+                        onClick={() => void copyProxy()}
+                      >
+                        {techCopy === "copied"
+                          ? "已复制"
+                          : techCopy === "failed"
+                            ? "复制失败"
+                            : "复制"}
+                      </button>
+                    ) : null}
+                  </dd>
+                </div>
+                <div>
+                  <dt>活跃连接数</dt>
+                  <dd className="num">{runtime.connections ?? "—"}</dd>
+                </div>
+                <div>
+                  <dt>直连 IP</dt>
+                  <dd className="num">{runtime.direct_ip ?? "—"}</dd>
+                </div>
+                <div>
+                  <dt>最近采样时间</dt>
+                  <dd className="num">{sampleTime}</dd>
+                </div>
+              </dl>
+            </details>
+          </div>
         )}
       </footer>
     </main>

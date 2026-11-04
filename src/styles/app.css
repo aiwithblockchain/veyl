@@ -2185,6 +2185,17 @@ body[data-resizing] .pane-handle,
   height: 13px;
 }
 
+.skeleton--button {
+  width: 96px;
+  height: 32px;
+  border-radius: var(--r-sm);
+}
+
+.skeleton--detail {
+  width: 72px;
+  height: 12px;
+}
+
 .config-list {
   flex: 1;
   min-height: 0;
@@ -2409,12 +2420,38 @@ body[data-resizing] .pane-handle,
 
 .console-top {
   display: flex;
-  align-items: center;
-  gap: 14px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   padding: 16px 28px;
   border-bottom: 1px solid var(--line);
   background: var(--bg);
   flex-shrink: 0;
+}
+
+.console-top__bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.console-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+}
+
+.console-summary__item {
+  white-space: nowrap;
+}
+
+.console-summary__sep {
+  color: var(--ink-3);
+  opacity: 0.55;
 }
 
 .console-top__primary {
@@ -2478,13 +2515,6 @@ body[data-resizing] .pane-handle,
 
 .console-exit.is-failed .console-exit__action {
   color: var(--err-text);
-}
-
-.console-exit-pending {
-  flex: none;
-  font-size: var(--fs-small);
-  color: var(--ink-3);
-  white-space: nowrap;
 }
 
 .console-status {
@@ -2571,26 +2601,6 @@ body[data-resizing] .pane-handle,
   justify-content: center;
   padding: 40px 28px;
   overflow-y: auto;
-}
-
-.console-mid__hint {
-  max-width: 360px;
-  text-align: center;
-}
-
-.console-mid__title {
-  margin: 0 0 8px;
-  font-size: var(--fs-card);
-  font-weight: 500;
-  line-height: 1.35;
-  color: var(--ink-2);
-}
-
-.console-mid__text {
-  margin: 0;
-  font-size: var(--fs-small);
-  line-height: 1.65;
-  color: var(--ink-3);
 }
 
 /* 零配置入口：标题 > 三步说明 > 主按钮 > 次按钮 */
@@ -2697,9 +2707,14 @@ body[data-resizing] .pane-handle,
 
 .console-node__skeleton-facts {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px 24px;
   max-width: 560px;
+}
+
+.console-node__skeleton-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .console-node__detail {
@@ -2749,6 +2764,107 @@ body[data-resizing] .pane-handle,
   font-size: var(--fs-label);
   font-weight: 500;
   line-height: 1.5;
+}
+
+.console-node__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 32px;
+  margin: 12px 0 0;
+}
+
+.console-node__stats div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.console-node__stats dt {
+  font-size: var(--fs-label);
+  font-weight: 500;
+  color: var(--ink-3);
+}
+
+.console-node__stats dd {
+  margin: 0;
+  font-size: var(--fs-small);
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+.console-node__current,
+.console-node__offline {
+  margin: 12px 0 0;
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+}
+
+.console-node__current strong {
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+.console-node__tech {
+  margin-top: 16px;
+}
+
+.console-node__tech summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+
+.console-node__tech summary::-webkit-details-marker {
+  display: none;
+}
+
+.console-node__tech summary::after {
+  content: "⌄";
+  line-height: 1;
+  transition: transform 120ms ease-out;
+}
+
+.console-node__tech[open] summary::after {
+  transform: rotate(180deg);
+}
+
+.console-node__tech .console-node__facts {
+  margin-top: 12px;
+}
+
+.console-node__facts dd.console-node__copy-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: visible;
+  white-space: normal;
+}
+
+.console-node__copy-row .num {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.console-node__copy {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--fs-label);
+  cursor: pointer;
+}
+
+.console-node__copy:hover {
+  text-decoration: underline;
 }
 
 .console-node__facts {
@@ -2860,12 +2976,6 @@ body[data-resizing] .pane-handle,
   color: var(--ink);
 }
 
-.node-picker__meta {
-  flex: none;
-  font-size: 11px;
-  color: var(--ink-3);
-}
-
 .node-picker__badge {
   flex: none;
   font-size: 11px;
@@ -2888,7 +2998,7 @@ body[data-resizing] .pane-handle,
 
 /* 控制台实际宽度不足时，状态和出口各占一行；不依赖窗口宽度。 */
 @container (max-width: 500px) {
-  .console-top {
+  .console-top__bar {
     flex-wrap: wrap;
     gap: 6px 8px;
   }
@@ -2903,9 +3013,8 @@ body[data-resizing] .pane-handle,
     max-width: none;
   }
 
-  .console-exit,
-  .console-exit-pending {
-    order: 4;
+  .console-summary {
+    gap: 4px 6px;
   }
 }
 

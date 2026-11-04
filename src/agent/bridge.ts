@@ -316,6 +316,7 @@ export function emptyRuntimeView(): RuntimeView {
     mixed_port: null,
     connected_since: null,
     latency_ms: null,
+    traffic: null,
     applied_route_revision: null,
     direct_ip: null,
   };
@@ -336,10 +337,16 @@ export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): Runtime
         last_error: event.payload.error,
         connected_since: keepConnection ? view.connected_since : null,
         latency_ms: keepConnection ? view.latency_ms : null,
+        traffic: keepConnection ? view.traffic : null,
       };
     }
     case AGENT_EVENTS.runtimeHealthChanged:
-      return { ...view, health: event.payload.health };
+      return {
+        ...view,
+        health: event.payload.health,
+        traffic:
+          "traffic" in event.payload ? event.payload.traffic ?? null : view.traffic,
+      };
     default:
       return view;
   }
@@ -365,6 +372,7 @@ export function snapshotToView(snapshot: RuntimeSnapshot): RuntimeView {
     mixed_port: snapshot.mixed_port ?? null,
     connected_since: snapshot.connected_since ?? null,
     latency_ms: snapshot.latency_ms ?? null,
+    traffic: snapshot.traffic ?? null,
     applied_route_revision: snapshot.applied_route_revision ?? null,
     direct_ip: snapshot.direct_ip ?? null,
   };

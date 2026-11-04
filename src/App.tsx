@@ -164,7 +164,7 @@ export default function App() {
       setRuntime((current) =>
         versionAtRequest === healthVersion.current
           ? base
-          : { ...base, health: current.health },
+          : { ...base, health: current.health, traffic: current.traffic },
       );
     });
   }, [bridge]);
@@ -959,7 +959,7 @@ export default function App() {
         onAskAi={handleAskAiFromConsole}
         onNewConfig={() => setNewConfigOpen(true)}
         loading={vpn.loading}
-        exitIp={runtime.health.exit_ip}
+        runtime={runtime}
       />
       {panelOpen ? (
         <div
