@@ -2,13 +2,16 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "veyl-web",
+      "name": "veyl-preview",
       "runtimeExecutable": "npm",
       "runtimeArgs": [
         "run",
-        "dev"
+        "dev",
+        "--",
+        "--port",
+        "1440"
       ],
-      "port": 1430
+      "port": 1440
     },
     {
       "name": "veyl-site",
