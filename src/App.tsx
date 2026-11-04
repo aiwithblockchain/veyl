@@ -19,6 +19,7 @@ import { IconClose } from "./components/icons";
 import { Onboarding } from "./components/Onboarding";
 import { Settings, describeImportError } from "./components/Settings";
 import type { ConnectMode } from "./config/model";
+import { isAiReady, shouldShowOnboarding } from "./config/onboarding";
 import { useVpnSession } from "./config/useVpnSession";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import { useFocusTrap } from "./ui/focus";
@@ -156,24 +157,24 @@ export default function App() {
   }, []);
 
   const refreshAiStatus = useCallback(
-    async (initial = false): Promise<boolean> => {
+    async (initial = false) => {
       const [key, providers] = await Promise.all([
         bridge.getDeepSeekKey().catch(() => null),
         bridge.llmProviderList().catch(() => null),
       ]);
-      // 内置服务商默认就是 active，但它不代表用户配过；看的是当前服务商有没有 Key。
-      const activeProvider = providers
-        ? providers.providers.find(
-            (provider) => provider.providerId === providers.activeProviderId,
-          )
-        : undefined;
-      const ready =
-        (key?.masked ?? null) !== null || activeProvider?.hasKey === true;
+      const ready = isAiReady({ key, providers });
       const wasReady = aiConfiguredRef.current;
       aiConfiguredRef.current = ready;
       setAiReady(ready);
       if (!initial && !wasReady && ready) maybeAutoOpenPanel();
-      return ready;
+      return {
+        ready,
+        showOnboarding: shouldShowOnboarding({
+          key,
+          providers,
+          skipped: onboardingSkippedRef.current,
+        }),
+      };
     },
     [bridge, maybeAutoOpenPanel],
   );
@@ -320,9 +321,9 @@ export default function App() {
     let cancelled = false;
     void (async () => {
       await refreshDefaultProfile();
-      const ready = await refreshAiStatus(true);
+      const decision = await refreshAiStatus(true);
       if (cancelled) return;
-      setShowOnboarding(!ready && !onboardingSkippedRef.current);
+      setShowOnboarding(decision.showOnboarding);
       setOnboardingLoaded(true);
     })();
     return () => {

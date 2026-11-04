@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run --dir src",
     "tauri": "tauri",
     "icons": "python3 scripts/generate_icons.py",
     "rules:fetch": "node scripts/rules/fetch-rules.mjs",
@@ -28,6 +29,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.7.2",
-    "vite": "^6.0.3"
+    "vite": "^6.0.3",
+    "vitest": "^5.1.0"
   }
 }
