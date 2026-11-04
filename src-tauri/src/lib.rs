@@ -109,10 +109,10 @@ pub fn run() {
     agent::install_app_state(&state);
 
     // ---- 启动序列：一行一条，故障时能直接看出「应用此刻认为自己处于什么状态」 ----
-    log::info!("启动 data_dir={}", data_dir.display());
-    log::info!("启动 数据库={}", crate::store::default_db_path(&data_dir).display());
+    log::info!("启动 data_dir={}", short_path(&data_dir));
+    log::info!("启动 数据库={}", short_path(&crate::store::default_db_path(&data_dir)));
     match crate::runtime::Installer::new(&data_dir).active() {
-        Ok(Some(rt)) => log::info!("启动 运行时={} ({})", rt.version, rt.binary.display()),
+        Ok(Some(rt)) => log::info!("启动 运行时={} ({})", rt.version, short_path(&rt.binary)),
         Ok(None) => log::info!("启动 运行时=未安装"),
         Err(error) => log::warn!("启动 运行时状态读取失败：{error}"),
     }
@@ -319,6 +319,17 @@ pub fn run() {
             lifecycle::on_exit_requested(handle, exit_parts.clone());
         }
     });
+}
+
+/// 日志里只留路径最后两段：本地日志没必要写全路径。
+fn short_path(path: &std::path::Path) -> String {
+    let parts: Vec<_> = path
+        .components()
+        .rev()
+        .take(2)
+        .map(|part| part.as_os_str().to_string_lossy().to_string())
+        .collect();
+    parts.into_iter().rev().collect::<Vec<_>>().join("/")
 }
 
 /// 把命令参数渲染成一行：**先脱敏再序列化**，敏感字段永远是 `***`。

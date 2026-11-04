@@ -24,6 +24,9 @@ const CONSOLE_LEVEL: LevelFilter = LevelFilter::Off;
 ///
 /// 最坏磁盘占用 = `LOG_KEEP_DAYS` × (1 + `MAX_ROTATED_PER_DAY`) × 本值
 /// = 7 × 3 × 2 MiB = **42 MiB**。
+///
+/// 这个上限对**长期不重启**的进程也成立：跨天时会先清理一次过期日志，
+/// 所以不会出现「开着几周、每天的轮转文件都堆着」的情况。
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// 每天除当前文件外最多保留的轮转文件数。
@@ -52,6 +55,11 @@ impl Logger {
         };
 
         let today = chrono::Local::now().date_naive();
+        if inner.date != today {
+            // 只在跨天时清一次：这样「连续开几周不重启」也不会无限涨，
+            // 7 天上限才是真的上限，而不是「每次重启后的上限」。
+            cleanup_old_logs(&inner.dir.join("logs"), LOG_KEEP_DAYS);
+        }
         if inner.date != today || inner.file.is_none() {
             inner.open(today);
         }
@@ -160,7 +168,7 @@ pub fn init(data_dir: &Path) -> Option<PathBuf> {
     }
 
     let inner = Inner {
-        dir: log_dir.clone(),
+        dir: data_dir.to_path_buf(),
         date: chrono::Local::now().date_naive(),
         written: std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
         file,
@@ -234,10 +242,19 @@ fn parse_log_date(name: &str) -> Option<chrono::NaiveDate> {
 
 /// 终端那一路的级别。release 构建里没有终端日志。
 fn console_level() -> LevelFilter {
-    match std::env::var("RUST_LOG") {
-        // 显式设了就听用户的（两路一起变）。
-        Ok(raw) => parse_level(&raw).unwrap_or(CONSOLE_LEVEL),
-        Err(_) => CONSOLE_LEVEL,
+    // release 构建恒为 Off，**没有覆盖开关**。
+    // 打包后的 GUI 应用 stderr 往往没有归宿，让它有机会被环境变量重新打开
+    // 只会制造「日志写到不知道哪里去了」这一类问题。
+    #[cfg(not(debug_assertions))]
+    {
+        LevelFilter::Off
+    }
+    #[cfg(debug_assertions)]
+    {
+        match std::env::var("RUST_LOG") {
+            Ok(raw) => parse_level(&raw).unwrap_or(CONSOLE_LEVEL),
+            Err(_) => CONSOLE_LEVEL,
+        }
     }
 }
 
@@ -289,14 +306,89 @@ fn is_free_text_key(key: &str) -> bool {
         .any(|needle| key == *needle || key.ends_with(&format!("_{needle}")))
 }
 
-/// 字符串一律截断，避免整份配置/提示词进日志。
-pub fn redact_str(value: &str) -> String {
-    let count = value.chars().count();
-    if count <= 24 {
-        return value.to_string();
+/// **自由文本不记内容，只记长度。**
+///
+/// 用户输入、提示词、模型返回的自由文本里可能夹着密码；截断会把 24 字以内的
+/// 短密码原样留下，所以这一类**一个字符都不留**。
+pub fn redact_text(value: &str) -> String {
+    format!("「共 {} 字」", value.chars().count())
+}
+
+/// 标识类字符串（名字、id、url、错误信息）：先掩掉像密钥的片段，再截断。
+///
+/// 名字叫 `truncate_for_log` 而不是 `redact_str`：它**不是**脱敏函数，
+/// 只是把长文本压短并顺手处理明显的密钥形态。真正的保证来自
+/// `redact_text`（自由文本）与 `is_secret_key`（敏感字段）。
+pub fn truncate_for_log(value: &str) -> String {
+    let masked = mask_secret_like(value);
+    let count = masked.chars().count();
+    if count <= 48 {
+        return masked;
     }
-    let head: String = value.chars().take(16).collect();
+    let head: String = masked.chars().take(40).collect();
     format!("{head}…（共 {count} 字）")
+}
+
+/// 把「看起来像凭据」的片段换成 `***`：
+/// - `scheme://user:pass@host` 里的 userinfo
+/// - `sk-` 开头的令牌
+/// - 长度 ≥16 且几乎只由 base64/hex 字符组成的一整段（API Key、订阅 token 的典型形态）
+fn mask_secret_like(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut token = String::new();
+
+    let flush = |token: &mut String, out: &mut String| {
+        if token.is_empty() {
+            return;
+        }
+        if looks_like_secret(token) {
+            out.push_str("***");
+        } else {
+            out.push_str(token);
+        }
+        token.clear();
+    };
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '=' | '-' | '_') {
+            token.push(ch);
+        } else {
+            flush(&mut token, &mut out);
+            out.push(ch);
+        }
+    }
+    flush(&mut token, &mut out);
+
+    mask_url_userinfo(&out)
+}
+
+fn looks_like_secret(token: &str) -> bool {
+    if token.starts_with("sk-") {
+        return true;
+    }
+    if token.len() < 16 {
+        return false;
+    }
+    let has_lower = token.chars().any(|c| c.is_ascii_lowercase());
+    let has_upper = token.chars().any(|c| c.is_ascii_uppercase());
+    let has_digit = token.chars().any(|c| c.is_ascii_digit());
+    // 纯小写单词（比如一句英文）不算凭据；要求混了大小写或数字。
+    (has_lower && has_upper) || (has_lower && has_digit) || (has_upper && has_digit)
+}
+
+/// `https://user:pass@host/...` → `https://***@host/...`
+fn mask_url_userinfo(text: &str) -> String {
+    let Some(scheme) = text.find("://") else {
+        return text.to_string();
+    };
+    let after = scheme + 3;
+    let rest = &text[after..];
+    let end = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..end];
+    match authority.rfind('@') {
+        Some(at) => format!("{}***{}{}", &text[..after], &authority[at..], &rest[end..]),
+        None => text.to_string(),
+    }
 }
 
 /// 递归脱敏。深度上限 6，防止异常结构把日志撑爆。
@@ -317,7 +409,8 @@ fn redact_json_at(value: &serde_json::Value, depth: usize) -> serde_json::Value 
                     Value::String("***".into())
                 } else if is_free_text_key(key) {
                     match item {
-                        Value::String(text) => Value::String(redact_str(text)),
+                        // 自由文本：只留长度，一个字符都不留。
+                        Value::String(text) => Value::String(redact_text(text)),
                         other => redact_json_at(other, depth + 1),
                     }
                 } else {
@@ -330,7 +423,7 @@ fn redact_json_at(value: &serde_json::Value, depth: usize) -> serde_json::Value 
         Value::Array(items) => {
             Value::Array(items.iter().map(|item| redact_json_at(item, depth + 1)).collect())
         }
-        Value::String(text) => Value::String(redact_str(text)),
+        Value::String(text) => Value::String(truncate_for_log(text)),
         other => other.clone(),
     }
 }
@@ -538,5 +631,59 @@ mod tests {
         assert!(!redacted.contains(&"x".repeat(50)), "长文本没有截断：{redacted}");
         assert!(redacted.contains("8388"), "非敏感字段不该被吃掉");
         assert!(redacted.contains("东京"));
+    }
+
+    /// 交叉检查抓到的真问题：12 个字符的密码短于旧的 24 字阈值，会原样进日志。
+    /// 现在自由文本**一个字符都不留**，只有长度。
+    #[test]
+    fn a_short_password_in_free_text_is_never_written() {
+        let value = serde_json::json!({ "text": "我的密码是 abc12345xyz" });
+        let redacted = redact_json(&value).to_string();
+        assert!(!redacted.contains("abc12345xyz"), "密码进日志了：{redacted}");
+        assert!(redacted.contains("共"), "自由文本应只留长度：{redacted}");
+    }
+
+    /// 敏感字段无论长短都掩掉。
+    #[test]
+    fn short_secrets_behind_a_secret_key_are_masked() {
+        let value = serde_json::json!({ "password": "abc12345xyz" });
+        let redacted = redact_json(&value).to_string();
+        assert!(!redacted.contains("abc12345xyz"), "{redacted}");
+        assert!(redacted.contains("***"));
+    }
+
+    /// 普通字段里夹带的凭据形态也要认出来：URL userinfo、sk- 令牌、长 base64。
+    #[test]
+    fn secret_shaped_fragments_are_masked_anywhere() {
+        for (text, leaked) in [
+            ("https://user:hunter2@example.com/sub", "hunter2"),
+            ("token sk-abcdefghijklmnopqrst", "sk-abcdefghijklmnopqrst"),
+            ("key AKIAIOSFODNN7EXAMPLE0123456789", "AKIAIOSFODNN7EXAMPLE0123456789"),
+        ] {
+            let out = truncate_for_log(text);
+            assert!(!out.contains(leaked), "{text} 泄漏了 {leaked}：{out}");
+        }
+    }
+
+    /// `Inner.dir` 是**数据目录**，不是 logs 目录——否则 `log_path_for`
+    /// 会拼成 `<data>/logs/logs/app-….log`。
+    #[test]
+    fn the_file_lands_directly_under_logs() {
+        let data = std::env::temp_dir().join(format!("veyl-dir-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(data.join("logs")).unwrap();
+
+        let mut inner = Inner {
+            dir: data.clone(),
+            date: chrono::Local::now().date_naive(),
+            file: None,
+            written: 0,
+            max_bytes: MAX_FILE_BYTES,
+        };
+        inner.open(chrono::Local::now().date_naive());
+
+        assert!(log_path(&data).exists(), "应写在 <data>/logs/ 下");
+        assert!(!data.join("logs").join("logs").exists(), "不能重复拼 logs");
+
+        let _ = std::fs::remove_dir_all(&data);
     }
 }
