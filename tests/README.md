@@ -30,7 +30,7 @@ CI 入口在 `scripts/`：`bash scripts/ci.sh`（完整 5 步）、`bash scripts
 | `mock-llm/server.mjs` | OpenAI 兼容接口，按剧本返回 `tool_calls` |
 | `echo/server.mjs` | 回显服务，验证代理链路 |
 | `local-node/setup.sh` | 真实 sing-box 服务端 + 客户端（VLESS Reality），带自检 |
-| `contracts/check-contracts.mjs` | 契约一致性检查（8 项）：事件名、chatStore 覆盖、快照字段、剧本工具名、contract_version、命令四方对齐、命令入参、事件载荷字段 |
+| `contracts/check-contracts.mjs` | 契约一致性检查（13 项）：事件名、chatStore 覆盖、订阅列表覆盖、快照字段、剧本工具名、contract_version（Rust + 前端）、命令四方对齐、命令入参、事件载荷字段（TS + Rust） |
 | `fixtures/nodes.json` | 节点数据（含不可达、凭证失效、注入载荷三种异常节点） |
 | `fixtures/llm-scenarios/*.json` | 剧本：用户说什么 → 依次返回什么工具调用 |
 | `fixtures/llm-scenarios/errors/*.json` | 18 个工具各一条错误路径剧本（见该目录 README） |

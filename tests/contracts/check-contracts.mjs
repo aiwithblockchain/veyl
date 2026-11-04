@@ -110,6 +110,42 @@ check("AGENT_EVENTS 全部被 chatStore 的 switch 覆盖", () => {
   return problems;
 });
 
+// --- 2b：订阅列表覆盖 ---
+//
+// tauriBridge 只订阅 `[...AI_EVENT_NAMES, ...APP_EVENT_NAMES]`。事件定义在 AGENT_EVENTS
+// 里但没进这两个数组 → **前端永远收不到**，而且不报错、不报警，最难查。
+// 名字变了、新加了事件忘了加列表，都属于这一类。
+
+function eventNameList(constName, ts) {
+  const m = ts.match(new RegExp(`export const ${constName}\\s*=\\s*\\[([\\s\\S]*?)\\]\\s*as const;`));
+  if (!m) return null;
+  return [...m[1].matchAll(/AGENT_EVENTS\.(\w+)/g)].map((x) => x[1]);
+}
+
+check("AGENT_EVENTS 的每个事件都在 AI_EVENT_NAMES / APP_EVENT_NAMES 里被订阅", () => {
+  const ts = read("src/agent/protocol.ts");
+  const entries = codeEventEntries();
+  const ai = eventNameList("AI_EVENT_NAMES", ts);
+  const app = eventNameList("APP_EVENT_NAMES", ts);
+  if (!ai || !app) throw new Error("未找到 AI_EVENT_NAMES / APP_EVENT_NAMES 定义");
+
+  const problems = [];
+  const known = new Set(entries.map((e) => e.key));
+  for (const key of [...ai, ...app]) {
+    if (!known.has(key)) problems.push(`订阅列表引用了不存在的 AGENT_EVENTS.${key}`);
+  }
+
+  const covered = new Set([...ai, ...app]);
+  for (const { key } of entries) {
+    if (!covered.has(key)) problems.push(`AGENT_EVENTS.${key} 没有被任何订阅列表覆盖（前端收不到这个事件）`);
+  }
+
+  for (const key of covered) {
+    if (ai.includes(key) && app.includes(key)) problems.push(`AGENT_EVENTS.${key} 同时出现在两个订阅列表里（会重复订阅）`);
+  }
+  return problems;
+});
+
 // --- 3：RuntimeStatus 快照不得带 clash_addr ---
 
 check("RuntimeStatus / RuntimeSnapshot 快照不含 clash_addr", () => {
@@ -159,13 +195,17 @@ check("mock LLM 剧本的工具名都在 docs/contracts/tools.md 的工具总表
 // 这一项默认只报 WARN，不阻断 CI：契约升版后实现往往滞后一版，先把偏差摆出来，
 // 由架构师决定何时收紧。用 AIVPN_CONTRACT_STRICT=1（contracts.sh --strict）可当失败处理。
 
-function walkRs(dir, out = []) {
+function walkExt(dir, exts, out = []) {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, e.name);
-    if (e.isDirectory()) walkRs(p, out);
-    else if (e.name.endsWith(".rs")) out.push(p);
+    if (e.isDirectory()) walkExt(p, exts, out);
+    else if (exts.some((x) => e.name.endsWith(x))) out.push(p);
   }
   return out;
+}
+
+function walkRs(dir, out = []) {
+  return walkExt(dir, [".rs"], out);
 }
 
 // 顺序有意义：先按完整路径精确匹配，再按目录前缀匹配。
@@ -182,9 +222,15 @@ const VERSION_MAP = [
   { prefix: "src-tauri/src/tools/", doc: "docs/contracts/tools.md" },
   { prefix: "src-tauri/src/runtime/", doc: "docs/contracts/runtime.md" },
   { prefix: "src-tauri/src/catalog/", doc: "docs/contracts/catalog.md" },
+  // 前端侧：protocol.ts 是 AGENT_EVENTS 与事件载荷类型的唯一来源，跟 events.md 走。
+  // 这一条曾经缺失，导致 CONTRACT_VERSION 停在 1.2.0 而契约已经 2.1.0 都没人发现。
+  { file: "src/agent/protocol.ts", doc: "docs/contracts/events.md" },
 ];
 
 // 常量名 → 契约文件。命中即用，不看目录。顺序：更具体的名字放前面。
+// 这里**不放裸 `CONTRACT_VERSION`**：`src-tauri/src/tools/envelope.rs` 也有一个同名的
+// `CONTRACT_VERSION`（值 3.2.0，归 tools.md），符号优先会把它错判给 events.md。
+// 前端的同名常量走下面 VERSION_MAP 的精确文件映射。
 const SYMBOL_MAP = [
   { symbol: "EVENT_CONTRACT_VERSION", doc: "docs/contracts/events.md" },
   { symbol: "CATALOG_CONTRACT_VERSION", doc: "docs/contracts/catalog.md" },
@@ -216,25 +262,32 @@ function docContractVersion(relDoc) {
 check(
   "实现里的 contract_version 与对应契约文档一致",
   () => {
-    const srcDir = join(ROOT, "src-tauri", "src");
-    if (!existsSync(srcDir)) return [];
+    // 两边都扫：Rust 侧（#[tauri::command] 与各模块常量）和前端侧（protocol.ts）。
+    // 只扫 Rust 会漏掉「契约升了、前端没跟」这类漂移，而它不会在编译期报错。
+    const roots = [
+      { dir: join(ROOT, "src-tauri", "src"), exts: [".rs"] },
+      { dir: join(ROOT, "src"), exts: [".ts", ".tsx"] },
+    ];
     const problems = [];
 
-    for (const file of walkRs(srcDir)) {
-      const rel = file.slice(ROOT.length + 1);
-      const lines = readFileSync(file, "utf8").split("\n");
-      lines.forEach((line, i) => {
-        if (!/CONTRACT_VERSION|contract_version/.test(line)) return;
-        // 归属按行判定：常量名优先于目录（见 VERSION_MAP 上方的说明）。
-        const doc = docForLine(rel, line);
-        // 未映射的文件/行不参与检查（例如 agent/ 下的命令层，不携带契约版本语义）。
-        if (!doc) return;
-        const expected = docContractVersion(doc);
-        for (const m of line.matchAll(/"([\d.]+\.[\d.]+)"/g)) {
-          if (m[1] === expected) continue;
-          problems.push(`${rel}:${i + 1} 是 ${m[1]}，${doc} 是 ${expected}`);
-        }
-      });
+    for (const { dir, exts } of roots) {
+      if (!existsSync(dir)) continue;
+      for (const file of walkExt(dir, exts)) {
+        const rel = file.slice(ROOT.length + 1);
+        const lines = readFileSync(file, "utf8").split("\n");
+        lines.forEach((line, i) => {
+          if (!/CONTRACT_VERSION|contract_version/.test(line)) return;
+          // 归属按行判定：常量名优先于目录（见 VERSION_MAP 上方的说明）。
+          const doc = docForLine(rel, line);
+          // 未映射的文件/行不参与检查（例如 agent/ 下的命令层，不携带契约版本语义）。
+          if (!doc) return;
+          const expected = docContractVersion(doc);
+          for (const m of line.matchAll(/"([\d.]+\.[\d.]+)"/g)) {
+            if (m[1] === expected) continue;
+            problems.push(`${rel}:${i + 1} 是 ${m[1]}，${doc} 是 ${expected}`);
+          }
+        });
+      }
     }
     return problems;
   },
