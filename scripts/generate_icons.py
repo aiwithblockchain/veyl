@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Generate Veyl app icons from veyl.png.
+"""Generate Veyl app icons from the icon masters.
+
+Two masters live in `src-tauri/icons/source/`, both produced by
+`build/logo-variants/make-app-icon.py`:
+
+  app-icon.png        >= 64px   母版原样
+  app-icon-mid.png    32-63px   内部压平，去掉细碎明暗层次
+  app-icon-small.png  16-31px   内部换成两区实心形状
+
+三档**容器完全一致**（同样的暗底与辉光），只有内部不同——所以同一个 App 在
+访达列表、访达图标视图、Dock、切换器里看到的是同一个标志的不同尺度。
+
+`veyl.png` 是原始素材，不再被本脚本直接读取，也不被修改。
 
 macOS follows the Big Sur icon grid: 824x824 rounded artwork centered on a
 1024x1024 transparent canvas (100px margin, 185px corner radius).
@@ -16,14 +28,20 @@ import sys
 from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "veyl.png"
 ICONS = ROOT / "src-tauri" / "icons"
+SOURCE = ICONS / "source" / "app-icon.png"
+MID_SOURCE = ICONS / "source" / "app-icon-mid.png"
+SMALL_SOURCE = ICONS / "source" / "app-icon-small.png"
 BUILD = ROOT / "build" / "icons"
 
 MAC_CANVAS = 1024
 MAC_ART = 824
 MAC_MARGIN = (MAC_CANVAS - MAC_ART) // 2
 MAC_RADIUS = 185
+
+# 分档：16-31 用简化内部，32-63 用压平内部，64 起用母版原样。
+MID_THRESHOLD = 32
+FULL_THRESHOLD = 64
 
 
 def resized(image: Image.Image, size: int) -> Image.Image:
@@ -49,12 +67,22 @@ def make_square_master(source: Image.Image) -> Image.Image:
     return source.convert("RGBA")
 
 
+def pick_master(
+    large: Image.Image, mid: Image.Image, small: Image.Image, size: int
+) -> Image.Image:
+    if size < MID_THRESHOLD:
+        return small
+    if size < FULL_THRESHOLD:
+        return mid
+    return large
+
+
 def save_png(image: Image.Image, path: Path, size: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     resized(image, size).save(path, "PNG")
 
 
-def write_macos(icon_master: Image.Image) -> None:
+def write_macos(large: Image.Image, mid: Image.Image, small: Image.Image) -> None:
     iconset = ICONS / "AppIcon.iconset"
     if iconset.exists():
         shutil.rmtree(iconset)
@@ -73,7 +101,7 @@ def write_macos(icon_master: Image.Image) -> None:
         ("icon_512x512@2x.png", 1024),
     ]
     for name, size in entries:
-        save_png(icon_master, iconset / name, size)
+        save_png(pick_master(large, mid, small, size), iconset / name, size)
 
     iconutil = shutil.which("iconutil")
     if iconutil:
@@ -85,12 +113,16 @@ def write_macos(icon_master: Image.Image) -> None:
         print("warning: iconutil not found, skipped icon.icns", file=sys.stderr)
 
 
-def write_windows(icon_master: Image.Image) -> None:
-    ico = resized(icon_master, 256)
-    ico.save(
+def write_windows(large: Image.Image, mid: Image.Image, small: Image.Image) -> None:
+    frames = [
+        resized(pick_master(large, mid, small, size), size)
+        for size in (16, 32, 48, 256)
+    ]
+    frames[-1].save(
         ICONS / "icon.ico",
         format="ICO",
         sizes=[(16, 16), (32, 32), (48, 48), (256, 256)],
+        append_images=frames[:-1],
     )
 
     for name, size in [
@@ -105,10 +137,10 @@ def write_windows(icon_master: Image.Image) -> None:
         ("Square284x284Logo.png", 284),
         ("Square310x310Logo.png", 310),
     ]:
-        save_png(icon_master, ICONS / name, size)
+        save_png(pick_master(large, mid, small, size), ICONS / name, size)
 
 
-def write_generic(icon_master: Image.Image) -> None:
+def write_generic(large: Image.Image, mid: Image.Image, small: Image.Image) -> None:
     for name, size in [
         ("32x32.png", 32),
         ("64x64.png", 64),
@@ -116,29 +148,41 @@ def write_generic(icon_master: Image.Image) -> None:
         ("128x128@2x.png", 256),
         ("icon.png", 1024),
     ]:
-        save_png(icon_master, ICONS / name, size)
+        save_png(pick_master(large, mid, small, size), ICONS / name, size)
 
 
 def main() -> int:
-    if not SOURCE.exists():
-        print(f"error: missing source image {SOURCE}", file=sys.stderr)
-        return 1
+    for path in (SOURCE, MID_SOURCE, SMALL_SOURCE):
+        if not path.exists():
+            print(f"error: missing icon master {path}", file=sys.stderr)
+            print(
+                "       run: python3 build/logo-variants/make-app-icon.py",
+                file=sys.stderr,
+            )
+            return 1
 
-    source = Image.open(SOURCE).convert("RGBA")
+    large_square = make_square_master(Image.open(SOURCE).convert("RGBA"))
+    mid_square = make_square_master(Image.open(MID_SOURCE).convert("RGBA"))
+    small_square = make_square_master(Image.open(SMALL_SOURCE).convert("RGBA"))
+
     BUILD.mkdir(parents=True, exist_ok=True)
+    large_macos = make_macos_master(large_square)
+    mid_macos = make_macos_master(mid_square)
+    small_macos = make_macos_master(small_square)
+    for name, image in (
+        ("macos-1024.png", large_macos),
+        ("macos-1024-mid.png", mid_macos),
+        ("macos-1024-small.png", small_macos),
+    ):
+        image.save(BUILD / name, "PNG")
 
-    macos_master = make_macos_master(source)
-    square_master = make_square_master(source)
-
-    macos_master.save(BUILD / "macos-1024.png", "PNG")
-    square_master.save(BUILD / "square-1024.png", "PNG")
-
-    write_macos(macos_master)
-    write_windows(square_master)
-    write_generic(square_master)
+    write_macos(large_macos, mid_macos, small_macos)
+    write_windows(large_square, mid_square, small_square)
+    write_generic(large_square, mid_square, small_square)
 
     print(f"macOS master: {BUILD / 'macos-1024.png'}")
-    print(f"square master: {BUILD / 'square-1024.png'}")
+    print(f"macOS master (mid): {BUILD / 'macos-1024-mid.png'}")
+    print(f"macOS master (small): {BUILD / 'macos-1024-small.png'}")
     print(f"icons written to: {ICONS}")
     return 0
 

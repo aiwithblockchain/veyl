@@ -62,7 +62,7 @@ def check_mask():
 def error_mask():
     image = canvas()
     draw = ImageDraw.Draw(image)
-    triangle = [(16, 4), (28, 27), (4, 27)]
+    triangle = [(16, 3.5), (28.5, 28.0), (3.5, 28.0)]
     draw.polygon(scaled(triangle), fill=255)
     # 圆角：三个顶点各叠一个圆，剪影仍是三角。
     for x, y in triangle:
@@ -71,13 +71,14 @@ def error_mask():
             scaled([(x - radius, y - radius), (x + radius, y + radius)]),
             fill=255,
         )
-    # 镂空感叹号。
+    # 镂空感叹号。16px 下细节会被吃掉，所以笔画要粗、间隙要留够：
+    # 竖条宽 3.2 单位（16px 下约 1.6px），与下方圆点的间隙 2.2 单位。
     draw.rounded_rectangle(
-        scaled([(14.8, 10.0), (17.2, 19.5)]),
-        radius=int(1.2 * SCALE),
+        scaled([(14.4, 9.2), (17.6, 17.2)]),
+        radius=int(1.5 * SCALE),
         fill=0,
     )
-    draw.ellipse(scaled([(14.5, 21.8), (17.5, 24.8)]), fill=0)
+    draw.ellipse(scaled([(14.2, 21.2), (17.8, 24.4)]), fill=0)
     return image
 
 
