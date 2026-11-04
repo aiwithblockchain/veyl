@@ -178,7 +178,7 @@ impl Tool for CatalogRefreshTool {
     }
 
     fn description(&self) -> &str {
-        "拉取并应用默认节点（veyl_seed.json）。有本地缓存时离线不算错误；\
+        "拉取并应用测试节点（veyl_seed.json）。有本地缓存时离线不算错误；\
          按内容哈希判断是否变化，不依赖 version 字段。"
     }
 
@@ -202,7 +202,7 @@ impl Tool for CatalogRefreshTool {
                     .get("node_count")
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
-                ToolOutcome::ok(format!("默认节点已检查（{node_count} 个）"), data)
+                ToolOutcome::ok(format!("测试节点已检查（{node_count} 个）"), data)
             }
             Err(error) => ToolOutcome::fail(tool_error(error)),
         };
@@ -227,7 +227,7 @@ impl Tool for DefaultProfileStatusTool {
     }
 
     fn description(&self) -> &str {
-        "读取默认节点缓存状态（不联网）：节点数、内容哈希、检查时间。"
+        "读取测试节点缓存状态（不联网）：节点数、内容哈希、检查时间。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -247,7 +247,7 @@ impl Tool for DefaultProfileStatusTool {
                     .is_some();
                 let summary = if available {
                     format!(
-                        "默认节点 {} 个{}",
+                        "测试节点 {} 个{}",
                         data.get("node_count").and_then(Value::as_i64).unwrap_or(0),
                         data.get("checked_at")
                             .and_then(Value::as_i64)
@@ -255,7 +255,7 @@ impl Tool for DefaultProfileStatusTool {
                             .unwrap_or_default()
                     )
                 } else {
-                    "还没有默认节点缓存，先运行 CatalogRefresh。".to_string()
+                    "还没有测试节点缓存，先运行 CatalogRefresh。".to_string()
                 };
                 ToolOutcome::ok(summary, data)
             }

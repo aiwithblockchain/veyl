@@ -25,7 +25,7 @@ impl Tool for DiagRunTool {
 
     fn description(&self) -> &str {
         "跑一次网络诊断：运行时/进程/控制面/数据面、系统代理逐服务、DNS、默认路由、\
-         出口 IP、默认源/GitHub/DeepSeek 可达性、当前配置与默认配置版本。\
+         出口 IP、测试节点源/GitHub/DeepSeek 可达性、当前配置与测试节点版本。\
          每项带 ok、detail、remediation 与可点击 action。连接失败时用它定位原因。"
     }
 
