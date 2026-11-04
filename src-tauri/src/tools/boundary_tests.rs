@@ -587,58 +587,90 @@ async fn path_traversal_and_control_characters_do_not_panic() {
 
 /// 可选字段给错类型**不该**被静默当成「没给」。
 ///
-/// 这是本组测试里最重要的一条：`config_id: 123` 如果被当成「省略」，
-/// `VpnConnect` 会去连**当前激活的那套配置**——用户以为连的是 A，实际连的是 B。
+/// **可选字符串参数**的类型错误不能被当成「没给」。
 ///
-/// 曾经是已知缺陷：`config_id` 类型不对时被 `and_then(Value::as_str)` 退化成
-/// `None`，于是「指定了 A」变成「用默认的 B」。现在由 `tools::optional_string`
-/// 区分「没给」与「给错类型」。
+/// 这条测试**从各工具的 schema 推导要测哪些字段**，不是手写列表——
+/// 上一版手写了四个工具，结果漏掉了 `RouteSetMode`，而它的后果和
+/// `VpnConnect` 一样严重：用户指定配置 A、传了错类型，实际改的是配置 B。
+///
+/// 新增一个带可选字符串参数的工具时，这条会直接红，逼着补 `base_input` 与实现。
 #[tokio::test]
-async fn wrong_typed_optional_ids_are_not_silently_ignored() {
+async fn wrong_typed_optional_strings_are_not_silently_ignored() {
     let (svc, rec) = FakeServices::new();
     let all = tools(svc);
 
-    // 这些工具的 `config_id` / `node_id` 都是「可选」的，给错类型时会被
-    // `and_then(Value::as_str)` 吞掉，退化成 None，于是：
-    //   VpnConnect   → 连当前激活配置（不是调用方指定的那套）
-    //   NodeImportUrl → 节点进公共池，没绑到目标配置
-    //   NodeCreate    → 同上
-    //   RouteGet      → 读当前激活配置的分流，而不是指定的那套
-    let cases: &[(&str, Value)] = &[
-        ("VpnConnect", json!({})),
-        (
-            "NodeImportUrl",
-            json!({ "url": "https://example.com/sub" }),
-        ),
-        (
-            "NodeCreate",
-            json!({
-                "name": "东京", "server": "198.51.100.20", "port": 8388,
-                "password": "pw", "method": "aes-256-gcm"
-            }),
-        ),
-        ("RouteGet", json!({})),
-    ];
+    let mut covered = 0usize;
+    for entry in all.iter() {
+        let name = entry.name();
+        for field in optional_string_params(&entry.input_schema()) {
+            let base = base_input(name).unwrap_or_else(|| {
+                panic!("工具 {name} 有可选字符串参数 {field}，但测试没有它的最小输入；请在 base_input 里补一条")
+            });
 
-    for (name, base) in cases {
-        for wrong in [json!(123), json!([]), json!({}), json!(true)] {
-            let mut input = base.clone();
-            input["config_id"] = wrong.clone();
-            rec.take();
-            let (is_error, env) = run(tool(&all, name), input).await;
-            let calls = rec.take();
+            for wrong in [json!(123), json!([]), json!({}), json!(true)] {
+                let mut input = base.clone();
+                input[&field] = wrong.clone();
+                rec.take();
+                let (is_error, env) = run(tool(&all, name), input).await;
+                let calls = rec.take();
 
-            assert!(
-                is_error,
-                "{name} 收到 config_id={wrong} 时应当拒绝，实际 {env}"
-            );
-            assert!(
-                calls.is_empty(),
-                "{name} 收到 config_id={wrong} 时仍然调用了服务层（{calls:?}）\
-                 ——它会被当成「没给」，从而落到另一套配置上"
-            );
+                assert!(
+                    is_error,
+                    "{name}.{field}={wrong} 应当拒绝，实际 {env}"
+                );
+                assert!(
+                    calls.is_empty(),
+                    "{name}.{field}={wrong} 仍然调用了服务层（{calls:?}）\
+                     ——错类型被当成「没给」，会落到另一套配置上"
+                );
+            }
+            covered += 1;
         }
     }
+
+    assert!(
+        covered >= 5,
+        "可选字符串参数至少覆盖 VpnConnect / NodeImportUrl / NodeCreate / RouteGet / RouteSetMode，实际 {covered} 个"
+    );
+}
+
+/// schema 里「类型是 string 且不在 required 里」的属性。
+fn optional_string_params(schema: &Value) -> Vec<String> {
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .map(|items| items.iter().filter_map(|item| item.as_str()).collect())
+        .unwrap_or_default();
+    schema["properties"]
+        .as_object()
+        .map(|props| {
+            props
+                .iter()
+                .filter(|(key, value)| {
+                    value["type"] == json!("string") && !required.contains(&key.as_str())
+                })
+                .map(|(key, _)| key.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 每个「有可选字符串参数」的工具的最小合法输入。
+fn base_input(name: &str) -> Option<Value> {
+    let value = match name {
+        "VpnConnect" | "RouteGet" | "RuntimeLogs" | "CatalogSearch" | "CategoryList" => json!({}),
+        "RouteSetMode" => json!({ "mode": "proxy_all" }),
+        "NodeImportUrl" => json!({ "url": "https://example.com/sub" }),
+        "ConfigCreate" => json!({
+            "name": "公司", "connect_mode": "tun", "routing_mode": "proxy_all"
+        }),
+        "ConfigUpdate" => json!({ "config_id": "cfg_1" }),
+        "NodeCreate" => json!({
+            "name": "东京", "server": "198.51.100.20", "port": 8388,
+            "password": "pw", "method": "aes-256-gcm"
+        }),
+        _ => return None,
+    };
+    Some(value)
 }
 
 // ---------- 5. 主路径 ----------

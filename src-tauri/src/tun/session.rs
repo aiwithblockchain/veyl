@@ -121,12 +121,15 @@ impl TunSession {
         }
         #[cfg(target_os = "macos")]
         {
-            if self.probed.swap(true, Ordering::SeqCst) {
+            // **先判就绪，再决定要不要探测。**
+            // 旧顺序是先 `probed.swap(true)` 再判就绪：helper 未就绪时第一次调用
+            // 就把标志永久置真，之后即使 helper 起来了也不会接手、`stop()` 还可能直接返回。
+            if !self.registration.status().is_ready() {
+                // 未就绪时把标志复位，等它真的可用了还能再探一次。
+                self.probed.store(false, Ordering::SeqCst);
                 return TunState::Stopped;
             }
-            // helper 没被注册/批准时根本不碰 XPC。
-            // `status()` 跑在启动路径上，可选功能的探测不该在那里制造任何风险。
-            if !self.registration.status().is_ready() {
+            if self.probed.swap(true, Ordering::SeqCst) {
                 return TunState::Stopped;
             }
             if let Ok(Reply::Status {

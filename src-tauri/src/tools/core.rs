@@ -136,8 +136,7 @@ impl Tool for CoreInstallTool {
         json!({
             "type": "object",
             "properties": {
-                "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
-                "channel": { "type": "string", "enum": ["stable"], "default": "stable" }
+                "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
             },
             "required": ["version"],
             "additionalProperties": false

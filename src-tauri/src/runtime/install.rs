@@ -220,7 +220,9 @@ impl Installer {
     ///
     /// 校验用 `build.rs` 在构建时算出来的完整 sha256——和 TUN helper 用的是同一个值，
     /// 不是 `runtime-manifest.json` 里的（那里记的是压缩包的哈希，不是解压出来的二进制）。
-    pub async fn install_bundled(&self) -> RuntimeResult<Option<InstalledRuntime>> {
+    /// `wanted` 是调用方要装的版本。随包那份不是这个版本时**直接返回 `None`**，
+    /// 不先装上一个用户没要的版本再去下载——那会留下一个不该存在的安装。
+    pub async fn install_bundled(&self, wanted: &str) -> RuntimeResult<Option<InstalledRuntime>> {
         let Some(source) = Self::bundled_runtime_path() else {
             log::info!("没有随包运行时，回退到下载");
             return Ok(None);
@@ -249,6 +251,11 @@ impl Installer {
         let version = read_binary_version(&source).await?;
         if version.is_empty() {
             log::warn!("随包运行时没有报告版本号，回退到下载");
+            return Ok(None);
+        }
+        if version != wanted {
+            // 先比版本再动手：否则会先装上一个用户没要的版本，再回退去下载。
+            log::info!("随包运行时是 {version}，与请求的 {wanted} 不一致，回退到下载");
             return Ok(None);
         }
 

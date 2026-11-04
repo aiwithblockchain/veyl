@@ -233,10 +233,12 @@ impl Tool for RuntimeLogsTool {
             .and_then(Value::as_u64)
             .unwrap_or(200)
             .clamp(1, 500) as u32;
-        let level = input
-            .get("level")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let level = match super::optional_string(&input, "level") {
+            Ok(value) => value,
+            Err(error) => {
+                return envelope::finish(ctx, "RuntimeLogs", ToolOutcome::fail(error))
+            }
+        };
 
         let outcome = match self.services.runtime_logs(lines, level).await {
             Ok(data) => ToolOutcome::ok(format_logs(&data), data),

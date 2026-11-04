@@ -1552,19 +1552,12 @@ impl VpnToolServices for WiredServices {
         // 让人卡在下载上是最差的体验（`docs/user-flows.md` §1.3）。
         let installed = match self
             .installer
-            .install_bundled()
+            .install_bundled(version)
             .await
             .map_err(|e| svc_error(e.code(), e))?
         {
-            Some(installed) if installed.version == version => installed,
-            Some(other) => {
-                log::info!(
-                    "随包运行时是 {}，与请求的 {} 不一致，回退到下载",
-                    other.version,
-                    version
-                );
-                self.install_release(version).await?
-            }
+            // install_bundled 已经保证版本一致，这里只需判有没有。
+            Some(installed) => installed,
             None => self.install_release(version).await?,
         };
 

@@ -245,7 +245,12 @@ impl Tool for ConfigCreateTool {
                 name: name.to_string(),
                 connect_mode: connect_mode.to_string(),
                 routing_mode: routing_mode.to_string(),
-                source: input.get("source").and_then(Value::as_str).map(str::to_string),
+                source: match super::optional_string(&input, "source") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return envelope::finish(ctx, "ConfigCreate", ToolOutcome::fail(error))
+                    }
+                },
                 node_ids,
                 targets: input.get("targets").and_then(Value::as_array).map(|items| {
                     items
@@ -346,11 +351,18 @@ impl Tool for ConfigUpdateTool {
             .config_update(
                 config_id,
                 ConfigUpdateInput {
-                    name: input.get("name").and_then(Value::as_str).map(str::to_string),
-                    routing_mode: input
-                        .get("routing_mode")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
+                    name: match super::optional_string(&input, "name") {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return envelope::finish(ctx, "ConfigUpdate", ToolOutcome::fail(error))
+                        }
+                    },
+                    routing_mode: match super::optional_string(&input, "routing_mode") {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return envelope::finish(ctx, "ConfigUpdate", ToolOutcome::fail(error))
+                        }
+                    },
                     listen_port: input
                         .get("listen_port")
                         .and_then(Value::as_u64)

@@ -149,10 +149,12 @@ impl Tool for RouteSetModeTool {
                 ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 mode")),
             );
         };
-        let config_id = input
-            .get("config_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let config_id = match super::optional_string(&input, "config_id") {
+            Ok(value) => value,
+            Err(error) => {
+                return envelope::finish(ctx, "RouteSetMode", ToolOutcome::fail(error))
+            }
+        };
         let confirm = input
             .get("confirm_reconnect")
             .and_then(Value::as_bool)
@@ -283,7 +285,12 @@ impl Tool for CategoryListTool {
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let query = input.get("query").and_then(Value::as_str).map(str::to_string);
+        let query = match super::optional_string(&input, "query") {
+            Ok(value) => value,
+            Err(error) => {
+                return envelope::finish(ctx, "CategoryList", ToolOutcome::fail(error))
+            }
+        };
         let limit = input
             .get("limit")
             .and_then(Value::as_u64)

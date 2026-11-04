@@ -170,7 +170,7 @@ pub fn call(
     config: Option<&[u8]>,
 ) -> Result<Reply, XpcError> {
     let service = cstring(service);
-    log::info!("xpc call method={method} service={}", service.to_string_lossy());
+    log::debug!("xpc call method={method} service={}", service.to_string_lossy());
     // SAFETY: 连接句柄的生命周期由本函数管理；消息与回复都是 libxpc 对象，
     // 出错路径上也会 release。
     unsafe {
@@ -269,13 +269,25 @@ fn get_i64(dict: xpc_object_t, key: &str) -> Option<i64> {
 /// 它不是「为了收事件」，而是 `xpc_connection_resume` 的前置条件：
 /// 缺了它 libxpc 会判定 API 误用并直接让进程 trap。
 fn install_noop_handler(connection: xpc_connection_t) {
-    use block2::RcBlock;
+    unsafe { xpc_connection_set_event_handler(connection, noop_handler_ptr()) };
+}
 
-    let handler: RcBlock<dyn Fn(xpc_object_t)> = RcBlock::new(|_event: xpc_object_t| {});
-    let raw = RcBlock::as_ptr(&handler) as *mut c_void;
-    // 处理器必须活得和连接一样久；由 libxpc 持有引用，这里不让它 drop。
-    std::mem::forget(handler);
-    unsafe { xpc_connection_set_event_handler(connection, raw) };
+/// 整个进程共用一个空处理器。
+///
+/// 以前每次 `call()` 都新建一个再 `mem::forget`——连接释放了，block 却永远留着，
+/// 调用多少次就漏多少份。现在只创建一次，与进程同寿。
+fn noop_handler_ptr() -> *mut c_void {
+    use block2::RcBlock;
+    use std::sync::OnceLock;
+
+    static POINTER: OnceLock<usize> = OnceLock::new();
+    *POINTER.get_or_init(|| {
+        let handler: RcBlock<dyn Fn(xpc_object_t)> = RcBlock::new(|_event: xpc_object_t| {});
+        let raw = RcBlock::as_ptr(&handler) as *mut c_void;
+        // 这一份是刻意的：libxpc 在连接存续期间会引用它，不能提前释放。
+        std::mem::forget(handler);
+        raw as usize
+    }) as *mut c_void
 }
 
 pub fn create_listener(service: &str) -> xpc_connection_t {

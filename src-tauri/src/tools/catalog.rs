@@ -47,20 +47,25 @@ impl Tool for CatalogSearchTool {
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let parse = |field: &str| super::optional_string(&input, field);
+        let (region, protocol, cursor) = match (
+            parse("region"),
+            parse("protocol"),
+            parse("cursor"),
+        ) {
+            (Ok(region), Ok(protocol), Ok(cursor)) => (region, protocol, cursor),
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+                return envelope::finish(ctx, "CatalogSearch", ToolOutcome::fail(error))
+            }
+        };
         let query = CatalogQuery {
-            region: input.get("region").and_then(Value::as_str).map(str::to_string),
-            protocol: input
-                .get("protocol")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            region,
+            protocol,
             limit: input
                 .get("limit")
                 .and_then(Value::as_u64)
                 .map(|value| value.clamp(1, 50) as u32),
-            cursor: input
-                .get("cursor")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            cursor,
         };
 
         let outcome = match self.services.catalog_search(query).await {
