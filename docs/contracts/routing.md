@@ -110,15 +110,15 @@ app_data/rules/<version>/
 | 环节 | 做法 |
 |---|---|
 | 源 | **我们自己发布的归档**（GitHub Releases / Pages），不直接拉上游 2,233 个文件 |
-| 触发 | 启动 5 分钟后一次；之后每 6 小时；设置页手动「更新规则数据」 |
-| 前置 | **下载需要已连接**（上游与 GitHub 在部分网络下不可达）。`system_proxy` 模式经本机 mixed 端口下载；`tun` 模式由 TUN 接管，直接请求即可。**未连接时排队**，下次连接成功后自动执行 |
-| 下载 | 临时目录，校验归档 `sha256` + 逐条 `manifest`，不覆盖当前版本 |
+| 触发 | **时机不变**：启动 5 分钟后一次；之后每 6 小时；连接失败且当前用种子节点时立即强制刷新一次；设置页手动「更新规则数据」。**不依赖连接**，但也不提前到启动瞬间——首启正在拉种子，叠加会互相抢 |
+| 前置 | **不要求已连接**。先直连尝试（每次重新解析 DNS）；直连失败且已连接 → 经代理重试；仍未成功或未连接 → 排队，下次连接成功后自动重试。**代理是兜底，不是唯一路径** |
+| 下载 | 临时目录，校验归档 `sha256` + 逐条 `manifest`，不覆盖当前版本。网络失败重试，**每次重试重新解析 DNS**，不复用上次的 IP |
 | 切换 | 解压到 `<new-version>.tmp` → 校验 → rename 为 `<new-version>` → 更新 `rules_state.active_version`（单事务） |
 | 旧版本 | 保留上一版目录；新版本 `sing-box check` 通过后删除更旧的版本 |
 | 生效 | **下次连接**。路由不能热重载（`user-flows.md` §1.4 实测） |
-| 失败 | 静默保留当前版本；`rules_status.checked_at` 更新；不插卡 |
+| 失败 | 静默保留当前版本；记录失败的域名与解析到的 IP；`rules_status.checked_at` 更新；不插卡 |
 
-手动更新在未连接时 → `PRECONDITION_FAILED / not_connected`，`details.hint = "连接后才能更新规则数据"`。
+手动更新在未连接时同样先直连尝试；直连失败才返回 `queued: true`，不报 `not_connected`。
 
 ---
 
@@ -503,8 +503,10 @@ type RulesStatus = {
 ### 7.10 `rules_update {}` → `{ queued: boolean, job_id: string | null }`
 
 - **G3 / I2** 更新规则数据（§2.5）。
-- 已连接 → 异步执行：立即返回 `queued: false` + `job_id`，进度走 `job-progress`（`kind = "rules_update"`）。
-- **未连接 → 排进待办**：返回 `queued: true`、`job_id: null`，`rules_status.pending_update = true`。下一次连接成功后自动执行。**不弹「更新失败」**——没有失败，只是时候未到。
+- **先尝试直连**（每次重新解析 DNS）：
+  - 直连成功 → 异步执行，立即返回 `queued: false` + `job_id`，进度走 `job-progress`（`kind = "rules_update"`）。
+  - 直连失败且已连接 → 异步执行，job 内自动改走代理重试，仍返回 `job_id`。
+  - 直连失败且未连接 → 排队：`queued: true`、`job_id = null`，`rules_status.pending_update = true`；下次连接成功后重新解析并重试。**不弹「更新失败」**——没有失败，只是时候未到。
 - 已有更新在跑 → `CONFLICT`，`details.job_id` 指向进行中的任务。
 - 成功切换目录后发 `rules-changed`，`effective = "next_connect"`。
 
@@ -667,7 +669,7 @@ applied_route_revision: number | null;  // 本次连接生成配置时的 config
 | 1 | 跨家族切换必须重连 | **已定**：接受；已连接时必须 `confirmReconnect`，Host 断开重连，与 `config_activate` 同级 | PM 2026-11-03 |
 | 2 | 非中国是否提供 `direct` | **已定：所有国家都提供**。CN 用 `geosite-cn` + `geoip-cn`，其它国家用 `geoip-<cc>`（IP 级近似），文案如实说明 | PM 2026-11-03（`user-flows.md` 决策表已改） |
 | 3 | 自定义规则匹配词汇 | **已定**：`domain` / `domain_suffix` / `domain_keyword` / `ip_cidr` / `category` | PM 2026-11-03 |
-| 4 | 规则更新必须已连接 | **已定**：未连接时排队，下次连接自动执行，不报失败 | PM 2026-11-03 |
+| 4 | 规则更新是否必须已连接 | **已修订**：不要求已连接；先直连（每次重新解析 DNS），失败且已连接再走代理，未连接且直连失败才排队。GitHub 是按 IP 封的，时通时不通，代理不是唯一路径 | PM 2026-11-04 实测 |
 | 5 | 规则归档由谁发布 | **已定**：我们的构建流水线打包发布，客户端不直连上游 | PM 2026-11-03 |
 | 6 | 如何表达「当前连接用的是哪一版规则」 | **已定**：`RuntimeSnapshot.applied_route_revision` 与 `configs.route_revision` 比较；相等即已生效，不等即下次连接生效 | PM 2026-11-03 |
 | 7 | 非中国 `direct` 模式的 DNS | **已定：全部域名走本地 DNS 直连解析**，再用 `geoip-<cc>` 按 IP 判定；接受 DNS 泄漏，不额外提示 | 产品负责人 2026-11-04（`user-flows.md` §5 例外） |
@@ -691,7 +693,7 @@ applied_route_revision: number | null;  // 本次连接生成配置时的 config
 
 ## 14. 变更记录
 
-### 1.1.0（2026-11-04，非中国 direct 的 DNS 策略）
+### 1.1.0（2026-11-04，批 3 修订）
 
 | # | 变更 | 类型 | 来源 |
 |---|---|---|---|
@@ -699,6 +701,7 @@ applied_route_revision: number | null;  // 本次连接生成配置时的 config
 | 2 | 同源约束改为覆盖两种形态：域名级（CN A/B、任意 C）与 IP 级 + 全本地解析（非 CN A/B） | 约束重写 | 同上 |
 | 3 | 明确 `route.final` 与 `dns.final` 可以不一致，分属两层；跨家族重连规则无例外 | 澄清 | 同上 |
 | 4 | 跨家族确认文案加「域名解析方式也会改变」；不新增字段 | 交互约束 | 同上 |
+| 5 | 规则更新改为「先直连、代理兜底、未连接且直连失败才排队」 | 语义修正 | GitHub 按 IP 封、时通时不通（2026-11-04 实测） |
 
 ### 1.0.0（2026-11-03，批 3）
 

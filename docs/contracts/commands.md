@@ -1127,8 +1127,10 @@ type RulesStatus = {
 ### 10.9 `rules_update {}` → `{ queued: boolean, job_id: string | null }`
 
 - **G3 / I2** 更新规则数据。
-- 已连接 → 异步执行：`queued = false`、返回 `job_id`；进度走 `job-progress`，`kind = "rules_update"`。
-- 未连接 → 排队：`queued = true`、`job_id = null`，下次连接成功后自动执行，**不返回失败**。
+- **先尝试直连**（每次重新解析 DNS，不复用上次 IP）：
+  - 直连成功 → 异步执行：`queued = false`、返回 `job_id`；进度走 `job-progress`，`kind = "rules_update"`。
+  - 直连失败且已连接 → 异步执行，job 内自动改走代理重试，仍返回 `job_id`。
+  - 直连失败且未连接 → 排队：`queued = true`、`job_id = null`，下次连接成功后重新解析并重试，**不返回失败**。
 - 已有任务在跑 → `CONFLICT`，`details.job_id` 指向进行中的任务。
 - 成功后发 `rules-changed`，`effective = "next_connect"`。
 
@@ -1344,6 +1346,7 @@ type RulesStatus = {
 | 1 | `runtime_start` **去掉 `nodeId` 参数**；切换当前节点只走 `node_switch` | 不兼容 | PM 2026-11-04：两个入口做同一件事，迟早有人用错 |
 | 2 | `route_set_mode` 的跨家族确认文案补充「域名解析方式也会改变」 | 交互约束 | 非中国 `direct` 改用本地 DNS 后，跨家族必然改变 DNS 行为 |
 | 3 | 非中国 `direct` / `proxy_all` 的 DNS 策略改为全本地解析（`routing.md` 1.1.0） | 语义 | 产品负责人 2026-11-04 |
+| 4 | `rules_update` 改为先直连、代理兜底；未连接且直连失败才排队 | 语义 | GitHub 按 IP 封、时通时不通（2026-11-04 实测） |
 
 ### 2.1.0（2026-11-03，批 3 · 分流与 DNS）
 
