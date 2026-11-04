@@ -238,6 +238,8 @@ pub fn run() {
             agent::commands::config_activate,
             agent::commands::node_import_url,
             agent::commands::node_create,
+            agent::commands::node_switch,
+            agent::commands::node_probe,
             agent::commands::default_profile_status,
             agent::commands::default_profile_refresh,
             agent::commands::import_seed_file,

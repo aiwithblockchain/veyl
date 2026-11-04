@@ -107,6 +107,17 @@ pub trait VpnToolServices: Send + Sync {
         url: &str,
     ) -> anyhow::Result<Value>;
     async fn node_create(&self, input: NodeCreateInput) -> anyhow::Result<Value>;
+    async fn node_switch(
+        &self,
+        config_id: &str,
+        node_id: &str,
+        confirm_reconnect: bool,
+    ) -> anyhow::Result<Value>;
+    async fn node_probe(
+        &self,
+        config_id: Option<String>,
+        node_id: &str,
+    ) -> anyhow::Result<Value>;
 
     async fn default_profile_status(&self) -> anyhow::Result<Value>;
     async fn default_profile_refresh(&self, force: bool) -> anyhow::Result<Value>;
@@ -114,6 +125,19 @@ pub trait VpnToolServices: Send + Sync {
 
     async fn rules_status(&self) -> anyhow::Result<Value>;
     async fn category_list(&self, query: Option<String>, limit: Option<u32>) -> anyhow::Result<Value>;
+
+    async fn route_get(&self, config_id: Option<String>) -> anyhow::Result<Value>;
+    async fn route_set_mode(
+        &self,
+        config_id: Option<String>,
+        mode: &str,
+        confirm_reconnect: bool,
+    ) -> anyhow::Result<Value>;
+    async fn route_targets_set(
+        &self,
+        config_id: &str,
+        categories: Vec<String>,
+    ) -> anyhow::Result<Value>;
 
     async fn net_config_get(&self) -> anyhow::Result<Value>;
     async fn net_repair(&self, action: &str, port: Option<u16>) -> anyhow::Result<Value>;
@@ -256,6 +280,23 @@ impl VpnToolServices for NotWiredServices {
         not_wired("创建节点")
     }
 
+    async fn node_switch(
+        &self,
+        _config_id: &str,
+        _node_id: &str,
+        _confirm_reconnect: bool,
+    ) -> anyhow::Result<Value> {
+        not_wired("切换节点")
+    }
+
+    async fn node_probe(
+        &self,
+        _config_id: Option<String>,
+        _node_id: &str,
+    ) -> anyhow::Result<Value> {
+        not_wired("测试节点")
+    }
+
     async fn default_profile_status(&self) -> anyhow::Result<Value> {
         not_wired("种子状态")
     }
@@ -278,6 +319,27 @@ impl VpnToolServices for NotWiredServices {
         _limit: Option<u32>,
     ) -> anyhow::Result<Value> {
         not_wired("分类目录")
+    }
+
+    async fn route_get(&self, _config_id: Option<String>) -> anyhow::Result<Value> {
+        not_wired("分流状态")
+    }
+
+    async fn route_set_mode(
+        &self,
+        _config_id: Option<String>,
+        _mode: &str,
+        _confirm_reconnect: bool,
+    ) -> anyhow::Result<Value> {
+        not_wired("切换分流模式")
+    }
+
+    async fn route_targets_set(
+        &self,
+        _config_id: &str,
+        _categories: Vec<String>,
+    ) -> anyhow::Result<Value> {
+        not_wired("设置分流目标")
     }
 
     async fn net_config_get(&self) -> anyhow::Result<Value> {
@@ -413,6 +475,53 @@ fn diag_check(
         "remediation": remediation,
         "action": action,
     })
+}
+
+fn probe_result(
+    node_id: &str,
+    reachable: bool,
+    latency_ms: Option<u64>,
+    error: Option<(&str, &str)>,
+) -> Value {
+    json!({
+        "node_id": node_id,
+        "reachable": reachable,
+        "latency_ms": latency_ms,
+        "probe_method": "clash_delay",
+        "checked_at": store::now_ms(),
+        "error": error.map(|(code, message)| json!({ "code": code, "message": message })),
+    })
+}
+
+/// 已连接的节点延迟：Clash API `GET /proxies/{tag}/delay`。
+async fn clash_delay(addr: &str, secret: &str, tag: &str) -> Result<u64, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .map_err(|error| format!("创建延迟测试客户端失败：{error}"))?;
+    let response = client
+        .get(format!("http://{addr}/proxies/{tag}/delay"))
+        .bearer_auth(secret)
+        .query(&[
+            ("timeout", "3000"),
+            ("url", "http://cp.cloudflare.com/generate_204"),
+        ])
+        .send()
+        .await
+        .map_err(|error| format!("延迟测试请求失败：{error}"))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let detail = body.chars().take(200).collect::<String>();
+        return Err(format!("延迟测试返回 HTTP {status}：{detail}"));
+    }
+    let value: Value =
+        serde_json::from_str(&body).map_err(|_| "延迟测试响应不是合法 JSON".to_string())?;
+    value
+        .get("delay")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "延迟测试响应缺少 delay".to_string())
 }
 
 async fn http_reachable(url: &str) -> bool {
@@ -1802,6 +1911,225 @@ impl VpnToolServices for WiredServices {
         Ok(node_json(node))
     }
 
+    async fn node_switch(
+        &self,
+        config_id: &str,
+        node_id: &str,
+        confirm_reconnect: bool,
+    ) -> anyhow::Result<Value> {
+        let config = self.require_config(config_id)?;
+        let members = {
+            let conn = self.store.conn();
+            configs::list_nodes(&conn, config_id)
+                .map_err(|error| svc_error(error.code(), error))?
+        };
+        if !members.iter().any(|node| node.id == node_id) {
+            return Err(svc_error_with_details(
+                "NOT_FOUND",
+                "节点不属于这套配置",
+                json!({ "reason": "node_not_in_config" }),
+            ));
+        }
+
+        let previous = config.current_node_id.clone();
+        let status = self.manager.status().await;
+        let connected = self.is_connected(&status);
+        let connected_config = self.connected_config_id().await;
+
+        if previous.as_deref() == Some(node_id) {
+            return Ok(json!({
+                "config_id": config_id,
+                "node_id": node_id,
+                "previous_node_id": previous,
+                "connected": connected,
+                "runtime": if connected {
+                    serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))?
+                } else {
+                    Value::Null
+                },
+            }));
+        }
+
+        if connected {
+            if connected_config.as_deref() != Some(config_id) {
+                return Err(svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    "这套配置不是当前连接的配置",
+                    json!({ "reason": "config_not_running" }),
+                ));
+            }
+            if !confirm_reconnect {
+                return Err(svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    "切换节点会断开当前连接",
+                    json!({
+                        "reason": "will_disconnect",
+                        "config_id": config_id,
+                        "node_id": node_id,
+                    }),
+                ));
+            }
+            self.runtime_stop(false).await?;
+        }
+
+        {
+            let conn = self.store.conn();
+            configs::update(
+                &conn,
+                config_id,
+                &configs::ConfigPatch {
+                    current_node_id: Some(Some(node_id.to_string())),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| svc_error(error.code(), error))?;
+        }
+
+        let runtime = if connected {
+            let data = self.runtime_start(Some(config_id.to_string())).await?;
+            crate::agent::app_handle::emit(
+                "node-switched",
+                json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                    "config_id": config_id,
+                    "from_node_id": previous,
+                    "to_node_id": node_id,
+                    "connected": true,
+                    "runtime": data,
+                    "emitted_at": chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                }),
+            );
+            data
+        } else {
+            crate::agent::app_handle::emit(
+                "node-switched",
+                json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                    "config_id": config_id,
+                    "from_node_id": previous,
+                    "to_node_id": node_id,
+                    "connected": false,
+                    "runtime": Value::Null,
+                    "emitted_at": chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                }),
+            );
+            Value::Null
+        };
+
+        Ok(json!({
+            "config_id": config_id,
+            "node_id": node_id,
+            "previous_node_id": previous,
+            "connected": connected,
+            "runtime": runtime,
+        }))
+    }
+
+    async fn node_probe(
+        &self,
+        config_id: Option<String>,
+        node_id: &str,
+    ) -> anyhow::Result<Value> {
+        let node = {
+            let conn = self.store.conn();
+            configs::get_node(&conn, node_id)
+                .map_err(|error| svc_error(error.code(), error))?
+                .ok_or_else(|| {
+                    svc_error_with_details(
+                        "NOT_FOUND",
+                        "节点不存在",
+                        json!({ "reason": "node_not_found" }),
+                    )
+                })?
+        };
+        let _ = node;
+
+        let status = self.manager.status().await;
+        if !self.is_connected(&status) {
+            return Ok(probe_result(
+                node_id,
+                false,
+                None,
+                Some(("NOT_CONNECTED", "需要先连接才能测试延迟")),
+            ));
+        }
+
+        let connected_config = self.connected_config_id().await;
+        let config_id = match config_id {
+            Some(id) => id,
+            None => {
+                let candidates = {
+                    let conn = self.store.conn();
+                    configs::config_ids_for_node(&conn, node_id)
+                        .map_err(|error| svc_error(error.code(), error))?
+                };
+                let active = self.active_config_id();
+                candidates
+                    .iter()
+                    .find(|id| active.as_deref() == Some(id.as_str()))
+                    .cloned()
+                    .or_else(|| candidates.first().cloned())
+                    .ok_or_else(|| {
+                        svc_error_with_details(
+                            "NOT_FOUND",
+                            "节点不属于任何配置",
+                            json!({ "reason": "node_not_in_config" }),
+                        )
+                    })?
+            }
+        };
+        let config = self.require_config(&config_id)?;
+        let members = {
+            let conn = self.store.conn();
+            configs::list_nodes(&conn, &config_id)
+                .map_err(|error| svc_error(error.code(), error))?
+        };
+        if !members.iter().any(|member| member.id == node_id) {
+            return Err(svc_error_with_details(
+                "NOT_FOUND",
+                "节点不属于这套配置",
+                json!({ "reason": "node_not_in_config" }),
+            ));
+        }
+        if connected_config.as_deref() != Some(config_id.as_str()) {
+            return Ok(probe_result(
+                node_id,
+                false,
+                None,
+                Some(("CONFIG_NOT_RUNNING", "当前连接不是这套配置")),
+            ));
+        }
+        if config.current_node_id.as_deref() != Some(node_id) {
+            return Ok(probe_result(
+                node_id,
+                false,
+                None,
+                Some(("NODE_NOT_CURRENT", "先切换到此节点再测试")),
+            ));
+        }
+
+        let Some(plan) = self.manager.current_plan().await else {
+            return Ok(probe_result(
+                node_id,
+                false,
+                None,
+                Some(("NOT_CONNECTED", "需要先连接才能测试延迟")),
+            ));
+        };
+        let tag = format!("node-{node_id}");
+        match clash_delay(&plan.clash_addr, &plan.clash_secret, &tag).await {
+            Ok(delay) => Ok(probe_result(node_id, true, Some(delay), None)),
+            Err(message) => Ok(probe_result(
+                node_id,
+                false,
+                None,
+                Some(("PROBE_FAILED", message.as_str())),
+            )),
+        }
+    }
+
     async fn default_profile_status(&self) -> anyhow::Result<Value> {
         Ok(self.seed_status_json("cache", false))
     }
@@ -2971,6 +3299,90 @@ mod config_service_tests {
             .await
             .unwrap();
         assert!(updated["listen_port"].is_null(), "传 null 表示改回自动");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn node_switch_updates_selection_without_starting_vpn() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("A")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "东京".into(),
+                server: "203.0.113.10".into(),
+                port: 8388,
+                password: "pw".into(),
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let node_id = node["node_id"].as_str().unwrap().to_string();
+
+        let switched = services
+            .node_switch(&config_id, &node_id, false)
+            .await
+            .unwrap();
+        assert_eq!(switched["connected"], false);
+        assert!(switched["runtime"].is_null());
+
+        let detail = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(detail["current_node_id"], node_id);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn node_probe_without_connection_says_connect_first() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("A")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "东京".into(),
+                server: "203.0.113.10".into(),
+                port: 8388,
+                password: "pw".into(),
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let node_id = node["node_id"].as_str().unwrap().to_string();
+
+        let probe = services
+            .node_probe(Some(config_id), &node_id)
+            .await
+            .unwrap();
+        assert_eq!(probe["reachable"], false);
+        assert_eq!(probe["error"]["code"], "NOT_CONNECTED");
+        assert_eq!(probe["probe_method"], "clash_delay");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn node_switch_rejects_a_node_outside_the_config() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("A")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap();
+        let error = services
+            .node_switch(config_id, "nod_missing", false)
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "NOT_FOUND");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "node_not_in_config"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -347,6 +347,35 @@ pub async fn node_create(
         .map_err(error_value)
 }
 
+/// 切换一套配置的当前节点。已连接时必须带 `confirmReconnect`。
+#[tauri::command]
+pub async fn node_switch(
+    state: State<'_, Arc<AppState>>,
+    config_id: String,
+    node_id: String,
+    confirm_reconnect: Option<bool>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .node_switch(&config_id, &node_id, confirm_reconnect.unwrap_or(false))
+        .await
+        .map_err(error_value)
+}
+
+/// 测试单个节点延迟。未连接返回 `NOT_CONNECTED`，不偷偷起运行时。
+#[tauri::command]
+pub async fn node_probe(
+    state: State<'_, Arc<AppState>>,
+    node_id: String,
+    config_id: Option<String>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .node_probe(config_id, &node_id)
+        .await
+        .map_err(error_value)
+}
+
 /// 默认节点缓存状态（离线可读，不联网）。
 #[tauri::command]
 pub async fn default_profile_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {

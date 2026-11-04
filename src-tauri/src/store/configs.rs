@@ -406,6 +406,14 @@ pub fn config_ids_with_seed_nodes(conn: &Connection) -> StoreResult<Vec<String>>
     rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
 }
 
+pub fn config_ids_for_node(conn: &Connection, node_id: &str) -> StoreResult<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT config_id FROM config_nodes WHERE node_id = ?1",
+    )?;
+    let rows = statement.query_map(params![node_id], |row| row.get::<_, String>(0))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+}
+
 pub fn record_seed_exclusion(conn: &Connection, source_key: &str) -> StoreResult<()> {
     conn.execute(
         "INSERT INTO seed_node_exclusions (source_key, created_at)

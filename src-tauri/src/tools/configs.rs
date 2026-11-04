@@ -443,6 +443,152 @@ impl Tool for ConfigDeleteTool {
     }
 }
 
+pub struct NodeSwitchTool {
+    services: Arc<dyn VpnToolServices>,
+}
+
+impl NodeSwitchTool {
+    pub fn new(services: Arc<dyn VpnToolServices>) -> Self {
+        Self { services }
+    }
+}
+
+#[async_trait]
+impl Tool for NodeSwitchTool {
+    fn name(&self) -> &str {
+        "NodeSwitch"
+    }
+
+    fn description(&self) -> &str {
+        "切换一套配置的当前节点。未连接只改选择，不启动 VPN；已连接会断开重连，\
+         需要用户确认后带 confirm_reconnect=true 再调用。"
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Execute
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "config_id": { "type": "string" },
+                "node_id": { "type": "string" },
+                "confirm_reconnect": { "type": "boolean", "default": false }
+            },
+            "required": ["config_id", "node_id"],
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let (Some(config_id), Some(node_id)) = (
+            input.get("config_id").and_then(Value::as_str),
+            input.get("node_id").and_then(Value::as_str),
+        ) else {
+            return envelope::finish(
+                ctx,
+                "NodeSwitch",
+                ToolOutcome::fail(AivpnError::new(
+                    "INVALID_ARGUMENT",
+                    "缺少 config_id 或 node_id",
+                )),
+            );
+        };
+        let confirm = input
+            .get("confirm_reconnect")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let outcome = match self.services.node_switch(config_id, node_id, confirm).await {
+            Ok(data) => {
+                let connected = data.get("connected").and_then(Value::as_bool).unwrap_or(false);
+                ToolOutcome::ok(
+                    if connected {
+                        "已切换节点并重连。"
+                    } else {
+                        "已切换当前节点（未连接，未启动 VPN）。"
+                    },
+                    data,
+                )
+            }
+            Err(error) => ToolOutcome::fail(failure(error)),
+        };
+        envelope::finish(ctx, "NodeSwitch", outcome)
+    }
+}
+
+pub struct NodeProbeTool {
+    services: Arc<dyn VpnToolServices>,
+}
+
+impl NodeProbeTool {
+    pub fn new(services: Arc<dyn VpnToolServices>) -> Self {
+        Self { services }
+    }
+}
+
+#[async_trait]
+impl Tool for NodeProbeTool {
+    fn name(&self) -> &str {
+        "NodeProbe"
+    }
+
+    fn description(&self) -> &str {
+        "测试单个节点连通性。已连接时走 Clash API 延迟；未连接返回需要先连接，\
+         不会偷偷启动运行时。节点不可达是正常结果，不算工具错误。"
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "node_id": { "type": "string" },
+                "config_id": { "type": "string" }
+            },
+            "required": ["node_id"],
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let Some(node_id) = input.get("node_id").and_then(Value::as_str) else {
+            return envelope::finish(
+                ctx,
+                "NodeProbe",
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 node_id")),
+            );
+        };
+        let config_id = input
+            .get("config_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let outcome = match self.services.node_probe(config_id, node_id).await {
+            Ok(data) => {
+                let reachable = data.get("reachable").and_then(Value::as_bool).unwrap_or(false);
+                let summary = if reachable {
+                    format!(
+                        "节点可达，延迟 {} ms。",
+                        data.get("latency_ms").and_then(Value::as_u64).unwrap_or(0)
+                    )
+                } else {
+                    data.get("error")
+                        .and_then(|error| error.get("message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("节点不可达。")
+                        .to_string()
+                };
+                ToolOutcome::ok(summary, data)
+            }
+            Err(error) => ToolOutcome::fail(failure(error)),
+        };
+        envelope::finish(ctx, "NodeProbe", outcome)
+    }
+}
+
 pub struct NodeImportUrlTool {
     services: Arc<dyn VpnToolServices>,
 }
