@@ -210,6 +210,7 @@ async fn run_e2e(args: &Args) -> StepResult {
         config_name: None,
         node_id: Some("selftest".into()),
         node_name: None,
+        applied_route_revision: None,
     };
     let status = manager.start(plan).await.map_err(|e| {
         let mut detail = e.to_string();
@@ -406,6 +407,7 @@ async fn run_fault(args: &Args) -> StepResult {
         config_name: None,
         node_id: None,
         node_name: None,
+        applied_route_revision: None,
     };
 
     step(1, "启动假 sing-box（2 秒后自杀）");

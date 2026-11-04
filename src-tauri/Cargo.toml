@@ -57,6 +57,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
+zstd = "0.13"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 aes-gcm = "0.10"

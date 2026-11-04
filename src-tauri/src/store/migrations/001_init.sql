@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS configs (
     connection_mode   TEXT NOT NULL CHECK (connection_mode IN ('system_proxy', 'tun')),
     -- direct：本地直连；proxy_all：全部走代理；proxy_selected：指定服务走代理
     routing_mode      TEXT NOT NULL CHECK (routing_mode IN ('direct', 'proxy_all', 'proxy_selected')),
+    -- 「指定服务」的分类 id 数组，仅 proxy_selected 使用
+    route_targets_json TEXT NOT NULL DEFAULT '[]',
+    -- 每次改 targets/自定义规则 +1；用于判断当前连接是否已应用
+    route_revision    INTEGER NOT NULL DEFAULT 0,
     -- 本机代理端口；NULL = 由运行时自动挑选。tun 模式恒为 NULL。
     listen_port       INTEGER CHECK (listen_port BETWEEN 1 AND 65535),
     -- DNS 候选：{"mode":"auto"|"custom","local":[...],"remote":[...]}
@@ -132,6 +136,20 @@ CREATE TABLE IF NOT EXISTS seed_cache (
 CREATE TABLE IF NOT EXISTS seed_node_exclusions (
     source_key TEXT PRIMARY KEY,
     created_at INTEGER NOT NULL
+);
+
+-- 当前生效的规则数据版本（单行）。规则文件本身在 app_data/rules/<version>/。
+CREATE TABLE IF NOT EXISTS rules_state (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    active_version  TEXT NOT NULL,
+    manifest_sha256 TEXT NOT NULL,
+    bundled_version TEXT NOT NULL,
+    geosite_tag     TEXT,
+    geoip_tag       TEXT,
+    item_count      INTEGER NOT NULL,
+    total_bytes     INTEGER NOT NULL,
+    applied_at      INTEGER NOT NULL,
+    checked_at      INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS runtime_versions (

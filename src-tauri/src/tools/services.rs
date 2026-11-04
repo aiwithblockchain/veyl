@@ -26,6 +26,8 @@ pub struct ConfigCreateInput {
     pub source: Option<String>,
     /// 绑定已有节点；顺序即节点顺序
     pub node_ids: Option<Vec<String>>,
+    /// 「指定服务」分类 id；proxy_selected 时必填
+    pub targets: Option<Vec<String>>,
     pub listen_port: Option<u16>,
     pub dns: Option<Value>,
     pub tun_excludes: Option<Vec<String>>,
@@ -41,6 +43,8 @@ pub struct ConfigUpdateInput {
     pub tun_excludes: Option<Vec<String>>,
     /// 整体替换节点集；顺序即新顺序。
     pub node_ids: Option<Vec<String>>,
+    /// 整体替换「指定服务」分类集合。
+    pub targets: Option<Vec<String>>,
     /// 契约里没有这个参数；带上它必须报 `connect_mode_immutable`。
     pub connect_mode: Option<String>,
 }
@@ -108,6 +112,9 @@ pub trait VpnToolServices: Send + Sync {
     async fn default_profile_refresh(&self, force: bool) -> anyhow::Result<Value>;
     async fn import_seed_file(&self, path: &str) -> anyhow::Result<Value>;
 
+    async fn rules_status(&self) -> anyhow::Result<Value>;
+    async fn category_list(&self, query: Option<String>, limit: Option<u32>) -> anyhow::Result<Value>;
+
     async fn net_config_get(&self) -> anyhow::Result<Value>;
     async fn net_repair(&self, action: &str, port: Option<u16>) -> anyhow::Result<Value>;
 
@@ -142,6 +149,7 @@ fn idle_snapshot() -> Value {
         "config_name": null,
         "node_id": null,
         "node_name": null,
+        "applied_route_revision": null,
         "connected_since": null,
         "latency_ms": null,
         "direct_ip": null,
@@ -258,6 +266,18 @@ impl VpnToolServices for NotWiredServices {
 
     async fn import_seed_file(&self, _path: &str) -> anyhow::Result<Value> {
         not_wired("导入种子文件")
+    }
+
+    async fn rules_status(&self) -> anyhow::Result<Value> {
+        not_wired("规则数据状态")
+    }
+
+    async fn category_list(
+        &self,
+        _query: Option<String>,
+        _limit: Option<u32>,
+    ) -> anyhow::Result<Value> {
+        not_wired("分类目录")
     }
 
     async fn net_config_get(&self) -> anyhow::Result<Value> {
@@ -812,6 +832,62 @@ impl WiredServices {
         status
     }
 
+    /// 校验「指定服务」分类：必须存在且能参与 DNS 决策。
+    fn validate_targets(&self, targets: &[String]) -> anyhow::Result<()> {
+        if targets.is_empty() {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "指定服务走 VPN 时至少要选一个分类",
+                json!({ "reason": "route_targets_empty" }),
+            ));
+        }
+        let categories = crate::rules::categories(&self.store, &self.data_dir);
+        if categories.is_empty() {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "规则数据尚未就绪",
+                json!({ "reason": "rules_not_ready" }),
+            ));
+        }
+        let known = categories
+            .iter()
+            .map(|category| (category.id.as_str(), category))
+            .collect::<std::collections::HashMap<_, _>>();
+        let unknown = targets
+            .iter()
+            .filter(|id| !known.contains_key(id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unknown.is_empty() {
+            return Err(svc_error_with_details(
+                "NOT_FOUND",
+                "有分类不存在",
+                json!({ "reason": "category_unknown", "unknown": unknown }),
+            ));
+        }
+        let not_classifiable = targets
+            .iter()
+            .filter(|id| {
+                known
+                    .get(id.as_str())
+                    .map(|category| !category.dns_classifiable)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !not_classifiable.is_empty() {
+            return Err(svc_error_with_details(
+                "UNSUPPORTED",
+                "这些分类没有域名规则集，不能用于指定服务走 VPN",
+                json!({
+                    "reason": "category_not_dns_classifiable",
+                    "categories": not_classifiable
+                }),
+            ));
+        }
+        Ok(())
+    }
+
     async fn connected_config_id(&self) -> Option<String> {
         self.manager
             .current_plan()
@@ -850,16 +926,9 @@ fn validate_connect_mode(value: &str) -> anyhow::Result<()> {
 }
 
 fn validate_routing_mode(value: &str) -> anyhow::Result<()> {
-    if value == configs::ROUTING_PROXY_SELECTED {
-        return Err(svc_error_with_details(
-            "UNSUPPORTED",
-            "指定服务走 VPN 会在后续批次提供",
-            json!({ "reason": "routing_mode_not_ready" }),
-        ));
-    }
     if matches!(
         value,
-        configs::ROUTING_DIRECT | configs::ROUTING_PROXY_ALL
+        configs::ROUTING_DIRECT | configs::ROUTING_PROXY_ALL | configs::ROUTING_PROXY_SELECTED
     ) {
         Ok(())
     } else {
@@ -1175,6 +1244,10 @@ impl VpnToolServices for WiredServices {
         validate_connect_mode(connect_mode)?;
         let routing_mode = input.routing_mode.trim();
         validate_routing_mode(routing_mode)?;
+        let targets = input.targets.clone().unwrap_or_default();
+        if !targets.is_empty() || routing_mode == configs::ROUTING_PROXY_SELECTED {
+            self.validate_targets(&targets)?;
+        }
 
         if connect_mode == configs::CONNECTION_TUN && input.listen_port.is_some() {
             return Err(svc_error_with_details(
@@ -1279,6 +1352,11 @@ impl VpnToolServices for WiredServices {
             configs::replace_nodes(&conn, &created.id, node_ids)
                 .map_err(|error| config_store_error(error))?;
         }
+        if !targets.is_empty() {
+            let conn = self.store.conn();
+            configs::set_route_targets(&conn, &created.id, &json!(targets))
+                .map_err(|error| config_store_error(error))?;
+        }
 
         let config = self.require_config(&created.id)?;
         let active_before = self.active_config_id();
@@ -1369,6 +1447,27 @@ impl VpnToolServices for WiredServices {
             .map(|node| node.id.clone())
             .collect::<Vec<_>>();
 
+        let final_mode = input
+            .routing_mode
+            .as_deref()
+            .unwrap_or(&current.routing_mode);
+        if let Some(targets) = input.targets.as_ref() {
+            self.validate_targets(targets)?;
+        } else if final_mode == configs::ROUTING_PROXY_SELECTED {
+            let empty = current
+                .route_targets
+                .as_array()
+                .map(|items| items.is_empty())
+                .unwrap_or(true);
+            if empty {
+                return Err(svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    "指定服务走 VPN 时至少要选一个分类",
+                    json!({ "reason": "route_targets_empty" }),
+                ));
+            }
+        }
+
         let unchanged = input
             .name
             .as_ref()
@@ -1393,6 +1492,11 @@ impl VpnToolServices for WiredServices {
                 .node_ids
                 .as_ref()
                 .map(|ids| ids == &current_node_ids)
+                .unwrap_or(true)
+            && input
+                .targets
+                .as_ref()
+                .map(|targets| json!(targets) == current.route_targets)
                 .unwrap_or(true);
         if unchanged {
             // 契约：参数与现状完全一致时返回同一份详情，不发事件。
@@ -1438,6 +1542,10 @@ impl VpnToolServices for WiredServices {
                         }
                     }
                 }
+            }
+            if let Some(targets) = input.targets.as_ref() {
+                configs::set_route_targets(&conn, config_id, &json!(targets))
+                    .map_err(|error| config_store_error(error))?;
             }
         }
 
@@ -1783,6 +1891,32 @@ impl VpnToolServices for WiredServices {
             "skipped": [],
             "nodes": nodes.iter().map(node_json).collect::<Vec<_>>(),
         }))
+    }
+
+    async fn rules_status(&self) -> anyhow::Result<Value> {
+        Ok(crate::rules::status(&self.store, &self.data_dir))
+    }
+
+    async fn category_list(
+        &self,
+        query: Option<String>,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Value> {
+        let needle = query.unwrap_or_default().trim().to_ascii_lowercase();
+        let limit = limit.unwrap_or(50).clamp(1, 200) as usize;
+        let all = crate::rules::categories(&self.store, &self.data_dir);
+        let matched = all
+            .into_iter()
+            .filter(|category| {
+                needle.is_empty()
+                    || category.id.to_ascii_lowercase().contains(&needle)
+                    || category.name_zh.to_ascii_lowercase().contains(&needle)
+                    || category.name_en.to_ascii_lowercase().contains(&needle)
+            })
+            .collect::<Vec<_>>();
+        let total = matched.len();
+        let categories = matched.into_iter().take(limit).collect::<Vec<_>>();
+        Ok(json!({ "categories": categories, "total": total }))
     }
 
     async fn vpn_connect(
@@ -2241,13 +2375,35 @@ impl WiredServices {
                 json!({ "reason": "tun_helper_missing" }),
             ));
         }
-        if config.routing_mode != configs::ROUTING_PROXY_ALL {
-            return Err(svc_error_with_details(
-                "UNSUPPORTED",
-                "分流策略会在后续批次提供，当前只支持「全部走代理」",
-                json!({ "reason": "routing_mode_not_ready" }),
-            ));
-        }
+
+        let installed_rules = crate::rules::load_active(&self.store, &self.data_dir).ok_or_else(|| {
+            svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "规则数据尚未就绪，先刷新规则数据",
+                json!({ "reason": "rules_not_ready" }),
+            )
+        })?;
+        let targets = config
+            .route_targets
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let region = crate::rules::detected_region();
+        let plan = crate::rules::plan::build(&crate::rules::plan::RouteInput {
+            mode: &config.routing_mode,
+            region: region.as_deref(),
+            targets: &targets,
+            rules: &installed_rules,
+        })
+        .map_err(|error| {
+            svc_error_with_details(error.code(), error.to_string(), json!({ "reason": error.reason() }))
+        })?;
 
         let (node, password) = self.active_node(config)?;
         let installed = self.ensure_runtime_installed()?;
@@ -2281,7 +2437,7 @@ impl WiredServices {
             clash_port,
             clash_secret,
         );
-        let value = vpn_config::build(&input).map_err(|e| svc_error(e.code(), e))?;
+        let value = vpn_config::build_routed(&input, &plan).map_err(|e| svc_error(e.code(), e))?;
 
         let started = self
             .start_connection(
@@ -2291,6 +2447,7 @@ impl WiredServices {
                 Some(config.name.clone()),
                 Some(node.id.clone()),
                 Some(node.name.clone()),
+                Some(config.route_revision),
                 &value,
             )
             .await;
@@ -2335,6 +2492,7 @@ impl WiredServices {
         config_name: Option<String>,
         node_id: Option<String>,
         node_name: Option<String>,
+        applied_route_revision: Option<i64>,
         value: &Value,
     ) -> anyhow::Result<Value> {
         let guard = RenderedConfigGuard::new(self.config_dir(), config_key.to_string());
@@ -2369,6 +2527,7 @@ impl WiredServices {
             config_name,
             node_id,
             node_name,
+            applied_route_revision,
         };
 
         // 切配置/重连：先撤旧代理，避免旧进程已停、代理还指着旧端口。
@@ -2682,6 +2841,7 @@ mod config_service_tests {
             routing_mode: configs::ROUTING_PROXY_ALL.into(),
             source: None,
             node_ids: None,
+            targets: None,
             listen_port: Some(7890),
             dns: None,
             tun_excludes: None,
@@ -2816,15 +2976,15 @@ mod config_service_tests {
     }
 
     #[tokio::test]
-    async fn proxy_selected_is_unsupported_for_now() {
+    async fn proxy_selected_requires_targets() {
         let dir = temp_dir();
         let services = services(&dir);
         let mut input = create_input("A");
         input.routing_mode = configs::ROUTING_PROXY_SELECTED.into();
         let error = services.config_create(input).await.unwrap_err();
         let service = error.downcast_ref::<ServiceError>().unwrap();
-        assert_eq!(service.code, "UNSUPPORTED");
-        assert_eq!(service.details.as_ref().unwrap()["reason"], "routing_mode_not_ready");
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "route_targets_empty");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

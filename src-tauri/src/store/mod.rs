@@ -14,6 +14,7 @@ pub mod layout;
 pub mod migrations;
 pub mod proxy_backup;
 pub mod runtime;
+pub mod rules_state;
 pub mod seed_cache;
 pub mod settings;
 pub mod tool_calls;

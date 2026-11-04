@@ -14,6 +14,7 @@ pub mod nodes;
 pub mod proxy;
 pub mod public_http;
 pub mod runtime;
+pub mod rules;
 pub mod secrets;
 pub mod seed;
 pub mod store;
@@ -107,6 +108,7 @@ pub fn run() {
     agent::install_app_state(&state);
 
     let setup_store = Arc::clone(&store);
+    let rules_data_dir = data_dir.clone();
 
     let app = tauri::Builder::default()
         // 单实例必须是第一个插件：它的 setup 在 Builder::build 阶段执行，
@@ -161,6 +163,22 @@ pub fn run() {
 
             // 工具事件（tool-call-start 等）需要全局句柄。
             agent::app_handle::set(app.handle().clone());
+
+            // 规则数据：随包归档 → app_data/rules/<version>/。失败不阻塞启动，
+            // 生成分流配置时再报 RULES_NOT_READY。
+            let resource_dir = app.path().resource_dir().ok();
+            match crate::rules::install_bundled(
+                &setup_store,
+                &rules_data_dir,
+                resource_dir.as_deref(),
+            ) {
+                Ok(rules) => log::info!(
+                    "规则数据就绪：{} · {} 个规则集",
+                    rules.manifest.version,
+                    rules.manifest.items.len()
+                ),
+                Err(error) => log::warn!("规则数据未就绪：{error}"),
+            }
 
             // 默认节点刷新：首次没有缓存时立即拉取；有缓存时启动 5 分钟后
             // 再检查，之后每 6 小时一次。失败保留缓存，不阻塞启动。
@@ -223,6 +241,8 @@ pub fn run() {
             agent::commands::default_profile_status,
             agent::commands::default_profile_refresh,
             agent::commands::import_seed_file,
+            agent::commands::rules_status,
+            agent::commands::category_list,
             agent::commands::net_repair,
             agent::commands::onboarding_status,
             agent::commands::onboarding_complete,

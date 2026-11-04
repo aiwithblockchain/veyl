@@ -156,6 +156,7 @@ pub async fn config_create(
     routing_mode: String,
     source: Option<String>,
     node_ids: Option<Vec<String>>,
+    targets: Option<Vec<String>>,
     listen_port: Option<u16>,
     dns: Option<Value>,
     tun_excludes: Option<Vec<String>>,
@@ -168,6 +169,7 @@ pub async fn config_create(
             routing_mode,
             source,
             node_ids,
+            targets,
             listen_port,
             dns,
             tun_excludes,
@@ -253,6 +255,13 @@ pub async fn config_update(
             .map(str::to_string)
             .collect::<Vec<_>>()
     });
+    let targets = arg("targets", "targets").and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
 
     state
         .services
@@ -265,6 +274,7 @@ pub async fn config_update(
                 dns,
                 tun_excludes,
                 node_ids,
+                targets,
                 connect_mode: None,
             },
         )
@@ -368,6 +378,26 @@ pub async fn import_seed_file(
     state
         .services
         .import_seed_file(&path)
+        .await
+        .map_err(error_value)
+}
+
+/// 规则数据状态（不联网）。
+#[tauri::command]
+pub async fn rules_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state.services.rules_status().await.map_err(error_value)
+}
+
+/// 分类目录（AI 与 UI 共用），只读当前生效版本。
+#[tauri::command]
+pub async fn category_list(
+    state: State<'_, Arc<AppState>>,
+    query: Option<String>,
+    limit: Option<u32>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .category_list(query, limit)
         .await
         .map_err(error_value)
 }

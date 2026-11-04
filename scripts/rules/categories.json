@@ -1,5 +1,6 @@
 {
   "schema": 1,
+  "_comment": "item_count 未填写：.srs 是二进制，推导不出底层域名条数；生成后的 categories.json 用 0 表示未知，0 不代表分类为空。",
   "categories": [
     {
       "id": "openai",

@@ -93,8 +93,94 @@ impl BuildInput {
     }
 }
 
-/// 生成客户端配置。节点字段来自目录服务，按不可信输入处理。
+/// 生成客户端配置（单节点、全部走代理）。
 pub fn build(input: &BuildInput) -> RuntimeResult<Value> {
+    validate_input(input)?;
+    let outbound = node_outbound(input, PROXY_TAG)?;
+
+    Ok(json!({
+        "log": {
+            "level": input.log_level,
+            "timestamp": true,
+        },
+        "inbounds": [{
+            "type": "mixed",
+            "tag": "mixed-in",
+            "listen": "127.0.0.1",
+            "listen_port": input.mixed_port,
+        }],
+        "outbounds": [
+            outbound,
+            { "type": "direct", "tag": "direct" },
+        ],
+        "route": { "final": PROXY_TAG },
+        "experimental": {
+            "clash_api": {
+                "external_controller": format!("127.0.0.1:{}", input.clash_port),
+                "secret": input.clash_secret,
+            }
+        },
+    }))
+}
+
+/// 带分流的配置：节点出站 + `proxy` selector + 可选的 `route-local` selector。
+///
+/// 规则集只包含 `plan` 实际引用的那些（`docs/contracts/routing.md` §2.3）。
+pub fn build_routed(
+    input: &BuildInput,
+    plan: &crate::rules::plan::RoutePlan,
+) -> RuntimeResult<Value> {
+    validate_input(input)?;
+    let node_tag = format!("node-{}", input.node.id);
+    let outbound = node_outbound(input, &node_tag)?;
+
+    let mut outbounds = vec![
+        outbound,
+        json!({
+            "type": "selector",
+            "tag": PROXY_TAG,
+            "outbounds": [node_tag.clone()],
+            "default": node_tag,
+        }),
+        json!({ "type": "direct", "tag": "direct" }),
+    ];
+    if let Some(default) = plan.outbound_local {
+        outbounds.push(json!({
+            "type": "selector",
+            "tag": "route-local",
+            "outbounds": ["direct", PROXY_TAG],
+            "default": default,
+        }));
+    }
+
+    Ok(json!({
+        "log": {
+            "level": input.log_level,
+            "timestamp": true,
+        },
+        "inbounds": [{
+            "type": "mixed",
+            "tag": "mixed-in",
+            "listen": "127.0.0.1",
+            "listen_port": input.mixed_port,
+        }],
+        "outbounds": outbounds,
+        "route": {
+            "rule_set": plan.rule_sets.clone(),
+            "rules": plan.route_rules.clone(),
+            "final": plan.route_final,
+        },
+        "dns": plan.dns.clone(),
+        "experimental": {
+            "clash_api": {
+                "external_controller": format!("127.0.0.1:{}", input.clash_port),
+                "secret": input.clash_secret,
+            }
+        },
+    }))
+}
+
+fn validate_input(input: &BuildInput) -> RuntimeResult<()> {
     validate_port(input.mixed_port, "mixed_port")?;
     validate_port(input.clash_port, "clash_port")?;
     if input.mixed_port == input.clash_port {
@@ -107,7 +193,10 @@ pub fn build(input: &BuildInput) -> RuntimeResult<Value> {
     }
     validate_server(&input.node.server)?;
     validate_port(input.node.server_port, "server_port")?;
+    Ok(())
+}
 
+fn node_outbound(input: &BuildInput, tag: &str) -> RuntimeResult<Value> {
     let outbound = match &input.node.protocol {
         ProtocolConfig::VlessReality {
             uuid,
@@ -122,7 +211,7 @@ pub fn build(input: &BuildInput) -> RuntimeResult<Value> {
             require(public_key, "public_key")?;
             let mut outbound = json!({
                 "type": "vless",
-                "tag": PROXY_TAG,
+                "tag": tag,
                 "server": input.node.server,
                 "server_port": input.node.server_port,
                 "uuid": uuid,
@@ -161,7 +250,7 @@ pub fn build(input: &BuildInput) -> RuntimeResult<Value> {
             }
             json!({
                 "type": "shadowsocks",
-                "tag": PROXY_TAG,
+                "tag": tag,
                 "server": input.node.server,
                 "server_port": input.node.server_port,
                 "method": method,
@@ -177,7 +266,7 @@ pub fn build(input: &BuildInput) -> RuntimeResult<Value> {
             require(server_name, "server_name")?;
             json!({
                 "type": "hysteria2",
-                "tag": PROXY_TAG,
+                "tag": tag,
                 "server": input.node.server,
                 "server_port": input.node.server_port,
                 "password": password,
@@ -189,30 +278,7 @@ pub fn build(input: &BuildInput) -> RuntimeResult<Value> {
             })
         }
     };
-
-    Ok(json!({
-        "log": {
-            "level": input.log_level,
-            "timestamp": true,
-        },
-        "inbounds": [{
-            "type": "mixed",
-            "tag": "mixed-in",
-            "listen": "127.0.0.1",
-            "listen_port": input.mixed_port,
-        }],
-        "outbounds": [
-            outbound,
-            { "type": "direct", "tag": "direct" },
-        ],
-        "route": { "final": PROXY_TAG },
-        "experimental": {
-            "clash_api": {
-                "external_controller": format!("127.0.0.1:{}", input.clash_port),
-                "secret": input.clash_secret,
-            }
-        },
-    }))
+    Ok(outbound)
 }
 
 pub const PROXY_TAG: &str = "proxy";
@@ -395,6 +461,42 @@ mod tests {
         assert!(!text.contains("00000000-0000-0000-0000-000000000000"));
         assert!(!text.contains("\"secret\""));
         assert!(text.contains("<redacted>"));
+    }
+
+    #[test]
+    fn routed_config_uses_selector_and_only_referenced_rule_sets() {
+        let plan = crate::rules::plan::RoutePlan {
+            rule_sets: vec![json!({
+                "tag": "geosite-cn", "type": "local", "format": "binary", "path": "/rules/geosite/cn.srs"
+            })],
+            route_rules: vec![json!({
+                "rule_set": ["geosite-cn"], "action": "route", "outbound": "route-local"
+            })],
+            route_final: "proxy",
+            dns: json!({
+                "servers": [{"tag": "dns-local-1", "address": "223.5.5.5", "detour": "direct"}],
+                "rules": [{"rule_set": ["geosite-cn"], "server": "dns-local-1"}],
+                "final": "dns-local-1",
+                "strategy": "prefer_ipv4"
+            }),
+            outbound_local: Some("direct"),
+            referenced: vec!["geosite-cn".into()],
+        };
+        let config = build_routed(&input(vless_node()), &plan).unwrap();
+
+        let tags = config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|outbound| outbound["tag"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(tags, vec!["node-jp-01", "proxy", "direct", "route-local"]);
+        assert_eq!(config["outbounds"][1]["outbounds"][0], "node-jp-01");
+        assert_eq!(config["outbounds"][3]["default"], "direct");
+        assert_eq!(config["route"]["final"], "proxy");
+        assert_eq!(config["route"]["rule_set"].as_array().unwrap().len(), 1);
+        assert_eq!(config["route"]["rule_set"][0]["tag"], "geosite-cn");
+        assert!(config.get("dns").is_some());
     }
 }
 

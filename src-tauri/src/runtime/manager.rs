@@ -123,6 +123,7 @@ pub struct RuntimeStatus {
     pub config_name: Option<String>,
     pub node_id: Option<String>,
     pub node_name: Option<String>,
+    pub applied_route_revision: Option<i64>,
     pub connected_since: Option<String>,
     pub latency_ms: Option<u64>,
     pub direct_ip: Option<String>,
@@ -253,6 +254,8 @@ pub struct StartPlan {
     pub config_name: Option<String>,
     pub node_id: Option<String>,
     pub node_name: Option<String>,
+    /// 建连时 `configs.route_revision` 的值。
+    pub applied_route_revision: Option<i64>,
 }
 
 impl std::fmt::Debug for StartPlan {
@@ -270,6 +273,7 @@ impl std::fmt::Debug for StartPlan {
             .field("config_name", &self.config_name)
             .field("node_id", &self.node_id)
             .field("node_name", &self.node_name)
+            .field("applied_route_revision", &self.applied_route_revision)
             .finish()
     }
 }
@@ -386,6 +390,11 @@ impl Inner {
                 None
             } else {
                 self.plan.as_ref().and_then(|p| p.node_name.clone())
+            },
+            applied_route_revision: if connected {
+                self.plan.as_ref().and_then(|p| p.applied_route_revision)
+            } else {
+                None
             },
             connected_since: if connected {
                 self.connected_since.clone()
@@ -1458,6 +1467,7 @@ mod tests {
             config_name: None,
             node_id: None,
             node_name: None,
+            applied_route_revision: None,
         }
     }
 
@@ -1521,6 +1531,7 @@ mod tests {
             config_name: None,
             node_id: None,
             node_name: None,
+            applied_route_revision: None,
         };
 
         {
@@ -1572,6 +1583,7 @@ mod tests {
             config_name: None,
             node_id: None,
             node_name: None,
+            applied_route_revision: None,
         };
 
         let first = manager.start(start_plan.clone()).await.unwrap();

@@ -198,6 +198,7 @@ impl Tool for ConfigCreateTool {
                 "routing_mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
                 "source": { "type": "string", "enum": ["seed", "empty"] },
                 "node_ids": { "type": "array", "items": { "type": "string" } },
+                "targets": { "type": "array", "items": { "type": "string" } },
                 "listen_port": { "type": "integer", "minimum": 1000, "maximum": 65535 },
                 "dns": { "type": "object" },
                 "tun_excludes": { "type": "array", "items": { "type": "string" } }
@@ -246,6 +247,13 @@ impl Tool for ConfigCreateTool {
                 routing_mode: routing_mode.to_string(),
                 source: input.get("source").and_then(Value::as_str).map(str::to_string),
                 node_ids,
+                targets: input.get("targets").and_then(Value::as_array).map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                }),
                 listen_port: input
                     .get("listen_port")
                     .and_then(Value::as_u64)
@@ -310,7 +318,8 @@ impl Tool for ConfigUpdateTool {
                 "listen_port": { "type": "integer", "minimum": 1000, "maximum": 65535 },
                 "dns": { "type": "object" },
                 "tun_excludes": { "type": "array", "items": { "type": "string" } },
-                "node_ids": { "type": "array", "items": { "type": "string" } }
+                "node_ids": { "type": "array", "items": { "type": "string" } },
+                "targets": { "type": "array", "items": { "type": "string" } }
             },
             "required": ["config_id"],
             "additionalProperties": false
@@ -359,6 +368,13 @@ impl Tool for ConfigUpdateTool {
                                 .collect()
                         }),
                     node_ids,
+                    targets: input.get("targets").and_then(Value::as_array).map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    }),
                     connect_mode: input
                         .get("connect_mode")
                         .and_then(Value::as_str)

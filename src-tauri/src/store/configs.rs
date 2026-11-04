@@ -35,6 +35,10 @@ pub struct Config {
     pub name: String,
     pub connection_mode: String,
     pub routing_mode: String,
+    /// 「指定服务」的分类 id 数组，仅 proxy_selected 使用。
+    pub route_targets: Value,
+    /// 每次改 targets / 自定义规则 +1。
+    pub route_revision: i64,
     pub listen_port: Option<u16>,
     pub dns: Value,
     pub tun_excludes: Value,
@@ -128,8 +132,9 @@ pub fn create(conn: &Connection, new: &NewConfig<'_>) -> StoreResult<Config> {
 
 pub fn get(conn: &Connection, id: &str) -> StoreResult<Option<Config>> {
     conn.query_row(
-        "SELECT id, name, connection_mode, routing_mode, listen_port, dns_json,
-                tun_excludes_json, current_node_id, is_active, created_at, updated_at, last_used_at
+        "SELECT id, name, connection_mode, routing_mode, route_targets_json, route_revision,
+                listen_port, dns_json, tun_excludes_json, current_node_id, is_active,
+                created_at, updated_at, last_used_at
            FROM configs WHERE id = ?1",
         params![id],
         row_to_config,
@@ -141,8 +146,9 @@ pub fn get(conn: &Connection, id: &str) -> StoreResult<Option<Config>> {
 /// 左栏顺序：最近使用过的在前，从未使用过的按创建时间。
 pub fn list(conn: &Connection) -> StoreResult<Vec<Config>> {
     let mut statement = conn.prepare(
-        "SELECT id, name, connection_mode, routing_mode, listen_port, dns_json,
-                tun_excludes_json, current_node_id, is_active, created_at, updated_at, last_used_at
+        "SELECT id, name, connection_mode, routing_mode, route_targets_json, route_revision,
+                listen_port, dns_json, tun_excludes_json, current_node_id, is_active,
+                created_at, updated_at, last_used_at
            FROM configs
           ORDER BY (last_used_at IS NULL) ASC, last_used_at DESC, created_at ASC",
     )?;
@@ -152,8 +158,9 @@ pub fn list(conn: &Connection) -> StoreResult<Vec<Config>> {
 
 pub fn active(conn: &Connection) -> StoreResult<Option<Config>> {
     conn.query_row(
-        "SELECT id, name, connection_mode, routing_mode, listen_port, dns_json,
-                tun_excludes_json, current_node_id, is_active, created_at, updated_at, last_used_at
+        "SELECT id, name, connection_mode, routing_mode, route_targets_json, route_revision,
+                listen_port, dns_json, tun_excludes_json, current_node_id, is_active,
+                created_at, updated_at, last_used_at
            FROM configs WHERE is_active = 1",
         [],
         row_to_config,
@@ -242,6 +249,19 @@ pub fn mark_used(conn: &Connection, id: &str) -> StoreResult<()> {
         params![id, now_ms()],
     )?;
     Ok(())
+}
+
+/// 整体替换「指定服务」的分类集合；每次变更把 `route_revision` +1。
+pub fn set_route_targets(conn: &Connection, id: &str, targets: &Value) -> StoreResult<Config> {
+    conn.execute(
+        "UPDATE configs
+            SET route_targets_json = ?2,
+                route_revision = route_revision + 1,
+                updated_at = ?3
+          WHERE id = ?1",
+        params![id, json_text(targets, "分流目标")?, now_ms()],
+    )?;
+    get(conn, id)?.ok_or_else(|| StoreError::NotFound(id.to_string()))
 }
 
 pub fn upsert_node(conn: &Connection, new: &NewNode<'_>) -> StoreResult<Node> {
@@ -628,17 +648,19 @@ fn row_to_config(row: &rusqlite::Row<'_>) -> rusqlite::Result<Config> {
         name: row.get(1)?,
         connection_mode: row.get(2)?,
         routing_mode: row.get(3)?,
-        listen_port: row.get::<_, Option<i64>>(4)?.map(|port| port as u16),
+        route_targets: parse_json_field(&row.get::<_, String>(4)?, serde_json::json!([])),
+        route_revision: row.get(5)?,
+        listen_port: row.get::<_, Option<i64>>(6)?.map(|port| port as u16),
         dns: parse_json_field(
-            &row.get::<_, String>(5)?,
+            &row.get::<_, String>(7)?,
             serde_json::json!({ "mode": "auto", "local": [], "remote": [] }),
         ),
-        tun_excludes: parse_json_field(&row.get::<_, String>(6)?, serde_json::json!([])),
-        current_node_id: row.get(7)?,
-        is_active: row.get::<_, i64>(8)? == 1,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
-        last_used_at: row.get(11)?,
+        tun_excludes: parse_json_field(&row.get::<_, String>(8)?, serde_json::json!([])),
+        current_node_id: row.get(9)?,
+        is_active: row.get::<_, i64>(10)? == 1,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+        last_used_at: row.get(13)?,
     })
 }
 
