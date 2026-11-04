@@ -854,6 +854,39 @@ export default function App() {
         </div>
       ) : null}
 
+      {pendingNode ? (
+        <div className="modal-backdrop" onMouseDown={() => setPendingNodeId(null)}>
+          <div
+            className="modal modal--confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="switch-node-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="modal__head">
+              <h2 id="switch-node-title" className="modal__title">
+                切换节点
+              </h2>
+            </header>
+            <p className="confirm__text">
+              切到「{pendingNode.name}」会先断开当前连接，再重新连上。
+            </p>
+            <div className="confirm__actions">
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => setPendingNodeId(null)}
+              >
+                取消
+              </button>
+              <button type="button" className="btn btn--primary" onClick={confirmNodeSwitch}>
+                切换
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <AskQuestionDialog
         question={currentQuestion}
         onAnswer={handleAnswerQuestion}

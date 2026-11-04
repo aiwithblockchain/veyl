@@ -96,7 +96,8 @@ impl BuildInput {
 /// 生成客户端配置（单节点、全部走代理）。
 pub fn build(input: &BuildInput) -> RuntimeResult<Value> {
     validate_input(input)?;
-    let outbound = node_outbound(input, PROXY_TAG)?;
+    validate_node(&input.node)?;
+    let outbound = node_outbound(&input.node, PROXY_TAG)?;
 
     Ok(json!({
         "log": {
@@ -130,26 +131,50 @@ pub fn build_routed(
     input: &BuildInput,
     plan: &crate::rules::plan::RoutePlan,
 ) -> RuntimeResult<Value> {
-    validate_input(input)?;
-    let node_tag = format!("node-{}", input.node.id);
-    let outbound = node_outbound(input, &node_tag)?;
+    build_routed_multi(input, std::slice::from_ref(&input.node), &input.node.id, plan)
+}
 
-    let mut outbounds = vec![
-        outbound,
-        json!({
-            "type": "selector",
-            "tag": PROXY_TAG,
-            "outbounds": [node_tag.clone()],
-            "default": node_tag,
-        }),
-        json!({ "type": "direct", "tag": "direct" }),
-    ];
-    if let Some(default) = plan.outbound_local {
+/// 多节点版本：`proxy` selector 列出配置内全部节点，默认选中 `default_node_id`。
+/// 这样 Clash API 能对配置内任意节点测延迟，后续也能热切节点。
+pub fn build_routed_multi(
+    input: &BuildInput,
+    nodes: &[NodeDescriptor],
+    default_node_id: &str,
+    plan: &crate::rules::plan::RoutePlan,
+) -> RuntimeResult<Value> {
+    validate_input(input)?;
+    if nodes.is_empty() {
+        return Err(RuntimeError::Config("配置里没有节点".into()));
+    }
+
+    let mut outbounds = Vec::new();
+    let mut node_tags = Vec::new();
+    for node in nodes {
+        validate_node(node)?;
+        let tag = format!("node-{}", node.id);
+        outbounds.push(node_outbound(node, &tag)?);
+        node_tags.push(tag);
+    }
+    let default_tag = format!("node-{default_node_id}");
+    let default = if node_tags.contains(&default_tag) {
+        default_tag
+    } else {
+        node_tags[0].clone()
+    };
+
+    outbounds.push(json!({
+        "type": "selector",
+        "tag": PROXY_TAG,
+        "outbounds": node_tags,
+        "default": default,
+    }));
+    outbounds.push(json!({ "type": "direct", "tag": "direct" }));
+    if let Some(local_default) = plan.outbound_local {
         outbounds.push(json!({
             "type": "selector",
             "tag": "route-local",
             "outbounds": ["direct", PROXY_TAG],
-            "default": default,
+            "default": local_default,
         }));
     }
 
@@ -191,13 +216,16 @@ fn validate_input(input: &BuildInput) -> RuntimeResult<()> {
     if input.clash_secret.trim().is_empty() {
         return Err(RuntimeError::Config("clash secret must not be empty".into()));
     }
-    validate_server(&input.node.server)?;
-    validate_port(input.node.server_port, "server_port")?;
     Ok(())
 }
 
-fn node_outbound(input: &BuildInput, tag: &str) -> RuntimeResult<Value> {
-    let outbound = match &input.node.protocol {
+fn validate_node(node: &NodeDescriptor) -> RuntimeResult<()> {
+    validate_server(&node.server)?;
+    validate_port(node.server_port, "server_port")
+}
+
+fn node_outbound(node: &NodeDescriptor, tag: &str) -> RuntimeResult<Value> {
+    let outbound = match &node.protocol {
         ProtocolConfig::VlessReality {
             uuid,
             flow,
@@ -212,8 +240,8 @@ fn node_outbound(input: &BuildInput, tag: &str) -> RuntimeResult<Value> {
             let mut outbound = json!({
                 "type": "vless",
                 "tag": tag,
-                "server": input.node.server,
-                "server_port": input.node.server_port,
+                "server": node.server,
+                "server_port": node.server_port,
                 "uuid": uuid,
                 "tls": {
                     "enabled": true,
@@ -251,8 +279,8 @@ fn node_outbound(input: &BuildInput, tag: &str) -> RuntimeResult<Value> {
             json!({
                 "type": "shadowsocks",
                 "tag": tag,
-                "server": input.node.server,
-                "server_port": input.node.server_port,
+                "server": node.server,
+                "server_port": node.server_port,
                 "method": method,
                 "password": password,
             })
@@ -267,8 +295,8 @@ fn node_outbound(input: &BuildInput, tag: &str) -> RuntimeResult<Value> {
             json!({
                 "type": "hysteria2",
                 "tag": tag,
-                "server": input.node.server,
-                "server_port": input.node.server_port,
+                "server": node.server,
+                "server_port": node.server_port,
                 "password": password,
                 "tls": {
                     "enabled": true,
@@ -464,8 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn routed_config_uses_selector_and_only_referenced_rule_sets() {
-        let plan = crate::rules::plan::RoutePlan {
+    fn routed_config_uses_selector_and_only_referenced_rule_sets() {        let plan = crate::rules::plan::RoutePlan {
             rule_sets: vec![json!({
                 "tag": "geosite-cn", "type": "local", "format": "binary", "path": "/rules/geosite/cn.srs"
             })],
@@ -497,6 +524,37 @@ mod tests {
         assert_eq!(config["route"]["rule_set"].as_array().unwrap().len(), 1);
         assert_eq!(config["route"]["rule_set"][0]["tag"], "geosite-cn");
         assert!(config.get("dns").is_some());
+    }
+
+    #[test]
+    fn routed_multi_selector_lists_every_node_for_probing() {
+        let plan = crate::rules::plan::RoutePlan {
+            rule_sets: vec![],
+            route_rules: vec![],
+            route_final: "proxy",
+            dns: json!({ "servers": [], "rules": [], "final": "dns-local-1" }),
+            outbound_local: Some("direct"),
+            referenced: vec![],
+        };
+        let first = vless_node();
+        let mut second = vless_node();
+        second.id = "sg-01".into();
+        second.server = "198.51.100.7".into();
+        let config = build_routed_multi(&input(first.clone()), &[first, second], "sg-01", &plan)
+            .unwrap();
+
+        let selector = config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|outbound| outbound["tag"] == "proxy")
+            .unwrap();
+        assert_eq!(
+            selector["outbounds"],
+            json!(["node-jp-01", "node-sg-01"]),
+            "配置内每个节点都要在 selector 里，Clash 才能逐个测延迟"
+        );
+        assert_eq!(selector["default"], "node-sg-01");
     }
 }
 

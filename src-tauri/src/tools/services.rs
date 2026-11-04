@@ -2219,28 +2219,12 @@ impl VpnToolServices for WiredServices {
         let connected = self.is_connected(&status);
         let connected_config = self.connected_config_id().await;
 
-        let config_id = connected_config
-            .clone()
-            .filter(|id| candidates.iter().any(|candidate| candidate == id))
-            .or_else(|| {
-                self.active_config_id()
-                    .filter(|id| candidates.iter().any(|candidate| candidate == id))
-            })
-            .or_else(|| candidates.first().cloned());
-
-        let config = config_id
-            .as_ref()
-            .and_then(|id| {
-                let conn = self.store.conn();
-                configs::get(&conn, id).ok().flatten()
-            });
-
+        // 运行时在跑，且节点属于当前连接的配置 → Clash 延迟。
+        // 不要求它是当前选中的节点：用户最需要「先测一下另一个节点」。
         let can_clash = connected
-            && config_id.is_some()
-            && connected_config == config_id
-            && config
+            && connected_config
                 .as_ref()
-                .map(|config| config.current_node_id.as_deref() == Some(node_id))
+                .map(|id| candidates.iter().any(|candidate| candidate == id))
                 .unwrap_or(false);
         if can_clash {
             if let Some(plan) = self.manager.current_plan().await {
@@ -3065,22 +3049,51 @@ impl WiredServices {
         }
         let clash_secret = vpn_config::random_secret();
 
-        let input = vpn_config::BuildInput::new(
-            vpn_config::NodeDescriptor {
-                id: node.id.clone(),
-                name: node.name.clone(),
-                server: node.server.clone(),
-                server_port: node.port,
+        // 配置内全部节点都进 selector：Clash API 才能对任意节点测延迟，
+        // 也为后续节点热切保留完整成员表。
+        let members = {
+            let conn = self.store.conn();
+            configs::list_nodes(&conn, &config.id)
+                .map_err(|error| svc_error(error.code(), error))?
+        };
+        let mut descriptors = Vec::new();
+        for member in &members {
+            let member_password = if member.id == node.id {
+                Some(password.clone())
+            } else {
+                crate::secrets::get_secret(&member.password_ref)
+                    .ok()
+                    .flatten()
+            };
+            let Some(member_password) = member_password else {
+                log::warn!("节点 {} 缺少凭据，跳过 selector", member.id);
+                continue;
+            };
+            descriptors.push(vpn_config::NodeDescriptor {
+                id: member.id.clone(),
+                name: member.name.clone(),
+                server: member.server.clone(),
+                server_port: member.port,
                 protocol: vpn_config::ProtocolConfig::Shadowsocks {
-                    password,
-                    method: node.method.clone(),
+                    password: member_password,
+                    method: member.method.clone(),
                 },
-            },
+            });
+        }
+        let current_descriptor = descriptors
+            .iter()
+            .find(|descriptor| descriptor.id == node.id)
+            .cloned()
+            .ok_or_else(|| svc_error("PRECONDITION_FAILED", "当前节点凭据缺失，请重新导入"))?;
+
+        let input = vpn_config::BuildInput::new(
+            current_descriptor,
             mixed_port,
             clash_port,
             clash_secret,
         );
-        let value = vpn_config::build_routed(&input, &plan).map_err(|e| svc_error(e.code(), e))?;
+        let value = vpn_config::build_routed_multi(&input, &descriptors, &node.id, &plan)
+            .map_err(|e| svc_error(e.code(), e))?;
 
         let started = self
             .start_connection(
