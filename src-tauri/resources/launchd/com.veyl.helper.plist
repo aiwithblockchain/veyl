@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Veyl 的 TUN 特权助手。
+
+  由 App 通过 SMAppService.daemon(plistName: "com.veyl.helper.plist").register()
+  注册；用户第一次在「系统设置 › 登录项与扩展」里批准一次，之后不再提示。
+
+  BundleProgram 用**相对包内**的路径，不能用绝对路径——
+  App 可能被拖到任何位置（/Applications、桌面、另一个卷）。
+
+  MachServices 是 XPC 的名字。客户端连上之后，helper 会先用
+  SecCodeCheckValidity 校验对端确实是我们签名的 App，验不过直接断开。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.veyl.helper</string>
+
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/veyl-helper</string>
+
+    <key>MachServices</key>
+    <dict>
+        <key>com.veyl.helper</key>
+        <true/>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

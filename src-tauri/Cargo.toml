@@ -15,8 +15,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "veyl-runtime-selftest"
 path = "src/bin/runtime_selftest.rs"
 
+# 特权 helper。必须显式声明：build-dmg.sh 靠解析这里来决定构建并装进包里，
+# 只放在 src/bin/ 下自动发现是不够的（会漏掉 universal 构建，打包时直接失败）。
+[[bin]]
+name = "veyl-helper"
+path = "src/bin/veyl-helper.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+sha2 = "0.10"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
@@ -65,6 +72,23 @@ pbkdf2 = "0.12"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# TUN 提权：SMAppService 只在 macOS 13+ 存在，按需引入。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+block2 = { version = "0.6", default-features = false }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSError",
+    "alloc",
+] }
+objc2-service-management = { version = "0.3", default-features = false, features = [
+    "std",
+    "SMAppService",
+    "objc2",
+    "objc2-foundation",
+] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

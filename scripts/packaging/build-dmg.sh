@@ -47,7 +47,7 @@ printf '== Veyl macOS 打包 ==\n'
 printf '仓库：%s\n' "$ROOT"
 printf '日志：%s\n' "$LOG"
 
-for tool in node npm cargo lipo codesign hdiutil ditto xcrun python3; do
+for tool in node npm cargo lipo codesign hdiutil ditto xcrun python3 shasum; do
   command -v "$tool" >/dev/null 2>&1 || die "缺少命令：$tool"
 done
 
@@ -114,6 +114,20 @@ printf '\n[1/9] 构建前端\n'
 
 printf '\n[2/9] 构建 universal .app\n'
 
+# 两样东西必须已经在仓库里，否则打出来的包 TUN 用不了。在这里失败，
+# 而不是让用户装完才发现——也省得白等一轮构建。
+RUNTIME_SRC="$ROOT/src-tauri/resources/runtime/sing-box"
+[ -f "$RUNTIME_SRC" ] || die "缺少运行时：$RUNTIME_SRC
+  先执行：node scripts/runtime/fetch-runtime.mjs
+  TUN 的特权 helper 只执行随包那一份（用户目录里的二进制以 root 执行是提权漏洞）。"
+
+# fetch-rules.mjs 的产物是归档，manifest.json 在归档**里面**——不要在这里找它。
+RULES_ARCHIVE="$(ls "$ROOT"/src-tauri/resources/rules/veyl-rules-*.tar.zst 2>/dev/null | head -1)"
+[ -n "$RULES_ARCHIVE" ] || die "缺少规则归档：src-tauri/resources/rules/veyl-rules-*.tar.zst
+  先执行：npm run rules:fetch
+  特权 helper 会自己解开这个归档、校验后放到自己拥有的目录；
+  缺了它，带分流的 TUN 起不来。"
+
 # Tauri 的 universal 打包只对主二进制做 lipo，crate 里其它 [[bin]] 不会被构建，
 # 但打包阶段仍要求它们在 universal 目录里存在。这里提前补齐，打包后再删掉，
 # 保证发布包里不带开发用工具。
@@ -156,8 +170,46 @@ APP_PATH="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle/macos/$PR
 [ -d "$APP_PATH" ] || die "找不到构建产物：$APP_PATH"
 
 for extra_bin in $EXTRA_BINS; do
+  # veyl-helper 是 TUN 的特权助手，必须留在包里；其余 [[bin]] 是本机开发工具。
+  if [ "$extra_bin" = "veyl-helper" ]; then
+    continue
+  fi
   rm -f "$APP_PATH/Contents/MacOS/$extra_bin"
 done
+
+# Tauri 不会把 [[bin]] 放进包（没有 externalBin 配置），这里显式安装 helper。
+# 它要和主程序同一个签名身份，否则 SMAppService 注册会失败。
+HELPER_SRC="$ROOT/src-tauri/target/universal-apple-darwin/release/veyl-helper"
+if [ -f "$HELPER_SRC" ]; then
+  mkdir -p "$APP_PATH/Contents/MacOS"
+  cp "$HELPER_SRC" "$APP_PATH/Contents/MacOS/veyl-helper"
+  chmod 755 "$APP_PATH/Contents/MacOS/veyl-helper"
+  printf '  已安装特权助手：Contents/MacOS/veyl-helper\n'
+else
+  die "缺少 universal 的 veyl-helper，无法打包 TUN 特权助手"
+fi
+
+# SMAppService 只认 Contents/Library/LaunchDaemons/ 下的 plist。
+LAUNCHD_SRC="$ROOT/src-tauri/resources/launchd/com.veyl.helper.plist"
+[ -f "$LAUNCHD_SRC" ] || die "缺少 $LAUNCHD_SRC"
+mkdir -p "$APP_PATH/Contents/Library/LaunchDaemons"
+cp "$LAUNCHD_SRC" "$APP_PATH/Contents/Library/LaunchDaemons/com.veyl.helper.plist"
+printf '  已安装 LaunchDaemon plist：com.veyl.helper.plist\n'
+
+# 运行时必须随包：helper 只从自己签名过的 bundle 里取 sing-box 再以 root 执行。
+# 放用户目录、从网上下载的二进制以 root 执行，是提权漏洞。
+RUNTIME_SRC="$ROOT/src-tauri/resources/runtime/sing-box"
+if [ -f "$RUNTIME_SRC" ]; then
+  mkdir -p "$APP_PATH/Contents/Resources/runtime"
+  cp "$RUNTIME_SRC" "$APP_PATH/Contents/Resources/runtime/sing-box"
+  chmod 755 "$APP_PATH/Contents/Resources/runtime/sing-box"
+  printf '  已安装运行时：Contents/Resources/runtime/sing-box\n'
+else
+  die "缺少运行时：$RUNTIME_SRC
+  TUN 的特权 helper 只执行随包那一份（用户目录里的二进制以 root 执行是提权漏洞），
+  所以没有它就打不出可用的包。把对应版本的 sing-box 放到这个位置再重试。
+  哈希由 src-tauri/build.rs 编译进 helper，换了二进制必须重新构建。"
+fi
 
 BUNDLED_ICON="$APP_PATH/Contents/Resources/icon.icns"
 if [ -f "$BUNDLED_ICON" ]; then
@@ -179,6 +231,27 @@ case "$ARCHS" in
   *arm64*x86_64*|*x86_64*arm64*) ;;
   *) die "不是 universal 二进制（需要 arm64 与 x86_64）：$ARCHS" ;;
 esac
+
+printf '\n[3.5/9] 校验包内资源落点\n'
+# helper 运行时只从这两个路径取资源。它们是 Tauri 对 resources 映射的**推断结果**，
+# 猜错的话带分流的 TUN 会全部 rule_set_missing。所以在签名之前就断言，
+# 让路径猜测失败暴露在构建阶段，而不是等用户装上、连不上。
+RUNTIME_IN_APP="$APP_PATH/Contents/Resources/runtime/sing-box"
+[ -f "$RUNTIME_IN_APP" ] || die "包内缺少运行时：$RUNTIME_IN_APP"
+
+RULES_IN_APP_DIR="$APP_PATH/Contents/Resources/resources/rules"
+[ -d "$RULES_IN_APP_DIR" ] || die "包内缺少规则目录：$RULES_IN_APP_DIR"
+
+RULES_IN_APP_COUNT="$(find "$RULES_IN_APP_DIR" -maxdepth 1 -name 'veyl-rules-*.tar.zst' | wc -l | tr -d ' ')"
+[ "$RULES_IN_APP_COUNT" = "1" ] || die "包内规则归档应当恰好一个，实际 $RULES_IN_APP_COUNT 个：$RULES_IN_APP_DIR"
+
+RULES_IN_APP="$(find "$RULES_IN_APP_DIR" -maxdepth 1 -name 'veyl-rules-*.tar.zst' -print -quit)"
+SRC_SHA="$(shasum -a 256 "$RULES_ARCHIVE" | awk '{print $1}')"
+APP_SHA="$(shasum -a 256 "$RULES_IN_APP" | awk '{print $1}')"
+[ "$SRC_SHA" = "$APP_SHA" ] || die "包内规则归档与源归档哈希不一致
+  源   $SRC_SHA
+  包内 $APP_SHA"
+printf '  运行时与规则归档落点正确\n'
 
 printf '\n[4/9] 签名嵌套 Mach-O 与 App\n'
 sign_app "$APP_PATH"

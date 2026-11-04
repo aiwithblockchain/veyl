@@ -406,6 +406,46 @@ fn svc_error_with_details(
     })
 }
 
+/// 配置里存的用户自定义排除网段（`tun_excludes` 是 JSON 数组）。
+fn tun_excludes_from_value(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tun_wiring_tests {
+    use super::*;
+
+    #[test]
+    fn tun_excludes_are_read_from_the_config_as_a_string_array() {
+        let value = json!(["172.30.0.0/16", " 10.20.0.0/16 ", "", 42]);
+        assert_eq!(
+            tun_excludes_from_value(&value),
+            vec!["172.30.0.0/16".to_string(), "10.20.0.0/16".to_string()],
+            "非字符串与空串要丢掉，不能把一个数字当网段用"
+        );
+    }
+
+    #[test]
+    fn tun_excludes_tolerate_the_default_empty_object() {
+        // 建表默认值是 {"mode":"auto","local":[],"remote":[]}，不是数组。
+        let default = json!({"mode": "auto", "local": [], "remote": []});
+        assert!(tun_excludes_from_value(&default).is_empty());
+        assert!(tun_excludes_from_value(&Value::Null).is_empty());
+    }
+
+
+}
+
 fn config_store_error(error: store::StoreError) -> anyhow::Error {
     match &error {
         store::StoreError::Invalid(message) if message.contains("配置名已存在") => {
@@ -648,6 +688,7 @@ pub struct WiredServices {
     installer: Installer,
     data_dir: PathBuf,
     device_gate: RegistrationGate,
+    tun: Arc<crate::tun::session::TunSession>,
 }
 
 impl WiredServices {
@@ -659,6 +700,9 @@ impl WiredServices {
         data_dir: impl Into<PathBuf>,
     ) -> Self {
         let data_dir = data_dir.into();
+        let tun = Arc::new(crate::tun::session::TunSession::new(
+            crate::tun::privilege::select(),
+        ));
         Self {
             installer: Installer::new(&data_dir),
             store,
@@ -667,11 +711,59 @@ impl WiredServices {
             catalog,
             data_dir,
             device_gate: RegistrationGate::new(),
+            tun,
         }
     }
 
     fn config_dir(&self) -> PathBuf {
         self.data_dir.join("config")
+    }
+
+    /// 把网络恢复到「我们没动过」的状态。
+    ///
+    /// **E3 重置网络与卸载清理都调这一个函数**（`docs/capabilities.md` §3.1：
+    /// 两处必须共用同一段代码，不能各写一套）。E3 的界面这轮不做。
+    ///
+    /// 顺序不可换：先停进程再撤代理。反过来的话，中间那几百毫秒里系统代理
+    /// 指向一个已经关掉的端口，用户那一刻整机没有网。
+    #[allow(dead_code)] // E3 重置网络与卸载清理的接缝，界面还没做
+    pub(crate) async fn cleanup_network(
+        &self,
+        config_id: Option<String>,
+    ) -> crate::tun::session::CleanupReport {
+        use crate::tun::session::CleanupReport;
+
+        let mut report = CleanupReport::default();
+
+        match self.tun.stop() {
+            Ok(()) => report.stopped_tun = true,
+            Err(error) => report.failures.push(format!("停止 TUN 运行时失败：{error}")),
+        }
+        match self.manager.stop().await {
+            Ok(_) => report.stopped_runtime = true,
+            Err(error) => report.failures.push(format!("停止运行时失败：{error}")),
+        }
+        // 按连接前写下的备份还原，不是「一刀切关掉」。
+        match self.restore_system_proxy() {
+            Ok(()) => report.restored_proxy = true,
+            Err(error) => report.failures.push(format!("还原系统代理失败：{error}")),
+        }
+        self.manager.set_system_proxy_enabled(false).await;
+
+        match crate::netcfg::flush_dns() {
+            Ok(()) => report.flushed_dns = true,
+            Err(error) => report.failures.push(format!("清除 DNS 缓存失败：{error}")),
+        }
+
+        report.removed_configs = match config_id {
+            Some(id) => {
+                vpn_config::remove_profile_config(&self.config_dir(), &id);
+                1
+            }
+            None => vpn_config::remove_all_profile_configs(&self.config_dir()),
+        };
+
+        report
     }
 
     fn active_config_id(&self) -> Option<String> {
@@ -1319,6 +1411,18 @@ fn validate_cidr(value: &str) -> Result<(), String> {
 #[async_trait]
 impl VpnToolServices for WiredServices {
     async fn runtime_status(&self) -> anyhow::Result<Value> {
+        // TUN 的进程不归 RuntimeManager 管，状态得单独报，否则界面会显示「未连接」。
+        if let crate::tun::session::TunState::Running { pid } = self.tun.status() {
+            return Ok(json!({
+                "contract_version": crate::runtime::CONTRACT_VERSION,
+                "state": "running",
+                "mode": "tun",
+                "pid": pid,
+                "mixed_port": null,
+                "system_proxy_enabled": false,
+                "helper": self.tun.launcher_kind(),
+            }));
+        }
         let status = self.manager.status().await;
         serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
     }
@@ -1347,6 +1451,11 @@ impl VpnToolServices for WiredServices {
 
     async fn runtime_stop(&self, _force: bool) -> anyhow::Result<Value> {
         let connected = self.connected_config_id().await;
+        // TUN 的 sing-box 是 helper 的子进程，manager 的 stop 碰不到它，单独停。
+        // 幂等：本来就没在跑时直接返回。
+        if let Err(error) = self.tun.stop() {
+            log::warn!("停止 TUN 运行时失败：{error}");
+        }
         self.restore_system_proxy()?;
         self.manager.set_system_proxy_enabled(false).await;
         let status = self
@@ -3025,15 +3134,8 @@ impl WiredServices {
         }
     }
 
-    /// 连接一套配置：单节点 + 全部走代理（本轮只保证这一种能起来）。
+    /// 连接一套配置。分流与节点准备两种模式共用，只有「怎么起」不同。
     async fn connect(&self, config: &configs::Config) -> anyhow::Result<Value> {
-        if config.connection_mode != configs::CONNECTION_SYSTEM_PROXY {
-            return Err(svc_error_with_details(
-                "PRECONDITION_FAILED",
-                "接管全部流量需要特权助手，会在后续批次提供",
-                json!({ "reason": "tun_helper_missing" }),
-            ));
-        }
 
         let installed_rules = crate::rules::load_active(&self.store, &self.data_dir).ok_or_else(|| {
             svc_error_with_details(
@@ -3118,17 +3220,27 @@ impl WiredServices {
             .cloned()
             .ok_or_else(|| svc_error("PRECONDITION_FAILED", "当前节点凭据缺失，请重新导入"))?;
 
-        let input = vpn_config::BuildInput::new(
-            current_descriptor,
-            mixed_port,
-            clash_port,
-            clash_secret,
-        );
-        let value = vpn_config::build_routed_multi(&input, &descriptors, &node.id, &plan)
-            .map_err(|e| svc_error(e.code(), e))?;
-
-        let started = self
-            .start_connection(
+        let started = if config.connection_mode == configs::CONNECTION_TUN {
+            self.start_tun_connection(
+                config,
+                &descriptors,
+                &current_descriptor,
+                &plan,
+                mixed_port,
+                clash_port,
+                clash_secret,
+            )
+            .await
+        } else {
+            let input = vpn_config::BuildInput::new(
+                current_descriptor,
+                mixed_port,
+                clash_port,
+                clash_secret,
+            );
+            let value = vpn_config::build_routed_multi(&input, &descriptors, &node.id, &plan)
+                .map_err(|e| svc_error(e.code(), e))?;
+            self.start_connection(
                 &installed,
                 &config.id,
                 Some(config.id.clone()),
@@ -3138,7 +3250,8 @@ impl WiredServices {
                 Some(config.route_revision),
                 &value,
             )
-            .await;
+            .await
+        };
 
         match started {
             Ok(data) => {
@@ -3169,6 +3282,81 @@ impl WiredServices {
                 Err(error)
             }
         }
+    }
+
+    /// TUN：写盘（0600，含凭据）→ 特权 helper 拉起 sing-box。
+    ///
+    /// 与 proxy 模式**分流与节点准备完全共用**，区别只有两点：
+    /// 不设系统代理（接管靠路由表），以及进程是 helper 的子进程。
+    ///
+    /// 失败一律是权限问题，只回 `helper_missing` / `helper_install_failed` /
+    /// `tun_denied` / `tun_start_failed`，**不降级成系统代理**
+    /// （`docs/tun-mode.md` §8）。
+    #[allow(clippy::too_many_arguments)]
+    async fn start_tun_connection(
+        &self,
+        config: &configs::Config,
+        descriptors: &[vpn_config::NodeDescriptor],
+        current: &vpn_config::NodeDescriptor,
+        plan: &crate::rules::plan::RoutePlan,
+        mixed_port: u16,
+        clash_port: u16,
+        clash_secret: String,
+    ) -> anyhow::Result<Value> {
+        // 排除表 = 固定表 + 本机反推 + 用户补充。反推失败也不影响启动，只是少几条。
+        let local = crate::tun::subnets(&crate::tun::collect());
+        let user = tun_excludes_from_value(&config.tun_excludes);
+        let excludes = crate::tun::excludes(&local, &user);
+
+        let input = vpn_config::BuildInput::new(
+            current.clone(),
+            mixed_port,
+            clash_port,
+            clash_secret,
+        )
+        .with_tun_excludes(excludes);
+        let value = vpn_config::build_routed_multi(&input, descriptors, &current.id, plan)
+            .map_err(|e| svc_error(e.code(), e))?;
+
+        // 不再由我们在用户目录里写配置：helper 收内容、自己落盘、自己跑 check。
+        let config_json = serde_json::to_string(&value)
+            .map_err(|e| svc_error("INTERNAL", format!("序列化配置失败：{e}")))?;
+
+        // TUN 不设系统代理：接管靠路由表（`docs/config-execution.md` §2 第 4 步）。
+        // 之前若在 proxy 模式，这里要把残留的系统代理撤掉，否则两层同时生效。
+        self.restore_system_proxy()?;
+        self.manager.set_system_proxy_enabled(false).await;
+
+        let pid = match self.tun.launch(&config_json) {
+            Ok(started) => started.pid,
+            Err(error) => {
+                return Err(svc_error_with_details(
+                    error.code,
+                    error.message.clone(),
+                    json!({
+                        "reason": error.code,
+                        "permission_problem": error.is_permission_problem(),
+                        "detail": error.detail.clone(),
+                    }),
+                ));
+            }
+        };
+
+        log::info!("TUN 已连接 pid={pid} config={}", config.id);
+        Ok(json!({
+            "contract_version": crate::runtime::CONTRACT_VERSION,
+            "state": "running",
+            "mode": "tun",
+            "pid": pid,
+            "mixed_port": null,
+            "config_id": config.id,
+            "config_name": config.name,
+            "node_id": current.id,
+            "node_name": current.name,
+            "applied_route_revision": config.route_revision,
+            "connected_since": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "system_proxy_enabled": false,
+        }))
     }
 
     /// 渲染 → 启动 → 设代理 → 等出口 IP。

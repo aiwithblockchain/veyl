@@ -5,6 +5,15 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+pub mod privilege;
+pub mod protocol;
+pub mod session;
+#[cfg(unix)]
+pub mod trust;
+
+#[cfg(target_os = "macos")]
+pub mod xpc;
+
 /// macOS 只接受 `utunN` 形式（或留空让系统分配），固定私有段。
 pub const TUN_ADDRESS: &str = "172.19.0.1/30";
 
