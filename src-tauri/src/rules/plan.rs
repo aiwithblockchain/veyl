@@ -71,6 +71,31 @@ pub struct RoutePlan {
     pub referenced: Vec<String>,
 }
 
+impl RoutePlan {
+    /// `route.default_domain_resolver`。1.14 起缺这个字段是 **FATAL**，
+    /// 不是降级——proxy 与 tun 都一样。
+    ///
+    /// 取 DNS 表里第一个本地候选：本地候选总是排在远程之前。
+    pub fn default_domain_resolver(&self) -> String {
+        self.dns["servers"]
+            .as_array()
+            .and_then(|servers| {
+                servers
+                    .iter()
+                    .find(|server| {
+                        server["tag"]
+                            .as_str()
+                            .map(|tag| tag.starts_with("dns-local"))
+                            .unwrap_or(false)
+                    })
+                    .or_else(|| servers.first())
+            })
+            .and_then(|server| server["tag"].as_str())
+            .unwrap_or("dns-local-1")
+            .to_string()
+    }
+}
+
 fn normalized_region(region: Option<&str>) -> String {
     region
         .unwrap_or("cn")
@@ -114,32 +139,36 @@ fn local_layer(region: &str) -> Vec<String> {
     }
 }
 
+/// 1.14 起旧写法（`{"tag","address"}`）已被**删除**，不是弃用——
+/// 生成的配置连 `sing-box check` 都过不去。新格式必须带 `type` + `server`。
 fn dns_servers(region: &str, include_remote: bool) -> Vec<Value> {
     let (local, remote) = if region == "cn" {
         (
             vec!["223.5.5.5", "119.29.29.29"],
-            vec!["https://1.1.1.1/dns-query", "https://dns.google/dns-query"],
+            vec!["1.1.1.1", "dns.google"],
         )
     } else {
         (
             vec!["1.1.1.1", "8.8.8.8"],
-            vec!["https://1.1.1.1/dns-query", "https://dns.google/dns-query"],
+            vec!["1.1.1.1", "dns.google"],
         )
     };
 
     let mut servers = Vec::new();
     for (index, address) in local.iter().enumerate() {
         servers.push(json!({
+            "type": "udp",
             "tag": format!("dns-local-{}", index + 1),
-            "address": address,
+            "server": address,
             "detour": "direct",
         }));
     }
     if include_remote {
         for (index, address) in remote.iter().enumerate() {
             servers.push(json!({
+                "type": "https",
                 "tag": format!("dns-remote-{}", index + 1),
-                "address": address,
+                "server": address,
                 "detour": "proxy",
             }));
         }
@@ -398,5 +427,65 @@ mod tests {
     fn quoted_paths_are_absolute() {
         let plan = plan("direct", "cn", &[]);
         assert!(plan.rule_sets[0]["path"].as_str().unwrap().starts_with('/'));
+    }
+
+    #[test]
+    fn dns_servers_use_the_1_14_format() {
+        // 1.14.0 起旧写法（tag + address）被删除，不是弃用：
+        // 生成的配置连 `sing-box check` 都过不去。这条是回归护栏。
+        let plan = plan("direct", "cn", &[]);
+        let servers = plan.dns["servers"].as_array().unwrap();
+        assert!(!servers.is_empty());
+        for server in servers {
+            assert!(
+                server.get("address").is_none(),
+                "address 字段在 1.14 已删除：{server}"
+            );
+            assert!(
+                server["type"].as_str().is_some(),
+                "新格式必须带 type：{server}"
+            );
+            assert!(
+                server["server"].as_str().is_some(),
+                "新格式必须带 server：{server}"
+            );
+        }
+        assert_eq!(servers[0]["type"], "udp");
+        assert_eq!(servers[0]["server"], "223.5.5.5");
+    }
+
+    #[test]
+    fn remote_dns_servers_are_doh_over_the_proxy() {
+        let plan = plan("direct", "cn", &[]);
+        let remote = plan.dns["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|server| server["tag"] == "dns-remote-1")
+            .expect("cn direct 需要远程 DNS");
+        assert_eq!(remote["type"], "https");
+        assert_eq!(remote["detour"], "proxy");
+        assert_eq!(remote["server"], "1.1.1.1", "不要带 https:// 前缀");
+    }
+
+    #[test]
+    fn every_mode_exposes_a_default_domain_resolver() {
+        // 缺它是 FATAL，proxy 与 tun 都一样。
+        for (mode, region, targets) in [
+            ("direct", "cn", vec![]),
+            ("proxy_all", "cn", vec![]),
+            ("proxy_selected", "cn", vec!["openai"]),
+            ("direct", "jp", vec![]),
+        ] {
+            let plan = plan(mode, region, &targets);
+            let tag = plan.default_domain_resolver();
+            assert!(tag.starts_with("dns-local"), "{mode}/{region} → {tag}");
+            assert!(plan
+                .dns["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|server| server["tag"] == tag.as_str()));
+        }
     }
 }

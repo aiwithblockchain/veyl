@@ -28,7 +28,44 @@ pub async fn check(binary: &Path, config: &Path) -> RuntimeResult<()> {
     if detail.is_empty() {
         detail = String::from_utf8_lossy(&output.stdout).trim().to_string();
     }
-    Err(RuntimeError::ConfigInvalid(truncate(&detail, 2000)))
+    let raw = truncate(&detail, 2000);
+    match humanize(&detail) {
+        // 原文保留：它是我们唯一能拿到的诊断依据，翻译不能把它吃掉。
+        Some(human) => Err(RuntimeError::ConfigInvalid(format!("{human}\n\n{raw}"))),
+        None => Err(RuntimeError::ConfigInvalid(raw)),
+    }
+}
+
+/// 把 `sing-box check` 的常见报错翻成人话。
+///
+/// 只覆盖会真的出现在用户面前的几类；认不出来的原样返回，
+/// 不猜——猜错比不翻译更糟。
+pub fn humanize(detail: &str) -> Option<&'static str> {
+    let lower = detail.to_ascii_lowercase();
+    let hit = |needle: &str| lower.contains(needle);
+
+    if hit("legacy dns server formats") {
+        return Some("DNS 服务器配置用的是旧格式，这个版本的运行时已经不支持");
+    }
+    if hit("default_domain_resolver") {
+        return Some("配置缺少默认 DNS 解析器，运行时拒绝启动");
+    }
+    if hit("parse rule-set") || hit("rule-set:") {
+        return Some("分流规则的数据文件缺失或损坏");
+    }
+    if hit("bad tun name") {
+        return Some("TUN 接口名不合法");
+    }
+    if hit("operation not permitted") || hit("configure tun interface") {
+        return Some("没有权限创建 TUN 接口，需要管理员授权");
+    }
+    if hit("address already in use") {
+        return Some("需要的端口已经被别的程序占用");
+    }
+    if hit("unknown field") {
+        return Some("配置里有这个版本的运行时无法识别的字段");
+    }
+    None
 }
 
 /// 写入临时文件（0600）→ `sing-box check` → 通过后原子替换成 active 配置。
@@ -210,5 +247,33 @@ mod tests {
     fn truncate_keeps_short_text() {
         assert_eq!(truncate("abc", 10), "abc");
         assert_eq!(truncate("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn humanize_maps_the_fatals_we_have_actually_seen() {
+        assert!(humanize(
+            "dns.servers[0]: legacy DNS server formats are deprecated in sing-box 1.12.0"
+        )
+        .unwrap()
+        .contains("旧格式"));
+        assert!(humanize("missing `route.default_domain_resolver` or `domain_resolver`")
+            .unwrap()
+            .contains("默认 DNS 解析器"));
+        assert!(humanize("initialize router: parse rule-set[0]: open /x.srs: no such file")
+            .unwrap()
+            .contains("规则"));
+        assert!(humanize("configure tun interface: Connect: operation not permitted")
+            .unwrap()
+            .contains("权限"));
+        assert!(humanize("inbounds[0].auto_detect_interface: json: unknown field")
+            .unwrap()
+            .contains("无法识别"));
+    }
+
+    #[test]
+    fn humanize_leaves_unknown_errors_alone() {
+        // 认不出来就原样交给用户，不猜。
+        assert_eq!(humanize("something entirely new"), None);
+        assert_eq!(humanize(""), None);
     }
 }

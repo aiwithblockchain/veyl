@@ -19,6 +19,7 @@ pub mod secrets;
 pub mod seed;
 pub mod store;
 pub mod tools;
+pub mod tun;
 
 #[cfg(test)]
 mod test_support;

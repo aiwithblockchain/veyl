@@ -38,6 +38,27 @@ pub enum ProtocolConfig {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectMode {
+    /// 系统代理 + `mixed` 入站，只听回环。
+    SystemProxy,
+    /// TUN 入站，接管全部流量。需要 root。
+    Tun,
+}
+
+impl ConnectMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConnectMode::SystemProxy => "system_proxy",
+            ConnectMode::Tun => "tun",
+        }
+    }
+
+    pub fn is_tun(&self) -> bool {
+        matches!(self, ConnectMode::Tun)
+    }
+}
+
 #[derive(Clone)]
 pub struct BuildInput {
     pub node: NodeDescriptor,
@@ -45,6 +66,9 @@ pub struct BuildInput {
     pub clash_port: u16,
     pub clash_secret: String,
     pub log_level: String,
+    pub connect_mode: ConnectMode,
+    /// 仅 TUN 使用：`route_exclude_address`。
+    pub tun_excludes: Vec<String>,
 }
 
 impl std::fmt::Debug for BuildInput {
@@ -55,6 +79,8 @@ impl std::fmt::Debug for BuildInput {
             .field("clash_port", &self.clash_port)
             .field("clash_secret", &"<redacted>")
             .field("log_level", &self.log_level)
+            .field("connect_mode", &self.connect_mode)
+            .field("tun_excludes", &self.tun_excludes)
             .finish()
     }
 }
@@ -89,12 +115,35 @@ impl BuildInput {
             clash_port,
             clash_secret,
             log_level: "info".into(),
+            connect_mode: ConnectMode::SystemProxy,
+            tun_excludes: Vec::new(),
         }
+    }
+
+    pub fn with_connect_mode(mut self, mode: ConnectMode) -> Self {
+        self.connect_mode = mode;
+        self
+    }
+
+    /// 切成 TUN 并带上排除表。排除表由 `crate::tun::excludes` 生成，
+    /// 这里不重新算一遍，避免出现第二份网段清单。
+    pub fn with_tun_excludes(mut self, excludes: Vec<String>) -> Self {
+        self.connect_mode = ConnectMode::Tun;
+        self.tun_excludes = excludes;
+        self
     }
 }
 
 /// 生成客户端配置（单节点、全部走代理）。
+///
+/// 只服务系统代理模式。TUN 必须有完整的路由与 DNS 方案，
+/// 走 `build_routed_multi`，否则会生成一份能通过 `check` 但抓不住 DNS 的配置。
 pub fn build(input: &BuildInput) -> RuntimeResult<Value> {
+    if input.connect_mode.is_tun() {
+        return Err(RuntimeError::Config(
+            "TUN 需要完整的路由与 DNS 方案，请使用 build_routed".into(),
+        ));
+    }
     validate_input(input)?;
     validate_node(&input.node)?;
     let outbound = node_outbound(&input.node, PROXY_TAG)?;
@@ -104,12 +153,7 @@ pub fn build(input: &BuildInput) -> RuntimeResult<Value> {
             "level": input.log_level,
             "timestamp": true,
         },
-        "inbounds": [{
-            "type": "mixed",
-            "tag": "mixed-in",
-            "listen": "127.0.0.1",
-            "listen_port": input.mixed_port,
-        }],
+        "inbounds": [inbound(input)],
         "outbounds": [
             outbound,
             { "type": "direct", "tag": "direct" },
@@ -122,6 +166,42 @@ pub fn build(input: &BuildInput) -> RuntimeResult<Value> {
             }
         },
     }))
+}
+
+/// 入站。两种模式**只有这一段不同**，路由与 DNS 完全共用。
+fn inbound(input: &BuildInput) -> Value {
+    match input.connect_mode {
+        ConnectMode::SystemProxy => json!({
+            "type": "mixed",
+            "tag": "mixed-in",
+            "listen": "127.0.0.1",
+            "listen_port": input.mixed_port,
+        }),
+        ConnectMode::Tun => json!({
+            "type": "tun",
+            "tag": "tun-in",
+            // 留空 interface_name：macOS 只接受 utunN，写死名字会 `bad tun name`。
+            "address": [crate::tun::TUN_ADDRESS],
+            "auto_route": true,
+            "route_exclude_address": input.tun_excludes,
+        }),
+    }
+}
+
+/// TUN 专属的前置规则。顺序不可变：`sniff` → `hijack-dns` → 其余
+/// （`docs/contracts/routing.md` §3.6）。顺序错是静默失效，不报错。
+fn transport_rules(input: &BuildInput) -> Vec<Value> {
+    if !input.connect_mode.is_tun() {
+        return Vec::new();
+    }
+    vec![
+        json!({
+            "action": "sniff",
+            "sniffer": crate::tun::SNIFFERS,
+            "timeout": crate::tun::SNIFF_TIMEOUT,
+        }),
+        json!({ "protocol": "dns", "action": "hijack-dns" }),
+    ]
 }
 
 /// 带分流的配置：节点出站 + `proxy` selector + 可选的 `route-local` selector。
@@ -178,23 +258,29 @@ pub fn build_routed_multi(
         }));
     }
 
+    let mut rules = transport_rules(input);
+    rules.extend(plan.route_rules.iter().cloned());
+
+    let mut route = json!({
+        "rule_set": plan.rule_sets.clone(),
+        "rules": rules,
+        "final": plan.route_final,
+        // 1.14 起缺这个字段是 FATAL，不只是 TUN——proxy 也一样起不来。
+        "default_domain_resolver": plan.default_domain_resolver(),
+    });
+    if input.connect_mode.is_tun() {
+        // 必开，否则 direct 出口可能绕回 TUN。
+        route["auto_detect_interface"] = json!(true);
+    }
+
     Ok(json!({
         "log": {
             "level": input.log_level,
             "timestamp": true,
         },
-        "inbounds": [{
-            "type": "mixed",
-            "tag": "mixed-in",
-            "listen": "127.0.0.1",
-            "listen_port": input.mixed_port,
-        }],
+        "inbounds": [inbound(input)],
         "outbounds": outbounds,
-        "route": {
-            "rule_set": plan.rule_sets.clone(),
-            "rules": plan.route_rules.clone(),
-            "final": plan.route_final,
-        },
+        "route": route,
         "dns": plan.dns.clone(),
         "experimental": {
             "clash_api": {
@@ -206,12 +292,21 @@ pub fn build_routed_multi(
 }
 
 fn validate_input(input: &BuildInput) -> RuntimeResult<()> {
-    validate_port(input.mixed_port, "mixed_port")?;
     validate_port(input.clash_port, "clash_port")?;
-    if input.mixed_port == input.clash_port {
-        return Err(RuntimeError::Config(
-            "mixed_port and clash_port must differ".into(),
-        ));
+    if input.connect_mode.is_tun() {
+        // 空排除表 = 本机内网也会被送进隧道，Tailscale / 局域网设备直接失联。
+        if input.tun_excludes.is_empty() {
+            return Err(RuntimeError::Config(
+                "TUN 模式必须给出排除网段，否则内网流量会全部进隧道".into(),
+            ));
+        }
+    } else {
+        validate_port(input.mixed_port, "mixed_port")?;
+        if input.mixed_port == input.clash_port {
+            return Err(RuntimeError::Config(
+                "mixed_port and clash_port must differ".into(),
+            ));
+        }
     }
     if input.clash_secret.trim().is_empty() {
         return Err(RuntimeError::Config("clash secret must not be empty".into()));
@@ -501,7 +596,7 @@ mod tests {
             })],
             route_final: "proxy",
             dns: json!({
-                "servers": [{"tag": "dns-local-1", "address": "223.5.5.5", "detour": "direct"}],
+                "servers": [{"type": "udp", "tag": "dns-local-1", "server": "223.5.5.5", "detour": "direct"}],
                 "rules": [{"rule_set": ["geosite-cn"], "server": "dns-local-1"}],
                 "final": "dns-local-1",
                 "strategy": "prefer_ipv4"
@@ -524,6 +619,137 @@ mod tests {
         assert_eq!(config["route"]["rule_set"].as_array().unwrap().len(), 1);
         assert_eq!(config["route"]["rule_set"][0]["tag"], "geosite-cn");
         assert!(config.get("dns").is_some());
+    }
+
+    fn routed_plan() -> crate::rules::plan::RoutePlan {
+        crate::rules::plan::RoutePlan {
+            rule_sets: vec![json!({
+                "tag": "geosite-cn", "type": "local", "format": "binary", "path": "/rules/geosite/cn.srs"
+            })],
+            route_rules: vec![
+                json!({ "ip_is_private": true, "action": "route", "outbound": "direct" }),
+                json!({
+                    "rule_set": ["geosite-cn"], "action": "route", "outbound": "route-local"
+                }),
+            ],
+            route_final: "proxy",
+            dns: json!({
+                "servers": [
+                    {"type": "udp", "tag": "dns-local-1", "server": "223.5.5.5", "detour": "direct"},
+                    {"type": "https", "tag": "dns-remote-1", "server": "1.1.1.1", "detour": "proxy"}
+                ],
+                "rules": [{"rule_set": ["geosite-cn"], "server": "dns-local-1"}],
+                "final": "dns-remote-1",
+                "strategy": "prefer_ipv4"
+            }),
+            outbound_local: Some("direct"),
+            referenced: vec!["geosite-cn".into()],
+        }
+    }
+
+    fn tun_input() -> BuildInput {
+        input(vless_node()).with_tun_excludes(crate::tun::excludes(&[], &[]))
+    }
+
+    #[test]
+    fn tun_swaps_only_the_inbound() {
+        let tun = build_routed(&tun_input(), &routed_plan()).unwrap();
+        let proxy = build_routed(&input(vless_node()), &routed_plan()).unwrap();
+
+        assert_eq!(tun["inbounds"][0]["type"], "tun");
+        assert_eq!(tun["inbounds"][0]["tag"], "tun-in");
+        assert_eq!(tun["inbounds"][0]["address"][0], crate::tun::TUN_ADDRESS);
+        assert_eq!(tun["inbounds"][0]["auto_route"], true);
+        assert!(
+            tun["inbounds"][0].get("listen_port").is_none(),
+            "TUN 没有代理端口"
+        );
+        assert!(
+            tun["inbounds"][0].get("interface_name").is_none(),
+            "interface_name 留空；写死名字在 macOS 上会 bad tun name"
+        );
+        assert!(
+            tun["inbounds"][0].get("auto_detect_interface").is_none(),
+            "它属于 route，不属于 inbound——写在 inbound 会让整个配置解析失败"
+        );
+
+        assert_eq!(proxy["inbounds"][0]["type"], "mixed");
+        assert_eq!(proxy["inbounds"][0]["listen"], "127.0.0.1");
+
+        // 出站与分流两层必须逐字相同：入站是唯一差异。
+        assert_eq!(tun["outbounds"], proxy["outbounds"]);
+        assert_eq!(tun["route"]["final"], proxy["route"]["final"]);
+        assert_eq!(tun["dns"], proxy["dns"]);
+        assert_eq!(tun["route"]["rule_set"], proxy["route"]["rule_set"]);
+    }
+
+    #[test]
+    fn tun_rule_order_is_sniff_hijack_private_then_routing() {
+        let config = build_routed(&tun_input(), &routed_plan()).unwrap();
+        let rules = config["route"]["rules"].as_array().unwrap();
+
+        assert_eq!(rules[0]["action"], "sniff", "嗅探必须最前");
+        assert_eq!(rules[1]["protocol"], "dns");
+        assert_eq!(rules[1]["action"], "hijack-dns", "DNS 劫持必须早于分流");
+        assert_eq!(rules[2]["ip_is_private"], true);
+
+        let sniffers = rules[0]["sniffer"].as_array().unwrap();
+        assert!(
+            sniffers.iter().any(|item| item == "dns"),
+            "sniffer 不含 dns 时 hijack-dns 永远不命中"
+        );
+    }
+
+    #[test]
+    fn tun_sets_auto_detect_interface_on_route() {
+        let config = build_routed(&tun_input(), &routed_plan()).unwrap();
+        assert_eq!(config["route"]["auto_detect_interface"], true);
+    }
+
+    #[test]
+    fn tun_inbound_carries_the_exclusion_table() {
+        let user = vec!["172.30.0.0/16".to_string()];
+        let input = input(vless_node()).with_tun_excludes(crate::tun::excludes(&[], &user));
+        let config = build_routed(&input, &routed_plan()).unwrap();
+        let excluded = config["inbounds"][0]["route_exclude_address"]
+            .as_array()
+            .unwrap();
+        assert!(excluded.iter().any(|item| item == "100.64.0.0/10"));
+        assert!(excluded.iter().any(|item| item == "172.30.0.0/16"));
+    }
+
+    #[test]
+    fn tun_without_excludes_is_rejected() {
+        // 空表意味着内网也进隧道，必须从生成阶段拦住。
+        let input = input(vless_node()).with_connect_mode(ConnectMode::Tun);
+        let error = build_routed(&input, &routed_plan()).unwrap_err();
+        assert!(matches!(error, RuntimeError::Config(_)), "{error}");
+    }
+
+    #[test]
+    fn both_modes_declare_default_domain_resolver() {
+        // 1.14 起缺它是 FATAL，不是降级。
+        let proxy = build_routed(&input(vless_node()), &routed_plan()).unwrap();
+        let tun = build_routed(&tun_input(), &routed_plan()).unwrap();
+        assert_eq!(proxy["route"]["default_domain_resolver"], "dns-local-1");
+        assert_eq!(tun["route"]["default_domain_resolver"], "dns-local-1");
+    }
+
+    #[test]
+    fn proxy_mode_never_gets_sniff_rules() {
+        let config = build_routed(&input(vless_node()), &routed_plan()).unwrap();
+        let rules = config["route"]["rules"].as_array().unwrap();
+        assert!(
+            rules.iter().all(|rule| rule["action"] != "sniff"),
+            "系统代理模式下不需要嗅探"
+        );
+    }
+
+    #[test]
+    fn build_refuses_tun_without_a_route_plan() {
+        let error = build(&tun_input()).unwrap_err();
+        assert!(matches!(error, RuntimeError::Config(_)));
+        assert!(format!("{error}").contains("build_routed"));
     }
 
     #[test]
