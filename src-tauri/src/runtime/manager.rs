@@ -916,15 +916,24 @@ impl RuntimeManager {
                 return false;
             }
 
-            let exited = {
-                let mut inner = self.inner.lock().await;
-                match inner.child.as_mut() {
-                    Some(child) => process::try_exit(child),
-                    None => Some("process handle is missing".to_string()),
-                }
-            };
-            if let Some(reason) = exited {
+            if let Some(reason) = self.child_exit_reason().await {
                 self.record_error(reason).await;
+                return false;
+            }
+
+            // 先判 deadline，再做可能阻塞的健康检查：健康请求有自己的 1s 超时，
+            // 放在 deadline 之后会把「进程已退出」误报成「启动超时」。
+            if Instant::now() >= deadline {
+                // deadline 到点后再查一次：进程可能刚好在这轮健康检查期间退出。
+                if let Some(reason) = self.child_exit_reason().await {
+                    self.record_error(reason).await;
+                    return false;
+                }
+                self.record_error(format!(
+                    "startup timed out after {} ms",
+                    self.cfg.startup_timeout.as_millis()
+                ))
+                .await;
                 return false;
             }
 
@@ -940,16 +949,15 @@ impl RuntimeManager {
                 return true;
             }
 
-            if Instant::now() >= deadline {
-                self.record_error(format!(
-                    "startup timed out after {} ms",
-                    self.cfg.startup_timeout.as_millis()
-                ))
-                .await;
-                return false;
-            }
-
             tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn child_exit_reason(&self) -> Option<String> {
+        let mut inner = self.inner.lock().await;
+        match inner.child.as_mut() {
+            Some(child) => process::try_exit(child),
+            None => Some("process handle is missing".to_string()),
         }
     }
 
@@ -1678,7 +1686,9 @@ mod tests {
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let mut cfg = RuntimeConfig::new(&dir);
-        cfg.startup_timeout = Duration::from_millis(300);
+        // 2s 不是放宽断言：只是给并行测试负载下的 /bin/sh 启动与退出留出余量。
+        // 断言仍然是「崩溃必须报 RUNTIME_EXITED，不是超时」。
+        cfg.startup_timeout = Duration::from_secs(2);
         let manager = RuntimeManager::new(cfg);
         let mut events = manager.subscribe();
 
