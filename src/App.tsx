@@ -382,7 +382,7 @@ export default function App() {
 
   // 首启自动发起第一轮；hidden 消息不显示成用户气泡，会话里只出现 AI 的回复。
   useEffect(() => {
-    if (!onboardingLoaded || showOnboarding || !aiReady || hasEverConnected) return;
+    if (!onboardingLoaded || showOnboarding || !aiReady) return;
     if (vpn.loading || vpn.configs.length > 0) return;
 
     if (!session) {
@@ -396,7 +396,6 @@ export default function App() {
     if (
       !shouldKickOffFirstRun({
         aiReady,
-        hasEverConnected,
         configCount: vpn.configs.length,
         messageCount: session.messages.length,
       })
@@ -418,7 +417,6 @@ export default function App() {
     onboardingLoaded,
     showOnboarding,
     aiReady,
-    hasEverConnected,
     vpn.loading,
     vpn.configs.length,
     session,

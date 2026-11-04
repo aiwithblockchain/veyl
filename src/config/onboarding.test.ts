@@ -102,21 +102,27 @@ describe("shouldShowOnboarding", () => {
 describe("shouldKickOffFirstRun", () => {
   const base = {
     aiReady: true,
-    hasEverConnected: false,
     configCount: 0,
     messageCount: 0,
   };
 
-  it("四个条件都满足时触发", () => {
+  it("三个条件都满足时触发", () => {
     expect(shouldKickOffFirstRun(base)).toBe(true);
+  });
+
+  it("连接过但配置删光、会话为空，仍然触发", () => {
+    // hasEverConnected 不参与判断：老用户删光配置后同样需要 AI 帮他重建。
+    const returningUser = {
+      aiReady: true,
+      hasEverConnected: true,
+      configCount: 0,
+      messageCount: 0,
+    };
+    expect(shouldKickOffFirstRun(returningUser)).toBe(true);
   });
 
   it("没有可用 AI 不触发", () => {
     expect(shouldKickOffFirstRun({ ...base, aiReady: false })).toBe(false);
-  });
-
-  it("连接过就不触发", () => {
-    expect(shouldKickOffFirstRun({ ...base, hasEverConnected: true })).toBe(false);
   });
 
   it("已有配置不触发", () => {
