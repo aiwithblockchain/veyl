@@ -34,7 +34,8 @@
 | 技术栈 | Tauri 2 + Rust + TypeScript |
 | macOS | universal（arm64 + x86_64），Developer ID + notarytool + staple |
 | Windows | P1/P2 只构建 MSI **不签名**；脚本预留签名 hook，P5 启用 |
-| 发布渠道 | GitHub Releases；**P1 无 updater、无 Cloudflare Worker、无官网同步** |
+| 发布渠道 | GitHub Releases；P1 无 updater（批 7 再加，见 `docs/upgrade.md`）、无 Cloudflare Worker、无官网同步 |
+| **构建期网络** | 规则数据要从 `github.com` 拉。**国内网络直连不通**（2026-11-04 实测：8 秒超时），本地构建需先连 VPN 或用镜像；**CI 跑在 GitHub Actions 上不受影响**。`github.io` 是另一条链路，通常可直连 |
 | 密钥 | 一律从 keychain profile / 环境变量读，**不落仓库、不落文档、不落日志**；详见 §5.2（硬约束） |
 | 路径 | 脚本内只用相对路径 + `$(dirname "$0")` 推导，**禁止写死本机绝对路径** |
 | 破坏性操作 | 发布、删除、覆盖类脚本默认支持 `--dry-run`，正式执行要二次确认 |
