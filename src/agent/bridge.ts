@@ -221,12 +221,8 @@ export interface AgentBridge {
   configCreate(input: ConfigCreateInput): Promise<ConfigDetail>;
   /** 切换 active 配置；已连接时需带 confirmDisconnect。 */
   configActivate(configId: string, confirmDisconnect?: boolean): Promise<ConfigActivateResult>;
-  /** 切换某套配置的当前节点；已连接时需带 confirmReconnect（会断开重连）。 */
-  nodeSwitch(
-    configId: string,
-    nodeId: string,
-    confirmReconnect?: boolean,
-  ): Promise<NodeSwitchResult>;
+  /** 切换某套配置的当前节点；已连接时由 Host 热切换，不断流。 */
+  nodeSwitch(configId: string, nodeId: string): Promise<NodeSwitchResult>;
   /** 测试单个节点连通性。不可达是正常结果，不抛错。 */
   nodeProbe(nodeId: string): Promise<NodeProbeResult>;
   /** 只读的默认配置包状态，不联网。 */

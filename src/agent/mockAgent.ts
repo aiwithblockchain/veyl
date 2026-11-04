@@ -716,11 +716,7 @@ export class MockAgentBridge implements AgentBridge {
     throw this.unsupportedConfigCommand("config_activate");
   }
 
-  async nodeSwitch(
-    _configId: string,
-    _nodeId: string,
-    _confirmReconnect = false,
-  ): Promise<NodeSwitchResult> {
+  async nodeSwitch(_configId: string, _nodeId: string): Promise<NodeSwitchResult> {
     throw this.unsupportedConfigCommand("node_switch");
   }
 

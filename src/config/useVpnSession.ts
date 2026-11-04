@@ -11,8 +11,6 @@ export type VpnConnectionState = "idle" | "starting" | "connected" | "stopping";
 export interface ActionResult {
   ok: boolean;
   activated?: boolean;
-  /** 已连接时切换节点/配置需要用户再确认一次。 */
-  willDisconnect?: boolean;
   message?: string;
 }
 
@@ -37,7 +35,7 @@ export interface VpnSession {
   nodeProbeAvailable: boolean;
   createConfig: (name: string, mode: ConnectMode) => Promise<ActionResult>;
   selectConfig: (configId: string, confirmDisconnect?: boolean) => Promise<ActionResult>;
-  switchNode: (nodeId: string, confirmReconnect?: boolean) => Promise<ActionResult>;
+  switchNode: (nodeId: string) => Promise<ActionResult>;
   start: () => Promise<ActionResult>;
   stop: () => Promise<ActionResult>;
   probe: (nodeId: string) => Promise<ProbeResult>;
@@ -303,17 +301,10 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     }
   };
 
-  const switchNode = async (
-    nodeId: string,
-    confirmReconnect = false,
-  ): Promise<ActionResult> => {
+  const switchNode = async (nodeId: string): Promise<ActionResult> => {
     if (mock) {
       const store = mockStore.current;
       if (!store.activeId) return { ok: false, message: "还没有配置。" };
-      const connected = connection === "connected" || connection === "starting";
-      if (connected && !confirmReconnect) {
-        return { ok: false, willDisconnect: true, message: "切换节点会断开当前连接。" };
-      }
       commitMock({
         ...store,
         configs: store.configs.map((config) =>
@@ -322,32 +313,12 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
             : config,
         ),
       });
-      if (connected) {
-        clearTimer();
-        setConnection("starting");
-        setConnectedConfigId(null);
-        const configId = store.activeId;
-        timer.current = window.setTimeout(() => {
-          timer.current = null;
-          setConnection("connected");
-          setConnectedConfigId(configId);
-        }, 700);
-      }
       return { ok: true };
     }
 
     if (!activeConfigId) return { ok: false, message: "还没有配置。" };
-    const connected = connection === "connected" || connection === "starting";
-    if (connected && !confirmReconnect) {
-      return { ok: false, willDisconnect: true, message: "切换节点会断开当前连接。" };
-    }
-
     try {
-      if (connected) {
-        setConnection("starting");
-        setConnectedConfigId(null);
-      }
-      await bridge.nodeSwitch(activeConfigId, nodeId, confirmReconnect);
+      await bridge.nodeSwitch(activeConfigId, nodeId);
       await refreshReal();
       return { ok: true };
     } catch (err) {
@@ -355,9 +326,6 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       if (isMissingCommand(err)) {
         setNodeSwitchAvailable(false);
         return { ok: false, message: "这个版本还不能切换节点。" };
-      }
-      if (toBridgeError(err).details?.reason === "will_disconnect") {
-        return { ok: false, willDisconnect: true, message: "切换节点会断开当前连接。" };
       }
       return { ok: false, message: actionMessage(err, "切换节点失败") };
     }

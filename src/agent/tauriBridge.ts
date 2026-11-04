@@ -172,16 +172,8 @@ export class TauriAgentBridge implements AgentBridge {
     });
   }
 
-  async nodeSwitch(
-    configId: string,
-    nodeId: string,
-    confirmReconnect = false,
-  ): Promise<NodeSwitchResult> {
-    return call<NodeSwitchResult>("node_switch", {
-      configId,
-      nodeId,
-      ...(confirmReconnect ? { confirmReconnect: true } : {}),
-    });
+  async nodeSwitch(configId: string, nodeId: string): Promise<NodeSwitchResult> {
+    return call<NodeSwitchResult>("node_switch", { configId, nodeId });
   }
 
   async nodeProbe(nodeId: string): Promise<NodeProbeResult> {

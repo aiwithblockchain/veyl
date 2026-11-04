@@ -85,7 +85,6 @@ export default function App() {
   const [repairing, setRepairing] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const [pendingConfigId, setPendingConfigId] = useState<string | null>(null);
-  const [pendingNodeId, setPendingNodeId] = useState<string | null>(null);
   const vpn = useVpnSession(
     bridge,
     import.meta.env.VITE_MOCK === "1" || bridge.mode === "mock",
@@ -688,35 +687,13 @@ export default function App() {
   };
 
   const handleSwitchNode = (nodeId: string) => {
-    // 已连接时切节点会断开重连，先让用户确认一次。
-    if (vpn.connection === "connected" || vpn.connection === "starting") {
-      setPendingNodeId(nodeId);
-      return;
-    }
-    void vpn.switchNode(nodeId).then((result) => {
-      if (result.willDisconnect) {
-        setPendingNodeId(nodeId);
-        return;
-      }
-      showActionResult(result, "切换节点失败");
-    });
-  };
-
-  const confirmNodeSwitch = () => {
-    if (!pendingNodeId) return;
-    const nodeId = pendingNodeId;
-    setPendingNodeId(null);
     void vpn
-      .switchNode(nodeId, true)
+      .switchNode(nodeId)
       .then((result) => showActionResult(result, "切换节点失败"));
   };
 
   const pendingConfig =
     vpn.configs.find((config) => config.config_id === pendingConfigId) ?? null;
-  const pendingNode =
-    pendingNodeId && vpn.activeConfig
-      ? vpn.activeConfig.nodes.find((node) => node.node_id === pendingNodeId) ?? null
-      : null;
 
   if (!onboardingLoaded) {
     return <div className="app-boot" aria-hidden />;
@@ -815,39 +792,6 @@ export default function App() {
                 取消
               </button>
               <button type="button" className="btn btn--primary" onClick={confirmConfigSwitch}>
-                切换
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {pendingNode ? (
-        <div className="modal-backdrop" onMouseDown={() => setPendingNodeId(null)}>
-          <div
-            className="modal modal--confirm"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="switch-node-title"
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <header className="modal__head">
-              <h2 id="switch-node-title" className="modal__title">
-                切换节点
-              </h2>
-            </header>
-            <p className="confirm__text">
-              切到「{pendingNode.name}」会先断开当前连接，再重新连上。
-            </p>
-            <div className="confirm__actions">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => setPendingNodeId(null)}
-              >
-                取消
-              </button>
-              <button type="button" className="btn btn--primary" onClick={confirmNodeSwitch}>
                 切换
               </button>
             </div>
