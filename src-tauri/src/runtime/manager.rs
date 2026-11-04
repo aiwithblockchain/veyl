@@ -9,11 +9,11 @@ use tokio::sync::{broadcast, Mutex, Notify};
 use tokio::time::Instant;
 
 use super::error::{RuntimeError, RuntimeResult};
-use super::health::{ClashApi, DataPlaneProbe, DirectIpProbe, ExitIpProbe, DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE};
+use super::health::{ClashApi, DataPlaneProbe, DirectIpProbe, ExitIpProbe, TrafficTotals, DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE};
 use super::process::{self, SpawnOptions};
 
 pub const CONTRACT_VERSION: &str = "2.1.0";
-pub const EVENT_CONTRACT_VERSION: &str = "2.1.0";
+pub const EVENT_CONTRACT_VERSION: &str = "2.2.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
 pub const DEFAULT_DATA_PLANE_PROBE: &str = "http://cp.cloudflare.com/generate_204";
@@ -180,6 +180,9 @@ pub struct RuntimeStateChangedPayload {
 pub struct RuntimeHealthChangedPayload {
     pub contract_version: &'static str,
     pub health: HealthSnapshot,
+    /// 流量快照；未连接或还没采到时为 `null`。
+    /// **不要用 0 代替**：UI 要能区分「0 字节」和「没有数据」。
+    pub traffic: Option<serde_json::Value>,
     pub emitted_at: String,
 }
 
@@ -324,6 +327,9 @@ struct Inner {
     last_exit_ip_latency_ms: Option<u64>,
     /// 不经代理测得的直连出口 IP；连接期间才有效。
     direct_ip: Option<String>,
+    /// 最近一次成功采到的流量快照；未连接或没采到时为 None。
+    /// 字段形状见 `docs/contracts/runtime.md` §2.4。
+    traffic: Option<serde_json::Value>,
 }
 
 impl Inner {
@@ -344,6 +350,7 @@ impl Inner {
             config_hash: None,
             system_proxy_enabled: false,
             health: HealthSnapshot::default(),
+            traffic: None,
             last_exit_ip_latency_ms: None,
             direct_ip: None,
         }
@@ -410,7 +417,7 @@ impl Inner {
             config_hash: self.config_hash.clone(),
             system_proxy_enabled: self.system_proxy_enabled,
             health: self.health.clone(),
-            traffic: None,
+            traffic: if connected { self.traffic.clone() } else { None },
             connections: None,
             restart_count: self.restart_count,
             last_error: self.last_error.clone(),
@@ -496,6 +503,18 @@ impl RuntimeManager {
         let mut inner = self.inner.lock().await;
         inner.health.exit_ip = exit_ip;
         inner.health.checked_at = now_iso();
+    }
+
+    /// 记录一次流量采样。速率由两次采样的差值 / 时间间隔算出。
+    async fn set_traffic(&self, totals: TrafficTotals, up_rate: u64, down_rate: u64) {
+        let mut inner = self.inner.lock().await;
+        inner.traffic = Some(serde_json::json!({
+            "up_bytes": totals.up_bytes,
+            "down_bytes": totals.down_bytes,
+            "up_rate": up_rate,
+            "down_rate": down_rate,
+            "sampled_at": now_iso(),
+        }));
     }
 
     /// 连接编排层用：短暂等待异步探测的结果，让 `VpnConnect` 能带回出口 IP。
@@ -592,6 +611,8 @@ impl RuntimeManager {
             inner.running_since = None;
             inner.connected_since = None;
             inner.health = HealthSnapshot::default();
+            // 上一次连接的流量不能带进这一次。
+            inner.traffic = None;
             inner.config_hash = hash_file(&plan.config_path);
             inner.version = Some(plan.version.clone());
             inner.plan = Some(plan.clone());
@@ -678,9 +699,10 @@ impl RuntimeManager {
             // plan 指向的配置文件已被断开清理删掉，留着只会让 restart 拿死路径去启动。
             inner.plan = None;
             inner.connected_since = None;
-            // 断开后不能还显示上一个节点的出口地址。
+            // 断开后不能还显示上一个节点的出口地址，也不能留着上次的流量。
             inner.health.exit_ip = None;
             inner.direct_ip = None;
+            inner.traffic = None;
             inner.last_transition_at = now_iso();
             inner.snapshot()
         };
@@ -1014,6 +1036,8 @@ impl RuntimeManager {
         let mut degraded_since: Option<Instant> = None;
         let mut next_health = Instant::now() + self.cfg.health_interval;
         let mut next_probe = Instant::now() + Duration::from_secs(10);
+        // 上一次流量采样，用来算速率。
+        let mut last_traffic: Option<(TrafficTotals, Instant)> = None;
 
         loop {
             tokio::select! {
@@ -1068,6 +1092,29 @@ impl RuntimeManager {
                     if degraded_since.take().is_some() {
                         self.transition(gen, RuntimeState::Running, RuntimeEventKind::HealthOk, None)
                             .await;
+                    }
+
+                    // 流量与健康检查同频（默认 2s）。采不到就保留上一次的值，
+                    // **不要写 0**：UI 会把它当成「这次真的没流量」。
+                    if let Ok(totals) = api.traffic_totals().await {
+                        let sampled_at = Instant::now();
+                        let (up_rate, down_rate) = match last_traffic {
+                            Some((previous, at)) => {
+                                let seconds =
+                                    sampled_at.duration_since(at).as_secs_f64().max(0.001);
+                                (
+                                    ((totals.up_bytes.saturating_sub(previous.up_bytes)) as f64
+                                        / seconds)
+                                        .round() as u64,
+                                    ((totals.down_bytes.saturating_sub(previous.down_bytes)) as f64
+                                        / seconds)
+                                        .round() as u64,
+                                )
+                            }
+                            None => (0, 0),
+                        };
+                        last_traffic = Some((totals, sampled_at));
+                        self.set_traffic(totals, up_rate, down_rate).await;
                     }
                 } else {
                     failures += 1;
@@ -1328,10 +1375,14 @@ impl RuntimeManager {
     }
 
     async fn emit_health(&self) {
-        let health = { self.inner.lock().await.health.clone() };
+        let (health, traffic) = {
+            let inner = self.inner.lock().await;
+            (inner.health.clone(), inner.traffic.clone())
+        };
         self.emit(RuntimeEvent::HealthChanged(RuntimeHealthChangedPayload {
             contract_version: EVENT_CONTRACT_VERSION,
             health,
+            traffic,
             emitted_at: now_iso(),
         }));
     }
@@ -2073,8 +2124,34 @@ mod tests {
         assert!(snapshot.direct_ip.is_none());
     }
 
+    /// 流量只在连接期间出现；未连接时必须是 null，不能是 0。
     #[test]
-    fn snapshot_hides_identity_when_terminal() {        let mut inner = Inner::new();
+    fn traffic_is_exposed_only_while_connected() {
+        let mut inner = Inner::new();
+        inner.traffic = Some(serde_json::json!({
+            "up_bytes": 1024,
+            "down_bytes": 2048,
+            "up_rate": 0,
+            "down_rate": 0,
+            "sampled_at": "2026-11-04T00:00:00Z",
+        }));
+
+        assert!(
+            inner.snapshot().traffic.is_none(),
+            "未连接时不能带流量：0 字节和没有数据要能区分"
+        );
+
+        inner.state = RuntimeState::Running;
+        let snapshot = inner.snapshot();
+        assert_eq!(snapshot.traffic.unwrap()["down_bytes"], 2048);
+
+        inner.state = RuntimeState::Failed;
+        assert!(inner.snapshot().traffic.is_none(), "失败后不能留着上次的流量");
+    }
+
+    #[test]
+    fn snapshot_hides_identity_when_terminal() {
+        let mut inner = Inner::new();
         inner.state = RuntimeState::Failed;
         inner.pid = Some(4242);
         inner.version = Some("1.14.4".into());

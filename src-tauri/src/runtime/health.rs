@@ -67,6 +67,53 @@ impl ClashApi {
     pub async fn healthy(&self) -> bool {
         self.version().await.is_ok()
     }
+
+    /// `/connections` 里的累计流量。
+    ///
+    /// Clash 的字段名是 `uploadTotal` / `downloadTotal`，单位字节、从进程启动起累加。
+    /// 速率由两次采样的差值算——`/traffic` 那条流式端点更适合做每秒速率，
+    /// 但我们要和健康检查同频（2s），轮询一次 `/connections` 已经够用。
+    pub async fn traffic_totals(&self) -> RuntimeResult<TrafficTotals> {
+        let response = self
+            .http
+            .get(format!("{}/connections", self.base))
+            .bearer_auth(&self.secret)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .map_err(|e| RuntimeError::ClashApi(format!("GET /connections: {e}")))?;
+
+        if !response.status().is_success() {
+            return Err(RuntimeError::ClashApi(format!(
+                "GET /connections returned HTTP {}",
+                response.status()
+            )));
+        }
+
+        let body: ConnectionsResponse = response
+            .json()
+            .await
+            .map_err(|e| RuntimeError::ClashApi(format!("GET /connections body: {e}")))?;
+        Ok(TrafficTotals {
+            up_bytes: body.upload_total,
+            down_bytes: body.download_total,
+        })
+    }
+}
+
+/// 本次运行的累计上下行字节。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrafficTotals {
+    pub up_bytes: u64,
+    pub down_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectionsResponse {
+    #[serde(default, rename = "uploadTotal")]
+    upload_total: u64,
+    #[serde(default, rename = "downloadTotal")]
+    download_total: u64,
 }
 
 /// 通过本地 mixed 入站访问一个轻量 URL，验证数据面真的能出网。
@@ -213,6 +260,29 @@ mod tests {
     fn clash_client_targets_the_given_address() {
         let api = ClashApi::new("127.0.0.1:19090", "secret");
         assert_eq!(api.addr(), "127.0.0.1:19090");
+    }
+
+    /// Clash 的字段名是驼峰，缺字段按 0 处理（刚连上时可能还没统计）。
+    #[test]
+    fn connections_totals_read_the_clash_field_names() {
+        let body: ConnectionsResponse = serde_json::from_str(
+            r#"{"uploadTotal": 12, "downloadTotal": 34, "connections": []}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            TrafficTotals {
+                up_bytes: body.upload_total,
+                down_bytes: body.download_total,
+            },
+            TrafficTotals {
+                up_bytes: 12,
+                down_bytes: 34,
+            }
+        );
+
+        let empty: ConnectionsResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.upload_total, 0);
+        assert_eq!(empty.download_total, 0);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.1.0`
+> 契约版本：`2.2.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，2.0.0）
@@ -358,15 +358,23 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.2.0";
   health: HealthSnapshot;
+  // 2.2 新增：本次运行累计流量与速率。
+  // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
+  // UI 要能区分「这次真的 0 字节」和「没有数据」。
+  traffic: TrafficStats | null;   // 形状见 runtime.md §2.4
   emitted_at: string;
 };
 ```
 
-触发：健康快照变化，**去抖 ≥ 1s**。同一秒内多次变化只发最后一条。
+触发：健康检查每 2s 一次，每次检查后发一条（`health_interval`）；健康快照变化时也会发，仍有 ≥ 1s 去抖。
 
-UI 处理：更新延迟/出口 IP/健康灯；`degraded` 时在状态栏加黄色标记。
+刷新频率：**2 秒一条**。数据来自 `GET /connections` 的 `uploadTotal` / `downloadTotal` 累计值，
+速率由相邻两次采样的差值除以间隔得到，所以 `up_rate` / `down_rate` 是约 2 秒的平均值，
+**不是每秒精确值**。采样失败时保留上一次的值，不会把流量清成 0。
+
+UI 处理：更新延迟/出口 IP/健康灯/流量；`degraded` 时在状态栏加黄色标记。
 
 ---
 
@@ -864,6 +872,14 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.2.0（2026-11-04，运行时流量进健康事件）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.2.0` | 元数据 | UI 重构需要实时流量 |
+| 2 | `runtime-health-changed` 载荷新增 `traffic: TrafficStats \| null` | 字段扩展 | 产品：连上后要一直看到用了多少流量 |
+| 3 | 明确发送频率：每次健康检查后发一条（默认 2s），本次不改发送时机 | 说明 | 同上 |
 
 ### 2.1.0（2026-11-03，批 3 · 分流与 DNS）
 
