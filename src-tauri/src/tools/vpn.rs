@@ -56,10 +56,7 @@ impl Tool for VpnConnectTool {
 
         let outcome = match self.services.vpn_connect(config_id).await {
             Ok(data) => {
-                let summary = match data.get("exit_ip").and_then(Value::as_str) {
-                    Some(ip) => format!("已连接，出口 IP {ip}。"),
-                    None => "已连接，出口 IP 仍在探测中。".to_string(),
-                };
+                let summary = connect_summary(&data);
                 ToolOutcome::ok(summary, data).with_next(
                     NextAction {
                         label: "断开连接".to_string(),
@@ -80,6 +77,34 @@ impl Tool for VpnConnectTool {
         };
         envelope::finish(ctx, "VpnConnect", outcome)
     }
+}
+
+/// 连接成功后的摘要：模型下一步就要向用户报「用的哪条线路、代理地址、出口 IP」。
+/// 少给一样它就得再调一次 `RuntimeStatus`，首启的轮次预算经不起这么花。
+fn connect_summary(data: &Value) -> String {
+    let name = data
+        .get("config_name")
+        .and_then(Value::as_str)
+        .unwrap_or("当前配置");
+    let mut parts = vec![format!("已连接：配置「{name}」")];
+    if let Some(node) = data.get("node_name").and_then(Value::as_str) {
+        parts.push(format!("节点「{node}」"));
+    }
+    match data.get("mixed_port").and_then(Value::as_u64) {
+        Some(port) => parts.push(format!("代理地址 127.0.0.1:{port}")),
+        // TUN 模式不监听本机端口，接管靠路由表。
+        None => parts.push("全部流量已接管".to_string()),
+    }
+    match data.get("exit_ip").and_then(Value::as_str) {
+        Some(ip) => {
+            parts.push(match data.get("latency_ms").and_then(Value::as_u64) {
+                Some(ms) => format!("出口 IP {ip}（{ms}ms）"),
+                None => format!("出口 IP {ip}"),
+            });
+        }
+        None => parts.push("出口 IP 仍在探测中".to_string()),
+    }
+    format!("{}。", parts.join("，"))
 }
 
 pub struct VpnDisconnectTool {

@@ -24,6 +24,49 @@ fn failure(error: anyhow::Error) -> AivpnError {
     }
 }
 
+/// 切换成功的摘要要说清「设成了什么」「哪些分类跟着生效」「现在有没有连上」。
+/// 只报「已更新」的话，模型无法确认分类落没落上，也不知道重连失败的连接其实已经断了，
+/// 只能再调一次 `RouteGet` / `RuntimeStatus`。
+fn summarise_route_change(data: &Value) -> String {
+    let mode = data
+        .get("routing_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let targets = data
+        .get("targets")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("、")
+        })
+        .unwrap_or_default();
+    let targets = if targets.is_empty() {
+        String::new()
+    } else {
+        format!("，目标分类：{targets}")
+    };
+    let hot = data
+        .get("hot_switched")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if hot {
+        format!("分流模式已热切换为 {mode}{targets}，连接未中断。")
+    } else {
+        match data.get("reconnect").and_then(Value::as_str) {
+            Some("reconnected") => {
+                format!("分流模式已切换为 {mode}{targets}，已重新连接生效。")
+            }
+            Some("reconnect_failed") => format!(
+                "分流模式已保存为 {mode}{targets}，但自动重连失败，当前未连接，需要重新连接。"
+            ),
+            _ => format!("分流模式已设为 {mode}{targets}，下一次连接生效。"),
+        }
+    }
+}
+
 fn summarise_route(data: &Value) -> String {
     let mode = data
         .get("routing_mode")
@@ -164,17 +207,7 @@ impl Tool for RouteSetModeTool {
             .route_set_mode(config_id, mode, confirm)
             .await
         {
-            Ok(data) => {
-                let hot = data.get("hot_switched").and_then(Value::as_bool).unwrap_or(false);
-                ToolOutcome::ok(
-                    if hot {
-                        "分流模式已热切换，连接未中断。"
-                    } else {
-                        "分流模式已更新，下一次连接生效。"
-                    },
-                    data,
-                )
-            }
+            Ok(data) => ToolOutcome::ok(summarise_route_change(&data), data),
             Err(error) => ToolOutcome::fail(failure(error)),
         };
         envelope::finish(ctx, "RouteSetMode", outcome)

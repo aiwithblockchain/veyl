@@ -50,6 +50,36 @@ fn summarise_configs(data: &Value) -> String {
     lines.join("\n")
 }
 
+/// 建配置的摘要必须带 `config_id`：模型拿不到 id 就只能再调一次 `ConfigList`
+/// 去翻，白烧一轮。节点名也一并给出，下一步连上后要向用户报是哪条线路。
+fn summarise_created(data: &Value) -> String {
+    let id = data.get("config_id").and_then(Value::as_str).unwrap_or("-");
+    let name = data.get("name").and_then(Value::as_str).unwrap_or("(未命名)");
+    let nodes: Vec<&str> = data
+        .get("nodes")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|node| node.get("name").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    if nodes.is_empty() {
+        return format!("配置已创建：{id}，名称「{name}」，暂未添加节点。");
+    }
+    let shown = nodes.iter().take(3).copied().collect::<Vec<_>>().join("、");
+    let list = if nodes.len() > 3 {
+        format!("{shown} 等 {} 个", nodes.len())
+    } else {
+        shown
+    };
+    format!(
+        "配置已创建：{id}，名称「{name}」，{} 个节点（{list}）。",
+        nodes.len()
+    )
+}
+
 fn summarise_detail(data: &Value) -> String {
     let name = data.get("name").and_then(Value::as_str).unwrap_or("(未命名)");
     let nodes: Vec<&Value> = data
@@ -276,7 +306,7 @@ impl Tool for ConfigCreateTool {
         {
             Ok(data) => {
                 let config_id = data.get("config_id").cloned().unwrap_or(Value::Null);
-                ToolOutcome::ok("配置已创建。", data).with_next(NextAction {
+                ToolOutcome::ok(summarise_created(&data), data).with_next(NextAction {
                     label: "连接".to_string(),
                     tool: "VpnConnect".to_string(),
                     args: json!({ "config_id": config_id }),
