@@ -9,12 +9,12 @@
 //! 这个 bin 刻意不 `use veyl_lib`，只链 libxpc / Security / CoreFoundation / sha2，
 //! 避免把整个 Tauri 依赖图拖进一个 root 进程。
 
-#[path = "../tun/protocol.rs"]
+#[path = "../../tun/protocol.rs"]
 mod protocol;
-#[path = "../tun/trust.rs"]
+#[path = "../../tun/trust.rs"]
 #[allow(dead_code)]
 mod trust;
-#[path = "../tun/xpc.rs"]
+#[path = "../../tun/xpc.rs"]
 #[allow(dead_code)] // 与主程序共用同一份绑定，helper 只用服务端那几个
 mod xpc;
 
@@ -35,7 +35,7 @@ extern "C" fn on_signal(_signal: libc::c_int) {
     SHUTDOWN.store(true, Ordering::SeqCst);
 }
 
-fn main() {
+pub fn run() {
     if !is_root() {
         eprintln!("veyl-helper: 必须以 root 运行");
         std::process::exit(1);

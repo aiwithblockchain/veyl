@@ -4,13 +4,17 @@
 //! 不是我们的子进程，manager 那套 Child 句柄的启停模型对它不适用。
 //! 代价是 TUN 连接不参与 manager 的重连/看门狗，这一点在报告里写清楚。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::privilege::{
-    app_location_hint, PrivilegeError, Registration, ERR_HELPER_MISSING, ERR_TUN_START_FAILED,
-};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use super::privilege::{PrivilegeError, Registration, ERR_HELPER_MISSING};
+#[cfg(target_os = "macos")]
+use super::privilege::{app_location_hint, ERR_TUN_START_FAILED};
+#[cfg(target_os = "macos")]
 use super::protocol::MACH_SERVICE;
+#[cfg(target_os = "macos")]
 use super::xpc::{self, Reply, XpcError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +37,7 @@ pub struct TunSession {
     pid: Mutex<Option<u32>>,
     /// App 崩溃重启后 TUN 还活着，这时内存里没有 pid。
     /// 首次查状态时向 helper 问一次，之后不再重复。
+    #[cfg(target_os = "macos")]
     probed: AtomicBool,
 }
 
@@ -41,6 +46,7 @@ impl TunSession {
         Self {
             registration,
             pid: Mutex::new(None),
+            #[cfg(target_os = "macos")]
             probed: AtomicBool::new(false),
         }
     }
@@ -54,24 +60,33 @@ impl TunSession {
     pub fn launch(&self, config: &str) -> Result<Started, PrivilegeError> {
         self.registration.ensure_registered()?;
 
-        match xpc::call(MACH_SERVICE, "start", Some(config.as_bytes())) {
-            Ok(Reply::Started {
-                pid,
-                clash_addr,
-                clash_secret,
-            }) => {
-                *self.pid.lock().unwrap() = Some(pid);
-                Ok(Started {
+        #[cfg(target_os = "macos")]
+        {
+            return match xpc::call(MACH_SERVICE, "start", Some(config.as_bytes())) {
+                Ok(Reply::Started {
                     pid,
                     clash_addr,
                     clash_secret,
-                })
-            }
-            Ok(_) => Err(PrivilegeError::new(
-                ERR_TUN_START_FAILED,
-                "特权助手回了意料之外的结果",
-            )),
-            Err(error) => Err(map_xpc_error(error)),
+                }) => {
+                    *self.pid.lock().unwrap() = Some(pid);
+                    Ok(Started {
+                        pid,
+                        clash_addr,
+                        clash_secret,
+                    })
+                }
+                Ok(_) => Err(PrivilegeError::new(
+                    ERR_TUN_START_FAILED,
+                    "特权助手回了意料之外的结果",
+                )),
+                Err(error) => Err(map_xpc_error(error)),
+            };
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = config;
+            Err(unsupported_platform())
         }
     }
 
@@ -80,12 +95,20 @@ impl TunSession {
         if self.status() == TunState::Stopped {
             return Ok(());
         }
-        let result = match xpc::call(MACH_SERVICE, "stop", None) {
-            Ok(_) => Ok(()),
-            Err(error) => Err(map_xpc_error(error)),
-        };
-        *self.pid.lock().unwrap() = None;
-        result
+        #[cfg(target_os = "macos")]
+        {
+            let result = match xpc::call(MACH_SERVICE, "stop", None) {
+                Ok(_) => Ok(()),
+                Err(error) => Err(map_xpc_error(error)),
+            };
+            *self.pid.lock().unwrap() = None;
+            return result;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            *self.pid.lock().unwrap() = None;
+            Ok(())
+        }
     }
 
     /// 热路径：只读内存里的 pid，不打 XPC。
@@ -96,24 +119,35 @@ impl TunSession {
         if let Some(pid) = *self.pid.lock().unwrap() {
             return TunState::Running { pid };
         }
-        if self.probed.swap(true, Ordering::SeqCst) {
-            return TunState::Stopped;
-        }
-        match xpc::call(MACH_SERVICE, "status", None) {
-            Ok(Reply::Status {
+        #[cfg(target_os = "macos")]
+        {
+            if self.probed.swap(true, Ordering::SeqCst) {
+                return TunState::Stopped;
+            }
+            if let Ok(Reply::Status {
                 running: true,
                 pid: Some(pid),
-            }) => {
+            }) = xpc::call(MACH_SERVICE, "status", None)
+            {
                 *self.pid.lock().unwrap() = Some(pid);
-                TunState::Running { pid }
+                return TunState::Running { pid };
             }
-            _ => TunState::Stopped,
         }
+        TunState::Stopped
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unsupported_platform() -> PrivilegeError {
+    PrivilegeError::new(
+        ERR_HELPER_MISSING,
+        "这个平台还不支持接管全部流量，请改用代理模式",
+    )
 }
 
 /// XPC 的失败翻译成用户能懂的两类：**助手不在**（权限/安装），
 /// 和**助手在但拒绝了**（启动失败）。两者都不该被当成网络故障。
+#[cfg(target_os = "macos")]
 pub fn map_xpc_error(error: XpcError) -> PrivilegeError {
     match error {
         XpcError::Unavailable(detail) => {
@@ -188,6 +222,7 @@ mod tests {
         assert_eq!(error.code, ERR_TUN_DENIED);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn unavailable_helper_is_reported_as_a_permission_problem() {
         let error = map_xpc_error(XpcError::Unavailable("connection invalid".into()));
@@ -197,6 +232,7 @@ mod tests {
         assert!(error.message.contains("应用程序"), "{}", error.message);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_server_rejection_is_a_start_failure_not_a_permission_problem() {
         let error = map_xpc_error(XpcError::Server {

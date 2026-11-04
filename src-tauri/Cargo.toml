@@ -19,7 +19,7 @@ path = "src/bin/runtime_selftest.rs"
 # 只放在 src/bin/ 下自动发现是不够的（会漏掉 universal 构建，打包时直接失败）。
 [[bin]]
 name = "veyl-helper"
-path = "src/bin/veyl-helper.rs"
+path = "src/bin/veyl-helper/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
