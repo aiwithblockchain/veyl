@@ -1692,10 +1692,20 @@ mod tests {
         let manager = RuntimeManager::new(cfg);
         let mut events = manager.subscribe();
 
+        let started = Instant::now();
         let err = manager.start(plan(fake, &dir)).await.unwrap_err();
+        eprintln!(
+            "[manager-test] crash start failed after {:?}: {err}",
+            started.elapsed()
+        );
         assert!(matches!(err, RuntimeError::Process(_)), "{err}");
 
         let status = manager.status().await;
+        eprintln!(
+            "[manager-test] state={:?} last_error={:?}",
+            status.state,
+            status.last_error.as_ref().map(|error| (&error.code, &error.message))
+        );
         assert_eq!(status.state, RuntimeState::Failed);
         assert_eq!(status.restart_count, 0);
         assert!(status.pid.is_none());

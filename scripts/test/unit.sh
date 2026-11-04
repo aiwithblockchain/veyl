@@ -2,7 +2,7 @@
 # 用法：
 #   bash scripts/test/unit.sh
 #
-# 内容：npm run typecheck → cargo test（顺序执行，任一失败即停）
+# 内容：npm run typecheck → cargo test --lib（--nocapture，失败写失败摘要）
 # 前置：已执行 npm ci；cargo 可用。不依赖网络。
 # 退出码：0 通过 / 1 失败 / 2 缺依赖
 #
@@ -21,6 +21,6 @@ ci_init
 ci_banner "单元测试"
 
 ci_step "typecheck" npm run --silent typecheck || exit 1
-ci_step "cargo-test" cargo test --manifest-path src-tauri/Cargo.toml || exit 1
+ci_step "cargo-test" bash scripts/test/cargo-lib.sh || exit 1
 
 printf '\n单元测试通过\n'

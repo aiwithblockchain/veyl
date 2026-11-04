@@ -7,7 +7,7 @@
 #   1. bash scripts/check-secrets.sh        ← 凭据文件形态扫描，跑不过后面全别跑
 #   2. bash scripts/test/secret-scan.sh     ← 信息泄漏扫描（IP / 路径 / 节点 id），硬失败
 #   3. npm run typecheck
-#   4. cargo test --manifest-path src-tauri/Cargo.toml
+#   4. bash scripts/test/cargo-lib.sh       ← lib 测试（--nocapture，失败写失败摘要）
 #   5. node tests/contracts/check-contracts.mjs
 #   6. bash scripts/test/wiring-check.sh    ← 接线检查（advisory，不影响退出码）
 #   7. cargo run --manifest-path src-tauri/Cargo.toml --bin veyl-runtime-selftest
@@ -49,7 +49,7 @@ printf '日志：%s\n' "$CI_LOG_DIR"
 ci_step "check-secrets" bash scripts/check-secrets.sh || exit 1
 ci_step "secret-scan" bash scripts/test/secret-scan.sh || exit 1
 ci_step "typecheck" npm run --silent typecheck || exit 1
-ci_step "cargo-test" cargo test --manifest-path src-tauri/Cargo.toml || exit 1
+ci_step "cargo-test" bash scripts/test/cargo-lib.sh || exit 1
 ci_step "contracts" node tests/contracts/check-contracts.mjs || exit 1
 
 # advisory：接线检查只告警，不阻断 CI。跑一段时间确认清单稳定后，再改成 --strict 纳入门禁。
