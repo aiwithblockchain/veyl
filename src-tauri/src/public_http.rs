@@ -300,6 +300,60 @@ mod tests {
         }
     }
 
+    /// 每个被拒网段的两侧边界。只写「10.1.2.3 被拒」测不出掩码写错——
+    /// 把 /8 写成 /12 照样能拒 10.1.2.3，但会误伤 10.16.0.1 之类。
+    #[test]
+    fn cidr_boundaries_are_exact() {
+        // (网段内应拒, 紧邻网段外应放行)
+        let cases = [
+            ("10.0.0.0", "11.0.0.0"),           // 10/8
+            ("172.16.0.0", "172.15.255.255"),   // 172.16/12 下边界
+            ("172.31.255.255", "172.32.0.0"),   // 172.16/12 上边界
+            ("192.168.0.0", "192.167.255.255"), // 192.168/16
+            ("100.64.0.0", "100.63.255.255"),   // 100.64/10 下边界
+            ("100.127.255.255", "100.128.0.0"), // 100.64/10 上边界
+            ("198.18.0.0", "198.17.255.255"),   // 198.18/15 下边界
+            ("198.19.255.255", "198.20.0.0"),   // 198.18/15 上边界
+            ("169.254.0.0", "169.253.255.255"), // 169.254/16
+            ("127.0.0.0", "126.255.255.255"),   // 127/8
+        ];
+        for (inside, outside) in cases {
+            assert!(!is_public_ip(ip(inside)), "{inside} 在保留段内，应被拒");
+            assert!(is_public_ip(ip(outside)), "{outside} 是网段外，应放行");
+        }
+    }
+
+    #[test]
+    fn ipv4_reserved_ranges_are_rejected() {
+        for value in [
+            "192.0.0.1",   // 192.0.0/24 IETF 协议分配
+            "192.88.99.1", // 6to4 中继任播
+            "240.0.0.1",   // 240/4 保留
+            "255.255.255.254",
+        ] {
+            assert!(!is_public_ip(ip(value)), "{value} 是保留地址，应被拒");
+        }
+    }
+
+    #[test]
+    fn ipv6_unicast_local_and_site_local_are_rejected() {
+        for value in [
+            "fec0::1",     // fec0::/10 站点本地（已废弃但仍可能被解析）
+            "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", // fc00::/7 上边界
+            "::ffff:10.0.0.1",  // IPv4 映射到内网
+            "::ffff:192.168.1.1",
+        ] {
+            assert!(!is_public_ip(ip(value)), "{value} 不应被视为公网地址");
+        }
+    }
+
+    #[test]
+    fn ipv4_mapped_public_address_passes() {
+        // `::ffff:8.8.8.8` 走的是 v4 判定分支，边界必须与 v4 一致。
+        assert!(is_public_ip(ip("::ffff:8.8.8.8")));
+        assert!(is_public_ip(ip("::ffff:185.199.108.153")));
+    }
+
     #[test]
     fn non_https_and_credentials_are_rejected_before_any_request() {
         for url in [

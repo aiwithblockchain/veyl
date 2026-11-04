@@ -8,6 +8,11 @@
 //   1. AGENT_EVENTS 的取值与 docs/contracts/events.md §1 事件总表一致
 //   2. AGENT_EVENTS 的每个取值都被 src/state/chatStore.ts 的 switch 覆盖
 //   3. RuntimeStatus / RuntimeSnapshot 的序列化字段不含 clash_addr（契约 runtime.md §11）
+//   4. mock 剧本里的工具名都在 docs/contracts/tools.md 的工具总表里
+//   5. 实现里的 contract_version 与对应契约文档一致
+//   6. 命令四方对齐：commands.md 总表 ↔ #[tauri::command] ↔ generate_handler! ↔ 前端 call()
+//   7. 命令参数对齐：commands.md 的入参 ↔ Rust 形参 ↔ 前端调用实参
+//   8. 事件载荷字段：events.md 的 Payload 类型 ↔ src/agent/protocol.ts 的接口
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -230,6 +235,393 @@ check(
           problems.push(`${rel}:${i + 1} 是 ${m[1]}，${doc} 是 ${expected}`);
         }
       });
+    }
+    return problems;
+  },
+  { advisory: true }
+);
+
+// --- 6 & 7：命令四方对齐 ---
+//
+// 四个集合，任何一个方向对不上都会在运行期才炸：
+//   doc       docs/contracts/commands.md §2 命令总表
+//   impl      src-tauri/src/agent/commands.rs 的 #[tauri::command] 函数
+//   register  src-tauri/src/lib.rs 的 generate_handler!
+//   ui        src/agent/tauriBridge.ts 的 call("...")
+//
+// 判定：
+//   impl 有、register 没有      → 失败（函数永远调不到）
+//   register 有、doc 没有       → 失败（文档漏记，AI 与前端都按文档写）
+//   ui 调用了 impl 里没有的命令 → 失败（点了就报「命令不存在」）
+//   doc 有、impl 没有           → advisory（这批功能还没做到，不是缺陷）
+
+function contractCommands() {
+  const md = read("docs/contracts/commands.md");
+  const start = md.indexOf("## 2. 命令总表");
+  if (start < 0) throw new Error("未找到 docs/contracts/commands.md 的 §2 命令总表");
+  const section = md.slice(start, md.indexOf("\n## ", start + 10));
+
+  const rows = new Map();
+  for (const m of section.matchAll(/^\|\s*\d+\s*\|\s*`([a-z0-9_]+)`\s*\|\s*`([^`]*)`/gm)) {
+    rows.set(m[1], { params: m[2] });
+  }
+  if (rows.size === 0) throw new Error("未能从 commands.md §2 解析出任何命令名");
+  return rows;
+}
+
+/** 解析 `{ name, connectMode, targets? }` → ["name", "connectMode", "targets"]。 */
+function parseParamList(text) {
+  const inner = text.trim().replace(/^\{/, "").replace(/\}$/, "").trim();
+  if (inner === "") return [];
+  return inner
+    .split(",")
+    .map((s) => s.trim().replace(/\?$/, "").trim())
+    .filter(Boolean);
+}
+
+/** 从 Rust 文件里抽出 `#[tauri::command]` 函数的 (名字, 形参名[])。 */
+// Tauri 从调用现场注入、不出现在 JS 入参对象里的形参。
+const INJECTED_PARAMS = new Set(["state", "app", "window", "request"]);
+
+function rustCommands() {
+  const rs = read("src-tauri/src/agent/commands.rs");
+  const out = new Map();
+  const ATTR = "#[tauri::command]";
+  let at = rs.indexOf(ATTR);
+  while (at >= 0) {
+    const sig = rs.indexOf("fn ", at);
+    if (sig < 0) break;
+    const nameMatch = /^fn\s+([a-z0-9_]+)\s*\(/.exec(rs.slice(sig));
+    if (!nameMatch) {
+      at = rs.indexOf(ATTR, at + 1);
+      continue;
+    }
+    const name = nameMatch[1];
+    // 从括号开始扫描到配对的右括号，收集形参名。
+    let depth = 0;
+    let i = rs.indexOf("(", sig);
+    const startParen = i;
+    for (; i < rs.length; i++) {
+      if (rs[i] === "(") depth++;
+      else if (rs[i] === ")") {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    const paramsBlob = rs.slice(startParen + 1, i).replace(/\/\/[^\n]*/g, "");
+    const params = [];
+    let d = 0;
+    let current = "";
+    for (const ch of paramsBlob) {
+      if ("(<[".includes(ch)) d++;
+      else if (")>]".includes(ch)) d--;
+      if (ch === "," && d === 0) {
+        params.push(current);
+        current = "";
+      } else current += ch;
+    }
+    if (current.trim()) params.push(current);
+
+    const names = [];
+    for (const raw of params) {
+      const m = /^\s*(?:mut\s+)?(_?[a-z0-9_]+)\s*:/.exec(raw);
+      if (!m) continue;
+      // Tauri 注入参数：不对应任何 JS 入参。Rust 侧常写成 `_state` 表示未使用。
+      if (INJECTED_PARAMS.has(m[1].replace(/^_+/, ""))) continue;
+      names.push(m[1]);
+    }
+    out.set(name, names);
+    at = rs.indexOf(ATTR, at + 1);
+  }
+  if (out.size === 0) throw new Error("未在 agent/commands.rs 找到任何 #[tauri::command] 函数");
+  return out;
+}
+
+function registeredCommands() {
+  const rs = read("src-tauri/src/lib.rs");
+  const open = rs.indexOf("generate_handler![");
+  if (open < 0) throw new Error("未在 lib.rs 找到 generate_handler!");
+  const close = rs.indexOf("]", open);
+  const blob = rs.slice(open, close);
+  const names = new Set();
+  for (const m of blob.matchAll(/\b([a-z0-9_]+)\s*(?:,|\s*$)/gm)) {
+    if (m[1] === "generate_handler") continue;
+    names.add(m[1]);
+  }
+  if (names.size === 0) throw new Error("generate_handler! 解析为空");
+  return names;
+}
+
+/**
+ * 从 tauriBridge.ts 抽出 `call("name")` / `call<T>("name", {...})`。
+ * 泛型可能跨行（`call<{\n ... \n}>("x"`），所以按括号配对扫描，不用正则。
+ */
+function uiCalls() {
+  const ts = read("src/agent/tauriBridge.ts");
+  const calls = [];
+  for (let i = ts.indexOf("call"); i >= 0; i = ts.indexOf("call", i + 4)) {
+    // 必须是一个完整标识符起始，避免匹配到 recall 之类。
+    if (i > 0 && /[A-Za-z0-9_$.]/.test(ts[i - 1])) continue;
+    let p = i + 4;
+    while (/\s/.test(ts[p] || "")) p++;
+    if (ts[p] === "<") {
+      let depth = 0;
+      for (; p < ts.length; p++) {
+        if (ts[p] === "<") depth++;
+        else if (ts[p] === ">") {
+          depth--;
+          if (depth === 0) {
+            p++;
+            break;
+          }
+        }
+      }
+      while (/\s/.test(ts[p] || "")) p++;
+    }
+    if (ts[p] !== "(") continue;
+    p++;
+    while (/\s/.test(ts[p] || "")) p++;
+    const m = /^"([a-z0-9_]+)"/.exec(ts.slice(p));
+    if (!m) continue;
+
+    // 取第二个实参（args 对象），只处理无 `...` 的简单字面量。
+    const afterName = p + m[0].length;
+    let q = ts.indexOf(",", afterName);
+    let args = null;
+    if (q >= 0 && ts.slice(afterName, q).trim() === "") {
+      let brace = q + 1;
+      while (/\s/.test(ts[brace] || "")) brace++;
+      if (ts[brace] === "{") {
+        let depth = 0;
+        let r = brace;
+        for (; r < ts.length; r++) {
+          if (ts[r] === "{") depth++;
+          else if (ts[r] === "}") {
+            depth--;
+            if (depth === 0) break;
+          }
+        }
+        const body = ts.slice(brace + 1, r);
+        if (!/\.\.\./.test(body)) {
+          args = body
+            .split(",")
+            .map((s) => s.split(":")[0].trim())
+            .filter((s) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s));
+        }
+      }
+    }
+    calls.push({ name: m[1], args });
+  }
+  if (calls.length === 0) throw new Error("未在 tauriBridge.ts 解析出任何 call(...)");
+  return calls;
+}
+
+check("命令在文档 / 实现 / 注册 / 前端四方一致", () => {
+  const doc = contractCommands();
+  const impl = rustCommands();
+  const registered = registeredCommands();
+  const ui = new Set(uiCalls().map((c) => c.name));
+
+  const problems = [];
+  for (const name of impl.keys()) {
+    if (!registered.has(name)) problems.push(`实现了但没注册到 generate_handler!：${name}`);
+  }
+  for (const name of registered) {
+    if (!impl.has(name)) problems.push(`注册了但 agent/commands.rs 里没有这个函数：${name}`);
+    if (!doc.has(name)) problems.push(`注册了但 commands.md §2 没写：${name}`);
+  }
+  for (const name of ui) {
+    if (!impl.has(name)) problems.push(`前端 invoke 了一个不存在的命令：${name}`);
+    if (!doc.has(name)) problems.push(`前端在调、但 commands.md §2 没写：${name}`);
+  }
+  return problems;
+});
+
+check(
+  "commands.md 声明的命令尚未实现（advisory，未实现的功能不算缺陷）",
+  () => {
+    const doc = contractCommands();
+    const impl = rustCommands();
+    const problems = [];
+    for (const name of doc.keys()) {
+      if (!impl.has(name)) problems.push(`${name} 已在契约里声明，实现还没有`);
+    }
+    return problems;
+  },
+  { advisory: true }
+);
+
+const snakeToCamel = (s) => s.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+
+check(
+  "命令入参在文档 / Rust 形参之间对齐（契约声明了、实现还没收 → advisory）",
+  () => {
+    const doc = contractCommands();
+    const impl = rustCommands();
+    const problems = [];
+
+    // 这个命令走 tauri::ipc::Request 手工解析，形参不是常规映射，单独跳过。
+    const RAW_REQUEST_COMMANDS = new Set(["config_update"]);
+
+    for (const [name, { params }] of doc) {
+      if (!impl.has(name)) continue; // 未实现已由上面那条 advisory 覆盖
+      if (RAW_REQUEST_COMMANDS.has(name)) continue;
+      const expected = parseParamList(params).map(snakeToCamel);
+      const actual = impl.get(name).map(snakeToCamel);
+
+      const expectedSet = new Set(expected);
+      const actualSet = new Set(actual);
+      for (const p of expected) if (!actualSet.has(p)) problems.push(`${name}：契约有 ${p}，Rust 形参还没收`);
+    }
+    return problems;
+  },
+  { advisory: true }
+);
+
+check("Rust 形参都在契约里写过，且前端实参 Rust 收得到", () => {
+  const doc = contractCommands();
+  const impl = rustCommands();
+  const ui = uiCalls();
+  const problems = [];
+
+  const RAW_REQUEST_COMMANDS = new Set(["config_update"]);
+
+  for (const [name, actual] of impl) {
+    if (RAW_REQUEST_COMMANDS.has(name)) continue;
+    const docParams = doc.has(name) ? parseParamList(doc.get(name).params).map(snakeToCamel) : [];
+    const expectedSet = new Set(docParams);
+    for (const p of actual.map(snakeToCamel)) {
+      if (!expectedSet.has(p)) problems.push(`${name}：Rust 形参有 ${p}，commands.md 没写`);
+    }
+  }
+
+  for (const { name, args } of ui) {
+    if (!args || !impl.has(name)) continue;
+    const expected = new Set(impl.get(name).map(snakeToCamel));
+    for (const a of args) {
+      if (!expected.has(a)) {
+        problems.push(`前端调 ${name} 传了 ${a}，Rust 侧没有这个形参（会被静默忽略）`);
+      }
+    }
+  }
+  return problems;
+});
+
+// --- 8：事件载荷字段 ---
+//
+// events.md 里的 `type XxxPayload = {...}` 是 UI 唯一可以依赖的字段清单。
+// protocol.ts 的接口是 UI 实际消费的形状。两者漂移 = 字段改名后 UI 静默读到 undefined。
+
+function contractPayloadTypes() {
+  const md = read("docs/contracts/events.md");
+  // 只认 §1 事件总表里「载荷类型」那一列点过名的类型，避免把普通 type 别名算进来。
+  const named = new Set();
+  for (const m of md.matchAll(/^\|\s*\d+\s*\|\s*`[a-z0-9-]+`\s*\|[^|]*\|\s*`(\w+Payload)`\s*\|/gm)) {
+    named.add(m[1]);
+  }
+  if (named.size === 0) throw new Error("未能从 events.md §1 解析出载荷类型名");
+
+  const out = new Map();
+  for (const m of md.matchAll(/^type\s+(\w+Payload)\s*=\s*\{([\s\S]*?)\n\};/gm)) {
+    if (!named.has(m[1])) continue;
+    out.set(m[1], parseTsFields(m[2]));
+  }
+  if (out.size === 0) throw new Error("events.md 里一个载荷类型都没解析出来");
+  return { named, parsed: out };
+}
+
+function parseTsFields(body) {
+  const fields = [];
+  for (const raw of body.split("\n")) {
+    const line = raw.replace(/\/\/.*$/, "").trim();
+    const m = /^([a-z_][a-z0-9_]*)\??\s*:/.exec(line);
+    if (m) fields.push(m[1]);
+  }
+  return fields;
+}
+
+function protocolPayloadTypes() {
+  const ts = read("src/agent/protocol.ts");
+  const out = new Map();
+  for (const m of ts.matchAll(/^export interface (\w+Payload)\s*\{([\s\S]*?)\n\}/gm)) {
+    out.set(m[1], parseTsFields(m[2]));
+  }
+  // 别名（`export type A = B`）直接继承，按 B 的字段算。
+  for (const m of ts.matchAll(/^export type (\w+Payload)\s*=\s*(\w+Payload)\s*;/gm)) {
+    if (out.has(m[2])) out.set(m[1], out.get(m[2]));
+  }
+  return out;
+}
+
+// 两个方向分开判：
+//   契约有、UI 没有   → advisory（字段是 2.0/2.1 新加的，UI 还没跟上）
+//   UI 有、契约没有   → 失败（旧字段名没清掉，UI 读到的是 undefined，这类最像「能跑但显示不对」）
+
+function payloadFieldDiff() {
+  const { named, parsed } = contractPayloadTypes();
+  const code = protocolPayloadTypes();
+  const missing = [];
+  const stale = [];
+
+  for (const typeName of named) {
+    const docFields = parsed.get(typeName);
+    if (!docFields) {
+      missing.push(`${typeName}：events.md §1 点名了，但正文里没有可解析的 type 定义`);
+      continue;
+    }
+    const codeFields = code.get(typeName);
+    if (!codeFields) {
+      missing.push(`${typeName}：protocol.ts 里没有对应接口（UI 会读不到字段）`);
+      continue;
+    }
+    const docSet = new Set(docFields);
+    const codeSet = new Set(codeFields);
+    for (const f of docSet) if (!codeSet.has(f)) missing.push(`${typeName}.${f}：契约有、protocol.ts 没有`);
+    for (const f of codeSet) if (!docSet.has(f)) stale.push(`${typeName}.${f}：protocol.ts 有、契约没有（旧字段名没清）`);
+  }
+  return { missing, stale };
+}
+
+check(
+  "事件载荷：契约新增的字段还没进 protocol.ts",
+  () => payloadFieldDiff().missing,
+  { advisory: true }
+);
+
+check("事件载荷：protocol.ts 里有契约已删除的字段", () => payloadFieldDiff().stale);
+
+// Rust 侧大部分事件载荷是 `json!({...})` 直接拼的，没有结构体可比。
+// 只对**确实定义了结构体**的载荷做比对，其余交给 protocol.ts 那条。
+check(
+  "事件载荷：Rust 结构体与 events.md 的字段差异",
+  () => {
+    const { parsed } = contractPayloadTypes();
+    const problems = [];
+    let compared = 0;
+
+    for (const file of walkRs(join(ROOT, "src-tauri", "src"))) {
+      const rel = file.slice(ROOT.length + 1);
+      const rs = readFileSync(file, "utf8");
+      for (const m of rs.matchAll(/pub struct (\w+Payload)\s*\{([\s\S]*?)\n\}/g)) {
+        const docFields = parsed.get(m[1]);
+        if (!docFields) continue;
+        compared++;
+        const rustFields = [];
+        for (const line of m[2].split("\n")) {
+          const f = /^\s*pub\s+(\w+)\s*:/.exec(line);
+          if (f) rustFields.push(f[1]);
+        }
+        const docSet = new Set(docFields);
+        const rustSet = new Set(rustFields);
+        for (const f of docSet) if (!rustSet.has(f)) problems.push(`${rel} ${m[1]}.${f}：契约有、Rust 结构体没有`);
+        for (const f of rustSet) if (!docSet.has(f)) problems.push(`${rel} ${m[1]}.${f}：Rust 有、契约没有`);
+      }
+    }
+
+    // 覆盖率低是事实，不要让它悄悄变成「全都检查过了」。
+    if (compared === 0) return ["一个事件载荷结构体都没比对上，检查脚本需要更新"];
+    if (problems.length > 0) {
+      problems.push(`（本轮仅比对了 ${compared} 个以结构体定义的事件载荷；其余是 json! 拼的，见报告）`);
     }
     return problems;
   },
