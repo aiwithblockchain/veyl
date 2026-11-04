@@ -37,12 +37,32 @@ export function ConfigRail({
           title="新建配置"
           onClick={() => setCreating(true)}
         >
-          ＋
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+            <path
+              d="M8 3.5v9M3.5 8h9"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+            />
+          </svg>
         </button>
       </header>
 
       {loading ? (
-        <p className="config-rail__loading">正在读取配置…</p>
+        <div
+          className="config-rail__loading"
+          role="status"
+          aria-busy="true"
+          aria-label="正在读取配置"
+        >
+          {[0, 1, 2].map((row) => (
+            <div className="skeleton-row" key={row} aria-hidden>
+              <span className="skeleton skeleton--name" />
+              <span className="skeleton skeleton--meta" />
+            </div>
+          ))}
+        </div>
       ) : configs.length === 0 && error ? (
         <div className="config-rail__empty">
           <p className="config-rail__empty-title">配置读取失败</p>
@@ -64,6 +84,7 @@ export function ConfigRail({
             {configs.map((config) => {
               const active = config.config_id === activeConfigId;
               const connected = config.config_id === connectedConfigId;
+              const port = portLabel(config);
               return (
                 <li key={config.config_id}>
                   <button
@@ -82,7 +103,8 @@ export function ConfigRail({
                       ) : null}
                     </span>
                     <span className="config-list__meta">
-                      {config.node_count} 个节点 · {portLabel(config)}
+                      {config.node_count} 个节点 ·{" "}
+                      {/^\d+$/.test(port) ? <span className="num">{port}</span> : port}
                     </span>
                   </button>
                 </li>
@@ -90,7 +112,10 @@ export function ConfigRail({
             })}
           </ul>
           <button type="button" className="config-rail__new" onClick={() => setCreating(true)}>
-            ＋ 新建配置
+            <span className="config-rail__new-plus" aria-hidden>
+              +
+            </span>
+            新建配置
           </button>
         </>
       )}

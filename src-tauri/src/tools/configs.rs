@@ -534,8 +534,9 @@ impl Tool for NodeProbeTool {
     }
 
     fn description(&self) -> &str {
-        "测试单个节点连通性。已连接时走 Clash API 延迟；未连接返回需要先连接，\
-         不会偷偷启动运行时。节点不可达是正常结果，不算工具错误。"
+        "测试单个节点连通性。已连接且是当前节点时走 Clash API 延迟；\
+         其余情况对 server:port 做 3 秒 TCP 握手，不启动运行时。\
+         节点不可达是正常结果，不算工具错误。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -546,8 +547,7 @@ impl Tool for NodeProbeTool {
         json!({
             "type": "object",
             "properties": {
-                "node_id": { "type": "string" },
-                "config_id": { "type": "string" }
+                "node_id": { "type": "string" }
             },
             "required": ["node_id"],
             "additionalProperties": false
@@ -562,11 +562,7 @@ impl Tool for NodeProbeTool {
                 ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 node_id")),
             );
         };
-        let config_id = input
-            .get("config_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let outcome = match self.services.node_probe(config_id, node_id).await {
+        let outcome = match self.services.node_probe(node_id).await {
             Ok(data) => {
                 let reachable = data.get("reachable").and_then(Value::as_bool).unwrap_or(false);
                 let summary = if reachable {

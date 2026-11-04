@@ -362,16 +362,15 @@ pub async fn node_switch(
         .map_err(error_value)
 }
 
-/// 测试单个节点延迟。未连接返回 `NOT_CONNECTED`，不偷偷起运行时。
+/// 测试单个节点连通性。未连接退化为 TCP 探测，不启动运行时。
 #[tauri::command]
 pub async fn node_probe(
     state: State<'_, Arc<AppState>>,
     node_id: String,
-    config_id: Option<String>,
 ) -> Result<Value, Value> {
     state
         .services
-        .node_probe(config_id, &node_id)
+        .node_probe(&node_id)
         .await
         .map_err(error_value)
 }

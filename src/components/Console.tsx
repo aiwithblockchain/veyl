@@ -16,12 +16,38 @@ interface Props {
   aiUnread: boolean;
   onTogglePanel: () => void;
   loading?: boolean;
+  vpnActionFailed?: boolean;
 }
 
 type Probe =
   | { nodeId: string; status: "testing" }
   | { nodeId: string; status: "ok"; latency: number | null }
   | { nodeId: string; status: "fail"; message: string | null; unreachable: boolean };
+
+type RouteState = "idle" | "connecting" | "connected" | "failed";
+
+const ROUTE_TEXT: Record<RouteState, string> = {
+  idle: "线路中断",
+  connecting: "正在建立线路",
+  connected: "线路已连接",
+  failed: "线路连接失败",
+};
+
+/** 本机到出口的一条线：未连接留缺口、连接中生长、已连接流动、失败处断点。 */
+function RouteLine({ state }: { state: RouteState }) {
+  return (
+    <div className={`route is-${state}`} role="img" aria-label={`线路：${ROUTE_TEXT[state]}`}>
+      <span className="route__label">本机</span>
+      <span className="route__track" aria-hidden>
+        <span className="route__line" />
+        <span className="route__break" />
+        <span className="route__line" />
+        <span className="route__flow" />
+      </span>
+      <span className="route__label">出口</span>
+    </div>
+  );
+}
 
 export function Console({
   config,
@@ -36,6 +62,7 @@ export function Console({
   aiUnread,
   onTogglePanel,
   loading = false,
+  vpnActionFailed = false,
 }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(
     config?.current_node_id ?? null,
@@ -105,6 +132,14 @@ export function Console({
 
   const canConnect = Boolean(config && config.nodes.length > 0);
   const connected = connection === "connected";
+  const routeState: RouteState =
+    connection === "connected"
+      ? "connected"
+      : connection === "starting"
+        ? "connecting"
+        : vpnActionFailed
+          ? "failed"
+          : "idle";
 
   useEffect(() => {
     if (!connected) setProbe(null);
@@ -131,47 +166,50 @@ export function Console({
   return (
     <main className="console">
       <header className="console-top">
-        <button
-          type="button"
-          className="btn btn--primary console-top__primary"
-          disabled={primary.disabled}
-          onClick={primary.stop ? onStop : onStart}
-        >
-          {primary.label}
-        </button>
-        <div className="console-top__right">
-          <div className={`console-status is-${status.tone}`} role="status">
-            <span className="console-status__dot" aria-hidden />
-            <span className="console-status__text">{status.text}</span>
-          </div>
+        <div className="console-top__row">
           <button
             type="button"
-            className={`console-panel-toggle ${panelOpen ? "is-active" : ""}`}
-            onClick={onTogglePanel}
-            aria-label={
-              panelOpen
-                ? "收起 AI 对话"
-                : aiUnread
-                  ? "展开 AI 对话，有新消息"
-                  : "展开 AI 对话"
-            }
-            aria-expanded={panelOpen}
-            title="AI 对话"
+            className="btn btn--primary console-top__primary"
+            disabled={primary.disabled}
+            onClick={primary.stop ? onStop : onStart}
           >
-            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
-              <path
-                d="M4 4.5A1.5 1.5 0 0 1 5.5 3h9A1.5 1.5 0 0 1 16 4.5v6a1.5 1.5 0 0 1-1.5 1.5H9l-3 2.5V12H5.5A1.5 1.5 0 0 1 4 10.5z"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.4"
-                strokeLinejoin="round"
-              />
-            </svg>
-            {aiUnread && !panelOpen ? (
-              <span className="console-panel-toggle__dot" aria-hidden />
-            ) : null}
+            {primary.label}
           </button>
+          <div className="console-top__right">
+            <div className={`console-status is-${status.tone}`} role="status">
+              <span className="console-status__dot" aria-hidden />
+              <span className="console-status__text">{status.text}</span>
+            </div>
+            <button
+              type="button"
+              className={`console-panel-toggle ${panelOpen ? "is-active" : ""}`}
+              onClick={onTogglePanel}
+              aria-label={
+                panelOpen
+                  ? "收起 AI 对话"
+                  : aiUnread
+                    ? "展开 AI 对话，有新消息"
+                    : "展开 AI 对话"
+              }
+              aria-expanded={panelOpen}
+              title="AI 对话"
+            >
+              <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
+                <path
+                  d="M4 4.5A1.5 1.5 0 0 1 5.5 3h9A1.5 1.5 0 0 1 16 4.5v6a1.5 1.5 0 0 1-1.5 1.5H9l-3 2.5V12H5.5A1.5 1.5 0 0 1 4 10.5z"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.4"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              {aiUnread && !panelOpen ? (
+                <span className="console-panel-toggle__dot" aria-hidden />
+              ) : null}
+            </button>
+          </div>
         </div>
+        <RouteLine state={routeState} />
       </header>
 
       <section className="console-mid">
@@ -185,7 +223,19 @@ export function Console({
 
       <footer className="console-node">
         {loading ? (
-          <p className="console-node__empty">正在读取配置…</p>
+          <div
+            className="console-node__skeleton"
+            role="status"
+            aria-busy="true"
+            aria-label="正在读取配置"
+          >
+            <span className="skeleton skeleton--node" aria-hidden />
+            <div className="console-node__skeleton-facts" aria-hidden>
+              <span className="skeleton skeleton--fact" />
+              <span className="skeleton skeleton--fact" />
+              <span className="skeleton skeleton--fact" />
+            </div>
+          </div>
         ) : !config ? (
           <p className="console-node__empty">在左侧新建一套配置后，这里会显示节点。</p>
         ) : !selectedNode ? (
@@ -203,12 +253,22 @@ export function Console({
                     onClick={() => setPickerOpen((open) => !open)}
                   >
                     {selectedNode.name}
-                    <span
+                    <svg
                       className={`console-node__chevron ${pickerOpen ? "is-open" : ""}`}
+                      viewBox="0 0 12 12"
+                      width="12"
+                      height="12"
                       aria-hidden
                     >
-                      ⌄
-                    </span>
+                      <path
+                        d="M3 4.5 6 7.5 9 4.5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
                   </button>
                 ) : (
                   <span className="console-node__name is-static">{selectedNode.name}</span>

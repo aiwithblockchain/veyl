@@ -92,10 +92,13 @@ export default function App() {
   const [repairing, setRepairing] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const [pendingConfigId, setPendingConfigId] = useState<string | null>(null);
+  const [pendingNodeId, setPendingNodeId] = useState<string | null>(null);
   const vpn = useVpnSession(
     bridge,
     import.meta.env.VITE_MOCK === "1" || bridge.mode === "mock",
   );
+  // 只驱动线路图的失败态，不参与连接逻辑。
+  const [vpnActionFailed, setVpnActionFailed] = useState(false);
   const importingRef = useRef(false);
   const endWaiters = useRef(new Map<string, () => void>());
   // 已经回答/超时/作废的问题 id：防止重连或重试路径把旧问题再插回来。
@@ -374,6 +377,10 @@ export default function App() {
   useEffect(() => {
     if (vpn.error) setAppNotice({ level: "error", text: vpn.error });
   }, [vpn.error]);
+
+  useEffect(() => {
+    if (vpn.connection !== "idle") setVpnActionFailed(false);
+  }, [vpn.connection]);
 
   const completeOnboarding = async (skippedKey: boolean) => {
     try {
@@ -692,21 +699,51 @@ export default function App() {
   };
 
   const handleVpnStart = () => {
-    void vpn.start().then((result) => showActionResult(result, "启动失败"));
+    setVpnActionFailed(false);
+    void vpn.start().then((result) => {
+      if (!result.ok) setVpnActionFailed(true);
+      showActionResult(result, "启动失败");
+    });
   };
 
   const handleVpnStop = () => {
-    void vpn.stop().then((result) => showActionResult(result, "断开失败"));
+    setVpnActionFailed(false);
+    void vpn.stop().then((result) => {
+      if (!result.ok) setVpnActionFailed(true);
+      showActionResult(result, "断开失败");
+    });
   };
 
   const handleSwitchNode = (nodeId: string) => {
+    // 已连接时切节点会断开重连，先让用户确认一次。
+    if (vpn.connection === "connected" || vpn.connection === "starting") {
+      setPendingNodeId(nodeId);
+      return;
+    }
+    void vpn.switchNode(nodeId).then((result) => {
+      if (result.willDisconnect) {
+        setPendingNodeId(nodeId);
+        return;
+      }
+      showActionResult(result, "切换节点失败");
+    });
+  };
+
+  const confirmNodeSwitch = () => {
+    if (!pendingNodeId) return;
+    const nodeId = pendingNodeId;
+    setPendingNodeId(null);
     void vpn
-      .switchNode(nodeId)
+      .switchNode(nodeId, true)
       .then((result) => showActionResult(result, "切换节点失败"));
   };
 
   const pendingConfig =
     vpn.configs.find((config) => config.config_id === pendingConfigId) ?? null;
+  const pendingNode =
+    pendingNodeId && vpn.activeConfig
+      ? vpn.activeConfig.nodes.find((node) => node.node_id === pendingNodeId) ?? null
+      : null;
 
   if (!onboardingLoaded) {
     return <div className="app-boot" aria-hidden />;
@@ -748,6 +785,7 @@ export default function App() {
         aiUnread={aiUnread}
         onTogglePanel={togglePanel}
         loading={vpn.loading}
+        vpnActionFailed={vpnActionFailed}
       />
       {panelOpen ? (
         <AiPanel
