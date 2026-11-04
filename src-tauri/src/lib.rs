@@ -249,8 +249,6 @@ pub fn run() {
             agent::commands::rules_status,
             agent::commands::category_list,
             agent::commands::net_repair,
-            agent::commands::onboarding_status,
-            agent::commands::onboarding_complete,
             agent::commands::open_log_dir,
             agent::commands::open_external,
             agent::commands::chat_history,

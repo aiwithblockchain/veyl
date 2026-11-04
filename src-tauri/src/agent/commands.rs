@@ -792,76 +792,6 @@ pub async fn open_external(
     Ok(json!({ "opened": true }))
 }
 
-/// 引导是否需要展示。`completed` 由设置表持久化。
-#[tauri::command]
-pub async fn onboarding_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
-    let completed = crate::store::global()
-        .map(|store| {
-            let conn = store.conn();
-            crate::store::settings::get(&conn, "onboarding_completed")
-                .ok()
-                .flatten()
-                .map(|value| {
-                    // 全库约定时间戳是毫秒；兼容早期写过的 "true"。
-                    value == "true"
-                        || value
-                            .parse::<i64>()
-                            .map(|millis| millis > 0)
-                            .unwrap_or(false)
-                })
-                .unwrap_or(false)
-        })
-        .unwrap_or(false);
-
-    let config_count = state
-        .services
-        .config_list()
-        .await
-        .ok()
-        .and_then(|data| {
-            data.get("configs")
-                .and_then(Value::as_array)
-                .map(|configs| configs.len())
-        })
-        .unwrap_or(0);
-
-    let has_key = state.has_credentials()
-        || crate::store::global()
-            .map(|store| crate::llm::has_any_usable(store))
-            .unwrap_or(false);
-    Ok(json!({
-        "completed": completed,
-        "has_key": has_key,
-        "config_count": config_count,
-    }))
-}
-
-/// 标记引导完成。`skipped_key` 只入库备查，不参与判定。
-#[tauri::command]
-pub async fn onboarding_complete(
-    skipped_key: Option<bool>,
-) -> Result<Value, Value> {
-    let Some(store) = crate::store::global() else {
-        return Err(json!({ "code": "INTERNAL", "message": "本地数据库不可用" }));
-    };
-    let conn = store.conn();
-    let skipped = skipped_key.unwrap_or(false);
-    // 全库约定：完成时刻存 Unix 毫秒。
-    crate::store::settings::set(
-        &conn,
-        "onboarding_completed",
-        &crate::store::now_ms().to_string(),
-    )
-    .map_err(|error| json!({ "code": "INTERNAL", "message": error.to_string() }))?;
-    crate::store::settings::set(
-        &conn,
-        "onboarding_skipped_key",
-        if skipped { "true" } else { "false" },
-    )
-    .map_err(|error| json!({ "code": "INTERNAL", "message": error.to_string() }))?;
-    Ok(json!({ "ok": true }))
-}
-
 /// 重启后恢复会话：不传 `session_id` 时取最近一个会话。
 #[tauri::command]
 pub async fn chat_history(session_id: Option<String>) -> Result<Value, String> {
@@ -944,13 +874,19 @@ pub async fn deepseek_key_status(state: State<'_, Arc<AppState>>) -> Result<Valu
     }))
 }
 
-/// 清除 Key：钥匙串与内存一起清，避免「钥匙串没了但内存还留着」。
+/// 清除 Key：本地密文与内存一起清。若当前激活的就是 DeepSeek，
+/// 同时清掉 active provider，避免「Key 没了但 AI 仍显示已配置」。
 #[tauri::command]
 pub async fn deepseek_clear_key(_state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
     match crate::secrets::delete_deepseek_key() {
         Ok(()) => {
-            crate::agent::refresh_credentials_if_active(crate::llm::PROVIDER_DEEPSEEK);
-            Ok(json!({ "cleared": true }))
+            if let Some(store) = crate::store::global() {
+                if crate::llm::active_id(store).as_deref() == Some(crate::llm::PROVIDER_DEEPSEEK) {
+                    let _ = crate::llm::set_active_id(store, None);
+                }
+            }
+            crate::agent::refresh_credentials();
+            Ok(json!({ "ok": true }))
         }
         Err(error) => Err(json!({
             "code": "KEYCHAIN",
