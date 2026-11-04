@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { AgentBridge, LlmProtocol, LlmProviderInput } from "../agent/bridge";
 import { isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import { describeKeyError, describeProviderError } from "./Settings";
+import { IconKey } from "./icons";
 import { PRODUCT_NAME } from "../brand";
 
 const PLATFORM_URL = "https://platform.deepseek.com/";
@@ -147,16 +148,20 @@ export function Onboarding({ bridge, onDone }: Props) {
             <label className="onboarding__field-label" htmlFor="onboarding-deepseek-key">
               DeepSeek API Key
             </label>
-            <input
-              id="onboarding-deepseek-key"
-              className="onboarding__input"
-              type="password"
-              value={value}
-              placeholder="sk-..."
-              autoComplete="off"
-              spellCheck={false}
-              onChange={(event) => setValue(event.target.value)}
-            />
+            <div className="onboarding__keybox">
+              <IconKey size={16} />
+              <input
+                id="onboarding-deepseek-key"
+                className="onboarding__input"
+                type="password"
+                value={value}
+                placeholder="粘贴 sk- 开头的 Key"
+                autoComplete="off"
+                spellCheck={false}
+                autoFocus
+                onChange={(event) => setValue(event.target.value)}
+              />
+            </div>
           </div>
           <button
             type="submit"

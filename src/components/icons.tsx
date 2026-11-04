@@ -79,3 +79,14 @@ export function IconTrash({ size = 14, className }: IconProps) {
     </>,
   );
 }
+
+export function IconKey({ size = 16, className }: IconProps) {
+  return base(
+    size,
+    className,
+    <>
+      <circle cx="5.5" cy="6" r="2.5" />
+      <path d="M7.4 8.2l5.1 5.1M10.4 11.2l1.6-1.6M12 12.8l1.6-1.6" />
+    </>,
+  );
+}
