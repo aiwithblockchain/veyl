@@ -5,7 +5,6 @@ import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, snapshotToView } from "./agent";
 import { isTauri } from "./agent/bridge";
 import type {
-  DeepSeekKeyState,
   DefaultProfileStatus,
   ImportSeedResult,
   PendingQuestion,
@@ -32,12 +31,6 @@ const AI_EVENTS = new Set<AgentEvent["name"]>([
   AGENT_EVENTS.compact,
   AGENT_EVENTS.requestEnd,
 ]);
-
-const EMPTY_KEY_STATE: DeepSeekKeyState = {
-  masked: null,
-  verified: false,
-  validation: "unverified",
-};
 
 type SettingsSection = "ai" | "network" | "advanced" | "about";
 
@@ -82,7 +75,7 @@ export default function App() {
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<ImportSeedResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
-  const [keyState, setKeyState] = useState<DeepSeekKeyState>(EMPTY_KEY_STATE);
+  const [aiReady, setAiReady] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingLoaded, setOnboardingLoaded] = useState(false);
   const [hasEverConnected, setHasEverConnected] = useState(readEverConnected);
@@ -120,7 +113,6 @@ export default function App() {
   const healthVersion = useRef(0);
 
   const session = activeSession(state);
-  const hasKey = keyState.masked !== null;
 
   const openSettings = (section: SettingsSection = "ai") => {
     setSettingsSection(section);
@@ -138,14 +130,6 @@ export default function App() {
           : { ...base, health: current.health },
       );
     });
-  }, [bridge]);
-
-  const refreshKeyState = useCallback(async () => {
-    try {
-      setKeyState(await bridge.getDeepSeekKey());
-    } catch {
-      setKeyState(EMPTY_KEY_STATE);
-    }
   }, [bridge]);
 
   const refreshDefaultProfile = useCallback(async () => {
@@ -166,16 +150,23 @@ export default function App() {
     setAiUnread(false);
   }, []);
 
-  const refreshAiStatus = useCallback(async () => {
-    try {
-      const status = await bridge.onboardingStatus();
-      const wasConfigured = aiConfiguredRef.current;
-      aiConfiguredRef.current = status.hasKey;
-      if (!wasConfigured && status.hasKey) maybeAutoOpenPanel();
-    } catch {
-      // 命令未就绪时不据此自动展开。
-    }
-  }, [bridge, maybeAutoOpenPanel]);
+  const refreshAiStatus = useCallback(
+    async (initial = false): Promise<boolean> => {
+      const [key, providers] = await Promise.all([
+        bridge.getDeepSeekKey().catch(() => null),
+        bridge.llmProviderList().catch(() => null),
+      ]);
+      const ready =
+        (key?.masked ?? null) !== null ||
+        (providers?.activeProviderId ?? null) !== null;
+      const wasReady = aiConfiguredRef.current;
+      aiConfiguredRef.current = ready;
+      setAiReady(ready);
+      if (!initial && !wasReady && ready) maybeAutoOpenPanel();
+      return ready;
+    },
+    [bridge, maybeAutoOpenPanel],
+  );
 
   useEffect(() => {
     panelOpenRef.current = panelOpen;
@@ -314,26 +305,20 @@ export default function App() {
     };
   }, [bridge]);
 
-  // 启动时确定是否要进首次引导。
+  // 启动时确定是否要进首次引导：没有任何可用 AI 才显示。
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      await Promise.all([refreshKeyState(), refreshDefaultProfile()]);
-      try {
-        const status = await bridge.onboardingStatus();
-        if (cancelled) return;
-        aiConfiguredRef.current = status.hasKey;
-        setShowOnboarding(!status.completed && (!status.hasKey || status.configCount === 0));
-      } catch {
-        if (!cancelled) setShowOnboarding(false);
-      } finally {
-        if (!cancelled) setOnboardingLoaded(true);
-      }
+      await refreshDefaultProfile();
+      const ready = await refreshAiStatus(true);
+      if (cancelled) return;
+      setShowOnboarding(!ready);
+      setOnboardingLoaded(true);
     })();
     return () => {
       cancelled = true;
     };
-  }, [bridge, refreshKeyState, refreshDefaultProfile]);
+  }, [refreshDefaultProfile, refreshAiStatus]);
 
   // 切换 / 恢复会话时，把该会话未回答的问题拉回来。
   useEffect(() => {
@@ -382,24 +367,18 @@ export default function App() {
     if (vpn.connection !== "idle") setVpnActionFailed(false);
   }, [vpn.connection]);
 
-  const completeOnboarding = async (skippedKey: boolean) => {
-    try {
-      await bridge.onboardingComplete(skippedKey);
-    } catch {
-      // 后端命令未就绪也允许继续用界面。
-    }
+  const completeOnboarding = async () => {
     setShowOnboarding(false);
     setOnboardingLoaded(true);
-    await Promise.all([refreshKeyState(), refreshDefaultProfile(), refreshAiStatus()]);
+    await Promise.all([refreshDefaultProfile(), refreshAiStatus()]);
   };
 
-  const finishOnboarding = (skippedKey: boolean) => {
-    void completeOnboarding(skippedKey);
+  const finishOnboarding = () => {
+    void completeOnboarding();
   };
 
   const closeSettings = () => {
     setSettingsOpen(false);
-    void refreshKeyState();
     void refreshAiStatus();
   };
 
@@ -536,8 +515,8 @@ export default function App() {
   };
 
   const sendToSession = (sessionId: string, text: string) => {
-    if (!hasKey) {
-      setAppNotice({ level: "error", text: "还没有配置 DeepSeek Key，先配置后再对话。" });
+    if (!aiReady) {
+      setAppNotice({ level: "error", text: "还没有配置 AI，先配置后再对话。" });
       openSettings("ai");
       return;
     }
@@ -565,8 +544,8 @@ export default function App() {
   };
 
   const handleAskAi = (text: string) => {
-    if (!hasKey) {
-      setAppNotice({ level: "error", text: "还没有配置 DeepSeek Key，先配置后再对话。" });
+    if (!aiReady) {
+      setAppNotice({ level: "error", text: "还没有配置 AI，先配置后再对话。" });
       openSettings("ai");
       return;
     }
@@ -745,7 +724,7 @@ export default function App() {
 
   if (showOnboarding) {
     return (
-      <Onboarding bridge={bridge} initialKey={keyState} onDone={finishOnboarding} />
+      <Onboarding bridge={bridge} onDone={finishOnboarding} />
     );
   }
 
@@ -781,7 +760,7 @@ export default function App() {
           session={session ?? null}
           sessions={state.sessions}
           activeSessionId={state.activeSessionId}
-          hasKey={hasKey}
+          aiReady={aiReady}
           hasEverConnected={hasEverConnected}
           onSelectSession={handleSelectSession}
           onNewSession={() => dispatch({ type: "new_session" })}

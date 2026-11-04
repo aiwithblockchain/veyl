@@ -6,7 +6,7 @@ interface Props {
   onSend: (text: string) => void;
   onStop: () => void;
   placeholder?: string;
-  /** 没有 DeepSeek Key 时禁用输入，并给出配置入口。 */
+  /** 没有可用 AI 时禁用输入，并给出配置入口。 */
   disabled?: boolean;
   onConfigure?: () => void;
 }
@@ -44,7 +44,7 @@ export function Composer({
           ref={textareaRef}
           value={value}
           rows={1}
-          placeholder={disabled ? "配置 DeepSeek Key 后可以直接对话" : placeholder}
+          placeholder={disabled ? "配置 AI 后可以直接对话" : placeholder}
           disabled={disabled}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={(event) => {

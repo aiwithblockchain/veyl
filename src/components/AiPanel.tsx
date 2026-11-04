@@ -16,7 +16,7 @@ interface Props {
   session: Session | null;
   sessions: Session[];
   activeSessionId: string;
-  hasKey: boolean;
+  aiReady: boolean;
   hasEverConnected: boolean;
   onSelectSession: (sessionId: string) => void;
   onNewSession: () => void;
@@ -46,7 +46,7 @@ export function AiPanel({
   session,
   sessions,
   activeSessionId,
-  hasKey,
+  aiReady,
   hasEverConnected,
   onSelectSession,
   onNewSession,
@@ -186,7 +186,7 @@ export function AiPanel({
         </div>
       </header>
 
-      {!hasKey ? (
+      {!aiReady ? (
         <div className="ai-panel__banner">
           还没有配置 AI，现在只能手动操作网络。
           <button type="button" className="ai-panel__banner-action" onClick={onOpenSettings}>
@@ -275,7 +275,7 @@ export function AiPanel({
             onSend={onSend}
             onStop={onStop}
             onNextAction={onNextAction}
-            hasKey={hasKey}
+            hasKey={aiReady}
             onConfigureKey={onConfigureKey}
           />
         ) : (
@@ -287,7 +287,7 @@ export function AiPanel({
               {!hasEverConnected ? (
                 <p className="ai-empty__text">连接在中间；需要我帮你配好，就在下面说。</p>
               ) : null}
-              {!hasEverConnected && hasKey ? (
+              {!hasEverConnected && aiReady ? (
                 <div className="ai-empty__suggest">
                   <span className="ai-empty__suggest-label">或者问我：</span>
                   {SUGGESTIONS.map((suggestion) => (
@@ -307,7 +307,7 @@ export function AiPanel({
               statusText={null}
               onSend={onEmptySend}
               onStop={onStop}
-              disabled={!hasKey}
+              disabled={!aiReady}
               onConfigure={onConfigureKey}
               placeholder="告诉我要去哪儿，或者让我诊断网络问题"
             />

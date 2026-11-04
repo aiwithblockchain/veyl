@@ -16,7 +16,6 @@ import type {
   NetRepairResult,
   NodeProbeResult,
   NodeSwitchResult,
-  OnboardingStatus,
   PendingQuestion,
   RenamedSession,
   StoredChatMessage,
@@ -187,21 +186,6 @@ export class TauriAgentBridge implements AgentBridge {
 
   async nodeProbe(nodeId: string): Promise<NodeProbeResult> {
     return call<NodeProbeResult>("node_probe", { nodeId });
-  }
-
-  async onboardingStatus(): Promise<OnboardingStatus> {
-    const raw = await call<{ completed?: boolean; has_key?: boolean; config_count?: number }>(
-      "onboarding_status",
-    );
-    return {
-      completed: raw.completed === true,
-      hasKey: raw.has_key === true,
-      configCount: raw.config_count ?? 0,
-    };
-  }
-
-  async onboardingComplete(skippedKey: boolean): Promise<void> {
-    await call("onboarding_complete", { skippedKey });
   }
 
   async defaultProfileStatus(): Promise<DefaultProfileStatus> {

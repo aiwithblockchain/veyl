@@ -14,7 +14,6 @@ import type {
   NetRepairResult,
   NodeProbeResult,
   NodeSwitchResult,
-  OnboardingStatus,
   RenamedSession,
 } from "./bridge";
 import { isLocalEndpoint, maskKey } from "./bridge";
@@ -85,10 +84,6 @@ export class MockAgentBridge implements AgentBridge {
       nodeId: "seed-sg-02",
     },
   ];
-  private onboarded =
-    typeof localStorage !== "undefined" &&
-    localStorage.getItem("veyl.mock.onboarding") === "1";
-
   private runtime: RuntimeSnapshot = {
     contract_version: CONTRACT_VERSION,
     state: "idle",
@@ -194,23 +189,6 @@ export class MockAgentBridge implements AgentBridge {
       system_proxy_enabled: false,
       connections: null,
     });
-  }
-
-  async onboardingStatus(): Promise<OnboardingStatus> {
-    return {
-      completed: this.onboarded,
-      hasKey: this.keyMasked !== null,
-      configCount: this.profiles.length,
-    };
-  }
-
-  async onboardingComplete(_skippedKey: boolean): Promise<void> {
-    this.onboarded = true;
-    try {
-      localStorage.setItem("veyl.mock.onboarding", "1");
-    } catch {
-      // 隐私模式下写不了 localStorage，只在本次进程内记住。
-    }
   }
 
   private defaultProfile: DefaultProfileStatus = {

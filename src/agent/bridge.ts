@@ -63,13 +63,6 @@ export interface ImportSeedResult {
   profiles: ImportedProfile[];
 }
 
-/** 首次引导的判定条件（commands.md）。 */
-export interface OnboardingStatus {
-  completed: boolean;
-  hasKey: boolean;
-  configCount: number;
-}
-
 export interface ConfigListData {
   configs: ConfigSummary[];
   active_config_id: string | null;
@@ -236,10 +229,6 @@ export interface AgentBridge {
   ): Promise<NodeSwitchResult>;
   /** 测试单个节点连通性。不可达是正常结果，不抛错。 */
   nodeProbe(nodeId: string): Promise<NodeProbeResult>;
-  /** 首次引导状态。 */
-  onboardingStatus(): Promise<OnboardingStatus>;
-  /** 记下引导已完成；skippedKey 表示用户明确跳过了 Key 这一步。 */
-  onboardingComplete(skippedKey: boolean): Promise<void>;
   /** 只读的默认配置包状态，不联网。 */
   defaultProfileStatus(): Promise<DefaultProfileStatus>;
   /** 拉取并应用默认配置包；不打断在线连接，下次连接生效。 */

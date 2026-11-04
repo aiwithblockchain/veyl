@@ -1,10 +1,5 @@
 import { useState } from "react";
-import type {
-  AgentBridge,
-  DeepSeekKeyState,
-  LlmProtocol,
-  LlmProviderInput,
-} from "../agent/bridge";
+import type { AgentBridge, LlmProtocol, LlmProviderInput } from "../agent/bridge";
 import { isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import { describeKeyError, describeProviderError } from "./Settings";
 import { PRODUCT_NAME } from "../brand";
@@ -13,9 +8,8 @@ const PLATFORM_URL = "https://platform.deepseek.com/";
 
 interface Props {
   bridge: AgentBridge;
-  initialKey: DeepSeekKeyState;
-  /** 完成引导；skippedKey 表示用户明确选择不用 AI。 */
-  onDone: (skippedKey: boolean) => void;
+  /** 完成引导：保存了 Key / 服务商，或者明确选择不用 AI。 */
+  onDone: () => void;
 }
 
 interface CustomForm {
@@ -25,13 +19,6 @@ interface CustomForm {
   apiKey: string;
 }
 
-function keyStatusText(state: DeepSeekKeyState): string | null {
-  if (!state.masked) return null;
-  if (state.validation === "ok") return "已验证";
-  if (state.validation === "invalid") return "无效或已吊销";
-  return "已保存但未验证";
-}
-
 const EMPTY_CUSTOM: CustomForm = {
   protocol: "openai",
   baseUrl: "",
@@ -39,12 +26,8 @@ const EMPTY_CUSTOM: CustomForm = {
   apiKey: "",
 };
 
-export function Onboarding({ bridge, initialKey, onDone }: Props) {
-  const [keyState, setKeyState] = useState<DeepSeekKeyState>(initialKey);
+export function Onboarding({ bridge, onDone }: Props) {
   const [value, setValue] = useState("");
-  const [editingKey, setEditingKey] = useState(
-    !initialKey.masked || initialKey.validation === "invalid",
-  );
   const [saving, setSaving] = useState<"key" | "provider" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [customOpen, setCustomOpen] = useState(false);
@@ -62,10 +45,9 @@ export function Onboarding({ bridge, initialKey, onDone }: Props) {
     setSaving("key");
     setError(null);
     try {
-      const next = await bridge.saveDeepSeekKey(key);
-      setKeyState(next);
+      await bridge.saveDeepSeekKey(key);
       setValue("");
-      onDone(false);
+      onDone();
     } catch (saveError) {
       setError(describeKeyError(saveError));
     } finally {
@@ -134,7 +116,7 @@ export function Onboarding({ bridge, initialKey, onDone }: Props) {
       } catch {
         // 没有其他当前服务时，保存时已经设为当前。
       }
-      onDone(false);
+      onDone();
     } catch (saveError) {
       setCustomError(describeProviderError(saveError));
     } finally {
@@ -142,7 +124,6 @@ export function Onboarding({ bridge, initialKey, onDone }: Props) {
     }
   };
 
-  const showSaved = Boolean(keyState.masked) && !editingKey;
   const primaryClass = customOpen ? "btn--ghost" : "btn--primary";
 
   return (
@@ -154,80 +135,37 @@ export function Onboarding({ bridge, initialKey, onDone }: Props) {
           Key 只保存在本机。配好之后，我来找节点、建立连接。
         </p>
 
-        {showSaved ? (
-          <div className="onboarding__form">
-            <div className="onboarding__saved">
-              <code className="num">{keyState.masked}</code>
-              <span className={`onboarding__badge onboarding__badge--${keyState.validation}`}>
-                {keyStatusText(keyState)}
-              </span>
-            </div>
-            <button
-              type="button"
-              className={`btn ${primaryClass} onboarding__submit`}
-              disabled={saving !== null}
-              onClick={() => onDone(false)}
-            >
-              继续
-            </button>
-            <button
-              type="button"
-              className="onboarding__textlink"
-              onClick={() => {
-                setEditingKey(true);
-                setValue("");
-                setError(null);
-              }}
-            >
-              换一个 Key
-            </button>
+        <form
+          className="onboarding__form"
+          aria-busy={saving === "key"}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void saveKey();
+          }}
+        >
+          <div className="onboarding__field">
+            <label className="onboarding__field-label" htmlFor="onboarding-deepseek-key">
+              DeepSeek API Key
+            </label>
+            <input
+              id="onboarding-deepseek-key"
+              className="onboarding__input"
+              type="password"
+              value={value}
+              placeholder="sk-..."
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(event) => setValue(event.target.value)}
+            />
           </div>
-        ) : (
-          <form
-            className="onboarding__form"
-            aria-busy={saving === "key"}
-            onSubmit={(event) => {
-              event.preventDefault();
-              void saveKey();
-            }}
+          <button
+            type="submit"
+            className={`btn ${primaryClass} onboarding__submit`}
+            disabled={saving !== null || value.trim().length === 0}
           >
-            <div className="onboarding__field">
-              <label className="onboarding__field-label" htmlFor="onboarding-deepseek-key">
-                DeepSeek API Key
-              </label>
-              <input
-                id="onboarding-deepseek-key"
-                className="onboarding__input"
-                type="password"
-                value={value}
-                placeholder="sk-..."
-                autoComplete="off"
-                spellCheck={false}
-                onChange={(event) => setValue(event.target.value)}
-              />
-            </div>
-            <button
-              type="submit"
-              className={`btn ${primaryClass} onboarding__submit`}
-              disabled={saving !== null || value.trim().length === 0}
-            >
-              {saving === "key" ? "验证中…" : "保存并验证"}
-            </button>
-            {keyState.masked ? (
-              <button
-                type="button"
-                className="onboarding__textlink"
-                onClick={() => {
-                  setEditingKey(false);
-                  setValue("");
-                  setError(null);
-                }}
-              >
-                使用已保存的 Key
-              </button>
-            ) : null}
-          </form>
-        )}
+            {saving === "key" ? "验证中…" : "保存并验证"}
+          </button>
+        </form>
 
         {error ? <p className="onboarding__error">{error}</p> : null}
 
@@ -358,7 +296,7 @@ export function Onboarding({ bridge, initialKey, onDone }: Props) {
           type="button"
           className="onboarding__manual"
           disabled={saving !== null}
-          onClick={() => onDone(true)}
+          onClick={onDone}
         >
           我懂网络，不用 AI
         </button>
