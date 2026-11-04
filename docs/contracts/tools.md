@@ -1,7 +1,7 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.1.0`
-> 状态：已定稿（批 0 + 批 3，2026-11-03）
+> 契约版本：`3.2.0`
+> 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md` 2.0.0、`docs/contracts/runtime.md` 2.0.0、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
@@ -197,8 +197,8 @@ type CallSource = "ui" | "agent";
 
 | 工具 | input | `args_preview` |
 |---|---|---|
-| `VpnConnect` | `{ "node_id": "nod_1a2b" }` | `{ "node_id": "nod_1a2b" }` |
-| `VpnConnect` | `{ "config_id": "cfg_1a2b", "node_id": "nod_3c4d" }` | `{ "config_id": "cfg_1a2b", "node_id": "nod_3c4d" }` |
+| `VpnConnect` | `{ "config_id": "cfg_1a2b" }` | `{ "config_id": "cfg_1a2b" }` |
+| `NodeSwitch` | `{ "config_id": "cfg_1a2b", "node_id": "nod_3c4d" }` | `{ "config_id": "cfg_1a2b", "node_id": "nod_3c4d" }` |
 | `DeepseekSaveKey` | `{ "key": "sk-abc…" }` | **省略**（唯一字段被打码） |
 | `CatalogSearch` | `{ "region": "jp", "limit": 10 }` | `{ "region": "jp", "limit": 10 }` |
 | `ConfigDelete` | `{ "config_id": "cfg_1a2b" }` | `{ "config_id": "cfg_1a2b" }` |
@@ -376,17 +376,17 @@ P1 移除审批后，这两个工具直接执行：
 {
   "type": "object",
   "properties": {
-    "config_id": { "type": "string" },
-    "node_id": { "type": "string" }
+    "config_id": { "type": "string" }
   },
   "additionalProperties": false
 }
 ```
 
 - `config_id` 省略时用当前 active 配置；没有任何配置 → `PRECONDITION_FAILED / no_config`。
-- `node_id` 省略时用该配置的 `current_node_id`，为空时用节点集第一个。
+- **没有 `node_id` 参数**：用该配置的 `current_node_id`，为空时用节点集第一个。要换节点先调 `NodeSwitch`。
 - **没有 `mode` 参数**：代理还是 TUN 由配置的 `connection_mode` 决定，不由调用方临时指定。
 - 与 `VpnConnect` 的区别：本工具只起进程，**不设置系统代理**。要用户可用请用 `VpnConnect`。
+- 已连接且指定了另一套配置 → `PRECONDITION_FAILED / other_config_running`。换配置走 `ConfigActivate`（会先确认断开），不在这里静默切换。
 
 `data`：
 
@@ -396,7 +396,7 @@ type RuntimeStartData = RuntimeSnapshot & {
 };
 ```
 
-错误：`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `tun_helper_missing`）、`NOT_FOUND`、`RUNTIME_BUSY`、`RUNTIME_NOT_INSTALLED`、`RUNTIME_START_TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`。
+错误：`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `other_config_running` / `tun_helper_missing`）、`NOT_FOUND`、`RUNTIME_BUSY`、`RUNTIME_NOT_INSTALLED`、`RUNTIME_START_TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`。
 
 ---
 
@@ -639,8 +639,7 @@ type CatalogSearchData = {
 {
   "type": "object",
   "properties": {
-    "config_id": { "type": "string" },
-    "node_id": { "type": "string" }
+    "config_id": { "type": "string" }
   },
   "additionalProperties": false
 }
@@ -649,8 +648,7 @@ type CatalogSearchData = {
 约束：
 
 - `config_id` 省略 → 用 active 配置；没有任何配置 → `PRECONDITION_FAILED / no_config`。
-- `node_id` 省略 → 用该配置的 `current_node_id`，为空时用节点集第一个。
-- `node_id` 必须属于该配置 → 否则 `NOT_FOUND / node_not_in_config`。
+- **没有 `node_id` 参数**：用该配置的 `current_node_id`，为空时用节点集第一个。要指定节点先调 `NodeSwitch`（未连接时只改选择，连接中则热切），再调本工具。
 - 节点集为空 → `PRECONDITION_FAILED / no_nodes`。
 
 `data`：
@@ -1309,7 +1307,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 
 - **「选中」不是「切换」**：模型不要为了「看看别的节点」调用本工具——那会真的改出口。
 - 热切换失败 → `PRECONDITION_FAILED / runtime_switch_failed`，`current_node_id` 不变。
-- 不要用 `VpnConnect({ node_id })` 表达切换：那会在未连接时启动 VPN，与用户意图不符。
+- 不要用 `VpnConnect` 表达切换：它没有 `node_id` 参数；换节点只走 `NodeSwitch`，未连接时不会启动 VPN。
 
 错误：`NOT_FOUND`、`PRECONDITION_FAILED`、`TIMEOUT`。
 
@@ -1530,6 +1528,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 - `direct` ↔ `proxy_all` 且已连接 → selector 热切，不断流。
 - 涉及 `proxy_selected` 的跨家族切换 → 未带 `confirm_reconnect` 时返回 `PRECONDITION_FAILED / will_disconnect`；**必须先问用户**，得到同意后再带 `true` 调一次。不得自行重试。
 - 该工具会改网络；即使没有确认点，模型也应在调用前用一句话说明会断一下（§2.1.1）。
+- 跨家族的确认一句话要包含两点：会断开并自动重连、**域名解析方式也会改变**（`routing.md` §6.4）。
 
 ---
 
@@ -1738,7 +1737,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 |---|---|---|
 | 结构化信封放哪 | `metadata.aivpn`；模型只读 `content` | §1 |
 | `CoreInstall` 是否需要审批 | ~~恒需审批~~ → **已移除审批，直接执行**（2026-11-02 用户决定） | §2.1、§4.7 |
-| `VpnConnect` 入参 | `config_id`（省略用 active）+ `node_id`（省略用当前节点） | §4.11 |
+| `VpnConnect` 入参 | 只有 `config_id`（省略用 active）；节点由 `NodeSwitch` 决定 | §4.11 |
 | 配置 / 节点 / 问题工具的保留 | 全部保留并新增；`ProfileList` → `ConfigList`，`ProfileImport` → `NodeImportUrl`，`ProfileDelete` → `ConfigDelete` | §3 表 |
 | `ConfigDelete` 是否允许删 active | **允许**（未连接时），删后回到空态；只拦「正在连接」 | §4.17 |
 | `VpnConnect` 审批粒度 | ~~会话内首次~~ → **已移除审批，直接执行** | §2.1、§3.2 |
@@ -1756,6 +1755,14 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 ---
 
 ## 8. 变更记录
+
+### 3.2.0（2026-11-04，批 3 修订）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `RuntimeStart` 去掉 `node_id`：切换节点只走 `NodeSwitch` | 不兼容 | PM：两个入口做同一件事 |
+| 2 | `VpnConnect` 去掉 `node_id`：同一理由，避免第三个入口 | 不兼容 | 同上 |
+| 3 | `RouteSetMode` 的跨家族确认补充「域名解析方式也会改变」 | 约束 | 非中国 `direct` 改本地 DNS |
 
 ### 3.1.0（2026-11-03，批 3 · 分流与 DNS）
 

@@ -1,6 +1,6 @@
 # 数据模型
 
-> 版本：`2`（对应契约 `commands.md` 2.1.0）
+> 版本：`3`（对应契约 `commands.md` 2.2.0）
 > 日期：2026-11-03
 > 范围：配置、节点、问题、布局，以及它们与 `secrets.enc`、种子缓存的关系
 > 依据：`docs/configs-and-nav.md` §3、§8，`docs/config-execution.md` §6–§10，`docs/issue-management.md` §3、`docs/center-panel.md` §3
@@ -271,7 +271,23 @@ CREATE TABLE seed_cache (
 - 种子里的节点**不会自动进入 `nodes`**。只有当用户创建 `source = "seed"` 的配置时，才解密种子并把节点物化进节点池（`source = 'seed'`），避免从未使用的种子在节点列表里出现。
 - 刷新时按 `source_key` upsert；新种子里不存在的 seed 节点被删除，其在配置里的关系随之级联。
 
-### 3.7 `config_rules` — 用户自定义分流规则
+### 3.7 `seed_node_exclusions` — 用户移除过的种子节点
+
+```sql
+CREATE TABLE seed_node_exclusions (
+    source_key  TEXT PRIMARY KEY,
+    name        TEXT,
+    excluded_at INTEGER NOT NULL
+);
+```
+
+- **按 `source_key` 全局生效，不按配置。** 用户在任意一套配置里移除某个种子节点，就记一条；种子刷新 / 首次物化时跳过它。
+- `source_key` 与 `nodes.source_key` 同构：`sha256(name \x1f server \x1f port \x1f method)`。同一节点在 `nodes` 里可能因来源不同有多行，但排除只影响**种子物化**这一条路径；URL 导入与手动创建不受影响。
+- 不写 `ON DELETE`：`nodes` 里没有对应行也能存；它记的是「用户不想要」，不是「这条节点存在」。
+- `name` 只用于将来设置页展示，可为空。
+- 没有「恢复」接口：排除是用户明确的动作，本期不做撤销；将来要恢复就加一个显式命令，而不是在下一次刷新时悄悄放回来。
+
+### 3.8 `config_rules` — 用户自定义分流规则
 
 自定义规则有**独立生命周期**（逐条增删、排序、单独撤销），与 DNS/内网排除不同，因此建子表而不是 JSON。
 
@@ -300,7 +316,7 @@ CREATE INDEX idx_config_rules_order ON config_rules (config_id, position);
 | 重复 | 同一 `(config_id, action, match_type, value)` 不允许两条 |
 | 删除 | 随配置级联；不随种子/规则数据更新变化 |
 
-### 3.8 `rules_state` — 规则数据状态（单行）
+### 3.9 `rules_state` — 规则数据状态（单行）
 
 ```sql
 CREATE TABLE rules_state (
@@ -322,7 +338,7 @@ CREATE TABLE rules_state (
 - `pending_update = 1`：未连接时排队的更新，下次连接成功后执行。
 - `bundled_version` 用于区分「随包基线」与「联网更新过的版本」。
 
-### 3.9 保留的基础设施表
+### 3.10 保留的基础设施表
 
 这些表与「配置」格式无关，2.0 原样保留，不在本批改动范围：
 
@@ -354,6 +370,7 @@ CREATE TABLE rules_state (
 | `issues` | `(config_id, status)` | 按配置筛选 |
 | `config_rules` | 唯一 `(config_id, action, match_type, value)` | 不允许重复规则 |
 | `config_rules` | `(config_id, position)` | 规则顺序 |
+| `seed_node_exclusions` | PK `source_key` | 同一节点只排除一次 |
 
 **外键必须真正生效**：`PRAGMA foreign_keys = ON` 在每个连接上设置。SQLite 的默认值是 OFF，漏设时所有级联删除都会静默失效——表现为「删了配置，config_nodes 还在」。
 
@@ -443,6 +460,7 @@ CREATE TABLE rules_state (
 | `seed_cache` | `default_profile_status` | `default_profile_refresh` / `import_seed_file` | `default-profile-updated` |
 | `config_rules` | `rule_custom_list` | `rule_custom_add` / `rule_custom_delete` | `routing-changed` |
 | `rules_state` | `rules_status` | `rules_update` / 启动解压 | `rules-changed` |
+| `seed_node_exclusions` | 无直接命令（设置页将来展示） | Host 内部：用户从配置移除种子节点时写入 | 无 |
 
 **没有任何命令直接写 `issues` 的采集字段。** `occurrences` / `first_seen_at` / `evidence_json` 只由 Host 内部登记器写；命令层只能改 `status` 与 `session_id`。
 
@@ -492,9 +510,10 @@ CREATE TABLE rules_state (
 | # | 对象 | 内容 |
 |---|---|---|
 | 11 | `configs` | 增加 `route_targets_json TEXT NOT NULL DEFAULT '[]'` 与 `route_revision INTEGER NOT NULL DEFAULT 0` |
-| 12 | `config_rules` | 新表（§3.7），含唯一索引与顺序索引 |
-| 13 | `rules_state` | 新表（§3.8），单行；`pending_update` 支持排队 |
+| 12 | `config_rules` | 新表（§3.8），含唯一索引与顺序索引 |
+| 13 | `rules_state` | 新表（§3.9），单行；`pending_update` 支持排队 |
 | 14 | `RuntimeSnapshot` | 增加 `applied_route_revision`（`runtime.md`），建连时从 `configs.route_revision` 读入 |
+| 15 | `seed_node_exclusions` | 新表（§3.7）；种子物化时按 `source_key` 跳过，配置无关 |
 
 > 差异 1–4 是**产品语义**问题，不是命名偏好：按现状实现，J3 转交后状态无处可写、P0/P1 插卡规则无法实现。差异 5–9 是**契约形状**问题。
 
@@ -525,6 +544,13 @@ CREATE TABLE rules_state (
 ---
 
 ## 11. 变更记录
+
+### 3（2026-11-04，批 3 修订）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | 新增 `seed_node_exclusions`：按 `source_key` 全局记住用户移除过的种子节点，刷新时跳过 | 表新增 |
+| 2 | 明确与 `nodes.source_key` 的关系：只影响种子物化，不影响 URL/手动节点 | 说明 |
 
 ### 2（2026-11-03，批 3 · 分流与 DNS）
 

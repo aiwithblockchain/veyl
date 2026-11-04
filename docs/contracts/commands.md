@@ -1,7 +1,7 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.1.0`
-> 状态：已定稿（批 0 + 批 3，2026-11-03）
+> 契约版本：`2.2.0`
+> 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
 > 变更记录：见 §16
@@ -29,7 +29,7 @@
 |---|---|
 | `profile` = 一个节点 | `config` = 一套方案；`node` = 一台服务器 |
 | 一个节点只属于一条 profile | 一个节点可被多套配置引用 |
-| `runtime_start(profileId)` | `runtime_start(configId, nodeId?)` |
+| `runtime_start(profileId)` | `runtime_start(configId)` |
 | 没有任何「问题」实体 | `issue` 有状态、可计数、可转交 |
 | 没有布局持久化 | `layout` 按配置存 |
 
@@ -68,7 +68,7 @@ Tauri 2 的 `#[tauri::command]` 默认把 JS 侧的 **camelCase 参数**映射�
 | 侧 | 写法 | 例子 |
 |---|---|---|
 | 命令名（invoke 第一个参数） | snake_case | `config_create`、`node_import_url` |
-| 参数键（args 对象的键） | **camelCase** | `configId`、`nodeId`、`sessionId` |
+| 参数键（args 对象的键） | **camelCase** | `configId`、`nodeId`、`sessionId`（各命令自己的参数，不代表 `runtime_start` 有 `nodeId`） |
 | Rust 形参 | snake_case | `config_id: Option<String>` |
 | 返回值字段 | snake_case | `config_id`、`node_count` |
 
@@ -145,7 +145,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 16 | `issue_resolve` | `{ issueId }` | `IssueResolveData` | **2.0 新增** |
 | 17 | `issue_ignore` | `{ issueId, ignored? }` | `IssueIgnoreData` | **2.0 新增** |
 | 18 | `runtime_status` | `{}` | `RuntimeSnapshot` | 保留（字段 2.0 改） |
-| 19 | `runtime_start` | `{ configId?, nodeId? }` | `RuntimeSnapshot` | 保留（参数 2.0 改） |
+| 19 | `runtime_start` | `{ configId? }` | `RuntimeSnapshot` | 保留（2.2 去掉 `nodeId`） |
 | 20 | `runtime_stop` | `{}` | `RuntimeSnapshot` | 保留 |
 | 21 | `net_repair` | `{ action, port? }` | `NetRepairResult` | 保留 |
 | 22 | `default_profile_status` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
@@ -664,7 +664,7 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 ## 7. 运行时与系统
 
-### 7.1 `runtime_start { configId?, nodeId? }` → `RuntimeSnapshot`
+### 7.1 `runtime_start { configId? }` → `RuntimeSnapshot`
 
 无 AI 模式的主行动（A1 建立连接）。与 AI 工具 `RuntimeStart` **共用同一份 Host 实现**。
 
@@ -672,11 +672,11 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 |---|---|
 | `configId` 指定 | 解析该配置；不存在 → `NOT_FOUND` |
 | `configId` 省略 | 用 active 配置；**没有任何配置** → `PRECONDITION_FAILED`，`details.reason = "no_config"` |
-| `nodeId` 指定 | 用该节点启动，并把它设为该配置的 `current_node_id`；不属于该配置 → `NOT_FOUND / node_not_in_config` |
-| `nodeId` 省略 | 用 `config.current_node_id`；为空时用节点集第一个 |
+| 用哪个节点 | 一律用 `config.current_node_id`；为空时用节点集第一个。**本命令没有 `nodeId` 参数** |
 | 节点集为空 | `PRECONDITION_FAILED`，`details.reason = "no_nodes"` |
 | 连接方式为 `tun` 且特权助手不可用 | `PRECONDITION_FAILED`，`details.reason = "tun_helper_missing"`（批 5） |
-| 已在连接中 | **不报错**：目标一致 → 返回当前快照；目标不同 → 平滑切换（见技术设计 §4） |
+| 已在连接中、同一套配置 | 幂等：返回当前快照 |
+| 已在连接中、指定了另一套配置 | `PRECONDITION_FAILED`，`details.reason = "other_config_running"`。换配置走 `config_activate`（会先确认断开），**不在这里静默切换** |
 | 成功后 | 系统代理已按连接方式设置、运行时 `state = running`；返回的 `RuntimeSnapshot` 必须满足 §7.3 |
 | `last_used_at` | 成功后刷新为该配置的当前毫秒时间 |
 
@@ -698,7 +698,7 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 - `connected_since` 为本次进入 running 的时刻（ISO 8601）。
 - `exit_ip` / `latency_ms` 允许为 `null`（探测是异步的），**不代表连接失败**。
 
-错误码：`RUNTIME_NOT_INSTALLED`、`PRECONDITION_FAILED`、`NOT_FOUND`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`TIMEOUT`、`UPSTREAM_ERROR`、`INTERNAL`。
+错误码：`RUNTIME_NOT_INSTALLED`、`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `other_config_running` / `tun_helper_missing`）、`NOT_FOUND`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`TIMEOUT`、`UPSTREAM_ERROR`、`INTERNAL`。
 
 ### 7.2 `runtime_stop {}` → `RuntimeSnapshot`
 
@@ -1085,6 +1085,7 @@ type RulesStatus = {
 - `direct` ↔ `proxy_all` 且已连接 → 走 Clash API selector 热切，`hot_switched = true`、`effective = "current_connection"`。
 - 涉及 `proxy_selected` 的跨家族切换、且已连接、未带 `confirmReconnect` → `PRECONDITION_FAILED`，`details.reason = "will_disconnect"`，**不产生任何变更**。
 - 带 `confirmReconnect: true` → 按「停运行时 → 写库 → 启运行时」执行，`reconnect` 给出结果。**重连失败不抛错**：切换本身已成功。
+- 确认文案必须包含两点：会断开一次并自动重连；**域名解析方式也会改变**（`routing.md` §6.4）。
 - 未连接 → 只写库，`effective = "next_connection"`、`reconnect = "not_running"`。
 - `mode = "proxy_selected"` 且 `targets` 为空 → `PRECONDITION_FAILED / route_targets_empty`。
 - 同一模式 → 幂等返回，不发事件。
@@ -1289,7 +1290,7 @@ type RulesStatus = {
 
 | 对象 | 旧 | 新 | 兼容性 |
 |---|---|---|---|
-| `runtime_start` 参数 | `profileId` | `configId`（+ 可选 `nodeId`） | **不兼容**，参数名变了 Tauri 侧会直接拿不到 |
+| `runtime_start` 参数 | `profileId` | `configId`（2.0 曾加 `nodeId`，2.2 已去掉） | **不兼容**，参数名变了 Tauri 侧会直接拿不到 |
 | `RuntimeSnapshot` 字段 | `profile_id` / `profile_name` | `config_id` / `config_name`，新增 `node_id` / `node_name` | **不兼容**，`runtime.md` 2.0.0 已同步 |
 | `RuntimeSnapshot.mode` | 只有 `"system_proxy"` | 增加 `"tun"` | 新增取值（旧值不变） |
 | `DefaultProfileResult.package_id` | 上游包 id | `seed_id: "veyl_seed"` | **不兼容** |
@@ -1318,11 +1319,11 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.1.0** | 批 0 + 批 3 已升级 |
-| `contracts/events.md` | **2.1.0** | 批 0 + 批 3 已升级 |
+| `contracts/commands.md` | **2.2.0** | 批 0 + 批 3 + 批 3 修订 |
+| `contracts/events.md` | **2.1.0** | 批 0 + 批 3 |
 | `contracts/runtime.md` | **2.1.0** | 批 0 + `applied_route_revision` |
-| `contracts/tools.md` | **3.1.0** | 批 0 + 批 3 工具 |
-| `data-model.md` | **2** | 批 0 + 批 3 表 |
+| `contracts/tools.md` | **3.2.0** | 批 0 + 批 3 工具 + 批 3 修订 |
+| `data-model.md` | **3** | 批 0 + 批 3 表 + 种子排除表 |
 | `contracts/routing.md` | **1.0.0** | 批 3 设计依据 |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
 
@@ -1335,6 +1336,14 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.2.0（2026-11-04，批 3 修订）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `runtime_start` **去掉 `nodeId` 参数**；切换当前节点只走 `node_switch` | 不兼容 | PM 2026-11-04：两个入口做同一件事，迟早有人用错 |
+| 2 | `route_set_mode` 的跨家族确认文案补充「域名解析方式也会改变」 | 交互约束 | 非中国 `direct` 改用本地 DNS 后，跨家族必然改变 DNS 行为 |
+| 3 | 非中国 `direct` / `proxy_all` 的 DNS 策略改为全本地解析（`routing.md` 1.1.0） | 语义 | 产品负责人 2026-11-04 |
 
 ### 2.1.0（2026-11-03，批 3 · 分流与 DNS）
 
