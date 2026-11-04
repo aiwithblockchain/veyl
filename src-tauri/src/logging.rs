@@ -74,7 +74,7 @@ impl Logger {
         if inner.date != today {
             // 只在跨天时清一次：这样「连续开几周不重启」也不会无限涨，
             // 7 天上限才是真的上限，而不是「每次重启后的上限」。
-            cleanup_old_logs(&inner.dir.join("logs"), LOG_KEEP_DAYS);
+            cleanup_old_logs(&inner.dir, LOG_KEEP_DAYS);
         }
         if inner.date != today || inner.file.is_none() {
             inner.open(today);
@@ -164,8 +164,8 @@ impl Log for Logger {
 /// 已经初始化过（例如测试）或无法创建文件时返回 `None`，调用方无需处理。
 pub fn init(data_dir: &Path) -> Option<PathBuf> {
     let level = level_from_env();
-    let path = log_path(data_dir);
-    let log_dir = path.parent()?.to_path_buf();
+    let log_dir = resolve_log_dir(data_dir);
+    let path = log_path(&log_dir);
 
     let _ = std::fs::create_dir_all(&log_dir);
     // 按天轮转：只清 `app-*.log`，不碰 runtime-<版本>.log / runtime-events.log。
@@ -184,7 +184,7 @@ pub fn init(data_dir: &Path) -> Option<PathBuf> {
     }
 
     let inner = Inner {
-        dir: data_dir.to_path_buf(),
+        dir: log_dir.clone(),
         date: chrono::Local::now().date_naive(),
         written: std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
         file,
@@ -209,22 +209,47 @@ pub fn init(data_dir: &Path) -> Option<PathBuf> {
 /// 需求 `phase-1-requirements.md` §6：按天轮转，最多保留 7 天。
 pub const LOG_KEEP_DAYS: i64 = 7;
 
-/// `<data_dir>/logs/app-YYYY-MM-DD.log`
-pub fn log_path(data_dir: &Path) -> PathBuf {
-    log_path_for(data_dir, chrono::Local::now().date_naive())
+/// 日志目录。
+///
+/// **debug 构建写到仓库根的 `logs/`**：开发时它就在编辑器文件树里，
+/// 和 `build/logs/dev-*.log` 也在一起。release 才写数据目录——
+/// 装好的应用不该往工作目录里拉文件。
+pub fn resolve_log_dir(data_dir: &Path) -> PathBuf {
+    #[cfg(debug_assertions)]
+    {
+        let _ = data_dir;
+        return repository_root().join("logs");
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        data_dir.join("logs")
+    }
 }
 
-pub fn log_path_for(data_dir: &Path, date: chrono::NaiveDate) -> PathBuf {
-    data_dir
-        .join("logs")
-        .join(format!("app-{}.log", date.format("%Y-%m-%d")))
+/// 仓库根：`CARGO_MANIFEST_DIR` 是 `src-tauri/`，父目录就是根。
+///
+/// 用编译期常量而不是往上找 `Cargo.toml`：`tauri dev` 跑 `cargo run` 时
+/// 工作目录是 `src-tauri/`，运行期往上找既慢又要处理找不到的情况；
+/// 编译期这个值是确定的，和 cwd 无关。
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// 轮转文件路径：`app-YYYY-MM-DD.<n>.log`
-pub fn rotated_path_for(data_dir: &Path, date: chrono::NaiveDate, index: u32) -> PathBuf {
-    data_dir
-        .join("logs")
-        .join(format!("app-{}.{index}.log", date.format("%Y-%m-%d")))
+/// `<log_dir>/app-YYYY-MM-DD.log`
+pub fn log_path(log_dir: &Path) -> PathBuf {
+    log_path_for(log_dir, chrono::Local::now().date_naive())
+}
+
+pub fn log_path_for(log_dir: &Path, date: chrono::NaiveDate) -> PathBuf {
+    log_dir.join(format!("app-{}.log", date.format("%Y-%m-%d")))
+}
+
+/// 轮转文件路径：`<log_dir>/app-YYYY-MM-DD.<n>.log`
+pub fn rotated_path_for(log_dir: &Path, date: chrono::NaiveDate, index: u32) -> PathBuf {
+    log_dir.join(format!("app-{}.{index}.log", date.format("%Y-%m-%d")))
 }
 
 /// 删除 `app-YYYY-MM-DD.log` 里早于 `keep_days` 的文件；返回删除数量。
@@ -471,11 +496,11 @@ mod tests {
 
     #[test]
     fn the_log_path_is_daily() {
-        let dir = std::env::temp_dir();
+        let logs = std::env::temp_dir().join("veyl-logs");
         let date = dated("2026-11-02");
         assert_eq!(
-            log_path_for(&dir, date),
-            dir.join("logs").join("app-2026-11-02.log")
+            log_path_for(&logs, date),
+            logs.join("app-2026-11-02.log")
         );
     }
 
@@ -498,13 +523,13 @@ mod tests {
         let mut kept = Vec::new();
         for offset in 0..7 {
             let date = today - chrono::Duration::days(offset);
-            let path = log_path_for(&dir, date);
+            let path = log_path_for(&logs, date);
             std::fs::write(&path, "x").unwrap();
             kept.push(path);
         }
         for offset in [7, 30] {
             let date = today - chrono::Duration::days(offset);
-            std::fs::write(log_path_for(&dir, date), "x").unwrap();
+            std::fs::write(log_path_for(&logs, date), "x").unwrap();
         }
         std::fs::write(logs.join("runtime-1.14.4.log"), "x").unwrap();
         std::fs::write(logs.join("runtime-events.log"), "x").unwrap();
@@ -513,7 +538,7 @@ mod tests {
         for path in kept {
             assert!(path.exists(), "{} 应保留", path.display());
         }
-        assert!(!log_path_for(&dir, today - chrono::Duration::days(7)).exists());
+        assert!(!log_path_for(&logs, today - chrono::Duration::days(7)).exists());
         assert!(logs.join("runtime-1.14.4.log").exists());
         assert!(logs.join("runtime-events.log").exists());
 
@@ -523,7 +548,7 @@ mod tests {
     fn test_logger(dir: &Path, file_level: LevelFilter, console: LevelFilter) -> Logger {
         Logger {
             inner: Mutex::new(Inner {
-                dir: dir.to_path_buf(),
+                dir: dir.join("logs"),
                 date: chrono::Local::now().date_naive(),
                 file: None,
                 written: 0,
@@ -551,7 +576,7 @@ mod tests {
         let logger = test_logger(&dir, FILE_LEVEL, LevelFilter::Debug);
 
         logger.log(&record(Level::Debug));
-        let path = log_path(&dir);
+        let path = log_path(&dir.join("logs"));
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(!content.contains("probe"), "DEBUG 不该进文件：{content:?}");
 
@@ -579,7 +604,7 @@ mod tests {
             logger.log(&record(Level::Warn));
         }
 
-        let base = log_path(&dir);
+        let base = log_path(&dir.join("logs"));
         assert!(base.exists(), "当前文件应存在");
         assert!(
             std::fs::metadata(&base).unwrap().len() <= 200,
@@ -587,11 +612,11 @@ mod tests {
             std::fs::metadata(&base).unwrap().len()
         );
         assert!(
-            rotated_path_for(&dir, chrono::Local::now().date_naive(), 1).exists(),
+            rotated_path_for(&dir.join("logs"), chrono::Local::now().date_naive(), 1).exists(),
             "应该产生 .1 轮转文件"
         );
         assert!(
-            !rotated_path_for(&dir, chrono::Local::now().date_naive(), MAX_ROTATED_PER_DAY + 1).exists(),
+            !rotated_path_for(&dir.join("logs"), chrono::Local::now().date_naive(), MAX_ROTATED_PER_DAY + 1).exists(),
             "轮转文件数不能超过上限"
         );
 
@@ -689,7 +714,7 @@ mod tests {
         std::fs::create_dir_all(data.join("logs")).unwrap();
 
         let mut inner = Inner {
-            dir: data.clone(),
+            dir: data.join("logs"),
             date: chrono::Local::now().date_naive(),
             file: None,
             written: 0,
@@ -697,9 +722,27 @@ mod tests {
         };
         inner.open(chrono::Local::now().date_naive());
 
-        assert!(log_path(&data).exists(), "应写在 <data>/logs/ 下");
+        assert!(log_path(&data.join("logs")).exists(), "应写在日志目录里");
         assert!(!data.join("logs").join("logs").exists(), "不能重复拼 logs");
 
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// 开发构建的日志必须落在**仓库根**的 `logs/`，不是 `src-tauri/logs/`。
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_builds_log_into_the_repository_root() {
+        let data = std::env::temp_dir().join("veyl-ignored-data");
+        let resolved = resolve_log_dir(&data);
+        let expected = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri 的父目录就是仓库根")
+            .join("logs");
+        assert_eq!(resolved, expected);
+        assert!(
+            !resolved.to_string_lossy().contains("src-tauri"),
+            "落到了 src-tauri 下：{}",
+            resolved.display()
+        );
     }
 }

@@ -50,6 +50,9 @@ scripts/packaging/output/
 # 打包脚本自产出（DMG / MSI / 签名日志）
 build/
 
+# 开发构建的日志（debug 构建写到仓库根，见 src-tauri/src/logging.rs）
+/logs/
+
 # 种子节点文件（含真实密码，绝不入库）
 *seeds*.json
 

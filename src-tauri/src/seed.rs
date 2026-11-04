@@ -195,7 +195,12 @@ pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcom
     };
     let now = store::now_ms();
 
-    if !force {
+    // **DB 里有行不等于内容还在。** 种子原文加密存在 `secrets.enc` 里，
+    // 文件丢失、换加密密钥、只恢复了数据库，都会留下「元数据在、内容没了」。
+    // 这种情况下任何「内容没变」的判定都是错的。
+    let content_ok = cached_content_available(store);
+
+    if !force && content_ok {
         if let Some(row) = &current {
             if now.saturating_sub(row.checked_at) < REFRESH_INTERVAL.as_millis() as i64 {
                 return RefreshOutcome::Unchanged {
@@ -207,7 +212,7 @@ pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcom
 
     let url = source_url();
     let etag = current.as_ref().and_then(|row| row.etag.clone());
-    let response = match public_http::get(&url, etag.as_deref(), MAX_SEED_BYTES).await {
+    let mut response = match public_http::get(&url, etag.as_deref(), MAX_SEED_BYTES).await {
         Ok(response) => response,
         Err(error) => {
             log::warn!("种子拉取失败，保留缓存：{error}");
@@ -218,13 +223,56 @@ pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcom
         }
     };
 
+    if response.status == 304 && !content_ok {
+        // 304 没有 body，而本地内容已经丢了——不带 etag 重拉一次。
+        log::warn!("种子元数据还在但内容已丢失，强制重新拉取");
+        response = match public_http::get(&url, None, MAX_SEED_BYTES).await {
+            Ok(response) => response,
+            Err(error) => {
+                log::warn!("种子重新拉取失败，保持现状：{error}");
+                return RefreshOutcome::Offline {
+                    cached: current.is_some(),
+                    error,
+                };
+            }
+        };
+    }
+
     if response.status == 304 {
+        if !cached_content_available(store) {
+            // 重拉之后仍然是 304（理论上不该发生）：内容拿不回来。
+            // 不更新 `checked_at`——续命时间戳等于把「坏掉」的状态一直藏下去。
+            return RefreshOutcome::Offline {
+                cached: false,
+                error: "种子元数据还在但内容缺失，远端未返回内容".into(),
+            };
+        }
         let conn = store.conn();
         let _ = seed_cache::touch(&conn, now, response.etag.as_deref());
         return RefreshOutcome::Unchanged {
             node_count: current.map(|row| row.node_count).unwrap_or(0),
         };
     }
+
+    apply_fetch(store, current.as_ref(), response, now, running).await
+}
+
+/// 本地缓存的内容是不是真的还能解出来。
+fn cached_content_available(store: &Store) -> bool {
+    load_nodes(store).is_some()
+}
+
+/// 把一次 200 响应落库。
+///
+/// **哈希相同但本地内容不在时不能算 `Unchanged`**——那种情况要接着往下
+/// 重新写入密文，否则 `secrets.enc` 一旦丢失，种子节点永远补不回来。
+async fn apply_fetch(
+    store: &Store,
+    current: Option<&seed_cache::SeedCacheRow>,
+    response: crate::public_http::PublicResponse,
+    now: i64,
+    running: bool,
+) -> RefreshOutcome {
 
     let hash = content_sha256(&response.body);
     let parsed = match parse_seed(&response.body) {
@@ -239,13 +287,16 @@ pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcom
     };
     let node_count = parsed.nodes.len() as i64;
 
-    if let Some(row) = &current {
-        if row.content_sha256 == hash {
+    if let Some(row) = current {
+        if row.content_sha256 == hash && cached_content_available(store) {
             let conn = store.conn();
             let _ = seed_cache::touch(&conn, now, response.etag.as_deref());
             return RefreshOutcome::Unchanged {
                 node_count: row.node_count,
             };
+        }
+        if row.content_sha256 == hash {
+            log::warn!("种子哈希未变但本地内容缺失，正在重建密文");
         }
     }
 
@@ -665,5 +716,62 @@ mod tests {
             let conn = store.conn();
             assert_eq!(configs::list_nodes(&conn, "cfg_1").unwrap().len(), 2);
         }
+    }
+
+    /// **回归：元数据还在、密文丢了，不能判「无需更新」。**
+    ///
+    /// `secrets.enc` 丢失（换机器、误删、只从备份恢复数据库）之后，
+    /// 旧逻辑比对哈希得出「内容没变」，于是种子节点永远补不回来，
+    /// 用户看到的是「默认节点一直是 0」，而我们什么都不报。
+    #[tokio::test]
+    async fn a_lost_secret_is_rebuilt_instead_of_reported_unchanged() {
+        crate::test_support::install_test_secrets();
+        let store = Store::open_in_memory().unwrap();
+        let body = sample();
+        let hash = content_sha256(body.as_bytes());
+
+        crate::secrets::set_secret(&secret_key(&hash), &body).unwrap();
+        let row = seed_cache::SeedCacheRow {
+            content_sha256: hash.clone(),
+            etag: Some("\"v1\"".into()),
+            source_version: Some("1".into()),
+            source_updated_at: None,
+            node_count: 2,
+            fetched_at: store::now_ms(),
+            checked_at: store::now_ms(),
+        };
+        {
+            let conn = store.conn();
+            seed_cache::save(&conn, &row).unwrap();
+        }
+
+        // 模拟密文丢失
+        crate::secrets::delete_secret(&secret_key(&hash)).unwrap();
+        assert!(load_nodes(&store).is_none(), "前置条件：内容确实丢了");
+
+        let outcome = apply_fetch(
+            &store,
+            Some(&row),
+            crate::public_http::PublicResponse {
+                status: 200,
+                etag: Some("\"v1\"".into()),
+                body: body.clone().into_bytes(),
+            },
+            store::now_ms(),
+            false,
+        )
+        .await;
+
+        assert!(
+            !matches!(outcome, RefreshOutcome::Unchanged { .. }),
+            "内容缺失时报了「无需更新」，种子将永远补不回来"
+        );
+        assert_eq!(
+            load_nodes(&store).map(|nodes| nodes.len()),
+            Some(2),
+            "密文应当被重建"
+        );
+
+        crate::secrets::delete_secret(&secret_key(&hash)).unwrap();
     }
 }
