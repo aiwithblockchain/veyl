@@ -30,6 +30,7 @@ export function ConfigRail({
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const confirmRef = useRef<HTMLDivElement>(null);
+  const railRef = useRef<HTMLElement>(null);
   useFocusTrap(Boolean(confirming), confirmRef);
 
   useEffect(() => {
@@ -53,12 +54,22 @@ export function ConfigRail({
     setDeleteError(null);
     const result = await onDelete(confirming.config_id);
     setDeleting(false);
-    if (result.ok) setConfirming(null);
-    else setDeleteError(result.message ?? "删除失败，请重试");
+    if (result.ok) {
+      setConfirming(null);
+      // 触发按钮随行卸载，焦点陷阱可能已把焦点还给 body；把焦点放回配置栏。
+      window.setTimeout(() => railRef.current?.focus(), 0);
+    } else {
+      setDeleteError(result.message ?? "删除失败，请重试");
+    }
   };
 
   return (
-    <aside className="config-rail" aria-label="配置列表">
+    <aside
+      ref={railRef}
+      tabIndex={-1}
+      className="config-rail"
+      aria-label="配置列表"
+    >
       <header className="config-rail__head">
         <span className="config-rail__title">配置</span>
         <button

@@ -1999,6 +1999,10 @@ pre {
   border-right: 1px solid var(--line);
 }
 
+.config-rail:focus {
+  outline: none;
+}
+
 .config-rail__head {
   display: flex;
   align-items: center;

@@ -5,7 +5,7 @@ import { AGENT_EVENTS } from "../agent/protocol";
 import type { ConfigDetail, ConfigSummary, RuntimeSnapshot } from "../agent/protocol";
 import type { ConnectMode } from "./model";
 import { createMockConfig, summarizeConfig } from "./model";
-import { deleteConfigWithDisconnect, withoutConfig } from "./deleteConfig";
+import { deleteConfigWithDisconnect, shouldDisconnectOnDelete, withoutConfig } from "./deleteConfig";
 
 export type VpnConnectionState = "idle" | "starting" | "connected" | "stopping";
 
@@ -104,6 +104,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
 
   const mockStore = useRef<MockStore>({ configs: [], activeId: null });
   const timer = useRef<number | null>(null);
+  const pendingConfigIdRef = useRef<string | null>(null);
   const disposed = useRef(false);
 
   const clearTimer = () => {
@@ -276,8 +277,10 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       if (connection === "connected" || connection === "starting") {
         setConnection("starting");
         setConnectedConfigId(null);
+        pendingConfigIdRef.current = configId;
         timer.current = window.setTimeout(() => {
           timer.current = null;
+          pendingConfigIdRef.current = null;
           setConnection("connected");
           setConnectedConfigId(configId);
         }, 700);
@@ -344,8 +347,10 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       setConnection("starting");
       setConnectedConfigId(null);
       const configId = activeConfigId;
+      pendingConfigIdRef.current = configId;
       timer.current = window.setTimeout(() => {
         timer.current = null;
+        pendingConfigIdRef.current = null;
         setConnection("connected");
         setConnectedConfigId(configId);
       }, 700);
@@ -367,6 +372,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
   const stop = async (): Promise<ActionResult> => {
     if (mock) {
       clearTimer();
+      pendingConfigIdRef.current = null;
       setConnection("stopping");
       timer.current = window.setTimeout(() => {
         timer.current = null;
@@ -393,8 +399,15 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       if (!store.configs.some((config) => config.config_id === configId)) {
         return { ok: true };
       }
-      if (connectedConfigId === configId) {
+      if (
+        shouldDisconnectOnDelete({
+          configId,
+          connectedConfigId,
+          pendingConfigId: pendingConfigIdRef.current,
+        })
+      ) {
         clearTimer();
+        pendingConfigIdRef.current = null;
         setConnection("idle");
         setConnectedConfigId(null);
       }

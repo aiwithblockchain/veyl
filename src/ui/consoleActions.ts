@@ -6,18 +6,44 @@ export type ZeroConfigMode =
   | "manual";
 export type ZeroConfigAction = "ask-ai" | "new-config";
 
-/** 请求已结束（无请求中、无流式、无未答问题）且对话里已有内容。 */
+/** 最后一条 assistant 消息的纯文本；没有 assistant 消息时返回 null。 */
+export function lastAssistantTextOf(
+  messages: Array<{
+    role: string;
+    items?: Array<{ kind: string; content?: string }>;
+  }>,
+): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "assistant" || !message.items) continue;
+    return message.items
+      .map((item) => (item.kind === "text" ? item.content ?? "" : ""))
+      .join("");
+  }
+  return null;
+}
+
+/** 末尾是问句（中文或英文问号）说明 AI 还在等用户打字。 */
+function endsWithQuestion(text: string | null): boolean {
+  const trimmed = text?.trim();
+  if (!trimmed) return false;
+  return /[?？]$/.test(trimmed);
+}
+
+/** 请求已结束（无请求中、无流式、无未答问题）且对话里已有内容，并且 AI 不是在等用户输入。 */
 export function shouldSettleZeroConfig(input: {
   requesting: boolean;
   hasActiveRequest: boolean;
   hasPendingQuestion: boolean;
   messageCount: number;
+  lastAssistantText: string | null;
 }): boolean {
   return (
     !input.requesting &&
     !input.hasActiveRequest &&
     !input.hasPendingQuestion &&
-    input.messageCount > 0
+    input.messageCount > 0 &&
+    !endsWithQuestion(input.lastAssistantText)
   );
 }
 

@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { deleteConfigWithDisconnect, withoutConfig } from "./deleteConfig";
+import {
+  deleteConfigWithDisconnect,
+  shouldDisconnectOnDelete,
+  withoutConfig,
+} from "./deleteConfig";
 
 const deleted = (over: Partial<{
   deleted: boolean;
@@ -84,5 +88,46 @@ describe("deleteConfigWithDisconnect", () => {
     });
 
     expect(outcome).toEqual({ ok: true });
+  });
+
+  it("pending 连接中删除也按需断开", () => {
+    expect(
+      shouldDisconnectOnDelete({
+        configId: "c1",
+        connectedConfigId: null,
+        pendingConfigId: "c1",
+      }),
+    ).toBe(true);
+    expect(
+      shouldDisconnectOnDelete({
+        configId: "c1",
+        connectedConfigId: "c1",
+        pendingConfigId: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldDisconnectOnDelete({
+        configId: "c1",
+        connectedConfigId: null,
+        pendingConfigId: "c2",
+      }),
+    ).toBe(false);
+  });
+
+  it("断开成功但删除失败，文案说明已经断开", async () => {
+    const disconnect = vi.fn().mockResolvedValue({ ok: true });
+    const remove = vi.fn().mockRejectedValue(new Error("boom"));
+
+    const outcome = await deleteConfigWithDisconnect({
+      configId: "c1",
+      connectedConfigId: "c1",
+      disconnect,
+      remove,
+    });
+
+    expect(outcome).toEqual({
+      ok: false,
+      message: "已断开连接，但删除失败：boom",
+    });
   });
 });

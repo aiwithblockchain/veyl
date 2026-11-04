@@ -30,6 +30,7 @@ import {
 import { useVpnSession } from "./config/useVpnSession";
 import {
   isZeroConfigAskSuppressed,
+  lastAssistantTextOf,
   shouldResetJustOnboarded,
   shouldSendZeroConfigAsk,
   shouldSettleZeroConfig,
@@ -873,6 +874,7 @@ export default function App() {
       ? pendingQuestions.some((item) => item.sessionId === session.id)
       : false,
     messageCount: session?.messages.length ?? 0,
+    lastAssistantText: lastAssistantTextOf(session?.messages ?? []),
   });
 
   if (!onboardingLoaded) {

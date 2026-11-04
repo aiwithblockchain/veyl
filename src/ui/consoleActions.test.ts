@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { activeSession, chatReducer, createInitialState, createSession } from "../state/chatStore";
 import {
   isZeroConfigAskSuppressed,
+  lastAssistantTextOf,
   runZeroConfigPrimaryAction,
   shouldResetJustOnboarded,
   shouldSendZeroConfigAsk,
@@ -146,6 +147,7 @@ describe("零配置入口", () => {
       hasActiveRequest: false,
       hasPendingQuestion: false,
       messageCount: 2,
+      lastAssistantText: "好的。",
     });
     expect(settled).toBe(true);
 
@@ -163,6 +165,7 @@ describe("零配置入口", () => {
         hasActiveRequest: false,
         hasPendingQuestion: false,
         messageCount: 2,
+      lastAssistantText: "好的。",
       }),
     ).toBe(false);
     expect(
@@ -171,6 +174,7 @@ describe("零配置入口", () => {
         hasActiveRequest: true,
         hasPendingQuestion: false,
         messageCount: 2,
+      lastAssistantText: "好的。",
       }),
     ).toBe(false);
     expect(
@@ -179,6 +183,7 @@ describe("零配置入口", () => {
         hasActiveRequest: false,
         hasPendingQuestion: true,
         messageCount: 2,
+      lastAssistantText: "好的。",
       }),
     ).toBe(false);
     expect(
@@ -187,11 +192,48 @@ describe("零配置入口", () => {
         hasActiveRequest: false,
         hasPendingQuestion: false,
         messageCount: 0,
+        lastAssistantText: null,
       }),
     ).toBe(false);
 
     expect(zeroConfigMode(true, true, false)).toBe("just-onboarded");
     expect(zeroConfigActions("just-onboarded")).toEqual(["new-config"]);
+  });
+
+  it("assistant 以问句结尾时不切 settled", () => {
+    const base = {
+      requesting: false,
+      hasActiveRequest: false,
+      hasPendingQuestion: false,
+      messageCount: 2,
+    };
+
+    expect(
+      shouldSettleZeroConfig({ ...base, lastAssistantText: "把订阅链接发我？" }),
+    ).toBe(false);
+    expect(
+      shouldSettleZeroConfig({
+        ...base,
+        lastAssistantText: "你的服务器地址是多少?",
+      }),
+    ).toBe(false);
+    expect(
+      shouldSettleZeroConfig({ ...base, lastAssistantText: "好的，我先看看。" }),
+    ).toBe(true);
+  });
+
+  it("从 assistant 消息里取最后一段文本", () => {
+    const messages = [
+      { role: "user" },
+      {
+        role: "assistant",
+        items: [
+          { kind: "thinking", content: "想一下" },
+          { kind: "text", content: "把订阅链接发我？" },
+        ],
+      },
+    ];
+    expect(lastAssistantTextOf(messages)).toBe("把订阅链接发我？");
   });
 
   it("B/C 不受 settled 影响", () => {
