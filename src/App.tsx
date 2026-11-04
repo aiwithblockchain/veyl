@@ -416,6 +416,8 @@ export default function App() {
     }
 
     kickoffStartedRef.current = true;
+    // 先标记 requestId 未知的 pending，删除保护与历史覆盖判断才会认为「有请求在跑」。
+    dispatch({ type: "request_pending", sessionId: session.id });
     // 本次运行内用户手动关过右栏，就不替他打开；否则让第一句话可见。
     if (!panelClosedThisRunRef.current) {
       panelOpenRef.current = true;

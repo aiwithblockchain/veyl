@@ -275,4 +275,186 @@ describe("chatReducer", () => {
     expect(second.activeRequestId).toBeNull();
     expect(second.status).toBeNull();
   });
+
+  it("kickoff 发出后、request_started 之前切会话，首个 chunk 落到 kickoff 会话", () => {
+    let state = withOneSession();
+    const kickoffSessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "request_pending",
+      sessionId: kickoffSessionId,
+    });
+
+    state = chatReducer(state, { type: "new_session" });
+    const otherSessionId = state.activeSessionId;
+
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.messageChunk,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_kickoff",
+          assistant_message_id: "asst_kickoff",
+          chunk: "我先了解一下你的使用场景。",
+          emitted_at: "2026-11-04T00:00:00Z",
+        },
+      },
+    });
+
+    const kickoff = state.sessions.find((item) => item.id === kickoffSessionId)!;
+    const other = state.sessions.find((item) => item.id === otherSessionId)!;
+
+    expect(kickoff.messages[0]).toMatchObject({
+      role: "assistant",
+      id: "asst_kickoff",
+      streaming: true,
+    });
+    expect(other.messages).toHaveLength(0);
+    expect(other.status).toBeNull();
+  });
+
+  it("目标会话在 request_started 前被删，后续事件不写进任何会话", () => {
+    let state = withOneSession();
+    const goneSessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "request_pending",
+      sessionId: goneSessionId,
+    });
+
+    state = chatReducer(state, { type: "new_session" });
+    const currentSessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "session_removed",
+      sessionId: goneSessionId,
+    });
+
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.messageChunk,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_gone",
+          assistant_message_id: "asst_gone",
+          chunk: "这段不应该出现。",
+          emitted_at: "2026-11-04T00:00:00Z",
+        },
+      },
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.requestEnd,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_gone",
+          assistant_message_id: "asst_gone",
+          result: "error",
+          final_text: null,
+          error: {
+            contract_version: CONTRACT_VERSION,
+            code: "INTERNAL",
+            message: "这段也不应该出现",
+            retryable: false,
+            details: null,
+            request_id: "req_gone",
+          },
+          usage: null,
+          duration_ms: 10,
+          emitted_at: "2026-11-04T00:00:01Z",
+        },
+      },
+    });
+
+    const current = state.sessions.find((item) => item.id === currentSessionId)!;
+    expect(state.sessions).toHaveLength(1);
+    expect(current.messages).toHaveLength(0);
+    expect(current.status).toBeNull();
+    expect(current.requesting).toBe(false);
+  });
+
+  it("会话 A 的请求结束后，迟到事件仍按消息里的 requestId 落到 A，而不是 requesting 的 B", () => {
+    let state = withOneSession();
+    const firstSessionId = state.activeSessionId;
+
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId: firstSessionId,
+      text: "连到日本",
+      localRequestId: "local_late",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId: firstSessionId,
+      requestId: "req_late",
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.messageChunk,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_late",
+          assistant_message_id: "asst_late",
+          chunk: "已连接到东京 01。",
+          emitted_at: "2026-11-04T00:00:00Z",
+        },
+      },
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.requestEnd,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_late",
+          assistant_message_id: "asst_late",
+          result: "success",
+          final_text: "已连接到东京 01。",
+          error: null,
+          usage: null,
+          duration_ms: 100,
+          emitted_at: "2026-11-04T00:00:01Z",
+        },
+      },
+    });
+
+    // B 正在发起新请求：requesting 为 true，但 request_started 还没回来。
+    state = chatReducer(state, { type: "new_session" });
+    const secondSessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "request_pending",
+      sessionId: secondSessionId,
+    });
+
+    // 一条属于 A 的迟到事件到达。
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.messageChunk,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_late",
+          assistant_message_id: "asst_late",
+          chunk: "迟到的补充。",
+          emitted_at: "2026-11-04T00:00:02Z",
+        },
+      },
+    });
+
+    const first = state.sessions.find((item) => item.id === firstSessionId)!;
+    const second = state.sessions.find((item) => item.id === secondSessionId)!;
+
+    const assistant = first.messages[1];
+    expect(assistant.role).toBe("assistant");
+    if (assistant.role === "assistant") {
+      const text = assistant.items
+        .map((item) => (item.kind === "text" ? item.content : ""))
+        .join("");
+      expect(text).toContain("迟到的补充。");
+    }
+    expect(second.messages).toHaveLength(0);
+    expect(second.activeRequestId).toBeNull();
+    expect(second.requesting).toBe(true);
+  });
 });

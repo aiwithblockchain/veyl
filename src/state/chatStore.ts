@@ -69,6 +69,7 @@ export type ChatAction =
   | { type: "new_session" }
   | { type: "add_session"; session: Session }
   | { type: "send_user_message"; sessionId: string; text: string; localRequestId: string }
+  | { type: "request_pending"; sessionId: string }
   | { type: "request_started"; sessionId: string; requestId: string }
   | { type: "request_failed"; sessionId: string; message: string }
   | { type: "agent_event"; event: import("../agent/protocol").AgentEvent }
@@ -239,21 +240,32 @@ const REQUEST_RESULTS: Record<RequestResult, boolean> = {
   cancelled: false,
 };
 
-/** 流式事件属于发起它的会话；找不到（无 requestId / 会话已删）时由调用方退回当前会话。 */
+/** 流式事件属于发起它的会话；找不到（无 requestId / 会话已删）时由调用方决定是否丢弃。 */
 function sessionForRequest(
   state: ChatState,
   requestId: string | null,
 ): Session | undefined {
   if (!requestId) return undefined;
-  return (
-    state.sessions.find((session) => session.activeRequestId === requestId) ??
-    state.sessions.find((session) =>
-      session.messages.some(
-        (message) =>
-          message.role === "assistant" && message.requestId === requestId,
-      ),
-    )
+
+  const byActive = state.sessions.find(
+    (session) => session.activeRequestId === requestId,
   );
+  if (byActive) return byActive;
+
+  // 精确匹配优先于「猜」：消息里留着 requestId 说明这条请求确实属于它。
+  const byMessage = state.sessions.find((session) =>
+    session.messages.some(
+      (message) =>
+        message.role === "assistant" && message.requestId === requestId,
+    ),
+  );
+  if (byMessage) return byMessage;
+
+  // 刚发出、requestId 还没回来的窗口：只有一个会话在跑时才归给它。
+  const requesting = state.sessions.filter((session) => session.requesting);
+  if (requesting.length === 1) return requesting[0];
+
+  return undefined;
 }
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
@@ -303,6 +315,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }));
     }
 
+    case "request_pending": {
+      const target = state.sessions.find((session) => session.id === action.sessionId);
+      if (!target) return state;
+      return patchSession(state, target.id, (session) => ({
+        ...session,
+        requesting: true,
+        status: { text: "正在思考", phase: "thinking" },
+      }));
+    }
+
     case "request_started": {
       const target = state.sessions.find((session) => session.id === action.sessionId);
       if (!target) return state;
@@ -343,10 +365,18 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
     case "agent_event": {
       const { event } = action;
-      const requestId =
-        "request_id" in event.payload ? event.payload.request_id : null;
-      // 流式事件按 request_id 归属到发起它的会话；找不到才退回当前会话。
-      const current = sessionForRequest(state, requestId) ?? activeSession(state);
+      const payload = event.payload;
+      let hasRequestId = false;
+      let requestId: string | null = null;
+      if ("request_id" in payload) {
+        hasRequestId = true;
+        requestId = payload.request_id;
+      }
+      // 有 requestId 却找不到归属 → 丢弃，绝不能写进别的会话；
+      // 没有 requestId 的事件仍退回当前会话。
+      const current =
+        sessionForRequest(state, requestId) ??
+        (hasRequestId ? undefined : activeSession(state));
       if (!current) return state;
 
       switch (event.name) {
