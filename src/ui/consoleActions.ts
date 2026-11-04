@@ -1,17 +1,40 @@
-/** 零配置入口的三种处境：刚引导完 / 已配 AI 直接进来 / 不用 AI。 */
-export type ZeroConfigMode = "just-onboarded" | "ai-ready" | "manual";
+/** 零配置入口的处境：刚引导完（等 AI 问）/ 刚引导完但 AI 停了 / 已配 AI 直接进来 / 不用 AI。 */
+export type ZeroConfigMode =
+  | "just-onboarded"
+  | "just-onboarded-stopped"
+  | "ai-ready"
+  | "manual";
 export type ZeroConfigAction = "ask-ai" | "new-config";
+
+/** 请求已结束（无请求中、无流式、无未答问题）且对话里已有内容。 */
+export function shouldSettleZeroConfig(input: {
+  requesting: boolean;
+  hasActiveRequest: boolean;
+  hasPendingQuestion: boolean;
+  messageCount: number;
+}): boolean {
+  return (
+    !input.requesting &&
+    !input.hasActiveRequest &&
+    !input.hasPendingQuestion &&
+    input.messageCount > 0
+  );
+}
 
 export function zeroConfigMode(
   aiReady: boolean,
   justOnboarded: boolean,
+  settled = false,
 ): ZeroConfigMode {
   if (!aiReady) return "manual";
-  return justOnboarded ? "just-onboarded" : "ai-ready";
+  if (!justOnboarded) return "ai-ready";
+  return settled ? "just-onboarded-stopped" : "just-onboarded";
 }
 
 export function zeroConfigActions(mode: ZeroConfigMode): ZeroConfigAction[] {
-  if (mode === "ai-ready") return ["ask-ai", "new-config"];
+  if (mode === "ai-ready" || mode === "just-onboarded-stopped") {
+    return ["ask-ai", "new-config"];
+  }
   return ["new-config"];
 }
 
@@ -19,6 +42,7 @@ export interface ZeroConfigContent {
   title: string;
   body: string | null;
   steps: string[] | null;
+  primaryLabel: string | null;
 }
 
 export function zeroConfigContent(mode: ZeroConfigMode): ZeroConfigContent {
@@ -27,6 +51,15 @@ export function zeroConfigContent(mode: ZeroConfigMode): ZeroConfigContent {
       title: "已经配好了。",
       body: "右边的对话已经开始了。回答两个问题，我就生成配置。",
       steps: null,
+      primaryLabel: null,
+    };
+  }
+  if (mode === "just-onboarded-stopped") {
+    return {
+      title: "还没配好。",
+      body: "可以让我再问一次。",
+      steps: null,
+      primaryLabel: "继续帮我配",
     };
   }
   if (mode === "ai-ready") {
@@ -38,12 +71,14 @@ export function zeroConfigContent(mode: ZeroConfigMode): ZeroConfigContent {
         "我按你的情况生成配置。",
         "点顶部的「启动 VPN」就连上。",
       ],
+      primaryLabel: "让 AI 帮我配",
     };
   }
   return {
     title: "先新建一套配置。",
     body: "建好后，点顶部的「启动 VPN」就能连上。",
     steps: null,
+    primaryLabel: "我自己配置",
   };
 }
 
@@ -55,8 +90,11 @@ export function runZeroConfigPrimaryAction(
   mode: ZeroConfigMode,
   handlers: { onAskAi: () => void; onNewConfig: () => void },
 ): void {
-  if (mode === "ai-ready") handlers.onAskAi();
-  else if (mode === "manual") handlers.onNewConfig();
+  if (mode === "ai-ready" || mode === "just-onboarded-stopped") {
+    handlers.onAskAi();
+  } else if (mode === "manual") {
+    handlers.onNewConfig();
+  }
 }
 
 /** 一旦本次运行内建出过配置，A 的「刚引导完」文案就不再适用。 */
@@ -67,8 +105,17 @@ export function shouldResetJustOnboarded(
   return justOnboarded && configCount > 0;
 }
 
+/** 上一次发过之后没有新消息就不重复发；AI 回了新内容就允许下一轮。 */
+export function isZeroConfigAskSuppressed(input: {
+  asked: boolean;
+  askedAtCount: number;
+  messageCount: number;
+}): boolean {
+  return input.asked && input.messageCount <= input.askedAtCount;
+}
+
 /**
- * 会话空闲、且本次运行内还没自动发过「帮我配一下网络」时才补发。
+ * 会话空闲、且这一轮还没自动发过「帮我配一下网络」时才补发。
  * 点过一次之后按钮只负责打开右栏给焦点，避免重复指令。
  */
 export function shouldSendZeroConfigAsk(input: {

@@ -28,7 +28,12 @@ import {
   shouldShowOnboarding,
 } from "./config/onboarding";
 import { useVpnSession } from "./config/useVpnSession";
-import { shouldSendZeroConfigAsk, shouldResetJustOnboarded } from "./ui/consoleActions";
+import {
+  isZeroConfigAskSuppressed,
+  shouldResetJustOnboarded,
+  shouldSendZeroConfigAsk,
+  shouldSettleZeroConfig,
+} from "./ui/consoleActions";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import { useFocusTrap } from "./ui/focus";
 import "./styles/app.css";
@@ -120,6 +125,7 @@ export default function App() {
   const kickoffStartedRef = useRef(false);
   const kickoffSessionCreatedRef = useRef(false);
   const zeroConfigAskedRef = useRef(false);
+  const askedMessageCountRef = useRef(0);
   const confirmConfigRef = useRef<HTMLDivElement>(null);
   useFocusTrap(Boolean(pendingConfigId), confirmConfigRef);
 
@@ -833,14 +839,20 @@ export default function App() {
     const hasPendingQuestion = session
       ? pendingQuestions.some((item) => item.sessionId === session.id)
       : false;
+    const messageCount = session?.messages.length ?? 0;
     const shouldSend = shouldSendZeroConfigAsk({
       requesting: session?.requesting ?? false,
       hasActiveRequest: Boolean(session?.activeRequestId),
       hasPendingQuestion,
-      alreadyAsked: zeroConfigAskedRef.current,
+      alreadyAsked: isZeroConfigAskSuppressed({
+        asked: zeroConfigAskedRef.current,
+        askedAtCount: askedMessageCountRef.current,
+        messageCount,
+      }),
     });
     if (shouldSend) {
       zeroConfigAskedRef.current = true;
+      askedMessageCountRef.current = messageCount;
       handleEmptySend("帮我配一下网络");
     }
   };
@@ -853,6 +865,15 @@ export default function App() {
 
   const pendingConfig =
     vpn.configs.find((config) => config.config_id === pendingConfigId) ?? null;
+
+  const zeroConfigSettled = shouldSettleZeroConfig({
+    requesting: session?.requesting ?? false,
+    hasActiveRequest: Boolean(session?.activeRequestId),
+    hasPendingQuestion: session
+      ? pendingQuestions.some((item) => item.sessionId === session.id)
+      : false,
+    messageCount: session?.messages.length ?? 0,
+  });
 
   if (!onboardingLoaded) {
     return <div className="app-boot" aria-hidden />;
@@ -890,6 +911,7 @@ export default function App() {
         onTogglePanel={togglePanel}
         aiReady={aiReady}
         justOnboarded={justOnboarded}
+        zeroConfigSettled={zeroConfigSettled}
         hasConfigs={vpn.configs.length > 0}
         onAskAi={handleAskAiFromConsole}
         onNewConfig={() => setNewConfigOpen(true)}

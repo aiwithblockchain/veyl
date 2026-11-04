@@ -23,6 +23,7 @@ interface Props {
   onTogglePanel: () => void;
   aiReady: boolean;
   justOnboarded: boolean;
+  zeroConfigSettled: boolean;
   hasConfigs: boolean;
   onAskAi: () => void;
   onNewConfig: () => void;
@@ -74,6 +75,7 @@ export function Console({
   onTogglePanel,
   aiReady,
   justOnboarded,
+  zeroConfigSettled,
   hasConfigs,
   onAskAi,
   onNewConfig,
@@ -179,7 +181,7 @@ export function Console({
   else if (!connected) probeHint = "连接后可以测试";
   const probeText = nodeProbeAvailable && connected ? probeLabel : probeHint;
 
-  const zeroMode = zeroConfigMode(aiReady, justOnboarded);
+  const zeroMode = zeroConfigMode(aiReady, justOnboarded, zeroConfigSettled);
   const zeroContent = zeroConfigContent(zeroMode);
   const zeroActions = zeroConfigActions(zeroMode);
 
@@ -250,7 +252,7 @@ export function Console({
                     runZeroConfigPrimaryAction(zeroMode, { onAskAi, onNewConfig })
                   }
                 >
-                  让 AI 帮我配
+                  {zeroContent.primaryLabel ?? "让 AI 帮我配"}
                 </button>
               ) : null}
               {zeroActions.includes("new-config") ? (
@@ -262,7 +264,7 @@ export function Console({
                       runZeroConfigPrimaryAction(zeroMode, { onAskAi, onNewConfig })
                     }
                   >
-                    我自己配置
+                    {zeroContent.primaryLabel ?? "我自己配置"}
                   </button>
                 ) : (
                   <button type="button" className="btn btn--ghost" onClick={onNewConfig}>

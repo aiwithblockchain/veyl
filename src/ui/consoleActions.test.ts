@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { activeSession, chatReducer, createInitialState, createSession } from "../state/chatStore";
 import {
+  isZeroConfigAskSuppressed,
   runZeroConfigPrimaryAction,
   shouldResetJustOnboarded,
   shouldSendZeroConfigAsk,
+  shouldSettleZeroConfig,
   zeroConfigActions,
   zeroConfigContent,
   zeroConfigMode,
@@ -47,9 +49,12 @@ describe("零配置入口", () => {
     expect(onAskAi).toHaveBeenCalledTimes(1);
     expect(onNewConfig).not.toHaveBeenCalled();
 
+    runZeroConfigPrimaryAction("just-onboarded-stopped", handlers);
+    expect(onAskAi).toHaveBeenCalledTimes(2);
+
     runZeroConfigPrimaryAction("manual", handlers);
     expect(onNewConfig).toHaveBeenCalledTimes(1);
-    expect(onAskAi).toHaveBeenCalledTimes(1);
+    expect(onAskAi).toHaveBeenCalledTimes(2);
   });
 
   it("会话空闲时，主按钮发出一条用户消息", () => {
@@ -133,5 +138,75 @@ describe("零配置入口", () => {
     expect(zeroConfigContent("ai-ready").title).not.toBe(
       zeroConfigContent("just-onboarded").title,
     );
+  });
+
+  it("A 状态在请求结束后切成可继续", () => {
+    const settled = shouldSettleZeroConfig({
+      requesting: false,
+      hasActiveRequest: false,
+      hasPendingQuestion: false,
+      messageCount: 2,
+    });
+    expect(settled).toBe(true);
+
+    const mode = zeroConfigMode(true, true, settled);
+    expect(mode).toBe("just-onboarded-stopped");
+    expect(zeroConfigActions(mode)).toEqual(["ask-ai", "new-config"]);
+    expect(zeroConfigContent(mode).title).toBe("还没配好。");
+    expect(zeroConfigContent(mode).primaryLabel).toBe("继续帮我配");
+  });
+
+  it("A 状态请求进行中保持原状", () => {
+    expect(
+      shouldSettleZeroConfig({
+        requesting: true,
+        hasActiveRequest: false,
+        hasPendingQuestion: false,
+        messageCount: 2,
+      }),
+    ).toBe(false);
+    expect(
+      shouldSettleZeroConfig({
+        requesting: false,
+        hasActiveRequest: true,
+        hasPendingQuestion: false,
+        messageCount: 2,
+      }),
+    ).toBe(false);
+    expect(
+      shouldSettleZeroConfig({
+        requesting: false,
+        hasActiveRequest: false,
+        hasPendingQuestion: true,
+        messageCount: 2,
+      }),
+    ).toBe(false);
+    expect(
+      shouldSettleZeroConfig({
+        requesting: false,
+        hasActiveRequest: false,
+        hasPendingQuestion: false,
+        messageCount: 0,
+      }),
+    ).toBe(false);
+
+    expect(zeroConfigMode(true, true, false)).toBe("just-onboarded");
+    expect(zeroConfigActions("just-onboarded")).toEqual(["new-config"]);
+  });
+
+  it("B/C 不受 settled 影响", () => {
+    expect(zeroConfigMode(true, false, true)).toBe("ai-ready");
+    expect(zeroConfigMode(false, true, true)).toBe("manual");
+    expect(zeroConfigActions("ai-ready")).toEqual(["ask-ai", "new-config"]);
+    expect(zeroConfigActions("manual")).toEqual(["new-config"]);
+  });
+
+  it("AI 回了新内容后按钮可以再次发送", () => {
+    expect(
+      isZeroConfigAskSuppressed({ asked: true, askedAtCount: 2, messageCount: 2 }),
+    ).toBe(true);
+    expect(
+      isZeroConfigAskSuppressed({ asked: true, askedAtCount: 2, messageCount: 4 }),
+    ).toBe(false);
   });
 });
