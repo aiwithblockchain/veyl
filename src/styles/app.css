@@ -2575,7 +2575,7 @@ pre {
   margin-top: 3px;
   border-radius: 50%;
   background: var(--bg-hover);
-  color: var(--ink-3);
+  color: var(--ink-2);
   font-size: var(--fs-label);
   font-weight: 500;
 }
@@ -2585,7 +2585,7 @@ pre {
   font-size: var(--fs-body);
   line-height: 1.65;
   color: var(--ink-2);
-  text-align: left;
+  text-align: center;
 }
 
 .console-empty-entry__actions {
@@ -2594,6 +2594,10 @@ pre {
   justify-content: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.console-empty-entry__actions .btn {
+  height: 38px;
 }
 
 .console-empty-entry__primary {

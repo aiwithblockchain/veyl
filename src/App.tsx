@@ -28,6 +28,7 @@ import {
   shouldShowOnboarding,
 } from "./config/onboarding";
 import { useVpnSession } from "./config/useVpnSession";
+import { shouldSendZeroConfigAsk } from "./ui/consoleActions";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import { useFocusTrap } from "./ui/focus";
 import "./styles/app.css";
@@ -812,12 +813,22 @@ export default function App() {
     });
   };
 
-  // 零配置主按钮「让 AI 帮我配」：只打开右栏并把焦点交给输入框，不发消息。
+  // 用户主动点「让 AI 帮我配」：打开右栏、给焦点；会话空闲时直接发一条可见的用户消息。
   const handleAskAiFromConsole = () => {
     panelOpenRef.current = true;
     setPanelOpen(true);
     setAiUnread(false);
     setComposerFocusSignal((value) => value + 1);
+
+    const hasPendingQuestion = session
+      ? pendingQuestions.some((item) => item.sessionId === session.id)
+      : false;
+    const shouldSend = shouldSendZeroConfigAsk({
+      requesting: session?.requesting ?? false,
+      hasActiveRequest: Boolean(session?.activeRequestId),
+      hasPendingQuestion,
+    });
+    if (shouldSend) handleEmptySend("帮我配一下网络");
   };
 
   const handleSwitchNode = (nodeId: string) => {

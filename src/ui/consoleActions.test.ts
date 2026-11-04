@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { activeSession, chatReducer, createInitialState, createSession } from "../state/chatStore";
 import {
   runZeroConfigPrimaryAction,
+  shouldSendZeroConfigAsk,
   zeroConfigActions,
   zeroConfigContent,
   zeroConfigMode,
@@ -49,15 +51,55 @@ describe("零配置入口", () => {
     expect(onAskAi).toHaveBeenCalledTimes(1);
   });
 
-  it("主按钮不会发出消息", () => {
-    const onAskAi = vi.fn();
-    const onNewConfig = vi.fn();
-    const onSend = vi.fn();
-    const handlers = { onAskAi, onNewConfig, onSend };
+  it("会话空闲时，主按钮发出一条用户消息", () => {
+    expect(
+      shouldSendZeroConfigAsk({
+        requesting: false,
+        hasActiveRequest: false,
+        hasPendingQuestion: false,
+      }),
+    ).toBe(true);
 
-    runZeroConfigPrimaryAction("ai-ready", handlers);
-    runZeroConfigPrimaryAction("manual", handlers);
+    const session = createSession(1);
+    let state = chatReducer(createInitialState(), {
+      type: "add_session",
+      session,
+    });
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId: session.id,
+      text: "帮我配一下网络",
+      localRequestId: "local_ask",
+    });
 
-    expect(onSend).not.toHaveBeenCalled();
+    const current = activeSession(state)!;
+    expect(current.messages[0]).toMatchObject({
+      role: "user",
+      text: "帮我配一下网络",
+    });
+  });
+
+  it("会话正在请求中、或有未回答的问题时，主按钮只给焦点，不重复发消息", () => {
+    expect(
+      shouldSendZeroConfigAsk({
+        requesting: true,
+        hasActiveRequest: false,
+        hasPendingQuestion: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldSendZeroConfigAsk({
+        requesting: false,
+        hasActiveRequest: true,
+        hasPendingQuestion: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldSendZeroConfigAsk({
+        requesting: false,
+        hasActiveRequest: false,
+        hasPendingQuestion: true,
+      }),
+    ).toBe(false);
   });
 });
