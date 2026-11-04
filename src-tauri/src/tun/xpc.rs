@@ -82,16 +82,25 @@ extern "C" {
     static _xpc_type_dictionary: c_void;
 }
 
-pub fn is_error(object: xpc_object_t) -> bool {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn is_error(object: xpc_object_t) -> bool {
     // SAFETY: 这两个都是 libxpc 导出的类型标记常量，只比较地址。
-    unsafe { xpc_get_type(object) == &_xpc_type_error as *const c_void }
+    unsafe { std::ptr::eq(xpc_get_type(object), &_xpc_type_error as *const c_void) }
 }
 
-pub fn is_dictionary(object: xpc_object_t) -> bool {
-    unsafe { xpc_get_type(object) == &_xpc_type_dictionary as *const c_void }
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn is_dictionary(object: xpc_object_t) -> bool {
+    unsafe { std::ptr::eq(xpc_get_type(object), &_xpc_type_dictionary as *const c_void) }
 }
 
-pub fn describe(object: xpc_object_t) -> String {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn describe(object: xpc_object_t) -> String {
     unsafe {
         let text = xpc_copy_description(object);
         if text.is_null() {
@@ -103,7 +112,10 @@ pub fn describe(object: xpc_object_t) -> String {
     }
 }
 
-pub fn release(object: xpc_object_t) {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn release(object: xpc_object_t) {
     if !object.is_null() {
         unsafe { xpc_release(object) };
     }
@@ -196,11 +208,11 @@ fn parse_reply(service: &CString, method: &str, reply: xpc_object_t) -> Result<R
             "助手没有回复（可能没有注册或被系统拒绝）".into(),
         ));
     }
-    if is_error(reply) {
-        return Err(XpcError::Unavailable(describe(reply)));
+    if unsafe { is_error(reply) } {
+        return Err(XpcError::Unavailable(unsafe { describe(reply) }));
     }
-    if !is_dictionary(reply) {
-        return Err(XpcError::Protocol(describe(reply)));
+    if !unsafe { is_dictionary(reply) } {
+        return Err(XpcError::Protocol(unsafe { describe(reply) }));
     }
 
     let ok = unsafe { xpc_dictionary_get_bool(reply, cstring("ok").as_ptr()) };
@@ -255,19 +267,31 @@ pub fn create_listener(service: &str) -> xpc_connection_t {
     }
 }
 
-pub fn connection_pid(connection: xpc_connection_t) -> u32 {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn connection_pid(connection: xpc_connection_t) -> u32 {
     unsafe { xpc_connection_get_pid(connection) as u32 }
 }
 
-pub fn resume(connection: xpc_connection_t) {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn resume(connection: xpc_connection_t) {
     unsafe { xpc_connection_resume(connection) };
 }
 
-pub fn cancel(connection: xpc_connection_t) {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn cancel(connection: xpc_connection_t) {
     unsafe { xpc_connection_cancel(connection) };
 }
 
-pub fn set_event_handler(connection: xpc_connection_t, handler: *mut c_void) {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn set_event_handler(connection: xpc_connection_t, handler: *mut c_void) {
     unsafe { xpc_connection_set_event_handler(connection, handler) };
 }
 
@@ -275,7 +299,10 @@ pub fn set_event_handler(connection: xpc_connection_t, handler: *mut c_void) {
 ///
 /// 用它替掉「取 pid 之后再 SecCodeCheckValidity」：后者在两步之间有窗口，
 /// 而且要求被验证方自己提供 pid 作为依据。返回 0 表示 requirement 字符串合法。
-pub fn set_peer_code_signing_requirement(
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn set_peer_code_signing_requirement(
     connection: xpc_connection_t,
     requirement: &str,
 ) -> Result<(), String> {
@@ -294,23 +321,38 @@ pub fn dict_create() -> xpc_object_t {
     unsafe { xpc_dictionary_create(std::ptr::null(), std::ptr::null(), 0) }
 }
 
-pub fn dict_set_bool(dict: xpc_object_t, key: &str, value: bool) {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn dict_set_bool(dict: xpc_object_t, key: &str, value: bool) {
     unsafe { xpc_dictionary_set_bool(dict, cstring(key).as_ptr(), value) };
 }
 
-pub fn dict_set_int64(dict: xpc_object_t, key: &str, value: i64) {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn dict_set_int64(dict: xpc_object_t, key: &str, value: i64) {
     unsafe { xpc_dictionary_set_int64(dict, cstring(key).as_ptr(), value) };
 }
 
-pub fn dict_set_string(dict: xpc_object_t, key: &str, value: &str) {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn dict_set_string(dict: xpc_object_t, key: &str, value: &str) {
     unsafe { xpc_dictionary_set_string(dict, cstring(key).as_ptr(), cstring(value).as_ptr()) };
 }
 
-pub fn dict_get_string(dict: xpc_object_t, key: &str) -> Option<String> {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn dict_get_string(dict: xpc_object_t, key: &str) -> Option<String> {
     get_string(dict, key)
 }
 
-pub fn dict_get_data(dict: xpc_object_t, key: &str) -> Option<Vec<u8>> {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn dict_get_data(dict: xpc_object_t, key: &str) -> Option<Vec<u8>> {
     unsafe {
         let mut length: usize = 0;
         let pointer = xpc_dictionary_get_data(dict, cstring(key).as_ptr(), &mut length);
@@ -321,18 +363,27 @@ pub fn dict_get_data(dict: xpc_object_t, key: &str) -> Option<Vec<u8>> {
     }
 }
 
-pub fn make_reply(original: xpc_object_t) -> xpc_object_t {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn make_reply(original: xpc_object_t) -> xpc_object_t {
     unsafe { xpc_dictionary_create_reply(original) }
 }
 
 /// 把回复发回对端连接。调用后由我们释放 reply。
-pub fn send_message(connection: xpc_connection_t, message: xpc_object_t) {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn send_message(connection: xpc_connection_t, message: xpc_object_t) {
     extern "C" {
         fn xpc_connection_send_message(connection: xpc_connection_t, message: xpc_object_t);
     }
     unsafe { xpc_connection_send_message(connection, message) };
 }
 
-pub fn set_value(dict: xpc_object_t, key: &str, value: xpc_object_t) {
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn set_value(dict: xpc_object_t, key: &str, value: xpc_object_t) {
     unsafe { xpc_dictionary_set_value(dict, cstring(key).as_ptr(), value) };
 }

@@ -88,15 +88,15 @@ fn serve(supervisor: Arc<Supervisor>) -> ! {
     }
 
     // 在连接建立时由 libxpc 校验对端签名，从根上消掉「取 pid 之后再验」的窗口。
-    if let Err(error) = xpc::set_peer_code_signing_requirement(listener, &protocol::app_requirement())
+    if let Err(error) = unsafe { xpc::set_peer_code_signing_requirement(listener, &protocol::app_requirement()) }
     {
         eprintln!("veyl-helper: {error}");
         std::process::exit(4);
     }
 
     let listener_handler: RcBlock<dyn Fn(xpc_object_t)> = RcBlock::new(move |event: xpc_object_t| {
-        if xpc::is_error(event) {
-            eprintln!("veyl-helper: 监听器事件：{}", xpc::describe(event));
+        if unsafe { xpc::is_error(event) } {
+            eprintln!("veyl-helper: 监听器事件：{}", unsafe { xpc::describe(event) });
             return;
         }
 
@@ -104,17 +104,17 @@ fn serve(supervisor: Arc<Supervisor>) -> ! {
         // 监听器已经过滤不满足 requirement 的消息；这里对连接本身再设一次，
         // 双向兜底（对每个连接只能设一次）。
         if let Err(error) =
-            xpc::set_peer_code_signing_requirement(connection, &protocol::app_requirement())
+            unsafe { xpc::set_peer_code_signing_requirement(connection, &protocol::app_requirement()) }
         {
             eprintln!("veyl-helper: 拒绝连接：{error}");
-            xpc::cancel(connection);
+            unsafe { xpc::cancel(connection) };
             return;
         }
 
         let per_connection = Arc::clone(&supervisor);
         let handler: RcBlock<dyn Fn(xpc_object_t)> =
             RcBlock::new(move |message: xpc_object_t| {
-                if xpc::is_error(message) {
+                if unsafe { xpc::is_error(message) } {
                     return;
                 }
                 handle_message(&per_connection, connection, message);
@@ -122,14 +122,14 @@ fn serve(supervisor: Arc<Supervisor>) -> ! {
         // block 必须活得和连接一样久；leak 是刻意的。
         let raw = RcBlock::as_ptr(&handler) as *mut c_void;
         std::mem::forget(handler);
-        xpc::set_event_handler(connection, raw);
-        xpc::resume(connection);
+        unsafe { xpc::set_event_handler(connection, raw) };
+        unsafe { xpc::resume(connection) };
     });
 
     let raw = RcBlock::as_ptr(&listener_handler) as *mut c_void;
     std::mem::forget(listener_handler);
-    xpc::set_event_handler(listener, raw);
-    xpc::resume(listener);
+    unsafe { xpc::set_event_handler(listener, raw) };
+    unsafe { xpc::resume(listener) };
 
     unsafe { dispatch_main() }
 }
@@ -139,19 +139,19 @@ fn handle_message(
     connection: xpc::xpc_connection_t,
     message: xpc_object_t,
 ) {
-    let method = xpc::dict_get_string(message, "method").unwrap_or_default();
-    let reply = xpc::make_reply(message);
+    let method = unsafe { xpc::dict_get_string(message, "method") }.unwrap_or_default();
+    let reply = unsafe { xpc::make_reply(message) };
 
     let outcome: Result<(), ProtocolError> = match method.as_str() {
         "start" => {
-            let raw = xpc::dict_get_data(message, "config").unwrap_or_default();
+            let raw = unsafe { xpc::dict_get_data(message, "config") }.unwrap_or_default();
             let config = String::from_utf8_lossy(&raw).to_string();
             match supervisor.start(&config) {
                 Ok(started) => {
-                    xpc::dict_set_bool(reply, "ok", true);
-                    xpc::dict_set_int64(reply, "pid", started.pid as i64);
-                    xpc::dict_set_string(reply, "clash_addr", &started.clash_addr);
-                    xpc::dict_set_string(reply, "clash_secret", &started.clash_secret);
+                    unsafe { xpc::dict_set_bool(reply, "ok", true) };
+                    unsafe { xpc::dict_set_int64(reply, "pid", started.pid as i64) };
+                    unsafe { xpc::dict_set_string(reply, "clash_addr", &started.clash_addr) };
+                    unsafe { xpc::dict_set_string(reply, "clash_secret", &started.clash_secret) };
                     Ok(())
                 }
                 Err(error) => Err(error),
@@ -159,14 +159,14 @@ fn handle_message(
         }
         "stop" => {
             supervisor.stop();
-            xpc::dict_set_bool(reply, "ok", true);
+            unsafe { xpc::dict_set_bool(reply, "ok", true) };
             Ok(())
         }
         "status" => {
             let status = supervisor.status();
-            xpc::dict_set_bool(reply, "ok", true);
-            xpc::dict_set_bool(reply, "running", status.is_some());
-            xpc::dict_set_int64(reply, "pid", status.unwrap_or(0) as i64);
+            unsafe { xpc::dict_set_bool(reply, "ok", true) };
+            unsafe { xpc::dict_set_bool(reply, "running", status.is_some()) };
+            unsafe { xpc::dict_set_int64(reply, "pid", status.unwrap_or(0) as i64) };
             Ok(())
         }
         other => Err(ProtocolError::new(
@@ -176,13 +176,13 @@ fn handle_message(
     };
 
     if let Err(error) = outcome {
-        xpc::dict_set_bool(reply, "ok", false);
-        xpc::dict_set_string(reply, "code", error.code);
-        xpc::dict_set_string(reply, "message", &error.message);
+        unsafe { xpc::dict_set_bool(reply, "ok", false) };
+        unsafe { xpc::dict_set_string(reply, "code", error.code) };
+        unsafe { xpc::dict_set_string(reply, "message", &error.message) };
     }
 
-    xpc::send_message(connection, reply);
-    xpc::release(reply);
+    unsafe { xpc::send_message(connection, reply) };
+    unsafe { xpc::release(reply) };
 }
 
 // ---------------------------------------------------------------------------

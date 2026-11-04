@@ -86,7 +86,7 @@ pub trait Registration: Send + Sync {
 pub fn select() -> Arc<dyn Registration> {
     #[cfg(target_os = "macos")]
     {
-        return Arc::new(smappservice::SmAppService);
+        Arc::new(smappservice::SmAppService)
     }
     #[cfg(not(target_os = "macos"))]
     {
