@@ -8,8 +8,8 @@ const PLATFORM_URL = "https://platform.deepseek.com/";
 
 interface Props {
   bridge: AgentBridge;
-  /** 完成引导：保存了 Key / 服务商，或者明确选择不用 AI。 */
-  onDone: () => void;
+  /** skipped 表示用户明确选择不用 AI；其余情况表示刚保存了 Key / 服务商。 */
+  onDone: (skipped: boolean) => void;
 }
 
 interface CustomForm {
@@ -47,7 +47,7 @@ export function Onboarding({ bridge, onDone }: Props) {
     try {
       await bridge.saveDeepSeekKey(key);
       setValue("");
-      onDone();
+      onDone(false);
     } catch (saveError) {
       setError(describeKeyError(saveError));
     } finally {
@@ -116,7 +116,7 @@ export function Onboarding({ bridge, onDone }: Props) {
       } catch {
         // 没有其他当前服务时，保存时已经设为当前。
       }
-      onDone();
+      onDone(false);
     } catch (saveError) {
       setCustomError(describeProviderError(saveError));
     } finally {
@@ -296,7 +296,7 @@ export function Onboarding({ bridge, onDone }: Props) {
           type="button"
           className="onboarding__manual"
           disabled={saving !== null}
-          onClick={onDone}
+          onClick={() => onDone(true)}
         >
           我懂网络，不用 AI
         </button>

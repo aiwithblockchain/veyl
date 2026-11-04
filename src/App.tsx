@@ -38,6 +38,7 @@ const EVER_CONNECTED_KEY = "veyl.hasEverConnected";
 const PANEL_KEY = "veyl.ui.panelOpen";
 const PANEL_CLOSED_BY_USER_KEY = "veyl.ui.panelClosedByUser";
 const PANEL_AUTO_OPENED_KEY = "veyl.ui.panelAutoOpened";
+const ONBOARDING_SKIPPED_KEY = "veyl.onboarding.skipped";
 
 function readFlag(key: string): boolean {
   try {
@@ -99,6 +100,7 @@ export default function App() {
   const panelClosedByUserRef = useRef(readFlag(PANEL_CLOSED_BY_USER_KEY));
   const panelAutoOpenedRef = useRef(readFlag(PANEL_AUTO_OPENED_KEY));
   const aiConfiguredRef = useRef(false);
+  const onboardingSkippedRef = useRef(readFlag(ONBOARDING_SKIPPED_KEY));
 
   const markQuestionSettled = (questionId: string) => {
     const settled = settledQuestionIds.current;
@@ -155,9 +157,14 @@ export default function App() {
         bridge.getDeepSeekKey().catch(() => null),
         bridge.llmProviderList().catch(() => null),
       ]);
+      // 内置服务商默认就是 active，但它不代表用户配过；看的是当前服务商有没有 Key。
+      const activeProvider = providers
+        ? providers.providers.find(
+            (provider) => provider.providerId === providers.activeProviderId,
+          )
+        : undefined;
       const ready =
-        (key?.masked ?? null) !== null ||
-        (providers?.activeProviderId ?? null) !== null;
+        (key?.masked ?? null) !== null || activeProvider?.hasKey === true;
       const wasReady = aiConfiguredRef.current;
       aiConfiguredRef.current = ready;
       setAiReady(ready);
@@ -311,7 +318,7 @@ export default function App() {
       await refreshDefaultProfile();
       const ready = await refreshAiStatus(true);
       if (cancelled) return;
-      setShowOnboarding(!ready);
+      setShowOnboarding(!ready && !onboardingSkippedRef.current);
       setOnboardingLoaded(true);
     })();
     return () => {
@@ -372,7 +379,11 @@ export default function App() {
     await Promise.all([refreshDefaultProfile(), refreshAiStatus()]);
   };
 
-  const finishOnboarding = () => {
+  const finishOnboarding = (skipped: boolean) => {
+    if (skipped) {
+      onboardingSkippedRef.current = true;
+      writeFlag(ONBOARDING_SKIPPED_KEY);
+    }
     void completeOnboarding();
   };
 
