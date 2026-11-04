@@ -44,9 +44,10 @@ const KEEP_ARCHIVES = 10;
 
 const USAGE = `用法：node scripts/dev/run-with-logs.mjs [选项] [-- tauri dev 的参数...]
 
-启动前把 logs/ 里上一次运行留下的文件移到 logs/archive/<上一次运行 id>/，
-然后拉起 npm run tauri -- dev；子进程输出同时打到终端和 logs/terminal.log，
-下次启动时跟着一起归档。
+启动前把 logs/ 里上一次运行留下的日志文件（app-*.log、terminal.log）移到
+logs/archive/<上一次运行 id>/，然后拉起 npm run tauri -- dev；子进程输出
+同时打到终端和 logs/terminal.log，下次启动时跟着一起归档。
+logs/ 里其它文件（你手放的笔记、脚本）不动。
 
 上一次运行的 id 记在 logs/.run-id 里：启动时读它给归档目录命名，再把
 本次的 id 写回去。所以目录名就是里面那批日志的运行时间。
@@ -111,13 +112,35 @@ function readRunId() {
   }
 }
 
+/** 只归档本脚本/本应用自己写的文件。 */
+const OWN_LOG_FILE = [/^app-.*\.log$/, /^terminal\.log$/];
+
+function isOwnLogFile(name) {
+  return OWN_LOG_FILE.some((pattern) => pattern.test(name));
+}
+
 /** `logs/` 一级目录下属于上一次运行的文件。`archive/` 是目录，`.run-id` 是标记，都跳过。 */
 function previousRunFiles() {
   if (!existsSync(LOGS_DIR)) {
     return [];
   }
   return readdirSync(LOGS_DIR, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name !== RUN_ID_FILE)
+    .filter((entry) => entry.isFile() && isOwnLogFile(entry.name))
+    .map((entry) => entry.name);
+}
+
+/** 不是我们写的文件：原样留在 logs/，只提示一句。 */
+function foreignFiles() {
+  if (!existsSync(LOGS_DIR)) {
+    return [];
+  }
+  return readdirSync(LOGS_DIR, { withFileTypes: true })
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        entry.name !== RUN_ID_FILE &&
+        !isOwnLogFile(entry.name),
+    )
     .map((entry) => entry.name);
 }
 
@@ -142,6 +165,8 @@ function pruneArchives() {
   const names = readdirSync(ARCHIVE_DIR, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
+    // 只认本脚本建的目录名；别的目录不是我们的，不删。
+    .filter((name) => /^\d{8}-\d{6}$/.test(name))
     // 目录名是 YYYYMMDD-HHMMSS，字典序即时间序。
     .sort();
   const removed = [];
@@ -209,6 +234,13 @@ function main() {
     console.log("[logs] 首次运行，没有需要归档的文件");
   }
   console.log(`[logs] 本次应用日志：${LOGS_DIR}；终端输出：${terminalLog}`);
+  // 只动自己写的文件：用户手放进去的笔记/脚本必须原样留下。
+  const foreign = foreignFiles();
+  if (foreign.length > 0) {
+    console.log(
+      `[logs] logs/ 里有 ${foreign.length} 个不是本脚本生成的文件，保持原样：${foreign.join("、")}`,
+    );
+  }
 
   if (options.dryRun) {
     console.log("[logs] --dry-run：不拉起进程");
