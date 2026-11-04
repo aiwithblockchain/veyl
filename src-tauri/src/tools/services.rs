@@ -3160,6 +3160,12 @@ impl WiredServices {
 
     /// 连接一套配置。分流与节点准备两种模式共用，只有「怎么起」不同。
     async fn connect(&self, config: &configs::Config) -> anyhow::Result<Value> {
+        log::info!(
+            "连接开始 config={} mode={} routing={}",
+            config.id,
+            config.connection_mode,
+            config.routing_mode
+        );
 
         let installed_rules = crate::rules::load_active(&self.store, &self.data_dir).ok_or_else(|| {
             svc_error_with_details(
@@ -3351,9 +3357,14 @@ impl WiredServices {
         self.restore_system_proxy()?;
         self.manager.set_system_proxy_enabled(false).await;
 
+        log::debug!("连接 TUN 配置已生成");
         let pid = match self.tun.launch(&config_json) {
-            Ok(started) => started.pid,
+            Ok(started) => {
+                log::info!("连接 TUN 运行时已启动 pid={}", started.pid);
+                started.pid
+            }
             Err(error) => {
+                log::error!("连接 TUN 启动失败 code={}：{}", error.code, error.message);
                 return Err(svc_error_with_details(
                     error.code,
                     error.message.clone(),
@@ -3407,6 +3418,7 @@ impl WiredServices {
         .await
         .map_err(|e| svc_error(e.code(), e))?;
 
+        log::debug!("连接 配置已渲染并通过 check path={}", path.display());
         let text = std::fs::read_to_string(&path)
             .map_err(|e| svc_error("PRECONDITION_FAILED", format!("读取本地配置失败：{e}")))?;
         let value: Value = serde_json::from_str(&text)
@@ -3450,14 +3462,18 @@ impl WiredServices {
             }
         };
 
+        log::info!("连接 运行时已启动 state={:?} pid={:?}", started.state, started.pid);
         if let Err(error) = require_running_state(started.state) {
+            log::error!("连接 运行时状态不是 running：{error}");
             return Err(self.abort_connection(error));
         }
 
         if let Err(error) = self.proxy.enable(mixed_port) {
+            log::error!("连接 设置系统代理失败 port={mixed_port}：{error}");
             self.rollback_proxy_after_enable_failure().await;
             return Err(svc_error("INTERNAL", format!("设置系统代理失败：{error}")));
         }
+        log::info!("连接 系统代理已设置 127.0.0.1:{mixed_port}");
         self.manager.set_system_proxy_enabled(true).await;
 
         let awaited_ip = self

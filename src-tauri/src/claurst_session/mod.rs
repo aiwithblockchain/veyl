@@ -208,6 +208,8 @@ impl AivpnSession {
         let request_session_id = self.session_id.clone();
         let mut messages = self.messages.lock().await;
         drop_dangling_tool_use(&mut messages);
+        // 只记长度，不记内容——用户输入不进日志。
+        log::debug!("AI 收到用户消息 {} 字", text.chars().count());
         messages.push(Message::user(text));
 
         // 工具审计要把调用记到当前请求上（工具自己拿不到 request_id）。
@@ -267,6 +269,10 @@ impl AivpnSession {
                     } => {
                         tool_call_id = tool_id.clone();
                         tool_started = Instant::now();
+                        let safe_args = serde_json::from_str::<Value>(input_json)
+                            .map(|value| crate::logging::redact_json(&value).to_string())
+                            .unwrap_or_else(|_| "<无法解析>".into());
+                        log::debug!("AI 工具调用 {tool_name} args={safe_args}");
 
                         let parsed = serde_json::from_str::<Value>(input_json).ok();
                         record_tool_call_start(&session_id, &tool_id, &tool_name, parsed.as_ref());
@@ -301,6 +307,12 @@ impl AivpnSession {
                     } => {
                         let outcome = envelope::take_outcome(&session_id, tool_name);
                         let duration_ms = tool_started.elapsed().as_millis() as u64;
+                        // 结果体不落日志（可能含节点信息），只记成败与耗时。
+                        log::debug!(
+                            "AI 工具完成 {tool_name} ok={} {duration_ms}ms 结果 {} 字节",
+                            !*is_error,
+                            result.chars().count()
+                        );
                         let error_code = outcome
                             .as_ref()
                             .and_then(|outcome| outcome.error.as_ref())

@@ -108,6 +108,28 @@ pub fn run() {
     // 工具路径没有 AppState 句柄，热更新凭据靠这个弱引用。
     agent::install_app_state(&state);
 
+    // ---- 启动序列：一行一条，故障时能直接看出「应用此刻认为自己处于什么状态」 ----
+    log::info!("启动 data_dir={}", data_dir.display());
+    log::info!("启动 数据库={}", crate::store::default_db_path(&data_dir).display());
+    match crate::runtime::Installer::new(&data_dir).active() {
+        Ok(Some(rt)) => log::info!("启动 运行时={} ({})", rt.version, rt.binary.display()),
+        Ok(None) => log::info!("启动 运行时=未安装"),
+        Err(error) => log::warn!("启动 运行时状态读取失败：{error}"),
+    }
+    log::info!(
+        "启动 种子节点={}",
+        crate::seed::load_nodes(&store).map(|nodes| nodes.len()).unwrap_or(0)
+    );
+    log::info!(
+        "启动 AI provider={:?} 可用={}",
+        crate::llm::active_id(&store),
+        crate::llm::has_any_usable(&store)
+    );
+    log::info!(
+        "启动 TUN helper={}",
+        crate::tun::privilege::select().status().as_str()
+    );
+
     let setup_store = Arc::clone(&store);
     let rules_data_dir = data_dir.clone();
 
@@ -225,7 +247,10 @@ pub fn run() {
                 lifecycle::hide_main_window(window.app_handle());
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler({
+            // 在**唯一的分发点**统一记录：前端点了什么命令、带了什么参数、多久返回。
+            // 39 个命令逐个加日志既容易漏，也会让每个函数都变长。
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             agent::commands::ai_send_message,
             agent::commands::ai_cancel,
             agent::commands::runtime_status,
@@ -265,7 +290,21 @@ pub fn run() {
             agent::commands::llm_provider_activate,
             agent::commands::llm_provider_test,
             agent::commands::rename_session,
-        ])
+        ];
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                let command = invoke.message.command().to_string();
+                let args = describe_invoke_args(invoke.message.payload());
+                let started = std::time::Instant::now();
+                let handled = handler(invoke);
+                let elapsed = started.elapsed().as_millis();
+                if handled {
+                    log::debug!("命令 {command} {elapsed}ms args={args}");
+                } else {
+                    log::warn!("命令 {command} 没有对应的处理函数");
+                }
+                handled
+            }
+        })
         .build(tauri::generate_context!())
         .expect("Veyl 启动失败");
 
@@ -280,6 +319,14 @@ pub fn run() {
             lifecycle::on_exit_requested(handle, exit_parts.clone());
         }
     });
+}
+
+/// 把命令参数渲染成一行：**先脱敏再序列化**，敏感字段永远是 `***`。
+fn describe_invoke_args(body: &tauri::ipc::InvokeBody) -> String {
+    match body {
+        tauri::ipc::InvokeBody::Json(value) => crate::logging::redact_json(value).to_string(),
+        tauri::ipc::InvokeBody::Raw(bytes) => format!("<raw {} 字节>", bytes.len()),
+    }
 }
 
 /// 自建应用菜单：接管 Cmd+Q，并保留常用编辑/窗口快捷键。
