@@ -590,10 +590,9 @@ async fn path_traversal_and_control_characters_do_not_panic() {
 /// 这是本组测试里最重要的一条：`config_id: 123` 如果被当成「省略」，
 /// `VpnConnect` 会去连**当前激活的那套配置**——用户以为连的是 A，实际连的是 B。
 ///
-/// **已知缺陷，当前 ignore**：`VpnConnectTool` 用的是
-/// `input.get("config_id").and_then(Value::as_str)`，类型不对就退化成 `None`。
-/// 这条测试正是为了它写的，修好后去掉 `ignore` 即可。
-#[ignore = "已知缺陷：VpnConnect 把类型错的 config_id 当成「省略」"]
+/// 曾经是已知缺陷：`config_id` 类型不对时被 `and_then(Value::as_str)` 退化成
+/// `None`，于是「指定了 A」变成「用默认的 B」。现在由 `tools::optional_string`
+/// 区分「没给」与「给错类型」。
 #[tokio::test]
 async fn wrong_typed_optional_ids_are_not_silently_ignored() {
     let (svc, rec) = FakeServices::new();

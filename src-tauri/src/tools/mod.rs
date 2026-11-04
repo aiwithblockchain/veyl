@@ -104,6 +104,36 @@ fn normalize_question_options(input: &Value) -> Result<Vec<Value>, &'static str>
 }
 
 /// P1 注册清单，顺序与 `tools.md` §3.1 一致。
+/// 读取**可选**的字符串参数。
+///
+/// 三种情况必须分开：
+/// - 键不存在（或显式 `null`）→ `Ok(None)`，走默认行为，这是可选参数该有的样子；
+/// - 键存在且是字符串 → `Ok(Some(_))`；
+/// - 键存在但类型不对 → `Err`。**不能退化成 `None`**：那会让「调用方指定了 A」
+///   悄悄变成「没指定，用默认的 B」——`VpnConnect` 会因此连错配置，
+///   界面上还一切正常。
+pub fn optional_string(input: &Value, key: &str) -> Result<Option<String>, envelope::AivpnError> {
+    match input.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(other) => Err(envelope::AivpnError::new(
+            "INVALID_ARGUMENT",
+            format!("{key} 必须是字符串，收到的是{}", value_kind(other)),
+        )),
+    }
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => " null",
+        Value::Bool(_) => "布尔值",
+        Value::Number(_) => "数字",
+        Value::String(_) => "字符串",
+        Value::Array(_) => "数组",
+        Value::Object(_) => "对象",
+    }
+}
+
 pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(runtime::RuntimeStatusTool::new(Arc::clone(&services))),

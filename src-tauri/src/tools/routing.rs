@@ -91,10 +91,10 @@ impl Tool for RouteGetTool {
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let config_id = input
-            .get("config_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let config_id = match super::optional_string(&input, "config_id") {
+            Ok(value) => value,
+            Err(error) => return envelope::finish(ctx, "RouteGet", ToolOutcome::fail(error)),
+        };
         let outcome = match self.services.route_get(config_id).await {
             Ok(data) => ToolOutcome::ok(summarise_route(&data), data),
             Err(error) => ToolOutcome::fail(failure(error)),

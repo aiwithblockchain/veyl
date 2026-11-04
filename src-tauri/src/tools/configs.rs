@@ -626,10 +626,12 @@ impl Tool for NodeImportUrlTool {
                 ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 url")),
             );
         };
-        let config_id = input
-            .get("config_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let config_id = match super::optional_string(&input, "config_id") {
+            Ok(value) => value,
+            Err(error) => {
+                return envelope::finish(ctx, "NodeImportUrl", ToolOutcome::fail(error))
+            }
+        };
 
         let outcome = match self.services.node_import_url(config_id, url).await {
             Ok(data) => {
@@ -720,10 +722,12 @@ impl Tool for NodeCreateTool {
         let outcome = match self
             .services
             .node_create(NodeCreateInput {
-                config_id: input
-                    .get("config_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                config_id: match super::optional_string(&input, "config_id") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return envelope::finish(ctx, "NodeCreate", ToolOutcome::fail(error))
+                    }
+                },
                 name: input["name"].as_str().unwrap_or_default().to_string(),
                 server: input["server"].as_str().unwrap_or_default().to_string(),
                 port,
