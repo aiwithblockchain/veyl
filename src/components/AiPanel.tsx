@@ -347,7 +347,6 @@ export function AiPanel({
               onStop={onStop}
               disabled={!aiReady}
               onConfigure={onConfigureKey}
-              placeholder="告诉我要去哪儿，或者让我诊断网络问题"
               focusSignal={focusSignal}
             />
           </>

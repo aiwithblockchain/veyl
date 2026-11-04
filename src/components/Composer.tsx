@@ -5,7 +5,6 @@ interface Props {
   statusText: string | null;
   onSend: (text: string) => void;
   onStop: () => void;
-  placeholder?: string;
   /** 没有可用 AI 时禁用输入，并给出配置入口。 */
   disabled?: boolean;
   onConfigure?: () => void;
@@ -18,7 +17,6 @@ export function Composer({
   statusText,
   onSend,
   onStop,
-  placeholder = "说「连到日本」，或者问我现在什么状态",
   disabled = false,
   onConfigure,
   focusSignal = 0,
@@ -52,7 +50,9 @@ export function Composer({
           ref={textareaRef}
           value={value}
           rows={1}
-          placeholder={disabled ? "配置 AI 后可以直接对话" : placeholder}
+          // 只在禁用时说明原因；可用时不写例句——预设的话会替用户
+          // 设想下一步，而这个助手要接的是用户自己说的话。
+          placeholder={disabled ? "配置 AI 后可以直接对话" : undefined}
           disabled={disabled}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={(event) => {
