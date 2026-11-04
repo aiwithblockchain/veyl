@@ -27,7 +27,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # 必须 ≥22.22.2：jsdom 30 与 vitest 5 都声明了 Node 22+。
+          # 用 26 是为了和开发机一致（见 .nvmrc 与 package.json 的 engines）。
+          node-version: "26"
           cache: npm
 
       - name: Install npm dependencies
@@ -35,6 +37,10 @@ jobs:
 
       - name: Typecheck frontend
         run: npm run typecheck
+
+      # 前端单测（vitest + jsdom）。之前一直没接进来，CI 全绿但一条前端用例都没跑过。
+      - name: Frontend tests
+        run: npm test
 
       - uses: dtolnay/rust-toolchain@stable
 
