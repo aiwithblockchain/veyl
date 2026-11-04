@@ -124,6 +124,11 @@ impl TunSession {
             if self.probed.swap(true, Ordering::SeqCst) {
                 return TunState::Stopped;
             }
+            // helper 没被注册/批准时根本不碰 XPC。
+            // `status()` 跑在启动路径上，可选功能的探测不该在那里制造任何风险。
+            if !self.registration.status().is_ready() {
+                return TunState::Stopped;
+            }
             if let Ok(Reply::Status {
                 running: true,
                 pid: Some(pid),

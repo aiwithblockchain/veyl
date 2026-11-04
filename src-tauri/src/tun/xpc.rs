@@ -170,6 +170,7 @@ pub fn call(
     config: Option<&[u8]>,
 ) -> Result<Reply, XpcError> {
     let service = cstring(service);
+    log::info!("xpc call method={method} service={}", service.to_string_lossy());
     // SAFETY: 连接句柄的生命周期由本函数管理；消息与回复都是 libxpc 对象，
     // 出错路径上也会 release。
     unsafe {
@@ -177,6 +178,11 @@ pub fn call(
         if connection.is_null() {
             return Err(XpcError::Unavailable("无法创建到特权助手的连接".into()));
         }
+
+        // **resume 之前必须装事件处理器**：libxpc 在 resume 时若发现没有处理器，
+        // 会调 `_xpc_api_misuse` 直接 `brk`，整个进程 SIGTRAP 退出——
+        // 一个可选功能的探测把 App 打死。实测复现过，不是理论风险。
+        install_noop_handler(connection);
         xpc_connection_resume(connection);
 
         let message = xpc_dictionary_create(std::ptr::null(), std::ptr::null(), 0);
@@ -194,6 +200,8 @@ pub fn call(
         let reply = xpc_connection_send_message_with_reply_sync(connection, message);
         xpc_release(message);
         xpc_connection_cancel(connection);
+        // create_* 出来的对象由我们持有，cancel 之后释放；不释放就是每次调用漏一个。
+        xpc_release(connection);
 
         let result = parse_reply(&service, method, reply);
         xpc_release(reply);
@@ -255,6 +263,20 @@ fn get_i64(dict: xpc_object_t, key: &str) -> Option<i64> {
 // ---------------------------------------------------------------------------
 // 服务端基础件（helper 用）
 // ---------------------------------------------------------------------------
+
+/// 装一个什么都不做的事件处理器。
+///
+/// 它不是「为了收事件」，而是 `xpc_connection_resume` 的前置条件：
+/// 缺了它 libxpc 会判定 API 误用并直接让进程 trap。
+fn install_noop_handler(connection: xpc_connection_t) {
+    use block2::RcBlock;
+
+    let handler: RcBlock<dyn Fn(xpc_object_t)> = RcBlock::new(|_event: xpc_object_t| {});
+    let raw = RcBlock::as_ptr(&handler) as *mut c_void;
+    // 处理器必须活得和连接一样久；由 libxpc 持有引用，这里不让它 drop。
+    std::mem::forget(handler);
+    unsafe { xpc_connection_set_event_handler(connection, raw) };
+}
 
 pub fn create_listener(service: &str) -> xpc_connection_t {
     let name = cstring(service);
