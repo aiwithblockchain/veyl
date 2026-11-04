@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { ConfigSummary } from "../agent/protocol";
 import type { ConnectMode } from "../config/model";
 import { nameTaken, suggestedConfigName, uniqueConfigName } from "../config/model";
+import { useFocusTrap } from "../ui/focus";
+import { IconClose } from "./icons";
 
 interface Props {
   configs: ConfigSummary[];
@@ -17,6 +19,8 @@ export function NewConfigDialog({ configs, onClose, onCreate }: Props) {
   const [nameTouched, setNameTouched] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLFormElement>(null);
+  useFocusTrap(true, dialogRef);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -54,6 +58,7 @@ export function NewConfigDialog({ configs, onClose, onCreate }: Props) {
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <form
+        ref={dialogRef}
         className="modal new-config"
         role="dialog"
         aria-modal="true"
@@ -68,6 +73,9 @@ export function NewConfigDialog({ configs, onClose, onCreate }: Props) {
           <h2 id="new-config-title" className="modal__title">
             新建一套配置
           </h2>
+          <button type="button" className="modal__close" onClick={onClose} aria-label="关闭">
+            <IconClose size={14} />
+          </button>
         </header>
 
         <div className="new-config__modes">

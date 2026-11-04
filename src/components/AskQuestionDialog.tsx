@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PendingQuestion } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { useFocusTrap } from "../ui/focus";
+import { IconClose } from "./icons";
 
 interface Props {
   question: PendingQuestion | null;
@@ -76,13 +77,19 @@ export function AskQuestionDialog({ question, onAnswer, onExpire }: Props) {
   if (!question) return null;
 
   return (
-    <div className="ask-question-backdrop">
+    <div
+      className="ask-question-backdrop"
+      onMouseDown={() => {
+        if (!submittingRef.current) void answer("");
+      }}
+    >
       <div
         ref={dialogRef}
         className="ask-question"
         role="dialog"
         aria-modal="true"
         aria-labelledby="ask-question-title"
+        onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="ask-question__head">
           <h2 id="ask-question-title" className="ask-question__title">
@@ -95,7 +102,7 @@ export function AskQuestionDialog({ question, onAnswer, onExpire }: Props) {
             disabled={submitting}
             onClick={skip}
           >
-            ×
+            <IconClose size={14} />
           </button>
         </header>
 

@@ -15,6 +15,7 @@ import { toBridgeError } from "../agent/errors";
 import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
 import { useFocusTrap } from "../ui/focus";
 import { formatPort, formatDate } from "../format";
+import { IconClose } from "./icons";
 
 const DEFAULT_SOURCE_URL = "https://meshnetprotocol.github.io/bootstrap.json";
 const APP_VERSION = "0.1.0";
@@ -463,7 +464,7 @@ export function Settings({
             设置
           </h2>
           <button type="button" className="modal__close" onClick={onClose} aria-label="关闭设置">
-            ×
+            <IconClose size={14} />
           </button>
         </header>
 

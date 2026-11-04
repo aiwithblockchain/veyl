@@ -1,8 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import type { NextAction } from "../agent/protocol";
 import type { Session } from "../state/chatStore";
+import { useFocusTrap } from "../ui/focus";
 import { ChatView } from "./ChatView";
 import { Composer } from "./Composer";
+import {
+  IconChevronLeft,
+  IconClose,
+  IconList,
+  IconPencil,
+  IconPlus,
+  IconSliders,
+  IconTrash,
+} from "./icons";
 
 export interface RenameResult {
   ok: boolean;
@@ -68,6 +78,8 @@ export function AiPanel({
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const editRef = useRef<HTMLInputElement>(null);
+  const confirmRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(Boolean(confirming), confirmRef);
 
   useEffect(() => {
     if (!editingId) return;
@@ -143,7 +155,7 @@ export function AiPanel({
               aria-label="返回对话"
               title="返回对话"
             >
-              ‹
+              <IconChevronLeft size={16} />
             </button>
           ) : null}
           <span className="ai-panel__title" title={title}>
@@ -161,7 +173,7 @@ export function AiPanel({
             aria-label="新建对话"
             title="新建对话"
           >
-            ＋
+            <IconPlus size={16} />
           </button>
           {view === "chat" ? (
             <button
@@ -171,7 +183,7 @@ export function AiPanel({
               aria-label="历史会话"
               title="历史会话"
             >
-              ☰
+              <IconList size={16} />
             </button>
           ) : null}
           <button
@@ -181,7 +193,7 @@ export function AiPanel({
             aria-label="设置"
             title="设置"
           >
-            ⚙
+            <IconSliders size={16} />
           </button>
         </div>
       </header>
@@ -250,18 +262,29 @@ export function AiPanel({
                             {relativeTime(item.updatedAt)}
                           </span>
                         </button>
-                        <button
-                          type="button"
-                          className="ai-history__delete"
-                          aria-label={`删除会话 ${item.title}`}
-                          title={`删除「${item.title}」`}
-                          onClick={() => {
-                            setConfirming(item);
-                            setDeleteError(null);
-                          }}
-                        >
-                          ×
-                        </button>
+                        <div className="ai-history__actions">
+                          <button
+                            type="button"
+                            className="ai-history__action"
+                            aria-label={`重命名会话 ${item.title}`}
+                            title={`重命名「${item.title}」`}
+                            onClick={() => startEdit(item)}
+                          >
+                            <IconPencil size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            className="ai-history__action ai-history__action--danger"
+                            aria-label={`删除会话 ${item.title}`}
+                            title={`删除「${item.title}」`}
+                            onClick={() => {
+                              setConfirming(item);
+                              setDeleteError(null);
+                            }}
+                          >
+                            <IconTrash size={13} />
+                          </button>
+                        </div>
                       </div>
                     )}
                   </li>
@@ -323,6 +346,7 @@ export function AiPanel({
           }}
         >
           <div
+            ref={confirmRef}
             className="modal modal--confirm"
             role="dialog"
             aria-modal="true"
@@ -333,6 +357,15 @@ export function AiPanel({
               <h2 id="ai-delete-session-title" className="modal__title">
                 删除对话
               </h2>
+              <button
+                type="button"
+                className="modal__close"
+                onClick={() => setConfirming(null)}
+                disabled={deleting}
+                aria-label="关闭"
+              >
+                <IconClose size={14} />
+              </button>
             </header>
             <p className="confirm__text">「{confirming.title}」删除后无法恢复。</p>
             {deleteError ? <p className="confirm__error">{deleteError}</p> : null}
