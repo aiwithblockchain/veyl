@@ -13,7 +13,7 @@ use super::health::{ClashApi, ConnectionSample, DataPlaneProbe, DirectIpProbe, E
 use super::process::{self, SpawnOptions};
 
 pub const CONTRACT_VERSION: &str = "2.1.0";
-pub const EVENT_CONTRACT_VERSION: &str = "2.2.0";
+pub const EVENT_CONTRACT_VERSION: &str = "2.3.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
 pub const DEFAULT_DATA_PLANE_PROBE: &str = "http://cp.cloudflare.com/generate_204";
@@ -52,6 +52,20 @@ impl RuntimeState {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeMode {
     SystemProxy,
+    Tun,
+}
+
+/// 拼 TUN 快照需要的输入。都来自 `TunSession`（manager 不知道 TUN 的存在）。
+#[derive(Debug, Clone, Default)]
+pub struct TunSnapshotInput {
+    pub pid: u32,
+    pub config_id: Option<String>,
+    pub config_name: Option<String>,
+    pub node_id: Option<String>,
+    pub node_name: Option<String>,
+    pub applied_route_revision: Option<i64>,
+    pub connected_since: Option<String>,
+    pub uptime_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -140,6 +154,53 @@ pub struct RuntimeStatus {
 }
 
 /// 契约里的 `AivpnError` 形状（`docs/contracts/runtime.md` §2.5）。
+impl RuntimeStatus {
+    /// TUN 连接的快照。
+    ///
+    /// TUN 的 sing-box 是 helper 的子进程，不归 `RuntimeManager` 管；但前端只认
+    /// `RuntimeStatus` 这一种形状，**缺任何一个顶层字段**（尤其是 `health`）
+    /// 都会让界面直接崩。所以复用同一个结构体来拼，不手工构造 JSON。
+    ///
+    /// TUN 没有 Clash API 探测通道：`clash_api` 如实给 `false` 而不是假装探测过；
+    /// `data_plane` 按契约「未探测时为 true」。
+    pub fn tun(input: TunSnapshotInput) -> Self {
+        let now = now_iso();
+        Self {
+            contract_version: CONTRACT_VERSION,
+            state: RuntimeState::Running,
+            mode: Some(RuntimeMode::Tun),
+            pid: Some(input.pid),
+            upstream_version: None,
+            uptime_seconds: input.uptime_seconds,
+            config_id: input.config_id,
+            mixed_port: None,
+            config_name: input.config_name,
+            node_id: input.node_id,
+            node_name: input.node_name,
+            applied_route_revision: input.applied_route_revision,
+            connected_since: input.connected_since.clone(),
+            latency_ms: None,
+            direct_ip: None,
+            config_hash: None,
+            system_proxy_enabled: false,
+            health: HealthSnapshot {
+                contract_version: CONTRACT_VERSION,
+                process: true,
+                clash_api: false,
+                data_plane: true,
+                exit_ip: None,
+                consecutive_failures: 0,
+                checked_at: now.clone(),
+            },
+            traffic: None,
+            connections: None,
+            restart_count: 0,
+            last_error: None,
+            last_transition_at: input.connected_since.unwrap_or(now),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeErrorInfo {
     pub contract_version: &'static str,
@@ -183,6 +244,11 @@ pub struct RuntimeHealthChangedPayload {
     /// 流量快照；未连接或还没采到时为 `null`。
     /// **不要用 0 代替**：UI 要能区分「0 字节」和「没有数据」。
     pub traffic: Option<serde_json::Value>,
+    /// 活跃连接数，与 `traffic` 同一次采样；未连接或没采到为 `null`。
+    pub connections: Option<u32>,
+    /// 出口 IP 探测往返耗时；未连接或没测到为 `null`。
+    /// 放进事件里，前端才不用额外拉一次快照就能刷新延迟。
+    pub latency_ms: Option<u64>,
     pub emitted_at: String,
 }
 
@@ -509,8 +575,27 @@ impl RuntimeManager {
     }
 
     /// 记录一次采样：流量与活跃连接数来自同一个 `/connections` 响应。
-    async fn set_traffic(&self, sample: ConnectionSample, up_rate: u64, down_rate: u64) {
+    ///
+    /// **写入前必须复查 generation / desired_stop / state**：stop 已经把状态清空
+    /// 并发了 null 事件，晚到的采样如果把旧流量写回去，就会发出「未连接却有流量」
+    /// 的快照，违反契约。
+    async fn set_traffic_if_live(
+        &self,
+        gen: u64,
+        sample: ConnectionSample,
+        up_rate: u64,
+        down_rate: u64,
+    ) -> bool {
         let mut inner = self.inner.lock().await;
+        if inner.generation != gen
+            || inner.desired_stop
+            || !matches!(
+                inner.state,
+                RuntimeState::Running | RuntimeState::Degraded
+            )
+        {
+            return false;
+        }
         inner.traffic = Some(serde_json::json!({
             "up_bytes": sample.up_bytes,
             "down_bytes": sample.down_bytes,
@@ -518,7 +603,11 @@ impl RuntimeManager {
             "down_rate": down_rate,
             "sampled_at": now_iso(),
         }));
-        inner.connections = Some(sample.active);
+        // 响应里没有 connections 数组时保留上一次的值：未知不等于 0。
+        if let Some(active) = sample.active {
+            inner.connections = Some(active);
+        }
+        true
     }
 
     /// 连接编排层用：短暂等待异步探测的结果，让 `VpnConnect` 能带回出口 IP。
@@ -1075,6 +1164,13 @@ impl RuntimeManager {
                     health.checked_at = now_iso();
                 })
                 .await;
+                // 进程已经没了：先把流量/连接数清掉再发事件，
+                // 否则这条「进程退出」的健康事件会带着上一次的旧流量。
+                {
+                    let mut inner = self.inner.lock().await;
+                    inner.traffic = None;
+                    inner.connections = None;
+                }
                 self.emit_health().await;
                 return SuperviseExit::Crash(reason);
             }
@@ -1102,7 +1198,7 @@ impl RuntimeManager {
 
                     // 流量与健康检查同频（默认 2s）。采不到就保留上一次的值，
                     // **不要写 0**：UI 会把它当成「这次真的没流量」。
-                    if let Ok(sample) = api.connection_sample().await {
+                    if let Ok(Some(sample)) = api.connection_sample().await {
                         let sampled_at = Instant::now();
                         let (up_rate, down_rate) = match last_traffic {
                             Some((previous, at)) => {
@@ -1121,7 +1217,8 @@ impl RuntimeManager {
                             None => (0, 0),
                         };
                         last_traffic = Some((sample, sampled_at));
-                        self.set_traffic(sample, up_rate, down_rate).await;
+                        self.set_traffic_if_live(gen, sample, up_rate, down_rate)
+                            .await;
                     }
                 } else {
                     failures += 1;
@@ -1382,14 +1479,31 @@ impl RuntimeManager {
     }
 
     async fn emit_health(&self) {
-        let (health, traffic) = {
+        let (health, traffic, connections, latency_ms) = {
             let inner = self.inner.lock().await;
-            (inner.health.clone(), inner.traffic.clone())
+            // 事件里的流量/连接数/延迟只在连接期间给值：
+            // 断开的瞬间状态先变、采样可能还没回来，按 state 门控才不会发出旧值。
+            let connected = matches!(
+                inner.state,
+                RuntimeState::Running | RuntimeState::Degraded
+            );
+            (
+                inner.health.clone(),
+                if connected { inner.traffic.clone() } else { None },
+                if connected { inner.connections } else { None },
+                if connected && inner.health.exit_ip.is_some() {
+                    inner.last_exit_ip_latency_ms
+                } else {
+                    None
+                },
+            )
         };
         self.emit(RuntimeEvent::HealthChanged(RuntimeHealthChangedPayload {
             contract_version: EVENT_CONTRACT_VERSION,
             health,
             traffic,
+            connections,
+            latency_ms,
             emitted_at: now_iso(),
         }));
     }
@@ -2129,6 +2243,95 @@ mod tests {
         assert!(snapshot.connected_since.is_none());
         assert!(snapshot.latency_ms.is_none());
         assert!(snapshot.direct_ip.is_none());
+    }
+
+    /// 断开之后晚到的采样必须丢掉：否则会发出「未连接却有流量」的快照。
+    #[tokio::test]
+    async fn a_late_traffic_sample_is_dropped_after_stop() {
+        let manager = RuntimeManager::new(RuntimeConfig::new(temp_dir("late-sample")));
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.generation = 7;
+            inner.state = RuntimeState::Running;
+        }
+
+        let sample = ConnectionSample {
+            up_bytes: 10,
+            down_bytes: 20,
+            active: Some(1),
+        };
+        assert!(manager.set_traffic_if_live(7, sample, 1, 1).await);
+        {
+            let inner = manager.inner.lock().await;
+            assert_eq!(inner.connections, Some(1));
+            assert!(inner.traffic.is_some());
+        }
+
+        // 断开：状态回落、流量清空。
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.state = RuntimeState::Idle;
+            inner.desired_stop = true;
+            inner.traffic = None;
+            inner.connections = None;
+        }
+        assert!(
+            !manager.set_traffic_if_live(7, sample, 1, 1).await,
+            "断开后晚到的采样不能写回"
+        );
+        {
+            let inner = manager.inner.lock().await;
+            assert!(inner.traffic.is_none());
+            assert!(inner.connections.is_none());
+        }
+
+        // generation 变了（重连）也不能写进新连接。
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.state = RuntimeState::Running;
+            inner.desired_stop = false;
+            inner.generation = 8;
+        }
+        assert!(!manager.set_traffic_if_live(7, sample, 1, 1).await);
+    }
+
+    /// 活跃连接数在响应里缺失时保留上一次的值：未知 ≠ 0。
+    #[tokio::test]
+    async fn a_sample_without_connections_keeps_the_previous_count() {
+        let manager = RuntimeManager::new(RuntimeConfig::new(temp_dir("no-connections")));
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.generation = 1;
+            inner.state = RuntimeState::Running;
+        }
+        manager
+            .set_traffic_if_live(
+                1,
+                ConnectionSample {
+                    up_bytes: 1,
+                    down_bytes: 1,
+                    active: Some(4),
+                },
+                0,
+                0,
+            )
+            .await;
+        manager
+            .set_traffic_if_live(
+                1,
+                ConnectionSample {
+                    up_bytes: 2,
+                    down_bytes: 2,
+                    active: None,
+                },
+                0,
+                0,
+            )
+            .await;
+
+        let inner = manager.inner.lock().await;
+        assert_eq!(inner.connections, Some(4), "缺失时不能落成 0");
+        assert_eq!(inner.traffic.clone().unwrap()["down_bytes"], 2);
     }
 
     /// 流量只在连接期间出现；未连接时必须是 null，不能是 0。

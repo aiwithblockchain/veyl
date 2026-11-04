@@ -73,7 +73,7 @@ impl ClashApi {
     /// Clash 的字段名是 `uploadTotal` / `downloadTotal`，单位字节、从进程启动起累加。
     /// 速率由两次采样的差值算——`/traffic` 那条流式端点更适合做每秒速率，
     /// 但我们要和健康检查同频（2s），轮询一次 `/connections` 已经够用。
-    pub async fn connection_sample(&self) -> RuntimeResult<ConnectionSample> {
+    pub async fn connection_sample(&self) -> RuntimeResult<Option<ConnectionSample>> {
         let response = self
             .http
             .get(format!("{}/connections", self.base))
@@ -94,30 +94,43 @@ impl ClashApi {
             .json()
             .await
             .map_err(|e| RuntimeError::ClashApi(format!("GET /connections body: {e}")))?;
-        Ok(ConnectionSample {
-            up_bytes: body.upload_total,
-            down_bytes: body.download_total,
-            active: body.connections.len() as u32,
-        })
+        Ok(body.into_sample())
     }
 }
 
 /// 一次 `/connections` 采样：累计上下行字节 + 活跃连接数。
+///
+/// `active` 是 `Option`：响应里没有 `connections` 数组时，「未知」和「0 条」
+/// 必须能区分开。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConnectionSample {
     pub up_bytes: u64,
     pub down_bytes: u64,
-    pub active: u32,
+    pub active: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ConnectionsResponse {
-    #[serde(default, rename = "uploadTotal")]
-    upload_total: u64,
-    #[serde(default, rename = "downloadTotal")]
-    download_total: u64,
-    #[serde(default)]
-    connections: Vec<serde_json::Value>,
+    #[serde(rename = "uploadTotal")]
+    upload_total: Option<u64>,
+    #[serde(rename = "downloadTotal")]
+    download_total: Option<u64>,
+    connections: Option<Vec<serde_json::Value>>,
+}
+
+impl ConnectionsResponse {
+    /// 两个累计字段缺任一，就当作这次采样没有数据。
+    ///
+    /// **不能落成 0**：刚连上时 Clash 可能还没统计，`serde(default)` 会造出一个
+    /// 合法的 `traffic: {0,0}`，UI 就会显示「0 B」——正好破坏
+    /// 「没有数据」和「真的 0 字节」的区分。
+    fn into_sample(self) -> Option<ConnectionSample> {
+        Some(ConnectionSample {
+            up_bytes: self.upload_total?,
+            down_bytes: self.download_total?,
+            active: self.connections.map(|items| items.len() as u32),
+        })
+    }
 }
 
 
@@ -275,22 +288,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ConnectionSample {
-                up_bytes: body.upload_total,
-                down_bytes: body.download_total,
-                active: body.connections.len() as u32,
-            },
-            ConnectionSample {
+            body.into_sample(),
+            Some(ConnectionSample {
                 up_bytes: 12,
                 down_bytes: 34,
-                active: 2,
-            }
+                active: Some(2),
+            })
         );
 
-        let empty: ConnectionsResponse = serde_json::from_str("{}").unwrap();
-        assert_eq!(empty.upload_total, 0);
-        assert_eq!(empty.download_total, 0);
-        assert_eq!(empty.connections.len(), 0);
+        // 没有 connections 数组时，连接数是「未知」而不是 0。
+        let no_connections: ConnectionsResponse =
+            serde_json::from_str(r#"{"uploadTotal": 1, "downloadTotal": 2}"#).unwrap();
+        assert_eq!(
+            no_connections.into_sample(),
+            Some(ConnectionSample {
+                up_bytes: 1,
+                down_bytes: 2,
+                active: None,
+            })
+        );
+    }
+
+    /// 缺字段不能兜成 0：那会把「还没统计到」显示成「0 B」。
+    #[test]
+    fn a_partial_connection_response_is_no_data_not_zero() {
+        for raw in [
+            r#"{}"#,
+            r#"{"uploadTotal": 12}"#,
+            r#"{"downloadTotal": 34}"#,
+        ] {
+            let body: ConnectionsResponse = serde_json::from_str(raw).unwrap();
+            assert_eq!(body.into_sample(), None, "这份响应应视为无数据：{raw}");
+        }
     }
 
     #[test]

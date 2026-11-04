@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.2.0`
+> 契约版本：`2.3.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，2.0.0）
@@ -358,12 +358,18 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.2.0";
+  contract_version: "2.3.0";
   health: HealthSnapshot;
   // 2.2 新增：本次运行累计流量与速率。
   // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
   // UI 要能区分「这次真的 0 字节」和「没有数据」。
   traffic: TrafficStats | null;   // 形状见 runtime.md §2.4
+  // 2.3 新增：活跃连接数，与 traffic 同一次 /connections 采样。
+  // 未连接、没采到、或响应里没有该数组时为 null（未知 ≠ 0 条）。
+  connections: number | null;
+  // 2.3 新增：出口 IP 探测往返耗时（毫秒）。
+  // 未连接或尚未测到出口 IP 时为 null。放进事件后，前端刷新延迟不用再拉快照。
+  latency_ms: number | null;
   emitted_at: string;
 };
 ```
@@ -372,9 +378,10 @@ type RuntimeHealthChangedPayload = {
 
 刷新频率：**2 秒一条**。数据来自 `GET /connections` 的 `uploadTotal` / `downloadTotal` 累计值，
 速率由相邻两次采样的差值除以间隔得到，所以 `up_rate` / `down_rate` 是约 2 秒的平均值，
-**不是每秒精确值**。采样失败时保留上一次的值，不会把流量清成 0。
+**不是每秒精确值**。采样失败或缺字段时保留上一次的值，不会把流量清成 0；
+进程退出、主动断开后立即变回 `null`。
 
-UI 处理：更新延迟/出口 IP/健康灯/流量；`degraded` 时在状态栏加黄色标记。
+UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；`degraded` 时在状态栏加黄色标记。
 
 ---
 
@@ -872,6 +879,15 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.3.0（2026-11-04，健康事件补齐连接数与延迟）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.3.0` | 元数据 | 连接期间这两个值不刷新 |
+| 2 | `runtime-health-changed` 载荷新增 `connections: number \| null` | 字段扩展 | 活跃连接数只在快照里，UI 连上后一直显示「—」 |
+| 3 | 同一载荷新增 `latency_ms: number \| null` | 字段扩展 | 延迟同理，避免每次拉快照 |
+| 4 | 明确「采样与断开竞态」：事件中的流量/连接数/延迟只在 running/degraded 时给值，其余为 null | 约束 | 防止晚到的采样发出旧值 |
 
 ### 2.2.0（2026-11-04，运行时流量进健康事件）
 

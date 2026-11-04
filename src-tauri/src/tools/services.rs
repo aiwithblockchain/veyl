@@ -1484,23 +1484,23 @@ fn validate_cidr(value: &str) -> Result<(), String> {
 impl VpnToolServices for WiredServices {
     async fn runtime_status(&self) -> anyhow::Result<Value> {
         // TUN 的进程不归 RuntimeManager 管，状态得单独报，否则界面会显示「未连接」。
+        // **必须返回与代理模式同形状的完整快照**：手工拼 JSON 少一个 `health`
+        // 就会让 `bridge.ts` 读 undefined 直接崩（helper 在 App 崩溃后仍存活的接手场景）。
         if let crate::tun::session::TunState::Running { pid } = self.tun.status() {
-            return Ok(json!({
-                "contract_version": crate::runtime::CONTRACT_VERSION,
-                "state": "running",
-                "mode": "tun",
-                "pid": pid,
-                // 前端要靠它判断「连的是哪套配置」，删除守卫也靠它。
-                // App 重启后接手的老连接没有 id，这里是 null。
-                "config_id": self.tun.connected_config_id(),
-                "mixed_port": null,
-                "system_proxy_enabled": false,
-                "helper": self.tun.launcher_kind(),
-                // TUN 的进程不归 RuntimeManager 管，流量与连接数都采不到。
-                // 显式给 null（不是缺字段）：UI 要能区分「没有数据」和「0 B」。
-                "traffic": null,
-                "connections": null,
-            }));
+            let meta = self.tun.launch_meta();
+            let status = crate::runtime::RuntimeStatus::tun(crate::runtime::TunSnapshotInput {
+                pid,
+                config_id: meta.as_ref().map(|meta| meta.config_id.clone()),
+                config_name: meta.as_ref().and_then(|meta| meta.config_name.clone()),
+                node_id: meta.as_ref().and_then(|meta| meta.node_id.clone()),
+                node_name: meta.as_ref().and_then(|meta| meta.node_name.clone()),
+                applied_route_revision: meta
+                    .as_ref()
+                    .and_then(|meta| meta.applied_route_revision),
+                connected_since: self.tun.connected_since(),
+                uptime_seconds: self.tun.uptime_seconds(),
+            });
+            return serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e));
         }
         let status = self.manager.status().await;
         serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
@@ -3475,7 +3475,16 @@ impl WiredServices {
         self.manager.set_system_proxy_enabled(false).await;
 
         log::debug!("连接 TUN 配置已生成");
-        let pid = match self.tun.launch(&config_json, &config.id) {
+        let pid = match self.tun.launch(
+            &config_json,
+            &crate::tun::session::TunLaunchMeta {
+                config_id: config.id.clone(),
+                config_name: Some(config.name.clone()),
+                node_id: Some(current.id.clone()),
+                node_name: Some(current.name.clone()),
+                applied_route_revision: Some(config.route_revision),
+            },
+        ) {
             Ok(started) => {
                 log::info!("连接 TUN 运行时已启动 pid={}", started.pid);
                 started.pid
@@ -4321,6 +4330,46 @@ mod config_service_tests {
         );
         assert!(status["traffic"].is_null(), "没有数据必须是 null");
         assert!(status["connections"].is_null(), "没有数据必须是 null");
+    }
+
+    /// TUN 快照必须和代理模式同形状。
+    /// 少一个顶层键（尤其是 `health`）前端会读到 `undefined` 并直接崩，
+    /// 而 helper 在 App 崩溃后仍存活、重启后接手 TUN 正是我们要支持的场景。
+    #[tokio::test]
+    async fn a_tun_snapshot_has_every_key_the_proxy_snapshot_has() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        services.tun.force_running_for_test(6161, Some("cfg_tun"));
+
+        let tun = services.runtime_status().await.unwrap();
+        let proxy = NotWiredServices.runtime_status().await.unwrap();
+
+        let keys = |value: &Value| {
+            let mut keys: Vec<String> = value
+                .as_object()
+                .expect("快照必须是对象")
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(
+            keys(&tun),
+            keys(&proxy),
+            "TUN 快照的顶层键必须和代理模式完全一致"
+        );
+
+        assert_eq!(tun["mode"], "tun");
+        assert!(tun["health"].is_object(), "health 必须是结构合法的对象");
+        assert_eq!(tun["health"]["process"], true, "TUN 进程确实在跑");
+        assert_eq!(
+            tun["health"]["clash_api"], false,
+            "拿不到 Clash API 就如实 false，不假装探测过"
+        );
+        assert!(tun["traffic"].is_null());
+        assert!(tun["connections"].is_null());
+        assert!(tun["latency_ms"].is_null());
     }
 }
 
