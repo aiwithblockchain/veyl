@@ -223,7 +223,7 @@ pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcom
         }
     };
 
-    if response.status == 304 && !content_ok {
+    if needs_refetch(response.status, content_ok) {
         // 304 没有 body，而本地内容已经丢了——不带 etag 重拉一次。
         log::warn!("种子元数据还在但内容已丢失，强制重新拉取");
         response = match public_http::get(&url, None, MAX_SEED_BYTES).await {
@@ -255,6 +255,12 @@ pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcom
     }
 
     apply_fetch(store, current.as_ref(), response, now, running).await
+}
+
+/// 304 且本地内容已丢时必须不带 ETag 重拉一次：304 没有 body，
+/// 拿不到内容就补不回来。
+fn needs_refetch(status: u16, content_ok: bool) -> bool {
+    status == 304 && !content_ok
 }
 
 /// 本地缓存的内容是不是真的还能解出来。
@@ -786,5 +792,12 @@ mod tests {
         );
 
         crate::secrets::delete_secret(&secret_key(&hash)).unwrap();
+    }
+
+    #[test]
+    fn a_304_with_lost_content_forces_a_refetch() {
+        assert!(needs_refetch(304, false), "304 + 内容丢了必须重拉");
+        assert!(!needs_refetch(304, true), "304 + 内容在，直接用缓存");
+        assert!(!needs_refetch(200, false), "200 有 body，不需要重拉");
     }
 }

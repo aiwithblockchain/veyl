@@ -23,6 +23,38 @@ pub struct PublicResponse {
     pub body: Vec<u8>,
 }
 
+/// 一个响应该走哪条路。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Step {
+    /// 需要跟随 `Location`。
+    Follow(String),
+    /// 304：内容没变，没有 body，**不需要 Location**。
+    NotModified,
+    /// 2xx：继续读 body。
+    Success,
+    /// 其它：失败。
+    Failure,
+}
+
+/// 只看状态码与 `Location` 决定下一步。
+///
+/// **304 必须排在跳转判断之前。** 它属于 3xx，但没有 `Location`；
+/// 按跳转处理会直接报「重定向缺少 Location」，于是带 ETag 的条件请求
+/// 永远拿不到结果——种子在内容丢失后就再也修不回来。
+fn decide(status: u16, location: Option<&str>) -> Result<Step, String> {
+    if status == 304 {
+        return Ok(Step::NotModified);
+    }
+    if (300..=399).contains(&status) {
+        let location = location.ok_or_else(|| "重定向缺少 Location".to_string())?;
+        return Ok(Step::Follow(location.to_string()));
+    }
+    if (200..=299).contains(&status) {
+        return Ok(Step::Success);
+    }
+    Ok(Step::Failure)
+}
+
 /// 发起一次受限 GET。`if_none_match` 只作用于第一跳（条件请求）。
 pub async fn get(
     url: &str,
@@ -59,34 +91,32 @@ pub async fn get(
             .await
             .map_err(|error| format!("请求失败：{error}"))?;
         let status = response.status();
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok());
 
-        if status.is_redirection() {
-            let location = response
-                .headers()
-                .get(LOCATION)
-                .and_then(|value| value.to_str().ok())
-                .ok_or_else(|| "重定向缺少 Location".to_string())?;
-            current = current
-                .join(location)
-                .map_err(|error| format!("重定向地址无效：{error}"))?;
-            continue;
-        }
-
-        if status.as_u16() == 304 {
-            return Ok(PublicResponse {
-                status: 304,
-                etag: response
-                    .headers()
-                    .get(ETAG)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string)
-                    .or_else(|| if_none_match.map(str::to_string)),
-                body: Vec::new(),
-            });
-        }
-
-        if !status.is_success() {
-            return Err(format!("远程返回 HTTP {status}"));
+        match decide(status.as_u16(), location)? {
+            Step::Follow(target) => {
+                current = current
+                    .join(&target)
+                    .map_err(|error| format!("重定向地址无效：{error}"))?;
+                continue;
+            }
+            Step::NotModified => {
+                return Ok(PublicResponse {
+                    status: 304,
+                    etag: response
+                        .headers()
+                        .get(ETAG)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string)
+                        .or_else(|| if_none_match.map(str::to_string)),
+                    body: Vec::new(),
+                });
+            }
+            Step::Success => {}
+            Step::Failure => return Err(format!("远程返回 HTTP {status}")),
         }
 
         if let Some(length) = response
@@ -367,5 +397,38 @@ mod tests {
             let parsed = reqwest::Url::parse(url).unwrap();
             assert!(ensure_allowed_url(&parsed).is_err(), "{url} 应被拒绝");
         }
+    }
+
+    /// **这条 bug 之前没有测试才活下来**：304 属于 3xx，但永远没有 Location。
+    #[test]
+    fn a_304_is_not_treated_as_a_redirect() {
+        assert_eq!(decide(304, None).unwrap(), Step::NotModified);
+        assert_eq!(decide(304, Some("/ignored")).unwrap(), Step::NotModified);
+    }
+
+    #[test]
+    fn real_redirects_still_require_a_location() {
+        for status in [301, 302, 303, 307, 308] {
+            assert_eq!(
+                decide(status, Some("/next")).unwrap(),
+                Step::Follow("/next".into())
+            );
+            assert!(decide(status, None).is_err(), "{status} 缺 Location 应当报错");
+        }
+        // 300/305/306 仍按跳转处理：不趁这次改动改变既有行为。
+        for status in [300, 305, 306] {
+            assert_eq!(
+                decide(status, Some("/next")).unwrap(),
+                Step::Follow("/next".into())
+            );
+        }
+    }
+
+    #[test]
+    fn success_and_failure_fall_where_expected() {
+        assert_eq!(decide(200, None).unwrap(), Step::Success);
+        assert_eq!(decide(204, None).unwrap(), Step::Success);
+        assert_eq!(decide(404, None).unwrap(), Step::Failure);
+        assert_eq!(decide(500, None).unwrap(), Step::Failure);
     }
 }
