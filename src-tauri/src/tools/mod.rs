@@ -12,6 +12,7 @@ pub mod envelope;
 pub mod job;
 pub mod net;
 pub mod policy;
+pub mod routing;
 pub mod runtime;
 pub mod services;
 pub mod vpn;
@@ -118,6 +119,11 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(configs::NodeCreateTool::new(Arc::clone(&services))),
         Box::new(configs::NodeSwitchTool::new(Arc::clone(&services))),
         Box::new(configs::NodeProbeTool::new(Arc::clone(&services))),
+        Box::new(routing::RouteGetTool::new(Arc::clone(&services))),
+        Box::new(routing::RouteSetModeTool::new(Arc::clone(&services))),
+        Box::new(routing::RouteTargetsSetTool::new(Arc::clone(&services))),
+        Box::new(routing::CategoryListTool::new(Arc::clone(&services))),
+        Box::new(routing::RulesStatusTool::new(Arc::clone(&services))),
         Box::new(vpn::VpnConnectTool::new(Arc::clone(&services))),
         Box::new(vpn::VpnDisconnectTool::new(Arc::clone(&services))),
         Box::new(diag::DiagRunTool::new(Arc::clone(&services))),

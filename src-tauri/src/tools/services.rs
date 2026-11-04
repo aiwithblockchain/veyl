@@ -113,11 +113,7 @@ pub trait VpnToolServices: Send + Sync {
         node_id: &str,
         confirm_reconnect: bool,
     ) -> anyhow::Result<Value>;
-    async fn node_probe(
-        &self,
-        config_id: Option<String>,
-        node_id: &str,
-    ) -> anyhow::Result<Value>;
+    async fn node_probe(&self, node_id: &str) -> anyhow::Result<Value>;
 
     async fn default_profile_status(&self) -> anyhow::Result<Value>;
     async fn default_profile_refresh(&self, force: bool) -> anyhow::Result<Value>;
@@ -289,11 +285,7 @@ impl VpnToolServices for NotWiredServices {
         not_wired("切换节点")
     }
 
-    async fn node_probe(
-        &self,
-        _config_id: Option<String>,
-        _node_id: &str,
-    ) -> anyhow::Result<Value> {
+    async fn node_probe(&self, _node_id: &str) -> anyhow::Result<Value> {
         not_wired("测试节点")
     }
 
@@ -481,16 +473,90 @@ fn probe_result(
     node_id: &str,
     reachable: bool,
     latency_ms: Option<u64>,
+    probe_method: &str,
     error: Option<(&str, &str)>,
 ) -> Value {
     json!({
         "node_id": node_id,
         "reachable": reachable,
         "latency_ms": latency_ms,
-        "probe_method": "clash_delay",
+        "probe_method": probe_method,
         "checked_at": store::now_ms(),
         "error": error.map(|(code, message)| json!({ "code": code, "message": message })),
     })
+}
+
+/// 未连接时的降级探测：对 server:port 做 TCP 握手，3 秒超时。
+async fn tcp_probe(server: &str, port: u16) -> Result<u64, String> {
+    let address = if server.contains(':') {
+        format!("[{server}]:{port}")
+    } else {
+        format!("{server}:{port}")
+    };
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => Ok(started.elapsed().as_millis() as u64),
+        Ok(Err(error)) => Err(format!("TCP 连接失败：{error}")),
+        Err(_) => Err("TCP 连接超时（3 秒）".to_string()),
+    }
+}
+
+async fn clash_put_selector(
+    addr: &str,
+    secret: &str,
+    selector: &str,
+    value: &str,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("创建控制面客户端失败：{error}"))?;
+    let response = client
+        .put(format!("http://{addr}/proxies/{selector}"))
+        .bearer_auth(secret)
+        .json(&json!({ "name": value }))
+        .send()
+        .await
+        .map_err(|error| format!("切换选择器请求失败：{error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("切换选择器返回 HTTP {}", response.status()));
+    }
+    Ok(())
+}
+
+async fn clash_get_selector(
+    addr: &str,
+    secret: &str,
+    selector: &str,
+) -> Result<Option<String>, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("创建控制面客户端失败：{error}"))?;
+    let response = client
+        .get(format!("http://{addr}/proxies/{selector}"))
+        .bearer_auth(secret)
+        .send()
+        .await
+        .map_err(|error| format!("读取选择器请求失败：{error}"))?;
+    if response.status().as_u16() == 404 {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(format!("读取选择器返回 HTTP {}", response.status()));
+    }
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("读取选择器响应失败：{error}"))?;
+    Ok(value.get("now").and_then(Value::as_str).map(str::to_string))
 }
 
 /// 已连接的节点延迟：Clash API `GET /proxies/{tag}/delay`。
@@ -628,6 +694,109 @@ impl WiredServices {
         configs::get(&conn, config_id)
             .map_err(|error| svc_error(error.code(), error))?
             .ok_or_else(|| svc_error("NOT_FOUND", "配置不存在"))
+    }
+
+    fn resolve_config(&self, config_id: Option<String>) -> anyhow::Result<configs::Config> {
+        match config_id {
+            Some(id) => self.require_config(&id),
+            None => {
+                let id = self.active_config_id().ok_or_else(|| {
+                    svc_error_with_details(
+                        "PRECONDITION_FAILED",
+                        "还没有配置，先新建一套",
+                        json!({ "reason": "no_config" }),
+                    )
+                })?;
+                self.require_config(&id)
+            }
+        }
+    }
+
+    fn update_routing_mode(
+        &self,
+        config_id: &str,
+        mode: &str,
+    ) -> anyhow::Result<configs::Config> {
+        {
+            let conn = self.store.conn();
+            configs::update(
+                &conn,
+                config_id,
+                &configs::ConfigPatch {
+                    routing_mode: Some(mode.to_string()),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| svc_error(error.code(), error))?;
+        }
+        self.require_config(config_id)
+    }
+
+    fn route_state_json(
+        &self,
+        config: &configs::Config,
+        applied_mode: Option<&str>,
+        applied_revision: Option<i64>,
+    ) -> Value {
+        let targets = config
+            .route_targets
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let applied = applied_mode.is_some() && applied_revision == Some(config.route_revision);
+        let region = crate::rules::detected_region();
+        let basis = if region.as_deref().unwrap_or("cn") == "cn" {
+            "domain_and_ip"
+        } else {
+            "ip_only"
+        };
+        json!({
+            "config_id": config.id,
+            "routing_mode": config.routing_mode,
+            "applied_mode": applied_mode,
+            "targets": targets,
+            "custom_rules": [],
+            "route_revision": config.route_revision,
+            "applied_revision": applied_revision,
+            "effective": if applied { "current_connection" } else { "next_connection" },
+            "reconnect_required": !applied,
+            "local_direct_basis": basis,
+            "detected_region": region,
+        })
+    }
+
+    fn emit_routing_changed(
+        &self,
+        config: &configs::Config,
+        change: &str,
+        applied_mode: Option<&str>,
+        applied_revision: Option<i64>,
+        hot_switched: bool,
+    ) {
+        let state = self.route_state_json(config, applied_mode, applied_revision);
+        crate::agent::app_handle::emit(
+            "routing-changed",
+            json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "config_id": config.id,
+                "routing_mode": config.routing_mode,
+                "applied_mode": applied_mode,
+                "targets": state["targets"].clone(),
+                "route_revision": config.route_revision,
+                "applied_revision": applied_revision,
+                "change": change,
+                "hot_switched": hot_switched,
+                "reconnect_required": state["reconnect_required"].clone(),
+                "emitted_at": chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            }),
+        );
     }
 
     async fn ensure_device_token(&self) -> anyhow::Result<()> {
@@ -2247,6 +2416,187 @@ impl VpnToolServices for WiredServices {
         Ok(json!({ "categories": categories, "total": total }))
     }
 
+    async fn route_get(&self, config_id: Option<String>) -> anyhow::Result<Value> {
+        let config = self.resolve_config(config_id)?;
+        let status = self.manager.status().await;
+        let connected = self.is_connected(&status);
+        let connected_config = self.connected_config_id().await;
+        let running = connected && connected_config.as_deref() == Some(config.id.as_str());
+        let applied_mode = running.then(|| config.routing_mode.clone());
+        let applied_revision = running.then_some(status.applied_route_revision).flatten();
+        Ok(self.route_state_json(&config, applied_mode.as_deref(), applied_revision))
+    }
+
+    async fn route_set_mode(
+        &self,
+        config_id: Option<String>,
+        mode: &str,
+        confirm_reconnect: bool,
+    ) -> anyhow::Result<Value> {
+        validate_routing_mode(mode)?;
+        let config = self.resolve_config(config_id)?;
+        let targets = config
+            .route_targets
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if mode == configs::ROUTING_PROXY_SELECTED && targets.is_empty() {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "指定服务走 VPN 时至少要选一个分类",
+                json!({ "reason": "route_targets_empty" }),
+            ));
+        }
+
+        let status = self.manager.status().await;
+        let connected = self.is_connected(&status);
+        let connected_config = self.connected_config_id().await;
+        let running = connected && connected_config.as_deref() == Some(config.id.as_str());
+        let applied_mode = running.then(|| config.routing_mode.clone());
+        let applied_revision = running.then_some(status.applied_route_revision).flatten();
+
+        if config.routing_mode == mode {
+            let mut data = self.route_state_json(&config, applied_mode.as_deref(), applied_revision);
+            data["hot_switched"] = json!(false);
+            data["reconnect"] = Value::Null;
+            return Ok(data);
+        }
+
+        let same_family = matches!(
+            config.routing_mode.as_str(),
+            configs::ROUTING_DIRECT | configs::ROUTING_PROXY_ALL
+        ) && matches!(mode, configs::ROUTING_DIRECT | configs::ROUTING_PROXY_ALL);
+
+        if running && same_family {
+            let plan = self.manager.current_plan().await.ok_or_else(|| {
+                svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    "当前没有运行中的配置",
+                    json!({ "reason": "config_not_running" }),
+                )
+            })?;
+            let from_selector = if config.routing_mode == configs::ROUTING_DIRECT {
+                "direct"
+            } else {
+                "proxy"
+            };
+            let to_selector = if mode == configs::ROUTING_DIRECT {
+                "direct"
+            } else {
+                "proxy"
+            };
+            if let Err(error) =
+                clash_put_selector(&plan.clash_addr, &plan.clash_secret, "route-local", to_selector)
+                    .await
+            {
+                return Err(svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    format!("切换分流模式失败：{error}"),
+                    json!({ "reason": "route_switch_failed" }),
+                ));
+            }
+            let read_back =
+                clash_get_selector(&plan.clash_addr, &plan.clash_secret, "route-local").await;
+            let applied = matches!(read_back, Ok(Some(ref now)) if now == to_selector);
+            if !applied {
+                let _ = clash_put_selector(
+                    &plan.clash_addr,
+                    &plan.clash_secret,
+                    "route-local",
+                    from_selector,
+                )
+                .await;
+                return Err(svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    "切换分流模式后读回不一致",
+                    json!({ "reason": "route_switch_failed" }),
+                ));
+            }
+
+            let updated = self.update_routing_mode(&config.id, mode)?;
+            self.emit_routing_changed(&updated, "mode", Some(mode), applied_revision, true);
+            let mut data = self.route_state_json(&updated, Some(mode), applied_revision);
+            data["hot_switched"] = json!(true);
+            data["reconnect"] = Value::Null;
+            return Ok(data);
+        }
+
+        if running && !confirm_reconnect {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "切换分流模式会断开当前连接，并且域名解析方式也会改变",
+                json!({
+                    "reason": "will_disconnect",
+                    "applied_mode": config.routing_mode,
+                    "target_mode": mode,
+                }),
+            ));
+        }
+
+        if running {
+            self.runtime_stop(false).await?;
+        }
+        let updated = self.update_routing_mode(&config.id, mode)?;
+
+        if !running {
+            self.emit_routing_changed(&updated, "mode", None, None, false);
+            let mut data = self.route_state_json(&updated, None, None);
+            data["hot_switched"] = json!(false);
+            data["reconnect"] = json!("not_running");
+            return Ok(data);
+        }
+
+        match self.runtime_start(Some(updated.id.clone())).await {
+            Ok(_) => {
+                let status = self.manager.status().await;
+                self.emit_routing_changed(
+                    &updated,
+                    "mode",
+                    Some(mode),
+                    status.applied_route_revision,
+                    false,
+                );
+                let mut data =
+                    self.route_state_json(&updated, Some(mode), status.applied_route_revision);
+                data["hot_switched"] = json!(false);
+                data["reconnect"] = json!("reconnected");
+                Ok(data)
+            }
+            Err(error) => {
+                log::warn!("分流模式切换后自动重连失败：{error}");
+                self.emit_routing_changed(&updated, "mode", None, None, false);
+                let mut data = self.route_state_json(&updated, None, None);
+                data["hot_switched"] = json!(false);
+                data["reconnect"] = json!("reconnect_failed");
+                Ok(data)
+            }
+        }
+    }
+
+    async fn route_targets_set(
+        &self,
+        config_id: &str,
+        categories: Vec<String>,
+    ) -> anyhow::Result<Value> {
+        self.require_config(config_id)?;
+        if !categories.is_empty() {
+            self.validate_targets(&categories)?;
+        }
+        let updated = {
+            let conn = self.store.conn();
+            configs::set_route_targets(&conn, config_id, &json!(categories))
+                .map_err(|error| config_store_error(error))?
+        };
+        self.emit_routing_changed(&updated, "targets", None, None, false);
+        Ok(self.route_state_json(&updated, None, None))
+    }
+
     async fn vpn_connect(
         &self,
         config_id: Option<String>,
@@ -3299,6 +3649,57 @@ mod config_service_tests {
             .await
             .unwrap();
         assert!(updated["listen_port"].is_null(), "传 null 表示改回自动");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn route_set_mode_without_connection_persists() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("A")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        let routed = services
+            .route_set_mode(Some(config_id.clone()), configs::ROUTING_DIRECT, false)
+            .await
+            .unwrap();
+        assert_eq!(routed["routing_mode"], configs::ROUTING_DIRECT);
+        assert_eq!(routed["hot_switched"], false);
+        assert_eq!(routed["reconnect"], "not_running");
+        assert_eq!(routed["effective"], "next_connection");
+
+        let detail = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(detail["routing_mode"], configs::ROUTING_DIRECT);
+
+        let route = services.route_get(Some(config_id)).await.unwrap();
+        assert_eq!(route["routing_mode"], configs::ROUTING_DIRECT);
+        assert!(route["applied_mode"].is_null());
+        assert_eq!(route["reconnect_required"], true);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn proxy_selected_without_targets_is_rejected() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("A")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let error = services
+            .route_set_mode(
+                Some(config_id),
+                configs::ROUTING_PROXY_SELECTED,
+                false,
+            )
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "route_targets_empty"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

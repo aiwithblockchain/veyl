@@ -411,6 +411,45 @@ pub async fn import_seed_file(
         .map_err(error_value)
 }
 
+/// 查看一套配置的分流状态。`configId` 省略时用 active 配置。
+#[tauri::command]
+pub async fn route_get(
+    state: State<'_, Arc<AppState>>,
+    config_id: Option<String>,
+) -> Result<Value, Value> {
+    state.services.route_get(config_id).await.map_err(error_value)
+}
+
+/// 切换分流模式。`direct` ↔ `proxy_all` 已连接时走 selector 热切；
+/// 涉及 `proxy_selected` 的跨家族切换会断开重连，需要 `confirmReconnect`。
+#[tauri::command]
+pub async fn route_set_mode(
+    state: State<'_, Arc<AppState>>,
+    config_id: Option<String>,
+    mode: String,
+    confirm_reconnect: Option<bool>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .route_set_mode(config_id, &mode, confirm_reconnect.unwrap_or(false))
+        .await
+        .map_err(error_value)
+}
+
+/// 整体替换「指定服务」分类集合。
+#[tauri::command]
+pub async fn route_targets_set(
+    state: State<'_, Arc<AppState>>,
+    config_id: String,
+    categories: Vec<String>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .route_targets_set(&config_id, categories)
+        .await
+        .map_err(error_value)
+}
+
 /// 规则数据状态（不联网）。
 #[tauri::command]
 pub async fn rules_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
