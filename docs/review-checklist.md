@@ -133,6 +133,8 @@ grep -rnE "加载中|请稍候|暂无数据|Loading\.\.\.|Loading…" src/compon
 | S-04 | 节点凭据不进 AI 上下文 | 自动：复用 `tests/mock-llm` 的 `GET /__last_request`（对应 TC-CAT-012） | 最近一次请求的消息数组里不含任何节点密码；含 `password_ref` 也算违规（引用键可接受，明文不行） |
 | S-05 | 监听地址只在本机 | 读文件：生成配置的 inbound `listen` 字段 | 必须是 `127.0.0.1`，不允许 `0.0.0.0` / `::`（A5） |
 | S-06 | 命令参数不嵌套对象 | 自动：`grep -rnE 'invoke\(\s*"[a-z_]+"\s*,\s*\{\s*[a-z_]+:\s*\{' src` | 零命中（`contracts/commands.md` §1.1.1）。嵌套参数会静默变 `None` |
+| S-11 | 取用户 URL 时不跟随系统代理 | 自动：`grep -n "no_proxy" src-tauri/src/public_http.rs`；再设 `HTTPS_PROXY` 后做一次导入 | 命中且行为不变（2026-11-04 裁定：种子是最后的恢复手段，跟随代理会形成「代理坏了→种子拉不到→修不好」的死锁） |
+| S-12 | IPv6 转换段也判为非公网 | 自动：单测覆盖 `64:ff9b::/96`（NAT64）与 `2002::/16`（6to4） | 两者都拒绝；否则可翻转到 v4 内网 |
 
 **S-02 的五条断言**（每条都要单独构造，缺一不可）：
 
@@ -195,7 +197,7 @@ grep -rn "app_data_dir\|veyl.db" src-tauri/src/store/db.rs | head
 | B2-03 | 左栏空态能自己走出去 | 界面：删光所有配置 | 出现 `configs-and-nav.md` §2.1 的空态文案与「新建配置」；按钮可点，能直接建一套 |
 | B2-04 | 顶部只有一个按钮 | 界面：未连接 / 已连接 / 连接中各看一次 | 永远一个按钮，两态互斥，文案固定为「启动 VPN」/「断开 VPN」；没有第二个主操作 |
 | B2-05 | 选中 ≠ 切换 | 界面：底部点开节点列表，选另一个 | 只有详情变；`runtime_status` 里当前节点不变；网络不中断。按「切换到此节点」后当前节点才变（`center-panel.md` §2.1） |
-| B2-06 | 切换按钮的禁用条件 | 界面：选中当前节点；再选另一个 | 选中 = 当前时禁用；不同时可用 |
+| B2-06 | 切换节点走独立命令 | 界面：选中当前节点；再选另一个并点「切换到此节点」 | 选中 = 当前时按钮禁用；切换走 `node_switch`，不是 `runtime_start(nodeId)`（2026-11-04 裁定：`runtime_start` 去掉 `nodeId`，只留 `configId`） |
 | B2-07 | 测试连通始终可点 | 界面：未连接、已连接、断网三种情况各点一次 | 都能点并给出结果；走 D6 / `node_probe`，不启动运行时也能测；失败说清原因，不是「失败」两个字 |
 | B2-08 | **全程不依赖 AI** | 界面：断网 + 清空 LLM key，用已缓存种子 | 新建配置 → 连接 → 换节点 → 断开，四步都成功（`implementation-plan.md` 批 2 完成标准） |
 | B2-09 | 中间空态不是纯白 | 界面：首启 0–20s，AI 还没输出 | 有一行说明，不是空白（`center-panel.md` §4 末段） |
@@ -204,6 +206,9 @@ grep -rn "app_data_dir\|veyl.db" src-tauri/src/store/db.rs | head
 | B2-12 | 换配置后中间重新编排 | 界面：从「本机代理」切到「接管全部」 | 代理卡消失，不残留旧配置的块；AI 不可用时也不报错，只按本地规则渲染骨架（`configs-and-nav.md` §9） |
 | B2-13 | 端口显示实际值 | 自动 + 界面：先占用默认端口再启动；`grep -rn "7890" src --include="*.tsx"` | 硬编码 0 处；端口被占用时自动顺延且界面显示真实端口（A5） |
 | B2-14 | 骨架层无禁止词 | 自动：G-07 | 见 G-07 |
+| B2-15 | **默认不启用 mock** | 自动 + 界面：不设 `VITE_MOCK` 启动，新建配置、点启动、换节点 | 全程走真实命令；`runtime_status` / `config_list` 有调用；`localStorage` 里没有 `veyl.configs.v1`；界面状态来自真实运行时（2026-11-04 裁定） |
+| B2-16 | mock 只能显式开启 | 自动：`grep -rn "VITE_MOCK" src` | 只有一个开关读取点；未设置时假数据路径不可达 |
+| B2-17 | 死路按钮已移除 | 自动 + 界面：`grep -rn "连接测试节点" src` | 零命中；首启不再出现点了必然失败的按钮（2026-11-04 裁定：Onboarding 留到批 4，但该按钮现在拆掉） |
 
 > B2-08 是 M1 的核心。先缓存好种子再断网，否则首启拉种子会失败——那是 `config-execution.md` §9 已知的唯一网络依赖，不算缺陷。
 
@@ -319,6 +324,9 @@ grep -rl "empty_hint" src-tauri/assets src-tauri/src src/ai 2>/dev/null
 | OPEN-07 | 问题列表放中间区的二级页面，入口是问题卡上的「查看全部」；没有问题时不显示任何入口 | B6-17、G-06 |
 | OPEN-08 | 那行提示**不常驻**：只在未连接时随 `empty_hint` 出现，已连接后不再显示 | B4-08 |
 | OPEN-09 | 确认页「展示内容」改为「具体数值与行为：连接方式、直连范围、DNS 候选、端口」，不再写「分流规则名」 | S-10、G-07 |
+| OPEN-05 | 批 1 的 `001_init.sql` 已对齐：`severity` 为 `P0/P1/P2`，`status` 含 `handed_off` / `ignored` | B6-09、B6-10 |
+| OPEN-06 | 批 1 的 `configs` 已有 `dns_json` / `tun_excludes_json` 两列 | B1-02 |
+| OPEN-10 | 去掉 `runtime_start` 的 `nodeId`：只保留 `node_switch` 改选中、`runtime_start(configId)` 启动 | B2-06、G-04 |
 
 ### 10.2 仍待处理
 
@@ -326,9 +334,8 @@ grep -rl "empty_hint" src-tauri/assets src-tauri/src src/ai 2>/dev/null
 
 | 编号 | 冲突 | 两边说法 | 影响 | 建议 |
 |---|---|---|---|---|
-| OPEN-03 | `capabilities.md` 的命令名是旧的 | B2 写 `runtime_start(profile_id)`、B3 `profile_delete`、B4 `import_seed_file`、C1/C2 `default_profile_refresh`；批 1 换成了 `config_*` / `node_*` | G-03 / G-04 会把能力表判成不一致 | 已转架构师，批 0 处理。`contracts/commands.md` §2 已声明「`invoke_handler` 是唯一事实来源」，按它为准 |
-| OPEN-05 | 问题状态与严重度词汇不一致 | 文档：`open/handed_off/resolved/ignored`、`P0/P1/P2`；当前 schema：`open/resolved/dismissed`、`info/warning/error` | 转交后回看、卡片分级都可能错 | 已转架构师，批 0 处理；库以文档为准 |
-| OPEN-06 | 配置模型缺 DNS 与内网排除 | `configs-and-nav.md` §3 把 DNS、内网排除列为一套配置的组成部分；`001_init.sql` 的 `configs` 没有对应列/表 | B1-02 判失败 | 已转架构师，批 0 处理；明确用 JSON 列还是子表承载，并写进 DDL 注释 |
+| OPEN-03 | `capabilities.md` 的 B 组命令名是旧的 | B1–B4 仍写 `profile_list` / `runtime_start(profile_id)` / `profile_delete` / `import_seed_file`；批 1 已有 `config_*` 与 K 组，但 B 组没改。这份表是系统提示词的来源 | G-03 / G-04 会把能力表判成不一致 | 已转架构师。把 B 组改成 `config_*` / `node_*`，或并入 K 组 |
+| OPEN-10 | 契约把未实现命令标成「2.0 新增」 | `commands.md` §2 里 `node_probe` / `proxy_params` / `probe_run` / `issue_*` 未注册（Bob 交接确认属后续批次），但状态列写的是「2.0 新增」而不是「预留」 | G-03 差集非空，看的人分不清是漏做还是没到批次 | 未实现的统一标「预留」。`node_switch` 与 `runtime_start` 的取舍已裁定，见 §10.1 |
 
 ---
 
@@ -353,7 +360,7 @@ bash scripts/test/wiring-check.sh --strict
 
 | 批次 | 条目 |
 |---|---|
-| 批 2 | B2-01、B2-02、B2-03、B2-04、B2-05、B2-06、B2-07、B2-08、B2-09、B2-10、B2-11、B2-12 |
+| 批 2 | B2-01、B2-02、B2-03、B2-04、B2-05、B2-06、B2-07、B2-08、B2-09、B2-10、B2-11、B2-12、B2-15、B2-17 |
 | 批 3 | B3-02、B3-04、B3-06 |
 | 批 4 | B4-01、B4-02、B4-03、B4-05、B4-07、B4-08、B4-09 |
 | 批 5 | B5-02、B5-03、B5-04、B5-05、B5-09、B5-10 |

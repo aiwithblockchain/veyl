@@ -1,7 +1,7 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.0.0`
-> 状态：待 PM 审核（批 0 · 契约与数据模型，2026-11-03）
+> 契约版本：`2.1.0`
+> 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，2.0.0）
 > 实现方：Rust（Host 发送）、TypeScript（UI 订阅）
@@ -49,8 +49,10 @@
 | 16 | `node-switched` | Host → UI | `NodeSwitchedPayload` | **2.0 新增**：当前节点变化 |
 | 17 | `issue-changed` | Host → UI | `IssueChangedPayload` | **2.0 新增**：问题新增或状态变化 |
 | 18 | `layout-updated` | Host → UI | `LayoutUpdatedPayload` | **2.0 新增**：中间区域编排布局落库 |
+| 19 | `routing-changed` | Host → UI | `RoutingChangedPayload` | **2.1 新增**：分流模式 / 目标 / 自定义规则变化 |
+| 20 | `rules-changed` | Host → UI | `RulesChangedPayload` | **2.1 新增**：规则数据版本切换 |
 
-1–8 是 AI 会话事件，9–18 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
+1–8 是 AI 会话事件，9–20 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
 
 > **事件与命令成对**：每个改变持久状态的命令都必须有一条对应事件。没有事件的变更只允许发生在「只读命令」上。例外是 `probe_run`——它不改状态，但探测失败的副作用（登记问题）由 `issue-changed` 表达。
 
@@ -374,7 +376,7 @@ UI 处理：更新延迟/出口 IP/健康灯；`degraded` 时在状态栏加黄�
 type JobProgressPayload = {
   contract_version: "2.0.0";
   job_id: string;
-  kind: "core_install" | "diag";
+  kind: "core_install" | "diag" | "rules_update";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
   stage: string;
   progress: number;              // 0.0–1.0
@@ -691,7 +693,56 @@ type LayoutUpdatedPayload = {
 - **本地规则不写布局**（见 §4.12）。因此本事件只有 AI 编排一个来源，没有 `source` 字段。
 - 切换配置时**不重发本事件**：`config-changed(activated)` 之后 UI 调 `config_detail`，布局随详情一起返回。
 
-### 4.14 应用事件的顺序约定
+### 4.14 `routing-changed`（2.1 新增）
+
+分流模式、目标分类或自定义规则发生变化。
+
+```ts
+type RoutingChangedPayload = {
+  contract_version: "2.1.0";
+  config_id: string;
+  routing_mode: "direct" | "proxy_all" | "proxy_selected";
+  applied_mode: "direct" | "proxy_all" | "proxy_selected" | null;
+  targets: string[];
+  route_revision: number;
+  applied_revision: number | null;    // 取自 RuntimeSnapshot.applied_route_revision
+  change: "mode" | "targets" | "custom_rule";
+  hot_switched: boolean;
+  reconnect_required: boolean;
+  emitted_at: string;
+};
+```
+
+触发：`route_set_mode` / `route_targets_set` / `rule_custom_add` / `rule_custom_delete` 事务提交后。
+
+- `hot_switched = true` 时 `applied_mode === routing_mode`，当前连接已生效。
+- `hot_switched = false` 时两者可以不同；`reconnect_required = true` 表示改了但当前连接还没用上，UI 必须显示「下次连接生效」。判断依据是 `route_revision` 与 `applied_revision` 是否相等。
+- 模式热切**不触发** `runtime-state-changed`：进程没迁移，只是某类流量的出口变了。
+
+### 4.15 `rules-changed`（2.1 新增）
+
+规则数据目录切换成功。
+
+```ts
+type RulesChangedPayload = {
+  contract_version: "2.1.0";
+  active_version: string;
+  previous_version: string | null;
+  geosite_tag: string | null;
+  geoip_tag: string | null;
+  item_count: number;
+  effective: "next_connect";
+  emitted_at: string;
+};
+```
+
+触发：`rules_update` 完成校验并原子切换目录之后。
+
+- **不打断当前连接**：当前连接继续用旧规则，下次连接才生效；payload 里固定 `effective = "next_connect"`。
+- 未连接时排队的更新在下一次连接成功后执行，执行完同样发本事件。
+- 失败的更新不发本事件（`job-progress` 以 `failed` 结束，保留旧版本）。
+
+### 4.16 应用事件的顺序约定
 
 Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 
@@ -700,6 +751,8 @@ Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 3. **节点切换不发运行时事件**（§4.11）。
 4. **问题事件与运行时事件互不阻塞**：一次崩溃可能同时产生 `runtime-state-changed(failed)` 与 `issue-changed(created)`，两者没有先后要求；UI 必须能处理任意顺序。
 5. **布局按 `revision` 丢弃旧值**（§4.13），不依赖到达顺序。
+6. **`routing-changed` 在 selector 写成功后发出**；`hot_switched = true` 时，其后到达的 `runtime-state-changed` 快照里 `applied_mode` 必须已经是新值，不得回退。UI 按 `route_revision` / `applied_revision` 判断，不以事件到达顺序为准。
+7. **`rules-changed` 不改当前连接**（`effective = "next_connect"`），不得据此刷新运行中的代理卡或状态。
 
 ---
 
@@ -811,6 +864,16 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.1.0（2026-11-03，批 3 · 分流与 DNS）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.1.0` | 元数据 | 批 3 |
+| 2 | 新增 `routing-changed`（事件总数 18 → 20 之一） | 新增事件 | `routing.md` 1.0.0 |
+| 3 | 新增 `rules-changed` | 新增事件 | 同上 |
+| 4 | `job-progress.kind` 增加 `rules_update` | 字段扩展 | 规则更新是长任务 |
+| 5 | §4.16 补两条顺序约定：selector 热切后的快照一致性、`rules-changed` 不改当前连接 | 约束 | 防止 UI 误刷新 |
 
 ### 2.0.0（2026-11-03，批 0 · 契约与数据模型）
 

@@ -1,7 +1,7 @@
 # 契约：Runtime Manager
 
-> 契约版本：`2.0.0`
-> 状态：待 PM 审核（批 0 · 契约与数据模型，2026-11-03）
+> 契约版本：`2.1.0`
+> 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 冻结前评审：PM / Alice / Bob
 > 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5、`docs/tun-mode.md`
 > 实现方：Rust（Host）与 TypeScript（UI）共用本文件
@@ -115,7 +115,7 @@ type HealthCheckName =
   | "traffic";
 
 type HealthSnapshot = {
-  contract_version: "2.0.0";
+  contract_version: "2.1.0";
   process: boolean;
   clash_api: boolean;
   data_plane: boolean;
@@ -141,7 +141,7 @@ type TrafficStats = {
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.0.0";
+  contract_version: "2.1.0";
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
@@ -156,6 +156,7 @@ type RuntimeSnapshot = {
   latency_ms: number | null;         // 出口 IP 探测往返耗时
   direct_ip: string | null;          // 不经代理的直连出口 IP
   config_hash: string | null;        // "sha256:<hex>"，配置文件的摘要
+  applied_route_revision: number | null; // 2.1：建连时 configs.route_revision 的值
   system_proxy_enabled: boolean;
   health: HealthSnapshot;
   traffic: TrafficStats | null;
@@ -182,6 +183,7 @@ type RuntimeSnapshot = {
 | `connected_since` | 本次进入 `running` 的时刻，ISO 8601 UTC | 仅在 `running` / `degraded` 下非 `null`；与 `uptime_seconds` **同源**：`uptime_seconds ≈ now − connected_since`。两者不得互相矛盾 |
 | `mixed_port` | 本次实际监听的本地 mixed 入站端口 | `mode = "system_proxy"` 且状态为 `running` / `degraded` 时非 `null`；`tun` 模式恒为 `null`。**禁止写常量**（1.0.10 的缺陷是把 2080 硬编码在 UI 里，而实际端口每次随机） |
 | `latency_ms` | 最近一次**出口 IP 探测**的往返耗时（毫秒） | 未探测/探测失败为 `null`。**不是**节点 ping 延迟 |
+| `applied_route_revision` | 本次连接生成配置时的 `configs.route_revision` | 建连时读入并随进程保存；未连接为 `null`。与库里的 `route_revision` 比较：相等 = 分流规则已生效，不等 = 改了但当前连接还没用上，UI 显示「下次连接生效」 |
 | `direct_ip` | 不经代理测得的**直连**出口 IP | 与 `exit_ip` 配对展示，用于让用户判断「是否真的走了代理」。未测到为 `null`。**不得**在探测时带上系统代理，否则两个值会相同、失去意义 |
 
 **`latency_ms` 的定义必须固定为「出口 IP 探测往返耗时」**，理由是它已经有实现、有含义，且能在没有额外网络请求的前提下反映链路质量。
@@ -196,7 +198,7 @@ type RuntimeSnapshot = {
 
 ```ts
 type AivpnError = {
-  contract_version: "2.0.0";
+  contract_version: "2.1.0";
   code: AivpnErrorCode;
   message: string;        // 面向用户，可本地化
   retryable: boolean;
@@ -469,7 +471,7 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 
 ```json
 {
-  "contract_version": "2.0.0",
+  "contract_version": "2.1.0",
   "state": "running",
   "mode": "system_proxy",
   "pid": 1234,
@@ -477,6 +479,7 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
   "config_id": "cfg_1a2b3c4d5e6f7788",
   "node_id": "nod_1a2b3c4d5e6f7788",
   "config_hash": "sha256:9a1c...",
+  "applied_route_revision": 3,
   "restart_intent": false,
   "restart_count": 1,
   "system_proxy_enabled": true,
@@ -559,6 +562,14 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 ---
 
 ## 12. 变更记录
+
+### 2.1.0（2026-11-03，批 3 · 分流与 DNS）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.1.0` | 元数据 | 批 3 |
+| 2 | `RuntimeSnapshot` 增加 `applied_route_revision`，回答「当前连接用的是哪一版分流规则」 | 字段新增 | PM 裁定 6 |
+| 3 | `runtime-state.json` 同步持久化该字段 | 持久化 | 崩溃恢复后仍能比较 |
 
 ### 2.0.0（2026-11-03，批 0 · 契约与数据模型）
 

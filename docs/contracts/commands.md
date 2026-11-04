@@ -1,10 +1,10 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.0.0`
-> 状态：待 PM 审核（批 0 · 契约与数据模型，2026-11-03）
+> 契约版本：`2.1.0`
+> 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
-> 变更记录：见 §15
+> 变更记录：见 §16
 
 > ⚠️ **本文件的版本号不代表整个契合同步升级。**
 > 契约拆成多份之后，每份的版本各自独立：`catalog.md` 是**与服务端协商**的协议版本（改它会中断目录服务，见该文件变更记录），`tools.md` / `runtime.md` / `events.md` / 本文件是应用内部版本。
@@ -33,7 +33,7 @@
 | 没有任何「问题」实体 | `issue` 有状态、可计数、可转交 |
 | 没有布局持久化 | `layout` 按配置存 |
 
-产品还没有用户，**不做迁移、不留兼容层**（`docs/implementation-plan.md` §1）。所有旧命令直接删除，数据库整体重建，详见 §10 与 `data-model.md` §6。
+产品还没有用户，**不做迁移、不留兼容层**（`docs/implementation-plan.md` §1）。所有旧命令直接删除，数据库整体重建，详见 §11 与 `data-model.md` §6。
 
 ### 0.2 跨文件一致性（批 0 已完成）
 
@@ -53,9 +53,9 @@
 |---|---|---|
 | OPEN-05 | 问题状态统一 `open` / `handed_off` / `resolved` / `ignored`；严重度统一 `P0` / `P1` / `P2` | §6、`data-model.md` §3.6 |
 | OPEN-06 | `configs` 表必须承载 DNS 候选与 TUN 内网排除网段，用 JSON 列（一组值、无独立生命周期，不需要子表） | §3.0、`data-model.md` §3.2 |
-| OPEN-03 | 命令名以本文件为准；`capabilities.md` 由 PM 维护，本文件只标注能力 ID | §11 |
-| — | 「测试连通」新增能力 **D6 测试单个节点连通性** | §11.1 的 `node_probe` |
-| — | 新增 **K 组「配置管理」K1–K5**（配置级能力，与 B 组节点级分开） | §11.1 |
+| OPEN-03 | 命令名以本文件为准；`capabilities.md` 由 PM 维护，本文件只标注能力 ID | §12 |
+| — | 「测试连通」新增能力 **D6 测试单个节点连通性** | §12.1 的 `node_probe` |
+| — | 新增 **K 组「配置管理」K1–K5**（配置级能力，与 B 组节点级分开） | §12.1 |
 
 ---
 
@@ -128,8 +128,8 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | # | 命令 | 入参 | 返回 | 状态 |
 |---|---|---|---|---|
 | 1 | `config_list` | `{}` | `ConfigListData` | **2.0 新增** |
-| 2 | `config_create` | `{ name, connectMode, routeMode, source?, nodeIds?, listenPort?, dns?, tunExcludes? }` | `ConfigDetail` | **2.0 新增** |
-| 3 | `config_update` | `{ configId, name?, routeMode?, listenPort?, dns?, tunExcludes?, nodeIds? }` | `ConfigDetail` | **2.0 新增** |
+| 2 | `config_create` | `{ name, connectMode, routingMode, targets?, source?, nodeIds?, listenPort?, dns?, tunExcludes? }` | `ConfigDetail` | **2.0 新增** |
+| 3 | `config_update` | `{ configId, name?, routingMode?, targets?, listenPort?, dns?, tunExcludes?, nodeIds? }` | `ConfigDetail` | **2.0 新增** |
 | 4 | `config_delete` | `{ configId }` | `ConfigDeleteData` | **2.0 新增** |
 | 5 | `config_activate` | `{ configId, confirmDisconnect? }` | `ConfigActivateData` | **2.0 新增** |
 | 6 | `config_detail` | `{ configId }` | `ConfigDetail` | **2.0 新增** |
@@ -168,8 +168,17 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 39 | `deepseek_clear_key` | `{}` | `{ ok: true }` | 保留 |
 | 40 | `open_log_dir` | `{}` | `{ path: string }` | 保留 |
 | 41 | `open_external` | `{ url }` | `{ ok: true }` | 保留（1.2.0 漏记，2.0 补录） |
+| 42 | `route_get` | `{ configId? }` | `RouteState` | **2.1 新增** |
+| 43 | `route_set_mode` | `{ configId?, mode, confirmReconnect? }` | `RouteSetModeData` | **2.1 新增** |
+| 44 | `route_targets_set` | `{ configId, categories }` | `RouteState` | **2.1 新增** |
+| 45 | `rule_custom_list` | `{ configId }` | `{ rules: CustomRule[] }` | **2.1 新增** |
+| 46 | `rule_custom_add` | `{ configId, action, matchType, value, note? }` | `CustomRule` | **2.1 新增** |
+| 47 | `rule_custom_delete` | `{ configId, ruleId }` | `{ rule_id, deleted, already_absent }` | **2.1 新增** |
+| 48 | `category_list` | `{ query?, limit? }` | `{ categories: Category[], total }` | **2.1 新增** |
+| 49 | `rules_status` | `{}` | `RulesStatus` | **2.1 新增** |
+| 50 | `rules_update` | `{}` | `{ queued: boolean, job_id: string \| null }` | **2.1 新增** |
 
-> 「状态」三列含义：**新增** = 2.0 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
+> 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
 
 ---
@@ -182,7 +191,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 
 ```ts
 type ConfigMode = "system_proxy" | "tun";
-type RouteMode = "direct" | "proxy_all" | "proxy_selected";
+type RoutingMode = "direct" | "proxy_all" | "proxy_selected";
 
 // DNS 候选：local 直连查询，remote 经代理查询。
 // 空数组表示「由生成器按用户国家自动选」，落库时也是空数组，不预填常量——
@@ -197,7 +206,7 @@ type ConfigSummary = {
   config_id: string;
   name: string;
   connect_mode: ConfigMode;          // system_proxy = 只给代理地址；tun = 接管全部
-  route_mode: RouteMode;
+  routing_mode: RoutingMode;
   node_count: number;
   listen_port: number | null;        // system_proxy：本机代理端口；null = 自动。tun 恒为 null
   is_active: boolean;
@@ -254,13 +263,14 @@ type ConfigListData = {
 - 空列表是合法状态，返回 `configs: []`，**不报错**。空态由 UI 渲染（`docs/configs-and-nav.md` §2.1）。
 - 列表里**不返回节点明细**，避免左栏为 N 个配置各拉一遍；要节点看 `config_detail`。
 
-### 3.2 `config_create { name, connectMode, routeMode, source?, nodeIds?, listenPort?, dns?, tunExcludes? }` → `ConfigDetail`
+### 3.2 `config_create { name, connectMode, routingMode, targets?, source?, nodeIds?, listenPort?, dns?, tunExcludes? }` → `ConfigDetail`
 
 | 参数 | 必填 | 规则 |
 |---|---|---|
 | `name` | 是 | trim 后非空、≤ 40 字符；**不允许重名**（trim 后逐字节比较）。重复 → `CONFLICT`，`details.reason = "duplicate_name"` |
 | `connectMode` | 是 | `"system_proxy"` / `"tun"`。**故意没有默认值**——连接方式是用户明确选的，见下 |
-| `routeMode` | 是 | `"direct"` / `"proxy_all"`。`"proxy_selected"` 本批返回 `UNSUPPORTED`，`details.reason = "route_mode_not_ready"`（自定义规则在批 3） |
+| `routingMode` | 是 | 三种取值都接受。`"proxy_selected"` 时 `targets` 必填且非空 |
+| `targets` | 否 | 分类 id 数组，仅 `proxy_selected` 有意义；id 不在分类目录 → `NOT_FOUND / category_unknown` |
 | `source` | 否 | `"seed"`：绑定当前种子里的全部节点；与 `nodeIds` **互斥** |
 | `nodeIds` | 否 | 绑定已有节点，顺序即节点顺序 |
 | `listenPort` | 否 | 仅 `system_proxy`；1000–65535。`tun` 传了 → `INVALID_ARGUMENT`，`details.reason = "listen_port_not_allowed"` |
@@ -287,12 +297,13 @@ type ConfigListData = {
 
 错误：`INVALID_ARGUMENT`、`CONFLICT`、`NOT_FOUND`、`PRECONDITION_FAILED`、`UNSUPPORTED`、`INTERNAL`。
 
-### 3.3 `config_update { configId, name?, routeMode?, listenPort?, dns?, tunExcludes?, nodeIds? }` → `ConfigDetail`
+### 3.3 `config_update { configId, name?, routingMode?, targets?, listenPort?, dns?, tunExcludes?, nodeIds? }` → `ConfigDetail`
 
 | 字段 | 可改 | 说明 |
 |---|---|---|
 | `name` | ✅ | 同样的非空 / ≤ 40 / 不重名校验 |
-| `routeMode` | ✅ | 只影响下一次生成配置；**不在线切换**（在线换分流是 G2，批 3 走 selector） |
+| `routingMode` | ✅ | 只影响下一次生成配置；**不在线切换**（在线切换走 `route_set_mode`，G2） |
+| `targets` | ✅ | 整套替换；切到 `proxy_selected` 时必须非空 |
 | `listenPort` | ✅ | 仅 `system_proxy` 配置；改端口在下一次连接生效 |
 | `dns` | ✅ | 整体替换；`custom` 的校验同 §3.2 |
 | `tunExcludes` | ✅ | 仅 `tun` 配置 |
@@ -300,7 +311,7 @@ type ConfigListData = {
 | `connectMode` | ❌ | **没有这个参数**。带上它 → `INVALID_ARGUMENT`，`details.reason = "connect_mode_immutable"` |
 
 - **改连接方式必须新建一套配置**（`docs/configs-and-nav.md` §4）：system_proxy 与 tun 是两种完全不同的接管方式，就地改会让「我刚才明明配好了」变成「它自己变了」。
-- `routeMode = "proxy_selected"` 同 §3.2，本批 `UNSUPPORTED`。
+- `routingMode = "proxy_selected"` 时 `targets` 必须非空（同 §3.2）。
 - 修改**不打断当前连接**：新值只写库；下一次连接或下一次切换节点时生效。UI 需要提示「下次连接生效」时，用返回值与当前 `RuntimeSnapshot` 自行比较，Host 不额外发信号。
 - 改的是 active 配置且当前已连接 → `runtime_status.config_hash` 与新配置不一致，但**不自动重连**。
 - 幂等：参数与现状完全一致时仍返回同一份 `ConfigDetail`，不发事件。
@@ -666,7 +677,7 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 | 节点集为空 | `PRECONDITION_FAILED`，`details.reason = "no_nodes"` |
 | 连接方式为 `tun` 且特权助手不可用 | `PRECONDITION_FAILED`，`details.reason = "tun_helper_missing"`（批 5） |
 | 已在连接中 | **不报错**：目标一致 → 返回当前快照；目标不同 → 平滑切换（见技术设计 §4） |
-| 成功后 | 系统代理已按连接方式设置、运行时 `state = running`；返回的 `RuntimeSnapshot` 必须满足 §7.4 |
+| 成功后 | 系统代理已按连接方式设置、运行时 `state = running`；返回的 `RuntimeSnapshot` 必须满足 §7.3 |
 | `last_used_at` | 成功后刷新为该配置的当前毫秒时间 |
 
 **2.0 删掉了「没有 active 就用默认配置包」的第二级回退。**
@@ -998,7 +1009,131 @@ type PendingQuestion = {
 
 ---
 
-## 10. 已删除与已作废
+## 10. 分流与 DNS（G / I 组）
+
+> 生成器、规则资源布局与三条模式的具体 `route.rules` / `final` 见 **`routing.md`**。本节只定义 UI → Host 的命令与返回形状。
+
+### 10.0 共用类型
+
+```ts
+type RoutingMode = "direct" | "proxy_all" | "proxy_selected";
+
+type CustomRule = {
+  rule_id: string;                 // rul_<16 hex>
+  action: "proxy" | "direct";
+  match_type: "domain" | "domain_suffix" | "domain_keyword" | "ip_cidr" | "category";
+  value: string;
+  note: string | null;
+  position: number;
+  created_at: number;              // Unix 毫秒
+};
+
+type RouteState = {
+  config_id: string;
+  routing_mode: RoutingMode;
+  applied_mode: RoutingMode | null;   // 取自 RuntimeSnapshot；未连接为 null
+  targets: string[];                  // 分类 id，仅 proxy_selected
+  custom_rules: CustomRule[];
+  route_revision: number;
+  applied_revision: number | null;    // = RuntimeSnapshot.applied_route_revision
+  effective: "current_connection" | "next_connection";
+  reconnect_required: boolean;
+  local_direct_basis: "domain_and_ip" | "ip_only";
+  detected_region: string | null;     // ISO 3166-1 alpha-2
+};
+
+type RouteSetModeData = RouteState & {
+  hot_switched: boolean;
+  reconnect: "not_running" | "reconnected" | "reconnect_failed" | null;
+};
+
+type Category = {
+  id: string;
+  name_zh: string;
+  name_en: string;
+  description: string;
+  item_count: number;
+  rule_sets: string[];
+  dns_classifiable: boolean;
+};
+
+type RulesStatus = {
+  active_version: string;
+  manifest_sha256: string;
+  geosite_tag: string | null;
+  geoip_tag: string | null;
+  geosite_age_days: number | null;
+  geoip_age_days: number | null;
+  stale: boolean;
+  item_count: number;
+  total_bytes: number;
+  checked_at: number | null;
+  bundled_version: string;
+  pending_update: boolean;
+};
+```
+
+### 10.1 `route_get { configId? }` → `RouteState`
+
+- **G1** 查看当前分流方式。`configId` 省略用 active 配置。
+- `applied_mode` / `applied_revision` 一律取自 `RuntimeSnapshot`，不从库里推。
+- 只读，不联网，不发事件。
+
+### 10.2 `route_set_mode { configId?, mode, confirmReconnect? }` → `RouteSetModeData`
+
+- **G2** 切换分流方式。
+- `direct` ↔ `proxy_all` 且已连接 → 走 Clash API selector 热切，`hot_switched = true`、`effective = "current_connection"`。
+- 涉及 `proxy_selected` 的跨家族切换、且已连接、未带 `confirmReconnect` → `PRECONDITION_FAILED`，`details.reason = "will_disconnect"`，**不产生任何变更**。
+- 带 `confirmReconnect: true` → 按「停运行时 → 写库 → 启运行时」执行，`reconnect` 给出结果。**重连失败不抛错**：切换本身已成功。
+- 未连接 → 只写库，`effective = "next_connection"`、`reconnect = "not_running"`。
+- `mode = "proxy_selected"` 且 `targets` 为空 → `PRECONDITION_FAILED / route_targets_empty`。
+- 同一模式 → 幂等返回，不发事件。
+
+### 10.3 `route_targets_set { configId, categories }` → `RouteState`
+
+- **G4** 整体替换「指定服务」的分类集合。
+- 任何一个 id 不在分类目录 → `NOT_FOUND / category_unknown`，`details.unknown` 一次列全。
+- `dns_classifiable = false` 的分类 → `UNSUPPORTED / category_not_dns_classifiable`。
+- 不热切：`effective = "next_connection"`。
+
+### 10.4 `rule_custom_list { configId }` → `{ rules: CustomRule[] }`
+
+- **G4** 按 `position` 升序返回；空数组合法。
+
+### 10.5 `rule_custom_add { configId, action, matchType, value, note? }` → `CustomRule`
+
+- **G4** 追加到末尾（`position = max + 1`）。
+- 校验 `matchType` 与 `value`：域名语法、CIDR 合法性、分类存在且 `dns_classifiable`。
+- 同一 `(config_id, action, match_type, value)` → `CONFLICT / duplicate_rule`。
+- 写入后 `route_revision + 1`；`effective = "next_connection"`，发 `routing-changed`。
+
+### 10.6 `rule_custom_delete { configId, ruleId }` → `{ rule_id, deleted, already_absent }`
+
+- **G4** 幂等：不存在 → `deleted = false`、`already_absent = true`。
+- 不重排 `position`（留空不影响顺序），`route_revision + 1`，发 `routing-changed`。
+
+### 10.7 `category_list { query?, limit? }` → `{ categories: Category[], total }`
+
+- **I1** 分类目录，AI 与 UI 共用。
+- `query` 对 id 与中英文名做不区分大小写的子串匹配；`limit` 默认 50、上限 200。
+- 只读，不联网，读当前生效规则版本的 `categories.json`。
+
+### 10.8 `rules_status {}` → `RulesStatus`
+
+- **G3 / I2** 当前规则数据版本与新鲜度。只读，不联网。
+- `stale` 只用于提示，不阻断连接；`pending_update` 表示有排队任务（见 10.9）。
+
+### 10.9 `rules_update {}` → `{ queued: boolean, job_id: string | null }`
+
+- **G3 / I2** 更新规则数据。
+- 已连接 → 异步执行：`queued = false`、返回 `job_id`；进度走 `job-progress`，`kind = "rules_update"`。
+- 未连接 → 排队：`queued = true`、`job_id = null`，下次连接成功后自动执行，**不返回失败**。
+- 已有任务在跑 → `CONFLICT`，`details.job_id` 指向进行中的任务。
+- 成功后发 `rules-changed`，`effective = "next_connect"`。
+
+---
+
+## 11. 已删除与已作废
 
 | 命令 | 处置 | 理由 |
 |---|---|---|
@@ -1012,15 +1147,15 @@ type PendingQuestion = {
 
 > **只作废 invoke 命令，不作废 AI 工具。** 聊天通道里的工具（`VpnConnect` 等）继续存在，见 `tools.md`。两条通道最终落到同一份 Host 实现，差别只在「谁发起」。
 >
-> `tools.md` 的工具名在 2.0 需要同步改名（§0.2），否则 AI 侧仍会按 `profile` 概念调用。
+> `tools.md` 已升到 3.1.0，工具名与本表一一对应。
 
 ---
 
-## 11. 能力 ↔ 命令 ↔ 块 映射
+## 12. 能力 ↔ 命令 ↔ 块 映射
 
 这是本文与 `docs/capabilities.md`、`docs/center-panel.md` §2.5.1 对齐的**唯一表格**。任何一行对不上，实现就是错的。
 
-### 11.1 新增与变更的命令
+### 12.1 新增与变更的命令
 
 | 命令 | 能力 ID | 界面元素 / 块 | 说明 |
 |---|---|---|---|
@@ -1044,9 +1179,16 @@ type PendingQuestion = {
 | `runtime_status` | **A4** 连接状态 | 顶部状态文字 | 配合 `runtime-state-changed` |
 | `net_repair` | **E1** 恢复直连 / **E2** 刷新 DNS | `issue_card`、设置页 | |
 | `open_log_dir` | **E4** 打开日志目录 | 状态区链接 | |
-| `default_profile_status` / `_refresh` | **C1** / **C2** / **C3** | `update_hint`、`source_choice` | |
+| `default_profile_status` / `_refresh` | **C1** / **C2** / **C3** | `update_hint`、`source_choice` |
+| `route_get` | **G1** 查看当前分流方式 | 设置页 / 分流文本 | |
+| `route_set_mode` | **G2** 切换分流方式 | 分流选项 | A↔B 热切；跨家族需确认后重连 |
+| `route_targets_set` | **G4** 用户自定义分流（目标服务） | 设置页 / 表单 | |
+| `rule_custom_list` / `_add` / `_delete` | **G4** 用户自定义分流（逐条规则） | 设置页 / 对话 | |
+| `category_list` | **I1** 读取分类目录 | 表单 / AI 工具 | |
+| `rules_status` | **G3** 更新分流规则数据 / **I2** | `update_hint`、设置页 | |
+| `rules_update` | **G3** / **I2** | 设置页按钮 | 未连接时排队 |
 
-### 11.2 固定骨架与块的完整对应
+### 12.2 固定骨架与块的完整对应
 
 | 骨架元素 / 块 | 依赖能力 | 命令 |
 |---|---|---|
@@ -1063,11 +1205,11 @@ type PendingQuestion = {
 | `issue_card` | J1–J4 / E1–E3 | `issue_*`、`net_repair` |
 | `update_hint` | C2 / C3 | `default_profile_status` |
 
-### 11.3 对不上的地方（需要 PM 在 `capabilities.md` 增补或改口径）
+### 12.3 对不上的地方（需要 PM 在 `capabilities.md` 增补或改口径）
 
 | # | 缺口 | 建议 |
 |---|---|---|
-| 1 | ~~没有「列出配置」「切换配置」的能力 ID~~ | **已解决**：PM 新增 K 组「配置管理」K1–K5，已并入 §11.1 |
+| 1 | ~~没有「列出配置」「切换配置」的能力 ID~~ | **已解决**：PM 新增 K 组「配置管理」K1–K5，已并入 §12.1 |
 | 2 | **B2 的实现方式变了**。旧表写 `runtime_start(profile_id)`，2.0 拆出 `node_switch`。 | 把 B2 的「实现状态」改成 `node_switch`。拆分理由：未连接时「切换到此节点」只改选择、**不应启动 VPN**；用 `runtime_start` 会把「看」与「连」混成一个动作 |
 | 3 | **J1 没有命令**。 | 保持现状：J1 是内部行为。若将来要让 UI 手动「重新检测」并登记，再加 `issue_collect`，不要暴露 `issue_create` |
 | 4 | **布局写入没有能力 ID。** | 布局属于编排协议（`center-panel.md` §3），不是用户可点能力，不需要能力 ID。写入路径是 AI 工具（批 4），UI 只读 |
@@ -1078,7 +1220,7 @@ type PendingQuestion = {
 
 ---
 
-## 12. 与 AI 工具的对应关系
+## 13. 与 AI 工具的对应关系
 
 | 命令 | AI 工具 | 是否共用实现 |
 |---|---|---|
@@ -1099,6 +1241,13 @@ type PendingQuestion = {
 | `issue_list` | `IssueList`（2.0 新增） | **必须** |
 | `issue_get` | `IssueGet`（2.0 新增） | **必须** |
 | `issue_handoff` / `issue_resolve` / `issue_ignore` | `IssueHandoff` / `IssueResolve` / `IssueIgnore`（2.0 新增） | **必须** |
+| `route_get` | `RouteGet`（2.1 新增） | **必须** |
+| `route_set_mode` | `RouteSetMode`（2.1 新增） | **必须** |
+| `route_targets_set` | `RouteTargetsSet`（2.1 新增） | **必须** |
+| `rule_custom_list` / `_add` / `_delete` | `RuleCustomList` / `RuleCustomAdd` / `RuleCustomDelete`（2.1 新增） | **必须** |
+| `category_list` | `CategoryList`（2.1 新增） | **必须** |
+| `rules_status` | `RulesStatus`（2.1 新增） | **必须** |
+| `rules_update` | `RulesUpdate`（2.1 新增） | **必须** |
 | `net_repair` | `NetRepair` | **必须** |
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
@@ -1107,7 +1256,7 @@ type PendingQuestion = {
 
 ---
 
-## 13. 待 PM / 产品确认
+## 14. 待 PM / 产品确认
 
 | # | 议题 | 我的建议 | 状态 |
 |---|---|---|---|
@@ -1115,17 +1264,17 @@ type PendingQuestion = {
 | 2 | 删除 active 配置是否允许 | **允许**（未连接时），删后回到空态。与「不设不可删除特例」一致；只拦「正在连接」 | **建议采纳** |
 | 3 | `config_create` 自动激活的条件 | 未连接时自动激活；已连接时不自动切 | **建议采纳** |
 | 4 | `config_activate` 的确认参数 | `confirmDisconnect: true`，每次都要重新确认，不记忆 | **建议采纳** |
-| 5 | `node_switch` 是否新增（而不是复用 `runtime_start`） | **新增**。理由见 §11.3 缺口 2 | **已拍板**（2026-11-03） |
-| 6 | 配置级能力 ID | **已拍板**：新增 K 组 K1–K5，见 §11.1 | **已解决** |
+| 5 | `node_switch` 是否新增（而不是复用 `runtime_start`） | **新增**。理由见 §12.3 缺口 2 | **已拍板**（2026-11-03） |
+| 6 | 配置级能力 ID | **已拍板**：新增 K 组 K1–K5，见 §12.1 | **已解决** |
 | 7 | `seed_id` 常量命名 | `"veyl_seed"` | 待确认 |
 | 8 | `import_seed_file` 保留（语义收窄为「只并节点」） | **保留**，理由见 §8.3 | **建议采纳** |
 | 9 | 删除配置的二次确认由谁做 | **UI**。`config_delete` 命中「正在连接」时拒绝；其余情况 Host 不再拦，确认框是界面职责（K5 标了破坏性） | 待确认 |
 
 ---
 
-## 14. 破坏性变更清单（1.2.0 → 2.0.0）
+## 15. 破坏性变更清单（1.2.0 → 2.1.0）
 
-### 14.1 删除
+### 15.1 删除
 
 | 对象 | 类型 | 影响 |
 |---|---|---|
@@ -1136,7 +1285,7 @@ type PendingQuestion = {
 | `profiles` 表 | 数据库 | 整个库重建，见 `data-model.md` §6 |
 | `settings.onboarding_completed` | 数据 | 不迁移 |
 
-### 14.2 改名 / 改形状
+### 15.2 改名 / 改形状
 
 | 对象 | 旧 | 新 | 兼容性 |
 |---|---|---|---|
@@ -1149,7 +1298,7 @@ type PendingQuestion = {
 | `import_seed_file` 语义 | 创建 profile | 只并节点池 | **不兼容** |
 | `runtime_start` 回退链 | active → 默认配置包 → 报错 | active → 报错（`no_config`） | 行为变更：全新安装不再能「直接连」 |
 
-### 14.3 新增
+### 15.3 新增
 
 17 个命令：
 
@@ -1158,29 +1307,47 @@ type PendingQuestion = {
 - 代理与探测 2 条：`proxy_params` / `probe_run`
 - 问题 5 条：`issue_list` / `issue_get` / `issue_handoff` / `issue_resolve` / `issue_ignore`
 
-### 14.4 数据结构
+### 15.4 数据结构
 
-- 数据库文件**整体重建**，`profiles` / `default_profile` 表删除，新增 `configs` / `nodes` / `config_nodes` / `layouts` / `issues` / `seed_meta`。
+- 数据库文件**整体重建**，`profiles` / `default_profile` 表删除，新增 `configs` / `nodes` / `config_nodes` / `layout` / `issues` / `seed_cache`（2.1 再加 `config_rules` / `rules_state`）。
 - 旧库存在时：启动检测 schema 代际不一致 → **删除数据库文件并重建**（对话历史一并丢失）。产品还没有用户，这是刻意选择，不是缺陷。
 
-### 14.5 连带的升级（已完成）
+### 15.5 连带的升级（已完成）
 
 **契约版本矩阵**
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.0.0** | 本批已升级 |
-| `contracts/events.md` | **2.0.0** | 本批已升级 |
-| `contracts/runtime.md` | **2.0.0** | 本批已升级（字段改名 + `mode` 增加 `tun`） |
-| `contracts/tools.md` | **3.0.0** | 本批已升级（工具改名与新增） |
-| `data-model.md` | **1**（schema 基线） | 本批新建 |
+| `contracts/commands.md` | **2.1.0** | 批 0 + 批 3 已升级 |
+| `contracts/events.md` | **2.1.0** | 批 0 + 批 3 已升级 |
+| `contracts/runtime.md` | **2.1.0** | 批 0 + `applied_route_revision` |
+| `contracts/tools.md` | **3.1.0** | 批 0 + 批 3 工具 |
+| `data-model.md` | **2** | 批 0 + 批 3 表 |
+| `contracts/routing.md` | **1.0.0** | 批 3 设计依据 |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
 
-四份应用侧契约现在可以同时按 2.0 词汇实现，不再有「命令是 config、内部仍是 profile」的半迁移状态。
+### 15.6 2.1.0 新增（非破坏性）
+
+- 9 条分流命令（§10）、2 个事件、2 列与 2 张表、1 个运行时快照字段。
+- `config_create` / `config_update` 新增可选 `targets`；`routing_mode = "proxy_selected"` 时必填。
+- 参数 `routeMode` 统一更名为 `routingMode`（与数据库列、AI 工具 schema 同名）。
 
 ---
 
-## 15. 变更记录
+## 16. 变更记录
+
+### 2.1.0（2026-11-03，批 3 · 分流与 DNS）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.1.0` | 元数据 | 批 3 契约设计 |
+| 2 | 新增 9 条命令：`route_get` / `route_set_mode` / `route_targets_set` / `rule_custom_list` / `_add` / `_delete` / `category_list` / `rules_status` / `rules_update` | 新增命令 | `routing.md` 1.0.0 |
+| 3 | `config_create` / `config_update` 新增可选 `targets`；`proxy_selected` 时必填 | 字段新增 | 配置模型包含目标服务 |
+| 4 | 参数 `routeMode` 统一更名为 `routingMode` | 改名 | 与 `configs.routing_mode`、AI 工具 schema 同名，消除中转 |
+| 5 | `proxy_selected` 不再返回 `UNSUPPORTED`，改为正式支持 | 语义变更 | 批 3 落地 |
+| 6 | `route_set_mode` 跨家族切换要求 `confirmReconnect`；未确认时 `will_disconnect` | 语义定案 | PM 裁定 1 |
+| 7 | `rules_update` 未连接时排队（`queued: true`），不返回失败 | 语义定案 | PM 裁定 4 |
+| 8 | 能力映射补 G1–G4 / I1 / I2，并新增 K 组 K1–K5（批 0 PM 裁定） | 映射 | `capabilities.md` |
 
 ### 2.0.0（2026-11-03，批 0 · 契约与数据模型）
 

@@ -1,6 +1,6 @@
 # 数据模型
 
-> 版本：`1`（对应契约 `commands.md` 2.0.0）
+> 版本：`2`（对应契约 `commands.md` 2.1.0）
 > 日期：2026-11-03
 > 范围：配置、节点、问题、布局，以及它们与 `secrets.enc`、种子缓存的关系
 > 依据：`docs/configs-and-nav.md` §3、§8，`docs/config-execution.md` §6–§10，`docs/issue-management.md` §3、`docs/center-panel.md` §3
@@ -81,6 +81,10 @@ CREATE TABLE configs (
     dns_json          TEXT NOT NULL DEFAULT '{"mode":"auto","local":[],"remote":[]}',
     -- TUN 内网排除网段（用户补充的部分）。固定网段表在生成器里，不进库。
     tun_excludes_json TEXT NOT NULL DEFAULT '[]',
+    -- 「指定服务走 VPN」的分类 id 数组；其它模式为空数组。
+    route_targets_json TEXT NOT NULL DEFAULT '[]',
+    -- 分流目标 / 自定义规则每次变更 +1；与运行时快照的 applied_route_revision 比较。
+    route_revision    INTEGER NOT NULL DEFAULT 0,
     -- 当前节点。节点被删时由外键置 NULL，不阻止删除。
     current_node_id   TEXT REFERENCES nodes (id) ON DELETE SET NULL,
     is_active         INTEGER NOT NULL DEFAULT 0 CHECK (is_active IN (0, 1)),
@@ -99,6 +103,8 @@ CREATE INDEX idx_configs_last_used ON configs (last_used_at DESC);
 | `listen_port` | `NULL` = 自动；1000–65535 是应用层限制（表只校验 1–65535，避免把产品策略写死进 schema）。`tun` 必须 `NULL` |
 | `dns_json` | 空数组 = 「按国家自动选」，**不预填常量**。常量会被当成用户的选择，从此不跟随国家变化 |
 | `tun_excludes_json` | 只存**用户补充**的网段；`10.0.0.0/8` 等固定排除表写死在生成器，避免每行配置重复一份 |
+| `route_targets_json` | 分类 id 数组，仅 `routing_mode = 'proxy_selected'` 使用；空数组表示还没选目标 |
+| `route_revision` | 单调递增；改 `targets` 或增删自定义规则时 +1。不是版本历史，只是「当前连接是否已应用」的比较基准 |
 | `current_node_id` | 必须是该配置节点集里的成员（应用层保证；数据库无法表达「在同一配置的 config_nodes 里」） |
 | `is_active` | 部分唯一索引保证至多一个 |
 
@@ -265,7 +271,58 @@ CREATE TABLE seed_cache (
 - 种子里的节点**不会自动进入 `nodes`**。只有当用户创建 `source = "seed"` 的配置时，才解密种子并把节点物化进节点池（`source = 'seed'`），避免从未使用的种子在节点列表里出现。
 - 刷新时按 `source_key` upsert；新种子里不存在的 seed 节点被删除，其在配置里的关系随之级联。
 
-### 3.7 保留的基础设施表
+### 3.7 `config_rules` — 用户自定义分流规则
+
+自定义规则有**独立生命周期**（逐条增删、排序、单独撤销），与 DNS/内网排除不同，因此建子表而不是 JSON。
+
+```sql
+CREATE TABLE config_rules (
+    id          TEXT PRIMARY KEY,               -- rul_<16 hex>
+    config_id   TEXT NOT NULL REFERENCES configs (id) ON DELETE CASCADE,
+    action      TEXT NOT NULL CHECK (action IN ('proxy', 'direct')),
+    match_type  TEXT NOT NULL CHECK (match_type IN
+                  ('domain', 'domain_suffix', 'domain_keyword', 'ip_cidr', 'category')),
+    value       TEXT NOT NULL,
+    note        TEXT,
+    position    INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX idx_config_rules_unique
+    ON config_rules (config_id, action, match_type, value);
+CREATE INDEX idx_config_rules_order ON config_rules (config_id, position);
+```
+
+| 列 | 规则 |
+|---|---|
+| `match_type = 'category'` | `value` 存**分类 id**（如 `openai`），不存 `.srs` tag。规则集 tag 由 `categories.json` 解析，分类目录升级后不影响已存的规则 |
+| `position` | 生成 `route.rules` 的顺序；删除不重排，留空不影响顺序 |
+| 重复 | 同一 `(config_id, action, match_type, value)` 不允许两条 |
+| 删除 | 随配置级联；不随种子/规则数据更新变化 |
+
+### 3.8 `rules_state` — 规则数据状态（单行）
+
+```sql
+CREATE TABLE rules_state (
+    id                INTEGER PRIMARY KEY CHECK (id = 1),
+    active_version    TEXT NOT NULL,       -- 目录名，如 "2026-11-03.1"
+    manifest_sha256   TEXT NOT NULL,
+    bundled_version   TEXT NOT NULL,       -- 随包基线
+    geosite_tag       TEXT,
+    geoip_tag         TEXT,
+    item_count        INTEGER NOT NULL,
+    total_bytes       INTEGER NOT NULL,
+    applied_at        INTEGER NOT NULL,
+    checked_at        INTEGER,
+    pending_update    INTEGER NOT NULL DEFAULT 0 CHECK (pending_update IN (0, 1))
+);
+```
+
+- 规则文件本身在磁盘（`app_data/rules/<version>/`），**不进库**。
+- `pending_update = 1`：未连接时排队的更新，下次连接成功后执行。
+- `bundled_version` 用于区分「随包基线」与「联网更新过的版本」。
+
+### 3.9 保留的基础设施表
 
 这些表与「配置」格式无关，2.0 原样保留，不在本批改动范围：
 
@@ -295,6 +352,8 @@ CREATE TABLE seed_cache (
 | `issues` | `merge_key UNIQUE` | 同类问题合并 |
 | `issues` | `(status, severity, last_seen_at DESC)` | 问题列表与插卡选择 |
 | `issues` | `(config_id, status)` | 按配置筛选 |
+| `config_rules` | 唯一 `(config_id, action, match_type, value)` | 不允许重复规则 |
+| `config_rules` | `(config_id, position)` | 规则顺序 |
 
 **外键必须真正生效**：`PRAGMA foreign_keys = ON` 在每个连接上设置。SQLite 的默认值是 OFF，漏设时所有级联删除都会静默失效——表现为「删了配置，config_nodes 还在」。
 
@@ -382,6 +441,8 @@ CREATE TABLE seed_cache (
 | `layout` | `config_detail` | AI 编排（批 4，Host 内部） | `layout-updated` |
 | `issues` | `issue_list` / `issue_get` | Host 内部（J1）、`issue_handoff` / `issue_resolve` / `issue_ignore` | `issue-changed` |
 | `seed_cache` | `default_profile_status` | `default_profile_refresh` / `import_seed_file` | `default-profile-updated` |
+| `config_rules` | `rule_custom_list` | `rule_custom_add` / `rule_custom_delete` | `routing-changed` |
+| `rules_state` | `rules_status` | `rules_update` / 启动解压 | `rules-changed` |
 
 **没有任何命令直接写 `issues` 的采集字段。** `occurrences` / `first_seen_at` / `evidence_json` 只由 Host 内部登记器写；命令层只能改 `status` 与 `session_id`。
 
@@ -399,9 +460,11 @@ CREATE TABLE seed_cache (
 | `issues.evidence_json` | `IssueDetail.evidence` |
 | `configs.id` | `ConfigSummary.config_id` |
 | `configs.connection_mode` | `ConfigSummary.connect_mode` |
-| `configs.routing_mode` | `ConfigSummary.route_mode` |
+| `configs.routing_mode` | `ConfigSummary.routing_mode` |
 | `configs.tun_excludes_json` | `ConfigDetail.tun_excludes` |
 | `configs.dns_json` | `ConfigDetail.dns` |
+| `configs.route_targets_json` | `RouteState.targets` |
+| `configs.route_revision` | `RouteState.route_revision` |
 | `nodes.id` | `NodeSummary.node_id` |
 | `layout.layout_json` | `ConfigDetail.layout` |
 
@@ -424,6 +487,15 @@ CREATE TABLE seed_cache (
 | 9 | `seed_cache.source_updated_at` / 无 `source_version` | 增加 `source_version TEXT` | `version` 只展示、`content_sha256` 判变化；两者都要能读到 |
 | 10 | `configs` 的 `connection_mode` 注释写「system_proxy / tun」 | 保持不变 | 已与本文件一致 |
 
+**批 3 待实现（尚未进代码，实现时按此加）：**
+
+| # | 对象 | 内容 |
+|---|---|---|
+| 11 | `configs` | 增加 `route_targets_json TEXT NOT NULL DEFAULT '[]'` 与 `route_revision INTEGER NOT NULL DEFAULT 0` |
+| 12 | `config_rules` | 新表（§3.7），含唯一索引与顺序索引 |
+| 13 | `rules_state` | 新表（§3.8），单行；`pending_update` 支持排队 |
+| 14 | `RuntimeSnapshot` | 增加 `applied_route_revision`（`runtime.md`），建连时从 `configs.route_revision` 读入 |
+
 > 差异 1–4 是**产品语义**问题，不是命名偏好：按现状实现，J3 转交后状态无处可写、P0/P1 插卡规则无法实现。差异 5–9 是**契约形状**问题。
 
 ---
@@ -436,7 +508,7 @@ CREATE TABLE seed_cache (
 | 软删除（`deleted_at`） | 删配置就是删；问题记录不提供删除。软删除会让每个查询都多一个 `WHERE`，且容易漏 |
 | 配置版本历史 / 回滚 | 没有需求；用户要回退就重配一套 |
 | 节点使用统计 | 目前没有「哪个节点用了多少次」的产品需求；需要时另表，不塞进 `nodes` |
-| 自定义分流规则表 | 批 3 再做。届时若规则需要单条启停，再建 `config_rules`；现在只有 `routing_mode` 枚举 |
+| ~~自定义分流规则表~~ | **已做**（批 3）：规则逐条增删、有独立生命周期，故建 `config_rules` 子表；DNS/内网排除仍用 JSON 列 |
 | 敏感字段的列级加密 | 密码根本不在库里；对非敏感列做加密只增加复杂度 |
 
 ---
@@ -449,3 +521,20 @@ CREATE TABLE seed_cache (
 | 2 | `listen_port` 用 NULL 还是 0 表示自动 | **NULL**：0 是合法的绑定值，不能当哨兵 | **已定**（PM，2026-11-03） |
 | 3 | `layout` 是否允许空布局（`blocks: []`） | **允许**；空布局 = AI 明确选择，无行 = 还没编排，两者必须区分 | **已定**（PM，2026-11-03） |
 | 4 | `nodes.source_key` 对 manual 是否也计算 | **计算**，便于将来跨来源合并；当前唯一索引按 `(source, source_key)`，不影响手动节点重复创建 | 待确认 |
+
+---
+
+## 11. 变更记录
+
+### 2（2026-11-03，批 3 · 分流与 DNS）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | `configs` 增加 `route_targets_json` / `route_revision` | 列新增 |
+| 2 | 新增 `config_rules`（自定义分流规则，独立生命周期 → 子表） | 表新增 |
+| 3 | 新增 `rules_state`（规则数据版本、基线、排队状态） | 表新增 |
+| 4 | 契约字段 `route_mode` 统一为 `routing_mode`（与列名、AI 工具同名） | 命名 |
+
+### 1（2026-11-03，批 0）
+
+首次定稿：6 张核心表、索引、`secrets.enc` 关系、旧 `profiles` 重建策略。

@@ -1,7 +1,7 @@
-# 契约：分流与 DNS（草案）
+# 契约：分流与 DNS
 
-> 契约版本：`1.0.0`（定稿待并入；并入后 `commands.md` 2.1 / `events.md` 2.1 / `data-model.md` 2 / `runtime.md` 2.1）
-> 状态：**定稿（待 PM 复核）**，2026-11-03。PM 复核通过前不改 `capabilities.md`，也不并入其它契约文件。
+> 契约版本：`1.1.0`（已并入 `commands.md` 2.1.1 / `events.md` 2.1.0 / `tools.md` 3.1.1 / `runtime.md` 2.1.0 / `data-model.md` 2）
+> 状态：**已定稿并并入**，2026-11-04。`capabilities.md` 由 PM 维护，本文件不改它。
 > 依据：`docs/user-flows.md` §1.4、`docs/config-execution.md` §7、`docs/capabilities.md` G/I 组、`docs/tun-mode.md` §3/§5、`docs/upgrade.md` §3、`docs/review-checklist.md` B3-01～B3-08
 > 实现：`src-tauri/src/config/`（生成）、`src-tauri/src/rules/`（资源与更新）、Clash API（热切换）
 
@@ -208,6 +208,8 @@ route-local = proxy
 | 本地层规则集 | CN：`geosite-cn`+`geoip-cn`；其它：`geoip-<cc>` | 同左 | 无 |
 | 能否热切 | ↔ `proxy_all` | ↔ `direct` | **否** |
 
+> DNS 那一层不随这张表走：它由「地区 + 模式」共同决定，见 §6.2。非中国的 `direct` / `proxy_all` 是 `route.final = proxy` 而 `dns.final = local`——**两个 final 本来就可以不一致**，它们分别管流量默认出口与解析默认出口。
+
 ### 3.6 顺序（不可变）
 
 ```
@@ -219,18 +221,21 @@ sniff → hijack-dns → ip_is_private → 自定义规则 → 本地层/目标�
 - 自定义规则在预置规则**之前**，用户覆盖优先。
 - 顺序错是**静默失效**，B3-03 会用脚本断言索引严格递增。
 
-### 3.7 所有国家都支持 `direct`，依据不同
+### 3.7 所有国家都支持 `direct`，依据与 DNS 策略不同
 
-产品负责人 2026-11-03 明确：**本国直连对所有国家都成立**，区别只在判定依据。
+产品负责人 2026-11-04 明确：**本国直连对所有国家都成立**；非中国改用本地 DNS 解析。
 
-| 地区 | 本地层规则集 | 精度 |
-|---|---|---|
-| CN | `geosite-cn` + `geoip-cn` | 域名级 + IP 级 |
-| 其它国家 | `geoip-<cc>`（如 `geoip-jp`） | **仅 IP 级近似** |
+| 地区 | 本地层规则集 | 判定精度 | DNS 策略 |
+|---|---|---|---|
+| CN | `geosite-cn` + `geoip-cn` | 域名级 + IP 级 | 按域名分流：本地规则集 → local，其余 → remote |
+| 其它国家 | `geoip-<cc>`（如 `geoip-jp`） | **仅 IP 级近似** | **所有域名走本地 DNS 直连解析**，再用 IP 判定走直连还是 VPN |
+
+**为什么非中国必须本地解析**：若走代理 DNS，本地网站会被解析成境外 IP，`geoip-<cc>` 判不出本地，`direct` 等于没生效——那还不如不提供这个选项。
+
+**代价是 DNS 泄漏**：本地 DNS 能看到用户查询的域名。这与产品「默认不防泄漏」的方针一致，**不额外弹提示、不在文案里承诺防护**（`user-flows.md` §5 的例外小节）。
 
 - 非中国用户的 `direct` 模式**照常提供服务**，不报错、不隐藏。
-- **文案必须如实说明近似**：界面说「尽量让你的本地网站直连；这项判断按 IP 归属，可能有个别网站判断不准」，不承诺精确。
-- **DNS 侧的限制**：其它国家没有对应的 geosite 规则集，DNS 无法按域名把「本地」分出来。此时 `dns.final` 仍是 `dns-remote`（与默认走 VPN 一致），本地站点的解析也可能经由代理 DNS——这是 IP 级近似的固有代价，写进文案与诊断说明，不假装没有。
+- **文案仍要如实说明近似**：「尽量让你的本地网站直连；判断按 IP 归属，可能有个别网站不准」。
 - 地区判定来自 H1（系统区域），不联网。
 
 ---
@@ -248,6 +253,7 @@ sniff → hijack-dns → ip_is_private → 自定义规则 → 本地层/目标�
 跨家族切换需要换 `final`，而 `final` 不能热重载（`user-flows.md` §1.4 实测：`PUT /configs` 返回 204 但不生效）。因此：
 
 - 已连接 + 跨家族 + **没有 `confirmReconnect: true`** → `PRECONDITION_FAILED`，`details.reason = "will_disconnect"`，`details { applied_mode, target_mode }`。**不静默切断**。
+  确认文案必须包含两点：会断开一次并自动重连；**域名解析方式也会改变**（§6.4）。
 - 带 `confirmReconnect: true` → Host 按 `runtime_stop` → 写库 → `runtime_start` 的顺序执行（与 `config_activate` 的确认语义同等对待），返回 `reconnect = "reconnected" | "reconnect_failed"`。
 - 未连接 → 只写库，不需要确认。
 
@@ -326,27 +332,30 @@ selector 只影响**新连接**；已建立的连接继续走原出口直到自�
 | CN | `223.5.5.5`、`119.29.29.29` | `https://1.1.1.1/dns-query`、`https://dns.google/dns-query` |
 | 其它 | 系统 DNS（若非回环）+ `1.1.1.1`（直连） | 同上 |
 
-- **非中国用户的 `direct` 模式没有 geosite 规则集**，DNS 侧没有「本地」可分类，全部走 `dns.final = dns-remote`。这与 §3.7 的 IP 级近似是同一件事，不要试图用 `geoip` 拼 DNS 规则。
+- **非中国 A/B 只生成 `dns-local-*`**：没有域名级分类，不需要 remote 服务器。其它组合只有在有规则或 final 引用 `dns-remote` 时才生成它——不生成用不到的服务器，配置更小，也不会让人误以为「有代理 DNS 就一定会用」。
 - `dns.mode = "custom"` 时用配置里的 `local` / `remote`，数量与格式在 `config_create` 校验。
 - 自动模式**排除回环与指向本机的 DNS**：系统 DNS 是 `127.0.0.1` / `::1` / 本机 mixed 端口时（用户开着别的代理），改用 `1.1.1.1` + `8.8.8.8` 直连，避免把解析打回自己的代理形成环。
 - remote 一律 DoH 经代理：明文 UDP 53 在部分网络会被劫持，DoH 经隧道才能拿到可信结果。
 
 ### 6.2 规则
 
-DNS 规则**由同一个 `RoutePlan` 生成**，与 `route.rules` 一一对应：
+DNS 规则与 `final` **由同一个 `RoutePlan` 生成**，按「地区 + 模式」有四种组合：
 
-| 模式 | DNS 规则 | `final` |
-|---|---|---|
-| `direct` / `proxy_all` | 本地层规则集 → `dns-local-1`（**仅 CN 有域名级规则**）；自定义 `direct` → `dns-local-1` | `dns-remote-1` |
-| `proxy_selected` | 目标层规则集 + 自定义 `proxy` → `dns-remote-1`；自定义 `direct` → `dns-local-1` | `dns-local-1` |
+| 地区 | 模式 | DNS 规则 | `dns.final` | 形态 |
+|---|---|---|---|---|
+| CN | `direct` / `proxy_all` | 本地层规则集 → `dns-local-1`；自定义 `direct` → `dns-local-1` | `dns-remote-1` | 域名级 |
+| CN | `proxy_selected` | 目标层 + 自定义 `proxy` → `dns-remote-1`；自定义 `direct` → `dns-local-1` | `dns-local-1` | 域名级 |
+| 其它 | `direct` / `proxy_all` | **无域名规则** | `dns-local-1` | IP 级 + 全本地解析 |
+| 其它 | `proxy_selected` | 目标层 + 自定义 `proxy` → `dns-remote-1`；自定义 `direct` → `dns-local-1` | `dns-local-1` | 域名级（目标）+ 全本地（其余） |
 
-**同源不变量（必须写成测试）**
+**同源不变量（覆盖两种形态，必须写成测试）**
 
-1. `dns.rules` 里引用的每个 `rule_set` 必须也出现在 `route.rule_set` 里（子集关系）。
-2. **`dns.rules` 只引用 `kind = "geosite"` 的规则集**。`geoip` 是纯 IP 匹配，DNS 查询阶段还没有目标 IP，写进去不会命中——它只参与 `route.rules`。
-3. 「哪些域名算本地 / 哪些算目标」只由一个 `Classification` 表决定；DNS 与 route 都从它读，**不允许出现第二份分类逻辑**。
-4. 用户自定义规则同时改变两侧：`domain` / `domain_suffix` / `domain_keyword` / `category` 四类进 DNS，`ip_cidr` **只进 route**（理由同上）。
-5. 一条 `direct` 规则既把流量指向 `direct`，也把该域名解析指向 `dns-local`；`proxy` 相反。
+1. 「哪些域名算本地 / 哪些算目标」只由一个 `Classification` 表决定；DNS 与 route 都从它读，**不允许出现第二份域名清单或第二套分类逻辑**。
+2. **域名级形态**（CN 的 A/B、任意地区的 C）：`dns.rules` 引用的每个 `rule_set` 必须也出现在 `route.rule_set` 里（子集关系）；`direct` → `dns-local`、`proxy` → `dns-remote`，与 route 同源。
+3. **IP 级形态**（非中国的 A/B）：DNS **不做域名分类**，全部本地解析；route 仍按 `geoip-<cc>` 判定。这是产品明确接受的降级（§3.7），不是遗漏，也不是「忘了配 DNS」。
+4. **`dns.rules` 只引用 `kind = "geosite"` 的规则集**。`geoip` 是纯 IP 匹配，DNS 查询阶段还没有目标 IP，写进去不会命中——它只参与 `route.rules`。
+5. **自定义规则按形态生效**：域名级形态下，`domain` / `domain_suffix` / `domain_keyword` / `category` 同时改 DNS 与 route；IP 级形态下它们**只改 route**（DNS 已全本地，无可再分）。`ip_cidr` 永远只改 route。
+6. 一条 `direct` 规则在域名级形态下既把流量指向 `direct`，也把该域名解析指向 `dns-local`；`proxy` 相反。
 
 ### 6.3 TUN 额外要求
 
@@ -357,7 +366,14 @@ DNS 规则**由同一个 `RoutePlan` 生成**，与 `route.rules` 一一对应�
 
 ### 6.4 DNS 与热切
 
-DNS 规则不随 A↔B 切换变化（两者的默认都是「其余走 VPN」，DNS final 都是 remote）。这正是把 `proxy_selected` 排除出热切的原因之一：它的 DNS final 是 `dns-local`，与 A/B 相反。**换家族必然换 DNS，必须重连。**
+| 切换 | route 变化 | DNS 变化 |
+|---|---|---|
+| A ↔ B（同家族） | 只改 `route-local` selector | **不变**：同一地区、同一家族的 DNS 规则与 final 完全相同 |
+| 任意跨家族（涉及 C） | `route.final` 改变，必须重连 | **必定改变**：C 多了目标域名的 remote 规则；CN 的 final 还在 local ↔ remote 之间切换 |
+
+- **「换 final 要重连」没有例外。** `route.final` 与 `dns.final` 是两个层各自的默认出口，不需要一致；非中国 A/B 的 `(proxy, local)` 组合是合法且刻意的。
+- A↔B 热切时 DNS 完全不动，所以 `route-local` 的 selector 切换不会影响解析——这是它能做到「不断流」的一部分。
+- **跨家族确认文案**：除「会断开一次并自动重连」外，再加一句「**域名解析方式也会改变**」。不需要新增字段：跨家族必然改变 DNS 行为，UI 只要按 `will_disconnect` 分支写死这句话即可。
 
 ---
 
@@ -629,7 +645,7 @@ applied_route_revision: number | null;  // 本次连接生成配置时的 config
 
 ---
 
-## 11. 与其它契约的改动清单（审核通过后执行）
+## 11. 与其它契约的改动清单（已执行）
 
 | 文件 | 改动 |
 |---|---|
@@ -654,6 +670,7 @@ applied_route_revision: number | null;  // 本次连接生成配置时的 config
 | 4 | 规则更新必须已连接 | **已定**：未连接时排队，下次连接自动执行，不报失败 | PM 2026-11-03 |
 | 5 | 规则归档由谁发布 | **已定**：我们的构建流水线打包发布，客户端不直连上游 | PM 2026-11-03 |
 | 6 | 如何表达「当前连接用的是哪一版规则」 | **已定**：`RuntimeSnapshot.applied_route_revision` 与 `configs.route_revision` 比较；相等即已生效，不等即下次连接生效 | PM 2026-11-03 |
+| 7 | 非中国 `direct` 模式的 DNS | **已定：全部域名走本地 DNS 直连解析**，再用 `geoip-<cc>` 按 IP 判定；接受 DNS 泄漏，不额外提示 | 产品负责人 2026-11-04（`user-flows.md` §5 例外） |
 
 ---
 
@@ -669,3 +686,27 @@ applied_route_revision: number | null;  // 本次连接生成配置时的 config
 | B3-06 文案无禁用词 | 不在契约层；UI 用「哪些网站走 VPN / 直连」 |
 | B3-07 按需加载 | §2.3 |
 | B3-08 先 `check` 再启动 | §2.4 / `config-execution.md` §7 既有规则 |
+
+---
+
+## 14. 变更记录
+
+### 1.1.0（2026-11-04，非中国 direct 的 DNS 策略）
+
+| # | 变更 | 类型 | 来源 |
+|---|---|---|---|
+| 1 | 非中国 `direct` / `proxy_all` 改为**全本地 DNS 解析**（原设计是 remote，会让本地站解析成境外 IP、geoip 判不出本地） | 语义修正 | 产品负责人 |
+| 2 | 同源约束改为覆盖两种形态：域名级（CN A/B、任意 C）与 IP 级 + 全本地解析（非 CN A/B） | 约束重写 | 同上 |
+| 3 | 明确 `route.final` 与 `dns.final` 可以不一致，分属两层；跨家族重连规则无例外 | 澄清 | 同上 |
+| 4 | 跨家族确认文案加「域名解析方式也会改变」；不新增字段 | 交互约束 | 同上 |
+
+### 1.0.0（2026-11-03，批 3）
+
+| # | 变更 | 类型 | 来源 |
+|---|---|---|---|
+| 1 | 由 `0.1.0-draft` 定稿 | 元数据 | PM 复核 |
+| 2 | `direct` 模式对所有国家开放：CN 用 `geosite-cn`+`geoip-cn`，其它国家用 `geoip-<cc>`（IP 级近似，文案如实说明） | 语义修正 | PM 裁定 2 |
+| 3 | 跨家族切换必须 `confirmReconnect`，Host 断开重连，不静默切断 | 语义修正 | PM 裁定 1 |
+| 4 | 未连接时 `rules_update` 排队，下次连接自动执行；不返回失败 | 语义修正 | PM 裁定 4 |
+| 5 | 新增 `RuntimeSnapshot.applied_route_revision`，与 `configs.route_revision` 比较判断是否生效 | 字段新增（待并入 `runtime.md`） | PM 裁定 6 |
+| 6 | 五种匹配词汇、归档由我们发布 | 确认 | PM 裁定 3、5 |

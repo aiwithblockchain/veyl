@@ -1,7 +1,7 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.0.0`
-> 状态：待 PM 审核（批 0 · 契约与数据模型，2026-11-03）
+> 契约版本：`3.1.0`
+> 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/contracts/commands.md` 2.0.0、`docs/contracts/runtime.md` 2.0.0、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
@@ -121,8 +121,9 @@ type NextAction = {
 | `CoreInstall` | 直接下载并执行二进制 | 无拦截点 |
 | `VpnConnect` | 直接修改系统代理 / 路由 | 无拦截点 |
 | `ConfigDelete` | 直接删除一套配置（含其节点关系与问题记录） | 无拦截点 |
+| `RouteSetMode` | 跨家族切换会断开并重连（需显式确认） | 会短暂断网 |
 
-**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigList`、`ConfigDetail`、`NodeProbe`、`ProxyParams`、`IssueList`、`IssueGet`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`）在 `PermissionMode::Default` 下直接允许；其余工具由 Host 的 `PermissionHandler` 一律返回 `Allow`。
+**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigList`、`ConfigDetail`、`NodeProbe`、`ProxyParams`、`IssueList`、`IssueGet`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`RuleCustomList`、`CategoryList`、`RulesStatus`）在 `PermissionMode::Default` 下直接允许；其余工具由 Host 的 `PermissionHandler` 一律返回 `Allow`。
 
 不再存在的东西：
 
@@ -260,6 +261,15 @@ type CallSource = "ui" | "agent";
 | 33 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
 | 34 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
 | 35 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
+| 36 | `RouteGet` | `RouteGetTool` | 分流模式、目标、自定义规则、生效状态 | `ReadOnly` | 只读 |
+| 37 | `RouteSetMode` | `RouteSetModeTool` | 切换分流模式（A↔B 热切） | `Execute` | 中 |
+| 38 | `RouteTargetsSet` | `RouteTargetsSetTool` | 设置「指定服务」分类集合 | `Write` | 中 |
+| 39 | `RuleCustomList` | `RuleCustomListTool` | 列自定义分流规则 | `ReadOnly` | 只读 |
+| 40 | `RuleCustomAdd` | `RuleCustomAddTool` | 追加一条自定义规则 | `Write` | 中 |
+| 41 | `RuleCustomDelete` | `RuleCustomDeleteTool` | 删除一条自定义规则 | `Write` | 中 |
+| 42 | `CategoryList` | `CategoryListTool` | 分类目录（I1） | `ReadOnly` | 只读 |
+| 43 | `RulesStatus` | `RulesStatusTool` | 规则数据版本与新鲜度 | `ReadOnly` | 只读 |
+| 44 | `RulesUpdate` | `RulesUpdateTool` | 更新规则数据（未连接时排队） | `Write` | 中 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
@@ -307,6 +317,16 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(NetRepairTool::new(proxy.clone(), rt.clone())),
     Box::new(CatalogRefreshTool::new(seed.clone(), store.clone(), secrets.clone())),
     Box::new(DefaultProfileStatusTool::new(store.clone())),
+    // 批 3：分流与 DNS
+    Box::new(RouteGetTool::new(store.clone(), rt.clone())),
+    Box::new(RouteSetModeTool::new(store.clone(), rt.clone())),
+    Box::new(RouteTargetsSetTool::new(store.clone())),
+    Box::new(RuleCustomListTool::new(store.clone())),
+    Box::new(RuleCustomAddTool::new(store.clone())),
+    Box::new(RuleCustomDeleteTool::new(store.clone())),
+    Box::new(CategoryListTool::new(rules.clone())),
+    Box::new(RulesStatusTool::new(rules.clone())),
+    Box::new(RulesUpdateTool::new(rules.clone(), rt.clone())),
 ];
 ```
 
@@ -1177,6 +1197,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
     "name": { "type": "string", "maxLength": 40 },
     "connect_mode": { "type": "string", "enum": ["system_proxy", "tun"] },
     "routing_mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
+    "targets": { "type": "array", "items": { "type": "string" } },
     "source": { "type": "string", "enum": ["seed", "empty"] },
     "node_ids": { "type": "array", "items": { "type": "string" } },
     "listen_port": { "type": "integer", "minimum": 1000, "maximum": 65535 },
@@ -1192,7 +1213,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 
 - `source = "seed"` 绑定**当前种子的全部节点**；种子为空 → `PRECONDITION_FAILED / seed_unavailable`。与 `node_ids` 互斥。
 - `source = "empty"` 或不传 → 创建空节点集的配置；可以存在，但 `VpnConnect` 会报 `no_nodes`。
-- `routing_mode = "proxy_selected"` 在批 3 前 → `UNSUPPORTED / route_mode_not_ready`。
+- `routing_mode = "proxy_selected"` 时必须传 `targets`（非空，分类 id 有效），否则 `PRECONDITION_FAILED / route_targets_empty`。
 - `listen_port` 只允许 `system_proxy`；`tun` 传了 → `INVALID_ARGUMENT / listen_port_not_allowed`。
 - **连接方式不给默认值**：`system_proxy` 与 `tun` 是两种接管方式，模型必须显式选。
 - 未连接时新建的配置会自动成为 active；已连接时不自动切换（与 `commands.md` §3.2 一致）。
@@ -1212,6 +1233,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
     "config_id": { "type": "string" },
     "name": { "type": "string", "maxLength": 40 },
     "routing_mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
+    "targets": { "type": "array", "items": { "type": "string" } },
     "listen_port": { "type": "integer", "minimum": 1000, "maximum": 65535 },
     "dns": { "type": "object" },
     "tun_excludes": { "type": "array", "items": { "type": "string" } },
@@ -1473,6 +1495,168 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 
 ---
 
+### 4.36 `RouteGet`（G1）
+
+```json
+{ "type": "object", "properties": { "config_id": { "type": "string" } }, "additionalProperties": false }
+```
+
+`data`：`RouteState`（`commands.md` §10.0）。
+
+- `applied_mode` / `applied_revision` 取自 `RuntimeSnapshot`，不是从库里推。
+- 只读，不联网。用户问「我现在怎么分的」时用它，不要从 `ConfigDetail` 猜。
+
+权限：`ReadOnly`。
+
+---
+
+### 4.37 `RouteSetMode`（G2）
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "config_id": { "type": "string" },
+    "mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
+    "confirm_reconnect": { "type": "boolean", "default": false }
+  },
+  "required": ["mode"],
+  "additionalProperties": false
+}
+```
+
+`data`：`RouteSetModeData`（`commands.md` §10.0）。
+
+- `direct` ↔ `proxy_all` 且已连接 → selector 热切，不断流。
+- 涉及 `proxy_selected` 的跨家族切换 → 未带 `confirm_reconnect` 时返回 `PRECONDITION_FAILED / will_disconnect`；**必须先问用户**，得到同意后再带 `true` 调一次。不得自行重试。
+- 该工具会改网络；即使没有确认点，模型也应在调用前用一句话说明会断一下（§2.1.1）。
+
+---
+
+### 4.38 `RouteTargetsSet`（G4）
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "config_id": { "type": "string" },
+    "categories": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["config_id", "categories"],
+  "additionalProperties": false
+}
+```
+
+`data`：`RouteState`。
+
+- 分类 id 先用 `CategoryList` 查；**不要把用户说的服务名直接当 id**。
+- `dns_classifiable = false` 的分类不能用（`UNSUPPORTED`）。
+- 不热切，`effective = "next_connection"`。
+
+---
+
+### 4.39 `RuleCustomList`（G4）
+
+```json
+{ "type": "object", "properties": { "config_id": { "type": "string" } }, "required": ["config_id"], "additionalProperties": false }
+```
+
+`data`：`{ rules: CustomRule[] }`（`commands.md` §10.0）。
+
+权限：`ReadOnly`。
+
+---
+
+### 4.40 `RuleCustomAdd`（G4）
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "config_id": { "type": "string" },
+    "action": { "type": "string", "enum": ["proxy", "direct"] },
+    "match_type": { "type": "string", "enum": ["domain", "domain_suffix", "domain_keyword", "ip_cidr", "category"] },
+    "value": { "type": "string" },
+    "note": { "type": "string" }
+  },
+  "required": ["config_id", "action", "match_type", "value"],
+  "additionalProperties": false
+}
+```
+
+`data`：`CustomRule`。
+
+- 用户说「让某个站直连 / 走 VPN」时用它；**域名可能被用户写错，先复述再写**。
+- `match_type = "category"` 时 `value` 是分类 id，仍然先 `CategoryList` 解析。
+- 写入后 `effective = "next_connection"`；已连接时告诉用户「下次连接生效」。
+
+---
+
+### 4.41 `RuleCustomDelete`（G4）
+
+```json
+{
+  "type": "object",
+  "properties": { "config_id": { "type": "string" }, "rule_id": { "type": "string" } },
+  "required": ["config_id", "rule_id"],
+  "additionalProperties": false
+}
+```
+
+`data`：`{ rule_id, deleted, already_absent }`。幂等。
+
+---
+
+### 4.42 `CategoryList`（I1）
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": { "type": "string" },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+  },
+  "additionalProperties": false
+}
+```
+
+`data`：`{ categories: Category[], total }`（`commands.md` §10.0）。
+
+- 把用户说的服务名翻成分类 id 的唯一入口。
+- 只读，不联网，读当前生效规则版本。
+
+权限：`ReadOnly`。
+
+---
+
+### 4.43 `RulesStatus`
+
+```json
+{ "type": "object", "properties": {}, "additionalProperties": false }
+```
+
+`data`：`RulesStatus`（`commands.md` §10.0）。
+
+- 只读。用户问「规则是不是旧了」时用它；`stale` 只提示，不阻断。
+
+权限：`ReadOnly`。
+
+---
+
+### 4.44 `RulesUpdate`
+
+```json
+{ "type": "object", "properties": {}, "additionalProperties": false }
+```
+
+`data`：`{ queued: boolean, job_id: string | null }`。
+
+- 已连接 → 异步，返回 `job_id`，进度走 `job-progress`。
+- 未连接 → 排队，`queued: true`；**不要告诉用户「更新失败」**，说「连上之后会自动更新」。
+- 已有任务 → `CONFLICT`，不要重复调用。
+
+---
+
 ## 5. 工具间协作约定
 
 ### 5.1 标准连接链路
@@ -1496,6 +1680,11 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 | `ConfigCreate` | **不幂等**：同名 → `CONFLICT / duplicate_name` |
 | `ConfigUpdate` | 参数与现状一致 → `ok: true`，不发事件 |
 | `ConfigDelete` | 已不存在 → `ok: true`，`deleted: false`，`already_absent: true`；**正在连接 → `PRECONDITION_FAILED`** |
+| `RouteSetMode` | 目标模式与当前一致 → `ok: true`，不发事件 |
+| `RouteTargetsSet` | 集合与现状一致 → `ok: true`，`route_revision` 不变 |
+| `RuleCustomAdd` | 同一 `(action, match_type, value)` 已存在 → `CONFLICT / duplicate_rule` |
+| `RuleCustomDelete` | 已不存在 → `ok: true`，`deleted: false`，`already_absent: true` |
+| `RulesUpdate` | 已有任务 → `CONFLICT`，`details.job_id` |
 | `NodeImportUrl` / `NodeCreate` | 同 `(source, source_key)` → 不新建，计入 `skipped`（`duplicate`）；`data` 仍返回已有节点 |
 | `NodeSwitch` | 目标就是当前节点 → `ok: true`，不发事件 |
 | `CoreInstall` | 同版本已在装或已装 → `CONFLICT`，`details.job_id` 指向进行中的任务 |
@@ -1514,6 +1703,10 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 | `RuntimeStart` | 15s（含 10s 启动） |
 | `VpnConnect` | 30s |
 | `ProbeRun` | 30s（四项顺序执行） |
+| `RouteGet` / `RuleCustomList` / `CategoryList` / `RulesStatus` | 3s（本地读） |
+| `RouteSetMode` | 15s（热切 5s；跨家族含断开重连） |
+| `RouteTargetsSet` / `RuleCustomAdd` / `RuleCustomDelete` | 3s |
+| `RulesUpdate` | 立即返回 `job_id` 或 `queued` |
 | `RuntimeStop` / `VpnDisconnect` | 10s |
 | `CoreInstall` | 立即返回 `job_id` |
 
@@ -1563,6 +1756,17 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 ---
 
 ## 8. 变更记录
+
+### 3.1.0（2026-11-03，批 3 · 分流与 DNS）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.1.0` | 元数据 | 批 3 |
+| 2 | 新增 9 个工具：`RouteGet` / `RouteSetMode` / `RouteTargetsSet` / `RuleCustomList` / `RuleCustomAdd` / `RuleCustomDelete` / `CategoryList` / `RulesStatus` / `RulesUpdate` | 新增工具 | `routing.md` 1.0.0 |
+| 3 | 工具总数 35 → 44 | 计数 | — |
+| 4 | `RouteSetMode` 明确：跨家族必须先问用户，带 `confirm_reconnect` 重调；不得自行重试 | 约束 | PM 裁定 1 |
+| 5 | `RulesUpdate` 未连接时返回 `queued`，不报失败 | 语义 | PM 裁定 4 |
+| 6 | 只读工具列表补 4 项 | 清单 | §2.1 |
 
 ### 3.0.0（2026-11-03，批 0 · 契约与数据模型）
 
