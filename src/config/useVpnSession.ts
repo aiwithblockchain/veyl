@@ -30,6 +30,9 @@ export interface VpnSession {
   connectedConfigId: string | null;
   loading: boolean;
   error: string | null;
+  /** 后端还没实现命令时，界面不再让用户点到必然失败的按钮。 */
+  nodeSwitchAvailable: boolean;
+  nodeProbeAvailable: boolean;
   createConfig: (name: string, mode: ConnectMode) => Promise<ActionResult>;
   selectConfig: (configId: string, confirmDisconnect?: boolean) => Promise<ActionResult>;
   switchNode: (nodeId: string) => Promise<ActionResult>;
@@ -76,6 +79,12 @@ function actionMessage(error: unknown, fallback: string): string {
   return bridgeError.message || fallback;
 }
 
+/** Tauri 对未注册命令的报错形如 `Command node_probe not found`。 */
+function isMissingCommand(error: unknown): boolean {
+  const message = toBridgeError(error).message;
+  return /unknown command/i.test(message) || /command\s+\S+\s+not\s+found/i.test(message);
+}
+
 /**
  * 配置与连接状态。默认走真实命令；`mock` 只在 VITE_MOCK=1（或浏览器里的
  * mock 通道）时启用，供离线演示与测试用。
@@ -88,6 +97,8 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
   const [connectedConfigId, setConnectedConfigId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [nodeSwitchAvailable, setNodeSwitchAvailable] = useState(true);
+  const [nodeProbeAvailable, setNodeProbeAvailable] = useState(true);
 
   const mockStore = useRef<MockStore>({ configs: [], activeId: null });
   const timer = useRef<number | null>(null);
@@ -311,6 +322,10 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       await refreshReal();
       return { ok: true };
     } catch (err) {
+      if (isMissingCommand(err)) {
+        setNodeSwitchAvailable(false);
+        return { ok: false, message: "这个版本还不能切换节点。" };
+      }
       return { ok: false, message: actionMessage(err, "切换节点失败") };
     }
   };
@@ -385,6 +400,15 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
         unreachable: !result.reachable,
       };
     } catch (err) {
+      if (isMissingCommand(err)) {
+        setNodeProbeAvailable(false);
+        return {
+          ok: false,
+          latencyMs: null,
+          message: "这个版本还不能测试连通。",
+          unreachable: false,
+        };
+      }
       return {
         ok: false,
         latencyMs: null,
@@ -402,6 +426,8 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     connectedConfigId,
     loading,
     error,
+    nodeSwitchAvailable,
+    nodeProbeAvailable,
     createConfig,
     selectConfig,
     switchNode,

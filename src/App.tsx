@@ -742,6 +742,8 @@ export default function App() {
         onStop={handleVpnStop}
         onSwitchNode={handleSwitchNode}
         onProbe={vpn.probe}
+        nodeSwitchAvailable={vpn.nodeSwitchAvailable}
+        nodeProbeAvailable={vpn.nodeProbeAvailable}
         panelOpen={panelOpen}
         aiUnread={aiUnread}
         onTogglePanel={togglePanel}

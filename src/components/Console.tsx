@@ -10,6 +10,8 @@ interface Props {
   onStop: () => void;
   onSwitchNode: (nodeId: string) => void;
   onProbe: (nodeId: string) => Promise<ProbeResult>;
+  nodeSwitchAvailable: boolean;
+  nodeProbeAvailable: boolean;
   panelOpen: boolean;
   aiUnread: boolean;
   onTogglePanel: () => void;
@@ -28,6 +30,8 @@ export function Console({
   onStop,
   onSwitchNode,
   onProbe,
+  nodeSwitchAvailable,
+  nodeProbeAvailable,
   panelOpen,
   aiUnread,
   onTogglePanel,
@@ -100,6 +104,12 @@ export function Console({
   };
 
   const canConnect = Boolean(config && config.nodes.length > 0);
+  const connected = connection === "connected";
+
+  useEffect(() => {
+    if (!connected) setProbe(null);
+  }, [connected]);
+
   const primary = consolePrimary(connection, canConnect);
   const status = loading
     ? { text: "正在读取配置…", tone: "muted" as const }
@@ -112,6 +122,11 @@ export function Console({
   } else if (probe?.status === "fail") {
     probeLabel = probe.unreachable ? "连不上" : "测试失败";
   }
+
+  let probeHint: string | null = null;
+  if (!nodeProbeAvailable) probeHint = "这个版本还不能测试";
+  else if (!connected) probeHint = "连接后可以测试";
+  const probeText = nodeProbeAvailable && connected ? probeLabel : probeHint;
 
   return (
     <main className="console">
@@ -248,7 +263,7 @@ export function Console({
               <button
                 type="button"
                 className="btn btn--ghost"
-                disabled={!switching || busy}
+                disabled={!switching || busy || !nodeSwitchAvailable}
                 onClick={() => onSwitchNode(selectedNode.node_id)}
               >
                 切换到此节点
@@ -256,32 +271,38 @@ export function Console({
               <button
                 type="button"
                 className="btn btn--ghost"
-                disabled={probe?.status === "testing"}
+                disabled={
+                  !connected || !nodeProbeAvailable || probe?.status === "testing"
+                }
                 onClick={() => void runProbe()}
               >
                 测试连通
               </button>
-              {probeLabel ? (
+              {probeText ? (
                 <span
                   className={`console-node__probe ${
-                    probe?.status === "ok"
+                    nodeProbeAvailable && probe?.status === "ok"
                       ? "is-ok"
-                      : probe?.status === "fail"
+                      : nodeProbeAvailable && probe?.status === "fail"
                         ? "is-err"
                         : ""
                   }`}
                   title={
-                    probe?.status === "fail" ? probe.message ?? undefined : undefined
+                    nodeProbeAvailable && probe?.status === "fail"
+                      ? probe.message ?? undefined
+                      : undefined
                   }
                 >
-                  {probeLabel}
+                  {probeText}
                 </span>
               ) : null}
             </div>
 
             {switching ? (
               <p className="console-node__hint">
-                选中只会改这里的详情；按「切换到此节点」才会真正切换。
+                {nodeSwitchAvailable
+                  ? "选中只会改这里的详情；按「切换到此节点」才会真正切换。"
+                  : "这个版本还不能切换节点。"}
               </p>
             ) : null}
           </>
