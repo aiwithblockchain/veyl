@@ -376,6 +376,14 @@ pub fn truncate_for_log(value: &str) -> String {
     format!("{head}…（共 {count} 字）")
 }
 
+/// 只掩掉「看起来像凭据」的片段，**不截断**。
+///
+/// 给「要看清内容、又不能让密钥漏出去」的场合用：运行时日志的失败原因
+/// 靠它带出来——截断了就看不出为什么起不来了。
+pub fn mask_secrets(value: &str) -> String {
+    mask_secret_like(value)
+}
+
 /// 把「看起来像凭据」的片段换成 `***`：
 /// - `scheme://user:pass@host` 里的 userinfo
 /// - `sk-` 开头的令牌

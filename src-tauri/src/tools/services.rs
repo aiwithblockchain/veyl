@@ -406,6 +406,55 @@ fn svc_error_with_details(
     })
 }
 
+/// 连接失败时带出来的运行时日志行数。
+const RUNTIME_LOG_TAIL_LINES: usize = 20;
+
+/// 读日志文件末尾：最多 32 KiB，再取最后 `lines` 个非空行。
+///
+/// 从中间开始读，避免为了 20 行把一个很大的日志整个读进内存；
+/// 第一行可能是半截，丢掉。只掩掉像密钥的片段，不截断——截断了就看不出原因。
+fn read_log_tail(path: &std::path::Path, lines: usize) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const MAX_BYTES: u64 = 32 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(MAX_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES).read_to_end(&mut bytes).ok()?;
+
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let text = if start > 0 {
+        text.split_once('\n')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_default()
+    } else {
+        text
+    };
+
+    let picked: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if picked.is_empty() {
+        return None;
+    }
+
+    let masked = crate::logging::mask_secrets(&picked.join("\n"));
+    Some(if masked.chars().count() > 2000 {
+        let head: String = masked.chars().take(2000).collect();
+        format!("{head}…")
+    } else {
+        masked
+    })
+}
+
 /// 配置里存的用户自定义排除网段（`tun_excludes` 是 JSON 数组）。
 fn tun_excludes_from_value(value: &Value) -> Vec<String> {
     value
@@ -1134,8 +1183,8 @@ impl WiredServices {
         let nodes = crate::seed::load_nodes(&self.store).ok_or_else(|| {
             svc_error_with_details(
                 "PRECONDITION_FAILED",
-                "现在拿不到默认节点，先刷新默认节点或手动添加一个",
-                json!({ "reason": "seed_unavailable", "hint": "先刷新默认配置或手动添加节点" }),
+                "现在拿不到测试节点，先刷新测试节点或手动添加一个",
+                json!({ "reason": "seed_unavailable", "hint": "先刷新测试节点或手动添加节点" }),
             )
         })?;
         let exclusions = {
@@ -1721,10 +1770,10 @@ impl VpnToolServices for WiredServices {
             if crate::seed::load_nodes(&self.store).is_none() {
                 return Err(svc_error_with_details(
                     "PRECONDITION_FAILED",
-                    "现在拿不到默认节点",
+                    "现在拿不到测试节点",
                     json!({
                         "reason": "seed_unavailable",
-                        "hint": "先刷新默认配置或手动添加节点"
+                        "hint": "先刷新测试节点或手动添加节点"
                     }),
                 ));
             }
@@ -2452,7 +2501,7 @@ impl VpnToolServices for WiredServices {
             }
             crate::seed::RefreshOutcome::Offline { error, .. } => Err(svc_error_with_details(
                 "UPSTREAM_ERROR",
-                format!("现在拿不到默认节点：{error}"),
+                format!("现在拿不到测试节点：{error}"),
                 json!({ "reason": "fetch_failed" }),
             )),
         }
@@ -2934,8 +2983,8 @@ impl VpnToolServices for WiredServices {
             "network.reachable_seed_source",
             "network",
             source_reachable,
-            if source_reachable { "默认节点源可达".into() } else { "默认节点源不可达".into() },
-            if source_reachable { None } else { Some("连上网络后刷新默认节点") },
+            if source_reachable { "测试节点源可达".into() } else { "测试节点源不可达".into() },
+            if source_reachable { None } else { Some("连上网络后刷新测试节点") },
             if source_reachable { None } else { Some(json!({ "kind": "refresh_default_profile" })) },
         ));
         let github = http_reachable("https://github.com").await;
@@ -2971,13 +3020,13 @@ impl VpnToolServices for WiredServices {
             seed_available,
             if seed_available {
                 format!(
-                    "默认节点 {} 个",
+                    "测试节点 {} 个",
                     seed.get("node_count").and_then(Value::as_i64).unwrap_or(0)
                 )
             } else {
-                "还没有默认节点缓存".into()
+                "还没有测试节点缓存".into()
             },
-            if seed_available { None } else { Some("刷新默认节点") },
+            if seed_available { None } else { Some("刷新测试节点") },
             if seed_available { None } else { Some(json!({ "kind": "refresh_default_profile" })) },
         ));
 
@@ -2994,13 +3043,13 @@ impl VpnToolServices for WiredServices {
             "config",
             !stale,
             if !seed_available {
-                "没有默认节点".into()
+                "没有测试节点".into()
             } else if stale {
-                "默认节点超过 6 小时未更新".into()
+                "测试节点超过 6 小时未更新".into()
             } else {
-                "默认节点较新".into()
+                "测试节点较新".into()
             },
-            if stale { Some("刷新默认节点") } else { None },
+            if stale { Some("刷新测试节点") } else { None },
             if stale { Some(json!({ "kind": "refresh_default_profile" })) } else { None },
         ));
 
@@ -3151,6 +3200,32 @@ impl WiredServices {
             log::warn!("连接中止后撤销系统代理失败：{disable_error}");
         }
         error
+    }
+
+    /// 连接失败时把运行时日志末尾附到错误里。
+    ///
+    /// sing-box 的 FATAL 只写进它自己的日志文件（`runtime-<ver>.log`）。
+    /// 不读出来，AI 和用户只能看到「进程退出了」——任何运行时故障都会
+    /// 变成「不知道哪出了问题」。
+    fn attach_runtime_log_tail(&self, error: anyhow::Error, version: &str) -> anyhow::Error {
+        let path = StartPlan::log_path(&self.manager.cfg, version);
+        let Some(tail) = read_log_tail(&path, RUNTIME_LOG_TAIL_LINES) else {
+            return error;
+        };
+        let (code, message, mut details) = match error.downcast_ref::<ServiceError>() {
+            Some(service) => (
+                service.code.clone(),
+                service.message.clone(),
+                service.details.clone().unwrap_or_else(|| json!({})),
+            ),
+            None => ("INTERNAL".to_string(), error.to_string(), json!({})),
+        };
+        details["runtime_log_tail"] = json!(tail);
+        svc_error_with_details(
+            code,
+            format!("{message}\n运行时日志最后 {RUNTIME_LOG_TAIL_LINES} 行：\n{tail}"),
+            details,
+        )
     }
 
     fn restore_system_proxy(&self) -> anyhow::Result<()> {
@@ -3527,14 +3602,16 @@ impl WiredServices {
         let started = match self.manager.start(plan).await {
             Ok(status) => status,
             Err(error) => {
-                return Err(self.abort_connection(svc_error(error.code(), error)));
+                let error = self.abort_connection(svc_error(error.code(), error));
+                return Err(self.attach_runtime_log_tail(error, &installed.version));
             }
         };
 
         log::info!("连接 运行时已启动 state={:?} pid={:?}", started.state, started.pid);
         if let Err(error) = require_running_state(started.state) {
             log::error!("连接 运行时状态不是 running：{error}");
-            return Err(self.abort_connection(error));
+            let error = self.abort_connection(error);
+            return Err(self.attach_runtime_log_tail(error, &installed.version));
         }
 
         if let Err(error) = self.proxy.enable(mixed_port) {
@@ -4138,6 +4215,32 @@ mod config_service_tests {
             2
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 失败原因来自运行时日志的末尾：只取最后几行，密钥打码，其余原样保留。
+    #[test]
+    fn the_runtime_log_tail_is_read_from_the_end_and_masked() {
+        let dir = temp_dir();
+        let path = dir.join("runtime-test.log");
+        let mut text = String::new();
+        for index in 0..50 {
+            text.push_str(&format!("line {index}\n"));
+        }
+        text.push_str("FATAL start service: start dns/udp[dns-local-1]: detour makes no sense\n");
+        text.push_str("password sk-abcdefghijklmnopqrstuvwxyz\n");
+        std::fs::write(&path, text).unwrap();
+
+        let tail = read_log_tail(&path, 5).expect("日志存在就应该读到");
+        assert!(tail.contains("FATAL start service"), "{tail}");
+        assert!(!tail.contains("line 0"), "只要末尾，不要整个文件：{tail}");
+        assert!(
+            !tail.contains("sk-abcdefghijklmnopqrstuvwxyz"),
+            "像密钥的片段必须打码：{tail}"
+        );
+        assert!(tail.contains("***"), "{tail}");
+
+        assert!(read_log_tail(&dir.join("missing.log"), 5).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

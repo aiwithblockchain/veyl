@@ -156,11 +156,14 @@ fn dns_servers(region: &str, include_remote: bool) -> Vec<Value> {
 
     let mut servers = Vec::new();
     for (index, address) in local.iter().enumerate() {
+        // **不能写 `detour: "direct"`。** 1.14 的 `run` 会直接 FATAL：
+        // `detour to an empty direct outbound makes no sense`——我们的 `direct`
+        // 出站没有任何字段，指向它等于没指。而 `sing-box check` 查不出这个错，
+        // 只有真正跑起来才炸。不写 detour 就是进程自己直连，正是本地 DNS 要的。
         servers.push(json!({
             "type": "udp",
             "tag": format!("dns-local-{}", index + 1),
             "server": address,
-            "detour": "direct",
         }));
     }
     if include_remote {
