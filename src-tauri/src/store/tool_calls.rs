@@ -56,6 +56,29 @@ pub fn finish(conn: &Connection, id: &str, result: &Value, is_error: bool) -> St
     Ok(())
 }
 
+/// 会话里最新一条**尚未完成**的某个工具调用。
+///
+/// 进程重启后内存里的 pending 没了，但 `tool_calls` 那行还在：
+/// `finished_at` 为空就说明没人答过，可以据此还原等待中的提问。
+pub fn latest_unfinished(
+    conn: &Connection,
+    session_id: &str,
+    tool_name: &str,
+) -> StoreResult<Option<ToolCallRecord>> {
+    conn.query_row(
+        "SELECT id, session_id, request_id, tool_name, args_json, approved, result_json,
+                is_error, created_at, finished_at
+           FROM tool_calls
+          WHERE session_id = ?1 AND tool_name = ?2 AND finished_at IS NULL
+          ORDER BY created_at DESC, rowid DESC
+          LIMIT 1",
+        params![session_id, tool_name],
+        row_to_record,
+    )
+    .optional()
+    .map_err(StoreError::from)
+}
+
 pub fn get(conn: &Connection, id: &str) -> StoreResult<Option<ToolCallRecord>> {
     conn.query_row(
         "SELECT id, session_id, request_id, tool_name, args_json, approved, result_json,
