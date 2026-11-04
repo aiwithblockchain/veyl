@@ -107,6 +107,22 @@ impl std::fmt::Debug for ProtocolConfig {
     }
 }
 
+/// sing-box 的日志级别。
+///
+/// `info` 会为**每一条连接**写一行：正常浏览一天就是几十 MB，而产品要求
+/// 「只写关键内容」。所以 release 用 `warn`（错误照样记，正常连接不记），
+/// debug 构建用 `info`（开发时要看细节）。
+/// 不用 `error`：连接失败的原因多半在 warn/info 级别，压到 error 就看不见了。
+///
+/// `VEYL_SINGBOX_LOG=debug|info|warn|error` 可以临时覆盖，调试单个问题用。
+fn default_log_level() -> String {
+    std::env::var("VEYL_SINGBOX_LOG")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| matches!(value.as_str(), "debug" | "info" | "warn" | "error"))
+        .unwrap_or_else(|| if cfg!(debug_assertions) { "info" } else { "warn" }.to_string())
+}
+
 impl BuildInput {
     pub fn new(node: NodeDescriptor, mixed_port: u16, clash_port: u16, clash_secret: String) -> Self {
         Self {
@@ -114,7 +130,7 @@ impl BuildInput {
             mixed_port,
             clash_port,
             clash_secret,
-            log_level: "info".into(),
+            log_level: default_log_level(),
             connect_mode: ConnectMode::SystemProxy,
             tun_excludes: Vec::new(),
         }

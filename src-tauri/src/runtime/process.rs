@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -15,9 +16,51 @@ pub struct SpawnOptions {
     pub log_path: PathBuf,
 }
 
+/// 运行时日志超过这个大小就轮转。
+pub(crate) const RUNTIME_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+/// 轮转时保留的末尾字节数。
+pub(crate) const RUNTIME_LOG_KEEP_BYTES: u64 = 512 * 1024;
+
+/// 日志太大就只留末尾。
+///
+/// **必须在 spawn 之前调用**：sing-box 运行中截断它正在写的文件会写坏内容。
+/// 保留尾部而不是整体改名成 `.1`：连接失败时 `read_log_tail` 要读这个文件，
+/// 轮转成空文件等于把失败原因丢了。
+pub(crate) fn rotate_if_oversized(path: &Path) -> RuntimeResult<bool> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(false);
+    };
+    if meta.len() <= RUNTIME_LOG_MAX_BYTES {
+        return Ok(false);
+    }
+
+    let mut file = std::fs::File::open(path).io_ctx(path)?;
+    let start = meta.len().saturating_sub(RUNTIME_LOG_KEEP_BYTES);
+    file.seek(SeekFrom::Start(start)).io_ctx(path)?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).io_ctx(path)?;
+    // 从中间切进来的第一行可能是半截，丢掉。
+    if start > 0 {
+        if let Some(newline) = tail.iter().position(|byte| *byte == b'\n') {
+            tail.drain(..=newline);
+        }
+    }
+
+    std::fs::write(path, &tail).io_ctx(path)?;
+    Ok(true)
+}
+
 pub async fn spawn(options: &SpawnOptions) -> RuntimeResult<Child> {
     if let Some(parent) = options.log_path.parent() {
         fsutil::ensure_dir(parent)?;
+    }
+
+    // 每次拉起新进程之前看一眼：sing-box 自己不会轮转，INFO 级别下
+    // 正常浏览一天就是几十 MB。失败不阻塞连接——日志大一点总比连不上强。
+    match rotate_if_oversized(&options.log_path) {
+        Ok(true) => log::info!("运行时日志超过上限，已只保留末尾"),
+        Ok(false) => {}
+        Err(error) => log::warn!("运行时日志轮转失败，继续启动：{error}"),
     }
 
     let log = std::fs::OpenOptions::new()
@@ -199,6 +242,63 @@ pub async fn terminate_pid(pid: u32, grace: Duration) -> bool {    #[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_log(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "veyl-runtime-log-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("runtime-1.14.4.log")
+    }
+
+    #[test]
+    fn a_small_runtime_log_is_left_alone() {
+        let path = temp_log("small");
+        std::fs::write(&path, "FATAL something\n").unwrap();
+        assert!(!rotate_if_oversized(&path).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "FATAL something\n"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_missing_runtime_log_is_not_an_error() {
+        let path = temp_log("missing");
+        assert!(!rotate_if_oversized(&path).unwrap());
+    }
+
+    /// 超过上限只保留末尾：连接失败时 `read_log_tail` 还要靠它读原因，
+    /// 轮转成空文件等于把失败原因丢了。
+    #[test]
+    fn an_oversized_runtime_log_keeps_only_its_tail() {
+        let path = temp_log("oversized");
+        let mut text = String::new();
+        for index in 0..400_000 {
+            text.push_str(&format!("line {index} padding\n"));
+        }
+        std::fs::write(&path, &text).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > RUNTIME_LOG_MAX_BYTES);
+
+        assert!(rotate_if_oversized(&path).unwrap());
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            (after.len() as u64) <= RUNTIME_LOG_KEEP_BYTES,
+            "轮转后还有 {} 字节",
+            after.len()
+        );
+        assert!(after.contains("line 399999"), "必须保留最后一行：{}", &after[..160.min(after.len())]);
+        assert!(!after.contains("line 0 padding"), "开头应该被丢掉");
+        assert!(
+            after.starts_with("line "),
+            "从中间切进来的半截行要丢掉：{}",
+            &after[..40.min(after.len())]
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 
     #[test]
     fn launch_match_requires_the_same_argv0_and_config() {

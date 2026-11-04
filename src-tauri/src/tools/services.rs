@@ -4244,6 +4244,24 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 轮转之后，失败原因仍然读得出来——这就是「保留尾部」而不是整体移走的原因。
+    #[test]
+    fn a_rotated_runtime_log_still_yields_its_tail() {
+        let dir = temp_dir();
+        let path = dir.join("runtime-1.14.4.log");
+        let mut text = String::new();
+        for index in 0..400_000 {
+            text.push_str(&format!("line {index} padding\n"));
+        }
+        text.push_str("FATAL start service: start dns/udp[dns-local-1]: detour makes no sense\n");
+        std::fs::write(&path, text).unwrap();
+
+        assert!(crate::runtime::process::rotate_if_oversized(&path).unwrap());
+        let tail = read_log_tail(&path, 20).expect("轮转后仍然要读得到");
+        assert!(tail.contains("FATAL start service"), "{tail}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// TUN 在跑的时候删配置：数据库删了、helper 里的 sing-box 还在接管，界面停不掉。
     #[tokio::test]
     async fn a_config_in_use_by_a_running_tun_connection_cannot_be_deleted() {
