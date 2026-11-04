@@ -143,7 +143,7 @@ export function AiPanel({
   };
 
   const hasMessages = Boolean(session && session.messages.length > 0);
-  const needsFirstConfig = aiReady && !hasEverConnected && !hasConfigs;
+  const needsFirstConfig = aiReady && !hasConfigs;
   const title = view === "history" ? "历史会话" : session?.title || "新对话";
 
   return (

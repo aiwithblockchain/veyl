@@ -102,21 +102,31 @@ describe("shouldShowOnboarding", () => {
 describe("shouldKickOffFirstRun", () => {
   const base = {
     aiReady: true,
+    historyReady: true,
+    sessionHistoryLoaded: true,
     configCount: 0,
     messageCount: 0,
   };
 
-  it("三个条件都满足时触发", () => {
+  it("所有条件满足时触发", () => {
     expect(shouldKickOffFirstRun(base)).toBe(true);
+  });
+
+  it("启动历史还没加载完不触发", () => {
+    expect(shouldKickOffFirstRun({ ...base, historyReady: false })).toBe(false);
+  });
+
+  it("当前会话历史还没加载完不触发", () => {
+    expect(
+      shouldKickOffFirstRun({ ...base, sessionHistoryLoaded: false }),
+    ).toBe(false);
   });
 
   it("连接过但配置删光、会话为空，仍然触发", () => {
     // hasEverConnected 不参与判断：老用户删光配置后同样需要 AI 帮他重建。
     const returningUser = {
-      aiReady: true,
+      ...base,
       hasEverConnected: true,
-      configCount: 0,
-      messageCount: 0,
     };
     expect(shouldKickOffFirstRun(returningUser)).toBe(true);
   });

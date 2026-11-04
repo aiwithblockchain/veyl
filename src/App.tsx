@@ -82,6 +82,7 @@ export default function App() {
   const [aiReady, setAiReady] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingLoaded, setOnboardingLoaded] = useState(false);
+  const [historyReady, setHistoryReady] = useState(false);
   const [hasEverConnected, setHasEverConnected] = useState(readEverConnected);
   const [panelOpen, setPanelOpen] = useState(() => readFlag(PANEL_KEY));
   const [aiUnread, setAiUnread] = useState(false);
@@ -100,6 +101,7 @@ export default function App() {
   // 已经回答/超时/作废的问题 id：防止重连或重试路径把旧问题再插回来。
   const settledQuestionIds = useRef(new Set<string>());
   const panelOpenRef = useRef(panelOpen);
+  const panelClosedThisRunRef = useRef(false);
   const panelClosedByUserRef = useRef(readFlag(PANEL_CLOSED_BY_USER_KEY));
   const panelAutoOpenedRef = useRef(readFlag(PANEL_AUTO_OPENED_KEY));
   const aiConfiguredRef = useRef(false);
@@ -310,9 +312,15 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    void bridge.getChatHistory().then((history) => {
-      if (!cancelled) dispatch({ type: "hydrate_history", history });
-    });
+    void bridge
+      .getChatHistory()
+      .then((history) => {
+        if (!cancelled) dispatch({ type: "hydrate_history", history });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setHistoryReady(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -383,6 +391,7 @@ export default function App() {
   // 首启自动发起第一轮；hidden 消息不显示成用户气泡，会话里只出现 AI 的回复。
   useEffect(() => {
     if (!onboardingLoaded || showOnboarding || !aiReady) return;
+    if (!historyReady) return;
     if (vpn.loading || vpn.configs.length > 0) return;
 
     if (!session) {
@@ -392,10 +401,13 @@ export default function App() {
       return;
     }
 
+    if (!session.historyLoaded) return;
     if (kickoffStartedRef.current) return;
     if (
       !shouldKickOffFirstRun({
         aiReady,
+        historyReady,
+        sessionHistoryLoaded: session.historyLoaded,
         configCount: vpn.configs.length,
         messageCount: session.messages.length,
       })
@@ -404,19 +416,28 @@ export default function App() {
     }
 
     kickoffStartedRef.current = true;
+    // 本次运行内用户手动关过右栏，就不替他打开；否则让第一句话可见。
+    if (!panelClosedThisRunRef.current) {
+      panelOpenRef.current = true;
+      setPanelOpen(true);
+      setAiUnread(false);
+    }
     void bridge
       .sendMessage(session.id, FIRST_RUN_KICKOFF, { hidden: true })
-      .then(({ requestId }) => dispatch({ type: "request_started", requestId }))
+      .then(({ requestId }) =>
+        dispatch({ type: "request_started", sessionId: session.id, requestId }),
+      )
       .catch((error: unknown) => {
         const message =
           toBridgeError(error).message || "AI 没能开始第一轮对话，请稍后重试。";
-        dispatch({ type: "request_failed", message });
+        dispatch({ type: "request_failed", sessionId: session.id, message });
         setAppNotice({ level: "error", text: message });
       });
   }, [
     onboardingLoaded,
     showOnboarding,
     aiReady,
+    historyReady,
     vpn.loading,
     vpn.configs.length,
     session,
@@ -463,6 +484,7 @@ export default function App() {
     if (next) {
       setAiUnread(false);
     } else {
+      panelClosedThisRunRef.current = true;
       panelClosedByUserRef.current = true;
       writeFlag(PANEL_CLOSED_BY_USER_KEY);
     }
@@ -599,10 +621,13 @@ export default function App() {
 
     void bridge
       .sendMessage(sessionId, text)
-      .then(({ requestId }) => dispatch({ type: "request_started", requestId }))
+      .then(({ requestId }) =>
+        dispatch({ type: "request_started", sessionId, requestId }),
+      )
       .catch((error: unknown) => {
         dispatch({
           type: "request_failed",
+          sessionId,
           message: error instanceof Error ? error.message : String(error),
         });
       });

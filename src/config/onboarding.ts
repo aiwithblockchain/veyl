@@ -29,15 +29,24 @@ export function isAiReady(
 export const FIRST_RUN_KICKOFF = "我是第一次用，帮我配一下网络。";
 
 /**
- * 首启第一轮只在「有可用 AI、没有配置、当前会话为空」时触发；
- * 「已有消息」也保证它只发一次。不要求「从没连过」——删光配置的老用户同样需要 AI 重建。
+ * 首启第一轮只在「有可用 AI、启动历史已加载、当前会话历史已加载、
+ * 没有配置、会话为空」时触发；「已有消息」也保证它只发一次。
+ * 不要求「从没连过」——删光配置的老用户同样需要 AI 重建。
  */
 export function shouldKickOffFirstRun(input: {
   aiReady: boolean;
+  historyReady: boolean;
+  sessionHistoryLoaded: boolean;
   configCount: number;
   messageCount: number;
 }): boolean {
-  return input.aiReady && input.configCount === 0 && input.messageCount === 0;
+  return (
+    input.aiReady &&
+    input.historyReady &&
+    input.sessionHistoryLoaded &&
+    input.configCount === 0 &&
+    input.messageCount === 0
+  );
 }
 
 /** 首启页只在「没有可用 AI 且用户也没选择过不用 AI」时出现。 */

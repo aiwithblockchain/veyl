@@ -69,8 +69,8 @@ export type ChatAction =
   | { type: "new_session" }
   | { type: "add_session"; session: Session }
   | { type: "send_user_message"; sessionId: string; text: string; localRequestId: string }
-  | { type: "request_started"; requestId: string }
-  | { type: "request_failed"; message: string }
+  | { type: "request_started"; sessionId: string; requestId: string }
+  | { type: "request_failed"; sessionId: string; message: string }
   | { type: "agent_event"; event: import("../agent/protocol").AgentEvent }
   | { type: "cancel_request" }
   | { type: "hydrate_history"; history: import("../agent/bridge").ChatHistory }
@@ -239,6 +239,23 @@ const REQUEST_RESULTS: Record<RequestResult, boolean> = {
   cancelled: false,
 };
 
+/** 流式事件属于发起它的会话；找不到（无 requestId / 会话已删）时由调用方退回当前会话。 */
+function sessionForRequest(
+  state: ChatState,
+  requestId: string | null,
+): Session | undefined {
+  if (!requestId) return undefined;
+  return (
+    state.sessions.find((session) => session.activeRequestId === requestId) ??
+    state.sessions.find((session) =>
+      session.messages.some(
+        (message) =>
+          message.role === "assistant" && message.requestId === requestId,
+      ),
+    )
+  );
+}
+
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   const current = activeSession(state);
 
@@ -286,9 +303,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }));
     }
 
-    case "request_started":
-      if (!current) return state;
-      return patchSession(state, current.id, (session) => ({
+    case "request_started": {
+      const target = state.sessions.find((session) => session.id === action.sessionId);
+      if (!target) return state;
+      return patchSession(state, target.id, (session) => ({
         ...session,
         activeRequestId: action.requestId,
         requesting: false,
@@ -300,10 +318,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             : message,
         ),
       }));
+    }
 
-    case "request_failed":
-      if (!current) return state;
-      return patchSession(state, current.id, (session) => ({
+    case "request_failed": {
+      const target = state.sessions.find((session) => session.id === action.sessionId);
+      if (!target) return state;
+      return patchSession(state, target.id, (session) => ({
         ...session,
         requesting: false,
         activeRequestId: null,
@@ -319,9 +339,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           },
         ],
       }));
+    }
 
     case "agent_event": {
       const { event } = action;
+      const requestId =
+        "request_id" in event.payload ? event.payload.request_id : null;
+      // 流式事件按 request_id 归属到发起它的会话；找不到才退回当前会话。
+      const current = sessionForRequest(state, requestId) ?? activeSession(state);
       if (!current) return state;
 
       switch (event.name) {
@@ -499,7 +524,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (history.sessions.length === 0) return state;
       // 已经有内容或有请求在跑：不拿历史覆盖，避免打断正在进行的对话。
       const busy = state.sessions.some(
-        (session) => session.activeRequestId !== null || session.messages.length > 0,
+        (session) =>
+          session.activeRequestId !== null ||
+          session.requesting ||
+          session.messages.length > 0,
       );
       if (busy) return state;
 
