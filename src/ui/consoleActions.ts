@@ -59,13 +59,28 @@ export function runZeroConfigPrimaryAction(
   else if (mode === "manual") handlers.onNewConfig();
 }
 
-/** 会话空闲时才补发「帮我配一下网络」；正在请求或有未答问题时只给焦点。 */
+/** 一旦本次运行内建出过配置，A 的「刚引导完」文案就不再适用。 */
+export function shouldResetJustOnboarded(
+  justOnboarded: boolean,
+  configCount: number,
+): boolean {
+  return justOnboarded && configCount > 0;
+}
+
+/**
+ * 会话空闲、且本次运行内还没自动发过「帮我配一下网络」时才补发。
+ * 点过一次之后按钮只负责打开右栏给焦点，避免重复指令。
+ */
 export function shouldSendZeroConfigAsk(input: {
   requesting: boolean;
   hasActiveRequest: boolean;
   hasPendingQuestion: boolean;
+  alreadyAsked: boolean;
 }): boolean {
   return (
-    !input.requesting && !input.hasActiveRequest && !input.hasPendingQuestion
+    !input.alreadyAsked &&
+    !input.requesting &&
+    !input.hasActiveRequest &&
+    !input.hasPendingQuestion
   );
 }

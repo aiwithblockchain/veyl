@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { activeSession, chatReducer, createInitialState, createSession } from "../state/chatStore";
 import {
   runZeroConfigPrimaryAction,
+  shouldResetJustOnboarded,
   shouldSendZeroConfigAsk,
   zeroConfigActions,
   zeroConfigContent,
@@ -57,6 +58,7 @@ describe("零配置入口", () => {
         requesting: false,
         hasActiveRequest: false,
         hasPendingQuestion: false,
+        alreadyAsked: false,
       }),
     ).toBe(true);
 
@@ -85,6 +87,7 @@ describe("零配置入口", () => {
         requesting: true,
         hasActiveRequest: false,
         hasPendingQuestion: false,
+        alreadyAsked: false,
       }),
     ).toBe(false);
     expect(
@@ -92,6 +95,7 @@ describe("零配置入口", () => {
         requesting: false,
         hasActiveRequest: true,
         hasPendingQuestion: false,
+        alreadyAsked: false,
       }),
     ).toBe(false);
     expect(
@@ -99,7 +103,35 @@ describe("零配置入口", () => {
         requesting: false,
         hasActiveRequest: false,
         hasPendingQuestion: true,
+        alreadyAsked: false,
       }),
     ).toBe(false);
+  });
+
+  it("同一运行内连点两次只发一条", () => {
+    const idle = {
+      requesting: false,
+      hasActiveRequest: false,
+      hasPendingQuestion: false,
+    };
+
+    let asked = false;
+    expect(shouldSendZeroConfigAsk({ ...idle, alreadyAsked: asked })).toBe(true);
+    asked = true;
+    expect(shouldSendZeroConfigAsk({ ...idle, alreadyAsked: asked })).toBe(false);
+  });
+
+  it("配置从有变无后 A 文案不再出现", () => {
+    let justOnboarded = true;
+    expect(zeroConfigMode(true, justOnboarded)).toBe("just-onboarded");
+
+    // 建出配置后复位；之后删光配置，入口回到 B，而不是 A。
+    expect(shouldResetJustOnboarded(justOnboarded, 1)).toBe(true);
+    justOnboarded = false;
+    expect(shouldResetJustOnboarded(justOnboarded, 0)).toBe(false);
+    expect(zeroConfigMode(true, justOnboarded)).toBe("ai-ready");
+    expect(zeroConfigContent("ai-ready").title).not.toBe(
+      zeroConfigContent("just-onboarded").title,
+    );
   });
 });

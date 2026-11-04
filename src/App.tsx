@@ -28,7 +28,7 @@ import {
   shouldShowOnboarding,
 } from "./config/onboarding";
 import { useVpnSession } from "./config/useVpnSession";
-import { shouldSendZeroConfigAsk } from "./ui/consoleActions";
+import { shouldSendZeroConfigAsk, shouldResetJustOnboarded } from "./ui/consoleActions";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import { useFocusTrap } from "./ui/focus";
 import "./styles/app.css";
@@ -119,6 +119,7 @@ export default function App() {
   const onboardingSkippedRef = useRef(readFlag(ONBOARDING_SKIPPED_KEY));
   const kickoffStartedRef = useRef(false);
   const kickoffSessionCreatedRef = useRef(false);
+  const zeroConfigAskedRef = useRef(false);
   const confirmConfigRef = useRef<HTMLDivElement>(null);
   useFocusTrap(Boolean(pendingConfigId), confirmConfigRef);
 
@@ -398,6 +399,12 @@ export default function App() {
   useEffect(() => {
     if (vpn.connection !== "idle") setVpnActionFailed(false);
   }, [vpn.connection]);
+
+  // 本次运行内建出过配置后，A 的「刚引导完」文案就不再适用。
+  useEffect(() => {
+    if (!shouldResetJustOnboarded(justOnboarded, vpn.configs.length)) return;
+    setJustOnboarded(false);
+  }, [justOnboarded, vpn.configs.length]);
 
   // 零配置时右栏必须可见；kickoff 只管「AI 开不开口」，不管「用户看不看得到」。
   useEffect(() => {
@@ -815,6 +822,9 @@ export default function App() {
 
   // 用户主动点「让 AI 帮我配」：打开右栏、给焦点；会话空闲时直接发一条可见的用户消息。
   const handleAskAiFromConsole = () => {
+    // 用户已经显式点名要 AI 配，自动 kickoff 不再另外发一条。
+    kickoffStartedRef.current = true;
+    kickoffSessionCreatedRef.current = true;
     panelOpenRef.current = true;
     setPanelOpen(true);
     setAiUnread(false);
@@ -827,8 +837,12 @@ export default function App() {
       requesting: session?.requesting ?? false,
       hasActiveRequest: Boolean(session?.activeRequestId),
       hasPendingQuestion,
+      alreadyAsked: zeroConfigAskedRef.current,
     });
-    if (shouldSend) handleEmptySend("帮我配一下网络");
+    if (shouldSend) {
+      zeroConfigAskedRef.current = true;
+      handleEmptySend("帮我配一下网络");
+    }
   };
 
   const handleSwitchNode = (nodeId: string) => {
