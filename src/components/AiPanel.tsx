@@ -154,7 +154,7 @@ export function AiPanel({
   const title = view === "history" ? "历史会话" : session?.title || "新对话";
 
   return (
-    <aside className="ai-panel" aria-label="AI 对话">
+    <aside id="ai-panel" className="ai-panel" aria-label="AI 对话">
       <header className="ai-panel__head">
         <div className="ai-panel__head-left">
           {view === "history" ? (

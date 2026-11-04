@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { AgentEvent, NextAction, RuntimeView } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
@@ -18,6 +19,7 @@ import { Console } from "./components/Console";
 import { IconClose } from "./components/icons";
 import { NewConfigDialog } from "./components/NewConfigDialog";
 import { Onboarding } from "./components/Onboarding";
+import { PaneHandle } from "./components/PaneHandle";
 import { Settings, describeImportError } from "./components/Settings";
 import type { ConnectMode } from "./config/model";
 import {
@@ -28,6 +30,8 @@ import {
   shouldShowOnboarding,
 } from "./config/onboarding";
 import { useVpnSession } from "./config/useVpnSession";
+import { PANEL_MIN, RAIL_MIN } from "./ui/layout";
+import { usePaneLayout } from "./ui/usePaneLayout";
 import {
   isZeroConfigAskSuppressed,
   lastAssistantTextOf,
@@ -111,6 +115,12 @@ export default function App() {
     bridge,
     import.meta.env.VITE_MOCK === "1" || bridge.mode === "mock",
   );
+  const appRef = useRef<HTMLDivElement>(null);
+  const panes = usePaneLayout({
+    appRef,
+    panelOpen,
+    active: onboardingLoaded && !showOnboarding,
+  });
   // 只驱动线路图的失败态，不参与连接逻辑。
   const [vpnActionFailed, setVpnActionFailed] = useState(false);
   const importingRef = useRef(false);
@@ -877,6 +887,33 @@ export default function App() {
     lastAssistantText: lastAssistantTextOf(session?.messages ?? []),
   });
 
+  const appStyle = {
+    "--rail-w": `${panes.rail}px`,
+    "--panel-w": `${panes.panel}px`,
+  } as CSSProperties;
+
+  const aiPanel = (
+    <AiPanel
+      session={session ?? null}
+      sessions={state.sessions}
+      activeSessionId={state.activeSessionId}
+      aiReady={aiReady}
+      hasEverConnected={hasEverConnected}
+      hasConfigs={vpn.configs.length > 0}
+      focusSignal={composerFocusSignal}
+      onSelectSession={handleSelectSession}
+      onNewSession={() => dispatch({ type: "new_session" })}
+      onRenameSession={handleRenameSession}
+      onDeleteSession={handleDeleteSession}
+      onSend={handleSend}
+      onEmptySend={handleEmptySend}
+      onStop={handleStop}
+      onNextAction={handleNextAction}
+      onOpenSettings={() => openSettings("ai")}
+      onConfigureKey={() => openSettings("ai")}
+    />
+  );
+
   if (!onboardingLoaded) {
     return <div className="app-boot" aria-hidden />;
   }
@@ -888,7 +925,13 @@ export default function App() {
   }
 
   return (
-    <div className={`app ${panelOpen ? "app--panel-open" : ""}`}>
+    <div
+      ref={appRef}
+      style={appStyle}
+      className={`app ${panelOpen ? "app--panel-open" : ""} ${
+        panes.floating ? "app--floating" : ""
+      }`}
+    >
       <ActivityBar />
       <ConfigRail
         configs={vpn.configs}
@@ -899,6 +942,16 @@ export default function App() {
         onSelect={handleSelectConfig}
         onNewConfig={() => setNewConfigOpen(true)}
         onDelete={vpn.deleteConfig}
+      />
+      <PaneHandle
+        side="rail"
+        label="调整配置列表宽度"
+        controls="config-rail"
+        value={panes.rail}
+        min={RAIL_MIN}
+        max={panes.railMax}
+        dragging={panes.draggingPane === "rail"}
+        {...panes.railHandlers}
       />
       <Console
         config={vpn.activeConfig}
@@ -921,26 +974,35 @@ export default function App() {
         loading={vpn.loading}
         vpnActionFailed={vpnActionFailed}
       />
-      {panelOpen ? (
-        <AiPanel
-          session={session ?? null}
-          sessions={state.sessions}
-          activeSessionId={state.activeSessionId}
-          aiReady={aiReady}
-          hasEverConnected={hasEverConnected}
-          hasConfigs={vpn.configs.length > 0}
-          focusSignal={composerFocusSignal}
-          onSelectSession={handleSelectSession}
-          onNewSession={() => dispatch({ type: "new_session" })}
-          onRenameSession={handleRenameSession}
-          onDeleteSession={handleDeleteSession}
-          onSend={handleSend}
-          onEmptySend={handleEmptySend}
-          onStop={handleStop}
-          onNextAction={handleNextAction}
-          onOpenSettings={() => openSettings("ai")}
-          onConfigureKey={() => openSettings("ai")}
+      {panelOpen && !panes.floating ? (
+        <PaneHandle
+          side="panel"
+          label="调整 AI 对话宽度"
+          controls="ai-panel"
+          value={panes.panel}
+          min={PANEL_MIN}
+          max={panes.panelMax}
+          dragging={panes.draggingPane === "panel"}
+          {...panes.panelHandlers}
         />
+      ) : null}
+      {panelOpen && !panes.floating ? aiPanel : null}
+      {panelOpen && panes.floating ? (
+        <div
+          className="ai-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="AI 对话"
+          onMouseDown={() => togglePanel()}
+        >
+          <div
+            className="ai-overlay__inner"
+            style={{ width: `${panes.panelWidth}px` }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            {aiPanel}
+          </div>
+        </div>
       ) : null}
 
       {appNotice ? (

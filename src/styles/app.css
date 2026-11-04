@@ -799,15 +799,115 @@ pre {
 /* ---------- layout ---------- */
 
 .app {
+  position: relative;
   display: grid;
-  grid-template-columns: 56px 240px minmax(0, 1fr);
+  grid-template-columns: 56px var(--rail-w, 240px) minmax(0, 1fr) var(--panel-w, 0px);
   grid-template-rows: minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
+  transition: grid-template-columns 120ms ease-out;
 }
 
-.app--panel-open {
-  grid-template-columns: 56px 240px minmax(0, 1fr) minmax(320px, 400px);
+.app--floating {
+  grid-template-columns: 56px var(--rail-w, 240px) minmax(0, 1fr);
+}
+
+body[data-resizing] {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body[data-resizing] .app,
+.app[data-snapping] {
+  transition: none;
+}
+
+/* ---------- 分隔条 ---------- */
+
+.pane-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  z-index: 20;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+.pane-handle--rail {
+  left: calc(56px + var(--rail-w, 240px));
+}
+
+.pane-handle--panel {
+  left: calc(100% - var(--panel-w, 0px));
+}
+
+.pane-handle--rail,
+.pane-handle--panel {
+  transition: left 120ms ease-out;
+}
+
+/* 浮层遮罩是 z 40；左栏手柄必须更高才能在浮层打开时拖动。
+   规范写手柄 z-index 20，这里刻意偏离，不是笔误。 */
+.app--floating .pane-handle--rail {
+  z-index: 45;
+}
+
+body[data-resizing] .pane-handle,
+.app[data-snapping] .pane-handle {
+  transition: none;
+}
+
+.pane-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  background: transparent;
+  transition: background 120ms ease-out, box-shadow 120ms ease-out;
+}
+
+.pane-handle:hover::before {
+  background: color-mix(in srgb, var(--accent) 60%, transparent);
+  box-shadow: 4px 0 0 0 var(--accent-soft);
+}
+
+.pane-handle:focus-visible::before,
+.pane-handle.is-dragging::before {
+  background: var(--accent);
+  box-shadow: 4px 0 0 0 var(--accent-soft);
+  transition: none;
+}
+
+.pane-handle:focus {
+  outline: none;
+}
+
+/* ---------- 浮层右栏 ---------- */
+
+.ai-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: flex-end;
+  background: var(--overlay-soft);
+}
+
+.ai-overlay__inner {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  box-shadow: var(--shadow-floating);
+}
+
+.ai-overlay__inner .ai-panel {
+  flex: 1;
+  border-left: 0;
 }
 
 .app-boot {
@@ -2815,30 +2915,30 @@ pre {
   color: var(--ink-3);
 }
 
-/* 窄屏且右栏停靠时，控制台会被压薄；收起线路图，状态另起一行，
-   保证「正在启动…」这类文案不被截断。（<1100 的右栏浮层属后续批次。） */
+/* 停靠右栏且窗口 ≤1100 时，控制台会被压薄；收起线路图，状态另起一行，
+   保证「正在启动…」这类文案不被截断。浮层模式不占列宽，不套这组压缩。 */
 @media (max-width: 1100px) {
-  .app--panel-open .console-top {
+  .app--panel-open:not(.app--floating) .console-top {
     flex-wrap: wrap;
     gap: 6px 8px;
     padding: 12px;
   }
 
-  .app--panel-open .console-top__primary {
+  .app--panel-open:not(.app--floating) .console-top__primary {
     height: 36px;
     padding: 0 12px;
     font-size: var(--fs-small);
   }
 
-  .app--panel-open .route {
+  .app--panel-open:not(.app--floating) .route {
     display: none;
   }
 
-  .app--panel-open .console-panel-toggle {
+  .app--panel-open:not(.app--floating) .console-panel-toggle {
     order: 2;
   }
 
-  .app--panel-open .console-status {
+  .app--panel-open:not(.app--floating) .console-status {
     order: 3;
     flex: 0 0 100%;
     max-width: 136px;

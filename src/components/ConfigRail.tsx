@@ -65,6 +65,7 @@ export function ConfigRail({
 
   return (
     <aside
+      id="config-rail"
       ref={railRef}
       tabIndex={-1}
       className="config-rail"
