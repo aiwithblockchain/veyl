@@ -187,6 +187,23 @@ pub fn load_nodes(store: &Store) -> Option<Vec<SeedNode>> {
 ///
 /// 任何网络或解析失败都返回 `Offline`，绝不清理已有缓存。
 pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcome {
+    refresh_with(store, running, force, |etag| async move {
+        public_http::get(&source_url(), etag.as_deref(), MAX_SEED_BYTES).await
+    })
+    .await
+}
+
+/// 同 [`refresh`]，但把「发请求」抽出来，测试可以注入假的响应。
+async fn refresh_with<F, Fut>(
+    store: &Store,
+    running: bool,
+    force: bool,
+    fetch: F,
+) -> RefreshOutcome
+where
+    F: Fn(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::public_http::PublicResponse, String>>,
+{
     let _guard = REFRESH_LOCK.lock().await;
 
     let current = {
@@ -210,14 +227,13 @@ pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcom
         }
     }
 
-    let url = source_url();
     let etag = current.as_ref().and_then(|row| row.etag.clone());
-    let mut response = match public_http::get(&url, etag.as_deref(), MAX_SEED_BYTES).await {
+    let mut response = match fetch(etag).await {
         Ok(response) => response,
         Err(error) => {
             log::warn!("种子拉取失败，保留缓存：{error}");
             return RefreshOutcome::Offline {
-                cached: current.is_some(),
+                cached: cached_content_available(store),
                 error,
             };
         }
@@ -226,12 +242,12 @@ pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcom
     if needs_refetch(response.status, content_ok) {
         // 304 没有 body，而本地内容已经丢了——不带 etag 重拉一次。
         log::warn!("种子元数据还在但内容已丢失，强制重新拉取");
-        response = match public_http::get(&url, None, MAX_SEED_BYTES).await {
+        response = match fetch(None).await {
             Ok(response) => response,
             Err(error) => {
                 log::warn!("种子重新拉取失败，保持现状：{error}");
                 return RefreshOutcome::Offline {
-                    cached: current.is_some(),
+                    cached: cached_content_available(store),
                     error,
                 };
             }
@@ -286,7 +302,7 @@ async fn apply_fetch(
         Err(error) => {
             log::warn!("种子校验失败，保留缓存：{error}");
             return RefreshOutcome::Offline {
-                cached: current.is_some(),
+                cached: cached_content_available(store),
                 error,
             };
         }
@@ -311,7 +327,7 @@ async fn apply_fetch(
     if let Err(error) = crate::secrets::set_secret(&secret_key(&hash), &raw) {
         log::warn!("种子缓存写入失败，保留旧缓存：{error}");
         return RefreshOutcome::Offline {
-            cached: current.is_some(),
+            cached: cached_content_available(store),
             error: format!("保存种子缓存失败：{error}"),
         };
     }
@@ -339,7 +355,7 @@ async fn apply_fetch(
     } {
         log::warn!("种子元数据写入失败：{error}");
         return RefreshOutcome::Offline {
-            cached: current.is_some(),
+            cached: cached_content_available(store),
             error: error.to_string(),
         };
     }
@@ -499,28 +515,37 @@ pub fn merge_file_nodes(store: &Store, contents: &[u8]) -> Result<(usize, Vec<St
 /// 「有新版本」不落库：它只在刷新时由「远端哈希 != 缓存哈希」推导，
 /// 避免多一个需要同步的真值来源。
 pub fn status(store: &Store) -> Value {
+    // **内容不可用就等于没有缓存。** 行只是元数据，`secrets.enc` 丢了之后
+    // `node_count` 报 2 而实际一个节点都取不到，界面和 AI 都会被骗。
+    let Some(nodes) = load_nodes(store) else {
+        return no_cache_status();
+    };
     let row = {
         let conn = store.conn();
         seed_cache::load(&conn).ok().flatten()
     };
     let Some(row) = row else {
-        return json!({
-            "seed_id": SEED_ID,
-            "version": null,
-            "content_sha256": null,
-            "node_count": 0,
-            "applied_at": null,
-            "checked_at": null,
-            "new_version_available": false,
-        });
+        return no_cache_status();
     };
     json!({
         "seed_id": SEED_ID,
         "version": row.source_version,
         "content_sha256": row.content_sha256,
-        "node_count": row.node_count,
+        "node_count": nodes.len() as i64,
         "applied_at": row.fetched_at,
         "checked_at": row.checked_at,
+        "new_version_available": false,
+    })
+}
+
+fn no_cache_status() -> Value {
+    json!({
+        "seed_id": SEED_ID,
+        "version": null,
+        "content_sha256": null,
+        "node_count": 0,
+        "applied_at": null,
+        "checked_at": null,
         "new_version_available": false,
     })
 }
@@ -799,5 +824,133 @@ mod tests {
         assert!(needs_refetch(304, false), "304 + 内容丢了必须重拉");
         assert!(!needs_refetch(304, true), "304 + 内容在，直接用缓存");
         assert!(!needs_refetch(200, false), "200 有 body，不需要重拉");
+    }
+
+    /// 行还在、内容丢了 → 对外必须报「没有缓存」，不能报 node_count=2。
+    #[test]
+    fn a_row_without_content_reports_no_cache() {
+        crate::test_support::install_test_secrets();
+        let store = Store::open_in_memory().unwrap();
+        let body = r#"{
+          "version": 1,
+          "updated_at": "2026-11-04T00:00:00Z",
+          "nodes": [
+            { "name": "gone-a", "server": "203.0.113.31", "port": 8388,
+              "method": "aes-256-gcm", "password": "pw-gone-a" },
+            { "name": "gone-b", "server": "203.0.113.32", "port": 8389,
+              "method": "aes-256-gcm", "password": "pw-gone-b" }
+          ]
+        }"#
+        .to_string();
+        let hash = content_sha256(body.as_bytes());
+        crate::secrets::set_secret(&secret_key(&hash), &body).unwrap();
+        {
+            let conn = store.conn();
+            seed_cache::save(
+                &conn,
+                &seed_cache::SeedCacheRow {
+                    content_sha256: hash.clone(),
+                    etag: None,
+                    source_version: Some("1".into()),
+                    source_updated_at: None,
+                    node_count: 2,
+                    fetched_at: store::now_ms(),
+                    checked_at: store::now_ms(),
+                },
+            )
+            .unwrap();
+        }
+        crate::secrets::delete_secret(&secret_key(&hash)).unwrap();
+
+        let value = status(&store);
+        assert_eq!(value["node_count"], 0, "内容不可用时不能报有节点");
+        assert!(value["version"].is_null(), "不能报一个用不了的版本号");
+    }
+
+    /// **refresh 层的回归**：304 + 本地内容丢了 → 必须不带 ETag 再拉一次。
+    ///
+    /// 只测 `needs_refetch` 纯函数不够——真正会出错的是这两次调用之间的衔接。
+    #[tokio::test]
+    async fn a_304_with_lost_content_refetches_without_etag() {
+        crate::test_support::install_test_secrets();
+        let store = Store::open_in_memory().unwrap();
+
+        let body = r#"{
+          "version": 1,
+          "updated_at": "2026-11-04T00:00:00Z",
+          "nodes": [
+            { "name": "retry-a", "server": "203.0.113.41", "port": 8388,
+              "method": "aes-256-gcm", "password": "pw-retry-a" },
+            { "name": "retry-b", "server": "203.0.113.42", "port": 8389,
+              "method": "aes-256-gcm", "password": "pw-retry-b" }
+          ]
+        }"#
+        .to_string();
+        let hash = content_sha256(body.as_bytes());
+
+        crate::secrets::set_secret(&secret_key(&hash), &body).unwrap();
+        {
+            let conn = store.conn();
+            seed_cache::save(
+                &conn,
+                &seed_cache::SeedCacheRow {
+                    content_sha256: hash.clone(),
+                    etag: Some("\"v1\"".into()),
+                    source_version: Some("1".into()),
+                    source_updated_at: None,
+                    node_count: 2,
+                    fetched_at: store::now_ms(),
+                    checked_at: store::now_ms(),
+                },
+            )
+            .unwrap();
+        }
+        crate::secrets::delete_secret(&secret_key(&hash)).unwrap();
+        assert!(load_nodes(&store).is_none(), "前置条件：内容已丢");
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let payload = body.clone().into_bytes();
+        let recorder = std::sync::Arc::clone(&calls);
+
+        let outcome = refresh_with(&store, false, false, move |etag: Option<String>| {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let payload = payload.clone();
+            async move {
+                recorder.lock().unwrap().push(etag.clone());
+                match etag {
+                    // 第一次带 ETag：服务器说没变
+                    Some(_) => Ok(crate::public_http::PublicResponse {
+                        status: 304,
+                        etag: Some("\"v1\"".into()),
+                        body: Vec::new(),
+                    }),
+                    // 重拉不带 ETag：给完整内容
+                    None => Ok(crate::public_http::PublicResponse {
+                        status: 200,
+                        etag: Some("\"v1\"".into()),
+                        body: payload,
+                    }),
+                }
+            }
+        })
+        .await;
+
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            2,
+            "第一次拿到 304 之后应当无 ETag 再拉一次，实际调用：{calls:?}"
+        );
+        assert!(calls[0].is_some(), "第一次必须带 ETag");
+        assert!(calls[1].is_none(), "第二次必须不带 ETag，否则又只会拿到 304");
+        assert!(
+            matches!(outcome, RefreshOutcome::Updated { .. }),
+            "内容被补回来才算成功"
+        );
+        assert_eq!(
+            load_nodes(&store).map(|nodes| nodes.len()),
+            Some(2),
+            "内容应当恢复"
+        );
     }
 }

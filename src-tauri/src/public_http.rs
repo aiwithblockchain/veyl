@@ -23,6 +23,32 @@ pub struct PublicResponse {
     pub body: Vec<u8>,
 }
 
+/// 只保留 `scheme://host:port`，丢掉 userinfo、路径和查询串。
+///
+/// 订阅链接常把凭据放在 userinfo 里（`https://user:pass@host/sub`），
+/// 这些串一旦进日志或错误提示就等于把密码交出去了。
+fn safe_url(url: &reqwest::Url) -> String {
+    let host = url.host_str().unwrap_or("-");
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
+}
+
+/// reqwest 的 `Display` 会带上整条 URL（含 userinfo）。只取分类，自己拼安全地址。
+fn describe_send_error(error: &reqwest::Error, url: &reqwest::Url) -> String {
+    let kind = if error.is_timeout() {
+        "请求超时"
+    } else if error.is_connect() {
+        "连接失败"
+    } else if error.is_body() || error.is_decode() {
+        "响应读取失败"
+    } else {
+        "请求失败"
+    };
+    format!("{kind}（{}）", safe_url(url))
+}
+
 /// 一个响应该走哪条路。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Step {
@@ -61,7 +87,9 @@ pub async fn get(
     if_none_match: Option<&str>,
     max_bytes: usize,
 ) -> Result<PublicResponse, String> {
-    let mut current = reqwest::Url::parse(url).map_err(|error| format!("地址无效：{error}"))?;
+    // 不把解析器的原始报错放进返回串：`Url::parse` 的 Display 会**回显整条输入**，
+    // 而订阅链接里常常带 `user:pass@`。
+    let mut current = reqwest::Url::parse(url).map_err(|_| "地址无效".to_string())?;
 
     for hop in 0..=MAX_REDIRECTS {
         ensure_allowed_url(&current)?;
@@ -89,7 +117,7 @@ pub async fn get(
         let response = request
             .send()
             .await
-            .map_err(|error| format!("请求失败：{error}"))?;
+            .map_err(|error| describe_send_error(&error, &current))?;
         let status = response.status();
         let location = response
             .headers()
@@ -98,9 +126,10 @@ pub async fn get(
 
         match decide(status.as_u16(), location)? {
             Step::Follow(target) => {
+                // 同样不回显：报错里会带上这条 location。
                 current = current
                     .join(&target)
-                    .map_err(|error| format!("重定向地址无效：{error}"))?;
+                    .map_err(|_| "重定向地址无效".to_string())?;
                 continue;
             }
             Step::NotModified => {
@@ -139,7 +168,7 @@ pub async fn get(
         let mut body = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| format!("读取响应失败：{error}"))?;
+            let chunk = chunk.map_err(|error| describe_send_error(&error, &current))?;
             if body.len() + chunk.len() > max_bytes {
                 return Err(format!("响应超过上限（{} 字节）", max_bytes));
             }
@@ -430,5 +459,21 @@ mod tests {
         assert_eq!(decide(204, None).unwrap(), Step::Success);
         assert_eq!(decide(404, None).unwrap(), Step::Failure);
         assert_eq!(decide(500, None).unwrap(), Step::Failure);
+    }
+
+    #[test]
+    fn error_text_never_carries_credentials_from_the_url() {
+        let url =
+            reqwest::Url::parse("https://user:hunter2@example.com/sub?token=abc").unwrap();
+        let text = safe_url(&url);
+        assert_eq!(text, "https://example.com");
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(!text.contains("token"), "{text}");
+    }
+
+    #[test]
+    fn safe_url_keeps_the_port_and_drops_everything_else() {
+        let url = reqwest::Url::parse("http://203.0.113.9:8080/x/y?z=1").unwrap();
+        assert_eq!(safe_url(&url), "http://203.0.113.9:8080");
     }
 }
