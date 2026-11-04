@@ -30,7 +30,7 @@ import {
   shouldShowOnboarding,
 } from "./config/onboarding";
 import { useVpnSession } from "./config/useVpnSession";
-import { PANEL_MIN, RAIL_MIN } from "./ui/layout";
+import { ACTIVITY_WIDTH, PANEL_MIN, RAIL_MIN } from "./ui/layout";
 import { usePaneLayout } from "./ui/usePaneLayout";
 import {
   isZeroConfigAskSuppressed,
@@ -888,6 +888,7 @@ export default function App() {
   });
 
   const appStyle = {
+    "--activity-w": `${ACTIVITY_WIDTH}px`,
     "--rail-w": `${panes.rail}px`,
     "--panel-w": `${panes.panel}px`,
   } as CSSProperties;
@@ -974,6 +975,26 @@ export default function App() {
         loading={vpn.loading}
         vpnActionFailed={vpnActionFailed}
       />
+      {panelOpen ? (
+        <div
+          className={`ai-panel-host ${
+            panes.floating ? "ai-panel-host--floating" : ""
+          }`}
+          role={panes.floating ? "dialog" : undefined}
+          aria-label={panes.floating ? "AI 对话" : undefined}
+          onMouseDown={panes.floating ? () => togglePanel() : undefined}
+        >
+          <div
+            className="ai-panel-host__panel"
+            style={panes.floating ? { width: `${panes.panelWidth}px` } : undefined}
+            onMouseDown={
+              panes.floating ? (event) => event.stopPropagation() : undefined
+            }
+          >
+            {aiPanel}
+          </div>
+        </div>
+      ) : null}
       {panelOpen && !panes.floating ? (
         <PaneHandle
           side="panel"
@@ -985,24 +1006,6 @@ export default function App() {
           dragging={panes.draggingPane === "panel"}
           {...panes.panelHandlers}
         />
-      ) : null}
-      {panelOpen && !panes.floating ? aiPanel : null}
-      {panelOpen && panes.floating ? (
-        <div
-          className="ai-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-label="AI 对话"
-          onMouseDown={() => togglePanel()}
-        >
-          <div
-            className="ai-overlay__inner"
-            style={{ width: `${panes.panelWidth}px` }}
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            {aiPanel}
-          </div>
-        </div>
       ) : null}
 
       {appNotice ? (

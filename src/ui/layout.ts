@@ -57,9 +57,9 @@ export function panelMaxFor(windowWidth: number, railWidth: number): number {
 }
 
 /**
- * 同一窗口宽度对应唯一布局；可用空间增减时，由下面的压缩公式决定谁先变化。
+ * 同一窗口宽度对应唯一布局；可用空间变化时按压缩公式分配，变宽变窄同一套。
  * available = W - ACTIVITY_WIDTH - CONSOLE_MIN。
- * 两侧偏好都放得下就都取偏好；否则左栏先保持偏好、由右栏吸收差值；
+ * 两侧偏好都放得下就都取偏好；否则右栏在 360 以上时由右栏让出/吸收差值；
  * 右栏已到最小 360 后，剩余差值由左栏吸收（左栏不低于最小 200）。
  * 控制台吃剩余空间；拖拽不走这里，拖哪侧钳哪侧。
  */
@@ -76,12 +76,18 @@ export function computePaneLayout(input: {
 
   if (floating) {
     const rail = clampWidth(railPref, RAIL_MIN, railMaxFor(windowWidth, 0));
+    // 不超过停靠时这个窗口能给右栏的宽度，跨 1100 不会反向跳。
+    const dockedPanelMax = panelMaxFor(windowWidth, rail);
     return {
       floating: true,
       rail,
       panel: 0,
       console: Math.max(CONSOLE_MIN, windowWidth - ACTIVITY_WIDTH - rail),
-      panelWidth: clampWidth(panelPref, PANEL_MIN, OVERLAY_MAX),
+      panelWidth: clampWidth(
+        panelPref,
+        PANEL_MIN,
+        Math.min(OVERLAY_MAX, dockedPanelMax),
+      ),
     };
   }
 

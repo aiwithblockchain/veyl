@@ -801,7 +801,7 @@ pre {
 .app {
   position: relative;
   display: grid;
-  grid-template-columns: 56px var(--rail-w, 240px) minmax(0, 1fr) var(--panel-w, 0px);
+  grid-template-columns: var(--activity-w) var(--rail-w, 240px) minmax(0, 1fr) var(--panel-w, 0px);
   grid-template-rows: minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
@@ -809,7 +809,7 @@ pre {
 }
 
 .app--floating {
-  grid-template-columns: 56px var(--rail-w, 240px) minmax(0, 1fr);
+  grid-template-columns: var(--activity-w) var(--rail-w, 240px) minmax(0, 1fr);
 }
 
 body[data-resizing] {
@@ -836,7 +836,7 @@ body[data-resizing] .app,
 }
 
 .pane-handle--rail {
-  left: calc(56px + var(--rail-w, 240px));
+  left: calc(var(--activity-w) + var(--rail-w, 240px));
 }
 
 .pane-handle--panel {
@@ -886,27 +886,45 @@ body[data-resizing] .pane-handle,
   outline: none;
 }
 
-/* ---------- 浮层右栏 ---------- */
+/* ---------- 右栏宿主：停靠与浮层共用同一棵子树 ---------- */
 
-.ai-overlay {
+.ai-panel-host {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ai-panel-host__panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.ai-panel-host__panel > .ai-panel {
+  flex: 1;
+  min-height: 0;
+}
+
+.ai-panel-host--floating {
   position: fixed;
   inset: 0;
   z-index: 40;
-  display: flex;
+  flex-direction: row;
   justify-content: flex-end;
   background: var(--overlay-soft);
 }
 
-.ai-overlay__inner {
-  display: flex;
-  flex-direction: column;
+.ai-panel-host--floating .ai-panel-host__panel {
+  flex: 0 0 auto;
   height: 100%;
-  min-height: 0;
   box-shadow: var(--shadow-floating);
 }
 
-.ai-overlay__inner .ai-panel {
-  flex: 1;
+.ai-panel-host--floating .ai-panel {
   border-left: 0;
 }
 

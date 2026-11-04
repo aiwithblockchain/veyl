@@ -70,18 +70,37 @@ describe("computePaneLayout", () => {
     expect(layout.rail).toBe(240);
     expect(layout.panel).toBe(0);
     expect(layout.console).toBe(604);
-    expect(layout.panelWidth).toBe(400);
+    expect(layout.panelWidth).toBe(360);
     expect(OVERLAY_BREAKPOINT).toBe(1100);
   });
 
-  it("浮层宽度钳在 360–480，偏好 560 时取 480", () => {
-    const layout = computePaneLayout({
+  it("浮层宽度不超过停靠可用的上限：900 取 360，1099 取 383", () => {
+    const narrow = computePaneLayout({
       windowWidth: 900,
       railPref: 240,
       panelPref: 560,
       panelOpen: true,
     });
-    expect(layout.panelWidth).toBe(480);
+    expect(narrow.panelWidth).toBe(360);
+    const nearBreakpoint = computePaneLayout({
+      windowWidth: 1099,
+      railPref: 240,
+      panelPref: 560,
+      panelOpen: true,
+    });
+    expect(nearBreakpoint.panelWidth).toBe(383);
+  });
+
+  it("跨 1100 前后宽度连续：1099 浮层 383，1100 停靠 384", () => {
+    const floating = computePaneLayout({
+      windowWidth: 1099,
+      railPref: 240,
+      panelPref: 560,
+      panelOpen: true,
+    });
+    const dockedLayout = docked(1100, 240, 560);
+    expect(floating.panelWidth).toBe(383);
+    expect(dockedLayout.panel).toBe(384);
   });
 
   it("右栏关闭时 panel 为 0，控制台拿回空间", () => {

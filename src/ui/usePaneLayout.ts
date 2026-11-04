@@ -29,9 +29,14 @@ type Pane = "rail" | "panel";
 interface DragState {
   pane: Pane;
   startX: number;
+  /** 按下时的有效宽度；只用于拖拽中的视觉反馈。 */
   startWidth: number;
+  /** 按下时的偏好宽度；持久化以它加位移为准。 */
+  startPref: number;
   value: number;
+  pref: number;
   pointerId: number;
+  target: HTMLElement;
 }
 
 function readStored(key: string): string | null {
@@ -90,6 +95,16 @@ export function usePaneLayout({
   const panelMax = panelMaxFor(appWidth, layout.rail);
 
   const cancelDrag = useCallback(() => {
+    const current = dragRef.current;
+    if (current) {
+      try {
+        if (current.target.hasPointerCapture(current.pointerId)) {
+          current.target.releasePointerCapture(current.pointerId);
+        }
+      } catch {
+        // 指针已释放或元素已卸载。
+      }
+    }
     dragRef.current = null;
     setDrag(null);
     if (rafRef.current !== null) {
@@ -165,7 +180,8 @@ export function usePaneLayout({
 
   const commit = (pane: Pane, value: number, immediate: boolean) => {
     const min = pane === "rail" ? RAIL_MIN : PANEL_MIN;
-    const max = pane === "rail" ? railMax : panelMax;
+    // 偏好存名义范围；窗口变窄只是显示上压到有效范围。
+    const max = pane === "rail" ? RAIL_MAX : PANEL_MAX;
     const next = clampWidth(value, min, max);
     if (pane === "rail") setRailPref(next);
     else setPanelPref(next);
@@ -189,12 +205,16 @@ export function usePaneLayout({
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     const startWidth = pane === "rail" ? layout.rail : layout.panel;
+    const startPref = pane === "rail" ? railPref : panelPref;
     dragRef.current = {
       pane,
       startX: event.clientX,
       startWidth,
+      startPref,
       value: startWidth,
+      pref: startPref,
       pointerId: event.pointerId,
+      target: event.currentTarget,
     };
     setDrag({ pane, value: startWidth });
   };
@@ -203,16 +223,15 @@ export function usePaneLayout({
     const current = dragRef.current;
     if (!current) return;
     const delta = event.clientX - current.startX;
-    const raw =
-      current.pane === "rail"
-        ? current.startWidth + delta
-        : current.startWidth - delta;
+    const signed = current.pane === "rail" ? delta : -delta;
     const min = current.pane === "rail" ? RAIL_MIN : PANEL_MIN;
     const max =
       current.pane === "rail"
         ? railMaxFor(appWidth, layout.panel)
         : panelMaxFor(appWidth, layout.rail);
-    current.value = clampWidth(raw, min, max);
+    const nominalMax = current.pane === "rail" ? RAIL_MAX : PANEL_MAX;
+    current.value = clampWidth(current.startWidth + signed, min, max);
+    current.pref = clampWidth(current.startPref + signed, min, nominalMax);
 
     if (rafRef.current === null) {
       rafRef.current = requestAnimationFrame(() => {
@@ -223,29 +242,23 @@ export function usePaneLayout({
     }
   };
 
-  const finishDrag = (persist: boolean) => (event: ReactPointerEvent<HTMLDivElement>) => {
+  const finishDrag = (persist: boolean) => () => {
     const current = dragRef.current;
     if (!current) return;
-    try {
-      if (event.currentTarget.hasPointerCapture(current.pointerId)) {
-        event.currentTarget.releasePointerCapture(current.pointerId);
-      }
-    } catch {
-      // 指针已经释放时忽略。
-    }
-    if (persist) {
-      if (current.pane === "rail") setRailPref(current.value);
-      else setPanelPref(current.value);
-      persistNow(current.pane, current.value);
+    // 偏好没变就不写；单击手柄不应把有效宽度写成偏好。
+    if (persist && current.pref !== current.startPref) {
+      if (current.pane === "rail") setRailPref(current.pref);
+      else setPanelPref(current.pref);
+      persistNow(current.pane, current.pref);
     }
     cancelDrag();
   };
 
   const handleKeyDown =
     (pane: Pane) => (event: ReactKeyboardEvent<HTMLDivElement>) => {
-      const current = pane === "rail" ? layout.rail : layout.panel;
-      const max = pane === "rail" ? railMax : panelMax;
+      const pref = pane === "rail" ? railPref : panelPref;
       const min = pane === "rail" ? RAIL_MIN : PANEL_MIN;
+      const max = pane === "rail" ? RAIL_MAX : PANEL_MAX;
       if (event.key === "Home") {
         event.preventDefault();
         snap(pane, pane === "rail" ? RAIL_DEFAULT : PANEL_DEFAULT);
@@ -262,9 +275,10 @@ export function usePaneLayout({
       const direction = event.key === "ArrowRight" ? 1 : -1;
       // 左栏向右变宽；右栏手柄在左边界，向左变宽。
       const delta = pane === "rail" ? direction * step : -direction * step;
-      // 已经顶到当前有效边界时不再把偏好值写成钳制后的有效值。
-      if ((delta > 0 && current >= max) || (delta < 0 && current <= min)) return;
-      commit(pane, current + delta, false);
+      // 调整偏好而不是有效宽度，避免窗口变宽后回不到原值。
+      const next = clampWidth(pref + delta, min, max);
+      if (next === pref) return;
+      commit(pane, next, false);
     };
 
   const resetPane = (pane: Pane) => () => {
