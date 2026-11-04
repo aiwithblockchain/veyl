@@ -121,8 +121,6 @@ export default function App() {
     panelOpen,
     active: onboardingLoaded && !showOnboarding,
   });
-  // 只驱动线路图的失败态，不参与连接逻辑。
-  const [vpnActionFailed, setVpnActionFailed] = useState(false);
   const importingRef = useRef(false);
   const endWaiters = useRef(new Map<string, () => void>());
   // 已经回答/超时/作废的问题 id：防止重连或重试路径把旧问题再插回来。
@@ -412,10 +410,6 @@ export default function App() {
   useEffect(() => {
     if (vpn.error) setAppNotice({ level: "error", text: vpn.error });
   }, [vpn.error]);
-
-  useEffect(() => {
-    if (vpn.connection !== "idle") setVpnActionFailed(false);
-  }, [vpn.connection]);
 
   // 本次运行内建出过配置后，A 的「刚引导完」文案就不再适用。
   useEffect(() => {
@@ -822,19 +816,11 @@ export default function App() {
   };
 
   const handleVpnStart = () => {
-    setVpnActionFailed(false);
-    void vpn.start().then((result) => {
-      if (!result.ok) setVpnActionFailed(true);
-      showActionResult(result, "启动失败");
-    });
+    void vpn.start().then((result) => showActionResult(result, "启动失败"));
   };
 
   const handleVpnStop = () => {
-    setVpnActionFailed(false);
-    void vpn.stop().then((result) => {
-      if (!result.ok) setVpnActionFailed(true);
-      showActionResult(result, "断开失败");
-    });
+    void vpn.stop().then((result) => showActionResult(result, "断开失败"));
   };
 
   // 用户主动点「让 AI 帮我配」：打开右栏、给焦点；会话空闲时直接发一条可见的用户消息。
@@ -973,7 +959,7 @@ export default function App() {
         onAskAi={handleAskAiFromConsole}
         onNewConfig={() => setNewConfigOpen(true)}
         loading={vpn.loading}
-        vpnActionFailed={vpnActionFailed}
+        exitIp={runtime.health.exit_ip}
       />
       {panelOpen ? (
         <div

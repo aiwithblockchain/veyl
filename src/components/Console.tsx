@@ -28,7 +28,7 @@ interface Props {
   onAskAi: () => void;
   onNewConfig: () => void;
   loading?: boolean;
-  vpnActionFailed?: boolean;
+  exitIp: string | null;
 }
 
 type Probe =
@@ -36,29 +36,28 @@ type Probe =
   | { nodeId: string; status: "ok"; latency: number | null }
   | { nodeId: string; status: "fail"; message: string | null; unreachable: boolean };
 
-type RouteState = "idle" | "connecting" | "connected" | "failed";
-
-const ROUTE_TEXT: Record<RouteState, string> = {
-  idle: "线路中断",
-  connecting: "正在建立线路",
-  connected: "线路已连接",
-  failed: "线路连接失败",
-};
-
-/** 本机到出口的一条线：未连接留缺口、连接中生长、已连接流动、失败处断点。 */
-function RouteLine({ state }: { state: RouteState }) {
-  return (
-    <div className={`route is-${state}`} role="img" aria-label={`线路：${ROUTE_TEXT[state]}`}>
-      <span className="route__label">本机</span>
-      <span className="route__track" aria-hidden>
-        <span className="route__line" />
-        <span className="route__break" />
-        <span className="route__line" />
-        <span className="route__flow" />
-      </span>
-      <span className="route__label">出口</span>
-    </div>
-  );
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 落到下面的 textarea 方案。
+  }
+  try {
+    const el = document.createElement("textarea");
+    el.value = text;
+    el.style.position = "fixed";
+    el.style.opacity = "0";
+    document.body.appendChild(el);
+    el.select();
+    const ok = document.execCommand("copy");
+    el.remove();
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 export function Console({
@@ -80,16 +79,30 @@ export function Console({
   onAskAi,
   onNewConfig,
   loading = false,
-  vpnActionFailed = false,
+  exitIp,
 }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(
     config?.current_node_id ?? null,
   );
   const [pickerOpen, setPickerOpen] = useState(false);
   const [probe, setProbe] = useState<Probe | null>(null);
+  const [exitCopy, setExitCopy] = useState<"idle" | "copied" | "failed">("idle");
+  const copyTimer = useRef<number | null>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const configId = config?.config_id ?? null;
   const currentNodeId = config?.current_node_id ?? null;
+  const exitAddress = exitIp?.trim() || null;
+
+  useEffect(() => {
+    setExitCopy("idle");
+  }, [exitAddress, connection]);
+
+  useEffect(
+    () => () => {
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    },
+    [],
+  );
 
   // 换配置或真正切换节点后，详情回到这套配置当前在用的节点。
   useEffect(() => {
@@ -150,14 +163,14 @@ export function Console({
 
   const canConnect = Boolean(config && config.nodes.length > 0);
   const connected = connection === "connected";
-  const routeState: RouteState =
-    connection === "connected"
-      ? "connected"
-      : connection === "starting"
-        ? "connecting"
-        : vpnActionFailed
-          ? "failed"
-          : "idle";
+
+  const copyExit = async () => {
+    if (!exitAddress) return;
+    const ok = await copyText(exitAddress);
+    setExitCopy(ok ? "copied" : "failed");
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setExitCopy("idle"), 2000);
+  };
 
   useEffect(() => {
     if (!connected) setProbe(null);
@@ -200,7 +213,27 @@ export function Console({
           <span className="console-status__dot" aria-hidden />
           <span className="console-status__text">{status.text}</span>
         </div>
-        <RouteLine state={routeState} />
+        {connected && exitAddress ? (
+          <button
+            type="button"
+            className={`console-exit ${
+              exitCopy === "copied" ? "is-copied" : exitCopy === "failed" ? "is-failed" : ""
+            }`}
+            onClick={() => void copyExit()}
+            title={`出口 ${exitAddress}，点击复制`}
+            aria-label={`出口 ${exitAddress}，点击复制`}
+          >
+            <span className="console-exit__label">出口</span>
+            <span className="console-exit__ip num" title={exitAddress}>
+              {exitAddress}
+            </span>
+            <span className="console-exit__action" aria-live="polite">
+              {exitCopy === "copied" ? "已复制" : exitCopy === "failed" ? "复制失败" : "复制"}
+            </span>
+          </button>
+        ) : connected ? (
+          <span className="console-exit-pending">正在确认出口…</span>
+        ) : null}
         <button
           type="button"
           className={`console-panel-toggle ${panelOpen ? "is-active" : ""}`}

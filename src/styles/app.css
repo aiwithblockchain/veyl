@@ -32,11 +32,6 @@
   --ok: #1C8A57;
   --warn: #A96A00;
   --err: #BE3A2E;
-
-  /* 品牌强调只用于「信号在流动」这一处，不做底色；色值取自 logo 母版 */
-  --brand-magenta-deep: #C83878;
-  --brand-magenta: #D8489A;
-  --brand-orange: #E89048;
   --ok-text: #14704A;
   --warn-text: #875A00;
   --err-text: #A93A2F;
@@ -656,28 +651,6 @@ pre {
   }
 }
 
-@keyframes route-flow {
-  to {
-    -webkit-mask-position: 17px 0;
-    mask-position: 17px 0;
-  }
-}
-
-@keyframes route-grow {
-  0% {
-    transform: translateY(-50%) scaleX(0);
-    opacity: 0.9;
-  }
-  70% {
-    transform: translateY(-50%) scaleX(1);
-    opacity: 0.9;
-  }
-  100% {
-    transform: translateY(-50%) scaleX(1);
-    opacity: 0;
-  }
-}
-
 @keyframes skeleton-pulse {
   0%,
   100% {
@@ -697,18 +670,8 @@ pre {
     transition-duration: 0.01ms !important;
   }
 
-  .route__flow,
   .skeleton {
     animation: none !important;
-  }
-
-  .route.is-connecting .route__flow {
-    opacity: 0.55 !important;
-    transform: translateY(-50%) scaleX(1);
-  }
-
-  .route.is-connected .route__flow {
-    opacity: 0 !important;
   }
 }
 
@@ -2441,6 +2404,7 @@ body[data-resizing] .pane-handle,
   min-width: 0;
   min-height: 0;
   background: var(--bg);
+  container-type: inline-size;
 }
 
 .console-top {
@@ -2461,91 +2425,66 @@ body[data-resizing] .pane-handle,
   font-weight: 500;
 }
 
-/* 线路图：全产品唯一的装饰性元素，只编码连接状态 */
-.route {
-  display: flex;
+/* 出口 IP：已连接后显示真实出口，点一下复制 */
+.console-exit {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  flex: 0 1 320px;
-  min-width: 72px;
-  max-width: 320px;
+  gap: 7px;
+  flex: none;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-2);
+  transition: background 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
 }
 
-.route__label {
+.console-exit:hover {
+  background: var(--bg-hover);
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.console-exit__label {
   flex: none;
   font-size: var(--fs-label);
   font-weight: 500;
   color: var(--ink-3);
 }
 
-.route__track {
-  position: relative;
-  flex: 1;
+.console-exit__ip {
   min-width: 0;
-  height: 12px;
-  display: flex;
-  align-items: center;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-small);
+  color: var(--ink);
 }
 
-.route__line {
-  flex: 1;
-  height: 1px;
-  background: var(--ink-3);
-  opacity: 0.55;
-}
-
-.route__break {
+.console-exit__action {
   flex: none;
-  width: 6px;
-  height: 1px;
-  background: transparent;
+  min-width: 44px;
+  text-align: right;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
 }
 
-.route__flow {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  height: 1px;
-  transform: translateY(-50%);
-  pointer-events: none;
+.console-exit.is-copied .console-exit__action {
+  color: var(--ok-text);
 }
 
-/* 已连接：连续绿线 + 极慢的流动虚线 */
-.route.is-connected .route__line,
-.route.is-connected .route__break {
-  background: var(--ok);
-  opacity: 1;
+.console-exit.is-failed .console-exit__action {
+  color: var(--err-text);
 }
 
-.route.is-connected .route__flow {
-  background-image: linear-gradient(
-    90deg,
-    var(--brand-magenta-deep),
-    var(--brand-magenta) 45%,
-    var(--brand-orange)
-  );
-  -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 5px, transparent 5px 17px);
-  mask-image: repeating-linear-gradient(90deg, #000 0 5px, transparent 5px 17px);
-  -webkit-mask-size: 17px 100%;
-  mask-size: 17px 100%;
-  opacity: 0.7;
-  animation: route-flow 3s linear infinite;
-}
-
-/* 连接中：线从左往右生长 */
-.route.is-connecting .route__flow {
-  background: var(--accent);
-  transform-origin: left center;
-  animation: route-grow 1.6s ease-out infinite;
-}
-
-/* 失败：缺口处一个 2px 断点，线仍是弱化的墨色 */
-.route.is-failed .route__break {
-  width: 2px;
-  height: 9px;
-  margin: 0 2px;
-  background: var(--err);
+.console-exit-pending {
+  flex: none;
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+  white-space: nowrap;
 }
 
 .console-status {
@@ -2933,12 +2872,10 @@ body[data-resizing] .pane-handle,
   color: var(--ink-3);
 }
 
-/* 停靠右栏且窗口 ≤1100 时，控制台会被压薄；收起线路图，状态另起一行，
-   保证「正在启动…」这类文案不被截断。浮层模式不占列宽，不套这组压缩。 */
+/* 停靠右栏且窗口 ≤1100 时，控制台会被压薄；只压缩按钮和边距。
+   顶栏换行由下面的容器查询按控制台实际宽度处理。 */
 @media (max-width: 1100px) {
   .app--panel-open:not(.app--floating) .console-top {
-    flex-wrap: wrap;
-    gap: 6px 8px;
     padding: 12px;
   }
 
@@ -2947,19 +2884,28 @@ body[data-resizing] .pane-handle,
     padding: 0 12px;
     font-size: var(--fs-small);
   }
+}
 
-  .app--panel-open:not(.app--floating) .route {
-    display: none;
+/* 控制台实际宽度不足时，状态和出口各占一行；不依赖窗口宽度。 */
+@container (max-width: 500px) {
+  .console-top {
+    flex-wrap: wrap;
+    gap: 6px 8px;
   }
 
-  .app--panel-open:not(.app--floating) .console-panel-toggle {
+  .console-panel-toggle {
     order: 2;
   }
 
-  .app--panel-open:not(.app--floating) .console-status {
+  .console-status {
     order: 3;
     flex: 0 0 100%;
-    max-width: 136px;
+    max-width: none;
+  }
+
+  .console-exit,
+  .console-exit-pending {
+    order: 4;
   }
 }
 
