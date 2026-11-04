@@ -1,8 +1,5 @@
-import { useState } from "react";
 import type { ConfigSummary } from "../agent/protocol";
-import type { ConnectMode } from "../config/model";
 import { portLabel } from "../config/model";
-import { NewConfigDialog } from "./NewConfigDialog";
 
 interface Props {
   configs: ConfigSummary[];
@@ -12,7 +9,7 @@ interface Props {
   loading?: boolean;
   error?: string | null;
   onSelect: (configId: string) => void;
-  onCreate: (name: string, mode: ConnectMode) => void;
+  onNewConfig: () => void;
 }
 
 export function ConfigRail({
@@ -22,9 +19,8 @@ export function ConfigRail({
   loading = false,
   error = null,
   onSelect,
-  onCreate,
+  onNewConfig,
 }: Props) {
-  const [creating, setCreating] = useState(false);
 
   return (
     <aside className="config-rail" aria-label="配置列表">
@@ -35,7 +31,7 @@ export function ConfigRail({
           className="config-rail__add"
           aria-label="新建配置"
           title="新建配置"
-          onClick={() => setCreating(true)}
+          onClick={onNewConfig}
         >
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
             <path
@@ -74,7 +70,7 @@ export function ConfigRail({
           <p className="config-rail__empty-text">
             自己新建一套，或在对话里让助手帮你配好第一套。
           </p>
-          <button type="button" className="btn btn--ghost" onClick={() => setCreating(true)}>
+          <button type="button" className="btn btn--ghost" onClick={onNewConfig}>
             新建配置
           </button>
         </div>
@@ -111,7 +107,7 @@ export function ConfigRail({
               );
             })}
           </ul>
-          <button type="button" className="config-rail__new" onClick={() => setCreating(true)}>
+          <button type="button" className="config-rail__new" onClick={onNewConfig}>
             <span className="config-rail__new-plus" aria-hidden>
               +
             </span>
@@ -119,17 +115,6 @@ export function ConfigRail({
           </button>
         </>
       )}
-
-      {creating ? (
-        <NewConfigDialog
-          configs={configs}
-          onClose={() => setCreating(false)}
-          onCreate={(name, mode) => {
-            onCreate(name, mode);
-            setCreating(false);
-          }}
-        />
-      ) : null}
     </aside>
   );
 }

@@ -16,6 +16,7 @@ import { AskQuestionDialog } from "./components/AskQuestionDialog";
 import { ConfigRail } from "./components/ConfigRail";
 import { Console } from "./components/Console";
 import { IconClose } from "./components/icons";
+import { NewConfigDialog } from "./components/NewConfigDialog";
 import { Onboarding } from "./components/Onboarding";
 import { Settings, describeImportError } from "./components/Settings";
 import type { ConnectMode } from "./config/model";
@@ -96,6 +97,9 @@ export default function App() {
   const [repairing, setRepairing] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const [pendingConfigId, setPendingConfigId] = useState<string | null>(null);
+  const [newConfigOpen, setNewConfigOpen] = useState(false);
+  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
+  const [justOnboarded, setJustOnboarded] = useState(false);
   const vpn = useVpnSession(
     bridge,
     import.meta.env.VITE_MOCK === "1" || bridge.mode === "mock",
@@ -480,6 +484,8 @@ export default function App() {
   };
 
   const finishOnboarding = (skipped: boolean) => {
+    // 只在本次运行内有效：刷新后回到「已配 AI、但不是刚引导完」的入口。
+    setJustOnboarded(!skipped);
     if (skipped) {
       onboardingSkippedRef.current = true;
       writeFlag(ONBOARDING_SKIPPED_KEY);
@@ -806,6 +812,14 @@ export default function App() {
     });
   };
 
+  // 零配置主按钮「让 AI 帮我配」：只打开右栏并把焦点交给输入框，不发消息。
+  const handleAskAiFromConsole = () => {
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
+    setComposerFocusSignal((value) => value + 1);
+  };
+
   const handleSwitchNode = (nodeId: string) => {
     void vpn
       .switchNode(nodeId)
@@ -835,7 +849,7 @@ export default function App() {
         loading={vpn.loading}
         error={vpn.error}
         onSelect={handleSelectConfig}
-        onCreate={handleCreateConfig}
+        onNewConfig={() => setNewConfigOpen(true)}
       />
       <Console
         config={vpn.activeConfig}
@@ -849,6 +863,11 @@ export default function App() {
         panelOpen={panelOpen}
         aiUnread={aiUnread}
         onTogglePanel={togglePanel}
+        aiReady={aiReady}
+        justOnboarded={justOnboarded}
+        hasConfigs={vpn.configs.length > 0}
+        onAskAi={handleAskAiFromConsole}
+        onNewConfig={() => setNewConfigOpen(true)}
         loading={vpn.loading}
         vpnActionFailed={vpnActionFailed}
       />
@@ -860,6 +879,7 @@ export default function App() {
           aiReady={aiReady}
           hasEverConnected={hasEverConnected}
           hasConfigs={vpn.configs.length > 0}
+          focusSignal={composerFocusSignal}
           onSelectSession={handleSelectSession}
           onNewSession={() => dispatch({ type: "new_session" })}
           onRenameSession={handleRenameSession}
@@ -927,6 +947,17 @@ export default function App() {
             </div>
           </div>
         </div>
+      ) : null}
+
+      {newConfigOpen ? (
+        <NewConfigDialog
+          configs={vpn.configs}
+          onClose={() => setNewConfigOpen(false)}
+          onCreate={(name, mode) => {
+            handleCreateConfig(name, mode);
+            setNewConfigOpen(false);
+          }}
+        />
       ) : null}
 
       <AskQuestionDialog

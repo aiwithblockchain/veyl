@@ -9,6 +9,8 @@ interface Props {
   /** 没有可用 AI 时禁用输入，并给出配置入口。 */
   disabled?: boolean;
   onConfigure?: () => void;
+  /** 递增这个值会把焦点移到输入框。 */
+  focusSignal?: number;
 }
 
 export function Composer({
@@ -19,9 +21,15 @@ export function Composer({
   placeholder = "说「连到日本」，或者问我现在什么状态",
   disabled = false,
   onConfigure,
+  focusSignal = 0,
 }: Props) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!focusSignal) return;
+    textareaRef.current?.focus();
+  }, [focusSignal]);
 
   useEffect(() => {
     const node = textareaRef.current;

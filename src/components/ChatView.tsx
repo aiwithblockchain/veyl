@@ -11,6 +11,8 @@ interface Props {
   onNextAction: (action: NextAction) => void;
   hasKey: boolean;
   onConfigureKey: () => void;
+  /** 递增这个值会把焦点移到输入框。 */
+  focusSignal?: number;
 }
 
 export function ChatView({
@@ -20,6 +22,7 @@ export function ChatView({
   onNextAction,
   hasKey,
   onConfigureKey,
+  focusSignal = 0,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
@@ -61,6 +64,7 @@ export function ChatView({
         onStop={onStop}
         disabled={!hasKey}
         onConfigure={onConfigureKey}
+        focusSignal={focusSignal}
       />
     </div>
   );

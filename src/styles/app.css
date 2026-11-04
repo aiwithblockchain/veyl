@@ -2526,6 +2526,82 @@ pre {
   color: var(--ink-3);
 }
 
+/* 零配置入口：标题 > 三步说明 > 主按钮 > 次按钮 */
+.console-empty-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  max-width: 380px;
+  text-align: center;
+}
+
+.console-empty-entry__title {
+  margin: 0;
+  font-size: var(--fs-title);
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.console-empty-entry__steps {
+  counter-reset: step;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+
+.console-empty-entry__steps li {
+  counter-increment: step;
+  display: flex;
+  gap: 10px;
+  font-size: var(--fs-body);
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.console-empty-entry__steps li::before {
+  content: counter(step);
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 3px;
+  border-radius: 50%;
+  background: var(--bg-hover);
+  color: var(--ink-3);
+  font-size: var(--fs-label);
+  font-weight: 500;
+}
+
+.console-empty-entry__text {
+  margin: 0;
+  font-size: var(--fs-body);
+  line-height: 1.65;
+  color: var(--ink-2);
+  text-align: left;
+}
+
+.console-empty-entry__actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.console-empty-entry__primary {
+  height: 38px;
+  padding: 0 20px;
+  font-size: var(--fs-card);
+}
+
 /* 底部：节点详情 */
 
 .console-node {

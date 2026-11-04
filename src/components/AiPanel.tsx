@@ -29,6 +29,8 @@ interface Props {
   aiReady: boolean;
   hasEverConnected: boolean;
   hasConfigs: boolean;
+  /** 递增这个值会把焦点移到输入框，并切回对话页。 */
+  focusSignal: number;
   onSelectSession: (sessionId: string) => void;
   onNewSession: () => void;
   onRenameSession: (sessionId: string, title: string) => Promise<RenameResult>;
@@ -60,6 +62,7 @@ export function AiPanel({
   aiReady,
   hasEverConnected,
   hasConfigs,
+  focusSignal,
   onSelectSession,
   onNewSession,
   onRenameSession,
@@ -82,6 +85,10 @@ export function AiPanel({
   const editRef = useRef<HTMLInputElement>(null);
   const confirmRef = useRef<HTMLDivElement>(null);
   useFocusTrap(Boolean(confirming), confirmRef);
+
+  useEffect(() => {
+    if (focusSignal > 0) setView("chat");
+  }, [focusSignal]);
 
   useEffect(() => {
     if (!editingId) return;
@@ -303,6 +310,7 @@ export function AiPanel({
             onNextAction={onNextAction}
             hasKey={aiReady}
             onConfigureKey={onConfigureKey}
+            focusSignal={focusSignal}
           />
         ) : (
           <>
@@ -340,6 +348,7 @@ export function AiPanel({
               disabled={!aiReady}
               onConfigure={onConfigureKey}
               placeholder="告诉我要去哪儿，或者让我诊断网络问题"
+              focusSignal={focusSignal}
             />
           </>
         )}

@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { ConfigDetail, NodeSummary } from "../agent/protocol";
 import type { ProbeResult, VpnConnectionState } from "../config/useVpnSession";
+import {
+  runZeroConfigPrimaryAction,
+  zeroConfigActions,
+  zeroConfigContent,
+  zeroConfigMode,
+} from "../ui/consoleActions";
 import { consolePrimary, consoleStatus } from "../ui/status";
 
 interface Props {
@@ -15,6 +21,11 @@ interface Props {
   panelOpen: boolean;
   aiUnread: boolean;
   onTogglePanel: () => void;
+  aiReady: boolean;
+  justOnboarded: boolean;
+  hasConfigs: boolean;
+  onAskAi: () => void;
+  onNewConfig: () => void;
   loading?: boolean;
   vpnActionFailed?: boolean;
 }
@@ -61,6 +72,11 @@ export function Console({
   panelOpen,
   aiUnread,
   onTogglePanel,
+  aiReady,
+  justOnboarded,
+  hasConfigs,
+  onAskAi,
+  onNewConfig,
   loading = false,
   vpnActionFailed = false,
 }: Props) {
@@ -163,6 +179,10 @@ export function Console({
   else if (!connected) probeHint = "连接后可以测试";
   const probeText = nodeProbeAvailable && connected ? probeLabel : probeHint;
 
+  const zeroMode = zeroConfigMode(aiReady, justOnboarded);
+  const zeroContent = zeroConfigContent(zeroMode);
+  const zeroActions = zeroConfigActions(zeroMode);
+
   return (
     <main className="console">
       <header className="console-top">
@@ -209,12 +229,57 @@ export function Console({
       </header>
 
       <section className="console-mid">
-        <div className="console-mid__hint">
-          <p className="console-mid__title">没有需要你决定的事</p>
-          <p className="console-mid__text">
-            AI 有需要你确认的步骤时，会出现在这里。
-          </p>
-        </div>
+        {!loading && !hasConfigs ? (
+          <div className="console-empty-entry">
+            <p className="console-empty-entry__title">{zeroContent.title}</p>
+            {zeroContent.steps ? (
+              <ol className="console-empty-entry__steps">
+                {zeroContent.steps.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
+            ) : zeroContent.body ? (
+              <p className="console-empty-entry__text">{zeroContent.body}</p>
+            ) : null}
+            <div className="console-empty-entry__actions">
+              {zeroActions.includes("ask-ai") ? (
+                <button
+                  type="button"
+                  className="btn btn--primary console-empty-entry__primary"
+                  onClick={() =>
+                    runZeroConfigPrimaryAction(zeroMode, { onAskAi, onNewConfig })
+                  }
+                >
+                  让 AI 帮我配
+                </button>
+              ) : null}
+              {zeroActions.includes("new-config") ? (
+                zeroMode === "manual" ? (
+                  <button
+                    type="button"
+                    className="btn btn--primary console-empty-entry__primary"
+                    onClick={() =>
+                      runZeroConfigPrimaryAction(zeroMode, { onAskAi, onNewConfig })
+                    }
+                  >
+                    我自己配置
+                  </button>
+                ) : (
+                  <button type="button" className="btn btn--ghost" onClick={onNewConfig}>
+                    我自己配置
+                  </button>
+                )
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <div className="console-mid__hint">
+            <p className="console-mid__title">没有需要你决定的事</p>
+            <p className="console-mid__text">
+              AI 有需要你确认的步骤时，会出现在这里。
+            </p>
+          </div>
+        )}
       </section>
 
       <footer className="console-node">
@@ -232,8 +297,8 @@ export function Console({
               <span className="skeleton skeleton--fact" />
             </div>
           </div>
-        ) : !config ? (
-          <p className="console-node__empty">在左侧新建一套配置后，这里会显示节点。</p>
+        ) : !hasConfigs ? null : !config ? (
+          <p className="console-node__empty">在左侧选一套配置。</p>
         ) : !selectedNode ? (
           <p className="console-node__empty">这套配置还没有节点。</p>
         ) : (
