@@ -56,41 +56,6 @@ pub fn finish(conn: &Connection, id: &str, result: &Value, is_error: bool) -> St
     Ok(())
 }
 
-/// 会话里**最新一条**某个工具的调用。
-///
-/// 注意不要按 `finished_at` 过滤：超时也会调 `finish()`，`finished_at` 有值
-/// 但结果是个空串——那仍然是「没人答过」。判断交给 [`is_unanswered`]。
-pub fn latest(
-    conn: &Connection,
-    session_id: &str,
-    tool_name: &str,
-) -> StoreResult<Option<ToolCallRecord>> {
-    conn.query_row(
-        "SELECT id, session_id, request_id, tool_name, args_json, approved, result_json,
-                is_error, created_at, finished_at
-           FROM tool_calls
-          WHERE session_id = ?1 AND tool_name = ?2
-          ORDER BY created_at DESC, rowid DESC
-          LIMIT 1",
-        params![session_id, tool_name],
-        row_to_record,
-    )
-    .optional()
-    .map_err(StoreError::from)
-}
-
-/// 这条调用还需要用户回答吗？
-///
-/// **看结果内容，不看 `finished_at`。** 超时会走 `finish()` 并写入空串，
-/// `finished_at` 因此有值——按它判断会把「超时没人答」误判成「已回答」。
-pub fn is_unanswered(record: &ToolCallRecord) -> bool {
-    match &record.result {
-        None | Some(Value::Null) => true,
-        Some(Value::String(text)) => text.trim().is_empty(),
-        Some(_) => false,
-    }
-}
-
 pub fn get(conn: &Connection, id: &str) -> StoreResult<Option<ToolCallRecord>> {
     conn.query_row(
         "SELECT id, session_id, request_id, tool_name, args_json, approved, result_json,
