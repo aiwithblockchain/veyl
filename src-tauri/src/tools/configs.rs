@@ -31,7 +31,7 @@ fn summarise_configs(data: &Value) -> String {
         .map(|items| items.iter().collect())
         .unwrap_or_default();
     if configs.is_empty() {
-        return "本地还没有配置。可以新建一套空配置，或在对话里选择默认节点。".to_string();
+        return "本地还没有配置。可以新建一套空配置，或选择用 Veyl 提供的测试节点。".to_string();
     }
 
     let mut lines = vec![format!("本地有 {} 套配置：", configs.len())];
@@ -282,7 +282,7 @@ impl Tool for ConfigCreateTool {
                         AivpnError::new(
                             "PRECONDITION_FAILED",
                             "还没有确认节点来源：先用 AskUserQuestion 问用户「节点从哪来」，\
-                             用户选了「用 Veyl 提供的默认节点」之后才能用默认节点",
+                             用户选了「用 Veyl 提供的测试节点（仅供试用）」之后才能用测试节点",
                         )
                         .with_details(json!({ "reason": "seed_source_not_confirmed" })),
                     ),
