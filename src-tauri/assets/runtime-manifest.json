@@ -16,7 +16,10 @@
       "upstream_asset": "sing-box-1.14.4-darwin-arm64.tar.gz",
       "source_url": "https://github.com/SagerNet/sing-box/tree/v1.14.4",
       "license": "GPL-3.0-or-later",
-      "config_schema": { "min": 1, "max": 2 },
+      "config_schema": {
+        "min": 1,
+        "max": 2
+      },
       "breaking": false,
       "yanked": false,
       "published_at": "2026-10-30T00:00:00Z"
@@ -34,7 +37,10 @@
       "upstream_asset": "sing-box-1.14.4-darwin-amd64.tar.gz",
       "source_url": "https://github.com/SagerNet/sing-box/tree/v1.14.4",
       "license": "GPL-3.0-or-later",
-      "config_schema": { "min": 1, "max": 2 },
+      "config_schema": {
+        "min": 1,
+        "max": 2
+      },
       "breaking": false,
       "yanked": false,
       "published_at": "2026-10-30T00:00:00Z"
@@ -52,10 +58,37 @@
       "upstream_asset": "sing-box-1.14.4-windows-amd64.zip",
       "source_url": "https://github.com/SagerNet/sing-box/tree/v1.14.4",
       "license": "GPL-3.0-or-later",
-      "config_schema": { "min": 1, "max": 2 },
+      "config_schema": {
+        "min": 1,
+        "max": 2
+      },
       "breaking": false,
       "yanked": false,
       "published_at": "2026-10-30T00:00:00Z"
     }
-  ]
+  ],
+  "universal": {
+    "version": "1.14.4",
+    "archs": [
+      "x86_64",
+      "arm64"
+    ],
+    "sha256": "2b956ab255cd58b36d3184cf22f44d768b65eac3a67834640c5aa73acfe1641e",
+    "size": 173391570,
+    "generated_at": "2026-11-04T07:25:00.222Z",
+    "artifacts": [
+      {
+        "arch": "arm64",
+        "upstream_asset": "sing-box-1.14.4-darwin-arm64.tar.gz",
+        "sha256": "0d8c7f5ed5d587b0f1a5e9772a708ec3bfa4ac4c9329604b01d8d9c2ba406838",
+        "size": 29186204
+      },
+      {
+        "arch": "x86_64",
+        "upstream_asset": "sing-box-1.14.4-darwin-amd64.tar.gz",
+        "sha256": "eae86b9b033bba50b7c44ab719e4bfac0aca05efd28483390ed3aa510f32db25",
+        "size": 31503132
+      }
+    ]
+  }
 }

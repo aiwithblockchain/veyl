@@ -910,6 +910,7 @@ impl RuntimeManager {
     async fn wait_until_ready(&self, gen: u64, plan: &StartPlan) -> bool {
         let api = ClashApi::new(&plan.clash_addr, &plan.clash_secret);
         let deadline = Instant::now() + self.cfg.startup_timeout;
+        #[cfg(test)]
         let started = Instant::now();
         #[cfg(test)]
         let debug_crash_path = plan
@@ -966,6 +967,7 @@ impl RuntimeManager {
                 return false;
             }
 
+            #[cfg(test)]
             let health_started = Instant::now();
             let healthy = api.healthy().await;
             #[cfg(test)]

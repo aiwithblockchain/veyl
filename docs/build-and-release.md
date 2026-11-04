@@ -35,7 +35,7 @@
 | macOS | universal（arm64 + x86_64），Developer ID + notarytool + staple |
 | Windows | P1/P2 只构建 MSI **不签名**；脚本预留签名 hook，P5 启用 |
 | 发布渠道 | GitHub Releases；P1 无 updater（批 7 再加，见 `docs/upgrade.md`）、无 Cloudflare Worker、无官网同步 |
-| **构建期网络** | 规则数据要从 `github.com` 拉。**国内网络直连不通**（2026-11-04 实测：8 秒超时），本地构建需先连 VPN 或用镜像；**CI 跑在 GitHub Actions 上不受影响**。`github.io` 是另一条链路，通常可直连 |
+| **构建期网络** | 规则数据走 `api.github.com` + `codeload.github.com`，运行时走 `api.github.com` + `release-assets.githubusercontent.com`。GitHub IP 时通时不通，脚本每次重试重新解析 DNS；不依赖 `github.com` / `raw.githubusercontent.com`。上游信任模型见 §4.10 |
 | 密钥 | 一律从 keychain profile / 环境变量读，**不落仓库、不落文档、不落日志**；详见 §5.2（硬约束） |
 | 路径 | 脚本内只用相对路径 + `$(dirname "$0")` 推导，**禁止写死本机绝对路径** |
 | 破坏性操作 | 发布、删除、覆盖类脚本默认支持 `--dry-run`，正式执行要二次确认 |
@@ -319,6 +319,33 @@ npm run icons
 - **发布前必须重跑一次**，放在 `bump-version` 之后、`build-dmg` / `build-msi` 之前。
 - `tauri.conf.json` 的 `bundle.icon` 已经指向 `icon.icns` / `icon.ico` / 多尺寸 png，重新生成后**不需要改配置**。
 - 打包后要抽查产物里的图标是新的：macOS 解包 `.app` 看 `Contents/Resources/icon.icns` 的修改时间；Windows 直接看 MSI 安装后的快捷方式。
+
+---
+
+### 4.10 规则数据与运行时下载
+
+```bash
+npm run rules:fetch
+npm run runtime:fetch
+```
+
+**网络路径**
+
+- 规则：`api.github.com` 查 `rule-set` 分支头，`codeload.github.com` 按完整 commit 下载 tarball；不访问 `github.com`、`raw.githubusercontent.com`。
+- 运行时：`api.github.com` 查 release asset，下载 302 到 `release-assets.githubusercontent.com`；不访问 `github.com`。
+- GitHub 的 IP 会因网络策略时通时不通；重试会**重新解析 DNS 并轮换 A 记录**，错误信息带域名、实际 IP、状态码和耗时。脚本不要求代理，默认直连。
+
+**上游信任模型（已拍板）**
+
+规则 tarball **不做独立哈希校验**。信任根是 TLS + GitHub 官方域名（`api.github.com` / `codeload.github.com`），与原来的 `git clone https://` 是同一套信任模型；git 的 commit 哈希防的是传输损坏和中途篡改，这两点已由 TLS 覆盖。manifest 和 `SOURCE.txt` 记录完整 commit 只用于版本追溯，不构成独立的密码学校验。**不要以为这里对 tarball 做过哈希验证。**
+
+**许可证**
+
+sing-geosite / sing-geoip 是 GPL-3.0-or-later。`rules:fetch` 通过 `api.github.com/.../license` 取许可证，拉不到就整体失败；`LICENSE-geosite.txt`、`LICENSE-geoip.txt`、`LICENSE-GPL-3.0.txt` 会写进归档，`verify-rules.mjs` 会检查它们非空。
+
+**runtime 产物**
+
+`runtime:fetch` 先把 universal 写到临时文件，校验 `lipo -archs` 同时含 `x86_64`/`arm64`，实际执行 `<产物> version` 核对版本，流式计算 sha256，最后原子 `rename`；最终 `universal.sha256` 写入 `src-tauri/assets/runtime-manifest.json`。
 
 ---
 

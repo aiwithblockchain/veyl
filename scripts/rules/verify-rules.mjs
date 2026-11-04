@@ -89,6 +89,11 @@ async function main() {
     throw new Error("manifest.items 为空");
   }
 
+  for (const name of ["LICENSE-geosite.txt", "LICENSE-geoip.txt"]) {
+    const text = await fsp.readFile(path.join(VERIFY_DIR, name), "utf8");
+    if (!text.trim()) throw new Error(`归档缺少许可证或内容为空：${name}`);
+  }
+
   let totalBytes = 0;
   const ids = new Set();
   for (const item of manifest.items) {
