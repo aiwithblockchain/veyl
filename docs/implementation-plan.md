@@ -185,10 +185,10 @@ activity bar、左栏配置列表、中间三段骨架、块系统、`source_cho
 
 | 项 | 内容 |
 |---|---|
-| 服务模型 | 安装时提权一次，注册 LocalSystem 常驻服务；命名管道通信；对端 Authenticode 验签 |
+| 服务模型 | 应用 per-user 安装、不要求管理员；**首次需要 TUN 时**提权安装 LocalSystem 常驻服务；拒绝后可重试、不重装；命名管道通信 + 对端 Authenticode 验签 |
 | 驱动 | Wintun（官方 `wintun.dll`，随 `sing-box.exe` 同目录、同架构） |
 | 运行时 | Windows zip 拉取、校验、解压；`build-msi.ps1` 安装运行时与服务 |
-| 安装/卸载 | MSI per-machine；卸载删服务、删适配器、恢复代理/DNS，与 E3 共用清理代码 |
+| 安装/卸载 | per-user 应用安装器 + 独立的提权服务安装器；卸载删服务、删适配器、恢复代理/DNS，与 E3 共用清理代码 |
 | 平台配置 | `strict_route`、`stack`、`interface_name`、内网排除反推 |
 | 签名 | Windows 代码签名证书（EV/OV）或 Azure Trusted Signing；时间戳；MSI 签名 |
 
@@ -196,7 +196,7 @@ activity bar、左栏配置列表、中间三段骨架、块系统、`source_cho
 
 1. Windows 代码签名证书或云签名账号（当前无法确认是否已有）。
 2. Windows 10/11 x64 真机（管理员权限、可反复装卸）；CI 不能验证 TUN。
-3. **服务模型已定**（2026-11-04）：安装时一次提权 + 常驻 LocalSystem 服务；不再是待拍板项。
+3. **提权时机已定**（2026-11-04 修正）：安装不要求管理员，AI 判定需要 TUN 后才提权安装常驻 LocalSystem 服务；拒绝后可重试，不重装。
 4. 法务确认 Wintun（预编译 DLL 专有许可）与 sing-box（GPL-3.0）的分发条款。
 
 **粗估**：1 人 4–6 周（不含证书采购与身份验证的 1–3 周）。

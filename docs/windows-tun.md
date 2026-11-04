@@ -133,30 +133,82 @@ sing-box 在 Windows 上的 TUN 入站依赖 **Wintun**，官方 Windows 发布 
 
 ### 3.2 提权形态（已定）
 
-**决定：安装时提权一次 + 常驻 LocalSystem 服务。** 与 macOS「授权一次、之后不再提示」的体验保持一致；`docs/tun-mode.md` §4 拒绝「每次弹管理员密码」是同一个判断。**不做「每次连接弹 UAC」。**
+**决定：安装不要求管理员权限；首次需要 TUN 时再提权安装常驻 LocalSystem 服务；之后不再每次弹 UAC。设计目标是「随时可以用，不用重装」。**
 
-#### 它解决了什么
+理由：
 
-- 用户安装时只弹一次 UAC，授权服务注册。
-- 之后每次连接、切换节点、重连都不再弹窗。
-- 二级用户（不会配代理）也能一次装好、长期使用，不用理解管理员权限。
+- 与 macOS「授权一次、之后不再提示」保持一致；`docs/tun-mode.md` §4 拒绝「每次弹管理员密码」是同一个判断。
+- **不在安装时把 TUN 的路堵死。** 用户装的时候可能没有管理员权限，或者不愿意授权；不能因此装出一个「永远用不了 TUN」的版本。
+- 提示时机是**AI 判定需要 TUN 之后**，不是一进门就弹。没有这个需求的人不会看到管理员提示。
 
-#### 代价
+#### 时序（不可颠倒）
 
-- **安装需要管理员权限。** 没有管理员权限的机器装不了 TUN；是否在安装器里明确引导「只能使用本机代理模式」，需要产品决定。
-- **服务以 LocalSystem 运行**，所以回到那条不能丢的原则：**特权进程绝不能从普通用户可写的位置读任何东西。** Windows 上具体不可信的位置比 macOS 更多：
+1. **正常安装，不要求管理员权限。**
+2. 用户走到需要 TUN 的那一步（例如 AI 判定必须接管全部流量）→ 这时才提示需要管理员权限。
+3. 提权安装服务：明确要求管理员权限；用户拒绝则 TUN 不可用，但**应用本身照常可用**。
+4. **之后随时可以再授权**：只重试提权安装服务，**不需要重新安装应用**。
+
+#### 用户拒绝授权之后
+
+| 能力 | 状态 |
+|---|---|
+| 代理模式（一级 / 三级） | 正常，不受影响 |
+| TUN / 接管全部（二级） | 不可用；返回权限类错误（`tun_denied` / `helper_missing`） |
+| 再次授权 | 随时可重试；不需要重装 |
+| 已经建立的代理连接 | 不受影响（失败发生在启动 TUN 之前） |
+
+界面不能显示「假的已连接」，也不能把「没有管理员权限」说成网络故障。这是权限问题，不是网络问题（`docs/tun-mode.md` §8）。
+
+#### 运行中提权去安装服务：两条路
+
+Windows 上从非管理员进程安装服务必须先提权。两种可行做法：
+
+| 做法 | 用户看到什么 | 判断 |
+|---|---|---|
+| 用 `ShellExecuteW(..., "runas", ...)` 重新启动自身（带 `--install-service` 参数） | UAC 弹窗；主窗口可能闪一下或出现第二个实例；取消返回 `ERROR_CANCELLED`（1223） | 可行，但体验差；要处理单实例与焦点 |
+| 启动一个小的、已签名的提权安装器（同一 exe 带参数，或独立的 `veyl-setup.exe`） | 只弹 UAC；主界面不动；取消无副作用 | **推荐** |
+
+两种做法的共同前提：
+
+- **当前用户必须有管理员权限，或能在 UAC 里提供管理员凭据。** 标准用户无法完成提权；这种情况下 TUN 就是不可用，不能说「再试一次」就能好。
+- **服务安装本身需要管理员**：`CreateServiceW`、写 `Program Files` 与 `%ProgramData%` 都需要。
+- **从用户可写目录启动提权进程是一条风险**：提权安装器必须签名，启动前校验自身；UAC 会显示发布者，用户据此判断。不要把「任意路径的 exe」直接 `runas`。
+
+#### 安装器形态（这条决定能不能做到"安装不要求管理员"）
+
+- Tauri 的 **MSI 是 perMachine**（安装到 `Program Files`，需要管理员）；**NSIS 默认 `currentUser`**，可以无管理员安装。
+- 要满足本决定，**安装包必须是 per-user 形态**（NSIS `currentUser`，或自定义 per-user MSI）；应用本身装在用户目录。
+- 服务、运行时、规则在**首次提权时**另行安装到 `C:\Program Files\Veyl\` 与 `%ProgramData%\Veyl\`。
+- **服务绝不能从 per-user 安装目录读取任何东西**——那是用户可写的，见下一节。
+- 自动更新只更新 per-user 的应用；服务与随包运行时的更新必须走提权安装器，并重新验签/验哈希。
+
+#### 服务设计
+
+| 项 | 设计 |
+|---|---|
+| 服务账户 | `LocalSystem`（需要创建 TUN 适配器、改路由/DNS） |
+| 安装时机 | **首次需要 TUN 时**，由提权安装器注册；不在应用安装时 |
+| 服务启动 | Automatic；崩溃恢复重启（有限次数） |
+| App ↔ 服务 | 命名管道；服务端限制 ACL，校验客户端进程路径 + Authenticode 发布者 |
+| 服务二进制 | `C:\Program Files\Veyl\veyl-helper.exe`（或 `veyl-service.exe`），管理员 ACL |
+| 运行时 | `C:\Program Files\Veyl\runtime\sing-box.exe` + `wintun.dll`；只从安装目录复制到 `%ProgramData%\Veyl\runtime\<sha256>\` |
+| 状态/配置/日志 | `%ProgramData%\Veyl\`，ACL：SYSTEM/Administrators 完全控制，普通用户不可写 |
+| 请求内容 | 仍然只有配置 JSON 内容，无路径；沿用 allowlist |
+
+#### 不可信位置（LocalSystem 绝不能读）
+
+**服务以 LocalSystem 运行，所以回到那条不能丢的原则：特权进程绝不能从普通用户可写的位置读任何东西。** Windows 上具体不可信的位置比 macOS 更多：
 
 | 不可信位置 | 为什么 | 服务若读取的后果 |
 |---|---|---|
 | `%APPDATA%` / `%LOCALAPPDATA%` | 当前用户可写 | 替换配置、运行时、DLL，LocalSystem 执行 |
 | `%TEMP%` / `%TMP%` | 用户可写 | 解压目录或临时文件被替换 |
-| `C:\Users\<user>\...`（桌面、下载、用户目录安装） | 用户可写 | 服务二进制或资源被替换 |
+| `C:\Users\<user>\...`（桌面、下载、per-user 安装目录） | 用户可写 | 服务二进制或资源被替换 |
 | 服务的工作目录 | 可能被启动方设为用户目录 | DLL 搜索顺序劫持 |
 | `%PATH%` 中的用户目录 | 用户可写 | 同名 DLL/EXE 劫持 |
 | 用户可创建的 junction / symlink 指向 | 可重定向 | 读写逃逸到别处 |
 
-- 因此服务**只从 `C:\Program Files\Veyl\`（管理员 ACL）读**二进制、运行时、规则；**只写 `%ProgramData%\Veyl\`（SYSTEM/Administrators ACL）**；工作目录固定为安装目录；DLL 用绝对路径或受限搜索（`LOAD_LIBRARY_SEARCH_*`）。
-- 当前实现的 `%LOCALAPPDATA%\Veyl` 是给用户态 App 的，**服务不能沿用**。
+因此服务**只从 `C:\Program Files\Veyl\`（管理员 ACL）读**二进制、运行时、规则；**只写 `%ProgramData%\Veyl\`（SYSTEM/Administrators ACL）**；工作目录固定为安装目录；DLL 用绝对路径或受限搜索（`LOAD_LIBRARY_SEARCH_*`）。当前实现的 `%LOCALAPPDATA%\Veyl` 是给用户态 App 的，**服务不能沿用**。
 
 #### 卸载必须清干净
 
@@ -169,17 +221,6 @@ sing-box 在 Windows 上的 TUN 入站依赖 **Wintun**，官方 Windows 发布 
 5. 复读校验：无服务、无 sing-box、无 Wintun 适配器、无代理指向。
 
 **卸载清理与 E3 必须共用同一段代码**，不能各写一套（`docs/capabilities.md` §3.1）。具体执行顺序见 §3.4。
-
-| 项 | 设计 |
-|---|---|
-| 服务账户 | `LocalSystem`（需要创建 TUN 适配器、改路由/DNS） |
-| 安装 | MSI per-machine，安装时一次 UAC；服务注册由安装器完成 |
-| 服务启动 | Automatic；崩溃恢复重启（有限次数） |
-| App ↔ 服务 | 命名管道；服务端限制 ACL，校验客户端进程路径 + Authenticode 发布者 |
-| 服务二进制 | `C:\Program Files\Veyl\veyl-helper.exe`（或 `veyl-service.exe`），管理员 ACL |
-| 运行时 | `C:\Program Files\Veyl\runtime\sing-box.exe` + `wintun.dll`；只从安装目录复制到 `%ProgramData%\Veyl\runtime\<sha256>\` |
-| 状态/配置/日志 | `%ProgramData%\Veyl\`，ACL：SYSTEM/Administrators 完全控制，普通用户不可写 |
-| 请求内容 | 仍然只有配置 JSON 内容，无路径；沿用 allowlist |
 
 **命名管道的具体约束：**
 
@@ -195,30 +236,49 @@ sing-box 在 Windows 上的 TUN 入站依赖 **Wintun**，官方 Windows 发布 
 - 需要 **Windows 代码签名证书**：OV 或 EV。EV 对 SmartScreen 信誉更直接；OV 现在通常也需要硬件令牌/HSM。
 - 替代方案：**Azure Trusted Signing**（云签名），CI 可用 service principal；或 DigiCert KeyLocker / SSL.com eSigner 等云 HSM。
 - 必须带**时间戳**（`/tr` + `/td sha256`），否则证书到期后旧签名失效。
-- 签名顺序：签 `veyl.exe` / 服务二进制 → 打 MSI → 签 MSI → `signtool verify /pa /v`。
-- 没有证书的后果：SmartScreen 显示「未知发布者」、企业环境可能直接拦截；一个需要管理员权限的常驻服务以未签名形式分发，**不可接受**。
+- 签名顺序：签 `veyl.exe` / 提权安装器 / 服务二进制 → 打 per-user 安装包 → 签安装包 → `signtool verify /pa /v`。
+- 没有证书的后果：SmartScreen 显示「未知发布者」、企业环境可能直接拦截；**提权安装器与常驻服务都必须签名**——用户是在 UAC 弹窗里看发布者做决定的。
 - Wintun 的驱动由 WireGuard 签名；不要改它。sing-box.exe 由上游发布，若我们重新签名要注意 GPL 与签名身份；通常保持上游签名并在安装器中校验哈希。
 
 ### 3.4 安装与卸载
 
-**安装（MSI，per-machine）：**
+#### 第一阶段：应用安装（per-user，不要求管理员）
 
-1. 校验安装包/二进制签名。
-2. 复制 `sing-box.exe` + `wintun.dll` + 规则归档到 `Program Files\Veyl\`。
-3. 创建 `%ProgramData%\Veyl\` 并设置 ACL。
-4. 注册服务（`CreateServiceW`，LocalSystem，Automatic），设置恢复策略。
-5. 不自动启动 TUN；等用户第一次连接。
+1. 用户运行 per-user 安装器（NSIS `currentUser`，或自定义 per-user MSI），**不弹 UAC**。
+2. 安装到用户目录（例如 `%LOCALAPPDATA%\Programs\Veyl`）。
+3. **不安装服务、不写 `Program Files` / `%ProgramData%`、不创建 Wintun 适配器。**
+4. 应用照常可用：代理模式（一级/三级）不受影响。
 
-**卸载（与 E3 共用清理代码）：**
+#### 第二阶段：首次需要 TUN 时提权安装服务
+
+触发条件：**AI 判定需要 TUN，且用户确认**。不是安装时，也不是首启时。
+
+1. 启动已签名的提权安装器（推荐独立小进程；UAC 弹窗）。
+2. 校验自身签名，校验随包 runtime / `wintun.dll` / 规则归档的哈希。
+3. 复制服务二进制、`sing-box.exe`、`wintun.dll`、规则归档到 `C:\Program Files\Veyl\`。
+4. 创建 `%ProgramData%\Veyl\` 并设置 ACL。
+5. 注册服务（`CreateServiceW`，LocalSystem，Automatic），设置恢复策略。
+6. 启动服务；App 通过命名管道完成对端验签，开始 TUN。
+7. 用户取消 UAC → `ERROR_CANCELLED`（1223），返回 `tun_denied`；应用保持代理模式，**之后可重试**。
+
+**关键约束：服务与运行时来自提权安装器内嵌/校验过的副本，不能直接引用 per-user 的应用安装目录**——那是用户可写的。
+
+#### 更新
+
+- per-user 应用按自己的安装器更新，不需要管理员。
+- 服务、运行时、规则的更新必须再次走提权安装器：验签 + 验哈希 + 原子替换；**不能由用户态进程直接替换 `Program Files` 下的文件**。
+- 更新失败保留旧版本；不因为更新失败把用户踢回「重装」。
+
+#### 卸载（与 E3 共用清理代码）
 
 1. 停止并删除服务。
 2. 停止 sing-box 子进程；删除 Wintun 适配器（正常退出时 sing-box 会清理；异常退出要兜底）。
 3. 恢复系统代理备份、清除 Veyl 写入的 DNS 覆盖。
 4. 删除 `%ProgramData%\Veyl\`（含配置、日志、pid、staged runtime/rules）。
-5. 删除 `Program Files\Veyl\`（MSI 负责）。
+5. 删除 `C:\Program Files\Veyl\`（服务与运行时）；per-user 应用目录由应用卸载器删除。
 6. 复读校验：无服务、无 sing-box、无 Wintun 适配器、无代理指向。
 
-对照 `docs/capabilities.md` §3.1：停止运行时 → 撤销代理 → 清 DNS → 删明文配置 → 复读校验。Windows 的差异是多了「删服务 + 删适配器」。
+对照 `docs/capabilities.md` §3.1：停止运行时 → 撤销代理 → 清 DNS → 删明文配置 → 复读校验。Windows 的差异是多了「删服务 + 删适配器」，以及服务目录与 per-user 应用目录分开清理。
 
 ### 3.5 平台差异的 sing-box 配置
 
@@ -267,25 +327,27 @@ sing-box 在 Windows 上的 TUN 入站依赖 **Wintun**，官方 Windows 发布 
 
 ## 5. 前置条件：现在能开工吗
 
-**结论：不能。** 缺的不是代码能力，是两样外部条件；提权形态已定，其余设计项见下表。
+**结论：不能。** 缺的是两样外部条件，另有一个安装器形态要先定；提权时机已定，见下表。
 
 | # | 条件 | 现状 | 缺口 |
 |---|---|---|---|
 | 1 | **Windows 代码签名证书 / 云签名账号** | 仓库只有 `sign-windows.ps1` 的 hook；本机没有 `VEYL_WIN_SIGN_CMD` / `VEYL_WIN_CERT_THUMBPRINT`；无证据表明公司持有 Windows 证书 | **无法确认是否已有**。没有证书就不能分发需要管理员权限的常驻服务 |
 | 2 | **Windows 测试机** | 文档里的测试机指 macOS 工作机；CI 的 `windows-latest` 只跑 `typecheck` / `cargo test --lib`，不能验证 TUN | **没有证据表明有可用的 Windows 真机**（Win10/11 x64、管理员权限、可反复装卸） |
-| 3 | **提权形态** | **已定**：安装时一次提权 + 常驻 LocalSystem 服务（2026-11-04） | 不再是阻塞项；剩余是 MSI 与服务实现 |
+| 3 | **提权时机** | **已定（2026-11-04 修正）**：应用 per-user 安装、不要求管理员；**首次需要 TUN 时**才提权安装常驻 LocalSystem 服务；拒绝后可重试，不重装 | 不再是阻塞项；剩余是提权安装器与服务实现 |
 | 4 | **Wintun / sing-box 许可证复核** | 公开资料结论已写入 §3.1 | 需要法务确认 notices 与分发方式 |
-| 5 | **Windows 运行时流水线** | `fetch-runtime.mjs` 只支持 darwin + lipo；manifest 只有 windows x64 条目，没有 arm64 | 需要新增 Windows zip 下载/校验/解压与 `wintun.dll` 校验；`build-msi.ps1` 需要安装运行时与服务 |
-| 6 | **Windows 构建先能编译** | `tun::session` 无条件依赖 macOS `xpc`；`veyl-helper` bin 无条件声明 | 先做平台门控，否则 Windows 构建在 TUN 代码上直接失败（静态判断，未实测） |
+| 5 | **Windows 运行时流水线** | `fetch-runtime.mjs` 只支持 darwin + lipo；manifest 只有 windows x64 条目，没有 arm64 | 需要新增 Windows zip 下载/校验/解压与 `wintun.dll` 校验 |
+| 6 | **安装器形态** | 现有 `build-msi.ps1` 出的是 MSI（perMachine，安装即要管理员）；Tauri MSI 没有 perUser 开关，NSIS 默认 `currentUser` | 需要改成 per-user 应用安装器 + **独立的提权服务安装器**；这是落实「安装不要求管理员」的前提 |
+| 7 | **Windows 构建先能编译** | `tun::session` 无条件依赖 macOS `xpc`；`veyl-helper` bin 无条件声明 | 先做平台门控，否则 Windows 构建在 TUN 代码上直接失败（静态判断，未实测） |
 
 **最短开工路径：**
 
 1. 确认/采购 Windows 签名证书或 Azure Trusted Signing。
 2. 准备一台 Windows 10/11 x64 真机（管理员、可重装）。
 3. 法务确认 Wintun/sing-box 分发条款。
-4. 给 TUN 模块补平台门控，保证 Windows 能编译。
-5. 再做服务 + IPC + Wintun 的第一条竖切。
+4. 定 per-user 应用安装器与提权服务安装器的形态（NSIS currentUser 起步）。
+5. 给 TUN 模块补平台门控，保证 Windows 能编译。
+6. 再做服务 + IPC + Wintun 的第一条竖切。
 
-> 提权形态已定（安装时一次 + 常驻 LocalSystem 服务），不再是开工前置。
+> 提权时机已定：安装不要求管理员，首次需要 TUN 时才提权安装服务；拒绝后可重试，不重装。
 
 **在 1、2 未满足之前，写代码也无法验证，不建议开工。**
