@@ -460,8 +460,8 @@ impl Tool for NodeSwitchTool {
     }
 
     fn description(&self) -> &str {
-        "切换一套配置的当前节点。未连接只改选择，不启动 VPN；已连接会断开重连，\
-         需要用户确认后带 confirm_reconnect=true 再调用。"
+        "切换一套配置的当前节点。未连接只改选择，不启动 VPN；\
+         已连接走 selector 热切，进程不重启、不断流。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -473,8 +473,7 @@ impl Tool for NodeSwitchTool {
             "type": "object",
             "properties": {
                 "config_id": { "type": "string" },
-                "node_id": { "type": "string" },
-                "confirm_reconnect": { "type": "boolean", "default": false }
+                "node_id": { "type": "string" }
             },
             "required": ["config_id", "node_id"],
             "additionalProperties": false
@@ -495,11 +494,7 @@ impl Tool for NodeSwitchTool {
                 )),
             );
         };
-        let confirm = input
-            .get("confirm_reconnect")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let outcome = match self.services.node_switch(config_id, node_id, confirm).await {
+        let outcome = match self.services.node_switch(config_id, node_id).await {
             Ok(data) => {
                 let connected = data.get("connected").and_then(Value::as_bool).unwrap_or(false);
                 ToolOutcome::ok(

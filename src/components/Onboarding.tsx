@@ -1,6 +1,12 @@
 import { useState } from "react";
-import type { AgentBridge, DeepSeekKeyState } from "../agent/bridge";
-import { describeKeyError } from "./Settings";
+import type {
+  AgentBridge,
+  DeepSeekKeyState,
+  LlmProtocol,
+  LlmProviderInput,
+} from "../agent/bridge";
+import { isHttpUrl, isLocalEndpoint } from "../agent/bridge";
+import { describeKeyError, describeProviderError } from "./Settings";
 import { PRODUCT_NAME } from "../brand";
 
 const PLATFORM_URL = "https://platform.deepseek.com/";
@@ -8,10 +14,15 @@ const PLATFORM_URL = "https://platform.deepseek.com/";
 interface Props {
   bridge: AgentBridge;
   initialKey: DeepSeekKeyState;
-  /** 第一步：去导入自己的配置文件。 */
-  onImport: () => void;
-  /** 完成或跳过：skippedKey 表示用户明确没有配置 Key。 */
+  /** 完成引导；skippedKey 表示用户明确选择不用 AI。 */
   onDone: (skippedKey: boolean) => void;
+}
+
+interface CustomForm {
+  protocol: LlmProtocol;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
 }
 
 function keyStatusText(state: DeepSeekKeyState): string | null {
@@ -21,13 +32,24 @@ function keyStatusText(state: DeepSeekKeyState): string | null {
   return "已保存但未验证";
 }
 
-export function Onboarding({ bridge, initialKey, onImport, onDone }: Props) {
-  const [step, setStep] = useState<0 | 1>(0);
+const EMPTY_CUSTOM: CustomForm = {
+  protocol: "openai",
+  baseUrl: "",
+  model: "",
+  apiKey: "",
+};
+
+export function Onboarding({ bridge, initialKey, onDone }: Props) {
   const [keyState, setKeyState] = useState<DeepSeekKeyState>(initialKey);
   const [value, setValue] = useState("");
-  const [saving, setSaving] = useState(false);
+  const [editingKey, setEditingKey] = useState(
+    !initialKey.masked || initialKey.validation === "invalid",
+  );
+  const [saving, setSaving] = useState<"key" | "provider" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [custom, setCustom] = useState<CustomForm>(EMPTY_CUSTOM);
+  const [customError, setCustomError] = useState<string | null>(null);
 
   const saveKey = async () => {
     const key = value.trim();
@@ -37,7 +59,7 @@ export function Onboarding({ bridge, initialKey, onImport, onDone }: Props) {
       return;
     }
 
-    setSaving(true);
+    setSaving("key");
     setError(null);
     try {
       const next = await bridge.saveDeepSeekKey(key);
@@ -47,11 +69,12 @@ export function Onboarding({ bridge, initialKey, onImport, onDone }: Props) {
     } catch (saveError) {
       setError(describeKeyError(saveError));
     } finally {
-      setSaving(false);
+      setSaving(null);
     }
   };
 
   const openPlatform = async () => {
+    setError(null);
     try {
       await bridge.openExternal(PLATFORM_URL);
     } catch {
@@ -59,129 +82,286 @@ export function Onboarding({ bridge, initialKey, onImport, onDone }: Props) {
     }
   };
 
-  const copyLink = async () => {
+  const toggleCustom = () => {
+    setCustomOpen((open) => !open);
+    setCustomError(null);
+    setError(null);
+  };
+
+  const buildProviderInput = (): LlmProviderInput | string => {
+    const model = custom.model.trim();
+    if (!model) return "模型不能为空";
+
+    const baseUrl = custom.baseUrl.trim();
+    if (!isHttpUrl(baseUrl)) return "Base URL 必须以 http:// 或 https:// 开头";
+    if (baseUrl.toLowerCase().startsWith("http://") && !isLocalEndpoint(baseUrl)) {
+      return "http 只允许本机地址（localhost / 127.0.0.1）；其他端点请用 https";
+    }
+
+    const apiKey = custom.apiKey.trim();
+    if (!apiKey && !isLocalEndpoint(baseUrl)) {
+      return "请填写 API Key；只有本机端点可以免 Key";
+    }
+
+    return {
+      name: model,
+      protocol: custom.protocol,
+      baseUrl,
+      model,
+      apiKey,
+    };
+  };
+
+  const saveProvider = async () => {
+    if (saving) return;
+    const input = buildProviderInput();
+    if (typeof input === "string") {
+      setCustomError(input);
+      return;
+    }
+
+    setSaving("provider");
+    setCustomError(null);
     try {
-      await navigator.clipboard.writeText(PLATFORM_URL);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setError("复制失败，请手动选中链接复制。");
+      const result = await bridge.llmProviderTest(input);
+      if (!result.ok) {
+        setCustomError(result.error || "连接失败，请检查端点和 Key。");
+        return;
+      }
+      const saved = await bridge.llmProviderSave(input);
+      try {
+        await bridge.llmProviderActivate(saved.providerId);
+      } catch {
+        // 没有其他当前服务时，保存时已经设为当前。
+      }
+      onDone(false);
+    } catch (saveError) {
+      setCustomError(describeProviderError(saveError));
+    } finally {
+      setSaving(null);
     }
   };
 
-  if (step === 0) {
-    return (
-      <div className="onboarding">
-        <div className="onboarding__card onboarding__card--intro">
-          <span className="onboarding__brand">{PRODUCT_NAME}</span>
-          <h1 className="onboarding__title">先准备好节点。</h1>
-          <p className="onboarding__text">
-            导入你自己的配置文件；也可以直接进入，稍后在右侧让助手帮你配好第一套。
-          </p>
-
-          <div className="onboarding__line" aria-hidden>
-            <span className="onboarding__line-dot" />
-            <span className="onboarding__line-rail" />
-            <span className="onboarding__line-dot" />
-          </div>
-
-          <div className="onboarding__actions">
-            <button
-              type="button"
-              className="btn btn--primary"
-              onClick={onImport}
-            >
-              导入我的配置文件
-            </button>
-          </div>
-
-          <button
-            type="button"
-            className="onboarding__skip"
-            onClick={() => onDone(true)}
-          >
-            跳过，直接进入
-          </button>
-
-          <p className="onboarding__next">
-            下一步：配置 AI（可选）
-            <button
-              type="button"
-              className="onboarding__next-link"
-              onClick={() => setStep(1)}
-            >
-              现在配置
-            </button>
-          </p>
-        </div>
-      </div>
-    );
-  }
+  const showSaved = Boolean(keyState.masked) && !editingKey;
+  const primaryClass = customOpen ? "btn--ghost" : "btn--primary";
 
   return (
     <div className="onboarding">
-      <div className="onboarding__card">
-        <button type="button" className="onboarding__back" onClick={() => setStep(0)}>
-          ← 返回
-        </button>
-        <h1 className="onboarding__title">配置 AI（可选）</h1>
+      <div className="onboarding__shell">
+        <div className="onboarding__brand">{PRODUCT_NAME}</div>
+        <h1 className="onboarding__title">配置 AI 后，我来帮你连上网络。</h1>
         <p className="onboarding__text">
-          AI 用来看懂你的意图、解释错误、推荐节点。它不代理你的流量，也看不到你的账号密码。不配置也能导入节点并连接。
+          Key 只保存在本机。配好之后，我来找节点、建立连接。
         </p>
 
-        <p className="onboarding__text onboarding__text--faint">
-          打开{" "}
-          <button type="button" className="onboarding__link" onClick={() => void openPlatform()}>
-            platform.deepseek.com
-          </button>{" "}
-          创建以 sk- 开头的 Key，再粘贴回这里。
-        </p>
-
-        {keyState.masked ? (
-          <div className="onboarding__saved">
-            <code>{keyState.masked}</code>
-            <span className={`onboarding__badge onboarding__badge--${keyState.validation}`}>
-              {keyStatusText(keyState)}
-            </span>
+        {showSaved ? (
+          <div className="onboarding__form">
+            <div className="onboarding__saved">
+              <code className="num">{keyState.masked}</code>
+              <span className={`onboarding__badge onboarding__badge--${keyState.validation}`}>
+                {keyStatusText(keyState)}
+              </span>
+            </div>
+            <button
+              type="button"
+              className={`btn ${primaryClass} onboarding__submit`}
+              disabled={saving !== null}
+              onClick={() => onDone(false)}
+            >
+              继续
+            </button>
+            <button
+              type="button"
+              className="onboarding__textlink"
+              onClick={() => {
+                setEditingKey(true);
+                setValue("");
+                setError(null);
+              }}
+            >
+              换一个 Key
+            </button>
           </div>
         ) : (
-          <div className="onboarding__key-row">
-            <input
-              type="password"
-              value={value}
-              placeholder="sk-..."
-              autoComplete="off"
-              spellCheck={false}
-              aria-label="DeepSeek API Key"
-              onChange={(event) => setValue(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void saveKey();
-                }
-              }}
-            />
-          </div>
+          <form
+            className="onboarding__form"
+            aria-busy={saving === "key"}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveKey();
+            }}
+          >
+            <div className="onboarding__field">
+              <label className="onboarding__field-label" htmlFor="onboarding-deepseek-key">
+                DeepSeek API Key
+              </label>
+              <input
+                id="onboarding-deepseek-key"
+                className="onboarding__input"
+                type="password"
+                value={value}
+                placeholder="sk-..."
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(event) => setValue(event.target.value)}
+              />
+            </div>
+            <button
+              type="submit"
+              className={`btn ${primaryClass} onboarding__submit`}
+              disabled={saving !== null || value.trim().length === 0}
+            >
+              {saving === "key" ? "验证中…" : "保存并验证"}
+            </button>
+            {keyState.masked ? (
+              <button
+                type="button"
+                className="onboarding__textlink"
+                onClick={() => {
+                  setEditingKey(false);
+                  setValue("");
+                  setError(null);
+                }}
+              >
+                使用已保存的 Key
+              </button>
+            ) : null}
+          </form>
         )}
 
         {error ? <p className="onboarding__error">{error}</p> : null}
 
-        <div className="onboarding__actions">
+        <div className="onboarding__links">
+          <button type="button" className="onboarding__link" onClick={() => void openPlatform()}>
+            获取 DeepSeek API Key <span aria-hidden>↗</span>
+          </button>
           <button
             type="button"
-            className="btn btn--primary"
-            onClick={() => void saveKey()}
-            disabled={saving || value.trim().length === 0}
+            className={`onboarding__toggle ${customOpen ? "is-open" : ""}`}
+            aria-expanded={customOpen}
+            onClick={toggleCustom}
           >
-            {saving ? "验证中…" : "保存并验证"}
-          </button>
-          <button type="button" className="btn btn--ghost" onClick={() => onDone(true)}>
-            稍后再说
-          </button>
-          <button type="button" className="onboarding__copy" onClick={() => void copyLink()}>
-            {copied ? "已复制链接" : "复制平台链接"}
+            {customOpen ? "收起其他 AI 服务" : "使用其他 AI 服务"}{" "}
+            <span className="onboarding__arrow" aria-hidden>
+              →
+            </span>
           </button>
         </div>
+
+        {customOpen ? (
+          <form
+            className="onboarding__custom"
+            aria-busy={saving === "provider"}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveProvider();
+            }}
+          >
+            <div className="onboarding__field">
+              <span className="onboarding__field-label" id="onboarding-protocol-label">
+                API 类型
+              </span>
+              <div
+                className="onboarding__segmented"
+                role="group"
+                aria-labelledby="onboarding-protocol-label"
+              >
+                <button
+                  type="button"
+                  className={custom.protocol === "openai" ? "is-selected" : ""}
+                  aria-pressed={custom.protocol === "openai"}
+                  onClick={() => setCustom((form) => ({ ...form, protocol: "openai" }))}
+                >
+                  OpenAI 兼容
+                </button>
+                <button
+                  type="button"
+                  className={custom.protocol === "anthropic" ? "is-selected" : ""}
+                  aria-pressed={custom.protocol === "anthropic"}
+                  onClick={() => setCustom((form) => ({ ...form, protocol: "anthropic" }))}
+                >
+                  Anthropic 兼容
+                </button>
+              </div>
+            </div>
+
+            <div className="onboarding__field">
+              <label className="onboarding__field-label" htmlFor="onboarding-base-url">
+                Base URL
+              </label>
+              <input
+                id="onboarding-base-url"
+                className="onboarding__input"
+                type="text"
+                inputMode="url"
+                value={custom.baseUrl}
+                placeholder="https://api.example.com"
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(event) =>
+                  setCustom((form) => ({ ...form, baseUrl: event.target.value }))
+                }
+              />
+            </div>
+
+            <div className="onboarding__field">
+              <label className="onboarding__field-label" htmlFor="onboarding-model">
+                模型
+              </label>
+              <input
+                id="onboarding-model"
+                className="onboarding__input"
+                type="text"
+                value={custom.model}
+                placeholder="如 deepseek-chat"
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(event) =>
+                  setCustom((form) => ({ ...form, model: event.target.value }))
+                }
+              />
+            </div>
+
+            <div className="onboarding__field">
+              <label className="onboarding__field-label" htmlFor="onboarding-provider-key">
+                API Key
+              </label>
+              <input
+                id="onboarding-provider-key"
+                className="onboarding__input"
+                type="password"
+                value={custom.apiKey}
+                placeholder="sk-..."
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(event) =>
+                  setCustom((form) => ({ ...form, apiKey: event.target.value }))
+                }
+              />
+            </div>
+
+            {customError ? <p className="onboarding__error">{customError}</p> : null}
+
+            <button
+              type="submit"
+              className="btn btn--primary onboarding__submit"
+              disabled={saving !== null}
+            >
+              {saving === "provider" ? "验证中…" : "保存并验证"}
+            </button>
+          </form>
+        ) : null}
+
+        <div className="onboarding__divider" aria-hidden />
+
+        <button
+          type="button"
+          className="onboarding__manual"
+          disabled={saving !== null}
+          onClick={() => onDone(true)}
+        >
+          我懂网络，不用 AI
+        </button>
       </div>
     </div>
   );

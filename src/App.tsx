@@ -397,12 +397,6 @@ export default function App() {
     void completeOnboarding(skippedKey);
   };
 
-  const finishOnboardingWithImport = () => {
-    setShowOnboarding(false);
-    openSettings("network");
-    void completeOnboarding(keyState.masked === null);
-  };
-
   const closeSettings = () => {
     setSettingsOpen(false);
     void refreshKeyState();
@@ -751,12 +745,7 @@ export default function App() {
 
   if (showOnboarding) {
     return (
-      <Onboarding
-        bridge={bridge}
-        initialKey={keyState}
-        onImport={finishOnboardingWithImport}
-        onDone={finishOnboarding}
-      />
+      <Onboarding bridge={bridge} initialKey={keyState} onDone={finishOnboarding} />
     );
   }
 

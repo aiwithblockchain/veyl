@@ -482,6 +482,15 @@ impl RuntimeManager {
         self.inner.lock().await.system_proxy_enabled = enabled;
     }
 
+    /// selector 热切节点后同步快照里的 node_id/node_name，不重启进程。
+    pub async fn set_plan_node(&self, node_id: String, node_name: String) {
+        let mut inner = self.inner.lock().await;
+        if let Some(plan) = inner.plan.as_mut() {
+            plan.node_id = Some(node_id);
+            plan.node_name = Some(node_name);
+        }
+    }
+
     /// 出口 IP 由连接编排层探测后回填，用于状态快照展示。
     pub async fn set_exit_ip(&self, exit_ip: Option<String>) {
         let mut inner = self.inner.lock().await;

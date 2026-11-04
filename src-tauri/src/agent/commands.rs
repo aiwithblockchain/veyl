@@ -347,17 +347,16 @@ pub async fn node_create(
         .map_err(error_value)
 }
 
-/// 切换一套配置的当前节点。已连接时必须带 `confirmReconnect`。
+/// 切换一套配置的当前节点。已连接时走 selector 热切，不断流。
 #[tauri::command]
 pub async fn node_switch(
     state: State<'_, Arc<AppState>>,
     config_id: String,
     node_id: String,
-    confirm_reconnect: Option<bool>,
 ) -> Result<Value, Value> {
     state
         .services
-        .node_switch(&config_id, &node_id, confirm_reconnect.unwrap_or(false))
+        .node_switch(&config_id, &node_id)
         .await
         .map_err(error_value)
 }

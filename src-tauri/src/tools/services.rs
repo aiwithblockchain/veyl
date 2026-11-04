@@ -107,12 +107,7 @@ pub trait VpnToolServices: Send + Sync {
         url: &str,
     ) -> anyhow::Result<Value>;
     async fn node_create(&self, input: NodeCreateInput) -> anyhow::Result<Value>;
-    async fn node_switch(
-        &self,
-        config_id: &str,
-        node_id: &str,
-        confirm_reconnect: bool,
-    ) -> anyhow::Result<Value>;
+    async fn node_switch(&self, config_id: &str, node_id: &str) -> anyhow::Result<Value>;
     async fn node_probe(&self, node_id: &str) -> anyhow::Result<Value>;
 
     async fn default_profile_status(&self) -> anyhow::Result<Value>;
@@ -276,12 +271,7 @@ impl VpnToolServices for NotWiredServices {
         not_wired("创建节点")
     }
 
-    async fn node_switch(
-        &self,
-        _config_id: &str,
-        _node_id: &str,
-        _confirm_reconnect: bool,
-    ) -> anyhow::Result<Value> {
+    async fn node_switch(&self, _config_id: &str, _node_id: &str) -> anyhow::Result<Value> {
         not_wired("切换节点")
     }
 
@@ -2080,12 +2070,7 @@ impl VpnToolServices for WiredServices {
         Ok(node_json(node))
     }
 
-    async fn node_switch(
-        &self,
-        config_id: &str,
-        node_id: &str,
-        confirm_reconnect: bool,
-    ) -> anyhow::Result<Value> {
+    async fn node_switch(&self, config_id: &str, node_id: &str) -> anyhow::Result<Value> {
         let config = self.require_config(config_id)?;
         let members = {
             let conn = self.store.conn();
@@ -2119,58 +2104,19 @@ impl VpnToolServices for WiredServices {
             }));
         }
 
-        if connected {
-            if connected_config.as_deref() != Some(config_id) {
-                return Err(svc_error_with_details(
-                    "PRECONDITION_FAILED",
-                    "这套配置不是当前连接的配置",
-                    json!({ "reason": "config_not_running" }),
-                ));
+        if !connected {
+            {
+                let conn = self.store.conn();
+                configs::update(
+                    &conn,
+                    config_id,
+                    &configs::ConfigPatch {
+                        current_node_id: Some(Some(node_id.to_string())),
+                        ..Default::default()
+                    },
+                )
+                .map_err(|error| svc_error(error.code(), error))?;
             }
-            if !confirm_reconnect {
-                return Err(svc_error_with_details(
-                    "PRECONDITION_FAILED",
-                    "切换节点会断开当前连接",
-                    json!({
-                        "reason": "will_disconnect",
-                        "config_id": config_id,
-                        "node_id": node_id,
-                    }),
-                ));
-            }
-            self.runtime_stop(false).await?;
-        }
-
-        {
-            let conn = self.store.conn();
-            configs::update(
-                &conn,
-                config_id,
-                &configs::ConfigPatch {
-                    current_node_id: Some(Some(node_id.to_string())),
-                    ..Default::default()
-                },
-            )
-            .map_err(|error| svc_error(error.code(), error))?;
-        }
-
-        let runtime = if connected {
-            let data = self.runtime_start(Some(config_id.to_string())).await?;
-            crate::agent::app_handle::emit(
-                "node-switched",
-                json!({
-                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
-                    "config_id": config_id,
-                    "from_node_id": previous,
-                    "to_node_id": node_id,
-                    "connected": true,
-                    "runtime": data,
-                    "emitted_at": chrono::Utc::now()
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                }),
-            );
-            data
-        } else {
             crate::agent::app_handle::emit(
                 "node-switched",
                 json!({
@@ -2184,14 +2130,100 @@ impl VpnToolServices for WiredServices {
                         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 }),
             );
-            Value::Null
-        };
+            return Ok(json!({
+                "config_id": config_id,
+                "node_id": node_id,
+                "previous_node_id": previous,
+                "connected": false,
+                "runtime": Value::Null,
+            }));
+        }
 
+        if connected_config.as_deref() != Some(config_id) {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "这套配置不是当前连接的配置",
+                json!({ "reason": "config_not_running" }),
+            ));
+        }
+
+        let plan = self.manager.current_plan().await.ok_or_else(|| {
+            svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "当前没有运行中的配置",
+                json!({ "reason": "config_not_running" }),
+            )
+        })?;
+        let to_tag = format!("node-{node_id}");
+        if let Err(error) =
+            clash_put_selector(&plan.clash_addr, &plan.clash_secret, "proxy", &to_tag).await
+        {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                format!("切换节点失败：{error}"),
+                json!({ "reason": "runtime_switch_failed" }),
+            ));
+        }
+        let read_back = clash_get_selector(&plan.clash_addr, &plan.clash_secret, "proxy").await;
+        if !matches!(read_back, Ok(Some(ref now)) if now == &to_tag) {
+            if let Some(previous) = &previous {
+                let _ = clash_put_selector(
+                    &plan.clash_addr,
+                    &plan.clash_secret,
+                    "proxy",
+                    &format!("node-{previous}"),
+                )
+                .await;
+            }
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "切换节点后读回不一致",
+                json!({ "reason": "runtime_switch_failed" }),
+            ));
+        }
+
+        let node_name = members
+            .iter()
+            .find(|node| node.id == node_id)
+            .map(|node| node.name.clone())
+            .unwrap_or_default();
+        self.manager
+            .set_plan_node(node_id.to_string(), node_name)
+            .await;
+        {
+            let conn = self.store.conn();
+            configs::update(
+                &conn,
+                config_id,
+                &configs::ConfigPatch {
+                    current_node_id: Some(Some(node_id.to_string())),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| svc_error(error.code(), error))?;
+        }
+
+        let status = self.manager.status().await;
+        let runtime =
+            serde_json::to_value(&status).map_err(|e| svc_error("INTERNAL", e))?;
+        crate::agent::app_handle::emit(
+            "node-switched",
+            json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "config_id": config_id,
+                "from_node_id": previous,
+                "to_node_id": node_id,
+                "connected": true,
+                "runtime": runtime,
+                "emitted_at": chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            }),
+        );
         Ok(json!({
             "config_id": config_id,
             "node_id": node_id,
             "previous_node_id": previous,
-            "connected": connected,
+            "connected": true,
             "runtime": runtime,
         }))
     }
@@ -3703,7 +3735,7 @@ mod config_service_tests {
         let node_id = node["node_id"].as_str().unwrap().to_string();
 
         let switched = services
-            .node_switch(&config_id, &node_id, false)
+            .node_switch(&config_id, &node_id)
             .await
             .unwrap();
         assert_eq!(switched["connected"], false);
@@ -3751,7 +3783,7 @@ mod config_service_tests {
         let created = services.config_create(create_input("A")).await.unwrap();
         let config_id = created["config_id"].as_str().unwrap();
         let error = services
-            .node_switch(config_id, "nod_missing", false)
+            .node_switch(config_id, "nod_missing")
             .await
             .unwrap_err();
         let service = error.downcast_ref::<ServiceError>().unwrap();
