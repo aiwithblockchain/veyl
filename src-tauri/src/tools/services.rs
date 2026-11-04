@@ -726,6 +726,25 @@ impl WiredServices {
     ///
     /// 顺序不可换：先停进程再撤代理。反过来的话，中间那几百毫秒里系统代理
     /// 指向一个已经关掉的端口，用户那一刻整机没有网。
+    /// 走下载安装指定版本。随包那份不可用或不匹配时才走到这里。
+    async fn install_release(
+        &self,
+        version: &str,
+    ) -> anyhow::Result<crate::runtime::InstalledRuntime> {
+        let manifest = crate::runtime::RuntimeManifest::builtin()
+            .map_err(|e| svc_error(e.code(), e))?;
+        let release = manifest
+            .releases
+            .iter()
+            .find(|release| release.upstream_version == version && !release.yanked)
+            .ok_or_else(|| svc_error("NOT_FOUND", format!("清单里没有版本 {version}")))?
+            .clone();
+        self.installer
+            .install(&release)
+            .await
+            .map_err(|e| svc_error(e.code(), e))
+    }
+
     #[allow(dead_code)] // E3 重置网络与卸载清理的接缝，界面还没做
     pub(crate) async fn cleanup_network(
         &self,
@@ -1529,20 +1548,25 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn core_install(&self, version: &str) -> anyhow::Result<Value> {
-        let manifest = crate::runtime::RuntimeManifest::builtin()
-            .map_err(|e| svc_error(e.code(), e))?;
-        let release = manifest
-            .releases
-            .iter()
-            .find(|release| release.upstream_version == version && !release.yanked)
-            .ok_or_else(|| svc_error("NOT_FOUND", format!("清单里没有版本 {version}")))?
-            .clone();
-
-        let installed = self
+        // 先试随包那份：用户第一次打开时网络往往是坏的，
+        // 让人卡在下载上是最差的体验（`docs/user-flows.md` §1.3）。
+        let installed = match self
             .installer
-            .install(&release)
+            .install_bundled()
             .await
-            .map_err(|e| svc_error(e.code(), e))?;
+            .map_err(|e| svc_error(e.code(), e))?
+        {
+            Some(installed) if installed.version == version => installed,
+            Some(other) => {
+                log::info!(
+                    "随包运行时是 {}，与请求的 {} 不一致，回退到下载",
+                    other.version,
+                    version
+                );
+                self.install_release(version).await?
+            }
+            None => self.install_release(version).await?,
+        };
 
         let row = crate::store::RuntimeVersionRow {
             version: installed.version.clone(),

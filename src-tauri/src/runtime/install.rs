@@ -190,15 +190,118 @@ impl Installer {
         }
 
         self.notify(InstallProgress::Activating);
-        let relative = extracted_binary
-            .strip_prefix(&staging)
+        self.activate(&staging, &extracted_binary, &release.upstream_version, digest)
+    }
+
+    /// 随包的运行时：打包后在 `Contents/Resources/runtime/`，
+    /// 开发时在源码树的 `resources/runtime/`。
+    ///
+    /// 同一条路径 TUN 的 helper 也在用（`tun/privilege` 那边），
+    /// 只是它从自己所在的 bundle 推，这里从主程序推。
+    pub fn bundled_runtime_path() -> Option<PathBuf> {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let candidate = dir.join("../Resources/runtime").join(BINARY_NAME);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        // 开发时：CARGO_MANIFEST_DIR 在编译期确定，装到用户机器上时这个路径不存在，
+        // 自然落到上面的分支。
+        let dev = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources/runtime")
+            .join(BINARY_NAME);
+        dev.is_file().then_some(dev)
+    }
+
+    /// 优先用随包资源安装，返回 `Ok(None)` 表示「随包那份不可用」，
+    /// 调用方应当回退到下载。
+    ///
+    /// 校验用 `build.rs` 在构建时算出来的完整 sha256——和 TUN helper 用的是同一个值，
+    /// 不是 `runtime-manifest.json` 里的（那里记的是压缩包的哈希，不是解压出来的二进制）。
+    pub async fn install_bundled(&self) -> RuntimeResult<Option<InstalledRuntime>> {
+        let Some(source) = Self::bundled_runtime_path() else {
+            log::info!("没有随包运行时，回退到下载");
+            return Ok(None);
+        };
+
+        let expected = env!("VEYL_RUNTIME_SHA256");
+        if expected.is_empty() {
+            log::info!("构建时没有随包运行时（VEYL_RUNTIME_SHA256 为空），回退到下载");
+            return Ok(None);
+        }
+
+        let bytes = std::fs::read(&source).map_err(|e| {
+            RuntimeError::State(format!("读取随包运行时失败 {}：{e}", source.display()))
+        })?;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let actual = hex::encode(hasher.finalize());
+        if !actual.eq_ignore_ascii_case(expected) {
+            log::warn!(
+                "随包运行时的哈希与构建记录不符（期望 {expected}，实际 {actual}），回退到下载"
+            );
+            return Ok(None);
+        }
+
+        // 版本号从二进制自己问，不信文件名。
+        let version = read_binary_version(&source).await?;
+        if version.is_empty() {
+            log::warn!("随包运行时没有报告版本号，回退到下载");
+            return Ok(None);
+        }
+
+        if let Some(existing) = self.read_state()?.installs.get(&version) {
+            if existing.binary.is_file() {
+                return Ok(Some(existing.clone()));
+            }
+        }
+
+        fsutil::ensure_dir(&self.root)?;
+        let nonce = format!("{:016x}", rand::random::<u64>());
+        let staging = self.root.join("runtime").join(format!(".bundled-{nonce}"));
+        fsutil::remove_dir_if_exists(&staging)?;
+        fsutil::ensure_dir(&staging)?;
+
+        let staged = staging.join(BINARY_NAME);
+        if let Err(e) = std::fs::write(&staged, &bytes) {
+            fsutil::remove_dir_if_exists(&staging)?;
+            return Err(RuntimeError::State(format!(
+                "写入随包运行时失败 {}：{e}",
+                staged.display()
+            )));
+        }
+        fsutil::set_executable(&staged)?;
+        if let Err(e) = verify_binary_version(&staged, &version).await {
+            fsutil::remove_dir_if_exists(&staging)?;
+            return Err(e);
+        }
+
+        log::info!("已从随包资源安装运行时 {}（未联网）", version);
+        self.activate(&staging, &staged, &version, actual).map(Some)
+    }
+
+    /// 把 staging 里的可执行文件落成正式安装。
+    ///
+    /// **下载与随包两条路共用这一段**：写状态文件、建版本目录、激活，
+    /// 只有「二进制从哪来」不同。
+    fn activate(
+        &self,
+        staging: &Path,
+        binary_in_staging: &Path,
+        version: &str,
+        sha256: String,
+    ) -> RuntimeResult<InstalledRuntime> {
+        let relative = binary_in_staging
+            .strip_prefix(staging)
             .unwrap_or_else(|_| Path::new(BINARY_NAME))
             .to_path_buf();
 
-        let final_dir = self.version_dir(&release.upstream_version);
+        let final_dir = self.version_dir(version);
         fsutil::remove_dir_if_exists(&final_dir)?;
         fsutil::ensure_dir(final_dir.parent().unwrap_or(&self.root))?;
-        std::fs::rename(&staging, &final_dir).io_ctx(&final_dir)?;
+        std::fs::rename(staging, &final_dir).io_ctx(&final_dir)?;
 
         let binary = final_dir.join(&relative);
         if !binary.is_file() {
@@ -209,14 +312,14 @@ impl Installer {
         }
 
         let installed = InstalledRuntime {
-            version: release.upstream_version.clone(),
+            version: version.to_string(),
             binary,
             license: ["LICENSE", "LICENSE.txt", "LICENSE.md"]
                 .iter()
                 .map(|n| final_dir.join(n))
                 .find(|p| p.is_file()),
             dir: final_dir,
-            sha256: digest,
+            sha256,
             installed_at: crate::store::db::now_ms(),
         };
 
@@ -342,7 +445,7 @@ fn locate_binary(root: &Path) -> Option<PathBuf> {
     None
 }
 
-pub async fn verify_binary_version(binary: &Path, expected: &str) -> RuntimeResult<String> {
+pub async fn read_binary_version(binary: &Path) -> RuntimeResult<String> {
     let output = tokio::process::Command::new(binary)
         .arg("version")
         .output()
@@ -360,13 +463,16 @@ pub async fn verify_binary_version(binary: &Path, expected: &str) -> RuntimeResu
     }
 
     let text = String::from_utf8_lossy(&output.stdout).to_string();
-    let reported = text
+    Ok(text
         .lines()
         .find_map(|line| line.trim().strip_prefix("sing-box version "))
         .unwrap_or_default()
         .trim()
-        .to_string();
+        .to_string())
+}
 
+pub async fn verify_binary_version(binary: &Path, expected: &str) -> RuntimeResult<String> {
+    let reported = read_binary_version(binary).await?;
     if !reported.is_empty() && reported != expected {
         return Err(RuntimeError::Process(format!(
             "installed binary reports {reported}, expected {expected}"
@@ -463,5 +569,21 @@ mod tests {
     fn release_helper_is_consistent() {
         let r = release("00", 1);
         assert_eq!(r.artifact.format.extension(), "tar.gz");
+    }
+
+    /// 随包二进制的实际哈希必须与构建时编进二进制的那个值一致。
+    /// 不一致说明 `resources/runtime/` 被换过但没重新构建——那会让
+    /// `install_bundled` 静默回退到下载，而没人知道为什么。
+    #[test]
+    fn the_bundled_runtime_matches_the_build_time_hash() {
+        let Some(path) = Installer::bundled_runtime_path() else {
+            return; // 没有随包资源就跳过（clean checkout 上常见）
+        };
+        let expected = env!("VEYL_RUNTIME_SHA256");
+        assert!(!expected.is_empty(), "有随包二进制但构建时没算出哈希");
+        let bytes = std::fs::read(&path).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        assert_eq!(hex::encode(hasher.finalize()), expected, "{}", path.display());
     }
 }

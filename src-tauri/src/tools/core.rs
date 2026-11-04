@@ -120,8 +120,8 @@ impl Tool for CoreInstallTool {
     }
 
     fn description(&self) -> &str {
-        "下载并安装指定版本的官方 sing-box。会引入一个可执行二进制。\
-         安装后即可用于启动运行时。"
+        "安装指定版本的官方 sing-box。**优先用安装包内自带的运行时，不需要联网**；\
+         自带的那份缺失、或版本与请求的不一致时才下载。安装后即可用于启动运行时。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
