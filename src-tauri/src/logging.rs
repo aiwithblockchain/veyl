@@ -163,9 +163,15 @@ impl Log for Logger {
 ///
 /// 已经初始化过（例如测试）或无法创建文件时返回 `None`，调用方无需处理。
 pub fn init(data_dir: &Path) -> Option<PathBuf> {
+    init_in(&resolve_log_dir(data_dir))
+}
+
+/// 直接指定日志目录。测试走这里，避免 `resolve_log_dir` 把测试进程也指到
+/// 仓库的 `logs/`——那样跑一次 `cargo test` 就会往应用日志里掺东西，
+/// 排查时会把「测试跑出来的日志」当成应用真的做了什么。
+fn init_in(log_dir: &Path) -> Option<PathBuf> {
     let level = level_from_env();
-    let log_dir = resolve_log_dir(data_dir);
-    let path = log_path(&log_dir);
+    let path = log_path(log_dir);
 
     let _ = std::fs::create_dir_all(&log_dir);
     // 按天轮转：只清 `app-*.log`，不碰 runtime-<版本>.log / runtime-events.log。
@@ -184,7 +190,7 @@ pub fn init(data_dir: &Path) -> Option<PathBuf> {
     }
 
     let inner = Inner {
-        dir: log_dir.clone(),
+        dir: log_dir.to_path_buf(),
         date: chrono::Local::now().date_naive(),
         written: std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
         file,
@@ -643,7 +649,7 @@ mod tests {
     #[test]
     fn a_record_reaches_the_file() {
         let dir = std::env::temp_dir().join(format!("veyl-log-{:016x}", rand::random::<u64>()));
-        let Some(path) = init(&dir) else {
+        let Some(path) = init_in(&dir.join("logs")) else {
             // 本进程已经装过 logger（并行测试），跳过。
             return;
         };

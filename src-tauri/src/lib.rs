@@ -208,10 +208,10 @@ pub fn run() {
             let refresh_store = Arc::clone(&setup_store);
             let refresh_manager = Arc::clone(&recovery_parts.manager);
             tauri::async_runtime::spawn(async move {
-                let has_cache = {
-                    let conn = refresh_store.conn();
-                    crate::store::seed_cache::load(&conn).ok().flatten().is_some()
-                };
+                // 判「内容能不能用」，不是「行在不在」：
+                // `secrets.enc` 丢过之后元数据还在，只看行会误判成「有缓存」，
+                // 于是白等 5 分钟才去修。和 `seed::refresh` 里那三处是同一个判据。
+                let has_cache = crate::seed::load_nodes(&refresh_store).is_some();
                 if has_cache {
                     tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
                 }

@@ -727,7 +727,20 @@ mod tests {
     async fn a_lost_secret_is_rebuilt_instead_of_reported_unchanged() {
         crate::test_support::install_test_secrets();
         let store = Store::open_in_memory().unwrap();
-        let body = sample();
+        // 用自己的内容，别和 `cached_nodes_round_trip...` 共用同一份：
+        // 两条测试共享同一个 `secrets.enc`，内容相同就会算到同一个 key 上，
+        // 这条的清理会把那条的数据删掉。
+        let body = r#"{
+          "version": 1,
+          "updated_at": "2026-11-04T00:00:00Z",
+          "nodes": [
+            { "name": "iso-a", "server": "203.0.113.21", "port": 8388,
+              "method": "aes-256-gcm", "password": "pw-iso-a" },
+            { "name": "iso-b", "server": "203.0.113.22", "port": 8389,
+              "method": "aes-256-gcm", "password": "pw-iso-b" }
+          ]
+        }"#
+        .to_string();
         let hash = content_sha256(body.as_bytes());
 
         crate::secrets::set_secret(&secret_key(&hash), &body).unwrap();
