@@ -1,5 +1,13 @@
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
-import type { AgentEvent, RuntimeSnapshot, RuntimeView } from "./protocol";
+import type {
+  AgentEvent,
+  ConfigConnectMode,
+  ConfigDetail,
+  ConfigRouteMode,
+  ConfigSummary,
+  RuntimeSnapshot,
+  RuntimeView,
+} from "./protocol";
 
 export type BridgeMode = "tauri" | "mock";
 
@@ -55,31 +63,49 @@ export interface ImportSeedResult {
   profiles: ImportedProfile[];
 }
 
-/** `profile_list` 的一项。字段名与 AI 工具 `ProfileList` 一致（commands.md §3.3）。 */
-export interface RuntimeProfile {
-  /** 契约统一为 `profile_id`。 */
-  id: string;
-  name: string;
-  /** 协议名，例如 shadowsocks；后端没有时为空串。 */
-  protocol: string;
-  region: string | null;
-  /** ISO 8601，用于前端按「最新在前」排序。 */
-  createdAt: string;
-  /** 目录里的 node_id；种子导入为 null，用来区分来源。 */
-  nodeId: string | null;
-}
-
-/** `profile_list` 的返回：后端按 created_at ASC，排序交给 UI。 */
-export interface ProfileListData {
-  profiles: RuntimeProfile[];
-  activeProfileId: string | null;
-}
-
-/** 首次引导的判定条件（commands.md §3.4）。 */
+/** 首次引导的判定条件（commands.md）。 */
 export interface OnboardingStatus {
   completed: boolean;
   hasKey: boolean;
-  profileCount: number;
+  configCount: number;
+}
+
+export interface ConfigListData {
+  configs: ConfigSummary[];
+  active_config_id: string | null;
+}
+
+/** `config_create` 的命令参数（commands.md §3.2）。 */
+export interface ConfigCreateInput {
+  name: string;
+  connectMode: ConfigConnectMode;
+  routingMode: ConfigRouteMode;
+  source?: "seed" | "empty";
+  nodeIds?: string[];
+  listenPort?: number;
+}
+
+export interface ConfigActivateResult {
+  active_config_id: string;
+  reconnect: "not_running" | "reconnected" | "reconnect_failed" | "skipped_no_nodes";
+  runtime: RuntimeSnapshot | null;
+}
+
+export interface NodeSwitchResult {
+  config_id: string;
+  node_id: string;
+  previous_node_id: string | null;
+  connected: boolean;
+  runtime: RuntimeSnapshot | null;
+}
+
+export interface NodeProbeResult {
+  node_id: string;
+  reachable: boolean;
+  latency_ms: number | null;
+  probe_method: "clash_delay" | "tcp";
+  checked_at: number;
+  error: { code: string; message: string } | null;
 }
 
 /** 模型提出、尚未回答的问题（1.2.0）。 */
@@ -191,12 +217,21 @@ export interface AgentBridge {
   cancel(requestId: string): Promise<void>;
   /** 事件不可达时的兜底快照（契约 §5 `runtime_status`）。 */
   getRuntimeSnapshot(): Promise<RuntimeSnapshot | null>;
-  /** UI 直连：发起连接；不传 profileId 时由后端选当前/默认配置。 */
-  runtimeStart(profileId?: string): Promise<void>;
+  /** UI 直连：发起连接；不传 configId 时用当前激活配置。 */
+  runtimeStart(configId?: string): Promise<void>;
   /** UI 直连：断开连接并恢复系统代理。 */
   runtimeStop(): Promise<void>;
-  /** UI 直连：节点列表（R28）。 */
-  profileList(): Promise<ProfileListData>;
+  /** 左栏配置列表。只读本地库，不联网。 */
+  configList(): Promise<ConfigListData>;
+  /** 中间底部节点详情的数据源。 */
+  configDetail(configId: string): Promise<ConfigDetail>;
+  configCreate(input: ConfigCreateInput): Promise<ConfigDetail>;
+  /** 切换 active 配置；已连接时需带 confirmDisconnect。 */
+  configActivate(configId: string, confirmDisconnect?: boolean): Promise<ConfigActivateResult>;
+  /** 切换某套配置的当前节点；已连接时在线热切换。 */
+  nodeSwitch(configId: string, nodeId: string): Promise<NodeSwitchResult>;
+  /** 测试单个节点连通性。不可达是正常结果，不抛错。 */
+  nodeProbe(nodeId: string): Promise<NodeProbeResult>;
   /** 首次引导状态。 */
   onboardingStatus(): Promise<OnboardingStatus>;
   /** 记下引导已完成；skippedKey 表示用户明确跳过了 Key 这一步。 */
@@ -211,8 +246,6 @@ export interface AgentBridge {
   openLogDir(): Promise<void>;
   /** 用系统默认浏览器打开链接。tauri 侧等 Host 接 opener 后实现。 */
   openExternal(url: string): Promise<void>;
-  /** 无 AI 模式的删除配置入口（契约 §5 `profile_delete`）。 */
-  deleteProfile(profileId: string): Promise<void>;
   /** 重启后恢复会话：不传 sessionId 时取最近一个会话。 */
   getChatHistory(sessionId?: string): Promise<ChatHistory>;
   /** 重命名会话；标题的 trim 与长度校验都由后端做。 */
@@ -268,8 +301,10 @@ export function emptyRuntimeView(): RuntimeView {
     pid: null,
     upstream_version: null,
     uptime_seconds: null,
-    profile_id: null,
-    profile_name: null,
+    config_id: null,
+    config_name: null,
+    node_id: null,
+    node_name: null,
     config_hash: null,
     system_proxy_enabled: false,
     health: { ...EMPTY_HEALTH },
@@ -308,14 +343,16 @@ export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): Runtime
 }
 
 export function snapshotToView(snapshot: RuntimeSnapshot): RuntimeView {
-  // 后端 1.1.0 之前不会返回新字段；一律归一成 null，UI 不显示 undefined。
+  // 后端旧版本不会返回新字段；一律归一成 null，UI 不显示 undefined。
   return {
     state: snapshot.state,
     pid: snapshot.pid,
     upstream_version: snapshot.upstream_version,
     uptime_seconds: snapshot.uptime_seconds,
-    profile_id: snapshot.profile_id,
-    profile_name: snapshot.profile_name ?? null,
+    config_id: snapshot.config_id,
+    config_name: snapshot.config_name ?? null,
+    node_id: snapshot.node_id ?? null,
+    node_name: snapshot.node_name ?? null,
     config_hash: snapshot.config_hash ?? null,
     system_proxy_enabled: snapshot.system_proxy_enabled,
     health: snapshot.health,

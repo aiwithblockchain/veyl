@@ -30,11 +30,12 @@ fn has_current_schema(conn: &Connection) -> StoreResult<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master
           WHERE type = 'table'
-            AND name IN ('configs', 'nodes', 'config_nodes', 'issues', 'layout', 'seed_cache')",
+            AND name IN ('configs', 'nodes', 'config_nodes', 'issues', 'layout', 'seed_cache',
+                         'seed_node_exclusions')",
         [],
         |row| row.get(0),
     )?;
-    Ok(count == 6)
+    Ok(count == 7)
 }
 
 /// 删除所有用户表。`sqlite_*` 内部表不在 sqlite_master 的普通表里。

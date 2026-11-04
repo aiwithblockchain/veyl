@@ -141,7 +141,6 @@ mod tests {
                 node_count: 1,
                 fetched_at: crate::store::db::now_ms(),
                 checked_at: crate::store::db::now_ms(),
-                new_version_available: false,
             },
         )
         .unwrap();

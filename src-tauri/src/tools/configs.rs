@@ -39,7 +39,7 @@ fn summarise_configs(data: &Value) -> String {
         let id = config.get("config_id").and_then(Value::as_str).unwrap_or("-");
         let name = config.get("name").and_then(Value::as_str).unwrap_or("(未命名)");
         let nodes = config.get("node_count").and_then(Value::as_i64).unwrap_or(0);
-        let route = config.get("route_mode").and_then(Value::as_str).unwrap_or("-");
+        let route = config.get("routing_mode").and_then(Value::as_str).unwrap_or("-");
         let active = config.get("is_active").and_then(Value::as_bool).unwrap_or(false);
         lines.push(format!(
             "- {id} | {name} | {nodes} 个节点 | {route}{}",
@@ -243,7 +243,7 @@ impl Tool for ConfigCreateTool {
             .config_create(ConfigCreateInput {
                 name: name.to_string(),
                 connect_mode: connect_mode.to_string(),
-                route_mode: routing_mode.to_string(),
+                routing_mode: routing_mode.to_string(),
                 source: input.get("source").and_then(Value::as_str).map(str::to_string),
                 node_ids,
                 listen_port: input
@@ -338,14 +338,15 @@ impl Tool for ConfigUpdateTool {
                 config_id,
                 ConfigUpdateInput {
                     name: input.get("name").and_then(Value::as_str).map(str::to_string),
-                    route_mode: input
+                    routing_mode: input
                         .get("routing_mode")
                         .and_then(Value::as_str)
                         .map(str::to_string),
                     listen_port: input
                         .get("listen_port")
                         .and_then(Value::as_u64)
-                        .and_then(|port| u16::try_from(port).ok()),
+                        .and_then(|port| u16::try_from(port).ok())
+                        .map(Some),
                     dns: input.get("dns").cloned(),
                     tun_excludes: input
                         .get("tun_excludes")

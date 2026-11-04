@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "icons": "python3 scripts/generate_icons.py",
+    "rules:fetch": "node scripts/rules/fetch-rules.mjs",
+    "rules:verify": "node scripts/rules/verify-rules.mjs",
     "app:dev": "tauri dev",
     "app:build": "tauri build"
   },

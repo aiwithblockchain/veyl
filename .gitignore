@@ -59,3 +59,7 @@ build/
 
 # 图标生成的中间产物（由 npm run icons 重新生成）
 src-tauri/icons/AppIcon.iconset/
+
+# 规则数据：构建时下载并打包，不入库（scripts/rules/fetch-rules.mjs）
+/src-tauri/resources/rules/*
+!/src-tauri/resources/rules/.gitkeep

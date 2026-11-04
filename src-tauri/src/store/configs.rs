@@ -374,6 +374,42 @@ pub fn list_nodes_by_source(conn: &Connection, source: &str) -> StoreResult<Vec<
     rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
 }
 
+/// 引用过种子节点的配置：种子刷新新增节点时自动绑到这些配置上。
+pub fn config_ids_with_seed_nodes(conn: &Connection) -> StoreResult<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT cn.config_id
+           FROM config_nodes cn
+           JOIN nodes n ON n.id = cn.node_id
+          WHERE n.source = ?1",
+    )?;
+    let rows = statement.query_map(params![SOURCE_SEED], |row| row.get::<_, String>(0))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+}
+
+pub fn record_seed_exclusion(conn: &Connection, source_key: &str) -> StoreResult<()> {
+    conn.execute(
+        "INSERT INTO seed_node_exclusions (source_key, created_at)
+         VALUES (?1, ?2)
+         ON CONFLICT(source_key) DO NOTHING",
+        params![source_key, now_ms()],
+    )?;
+    Ok(())
+}
+
+pub fn remove_seed_exclusion(conn: &Connection, source_key: &str) -> StoreResult<()> {
+    conn.execute(
+        "DELETE FROM seed_node_exclusions WHERE source_key = ?1",
+        params![source_key],
+    )?;
+    Ok(())
+}
+
+pub fn seed_exclusions(conn: &Connection) -> StoreResult<std::collections::HashSet<String>> {
+    let mut statement = conn.prepare("SELECT source_key FROM seed_node_exclusions")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<std::collections::HashSet<_>, _>>()?)
+}
+
 /// 返回这些 id 里不存在的节点（一次报全）。
 pub fn missing_nodes(conn: &Connection, node_ids: &[String]) -> StoreResult<Vec<String>> {
     let mut missing = Vec::new();
@@ -804,5 +840,49 @@ mod tests {
         for server in ["", "https://x", "a b", "a/b"] {
             assert!(upsert_node(&conn, &node("node_1", server)).is_err(), "{server}");
         }
+    }
+
+    #[test]
+    fn seed_exclusions_round_trip() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        assert!(seed_exclusions(&conn).unwrap().is_empty());
+
+        record_seed_exclusion(&conn, "key-a").unwrap();
+        record_seed_exclusion(&conn, "key-a").unwrap();
+        record_seed_exclusion(&conn, "key-b").unwrap();
+        let excluded = seed_exclusions(&conn).unwrap();
+        assert_eq!(excluded.len(), 2);
+        assert!(excluded.contains("key-a"));
+
+        remove_seed_exclusion(&conn, "key-a").unwrap();
+        assert_eq!(seed_exclusions(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn config_ids_with_seed_nodes_ignores_manual_nodes() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        create(&conn, &config("cfg_1", "A")).unwrap();
+        create(&conn, &config("cfg_2", "B")).unwrap();
+        upsert_node(
+            &conn,
+            &NewNode {
+                id: "nod_seed",
+                name: "seed",
+                server: "203.0.113.10",
+                port: 8388,
+                method: "aes-256-gcm",
+                password_ref: "node:nod_seed",
+                source: SOURCE_SEED,
+                source_key: "key-seed",
+            },
+        )
+        .unwrap();
+        attach_node(&conn, "cfg_1", "nod_seed").unwrap();
+        upsert_node(&conn, &node("nod_manual", "203.0.113.11")).unwrap();
+        attach_node(&conn, "cfg_2", "nod_manual").unwrap();
+
+        assert_eq!(config_ids_with_seed_nodes(&conn).unwrap(), vec!["cfg_1"]);
     }
 }

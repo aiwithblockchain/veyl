@@ -1082,14 +1082,6 @@ pre {
   flex: none;
 }
 
-.settings-tag {
-  font-size: 11px;
-  color: var(--ink-3);
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  padding: 0 7px;
-}
-
 .ask-ai {
   flex: none;
   padding: 0;
@@ -1849,6 +1841,13 @@ pre {
   margin-top: 6px;
 }
 
+.config-rail__loading {
+  margin: 0;
+  padding: 16px 8px;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
 .config-list {
   flex: 1;
   min-height: 0;
@@ -2277,6 +2276,10 @@ pre {
 
 .console-node__probe.is-ok {
   color: var(--ok-text);
+}
+
+.console-node__probe.is-err {
+  color: var(--err-text);
 }
 
 .console-node__hint {

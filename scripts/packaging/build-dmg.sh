@@ -91,7 +91,14 @@ else
   printf '\n--skip-notarize：只签名，不公证\n'
 fi
 
-printf '\n[0/9] 图标新鲜度\n'
+printf '\n[0/9] 规则数据与图标\n'
+# 规则数据不入库：有归档就校验，没有就现场拉取并打包。
+if compgen -G "$ROOT/src-tauri/resources/rules/veyl-rules-*.tar.zst" >/dev/null; then
+  (cd "$ROOT" && node scripts/rules/verify-rules.mjs --required)
+else
+  (cd "$ROOT" && node scripts/rules/fetch-rules.mjs)
+fi
+
 ICON_SOURCE="$ROOT/veyl.png"
 ICON_ICNS="$ROOT/src-tauri/icons/icon.icns"
 if [ ! -f "$ICON_ICNS" ]; then

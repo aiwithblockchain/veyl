@@ -38,6 +38,9 @@ pub async fn get(
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
+            // 种子是最后的恢复手段：绝不能跟随系统代理，否则代理坏了
+            // 就永远拉不到种子、修不好。也让 DNS pinning 真正有效。
+            .no_proxy()
             .resolve(&host, address)
             .build()
             .map_err(|error| format!("创建下载客户端失败：{error}"))?;
@@ -239,6 +242,14 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     if segments[0] == 0x2001 && segments[1] == 0x0db8 {
         return false;
     }
+    // 64:ff9b::/96 NAT64：内网 IPv4 可以嵌在里面重新包装成公网形式
+    if segments[0] == 0x0064 && segments[1] == 0xff9b {
+        return false;
+    }
+    // 2002::/16 6to4：同样可以内嵌内网 IPv4
+    if segments[0] == 0x2002 {
+        return false;
+    }
     true
 }
 
@@ -274,6 +285,8 @@ mod tests {
             "fe80::1",
             "ff02::1",
             "2001:db8::1",
+            "64:ff9b::10.0.0.1",
+            "2002:0a00:0001::1",
             "::ffff:127.0.0.1",
         ] {
             assert!(!is_public_ip(ip(value)), "{value} 不应被视为公网地址");

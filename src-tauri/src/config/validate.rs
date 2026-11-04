@@ -115,13 +115,13 @@ pub async fn install_profile(
     value: &Value,
     etag: Option<&str>,
 ) -> RuntimeResult<PathBuf> {
-    // 这里会落明文凭据，目录用 0700。
+    // 这里会落明文凭据：临时文件创建时就是 0600，不留「先写后 chmod」的窗口。
     fsutil::ensure_private_dir(config_dir)?;
     let final_path = config_dir.join(format!("profile-{profile_id}.json"));
 
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| RuntimeError::Config(format!("serialize config: {e}")))?;
-    fsutil::write_atomic(&final_path, &bytes)?;
+    fsutil::write_atomic_private(&final_path, &bytes)?;
 
     if let Err(error) = check(binary, &final_path).await {
         let _ = std::fs::remove_file(&final_path);

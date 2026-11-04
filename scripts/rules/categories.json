@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "categories": [
+    {
+      "id": "openai",
+      "name_zh": "ChatGPT / OpenAI",
+      "name_en": "OpenAI",
+      "description": "OpenAI 的网页与 API 域名",
+      "rule_sets": ["geosite-openai"]
+    },
+    {
+      "id": "google",
+      "name_zh": "Google",
+      "name_en": "Google",
+      "description": "Google 搜索、Gmail、Google Cloud 等",
+      "rule_sets": ["geosite-google"]
+    },
+    {
+      "id": "youtube",
+      "name_zh": "YouTube",
+      "name_en": "YouTube",
+      "description": "YouTube 视频与直播域名",
+      "rule_sets": ["geosite-youtube"]
+    },
+    {
+      "id": "netflix",
+      "name_zh": "Netflix",
+      "name_en": "Netflix",
+      "description": "Netflix 流媒体域名",
+      "rule_sets": ["geosite-netflix"]
+    },
+    {
+      "id": "disney",
+      "name_zh": "Disney+",
+      "name_en": "Disney Plus",
+      "description": "Disney+ 流媒体域名",
+      "rule_sets": ["geosite-disney"]
+    },
+    {
+      "id": "spotify",
+      "name_zh": "Spotify",
+      "name_en": "Spotify",
+      "description": "Spotify 音乐流媒体域名",
+      "rule_sets": ["geosite-spotify"]
+    },
+    {
+      "id": "telegram",
+      "name_zh": "Telegram",
+      "name_en": "Telegram",
+      "description": "Telegram 客户端与网页域名",
+      "rule_sets": ["geosite-telegram"]
+    },
+    {
+      "id": "twitter",
+      "name_zh": "X / Twitter",
+      "name_en": "X / Twitter",
+      "description": "X（原 Twitter）域名",
+      "rule_sets": ["geosite-twitter"]
+    },
+    {
+      "id": "github",
+      "name_zh": "GitHub",
+      "name_en": "GitHub",
+      "description": "GitHub 网页、API 与静态资源域名",
+      "rule_sets": ["geosite-github"]
+    },
+    {
+      "id": "microsoft",
+      "name_zh": "Microsoft",
+      "name_en": "Microsoft",
+      "description": "Microsoft 账号、Office 与云服务域名",
+      "rule_sets": ["geosite-microsoft"]
+    },
+    {
+      "id": "apple",
+      "name_zh": "Apple",
+      "name_en": "Apple",
+      "description": "Apple 服务与 App Store 域名",
+      "rule_sets": ["geosite-apple"]
+    },
+    {
+      "id": "steam",
+      "name_zh": "Steam",
+      "name_en": "Steam",
+      "description": "Steam 商店与社区域名",
+      "rule_sets": ["geosite-steam"]
+    },
+    {
+      "id": "discord",
+      "name_zh": "Discord",
+      "name_en": "Discord",
+      "description": "Discord 客户端与网页域名",
+      "rule_sets": ["geosite-discord"]
+    },
+    {
+      "id": "cloudflare",
+      "name_zh": "Cloudflare",
+      "name_en": "Cloudflare",
+      "description": "Cloudflare 边缘与 API 域名",
+      "rule_sets": ["geosite-cloudflare"]
+    }
+  ]
+}

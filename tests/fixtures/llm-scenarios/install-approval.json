@@ -19,7 +19,7 @@
           "arguments": {
             "name": "默认配置",
             "connect_mode": "system_proxy",
-            "route_mode": "proxy_all",
+            "routing_mode": "proxy_all",
             "source": "seed"
           }
         }

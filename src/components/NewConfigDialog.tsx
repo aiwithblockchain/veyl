@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import type { ConnectMode, VpnConfig } from "../config/model";
+import type { ConfigSummary } from "../agent/protocol";
+import type { ConnectMode } from "../config/model";
 import { nameTaken, suggestedConfigName, uniqueConfigName } from "../config/model";
 
 interface Props {
-  configs: VpnConfig[];
+  configs: ConfigSummary[];
   onClose: () => void;
   onCreate: (name: string, mode: ConnectMode) => void;
 }
@@ -111,6 +112,7 @@ export function NewConfigDialog({ configs, onClose, onCreate }: Props) {
             ref={inputRef}
             className="new-config__input"
             value={name}
+            maxLength={40}
             aria-label="配置名字"
             onChange={(event) => {
               setName(event.target.value);

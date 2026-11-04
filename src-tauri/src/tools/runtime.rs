@@ -145,7 +145,7 @@ impl Tool for RuntimeStartTool {
     }
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
-        let outcome = match self.services.runtime_start(None, None).await {
+        let outcome = match self.services.runtime_start(None).await {
             Ok(data) => ToolOutcome::ok("运行时已启动。", data),
             Err(error) => failure(error),
         };

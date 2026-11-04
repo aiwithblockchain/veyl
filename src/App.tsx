@@ -19,8 +19,7 @@ import { Console } from "./components/Console";
 import { Onboarding } from "./components/Onboarding";
 import { Settings, describeImportError } from "./components/Settings";
 import type { ConnectMode } from "./config/model";
-import { useConfigs } from "./config/useConfigs";
-import { useMockConnection } from "./config/useMockConnection";
+import { useVpnSession } from "./config/useVpnSession";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import "./styles/app.css";
 
@@ -93,12 +92,11 @@ export default function App() {
   const [repairing, setRepairing] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const [pendingConfigId, setPendingConfigId] = useState<string | null>(null);
-  const { configs, activeConfig, activeConfigId, createConfig, selectConfig, setCurrentNode } =
-    useConfigs();
-  const connection = useMockConnection();
+  const vpn = useVpnSession(
+    bridge,
+    import.meta.env.VITE_MOCK === "1" || bridge.mode === "mock",
+  );
   const importingRef = useRef(false);
-  const runtimeActionRef = useRef(false);
-  const connectTestRef = useRef(false);
   const endWaiters = useRef(new Map<string, () => void>());
   // 已经回答/超时/作废的问题 id：防止重连或重试路径把旧问题再插回来。
   const settledQuestionIds = useRef(new Set<string>());
@@ -322,7 +320,7 @@ export default function App() {
         const status = await bridge.onboardingStatus();
         if (cancelled) return;
         aiConfiguredRef.current = status.hasKey;
-        setShowOnboarding(!status.completed && (!status.hasKey || status.profileCount === 0));
+        setShowOnboarding(!status.completed && (!status.hasKey || status.configCount === 0));
       } catch {
         if (!cancelled) setShowOnboarding(false);
       } finally {
@@ -362,7 +360,7 @@ export default function App() {
   }, [bridge, session?.id]);
 
   // 第一次成功连接后，界面不再出现任何引导。
-  const connectedOnce = runtime.state === "running" || connection.state === "connected";
+  const connectedOnce = runtime.state === "running" || vpn.connection === "connected";
   useEffect(() => {
     if (!connectedOnce || hasEverConnected) return;
     setHasEverConnected(true);
@@ -372,6 +370,10 @@ export default function App() {
       // 存不了就只在本次会话里记住。
     }
   }, [connectedOnce, hasEverConnected]);
+
+  useEffect(() => {
+    if (vpn.error) setAppNotice({ level: "error", text: vpn.error });
+  }, [vpn.error]);
 
   const completeOnboarding = async (skippedKey: boolean) => {
     try {
@@ -392,31 +394,6 @@ export default function App() {
     setShowOnboarding(false);
     openSettings("network");
     void completeOnboarding(keyState.masked === null);
-  };
-
-  // 第一步：刷新默认包并直接连接；全部结束（成功或失败）后才进入主界面。
-  const handleConnectTest = async () => {
-    if (connectTestRef.current) return;
-    connectTestRef.current = true;
-    try {
-      try {
-        const next = await bridge.defaultProfileRefresh();
-        setDefaultProfile(next);
-      } catch (error) {
-        setAppNotice({ level: "error", text: describeDefaultProfileError(error) });
-      }
-      try {
-        await bridge.onboardingComplete(keyState.masked === null);
-      } catch {
-        // 命令未就绪也允许继续。
-      }
-      await runRuntimeAction("start");
-      await Promise.all([refreshKeyState(), refreshDefaultProfile(), refreshAiStatus()]);
-      setShowOnboarding(false);
-      setOnboardingLoaded(true);
-    } finally {
-      connectTestRef.current = false;
-    }
   };
 
   const closeSettings = () => {
@@ -608,23 +585,6 @@ export default function App() {
     handleSend(`${action.label}${args}`);
   };
 
-  const runRuntimeAction = async (kind: "start" | "stop") => {
-    if (runtimeActionRef.current) return;
-    runtimeActionRef.current = true;
-    try {
-      if (kind === "start") {
-        await bridge.runtimeStart(runtime.profile_id ?? undefined);
-      } else {
-        await bridge.runtimeStop();
-      }
-      refreshSnapshot();
-    } catch (error) {
-      setAppNotice({ level: "error", text: describeRuntimeError(error) });
-    } finally {
-      runtimeActionRef.current = false;
-    }
-  };
-
   // 恢复网络不依赖 AI：撤代理 → 停运行时 → 清明文配置。
   const handleRestoreNetwork = async () => {
     if (repairing) return;
@@ -687,39 +647,66 @@ export default function App() {
     }
   };
 
+  const showActionResult = (
+    result: { ok: boolean; message?: string },
+    fallback: string,
+  ) => {
+    if (!result.ok) {
+      setAppNotice({ level: "error", text: result.message ?? fallback });
+    } else if (result.message) {
+      setAppNotice({ level: "info", text: result.message });
+    }
+  };
+
   const handleCreateConfig = (name: string, mode: ConnectMode) => {
-    createConfig(name, mode);
+    void vpn.createConfig(name, mode).then((result) => {
+      if (!result.ok) {
+        setAppNotice({ level: "error", text: result.message ?? "创建配置失败" });
+        return;
+      }
+      if (!result.activated) {
+        setAppNotice({ level: "info", text: "已创建，从左侧切换过去。" });
+      }
+    });
   };
 
   // 已连接时换配置：先说清会断一次，确认后再切并重新连上。
   const handleSelectConfig = (configId: string) => {
-    if (configId === activeConfigId) return;
-    if (connection.state === "connected" || connection.state === "starting") {
+    if (configId === vpn.activeConfigId) return;
+    if (vpn.connection === "connected" || vpn.connection === "starting") {
       setPendingConfigId(configId);
       return;
     }
-    selectConfig(configId);
+    void vpn
+      .selectConfig(configId)
+      .then((result) => showActionResult(result, "切换配置失败"));
   };
 
   const confirmConfigSwitch = () => {
     if (!pendingConfigId) return;
-    selectConfig(pendingConfigId);
-    connection.start(pendingConfigId);
+    const configId = pendingConfigId;
     setPendingConfigId(null);
+    void vpn
+      .selectConfig(configId, true)
+      .then((result) => showActionResult(result, "切换配置失败"));
   };
 
-  const handleStart = () => {
-    if (!activeConfig) return;
-    connection.start(activeConfig.config_id);
+  const handleVpnStart = () => {
+    void vpn.start().then((result) => showActionResult(result, "启动失败"));
+  };
+
+  const handleVpnStop = () => {
+    void vpn.stop().then((result) => showActionResult(result, "断开失败"));
   };
 
   const handleSwitchNode = (nodeId: string) => {
-    if (!activeConfig) return;
-    setCurrentNode(activeConfig.config_id, nodeId);
+    void vpn
+      .switchNode(nodeId)
+      .then((result) => showActionResult(result, "切换节点失败"));
   };
 
   const pendingConfig =
-    configs.find((config) => config.config_id === pendingConfigId) ?? null;
+    vpn.configs.find((config) => config.config_id === pendingConfigId) ?? null;
 
   if (!onboardingLoaded) {
     return <div className="app-boot" aria-hidden />;
@@ -730,7 +717,6 @@ export default function App() {
       <Onboarding
         bridge={bridge}
         initialKey={keyState}
-        onConnectTest={handleConnectTest}
         onImport={finishOnboardingWithImport}
         onDone={finishOnboarding}
       />
@@ -741,21 +727,25 @@ export default function App() {
     <div className={`app ${panelOpen ? "app--panel-open" : ""}`}>
       <ActivityBar />
       <ConfigRail
-        configs={configs}
-        activeConfigId={activeConfigId}
-        connectedConfigId={connection.connectedConfigId}
+        configs={vpn.configs}
+        activeConfigId={vpn.activeConfigId}
+        connectedConfigId={vpn.connectedConfigId}
+        loading={vpn.loading}
+        error={vpn.error}
         onSelect={handleSelectConfig}
         onCreate={handleCreateConfig}
       />
       <Console
-        config={activeConfig}
-        connection={connection.state}
-        onStart={handleStart}
-        onStop={connection.stop}
+        config={vpn.activeConfig}
+        connection={vpn.connection}
+        onStart={handleVpnStart}
+        onStop={handleVpnStop}
         onSwitchNode={handleSwitchNode}
+        onProbe={vpn.probe}
         panelOpen={panelOpen}
         aiUnread={aiUnread}
         onTogglePanel={togglePanel}
+        loading={vpn.loading}
       />
       {panelOpen ? (
         <AiPanel
@@ -859,34 +849,6 @@ export default function App() {
       />
     </div>
   );
-}
-
-/** 连接/断开的失败说法：区分「代理没恢复」和「没有节点」这两种要用户动手的情况。 */
-function describeRuntimeError(error: unknown): string {
-  const bridgeError = toBridgeError(error);
-  const reason = bridgeError.details?.reason;
-  if (reason === "proxy_restore_failed") {
-    return "系统代理没能恢复，为避免断网已保持连接。请重试，或重启应用。";
-  }
-  if (reason === "no_active_profile") {
-    return "还没有可用节点，请导入配置文件或使用测试节点。";
-  }
-  if (reason === "no_active_provider") {
-    return "没有可用的 AI 服务，请到设置里选择一个。";
-  }
-  return bridgeError.message || "操作失败，请重试";
-}
-
-function describeDefaultProfileError(error: unknown): string {
-  const bridgeError = toBridgeError(error);
-  if (/not found|unknown command/i.test(bridgeError.message)) {
-    return "默认配置命令还没有接入当前版本，可以先用「导入配置文件」导入本地节点。";
-  }
-  const offline = /network|offline|unreachable|timeout|dns|connect/i.test(bridgeError.message);
-  if (offline || bridgeError.code === "TIMEOUT" || bridgeError.code === "UNSUPPORTED") {
-    return "默认配置源暂时不可达（离线时属正常）。可以先用「导入配置文件」导入本地节点。";
-  }
-  return bridgeError.message || "获取默认配置失败，请稍后重试。";
 }
 
 function describeCommandError(error: unknown, label: string): string {

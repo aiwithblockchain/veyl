@@ -275,8 +275,6 @@ pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcom
         node_count,
         fetched_at: now,
         checked_at: now,
-        // 在线时新版本只在下次连接生效，入口显示「有新版本」。
-        new_version_available: running,
     };
     if let Err(error) = {
         let conn = store.conn();
@@ -304,7 +302,7 @@ pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcom
             "content_sha256": hash,
             "version": row.source_version,
             "node_count": node_count,
-            "new_version_available": row.new_version_available,
+            "new_version_available": running,
             "applied_at": now,
             "emitted_at": chrono::Utc::now()
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -321,11 +319,17 @@ pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcom
 /// 让已物化的种子节点层跟随新种子：按 `source_key` upsert，删掉新种子里没有的。
 ///
 /// 从未创建过 seed 配置时不物化任何节点——没被用过的种子不该出现在节点池里。
+/// 新增节点会自动绑到「已经在引用种子节点」的配置上；用户移除过的节点由
+/// `seed_node_exclusions` 跳过，不自动复活。
 fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<Vec<String>, String> {
-    let existing = {
+    let (existing, exclusions, following_configs) = {
         let conn = store.conn();
-        configs::list_nodes_by_source(&conn, configs::SOURCE_SEED)
-            .map_err(|error| error.to_string())?
+        (
+            configs::list_nodes_by_source(&conn, configs::SOURCE_SEED)
+                .map_err(|error| error.to_string())?,
+            configs::seed_exclusions(&conn).map_err(|error| error.to_string())?,
+            configs::config_ids_with_seed_nodes(&conn).map_err(|error| error.to_string())?,
+        )
     };
     if existing.is_empty() {
         return Ok(Vec::new());
@@ -335,6 +339,9 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<Vec<String>
     let mut changed = Vec::new();
     for node in seed_nodes {
         let key = nodes::source_key(&node.name, &node.server, node.port, &node.method);
+        if exclusions.contains(&key) {
+            continue;
+        }
         let id = nodes::node_id(configs::SOURCE_SEED, &key);
         let reference = nodes::password_ref(&id);
         crate::secrets::set_secret(&reference, &node.password).map_err(|error| error.to_string())?;
@@ -354,6 +361,10 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<Vec<String>
                 },
             )
             .map_err(|error| error.to_string())?;
+            for config_id in &following_configs {
+                configs::attach_node(&conn, config_id, &id)
+                    .map_err(|error| error.to_string())?;
+            }
         }
         if !existing.iter().any(|row| row.id == id) {
             changed.push(id.clone());
@@ -362,6 +373,11 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<Vec<String>
     }
 
     for row in existing {
+        if exclusions.contains(&row.source_key) {
+            // 用户移除过的节点：不复活，但也不因为「不在新种子」而被误删。
+            keep.insert(row.id.clone());
+            continue;
+        }
         if !keep.contains(&row.id) {
             {
                 let conn = store.conn();
@@ -421,18 +437,10 @@ pub fn merge_file_nodes(store: &Store, contents: &[u8]) -> Result<(usize, Vec<St
     Ok((imported, added))
 }
 
-/// 连接成功后清掉「有新版本」标记。
-pub fn mark_applied(store: &Store) {
-    let conn = store.conn();
-    if let Ok(Some(mut row)) = seed_cache::load(&conn) {
-        if row.new_version_available {
-            row.new_version_available = false;
-            let _ = seed_cache::save(&conn, &row);
-        }
-    }
-}
-
 /// 只读状态，不联网。形状见 `commands.md` §8.1。
+///
+/// 「有新版本」不落库：它只在刷新时由「远端哈希 != 缓存哈希」推导，
+/// 避免多一个需要同步的真值来源。
 pub fn status(store: &Store) -> Value {
     let row = {
         let conn = store.conn();
@@ -456,7 +464,7 @@ pub fn status(store: &Store) -> Value {
         "node_count": row.node_count,
         "applied_at": row.fetched_at,
         "checked_at": row.checked_at,
-        "new_version_available": row.new_version_available,
+        "new_version_available": false,
     })
 }
 
@@ -577,7 +585,6 @@ mod tests {
                     node_count: 2,
                     fetched_at: store::now_ms(),
                     checked_at: store::now_ms(),
-                    new_version_available: false,
                 },
             )
             .unwrap();
@@ -593,5 +600,70 @@ mod tests {
         assert_eq!(value["node_count"], 2);
 
         crate::secrets::delete_secret(&secret_key(&hash)).unwrap();
+    }
+
+    #[test]
+    fn refresh_binds_new_seed_nodes_and_skips_exclusions() {
+        crate::test_support::install_test_secrets();
+        let store = Store::open_in_memory().unwrap();
+        let parsed = parse_seed(sample().as_bytes()).unwrap();
+        let first = &parsed.nodes[0];
+        let second = &parsed.nodes[1];
+        let first_key = nodes::source_key(&first.name, &first.server, first.port, &first.method);
+        let second_key = nodes::source_key(&second.name, &second.server, second.port, &second.method);
+        let first_id = nodes::node_id(configs::SOURCE_SEED, &first_key);
+
+        {
+            let conn = store.conn();
+            configs::create(
+                &conn,
+                &configs::NewConfig {
+                    id: "cfg_1",
+                    name: "跟随种子",
+                    connection_mode: configs::CONNECTION_SYSTEM_PROXY,
+                    routing_mode: configs::ROUTING_PROXY_ALL,
+                    listen_port: Some(7890),
+                    dns: &json!({ "mode": "auto", "local": [], "remote": [] }),
+                    tun_excludes: &json!([]),
+                },
+            )
+            .unwrap();
+            crate::secrets::set_secret(&nodes::password_ref(&first_id), &first.password).unwrap();
+            configs::upsert_node(
+                &conn,
+                &configs::NewNode {
+                    id: &first_id,
+                    name: &first.name,
+                    server: &first.server,
+                    port: first.port,
+                    method: &first.method,
+                    password_ref: &nodes::password_ref(&first_id),
+                    source: configs::SOURCE_SEED,
+                    source_key: &first_key,
+                },
+            )
+            .unwrap();
+            configs::attach_node(&conn, "cfg_1", &first_id).unwrap();
+
+            // 用户移除过第二个节点：刷新不能把它加回来。
+            configs::record_seed_exclusion(&conn, &second_key).unwrap();
+        }
+
+        sync_seed_nodes(&store, &parsed.nodes).unwrap();
+        {
+            let conn = store.conn();
+            assert_eq!(configs::list_nodes(&conn, "cfg_1").unwrap().len(), 1);
+        }
+
+        // 明确撤销排除后，下一次刷新会绑定。
+        {
+            let conn = store.conn();
+            configs::remove_seed_exclusion(&conn, &second_key).unwrap();
+        }
+        sync_seed_nodes(&store, &parsed.nodes).unwrap();
+        {
+            let conn = store.conn();
+            assert_eq!(configs::list_nodes(&conn, "cfg_1").unwrap().len(), 2);
+        }
     }
 }

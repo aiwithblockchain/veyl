@@ -477,6 +477,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         case AGENT_EVENTS.nodeSwitched:
         case AGENT_EVENTS.issueChanged:
         case AGENT_EVENTS.layoutUpdated:
+        case AGENT_EVENTS.routingChanged:
+        case AGENT_EVENTS.rulesChanged:
           return state;
 
         default:

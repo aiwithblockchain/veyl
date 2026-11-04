@@ -1,13 +1,16 @@
 import { useState } from "react";
-import type { ConnectMode, VpnConfig } from "../config/model";
+import type { ConfigSummary } from "../agent/protocol";
+import type { ConnectMode } from "../config/model";
 import { portLabel } from "../config/model";
 import { NewConfigDialog } from "./NewConfigDialog";
 
 interface Props {
-  configs: VpnConfig[];
+  configs: ConfigSummary[];
   activeConfigId: string | null;
   /** 当前真正连着的那套配置；没连或没连上都是 null。 */
   connectedConfigId: string | null;
+  loading?: boolean;
+  error?: string | null;
   onSelect: (configId: string) => void;
   onCreate: (name: string, mode: ConnectMode) => void;
 }
@@ -16,6 +19,8 @@ export function ConfigRail({
   configs,
   activeConfigId,
   connectedConfigId,
+  loading = false,
+  error = null,
   onSelect,
   onCreate,
 }: Props) {
@@ -36,7 +41,14 @@ export function ConfigRail({
         </button>
       </header>
 
-      {configs.length === 0 ? (
+      {loading ? (
+        <p className="config-rail__loading">正在读取配置…</p>
+      ) : configs.length === 0 && error ? (
+        <div className="config-rail__empty">
+          <p className="config-rail__empty-title">配置读取失败</p>
+          <p className="config-rail__empty-text">{error}</p>
+        </div>
+      ) : configs.length === 0 ? (
         <div className="config-rail__empty">
           <p className="config-rail__empty-title">还没有配置</p>
           <p className="config-rail__empty-text">
@@ -70,7 +82,7 @@ export function ConfigRail({
                       ) : null}
                     </span>
                     <span className="config-list__meta">
-                      {config.nodes.length} 个节点 · {portLabel(config)}
+                      {config.node_count} 个节点 · {portLabel(config)}
                     </span>
                   </button>
                 </li>

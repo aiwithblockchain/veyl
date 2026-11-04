@@ -124,8 +124,14 @@ CREATE TABLE IF NOT EXISTS seed_cache (
     source_updated_at     TEXT,
     node_count            INTEGER NOT NULL,
     fetched_at            INTEGER NOT NULL,
-    checked_at            INTEGER NOT NULL,
-    new_version_available INTEGER NOT NULL DEFAULT 0 CHECK (new_version_available IN (0, 1))
+    checked_at            INTEGER NOT NULL
+);
+
+-- 用户从配置里移除过的种子节点。刷新时跳过，避免「删了又自己回来」。
+-- 不用软删除：那会让每个节点查询都多一个 WHERE。
+CREATE TABLE IF NOT EXISTS seed_node_exclusions (
+    source_key TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS runtime_versions (

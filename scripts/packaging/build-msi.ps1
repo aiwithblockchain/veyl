@@ -73,7 +73,16 @@ try {
     Write-Host "版本：$version"
     Write-Host "产品名：$productName"
 
-    Write-Host "`n[0/5] 图标新鲜度"
+    Write-Host "`n[0/5] 规则数据与图标"
+    $rulesArchive = Get-ChildItem (Join-Path $root "src-tauri/resources/rules") -Filter "veyl-rules-*.tar.zst" -ErrorAction SilentlyContinue
+    if ($rulesArchive) {
+        & node (Join-Path $root "scripts/rules/verify-rules.mjs") --required
+    }
+    else {
+        & node (Join-Path $root "scripts/rules/fetch-rules.mjs")
+    }
+    if ($LASTEXITCODE -ne 0) { throw "规则数据准备失败" }
+
     $iconSource = Join-Path $root "veyl.png"
     $iconIco = Join-Path $root "src-tauri/icons/icon.ico"
     if (-not (Test-Path $iconIco)) {

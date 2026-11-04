@@ -63,6 +63,46 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> RuntimeResult<()> {
     result
 }
 
+/// 含明文凭据的文件：临时文件创建时就是 0600，避免「先写后 chmod」的读取窗口。
+pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> RuntimeResult<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| RuntimeError::State(format!("{} has no parent", path.display())))?;
+    fs::create_dir_all(parent).io_ctx(parent)?;
+
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "state".to_string());
+    let tmp = parent.join(format!(".{file_name}.tmp-{:016x}", rand::random::<u64>()));
+
+    let result = (|| -> RuntimeResult<()> {
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)
+                .io_ctx(&tmp)?
+        };
+        #[cfg(not(unix))]
+        let mut file = fs::File::create(&tmp).io_ctx(&tmp)?;
+
+        file.write_all(bytes).io_ctx(&tmp)?;
+        file.sync_all().io_ctx(&tmp)?;
+        drop(file);
+        fs::rename(&tmp, path).io_ctx(path)?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 pub fn write_atomic_json<T: serde::Serialize>(path: &Path, value: &T) -> RuntimeResult<()> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| RuntimeError::State(format!("serialize {}: {e}", path.display())))?;
@@ -134,6 +174,20 @@ mod tests {
         write_atomic(&path, b"one").unwrap();
         write_atomic(&path, b"two").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "two");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_atomic_files_are_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("veyl-fsutil-{:016x}", rand::random::<u64>()));
+        ensure_dir(&dir).unwrap();
+        let path = dir.join("config.json");
+        write_atomic_private(&path, b"secret").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "secret");
         let _ = fs::remove_dir_all(&dir);
     }
 }

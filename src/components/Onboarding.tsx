@@ -8,8 +8,6 @@ const PLATFORM_URL = "https://platform.deepseek.com/";
 interface Props {
   bridge: AgentBridge;
   initialKey: DeepSeekKeyState;
-  /** 第一步：用默认配置包直接连接；返回的 Promise 结束时才解除 busy。 */
-  onConnectTest: () => Promise<void> | void;
   /** 第一步：去导入自己的配置文件。 */
   onImport: () => void;
   /** 完成或跳过：skippedKey 表示用户明确没有配置 Key。 */
@@ -23,14 +21,13 @@ function keyStatusText(state: DeepSeekKeyState): string | null {
   return "已保存但未验证";
 }
 
-export function Onboarding({ bridge, initialKey, onConnectTest, onImport, onDone }: Props) {
+export function Onboarding({ bridge, initialKey, onImport, onDone }: Props) {
   const [step, setStep] = useState<0 | 1>(0);
   const [keyState, setKeyState] = useState<DeepSeekKeyState>(initialKey);
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [connecting, setConnecting] = useState(false);
 
   const saveKey = async () => {
     const key = value.trim();
@@ -51,16 +48,6 @@ export function Onboarding({ bridge, initialKey, onConnectTest, onImport, onDone
       setError(describeKeyError(saveError));
     } finally {
       setSaving(false);
-    }
-  };
-
-  const connectTest = async () => {
-    if (connecting) return;
-    setConnecting(true);
-    try {
-      await onConnectTest();
-    } finally {
-      setConnecting(false);
     }
   };
 
@@ -87,9 +74,9 @@ export function Onboarding({ bridge, initialKey, onConnectTest, onImport, onDone
       <div className="onboarding">
         <div className="onboarding__card onboarding__card--intro">
           <span className="onboarding__brand">{PRODUCT_NAME}</span>
-          <h1 className="onboarding__title">先连上，再聊。</h1>
+          <h1 className="onboarding__title">先准备好节点。</h1>
           <p className="onboarding__text">
-            用官方提供的测试节点，点一下就能用。不需要先配置 AI，也不需要先读文档。
+            导入你自己的配置文件；也可以直接进入，稍后在右侧让助手帮你配好第一套。
           </p>
 
           <div className="onboarding__line" aria-hidden>
@@ -102,16 +89,7 @@ export function Onboarding({ bridge, initialKey, onConnectTest, onImport, onDone
             <button
               type="button"
               className="btn btn--primary"
-              onClick={() => void connectTest()}
-              disabled={connecting}
-            >
-              {connecting ? "正在连接…" : "连接测试节点"}
-            </button>
-            <button
-              type="button"
-              className="btn btn--ghost"
               onClick={onImport}
-              disabled={connecting}
             >
               导入我的配置文件
             </button>
@@ -121,7 +99,6 @@ export function Onboarding({ bridge, initialKey, onConnectTest, onImport, onDone
             type="button"
             className="onboarding__skip"
             onClick={() => onDone(true)}
-            disabled={connecting}
           >
             跳过，直接进入
           </button>
@@ -132,7 +109,6 @@ export function Onboarding({ bridge, initialKey, onConnectTest, onImport, onDone
               type="button"
               className="onboarding__next-link"
               onClick={() => setStep(1)}
-              disabled={connecting}
             >
               现在配置
             </button>

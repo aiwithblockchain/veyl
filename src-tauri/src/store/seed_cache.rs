@@ -13,13 +13,12 @@ pub struct SeedCacheRow {
     pub node_count: i64,
     pub fetched_at: i64,
     pub checked_at: i64,
-    pub new_version_available: bool,
 }
 
 pub fn load(conn: &Connection) -> StoreResult<Option<SeedCacheRow>> {
     conn.query_row(
         "SELECT content_sha256, etag, source_version, source_updated_at, node_count,
-                fetched_at, checked_at, new_version_available
+                fetched_at, checked_at
            FROM seed_cache WHERE id = 1",
         [],
         |row| {
@@ -31,7 +30,6 @@ pub fn load(conn: &Connection) -> StoreResult<Option<SeedCacheRow>> {
                 node_count: row.get(4)?,
                 fetched_at: row.get(5)?,
                 checked_at: row.get(6)?,
-                new_version_available: row.get::<_, i64>(7)? != 0,
             })
         },
     )
@@ -43,8 +41,8 @@ pub fn save(conn: &Connection, row: &SeedCacheRow) -> StoreResult<()> {
     conn.execute(
         "INSERT INTO seed_cache
             (id, content_sha256, etag, source_version, source_updated_at,
-             node_count, fetched_at, checked_at, new_version_available)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             node_count, fetched_at, checked_at)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET
             content_sha256 = excluded.content_sha256,
             etag = excluded.etag,
@@ -52,8 +50,7 @@ pub fn save(conn: &Connection, row: &SeedCacheRow) -> StoreResult<()> {
             source_updated_at = excluded.source_updated_at,
             node_count = excluded.node_count,
             fetched_at = excluded.fetched_at,
-            checked_at = excluded.checked_at,
-            new_version_available = excluded.new_version_available",
+            checked_at = excluded.checked_at",
         params![
             row.content_sha256,
             row.etag,
@@ -61,8 +58,7 @@ pub fn save(conn: &Connection, row: &SeedCacheRow) -> StoreResult<()> {
             row.source_updated_at,
             row.node_count,
             row.fetched_at,
-            row.checked_at,
-            if row.new_version_available { 1 } else { 0 }
+            row.checked_at
         ],
     )?;
     Ok(())
@@ -94,7 +90,6 @@ mod tests {
             node_count: 2,
             fetched_at: 1,
             checked_at: 2,
-            new_version_available: false,
         }
     }
 
@@ -111,9 +106,8 @@ mod tests {
 
         let mut next = row();
         next.content_sha256 = "def".into();
-        next.new_version_available = true;
         save(&conn, &next).unwrap();
-        assert!(load(&conn).unwrap().unwrap().new_version_available);
+        assert_eq!(load(&conn).unwrap().unwrap().content_sha256, "def");
     }
 
     #[test]

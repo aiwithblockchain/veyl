@@ -1,22 +1,25 @@
 import { useEffect, useRef, useState } from "react";
-import type { ConfigNode, VpnConfig } from "../config/model";
-import type { MockConnectionState } from "../config/useMockConnection";
+import type { ConfigDetail, NodeSummary } from "../agent/protocol";
+import type { ProbeResult, VpnConnectionState } from "../config/useVpnSession";
 import { consolePrimary, consoleStatus } from "../ui/status";
 
 interface Props {
-  config: VpnConfig | null;
-  connection: MockConnectionState;
+  config: ConfigDetail | null;
+  connection: VpnConnectionState;
   onStart: () => void;
   onStop: () => void;
   onSwitchNode: (nodeId: string) => void;
+  onProbe: (nodeId: string) => Promise<ProbeResult>;
   panelOpen: boolean;
   aiUnread: boolean;
   onTogglePanel: () => void;
+  loading?: boolean;
 }
 
 type Probe =
   | { nodeId: string; status: "testing" }
-  | { nodeId: string; status: "ok"; latency: number };
+  | { nodeId: string; status: "ok"; latency: number | null }
+  | { nodeId: string; status: "fail"; message: string | null; unreachable: boolean };
 
 export function Console({
   config,
@@ -24,9 +27,11 @@ export function Console({
   onStart,
   onStop,
   onSwitchNode,
+  onProbe,
   panelOpen,
   aiUnread,
   onTogglePanel,
+  loading = false,
 }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(
     config?.current_node_id ?? null,
@@ -34,7 +39,6 @@ export function Console({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [probe, setProbe] = useState<Probe | null>(null);
   const detailRef = useRef<HTMLDivElement>(null);
-  const probeTimer = useRef<number | null>(null);
   const configId = config?.config_id ?? null;
   const currentNodeId = config?.current_node_id ?? null;
 
@@ -43,18 +47,7 @@ export function Console({
     setSelectedId(currentNodeId);
     setPickerOpen(false);
     setProbe(null);
-    if (probeTimer.current !== null) {
-      window.clearTimeout(probeTimer.current);
-      probeTimer.current = null;
-    }
   }, [configId, currentNodeId]);
-
-  useEffect(
-    () => () => {
-      if (probeTimer.current !== null) window.clearTimeout(probeTimer.current);
-    },
-    [],
-  );
 
   useEffect(() => {
     if (!pickerOpen) return;
@@ -74,7 +67,7 @@ export function Console({
     };
   }, [pickerOpen]);
 
-  const selectedNode: ConfigNode | null =
+  const selectedNode: NodeSummary | null =
     config?.nodes.find((node) => node.node_id === selectedId) ?? null;
   const canPick = (config?.nodes.length ?? 0) > 1;
   const switching = Boolean(
@@ -86,30 +79,39 @@ export function Console({
     setSelectedId(nodeId);
     setPickerOpen(false);
     setProbe(null);
-    if (probeTimer.current !== null) {
-      window.clearTimeout(probeTimer.current);
-      probeTimer.current = null;
-    }
   };
 
-  const runProbe = () => {
+  const runProbe = async () => {
     if (!selectedNode || probe?.status === "testing") return;
     const node = selectedNode;
     setProbe({ nodeId: node.node_id, status: "testing" });
-    if (probeTimer.current !== null) window.clearTimeout(probeTimer.current);
-    probeTimer.current = window.setTimeout(() => {
-      probeTimer.current = null;
-      setProbe({ nodeId: node.node_id, status: "ok", latency: 32 + (node.port % 41) });
-    }, 700);
+    const result = await onProbe(node.node_id);
+    setProbe((current) => {
+      if (!current || current.nodeId !== node.node_id) return current;
+      return result.ok
+        ? { nodeId: node.node_id, status: "ok", latency: result.latencyMs }
+        : {
+            nodeId: node.node_id,
+            status: "fail",
+            message: result.message ?? null,
+            unreachable: result.unreachable,
+          };
+    });
   };
 
   const canConnect = Boolean(config && config.nodes.length > 0);
   const primary = consolePrimary(connection, canConnect);
-  const status = consoleStatus(connection, Boolean(config), canConnect);
+  const status = loading
+    ? { text: "正在读取配置…", tone: "muted" as const }
+    : consoleStatus(connection, Boolean(config), canConnect);
 
   let probeLabel: string | null = null;
   if (probe?.status === "testing") probeLabel = "测试中…";
-  else if (probe?.status === "ok") probeLabel = `延迟 ${probe.latency}ms`;
+  else if (probe?.status === "ok") {
+    probeLabel = probe.latency === null ? "可达" : `延迟 ${probe.latency}ms`;
+  } else if (probe?.status === "fail") {
+    probeLabel = probe.unreachable ? "连不上" : "测试失败";
+  }
 
   return (
     <main className="console">
@@ -167,7 +169,9 @@ export function Console({
       </section>
 
       <footer className="console-node">
-        {!config ? (
+        {loading ? (
+          <p className="console-node__empty">正在读取配置…</p>
+        ) : !config ? (
           <p className="console-node__empty">在左侧新建一套配置后，这里会显示节点。</p>
         ) : !selectedNode ? (
           <p className="console-node__empty">这套配置还没有节点。</p>
@@ -253,15 +257,22 @@ export function Console({
                 type="button"
                 className="btn btn--ghost"
                 disabled={probe?.status === "testing"}
-                onClick={runProbe}
+                onClick={() => void runProbe()}
               >
                 测试连通
               </button>
               {probeLabel ? (
                 <span
                   className={`console-node__probe ${
-                    probe?.status === "ok" ? "is-ok" : ""
+                    probe?.status === "ok"
+                      ? "is-ok"
+                      : probe?.status === "fail"
+                        ? "is-err"
+                        : ""
                   }`}
+                  title={
+                    probe?.status === "fail" ? probe.message ?? undefined : undefined
+                  }
                 >
                   {probeLabel}
                 </span>

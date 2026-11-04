@@ -420,7 +420,7 @@ export function Settings({
       singBox: runtime.upstream_version,
       mixedPort: runtime.mixed_port,
       pid: runtime.pid,
-      profiles: runtime.profile_id,
+      configId: runtime.config_id,
       configHash: runtime.config_hash,
       latencyMs: runtime.latency_ms,
       lastError: runtime.last_error?.code ?? null,
@@ -896,7 +896,6 @@ export function Settings({
                 <div className="settings-row__value">系统代理</div>
               </div>
               <div className="settings-row__aside">
-                <span className="settings-tag">TUN 暂不支持</span>
                 <button
                   type="button"
                   className="ask-ai"

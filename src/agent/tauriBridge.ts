@@ -3,6 +3,9 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   AgentBridge,
   ChatHistory,
+  ConfigActivateResult,
+  ConfigCreateInput,
+  ConfigListData,
   DeepSeekKeyState,
   DefaultProfileStatus,
   ImportSeedResult,
@@ -11,9 +14,10 @@ import type {
   LlmProviderTestResult,
   NetRepairAction,
   NetRepairResult,
+  NodeProbeResult,
+  NodeSwitchResult,
   OnboardingStatus,
   PendingQuestion,
-  ProfileListData,
   RenamedSession,
   StoredChatMessage,
   StoredSessionSummary,
@@ -21,23 +25,11 @@ import type {
 import { toBridgeError } from "./errors";
 import { createListenerManager } from "./listeners";
 import { AGENT_EVENTS, APP_EVENT_NAMES, AI_EVENT_NAMES } from "./protocol";
-import type { AgentEvent, RuntimeSnapshot } from "./protocol";
+import type { AgentEvent, ConfigDetail, RuntimeSnapshot } from "./protocol";
 
 const EVENT_NAMES = [...AI_EVENT_NAMES, ...APP_EVENT_NAMES];
 
-/** 契约（commands.md §3.3）冻结的线格式：只认 `profile_id` / `node_id`。 */
-interface RawProfile {
-  profile_id?: string;
-  node_id?: string | null;
-  name?: string;
-  protocol?: string;
-  method?: string;
-  region?: string | null;
-  created_at?: string;
-}
-
-interface RawPendingQuestion {
-  question_id?: string;
+interface RawPendingQuestion {  question_id?: string;
   session_id?: string;
   request_id?: string;
   question?: string;
@@ -145,48 +137,58 @@ export class TauriAgentBridge implements AgentBridge {
     }
   }
 
-  async runtimeStart(profileId?: string): Promise<void> {
-    await call("runtime_start", profileId ? { profileId } : undefined);
+  async runtimeStart(configId?: string): Promise<void> {
+    await call("runtime_start", configId ? { configId } : undefined);
   }
 
   async runtimeStop(): Promise<void> {
     await call("runtime_stop");
   }
 
-  async profileList(): Promise<ProfileListData> {
-    const raw = await call<{
-      profiles?: RawProfile[];
-      active_profile_id?: string | null;
-    }>("profile_list");
-    const profiles = (raw.profiles ?? [])
-      .map((item) => ({
-        id: item.profile_id ?? "",
-        name: item.name ?? "未命名节点",
-        protocol: item.protocol ?? item.method ?? "",
-        region: item.region ?? null,
-        createdAt: item.created_at ?? "",
-        nodeId: item.node_id ?? null,
-      }))
-      .filter((item) => item.id.length > 0)
-      // 后端按 created_at 升序返回；UI 要「最新在前」。
-      .sort((a, b) => {
-        const left = Date.parse(a.createdAt);
-        const right = Date.parse(b.createdAt);
-        if (!Number.isFinite(left) || !Number.isFinite(right)) return 0;
-        return right - left;
-      });
+  async configList(): Promise<ConfigListData> {
+    const raw = await call<Partial<ConfigListData>>("config_list");
+    return {
+      configs: raw.configs ?? [],
+      active_config_id: raw.active_config_id ?? null,
+    };
+  }
 
-    return { profiles, activeProfileId: raw.active_profile_id ?? null };
+  async configDetail(configId: string): Promise<ConfigDetail> {
+    return call<ConfigDetail>("config_detail", { configId });
+  }
+
+  async configCreate(input: ConfigCreateInput): Promise<ConfigDetail> {
+    return call<ConfigDetail>("config_create", {
+      ...input,
+    } as unknown as Record<string, unknown>);
+  }
+
+  async configActivate(
+    configId: string,
+    confirmDisconnect = false,
+  ): Promise<ConfigActivateResult> {
+    return call<ConfigActivateResult>("config_activate", {
+      configId,
+      ...(confirmDisconnect ? { confirmDisconnect: true } : {}),
+    });
+  }
+
+  async nodeSwitch(configId: string, nodeId: string): Promise<NodeSwitchResult> {
+    return call<NodeSwitchResult>("node_switch", { configId, nodeId });
+  }
+
+  async nodeProbe(nodeId: string): Promise<NodeProbeResult> {
+    return call<NodeProbeResult>("node_probe", { nodeId });
   }
 
   async onboardingStatus(): Promise<OnboardingStatus> {
-    const raw = await call<{ completed?: boolean; has_key?: boolean; profile_count?: number }>(
+    const raw = await call<{ completed?: boolean; has_key?: boolean; config_count?: number }>(
       "onboarding_status",
     );
     return {
       completed: raw.completed === true,
       hasKey: raw.has_key === true,
-      profileCount: raw.profile_count ?? 0,
+      configCount: raw.config_count ?? 0,
     };
   }
 
@@ -236,10 +238,6 @@ export class TauriAgentBridge implements AgentBridge {
 
   async cancel(requestId: string): Promise<void> {
     await call("ai_cancel", { requestId });
-  }
-
-  async deleteProfile(profileId: string): Promise<void> {
-    await call("profile_delete", { profileId });
   }
 
   async getChatHistory(sessionId?: string): Promise<ChatHistory> {

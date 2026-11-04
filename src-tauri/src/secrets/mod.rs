@@ -213,8 +213,8 @@ impl SecretsStore {
 
         let bytes =
             serde_json::to_vec_pretty(&out).map_err(|e| SecretError::Backend(e.to_string()))?;
-        // 临时文件 + fsync + rename（write_atomic 已包含），顺手置 0600。
-        crate::runtime::fsutil::write_atomic(&self.path, &bytes)
+        // 临时文件创建时就是 0600，再 fsync + rename（write_atomic_private 已包含）。
+        crate::runtime::fsutil::write_atomic_private(&self.path, &bytes)
             .map_err(|e| SecretError::Backend(e.to_string()))
     }
 

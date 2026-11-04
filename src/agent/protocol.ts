@@ -27,6 +27,8 @@ export const AGENT_EVENTS = {
   nodeSwitched: "node-switched",
   issueChanged: "issue-changed",
   layoutUpdated: "layout-updated",
+  routingChanged: "routing-changed",
+  rulesChanged: "rules-changed",
 } as const;
 
 export type AgentEventName = (typeof AGENT_EVENTS)[keyof typeof AGENT_EVENTS];
@@ -54,6 +56,8 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.nodeSwitched,
   AGENT_EVENTS.issueChanged,
   AGENT_EVENTS.layoutUpdated,
+  AGENT_EVENTS.routingChanged,
+  AGENT_EVENTS.rulesChanged,
 ] as const;
 
 /* ------------------------------------------------------------------ */
@@ -310,7 +314,7 @@ export interface ConfigSummary {
   config_id: string;
   name: string;
   connect_mode: ConfigConnectMode;
-  route_mode: ConfigRouteMode;
+  routing_mode: ConfigRouteMode;
   node_count: number;
   listen_port: number | null;
   is_active: boolean;
@@ -318,6 +322,30 @@ export interface ConfigSummary {
   created_at: number;
   updated_at: number;
   last_used_at: number | null;
+}
+
+export interface NodeSummary {
+  node_id: string;
+  name: string;
+  server: string;
+  port: number;
+  method: string;
+  protocol: "shadowsocks";
+  source: "seed" | "url" | "manual";
+  created_at: number;
+}
+
+export interface DnsConfig {
+  mode: "auto" | "custom";
+  local: string[];
+  remote: string[];
+}
+
+export interface ConfigDetail extends ConfigSummary {
+  nodes: NodeSummary[];
+  dns: DnsConfig;
+  tun_excludes: string[];
+  layout: Layout | null;
 }
 
 export interface ConfigChangedPayload {
@@ -434,6 +462,8 @@ export interface AgentEventMap {
   [AGENT_EVENTS.nodeSwitched]: NodeSwitchedPayload;
   [AGENT_EVENTS.issueChanged]: IssueChangedPayload;
   [AGENT_EVENTS.layoutUpdated]: LayoutUpdatedPayload;
+  [AGENT_EVENTS.routingChanged]: Record<string, unknown>;
+  [AGENT_EVENTS.rulesChanged]: Record<string, unknown>;
 }
 
 export type AgentEvent = {
@@ -459,9 +489,11 @@ export interface RuntimeSnapshot {
   pid: number | null;
   upstream_version: string | null;
   uptime_seconds: number | null;
-  /** 当前配置（profile）。1.1.0 起随 profile_name / latency 一起提供给 UI。 */
-  profile_id: string | null;
-  profile_name: string | null;
+  /** 当前配置与节点（runtime.md 2.0.0）。 */
+  config_id: string | null;
+  config_name: string | null;
+  node_id: string | null;
+  node_name: string | null;
   config_hash: string | null;
   system_proxy_enabled: boolean;
   health: HealthSnapshot;
@@ -485,8 +517,10 @@ export interface RuntimeView {
   pid: number | null;
   upstream_version: string | null;
   uptime_seconds: number | null;
-  profile_id: string | null;
-  profile_name: string | null;
+  config_id: string | null;
+  config_name: string | null;
+  node_id: string | null;
+  node_name: string | null;
   config_hash: string | null;
   system_proxy_enabled: boolean;
   health: HealthSnapshot;

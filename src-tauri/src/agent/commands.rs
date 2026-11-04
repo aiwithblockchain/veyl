@@ -115,11 +115,10 @@ fn error_value(error: anyhow::Error) -> Value {
 pub async fn runtime_start(
     state: State<'_, Arc<AppState>>,
     config_id: Option<String>,
-    node_id: Option<String>,
 ) -> Result<Value, Value> {
     state
         .services
-        .runtime_start(config_id, node_id)
+        .runtime_start(config_id)
         .await
         .map_err(error_value)
 }
@@ -154,7 +153,7 @@ pub async fn config_create(
     state: State<'_, Arc<AppState>>,
     name: String,
     connect_mode: String,
-    route_mode: String,
+    routing_mode: String,
     source: Option<String>,
     node_ids: Option<Vec<String>>,
     listen_port: Option<u16>,
@@ -166,7 +165,7 @@ pub async fn config_create(
         .config_create(crate::tools::ConfigCreateInput {
             name,
             connect_mode,
-            route_mode,
+            routing_mode,
             source,
             node_ids,
             listen_port,
@@ -178,30 +177,95 @@ pub async fn config_create(
 }
 
 /// 就地更新一套配置。改连接方式必须新建，`connectMode` 会被拒绝。
+///
+/// 用原始 `Request` 解析参数：只有这样才能区分 `listenPort` 的三种状态
+/// 「没传 / 传了 null / 传了数字」。Tauri 的 `Option<Option<T>>` 会把
+/// 缺失与 null 都折成 None。
 #[tauri::command]
 pub async fn config_update(
     state: State<'_, Arc<AppState>>,
-    config_id: String,
-    name: Option<String>,
-    route_mode: Option<String>,
-    listen_port: Option<u16>,
-    dns: Option<Value>,
-    tun_excludes: Option<Vec<String>>,
-    node_ids: Option<Vec<String>>,
-    connect_mode: Option<String>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<Value, Value> {
+    fn invalid(reason: &str, message: &str) -> Value {
+        json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "INVALID_ARGUMENT",
+            "message": message,
+            "retryable": false,
+            "details": { "reason": reason },
+            "request_id": "",
+        })
+    }
+
+    let payload = match request.body() {
+        tauri::ipc::InvokeBody::Json(value) => value,
+        _ => return Err(invalid("invalid_payload", "参数必须是 JSON 对象")),
+    };
+    let object = payload
+        .as_object()
+        .ok_or_else(|| invalid("invalid_payload", "参数必须是 JSON 对象"))?;
+
+    let arg = |camel: &str, snake: &str| object.get(camel).or_else(|| object.get(snake));
+
+    let config_id = arg("configId", "config_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid("invalid_config_id", "config_id 不能为空"))?
+        .to_string();
+
+    if arg("connectMode", "connect_mode").is_some() {
+        return Err(invalid(
+            "connect_mode_immutable",
+            "改连接方式必须新建一套配置",
+        ));
+    }
+
+    let name = arg("name", "name")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let routing_mode = arg("routingMode", "routing_mode")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let listen_port = match arg("listenPort", "listen_port") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(value) => match value
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+        {
+            Some(port) => Some(Some(port)),
+            None => return Err(invalid("invalid_listen_port", "listenPort 必须是数字或 null")),
+        },
+    };
+    let dns = arg("dns", "dns").cloned();
+    let tun_excludes = arg("tunExcludes", "tun_excludes").and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    let node_ids = arg("nodeIds", "node_ids").and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+
     state
         .services
         .config_update(
             &config_id,
             crate::tools::ConfigUpdateInput {
                 name,
-                route_mode,
+                routing_mode,
                 listen_port,
                 dns,
                 tun_excludes,
                 node_ids,
-                connect_mode,
+                connect_mode: None,
             },
         )
         .await

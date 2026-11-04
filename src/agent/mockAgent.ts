@@ -1,6 +1,9 @@
 import type {
   AgentBridge,
   ChatHistory,
+  ConfigActivateResult,
+  ConfigCreateInput,
+  ConfigListData,
   DeepSeekKeyState,
   DefaultProfileStatus,
   ImportSeedResult,
@@ -9,15 +12,17 @@ import type {
   LlmProviderTestResult,
   NetRepairAction,
   NetRepairResult,
+  NodeProbeResult,
+  NodeSwitchResult,
   OnboardingStatus,
   RenamedSession,
-  RuntimeProfile,
 } from "./bridge";
 import { isLocalEndpoint, maskKey } from "./bridge";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
   AgentEvent,
   AiStatusPhase,
+  ConfigDetail,
   NextAction,
   RuntimeSnapshot,
   RuntimeState,
@@ -44,6 +49,15 @@ function splitForStreaming(text: string): string[] {
  * 脚本化事件源：事件名与字段完全按 `docs/contracts/events.md` v1.0.4，
  * Host 接进来后把 bridge 换成 tauriBridge 即可，组件不用改。
  */
+interface MockNodeEntry {
+  id: string;
+  name: string;
+  protocol: string;
+  region: string | null;
+  createdAt: string;
+  nodeId: string | null;
+}
+
 export class MockAgentBridge implements AgentBridge {
   readonly mode = "mock" as const;
 
@@ -53,7 +67,7 @@ export class MockAgentBridge implements AgentBridge {
   /** 装过一次就不再走安装流程（真实链路同理，已安装时不重复装）。 */
   private installed = false;
   /** mock 的节点目录：让控制台与面板的节点切换可以离线演示。 */
-  private profiles: RuntimeProfile[] = [
+  private profiles: MockNodeEntry[] = [
     {
       id: "prf_1",
       name: "东京 01",
@@ -82,8 +96,10 @@ export class MockAgentBridge implements AgentBridge {
     pid: null,
     upstream_version: null,
     uptime_seconds: null,
-    profile_id: null,
-    profile_name: null,
+    config_id: null,
+    config_name: null,
+    node_id: null,
+    node_name: null,
     config_hash: null,
     system_proxy_enabled: false,
     health: {
@@ -117,10 +133,10 @@ export class MockAgentBridge implements AgentBridge {
     return this.runtime;
   }
 
-  async runtimeStart(profileId?: string): Promise<void> {
+  async runtimeStart(configId?: string): Promise<void> {
     const profile =
-      this.profiles.find((item) => item.id === profileId) ??
-      this.profiles.find((item) => item.id === this.runtime.profile_id) ??
+      this.profiles.find((item) => item.id === configId) ??
+      this.profiles.find((item) => item.id === this.runtime.config_id) ??
       this.profiles[0];
     if (!profile) {
       throw { code: "PRECONDITION_FAILED", message: "还没有可用的节点" };
@@ -128,8 +144,10 @@ export class MockAgentBridge implements AgentBridge {
 
     const switching = this.runtime.state === "running" || this.runtime.state === "degraded";
     this.transition(switching ? "restarting" : "starting", switching ? "restart_req" : "start_req", {
-      profile_id: profile.id,
-      profile_name: profile.name,
+      config_id: profile.id,
+      config_name: profile.name,
+      node_id: profile.id,
+      node_name: profile.name,
       connected_since: null,
       latency_ms: null,
     });
@@ -145,8 +163,10 @@ export class MockAgentBridge implements AgentBridge {
     this.transition("running", "process_ready", {
       pid: 48213,
       uptime_seconds: 0,
-      profile_id: profile.id,
-      profile_name: profile.name,
+      config_id: profile.id,
+      config_name: profile.name,
+      node_id: profile.id,
+      node_name: profile.name,
       mixed_port: 2080,
       connected_since: now(),
       latency_ms: profile.id === "prf_2" ? 68 : 42,
@@ -164,8 +184,10 @@ export class MockAgentBridge implements AgentBridge {
     this.transition("idle", "stopped", {
       pid: null,
       uptime_seconds: null,
-      profile_id: null,
-      profile_name: null,
+      config_id: null,
+      config_name: null,
+      node_id: null,
+      node_name: null,
       mixed_port: null,
       connected_since: null,
       latency_ms: null,
@@ -174,22 +196,11 @@ export class MockAgentBridge implements AgentBridge {
     });
   }
 
-  async profileList(): Promise<{ profiles: RuntimeProfile[]; activeProfileId: string | null }> {
-    // 与后端一致：按 created_at 升序给，排序交给 UI。
-    const ordered = [...this.profiles].sort(
-      (a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt),
-    );
-    return {
-      profiles: ordered.map((profile) => ({ ...profile })),
-      activeProfileId: this.runtime.profile_id ?? this.profiles[0]?.id ?? null,
-    };
-  }
-
   async onboardingStatus(): Promise<OnboardingStatus> {
     return {
       completed: this.onboarded,
       hasKey: this.keyMasked !== null,
-      profileCount: this.profiles.length,
+      configCount: this.profiles.length,
     };
   }
 
@@ -551,8 +562,10 @@ export class MockAgentBridge implements AgentBridge {
     this.transition("running", "process_ready", {
       pid: 48213,
       uptime_seconds: 1,
-      profile_id: "prf_1",
-      profile_name: "东京 01",
+      config_id: "prf_1",
+      config_name: "东京 01",
+      node_id: "prf_1",
+      node_name: "东京 01",
       mixed_port: 2080,
       connected_since: now(),
       latency_ms: 42,
@@ -647,8 +660,10 @@ export class MockAgentBridge implements AgentBridge {
     this.transition("idle", "stopped", {
       pid: null,
       uptime_seconds: null,
-      profile_id: null,
-      profile_name: null,
+      config_id: null,
+      config_name: null,
+      node_id: null,
+      node_name: null,
       mixed_port: null,
       connected_since: null,
       latency_ms: null,
@@ -703,11 +718,46 @@ export class MockAgentBridge implements AgentBridge {
     return { sessions: [], activeSessionId: null, messages: [] };
   }
 
-  async deleteProfile(profileId: string): Promise<void> {
-    if (this.runtime.state === "running" && this.runtime.profile_id === profileId) {
-      throw new Error("当前连接仍在使用这个配置，请先断开再删除。");
-    }
-    this.runtime = { ...this.runtime, profile_id: null };
+  async configList(): Promise<ConfigListData> {
+    // 浏览器通道的配置列表由 useVpnSession 的 mock 分支提供；这里只满足接口。
+    return { configs: [], active_config_id: null };
+  }
+
+  async configDetail(_configId: string): Promise<ConfigDetail> {
+    throw this.unsupportedConfigCommand("config_detail");
+  }
+
+  async configCreate(_input: ConfigCreateInput): Promise<ConfigDetail> {
+    throw this.unsupportedConfigCommand("config_create");
+  }
+
+  async configActivate(
+    _configId: string,
+    _confirmDisconnect = false,
+  ): Promise<ConfigActivateResult> {
+    throw this.unsupportedConfigCommand("config_activate");
+  }
+
+  async nodeSwitch(_configId: string, _nodeId: string): Promise<NodeSwitchResult> {
+    throw this.unsupportedConfigCommand("node_switch");
+  }
+
+  async nodeProbe(nodeId: string): Promise<NodeProbeResult> {
+    return {
+      node_id: nodeId,
+      reachable: true,
+      latency_ms: 42,
+      probe_method: "tcp",
+      checked_at: Date.now(),
+      error: null,
+    };
+  }
+
+  private unsupportedConfigCommand(command: string) {
+    return {
+      code: "UNSUPPORTED",
+      message: `浏览器通道未实现 ${command}，配置操作走本地 mock 会话`,
+    };
   }
 
   private keyMasked: string | null = null;

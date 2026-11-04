@@ -21,7 +21,7 @@ pub struct ConfigCreateInput {
     /// system_proxy | tun
     pub connect_mode: String,
     /// direct | proxy_all | proxy_selected
-    pub route_mode: String,
+    pub routing_mode: String,
     /// seed：绑定当前种子的全部节点；与 node_ids 互斥
     pub source: Option<String>,
     /// 绑定已有节点；顺序即节点顺序
@@ -34,8 +34,9 @@ pub struct ConfigCreateInput {
 #[derive(Debug, Clone, Default)]
 pub struct ConfigUpdateInput {
     pub name: Option<String>,
-    pub route_mode: Option<String>,
-    pub listen_port: Option<u16>,
+    pub routing_mode: Option<String>,
+    /// None = 不改；Some(None) = 改为自动；Some(Some(port)) = 指定端口。
+    pub listen_port: Option<Option<u16>>,
     pub dns: Option<Value>,
     pub tun_excludes: Option<Vec<String>>,
     /// 整体替换节点集；顺序即新顺序。
@@ -71,11 +72,7 @@ impl std::fmt::Debug for NodeCreateInput {
 #[async_trait]
 pub trait VpnToolServices: Send + Sync {
     async fn runtime_status(&self) -> anyhow::Result<Value>;
-    async fn runtime_start(
-        &self,
-        config_id: Option<String>,
-        node_id: Option<String>,
-    ) -> anyhow::Result<Value>;
+    async fn runtime_start(&self, config_id: Option<String>) -> anyhow::Result<Value>;
     async fn runtime_stop(&self, force: bool) -> anyhow::Result<Value>;
     async fn runtime_restart(&self, reason: Option<String>) -> anyhow::Result<Value>;
     async fn runtime_logs(&self, lines: u32, level: Option<String>) -> anyhow::Result<Value>;
@@ -114,11 +111,7 @@ pub trait VpnToolServices: Send + Sync {
     async fn net_config_get(&self) -> anyhow::Result<Value>;
     async fn net_repair(&self, action: &str, port: Option<u16>) -> anyhow::Result<Value>;
 
-    async fn vpn_connect(
-        &self,
-        config_id: Option<String>,
-        node_id: Option<String>,
-    ) -> anyhow::Result<Value>;
+    async fn vpn_connect(&self, config_id: Option<String>) -> anyhow::Result<Value>;
     async fn vpn_disconnect(&self) -> anyhow::Result<Value>;
 
     async fn diag_run(&self, include_logs: bool) -> anyhow::Result<Value>;
@@ -177,11 +170,7 @@ impl VpnToolServices for NotWiredServices {
         Ok(idle_snapshot())
     }
 
-    async fn runtime_start(
-        &self,
-        _config_id: Option<String>,
-        _node_id: Option<String>,
-    ) -> anyhow::Result<Value> {
+    async fn runtime_start(&self, _config_id: Option<String>) -> anyhow::Result<Value> {
         not_wired("启动运行时")
     }
 
@@ -279,11 +268,7 @@ impl VpnToolServices for NotWiredServices {
         not_wired("修复系统网络")
     }
 
-    async fn vpn_connect(
-        &self,
-        _config_id: Option<String>,
-        _node_id: Option<String>,
-    ) -> anyhow::Result<Value> {
+    async fn vpn_connect(&self, _config_id: Option<String>) -> anyhow::Result<Value> {
         not_wired("连接")
     }
 
@@ -607,7 +592,7 @@ impl WiredServices {
             "config_id": config.id,
             "name": config.name,
             "connect_mode": config.connection_mode,
-            "route_mode": config.routing_mode,
+            "routing_mode": config.routing_mode,
             "node_count": node_count,
             "listen_port": config.listen_port,
             "is_active": config.is_active,
@@ -747,15 +732,23 @@ impl WiredServices {
 
     /// 把种子缓存里的节点落到当前配置。种子只给节点，分流由配置自己决定。
     fn materialize_seed_nodes(&self, config_id: &str) -> anyhow::Result<usize> {
-        let Some(nodes) = crate::seed::load_nodes(&self.store) else {
-            return Err(svc_error_with_details(
+        let nodes = crate::seed::load_nodes(&self.store).ok_or_else(|| {
+            svc_error_with_details(
                 "PRECONDITION_FAILED",
                 "现在拿不到默认节点，先刷新默认节点或手动添加一个",
                 json!({ "reason": "seed_unavailable", "hint": "先刷新默认配置或手动添加节点" }),
-            ));
+            )
+        })?;
+        let exclusions = {
+            let conn = self.store.conn();
+            configs::seed_exclusions(&conn).map_err(|error| svc_error(error.code(), error))?
         };
         let parsed: Vec<crate::nodes::ParsedNode> = nodes
             .into_iter()
+            .filter(|node| {
+                let key = crate::nodes::source_key(&node.name, &node.server, node.port, &node.method);
+                !exclusions.contains(&key)
+            })
             .map(|node| crate::nodes::ParsedNode {
                 name: node.name,
                 server: node.server,
@@ -776,7 +769,6 @@ impl WiredServices {
     fn active_node(
         &self,
         config: &configs::Config,
-        explicit_node_id: Option<&str>,
     ) -> anyhow::Result<(configs::Node, String)> {
         let nodes = {
             let conn = self.store.conn();
@@ -791,24 +783,11 @@ impl WiredServices {
             ));
         }
 
-        let node = match explicit_node_id {
-            Some(node_id) => nodes
-                .iter()
-                .find(|node| node.id == node_id)
-                .cloned()
-                .ok_or_else(|| {
-                    svc_error_with_details(
-                        "NOT_FOUND",
-                        "节点不属于这套配置",
-                        json!({ "reason": "node_not_in_config" }),
-                    )
-                })?,
-            None => config
-                .current_node_id
-                .as_ref()
-                .and_then(|id| nodes.iter().find(|node| &node.id == id).cloned())
-                .unwrap_or_else(|| nodes[0].clone()),
-        };
+        let node = config
+            .current_node_id
+            .as_ref()
+            .and_then(|id| nodes.iter().find(|node| &node.id == id).cloned())
+            .unwrap_or_else(|| nodes[0].clone());
 
         let password = crate::secrets::get_secret(&node.password_ref)
             .map_err(|error| svc_error("SECRET_STORE", error))?
@@ -822,6 +801,15 @@ impl WiredServices {
             status.state,
             crate::runtime::RuntimeState::Running | crate::runtime::RuntimeState::Degraded
         )
+    }
+
+    fn seed_status_json(&self, source: &str, changed: bool) -> Value {
+        let mut status = crate::seed::status(&self.store);
+        // `source = cache` 表示本次没有成功访问远端，用的是本地缓存；
+        // `changed = true` 才表示这次刷新真的换了内容。
+        status["source"] = json!(source);
+        status["changed"] = json!(changed);
+        status
     }
 
     async fn connected_config_id(&self) -> Option<String> {
@@ -861,12 +849,12 @@ fn validate_connect_mode(value: &str) -> anyhow::Result<()> {
     }
 }
 
-fn validate_route_mode(value: &str) -> anyhow::Result<()> {
+fn validate_routing_mode(value: &str) -> anyhow::Result<()> {
     if value == configs::ROUTING_PROXY_SELECTED {
         return Err(svc_error_with_details(
             "UNSUPPORTED",
             "指定服务走 VPN 会在后续批次提供",
-            json!({ "reason": "route_mode_not_ready" }),
+            json!({ "reason": "routing_mode_not_ready" }),
         ));
     }
     if matches!(
@@ -878,7 +866,7 @@ fn validate_route_mode(value: &str) -> anyhow::Result<()> {
         Err(svc_error_with_details(
             "INVALID_ARGUMENT",
             format!("不支持的分流策略：{value}"),
-            json!({ "reason": "invalid_route_mode" }),
+            json!({ "reason": "invalid_routing_mode" }),
         ))
     }
 }
@@ -998,11 +986,7 @@ impl VpnToolServices for WiredServices {
         serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
     }
 
-    async fn runtime_start(
-        &self,
-        config_id: Option<String>,
-        node_id: Option<String>,
-    ) -> anyhow::Result<Value> {
+    async fn runtime_start(&self, config_id: Option<String>) -> anyhow::Result<Value> {
         if crate::lifecycle::is_quitting() {
             return Err(svc_error_with_details(
                 "PRECONDITION_FAILED",
@@ -1021,23 +1005,7 @@ impl VpnToolServices for WiredServices {
             })?,
         };
         let config = self.require_config(&config_id)?;
-        if let Some(node_id) = &node_id {
-            let is_member = {
-                let conn = self.store.conn();
-                configs::list_nodes(&conn, &config_id)
-                    .map_err(|error| svc_error(error.code(), error))?
-                    .iter()
-                    .any(|node| &node.id == node_id)
-            };
-            if !is_member {
-                return Err(svc_error_with_details(
-                    "NOT_FOUND",
-                    "节点不属于这套配置",
-                    json!({ "reason": "node_not_in_config" }),
-                ));
-            }
-        }
-        self.connect(&config, node_id.as_deref()).await
+        self.connect(&config).await
     }
 
     async fn runtime_stop(&self, _force: bool) -> anyhow::Result<Value> {
@@ -1205,8 +1173,8 @@ impl VpnToolServices for WiredServices {
     async fn config_create(&self, input: ConfigCreateInput) -> anyhow::Result<Value> {
         let connect_mode = input.connect_mode.trim();
         validate_connect_mode(connect_mode)?;
-        let route_mode = input.route_mode.trim();
-        validate_route_mode(route_mode)?;
+        let routing_mode = input.routing_mode.trim();
+        validate_routing_mode(routing_mode)?;
 
         if connect_mode == configs::CONNECTION_TUN && input.listen_port.is_some() {
             return Err(svc_error_with_details(
@@ -1291,7 +1259,7 @@ impl VpnToolServices for WiredServices {
                     id: &id,
                     name: &input.name,
                     connection_mode: connect_mode,
-                    routing_mode: route_mode,
+                    routing_mode,
                     listen_port: input.listen_port,
                     dns: &dns,
                     tun_excludes: &tun_excludes,
@@ -1345,10 +1313,10 @@ impl VpnToolServices for WiredServices {
             ));
         }
         let current = self.require_config(config_id)?;
-        if let Some(route_mode) = input.route_mode.as_deref() {
-            validate_route_mode(route_mode)?;
+        if let Some(routing_mode) = input.routing_mode.as_deref() {
+            validate_routing_mode(routing_mode)?;
         }
-        if let Some(port) = input.listen_port {
+        if let Some(Some(port)) = input.listen_port {
             if current.connection_mode == configs::CONNECTION_TUN {
                 return Err(svc_error_with_details(
                     "INVALID_ARGUMENT",
@@ -1391,10 +1359,59 @@ impl VpnToolServices for WiredServices {
             }
         }
 
+        let current_nodes = {
+            let conn = self.store.conn();
+            configs::list_nodes(&conn, config_id)
+                .map_err(|error| svc_error(error.code(), error))?
+        };
+        let current_node_ids = current_nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+
+        let unchanged = input
+            .name
+            .as_ref()
+            .map(|name| name.trim() == current.name)
+            .unwrap_or(true)
+            && input
+                .routing_mode
+                .as_ref()
+                .map(|mode| mode == &current.routing_mode)
+                .unwrap_or(true)
+            && match input.listen_port {
+                None => true,
+                Some(None) => current.listen_port.is_none(),
+                Some(Some(port)) => current.listen_port == Some(port),
+            }
+            && dns.as_ref().map(|value| value == &current.dns).unwrap_or(true)
+            && tun_excludes
+                .as_ref()
+                .map(|value| value == &current.tun_excludes)
+                .unwrap_or(true)
+            && input
+                .node_ids
+                .as_ref()
+                .map(|ids| ids == &current_node_ids)
+                .unwrap_or(true);
+        if unchanged {
+            // 契约：参数与现状完全一致时返回同一份详情，不发事件。
+            return self.config_detail_json(&current);
+        }
+
+        let previous_seed_nodes = if input.node_ids.is_some() {
+            current_nodes
+                .into_iter()
+                .filter(|node| node.source == configs::SOURCE_SEED)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
         let patch = configs::ConfigPatch {
             name: input.name,
-            routing_mode: input.route_mode,
-            listen_port: input.listen_port.map(Some),
+            routing_mode: input.routing_mode,
+            listen_port: input.listen_port,
             dns,
             tun_excludes,
             current_node_id: None,
@@ -1406,6 +1423,21 @@ impl VpnToolServices for WiredServices {
             if let Some(node_ids) = input.node_ids.as_ref() {
                 configs::replace_nodes(&conn, config_id, node_ids)
                     .map_err(|error| config_store_error(error))?;
+
+                // 用户移除过的种子节点记一笔，刷新时不再自动加回来。
+                for node in &previous_seed_nodes {
+                    if !node_ids.iter().any(|id| id == &node.id) {
+                        let _ = configs::record_seed_exclusion(&conn, &node.source_key);
+                    }
+                }
+                // 明确加回来的种子节点：撤销排除。
+                for node_id in node_ids {
+                    if let Ok(Some(node)) = configs::get_node(&conn, node_id) {
+                        if node.source == configs::SOURCE_SEED {
+                            let _ = configs::remove_seed_exclusion(&conn, &node.source_key);
+                        }
+                    }
+                }
             }
         }
 
@@ -1525,7 +1557,7 @@ impl VpnToolServices for WiredServices {
             }));
         }
 
-        match self.runtime_start(Some(config_id.to_string()), None).await {
+        match self.runtime_start(Some(config_id.to_string())).await {
             Ok(runtime) => Ok(json!({
                 "active_config_id": config_id,
                 "reconnect": "reconnected",
@@ -1663,19 +1695,22 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn default_profile_status(&self) -> anyhow::Result<Value> {
-        Ok(crate::seed::status(&self.store))
+        Ok(self.seed_status_json("cache", false))
     }
 
     async fn default_profile_refresh(&self, force: bool) -> anyhow::Result<Value> {
         let running = self.is_connected(&self.manager.status().await);
         match crate::seed::refresh(&self.store, running, force).await {
-            crate::seed::RefreshOutcome::Updated { .. }
-            | crate::seed::RefreshOutcome::Unchanged { .. } => {
-                Ok(crate::seed::status(&self.store))
+            crate::seed::RefreshOutcome::Updated { .. } => {
+                Ok(self.seed_status_json("network", true))
+            }
+            crate::seed::RefreshOutcome::Unchanged { .. } => {
+                Ok(self.seed_status_json("network", false))
             }
             crate::seed::RefreshOutcome::Offline { cached: true, .. } => {
-                // 有缓存时离线是正常场景，不把刷新失败变成用户可见的错误。
-                Ok(crate::seed::status(&self.store))
+                // 有缓存时离线是正常场景：明确告诉调用方「这次用的是缓存」，
+                // 不把刷新失败变成用户可见的错误。
+                Ok(self.seed_status_json("cache", false))
             }
             crate::seed::RefreshOutcome::Offline { error, .. } => Err(svc_error_with_details(
                 "UPSTREAM_ERROR",
@@ -1753,9 +1788,8 @@ impl VpnToolServices for WiredServices {
     async fn vpn_connect(
         &self,
         config_id: Option<String>,
-        node_id: Option<String>,
     ) -> anyhow::Result<Value> {
-        self.runtime_start(config_id, node_id).await
+        self.runtime_start(config_id).await
     }
 
     async fn vpn_disconnect(&self) -> anyhow::Result<Value> {
@@ -2051,7 +2085,7 @@ impl VpnToolServices for WiredServices {
         };
 
         Ok(json!({
-            "contract_version": "3.0.0",
+            "contract_version": "3.2.0",
             "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "app_version": env!("CARGO_PKG_VERSION"),
             "platform": crate::netcfg::platform_name(),
@@ -2199,11 +2233,7 @@ impl WiredServices {
     }
 
     /// 连接一套配置：单节点 + 全部走代理（本轮只保证这一种能起来）。
-    async fn connect(
-        &self,
-        config: &configs::Config,
-        explicit_node_id: Option<&str>,
-    ) -> anyhow::Result<Value> {
+    async fn connect(&self, config: &configs::Config) -> anyhow::Result<Value> {
         if config.connection_mode != configs::CONNECTION_SYSTEM_PROXY {
             return Err(svc_error_with_details(
                 "PRECONDITION_FAILED",
@@ -2215,11 +2245,11 @@ impl WiredServices {
             return Err(svc_error_with_details(
                 "UNSUPPORTED",
                 "分流策略会在后续批次提供，当前只支持「全部走代理」",
-                json!({ "reason": "route_mode_not_ready" }),
+                json!({ "reason": "routing_mode_not_ready" }),
             ));
         }
 
-        let (node, password) = self.active_node(config, explicit_node_id)?;
+        let (node, password) = self.active_node(config)?;
         let installed = self.ensure_runtime_installed()?;
         self.drop_previous_rendered_config(&config.id);
 
@@ -2270,31 +2300,6 @@ impl WiredServices {
                 {
                     let conn = self.store.conn();
                     let _ = configs::mark_used(&conn, &config.id);
-                    if let Some(node_id) = explicit_node_id {
-                        let _ = configs::update(
-                            &conn,
-                            &config.id,
-                            &configs::ConfigPatch {
-                                current_node_id: Some(Some(node_id.to_string())),
-                                ..Default::default()
-                            },
-                        );
-                    }
-                }
-                if explicit_node_id.is_some() {
-                    crate::agent::app_handle::emit(
-                        "node-switched",
-                        json!({
-                            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
-                            "config_id": config.id,
-                            "from_node_id": config.current_node_id,
-                            "to_node_id": node.id,
-                            "connected": true,
-                            "runtime": data,
-                            "emitted_at": chrono::Utc::now()
-                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                        }),
-                    );
                 }
                 if !config.is_active {
                     {
@@ -2304,9 +2309,6 @@ impl WiredServices {
                     if let Ok(updated) = self.require_config(&config.id) {
                         self.emit_config_changed("activated", Some(&updated));
                     }
-                }
-                if node.source == configs::SOURCE_SEED {
-                    crate::seed::mark_applied(&self.store);
                 }
                 Ok(data)
             }
@@ -2677,7 +2679,7 @@ mod config_service_tests {
         ConfigCreateInput {
             name: name.into(),
             connect_mode: configs::CONNECTION_SYSTEM_PROXY.into(),
-            route_mode: configs::ROUTING_PROXY_ALL.into(),
+            routing_mode: configs::ROUTING_PROXY_ALL.into(),
             source: None,
             node_ids: None,
             listen_port: Some(7890),
@@ -2716,7 +2718,7 @@ mod config_service_tests {
         assert_eq!(summary["node_count"], 1);
         assert!(summary.get("nodes").is_none(), "列表不返回节点明细");
         assert_eq!(summary["connect_mode"], configs::CONNECTION_SYSTEM_PROXY);
-        assert_eq!(summary["route_mode"], configs::ROUTING_PROXY_ALL);
+        assert_eq!(summary["routing_mode"], configs::ROUTING_PROXY_ALL);
         let text = list.to_string();
         assert!(!text.contains("pw-secret"), "{text}");
 
@@ -2791,15 +2793,38 @@ mod config_service_tests {
     }
 
     #[tokio::test]
+    async fn listen_port_can_go_back_to_auto() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("A")).await.unwrap();
+        let id = created["config_id"].as_str().unwrap();
+        assert_eq!(created["listen_port"], 7890);
+
+        let updated = services
+            .config_update(
+                id,
+                ConfigUpdateInput {
+                    listen_port: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(updated["listen_port"].is_null(), "传 null 表示改回自动");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn proxy_selected_is_unsupported_for_now() {
         let dir = temp_dir();
         let services = services(&dir);
         let mut input = create_input("A");
-        input.route_mode = configs::ROUTING_PROXY_SELECTED.into();
+        input.routing_mode = configs::ROUTING_PROXY_SELECTED.into();
         let error = services.config_create(input).await.unwrap_err();
         let service = error.downcast_ref::<ServiceError>().unwrap();
         assert_eq!(service.code, "UNSUPPORTED");
-        assert_eq!(service.details.as_ref().unwrap()["reason"], "route_mode_not_ready");
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "routing_mode_not_ready");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

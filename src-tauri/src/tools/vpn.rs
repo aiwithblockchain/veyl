@@ -24,8 +24,8 @@ impl Tool for VpnConnectTool {
     }
 
     fn description(&self) -> &str {
-        "连接一套配置并设置系统代理。省略 config_id 时使用当前激活配置；\
-         可选的 node_id 会同时切换当前节点。\
+        "连接一套配置并设置系统代理。省略 config_id 时使用当前激活配置。\
+         切换当前节点请用 NodeSwitch，不要用本工具。\
          state=running 即已连上；exit_ip 为 null 表示已连接但出口尚未测到，\
          不代表连接失败，可用 RuntimeStatus 再查。"
     }
@@ -42,8 +42,7 @@ impl Tool for VpnConnectTool {
         json!({
             "type": "object",
             "properties": {
-                "config_id": { "type": "string" },
-                "node_id": { "type": "string" }
+                "config_id": { "type": "string" }
             },
             "additionalProperties": false
         })
@@ -54,12 +53,8 @@ impl Tool for VpnConnectTool {
             .get("config_id")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let node_id = input
-            .get("node_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
 
-        let outcome = match self.services.vpn_connect(config_id, node_id).await {
+        let outcome = match self.services.vpn_connect(config_id).await {
             Ok(data) => {
                 let summary = match data.get("exit_ip").and_then(Value::as_str) {
                     Some(ip) => format!("已连接，出口 IP {ip}。"),
