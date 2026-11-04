@@ -910,13 +910,33 @@ impl RuntimeManager {
     async fn wait_until_ready(&self, gen: u64, plan: &StartPlan) -> bool {
         let api = ClashApi::new(&plan.clash_addr, &plan.clash_secret);
         let deadline = Instant::now() + self.cfg.startup_timeout;
+        let started = Instant::now();
+        #[cfg(test)]
+        let debug_crash_path = plan
+            .work_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.starts_with("veyl-crash-"))
+            .unwrap_or(false);
 
         loop {
             if !self.is_current(gen).await {
+                #[cfg(test)]
+                if debug_crash_path {
+                    eprintln!("[wait] gen mismatch at {:?}", started.elapsed());
+                }
                 return false;
             }
 
-            if let Some(reason) = self.child_exit_reason().await {
+            let exit = self.child_exit_reason().await;
+            #[cfg(test)]
+            if debug_crash_path {
+                eprintln!(
+                    "[wait] t={:?} exit={exit:?}",
+                    started.elapsed()
+                );
+            }
+            if let Some(reason) = exit {
                 self.record_error(reason).await;
                 return false;
             }
@@ -929,6 +949,15 @@ impl RuntimeManager {
                     self.record_error(reason).await;
                     return false;
                 }
+                #[cfg(test)]
+                if debug_crash_path {
+                    let pid = self.inner.lock().await.pid;
+                    eprintln!(
+                        "[wait] timeout pid={pid:?} alive={:?} cmd={:?}",
+                        pid.map(process::is_alive),
+                        pid.and_then(process::command_line)
+                    );
+                }
                 self.record_error(format!(
                     "startup timed out after {} ms",
                     self.cfg.startup_timeout.as_millis()
@@ -937,7 +966,17 @@ impl RuntimeManager {
                 return false;
             }
 
-            if api.healthy().await {
+            let health_started = Instant::now();
+            let healthy = api.healthy().await;
+            #[cfg(test)]
+            if debug_crash_path {
+                eprintln!(
+                    "[wait] t={:?} healthy={healthy} took={:?}",
+                    started.elapsed(),
+                    health_started.elapsed()
+                );
+            }
+            if healthy {
                 self.update_health(|health| {
                     health.process = true;
                     health.clash_api = true;
@@ -1675,18 +1714,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_startup_crash_goes_straight_to_failed() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = temp_dir("crash");
         std::fs::create_dir_all(&dir).unwrap();
-        let fake = dir.join("fake-sing-box");
-        std::fs::write(&fake, "#!/bin/sh\nexit 1\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // 用系统自带的 /usr/bin/false，而不是现写一个 shell 脚本。
+        // 并行负载下新脚本的 fork/exec 可能超过 startup_timeout；那时进程确实还活着，
+        // 报 TIMEOUT 是正确行为，但这条测试要验证的是「崩溃 → EXITED」。
+        let fake = PathBuf::from("/usr/bin/false");
 
         let mut cfg = RuntimeConfig::new(&dir);
-        // 2s 不是放宽断言：只是给并行测试负载下的 /bin/sh 启动与退出留出余量。
+        // 2s 不是放宽断言：只是给并行测试负载下的进程启动留出余量。
         // 断言仍然是「崩溃必须报 RUNTIME_EXITED，不是超时」。
         cfg.startup_timeout = Duration::from_secs(2);
         let manager = RuntimeManager::new(cfg);
