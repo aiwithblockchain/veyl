@@ -72,7 +72,7 @@ export function ConfigRail({
         <div className="config-rail__empty">
           <p className="config-rail__empty-title">还没有配置</p>
           <p className="config-rail__empty-text">
-            在右侧告诉助手你的情况，它会帮你配好第一套。也可以自己新建一套。
+            自己新建一套，或在对话里让助手帮你配好第一套。
           </p>
           <button type="button" className="btn btn--ghost" onClick={() => setCreating(true)}>
             新建配置

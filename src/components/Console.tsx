@@ -166,57 +166,53 @@ export function Console({
   return (
     <main className="console">
       <header className="console-top">
-        <div className="console-top__row">
-          <button
-            type="button"
-            className="btn btn--primary console-top__primary"
-            disabled={primary.disabled}
-            onClick={primary.stop ? onStop : onStart}
-          >
-            {primary.label}
-          </button>
-          <div className="console-top__right">
-            <div className={`console-status is-${status.tone}`} role="status">
-              <span className="console-status__dot" aria-hidden />
-              <span className="console-status__text">{status.text}</span>
-            </div>
-            <button
-              type="button"
-              className={`console-panel-toggle ${panelOpen ? "is-active" : ""}`}
-              onClick={onTogglePanel}
-              aria-label={
-                panelOpen
-                  ? "收起 AI 对话"
-                  : aiUnread
-                    ? "展开 AI 对话，有新消息"
-                    : "展开 AI 对话"
-              }
-              aria-expanded={panelOpen}
-              title="AI 对话"
-            >
-              <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
-                <path
-                  d="M4 4.5A1.5 1.5 0 0 1 5.5 3h9A1.5 1.5 0 0 1 16 4.5v6a1.5 1.5 0 0 1-1.5 1.5H9l-3 2.5V12H5.5A1.5 1.5 0 0 1 4 10.5z"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.4"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              {aiUnread && !panelOpen ? (
-                <span className="console-panel-toggle__dot" aria-hidden />
-              ) : null}
-            </button>
-          </div>
+        <button
+          type="button"
+          className="btn btn--primary console-top__primary"
+          disabled={primary.disabled}
+          onClick={primary.stop ? onStop : onStart}
+        >
+          {primary.label}
+        </button>
+        <div className={`console-status is-${status.tone}`} role="status">
+          <span className="console-status__dot" aria-hidden />
+          <span className="console-status__text">{status.text}</span>
         </div>
         <RouteLine state={routeState} />
+        <button
+          type="button"
+          className={`console-panel-toggle ${panelOpen ? "is-active" : ""}`}
+          onClick={onTogglePanel}
+          aria-label={
+            panelOpen
+              ? "收起 AI 对话"
+              : aiUnread
+                ? "展开 AI 对话，有新消息"
+                : "展开 AI 对话"
+          }
+          aria-expanded={panelOpen}
+          title="AI 对话"
+        >
+          <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
+            <path
+              d="M4 4.5A1.5 1.5 0 0 1 5.5 3h9A1.5 1.5 0 0 1 16 4.5v6a1.5 1.5 0 0 1-1.5 1.5H9l-3 2.5V12H5.5A1.5 1.5 0 0 1 4 10.5z"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinejoin="round"
+            />
+          </svg>
+          {aiUnread && !panelOpen ? (
+            <span className="console-panel-toggle__dot" aria-hidden />
+          ) : null}
+        </button>
       </header>
 
       <section className="console-mid">
         <div className="console-mid__hint">
           <p className="console-mid__title">没有需要你决定的事</p>
           <p className="console-mid__text">
-            连接在上面，节点在下面。要调整的话，在右侧告诉助手。
+            AI 有需要你确认的步骤时，会出现在这里。
           </p>
         </div>
       </section>

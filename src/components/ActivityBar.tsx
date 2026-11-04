@@ -1,13 +1,7 @@
-import logo from "../assets/logo.png";
-import { PRODUCT_NAME } from "../brand";
-
 /** 最左侧窄条。本期只有「客户端」一项，没做的入口不显示。 */
 export function ActivityBar() {
   return (
     <nav className="activity-bar" aria-label="主导航">
-      <div className="activity-bar__brand">
-        <img className="activity-bar__mark" src={logo} alt={PRODUCT_NAME} />
-      </div>
       <button
         type="button"
         className="activity-bar__item is-active"

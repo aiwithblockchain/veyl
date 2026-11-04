@@ -828,6 +828,14 @@ pre {
   cursor: default;
 }
 
+/* 禁用的主按钮不是「变淡的实心块」：换成浅底 + 弱文字，避免抢过标题 */
+.btn--primary:disabled {
+  background: var(--bg-hover);
+  border-color: var(--line);
+  color: var(--ink-3);
+  opacity: 1;
+}
+
 .btn--primary {
   background: var(--ink);
   color: var(--bg);
@@ -1395,9 +1403,9 @@ pre {
   min-height: 100vh;
   overflow-y: auto;
   display: flex;
-  align-items: flex-start;
+  align-items: safe center;
   justify-content: center;
-  padding: clamp(56px, 13vh, 128px) 24px 48px;
+  padding: 40px 24px;
   background: var(--bg);
 }
 
@@ -1644,28 +1652,28 @@ pre {
 }
 
 .onboarding__divider {
+  width: 48px;
   height: 1px;
-  margin: 26px 0 20px;
+  margin: 28px auto 18px;
   background: var(--line);
 }
 
 .onboarding__manual {
   align-self: center;
-  height: 36px;
-  padding: 0 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 0;
   background: transparent;
-  color: var(--ink-2);
+  color: var(--ink-3);
   font-size: var(--fs-small);
   font-weight: 500;
-  transition: background 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
+  transition: color 120ms ease-out;
 }
 
 .onboarding__manual:not(:disabled):hover {
-  background: var(--bg-hover);
-  border-color: var(--line-strong);
   color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .onboarding__manual:disabled {
@@ -1875,22 +1883,6 @@ pre {
   padding: 12px 0;
   background: var(--bg-raise);
   border-right: 1px solid var(--line);
-}
-
-.activity-bar__brand {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  margin-bottom: 14px;
-}
-
-.activity-bar__mark {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  object-fit: contain;
 }
 
 .activity-bar__item {
@@ -2258,19 +2250,12 @@ pre {
 
 .console-top {
   display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 18px 28px 16px;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 28px;
   border-bottom: 1px solid var(--line);
   background: var(--bg);
   flex-shrink: 0;
-}
-
-.console-top__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
 }
 
 .console-top__primary {
@@ -2286,7 +2271,9 @@ pre {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-width: 0;
+  flex: 0 1 320px;
+  min-width: 72px;
+  max-width: 320px;
 }
 
 .route__label {
@@ -2366,6 +2353,8 @@ pre {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  flex: 0 0 auto;
+  max-width: 180px;
   min-width: 0;
   font-size: var(--fs-small);
   color: var(--ink-3);
@@ -2403,13 +2392,6 @@ pre {
   background: var(--warn);
 }
 
-.console-top__right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
 .console-panel-toggle {
   position: relative;
   flex: none;
@@ -2418,6 +2400,7 @@ pre {
   justify-content: center;
   width: 32px;
   height: 32px;
+  margin-left: auto;
   border: 0;
   border-radius: var(--r-sm);
   background: transparent;
@@ -2669,6 +2652,36 @@ pre {
   flex: none;
   font-size: 11px;
   color: var(--ink-3);
+}
+
+/* 窄屏且右栏停靠时，控制台会被压薄；收起线路图，状态另起一行，
+   保证「正在启动…」这类文案不被截断。（<1100 的右栏浮层属后续批次。） */
+@media (max-width: 1100px) {
+  .app--panel-open .console-top {
+    flex-wrap: wrap;
+    gap: 6px 8px;
+    padding: 12px;
+  }
+
+  .app--panel-open .console-top__primary {
+    height: 36px;
+    padding: 0 12px;
+    font-size: var(--fs-small);
+  }
+
+  .app--panel-open .route {
+    display: none;
+  }
+
+  .app--panel-open .console-panel-toggle {
+    order: 2;
+  }
+
+  .app--panel-open .console-status {
+    order: 3;
+    flex: 0 0 100%;
+    max-width: 136px;
+  }
 }
 
 /* ---------- 右栏：AI 面板 ---------- */
