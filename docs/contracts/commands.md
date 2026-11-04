@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.3.2`
+> 契约版本：`2.3.3`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -744,7 +744,7 @@ type RuntimeSnapshot = {
 
 - `mode` 在 2.0 扩展为 `"system_proxy" | "tun"`；`tun` 在批 5 接线前不会出现。
 - `pid` / `upstream_version` / `uptime_seconds` 在 `idle` 与 `failed` 下**必须为 `null`**。
-- `traffic` 在 `idle` / `failed` 下为 `null`，其余状态不得为 `null`。
+- `traffic` 为 `null` 表示**没有数据**（未连接 / 刚连上还没采到 / TUN 模式），不是 0 字节；采样失败保留上一次的值。数据源、频率与速率算法见 `runtime.md` §2.4。
 - `config_id` / `node_id` 与 `connected_since` 同生同灭：只在 `running` / `degraded` 下非 `null`。
 - 字段恒存在，无值写 `null`，**不得省略键**。
 
@@ -1339,12 +1339,12 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.3.2** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 |
-| `contracts/events.md` | **2.1.0** | 批 0 + 批 3 |
-| `contracts/runtime.md` | **2.1.0** | 批 0 + `applied_route_revision` |
+| `contracts/commands.md` | **2.3.3** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 |
+| `contracts/events.md` | **2.2.0** | 批 0 + 批 3 + 流量进健康事件 |
+| `contracts/runtime.md` | **2.2.0** | 批 0 + `applied_route_revision` + 流量口径 |
 | `contracts/tools.md` | **3.2.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 |
 | `data-model.md` | **3** | 批 0 + 批 3 表 + 种子排除表 |
-| `contracts/routing.md` | **1.0.0** | 批 3 设计依据 |
+| `contracts/routing.md` | **1.1.0** | 批 3 设计依据 |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
 
 ### 15.6 2.1.0 新增（非破坏性）
@@ -1356,6 +1356,14 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.3.3（2026-11-04，流量口径）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.3.3` | 元数据 | 流量采样落地 |
+| 2 | §7.3 里 `traffic` 的不变量改为与 `runtime.md` §2.4 一致：`null` = 没有数据（未连接 / 尚未采到 / TUN），不是 0 字节 | 语义修正 | 实现 `0576da4` |
+| 3 | §16 版本矩阵同步 `events.md` 2.2.0、`runtime.md` 2.2.0、`routing.md` 1.1.0 | 元数据 | 矩阵滞后于各文件的真实版本 |
 
 ### 2.3.2（2026-11-04，节点来源对外叫「测试节点」）
 

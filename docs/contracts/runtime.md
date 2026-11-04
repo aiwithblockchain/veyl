@@ -1,6 +1,6 @@
 # 契约：Runtime Manager
 
-> 契约版本：`2.1.0`
+> 契约版本：`2.2.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 冻结前评审：PM / Alice / Bob
 > 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5、`docs/tun-mode.md`
@@ -129,13 +129,27 @@ type HealthSnapshot = {
 
 ```ts
 type TrafficStats = {
-  up_bytes: number;      // 本次运行累计上行字节
-  down_bytes: number;    // 本次运行累计下行字节
-  up_rate: number;       // 字节/秒，来自 /traffic
-  down_rate: number;     // 字节/秒
+  up_bytes: number;      // 本次运行累计上行字节（/connections 的 uploadTotal）
+  down_bytes: number;    // 本次运行累计下行字节（/connections 的 downloadTotal）
+  up_rate: number;       // 字节/秒：相邻两次采样差值 ÷ 实际间隔（约 2s）
+  down_rate: number;     // 同上
   sampled_at: string;    // ISO 8601 UTC
 };
 ```
+
+**数据来源与频率（按实现，不是设想）：**
+
+| 项 | 值 |
+|---|---|
+| 数据源 | `GET /connections` 的累计值 `uploadTotal` / `downloadTotal`，单位字节，从 sing-box 进程启动起累加 |
+| 采样频率 | **2 秒一次**，与 `clash_api` 健康检查同频（`health_interval`）；不单独起定时器 |
+| 速率算法 | 相邻两次采样的差值 ÷ 两次采样的实际间隔。间隔不一定正好 2.000 秒，所以 `up_rate` / `down_rate` 是**约 2 秒的平均值，不是每秒精确值** |
+| 第一个样本 | 还没有可比较的上一次采样时，两个速率为 `0`，累计字节是真实值 |
+| 采样失败 | **保留上一次的值**，不清零、不报错。失败只影响展示，不影响运行时状态 |
+| 重置时机 | 断开时清空；开始新一次连接时清空。上一次连接的流量**不得**带进这一次 |
+| TUN 模式 | 恒为 `null`：TUN 的 sing-box 进程不归 `RuntimeManager` 管，采样只覆盖代理模式 |
+
+> **`null` 是「没有数据」，不是「用了 0 字节」。** UI 必须把两者分开显示——把 `null` 渲染成 `0 B/s` 会让用户以为连接没在走流量。
 
 ### 2.5 运行时状态快照（`RuntimeStatus` 的 `data`）
 
@@ -170,7 +184,7 @@ type RuntimeSnapshot = {
 实现要求：
 
 - `pid` / `upstream_version` / `uptime_seconds` 在 `idle` 与 `failed` 下**必须为 `null`**，不得为 0 或空串。
-- `traffic` 在 `idle` / `failed` 下为 `null`；其余状态不得为 `null`。
+- `traffic` 为 `null` 表示**没有数据**，不是 0 字节。具体是：未连接（`idle` / `failed`）、刚连上还没采到第一个样本、TUN 模式（采样不覆盖）。采样失败时保留上一次的值，**不得清成 0**。
 - `config_hash` 用于 UI 判断「配置是否变化」，不是安全校验手段。
 - `mode` 在 `idle` / `failed` 下为 `null`；在 `starting` / `running` / `restarting` / `degraded` / `stopping` 下非 `null`。
 
@@ -282,7 +296,7 @@ type AivpnError = {
 | `clash_api` | 2s | 1s | `GET /version` 返回 200 且 body 可解析 |
 | `data_plane` | 10s | 5s | 经本地 mixed 入站访问探测 URL 成功 |
 | `exit_ip` | 连接成功后一次 + 每 60s | 5s | 返回合法 IP |
-| `traffic` | 30s | 1s | `/traffic` 连接可建立 |
+| `traffic` | 2s（与 `clash_api` 同频） | 2s | `GET /connections` 返回 200 且 body 可解析；取 `uploadTotal` / `downloadTotal` 算累计与速率 |
 
 判定规则：
 
@@ -351,13 +365,14 @@ Accept: application/json
 | 方法 | 路径 | 用途 | 超时 |
 |---|---|---|---|
 | GET | `/version` | 就绪探测、运行版本 | 1s |
-| GET | `/traffic` | 流式上下行速率（NDJSON，约 1s 一条） | 长连接 |
-| GET | `/connections` | 活动连接数 | 2s |
+| GET | `/connections` | 活动连接数；**累计流量 `uploadTotal` / `downloadTotal`**（`traffic` 的唯一数据源） | 2s |
 | GET | `/proxies` | 出站列表 | 2s |
 | GET | `/proxies/{name}/delay?url=<u>&timeout=<ms>` | 延迟测试 | 2s |
 | PUT | `/configs?force=true` | 热更新配置 | 5s |
 | GET | `/logs?level=<lvl>` | 流式日志 | 长连接 |
 | POST | `/close`（若版本支持） | 优雅退出；不支持则发信号 | 2s |
+
+> **`/traffic`（NDJSON 流式，约 1s 一条）当前不使用——它是路线图项，不是现状。** 现有实现用 `/connections` 的累计值做差分（见 §2.4）：2 秒一个样本、速率取平均值，已能满足展示需要。将来若要更细的每秒速率，可以改用 `/traffic`，那是一次独立的优化，不影响本契约的 `TrafficStats` 形状。**实现方不要把它当成已接通的端点。**
 
 ### 5.4 响应类型
 
@@ -562,6 +577,18 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 ---
 
 ## 12. 变更记录
+
+### 2.2.0（2026-11-04，流量采样的真实口径）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 契约版本升到 `2.2.0`（与 `events.md` 2.2.0 同一次改动） | 元数据 | 流量采样落地 |
+| 2 | §2.4 改成按实现写：数据源 `GET /connections` 的 `uploadTotal` / `downloadTotal`，2 秒一次，速率是相邻两次差值的平均值（首样本为 0；失败保留上次值；断开与新连接都重置；TUN 恒 `null`） | 语义修正 | 实现 `0576da4` |
+| 3 | §2.5 删除「其余状态不得为 `null`」：`null` 表示没有数据，未连接 / 尚未采到 / TUN 都是 `null`，不是 0 字节 | 语义修正 | 同上；把 `null` 渲染成 0 会让用户误判 |
+| 4 | §4.1 健康检查表：`traffic` 由「30s 一次、探测 `/traffic` 可连通」改为「2s 一次、`/connections` 可解析」 | 修正 | 同上 |
+| 5 | §5.3 把 `/traffic` 从「使用的端点」移出，明确标为**未实现的可选优化**，不是现状 | 澄清 | 代码里除注释外没有任何 `/traffic` 引用 |
+
+> 本文件版本升到 `2.2.0` 表示**语义**已更新；线上 `RuntimeSnapshot.contract_version` 仍是 `2.1.0`（快照形状没变，代码常量未动），等下次改 runtime 代码时再一起升，届时 §2.5 / §2.6 里的字面量同步。
 
 ### 2.1.0（2026-11-03，批 3 · 分流与 DNS）
 

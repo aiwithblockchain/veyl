@@ -83,8 +83,7 @@
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/version` | 就绪探测、运行版本 |
-| GET | `/traffic` | 流式上下行速率（约 1 秒一条） |
-| GET | `/connections` | 活动连接（默认脱敏） |
+| GET | `/connections` | 活动连接（默认脱敏）；累计流量取 `uploadTotal` / `downloadTotal` |
 | GET | `/proxies` | 出站列表 |
 | GET | `/proxies/{name}/delay` | 节点延迟测试 |
 | PUT | `/configs?force=true` | 热更新配置 |
@@ -235,7 +234,7 @@ Profile（用户配置）
 | Clash API | 2s | `GET /version` 200 |
 | 数据面 | 10s | 通过本地 mixed 入站发一次探测请求 |
 | 出口 | 30s | 查询出口 IP（隐私模式下跳过） |
-| 流量流 | 30s | `/traffic` 能持续返回（无流量时仅作参考） |
+| 流量采样 | 2s（与 Clash API 同频） | `GET /connections` 返回累计值；失败只影响展示，不影响状态 |
 
 连续 3 次失败 → `degraded`。
 
