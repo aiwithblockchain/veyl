@@ -9,6 +9,7 @@ export const PANEL_MIN = 360;
 export const PANEL_MAX = 560;
 export const CONSOLE_MIN = 420;
 export const OVERLAY_BREAKPOINT = 1100;
+/** 浮层的理论上限；实际还受当前窗口停靠时右栏的有效上限钳制，见 computePaneLayout。 */
 export const OVERLAY_MAX = 480;
 
 export interface PaneLayout {
@@ -77,6 +78,7 @@ export function computePaneLayout(input: {
   if (floating) {
     const rail = clampWidth(railPref, RAIL_MIN, railMaxFor(windowWidth, 0));
     // 不超过停靠时这个窗口能给右栏的宽度，跨 1100 不会反向跳。
+    // 取舍：900 宽时浮层从 480 降到 360，窄屏优先让控制台完整可见，是有意的。
     const dockedPanelMax = panelMaxFor(windowWidth, rail);
     return {
       floating: true,
@@ -102,6 +104,8 @@ export function computePaneLayout(input: {
     };
   }
 
+  // 左栏跨 1100 会反向跳（如偏好 360：浮层 360、停靠 264）：
+  // 停靠后右栏必须占列宽，这是结构性结果，不在跨断点连续性修复范围内。
   const available = windowWidth - ACTIVITY_WIDTH - CONSOLE_MIN;
   let rail: number;
   let panel: number;

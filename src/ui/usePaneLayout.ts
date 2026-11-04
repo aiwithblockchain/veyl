@@ -205,7 +205,8 @@ export function usePaneLayout({
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     const startWidth = pane === "rail" ? layout.rail : layout.panel;
-    const startPref = pane === "rail" ? railPref : panelPref;
+    // 压缩时偏好大于可见宽度；基准取可见宽度，松手按它重算才不会回弹。
+    const startPref = Math.min(pane === "rail" ? railPref : panelPref, startWidth);
     dragRef.current = {
       pane,
       startX: event.clientX,
@@ -257,8 +258,11 @@ export function usePaneLayout({
   const handleKeyDown =
     (pane: Pane) => (event: ReactKeyboardEvent<HTMLDivElement>) => {
       const pref = pane === "rail" ? railPref : panelPref;
+      const current = pane === "rail" ? layout.rail : layout.panel;
+      // 以用户看到的宽度为基准；偏好高于有效宽度时不会出现按键死区。
+      const base = Math.min(pref, current);
       const min = pane === "rail" ? RAIL_MIN : PANEL_MIN;
-      const max = pane === "rail" ? RAIL_MAX : PANEL_MAX;
+      const max = pane === "rail" ? railMax : panelMax;
       if (event.key === "Home") {
         event.preventDefault();
         snap(pane, pane === "rail" ? RAIL_DEFAULT : PANEL_DEFAULT);
@@ -275,9 +279,8 @@ export function usePaneLayout({
       const direction = event.key === "ArrowRight" ? 1 : -1;
       // 左栏向右变宽；右栏手柄在左边界，向左变宽。
       const delta = pane === "rail" ? direction * step : -direction * step;
-      // 调整偏好而不是有效宽度，避免窗口变宽后回不到原值。
-      const next = clampWidth(pref + delta, min, max);
-      if (next === pref) return;
+      const next = clampWidth(base + delta, min, max);
+      if (next === base) return;
       commit(pane, next, false);
     };
 

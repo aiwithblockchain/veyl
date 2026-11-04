@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { act, renderHook } from "@testing-library/react";
+import { act, fireEvent, renderHook } from "@testing-library/react";
 import type {
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
@@ -40,17 +40,30 @@ function setup(width: number) {
   return result;
 }
 
-function pointerEvent(clientX: number): ReactPointerEvent<HTMLDivElement> {
+interface PointerTarget {
+  setPointerCapture: ReturnType<typeof vi.fn>;
+  hasPointerCapture: () => boolean;
+  releasePointerCapture: ReturnType<typeof vi.fn>;
+}
+
+function makeTarget(): PointerTarget {
+  return {
+    setPointerCapture: vi.fn(),
+    hasPointerCapture: () => true,
+    releasePointerCapture: vi.fn(),
+  };
+}
+
+function pointerEvent(
+  clientX: number,
+  target: PointerTarget = makeTarget(),
+): ReactPointerEvent<HTMLDivElement> {
   return {
     button: 0,
     pointerId: 1,
     clientX,
     preventDefault: vi.fn(),
-    currentTarget: {
-      setPointerCapture: vi.fn(),
-      hasPointerCapture: () => true,
-      releasePointerCapture: vi.fn(),
-    },
+    currentTarget: target,
   } as unknown as ReactPointerEvent<HTMLDivElement>;
 }
 
@@ -109,21 +122,64 @@ describe("usePaneLayout 偏好持久化", () => {
     expect(localStorage.getItem("veyl.ui.panelWidth")).toBe("400");
   });
 
-  it("窄窗口 End 存名义上限 560，不存有效上限 384", () => {
+  it("窄窗口 End 跳到有效上限 384", () => {
     vi.useFakeTimers();
-    localStorage.setItem("veyl.ui.panelWidth", "400");
+    localStorage.setItem("veyl.ui.panelWidth", "560");
     const result = setup(1100);
     act(() => result.current.panelHandlers.onKeyDown(keyEvent("End")));
     act(() => vi.advanceTimersByTime(150));
-    expect(localStorage.getItem("veyl.ui.panelWidth")).toBe("560");
+    expect(localStorage.getItem("veyl.ui.panelWidth")).toBe("384");
   });
 
-  it("拖拽存起始偏好加位移，不存有效宽度", () => {
-    localStorage.setItem("veyl.ui.panelWidth", "400");
+  it("偏好高于有效宽度时，第一次方向键就生效", () => {
+    vi.useFakeTimers();
+    localStorage.setItem("veyl.ui.panelWidth", "560");
     const result = setup(1100);
+    expect(result.current.panel).toBe(384);
+    act(() => result.current.panelHandlers.onKeyDown(keyEvent("ArrowRight")));
+    expect(result.current.panel).toBe(368);
+    act(() => vi.advanceTimersByTime(150));
+    expect(localStorage.getItem("veyl.ui.panelWidth")).toBe("368");
+  });
+
+  it("拖拽存可见宽度加位移", () => {
+    localStorage.setItem("veyl.ui.panelWidth", "400");
+    const result = setup(1440);
     act(() => result.current.panelHandlers.onPointerDown(pointerEvent(500)));
     act(() => result.current.panelHandlers.onPointerMove(pointerEvent(490)));
     act(() => result.current.panelHandlers.onPointerUp());
     expect(localStorage.getItem("veyl.ui.panelWidth")).toBe("410");
+  });
+
+  it("压缩区间右栏拖拽松手不回弹：484 拖到 444 后保持", () => {
+    localStorage.setItem("veyl.ui.panelWidth", "560");
+    const result = setup(1200);
+    act(() => result.current.panelHandlers.onPointerDown(pointerEvent(500)));
+    act(() => result.current.panelHandlers.onPointerMove(pointerEvent(540)));
+    expect(result.current.panel).toBe(444);
+    act(() => result.current.panelHandlers.onPointerUp());
+    expect(result.current.panel).toBe(444);
+    expect(localStorage.getItem("veyl.ui.panelWidth")).toBe("444");
+  });
+
+  it("压缩区间左栏拖拽松手不回弹：264 拖到 228 后保持", () => {
+    localStorage.setItem("veyl.ui.railWidth", "300");
+    const result = setup(1100);
+    act(() => result.current.railHandlers.onPointerDown(pointerEvent(500)));
+    act(() => result.current.railHandlers.onPointerMove(pointerEvent(464)));
+    expect(result.current.rail).toBe(228);
+    act(() => result.current.railHandlers.onPointerUp());
+    expect(result.current.rail).toBe(228);
+    expect(localStorage.getItem("veyl.ui.railWidth")).toBe("228");
+  });
+
+  it("取消拖拽时释放 pointer capture", () => {
+    const result = setup(1100);
+    const target = makeTarget();
+    act(() => result.current.railHandlers.onPointerDown(pointerEvent(500, target)));
+    act(() => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+    expect(target.releasePointerCapture).toHaveBeenCalledWith(1);
   });
 });
