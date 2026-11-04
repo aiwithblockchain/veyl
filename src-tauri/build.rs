@@ -55,6 +55,10 @@ fn main() {
     }
     println!("cargo:rustc-env=VEYL_RULES_ARCHIVE_SHA256={rules_digest}");
 
+    // 提示词被 include_str! 编进二进制；改了它要让 cargo 重新编译。
+    let prompts = manifest.join("../resources/prompts");
+    println!("cargo:rerun-if-changed={}", prompts.display());
+
     tauri_build::build()
 }
 
