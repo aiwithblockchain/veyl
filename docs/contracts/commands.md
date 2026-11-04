@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.3.0`
+> 契约版本：`2.3.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -888,6 +888,8 @@ type SeedImportResult = {
 - 不影响来源标记：`source` 仍是 `ui`，UI 不能借 `hidden` 改变权限或绕过命令入口。
 - 允许其它场景使用，但调用方应能解释为什么这条用户消息不该出现在历史里。
 
+**历史回放的约束（将来）。** 当前 `AivpnSession::messages` 在新建时为空，模型**不从 `chat_messages` 回放上下文**（`src-tauri/src/claurst_session/mod.rs:188`、`:554-585`），所以 `hidden` 不落库不影响当前对话。**若将来实现历史回放**，必须在 `chat_messages` 里为 hidden 消息保留标记（例如新增 `hidden` 列），或从 assistant 消息反推重建；否则模型会看到一串没有对应提问的 assistant 消息，上下文直接错乱。这是一条实现前置约束，不是「以后再说」的备注。
+
 > **`attachments` 已删除（2.3.0）。** 它自 1.0 起只在本命令里声明过：Rust 形参从未接收、前端从未传、`docs/` 里没有任何需求、UI 或存储设计。属于「声明了但从未实现、也没有计划」的字段，留着会让契约与实现永久对不上。将来要做附件，按新能力重新设计，不复用这个占位。
 
 ### 9.2 `ai_cancel { requestId }` → `{ cancelled: boolean }`
@@ -1337,7 +1339,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.3.0** | 批 0 + 批 3 + `ai_send_message.hidden` |
+| `contracts/commands.md` | **2.3.1** | 批 0 + 批 3 + `ai_send_message.hidden` |
 | `contracts/events.md` | **2.1.0** | 批 0 + 批 3 |
 | `contracts/runtime.md` | **2.1.0** | 批 0 + `applied_route_revision` |
 | `contracts/tools.md` | **3.2.0** | 批 0 + 批 3 工具 + 批 3 修订 |
@@ -1354,6 +1356,13 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.3.1（2026-11-04，`hidden` 与历史回放的约束）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.3.1` | 元数据 | 代码审查指出的将来坑 |
+| 2 | §9.1 补约束：将来实现历史回放时，必须为 hidden 消息保留标记或从 assistant 消息反推重建 | 约束 | 当前不回放，故现在无影响 |
 
 ### 2.3.0（2026-11-04，`ai_send_message` 补 `hidden`）
 
