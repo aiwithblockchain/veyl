@@ -15,11 +15,13 @@ import { AiPanel, type RenameResult } from "./components/AiPanel";
 import { AskQuestionDialog } from "./components/AskQuestionDialog";
 import { ConfigRail } from "./components/ConfigRail";
 import { Console } from "./components/Console";
+import { IconClose } from "./components/icons";
 import { Onboarding } from "./components/Onboarding";
 import { Settings, describeImportError } from "./components/Settings";
 import type { ConnectMode } from "./config/model";
 import { useVpnSession } from "./config/useVpnSession";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
+import { useFocusTrap } from "./ui/focus";
 import "./styles/app.css";
 
 const AI_EVENTS = new Set<AgentEvent["name"]>([
@@ -101,6 +103,8 @@ export default function App() {
   const panelAutoOpenedRef = useRef(readFlag(PANEL_AUTO_OPENED_KEY));
   const aiConfiguredRef = useRef(false);
   const onboardingSkippedRef = useRef(readFlag(ONBOARDING_SKIPPED_KEY));
+  const confirmConfigRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(Boolean(pendingConfigId), confirmConfigRef);
 
   const markQuestionSettled = (questionId: string) => {
     const settled = settledQuestionIds.current;
@@ -372,6 +376,15 @@ export default function App() {
   useEffect(() => {
     if (vpn.connection !== "idle") setVpnActionFailed(false);
   }, [vpn.connection]);
+
+  useEffect(() => {
+    if (!pendingConfigId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPendingConfigId(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [pendingConfigId]);
 
   const completeOnboarding = async () => {
     setShowOnboarding(false);
@@ -780,6 +793,7 @@ export default function App() {
       {pendingConfig ? (
         <div className="modal-backdrop" onMouseDown={() => setPendingConfigId(null)}>
           <div
+            ref={confirmConfigRef}
             className="modal modal--confirm"
             role="dialog"
             aria-modal="true"
@@ -790,6 +804,14 @@ export default function App() {
               <h2 id="switch-config-title" className="modal__title">
                 切换配置
               </h2>
+              <button
+                type="button"
+                className="modal__close"
+                onClick={() => setPendingConfigId(null)}
+                aria-label="关闭"
+              >
+                <IconClose size={14} />
+              </button>
             </header>
             <p className="confirm__text">
               切到「{pendingConfig.name}」会先断开当前连接，再按新配置重新连上。
