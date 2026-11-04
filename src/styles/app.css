@@ -31,9 +31,10 @@
   --warn: #A96A00;
   --err: #BE3A2E;
 
-  /* 品牌强调只用于「信号在流动」这一处，不做底色 */
-  --brand-magenta: #D149A3;
-  --brand-orange: #E58D4D;
+  /* 品牌强调只用于「信号在流动」这一处，不做底色；色值取自 logo 母版 */
+  --brand-magenta-deep: #C83878;
+  --brand-magenta: #D8489A;
+  --brand-orange: #E89048;
   --ok-text: #14704A;
   --warn-text: #875A00;
   --err-text: #A93A2F;
@@ -2355,7 +2356,12 @@ pre {
 }
 
 .route.is-connected .route__flow {
-  background-image: linear-gradient(90deg, var(--brand-magenta), var(--brand-orange));
+  background-image: linear-gradient(
+    90deg,
+    var(--brand-magenta-deep),
+    var(--brand-magenta) 45%,
+    var(--brand-orange)
+  );
   -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 5px, transparent 5px 17px);
   mask-image: repeating-linear-gradient(90deg, #000 0 5px, transparent 5px 17px);
   -webkit-mask-size: 17px 100%;
