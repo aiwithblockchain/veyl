@@ -142,6 +142,24 @@ export interface NetRepairResult {
   verified: boolean;
 }
 
+/** 强制重置网络的单步状态；后端目前只回 ok 布尔，skipped 留给后续逐步事件。 */
+export type NetworkResetStepStatus = "ok" | "failed" | "skipped";
+
+export interface NetworkForceResetStep {
+  id: string;
+  ok: boolean;
+  detail: string;
+  status?: NetworkResetStepStatus;
+}
+
+/** `network_force_reset` 的返回：八步固定、顺序固定，UI 只按 steps 渲染。 */
+export interface NetworkForceResetResult {
+  ok: boolean;
+  verified: boolean;
+  exitIp: string | null;
+  steps: NetworkForceResetStep[];
+}
+
 /** 模型端点配置（R32）。线格式 snake_case，由 bridge 转成 camelCase。 */
 export type LlmProtocol = "openai" | "anthropic";
 
@@ -244,6 +262,8 @@ export interface AgentBridge {
   defaultProfileRefresh(): Promise<DefaultProfileStatus>;
   /** 恢复网络：撤代理 → 停运行时 → 清明文配置（不依赖 AI）。 */
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
+  /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */
+  networkForceReset(): Promise<NetworkForceResetResult>;
   /** 用系统文件管理器定位日志文件。 */
   openLogDir(): Promise<void>;
   /** 用系统默认浏览器打开链接。tauri 侧等 Host 接 opener 后实现。 */

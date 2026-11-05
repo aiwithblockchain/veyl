@@ -15,6 +15,9 @@ import type {
   LlmProviderTestResult,
   NetRepairAction,
   NetRepairResult,
+  NetworkForceResetResult,
+  NetworkForceResetStep,
+  NetworkResetStepStatus,
   NodeProbeResult,
   NodeSwitchResult,
   PendingQuestion,
@@ -77,6 +80,26 @@ function normalizeProvider(raw: RawLlmProvider): LlmProvider {
     hasKey: raw.has_key === true,
     isActive: raw.is_active === true,
     isBuiltin: raw.is_builtin === true,
+  };
+}
+
+function normalizeResetStep(raw: {
+  id?: string;
+  ok?: boolean;
+  detail?: string | null;
+  status?: string;
+}): NetworkForceResetStep {
+  const status: NetworkResetStepStatus =
+    raw.status === "ok" || raw.status === "failed" || raw.status === "skipped"
+      ? raw.status
+      : raw.ok === true
+        ? "ok"
+        : "failed";
+  return {
+    id: raw.id ?? "",
+    ok: raw.ok === true,
+    detail: raw.detail ?? "",
+    status,
   };
 }
 
@@ -208,6 +231,26 @@ export class TauriAgentBridge implements AgentBridge {
       detail: raw.detail ?? "",
       exitIp: raw.exit_ip ?? null,
       verified: raw.verified === true,
+    };
+  }
+
+  async networkForceReset(): Promise<NetworkForceResetResult> {
+    const raw = await call<{
+      ok?: boolean;
+      verified?: boolean;
+      exit_ip?: string | null;
+      steps?: Array<{
+        id?: string;
+        ok?: boolean;
+        detail?: string | null;
+        status?: string;
+      }>;
+    }>("network_force_reset");
+    return {
+      ok: raw.ok === true,
+      verified: raw.verified === true,
+      exitIp: raw.exit_ip ?? null,
+      steps: (raw.steps ?? []).map(normalizeResetStep),
     };
   }
 

@@ -8,6 +8,8 @@ import type {
   LlmProtocol,
   LlmProvider,
   LlmProviderInput,
+  NetworkForceResetResult,
+  NetworkForceResetStep,
 } from "../agent/bridge";
 import { isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import type { RuntimeView } from "../agent/protocol";
@@ -55,6 +57,168 @@ interface ProviderForm {
 }
 
 type TestState = { state: "idle" | "running" | "ok" | "error"; text: string };
+
+type ResetPhase = "idle" | "confirm" | "running" | "result";
+
+type ResetStepKey =
+  | "stop_runtime"
+  | "stop_tun"
+  | "sweep_processes"
+  | "clear_routes"
+  | "flush_dns"
+  | "restore_proxy"
+  | "clear_plaintext"
+  | "verify";
+
+/** 后端 id 与设计文档 id 并存，界面只认归一后的中文名。 */
+const RESET_STEP_ALIASES: Record<string, ResetStepKey> = {
+  stop_runtime: "stop_runtime",
+  stop_tun: "stop_tun",
+  sweep_processes: "sweep_processes",
+  clean_leftovers: "sweep_processes",
+  clear_routes: "clear_routes",
+  restore_routes: "clear_routes",
+  flush_dns: "flush_dns",
+  restore_dns: "flush_dns",
+  restore_proxy: "restore_proxy",
+  clear_plaintext: "clear_plaintext",
+  remove_temp_config: "clear_plaintext",
+  verify: "verify",
+};
+
+const RESET_STEP_LABELS: Record<ResetStepKey, string> = {
+  stop_runtime: "停止运行时",
+  stop_tun: "关闭接管",
+  sweep_processes: "清理残留组件",
+  clear_routes: "恢复系统路由",
+  flush_dns: "恢复 DNS",
+  restore_proxy: "撤销系统代理",
+  clear_plaintext: "删除临时配置",
+  verify: "复查网络状态",
+};
+
+const RESET_STEP_NEXT: Record<ResetStepKey, string> = {
+  stop_runtime: "退出其它 VPN 后点「再试一次」；仍失败就重启电脑。",
+  stop_tun: "点「再试一次」；仍失败就重启电脑。",
+  sweep_processes: "退出其它 VPN 或安全软件后点「再试一次」。",
+  clear_routes: "重启电脑后再试一次；仍然不行，展开「手动清理路由」。",
+  flush_dns: "点「再试一次」；仍失败就在系统设置里把 DNS 改回自动。",
+  restore_proxy: "点「再试一次」；仍失败就重启电脑后再试。",
+  clear_plaintext: "点「再试一次」；这不影响上网。",
+  verify: "点「再试一次」；仍失败就复制诊断信息发给助手。",
+};
+
+/** 成功行用设计文档的固定说明；后端 detail 可能带内部路径，不适合直接展示。 */
+const RESET_STEP_DONE: Record<ResetStepKey, string> = {
+  stop_runtime: "运行时进程已停止。",
+  stop_tun: "接管已关闭。",
+  sweep_processes: "没有遗留的 Veyl 网络组件。",
+  clear_routes: "系统路由已恢复。",
+  flush_dns: "DNS 已恢复为系统默认。",
+  restore_proxy: "系统代理已恢复到连接前的设置。",
+  clear_plaintext: "临时配置文件已删除。",
+  verify: "代理、路由、DNS 和组件都符合预期。",
+};
+
+const RESET_STEP_FAILED: Record<ResetStepKey, string> = {
+  stop_runtime: "还有运行时没停下来。",
+  stop_tun: "接管没有关闭。",
+  sweep_processes: "还有残留组件。",
+  clear_routes: "系统路由还有残留。",
+  flush_dns: "DNS 没有恢复。",
+  restore_proxy: "系统代理没有恢复。",
+  clear_plaintext: "临时配置没有删掉。",
+  verify: "复查没有通过。",
+};
+
+/** 前五步失败说明网络还处于半接管状态；后三步只影响完整性。 */
+const RESET_CRITICAL: ReadonlySet<ResetStepKey> = new Set([
+  "stop_runtime",
+  "stop_tun",
+  "sweep_processes",
+  "clear_routes",
+  "restore_proxy",
+]);
+
+export function canonicalResetStep(id: string): ResetStepKey | null {
+  return RESET_STEP_ALIASES[id] ?? null;
+}
+
+export function resetStepLabel(id: string): string {
+  const key = canonicalResetStep(id);
+  return key ? RESET_STEP_LABELS[key] : "其它检查";
+}
+
+export function resetStepStatus(
+  step: NetworkForceResetStep,
+): "ok" | "failed" | "skipped" {
+  if (step.status === "skipped") return "skipped";
+  if (step.status === "ok" || step.status === "failed") return step.status;
+  return step.ok ? "ok" : "failed";
+}
+
+export function resetStepNext(id: string): string | null {
+  const key = canonicalResetStep(id);
+  return key ? RESET_STEP_NEXT[key] : null;
+}
+
+export interface ResetOutcome {
+  kind: "success" | "partial" | "failed" | "unverified";
+  title: string;
+  sub: string;
+}
+
+export function resetOutcome(result: NetworkForceResetResult): ResetOutcome {
+  const unfinished = result.steps.filter((step) => resetStepStatus(step) !== "ok");
+  const partial: ResetOutcome = {
+    kind: "partial",
+    title: `网络已重置，但有 ${Math.max(unfinished.length, 1)} 项没完成`,
+    sub: "其它检查已经通过；按下面的提示处理没完成的项。",
+  };
+
+  if (unfinished.length === 0) {
+    if (result.ok && result.verified) {
+      return {
+        kind: "success",
+        title: "网络已重置",
+        sub: "八项检查都通过。需要时再点「启动 VPN」。",
+      };
+    }
+    // 没有逐项结果时不能凭空说「有 n 项没完成」；下面也没有对应的失败行。
+    if (result.steps.length === 0) {
+      return {
+        kind: "unverified",
+        title: "没拿到逐项结果",
+        sub: "请复制诊断信息发给助手，或再试一次。",
+      };
+    }
+    return {
+      kind: "unverified",
+      title: "网络已重置，但复查没有通过",
+      sub: "每一步都执行了，但复查没有通过。请复制诊断信息发给助手，或再试一次。",
+    };
+  }
+
+  const critical = unfinished.some((step) => {
+    const key = canonicalResetStep(step.id);
+    return key === null || RESET_CRITICAL.has(key);
+  });
+  if (!critical) return partial;
+
+  return {
+    kind: "failed",
+    title: "重置没有完成",
+    sub: "中途有步骤失败，网络可能还没有恢复。按下面的提示处理后再试。",
+  };
+}
+
+export function resetTimeLabel(at: number, now = Date.now()): string {
+  if (now - at < 60_000) return "刚刚";
+  const date = new Date(at);
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  return `今天 ${hh}:${mm}`;
+}
 
 const SECTIONS: Array<{ id: SectionId; label: string }> = [
   { id: "ai", label: "账号与 AI" },
@@ -165,9 +329,26 @@ export function Settings({
   const [providerTest, setProviderTest] = useState<TestState>({ state: "idle", text: "" });
   const [pendingDelete, setPendingDelete] = useState<LlmProvider | null>(null);
   const [diagnosticNotice, setDiagnosticNotice] = useState<string | null>(null);
+  const [resetPhase, setResetPhase] = useState<ResetPhase>("idle");
+  const [resetResult, setResetResult] = useState<NetworkForceResetResult | null>(null);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [lastReset, setLastReset] = useState<{
+    at: number;
+    total: number;
+    failed: number;
+  } | null>(null);
+  const [resetCopy, setResetCopy] = useState<"idle" | "ok" | "error">("idle");
+  const [routeCopy, setRouteCopy] = useState<"idle" | "ok" | "error">("idle");
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(open, dialogRef);
+  const resetDialogRef = useRef<HTMLDivElement>(null);
+  const resetTriggerRef = useRef<HTMLButtonElement>(null);
+  const resetCancelRef = useRef<HTMLButtonElement>(null);
+  const resetCloseRef = useRef<HTMLButtonElement>(null);
+  const returnFocusRef = useRef(false);
+  const copyTimerRef = useRef<number | null>(null);
+  useFocusTrap(open && resetPhase === "idle", dialogRef);
+  useFocusTrap(resetPhase !== "idle", resetDialogRef);
 
   const refreshProviders = useCallback(async () => {
     setProvidersLoading(true);
@@ -206,18 +387,56 @@ export function Settings({
     setProviderTest({ state: "idle", text: "" });
     setPendingDelete(null);
     setDiagnosticNotice(null);
+    setResetPhase("idle");
+    setResetResult(null);
+    setResetError(null);
+    setLastReset(null);
+    setResetCopy("idle");
+    setRouteCopy("idle");
     void refreshProviders();
     refresh();
   }, [open, refresh, refreshProviders, initialSection]);
 
+  const closeReset = useCallback(() => {
+    if (resetPhase === "running") return;
+    returnFocusRef.current = true;
+    setResetPhase("idle");
+    setResetResult(null);
+    setResetError(null);
+    setResetCopy("idle");
+    setRouteCopy("idle");
+  }, [resetPhase]);
+
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape") return;
+      // 重置弹层在上层：先关它，运行中则完全忽略。
+      if (resetPhase !== "idle") {
+        if (resetPhase !== "running") closeReset();
+        return;
+      }
+      onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
+  }, [open, onClose, resetPhase, closeReset]);
+
+  useEffect(() => {
+    if (resetPhase === "confirm") resetCancelRef.current?.focus();
+    if (resetPhase === "result") resetCloseRef.current?.focus();
+    if (resetPhase === "idle" && returnFocusRef.current) {
+      returnFocusRef.current = false;
+      resetTriggerRef.current?.focus();
+    }
+  }, [resetPhase]);
+
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (open && editing) inputRef.current?.focus();
@@ -434,6 +653,68 @@ export function Settings({
     }
   };
 
+  const flashCopy = (
+    setState: (state: "idle" | "ok" | "error") => void,
+    next: "ok" | "error",
+  ) => {
+    setState(next);
+    if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => setState("idle"), 2000);
+  };
+
+  const runNetworkReset = async () => {
+    if (resetPhase === "running") return;
+    setResetResult(null);
+    setResetError(null);
+    setResetCopy("idle");
+    setRouteCopy("idle");
+    setResetPhase("running");
+    try {
+      const result = await bridge.networkForceReset();
+      setResetResult(result);
+      setLastReset({
+        at: Date.now(),
+        total: result.steps.length,
+        failed: result.steps.filter((step) => resetStepStatus(step) !== "ok").length,
+      });
+    } catch (error) {
+      setResetError(describeResetError(error));
+    } finally {
+      setResetPhase("result");
+    }
+  };
+
+  const copyResetReport = async () => {
+    const payload = {
+      app: APP_VERSION,
+      eventSource: bridge.mode,
+      runtimeState: runtime.state,
+      reset: resetResult
+        ? {
+            ok: resetResult.ok,
+            verified: resetResult.verified,
+            exitIp: resetResult.exitIp,
+            steps: resetResult.steps,
+          }
+        : { error: resetError },
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      flashCopy(setResetCopy, "ok");
+    } catch {
+      flashCopy(setResetCopy, "error");
+    }
+  };
+
+  const copyRouteCommand = async () => {
+    try {
+      await navigator.clipboard.writeText("sudo route -n delete -net <残留网段>");
+      flashCopy(setRouteCopy, "ok");
+    } catch {
+      flashCopy(setRouteCopy, "error");
+    }
+  };
+
   const pickFile = useCallback(async () => {
     try {
       const path = await openDialog({
@@ -447,18 +728,33 @@ export function Settings({
     }
   }, [onImportPath, onNotice]);
 
+  const outcome = resetError
+    ? { kind: "failed" as const, title: "重置没有开始", sub: resetError }
+    : resetResult
+      ? resetOutcome(resetResult)
+      : null;
+  const resetTitle =
+    resetPhase === "confirm"
+      ? "强制重置网络？"
+      : resetPhase === "running"
+        ? "正在重置网络"
+        : (outcome?.title ?? "强制重置网络？");
+
   if (!open) return null;
 
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div
-        ref={dialogRef}
-        className="modal modal--settings"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="settings-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
+    <>
+      <div className="modal-backdrop" onMouseDown={onClose}>
+        <div
+          ref={dialogRef}
+          className="modal modal--settings"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="settings-title"
+          aria-hidden={resetPhase !== "idle" ? true : undefined}
+          inert={resetPhase !== "idle"}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
         <header className="modal__head">
           <h2 id="settings-title" className="modal__title">
             设置
@@ -953,13 +1249,13 @@ export function Settings({
 
             <div className="settings-row">
               <div>
-                <div className="settings-row__label">恢复网络</div>
+                <div className="settings-row__label">恢复直连</div>
                 <div className="settings-row__value">
-                  撤销系统代理并停止运行时，适合连不上网时使用。
+                  撤销系统代理并停止运行时；不处理接管残留。
                 </div>
               </div>
               <button type="button" className="btn btn--ghost" onClick={onRestoreNetwork}>
-                恢复网络
+                恢复直连
               </button>
             </div>
 
@@ -1057,6 +1353,8 @@ export function Settings({
               </button>
             </div>
 
+            <div className="settings-subhead">诊断</div>
+
             <div className="settings-row">
               <div>
                 <div className="settings-row__label">诊断信息</div>
@@ -1084,6 +1382,35 @@ export function Settings({
             {diagnosticNotice ? (
               <p className="settings-feedback settings-feedback--ok">{diagnosticNotice}</p>
             ) : null}
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">强制重置网络</div>
+                <div className="settings-row__value">
+                  停掉接管并恢复系统网络设置；保留配置和助手授权。
+                </div>
+                <p className="settings-note">只在「恢复直连」无效时使用。</p>
+                {lastReset ? (
+                  <p
+                    className={`settings-note ${
+                      lastReset.failed > 0 ? "reset-last--warn" : ""
+                    }`}
+                  >
+                    {lastReset.failed > 0
+                      ? `上次重置：${resetTimeLabel(lastReset.at)} · ${lastReset.failed} 项未完成`
+                      : `上次重置：${resetTimeLabel(lastReset.at)} · ${lastReset.total} 项全部完成`}
+                  </p>
+                ) : null}
+              </div>
+              <button
+                ref={resetTriggerRef}
+                type="button"
+                className="btn btn--danger-ghost"
+                onClick={() => setResetPhase("confirm")}
+              >
+                强制重置网络
+              </button>
+            </div>
           </section>
         ) : null}
 
@@ -1131,8 +1458,283 @@ export function Settings({
           </section>
         ) : null}
       </div>
-    </div>
+      </div>
+
+      {resetPhase !== "idle" ? (
+        <div
+          className="modal-backdrop modal-backdrop--nested"
+          onMouseDown={() => {
+            if (resetPhase === "confirm") closeReset();
+          }}
+        >
+          <div
+            ref={resetDialogRef}
+            className="modal modal--confirm reset-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-dialog-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="modal__head">
+              <h2 id="reset-dialog-title" className="modal__title">
+                {resetTitle}
+              </h2>
+              <button
+                type="button"
+                className="modal__close"
+                onClick={closeReset}
+                aria-label="关闭"
+                disabled={resetPhase === "running"}
+              >
+                <IconClose size={14} />
+              </button>
+            </header>
+
+            {resetPhase === "confirm" ? (
+              <div className="reset-confirm">
+                <p className="reset-confirm__warning">
+                  这是最后手段。先到「网络」里点「恢复直连」；只有它无效时再继续。
+                </p>
+                <section className="reset-confirm__section">
+                  <h3 className="reset-confirm__label">会发生什么</h3>
+                  <p className="reset-confirm__text">
+                    当前连接会立即断开。Veyl
+                    会停止接管、清理残留组件和临时文件、恢复路由和 DNS，并撤销系统代理。
+                  </p>
+                </section>
+                <section className="reset-confirm__section">
+                  <h3 className="reset-confirm__label">不会发生什么</h3>
+                  <p className="reset-confirm__text">
+                    不会删除配置和节点，不会撤销助手的授权，也不会改动其它设置。
+                  </p>
+                </section>
+                <section className="reset-confirm__section">
+                  <h3 className="reset-confirm__label">现在做什么</h3>
+                  <p className="reset-confirm__text">
+                    先退出其它 VPN、代理或网络加速软件；如果正在开会或下载，等结束再做。确认后网络会短暂中断，通常几秒内恢复；需要时再点「启动
+                    VPN」。
+                  </p>
+                </section>
+                <div className="settings-actions">
+                  <button
+                    ref={resetCancelRef}
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={closeReset}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--danger-ghost"
+                    onClick={() => void runNetworkReset()}
+                  >
+                    强制重置
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {resetPhase === "running" ? (
+              <div className="reset-running" role="status" aria-live="polite">
+                <p className="reset-running__text">不要关闭 Veyl。网络会短暂中断。</p>
+                <div
+                  className="reset-progress"
+                  role="progressbar"
+                  aria-label="正在重置网络"
+                />
+                <div className="settings-actions">
+                  <button type="button" className="btn btn--ghost" disabled>
+                    正在重置…
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {resetPhase === "result" && outcome ? (
+              <div className="reset-result">
+                <div role="status" aria-live="polite">
+                  <h3 className={`reset-result__title is-${outcome.kind}`}>
+                    {outcome.title}
+                  </h3>
+                  <p className="reset-result__sub">{outcome.sub}</p>
+                </div>
+
+                {resetResult && !resetResult.verified ? (
+                  <p className="reset-result__hint">
+                    网络状态没有通过复查。先点「再试一次」；仍不通过就复制诊断信息发给助手。
+                  </p>
+                ) : null}
+
+                {resetResult && resetResult.steps.length > 0 ? (
+                  <ul className="reset-steps">
+                    {resetResult.steps.map((step, index) => {
+                      const status = resetStepStatus(step);
+                      const key = canonicalResetStep(step.id);
+                      const next = status === "failed" ? resetStepNext(step.id) : null;
+                      const detail =
+                        status === "skipped"
+                          ? "前面一步没有完成，已跳过。"
+                          : status === "ok"
+                            ? key
+                              ? RESET_STEP_DONE[key]
+                              : ""
+                            : key
+                              ? RESET_STEP_FAILED[key]
+                              : "这一步没有完成。";
+                      return (
+                        <li
+                          key={`${step.id}-${index}`}
+                          className={`reset-step is-${status}`}
+                        >
+                          <span className="reset-step__icon" aria-hidden="true">
+                            <ResetStepIcon status={status} />
+                          </span>
+                          <div className="reset-step__body">
+                            <span className="reset-step__label">
+                              {resetStepLabel(step.id)}
+                            </span>
+                            {detail ? (
+                              <span className="reset-step__detail">{detail}</span>
+                            ) : null}
+                            {next ? (
+                              <span className="reset-step__next">{next}</span>
+                            ) : null}
+                          </div>
+                          <span className="reset-step__status">
+                            {status === "ok"
+                              ? "已完成"
+                              : status === "failed"
+                                ? "未完成"
+                                : "未执行"}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : null}
+
+                {resetResult?.steps.some(
+                  (step) =>
+                    resetStepStatus(step) === "failed" &&
+                    canonicalResetStep(step.id) === "clear_routes",
+                ) ? (
+                  <details className="reset-route-help">
+                    <summary>手动清理路由（高级）</summary>
+                    <ol>
+                      <li>
+                        先确认当前默认网关：<code>route -n get default</code>
+                      </li>
+                      <li>
+                        只删除诊断信息里标出的那一条残留路由：
+                        <span className="reset-route-help__code">
+                          <code>sudo route -n delete -net &lt;残留网段&gt;</code>
+                          <button
+                            type="button"
+                            className="btn btn--ghost reset-route-help__copy"
+                            onClick={() => void copyRouteCommand()}
+                          >
+                            复制模板（替换 &lt;网段&gt;）
+                          </button>
+                        </span>
+                        如果命令提示需要网关，按诊断信息里的网关补在末尾；不要删 default。
+                      </li>
+                      <li>不要删除 default，也不要删除你不认识的路由。</li>
+                      <li>删除后重新运行「强制重置网络」做复查。</li>
+                      <li>
+                        Windows 用户不要执行上面的命令；请在系统设置里使用「网络重置」，或重启电脑。
+                      </li>
+                    </ol>
+                    {routeCopy !== "idle" ? (
+                      <p className="settings-feedback settings-feedback--ok">
+                        {routeCopy === "ok" ? "已复制" : "复制失败"}
+                      </p>
+                    ) : null}
+                  </details>
+                ) : null}
+
+                <div className="settings-actions">
+                  {outcome.kind !== "success" ? (
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => void runNetworkReset()}
+                    >
+                      再试一次
+                    </button>
+                  ) : null}
+                  <button
+                    ref={resetCloseRef}
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={closeReset}
+                  >
+                    关闭
+                  </button>
+                  {outcome.kind !== "success" ? (
+                    <button
+                      type="button"
+                      className="btn btn--link"
+                      onClick={() => void copyResetReport()}
+                    >
+                      复制诊断信息
+                    </button>
+                  ) : null}
+                </div>
+                {resetCopy !== "idle" ? (
+                  <p className="settings-feedback settings-feedback--ok">
+                    {resetCopy === "ok" ? "已复制" : "复制失败"}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </>
   );
+}
+
+function ResetStepIcon({ status }: { status: "ok" | "failed" | "skipped" }) {
+  if (status === "ok") {
+    return (
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+        <path
+          d="M2.5 7.3l2.8 2.8 6.2-6.2"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+        <path
+          d="M3.2 3.2l7.6 7.6M10.8 3.2l-7.6 7.6"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  }
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <path d="M3 7h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function describeResetError(error: unknown): string {
+  const bridgeError = toBridgeError(error);
+  if (/not found|unknown command/i.test(bridgeError.message)) {
+    return "当前版本还没有接入强制重置，请更新应用后再试。";
+  }
+  // 原始错误可能带路径或英文命令，只进「复制诊断信息」。
+  return "重置没有开始，请稍后再试；仍失败就复制诊断信息发给助手。";
 }
 
 export function describeProviderError(error: unknown): string {

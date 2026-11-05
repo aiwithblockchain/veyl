@@ -13,6 +13,7 @@ import type {
   LlmProviderTestResult,
   NetRepairAction,
   NetRepairResult,
+  NetworkForceResetResult,
   NodeProbeResult,
   NodeSwitchResult,
   RenamedSession,
@@ -238,6 +239,28 @@ export class MockAgentBridge implements AgentBridge {
       };
     }
     return { ok: true, action, detail: "已刷新本地 DNS 缓存。", exitIp: null, verified: true };
+  }
+
+  async networkForceReset(): Promise<NetworkForceResetResult> {
+    // 真实链路要等 helper 与系统命令，留出一段可见的等待态。
+    await sleep(1600);
+    await this.runtimeStop();
+    const steps = [
+      ["stop_tun", "接管未在运行"],
+      ["stop_runtime", "代理模式已停止"],
+      ["restore_proxy", "系统代理未指向 Veyl"],
+      ["sweep_processes", "没有 Veyl 的 sing-box 残留"],
+      ["clear_routes", "没有指向已消失 utun 的分流路由"],
+      ["flush_dns", "DNS 缓存已刷新，探针域名可解析"],
+      ["clear_plaintext", "已清理 0 个明文配置，没有残留的运行记录"],
+      ["verify", "代理、路由、DNS 和组件都符合预期"],
+    ] as const;
+    return {
+      ok: true,
+      verified: true,
+      exitIp: MOCK_DIRECT_IP,
+      steps: steps.map(([id, detail]) => ({ id, ok: true, detail, status: "ok" as const })),
+    };
   }
 
   async openLogDir(): Promise<void> {
