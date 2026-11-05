@@ -407,6 +407,52 @@ fn svc_error_with_details(
     })
 }
 
+/// TUN 后端错误 → `AivpnError.details`（契约 §4.3 / §4.4）。
+///
+/// `reason` 只允许四种；wire 码与本地码分开放，UI 不展示它们。
+fn tun_error_details(error: &crate::tun::backend::TunError) -> Value {
+    use crate::tun::backend::TunErrorCode;
+
+    // 后端可以显式标注 local_code——例如 `XpcError::Unavailable` 是一次调用竞态，
+    // 不是 `ensure_available` 的可用性结论。没有标注时再按三种本地码回退。
+    let local_code = error
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("local_code"))
+        .and_then(|code| code.as_str())
+        .map(str::to_string)
+        .or_else(|| match error.code {
+            TunErrorCode::Timeout | TunErrorCode::PeerUnverified | TunErrorCode::TransportError => {
+                Some(error.code.as_str().to_string())
+            }
+            _ => None,
+        });
+    json!({
+        "reason": error.code.ui_reason(),
+        "permission_problem": matches!(
+            error.code,
+            TunErrorCode::TunDenied
+                | TunErrorCode::HelperMissing
+                | TunErrorCode::HelperInstallFailed
+        ),
+        "wire_code": if error.code.is_wire() { Some(error.code.as_str()) } else { None },
+        "local_code": local_code,
+        "detail": error.detail,
+    })
+}
+
+/// 顶层错误码保持旧取值；安装失败也归到 `helper_missing`，不出现第五种理由。
+fn tun_error_code(error: &crate::tun::backend::TunError) -> &'static str {
+    use crate::tun::backend::TunErrorCode;
+    match error.code {
+        TunErrorCode::TunDenied => "tun_denied",
+        TunErrorCode::HelperMissing
+        | TunErrorCode::HelperInstallFailed
+        | TunErrorCode::UnsupportedPlatform => "helper_missing",
+        _ => "tun_start_failed",
+    }
+}
+
 /// 连接失败时带出来的运行时日志行数。
 const RUNTIME_LOG_TAIL_LINES: usize = 20;
 
@@ -1527,7 +1573,8 @@ impl VpnToolServices for WiredServices {
             return Err(svc_error_with_details(
                 "INTERNAL",
                 format!("特权连接没有停掉：{}", error.message),
-                json!({ "reason": "tun_stop_failed", "detail": error.code }),
+                // 理由仍只出四种；停不掉的具体原因在 wire_code / local_code 里。
+                tun_error_details(&error),
             ));
         }
         serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
@@ -3468,15 +3515,11 @@ impl WiredServices {
                 started.pid
             }
             Err(error) => {
-                log::error!("连接 TUN 启动失败 code={}：{}", error.code, error.message);
+                log::error!("连接 TUN 启动失败 code={}：{}", error.code.as_str(), error.message);
                 return Err(svc_error_with_details(
-                    error.code,
+                    tun_error_code(&error),
                     error.message.clone(),
-                    json!({
-                        "reason": error.code,
-                        "permission_problem": error.is_permission_problem(),
-                        "detail": error.detail.clone(),
-                    }),
+                    tun_error_details(&error),
                 ));
             }
         };
@@ -4213,14 +4256,14 @@ mod config_service_tests {
             text.push_str(&format!("line {index}\n"));
         }
         text.push_str("FATAL start service: start dns/udp[dns-local-1]: detour makes no sense\n");
-        text.push_str("password sk-abcdefghijklmnopqrstuvwxyz\n");
+        text.push_str("password sk-abcdefghijklmnopqrstuvwxyz\n"); // check-secrets:allow 测试假值
         std::fs::write(&path, text).unwrap();
 
         let tail = read_log_tail(&path, 5).expect("日志存在就应该读到");
         assert!(tail.contains("FATAL start service"), "{tail}");
         assert!(!tail.contains("line 0"), "只要末尾，不要整个文件：{tail}");
         assert!(
-            !tail.contains("sk-abcdefghijklmnopqrstuvwxyz"),
+            !tail.contains("sk-abcdefghijklmnopqrstuvwxyz"), // check-secrets:allow 测试假值
             "像密钥的片段必须打码：{tail}"
         );
         assert!(tail.contains("***"), "{tail}");
@@ -4741,5 +4784,83 @@ mod main_flow_tests {
         );
 
         drop(watcher);
+    }
+}
+
+#[cfg(test)]
+mod tun_error_details_tests {
+    use super::*;
+    use crate::tun::backend::{TunError, TunErrorCode};
+
+    /// 契约 §4.3：`details.reason` 只允许四种。
+    #[test]
+    fn tun_errors_expose_only_the_four_ui_reasons() {
+        let cases = [
+            (TunErrorCode::TunDenied, "tun_denied"),
+            (TunErrorCode::HelperMissing, "helper_missing"),
+            (TunErrorCode::HelperInstallFailed, "helper_missing"),
+            (TunErrorCode::ConfigForbidden, "tun_start_failed"),
+            (TunErrorCode::Timeout, "tun_start_failed"),
+            (TunErrorCode::PeerUnverified, "helper_missing"),
+            (TunErrorCode::TransportError, "tun_start_failed"),
+            (TunErrorCode::UnsupportedPlatform, "unsupported_platform"),
+        ];
+        for (code, reason) in cases {
+            let details = tun_error_details(&TunError::new(code, "x"));
+            assert_eq!(details["reason"], reason, "{}", code.as_str());
+            assert!(details.get("wire_code").is_some(), "键必须存在");
+            assert!(details.get("local_code").is_some(), "键必须存在");
+        }
+    }
+
+    /// 契约 §4.4：wire 码与本地码不混用。
+    #[test]
+    fn wire_and_local_codes_are_kept_apart() {
+        let wire = tun_error_details(&TunError::new(TunErrorCode::ConfigForbidden, "x"));
+        assert_eq!(wire["wire_code"], "config_forbidden");
+        assert!(wire["local_code"].is_null());
+
+        let timeout = tun_error_details(&TunError::new(TunErrorCode::Timeout, "x"));
+        assert_eq!(timeout["local_code"], "timeout");
+        assert!(timeout["wire_code"].is_null());
+        assert_eq!(timeout["reason"], "tun_start_failed");
+
+        // 验收项：PeerUnverified 必须是「权限」而不是普通启动失败。
+        let peer = tun_error_details(&TunError::new(TunErrorCode::PeerUnverified, "x"));
+        assert_eq!(peer["reason"], "helper_missing");
+        assert_eq!(peer["local_code"], "peer_unverified");
+        assert!(peer["wire_code"].is_null());
+    }
+
+    /// 安装失败不能漏成第五种理由。
+    #[test]
+    fn install_failures_collapse_to_helper_missing() {
+        let error = TunError::new(TunErrorCode::HelperInstallFailed, "x");
+        assert_eq!(tun_error_code(&error), "helper_missing");
+        assert_eq!(tun_error_details(&error)["reason"], "helper_missing");
+    }
+
+    /// 契约 1.0.6：调用竞态下的 helper_missing 带 local_code，
+    /// 与 `ensure_available` 的可用性结论区分开。
+    #[test]
+    fn a_race_helper_missing_keeps_its_local_code() {
+        let race = TunError::new(TunErrorCode::HelperMissing, "x")
+            .with_detail(json!({ "local_code": "helper_missing" }));
+        let details = tun_error_details(&race);
+        assert_eq!(details["local_code"], "helper_missing");
+        assert_eq!(details["reason"], "helper_missing");
+        assert!(details["wire_code"].is_null());
+    }
+
+    /// 权限层的 HelperMissing 来自 availability，不是调用竞态，不能带 local_code。
+    #[test]
+    fn an_availability_helper_missing_has_no_local_code() {
+        let availability = TunError::from_privilege(crate::tun::privilege::PrivilegeError::new(
+            crate::tun::privilege::ERR_HELPER_MISSING,
+            "助手不在",
+        ));
+        let details = tun_error_details(&availability);
+        assert_eq!(details["reason"], "helper_missing");
+        assert!(details["local_code"].is_null());
     }
 }

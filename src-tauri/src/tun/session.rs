@@ -1,21 +1,25 @@
-//! TUN 连接的生命周期：确保 helper 已注册 → 通过 XPC 发 start → 拿 pid。
+//! TUN 连接的生命周期：确保特权组件可用 → 通过 `TunBackend` 发 start → 拿 pid。
 //!
-//! 这里**不碰** `RuntimeManager`：TUN 的 sing-box 是 helper（root）的子进程，
+//! **不直接依赖 XPC / 管道**：平台差异都被 `tun::backend::TunBackend` 挡住，
+//! 会话逻辑两端同一份（实施计划 §1.1）。
+//!
+//! 这里**不碰** `RuntimeManager`：TUN 的 sing-box 是特权进程的子进程，
 //! 不是我们的子进程，manager 那套 Child 句柄的启停模型对它不适用。
-//! 代价是 TUN 连接不参与 manager 的重连/看门狗，这一点在报告里写清楚。
+//! 代价是 TUN 连接不参与 manager 的重连/看门狗。
 
-use std::sync::{Arc, Mutex};
-
-#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use super::privilege::{PrivilegeError, Registration, ERR_HELPER_MISSING};
-#[cfg(target_os = "macos")]
-use super::privilege::{app_location_hint, ERR_TUN_START_FAILED};
-#[cfg(target_os = "macos")]
-use super::protocol::MACH_SERVICE;
-#[cfg(target_os = "macos")]
-use super::xpc::{self, Reply, XpcError};
+use super::backend::{ClashApi, StartReply, TunBackend, TunError, TunSnapshot};
+use super::privilege::Registration;
+
+/// 缓存中的 pid 超过这个间隔就向后端复核一次：helper 崩溃或被停掉时，
+/// 界面不能一直报「已连接」。测试里缩短，避免用例等 5 秒。
+#[cfg(not(test))]
+const RUNNING_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const RUNNING_RECHECK_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Started {
@@ -44,74 +48,74 @@ pub struct TunLaunchMeta {
 }
 
 pub struct TunSession {
-    registration: Arc<dyn Registration>,
-    /// 上次成功 start 拿到的 pid。**刻意不每次读 XPC**：
-    /// `runtime_status` 是热路径，同步 XPC 会把它拖慢。
+    backend: Arc<dyn TunBackend>,
+    kind: &'static str,
+    /// 上次成功 start 拿到的 pid。**刻意不每次读后端**：
+    /// `runtime_status` 是热路径，同步 IPC 会把它拖慢。
     pid: Mutex<Option<u32>>,
     /// 这次连的是哪套配置、哪条线路。manager 不知道 TUN 的存在，删配置的守卫只能靠它。
     meta: Mutex<Option<TunLaunchMeta>>,
-    /// 启动时刻：ISO 字符串给快照，`Instant` 用来算 uptime。
-    connected: Mutex<Option<(std::time::Instant, String)>>,
+    /// 启动时刻（ISO 8601）：给快照，也用来算 uptime。接手老连接时以 helper
+    /// 报的值为准——那是真正的进程启动时刻，不是「App 发现它的时刻」。
+    connected: Mutex<Option<String>>,
+    /// 本次进程的 Clash API；App 崩溃接手时从 helper 的 status 补回来。
+    clash: Mutex<Option<ClashApi>>,
+    /// 上一次向后端复核的时刻。缓存不能永远不出门：helper 死了要能发现。
+    last_check: Mutex<Option<Instant>>,
     /// App 崩溃重启后 TUN 还活着，这时内存里没有 pid。
-    /// 首次查状态时向 helper 问一次，之后不再重复。
-    #[cfg(target_os = "macos")]
+    /// 首次查状态时向后端问一次，之后不再重复。
     probed: AtomicBool,
 }
 
 impl TunSession {
+    /// 沿用既有构造入口：配置里只给注册器，后端在这里按平台装配。
     pub fn new(registration: Arc<dyn Registration>) -> Self {
+        let kind = registration.kind();
+        #[cfg(target_os = "macos")]
+        let backend: Arc<dyn TunBackend> = Arc::new(super::backend::MacXpcBackend::new(registration));
+        #[cfg(not(target_os = "macos"))]
+        let backend: Arc<dyn TunBackend> = {
+            let _ = registration;
+            Arc::new(super::backend::UnsupportedBackend)
+        };
+        Self::with_backend(backend, kind)
+    }
+
+    /// 测试与将来 Windows 装配用：直接注入一个后端。
+    pub fn with_backend(backend: Arc<dyn TunBackend>, kind: &'static str) -> Self {
         Self {
-            registration,
+            backend,
+            kind,
             pid: Mutex::new(None),
             meta: Mutex::new(None),
             connected: Mutex::new(None),
-            #[cfg(target_os = "macos")]
+            clash: Mutex::new(None),
+            last_check: Mutex::new(None),
             probed: AtomicBool::new(false),
         }
     }
 
     pub fn launcher_kind(&self) -> &'static str {
-        self.registration.kind()
+        self.kind
     }
 
-    /// 起 TUN。顺序不可换：**先确认 helper 已被批准**再发请求，
+    /// 起 TUN。顺序不可换：**先确认特权组件可用**再发请求，
     /// 否则连不上时用户只会看到一个无意义的超时。
-    pub fn launch(&self, config: &str, meta: &TunLaunchMeta) -> Result<Started, PrivilegeError> {
-        self.registration.ensure_registered()?;
+    pub fn launch(&self, config: &str, meta: &TunLaunchMeta) -> Result<Started, TunError> {
+        self.backend.ensure_available()?;
+        let reply: StartReply = self.backend.start(config)?;
 
-        #[cfg(target_os = "macos")]
-        {
-            return match xpc::call(MACH_SERVICE, "start", Some(config.as_bytes())) {
-                Ok(Reply::Started {
-                    pid,
-                    clash_addr,
-                    clash_secret,
-                }) => {
-                    *self.pid.lock().unwrap() = Some(pid);
-                    *self.meta.lock().unwrap() = Some(meta.clone());
-                    *self.connected.lock().unwrap() = Some((
-                        std::time::Instant::now(),
-                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    ));
-                    Ok(Started {
-                        pid,
-                        clash_addr,
-                        clash_secret,
-                    })
-                }
-                Ok(_) => Err(PrivilegeError::new(
-                    ERR_TUN_START_FAILED,
-                    "特权助手回了意料之外的结果",
-                )),
-                Err(error) => Err(map_xpc_error(error)),
-            };
-        }
+        *self.pid.lock().unwrap() = Some(reply.pid);
+        *self.meta.lock().unwrap() = Some(meta.clone());
+        *self.connected.lock().unwrap() = Some(reply.since.clone());
+        *self.clash.lock().unwrap() = Some(reply.clash_api.clone());
+        *self.last_check.lock().unwrap() = Some(Instant::now());
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = meta;
-            Err(unsupported_platform())
-        }
+        Ok(Started {
+            pid: reply.pid,
+            clash_addr: reply.clash_api.addr,
+            clash_secret: reply.clash_api.secret,
+        })
     }
 
     /// 正在接管的配置。只有 TUN 确实在跑时才回答；
@@ -133,26 +137,29 @@ impl TunSession {
         if !matches!(self.status(), TunState::Running { .. }) {
             return None;
         }
-        self.connected
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|(_, since)| since.clone())
+        self.connected.lock().unwrap().clone()
     }
 
-    /// 连接已持续多少秒。App 重启后接手的老连接不知道起点，返回 None。
+    /// 本次进程的 Clash API；App 崩溃接手后也能从 helper 的 status 拿到。
+    pub fn clash_api(&self) -> Option<ClashApi> {
+        if !matches!(self.status(), TunState::Running { .. }) {
+            return None;
+        }
+        self.clash.lock().unwrap().clone()
+    }
+
+    /// 连接已持续多少秒。按 helper 报的启动时刻算，接手老连接也一样。
     pub fn uptime_seconds(&self) -> Option<u64> {
         if !matches!(self.status(), TunState::Running { .. }) {
             return None;
         }
-        self.connected
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|(started, _)| started.elapsed().as_secs())
+        let since = self.connected.lock().unwrap().clone()?;
+        let started = chrono::DateTime::parse_from_rfc3339(&since).ok()?;
+        let elapsed = chrono::Utc::now() - started.with_timezone(&chrono::Utc);
+        Some(elapsed.num_seconds().max(0) as u64)
     }
 
-    /// 测试用：直接摆出「正在跑 + 记得是哪套配置」的状态，不碰 helper。
+    /// 测试用：直接摆出「正在跑 + 记得是哪套配置」的状态，不碰后端。
     #[cfg(test)]
     pub fn force_running_for_test(&self, pid: u32, config_id: Option<&str>) {
         *self.pid.lock().unwrap() = Some(pid);
@@ -163,32 +170,23 @@ impl TunSession {
             node_name: None,
             applied_route_revision: None,
         });
-        *self.connected.lock().unwrap() =
-            Some((std::time::Instant::now(), "2026-11-04T00:00:00Z".into()));
+        *self.connected.lock().unwrap() = Some("2026-11-04T00:00:00Z".into());
+        *self.last_check.lock().unwrap() = Some(Instant::now());
     }
 
-    /// 幂等。本来就没起过时不发 XPC——否则每次断开代理连接都要等一次超时。
-    pub fn stop(&self) -> Result<(), PrivilegeError> {
+    /// 幂等。本来就没起过时不发请求——否则每次断开代理连接都要等一次超时。
+    pub fn stop(&self) -> Result<(), TunError> {
         if self.status() == TunState::Stopped {
             return Ok(());
         }
-        #[cfg(target_os = "macos")]
-        {
-            let result = match xpc::call(MACH_SERVICE, "stop", None) {
-                Ok(_) => Ok(()),
-                Err(error) => Err(map_xpc_error(error)),
-            };
-            // 只有真的停掉了才清状态：停失败还清掉，界面会显示已断开，
-            // 而 helper 里的 sing-box 还在接管流量。
-            if result.is_ok() {
+        match self.backend.stop() {
+            Ok(()) => {
                 self.clear_state();
+                Ok(())
             }
-            return result;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.clear_state();
-            Ok(())
+            // 只有真的停掉了才清状态：停失败还清掉，界面会显示已断开，
+            // 而特权侧里的 sing-box 还在接管流量。
+            Err(error) => Err(error),
         }
     }
 
@@ -196,69 +194,92 @@ impl TunSession {
         *self.pid.lock().unwrap() = None;
         *self.meta.lock().unwrap() = None;
         *self.connected.lock().unwrap() = None;
+        *self.clash.lock().unwrap() = None;
+        *self.last_check.lock().unwrap() = None;
     }
 
-    /// 热路径：只读内存里的 pid，不打 XPC。
+    /// 热路径：缓存有效时只读内存，超过复核间隔才问一次后端。
     ///
-    /// 但 App 崩溃重启后 TUN 可能还连着（helper 是独立进程），
-    /// 这时内存里没有 pid——首次调用向 helper 问一次把它接手过来。
+    /// 缓存不能永远不出门：helper 崩溃或被停掉时，界面必须能变成「未连接」，
+    /// 否则删配置的守卫会以为配置还在用。问不到后端时**不据此判定断开**，
+    /// 保留缓存，下一个间隔再试。
     pub fn status(&self) -> TunState {
-        if let Some(pid) = *self.pid.lock().unwrap() {
-            return TunState::Running { pid };
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // **先判就绪，再决定要不要探测。**
-            // 旧顺序是先 `probed.swap(true)` 再判就绪：helper 未就绪时第一次调用
-            // 就把标志永久置真，之后即使 helper 起来了也不会接手、`stop()` 还可能直接返回。
-            if !self.registration.status().is_ready() {
-                // 未就绪时把标志复位，等它真的可用了还能再探一次。
-                self.probed.store(false, Ordering::SeqCst);
-                return TunState::Stopped;
-            }
-            if self.probed.swap(true, Ordering::SeqCst) {
-                return TunState::Stopped;
-            }
-            if let Ok(Reply::Status {
-                running: true,
-                pid: Some(pid),
-            }) = xpc::call(MACH_SERVICE, "status", None)
-            {
-                *self.pid.lock().unwrap() = Some(pid);
+        // 先复制出来再解锁：`if let Some(pid) = *lock...` 会把 MutexGuard 持有到
+        // 整个分支结束，而分支里会再锁 pid（adopt / clear_state），造成自死锁。
+        let cached = { *self.pid.lock().unwrap() };
+        if let Some(pid) = cached {
+            let due = self
+                .last_check
+                .lock()
+                .unwrap()
+                .map(|at| at.elapsed() >= RUNNING_RECHECK_INTERVAL)
+                .unwrap_or(true);
+            if !due {
                 return TunState::Running { pid };
             }
+            return self.recheck(pid);
         }
-        TunState::Stopped
+        self.probe_once()
     }
-}
 
-#[cfg(not(target_os = "macos"))]
-fn unsupported_platform() -> PrivilegeError {
-    PrivilegeError::new(
-        ERR_HELPER_MISSING,
-        "这个平台还不支持接管全部流量，请改用代理模式",
-    )
-}
-
-/// XPC 的失败翻译成用户能懂的两类：**助手不在**（权限/安装），
-/// 和**助手在但拒绝了**（启动失败）。两者都不该被当成网络故障。
-#[cfg(target_os = "macos")]
-pub fn map_xpc_error(error: XpcError) -> PrivilegeError {
-    match error {
-        XpcError::Unavailable(detail) => {
-            let mut message = String::from("连不上特权助手，接管全部流量需要它");
-            if let Some(hint) = app_location_hint() {
-                message.push_str(&format!("。{hint}"));
+    /// 没有缓存时的一次性接手：先判就绪，再问后端。
+    fn probe_once(&self) -> TunState {
+        // **先判就绪，再决定要不要探测。**
+        // 旧顺序是先 `probed.swap(true)` 再判就绪：未就绪时第一次调用
+        // 就把标志永久置真，之后即使组件起来了也不会接手。
+        if !matches!(self.backend.availability(), Ok(status) if status.is_ready()) {
+            // 未就绪时把标志复位，等它真的可用了还能再探一次。
+            self.probed.store(false, Ordering::SeqCst);
+            return TunState::Stopped;
+        }
+        if self.probed.swap(true, Ordering::SeqCst) {
+            return TunState::Stopped;
+        }
+        match self.backend.status() {
+            Ok(snapshot) => match snapshot.pid {
+                Some(pid) => {
+                    self.adopt(&snapshot, pid);
+                    TunState::Running { pid }
+                }
+                None => TunState::Stopped,
+            },
+            Err(_) => {
+                // 问不到不等于没在跑；复位标志，让下一次还能再试。
+                self.probed.store(false, Ordering::SeqCst);
+                TunState::Stopped
             }
-            PrivilegeError::new(ERR_HELPER_MISSING, message).with_detail(detail)
         }
-        XpcError::Server { code, message } => {
-            PrivilegeError::new(ERR_TUN_START_FAILED, message).with_detail(code)
+    }
+
+    /// 缓存命中但已过复核间隔：向后端确认一次。
+    fn recheck(&self, cached_pid: u32) -> TunState {
+        *self.last_check.lock().unwrap() = Some(Instant::now());
+        match self.backend.status() {
+            Ok(snapshot) => match snapshot.pid {
+                Some(pid) => {
+                    self.adopt(&snapshot, pid);
+                    TunState::Running { pid }
+                }
+                None => {
+                    self.clear_state();
+                    TunState::Stopped
+                }
+            },
+            // 后端暂时问不到：保留缓存，不把「问不到」当成「已断开」。
+            Err(_) => TunState::Running { pid: cached_pid },
         }
-        XpcError::Protocol(detail) => {
-            PrivilegeError::new(ERR_TUN_START_FAILED, "特权助手返回了无法识别的回复")
-                .with_detail(detail)
+    }
+
+    /// 把后端报的 pid / since / clash 写回缓存（启动成功或接手老连接）。
+    fn adopt(&self, snapshot: &TunSnapshot, pid: u32) {
+        *self.pid.lock().unwrap() = Some(pid);
+        if let Some(since) = snapshot.since.clone() {
+            *self.connected.lock().unwrap() = Some(since);
         }
+        if let Some(api) = snapshot.clash_api.clone() {
+            *self.clash.lock().unwrap() = Some(api);
+        }
+        *self.last_check.lock().unwrap() = Some(Instant::now());
     }
 }
 
@@ -283,7 +304,9 @@ impl CleanupReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tun::privilege::{HelperStatus, ERR_TUN_DENIED};
+    use crate::tun::backend::{ClashApi, TunErrorCode, TunSnapshot};
+    use crate::tun::privilege::{HelperStatus, PrivilegeError, ERR_TUN_DENIED};
+    use std::sync::atomic::AtomicUsize;
 
     /// 假注册：不碰系统，只按剧本成功或拒绝。
     struct FakeRegistration {
@@ -309,45 +332,150 @@ mod tests {
         }
     }
 
+    /// 假后端：把会话与传输层隔开，验证 `TunSession` 只依赖 trait。
+    struct FakeBackend {
+        starts: AtomicUsize,
+        stops: AtomicUsize,
+        running: Mutex<Option<u32>>,
+        clash: Mutex<Option<ClashApi>>,
+        since: Mutex<Option<String>>,
+    }
+
+    impl FakeBackend {
+        fn new() -> Self {
+            Self {
+                starts: AtomicUsize::new(0),
+                stops: AtomicUsize::new(0),
+                running: Mutex::new(None),
+                clash: Mutex::new(None),
+                since: Mutex::new(None),
+            }
+        }
+    }
+
+    impl TunBackend for FakeBackend {
+        fn availability(&self) -> Result<HelperStatus, TunError> {
+            Ok(HelperStatus::Enabled)
+        }
+        fn ensure_available(&self) -> Result<HelperStatus, TunError> {
+            Ok(HelperStatus::Enabled)
+        }
+        fn start(&self, _config: &str) -> Result<StartReply, TunError> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            let pid = 4242;
+            *self.running.lock().unwrap() = Some(pid);
+            let clash_api = ClashApi {
+                addr: "127.0.0.1:51234".into(),
+                secret: "s".into(),
+            };
+            *self.clash.lock().unwrap() = Some(clash_api.clone());
+            let since = "2026-11-05T00:00:00Z".to_string();
+            *self.since.lock().unwrap() = Some(since.clone());
+            Ok(StartReply {
+                pid,
+                clash_api,
+                since,
+            })
+        }
+        fn stop(&self) -> Result<(), TunError> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            *self.running.lock().unwrap() = None;
+            *self.clash.lock().unwrap() = None;
+            *self.since.lock().unwrap() = None;
+            Ok(())
+        }
+        fn status(&self) -> Result<TunSnapshot, TunError> {
+            let pid = *self.running.lock().unwrap();
+            Ok(TunSnapshot {
+                running: pid.is_some(),
+                pid,
+                clash_api: self.clash.lock().unwrap().clone(),
+                since: self.since.lock().unwrap().clone(),
+                last_error: None,
+            })
+        }
+    }
+
+    fn meta() -> TunLaunchMeta {
+        TunLaunchMeta {
+            config_id: "cfg_test".into(),
+            config_name: None,
+            node_id: None,
+            node_name: None,
+            applied_route_revision: None,
+        }
+    }
+
     #[test]
-    fn a_rejected_registration_stops_before_any_xpc_call() {
+    fn a_rejected_registration_stops_before_any_ipc_call() {
         // 没被批准时 launch 必须立刻失败，而不是去连一个不存在的服务。
         let session = TunSession::new(Arc::new(FakeRegistration { ready: false }));
-        let error = session
-            .launch(
-                "{}",
-                &TunLaunchMeta {
-                    config_id: "cfg_test".into(),
-                    config_name: None,
-                    node_id: None,
-                    node_name: None,
-                    applied_route_revision: None,
-                },
-            )
-            .unwrap_err();
-        assert_eq!(error.code, ERR_TUN_DENIED);
+        let error = session.launch("{}", &meta()).unwrap_err();
+        assert_eq!(error.code, TunErrorCode::TunDenied);
     }
 
-    #[cfg(target_os = "macos")]
+    /// 会话只依赖 trait：start / stop / since 都由后端回包决定。
     #[test]
-    fn unavailable_helper_is_reported_as_a_permission_problem() {
-        let error = map_xpc_error(XpcError::Unavailable("connection invalid".into()));
-        assert_eq!(error.code, ERR_HELPER_MISSING);
-        assert!(error.is_permission_problem());
-        // 测试环境不在 /Applications，提示必须带上。
-        assert!(error.message.contains("应用程序"), "{}", error.message);
+    fn the_session_goes_through_the_backend_trait() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+
+        let started = session.launch("{}", &meta()).unwrap();
+        assert_eq!(started.pid, 4242);
+        assert_eq!(started.clash_addr, "127.0.0.1:51234");
+        assert_eq!(session.status(), TunState::Running { pid: 4242 });
+        assert_eq!(
+            session.connected_since().as_deref(),
+            Some("2026-11-05T00:00:00Z")
+        );
+
+        session.stop().unwrap();
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(session.status(), TunState::Stopped);
+
+        // 幂等：第二次 stop 不再打后端。
+        session.stop().unwrap();
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 1);
     }
 
-    #[cfg(target_os = "macos")]
+    /// 后端报 running 时，首次 status 能接手（App 崩溃重启场景），
+    /// 并把 helper 报的 since / clash_api 一起缓存下来。
     #[test]
-    fn a_server_rejection_is_a_start_failure_not_a_permission_problem() {
-        let error = map_xpc_error(XpcError::Server {
-            code: "config_forbidden".into(),
-            message: "不允许远程引用".into(),
+    fn an_adopted_running_backend_is_picked_up_with_since_and_clash() {
+        let backend = Arc::new(FakeBackend::new());
+        *backend.running.lock().unwrap() = Some(777);
+        *backend.since.lock().unwrap() = Some("2026-11-05T00:00:00Z".into());
+        *backend.clash.lock().unwrap() = Some(ClashApi {
+            addr: "127.0.0.1:60000".into(),
+            secret: "s".into(),
         });
-        assert_eq!(error.code, ERR_TUN_START_FAILED);
-        assert!(!error.is_permission_problem());
-        assert_eq!(error.message, "不允许远程引用");
+        let session = TunSession::with_backend(backend, "fake");
+
+        assert_eq!(session.status(), TunState::Running { pid: 777 });
+        assert_eq!(
+            session.connected_since().as_deref(),
+            Some("2026-11-05T00:00:00Z")
+        );
+        assert_eq!(
+            session.clash_api().map(|api| api.addr).as_deref(),
+            Some("127.0.0.1:60000")
+        );
+        assert!(session.launch_meta().is_none(), "接手的老连接没有配置归属");
+    }
+
+    /// 缓存不能永远不出门：helper 那边停了，复核必须把状态改回未连接。
+    #[test]
+    fn a_cached_running_state_is_rechecked_and_cleared_when_the_backend_stops() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        session.launch("{}", &meta()).unwrap();
+        assert_eq!(session.status(), TunState::Running { pid: 4242 });
+
+        *backend.running.lock().unwrap() = None;
+        std::thread::sleep(RUNNING_RECHECK_INTERVAL + Duration::from_millis(20));
+
+        assert_eq!(session.status(), TunState::Stopped, "helper 停了就不能再报 Running");
     }
 
     #[test]

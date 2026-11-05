@@ -712,7 +712,7 @@ mod tests {
     fn secret_shaped_fragments_are_masked_anywhere() {
         for (text, leaked) in [
             ("https://user:hunter2@example.com/sub", "hunter2"),
-            ("token sk-abcdefghijklmnopqrst", "sk-abcdefghijklmnopqrst"),
+            ("token sk-abcdefghijklmnopqrst", "sk-abcdefghijklmnopqrst"), // check-secrets:allow 测试假值
             ("key AKIAIOSFODNN7EXAMPLE0123456789", "AKIAIOSFODNN7EXAMPLE0123456789"),
         ] {
             let out = truncate_for_log(text);

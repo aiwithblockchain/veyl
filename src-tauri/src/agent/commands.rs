@@ -802,6 +802,26 @@ pub async fn open_external(
     Ok(json!({ "opened": true }))
 }
 
+/// 把用户送到「系统设置 › 登录项与扩展」。
+///
+/// 首次 TUN 连接返回 `tun_denied` 时，界面给一个可点击的入口；用户批准后
+/// 重新调用连接命令即可，不需要退出 App。
+#[tauri::command]
+pub async fn tun_helper_open_settings() -> Result<Value, Value> {
+    crate::tun::privilege::open_login_items();
+    Ok(json!({ "opened": true }))
+}
+
+/// 卸载后台助手。「设置」或诊断区调用。
+///
+/// 幂等：没注册过也算成功；真正的失败返回 `{code, message}`。
+#[tauri::command]
+pub async fn tun_helper_uninstall() -> Result<Value, Value> {
+    crate::tun::privilege::unregister_helper()
+        .map(|()| json!({ "ok": true }))
+        .map_err(|error| json!({ "code": error.code, "message": error.message }))
+}
+
 /// 重启后恢复会话：不传 `session_id` 时取最近一个会话。
 #[tauri::command]
 pub async fn chat_history(session_id: Option<String>) -> Result<Value, String> {

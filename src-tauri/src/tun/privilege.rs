@@ -94,6 +94,23 @@ pub fn select() -> Arc<dyn Registration> {
     }
 }
 
+/// 把用户送到能点「允许」的那一页。
+///
+/// 首次连接返回 `tun_denied` / `requires_approval` 时，界面调用这个入口，
+/// 用户批准后**原地重试连接**即可——重新调用连接命令会再走一次
+/// `ensure_registered()`，没有任何状态会挡住第二次。
+pub fn open_login_items() {
+    #[cfg(target_os = "macos")]
+    smappservice::open_login_items();
+}
+
+/// 注销后台助手。App 内的「卸载助手」入口调用这里。
+///
+/// 没注册过也算成功（幂等）；真正的失败返回 `helper_install_failed`。
+pub fn unregister_helper() -> Result<(), PrivilegeError> {
+    select().unregister()
+}
+
 #[cfg(not(target_os = "macos"))]
 pub struct Unsupported;
 

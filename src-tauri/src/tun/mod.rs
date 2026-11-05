@@ -5,6 +5,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+pub mod backend;
 pub mod privilege;
 pub mod protocol;
 pub mod session;

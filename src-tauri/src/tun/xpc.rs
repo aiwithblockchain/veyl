@@ -25,10 +25,6 @@ extern "C" {
     fn xpc_connection_resume(connection: xpc_connection_t);
     fn xpc_connection_cancel(connection: xpc_connection_t);
     fn xpc_connection_get_pid(connection: xpc_connection_t) -> libc::pid_t;
-    fn xpc_connection_send_message_with_reply_sync(
-        connection: xpc_connection_t,
-        message: xpc_object_t,
-    ) -> xpc_object_t;
     fn xpc_connection_set_event_handler(
         connection: xpc_connection_t,
         handler: *mut c_void,
@@ -72,14 +68,29 @@ extern "C" {
     fn xpc_dictionary_create_reply(original: xpc_object_t) -> xpc_object_t;
 
     fn xpc_get_type(object: xpc_object_t) -> *const c_void;
+    fn xpc_retain(object: xpc_object_t) -> xpc_object_t;
     fn xpc_release(object: xpc_object_t);
     fn xpc_copy_description(object: xpc_object_t) -> *mut c_char;
+
+    fn xpc_connection_send_message_with_reply(
+        connection: xpc_connection_t,
+        message: xpc_object_t,
+        queue: dispatch_queue_t,
+        handler: *mut c_void,
+    );
+}
+
+// 全局并发队列：异步回复的 handler 在那上面跑，不占主线程。
+extern "C" {
+    fn dispatch_get_global_queue(identifier: isize, flags: usize) -> dispatch_queue_t;
 }
 
 // `XPC_TYPE_ERROR` 的符号地址。用它判断「回的不是字典而是一个错误对象」。
 extern "C" {
     static _xpc_type_error: c_void;
     static _xpc_type_dictionary: c_void;
+    /// 连接被中断（对端重启/被杀），与「服务不存在」是两回事。
+    static _xpc_error_connection_interrupted: xpc_object_t;
 }
 
 ///
@@ -137,6 +148,10 @@ pub enum XpcError {
     Server { code: String, message: String },
     /// 回了看不懂的东西。
     Protocol(String),
+    /// 连接被中断：对端重启、被杀，或传输层断开。
+    Interrupted(String),
+    /// 在契约给的等待上限内没收到回复（`tun-backend.md` §1.3）。
+    Timeout,
 }
 
 impl std::fmt::Display for XpcError {
@@ -145,6 +160,8 @@ impl std::fmt::Display for XpcError {
             XpcError::Unavailable(message) => write!(f, "无法连接特权助手：{message}"),
             XpcError::Server { code, message } => write!(f, "{code}: {message}"),
             XpcError::Protocol(message) => write!(f, "助手返回了无法识别的回复：{message}"),
+            XpcError::Interrupted(message) => write!(f, "与特权助手的连接中断：{message}"),
+            XpcError::Timeout => write!(f, "特权助手没有在限定时间内回复"),
         }
     }
 }
@@ -155,20 +172,63 @@ pub enum Reply {
         pid: u32,
         clash_addr: String,
         clash_secret: String,
+        /// 特权侧生成的启动时刻（契约 §3.1）。
+        since: String,
     },
     Stopped,
     Status {
         running: bool,
         pid: Option<u32>,
+        /// 未运行时为 None（契约 §3.2：字段存在，值为 null）。
+        clash_addr: Option<String>,
+        clash_secret: Option<String>,
+        since: Option<String>,
     },
 }
 
-/// 发一条请求并等回复。阻塞调用，调用方负责放到不会卡住 runtime 的地方。
-pub fn call(
+/// 回复指针跨线程传递的包装。
+///
+/// SAFETY: 指针只在 handler 与等待方之间传一次；libxpc 对象由 `xpc_retain`
+/// 保持在这次交互期间有效，且同一时刻只有一个线程使用它。
+struct SendPtr(xpc_object_t);
+unsafe impl Send for SendPtr {}
+
+impl SendPtr {
+    /// 取出指针并交出所有权；之后的 `Drop` 不再释放。
+    fn take(mut self) -> xpc_object_t {
+        let ptr = self.0;
+        self.0 = std::ptr::null_mut();
+        ptr
+    }
+}
+
+impl Drop for SendPtr {
+    /// 等待方超时放弃后，handler 仍可能投递成功；那条路径必须把 retain 的
+    /// 引用还回去，否则每超时一次漏一个 XPC 对象。
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { release(self.0) };
+        }
+    }
+}
+
+/// 发一条请求并等回复，**最多等 `timeout`**。
+///
+/// libxpc 的同步接口没有超时参数：helper 不回复时 `send_message_with_reply_sync`
+/// 会一直阻塞。契约 §1.3 要求两端都有超时，所以这里改用异步回复 + 带超时的通道
+/// 等待；到点就取消连接并返回 `XpcError::Timeout`，不留悬挂的等待者。
+///
+/// 通道断开（handler 没送达就没了）也按 `Protocol` 处理——那是传输层问题，
+/// 不是 helper 的拒绝。
+pub fn call_with_timeout(
     service: &str,
     method: &str,
     config: Option<&[u8]>,
+    timeout: std::time::Duration,
 ) -> Result<Reply, XpcError> {
+    use block2::RcBlock;
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+
     let service = cstring(service);
     log::debug!("xpc call method={method} service={}", service.to_string_lossy());
     // SAFETY: 连接句柄的生命周期由本函数管理；消息与回复都是 libxpc 对象，
@@ -197,12 +257,49 @@ pub fn call(
             );
         }
 
-        let reply = xpc_connection_send_message_with_reply_sync(connection, message);
+        let (sender, receiver) = channel::<SendPtr>();
+        let handler = RcBlock::new(move |reply: xpc_object_t| {
+            let retained = if reply.is_null() {
+                std::ptr::null_mut()
+            } else {
+                xpc_retain(reply)
+            };
+            // 等待方已经超时放弃时，send 会失败，SendPtr 在 drop 里把引用还回去。
+            let _ = sender.send(SendPtr(retained));
+        });
+
+        // libxpc 会复制 handler 并在回复到达时调用；send 返回后我们这份可以释放。
+        xpc_connection_send_message_with_reply(
+            connection,
+            message,
+            dispatch_get_global_queue(0, 0),
+            RcBlock::as_ptr(&handler) as *mut c_void,
+        );
+        drop(handler);
         xpc_release(message);
+
+        let reply = match receiver.recv_timeout(timeout) {
+            Ok(sent) => sent.take(),
+            Err(RecvTimeoutError::Timeout) => {
+                // 放弃等待：取消连接，之后即使 handler 被调用也会投递失败并释放回复。
+                xpc_connection_cancel(connection);
+                xpc_release(connection);
+                return Err(XpcError::Timeout);
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                xpc_connection_cancel(connection);
+                xpc_release(connection);
+                return Err(XpcError::Protocol("回复通道提前断开".into()));
+            }
+        };
+
         xpc_connection_cancel(connection);
         // create_* 出来的对象由我们持有，cancel 之后释放；不释放就是每次调用漏一个。
         xpc_release(connection);
 
+        if reply.is_null() {
+            return Err(XpcError::Protocol("助手返回了空回复".into()));
+        }
         let result = parse_reply(&service, method, reply);
         xpc_release(reply);
         result
@@ -217,6 +314,11 @@ fn parse_reply(service: &CString, method: &str, reply: xpc_object_t) -> Result<R
         ));
     }
     if unsafe { is_error(reply) } {
+        // 「连接被中断」说明 helper 还在（或刚退出），是传输层问题；
+        // 「连接无效」通常是没有注册/没批准。两者对用户的含义不同，不能合并。
+        if reply == unsafe { _xpc_error_connection_interrupted } {
+            return Err(XpcError::Interrupted(unsafe { describe(reply) }));
+        }
         return Err(XpcError::Unavailable(unsafe { describe(reply) }));
     }
     if !unsafe { is_dictionary(reply) } {
@@ -235,12 +337,31 @@ fn parse_reply(service: &CString, method: &str, reply: xpc_object_t) -> Result<R
             pid: get_i64(reply, "pid").unwrap_or(0) as u32,
             clash_addr: get_string(reply, "clash_addr").unwrap_or_default(),
             clash_secret: get_string(reply, "clash_secret").unwrap_or_default(),
+            since: get_string(reply, "since").unwrap_or_default(),
         }),
         "stop" => Ok(Reply::Stopped),
-        "status" => Ok(Reply::Status {
-            running: unsafe { xpc_dictionary_get_bool(reply, cstring("running").as_ptr()) },
-            pid: get_i64(reply, "pid").filter(|pid| *pid > 0).map(|pid| pid as u32),
-        }),
+        "status" => {
+            let running = unsafe { xpc_dictionary_get_bool(reply, cstring("running").as_ptr()) };
+            // 未运行时 helper 不写这三项；按契约给 None，不留空串冒充有效值。
+            let text = |key: &str| {
+                if running {
+                    get_string(reply, key).filter(|value| !value.is_empty())
+                } else {
+                    None
+                }
+            };
+            Ok(Reply::Status {
+                running,
+                pid: if running {
+                    get_i64(reply, "pid").filter(|pid| *pid > 0).map(|pid| pid as u32)
+                } else {
+                    None
+                },
+                clash_addr: text("clash_addr"),
+                clash_secret: text("clash_secret"),
+                since: text("since"),
+            })
+        }
         other => Err(XpcError::Protocol(format!("未知方法 {other}"))),
     }
 }
@@ -420,4 +541,111 @@ pub unsafe fn send_message(connection: xpc_connection_t, message: xpc_object_t) 
 /// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
 pub unsafe fn set_value(dict: xpc_object_t, key: &str, value: xpc_object_t) {
     unsafe { xpc_dictionary_set_value(dict, cstring(key).as_ptr(), value) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// 不存在的 Mach service：必须很快报 `Unavailable`，而不是把调用方挂住。
+    /// 这条覆盖的是异步回复 + 超时等待的基本路径。
+    #[test]
+    fn a_missing_service_fails_fast_instead_of_blocking() {
+        let start = Instant::now();
+        let result = call_with_timeout(
+            "com.veyl.helper.nonexistent.test",
+            "status",
+            None,
+            Duration::from_secs(2),
+        );
+        assert!(
+            matches!(&result, Err(XpcError::Unavailable(_))),
+            "应当报 Unavailable，实际 {result:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "不该等到超时才返回：{:?}",
+            start.elapsed()
+        );
+    }
+
+    fn status_dict(running: bool, pid: i64, extra: bool) -> xpc_object_t {
+        unsafe {
+            let dict = xpc_dictionary_create(std::ptr::null(), std::ptr::null(), 0);
+            dict_set_bool(dict, "ok", true);
+            dict_set_bool(dict, "running", running);
+            dict_set_int64(dict, "pid", pid);
+            if extra {
+                dict_set_string(dict, "clash_addr", "127.0.0.1:50000");
+                dict_set_string(dict, "clash_secret", "s3cret");
+                dict_set_string(dict, "since", "2026-11-05T00:00:00Z");
+            }
+            dict
+        }
+    }
+
+    /// 契约 §3.2：运行中的 status 必须带回 clash 地址与启动时刻。
+    #[test]
+    fn a_running_status_reply_carries_clash_and_since() {
+        unsafe {
+            let dict = status_dict(true, 123, true);
+            let parsed = parse_reply(&cstring("svc"), "status", dict).unwrap();
+            release(dict);
+            assert_eq!(
+                parsed,
+                Reply::Status {
+                    running: true,
+                    pid: Some(123),
+                    clash_addr: Some("127.0.0.1:50000".into()),
+                    clash_secret: Some("s3cret".into()),
+                    since: Some("2026-11-05T00:00:00Z".into()),
+                }
+            );
+        }
+    }
+
+    /// 未运行时这三项是 None，不能用空串冒充有效值。
+    #[test]
+    fn a_stopped_status_reply_has_no_clash_fields() {
+        unsafe {
+            let dict = status_dict(false, 0, false);
+            let parsed = parse_reply(&cstring("svc"), "status", dict).unwrap();
+            release(dict);
+            assert_eq!(
+                parsed,
+                Reply::Status {
+                    running: false,
+                    pid: None,
+                    clash_addr: None,
+                    clash_secret: None,
+                    since: None,
+                }
+            );
+        }
+    }
+
+    /// start 回复里的 `since` 来自特权侧（契约 §3.1）。
+    #[test]
+    fn a_start_reply_carries_the_privileged_start_time() {
+        unsafe {
+            let dict = xpc_dictionary_create(std::ptr::null(), std::ptr::null(), 0);
+            dict_set_bool(dict, "ok", true);
+            dict_set_int64(dict, "pid", 9);
+            dict_set_string(dict, "clash_addr", "127.0.0.1:50001");
+            dict_set_string(dict, "clash_secret", "s");
+            dict_set_string(dict, "since", "2026-11-05T01:02:03Z");
+            let parsed = parse_reply(&cstring("svc"), "start", dict).unwrap();
+            release(dict);
+            assert_eq!(
+                parsed,
+                Reply::Started {
+                    pid: 9,
+                    clash_addr: "127.0.0.1:50001".into(),
+                    clash_secret: "s".into(),
+                    since: "2026-11-05T01:02:03Z".into(),
+                }
+            );
+        }
+    }
 }

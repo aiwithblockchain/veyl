@@ -9,6 +9,7 @@
 # 环境变量：
 #   VEYL_DEV_ID_APP       Developer ID Application 证书名；缺失时用 ad-hoc 签名（仅本地）
 #   VEYL_NOTARY_PROFILE   notarytool store-credentials 里的 profile 名
+#   VEYL_SIGN_TIMESTAMP   1（默认）带安全时间戳；0 用于开发证书（timestamp 服务不保证接受）
 #
 # 打印环境时只输出「是否设置」，绝不输出值。
 
@@ -40,13 +41,21 @@ _codesign() {
   shift
   if [ "$identity" = "-" ]; then
     codesign --force --sign - "$@"
+    return
+  fi
+  # Developer ID 必须带安全时间戳；开发证书不保证被 timestamp 服务接受，
+  # 开发脚本用 VEYL_SIGN_TIMESTAMP=0 关掉它。
+  # 用字符串而不是数组：macOS 自带的 bash 3.2 在 `set -u` 下展开空数组会报错。
+  local extra="--timestamp"
+  if [ "${VEYL_SIGN_TIMESTAMP:-1}" = "0" ]; then
+    extra=""
+  fi
+  # shellcheck disable=SC2086  # extra 只会是空串或一个不含空格的开关
+  if [ -n "$VEYL_APP_ENTITLEMENTS" ] && [ -f "$VEYL_APP_ENTITLEMENTS" ]; then
+    codesign --force --options runtime $extra \
+      --entitlements "$VEYL_APP_ENTITLEMENTS" --sign "$identity" "$@"
   else
-    if [ -n "$VEYL_APP_ENTITLEMENTS" ] && [ -f "$VEYL_APP_ENTITLEMENTS" ]; then
-      codesign --force --options runtime --timestamp \
-        --entitlements "$VEYL_APP_ENTITLEMENTS" --sign "$identity" "$@"
-    else
-      codesign --force --options runtime --timestamp --sign "$identity" "$@"
-    fi
+    codesign --force --options runtime $extra --sign "$identity" "$@"
   fi
 }
 
@@ -113,7 +122,31 @@ sign_app() {
   sign_nested_bundles "$app" "$identity" || return 1
 
   printf '  sign app %s\n' "$(basename "$app")"
-  _codesign "$identity" --deep "$app"
+  _codesign "$identity" --deep "$app" || return 1
+  assert_runtime_identifier "$app" "$identity" || return 1
+}
+
+# 运行时必须以裸 Mach-O 的文件名作为签名 identifier：helper 的验签要求里写死了
+# `identifier "sing-box"`。改名、或以后有人给它加 `--identifier`，都会让 TUN
+# 在真机上静默失配，所以在签名之后立刻断言。
+assert_runtime_identifier() {
+  local app="$1" identity="$2" runtime identifier
+  runtime="$app/Contents/Resources/runtime/sing-box"
+  [ -f "$runtime" ] || return 0
+  identifier="$(codesign -d --verbose=4 "$runtime" 2>&1 | sed -n 's/^Identifier=//p' | head -1)"
+  if [ "$identifier" = "sing-box" ]; then
+    printf '  运行时签名 identifier：%s\n' "$identifier"
+    return 0
+  fi
+  if [ "$identity" = "-" ]; then
+    # ad-hoc 的 identifier 本来就会被加随机后缀，且这种包 TUN 也用不了。
+    printf '警告：ad-hoc 签名的运行时 identifier 是 %s（这个包上 TUN 不可用）\n' \
+      "${identifier:-<空>}" >&2
+    return 0
+  fi
+  printf '错误：运行时的签名 identifier 是 "%s"，helper 验签要求 "sing-box"\n' \
+    "${identifier:-<空>}" >&2
+  return 1
 }
 
 submit_and_wait() {

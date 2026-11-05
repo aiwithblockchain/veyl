@@ -51,6 +51,13 @@ jobs:
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
+      # veyl-helper 是独立 bin，`--lib` 覆盖不到它的 37 项测试。它一度变成只能在
+      # macOS 编译而没人发现。Windows runner 上这个 bin 会随 [[bin]] 的平台门控消失，
+      # 所以只在这里跑；不满足条件的 job 直接跳过，不算失败。
+      - name: Helper bin tests
+        if: runner.os == 'macOS'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --bin veyl-helper
+
       # --lib 只编库，抓不到 bin 和集成测试。TUN 的 helper 是个 bin，它一度变成
       # 只能在 macOS 编译而没人发现——这条用 --all-targets 把 bin 也纳入编译。
       - name: Rust check all targets

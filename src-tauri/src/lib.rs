@@ -297,6 +297,8 @@ pub fn run() {
             agent::commands::net_repair,
             agent::commands::open_log_dir,
             agent::commands::open_external,
+            agent::commands::tun_helper_open_settings,
+            agent::commands::tun_helper_uninstall,
             agent::commands::chat_history,
             agent::commands::chat_delete,
             agent::commands::reply_user_question,

@@ -254,6 +254,14 @@ APP_SHA="$(shasum -a 256 "$RULES_IN_APP" | awk '{print $1}')"
 printf '  运行时与规则归档落点正确\n'
 
 printf '\n[4/9] 签名嵌套 Mach-O 与 App\n'
+# 正式包必须带安全时间戳。开发脚本会设 VEYL_SIGN_TIMESTAMP=0，那是给
+# 开发证书用的；这个变量留在环境里会让正式包静默失去时间戳，所以这里强制改回来。
+if [ -n "${VEYL_DEV_ID_APP:-}" ]; then
+  if [ "${VEYL_SIGN_TIMESTAMP:-1}" = "0" ]; then
+    printf '警告：忽略残留的 VEYL_SIGN_TIMESTAMP=0，正式包强制带安全时间戳\n' >&2
+  fi
+  export VEYL_SIGN_TIMESTAMP=1
+fi
 sign_app "$APP_PATH"
 
 printf '\n[5/9] 校验签名\n'

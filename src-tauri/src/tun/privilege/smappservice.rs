@@ -89,20 +89,43 @@ impl Registration for SmAppService {
         let Some(service) = service() else {
             return Ok(());
         };
+        // 先看状态：压根没注册、或 bundle 里没有 plist，卸载就是幂等成功。
+        // 不能只靠错误文案——系统语言一变，`not found` 还认不认得出来全靠运气。
+        if matches!(
+            map_status(unsafe { service.status() }),
+            HelperStatus::NotFound | HelperStatus::NotRegistered
+        ) {
+            return Ok(());
+        }
+
         match unsafe { service.unregisterAndReturnError() } {
             Ok(()) => Ok(()),
-            // 本来就没注册：卸载时这是成功，不是错误。
             Err(error) => {
-                let text = error.localizedDescription().to_string();
-                if text.contains("not found") || text.contains("JobNotFound") {
-                    Ok(())
-                } else {
-                    Err(PrivilegeError::new(
-                        ERR_HELPER_INSTALL_FAILED,
-                        "移除后台助手失败",
-                    )
-                    .with_detail(text))
+                // 失败后状态已经不在了：并发卸载或状态滞后，对调用方同样是成功。
+                // Apple 没有为 SMAppServiceErrorDomain 公开错误码，状态才是主判据。
+                if matches!(
+                    map_status(unsafe { service.status() }),
+                    HelperStatus::NotFound | HelperStatus::NotRegistered
+                ) {
+                    return Ok(());
                 }
+                let domain = error.domain().to_string();
+                let text = error.localizedDescription().to_string();
+                // 最后兜底：同域、且文案明确表示「没找到」。
+                // 前两步都没有结论时才用，避免把真正的失败当成成功。
+                if domain == "SMAppServiceErrorDomain"
+                    && (text.contains("not found") || text.contains("JobNotFound"))
+                {
+                    return Ok(());
+                }
+                Err(PrivilegeError::new(
+                    ERR_HELPER_INSTALL_FAILED,
+                    "移除后台助手失败",
+                )
+                .with_detail(format!(
+                    "{domain}:{}: {text}",
+                    error.code()
+                )))
             }
         }
     }
@@ -130,7 +153,7 @@ fn map_status(status: SMAppServiceStatus) -> HelperStatus {
 }
 
 /// 把用户送到能点「允许」的那一页。
-fn open_login_items() {
+pub(crate) fn open_login_items() {
     if AnyClass::get(c"SMAppService").is_none() {
         return;
     }
