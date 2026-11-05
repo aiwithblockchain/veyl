@@ -547,6 +547,43 @@ pub async fn net_repair(
         .map_err(error_value)
 }
 
+/// 强制重置网络。UI 专用，不注册为 AI 工具（`tools/net.rs` 里没有这个动作）。
+///
+/// 八步固定、逐项回报；每一步失败都不影响后续步骤，最终以 `verify` 为准。
+/// 并发双击时第二次直接拒绝，不跑两轮互相拆台。
+static FORCE_RESET_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[tauri::command]
+pub async fn network_force_reset(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    use std::sync::atomic::Ordering;
+
+    if FORCE_RESET_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "PRECONDITION_FAILED",
+            "message": "强制重置正在进行中，请等当前这次结束",
+            "retryable": true,
+            "details": { "reason": "reset_in_flight" },
+            "request_id": "",
+        }));
+    }
+    // 无论正常返回、报错还是被取消，都要把标志放回去。
+    struct InFlight;
+    impl Drop for InFlight {
+        fn drop(&mut self) {
+            FORCE_RESET_IN_FLIGHT.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = InFlight;
+
+    state
+        .services
+        .network_force_reset()
+        .await
+        .map_err(error_value)
+}
+
 /// 删除会话及其全部消息与工具调用记录（同事务）。有进行中的请求时拒绝。
 #[tauri::command]
 pub async fn chat_delete(

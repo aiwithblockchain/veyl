@@ -9,6 +9,7 @@ pub mod config;
 pub mod lifecycle;
 pub mod llm;
 pub mod logging;
+pub mod net_reset;
 pub mod netcfg;
 pub mod nodes;
 pub mod proxy;
@@ -295,6 +296,7 @@ pub fn run() {
             agent::commands::rules_status,
             agent::commands::category_list,
             agent::commands::net_repair,
+            agent::commands::network_force_reset,
             agent::commands::open_log_dir,
             agent::commands::open_external,
             agent::commands::tun_helper_open_settings,

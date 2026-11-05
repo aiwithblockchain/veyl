@@ -277,16 +277,22 @@ fn mask_v6(addr: Ipv6Addr, prefix: u8) -> Ipv6Addr {
 ///
 /// 读不到就返回空——TUN 仍然可用，只是确认页上少一句「我会绕开你的网段」。
 pub fn collect() -> Vec<LocalAddr> {
+    try_collect().unwrap_or_default()
+}
+
+/// 同 `collect`，但读不到接口时返回错误。
+///
+/// 「没有 TUN」和「根本没读到接口」必须分开：后者当成前者，
+/// 会让复核把未知状态报成已恢复。
+pub fn try_collect() -> Result<Vec<LocalAddr>, String> {
     #[cfg(target_os = "macos")]
     {
-        let Ok(output) = crate::netcfg::run("/sbin/ifconfig", &["-a"]) else {
-            return Vec::new();
-        };
-        parse_ifconfig(&output)
+        let output = crate::netcfg::run("/sbin/ifconfig", &["-a"])?;
+        Ok(parse_ifconfig(&output))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Vec::new()
+        Err("当前平台未实现本机接口采集".into())
     }
 }
 

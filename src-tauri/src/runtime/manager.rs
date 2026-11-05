@@ -953,6 +953,24 @@ impl RuntimeManager {
         }
     }
 
+    /// `runtime.pid` 里记录的进程是否还活着、且确实是我们启动的那个 sing-box。
+    ///
+    /// 与 `reclaim_stale` 同一套三重核对（pid 活着 + 命令行对得上），
+    /// 但**只读不杀**。强制重置用它决定能不能删掉运行记录：只凭 pid
+    /// 判断会被 pid 复用骗到，那一项就永远红。
+    pub fn recorded_sing_box_is_alive(&self) -> bool {
+        let path = self.running_pid_path();
+        let Ok(Some(record)) = crate::runtime::fsutil::read_json::<RunningPid>(&path) else {
+            return false;
+        };
+        if !process::is_alive(record.pid) {
+            return false;
+        }
+        process::command_line(record.pid)
+            .map(|command| process::matches_launch(&command, &record.binary, &record.config))
+            .unwrap_or(false)
+    }
+
     async fn engine(self: Arc<Self>, gen: u64) {
         let mut restarts: u32 = 0;
 

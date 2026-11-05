@@ -132,6 +132,22 @@ pub fn run(program: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// 只关掉「指向本机指定端口」的系统代理，不动别人的设置。
+///
+/// 强制重置用：备份丢了、但系统代理还指着 Veyl 的端口时，按端口精确清理。
+/// 返回被改动的网络服务名。
+pub fn disable_proxy_for_port(port: u16) -> Result<Vec<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::disable_proxy_for_port(port)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = port;
+        Err("当前平台暂未实现按端口清理系统代理".into())
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
@@ -201,6 +217,41 @@ mod macos {
             });
         }
         Ok(proxies)
+    }
+
+    /// 是不是我们写进去的那一份：已启用、端口一致、服务器是本机回环。
+    /// 只认 `127.0.0.1` / `localhost`，用户自己的远端代理不会被误伤。
+    fn points_at(entry: &ProxyEntry, port: u16) -> bool {
+        entry.enabled
+            && entry.port == Some(port)
+            && matches!(entry.server.as_deref(), Some("127.0.0.1") | Some("localhost"))
+    }
+
+    pub fn disable_proxy_for_port(port: u16) -> Result<Vec<String>, String> {
+        let mut touched = Vec::new();
+        for service in list_services()? {
+            let mut cleared = false;
+            for (entry, flag) in [
+                (read_setting(&service, "-getwebproxy"), "-setwebproxystate"),
+                (
+                    read_setting(&service, "-getsecurewebproxy"),
+                    "-setsecurewebproxystate",
+                ),
+                (
+                    read_setting(&service, "-getsocksfirewallproxy"),
+                    "-setsocksfirewallproxystate",
+                ),
+            ] {
+                if points_at(&entry, port) {
+                    run_network_setup(&[flag, service.as_str(), "off"])?;
+                    cleared = true;
+                }
+            }
+            if cleared {
+                touched.push(service);
+            }
+        }
+        Ok(touched)
     }
 
     fn read_dns_servers() -> Vec<String> {
@@ -317,6 +368,29 @@ mod macos {
         listeners.sort_by_key(|item| item.port);
         listeners.truncate(50);
         listeners
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn entry(enabled: bool, server: &str, port: u16) -> ProxyEntry {
+            ProxyEntry {
+                enabled,
+                server: Some(server.into()),
+                port: Some(port),
+            }
+        }
+
+        /// 只认「已启用 + 回环 + 端口一致」；用户自己的代理不能被误伤。
+        #[test]
+        fn only_our_loopback_endpoint_is_matched() {
+            assert!(points_at(&entry(true, "127.0.0.1", 2080), 2080));
+            assert!(points_at(&entry(true, "localhost", 2080), 2080));
+            assert!(!points_at(&entry(true, "127.0.0.1", 2081), 2080));
+            assert!(!points_at(&entry(false, "127.0.0.1", 2080), 2080));
+            assert!(!points_at(&entry(true, "10.0.0.1", 2080), 2080));
+        }
     }
 }
 

@@ -241,6 +241,10 @@ impl VpnToolServices for FakeServices {
         self.rec.record(format!("net_repair({action},{port:?})"));
         Ok(self.data.clone())
     }
+    async fn network_force_reset(&self) -> anyhow::Result<Value> {
+        self.rec.record("network_force_reset()".to_string());
+        Ok(self.data.clone())
+    }
     async fn vpn_connect(&self, config_id: Option<String>) -> anyhow::Result<Value> {
         self.rec.record(format!("vpn_connect({config_id:?})"));
         Ok(self.data.clone())
@@ -852,6 +856,9 @@ async fn service_failure_becomes_a_structured_error_with_next_actions() {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn net_repair(&self, _: &str, _: Option<u16>) -> anyhow::Result<Value> {
+            Err(anyhow::anyhow!("磁盘满了"))
+        }
+        async fn network_force_reset(&self) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn vpn_connect(&self, _: Option<String>) -> anyhow::Result<Value> {

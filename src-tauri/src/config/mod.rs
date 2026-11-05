@@ -8,5 +8,6 @@ pub use builder::{
 };
 pub use ports::{any_free_port, is_port_free, pick_free_port, random_secret};
 pub use validate::{
-    check, install, install_profile, remove_all_profile_configs, remove_profile_config,
+    check, install, install_profile, remove_all_profile_configs,
+    remove_all_profile_configs_checked, remove_profile_config,
 };

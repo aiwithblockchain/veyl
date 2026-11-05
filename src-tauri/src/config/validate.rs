@@ -117,8 +117,29 @@ pub fn remove_profile_config(config_dir: &Path, profile_id: &str) {
 /// 每次连接都会重新渲染，所以启动与退出时可以整体清掉——它们都含明文凭据，
 /// 不能留在磁盘上等下一次连接。
 pub fn remove_all_profile_configs(config_dir: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(config_dir) else {
-        return 0;
+    match remove_all_profile_configs_checked(config_dir) {
+        Ok(removed) => {
+            if removed > 0 {
+                log::info!("active_config removed count={removed}");
+            }
+            removed
+        }
+        Err(error) => {
+            log::warn!("清空明文配置失败：{error}");
+            0
+        }
+    }
+}
+
+/// 同 `remove_all_profile_configs`，但删除失败会返回错误。
+///
+/// 强制重置用它：报 ok 却把明文留在磁盘上，比直接失败更糟。
+pub fn remove_all_profile_configs_checked(config_dir: &Path) -> Result<usize, String> {
+    let entries = match std::fs::read_dir(config_dir) {
+        Ok(entries) => entries,
+        // 目录不存在就是没有明文，算成功。
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(format!("读取配置目录失败：{error}")),
     };
     let mut removed = 0;
     for entry in entries.flatten() {
@@ -132,15 +153,11 @@ pub fn remove_all_profile_configs(config_dir: &Path) -> usize {
         if !name.starts_with("profile-") || !name.ends_with(".json") {
             continue;
         }
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                removed += 1;
-                log::info!("active_config removed path={}", path.display());
-            }
-            Err(error) => log::warn!("删除配置文件失败 {}：{error}", path.display()),
-        }
+        std::fs::remove_file(&path)
+            .map_err(|error| format!("删除 {} 失败：{error}", path.display()))?;
+        removed += 1;
     }
-    removed
+    Ok(removed)
 }
 
 /// 按 profile 落盘**完整**配置（含凭据），权限 0600。

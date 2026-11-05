@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::backend::{ClashApi, StartReply, TunBackend, TunError, TunSnapshot};
-use super::privilege::Registration;
+use super::privilege::{HelperStatus, Registration};
 
 /// 缓存中的 pid 超过这个间隔就向后端复核一次：helper 崩溃或被停掉时，
 /// 界面不能一直报「已连接」。测试里缩短，避免用例等 5 秒。
@@ -112,6 +112,14 @@ impl TunSession {
 
     pub fn launcher_kind(&self) -> &'static str {
         self.kind
+    }
+
+    /// 特权组件当前状态。`stop()` 在助手不可用时会直接返回成功（没有可停的东西），
+    /// 强制重置必须能区分「真的没在跑」和「问不到」。
+    pub fn helper_status(&self) -> HelperStatus {
+        self.backend
+            .availability()
+            .unwrap_or(HelperStatus::Unsupported)
     }
 
     /// 起 TUN。顺序不可换：**先确认特权组件可用**再发请求，

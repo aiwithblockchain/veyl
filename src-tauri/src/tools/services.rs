@@ -133,6 +133,12 @@ pub trait VpnToolServices: Send + Sync {
     async fn net_config_get(&self) -> anyhow::Result<Value>;
     async fn net_repair(&self, action: &str, port: Option<u16>) -> anyhow::Result<Value>;
 
+    /// 强制重置网络（**UI 专用，不注册为 AI 工具**）。
+    ///
+    /// 与 `net_repair` 的区别：这是「不知道现在什么状态，给我恢复干净」——
+    /// TUN 与代理模式的残留一起收，并逐项复核，失败不中断后续。
+    async fn network_force_reset(&self) -> anyhow::Result<Value>;
+
     async fn vpn_connect(&self, config_id: Option<String>) -> anyhow::Result<Value>;
     async fn vpn_disconnect(&self) -> anyhow::Result<Value>;
 
@@ -333,6 +339,10 @@ impl VpnToolServices for NotWiredServices {
         not_wired("修复系统网络")
     }
 
+    async fn network_force_reset(&self) -> anyhow::Result<Value> {
+        not_wired("强制重置网络")
+    }
+
     async fn vpn_connect(&self, _config_id: Option<String>) -> anyhow::Result<Value> {
         not_wired("连接")
     }
@@ -496,6 +506,152 @@ fn tun_error_details(error: &crate::tun::backend::TunError) -> Value {
         "local_code": local_code,
         "detail": error.detail,
     })
+}
+
+/// 强制重置里的一步。字段固定为 `{id, ok, detail}`，前端按 id 渲染。
+fn reset_step(id: &str, ok: bool, detail: impl Into<String>) -> Value {
+    json!({ "id": id, "ok": ok, "detail": detail.into() })
+}
+
+/// UI 只该看到 message。`ServiceError` 的 Display 是「CODE: message」，
+/// 直接拼进 step.detail 会把内部错误码露给用户。
+fn user_message(error: &anyhow::Error) -> String {
+    error
+        .downcast_ref::<ServiceError>()
+        .map(|service| service.message.clone())
+        .unwrap_or_else(|| error.to_string())
+}
+
+/// `server:port` 里的 server 部分；IPv6 可能是 `[::1]:8080`。
+fn endpoint_server(endpoint: &str) -> &str {
+    endpoint
+        .rsplit_once(':')
+        .map(|(server, _)| server)
+        .unwrap_or(endpoint)
+}
+
+fn is_loopback_endpoint(endpoint: &str) -> bool {
+    let server = endpoint_server(endpoint)
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    matches!(server, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// 八步全过才算成功；任何一步 false 都不能抬成 true。
+fn steps_all_ok(steps: &[Value]) -> bool {
+    !steps.is_empty()
+        && steps
+            .iter()
+            .all(|step| step.get("ok").and_then(Value::as_bool) == Some(true))
+}
+
+/// 停 TUN 的三种结果。`Unconfirmed` 与 `Failed` 都不能被当成「停掉了」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TunStopOutcome {
+    Stopped { was_running: bool },
+    Unconfirmed(String),
+    Failed(String),
+}
+
+/// 读系统代理当前指向的端点；读不到时是 `Unknown`，不能当成「没有代理」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CurrentProxy {
+    Known(Option<String>),
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ProxyResetFacts {
+    applied: Option<crate::proxy::ProxyEndpoint>,
+    plan_port: Option<u16>,
+    disable_error: Option<String>,
+    clear_error: Option<String>,
+    cleared_services: Vec<String>,
+    /// 有备份时：仍在使用该端点的网络服务；`None` 表示读失败。
+    in_use: Option<Vec<String>>,
+    /// 没有备份时：系统代理当前指向；`None` 表示不需要读。
+    current: Option<CurrentProxy>,
+}
+
+/// `restore_proxy` 的判定，与系统调用隔开以便直接构造事实做测试。
+fn judge_restore_proxy(facts: &ProxyResetFacts) -> Value {
+    if let Some(error) = &facts.disable_error {
+        let mut detail = format!("恢复系统代理失败：{error}");
+        if let Some(clear) = &facts.clear_error {
+            detail.push_str(&format!("；按端口清理也失败：{clear}"));
+        }
+        return reset_step("restore_proxy", false, detail);
+    }
+    if let Some(error) = &facts.clear_error {
+        return reset_step("restore_proxy", false, format!("清理系统代理失败：{error}"));
+    }
+
+    if let Some(endpoint) = &facts.applied {
+        return match &facts.in_use {
+            Some(still) if still.is_empty() => reset_step(
+                "restore_proxy",
+                true,
+                format!("已恢复连接前的系统代理（{endpoint}）"),
+            ),
+            Some(still) => reset_step(
+                "restore_proxy",
+                false,
+                format!("{endpoint} 仍被 {} 个网络服务使用", still.len()),
+            ),
+            // 核对不了就不能算已恢复。
+            None => reset_step("restore_proxy", false, "无法确认系统代理是否已恢复"),
+        };
+    }
+
+    let current = match facts.current.as_ref() {
+        Some(CurrentProxy::Known(value)) => value,
+        Some(CurrentProxy::Unknown(error)) => {
+            return reset_step(
+                "restore_proxy",
+                false,
+                format!("无法读取系统代理状态：{error}"),
+            )
+        }
+        None => return reset_step("restore_proxy", false, "无法确认系统代理状态"),
+    };
+
+    let ours = facts.plan_port.map(|port| format!("127.0.0.1:{port}"));
+    if let Some(ours) = &ours {
+        if current.as_deref() == Some(ours.as_str()) {
+            return reset_step("restore_proxy", false, format!("系统代理仍指向 Veyl（{ours}）"));
+        }
+    }
+    if !facts.cleared_services.is_empty() {
+        return reset_step(
+            "restore_proxy",
+            true,
+            format!(
+                "已清掉指向 Veyl 端口的系统代理：{}",
+                facts.cleared_services.join("、")
+            ),
+        );
+    }
+    if ours.is_some() {
+        // 知道我们的端口，且它不在当前设置里，可以确认。
+        return reset_step("restore_proxy", true, "系统代理未指向 Veyl");
+    }
+
+    match current {
+        None => reset_step("restore_proxy", true, "系统代理已关闭"),
+        // 明确不是 Veyl：非回环地址，我们没有理由动它，也不该因此报失败。
+        Some(endpoint) if !is_loopback_endpoint(endpoint) => reset_step(
+            "restore_proxy",
+            true,
+            format!("系统代理不属于 Veyl（{endpoint}），未改动"),
+        ),
+        // 回环但端口对不上任何已知的本次连接：可能仍是 Veyl 的残留，不能算确认。
+        Some(endpoint) => reset_step(
+            "restore_proxy",
+            false,
+            format!("系统代理指向本机端口（{endpoint}），无法确认是否属于 Veyl；未做改动"),
+        ),
+    }
 }
 
 /// 顶层错误码保持旧取值；安装失败也归到 `helper_missing`，不出现第五种理由。
@@ -875,6 +1031,100 @@ impl WiredServices {
             .map_err(|e| svc_error(e.code(), e))
     }
 
+    /// 共享动作：E3/卸载（`cleanup_network`）与强制重置走**同一份**。
+    ///
+    /// `Err` 表示「没能确认停掉」，不是「本来就没事」——helper 不可用时
+    /// `TunSession::stop()` 会直接返回成功，这里必须挡在它前面。
+    fn decide_tun_stop(
+        was_running: bool,
+        helper: crate::tun::privilege::HelperStatus,
+        stop: Result<(), String>,
+    ) -> TunStopOutcome {
+        use crate::tun::privilege::HelperStatus;
+
+        if !helper.is_ready() && !matches!(helper, HelperStatus::Unsupported) {
+            return TunStopOutcome::Unconfirmed(format!(
+                "特权助手不可用（{}），无法停止或确认 TUN",
+                helper.as_str()
+            ));
+        }
+        match stop {
+            Ok(()) => TunStopOutcome::Stopped { was_running },
+            Err(message) => TunStopOutcome::Failed(message),
+        }
+    }
+
+    async fn tun_stop_outcome(&self) -> TunStopOutcome {
+        use crate::tun::session::TunState;
+
+        let was_running = matches!(self.tun.status(), TunState::Running { .. });
+        let helper = self.tun.helper_status();
+        let stop = if helper.is_ready()
+            || matches!(helper, crate::tun::privilege::HelperStatus::Unsupported)
+        {
+            self.tun
+                .stop()
+                .map_err(|error| format!("停止 TUN 失败：{}", error.message))
+        } else {
+            // 问不到就别发请求：stop() 在这种状态下会假装成功。
+            Ok(())
+        };
+        Self::decide_tun_stop(was_running, helper, stop)
+    }
+
+    async fn stop_tun_action(&self) -> Result<bool, String> {
+        match self.tun_stop_outcome().await {
+            TunStopOutcome::Stopped { was_running } => Ok(was_running),
+            TunStopOutcome::Unconfirmed(message) | TunStopOutcome::Failed(message) => Err(message),
+        }
+    }
+
+    async fn stop_runtime_action(&self) -> Result<(), String> {
+        self.manager
+            .stop()
+            .await
+            .map_err(|error| format!("停止运行时失败：{error}"))?;
+        // 与 cleanup_network 共用同一段：运行时停了，快照里的标志也要落。
+        self.manager.set_system_proxy_enabled(false).await;
+        Ok(())
+    }
+
+    fn restore_proxy_action(&self) -> Result<(), anyhow::Error> {
+        self.restore_system_proxy()
+    }
+
+    fn flush_dns_action(&self) -> Result<(), String> {
+        crate::netcfg::flush_dns()
+    }
+
+    /// 清掉明文配置与运行记录。返回 `(profile 数, 是否删了 active.json, 是否删了 runtime.pid)`。
+    fn clear_plaintext_action(&self) -> Result<(usize, bool, bool), String> {
+        let removed = vpn_config::remove_all_profile_configs_checked(&self.config_dir())?;
+
+        // `remove_all_profile_configs_checked` 只清 `profile-*`，连接时 rename
+        // 出来的 `active.json` 同样是明文，要单独删。
+        let active_path = self.config_dir().join("active.json");
+        let active_removed = match std::fs::remove_file(&active_path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(format!("删除 active.json 失败：{error}")),
+        };
+
+        // 进程还活着就别删记录：那是下次启动安全回收的唯一线索。
+        // 用命令行核对，不只看 pid——pid 会被复用。
+        if self.manager.recorded_sing_box_is_alive() {
+            return Err("明文配置已清理；代理 sing-box 仍在运行，保留运行记录以便下次回收".into());
+        }
+        let pid_path = self.data_dir.join("runtime.pid");
+        let pid_removed = match std::fs::remove_file(&pid_path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(format!("删除运行记录失败：{error}")),
+        };
+
+        Ok((removed, active_removed, pid_removed))
+    }
+
     #[allow(dead_code)] // E3 重置网络与卸载清理的接缝，界面还没做
     pub(crate) async fn cleanup_network(
         &self,
@@ -884,24 +1134,21 @@ impl WiredServices {
 
         let mut report = CleanupReport::default();
 
-        match self.tun.stop() {
-            Ok(()) => report.stopped_tun = true,
-            Err(error) => report.failures.push(format!("停止 TUN 运行时失败：{error}")),
+        match self.stop_tun_action().await {
+            Ok(_) => report.stopped_tun = true,
+            Err(error) => report.failures.push(error),
         }
-        match self.manager.stop().await {
-            Ok(_) => report.stopped_runtime = true,
-            Err(error) => report.failures.push(format!("停止运行时失败：{error}")),
+        match self.stop_runtime_action().await {
+            Ok(()) => report.stopped_runtime = true,
+            Err(error) => report.failures.push(error),
         }
-        // 按连接前写下的备份还原，不是「一刀切关掉」。
-        match self.restore_system_proxy() {
+        match self.restore_proxy_action() {
             Ok(()) => report.restored_proxy = true,
-            Err(error) => report.failures.push(format!("还原系统代理失败：{error}")),
+            Err(error) => report.failures.push(user_message(&error)),
         }
-        self.manager.set_system_proxy_enabled(false).await;
-
-        match crate::netcfg::flush_dns() {
+        match self.flush_dns_action() {
             Ok(()) => report.flushed_dns = true,
-            Err(error) => report.failures.push(format!("清除 DNS 缓存失败：{error}")),
+            Err(error) => report.failures.push(error),
         }
 
         report.removed_configs = match config_id {
@@ -909,7 +1156,13 @@ impl WiredServices {
                 vpn_config::remove_profile_config(&self.config_dir(), &id);
                 1
             }
-            None => vpn_config::remove_all_profile_configs(&self.config_dir()),
+            None => match self.clear_plaintext_action() {
+                Ok((removed, _, _)) => removed,
+                Err(error) => {
+                    report.failures.push(error);
+                    0
+                }
+            },
         };
 
         report
@@ -3256,6 +3509,17 @@ impl VpnToolServices for WiredServices {
             )),
         }
     }
+
+    /// UI 专用，不注册为 AI 工具。
+    async fn network_force_reset(&self) -> anyhow::Result<Value> {
+        if !cfg!(target_os = "macos") {
+            return Err(svc_error(
+                "UNSUPPORTED",
+                "强制重置网络目前只支持 macOS；请重启 App 并检查网络设置",
+            ));
+        }
+        self.force_reset_network().await
+    }
 }
 
 /// 连接期间才允许存在的明文配置：中途任何失败都把它删掉。
@@ -3808,6 +4072,496 @@ impl WiredServices {
             "exit_ip": Value::Null,
             "verified": verified,
         }))
+    }
+
+    /// 强制重置网络：八步固定、顺序固定，每步独立记录，失败不中断后续。
+    /// 顶层 `ok` 要求八步全过；`verified` 只反映最后一步的复检——
+    /// 「跑完了」不等于「恢复好了」，两者不能混。
+    async fn force_reset_network(&self) -> anyhow::Result<Value> {
+        // 端口与备份必须在 stop 之前取：manager.stop() 会清掉 plan。
+        let plan_port = self
+            .manager
+            .current_plan()
+            .await
+            .map(|plan| plan.mixed_port);
+        let applied = self.proxy.applied_endpoint().ok().flatten();
+
+        let mut steps = Vec::with_capacity(8);
+        steps.push(self.reset_stop_tun().await);
+        steps.push(self.reset_stop_runtime().await);
+        steps.push(self.reset_restore_proxy(applied.as_ref(), plan_port));
+        steps.push(self.reset_sweep_processes().await);
+        steps.push(self.reset_clear_routes());
+        steps.push(self.reset_flush_dns().await);
+        steps.push(self.reset_clear_plaintext());
+
+        let (verify, exit_ip) = self.reset_verify(applied.as_ref(), plan_port).await;
+        steps.push(verify);
+
+        let ok = steps_all_ok(&steps);
+        let verified = steps
+            .last()
+            .and_then(|step| step.get("ok"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        log::info!(
+            "强制重置网络 完成 ok={ok} verified={verified} 未通过={:?}",
+            steps
+                .iter()
+                .filter(|step| step.get("ok").and_then(Value::as_bool) != Some(true))
+                .filter_map(|step| step.get("id").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+        );
+
+        Ok(json!({
+            "ok": ok,
+            "verified": verified,
+            "exit_ip": exit_ip,
+            "steps": steps,
+        }))
+    }
+
+    async fn reset_stop_tun(&self) -> Value {
+        match self.tun_stop_outcome().await {
+            TunStopOutcome::Stopped { was_running } => reset_step(
+                "stop_tun",
+                true,
+                if was_running {
+                    "TUN 已停止"
+                } else {
+                    "TUN 未在运行"
+                },
+            ),
+            TunStopOutcome::Unconfirmed(message) => reset_step(
+                "stop_tun",
+                false,
+                format!("{message}；重启 App 或按提示授权后重试"),
+            ),
+            TunStopOutcome::Failed(message) => reset_step("stop_tun", false, message),
+        }
+    }
+
+    async fn reset_stop_runtime(&self) -> Value {
+        match self.stop_runtime_action().await {
+            Ok(()) => {
+                let state = self.manager.status().await.state;
+                let ok = state == crate::runtime::RuntimeState::Idle;
+                reset_step(
+                    "stop_runtime",
+                    ok,
+                    if ok {
+                        "代理模式已停止".to_string()
+                    } else {
+                        format!("运行时仍处于 {}", state.as_str())
+                    },
+                )
+            }
+            Err(message) => reset_step("stop_runtime", false, message),
+        }
+    }
+
+    fn reset_restore_proxy(
+        &self,
+        applied: Option<&crate::proxy::ProxyEndpoint>,
+        plan_port: Option<u16>,
+    ) -> Value {
+        let applied = applied.cloned();
+        // 与 cleanup_network 共用同一段「还原 + 复核」。
+        let disable_error = self
+            .restore_system_proxy()
+            .err()
+            .map(|error| user_message(&error));
+
+        // 备份丢失或还原失败时，系统代理可能还指着我们的端口。
+        // 只按「回环 + 这个端口」精确关掉，用户自己的代理一概不动。
+        let mut cleared_services = Vec::new();
+        let mut clear_error = None;
+        if (applied.is_none() || disable_error.is_some()) && plan_port.is_some() {
+            if let Some(port) = plan_port {
+                match crate::netcfg::disable_proxy_for_port(port) {
+                    Ok(services) => cleared_services = services,
+                    Err(error) => clear_error = Some(error),
+                }
+            }
+        }
+
+        let in_use = applied
+            .as_ref()
+            .and_then(|endpoint| self.proxy.endpoint_in_use(endpoint).ok());
+
+        let current = if applied.is_none() {
+            Some(match self.proxy.current_endpoint() {
+                Ok(value) => CurrentProxy::Known(value),
+                Err(error) => CurrentProxy::Unknown(error.to_string()),
+            })
+        } else {
+            None
+        };
+
+        judge_restore_proxy(&ProxyResetFacts {
+            applied,
+            plan_port,
+            disable_error,
+            clear_error,
+            cleared_services,
+            in_use,
+            current,
+        })
+    }
+
+    /// 扫描 `ps` 里属于我们的 sing-box，返回 `(pid, 命令行, 是否 root)`。
+    async fn our_sing_box_processes(&self) -> Result<Vec<(u32, String, bool)>, String> {
+        let mut roots = vec![self.data_dir.clone()];
+        if let Some(root) = crate::net_reset::tun_runtime_root() {
+            roots.push(root);
+        }
+        tokio::task::spawn_blocking(move || {
+            let output = crate::net_reset::read_ps()?;
+            let entries = crate::net_reset::parse_ps(&output);
+            Ok(crate::net_reset::find_sing_box_processes(&entries, &roots)
+                .into_iter()
+                .map(|entry| {
+                    (
+                        entry.pid,
+                        entry.command.clone(),
+                        crate::net_reset::is_helper_runtime(&entry.command),
+                    )
+                })
+                .collect())
+        })
+        .await
+        .map_err(|error| format!("扫描进程失败：{error}"))?
+    }
+
+    /// helper 由 launchd 守护，刚停完 TUN 时可能短暂不可用。
+    /// 给它一个短窗口，仍不可用才按失败处理。
+    async fn wait_for_helper(
+        &self,
+        timeout: std::time::Duration,
+    ) -> crate::tun::privilege::HelperStatus {
+        use crate::tun::privilege::HelperStatus;
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let status = self.tun.helper_status();
+            if status.is_ready()
+                || matches!(status, HelperStatus::Unsupported)
+                || tokio::time::Instant::now() >= deadline
+            {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn reset_sweep_processes(&self) -> Value {
+        use crate::tun::privilege::HelperStatus;
+
+        let mut notes = Vec::new();
+        let mut ok = true;
+
+        // 有 pid 记录时由 manager 做三重核对后回收；没有记录的才走下面的路径匹配。
+        match self.manager.reclaim_stale().await {
+            Ok(Some(pid)) => notes.push(format!("回收了遗留的代理 sing-box（pid {pid}）")),
+            Ok(None) => {}
+            Err(error) => {
+                ok = false;
+                notes.push(format!("回收代理残留失败：{error}"));
+            }
+        }
+
+        // 重试窗口：helper 可能正在被 launchd 重启，别一次问不到就下结论。
+        let helper = self
+            .wait_for_helper(std::time::Duration::from_secs(2))
+            .await;
+        let helper_ok = helper.is_ready() || matches!(helper, HelperStatus::Unsupported);
+        if !helper_ok {
+            ok = false;
+            notes.push(format!(
+                "特权助手不可用（{}），无法确认特权侧没有残留；先重启 App 或按提示授权再试",
+                helper.as_str()
+            ));
+        }
+
+        let leftovers = match self.our_sing_box_processes().await {
+            Ok(found) => found,
+            Err(error) => return reset_step("sweep_processes", false, error),
+        };
+
+        let mut remaining: Vec<(u32, bool)> = Vec::new();
+        for (pid, command, is_root) in leftovers {
+            if is_root {
+                // root 进程只有 helper 能停；没有权限就不假装停了。
+                remaining.push((pid, true));
+                continue;
+            }
+            if crate::runtime::process::terminate_pid(pid, std::time::Duration::from_secs(2)).await {
+                notes.push(format!("结束了遗留的 sing-box（pid {pid}）"));
+            } else {
+                log::warn!("遗留 sing-box pid={pid} 未能结束：{command}");
+                remaining.push((pid, false));
+            }
+        }
+
+        // root 进程也可能正在被 helper 收掉，再给 2 秒重扫。
+        if remaining.iter().any(|(_, is_root)| *is_root) {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let still: Vec<u32> = match self.our_sing_box_processes().await {
+                    Ok(found) => found
+                        .into_iter()
+                        .filter(|(_, _, is_root)| *is_root)
+                        .map(|(pid, _, _)| pid)
+                        .collect(),
+                    Err(_) => break,
+                };
+                if still.is_empty() {
+                    remaining.retain(|(_, is_root)| !*is_root);
+                    notes.push("特权侧的 sing-box 已在重试窗口内退出".to_string());
+                    break;
+                }
+            }
+        }
+
+        if remaining.is_empty() {
+            return reset_step(
+                "sweep_processes",
+                ok,
+                if notes.is_empty() {
+                    "没有 Veyl 的 sing-box 残留".to_string()
+                } else {
+                    notes.join("；")
+                },
+            );
+        }
+
+        let pids = remaining
+            .iter()
+            .map(|(pid, _)| pid.to_string())
+            .collect::<Vec<_>>()
+            .join("、");
+        let needs_root = remaining.iter().any(|(_, root)| *root);
+        let mut detail = format!("仍有 Veyl 的 sing-box 残留（pid {pids}）");
+        if needs_root {
+            detail.push_str("，属于特权助手，需要重启 App 或手工清理");
+        }
+        if !notes.is_empty() {
+            detail = format!("{}；{detail}", notes.join("；"));
+        }
+        reset_step("sweep_processes", false, detail)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn reset_clear_routes(&self) -> Value {
+        let netstat = match crate::net_reset::read_netstat() {
+            Ok(output) => output,
+            Err(error) => {
+                return reset_step("clear_routes", false, format!("读取路由表失败：{error}"))
+            }
+        };
+        let live = match crate::net_reset::read_ifconfig() {
+            Ok(output) => crate::net_reset::parse_interface_names(&output),
+            Err(error) => {
+                // 读不到接口就无法判断哪条路由是残留：fail-closed。
+                // 这里既不能删，也不能给删除建议——照做会删掉正在用的 TUN。
+                return reset_step(
+                    "clear_routes",
+                    false,
+                    format!("读取接口列表失败，未删除任何路由：{error}"),
+                );
+            }
+        };
+        let stale = crate::net_reset::stale_split_routes(&netstat, &live);
+        if stale.is_empty() {
+            return reset_step("clear_routes", true, "没有指向已消失 utun 的分流路由");
+        }
+
+        let mut deleted = Vec::new();
+        let mut failed = Vec::new();
+        for route in &stale {
+            match crate::net_reset::delete_route(&route.destination, &route.interface) {
+                Ok(()) => deleted.push(route.destination.clone()),
+                Err(error) => {
+                    log::warn!("删除路由 {} 失败：{error}", route.destination);
+                    failed.push(route.clone());
+                }
+            }
+        }
+
+        if failed.is_empty() {
+            return reset_step(
+                "clear_routes",
+                true,
+                format!("已删除分流路由 {}", deleted.join("、")),
+            );
+        }
+        // 改路由表要 root；这里不弹管理员，如实给出可复制的命令。
+        // 只对「接口确认已消失」的路由给建议（上面的 fail-closed 保证）。
+        let manual = failed
+            .iter()
+            .map(|route| {
+                format!(
+                    "sudo route -n delete -net {} -ifscope {}（该接口已消失）",
+                    route.destination, route.interface
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("；");
+        reset_step(
+            "clear_routes",
+            false,
+            format!("路由残留需要手工清理：{manual}"),
+        )
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn reset_clear_routes(&self) -> Value {
+        reset_step(
+            "clear_routes",
+            false,
+            "当前平台未实现路由检查；若 TUN 仍在接管流量请重启系统",
+        )
+    }
+
+    async fn reset_flush_dns(&self) -> Value {
+        match tokio::task::spawn_blocking(crate::netcfg::flush_dns).await {
+            Ok(Ok(())) => {
+                let resolved = tokio::task::spawn_blocking(crate::netcfg::dns_resolvable)
+                    .await
+                    .unwrap_or(false);
+                reset_step(
+                    "flush_dns",
+                    resolved,
+                    if resolved {
+                        "DNS 缓存已刷新，探针域名可解析"
+                    } else {
+                        "DNS 缓存已刷新，但探针域名仍无法解析"
+                    },
+                )
+            }
+            Ok(Err(error)) => reset_step("flush_dns", false, format!("刷新 DNS 失败：{error}")),
+            Err(error) => reset_step("flush_dns", false, format!("刷新 DNS 失败：{error}")),
+        }
+    }
+
+    fn reset_clear_plaintext(&self) -> Value {
+        // 删除失败必须让这一步变红：报 ok 却把明文留在磁盘上更糟。
+        match self.clear_plaintext_action() {
+            Ok((removed, active_removed, pid_removed)) => reset_step(
+                "clear_plaintext",
+                true,
+                format!(
+                    "已清理 {removed} 个明文配置{}，{}",
+                    if active_removed { "、active.json" } else { "" },
+                    if pid_removed {
+                        "运行记录已删除"
+                    } else {
+                        "没有残留的运行记录"
+                    }
+                ),
+            ),
+            Err(error) => reset_step("clear_plaintext", false, error),
+        }
+    }
+
+    async fn reset_verify(
+        &self,
+        applied: Option<&crate::proxy::ProxyEndpoint>,
+        plan_port: Option<u16>,
+    ) -> (Value, Option<String>) {
+        let mut problems: Vec<String> = Vec::new();
+
+        // 1. 没有 TUN 接口。地址按平台取（`tun::TUN_ADDRESS`）：
+        // macOS 172.19.0.1/30，Windows 198.18.0.1/15，这里不写死。
+        // 读不到接口时判 unknown 并让这一步变红，不能因为「空」就通过。
+        match tokio::task::spawn_blocking(crate::tun::try_collect).await {
+            Ok(Ok(addrs)) => {
+                if let Some(name) = crate::tun::device_name(&addrs) {
+                    problems.push(format!(
+                        "仍有 TUN 接口 {name}（{}）",
+                        crate::tun::TUN_ADDRESS
+                    ));
+                }
+            }
+            Ok(Err(error)) => {
+                problems.push(format!("无法读取接口列表，TUN 状态未知：{error}"))
+            }
+            Err(error) => problems.push(format!("无法读取接口列表，TUN 状态未知：{error}")),
+        }
+
+        // 2. 默认路由不在 utun 上
+        match crate::netcfg::read() {
+            Ok(config) => {
+                if let Some(iface) = config.route.default_interface.as_deref() {
+                    if iface.starts_with("utun") {
+                        problems.push(format!("默认路由仍指向 {iface}"));
+                    }
+                }
+            }
+            Err(error) => problems.push(format!("无法读取路由表：{error}")),
+        }
+
+        // 3. 系统代理不指向 Veyl
+        let mut proxy_ok = true;
+        if let Some(endpoint) = applied {
+            proxy_ok = self
+                .proxy
+                .endpoint_in_use(endpoint)
+                .map(|in_use| in_use.is_empty())
+                .unwrap_or(false);
+        }
+        if let Some(port) = plan_port {
+            let ours = format!("127.0.0.1:{port}");
+            if self.proxy.current_endpoint().ok().flatten().as_deref()
+                == Some(ours.as_str())
+            {
+                proxy_ok = false;
+            }
+        }
+        if !proxy_ok {
+            problems.push("系统代理仍指向 Veyl".into());
+        }
+
+        // 4. 没有 Veyl 的 sing-box
+        match self.our_sing_box_processes().await {
+            Ok(found) if found.is_empty() => {}
+            Ok(found) => problems.push(format!(
+                "仍有 Veyl 的 sing-box 进程：{}",
+                found
+                    .iter()
+                    .map(|(pid, _, _)| pid.to_string())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )),
+            Err(error) => problems.push(error),
+        }
+
+        // 5. 直连出口
+        let exit_ip =
+            match crate::runtime::DirectIpProbe::new(crate::runtime::DEFAULT_DIRECT_IP_PROBE) {
+                Ok(probe) => probe.check().await.ok().flatten(),
+                Err(_) => None,
+            };
+        if exit_ip.is_none() {
+            // 探测失败与真的离线在这里分不出来，措辞如实说「无法确认」，
+            // 不能因为前面几步成功就把这一项算通过。
+            problems.push("直连 IP 探测失败或当前离线，无法确认已恢复直连".into());
+        }
+
+        let ok = problems.is_empty();
+        let detail = if ok {
+            match &exit_ip {
+                Some(ip) => format!("网络已恢复直连，出口 IP {ip}"),
+                None => "网络已恢复直连".to_string(),
+            }
+        } else {
+            problems.join("；")
+        };
+        (reset_step("verify", ok, detail), exit_ip)
     }
 
     async fn repair_set_proxy(&self, port: Option<u16>) -> anyhow::Result<Value> {
@@ -4937,5 +5691,253 @@ mod tun_error_details_tests {
         let details = tun_error_details(&availability);
         assert_eq!(details["reason"], "helper_missing");
         assert!(details["local_code"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod force_reset_tests {
+    use super::*;
+    use crate::proxy::backup::MemoryBackupStore;
+
+    fn services(root: &std::path::Path) -> WiredServices {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let manager = crate::runtime::RuntimeManager::new(crate::runtime::RuntimeConfig::new(root));
+        let proxy = Arc::new(crate::proxy::ProxyController::new(Box::new(
+            MemoryBackupStore::new(),
+        )));
+        let catalog = Arc::new(CatalogClient::new("http://127.0.0.1:9/v1"));
+        WiredServices::new(store, manager, proxy, catalog, root)
+    }
+
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("veyl-reset-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 契约：每一步只有 id / ok / detail 三个字段。
+    #[test]
+    fn a_step_has_exactly_the_contract_fields() {
+        assert_eq!(
+            reset_step("stop_tun", true, "TUN 未在运行"),
+            json!({ "id": "stop_tun", "ok": true, "detail": "TUN 未在运行" })
+        );
+    }
+
+    /// 有备份且端点仍被占用：必须红。
+    #[test]
+    fn a_still_in_use_endpoint_makes_restore_proxy_red() {
+        let facts = ProxyResetFacts {
+            applied: Some(crate::proxy::ProxyEndpoint::loopback(2080)),
+            in_use: Some(vec!["Wi-Fi".into()]),
+            ..Default::default()
+        };
+        let step = judge_restore_proxy(&facts);
+        assert_eq!(step["ok"], false, "{step}");
+        assert!(step["detail"].as_str().unwrap().contains("1 个"));
+    }
+
+    /// 公司固定代理不是 Veyl 的：不能因为它而报失败，也不能去动它。
+    #[test]
+    fn a_foreign_system_proxy_is_left_alone_and_not_a_failure() {
+        let foreign = ProxyResetFacts {
+            current: Some(CurrentProxy::Known(Some("corp-proxy:8080".into()))),
+            ..Default::default()
+        };
+        let step = judge_restore_proxy(&foreign);
+        assert_eq!(step["ok"], true, "{step}");
+        assert!(step["detail"].as_str().unwrap().contains("不属于 Veyl"));
+
+        // 回环但端口对不上本次连接：可能仍是我们的残留，不能确认。
+        let local = ProxyResetFacts {
+            current: Some(CurrentProxy::Known(Some("127.0.0.1:7890".into()))),
+            ..Default::default()
+        };
+        let step = judge_restore_proxy(&local);
+        assert_eq!(step["ok"], false, "{step}");
+        assert!(step["detail"].as_str().unwrap().contains("无法确认"));
+
+        let closed = ProxyResetFacts {
+            current: Some(CurrentProxy::Known(None)),
+            ..Default::default()
+        };
+        assert_eq!(judge_restore_proxy(&closed)["ok"], true);
+
+        let unreadable = ProxyResetFacts {
+            current: Some(CurrentProxy::Unknown("networksetup 失败".into())),
+            ..Default::default()
+        };
+        assert_eq!(judge_restore_proxy(&unreadable)["ok"], false);
+    }
+
+    #[test]
+    fn loopback_endpoints_are_recognised() {
+        assert!(is_loopback_endpoint("127.0.0.1:7890"));
+        assert!(is_loopback_endpoint("localhost:7890"));
+        assert!(is_loopback_endpoint("[::1]:7890"));
+        assert!(!is_loopback_endpoint("corp-proxy:8080"));
+        assert!(!is_loopback_endpoint("10.0.0.1:8080"));
+    }
+
+    /// step.detail 是给用户看的，不能带内部错误码。
+    #[test]
+    fn a_service_error_is_rendered_without_its_internal_code() {
+        let error = svc_error("PRECONDITION_FAILED", "撤销系统代理失败：boom");
+        let message = user_message(&error);
+        assert_eq!(message, "撤销系统代理失败：boom");
+        assert!(!message.contains("PRECONDITION_FAILED"));
+
+        let plain = anyhow::anyhow!("plain failure");
+        assert_eq!(user_message(&plain), "plain failure");
+    }
+
+    /// 没有备份但有本次端口：确认它不在当前设置里就算恢复。
+    #[test]
+    fn a_known_port_absent_from_the_current_setting_is_confirmed() {
+        let facts = ProxyResetFacts {
+            plan_port: Some(2080),
+            current: Some(CurrentProxy::Known(None)),
+            ..Default::default()
+        };
+        let step = judge_restore_proxy(&facts);
+        assert_eq!(step["ok"], true, "{step}");
+        assert!(step["detail"].as_str().unwrap().contains("未指向"));
+
+        let still = ProxyResetFacts {
+            plan_port: Some(2080),
+            current: Some(CurrentProxy::Known(Some("127.0.0.1:2080".into()))),
+            ..Default::default()
+        };
+        assert_eq!(judge_restore_proxy(&still)["ok"], false);
+    }
+
+    /// ok 聚合：任何一步失败都不能被抬成 true。
+    #[test]
+    fn ok_aggregation_turns_red_when_any_step_fails() {
+        let green = [
+            reset_step("stop_tun", true, "x"),
+            reset_step("verify", true, "x"),
+        ];
+        assert!(steps_all_ok(&green));
+        let red = [
+            reset_step("stop_tun", true, "x"),
+            reset_step("sweep_processes", false, "x"),
+        ];
+        assert!(!steps_all_ok(&red), "任何一步失败都不能抬成 true");
+        assert!(!steps_all_ok(&[]), "空列表不能算成功");
+    }
+
+    /// helper 不可用时不能报「TUN 已停」。
+    #[test]
+    fn an_unavailable_helper_makes_stop_tun_red() {
+        use crate::tun::privilege::HelperStatus;
+
+        assert_eq!(
+            WiredServices::decide_tun_stop(false, HelperStatus::NotRegistered, Ok(())),
+            TunStopOutcome::Unconfirmed(
+                "特权助手不可用（not_registered），无法停止或确认 TUN".into()
+            )
+        );
+        assert_eq!(
+            WiredServices::decide_tun_stop(false, HelperStatus::Enabled, Ok(())),
+            TunStopOutcome::Stopped { was_running: false }
+        );
+        assert!(matches!(
+            WiredServices::decide_tun_stop(false, HelperStatus::Enabled, Err("boom".into())),
+            TunStopOutcome::Failed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stopping_an_idle_runtime_is_ok() {
+        let dir = temp_dir();
+        let step = services(&dir).reset_stop_runtime().await;
+        assert_eq!(step["id"], "stop_runtime");
+        assert_eq!(step["ok"], true, "{step}");
+    }
+
+    /// active.json 与 profile-* 都是明文，必须一起清掉。
+    #[test]
+    fn clear_plaintext_removes_active_json_profiles_and_runtime_pid() {
+        let dir = temp_dir();
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("profile-a.json"), "{}").unwrap();
+        std::fs::write(config.join("profile-a.meta.json"), "{}").unwrap();
+        std::fs::write(config.join("active.json"), "{}").unwrap();
+        std::fs::write(dir.join("runtime.pid"), "{}").unwrap();
+
+        let step = services(&dir).reset_clear_plaintext();
+        assert_eq!(step["ok"], true, "{step}");
+        assert!(!config.join("profile-a.json").exists());
+        assert!(!config.join("profile-a.meta.json").exists());
+        assert!(!config.join("active.json").exists());
+        assert!(!dir.join("runtime.pid").exists());
+    }
+
+    /// 进程还活着且命令行对得上时不能删 runtime.pid：
+    /// 那是下次启动安全回收的唯一线索。只看 pid 会被复用骗到。
+    #[cfg(unix)]
+    #[test]
+    fn clear_plaintext_keeps_the_pid_record_while_the_process_is_alive() {
+        let dir = temp_dir();
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let active = config.join("active.json");
+        std::fs::write(&active, "{}").unwrap();
+
+        // 用一个临时进程冒充 sing-box：命令行以 binary 开头、包含 config 路径，
+        // 正好满足 `matches_launch` 的三重核对。
+        // 末尾的 `:` 阻止 sh 把自己 exec 成 sleep，否则 argv[0] 会变。
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30; :")
+            .arg(&active)
+            .spawn()
+            .unwrap();
+
+        std::fs::write(
+            dir.join("runtime.pid"),
+            json!({
+                "pid": child.id(),
+                "binary": "/bin/sh",
+                "config": active.display().to_string(),
+                "started_at": 0,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let step = services(&dir).reset_clear_plaintext();
+        assert_eq!(step["ok"], false, "{step}");
+        assert!(step["detail"].as_str().unwrap().contains("保留运行记录"));
+        assert!(!active.exists(), "明文仍要清掉");
+        assert!(dir.join("runtime.pid").exists());
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// pid 记录指向一个不相干的进程（命令行对不上）时，记录可以删。
+    #[cfg(unix)]
+    #[test]
+    fn a_reused_pid_does_not_block_clearing_the_record() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::write(
+            dir.join("runtime.pid"),
+            json!({
+                "pid": std::process::id(),
+                "binary": "/opt/not-our-sing-box",
+                "config": "/tmp/not-ours.json",
+                "started_at": 0,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let step = services(&dir).reset_clear_plaintext();
+        assert_eq!(step["ok"], true, "{step}");
+        assert!(!dir.join("runtime.pid").exists());
     }
 }
