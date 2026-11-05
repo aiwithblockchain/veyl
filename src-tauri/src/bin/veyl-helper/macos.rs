@@ -432,6 +432,9 @@ struct Supervisor {
     user_logs: Mutex<std::collections::HashMap<u32, Arc<UserLogs>>>,
     /// 还没有连接用户时产生的日志行，灌进第一份用户日志。
     pending_notes: Mutex<Vec<String>>,
+    /// 最近一次接入的用户。没有连接上下文的 note（例如规则预置完成）
+    /// 优先写进它，避免日志建成之后还一直堆在 pending 里。
+    last_uid: Mutex<Option<u32>>,
 }
 
 impl Supervisor {
@@ -446,6 +449,7 @@ impl Supervisor {
             rules: Mutex::new(RulesState::Pending),
             user_logs: Mutex::new(std::collections::HashMap::new()),
             pending_notes: Mutex::new(Vec::new()),
+            last_uid: Mutex::new(None),
         }
     }
 
@@ -455,6 +459,7 @@ impl Supervisor {
         {
             let map = self.user_logs.lock().unwrap();
             if let Some(existing) = map.get(&uid) {
+                *self.last_uid.lock().unwrap() = Some(uid);
                 return Some(Arc::clone(existing));
             }
         }
@@ -481,6 +486,7 @@ impl Supervisor {
             }
         }
         map.insert(uid, Arc::clone(&logs));
+        *self.last_uid.lock().unwrap() = Some(uid);
         Some(logs)
     }
 
@@ -499,10 +505,18 @@ impl Supervisor {
         }
     }
 
-    /// 还没有连接用户时（helper 启动阶段）的日志：先缓存，等第一份用户日志建好再补写。
+    /// 没有连接上下文的日志（helper 启动阶段、规则预置完成等）。
+    /// 已经有用户日志就写进最近那个；还没有才缓存，等第一份日志建好再补写。
     fn note(&self, message: &str) {
         self.emit_note(message);
         let line = self.stamped(message);
+        let last = *self.last_uid.lock().unwrap();
+        if let Some(uid) = last {
+            if let Some(logs) = self.logs_for(uid) {
+                logs.append_helper(&line);
+                return;
+            }
+        }
         let mut pending = self.pending_notes.lock().unwrap();
         if pending.len() < 200 {
             pending.push(line);
@@ -2507,6 +2521,40 @@ mod tests {
         assert!(moved.join("sing-box.log").exists());
         assert!(!elsewhere.join("helper.log").exists(), "软链目标不能出现日志");
         assert!(!elsewhere.join("sing-box.log").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 规则预置完成发生在一个用户已经连过之后：这条没有连接上下文的日志
+    /// 必须写进最近那个用户日志，不能一直堆在 pending 里。
+    #[test]
+    fn a_note_after_a_user_log_exists_is_written_not_buffered() {
+        use std::sync::Arc;
+
+        let home = temp("late-notes");
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let supervisor = Supervisor::new(temp("late-root"));
+        let logs = Arc::new(UserLogs::open(&home, uid, gid).unwrap());
+        let fake = 100_010;
+        supervisor
+            .user_logs
+            .lock()
+            .unwrap()
+            .insert(fake, Arc::clone(&logs));
+        // 模拟这个用户刚刚连过：note() 应当跟随最近一次接入。
+        *supervisor.last_uid.lock().unwrap() = Some(fake);
+
+        supervisor.note("规则预置完成");
+
+        let text = std::fs::read_to_string(
+            veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home)).join("helper.log"),
+        )
+        .unwrap();
+        assert!(text.contains("规则预置完成"), "{text}");
+        assert!(
+            supervisor.pending_notes.lock().unwrap().is_empty(),
+            "已有用户日志时不该再进 pending"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 

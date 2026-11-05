@@ -113,7 +113,7 @@ RUST_LOG=debug npm run app:dev
 ```
 
 **过：** 日志出现「种子已更新」或「默认节点刷新」，窗口标题是 `Veyl`。
-**不过：** 窗口没起来先看终端里的 Rust 编译/启动错误；窗口起来但日志是空的，检查 `~/.veyl/logs/` 下有没有当天的 `app-YYYY-MM-DD.log`。
+**不过：** 窗口没起来先看终端里的 Rust 编译/启动错误；窗口起来但日志是空的，检查仓库根 `logs/` 下有没有当天的 `app-YYYY-MM-DD.log`（dev 构建；release 才是 `~/.veyl/logs/`）。
 
 > sing-box 的日志是另一个文件：`~/.veyl/logs/runtime-<版本>.log`，要等内核装好、第一次启动后才出现。
 
