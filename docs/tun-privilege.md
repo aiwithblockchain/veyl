@@ -82,6 +82,19 @@ plist 放在 `Contents/Library/LaunchDaemons/com.veyl.helper.plist`：
 App 侧 `SMAppService.daemon(plistName:).register()`，用户在
 「系统设置 › 登录项与扩展」批准一次，之后由 launchd 守护。
 
+**`.notFound` 不是「包里没有 plist」。** 它的语义是「系统注册库里还没有这个
+服务」：注册前、以及未签名未打包的 build 上，`status()` 都会返回它。旧实现
+把它当成「安装包里没有找到后台助手」直接短路，`register()` 从未被调用，
+用户也就永远看不到授权提示。现在 `.notFound` 与 `.notRegistered` 走同一条
+注册分支——都去调 `register()`，注册后**重新读一次状态**：
+
+| 注册后的情况 | 结果 |
+| --- | --- |
+| `register()` 抛错 | `helper_install_failed`，detail 是系统的 `localizedDescription` |
+| `enabled` | 成功 |
+| `requires_approval` | 打开「登录项与扩展」，返回 `tun_denied` |
+| 其它（状态没变） | `helper_install_failed`，detail 带上注册后的状态 |
+
 **App 必须在 `/Applications`**，否则 LaunchDaemon 的开机自举不保证。
 这条要**告诉用户**，不能静默失败成一个 `helper_missing` 让他去猜——
 `tun::privilege::app_location_hint()` 会把这句附在错误信息里。
@@ -284,6 +297,11 @@ SMAppService 启动 helper 时，是否对 helper 本身做代码签名校验。
 1. `MachServices` 的名字是否要带 Team ID 前缀才会被 `SMAppService` 正确注册。
 2. `BundleProgram` 与 `MachServices` 并存是否被 launchd 接受。
 3. `xpc_connection_set_peer_code_signing_requirement` 在未公证的本地签名包上的行为。
+
+**已确认（2026-11-05 真机）：注册前 `status()` 返回 `.notFound` 属预期。**
+它只说明系统注册库里还没有这个服务，不能拿来推断「包里没有 plist」——
+见 §3 的分支表。启动日志里首次运行显示 `TUN helper=not_found` 同理，是
+还没注册，不是装不上。
 
 验证方式：`bash scripts/packaging/build-dmg.sh --skip-notarize` 出包后安装，
 观察连接是否被接受、拒绝时日志是否给出明确原因。
