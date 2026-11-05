@@ -187,6 +187,26 @@ pub fn run() {
             // 工具事件（tool-call-start 等）需要全局句柄。
             agent::app_handle::set(app.handle().clone());
 
+            // 运行时把状态迁移与健康检查发进内部 broadcast，前端订阅的是 Tauri 事件。
+            // 这里只做序列化转发：不查状态、不加锁，否则会与状态迁移脱节。
+            let mut runtime_events = recovery_parts.manager.subscribe();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match runtime_events.recv().await {
+                        Ok(event) => {
+                            match crate::runtime::runtime_event_to_emit(&event) {
+                                Some((name, payload)) => agent::app_handle::emit(name, payload),
+                                None => log::warn!("运行时事件序列化失败：{event:?}"),
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            log::warn!("运行时事件转发落后 {skipped} 条，继续");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+
             // 规则数据：随包归档 → app_data/rules/<version>/。失败不阻塞启动，
             // 生成分流配置时再报 RULES_NOT_READY。
             let resource_dir = app.path().resource_dir().ok();

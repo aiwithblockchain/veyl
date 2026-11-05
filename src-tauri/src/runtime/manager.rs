@@ -234,6 +234,8 @@ pub struct RuntimeStateChangedPayload {
     pub upstream_version: Option<String>,
     pub reason: Option<String>,
     pub error: Option<RuntimeErrorInfo>,
+    /// 迁移后的完整快照，不变量：`snapshot.state == to`。
+    pub snapshot: RuntimeStatus,
     pub emitted_at: String,
 }
 
@@ -689,7 +691,7 @@ impl RuntimeManager {
             self.stop().await?;
         }
 
-        let (stale_child, gen, from, version) = {
+        let (stale_child, gen, from, version, snapshot) = {
             let mut inner = self.inner.lock().await;
             if !plan.binary.is_file() {
                 return Err(RuntimeError::NotInstalled);
@@ -712,12 +714,15 @@ impl RuntimeManager {
             inner.plan = Some(plan.clone());
             inner.state = RuntimeState::Starting;
             inner.last_transition_at = now_iso();
+            // 快照在持锁位置取：锁外再补会和后续迁移脱节。
+            let snapshot = inner.snapshot();
 
             (
                 inner.child.take(),
                 inner.generation,
                 from,
                 plan.version.clone(),
+                snapshot,
             )
         };
 
@@ -732,6 +737,7 @@ impl RuntimeManager {
             None,
             None,
             Some(version),
+            snapshot,
         )));
 
         let manager = Arc::clone(self);
@@ -744,7 +750,7 @@ impl RuntimeManager {
     }
 
     pub async fn stop(&self) -> RuntimeResult<RuntimeStatus> {
-        let (child, from) = {
+        let (child, from, snapshot) = {
             let mut inner = self.inner.lock().await;
             if inner.state == RuntimeState::Idle && inner.child.is_none() {
                 // 配置可能已被断开清理删掉，旧的 plan 不能再用于重启。
@@ -756,7 +762,8 @@ impl RuntimeManager {
             inner.desired_stop = true;
             inner.state = RuntimeState::Stopping;
             inner.last_transition_at = now_iso();
-            (inner.child.take(), from)
+            let snapshot = inner.snapshot();
+            (inner.child.take(), from, snapshot)
         };
 
         self.wake.notify_waiters();
@@ -769,6 +776,7 @@ impl RuntimeManager {
             upstream_version: None,
             reason: None,
             error: None,
+            snapshot,
             emitted_at: now_iso(),
         }));
 
@@ -811,6 +819,7 @@ impl RuntimeManager {
             upstream_version: None,
             reason: None,
             error: None,
+            snapshot: snapshot.clone(),
             emitted_at: now_iso(),
         }));
         // exit_ip 已在上面清空；推一次健康事件，否则面板会一直显示上一个节点的地址。
@@ -1293,6 +1302,7 @@ impl RuntimeManager {
                     None,
                     inner.pid,
                     inner.version.clone(),
+                    inner.snapshot(),
                 ),
                 inner.plan.clone(),
             )
@@ -1457,6 +1467,7 @@ impl RuntimeManager {
                     } else {
                         inner.version.clone()
                     },
+                    inner.snapshot(),
                 ),
                 error,
             )
@@ -1618,6 +1629,7 @@ fn state_payload(
     reason: Option<String>,
     pid: Option<u32>,
     upstream_version: Option<String>,
+    snapshot: RuntimeStatus,
 ) -> RuntimeStateChangedPayload {
     RuntimeStateChangedPayload {
         contract_version: EVENT_CONTRACT_VERSION,
@@ -1628,7 +1640,26 @@ fn state_payload(
         upstream_version,
         reason,
         error: None,
+        snapshot,
         emitted_at: now_iso(),
+    }
+}
+
+/// 把内部广播事件转成前端事件名 + payload。
+///
+/// 转发层只做这一步：不查状态、不加锁，避免与状态迁移脱节。
+pub fn runtime_event_to_emit(
+    event: &RuntimeEvent,
+) -> Option<(&'static str, serde_json::Value)> {
+    match event {
+        RuntimeEvent::StateChanged(payload) => Some((
+            crate::claurst_session::events::EV_RUNTIME_STATE_CHANGED,
+            serde_json::to_value(payload).ok()?,
+        )),
+        RuntimeEvent::HealthChanged(payload) => Some((
+            crate::claurst_session::events::EV_RUNTIME_HEALTH_CHANGED,
+            serde_json::to_value(payload).ok()?,
+        )),
     }
 }
 
@@ -2377,5 +2408,93 @@ mod tests {
         assert!(snapshot.upstream_version.is_none());
         assert!(snapshot.uptime_seconds.is_none());
         assert!(snapshot.mode.is_none());
+    }
+
+    #[test]
+    fn runtime_events_map_to_frozen_event_names() {
+        let mut inner = Inner::new();
+        inner.state = RuntimeState::Starting;
+        let state_event = RuntimeEvent::StateChanged(state_payload(
+            RuntimeState::Idle,
+            RuntimeState::Starting,
+            RuntimeEventKind::StartReq,
+            None,
+            None,
+            None,
+            inner.snapshot(),
+        ));
+
+        let (name, payload) = runtime_event_to_emit(&state_event).unwrap();
+        assert_eq!(name, "runtime-state-changed");
+        assert_eq!(payload["from"], "idle");
+        assert_eq!(payload["to"], "starting");
+        assert_eq!(payload["snapshot"]["state"], "starting");
+        assert!(
+            payload["snapshot"]["health"].is_object(),
+            "快照必须带齐顶层字段，缺 health 前端会崩"
+        );
+        assert!(payload["emitted_at"].is_string());
+
+        let health_event = RuntimeEvent::HealthChanged(RuntimeHealthChangedPayload {
+            contract_version: EVENT_CONTRACT_VERSION,
+            health: HealthSnapshot::default(),
+            traffic: None,
+            connections: None,
+            latency_ms: None,
+            emitted_at: now_iso(),
+        });
+        let (name, payload) = runtime_event_to_emit(&health_event).unwrap();
+        assert_eq!(name, "runtime-health-changed");
+        assert!(payload["health"].is_object());
+        assert!(
+            payload["traffic"].is_null(),
+            "没有采样必须是 null，不能用 0 冒充"
+        );
+        assert!(payload["connections"].is_null());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn state_changed_events_carry_snapshot_matching_to() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("state-snapshot");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-sing-box");
+        std::fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (clash_port, server) = fake_clash_server().await;
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+        let mut events = manager.subscribe();
+
+        let mut launch = plan(fake, &dir);
+        launch.clash_addr = format!("127.0.0.1:{clash_port}");
+
+        let status = manager.start(launch).await.unwrap();
+        assert_eq!(status.state, RuntimeState::Running);
+        manager.stop().await.unwrap();
+        server.abort();
+
+        let mut reached_running = false;
+        while let Ok(event) = events.try_recv() {
+            if let RuntimeEvent::StateChanged(payload) = event {
+                assert_eq!(
+                    payload.snapshot.state,
+                    payload.to,
+                    "snapshot.state 必须等于 to（{} → {}）",
+                    payload.from.as_str(),
+                    payload.to.as_str()
+                );
+                if payload.to == RuntimeState::Running {
+                    reached_running = true;
+                    assert_eq!(payload.snapshot.config_id.as_deref(), Some("profile-1"));
+                    assert_eq!(payload.snapshot.pid, status.pid);
+                }
+            }
+        }
+        assert!(reached_running, "必须收到进入 running 的迁移事件");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
