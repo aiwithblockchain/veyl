@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #
 # 用法：
-#   bash scripts/dev/tun-dev.sh             构建 → 签名 → 装 /Applications → 启动
-#   bash scripts/dev/tun-dev.sh --no-open   只构建与安装，不启动
+#   bash scripts/dev/tun-dev.sh                 构建 → 签名 → 装 /Applications → 前台启动
+#   bash scripts/dev/tun-dev.sh --detach        装完即返回（App 在后台跑）
+#   bash scripts/dev/tun-dev.sh --no-open       只构建与安装，不启动
+#   bash scripts/dev/tun-dev.sh --kill-existing 安装前先结束正在运行的实例
 #   bash scripts/dev/tun-dev.sh --help
 #
 # 为什么需要它：TUN 在开发态用 `tauri dev` **测不了**。
@@ -11,10 +13,15 @@
 # 所以这里走和发布包同一条「签名 + 装进 /Applications + 由 App 注册 daemon」的路径，
 # 只是构建配置换成 debug、不公证。
 #
+# 默认在前台运行 App：Ctrl-C 或脚本退出时先 TERM、最多等 5 秒、再 KILL，
+# 重复执行不会和上一个实例打架。日志落在 build/logs/tun-dev-<时间戳>.log。
+#
 # **不改变架构，也不开调试特权通道**：没有管理员弹窗直拉进程，没有跳过验签的开关。
+# App 退出不会停 TUN（产品设计）：**若 TUN 仍在运行，请在 App 内断开**，
+# 本脚本不会去 kill helper 或 bootout daemon。
 #
 # 环境变量：
-#   VEYL_DEV_ID_APP   指定签名身份（留空则自动挑：先 Apple Development，再 Developer ID，
+#   VEYL_DEV_ID_APP   指定签名身份（留空则自动挑：先 Developer ID，再 Apple Development，
 #                     都要求 Team 与 VEYL_TEAM_ID 一致）
 #   VEYL_TEAM_ID      期望的 Team ID，默认 2XYK8RBB6M（与 build.rs 的默认值一致）
 #
@@ -26,23 +33,41 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALL_DIR="${VEYL_INSTALL_DIR:-/Applications}"
 TEAM="${VEYL_TEAM_ID:-2XYK8RBB6M}"
-OPEN_APP=1
-
-for arg in "$@"; do
-  case "$arg" in
-    --no-open) OPEN_APP=0 ;;
-    -h|--help)
-      sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-      exit 0
-      ;;
-    *) printf '错误：未知参数 %s\n' "$arg" >&2; exit 2 ;;
-  esac
-done
+NO_OPEN=0
+DETACH=0
+KILL_EXISTING=0
 
 die() {
   printf '错误：%s\n' "$*" >&2
   exit 1
 }
+
+usage() {
+  awk 'NR == 1 { next }
+       /^#/ { sub(/^# ?/, ""); if ($0 == "" && !seen) next; seen = 1; print; next }
+       { exit }' "${BASH_SOURCE[0]}"
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-open) NO_OPEN=1 ;;
+    --detach) DETACH=1 ;;
+    --kill-existing) KILL_EXISTING=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf '错误：未知参数 %s\n' "$arg" >&2; exit 2 ;;
+  esac
+done
+
+if [ "$NO_OPEN" -eq 1 ] && [ "$DETACH" -eq 1 ]; then
+  die "--no-open 与 --detach 不能同时使用"
+fi
+if [ "$NO_OPEN" -eq 1 ]; then
+  LAUNCH_MODE="none"
+elif [ "$DETACH" -eq 1 ]; then
+  LAUNCH_MODE="detach"
+else
+  LAUNCH_MODE="foreground"
+fi
 
 [ "$(uname -s)" = "Darwin" ] || die "tun-dev.sh 只能在 macOS 上运行"
 
@@ -59,6 +84,58 @@ PY
 
 APP_SRC="$ROOT/src-tauri/target/debug/bundle/macos/$PRODUCT.app"
 APP_DEST="$INSTALL_DIR/$PRODUCT.app"
+
+# 可执行文件名必须来自 Info.plist：productName 是 `Veyl`，实际二进制是 `veyl`。
+# 拿 productName 去 pgrep 永远匹配不到，`--kill-existing` 会当成「没有实例」。
+resolve_executable() {
+  local plist name
+  for plist in "$APP_DEST/Contents/Info.plist" "$APP_SRC/Contents/Info.plist"; do
+    [ -f "$plist" ] || continue
+    name="$(plutil -extract CFBundleExecutable raw "$plist" 2>/dev/null || true)"
+    if [ -n "$name" ]; then
+      printf '%s\n' "$name"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 在第一次匹配进程前赋值；取不到就 die，绝不退化成 productName。
+EXECUTABLE=""
+
+# 只匹配装进 /Applications 的这一份，不碰别的构建产物。
+app_pids() {
+  pgrep -f "$APP_DEST/Contents/MacOS/$EXECUTABLE" 2>/dev/null || true
+}
+
+# 结束该路径下所有实例：先 TERM，最多等 5 秒，再 KILL。
+terminate_app() {
+  local pids i
+  pids="$(app_pids)"
+  [ -n "$pids" ] || return 0
+  kill -TERM $pids 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 10 ]; do
+    pids="$(app_pids)"
+    [ -n "$pids" ] || return 0
+    sleep 0.5
+    i=$((i + 1))
+  done
+  pids="$(app_pids)"
+  if [ -n "$pids" ]; then
+    kill -KILL $pids 2>/dev/null || true
+    # KILL 之后进程还要一点时间从进程表消失，别让调用方读到残留。
+    i=0
+    while [ "$i" -lt 20 ]; do
+      if [ -z "$(app_pids)" ]; then
+        return 0
+      fi
+      sleep 0.05
+      i=$((i + 1))
+    done
+  fi
+  return 0
+}
 
 printf '== Veyl TUN 开发包 ==\n'
 printf '仓库：%s\n' "$ROOT"
@@ -183,9 +260,25 @@ printf '  签名校验通过\n'
 
 # ---- 5. 安装 ----
 printf '\n[5/5] 安装到 %s\n' "$INSTALL_DIR"
-if pgrep -f "$PRODUCT.app/Contents/MacOS/$PRODUCT" >/dev/null 2>&1; then
-  die "$PRODUCT 正在运行。先退出（菜单里「退出 Veyl」），再执行本脚本：
-  替换正在运行的包会得到半新半旧的应用。"
+
+# 替换正在运行的包会得到半新半旧的应用。默认拒绝，--kill-existing 时先结束。
+EXECUTABLE="$(resolve_executable)" || die "读不到 CFBundleExecutable：$APP_DEST 与 $APP_SRC 都没有可解析的 Info.plist，无法识别 Veyl 进程"
+[ -n "$EXECUTABLE" ] || die "Info.plist 里的 CFBundleExecutable 为空，无法识别 Veyl 进程"
+
+RUNNING_PIDS="$(app_pids)"
+if [ -n "$RUNNING_PIDS" ]; then
+  if [ "$KILL_EXISTING" -eq 1 ]; then
+    printf '发现正在运行的 %s（PID：%s），先结束它\n' \
+      "$PRODUCT" "$(printf '%s' "$RUNNING_PIDS" | tr '\n' ' ')"
+    terminate_app
+    REMAINING="$(app_pids)"
+    if [ -n "$REMAINING" ]; then
+      die "结束旧实例失败（PID：$(printf '%s' "$REMAINING" | tr '\n' ' ')）。先手动退出再重试。"
+    fi
+  else
+    die "$PRODUCT 正在运行（PID：$(printf '%s' "$RUNNING_PIDS" | tr '\n' ' ')）。
+  先退出 App（菜单里「退出 Veyl」），或加 --kill-existing 让脚本结束它。"
+  fi
 fi
 
 # 只允许删这一个路径，避免 productName 读错时误删别处。
@@ -232,11 +325,8 @@ trap - EXIT
 touch "$APP_DEST"
 printf '  已安装：%s\n' "$APP_DEST"
 
-if [ "$OPEN_APP" -eq 1 ]; then
-  open "$APP_DEST"
-fi
-
-cat <<EOF
+print_next_steps() {
+  cat <<EOF
 
 完成。下一步：
   1. 新建或选择一套 TUN 配置，点「连接」。
@@ -248,4 +338,94 @@ cat <<EOF
 
 注意：换过签名证书后，旧的 daemon 注册可能还在，导致注册失败。那时先卸载助手（M4 的入口），
 或手工：sudo launchctl bootout system/com.veyl.helper
+
+TUN 是独立进程：关闭 App 不会断开连接。若 TUN 仍在运行，请在 App 内断开——
+本脚本不会去 kill helper 或 bootout daemon。
 EOF
+}
+
+# 前台运行期间的生命周期：脚本退出（含 Ctrl-C）时收掉自己起的这个实例。
+APP_PID=""
+LOG_FILE=""
+
+cleanup_app() {
+  [ -n "${APP_PID:-}" ] || return 0
+  kill -0 "$APP_PID" 2>/dev/null || return 0
+  kill -TERM "$APP_PID" 2>/dev/null || true
+  local i=0
+  while [ "$i" -lt 10 ]; do
+    kill -0 "$APP_PID" 2>/dev/null || return 0
+    sleep 0.5
+    i=$((i + 1))
+  done
+  kill -KILL "$APP_PID" 2>/dev/null || true
+  return 0
+}
+
+on_exit() {
+  cleanup_app
+  if [ -n "${LOG_FILE:-}" ]; then
+    printf '\n日志：%s\n' "$LOG_FILE"
+  fi
+}
+
+run_foreground() {
+  local bin="$APP_DEST/Contents/MacOS/$EXECUTABLE"
+  [ -x "$bin" ] || die "找不到可执行文件：$bin"
+
+  local log_dir="$ROOT/build/logs"
+  mkdir -p "$log_dir" || die "无法创建日志目录：$log_dir"
+  LOG_FILE="$log_dir/tun-dev-$(date +%Y%m%d-%H%M%S).log"
+
+  printf '\n前台启动：%s\n日志：%s\n按 Ctrl-C 结束。\n\n' "$bin" "$LOG_FILE"
+
+  local started
+  started="$(date +%s)"
+
+  # 直接执行包内二进制：Bundle.main 仍解析到 .app，SMAppService 的行为与 open 一致。
+  # 万一实测不一致，退回 `open -W` 并按进程组结束。
+  "$bin" > >(tee -a "$LOG_FILE") 2>&1 &
+  APP_PID=$!
+
+  # wait 被信号打断时返回非零，交给 trap 收尾。
+  local status=0
+  wait "$APP_PID" || status=$?
+  APP_PID=""
+  # 给 tee 一点时间把最后几行刷进文件。
+  sleep 0.2
+
+  # 2 秒内退出却还有同名进程：单实例插件挡住了新实例，旧进程没死。
+  # 这不能静默——用户会以为已经换上新构建。
+  if [ $(( $(date +%s) - started )) -le 2 ]; then
+    local others
+    others="$(app_pids)"
+    if [ -n "$others" ]; then
+      printf '\n错误：旧实例仍在运行（PID：%s），新实例已退出（单实例保护）。\n' \
+        "$(printf '%s' "$others" | tr '\n' ' ')" >&2
+      printf '先退出旧实例，或用 --kill-existing 重跑本脚本。\n' >&2
+      return 1
+    fi
+  fi
+
+  if [ "$status" -ne 0 ]; then
+    printf '\nApp 退出码：%s\n' "$status"
+  fi
+  return "$status"
+}
+
+print_next_steps
+
+case "$LAUNCH_MODE" in
+  none)
+    ;;
+  detach)
+    open "$APP_DEST"
+    printf '\n已在后台启动：%s\n' "$APP_DEST"
+    ;;
+  foreground)
+    trap on_exit EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    run_foreground
+    ;;
+esac
