@@ -132,30 +132,36 @@ fn tun_summary(data: &Value) -> String {
         .get("routing_mode")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let device_up = data
-        .get("tun_device_up")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let default_route = data
-        .get("tun_default_route")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !device_up {
-        parts.push("但还没确认接管（没看到 TUN 设备），不要告诉用户已经接管".to_string());
-    } else if routing == "proxy_all" {
-        if default_route {
-            parts.push("TUN 设备已就绪、默认路由已指过来，全部流量已接管".to_string());
-        } else {
-            parts.push(
+    // 三态：true / false / 未采集（null 或键不存在）。
+    // 未采集不能说成「设备没出现」——那是把「不知道」当成「没起来」。
+    let device_up = data.get("tun_device_up").and_then(Value::as_bool);
+    let default_route = data.get("tun_default_route").and_then(Value::as_bool);
+    match device_up {
+        None => parts.push(
+            "当前平台未采集 TUN 设备状态，无法确认是否接管；不要告诉用户已经接管".to_string(),
+        ),
+        Some(false) => {
+            parts.push("但还没确认接管（没看到 TUN 设备），不要告诉用户已经接管".to_string())
+        }
+        Some(true) if routing == "proxy_all" => match default_route {
+            Some(true) => {
+                parts.push("TUN 设备已就绪、默认路由已指过来，全部流量已接管".to_string())
+            }
+            Some(false) => parts.push(
                 "TUN 设备已就绪，但默认路由还没指过来，接管尚未确认，\
                  不要告诉用户已经全部接管"
                     .to_string(),
-            );
+            ),
+            None => parts.push(
+                "TUN 设备已就绪，但默认路由状态未采集，无法确认全部接管，\
+                 不要告诉用户已经全部接管"
+                    .to_string(),
+            ),
+        },
+        Some(true) if routing == "direct" => {
+            parts.push("TUN 设备已就绪，但当前分流模式是直连，流量没有走进 VPN".to_string())
         }
-    } else if routing == "direct" {
-        parts.push("TUN 设备已就绪，但当前分流模式是直连，流量没有走进 VPN".to_string());
-    } else {
-        parts.push("TUN 设备已就绪，按分流规则接管选定服务".to_string());
+        Some(true) => parts.push("TUN 设备已就绪，按分流规则接管选定服务".to_string()),
     }
 
     match data.get("exit_ip").and_then(Value::as_str) {
@@ -241,6 +247,36 @@ mod tests {
         }));
         assert!(!text.contains("全部流量已接管"), "{text}");
         assert!(text.contains("接管尚未确认"), "{text}");
+    }
+
+    /// 未采集（null）不是「设备没出现」：不能说设备没起来，更不能说已经接管。
+    #[test]
+    fn an_uncollected_device_state_is_not_reported_as_missing() {
+        let text = connect_summary(&json!({
+            "mode": "tun",
+            "config_name": "C",
+            "routing_mode": "proxy_all",
+            "tun_device_up": null,
+            "tun_default_route": null,
+        }));
+        assert!(text.contains("未采集"), "{text}");
+        assert!(!text.contains("没看到 TUN 设备"), "{text}");
+        assert!(text.contains("不要告诉用户已经接管"), "{text}");
+    }
+
+    /// 默认路由未采集时，也不能断言「还没指过来」。
+    #[test]
+    fn an_uncollected_default_route_is_not_a_negative_claim() {
+        let text = connect_summary(&json!({
+            "mode": "tun",
+            "config_name": "C",
+            "routing_mode": "proxy_all",
+            "tun_device_up": true,
+            "tun_default_route": null,
+        }));
+        assert!(text.contains("默认路由状态未采集"), "{text}");
+        assert!(!text.contains("还没指过来"), "{text}");
+        assert!(!text.contains("全部流量已接管"), "{text}");
     }
 
     /// 只接管选定服务时，「全部」这两个字一次都不能出现。

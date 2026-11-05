@@ -8,10 +8,17 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod acl;
 pub mod ipc;
 pub mod log;
 pub mod peer;
 pub mod pipe;
+pub mod process;
+pub mod runtime;
+pub mod scm;
+
+// `cidr.rs` 不在这里声明：主程序（`tun/mod.rs`）与服务二进制都直接
+// `#[path]` 引用它，在这里再声明一次会让主程序把同一份源码编两遍。
 
 /// 管道名与服务名。管道名沿用文档里的 `veyl-helper`，避免客户端两套名字。
 pub const PIPE_NAME: &str = r"\\.\pipe\veyl-helper";
@@ -20,6 +27,9 @@ pub const SERVICE_NAME: &str = "VeylService";
 #[allow(dead_code)]
 pub const SERVICE_DISPLAY_NAME: &str = "Veyl Privileged Service";
 pub const INSTALL_DIR_NAME: &str = "Veyl";
+
+/// 拉起子进程时不创建控制台窗口（服务运行在 session 0，没人能看见它）。
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// `ProgramFiles` 在服务进程里来自系统环境，不是用户可写的。
 pub fn program_files_dir() -> PathBuf {
@@ -55,6 +65,11 @@ pub fn path_within(root: &Path, image: &Path) -> bool {
     let root = normalize(root);
     let image = normalize(image);
     image == root || image.starts_with(&format!("{root}\\"))
+}
+
+/// 两个路径是否指向同一个文件。用于「这个 pid 还是不是我们起的那个」的核对。
+pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
+    normalize(left) == normalize(right)
 }
 
 fn normalize(path: &Path) -> String {

@@ -69,16 +69,31 @@ pub struct TunSession {
 
 impl TunSession {
     /// 沿用既有构造入口：配置里只给注册器，后端在这里按平台装配。
+    ///
+    /// Windows 没有「注册后台助手」这个动作——服务由提权安装器注册，
+    /// 应用只做普通用户的管道请求，所以 `registration` 在这里不参与装配。
     pub fn new(registration: Arc<dyn Registration>) -> Self {
-        let kind = registration.kind();
-        #[cfg(target_os = "macos")]
-        let backend: Arc<dyn TunBackend> = Arc::new(super::backend::MacXpcBackend::new(registration));
-        #[cfg(not(target_os = "macos"))]
-        let backend: Arc<dyn TunBackend> = {
+        #[cfg(target_os = "windows")]
+        {
             let _ = registration;
-            Arc::new(super::backend::UnsupportedBackend)
-        };
-        Self::with_backend(backend, kind)
+            Self::with_backend(
+                Arc::new(super::backend::WinPipeBackend::new()),
+                "windows_pipe",
+            )
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let kind = registration.kind();
+            #[cfg(target_os = "macos")]
+            let backend: Arc<dyn TunBackend> =
+                Arc::new(super::backend::MacXpcBackend::new(registration));
+            #[cfg(not(target_os = "macos"))]
+            let backend: Arc<dyn TunBackend> = {
+                let _ = registration;
+                Arc::new(super::backend::UnsupportedBackend)
+            };
+            Self::with_backend(backend, kind)
+        }
     }
 
     /// 测试与将来 Windows 装配用：直接注入一个后端。
@@ -475,7 +490,11 @@ mod tests {
         *backend.running.lock().unwrap() = None;
         std::thread::sleep(RUNNING_RECHECK_INTERVAL + Duration::from_millis(20));
 
-        assert_eq!(session.status(), TunState::Stopped, "helper 停了就不能再报 Running");
+        assert_eq!(
+            session.status(),
+            TunState::Stopped,
+            "helper 停了就不能再报 Running"
+        );
     }
 
     #[test]
@@ -490,7 +509,10 @@ mod tests {
     #[test]
     fn a_running_session_remembers_which_config_it_launched() {
         let session = TunSession::new(Arc::new(FakeRegistration { ready: true }));
-        assert!(session.connected_config_id().is_none(), "没跑的时候没有归属");
+        assert!(
+            session.connected_config_id().is_none(),
+            "没跑的时候没有归属"
+        );
 
         session.force_running_for_test(42, Some("cfg_a"));
         assert_eq!(session.connected_config_id().as_deref(), Some("cfg_a"));

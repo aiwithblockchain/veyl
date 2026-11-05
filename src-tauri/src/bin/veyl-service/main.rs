@@ -1,8 +1,8 @@
 //! Windows 特权服务 `veyl-service.exe`。
 //!
 //! 形态与 macOS 的 `veyl-helper` 对应：界面进程永远普通用户，只有这个
-//! LocalSystem 服务做特权操作。本轮只实现服务骨架、命名管道与对端认证；
-//! sing-box 的实际拉起与安装器在后续阶段。
+//! LocalSystem 服务做特权操作。W1–W2 是服务骨架、命名管道与对端认证；
+//! W3 起由它 staging 运行时、拉起与回收 sing-box。安装器仍归 W5。
 //!
 //! 开发用法（管理员）：
 //!   veyl-service --console        前台跑管道，Ctrl+C 退出
@@ -14,6 +14,14 @@
 mod server;
 #[cfg(windows)]
 mod service;
+
+// 纯 IPv4 CIDR 计算：与主程序 `tun::cidr` 是**同一份源码**，
+// 用 `#[path]` 引用，不复制粘贴（两份 CIDR 判断迟早会分叉）。
+// 主程序要的 `remove_covering` 服务端用不到，不必逐条报死代码。
+#[cfg(windows)]
+#[allow(dead_code)]
+#[path = "../../tun/windows/cidr.rs"]
+mod cidr;
 
 #[cfg(windows)]
 // 这份模块是客户端与服务端共用的：服务二进制只用到服务端那一半，

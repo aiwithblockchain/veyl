@@ -331,6 +331,10 @@ powershell -ExecutionPolicy Bypass -File "$repo\scripts\windows\dev-install-serv
 
 ### 4.4 allowlist 复用（与 macOS 同一份实现）
 
+> **2026-11-05 后注**：W3 起 `tun-valid.json` 会让服务真正拉起 sing-box，
+> 不再返回 `runtime_missing`。本节描述的是 W0–W2 的阶段性行为；
+> 当前行为与验证方式见 `docs/windows-tun-w3-handover.md`。
+
 普通用户 PowerShell，从 `Program Files` 运行客户端：
 
 ```powershell

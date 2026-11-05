@@ -407,6 +407,63 @@ fn svc_error_with_details(
     })
 }
 
+/// TUN 启动回复里的设备状态，三态。
+///
+/// `null` 不是「没起来」：Windows 在适配器枚举实现之前就是未采集，
+/// 把它当成失败会让每次分流切换都被判成重连失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TunTakeover {
+    /// 非 TUN 模式，或设备已确认起来。
+    Confirmed,
+    /// 明确没看到设备。
+    Unconfirmed,
+    /// 当前平台未采集。
+    Unknown,
+}
+
+fn tun_takeover(started: &Value) -> TunTakeover {
+    if started.get("mode").and_then(Value::as_str) != Some("tun") {
+        return TunTakeover::Confirmed;
+    }
+    match started.get("tun_device_up").and_then(Value::as_bool) {
+        Some(false) => TunTakeover::Unconfirmed,
+        Some(true) => TunTakeover::Confirmed,
+        None => TunTakeover::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tun_takeover_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_uncollected_device_state_is_unknown_not_unconfirmed() {
+        assert_eq!(
+            tun_takeover(&json!({ "mode": "tun", "tun_device_up": null })),
+            TunTakeover::Unknown
+        );
+        assert_eq!(
+            tun_takeover(&json!({ "mode": "tun" })),
+            TunTakeover::Unknown,
+            "缺键也是未采集，不能默认成 false"
+        );
+        assert_eq!(
+            tun_takeover(&json!({ "mode": "tun", "tun_device_up": false })),
+            TunTakeover::Unconfirmed
+        );
+        assert_eq!(
+            tun_takeover(&json!({ "mode": "tun", "tun_device_up": true })),
+            TunTakeover::Confirmed
+        );
+        assert_eq!(
+            tun_takeover(&json!({ "mode": "system_proxy" })),
+            TunTakeover::Confirmed,
+            "非 TUN 模式不参与这条判断"
+        );
+    }
+}
+
 /// TUN 后端错误 → `AivpnError.details`（契约 §4.3 / §4.4）。
 ///
 /// `reason` 只允许四种；wire 码与本地码分开放，UI 不展示它们。
@@ -2766,12 +2823,9 @@ impl VpnToolServices for WiredServices {
         match self.runtime_start(Some(updated.id.clone())).await {
             Ok(started) => {
                 // TUN 的 Ok 只说明 helper 接受了启动请求，不代表接管成功。
-                let tun_unconfirmed = started.get("mode").and_then(Value::as_str) == Some("tun")
-                    && !started
-                        .get("tun_device_up")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                if tun_unconfirmed {
+                // 三态：确认起来 / 确认没起来 / 当前平台未采集。
+                let takeover = tun_takeover(&started);
+                if takeover == TunTakeover::Unconfirmed {
                     log::warn!("分流切换后 TUN 已启动，但没确认接管");
                     self.emit_routing_changed(&updated, "mode", None, None, false);
                     let mut data = self.route_state_json(&updated, None, None);
@@ -2790,8 +2844,18 @@ impl VpnToolServices for WiredServices {
                 );
                 let mut data =
                     self.route_state_json(&updated, Some(mode), status.applied_route_revision);
-                data["hot_switched"] = json!(false);
                 data["reconnect"] = json!("reconnected");
+                if takeover == TunTakeover::Unknown {
+                    // 未采集不是失败：切换本身成功，只是无法确认接管。
+                    // `hot_switched` 在这里仍是 true，与「发生过重启」的语义不符；
+                    // 当前唯一消费方（`routing.rs`）先匹配 `runtime_state`，
+                    // 所以这个字段实际不可见。改语义前先确认消费方。
+                    log::warn!("分流切换后 TUN 已启动，但当前平台未采集设备状态，无法确认接管");
+                    data["hot_switched"] = json!(true);
+                    data["runtime_state"] = json!("tun_unknown");
+                } else {
+                    data["hot_switched"] = json!(false);
+                }
                 Ok(data)
             }
             Err(error) => {
@@ -3527,31 +3591,42 @@ impl WiredServices {
         log::info!("TUN 已连接 pid={pid} config={}", config.id);
         // helper 只等 sing-box check + spawn，不等 TUN 设备与路由表。
         // 设备出现 + 默认路由指过来，才算「流量真的被接管」。
-        let tun_device =
-            crate::tun::wait_until_device_up(std::time::Duration::from_millis(1500)).await;
-        let tun_device_up = tun_device.is_some();
-        let tun_default_route = match (&tun_device, config.routing_mode.as_str()) {
-            // 只有「全部走 VPN」才该把默认路由抢过来；按服务分流时默认路由留在物理网卡。
-            (Some(name), configs::ROUTING_PROXY_ALL) => {
-                let name = name.clone();
-                tokio::task::spawn_blocking(move || crate::tun::default_route_goes_through(&name))
+        //
+        // Windows 还没有适配器枚举（`tun::collect()` 返回空）：不白等 1.5 秒，
+        // 也不把「未采集」说成「设备没出现」。两个字段用 null 标记未采集。
+        #[cfg(target_os = "windows")]
+        let (tun_device_up, tun_default_route) = (Value::Null, Value::Null);
+        #[cfg(not(target_os = "windows"))]
+        let (tun_device_up, tun_default_route) = {
+            let tun_device =
+                crate::tun::wait_until_device_up(std::time::Duration::from_millis(1500)).await;
+            let device_up = tun_device.is_some();
+            let default_route = match (&tun_device, config.routing_mode.as_str()) {
+                // 只有「全部走 VPN」才该把默认路由抢过来；按服务分流时默认路由留在物理网卡。
+                (Some(name), configs::ROUTING_PROXY_ALL) => {
+                    let name = name.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::tun::default_route_goes_through(&name)
+                    })
                     .await
                     .unwrap_or(false)
+                }
+                _ => false,
+            };
+            if !device_up {
+                log::warn!("TUN 已启动 pid={pid}，但 1.5s 内没看到 TUN 设备，接管状态待确认");
+            } else if config.routing_mode == configs::ROUTING_PROXY_ALL && !default_route {
+                log::warn!(
+                    "TUN 设备已就绪 pid={pid}，但默认路由没指过来，「全部接管」尚不能确认"
+                );
+            } else {
+                log::info!(
+                    "TUN 接管已确认 pid={pid} device={:?} default_route={default_route}",
+                    tun_device
+                );
             }
-            _ => false,
+            (json!(device_up), json!(default_route))
         };
-        if !tun_device_up {
-            log::warn!("TUN 已启动 pid={pid}，但 1.5s 内没看到 TUN 设备，接管状态待确认");
-        } else if config.routing_mode == configs::ROUTING_PROXY_ALL && !tun_default_route {
-            log::warn!(
-                "TUN 设备已就绪 pid={pid}，但默认路由没指过来，「全部接管」尚不能确认"
-            );
-        } else {
-            log::info!(
-                "TUN 接管已确认 pid={pid} device={:?} default_route={tun_default_route}",
-                tun_device
-            );
-        }
         Ok(json!({
             "contract_version": crate::runtime::CONTRACT_VERSION,
             "state": "running",

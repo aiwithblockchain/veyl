@@ -33,11 +33,7 @@ use windows_sys::Win32::System::Pipes::{
     WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
-use windows_sys::Win32::System::Services::{
-    CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_HANDLE,
-    SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
-    SERVICE_STATUS_PROCESS,
-};
+use windows_sys::Win32::System::Services::SERVICE_RUNNING;
 use windows_sys::Win32::System::Threading::{
     CreateEventW, GetCurrentThreadId, OpenThread, ResetEvent, WaitForSingleObject, THREAD_TERMINATE,
 };
@@ -48,6 +44,7 @@ use windows_sys::Win32::System::IO::{
 use super::ipc::{self, Request, Response};
 use super::log::ServiceLog;
 use super::peer;
+use super::scm;
 
 /// 契约 1.0.4 §1.3 的四个最终值。改值只改这里，不要用同一个笼统常量覆盖不同语义。
 pub const TUN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -193,66 +190,21 @@ fn verify_server(pipe: &Handle) -> Result<(), IpcError> {
         )));
     }
 
-    let scm = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT) };
-    if scm.is_null() {
-        return Err(helper_missing(format!(
-            "打开服务控制管理器失败（Win32 {}）",
-            unsafe { GetLastError() }
-        )));
-    }
-    let scm = ScHandle(scm);
-
-    let name = super::wide(super::SERVICE_NAME);
-    let service = unsafe { OpenServiceW(scm.0, name.as_ptr(), SERVICE_QUERY_STATUS) };
-    if service.is_null() {
-        return Err(helper_missing(format!(
-            "服务 {} 未安装或不可查询（Win32 {}）",
-            super::SERVICE_NAME,
-            unsafe { GetLastError() }
-        )));
-    }
-    let service = ScHandle(service);
-
-    let mut status: SERVICE_STATUS_PROCESS = unsafe { std::mem::zeroed() };
-    let mut needed = 0u32;
-    let ok = unsafe {
-        QueryServiceStatusEx(
-            service.0,
-            SC_STATUS_PROCESS_INFO,
-            &mut status as *mut SERVICE_STATUS_PROCESS as *mut u8,
-            std::mem::size_of::<SERVICE_STATUS_PROCESS>() as u32,
-            &mut needed,
-        )
-    };
-    if ok == 0 {
-        return Err(helper_missing(format!(
-            "查询服务状态失败（Win32 {}）",
-            unsafe { GetLastError() }
-        )));
-    }
-    if status.dwCurrentState != SERVICE_RUNNING {
+    let status =
+        scm::query(super::SERVICE_NAME).map_err(|error| helper_missing(error.to_string()))?;
+    if status.state != SERVICE_RUNNING {
         return Err(unverified(format!(
             "服务状态不是运行中（state={}）",
-            status.dwCurrentState
+            status.state
         )));
     }
-    if status.dwProcessId == 0 || status.dwProcessId != server_pid {
+    if status.pid == 0 || status.pid != server_pid {
         // 契约 §4.4：不回显可疑进程的 pid / 路径。
         return Err(unverified(
             "管道对端与服务进程不一致（SCM 记录的进程不是它）".to_string(),
         ));
     }
     Ok(())
-}
-
-struct ScHandle(SC_HANDLE);
-
-impl Drop for ScHandle {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { CloseServiceHandle(self.0) };
-        }
-    }
 }
 
 fn connect_client(timeout: Duration) -> Result<Handle, IpcError> {
@@ -280,22 +232,43 @@ fn connect_client(timeout: Duration) -> Result<Handle, IpcError> {
         if code != windows_sys::Win32::Foundation::ERROR_PIPE_BUSY
             && code != windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND
         {
-            return Err(IpcError::Unavailable(format!(
-                "打开 {} 失败（Win32 {code}）；服务可能没有安装或没有权限",
-                super::PIPE_NAME
-            )));
+            // 管道存在但打不开（典型是 ACL 拒绝）：这是权限/安装问题，不是传输故障。
+            return Err(create_error(code));
         }
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(IpcError::Unavailable(format!(
-                "等待 {} 超时（Win32 {code}）",
-                super::PIPE_NAME
-            )));
+            return Err(connect_exhausted(code, timeout));
         }
         let wait = remaining.as_millis().min(200) as u32;
         unsafe { WaitNamedPipeW(name.as_ptr(), wait) };
     }
+}
+
+/// 连接阶段（尚未建立连接）的失败分类，契约 §1.3 / §4.4：
+/// 服务根本没在跑 → `helper_missing`；管道一直被别的连接占着 → `timeout`。
+/// 连接建立之后的读写失败才是 `transport_error`。
+fn connect_exhausted(last_code: u32, timeout: Duration) -> IpcError {
+    if last_code == windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND {
+        IpcError::HelperMissing(format!(
+            "服务没有在运行（等待 {} ms 后 {} 仍不存在）",
+            timeout.as_millis(),
+            super::PIPE_NAME
+        ))
+    } else {
+        IpcError::Timeout(format!(
+            "等待 {} 超过 {} ms 仍未连上",
+            super::PIPE_NAME,
+            timeout.as_millis()
+        ))
+    }
+}
+
+fn create_error(code: u32) -> IpcError {
+    IpcError::HelperMissing(format!(
+        "打开 {} 失败（Win32 {code}）；服务可能没有安装或没有权限",
+        super::PIPE_NAME
+    ))
 }
 
 fn to_millis(duration: Duration) -> u32 {
@@ -487,9 +460,14 @@ pub fn request_stop() {
 }
 
 /// 建立唯一一条管道实例并循环服务。单线程：一次一个客户端。
-pub fn serve<F>(log: Arc<ServiceLog>, dispatch: F) -> Result<(), String>
+///
+/// `on_reply_failed` 只在 `start` 已经成功、但回复没能在
+/// `TUN_REPLY_DEADLINE_START` 内送达时调用（契约 §1.3「服务端超时要回滚」）。
+/// 调用方负责停掉已经 spawn 的进程——否则会留下一个客户端不知道存在的 TUN。
+pub fn serve<F, G>(log: Arc<ServiceLog>, dispatch: F, on_reply_failed: G) -> Result<(), String>
 where
     F: Fn(&Request) -> Response,
+    G: Fn(&Request),
 {
     let listener = Listener::new(&log)?;
     let pipe = listener.create_pipe()?;
@@ -525,7 +503,7 @@ where
                     peer.pid, peer.image, peer.signature.subject, peer.signature.thumbprint
                 ));
                 // `peer` 持有客户端进程句柄到会话结束，防止 pid 在验证后被复用。
-                if let Err(error) = session(&pipe, &log, &dispatch, &peer) {
+                if let Err(error) = session(&pipe, &log, &dispatch, &on_reply_failed, &peer) {
                     log.warn(format!("连接结束：{error}"));
                 }
             }
@@ -556,14 +534,16 @@ fn connect_server(pipe: &Handle) -> Result<(), u32> {
 
 /// 一次连接只处理一条请求：读一帧 → 分发 → 回一帧 → 由调用方断开。
 /// 契约 §1.1：没有长连接、没有请求 ID；首帧有超时，避免「连上不发包」锁死唯一实例。
-fn session<F>(
+fn session<F, G>(
     pipe: &Handle,
     log: &ServiceLog,
     dispatch: &F,
+    on_reply_failed: &G,
     _peer: &peer::PeerSession,
 ) -> Result<(), String>
 where
     F: Fn(&Request) -> Response,
+    G: Fn(&Request),
 {
     if STOP.load(Ordering::SeqCst) {
         return Ok(());
@@ -579,14 +559,30 @@ where
         Err(error) => return Err(format!("读取请求失败：{error}")),
     };
 
-    let response = match ipc::parse_request(&frame) {
-        Ok(request) => dispatch(&request),
-        Err(error) => Response::error("bad_request", error),
+    let dispatched = Instant::now();
+    let (request, response) = match ipc::parse_request(&frame) {
+        Ok(request) => {
+            let response = dispatch(&request);
+            (Some(request), response)
+        }
+        Err(error) => (None, Response::error("bad_request", error)),
     };
+    let succeeded = response.ok;
 
     let mut io = PipeIo(pipe.raw());
     let body = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
-    ipc::write_frame(&mut io, &body).map_err(|error| format!("写回复失败：{error}"))?;
+    let written = ipc::write_frame(&mut io, &body);
+
+    // 契约 §1.3：`start` 在时限内没能把回复写完（或客户端已断开）时必须回滚。
+    // 回滚由调用方做——只有它知道刚才 spawn 了什么。
+    let late = dispatched.elapsed() > TUN_REPLY_DEADLINE_START;
+    if succeeded && (written.is_err() || late) {
+        if let Some(request @ Request::Start { .. }) = &request {
+            on_reply_failed(request);
+        }
+    }
+
+    written.map_err(|error| format!("写回复失败：{error}"))?;
     Ok(())
 }
 
@@ -904,5 +900,87 @@ impl Write for PipeIo {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 契约 1.0.4 §1.3 的四个值。改动必须同时改契约，不能只改这里。
+    #[test]
+    fn the_four_timeouts_match_the_contract() {
+        assert_eq!(TUN_CONNECT_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(TUN_FIRST_FRAME_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(TUN_REPLY_DEADLINE_CONTROL, Duration::from_secs(10));
+        assert_eq!(TUN_REPLY_DEADLINE_START, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn local_errors_report_the_contract_codes() {
+        assert_eq!(
+            IpcError::HelperMissing("x".into()).local_code(),
+            "helper_missing"
+        );
+        assert_eq!(
+            IpcError::PeerUnverified { detail: "x".into() }.local_code(),
+            "peer_unverified"
+        );
+        assert_eq!(IpcError::Timeout("x".into()).local_code(), "timeout");
+        assert_eq!(
+            IpcError::Unavailable("x".into()).local_code(),
+            "transport_error"
+        );
+        assert_eq!(
+            IpcError::Protocol("x".into()).local_code(),
+            "transport_error"
+        );
+    }
+
+    /// `peer_unverified` 的 message 只能说明「服务没正常启动」，
+    /// 不能把探测到的细节回显给可能已经占了管道的进程。
+    #[test]
+    fn a_peer_failure_does_not_echo_probe_details() {
+        let error = IpcError::PeerUnverified {
+            detail: "管道对端与服务进程不一致".into(),
+        };
+        assert_eq!(error.to_string(), "服务没有正常启动");
+        let error = IpcError::HelperMissing("服务 VeylService 未安装（Win32 1060）".into());
+        assert_eq!(error.to_string(), "Veyl 特权服务不可用");
+    }
+
+    #[test]
+    fn an_io_timeout_is_a_timeout_not_a_transport_failure() {
+        let error = map_io("读回复", io::Error::new(io::ErrorKind::TimedOut, "x"));
+        assert!(matches!(error, IpcError::Timeout(_)));
+        let error = map_io("读回复", io::Error::new(io::ErrorKind::BrokenPipe, "x"));
+        assert!(matches!(error, IpcError::Unavailable(_)));
+    }
+
+    /// 连接阶段（连接还没建立）的失败不能算 `transport_error`。
+    #[test]
+    fn connect_stage_failures_are_classified() {
+        use windows_sys::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
+        };
+
+        let missing = connect_exhausted(ERROR_FILE_NOT_FOUND, Duration::from_secs(5));
+        assert_eq!(missing.local_code(), "helper_missing");
+        assert!(matches!(missing, IpcError::HelperMissing(_)));
+
+        let busy = connect_exhausted(ERROR_PIPE_BUSY, Duration::from_secs(5));
+        assert_eq!(busy.local_code(), "timeout");
+        assert!(matches!(busy, IpcError::Timeout(_)));
+
+        let denied = create_error(ERROR_ACCESS_DENIED);
+        assert_eq!(denied.local_code(), "helper_missing");
+    }
+
+    /// 整条请求/回复用的是单一 deadline：耗尽后立即超时，不再重新等一整个预算。
+    #[test]
+    fn an_exhausted_deadline_fails_immediately() {
+        let error = timed_out(false, TUN_REPLY_DEADLINE_START);
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("30000"), "{error}");
     }
 }

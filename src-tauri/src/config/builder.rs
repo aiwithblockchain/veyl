@@ -120,11 +120,23 @@ fn default_log_level() -> String {
         .ok()
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| matches!(value.as_str(), "debug" | "info" | "warn" | "error"))
-        .unwrap_or_else(|| if cfg!(debug_assertions) { "info" } else { "warn" }.to_string())
+        .unwrap_or_else(|| {
+            if cfg!(debug_assertions) {
+                "info"
+            } else {
+                "warn"
+            }
+            .to_string()
+        })
 }
 
 impl BuildInput {
-    pub fn new(node: NodeDescriptor, mixed_port: u16, clash_port: u16, clash_secret: String) -> Self {
+    pub fn new(
+        node: NodeDescriptor,
+        mixed_port: u16,
+        clash_port: u16,
+        clash_secret: String,
+    ) -> Self {
         Self {
             node,
             mixed_port,
@@ -193,14 +205,28 @@ fn inbound(input: &BuildInput) -> Value {
             "listen": "127.0.0.1",
             "listen_port": input.mixed_port,
         }),
-        ConnectMode::Tun => json!({
-            "type": "tun",
-            "tag": "tun-in",
-            // 留空 interface_name：macOS 只接受 utunN，写死名字会 `bad tun name`。
-            "address": [crate::tun::TUN_ADDRESS],
-            "auto_route": true,
-            "route_exclude_address": input.tun_excludes,
-        }),
+        ConnectMode::Tun => {
+            // Windows 才追加平台字段，其它平台上这个 `mut` 用不到。
+            #[allow(unused_mut)]
+            let mut inbound = json!({
+                "type": "tun",
+                "tag": "tun-in",
+                // 留空 interface_name：macOS 只接受 utunN，写死名字会 `bad tun name`；
+                // Windows 交给 Wintun 自己命名。
+                "address": [crate::tun::TUN_ADDRESS],
+                "auto_route": true,
+                "route_exclude_address": input.tun_excludes,
+            });
+            #[cfg(target_os = "windows")]
+            {
+                // 平台差异（`docs/windows-tun-w3-handover.md` §2）：
+                // strict_route 用 WFP 挡住 TUN 之外的 DNS/流量泄漏；
+                // gvisor 栈不依赖系统栈，与其它 VPN / 安全软件共存问题最少。
+                inbound["stack"] = json!(crate::tun::WINDOWS_TUN_STACK);
+                inbound["strict_route"] = json!(true);
+            }
+            inbound
+        }
     }
 }
 
@@ -227,7 +253,12 @@ pub fn build_routed(
     input: &BuildInput,
     plan: &crate::rules::plan::RoutePlan,
 ) -> RuntimeResult<Value> {
-    build_routed_multi(input, std::slice::from_ref(&input.node), &input.node.id, plan)
+    build_routed_multi(
+        input,
+        std::slice::from_ref(&input.node),
+        &input.node.id,
+        plan,
+    )
 }
 
 /// 多节点版本：`proxy` selector 列出配置内全部节点，默认选中 `default_node_id`。
@@ -289,6 +320,18 @@ pub fn build_routed_multi(
         route["auto_detect_interface"] = json!(true);
     }
 
+    // 只有 Windows 会改它，其它平台上这个 `mut` 用不到。
+    #[allow(unused_mut)]
+    let mut dns = plan.dns.clone();
+    // Windows 的 TUN 只有 IPv4 地址；不把 DNS 限成 v4，AAAA 要么被
+    // strict_route 黑洞、要么绕开隧道。macOS 保持 plan 里的 prefer_ipv4。
+    #[cfg(target_os = "windows")]
+    if input.connect_mode.is_tun() {
+        if let Some(object) = dns.as_object_mut() {
+            object.insert("strategy".into(), json!(crate::tun::TUN_DNS_STRATEGY));
+        }
+    }
+
     Ok(json!({
         "log": {
             "level": input.log_level,
@@ -297,7 +340,7 @@ pub fn build_routed_multi(
         "inbounds": [inbound(input)],
         "outbounds": outbounds,
         "route": route,
-        "dns": plan.dns.clone(),
+        "dns": dns,
         "experimental": {
             "clash_api": {
                 "external_controller": format!("127.0.0.1:{}", input.clash_port),
@@ -316,6 +359,19 @@ fn validate_input(input: &BuildInput) -> RuntimeResult<()> {
                 "TUN 模式必须给出排除网段，否则内网流量会全部进隧道".into(),
             ));
         }
+        // TUN 自己的地址被排除出去，等于把隧道入口也绕开了：启动前就拦住，
+        // 不要等到用户看到「已连接」却没有流量。只对 Windows 生效——那边
+        // TUN 地址在 fakeip 段内，macOS 的私有段不受本轮调整影响。
+        #[cfg(target_os = "windows")]
+        if let Some(entry) = crate::tun::cidr::first_covering(
+            input.tun_excludes.iter().map(String::as_str),
+            crate::tun::TUN_ADDRESS,
+        ) {
+            return Err(RuntimeError::Config(format!(
+                "排除网段 {entry} 覆盖了 TUN 地址 {}：TUN 自己的流量会绕开隧道",
+                crate::tun::TUN_ADDRESS
+            )));
+        }
     } else {
         validate_port(input.mixed_port, "mixed_port")?;
         if input.mixed_port == input.clash_port {
@@ -325,7 +381,9 @@ fn validate_input(input: &BuildInput) -> RuntimeResult<()> {
         }
     }
     if input.clash_secret.trim().is_empty() {
-        return Err(RuntimeError::Config("clash secret must not be empty".into()));
+        return Err(RuntimeError::Config(
+            "clash secret must not be empty".into(),
+        ));
     }
     Ok(())
 }
@@ -516,7 +574,10 @@ mod tests {
         let config = build(&input(node)).unwrap();
         assert_eq!(config["outbounds"][0]["type"], "hysteria2");
         assert_eq!(config["outbounds"][0]["tls"]["enabled"], true);
-        assert_eq!(config["outbounds"][0]["tls"]["server_name"], "hy.example.com");
+        assert_eq!(
+            config["outbounds"][0]["tls"]["server_name"],
+            "hy.example.com"
+        );
     }
 
     #[test]
@@ -603,7 +664,8 @@ mod tests {
     }
 
     #[test]
-    fn routed_config_uses_selector_and_only_referenced_rule_sets() {        let plan = crate::rules::plan::RoutePlan {
+    fn routed_config_uses_selector_and_only_referenced_rule_sets() {
+        let plan = crate::rules::plan::RoutePlan {
             rule_sets: vec![json!({
                 "tag": "geosite-cn", "type": "local", "format": "binary", "path": "/rules/geosite/cn.srs"
             })],
@@ -742,6 +804,59 @@ mod tests {
         assert!(matches!(error, RuntimeError::Config(_)), "{error}");
     }
 
+    /// Windows 的 TUN 地址落在 fakeip 段里：排除表必须先把它摘掉，
+    /// 否则「TUN 地址 ∩ 排除段」这条校验会拒绝掉我们自己生成的配置。
+    #[test]
+    fn the_windows_exclusion_table_can_hold_its_own_tun_address() {
+        let excludes = crate::tun::cidr::remove_covering(
+            crate::tun::FIXED_EXCLUDES.iter().copied(),
+            crate::tun::TUN_ADDRESS_WINDOWS,
+        );
+        assert!(!excludes.iter().any(|entry| entry == "198.18.0.0/15"));
+        assert_eq!(
+            crate::tun::cidr::first_covering(
+                excludes.iter().map(String::as_str),
+                crate::tun::TUN_ADDRESS_WINDOWS
+            ),
+            None
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_user_exclusion_covering_the_tun_address_by_bare_ip_is_rejected() {
+        // 裸 IP 必须按 /32 参与判定；去掉这个默认值这条会变红。
+        let user = vec!["198.18.0.1".to_string()];
+        let input = input(vless_node()).with_tun_excludes(crate::tun::excludes(&[], &user));
+        let error = build_routed(&input, &routed_plan()).unwrap_err();
+        assert!(matches!(error, RuntimeError::Config(_)), "{error}");
+        assert!(format!("{error}").contains("198.18.0.1"), "{error}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_tun_inbound_uses_strict_route_and_the_gvisor_stack() {
+        let config = build_routed(&tun_input(), &routed_plan()).unwrap();
+        let inbound = &config["inbounds"][0];
+        assert_eq!(inbound["address"][0], crate::tun::TUN_ADDRESS_WINDOWS);
+        assert_eq!(inbound["stack"], crate::tun::WINDOWS_TUN_STACK);
+        assert_eq!(inbound["strict_route"], true);
+        assert!(
+            inbound.get("interface_name").is_none(),
+            "Wintun 自己命名，不写死"
+        );
+
+        // 生成的排除表里不能有覆盖 TUN 地址的段。
+        let excluded = inbound["route_exclude_address"].as_array().unwrap();
+        assert_eq!(
+            crate::tun::cidr::first_covering(
+                excluded.iter().filter_map(|value| value.as_str()),
+                crate::tun::TUN_ADDRESS_WINDOWS
+            ),
+            None
+        );
+    }
+
     #[test]
     fn both_modes_declare_default_domain_resolver() {
         // 1.14 起缺它是 FATAL，不是降级。
@@ -749,6 +864,29 @@ mod tests {
         let tun = build_routed(&tun_input(), &routed_plan()).unwrap();
         assert_eq!(proxy["route"]["default_domain_resolver"], "dns-local-1");
         assert_eq!(tun["route"]["default_domain_resolver"], "dns-local-1");
+    }
+
+    #[test]
+    fn tun_dns_strategy_follows_the_platform_recipe() {
+        let tun = build_routed(&tun_input(), &routed_plan()).unwrap();
+        assert_eq!(tun["dns"]["strategy"], crate::tun::TUN_DNS_STRATEGY);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_tun_forces_ipv4_only_dns_but_proxy_mode_is_untouched() {
+        let tun = build_routed(&tun_input(), &routed_plan()).unwrap();
+        assert_eq!(tun["dns"]["strategy"], "ipv4_only");
+        // 系统代理模式不经过 TUN，IPv6 仍然可用，不要一起改。
+        let proxy = build_routed(&input(vless_node()), &routed_plan()).unwrap();
+        assert_eq!(proxy["dns"]["strategy"], "prefer_ipv4");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn macos_tun_keeps_prefer_ipv4() {
+        let tun = build_routed(&tun_input(), &routed_plan()).unwrap();
+        assert_eq!(tun["dns"]["strategy"], "prefer_ipv4");
     }
 
     #[test]
@@ -782,8 +920,8 @@ mod tests {
         let mut second = vless_node();
         second.id = "sg-01".into();
         second.server = "198.51.100.7".into();
-        let config = build_routed_multi(&input(first.clone()), &[first, second], "sg-01", &plan)
-            .unwrap();
+        let config =
+            build_routed_multi(&input(first.clone()), &[first, second], "sg-01", &plan).unwrap();
 
         let selector = config["outbounds"]
             .as_array()
@@ -863,10 +1001,28 @@ mod negative_tests {
 
     #[test]
     fn rejects_zero_ports_and_blank_secret() {
-        assert!(build(&BuildInput::new(node_with(vless_protocol()), 0, 19090, "s".into())).is_err());
-        assert!(build(&BuildInput::new(node_with(vless_protocol()), 2080, 0, "s".into())).is_err());
+        assert!(build(&BuildInput::new(
+            node_with(vless_protocol()),
+            0,
+            19090,
+            "s".into()
+        ))
+        .is_err());
+        assert!(build(&BuildInput::new(
+            node_with(vless_protocol()),
+            2080,
+            0,
+            "s".into()
+        ))
+        .is_err());
         assert!(
-            build(&BuildInput::new(node_with(vless_protocol()), 2080, 19090, "  ".into())).is_err(),
+            build(&BuildInput::new(
+                node_with(vless_protocol()),
+                2080,
+                19090,
+                "  ".into()
+            ))
+            .is_err(),
             "空 clash secret 必须拒绝"
         );
     }

@@ -52,6 +52,14 @@ fn summarise_route_change(data: &Value) -> String {
         .get("hot_switched")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // TUN 起来了但平台未采集设备状态：切换成功，接管无法确认。
+    // 这条必须优先于热切换/重连文案，否则「连接未中断」会把不确定性盖掉。
+    if data.get("runtime_state").and_then(Value::as_str) == Some("tun_unknown") {
+        return format!(
+            "分流模式已切换为 {mode}{targets}，TUN 已启动，但当前平台未采集设备状态，\
+             无法确认是否接管，需要用系统命令确认。"
+        );
+    }
     if hot {
         format!("分流模式已热切换为 {mode}{targets}，连接未中断。")
     } else {
@@ -512,5 +520,20 @@ mod tests {
         assert!(text.contains("没确认接管"), "{text}");
         assert!(!text.contains("已重新连接生效"), "{text}");
         assert!(!text.contains("没有连上"), "没证据就不能断言断开：{text}");
+    }
+
+    /// 设备状态未采集（Windows）不是失败，也不能说成「连接未中断」。
+    #[test]
+    fn an_uncollected_tun_device_state_is_reported_as_unknown() {
+        let text = changed(json!({
+            "hot_switched": true,
+            "reconnect": "reconnected",
+            "runtime_state": "tun_unknown",
+        }));
+        assert!(text.contains("未采集设备状态"), "{text}");
+        assert!(text.contains("无法确认是否接管"), "{text}");
+        assert!(text.contains("系统命令"), "要给出确认途径：{text}");
+        assert!(!text.contains("连接未中断"), "不确定性不能被盖掉：{text}");
+        assert!(!text.contains("没有连上"), "{text}");
     }
 }

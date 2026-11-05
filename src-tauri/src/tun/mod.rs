@@ -6,6 +6,10 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub mod backend;
+/// 纯 IPv4 CIDR 计算。源码在 `windows/` 下，但声明放在这里：
+/// 服务二进制也 `#[path]` 引用同一份文件，而 macOS 上同样需要它的单元测试。
+#[path = "windows/cidr.rs"]
+pub mod cidr;
 pub mod privilege;
 pub mod protocol;
 pub mod session;
@@ -22,7 +26,32 @@ pub mod xpc;
 pub mod windows;
 
 /// macOS 只接受 `utunN` 形式（或留空让系统分配），固定私有段。
-pub const TUN_ADDRESS: &str = "172.19.0.1/30";
+pub const TUN_ADDRESS_MACOS: &str = "172.19.0.1/30";
+
+/// Windows 用 fakeip 段，与 macOS 的 `172.19.0.1/30` **不能互换**。
+/// 地址段是本轮的决定，真机效果按 `docs/windows-tun-w3-handover.md` 验证；
+/// 在验证通过之前不要把它当成「已实测」。
+pub const TUN_ADDRESS_WINDOWS: &str = "198.18.0.1/15";
+
+#[cfg(target_os = "windows")]
+pub const TUN_ADDRESS: &str = TUN_ADDRESS_WINDOWS;
+#[cfg(not(target_os = "windows"))]
+pub const TUN_ADDRESS: &str = TUN_ADDRESS_MACOS;
+
+/// Windows TUN 入站的协议栈。`gvisor` 是纯用户态实现，不依赖系统栈，
+/// Windows 上与其它 VPN / 安全软件的共存问题最少；更换前先看交接文档里的实测项。
+pub const WINDOWS_TUN_STACK: &str = "gvisor";
+
+/// TUN 模式下 DNS 的地址族策略。
+///
+/// Windows 的 TUN 只有 IPv4 地址（`198.18.0.1/15`），AAAA 查询交给应用后
+/// 要么被 `strict_route` 黑洞、要么绕开隧道，两者都不是我们要的。
+/// `ipv4_only` 让 sing-box 直接不返回 AAAA 记录，行为是确定的。
+/// macOS 继续用 `prefer_ipv4`（配方见 `docs/tun-windows-notes.md` §5.1）。
+#[cfg(target_os = "windows")]
+pub const TUN_DNS_STRATEGY: &str = "ipv4_only";
+#[cfg(not(target_os = "windows"))]
+pub const TUN_DNS_STRATEGY: &str = "prefer_ipv4";
 
 /// TUN 设备是否真的起来了：本机接口里能看到我们固定的 TUN 地址。
 ///
@@ -91,6 +120,9 @@ pub const SNIFF_TIMEOUT: &str = "300ms";
 
 /// 固定排除表。`ip_is_private` 覆盖不到的那几段也在这里，
 /// 所以这一张表同时用于路由表排除与确认页展示。
+///
+/// 这是**平台无关的底表**；Windows 实际使用的表还会去掉覆盖 TUN 自身地址的段，
+/// 见 [`fixed_excludes`]。不要在别处再抄一份。
 pub const FIXED_EXCLUDES: [&str; 15] = [
     // IPv4 私有段
     "10.0.0.0/8",
@@ -158,10 +190,10 @@ pub fn subnets(addrs: &[LocalAddr]) -> Vec<String> {
 ///
 /// 用户补充的排在最后：它们是用户显式要求的，出问题时更容易被看见。
 pub fn excludes(local: &[String], user: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(FIXED_EXCLUDES.len() + local.len() + user.len());
-    for entry in FIXED_EXCLUDES
-        .iter()
-        .map(|s| s.to_string())
+    let fixed = fixed_excludes();
+    let mut out = Vec::with_capacity(fixed.len() + local.len() + user.len());
+    for entry in fixed
+        .into_iter()
         .chain(local.iter().cloned())
         .chain(user.iter().cloned())
     {
@@ -171,6 +203,27 @@ pub fn excludes(local: &[String], user: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+/// 当前平台的固定排除表。
+///
+/// Windows 的 TUN 地址就在 `198.18.0.0/15` 里，而这一段本来是要排除的 fakeip 段。
+/// 留着它，TUN 自己的流量也会被判定为「绕开隧道」；所以按**几何覆盖**把它去掉，
+/// 而不是按字面量匹配——用户把段写成 `198.18.0.0/16` 也躲不过。
+///
+/// macOS 保持不变：那边 TUN 是 `172.19.0.1/30`，固定表里的私有段不参与本轮调整。
+pub fn fixed_excludes() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        cidr::remove_covering(FIXED_EXCLUDES.iter().copied(), TUN_ADDRESS)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        FIXED_EXCLUDES
+            .iter()
+            .map(|entry| (*entry).to_string())
+            .collect()
+    }
 }
 
 fn is_user_subnet(addr: &LocalAddr) -> bool {
@@ -248,13 +301,20 @@ pub(crate) fn parse_ifconfig(output: &str) -> Vec<LocalAddr> {
     let mut iface = String::new();
     for line in output.lines() {
         if !line.starts_with(char::is_whitespace) {
-            iface = line.split(':').next().unwrap_or_default().trim().to_string();
+            iface = line
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             continue;
         }
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("inet ") {
             let mut parts = rest.split_whitespace();
-            let Some(address) = parts.next() else { continue };
+            let Some(address) = parts.next() else {
+                continue;
+            };
             let Ok(address) = address.parse::<Ipv4Addr>() else {
                 continue;
             };
@@ -279,7 +339,9 @@ pub(crate) fn parse_ifconfig(output: &str) -> Vec<LocalAddr> {
             out.push(LocalAddr::new(&iface, IpAddr::V4(address), prefix));
         } else if let Some(rest) = line.strip_prefix("inet6 ") {
             let mut parts = rest.split_whitespace();
-            let Some(address) = parts.next() else { continue };
+            let Some(address) = parts.next() else {
+                continue;
+            };
             // 链路本地地址带 `%en0` 作用域后缀
             let address = address.split('%').next().unwrap_or(address);
             let Ok(address) = address.parse::<Ipv6Addr>() else {
@@ -360,17 +422,55 @@ mod tests {
         let local = vec!["192.168.1.0/24".to_string()];
         let user = vec!["172.30.0.0/16".to_string(), " ".to_string()];
         let result = excludes(&local, &user);
-        assert_eq!(result.len(), FIXED_EXCLUDES.len() + 2);
-        assert_eq!(&result[..3], &["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]);
-        assert_eq!(result[FIXED_EXCLUDES.len()], "192.168.1.0/24");
-        assert_eq!(result[FIXED_EXCLUDES.len() + 1], "172.30.0.0/16");
+        let fixed = fixed_excludes();
+        assert_eq!(result.len(), fixed.len() + 2);
+        assert_eq!(
+            &result[..3],
+            &["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+        );
+        assert_eq!(result[fixed.len()], "192.168.1.0/24");
+        assert_eq!(result[fixed.len() + 1], "172.30.0.0/16");
     }
 
     #[test]
     fn excludes_drop_duplicates_from_user_input() {
         let user = vec!["10.0.0.0/8".to_string()];
         let result = excludes(&[], &user);
-        assert_eq!(result.len(), FIXED_EXCLUDES.len(), "固定表里已有的不再重复");
+        assert_eq!(
+            result.len(),
+            fixed_excludes().len(),
+            "固定表里已有的不再重复"
+        );
+    }
+
+    /// Windows 的 TUN 地址落在 fakeip 段里：这一段必须从排除表里消失，
+    /// 否则 TUN 自己的流量会被判定为「绕开隧道」。
+    #[test]
+    fn the_windows_fixed_table_drops_the_range_that_holds_its_tun_address() {
+        let fixed = cidr::remove_covering(FIXED_EXCLUDES.iter().copied(), TUN_ADDRESS_WINDOWS);
+        assert!(!fixed.iter().any(|entry| entry == "198.18.0.0/15"));
+        assert!(fixed.iter().any(|entry| entry == "10.0.0.0/8"));
+        assert_eq!(fixed.len(), FIXED_EXCLUDES.len() - 1);
+        // macOS 的地址段不受影响，固定表保持原样。
+        let untouched = cidr::remove_covering(FIXED_EXCLUDES.iter().copied(), TUN_ADDRESS_MACOS);
+        assert_eq!(
+            untouched.len(),
+            FIXED_EXCLUDES.len() - 1,
+            "172.16.0.0/12 覆盖 macOS 地址"
+        );
+    }
+
+    /// Windows 上这条是启动前提：固定表不能排除 TUN 自己的地址。
+    /// macOS 的固定表里 `172.16.0.0/12` 覆盖 `172.19.0.1/30`，本轮按决定不动它。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_platform_fixed_table_never_excludes_the_platform_tun_address() {
+        let fixed = fixed_excludes();
+        assert_eq!(
+            cidr::first_covering(fixed.iter().map(String::as_str), TUN_ADDRESS),
+            None,
+            "固定表不能排除 TUN 自己的地址"
+        );
     }
 
     #[test]
@@ -391,7 +491,10 @@ mod tests {
 
     #[test]
     fn sniffers_include_dns_or_hijack_never_fires() {
-        assert!(SNIFFERS.contains(&"dns"), "缺 dns 嗅探，hijack-dns 规则不命中");
+        assert!(
+            SNIFFERS.contains(&"dns"),
+            "缺 dns 嗅探，hijack-dns 规则不命中"
+        );
     }
 
     #[test]
@@ -407,7 +510,10 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
 ";
         let parsed = parse_ifconfig(output);
         assert_eq!(parsed.len(), 5);
-        assert_eq!(parsed[1], LocalAddr::new("lo0", "::1".parse().unwrap(), 128));
+        assert_eq!(
+            parsed[1],
+            LocalAddr::new("lo0", "::1".parse().unwrap(), 128)
+        );
         assert_eq!(parsed[2], LocalAddr::new("en0", v4("192.168.1.23"), 24));
         assert_eq!(
             parsed[3],
@@ -479,7 +585,8 @@ default            192.168.1.1        UGScg          en0
 
     #[test]
     fn a_missing_default_route_is_not_mistaken_for_one() {
-        let output = "Destination        Gateway            Flags        Netif\n10/8  link#4  UCSIg  en0\n";
+        let output =
+            "Destination        Gateway            Flags        Netif\n10/8  link#4  UCSIg  en0\n";
         assert_eq!(parse_default_route_interface(output), None);
     }
 }

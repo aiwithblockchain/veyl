@@ -83,6 +83,13 @@ fn print_client_help() {
 // ---------------------------------------------------------------------------
 
 fn run_console() {
+    // 先建/校验数据目录，再创建日志文件：否则日志目录会以默认继承 ACL 被创建，
+    // 后面再收紧就晚了。普通用户跑 --console 会在这里直接失败。
+    if let Err(error) = super::win::acl::ensure_data_layout(&super::win::program_data_dir()) {
+        eprintln!("数据目录权限不合规：{error}");
+        eprintln!("%ProgramData%\\Veyl 必须只允许 SYSTEM/Administrators 写");
+        std::process::exit(1);
+    }
     let log = Arc::new(ServiceLog::open(true));
     harden_process(&log);
     log.info(format!(
@@ -90,10 +97,23 @@ fn run_console() {
         std::process::id(),
         super::win::PIPE_NAME
     ));
+    let server = Arc::new(server::Server::new(log.clone()));
+    server.sweep_stale();
     pipe::reset_stop();
-    match pipe::serve(log.clone(), server::dispatch) {
-        Ok(()) => log.info("控制台模式结束"),
+
+    let dispatch = server.clone();
+    let rollback = server.clone();
+    match pipe::serve(
+        log.clone(),
+        move |request| dispatch.dispatch(request),
+        move |request| rollback.abort_started(request),
+    ) {
+        Ok(()) => {
+            server.shutdown();
+            log.info("控制台模式结束");
+        }
         Err(error) => {
+            server.shutdown();
             log.error(format!("无法启动：{error}"));
             std::process::exit(1);
         }
@@ -202,10 +222,26 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
     }
     STATUS_HANDLE.store(handle as usize, Ordering::SeqCst);
 
-    report(SERVICE_START_PENDING, 0, 3_000);
+    report(SERVICE_START_PENDING, 0, 10_000);
+    // 先建/校验数据目录，再创建日志文件：否则日志目录会以默认（可能宽松的）
+    // 继承 ACL 被创建。staged 的 sing-box.exe 会从这里执行，这一步失败即拒绝启动。
+    if let Err(error) = super::win::acl::ensure_data_layout(&super::win::program_data_dir()) {
+        // 失败路径**不碰日志文件**：logs 可能是预置的软链，SYSTEM 会往目标追加。
+        // SCM 收不到 stderr，但 `sc.exe query` 会显示服务没有起来，排障看事件日志。
+        eprintln!("数据目录权限不合规：{error}");
+        eprintln!("%ProgramData%\\Veyl 必须只允许 SYSTEM/Administrators 写；服务拒绝启动");
+        report_failure();
+        return;
+    }
     let log = Arc::new(ServiceLog::open(false));
     log.info(format!("服务启动，pid={}", std::process::id()));
     harden_process(&log);
+
+    // 上次崩溃留下的 sing-box 必须在对外服务之前收掉：它是一个还在接管流量、
+    // 却没有任何客户端知道存在的进程。核对是 pid + 启动时间 + 镜像路径三重。
+    let server = Arc::new(server::Server::new(log.clone()));
+    server.sweep_stale();
+
     report(
         SERVICE_RUNNING,
         SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN,
@@ -214,12 +250,21 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
 
     // 起不来就停服务并留下明确原因（例如同名管道被抢占）。
     // 不降级、不换名字——换名字等于把「先到先得」的窗口留给攻击者。
-    match pipe::serve(log.clone(), server::dispatch) {
+    let dispatch = server.clone();
+    let rollback = server.clone();
+    match pipe::serve(
+        log.clone(),
+        move |request| dispatch.dispatch(request),
+        move |request| rollback.abort_started(request),
+    ) {
         Ok(()) => {
+            // STOP / SHUTDOWN 之后由这里收掉 sing-box；子进程不会随服务退出自动结束。
+            server.shutdown();
             log.info("服务停止");
             report(SERVICE_STOPPED, 0, 0);
         }
         Err(error) => {
+            server.shutdown();
             log.error(format!("服务无法启动：{error}"));
             log.warn("常见原因：同名管道已被别的进程创建，或安装目录/ACL 不完整");
             report_failure();
@@ -235,7 +280,8 @@ unsafe extern "system" fn control_handler(
 ) -> u32 {
     match control {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
-            report(SERVICE_STOP_PENDING, 0, 3_000);
+            // 停止要等 sing-box 退出（最多 5 s），给 SCM 一个诚实的等待提示。
+            report(SERVICE_STOP_PENDING, 0, 10_000);
             pipe::request_stop();
             ERROR_SUCCESS
         }
@@ -292,8 +338,9 @@ fn report_failure() {
 /// 特权进程的加载面收口：DLL 只从 System32 与应用目录找，工作目录固定。
 ///
 /// 契约 §5.4：路径白名单约束的是服务**自己执行或加载**的文件，不是客户端。
-/// 这里先记录自身镜像是否位于安装目录；W3 拉起 `sing-box.exe` / 加载
-/// `wintun.dll` 时按同一规则做强制检查。
+/// 这里先记录自身镜像是否位于安装目录；`sing-box.exe` 与 `wintun.dll`
+/// 由 `win::runtime` 从安装目录 staging 到 `%ProgramData%`，并校验编译进
+/// 二进制的哈希——那一段同样是「自己要读的文件」，走同一条规则。
 fn harden_process(log: &ServiceLog) {
     unsafe {
         SetDefaultDllDirectories(

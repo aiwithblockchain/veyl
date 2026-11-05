@@ -460,6 +460,21 @@ mod macos {
 #[cfg(target_os = "macos")]
 pub use macos::MacXpcBackend;
 
+// ---------------------------------------------------------------------------
+// Windows 实现
+//
+// 源码在 `tun/windows/backend.rs`，但用 `#[path]` 挂在**这里**：
+// `tun/windows/mod.rs` 会被服务二进制整份引入，在那边声明会把 `TunBackend`
+// 与服务端用不到的依赖一起编进一个 LocalSystem 进程。
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+#[path = "windows/backend.rs"]
+mod win_pipe;
+
+#[cfg(target_os = "windows")]
+pub use win_pipe::WinPipeBackend;
+
 
 #[cfg(test)]
 mod tests {

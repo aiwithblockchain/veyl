@@ -57,6 +57,10 @@ function Set-VeylAcl {
       [System.Security.AccessControl.AccessControlType]"Allow")
     $acl.AddAccessRule($rule)
   }
+  # 所有者必须是管理员或 SYSTEM：所有者隐含 WRITE_DAC，普通用户一旦成为所有者
+  # 就能给自己加写权限。服务启动时会校验这一点并拒绝启动。
+  $adminSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")
+  $acl.SetOwner($adminSid)
   Set-Acl -Path $Path -AclObject $acl
 }
 
@@ -80,6 +84,25 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
   Start-Sleep -Seconds 1
 }
 Copy-Item -LiteralPath $Binary -Destination $target -Force
+
+# 运行时：服务只从安装目录复制到 %ProgramData% 后执行，不会读 per-user 目录。
+# 缺了它 TUN 会明确返回 runtime_missing，不影响协议/对端认证的验证。
+$runtimeSource = Join-Path $PSScriptRoot "..\..\src-tauri\resources\runtime"
+$runtimeTarget = Join-Path $installDir "runtime"
+if (Test-Path (Join-Path $runtimeSource "sing-box.exe")) {
+  Write-Host "      复制运行时到 $runtimeTarget"
+  New-Item -ItemType Directory -Force -Path $runtimeTarget | Out-Null
+  foreach ($name in @("sing-box.exe", "wintun.dll", "wintun-LICENSE.txt")) {
+    $from = Join-Path $runtimeSource $name
+    if (-not (Test-Path $from)) {
+      throw "缺少 $from。先跑: node scripts\runtime\fetch-runtime.mjs --platform=windows"
+    }
+    Copy-Item -LiteralPath $from -Destination (Join-Path $runtimeTarget $name) -Force
+  }
+} else {
+  Write-Warning "没有 $runtimeSource\sing-box.exe：TUN 启动会返回 runtime_missing"
+  Write-Warning "先跑 node scripts\runtime\fetch-runtime.mjs --platform=windows 再重跑本脚本"
+}
 
 Write-Host "[4/5] 注册服务 $ServiceName（LocalSystem / Automatic）"
 # New-Service 会正确引用带空格的路径；sc.exe create 在 PowerShell 里容易被引号坑到。
