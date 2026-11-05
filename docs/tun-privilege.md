@@ -261,6 +261,7 @@ SMAppService 启动 helper 时，是否对 helper 本身做代码签名校验。
 | TUN 不进 `RuntimeManager` | 没有自动重连与看门狗；`runtime_status` 返回精简快照 |
 | 后台升级运行时 | 对 TUN 不生效，要等下次 App 更新（见 `docs/upgrade.md` §4.1） |
 | 规则数据 | helper 从 bundle 的 `veyl-rules-*.tar.zst` 解到 `<root>/rules/current/`。归档的 sha256 编译进 helper，逐项再按清单哈希校验 |
+| 日志 | helper 的 sing-box 日志超过 5 MiB 轮转一次、保留上一份，稳态上限约 10 MiB（`5 MiB + 5 MiB`）。没有更细的按天切分 |
 
 ---
 

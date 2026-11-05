@@ -56,7 +56,7 @@ configure tun interface: Connect: operation not permitted
 - macOS 13+ 用 `SMAppService`；更老的系统用 `SMJobBless`（已废弃但仍可用）
 - App 与 helper 用**同一个开发者证书**签名（已有签名）
 - 不采用「每次弹管理员密码」：对二级用户是灾难
-- 不采用 NetworkExtension：需要 Apple 授权 entitlement，门槛过高
+- 不采用 NetworkExtension：需要 Apple 授权 entitlement，门槛过高。**完整评估见 `docs/tun-architecture-decision.md`**——结论不变（继续用 root helper），但真实门槛不止 entitlement：Developer ID 分发必须打包成系统扩展、sing-box 要改成 libbox 内嵌、`tun-mode.md` §2/§3/§6 的多数参数在 NE 下不适用
 
 **必须处理的四件事：**
 

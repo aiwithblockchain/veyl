@@ -4,6 +4,7 @@
 > 性质：设计判断记录，不含实现。对照 `docs/tun-privilege.md`（macOS 特权通道）。
 > 依据：当前工作树代码、`docs/tun-mode.md`、`docs/build-and-release.md`、`docs/capabilities.md` §3.1
 > 结论：**现在不具备开工条件**，缺什么见 §5。
+> **2026-11-05 更正**：对端校验改为**只看签名、不看客户端路径**（§2.1、§3.2）。应用按 per-user 安装，要求客户端在 `Program Files\Veyl` 会拒掉我们自己的 App。路径白名单从此只约束服务自己执行/加载的文件。同日 W0–W2 评审追加两条：对端校验是**双向**的（客户端也要验服务端），且两侧读取都要有超时（§3.2）。
 
 ---
 
@@ -66,9 +67,9 @@ macOS 的特权模型（SMAppService + XPC + Security.framework）在 Windows �
 | `SMAppService` 注册 LaunchDaemon | **SCM**（Service Control Manager）：`CreateServiceW` / `sc create`，服务账户 `LocalSystem`，启动类型 Automatic | 概念对应，代码全重写 |
 | `Contents/Library/LaunchDaemons/*.plist` | 服务注册项（注册表 `HKLM\SYSTEM\CurrentControlSet\Services\...`）+ `binPath` | 重写 |
 | XPC Mach service | **命名管道** `\\.\pipe\veyl-helper`（`CreateNamedPipeW`，带 security descriptor，`PIPE_REJECT_REMOTE_CLIENTS`） | 重写 |
-| `xpc_connection_set_peer_code_signing_requirement` | 连接后取客户端 PID（`GetNamedPipeClientProcessId`），校验其镜像路径 + **Authenticode**（`WinVerifyTrust`）签名者 | 重写，且多一步路径校验 |
+| `xpc_connection_set_peer_code_signing_requirement` | 连接后取客户端 PID（`GetNamedPipeClientProcessId`），校验其 **Authenticode**（`WinVerifyTrust`）签名者 | 重写（校验内容对齐：都只看签名身份） |
 | `SecStaticCodeCheckValidity` 验 bundle | `WinVerifyTrust` 验服务/客户端 exe；资源用编译进二进制的哈希固定 | 概念对应 |
-| `SecCodeCheckValidity` + designated requirement | Authenticode 签名者（发布者/证书指纹）+ 路径必须在 `Program Files\Veyl` | 重写 |
+| `SecCodeCheckValidity` + designated requirement | Authenticode 签名者（发布者 + 证书指纹） | 概念对应，代码重写 |
 | `/Applications/Veyl.app` 作为安装根 | `C:\Program Files\Veyl\`（管理员可写、普通用户不可写） | 概念对应 |
 | `Contents/Resources/...` 随包资源 | 安装目录下的 `runtime\` / `rules\`；**不是** `%LOCALAPPDATA%` | 重写路径 |
 | `/Library/Application Support/Veyl`（root 信任根） | `C:\ProgramData\Veyl\`（ACL：SYSTEM + Administrators 完全控制，普通用户只读或不可读） | 概念对应，ACL 必须显式设 |
@@ -84,7 +85,7 @@ macOS 的特权模型（SMAppService + XPC + Security.framework）在 Windows �
 2. **请求里不出现路径。** 只收配置内容；运行时、规则、日志、pid 由服务自己决定。
 3. **配置走 allowlist，多余键拒绝而不是忽略。**
 4. **只允许 `type: "tun"` 入站；Clash API 只绑回环；规则集不许远程引用。**
-5. **先验对端，再读消息。**
+5. **先验对端，再读写消息——双向。**
 6. **运行时与规则用编译进二进制的哈希固定；失败关闭，不降级。**
 7. **停止/卸载与 E3 共用同一段清理代码。**
 
@@ -189,8 +190,8 @@ Windows 上从非管理员进程安装服务必须先提权。两种可行做法
 | 服务账户 | `LocalSystem`（需要创建 TUN 适配器、改路由/DNS） |
 | 安装时机 | **首次需要 TUN 时**，由提权安装器注册；不在应用安装时 |
 | 服务启动 | Automatic；崩溃恢复重启（有限次数） |
-| App ↔ 服务 | 命名管道；服务端限制 ACL，校验客户端进程路径 + Authenticode 发布者 |
-| 服务二进制 | `C:\Program Files\Veyl\veyl-helper.exe`（或 `veyl-service.exe`），管理员 ACL |
+| App ↔ 服务 | 命名管道；**双向校验**：服务端验客户端签名，客户端用 SCM 的服务 PID 与管道服务端 PID 比对（见下方约束） |
+| 服务二进制 | `C:\Program Files\Veyl\veyl-service.exe`，管理员 ACL（**名字定稿**：不与 macOS 的 `veyl-helper` 重名，避免日志、安装器与排障混淆） |
 | 运行时 | `C:\Program Files\Veyl\runtime\sing-box.exe` + `wintun.dll`；只从安装目录复制到 `%ProgramData%\Veyl\runtime\<sha256>\` |
 | 状态/配置/日志 | `%ProgramData%\Veyl\`，ACL：SYSTEM/Administrators 完全控制，普通用户不可写 |
 | 请求内容 | 仍然只有配置 JSON 内容，无路径；沿用 allowlist |
@@ -226,8 +227,11 @@ Windows 上从非管理员进程安装服务必须先提权。两种可行做法
 
 - `CreateNamedPipeW` 用 `FILE_FLAG_FIRST_PIPE_INSTANCE`，防止抢占。
 - Security descriptor 只允许 `SYSTEM`、`Administrators` 和「已认证用户」中的必要集合；`PIPE_REJECT_REMOTE_CLIENTS`。
-- 连接后 `GetNamedPipeClientProcessId` → `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` → `QueryFullProcessImageNameW`，要求路径在 `Program Files\Veyl\`；再对镜像做 `WinVerifyTrust`，校验发布者/证书指纹。
+- 连接后 `GetNamedPipeClientProcessId` → `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` → `QueryFullProcessImageNameW`（路径**仅写入日志用于诊断**）→ 对镜像做 `WinVerifyTrust`，校验发布者与证书指纹。**不校验客户端路径**：应用按 per-user 安装，路径校验会拒掉我们自己的 App；而签名校验在路径校验面前没有损失——攻击者伪造不了我们的证书，用户目录里的 App 本来就是我们设计的合法位置。进程句柄保持到会话结束，防 pid 复用；连接用户身份由管道 ACL 保证。
+- **路径白名单只约束服务自己执行或加载的文件**：服务二进制、`sing-box.exe`、`wintun.dll`、规则归档、staging/状态目录（见 §3.2「不可信位置」）。
 - 校验失败直接断开，不读消息。**不要在验证前接受任何配置内容。**
+- **客户端也要验服务端。** 服务没在运行时，同一用户的任意进程都可以先创建同名管道冒充服务端——它收到的将是**带节点凭据的完整配置**，还能伪造「已连接」的回复；这时服务端 ACL 帮不上忙，因为服务端根本不存在。所以 App 在连上之后、写第一个字节之前，必须 `OpenSCManager` / `OpenService` → `QueryServiceStatusEx` 取服务 PID，与 `GetNamedPipeServerProcessId` 比对；不一致或服务未运行 → 关闭并报 `peer_unverified`，一个字节都不发（契约 §5.4）。
+- **两侧读取都要超时。** 服务端等首帧 5 s；客户端等回复按方法分：`status` / `stop` 10 s，`start` 30 s（首次 start 要复制约 78 MB 的 `sing-box.exe` 与 `wintun.dll`，慢盘与 Defender 扫描下 10 s 会误判）。超时即断开；服务端 `start` 在时限内写不完回复时必须回滚已 spawn 的进程，不留孤儿。数值以契约 §1.3 为准，不在本文另抄一份。
 
 ### 3.3 代码签名
 
@@ -322,6 +326,7 @@ Windows 上从非管理员进程安装服务必须先提权。两种可行做法
 | 6 | 孤儿进程回收 | 中 | 现有 Windows 实现拿不到命令行，`reclaim_stale` 一律跳过；服务模型下要重新设计 |
 | 7 | CI 无法覆盖 TUN | 中 | 只能编译/单测；真机验证必须人工 |
 | 8 | arm64 Windows | 低（可延后） | x64 先行；arm64 需要额外资产与 Wintun DLL |
+| 9 | 验签 TOCTOU 与 `WTD_REVOKE_NONE` 吊销语义 | 低 | 属**已登记的残余风险**，不是待修缺陷：影响限于「未签名代码借签名身份连上服务」。取舍与可能的收口见契约 §9 的 R1 / R2 |
 
 ---
 
