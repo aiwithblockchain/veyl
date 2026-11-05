@@ -24,6 +24,7 @@ extern "C" {
     ) -> xpc_connection_t;
     fn xpc_connection_resume(connection: xpc_connection_t);
     fn xpc_connection_cancel(connection: xpc_connection_t);
+    fn xpc_connection_set_target_queue(connection: xpc_connection_t, queue: dispatch_queue_t);
     fn xpc_connection_get_pid(connection: xpc_connection_t) -> libc::pid_t;
     fn xpc_connection_set_event_handler(
         connection: xpc_connection_t,
@@ -448,6 +449,22 @@ pub unsafe fn cancel(connection: xpc_connection_t) {
 /// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
 pub unsafe fn set_event_handler(connection: xpc_connection_t, handler: *mut c_void) {
     unsafe { xpc_connection_set_event_handler(connection, handler) };
+}
+
+/// 全局并发队列（QOS_CLASS_DEFAULT）。
+pub fn global_queue() -> dispatch_queue_t {
+    unsafe { dispatch_get_global_queue(0, 0) }
+}
+
+/// 把连接的事件处理器挪到指定队列。必须在 `resume` 之前调用。
+///
+/// helper 用它在并发队列上处理请求：`start` 准备规则可能几十秒，
+/// 排在同一队列上的 `stop` 不能陪着一起等。
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn set_target_queue(connection: xpc_connection_t, queue: dispatch_queue_t) {
+    unsafe { xpc_connection_set_target_queue(connection, queue) };
 }
 
 /// 让 libxpc 在**连接建立时**就按 requirement 校验对端。

@@ -19,10 +19,11 @@ mod trust;
 mod xpc;
 
 use std::ffi::{c_char, c_void};
+use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,110 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// 保留上一份而不是直接清空：排障时要看的是上一次连接的后半段。
 const TUN_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const TUN_LOG_KEEP: usize = 1;
+
+/// `start` 的准备阶段上限。客户端等 30 秒，留 5 秒给 IPC 与收尾。
+/// 从**规则就绪之后**开始算：等待规则另有 60 秒上限。
+const START_PREPARE_DEADLINE: Duration = Duration::from_secs(25);
+
+/// 首连等待规则就绪的上限。
+///
+/// 必须**短于**客户端的 start 期限（30 秒）：后台线程还在解包时，
+/// 连接宁可快点返回「正在准备」，也不要让客户端先超时、用户重试又排在
+/// 这次等待后面。超时不会 spawn，也不会留下孤儿。
+const RULES_WAIT_DEADLINE: Duration = Duration::from_secs(15);
+
+/// `sing-box check` 的上限。挂住的 check 会一直占着 `start_lock`，
+/// 后面的 start/stop 全被堵死。
+const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// helper 自己的诊断日志上限；超了直接重开，避免无限增长。
+const HELPER_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+/// 规则预置的进度。监听先起，后台线程负责解包，`start` 只等结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RulesState {
+    Pending,
+    Ready,
+    Failed { code: &'static str, message: String },
+}
+
+/// 跑 `sing-box check`，带超时。
+///
+/// `Command::output()` 没有超时：check 一旦挂住就会一直占着 `start_lock`，
+/// 后面的 start 与 stop 全部被堵死。
+fn check_config(
+    binary: &Path,
+    config: &Path,
+    timeout: Duration,
+) -> Result<std::process::Output, ProtocolError> {
+    let mut child = Command::new(binary)
+        .arg("check")
+        .arg("-c")
+        .arg(config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            ProtocolError::new(
+                protocol::ERR_RUNTIME_MISSING,
+                format!("无法执行运行时：{error}"),
+            )
+        })?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child.wait_with_output().map_err(|error| {
+                    ProtocolError::new(
+                        protocol::ERR_TUN_START_FAILED,
+                        format!("读取校验结果失败：{error}"),
+                    )
+                })
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50))
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ProtocolError::new(
+                    protocol::ERR_TUN_START_FAILED,
+                    format!("配置校验超过 {} 秒，已终止", timeout.as_secs()),
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ProtocolError::new(
+                    protocol::ERR_TUN_START_FAILED,
+                    format!("等待配置校验失败：{error}"),
+                ));
+            }
+        }
+    }
+}
+
+/// 准备阶段的让路判定。拆成纯函数，便于直接断言「stop 打断 start」与「超时放弃」。
+fn check_start_allowed(stop_requested: bool, elapsed: Duration) -> Result<(), ProtocolError> {
+    if stop_requested {
+        return Err(ProtocolError::new(
+            protocol::ERR_TUN_START_FAILED,
+            "启动被停止请求取消",
+        ));
+    }
+    if elapsed > START_PREPARE_DEADLINE {
+        return Err(ProtocolError::new(
+            protocol::ERR_TUN_START_FAILED,
+            format!(
+                "启动准备超过 {} 秒仍未就绪，已放弃（规则或运行时可能还在准备）",
+                START_PREPARE_DEADLINE.as_secs()
+            ),
+        ));
+    }
+    Ok(())
+}
 
 /// 运行时的签名 identifier。裸 Mach-O 没有 Info.plist，codesign 用文件名作 identifier。
 /// `staged_runtime_signature_valid` 钉住它，打包脚本也有同样的断言。
@@ -65,6 +170,16 @@ pub fn run() {
 
     let supervisor = Arc::new(Supervisor::new(root));
     supervisor.sweep_stale();
+
+    // 规则解包 + 逐项校验是首跑最慢的一步（真机 2233 个规则集约 30 秒）。
+    // 放到后台线程做、监听先起：`start` 只等结果（最多 60 秒），
+    // 不能因为解包比客户端的 30 秒还慢就必然失败。
+    let staging = Arc::clone(&supervisor);
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let outcome = staging.ensure_rules_staged();
+        staging.record_rules(outcome, started.elapsed());
+    });
 
     // SAFETY: 处理器只写一个原子变量。
     unsafe {
@@ -123,6 +238,11 @@ fn serve(supervisor: Arc<Supervisor>) -> ! {
             unsafe { xpc::cancel(connection) };
             return;
         }
+
+        // 并发队列：`start` 可能准备几十秒，`stop` 不能被它堵在主队列上。
+        // 每个连接一个 handler，不同连接之间就能并发执行。
+        // 必须在 resume 之前设置。
+        unsafe { xpc::set_target_queue(connection, xpc::global_queue()) };
 
         let per_connection = Arc::clone(&supervisor);
         let handler: RcBlock<dyn Fn(xpc_object_t)> =
@@ -239,6 +359,17 @@ struct Supervisor {
     child: Mutex<Option<Child>>,
     /// 与 `child` 同生共死；`status` 用它回答 clash 地址与启动时刻。
     running: Mutex<Option<Running>>,
+    /// 外部 stop 请求。`start` 在准备阶段与 spawn 前后据此让路，
+    /// 否则 client 超时后的 stop 只能干等 start 跑完。
+    stop_requested: AtomicBool,
+    /// 串行化 `start`。处理器现在跑在并发队列上，两次 start 并发会各自
+    /// spawn 一个，后登记的覆盖前一个 child，留下没人管的 root 进程。
+    /// `stop` 不能抢这把锁——它必须能在 start 进行中插进来。
+    start_lock: Mutex<()>,
+    /// 每次 start 递增。老的 `stop_child` 等完子进程后只能清理它那一代的
+    /// config/pid，不能把新 start 刚写好的文件删掉。
+    generation: AtomicU64,
+    rules: Mutex<RulesState>,
 }
 
 impl Supervisor {
@@ -247,7 +378,121 @@ impl Supervisor {
             root,
             child: Mutex::new(None),
             running: Mutex::new(None),
+            stop_requested: AtomicBool::new(false),
+            start_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
+            rules: Mutex::new(RulesState::Pending),
         }
+    }
+
+    /// helper 的诊断输出。
+    ///
+    /// launchd 下 stderr 不保证进统一日志；同一份再落到 `tun/helper.log`，
+    /// 排查时 `sudo tail` 一定能看到。文件超过 1 MiB 直接重开。
+    fn note(&self, message: &str) {
+        eprintln!("veyl-helper: {message}");
+        let dir = self.root.join("tun");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("helper.log");
+        if std::fs::metadata(&path)
+            .map(|meta| meta.len() > HELPER_LOG_MAX_BYTES)
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        {
+            let _ = writeln!(file, "{message}");
+        }
+    }
+
+    /// 规则就绪前最多等 `timeout`；失败原因原样带出去。
+    ///
+    /// 循环里也看 `stop_requested`：客户端 30 秒超时后的 stop 不能被
+    /// 这次等待挡住——否则它继续握着 `start_lock`，用户重试只能排队再超时。
+    fn wait_for_rules(&self, timeout: Duration) -> Result<(), ProtocolError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.stop_requested.load(Ordering::SeqCst) {
+                return Err(ProtocolError::new(
+                    protocol::ERR_TUN_START_FAILED,
+                    "启动被停止请求取消",
+                ));
+            }
+            {
+                let state = self.rules.lock().unwrap();
+                match &*state {
+                    RulesState::Ready => return Ok(()),
+                    RulesState::Failed { code, message } => {
+                        return Err(ProtocolError::new(code, message.clone()))
+                    }
+                    RulesState::Pending => {}
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(ProtocolError::new(
+                    protocol::ERR_TUN_START_FAILED,
+                    "分流数据正在准备，请稍后重试",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn record_rules(&self, outcome: Result<(), ProtocolError>, elapsed: Duration) {
+        let state = match outcome {
+            Ok(()) => RulesState::Ready,
+            Err(error) => RulesState::Failed {
+                code: error.code,
+                message: error.message,
+            },
+        };
+        let ready = matches!(state, RulesState::Ready);
+        *self.rules.lock().unwrap() = state;
+        self.note(&format!(
+            "规则预置{} 耗时={}ms",
+            if ready { "完成" } else { "失败" },
+            elapsed.as_millis()
+        ));
+    }
+
+    /// 等完子进程后按代号清理文件：新一代 start 已经开始的话，文件归它。
+    fn cleanup_files(&self, generation: u64) {
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let _ = std::fs::remove_file(self.config_path());
+        let _ = std::fs::remove_file(self.pid_path());
+    }
+
+    /// spawn 之后的登记。与 `stop_child` 抢同一把 child 锁：
+    /// stop 先置标志再取锁，所以这里要么看见标志，要么 stop 随后一定能取到 child。
+    fn register_child(&self, child: Child, running: Running) -> Result<(), ProtocolError> {
+        let pid = running.pid;
+        let mut slot = self.child.lock().unwrap();
+        let mut running_slot = self.running.lock().unwrap();
+        if self.stop_requested.load(Ordering::SeqCst) {
+            drop(running_slot);
+            drop(slot);
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            let mut child = child;
+            let _ = child.wait();
+            let _ = std::fs::remove_file(self.config_path());
+            let _ = std::fs::remove_file(self.pid_path());
+            self.note(&format!("start 在 spawn 后被停止请求取消 pid={pid}"));
+            return Err(ProtocolError::new(
+                protocol::ERR_TUN_START_FAILED,
+                "启动被停止请求取消",
+            ));
+        }
+        *slot = Some(child);
+        *running_slot = Some(running);
+        Ok(())
     }
 
     fn tun_dir(&self) -> PathBuf {
@@ -385,6 +630,16 @@ impl Supervisor {
     }
 
     fn start(&self, config: &str) -> Result<Started, ProtocolError> {
+        // 先声明「这次 start 是新的」，再排队等锁：
+        // 反过来的话，等待期间到达的 stop 会被拿到锁之后的那次 store 抹掉。
+        self.stop_requested.store(false, Ordering::SeqCst);
+        // 两次 start 串行：并发 spawn 会留下一个没人持有的 child。
+        let _start_guard = self.start_lock.lock().unwrap();
+
+        // 代号：老的 stop_child 只能清理自己那一代的文件。
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let mut started_at = Instant::now();
+
         // 构建期没读到随包运行时（build.rs 把它留空）说明这份二进制不是按发布流程
         // 构出来的。放在启动路径而不是 `resolve_runtime`：测试环境没有那 173 MB
         // 运行时，放在下面会让 staging 的单测在干净 CI 上直接失败。
@@ -398,8 +653,19 @@ impl Supervisor {
         // 每次 start 都重验整条链，而不是只在 helper 启动时验一次。
         // 理由不是当下的风险，是这条链以后会被改：哪天给 tun/ 加了子目录、
         // 或者权限被别的代码动了，这里不改也不会漏。
+        let phase = Instant::now();
         self.verify_trust_chain()?;
+        self.note(&format!(
+            "start 阶段 trust_chain={}ms",
+            phase.elapsed().as_millis()
+        ));
+
+        let phase = Instant::now();
         let binary = self.resolve_runtime()?;
+        self.note(&format!(
+            "start 阶段 runtime={}ms",
+            phase.elapsed().as_millis()
+        ));
 
         // 规则不是每个配置都要；错在这里不应该挡住不带分流的配置。
         let has_rule_sets = serde_json::from_str::<serde_json::Value>(config)
@@ -411,10 +677,26 @@ impl Supervisor {
             })
             .unwrap_or(false);
         if has_rule_sets {
-            self.ensure_rules_staged()?;
+            let phase = Instant::now();
+            // 规则由启动时的后台线程解包，这里只等结果；等待不计入 25 秒准备上限。
+            self.wait_for_rules(RULES_WAIT_DEADLINE)?;
+            self.note(&format!(
+                "start 阶段 rules_wait={}ms",
+                phase.elapsed().as_millis()
+            ));
+            started_at = Instant::now();
         }
 
-        self.stop();
+        // 规则准备完就检查一次：客户端可能已经超时并撤了。
+        check_start_allowed(self.stop_requested.load(Ordering::SeqCst), started_at.elapsed())?;
+
+        let phase = Instant::now();
+        // 替换语义：先收旧进程，但不设置取消标志（那会把这次 start 自己取消掉）。
+        self.stop_child();
+        self.note(&format!(
+            "start 阶段 stop_old={}ms",
+            phase.elapsed().as_millis()
+        ));
 
         // 旧进程已经停了，这时才能删旧运行时目录：
         //   · 提前删（在 resolve_runtime 里）会让 `ensure_rules_staged()` 失败后仍活着的
@@ -430,6 +712,7 @@ impl Supervisor {
             prune_staged_runtimes(&self.root.join("runtime"), digest);
         }
 
+        let phase = Instant::now();
         let clash_port = pick_loopback_port()?;
         let clash_secret = random_secret();
         let rules = self.rule_index();
@@ -445,19 +728,14 @@ impl Supervisor {
                 format!("写入配置失败：{error}"),
             )
         })?;
+        self.note(&format!(
+            "start 阶段 prepare={}ms",
+            phase.elapsed().as_millis()
+        ));
 
-        // 先跑 check，不过就不启动。
-        let check = Command::new(&binary)
-            .arg("check")
-            .arg("-c")
-            .arg(self.config_path())
-            .output()
-            .map_err(|error| {
-                ProtocolError::new(
-                    protocol::ERR_RUNTIME_MISSING,
-                    format!("无法执行运行时：{error}"),
-                )
-            })?;
+        // 先跑 check，不过就不启动。挂住就 kill：它会一直占着 start_lock。
+        let phase = Instant::now();
+        let check = check_config(&binary, &self.config_path(), CHECK_TIMEOUT)?;
         if !check.status.success() {
             let _ = std::fs::remove_file(self.config_path());
             let detail = String::from_utf8_lossy(&check.stderr).trim().to_string();
@@ -466,8 +744,15 @@ impl Supervisor {
                 format!("配置校验没过：{detail}"),
             ));
         }
+        self.note(&format!(
+            "start 阶段 check={}ms",
+            phase.elapsed().as_millis()
+        ));
 
-        // 上次的 sing-box 已经停掉（见上面的 self.stop()），此刻没有写入者。
+        // spawn 前最后一次让路：客户端可能已经超时并发来 stop。
+        check_start_allowed(self.stop_requested.load(Ordering::SeqCst), started_at.elapsed())?;
+
+        // 上次的 sing-box 已经停掉（见上面的 stop_child），此刻没有写入者。
         rotate_log_if_oversized(&self.log_path(), TUN_LOG_MAX_BYTES, TUN_LOG_KEEP);
 
         let log = std::fs::OpenOptions::new()
@@ -486,6 +771,7 @@ impl Supervisor {
             ProtocolError::new(protocol::ERR_TUN_START_FAILED, format!("{error}"))
         })?;
 
+        let phase = Instant::now();
         let child = Command::new(&binary)
             .arg("run")
             .arg("-c")
@@ -501,6 +787,10 @@ impl Supervisor {
                     format!("启动运行时失败：{error}"),
                 )
             })?;
+        self.note(&format!(
+            "start 阶段 spawn={}ms",
+            phase.elapsed().as_millis()
+        ));
 
         let pid = child.id();
         // 启动时刻由特权侧生成（契约 §3.1），App 崩溃重启后 `status` 也报这个值。
@@ -513,18 +803,24 @@ impl Supervisor {
             binary.display()
         );
         if let Err(error) = write_private(&self.pid_path(), record.as_bytes()) {
-            eprintln!("veyl-helper: 写 pid 失败：{error}");
+            self.note(&format!("写 pid 失败：{error}"));
         }
 
         let clash_addr = format!("127.0.0.1:{clash_port}");
-        *self.running.lock().unwrap() = Some(Running {
-            pid,
-            clash_addr: clash_addr.clone(),
-            clash_secret: clash_secret.clone(),
-            since: since.clone(),
-        });
-        *self.child.lock().unwrap() = Some(child);
+        self.register_child(
+            child,
+            Running {
+                pid,
+                clash_addr: clash_addr.clone(),
+                clash_secret: clash_secret.clone(),
+                since: since.clone(),
+            },
+        )?;
 
+        self.note(&format!(
+            "start 完成 总耗时={}ms",
+            started_at.elapsed().as_millis()
+        ));
         Ok(Started {
             pid,
             clash_addr,
@@ -533,7 +829,20 @@ impl Supervisor {
         })
     }
 
+    /// 外部 stop：先置取消标志，再收子进程。
+    ///
+    /// 标志必须先置：`start` 在准备阶段和 spawn 前后各看一次，
+    /// 否则客户端超时后的 stop 只能等 start 自己跑完。
     fn stop(&self) {
+        self.stop_requested.store(true, Ordering::SeqCst);
+        self.stop_child();
+    }
+
+    /// 只收自己起的子进程，不动取消标志。`start` 的替换语义用它——
+    /// 走 `stop()` 会把这次 start 自己取消掉。
+    fn stop_child(&self) {
+        // 记下代号：等子进程最多 5 秒，这期间新一代 start 可能已经写好文件。
+        let generation = self.generation.load(Ordering::SeqCst);
         let child = self.child.lock().unwrap().take();
         // 与 child 同步清空：App 崩溃后接手不到一个已经停掉的连接。
         *self.running.lock().unwrap() = None;
@@ -554,8 +863,9 @@ impl Supervisor {
                 }
             }
         }
-        let _ = std::fs::remove_file(self.config_path());
-        let _ = std::fs::remove_file(self.pid_path());
+        // 代号没变才删：变了说明新 start 已经接管这些文件，
+        // 删掉会让 live root 进程失去孤儿回收线索。
+        self.cleanup_files(generation);
     }
 
     /// 收掉上次崩溃留下的 sing-box。
@@ -1738,5 +2048,202 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).unwrap(), b"small");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 客户端超时后发来的 stop 必须能让进行中的 start 让路。
+    #[test]
+    fn a_stop_request_cancels_a_pending_start() {
+        let root = temp("cancel");
+        let supervisor = Supervisor::new(root.clone());
+        assert!(!supervisor.stop_requested.load(Ordering::SeqCst));
+
+        supervisor.stop();
+        assert!(supervisor.stop_requested.load(Ordering::SeqCst));
+
+        let error = check_start_allowed(true, Duration::from_millis(1)).unwrap_err();
+        assert!(error.message.contains("取消"), "{}", error.message);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 准备阶段超过上限就不该再 spawn。
+    #[test]
+    fn a_start_that_takes_too_long_is_abandoned_before_spawn() {
+        assert!(check_start_allowed(false, Duration::from_secs(1)).is_ok());
+
+        let error =
+            check_start_allowed(false, START_PREPARE_DEADLINE + Duration::from_secs(1))
+                .unwrap_err();
+        assert!(error.message.contains("25 秒"), "{}", error.message);
+    }
+
+    /// spawn 之后才到达的 stop：登记前必须杀掉这个 child。
+    #[test]
+    fn a_child_spawned_after_a_stop_is_killed_on_registration() {
+        let root = temp("postspawn-cancel");
+        let supervisor = Supervisor::new(root.clone());
+        supervisor.stop_requested.store(true, Ordering::SeqCst);
+
+        let child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let error = supervisor
+            .register_child(
+                child,
+                Running {
+                    pid,
+                    clash_addr: "127.0.0.1:1".into(),
+                    clash_secret: "s".into(),
+                    since: "2026-01-01T00:00:00Z".into(),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.message.contains("取消"), "{}", error.message);
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        assert!(!alive, "取消后子进程必须已经退出");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// check 挂住必须在期限处被终止，否则会一直占着 start_lock。
+    #[test]
+    fn a_hung_check_is_killed_at_the_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp("check-timeout");
+        let script = dir.join("slow-check");
+        // 睡够久：期限一旦被放松，下面的 <1s 断言会立刻红。
+        std::fs::write(&script, "#!/bin/sh\nsleep 10\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = Instant::now();
+        let error = check_config(
+            &script,
+            &dir.join("config.json"),
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("超过"), "{}", error.message);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "应当在超时点就返回，实际 {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// start 只等规则结果，不再自己解包。
+    #[test]
+    fn a_start_waits_for_rules_and_reports_a_clear_timeout() {
+        let root = temp("rules-wait");
+        let supervisor = Supervisor::new(root.clone());
+
+        let error = supervisor
+            .wait_for_rules(Duration::from_millis(150))
+            .unwrap_err();
+        assert!(
+            error.message.contains("分流数据正在准备"),
+            "{}",
+            error.message
+        );
+        assert_eq!(error.code, protocol::ERR_TUN_START_FAILED);
+
+        supervisor.record_rules(Ok(()), Duration::from_millis(1));
+        assert!(supervisor
+            .wait_for_rules(Duration::from_millis(10))
+            .is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 等待规则时必须能被 stop 打断：否则它继续占着 start_lock，
+    /// 用户重试只能排在后面再超时一次。
+    #[test]
+    fn a_stop_during_the_rules_wait_aborts_before_spawn() {
+        let root = temp("rules-cancel");
+        let supervisor = Supervisor::new(root.clone());
+        supervisor.stop_requested.store(true, Ordering::SeqCst);
+
+        let started = Instant::now();
+        let error = supervisor
+            .wait_for_rules(Duration::from_secs(15))
+            .unwrap_err();
+        assert!(error.message.contains("取消"), "{}", error.message);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "被取消时不该等满整个期限"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_rules_failure_is_surfaced_to_the_next_start() {
+        let root = temp("rules-failed");
+        let supervisor = Supervisor::new(root.clone());
+        supervisor.record_rules(
+            Err(ProtocolError::new(
+                protocol::ERR_RULE_SET_MISSING,
+                "规则归档哈希不符",
+            )),
+            Duration::from_millis(1),
+        );
+
+        let error = supervisor
+            .wait_for_rules(Duration::from_millis(10))
+            .unwrap_err();
+        assert_eq!(error.code, protocol::ERR_RULE_SET_MISSING);
+        assert!(error.message.contains("哈希不符"), "{}", error.message);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 等完子进程的 stop 只能清理自己那一代：新 start 的文件不能被它删掉。
+    #[test]
+    fn a_stale_stop_cannot_delete_the_next_starts_files() {
+        let root = temp("generation");
+        let supervisor = Supervisor::new(root.clone());
+        std::fs::create_dir_all(supervisor.tun_dir()).unwrap();
+
+        let stale = supervisor.generation.load(Ordering::SeqCst);
+        std::fs::write(supervisor.config_path(), "{}").unwrap();
+        std::fs::write(supervisor.pid_path(), "1\n").unwrap();
+
+        // 新一次 start 已经把代号推进了。
+        supervisor.generation.fetch_add(1, Ordering::SeqCst);
+        supervisor.cleanup_files(stale);
+        assert!(
+            supervisor.config_path().exists(),
+            "新 start 的配置不能被删"
+        );
+        assert!(supervisor.pid_path().exists());
+
+        // 同一代才清理。
+        supervisor.cleanup_files(supervisor.generation.load(Ordering::SeqCst));
+        assert!(!supervisor.config_path().exists());
+        assert!(!supervisor.pid_path().exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// stop 不能等 start_lock：进行中的 start 可能还要几十秒。
+    #[test]
+    fn a_stop_does_not_wait_for_the_start_lock() {
+        let root = temp("concurrent");
+        let supervisor = Arc::new(Supervisor::new(root.clone()));
+        let guard = supervisor.start_lock.lock().unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let supervisor = Arc::clone(&supervisor);
+            std::thread::spawn(move || {
+                supervisor.stop();
+                let _ = tx.send(());
+            })
+        };
+
+        assert!(
+            rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "stop 被 start_lock 挡住了"
+        );
+        assert!(supervisor.stop_requested.load(Ordering::SeqCst));
+
+        worker.join().unwrap();
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

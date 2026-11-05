@@ -36,6 +36,14 @@ pub trait TunBackend: Send + Sync {
     /// 停 TUN。幂等：没在运行也返回成功。
     fn stop(&self) -> Result<(), TunError>;
 
+    /// 同 `stop`，但允许调用方指定更长的等待上限。
+    ///
+    /// 强制重置用：`start` 可能还在准备规则，`stop` 要排到它后面。
+    /// 默认实现忽略上限，由具体后端决定。
+    fn stop_with_deadline(&self, _deadline: Duration) -> Result<(), TunError> {
+        self.stop()
+    }
+
     /// 读快照。随时可调，不改变状态；必须便宜（一次 IPC，不读大文件、不 spawn）。
     fn status(&self) -> Result<TunSnapshot, TunError>;
 }
@@ -310,12 +318,11 @@ mod macos {
         }
 
         fn stop(&self) -> Result<(), TunError> {
-            match xpc::call_with_timeout(
-                MACH_SERVICE,
-                "stop",
-                None,
-                TUN_REPLY_DEADLINE_CONTROL,
-            ) {
+            self.stop_with_deadline(TUN_REPLY_DEADLINE_CONTROL)
+        }
+
+        fn stop_with_deadline(&self, deadline: Duration) -> Result<(), TunError> {
+            match xpc::call_with_timeout(MACH_SERVICE, "stop", None, deadline) {
                 Ok(_) => Ok(()),
                 Err(error) => Err(map_xpc_error(error)),
             }

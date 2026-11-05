@@ -1062,8 +1062,9 @@ impl WiredServices {
         let stop = if helper.is_ready()
             || matches!(helper, crate::tun::privilege::HelperStatus::Unsupported)
         {
+            // 强制重置的 stop 要能排到进行中的 start 后面：真机首跑准备规则约 30 秒。
             self.tun
-                .stop()
+                .stop_with_deadline(std::time::Duration::from_secs(60))
                 .map_err(|error| format!("停止 TUN 失败：{}", error.message))
         } else {
             // 问不到就别发请求：stop() 在这种状态下会假装成功。
@@ -4135,9 +4136,18 @@ impl WiredServices {
             TunStopOutcome::Unconfirmed(message) => reset_step(
                 "stop_tun",
                 false,
-                format!("{message}；重启 App 或按提示授权后重试"),
+                format!(
+                    "{message}；可尝试：sudo launchctl kickstart -k system/com.veyl.helper"
+                ),
             ),
-            TunStopOutcome::Failed(message) => reset_step("stop_tun", false, message),
+            TunStopOutcome::Failed(message) => reset_step(
+                "stop_tun",
+                false,
+                format!(
+                    "{message}；可尝试：sudo launchctl kickstart -k system/com.veyl.helper，\
+                     仍未停掉再执行 sudo pkill -f '/Library/Application Support/Veyl/runtime/.*/sing-box'"
+                ),
+            ),
         }
     }
 

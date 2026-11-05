@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::backend::{ClashApi, StartReply, TunBackend, TunError, TunSnapshot};
+use super::backend::{
+    ClashApi, StartReply, TunBackend, TunError, TunErrorCode, TunSnapshot, TUN_REPLY_DEADLINE_CONTROL,
+};
 use super::privilege::{HelperStatus, Registration};
 
 /// 缓存中的 pid 超过这个间隔就向后端复核一次：helper 崩溃或被停掉时，
@@ -65,6 +67,11 @@ pub struct TunSession {
     /// App 崩溃重启后 TUN 还活着，这时内存里没有 pid。
     /// 首次查状态时向后端问一次，之后不再重复。
     probed: AtomicBool,
+    /// 是否发起过 start。**只在 stop 成功后清除**。
+    ///
+    /// 与 pid 分开记：start 超时后本地没有 pid，但 helper 里可能已经有
+    /// root 进程。只看 pid 会把这种情况下的 `helper_missing` 当成「没东西可停」。
+    start_attempted: AtomicBool,
 }
 
 impl TunSession {
@@ -107,6 +114,7 @@ impl TunSession {
             clash: Mutex::new(None),
             last_check: Mutex::new(None),
             probed: AtomicBool::new(false),
+            start_attempted: AtomicBool::new(false),
         }
     }
 
@@ -126,6 +134,9 @@ impl TunSession {
     /// 否则连不上时用户只会看到一个无意义的超时。
     pub fn launch(&self, config: &str, meta: &TunLaunchMeta) -> Result<Started, TunError> {
         self.backend.ensure_available()?;
+        // 必须在调 start **之前**置位：start 失败或超时也意味着 helper
+        // 可能已经动手了。标志只有 stop 成功才清。
+        self.start_attempted.store(true, Ordering::SeqCst);
         let reply: StartReply = self.backend.start(config)?;
 
         *self.pid.lock().unwrap() = Some(reply.pid);
@@ -197,13 +208,37 @@ impl TunSession {
         *self.last_check.lock().unwrap() = Some(Instant::now());
     }
 
-    /// 幂等。本来就没起过时不发请求——否则每次断开代理连接都要等一次超时。
+    /// 幂等，且**永远发请求**。
+    ///
+    /// 不能因为本地缓存是 `Stopped` 就跳过：start 超时/失败时本地没记下 pid，
+    /// 但 helper 可能已经或即将把 sing-box 拉起来。真机上就是这样漏的——
+    /// 客户端超时后 session 是 Stopped，`backend.stop()` 一次都没发出去，
+    /// helper 里的 root 进程一直活着。后端的 stop 本身幂等，多一次 IPC
+    /// 比留一个 root 进程便宜得多。
     pub fn stop(&self) -> Result<(), TunError> {
-        if self.status() == TunState::Stopped {
-            return Ok(());
-        }
-        match self.backend.stop() {
+        self.stop_with_deadline(TUN_REPLY_DEADLINE_CONTROL)
+    }
+
+    /// 强制重置用：start 可能还在准备（真机首跑约 30 秒），stop 要能排到它后面。
+    pub fn stop_with_deadline(&self, deadline: Duration) -> Result<(), TunError> {
+        // 先取本地状态再解锁：后面要据此判断「报错能不能吞」。
+        let had_state = { self.pid.lock().unwrap().is_some() };
+        let attempted = self.start_attempted.load(Ordering::SeqCst);
+
+        match self.backend.stop_with_deadline(deadline) {
             Ok(()) => {
+                self.start_attempted.store(false, Ordering::SeqCst);
+                self.clear_state();
+                Ok(())
+            }
+            // 两个条件都要满足才能吞：没有发起过 start，本地也没有 pid。
+            // start 超时后 pid 是空的，但 helper 里可能有 root 进程——
+            // 只看 pid 会把这种 `helper_missing` 当成「没东西可停」。
+            Err(error)
+                if !attempted
+                    && !had_state
+                    && matches!(error.code, TunErrorCode::HelperMissing) =>
+            {
                 self.clear_state();
                 Ok(())
             }
@@ -362,6 +397,8 @@ mod tests {
         running: Mutex<Option<u32>>,
         clash: Mutex<Option<ClashApi>>,
         since: Mutex<Option<String>>,
+        start_error: Mutex<Option<TunErrorCode>>,
+        stop_error: Mutex<Option<TunErrorCode>>,
     }
 
     impl FakeBackend {
@@ -372,6 +409,8 @@ mod tests {
                 running: Mutex::new(None),
                 clash: Mutex::new(None),
                 since: Mutex::new(None),
+                start_error: Mutex::new(None),
+                stop_error: Mutex::new(None),
             }
         }
     }
@@ -384,6 +423,9 @@ mod tests {
             Ok(HelperStatus::Enabled)
         }
         fn start(&self, _config: &str) -> Result<StartReply, TunError> {
+            if let Some(code) = *self.start_error.lock().unwrap() {
+                return Err(TunError::new(code, "fake start error"));
+            }
             self.starts.fetch_add(1, Ordering::SeqCst);
             let pid = 4242;
             *self.running.lock().unwrap() = Some(pid);
@@ -402,6 +444,9 @@ mod tests {
         }
         fn stop(&self) -> Result<(), TunError> {
             self.stops.fetch_add(1, Ordering::SeqCst);
+            if let Some(code) = *self.stop_error.lock().unwrap() {
+                return Err(TunError::new(code, "fake stop error"));
+            }
             *self.running.lock().unwrap() = None;
             *self.clash.lock().unwrap() = None;
             *self.since.lock().unwrap() = None;
@@ -456,10 +501,56 @@ mod tests {
         assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
         assert_eq!(session.status(), TunState::Stopped);
 
-        // 幂等：第二次 stop 不再打后端。
+        // 仍然幂等（返回成功），但每次都会发请求：
+        // 本地缓存不能当作「不用停」的依据。
         session.stop().unwrap();
-        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 2);
         assert_eq!(backend.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// 真机洞：start 超时后本地没有 pid（status 是 Stopped），
+    /// 但 helper 可能已经把 sing-box 拉起来了——stop 必须照样发请求。
+    #[test]
+    fn a_stop_after_a_failed_start_still_reaches_the_backend() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        assert_eq!(session.status(), TunState::Stopped);
+
+        session.stop().unwrap();
+        assert_eq!(
+            backend.stops.load(Ordering::SeqCst),
+            1,
+            "缓存是 Stopped 也必须发 stop"
+        );
+    }
+
+    /// start 超时后 helper 仍可能把进程拉起来：此时 stop 拿到 `helper_missing`
+    /// 不能被当成成功吞掉（真机断网事故的正式修复）。
+    #[test]
+    fn a_helper_missing_after_a_start_attempt_is_not_swallowed() {
+        let backend = Arc::new(FakeBackend::new());
+        *backend.start_error.lock().unwrap() = Some(TunErrorCode::Timeout);
+        *backend.stop_error.lock().unwrap() = Some(TunErrorCode::HelperMissing);
+
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        assert!(session.launch("{}", &meta()).is_err());
+
+        let error = session.stop().unwrap_err();
+        assert_eq!(
+            error.code,
+            TunErrorCode::HelperMissing,
+            "发起过 start 就必须如实报出来"
+        );
+    }
+
+    /// 从未尝试过 start、本地也没有 pid：断开代理连接不该因为助手不在而失败。
+    #[test]
+    fn a_helper_missing_before_any_start_attempt_is_swallowed() {
+        let backend = Arc::new(FakeBackend::new());
+        *backend.stop_error.lock().unwrap() = Some(TunErrorCode::HelperMissing);
+
+        let session = TunSession::with_backend(backend, "fake");
+        assert!(session.stop().is_ok());
     }
 
     /// 后端报 running 时，首次 status 能接手（App 崩溃重启场景），
