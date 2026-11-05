@@ -83,6 +83,11 @@ impl TunBackend for WinPipeBackend {
             )
         })
     }
+
+    /// Windows 的 helper 由 SCM 拉起；本轮不提供自助换映像。
+    fn restart(&self) -> Result<(), TunError> {
+        Err(unsupported_platform_error())
+    }
 }
 
 /// 契约 §2.1 的 Windows 映射：`enabled` = 服务存在且正在运行；

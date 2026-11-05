@@ -19,6 +19,9 @@ import type {
   NodeProbeResult,
   NodeSwitchResult,
   RenamedSession,
+  TunHelperInfo,
+  TunHelperRestartResult,
+  TunHelperState,
   TunProbeData,
 } from "./bridge";
 import { isLocalEndpoint, maskKey } from "./bridge";
@@ -45,6 +48,14 @@ function mockFlag(key: string): string | null {
     return null;
   }
 }
+
+const HELPER_STATES: TunHelperState[] = [
+  "running",
+  "not_running",
+  "stale",
+  "start_failed",
+  "file_invalid",
+];
 
 /** mock 通道固定出口 IP，方便自动化断言。 */
 export const MOCK_EXIT_IP = "203.0.113.7";
@@ -115,6 +126,8 @@ export class MockAgentBridge implements AgentBridge {
   private coreActiveSource: "bundled" | "installed" = "bundled";
   private coreRestartRequired = false;
   private coreJob: { id: string; cancelled: boolean } | null = null;
+  /** 演示「检查并更新」成功后，后台组件回到 running。 */
+  private helperState: TunHelperState | null = null;
   private runtime: RuntimeSnapshot = {
     contract_version: CONTRACT_VERSION,
     state: "idle",
@@ -364,7 +377,7 @@ export class MockAgentBridge implements AgentBridge {
 
   async tunProbe(): Promise<TunProbeData> {
     if (this.runtime.state !== "running" && this.runtime.state !== "degraded") {
-      throw { code: "PRECONDITION_FAILED", message: "TUN 未连接，先连接后再执行诊断" };
+      throw { code: "PRECONDITION_FAILED", message: "还没有连接，先连接后再执行诊断" };
     }
     // 真实链路要跑路由表与几轮网络探测，留出可见的等待态。
     const mode = mockFlag("veyl.mock.tun.probe");
@@ -386,6 +399,44 @@ export class MockAgentBridge implements AgentBridge {
       dns: "www.apple.com → 203.0.113.10（18ms）",
       https: "HTTP 200（236ms）",
       process: `pid=${this.runtime.pid ?? 4812} 存活=true since=${this.runtime.connected_since ?? now()}`,
+    };
+  }
+
+  async tunHelperInfo(): Promise<TunHelperInfo> {
+    await sleep(220);
+    const mode = mockFlag("veyl.mock.helper");
+    if (mode === "missing") {
+      throw new Error("Command tun_helper_info not found");
+    }
+    const active = this.runtime.state === "running" || this.runtime.state === "degraded";
+    const forced = HELPER_STATES.find((item) => item === mode) ?? null;
+    const state: TunHelperState = this.helperState ?? forced ?? (active ? "running" : "not_running");
+    return {
+      runningBuild: state === "running" ? "2026.11.1" : state === "stale" ? "2026.10.2" : null,
+      expectedBuild: "2026.11.1",
+      stale: state === "stale",
+      state,
+      needsAdminRestart: mockFlag("veyl.mock.helper.admin") === "1",
+    };
+  }
+
+  async tunHelperRestart(): Promise<TunHelperRestartResult> {
+    await sleep(1200);
+    const mode = mockFlag("veyl.mock.helper");
+    if (mode === "missing") {
+      throw new Error("Command tun_helper_restart not found");
+    }
+    if (mode === "deny") {
+      throw { code: "AUTH_DENIED", message: "用户拒绝管理员授权" };
+    }
+    if (mode === "fail") {
+      throw { code: "HELPER_INSTALL_FAILED", message: "后台组件安装失败" };
+    }
+    this.helperState = "running";
+    return {
+      ok: true,
+      restarted: true,
+      needsAdminRestart: mockFlag("veyl.mock.helper.admin") === "1",
     };
   }
 

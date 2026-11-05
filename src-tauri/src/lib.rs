@@ -92,25 +92,31 @@ pub fn run() {
     // 从而撤掉第一实例的代理、杀掉它的 sing-box。它们统一放进 `.setup()`，见下方。
     let config_dir = data_dir.join("config");
 
+    let catalog = Arc::new(crate::catalog::CatalogClient::new(catalog_base_url(&store)));
+    let wired = Arc::new(WiredServices::new(
+        Arc::clone(&store),
+        Arc::clone(&manager),
+        Arc::clone(&proxy),
+        catalog,
+        &data_dir,
+    ));
+    // 后台检查 helper 是否还是包里的那份；不阻塞启动、不弹窗。
+    wired.spawn_helper_updater();
+
     // 退出与托盘共用的句柄。运行时、代理与配置目录都从这里取。
+    // TUN 的 sing-box 由 helper 持有，退出时必须单独停（见 lifecycle）。
     let lifecycle_parts = lifecycle::Parts {
-        proxy: Arc::clone(&proxy),
-        manager: Arc::clone(&manager),
+        proxy,
+        manager,
         config_dir: config_dir.clone(),
+        tun: wired.tun_session(),
     };
     let tray_parts = lifecycle_parts.clone();
     let exit_parts = lifecycle_parts.clone();
     let recovery_parts = lifecycle_parts.clone();
     let menu_parts = lifecycle_parts.clone();
 
-    let catalog = Arc::new(crate::catalog::CatalogClient::new(catalog_base_url(&store)));
-    let services: Arc<dyn VpnToolServices> = Arc::new(WiredServices::new(
-        Arc::clone(&store),
-        manager,
-        proxy,
-        catalog,
-        &data_dir,
-    ));
+    let services: Arc<dyn VpnToolServices> = wired;
     let state = Arc::new(agent::AppState::new(services));
     // 工具路径没有 AppState 句柄，热更新凭据靠这个弱引用。
     agent::install_app_state(&state);
@@ -306,6 +312,8 @@ pub fn run() {
                 agent::commands::core_upgrade,
                 agent::commands::core_cancel_upgrade,
                 agent::commands::core_rollback,
+                agent::commands::tun_helper_info,
+                agent::commands::tun_helper_restart,
                 agent::commands::config_list,
                 agent::commands::config_detail,
                 agent::commands::config_create,
@@ -357,6 +365,8 @@ pub fn run() {
                 agent::commands::core_upgrade,
                 agent::commands::core_cancel_upgrade,
                 agent::commands::core_rollback,
+                agent::commands::tun_helper_info,
+                agent::commands::tun_helper_restart,
                 agent::commands::config_list,
                 agent::commands::config_detail,
                 agent::commands::config_create,

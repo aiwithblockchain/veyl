@@ -683,19 +683,21 @@ check(
 
 // --- 9：AI 边界的硬约束 ---
 //
-// 运行时核心版本管理只属于 UI：模型既不能下载，也不能升级或回滚。下载并替换一个会以
-// 特权身份运行的二进制，必须由用户看见并显式点击。
+// 运行时核心版本管理与 TUN helper 重启只属于 UI：模型既不能下载/升级/回滚运行时，
+// 也不能重启特权组件。这两类操作都必须由用户看见并显式点击。
 //
 // 契约侧（tools.md / commands.md）是硬约束，违反即失败；实现侧滞后时只报 advisory，
 // 等实现会话删掉 CoreInstallTool 后自动转绿。不要为了让检查变绿而回退契约。
 
 const REMOVED_AI_TOOLS = ["CoreInstall"];
-const UI_ONLY_CORE_COMMANDS = [
+const UI_ONLY_COMMANDS = [
   "core_info",
   "core_check_updates",
   "core_upgrade",
   "core_cancel_upgrade",
   "core_rollback",
+  "tun_helper_info",
+  "tun_helper_restart",
 ];
 
 const pascalCase = (s) => s.replace(/(^|_)([a-z0-9])/g, (_, __, c) => c.toUpperCase());
@@ -748,13 +750,13 @@ check("AI 工具集不再包含已移除的工具（契约）", () => {
   return problems;
 });
 
-check("运行时核心版本管理命令没有 AI 工具（契约）", () => {
+check("UI 专用命令没有 AI 工具（契约）", () => {
   const tools = contractTools();
   const problems = [];
-  for (const cmd of UI_ONLY_CORE_COMMANDS) {
+  for (const cmd of UI_ONLY_COMMANDS) {
     const name = pascalCase(cmd);
     if (tools.has(name)) {
-      problems.push(`tools.md §3 列出了 ${name}，但 ${cmd} 是 UI 专用命令（模型不得触发下载/升级/回滚）`);
+      problems.push(`tools.md §3 列出了 ${name}，但 ${cmd} 是 UI 专用命令（模型不得触发）`);
     }
   }
   return problems;
@@ -770,9 +772,9 @@ check("CoreListVersions 仍是只读 AI 工具", () => {
   return [];
 });
 
-check("commands.md 记录了五条 UI 专用 core_* 命令", () => {
+check("commands.md 记录了全部 UI 专用命令", () => {
   const doc = contractCommands();
-  return UI_ONLY_CORE_COMMANDS.filter((n) => !doc.has(n)).map((n) => `commands.md §2 缺少 ${n}`);
+  return UI_ONLY_COMMANDS.filter((n) => !doc.has(n)).map((n) => `commands.md §2 缺少 ${n}`);
 });
 
 check(
@@ -785,11 +787,90 @@ check(
         problems.push(`src-tauri/src/tools/mod.rs 仍注册 ${n}Tool（契约已移除；删掉后本项转绿）`);
       }
     }
-    for (const cmd of UI_ONLY_CORE_COMMANDS) {
+    for (const cmd of UI_ONLY_COMMANDS) {
       const n = pascalCase(cmd);
       if (registered.has(n)) {
         problems.push(`src-tauri/src/tools/mod.rs 注册了 ${n}Tool，但 ${cmd} 是 UI 专用命令`);
       }
+    }
+    return problems;
+  },
+  { advisory: true }
+);
+
+// --- 10：TUN helper 的状态枚举与 restart 协商 ---
+//
+// `tun_helper_info.state` 是 UI 分支的唯一依据，少一个值就会有状态掉进 default。
+// `restart` 是版本协商的探针：旧 helper 只会返回 bad_request。契约先锁文档，实现未
+// 跟上时只报 advisory（PM 允许先不实现）。
+
+const TUN_HELPER_STATES = ["running", "not_running", "stale", "start_failed", "file_invalid"];
+
+function tunHelperInfoStateUnion() {
+  const md = read("docs/contracts/commands.md");
+  const typeBlock = md.match(/type TunHelperInfoData = \{([\s\S]*?)\n\};/);
+  if (!typeBlock) throw new Error("未在 commands.md 找到 TunHelperInfoData 定义");
+  const stateLine = typeBlock[1].match(/^\s*state\s*:\s*([^;]+);/m);
+  if (!stateLine) throw new Error("TunHelperInfoData 缺少 state 字段");
+  return [...stateLine[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+}
+
+check("tun_helper_info.state 枚举完备（契约）", () => {
+  const actual = tunHelperInfoStateUnion();
+  const md = read("docs/contracts/commands.md");
+  const problems = [];
+
+  for (const s of TUN_HELPER_STATES) {
+    if (!actual.includes(s)) problems.push(`缺失 state 取值：${s}`);
+  }
+  for (const s of actual) {
+    if (!TUN_HELPER_STATES.includes(s)) problems.push(`多出未约定的 state 取值：${s}`);
+  }
+
+  // 每个取值都必须在 §7.8.1 的语义表里占一行，不能只写在类型里。
+  const start = md.indexOf("### 7.8.1");
+  const end = md.indexOf("### 7.8.2", start);
+  const body = md.slice(start, end < 0 ? undefined : end);
+  for (const s of TUN_HELPER_STATES) {
+    if (!body.includes("| `" + s + "` |")) problems.push(`§7.8.1 的语义表没有解释 state = ${s}`);
+  }
+  return problems;
+});
+
+check("tun-backend.md 声明了 restart 与 helper 构建字段（契约）", () => {
+  const md = read("docs/contracts/tun-backend.md");
+  const problems = [];
+
+  if (!/method:\s*"start"\s*\|\s*"stop"\s*\|\s*"status"\s*\|\s*"restart"/.test(md)) {
+    problems.push("TunRequest.method 没有 restart");
+  }
+  if (!/fn\s+restart\s*\(&self\)\s*->\s*Result<\s*\(\s*\)\s*,\s*TunError\s*>/.test(md)) {
+    problems.push("TunBackend trait 没有 fn restart(&self) -> Result<(), TunError>");
+  }
+
+  const snap = md.match(/type TunSnapshot = \{([\s\S]*?)\n\};/);
+  if (!snap) {
+    problems.push("找不到 TunSnapshot 定义");
+  } else {
+    for (const f of ["helper_build", "helper_version"]) {
+      if (!new RegExp(`\\b${f}\\b`).test(snap[1])) problems.push(`TunSnapshot 缺少 ${f}`);
+    }
+  }
+  return problems;
+});
+
+check(
+  "tun-backend 的 restart 实现状态（advisory）",
+  () => {
+    const problems = [];
+    if (!/"restart"\s*=>/.test(read("src-tauri/src/bin/veyl-helper/macos.rs"))) {
+      problems.push("veyl-helper/macos.rs 还没有处理 restart");
+    }
+    if (!/"restart"\s*=>/.test(read("src-tauri/src/tun/windows/ipc.rs"))) {
+      problems.push("tun/windows/ipc.rs 还没有解析 restart");
+    }
+    if (!/fn\s+restart\s*\(&self\)/.test(read("src-tauri/src/tun/backend.rs"))) {
+      problems.push("tun/backend.rs 的 TunBackend 还没有 restart 方法");
     }
     return problems;
   },

@@ -90,6 +90,11 @@ pub trait VpnToolServices: Send + Sync {
     async fn core_cancel_upgrade(&self, job_id: &str) -> anyhow::Result<Value>;
     async fn core_rollback(&self) -> anyhow::Result<Value>;
 
+    /// 仅 UI：后台组件（TUN helper）的构建与运行状态。只读。
+    async fn tun_helper_info(&self) -> anyhow::Result<Value>;
+    /// 仅 UI：换新 helper 映像。TUN 在跑时必须先拒绝。
+    async fn tun_helper_restart(&self) -> anyhow::Result<Value>;
+
     /// 仅 debug 构建：TUN 已连接时采集一次诊断报告。release 里这个方法不存在。
     #[cfg(debug_assertions)]
     async fn tun_probe(&self) -> anyhow::Result<Value>;
@@ -255,6 +260,20 @@ impl VpnToolServices for NotWiredServices {
 
     async fn core_rollback(&self) -> anyhow::Result<Value> {
         not_wired("回滚运行库")
+    }
+
+    async fn tun_helper_info(&self) -> anyhow::Result<Value> {
+        Ok(json!({
+            "running_build": null,
+            "expected_build": "",
+            "stale": false,
+            "state": "not_running",
+            "needs_admin_restart": false,
+        }))
+    }
+
+    async fn tun_helper_restart(&self) -> anyhow::Result<Value> {
+        not_wired("重启后台组件")
     }
 
     #[cfg(debug_assertions)]
@@ -1621,6 +1640,7 @@ pub struct WiredServices {
     data_dir: PathBuf,
     device_gate: RegistrationGate,
     tun: Arc<crate::tun::session::TunSession>,
+    helper: Arc<crate::tun::helper_update::HelperUpdater>,
 }
 
 impl WiredServices {
@@ -1635,6 +1655,7 @@ impl WiredServices {
         let tun = Arc::new(crate::tun::session::TunSession::new(
             crate::tun::privilege::select(),
         ));
+        let helper = Arc::new(crate::tun::helper_update::HelperUpdater::new(tun.backend()));
         Self {
             installer: Installer::new(&data_dir),
             updates: crate::runtime::updates::UpdateManager::new(&data_dir),
@@ -1645,7 +1666,18 @@ impl WiredServices {
             data_dir,
             device_gate: RegistrationGate::new(),
             tun,
+            helper,
         }
+    }
+
+    /// 启动后台的 helper 构建检查（不阻塞 UI、不弹窗）。
+    pub fn spawn_helper_updater(self: &Arc<Self>) {
+        self.helper.spawn_background();
+    }
+
+    /// 退出流程需要直接停 TUN；生命周期层不依赖工具层。
+    pub fn tun_session(&self) -> Arc<crate::tun::session::TunSession> {
+        Arc::clone(&self.tun)
     }
 
     fn config_dir(&self) -> PathBuf {
@@ -2869,6 +2901,46 @@ impl VpnToolServices for WiredServices {
                 Ok(json!({ "ok": true }))
             }
         }
+    }
+
+    async fn tun_helper_info(&self) -> anyhow::Result<Value> {
+        let helper = Arc::clone(&self.helper);
+        let info = tokio::task::spawn_blocking(move || helper.info())
+            .await
+            .map_err(|error| svc_error("INTERNAL", format!("读取后台组件状态失败：{error}")))?;
+        serde_json::to_value(info).map_err(|error| svc_error("INTERNAL", error))
+    }
+
+    async fn tun_helper_restart(&self) -> anyhow::Result<Value> {
+        // 契约 §7.8.2：重启会中断当前 TUN，调用方必须先断开。
+        if matches!(
+            self.tun.status(),
+            crate::tun::session::TunState::Running { .. }
+        ) {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "TUN 正在连接，先断开再重启后台组件",
+                json!({ "reason": "tun_running" }),
+            ));
+        }
+        let helper = Arc::clone(&self.helper);
+        let report = tokio::task::spawn_blocking(move || helper.restart_from_user())
+            .await
+            .map_err(|error| svc_error("INTERNAL", format!("重启后台组件失败：{error}")))?;
+        if report.busy {
+            // 正在执行 start：可重试，不是故障，也不能说成「需要管理员授权」。
+            return Err(anyhow::Error::new(ServiceError {
+                code: "PRECONDITION_FAILED".into(),
+                message: "后台组件正在准备，请稍后再试".into(),
+                retryable: true,
+                details: Some(json!({ "reason": "helper_busy" })),
+            }));
+        }
+        Ok(json!({
+            "ok": report.ok,
+            "restarted": report.restarted,
+            "needs_admin_restart": report.needs_admin_restart,
+        }))
     }
 
     async fn catalog_search(&self, query: CatalogQuery) -> anyhow::Result<Value> {
@@ -4934,6 +5006,20 @@ impl WiredServices {
         // 不再由我们在用户目录里写配置：helper 收内容、自己落盘、自己跑 check。
         let config_json = serde_json::to_string(&value)
             .map_err(|e| svc_error("INTERNAL", format!("序列化配置失败：{e}")))?;
+
+        // 每次 TUN 连接前再比对一次 helper 构建：App 已升级但后台还是旧映像时，
+        // 先换新再连；换不了就让本次连接失败，避免用旧 helper 接管流量。
+        let helper = Arc::clone(&self.helper);
+        tokio::task::spawn_blocking(move || helper.ensure_current_for_connect())
+            .await
+            .map_err(|error| svc_error("INTERNAL", format!("检查后台组件失败：{error}")))?
+            .map_err(|(message, reason)| {
+                svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    message,
+                    json!({ "reason": reason }),
+                )
+            })?;
 
         // TUN 不设系统代理：接管靠路由表（`docs/config-execution.md` §2 第 4 步）。
         // 之前若在 proxy 模式，这里要把残留的系统代理撤掉，否则两层同时生效。

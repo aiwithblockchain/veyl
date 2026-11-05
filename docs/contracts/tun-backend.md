@@ -1,6 +1,6 @@
 # 契约：TUN 特权后端
 
-> 契约版本：`1.0.6`
+> 契约版本：`1.0.7`
 > 状态：**已定稿，待实现**（2026-11-05）
 > 定位：`TunBackend` 抽象、请求/回复信封、错误码、快照形状、四条不变式。**只定契约，不含实现。**
 > 上游：[`../tun-privilege-implementation-plan.md`](../tun-privilege-implementation-plan.md)（双平台计划）、[`../tun-privilege.md`](../tun-privilege.md)（macOS 信任模型）、[`../windows-tun.md`](../windows-tun.md)（Windows 设计）、[`../tun-mode.md`](../tun-mode.md)（连接语义与失败处理）
@@ -31,7 +31,7 @@
 
 ```ts
 type TunRequest = {
-  method: "start" | "stop" | "status";
+  method: "start" | "stop" | "status" | "restart";
   config: string | null;   // UTF-8 的 sing-box 配置文本；仅 method = "start" 时非 null
 };
 ```
@@ -41,7 +41,7 @@ type TunRequest = {
 ```ts
 type TunReply =
   | { ok: true;  result: StartReply }        // start 成功
-  | { ok: true;  result: null }              // stop 成功
+  | { ok: true;  result: null }              // stop / restart 成功
   | { ok: true;  result: TunSnapshot }       // status 成功
   | { ok: false; code: TunErrorCode; message: string; detail?: unknown };
 ```
@@ -53,13 +53,27 @@ type TunReply =
 - `config` 里**不得出现路径**。字段名以 `_path` / `_file` 结尾、或包含 `certificate` 的，一律 `config_forbidden`（§5.1 不变式 1）。
 - `message` 是**给用户看的中文**，不含路径、不含凭据、不含内部错误栈。
 
+#### 1.1.1 版本协商：`restart` 就是探针
+
+`restart` 无参数（`config` 必须为 `null`）。helper 先回 `{ ok: true, result: null }`，再以退出码 **75**（`EX_TEMPFAIL`）退出；launchd 按 `KeepAlive` 拉起磁盘上的新映像。用 75 而不是 0：0 是正常退出，launchd 不会重启。
+
+**判断 helper 新旧只看它认不认识 `restart`，不比较版本号：**
+
+| helper 行为 | 含义 |
+|---|---|
+| `restart` 返回 `{ ok: true }` | 新版，且已触发换映像 |
+| `restart` 返回 `bad_request`（未知方法） | **旧 helper**。调用方不重试、不崩溃，转入 `needs_admin_restart` 路径 |
+| `restart` 超时（10 s） | 视同旧 helper / 卡死，走同一路径并记日志 |
+
+`helper_build` / `helper_version` 只用于诊断展示，**不得**拿来做版本判断——否则就有了两套协商依据，旧 helper 恰恰不会返回这两个字段。
+
 ### 1.2 承载绑定
 
 | | macOS | Windows |
 |---|---|---|
 | 承载 | XPC Mach service `com.veyl.helper` | 命名管道 `\\.\pipe\veyl-helper` |
 | 请求编码 | XPC dictionary：`method`（string）、`config`（data，UTF-8 字节） | 长度前缀帧（u32 小端，不含自身 4 字节）+ 与 §1.1 同构的 JSON 对象 |
-| 回复编码 | XPC dictionary：`ok`（bool）、`code` / `message`（string）、`result` 展开为 `pid` / `clash_addr` / `clash_secret` / `since` / `running` / `last_error` | 长度前缀帧 + 与 macOS **同名同值**的 JSON 对象 |
+| 回复编码 | XPC dictionary：`ok`（bool）、`code` / `message`（string）、`result` 展开为 `pid` / `clash_addr` / `clash_secret` / `since` / `running` / `last_error` / `helper_build` / `helper_version` | 长度前缀帧 + 与 macOS **同名同值**的 JSON 对象 |
 | 服务端验客户端 | 连接建立时由 libxpc 完成：`xpc_connection_set_peer_code_signing_requirement`（anchor + bundle id + Team ID） | 连接后、首次 `ReadFile` 之前：`GetNamedPipeClientProcessId` → 持有进程句柄 → `WinVerifyTrust` 校验发布者与证书指纹（**路径只写日志，不参与判定**） |
 | 客户端验服务端 | 由 launchd 的 Mach 服务命名空间保证：未注册进程无法在系统命名空间占用该名字，连上的必是已注册 helper（可选 `SecCodeCheckValidity` 作纵深防御） | **连接后、发送任何字节之前**：`OpenSCManager` / `OpenService` → `QueryServiceStatusEx` 取 `dwProcessId` → 与 `GetNamedPipeServerProcessId` 比对；服务未运行或 PID 不一致 → 关闭，**不发送配置** |
 | 管道/连接属性 | `MACH_SERVICE` 名字由 App 与 helper 各自常量引用 | `FILE_FLAG_FIRST_PIPE_INSTANCE` + 严格 ACL + `PIPE_REJECT_REMOTE_CLIENTS` |
@@ -74,7 +88,7 @@ type TunReply =
 |---|---|---|---|
 | `TUN_CONNECT_TIMEOUT` | 5 s | 客户端等连接建立 | 关闭，报本地错误 `timeout` |
 | `TUN_FIRST_FRAME_TIMEOUT` | 5 s | **服务端**等首帧 | `DisconnectNamedPipe`，不读后续字节，不产生任何进程或写盘 |
-| `TUN_REPLY_DEADLINE_CONTROL` | 10 s | **客户端**等 `status` / `stop` 的完整回复 | 关闭，报本地错误 `timeout` |
+| `TUN_REPLY_DEADLINE_CONTROL` | 10 s | **客户端**等 `status` / `stop` / `restart` 的完整回复 | 关闭，报本地错误 `timeout` |
 | `TUN_REPLY_DEADLINE_START` | 30 s | **客户端**等 `start` 的完整回复 | 关闭，报本地错误 `timeout` |
 
 `start` 单独给 30 s，不是保守：Windows 首次 `start` 要把 `sing-box.exe`（约 78 MB）与 `wintun.dll` 复制到服务目录，在慢盘、Defender 实时扫描、企业终端的加密盘上都会显著变慢。10 s 在这些环境里会稳定误判为超时，而误判的代价是一次失败的连接加一次无意义的回滚。
@@ -107,6 +121,10 @@ pub trait TunBackend: Send + Sync {
 
     /// 读快照。随时可调，不改变状态。
     fn status(&self) -> Result<TunSnapshot, TunError>;
+
+    /// 让特权组件换新映像：helper 回 ok 后以 exit(75) 退出，由 launchd 拉起。
+    /// 旧 helper 不认识这个方法，返回 `bad_request` —— 这就是版本协商（§1.1.1）。
+    fn restart(&self) -> Result<(), TunError>;
 }
 ```
 
@@ -119,6 +137,7 @@ pub trait TunBackend: Send + Sync {
 | `start` | 先校验对端与配置（§5），再停旧实例、起新实例，**spawn 成功即返回**——不代表隧道已就绪（就绪由调用方探测出口 IP / 默认路由判定）。绝不因「已在运行」失败。 |
 | `stop` | 现有实例存在则终止并等其退出；不存在也返回 `Ok`。不返回 `not_running`。 |
 | `status` | 不依赖调用方缓存。App 崩溃重启后第一次 `status` 必须能拿回 `pid` 与 `clash_api`（§3.2）。 |
+| `restart` | 无参。回 `{ ok: true }` 后 helper 自行 `exit(75)`，launchd 拉起新映像。**旧 helper 返回 `bad_request`**，调用方据此判定版本并转 `needs_admin_restart`，不重试、不比较版本号。重启会中断当前 TUN——调用前必须先 `stop`。 |
 
 ### 2.1 给将来接入留的口子（I2）
 
@@ -169,10 +188,14 @@ type TunSnapshot = {
   clash_api: { addr: string; secret: string } | null;  // running = false 时为 null
   since: string | null;            // running = false 时为 null
   last_error: { code: TunErrorCode; message: string; at: string } | null;
+  helper_build: string | null;     // 特权组件构建标识，诊断用
+  helper_version: string | null;   // 特权组件版本，诊断用
 };
 ```
 
 - **字段恒存在**，无值写 `null`，**不得省略键**——省略键会让 TS 消费方拿到 `undefined`，绕过类型检查静默失败（与 `runtime.md` §2.5 同一条规则）。
+- `helper_build` / `helper_version` 由特权侧从自身编译期常量写入。**旧 helper 不会返回这两个键**，客户端按 `null` 解析，不得因此报错。
+- 两者**只用于诊断展示**：版本协商以 `restart` 是否返回 `bad_request` 为准（§1.1.1），不要用这两个字段做新旧判断。
 - `last_error` 只在「最近一次 start 失败且此后没有成功 start」时非 null；成功 start 后清空。
 - `status` 在未运行时**不是错误**：返回 `running: false` 与 `pid: null`。
 - App 崩溃重启后，`status` 必须仍能返回 `pid` 与 `clash_api`——这是 TUN 的流量/延迟采样与「删配置守卫」的前提（`review-checklist` GAP-03 的根因之一）。
@@ -219,6 +242,8 @@ type TunError = {
 
 - `start` 是**替换语义**：helper 在 spawn 前会先停旧实例（`veyl-helper/macos.rs:364`）。返回 `already_running` 会让「换配置/换节点后重连」变成一次失败。
 - `stop` 是**幂等**的（`veyl-helper/macos.rs:455-473`：取不到 child 就什么都不做）。返回 `not_running` 只会让调用方多写一个无意义的分支。
+
+> **`restart` 在旧 helper 上返回 `bad_request` 不是故障。** 那是版本协商的正常结果（§1.1.1）：调用方把它翻译成「需要管理员重启」，而不是 `INTERNAL`。新增 `restart` 不新增 wire 错误码。
 
 ### 4.3 UI 理由（界面进程翻译后）
 
@@ -352,6 +377,8 @@ allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端�
 | 10 | 服务未运行时，同用户进程先占住 `\\.\pipe\veyl-helper`：App 连接后必须判 `peer_unverified` 并关闭，**该进程收不到任何配置字节**，也拿不到连接成功的回复 |
 | 11 | 客户端等回复超时 → 断开并报 `timeout`：`status` / `stop` 按 10 s、`start` 按 30 s 各测一次；服务端等首帧超时 → 断开，不产生进程、不写盘（§1.3） |
 | 12 | 服务端 `start` 在 `TUN_REPLY_DEADLINE_START`（30 s）内写不完回复时，已 spawn 的 sing-box 被停掉，无孤儿进程（§1.3） |
+| 13 | `restart`：收到 `{ ok: true }` 后 helper 进程以**退出码 75** 退出，launchd 拉起新映像；再次 `status` 的 `helper_build` 与重启前不同 |
+| 14 | 旧 helper 收到 `restart` 返回 `bad_request`；调用方不重试、不崩溃，UI 显示「需要管理员重启」；`status` 的 `helper_build` / `helper_version` 缺失时按 `null` 解析，不报错（§1.1.1、§3.2） |
 
 第 10–12 条与 §1.3 的四个超时常量是**最终值（2026-11-05 定稿）**，实现按此验收；核对时以这两处为准，不要按其他文档里的旧数值。
 
@@ -370,6 +397,17 @@ allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端�
 macOS 侧没有 R1 / R2：XPC 的对端校验由 libxpc 基于连接上的审计令牌完成，不读路径、不依赖磁盘状态；签名有效性由系统在加载时判定。这也是 §6 第 3 项「机制不同」的实际含义——Windows 自己实现的那一侧，把 macOS 由系统兜住的保证接管过来，也就接管了它的边界。
 
 ## 10. 变更记录
+
+### 1.0.7（2026-11-05，helper 自更新与版本探针）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `1.0.7` | 元数据 | 后台组件需要可自助换新映像 |
+| 2 | `TunSnapshot` 新增 `helper_build` / `helper_version`（`string \| null`），仅供诊断；旧 helper 不返回时按 `null` 解析 | 字段扩展 | 排障时需要知道线上跑的是哪个构建 |
+| 3 | 新增方法 `restart`（无参）：回 `{ ok: true }` 后 helper `exit(75)`，由 launchd 拉起新映像 | 新增方法 | 产品负责人 2026-11-05 |
+| 4 | 版本协商定为「认不认识 `restart`」：旧 helper 返回 `bad_request` 即旧版，**不增加版本号比较** | 语义 | 避免两套协商依据 |
+| 5 | `TUN_REPLY_DEADLINE_CONTROL` 覆盖 `restart`（10 s）；错误码表注明旧 helper 的 `bad_request` 不是故障 | 补充 | 同上 |
+| 6 | §8 新增验收 13 / 14（退出码 75、旧 helper 路径） | 验收 | 同上 |
 
 ### 1.0.6（2026-11-05，本地码补第四项）
 

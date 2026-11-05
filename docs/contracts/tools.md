@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.4.0`
+> 契约版本：`3.4.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.4.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.4.1`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.4.0";
+  contract_version: "3.4.1";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -273,6 +273,8 @@ type CallSource = "ui" | "agent";
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
 **破坏性工具（destructive）**：`ConfigDelete`、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。**均无确认点**，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0 从工具集移除，见 §4.7。
+
+**UI 专用命令不注册工具**：`core_info` / `core_check_updates` / `core_upgrade` / `core_cancel_upgrade` / `core_rollback`（`commands.md` §7.10）与 `tun_helper_info` / `tun_helper_restart`（§7.8.1–§7.8.2）。模型既不能替换运行时，也不能重启特权组件——这两类操作都要求用户看见并显式点击。
 
 ### 3.1 注册清单（照抄）
 
@@ -773,7 +775,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.4.0";
+  contract_version: "3.4.1";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -936,7 +938,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.4.0";
+  contract_version: "3.4.1";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -1763,6 +1765,14 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 ---
 
 ## 8. 变更记录
+
+### 3.4.1（2026-11-05，UI 专用命令说明）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.4.1` | 元数据 | 文档补充 |
+| 2 | §3 明确 `core_*` 五条与 `tun_helper_info` / `tun_helper_restart` 为 UI 专用命令，不注册 AI 工具 | 说明 | 产品负责人 2026-11-05：替换运行时、重启特权组件都不能交给模型 |
+| 3 | 工具集本身不变，仍是 43 个 | 确认 | 同上 |
 
 ### 3.4.0（2026-11-05，移除 `CoreInstall`）
 

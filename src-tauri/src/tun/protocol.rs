@@ -26,6 +26,8 @@ pub const ERR_RULE_SET_MISSING: &str = "rule_set_missing";
 pub const ERR_RUNTIME_MISSING: &str = "runtime_missing";
 pub const ERR_INTERNAL: &str = "internal";
 pub const ERR_TUN_START_FAILED: &str = "tun_start_failed";
+/// `restart` 在 start 进行中会被拒绝；调用方稍后重试。
+pub const ERR_PRECONDITION_FAILED: &str = "precondition_failed";
 
 /// 从 `tauri.conf.json` 编译进来的 bundle identifier（见 `build.rs`）。
 /// 不要在别处再写一遍字面量——写错一次就是所有 XPC 连接被拒。

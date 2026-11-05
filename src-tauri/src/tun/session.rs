@@ -119,6 +119,11 @@ impl TunSession {
         }
     }
 
+    /// 底层通道。helper 构建检查与升级需要它，但状态仍由本会话统一持有。
+    pub fn backend(&self) -> Arc<dyn TunBackend> {
+        Arc::clone(&self.backend)
+    }
+
     pub fn launcher_kind(&self) -> &'static str {
         self.kind
     }
@@ -471,11 +476,18 @@ mod tests {
                 clash_api: self.clash.lock().unwrap().clone(),
                 since: self.since.lock().unwrap().clone(),
                 last_error: None,
+                helper_build: None,
+                helper_version: None,
+                helper_pid: None,
             })
         }
 
         fn flush_dns(&self) -> Result<(), TunError> {
             self.flushes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn restart(&self) -> Result<(), TunError> {
             Ok(())
         }
     }

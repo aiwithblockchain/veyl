@@ -29,6 +29,8 @@ pub struct Parts {
     pub proxy: Arc<ProxyController>,
     pub manager: Arc<RuntimeManager>,
     pub config_dir: PathBuf,
+    /// TUN 的 sing-box 是特权助手的子进程，`manager.stop()` 碰不到它。
+    pub tun: Arc<crate::tun::session::TunSession>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,7 +225,7 @@ fn ask_exit<R: Runtime>(
     let mut builder = app
         .dialog()
         .message(
-            "退出 Veyl 会断开当前连接并恢复网络。\n想让连接保持，请选择「后台运行」。",
+            "想让连接保持，请选择「后台运行」；App 会留在后台，后台组件继续工作。\n选择「退出」会先断开连接并恢复网络，后台组件随后自动退出。",
         )
         .title("退出 Veyl")
         .kind(MessageDialogKind::Warning)
@@ -341,6 +343,18 @@ fn perform_shutdown(
     parts: &Parts,
     applied: &mut Option<crate::proxy::ProxyEndpoint>,
 ) -> Result<(), String> {
+    // 先停 TUN：它的 sing-box 由 helper 持有，退出后 App 的租约也会断，
+    // 但等 5 秒兜底太慢，用户点「退出」就应当立刻断开。
+    // 失败只记日志、继续退出——契约 §7.8.3 不允许清理失败卡住退出。
+    if let Err(error) = parts
+        .tun
+        .stop_with_deadline(std::time::Duration::from_secs(10))
+    {
+        log::warn!("退出时停止 TUN 失败（继续退出）：{}", error.message);
+    } else {
+        log::info!("TUN 已停止");
+    }
+
     if applied.is_none() {
         *applied = parts
             .proxy
@@ -380,6 +394,12 @@ fn perform_shutdown(
 
 /// 强制退出：跳过代理校验，但仍尽力停运行时、清明文配置。
 fn force_cleanup(parts: &Parts) {
+    if let Err(error) = parts
+        .tun
+        .stop_with_deadline(std::time::Duration::from_secs(10))
+    {
+        log::warn!("强制退出时停止 TUN 失败：{}", error.message);
+    }
     if let Err(error) = parts.proxy.disable() {
         log::warn!("强制退出时撤销系统代理失败：{error}");
     }

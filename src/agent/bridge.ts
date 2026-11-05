@@ -205,6 +205,30 @@ export interface TunProbeData {
   process: string;
 }
 
+/** 后台组件（接管全部流量）的当前状态。 */
+export type TunHelperState =
+  | "running"
+  | "not_running"
+  | "stale"
+  | "start_failed"
+  | "file_invalid"
+  /** 后端给了未知取值：只读展示，不提供动作。 */
+  | "unknown";
+
+export interface TunHelperInfo {
+  runningBuild: string | null;
+  expectedBuild: string | null;
+  stale: boolean;
+  state: TunHelperState;
+  needsAdminRestart: boolean;
+}
+
+export interface TunHelperRestartResult {
+  ok: boolean;
+  restarted: boolean;
+  needsAdminRestart: boolean;
+}
+
 /** 模型端点配置（R32）。线格式 snake_case，由 bridge 转成 camelCase。 */
 export type LlmProtocol = "openai" | "anthropic";
 
@@ -320,6 +344,10 @@ export interface AgentBridge {
   coreRollback(): Promise<void>;
   /** 仅 debug 构建：TUN 已连接时采集一次诊断；未连接抛 PRECONDITION_FAILED。 */
   tunProbe(): Promise<TunProbeData>;
+  /** 后台组件状态；命令缺失时抛错，由 UI 降级为只读。 */
+  tunHelperInfo(): Promise<TunHelperInfo>;
+  /** 检查并更新后台组件；可能需要一次管理员授权。 */
+  tunHelperRestart(): Promise<TunHelperRestartResult>;
   /** 用系统文件管理器定位日志文件。 */
   openLogDir(): Promise<void>;
   /** 用系统默认浏览器打开链接。tauri 侧等 Host 接 opener 后实现。 */

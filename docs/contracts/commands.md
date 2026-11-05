@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.5.0`
+> 契约版本：`2.6.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -185,6 +185,8 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 56 | `core_upgrade` | `{ version }` | `{ job_id, current_version, target_version }` | **2.5.0 新增（仅 UI）** |
 | 57 | `core_cancel_upgrade` | `{ jobId }` | `{ cancelled: boolean }` | **2.5.0 新增（仅 UI）** |
 | 58 | `core_rollback` | `{}` | `{ ok: true }` | **2.5.0 新增（仅 UI）** |
+| 59 | `tun_helper_info` | `{}` | `TunHelperInfoData` | **2.6.0 新增（仅 UI）** |
+| 60 | `tun_helper_restart` | `{}` | `{ ok, restarted, needs_admin_restart }` | **2.6.0 新增（仅 UI）** |
 | 59 | `tun_probe` | `{}` | `TunProbeData` | **仅 debug 构建注册；AI 不可调用** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
@@ -826,6 +828,60 @@ type NetRepairResult = {
 - **不负责停 sing-box**：TUN 正在运行时应先 `runtime_stop` 再调本命令（清理顺序见 `capabilities.md` §3.1）。
 - 失败返回 `{ code, message }`，`code` 取自权限层错误码（当前只会是 `helper_install_failed`）。**这是 §1.2 通用 `AivpnError` 的刻意例外**：本命令没有重试语义，也不需要 `request_id`；若将来要统一，以 `AivpnError` 为准，不要两套并存。
 
+### 7.8.1 `tun_helper_info {}` → `TunHelperInfoData`
+
+后台组件（TUN helper）的构建与运行状态。只读、无副作用、**不联网**。
+
+```ts
+type TunHelperInfoData = {
+  running_build: string | null;   // 正在运行的构建；未运行时为 null
+  expected_build: string;         // 随包/已安装的期望构建
+  stale: boolean;                 // running_build 存在且 != expected_build
+  state: "running" | "not_running" | "stale" | "start_failed" | "file_invalid";
+  needs_admin_restart: boolean;   // 无法自助重启，需要管理员/系统授权
+};
+```
+
+`state` 五值互斥，语义固定：
+
+| 值 | 含义 | `needs_admin_restart` |
+|---|---|---|
+| `running` | helper 在运行，且构建与期望一致 | `false` |
+| `not_running` | 未在运行（launchd 未加载），但磁盘文件有效 | `false`（可直接重启拉起） |
+| `stale` | 在运行，但构建与期望不一致 | `false`（可自助 `restart` 换新映像） |
+| `start_failed` | launchd 尝试拉起但失败（崩溃、退出码异常） | `true` |
+| `file_invalid` | 磁盘上的 helper 缺失、不可执行或验签失败 | `true`（需重装） |
+
+- `state = "running"` 时 `stale` 必须为 `false`；`state = "stale"` 时 `stale` 必须为 `true`。两者不得自相矛盾。
+- **`needs_admin_restart = true` 时，`tun_helper_restart` 不应被 UI 当作可用操作**；界面应显示重新安装/授权的说明。
+- 旧 helper 不返回 `helper_build` / `helper_version`（`tun-backend.md` §3.2）：此时 `running_build` 按 `null` 处理，**不是** `stale` 以外的新状态；是否旧版只看 `tun_helper_restart` 的结果（`tun-backend.md` §1.1.1）。
+
+### 7.8.2 `tun_helper_restart {}` → `{ ok, restarted, needs_admin_restart }`
+
+让 helper 换新映像：调用 `TunBackend::restart()`（`tun-backend.md` §2），helper 回 `ok` 后以 `exit(75)` 退出，由 launchd 拉起。
+
+- **调用前必须先 `runtime_stop`**：重启会中断当前 TUN。命令本身不替调用方停连接——但它必须在检测到 TUN 正在运行时拒绝，`PRECONDITION_FAILED`，`details.reason = "tun_running"`。
+- `restarted` 表示本次是否真的发生了进程替换（旧进程退出 + launchd 拉起新进程）；helper 原本未运行、本次直接拉起时为 `false`。
+- `ok` 表示调用结束时 helper 处于可用状态且 `running_build == expected_build`；`restarted = true` 但新映像仍不一致时 `ok = false`。
+- **旧 helper（`restart` 返回 `bad_request`）**：`ok = false`、`restarted = false`、`needs_admin_restart = true`。不重试、不报内部错误，界面提示需要管理员重装。
+- 超时（10 s，`TUN_REPLY_DEADLINE_CONTROL`）按旧 helper 同样处理，但写日志区分 `timeout` 与 `bad_request`。
+- 无参数。不接受构建号、路径或版本——换什么映像是 Host 的事。
+
+### 7.8.3 应用退出流程（规范性）
+
+退出流程（`quitting`）必须在进程结束前**先停 TUN、再停代理运行时**：
+
+1. 若 TUN 在运行，调用 `TunBackend::stop()`；失败只记日志，**继续**下一步。
+2. 调用与 `runtime_stop` **同一段实现**：先撤系统代理，再停 sing-box。失败只记日志，**继续**退出。
+3. 进程结束。
+
+约束：
+
+- **当前实现只停了代理运行时、没停 TUN，是缺陷**；本节是修复目标。退出后不得留下 TUN 隧道、系统代理或孤儿 sing-box。
+- 与 `network_force_reset`（§7.9）**共用清理代码**：`stop_tun` → `stop_runtime` 两步同源；退出流程**不**执行 DNS 刷新、路由恢复、临时文件清理——那些是重置专用步骤。
+- 清理失败**不得阻塞退出**，也不得弹窗卡住用户；用户点「退出」后进程必须结束。失败信息写入日志。
+- `quitting` 期间拒绝新的连接请求：`runtime_start` 返回 `PRECONDITION_FAILED`，`details.reason = "quitting"`（`events.md` §4.7.3）。
+
 ### 7.9 `network_force_reset {}` → `NetworkForceResetData`
 
 E3：高破坏性。先断开当前连接，再按固定顺序把整台机器的网络恢复原状。**必须二次确认**，确认文案要说清「会发生什么 / 不会发生什么 / 现在做什么」。
@@ -1322,7 +1378,7 @@ type RulesStatus = {
 
 > **只作废 invoke 命令，不作废 AI 工具。** 聊天通道里的工具（`VpnConnect` 等）继续存在，见 `tools.md`。两条通道最终落到同一份 Host 实现，差别只在「谁发起」。
 >
-> `tools.md` 已升到 3.1.0，工具名与本表一一对应。
+> `tools.md` 已升到 3.4.1，工具名与本表一一对应。
 
 ---
 
@@ -1426,12 +1482,13 @@ type RulesStatus = {
 | `rules_update` | `RulesUpdate`（2.1 新增） | **必须** |
 | `net_repair` | `NetRepair` | **必须** |
 | `core_info` / `core_check_updates` / `core_upgrade` / `core_cancel_upgrade` / `core_rollback` | **无**（UI 专用，见 §7.10） | — |
+| `tun_helper_info` / `tun_helper_restart` | **无**（UI 专用，见 §7.8.1–§7.8.2） | — |
 
-> **`core_*` 五个命令没有 AI 工具。** 下载并替换特权二进制必须由用户显式点击；`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
+> **UI 专用、没有 AI 工具的命令**：`core_*` 五条与 `tun_helper_info` / `tun_helper_restart`。前者替换特权运行时，后者重启特权组件，都必须由用户显式点击；`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
-`tools.md` 已升到 3.0.0，上表的工具名与它一一对应（§0.2）。
+`tools.md` 已升到 3.4.1，上表的工具名与它一一对应（§0.2）。
 
 ---
 
@@ -1497,10 +1554,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.5.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI） |
+| `contracts/commands.md` | **2.6.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 |
 | `contracts/events.md` | **2.5.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 |
 | `contracts/runtime.md` | **2.3.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` |
-| `contracts/tools.md` | **3.4.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` |
+| `contracts/tools.md` | **3.4.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + UI 专用命令说明 |
 | `data-model.md` | **3** | 批 0 + 批 3 表 + 种子排除表 |
 | `contracts/routing.md` | **1.2.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 |
 | `contracts/tun-backend.md` | **1.0.6** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险） |
@@ -1515,6 +1572,15 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.6.0（2026-11-05，helper 状态/重启与退出流程）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.6.0`；§2 新增 59 `tun_helper_info`、60 `tun_helper_restart`，详解见 §7.8.1 / §7.8.2 | 新增命令 | 后台组件需要可自助换新映像 |
+| 2 | 两条命令均为 **UI 专用**：`tools.md` §3 不注册对应工具；§13 补行 | AI 边界 | 重启特权组件属于系统管理动作 |
+| 3 | 新增 §7.8.3 应用退出流程：**先停 TUN、再停代理运行时**；与 `network_force_reset` 共用清理代码；清理失败不阻塞退出 | 缺陷修复约束 | 当前实现只停代理运行时 |
+| 4 | §15.5 矩阵同步本文件 2.6.0、`tun-backend.md` 1.0.7、`tools.md` 3.4.1 | 元数据 | — |
 
 ### 2.5.0（2026-11-05，运行时核心版本管理）
 

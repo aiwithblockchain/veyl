@@ -20,6 +20,7 @@ import { formatPort, formatDate } from "../format";
 import { IconClose } from "./icons";
 import { RuntimeUpgradeRow, useRuntimeUpgrade } from "./RuntimeUpgrade";
 import { TunDiagnosticsRow } from "./TunDiagnostics";
+import { TunHelperRow, useTunHelper } from "./TunHelper";
 
 const DEFAULT_SOURCE_URL = "https://meshnetprotocol.github.io/bootstrap.json";
 const APP_VERSION = "0.1.0";
@@ -307,6 +308,7 @@ export function Settings({
 }: Props) {
   const [section, setSection] = useState<SectionId>("ai");
   const coreUpgrade = useRuntimeUpgrade({ bridge, enabled: open });
+  const tunHelper = useTunHelper({ bridge, enabled: open });
   const [state, setState] = useState<DeepSeekKeyState>({
     masked: null,
     verified: false,
@@ -1329,6 +1331,10 @@ export function Settings({
             <h3 className="settings-section__title">高级</h3>
 
             <RuntimeUpgradeRow controller={coreUpgrade} />
+            <TunHelperRow
+              controller={tunHelper}
+              activeConnection={runtime.state === "running" || runtime.state === "degraded"}
+            />
 
             <div className="settings-row">
               <div>

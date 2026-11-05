@@ -26,6 +26,9 @@ import type {
   RenamedSession,
   StoredChatMessage,
   StoredSessionSummary,
+  TunHelperInfo,
+  TunHelperRestartResult,
+  TunHelperState,
   TunProbeData,
 } from "./bridge";
 import { toBridgeError } from "./errors";
@@ -94,6 +97,32 @@ function normalizeCoreCheck(raw: {
       .map((item) => ({ version: item.version as string, size: item.size ?? 0 })),
     cached: raw.cached === true,
     message: raw.message ?? undefined,
+  };
+}
+
+const HELPER_STATES: TunHelperState[] = [
+  "running",
+  "not_running",
+  "stale",
+  "start_failed",
+  "file_invalid",
+];
+
+function normalizeHelperInfo(raw: {
+  running_build?: unknown;
+  expected_build?: unknown;
+  stale?: unknown;
+  state?: unknown;
+  needs_admin_restart?: unknown;
+}): TunHelperInfo {
+  const state = HELPER_STATES.find((item) => item === raw.state) ?? "unknown";
+  return {
+    runningBuild: typeof raw.running_build === "string" && raw.running_build ? raw.running_build : null,
+    expectedBuild:
+      typeof raw.expected_build === "string" && raw.expected_build ? raw.expected_build : null,
+    stale: raw.stale === true,
+    state,
+    needsAdminRestart: raw.needs_admin_restart === true,
   };
 }
 
@@ -332,6 +361,31 @@ export class TauriAgentBridge implements AgentBridge {
       dns: raw.dns ?? "",
       https: raw.https ?? "",
       process: raw.process ?? "",
+    };
+  }
+
+  async tunHelperInfo(): Promise<TunHelperInfo> {
+    return normalizeHelperInfo(
+      await call<{
+        running_build?: unknown;
+        expected_build?: unknown;
+        stale?: unknown;
+        state?: unknown;
+        needs_admin_restart?: unknown;
+      }>("tun_helper_info"),
+    );
+  }
+
+  async tunHelperRestart(): Promise<TunHelperRestartResult> {
+    const raw = await call<{
+      ok?: boolean;
+      restarted?: boolean;
+      needs_admin_restart?: boolean;
+    }>("tun_helper_restart");
+    return {
+      ok: raw.ok === true,
+      restarted: raw.restarted === true,
+      needsAdminRestart: raw.needs_admin_restart === true,
     };
   }
 

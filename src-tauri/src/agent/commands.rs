@@ -186,6 +186,18 @@ pub async fn core_rollback(state: State<'_, Arc<AppState>>) -> Result<Value, Val
     state.services.core_rollback().await.map_err(error_value)
 }
 
+/// 后台组件（TUN helper）的构建与运行状态。仅 UI，不进 AI 工具集。
+#[tauri::command]
+pub async fn tun_helper_info(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state.services.tun_helper_info().await.map_err(error_value)
+}
+
+/// 换新后台组件映像。仅 UI；TUN 在跑时拒绝。
+#[tauri::command]
+pub async fn tun_helper_restart(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state.services.tun_helper_restart().await.map_err(error_value)
+}
+
 /// 仅 debug 构建：TUN 已连接时采集一次诊断，返回结论与报告路径。
 ///
 /// 不注册进 release 的 invoke_handler；也不在任何 AI 工具集里。

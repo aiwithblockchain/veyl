@@ -10,6 +10,7 @@ pub mod backend;
 /// 服务二进制也 `#[path]` 引用同一份文件，而 macOS 上同样需要它的单元测试。
 #[path = "windows/cidr.rs"]
 pub mod cidr;
+pub mod helper_update;
 pub mod privilege;
 pub mod protocol;
 pub mod session;

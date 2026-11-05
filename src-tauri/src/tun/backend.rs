@@ -23,6 +23,14 @@ pub const TUN_REPLY_DEADLINE_CONTROL: Duration = Duration::from_secs(10);
 /// 客户端等 `start` 回复的上限。首次 start 可能要复制运行时并跑 check，给足时间。
 pub const TUN_REPLY_DEADLINE_START: Duration = Duration::from_secs(30);
 
+/// 会话租约句柄：TUN 运行期间 App 保持的一条空闲连接。
+///
+/// macOS 上是真实 XPC 连接；其它平台暂时没有租约机制，留空类型占位。
+#[cfg(target_os = "macos")]
+pub type TunLease = crate::tun::xpc::Lease;
+#[cfg(not(target_os = "macos"))]
+pub struct TunLease;
+
 pub trait TunBackend: Send + Sync {
     /// 查特权组件的注册状态。纯查询，不触发任何系统弹窗。
     fn availability(&self) -> Result<HelperStatus, TunError>;
@@ -59,6 +67,18 @@ pub trait TunBackend: Send + Sync {
 
     /// 读快照。随时可调，不改变状态；必须便宜（一次 IPC，不读大文件、不 spawn）。
     fn status(&self) -> Result<TunSnapshot, TunError>;
+
+    /// 让特权组件换新映像：helper 回 ok 后自行退出，由 launchd 拉起新进程。
+    /// 旧 helper 不认识这个方法，会返回 `bad_request`——这就是版本协商。
+    fn restart(&self) -> Result<(), TunError>;
+
+    /// 拿一条会话租约。默认平台没有租约机制。
+    ///
+    /// 旧 helper 不认识 `lease`，返回 `bad_request`；调用方只记日志、不因此
+    /// 让连接失败——租约是崩溃兜底，不是连接的前提。
+    fn acquire_lease(&self) -> Result<Option<TunLease>, TunError> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +105,16 @@ pub struct TunSnapshot {
     pub clash_api: Option<ClashApi>,
     pub since: Option<String>,
     pub last_error: Option<TunErrorRecord>,
+    /// 特权组件构建标识，仅诊断用。旧 helper 不返回时为 null。
+    #[serde(default)]
+    pub helper_build: Option<String>,
+    /// 特权组件版本，仅诊断用。旧 helper 不返回时为 null。
+    #[serde(default)]
+    pub helper_version: Option<String>,
+    /// 回复 status 的 helper 进程 pid。只用于 App 侧取运行中 cdhash，
+    /// 不跨进程序列化（Windows 服务的快照里没有这个键）。
+    #[serde(skip)]
+    pub helper_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +283,10 @@ impl TunBackend for UnsupportedBackend {
     fn status(&self) -> Result<TunSnapshot, TunError> {
         Err(unsupported_platform_error())
     }
+
+    fn restart(&self) -> Result<(), TunError> {
+        Err(unsupported_platform_error())
+    }
 }
 
 pub fn unsupported_platform_error() -> TunError {
@@ -358,14 +392,24 @@ mod macos {
         }
 
         fn status(&self) -> Result<TunSnapshot, TunError> {
-            match xpc::call_with_timeout(MACH_SERVICE, "status", None, TUN_REPLY_DEADLINE_CONTROL) {
-                Ok(Reply::Status {
-                    running,
-                    pid,
-                    clash_addr,
-                    clash_secret,
-                    since,
-                }) => Ok(TunSnapshot {
+            match xpc::call_with_timeout_peer(
+                MACH_SERVICE,
+                "status",
+                None,
+                TUN_REPLY_DEADLINE_CONTROL,
+            ) {
+                Ok((
+                    Reply::Status {
+                        running,
+                        pid,
+                        clash_addr,
+                        clash_secret,
+                        since,
+                        helper_build,
+                        helper_version,
+                    },
+                    helper_pid,
+                )) => Ok(TunSnapshot {
                     running,
                     pid: if running { pid } else { None },
                     clash_api: match (clash_addr, clash_secret) {
@@ -375,6 +419,9 @@ mod macos {
                     },
                     since: if running { since } else { None },
                     last_error: None,
+                    helper_build,
+                    helper_version,
+                    helper_pid: Some(helper_pid).filter(|pid| *pid > 0),
                 }),
                 Ok(_) => Err(TunError::new(
                     TunErrorCode::Internal,
@@ -382,6 +429,26 @@ mod macos {
                 )),
                 Err(error) => Err(map_xpc_error(error)),
             }
+        }
+
+        fn restart(&self) -> Result<(), TunError> {
+            match xpc::call_with_timeout(MACH_SERVICE, "restart", None, TUN_REPLY_DEADLINE_CONTROL)
+            {
+                Ok(Reply::Restarted) => Ok(()),
+                Ok(_) => Err(TunError::new(
+                    TunErrorCode::Internal,
+                    "特权助手回了意料之外的结果",
+                )),
+                // 旧 helper 不认识 restart：这是版本协商的正常结果，
+                // 原样带出 wire_code，由调用方翻译成「需要管理员重启」。
+                Err(error) => Err(map_xpc_error(error)),
+            }
+        }
+
+        fn acquire_lease(&self) -> Result<Option<TunLease>, TunError> {
+            xpc::open_lease(MACH_SERVICE, TUN_REPLY_DEADLINE_CONTROL)
+                .map(Some)
+                .map_err(map_xpc_error)
         }
     }
 
@@ -589,9 +656,20 @@ mod tests {
             clash_api: None,
             since: None,
             last_error: None,
+            helper_build: None,
+            helper_version: None,
+            helper_pid: None,
         };
         let value = serde_json::to_value(&snapshot).unwrap();
-        for key in ["running", "pid", "clash_api", "since", "last_error"] {
+        for key in [
+            "running",
+            "pid",
+            "clash_api",
+            "since",
+            "last_error",
+            "helper_build",
+            "helper_version",
+        ] {
             assert!(value.get(key).is_some(), "缺少键 {key}");
         }
         assert_eq!(value["pid"], serde_json::Value::Null);

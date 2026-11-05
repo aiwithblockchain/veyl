@@ -1398,6 +1398,33 @@ body[data-resizing] {
   text-decoration: underline;
 }
 
+/* 后台组件 */
+
+.tun-helper {
+  flex: 1;
+  min-width: 0;
+}
+
+.tun-helper__status {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.tun-helper__status.is-warn {
+  color: var(--warn-text);
+}
+
+.tun-helper__status.is-error {
+  color: var(--err-text);
+}
+
+.tun-helper__failure {
+  display: grid;
+  gap: 2px;
+  margin-top: 8px;
+}
+
 /* 运行时升级 */
 
 .core-upgrade {

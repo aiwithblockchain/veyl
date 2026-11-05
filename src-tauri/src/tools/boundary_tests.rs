@@ -127,6 +127,14 @@ impl VpnToolServices for FakeServices {
         self.rec.record("core_rollback");
         Ok(self.data.clone())
     }
+    async fn tun_helper_info(&self) -> anyhow::Result<Value> {
+        self.rec.record("tun_helper_info");
+        Ok(self.data.clone())
+    }
+    async fn tun_helper_restart(&self) -> anyhow::Result<Value> {
+        self.rec.record("tun_helper_restart");
+        Ok(self.data.clone())
+    }
     #[cfg(debug_assertions)]
     async fn tun_probe(&self) -> anyhow::Result<Value> {
         self.rec.record("tun_probe");
@@ -818,6 +826,12 @@ async fn service_failure_becomes_a_structured_error_with_next_actions() {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn core_rollback(&self) -> anyhow::Result<Value> {
+            Err(anyhow::anyhow!("磁盘满了"))
+        }
+        async fn tun_helper_info(&self) -> anyhow::Result<Value> {
+            Err(anyhow::anyhow!("磁盘满了"))
+        }
+        async fn tun_helper_restart(&self) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         #[cfg(debug_assertions)]

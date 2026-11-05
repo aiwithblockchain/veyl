@@ -25,7 +25,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,65 @@ use protocol::ProtocolError;
 use xpc::xpc_object_t;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// `restart` 的退出码（`EX_TEMPFAIL`）。launchd 的 KeepAlive 只对非零退出重启。
+const RESTART_EXIT_CODE: i32 = 75;
+
+/// 没有子进程、没有租约、最近请求超过这个时长 → 主动 exit(0)。
+/// 0 是正常退出，`KeepAlive.SuccessfulExit=false` 不会把它拉起来。
+const IDLE_EXIT_AFTER: Duration = Duration::from_secs(10 * 60);
+const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// 租约断开后等多久再停隧道：给 App 重连/重启留出窗口。
+const LEASE_LOSS_GRACE: Duration = Duration::from_secs(5);
+
+/// 崩溃循环打断：10 分钟内第 3 次启动就正常退出，避免无限拉起。
+const CRASH_LOOP_WINDOW: u64 = 10 * 60;
+const CRASH_LOOP_LIMIT: usize = 3;
+
+/// 纯判定：没有子进程、没有租约、没有正在处理的请求，且静默够久。
+fn should_exit_idle(running: bool, leases: usize, in_flight: usize, idle: Duration) -> bool {
+    !running && leases == 0 && in_flight == 0 && idle >= IDLE_EXIT_AFTER
+}
+
+/// 纯判定：租约全部丢失后应当做什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseLossAction {
+    /// 有新租约、或有新的 start：什么都不做。
+    Ignore,
+    /// 没有租约也没有新 start：停隧道再退出。
+    StopAndExit,
+    /// 没有租约也没有隧道：直接退出。
+    Exit,
+}
+
+/// `generation_changed`：租约断开后又有新的 start（新实例接手），不能动它。
+///
+/// 已知限制：另一个实例存活（租约非空）但不再新建连接时，崩溃方留下的隧道
+/// 会一直残留到该实例退出或发起下一次 start。受 macOS 单实例约束，正常路径
+/// 不会出现；这里不按连接指针区分 owner——start 与租约是两条不同的连接，
+/// 指针比较既不可靠，还可能因地址复用误停别人的隧道。
+fn lease_loss_action(
+    leases: usize,
+    running: bool,
+    generation_changed: bool,
+) -> LeaseLossAction {
+    if generation_changed || leases > 0 {
+        LeaseLossAction::Ignore
+    } else if running {
+        LeaseLossAction::StopAndExit
+    } else {
+        LeaseLossAction::Exit
+    }
+}
+
+/// 纯判定：按启动时间戳（Unix 秒）判断是否进入崩溃循环。
+fn crash_loop_tripped(starts: &[u64], now: u64) -> bool {
+    starts
+        .iter()
+        .filter(|at| now.saturating_sub(**at) <= CRASH_LOOP_WINDOW)
+        .count()
+        >= CRASH_LOOP_LIMIT
+}
 
 /// helper 自己的 sing-box 日志上限与保留份数（GAP-02）。
 /// 保留上一份而不是直接清空：排障时要看的是上一次连接的后半段。
@@ -168,6 +227,12 @@ pub fn run() {
         }
     };
 
+    if crash_loop_tripped_now(&root) {
+        eprintln!("veyl-helper: 10 分钟内第 3 次启动，正常退出以打断崩溃循环");
+        std::process::exit(0);
+    }
+    let _ = HELPER_BUILD.set(self_cdhash().unwrap_or_default());
+
     let supervisor = Arc::new(Supervisor::new(root));
     // 必须在监听起来之前完成：sweep 与任何 start 不能并发。
     let sweep_started = Instant::now();
@@ -207,6 +272,8 @@ pub fn run() {
         watchdog.stop();
         std::process::exit(0);
     });
+
+    spawn_idle_watchdog(Arc::clone(&supervisor));
 
     serve(supervisor);
 }
@@ -258,6 +325,12 @@ fn serve(supervisor: Arc<Supervisor>) -> ! {
             let handler: RcBlock<dyn Fn(xpc_object_t)> =
                 RcBlock::new(move |message: xpc_object_t| {
                     if unsafe { xpc::is_error(message) } {
+                        // 连接失效：如果它持有租约，5 秒后按租约数与 generation
+                        // 决定是否停隧道。
+                        let generation = per_connection.generation.load(Ordering::SeqCst);
+                        if per_connection.release_lease(connection) {
+                            spawn_lease_loss_check(&per_connection, generation);
+                        }
                         return;
                     }
                     handle_message(&per_connection, connection, message);
@@ -282,6 +355,8 @@ fn handle_message(
     connection: xpc::xpc_connection_t,
     message: xpc_object_t,
 ) {
+    // 处理期间不参与空闲退出；同时刷新「最近请求」。
+    let _request = supervisor.begin_request();
     // 日志归属按**这条消息的连接**取；切换用户后另一条连接会拿到自己的 uid。
     let euid = unsafe { xpc::connection_euid(connection) };
 
@@ -309,6 +384,32 @@ fn handle_message(
             unsafe { xpc::dict_set_bool(reply, "ok", true) };
             Ok(())
         }
+        // restart：start 正在进行时拒绝（precondition_failed），否则先停掉
+        // 已登记的隧道，再回 ok 并 exit(75)。这样不会把 root sing-box 留给
+        // 新 helper 去 sweep，也不会与并发 start 抢子进程。
+        // `_guard` 一直持有到进程退出，并发 start 无法在回复与退出之间插进来。
+        "restart" => match supervisor.start_lock.try_lock() {
+            Ok(_guard) => {
+                supervisor.stop_child("restart");
+                unsafe { xpc::dict_set_bool(reply, "ok", true) };
+                unsafe { xpc::send_message(connection, reply) };
+                unsafe { xpc::release(reply) };
+                // 给 libxpc 一点时间把回复排出去；退出码 75 由 KeepAlive 拉起新映像。
+                std::thread::sleep(Duration::from_millis(100));
+                supervisor.note("restart：回复后以 75 退出，等待 launchd 拉起新映像");
+                std::process::exit(RESTART_EXIT_CODE);
+            }
+            Err(_) => Err(ProtocolError::new(
+                protocol::ERR_PRECONDITION_FAILED,
+                "正在启动连接，稍后再重启后台组件",
+            )),
+        },
+        // 会话租约：连接保持打开，断开事件由事件处理器释放。
+        "lease" => {
+            supervisor.register_lease(connection);
+            unsafe { xpc::dict_set_bool(reply, "ok", true) };
+            Ok(())
+        }
         // 只有 root 能 HUP mDNSResponder：普通用户执行 killall 会失败，
         // 而 `dscacheutil -flushcache` 即使返回 0 也清不掉它的缓存。
         // 强制重置与 TUN 回滚都依赖这条路径。
@@ -323,6 +424,12 @@ fn handle_message(
             let status = supervisor.status();
             unsafe { xpc::dict_set_bool(reply, "ok", true) };
             unsafe { xpc::dict_set_bool(reply, "running", status.is_some()) };
+            if let Some(build) = helper_build() {
+                unsafe { xpc::dict_set_string(reply, "helper_build", build) };
+            }
+            unsafe {
+                xpc::dict_set_string(reply, "helper_version", env!("CARGO_PKG_VERSION"))
+            };
             match status {
                 Some(running) => {
                     unsafe { xpc::dict_set_int64(reply, "pid", running.pid as i64) };
@@ -412,6 +519,58 @@ struct Running {
     since: String,
 }
 
+struct RequestGuard<'a> {
+    supervisor: &'a Supervisor,
+}
+
+impl Drop for RequestGuard<'_> {
+    fn drop(&mut self) {
+        self.supervisor.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// presence 租约断开后等 5 秒再判：期间 App 重启/重连会重新登记租约。
+///
+/// 租约是 **App 启动到退出** 的存活信号：没有新租约说明 App 已经不在了。
+/// 还有隧道就先停，然后正常退出（0）；KeepAlive 不会拉起，下一次请求由
+/// launchd 按需启动。
+fn spawn_lease_loss_check(supervisor: &Arc<Supervisor>, generation: u64) {
+    let supervisor = Arc::clone(supervisor);
+    std::thread::spawn(move || {
+        std::thread::sleep(LEASE_LOSS_GRACE);
+        let leases = supervisor.lease_count();
+        let running = supervisor.status().is_some();
+        let generation_changed = supervisor.generation.load(Ordering::SeqCst) != generation;
+        match lease_loss_action(leases, running, generation_changed) {
+            LeaseLossAction::Ignore => {}
+            LeaseLossAction::StopAndExit => {
+                supervisor.note("[diag] presence 租约断开且无新租约，停止隧道后退出");
+                supervisor.stop_child("lease_lost");
+                std::process::exit(0);
+            }
+            LeaseLossAction::Exit => {
+                supervisor.note("[diag] presence 租约断开且无隧道，退出");
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
+/// 空闲退出：无子进程、无租约、无请求，静默 10 分钟就正常退出。
+/// 正常退出（0）不会触发 KeepAlive，下次 status/start 由 launchd 按需拉起。
+fn spawn_idle_watchdog(supervisor: Arc<Supervisor>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(IDLE_CHECK_INTERVAL);
+        let running = supervisor.status().is_some();
+        let leases = supervisor.lease_count();
+        let in_flight = supervisor.in_flight.load(Ordering::SeqCst);
+        if should_exit_idle(running, leases, in_flight, supervisor.idle_for()) {
+            supervisor.note("空闲退出：无连接、无租约、10 分钟无请求");
+            std::process::exit(0);
+        }
+    });
+}
+
 struct Supervisor {
     root: PathBuf,
     child: Mutex<Option<Child>>,
@@ -435,6 +594,12 @@ struct Supervisor {
     /// 最近一次接入的用户。没有连接上下文的 note（例如规则预置完成）
     /// 优先写进它，避免日志建成之后还一直堆在 pending 里。
     last_uid: Mutex<Option<u32>>,
+    /// TUN 运行期间 App 保持的会话租约（按连接指针记）。
+    leases: Mutex<std::collections::HashSet<usize>>,
+    /// 最近一次请求时刻。空闲退出用它判断「真的没人用了」。
+    last_request: Mutex<Instant>,
+    /// 正在处理的请求数。空闲退出不能在处理中退出。
+    in_flight: AtomicUsize,
 }
 
 impl Supervisor {
@@ -450,11 +615,40 @@ impl Supervisor {
             user_logs: Mutex::new(std::collections::HashMap::new()),
             pending_notes: Mutex::new(Vec::new()),
             last_uid: Mutex::new(None),
+            leases: Mutex::new(std::collections::HashSet::new()),
+            last_request: Mutex::new(Instant::now()),
+            in_flight: AtomicUsize::new(0),
         }
     }
 
     /// 取（必要时创建）某个用户的日志。uid 来自处理这条消息的连接，
     /// 不能钉死成首个对端——A 连完切到 B 时，B 的日志必须写进 B 的家目录。
+    /// 请求开始/结束的计数守卫：空闲退出不能在请求处理中触发。
+    fn begin_request(&self) -> RequestGuard<'_> {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        *self.last_request.lock().unwrap() = Instant::now();
+        RequestGuard { supervisor: self }
+    }
+
+    /// 登记一条会话租约。连接断开时由事件处理器释放。
+    fn register_lease(&self, connection: xpc::xpc_connection_t) {
+        self.leases.lock().unwrap().insert(connection as usize);
+        self.note("[diag] 租约建立");
+    }
+
+    /// 释放租约；返回 `true` 表示这条连接原本持有租约。
+    fn release_lease(&self, connection: xpc::xpc_connection_t) -> bool {
+        self.leases.lock().unwrap().remove(&(connection as usize))
+    }
+
+    fn lease_count(&self) -> usize {
+        self.leases.lock().unwrap().len()
+    }
+
+    fn idle_for(&self) -> Duration {
+        self.last_request.lock().unwrap().elapsed()
+    }
+
     fn logs_for(&self, uid: u32) -> Option<Arc<UserLogs>> {
         {
             let map = self.user_logs.lock().unwrap();
@@ -1370,10 +1564,19 @@ extern "C" {
         encoding: u32,
     ) -> *const c_void;
     fn CFRelease(value: *const c_void);
+    fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
+    fn CFDataGetLength(data: *const c_void) -> isize;
+    fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
 }
 
 #[link(name = "Security", kind = "framework")]
 extern "C" {
+    fn SecCodeCopySelf(flags: u32, code: *mut *const c_void) -> i32;
+    fn SecCodeCopySigningInformation(
+        code: *const c_void,
+        flags: u32,
+        information: *mut *const c_void,
+    ) -> i32;
     fn SecStaticCodeCreateWithPath(
         path: *const c_void,
         flags: u32,
@@ -1492,6 +1695,97 @@ fn static_requirement_check(
             Err(format!("签名不满足我们的要求（OSStatus {valid}）"))
         }
     }
+}
+
+/// 自身镜像的 cdhash。启动时算一次，`status` 作为诊断字段返回。
+static HELPER_BUILD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn helper_build() -> Option<&'static str> {
+    HELPER_BUILD
+        .get()
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+/// 取运行中 helper 自己的代码目录哈希（cdhash）。
+///
+/// 这是与 App 侧 `SecCodeCopyGuestWithAttributes` 同一套算法：两端比的是
+/// 「这份映像的哈希」，与版本号无关，因此 App 降级也能正确判断。
+fn self_cdhash() -> Option<String> {
+    // kSecCSSigningInformation = 2
+    const SIGNING_INFORMATION: u32 = 2;
+    unsafe {
+        let mut code: *const c_void = std::ptr::null();
+        if SecCodeCopySelf(0, &mut code) != 0 || code.is_null() {
+            return None;
+        }
+        let mut info: *const c_void = std::ptr::null();
+        let status = SecCodeCopySigningInformation(code, SIGNING_INFORMATION, &mut info);
+        if status != 0 || info.is_null() {
+            CFRelease(code);
+            return None;
+        }
+        let key = CFStringCreateWithCString(
+            std::ptr::null(),
+            b"unique\0".as_ptr() as *const c_char,
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        let data = if key.is_null() {
+            std::ptr::null()
+        } else {
+            CFDictionaryGetValue(info, key)
+        };
+        let mut hex = None;
+        if !data.is_null() {
+            let length = CFDataGetLength(data);
+            if length > 0 {
+                let bytes = CFDataGetBytePtr(data);
+                if !bytes.is_null() {
+                    hex = Some(
+                        (0..length as usize)
+                            .map(|i| format!("{:02x}", *bytes.add(i)))
+                            .collect::<String>(),
+                    );
+                }
+            }
+        }
+        if !key.is_null() {
+            CFRelease(key);
+        }
+        CFRelease(info);
+        CFRelease(code);
+        hex
+    }
+}
+
+/// 崩溃循环打断：把本次启动记进 `<root>/helper-starts`，10 分钟内第 3 次
+/// 就正常退出（0），让 launchd 停下来，而不是无限拉起。
+fn crash_loop_tripped_now(root: &Path) -> bool {
+    let path = root.join("helper-starts");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or_default();
+    let mut starts: Vec<u64> = std::fs::read_to_string(&path)
+        .ok()
+        .map(|text| {
+            text.lines()
+                .filter_map(|line| line.trim().parse::<u64>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    starts.push(now);
+    starts.retain(|at| now.saturating_sub(*at) <= CRASH_LOOP_WINDOW);
+    let tripped = crash_loop_tripped(&starts, now);
+    let text = starts
+        .iter()
+        .map(|at| at.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Err(error) = std::fs::write(&path, text) {
+        eprintln!("veyl-helper: 写启动记录失败：{error}");
+    }
+    tripped
 }
 
 // ---------------------------------------------------------------------------
@@ -2857,7 +3151,7 @@ mod tests {
                     clash_addr: "127.0.0.1:1".into(),
                     clash_secret: "s".into(),
                     since: "2026-01-01T00:00:00Z".into(),
-                },
+                        },
                 // 假 uid：解析不到 home，只写 stderr，测试不碰真实家目录。
                 60_000,
             )
@@ -3085,5 +3379,63 @@ mod tests {
         let error = UserLogs::open(&home, uid, gid).err().expect("应当拒绝");
         assert!(error.contains("group/other"), "{error}");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn restart_exits_with_tempfail_so_launchd_restarts() {
+        // 0 是正常退出，KeepAlive 不会拉起；必须用非零。
+        assert_eq!(RESTART_EXIT_CODE, 75);
+    }
+
+    #[test]
+    fn idle_exit_needs_no_child_no_lease_and_no_request_in_flight() {
+        let long_enough = IDLE_EXIT_AFTER + Duration::from_secs(1);
+        assert!(should_exit_idle(false, 0, 0, long_enough));
+        assert!(!should_exit_idle(true, 0, 0, long_enough), "子进程还在");
+        assert!(!should_exit_idle(false, 1, 0, long_enough), "还有租约");
+        assert!(!should_exit_idle(false, 0, 1, long_enough), "请求处理中");
+        assert!(
+            !should_exit_idle(false, 0, 0, Duration::from_secs(60)),
+            "还没到 10 分钟"
+        );
+    }
+
+    #[test]
+    fn lease_loss_respects_generation_and_other_leases() {
+        // 还有新租约：不动。
+        assert_eq!(
+            lease_loss_action(1, false, false),
+            LeaseLossAction::Ignore
+        );
+        assert_eq!(
+            lease_loss_action(1, true, false),
+            LeaseLossAction::Ignore,
+            "另一个实例还活着，不能动隧道"
+        );
+        // 租约断开后又有新 start（新实例接手）：不动它的隧道。
+        assert_eq!(
+            lease_loss_action(0, true, true),
+            LeaseLossAction::Ignore
+        );
+        // 没有租约、没有新 start：停隧道再退出。
+        assert_eq!(
+            lease_loss_action(0, true, false),
+            LeaseLossAction::StopAndExit
+        );
+        assert_eq!(
+            lease_loss_action(0, false, false),
+            LeaseLossAction::Exit
+        );
+    }
+
+    #[test]
+    fn three_starts_within_ten_minutes_trip_the_crash_guard() {
+        let now = 1_000_000;
+        assert!(!crash_loop_tripped(&[now - 30, now - 600], now));
+        assert!(crash_loop_tripped(&[now - 600, now - 30, now], now));
+        assert!(
+            !crash_loop_tripped(&[now - 601, now - 30, now], now),
+            "窗口外的启动不算"
+        );
     }
 }

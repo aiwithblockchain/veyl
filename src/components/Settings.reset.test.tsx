@@ -32,6 +32,18 @@ function makeBridge(
       activeSource: "bundled" as const,
       restartRequired: false,
     })),
+    tunHelperInfo: vi.fn(async () => ({
+      runningBuild: null,
+      expectedBuild: "2026.11.1",
+      stale: false,
+      state: "not_running" as const,
+      needsAdminRestart: false,
+    })),
+    tunHelperRestart: vi.fn(async () => ({
+      ok: true,
+      restarted: true,
+      needsAdminRestart: false,
+    })),
     getDeepSeekKey: vi.fn(async () => ({
       masked: null,
       verified: false,

@@ -171,6 +171,10 @@ pub enum Reply {
         since: String,
     },
     Stopped,
+    /// `restart` 的应答：helper 已经答应换映像，随后以 75 退出。
+    Restarted,
+    /// 会话租约已登记；连接保持打开，断开即视为租约丢失。
+    Leased,
     /// `flush_dns` 的应答。没有负载，只表示特权侧已经执行完。
     Flushed,
     Status {
@@ -180,6 +184,10 @@ pub enum Reply {
         clash_addr: Option<String>,
         clash_secret: Option<String>,
         since: Option<String>,
+        /// 特权组件自身构建标识；旧 helper 不返回。
+        helper_build: Option<String>,
+        /// 特权组件版本；旧 helper 不返回。
+        helper_version: Option<String>,
     },
 }
 
@@ -223,6 +231,19 @@ pub fn call_with_timeout(
     config: Option<&[u8]>,
     timeout: std::time::Duration,
 ) -> Result<Reply, XpcError> {
+    call_with_timeout_peer(service, method, config, timeout).map(|(reply, _)| reply)
+}
+
+/// 同 `call_with_timeout`，但把**回复这次请求的 helper 进程 pid** 一并带出。
+///
+/// App 用它去 `SecCodeCopyGuestWithAttributes` 取运行中 helper 的 cdhash，
+/// 而不是相信 helper 自报的构建号（自报只能用于诊断，不能做判定）。
+pub fn call_with_timeout_peer(
+    service: &str,
+    method: &str,
+    config: Option<&[u8]>,
+    timeout: std::time::Duration,
+) -> Result<(Reply, u32), XpcError> {
     use block2::RcBlock;
     use std::sync::mpsc::{channel, RecvTimeoutError};
 
@@ -294,6 +315,8 @@ pub fn call_with_timeout(
             }
         };
 
+        // pid 必须在连接取消前取：取消后 libxpc 不再保证这个值。
+        let peer_pid = connection_pid(connection);
         xpc_connection_cancel(connection);
         // create_* 出来的对象由我们持有，cancel 之后释放；不释放就是每次调用漏一个。
         xpc_release(connection);
@@ -303,12 +326,119 @@ pub fn call_with_timeout(
         }
         let result = parse_reply(&service, method, reply);
         xpc_release(reply);
-        result
+        result.map(|reply| (reply, peer_pid))
     }
 }
 
-fn parse_reply(service: &CString, method: &str, reply: xpc_object_t) -> Result<Reply, XpcError> {
-    let _ = service;
+/// TUN 运行期间由 App 持有的**会话租约**：一条保持打开的空闲 XPC 连接。
+///
+/// helper 监听连接失效事件；断开 5 秒仍没有新租约就停掉 sing-box。
+/// App 崩溃/被强杀时不用依赖任何清理代码，隧道也不会永远留着。
+pub struct Lease {
+    connection: xpc_object_t,
+}
+
+// SAFETY: libxpc 的连接对象可以在任意线程 cancel/release；
+// 这个指针只被 Lease 自己持有，且只释放一次。
+unsafe impl Send for Lease {}
+
+impl Lease {
+    pub fn cancel(&mut self) {
+        if !self.connection.is_null() {
+            unsafe {
+                xpc_connection_cancel(self.connection);
+                xpc_release(self.connection);
+            }
+            self.connection = std::ptr::null_mut();
+        }
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+/// 建立租约连接并等 helper 确认。成功后的连接**保持打开**，由 `Lease` 管理。
+pub fn open_lease(service: &str, timeout: std::time::Duration) -> Result<Lease, XpcError> {
+    use block2::RcBlock;
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+
+    let service = cstring(service);
+    // SAFETY: 与 `call_with_timeout_peer` 相同的生命周期约束；成功路径把连接
+    // 的所有权交给 `Lease`，失败路径在这里 cancel + release。
+    unsafe {
+        let connection =
+            xpc_connection_create_mach_service(service.as_ptr(), std::ptr::null_mut(), 0);
+        if connection.is_null() {
+            return Err(XpcError::Unavailable("无法创建到特权助手的连接".into()));
+        }
+        install_noop_handler(connection);
+        xpc_connection_resume(connection);
+
+        let message = xpc_dictionary_create(std::ptr::null(), std::ptr::null(), 0);
+        xpc_dictionary_set_string(
+            message,
+            cstring("method").as_ptr(),
+            cstring("lease").as_ptr(),
+        );
+
+        let (sender, receiver) = channel::<SendPtr>();
+        let handler = RcBlock::new(move |reply: xpc_object_t| {
+            let retained = if reply.is_null() {
+                std::ptr::null_mut()
+            } else {
+                xpc_retain(reply)
+            };
+            let _ = sender.send(SendPtr(retained));
+        });
+        xpc_connection_send_message_with_reply(
+            connection,
+            message,
+            dispatch_get_global_queue(0, 0),
+            RcBlock::as_ptr(&handler) as *mut c_void,
+        );
+        drop(handler);
+        xpc_release(message);
+
+        let reply = match receiver.recv_timeout(timeout) {
+            Ok(sent) => sent.take(),
+            Err(RecvTimeoutError::Timeout) => {
+                xpc_connection_cancel(connection);
+                xpc_release(connection);
+                return Err(XpcError::Timeout);
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                xpc_connection_cancel(connection);
+                xpc_release(connection);
+                return Err(XpcError::Protocol("回复通道提前断开".into()));
+            }
+        };
+        if reply.is_null() {
+            xpc_connection_cancel(connection);
+            xpc_release(connection);
+            return Err(XpcError::Protocol("助手返回了空回复".into()));
+        }
+        let parsed = parse_reply(&service, "lease", reply);
+        xpc_release(reply);
+        match parsed {
+            Ok(Reply::Leased) => Ok(Lease { connection }),
+            Ok(_) => {
+                xpc_connection_cancel(connection);
+                xpc_release(connection);
+                Err(XpcError::Protocol("助手回了意料之外的租约应答".into()))
+            }
+            Err(error) => {
+                xpc_connection_cancel(connection);
+                xpc_release(connection);
+                Err(error)
+            }
+        }
+    }
+}
+
+fn parse_reply(service: &CString, method: &str, reply: xpc_object_t) -> Result<Reply, XpcError> {    let _ = service;
     if reply.is_null() {
         return Err(XpcError::Unavailable(
             "助手没有回复（可能没有注册或被系统拒绝）".into(),
@@ -341,6 +471,8 @@ fn parse_reply(service: &CString, method: &str, reply: xpc_object_t) -> Result<R
             since: get_string(reply, "since").unwrap_or_default(),
         }),
         "stop" => Ok(Reply::Stopped),
+        "restart" => Ok(Reply::Restarted),
+        "lease" => Ok(Reply::Leased),
         "flush_dns" => Ok(Reply::Flushed),
         "status" => {
             let running = unsafe { xpc_dictionary_get_bool(reply, cstring("running").as_ptr()) };
@@ -364,6 +496,10 @@ fn parse_reply(service: &CString, method: &str, reply: xpc_object_t) -> Result<R
                 clash_addr: text("clash_addr"),
                 clash_secret: text("clash_secret"),
                 since: text("since"),
+                // 诊断字段：旧 helper 没有这两个键，按 null 处理（契约 §3.2）。
+                helper_build: get_string(reply, "helper_build").filter(|value| !value.is_empty()),
+                helper_version: get_string(reply, "helper_version")
+                    .filter(|value| !value.is_empty()),
             })
         }
         other => Err(XpcError::Protocol(format!("未知方法 {other}"))),
@@ -628,6 +764,8 @@ mod tests {
                     clash_addr: Some("127.0.0.1:50000".into()),
                     clash_secret: Some("s3cret".into()),
                     since: Some("2026-11-05T00:00:00Z".into()),
+                    helper_build: None,
+                    helper_version: None,
                 }
             );
         }
@@ -648,6 +786,8 @@ mod tests {
                     clash_addr: None,
                     clash_secret: None,
                     since: None,
+                    helper_build: None,
+                    helper_version: None,
                 }
             );
         }

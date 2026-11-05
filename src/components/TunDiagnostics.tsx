@@ -18,9 +18,9 @@ interface Props {
 function announcement(phase: Phase): string {
   switch (phase.kind) {
     case "running":
-      return "正在运行 TUN 诊断";
+      return "正在运行网络诊断";
     case "precondition":
-      return "TUN 未连接，无法运行诊断";
+      return "还没有连接，无法运行诊断";
     case "done":
       return `${phase.result.conclusion}，诊断报告已生成`;
     default:
