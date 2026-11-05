@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.4.0`
+> 契约版本：`2.5.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，版本以该文件头为准）
@@ -22,7 +22,7 @@
 - **落库实体字段的时间戳**（`created_at` / `first_seen` / `last_seen` / `checked_at` 等）：**Unix 毫秒整数**，与 `data-model.md` 的列类型一致。见 §2.3。
 - 错误码 **大写下划线**。
 - 所有 payload 带 `contract_version`。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.4.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.5.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
 
 > **命名决策**：事件名沿用 TweetPilot 的真实名称（`message-chunk`、`thinking-chunk`、`tool-call-start`、`tool-call-end`、`ai-status`、`ai-compact`、`ai-request-end`），**不**加 `ai-` 前缀。`docs/phase-1-technical-design.md` §4.2 写的 `agent://delta` / `agent://tool` 是笔误，以本契约为准。
 
@@ -52,8 +52,10 @@
 | 18 | `layout-updated` | Host → UI | `LayoutUpdatedPayload` | **2.0 新增**：中间区域编排布局落库 |
 | 19 | `routing-changed` | Host → UI | `RoutingChangedPayload` | **2.1 新增**：分流模式 / 目标 / 自定义规则变化 |
 | 20 | `rules-changed` | Host → UI | `RulesChangedPayload` | **2.1 新增**：规则数据版本切换 |
+| 21 | `core-upgrade-progress` | Host → UI | `CoreUpgradeProgressPayload` | **2.5 新增**：核心升级进度 |
+| 22 | `core-upgrade-finished` | Host → UI | `CoreUpgradeFinishedPayload` | **2.5 新增**：核心升级结束 |
 
-1–8 是 AI 会话事件，9–20 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
+1–8 是 AI 会话事件，9–22 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
 
 > **事件与命令成对**：每个改变持久状态的命令都必须有一条对应事件。没有事件的变更只允许发生在「只读命令」上。例外是 `probe_run`——它不改状态，但探测失败的副作用（登记问题）由 `issue-changed` 表达。
 
@@ -100,7 +102,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -122,7 +124,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -140,7 +142,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -182,7 +184,7 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 
 ```ts
 type ToolCallEndPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -222,7 +224,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -261,7 +263,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -289,7 +291,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -327,7 +329,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -360,7 +362,7 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   health: HealthSnapshot;
   // 2.2 新增：本次运行累计流量与速率。
   // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
@@ -396,9 +398,9 @@ UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；面板上给用�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   job_id: string;
-  kind: "core_install" | "diag" | "rules_update";
+  kind: "core_install" | "core_upgrade" | "diag" | "rules_update";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
   stage: string;
   progress: number;              // 0.0–1.0
@@ -426,7 +428,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -443,7 +445,7 @@ type AppLifecycleChangedPayload = {
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   seed_id: "veyl_seed";
   content_sha256: string;           // 2.0：变化判定依据
   version: string | null;           // 文件里的 version，仅展示
@@ -498,7 +500,7 @@ type DefaultProfileUpdatedPayload = {
 
 ```ts
 type AskUserQuestionPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   session_id: string;
   request_id: string;
   question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
@@ -573,7 +575,7 @@ tool-call-end    (同一 request_id)
 
 ```ts
 type ConfigChangedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   change: "created" | "updated" | "deleted" | "activated";
   config_id: string;
   config: ConfigSummary | null;      // deleted 时为 null；类型见 commands.md §3.0
@@ -609,7 +611,7 @@ type NodeListChangedReason =
   | "bindings_changed";       // config_update 整体替换了节点集
 
 type NodeListChangedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   reason: NodeListChangedReason;
   config_id: string | null;        // 只有 bindings_changed 时非空
   node_count_total: number;        // 节点池总数
@@ -631,7 +633,7 @@ type NodeListChangedPayload = {
 
 ```ts
 type NodeSwitchedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   config_id: string;
   from_node_id: string | null;
   to_node_id: string;
@@ -659,7 +661,7 @@ type NodeSwitchedPayload = {
 
 ```ts
 type IssueChangedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
   issue: IssueSummary;                  // 变更后的状态
   blocking_issue_id: string | null;     // 当前应插卡的那一条；null = 中间不插卡
@@ -697,7 +699,7 @@ type IssueChangedPayload = {
 
 ```ts
 type LayoutUpdatedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   config_id: string;
   revision: number;            // 每配置单调递增，从 1 开始
   layout: Layout;              // 见 commands.md §3.0
@@ -721,7 +723,7 @@ type LayoutUpdatedPayload = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   config_id: string;
   routing_mode: "direct" | "proxy_all" | "proxy_selected";
   applied_mode: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -747,7 +749,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
@@ -775,6 +777,45 @@ Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 5. **布局按 `revision` 丢弃旧值**（§4.13），不依赖到达顺序。
 6. **`routing-changed` 在 selector 写成功后发出**；`hot_switched = true` 时，其后到达的 `runtime-state-changed` 快照里 `applied_mode` 必须已经是新值，不得回退。UI 按 `route_revision` / `applied_revision` 判断，不以事件到达顺序为准。
 7. **`rules-changed` 不改当前连接**（`effective = "next_connect"`），不得据此刷新运行中的代理卡或状态。
+
+### 4.17 `core-upgrade-progress`（2.5 新增）
+
+```ts
+type CoreUpgradeProgressPayload = {
+  contract_version: "2.5.0";
+  job_id: string;
+  phase: "downloading" | "verifying" | "unpacking" | "installing" | "activating";
+  received: number;               // 已接收字节
+  total: number | null;           // 总字节；源未给 Content-Length 时为 null
+  emitted_at: string;
+};
+```
+
+触发：`core_upgrade` 任务的阶段或已接收字节变化，最多 4 次/秒；1% 以下的字节变化不发。
+
+- `total = null` 表示总大小未知，UI 显示不确定进度条，**不要按 0 算百分比**。
+- 阶段只前进不回退；`downloading` 期间 `received` 单调不减。
+- **只在后台下载与安装，不改变当前运行中的进程**；升级完成后要等用户重启才生效。
+- 任务失败或取消时，进度事件以最后一个阶段的最后一条结束，随后发 `core-upgrade-finished`。
+
+### 4.18 `core-upgrade-finished`（2.5 新增）
+
+```ts
+type CoreUpgradeFinishedPayload = {
+  contract_version: "2.5.0";
+  job_id: string;
+  ok: boolean;
+  code?: string;      // ok = false 时给错误码，取值见 commands.md §7.10
+  version?: string;   // ok = true 时给已安装版本
+  emitted_at: string;
+};
+```
+
+触发：升级任务结束（成功、失败或取消），**每个 `job_id` 恰好一条**，且是该任务最后一条事件。
+
+- `ok = true` 时 UI 重新调用 `core_info`，并按 `restart_required` 提示「重启后生效」；**不自动重启**。
+- `ok = false` 时保留当前版本继续可用；`code` 用于区分网络 / 源 / 校验 / 磁盘 / 忙等失败。
+- 取消的任务同样发本事件，`ok = false`、`code = "CANCELLED"`。
 
 ---
 
@@ -886,6 +927,16 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.5.0（2026-11-05，核心升级进度事件）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.5.0` | 元数据 | 运行时核心版本管理改为 UI 显式触发 |
+| 2 | 新增 `core-upgrade-progress`（事件总数 20 → 22 之一），载荷含 `job_id` / `phase` / `received` / `total` | 新增事件 | 后台下载需要可见进度 |
+| 3 | 新增 `core-upgrade-finished`，每个 `job_id` 恰好一条，`ok = false` 时带 `code` | 新增事件 | 升级结果必须能被 UI 收尾 |
+| 4 | `job-progress.kind` 增加 `core_upgrade` | 字段扩展 | 升级是长任务，`JobGet` 也要能认 |
+| 5 | 明确升级/回滚都不改当前运行中的进程，`restart_required` 由 `core_info` 表达 | 约束 | 不静默重启 |
 
 ### 2.4.0（2026-11-05，节点延迟与出口延迟分开）
 

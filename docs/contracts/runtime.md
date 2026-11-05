@@ -160,7 +160,8 @@ type RuntimeSnapshot = {
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
-  upstream_version: string | null;   // 例 "1.14.4"；未启动时 null
+  upstream_version: string | null;   // 例 "1.14.4"；运行中为进程版本，未运行时为可用运行时版本
+  runtime_source: "installed" | "bundled" | "none"; // 可用运行时的来源；没有可用运行时为 none
   uptime_seconds: number | null;
   config_id: string | null;          // 2.0：原 profile_id
   config_name: string | null;        // 2.0：原 profile_name
@@ -185,7 +186,9 @@ type RuntimeSnapshot = {
 
 实现要求：
 
-- `pid` / `upstream_version` / `uptime_seconds` 在 `idle` 与 `failed` 下**必须为 `null`**，不得为 0 或空串。
+- `pid` / `uptime_seconds` 在 `idle` 与 `failed` 下**必须为 `null`**，不得为 0 或空串。
+- `upstream_version` 未运行时**不得为 `null`**（只要还有可用运行时）：取当前可用运行时的版本，来源见 `runtime_source`。只有既没有已安装版本、随包也不可用时才为 `null`。
+- `runtime_source` 恒存在，取值只有 `installed` / `bundled` / `none`。**「未运行」不等于「不可用」**：`state = idle` 且 `runtime_source = bundled` 表示运行时可用、只是没连接。
 - `traffic` 为 `null` 表示**没有数据**，不是 0 字节。具体是：未连接（`idle` / `failed`）、刚连上还没采到第一个样本、TUN 模式（采样不覆盖）。采样失败时保留上一次的值，**不得清成 0**。
 - `config_hash` 用于 UI 判断「配置是否变化」，不是安全校验手段。
 - `mode` 在 `idle` / `failed` 下为 `null`；在 `starting` / `running` / `restarting` / `degraded` / `stopping` 下非 `null`。
@@ -194,6 +197,8 @@ type RuntimeSnapshot = {
 
 | 字段 | 取值 | 不变量 |
 |---|---|---|
+| `upstream_version` | sing-box 版本号 | 运行中 = 进程实际版本；未运行 = 当前可用运行时版本（已安装且可执行 > 随包）。只有两份都不可用时才为 `null`。**不得**把「未运行」写成 `null` 或「未安装」 |
+| `runtime_source` | `installed` / `bundled` / `none` | 描述当前可用运行时的来源。`none` 表示既没有已安装版本、随包也不可用——这是**唯一**可以对外说「运行时不可用」的情形 |
 | `config_id` / `config_name` | 当前连接所用的配置 | 与 `node_id` 同生同灭；未连接时为 `null`。2.0 之前叫 `profile_id` / `profile_name`，**没有默认配置包的特殊情形**——没有配置就报 `no_config`，不存在 `config_id = null` 但 `config_name` 非空的合法状态 |
 | `node_id` / `node_name` | 本次实际连接的节点 | 未连接时为 `null`；连接中切换节点后立即变新值（热切换不重启进程） |
 | `connected_since` | 本次进入 `running` 的时刻，ISO 8601 UTC | 仅在 `running` / `degraded` 下非 `null`；与 `uptime_seconds` **同源**：`uptime_seconds ≈ now − connected_since`。两者不得互相矛盾 |
@@ -591,6 +596,7 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 | 3 | 明确 `latency_ms` 与 `node_latency_ms` **不得互相填充**；断开 / 失败 / 节点热切换后 `node_latency_ms` 必须复位为 `null` | 不变量 | 防止把上一个节点的数字留在面板上 |
 | 4 | §4.1 健康检查表新增 `node_latency`：连接后一次 + 每 30s，6s 超时（上游 `timeout=3000`），测不到不等于不健康；§5.3 的 delay 超时由 2s 修正为实际的 6s | 新增检查项 | 与实现一致（`LATENCY_REFRESH_INTERVAL`），避免对节点另起一套探测节奏 |
 | 5 | §2.3 / §2.5 / §2.6 的 `contract_version` 字面量统一为本文件版本 | 元数据 | 见 §0 的版本约定 |
+| 6 | §2.5 / §2.5.1 新增 `runtime_source`；`upstream_version` 未运行时改为报告可用运行时版本，不再恒为 `null` | 字段新增 / 语义修正 | 真机缺陷：未连接时被误报成「运行时未安装」，AI 因此提议安装已内置的运行时 |
 
 ### 2.2.0（2026-11-04，流量采样的真实口径）
 

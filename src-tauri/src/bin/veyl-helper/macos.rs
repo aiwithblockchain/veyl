@@ -757,6 +757,19 @@ impl Supervisor {
         // 两次 start 串行：并发 spawn 会留下一个没人持有的 child。
         let _start_guard = self.start_lock.lock().unwrap();
 
+        #[cfg(debug_assertions)]
+        {
+            let first = self.status().is_none();
+            diag(
+                self,
+                uid,
+                &format!(
+                    "start 收到 mode=tun config_bytes={} 首次={first}",
+                    config.len()
+                ),
+            );
+        }
+
         // 代号：老的 stop_child 只能清理自己那一代的文件。
         self.generation.fetch_add(1, Ordering::SeqCst);
         let mut started_at = Instant::now();
@@ -787,6 +800,16 @@ impl Supervisor {
             "start 阶段 runtime={}ms",
             phase.elapsed().as_millis()
         ));
+        #[cfg(debug_assertions)]
+        diag(
+            self,
+            uid,
+            &format!(
+                "runtime 解析 来源=bundled path={} 验签=通过 耗时={}ms",
+                binary.display(),
+                phase.elapsed().as_millis()
+            ),
+        );
 
         // 规则不是每个配置都要；错在这里不应该挡住不带分流的配置。
         let has_rule_sets = serde_json::from_str::<serde_json::Value>(config)
@@ -798,6 +821,8 @@ impl Supervisor {
             })
             .unwrap_or(false);
         if has_rule_sets {
+            #[cfg(debug_assertions)]
+            let rules_before = self.rule_index().len();
             let phase = Instant::now();
             // 规则由启动时的后台线程解包，这里只等结果；等待不计入 25 秒准备上限。
             self.wait_for_rules(RULES_WAIT_DEADLINE)?;
@@ -805,6 +830,17 @@ impl Supervisor {
                 "start 阶段 rules_wait={}ms",
                 phase.elapsed().as_millis()
             ));
+            #[cfg(debug_assertions)]
+            diag(
+                self,
+                uid,
+                &format!(
+                    "规则就绪 数量={} 耗时={}ms cache_hit={}",
+                    self.rule_index().len(),
+                    phase.elapsed().as_millis(),
+                    rules_before > 0
+                ),
+            );
             started_at = Instant::now();
         }
 
@@ -817,7 +853,7 @@ impl Supervisor {
         let phase = Instant::now();
         // 替换语义：先收旧进程，但不设置取消标志（那会把这次 start 自己取消掉）。
         let had_child = { self.child.lock().unwrap().is_some() };
-        self.stop_child();
+        self.stop_child("replace");
         self.note_for(uid, &format!(
             "start 阶段 stop_old={}ms had_child={had_child}",
             phase.elapsed().as_millis()
@@ -842,17 +878,25 @@ impl Supervisor {
         let clash_secret = random_secret();
         let rules = self.rule_index();
         let prepared = protocol::prepare_config(config, &rules, clash_port, &clash_secret)?;
+        let prepared_bytes = serde_json::to_vec_pretty(&prepared).unwrap();
 
-        write_private(
-            &self.config_path(),
-            &serde_json::to_vec_pretty(&prepared).unwrap(),
-        )
-        .map_err(|error| {
+        write_private(&self.config_path(), &prepared_bytes).map_err(|error| {
             ProtocolError::new(
                 protocol::ERR_TUN_START_FAILED,
                 format!("写入配置失败：{error}"),
             )
         })?;
+        #[cfg(debug_assertions)]
+        diag(
+            self,
+            uid,
+            &format!(
+                "配置写入 path={} bytes={} sha256={}",
+                self.config_path().display(),
+                prepared_bytes.len(),
+                short_sha256(&prepared_bytes)
+            ),
+        );
         self.note_for(uid, &format!(
             "start 阶段 prepare={}ms",
             phase.elapsed().as_millis()
@@ -915,6 +959,15 @@ impl Supervisor {
         ));
 
         let pid = child.id();
+        #[cfg(debug_assertions)]
+        diag(
+            self,
+            uid,
+            &format!(
+                "spawn pid={pid} args=run -c {}",
+                self.config_path().display()
+            ),
+        );
         // 启动时刻由特权侧生成（契约 §3.1），App 崩溃重启后 `status` 也报这个值。
         let since = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         // 记下启动时间与可执行路径：下次崩溃重启时靠这三样认出「是我们起的那个」，
@@ -940,6 +993,52 @@ impl Supervisor {
             uid,
         )?;
 
+        #[cfg(debug_assertions)]
+        {
+            let address = prepared["inbounds"]
+                .as_array()
+                .and_then(|entries| entries.first())
+                .and_then(|entry| entry.get("address"))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            diag(self, uid, &format!("接管开始 等待路由 address={address}"));
+            let phase = Instant::now();
+            let mut found = None;
+            for _ in 0..15 {
+                found = diag_tun_interface(&address);
+                if found.is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            match found {
+                Some(name) => {
+                    let (count, missing) = diag_route_snapshot(&name);
+                    diag(
+                        self,
+                        uid,
+                        &format!(
+                            "接管结束 tun={name} 路由数={count} 关键段={}/4 缺失={missing:?} 耗时={}ms",
+                            4 - missing.len(),
+                            phase.elapsed().as_millis()
+                        ),
+                    );
+                }
+                None => diag(
+                    self,
+                    uid,
+                    &format!(
+                        "接管结束 未找到 TUN 设备（address={address}）耗时={}ms",
+                        phase.elapsed().as_millis()
+                    ),
+                ),
+            }
+        }
+
         self.note_for(uid, &format!(
             "start 完成 总耗时={}ms",
             started_at.elapsed().as_millis()
@@ -958,12 +1057,14 @@ impl Supervisor {
     /// 否则客户端超时后的 stop 只能等 start 自己跑完。
     fn stop(&self) {
         self.stop_requested.store(true, Ordering::SeqCst);
-        self.stop_child();
+        self.stop_child("external");
     }
 
     /// 只收自己起的子进程，不动取消标志。`start` 的替换语义用它——
     /// 走 `stop()` 会把这次 start 自己取消掉。
-    fn stop_child(&self) {
+    fn stop_child(&self, reason: &str) {
+        #[cfg(not(debug_assertions))]
+        let _ = reason;
         // 记下代号：等子进程最多 5 秒，这期间新一代 start 可能已经写好文件。
         let generation = self.generation.load(Ordering::SeqCst);
         let child = self.child.lock().unwrap().take();
@@ -989,6 +1090,12 @@ impl Supervisor {
         // 代号没变才删：变了说明新 start 已经接管这些文件，
         // 删掉会让 live root 进程失去孤儿回收线索。
         self.cleanup_files(generation);
+
+        #[cfg(debug_assertions)]
+        self.note(&format!(
+            "[diag] stop 原因={reason} 进程=已停止 残留utun路由={}",
+            diag_utun_route_count()
+        ));
     }
 
     /// 收掉上次崩溃留下的 sing-box。
@@ -1385,6 +1492,107 @@ fn static_requirement_check(
             Err(format!("签名不满足我们的要求（OSStatus {valid}）"))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// debug 构建专用的分段诊断日志
+//
+// release 构建里这些函数与调用点都不编译，行为与日志完全不受影响。
+// 日志里不出现配置内容、密码或密钥；只写路径、字节数、哈希前缀、IP/端口。
+// ---------------------------------------------------------------------------
+
+#[cfg(debug_assertions)]
+fn diag(supervisor: &Supervisor, uid: u32, message: &str) {
+    supervisor.note_for(uid, &format!("[diag] {message}"));
+}
+
+#[cfg(debug_assertions)]
+fn short_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = hex(Sha256::digest(bytes).as_slice());
+    digest.get(..12).unwrap_or(&digest).to_string()
+}
+
+/// 从 `ifconfig -a` 里找持有该地址的 utun。地址不带前缀长度。
+#[cfg(debug_assertions)]
+fn diag_tun_interface(address: &str) -> Option<String> {
+    let output = std::process::Command::new("/sbin/ifconfig")
+        .arg("-a")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if !line.starts_with(char::is_whitespace) {
+            current = line.split(':').next().map(str::to_string);
+            continue;
+        }
+        let Some(name) = current.as_deref() else {
+            continue;
+        };
+        if !name.starts_with("utun") {
+            continue;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.first() == Some(&"inet") && tokens.get(1) == Some(&address) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// 指向该接口的路由数，以及缺失的关键段（0/1、128/1、16/4、32/3）。
+#[cfg(debug_assertions)]
+fn diag_route_snapshot(interface: &str) -> (usize, Vec<&'static str>) {
+    let Ok(output) = std::process::Command::new("/usr/sbin/netstat")
+        .args(["-rn", "-f", "inet"])
+        .output()
+    else {
+        return (0, vec!["0/1", "128/1", "16/4", "32/3"]);
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut count = 0usize;
+    let mut has = [false; 4];
+    for line in text.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 4 || tokens[3] != interface {
+            continue;
+        }
+        count += 1;
+        match tokens[0] {
+            "0/1" | "0.0.0.0/1" => has[0] = true,
+            "128/1" | "128.0.0.0/1" => has[1] = true,
+            "16/4" | "16.0.0.0/4" => has[2] = true, // secret-scan:allow 接管关键段常量
+            "32/3" | "32.0.0.0/3" => has[3] = true, // secret-scan:allow 接管关键段常量
+            _ => {}
+        }
+    }
+    let labels = ["0/1", "128/1", "16/4", "32/3"];
+    let missing = labels
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !has[*index])
+        .map(|(_, label)| *label)
+        .collect();
+    (count, missing)
+}
+
+/// 全局 utun 路由数：stop 后用它判断有没有残留。
+#[cfg(debug_assertions)]
+fn diag_utun_route_count() -> usize {
+    let Ok(output) = std::process::Command::new("/usr/sbin/netstat")
+        .args(["-rn", "-f", "inet"])
+        .output()
+    else {
+        return 0;
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            tokens.len() >= 4 && tokens[3].starts_with("utun")
+        })
+        .count()
 }
 
 // ---------------------------------------------------------------------------

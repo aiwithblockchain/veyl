@@ -111,7 +111,7 @@ impl std::fmt::Debug for ProtocolConfig {
 ///
 /// `info` 会为**每一条连接**写一行：正常浏览一天就是几十 MB，而产品要求
 /// 「只写关键内容」。所以 release 用 `warn`（错误照样记，正常连接不记），
-/// debug 构建用 `info`（开发时要看细节）。
+/// debug 构建用 `debug`（TUN 排查要看出站拨号失败的原因）。
 /// 不用 `error`：连接失败的原因多半在 warn/info 级别，压到 error 就看不见了。
 ///
 /// `VEYL_SINGBOX_LOG=debug|info|warn|error` 可以临时覆盖，调试单个问题用。
@@ -122,7 +122,7 @@ fn default_log_level() -> String {
         .filter(|value| matches!(value.as_str(), "debug" | "info" | "warn" | "error"))
         .unwrap_or_else(|| {
             if cfg!(debug_assertions) {
-                "info"
+                "debug"
             } else {
                 "warn"
             }

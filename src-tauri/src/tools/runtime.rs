@@ -28,7 +28,9 @@ impl Tool for RuntimeStatusTool {
     }
 
     fn description(&self) -> &str {
-        "读取 sing-box 运行时的状态快照（进程、版本、健康、出口 IP、流量、连接数）。只读。"
+        "读取 sing-box 运行时的状态快照（进程、版本、来源、健康、出口 IP、流量、连接数）。\
+未连接时也会报告当前可用的运行时版本与来源；只有确实没有可用运行时时才会说不可用。\
+运行时随安装包自带，AI 不需要也不能安装它。只读。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -47,31 +49,51 @@ impl Tool for RuntimeStatusTool {
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match self.services.runtime_status().await {
-            Ok(snapshot) => {
-                let state = snapshot
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string();
-                let version = snapshot
-                    .get("upstream_version")
-                    .and_then(Value::as_str)
-                    .unwrap_or("未安装")
-                    .to_string();
-                let exit_ip = snapshot
-                    .get("health")
-                    .and_then(|health| health.get("exit_ip"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("未知")
-                    .to_string();
-                ToolOutcome::ok(
-                    format!("运行状态 {state}，sing-box {version}，出口 {exit_ip}。"),
-                    snapshot,
-                )
-            }
+            Ok(snapshot) => ToolOutcome::ok(summary(&snapshot), snapshot),
             Err(error) => failure(error),
         };
         envelope::finish(ctx, "RuntimeStatus", outcome)
+    }
+}
+
+fn source_label(source: &str) -> &'static str {
+    match source {
+        "bundled" => "随包",
+        "installed" => "已安装",
+        _ => "来源未知",
+    }
+}
+
+/// 「未运行」与「未安装」是两件事：前者只说明没有连接，后者才代表运行时不可用。
+fn summary(snapshot: &Value) -> String {
+    let state = snapshot
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let connected = matches!(state, "running" | "degraded");
+    let version = snapshot.get("upstream_version").and_then(Value::as_str);
+    let source = snapshot
+        .get("runtime_source")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+
+    let runtime = match version {
+        Some(version) if source != "none" => {
+            format!("运行时 {version}（{}）", source_label(source))
+        }
+        Some(version) => format!("运行时 {version}"),
+        None => "运行时不可用".to_string(),
+    };
+
+    if connected {
+        let exit_ip = snapshot
+            .get("health")
+            .and_then(|health| health.get("exit_ip"))
+            .and_then(Value::as_str)
+            .unwrap_or("未知");
+        format!("运行状态 {state}，{runtime}，出口 {exit_ip}。")
+    } else {
+        format!("运行状态 {state}，{runtime}，未连接。")
     }
 }
 
@@ -266,5 +288,63 @@ mod log_format_tests {
     fn an_empty_log_says_so() {
         let text = format_logs(&json!({ "lines": [] }));
         assert!(text.contains("日志为空"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod status_summary_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 未连接但随包运行时可用：总结必须带版本与来源，且不能出现「未安装」。
+    #[test]
+    fn an_idle_snapshot_with_a_bundled_runtime_is_not_reported_as_uninstalled() {
+        let text = summary(&json!({
+            "state": "idle",
+            "upstream_version": "1.14.4",
+            "runtime_source": "bundled",
+            "health": { "exit_ip": null }
+        }));
+        assert_eq!(text, "运行状态 idle，运行时 1.14.4（随包），未连接。");
+        assert!(!text.contains("未安装"), "{text}");
+        assert!(!text.contains("不可用"), "{text}");
+    }
+
+    #[test]
+    fn an_installed_runtime_is_labelled_as_installed() {
+        let text = summary(&json!({
+            "state": "failed",
+            "upstream_version": "1.15.0",
+            "runtime_source": "installed",
+            "health": { "exit_ip": null }
+        }));
+        assert_eq!(text, "运行状态 failed，运行时 1.15.0（已安装），未连接。");
+    }
+
+    /// 只有确实没有可用运行时（`runtime_source = none`）才可以说不可用。
+    #[test]
+    fn an_unavailable_runtime_is_reported_only_when_there_is_none() {
+        let text = summary(&json!({
+            "state": "idle",
+            "upstream_version": null,
+            "runtime_source": "none",
+            "health": { "exit_ip": null }
+        }));
+        assert_eq!(text, "运行状态 idle，运行时不可用，未连接。");
+        assert!(!text.contains("未安装"), "{text}");
+    }
+
+    #[test]
+    fn a_connected_snapshot_keeps_the_exit_ip() {
+        let text = summary(&json!({
+            "state": "running",
+            "upstream_version": "1.14.4",
+            "runtime_source": "bundled",
+            "health": { "exit_ip": "203.0.113.9" }
+        }));
+        assert_eq!(
+            text,
+            "运行状态 running，运行时 1.14.4（随包），出口 203.0.113.9。"
+        );
     }
 }

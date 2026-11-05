@@ -142,7 +142,7 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(runtime::RuntimeRestartTool::new(Arc::clone(&services))),
         Box::new(runtime::RuntimeLogsTool::new(Arc::clone(&services))),
         Box::new(core::CoreListVersionsTool::new(Arc::clone(&services))),
-        Box::new(core::CoreInstallTool::new(Arc::clone(&services))),
+        // CoreInstall 已移除：运行库安装/升级只能由用户在高级设置里发起。
         Box::new(catalog::CatalogSearchTool::new(Arc::clone(&services))),
         Box::new(configs::ConfigListTool::new(Arc::clone(&services))),
         Box::new(configs::ConfigDetailTool::new(Arc::clone(&services))),

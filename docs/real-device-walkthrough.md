@@ -94,7 +94,7 @@ find "$HOME/Library/WebKit/veyl" -name localstorage.sqlite3 \
 ## 2. 启动与看日志
 
 ```bash
-cd /Users/wesley/ai/veyl
+cd ~/ai/veyl
 npm run app:dev
 ```
 

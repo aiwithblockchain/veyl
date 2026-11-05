@@ -681,6 +681,121 @@ check(
   { advisory: true }
 );
 
+// --- 9：AI 边界的硬约束 ---
+//
+// 运行时核心版本管理只属于 UI：模型既不能下载，也不能升级或回滚。下载并替换一个会以
+// 特权身份运行的二进制，必须由用户看见并显式点击。
+//
+// 契约侧（tools.md / commands.md）是硬约束，违反即失败；实现侧滞后时只报 advisory，
+// 等实现会话删掉 CoreInstallTool 后自动转绿。不要为了让检查变绿而回退契约。
+
+const REMOVED_AI_TOOLS = ["CoreInstall"];
+const UI_ONLY_CORE_COMMANDS = [
+  "core_info",
+  "core_check_updates",
+  "core_upgrade",
+  "core_cancel_upgrade",
+  "core_rollback",
+];
+
+const pascalCase = (s) => s.replace(/(^|_)([a-z0-9])/g, (_, __, c) => c.toUpperCase());
+
+/** tools.md §3 的工具表：模型可见名 → 该行其余内容。 */
+function contractTools() {
+  const md = read("docs/contracts/tools.md");
+  const start = md.indexOf("## 3. P1 工具总表");
+  if (start < 0) throw new Error("未找到 docs/contracts/tools.md 的 §3 工具总表");
+  const end = md.indexOf("### 3.1", start);
+  const section = md.slice(start, end < 0 ? undefined : end);
+  const rows = new Map();
+  for (const m of section.matchAll(/^\|\s*\d+\s*\|\s*`([A-Za-z]+)`\s*\|([^\n]*)$/gm)) {
+    rows.set(m[1], m[2]);
+  }
+  if (rows.size === 0) throw new Error("未能从 tools.md §3 解析出任何工具名");
+  return rows;
+}
+
+/** src-tauri/src/tools/mod.rs 的 vpn_tools() 注册了哪些模型可见名。 */
+function registeredToolTypes() {
+  const rs = read("src-tauri/src/tools/mod.rs");
+  const open = rs.indexOf("pub fn vpn_tools");
+  if (open < 0) throw new Error("未在 tools/mod.rs 找到 vpn_tools()");
+  const close = rs.indexOf("\n}", open);
+  const blob = rs.slice(open, close < 0 ? undefined : close);
+  const names = new Set();
+  for (const m of blob.matchAll(/Box::new\(\w+::(\w+Tool)\b/g)) names.add(m[1].replace(/Tool$/, ""));
+  for (const m of blob.matchAll(/Box::new\((\w+Guard)\b/g)) names.add(m[1].replace(/Guard$/, ""));
+  if (names.size === 0) throw new Error("vpn_tools() 里一个工具都没解析出来");
+  return names;
+}
+
+check("AI 工具集不再包含已移除的工具（契约）", () => {
+  const tools = contractTools();
+  const problems = [];
+  for (const n of REMOVED_AI_TOOLS) {
+    if (tools.has(n)) problems.push(`tools.md §3 仍然列出 ${n}（它已被移出 AI 工具集）`);
+  }
+
+  const md = read("docs/contracts/tools.md");
+  const regStart = md.indexOf("### 3.1 注册清单（照抄）");
+  const regEnd = md.indexOf("### 3.2", regStart);
+  const regBlock = md.slice(regStart, regEnd < 0 ? undefined : regEnd);
+  for (const n of REMOVED_AI_TOOLS) {
+    if (new RegExp(`\\b${n}Tool\\b`).test(regBlock)) {
+      problems.push(`tools.md §3.1 的注册清单里仍有 ${n}Tool`);
+    }
+  }
+  return problems;
+});
+
+check("运行时核心版本管理命令没有 AI 工具（契约）", () => {
+  const tools = contractTools();
+  const problems = [];
+  for (const cmd of UI_ONLY_CORE_COMMANDS) {
+    const name = pascalCase(cmd);
+    if (tools.has(name)) {
+      problems.push(`tools.md §3 列出了 ${name}，但 ${cmd} 是 UI 专用命令（模型不得触发下载/升级/回滚）`);
+    }
+  }
+  return problems;
+});
+
+check("CoreListVersions 仍是只读 AI 工具", () => {
+  const tools = contractTools();
+  const row = tools.get("CoreListVersions");
+  if (!row) return ["tools.md §3 缺少 CoreListVersions（版本查询是保留给模型的只读能力）"];
+  if (!row.includes("`ReadOnly`")) {
+    return ["CoreListVersions 的 PermissionLevel 不是 ReadOnly（它只能查询，不能下载）"];
+  }
+  return [];
+});
+
+check("commands.md 记录了五条 UI 专用 core_* 命令", () => {
+  const doc = contractCommands();
+  return UI_ONLY_CORE_COMMANDS.filter((n) => !doc.has(n)).map((n) => `commands.md §2 缺少 ${n}`);
+});
+
+check(
+  "AI 工具实现与 contracts/tools.md 的工具集一致（advisory）",
+  () => {
+    const registered = registeredToolTypes();
+    const problems = [];
+    for (const n of REMOVED_AI_TOOLS) {
+      if (registered.has(n)) {
+        problems.push(`src-tauri/src/tools/mod.rs 仍注册 ${n}Tool（契约已移除；删掉后本项转绿）`);
+      }
+    }
+    for (const cmd of UI_ONLY_CORE_COMMANDS) {
+      const n = pascalCase(cmd);
+      if (registered.has(n)) {
+        problems.push(`src-tauri/src/tools/mod.rs 注册了 ${n}Tool，但 ${cmd} 是 UI 专用命令`);
+      }
+    }
+    return problems;
+  },
+  { advisory: true }
+);
+
 // --- 输出 ---
 
 const strict = process.env.AIVPN_CONTRACT_STRICT === "1";

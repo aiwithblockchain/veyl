@@ -59,13 +59,34 @@ _codesign() {
   fi
 }
 
+# 构建前签好随包运行时，让 `build.rs` 哈希的是**签名后的字节**。
+#
+# 签名会改写 Mach-O（插入 CodeDirectory、时间戳），字节一变，编译期算出的
+# sha256 就对不上包里的副本，安装时只能回退到下载。所以顺序必须是：
+# 先签运行时 → 再 cargo build（哈希写进主程序与 helper）→ 组装 → 签整个包，
+# 组装阶段不能再碰这个文件。
+prepare_bundled_runtime() {
+  local runtime="$1" identity
+  identity="$(signing_identity)"
+  [ -f "$runtime" ] || return 0
+  printf '  签名随包运行时：%s\n' "$(basename "$runtime")"
+  _codesign "$identity" "$runtime" || return 1
+  assert_signed_runtime "$runtime" "$identity"
+}
+
 # 第一轮：裸 Mach-O 文件（dylib、helper 可执行文件），由内向外。
 sign_nested_files() {
   local app="$1" identity="$2" list
+  app="${app%/}"
   list="$(mktemp "${TMPDIR:-/tmp}/veyl-sign-files.XXXXXX")"
 
   find "$app/Contents" -type f -print0 2>/dev/null |
     while IFS= read -r -d '' candidate; do
+      # 随包运行时已经在构建前签过（见 prepare_bundled_runtime）。这里重签会
+      # 改字节，把编译进二进制的哈希变成废值——全新安装就会一直回退到下载。
+      if [ "$candidate" = "$app/Contents/Resources/runtime/sing-box" ]; then
+        continue
+      fi
       if file "$candidate" 2>/dev/null | grep -q 'Mach-O'; then
         printf '%s\n' "$candidate"
       fi
@@ -121,32 +142,58 @@ sign_app() {
   sign_nested_files "$app" "$identity" || return 1
   sign_nested_bundles "$app" "$identity" || return 1
 
+  # 只封 bundle，不加 `--deep`：嵌套代码已经由内向外签完，`--deep` 会让签名工具
+  # 再走一遍嵌套项，把构建前签好的运行时的字节改掉。
   printf '  sign app %s\n' "$(basename "$app")"
-  _codesign "$identity" --deep "$app" || return 1
-  assert_runtime_identifier "$app" "$identity" || return 1
+  _codesign "$identity" "$app" || return 1
+  assert_bundled_runtime "$app" "$identity" || return 1
 }
 
 # 运行时必须以裸 Mach-O 的文件名作为签名 identifier：helper 的验签要求里写死了
-# `identifier "sing-box"`。改名、或以后有人给它加 `--identifier`，都会让 TUN
-# 在真机上静默失配，所以在签名之后立刻断言。
-assert_runtime_identifier() {
-  local app="$1" identity="$2" runtime identifier
-  runtime="$app/Contents/Resources/runtime/sing-box"
+# `identifier "sing-box"`。它还必须真的带着有效签名——签名是在构建前做的，
+# 组装阶段不再重签，这里既验 identifier 也验签名。
+assert_bundled_runtime() {
+  local app="$1" identity="$2"
+  assert_signed_runtime "$app/Contents/Resources/runtime/sing-box" "$identity"
+}
+
+assert_signed_runtime() {
+  local runtime="$1" identity="$2" identifier authority
   [ -f "$runtime" ] || return 0
-  identifier="$(codesign -d --verbose=4 "$runtime" 2>&1 | sed -n 's/^Identifier=//p' | head -1)"
-  if [ "$identifier" = "sing-box" ]; then
-    printf '  运行时签名 identifier：%s\n' "$identifier"
-    return 0
+
+  if ! codesign --verify --strict "$runtime" >/dev/null 2>&1; then
+    printf '错误：随包运行时没有有效签名：%s\n' "$runtime" >&2
+    printf '  它必须在构建前由 prepare_bundled_runtime 签好，\n' >&2
+    printf '  build.rs 才能把签名后的哈希编进主程序与 helper。\n' >&2
+    return 1
   fi
+
+  identifier="$(codesign -d --verbose=4 "$runtime" 2>&1 | sed -n 's/^Identifier=//p' | head -1)"
   if [ "$identity" = "-" ]; then
     # ad-hoc 的 identifier 本来就会被加随机后缀，且这种包 TUN 也用不了。
-    printf '警告：ad-hoc 签名的运行时 identifier 是 %s（这个包上 TUN 不可用）\n' \
-      "${identifier:-<空>}" >&2
+    if [ "$identifier" = "sing-box" ]; then
+      printf '  运行时签名 identifier：%s\n' "$identifier"
+    else
+      printf '警告：ad-hoc 签名的运行时 identifier 是 %s（这个包上 TUN 不可用）\n' \
+        "${identifier:-<空>}" >&2
+    fi
     return 0
   fi
-  printf '错误：运行时的签名 identifier 是 "%s"，helper 验签要求 "sing-box"\n' \
-    "${identifier:-<空>}" >&2
-  return 1
+
+  if [ "$identifier" != "sing-box" ]; then
+    printf '错误：运行时的签名 identifier 是 "%s"，helper 验签要求 "sing-box"\n' \
+      "${identifier:-<空>}" >&2
+    return 1
+  fi
+
+  authority="$(codesign -d --verbose=4 "$runtime" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
+  if [ "$authority" != "$identity" ]; then
+    printf '错误：随包运行时由 "%s" 签名，与当前身份 "%s" 不一致\n' \
+      "${authority:-<无>}" "$identity" >&2
+    printf '  换证书后必须重新构建，否则编译期哈希与包内副本对不上。\n' >&2
+    return 1
+  fi
+  printf '  运行时签名 identifier：%s\n' "$identifier"
 }
 
 submit_and_wait() {

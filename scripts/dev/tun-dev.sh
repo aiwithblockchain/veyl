@@ -212,6 +212,21 @@ fi
 # ---- 2. 构建 ----
 printf '[1/5] 构建 debug .app\n'
 export VEYL_TEAM_ID="$TEAM"
+export VEYL_DEV_ID_APP="$IDENTITY"
+# 开发证书不保证被 timestamp 服务接受；Developer ID 必须带时间戳。
+# 必须在签名运行时之前定下来——它决定运行时的签名内容。
+if [ "$IDENTITY_KIND" = "development" ]; then
+  export VEYL_SIGN_TIMESTAMP=0
+else
+  export VEYL_SIGN_TIMESTAMP=1
+fi
+# shellcheck source=../packaging/lib/sign-macos.sh
+source "$ROOT/scripts/packaging/lib/sign-macos.sh"
+
+# 签名必须先于构建：build.rs 把运行时**签名后**的 sha256 编进主程序与 helper，
+# 安装时按它校验随包副本。组装后再签会改字节，哈希必然对不上。
+prepare_bundled_runtime "$RUNTIME_SRC" || die "签名随包运行时失败：$RUNTIME_SRC"
+
 (cd "$ROOT" && npm run tauri -- build --debug --bundles app)
 
 [ -d "$APP_SRC" ] || die "找不到构建产物：$APP_SRC"
@@ -236,6 +251,9 @@ cp "$LAUNCHD_SRC" "$APP_SRC/Contents/Library/LaunchDaemons/com.veyl.helper.plist
 mkdir -p "$APP_SRC/Contents/Resources/runtime"
 cp "$RUNTIME_SRC" "$APP_SRC/Contents/Resources/runtime/sing-box"
 chmod 755 "$APP_SRC/Contents/Resources/runtime/sing-box"
+# 包里那份必须与构建时被哈希的源文件逐字节相同，否则哈希断言一定失败。
+cmp -s "$RUNTIME_SRC" "$APP_SRC/Contents/Resources/runtime/sing-box" \
+  || die "包内运行时与签名后的源文件不一致：$RUNTIME_SRC"
 
 RULES_IN_APP="$(ls "$APP_SRC"/Contents/Resources/resources/rules/veyl-rules-*.tar.zst 2>/dev/null | head -1)"
 [ -n "$RULES_IN_APP" ] || die "包内没有规则归档：$APP_SRC/Contents/Resources/resources/rules/
@@ -245,15 +263,8 @@ printf '  helper / plist / 运行时 / 规则归档 就位\n'
 
 # ---- 4. 签名：与发布包同一套嵌套签名逻辑，只是不公证 ----
 printf '\n[4/5] 签名\n'
-# 开发证书不保证被 timestamp 服务接受；Developer ID 必须带时间戳。
-if [ "$IDENTITY_KIND" = "development" ]; then
-  export VEYL_SIGN_TIMESTAMP=0
-else
-  export VEYL_SIGN_TIMESTAMP=1
-fi
-export VEYL_DEV_ID_APP="$IDENTITY"
-# shellcheck source=../packaging/lib/sign-macos.sh
-source "$ROOT/scripts/packaging/lib/sign-macos.sh"
+# `sign_app` 内部已断言包内运行时的签名有效、identifier 是 `sing-box`、
+# 签名身份与当前证书一致。macOS 的运行时判定用验签，不用编译期哈希。
 sign_app "$APP_SRC"
 codesign --verify --deep --strict --verbose=2 "$APP_SRC" >/dev/null
 printf '  签名校验通过\n'

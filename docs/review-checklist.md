@@ -52,7 +52,7 @@ python3 -I -c "import json,os;d=json.load(open(os.path.expanduser('~/.veyl/secre
 **执行**
 
 ```bash
-cd /Users/wesley/ai/veyl
+cd ~/ai/veyl
 npm run app:dev
 ```
 

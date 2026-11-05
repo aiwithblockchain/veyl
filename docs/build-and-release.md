@@ -206,15 +206,26 @@ bash scripts/packaging/build-dmg.sh --skip-notarize   # 本地快速出包（不
 
 0. 检查 `src-tauri/icons/icon.icns` 的修改时间是否早于 `aivpn.png`；是则**警告并提示跑 `npm run icons`**（不自动跑，避免脚本偷偷改仓库文件）。
 1. 读版本号。
-2. `npm run build`。
-3. `tauri build --target universal-apple-darwin --bundles app`。
-4. 校验 `.app` 内可执行文件是 universal（`lipo -archs` 含 `arm64` 与 `x86_64`）。
-5. 签嵌套 Mach-O（两轮）。
-6. `codesign --force --deep --options runtime --timestamp`。
-7. 打 zip → `notarytool submit --wait` → `stapler staple`。
-8. 制作 DMG → 签 DMG → 公证 → staple。
-9. `codesign --verify --deep --strict` + `spctl -a -vv`。
-10. 产物放 `build/packages/Veyl-<version>.dmg`。
+2. **签名随包运行时**（`prepare_bundled_runtime`）。这一步必须早于任何 cargo 构建：
+   `build.rs` 把 `resources/runtime/sing-box` **签名后**的 sha256 编进主程序与 helper，
+   安装时按这个值校验包内副本。签名会改写 Mach-O，组装完再签必然对不上，
+   全新安装就会一直回退到 GitHub 下载。
+3. `npm run build`。
+4. `tauri build --target universal-apple-darwin --bundles app`；补齐并安装 `veyl-helper`；
+   把运行时复制进 `Contents/Resources/runtime/`，断言与签名后的源文件逐字节相同。
+5. 校验 `.app` 内可执行文件是 universal（`lipo -archs` 含 `arm64` 与 `x86_64`）。
+6. 签嵌套 Mach-O（两轮，**跳过** `Contents/Resources/runtime/sing-box`——它已在第 2 步签好）。
+7. 封 bundle：`codesign --force --options runtime --timestamp`，**不加 `--deep`**
+   （`--deep` 会重走嵌套项，可能重签运行时）。
+8. 断言包内运行时的签名有效、identifier 是 `sing-box`、签名身份与当前证书一致。
+   macOS 的运行时判定用**验签**，不用编译期哈希——哈希只对签名前的文件成立。
+9. 打 zip → `notarytool submit --wait` → `stapler staple`。
+10. 制作 DMG → 签 DMG → 公证 → staple。
+11. `codesign --verify --deep --strict` + `spctl -a -vv`。
+12. 产物放 `build/packages/Veyl-<version>.dmg`。
+
+同一顺序由 `scripts/test/packaging-sign-order.sh` 在 CI 中守护（ad-hoc 签名，
+不需要证书）；它断言签名确实改字节、而组装与封 bundle 不再改运行时。
 
 凭据：
 
@@ -347,6 +358,28 @@ sing-geosite / sing-geoip 是 GPL-3.0-or-later。`rules:fetch` 通过 `api.githu
 
 `runtime:fetch` 先把 universal 写到临时文件，校验 `lipo -archs` 同时含 `x86_64`/`arm64`，实际执行 `<产物> version` 核对版本，流式计算 sha256，最后原子 `rename`；最终 `universal.sha256` 写入 `src-tauri/assets/runtime-manifest.json`。
 
+> 注意：这个 `universal.sha256` 是**下载进来、签名之前**的产物哈希，只用于追溯。
+> macOS 打包会在构建前给运行时签名（`prepare_bundled_runtime`），签名后字节改变；
+> App 判定随包运行时用的是代码签名，不是这个哈希。
+
+### 4.11 运行库更新清单与公钥注入
+
+**地址固定**：`https://updates.veyl.app/runtime/manifest-v1.json`（HTTPS、禁止跨主机跳转、禁止 userinfo）。
+清单是信封 `{ payload, sig, key_id }`：`sig` 是对 **base64 解码后的 payload 原始字节**做的 Ed25519 签名，不做 JSON 规范化。
+
+**公钥注入（只注入公钥）**
+
+`src-tauri/build.rs` 把 `VEYL_UPDATE_PUBKEYS` 编进二进制，格式 `key_id=hex[,key_id=hex]`（每把公钥 32 字节）。未设置时升级功能不可用——**不是跳过验签**。
+
+- CI：公钥放在仓库变量（不是 secret，公钥本来就可以公开），构建前 `export VEYL_UPDATE_PUBKEYS=...`；私钥只在发布 job 的 secret 里，用于给清单签名。
+- 轮换：同时编进「当前 + 下一把」，用 `key_id` 选择；等所有客户端都升级后再移除旧 key。
+- 本地：`bash scripts/dev/update-keys.sh gen`，它会把私钥写到 `~/.veyl/dev-keys/updates.key`（0600）并打印要 export 的值；`update-keys.sh sign payload.json` 输出信封。**私钥不进仓库、日志或模型上下文。**
+
+**不可信清单一律停止升级**：验签失败、schema 不认识、`generated_at` 超过 30 天、`min_app_version` 高于当前版本、下载地址不是 HTTPS。错误码 `SOURCE_UNAVAILABLE`，文案「更新信息无法验证，已停止」。断网是 `NETWORK_UNREACHABLE`，此时不进入下载。
+
+**下载与安装**：先按清单 `sha256` 校验，再验平台签名（macOS `SecStaticCodeCheckValidity`，要求 `identifier=sing-box` + Team OU；Windows Authenticode 尚未接入，直接拒绝）。产物写到 `~/.veyl/runtime/.staging/<version>`，成功后 rename 到 `~/.veyl/runtime/<version>/`；启动时清理 `.staging`。不热替换运行中的进程，装完提示「下次连接时生效」。
+
+
 ---
 
 ## 5. 环境变量与密钥管理
@@ -359,6 +392,7 @@ sing-geosite / sing-geoip 是 GPL-3.0-or-later。`rules:fetch` 通过 `api.githu
 | `VEYL_NOTARY_PROFILE` | notarytool profile 名 | 否 |
 | `VEYL_WIN_SIGN_CMD` | Windows 云 HSM 签名命令 | 否 |
 | `VEYL_WIN_CERT_THUMBPRINT` | Windows 本地证书指纹 | 否 |
+| `VEYL_UPDATE_PUBKEYS` | 运行库更新清单的 Ed25519 公钥（`key_id=hex`） | 公钥可以进；私钥绝不 |
 | `RUST_LOG` | 开发日志级别 | 可以有默认值 |
 | `MOCK_CATALOG_PORT` / `MOCK_LLM_PORT` / `MOCK_ECHO_PORT` | 测试 mock 端口 | 有默认值即可 |
 

@@ -139,6 +139,62 @@ pub async fn runtime_stop(state: State<'_, Arc<AppState>>) -> Result<Value, Valu
     state.services.runtime_stop(false).await.map_err(error_value)
 }
 
+// ---------------------------------------------------------------------------
+// 运行库（高级设置）。安装/升级只能由用户在这里显式发起，AI 不代劳。
+// ---------------------------------------------------------------------------
+
+/// 当前随包版本、激活版本、来源、是否需要重启。
+#[tauri::command]
+pub async fn core_info(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state.services.core_info().await.map_err(error_value)
+}
+
+/// 检查更新。断网时返回 `NETWORK_UNREACHABLE`，不进入下载。
+#[tauri::command]
+pub async fn core_check_updates(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state.services.core_check_updates().await.map_err(error_value)
+}
+
+/// 开始升级，立即返回 `{ job_id }`；进度走 `core-upgrade-progress` 事件。
+#[tauri::command]
+pub async fn core_upgrade(
+    state: State<'_, Arc<AppState>>,
+    version: String,
+) -> Result<Value, Value> {
+    state
+        .services
+        .core_upgrade(&version)
+        .await
+        .map_err(error_value)
+}
+
+#[tauri::command]
+pub async fn core_cancel_upgrade(
+    state: State<'_, Arc<AppState>>,
+    job_id: String,
+) -> Result<Value, Value> {
+    state
+        .services
+        .core_cancel_upgrade(&job_id)
+        .await
+        .map_err(error_value)
+}
+
+/// 回到随包运行时。
+#[tauri::command]
+pub async fn core_rollback(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state.services.core_rollback().await.map_err(error_value)
+}
+
+/// 仅 debug 构建：TUN 已连接时采集一次诊断，返回结论与报告路径。
+///
+/// 不注册进 release 的 invoke_handler；也不在任何 AI 工具集里。
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn tun_probe(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state.services.tun_probe().await.map_err(error_value)
+}
+
 /// 配置列表（`ConfigListData`）。不返回节点明细，要节点用 config_detail。
 #[tauri::command]
 pub async fn config_list(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {

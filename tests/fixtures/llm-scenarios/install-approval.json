@@ -1,14 +1,12 @@
 {
   "name": "install-approval",
-  "description": "运行时未安装：触发 core_install 后完成连接",
+  "description": "运行时随包可用（安装审批已取消，CoreInstall 已从工具集移除）：查询版本后完成连接",
   "turns": [
     {
       "tool_calls": [
         {
-          "name": "CoreInstall",
-          "arguments": {
-            "version": "1.14.4"
-          }
+          "name": "CoreListVersions",
+          "arguments": {}
         }
       ]
     },

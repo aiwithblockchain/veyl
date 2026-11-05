@@ -48,6 +48,11 @@ pub enum RuntimeError {
     #[error("runtime is not installed")]
     NotInstalled,
 
+    /// 随包运行时缺失或验签不通过。**不再回退到下载**：明确报错，让用户
+    /// 重装或到高级设置里手动升级。
+    #[error("{0}")]
+    BundledUnavailable(String),
+
     #[error("install aborted")]
     InstallAborted,
 
@@ -82,7 +87,9 @@ impl RuntimeError {
     /// 映射到 `docs/contracts/runtime.md` §6 的错误码，Host → UI → Agent 共用同一标识。
     pub fn code(&self) -> &'static str {
         match self {
-            RuntimeError::NotInstalled => "RUNTIME_NOT_INSTALLED",
+            RuntimeError::NotInstalled | RuntimeError::BundledUnavailable(_) => {
+                "RUNTIME_NOT_INSTALLED"
+            }
             RuntimeError::StartupTimeout(_) => "RUNTIME_START_TIMEOUT",
             RuntimeError::ConfigInvalid(_) => "RUNTIME_CONFIG_INVALID",
             RuntimeError::Config(_) => "INVALID_ARGUMENT",
@@ -115,7 +122,9 @@ impl RuntimeError {
             RuntimeError::Precondition { reason, .. } => {
                 Some(serde_json::json!({ "reason": reason }))
             }
-            RuntimeError::NotInstalled => Some(serde_json::json!({ "hint": "call CoreInstall" })),
+            RuntimeError::NotInstalled | RuntimeError::BundledUnavailable(_) => {
+                Some(serde_json::json!({ "hint": "reinstall_or_upgrade_manually" }))
+            }
             RuntimeError::Unsupported { details, .. } => Some(details.clone()),
             _ => None,
         }
@@ -152,10 +161,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_runtime_points_at_core_install() {
+    fn missing_runtime_points_at_reinstall_or_manual_upgrade() {
         let err = RuntimeError::NotInstalled;
         assert_eq!(err.code(), "RUNTIME_NOT_INSTALLED");
-        assert_eq!(err.details().unwrap()["hint"], "call CoreInstall");
+        assert_eq!(
+            err.details().unwrap()["hint"],
+            "reinstall_or_upgrade_manually"
+        );
+        let bundled = RuntimeError::BundledUnavailable("验签未通过".into());
+        assert_eq!(bundled.code(), "RUNTIME_NOT_INSTALLED");
     }
 
     #[test]

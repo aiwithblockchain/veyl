@@ -107,8 +107,29 @@ impl VpnToolServices for FakeServices {
         self.rec.record("core_list_versions");
         Ok(self.data.clone())
     }
-    async fn core_install(&self, version: &str) -> anyhow::Result<Value> {
-        self.rec.record(format!("core_install({version})"));
+    async fn core_info(&self) -> anyhow::Result<Value> {
+        self.rec.record("core_info");
+        Ok(self.data.clone())
+    }
+    async fn core_check_updates(&self) -> anyhow::Result<Value> {
+        self.rec.record("core_check_updates");
+        Ok(self.data.clone())
+    }
+    async fn core_upgrade(&self, version: &str) -> anyhow::Result<Value> {
+        self.rec.record(format!("core_upgrade({version})"));
+        Ok(self.data.clone())
+    }
+    async fn core_cancel_upgrade(&self, job_id: &str) -> anyhow::Result<Value> {
+        self.rec.record(format!("core_cancel_upgrade({job_id})"));
+        Ok(self.data.clone())
+    }
+    async fn core_rollback(&self) -> anyhow::Result<Value> {
+        self.rec.record("core_rollback");
+        Ok(self.data.clone())
+    }
+    #[cfg(debug_assertions)]
+    async fn tun_probe(&self) -> anyhow::Result<Value> {
+        self.rec.record("tun_probe");
         Ok(self.data.clone())
     }
     async fn catalog_search(&self, query: CatalogQuery) -> anyhow::Result<Value> {
@@ -402,7 +423,6 @@ async fn required_fields_must_be_present_and_strings() {
         ("NodeSwitch", "config_id", json!({ "node_id": "nod_1" })),
         ("NodeProbe", "node_id", json!({})),
         ("NodeImportUrl", "url", json!({})),
-        ("CoreInstall", "version", json!({})),
         ("JobGet", "job_id", json!({})),
     ];
 
@@ -535,7 +555,6 @@ async fn oversized_strings_do_not_break_the_envelope() {
         ),
         ("NodeImportUrl", json!({ "url": huge })),
         ("JobGet", json!({ "job_id": huge })),
-        ("CoreInstall", json!({ "version": huge })),
         ("CategoryList", json!({ "query": huge })),
     ];
 
@@ -691,7 +710,6 @@ async fn valid_input_reaches_the_service_and_succeeds() {
         ("NodeSwitch", json!({ "config_id": "cfg_1", "node_id": "nod_1" }), "node_switch(cfg_1,nod_1)"),
         ("NodeProbe", json!({ "node_id": "nod_1" }), "node_probe(nod_1)"),
         ("NodeImportUrl", json!({ "url": "https://example.com/sub" }), "node_import_url(None,23chars)"),
-        ("CoreInstall", json!({ "version": "1.14.4" }), "core_install(1.14.4)"),
         ("JobGet", json!({ "job_id": "job_1" }), "job_get(job_1)"),
         ("VpnConnect", json!({ "config_id": "cfg_1" }), "vpn_connect(Some(\"cfg_1\"))"),
     ];
@@ -787,7 +805,23 @@ async fn service_failure_becomes_a_structured_error_with_next_actions() {
         async fn core_list_versions(&self) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
-        async fn core_install(&self, _: &str) -> anyhow::Result<Value> {
+        async fn core_info(&self) -> anyhow::Result<Value> {
+            Err(anyhow::anyhow!("磁盘满了"))
+        }
+        async fn core_check_updates(&self) -> anyhow::Result<Value> {
+            Err(anyhow::anyhow!("磁盘满了"))
+        }
+        async fn core_upgrade(&self, _: &str) -> anyhow::Result<Value> {
+            Err(anyhow::anyhow!("磁盘满了"))
+        }
+        async fn core_cancel_upgrade(&self, _: &str) -> anyhow::Result<Value> {
+            Err(anyhow::anyhow!("磁盘满了"))
+        }
+        async fn core_rollback(&self) -> anyhow::Result<Value> {
+            Err(anyhow::anyhow!("磁盘满了"))
+        }
+        #[cfg(debug_assertions)]
+        async fn tun_probe(&self) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn catalog_search(&self, _: CatalogQuery) -> anyhow::Result<Value> {

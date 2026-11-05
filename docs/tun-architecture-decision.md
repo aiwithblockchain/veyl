@@ -3,7 +3,7 @@
 > 日期：2026-11-05
 > 状态：**评估结论，未实施**。本文不改任何代码，也不构成对现有实现的否决。
 > 触发原因：产品负责人指出参考项目 `openmesh-cli` 在 macOS 上以 NetworkExtension 跑通 sing-box，且「Debug 模式就能跑」，怀疑我们选错了架构。
-> 参考实现：`/Users/wesley/ai/openmesh-cli/openmesh-apple/`（下称「参考项目」）
+> 参考实现：`~/ai/openmesh-cli/openmesh-apple/`（下称「参考项目」）
 > 姊妹文档：[`docs/tun-alternatives-macos.md`](tun-alternatives-macos.md)（两条路的事实核对，本文在其上做裁决）、[`docs/tun-test-readiness.md`](tun-test-readiness.md)（当前测试就绪度审计）
 > 相关文档：`docs/tun-mode.md` §4、`docs/tun-privilege.md`、`docs/review-checklist.md` B5 组
 
@@ -263,7 +263,7 @@ Apple 的 TN3134 明确写了这一点；参考项目也因此维护了**两套 
 
 ## 9. 参考项目给出的确定事实
 
-（均可在 `/Users/wesley/ai/openmesh-cli/openmesh-apple/` 复核）
+（均可在 `~/ai/openmesh-cli/openmesh-apple/` 复核）
 
 - `MeshFluxMac` = Apple Development + 自动签名，内嵌 `.appex`；`MeshFlux.sys` = Developer ID + 手动签名 + 手写 profile，内嵌 `.systemextension`。**两套 target 并存**，不是一套配置通吃。
 - sysext 的 entitlements 用 `packet-tunnel-provider-systemextension`，app 用同名值；`.appex` 才用不带后缀的 `packet-tunnel-provider`。
@@ -284,4 +284,4 @@ Apple 的 TN3134 明确写了这一点；参考项目也因此维护了**两套 
 - Apple 技术说明 **TN3134「Network Extension provider deployment」**：Developer ID 分发必须用系统扩展，`.appex` 仅限 Mac App Store（本文据此，未附链接）
 - 苹果 entitlement 是否自助、同 Team 是否已有 NE profile：见 [`docs/tun-alternatives-macos.md`](tun-alternatives-macos.md) §3.2 / §3.3（本文采纳其核对结果）
 - 当前测试就绪度与打包阻塞项：见 [`docs/tun-test-readiness.md`](tun-test-readiness.md)
-- 参考实现：`/Users/wesley/ai/openmesh-cli/openmesh-apple/scripts/release_macos_dev_id.sh`、`MeshFlux.xcodeproj/project.pbxproj`、`MeshFlux.sys/SystemExtensionManager.swift`、`vpn_extension_mac{x,os}/`
+- 参考实现：`~/ai/openmesh-cli/openmesh-apple/scripts/release_macos_dev_id.sh`、`MeshFlux.xcodeproj/project.pbxproj`、`MeshFlux.sys/SystemExtensionManager.swift`、`vpn_extension_mac{x,os}/`

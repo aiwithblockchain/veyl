@@ -1,7 +1,7 @@
 # macOS TUN 两条路：root helper vs NetworkExtension
 
 > 2026-11-05 · 只做事实核对与代价评估。
-> 参照实现：`/Users/wesley/ai/openmesh-cli/openmesh-apple/`（下称 openmesh）。
+> 参照实现：`~/ai/openmesh-cli/openmesh-apple/`（下称 openmesh）。
 > 本文**不下最终结论**；「要不要换」由架构师与 PM 裁决。
 >
 > 一句话：`docs/tun-mode.md` §4 里「NetworkExtension 需要 Apple 授权 entitlement，门槛过高」这个前提，
@@ -228,6 +228,6 @@ openmesh 能跑，是因为它跑的是 **Xcode 产出的、已签名、内嵌�
 
 ## 7. 本文的事实来源
 
-- openmesh 代码：`/Users/wesley/ai/openmesh-cli/openmesh-apple/`，逐处已在正文标注文件:行号。
+- openmesh 代码：`~/ai/openmesh-cli/openmesh-apple/`，逐处已在正文标注文件:行号。
 - provisioning profile：只读取了本机钥匙串目录下的 `Name` / `Entitlements` / `ProvisionedDevices` 字段，**没有复制任何 `.provisionprofile` 或签名材料进本仓库**。
 - Apple 侧：TN3134（Network Extension 提供商部署）与 Apple Developer Forums 的 DTS 答复；`packet-tunnel-provider` 为自助能力、Developer ID 分发需系统扩展并带 `-systemextension` 后缀，这两点多处来源一致。

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
+use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::VpnToolServices;
 
 pub struct CoreListVersionsTool {
@@ -46,7 +46,7 @@ impl Tool for CoreListVersionsTool {
 
 
 /// 把版本清单渲染成模型可直接引用的形式。
-/// 只写计数的话，模型只能猜版本号，紧接着的 CoreInstall 必然 NOT_FOUND。
+/// 只写计数的话，模型连「现在用的是哪个版本」都不知道，诊断只能靠猜。
 fn summarise_versions(data: &Value) -> String {
     let installed: Vec<&str> = data
         .get("installed")
@@ -94,83 +94,11 @@ fn summarise_versions(data: &Value) -> String {
         for (version, channel) in &available {
             lines.push(format!("- {version} ({channel})"));
         }
-        lines.push(format!(
-            "使用版本号调用 CoreInstall，例如 CoreInstall(\"{}\")。",
-            available[0].0
-        ));
+        // 运行库安装/升级只能由用户在「高级设置 → 运行库」里发起，AI 不代为安装。
+        lines.push("安装或升级运行库请提示用户到「高级设置 → 运行库」手动操作。".to_string());
     }
 
     lines.join("\n")
-}
-
-pub struct CoreInstallTool {
-    services: Arc<dyn VpnToolServices>,
-}
-
-impl CoreInstallTool {
-    pub fn new(services: Arc<dyn VpnToolServices>) -> Self {
-        Self { services }
-    }
-}
-
-#[async_trait]
-impl Tool for CoreInstallTool {
-    fn name(&self) -> &str {
-        "CoreInstall"
-    }
-
-    fn description(&self) -> &str {
-        "安装指定版本的官方 sing-box。**优先用安装包内自带的运行时，不需要联网**；\
-         自带的那份缺失、或版本与请求的不一致时才下载。安装后即可用于启动运行时。"
-    }
-
-    fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::Execute
-    }
-
-    fn self_gates(&self) -> bool {
-        true
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
-            },
-            "required": ["version"],
-            "additionalProperties": false
-        })
-    }
-
-    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let Some(version) = input.get("version").and_then(Value::as_str) else {
-            return envelope::finish(
-                ctx,
-                "CoreInstall",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 version 参数")),
-            );
-        };
-
-        let outcome = match self.services.core_install(version).await {
-            Ok(data) => {
-                let job_id = data
-                    .get("job_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                ToolOutcome::ok(format!("已开始安装 sing-box {version}。"), data).with_next(
-                    NextAction {
-                        label: "查看进度".to_string(),
-                        tool: "JobGet".to_string(),
-                        args: json!({ "job_id": job_id }),
-                    },
-                )
-            }
-            Err(error) => ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string())),
-        };
-        envelope::finish(ctx, "CoreInstall", outcome)
-    }
 }
 
 #[cfg(test)]
@@ -193,8 +121,9 @@ mod version_summary_tests {
         assert!(text.contains("已安装：无"), "{text}");
         assert!(text.contains("- 1.14.4 (stable)"), "{text}");
         assert!(text.contains("- 1.13.0 (stable)"), "{text}");
-        // 引导语里必须出现模型下一步要用的标识符。
-        assert!(text.contains("CoreInstall(\"1.14.4\")"), "{text}");
+        // 不再引导模型去装运行时：安装只能由用户在高级设置里发起。
+        assert!(text.contains("高级设置"), "{text}");
+        assert!(!text.contains("CoreInstall"), "{text}");
     }
 
     #[test]
@@ -205,7 +134,8 @@ mod version_summary_tests {
         });
         let text = summarise_versions(&data);
         assert!(text.contains("已安装：1.14.4"), "{text}");
-        assert!(text.contains("CoreInstall(\"1.14.4\")"), "{text}");
+        assert!(text.contains("高级设置"), "{text}");
+        assert!(!text.contains("CoreInstall"), "{text}");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 > 日期：2026-11-05
 > 性质：只做调研，不含实现，不改代码。
-> 参考代码：`/Users/wesley/ai/openmesh-cli/openmesh-win/`、
+> 参考代码：`~/ai/openmesh-cli/openmesh-win/`、
 > `go-cli-lib/cmd/openmesh-win-core-embedded/`（只读）
 > 对照：`docs/windows-tun.md`（Veyl 的 Windows TUN 设计判断）、`docs/tun-privilege.md`（macOS 特权通道）
 >

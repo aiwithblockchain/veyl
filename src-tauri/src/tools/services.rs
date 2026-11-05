@@ -82,7 +82,17 @@ pub trait VpnToolServices: Send + Sync {
     async fn runtime_logs(&self, lines: u32, level: Option<String>) -> anyhow::Result<Value>;
 
     async fn core_list_versions(&self) -> anyhow::Result<Value>;
-    async fn core_install(&self, version: &str) -> anyhow::Result<Value>;
+    // 运行库的安装不再由 AI 触发：CoreInstall 已从工具集移除。
+    // 下面这一组只服务于「高级设置 → 运行库」里用户主动发起的操作。
+    async fn core_info(&self) -> anyhow::Result<Value>;
+    async fn core_check_updates(&self) -> anyhow::Result<Value>;
+    async fn core_upgrade(&self, version: &str) -> anyhow::Result<Value>;
+    async fn core_cancel_upgrade(&self, job_id: &str) -> anyhow::Result<Value>;
+    async fn core_rollback(&self) -> anyhow::Result<Value>;
+
+    /// 仅 debug 构建：TUN 已连接时采集一次诊断报告。release 里这个方法不存在。
+    #[cfg(debug_assertions)]
+    async fn tun_probe(&self) -> anyhow::Result<Value>;
 
     async fn catalog_search(&self, query: CatalogQuery) -> anyhow::Result<Value>;
 
@@ -164,6 +174,7 @@ fn idle_snapshot() -> Value {
         "mode": "system_proxy",
         "pid": null,
         "upstream_version": null,
+        "runtime_source": "none",
         "uptime_seconds": null,
         "config_id": null,
         "mixed_port": null,
@@ -226,8 +237,29 @@ impl VpnToolServices for NotWiredServices {
         }))
     }
 
-    async fn core_install(&self, _version: &str) -> anyhow::Result<Value> {
-        not_wired("安装运行时")
+    async fn core_info(&self) -> anyhow::Result<Value> {
+        not_wired("运行库信息")
+    }
+
+    async fn core_check_updates(&self) -> anyhow::Result<Value> {
+        not_wired("检查运行库更新")
+    }
+
+    async fn core_upgrade(&self, _version: &str) -> anyhow::Result<Value> {
+        not_wired("升级运行库")
+    }
+
+    async fn core_cancel_upgrade(&self, _job_id: &str) -> anyhow::Result<Value> {
+        not_wired("取消运行库升级")
+    }
+
+    async fn core_rollback(&self) -> anyhow::Result<Value> {
+        not_wired("回滚运行库")
+    }
+
+    #[cfg(debug_assertions)]
+    async fn tun_probe(&self) -> anyhow::Result<Value> {
+        not_wired("TUN 诊断")
     }
 
     async fn catalog_search(&self, _query: CatalogQuery) -> anyhow::Result<Value> {
@@ -417,6 +449,77 @@ fn svc_error_with_details(
     })
 }
 
+fn update_error(error: crate::runtime::updates::UpdateError) -> anyhow::Error {
+    match error.details {
+        Some(details) => svc_error_with_details(error.code, error.message, details),
+        None => svc_error(error.code, error.message),
+    }
+}
+
+/// 从结构化错误里取 code / detail.reason / wire_code，供 debug 日志一行说清。
+fn service_error_fields(error: &anyhow::Error) -> (String, Option<String>, Option<String>) {
+    let Some(service) = error.downcast_ref::<ServiceError>() else {
+        return ("INTERNAL".into(), None, None);
+    };
+    let details = service.details.as_ref();
+    let detail_reason = details
+        .and_then(|value| value.get("detail"))
+        .and_then(|value| value.get("reason"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let reason = detail_reason.or_else(|| {
+        details
+            .and_then(|value| value.get("reason"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    });
+    let wire_code = details
+        .and_then(|value| value.get("wire_code"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    (service.code.clone(), reason, wire_code)
+}
+
+/// 把错误映射成「卡在哪一步」，只用于 debug 日志。
+fn connect_phase(code: &str, reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("node_server_unresolved") => "节点服务器解析",
+        Some("takeover_incomplete") => "路由接管",
+        Some("rules_not_ready") => "规则数据",
+        Some("helper_missing") | Some("helper_install_failed") | Some("tun_denied") => "特权助手",
+        _ => match code {
+            "RUNTIME_NOT_INSTALLED" => "运行时",
+            "RUNTIME_START_TIMEOUT" => "sing-box 启动超时",
+            "RUNTIME_EXITED" | "RUNTIME_BINARY_NOT_EXECUTABLE" => "sing-box 进程",
+            "tun_start_failed" => "TUN 启动",
+            _ => "未分类",
+        },
+    }
+}
+
+/// 某个 utun 上的路由数与关键段覆盖（`tun_probe` 用，仅 debug）。
+#[cfg(debug_assertions)]
+fn tun_route_stats(netstat: &str, interface: &str) -> (usize, String) {
+    let mut count = 0usize;
+    let mut has = [false; 4];
+    for line in netstat.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 4 || tokens[3] != interface {
+            continue;
+        }
+        count += 1;
+        match tokens[0] {
+            "0/1" | "0.0.0.0/1" => has[0] = true,
+            "128/1" | "128.0.0.0/1" => has[1] = true,
+            "16/4" | "16.0.0.0/4" => has[2] = true, // secret-scan:allow 接管关键段常量
+            "32/3" | "32.0.0.0/3" => has[3] = true, // secret-scan:allow 接管关键段常量
+            _ => {}
+        }
+    }
+    let present = has.iter().filter(|value| **value).count();
+    (count, format!("{present}/4"))
+}
+
 /// TUN 启动回复里的设备状态，三态。
 ///
 /// `null` 不是「没起来」：Windows 在适配器枚举实现之前就是未采集，
@@ -538,12 +641,12 @@ mod tun_takeover_tests {
         };
         let list = [
             descriptor("64.177.43.69"),
-            descriptor("64.177.57.184"),
+            descriptor("64.177.57.184"), // secret-scan:allow 测试常量：节点绕过计划
             descriptor("localhost"),
             descriptor("2001:db8::1"),
         ];
         let plan = node_bypass_plan(&list).await;
-        for expected in ["64.177.43.69/32", "64.177.57.184/32", "2001:db8::1/128"] {
+        for expected in ["64.177.43.69/32", "64.177.57.184/32", "2001:db8::1/128"] { // secret-scan:allow 测试常量：节点绕过计划
             assert!(
                 plan.prefixes.iter().any(|item| item == expected),
                 "{:?}",
@@ -559,8 +662,8 @@ mod tun_takeover_tests {
         );
         // 域名必须被钉成字面量 IP；字面量 IP 本身不需要再钉。
         assert!(plan.pinned.contains_key("localhost"), "{:?}", plan.pinned);
-        assert!(!plan.pinned.contains_key("64.177.43.69"));
-        assert!(node_server_is_resolved("64.177.43.69", &plan.pinned));
+        assert!(!plan.pinned.contains_key("64.177.43.69")); // secret-scan:allow 测试常量：节点绕过计划
+        assert!(node_server_is_resolved("64.177.43.69", &plan.pinned)); // secret-scan:allow 测试常量：节点绕过计划
         assert!(node_server_is_resolved("localhost", &plan.pinned));
         assert!(!node_server_is_resolved("unresolved.invalid", &plan.pinned));
     }
@@ -1232,6 +1335,66 @@ fn require_running_state(state: crate::runtime::RuntimeState) -> anyhow::Result<
     }
 }
 
+/// 可用运行时的判定：已安装记录优先，其次随包。
+///
+/// `active` 是 `(版本, 来源)`；来源为 `SOURCE_BUNDLED` 或 `SOURCE_INSTALLED`。
+fn choose_available_runtime(
+    active: Option<(String, String)>,
+    bundled: Option<String>,
+) -> Option<(String, &'static str)> {
+    match active {
+        Some((version, source)) if source == crate::runtime::SOURCE_BUNDLED => {
+            Some((version, crate::runtime::SOURCE_BUNDLED))
+        }
+        Some((version, _)) => Some((version, crate::runtime::SOURCE_INSTALLED)),
+        None => bundled.map(|version| (version, crate::runtime::SOURCE_BUNDLED)),
+    }
+}
+
+fn runtime_source_label(source: &str) -> &'static str {
+    if source == crate::runtime::SOURCE_BUNDLED {
+        "随包"
+    } else {
+        "已安装"
+    }
+}
+
+#[cfg(test)]
+mod runtime_availability_tests {
+    use super::*;
+    use crate::runtime::{SOURCE_BUNDLED, SOURCE_INSTALLED};
+
+    #[test]
+    fn an_installed_runtime_wins_over_the_bundled_one() {
+        let picked = choose_available_runtime(
+            Some(("1.15.0".into(), SOURCE_INSTALLED.into())),
+            Some("1.14.4".into()),
+        );
+        assert_eq!(picked, Some(("1.15.0".to_string(), SOURCE_INSTALLED)));
+    }
+
+    #[test]
+    fn a_bundled_install_record_keeps_the_bundled_source() {
+        let picked = choose_available_runtime(
+            Some(("1.14.4".into(), SOURCE_BUNDLED.into())),
+            Some("1.13.0".into()),
+        );
+        assert_eq!(picked, Some(("1.14.4".to_string(), SOURCE_BUNDLED)));
+    }
+
+    #[test]
+    fn the_bundled_runtime_is_used_when_nothing_is_installed() {
+        let picked = choose_available_runtime(None, Some("1.14.4".into()));
+        assert_eq!(picked, Some(("1.14.4".to_string(), SOURCE_BUNDLED)));
+    }
+
+    /// 只有两份都没有时才是真正的「运行时不可用」。
+    #[test]
+    fn none_means_really_unavailable() {
+        assert_eq!(choose_available_runtime(None, None), None);
+    }
+}
+
 fn diag_check(
     name: &str,
     group: &str,
@@ -1454,6 +1617,7 @@ pub struct WiredServices {
     proxy: Arc<ProxyController>,
     catalog: Arc<CatalogClient>,
     installer: Installer,
+    updates: crate::runtime::updates::UpdateManager,
     data_dir: PathBuf,
     device_gate: RegistrationGate,
     tun: Arc<crate::tun::session::TunSession>,
@@ -1473,6 +1637,7 @@ impl WiredServices {
         ));
         Self {
             installer: Installer::new(&data_dir),
+            updates: crate::runtime::updates::UpdateManager::new(&data_dir),
             store,
             manager,
             proxy,
@@ -1487,6 +1652,12 @@ impl WiredServices {
         self.data_dir.join("config")
     }
 
+    /// 测试夹具专用：假运行时是 shell 脚本，不可能带上代码签名。
+    #[cfg(test)]
+    pub(crate) fn allow_unsigned_runtime(&mut self) {
+        self.installer.allow_unsigned_runtime();
+    }
+
     /// 把网络恢复到「我们没动过」的状态。
     ///
     /// **E3 重置网络与卸载清理都调这一个函数**（`docs/capabilities.md` §3.1：
@@ -1494,25 +1665,6 @@ impl WiredServices {
     ///
     /// 顺序不可换：先停进程再撤代理。反过来的话，中间那几百毫秒里系统代理
     /// 指向一个已经关掉的端口，用户那一刻整机没有网。
-    /// 走下载安装指定版本。随包那份不可用或不匹配时才走到这里。
-    async fn install_release(
-        &self,
-        version: &str,
-    ) -> anyhow::Result<crate::runtime::InstalledRuntime> {
-        let manifest =
-            crate::runtime::RuntimeManifest::builtin().map_err(|e| svc_error(e.code(), e))?;
-        let release = manifest
-            .releases
-            .iter()
-            .find(|release| release.upstream_version == version && !release.yanked)
-            .ok_or_else(|| svc_error("NOT_FOUND", format!("清单里没有版本 {version}")))?
-            .clone();
-        self.installer
-            .install(&release)
-            .await
-            .map_err(|e| svc_error(e.code(), e))
-    }
-
     /// 共享动作：E3/卸载（`cleanup_network`）与强制重置走**同一份**。
     ///
     /// `Err` 表示「没能确认停掉」，不是「本来就没事」——helper 不可用时
@@ -1838,15 +1990,45 @@ impl WiredServices {
         }
     }
 
-    fn ensure_runtime_installed(&self) -> anyhow::Result<crate::runtime::InstalledRuntime> {
-        self.installer
+    /// 当前可用的运行时：已安装且可执行 > 随包。与 `core_info` 同一判据。
+    ///
+    /// 「未运行」不等于「未安装」：状态查询必须能把可用的版本与来源报出来，
+    /// 否则未连接时会被误判成没有运行时。
+    async fn available_runtime(&self) -> Option<(String, &'static str)> {
+        let active = self
+            .installer
             .active()
-            .map_err(|e| svc_error(e.code(), e))?
-            .ok_or_else(|| {
-                svc_error(
-                    "RUNTIME_NOT_INSTALLED",
-                    "还没有安装 sing-box，先调用 CoreInstall",
-                )
+            .ok()
+            .flatten()
+            .map(|runtime| (runtime.version, runtime.source));
+        let bundled = if active.is_none() {
+            self.installer.bundled_version().await
+        } else {
+            None
+        };
+        choose_available_runtime(active, bundled)
+    }
+
+    /// 连接前取运行时：已安装且校验通过优先，否则用随包那份。
+    ///
+    /// **不联网。** 两份都不可用时直接失败并把原因说清楚——首次启动时用户
+    /// 最可能没有网，静默下载只会把可诊断的问题拖成超时。
+    async fn ensure_runtime(&self) -> anyhow::Result<crate::runtime::InstalledRuntime> {
+        self.installer
+            .select_runtime()
+            .await
+            .map_err(|error| match &error {
+                crate::runtime::RuntimeError::BundledUnavailable(detail) => {
+                    svc_error_with_details(
+                        error.code(),
+                        format!(
+                            "{}（{detail}）",
+                            crate::runtime::signature::rejection_hint()
+                        ),
+                        json!({ "reason": "runtime_unavailable" }),
+                    )
+                }
+                _ => svc_error(error.code(), error),
             })
     }
 
@@ -2318,9 +2500,9 @@ impl VpnToolServices for WiredServices {
         // TUN 的进程不归 RuntimeManager 管，状态得单独报，否则界面会显示「未连接」。
         // **必须返回与代理模式同形状的完整快照**：手工拼 JSON 少一个 `health`
         // 就会让 `bridge.ts` 读 undefined 直接崩（helper 在 App 崩溃后仍存活的接手场景）。
-        if let crate::tun::session::TunState::Running { pid } = self.tun.status() {
+        let mut status = if let crate::tun::session::TunState::Running { pid } = self.tun.status() {
             let meta = self.tun.launch_meta();
-            let status = crate::runtime::RuntimeStatus::tun(crate::runtime::TunSnapshotInput {
+            crate::runtime::RuntimeStatus::tun(crate::runtime::TunSnapshotInput {
                 pid,
                 config_id: meta.as_ref().map(|meta| meta.config_id.clone()),
                 config_name: meta.as_ref().and_then(|meta| meta.config_name.clone()),
@@ -2329,11 +2511,24 @@ impl VpnToolServices for WiredServices {
                 applied_route_revision: meta.as_ref().and_then(|meta| meta.applied_route_revision),
                 connected_since: self.tun.connected_since(),
                 uptime_seconds: self.tun.uptime_seconds(),
-            });
-            return serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e));
-        }
-        let status = self.manager.status().await;
-        serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
+            })
+        } else {
+            self.manager.status().await
+        };
+
+        // 未运行时 `upstream_version` 由 manager 置 null，但「不可用」和「没运行」
+        // 是两件事：把当前可用的运行时版本与来源一并报出来，消费方不必再去猜。
+        let available = self.available_runtime().await;
+        status.upstream_version = match (&available, &status.upstream_version) {
+            (Some((version, _)), None) => Some(version.clone()),
+            (_, running) => running.clone(),
+        };
+        let mut value = serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))?;
+        value["runtime_source"] = json!(available
+            .as_ref()
+            .map(|(_, source)| *source)
+            .unwrap_or("none"));
+        Ok(value)
     }
 
     async fn runtime_start(&self, config_id: Option<String>) -> anyhow::Result<Value> {
@@ -2446,39 +2641,234 @@ impl VpnToolServices for WiredServices {
         }))
     }
 
-    async fn core_install(&self, version: &str) -> anyhow::Result<Value> {
-        // 先试随包那份：用户第一次打开时网络往往是坏的，
-        // 让人卡在下载上是最差的体验（`docs/user-flows.md` §1.3）。
-        let installed = match self
-            .installer
-            .install_bundled(version)
-            .await
-            .map_err(|e| svc_error(e.code(), e))?
-        {
-            // install_bundled 已经保证版本一致，这里只需判有没有。
-            Some(installed) => installed,
-            None => self.install_release(version).await?,
+    async fn core_info(&self) -> anyhow::Result<Value> {
+        let bundled_version = self.installer.bundled_version().await;
+        let active = self.installer.active().ok().flatten();
+        let running = self.manager.status().await.upstream_version;
+        let restart_required = match (&active, running) {
+            (Some(active), Some(running)) => active.version != running,
+            _ => false,
         };
+        Ok(json!({
+            "bundled_version": bundled_version,
+            "active_version": active.as_ref().map(|runtime| runtime.version.clone()),
+            "active_source": active.as_ref().map(|runtime| runtime.source.clone()),
+            "restart_required": restart_required,
+        }))
+    }
 
-        let row = crate::store::RuntimeVersionRow {
-            version: installed.version.clone(),
-            path: installed.dir.to_string_lossy().into_owned(),
-            binary_path: installed.binary.to_string_lossy().into_owned(),
-            sha256: installed.sha256.clone(),
-            state: "active".into(),
-            installed_at: installed.installed_at,
+    async fn core_check_updates(&self) -> anyhow::Result<Value> {
+        let check = self.updates.check().await.map_err(update_error)?;
+        serde_json::to_value(check).map_err(|error| svc_error("INTERNAL", error))
+    }
+
+    async fn core_upgrade(&self, version: &str) -> anyhow::Result<Value> {
+        match self.updates.start(version).await {
+            Ok(started) => Ok(json!({
+                "job_id": started.job_id,
+                "current_version": started.current_version,
+                "target_version": started.target_version,
+            })),
+            Err(error) if error.code == "BUSY" => Err(svc_error_with_details(
+                error.code,
+                error.message,
+                json!({ "job_id": self.updates.active_job_id() }),
+            )),
+            Err(error) => Err(update_error(error)),
+        }
+    }
+
+    async fn core_cancel_upgrade(&self, job_id: &str) -> anyhow::Result<Value> {
+        Ok(json!({ "cancelled": self.updates.cancel(job_id) }))
+    }
+
+    #[cfg(debug_assertions)]
+    async fn tun_probe(&self) -> anyhow::Result<Value> {
+        use std::time::Duration;
+
+        let pid = match self.tun.status() {
+            crate::tun::session::TunState::Running { pid } => pid,
+            _ => {
+                return Err(svc_error(
+                    "PRECONDITION_FAILED",
+                    "TUN 未连接，先连接后再执行诊断",
+                ))
+            }
         };
-        {
-            let conn = self.store.conn();
-            crate::store::runtime::upsert_version(&conn, &row)
-                .map_err(|e| svc_error(e.code(), e))?;
+        let since = self.tun.connected_since().unwrap_or_default();
+
+        // ---- 设备与路由 ----
+        let addrs = tokio::task::spawn_blocking(crate::tun::collect)
+            .await
+            .unwrap_or_default();
+        let netstat = crate::netcfg::run("/usr/sbin/netstat", &["-rn", "-f", "inet"])
+            .unwrap_or_default();
+        let mut utuns: Vec<String> = Vec::new();
+        for addr in addrs.iter().filter(|addr| addr.name.starts_with("utun")) {
+            let (routes, key) = tun_route_stats(&netstat, &addr.name);
+            utuns.push(format!(
+                "{} {}/{} 路由={routes} 关键段={key}",
+                addr.name, addr.address, addr.prefix_len
+            ));
         }
 
+        // ---- 节点服务器直连 ----
+        let mut node_line = "未找到当前节点".to_string();
+        let node_reachable = if let Some(config_id) = self.active_config_id() {
+            match self.require_config(&config_id) {
+                Ok(config) => match self.active_node(&config) {
+                    Ok((node, _password)) => {
+                        let started = std::time::Instant::now();
+                        match tokio::time::timeout(
+                            Duration::from_secs(4),
+                            tokio::net::TcpStream::connect((node.server.as_str(), node.port)),
+                        )
+                        .await
+                        {
+                            Ok(Ok(_)) => {
+                                node_line = format!(
+                                    "{}:{} 可直连（{}ms）",
+                                    node.server,
+                                    node.port,
+                                    started.elapsed().as_millis()
+                                );
+                                true
+                            }
+                            Ok(Err(error)) => {
+                                node_line = format!("{}:{} 直连失败：{error}", node.server, node.port);
+                                false
+                            }
+                            Err(_) => {
+                                node_line =
+                                    format!("{}:{} 直连超时（4s）", node.server, node.port);
+                                false
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        node_line = format!("读取当前节点失败：{error}");
+                        false
+                    }
+                },
+                Err(error) => {
+                    node_line = format!("读取配置失败：{error}");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        // ---- 系统 DNS ----
+        let dns_started = std::time::Instant::now();
+        let dns = match tokio::time::timeout(
+            Duration::from_secs(4),
+            tokio::net::lookup_host(("www.apple.com", 443)),
+        )
+        .await
+        {
+            Ok(Ok(mut addresses)) => {
+                let first = addresses
+                    .next()
+                    .map(|addr| addr.ip().to_string())
+                    .unwrap_or_else(|| "无结果".into());
+                format!(
+                    "www.apple.com → {first}（{}ms）",
+                    dns_started.elapsed().as_millis()
+                )
+            }
+            Ok(Err(error)) => format!("解析失败：{error}"),
+            Err(_) => "解析超时（4s）".into(),
+        };
+        let dns_ok = dns.contains("→");
+
+        // ---- 经隧道访问 HTTPS ----
+        let http_started = std::time::Instant::now();
+        let https = match reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(8))
+            .build()
+        {
+            Ok(client) => match client.get("https://www.apple.com/").send().await {
+                Ok(response) => format!(
+                    "HTTP {}（{}ms）",
+                    response.status().as_u16(),
+                    http_started.elapsed().as_millis()
+                ),
+                Err(error) => format!("失败：{error}"),
+            },
+            Err(error) => format!("客户端初始化失败：{error}"),
+        };
+        let https_ok = https.starts_with("HTTP 2") || https.starts_with("HTTP 3");
+
+        // ---- 进程 ----
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        let process = format!("pid={pid} 存活={alive} since={since}");
+
+        let conclusion = if !node_reachable {
+            "节点服务器不可达（直连失败，先查本地网络/节点地址）"
+        } else if !dns_ok {
+            "节点可达，但系统 DNS 解析失败"
+        } else if !https_ok {
+            "隧道已接管，但经隧道出站失败（看出站拨号日志）"
+        } else {
+            "隧道与出站均正常"
+        };
+
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let report = format!(
+            "结论：{conclusion}\n时间：{}\n\n[设备与路由]\n{}\n\n[节点直连]\n{node_line}\n\n[系统 DNS]\n{dns}\n\n[经隧道 HTTPS]\n{https}\n\n[sing-box 进程]\n{process}\n",
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            if utuns.is_empty() {
+                "未发现 utun 接口".to_string()
+            } else {
+                utuns.join("\n")
+            }
+        );
+        let dir = self.data_dir.join("diagnostics");
+        crate::runtime::fsutil::ensure_private_dir(&dir)
+            .map_err(|error| svc_error("INTERNAL", error.to_string()))?;
+        let path = dir.join(format!("tun-{stamp}.txt"));
+        crate::runtime::fsutil::write_atomic_private(&path, report.as_bytes())
+            .map_err(|error| svc_error("INTERNAL", error.to_string()))?;
+
         Ok(json!({
-            "version": installed.version,
-            "path": installed.binary.to_string_lossy(),
-            "installed": true,
+            "conclusion": conclusion,
+            "report_path": path.to_string_lossy(),
+            "utun": utuns,
+            "node": node_line,
+            "dns": dns,
+            "https": https,
+            "process": process,
         }))
+    }
+
+    async fn core_rollback(&self) -> anyhow::Result<Value> {
+        if self.updates.busy() {
+            return Err(svc_error_with_details(
+                "BUSY",
+                "运行库升级进行中，完成后再回滚",
+                json!({ "job_id": self.updates.active_job_id() }),
+            ));
+        }
+        let active = self
+            .installer
+            .active()
+            .map_err(|error| svc_error(error.code(), error))?;
+        match active {
+            // 契约：没有已安装版本 → NOT_FOUND；已经是随包 → 幂等返回 ok。
+            None => Err(svc_error("NOT_FOUND", "没有可回滚的运行库")),
+            Some(runtime) if runtime.source == crate::runtime::SOURCE_BUNDLED => {
+                Ok(json!({ "ok": true }))
+            }
+            Some(_) => {
+                self.installer
+                    .rollback_to_bundled()
+                    .await
+                    .map_err(|error| svc_error(error.code(), error))?;
+                Ok(json!({ "ok": true }))
+            }
+        }
     }
 
     async fn catalog_search(&self, query: CatalogQuery) -> anyhow::Result<Value> {
@@ -3681,7 +4071,8 @@ impl VpnToolServices for WiredServices {
             status.state,
             crate::runtime::RuntimeState::Running | crate::runtime::RuntimeState::Degraded
         );
-        let installed = self.installer.active().ok().flatten().is_some();
+        let available_runtime = self.available_runtime().await;
+        let available = available_runtime.is_some();
         let net = tokio::task::spawn_blocking(crate::netcfg::read)
             .await
             .ok()
@@ -3694,25 +4085,23 @@ impl VpnToolServices for WiredServices {
 
         let mut checks = Vec::new();
 
+        // 「随包可用」就是可用：启动时已经从随包装好，不能再判成「未安装」。
         checks.push(diag_check(
             "app.runtime_installed",
             "app",
-            installed,
-            if installed {
-                "运行时已安装".into()
-            } else {
-                "运行时未安装".into()
+            available,
+            match &available_runtime {
+                Some((version, source)) => {
+                    format!("运行时可用 {version}（{}）", runtime_source_label(source))
+                }
+                None => "运行时不可用（随包与已安装版本都不可用）".into(),
             },
-            if installed {
+            if available {
                 None
             } else {
-                Some("安装运行时后再试")
+                Some("重新安装 Veyl，或在「高级设置 → 运行库」手动升级")
             },
-            if installed {
-                None
-            } else {
-                Some(json!({ "kind": "reconnect" }))
-            },
+            None,
         ));
         checks.push(diag_check(
             "app.process_alive",
@@ -3730,13 +4119,10 @@ impl VpnToolServices for WiredServices {
                 None
             },
         ));
-        let version = status.upstream_version.clone().or_else(|| {
-            self.installer
-                .active()
-                .ok()
-                .flatten()
-                .map(|runtime| runtime.version)
-        });
+        let version = status
+            .upstream_version
+            .clone()
+            .or_else(|| available_runtime.map(|(version, _)| version));
         checks.push(diag_check(
             "app.version",
             "app",
@@ -4273,7 +4659,36 @@ impl WiredServices {
     }
 
     /// 连接一套配置。分流与节点准备两种模式共用，只有「怎么起」不同。
+    /// debug 构建：一次连接的结果与耗时集中成一行，失败时带上「卡在哪一步」。
     async fn connect(&self, config: &configs::Config) -> anyhow::Result<Value> {
+        let started = std::time::Instant::now();
+        let result = self.connect_inner(config).await;
+        if cfg!(debug_assertions) {
+            match &result {
+                Ok(_) => log::debug!(
+                    "连接完成 config={} mode={} 耗时={}ms",
+                    config.id,
+                    config.connection_mode,
+                    started.elapsed().as_millis()
+                ),
+                Err(error) => {
+                    let (code, reason, wire_code) = service_error_fields(error);
+                    log::debug!(
+                        "连接失败 卡在={} config={} mode={} code={code} reason={} wire_code={} 耗时={}ms",
+                        connect_phase(&code, reason.as_deref()),
+                        config.id,
+                        config.connection_mode,
+                        reason.as_deref().unwrap_or("-"),
+                        wire_code.as_deref().unwrap_or("-"),
+                        started.elapsed().as_millis()
+                    );
+                }
+            }
+        }
+        result
+    }
+
+    async fn connect_inner(&self, config: &configs::Config) -> anyhow::Result<Value> {
         log::info!(
             "连接开始 config={} mode={} routing={}",
             config.id,
@@ -4316,7 +4731,7 @@ impl WiredServices {
         })?;
 
         let (node, password) = self.active_node(config)?;
-        let installed = self.ensure_runtime_installed()?;
+        let installed = self.ensure_runtime().await?;
         self.drop_previous_rendered_config(&config.id);
 
         let mixed_port = match config.listen_port {
@@ -5619,7 +6034,7 @@ mod config_service_tests {
                 name: "东京".into(),
                 server: "203.0.113.10".into(),
                 port: 8388,
-                password: "pw-secret".into(),
+                password: "pw-secret".into(), // secret-scan:allow 测试夹具口令
                 method: "aes-256-gcm".into(),
             })
             .await
@@ -6014,6 +6429,44 @@ mod config_service_tests {
         assert!(status["connections"].is_null(), "没有数据必须是 null");
     }
 
+    /// 未连接时也要报可用的运行时版本与来源：
+    /// 不能因为进程没在跑，就把已经装好的随包运行时说成「未安装」。
+    #[tokio::test]
+    async fn an_idle_snapshot_reports_the_available_bundled_runtime() {
+        let dir = temp_dir();
+        let version = "1.14.4";
+        let runtime_dir = dir.join("runtime").join(version);
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        let binary = runtime_dir.join(crate::runtime::BINARY_NAME);
+        std::fs::write(&binary, b"#!/bin/sh\nexit 0\n").unwrap();
+        let state = json!({
+            "schema": 1,
+            "active_version": version,
+            "installs": {
+                (version): {
+                    "version": version,
+                    "dir": runtime_dir,
+                    "binary": binary,
+                    "license": null,
+                    "sha256": "00",
+                    "installed_at": 0,
+                    "source": crate::runtime::SOURCE_BUNDLED,
+                }
+            }
+        });
+        std::fs::write(
+            dir.join("runtime-state.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+
+        let services = services(&dir);
+        let status = services.runtime_status().await.unwrap();
+        assert_eq!(status["state"], "idle");
+        assert_eq!(status["upstream_version"], version);
+        assert_eq!(status["runtime_source"], crate::runtime::SOURCE_BUNDLED);
+    }
+
     /// TUN 快照必须和代理模式同形状。
     /// 少一个顶层键（尤其是 `health`）前端会读到 `undefined` 并直接崩，
     /// 而 helper 在 App 崩溃后仍存活、重启后接手 TUN 正是我们要支持的场景。
@@ -6283,7 +6736,9 @@ mod main_flow_tests {
         cfg.direct_ip_probe = None;
         let manager = RuntimeManager::new(cfg);
         let catalog = Arc::new(CatalogClient::new("http://127.0.0.1:9/v1"));
-        let services = WiredServices::new(store, manager, proxy, catalog, &dir);
+        let mut services = WiredServices::new(store, manager, proxy, catalog, &dir);
+        // 假运行时是 shell 脚本，不可能通过代码签名校验。
+        services.allow_unsigned_runtime();
 
         Harness {
             services,
@@ -6333,7 +6788,7 @@ mod main_flow_tests {
                 name: "东京".into(),
                 server: "198.51.100.20".into(),
                 port: 8388,
-                password: "pw-main-flow".into(),
+                password: "pw-main-flow".into(), // secret-scan:allow 测试夹具口令
                 method: "aes-256-gcm".into(),
             })
             .await

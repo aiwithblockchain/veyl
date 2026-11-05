@@ -114,12 +114,27 @@ printf '\n[1/9] 构建前端\n'
 
 printf '\n[2/9] 构建 universal .app\n'
 
+# 正式包必须带安全时间戳（嵌套的运行时也一起算）。开发脚本会设
+# VEYL_SIGN_TIMESTAMP=0，那是给开发证书用的；这个变量留在环境里会让正式包
+# 静默失去时间戳，所以这里强制改回来——必须在签名运行时之前生效。
+if [ -n "${VEYL_DEV_ID_APP:-}" ]; then
+  if [ "${VEYL_SIGN_TIMESTAMP:-1}" = "0" ]; then
+    printf '警告：忽略残留的 VEYL_SIGN_TIMESTAMP=0，正式包强制带安全时间戳\n' >&2
+  fi
+  export VEYL_SIGN_TIMESTAMP=1
+fi
+
 # 两样东西必须已经在仓库里，否则打出来的包 TUN 用不了。在这里失败，
 # 而不是让用户装完才发现——也省得白等一轮构建。
 RUNTIME_SRC="$ROOT/src-tauri/resources/runtime/sing-box"
 [ -f "$RUNTIME_SRC" ] || die "缺少运行时：$RUNTIME_SRC
   先执行：node scripts/runtime/fetch-runtime.mjs
   TUN 的特权 helper 只执行随包那一份（用户目录里的二进制以 root 执行是提权漏洞）。"
+
+# **签名必须先于构建**：build.rs 把运行时**签名后**的 sha256 编进主程序和 helper，
+# 安装时按这个值校验随包副本。组装完再签会改字节，哈希必然对不上，
+# 全新安装就会一直回退到 GitHub 下载。
+prepare_bundled_runtime "$RUNTIME_SRC" || die "签名随包运行时失败：$RUNTIME_SRC"
 
 # fetch-rules.mjs 的产物是归档，manifest.json 在归档**里面**——不要在这里找它。
 RULES_ARCHIVE="$(ls "$ROOT"/src-tauri/resources/rules/veyl-rules-*.tar.zst 2>/dev/null | head -1)"
@@ -153,6 +168,10 @@ PY
 if [ -n "$EXTRA_BINS" ]; then
   printf '  辅助二进制：%s\n' "$EXTRA_BINS"
   for extra_bin in $EXTRA_BINS; do
+    # 自测二进制需要可选 feature（`runtime-selftest`），发布包不构建、不携带。
+    if [ "$extra_bin" = "veyl-runtime-selftest" ]; then
+      continue
+    fi
     for arch in aarch64-apple-darwin x86_64-apple-darwin; do
       (cd "$ROOT/src-tauri" && cargo build --release --bin "$extra_bin" --target "$arch")
     done
@@ -203,6 +222,9 @@ if [ -f "$RUNTIME_SRC" ]; then
   mkdir -p "$APP_PATH/Contents/Resources/runtime"
   cp "$RUNTIME_SRC" "$APP_PATH/Contents/Resources/runtime/sing-box"
   chmod 755 "$APP_PATH/Contents/Resources/runtime/sing-box"
+  # 包里那份必须与构建时被哈希的源文件逐字节相同，否则哈希断言一定失败。
+  cmp -s "$RUNTIME_SRC" "$APP_PATH/Contents/Resources/runtime/sing-box" \
+    || die "包内运行时与签名后的源文件不一致：$RUNTIME_SRC"
   printf '  已安装运行时：Contents/Resources/runtime/sing-box\n'
 else
   die "缺少运行时：$RUNTIME_SRC
@@ -254,14 +276,8 @@ APP_SHA="$(shasum -a 256 "$RULES_IN_APP" | awk '{print $1}')"
 printf '  运行时与规则归档落点正确\n'
 
 printf '\n[4/9] 签名嵌套 Mach-O 与 App\n'
-# 正式包必须带安全时间戳。开发脚本会设 VEYL_SIGN_TIMESTAMP=0，那是给
-# 开发证书用的；这个变量留在环境里会让正式包静默失去时间戳，所以这里强制改回来。
-if [ -n "${VEYL_DEV_ID_APP:-}" ]; then
-  if [ "${VEYL_SIGN_TIMESTAMP:-1}" = "0" ]; then
-    printf '警告：忽略残留的 VEYL_SIGN_TIMESTAMP=0，正式包强制带安全时间戳\n' >&2
-  fi
-  export VEYL_SIGN_TIMESTAMP=1
-fi
+# `sign_app` 内部已断言：包内运行时签名有效、identifier 是 `sing-box`、
+# 签名身份与当前证书一致。macOS 的运行时判定用的是验签，不是编译期哈希。
 sign_app "$APP_PATH"
 
 printf '\n[5/9] 校验签名\n'

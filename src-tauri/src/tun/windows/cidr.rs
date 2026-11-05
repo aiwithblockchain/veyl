@@ -96,7 +96,7 @@ mod tests {
             Some(true)
         );
         assert_eq!(
-            contains("198.18.0.0/15", "198.20.0.1".parse().unwrap()),
+            contains("198.18.0.0/15", "198.20.0.1".parse().unwrap()), // secret-scan:allow 测试边界常量：紧邻 198.18/15 之外的地址
             Some(false)
         );
         assert_eq!(
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn zero_and_full_prefixes_are_boundaries() {
         assert_eq!(
-            contains("0.0.0.0/0", "1.2.3.4".parse().unwrap()),
+            contains("0.0.0.0/0", "1.2.3.4".parse().unwrap()), // secret-scan:allow 测试常量：0.0.0.0/0 的匹配边界
             Some(true)
         );
         assert_eq!(

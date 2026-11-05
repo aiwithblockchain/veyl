@@ -19,6 +19,8 @@ pub const EV_COMPACT: &str = "ai-compact";
 pub const EV_REQUEST_END: &str = "ai-request-end";
 pub const EV_RUNTIME_STATE_CHANGED: &str = "runtime-state-changed";
 pub const EV_RUNTIME_HEALTH_CHANGED: &str = "runtime-health-changed";
+pub const EV_CORE_UPGRADE_PROGRESS: &str = "core-upgrade-progress";
+pub const EV_CORE_UPGRADE_FINISHED: &str = "core-upgrade-finished";
 pub const EV_JOB_PROGRESS: &str = "job-progress";
 pub const EV_ASK_USER_QUESTION: &str = "ask-user-question";
 

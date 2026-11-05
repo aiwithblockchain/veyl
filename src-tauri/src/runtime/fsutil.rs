@@ -151,6 +151,50 @@ pub fn remove_dir_if_exists(path: &Path) -> RuntimeResult<()> {
     }
 }
 
+/// 流式计算文件的 sha256（十六进制小写）。
+///
+/// 不把整个文件读进内存：运行时约 173 MB，两个那样的缓冲没有必要。
+pub fn sha256_file(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// 目标目录所在卷的可用字节数。取不到时返回 `None`（调用方跳过预检，不假装够用）。
+pub fn free_space(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c.as_ptr(), &mut stat) } != 0 {
+            return None;
+        }
+        Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

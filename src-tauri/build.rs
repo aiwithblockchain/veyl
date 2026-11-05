@@ -23,6 +23,10 @@ fn main() {
     // 3. 运行时的完整 sha256。helper/service 只认这个值，请求方说了不算。
     //    文件不存在时留空，特权侧会在启动时报 runtime_missing。
     //
+    //    哈希取的是**此刻文件里的字节**，所以打包脚本必须先给运行时签名、
+    //    再开始构建：签名会改写 Mach-O，签完之后就不能再碰这个文件，
+    //    否则这里算出的值与包内副本对不上，安装时会静默回退到下载。
+    //
     //    Windows 的运行时是 `sing-box.exe`（不是 macOS 的 `sing-box`），
     //    TUN 还多一个 `wintun.dll`。三个哈希都编进二进制，特权侧不读用户可写目录。
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -57,7 +61,18 @@ fn main() {
         println!("cargo:rerun-if-env-changed={key}");
     }
 
-    // 4. 规则归档的 sha256。
+    // 4. 更新清单的 Ed25519 公钥。
+    //
+    //    格式 `key_id=hex[,key_id=hex]`，只放**公钥**：私钥在 CI secret 里，
+    //    本地开发用 scripts/dev/update-keys.sh 生成到 ~/.veyl/dev-keys/，
+    //    构建时通过同名环境变量注入。未配置时升级功能不可用（而不是跳过验签）。
+    println!("cargo:rerun-if-env-changed=VEYL_UPDATE_PUBKEYS");
+    println!(
+        "cargo:rustc-env=VEYL_UPDATE_PUBKEYS={}",
+        std::env::var("VEYL_UPDATE_PUBKEYS").unwrap_or_default()
+    );
+
+    // 5. 规则归档的 sha256。
     //
     //    这是一个**有效的构建期绑定**：哈希编进 helper，helper 又被签名，
     //    所以构建完成之后把包里的归档换掉会被发现。

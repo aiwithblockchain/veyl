@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.4.0`
+> 契约版本：`2.5.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -180,6 +180,12 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 51 | `tun_helper_open_settings` | `{}` | `{ opened: true }` | **2.3.5 新增** |
 | 52 | `tun_helper_uninstall` | `{}` | `{ ok: true }` | **2.3.5 新增** |
 | 53 | `network_force_reset` | `{}` | `NetworkForceResetData`（`{ ok, verified, exit_ip, steps }`） | **2.4.0 新增** |
+| 54 | `core_info` | `{}` | `CoreInfoData` | **2.5.0 新增（仅 UI）** |
+| 55 | `core_check_updates` | `{}` | `CoreCheckUpdatesData` | **2.5.0 新增（仅 UI）** |
+| 56 | `core_upgrade` | `{ version }` | `{ job_id, current_version, target_version }` | **2.5.0 新增（仅 UI）** |
+| 57 | `core_cancel_upgrade` | `{ jobId }` | `{ cancelled: boolean }` | **2.5.0 新增（仅 UI）** |
+| 58 | `core_rollback` | `{}` | `{ ok: true }` | **2.5.0 新增（仅 UI）** |
+| 59 | `tun_probe` | `{}` | `TunProbeData` | **仅 debug 构建注册；AI 不可调用** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -857,6 +863,93 @@ type NetworkForceResetData = {
 - **不给 AI 工具**：`tools/net.rs` 不注册对应工具，模型不能自行触发这条破坏性路径。这条命令只属于 UI（设置 › 高级 › 诊断 ›「强制重置网络」）。
 - 与卸载清理共用同一段代码（`capabilities.md` §3.1）。
 
+### 7.10 运行时核心版本管理（`core_*`，仅 UI）
+
+这一组命令只服务于「设置 › 高级 › 运行时版本」页。**模型不能调用**：`tools.md` §3 不注册任何对应工具，删除的 `CoreInstall` 也不再补回。原因是这组操作会下载并替换一个会以特权身份运行的二进制，必须由用户看见并显式点击。
+
+四条行为约束（契约级，不是实现建议）：
+
+1. **随包运行时用验签判定。** 启动时校验随包二进制的签名清单（macOS 为代码签名，Windows 为 Authenticode）；校验失败视为不可用，**报错而不是运行**。
+2. **已安装版本校验失败自动回落随包。** 启动校验已安装版本失败时，隔离该版本并回落到随包版本，`core_info.active_source` 变为 `"bundled"`；不回落到「无运行时」。
+3. **绝不静默下载。** 只有 `core_upgrade` 被用户在界面上显式触发才允许下载。连接、诊断、启动、`core_list_versions`、`core_check_updates` 都不得触发下载。
+4. **启动过程不联网。** App 启动不检查更新、不拉清单、不下载；`core_check_updates` 只能由设置页上的「检查更新」按钮调用。
+
+#### `core_info {}` → `CoreInfoData`
+
+```ts
+type CoreInfoData = {
+  bundled_version: string;                    // 随包运行时版本，恒定存在
+  active_version: string;                     // 当前实际会启动的版本
+  active_source: "bundled" | "installed";     // active_version 的来源
+  restart_required: boolean;                  // 有已安装/回滚的版本需要重启 App 才生效
+};
+```
+
+- 无参数、无副作用、**不联网**。UI 在打开设置页和收到 `core-upgrade-finished` 后各调用一次。
+- `restart_required = true` 时界面必须提示「重启后生效」，**不自动重启 App**。
+
+#### `core_check_updates {}` → `CoreCheckUpdatesData`
+
+```ts
+type CoreCandidate = {
+  version: string;
+  size: number;   // 字节
+};
+
+type CoreCheckUpdatesData = {
+  network: "ok" | "unreachable" | "source_error";
+  candidates: CoreCandidate[];   // 新于 active_version 的版本，按版本降序
+  cached: boolean;               // true = 来自本地缓存（联网检查失败），不是实时结果
+};
+```
+
+- 「检查不到」是**正常结果**，写在 `network` 里，不抛错误：`unreachable` = 网络不可达；`source_error` = 源返回了非 200 或格式非法。
+- `network = "source_error"` 与下一节命令错误码 `SOURCE_UNAVAILABLE` 是同一件事的两个位置：**查询阶段**写在数据里，**下载阶段**才抛错误。
+- `cached = false` 时 `network !== "ok"` → `candidates` 必须为空数组。
+- `cached = true` 时允许带**上一次成功验签**的候选；界面必须标「可能已过期」，不得当成实时结果，也不得据此自动下载（`core_upgrade` 会重新联网验证）。
+- **只查询，不下载。** 成功结果写 `~/.veyl/runtime/manifest-v1.json` + `.sig`（0600），失败时可回退这份缓存；缓存同样要过验签与有效期检查。
+
+#### `core_upgrade { version }` → `{ job_id, current_version, target_version }`
+
+- **命令自己完成全部检查，不假设调用方已经做过**：每次调用都重新拉取并验签清单（请求带 `Cache-Control: no-cache`，**本地缓存一律不得放行升级**），在**本次**清单的全部未 `yanked` 版本里按平台/架构查找 `version`；找不到 → `NOT_FOUND`。
+- 目标版本必须**严格高于**当前生效版本（`active_version` 为空时按 `bundled_version`）：相等或更低 → `PRECONDITION_FAILED`，`details.reason = "not_newer"`、`details.current_version` 给出实际值；不建任务、不静默降级。
+- 检查 + 建任务的同步阶段 ≤ 12 秒；单次清单请求 5 秒超时，仅对 `NETWORK_UNREACHABLE` 重试一次（`SOURCE_UNAVAILABLE` / 验签失败不重试）。断网时返回 `NETWORK_UNREACHABLE`，不退回缓存。
+- 以上任一失败：不建任务、不写临时文件、不发下载请求。
+- 成功返回 `job_id` 以及 `current_version` / `target_version`，供调用方原样转述；进度经 `core-upgrade-progress` 推送，结果经 `core-upgrade-finished` 推送。
+- 同一时刻只允许一个升级任务：已有任务在跑 → `BUSY`，`details.job_id` 指向进行中的任务。
+- 升级在**后台完成下载、验签、解包与安装**；不改当前正在运行的进程，`restart_required` 置 `true`，由用户重启生效。
+- 错误码：`NETWORK_UNREACHABLE` / `SOURCE_UNAVAILABLE` / `HASH_MISMATCH` / `DISK_FULL` / `BUSY` / `NOT_FOUND` / `PRECONDITION_FAILED` / `INTERNAL`。（任务被取消时 `core-upgrade-finished.code = "CANCELLED"`，它是事件级的结束标记，不属于命令错误码。）
+
+#### `core_cancel_upgrade { jobId }` → `{ cancelled: boolean }`
+
+- 排队中或进行中 → 取消并返回 `true`；已结束或未知 `jobId` → `false`，**不报错**（与 `ai_cancel` 一致，前端按「已结束」处理）。
+- 取消只清理临时文件，**不回滚已经安装但未生效的版本**——那一步是 `core_rollback` 的职责。
+
+#### `core_rollback {}` → `{ ok: true }`
+
+- 回滚到随包版本：删除/隔离已安装版本，`active_source` 回到 `"bundled"`，`restart_required` 置 `true`。
+- 没有已安装版本 → `NOT_FOUND`；升级任务进行中 → `BUSY`。
+- 幂等：已经是随包版本时直接返回 `{ ok: true }`。
+- 回滚**不改连接**：正在运行的进程仍用旧二进制，直到用户重启。
+
+#### `tun_probe {}` → `TunProbeData`（仅 debug 构建）
+
+```ts
+type TunProbeData = {
+  conclusion: string;      // 一句话结论
+  report_path: string;     // ~/.veyl/diagnostics/tun-<时间>.txt
+  utun: string[];          // 接口、地址、路由数、关键段覆盖
+  node: string;            // 当前节点服务器 TCP 直连结果
+  dns: string;             // 系统 DNS 解析结果
+  https: string;           // 经隧道访问固定 HTTPS 的结果
+  process: string;         // sing-box pid / 存活 / 建立时间
+};
+```
+
+- **只在 debug 构建注册**到 `invoke_handler`；release 没有这条命令，也不在 `tools.md` 的工具总表里——AI 无法调用。
+- TUN 未连接 → `PRECONDITION_FAILED`。只读：不改路由、不改连接。
+- 用于「连上但网络不通」的二分：先看 `node` 与 `https`，再看 `utun` 的关键段覆盖；详见 `docs/tun-diagnostics.md`。
+
 ---
 
 ## 8. 种子（官方默认配置，C 组）
@@ -1332,6 +1425,9 @@ type RulesStatus = {
 | `rules_status` | `RulesStatus`（2.1 新增） | **必须** |
 | `rules_update` | `RulesUpdate`（2.1 新增） | **必须** |
 | `net_repair` | `NetRepair` | **必须** |
+| `core_info` / `core_check_updates` / `core_upgrade` / `core_cancel_upgrade` / `core_rollback` | **无**（UI 专用，见 §7.10） | — |
+
+> **`core_*` 五个命令没有 AI 工具。** 下载并替换特权二进制必须由用户显式点击；`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
@@ -1401,10 +1497,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.4.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 |
-| `contracts/events.md` | **2.4.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` |
+| `contracts/commands.md` | **2.5.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI） |
+| `contracts/events.md` | **2.5.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 |
 | `contracts/runtime.md` | **2.3.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` |
-| `contracts/tools.md` | **3.3.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 |
+| `contracts/tools.md` | **3.4.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` |
 | `data-model.md` | **3** | 批 0 + 批 3 表 + 种子排除表 |
 | `contracts/routing.md` | **1.2.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 |
 | `contracts/tun-backend.md` | **1.0.6** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险） |
@@ -1419,6 +1515,16 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.5.0（2026-11-05，运行时核心版本管理）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.5.0`；§2 新增 54–58 `core_info` / `core_check_updates` / `core_upgrade` / `core_cancel_upgrade` / `core_rollback`，详解见 §7.10 | 新增命令 | PM：核心升级改为 UI 显式触发，模型不再参与 |
+| 2 | 明确五条命令均为 **UI 专用**，`tools.md` §3 不注册对应工具；§13 补对应行 | AI 边界 | 下载并替换特权二进制不能交给模型 |
+| 3 | 写入四条契约级约束：随包验签判定、已安装校验失败回落随包、绝不静默下载、启动过程不联网 | 约束 | PM 2026-11-05 |
+| 4 | `core_install` 从 AI 工具集删除；`core_list_versions` 保留为只读工具 | AI 边界 | 同上；见 `tools.md` 3.4.0 |
+| 5 | §15.5 矩阵同步本文件 2.5.0、`events.md` 2.5.0、`tools.md` 3.4.0 | 元数据 | — |
 
 ### 2.4.0（2026-11-05，强制重置网络下发）
 

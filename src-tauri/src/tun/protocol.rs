@@ -683,7 +683,7 @@ mod tests {
                 "default_domain_resolver": "dns-local-1"
             },
             "dns": {
-                "servers": [{"type": "udp", "tag": "dns-local-1", "server": "223.5.5.5", "detour": "direct"}],
+                "servers": [{"type": "udp", "tag": "dns-local-1", "server": "223.5.5.5", "detour": "direct"}], // secret-scan:allow 测试夹具：公共 DNS 地址
                 "rules": [], "final": "dns-local-1", "strategy": "prefer_ipv4"
             },
             "experimental": {"clash_api": {"external_controller": "127.0.0.1:1", "secret": "x"}}

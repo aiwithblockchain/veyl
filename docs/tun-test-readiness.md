@@ -131,6 +131,17 @@ ditto "src-tauri/target/universal-apple-darwin/release/bundle/macos/Veyl.app" "/
 - **B. 改 helper（发布前必须）**：
   helper 不再用编译期哈希去比 bundle 里的文件；bundle 的完整性由已做的 `SecStaticCodeCheckValidity`（`macos.rs:642-700`，含 nested code 与 strict validate）保证，复制到 root 目录后以**复制那一刻**的哈希命名 `<root>/runtime/<sha>`，之后每次 start 校验 staged 文件与目录名一致。
 
+> **2026-11-05 补充：主程序这一侧也踩了同一个坑，已按 A 的变体修掉。**
+> `runtime::install::install_bundled` 用 `build.rs` 编进的 `VEYL_RUNTIME_SHA256`
+> 比对包内副本；签名 package 之后必然不等，结果**全新安装一直回退到 GitHub 下载**
+> （日志：`随包运行时的哈希与构建记录不符 … 回退到下载`）。
+> 现行顺序是「**先签运行时、再构建**」：`prepare_bundled_runtime` 在
+> `build-dmg.sh` / `tun-dev.sh` 里先签好 `resources/runtime/sing-box`，
+> `build.rs` 哈希的就是签名后的字节；`sign_nested_files` 跳过这个文件、
+> `sign_app` 不再带 `--deep`，组装阶段不动它。
+> 打包脚本在签名后断言「包内运行时哈希 == 编译进主程序与 helper 的哈希」，
+> `scripts/test/packaging-sign-order.sh` 在 CI 里覆盖同一不变量。
+
 **这一轮想先测起来、不想改代码的临时办法**（安全，且不削弱任何校验）：手工把**未签名的那份**预置到 helper 自己的目录，路径用 helper 里编译进去的哈希：
 
 ```bash

@@ -31,7 +31,12 @@ ALLOW_RE='(secret-scan|check-secrets):allow'
 # 128.0.0.0/1 是分默认路由的起点，不是可泄漏的公网地址。
 IP_ALLOW_RE='^(127\.|0\.0\.0\.0$|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|198\.1[89]\.|203\.0\.113\.|198\.51\.100\.|192\.0\.2\.|128\.0\.0\.0$|22[4-9]\.|23[0-9]\.|24[0-9]\.|25[0-5]\.)'
 
-PLACEHOLDER_USER_RE='^(x|X|test|user|username|alice|bob|foo|bar|example|demo|me|you|name|<.+>)$'
+# 文档与测试里逐个出现过的**精确**地址（不是网段）。只在完全相等时放行：
+# 公共 DNS、文档示例、私有段边界的邻接值、OID/版本号这类被正则误认的字符串。
+# 新增一条都要人工判断一次——不要在这里写 /8、/16 这种范围。
+IP_ALLOW_EXACT_RE='^(1\.2\.3\.4|1\.1\.1\.1|8\.8\.8\.8|9\.9\.9\.9|1\.0\.0\.1|0\.0\.0\.1|16\.0\.0\.0|223\.5\.5\.5|119\.29\.29\.29|211\.179\.155\.161|185\.199\.108\.153|64\.177\.43\.69|64\.177\.57\.184|192\.0\.0\.1|192\.88\.99\.1|100\.64\.0\.0|100\.64\.0\.1|100\.63\.255\.255|100\.127\.255\.255|100\.128\.0\.0|126\.255\.255\.255|11\.0\.0\.0|172\.15\.255\.255|172\.32\.0\.0|192\.167\.255\.255|169\.253\.255\.255|198\.17\.255\.255|198\.20\.0\.0|0\.14\.0\.0|1\.3\.6\.1|5\.5\.7\.3)$'
+
+PLACEHOLDER_USER_RE='^(x|X|test|user|username|alice|bob|foo|bar|example|demo|me|you|name|\.\.\.|<.+>)$'
 
 EXCLUDE_RE='(^|/)(\.git|node_modules|target)/|^src-tauri/claurst/|^scripts/test/secret-scan\.sh$|^docs/acceptance-p1\.md$'
 
@@ -63,7 +68,7 @@ each_line() {
 
 cb_public_ipv4() {
   local file="$1" num="$2" line="$3"
-  if printf '%s\n' "$line" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | grep -qvE "$IP_ALLOW_RE"; then
+  if printf '%s\n' "$line" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | grep -qvE "$IP_ALLOW_RE|$IP_ALLOW_EXACT_RE"; then
     hit "$file" "$num" "公网 IPv4"
   fi
 }
@@ -76,6 +81,8 @@ cb_public_ipv6() {
     printf '%s' "$cand" | grep -qE '[0-9]' || continue
     case "$cand" in
       ::1|::|2001:db8*|fe80:*|ff[0-9a-f][0-9a-f]:*|::ffff:*) continue ;;
+      # 文档/测试夹具里逐条出现过的精确地址（按本脚本抽取到的形态）。
+      8c00::1|4700::1111|2002:0a00:0001:) continue ;;
     esac
     hit "$file" "$num" "公网 IPv6"
     return 0
@@ -83,7 +90,13 @@ cb_public_ipv6() {
 }
 
 cb_plain() {
-  local file="$1" num="$2" type="$4"
+  local file="$1" num="$2" line="$3" type="$4"
+  # AWS 官方文档里的示例访问密钥（日志脱敏测试的夹具），不是真实凭据。
+  case "$type" in
+    "疑似 token")
+      case "$line" in *AKIAIOSFODNN7EXAMPLE*) return 0 ;; esac
+      ;;
+  esac
   hit "$file" "$num" "$type"
 }
 
@@ -99,6 +112,8 @@ cb_password() {
   # 否则 correct-horse-battery-staple 这种口令短语会被整类放过。
   case "$val" in
     new-secret|pw-tokyo|pw-osaka|pw-secret-tokyo|pw-leak-me|\
+    pw-secret|pw-main-flow|pw-iso-a|pw-iso-b|pw-gone-a|pw-gone-b|\
+    pw-retry-a|pw-retry-b|topsecret|abc12345xyz|sk-abcdefghijklmnop|\
     test-password-not-real|test-secret|test-secret-123|\
     dummy-secret|not-a-real-secret|placeholder-secret) return 0 ;;
     \$*) return 0 ;;        # $CLASH_SECRET / $(printf ...) 这类变量或命令替换
