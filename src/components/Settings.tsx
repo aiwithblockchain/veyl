@@ -18,6 +18,8 @@ import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
 import { useFocusTrap } from "../ui/focus";
 import { formatPort, formatDate } from "../format";
 import { IconClose } from "./icons";
+import { RuntimeUpgradeRow, useRuntimeUpgrade } from "./RuntimeUpgrade";
+import { TunDiagnosticsRow } from "./TunDiagnostics";
 
 const DEFAULT_SOURCE_URL = "https://meshnetprotocol.github.io/bootstrap.json";
 const APP_VERSION = "0.1.0";
@@ -304,6 +306,7 @@ export function Settings({
   initialSection = "ai",
 }: Props) {
   const [section, setSection] = useState<SectionId>("ai");
+  const coreUpgrade = useRuntimeUpgrade({ bridge, enabled: open });
   const [state, setState] = useState<DeepSeekKeyState>({
     masked: null,
     verified: false,
@@ -1325,6 +1328,8 @@ export function Settings({
           <section className="settings-section">
             <h3 className="settings-section__title">高级</h3>
 
+            <RuntimeUpgradeRow controller={coreUpgrade} />
+
             <div className="settings-row">
               <div>
                 <div className="settings-row__label">默认配置源地址</div>
@@ -1382,6 +1387,9 @@ export function Settings({
             {diagnosticNotice ? (
               <p className="settings-feedback settings-feedback--ok">{diagnosticNotice}</p>
             ) : null}
+
+            {/* tun_probe 只在 debug 构建注册，release 里连入口一起隐藏。 */}
+            {import.meta.env.DEV ? <TunDiagnosticsRow bridge={bridge} /> : null}
 
             <div className="settings-row">
               <div>

@@ -1319,6 +1319,208 @@ body[data-resizing] {
   flex: none;
 }
 
+/* TUN 诊断（仅 debug 构建） */
+
+.settings-row--stack {
+  align-items: flex-start;
+}
+
+.tun-probe {
+  flex: 1;
+  min-width: 0;
+}
+
+.tun-probe__status {
+  margin-top: 6px;
+}
+
+.tun-probe__result {
+  margin-top: 10px;
+}
+
+.tun-probe__conclusion {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.tun-probe__items {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+}
+
+.tun-probe__item {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.tun-probe__item dt {
+  flex: none;
+  width: 84px;
+  color: var(--ink-3);
+}
+
+.tun-probe__item dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--ink-2);
+  word-break: break-word;
+}
+
+.tun-probe__line {
+  display: block;
+}
+
+.tun-probe__path {
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-3);
+  text-align: left;
+  word-break: break-all;
+  cursor: pointer;
+}
+
+.tun-probe__path:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+.tun-probe__copy {
+  margin-left: 8px;
+  text-decoration: underline;
+}
+
+/* 运行时升级 */
+
+.core-upgrade {
+  align-items: flex-start;
+}
+
+.core-upgrade__main {
+  flex: 1;
+  min-width: 0;
+}
+
+.core-upgrade__status {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.core-upgrade__status.is-ok {
+  color: var(--ok-text);
+}
+
+.core-upgrade__status.is-warn {
+  color: var(--warn-text);
+}
+
+.core-upgrade__status.is-error {
+  color: var(--err-text);
+}
+
+.core-upgrade__status.is-muted {
+  color: var(--ink-3);
+}
+
+.core-upgrade__note {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
+.core-upgrade__cached {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--warn-text);
+}
+
+.core-upgrade__fail {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.core-upgrade__fail p {
+  margin: 0;
+}
+
+.core-upgrade__fail p:first-child {
+  color: var(--err-text);
+}
+
+.core-upgrade__bar {
+  position: relative;
+  margin-top: 8px;
+  height: 2px;
+  max-width: 360px;
+  overflow: hidden;
+  border-radius: 1px;
+  background: var(--hair);
+}
+
+.core-upgrade__bar span {
+  display: block;
+  height: 100%;
+  background: var(--cobalt);
+  transition: width 120ms linear;
+}
+
+.core-upgrade__bar.is-indeterminate span {
+  width: 36%;
+  animation: core-upgrade-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes core-upgrade-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(280%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .core-upgrade__bar span {
+    transition: none;
+  }
+  .core-upgrade__bar.is-indeterminate span {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
+.core-upgrade__actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .core-upgrade {
+    flex-wrap: wrap;
+  }
+  .core-upgrade__actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
 /* 强制重置网络 */
 
 .reset-dialog {

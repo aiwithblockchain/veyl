@@ -25,6 +25,13 @@ function makeBridge(
 ): AgentBridge {
   return {
     mode: "mock",
+    subscribe: vi.fn(() => () => {}),
+    coreInfo: vi.fn(async () => ({
+      bundledVersion: "1.14.4",
+      activeVersion: "1.14.4",
+      activeSource: "bundled" as const,
+      restartRequired: false,
+    })),
     getDeepSeekKey: vi.fn(async () => ({
       masked: null,
       verified: false,

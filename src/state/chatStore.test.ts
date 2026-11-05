@@ -457,4 +457,48 @@ describe("chatReducer", () => {
     expect(second.activeRequestId).toBeNull();
     expect(second.requesting).toBe(true);
   });
+
+  it("运行时升级事件不进对话流，也不会结束当前请求", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "帮我检查运行时",
+      localRequestId: "local_1",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_1",
+    });
+
+    const before = state;
+    let next = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.coreUpgradeProgress,
+        payload: {
+          job_id: "job_1",
+          phase: "downloading",
+          received: 1024,
+          total: 2048,
+        },
+      },
+    });
+    expect(next).toBe(before);
+
+    next = chatReducer(next, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.coreUpgradeFinished,
+        payload: { job_id: "job_1", ok: true, version: "1.15.0" },
+      },
+    });
+    expect(next).toBe(before);
+
+    const session = activeSession(next)!;
+    expect(session.activeRequestId).toBe("req_1");
+    expect(session.status?.text).toBe("正在思考");
+  });
 });

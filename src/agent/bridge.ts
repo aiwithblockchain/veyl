@@ -160,6 +160,51 @@ export interface NetworkForceResetResult {
   steps: NetworkForceResetStep[];
 }
 
+/** 运行时（建立连接时实际运行的程序）的版本来源。 */
+export type CoreActiveSource = "bundled" | "installed";
+
+export interface CoreInfo {
+  bundledVersion: string;
+  activeVersion: string;
+  activeSource: CoreActiveSource;
+  restartRequired: boolean;
+}
+
+export interface CoreUpdateCandidate {
+  version: string;
+  /** 安装包字节数；后端没给时为 0。 */
+  size: number;
+}
+
+export type CoreUpdateNetwork = "ok" | "unreachable" | "source_error";
+
+export interface CoreCheckUpdatesResult {
+  network: CoreUpdateNetwork;
+  candidates: CoreUpdateCandidate[];
+  /** true = 本次联网失败，结果来自上次成功验签的缓存，不能当作实时结果。 */
+  cached: boolean;
+  /** 失败原因；后端可选返回。 */
+  message?: string;
+}
+
+/** 仅 debug 构建的 TUN 诊断结果；只读，不改路由与连接。 */
+export interface TunProbeData {
+  /** 一句话结论。 */
+  conclusion: string;
+  /** 报告文件绝对路径，位于 ~/.veyl/diagnostics/。 */
+  reportPath: string;
+  /** 接口、地址、路由数与关键段覆盖，每项一行。 */
+  utun: string[];
+  /** 当前节点服务器 TCP 直连结果。 */
+  node: string;
+  /** 系统 DNS 解析结果。 */
+  dns: string;
+  /** 经隧道访问固定 HTTPS 的结果。 */
+  https: string;
+  /** sing-box pid / 存活 / 建立时间。 */
+  process: string;
+}
+
 /** 模型端点配置（R32）。线格式 snake_case，由 bridge 转成 camelCase。 */
 export type LlmProtocol = "openai" | "anthropic";
 
@@ -264,6 +309,17 @@ export interface AgentBridge {
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
   /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */
   networkForceReset(): Promise<NetworkForceResetResult>;
+  /** 当前运行时版本与来源；命令不存在时抛错，由 UI 降级为只读。 */
+  coreInfo(): Promise<CoreInfo>;
+  /** 检查运行时更新；网络不可达是正常结果，不抛错。 */
+  coreCheckUpdates(): Promise<CoreCheckUpdatesResult>;
+  /** 开始升级；进度通过 core-upgrade-progress / finished 事件回流。 */
+  coreUpgrade(version: string): Promise<{ jobId: string }>;
+  coreCancelUpgrade(jobId: string): Promise<{ cancelled: boolean }>;
+  /** 回到随包版本。 */
+  coreRollback(): Promise<void>;
+  /** 仅 debug 构建：TUN 已连接时采集一次诊断；未连接抛 PRECONDITION_FAILED。 */
+  tunProbe(): Promise<TunProbeData>;
   /** 用系统文件管理器定位日志文件。 */
   openLogDir(): Promise<void>;
   /** 用系统默认浏览器打开链接。tauri 侧等 Host 接 opener 后实现。 */

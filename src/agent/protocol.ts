@@ -29,6 +29,8 @@ export const AGENT_EVENTS = {
   layoutUpdated: "layout-updated",
   routingChanged: "routing-changed",
   rulesChanged: "rules-changed",
+  coreUpgradeProgress: "core-upgrade-progress",
+  coreUpgradeFinished: "core-upgrade-finished",
 } as const;
 
 export type AgentEventName = (typeof AGENT_EVENTS)[keyof typeof AGENT_EVENTS];
@@ -58,6 +60,8 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.layoutUpdated,
   AGENT_EVENTS.routingChanged,
   AGENT_EVENTS.rulesChanged,
+  AGENT_EVENTS.coreUpgradeProgress,
+  AGENT_EVENTS.coreUpgradeFinished,
 ] as const;
 
 /* ------------------------------------------------------------------ */
@@ -278,6 +282,25 @@ export interface JobProgressPayload {
   message: string | null;
   error: AivpnError | null;
   emitted_at: string;
+}
+
+/** 运行时升级进度；phase 由后端定义，前端按常见别名归一。 */
+export interface CoreUpgradeProgressPayload {
+  contract_version?: typeof CONTRACT_VERSION;
+  job_id: string;
+  phase: string;
+  received: number;
+  total: number | null;
+  emitted_at?: string;
+}
+
+export interface CoreUpgradeFinishedPayload {
+  contract_version?: typeof CONTRACT_VERSION;
+  job_id: string;
+  ok: boolean;
+  code?: string | null;
+  version?: string | null;
+  emitted_at?: string;
 }
 
 export type AppLifecycleState = "foreground" | "background";
@@ -504,6 +527,8 @@ export interface AgentEventMap {
   [AGENT_EVENTS.layoutUpdated]: LayoutUpdatedPayload;
   [AGENT_EVENTS.routingChanged]: RoutingChangedPayload;
   [AGENT_EVENTS.rulesChanged]: RulesChangedPayload;
+  [AGENT_EVENTS.coreUpgradeProgress]: CoreUpgradeProgressPayload;
+  [AGENT_EVENTS.coreUpgradeFinished]: CoreUpgradeFinishedPayload;
 }
 
 export type AgentEvent = {

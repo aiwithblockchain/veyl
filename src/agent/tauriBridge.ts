@@ -7,6 +7,8 @@ import type {
   ConfigCreateInput,
   ConfigDeleteData,
   ConfigListData,
+  CoreCheckUpdatesResult,
+  CoreInfo,
   DeepSeekKeyState,
   DefaultProfileStatus,
   ImportSeedResult,
@@ -24,6 +26,7 @@ import type {
   RenamedSession,
   StoredChatMessage,
   StoredSessionSummary,
+  TunProbeData,
 } from "./bridge";
 import { toBridgeError } from "./errors";
 import { createListenerManager } from "./listeners";
@@ -56,6 +59,41 @@ function normalizeDefaultProfile(raw: RawDefaultProfile): DefaultProfileStatus {
     appliedAt: raw.applied_at ?? null,
     newVersionAvailable: raw.new_version_available === true,
     nodeCount: raw.node_count ?? 0,
+  };
+}
+
+interface RawCoreInfo {
+  bundled_version?: string | null;
+  active_version?: string | null;
+  active_source?: string | null;
+  restart_required?: boolean;
+}
+
+function normalizeCoreInfo(raw: RawCoreInfo): CoreInfo {
+  return {
+    bundledVersion: raw.bundled_version ?? "",
+    activeVersion: raw.active_version ?? raw.bundled_version ?? "",
+    // 未知来源按随包处理：没有明确说「已安装」就不显示回退入口。
+    activeSource: raw.active_source === "installed" ? "installed" : "bundled",
+    restartRequired: raw.restart_required === true,
+  };
+}
+
+function normalizeCoreCheck(raw: {
+  network?: string;
+  candidates?: Array<{ version?: string; size?: number }>;
+  cached?: boolean;
+  message?: string | null;
+}): CoreCheckUpdatesResult {
+  const network =
+    raw.network === "unreachable" || raw.network === "source_error" ? raw.network : "ok";
+  return {
+    network,
+    candidates: (raw.candidates ?? [])
+      .filter((item) => typeof item.version === "string" && item.version.length > 0)
+      .map((item) => ({ version: item.version as string, size: item.size ?? 0 })),
+    cached: raw.cached === true,
+    message: raw.message ?? undefined,
   };
 }
 
@@ -251,6 +289,49 @@ export class TauriAgentBridge implements AgentBridge {
       verified: raw.verified === true,
       exitIp: raw.exit_ip ?? null,
       steps: (raw.steps ?? []).map(normalizeResetStep),
+    };
+  }
+
+  async coreInfo(): Promise<CoreInfo> {
+    return normalizeCoreInfo(await call<RawCoreInfo>("core_info"));
+  }
+
+  async coreCheckUpdates(): Promise<CoreCheckUpdatesResult> {
+    return normalizeCoreCheck(await call("core_check_updates"));
+  }
+
+  async coreUpgrade(version: string): Promise<{ jobId: string }> {
+    const raw = await call<{ job_id?: string }>("core_upgrade", { version });
+    return { jobId: raw.job_id ?? "" };
+  }
+
+  async coreCancelUpgrade(jobId: string): Promise<{ cancelled: boolean }> {
+    const raw = await call<{ cancelled?: boolean }>("core_cancel_upgrade", { jobId });
+    return { cancelled: raw.cancelled === true };
+  }
+
+  async coreRollback(): Promise<void> {
+    await call("core_rollback");
+  }
+
+  async tunProbe(): Promise<TunProbeData> {
+    const raw = await call<{
+      conclusion?: string;
+      report_path?: string;
+      utun?: string[];
+      node?: string;
+      dns?: string;
+      https?: string;
+      process?: string;
+    }>("tun_probe");
+    return {
+      conclusion: raw.conclusion ?? "",
+      reportPath: raw.report_path ?? "",
+      utun: raw.utun ?? [],
+      node: raw.node ?? "",
+      dns: raw.dns ?? "",
+      https: raw.https ?? "",
+      process: raw.process ?? "",
     };
   }
 

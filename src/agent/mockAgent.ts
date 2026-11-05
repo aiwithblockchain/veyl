@@ -5,6 +5,8 @@ import type {
   ConfigCreateInput,
   ConfigDeleteData,
   ConfigListData,
+  CoreCheckUpdatesResult,
+  CoreInfo,
   DeepSeekKeyState,
   DefaultProfileStatus,
   ImportSeedResult,
@@ -17,6 +19,7 @@ import type {
   NodeProbeResult,
   NodeSwitchResult,
   RenamedSession,
+  TunProbeData,
 } from "./bridge";
 import { isLocalEndpoint, maskKey } from "./bridge";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
@@ -33,6 +36,15 @@ import type {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = () => new Date().toISOString();
 const CHUNK_INTERVAL = 16;
+
+/** 浏览器演示用的行为开关；Tauri 通道不读这些值。 */
+function mockFlag(key: string): string | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
 
 /** mock 通道固定出口 IP，方便自动化断言。 */
 export const MOCK_EXIT_IP = "203.0.113.7";
@@ -62,11 +74,19 @@ interface MockNodeEntry {
 export class MockAgentBridge implements AgentBridge {
   readonly mode = "mock" as const;
 
+  constructor() {
+    // 刷新页面相当于重启 App：上一次装好的版本到这里才真正生效。
+    const installed = mockFlag("veyl.mock.core.installed");
+    if (installed) {
+      this.coreActiveSource = "installed";
+      this.coreActiveVersion = installed;
+      this.coreRestartRequired = false;
+    }
+  }
+
   private listeners = new Set<(event: AgentEvent) => void>();
   private cancelled = new Set<string>();
   private activeRequests = new Set<string>();
-  /** 装过一次就不再走安装流程（真实链路同理，已安装时不重复装）。 */
-  private installed = false;
   private healthTimer: number | null = null;
   private trafficUp = 0;
   private trafficDown = 0;
@@ -90,6 +110,11 @@ export class MockAgentBridge implements AgentBridge {
       nodeId: "seed-sg-02",
     },
   ];
+  private coreBundledVersion = "1.14.4";
+  private coreActiveVersion = "1.14.4";
+  private coreActiveSource: "bundled" | "installed" = "bundled";
+  private coreRestartRequired = false;
+  private coreJob: { id: string; cancelled: boolean } | null = null;
   private runtime: RuntimeSnapshot = {
     contract_version: CONTRACT_VERSION,
     state: "idle",
@@ -261,6 +286,184 @@ export class MockAgentBridge implements AgentBridge {
       exitIp: MOCK_DIRECT_IP,
       steps: steps.map(([id, detail]) => ({ id, ok: true, detail, status: "ok" as const })),
     };
+  }
+
+  async coreInfo(): Promise<CoreInfo> {
+    await sleep(200);
+    if (mockFlag("veyl.mock.core.missing") === "1") {
+      throw new Error("Command core_info not found");
+    }
+    return {
+      bundledVersion: this.coreBundledVersion,
+      activeVersion: this.coreActiveVersion,
+      activeSource: this.coreActiveSource,
+      restartRequired: this.coreRestartRequired,
+    };
+  }
+
+  async coreCheckUpdates(): Promise<CoreCheckUpdatesResult> {
+    await sleep(mockFlag("veyl.mock.core.slow") === "1" ? 4000 : 900);
+    const forced = mockFlag("veyl.mock.core.check");
+    if (forced === "unreachable") {
+      return { network: "unreachable", candidates: [], cached: false };
+    }
+    if (forced === "source_error") {
+      return { network: "source_error", candidates: [], cached: false };
+    }
+    if (forced === "cached") {
+      // 联网失败但有上次成功验签的缓存：candidates 非空，不能当实时结果。
+      return {
+        network: "unreachable",
+        candidates: [{ version: "1.15.0", size: 12 * 1024 * 1024 }],
+        cached: true,
+        message: "连不上更新服务器，显示上次检查的结果。",
+      };
+    }
+    if (forced === "none" || mockFlag("veyl.mock.core.installed")) {
+      return { network: "ok", candidates: [], cached: false };
+    }
+    return {
+      network: "ok",
+      candidates: [{ version: "1.15.0", size: 12 * 1024 * 1024 }],
+      cached: false,
+    };
+  }
+
+  async coreUpgrade(version: string): Promise<{ jobId: string }> {
+    const job = { id: `core_${Date.now()}`, cancelled: false };
+    this.coreJob = job;
+    const mode = mockFlag("veyl.mock.core.upgrade");
+    void this.runMockUpgrade(job, version, mode);
+    return { jobId: job.id };
+  }
+
+  async coreCancelUpgrade(jobId: string): Promise<{ cancelled: boolean }> {
+    const cancelled = this.coreJob?.id === jobId;
+    if (cancelled && this.coreJob) {
+      this.coreJob.cancelled = true;
+      this.coreJob = null;
+    }
+    await sleep(150);
+    // 真机取消也会发一条 ok:false 的结束事件；这里保持同一形状。
+    if (cancelled) this.emitCoreFinished(jobId, false, null, null);
+    return { cancelled };
+  }
+
+  async coreRollback(): Promise<void> {
+    await sleep(700);
+    try {
+      localStorage.removeItem("veyl.mock.core.installed");
+    } catch {
+      // 浏览器存储不可用时只影响演示。
+    }
+    this.coreActiveSource = "bundled";
+    this.coreActiveVersion = this.coreBundledVersion;
+    this.coreRestartRequired =
+      this.runtime.state === "running" || this.runtime.state === "degraded";
+  }
+
+  async tunProbe(): Promise<TunProbeData> {
+    if (this.runtime.state !== "running" && this.runtime.state !== "degraded") {
+      throw { code: "PRECONDITION_FAILED", message: "TUN 未连接，先连接后再执行诊断" };
+    }
+    // 真实链路要跑路由表与几轮网络探测，留出可见的等待态。
+    const mode = mockFlag("veyl.mock.tun.probe");
+    await sleep(mode === "slow" ? 6000 : 2200);
+    if (mode === "fail") {
+      throw { code: "INTERNAL", message: "采集诊断失败：读取路由表超时" };
+    }
+    const node = this.runtime.node_name ?? "节点";
+    const stamp = new Date()
+      .toISOString()
+      .slice(0, 19)
+      .replace(/[-:]/g, "")
+      .replace("T", "-");
+    return {
+      conclusion: "隧道与出站均正常",
+      reportPath: `~/.veyl/diagnostics/tun-${stamp}.txt`,
+      utun: ["utun7 198.18.0.1/16 路由=3 关键段=0/1,128/1,16/4,32/3"],
+      node: `${node} 可直连（42ms）`,
+      dns: "www.apple.com → 203.0.113.10（18ms）",
+      https: "HTTP 200（236ms）",
+      process: `pid=${this.runtime.pid ?? 4812} 存活=true since=${this.runtime.connected_since ?? now()}`,
+    };
+  }
+
+  private async runMockUpgrade(
+    job: { id: string; cancelled: boolean },
+    version: string,
+    mode: string | null,
+  ) {
+    const slow = mockFlag("veyl.mock.core.slow");
+    const stepDelay = slow === "2" ? 600 : slow === "1" ? 200 : 80;
+    const phaseDelay = slow === "2" ? 5000 : slow === "1" ? 2500 : 700;
+    const total = 12 * 1024 * 1024;
+    const steps = 24;
+    for (let i = 1; i <= steps; i += 1) {
+      await sleep(stepDelay);
+      if (job.cancelled) return;
+      this.emitCoreProgress(job.id, "download", Math.round((total * i) / steps), total);
+    }
+    if (job.cancelled) return;
+    this.emitCoreProgress(job.id, "verify", 0, null);
+    await sleep(phaseDelay);
+    if (job.cancelled) return;
+    if (mode === "fail") {
+      this.emitCoreFinished(job.id, false, "CHECKSUM_MISMATCH", null);
+      return;
+    }
+    this.emitCoreProgress(job.id, "install", 0, null);
+    await sleep(phaseDelay);
+    if (job.cancelled) return;
+    try {
+      localStorage.setItem("veyl.mock.core.installed", version);
+    } catch {
+      // 浏览器存储不可用时只影响演示。
+    }
+    // 与真机一致：空闲时装完即用；只有运行中的进程还是旧版本才需要重启。
+    this.coreActiveSource = "installed";
+    this.coreActiveVersion = version;
+    this.coreRestartRequired =
+      this.runtime.state === "running" || this.runtime.state === "degraded";
+    this.emitCoreFinished(job.id, true, null, version);
+  }
+
+  private emitCoreProgress(
+    jobId: string,
+    phase: string,
+    received: number,
+    total: number | null,
+  ) {
+    this.emit({
+      name: AGENT_EVENTS.coreUpgradeProgress,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        job_id: jobId,
+        phase,
+        received,
+        total,
+        emitted_at: now(),
+      },
+    });
+  }
+
+  private emitCoreFinished(
+    jobId: string,
+    ok: boolean,
+    code: string | null,
+    version: string | null,
+  ) {
+    this.emit({
+      name: AGENT_EVENTS.coreUpgradeFinished,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        job_id: jobId,
+        ok,
+        code,
+        version,
+        emitted_at: now(),
+      },
+    });
   }
 
   async openLogDir(): Promise<void> {
@@ -545,7 +748,9 @@ export class MockAgentBridge implements AgentBridge {
     if (text.includes("第一次用")) return this.firstRunFlow(sessionId, requestId, assistantId);
     if (text.includes("断开")) return this.disconnectFlow(requestId, assistantId);
     if (text.includes("状态")) return this.statusFlow(requestId, assistantId);
-    if (text.includes("安装")) return this.installOnlyFlow(sessionId, requestId, assistantId);
+    if (text.includes("安装") || text.includes("版本")) {
+      return this.runtimeVersionFlow(requestId, assistantId);
+    }
     if (/key/i.test(text)) return this.saveKeyFlow(requestId, assistantId);
 
     if (!this.status(requestId, assistantId, "正在理解你的意图", "thinking")) return;
@@ -560,9 +765,6 @@ export class MockAgentBridge implements AgentBridge {
     }
 
     this.status(requestId, assistantId, "检查 sing-box 运行时", "preparing_tool");
-    const versionSummary = this.installed
-      ? "已安装 1.14.4（active）"
-      : "未安装，可安装 1.14.4";
     if (
       !(await this.tool(
         requestId,
@@ -570,46 +772,10 @@ export class MockAgentBridge implements AgentBridge {
         "CoreListVersions",
         "查询可用版本",
         640,
-        versionSummary,
+        "随包 1.14.4（active）",
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
-    }
-
-    if (!this.installed) {
-      if (
-        !(await this.type(
-          requestId,
-          assistantId,
-          "本地还没有安装 sing-box。我先装一个官方版本，再帮你连到日本。",
-        ))
-      ) {
-        return this.finish(requestId, assistantId, "cancelled", null);
-      }
-
-      if (
-        !(await this.tool(
-          requestId,
-          assistantId,
-          "CoreInstall",
-          "安装 1.14.4",
-          1900,
-          "已安装 sing-box 1.14.4。",
-          {
-            permissionLevel: "execute",
-            argsPreview: { version: "1.14.4" },
-          },
-        ))
-      ) {
-        return this.finish(requestId, assistantId, "cancelled", null);
-      }
-      this.installed = true;
-      this.transition("idle", "process_ready", {
-        upstream_version: "1.14.4",
-        pid: null,
-      });
-
-      await this.type(requestId, assistantId, "运行时装好了。正在查日本节点。");
     }
 
     if (
@@ -711,28 +877,28 @@ export class MockAgentBridge implements AgentBridge {
     this.finish(requestId, assistantId, "success", reply);
   }
 
-  private async installOnlyFlow(_sessionId: string, requestId: string, assistantId: string) {
-    this.status(requestId, assistantId, "准备安装运行时", "preparing_tool");
+  /**
+   * 运行时版本只读查询。安装/升级是 UI 专用路径（设置 › 高级 › 运行时），
+   * 模型没有对应工具，mock 也不能演示成 AI 能装。
+   */
+  private async runtimeVersionFlow(requestId: string, assistantId: string) {
+    this.status(requestId, assistantId, "查询运行时版本", "preparing_tool");
 
     if (
       !(await this.tool(
         requestId,
         assistantId,
-        "CoreInstall",
-        "安装 1.14.4",
-        1900,
-        "已安装 sing-box 1.14.4。",
-        {
-          permissionLevel: "execute",
-          argsPreview: { version: "1.14.4" },
-        },
+        "CoreListVersions",
+        "查询可用版本",
+        640,
+        "随包 1.14.4（active）",
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
     }
 
-    this.installed = true;
-    const reply = "运行时已经装好了，随时可以连节点。";
+    const reply =
+      "运行时随 Veyl 一起提供，我这边只能查看版本。要检查更新，去「设置 › 高级 › 运行时」。";
     await this.type(requestId, assistantId, reply);
     this.finish(requestId, assistantId, "success", reply);
   }
