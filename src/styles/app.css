@@ -2606,6 +2606,129 @@ body[data-resizing] .pane-handle,
   justify-content: center;
   padding: 40px 28px;
   overflow-y: auto;
+  container-type: inline-size;
+}
+
+/* 中间区本地兜底：一句话居中，有卡片时靠上排 */
+.console-mid--stacked {
+  align-items: flex-start;
+  padding-top: 24px;
+}
+
+.console-mid__hint {
+  width: 100%;
+}
+
+.console-mid__stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 520px;
+}
+
+/* 中间区整体窄于 420px 时，左右内边距从 28 降到 16。
+   容器查询量的是内容盒，420 - 左右各 28 = 364；容器查询改不了父级，用负外边距抵消。 */
+@container (max-width: 364px) {
+  .console-mid__hint,
+  .console-mid__stack {
+    margin-inline: -12px;
+  }
+}
+
+.console-hint {
+  max-width: 42em;
+  margin: 0 auto;
+  text-align: center;
+  font-size: var(--fs-body);
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+
+.console-card {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-card);
+}
+
+.console-card--issue.is-failed {
+  border-color: var(--err-line);
+}
+
+.console-card--issue.is-degraded {
+  border-color: var(--warn-line);
+}
+
+.console-card__title {
+  margin: 0;
+  font-size: var(--fs-card);
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.console-card__note {
+  margin: 6px 0 0;
+  font-size: var(--fs-small);
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
+.console-card__field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  margin-top: 12px;
+}
+
+.console-card__label {
+  font-size: var(--fs-label);
+  font-weight: 500;
+  color: var(--ink-3);
+}
+
+.console-card__address {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--fs-body);
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.console-card__address .num {
+  overflow-wrap: anywhere;
+}
+
+.console-card__copy {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--fs-label);
+  cursor: pointer;
+}
+
+.console-card__copy:hover {
+  text-decoration: underline;
+}
+
+.console-card__text {
+  margin: 12px 0 0;
+  font-size: var(--fs-small);
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+
+.console-card__foot {
+  margin: 6px 0 0;
+  font-size: var(--fs-small);
+  line-height: 1.65;
+  color: var(--ink-3);
 }
 
 /* 零配置入口：标题 > 三步说明 > 主按钮 > 次按钮 */

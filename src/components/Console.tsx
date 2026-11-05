@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ConfigDetail, NodeSummary, RuntimeView } from "../agent/protocol";
 import type { ProbeResult, VpnConnectionState } from "../config/useVpnSession";
+import { copyText } from "../ui/clipboard";
 import {
   runZeroConfigPrimaryAction,
   zeroConfigActions,
@@ -8,7 +9,9 @@ import {
   zeroConfigMode,
 } from "../ui/consoleActions";
 import { formatDuration, formatSampleTime, formatTraffic } from "../ui/format";
+import { middleBlocks } from "../ui/middleArea";
 import { consolePrimary, consoleStatus } from "../ui/status";
+import { MiddleArea } from "./MiddleArea";
 
 interface Props {
   config: ConfigDetail | null;
@@ -30,36 +33,14 @@ interface Props {
   onNewConfig: () => void;
   loading?: boolean;
   runtime: RuntimeView;
+  /** 最近一次失败是否来自已连接态；决定失败卡标题是「连接断了」还是「这次没有连上」。 */
+  failedAfterConnected?: boolean;
 }
 
 type Probe =
   | { nodeId: string; status: "testing" }
   | { nodeId: string; status: "ok"; latency: number | null }
   | { nodeId: string; status: "fail"; message: string | null; unreachable: boolean };
-
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // 落到下面的 textarea 方案。
-  }
-  try {
-    const el = document.createElement("textarea");
-    el.value = text;
-    el.style.position = "fixed";
-    el.style.opacity = "0";
-    document.body.appendChild(el);
-    el.select();
-    const ok = document.execCommand("copy");
-    el.remove();
-    return ok;
-  } catch {
-    return false;
-  }
-}
 
 export function Console({
   config,
@@ -81,6 +62,7 @@ export function Console({
   onNewConfig,
   loading = false,
   runtime,
+  failedAfterConnected = false,
 }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(
     config?.current_node_id ?? null,
@@ -238,7 +220,7 @@ export function Console({
     if (!connected) setProbe(null);
   }, [connected]);
 
-  const primary = consolePrimary(connection, canConnect);
+  const primary = consolePrimary(connection, canConnect, runtime.state === "failed");
   const status = loading
     ? { text: "正在读取配置…", tone: "muted" as const }
     : consoleStatus(connection, Boolean(config), canConnect);
@@ -259,6 +241,15 @@ export function Console({
   const zeroMode = zeroConfigMode(aiReady, justOnboarded, zeroConfigSettled);
   const zeroContent = zeroConfigContent(zeroMode);
   const zeroActions = zeroConfigActions(zeroMode);
+
+  // 只有从没被编排过的配置（layout 为 null）才走本地兜底；
+  // layout.blocks = [] 是 AI 明确留白，不是空数据，不能拿本地规则去填。
+  // 老后端可能不带 layout 字段，宽松比较把 undefined 也算作没编排过。
+  const midBlocks =
+    !loading && config && config.layout == null
+      ? middleBlocks(runtime, config, aiReady, failedAfterConnected)
+      : [];
+  const midStacked = midBlocks.some((block) => block.kind !== "empty_hint");
 
   return (
     <main className="console">
@@ -337,7 +328,7 @@ export function Console({
         ) : null}
       </header>
 
-      <section className="console-mid">
+      <section className={`console-mid${midStacked ? " console-mid--stacked" : ""}`}>
         {!loading && !hasConfigs ? (
           <div className="console-empty-entry">
             <p className="console-empty-entry__title">{zeroContent.title}</p>
@@ -381,7 +372,9 @@ export function Console({
               ) : null}
             </div>
           </div>
-        ) : null}
+        ) : (
+          <MiddleArea blocks={midBlocks} />
+        )}
       </section>
 
       <footer className="console-node">

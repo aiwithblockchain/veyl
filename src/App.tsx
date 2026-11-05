@@ -31,6 +31,7 @@ import {
 } from "./config/onboarding";
 import { useVpnSession } from "./config/useVpnSession";
 import { ACTIVITY_WIDTH, PANEL_MIN, RAIL_MIN } from "./ui/layout";
+import { isDisconnectFailure } from "./ui/middleArea";
 import { usePaneLayout } from "./ui/usePaneLayout";
 import {
   isZeroConfigAskSuppressed,
@@ -92,6 +93,9 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("ai");
   const [runtime, setRuntime] = useState<RuntimeView>(() => emptyRuntimeView());
+  // 失败快照里 connected_since 已被后端清空，只能记住这次失败是不是从已连接态掉下来的。
+  // 每次状态迁移都整体覆盖，非失败迁移自然复位。
+  const [failedAfterConnected, setFailedAfterConnected] = useState(false);
   const [appNotice, setAppNotice] = useState<AppNotice | null>(null);
   const [dragging, setDragging] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -337,6 +341,9 @@ export default function App() {
         }
       }
       if (event.name === AGENT_EVENTS.runtimeStateChanged) {
+        setFailedAfterConnected(
+          isDisconnectFailure(event.payload.from, event.payload.to),
+        );
         refreshSnapshot();
       }
     });
@@ -969,6 +976,7 @@ export default function App() {
         onNewConfig={() => setNewConfigOpen(true)}
         loading={vpn.loading}
         runtime={runtime}
+        failedAfterConnected={failedAfterConnected}
       />
       {panelOpen ? (
         <div

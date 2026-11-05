@@ -163,9 +163,12 @@ export function consoleStatus(
 export function consolePrimary(
   state: ConsoleConnectionState,
   canConnect: boolean,
+  failed = false,
 ): { label: string; disabled: boolean; stop: boolean } {
   if (state === "starting") return { label: "正在启动…", disabled: true, stop: false };
   if (state === "connected") return { label: "断开 VPN", disabled: false, stop: true };
   if (state === "stopping") return { label: "正在断开…", disabled: true, stop: true };
+  // failed 在 connection 里被归成 idle，按钮得靠这张卡片再点一次，不能叫「启动」。
+  if (failed) return { label: "重新连接", disabled: !canConnect, stop: false };
   return { label: "启动 VPN", disabled: !canConnect, stop: false };
 }

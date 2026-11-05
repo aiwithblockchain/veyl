@@ -199,10 +199,10 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
   useEffect(() => {
     if (mock) return;
     return bridge.subscribe((event) => {
-      if (
-        event.name === AGENT_EVENTS.runtimeStateChanged ||
-        event.name === AGENT_EVENTS.runtimeHealthChanged
-      ) {
+      if (event.name === AGENT_EVENTS.runtimeStateChanged) {
+        // 先按事件把按钮状态切过去，别等快照：两者之间隔着一次 IPC，
+        // 这期间中间区已经按新 state 渲染，顶部却还停在旧文案。
+        setConnection(toConnectionState(event.payload.to));
         void bridge.getRuntimeSnapshot().then((snap) => {
           if (!disposed.current) applySnapshot(snap);
         });
