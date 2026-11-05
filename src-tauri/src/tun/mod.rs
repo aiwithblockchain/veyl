@@ -114,6 +114,276 @@ pub(crate) fn parse_default_route_interface(output: &str) -> Option<String> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// 接管是否完整
+//
+// sing-tun 在 Darwin 上 auto_route 的起点不是 `0.0.0.0/0`，而是下面八段
+// （`0.0.0.0/8` 是保留段，它刻意不接管）。所以复核必须与它对齐，
+// 否则会把「设计上不接管」误判成失败。
+// ---------------------------------------------------------------------------
+
+/// macOS 上 sing-box 实际会加路由的 IPv4 起点。
+pub const AUTO_ROUTE_BASE_V4: [(u32, u8); 8] = [
+    (1 << 24, 8),
+    (2 << 24, 7),
+    (4 << 24, 6),
+    (8 << 24, 5),
+    (16 << 24, 4),
+    (32 << 24, 3),
+    (64 << 24, 2),
+    (128 << 24, 1),
+];
+
+/// 闭区间 `[start, end]`，单位是 IPv4 的 `u32`。
+pub type V4Range = (u32, u32);
+
+fn prefix_range(network: u32, prefix: u8) -> V4Range {
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    let start = network & mask;
+    (start, start | !mask)
+}
+
+fn subtract_range(ranges: Vec<V4Range>, cut: V4Range) -> Vec<V4Range> {
+    let mut out = Vec::with_capacity(ranges.len() + 1);
+    for (start, end) in ranges {
+        if cut.1 < start || cut.0 > end {
+            out.push((start, end));
+            continue;
+        }
+        if cut.0 > start {
+            out.push((start, cut.0 - 1));
+        }
+        if cut.1 < end {
+            out.push((cut.1 + 1, end));
+        }
+    }
+    out
+}
+
+fn merge_ranges(mut ranges: Vec<V4Range>) -> Vec<V4Range> {
+    ranges.sort_unstable();
+    let mut out: Vec<V4Range> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        match out.last_mut() {
+            Some(last) if start <= last.1.saturating_add(1) => {
+                last.1 = last.1.max(end);
+            }
+            _ => out.push((start, end)),
+        }
+    }
+    out
+}
+
+/// 排除表生效后，TUN 应当接管的 IPv4 区间。
+///
+/// 排除表里的 IPv6 条目在这里不参与（本机 TUN 只有 IPv4 地址）。
+/// 节点服务器的 `/32` 旁路也是排除表的一部分，所以会同样留出空洞。
+///
+/// 相邻区间**不合并**：补集减出来的每一段都与原前缀对齐，
+/// 保留它们才能在报缺失时说出 `16.0.0.0/4` 这种可读网段。
+pub fn expected_takeover_ranges(excludes: &[String]) -> Vec<V4Range> {
+    let mut ranges: Vec<V4Range> = AUTO_ROUTE_BASE_V4
+        .iter()
+        .map(|&(network, prefix)| prefix_range(network, prefix))
+        .collect();
+    for entry in excludes {
+        let Some((network, prefix)) = cidr::parse(entry) else {
+            continue;
+        };
+        ranges = subtract_range(ranges, prefix_range(network, prefix));
+    }
+    ranges.sort_unstable();
+    ranges
+}
+
+/// `netstat` 的目标列 → 前缀。支持三种写法：
+/// `default`、`127`（等价 `/8`）、`172.0/12`、`255.255.255.255/32`。
+fn parse_route_destination(token: &str) -> Option<(u32, u8)> {
+    if token == "default" {
+        return Some((0, 0));
+    }
+    let (address, prefix) = match token.split_once('/') {
+        Some((address, prefix)) => (address, Some(prefix.trim().parse::<u8>().ok()?)),
+        None => (token, None),
+    };
+    let mut octets = [0u8; 4];
+    let mut count = 0usize;
+    for part in address.split('.') {
+        if count == 4 {
+            return None;
+        }
+        octets[count] = part.trim().parse().ok()?;
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    let prefix = prefix.unwrap_or((count * 8) as u8);
+    if prefix > 32 {
+        return None;
+    }
+    Some((u32::from(Ipv4Addr::from(octets)), prefix))
+}
+
+/// 路由表里指向这个 TUN 接口的 IPv4 区间。
+pub(crate) fn tun_route_ranges(output: &str, tun_name: &str) -> Vec<V4Range> {
+    let mut ranges = Vec::new();
+    for line in output.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        // `Destination Gateway Flags Netif [Expire]`
+        if tokens.len() < 4 || tokens[3] != tun_name {
+            continue;
+        }
+        let Some((network, prefix)) = parse_route_destination(tokens[0]) else {
+            continue;
+        };
+        ranges.push(prefix_range(network, prefix));
+    }
+    merge_ranges(ranges)
+}
+
+/// `expected` 里没有被 `actual` 完整覆盖的区间。
+pub(crate) fn uncovered_ranges(expected: &[V4Range], actual: &[V4Range]) -> Vec<V4Range> {
+    let mut missing = Vec::new();
+    for &(start, end) in expected {
+        let mut cursor = start;
+        while cursor <= end {
+            match actual
+                .iter()
+                .find(|(range_start, range_end)| *range_start <= cursor && cursor <= *range_end)
+            {
+                Some((_, range_end)) => {
+                    if *range_end >= end {
+                        break;
+                    }
+                    cursor = *range_end + 1;
+                }
+                None => {
+                    let next_start = actual
+                        .iter()
+                        .filter(|(range_start, _)| *range_start > cursor)
+                        .map(|(range_start, _)| *range_start)
+                        .min();
+                    match next_start {
+                        Some(next_start) if next_start <= end => {
+                            missing.push((cursor, next_start - 1));
+                            cursor = next_start;
+                        }
+                        _ => {
+                            missing.push((cursor, end));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    missing
+}
+
+/// 人能读的区间：对齐的单前缀写 CIDR，其余写起止地址。
+pub fn describe_range(range: V4Range) -> String {
+    let (start, end) = range;
+    let size = end as u64 - start as u64 + 1;
+    if size.is_power_of_two() && (start as u64) % size == 0 {
+        format!(
+            "{}/{}",
+            Ipv4Addr::from(start),
+            32 - size.trailing_zeros() as u8
+        )
+    } else {
+        format!("{}-{}", Ipv4Addr::from(start), Ipv4Addr::from(end))
+    }
+}
+
+/// 前缀写法；`range_prefixes` 给出的网络地址已经对齐。
+pub(crate) fn describe_prefix((network, prefix): (u32, u8)) -> String {
+    format!("{}/{}", Ipv4Addr::from(network), prefix)
+}
+
+/// 把一个连续区间拆成最少的对齐前缀——补集算出来的是区间，
+/// 但报给用户看、以及和 `netstat` 的目标列对照，都要用 CIDR。
+pub(crate) fn range_prefixes((start, end): V4Range) -> Vec<(u32, u8)> {
+    let mut out = Vec::new();
+    let mut cursor = start as u64;
+    let end = end as u64;
+    while cursor <= end {
+        let align = if cursor == 0 {
+            32
+        } else {
+            (cursor as u32).trailing_zeros()
+        };
+        let remaining = end - cursor + 1;
+        let size_exp = remaining.ilog2();
+        let exp = align.min(size_exp);
+        out.push((cursor as u32, (32 - exp) as u8));
+        cursor += 1u64 << exp;
+    }
+    out
+}
+
+/// 读一次路由表，返回没有接管的区间（空 = 完整覆盖）。
+pub fn missing_takeover(tun_name: &str, excludes: &[String]) -> Result<Vec<String>, String> {
+    let output = crate::netcfg::run("/usr/sbin/netstat", &["-rn", "-f", "inet"])?;
+    Ok(missing_takeover_from(&output, tun_name, excludes))
+}
+
+/// 回滚后核对：这个接口上是否还挂着路由。
+///
+/// 正常情况下进程退出、utun 销毁，内核会连带删掉这些路由；
+/// 读得到残余就说明没清干净，要如实告诉用户去强制重置。
+pub fn routes_left(tun_name: &str) -> Result<bool, String> {
+    let output = crate::netcfg::run("/usr/sbin/netstat", &["-rn", "-f", "inet"])?;
+    Ok(interface_has_routes(&output, tun_name))
+}
+
+pub(crate) fn interface_has_routes(output: &str, tun_name: &str) -> bool {
+    output.lines().any(|line| {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        tokens.len() >= 4 && tokens[3] == tun_name
+    })
+}
+
+pub(crate) fn missing_takeover_from(
+    output: &str,
+    tun_name: &str,
+    excludes: &[String],
+) -> Vec<String> {
+    let expected = expected_takeover_ranges(excludes);
+    let actual = tun_route_ranges(output, tun_name);
+    uncovered_ranges(&expected, &actual)
+        .into_iter()
+        .flat_map(range_prefixes)
+        .map(describe_prefix)
+        .collect()
+}
+
+/// 节点服务器必须直连：连自己服务器的流量若被吸进 TUN，就是环路。
+///
+/// 只处理字面量 IP；域名由调用方先解析成全部地址再交进来。
+pub fn host_prefixes<I, S>(servers: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out = Vec::new();
+    for server in servers {
+        let prefix = match server.as_ref().trim().parse::<IpAddr>() {
+            Ok(IpAddr::V4(v4)) => format!("{v4}/32"),
+            Ok(IpAddr::V6(v6)) => format!("{v6}/128"),
+            Err(_) => continue,
+        };
+        if !out.contains(&prefix) {
+            out.push(prefix);
+        }
+    }
+    out
+}
+
 /// `dns` 必须在列表里，否则 `hijack-dns` 规则不会命中（`tun-mode.md` §3）。
 pub const SNIFFERS: [&str; 4] = ["http", "tls", "quic", "dns"];
 pub const SNIFF_TIMEOUT: &str = "300ms";
@@ -594,5 +864,163 @@ default            192.168.1.1        UGScg          en0
         let output =
             "Destination        Gateway            Flags        Netif\n10/8  link#4  UCSIg  en0\n";
         assert_eq!(parse_default_route_interface(output), None);
+    }
+
+    // ---- 接管覆盖复核 ----
+
+    fn contains(ranges: &[V4Range], address: &str) -> bool {
+        let value = u32::from(address.parse::<Ipv4Addr>().unwrap());
+        ranges
+            .iter()
+            .any(|(start, end)| *start <= value && value <= *end)
+    }
+
+    #[test]
+    fn the_expected_takeover_matches_sing_box_darwin_sub_ranges() {
+        let excludes = fixed_excludes();
+        let ranges = expected_takeover_ranges(&excludes);
+        // sing-box 刻意不接管 0.0.0.0/8；复核不能要求这一段。
+        assert!(!contains(&ranges, "0.0.0.1"), "0/8 是保留段，不该要求接管");
+        assert!(contains(&ranges, "1.0.0.1"));
+        assert!(contains(&ranges, "9.9.9.9"));
+        assert!(!contains(&ranges, "10.0.0.1"), "10/8 在排除表里");
+        assert!(contains(&ranges, "17.1.2.3"));
+        assert!(contains(&ranges, "64.177.43.69"));
+        assert!(!contains(&ranges, "127.0.0.1"));
+        assert!(!contains(&ranges, "192.168.1.1"));
+        assert!(!contains(&ranges, "224.0.0.1"));
+        assert!(contains(&ranges, "223.5.5.5"));
+    }
+
+    #[test]
+    fn node_servers_are_cut_out_of_the_takeover() {
+        let mut excludes = fixed_excludes();
+        excludes.extend(host_prefixes(["64.177.43.69", "nightly.example"]));
+        let ranges = expected_takeover_ranges(&excludes);
+        assert!(!contains(&ranges, "64.177.43.69"), "节点服务器必须直连");
+        assert!(contains(&ranges, "64.177.43.70"));
+        assert_eq!(
+            host_prefixes(["64.177.43.69", "64.177.43.69", "example.com"]),
+            vec!["64.177.43.69/32"],
+            "字面量去重，域名不在这里解析"
+        );
+        assert_eq!(host_prefixes(["2001:db8::1"]), vec!["2001:db8::1/128"]);
+    }
+
+    #[test]
+    fn netstat_destinations_accept_shorthand_and_cidr() {
+        assert_eq!(parse_route_destination("default"), Some((0, 0)));
+        assert_eq!(
+            parse_route_destination("127"),
+            Some((u32::from(Ipv4Addr::new(127, 0, 0, 0)), 8))
+        );
+        assert_eq!(
+            parse_route_destination("192.168.18"),
+            Some((u32::from(Ipv4Addr::new(192, 168, 18, 0)), 24))
+        );
+        assert_eq!(
+            parse_route_destination("172.0/12"),
+            Some((u32::from(Ipv4Addr::new(172, 0, 0, 0)), 12))
+        );
+        assert_eq!(
+            parse_route_destination("255.255.255.255/32"),
+            Some((u32::MAX, 32))
+        );
+        assert_eq!(parse_route_destination("garbage"), None);
+        assert_eq!(parse_route_destination("10.0.0.0/33"), None);
+    }
+
+    /// 真机 2026-11-05 的路由表片段：16–63 整段没有指向 utun4。
+    /// 这条用例锁住「半接管必须被点名」，不许再当成已连接。
+    #[test]
+    fn the_real_machine_route_gap_is_reported() {
+        let output = "\
+Routing tables
+
+Internet:
+Destination        Gateway            Flags        Netif Expire
+default            192.168.18.1       UGScg          en0
+8/7                link#20            UCSIg         utun4
+11                 link#20            UCSIg         utun4
+12/6               link#20            UCSIg         utun4
+64/3               link#20            UCSIg         utun4
+96/6               link#20            UCSIg         utun4
+100/10             link#20            UCSIg         utun4
+100.128/9          link#20            UCSIg         utun4
+101                link#20            UCSIg         utun4
+102/7              link#20            UCSIg         utun4
+104/5              link#20            UCSIg         utun4
+112/5              link#20            UCSIg         utun4
+120/6              link#20            UCSIg         utun4
+124/7              link#20            UCSIg         utun4
+126                link#20            UCSIg         utun4
+128.0/3            link#20            UCSIg         utun4
+160.0/5            link#20            UCSIg         utun4
+168.0/8            link#20            UCSIg         utun4
+169.0/9            link#20            UCSIg         utun4
+169.128/10         link#20            UCSIg         utun4
+";
+        let missing = missing_takeover_from(output, "utun4", &fixed_excludes());
+        assert!(missing.contains(&"16.0.0.0/4".to_string()), "{missing:?}");
+        assert!(missing.contains(&"32.0.0.0/3".to_string()), "{missing:?}");
+        assert!(
+            !missing.iter().any(|item| item.starts_with("64.")),
+            "64 段已经接管，不应误报：{missing:?}"
+        );
+    }
+
+    #[test]
+    fn a_complete_route_table_leaves_nothing_missing() {
+        let excludes = fixed_excludes();
+        let expected = expected_takeover_ranges(&excludes);
+        let mut table = String::from("Destination Gateway Flags Netif\n");
+        for range in &expected {
+            for prefix in range_prefixes(*range) {
+                table.push_str(&format!(
+                    "{} link#20 UCSIg utun4\n",
+                    describe_prefix(prefix)
+                ));
+            }
+        }
+        assert_eq!(
+            missing_takeover_from(&table, "utun4", &excludes),
+            Vec::<String>::new()
+        );
+        // 缩小一段就立刻报出来。
+        let narrowed = table.replace("16.0.0.0/4", "16.0.0.0/5");
+        let missing = missing_takeover_from(&narrowed, "utun4", &excludes);
+        assert!(!missing.is_empty(), "16/4 被缩小后必须报缺失");
+    }
+
+    #[test]
+    fn residual_routes_on_the_tun_interface_are_detected() {
+        let table = "\
+default            192.168.18.1       UGScg          en0
+8/7                link#20            UCSIg         utun4
+";
+        assert!(interface_has_routes(table, "utun4"));
+        assert!(!interface_has_routes(table, "utun5"));
+        assert!(!interface_has_routes(
+            "default 192.168.18.1 UGScg en0\n",
+            "utun4"
+        ));
+    }
+
+    #[test]
+    fn uncovered_ranges_handles_partial_and_adjacent_coverage() {
+        assert_eq!(
+            uncovered_ranges(&[(0, 99)], &[(0, 49), (50, 99)]),
+            Vec::new()
+        );
+        assert_eq!(uncovered_ranges(&[(0, 99)], &[(0, 49)]), vec![(50, 99)]);
+        assert_eq!(
+            uncovered_ranges(&[(0, 99)], &[(10, 19), (50, 99)]),
+            vec![(0, 9), (20, 49)]
+        );
+        assert_eq!(
+            describe_range((16 << 24, 31 << 24 | 0xff_ffff)),
+            "16.0.0.0/4"
+        );
+        assert_eq!(describe_range((0, 9)), "0.0.0.0-0.0.0.9");
     }
 }

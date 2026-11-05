@@ -1071,7 +1071,7 @@ type NetConfigData = {
 | action | 行为 | 是否需要 `port` |
 |---|---|---|
 | `restore_direct` | 撤掉 Veyl 设置的系统代理并恢复备份 → 停运行时 → 删渲染配置 → 不带代理探测一次出口 IP | 否（给 `port` 按 `INVALID_ARGUMENT` 拒绝） |
-| `flush_dns` | macOS：`dscacheutil -flushcache` + `killall -HUP mDNSResponder`；Windows：`ipconfig /flushdns`。**不动代理、不停运行时** | 否 |
+| `flush_dns` | macOS：`dscacheutil -flushcache` + `killall -HUP mDNSResponder`，**经特权助手以 root 执行**（普通用户 HUP 不动 mDNSResponder）；Windows：`ipconfig /flushdns`。**不动代理、不停运行时**；`verified` 以探针域名能否解析为准 | 否 |
 | `set_proxy` | 把系统代理指向 **Veyl 自己的** mixed 端口 | **必填** |
 | `clear_proxy` | 撤掉系统代理并恢复备份（不停运行时），等价于 `restore_direct` 的第 1 步 | 否 |
 

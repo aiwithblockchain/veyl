@@ -772,7 +772,7 @@ type NetRepairResult = {
 | action | 行为 | UI 是否使用 |
 |---|---|---|
 | `restore_direct` | 撤系统代理（含复核）→ 停运行时 → 删渲染配置 → 不带代理探测出口 IP | ✅「恢复网络」（E1） |
-| `flush_dns` | macOS：`dscacheutil -flushcache` + `killall -HUP mDNSResponder`；Windows：`ipconfig /flushdns` | ✅ 诊断页（E2） |
+| `flush_dns` | macOS：`dscacheutil -flushcache` + `killall -HUP mDNSResponder`，**经特权助手以 root 执行**（普通用户 HUP 不动 mDNSResponder，退出码 0 不代表已刷新）；Windows：`ipconfig /flushdns` | ✅ 诊断页（E2） |
 | `set_proxy` | 把系统代理指向 Veyl 自己的 mixed 端口，`port` 必填且必须等于当前运行时的端口 | ❌ 留给模型 |
 | `clear_proxy` | 撤代理并恢复备份，不停运行时 | ❌ 留给模型 |
 
@@ -841,14 +841,14 @@ type NetworkForceResetData = {
 
 | # | `id` | 做什么 |
 |---|---|---|
-| 1 | `stop_runtime` | 停运行时 |
-| 2 | `stop_tun` | 关闭接管 |
-| 3 | `sweep_processes` | 清理残留组件 |
-| 4 | `clear_routes` | 恢复系统路由 |
-| 5 | `flush_dns` | 恢复 DNS |
-| 6 | `restore_proxy` | 撤销系统代理 |
+| 1 | `stop_tun` | 关闭接管（先停 TUN，再停代理运行时） |
+| 2 | `stop_runtime` | 停运行时 |
+| 3 | `restore_proxy` | 撤销系统代理 |
+| 4 | `sweep_processes` | 清理残留组件 |
+| 5 | `clear_routes` | 恢复系统路由 |
+| 6 | `flush_dns` | 恢复 DNS（特权刷新 + `scutil --dns` 点名本机解析器） |
 | 7 | `clear_plaintext` | 删除临时配置 |
-| 8 | `verify` | 复查网络状态 |
+| 8 | `verify` | 复查用户视角能否上网：探针域名解析 + 一次直连 HTTPS + 出口 IP |
 
 - **无参数**。尤其不接受路径——运行时、规则、日志、临时文件的位置全由 Host 决定。
 - `steps` **恒为八项、顺序固定**。UI 按数组顺序渲染，不重排、不按 id 查找缺失项；`id` 不认识时按「其它检查」兜底显示，**不要丢行**。

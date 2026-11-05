@@ -26,10 +26,7 @@ extern "C" {
     fn xpc_connection_cancel(connection: xpc_connection_t);
     fn xpc_connection_set_target_queue(connection: xpc_connection_t, queue: dispatch_queue_t);
     fn xpc_connection_get_pid(connection: xpc_connection_t) -> libc::pid_t;
-    fn xpc_connection_set_event_handler(
-        connection: xpc_connection_t,
-        handler: *mut c_void,
-    );
+    fn xpc_connection_set_event_handler(connection: xpc_connection_t, handler: *mut c_void);
     fn xpc_connection_set_peer_code_signing_requirement(
         connection: xpc_connection_t,
         requirement: *const c_char,
@@ -53,11 +50,7 @@ extern "C" {
     );
     fn xpc_dictionary_set_int64(dictionary: xpc_object_t, key: *const c_char, value: i64);
     fn xpc_dictionary_set_bool(dictionary: xpc_object_t, key: *const c_char, value: bool);
-    fn xpc_dictionary_set_value(
-        dictionary: xpc_object_t,
-        key: *const c_char,
-        value: xpc_object_t,
-    );
+    fn xpc_dictionary_set_value(dictionary: xpc_object_t, key: *const c_char, value: xpc_object_t);
     fn xpc_dictionary_get_string(dictionary: xpc_object_t, key: *const c_char) -> *const c_char;
     fn xpc_dictionary_get_int64(dictionary: xpc_object_t, key: *const c_char) -> i64;
     fn xpc_dictionary_get_bool(dictionary: xpc_object_t, key: *const c_char) -> bool;
@@ -177,6 +170,8 @@ pub enum Reply {
         since: String,
     },
     Stopped,
+    /// `flush_dns` 的应答。没有负载，只表示特权侧已经执行完。
+    Flushed,
     Status {
         running: bool,
         pid: Option<u32>,
@@ -231,11 +226,15 @@ pub fn call_with_timeout(
     use std::sync::mpsc::{channel, RecvTimeoutError};
 
     let service = cstring(service);
-    log::debug!("xpc call method={method} service={}", service.to_string_lossy());
+    log::debug!(
+        "xpc call method={method} service={}",
+        service.to_string_lossy()
+    );
     // SAFETY: 连接句柄的生命周期由本函数管理；消息与回复都是 libxpc 对象，
     // 出错路径上也会 release。
     unsafe {
-        let connection = xpc_connection_create_mach_service(service.as_ptr(), std::ptr::null_mut(), 0);
+        let connection =
+            xpc_connection_create_mach_service(service.as_ptr(), std::ptr::null_mut(), 0);
         if connection.is_null() {
             return Err(XpcError::Unavailable("无法创建到特权助手的连接".into()));
         }
@@ -341,6 +340,7 @@ fn parse_reply(service: &CString, method: &str, reply: xpc_object_t) -> Result<R
             since: get_string(reply, "since").unwrap_or_default(),
         }),
         "stop" => Ok(Reply::Stopped),
+        "flush_dns" => Ok(Reply::Flushed),
         "status" => {
             let running = unsafe { xpc_dictionary_get_bool(reply, cstring("running").as_ptr()) };
             // 未运行时 helper 不写这三项；按契约给 None，不留空串冒充有效值。
@@ -354,7 +354,9 @@ fn parse_reply(service: &CString, method: &str, reply: xpc_object_t) -> Result<R
             Ok(Reply::Status {
                 running,
                 pid: if running {
-                    get_i64(reply, "pid").filter(|pid| *pid > 0).map(|pid| pid as u32)
+                    get_i64(reply, "pid")
+                        .filter(|pid| *pid > 0)
+                        .map(|pid| pid as u32)
                 } else {
                     None
                 },

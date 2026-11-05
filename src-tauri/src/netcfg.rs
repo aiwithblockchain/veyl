@@ -99,6 +99,63 @@ pub fn dns_resolvable() -> bool {
         .unwrap_or(false)
 }
 
+/// `scutil --dns` 里配置的全部 nameserver（去重）。
+///
+/// 强制重置读它来点名残留解析器；读不到就是错误，不能当成「没有残留」。
+pub fn dns_servers() -> Result<Vec<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = run("/usr/sbin/scutil", &["--dns"])?;
+        Ok(parse_dns_servers(&output))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("当前平台未实现 DNS 解析器读取".into())
+    }
+}
+
+/// 指向本机回环、TUN 地址或 fakeip 段的解析器。
+///
+/// 这些**可能**是 Veyl 的残留，也可能是用户自建的本地 DNS（AdGuard 等）。
+/// 这里只负责点名；是否真的坏了交给解析探测判断，不按地址预设罪名。
+pub fn suspicious_dns_servers() -> Result<Vec<String>, String> {
+    Ok(dns_servers()?
+        .into_iter()
+        .filter(|server| is_local_dns(server))
+        .collect())
+}
+
+fn is_local_dns(server: &str) -> bool {
+    use std::net::IpAddr;
+    let Ok(ip) = server.parse::<IpAddr>() else {
+        return false;
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || crate::tun::cidr::contains(crate::tun::TUN_ADDRESS, v4).unwrap_or(false)
+                || crate::tun::cidr::contains("198.18.0.0/15", v4).unwrap_or(false)
+        }
+        IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
+pub(crate) fn parse_dns_servers(output: &str) -> Vec<String> {
+    let mut servers: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("nameserver[") {
+            if let Some((_, address)) = value.split_once(':') {
+                let address = address.trim();
+                if !address.is_empty() && !servers.iter().any(|item| item == address) {
+                    servers.push(address.to_string());
+                }
+            }
+        }
+    }
+    servers
+}
+
 /// 只做一条受限的系统命令，不做通用 shell。
 pub fn flush_dns() -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -224,7 +281,10 @@ mod macos {
     fn points_at(entry: &ProxyEntry, port: u16) -> bool {
         entry.enabled
             && entry.port == Some(port)
-            && matches!(entry.server.as_deref(), Some("127.0.0.1") | Some("localhost"))
+            && matches!(
+                entry.server.as_deref(),
+                Some("127.0.0.1") | Some("localhost")
+            )
     }
 
     pub fn disable_proxy_for_port(port: u16) -> Result<Vec<String>, String> {
@@ -255,22 +315,7 @@ mod macos {
     }
 
     fn read_dns_servers() -> Vec<String> {
-        let Ok(output) = run("/usr/sbin/scutil", &["--dns"]) else {
-            return Vec::new();
-        };
-        let mut servers: Vec<String> = Vec::new();
-        for line in output.lines() {
-            let line = line.trim();
-            if let Some(value) = line.strip_prefix("nameserver[") {
-                if let Some((_, address)) = value.split_once(':') {
-                    let address = address.trim();
-                    if !address.is_empty() && !servers.iter().any(|item| item == address) {
-                        servers.push(address.to_string());
-                    }
-                }
-            }
-        }
-        servers
+        super::dns_servers().unwrap_or_default()
     }
 
     fn read_route() -> RouteInfo {
@@ -302,11 +347,17 @@ mod macos {
         let mut interfaces: Vec<InterfaceInfo> = Vec::new();
         for line in output.lines() {
             if !line.starts_with(char::is_whitespace) {
-                let name = line.split(':').next().unwrap_or_default().trim().to_string();
+                let name = line
+                    .split(':')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
                 if name.is_empty() {
                     continue;
                 }
-                let up = line.contains("<") && line.split('<').nth(1).unwrap_or("").starts_with("UP");
+                let up =
+                    line.contains("<") && line.split('<').nth(1).unwrap_or("").starts_with("UP");
                 interfaces.push(InterfaceInfo {
                     name,
                     addresses: Vec::new(),
@@ -401,5 +452,36 @@ mod tests {
     #[test]
     fn platform_name_is_known() {
         assert!(["darwin", "windows", "linux"].contains(&platform_name()));
+    }
+
+    #[test]
+    fn dns_servers_are_read_from_scutil_output() {
+        let output = "\
+DNS configuration
+
+resolver #1
+  nameserver[0] : 211.179.155.161
+  nameserver[1] : 223.5.5.5
+  nameserver[0] : 211.179.155.161
+
+resolver #2
+  domain   : local
+  options  : mdns
+";
+        assert_eq!(
+            parse_dns_servers(output),
+            vec!["211.179.155.161", "223.5.5.5"]
+        );
+    }
+
+    /// 回环、TUN 地址、fakeip 段要被点名；正常公网 DNS 不能被误伤。
+    #[test]
+    fn local_resolvers_are_flagged_but_public_ones_are_not() {
+        for suspicious in ["127.0.0.1", "127.0.0.53", "::1", "172.19.0.1", "198.18.0.1"] {
+            assert!(is_local_dns(suspicious), "{suspicious} 应被点名");
+        }
+        for public in ["223.5.5.5", "1.1.1.1", "211.179.155.161", "2409:8c00::1"] {
+            assert!(!is_local_dns(public), "{public} 不该被误伤");
+        }
     }
 }

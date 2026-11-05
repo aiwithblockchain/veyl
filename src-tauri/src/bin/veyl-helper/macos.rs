@@ -98,9 +98,7 @@ fn check_config(
                     )
                 })
             }
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(50))
-            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -169,7 +167,13 @@ pub fn run() {
     };
 
     let supervisor = Arc::new(Supervisor::new(root));
+    // 必须在监听起来之前完成：sweep 与任何 start 不能并发。
+    let sweep_started = Instant::now();
     supervisor.sweep_stale();
+    supervisor.note(&format!(
+        "启动 sweep={}ms",
+        sweep_started.elapsed().as_millis()
+    ));
 
     // 规则解包 + 逐项校验是首跑最慢的一步（真机 2233 个规则集约 30 秒）。
     // 放到后台线程做、监听先起：`start` 只等结果（最多 60 秒），
@@ -216,48 +220,52 @@ fn serve(supervisor: Arc<Supervisor>) -> ! {
     }
 
     // 在连接建立时由 libxpc 校验对端签名，从根上消掉「取 pid 之后再验」的窗口。
-    if let Err(error) = unsafe { xpc::set_peer_code_signing_requirement(listener, &protocol::app_requirement()) }
+    if let Err(error) =
+        unsafe { xpc::set_peer_code_signing_requirement(listener, &protocol::app_requirement()) }
     {
         eprintln!("veyl-helper: {error}");
         std::process::exit(4);
     }
 
-    let listener_handler: RcBlock<dyn Fn(xpc_object_t)> = RcBlock::new(move |event: xpc_object_t| {
-        if unsafe { xpc::is_error(event) } {
-            eprintln!("veyl-helper: 监听器事件：{}", unsafe { xpc::describe(event) });
-            return;
-        }
+    let listener_handler: RcBlock<dyn Fn(xpc_object_t)> =
+        RcBlock::new(move |event: xpc_object_t| {
+            if unsafe { xpc::is_error(event) } {
+                eprintln!("veyl-helper: 监听器事件：{}", unsafe {
+                    xpc::describe(event)
+                });
+                return;
+            }
 
-        let connection = event;
-        // 监听器已经过滤不满足 requirement 的消息；这里对连接本身再设一次，
-        // 双向兜底（对每个连接只能设一次）。
-        if let Err(error) =
-            unsafe { xpc::set_peer_code_signing_requirement(connection, &protocol::app_requirement()) }
-        {
-            eprintln!("veyl-helper: 拒绝连接：{error}");
-            unsafe { xpc::cancel(connection) };
-            return;
-        }
+            let connection = event;
+            // 监听器已经过滤不满足 requirement 的消息；这里对连接本身再设一次，
+            // 双向兜底（对每个连接只能设一次）。
+            if let Err(error) = unsafe {
+                xpc::set_peer_code_signing_requirement(connection, &protocol::app_requirement())
+            } {
+                eprintln!("veyl-helper: 拒绝连接：{error}");
+                unsafe { xpc::cancel(connection) };
+                return;
+            }
 
-        // 并发队列：`start` 可能准备几十秒，`stop` 不能被它堵在主队列上。
-        // 每个连接一个 handler，不同连接之间就能并发执行。
-        // 必须在 resume 之前设置。
-        unsafe { xpc::set_target_queue(connection, xpc::global_queue()) };
+            // 并发队列：`start` 可能准备几十秒，`stop` 不能被它堵在主队列上。
+            // 每个连接一个 handler，不同连接之间就能并发执行。
+            // 必须在 resume 之前设置。
+            unsafe { xpc::set_target_queue(connection, xpc::global_queue()) };
 
-        let per_connection = Arc::clone(&supervisor);
-        let handler: RcBlock<dyn Fn(xpc_object_t)> =
-            RcBlock::new(move |message: xpc_object_t| {
-                if unsafe { xpc::is_error(message) } {
-                    return;
-                }
-                handle_message(&per_connection, connection, message);
-            });
-        // block 必须活得和连接一样久；leak 是刻意的。
-        let raw = RcBlock::as_ptr(&handler) as *mut c_void;
-        std::mem::forget(handler);
-        unsafe { xpc::set_event_handler(connection, raw) };
-        unsafe { xpc::resume(connection) };
-    });
+            let per_connection = Arc::clone(&supervisor);
+            let handler: RcBlock<dyn Fn(xpc_object_t)> =
+                RcBlock::new(move |message: xpc_object_t| {
+                    if unsafe { xpc::is_error(message) } {
+                        return;
+                    }
+                    handle_message(&per_connection, connection, message);
+                });
+            // block 必须活得和连接一样久；leak 是刻意的。
+            let raw = RcBlock::as_ptr(&handler) as *mut c_void;
+            std::mem::forget(handler);
+            unsafe { xpc::set_event_handler(connection, raw) };
+            unsafe { xpc::resume(connection) };
+        });
 
     let raw = RcBlock::as_ptr(&listener_handler) as *mut c_void;
     std::mem::forget(listener_handler);
@@ -296,6 +304,16 @@ fn handle_message(
             unsafe { xpc::dict_set_bool(reply, "ok", true) };
             Ok(())
         }
+        // 只有 root 能 HUP mDNSResponder：普通用户执行 killall 会失败，
+        // 而 `dscacheutil -flushcache` 即使返回 0 也清不掉它的缓存。
+        // 强制重置与 TUN 回滚都依赖这条路径。
+        "flush_dns" => match flush_system_dns() {
+            Ok(()) => {
+                unsafe { xpc::dict_set_bool(reply, "ok", true) };
+                Ok(())
+            }
+            Err(message) => Err(ProtocolError::new(protocol::ERR_INTERNAL, message)),
+        },
         "status" => {
             let status = supervisor.status();
             unsafe { xpc::dict_set_bool(reply, "ok", true) };
@@ -331,9 +349,44 @@ fn handle_message(
 }
 
 // ---------------------------------------------------------------------------
-// Supervisor
+// 系统 DNS
 // ---------------------------------------------------------------------------
 
+/// 以 root 刷新系统 DNS。
+///
+/// 两条都要跑：`dscacheutil` 清目录服务缓存，`killall -HUP` 才是让
+/// mDNSResponder 丢掉解析缓存的那一步。普通用户跑第二条会直接失败，
+/// 所以这条能力必须留在特权侧。
+fn flush_system_dns() -> Result<(), String> {
+    let mut failures = Vec::new();
+    if let Err(error) = run_command("/usr/bin/dscacheutil", &["-flushcache"]) {
+        failures.push(format!("dscacheutil：{error}"));
+    }
+    if let Err(error) = run_command("/usr/bin/killall", &["-HUP", "mDNSResponder"]) {
+        failures.push(format!("mDNSResponder：{error}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("；"))
+    }
+}
+
+fn run_command(program: &str, args: &[&str]) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!("退出状态 {}", output.status))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Supervisor
+// ---------------------------------------------------------------------------
 struct Started {
     pid: u32,
     clash_addr: String,
@@ -542,7 +595,9 @@ impl Supervisor {
         // 比归档哈希，不比版本号：同一天、同一版本号重新打包时，
         // 版本号不变但内容变了，只比版本号会留着旧规则不更新。
         let current = self.rules_dir();
-        if std::fs::read_to_string(current.join(".archive-sha256")).ok().as_deref()
+        if std::fs::read_to_string(current.join(".archive-sha256"))
+            .ok()
+            .as_deref()
             == Some(expected)
         {
             return Ok(());
@@ -688,13 +743,17 @@ impl Supervisor {
         }
 
         // 规则准备完就检查一次：客户端可能已经超时并撤了。
-        check_start_allowed(self.stop_requested.load(Ordering::SeqCst), started_at.elapsed())?;
+        check_start_allowed(
+            self.stop_requested.load(Ordering::SeqCst),
+            started_at.elapsed(),
+        )?;
 
         let phase = Instant::now();
         // 替换语义：先收旧进程，但不设置取消标志（那会把这次 start 自己取消掉）。
+        let had_child = { self.child.lock().unwrap().is_some() };
         self.stop_child();
         self.note(&format!(
-            "start 阶段 stop_old={}ms",
+            "start 阶段 stop_old={}ms had_child={had_child}",
             phase.elapsed().as_millis()
         ));
 
@@ -750,7 +809,10 @@ impl Supervisor {
         ));
 
         // spawn 前最后一次让路：客户端可能已经超时并发来 stop。
-        check_start_allowed(self.stop_requested.load(Ordering::SeqCst), started_at.elapsed())?;
+        check_start_allowed(
+            self.stop_requested.load(Ordering::SeqCst),
+            started_at.elapsed(),
+        )?;
 
         // 上次的 sing-box 已经停掉（见上面的 stop_child），此刻没有写入者。
         rotate_log_if_oversized(&self.log_path(), TUN_LOG_MAX_BYTES, TUN_LOG_KEEP);
@@ -877,7 +939,10 @@ impl Supervisor {
             return;
         };
         let mut lines = text.lines();
-        let Some(pid) = lines.next().and_then(|value| value.trim().parse::<u32>().ok()) else {
+        let Some(pid) = lines
+            .next()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        else {
             return;
         };
         let recorded_start = lines.next().unwrap_or_default().trim().to_string();
@@ -1115,7 +1180,6 @@ extern "C" {
     fn dispatch_main() -> !;
 }
 
-
 // ---------------------------------------------------------------------------
 // bundle 签名校验
 //
@@ -1142,8 +1206,16 @@ extern "C" {
 
 #[link(name = "Security", kind = "framework")]
 extern "C" {
-    fn SecStaticCodeCreateWithPath(path: *const c_void, flags: u32, code: *mut *const c_void) -> i32;
-    fn SecStaticCodeCheckValidity(code: *const c_void, flags: u32, requirement: *const c_void) -> i32;
+    fn SecStaticCodeCreateWithPath(
+        path: *const c_void,
+        flags: u32,
+        code: *mut *const c_void,
+    ) -> i32;
+    fn SecStaticCodeCheckValidity(
+        code: *const c_void,
+        flags: u32,
+        requirement: *const c_void,
+    ) -> i32;
     fn SecRequirementCreateWithString(
         text: *const c_void,
         flags: u32,
@@ -1344,7 +1416,10 @@ fn rules_archive_in(dir: &Path) -> Option<PathBuf> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
             name.starts_with("veyl-rules-") && name.ends_with(".tar.zst")
         })
         .collect();
@@ -1426,7 +1501,10 @@ fn validate_rule_item(dir: &Path, id: &str, file: &str) -> Result<(), ProtocolEr
     if path.is_absolute() {
         return Err(reject(format!("file 是绝对路径：{file}")));
     }
-    if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(reject(format!("file 含 ..：{file}")));
     }
     let joined = dir.join(path);
@@ -1594,7 +1672,8 @@ mod tests {
     use super::*;
 
     fn temp(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("veyl-helper-{tag}-{:016x}", rand::random::<u64>()));
+        let dir =
+            std::env::temp_dir().join(format!("veyl-helper-{tag}-{:016x}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -1635,7 +1714,8 @@ mod tests {
         header.set_size(body.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();
-        tar.append_data(&mut header, "manifest.json", &body[..]).unwrap();
+        tar.append_data(&mut header, "manifest.json", &body[..])
+            .unwrap();
         let encoder = tar.into_inner().unwrap();
         encoder.finish().unwrap();
 
@@ -1675,7 +1755,10 @@ mod tests {
                 .flatten()
                 .map(|entry| entry.path())
                 .filter(|path| {
-                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
                     name.starts_with("veyl-rules-") && name.ends_with(".tar.zst")
                 })
                 .collect();
@@ -1832,7 +1915,12 @@ mod tests {
         let error = supervisor
             .resolve_runtime_from(
                 Some(missing),
-                || Err(ProtocolError::new(protocol::ERR_RUNTIME_MISSING, "来源不可信")),
+                || {
+                    Err(ProtocolError::new(
+                        protocol::ERR_RUNTIME_MISSING,
+                        "来源不可信",
+                    ))
+                },
                 signature_ok,
                 current_uid(),
             )
@@ -1884,7 +1972,12 @@ mod tests {
             .resolve_runtime_from(
                 Some(bundled),
                 || Ok(()),
-                |_| Err(ProtocolError::new(protocol::ERR_RUNTIME_MISSING, "签名不符")),
+                |_| {
+                    Err(ProtocolError::new(
+                        protocol::ERR_RUNTIME_MISSING,
+                        "签名不符",
+                    ))
+                },
                 current_uid(),
             )
             .unwrap_err();
@@ -1935,7 +2028,10 @@ mod tests {
 
         prune_staged_runtimes(&runtime_dir, &"d".repeat(64));
 
-        assert!(target.join("keep-me").exists(), "不能顺着软链删掉外面的东西");
+        assert!(
+            target.join("keep-me").exists(),
+            "不能顺着软链删掉外面的东西"
+        );
         assert!(
             std::fs::symlink_metadata(&link).is_ok(),
             "软链本身不是我们建的目录，不能被删——回归成 path.is_dir() 时这条会红"
@@ -1956,7 +2052,12 @@ mod tests {
         let error = supervisor
             .resolve_runtime_from(
                 Some(bundled),
-                || Err(ProtocolError::new(protocol::ERR_RUNTIME_MISSING, "来源不可信")),
+                || {
+                    Err(ProtocolError::new(
+                        protocol::ERR_RUNTIME_MISSING,
+                        "来源不可信",
+                    ))
+                },
                 signature_ok,
                 current_uid(),
             )
@@ -2022,7 +2123,8 @@ mod tests {
 
     /// GAP-02：helper 的 sing-box 日志此前只追加不轮转。
     #[test]
-    fn an_oversized_helper_log_is_rotated_and_one_previous_file_is_kept() {        let dir = temp("log");
+    fn an_oversized_helper_log_is_rotated_and_one_previous_file_is_kept() {
+        let dir = temp("log");
         let path = dir.join("sing-box.log");
         std::fs::write(&path, vec![b'x'; 16]).unwrap();
         std::fs::write(log_shard(&path, 1), b"older").unwrap();
@@ -2070,9 +2172,8 @@ mod tests {
     fn a_start_that_takes_too_long_is_abandoned_before_spawn() {
         assert!(check_start_allowed(false, Duration::from_secs(1)).is_ok());
 
-        let error =
-            check_start_allowed(false, START_PREPARE_DEADLINE + Duration::from_secs(1))
-                .unwrap_err();
+        let error = check_start_allowed(false, START_PREPARE_DEADLINE + Duration::from_secs(1))
+            .unwrap_err();
         assert!(error.message.contains("25 秒"), "{}", error.message);
     }
 
@@ -2147,9 +2248,7 @@ mod tests {
         assert_eq!(error.code, protocol::ERR_TUN_START_FAILED);
 
         supervisor.record_rules(Ok(()), Duration::from_millis(1));
-        assert!(supervisor
-            .wait_for_rules(Duration::from_millis(10))
-            .is_ok());
+        assert!(supervisor.wait_for_rules(Duration::from_millis(10)).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2207,10 +2306,7 @@ mod tests {
         // 新一次 start 已经把代号推进了。
         supervisor.generation.fetch_add(1, Ordering::SeqCst);
         supervisor.cleanup_files(stale);
-        assert!(
-            supervisor.config_path().exists(),
-            "新 start 的配置不能被删"
-        );
+        assert!(supervisor.config_path().exists(), "新 start 的配置不能被删");
         assert!(supervisor.pid_path().exists());
 
         // 同一代才清理。
@@ -2245,5 +2341,12 @@ mod tests {
         worker.join().unwrap();
         drop(guard);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failing_command_is_reported_instead_of_swallowed() {
+        assert!(run_command("/bin/echo", &["ok"]).is_ok());
+        assert!(run_command("/bin/false", &[]).is_err());
+        assert!(run_command("/nonexistent/binary", &[]).is_err());
     }
 }

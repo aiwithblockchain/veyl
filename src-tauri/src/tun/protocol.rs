@@ -24,6 +24,7 @@ pub const ERR_CONFIG_INVALID: &str = "config_invalid";
 pub const ERR_CONFIG_FORBIDDEN: &str = "config_forbidden";
 pub const ERR_RULE_SET_MISSING: &str = "rule_set_missing";
 pub const ERR_RUNTIME_MISSING: &str = "runtime_missing";
+pub const ERR_INTERNAL: &str = "internal";
 pub const ERR_TUN_START_FAILED: &str = "tun_start_failed";
 
 /// 从 `tauri.conf.json` 编译进来的 bundle identifier（见 `build.rs`）。

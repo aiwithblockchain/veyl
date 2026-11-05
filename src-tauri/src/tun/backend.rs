@@ -44,6 +44,19 @@ pub trait TunBackend: Send + Sync {
         self.stop()
     }
 
+    /// 刷新系统 DNS 缓存。
+    ///
+    /// 默认执行本机命令；macOS 上 mDNSResponder 只有 root 才 HUP 得动，
+    /// 由 `MacXpcBackend` 走特权助手覆盖。
+    fn flush_dns(&self) -> Result<(), TunError> {
+        crate::netcfg::flush_dns().map_err(|error| {
+            TunError::new(
+                TunErrorCode::Internal,
+                format!("刷新 DNS 缓存失败：{error}"),
+            )
+        })
+    }
+
     /// 读快照。随时可调，不改变状态；必须便宜（一次 IPC，不读大文件、不 spawn）。
     fn status(&self) -> Result<TunSnapshot, TunError>;
 }
@@ -328,13 +341,24 @@ mod macos {
             }
         }
 
-        fn status(&self) -> Result<TunSnapshot, TunError> {
+        fn flush_dns(&self) -> Result<(), TunError> {
             match xpc::call_with_timeout(
                 MACH_SERVICE,
-                "status",
+                "flush_dns",
                 None,
                 TUN_REPLY_DEADLINE_CONTROL,
             ) {
+                Ok(Reply::Flushed) => Ok(()),
+                Ok(_) => Err(TunError::new(
+                    TunErrorCode::Internal,
+                    "特权助手回了意料之外的结果",
+                )),
+                Err(error) => Err(map_xpc_error(error)),
+            }
+        }
+
+        fn status(&self) -> Result<TunSnapshot, TunError> {
+            match xpc::call_with_timeout(MACH_SERVICE, "status", None, TUN_REPLY_DEADLINE_CONTROL) {
                 Ok(Reply::Status {
                     running,
                     pid,
@@ -381,18 +405,15 @@ mod macos {
                 )
             }
             XpcError::Server { code, message } => {
-                let parsed =
-                    TunErrorCode::from_wire(&code).unwrap_or(TunErrorCode::TunStartFailed);
-                TunError::new(parsed, message)
-                    .with_detail(serde_json::json!({ "wire_code": code }))
+                let parsed = TunErrorCode::from_wire(&code).unwrap_or(TunErrorCode::TunStartFailed);
+                TunError::new(parsed, message).with_detail(serde_json::json!({ "wire_code": code }))
             }
-            XpcError::Protocol(detail) => TunError::new(
-                TunErrorCode::TransportError,
-                "特权助手返回了无法识别的回复",
-            )
-            .with_detail(
-                serde_json::json!({ "local_code": "transport_error", "detail": detail }),
-            ),
+            XpcError::Protocol(detail) => {
+                TunError::new(TunErrorCode::TransportError, "特权助手返回了无法识别的回复")
+                    .with_detail(
+                        serde_json::json!({ "local_code": "transport_error", "detail": detail }),
+                    )
+            }
             // 连接被中断是传输层问题，不是「没装/没批准」。
             XpcError::Interrupted(detail) => {
                 TunError::new(TunErrorCode::TransportError, "与特权助手的连接中断").with_detail(
@@ -400,9 +421,8 @@ mod macos {
                 )
             }
             XpcError::Timeout => {
-                TunError::new(TunErrorCode::Timeout, "特权助手没有在限定时间内回复").with_detail(
-                    serde_json::json!({ "local_code": "timeout" }),
-                )
+                TunError::new(TunErrorCode::Timeout, "特权助手没有在限定时间内回复")
+                    .with_detail(serde_json::json!({ "local_code": "timeout" }))
             }
         }
     }
@@ -482,7 +502,6 @@ mod win_pipe;
 #[cfg(target_os = "windows")]
 pub use win_pipe::WinPipeBackend;
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,7 +553,8 @@ mod tests {
     }
 
     #[test]
-    fn ui_reasons_follow_the_contract_table() {        assert_eq!(TunErrorCode::TunDenied.ui_reason(), "tun_denied");
+    fn ui_reasons_follow_the_contract_table() {
+        assert_eq!(TunErrorCode::TunDenied.ui_reason(), "tun_denied");
         assert_eq!(TunErrorCode::HelperMissing.ui_reason(), "helper_missing");
         assert_eq!(TunErrorCode::PeerUnverified.ui_reason(), "helper_missing");
         assert_eq!(
@@ -556,8 +576,7 @@ mod tests {
     fn privilege_errors_keep_their_meaning() {
         let denied = TunError::from_privilege(PrivilegeError::new(ERR_TUN_DENIED, "用户拒绝了"));
         assert_eq!(denied.code, TunErrorCode::TunDenied);
-        let missing =
-            TunError::from_privilege(PrivilegeError::new(ERR_HELPER_MISSING, "助手不在"));
+        let missing = TunError::from_privilege(PrivilegeError::new(ERR_HELPER_MISSING, "助手不在"));
         assert_eq!(missing.code, TunErrorCode::HelperMissing);
     }
 

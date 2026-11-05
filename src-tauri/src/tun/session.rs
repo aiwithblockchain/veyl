@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::backend::{
-    ClashApi, StartReply, TunBackend, TunError, TunErrorCode, TunSnapshot, TUN_REPLY_DEADLINE_CONTROL,
+    ClashApi, StartReply, TunBackend, TunError, TunErrorCode, TunSnapshot,
+    TUN_REPLY_DEADLINE_CONTROL,
 };
 use super::privilege::{HelperStatus, Registration};
 
@@ -256,6 +257,14 @@ impl TunSession {
         *self.last_check.lock().unwrap() = None;
     }
 
+    /// 刷新系统 DNS 缓存。
+    ///
+    /// 没在跑也能调：TUN 回滚时进程已经停了，但 hijack 期间写进
+    /// mDNSResponder 的坏缓存还在，要一起清掉。
+    pub fn flush_dns(&self) -> Result<(), TunError> {
+        self.backend.flush_dns()
+    }
+
     /// 热路径：缓存有效时只读内存，超过复核间隔才问一次后端。
     ///
     /// 缓存不能永远不出门：helper 崩溃或被停掉时，界面必须能变成「未连接」，
@@ -394,6 +403,7 @@ mod tests {
     struct FakeBackend {
         starts: AtomicUsize,
         stops: AtomicUsize,
+        flushes: AtomicUsize,
         running: Mutex<Option<u32>>,
         clash: Mutex<Option<ClashApi>>,
         since: Mutex<Option<String>>,
@@ -406,6 +416,7 @@ mod tests {
             Self {
                 starts: AtomicUsize::new(0),
                 stops: AtomicUsize::new(0),
+                flushes: AtomicUsize::new(0),
                 running: Mutex::new(None),
                 clash: Mutex::new(None),
                 since: Mutex::new(None),
@@ -461,6 +472,11 @@ mod tests {
                 since: self.since.lock().unwrap().clone(),
                 last_error: None,
             })
+        }
+
+        fn flush_dns(&self) -> Result<(), TunError> {
+            self.flushes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -621,5 +637,15 @@ mod tests {
             session.connected_config_id().is_none(),
             "重启后接手的老连接读不到 id，必须如实返回 None"
         );
+    }
+
+    /// 回滚时进程已经停了，但缓存还要清：flush 不能依赖运行状态。
+    #[test]
+    fn dns_flush_reaches_the_backend_even_when_stopped() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        assert!(matches!(session.status(), TunState::Stopped));
+        session.flush_dns().unwrap();
+        assert_eq!(backend.flushes.load(Ordering::SeqCst), 1);
     }
 }

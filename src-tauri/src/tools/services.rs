@@ -101,11 +101,7 @@ pub trait VpnToolServices: Send + Sync {
         confirm_disconnect: bool,
     ) -> anyhow::Result<Value>;
 
-    async fn node_import_url(
-        &self,
-        config_id: Option<String>,
-        url: &str,
-    ) -> anyhow::Result<Value>;
+    async fn node_import_url(&self, config_id: Option<String>, url: &str) -> anyhow::Result<Value>;
     async fn node_create(&self, input: NodeCreateInput) -> anyhow::Result<Value>;
     async fn node_switch(&self, config_id: &str, node_id: &str) -> anyhow::Result<Value>;
     async fn node_probe(&self, node_id: &str) -> anyhow::Result<Value>;
@@ -115,7 +111,11 @@ pub trait VpnToolServices: Send + Sync {
     async fn import_seed_file(&self, path: &str) -> anyhow::Result<Value>;
 
     async fn rules_status(&self) -> anyhow::Result<Value>;
-    async fn category_list(&self, query: Option<String>, limit: Option<u32>) -> anyhow::Result<Value>;
+    async fn category_list(
+        &self,
+        query: Option<String>,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Value>;
 
     async fn route_get(&self, config_id: Option<String>) -> anyhow::Result<Value>;
     async fn route_set_mode(
@@ -472,6 +472,144 @@ mod tun_takeover_tests {
             "非 TUN 模式不参与这条判断"
         );
     }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_half_taken_over_tun_is_a_start_failure_without_internal_codes() {
+        let error = takeover_incomplete_error(&["16.0.0.0/4".into()], None, false, None);
+        let service = error.downcast_ref::<ServiceError>().expect("ServiceError");
+        assert_eq!(service.code, "tun_start_failed");
+        assert!(
+            service.message.contains("16.0.0.0/4"),
+            "{}",
+            service.message
+        );
+        assert!(
+            !service.message.contains("tun_start_failed"),
+            "错误码不能进用户文案：{}",
+            service.message
+        );
+        let details = service.details.as_ref().unwrap();
+        assert_eq!(details["reason"], "tun_start_failed");
+        assert_eq!(details["detail"]["reason"], "takeover_incomplete");
+        assert_eq!(details["detail"]["missing"][0], "16.0.0.0/4");
+        assert_eq!(details["permission_problem"], false);
+        assert_eq!(details["detail"]["dns_flushed"], true);
+
+        let with_dns_error =
+            takeover_incomplete_error(&[], None, false, Some("mDNSResponder 失败"));
+        let service = with_dns_error
+            .downcast_ref::<ServiceError>()
+            .expect("ServiceError");
+        assert!(service.message.contains("重启系统"), "{}", service.message);
+        assert_eq!(
+            service.details.as_ref().unwrap()["detail"]["dns_flushed"],
+            false
+        );
+    }
+
+    /// 退出码 0 不等于清干净：助手可用时必须真的走成特权刷新。
+    #[test]
+    fn dns_flush_needs_more_than_a_zero_exit_code() {
+        assert!(flush_dns_verdict(true, true, true));
+        assert!(
+            !flush_dns_verdict(true, false, true),
+            "助手在却没走特权刷新"
+        );
+        assert!(!flush_dns_verdict(false, true, true), "解析没恢复");
+        assert!(
+            flush_dns_verdict(true, false, false),
+            "没有助手时以解析为准"
+        );
+        assert!(!flush_dns_verdict(false, false, false));
+    }
+
+    #[tokio::test]
+    async fn tun_bypasses_every_node_server_literal_and_pins_resolved_domains() {
+        let descriptor = |server: &str| vpn_config::NodeDescriptor {
+            id: server.to_string(),
+            name: server.to_string(),
+            server: server.to_string(),
+            server_port: 8388,
+            protocol: vpn_config::ProtocolConfig::Shadowsocks {
+                password: "test".into(),
+                method: "aes-256-gcm".into(),
+            },
+        };
+        let list = [
+            descriptor("64.177.43.69"),
+            descriptor("64.177.57.184"),
+            descriptor("localhost"),
+            descriptor("2001:db8::1"),
+        ];
+        let plan = node_bypass_plan(&list).await;
+        for expected in ["64.177.43.69/32", "64.177.57.184/32", "2001:db8::1/128"] {
+            assert!(
+                plan.prefixes.iter().any(|item| item == expected),
+                "{:?}",
+                plan.prefixes
+            );
+        }
+        assert!(
+            plan.prefixes
+                .iter()
+                .any(|item| item == "127.0.0.1/32" || item == "::1/128"),
+            "域名要解析成旁路：{:?}",
+            plan.prefixes
+        );
+        // 域名必须被钉成字面量 IP；字面量 IP 本身不需要再钉。
+        assert!(plan.pinned.contains_key("localhost"), "{:?}", plan.pinned);
+        assert!(!plan.pinned.contains_key("64.177.43.69"));
+        assert!(node_server_is_resolved("64.177.43.69", &plan.pinned));
+        assert!(node_server_is_resolved("localhost", &plan.pinned));
+        assert!(!node_server_is_resolved("unresolved.invalid", &plan.pinned));
+    }
+
+    /// 订阅里几十个域名、DNS 又挂掉时，不能 2s × N 串行拖死连接。
+    ///
+    /// 用永不返回的解析器：并发实现所有任务同时起跑、2 秒内全部超时；
+    /// 串行实现要 40 × 2s，必然超过这里的 3 秒断言。
+    #[tokio::test]
+    async fn many_slow_node_domains_run_concurrently_under_one_deadline() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let started = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&started);
+        let resolver: NodeResolver = Arc::new(move |_server: String| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok::<Vec<std::net::IpAddr>, ()>(Vec::new())
+            })
+        });
+        let descriptor = |server: String| vpn_config::NodeDescriptor {
+            id: server.clone(),
+            name: server.clone(),
+            server,
+            server_port: 8388,
+            protocol: vpn_config::ProtocolConfig::Shadowsocks {
+                password: "test".into(),
+                method: "aes-256-gcm".into(),
+            },
+        };
+        let list = (0..40)
+            .map(|index| descriptor(format!("node{index}.invalid")))
+            .collect::<Vec<_>>();
+        let begin = std::time::Instant::now();
+        let plan = node_bypass_plan_with(&list, resolver).await;
+        let elapsed = begin.elapsed();
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            list.len(),
+            "所有域名必须同时开始解析"
+        );
+        assert!(plan.pinned.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "必须受全局上限约束，实际 {elapsed:?}"
+        );
+    }
 }
 
 /// TUN 后端错误 → `AivpnError.details`（契约 §4.3 / §4.4）。
@@ -511,6 +649,33 @@ fn tun_error_details(error: &crate::tun::backend::TunError) -> Value {
 /// 强制重置里的一步。字段固定为 `{id, ok, detail}`，前端按 id 渲染。
 fn reset_step(id: &str, ok: bool, detail: impl Into<String>) -> Value {
     json!({ "id": id, "ok": ok, "detail": detail.into() })
+}
+
+/// 刷新 DNS 的判定：解析必须真的恢复；助手可用时还必须走成特权刷新。
+///
+/// 只跑 `dscacheutil` 会返回 0 却清不掉 mDNSResponder 的缓存，
+/// 这正是「重置报 ok、网络没恢复」的成因，不能让退出码再冒充成功。
+fn flush_dns_verdict(resolved: bool, privileged_ok: bool, helper_enabled: bool) -> bool {
+    resolved && (privileged_ok || !helper_enabled)
+}
+
+/// 特权刷新失败的文案：不把 wire 码或「未知方法」这类内部字眼甩给用户。
+fn flush_dns_failure_message(error: &crate::tun::backend::TunError) -> String {
+    use crate::tun::backend::TunErrorCode;
+    match error.code {
+        TunErrorCode::BadRequest => {
+            "后台助手版本过旧，无法彻底刷新 DNS；请重启 Veyl 或重装后台助手".to_string()
+        }
+        TunErrorCode::HelperMissing
+        | TunErrorCode::HelperInstallFailed
+        | TunErrorCode::TunDenied => {
+            "后台助手不可用，无法彻底刷新 DNS；请重启 Veyl 或重装后台助手".to_string()
+        }
+        TunErrorCode::Timeout => {
+            "后台助手没有响应，无法彻底刷新 DNS；请重启 Veyl 后再试".to_string()
+        }
+        _ => "刷新 DNS 失败，请重启 Veyl 或重装后台助手后再试".to_string(),
+    }
 }
 
 /// UI 只该看到 message。`ServiceError` 的 Display 是「CODE: message」，
@@ -619,7 +784,11 @@ fn judge_restore_proxy(facts: &ProxyResetFacts) -> Value {
     let ours = facts.plan_port.map(|port| format!("127.0.0.1:{port}"));
     if let Some(ours) = &ours {
         if current.as_deref() == Some(ours.as_str()) {
-            return reset_step("restore_proxy", false, format!("系统代理仍指向 Veyl（{ours}）"));
+            return reset_step(
+                "restore_proxy",
+                false,
+                format!("系统代理仍指向 Veyl（{ours}）"),
+            );
         }
     }
     if !facts.cleared_services.is_empty() {
@@ -664,6 +833,280 @@ fn tun_error_code(error: &crate::tun::backend::TunError) -> &'static str {
         | TunErrorCode::UnsupportedPlatform => "helper_missing",
         _ => "tun_start_failed",
     }
+}
+
+/// 一次解析的产物：旁路前缀 + 域名 → 钉住的地址。
+///
+/// 没解析出来的域名不在这里出现；调用方按「是不是当前节点」决定是否阻断。
+struct NodeBypass {
+    prefixes: Vec<String>,
+    pinned: std::collections::HashMap<String, std::net::IpAddr>,
+}
+
+type NodeResolveFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<std::net::IpAddr>, ()>> + Send>>;
+type NodeResolver = std::sync::Arc<dyn Fn(String) -> NodeResolveFuture + Send + Sync>;
+
+/// 节点服务器必须直连，否则 sing-box 连自己的服务器也会被吸进 TUN，形成环路。
+///
+/// 所有域名**并发**解析，总时限 2.5 秒（单个域名另给 2 秒防长尾）。
+/// 解析结果同时做两件事：
+///   1) 全部地址（A/AAAA）加进 `route_exclude_address`；
+///   2) 出站 `server` 钉到其中一个字面量 IP——否则 sing-box 会用
+///      `default_domain_resolver` 再解析一次，GeoDNS / 轮换给出别的地址，
+///      旁路就漏了，又绕回环路。TLS 的 `server_name` 保持域名不变。
+async fn node_bypass_plan(descriptors: &[vpn_config::NodeDescriptor]) -> NodeBypass {
+    let resolver: NodeResolver = std::sync::Arc::new(|server: String| {
+        Box::pin(async move {
+            tokio::net::lookup_host((server, 0))
+                .await
+                .map(|addresses| addresses.map(|address| address.ip()).collect())
+                .map_err(|_| ())
+        })
+    });
+    node_bypass_plan_with(descriptors, resolver).await
+}
+
+/// 解析器可注入：单测用一个永远不返回的解析器，才验证得到「并发 + 全局上限」，
+/// 而不是碰运气等系统 DNS 快速失败。
+async fn node_bypass_plan_with(
+    descriptors: &[vpn_config::NodeDescriptor],
+    resolver: NodeResolver,
+) -> NodeBypass {
+    use std::collections::{HashMap, HashSet};
+    use std::net::IpAddr;
+
+    const MAX_ADDRESSES_PER_HOST: usize = 16;
+    const LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
+
+    let mut plan = NodeBypass {
+        prefixes: crate::tun::host_prefixes(descriptors.iter().map(|item| item.server.as_str())),
+        pinned: HashMap::new(),
+    };
+    let mut seen = HashSet::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    for descriptor in descriptors {
+        let server = descriptor.server.trim().to_string();
+        if server.parse::<IpAddr>().is_ok() || !seen.insert(server.clone()) {
+            continue;
+        }
+        let resolver = std::sync::Arc::clone(&resolver);
+        tasks.spawn(async move {
+            let lookup = tokio::time::timeout(LOOKUP_TIMEOUT, resolver(server.clone())).await;
+            (server, lookup)
+        });
+    }
+
+    // 全局上限：订阅里几十个域名、DNS 又不通时，不能 2s × N 地串行等下去。
+    let deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
+    while !tasks.is_empty() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            tasks.abort_all();
+            break;
+        }
+        match tokio::time::timeout(remaining, tasks.join_next()).await {
+            Ok(Some(Ok((server, Ok(Ok(addresses)))))) => {
+                let addresses = addresses
+                    .into_iter()
+                    .take(MAX_ADDRESSES_PER_HOST)
+                    .collect::<Vec<_>>();
+                if addresses.is_empty() {
+                    continue;
+                }
+                // 优先 IPv4；只有 v6 时才用 v6。订阅里的节点绝大多数是 v4。
+                let chosen = addresses
+                    .iter()
+                    .find(|address| address.is_ipv4())
+                    .copied()
+                    .unwrap_or(addresses[0]);
+                for address in &addresses {
+                    let prefix = match address {
+                        IpAddr::V4(v4) => format!("{v4}/32"),
+                        IpAddr::V6(v6) => format!("{v6}/128"),
+                    };
+                    if !plan.prefixes.contains(&prefix) {
+                        plan.prefixes.push(prefix);
+                    }
+                }
+                plan.pinned.insert(server, chosen);
+            }
+            Ok(Some(Ok(_))) | Ok(Some(Err(_))) => {}
+            Ok(None) => break,
+            Err(_) => {
+                tasks.abort_all();
+                break;
+            }
+        }
+    }
+    plan
+}
+
+/// 当前节点有没有可用的直连地址：字面量 IP，或者域名解析成功并已钉住。
+fn node_server_is_resolved(
+    server: &str,
+    pinned: &std::collections::HashMap<String, std::net::IpAddr>,
+) -> bool {
+    let server = server.trim();
+    server.parse::<std::net::IpAddr>().is_ok() || pinned.contains_key(server)
+}
+
+/// 轮询路由表直到接管完整或超时。返回仍然缺失的网段（空 = 完整）。
+#[cfg(not(target_os = "windows"))]
+async fn wait_for_takeover(
+    tun_name: &str,
+    excludes: &[String],
+    timeout: std::time::Duration,
+) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let name = tun_name.to_string();
+        let expected = excludes.to_vec();
+        let result =
+            tokio::task::spawn_blocking(move || crate::tun::missing_takeover(&name, &expected))
+                .await
+                .unwrap_or_else(|error| Err(format!("路由复核任务失败：{error}")));
+        match result {
+            Ok(missing) if missing.is_empty() => return Vec::new(),
+            Ok(missing) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return missing;
+                }
+            }
+            Err(error) => {
+                log::warn!("读取路由表失败，继续等待：{error}");
+                if tokio::time::Instant::now() >= deadline {
+                    return vec![format!("无法读取路由表：{error}")];
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+}
+
+/// 接管不完整按启动失败处理：**不能**把半成品留给用户，
+/// 上层更不许把它报成「已连接」。
+#[cfg(not(target_os = "windows"))]
+fn takeover_incomplete_error(
+    missing: &[String],
+    stop_error: Option<&crate::tun::backend::TunError>,
+    residual_routes: bool,
+    dns_error: Option<&str>,
+) -> anyhow::Error {
+    let mut message = String::from("TUN 接管路由没有完整生效，已自动停止");
+    if let Some(error) = stop_error {
+        log::error!("回滚时停止 TUN 失败：{error}");
+        message.push_str("。停止未成功，请到设置里执行「强制重置网络」");
+    } else if residual_routes {
+        log::error!("回滚后仍检测到残留路由或无法确认已清除");
+        message.push_str("。未能确认接管路由已清除，请到设置里执行「强制重置网络」");
+    } else {
+        message.push_str("并清理路由");
+    }
+    // TUN 期间被 hijack 的 DNS 会把坏答案留在 mDNSResponder 里；
+    // 进程停了不等于网络恢复，这一步失败要如实说。
+    if let Some(error) = dns_error {
+        log::error!("回滚时刷新 DNS 失败：{error}");
+        message.push_str("。DNS 缓存未能刷新，若仍无法上网请重启系统");
+    } else {
+        message.push_str("，DNS 缓存已刷新");
+    }
+    if !missing.is_empty() {
+        message.push_str("（未覆盖：");
+        message.push_str(&missing.join("、"));
+        message.push('）');
+    }
+    svc_error_with_details(
+        "tun_start_failed",
+        message,
+        json!({
+            "reason": "tun_start_failed",
+            "permission_problem": false,
+            "wire_code": null,
+            "local_code": null,
+            "detail": {
+                "reason": "takeover_incomplete",
+                "missing": missing,
+                "residual_routes": residual_routes,
+                "dns_flushed": dns_error.is_none(),
+            },
+        }),
+    )
+}
+
+/// 停止后等接口销毁（内核会连带删掉接口上的路由）。
+/// 返回 `false` 表示超时后仍读得到残留路由。
+#[cfg(not(target_os = "windows"))]
+async fn wait_until_routes_gone(tun_name: &str, timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let name = tun_name.to_string();
+        match tokio::task::spawn_blocking(move || crate::tun::routes_left(&name)).await {
+            Ok(Ok(false)) => return true,
+            Ok(Ok(true)) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+            }
+            Ok(Err(error)) => {
+                // 读不到路由表 = 未知，不能当成「已清干净」；回滚宁可多提示一次。
+                log::warn!("回滚后读取路由表失败，按未确认处理：{error}");
+                return false;
+            }
+            Err(error) => {
+                log::warn!("回滚核对任务失败，按未确认处理：{error}");
+                return false;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+}
+
+/// 用户视角的 DNS：系统解析器真的能给出地址。
+///
+/// 「进程没了、路由没了」不代表用户能上网——mDNSResponder 里可能还留着
+/// TUN 期间的坏答案。
+async fn probe_dns(domain: &str, timeout: std::time::Duration) -> Result<Vec<String>, String> {
+    match tokio::time::timeout(timeout, tokio::net::lookup_host((domain, 443))).await {
+        Ok(Ok(addresses)) => {
+            let list = addresses
+                .map(|address| address.ip().to_string())
+                .collect::<Vec<_>>();
+            if list.is_empty() {
+                Err("没有返回任何地址".into())
+            } else {
+                Ok(list)
+            }
+        }
+        Ok(Err(error)) => Err(format!("解析失败：{error}")),
+        Err(_) => Err("解析超时".into()),
+    }
+}
+
+/// 强制重置的直连 HTTPS 探针。第一个是这次真机故障的现场，
+/// 第二个兜底，避免单个站点自身故障把「已恢复」误判成失败。
+const DIRECT_PROBE_URLS: [&str; 2] = ["https://www.apple.com/", "https://www.baidu.com/"];
+
+/// 真发一次 HTTPS 请求。`no_proxy` 是刻意的：要验证的是**直连**，
+/// 不能让环境变量里的代理把结果洗白。
+async fn probe_https(urls: &[&str], timeout: std::time::Duration) -> Result<(String, u16), String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| format!("创建探测客户端失败：{error}"))?;
+    let mut last = String::from("没有可用的探测地址");
+    for url in urls {
+        match client.get(*url).send().await {
+            Ok(response) if response.status().is_success() => {
+                return Ok(((*url).to_string(), response.status().as_u16()));
+            }
+            Ok(response) => last = format!("{url} 返回 {}", response.status().as_u16()),
+            Err(error) => last = format!("{url} 请求失败：{error}"),
+        }
+    }
+    Err(last)
 }
 
 /// 连接失败时带出来的运行时日志行数。
@@ -751,8 +1194,6 @@ mod tun_wiring_tests {
         assert!(tun_excludes_from_value(&default).is_empty());
         assert!(tun_excludes_from_value(&Value::Null).is_empty());
     }
-
-
 }
 
 fn config_store_error(error: store::StoreError) -> anyhow::Error {
@@ -769,11 +1210,9 @@ fn config_store_error(error: store::StoreError) -> anyhow::Error {
             message.clone(),
             json!({ "reason": "invalid_argument" }),
         ),
-        store::StoreError::NotFound(_) => svc_error_with_details(
-            "NOT_FOUND",
-            "记录不存在",
-            json!({ "reason": "not_found" }),
-        ),
+        store::StoreError::NotFound(_) => {
+            svc_error_with_details("NOT_FOUND", "记录不存在", json!({ "reason": "not_found" }))
+        }
         other => svc_error(other.code(), other),
     }
 }
@@ -785,7 +1224,10 @@ fn require_running_state(state: crate::runtime::RuntimeState) -> anyhow::Result<
     } else {
         Err(svc_error(
             "PRECONDITION_FAILED",
-            format!("运行时未进入 running（当前 {}），连接已中止", state.as_str()),
+            format!(
+                "运行时未进入 running（当前 {}），连接已中止",
+                state.as_str()
+            ),
         ))
     }
 }
@@ -896,6 +1338,46 @@ async fn clash_get_selector(
         .await
         .map_err(|error| format!("读取选择器响应失败：{error}"))?;
     Ok(value.get("now").and_then(Value::as_str).map(str::to_string))
+}
+
+/// Clash API `GET /proxies/{selector}` 的成员表。
+///
+/// 热切前先查一次：TUN 会把解析不出地址的节点剔出 selector，
+/// 直接 PUT 只会得到一句看不懂的 HTTP 400。
+async fn clash_selector_members(
+    addr: &str,
+    secret: &str,
+    selector: &str,
+) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("创建控制面客户端失败：{error}"))?;
+    let response = client
+        .get(format!("http://{addr}/proxies/{selector}"))
+        .bearer_auth(secret)
+        .send()
+        .await
+        .map_err(|error| format!("读取选择器请求失败：{error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("读取选择器返回 HTTP {}", response.status()));
+    }
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("读取选择器响应失败：{error}"))?;
+    Ok(value
+        .get("all")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// 已连接的节点延迟：Clash API `GET /proxies/{tag}/delay`。
@@ -1017,8 +1499,8 @@ impl WiredServices {
         &self,
         version: &str,
     ) -> anyhow::Result<crate::runtime::InstalledRuntime> {
-        let manifest = crate::runtime::RuntimeManifest::builtin()
-            .map_err(|e| svc_error(e.code(), e))?;
+        let manifest =
+            crate::runtime::RuntimeManifest::builtin().map_err(|e| svc_error(e.code(), e))?;
         let release = manifest
             .releases
             .iter()
@@ -1095,6 +1577,16 @@ impl WiredServices {
     }
 
     fn flush_dns_action(&self) -> Result<(), String> {
+        // 助手可用时走特权通道：macOS 上 mDNSResponder 只有 root 能 HUP。
+        if matches!(
+            self.tun.helper_status(),
+            crate::tun::privilege::HelperStatus::Enabled
+        ) {
+            return self
+                .tun
+                .flush_dns()
+                .map_err(|error| flush_dns_failure_message(&error));
+        }
         crate::netcfg::flush_dns()
     }
 
@@ -1171,7 +1663,10 @@ impl WiredServices {
 
     fn active_config_id(&self) -> Option<String> {
         let conn = self.store.conn();
-        configs::active(&conn).ok().flatten().map(|config| config.id)
+        configs::active(&conn)
+            .ok()
+            .flatten()
+            .map(|config| config.id)
     }
 
     fn require_config(&self, config_id: &str) -> anyhow::Result<configs::Config> {
@@ -1197,11 +1692,7 @@ impl WiredServices {
         }
     }
 
-    fn update_routing_mode(
-        &self,
-        config_id: &str,
-        mode: &str,
-    ) -> anyhow::Result<configs::Config> {
+    fn update_routing_mode(&self, config_id: &str, mode: &str) -> anyhow::Result<configs::Config> {
         {
             let conn = self.store.conn();
             configs::update(
@@ -1351,12 +1842,22 @@ impl WiredServices {
         self.installer
             .active()
             .map_err(|e| svc_error(e.code(), e))?
-            .ok_or_else(|| svc_error("RUNTIME_NOT_INSTALLED", "还没有安装 sing-box，先调用 CoreInstall"))
+            .ok_or_else(|| {
+                svc_error(
+                    "RUNTIME_NOT_INSTALLED",
+                    "还没有安装 sing-box，先调用 CoreInstall",
+                )
+            })
     }
 
     /// 磁盘配置里读回端口与 secret；配置损坏时返回 None。
     fn config_endpoints(value: &Value) -> Option<(u16, u16, String)> {
-        let mixed = value.get("inbounds")?.as_array()?.first()?.get("listen_port")?.as_u64()? as u16;
+        let mixed = value
+            .get("inbounds")?
+            .as_array()?
+            .first()?
+            .get("listen_port")?
+            .as_u64()? as u16;
         let clash = value.get("experimental")?.get("clash_api")?;
         let controller = clash.get("external_controller")?.as_str()?;
         let clash_port = controller.rsplit(':').next()?.parse().ok()?;
@@ -1529,7 +2030,8 @@ impl WiredServices {
         let parsed: Vec<crate::nodes::ParsedNode> = nodes
             .into_iter()
             .filter(|node| {
-                let key = crate::nodes::source_key(&node.name, &node.server, node.port, &node.method);
+                let key =
+                    crate::nodes::source_key(&node.name, &node.server, node.port, &node.method);
                 !exclusions.contains(&key)
             })
             .map(|node| crate::nodes::ParsedNode {
@@ -1540,19 +2042,12 @@ impl WiredServices {
                 password: node.password,
             })
             .collect();
-        let (added, _) = self.add_parsed_nodes(
-            Some(config_id),
-            &parsed,
-            configs::SOURCE_SEED,
-            false,
-        )?;
+        let (added, _) =
+            self.add_parsed_nodes(Some(config_id), &parsed, configs::SOURCE_SEED, false)?;
         Ok(added.len())
     }
 
-    fn active_node(
-        &self,
-        config: &configs::Config,
-    ) -> anyhow::Result<(configs::Node, String)> {
+    fn active_node(&self, config: &configs::Config) -> anyhow::Result<(configs::Node, String)> {
         let nodes = {
             let conn = self.store.conn();
             configs::list_nodes(&conn, &config.id)
@@ -1729,7 +2224,11 @@ fn validate_dns(dns: Option<&Value>) -> anyhow::Result<Value> {
     }
 
     let list = |key: &str| -> anyhow::Result<Vec<String>> {
-        let items = object.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+        let items = object
+            .get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let mut entries = Vec::new();
         for item in items {
             let value = item.as_str().ok_or_else(|| {
@@ -1803,9 +2302,7 @@ fn validate_tun_excludes(
 }
 
 fn validate_cidr(value: &str) -> Result<(), String> {
-    let (address, prefix) = value
-        .split_once('/')
-        .ok_or_else(|| value.to_string())?;
+    let (address, prefix) = value.split_once('/').ok_or_else(|| value.to_string())?;
     let ip: std::net::IpAddr = address.parse().map_err(|_| value.to_string())?;
     let prefix: u8 = prefix.parse().map_err(|_| value.to_string())?;
     let max = if ip.is_ipv4() { 32 } else { 128 };
@@ -1829,9 +2326,7 @@ impl VpnToolServices for WiredServices {
                 config_name: meta.as_ref().and_then(|meta| meta.config_name.clone()),
                 node_id: meta.as_ref().and_then(|meta| meta.node_id.clone()),
                 node_name: meta.as_ref().and_then(|meta| meta.node_name.clone()),
-                applied_route_revision: meta
-                    .as_ref()
-                    .and_then(|meta| meta.applied_route_revision),
+                applied_route_revision: meta.as_ref().and_then(|meta| meta.applied_route_revision),
                 connected_since: self.tun.connected_since(),
                 uptime_seconds: self.tun.uptime_seconds(),
             });
@@ -1915,13 +2410,15 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn core_list_versions(&self) -> anyhow::Result<Value> {
-        let manifest = crate::runtime::RuntimeManifest::builtin()
-            .map_err(|e| svc_error(e.code(), e))?;
+        let manifest =
+            crate::runtime::RuntimeManifest::builtin().map_err(|e| svc_error(e.code(), e))?;
         let (platform, arch) = crate::runtime::RuntimeManifest::host_platform();
         let available: Vec<Value> = manifest
             .releases
             .iter()
-            .filter(|release| release.platform == platform && release.arch == arch && !release.yanked)
+            .filter(|release| {
+                release.platform == platform && release.arch == arch && !release.yanked
+            })
             .map(|release| {
                 json!({
                     "version": release.upstream_version,
@@ -1993,9 +2490,7 @@ impl VpnToolServices for WiredServices {
             Some(other) => {
                 return Err(svc_error(
                     "INVALID_ARGUMENT",
-                    format!(
-                        "不支持的协议 {other}，可选值：vless_reality、hysteria2、shadowsocks"
-                    ),
+                    format!("不支持的协议 {other}，可选值：vless_reality、hysteria2、shadowsocks"),
                 ))
             }
         };
@@ -2070,8 +2565,7 @@ impl VpnToolServices for WiredServices {
         }
 
         let dns = validate_dns(input.dns.as_ref())?;
-        let tun_excludes =
-            validate_tun_excludes(connect_mode, input.tun_excludes.as_deref())?;
+        let tun_excludes = validate_tun_excludes(connect_mode, input.tun_excludes.as_deref())?;
 
         let source = input
             .source
@@ -2235,8 +2729,7 @@ impl VpnToolServices for WiredServices {
 
         let current_nodes = {
             let conn = self.store.conn();
-            configs::list_nodes(&conn, config_id)
-                .map_err(|error| svc_error(error.code(), error))?
+            configs::list_nodes(&conn, config_id).map_err(|error| svc_error(error.code(), error))?
         };
         let current_node_ids = current_nodes
             .iter()
@@ -2279,7 +2772,10 @@ impl VpnToolServices for WiredServices {
                 Some(None) => current.listen_port.is_none(),
                 Some(Some(port)) => current.listen_port == Some(port),
             }
-            && dns.as_ref().map(|value| value == &current.dns).unwrap_or(true)
+            && dns
+                .as_ref()
+                .map(|value| value == &current.dns)
+                .unwrap_or(true)
             && tun_excludes
                 .as_ref()
                 .map(|value| value == &current.tun_excludes)
@@ -2318,8 +2814,7 @@ impl VpnToolServices for WiredServices {
         };
         {
             let conn = self.store.conn();
-            configs::update(&conn, config_id, &patch)
-                .map_err(|error| config_store_error(error))?;
+            configs::update(&conn, config_id, &patch).map_err(|error| config_store_error(error))?;
             if let Some(node_ids) = input.node_ids.as_ref() {
                 configs::replace_nodes(&conn, config_id, node_ids)
                     .map_err(|error| config_store_error(error))?;
@@ -2348,7 +2843,12 @@ impl VpnToolServices for WiredServices {
         let updated = self.require_config(config_id)?;
         self.emit_config_changed("updated", Some(&updated));
         if input.node_ids.is_some() {
-            crate::seed::emit_node_list_changed(&self.store, "bindings_changed", Some(config_id), &[]);
+            crate::seed::emit_node_list_changed(
+                &self.store,
+                "bindings_changed",
+                Some(config_id),
+                &[],
+            );
         }
         self.config_detail_json(&updated)
     }
@@ -2384,8 +2884,7 @@ impl VpnToolServices for WiredServices {
 
         let deleted = {
             let conn = self.store.conn();
-            configs::delete(&conn, config_id)
-                .map_err(|error| svc_error(error.code(), error))?
+            configs::delete(&conn, config_id).map_err(|error| svc_error(error.code(), error))?
         };
         vpn_config::remove_profile_config(&self.config_dir(), config_id);
         self.emit_config_changed("deleted", None);
@@ -2456,15 +2955,13 @@ impl VpnToolServices for WiredServices {
         self.runtime_stop(false).await?;
         {
             let conn = self.store.conn();
-            configs::activate(&conn, config_id)
-                .map_err(|error| svc_error(error.code(), error))?;
+            configs::activate(&conn, config_id).map_err(|error| svc_error(error.code(), error))?;
         }
         self.emit_config_changed("activated", Some(&target));
 
         let node_count = {
             let conn = self.store.conn();
-            configs::node_count(&conn, config_id)
-                .map_err(|error| svc_error(error.code(), error))?
+            configs::node_count(&conn, config_id).map_err(|error| svc_error(error.code(), error))?
         };
         if node_count == 0 {
             return Ok(json!({
@@ -2493,11 +2990,7 @@ impl VpnToolServices for WiredServices {
         }
     }
 
-    async fn node_import_url(
-        &self,
-        config_id: Option<String>,
-        url: &str,
-    ) -> anyhow::Result<Value> {
+    async fn node_import_url(&self, config_id: Option<String>, url: &str) -> anyhow::Result<Value> {
         if let Some(config_id) = &config_id {
             self.require_config(config_id)?;
         }
@@ -2516,10 +3009,12 @@ impl VpnToolServices for WiredServices {
             ));
         }
 
-        let subscription = crate::nodes::fetch_subscription(url).await.map_err(|error| {
-            let message = error.to_string();
-            svc_error_with_details(error.code(), message, json!({ "reason": error.reason() }))
-        })?;
+        let subscription = crate::nodes::fetch_subscription(url)
+            .await
+            .map_err(|error| {
+                let message = error.to_string();
+                svc_error_with_details(error.code(), message, json!({ "reason": error.reason() }))
+            })?;
         let (added, duplicates) = self.add_parsed_nodes(
             config_id.as_deref(),
             &subscription.nodes,
@@ -2615,8 +3110,7 @@ impl VpnToolServices for WiredServices {
         let config = self.require_config(config_id)?;
         let members = {
             let conn = self.store.conn();
-            configs::list_nodes(&conn, config_id)
-                .map_err(|error| svc_error(error.code(), error))?
+            configs::list_nodes(&conn, config_id).map_err(|error| svc_error(error.code(), error))?
         };
         if !members.iter().any(|node| node.id == node_id) {
             return Err(svc_error_with_details(
@@ -2696,6 +3190,24 @@ impl VpnToolServices for WiredServices {
             )
         })?;
         let to_tag = format!("node-{node_id}");
+        // 本次连接的 selector 里可能没有它（TUN 会剔除解析失败的节点）。
+        // 先查成员表，给一个用户能懂的理由，而不是一句 HTTP 400。
+        match clash_selector_members(&plan.clash_addr, &plan.clash_secret, "proxy").await {
+            Ok(members) if !members.is_empty() && !members.iter().any(|tag| tag == &to_tag) => {
+                return Err(svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    "这个节点在本次连接中不可用（服务器域名解析失败），请重新连接或换一个节点",
+                    json!({
+                        "reason": "runtime_switch_failed",
+                        "detail": { "reason": "node_server_unresolved" },
+                        "node_id": node_id,
+                    }),
+                ));
+            }
+            Ok(_) => {}
+            // 读不到成员表不据此拒绝，继续走原来的 PUT 路径。
+            Err(error) => log::warn!("读取 selector 成员失败，跳过预检：{error}"),
+        }
         if let Err(error) =
             clash_put_selector(&plan.clash_addr, &plan.clash_secret, "proxy", &to_tag).await
         {
@@ -2745,8 +3257,7 @@ impl VpnToolServices for WiredServices {
         }
 
         let status = self.manager.status().await;
-        let runtime =
-            serde_json::to_value(&status).map_err(|e| svc_error("INTERNAL", e))?;
+        let runtime = serde_json::to_value(&status).map_err(|e| svc_error("INTERNAL", e))?;
         crate::agent::app_handle::emit(
             "node-switched",
             json!({
@@ -2803,7 +3314,13 @@ impl VpnToolServices for WiredServices {
             if let Some(plan) = self.manager.current_plan().await {
                 let tag = format!("node-{node_id}");
                 if let Ok(delay) = clash_delay(&plan.clash_addr, &plan.clash_secret, &tag).await {
-                    return Ok(probe_result(node_id, true, Some(delay), "clash_delay", None));
+                    return Ok(probe_result(
+                        node_id,
+                        true,
+                        Some(delay),
+                        "clash_delay",
+                        None,
+                    ));
                 }
             }
         }
@@ -2984,7 +3501,8 @@ impl VpnToolServices for WiredServices {
         let applied_revision = running.then_some(status.applied_route_revision).flatten();
 
         if config.routing_mode == mode {
-            let mut data = self.route_state_json(&config, applied_mode.as_deref(), applied_revision);
+            let mut data =
+                self.route_state_json(&config, applied_mode.as_deref(), applied_revision);
             data["hot_switched"] = json!(false);
             data["reconnect"] = Value::Null;
             return Ok(data);
@@ -3013,9 +3531,13 @@ impl VpnToolServices for WiredServices {
             } else {
                 "proxy"
             };
-            if let Err(error) =
-                clash_put_selector(&plan.clash_addr, &plan.clash_secret, "route-local", to_selector)
-                    .await
+            if let Err(error) = clash_put_selector(
+                &plan.clash_addr,
+                &plan.clash_secret,
+                "route-local",
+                to_selector,
+            )
+            .await
             {
                 return Err(svc_error_with_details(
                     "PRECONDITION_FAILED",
@@ -3145,10 +3667,7 @@ impl VpnToolServices for WiredServices {
         Ok(self.route_state_json(&updated, None, None))
     }
 
-    async fn vpn_connect(
-        &self,
-        config_id: Option<String>,
-    ) -> anyhow::Result<Value> {
+    async fn vpn_connect(&self, config_id: Option<String>) -> anyhow::Result<Value> {
         self.runtime_start(config_id).await
     }
 
@@ -3179,26 +3698,53 @@ impl VpnToolServices for WiredServices {
             "app.runtime_installed",
             "app",
             installed,
-            if installed { "运行时已安装".into() } else { "运行时未安装".into() },
-            if installed { None } else { Some("安装运行时后再试") },
-            if installed { None } else { Some(json!({ "kind": "reconnect" })) },
+            if installed {
+                "运行时已安装".into()
+            } else {
+                "运行时未安装".into()
+            },
+            if installed {
+                None
+            } else {
+                Some("安装运行时后再试")
+            },
+            if installed {
+                None
+            } else {
+                Some(json!({ "kind": "reconnect" }))
+            },
         ));
         checks.push(diag_check(
             "app.process_alive",
             "app",
             status.health.process,
-            if status.health.process { "sing-box 进程存活".into() } else { "sing-box 进程未运行".into() },
+            if status.health.process {
+                "sing-box 进程存活".into()
+            } else {
+                "sing-box 进程未运行".into()
+            },
             None,
-            if running && !status.health.process { Some(json!({ "kind": "reconnect" })) } else { None },
+            if running && !status.health.process {
+                Some(json!({ "kind": "reconnect" }))
+            } else {
+                None
+            },
         ));
         let version = status.upstream_version.clone().or_else(|| {
-            self.installer.active().ok().flatten().map(|runtime| runtime.version)
+            self.installer
+                .active()
+                .ok()
+                .flatten()
+                .map(|runtime| runtime.version)
         });
         checks.push(diag_check(
             "app.version",
             "app",
             version.is_some(),
-            version.clone().map(|value| format!("运行时版本 {value}")).unwrap_or_else(|| "没有可用的运行时版本".into()),
+            version
+                .clone()
+                .map(|value| format!("运行时版本 {value}"))
+                .unwrap_or_else(|| "没有可用的运行时版本".into()),
             None,
             None,
         ));
@@ -3207,7 +3753,10 @@ impl VpnToolServices for WiredServices {
             "app",
             !running || status.config_hash.is_some(),
             if running {
-                status.config_hash.clone().unwrap_or_else(|| "缺少配置摘要".into())
+                status
+                    .config_hash
+                    .clone()
+                    .unwrap_or_else(|| "缺少配置摘要".into())
             } else {
                 "未连接，无活动配置".into()
             },
@@ -3218,16 +3767,32 @@ impl VpnToolServices for WiredServices {
             "app.clash_api",
             "app",
             !running || status.health.clash_api,
-            if status.health.clash_api { "控制面可用".into() } else { "控制面不可用".into() },
-            if running && !status.health.clash_api { Some("重新连接后再试") } else { None },
+            if status.health.clash_api {
+                "控制面可用".into()
+            } else {
+                "控制面不可用".into()
+            },
+            if running && !status.health.clash_api {
+                Some("重新连接后再试")
+            } else {
+                None
+            },
             None,
         ));
         checks.push(diag_check(
             "app.data_plane",
             "app",
             !running || status.health.data_plane,
-            if status.health.data_plane { "数据面可用".into() } else { "数据面不可用".into() },
-            if running && !status.health.data_plane { Some("换个节点或稍后重试") } else { None },
+            if status.health.data_plane {
+                "数据面可用".into()
+            } else {
+                "数据面不可用".into()
+            },
+            if running && !status.health.data_plane {
+                Some("换个节点或稍后重试")
+            } else {
+                None
+            },
             None,
         ));
 
@@ -3253,7 +3818,9 @@ impl VpnToolServices for WiredServices {
                 let (ok, detail) = if running {
                     let matches_runtime = expected
                         .as_ref()
-                        .map(|expected| !endpoints.is_empty() && endpoints.iter().all(|item| item == expected))
+                        .map(|expected| {
+                            !endpoints.is_empty() && endpoints.iter().all(|item| item == expected)
+                        })
                         .unwrap_or(false);
                     (
                         matches_runtime && !dead_loopback,
@@ -3273,8 +3840,16 @@ impl VpnToolServices for WiredServices {
                     "system",
                     ok,
                     detail,
-                    if ok { None } else { Some("点『恢复网络』撤掉代理后再试") },
-                    if ok { None } else { Some(json!({ "kind": "restore_network" })) },
+                    if ok {
+                        None
+                    } else {
+                        Some("点『恢复网络』撤掉代理后再试")
+                    },
+                    if ok {
+                        None
+                    } else {
+                        Some(json!({ "kind": "restore_network" }))
+                    },
                 ));
 
                 checks.push(diag_check(
@@ -3285,10 +3860,22 @@ impl VpnToolServices for WiredServices {
                         "{} 个解析器，{} {}",
                         net.dns.servers.len(),
                         net.dns.probe_domain,
-                        if net.dns.resolvable { "可解析" } else { "无法解析" }
+                        if net.dns.resolvable {
+                            "可解析"
+                        } else {
+                            "无法解析"
+                        }
                     ),
-                    if net.dns.resolvable { None } else { Some("刷新 DNS 缓存后重试") },
-                    if net.dns.resolvable { None } else { Some(json!({ "kind": "flush_dns" })) },
+                    if net.dns.resolvable {
+                        None
+                    } else {
+                        Some("刷新 DNS 缓存后重试")
+                    },
+                    if net.dns.resolvable {
+                        None
+                    } else {
+                        Some(json!({ "kind": "flush_dns" }))
+                    },
                 ));
 
                 let route_ok = net.route.default_interface.is_some();
@@ -3297,11 +3884,17 @@ impl VpnToolServices for WiredServices {
                     "system",
                     route_ok,
                     match (&net.route.default_interface, &net.route.default_gateway) {
-                        (Some(interface), Some(gateway)) => format!("默认接口 {interface}，网关 {gateway}"),
+                        (Some(interface), Some(gateway)) => {
+                            format!("默认接口 {interface}，网关 {gateway}")
+                        }
                         (Some(interface), None) => format!("默认接口 {interface}"),
                         _ => "没有默认路由".to_string(),
                     },
-                    if route_ok { None } else { Some("检查本机网络连接") },
+                    if route_ok {
+                        None
+                    } else {
+                        Some("检查本机网络连接")
+                    },
                     None,
                 ));
             }
@@ -3320,9 +3913,20 @@ impl VpnToolServices for WiredServices {
             "network.exit_ip",
             "network",
             !running || exit_ip.is_some(),
-            exit_ip.clone().map(|ip| format!("代理出口 {ip}")).unwrap_or_else(|| "未探测到出口 IP".into()),
-            if running && exit_ip.is_none() { Some("重新连接以重新探测") } else { None },
-            if running && exit_ip.is_none() { Some(json!({ "kind": "reconnect" })) } else { None },
+            exit_ip
+                .clone()
+                .map(|ip| format!("代理出口 {ip}"))
+                .unwrap_or_else(|| "未探测到出口 IP".into()),
+            if running && exit_ip.is_none() {
+                Some("重新连接以重新探测")
+            } else {
+                None
+            },
+            if running && exit_ip.is_none() {
+                Some(json!({ "kind": "reconnect" }))
+            } else {
+                None
+            },
         ));
 
         let source_reachable = http_reachable(&crate::seed::source_url()).await;
@@ -3330,16 +3934,32 @@ impl VpnToolServices for WiredServices {
             "network.reachable_seed_source",
             "network",
             source_reachable,
-            if source_reachable { "测试节点源可达".into() } else { "测试节点源不可达".into() },
-            if source_reachable { None } else { Some("连上网络后刷新测试节点") },
-            if source_reachable { None } else { Some(json!({ "kind": "refresh_default_profile" })) },
+            if source_reachable {
+                "测试节点源可达".into()
+            } else {
+                "测试节点源不可达".into()
+            },
+            if source_reachable {
+                None
+            } else {
+                Some("连上网络后刷新测试节点")
+            },
+            if source_reachable {
+                None
+            } else {
+                Some(json!({ "kind": "refresh_default_profile" }))
+            },
         ));
         let github = http_reachable("https://github.com").await;
         checks.push(diag_check(
             "network.reachable_github",
             "network",
             github,
-            if github { "GitHub 可达".into() } else { "GitHub 不可达".into() },
+            if github {
+                "GitHub 可达".into()
+            } else {
+                "GitHub 不可达".into()
+            },
             None,
             None,
         ));
@@ -3353,14 +3973,19 @@ impl VpnToolServices for WiredServices {
                 .as_ref()
                 .map(|config| format!("当前配置：{}", config.name))
                 .unwrap_or_else(|| "还没有可用配置".into()),
-            if has_config { None } else { Some("新建一套配置") },
-            if has_config { None } else { Some(json!({ "kind": "open_default_profile" })) },
+            if has_config {
+                None
+            } else {
+                Some("新建一套配置")
+            },
+            if has_config {
+                None
+            } else {
+                Some(json!({ "kind": "open_default_profile" }))
+            },
         ));
 
-        let seed_available = seed
-            .get("content_sha256")
-            .and_then(Value::as_str)
-            .is_some();
+        let seed_available = seed.get("content_sha256").and_then(Value::as_str).is_some();
         checks.push(diag_check(
             "config.seed_available",
             "config",
@@ -3373,8 +3998,16 @@ impl VpnToolServices for WiredServices {
             } else {
                 "还没有测试节点缓存".into()
             },
-            if seed_available { None } else { Some("刷新测试节点") },
-            if seed_available { None } else { Some(json!({ "kind": "refresh_default_profile" })) },
+            if seed_available {
+                None
+            } else {
+                Some("刷新测试节点")
+            },
+            if seed_available {
+                None
+            } else {
+                Some(json!({ "kind": "refresh_default_profile" }))
+            },
         ));
 
         let stale = seed
@@ -3396,8 +4029,16 @@ impl VpnToolServices for WiredServices {
             } else {
                 "测试节点较新".into()
             },
-            if stale { Some("刷新测试节点") } else { None },
-            if stale { Some(json!({ "kind": "refresh_default_profile" })) } else { None },
+            if stale {
+                Some("刷新测试节点")
+            } else {
+                None
+            },
+            if stale {
+                Some(json!({ "kind": "refresh_default_profile" }))
+            } else {
+                None
+            },
         ));
 
         let total = checks.len();
@@ -3464,13 +4105,15 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn save_deepseek_key(&self, key: &str) -> anyhow::Result<Value> {
-        let outcome = crate::secrets::save_deepseek_key(key).await.map_err(|error| {
-            let code = match error.ui_code() {
-                "INVALID_KEY" => "INVALID_ARGUMENT",
-                _ => "INTERNAL",
-            };
-            svc_error(code, error.message())
-        })?;
+        let outcome = crate::secrets::save_deepseek_key(key)
+            .await
+            .map_err(|error| {
+                let code = match error.ui_code() {
+                    "INVALID_KEY" => "INVALID_ARGUMENT",
+                    _ => "INTERNAL",
+                };
+                svc_error(code, error.message())
+            })?;
         crate::agent::refresh_credentials_if_active(crate::llm::PROVIDER_DEEPSEEK);
         Ok(json!({
             "saved": true,
@@ -3638,13 +4281,14 @@ impl WiredServices {
             config.routing_mode
         );
 
-        let installed_rules = crate::rules::load_active(&self.store, &self.data_dir).ok_or_else(|| {
-            svc_error_with_details(
-                "PRECONDITION_FAILED",
-                "规则数据尚未就绪，先刷新规则数据",
-                json!({ "reason": "rules_not_ready" }),
-            )
-        })?;
+        let installed_rules =
+            crate::rules::load_active(&self.store, &self.data_dir).ok_or_else(|| {
+                svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    "规则数据尚未就绪，先刷新规则数据",
+                    json!({ "reason": "rules_not_ready" }),
+                )
+            })?;
         let targets = config
             .route_targets
             .as_array()
@@ -3664,7 +4308,11 @@ impl WiredServices {
             rules: &installed_rules,
         })
         .map_err(|error| {
-            svc_error_with_details(error.code(), error.to_string(), json!({ "reason": error.reason() }))
+            svc_error_with_details(
+                error.code(),
+                error.to_string(),
+                json!({ "reason": error.reason() }),
+            )
         })?;
 
         let (node, password) = self.active_node(config)?;
@@ -3804,19 +4452,68 @@ impl WiredServices {
         clash_port: u16,
         clash_secret: String,
     ) -> anyhow::Result<Value> {
-        // 排除表 = 固定表 + 本机反推 + 用户补充。反推失败也不影响启动，只是少几条。
+        // 排除表 = 固定表 + 本机反推 + 用户补充 + 节点服务器旁路。
+        // 最后一项不能省：节点服务器若落在被接管段里，sing-box 连自己也会绕成环路。
         let local = crate::tun::subnets(&crate::tun::collect());
         let user = tun_excludes_from_value(&config.tun_excludes);
-        let excludes = crate::tun::excludes(&local, &user);
+        let mut excludes = crate::tun::excludes(&local, &user);
+        let bypass = node_bypass_plan(descriptors).await;
+        excludes.extend(bypass.prefixes.iter().cloned());
 
-        let input = vpn_config::BuildInput::new(
-            current.clone(),
-            mixed_port,
-            clash_port,
-            clash_secret,
-        )
-        .with_tun_excludes(excludes);
-        let value = vpn_config::build_routed_multi(&input, descriptors, &current.id, plan)
+        // 当前节点的域名解析不出来时直接失败：
+        // 没有旁路就可能绕回 TUN，而且 sing-box 自己也要靠同一次解析才能连上。
+        // 其它节点解析失败只记警告——它们可能永远不会被选中，不该拖死本次连接。
+        if !node_server_is_resolved(&current.server, &bypass.pinned) {
+            let label = if current.name.is_empty() {
+                &current.id
+            } else {
+                &current.name
+            };
+            log::error!("当前节点「{label}」的服务器域名解析失败，拒绝启动 TUN");
+            return Err(svc_error_with_details(
+                "tun_start_failed",
+                format!("节点「{label}」的服务器域名解析失败，请检查网络或换一个节点"),
+                json!({
+                    "reason": "tun_start_failed",
+                    "permission_problem": false,
+                    "wire_code": null,
+                    "local_code": null,
+                    "detail": { "reason": "node_server_unresolved" },
+                }),
+            ));
+        }
+        // 出站 server 钉成解析出的 IP（TLS 的 server_name 不动）：
+        // 否则 sing-box 会再解析一次，GeoDNS 给出别的地址就绕过了刚加的旁路。
+        //
+        // 未解析出地址的节点**不进 selector**：`node_switch` 是 Clash 热切，
+        // 不重连、也不会重跑解析；把它们留在里面等于给环路留后门。
+        let pinned_descriptors = descriptors
+            .iter()
+            .filter_map(|descriptor| {
+                if !node_server_is_resolved(&descriptor.server, &bypass.pinned) {
+                    log::warn!(
+                        "节点 {} 的服务器域名未能解析，已从 TUN selector 中剔除",
+                        descriptor.id
+                    );
+                    return None;
+                }
+                let mut descriptor = descriptor.clone();
+                if let Some(address) = bypass.pinned.get(descriptor.server.trim()) {
+                    descriptor.server = address.to_string();
+                }
+                Some(descriptor)
+            })
+            .collect::<Vec<_>>();
+        let pinned_current = pinned_descriptors
+            .iter()
+            .find(|descriptor| descriptor.id == current.id)
+            .cloned()
+            .unwrap_or_else(|| current.clone());
+
+        let input =
+            vpn_config::BuildInput::new(pinned_current, mixed_port, clash_port, clash_secret)
+                .with_tun_excludes(excludes.clone());
+        let value = vpn_config::build_routed_multi(&input, &pinned_descriptors, &current.id, plan)
             .map_err(|e| svc_error(e.code(), e))?;
 
         // 不再由我们在用户目录里写配置：helper 收内容、自己落盘、自己跑 check。
@@ -3844,7 +4541,11 @@ impl WiredServices {
                 started.pid
             }
             Err(error) => {
-                log::error!("连接 TUN 启动失败 code={}：{}", error.code.as_str(), error.message);
+                log::error!(
+                    "连接 TUN 启动失败 code={}：{}",
+                    error.code.as_str(),
+                    error.message
+                );
                 return Err(svc_error_with_details(
                     tun_error_code(&error),
                     error.message.clone(),
@@ -3855,7 +4556,8 @@ impl WiredServices {
 
         log::info!("TUN 已连接 pid={pid} config={}", config.id);
         // helper 只等 sing-box check + spawn，不等 TUN 设备与路由表。
-        // 设备出现 + 默认路由指过来，才算「流量真的被接管」。
+        // 设备出现 + 接管路由完整，才算「流量真的被接管」；
+        // 只看到设备就把「已连接」报给用户，等于让用户以为通了、实际半接管。
         //
         // Windows 还没有适配器枚举（`tun::collect()` 返回空）：不白等 1.5 秒，
         // 也不把「未采集」说成「设备没出现」。两个字段用 null 标记未采集。
@@ -3864,33 +4566,38 @@ impl WiredServices {
         #[cfg(not(target_os = "windows"))]
         let (tun_device_up, tun_default_route) = {
             let tun_device =
-                crate::tun::wait_until_device_up(std::time::Duration::from_millis(1500)).await;
-            let device_up = tun_device.is_some();
-            let default_route = match (&tun_device, config.routing_mode.as_str()) {
-                // 只有「全部走 VPN」才该把默认路由抢过来；按服务分流时默认路由留在物理网卡。
-                (Some(name), configs::ROUTING_PROXY_ALL) => {
-                    let name = name.clone();
-                    tokio::task::spawn_blocking(move || {
-                        crate::tun::default_route_goes_through(&name)
-                    })
-                    .await
-                    .unwrap_or(false)
-                }
-                _ => false,
+                crate::tun::wait_until_device_up(std::time::Duration::from_secs(5)).await;
+            let Some(name) = tun_device else {
+                log::error!("TUN 已启动 pid={pid}，5s 内没看到 TUN 设备，判定启动失败并回滚");
+                let stop_error = self.tun.stop().err();
+                let dns_error = self.tun.flush_dns().err().map(|error| error.message);
+                return Err(takeover_incomplete_error(
+                    &[],
+                    stop_error.as_ref(),
+                    false,
+                    dns_error.as_deref(),
+                ));
             };
-            if !device_up {
-                log::warn!("TUN 已启动 pid={pid}，但 1.5s 内没看到 TUN 设备，接管状态待确认");
-            } else if config.routing_mode == configs::ROUTING_PROXY_ALL && !default_route {
-                log::warn!(
-                    "TUN 设备已就绪 pid={pid}，但默认路由没指过来，「全部接管」尚不能确认"
-                );
-            } else {
-                log::info!(
-                    "TUN 接管已确认 pid={pid} device={:?} default_route={default_route}",
-                    tun_device
-                );
+            // 路由可能比设备晚几十毫秒到几秒；给 5 秒窗口，
+            // 但**不接受**半覆盖：缺一段就回滚，绝不对外报已连接。
+            let missing =
+                wait_for_takeover(&name, &excludes, std::time::Duration::from_secs(5)).await;
+            if !missing.is_empty() {
+                log::error!("TUN 接管不完整 tun={name} missing={missing:?}，停止实例并回滚");
+                let stop_error = self.tun.stop().err();
+                let residual = stop_error.is_none()
+                    && !wait_until_routes_gone(&name, std::time::Duration::from_secs(2)).await;
+                // 只停进程不够：hijack 期间的坏解析结果还留在 mDNSResponder 里。
+                let dns_error = self.tun.flush_dns().err().map(|error| error.message);
+                return Err(takeover_incomplete_error(
+                    &missing,
+                    stop_error.as_ref(),
+                    residual,
+                    dns_error.as_deref(),
+                ));
             }
-            (json!(device_up), json!(default_route))
+            log::info!("TUN 接管已确认 pid={pid} tun={name} routes=完整");
+            (json!(true), json!(true))
         };
         Ok(json!({
             "contract_version": crate::runtime::CONTRACT_VERSION,
@@ -3981,7 +4688,11 @@ impl WiredServices {
             }
         };
 
-        log::info!("连接 运行时已启动 state={:?} pid={:?}", started.state, started.pid);
+        log::info!(
+            "连接 运行时已启动 state={:?} pid={:?}",
+            started.state,
+            started.pid
+        );
         if let Err(error) = require_running_state(started.state) {
             log::error!("连接 运行时状态不是 running：{error}");
             let error = self.abort_connection(error);
@@ -4029,11 +4740,11 @@ impl WiredServices {
         verified =
             verified && self.manager.status().await.state == crate::runtime::RuntimeState::Idle;
 
-        let exit_ip = match crate::runtime::DirectIpProbe::new(crate::runtime::DEFAULT_DIRECT_IP_PROBE)
-        {
-            Ok(probe) => probe.check().await.ok().flatten(),
-            Err(_) => None,
-        };
+        let exit_ip =
+            match crate::runtime::DirectIpProbe::new(crate::runtime::DEFAULT_DIRECT_IP_PROBE) {
+                Ok(probe) => probe.check().await.ok().flatten(),
+                Err(_) => None,
+            };
         let detail = if verified {
             match &exit_ip {
                 Some(ip) => format!("已恢复直连，当前出口 IP {ip}"),
@@ -4055,13 +4766,37 @@ impl WiredServices {
         if port.is_some() {
             return Err(svc_error("INVALID_ARGUMENT", "flush_dns 不接受 port"));
         }
-        tokio::task::spawn_blocking(crate::netcfg::flush_dns)
-            .await
-            .map_err(|error| svc_error("INTERNAL", error))?
-            .map_err(|error| svc_error("INTERNAL", error))?;
-        let verified = tokio::task::spawn_blocking(crate::netcfg::dns_resolvable)
-            .await
-            .unwrap_or(false);
+        // 与强制重置同一条路径：助手可用时只有它能 HUP mDNSResponder。
+        if matches!(
+            self.tun.helper_status(),
+            crate::tun::privilege::HelperStatus::Enabled
+        ) {
+            let tun = Arc::clone(&self.tun);
+            tokio::task::spawn_blocking(move || tun.flush_dns())
+                .await
+                .map_err(|error| svc_error("INTERNAL", error))?
+                .map_err(|error| {
+                    log::warn!("特权刷新 DNS 失败：{error}");
+                    svc_error("INTERNAL", flush_dns_failure_message(&error))
+                })?;
+        } else {
+            tokio::task::spawn_blocking(crate::netcfg::flush_dns)
+                .await
+                .map_err(|error| svc_error("INTERNAL", error))?
+                .map_err(|error| svc_error("INTERNAL", error))?;
+        }
+        // HUP 之后 mDNSResponder 要几百毫秒才回来；给它 3 秒。
+        let mut verified = false;
+        for _ in 0..20 {
+            if tokio::task::spawn_blocking(crate::netcfg::dns_resolvable)
+                .await
+                .unwrap_or(false)
+            {
+                verified = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
         Ok(json!({
             "ok": verified,
             "action": "flush_dns",
@@ -4305,7 +5040,8 @@ impl WiredServices {
                 remaining.push((pid, true));
                 continue;
             }
-            if crate::runtime::process::terminate_pid(pid, std::time::Duration::from_secs(2)).await {
+            if crate::runtime::process::terminate_pid(pid, std::time::Duration::from_secs(2)).await
+            {
                 notes.push(format!("结束了遗留的 sing-box（pid {pid}）"));
             } else {
                 log::warn!("遗留 sing-box pid={pid} 未能结束：{command}");
@@ -4438,24 +5174,83 @@ impl WiredServices {
     }
 
     async fn reset_flush_dns(&self) -> Value {
-        match tokio::task::spawn_blocking(crate::netcfg::flush_dns).await {
-            Ok(Ok(())) => {
-                let resolved = tokio::task::spawn_blocking(crate::netcfg::dns_resolvable)
-                    .await
-                    .unwrap_or(false);
-                reset_step(
-                    "flush_dns",
-                    resolved,
-                    if resolved {
-                        "DNS 缓存已刷新，探针域名可解析"
-                    } else {
-                        "DNS 缓存已刷新，但探针域名仍无法解析"
-                    },
-                )
-            }
-            Ok(Err(error)) => reset_step("flush_dns", false, format!("刷新 DNS 失败：{error}")),
-            Err(error) => reset_step("flush_dns", false, format!("刷新 DNS 失败：{error}")),
+        // 关键：macOS 上 `dscacheutil -flushcache` 用普通用户执行也返回 0，
+        // 但真正装着解析缓存的是 mDNSResponder，只有 root 的 `killall -HUP`
+        // 才清得掉。只跑本地命令正是上次「重置报 ok、网络没恢复」的原因。
+        let tun = Arc::clone(&self.tun);
+        let privileged = match tokio::task::spawn_blocking(move || tun.flush_dns()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(error.message),
+            Err(error) => Err(format!("刷新任务失败：{error}")),
+        };
+        let privileged_ok = privileged.is_ok();
+        if let Err(reason) = &privileged {
+            log::warn!("特权刷新 DNS 失败：{reason}");
         }
+
+        // 兜底的本机命令照跑；它清不掉 mDNSResponder，不能据此判成功。
+        let local_error = if privileged_ok {
+            None
+        } else {
+            crate::netcfg::flush_dns().err()
+        };
+
+        // HUP 之后 mDNSResponder 要几百毫秒才回来；给它 3 秒。
+        let mut resolved = false;
+        for _ in 0..20 {
+            if tokio::task::spawn_blocking(crate::netcfg::dns_resolvable)
+                .await
+                .unwrap_or(false)
+            {
+                resolved = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+
+        // 点名指向本机的解析器。可能是 Veyl 残留，也可能是用户自建的本地 DNS，
+        // 所以只写进 detail；是否真的坏了，由「能不能解析」判断。
+        let suspicious = tokio::task::spawn_blocking(crate::netcfg::suspicious_dns_servers)
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()));
+
+        // 助手可用时，特权刷新失败不能算成功——缓存可能还留着别的坏答案。
+        let helper_enabled = matches!(
+            self.tun.helper_status(),
+            crate::tun::privilege::HelperStatus::Enabled
+        );
+        let ok = flush_dns_verdict(resolved, privileged_ok, helper_enabled);
+
+        let mut detail = String::new();
+        if privileged_ok {
+            detail.push_str("已通过特权助手刷新（dscacheutil + mDNSResponder）");
+        } else {
+            detail.push_str("特权刷新失败");
+            if local_error.is_some() {
+                detail.push_str("，本机命令也失败");
+            } else {
+                detail.push_str("，已退回本机命令");
+            }
+            if helper_enabled {
+                detail.push_str("；后台助手可能版本过旧，重启 Veyl 或重装后台助手后再试");
+            } else {
+                detail.push_str("；后台助手不可用，无法通知 mDNSResponder");
+            }
+        }
+        if resolved {
+            detail.push_str("，探针域名可解析");
+        } else {
+            detail.push_str("，探针域名仍无法解析");
+        }
+        match suspicious {
+            Ok(servers) if servers.is_empty() => {}
+            Ok(servers) => detail.push_str(&format!(
+                "；检测到指向本机的解析器：{}（若为自建 DNS 可忽略）",
+                servers.join("、")
+            )),
+            Err(error) => detail.push_str(&format!("；无法读取解析器列表：{error}")),
+        }
+        reset_step("flush_dns", ok, detail)
     }
 
     fn reset_clear_plaintext(&self) -> Value {
@@ -4497,9 +5292,7 @@ impl WiredServices {
                     ));
                 }
             }
-            Ok(Err(error)) => {
-                problems.push(format!("无法读取接口列表，TUN 状态未知：{error}"))
-            }
+            Ok(Err(error)) => problems.push(format!("无法读取接口列表，TUN 状态未知：{error}")),
             Err(error) => problems.push(format!("无法读取接口列表，TUN 状态未知：{error}")),
         }
 
@@ -4526,9 +5319,7 @@ impl WiredServices {
         }
         if let Some(port) = plan_port {
             let ours = format!("127.0.0.1:{port}");
-            if self.proxy.current_endpoint().ok().flatten().as_deref()
-                == Some(ours.as_str())
-            {
+            if self.proxy.current_endpoint().ok().flatten().as_deref() == Some(ours.as_str()) {
                 proxy_ok = false;
             }
         }
@@ -4562,11 +5353,47 @@ impl WiredServices {
             problems.push("直连 IP 探测失败或当前离线，无法确认已恢复直连".into());
         }
 
+        // 6. 用户视角：系统解析器真的能给地址。
+        // 进程、路由、代理都干净但 DNS 坏掉时，用户一样上不了网——
+        // 这正是上次「ok=true 但断网」的形态。
+        match probe_dns(
+            crate::netcfg::DNS_PROBE_DOMAIN,
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        {
+            Ok(addresses) => {
+                log::info!("强制重置 DNS 探测通过（{} 个地址）", addresses.len());
+            }
+            Err(error) => problems.push(format!("探针域名无法解析：{error}")),
+        }
+
+        // 7. 用户视角：真发一次 HTTPS 请求。失败**不判重置失败**——
+        //    DNS 与出口 IP 都正常时，单个站点失败更可能是站点或线路问题；
+        //    只在 detail 里作为「部分完成」提示，避免误报整体失败。
+        let https_warning =
+            match probe_https(&DIRECT_PROBE_URLS, std::time::Duration::from_secs(5)).await {
+                Ok((url, status)) => {
+                    log::info!("强制重置 HTTPS 探测通过：{url} 返回 {status}");
+                    None
+                }
+                Err(error) => {
+                    log::warn!("强制重置 HTTPS 探测失败：{error}");
+                    Some(error)
+                }
+            };
+
         let ok = problems.is_empty();
         let detail = if ok {
-            match &exit_ip {
-                Some(ip) => format!("网络已恢复直连，出口 IP {ip}"),
-                None => "网络已恢复直连".to_string(),
+            match (&exit_ip, &https_warning) {
+                (Some(ip), None) => format!("DNS、HTTPS 与直连出口均正常，出口 IP {ip}"),
+                (None, None) => "DNS、HTTPS 与直连出口均正常".to_string(),
+                (Some(ip), Some(error)) => format!(
+                    "基础网络已恢复（出口 IP {ip}），但 HTTPS 探测未通过（{error}），可能是目标站点或线路问题"
+                ),
+                (None, Some(error)) => format!(
+                    "基础网络已恢复，但 HTTPS 探测未通过（{error}），可能是目标站点或线路问题"
+                ),
             }
         } else {
             problems.join("；")
@@ -4604,13 +5431,8 @@ impl WiredServices {
         }
         self.manager.set_system_proxy_enabled(true).await;
         let expected = format!("127.0.0.1:{port}");
-        let verified = self
-            .proxy
-            .current_endpoint()
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some(expected.as_str());
+        let verified =
+            self.proxy.current_endpoint().ok().flatten().as_deref() == Some(expected.as_str());
         Ok(json!({
             "ok": verified,
             "action": "set_proxy",
@@ -4711,7 +5533,9 @@ mod registration_gate_tests {
     #[tokio::test]
     async fn reset_allows_registering_again() {
         let gate = RegistrationGate::new();
-        gate.ensure(|| async { Ok::<(), String>(()) }).await.unwrap();
+        gate.ensure(|| async { Ok::<(), String>(()) })
+            .await
+            .unwrap();
         gate.reset();
         assert!(!gate.is_ready());
     }
@@ -4839,7 +5663,10 @@ mod config_service_tests {
             .unwrap_err();
         let service = error.downcast_ref::<ServiceError>().unwrap();
         assert_eq!(service.code, "INVALID_ARGUMENT");
-        assert_eq!(service.details.as_ref().unwrap()["reason"], "connect_mode_immutable");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "connect_mode_immutable"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4865,7 +5692,9 @@ mod config_service_tests {
 
         let node_id = {
             let conn = services.store.conn();
-            configs::list_nodes(&conn, &config_id).unwrap()[0].id.clone()
+            configs::list_nodes(&conn, &config_id).unwrap()[0]
+                .id
+                .clone()
         };
         let password_ref = crate::nodes::password_ref(&node_id);
         assert!(crate::secrets::get_secret(&password_ref).unwrap().is_some());
@@ -4938,11 +5767,7 @@ mod config_service_tests {
         let created = services.config_create(create_input("A")).await.unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
         let error = services
-            .route_set_mode(
-                Some(config_id),
-                configs::ROUTING_PROXY_SELECTED,
-                false,
-            )
+            .route_set_mode(Some(config_id), configs::ROUTING_PROXY_SELECTED, false)
             .await
             .unwrap_err();
         let service = error.downcast_ref::<ServiceError>().unwrap();
@@ -4975,10 +5800,7 @@ mod config_service_tests {
             .unwrap();
         let node_id = node["node_id"].as_str().unwrap().to_string();
 
-        let switched = services
-            .node_switch(&config_id, &node_id)
-            .await
-            .unwrap();
+        let switched = services.node_switch(&config_id, &node_id).await.unwrap();
         assert_eq!(switched["connected"], false);
         assert!(switched["runtime"].is_null());
 
@@ -5046,7 +5868,10 @@ mod config_service_tests {
         let error = services.config_create(input).await.unwrap_err();
         let service = error.downcast_ref::<ServiceError>().unwrap();
         assert_eq!(service.code, "PRECONDITION_FAILED");
-        assert_eq!(service.details.as_ref().unwrap()["reason"], "route_targets_empty");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "route_targets_empty"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5060,7 +5885,10 @@ mod config_service_tests {
         input.listen_port = Some(7890);
         let error = services.config_create(input).await.unwrap_err();
         let service = error.downcast_ref::<ServiceError>().unwrap();
-        assert_eq!(service.details.as_ref().unwrap()["reason"], "listen_port_not_allowed");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "listen_port_not_allowed"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5298,8 +6126,11 @@ mod main_flow_tests {
         let runtime_dir = dir.join("runtime").join("test");
         std::fs::create_dir_all(&runtime_dir).unwrap();
         let binary = runtime_dir.join("sing-box");
-        std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = check ]; then exit 0; fi\nexec sleep 120\n")
-            .unwrap();
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nif [ \"$1\" = check ]; then exit 0; fi\nexec sleep 120\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let state = json!({
@@ -5363,7 +6194,8 @@ mod main_flow_tests {
                             continue;
                         };
 
-                        let Ok(clash_listener) = std::net::TcpListener::bind(("127.0.0.1", clash_port))
+                        let Ok(clash_listener) =
+                            std::net::TcpListener::bind(("127.0.0.1", clash_port))
                         else {
                             continue;
                         };
@@ -5422,7 +6254,8 @@ mod main_flow_tests {
     fn harness() -> Harness {
         crate::test_support::install_test_secrets();
 
-        let dir = std::env::temp_dir().join(format!("veyl-main-flow-{:016x}", rand::random::<u64>()));
+        let dir =
+            std::env::temp_dir().join(format!("veyl-main-flow-{:016x}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let store = Store::open_in_memory().unwrap();
@@ -5488,7 +6321,10 @@ mod main_flow_tests {
             .await
             .unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
-        assert!(created["listen_port"].is_null(), "不指定时应当留给连接时自动挑");
+        assert!(
+            created["listen_port"].is_null(),
+            "不指定时应当留给连接时自动挑"
+        );
 
         let node = h
             .services
@@ -5510,31 +6346,30 @@ mod main_flow_tests {
         assert_eq!(configs[0]["config_id"], config_id.as_str());
         assert_eq!(configs[0]["node_count"], 1);
         assert_eq!(
-            configs[0]["current_node_id"], node_id.as_str(),
+            configs[0]["current_node_id"],
+            node_id.as_str(),
             "唯一节点应当自动成为当前节点"
         );
         // 第一套配置会**自动激活**（还没有别的配置可比）。这里把这条行为钉住，
         // 后面的 `config_activate` 因此测的是「重新激活并重连」而不是「从无到有」。
         assert_eq!(
-            list["active_config_id"], config_id.as_str(),
+            list["active_config_id"],
+            config_id.as_str(),
             "第一套配置应当自动成为 active"
         );
 
         // ---- 2. 激活 ----
         // 从「未连接」切过来不会顺带连接：替用户连等于替他做决定。
         // 已经连着的时候才会重连（`reconnect: "reconnected"`）。
-        let activated = h
-            .services
-            .config_activate(&config_id, false)
-            .await
-            .unwrap();
+        let activated = h.services.config_activate(&config_id, false).await.unwrap();
         assert_eq!(activated["active_config_id"], config_id.as_str());
         assert_eq!(activated["reconnect"], "not_running", "{activated}");
         assert!(activated["runtime"].is_null());
 
         let list = h.services.config_list().await.unwrap();
         assert_eq!(
-            list["active_config_id"], config_id.as_str(),
+            list["active_config_id"],
+            config_id.as_str(),
             "激活后 active_config_id 要指向它"
         );
         let actives: Vec<&Value> = list["configs"]
