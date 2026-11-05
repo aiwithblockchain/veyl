@@ -17,9 +17,20 @@ path = "src/bin/runtime_selftest.rs"
 
 # 特权 helper。必须显式声明：build-dmg.sh 靠解析这里来决定构建并装进包里，
 # 只放在 src/bin/ 下自动发现是不够的（会漏掉 universal 构建，打包时直接失败）。
+#
+# Cargo 没有「按目标平台声明一个 bin」的语法（[[bin]] 不接受 target 条件）。
+# 这里保留声明，Windows 构建靠 main.rs 的门控编译成空壳；真正依赖
+# libxpc / Security.framework 的代码在 `#[cfg(target_os = "macos")] mod macos` 里，
+# Windows 目标不会解析、也不会链接它们。
 [[bin]]
 name = "veyl-helper"
 path = "src/bin/veyl-helper/main.rs"
+
+# Windows 特权服务（LocalSystem + 命名管道）。macOS 上编译成空壳，
+# 见 src/bin/veyl-service/main.rs 的门控。显式声明是为了打包脚本能按名字找到它。
+[[bin]]
+name = "veyl-service"
+path = "src/bin/veyl-service/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -92,9 +103,24 @@ objc2-service-management = { version = "0.3", default-features = false, features
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# TUN 特权服务用到的部分：SCM、命名管道、令牌/进程信息、Authenticode。
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Networking_WinInet",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Services",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
 ] }
 
 # 注意：release profile 不要设置 panic = "abort"。

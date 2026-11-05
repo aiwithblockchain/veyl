@@ -20,15 +20,42 @@ fn main() {
     );
     println!("cargo:rustc-env=VEYL_TEAM_ID={team}");
 
-    // 3. 运行时的完整 sha256。helper 只认这个值，请求方说了不算。
-    //    文件不存在时留空，helper 会在启动时报 runtime_missing。
-    let runtime = manifest.join("resources/runtime/sing-box");
+    // 3. 运行时的完整 sha256。helper/service 只认这个值，请求方说了不算。
+    //    文件不存在时留空，特权侧会在启动时报 runtime_missing。
+    //
+    //    Windows 的运行时是 `sing-box.exe`（不是 macOS 的 `sing-box`），
+    //    TUN 还多一个 `wintun.dll`。三个哈希都编进二进制，特权侧不读用户可写目录。
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let runtime_name = if target_os == "windows" {
+        "sing-box.exe"
+    } else {
+        "sing-box"
+    };
+    let runtime = manifest.join("resources/runtime").join(runtime_name);
     println!("cargo:rerun-if-changed={}", runtime.display());
     let digest = match std::fs::read(&runtime) {
         Ok(bytes) => sha256_hex(&bytes),
         Err(_) => String::new(),
     };
     println!("cargo:rustc-env=VEYL_RUNTIME_SHA256={digest}");
+
+    let wintun = manifest.join("resources/runtime/wintun.dll");
+    println!("cargo:rerun-if-changed={}", wintun.display());
+    let wintun_digest = match std::fs::read(&wintun) {
+        Ok(bytes) => sha256_hex(&bytes),
+        Err(_) => String::new(),
+    };
+    println!("cargo:rustc-env=VEYL_WINTUN_SHA256={wintun_digest}");
+
+    // Windows 签名策略：发布构建通过环境变量把允许的发布者/证书指纹编进服务。
+    // 未设置时服务只接受「链有效」的签名，并在开发机上允许显式开启的未签名测试文件。
+    for key in [
+        "VEYL_WIN_PUBLISHER",
+        "VEYL_WIN_CERT_THUMBPRINTS",
+        "VEYL_WIN_ALLOW_UNSIGNED_DEV",
+    ] {
+        println!("cargo:rerun-if-env-changed={key}");
+    }
 
     // 4. 规则归档的 sha256。
     //

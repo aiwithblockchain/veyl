@@ -21,6 +21,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import dns from "node:dns";
 import {
   chmodSync,
+  copyFileSync,
   createReadStream,
   createWriteStream,
   mkdirSync,
@@ -47,6 +48,14 @@ const CONNECT_TIMEOUT_MS = 10_000;
 const IDLE_TIMEOUT_MS = 30_000;
 const ASSET_CONNECT_TIMEOUT_MS = 15_000;
 const ASSET_IDLE_TIMEOUT_MS = 60_000;
+
+// Wintun 的官方预编译 DLL。**不要自己从源码编译再分发**：源码是 GPL-2.0，
+// 官方 ZIP 里的 DLL 是另一份允许随应用分发的许可（docs/windows-tun.md §3.1）。
+// 哈希固定在这里；换版本必须重新核对 wintun.net 上的产物。
+const WINTUN_VERSION = "0.14.1";
+const WINTUN_URL = `https://www.wintun.net/builds/wintun-${WINTUN_VERSION}.zip`;
+const WINTUN_SHA256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51";
+const WINTUN_ARCH_DIR = { x86_64: "amd64", arm64: "arm64" };
 
 async function sha256File(file) {
   return new Promise((resolve, reject) => {
@@ -489,99 +498,242 @@ async function downloadAsset(release, archivePath) {
   }
 }
 
-const manifest = JSON.parse(readFileSync(MANIFEST, "utf8"));
-const releases = manifest.releases.filter((item) => item.platform === "darwin");
-
-const picks = [];
-for (const arch of ARCHES) {
-  const release = releases.find((item) => item.arch === arch);
-  if (!release) fail(`manifest 里没有 darwin/${arch} 的发布记录`);
-  picks.push(release);
+/**
+ * 目标平台：默认跟着构建机走，也可以 `--platform=windows` 显式指定。
+ * （在 macOS 上只能交叉准备 Windows 产物，不能在构建机执行 PE 自检。）
+ */
+function selectedPlatform() {
+  const flag = process.argv.find((arg) => arg.startsWith("--platform="));
+  const value = flag ? flag.slice("--platform=".length) : process.platform;
+  if (value === "darwin" || value === "macos") return "darwin";
+  if (value === "windows" || value === "win32") return "windows";
+  fail(`不认识的平台：${value}（只支持 darwin / windows）`);
 }
 
-// 版本必须一致，否则 lipo 出来的东西两半不是同一个东西。
-const versions = new Set(picks.map((item) => item.upstream_version));
-if (versions.size !== 1) fail(`darwin 两个架构的版本不一致：${[...versions].join(", ")}`);
-const version = picks[0].upstream_version;
+const manifest = JSON.parse(readFileSync(MANIFEST, "utf8"));
 
-mkdirSync(OUT_DIR, { recursive: true });
-const work = mkdtempSync(join(tmpdir(), "veyl-runtime-"));
+async function fetchDarwin() {
+  const releases = manifest.releases.filter((item) => item.platform === "darwin");
 
-try {
-  const binaries = [];
-  for (const release of picks) {
+  const picks = [];
+  for (const arch of ARCHES) {
+    const release = releases.find((item) => item.arch === arch);
+    if (!release) fail(`manifest 里没有 darwin/${arch} 的发布记录`);
+    picks.push(release);
+  }
+
+  // 版本必须一致，否则 lipo 出来的东西两半不是同一个东西。
+  const versions = new Set(picks.map((item) => item.upstream_version));
+  if (versions.size !== 1) fail(`darwin 两个架构的版本不一致：${[...versions].join(", ")}`);
+  const version = picks[0].upstream_version;
+
+  mkdirSync(OUT_DIR, { recursive: true });
+  const work = mkdtempSync(join(tmpdir(), "veyl-runtime-"));
+
+  try {
+    const binaries = [];
+    for (const release of picks) {
+      const archive = join(work, release.upstream_asset);
+      await downloadAsset(release, archive);
+
+      const extractDir = join(work, release.arch);
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync("tar", ["-xzf", archive, "-C", extractDir], { stdio: "inherit" });
+
+      const binary = join(extractDir, release.upstream_asset.replace(/\.tar\.gz$/, ""), "sing-box");
+      if (!statSync(binary, { throwIfNoEntry: false })) fail(`解压后找不到 ${binary}`);
+      binaries.push(binary);
+    }
+
+    console.log("[runtime] lipo 成 universal");
+    const tmpOut = `${OUT}.tmp-${process.pid}`;
+    const tmpManifest = `${MANIFEST}.tmp-${process.pid}`;
+    try {
+      rmSync(tmpOut, { force: true });
+      execFileSync("lipo", ["-create", ...binaries, "-output", tmpOut], {
+        stdio: "inherit",
+      });
+      chmodSync(tmpOut, 0o755);
+
+      const archs = execFileSync("lipo", ["-archs", tmpOut], {
+        encoding: "utf8",
+      }).trim();
+      const archSet = new Set(archs.split(/\s+/).filter(Boolean));
+      if (!archSet.has("x86_64") || !archSet.has("arm64")) {
+        throw new Error(`lipo 产物架构不完整：${archs}`);
+      }
+
+      const versionResult = spawnSync(tmpOut, ["version"], { encoding: "utf8" });
+      const versionText = `${versionResult.stdout ?? ""}\n${versionResult.stderr ?? ""}`.trim();
+      if (versionResult.status !== 0) {
+        throw new Error(`产物 version 退出码 ${versionResult.status}：${versionText}`);
+      }
+      if (!versionText.includes(version)) {
+        throw new Error(`产物版本不匹配：期望 ${version}，实际 ${versionText}`);
+      }
+
+      const size = statSync(tmpOut).size;
+      const finalSha = await sha256File(tmpOut);
+      renameSync(tmpOut, OUT);
+
+      const universal = {
+        version,
+        archs: ["x86_64", "arm64"],
+        sha256: finalSha,
+        size,
+        generated_at: new Date().toISOString(),
+        artifacts: picks.map((release) => ({
+          arch: release.arch,
+          upstream_asset: release.upstream_asset,
+          sha256: release.artifact.sha256,
+          size: release.artifact.size,
+        })),
+      };
+      writeFileSync(
+        tmpManifest,
+        `${JSON.stringify({ ...manifest, universal }, null, 2)}\n`,
+      );
+      renameSync(tmpManifest, MANIFEST);
+
+      console.log(`[runtime] 完成：${OUT}`);
+      console.log(`[runtime] 版本 ${version} · ${(size / 1024 / 1024).toFixed(1)} MB`);
+      console.log(`[runtime] 架构 ${archs}`);
+      console.log(`[runtime] sha256 ${finalSha}（已写入 runtime-manifest.json）`);
+      console.log("[runtime] 这个哈希由 build.rs 在构建时重新计算并编进 helper，不需要手工同步。");
+    } catch (error) {
+      rmSync(tmpOut, { force: true });
+      rmSync(tmpManifest, { force: true });
+      fail(error.message);
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+/** 用 tar 解压；Windows 10+ 自带 bsdtar，支持 zip。 */
+function extractZip(archive, dest, label) {
+  try {
+    execFileSync("tar", ["-xf", archive, "-C", dest], { stdio: "inherit" });
+    return;
+  } catch (error) {
+    // 少数环境没有 tar.exe；退回 PowerShell。只在这里用，不把整个脚本交给 shell。
+    if (process.platform !== "win32") throw error;
+    execFileSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `Expand-Archive -LiteralPath '${archive}' -DestinationPath '${dest}' -Force`,
+      ],
+      { stdio: "inherit" },
+    );
+    console.log(`[runtime] tar 解压 ${label} 失败，已用 Expand-Archive 重试`);
+  }
+}
+
+async function fetchWindows() {
+  const archFlag = process.argv.find((arg) => arg.startsWith("--arch="));
+  const arch = archFlag
+    ? archFlag.slice("--arch=".length)
+    : process.arch === "arm64"
+      ? "arm64"
+      : "x86_64";
+  if (!WINTUN_ARCH_DIR[arch]) {
+    fail(`不支持的 Windows 架构：${arch}（只支持 x86_64 / arm64）`);
+  }
+  const release = manifest.releases.find(
+    (item) => item.platform === "windows" && item.arch === arch,
+  );
+  if (!release) {
+    fail(`manifest 里没有 windows/${arch} 的发布记录（当前只准备了 x86_64）`);
+  }
+  const version = release.upstream_version;
+
+  mkdirSync(OUT_DIR, { recursive: true });
+  const work = mkdtempSync(join(tmpdir(), "veyl-runtime-"));
+
+  try {
     const archive = join(work, release.upstream_asset);
     await downloadAsset(release, archive);
 
-    const extractDir = join(work, release.arch);
+    const extractDir = join(work, "sing-box");
     mkdirSync(extractDir, { recursive: true });
-    execFileSync("tar", ["-xzf", archive, "-C", extractDir], { stdio: "inherit" });
+    extractZip(archive, extractDir, release.upstream_asset);
 
-    const binary = join(extractDir, release.upstream_asset.replace(/\.tar\.gz$/, ""), "sing-box");
-    if (!statSync(binary, { throwIfNoEntry: false })) fail(`解压后找不到 ${binary}`);
-    binaries.push(binary);
-  }
-
-  console.log("[runtime] lipo 成 universal");
-  const tmpOut = `${OUT}.tmp-${process.pid}`;
-  const tmpManifest = `${MANIFEST}.tmp-${process.pid}`;
-  try {
-    rmSync(tmpOut, { force: true });
-    execFileSync("lipo", ["-create", ...binaries, "-output", tmpOut], {
-      stdio: "inherit",
-    });
-    chmodSync(tmpOut, 0o755);
-
-    const archs = execFileSync("lipo", ["-archs", tmpOut], {
-      encoding: "utf8",
-    }).trim();
-    const archSet = new Set(archs.split(/\s+/).filter(Boolean));
-    if (!archSet.has("x86_64") || !archSet.has("arm64")) {
-      throw new Error(`lipo 产物架构不完整：${archs}`);
-    }
-
-    const versionResult = spawnSync(tmpOut, ["version"], { encoding: "utf8" });
-    const versionText = `${versionResult.stdout ?? ""}\n${versionResult.stderr ?? ""}`.trim();
-    if (versionResult.status !== 0) {
-      throw new Error(`产物 version 退出码 ${versionResult.status}：${versionText}`);
-    }
-    if (!versionText.includes(version)) {
-      throw new Error(`产物版本不匹配：期望 ${version}，实际 ${versionText}`);
-    }
-
-    const size = statSync(tmpOut).size;
-    const finalSha = await sha256File(tmpOut);
-    renameSync(tmpOut, OUT);
-
-    const universal = {
-      version,
-      archs: ["x86_64", "arm64"],
-      sha256: finalSha,
-      size,
-      generated_at: new Date().toISOString(),
-      artifacts: picks.map((release) => ({
-        arch: release.arch,
-        upstream_asset: release.upstream_asset,
-        sha256: release.artifact.sha256,
-        size: release.artifact.size,
-      })),
-    };
-    writeFileSync(
-      tmpManifest,
-      `${JSON.stringify({ ...manifest, universal }, null, 2)}\n`,
+    const binary = join(
+      extractDir,
+      release.upstream_asset.replace(/\.zip$/, ""),
+      "sing-box.exe",
     );
-    renameSync(tmpManifest, MANIFEST);
+    if (!statSync(binary, { throwIfNoEntry: false })) fail(`解压后找不到 ${binary}`);
 
-    console.log(`[runtime] 完成：${OUT}`);
-    console.log(`[runtime] 版本 ${version} · ${(size / 1024 / 1024).toFixed(1)} MB`);
-    console.log(`[runtime] 架构 ${archs}`);
-    console.log(`[runtime] sha256 ${finalSha}（已写入 runtime-manifest.json）`);
-    console.log("[runtime] 这个哈希由 build.rs 在构建时重新计算并编进 helper，不需要手工同步。");
-  } catch (error) {
-    rmSync(tmpOut, { force: true });
-    rmSync(tmpManifest, { force: true });
-    fail(error.message);
+    const outExe = join(OUT_DIR, "sing-box.exe");
+    rmSync(outExe, { force: true });
+    copyFileSync(binary, outExe);
+    const exeSha = await sha256File(outExe);
+    const exeSize = statSync(outExe).size;
+
+    // 交叉准备时（在 macOS 上生成 Windows 产物）不能执行 PE，跳过自检。
+    if (process.platform === "win32") {
+      const versionResult = spawnSync(outExe, ["version"], { encoding: "utf8" });
+      const versionText = `${versionResult.stdout ?? ""}\n${versionResult.stderr ?? ""}`.trim();
+      if (versionResult.status !== 0) {
+        throw new Error(`sing-box.exe version 退出码 ${versionResult.status}：${versionText}`);
+      }
+      if (!versionText.includes(version)) {
+        throw new Error(`产物版本不匹配：期望 ${version}，实际 ${versionText}`);
+      }
+    } else {
+      console.log("[runtime] 构建机不是 Windows，跳过 sing-box.exe 的 version 自检");
+    }
+
+    // wintun.dll：官方 ZIP 里按架构取，**原样随包**，不做任何修改。
+    const wintunArchive = join(work, `wintun-${WINTUN_VERSION}.zip`);
+    await requestToFile(WINTUN_URL, wintunArchive, {
+      connectTimeoutMs: ASSET_CONNECT_TIMEOUT_MS,
+      idleTimeoutMs: ASSET_IDLE_TIMEOUT_MS,
+    });
+    const wintunSha = await sha256File(wintunArchive);
+    if (wintunSha !== WINTUN_SHA256) {
+      fail(
+        `wintun-${WINTUN_VERSION}.zip 哈希不符\n  期望 ${WINTUN_SHA256}\n  实际 ${wintunSha}`,
+      );
+    }
+
+    const wintunDir = join(work, "wintun");
+    mkdirSync(wintunDir, { recursive: true });
+    extractZip(wintunArchive, wintunDir, `wintun-${WINTUN_VERSION}.zip`);
+    const dll = join(wintunDir, "wintun", "bin", WINTUN_ARCH_DIR[arch], "wintun.dll");
+    if (!statSync(dll, { throwIfNoEntry: false })) fail(`wintun 压缩包里找不到 ${dll}`);
+
+    const outDll = join(OUT_DIR, "wintun.dll");
+    rmSync(outDll, { force: true });
+    copyFileSync(dll, outDll);
+
+    // 许可证必须随包分发；Wintun 的条款要求保留版权声明。
+    const license = join(wintunDir, "wintun", "LICENSE.txt");
+    const outLicense = join(OUT_DIR, "wintun-LICENSE.txt");
+    if (statSync(license, { throwIfNoEntry: false })) {
+      copyFileSync(license, outLicense);
+    } else {
+      console.warn("[runtime] wintun 压缩包里没有 LICENSE.txt，发布前必须补上");
+    }
+
+    const dllSha = await sha256File(outDll);
+    console.log(`[runtime] 完成：${outExe}`);
+    console.log(`[runtime] 版本 ${version} · ${(exeSize / 1024 / 1024).toFixed(1)} MB`);
+    console.log(`[runtime] sing-box.exe sha256 ${exeSha}`);
+    console.log(`[runtime] wintun.dll ${WINTUN_VERSION}/${WINTUN_ARCH_DIR[arch]} sha256 ${dllSha}`);
+    console.log("[runtime] 这两个哈希由 build.rs 在构建时重新计算并编进服务，不需要手工同步。");
+  } finally {
+    rmSync(work, { recursive: true, force: true });
   }
-} finally {
-  rmSync(work, { recursive: true, force: true });
+}
+
+const platform = selectedPlatform();
+if (platform === "darwin") {
+  await fetchDarwin();
+} else {
+  await fetchWindows();
 }

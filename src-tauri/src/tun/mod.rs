@@ -15,6 +15,12 @@ pub mod trust;
 #[cfg(target_os = "macos")]
 pub mod xpc;
 
+// Windows 的通道是命名管道 + 服务，与 XPC 没有可复用的代码。
+// 主程序侧用 `windows::pipe::call`（对端校验在服务端做），
+// 服务端在 `src/bin/veyl-service/`。
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 /// macOS 只接受 `utunN` 形式（或留空让系统分配），固定私有段。
 pub const TUN_ADDRESS: &str = "172.19.0.1/30";
 
