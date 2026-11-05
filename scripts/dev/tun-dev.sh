@@ -334,7 +334,7 @@ print_next_steps() {
   3. 打开 Veyl 的后台助手开关，回到 App 再点一次「连接」。
   4. 失败时看这两处：
        $APP_DEST/Contents/MacOS/veyl-helper 的 stderr（统一日志：log show --predicate 'process == "veyl-helper"' --last 5m）
-       /Library/Application Support/Veyl/tun/sing-box.log
+       ~/.veyl/helper-logs/sing-box.log
 
 注意：换过签名证书后，旧的 daemon 注册可能还在，导致注册失败。那时先卸载助手（M4 的入口），
 或手工：sudo launchctl bootout system/com.veyl.helper

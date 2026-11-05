@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1805,32 +1805,45 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-pub fn default_app_data_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
+pub fn default_app_data_dir() -> PathBuf {    #[cfg(windows)]
     {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            return crate::veyl_paths::data_dir_under(Path::new(&profile));
+        }
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join("Library/Application Support/Veyl");
+            return crate::veyl_paths::data_dir_under(Path::new(&home));
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(not(windows))]
     {
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            return PathBuf::from(local).join("Veyl");
-        }
-    }
-
-    #[cfg(all(not(target_os = "macos"), not(windows)))]
-    {
-        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-            return PathBuf::from(xdg).join("veyl");
-        }
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".local/share/veyl");
+            return crate::veyl_paths::data_dir_under(Path::new(&home));
         }
     }
 
     std::env::temp_dir().join("veyl")
+}
+
+/// 首次启动准备用户数据目录：`~/.veyl` 0700、`helper-logs` 0755。
+///
+/// 迁移不做：旧目录用户已删除，这里只保证空目录能全新初始化。
+/// 失败不阻断——上层会记录，真正的读写错误在各自的位置再报。
+pub fn prepare_app_data_dir(data_dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let helper_logs = crate::veyl_paths::helper_logs_dir(data_dir);
+    std::fs::create_dir_all(&helper_logs)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&helper_logs, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1839,6 +1852,34 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("veyl-{tag}-{:016x}", rand::random::<u64>()))
+    }
+
+    #[test]
+    fn the_default_data_dir_is_dot_veyl() {
+        let path = default_app_data_dir();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(".veyl")
+        );
+    }
+
+    /// 空目录首次启动：`~/.veyl` 自己 0700，helper 日志目录 0755。
+    #[test]
+    fn first_start_creates_private_data_dir_and_helper_logs() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = temp_dir("prepare");
+        std::fs::create_dir_all(&root).unwrap();
+        let data = root.join(".veyl");
+        prepare_app_data_dir(&data).unwrap();
+        assert_eq!(std::fs::metadata(&data).unwrap().mode() & 0o777, 0o700);
+        let helper = data.join("helper-logs");
+        assert_eq!(std::fs::metadata(&helper).unwrap().mode() & 0o777, 0o755);
+
+        // 幂等：第二次调用不报错，权限不被改坏。
+        prepare_app_data_dir(&data).unwrap();
+        assert_eq!(std::fs::metadata(&data).unwrap().mode() & 0o777, 0o700);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn plan(binary: PathBuf, dir: &std::path::Path) -> StartPlan {

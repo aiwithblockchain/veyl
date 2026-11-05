@@ -42,7 +42,7 @@ netstat -rn -f inet | grep -E '^(0/1|128\.0/1)' || echo "无 128.0/1 路由"
 rm -rf "$HOME/Library/WebKit/veyl/WebsiteData"
 
 # 3) 确认没有可用 AI Key（要验首启就必须没有）
-python3 -I -c "import json,os;d=json.load(open(os.path.expanduser('~/Library/Application Support/Veyl/secrets.enc')));print(sorted(k for k in d if k.startswith('provider:')) or '没有 AI Key')"
+python3 -I -c "import json,os;d=json.load(open(os.path.expanduser('~/.veyl/secrets.enc')));print(sorted(k for k in d if k.startswith('provider:')) or '没有 AI Key')"
 ```
 
 第 2 步会重置面板开关、「连接过」标记与「不用 AI」标记；**不会**动 `veyl.db` 和 `secrets.enc`。
@@ -59,7 +59,7 @@ npm run app:dev
 开另一个终端看日志：
 
 ```bash
-tail -f "$HOME/Library/Application Support/Veyl/logs/app-$(date +%F).log"
+tail -f logs/app-$(date +%F).log   # dev 构建写仓库 logs/；release 写 ~/.veyl/logs/
 ```
 
 **算过**
@@ -70,7 +70,7 @@ tail -f "$HOME/Library/Application Support/Veyl/logs/app-$(date +%F).log"
 4. 日志干净：
 
 ```bash
-grep -nE "panic|SIGTRAP|backtrace" "$HOME/Library/Application Support/Veyl/logs/app-$(date +%F).log" || echo 干净
+grep -nE "panic|SIGTRAP|backtrace" logs/app-$(date +%F).log || echo 干净
 ```
 
 **算不过**
@@ -116,10 +116,10 @@ grep -nE "panic|SIGTRAP|backtrace" "$HOME/Library/Application Support/Veyl/logs/
 3. Key 确实存进了本机密文：
 
 ```bash
-python3 -I -c "import json,os;d=json.load(open(os.path.expanduser('~/Library/Application Support/Veyl/secrets.enc')));print(sorted(k for k in d if k.startswith('provider:')))"
+python3 -I -c "import json,os;d=json.load(open(os.path.expanduser('~/.veyl/secrets.enc')));print(sorted(k for k in d if k.startswith('provider:')))"
 # 期望：['provider:deepseek']
 
-grep -a -c "sk-" "$HOME/Library/Application Support/Veyl/secrets.enc" || true
+grep -a -c "sk-" "$HOME/.veyl/secrets.enc" || true
 # 期望：0
 ```
 
@@ -183,7 +183,7 @@ curl -s --max-time 10 --proxy "http://127.0.0.1:<端口>" https://api.ipify.org;
 7. 明文配置已清掉：
 
 ```bash
-ls "$HOME/Library/Application Support/Veyl/config" 2>/dev/null | grep profile- || echo 干净
+ls "$HOME/.veyl/config" 2>/dev/null | grep profile- || echo 干净
 ```
 
 **算不过**：以上任一项不符。
@@ -657,15 +657,15 @@ bash scripts/test/wiring-check.sh --strict
 
 **验收时怎么处理**：遇到「两会话并发时偶发事件丢失 / 状态停住」按本缺口记录，不重复开新问题；除此之外按正常缺陷处理。
 
-#### GAP-02｜TUN 的 sing-box 日志没有上限
+#### GAP-02（已修）｜TUN 的 sing-box 日志上限
 
 | 项 | 内容 |
 |---|---|
-| **现象** | TUN 模式的 sing-box 日志落在 `/Library/Application Support/Veyl/tun/sing-box.log`（`src-tauri/src/bin/veyl-helper/macos.rs:223-225`），由 helper **以 root 身份**用 append + `O_NOFOLLOW`、`0600` 打开（同文件 `:403-410`）。**helper 里没有任何大小检查或轮转**，文件只增不减 |
+| **现象** | TUN 模式的 sing-box 日志落在 `~/.veyl/helper-logs/sing-box.log`，由 helper 以 root 身份相对已校验的 dirfd 打开（`0644`）。**现在会在每次 start 前按 5 MiB 轮转一份**（`rotate_in_dir`），不再只增不减 |
 | **触发条件** | 长期使用 TUN 模式。代理模式的运行时日志已经降级并限了大小，但那是另一个文件、另一条写入路径，**不覆盖这个文件** |
 | **当前影响** | 磁盘占用缓慢增长，**不影响功能**，也没有正确性后果。release 下级别是 warn，增长速度会明显低于 info，但**仍然无上限**——用得够久就会一直涨 |
 | **正确修法** | 在 helper 的 `start` 里、spawn 之前判断文件大小，超过阈值只保留末尾一段（与 `src-tauri/src/logging.rs` 里「写之前先轮转」同一策略）。注意两件事：一是 helper 是独立二进制、跑在 root 下，不能复用 App 进程里的写日志器；二是保留尾部必须发生在打开 fd 之前，否则 append 会接着写进旧文件 |
-| **为什么现在不做** | 要改的是 root 权限的 helper，属于安全敏感路径，不能顺手改；而且 TUN 在当前机器上 helper 还没就绪，改完也无法验证。归到 TUN 那轮一起做 |
+| **状态** | 已实现：`start` 前后轮转、`helper.log` 1 MiB / `sing-box.log` 5 MiB，各保留 1 份 |
 | **来源** | 运行时日志限容那一轮的遗漏（PM 2026-11-04 核实） |
 
 **验收时怎么处理**：看到 TUN 日志持续增大按本缺口记录，不当作功能缺陷；清理磁盘时可以用管理员权限手工删这个文件（helper 下次启动会重新创建），但要先断开 TUN。

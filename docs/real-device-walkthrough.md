@@ -51,7 +51,7 @@ pgrep -fl 'sing-box|clash|mihomo' || echo "没有代理进程"
 
 ```bash
 pgrep -fl sing-box || echo "没有 sing-box 在跑"
-ls -la "$HOME/Library/Application Support/Veyl/config" 2>/dev/null || echo "没有明文配置目录"
+ls -la "$HOME/.veyl/config" 2>/dev/null || echo "没有明文配置目录"
 scutil --proxy
 ```
 
@@ -72,10 +72,10 @@ scutil --proxy
 复核命令：
 
 ```bash
-sqlite3 "file:$HOME/Library/Application Support/Veyl/veyl.db?mode=ro" \
+sqlite3 "file:$HOME/.veyl/veyl.db?mode=ro" \
   "select 'configs',count(*) from configs union all select 'nodes',count(*) from nodes union all select 'runtime',count(*) from runtime_versions;"
 
-python3 -I -c "import json,os;d=json.load(open(os.path.expanduser('~/Library/Application Support/Veyl/secrets.enc')));print(sorted(k for k in d if k.startswith('provider:')) or '没有 AI Key')"
+python3 -I -c "import json,os;d=json.load(open(os.path.expanduser('~/.veyl/secrets.enc')));print(sorted(k for k in d if k.startswith('provider:')) or '没有 AI Key')"
 
 find "$HOME/Library/WebKit/veyl" -name localstorage.sqlite3 \
   -exec sqlite3 "file:{}?mode=ro" "select key from ItemTable;" \;
@@ -103,7 +103,7 @@ npm run app:dev
 开两个终端，一个跑应用，一个跟日志：
 
 ```bash
-tail -f "$HOME/Library/Application Support/Veyl/logs/app-$(date +%F).log"
+tail -f logs/app-$(date +%F).log   # dev 构建；release 构建看 ~/.veyl/logs/
 ```
 
 需要更详细的后端日志时：
@@ -113,9 +113,9 @@ RUST_LOG=debug npm run app:dev
 ```
 
 **过：** 日志出现「种子已更新」或「默认节点刷新」，窗口标题是 `Veyl`。
-**不过：** 窗口没起来先看终端里的 Rust 编译/启动错误；窗口起来但日志是空的，检查 `~/Library/Application Support/Veyl/logs/` 下有没有当天的 `app-YYYY-MM-DD.log`。
+**不过：** 窗口没起来先看终端里的 Rust 编译/启动错误；窗口起来但日志是空的，检查 `~/.veyl/logs/` 下有没有当天的 `app-YYYY-MM-DD.log`。
 
-> sing-box 的日志是另一个文件：`~/Library/Application Support/Veyl/logs/runtime-<版本>.log`，要等内核装好、第一次启动后才出现。
+> sing-box 的日志是另一个文件：`~/.veyl/logs/runtime-<版本>.log`，要等内核装好、第一次启动后才出现。
 
 ---
 
@@ -182,13 +182,13 @@ localStorage.removeItem("veyl.onboarding.skipped")
 验证「Key 只在本机、且是密文」：
 
 ```bash
-python3 -I -c "import json,os;d=json.load(open(os.path.expanduser('~/Library/Application Support/Veyl/secrets.enc')));print(sorted(k for k in d if k.startswith('provider:')))"
+python3 -I -c "import json,os;d=json.load(open(os.path.expanduser('~/.veyl/secrets.enc')));print(sorted(k for k in d if k.startswith('provider:')))"
 ```
 
 期望打印 `['provider:deepseek']`。
 
 ```bash
-grep -a -c "sk-" "$HOME/Library/Application Support/Veyl/secrets.enc" || true
+grep -a -c "sk-" "$HOME/.veyl/secrets.enc" || true
 ```
 
 期望 `0`——密文里不应该出现 `sk-` 明文。
@@ -266,9 +266,9 @@ grep -a -c "sk-" "$HOME/Library/Application Support/Veyl/secrets.enc" || true
 内核装好后的确认：
 
 ```bash
-sqlite3 "file:$HOME/Library/Application Support/Veyl/veyl.db?mode=ro" \
+sqlite3 "file:$HOME/.veyl/veyl.db?mode=ro" \
   "select version,state from runtime_versions;"
-ls -la "$HOME/Library/Application Support/Veyl/runtime"
+ls -la "$HOME/.veyl/runtime"
 ```
 
 期望有一条 `1.14.4|active`，且 `runtime/1.14.4/` 下有 `sing-box` 可执行文件。
@@ -389,7 +389,7 @@ curl -s --max-time 10 --proxy "http://127.0.0.1:<端口>" https://api.ipify.org;
 scutil --proxy
 networksetup -getwebproxy "Wi-Fi"
 pgrep -fl sing-box || echo "没有 sing-box 进程"
-ls -la "$HOME/Library/Application Support/Veyl/config" 2>/dev/null || echo "没有明文配置目录"
+ls -la "$HOME/.veyl/config" 2>/dev/null || echo "没有明文配置目录"
 ```
 
 期望：`HTTPEnable : 0`；`Enabled: No`；没有进程；明文配置目录为空或不存在。
@@ -459,14 +459,14 @@ ls -la "$HOME/Library/Application Support/Veyl/config" 2>/dev/null || echo "没�
 
 | 内容 | 命令 / 位置 |
 |---|---|
-| 应用日志 | `cp "$HOME/Library/Application Support/Veyl/logs/app-$(date +%F).log" ~/Desktop/veyl-app.log` |
-| 运行时日志 | `cp "$HOME/Library/Application Support/Veyl/logs/runtime-1.14.4.log" ~/Desktop/` |
+| 应用日志 | dev：`cp logs/app-$(date +%F).log ~/Desktop/veyl-app.log`；release：`cp "$HOME/.veyl/logs/app-$(date +%F).log" ~/Desktop/veyl-app.log` |
+| 运行时日志 | `cp "$HOME/.veyl/logs/runtime-1.14.4.log" ~/Desktop/` |
 | 系统代理现状 | `scutil --proxy > ~/Desktop/veyl-proxy.txt` |
 | 网络服务与代理 | `networksetup -listallnetworkservices >> ~/Desktop/veyl-proxy.txt`；每个服务再跑 `-getwebproxy` 追加进去 |
 | 路由与接口 | `netstat -rn -f inet > ~/Desktop/veyl-routes.txt`；`ifconfig > ~/Desktop/veyl-ifconfig.txt` |
-| 数据库快照 | 退出应用后 `cp "$HOME/Library/Application Support/Veyl/veyl.db" ~/Desktop/` |
+| 数据库快照 | 退出应用后 `cp "$HOME/.veyl/veyl.db" ~/Desktop/` |
 | 界面截图 | 首启页、错误提示条、AI 工具卡片、已连接状态、设置 → 网络 |
-| 明文配置残留 | `ls -la "$HOME/Library/Application Support/Veyl/config"`（**只记录路径，不要外发文件内容**） |
+| 明文配置残留 | `ls -la "$HOME/.veyl/config"`（**只记录路径，不要外发文件内容**） |
 
 **不要外发**：`secrets.enc`、`config/profile-*.json`（含节点密码）、任何含 `sk-` 的截图。
 

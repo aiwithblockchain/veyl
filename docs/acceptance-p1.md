@@ -62,10 +62,10 @@
 
 | 项 | 值 |
 |---|---|
-| 数据目录 | `~/Library/Application Support/Veyl/` |
-| 数据库 | `~/Library/Application Support/Veyl/veyl.db`（WAL） |
+| 数据目录 | `~/.veyl/` |
+| 数据库 | `~/.veyl/veyl.db`（WAL） |
 | 应用日志 | `build/logs/dev-<时间戳>.log`（用 `dev-with-log.sh` 启动时） |
-| 运行时日志 | `~/Library/Application Support/Veyl/logs/runtime-<版本>.log` |
+| 运行时日志 | `~/.veyl/logs/runtime-<版本>.log` |
 | dev 端口 | 1430（HMR 1431） |
 | 可执行文件 | `src-tauri/target/debug/veyl` |
 
@@ -73,8 +73,8 @@
 
 ```bash
 # 1. 数据库在位、8 张表、user_version=1
-sqlite3 "$HOME/Library/Application Support/Veyl/veyl.db" ".tables"
-sqlite3 "$HOME/Library/Application Support/Veyl/veyl.db" "PRAGMA user_version;"
+sqlite3 "$HOME/.veyl/veyl.db" ".tables"
+sqlite3 "$HOME/.veyl/veyl.db" "PRAGMA user_version;"
 
 # 2. 基线全绿（不占端口，但会编译与跑测试）
 bash scripts/ci.sh --quick
@@ -133,7 +133,7 @@ fi
 ## 2. 证据采集速查
 
 ```bash
-DB="$HOME/Library/Application Support/Veyl/veyl.db"
+DB="$HOME/.veyl/veyl.db"
 ```
 
 > ⚠️ **时间列的单位：库里存毫秒，不是秒。**
@@ -526,7 +526,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin veyl-runtime-selftest -- pr
   - 或勾选框已关，但 Server/Port 仍是我们写进去的值
 - **证据**：每一步的系统设置截屏 + `proxy-status` 输出
 
-> **证据来自哪份库**：`--data-dir /tmp/veyl-proxy` 会另建一份数据目录，`proxy-backup.json`（**连字符**，见 `src-tauri/src/proxy/backup.rs:77`）写在 `/tmp/veyl-proxy/` 下，**不在 App 的 `~/Library/Application Support/Veyl/`**。去 App 库查 `proxy_backup` 表查不到东西是正常的，不要误判为「备份没写」。
+> **证据来自哪份库**：`--data-dir /tmp/veyl-proxy` 会另建一份数据目录，`proxy-backup.json`（**连字符**，见 `src-tauri/src/proxy/backup.rs:77`）写在 `/tmp/veyl-proxy/` 下，**不在 App 的 `~/.veyl/`**。去 App 库查 `proxy_backup` 表查不到东西是正常的，不要误判为「备份没写」。
 
 > ⚠️ 这条会真的改动用户的系统代理。**执行前先确认用户知道**，测完必须还原。
 
@@ -801,7 +801,7 @@ networksetup -setsocksfirewallproxystate Wi-Fi off
 - **命令**：
 
 ```bash
-DB="$HOME/Library/Application Support/Veyl/veyl.db"
+DB="$HOME/.veyl/veyl.db"
 sqlite3 "$DB" "SELECT result_json FROM tool_calls WHERE tool_name='VpnConnect'     ORDER BY created_at DESC LIMIT 1;"
 sqlite3 "$DB" "SELECT result_json FROM tool_calls WHERE tool_name='RuntimeStatus'  ORDER BY created_at DESC LIMIT 1;"
 
@@ -841,8 +841,8 @@ PID=$(pgrep -f 'sing-box run' | head -1)
 echo "pid=$PID"; ps -o lstart= -p "$PID"
 lsof -nP -iTCP -sTCP:LISTEN -a -p "$PID" | awk 'NR>1{print $9}'
 scutil --proxy | grep -E 'HTTPEnable|HTTPPort'
-ls -1 "$HOME/Library/Application Support/Veyl/config"
-python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/Library/Application Support/Veyl/runtime.pid'))))"
+ls -1 "$HOME/.veyl/config"
+python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.veyl/runtime.pid'))))"
 ```
 
 - **断言**：
@@ -904,7 +904,7 @@ stat -f '%Sm' -t '%F %T' src-tauri/target/debug/veyl
 - **命令**：
 
 ```bash
-PIDFILE="$HOME/Library/Application Support/Veyl/runtime.pid"
+PIDFILE="$HOME/.veyl/runtime.pid"
 cat "$PIDFILE" 2>/dev/null || echo "runtime.pid 不存在"
 pgrep -fl 'sing-box run'
 ps -o pid=,comm= -p "$(cat "$PIDFILE")" 2>/dev/null
@@ -942,7 +942,7 @@ pgrep -fl 'sing-box run'                 # 应为 SB —— 孤儿
 
 ```bash
 pgrep -fl 'sing-box run' || echo "无 sing-box 进程"
-cat "$HOME/Library/Application Support/Veyl/runtime.pid" 2>/dev/null || echo "runtime.pid 已清"
+cat "$HOME/.veyl/runtime.pid" 2>/dev/null || echo "runtime.pid 已清"
 scutil --proxy | grep -E 'HTTPEnable|HTTPProxy|HTTPPort'
 ```
 

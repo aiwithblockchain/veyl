@@ -27,7 +27,9 @@ cd "$ROOT" || exit 2
 ALLOW_RE='(secret-scan|check-secrets):allow'
 
 # RFC 5737 / 3849 文档地址、回环、私有、链路本地、组播与保留段。
-IP_ALLOW_RE='^(127\.|0\.0\.0\.0$|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|203\.0\.113\.|198\.51\.100\.|192\.0\.2\.|22[4-9]\.|23[0-9]\.|24[0-9]\.|25[0-5]\.)'
+# 198.18.0.0/15 是 RFC 2544 基准段，也是 Windows TUN 的 fakeip 段；
+# 128.0.0.0/1 是分默认路由的起点，不是可泄漏的公网地址。
+IP_ALLOW_RE='^(127\.|0\.0\.0\.0$|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|198\.1[89]\.|203\.0\.113\.|198\.51\.100\.|192\.0\.2\.|128\.0\.0\.0$|22[4-9]\.|23[0-9]\.|24[0-9]\.|25[0-5]\.)'
 
 PLACEHOLDER_USER_RE='^(x|X|test|user|username|alice|bob|foo|bar|example|demo|me|you|name|<.+>)$'
 
@@ -125,6 +127,7 @@ cb_seeds_path() {
   # 文档里写的应用数据目录（用户自己放种子的位置）不算泄漏。
   case "$line" in
     *"Application Support/Veyl/"*seeds.json*) return 0 ;;
+    *"/.veyl/"*seeds.json*) return 0 ;;
   esac
   path="$(printf '%s\n' "$line" | grep -oE "$SEEDS_PATH_RE" | head -n1)"
   [ -n "$path" ] || return 0

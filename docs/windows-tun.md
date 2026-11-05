@@ -23,7 +23,7 @@ macOS 的特权模型（SMAppService + XPC + Security.framework）在 Windows �
 | `proxy/windows.rs` | WinINet 系统代理：注册表 `Internet Settings` 的 `ProxyEnable` / `ProxyServer` / `ProxyOverride`，改完调 `InternetSetOptionW` 刷新 | **可用**，一级用户的本机代理模式走这条 |
 | `netcfg.rs` | `flush_dns` 走 `ipconfig /flushdns`；`read()` 在非 macOS 返回 `UNSUPPORTED` | 刷新可用，完整网络读取没有 |
 | `runtime/process.rs` | `tasklist` 判存活与取镜像名；**拿不到完整命令行**，`reclaim_stale` 会一律跳过 | 代理模式可用；孤儿进程回收是已知缺口 |
-| `runtime/manager.rs` | 数据目录 `%LOCALAPPDATA%\Veyl` | 代理模式可用；**特权服务不能沿用** |
+| `runtime/manager.rs` | 数据目录 `%USERPROFILE%\.veyl` | 代理模式可用；**特权服务不能沿用** |
 | `runtime/archive.rs` | zip 解压时拒绝带盘符的路径段 | 可用 |
 | `runtime/fsutil.rs` | Windows 文件权限/原子替换分支 | 可用 |
 | `lifecycle.rs` | macOS 的 Dock 激活策略没有 Windows 分支 | 无影响 |
@@ -104,7 +104,7 @@ macOS 第一版的错误是「root helper 读 `~/Library/Application Support` �
 
 | 形态 | 后果 |
 |---|---|
-| **当前 `%LOCALAPPDATA%\Veyl`** | 服务若从这里读 `sing-box.exe` / `wintun.dll` / 配置，任何用户进程都能替换二进制 → LocalSystem 执行 |
+| **当前 `%USERPROFILE%\.veyl`** | 服务若从这里读 `sing-box.exe` / `wintun.dll` / 配置，任何用户进程都能替换二进制 → LocalSystem 执行 |
 | **DLL 搜索顺序** | 服务从当前工作目录或 `%PATH%` 加载 `wintun.dll`，可被同名 DLL 劫持 |
 | **服务 `ImagePath` 可写** | 服务二进制若放在用户可写目录，改文件即提权 |
 | **命名管道抢占** | 服务启动前别人先创建同名管道，客户端连到假服务；必须 `FILE_FLAG_FIRST_PIPE_INSTANCE` + 严格 ACL |
@@ -209,7 +209,7 @@ Windows 上从非管理员进程安装服务必须先提权。两种可行做法
 | `%PATH%` 中的用户目录 | 用户可写 | 同名 DLL/EXE 劫持 |
 | 用户可创建的 junction / symlink 指向 | 可重定向 | 读写逃逸到别处 |
 
-因此服务**只从 `C:\Program Files\Veyl\`（管理员 ACL）读**二进制、运行时、规则；**只写 `%ProgramData%\Veyl\`（SYSTEM/Administrators ACL）**；工作目录固定为安装目录；DLL 用绝对路径或受限搜索（`LOAD_LIBRARY_SEARCH_*`）。当前实现的 `%LOCALAPPDATA%\Veyl` 是给用户态 App 的，**服务不能沿用**。
+因此服务**只从 `C:\Program Files\Veyl\`（管理员 ACL）读**二进制、运行时、规则；**只写 `%ProgramData%\Veyl\`（SYSTEM/Administrators ACL）**；工作目录固定为安装目录；DLL 用绝对路径或受限搜索（`LOAD_LIBRARY_SEARCH_*`）。当前实现的 `%USERPROFILE%\.veyl` 是给用户态 App 的，**服务不能沿用**。
 
 #### 卸载必须清干净
 

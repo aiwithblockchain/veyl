@@ -177,7 +177,7 @@ openmesh 能跑，是因为它跑的是 **Xcode 产出的、已签名、内嵌�
 | 限制 | 影响 |
 |---|---|
 | **分发方式** | 模式 A（appex）只适用于 Mac App Store；我们发 DMG，只能用模式 B（系统扩展）。DTS 答复与 Tailscale / Firezone 的迁移实践一致：Developer ID 分发要用 `-systemextension` 那一套 |
-| **沙箱** | appex 是 App Sandbox；sysext 虽 `app-sandbox=false`，仍是受限沙箱。扩展**读不到**用户目录里的任意文件——我们的 `~/Library/Application Support/Veyl/configs/*` 不能直接读，必须走 App Group 共享容器或 `providerConfiguration`（openmesh 两者都用：`FilePath.swift:17`、`VPNManager.swift:185-193`） |
+| **沙箱** | appex 是 App Sandbox；sysext 虽 `app-sandbox=false`，仍是受限沙箱。扩展**读不到**用户目录里的任意文件——我们的 `~/.veyl/configs/*` 不能直接读，必须走 App Group 共享容器或 `providerConfiguration`（openmesh 两者都用：`FilePath.swift:17`、`VPNManager.swift:185-193`） |
 | **不能起子进程** | 见上，必须 libbox 或另证 |
 | **签名/公证** | 容器 App 与扩展各自需要 Developer ID profile，且要「由内向外」手工签（Xcode 不会自动用 `-systemextension` 的值）；公证是必须的，不再是可选 |
 | **`includeAllNetworks`** | 开启后 sing-box 的 `tun.stack` 不能是 `system`/`mixed`，openmesh 在启动前直接拦截报错（`PacketTunnelProvider.swift:353-370`） |

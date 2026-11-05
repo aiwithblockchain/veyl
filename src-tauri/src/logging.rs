@@ -221,27 +221,7 @@ pub const LOG_KEEP_DAYS: i64 = 7;
 /// 和 `build/logs/dev-*.log` 也在一起。release 才写数据目录——
 /// 装好的应用不该往工作目录里拉文件。
 pub fn resolve_log_dir(data_dir: &Path) -> PathBuf {
-    #[cfg(debug_assertions)]
-    {
-        let _ = data_dir;
-        return repository_root().join("logs");
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        data_dir.join("logs")
-    }
-}
-
-/// 仓库根：`CARGO_MANIFEST_DIR` 是 `src-tauri/`，父目录就是根。
-///
-/// 用编译期常量而不是往上找 `Cargo.toml`：`tauri dev` 跑 `cargo run` 时
-/// 工作目录是 `src-tauri/`，运行期往上找既慢又要处理找不到的情况；
-/// 编译期这个值是确定的，和 cwd 无关。
-fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::log_paths::resolve_log_dir(data_dir)
 }
 
 /// `<log_dir>/app-YYYY-MM-DD.log`
@@ -250,12 +230,12 @@ pub fn log_path(log_dir: &Path) -> PathBuf {
 }
 
 pub fn log_path_for(log_dir: &Path, date: chrono::NaiveDate) -> PathBuf {
-    log_dir.join(format!("app-{}.log", date.format("%Y-%m-%d")))
+    crate::log_paths::dated_log_path(log_dir, "app", date)
 }
 
 /// 轮转文件路径：`<log_dir>/app-YYYY-MM-DD.<n>.log`
 pub fn rotated_path_for(log_dir: &Path, date: chrono::NaiveDate, index: u32) -> PathBuf {
-    log_dir.join(format!("app-{}.{index}.log", date.format("%Y-%m-%d")))
+    crate::log_paths::rotated_log_path(log_dir, "app", date, index)
 }
 
 /// 删除 `app-YYYY-MM-DD.log` 里早于 `keep_days` 的文件；返回删除数量。

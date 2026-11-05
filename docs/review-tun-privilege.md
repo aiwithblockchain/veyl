@@ -306,8 +306,8 @@ App 内有注销助手的入口（M4），且卸载后无残留。
 **怎么验**
 
 ```bash
-ls -lh '/Library/Application Support/Veyl/tun/sing-box.log'
-# 长连接/长时间运行后重复查看；当前实现只追加不轮转 → 记为已知缺口（GAP-02）
+ls -lh "$HOME/.veyl/helper-logs/sing-box.log"
+# 启动时按 5 MiB 轮转一份（GAP-02 已修）
 ```
 
 - 卸载入口（M4 落地后）：在 App 内触发注销 →

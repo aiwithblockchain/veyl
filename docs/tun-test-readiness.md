@@ -257,7 +257,7 @@ TUN 失败不会降级成系统代理（`services.rs:3413-3420` 的设计说明�
 | 编号 | 现象 | 原因 |
 |---|---|---|
 | GAP-03 | 连接瞬间返回的 `VpnConnect` 结果比 `RuntimeStatus` 少 12 个字段：`upstream_version`、`uptime_seconds`、`latency_ms`、`node_latency_ms`、`direct_ip`、`config_hash`、`health`、`traffic`、`connections`、`restart_count`、`last_error`、`last_transition_at`；其中 `health`/`traffic`/`node_latency_ms` 拿不到真值 | TUN 的连接返回值仍是手拼 JSON（`services.rs:3518-3532`）；后续 `RuntimeStatus` 查询已经复用结构体（`manager.rs:172-208`），但连接响应这条路径没改 |
-| GAP-02 | helper 的 sing-box 日志无上限 | `macos.rs:224-226` → `/Library/Application Support/Veyl/tun/sing-box.log`，只追加不轮转。测完 `ls -lh` 看一眼大小 |
+| GAP-02 | helper 的 sing-box 日志无上限 | `macos.rs` → `~/.veyl/helper-logs/sing-box.log`，启动时按 5 MiB 轮转一份。测完 `ls -lh` 看一眼大小 |
 | 面板延迟 | TUN 连接后节点延迟一直显示「确认中…」 | TUN 不经过 `RuntimeManager`，没有 Clash 延迟探测通道；`node_latency_ms` 恒为 null（`manager.rs:188-189`） |
 | 首连 `tun_device_up=false` | 见 §4 步骤 4 | 1.5 秒固定等待，不是真实失败 |
 | 改分流/切节点对已连接无效 | 连接中点其它节点或改路由，隧道行为不变 | TUN 不进 `RuntimeManager`，没有热切与看门狗（`docs/tun-privilege.md:262`、`session.rs:1-5`） |

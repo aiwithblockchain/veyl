@@ -26,6 +26,7 @@ extern "C" {
     fn xpc_connection_cancel(connection: xpc_connection_t);
     fn xpc_connection_set_target_queue(connection: xpc_connection_t, queue: dispatch_queue_t);
     fn xpc_connection_get_pid(connection: xpc_connection_t) -> libc::pid_t;
+    fn xpc_connection_get_euid(connection: xpc_connection_t) -> libc::uid_t;
     fn xpc_connection_set_event_handler(connection: xpc_connection_t, handler: *mut c_void);
     fn xpc_connection_set_peer_code_signing_requirement(
         connection: xpc_connection_t,
@@ -430,6 +431,14 @@ pub fn create_listener(service: &str) -> xpc_connection_t {
 /// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
 pub unsafe fn connection_pid(connection: xpc_connection_t) -> u32 {
     unsafe { xpc_connection_get_pid(connection) as u32 }
+}
+
+/// 连接对端的有效 uid。helper 用它把日志写进对应用户的家目录。
+///
+/// # Safety
+/// 传入的指针必须来自对应的 libxpc 创建函数，且在本调用期间保持有效。
+pub unsafe fn connection_euid(connection: xpc_connection_t) -> u32 {
+    unsafe { xpc_connection_get_euid(connection) as u32 }
 }
 
 ///

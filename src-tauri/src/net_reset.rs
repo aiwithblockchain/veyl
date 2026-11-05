@@ -242,31 +242,31 @@ utun6: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500
     #[test]
     fn ps_lines_keep_paths_with_spaces_intact() {
         let output = "\
-  123 /Users/x/Library/Application Support/Veyl/runtime/1.14.4/sing-box run -c /tmp/a.json
+  123 /Users/x/.veyl/runtime/1.14.4/sing-box run -c /tmp/a.json
   456 /Library/Application Support/Veyl/runtime/ab12/sing-box run -c /tmp/b.json
   789 /usr/sbin/something-else
 ";
         let entries = parse_ps(output);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].pid, 123);
-        assert!(entries[0].command.starts_with("/Users/x/Library/Application Support"));
+        assert!(entries[0].command.starts_with("/Users/x/.veyl/runtime"));
     }
 
     #[test]
     fn only_our_runtime_binaries_match() {
-        let root = Path::new("/Users/x/Library/Application Support/Veyl");
+        let root = Path::new("/Users/x/.veyl");
         assert!(is_our_sing_box(
-            "/Users/x/Library/Application Support/Veyl/runtime/1.14.4/sing-box run -c /tmp/a.json",
+            "/Users/x/.veyl/runtime/1.14.4/sing-box run -c /tmp/a.json",
             root
         ));
         // 目录里别的程序不算。
         assert!(!is_our_sing_box(
-            "/Users/x/Library/Application Support/Veyl/runtime/1.14.4/not-sing-box",
+            "/Users/x/.veyl/runtime/1.14.4/not-sing-box",
             root
         ));
         // 名字前缀相同但不是我们的目录。
         assert!(!is_our_sing_box(
-            "/Users/x/Library/Application Support/Veyl-other/runtime/1/sing-box",
+            "/Users/x/.veyl-other/runtime/1/sing-box",
             root
         ));
         // 完全不相干的进程。

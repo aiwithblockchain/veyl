@@ -15,7 +15,8 @@ pub use install::{
     InstallProgress, Installer, InstalledRuntime, ProgressFn, RuntimeStateFile, BINARY_NAME,
 };
 pub use manager::{
-    default_app_data_dir, runtime_event_to_emit, HealthSnapshot, RuntimeConfig, RuntimeEvent,
+    default_app_data_dir, prepare_app_data_dir, runtime_event_to_emit, HealthSnapshot,
+    RuntimeConfig, RuntimeEvent,
     RuntimeEventKind, RuntimeHealthChangedPayload, RuntimeManager, RuntimeMode, RuntimeState,
     RuntimeStateChangedPayload, RuntimeStatus, StartPlan, TunSnapshotInput, CONTRACT_VERSION,
     DEFAULT_DATA_PLANE_PROBE, EVENT_CONTRACT_VERSION,

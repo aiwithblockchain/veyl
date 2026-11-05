@@ -16,13 +16,13 @@
 ### 0.2 通用证据命令
 
 ```bash
-DATA="$HOME/Library/Application Support/Veyl"
+DATA="$HOME/.veyl"
 DB="$DATA/veyl.db"
 
 # 1) secrets.enc 里的 provider 键名（只列名字，不读值）
 python3 - <<'PY'
 import json, os
-p = os.path.expanduser("~/Library/Application Support/Veyl/secrets.enc")
+p = os.path.expanduser("~/.veyl/secrets.enc")
 try:
     d = json.load(open(p))
     print(sorted(k for k in d if k.startswith("provider:")))
@@ -76,7 +76,7 @@ ls -t "$DATA/logs/" | head -3
 ```bash
 python3 - <<'PY'
 import json, os
-p = os.path.expanduser("~/Library/Application Support/Veyl/secrets.enc")
+p = os.path.expanduser("~/.veyl/secrets.enc")
 d = json.load(open(p)); print(sorted(k for k in d if k.startswith("provider:")))
 PY
 sqlite3 "$DATA/veyl.db" "SELECT key,value FROM settings WHERE key LIKE '%provider%';"
@@ -160,7 +160,7 @@ sqlite3 "$DATA/veyl.db" "SELECT key,value FROM settings WHERE key LIKE '%provide
 ```bash
 python3 - <<'PY'
 import json, os
-p = os.path.expanduser("~/Library/Application Support/Veyl/secrets.enc")
+p = os.path.expanduser("~/.veyl/secrets.enc")
 d = json.load(open(p)); print(sorted(k for k in d if k.startswith("provider:")))
 PY
 sqlite3 -header -column "$DATA/veyl.db" "SELECT key,value FROM settings WHERE key LIKE '%provider%';"
@@ -195,13 +195,13 @@ sqlite3 -header -column "$DATA/veyl.db" "SELECT key,value FROM settings WHERE ke
 - **迁移前后快照**：
 
 ```bash
-DATA="$HOME/Library/Application Support/Veyl"
+DATA="$HOME/.veyl"
 DB="$DATA/veyl.db"
 
 # 键名（不含值，只列 provider:）
 python3 - <<'PY'
 import json, os
-p = os.path.expanduser("~/Library/Application Support/Veyl/secrets.enc")
+p = os.path.expanduser("~/.veyl/secrets.enc")
 d = json.load(open(p))
 print(sorted(k for k in d if k.startswith("provider:")))
 PY
@@ -253,7 +253,7 @@ sqlite3 -header -column "$DB" "SELECT key,value FROM settings ORDER BY key;"
 - **证据**：
 
 ```bash
-DATA="$HOME/Library/Application Support/Veyl"
+DATA="$HOME/.veyl"
 DB="$DATA/veyl.db"
 KEY='sk-hxtest-0000000000'
 

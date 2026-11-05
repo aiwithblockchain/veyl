@@ -850,15 +850,19 @@ guide_verify → 有 Token 查 API；无则等控制面注册/探测 IP:22
     profile-<id>.meta.json # schemaVersion 等旁路元数据
   db.sqlite
   logs/
+    app-YYYY-MM-DD.log
     runtime-events.log
     runtime-<version>.log
+  helper-logs/             # 特权 helper 与 sing-box（0755）
+    helper.log
+    sing-box.log
 ```
 
 | 平台 | 路径 |
 |---|---|
-| macOS | `~/Library/Application Support/Veyl/` |
-| Windows | `%LOCALAPPDATA%\Veyl\` |
-| Linux | `~/.local/share/veyl/` |
+| macOS | `~/.veyl/` |
+| Windows | `%USERPROFILE%\.veyl\` |
+| Linux | `~/.veyl/` |
 
 **原子性**：`runtime-state.json` 与 active 指针必须写临时文件后 `rename`。
 

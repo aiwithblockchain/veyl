@@ -46,12 +46,16 @@ Veyl.app（Developer ID 签名 + hardened runtime）
                    ├── 信任根：/Library/Application Support/Veyl（属主 root，用户建不了东西在里面）
                    │      ├── runtime/<完整 sha256>/sing-box   0755
                    │      ├── rules/<tag>.srs                  只读
-                   │      └── tun/{active.json,sing-box.pid,sing-box.log}  0600
+                   │      └── tun/{active.json,sing-box.pid}   0600
                    └── 来源：  Contents/Resources/runtime/sing-box（随包、同签名，仅作复制源）
+
+helper 与 sing-box 的**日志**不在信任根里：写到连接用户家目录的
+`~/.veyl/helper-logs/{helper,sing-box}.log`（0755 目录、0644 文件），
+root 逐级 `openat(O_DIRECTORY|O_NOFOLLOW)` 并校验属主，失败只打 stderr。
 ```
 
 **信任根不是 `<data>`。** 第一版把它放在
-`~/Library/Application Support/Veyl`——那是当前用户完全可写、可整体删除重建的目录，
+`~/.veyl`——那是当前用户完全可写、可整体删除重建的目录，
 于是 helper 碰到的六个路径（运行时、配置、pid、日志、规则）全部连带不可信：
 用户往 `runtime/<id>/sing-box` 放一个 0755 文件，root 就会执行它。
 和 §1 是同一类错误，只是换了个入口。

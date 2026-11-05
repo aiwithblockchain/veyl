@@ -9,6 +9,8 @@ pub mod config;
 pub mod lifecycle;
 pub mod llm;
 pub mod logging;
+pub mod log_paths;
+pub mod veyl_paths;
 pub mod net_reset;
 pub mod netcfg;
 pub mod nodes;
@@ -53,8 +55,12 @@ fn catalog_base_url(store: &Store) -> String {
 
 pub fn run() {
     let data_dir = crate::runtime::default_app_data_dir();
+    // 空目录首次启动：`~/.veyl` 0700、helper-logs 0755。失败留给后面的读写去报。
+    if let Err(error) = crate::runtime::prepare_app_data_dir(&data_dir) {
+        eprintln!("veyl: 准备数据目录失败：{error}");
+    }
     // 日志最先初始化：后面每一步失败都要能落盘。
-    crate::logging::init(&data_dir);
+    let log_file = crate::logging::init(&data_dir);
     // 本地加密凭据文件；不访问系统钥匙串。
     crate::secrets::install(&data_dir);
 
@@ -111,6 +117,13 @@ pub fn run() {
 
     // ---- 启动序列：一行一条，故障时能直接看出「应用此刻认为自己处于什么状态」 ----
     log::info!("启动 data_dir={}", short_path(&data_dir));
+    log::info!(
+        "启动 日志={}",
+        log_file
+            .as_ref()
+            .map(|path| short_path(path))
+            .unwrap_or_else(|| "未启用".into())
+    );
     log::info!("启动 数据库={}", short_path(&crate::store::default_db_path(&data_dir)));
     match crate::runtime::Installer::new(&data_dir).active() {
         Ok(Some(rt)) => log::info!("启动 运行时={} ({})", rt.version, short_path(&rt.binary)),

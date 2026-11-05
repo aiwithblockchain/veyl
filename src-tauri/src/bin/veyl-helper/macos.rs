@@ -9,6 +9,8 @@
 //! 这个 bin 刻意不 `use veyl_lib`，只链 libxpc / Security / CoreFoundation / sha2，
 //! 避免把整个 Tauri 依赖图拖进一个 root 进程。
 
+#[path = "../../veyl_paths.rs"]
+mod veyl_paths;
 #[path = "../../tun/protocol.rs"]
 mod protocol;
 #[path = "../../tun/trust.rs"]
@@ -280,6 +282,9 @@ fn handle_message(
     connection: xpc::xpc_connection_t,
     message: xpc_object_t,
 ) {
+    // 日志归属按**这条消息的连接**取；切换用户后另一条连接会拿到自己的 uid。
+    let euid = unsafe { xpc::connection_euid(connection) };
+
     let method = unsafe { xpc::dict_get_string(message, "method") }.unwrap_or_default();
     let reply = unsafe { xpc::make_reply(message) };
 
@@ -287,7 +292,7 @@ fn handle_message(
         "start" => {
             let raw = unsafe { xpc::dict_get_data(message, "config") }.unwrap_or_default();
             let config = String::from_utf8_lossy(&raw).to_string();
-            match supervisor.start(&config) {
+            match supervisor.start(&config, euid) {
                 Ok(started) => {
                     unsafe { xpc::dict_set_bool(reply, "ok", true) };
                     unsafe { xpc::dict_set_int64(reply, "pid", started.pid as i64) };
@@ -423,6 +428,10 @@ struct Supervisor {
     /// config/pid，不能把新 start 刚写好的文件删掉。
     generation: AtomicU64,
     rules: Mutex<RulesState>,
+    /// 每个连接用户一份日志：helper 是系统级 daemon，可能先后服务多个用户。
+    user_logs: Mutex<std::collections::HashMap<u32, Arc<UserLogs>>>,
+    /// 还没有连接用户时产生的日志行，灌进第一份用户日志。
+    pending_notes: Mutex<Vec<String>>,
 }
 
 impl Supervisor {
@@ -435,33 +444,80 @@ impl Supervisor {
             start_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
             rules: Mutex::new(RulesState::Pending),
+            user_logs: Mutex::new(std::collections::HashMap::new()),
+            pending_notes: Mutex::new(Vec::new()),
         }
     }
 
-    /// helper 的诊断输出。
-    ///
-    /// launchd 下 stderr 不保证进统一日志；同一份再落到 `tun/helper.log`，
-    /// 排查时 `sudo tail` 一定能看到。文件超过 1 MiB 直接重开。
+    /// 取（必要时创建）某个用户的日志。uid 来自处理这条消息的连接，
+    /// 不能钉死成首个对端——A 连完切到 B 时，B 的日志必须写进 B 的家目录。
+    fn logs_for(&self, uid: u32) -> Option<Arc<UserLogs>> {
+        {
+            let map = self.user_logs.lock().unwrap();
+            if let Some(existing) = map.get(&uid) {
+                return Some(Arc::clone(existing));
+            }
+        }
+        let Some((home, gid)) = peer_account(uid) else {
+            eprintln!("veyl-helper: 无法解析 uid {uid} 的 home，日志只写 stderr");
+            return None;
+        };
+        let logs = match UserLogs::open(&home, uid, gid) {
+            Ok(logs) => Arc::new(logs),
+            Err(error) => {
+                eprintln!("veyl-helper: uid {uid} 的用户日志不可用，只写 stderr：{error}");
+                return None;
+            }
+        };
+        let mut map = self.user_logs.lock().unwrap();
+        // 并发的另一条连接可能刚插进来；以先到的为准。
+        if let Some(existing) = map.get(&uid) {
+            return Some(Arc::clone(existing));
+        }
+        if map.is_empty() {
+            let pending = std::mem::take(&mut *self.pending_notes.lock().unwrap());
+            for line in pending {
+                logs.append_helper(&line);
+            }
+        }
+        map.insert(uid, Arc::clone(&logs));
+        Some(logs)
+    }
+
+    #[cfg(test)]
+    fn sing_box_log_path(&self, uid: u32) -> Option<PathBuf> {
+        self.logs_for(uid).map(|logs| logs.sing_box_path.clone())
+    }
+
+    /// 带用户归属的日志：start/stop 的每一步都写进发起连接的那个用户。
+    fn note_for(&self, uid: u32, message: &str) {
+        self.emit_note(message);
+        let line = self.stamped(message);
+        match self.logs_for(uid) {
+            Some(logs) => logs.append_helper(&line),
+            None => eprintln!("veyl-helper: 用户日志不可用，本行只写 stderr"),
+        }
+    }
+
+    /// 还没有连接用户时（helper 启动阶段）的日志：先缓存，等第一份用户日志建好再补写。
     fn note(&self, message: &str) {
+        self.emit_note(message);
+        let line = self.stamped(message);
+        let mut pending = self.pending_notes.lock().unwrap();
+        if pending.len() < 200 {
+            pending.push(line);
+        }
+    }
+
+    fn emit_note(&self, message: &str) {
         eprintln!("veyl-helper: {message}");
-        let dir = self.root.join("tun");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("helper.log");
-        if std::fs::metadata(&path)
-            .map(|meta| meta.len() > HELPER_LOG_MAX_BYTES)
-            .unwrap_or(false)
-        {
-            let _ = std::fs::remove_file(&path);
-        }
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)
-        {
-            let _ = writeln!(file, "{message}");
-        }
+    }
+
+    fn stamped(&self, message: &str) -> String {
+        format!(
+            "{} {message}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
+        )
     }
 
     /// 规则就绪前最多等 `timeout`；失败原因原样带出去。
@@ -525,7 +581,7 @@ impl Supervisor {
 
     /// spawn 之后的登记。与 `stop_child` 抢同一把 child 锁：
     /// stop 先置标志再取锁，所以这里要么看见标志，要么 stop 随后一定能取到 child。
-    fn register_child(&self, child: Child, running: Running) -> Result<(), ProtocolError> {
+    fn register_child(&self, child: Child, running: Running, uid: u32) -> Result<(), ProtocolError> {
         let pid = running.pid;
         let mut slot = self.child.lock().unwrap();
         let mut running_slot = self.running.lock().unwrap();
@@ -537,7 +593,7 @@ impl Supervisor {
             let _ = child.wait();
             let _ = std::fs::remove_file(self.config_path());
             let _ = std::fs::remove_file(self.pid_path());
-            self.note(&format!("start 在 spawn 后被停止请求取消 pid={pid}"));
+            self.note_for(uid, &format!("start 在 spawn 后被停止请求取消 pid={pid}"));
             return Err(ProtocolError::new(
                 protocol::ERR_TUN_START_FAILED,
                 "启动被停止请求取消",
@@ -558,10 +614,6 @@ impl Supervisor {
 
     fn pid_path(&self) -> PathBuf {
         self.tun_dir().join("sing-box.pid")
-    }
-
-    fn log_path(&self) -> PathBuf {
-        self.tun_dir().join("sing-box.log")
     }
 
     fn rules_dir(&self) -> PathBuf {
@@ -684,7 +736,7 @@ impl Supervisor {
         }
     }
 
-    fn start(&self, config: &str) -> Result<Started, ProtocolError> {
+    fn start(&self, config: &str, uid: u32) -> Result<Started, ProtocolError> {
         // 先声明「这次 start 是新的」，再排队等锁：
         // 反过来的话，等待期间到达的 stop 会被拿到锁之后的那次 store 抹掉。
         self.stop_requested.store(false, Ordering::SeqCst);
@@ -710,14 +762,14 @@ impl Supervisor {
         // 或者权限被别的代码动了，这里不改也不会漏。
         let phase = Instant::now();
         self.verify_trust_chain()?;
-        self.note(&format!(
+        self.note_for(uid, &format!(
             "start 阶段 trust_chain={}ms",
             phase.elapsed().as_millis()
         ));
 
         let phase = Instant::now();
         let binary = self.resolve_runtime()?;
-        self.note(&format!(
+        self.note_for(uid, &format!(
             "start 阶段 runtime={}ms",
             phase.elapsed().as_millis()
         ));
@@ -735,7 +787,7 @@ impl Supervisor {
             let phase = Instant::now();
             // 规则由启动时的后台线程解包，这里只等结果；等待不计入 25 秒准备上限。
             self.wait_for_rules(RULES_WAIT_DEADLINE)?;
-            self.note(&format!(
+            self.note_for(uid, &format!(
                 "start 阶段 rules_wait={}ms",
                 phase.elapsed().as_millis()
             ));
@@ -752,7 +804,7 @@ impl Supervisor {
         // 替换语义：先收旧进程，但不设置取消标志（那会把这次 start 自己取消掉）。
         let had_child = { self.child.lock().unwrap().is_some() };
         self.stop_child();
-        self.note(&format!(
+        self.note_for(uid, &format!(
             "start 阶段 stop_old={}ms had_child={had_child}",
             phase.elapsed().as_millis()
         ));
@@ -787,7 +839,7 @@ impl Supervisor {
                 format!("写入配置失败：{error}"),
             )
         })?;
-        self.note(&format!(
+        self.note_for(uid, &format!(
             "start 阶段 prepare={}ms",
             phase.elapsed().as_millis()
         ));
@@ -803,7 +855,7 @@ impl Supervisor {
                 format!("配置校验没过：{detail}"),
             ));
         }
-        self.note(&format!(
+        self.note_for(uid, &format!(
             "start 阶段 check={}ms",
             phase.elapsed().as_millis()
         ));
@@ -815,41 +867,35 @@ impl Supervisor {
         )?;
 
         // 上次的 sing-box 已经停掉（见上面的 stop_child），此刻没有写入者。
-        rotate_log_if_oversized(&self.log_path(), TUN_LOG_MAX_BYTES, TUN_LOG_KEEP);
-
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(self.log_path())
-            .map_err(|error| {
-                ProtocolError::new(
-                    protocol::ERR_TUN_START_FAILED,
-                    format!("无法打开日志：{error}"),
-                )
-            })?;
-        let log_err = log.try_clone().map_err(|error| {
-            ProtocolError::new(protocol::ERR_TUN_START_FAILED, format!("{error}"))
-        })?;
+        // 相对已校验的 dirfd 打开；之后父链被换掉也写不到别处去。
+        let user_logs = self.logs_for(uid);
+        if let Some(logs) = &user_logs {
+            self.note_for(uid, &format!("sing-box 日志={}", logs.sing_box_path.display()));
+        }
+        let sing_box_log = user_logs.and_then(|logs| match logs.open_sing_box() {
+            Ok(file) => Some(file),
+            Err(error) => {
+                self.note_for(uid, &format!("sing-box 日志打开失败，输出丢弃：{error}"));
+                None
+            }
+        });
+        if sing_box_log.is_none() {
+            self.note_for(uid, "用户日志目录不可用，sing-box 输出将被丢弃");
+        }
 
         let phase = Instant::now();
-        let child = Command::new(&binary)
-            .arg("run")
-            .arg("-c")
-            .arg(self.config_path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(log_err))
-            .spawn()
-            .map_err(|error| {
-                let _ = std::fs::remove_file(self.config_path());
-                ProtocolError::new(
-                    protocol::ERR_TUN_START_FAILED,
-                    format!("启动运行时失败：{error}"),
-                )
-            })?;
-        self.note(&format!(
+        let spawned = match sing_box_log {
+            Some(file) => spawn_with_log(&binary, &self.config_path(), file),
+            None => spawn_without_log(&binary, &self.config_path()),
+        };
+        let child = spawned.map_err(|error| {
+            let _ = std::fs::remove_file(self.config_path());
+            ProtocolError::new(
+                protocol::ERR_TUN_START_FAILED,
+                format!("启动运行时失败：{error}"),
+            )
+        })?;
+        self.note_for(uid, &format!(
             "start 阶段 spawn={}ms",
             phase.elapsed().as_millis()
         ));
@@ -865,7 +911,7 @@ impl Supervisor {
             binary.display()
         );
         if let Err(error) = write_private(&self.pid_path(), record.as_bytes()) {
-            self.note(&format!("写 pid 失败：{error}"));
+            self.note_for(uid, &format!("写 pid 失败：{error}"));
         }
 
         let clash_addr = format!("127.0.0.1:{clash_port}");
@@ -877,9 +923,10 @@ impl Supervisor {
                 clash_secret: clash_secret.clone(),
                 since: since.clone(),
             },
+            uid,
         )?;
 
-        self.note(&format!(
+        self.note_for(uid, &format!(
             "start 完成 总耗时={}ms",
             started_at.elapsed().as_millis()
         ));
@@ -1574,51 +1621,345 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
-/// 日志超过上限就轮转：`sing-box.log` → `sing-box.log.1` → …，最旧的丢弃。
-///
-/// 失败不阻断启动：日志写不进去是排障问题，不该让 TUN 起不来。
-/// 与 `runtime/process.rs` 同一思路——保留尾部，而不是从开头截断。
-fn rotate_log_if_oversized(path: &Path, max_bytes: u64, keep: usize) {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return;
-    };
-    if metadata.len() < max_bytes {
-        return;
+// ---------------------------------------------------------------------------
+// 用户目录日志：~/.veyl/helper-logs/{helper,sing-box}.log
+//
+// helper 是 root，写用户目录必须防软链与替换：逐级 openat(O_DIRECTORY|O_NOFOLLOW)、
+// 校验属主与写权限，文件 O_CREAT|O_APPEND|O_NOFOLLOW + 0644。
+// 任何异常只打 stderr，不失败、不换路径。
+// uid 由 XPC 连接对端推出（getpwuid），不采信客户端传来的任何路径。
+// ---------------------------------------------------------------------------
+
+struct UserLogs {
+    helper: Mutex<std::fs::File>,
+    sing_box_path: PathBuf,
+    uid: u32,
+    /// 已经校验过的 `helper-logs` 目录。之后的 openat / renameat / unlinkat
+    /// 全部相对它执行；父链事后被换成软链也影响不到这里。
+    dir: Fd,
+}
+
+impl UserLogs {
+    fn open(home: &Path, uid: u32, gid: u32) -> Result<Self, String> {
+        let home_fd = Fd::new(open_dir_nofollow(home)?);
+        verify_dir(home_fd.raw(), uid, false)?;
+        let veyl_fd = Fd::new(open_or_create_dir(
+            home_fd.raw(),
+            veyl_paths::DATA_DIR_NAME,
+            0o700,
+            uid,
+            gid,
+            true,
+        )?);
+        let dir = Fd::new(open_or_create_dir(
+            veyl_fd.raw(),
+            "helper-logs",
+            0o755,
+            uid,
+            gid,
+            false,
+        )?);
+        let dir_path = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(home));
+        let sing_box_path = dir_path.join("sing-box.log");
+        rotate_in_dir(dir.raw(), "helper.log", HELPER_LOG_MAX_BYTES, 1);
+        let helper = open_log_at(dir.raw(), "helper.log", uid)?;
+        Ok(Self {
+            helper: Mutex::new(helper),
+            sing_box_path,
+            uid,
+            dir,
+        })
     }
-    if keep == 0 {
-        if let Err(error) = std::fs::remove_file(path) {
-            eprintln!("veyl-helper: 清理日志失败 {}：{error}", path.display());
-        }
-        return;
-    }
-    for index in (1..=keep).rev() {
-        let target = log_shard(path, index);
-        if index == keep {
-            let _ = std::fs::remove_file(&target);
-        }
-        let source = if index == 1 {
-            path.to_path_buf()
-        } else {
-            log_shard(path, index - 1)
-        };
-        if source.exists() {
-            if let Err(error) = std::fs::rename(&source, &target) {
-                eprintln!(
-                    "veyl-helper: 轮转日志失败 {} → {}：{error}",
-                    source.display(),
-                    target.display()
-                );
-                return;
+
+    fn append_helper(&self, line: &str) {
+        let mut file = self.helper.lock().unwrap();
+        let oversized = file
+            .metadata()
+            .map(|meta| meta.len() > HELPER_LOG_MAX_BYTES)
+            .unwrap_or(false);
+        if oversized {
+            rotate_in_dir(self.dir.raw(), "helper.log", HELPER_LOG_MAX_BYTES, 1);
+            if let Ok(reopened) = open_log_at(self.dir.raw(), "helper.log", self.uid) {
+                *file = reopened;
             }
         }
+        let _ = writeln!(file, "{line}");
+    }
+
+    /// 为一次 start 打开 sing-box 日志。轮转与打开都相对已校验的目录。
+    fn open_sing_box(&self) -> Result<std::fs::File, String> {
+        rotate_in_dir(
+            self.dir.raw(),
+            "sing-box.log",
+            TUN_LOG_MAX_BYTES,
+            TUN_LOG_KEEP,
+        );
+        open_log_at(self.dir.raw(), "sing-box.log", self.uid)
     }
 }
 
-/// `sing-box.log` + 序号 → `sing-box.log.1`。
-fn log_shard(path: &Path, index: usize) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(format!(".{index}"));
-    PathBuf::from(name)
+/// 连接用户的 home 与 gid；解析不出来就放弃写用户日志。
+fn peer_account(uid: u32) -> Option<(PathBuf, u32)> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = vec![0 as libc::c_char; 4096];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let status = unsafe {
+        libc::getpwuid_r(
+            uid as libc::uid_t,
+            &mut pwd,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() || pwd.pw_dir.is_null() {
+        return None;
+    }
+    let home = unsafe { CStr::from_ptr(pwd.pw_dir) };
+    Some((
+        PathBuf::from(std::ffi::OsStr::from_bytes(home.to_bytes())),
+        pwd.pw_gid as u32,
+    ))
+}
+
+struct Fd(std::os::fd::RawFd);
+
+impl Fd {
+    fn new(fd: std::os::fd::RawFd) -> Self {
+        Self(fd)
+    }
+
+    fn raw(&self) -> std::os::fd::RawFd {
+        self.0
+    }
+}
+
+impl Drop for Fd {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.0) };
+    }
+}
+
+fn open_dir_nofollow(path: &Path) -> Result<std::os::fd::RawFd, String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| "路径含 NUL".to_string())?;
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "打开 {} 失败：{}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(fd)
+}
+
+fn open_or_create_dir(
+    parent: std::os::fd::RawFd,
+    name: &str,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    private: bool,
+) -> Result<std::os::fd::RawFd, String> {
+    let c = std::ffi::CString::new(name).map_err(|_| "目录名含 NUL".to_string())?;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let mut fd = unsafe { libc::openat(parent, c.as_ptr(), flags) };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENOENT) {
+            return Err(format!("打开 {name} 失败：{error}"));
+        }
+        if unsafe { libc::mkdirat(parent, c.as_ptr(), mode as libc::mode_t) } != 0 {
+            return Err(format!(
+                "创建 {name} 失败：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        fd = unsafe { libc::openat(parent, c.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(format!(
+                "重新打开 {name} 失败：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // root 创建时要交还给连接用户；以用户身份运行时目录本来就是他的。
+        let chown_failed = unsafe { libc::geteuid() } == 0
+            && unsafe { libc::fchown(fd, uid, gid) } != 0;
+        if chown_failed || unsafe { libc::fchmod(fd, mode as libc::mode_t) } != 0 {
+            unsafe { libc::close(fd) };
+            return Err(format!(
+                "{name} 属主/权限设置失败：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    verify_dir(fd, uid, private)?;
+    Ok(fd)
+}
+
+fn verify_dir(fd: std::os::fd::RawFd, uid: u32, private: bool) -> Result<(), String> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return Err(format!(
+            "读取目录状态失败：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err("不是目录".into());
+    }
+    if stat.st_uid != uid {
+        return Err("目录属主不是连接用户".into());
+    }
+    if stat.st_mode & 0o022 != 0 {
+        return Err("目录允许 group/other 写入".into());
+    }
+    if private && stat.st_mode & 0o077 != 0 {
+        return Err("私有目录权限不是 0700".into());
+    }
+    Ok(())
+}
+
+fn open_log_at(dir_fd: std::os::fd::RawFd, name: &str, uid: u32) -> Result<std::fs::File, String> {
+    use std::os::fd::FromRawFd;
+
+    let c = std::ffi::CString::new(name).map_err(|_| "文件名含 NUL".to_string())?;
+    let fd = unsafe {
+        libc::openat(
+            dir_fd,
+            c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644 as libc::c_int,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "打开 {name} 失败：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if let Err(error) = verify_log_file(fd, uid) {
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+fn verify_log_file(fd: std::os::fd::RawFd, uid: u32) -> Result<(), String> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return Err(format!(
+            "读取日志状态失败：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err("日志不是普通文件".into());
+    }
+    if stat.st_uid != uid && stat.st_uid != 0 {
+        return Err("日志属主不合法".into());
+    }
+    if stat.st_mode & 0o022 != 0 {
+        return Err("日志允许 group/other 写入".into());
+    }
+    Ok(())
+}
+
+/// 相对目录轮转：`fstatat` / `renameat` / `unlinkat`，不跟随任何路径。
+fn rotate_in_dir(dir: std::os::fd::RawFd, name: &str, max_bytes: u64, keep: usize) {
+    let Ok(stat) = stat_at(dir, name) else {
+        return;
+    };
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG || (stat.st_size.max(0) as u64) < max_bytes {
+        return;
+    }
+    if keep == 0 {
+        let _ = unlink_at(dir, name);
+        return;
+    }
+    for index in (1..=keep).rev() {
+        let target = format!("{name}.{index}");
+        if index == keep {
+            let _ = unlink_at(dir, &target);
+        }
+        let source = if index == 1 {
+            name.to_string()
+        } else {
+            format!("{name}.{}", index - 1)
+        };
+        let _ = rename_at(dir, &source, dir, &target);
+    }
+}
+
+fn stat_at(dir: std::os::fd::RawFd, name: &str) -> Result<libc::stat, ()> {
+    let c = std::ffi::CString::new(name).map_err(|_| ())?;
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir, c.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) } == 0 {
+        Ok(stat)
+    } else {
+        Err(())
+    }
+}
+
+fn unlink_at(dir: std::os::fd::RawFd, name: &str) {
+    if let Ok(c) = std::ffi::CString::new(name) {
+        unsafe { libc::unlinkat(dir, c.as_ptr(), 0) };
+    }
+}
+
+fn rename_at(
+    old_dir: std::os::fd::RawFd,
+    old_name: &str,
+    new_dir: std::os::fd::RawFd,
+    new_name: &str,
+) {
+    let (Ok(old), Ok(new)) = (
+        std::ffi::CString::new(old_name),
+        std::ffi::CString::new(new_name),
+    ) else {
+        return;
+    };
+    unsafe { libc::renameat(old_dir, old.as_ptr(), new_dir, new.as_ptr()) };
+}
+
+/// 正常路径：sing-box 的 stdout/stderr 直接写用户日志。
+fn spawn_with_log(
+    binary: &Path,
+    config: &Path,
+    log: std::fs::File,
+) -> std::io::Result<Child> {
+    let log_err = log.try_clone()?;
+    Command::new(binary)
+        .arg("run")
+        .arg("-c")
+        .arg(config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+}
+
+/// 用户日志不可用时宁可丢弃输出，也不退回别的路径。
+fn spawn_without_log(binary: &Path, config: &Path) -> std::io::Result<Child> {
+    Command::new(binary)
+        .arg("run")
+        .arg("-c")
+        .arg(config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
 }
 
 /// 进程启动时间（`LC_ALL=C` 固定格式）。用 `ps` 而不是 sysctl：
@@ -2121,35 +2462,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// GAP-02：helper 的 sing-box 日志此前只追加不轮转。
+    /// 轮转必须走 dirfd；父链被别人换掉也只会作用在原来的目录上。
     #[test]
-    fn an_oversized_helper_log_is_rotated_and_one_previous_file_is_kept() {
-        let dir = temp("log");
-        let path = dir.join("sing-box.log");
-        std::fs::write(&path, vec![b'x'; 16]).unwrap();
-        std::fs::write(log_shard(&path, 1), b"older").unwrap();
+    fn an_oversized_helper_log_is_rotated_inside_the_original_dir() {
+        let home = temp("log-rotate");
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let logs = UserLogs::open(&home, uid, gid).unwrap();
+        let dir = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home));
 
-        rotate_log_if_oversized(&path, 8, 1);
+        logs.append_helper(&"x".repeat(HELPER_LOG_MAX_BYTES as usize + 1));
+        logs.append_helper("after-rotation");
 
-        assert!(!path.exists(), "超限的日志要挪走");
-        assert_eq!(
-            std::fs::read(log_shard(&path, 1)).unwrap(),
-            vec![b'x'; 16],
-            "最新那份进 .1，更旧的被丢弃"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(dir.join("helper.log.1").exists(), "超限的日志要挪走");
+        let current = std::fs::read_to_string(dir.join("helper.log")).unwrap();
+        assert!(current.contains("after-rotation"), "{current}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// 打开之后把 `helper-logs` 换成软链：写入和新建都必须留在原目录。
     #[test]
-    fn a_small_helper_log_is_left_alone() {
-        let dir = temp("log-small");
-        let path = dir.join("sing-box.log");
-        std::fs::write(&path, b"small").unwrap();
+    fn a_replaced_logs_dir_does_not_redirect_writes() {
+        let home = temp("log-swap");
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let logs = UserLogs::open(&home, uid, gid).unwrap();
+        let data = veyl_paths::data_dir_under(&home);
+        let real = data.join("helper-logs");
+        let moved = data.join("helper-logs-real");
+        std::fs::rename(&real, &moved).unwrap();
+        let elsewhere = home.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &real).unwrap();
 
-        rotate_log_if_oversized(&path, 8, 1);
+        logs.append_helper("after-swap");
+        drop(logs.open_sing_box().unwrap());
 
-        assert_eq!(std::fs::read(&path).unwrap(), b"small");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            std::fs::read_to_string(moved.join("helper.log"))
+                .unwrap()
+                .contains("after-swap"),
+            "写入必须落在已经校验过的目录"
+        );
+        assert!(moved.join("sing-box.log").exists());
+        assert!(!elsewhere.join("helper.log").exists(), "软链目标不能出现日志");
+        assert!(!elsewhere.join("sing-box.log").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 多用户：每个 uid 的日志与 sing-box 日志各回各家。
+    #[test]
+    fn different_users_get_their_own_logs() {
+        use std::sync::Arc;
+
+        let home_a = temp("multi-a");
+        let home_b = temp("multi-b");
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let logs_a = Arc::new(UserLogs::open(&home_a, uid, gid).unwrap());
+        let logs_b = Arc::new(UserLogs::open(&home_b, uid, gid).unwrap());
+        let supervisor = Supervisor::new(temp("multi-root"));
+        supervisor
+            .user_logs
+            .lock()
+            .unwrap()
+            .insert(100_001, Arc::clone(&logs_a));
+        supervisor
+            .user_logs
+            .lock()
+            .unwrap()
+            .insert(100_002, Arc::clone(&logs_b));
+
+        supervisor.note_for(100_001, "a-line");
+        supervisor.note_for(100_002, "b-line");
+
+        let read = |home: &Path| {
+            std::fs::read_to_string(
+                veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(home))
+                    .join("helper.log"),
+            )
+            .unwrap()
+        };
+        assert!(read(&home_a).contains("a-line"));
+        assert!(!read(&home_a).contains("b-line"));
+        assert!(read(&home_b).contains("b-line"));
+        assert!(!read(&home_b).contains("a-line"));
+        assert_eq!(
+            supervisor.sing_box_log_path(100_001),
+            Some(logs_a.sing_box_path.clone())
+        );
+        assert_eq!(
+            supervisor.sing_box_log_path(100_002),
+            Some(logs_b.sing_box_path.clone())
+        );
+        let _ = std::fs::remove_dir_all(&home_a);
+        let _ = std::fs::remove_dir_all(&home_b);
     }
 
     /// 客户端超时后发来的 stop 必须能让进行中的 start 让路。
@@ -2195,6 +2602,8 @@ mod tests {
                     clash_secret: "s".into(),
                     since: "2026-01-01T00:00:00Z".into(),
                 },
+                // 假 uid：解析不到 home，只写 stderr，测试不碰真实家目录。
+                60_000,
             )
             .unwrap_err();
 
@@ -2348,5 +2757,77 @@ mod tests {
         assert!(run_command("/bin/echo", &["ok"]).is_ok());
         assert!(run_command("/bin/false", &[]).is_err());
         assert!(run_command("/nonexistent/binary", &[]).is_err());
+    }
+
+    #[test]
+    fn user_logs_create_private_dirs_and_readable_files() {
+        use std::os::unix::fs::MetadataExt;
+
+        let home = temp("userlogs");
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let logs = UserLogs::open(&home, uid, gid).unwrap();
+        logs.append_helper("hello");
+
+        let dir = home.join(veyl_paths::DATA_DIR_NAME);
+        assert_eq!(std::fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
+        let helper_dir = dir.join("helper-logs");
+        assert_eq!(
+            std::fs::metadata(&helper_dir).unwrap().mode() & 0o777,
+            0o755
+        );
+        let path = helper_dir.join("helper.log");
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.uid(), uid);
+        assert_eq!(meta.mode() & 0o777, 0o644);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("hello"));
+        assert_eq!(logs.sing_box_path, helper_dir.join("sing-box.log"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn user_logs_reject_a_symlinked_data_dir() {
+        let home = temp("userlogs-symlink");
+        let elsewhere = home.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.join(veyl_paths::DATA_DIR_NAME)).unwrap();
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let error = UserLogs::open(&home, uid, gid).err().expect("应当拒绝");
+        assert!(error.contains("失败"), "{error}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn user_logs_require_a_private_data_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = temp("userlogs-private");
+        let dir = home.join(veyl_paths::DATA_DIR_NAME);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let error = UserLogs::open(&home, uid, gid).err().expect("应当拒绝");
+        assert!(error.contains("0700"), "{error}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn user_logs_reject_a_group_writable_log() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = temp("userlogs-mode");
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let _ = UserLogs::open(&home, uid, gid).unwrap();
+        let path = home
+            .join(veyl_paths::DATA_DIR_NAME)
+            .join("helper-logs")
+            .join("helper.log");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let error = UserLogs::open(&home, uid, gid).err().expect("应当拒绝");
+        assert!(error.contains("group/other"), "{error}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

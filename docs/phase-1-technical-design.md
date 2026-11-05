@@ -996,7 +996,7 @@ vpn_connect 失败
 | 可执行文件 | `sing-box` | `sing-box.exe` |
 | 系统代理 | `networksetup` | 注册表 + `InternetSetOption` |
 | 代理生效 | 立即 | 部分应用需重启或重新登录 |
-| 路径 | `~/Library/Application Support/Veyl` | `%LOCALAPPDATA%\Veyl` |
+| 路径 | `~/.veyl` | `%USERPROFILE%\.veyl` |
 | 打包 | `.dmg` | `.msi` / NSIS |
 
 ### 10.1 签名与公证
