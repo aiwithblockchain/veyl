@@ -5,8 +5,9 @@ import { emptyRuntimeView } from "../agent/bridge";
 import {
   degradedReason,
   emptyHintText,
-  failureNextStep,
+  failureHeadline,
   failureReason,
+  failureSteps,
   isDisconnectFailure,
   isProxyUser,
   middleBlocks,
@@ -132,12 +133,8 @@ describe("emptyHintText", () => {
 
   it("没有节点时覆盖未连接与已连接", () => {
     const empty = makeConfig({ nodes: [], node_count: 0 });
-    expect(emptyHintText(empty, false)).toBe(
-      "让右侧的助手帮你加一个节点，或者新建一套配置。",
-    );
-    expect(emptyHintText(empty, true)).toBe(
-      "让右侧的助手帮你加一个节点，或者新建一套配置。",
-    );
+    expect(emptyHintText(empty, false)).toBe("这套配置还没有节点。");
+    expect(emptyHintText(empty, true)).toBe("这套配置还没有节点。");
   });
 });
 
@@ -227,23 +224,21 @@ describe("failureReason 九级判定", () => {
   });
 });
 
-describe("failureNextStep", () => {
-  it("两个及以上节点先换节点", () => {
-    expect(failureNextStep(makeConfig(), false)).toBe(
-      "先点上面的「重新连接」。还是不行，就换下面的节点再试。",
-    );
+describe("failureSteps", () => {
+  it("两个及以上节点：重连 → 换节点 → 助手定位", () => {
+    const steps = failureSteps(makeConfig(), true);
+    expect(steps.map((step) => step.label)).toEqual(["重新连接", "换一个节点", "让助手定位"]);
+    expect(steps[0].detail).toBe("先点上面的「重新连接」。");
   });
 
-  it("单节点且 AI 可用指向对话", () => {
-    expect(failureNextStep(makeConfig({ nodes: [makeConfig().nodes[0]] }), true)).toBe(
-      "先点上面的「重新连接」。还是不行，就在右侧对话里说「帮我看看为什么连不上」。",
-    );
+  it("单节点且 AI 可用：跳过换节点", () => {
+    const steps = failureSteps(makeConfig({ nodes: [makeConfig().nodes[0]] }), true);
+    expect(steps.map((step) => step.label)).toEqual(["重新连接", "让助手定位"]);
   });
 
-  it("单节点且没有 AI 指向新建配置", () => {
-    expect(failureNextStep(makeConfig({ nodes: [] }), false)).toBe(
-      "先点上面的「重新连接」。还是不行，就新建一套配置再试。",
-    );
+  it("单节点且没有 AI：指到新建配置", () => {
+    const steps = failureSteps(makeConfig({ nodes: [] }), false);
+    expect(steps.map((step) => step.label)).toEqual(["重新连接", "新建一套配置"]);
   });
 });
 
@@ -289,6 +284,13 @@ describe("isDisconnectFailure", () => {
   });
 });
 
+describe("failureHeadline", () => {
+  it("连接断了 vs 从来没有连上", () => {
+    expect(failureHeadline(true)).toBe("连接断了。");
+    expect(failureHeadline(false)).toBe("没有连上节点。");
+  });
+});
+
 describe("middleBlocks 块矩阵", () => {
   it("过渡态不渲染任何块", () => {
     expect(middleBlocks(makeRuntime({ state: "starting" }), makeConfig(), true)).toEqual([]);
@@ -306,28 +308,23 @@ describe("middleBlocks 块矩阵", () => {
     expect(blocks[0]).toMatchObject({
       kind: "issue_card",
       tone: "failed",
-      title: "这次没有连上。",
     });
   });
 
-  it("从已连接态掉下来写连接断了", () => {
-    const blocks = middleBlocks(withCode("RUNTIME_EXITED"), makeConfig(), true, true);
-    expect(blocks[0]).toMatchObject({ kind: "issue_card", title: "连接断了。" });
+  it("从已连接态掉下来时标题由 failureHeadline 决定", () => {
+    const blocks = middleBlocks(withCode("RUNTIME_EXITED"), makeConfig(), true);
+    expect(blocks[0]).toMatchObject({ kind: "issue_card" });
+    expect(failureHeadline(true)).toBe("连接断了。");
   });
 
-  it("没连上过就失败写这次没有连上", () => {
-    const blocks = middleBlocks(withCode("RUNTIME_EXITED"), makeConfig(), true, false);
-    expect(blocks[0]).toMatchObject({ kind: "issue_card", title: "这次没有连上。" });
-  });
-
-  it("connected_since 有值也不再影响标题", () => {
-    const blocks = middleBlocks(
-      withCode("RUNTIME_EXITED", { connected_since: "2026-11-05T09:00:00Z" }),
-      makeConfig(),
-      true,
-      false,
-    );
-    expect(blocks[0]).toMatchObject({ title: "这次没有连上。" });
+  it("没连上过就失败：步骤完整，next 为空", () => {
+    const blocks = middleBlocks(withCode("RUNTIME_EXITED"), makeConfig(), true);
+    expect(blocks[0]).toMatchObject({
+      kind: "issue_card",
+      next: null,
+    });
+    expect((blocks[0] as { steps: unknown[] }).steps).toHaveLength(3);
+    expect(failureHeadline(false)).toBe("没有连上节点。");
   });
 
   it("降级：非代理用户只有一张卡", () => {

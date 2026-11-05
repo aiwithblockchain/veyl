@@ -3,7 +3,31 @@ import { copyText } from "../ui/clipboard";
 import type { MiddleBlock } from "../ui/middleArea";
 
 type ProxyBlock = Extract<MiddleBlock, { kind: "proxy_card" }>;
+type IssueBlock = Extract<MiddleBlock, { kind: "issue_card" }>;
 type CopyState = "idle" | "copied" | "failed";
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden>
+      <rect
+        x="5.5"
+        y="5.5"
+        width="7.5"
+        height="7.5"
+        rx="1.2"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      <path
+        d="M10.2 5.5V3.9a1.4 1.4 0 0 0-1.4-1.4H3.9a1.4 1.4 0 0 0-1.4 1.4v4.9a1.4 1.4 0 0 0 1.4 1.4h1.6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+    </svg>
+  );
+}
 
 function ProxyCard({ block }: { block: ProxyBlock }) {
   const [copy, setCopy] = useState<CopyState>("idle");
@@ -34,63 +58,66 @@ function ProxyCard({ block }: { block: ProxyBlock }) {
   else addressText = "连上后显示";
 
   return (
-    <section
-      className="console-card console-card--proxy"
-      aria-label={block.connected ? "本机代理地址" : "预计地址"}
-    >
-      <h2 className="console-card__title">
+    <div className="card card--proxy">
+      <p className="card__title">
         {block.connected ? "代理已经开好" : "连上后，这里会给你一个代理地址"}
-      </h2>
+      </p>
       {block.systemProxyEnabled ? (
-        <p className="console-card__note">浏览器已经设好了，其它软件按上面的地址填。</p>
+        <p className="card__action">浏览器已经设好了，其它软件按上面的地址填。</p>
       ) : null}
-      <div className="console-card__field">
-        <span className="console-card__label">
-          {block.connected ? "本机代理地址" : "预计地址"}
+      <div className="proxy__row">
+        <span className={`proxy__addr num ${block.address ? "" : "is-pending"}`}>
+          {addressText}
         </span>
-        <span className="console-card__address">
-          <span className="num">{addressText}</span>
-          {block.connected && block.address ? (
-            <button type="button" className="console-card__copy" onClick={() => void runCopy()}>
-              <span aria-live="polite">
-                {copy === "copied" ? "已复制" : copy === "failed" ? "复制失败" : "复制"}
-              </span>
-            </button>
-          ) : null}
-        </span>
+        {block.connected && block.address ? (
+          <button type="button" className="copy-btn" onClick={() => void runCopy()}>
+            <CopyIcon />
+            <span aria-live="polite">
+              {copy === "copied" ? "已复制" : copy === "failed" ? "复制失败" : "复制"}
+            </span>
+          </button>
+        ) : null}
       </div>
-      <p className="console-card__text">
+      <p className="card__action">
         {block.connected
-          ? "HTTP 和 SOCKS5 都支持，填同一个地址。"
-          : "HTTP 和 SOCKS5 都支持，同一个地址。"}
+          ? "HTTP 和 SOCKS5 都支持，填同一个地址。只在本机可用，别的设备连不上。"
+          : "HTTP 和 SOCKS5 都支持，同一个地址。实际端口连上后确认；被占用会自动换。"}
       </p>
-      <p className="console-card__foot">
-        {block.connected ? "只在本机可用，别的设备连不上。" : "实际端口连上后确认；被占用会自动换。"}
-      </p>
-    </section>
+    </div>
   );
 }
 
-function IssueCard({ block }: { block: Extract<MiddleBlock, { kind: "issue_card" }> }) {
+function IssueCard({ block }: { block: IssueBlock }) {
   return (
-    <section className={`console-card console-card--issue is-${block.tone}`}>
-      <h2 className="console-card__title">{block.title}</h2>
-      <p className="console-card__text">{block.reason}</p>
-      <p className="console-card__foot">{block.next}</p>
-    </section>
+    <div className={`card card--${block.tone === "failed" ? "err" : "warn"}`}>
+      <p className="card__lead">{block.reason}</p>
+      {block.steps.length > 0 ? (
+        <div className="recovery">
+          {block.steps.map((step, index) => (
+            <div className="recovery__row" key={step.label}>
+              <span className="recovery__num">{String(index + 1).padStart(2, "0")}</span>
+              <div>
+                <strong>{step.label}</strong>
+                <small>{step.detail}</small>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {block.next ? <p className="card__action">{block.next}</p> : null}
+    </div>
   );
 }
 
-/** 中间区的块：一句话居中；有卡片时靠上排。块顺序由 middleBlocks 决定。 */
+/** 中间区那「一件事」：一句话、代理卡或失败/降级卡。块顺序由 middleBlocks 决定。 */
 export function MiddleArea({ blocks }: { blocks: MiddleBlock[] }) {
   if (blocks.length === 0) return null;
-  const stacked = blocks.some((block) => block.kind !== "empty_hint");
   return (
-    <div className={stacked ? "console-mid__stack" : "console-mid__hint"}>
+    <div className="one-thing">
       {blocks.map((block, index) => {
         if (block.kind === "empty_hint") {
           return (
-            <p key="empty_hint" className="console-hint">
+            <p key="empty_hint" className={`note note--${block.tone}`}>
               {block.text}
             </p>
           );

@@ -6,11 +6,11 @@ import { ChatView } from "./ChatView";
 import { Composer } from "./Composer";
 import {
   IconChevronLeft,
+  IconChevronRight,
   IconClose,
   IconList,
   IconPencil,
   IconPlus,
-  IconSliders,
   IconTrash,
 } from "./icons";
 
@@ -41,6 +41,8 @@ interface Props {
   onNextAction: (action: NextAction) => void;
   onOpenSettings: () => void;
   onConfigureKey: () => void;
+  /** 收起助手；宽屏停靠时收成右边缘 tab。 */
+  onCollapse: () => void;
 }
 
 const SUGGESTIONS = ["为什么我打不开某个网站？", "检查我的网络配置"];
@@ -73,6 +75,7 @@ export function AiPanel({
   onNextAction,
   onOpenSettings,
   onConfigureKey,
+  onCollapse,
 }: Props) {
   const [view, setView] = useState<View>("chat");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -151,13 +154,12 @@ export function AiPanel({
 
   const hasMessages = Boolean(session && session.messages.length > 0);
   const needsFirstConfig = aiReady && !hasConfigs;
-  const title = view === "history" ? "历史会话" : session?.title || "新对话";
 
   return (
     <aside id="ai-panel" className="ai-panel" aria-label="AI 对话">
       <header className="ai-panel__head">
-        <div className="ai-panel__head-left">
-          {view === "history" ? (
+        {view === "history" ? (
+          <div className="ai-panel__id">
             <button
               type="button"
               className="ai-panel__icon"
@@ -167,11 +169,14 @@ export function AiPanel({
             >
               <IconChevronLeft size={16} />
             </button>
-          ) : null}
-          <span className="ai-panel__title" title={title}>
-            {title}
-          </span>
-        </div>
+            <span className="ai-panel__name">历史会话</span>
+          </div>
+        ) : (
+          <div className="ai-panel__id">
+            <span className="ai-panel__name">助手</span>
+            <span className="ai-panel__model">{aiReady ? "DeepSeek" : "未连接 AI"}</span>
+          </div>
+        )}
         <div className="ai-panel__head-right">
           <button
             type="button"
@@ -180,8 +185,8 @@ export function AiPanel({
               onNewSession();
               setView("chat");
             }}
-            aria-label="新建对话"
-            title="新建对话"
+            aria-label="新对话"
+            title="新对话"
           >
             <IconPlus size={16} />
           </button>
@@ -199,11 +204,11 @@ export function AiPanel({
           <button
             type="button"
             className="ai-panel__icon"
-            onClick={onOpenSettings}
-            aria-label="设置"
-            title="设置"
+            onClick={onCollapse}
+            aria-label="收起助手"
+            title="收起助手"
           >
-            <IconSliders size={16} />
+            <IconChevronRight size={16} />
           </button>
         </div>
       </header>

@@ -7,7 +7,6 @@ import {
   shouldResetJustOnboarded,
   shouldSendZeroConfigAsk,
   shouldSettleZeroConfig,
-  zeroConfigActions,
   zeroConfigContent,
   zeroConfigMode,
 } from "./consoleActions";
@@ -15,24 +14,21 @@ import {
 describe("零配置入口", () => {
   it("A：刚配好 AI 时只有「我自己配置」", () => {
     expect(zeroConfigMode(true, true)).toBe("just-onboarded");
-    expect(zeroConfigActions("just-onboarded")).toEqual(["new-config"]);
   });
 
   it("B：已配 AI、非刚引导时有「让 AI 帮我配」和「我自己配置」", () => {
     expect(zeroConfigMode(true, false)).toBe("ai-ready");
-    expect(zeroConfigActions("ai-ready")).toEqual(["ask-ai", "new-config"]);
   });
 
   it("C：未配 AI 时只有「我自己配置」，文案不提 AI", () => {
     expect(zeroConfigMode(false, false)).toBe("manual");
     expect(zeroConfigMode(false, true)).toBe("manual");
-    expect(zeroConfigActions("manual")).toEqual(["new-config"]);
 
     const content = zeroConfigContent("manual");
     const text = [
       content.title,
       content.body ?? "",
-      ...(content.steps ?? []),
+      ...(content.steps ?? []).flatMap((step) => [step.title, step.detail]),
     ].join(" ");
     expect(text).not.toMatch(/AI/i);
   });
@@ -127,7 +123,7 @@ describe("零配置入口", () => {
     expect(shouldSendZeroConfigAsk({ ...idle, alreadyAsked: asked })).toBe(false);
   });
 
-  it("配置从有变无后 A 文案不再出现", () => {
+  it("配置从有变无后回到 B，而不是 A 的对话中提示", () => {
     let justOnboarded = true;
     expect(zeroConfigMode(true, justOnboarded)).toBe("just-onboarded");
 
@@ -136,8 +132,12 @@ describe("零配置入口", () => {
     justOnboarded = false;
     expect(shouldResetJustOnboarded(justOnboarded, 0)).toBe(false);
     expect(zeroConfigMode(true, justOnboarded)).toBe("ai-ready");
-    expect(zeroConfigContent("ai-ready").title).not.toBe(
+    // 两种状态的标题都是「先配一条线路」；区别在顶部说明。
+    expect(zeroConfigContent("ai-ready").title).toBe(
       zeroConfigContent("just-onboarded").title,
+    );
+    expect(zeroConfigContent("ai-ready").body).not.toBe(
+      zeroConfigContent("just-onboarded").body,
     );
   });
 
@@ -153,7 +153,6 @@ describe("零配置入口", () => {
 
     const mode = zeroConfigMode(true, true, settled);
     expect(mode).toBe("just-onboarded-stopped");
-    expect(zeroConfigActions(mode)).toEqual(["ask-ai", "new-config"]);
     expect(zeroConfigContent(mode).title).toBe("还没配好。");
     expect(zeroConfigContent(mode).primaryLabel).toBe("继续帮我配");
   });
@@ -197,7 +196,6 @@ describe("零配置入口", () => {
     ).toBe(false);
 
     expect(zeroConfigMode(true, true, false)).toBe("just-onboarded");
-    expect(zeroConfigActions("just-onboarded")).toEqual(["new-config"]);
   });
 
   it("assistant 以问句结尾时不切 settled", () => {
@@ -239,8 +237,6 @@ describe("零配置入口", () => {
   it("B/C 不受 settled 影响", () => {
     expect(zeroConfigMode(true, false, true)).toBe("ai-ready");
     expect(zeroConfigMode(false, true, true)).toBe("manual");
-    expect(zeroConfigActions("ai-ready")).toEqual(["ask-ai", "new-config"]);
-    expect(zeroConfigActions("manual")).toEqual(["new-config"]);
   });
 
   it("AI 回了新内容后按钮可以再次发送", () => {

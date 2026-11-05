@@ -1,30 +1,27 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { ConfigDetail, NodeSummary, RuntimeView } from "../agent/protocol";
-import type { ProbeResult, VpnConnectionState } from "../config/useVpnSession";
+import type { ProbeResult } from "../config/useVpnSession";
 import { copyText } from "../ui/clipboard";
+import { modeSummary, scopeSummary } from "../ui/configLabels";
 import {
   runZeroConfigPrimaryAction,
-  zeroConfigActions,
   zeroConfigContent,
   zeroConfigMode,
 } from "../ui/consoleActions";
-import { formatDuration, formatSampleTime, formatTraffic } from "../ui/format";
-import { middleBlocks } from "../ui/middleArea";
-import { consolePrimary, consoleStatus } from "../ui/status";
+import { formatCheckedAgo, formatClock, formatTraffic } from "../ui/format";
+import { failureHeadline, middleBlocks, middleLevel } from "../ui/middleArea";
+import { rateChart, rateLabel, type RateSample } from "../ui/rateSeries";
 import { MiddleArea } from "./MiddleArea";
 
 interface Props {
   config: ConfigDetail | null;
-  connection: VpnConnectionState;
   onStart: () => void;
   onStop: () => void;
   onSwitchNode: (nodeId: string) => void;
   onProbe: (nodeId: string) => Promise<ProbeResult>;
   nodeSwitchAvailable: boolean;
   nodeProbeAvailable: boolean;
-  panelOpen: boolean;
-  aiUnread: boolean;
-  onTogglePanel: () => void;
   aiReady: boolean;
   justOnboarded: boolean;
   zeroConfigSettled: boolean;
@@ -33,8 +30,10 @@ interface Props {
   onNewConfig: () => void;
   loading?: boolean;
   runtime: RuntimeView;
-  /** 最近一次失败是否来自已连接态；决定失败卡标题是「连接断了」还是「这次没有连上」。 */
+  /** 最近一次失败是否来自已连接态；决定失败卡标题是「连接断了」还是「没有连上节点」。 */
   failedAfterConnected?: boolean;
+  /** 健康事件累积的最近 60 秒速率（前端内存，重启即丢）。 */
+  rateSamples?: RateSample[];
 }
 
 type Probe =
@@ -42,18 +41,39 @@ type Probe =
   | { nodeId: string; status: "ok"; latency: number | null }
   | { nodeId: string; status: "fail"; message: string | null; unreachable: boolean };
 
+const NO_RATE: RateSample[] = [];
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden>
+      <rect
+        x="5.5"
+        y="5.5"
+        width="7.5"
+        height="7.5"
+        rx="1.2"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      <path
+        d="M10.2 5.5V3.9a1.4 1.4 0 0 0-1.4-1.4H3.9a1.4 1.4 0 0 0-1.4 1.4v4.9a1.4 1.4 0 0 0 1.4 1.4h1.6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+    </svg>
+  );
+}
+
 export function Console({
   config,
-  connection,
   onStart,
   onStop,
   onSwitchNode,
   onProbe,
   nodeSwitchAvailable,
   nodeProbeAvailable,
-  panelOpen,
-  aiUnread,
-  onTogglePanel,
   aiReady,
   justOnboarded,
   zeroConfigSettled,
@@ -63,6 +83,7 @@ export function Console({
   loading = false,
   runtime,
   failedAfterConnected = false,
+  rateSamples = NO_RATE,
 }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(
     config?.current_node_id ?? null,
@@ -70,28 +91,29 @@ export function Console({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [probe, setProbe] = useState<Probe | null>(null);
   const [exitCopy, setExitCopy] = useState<"idle" | "copied" | "failed">("idle");
-  const [techCopy, setTechCopy] = useState<"idle" | "copied" | "failed">("idle");
   const [now, setNow] = useState(() => Date.now());
   const copyTimer = useRef<number | null>(null);
-  const techCopyTimer = useRef<number | null>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const configId = config?.config_id ?? null;
   const currentNodeId = config?.current_node_id ?? null;
   const exitAddress = runtime.health.exit_ip?.trim() || null;
-  const proxyAddress = runtime.mixed_port ? `127.0.0.1:${runtime.mixed_port}` : null;
+
+  const level = middleLevel(runtime.state);
+  const connected = level === "running" || level === "degraded";
+  const degraded = level === "degraded";
+  const transitioning = level === "transition";
+  const stopping = runtime.state === "stopping";
+
+  const canConnect = Boolean(config && config.nodes.length > 0);
+  const hasNodes = (config?.nodes.length ?? 0) > 0;
 
   useEffect(() => {
     setExitCopy("idle");
-  }, [exitAddress, connection]);
-
-  useEffect(() => {
-    setTechCopy("idle");
-  }, [proxyAddress]);
+  }, [exitAddress, connected]);
 
   useEffect(
     () => () => {
       if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-      if (techCopyTimer.current !== null) window.clearTimeout(techCopyTimer.current);
     },
     [],
   );
@@ -121,25 +143,51 @@ export function Console({
     };
   }, [pickerOpen]);
 
+  // 计时器每秒跳一次；连接时刻来自 runtime，不轮询快照。
+  useEffect(() => {
+    if (!connected) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [connected]);
+
+  useEffect(() => {
+    if (!connected) setProbe(null);
+  }, [connected]);
+
   const selectedNode: NodeSummary | null =
     config?.nodes.find((node) => node.node_id === selectedId) ??
     config?.nodes.find((node) => node.node_id === config.current_node_id) ??
     config?.nodes[0] ??
     null;
   const selectedNodeId = selectedNode?.node_id ?? null;
-  const currentNode: NodeSummary | null =
-    config?.nodes.find((node) => node.node_id === config.current_node_id) ?? null;
   const canPick = (config?.nodes.length ?? 0) > 1;
   const switching = Boolean(
     selectedNode && config && selectedNode.node_id !== config.current_node_id,
   );
-  const busy = connection === "starting" || connection === "stopping";
 
-  const selectNode = (nodeId: string) => {
-    setSelectedId(nodeId);
-    setPickerOpen(false);
-    setProbe(null);
-  };
+  const connectedAt = runtime.connected_since
+    ? Date.parse(runtime.connected_since)
+    : Number.NaN;
+  const durationSeconds = Number.isFinite(connectedAt)
+    ? Math.max(0, Math.floor((now - connectedAt) / 1000))
+    : null;
+  const clock = formatClock(durationSeconds ?? 0);
+
+  const usedBytes = runtime.traffic
+    ? runtime.traffic.up_bytes + runtime.traffic.down_bytes
+    : null;
+  const trafficLabel = usedBytes === null ? "—" : formatTraffic(usedBytes);
+  const trafficSub = runtime.traffic
+    ? `上行 ${formatTraffic(runtime.traffic.up_bytes)} · 下行 ${formatTraffic(runtime.traffic.down_bytes)}`
+    : "还没开始统计";
+  const latencyLabel =
+    runtime.node_latency_ms === null ? "—" : `${runtime.node_latency_ms} ms`;
+  const latencySub = formatCheckedAgo(runtime.health.checked_at, now);
+  const rates = rateLabel(rateSamples);
+
+  const blocks =
+    config && config.layout == null ? middleBlocks(runtime, config, aiReady) : [];
 
   const runProbe = async () => {
     if (!selectedNode || probe?.status === "testing") return;
@@ -159,47 +207,6 @@ export function Console({
     });
   };
 
-  const canConnect = Boolean(config && config.nodes.length > 0);
-  const connected = connection === "connected";
-
-  // 时长只在前端按 30 秒粒度刷新；连接时刻来自 runtime，不轮询快照。
-  useEffect(() => {
-    if (!connected) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, [connected]);
-
-  const connectedAt = runtime.connected_since
-    ? Date.parse(runtime.connected_since)
-    : NaN;
-  const durationSeconds = Number.isFinite(connectedAt)
-    ? Math.max(0, Math.floor((now - connectedAt) / 1000))
-    : null;
-  const durationLabel =
-    durationSeconds === null ? "刚刚" : formatDuration(durationSeconds);
-  const usedBytes = runtime.traffic
-    ? runtime.traffic.up_bytes + runtime.traffic.down_bytes
-    : null;
-  const trafficLabel = usedBytes === null ? "—" : formatTraffic(usedBytes);
-  const latencyLabel =
-    runtime.node_latency_ms === null ? "确认中…" : `${runtime.node_latency_ms} 毫秒`;
-  const linkStateLabel =
-    connection === "starting"
-      ? "正在连接"
-      : connection === "stopping"
-        ? "正在断开"
-        : "未连接";
-  const currentLineName = currentNode?.name ?? runtime.node_name ?? "当前节点";
-  const currentLineText = connected
-    ? [currentLineName, durationLabel, trafficLabel === "—" ? null : trafficLabel]
-        .filter(Boolean)
-        .join(" · ")
-    : `${currentLineName} · ${linkStateLabel}`;
-  const sampleTime = formatSampleTime(
-    runtime.traffic?.sampled_at ?? runtime.health.checked_at,
-  );
-
   const copyExit = async () => {
     if (!exitAddress) return;
     const ok = await copyText(exitAddress);
@@ -208,376 +215,398 @@ export function Console({
     copyTimer.current = window.setTimeout(() => setExitCopy("idle"), 2000);
   };
 
-  const copyProxy = async () => {
-    if (!proxyAddress) return;
-    const ok = await copyText(proxyAddress);
-    setTechCopy(ok ? "copied" : "failed");
-    if (techCopyTimer.current !== null) window.clearTimeout(techCopyTimer.current);
-    techCopyTimer.current = window.setTimeout(() => setTechCopy("idle"), 2000);
-  };
-
-  useEffect(() => {
-    if (!connected) setProbe(null);
-  }, [connected]);
-
-  const primary = consolePrimary(connection, canConnect, runtime.state === "failed");
-  const status = loading
-    ? { text: "正在读取配置…", tone: "muted" as const }
-    : consoleStatus(connection, Boolean(config), canConnect);
-
   let probeLabel: string | null = null;
   if (probe?.status === "testing") probeLabel = "检查中…";
   else if (probe?.status === "ok") {
-    probeLabel = probe.latency === null ? "可达" : `延迟 ${probe.latency} 毫秒`;
+    probeLabel = probe.latency === null ? "可达" : `延迟 ${probe.latency} ms`;
   } else if (probe?.status === "fail") {
     probeLabel = probe.unreachable ? "连不上" : "检查失败";
   }
 
-  let probeHint: string | null = null;
-  if (!nodeProbeAvailable) probeHint = "这个版本还不能检查";
-  else if (!connected) probeHint = "连接后可以检查";
-  const probeText = nodeProbeAvailable && connected ? probeLabel : probeHint;
-
   const zeroMode = zeroConfigMode(aiReady, justOnboarded, zeroConfigSettled);
   const zeroContent = zeroConfigContent(zeroMode);
-  const zeroActions = zeroConfigActions(zeroMode);
 
-  // 只有从没被编排过的配置（layout 为 null）才走本地兜底；
-  // layout.blocks = [] 是 AI 明确留白，不是空数据，不能拿本地规则去填。
-  // 老后端可能不带 layout 字段，宽松比较把 undefined 也算作没编排过。
-  const midBlocks =
-    !loading && config && config.layout == null
-      ? middleBlocks(runtime, config, aiReady, failedAfterConnected)
-      : [];
-  const midStacked = midBlocks.some((block) => block.kind !== "empty_hint");
+  const showLedger = Boolean(config && hasNodes && !transitioning && level !== "failed");
+  const showStrip = Boolean(connected && config && !isProxy(config));
+
+  let hero: ReactNode;
+  if (connected) {
+    hero = (
+      <section className="hero">
+        <div className="hero__main">
+          <h1 className="state-line">
+            <span className="state-line__label">
+              <span className={`led ${degraded ? "is-warn" : "is-ok"}`} aria-hidden />
+              {degraded ? "连接不稳定" : "已连接"}
+            </span>
+            <span className="timecode num">{clock}</span>
+          </h1>
+          <p className="hero__caption">本次连接</p>
+        </div>
+        <button type="button" className="btn btn--outline" onClick={onStop}>
+          断开 VPN
+        </button>
+      </section>
+    );
+  } else {
+    const word = stopping
+      ? "正在断开"
+      : transitioning
+        ? "正在连接"
+        : level === "failed"
+          ? "连接失败"
+          : "未连接";
+    const led = stopping
+      ? ""
+      : transitioning
+        ? "is-connecting"
+        : level === "failed"
+          ? "is-err"
+          : null;
+    const caption =
+      level === "failed" ? failureHeadline(failedAfterConnected) : null;
+    hero = (
+      <section className="hero">
+        <div className="hero__main">
+          <h1 className="state-word">
+            {led ? <span className={`led ${led}`} aria-hidden /> : null}
+            <span>{word}</span>
+          </h1>
+          {caption ? <p className="hero__caption">{caption}</p> : null}
+        </div>
+        {transitioning ? (
+          <button
+            type="button"
+            className="btn btn--outline"
+            disabled={stopping}
+            onClick={stopping ? undefined : onStop}
+          >
+            {stopping ? "正在断开…" : "取消"}
+          </button>
+        ) : level === "failed" ? (
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={!canConnect}
+            onClick={onStart}
+          >
+            重新连接
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={!canConnect}
+            onClick={onStart}
+          >
+            启动 VPN
+          </button>
+        )}
+      </section>
+    );
+  }
+
+  const srStatus = stopping
+    ? "正在断开"
+    : transitioning
+      ? "正在连接"
+      : level === "failed"
+        ? "连接失败"
+        : degraded
+          ? "连接不稳定"
+          : connected
+            ? "已连接"
+            : "未连接";
 
   return (
     <main className="console">
-      <header className="console-top">
-        <div className="console-top__bar">
-          <button
-            type="button"
-            className="btn btn--primary console-top__primary"
-            disabled={primary.disabled}
-            onClick={primary.stop ? onStop : onStart}
-          >
-            {primary.label}
-          </button>
-          <div className={`console-status is-${status.tone}`} role="status">
-            <span className="console-status__dot" aria-hidden />
-            <span className="console-status__text">{status.text}</span>
-          </div>
-          <button
-            type="button"
-            className={`console-panel-toggle ${panelOpen ? "is-active" : ""}`}
-            onClick={onTogglePanel}
-            aria-label={
-              panelOpen
-                ? "收起 AI 对话"
-                : aiUnread
-                  ? "展开 AI 对话，有新消息"
-                  : "展开 AI 对话"
-            }
-            aria-expanded={panelOpen}
-            title="AI 对话"
-          >
-            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
-              <path
-                d="M4 4.5A1.5 1.5 0 0 1 5.5 3h9A1.5 1.5 0 0 1 16 4.5v6a1.5 1.5 0 0 1-1.5 1.5H9l-3 2.5V12H5.5A1.5 1.5 0 0 1 4 10.5z"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.4"
-                strokeLinejoin="round"
-              />
-            </svg>
-            {aiUnread && !panelOpen ? (
-              <span className="console-panel-toggle__dot" aria-hidden />
-            ) : null}
-          </button>
-        </div>
-
-        {connected ? (
-          <div className="console-summary">
-            <span className="console-summary__item">{durationLabel}</span>
-            <span className="console-summary__item">已用 {trafficLabel}</span>
-            <span className="console-summary__item">
-              {runtime.node_latency_ms === null ? "延迟确认中…" : `延迟 ${latencyLabel}`}
-            </span>
-            {exitAddress ? (
-              <button
-                type="button"
-                className={`console-exit ${
-                  exitCopy === "copied" ? "is-copied" : exitCopy === "failed" ? "is-failed" : ""
-                }`}
-                onClick={() => void copyExit()}
-                title={`出口 ${exitAddress}，点击复制`}
-                aria-label={`出口 ${exitAddress}，点击复制`}
-              >
-                <span className="console-exit__label">出口</span>
-                <span className="console-exit__ip num" title={exitAddress}>
-                  {exitAddress}
-                </span>
-                <span className="console-exit__action" aria-live="polite">
-                  {exitCopy === "copied" ? "已复制" : exitCopy === "failed" ? "复制失败" : "复制"}
-                </span>
-              </button>
-            ) : (
-              <span className="console-summary__item">正在确认出口…</span>
-            )}
-          </div>
-        ) : null}
+      <header className="console__head">
+        <span className="console__crumb">控制台</span>
       </header>
 
-      <section className={`console-mid${midStacked ? " console-mid--stacked" : ""}`}>
-        {!loading && !hasConfigs ? (
-          <div className="console-empty-entry">
-            <p className="console-empty-entry__title">{zeroContent.title}</p>
-            {zeroContent.steps ? (
-              <ol className="console-empty-entry__steps">
-                {zeroContent.steps.map((step) => (
-                  <li key={step}>{step}</li>
-                ))}
-              </ol>
-            ) : zeroContent.body ? (
-              <p className="console-empty-entry__text">{zeroContent.body}</p>
-            ) : null}
-            <div className="console-empty-entry__actions">
-              {zeroActions.includes("ask-ai") ? (
-                <button
-                  type="button"
-                  className="btn btn--primary console-empty-entry__primary"
-                  onClick={() =>
-                    runZeroConfigPrimaryAction(zeroMode, { onAskAi, onNewConfig })
-                  }
-                >
-                  {zeroContent.primaryLabel ?? "让 AI 帮我配"}
-                </button>
-              ) : null}
-              {zeroActions.includes("new-config") ? (
-                zeroMode === "manual" ? (
-                  <button
-                    type="button"
-                    className="btn btn--primary console-empty-entry__primary"
-                    onClick={() =>
-                      runZeroConfigPrimaryAction(zeroMode, { onAskAi, onNewConfig })
-                    }
-                  >
-                    {zeroContent.primaryLabel ?? "我自己配置"}
-                  </button>
-                ) : (
-                  <button type="button" className="btn btn--ghost" onClick={onNewConfig}>
-                    我自己配置
-                  </button>
-                )
+      {!loading && !hasConfigs ? (
+        <div className="console__body console__body--welcome">
+          <p className="sr-only" role="status" aria-live="polite">
+            {srStatus}
+          </p>
+          <section className="hero">
+            <div className="hero__main">
+              <h1 className="state-word">
+                <span>{zeroContent.title}</span>
+              </h1>
+              {zeroContent.body ? (
+                <p className="hero__caption">{zeroContent.body}</p>
               ) : null}
             </div>
-          </div>
-        ) : (
-          <MiddleArea blocks={midBlocks} />
-        )}
-      </section>
-
-      <footer className="console-node">
-        {loading ? (
-          <div
-            className="console-node__skeleton"
-            role="status"
-            aria-busy="true"
-            aria-label="正在读取配置"
-          >
-            <span className="skeleton skeleton--node" aria-hidden />
-            <div className="console-node__skeleton-facts" aria-hidden>
-              <span className="skeleton skeleton--fact" />
-              <span className="skeleton skeleton--fact" />
-            </div>
-            <div className="console-node__skeleton-actions" aria-hidden>
-              <span className="skeleton skeleton--button" />
-              <span className="skeleton skeleton--button" />
-            </div>
-            <span className="skeleton skeleton--detail" aria-hidden />
-          </div>
-        ) : !hasConfigs ? null : !config ? (
-          <p className="console-node__empty">在左侧选一套配置。</p>
-        ) : !selectedNode ? (
-          <p className="console-node__empty">这套配置还没有节点。</p>
-        ) : (
-          <div className="console-node__detail" ref={detailRef}>
-            <div className="console-node__heading">
-              {canPick ? (
-                <button
-                  type="button"
-                  className="console-node__name"
-                  aria-haspopup="listbox"
-                  aria-expanded={pickerOpen}
-                  onClick={() => setPickerOpen((open) => !open)}
-                >
-                  {selectedNode.name}
-                  <svg
-                    className={`console-node__chevron ${pickerOpen ? "is-open" : ""}`}
-                    viewBox="0 0 12 12"
-                    width="12"
-                    height="12"
-                    aria-hidden
-                  >
-                    <path
-                      d="M3 4.5 6 7.5 9 4.5"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.4"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
-              ) : (
-                <span className="console-node__name is-static">{selectedNode.name}</span>
-              )}
-              {selectedNode.node_id === config.current_node_id ? (
-                <span className="console-node__badge">当前使用</span>
-              ) : null}
-            </div>
-
-            {pickerOpen ? (
-              <div className="node-picker" role="listbox" aria-label="这个配置里的节点">
-                {config.nodes.map((node) => (
-                  <button
-                    key={node.node_id}
-                    type="button"
-                    role="option"
-                    aria-selected={node.node_id === selectedNodeId}
-                    className={`node-picker__item ${
-                      node.node_id === selectedNodeId ? "is-selected" : ""
-                    }`}
-                    onClick={() => selectNode(node.node_id)}
-                  >
-                    <span className="node-picker__name">{node.name}</span>
-                    {node.node_id === config.current_node_id ? (
-                      <span className="node-picker__badge">当前</span>
-                    ) : null}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-
-            {selectedNode.node_id === config.current_node_id ? (
-              connected ? (
-                <dl className="console-node__stats">
-                  <div>
-                    <dt>已用流量</dt>
-                    <dd className="num">{trafficLabel}</dd>
-                  </div>
-                  <div>
-                    <dt>延迟</dt>
-                    <dd className="num">{latencyLabel}</dd>
-                  </div>
-                </dl>
-              ) : (
-                <p className="console-node__offline">{linkStateLabel}</p>
-              )
-            ) : (
-              <p className="console-node__current">
-                当前线路：<strong>{currentLineText}</strong>
-              </p>
-            )}
-
-            <div className="console-node__actions">
+            {zeroContent.primaryLabel ? (
               <button
                 type="button"
-                className="btn btn--ghost"
-                disabled={!switching || busy || !nodeSwitchAvailable}
-                onClick={() => onSwitchNode(selectedNode.node_id)}
-              >
-                用这个节点
-              </button>
-              <button
-                type="button"
-                className="btn btn--ghost"
-                disabled={
-                  !connected || !nodeProbeAvailable || probe?.status === "testing"
+                className="btn btn--primary"
+                onClick={() =>
+                  runZeroConfigPrimaryAction(zeroMode, { onAskAi, onNewConfig })
                 }
-                onClick={() => void runProbe()}
               >
-                检查连接
+                {zeroContent.primaryLabel}
               </button>
-              {probeText ? (
-                <span
-                  className={`console-node__probe ${
-                    nodeProbeAvailable && probe?.status === "ok"
-                      ? "is-ok"
-                      : nodeProbeAvailable && probe?.status === "fail"
-                        ? "is-err"
-                        : ""
-                  }`}
-                  title={
-                    nodeProbeAvailable && probe?.status === "fail"
-                      ? probe.message ?? undefined
-                      : undefined
-                  }
-                >
-                  {probeText}
-                </span>
-              ) : null}
-            </div>
-
-            {switching ? (
-              <p className="console-node__hint">
-                {nodeSwitchAvailable
-                  ? "点上面的按钮才会真正切换。"
-                  : "这个版本还不能切换节点。"}
-              </p>
             ) : null}
-
-            <details className="console-node__tech">
-              <summary>技术详情</summary>
-              <dl className="console-node__facts">
-                <div>
-                  <dt>服务器地址</dt>
-                  <dd className="num">{selectedNode.server}</dd>
-                </div>
-                <div>
-                  <dt>服务器端口</dt>
-                  <dd className="num">{selectedNode.port}</dd>
-                </div>
-                <div>
-                  <dt>加密方式</dt>
-                  <dd className="num">{selectedNode.method}</dd>
-                </div>
-                <div>
-                  <dt>本机代理地址</dt>
-                  <dd className="console-node__copy-row">
-                    <span className="num">{proxyAddress ?? "—"}</span>
-                    {proxyAddress ? (
-                      <button
-                        type="button"
-                        className="console-node__copy"
-                        onClick={() => void copyProxy()}
-                      >
-                        {techCopy === "copied"
-                          ? "已复制"
-                          : techCopy === "failed"
-                            ? "复制失败"
-                            : "复制"}
-                      </button>
-                    ) : null}
-                  </dd>
-                </div>
-                <div>
-                  <dt>活跃连接数</dt>
-                  <dd className="num">{runtime.connections ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt>直连 IP</dt>
-                  <dd className="num">{runtime.direct_ip ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt>最近采样时间</dt>
-                  <dd className="num">{sampleTime}</dd>
-                </div>
-              </dl>
-            </details>
+          </section>
+          {zeroContent.steps ? (
+            <ol className="steps">
+              {zeroContent.steps.map((step, index) => (
+                <li key={step.title}>
+                  <span className="steps__num">{String(index + 1).padStart(2, "0")}</span>
+                  <span>
+                    <strong>{step.title}</strong>
+                    <small>{step.detail}</small>
+                  </span>
+                </li>
+              ))}
+            </ol>
+          ) : null}
+        </div>
+      ) : loading ? (
+        <div className="console__body" aria-busy="true" aria-label="正在读取配置">
+          <span className="skeleton skeleton--hero" aria-hidden />
+          <span className="skeleton skeleton--ledger" aria-hidden />
+          <span className="skeleton skeleton--card" aria-hidden />
+        </div>
+      ) : !config ? (
+        <div className="console__body">
+          <p className="sr-only" role="status" aria-live="polite">
+            未连接
+          </p>
+          <div className="one-thing">
+            <p className="note note--idle">在左侧选一套配置。</p>
           </div>
-        )}
-      </footer>
+        </div>
+      ) : (
+        <>
+        <div className="console__body">
+          <p className="sr-only" role="status" aria-live="polite">
+            {srStatus}
+          </p>
+
+          {hero}
+
+          {transitioning && !stopping ? (
+            <div className="progress" aria-hidden />
+          ) : null}
+
+          {showLedger && config ? (
+            <dl className="ledger">
+              {connected ? (
+                <>
+                  <div className="ledger__row">
+                    <dt className="ledger__label">流量</dt>
+                    <dd className="ledger__value">{trafficLabel}</dd>
+                    <dd className="ledger__sub">{trafficSub}</dd>
+                  </div>
+                  <div className="ledger__row">
+                    <dt className="ledger__label">延迟</dt>
+                    <dd className="ledger__value">{latencyLabel}</dd>
+                    <dd className="ledger__sub">{latencySub}</dd>
+                  </div>
+                  <div className="ledger__row">
+                    <dt className="ledger__label">出口</dt>
+                    <dd className="ledger__value">{exitAddress ?? "—"}</dd>
+                    <dd className="ledger__sub">
+                      {exitAddress ? (
+                        <button type="button" className="copy-btn" onClick={() => void copyExit()}>
+                          <CopyIcon />
+                          <span aria-live="polite">
+                            {exitCopy === "copied"
+                              ? "已复制"
+                              : exitCopy === "failed"
+                                ? "复制失败"
+                                : "复制"}
+                          </span>
+                        </button>
+                      ) : (
+                        "正在确认出口…"
+                      )}
+                    </dd>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="ledger__row">
+                    <dt className="ledger__label">方式</dt>
+                    <dd className="ledger__value ledger__value--text">
+                      {modeSummary(config).value}
+                    </dd>
+                    <dd className="ledger__sub">{modeSummary(config).sub}</dd>
+                  </div>
+                  <div className="ledger__row">
+                    <dt className="ledger__label">范围</dt>
+                    <dd className="ledger__value ledger__value--text">
+                      {scopeSummary(config).value}
+                    </dd>
+                    <dd className="ledger__sub">{scopeSummary(config).sub}</dd>
+                  </div>
+                  <div className="ledger__row">
+                    <dt className="ledger__label">节点</dt>
+                    <dd className="ledger__value ledger__value--text">
+                      {config.nodes.length} 个可选
+                    </dd>
+                    <dd className="ledger__sub">
+                      {config.nodes.length > 1 ? "可切换" : "先加一个节点"}
+                    </dd>
+                  </div>
+                </>
+              )}
+            </dl>
+          ) : null}
+
+          <MiddleArea blocks={blocks} />
+
+          {showStrip ? (
+            <RateStrip samples={rateSamples} warn={degraded} current={rates} />
+          ) : null}
+        </div>
+
+        {hasNodes && selectedNode ? (
+            <footer className="node-card" ref={detailRef}>
+              <div className="node-card__head">
+                <div>
+                  <span className="node-card__label">
+                    {switching ? "选中的节点" : "当前节点"}
+                  </span>
+                  {canPick ? (
+                    <button
+                      type="button"
+                      className="node-card__name node-card__name--button"
+                      aria-haspopup="listbox"
+                      aria-expanded={pickerOpen}
+                      onClick={() => setPickerOpen((open) => !open)}
+                    >
+                      {selectedNode.name}
+                    </button>
+                  ) : (
+                    <span className="node-card__name">{selectedNode.name}</span>
+                  )}
+                </div>
+                <div className="node-card__actions">
+                  {switching ? (
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      disabled={!nodeSwitchAvailable}
+                      onClick={() => onSwitchNode(selectedNode.node_id)}
+                    >
+                      用这个节点
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    disabled={!canPick}
+                    onClick={() => setPickerOpen((open) => !open)}
+                  >
+                    更换
+                  </button>
+                  {connected ? (
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      disabled={!nodeProbeAvailable || probe?.status === "testing"}
+                      onClick={() => void runProbe()}
+                    >
+                      检查
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="node-card__facts num">
+                {selectedNode.server} : {selectedNode.port}
+                <span className="sep">·</span>
+                {selectedNode.method}
+              </div>
+
+              {probeLabel ? (
+                <p
+                  className={`node-card__probe ${
+                    probe?.status === "ok" ? "is-ok" : probe?.status === "fail" ? "is-err" : ""
+                  }`}
+                  title={probe?.status === "fail" ? probe.message ?? undefined : undefined}
+                >
+                  {probeLabel}
+                </p>
+              ) : null}
+              {switching ? (
+                <p className="node-card__hint">
+                  {nodeSwitchAvailable
+                    ? "点「用这个节点」才会真正切换。"
+                    : "这个版本还不能切换节点。"}
+                </p>
+              ) : null}
+
+              {pickerOpen ? (
+                <div className="node-picker" role="listbox" aria-label="这个配置里的节点">
+                  {config.nodes.map((node) => (
+                    <button
+                      key={node.node_id}
+                      type="button"
+                      role="option"
+                      aria-selected={node.node_id === selectedNodeId}
+                      className={`node-picker__item ${
+                        node.node_id === selectedNodeId ? "is-selected" : ""
+                      }`}
+                      onClick={() => {
+                        setSelectedId(node.node_id);
+                        setPickerOpen(false);
+                        setProbe(null);
+                      }}
+                    >
+                      <span className="node-picker__name">{node.name}</span>
+                      {node.node_id === config.current_node_id ? (
+                        <span className="node-picker__badge">当前</span>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </footer>
+          ) : null}
+        </>
+      )}
     </main>
+  );
+}
+
+function isProxy(config: ConfigDetail): boolean {
+  return config.connect_mode === "system_proxy" && config.routing_mode === "proxy_selected";
+}
+
+function RateStrip({
+  samples,
+  warn,
+  current,
+}: {
+  samples: RateSample[];
+  warn: boolean;
+  current: { up: number; down: number } | null;
+}) {
+  const chart = rateChart(samples);
+  return (
+    <section className={`strip ${warn ? "strip--warn" : ""}`} aria-label="最近 60 秒速率">
+      <div className="strip__head">
+        <span className="strip__label">最近 60 秒</span>
+        <span className="strip__rates">
+          {current
+            ? `上行 ${formatTraffic(current.up)}/s · 下行 ${formatTraffic(current.down)}/s`
+            : "等下一条采样"}
+        </span>
+      </div>
+      <svg className="strip__chart" viewBox="0 0 700 56" preserveAspectRatio="none" aria-hidden>
+        <line className="strip__base" x1="0" y1="53.5" x2="700" y2="53.5" />
+        {chart.area ? <path className="strip__area" d={chart.area} /> : null}
+        <path className="strip__line" d={chart.line} />
+      </svg>
+      <div className="strip__axis">
+        <span>60 秒前</span>
+        <span>现在</span>
+      </div>
+    </section>
   );
 }

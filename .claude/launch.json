@@ -24,6 +24,18 @@
         "site"
       ],
       "port": 4173
+    },
+    {
+      "name": "veyl-prototype",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "4174",
+        "--directory",
+        "docs/design/prototype"
+      ],
+      "port": 4174
     }
   ]
 }

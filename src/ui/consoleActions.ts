@@ -4,7 +4,6 @@ export type ZeroConfigMode =
   | "just-onboarded-stopped"
   | "ai-ready"
   | "manual";
-export type ZeroConfigAction = "ask-ai" | "new-config";
 
 /** 最后一条 assistant 消息的纯文本；没有 assistant 消息时返回 null。 */
 export function lastAssistantTextOf(
@@ -57,26 +56,28 @@ export function zeroConfigMode(
   return settled ? "just-onboarded-stopped" : "just-onboarded";
 }
 
-export function zeroConfigActions(mode: ZeroConfigMode): ZeroConfigAction[] {
-  if (mode === "ai-ready" || mode === "just-onboarded-stopped") {
-    return ["ask-ai", "new-config"];
-  }
-  return ["new-config"];
+export interface ZeroConfigStep {
+  title: string;
+  detail: string;
 }
 
 export interface ZeroConfigContent {
   title: string;
   body: string | null;
-  steps: string[] | null;
+  steps: ZeroConfigStep[] | null;
   primaryLabel: string | null;
 }
 
 export function zeroConfigContent(mode: ZeroConfigMode): ZeroConfigContent {
   if (mode === "just-onboarded") {
     return {
-      title: "已经配好了。",
-      body: "右边的对话已经开始了。回答两个问题，我就生成配置。",
-      steps: null,
+      title: "先配一条线路",
+      body: "右边的助手正在问你要用在哪，回答完就生成配置。",
+      steps: [
+        { title: "告诉助手你要访问什么", detail: "网页，或者桌面软件。" },
+        { title: "我按你的情况生成配置", detail: "自动选好节点和连接方式。" },
+        { title: "点「启动 VPN」", detail: "之后随时可以换节点。" },
+      ],
       primaryLabel: null,
     };
   }
@@ -90,19 +91,19 @@ export function zeroConfigContent(mode: ZeroConfigMode): ZeroConfigContent {
   }
   if (mode === "ai-ready") {
     return {
-      title: "说一句，我来把网络配好。",
+      title: "先配一条线路",
       body: null,
       steps: [
-        "告诉我你要访问的网站或应用。",
-        "我按你的情况生成配置。",
-        "点顶部的「启动 VPN」就连上。",
+        { title: "告诉助手你要访问什么", detail: "网页，或者桌面软件。" },
+        { title: "我按你的情况生成配置", detail: "自动选好节点和连接方式。" },
+        { title: "点「启动 VPN」", detail: "之后随时可以换节点。" },
       ],
-      primaryLabel: "让 AI 帮我配",
+      primaryLabel: "让助手帮我配",
     };
   }
   return {
     title: "先新建一套配置。",
-    body: "建好后，点顶部的「启动 VPN」就能连上。",
+    body: "建好后，点「启动 VPN」就能连上。",
     steps: null,
     primaryLabel: "我自己配置",
   };

@@ -36,6 +36,10 @@ export function IconChevronLeft({ size = 16, className }: IconProps) {
   return base(size, className, <path d="M9.5 4 5.5 8l4 4" />);
 }
 
+export function IconChevronRight({ size = 16, className }: IconProps) {
+  return base(size, className, <path d="M6.5 4 10.5 8l-4 4" />);
+}
+
 export function IconList({ size = 16, className }: IconProps) {
   return base(
     size,

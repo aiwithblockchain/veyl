@@ -1,16 +1,15 @@
 /** @vitest-environment jsdom */
 import { cleanup, fireEvent, render } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
-import type {
-  ConfigDetail,
-  NodeSummary,
-  RuntimeView,
-} from "../agent/protocol";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ConfigDetail, NodeSummary, RuntimeView } from "../agent/protocol";
 import { CONTRACT_VERSION } from "../agent/protocol";
 import { emptyRuntimeView } from "../agent/bridge";
 import { Console } from "./Console";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 const NODES: NodeSummary[] = [
   {
@@ -35,27 +34,24 @@ const NODES: NodeSummary[] = [
   },
 ];
 
-function makeConfig(
-  currentNodeId: string | null,
-  nodes: NodeSummary[] = NODES,
-): ConfigDetail {
+function makeConfig(currentNodeId: string | null): ConfigDetail {
   return {
     config_id: "cfg-1",
     name: "测试配置",
-    connect_mode: "proxy",
-    routing_mode: "rule",
-    node_count: nodes.length,
+    connect_mode: "system_proxy",
+    routing_mode: "direct",
+    node_count: NODES.length,
     listen_port: 2080,
     is_active: true,
     current_node_id: currentNodeId,
     created_at: 0,
     updated_at: 0,
     last_used_at: null,
-    nodes,
-    dns: { mode: "auto", servers: [] },
+    nodes: NODES,
+    dns: { mode: "auto", local: [], remote: [] },
     tun_excludes: [],
     layout: null,
-  } as unknown as ConfigDetail;
+  } as ConfigDetail;
 }
 
 function makeRuntime(over: Partial<RuntimeView> = {}): RuntimeView {
@@ -66,26 +62,22 @@ const noop = () => {};
 const never = async () => ({ ok: false, latencyMs: null, unreachable: false });
 
 interface RenderOptions {
-  connection?: "idle" | "starting" | "connected" | "stopping";
   runtime?: RuntimeView;
   config?: ConfigDetail | null;
   loading?: boolean;
+  failedAfterConnected?: boolean;
 }
 
 function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
   return (
     <Console
       config={config}
-      connection={opts.connection ?? "idle"}
       onStart={noop}
       onStop={noop}
       onSwitchNode={noop}
       onProbe={never}
       nodeSwitchAvailable={false}
       nodeProbeAvailable={false}
-      panelOpen={false}
-      aiUnread={false}
-      onTogglePanel={noop}
       aiReady
       justOnboarded={false}
       zeroConfigSettled
@@ -94,6 +86,7 @@ function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
       onNewConfig={noop}
       loading={opts.loading}
       runtime={opts.runtime ?? makeRuntime()}
+      failedAfterConnected={opts.failedAfterConnected}
     />
   );
 }
@@ -101,63 +94,75 @@ function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
 function renderConsole(opts: RenderOptions) {
   const config = opts.config === undefined ? makeConfig("n-tokyo") : opts.config;
   const utils = render(consoleElement(config, opts));
-  const summary = utils.container.querySelector(".console-summary");
+  const text = (selector: string) =>
+    (utils.container.querySelector(selector)?.textContent ?? "").replace(/\s+/g, " ").trim();
+  const rows = Array.from(utils.container.querySelectorAll(".ledger__row")).map((row) => ({
+    label: row.querySelector("dt")?.textContent ?? "",
+    value: row.querySelector(".ledger__value")?.textContent ?? "",
+    sub: row.querySelector(".ledger__sub")?.textContent ?? "",
+  }));
   return {
     ...utils,
-    summary,
-    summaryText: (summary?.textContent ?? "").replace(/\s+/g, " ").trim(),
-    cardText: (utils.container.querySelector(".console-node")?.textContent ?? "")
-      .replace(/\s+/g, " ")
-      .trim(),
-    stats: utils.container.querySelector(".console-node__stats"),
-    offline: utils.container.querySelector(".console-node__offline"),
-    currentLine: utils.container.querySelector(".console-node__current"),
-    tech: utils.container.querySelector(".console-node__tech"),
+    text,
+    rows,
+    stateWord: utils.container.querySelector(".state-word")?.textContent ?? "",
+    timecode: utils.container.querySelector(".timecode")?.textContent ?? null,
+    caption: text(".hero__caption"),
+    cardText: () => text(".node-card"),
+    note: text(".note"),
+    card: utils.container.querySelector(".card"),
   };
 }
 
 describe("状态矩阵", () => {
-  it("1 未连接：无摘要行，卡片显示未连接，可开技术详情", () => {
-    const r = renderConsole({ connection: "idle" });
-    expect(r.summary).toBeNull();
-    expect(r.offline?.textContent).toBe("未连接");
-    expect(r.stats).toBeNull();
-    expect(r.tech).not.toBeNull();
-    expect(r.cardText).not.toContain("已用");
+  it("1 未连接：H1 未连接，读数行是方式 / 范围 / 节点", () => {
+    const r = renderConsole({});
+    expect(r.stateWord).toBe("未连接");
+    expect(r.timecode).toBeNull();
+    expect(r.rows.map((row) => row.label)).toEqual(["方式", "范围", "节点"]);
+    expect(r.rows[0].value).toBe("浏览器代理");
+    expect(r.rows[2].value).toBe("2 个可选");
+    expect(r.text(".hero .btn")).toBe("启动 VPN");
   });
 
-  it("2 连接中：无摘要行，卡片写正在连接", () => {
-    const r = renderConsole({ connection: "starting" });
-    expect(r.summary).toBeNull();
-    expect(r.offline?.textContent).toBe("正在连接");
+  it("2 连接中：H1 正在连接 + 进度线 + 取消", () => {
+    const r = renderConsole({ runtime: makeRuntime({ state: "starting" }) });
+    expect(r.stateWord).toBe("正在连接");
+    expect(r.container.querySelector(".progress")).not.toBeNull();
+    expect(r.text(".hero .btn")).toBe("取消");
+    expect(r.container.querySelector(".ledger")).toBeNull();
   });
 
-  it("2b 断开中：无摘要行，卡片写正在断开", () => {
-    const r = renderConsole({ connection: "stopping" });
-    expect(r.summary).toBeNull();
-    expect(r.offline?.textContent).toBe("正在断开");
+  it("2b 断开中：H1 正在断开，按钮禁用", () => {
+    const r = renderConsole({ runtime: makeRuntime({ state: "stopping" }) });
+    expect(r.stateWord).toBe("正在断开");
+    const button = r.container.querySelector<HTMLButtonElement>(".hero .btn");
+    expect(button?.textContent).toBe("正在断开…");
+    expect(button?.disabled).toBe(true);
   });
 
-  it("3 刚连上：四个占位都在", () => {
+  it("3 刚连上：计时器 00:00:00，读数都是占位", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-05T10:00:00Z"));
     const r = renderConsole({
-      connection: "connected",
-      runtime: makeRuntime({ state: "running" }),
+      runtime: makeRuntime({ state: "running", connected_since: new Date().toISOString() }),
     });
-    console.log("[state 3] summary:", r.summaryText);
-    expect(r.summaryText).toContain("刚刚");
-    expect(r.summaryText).toContain("已用 —");
-    expect(r.summaryText).toContain("延迟确认中…");
-    expect(r.summaryText).toContain("正在确认出口…");
+    expect(r.timecode).toBe("00:00:00");
+    expect(r.rows.map((row) => row.label)).toEqual(["流量", "延迟", "出口"]);
+    expect(r.rows[0].value).toBe("—");
+    expect(r.rows[1].value).toBe("—");
+    expect(r.rows[2].value).toBe("—");
+    expect(r.rows[2].sub).toBe("正在确认出口…");
   });
 
-  it("4 稳定后：四个数都来自 runtime", () => {
-    const since = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  it("4 稳定后：计时器、流量、延迟、出口都来自 runtime", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-05T10:00:00Z"));
+    const since = new Date(Date.now() - 301_000).toISOString();
     const r = renderConsole({
-      connection: "connected",
       runtime: makeRuntime({
         state: "running",
         connected_since: since,
-        latency_ms: 42,
         node_latency_ms: 42,
         traffic: {
           up_bytes: 300000,
@@ -177,20 +182,19 @@ describe("状态矩阵", () => {
         } as RuntimeView["health"],
       }),
     });
-    console.log("[state 4] summary:", r.summaryText);
-    expect(r.summaryText).toContain("5 分钟");
-    expect(r.summaryText).toContain("已用 1.0 MB");
-    expect(r.summaryText).toContain("延迟 42 毫秒");
-    expect(r.summaryText).toContain("203.0.113.9");
-    expect(r.summaryText).not.toContain("—");
+    expect(r.timecode).toBe("00:05:01");
+    expect(r.rows[0].value).toBe("1.0 MB");
+    expect(r.rows[0].sub).toContain("上行 293 KB");
+    expect(r.rows[1].value).toBe("42 ms");
+    expect(r.rows[1].sub).toBe("刚刚检测");
+    expect(r.rows[2].value).toBe("203.0.113.9");
+    expect(r.text(".hero .btn")).toBe("断开 VPN");
   });
 
-  it("6 断开瞬间：摘要和统计都清掉", () => {
-    const since = new Date(Date.now() - 60_000).toISOString();
+  it("6 断开瞬间：回到未连接读数行，不残留流量与计时器", () => {
     const r = renderConsole({
-      connection: "idle",
       runtime: makeRuntime({
-        connected_since: since,
+        connected_since: new Date().toISOString(),
         traffic: {
           up_bytes: 1000,
           down_bytes: 2000,
@@ -200,119 +204,67 @@ describe("状态矩阵", () => {
         },
       }),
     });
-    console.log("[state 6] card:", r.cardText);
-    expect(r.summary).toBeNull();
-    expect(r.stats).toBeNull();
-    expect(r.cardText).not.toContain("1 KB");
-    expect(r.cardText).not.toContain("已用");
-    expect(r.cardText).not.toContain("分钟");
+    expect(r.timecode).toBeNull();
+    expect(r.rows.map((row) => row.label)).toEqual(["方式", "范围", "节点"]);
+    expect(r.text(".console")).not.toContain("上行");
+    expect(r.text(".console")).not.toContain("已用");
   });
 
-  it("7 流量为 null：三处都不能是 0 B", () => {
-    const r = renderConsole({
-      connection: "connected",
-      runtime: makeRuntime({ state: "running" }),
-    });
-    expect(r.summaryText).toContain("已用 —");
-    expect(r.summaryText).not.toContain("0 B");
-    const ds = Array.from(r.stats?.querySelectorAll("dd") ?? []).map(
-      (d) => d.textContent,
-    );
-    console.log("[state 7] stats dd:", ds);
-    expect(ds[0]).toBe("—");
-    expect(r.cardText).not.toContain("0 B");
+  it("7 流量为 null：显示破折号，不是 0 B", () => {
+    const r = renderConsole({ runtime: makeRuntime({ state: "running" }) });
+    expect(r.rows[0].value).toBe("—");
+    expect(r.rows[0].sub).toBe("还没开始统计");
+    expect(r.text(".console")).not.toContain("0 B");
   });
 
-  it("5a 选中别的节点：只显示当前线路，选中节点没有流量/延迟", () => {
-    const since = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    const r = renderConsole({
-      connection: "connected",
-      runtime: makeRuntime({
-        state: "running",
-        connected_since: since,
-        latency_ms: 42,
-        node_latency_ms: 42,
-        traffic: {
-          up_bytes: 0,
-          down_bytes: 1_048_576,
-          up_rate: 0,
-          down_rate: 0,
-          sampled_at: new Date().toISOString(),
-        },
-      }),
-    });
-    fireEvent.click(r.container.querySelector(".console-node__name")!);
+  it("5a 选中别的节点：卡片换成选中节点，出现用这个节点", () => {
+    const r = renderConsole({ runtime: makeRuntime({ state: "running" }) });
+    fireEvent.click(r.container.querySelector(".node-card__name")!);
     const items = Array.from(
       r.container.querySelectorAll<HTMLButtonElement>(".node-picker__item"),
     );
     fireEvent.click(items.find((el) => el.textContent?.includes("大阪 02"))!);
-    const current = r.container.querySelector(".console-node__current");
-    const cardText = (
-      r.container.querySelector(".console-node")?.textContent ?? ""
-    )
-      .replace(/\s+/g, " ")
-      .trim();
-    console.log("[state 5] current:", current?.textContent);
-    console.log("[state 5] card:", cardText);
-    expect(r.container.querySelector(".console-node__stats")).toBeNull();
-    expect(cardText).not.toContain("已用流量");
-    expect(cardText).not.toContain("延迟");
-    expect(cardText).toContain("当前线路");
-    expect(cardText).toContain("东京 01");
-    expect(cardText).toContain("5 分钟");
-    expect(cardText).toContain("1.0 MB");
+    expect(r.text(".node-card__label")).toBe("选中的节点");
+    expect(r.text(".node-card__name")).toBe("大阪 02");
+    expect(r.cardText()).toContain("osaka.example.com");
+    expect(r.cardText()).toContain("用这个节点");
+    expect(r.cardText()).not.toContain("当前节点");
   });
 
   it("8 加载中：骨架出现，真实卡片不出现", () => {
     const r = renderConsole({ loading: true });
-    expect(r.container.querySelector(".console-node__skeleton")).not.toBeNull();
-    expect(r.tech).toBeNull();
-  });
-
-  it("10 延迟只显示节点延迟，出口探测耗时不上界面", () => {
-    const r = renderConsole({
-      connection: "connected",
-      runtime: makeRuntime({
-        state: "running",
-        latency_ms: 999,
-        node_latency_ms: 42,
-      }),
-    });
-    expect(r.summaryText).toContain("延迟 42 毫秒");
-    expect(r.summaryText).not.toContain("999");
-    const ds = Array.from(r.stats?.querySelectorAll("dd") ?? []).map(
-      (d) => d.textContent,
-    );
-    expect(ds[1]).toBe("42 毫秒");
-    expect(r.cardText).not.toContain("999");
-
-    const onlyExit = renderConsole({
-      connection: "connected",
-      runtime: makeRuntime({ state: "running", latency_ms: 999 }),
-    });
-    expect(onlyExit.summaryText).toContain("延迟确认中…");
-    expect(onlyExit.summaryText).not.toContain("999");
+    expect(r.container.querySelector(".skeleton--hero")).not.toBeNull();
+    expect(r.container.querySelector(".node-card")).toBeNull();
   });
 
   it("9 选中的节点消失：回退到当前节点", () => {
     const r = renderConsole({});
-    fireEvent.click(r.container.querySelector(".console-node__name")!);
+    fireEvent.click(r.container.querySelector(".node-card__name")!);
     const items = Array.from(
       r.container.querySelectorAll<HTMLButtonElement>(".node-picker__item"),
     );
     fireEvent.click(items.find((el) => el.textContent?.includes("大阪 02"))!);
-    expect(r.container.querySelector(".console-node__current")).not.toBeNull();
+    expect(r.text(".node-card__label")).toBe("选中的节点");
 
-    r.rerender(consoleElement(makeConfig("n-tokyo", NODES.slice(0, 1)), {}));
-    const cardText = (
-      r.container.querySelector(".console-node")?.textContent ?? ""
-    )
-      .replace(/\s+/g, " ")
-      .trim();
-    expect(cardText).toContain("东京 01");
-    expect(cardText).not.toContain("还没有节点");
-    expect(r.container.querySelector(".console-node__badge")?.textContent).toBe(
-      "当前使用",
+    r.rerender(
+      consoleElement({ ...makeConfig("n-tokyo"), nodes: NODES.slice(0, 1) }, {}),
     );
+    expect(r.text(".node-card__name")).toBe("东京 01");
+    expect(r.text(".node-card__label")).toBe("当前节点");
+    expect(r.cardText()).not.toContain("还没有节点");
+  });
+
+  it("10 延迟只显示节点延迟，出口探测耗时不上界面", () => {
+    const r = renderConsole({
+      runtime: makeRuntime({ state: "running", latency_ms: 999, node_latency_ms: 42 }),
+    });
+    expect(r.rows[1].value).toBe("42 ms");
+    expect(r.text(".console")).not.toContain("999");
+
+    const onlyExit = renderConsole({
+      runtime: makeRuntime({ state: "running", latency_ms: 999 }),
+    });
+    expect(onlyExit.rows[1].value).toBe("—");
+    expect(onlyExit.text(".console")).not.toContain("999");
   });
 });

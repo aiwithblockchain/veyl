@@ -348,6 +348,8 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       setConnectedConfigId(null);
       const configId = activeConfigId;
       pendingConfigIdRef.current = configId;
+      // 同时驱动 mock 运行时的状态事件，让面板按真实事件流更新。
+      void bridge.runtimeStart(configId).catch(() => undefined);
       timer.current = window.setTimeout(() => {
         timer.current = null;
         pendingConfigIdRef.current = null;
@@ -374,6 +376,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       clearTimer();
       pendingConfigIdRef.current = null;
       setConnection("stopping");
+      void bridge.runtimeStop().catch(() => undefined);
       timer.current = window.setTimeout(() => {
         timer.current = null;
         setConnection("idle");

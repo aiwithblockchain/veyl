@@ -1,25 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDuration, formatTraffic } from "./format";
-
-describe("formatDuration", () => {
-  it("59 秒显示刚刚，60 秒起按分钟", () => {
-    expect(formatDuration(0)).toBe("刚刚");
-    expect(formatDuration(59)).toBe("刚刚");
-    expect(formatDuration(60)).toBe("1 分钟");
-  });
-
-  it("59 分、1 小时、1 小时 12 分、24 小时", () => {
-    expect(formatDuration(59 * 60)).toBe("59 分钟");
-    expect(formatDuration(60 * 60)).toBe("1 小时");
-    expect(formatDuration(60 * 60 + 12 * 60)).toBe("1 小时 12 分钟");
-    expect(formatDuration(24 * 60 * 60)).toBe("24 小时");
-  });
-
-  it("非有限值显示破折号", () => {
-    expect(formatDuration(Number.NaN)).toBe("—");
-    expect(formatDuration(Infinity)).toBe("—");
-  });
-});
+import { formatCheckedAgo, formatClock, formatTraffic } from "./format";
 
 describe("formatTraffic", () => {
   it("1023 B 显示字节，1024 B 起按 KB 取整", () => {
@@ -45,5 +25,35 @@ describe("formatTraffic", () => {
   it("非有限值显示破折号", () => {
     expect(formatTraffic(Number.NaN)).toBe("—");
     expect(formatTraffic(Infinity)).toBe("—");
+  });
+});
+
+describe("formatClock", () => {
+  it("按 HH:MM:SS 补零", () => {
+    expect(formatClock(0)).toBe("00:00:00");
+    expect(formatClock(61)).toBe("00:01:01");
+    expect(formatClock(12 * 60 + 47)).toBe("00:12:47");
+    expect(formatClock(3600 + 5)).toBe("01:00:05");
+  });
+
+  it("非有限或负数按 00:00:00", () => {
+    expect(formatClock(Number.NaN)).toBe("00:00:00");
+    expect(formatClock(-5)).toBe("00:00:00");
+    expect(formatClock(Infinity)).toBe("00:00:00");
+  });
+});
+
+describe("formatCheckedAgo", () => {
+  const now = Date.parse("2026-11-05T10:00:00Z");
+
+  it("5 秒内是刚刚检测，之后按秒/分钟", () => {
+    expect(formatCheckedAgo("2026-11-05T09:59:58Z", now)).toBe("刚刚检测");
+    expect(formatCheckedAgo("2026-11-05T09:59:48Z", now)).toBe("12 秒前检测");
+    expect(formatCheckedAgo("2026-11-05T09:58:00Z", now)).toBe("2 分钟前检测");
+  });
+
+  it("缺失或无效时显示确认中", () => {
+    expect(formatCheckedAgo(null, now)).toBe("确认中…");
+    expect(formatCheckedAgo("not-a-date", now)).toBe("确认中…");
   });
 });

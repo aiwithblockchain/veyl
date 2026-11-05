@@ -1,14 +1,3 @@
-/** 时长按秒转成用户口径：<60 秒「刚刚」，<60 分钟按分钟，更长按小时 + 分钟。 */
-export function formatDuration(totalSeconds: number): string {
-  if (!Number.isFinite(totalSeconds)) return "—";
-  const seconds = Math.max(0, Math.floor(totalSeconds));
-  if (seconds < 60) return "刚刚";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  return minutes === 0 ? `${hours} 小时` : `${hours} 小时 ${minutes} 分钟`;
-}
-
 /** 两位小数精度，去掉末尾多余的 0：1.00 → 1.0，1.04 → 1.04。 */
 function twoDecimals(value: number, unit: "MB" | "GB"): string {
   const fixed = value.toFixed(2);
@@ -30,10 +19,23 @@ export function formatTraffic(bytes: number): string {
   return twoDecimals(value / (1024 * 1024 * 1024), "GB");
 }
 
-/** 技术详情里的采样时间；缺失、无效或纪元值显示破折号。 */
-export function formatSampleTime(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const at = Date.parse(iso);
-  if (!Number.isFinite(at) || at <= 0) return "—";
-  return new Date(at).toLocaleTimeString("zh-CN", { hour12: false });
+/** hero 计时器：HH:MM:SS。 */
+export function formatClock(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return "00:00:00";
+  const seconds = Math.floor(totalSeconds);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return `${pad(hours)}:${pad(minutes)}:${pad(seconds % 60)}`;
+}
+
+/** 延迟读数右侧的「刚刚检测 / N 秒前检测」。 */
+export function formatCheckedAgo(iso: string | null, now: number): string {
+  const at = iso ? Date.parse(iso) : Number.NaN;
+  if (!Number.isFinite(at)) return "确认中…";
+  const seconds = Math.max(0, Math.floor((now - at) / 1000));
+  if (seconds < 5) return "刚刚检测";
+  if (seconds < 60) return `${seconds} 秒前检测`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes} 分钟前检测` : "很久没检测";
 }

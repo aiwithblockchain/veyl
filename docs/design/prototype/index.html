@@ -1,0 +1,984 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veyl · 主界面重塑原型</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<nav class="review" aria-label="原型状态切换">
+  <span class="review__title">Veyl · UI 重塑</span>
+  <div class="review__links"><a href="#s01">01 首启</a><a href="#s02">02 未连接</a><a href="#s03">03 连接中</a><a href="#s04">04 浏览器</a><a href="#s05">05 全部软件</a><a href="#s06">06 降级</a><a href="#s07">07 失败</a><a href="#s08">08 无节点</a><a href="#s09">09 代理</a><a href="#s10">10 窄窗</a></div>
+  <span class="review__meta">DESKTOP · LIGHT</span>
+</nav>
+
+  <section class="screen" id="s01" aria-label="首次启动，没有配置">
+    <div class="app ">
+      
+    <aside class="rail" aria-label="配置列表">
+      <header class="rail__brand">
+        <span class="wordmark">Veyl</span>
+        <span class="rail__sub">网络控制台</span>
+      </header>
+      <div class="rail__section">
+        <span class="rail__label">配置</span>
+        <span class="rail__count">0</span>
+        <button class="icon-btn" aria-label="新建配置" title="新建配置"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+      </div>
+      
+        <div class="rail__empty">
+          <p class="rail__empty-title">还没有配置</p>
+          <p class="rail__empty-text">让助手配一条，或自己新建一套。</p>
+        </div>
+      <footer class="rail__foot">
+        <button class="rail__settings"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 5h11M2.5 11h11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="6" cy="5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="11" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>设置</span></button>
+      </footer>
+    </aside>
+      <main class="console">
+        <header class="console__head">
+          <span class="console__crumb">控制台</span>
+          <span class="console__meta"></span>
+        </header>
+        <div class="console__body console__body--welcome">
+          <p class="sr-only" role="status" aria-live="polite">还没有配置</p>
+          
+    <section class="hero">
+      <div class="hero__main">
+        <h1 class="state-word"><span>先配一条线路</span></h1>
+        
+      </div>
+      <button class="btn btn--primary">让助手帮我配</button>
+    </section>
+    
+          <ol class="steps">
+      <li><span class="steps__num">01</span><span><strong>告诉助手你要访问什么</strong><small>网页，或者桌面软件。</small></span></li>
+      <li><span class="steps__num">02</span><span><strong>我按你的情况生成配置</strong><small>自动选好节点和连接方式。</small></span></li>
+      <li><span class="steps__num">03</span><span><strong>点「启动 VPN」</strong><small>之后随时可以换节点。</small></span></li>
+    </ol>
+          
+        </div>
+      </main>
+      <div class="assistant-slot">
+    <aside class="assistant" aria-label="AI 助手">
+      <header class="assistant__head">
+        <div class="assistant__id">
+          <span class="assistant__name">助手</span>
+          <span class="assistant__model">DeepSeek</span>
+        </div>
+        <div class="assistant__actions">
+          <button class="icon-btn" aria-label="新对话" title="新对话"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+          <button class="icon-btn" aria-label="收起助手" title="收起助手"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </header>
+      <div class="thread"><div class="msg">
+      <span class="msg__who">Veyl</span>
+      <p>先配一条能用的线路。你主要用它做什么？</p>
+      <div class="chips"><button class="chip">只浏览网页</button><button class="chip">桌面软件也要用</button><button class="chip">我自己会配代理</button></div>
+    </div></div>
+      
+      <div class="composer">
+        <div class="composer__box">
+          <span>问点什么，或让我改配置</span>
+          <button class="send" aria-label="发送"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 12.5V4M4.4 7.4 8 3.8l3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="composer__hint">⌘↵ 发送</div>
+      </div>
+    </aside><aside class="assistant-tab" aria-label="助手已收起"><span class="assistant-tab__label">助手</span><span class="assistant-tab__dot"></span><button class="icon-btn" aria-label="展开助手"><svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3.5 5.2A1.7 1.7 0 0 1 5.2 3.5h9.6a1.7 1.7 0 0 1 1.7 1.7v6.2a1.7 1.7 0 0 1-1.7 1.7H9.2L6 15.4v-2.3H5.2a1.7 1.7 0 0 1-1.7-1.7z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg></button></aside></div>
+    </div>
+  </section>
+  <section class="screen" id="s02" aria-label="有配置，未连接">
+    <div class="app ">
+      
+    <aside class="rail" aria-label="配置列表">
+      <header class="rail__brand">
+        <span class="wordmark">Veyl</span>
+        <span class="rail__sub">网络控制台</span>
+      </header>
+      <div class="rail__section">
+        <span class="rail__label">配置</span>
+        <span class="rail__count">3</span>
+        <button class="icon-btn" aria-label="新建配置" title="新建配置"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+      </div>
+      <ul class="configs"><li class="config is-active" tabindex="0">
+              <span class="config__name">家里</span>
+              <span class="config__meta">3 个节点 · 浏览器</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">公司</span>
+              <span class="config__meta">5 个节点 · 全部软件</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">客户</span>
+              <span class="config__meta">2 个节点 · 本机代理</span>
+            </li></ul>
+      <footer class="rail__foot">
+        <button class="rail__settings"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 5h11M2.5 11h11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="6" cy="5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="11" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>设置</span></button>
+      </footer>
+    </aside>
+      <main class="console">
+        <header class="console__head">
+          <span class="console__crumb">控制台</span>
+          <span class="console__meta"></span>
+        </header>
+        <div class="console__body ">
+          <p class="sr-only" role="status" aria-live="polite">连接状态：未连接</p>
+          
+    <section class="hero">
+      <div class="hero__main">
+        <h1 class="state-word"><span>未连接</span></h1>
+        
+      </div>
+      <button class="btn btn--primary">启动 VPN</button>
+    </section>
+    
+          <dl class="ledger"><div class="ledger__row">
+              <dt class="ledger__label">方式</dt>
+              <dd class="ledger__value ledger__value--text">浏览器代理</dd>
+              <dd class="ledger__sub">只影响浏览器</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">范围</dt>
+              <dd class="ledger__value ledger__value--text">本地网站直连</dd>
+              <dd class="ledger__sub">其它走节点</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">节点</dt>
+              <dd class="ledger__value ledger__value--text">3 个可选</dd>
+              <dd class="ledger__sub">可切换</dd>
+            </div></dl><div class="one-thing"><p class="note note--idle">点上面的「启动 VPN」，浏览器就能用了。</p></div>
+          
+    <footer class="node-card">
+      <div class="node-card__head">
+        <div>
+          <span class="node-card__label">当前节点</span>
+          <span class="node-card__name">东京 01</span>
+        </div>
+        <div class="node-card__actions"><button class="btn btn--ghost">更换</button></div>
+      </div>
+      <div class="node-card__facts">203.0.113.8 : 20343<span class="sep">·</span>aes-256-gcm</div>
+    </footer>
+        </div>
+      </main>
+      <div class="assistant-slot">
+    <aside class="assistant" aria-label="AI 助手">
+      <header class="assistant__head">
+        <div class="assistant__id">
+          <span class="assistant__name">助手</span>
+          <span class="assistant__model">DeepSeek</span>
+        </div>
+        <div class="assistant__actions">
+          <button class="icon-btn" aria-label="新对话" title="新对话"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+          <button class="icon-btn" aria-label="收起助手" title="收起助手"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </header>
+      <div class="thread"><div class="msg">
+      <span class="msg__who">Veyl</span>
+      <p>这条线路已经就绪。需要我做什么？</p>
+      <div class="chips"><button class="chip">测一下延迟</button><button class="chip">解释连接方式</button></div>
+    </div></div>
+      
+      <div class="composer">
+        <div class="composer__box">
+          <span>问点什么，或让我改配置</span>
+          <button class="send" aria-label="发送"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 12.5V4M4.4 7.4 8 3.8l3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="composer__hint">⌘↵ 发送</div>
+      </div>
+    </aside><aside class="assistant-tab" aria-label="助手已收起"><span class="assistant-tab__label">助手</span><span class="assistant-tab__dot"></span><button class="icon-btn" aria-label="展开助手"><svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3.5 5.2A1.7 1.7 0 0 1 5.2 3.5h9.6a1.7 1.7 0 0 1 1.7 1.7v6.2a1.7 1.7 0 0 1-1.7 1.7H9.2L6 15.4v-2.3H5.2a1.7 1.7 0 0 1-1.7-1.7z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg></button></aside></div>
+    </div>
+  </section>
+  <section class="screen" id="s03" aria-label="正在连接">
+    <div class="app ">
+      
+    <aside class="rail" aria-label="配置列表">
+      <header class="rail__brand">
+        <span class="wordmark">Veyl</span>
+        <span class="rail__sub">网络控制台</span>
+      </header>
+      <div class="rail__section">
+        <span class="rail__label">配置</span>
+        <span class="rail__count">3</span>
+        <button class="icon-btn" aria-label="新建配置" title="新建配置"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+      </div>
+      <ul class="configs"><li class="config is-active" tabindex="0">
+              <span class="config__name">家里</span>
+              <span class="config__meta">3 个节点 · 浏览器</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">公司</span>
+              <span class="config__meta">5 个节点 · 全部软件</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">客户</span>
+              <span class="config__meta">2 个节点 · 本机代理</span>
+            </li></ul>
+      <footer class="rail__foot">
+        <button class="rail__settings"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 5h11M2.5 11h11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="6" cy="5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="11" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>设置</span></button>
+      </footer>
+    </aside>
+      <main class="console">
+        <header class="console__head">
+          <span class="console__crumb">控制台</span>
+          <span class="console__meta"></span>
+        </header>
+        <div class="console__body ">
+          <p class="sr-only" role="status" aria-live="polite">连接状态：正在连接</p>
+          
+    <section class="hero">
+      <div class="hero__main">
+        <h1 class="state-word"><span class="led is-connecting" aria-hidden="true"></span><span>正在连接</span></h1>
+        
+      </div>
+      <button class="btn btn--outline">取消</button>
+    </section>
+    <div class="progress" aria-hidden="true"></div>
+          <div class="one-thing"><p class="note note--idle">通常几秒。超过半分钟还没连上，可以取消后换一个节点。</p></div>
+          
+    <footer class="node-card">
+      <div class="node-card__head">
+        <div>
+          <span class="node-card__label">当前节点</span>
+          <span class="node-card__name">东京 01</span>
+        </div>
+        
+      </div>
+      <div class="node-card__facts">203.0.113.8 : 20343<span class="sep">·</span>aes-256-gcm</div>
+    </footer>
+        </div>
+      </main>
+      <div class="assistant-slot">
+    <aside class="assistant" aria-label="AI 助手">
+      <header class="assistant__head">
+        <div class="assistant__id">
+          <span class="assistant__name">助手</span>
+          <span class="assistant__model">DeepSeek</span>
+        </div>
+        <div class="assistant__actions">
+          <button class="icon-btn" aria-label="新对话" title="新对话"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+          <button class="icon-btn" aria-label="收起助手" title="收起助手"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </header>
+      <div class="thread"><div class="msg">
+      <span class="msg__who">Veyl</span>
+      <p>正在连接。如果一直停在这里，告诉我。</p>
+      
+    </div></div>
+      
+      <div class="composer">
+        <div class="composer__box">
+          <span>问点什么，或让我改配置</span>
+          <button class="send" aria-label="发送"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 12.5V4M4.4 7.4 8 3.8l3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="composer__hint">⌘↵ 发送</div>
+      </div>
+    </aside><aside class="assistant-tab" aria-label="助手已收起"><span class="assistant-tab__label">助手</span><span class="assistant-tab__dot"></span><button class="icon-btn" aria-label="展开助手"><svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3.5 5.2A1.7 1.7 0 0 1 5.2 3.5h9.6a1.7 1.7 0 0 1 1.7 1.7v6.2a1.7 1.7 0 0 1-1.7 1.7H9.2L6 15.4v-2.3H5.2a1.7 1.7 0 0 1-1.7-1.7z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg></button></aside></div>
+    </div>
+  </section>
+  <section class="screen" id="s04" aria-label="已连接（浏览器代理）">
+    <div class="app ">
+      
+    <aside class="rail" aria-label="配置列表">
+      <header class="rail__brand">
+        <span class="wordmark">Veyl</span>
+        <span class="rail__sub">网络控制台</span>
+      </header>
+      <div class="rail__section">
+        <span class="rail__label">配置</span>
+        <span class="rail__count">3</span>
+        <button class="icon-btn" aria-label="新建配置" title="新建配置"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+      </div>
+      <ul class="configs"><li class="config is-active" tabindex="0">
+              <span class="config__name">家里</span>
+              <span class="config__meta">3 个节点 · 浏览器</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">公司</span>
+              <span class="config__meta">5 个节点 · 全部软件</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">客户</span>
+              <span class="config__meta">2 个节点 · 本机代理</span>
+            </li></ul>
+      <footer class="rail__foot">
+        <button class="rail__settings"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 5h11M2.5 11h11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="6" cy="5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="11" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>设置</span></button>
+      </footer>
+    </aside>
+      <main class="console">
+        <header class="console__head">
+          <span class="console__crumb">控制台</span>
+          <span class="console__meta"></span>
+        </header>
+        <div class="console__body ">
+          <p class="sr-only" role="status" aria-live="polite">连接状态：已连接</p>
+          
+    <section class="hero">
+      <div class="hero__main">
+        <h1 class="state-line"><span class="state-line__label"><span class="led is-ok" aria-hidden="true"></span>已连接</span><span class="timecode">00:12:47</span></h1>
+        <p class="hero__caption">本次连接</p>
+      </div>
+      <button class="btn btn--outline">断开 VPN</button>
+    </section>
+    
+          <dl class="ledger"><div class="ledger__row">
+              <dt class="ledger__label">流量</dt>
+              <dd class="ledger__value">1.24 GB</dd>
+              <dd class="ledger__sub">上行 12.4 MB · 下行 1.22 GB</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">延迟</dt>
+              <dd class="ledger__value">28 ms</dd>
+              <dd class="ledger__sub">12 秒前检测</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">出口</dt>
+              <dd class="ledger__value">203.0.113.42</dd>
+              <dd class="ledger__sub"><button class="copy-btn"><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M10.2 5.5V3.9a1.4 1.4 0 0 0-1.4-1.4H3.9a1.4 1.4 0 0 0-1.4 1.4v4.9a1.4 1.4 0 0 0 1.4 1.4h1.6" fill="none" stroke="currentColor" stroke-width="1.2"/></svg> 复制</button></dd>
+            </div></dl><div class="one-thing"><p class="note">浏览器现在能用了。</p></div><section class="strip" aria-label="最近 60 秒速率">
+      <div class="strip__head">
+        <span class="strip__label">最近 60 秒</span>
+        <span class="strip__rates">上行 1.2 MB/s · 下行 12.4 MB/s</span>
+      </div>
+      <svg class="strip__chart" viewBox="0 0 700 56" preserveAspectRatio="none" aria-hidden="true">
+        <line class="strip__base" x1="0" y1="53.5" x2="700" y2="53.5"></line>
+        <path class="strip__area" d="M0,46 L35,43 L70,45 L105,38 L140,40 L175,30 L210,34 L245,28 L280,31 L315,22 L350,26 L385,20 L420,24 L455,18 L490,23 L525,17 L560,21 L595,15 L630,19 L665,14 L700,17 L700,54 L0,54 Z"></path>
+        <path class="strip__line" d="M0,46 L35,43 L70,45 L105,38 L140,40 L175,30 L210,34 L245,28 L280,31 L315,22 L350,26 L385,20 L420,24 L455,18 L490,23 L525,17 L560,21 L595,15 L630,19 L665,14 L700,17"></path>
+      </svg>
+      <div class="strip__axis"><span>60 秒前</span><span>现在</span></div>
+    </section>
+          
+    <footer class="node-card">
+      <div class="node-card__head">
+        <div>
+          <span class="node-card__label">当前节点</span>
+          <span class="node-card__name">东京 01</span>
+        </div>
+        <div class="node-card__actions"><button class="btn btn--ghost">更换</button><button class="btn btn--ghost">检查</button></div>
+      </div>
+      <div class="node-card__facts">203.0.113.8 : 20343<span class="sep">·</span>aes-256-gcm</div>
+    </footer>
+        </div>
+      </main>
+      <div class="assistant-slot">
+    <aside class="assistant" aria-label="AI 助手">
+      <header class="assistant__head">
+        <div class="assistant__id">
+          <span class="assistant__name">助手</span>
+          <span class="assistant__model">DeepSeek</span>
+        </div>
+        <div class="assistant__actions">
+          <button class="icon-btn" aria-label="新对话" title="新对话"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+          <button class="icon-btn" aria-label="收起助手" title="收起助手"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </header>
+      <div class="thread"><div class="msg msg--user">
+      <span class="msg__who">你</span>
+      <p>帮我配一个能看 ChatGPT 的线路。</p>
+      
+    </div><div class="msg">
+      <span class="msg__who">Veyl</span>
+      <p>配好了。需要我解释哪一项？</p>
+      <div class="chips"><button class="chip">流量怎么算</button><button class="chip">怎么换节点</button></div>
+    </div></div>
+      
+      <div class="composer">
+        <div class="composer__box">
+          <span>问点什么，或让我改配置</span>
+          <button class="send" aria-label="发送"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 12.5V4M4.4 7.4 8 3.8l3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="composer__hint">⌘↵ 发送</div>
+      </div>
+    </aside><aside class="assistant-tab" aria-label="助手已收起"><span class="assistant-tab__label">助手</span><span class="assistant-tab__dot"></span><button class="icon-btn" aria-label="展开助手"><svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3.5 5.2A1.7 1.7 0 0 1 5.2 3.5h9.6a1.7 1.7 0 0 1 1.7 1.7v6.2a1.7 1.7 0 0 1-1.7 1.7H9.2L6 15.4v-2.3H5.2a1.7 1.7 0 0 1-1.7-1.7z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg></button></aside></div>
+    </div>
+  </section>
+  <section class="screen" id="s05" aria-label="已连接（全部软件）">
+    <div class="app ">
+      
+    <aside class="rail" aria-label="配置列表">
+      <header class="rail__brand">
+        <span class="wordmark">Veyl</span>
+        <span class="rail__sub">网络控制台</span>
+      </header>
+      <div class="rail__section">
+        <span class="rail__label">配置</span>
+        <span class="rail__count">3</span>
+        <button class="icon-btn" aria-label="新建配置" title="新建配置"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+      </div>
+      <ul class="configs"><li class="config" tabindex="0">
+              <span class="config__name">家里</span>
+              <span class="config__meta">3 个节点 · 浏览器</span>
+            </li>
+<li class="config is-active" tabindex="0">
+              <span class="config__name">公司</span>
+              <span class="config__meta">5 个节点 · 全部软件</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">客户</span>
+              <span class="config__meta">2 个节点 · 本机代理</span>
+            </li></ul>
+      <footer class="rail__foot">
+        <button class="rail__settings"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 5h11M2.5 11h11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="6" cy="5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="11" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>设置</span></button>
+      </footer>
+    </aside>
+      <main class="console">
+        <header class="console__head">
+          <span class="console__crumb">控制台</span>
+          <span class="console__meta"></span>
+        </header>
+        <div class="console__body ">
+          <p class="sr-only" role="status" aria-live="polite">连接状态：已连接</p>
+          
+    <section class="hero">
+      <div class="hero__main">
+        <h1 class="state-line"><span class="state-line__label"><span class="led is-ok" aria-hidden="true"></span>已连接</span><span class="timecode">00:03:08</span></h1>
+        <p class="hero__caption">本次连接</p>
+      </div>
+      <button class="btn btn--outline">断开 VPN</button>
+    </section>
+    
+          <dl class="ledger"><div class="ledger__row">
+              <dt class="ledger__label">流量</dt>
+              <dd class="ledger__value">486 MB</dd>
+              <dd class="ledger__sub">上行 8.2 MB · 下行 478 MB</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">延迟</dt>
+              <dd class="ledger__value">42 ms</dd>
+              <dd class="ledger__sub">刚刚检测</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">出口</dt>
+              <dd class="ledger__value">198.51.100.24</dd>
+              <dd class="ledger__sub"><button class="copy-btn"><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M10.2 5.5V3.9a1.4 1.4 0 0 0-1.4-1.4H3.9a1.4 1.4 0 0 0-1.4 1.4v4.9a1.4 1.4 0 0 0 1.4 1.4h1.6" fill="none" stroke="currentColor" stroke-width="1.2"/></svg> 复制</button></dd>
+            </div></dl><div class="one-thing"><p class="note">所有软件现在都能用了。</p></div><section class="strip" aria-label="最近 60 秒速率">
+      <div class="strip__head">
+        <span class="strip__label">最近 60 秒</span>
+        <span class="strip__rates">上行 0.8 MB/s · 下行 6.2 MB/s</span>
+      </div>
+      <svg class="strip__chart" viewBox="0 0 700 56" preserveAspectRatio="none" aria-hidden="true">
+        <line class="strip__base" x1="0" y1="53.5" x2="700" y2="53.5"></line>
+        <path class="strip__area" d="M0,46 L35,43 L70,45 L105,38 L140,40 L175,30 L210,34 L245,28 L280,31 L315,22 L350,26 L385,20 L420,24 L455,18 L490,23 L525,17 L560,21 L595,15 L630,19 L665,14 L700,17 L700,54 L0,54 Z"></path>
+        <path class="strip__line" d="M0,46 L35,43 L70,45 L105,38 L140,40 L175,30 L210,34 L245,28 L280,31 L315,22 L350,26 L385,20 L420,24 L455,18 L490,23 L525,17 L560,21 L595,15 L630,19 L665,14 L700,17"></path>
+      </svg>
+      <div class="strip__axis"><span>60 秒前</span><span>现在</span></div>
+    </section>
+          
+    <footer class="node-card">
+      <div class="node-card__head">
+        <div>
+          <span class="node-card__label">当前节点</span>
+          <span class="node-card__name">法兰克福 02</span>
+        </div>
+        <div class="node-card__actions"><button class="btn btn--ghost">更换</button><button class="btn btn--ghost">检查</button></div>
+      </div>
+      <div class="node-card__facts">198.51.100.9 : 20343<span class="sep">·</span>aes-256-gcm</div>
+    </footer>
+        </div>
+      </main>
+      <div class="assistant-slot">
+    <aside class="assistant" aria-label="AI 助手">
+      <header class="assistant__head">
+        <div class="assistant__id">
+          <span class="assistant__name">助手</span>
+          <span class="assistant__model">DeepSeek</span>
+        </div>
+        <div class="assistant__actions">
+          <button class="icon-btn" aria-label="新对话" title="新对话"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+          <button class="icon-btn" aria-label="收起助手" title="收起助手"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </header>
+      <div class="thread"><div class="msg msg--user">
+      <span class="msg__who">你</span>
+      <p>桌面软件也要用。</p>
+      
+    </div><div class="msg">
+      <span class="msg__who">Veyl</span>
+      <p>配好了。需要我做什么？</p>
+      <div class="chips"><button class="chip">解释接管范围</button><button class="chip">看一下现在的延迟</button></div>
+    </div></div>
+      
+      <div class="composer">
+        <div class="composer__box">
+          <span>问点什么，或让我改配置</span>
+          <button class="send" aria-label="发送"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 12.5V4M4.4 7.4 8 3.8l3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="composer__hint">⌘↵ 发送</div>
+      </div>
+    </aside><aside class="assistant-tab" aria-label="助手已收起"><span class="assistant-tab__label">助手</span><span class="assistant-tab__dot"></span><button class="icon-btn" aria-label="展开助手"><svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3.5 5.2A1.7 1.7 0 0 1 5.2 3.5h9.6a1.7 1.7 0 0 1 1.7 1.7v6.2a1.7 1.7 0 0 1-1.7 1.7H9.2L6 15.4v-2.3H5.2a1.7 1.7 0 0 1-1.7-1.7z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg></button></aside></div>
+    </div>
+  </section>
+  <section class="screen" id="s06" aria-label="连接降级">
+    <div class="app ">
+      
+    <aside class="rail" aria-label="配置列表">
+      <header class="rail__brand">
+        <span class="wordmark">Veyl</span>
+        <span class="rail__sub">网络控制台</span>
+      </header>
+      <div class="rail__section">
+        <span class="rail__label">配置</span>
+        <span class="rail__count">3</span>
+        <button class="icon-btn" aria-label="新建配置" title="新建配置"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+      </div>
+      <ul class="configs"><li class="config is-active" tabindex="0">
+              <span class="config__name">家里</span>
+              <span class="config__meta">3 个节点 · 浏览器</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">公司</span>
+              <span class="config__meta">5 个节点 · 全部软件</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">客户</span>
+              <span class="config__meta">2 个节点 · 本机代理</span>
+            </li></ul>
+      <footer class="rail__foot">
+        <button class="rail__settings"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 5h11M2.5 11h11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="6" cy="5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="11" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>设置</span></button>
+      </footer>
+    </aside>
+      <main class="console">
+        <header class="console__head">
+          <span class="console__crumb">控制台</span>
+          <span class="console__meta"></span>
+        </header>
+        <div class="console__body ">
+          <p class="sr-only" role="status" aria-live="polite">连接状态：不稳定</p>
+          
+    <section class="hero">
+      <div class="hero__main">
+        <h1 class="state-line"><span class="state-line__label"><span class="led is-warn" aria-hidden="true"></span>连接不稳定</span><span class="timecode">00:04:12</span></h1>
+        <p class="hero__caption">本次连接</p>
+      </div>
+      <button class="btn btn--outline">断开 VPN</button>
+    </section>
+    
+          <dl class="ledger"><div class="ledger__row">
+              <dt class="ledger__label">流量</dt>
+              <dd class="ledger__value">312 MB</dd>
+              <dd class="ledger__sub">上行 6.1 MB · 下行 306 MB</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">延迟</dt>
+              <dd class="ledger__value">186 ms</dd>
+              <dd class="ledger__sub">12 秒前检测</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">出口</dt>
+              <dd class="ledger__value">203.0.113.42</dd>
+              <dd class="ledger__sub"><button class="copy-btn"><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M10.2 5.5V3.9a1.4 1.4 0 0 0-1.4-1.4H3.9a1.4 1.4 0 0 0-1.4 1.4v4.9a1.4 1.4 0 0 0 1.4 1.4h1.6" fill="none" stroke="currentColor" stroke-width="1.2"/></svg> 复制</button></dd>
+            </div></dl><div class="one-thing">
+      <div class="card card--warn">
+        <p class="card__lead">最近的网络检查没有通过。</p>
+        <p class="card__action">能继续用就先不动；网页打不开时，点上面的「断开 VPN」再重新连接。</p>
+      </div>
+    </div><section class="strip strip--warn" aria-label="最近 60 秒速率">
+      <div class="strip__head">
+        <span class="strip__label">最近 60 秒</span>
+        <span class="strip__rates">上行 0.3 MB/s · 下行 1.1 MB/s</span>
+      </div>
+      <svg class="strip__chart" viewBox="0 0 700 56" preserveAspectRatio="none" aria-hidden="true">
+        <line class="strip__base" x1="0" y1="53.5" x2="700" y2="53.5"></line>
+        <path class="strip__area" d="M0,46 L35,43 L70,45 L105,38 L140,40 L175,30 L210,34 L245,28 L280,31 L315,22 L350,26 L385,20 L420,24 L455,18 L490,23 L525,17 L560,21 L595,15 L630,19 L665,14 L700,17 L700,54 L0,54 Z"></path>
+        <path class="strip__line" d="M0,46 L35,43 L70,45 L105,38 L140,40 L175,30 L210,34 L245,28 L280,31 L315,22 L350,26 L385,20 L420,24 L455,18 L490,23 L525,17 L560,21 L595,15 L630,19 L665,14 L700,17"></path>
+      </svg>
+      <div class="strip__axis"><span>60 秒前</span><span>现在</span></div>
+    </section>
+          
+    <footer class="node-card">
+      <div class="node-card__head">
+        <div>
+          <span class="node-card__label">当前节点</span>
+          <span class="node-card__name">东京 01</span>
+        </div>
+        <div class="node-card__actions"><button class="btn btn--ghost">更换</button><button class="btn btn--ghost">检查</button></div>
+      </div>
+      <div class="node-card__facts">203.0.113.8 : 20343<span class="sep">·</span>aes-256-gcm</div>
+    </footer>
+        </div>
+      </main>
+      <div class="assistant-slot">
+    <aside class="assistant" aria-label="AI 助手">
+      <header class="assistant__head">
+        <div class="assistant__id">
+          <span class="assistant__name">助手</span>
+          <span class="assistant__model">DeepSeek</span>
+        </div>
+        <div class="assistant__actions">
+          <button class="icon-btn" aria-label="新对话" title="新对话"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+          <button class="icon-btn" aria-label="收起助手" title="收起助手"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </header>
+      <div class="thread"><div class="msg">
+      <span class="msg__who">Veyl</span>
+      <p>需要我做什么？</p>
+      <div class="chips"><button class="chip">继续观察一会儿</button><button class="chip">解释这次的不稳定</button></div>
+    </div></div>
+      
+      <div class="composer">
+        <div class="composer__box">
+          <span>问点什么，或让我改配置</span>
+          <button class="send" aria-label="发送"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 12.5V4M4.4 7.4 8 3.8l3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="composer__hint">⌘↵ 发送</div>
+      </div>
+    </aside><aside class="assistant-tab" aria-label="助手已收起"><span class="assistant-tab__label">助手</span><span class="assistant-tab__dot"></span><button class="icon-btn" aria-label="展开助手"><svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3.5 5.2A1.7 1.7 0 0 1 5.2 3.5h9.6a1.7 1.7 0 0 1 1.7 1.7v6.2a1.7 1.7 0 0 1-1.7 1.7H9.2L6 15.4v-2.3H5.2a1.7 1.7 0 0 1-1.7-1.7z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg></button></aside></div>
+    </div>
+  </section>
+  <section class="screen" id="s07" aria-label="连接失败">
+    <div class="app ">
+      
+    <aside class="rail" aria-label="配置列表">
+      <header class="rail__brand">
+        <span class="wordmark">Veyl</span>
+        <span class="rail__sub">网络控制台</span>
+      </header>
+      <div class="rail__section">
+        <span class="rail__label">配置</span>
+        <span class="rail__count">3</span>
+        <button class="icon-btn" aria-label="新建配置" title="新建配置"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+      </div>
+      <ul class="configs"><li class="config is-active" tabindex="0">
+              <span class="config__name">家里</span>
+              <span class="config__meta">3 个节点 · 浏览器</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">公司</span>
+              <span class="config__meta">5 个节点 · 全部软件</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">客户</span>
+              <span class="config__meta">2 个节点 · 本机代理</span>
+            </li></ul>
+      <footer class="rail__foot">
+        <button class="rail__settings"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 5h11M2.5 11h11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="6" cy="5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="11" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>设置</span></button>
+      </footer>
+    </aside>
+      <main class="console">
+        <header class="console__head">
+          <span class="console__crumb">控制台</span>
+          <span class="console__meta"></span>
+        </header>
+        <div class="console__body ">
+          <p class="sr-only" role="status" aria-live="polite">连接状态：失败</p>
+          
+    <section class="hero">
+      <div class="hero__main">
+        <h1 class="state-word"><span class="led is-err" aria-hidden="true"></span><span>连接失败</span></h1>
+        <p class="hero__caption">没有连上节点。</p>
+      </div>
+      <button class="btn btn--primary">重新连接</button>
+    </section>
+    
+          <div class="one-thing">
+      <div class="card card--err">
+        <p class="card__lead">本机用来做代理的端口被别的软件占用了。</p>
+        <div class="recovery">
+          <div class="recovery__row"><span class="recovery__num">01</span><div><strong>重新连接</strong><small>先点上面的「重新连接」。</small></div></div>
+          <div class="recovery__row"><span class="recovery__num">02</span><div><strong>换一个节点</strong><small>用下面节点卡里的「更换」。</small></div></div>
+          <div class="recovery__row"><span class="recovery__num">03</span><div><strong>让助手定位</strong><small>在右侧说「帮我看看为什么连不上」。</small></div></div>
+        </div>
+      </div>
+    </div>
+          
+    <footer class="node-card">
+      <div class="node-card__head">
+        <div>
+          <span class="node-card__label">当前节点</span>
+          <span class="node-card__name">东京 01</span>
+        </div>
+        <div class="node-card__actions"><button class="btn btn--ghost">更换</button></div>
+      </div>
+      <div class="node-card__facts">203.0.113.8 : 20343<span class="sep">·</span>aes-256-gcm</div>
+    </footer>
+        </div>
+      </main>
+      <div class="assistant-slot">
+    <aside class="assistant" aria-label="AI 助手">
+      <header class="assistant__head">
+        <div class="assistant__id">
+          <span class="assistant__name">助手</span>
+          <span class="assistant__model">DeepSeek</span>
+        </div>
+        <div class="assistant__actions">
+          <button class="icon-btn" aria-label="新对话" title="新对话"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+          <button class="icon-btn" aria-label="收起助手" title="收起助手"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </header>
+      <div class="thread"><div class="msg msg--user">
+      <span class="msg__who">你</span>
+      <p>怎么连不上了？</p>
+      
+    </div><div class="msg">
+      <span class="msg__who">Veyl</span>
+      <p>需要我一起看看吗？</p>
+      <div class="chips"><button class="chip">帮我定位</button></div>
+    </div></div>
+      
+      <div class="composer">
+        <div class="composer__box">
+          <span>问点什么，或让我改配置</span>
+          <button class="send" aria-label="发送"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 12.5V4M4.4 7.4 8 3.8l3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="composer__hint">⌘↵ 发送</div>
+      </div>
+    </aside><aside class="assistant-tab" aria-label="助手已收起"><span class="assistant-tab__label">助手</span><span class="assistant-tab__dot"></span><button class="icon-btn" aria-label="展开助手"><svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3.5 5.2A1.7 1.7 0 0 1 5.2 3.5h9.6a1.7 1.7 0 0 1 1.7 1.7v6.2a1.7 1.7 0 0 1-1.7 1.7H9.2L6 15.4v-2.3H5.2a1.7 1.7 0 0 1-1.7-1.7z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg></button></aside></div>
+    </div>
+  </section>
+  <section class="screen" id="s08" aria-label="无节点">
+    <div class="app ">
+      
+    <aside class="rail" aria-label="配置列表">
+      <header class="rail__brand">
+        <span class="wordmark">Veyl</span>
+        <span class="rail__sub">网络控制台</span>
+      </header>
+      <div class="rail__section">
+        <span class="rail__label">配置</span>
+        <span class="rail__count">1</span>
+        <button class="icon-btn" aria-label="新建配置" title="新建配置"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+      </div>
+      <ul class="configs"><li class="config is-active" tabindex="0">
+              <span class="config__name">新线路</span>
+              <span class="config__meta">0 个节点 · 浏览器</span>
+            </li></ul>
+      <footer class="rail__foot">
+        <button class="rail__settings"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 5h11M2.5 11h11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="6" cy="5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="11" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>设置</span></button>
+      </footer>
+    </aside>
+      <main class="console">
+        <header class="console__head">
+          <span class="console__crumb">控制台</span>
+          <span class="console__meta"></span>
+        </header>
+        <div class="console__body console__body--welcome">
+          <p class="sr-only" role="status" aria-live="polite">连接状态：未连接</p>
+          
+    <section class="hero">
+      <div class="hero__main">
+        <h1 class="state-word"><span>未连接</span></h1>
+        
+      </div>
+      <button class="btn btn--primary" disabled>启动 VPN</button>
+    </section>
+    
+          <div class="one-thing"><p class="note note--idle">这套配置还没有节点。</p></div>
+          
+        </div>
+      </main>
+      <div class="assistant-slot">
+    <aside class="assistant" aria-label="AI 助手">
+      <header class="assistant__head">
+        <div class="assistant__id">
+          <span class="assistant__name">助手</span>
+          <span class="assistant__model">DeepSeek</span>
+        </div>
+        <div class="assistant__actions">
+          <button class="icon-btn" aria-label="新对话" title="新对话"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+          <button class="icon-btn" aria-label="收起助手" title="收起助手"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </header>
+      <div class="thread"><div class="msg">
+      <span class="msg__who">Veyl</span>
+      <p>要我从测试节点开始吗？</p>
+      <div class="chips"><button class="chip">用测试节点</button><button class="chip">我自己填</button></div>
+    </div></div>
+      
+      <div class="composer">
+        <div class="composer__box">
+          <span>问点什么，或让我改配置</span>
+          <button class="send" aria-label="发送"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 12.5V4M4.4 7.4 8 3.8l3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="composer__hint">⌘↵ 发送</div>
+      </div>
+    </aside><aside class="assistant-tab" aria-label="助手已收起"><span class="assistant-tab__label">助手</span><span class="assistant-tab__dot"></span><button class="icon-btn" aria-label="展开助手"><svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3.5 5.2A1.7 1.7 0 0 1 5.2 3.5h9.6a1.7 1.7 0 0 1 1.7 1.7v6.2a1.7 1.7 0 0 1-1.7 1.7H9.2L6 15.4v-2.3H5.2a1.7 1.7 0 0 1-1.7-1.7z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg></button></aside></div>
+    </div>
+  </section>
+  <section class="screen" id="s09" aria-label="三级代理已连接">
+    <div class="app ">
+      
+    <aside class="rail" aria-label="配置列表">
+      <header class="rail__brand">
+        <span class="wordmark">Veyl</span>
+        <span class="rail__sub">网络控制台</span>
+      </header>
+      <div class="rail__section">
+        <span class="rail__label">配置</span>
+        <span class="rail__count">3</span>
+        <button class="icon-btn" aria-label="新建配置" title="新建配置"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+      </div>
+      <ul class="configs"><li class="config" tabindex="0">
+              <span class="config__name">家里</span>
+              <span class="config__meta">3 个节点 · 浏览器</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">公司</span>
+              <span class="config__meta">5 个节点 · 全部软件</span>
+            </li>
+<li class="config is-active" tabindex="0">
+              <span class="config__name">客户</span>
+              <span class="config__meta">2 个节点 · 本机代理</span>
+            </li></ul>
+      <footer class="rail__foot">
+        <button class="rail__settings"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 5h11M2.5 11h11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="6" cy="5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="11" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>设置</span></button>
+      </footer>
+    </aside>
+      <main class="console">
+        <header class="console__head">
+          <span class="console__crumb">控制台</span>
+          <span class="console__meta"></span>
+        </header>
+        <div class="console__body ">
+          <p class="sr-only" role="status" aria-live="polite">连接状态：已连接</p>
+          
+    <section class="hero">
+      <div class="hero__main">
+        <h1 class="state-line"><span class="state-line__label"><span class="led is-ok" aria-hidden="true"></span>已连接</span><span class="timecode">00:41:19</span></h1>
+        <p class="hero__caption">本次连接</p>
+      </div>
+      <button class="btn btn--outline">断开 VPN</button>
+    </section>
+    
+          <dl class="ledger"><div class="ledger__row">
+              <dt class="ledger__label">流量</dt>
+              <dd class="ledger__value">2.08 GB</dd>
+              <dd class="ledger__sub">上行 34 MB · 下行 2.05 GB</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">延迟</dt>
+              <dd class="ledger__value">64 ms</dd>
+              <dd class="ledger__sub">12 秒前检测</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">出口</dt>
+              <dd class="ledger__value">203.0.113.77</dd>
+              <dd class="ledger__sub"><button class="copy-btn"><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M10.2 5.5V3.9a1.4 1.4 0 0 0-1.4-1.4H3.9a1.4 1.4 0 0 0-1.4 1.4v4.9a1.4 1.4 0 0 0 1.4 1.4h1.6" fill="none" stroke="currentColor" stroke-width="1.2"/></svg> 复制</button></dd>
+            </div></dl><div class="one-thing">
+      <div class="card">
+        <p class="card__title">代理已经开好</p>
+        <p class="card__body"><span class="proxy__row"><span class="proxy__addr">127.0.0.1:7890</span><button class="copy-btn"><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M10.2 5.5V3.9a1.4 1.4 0 0 0-1.4-1.4H3.9a1.4 1.4 0 0 0-1.4 1.4v4.9a1.4 1.4 0 0 0 1.4 1.4h1.6" fill="none" stroke="currentColor" stroke-width="1.2"/></svg> 复制</button></span></p>
+        <p class="card__action">HTTP 和 SOCKS5 都支持，填同一个地址。只在本机可用，别的设备连不上。</p>
+        
+      </div>
+    </div>
+          
+    <footer class="node-card">
+      <div class="node-card__head">
+        <div>
+          <span class="node-card__label">当前节点</span>
+          <span class="node-card__name">新加坡 01</span>
+        </div>
+        <div class="node-card__actions"><button class="btn btn--ghost">更换</button><button class="btn btn--ghost">检查</button></div>
+      </div>
+      <div class="node-card__facts">203.0.113.77 : 20343<span class="sep">·</span>aes-256-gcm</div>
+    </footer>
+        </div>
+      </main>
+      <div class="assistant-slot">
+    <aside class="assistant" aria-label="AI 助手">
+      <header class="assistant__head">
+        <div class="assistant__id">
+          <span class="assistant__name">助手</span>
+          <span class="assistant__model">DeepSeek</span>
+        </div>
+        <div class="assistant__actions">
+          <button class="icon-btn" aria-label="新对话" title="新对话"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+          <button class="icon-btn" aria-label="收起助手" title="收起助手"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </header>
+      <div class="thread"><div class="msg msg--user">
+      <span class="msg__who">你</span>
+      <p>我自己填代理。</p>
+      
+    </div><div class="msg">
+      <span class="msg__who">Veyl</span>
+      <p>地址要填到哪个软件里？告诉我软件名，我把该填的格子说清楚。</p>
+      
+    </div></div>
+      
+      <div class="composer">
+        <div class="composer__box">
+          <span>问点什么，或让我改配置</span>
+          <button class="send" aria-label="发送"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 12.5V4M4.4 7.4 8 3.8l3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="composer__hint">⌘↵ 发送</div>
+      </div>
+    </aside><aside class="assistant-tab" aria-label="助手已收起"><span class="assistant-tab__label">助手</span><span class="assistant-tab__dot"></span><button class="icon-btn" aria-label="展开助手"><svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3.5 5.2A1.7 1.7 0 0 1 5.2 3.5h9.6a1.7 1.7 0 0 1 1.7 1.7v6.2a1.7 1.7 0 0 1-1.7 1.7H9.2L6 15.4v-2.3H5.2a1.7 1.7 0 0 1-1.7-1.7z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg></button></aside></div>
+    </div>
+  </section>
+  <section class="screen" id="s10" aria-label="窄窗口，助手收起">
+    <div class="app app--narrow">
+      
+    <aside class="rail" aria-label="配置列表">
+      <header class="rail__brand">
+        <span class="wordmark">Veyl</span>
+        <span class="rail__sub">网络控制台</span>
+      </header>
+      <div class="rail__section">
+        <span class="rail__label">配置</span>
+        <span class="rail__count">3</span>
+        <button class="icon-btn" aria-label="新建配置" title="新建配置"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+      </div>
+      <ul class="configs"><li class="config is-active" tabindex="0">
+              <span class="config__name">家里</span>
+              <span class="config__meta">3 个节点 · 浏览器</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">公司</span>
+              <span class="config__meta">5 个节点 · 全部软件</span>
+            </li>
+<li class="config" tabindex="0">
+              <span class="config__name">客户</span>
+              <span class="config__meta">2 个节点 · 本机代理</span>
+            </li></ul>
+      <footer class="rail__foot">
+        <button class="rail__settings"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 5h11M2.5 11h11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="6" cy="5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="11" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>设置</span></button>
+      </footer>
+    </aside>
+      <main class="console">
+        <header class="console__head">
+          <span class="console__crumb">控制台</span>
+          <span class="console__meta"></span>
+        </header>
+        <div class="console__body ">
+          <p class="sr-only" role="status" aria-live="polite">连接状态：已连接</p>
+          
+    <section class="hero">
+      <div class="hero__main">
+        <h1 class="state-line"><span class="state-line__label"><span class="led is-ok" aria-hidden="true"></span>已连接</span><span class="timecode">00:12:47</span></h1>
+        <p class="hero__caption">本次连接</p>
+      </div>
+      <button class="btn btn--outline">断开 VPN</button>
+    </section>
+    
+          <dl class="ledger"><div class="ledger__row">
+              <dt class="ledger__label">流量</dt>
+              <dd class="ledger__value">1.24 GB</dd>
+              <dd class="ledger__sub">上行 12.4 MB · 下行 1.22 GB</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">延迟</dt>
+              <dd class="ledger__value">28 ms</dd>
+              <dd class="ledger__sub">12 秒前检测</dd>
+            </div><div class="ledger__row">
+              <dt class="ledger__label">出口</dt>
+              <dd class="ledger__value">203.0.113.42</dd>
+              <dd class="ledger__sub"><button class="copy-btn"><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M10.2 5.5V3.9a1.4 1.4 0 0 0-1.4-1.4H3.9a1.4 1.4 0 0 0-1.4 1.4v4.9a1.4 1.4 0 0 0 1.4 1.4h1.6" fill="none" stroke="currentColor" stroke-width="1.2"/></svg> 复制</button></dd>
+            </div></dl><div class="one-thing"><p class="note">浏览器现在能用了。</p></div><section class="strip" aria-label="最近 60 秒速率">
+      <div class="strip__head">
+        <span class="strip__label">最近 60 秒</span>
+        <span class="strip__rates">上行 1.2 MB/s · 下行 12.4 MB/s</span>
+      </div>
+      <svg class="strip__chart" viewBox="0 0 700 56" preserveAspectRatio="none" aria-hidden="true">
+        <line class="strip__base" x1="0" y1="53.5" x2="700" y2="53.5"></line>
+        <path class="strip__area" d="M0,46 L35,43 L70,45 L105,38 L140,40 L175,30 L210,34 L245,28 L280,31 L315,22 L350,26 L385,20 L420,24 L455,18 L490,23 L525,17 L560,21 L595,15 L630,19 L665,14 L700,17 L700,54 L0,54 Z"></path>
+        <path class="strip__line" d="M0,46 L35,43 L70,45 L105,38 L140,40 L175,30 L210,34 L245,28 L280,31 L315,22 L350,26 L385,20 L420,24 L455,18 L490,23 L525,17 L560,21 L595,15 L630,19 L665,14 L700,17"></path>
+      </svg>
+      <div class="strip__axis"><span>60 秒前</span><span>现在</span></div>
+    </section>
+          
+    <footer class="node-card">
+      <div class="node-card__head">
+        <div>
+          <span class="node-card__label">当前节点</span>
+          <span class="node-card__name">东京 01</span>
+        </div>
+        <div class="node-card__actions"><button class="btn btn--ghost">更换</button><button class="btn btn--ghost">检查</button></div>
+      </div>
+      <div class="node-card__facts">203.0.113.8 : 20343<span class="sep">·</span>aes-256-gcm</div>
+    </footer>
+        </div>
+      </main>
+      <div class="assistant-slot"><aside class="assistant-tab" aria-label="助手已收起"><span class="assistant-tab__label">助手</span><span class="assistant-tab__dot"></span><button class="icon-btn" aria-label="展开助手"><svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3.5 5.2A1.7 1.7 0 0 1 5.2 3.5h9.6a1.7 1.7 0 0 1 1.7 1.7v6.2a1.7 1.7 0 0 1-1.7 1.7H9.2L6 15.4v-2.3H5.2a1.7 1.7 0 0 1-1.7-1.7z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg></button></aside></div>
+    </div>
+  </section>
+</body>
+</html>

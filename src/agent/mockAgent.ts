@@ -66,6 +66,10 @@ export class MockAgentBridge implements AgentBridge {
   private activeRequests = new Set<string>();
   /** 装过一次就不再走安装流程（真实链路同理，已安装时不重复装）。 */
   private installed = false;
+  private healthTimer: number | null = null;
+  private trafficUp = 0;
+  private trafficDown = 0;
+  private trafficTick = 0;
   /** mock 的节点目录：让控制台与面板的节点切换可以离线演示。 */
   private profiles: MockNodeEntry[] = [
     {
@@ -168,6 +172,7 @@ export class MockAgentBridge implements AgentBridge {
       mixed_port: 2080,
       connected_since: now(),
       latency_ms: profile.id === "prf_2" ? 68 : 42,
+      node_latency_ms: profile.id === "prf_2" ? 68 : 42,
       direct_ip: MOCK_DIRECT_IP,
       system_proxy_enabled: true,
       connections: 2,
@@ -269,6 +274,9 @@ export class MockAgentBridge implements AgentBridge {
         emitted_at: now(),
       },
     });
+
+    if (to === "running" || to === "degraded") this.startTrafficTicker();
+    else this.stopTrafficTicker();
   }
 
   private health(patch: Partial<RuntimeSnapshot["health"]>) {
@@ -281,6 +289,81 @@ export class MockAgentBridge implements AgentBridge {
       payload: {
         contract_version: CONTRACT_VERSION,
         health: this.runtime.health,
+        ...(this.runtime.state === "running" || this.runtime.state === "degraded"
+          ? {
+              traffic: this.runtime.traffic,
+              connections: this.runtime.connections,
+              node_latency_ms: this.runtime.node_latency_ms,
+            }
+          : {}),
+        emitted_at: now(),
+      },
+    });
+  }
+
+  /**
+   * 浏览器演示用：连接后每 2 秒发一条带流量的健康事件，
+   * 让「最近 60 秒」速率条在 mock 环境里也有数据。
+   */
+  private startTrafficTicker() {
+    this.stopTrafficTicker();
+    this.trafficUp = 4_200_000;
+    this.trafficDown = 38_000_000;
+    const tick = () => {
+      if (this.runtime.state !== "running" && this.runtime.state !== "degraded") return;
+      this.trafficTick += 1;
+      const up = 240_000 + Math.round(180_000 * Math.abs(Math.sin(this.trafficTick / 2.6)));
+      const down =
+        1_800_000 + Math.round(1_500_000 * Math.abs(Math.sin(this.trafficTick / 3.1)));
+      this.trafficUp += up * 2;
+      this.trafficDown += down * 2;
+      this.runtime = {
+        ...this.runtime,
+        connections: 4,
+        traffic: {
+          up_bytes: this.trafficUp,
+          down_bytes: this.trafficDown,
+          up_rate: up,
+          down_rate: down,
+          sampled_at: now(),
+        },
+      };
+      this.health({});
+    };
+    tick();
+    this.healthTimer = window.setInterval(tick, 2000);
+  }
+
+  private stopTrafficTicker() {
+    if (this.healthTimer !== null) {
+      window.clearInterval(this.healthTimer);
+      this.healthTimer = null;
+    }
+  }
+
+  private async firstRunFlow(
+    sessionId: string,
+    requestId: string,
+    assistantId: string,
+  ) {
+    this.status(requestId, assistantId, "准备配置", "thinking");
+    const question = "先配一条能用的线路。你主要用它做什么？";
+    if (!(await this.type(requestId, assistantId, question))) {
+      return this.finish(requestId, assistantId, "cancelled", null);
+    }
+    // 先结束这一轮再提问：前端在 requestEnd 时会把同一 request 的旧问题清掉。
+    this.finish(requestId, assistantId, "success", question);
+    this.emit({
+      name: AGENT_EVENTS.askUserQuestion,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        session_id: sessionId,
+        request_id: requestId,
+        question_id: `q_${requestId}`,
+        question,
+        options: ["只浏览网页", "桌面软件也要用", "我自己会配代理"],
+        created_at: Date.now(),
+        expires_at: Date.now() + 300_000,
         emitted_at: now(),
       },
     });
@@ -436,6 +519,7 @@ export class MockAgentBridge implements AgentBridge {
   }
 
   private async run(sessionId: string, requestId: string, assistantId: string, text: string) {
+    if (text.includes("第一次用")) return this.firstRunFlow(sessionId, requestId, assistantId);
     if (text.includes("断开")) return this.disconnectFlow(requestId, assistantId);
     if (text.includes("状态")) return this.statusFlow(requestId, assistantId);
     if (text.includes("安装")) return this.installOnlyFlow(sessionId, requestId, assistantId);

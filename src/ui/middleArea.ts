@@ -8,8 +8,13 @@ import type { ConfigDetail, RuntimeView } from "../agent/protocol";
 
 export type MiddleLevel = "idle" | "running" | "degraded" | "failed" | "transition";
 
+export interface FailureStep {
+  label: string;
+  detail: string;
+}
+
 export type MiddleBlock =
-  | { kind: "empty_hint"; text: string }
+  | { kind: "empty_hint"; text: string; tone: "idle" | "ok" }
   | {
       kind: "proxy_card";
       /** 已连接（含降级）才有实际端口，未连接只给预计端口。 */
@@ -17,7 +22,14 @@ export type MiddleBlock =
       address: string | null;
       systemProxyEnabled: boolean;
     }
-  | { kind: "issue_card"; tone: "failed" | "degraded"; title: string; reason: string; next: string };
+  | {
+      kind: "issue_card";
+      tone: "failed" | "degraded";
+      reason: string;
+      steps: FailureStep[];
+      /** 降级卡的一句话行动；失败卡用 steps。 */
+      next: string | null;
+    };
 
 /** 三态以 runtime.state 归并；过渡态单独一档，中间不渲染任何块。 */
 export function middleLevel(state: RuntimeView["state"]): MiddleLevel {
@@ -55,7 +67,7 @@ export function isProxyUser(config: ConfigDetail): boolean {
 /** §4.1。没有节点时统一换成指路的一句，覆盖未连接 / 已连接两种状态。 */
 export function emptyHintText(config: ConfigDetail, connected: boolean): string {
   if (config.nodes.length === 0) {
-    return "让右侧的助手帮你加一个节点，或者新建一套配置。";
+    return "这套配置还没有节点。";
   }
   if (connected) {
     return config.connect_mode === "tun"
@@ -114,15 +126,20 @@ export function failureReason(runtime: RuntimeView): string {
   return "具体原因还没确认。";
 }
 
-/** §4.3.4。卡里不放按钮：重新连接在顶部，换节点在底部。 */
-export function failureNextStep(config: ConfigDetail, aiReady: boolean): string {
+/** §4.3.4。「现在做什么」拆成卡片里的 01/02/03，卡里不放按钮。 */
+export function failureSteps(config: ConfigDetail, aiReady: boolean): FailureStep[] {
+  const steps: FailureStep[] = [
+    { label: "重新连接", detail: "先点上面的「重新连接」。" },
+  ];
   if (config.nodes.length >= 2) {
-    return "先点上面的「重新连接」。还是不行，就换下面的节点再试。";
+    steps.push({ label: "换一个节点", detail: "用下面节点卡里的「更换」。" });
   }
-  if (aiReady) {
-    return "先点上面的「重新连接」。还是不行，就在右侧对话里说「帮我看看为什么连不上」。";
-  }
-  return "先点上面的「重新连接」。还是不行，就新建一套配置再试。";
+  steps.push(
+    aiReady
+      ? { label: "让助手定位", detail: "在右侧说「帮我看看为什么连不上」。" }
+      : { label: "新建一套配置", detail: "还是不行，就新建一套配置再试。" },
+  );
+  return steps;
 }
 
 /** §4.3.3。 */
@@ -160,12 +177,16 @@ export function isDisconnectFailure(
   return to === "failed" && (from === "running" || from === "degraded");
 }
 
+/** 失败时 H1 下面那行小字：区分「没连上」与「连接断了」。只有这一处。 */
+export function failureHeadline(wasConnected: boolean): string {
+  return wasConnected ? "连接断了。" : "没有连上节点。";
+}
+
 /** §3 状态 × 块矩阵，最多两块，issue_card 永远排第一。 */
 export function middleBlocks(
   runtime: RuntimeView,
   config: ConfigDetail,
   aiReady: boolean,
-  wasConnected = false,
 ): MiddleBlock[] {
   const level = middleLevel(runtime.state);
 
@@ -176,9 +197,9 @@ export function middleBlocks(
       {
         kind: "issue_card",
         tone: "failed",
-        title: wasConnected ? "连接断了。" : "这次没有连上。",
         reason: failureReason(runtime),
-        next: failureNextStep(config, aiReady),
+        steps: failureSteps(config, aiReady),
+        next: null,
       },
     ];
   }
@@ -188,8 +209,8 @@ export function middleBlocks(
       {
         kind: "issue_card",
         tone: "degraded",
-        title: "连接不太稳定。",
         reason: degradedReason(runtime),
+        steps: [],
         next: "能继续用就先不动；网页打不开时，点上面的「断开 VPN」再重新连接。",
       },
     ];
@@ -202,6 +223,10 @@ export function middleBlocks(
   }
 
   return [
-    { kind: "empty_hint", text: emptyHintText(config, level === "running") },
+    {
+      kind: "empty_hint",
+      text: emptyHintText(config, level === "running"),
+      tone: level === "running" ? "ok" : "idle",
+    },
   ];
 }

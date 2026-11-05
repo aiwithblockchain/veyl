@@ -11,15 +11,15 @@ import type {
   PendingQuestion,
 } from "./agent/bridge";
 import { BridgeError, toBridgeError } from "./agent/errors";
-import { ActivityBar } from "./components/ActivityBar";
 import { AiPanel, type RenameResult } from "./components/AiPanel";
 import { AskQuestionDialog } from "./components/AskQuestionDialog";
+import { AssistantOverlay } from "./components/AssistantOverlay";
+import { AssistantTab } from "./components/AssistantTab";
 import { ConfigRail } from "./components/ConfigRail";
 import { Console } from "./components/Console";
 import { IconClose } from "./components/icons";
 import { NewConfigDialog } from "./components/NewConfigDialog";
 import { Onboarding } from "./components/Onboarding";
-import { PaneHandle } from "./components/PaneHandle";
 import { Settings, describeImportError } from "./components/Settings";
 import type { ConnectMode } from "./config/model";
 import {
@@ -30,9 +30,13 @@ import {
   shouldShowOnboarding,
 } from "./config/onboarding";
 import { useVpnSession } from "./config/useVpnSession";
-import { ACTIVITY_WIDTH, PANEL_MIN, RAIL_MIN } from "./ui/layout";
+import {
+  assistantColumnWidth,
+  shellLayout,
+} from "./ui/breakpoints";
 import { isDisconnectFailure } from "./ui/middleArea";
-import { usePaneLayout } from "./ui/usePaneLayout";
+import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
+import { pushRateSample, shouldPushRateSample, type RateSample } from "./ui/rateSeries";
 import {
   isZeroConfigAskSuppressed,
   lastAssistantTextOf,
@@ -57,7 +61,6 @@ const AI_EVENTS = new Set<AgentEvent["name"]>([
 type SettingsSection = "ai" | "network" | "advanced" | "about";
 
 const EVER_CONNECTED_KEY = "veyl.hasEverConnected";
-const PANEL_KEY = "veyl.ui.panelOpen";
 const PANEL_CLOSED_BY_USER_KEY = "veyl.ui.panelClosedByUser";
 const PANEL_AUTO_OPENED_KEY = "veyl.ui.panelAutoOpened";
 const ONBOARDING_SKIPPED_KEY = "veyl.onboarding.skipped";
@@ -87,6 +90,11 @@ function readEverConnected(): boolean {
   }
 }
 
+/** 用户手动开/关过就沿用；从没选过、或来自旧版本时宽屏展开、窄屏收成 tab。 */
+function readInitialPanelOpen(): boolean {
+  return readPanelOpen(localStorage, typeof window === "undefined" ? 1440 : window.innerWidth);
+}
+
 export default function App() {
   const bridge = useMemo(() => getAgentBridge(), []);
   const [state, dispatch] = useReducer(chatReducer, undefined, createInitialState);
@@ -106,7 +114,11 @@ export default function App() {
   const [onboardingLoaded, setOnboardingLoaded] = useState(false);
   const [historyReady, setHistoryReady] = useState(false);
   const [hasEverConnected, setHasEverConnected] = useState(readEverConnected);
-  const [panelOpen, setPanelOpen] = useState(() => readFlag(PANEL_KEY));
+  const [panelOpen, setPanelOpen] = useState(readInitialPanelOpen);
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === "undefined" ? 1440 : window.innerWidth,
+  );
+  const [rateSamples, setRateSamples] = useState<RateSample[]>([]);
   const [aiUnread, setAiUnread] = useState(false);
   const [defaultProfile, setDefaultProfile] = useState<DefaultProfileStatus | null>(null);
   const [repairing, setRepairing] = useState(false);
@@ -119,17 +131,29 @@ export default function App() {
     bridge,
     import.meta.env.VITE_MOCK === "1" || bridge.mode === "mock",
   );
-  const appRef = useRef<HTMLDivElement>(null);
-  const panes = usePaneLayout({
-    appRef,
-    panelOpen,
-    active: onboardingLoaded && !showOnboarding,
-  });
+  // 断点只看窗口宽度：三栏宽度、助手停靠/浮层都由它决定。
+  const dockedRef = useRef(true);
+  useEffect(() => {
+    const onResize = () => {
+      const width = window.innerWidth;
+      setViewportWidth(width);
+      // 从停靠断点拖到窄屏时收回 tab，不让浮层突然盖住控制台；这次收起不算用户选择。
+      if (dockedRef.current && !shellLayout(width).docked) {
+        setPanelOpen(false);
+        panelOpenRef.current = false;
+      }
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const importingRef = useRef(false);
   const endWaiters = useRef(new Map<string, () => void>());
   // 已经回答/超时/作废的问题 id：防止重连或重试路径把旧问题再插回来。
   const settledQuestionIds = useRef(new Set<string>());
   const panelOpenRef = useRef(panelOpen);
+  const assistantTabRef = useRef<HTMLButtonElement>(null);
+  // 用户主动关闭（Esc / 点遮罩 / 点收起）后把焦点还给 tab；自动收起不抢焦点。
+  const returnFocusToTabRef = useRef(false);
   const panelClosedThisRunRef = useRef(false);
   const panelClosedByUserRef = useRef(readFlag(PANEL_CLOSED_BY_USER_KEY));
   const panelAutoOpenedRef = useRef(readFlag(PANEL_AUTO_OPENED_KEY));
@@ -152,6 +176,9 @@ export default function App() {
   };
   // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
   const healthVersion = useRef(0);
+  // 同一个 traffic 会被健康事件重复推送（出口探测、节点延迟都会触发 emit_health）；
+  // 只按 sampled_at 推进时的第一条算一个速率样本。
+  const lastSampleAtRef = useRef<string | null>(null);
   // 快照请求的单调序号：只接受最新一次请求，避免旧快照晚到覆盖新状态。
   const snapshotSeq = useRef(0);
 
@@ -219,11 +246,6 @@ export default function App() {
 
   useEffect(() => {
     panelOpenRef.current = panelOpen;
-    try {
-      localStorage.setItem(PANEL_KEY, panelOpen ? "1" : "0");
-    } catch {
-      // 存不了就只在本次会话里记住。
-    }
   }, [panelOpen]);
 
   const importPath = useCallback(
@@ -293,7 +315,20 @@ export default function App() {
 
   useEffect(() => {
     return bridge.subscribe((event) => {
-      if (event.name === AGENT_EVENTS.runtimeHealthChanged) healthVersion.current += 1;
+      if (event.name === AGENT_EVENTS.runtimeHealthChanged) {
+        healthVersion.current += 1;
+        const traffic = event.payload.traffic;
+        const sampledAt = traffic?.sampled_at ?? "";
+        if (
+          traffic &&
+          shouldPushRateSample(lastSampleAtRef.current, sampledAt)
+        ) {
+          lastSampleAtRef.current = sampledAt;
+          setRateSamples((samples) =>
+            pushRateSample(samples, { up: traffic.up_rate, down: traffic.down_rate }),
+          );
+        }
+      }
       setRuntime((view) => applyRuntimeEvent(view, event));
       if (
         (AI_EVENTS.has(event.name) || event.name === AGENT_EVENTS.askUserQuestion) &&
@@ -338,6 +373,12 @@ export default function App() {
         setFailedAfterConnected(
           isDisconnectFailure(event.payload.from, event.payload.to),
         );
+        const online =
+          event.payload.to === "running" || event.payload.to === "degraded";
+        if (!online) {
+          lastSampleAtRef.current = null;
+          setRateSamples([]);
+        }
         refreshSnapshot();
       }
     });
@@ -536,6 +577,8 @@ export default function App() {
     const next = !panelOpen;
     setPanelOpen(next);
     panelOpenRef.current = next;
+    writePanelChoice(localStorage, next);
+    if (!next) returnFocusToTabRef.current = true;
     if (next) {
       setAiUnread(false);
     } else {
@@ -544,6 +587,13 @@ export default function App() {
       writeFlag(PANEL_CLOSED_BY_USER_KEY);
     }
   };
+
+  // tab 和浮层是互斥渲染：关闭后 tab 在本次 commit 才挂载，所以在这里补焦点。
+  useEffect(() => {
+    if (!returnFocusToTabRef.current) return;
+    returnFocusToTabRef.current = false;
+    assistantTabRef.current?.focus();
+  });
 
   const waitForRequestEnd = (requestId: string, timeoutMs = 5000): Promise<void> =>
     new Promise((resolve) => {
@@ -883,10 +933,12 @@ export default function App() {
     lastAssistantText: lastAssistantTextOf(session?.messages ?? []),
   });
 
+  const shell = shellLayout(viewportWidth);
+  dockedRef.current = shell.docked;
+
   const appStyle = {
-    "--activity-w": `${ACTIVITY_WIDTH}px`,
-    "--rail-w": `${panes.rail}px`,
-    "--panel-w": `${panes.panel}px`,
+    "--rail-w": `${shell.rail}px`,
+    "--assistant-w": `${assistantColumnWidth(shell, panelOpen)}px`,
   } as CSSProperties;
 
   const aiPanel = (
@@ -908,6 +960,7 @@ export default function App() {
       onNextAction={handleNextAction}
       onOpenSettings={() => openSettings("ai")}
       onConfigureKey={() => openSettings("ai")}
+      onCollapse={togglePanel}
     />
   );
 
@@ -922,14 +975,7 @@ export default function App() {
   }
 
   return (
-    <div
-      ref={appRef}
-      style={appStyle}
-      className={`app ${panelOpen ? "app--panel-open" : ""} ${
-        panes.floating ? "app--floating" : ""
-      }`}
-    >
-      <ActivityBar />
+    <div style={appStyle} className="app">
       <ConfigRail
         configs={vpn.configs}
         activeConfigId={vpn.activeConfigId}
@@ -939,29 +985,17 @@ export default function App() {
         onSelect={handleSelectConfig}
         onNewConfig={() => setNewConfigOpen(true)}
         onDelete={vpn.deleteConfig}
-      />
-      <PaneHandle
-        side="rail"
-        label="调整配置列表宽度"
-        controls="config-rail"
-        value={panes.rail}
-        min={RAIL_MIN}
-        max={panes.railMax}
-        dragging={panes.draggingPane === "rail"}
-        {...panes.railHandlers}
+        onOpenSettings={() => openSettings()}
+        compact={shell.mode === "drawer"}
       />
       <Console
         config={vpn.activeConfig}
-        connection={vpn.connection}
         onStart={handleVpnStart}
         onStop={handleVpnStop}
         onSwitchNode={handleSwitchNode}
         onProbe={vpn.probe}
         nodeSwitchAvailable={vpn.nodeSwitchAvailable}
         nodeProbeAvailable={vpn.nodeProbeAvailable}
-        panelOpen={panelOpen}
-        aiUnread={aiUnread}
-        onTogglePanel={togglePanel}
         aiReady={aiReady}
         justOnboarded={justOnboarded}
         zeroConfigSettled={zeroConfigSettled}
@@ -971,39 +1005,19 @@ export default function App() {
         loading={vpn.loading}
         runtime={runtime}
         failedAfterConnected={failedAfterConnected}
+        rateSamples={rateSamples}
       />
-      {panelOpen ? (
-        <div
-          className={`ai-panel-host ${
-            panes.floating ? "ai-panel-host--floating" : ""
-          }`}
-          role={panes.floating ? "dialog" : undefined}
-          aria-label={panes.floating ? "AI 对话" : undefined}
-          onMouseDown={panes.floating ? () => togglePanel() : undefined}
-        >
-          <div
-            className="ai-panel-host__panel"
-            style={panes.floating ? { width: `${panes.panelWidth}px` } : undefined}
-            onMouseDown={
-              panes.floating ? (event) => event.stopPropagation() : undefined
-            }
-          >
-            {aiPanel}
-          </div>
-        </div>
-      ) : null}
-      {panelOpen && !panes.floating ? (
-        <PaneHandle
-          side="panel"
-          label="调整 AI 对话宽度"
-          controls="ai-panel"
-          value={panes.panel}
-          min={PANEL_MIN}
-          max={panes.panelMax}
-          dragging={panes.draggingPane === "panel"}
-          {...panes.panelHandlers}
+      {panelOpen && shell.docked ? (
+        <div className="assistant-slot">{aiPanel}</div>
+      ) : panelOpen ? (
+        <AssistantOverlay onClose={togglePanel}>{aiPanel}</AssistantOverlay>
+      ) : (
+        <AssistantTab
+          unread={aiUnread}
+          onOpen={togglePanel}
+          openButtonRef={assistantTabRef}
         />
-      ) : null}
+      )}
 
       {appNotice ? (
         <div className={`app-toast app-toast--${appNotice.level}`} role="status">
