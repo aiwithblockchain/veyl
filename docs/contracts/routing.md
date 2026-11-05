@@ -1,6 +1,6 @@
 # 契约：分流与 DNS
 
-> 契约版本：`1.1.0`（**已并入**。并入时基线：`commands.md` 2.3.1 / `events.md` 2.1.0 / `tools.md` 3.2.0 / `runtime.md` 2.1.0 / `data-model.md` 3。此后各文件独立演进，一律以各文件头为准，本行不再追更）
+> 契约版本：`1.2.0`（**已并入**。并入时基线：`commands.md` 2.3.1 / `events.md` 2.1.0 / `tools.md` 3.2.0 / `runtime.md` 2.1.0 / `data-model.md` 3。此后各文件独立演进，一律以各文件头为准，本行不再追更）
 > 状态：**已定稿并并入**，2026-11-04。`capabilities.md` 由 PM 维护，本文件不改它。
 > 依据：`docs/user-flows.md` §1.4、`docs/config-execution.md` §7、`docs/capabilities.md` G/I 组、`docs/tun-mode.md` §3/§5、`docs/upgrade.md` §3、`docs/review-checklist.md` B3-01～B3-08
 > 实现：`src-tauri/src/config/`（生成）、`src-tauri/src/rules/`（资源与更新）、Clash API（热切换）
@@ -362,7 +362,10 @@ DNS 规则与 `final` **由同一个 `RoutePlan` 生成**，按「地区 + 模�
 - 必须配 `route.default_domain_resolver`（取第一个 `dns-local` 的 tag）。配了多条 DNS 却缺它不是降级，是 **FATAL 起不来**（`tun-mode.md` §5）。
 - 规则顺序：`sniff` → `hijack-dns` → `ip_is_private` → 分流。
 - sniffer 必须含 `dns`，否则劫持规则不命中。
-- `strategy = "prefer_ipv4"`：默认不启用 IPv6 解析优先，避免本地 IPv6 半通状态把用户卡住。此值本批固定，不做配置项。
+- `strategy` **按平台取值**，由生成器决定，仍然不是配置项：
+  - **macOS：`prefer_ipv4`** —— 不启用 IPv6 解析优先，避免本地 IPv6 半通状态把用户卡住。
+  - **Windows：`ipv4_only`** —— Windows 的 TUN 接口只分配 IPv4 地址（地址段见 `tun-privilege-implementation-plan.md` W4）。`prefer_ipv4` 只是「优先」，解析结果里仍会带 AAAA；这些流量进入一个没有 IPv6 出口的 TUN，表现就是黑洞，或绕过隧道的泄漏。`ipv4_only` 直接不要 AAAA，把这个分支消灭在解析阶段。
+  - 两边取值不同是**有意的平台差异**，不是其中一边还没改完。改 `strategy` 属于契约变更，不是实现细节。
 
 ### 6.4 DNS 与热切
 
@@ -694,6 +697,12 @@ applied_route_revision: number | null;  // 本次连接生成配置时的 config
 ---
 
 ## 14. 变更记录
+
+### 1.2.0（2026-11-05，DNS strategy 按平台）
+
+| # | 变更 | 类型 | 来源 |
+|---|---|---|---|
+| 1 | §6.3 的 `dns.strategy` 由「本批固定 `prefer_ipv4`」改为按平台取值：macOS `prefer_ipv4`、Windows `ipv4_only`；仍不是配置项 | 语义修正 | 产品负责人：Windows TUN 只有 IPv4 地址，`prefer_ipv4` 仍会放进 AAAA，导致黑洞或泄漏 |
 
 ### 1.1.0（2026-11-04，批 3 修订）
 

@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.3.4`
+> 契约版本：`2.3.5`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -177,6 +177,8 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 48 | `category_list` | `{ query?, limit? }` | `{ categories: Category[], total }` | **2.1 新增** |
 | 49 | `rules_status` | `{}` | `RulesStatus` | **2.1 新增** |
 | 50 | `rules_update` | `{}` | `{ queued: boolean, job_id: string \| null }` | **2.1 新增** |
+| 51 | `tun_helper_open_settings` | `{}` | `{ opened: true }` | **2.3.5 新增** |
+| 52 | `tun_helper_uninstall` | `{}` | `{ ok: true }` | **2.3.5 新增** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -798,6 +800,25 @@ type NetRepairResult = {
 - 不跟随、不代理、不预取；只把 URL 交给系统 opener。
 - 加域名必须改 Host 常量并同步本节——**不允许由前端或模型传任意域名**。
 
+### 7.7 `tun_helper_open_settings {}` → `{ opened: true }`
+
+把用户送到「系统设置 › 登录项与扩展」，让他批准后台助手。
+
+首次 TUN 连接以 `tun_denied` 失败、或助手停在 `requires_approval` 时，界面给一个可点击的入口；**用户批准后重新调用连接命令即可，不需要退出 App**（`tun-mode.md` §8、实施计划 M3）。
+
+- 无参数、无副作用：只调用系统打开设置面板，**不改注册状态、不做任何提权、不弹我们自己的授权框**。
+- macOS 走 `SMAppService.openSystemSettingsLoginItems()`。**非 macOS 是 no-op，仍返回 `{ opened: true }`**——这个值不表示「真的打开了」，UI 不应在非 macOS 暴露该入口，也不能据此判断结果。
+- 它不检查助手当前状态；要不要显示这个入口，由连接失败时的 `details.reason` 决定。
+
+### 7.8 `tun_helper_uninstall {}` → `{ ok: true }`
+
+从 App 内卸载后台助手（macOS：注销 LaunchDaemon 注册）。设置页或诊断区调用。
+
+- **幂等**：没注册过也返回成功，重复调用无副作用。**非 macOS 是 no-op**，返回 `{ ok: true }`——不存在的助手等于已经卸载。
+- **不做任何提权**：注销由系统完成，不需要管理员密码，也不弹授权框。
+- **不负责停 sing-box**：TUN 正在运行时应先 `runtime_stop` 再调本命令（清理顺序见 `capabilities.md` §3.1）。
+- 失败返回 `{ code, message }`，`code` 取自权限层错误码（当前只会是 `helper_install_failed`）。**这是 §1.2 通用 `AivpnError` 的刻意例外**：本命令没有重试语义，也不需要 `request_id`；若将来要统一，以 `AivpnError` 为准，不要两套并存。
+
 ---
 
 ## 8. 种子（官方默认配置，C 组）
@@ -1341,12 +1362,13 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.3.4** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 |
+| `contracts/commands.md` | **2.3.5** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 |
 | `contracts/events.md` | **2.4.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` |
 | `contracts/runtime.md` | **2.3.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` |
 | `contracts/tools.md` | **3.3.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 |
 | `data-model.md` | **3** | 批 0 + 批 3 表 + 种子排除表 |
-| `contracts/routing.md` | **1.1.0** | 批 3 设计依据 |
+| `contracts/routing.md` | **1.2.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 |
+| `contracts/tun-backend.md` | **1.0.6** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险） |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
 
 ### 15.6 2.1.0 新增（非破坏性）
@@ -1358,6 +1380,13 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.3.5（2026-11-05，助手设置/卸载补录）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.3.5`；§2 新增 51 `tun_helper_open_settings`、52 `tun_helper_uninstall`，详解见 §7.7 / §7.8 | 补录 | 实现已注册（`lib.rs:300-301`）、契约未写，检查器报 FAIL；产品负责人 2026-11-05 确认按实现签名补 |
+| 2 | §15.5 矩阵同步本文件 2.3.5、`routing.md` 1.2.0，并新增 `tun-backend.md` 1.0.6 一行 | 元数据 | 矩阵滞后于各文件的真实版本 |
 
 ### 2.3.4（2026-11-05，节点延迟与出口延迟分开）
 
