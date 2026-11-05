@@ -94,8 +94,13 @@ fn summarise_versions(data: &Value) -> String {
         for (version, channel) in &available {
             lines.push(format!("- {version} ({channel})"));
         }
-        // 运行库安装/升级只能由用户在「高级设置 → 运行库」里发起，AI 不代为安装。
-        lines.push("安装或升级运行库请提示用户到「高级设置 → 运行库」手动操作。".to_string());
+        // 升级只能在用户明确要求时发起：可以用 CoreUpgrade（会弹确认卡），
+        // 也可以让用户到「高级设置 → 运行库」手动操作。
+        lines.push(
+            "用户明确要求更新运行库时，可用 CoreUpgrade（会先弹确认卡并等待用户选「升级」）；\
+也可以提示用户到「高级设置 → 运行库」手动操作。"
+                .to_string(),
+        );
     }
 
     lines.join("\n")
@@ -121,8 +126,9 @@ mod version_summary_tests {
         assert!(text.contains("已安装：无"), "{text}");
         assert!(text.contains("- 1.14.4 (stable)"), "{text}");
         assert!(text.contains("- 1.13.0 (stable)"), "{text}");
-        // 不再引导模型去装运行时：安装只能由用户在高级设置里发起。
+        // 升级只能在用户明确要求时发起，且必须经过确认卡。
         assert!(text.contains("高级设置"), "{text}");
+        assert!(text.contains("CoreUpgrade"), "{text}");
         assert!(!text.contains("CoreInstall"), "{text}");
     }
 

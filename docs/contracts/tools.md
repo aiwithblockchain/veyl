@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.4.1`
+> 契约版本：`3.5.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.4.1`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.5.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.4.1";
+  contract_version: "3.5.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -232,49 +232,50 @@ type CallSource = "ui" | "agent";
 | 4 | `RuntimeRestart` | `RuntimeRestartTool` | 重启运行时进程 | `Write` | 中 |
 | 5 | `RuntimeLogs` | `RuntimeLogsTool` | 拉取脱敏日志 | `ReadOnly` | 只读 |
 | 6 | `CoreListVersions` | `CoreListVersionsTool` | 已安装/可安装版本 | `ReadOnly` | 只读 |
-| 7 | `CatalogSearch` | `CatalogSearchTool` | 查询**远端**节点目录（不含本地导入） | `ReadOnly` | 只读 |
-| 8 | `ConfigList` | `ConfigListTool` | 列**本地**全部配置 | `ReadOnly` | 只读 |
-| 9 | `ConfigDetail` | `ConfigDetailTool` | 一套配置的节点集、DNS、端口、布局 | `ReadOnly` | 只读 |
-| 10 | `ConfigCreate` | `ConfigCreateTool` | 新建一套配置（种子 / 空 / 指定节点） | `Write` | 中 |
-| 11 | `ConfigUpdate` | `ConfigUpdateTool` | 编辑配置（名称 / 分流 / DNS / 端口 / 节点集） | `Write` | 中 |
-| 12 | `ConfigDelete` | `ConfigDeleteTool` | 删除一套配置 | `Write` | 中 |
-| 13 | `NodeImportUrl` | `NodeImportUrlTool` | 从订阅 URL 解析并导入节点 | `Write` | 中 |
-| 14 | `NodeCreate` | `NodeCreateTool` | 手动创建一个节点 | `Write` | 中 |
-| 15 | `NodeSwitch` | `NodeSwitchTool` | 切换某套配置的当前节点 | `Execute` | 中 |
-| 16 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `ReadOnly` | 只读 |
-| 17 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 / TUN | `Execute` | 高 |
-| 18 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
-| 19 | `ProxyParams` | `ProxyParamsTool` | 本机代理地址与端口（A5） | `ReadOnly` | 只读 |
-| 20 | `ProbeRun` | `ProbeRunTool` | 连接后四项探测，失败登记问题 | `Write` | 低 |
-| 21 | `IssueList` | `IssueListTool` | 列出问题记录 | `ReadOnly` | 只读 |
-| 22 | `IssueGet` | `IssueGetTool` | 单条问题的诊断包 | `ReadOnly` | 只读 |
-| 23 | `IssueHandoff` | `IssueHandoffTool` | 把问题转交 AI 会话 | `Write` | 低 |
-| 24 | `IssueResolve` | `IssueResolveTool` | 复测通过后标记已解决 | `Write` | 低 |
-| 25 | `IssueIgnore` | `IssueIgnoreTool` | 忽略 / 恢复问题 | `Write` | 低 |
-| 26 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
-| 27 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
-| 28 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
-| 29 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
-| 30 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
-| 31 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口 | `ReadOnly` | 只读 |
-| 32 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
-| 33 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
-| 34 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
-| 35 | `RouteGet` | `RouteGetTool` | 分流模式、目标、自定义规则、生效状态 | `ReadOnly` | 只读 |
-| 36 | `RouteSetMode` | `RouteSetModeTool` | 切换分流模式（A↔B 热切） | `Execute` | 中 |
-| 37 | `RouteTargetsSet` | `RouteTargetsSetTool` | 设置「指定服务」分类集合 | `Write` | 中 |
-| 38 | `RuleCustomList` | `RuleCustomListTool` | 列自定义分流规则 | `ReadOnly` | 只读 |
-| 39 | `RuleCustomAdd` | `RuleCustomAddTool` | 追加一条自定义规则 | `Write` | 中 |
-| 40 | `RuleCustomDelete` | `RuleCustomDeleteTool` | 删除一条自定义规则 | `Write` | 中 |
-| 41 | `CategoryList` | `CategoryListTool` | 分类目录（I1） | `ReadOnly` | 只读 |
-| 42 | `RulesStatus` | `RulesStatusTool` | 规则数据版本与新鲜度 | `ReadOnly` | 只读 |
-| 43 | `RulesUpdate` | `RulesUpdateTool` | 更新规则数据（未连接时排队） | `Write` | 中 |
+| 7 | `CoreUpgrade` | `CoreUpgradeTool` | 检查并安装运行时更新（唯一有确认点的工具） | `Execute` | 高 |
+| 8 | `CatalogSearch` | `CatalogSearchTool` | 查询**远端**节点目录（不含本地导入） | `ReadOnly` | 只读 |
+| 9 | `ConfigList` | `ConfigListTool` | 列**本地**全部配置 | `ReadOnly` | 只读 |
+| 10 | `ConfigDetail` | `ConfigDetailTool` | 一套配置的节点集、DNS、端口、布局 | `ReadOnly` | 只读 |
+| 11 | `ConfigCreate` | `ConfigCreateTool` | 新建一套配置（种子 / 空 / 指定节点） | `Write` | 中 |
+| 12 | `ConfigUpdate` | `ConfigUpdateTool` | 编辑配置（名称 / 分流 / DNS / 端口 / 节点集） | `Write` | 中 |
+| 13 | `ConfigDelete` | `ConfigDeleteTool` | 删除一套配置 | `Write` | 中 |
+| 14 | `NodeImportUrl` | `NodeImportUrlTool` | 从订阅 URL 解析并导入节点 | `Write` | 中 |
+| 15 | `NodeCreate` | `NodeCreateTool` | 手动创建一个节点 | `Write` | 中 |
+| 16 | `NodeSwitch` | `NodeSwitchTool` | 切换某套配置的当前节点 | `Execute` | 中 |
+| 17 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `ReadOnly` | 只读 |
+| 18 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 / TUN | `Execute` | 高 |
+| 19 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
+| 20 | `ProxyParams` | `ProxyParamsTool` | 本机代理地址与端口（A5） | `ReadOnly` | 只读 |
+| 21 | `ProbeRun` | `ProbeRunTool` | 连接后四项探测，失败登记问题 | `Write` | 低 |
+| 22 | `IssueList` | `IssueListTool` | 列出问题记录 | `ReadOnly` | 只读 |
+| 23 | `IssueGet` | `IssueGetTool` | 单条问题的诊断包 | `ReadOnly` | 只读 |
+| 24 | `IssueHandoff` | `IssueHandoffTool` | 把问题转交 AI 会话 | `Write` | 低 |
+| 25 | `IssueResolve` | `IssueResolveTool` | 复测通过后标记已解决 | `Write` | 低 |
+| 26 | `IssueIgnore` | `IssueIgnoreTool` | 忽略 / 恢复问题 | `Write` | 低 |
+| 27 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
+| 28 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
+| 29 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
+| 30 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
+| 31 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
+| 32 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口 | `ReadOnly` | 只读 |
+| 33 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
+| 34 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
+| 35 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
+| 36 | `RouteGet` | `RouteGetTool` | 分流模式、目标、自定义规则、生效状态 | `ReadOnly` | 只读 |
+| 37 | `RouteSetMode` | `RouteSetModeTool` | 切换分流模式（A↔B 热切） | `Execute` | 中 |
+| 38 | `RouteTargetsSet` | `RouteTargetsSetTool` | 设置「指定服务」分类集合 | `Write` | 中 |
+| 39 | `RuleCustomList` | `RuleCustomListTool` | 列自定义分流规则 | `ReadOnly` | 只读 |
+| 40 | `RuleCustomAdd` | `RuleCustomAddTool` | 追加一条自定义规则 | `Write` | 中 |
+| 41 | `RuleCustomDelete` | `RuleCustomDeleteTool` | 删除一条自定义规则 | `Write` | 中 |
+| 42 | `CategoryList` | `CategoryListTool` | 分类目录（I1） | `ReadOnly` | 只读 |
+| 43 | `RulesStatus` | `RulesStatusTool` | 规则数据版本与新鲜度 | `ReadOnly` | 只读 |
+| 44 | `RulesUpdate` | `RulesUpdateTool` | 更新规则数据（未连接时排队） | `Write` | 中 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
-**破坏性工具（destructive）**：`ConfigDelete`、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。**均无确认点**，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0 从工具集移除，见 §4.7。
+**破坏性工具（destructive）**：`CoreUpgrade`（下载并安装运行时，**唯一有确认点**，见 §4.45）、`ConfigDelete`、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。除 `CoreUpgrade` 外均无确认点，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0 从工具集移除，见 §4.7。
 
-**UI 专用命令不注册工具**：`core_info` / `core_check_updates` / `core_upgrade` / `core_cancel_upgrade` / `core_rollback`（`commands.md` §7.10）与 `tun_helper_info` / `tun_helper_restart`（§7.8.1–§7.8.2）。模型既不能替换运行时，也不能重启特权组件——这两类操作都要求用户看见并显式点击。
+**UI 专用命令不注册工具**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`（`commands.md` §7.10）与 `tun_helper_info` / `tun_helper_restart`（§7.8.1–§7.8.2）。**`core_upgrade` 是例外**：模型只能经 `CoreUpgrade` 工具调用，且必须由用户逐字确认（§4.45）；确认卡由 Host 生成，模型无法伪造。
 
 ### 3.1 注册清单（照抄）
 
@@ -286,6 +287,7 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(RuntimeRestartTool::new(rt.clone(), proxy.clone())),
     Box::new(RuntimeLogsTool::new(rt.clone())),
     Box::new(CoreListVersionsTool::new(installer.clone())),
+    Box::new(CoreUpgradeTool::new(installer.clone())),
     Box::new(CatalogSearchTool::new(catalog.clone())),
     // 2.0：配置与节点
     Box::new(ConfigListTool::new(store.clone())),
@@ -337,6 +339,8 @@ P1 移除审批后，`VpnConnect` 直接执行：它会修改系统代理，不�
 它仍然是**需要用户明确意图**的操作 —— 区别只在于这个意图由 Agent 的判断代替用户点击。风险记录见 §2.1.1。
 
 > `CoreInstall` 自 3.4.0 起**不在工具集里**：下载并替换特权二进制改为 UI 显式触发（`commands.md` §7.10），模型既不能安装、也不能升级或回滚。
+
+> **`CoreUpgrade` 是唯一的例外，也是唯一有确认点的工具**（3.5.0 新增，§4.45）。它不恢复旧审批框架：`ApprovalPolicy` / `ApprovalScope` / `approval_id` 仍然全部删除；确认走的是既有的 `AskUserQuestion` 阻塞通道，由 Host 填 `kind: "core_upgrade_confirm"`。模型能发起「问用户要不要升级」，但不能自己回答，也不能跳过。
 
 ---
 
@@ -775,7 +779,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.4.1";
+  contract_version: "3.5.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -938,9 +942,10 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.4.1";
+  contract_version: "3.5.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
+  origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
   stage: string;            // core_upgrade: downloading|verifying|unpacking|installing|activating
   progress: number;         // 0.0–1.0
@@ -1668,6 +1673,63 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 
 ---
 
+### 4.45 `CoreUpgrade`（AI 代劳升级，3.5.0 新增）
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
+  },
+  "additionalProperties": false
+}
+```
+
+- 参数**只有可选 `version`**。出现 `url` / `sha256` / `size` / `force` 或任何其它键 → `INVALID_ARGUMENT`（`details.reason = "unknown_argument"`）。下载源、校验值、大小全部由 Host 决定，模型无权指定。
+- 省略 `version` 表示「装最新可用版本」。
+
+`data`：
+
+```ts
+type CoreUpgradeData = {
+  job_id: string | null;                       // 开始下载时非 null
+  current_version: string;                     // 调用前的实际版本（随包或已安装），与 core_upgrade 命令返回同名
+  target_version: string;                      // 本次比较/安装的目标版本
+  changed: boolean;                            // target_version != current_version
+  confirmation: "accepted" | "not_needed";     // 成功回复里恒有
+};
+```
+
+**调用顺序（验收句）**
+
+1. **先查网络，再比较版本。** 未完成网络检查（`core_check_updates`）前不得比较版本、不得弹确认卡；网络不通时本次调用 `core_upgrade` 命令的次数必须为 **0**。
+2. **只重试一次，且只对网络错误。** 仅 `NETWORK_UNREACHABLE` 允许重试一次；`SOURCE_UNAVAILABLE` 与 `SIGNATURE_INVALID` **不重试**，直接失败。
+3. **只对更高版本弹卡。** 比较基准是 `core_info.active_version`（为空则用随包的 `bundled_version`）；没有更高版本时确认卡出现次数为 **0**，返回 `changed: false`。
+
+**确认卡**
+
+- 用户同意后 Host 才调用 `core_upgrade` 命令。确认走既有的 `AskUserQuestion` 阻塞通道（`events.md` §4.8），Host 填 `kind: "core_upgrade_confirm"` 与 `details`（`commands.md` §7.10），**模型无法伪造**。
+- 同意一次性绑定 `(session_id, request_id, target_version, artifact_sha256)`；换版本必须重新确认，绑定只对本次请求有效。
+- 用户拒绝 → `CANCELLED`，不启动下载。
+- 没有新版本 → **不弹卡**，直接返回 `changed: false`。
+
+**回复**
+
+所有回复都带当前版本与「有没有改动」：
+
+| 情况 | 结果 |
+|---|---|
+| 有新版本、用户同意 | `{ job_id, current_version, target_version, changed: true, confirmation: "accepted" }`，Job 的 `origin = "agent"` |
+| 没有新版本 | `{ job_id: null, current_version, target_version: current_version, changed: false, confirmation: "not_needed" }` |
+| 用户拒绝 | `CANCELLED`，`details.current_version` 必填 |
+| 网络 / 源 / 签名失败 | 对应错误码，`details.current_version` 必填 |
+
+错误：`NETWORK_UNREACHABLE`、`SOURCE_UNAVAILABLE`、`SIGNATURE_INVALID`、`HASH_MISMATCH`、`DISK_FULL`、`BUSY`、`NOT_FOUND`、`CANCELLED`、`INTERNAL`。
+
+> 这是**唯一有确认点的工具**。它不恢复旧审批框架：`ApprovalPolicy` / `ApprovalScope` / `approval_id` 仍然全部删除；确认只是借用 `AskUserQuestion` 的阻塞通道，Host 提供结构化 `kind` / `details`，模型只能发起、不能代答。
+
+---
+
 ## 5. 工具间协作约定
 
 ### 5.1 标准连接链路
@@ -1698,6 +1760,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 | `RulesUpdate` | 已有任务 → `CONFLICT`，`details.job_id` |
 | `NodeImportUrl` / `NodeCreate` | 同 `(source, source_key)` → 不新建，计入 `skipped`（`duplicate`）；`data` 仍返回已有节点 |
 | `NodeSwitch` | 目标就是当前节点 → `ok: true`，不发事件 |
+| `CoreUpgrade` | 同目标版本已有任务 → `BUSY`，`details.job_id`；无新版本 → 成功且 `changed: false`，不建任务 |
 | `VpnConnect` | 已连同一配置同一节点 → `ok: true`，不重复设置代理 |
 | `ProbeRun` | 每次都是真实探测，不缓存；会刷新 `last_seen` |
 | `IssueHandoff` | 重复转交 → 复用会话，`last_handoff_at` 刷新，计数不变 |
@@ -1718,6 +1781,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 | `RouteTargetsSet` / `RuleCustomAdd` / `RuleCustomDelete` | 3s |
 | `RulesUpdate` | 立即返回 `job_id` 或 `queued` |
 | `RuntimeStop` / `VpnDisconnect` | 10s |
+| `CoreUpgrade` | 网络检查 + 返回 `job_id`，≤10s |
 
 同步工具超过预算返回 `TIMEOUT` + `retryable: true`，不要无限等待。
 
@@ -1765,6 +1829,17 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 ---
 
 ## 8. 变更记录
+
+### 3.5.0（2026-11-05，AI 代劳升级 `CoreUpgrade`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.5.0`；工具总数 43 → 44 | 元数据 | AI 代劳升级定稿 |
+| 2 | 新增 `CoreUpgrade`（`Execute`，高风险）：参数只有可选 `version`；`url` / `sha256` / `size` / `force` → `INVALID_ARGUMENT` | 新增工具 | 产品负责人 2026-11-05 |
+| 3 | 新增 §4.45：调用顺序三段验收句（先查网络、只对 `NETWORK_UNREACHABLE` 重试一次、只对更高版本弹卡）、确认卡协议、所有回复带 `active_version` 与 `changed` | 新增 | 同上 |
+| 4 | 声明它是**唯一有确认点的工具**：复用 `AskUserQuestion` 阻塞通道（Host 填 `kind: "core_upgrade_confirm"`），**不恢复** `ApprovalPolicy` 等旧审批框架 | 约束 | 同上 |
+| 5 | 错误码补 `SIGNATURE_INVALID`、`CANCELLED` | 错误码 | 签名校验失败与用户拒绝是两条不同路径 |
+| 6 | `JobGet.kind` 的 `Job` 增必填 `origin: "ui" \| "agent"`（旧记录按 `"ui"`）；§5.2 / §5.3 增 `CoreUpgrade` 行 | 字段扩展 | UI 与 Agent 发起的任务要能区分 |
 
 ### 3.4.1（2026-11-05，UI 专用命令说明）
 

@@ -4,7 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { AgentEvent, NextAction, RuntimeView } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
-import { isTauri } from "./agent/bridge";
+import { isTauri, readQuestionDetail } from "./agent/bridge";
 import type {
   DefaultProfileStatus,
   ImportSeedResult,
@@ -345,6 +345,7 @@ export default function App() {
       if (event.name === AGENT_EVENTS.askUserQuestion) {
         const payload = event.payload;
         if (settledQuestionIds.current.has(payload.question_id)) return;
+        const detail = readQuestionDetail(payload as unknown as Record<string, unknown>);
         setPendingQuestions((current) => [
           ...current.filter((item) => item.questionId !== payload.question_id),
           {
@@ -355,6 +356,8 @@ export default function App() {
             options: payload.options ?? [],
             createdAt: payload.created_at,
             expiresAt: payload.expires_at,
+            kind: detail.kind,
+            upgradeConfirm: detail.upgradeConfirm,
           },
         ]);
       }
@@ -1126,6 +1129,7 @@ export default function App() {
         question={currentQuestion}
         onAnswer={handleAnswerQuestion}
         onExpire={handleQuestionExpired}
+        connected={runtime.state === "running" || runtime.state === "degraded"}
       />
 
       <Settings

@@ -54,6 +54,16 @@ function isDenied(error: unknown): boolean {
   return /拒绝|取消|未授权|没有授权|authoriz|denied|cancel/i.test(bridgeError.message);
 }
 
+function isBusy(error: unknown): boolean {
+  const bridgeError = toBridgeError(error);
+  const reason = String(bridgeError.details?.reason ?? "").toLowerCase();
+  return (
+    (bridgeError.code === "PRECONDITION_FAILED" && bridgeError.retryable) ||
+    bridgeError.code.toUpperCase() === "HELPER_BUSY" ||
+    reason === "helper_busy"
+  );
+}
+
 /** 后台组件状态与「检查并更新」；状态放在设置页顶层，切换分区不丢失。 */
 export function useTunHelper({
   bridge,
@@ -141,6 +151,12 @@ export function useTunHelper({
       if (!mounted.current) return;
       if (isMissingCommand(error)) {
         setAvailable(false);
+        return;
+      }
+      if (isBusy(error)) {
+        setFailure(null);
+        setAdminHint(false);
+        setHint("正在准备，请稍后再试");
         return;
       }
       setFailure(isDenied(error) ? UPDATE_DENIED : UPDATE_FAILED);

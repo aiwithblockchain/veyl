@@ -10,12 +10,20 @@ export class BridgeError extends Error {
   readonly code: string;
   /** 后端的结构化细节，例如 `{ reason: "empty_title" }`。 */
   readonly details: Record<string, unknown> | null;
+  /** 后端标记为可重试（例如任务正在准备）；没给时按不可重试处理。 */
+  readonly retryable: boolean;
 
-  constructor(code: string, message: string, details: Record<string, unknown> | null = null) {
+  constructor(
+    code: string,
+    message: string,
+    details: Record<string, unknown> | null = null,
+    retryable = false,
+  ) {
     super(message);
     this.name = "BridgeError";
     this.code = code;
     this.details = details;
+    this.retryable = retryable;
   }
 }
 
@@ -34,16 +42,31 @@ export function toBridgeError(error: unknown, fallbackCode = "INTERNAL"): Bridge
   }
 
   if (error instanceof Error) {
-    const record = error as Error & { code?: unknown; details?: unknown };
+    const record = error as Error & { code?: unknown; details?: unknown; retryable?: unknown };
     const code = typeof record.code === "string" ? record.code : fallbackCode;
-    return new BridgeError(code, record.message, readDetails(record.details));
+    return new BridgeError(
+      code,
+      record.message,
+      readDetails(record.details),
+      record.retryable === true,
+    );
   }
 
   if (error && typeof error === "object") {
-    const record = error as { code?: unknown; message?: unknown; details?: unknown };
+    const record = error as {
+      code?: unknown;
+      message?: unknown;
+      details?: unknown;
+      retryable?: unknown;
+    };
     const code = typeof record.code === "string" ? record.code : fallbackCode;
     const message = typeof record.message === "string" ? record.message : "操作失败";
-    return new BridgeError(code, message, readDetails(record.details));
+    return new BridgeError(
+      code,
+      message,
+      readDetails(record.details),
+      record.retryable === true,
+    );
   }
 
   return new BridgeError(fallbackCode, "操作失败");

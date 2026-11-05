@@ -25,3 +25,21 @@ export function formatDate(iso: string | null): string {
     day: "numeric",
   });
 }
+
+/** 安装包大小：未知或非正数返回 null，由调用方决定「大小未知」等文案。 */
+export function formatByteSize(bytes: number | null): string | null {
+  if (!bytes || bytes <= 0) return null;
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 10) return `${Math.round(mb)} MB`;
+  if (mb >= 1) return `${mb.toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/**
+ * 升级生效时机：只有确实需要重启 App 时才提重启；
+ * 否则按当前是否连接，选择「断开并重新连接」或「下次连接」。
+ */
+export function upgradeEffectText(restartRequired: boolean, connected: boolean): string {
+  if (restartRequired) return "重启 Veyl 后生效";
+  return connected ? "断开并重新连接后生效" : "下次连接时生效";
+}

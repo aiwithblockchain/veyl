@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, snapshotToView } from "./bridge";
+import { applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, readQuestionDetail, snapshotToView } from "./bridge";
 import {
   AGENT_EVENTS,
   CONTRACT_VERSION,
@@ -158,5 +158,59 @@ describe("runtime 快照与事件兜底", () => {
     // 其余字段仍以快照为准。
     expect(merged.state).toBe("running");
     expect(merged.mixed_port).toBe(7890);
+  });
+});
+
+describe("readQuestionDetail", () => {
+  it("读取嵌套的升级明细", () => {
+    expect(
+      readQuestionDetail({
+        kind: "core_upgrade_confirm",
+        details: {
+          current_version: "1.14.4",
+          target_version: "1.15.0",
+          size: 12 * 1024 * 1024,
+          restart_required: true,
+        },
+      }),
+    ).toEqual({
+      kind: "core_upgrade_confirm",
+      upgradeConfirm: {
+        currentVersion: "1.14.4",
+        targetVersion: "1.15.0",
+        size: 12 * 1024 * 1024,
+        restartRequired: true,
+      },
+    });
+  });
+
+  it("兼容与 kind 同级的扁平字段，大小缺失为 null", () => {
+    expect(
+      readQuestionDetail({
+        kind: "core_upgrade_confirm",
+        current_version: "1.14.4",
+        target_version: "1.15.0",
+        size: 0,
+      }),
+    ).toEqual({
+      kind: "core_upgrade_confirm",
+      upgradeConfirm: {
+        currentVersion: "1.14.4",
+        targetVersion: "1.15.0",
+        size: null,
+        restartRequired: false,
+      },
+    });
+  });
+
+  it("普通提问不产出升级明细", () => {
+    expect(readQuestionDetail({ kind: null })).toEqual({
+      kind: null,
+      upgradeConfirm: null,
+    });
+    expect(readQuestionDetail({ question: "要升级吗？" })).toEqual({
+      kind: null,
+      upgradeConfirm: null,
+    });
   });
 });

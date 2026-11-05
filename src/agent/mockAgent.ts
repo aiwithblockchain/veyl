@@ -125,7 +125,9 @@ export class MockAgentBridge implements AgentBridge {
   private coreActiveVersion = "1.14.4";
   private coreActiveSource: "bundled" | "installed" = "bundled";
   private coreRestartRequired = false;
-  private coreJob: { id: string; cancelled: boolean } | null = null;
+  private coreJob: { id: string; cancelled: boolean; origin?: "ui" | "agent" | null } | null = null;
+  /** 对话发起的升级确认：回答「升级」后才真正开始任务。 */
+  private pendingUpgradeQuestion: { id: string; version: string } | null = null;
   /** 演示「检查并更新」成功后，后台组件回到 running。 */
   private helperState: TunHelperState | null = null;
   private runtime: RuntimeSnapshot = {
@@ -343,22 +345,23 @@ export class MockAgentBridge implements AgentBridge {
   }
 
   async coreUpgrade(version: string): Promise<{ jobId: string }> {
-    const job = { id: `core_${Date.now()}`, cancelled: false };
+    const job = { id: `core_${Date.now()}`, cancelled: false, origin: null };
     this.coreJob = job;
     const mode = mockFlag("veyl.mock.core.upgrade");
-    void this.runMockUpgrade(job, version, mode);
+    void this.runMockUpgrade(job, version, mode, null);
     return { jobId: job.id };
   }
 
   async coreCancelUpgrade(jobId: string): Promise<{ cancelled: boolean }> {
     const cancelled = this.coreJob?.id === jobId;
+    const origin = this.coreJob?.origin ?? null;
     if (cancelled && this.coreJob) {
       this.coreJob.cancelled = true;
       this.coreJob = null;
     }
     await sleep(150);
     // 真机取消也会发一条 ok:false 的结束事件；这里保持同一形状。
-    if (cancelled) this.emitCoreFinished(jobId, false, null, null);
+    if (cancelled) this.emitCoreFinished(jobId, false, null, null, origin);
     return { cancelled };
   }
 
@@ -371,8 +374,8 @@ export class MockAgentBridge implements AgentBridge {
     }
     this.coreActiveSource = "bundled";
     this.coreActiveVersion = this.coreBundledVersion;
-    this.coreRestartRequired =
-      this.runtime.state === "running" || this.runtime.state === "degraded";
+    // 新语义：restart_required 只表示确实需要重启 App；普通生效靠断开重连或下次连接。
+    this.coreRestartRequired = mockFlag("veyl.mock.core.restart") === "1";
   }
 
   async tunProbe(): Promise<TunProbeData> {
@@ -426,6 +429,14 @@ export class MockAgentBridge implements AgentBridge {
     if (mode === "missing") {
       throw new Error("Command tun_helper_restart not found");
     }
+    if (mode === "busy") {
+      throw {
+        code: "PRECONDITION_FAILED",
+        retryable: true,
+        message: "后台组件正在准备",
+        details: { reason: "helper_busy" },
+      };
+    }
     if (mode === "deny") {
       throw { code: "AUTH_DENIED", message: "用户拒绝管理员授权" };
     }
@@ -444,6 +455,7 @@ export class MockAgentBridge implements AgentBridge {
     job: { id: string; cancelled: boolean },
     version: string,
     mode: string | null,
+    origin: "ui" | "agent" | null,
   ) {
     const slow = mockFlag("veyl.mock.core.slow");
     const stepDelay = slow === "2" ? 600 : slow === "1" ? 200 : 80;
@@ -453,17 +465,17 @@ export class MockAgentBridge implements AgentBridge {
     for (let i = 1; i <= steps; i += 1) {
       await sleep(stepDelay);
       if (job.cancelled) return;
-      this.emitCoreProgress(job.id, "download", Math.round((total * i) / steps), total);
+      this.emitCoreProgress(job.id, "download", Math.round((total * i) / steps), total, origin);
     }
     if (job.cancelled) return;
-    this.emitCoreProgress(job.id, "verify", 0, null);
+    this.emitCoreProgress(job.id, "verify", 0, null, origin);
     await sleep(phaseDelay);
     if (job.cancelled) return;
     if (mode === "fail") {
-      this.emitCoreFinished(job.id, false, "CHECKSUM_MISMATCH", null);
+      this.emitCoreFinished(job.id, false, "CHECKSUM_MISMATCH", null, origin);
       return;
     }
-    this.emitCoreProgress(job.id, "install", 0, null);
+    this.emitCoreProgress(job.id, "install", 0, null, origin);
     await sleep(phaseDelay);
     if (job.cancelled) return;
     try {
@@ -471,12 +483,10 @@ export class MockAgentBridge implements AgentBridge {
     } catch {
       // 浏览器存储不可用时只影响演示。
     }
-    // 与真机一致：空闲时装完即用；只有运行中的进程还是旧版本才需要重启。
     this.coreActiveSource = "installed";
     this.coreActiveVersion = version;
-    this.coreRestartRequired =
-      this.runtime.state === "running" || this.runtime.state === "degraded";
-    this.emitCoreFinished(job.id, true, null, version);
+    this.coreRestartRequired = mockFlag("veyl.mock.core.restart") === "1";
+    this.emitCoreFinished(job.id, true, null, version, origin);
   }
 
   private emitCoreProgress(
@@ -484,6 +494,7 @@ export class MockAgentBridge implements AgentBridge {
     phase: string,
     received: number,
     total: number | null,
+    origin: "ui" | "agent" | null,
   ) {
     this.emit({
       name: AGENT_EVENTS.coreUpgradeProgress,
@@ -493,6 +504,7 @@ export class MockAgentBridge implements AgentBridge {
         phase,
         received,
         total,
+        origin,
         emitted_at: now(),
       },
     });
@@ -503,6 +515,7 @@ export class MockAgentBridge implements AgentBridge {
     ok: boolean,
     code: string | null,
     version: string | null,
+    origin: "ui" | "agent" | null,
   ) {
     this.emit({
       name: AGENT_EVENTS.coreUpgradeFinished,
@@ -512,6 +525,7 @@ export class MockAgentBridge implements AgentBridge {
         ok,
         code,
         version,
+        origin,
         emitted_at: now(),
       },
     });
@@ -799,6 +813,13 @@ export class MockAgentBridge implements AgentBridge {
     if (text.includes("第一次用")) return this.firstRunFlow(sessionId, requestId, assistantId);
     if (text.includes("断开")) return this.disconnectFlow(requestId, assistantId);
     if (text.includes("状态")) return this.statusFlow(requestId, assistantId);
+    if (
+      text.includes("升级运行时") ||
+      text.includes("更新运行时") ||
+      text.includes("升级后台运行库")
+    ) {
+      return this.upgradeConfirmFlow(sessionId, requestId, assistantId);
+    }
     if (text.includes("安装") || text.includes("版本")) {
       return this.runtimeVersionFlow(requestId, assistantId);
     }
@@ -952,6 +973,60 @@ export class MockAgentBridge implements AgentBridge {
       "运行时随 Veyl 一起提供，我这边只能查看版本。要检查更新，去「设置 › 高级 › 运行时」。";
     await this.type(requestId, assistantId, reply);
     this.finish(requestId, assistantId, "success", reply);
+  }
+
+  /** 对话代劳升级：先出确认卡，用户点「升级」后才真正开始任务。 */
+  private async upgradeConfirmFlow(
+    sessionId: string,
+    requestId: string,
+    assistantId: string,
+  ) {
+    this.status(requestId, assistantId, "检查可用版本", "preparing_tool");
+    if (
+      !(await this.tool(
+        requestId,
+        assistantId,
+        "CoreListVersions",
+        "查询可用版本",
+        640,
+        `随包 ${this.coreBundledVersion}（active）`,
+      ))
+    ) {
+      return this.finish(requestId, assistantId, "cancelled", null);
+    }
+
+    const target = this.coreActiveVersion === "1.15.0" ? "1.15.1" : "1.15.0";
+    const size = 12 * 1024 * 1024;
+    const question = `发现新版本 ${target}（约 12 MB）。要我帮你更新后台运行库吗？`;
+    if (!(await this.type(requestId, assistantId, question))) {
+      return this.finish(requestId, assistantId, "cancelled", null);
+    }
+    this.finish(requestId, assistantId, "success", question);
+
+    const questionId = `q_${requestId}`;
+    this.pendingUpgradeQuestion = { id: questionId, version: target };
+    this.emit({
+      name: AGENT_EVENTS.askUserQuestion,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        session_id: sessionId,
+        request_id: requestId,
+        question_id: questionId,
+        question,
+        options: ["升级", "取消"],
+        kind: "core_upgrade_confirm",
+        details: {
+          current_version: this.coreActiveVersion,
+          target_version: target,
+          size,
+          source: "official",
+          restart_required: mockFlag("veyl.mock.core.restart") === "1",
+        },
+        created_at: Date.now(),
+        expires_at: Date.now() + 300_000,
+        emitted_at: now(),
+      },
+    });
   }
 
   private async disconnectFlow(requestId: string, assistantId: string) {
@@ -1169,10 +1244,16 @@ export class MockAgentBridge implements AgentBridge {
 
   async replyUserQuestion(
     _sessionId: string,
-    _questionId: string,
-    _answer: string,
+    questionId: string,
+    answer: string,
   ): Promise<void> {
-    // 浏览器事件源没有提问通道；调用即视为完成。
+    const pending = this.pendingUpgradeQuestion;
+    if (!pending || pending.id !== questionId) return;
+    this.pendingUpgradeQuestion = null;
+    if (!/升级|更新/.test(answer)) return;
+    const job = { id: `core_chat_${Date.now()}`, cancelled: false, origin: "agent" as const };
+    this.coreJob = job;
+    void this.runMockUpgrade(job, pending.version, mockFlag("veyl.mock.core.upgrade"), "agent");
   }
 
   async listPendingQuestions(_sessionId: string): Promise<never[]> {

@@ -306,8 +306,9 @@ export function Settings({
   onAskAi,
   initialSection = "ai",
 }: Props) {
+  const connected = runtime.state === "running" || runtime.state === "degraded";
   const [section, setSection] = useState<SectionId>("ai");
-  const coreUpgrade = useRuntimeUpgrade({ bridge, enabled: open });
+  const coreUpgrade = useRuntimeUpgrade({ bridge, enabled: open, connected });
   const tunHelper = useTunHelper({ bridge, enabled: open });
   const [state, setState] = useState<DeepSeekKeyState>({
     masked: null,
@@ -1331,10 +1332,7 @@ export function Settings({
             <h3 className="settings-section__title">高级</h3>
 
             <RuntimeUpgradeRow controller={coreUpgrade} />
-            <TunHelperRow
-              controller={tunHelper}
-              activeConnection={runtime.state === "running" || runtime.state === "degraded"}
-            />
+            <TunHelperRow controller={tunHelper} activeConnection={connected} />
 
             <div className="settings-row">
               <div>

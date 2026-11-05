@@ -34,6 +34,22 @@ struct PendingQuestion {
     options: Vec<String>,
     created_at: i64,
     reply: Option<oneshot::Sender<String>>,
+    /// UI 用来渲染专用卡片（当前只有 `core_upgrade_confirm`）。
+    kind: Option<String>,
+    details: Option<Value>,
+    default_index: Option<u32>,
+    /// 升级确认绑定：同意一次只对这一个版本 + 产物哈希有效。
+    target_version: Option<String>,
+    artifact_sha256: Option<String>,
+}
+
+/// 带专用卡片信息的提问（目前只有 AI 代劳升级）。
+pub struct QuestionExtras {
+    pub kind: &'static str,
+    pub details: Value,
+    pub default_index: u32,
+    pub target_version: Option<String>,
+    pub artifact_sha256: Option<String>,
 }
 
 fn pending() -> &'static Mutex<HashMap<String, PendingQuestion>> {
@@ -87,8 +103,85 @@ pub fn seed_consent_granted(session_id: &str, request_id: &str) -> bool {
         .contains(&(session_id.to_string(), request_id.to_string()))
 }
 
+/// 升级确认的一次性同意：`(session_id, request_id, target_version, artifact_sha256)`。
+///
+/// 换版本或换产物必须重新确认——模型不能拿上一次的同意去装另一个包。
+fn upgrade_consents() -> &'static Mutex<HashSet<(String, String, String, String)>> {
+    static CONSENTS: OnceLock<Mutex<HashSet<(String, String, String, String)>>> = OnceLock::new();
+    CONSENTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn record_upgrade_consent(session_id: &str, request_id: &str, target: &str, sha: &str) {
+    upgrade_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert((
+            session_id.to_string(),
+            request_id.to_string(),
+            target.to_string(),
+            sha.to_ascii_lowercase(),
+        ));
+}
+
+fn revoke_upgrade_consent(session_id: &str, request_id: &str, target: &str, sha: &str) {
+    upgrade_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&(
+            session_id.to_string(),
+            request_id.to_string(),
+            target.to_string(),
+            sha.to_ascii_lowercase(),
+        ));
+}
+
+pub fn upgrade_consent_granted(
+    session_id: &str,
+    request_id: &str,
+    target: &str,
+    sha: &str,
+) -> bool {
+    upgrade_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&(
+            session_id.to_string(),
+            request_id.to_string(),
+            target.to_string(),
+            sha.to_ascii_lowercase(),
+        ))
+}
+
+/// 取走并删除一次性同意。建任务时只消费一次，第二次升级必须重新确认。
+pub fn consume_upgrade_consent(
+    session_id: &str,
+    request_id: &str,
+    target: &str,
+    sha: &str,
+) -> bool {
+    upgrade_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&(
+            session_id.to_string(),
+            request_id.to_string(),
+            target.to_string(),
+            sha.to_ascii_lowercase(),
+        ))
+}
+
 /// 收到 Claurst 的提问：登记 pending、发事件、启动超时。
 pub fn register(session_id: &str, request_id: &str, event: UserQuestionEvent) {
+    register_with(session_id, request_id, event, None);
+}
+
+/// 同 `register`，但可以带专用卡片（kind/details/默认焦点）与升级绑定信息。
+pub fn register_with(
+    session_id: &str,
+    request_id: &str,
+    event: UserQuestionEvent,
+    extras: Option<QuestionExtras>,
+) {
     let options = event.options.clone().unwrap_or_default();
     if options.is_empty() {
         // 正常路径由 AskUserQuestionGuard 拦成 INVALID_ARGUMENT；这里只做防御，不发事件。
@@ -101,6 +194,17 @@ pub fn register(session_id: &str, request_id: &str, event: UserQuestionEvent) {
     let created_at = now_ms();
     let expires_at = created_at + ANSWER_TIMEOUT_MS;
 
+    let (kind, details, default_index, target_version, artifact_sha256) = match extras {
+        Some(extras) => (
+            Some(extras.kind.to_string()),
+            Some(extras.details),
+            Some(extras.default_index),
+            extras.target_version,
+            extras.artifact_sha256,
+        ),
+        None => (None, None, None, None, None),
+    };
+
     {
         let mut guard = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.insert(
@@ -112,24 +216,36 @@ pub fn register(session_id: &str, request_id: &str, event: UserQuestionEvent) {
                 options: options.clone(),
                 created_at,
                 reply: Some(event.reply_tx),
+                kind: kind.clone(),
+                details: details.clone(),
+                default_index,
+                target_version,
+                artifact_sha256,
             },
         );
     }
 
-    app_handle::emit(
-        EV_ASK_USER_QUESTION,
-        json!({
-            "contract_version": "2.5.0",
-            "session_id": session_id,
-            "request_id": request_id,
-            "question_id": question_id,
-            "question": event.question,
-            "options": options,
-            "created_at": created_at,
-            "expires_at": expires_at,
-            "emitted_at": now(),
-        }),
-    );
+    let mut payload = json!({
+        "contract_version": "2.6.0",
+        "session_id": session_id,
+        "request_id": request_id,
+        "question_id": question_id,
+        "question": event.question,
+        "options": options,
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "emitted_at": now(),
+    });
+    if let Some(kind) = &kind {
+        payload["kind"] = json!(kind);
+    }
+    if let Some(details) = details {
+        payload["details"] = details;
+    }
+    if let Some(index) = default_index {
+        payload["default_index"] = json!(index);
+    }
+    app_handle::emit(EV_ASK_USER_QUESTION, payload);
 
     let timeout_id = question_id.clone();
     tokio::spawn(async move {
@@ -172,11 +288,17 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
             Some(question) if question.session_id != session_id => {
                 return Err(not_pending());
             }
-            Some(question) => Some((question.options.clone(), question.request_id.clone())),
+            Some(question) => Some((
+                question.options.clone(),
+                question.request_id.clone(),
+                question.kind.clone(),
+                question.target_version.clone(),
+                question.artifact_sha256.clone(),
+            )),
         }
     };
 
-    let Some((options, request_id)) = matched else {
+    let Some((options, request_id, kind, target_version, artifact_sha256)) = matched else {
         return Err(not_pending());
     };
     if !answer.is_empty() && !options.iter().any(|option| option == answer) {
@@ -192,9 +314,21 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
     if granted {
         record_seed_consent(session_id, &request_id);
     }
+    // 升级确认只认逐字「升级」，并且绑定本次的目标版本与产物哈希。
+    let upgrade_granted = kind.as_deref() == Some("core_upgrade_confirm")
+        && answer == "升级"
+        && target_version.is_some()
+        && artifact_sha256.is_some();
+    if let (true, Some(target), Some(sha)) = (upgrade_granted, &target_version, &artifact_sha256) {
+        record_upgrade_consent(session_id, &request_id, target, sha);
+    }
     if !settle(question_id, answer.to_string()) {
         if granted {
             revoke_seed_consent(session_id, &request_id);
+        }
+        if let (true, Some(target), Some(sha)) = (upgrade_granted, &target_version, &artifact_sha256)
+        {
+            revoke_upgrade_consent(session_id, &request_id, target, sha);
         }
         return Err(not_pending());
     }
@@ -222,6 +356,9 @@ pub fn list_pending(session_id: &str) -> Value {
                 "options": question.options,
                 "created_at": question.created_at,
                 "expires_at": question.created_at + ANSWER_TIMEOUT_MS,
+                "kind": question.kind,
+                "details": question.details,
+                "default_index": question.default_index,
             })
         })
         .collect();
@@ -249,6 +386,12 @@ pub fn cleanup_request(session_id: &str, request_id: &str) {
         .retain(|(session, request)| {
             !(session.as_str() == session_id && request.as_str() == request_id)
         });
+    upgrade_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(session, request, _, _)| {
+            !(session.as_str() == session_id && request.as_str() == request_id)
+        });
 }
 
 /// 会话删除：作废该会话所有未答问题。
@@ -268,6 +411,10 @@ pub fn cleanup_session(session_id: &str) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .retain(|(session, _)| session.as_str() != session_id);
+    upgrade_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(session, _, _, _)| session.as_str() != session_id);
 }
 
 #[cfg(test)]
@@ -382,6 +529,70 @@ mod memory_tests {
         reply("ses_own", &id, "用我自己的节点").unwrap();
         assert!(!seed_consent_granted("ses_own", "req_own"));
         cleanup_request("ses_own", "req_own");
+    }
+
+    /// 升级同意只绑定本次的目标版本与产物哈希，且只认逐字「升级」。
+    #[tokio::test]
+    async fn upgrade_consent_is_bound_to_target_and_hash() {
+        let extras = || QuestionExtras {
+            kind: "core_upgrade_confirm",
+            details: json!({ "current_version": "1.14.4", "target_version": "1.15.0" }),
+            default_index: 1,
+            target_version: Some("1.15.0".into()),
+            artifact_sha256: Some("AABB".into()),
+        };
+        let (event, rx) = event("是否升级？", &["升级", "取消"]);
+        register_with("ses_up", "req_up", event, Some(extras()));
+        let listed = list_pending("ses_up");
+        assert_eq!(listed["questions"][0]["kind"], "core_upgrade_confirm");
+        assert_eq!(listed["questions"][0]["default_index"], 1);
+        let id = listed["questions"][0]["question_id"].as_str().unwrap().to_string();
+
+        reply("ses_up", &id, "升级").unwrap();
+        assert_eq!(rx.await.unwrap(), "升级");
+        assert!(upgrade_consent_granted("ses_up", "req_up", "1.15.0", "aabb"));
+        assert!(
+            !upgrade_consent_granted("ses_up", "req_up", "1.16.0", "aabb"),
+            "换版本必须重新确认"
+        );
+        assert!(
+            !upgrade_consent_granted("ses_up", "req_up", "1.15.0", "ccdd"),
+            "换产物必须重新确认"
+        );
+        // 建任务时消费掉：同一份同意不能再用第二次。
+        assert!(consume_upgrade_consent("ses_up", "req_up", "1.15.0", "aabb"));
+        assert!(!upgrade_consent_granted("ses_up", "req_up", "1.15.0", "aabb"));
+        cleanup_request("ses_up", "req_up");
+        assert!(!upgrade_consent_granted("ses_up", "req_up", "1.15.0", "aabb"));
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_upgrade_does_not_grant_consent() {
+        let (event, _rx) = event("是否升级？", &["升级", "取消"]);
+        register_with(
+            "ses_up_cancel",
+            "req_up_cancel",
+            event,
+            Some(QuestionExtras {
+                kind: "core_upgrade_confirm",
+                details: json!({}),
+                default_index: 1,
+                target_version: Some("1.15.0".into()),
+                artifact_sha256: Some("ab".into()),
+            }),
+        );
+        let id = list_pending("ses_up_cancel")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        reply("ses_up_cancel", &id, "取消").unwrap();
+        assert!(!upgrade_consent_granted(
+            "ses_up_cancel",
+            "req_up_cancel",
+            "1.15.0",
+            "ab"
+        ));
+        cleanup_request("ses_up_cancel", "req_up_cancel");
     }
 
     /// 超时自动跳过不算同意。

@@ -153,6 +153,47 @@ describe("TunHelperRow", () => {
     expect(screen.getByRole("alert")).toBeTruthy();
   });
 
+  it("PRECONDITION_FAILED + retryable 视为正在准备", async () => {
+    harness(helperInfo("running"), {
+      overrides: {
+        tunHelperRestart: vi.fn(async () => {
+          throw {
+            code: "PRECONDITION_FAILED",
+            retryable: true,
+            message: "后台组件正在准备",
+            details: { reason: "helper_busy" },
+          };
+        }),
+      },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "检查并更新" }));
+
+    expect(await screen.findByText("正在准备，请稍后再试")).toBeTruthy();
+    expect(screen.queryByText("需要输入一次管理员密码")).toBeNull();
+    expect(screen.queryByText("没有获得管理员授权。")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("helper_busy 原因同样按正在准备处理", async () => {
+    harness(helperInfo("running"), {
+      overrides: {
+        tunHelperRestart: vi.fn(async () => {
+          throw {
+            code: "PRECONDITION_FAILED",
+            message: "后台组件正在准备",
+            details: { reason: "helper_busy" },
+          };
+        }),
+      },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "检查并更新" }));
+
+    expect(await screen.findByText("正在准备，请稍后再试")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("命令缺失时降级为只读", async () => {
     harness(helperInfo("running"), {
       overrides: {

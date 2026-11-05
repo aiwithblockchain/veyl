@@ -31,6 +31,7 @@ import type {
   TunHelperState,
   TunProbeData,
 } from "./bridge";
+import { readQuestionDetail } from "./bridge";
 import { toBridgeError } from "./errors";
 import { createListenerManager } from "./listeners";
 import { AGENT_EVENTS, APP_EVENT_NAMES, AI_EVENT_NAMES } from "./protocol";
@@ -45,6 +46,7 @@ interface RawPendingQuestion {  question_id?: string;
   options?: string[];
   created_at?: number;
   expires_at?: number;
+  [key: string]: unknown;
 }
 
 interface RawDefaultProfile {
@@ -503,15 +505,20 @@ export class TauriAgentBridge implements AgentBridge {
       sessionId,
     });
     return (raw.questions ?? [])
-      .map((item) => ({
-        questionId: item.question_id ?? "",
-        sessionId: item.session_id ?? sessionId,
-        requestId: item.request_id ?? "",
-        question: item.question ?? "",
-        options: item.options ?? [],
-        createdAt: item.created_at ?? 0,
-        expiresAt: item.expires_at ?? item.created_at ?? 0,
-      }))
+      .map((item) => {
+        const detail = readQuestionDetail(item);
+        return {
+          questionId: item.question_id ?? "",
+          sessionId: item.session_id ?? sessionId,
+          requestId: item.request_id ?? "",
+          question: item.question ?? "",
+          options: item.options ?? [],
+          createdAt: item.created_at ?? 0,
+          expiresAt: item.expires_at ?? item.created_at ?? 0,
+          kind: detail.kind,
+          upgradeConfirm: detail.upgradeConfirm,
+        };
+      })
       .filter((item) => item.questionId.length > 0);
   }
 

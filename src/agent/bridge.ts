@@ -117,6 +117,67 @@ export interface PendingQuestion {
   options: string[];
   createdAt: number;
   expiresAt: number;
+  /** 结构化提问的类型；普通提问为 null。 */
+  kind?: string | null;
+  /** kind = "core_upgrade_confirm" 时的升级明细。 */
+  upgradeConfirm?: CoreUpgradeConfirmData | null;
+}
+
+export interface CoreUpgradeConfirmData {
+  currentVersion: string | null;
+  targetVersion: string | null;
+  /** 安装包字节数；后端没给时为 null。 */
+  size: number | null;
+  restartRequired: boolean;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function readSize(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  }
+  return null;
+}
+
+/**
+ * 从提问载荷里读结构化信息。明细可能在 `upgrade` / `confirm` / `data`
+ * 下，也可能与 `kind` 同级；两种形状都认，避免前后端字段位置不同直接丢卡。
+ */
+export function readQuestionDetail(raw: Record<string, unknown>): {
+  kind: string | null;
+  upgradeConfirm: CoreUpgradeConfirmData | null;
+} {
+  const kind = readString(raw.kind);
+  if (kind !== "core_upgrade_confirm") return { kind, upgradeConfirm: null };
+  const merged = {
+    ...(asRecord(raw.upgrade) ?? {}),
+    ...(asRecord(raw.confirm) ?? {}),
+    ...(asRecord(raw.data) ?? {}),
+    ...(asRecord(raw.details) ?? {}),
+    ...raw,
+  };
+  return {
+    kind,
+    upgradeConfirm: {
+      currentVersion: readString(merged.current_version, merged.currentVersion),
+      targetVersion: readString(merged.target_version, merged.targetVersion),
+      size: readSize(merged.size, merged.download_size, merged.bytes),
+      restartRequired:
+        merged.restart_required === true || merged.restartRequired === true,
+    },
+  };
 }
 
 /** UI 发起的连接/断开正在进行中；按钮据此禁用，防止重复提交。 */

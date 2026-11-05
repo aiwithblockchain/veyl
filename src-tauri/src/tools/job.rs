@@ -24,7 +24,7 @@ impl Tool for JobGetTool {
     }
 
     fn description(&self) -> &str {
-        "查询长任务（安装、诊断）的状态与进度。"
+        "查询长任务（运行库升级、安装、诊断）的状态、进度与发起方（origin）。"
     }
 
     fn permission_level(&self) -> PermissionLevel {

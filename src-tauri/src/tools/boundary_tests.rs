@@ -115,8 +115,13 @@ impl VpnToolServices for FakeServices {
         self.rec.record("core_check_updates");
         Ok(self.data.clone())
     }
-    async fn core_upgrade(&self, version: &str) -> anyhow::Result<Value> {
-        self.rec.record(format!("core_upgrade({version})"));
+    async fn core_upgrade(
+        &self,
+        version: &str,
+        origin: &str,
+        expected_sha256: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        self.rec.record(format!("core_upgrade({version},{origin},{expected_sha256:?})"));
         Ok(self.data.clone())
     }
     async fn core_cancel_upgrade(&self, job_id: &str) -> anyhow::Result<Value> {
@@ -689,6 +694,7 @@ fn optional_string_params(schema: &Value) -> Vec<String> {
 fn base_input(name: &str) -> Option<Value> {
     let value = match name {
         "VpnConnect" | "RouteGet" | "RuntimeLogs" | "CatalogSearch" | "CategoryList" => json!({}),
+        "CoreUpgrade" => json!({}),
         "RouteSetMode" => json!({ "mode": "proxy_all" }),
         "NodeImportUrl" => json!({ "url": "https://example.com/sub" }),
         "ConfigCreate" => json!({
@@ -819,7 +825,7 @@ async fn service_failure_becomes_a_structured_error_with_next_actions() {
         async fn core_check_updates(&self) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
-        async fn core_upgrade(&self, _: &str) -> anyhow::Result<Value> {
+        async fn core_upgrade(&self, _: &str, _: &str, _: Option<&str>) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn core_cancel_upgrade(&self, _: &str) -> anyhow::Result<Value> {

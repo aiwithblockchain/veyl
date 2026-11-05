@@ -1472,6 +1472,13 @@ body[data-resizing] {
   color: var(--warn-text);
 }
 
+.core-upgrade__origin {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
 .core-upgrade__fail {
   display: flex;
   flex-direction: column;
@@ -2559,6 +2566,45 @@ body[data-resizing] {
 
 .ask-question__skip:hover {
   color: var(--ink-2);
+}
+
+/* AI 代劳升级的确认卡 */
+
+.core-confirm {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.core-confirm__row {
+  display: flex;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.core-confirm__row dt {
+  flex: none;
+  width: 72px;
+  color: var(--ink-3);
+}
+
+.core-confirm__row dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.core-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.core-confirm__actions .btn {
+  min-width: 88px;
 }
 
 /* ============================================================

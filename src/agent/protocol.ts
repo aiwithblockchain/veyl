@@ -6,7 +6,7 @@
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.5.0" as const;
+export const CONTRACT_VERSION = "2.6.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -275,12 +275,14 @@ export type JobState = "queued" | "running" | "succeeded" | "failed" | "cancelle
 export interface JobProgressPayload {
   contract_version: typeof CONTRACT_VERSION;
   job_id: string;
-  kind: "core_install" | "diag";
+  kind: "core_install" | "core_upgrade" | "diag" | "rules_update";
   state: JobState;
   stage: string;
   progress: number;
   message: string | null;
   error: AivpnError | null;
+  /** 任务发起方；旧记录按 "ui" 读。 */
+  origin: "ui" | "agent";
   emitted_at: string;
 }
 
@@ -291,6 +293,8 @@ export interface CoreUpgradeProgressPayload {
   phase: string;
   received: number;
   total: number | null;
+  /** 任务发起方；agent 表示由对话发起，ui 表示设置页。 */
+  origin?: "ui" | "agent" | null;
   emitted_at?: string;
 }
 
@@ -300,6 +304,8 @@ export interface CoreUpgradeFinishedPayload {
   ok: boolean;
   code?: string | null;
   version?: string | null;
+  /** 任务发起方；agent 表示由对话发起，ui 表示设置页。 */
+  origin?: "ui" | "agent" | null;
   emitted_at?: string;
 }
 
@@ -334,6 +340,10 @@ export interface AskUserQuestionPayload {
   question_id: string;
   question: string;
   options: string[];
+  /** 结构化提问的类型；普通提问没有该字段。 */
+  kind?: string | null;
+  /** kind = "core_upgrade_confirm" 时的明细（线格式 snake_case）。 */
+  details?: Record<string, unknown> | null;
   created_at: number;
   /** Unix 毫秒，= created_at + 300_000；前端只读这个值做倒计时。 */
   expires_at: number;

@@ -163,7 +163,7 @@ pub async fn core_upgrade(
 ) -> Result<Value, Value> {
     state
         .services
-        .core_upgrade(&version)
+        .core_upgrade(&version, "ui", None)
         .await
         .map_err(error_value)
 }

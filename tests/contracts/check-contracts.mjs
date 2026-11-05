@@ -693,7 +693,6 @@ const REMOVED_AI_TOOLS = ["CoreInstall"];
 const UI_ONLY_COMMANDS = [
   "core_info",
   "core_check_updates",
-  "core_upgrade",
   "core_cancel_upgrade",
   "core_rollback",
   "tun_helper_info",
@@ -873,6 +872,131 @@ check(
       problems.push("tun/backend.rs 的 TunBackend 还没有 restart 方法");
     }
     return problems;
+  },
+  { advisory: true }
+);
+
+// --- 11：AI 代劳升级 ---
+//
+// CoreUpgrade 是唯一有确认点的工具：它不在 UI 专用清单里，而是明确允许模型调用。
+// 这里锁三件事：工具表里有它、参数只有可选 version、确认卡走 AskUserQuestion 的
+// kind/details；实现滞后时只报 advisory。
+
+check("CoreUpgrade 在工具表中且为高风险 Execute", () => {
+  const tools = contractTools();
+  const row = tools.get("CoreUpgrade");
+  if (!row) return ["tools.md §3 缺少 CoreUpgrade（AI 代劳升级的唯一入口）"];
+  const problems = [];
+  if (!row.includes("`Execute`")) problems.push("CoreUpgrade 的 PermissionLevel 不是 Execute");
+  if (!row.includes("高")) problems.push("CoreUpgrade 的风险等级不是「高」");
+  return problems;
+});
+
+check("CoreUpgrade 参数只有可选 version（契约）", () => {
+  const md = read("docs/contracts/tools.md");
+  const start = md.indexOf("### 4.45 `CoreUpgrade`");
+  if (start < 0) return ["tools.md 找不到 §4.45 CoreUpgrade"];
+  const end = md.indexOf("## 5.", start);
+  const block = md.slice(start, end < 0 ? undefined : end);
+
+  const schemaBlock = block.match(/```json\s*([\s\S]*?)```/);
+  if (!schemaBlock) return ["§4.45 找不到 JSON Schema"];
+
+  let schema;
+  try {
+    schema = JSON.parse(schemaBlock[1]);
+  } catch (err) {
+    return [`§4.45 的 JSON Schema 不是合法 JSON：${err.message}`];
+  }
+
+  const problems = [];
+  const props = Object.keys(schema.properties || {});
+  if (props.length !== 1 || props[0] !== "version") {
+    problems.push(`§4.45 只允许 version 一个参数，实际是 ${JSON.stringify(props)}`);
+  }
+  if ((schema.required || []).includes("version")) problems.push("version 必须是可选参数");
+  if (schema.additionalProperties !== false) problems.push("§4.45 必须声明 additionalProperties: false");
+  for (const key of ["url", "sha256", "size", "force"]) {
+    if (!block.includes(key)) problems.push(`§4.45 没有写明 ${key} 会被拒绝`);
+  }
+  return problems;
+});
+
+function payloadFields(rel, typeName) {
+  const md = read(rel);
+  const m = md.match(new RegExp(`type ${typeName} = \\{([\\s\\S]*?)\\n\\};`));
+  return m ? parseTsFields(m[1]) : null;
+}
+
+function payloadFieldIsOptional(rel, typeName, field) {
+  const md = read(rel);
+  const m = md.match(new RegExp(`type ${typeName} = \\{([\\s\\S]*?)\\n\\};`));
+  if (!m) return null;
+  return new RegExp(`^\\s*${field}\\?\\s*:`, "m").test(m[1]);
+}
+
+check("ask-user-question 载荷有 kind / details（且可选）", () => {
+  const fields = payloadFields("docs/contracts/events.md", "AskUserQuestionPayload");
+  if (!fields) return ["events.md 找不到 AskUserQuestionPayload"];
+  const problems = [];
+  for (const f of ["kind", "details"]) {
+    if (!fields.includes(f)) problems.push(`AskUserQuestionPayload 缺少 ${f}`);
+    else if (payloadFieldIsOptional("docs/contracts/events.md", "AskUserQuestionPayload", f) !== true) {
+      problems.push(`AskUserQuestionPayload.${f} 必须是可选字段（模型提问时不带）`);
+    }
+  }
+  return problems;
+});
+
+check("任务来源 origin 在 Job 与三个事件载荷中必填", () => {
+  const problems = [];
+
+  for (const t of [
+    "JobProgressPayload",
+    "CoreUpgradeProgressPayload",
+    "CoreUpgradeFinishedPayload",
+  ]) {
+    const fields = payloadFields("docs/contracts/events.md", t);
+    if (!fields) {
+      problems.push(`events.md 找不到 ${t}`);
+      continue;
+    }
+    if (!fields.includes("origin")) problems.push(`${t} 缺少 origin`);
+    else if (payloadFieldIsOptional("docs/contracts/events.md", t, "origin") !== false) {
+      problems.push(`${t}.origin 必须是必填字段`);
+    }
+  }
+
+  const jobFields = payloadFields("docs/contracts/tools.md", "Job");
+  if (!jobFields) problems.push("tools.md 找不到 Job 类型");
+  else if (!jobFields.includes("origin")) problems.push("Job 缺少 origin");
+  else if (payloadFieldIsOptional("docs/contracts/tools.md", "Job", "origin") !== false) {
+    problems.push("Job.origin 必须是必填字段");
+  }
+  return problems;
+});
+
+check("升级确认卡 details 含 restart_required（契约）", () => {
+  const md = read("docs/contracts/commands.md");
+  const m = md.match(/type CoreUpgradeConfirmDetails = \{([\s\S]*?)\n\};/);
+  if (!m) return ["commands.md 找不到 CoreUpgradeConfirmDetails"];
+  const fields = parseTsFields(m[1]);
+  const problems = [];
+  for (const f of ["current_version", "target_version", "size", "source", "restart_required"]) {
+    if (!fields.includes(f)) problems.push(`CoreUpgradeConfirmDetails 缺少 ${f}`);
+  }
+  if (!/source:\s*"official"/.test(m[1])) problems.push('source 必须固定为 "official"');
+  if (/^\s*restart_required\?\s*:/m.test(m[1])) problems.push("restart_required 必须是必填字段");
+  return problems;
+});
+
+check(
+  "CoreUpgrade 实现注册状态（advisory）",
+  () => {
+    if (!registeredToolTypes().has("CoreUpgrade")) {
+      return ["src-tauri/src/tools/mod.rs 还没有注册 CoreUpgradeTool"];
+    }
+    return [];
   },
   { advisory: true }
 );

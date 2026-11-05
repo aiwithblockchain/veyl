@@ -86,7 +86,12 @@ pub trait VpnToolServices: Send + Sync {
     // 下面这一组只服务于「高级设置 → 运行库」里用户主动发起的操作。
     async fn core_info(&self) -> anyhow::Result<Value>;
     async fn core_check_updates(&self) -> anyhow::Result<Value>;
-    async fn core_upgrade(&self, version: &str) -> anyhow::Result<Value>;
+    async fn core_upgrade(
+        &self,
+        version: &str,
+        origin: &str,
+        expected_sha256: Option<&str>,
+    ) -> anyhow::Result<Value>;
     async fn core_cancel_upgrade(&self, job_id: &str) -> anyhow::Result<Value>;
     async fn core_rollback(&self) -> anyhow::Result<Value>;
 
@@ -250,7 +255,12 @@ impl VpnToolServices for NotWiredServices {
         not_wired("检查运行库更新")
     }
 
-    async fn core_upgrade(&self, _version: &str) -> anyhow::Result<Value> {
+    async fn core_upgrade(
+        &self,
+        _version: &str,
+        _origin: &str,
+        _expected_sha256: Option<&str>,
+    ) -> anyhow::Result<Value> {
         not_wired("升级运行库")
     }
 
@@ -2694,8 +2704,13 @@ impl VpnToolServices for WiredServices {
         serde_json::to_value(check).map_err(|error| svc_error("INTERNAL", error))
     }
 
-    async fn core_upgrade(&self, version: &str) -> anyhow::Result<Value> {
-        match self.updates.start(version).await {
+    async fn core_upgrade(
+        &self,
+        version: &str,
+        origin: &str,
+        expected_sha256: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        match self.updates.start(version, origin, expected_sha256).await {
             Ok(started) => Ok(json!({
                 "job_id": started.job_id,
                 "current_version": started.current_version,
@@ -4544,7 +4559,7 @@ impl VpnToolServices for WiredServices {
         };
 
         Ok(json!({
-            "contract_version": "3.4.0",
+            "contract_version": "3.5.0",
             "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "app_version": env!("CARGO_PKG_VERSION"),
             "platform": crate::netcfg::platform_name(),
@@ -4580,8 +4595,13 @@ impl VpnToolServices for WiredServices {
         }))
     }
 
-    async fn job_get(&self, _job_id: &str) -> anyhow::Result<Value> {
-        Err(svc_error("NOT_FOUND", "P1 没有长任务"))
+    async fn job_get(&self, job_id: &str) -> anyhow::Result<Value> {
+        let mut job = self
+            .updates
+            .job(job_id)
+            .ok_or_else(|| svc_error("NOT_FOUND", "任务不存在或已过期"))?;
+        job["contract_version"] = json!(crate::tools::envelope::CONTRACT_VERSION);
+        Ok(job)
     }
 
     async fn net_config_get(&self) -> anyhow::Result<Value> {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentBridge, CoreInfo, CoreUpdateCandidate } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { formatByteSize, upgradeEffectText } from "../format";
 import { AGENT_EVENTS } from "../agent/protocol";
 import type {
   CoreUpgradeFinishedPayload,
@@ -46,6 +47,10 @@ export interface RuntimeUpgradeController {
   copyState: CopyState;
   /** 命令不存在时的只读降级：保留版本展示，不显示任何动作。 */
   readOnly: boolean;
+  /** 当前任务由对话发起；设置页在任务尾部标注来源。 */
+  fromChat: boolean;
+  /** 当前有连接在跑；决定升级成功后的生效时机文案。 */
+  connected: boolean;
   startCheck: () => void;
   cancelCheck: () => void;
   startUpgrade: () => void;
@@ -75,16 +80,16 @@ function pickLatest(candidates: CoreUpdateCandidate[]): CoreUpdateCandidate | nu
   )[0];
 }
 
-function formatSize(bytes: number): string | null {
-  if (!bytes || bytes <= 0) return null;
-  const mb = bytes / (1024 * 1024);
-  if (mb >= 10) return `${Math.round(mb)} MB`;
-  if (mb >= 1) return `${mb.toFixed(1)} MB`;
-  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+/** 任务由对话发起时，设置页在任务尾部标注来源。 */
+function isChatOrigin(origin: string | null | undefined): boolean {
+  if (typeof origin !== "string") return false;
+  const value = origin.toLowerCase();
+  return ["assistant", "ai", "agent", "chat", "conversation", "dialog", "llm"].includes(
+    value,
+  );
 }
 
-function normalizePhase(phase: string): "download" | "verify" | "install" | "working" {
-  const value = phase.toLowerCase();
+function normalizePhase(phase: string): "download" | "verify" | "install" | "working" {  const value = phase.toLowerCase();
   if (value.includes("download") || value.includes("fetch")) return "download";
   if (value.includes("verify") || value.includes("checksum") || value.includes("validat")) {
     return "verify";
@@ -105,18 +110,22 @@ function normalizePhase(phase: string): "download" | "verify" | "install" | "wor
 export function useRuntimeUpgrade({
   bridge,
   enabled,
+  connected,
 }: {
   bridge: AgentBridge;
   enabled: boolean;
+  connected: boolean;
 }): RuntimeUpgradeController {
   const [phase, setPhase] = useState<UpgradePhase>({ kind: "loading" });
   const [info, setInfo] = useState<CoreInfo | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<CopyState>("idle");
   const [readOnly, setReadOnly] = useState(false);
+  const [fromChat, setFromChat] = useState(false);
 
   const phaseRef = useRef<UpgradePhase>(phase);
   const jobRef = useRef<string | null>(null);
+  const endedJobRef = useRef<string | null>(null);
   const targetRef = useRef<string | null>(null);
   const candidateRef = useRef<CoreUpdateCandidate | null>(null);
   const checkEpochRef = useRef(0);
@@ -192,6 +201,7 @@ export function useRuntimeUpgrade({
   const applyFinished = useCallback(
     (payload: CoreUpgradeFinishedPayload) => {
       if (!jobRef.current || payload.job_id !== jobRef.current) return;
+      endedJobRef.current = payload.job_id;
       jobRef.current = null;
       setNote(null);
       // 后端取消时可能只发 ok:false 而不带 code，用本地取消标记兜底。
@@ -237,22 +247,48 @@ export function useRuntimeUpgrade({
   useEffect(() => {
     return bridge.subscribe((event) => {
       if (event.name === AGENT_EVENTS.coreUpgradeProgress) {
+        const payload = event.payload;
         // job_id 回来之前先暂存：后端常先 spawn 再返回 id，快速失败会抢跑。
         if (awaitingJobRef.current) {
-          bufferedEventsRef.current.push({ kind: "progress", payload: event.payload });
+          bufferedEventsRef.current.push({ kind: "progress", payload });
           return;
         }
-        if (!jobRef.current || event.payload.job_id !== jobRef.current) return;
-        applyProgress(event.payload);
+        if (!jobRef.current) {
+          // 设置页没发起这次升级：可能是对话发起的任务，接管后才能显示进度与取消。
+          if (endedJobRef.current === payload.job_id) return;
+          jobRef.current = payload.job_id;
+          targetRef.current = "";
+          candidateRef.current = null;
+          cancelRequestedRef.current = false;
+          endedJobRef.current = null;
+          checkEpochRef.current += 1;
+          setNote(null);
+          setFromChat(isChatOrigin(payload.origin));
+        } else if (payload.job_id !== jobRef.current) {
+          return;
+        }
+        if (isChatOrigin(payload.origin)) setFromChat(true);
+        applyProgress(payload);
         return;
       }
 
       if (event.name === AGENT_EVENTS.coreUpgradeFinished) {
+        const payload = event.payload;
         if (awaitingJobRef.current) {
-          bufferedEventsRef.current.push({ kind: "finished", payload: event.payload });
+          bufferedEventsRef.current.push({ kind: "finished", payload });
           return;
         }
-        applyFinished(event.payload);
+        if (!jobRef.current) {
+          if (endedJobRef.current === payload.job_id) return;
+          jobRef.current = payload.job_id;
+          targetRef.current = "";
+          candidateRef.current = null;
+          cancelRequestedRef.current = false;
+          setFromChat(isChatOrigin(payload.origin));
+        }
+        if (payload.job_id !== jobRef.current) return;
+        if (isChatOrigin(payload.origin)) setFromChat(true);
+        applyFinished(payload);
       }
     });
   }, [bridge, applyProgress, applyFinished]);
@@ -318,6 +354,7 @@ export function useRuntimeUpgrade({
         if (!cancelled) return;
         cancelRequestedRef.current = false;
         jobRef.current = null;
+        endedJobRef.current = jobId;
         setNote(null);
         const target = targetRef.current;
         const candidate =
@@ -340,6 +377,8 @@ export function useRuntimeUpgrade({
       cancelRequestedRef.current = false;
       awaitingJobRef.current = true;
       bufferedEventsRef.current = [];
+      endedJobRef.current = null;
+      setFromChat(false);
       setNote(null);
       setPhase({
         kind: "downloading",
@@ -411,6 +450,7 @@ export function useRuntimeUpgrade({
 
   const runRollback = useCallback(async () => {
     setNote(null);
+    setFromChat(false);
     try {
       await bridge.coreRollback();
       setInfo((current) =>
@@ -518,6 +558,8 @@ export function useRuntimeUpgrade({
     note,
     copyState,
     readOnly,
+    fromChat,
+    connected,
     startCheck,
     cancelCheck,
     startUpgrade,
@@ -530,7 +572,7 @@ export function useRuntimeUpgrade({
   };
 }
 
-function statusText(phase: UpgradePhase, info: CoreInfo | null): string {
+function statusText(phase: UpgradePhase, info: CoreInfo | null, connected: boolean): string {
   switch (phase.kind) {
     case "loading":
       return "正在读取运行时信息…";
@@ -550,7 +592,7 @@ function statusText(phase: UpgradePhase, info: CoreInfo | null): string {
     case "up_to_date":
       return "已是最新版本";
     case "available": {
-      const size = formatSize(phase.candidate.size);
+      const size = formatByteSize(phase.candidate.size);
       return `可升级到 ${phase.candidate.version}${size ? `（约 ${size}）` : ""}`;
     }
     case "unreachable":
@@ -571,23 +613,25 @@ function statusText(phase: UpgradePhase, info: CoreInfo | null): string {
     case "working":
       return "正在升级…";
     case "done":
-      return phase.restartRequired
-        ? "新版本会在重启 App 后生效"
-        : "新版本会在下次连接时生效";
+      return `新版本会在${upgradeEffectText(phase.restartRequired, connected)}`;
     case "failed":
       return "";
   }
 }
 
 /** 只随阶段变化：进度百分比变化不触发 aria-live 重复播报。 */
-function announceText(phase: UpgradePhase, info: CoreInfo | null): string {
+function announceText(
+  phase: UpgradePhase,
+  info: CoreInfo | null,
+  connected: boolean,
+): string {
   switch (phase.kind) {
     case "loading":
       return "正在读取运行时信息";
     case "unsupported":
       return "暂时读不到运行时信息";
     case "idle":
-      return statusText(phase, info);
+      return statusText(phase, info, connected);
     case "checking":
       return "正在检查更新";
     case "up_to_date":
@@ -597,7 +641,7 @@ function announceText(phase: UpgradePhase, info: CoreInfo | null): string {
         ? `发现新版本 ${phase.candidate.version}，来自上次检查`
         : `发现新版本 ${phase.candidate.version}`;
     case "unreachable":
-      return statusText(phase, info);
+      return statusText(phase, info, connected);
     case "downloading":
       return "正在下载安装包";
     case "verifying":
@@ -607,15 +651,26 @@ function announceText(phase: UpgradePhase, info: CoreInfo | null): string {
     case "working":
       return "正在升级";
     case "done":
-      return statusText(phase, info);
+      return statusText(phase, info, connected);
     case "failed":
       // 失败块用 role="alert" 播报，避免重复。
       return "";
   }
 }
 
-function statusTone(phase: UpgradePhase): string {
-  if (phase.kind === "failed") return "is-error";
+/** 升级任务本身才标注来源；检查、可升级、回滚结果都不标注。 */
+function showsOrigin(phase: UpgradePhase): boolean {
+  return (
+    phase.kind === "downloading" ||
+    phase.kind === "verifying" ||
+    phase.kind === "installing" ||
+    phase.kind === "working" ||
+    phase.kind === "done" ||
+    (phase.kind === "failed" && phase.operation === "upgrade")
+  );
+}
+
+function statusTone(phase: UpgradePhase): string {  if (phase.kind === "failed") return "is-error";
   if (phase.kind === "unreachable") return "is-warn";
   if (phase.kind === "done") return "is-ok";
   if (phase.kind === "unsupported") return "is-muted";
@@ -646,7 +701,7 @@ export function RuntimeUpgradeRow({
 }: {
   controller: RuntimeUpgradeController;
 }) {
-  const { phase, info, note, copyState } = controller;
+  const { phase, info, note, copyState, fromChat, connected } = controller;
   const actionsRef = useRef<HTMLDivElement>(null);
 
   // 点击后按钮会随状态换掉；焦点掉到 body 时接回新出现的第一个动作。
@@ -656,7 +711,7 @@ export function RuntimeUpgradeRow({
     actionsRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
   }, [phase.kind]);
 
-  const text = statusText(phase, info);
+  const text = statusText(phase, info, connected);
   const progress =
     phase.kind === "downloading" && phase.total && phase.total > 0
       ? Math.min(100, Math.max(0, Math.floor((phase.received / phase.total) * 100)))
@@ -674,7 +729,7 @@ export function RuntimeUpgradeRow({
         <div className="settings-row__value">建立连接时实际运行的程序。</div>
 
         <p className="sr-only" role="status" aria-live="polite">
-          {announceText(phase, info)}
+          {announceText(phase, info, connected)}
         </p>
 
         {phase.kind === "failed" ? (
@@ -695,8 +750,12 @@ export function RuntimeUpgradeRow({
           <p className={`core-upgrade__status ${statusTone(phase)}`}>{text}</p>
         )}
 
+        {fromChat && showsOrigin(phase) ? (
+          <p className="core-upgrade__origin">由对话发起</p>
+        ) : null}
+
         {phase.kind === "idle" && info?.restartRequired ? (
-          <p className="core-upgrade__note">新版本会在重启 App 后生效。</p>
+          <p className="core-upgrade__note">新版本会在重启 Veyl 后生效。</p>
         ) : null}
         {phase.kind === "available" && phase.cached ? (
           <p className="core-upgrade__cached">上次检查的结果，可能不是最新</p>

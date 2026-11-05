@@ -12,6 +12,7 @@
 //!
 //! 私钥永远不进仓库、日志或模型上下文；这里只读编译进二进制的公钥。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -87,6 +88,21 @@ impl UpdateError {
         Self::new("BUSY", "已有运行库升级在进行中")
     }
 
+    /// 同意后清单里的产物哈希变了：不建任务，要求重新确认。
+    fn artifact_changed(current: &str, target: &str, expected: &str, actual: &str) -> Self {
+        Self::with_details(
+            "PRECONDITION_FAILED",
+            format!("目标版本 {target} 的更新内容已变化，需要重新确认"),
+            serde_json::json!({
+                "reason": "artifact_changed",
+                "current_version": current,
+                "target_version": target,
+                "expected_sha256": expected,
+                "actual_sha256": actual,
+            }),
+        )
+    }
+
     /// 目标版本不高于当前版本：单独的结果，不静默降级。
     fn not_newer(current: &str, target: &str) -> Self {
         Self::with_details(
@@ -133,17 +149,34 @@ pub struct UpdateRelease {
     pub arch: String,
     pub url: String,
     pub sha256: String,
-    pub size: u64,
+    /// 可选：只用于展示，**不是闸门**。缺失/0/非法都按 None。
+    #[serde(default, deserialize_with = "optional_size")]
+    pub size: Option<u64>,
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
     pub yanked: bool,
 }
 
+/// 清单里的 `size` 不做严格类型校验：缺失、0、字符串或负数都按「未知」处理，
+/// 不能因为一个展示字段让整次更新不可用。
+fn optional_size<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::Number(number)) => number.as_u64().filter(|size| *size > 0),
+        _ => None,
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Candidate {
     pub version: String,
     pub size: u64,
+    /// 产物哈希：确认卡与升级绑定用它，UI 不展示。
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +184,9 @@ pub struct UpdateCheck {
     /// `ok` | `unreachable` | `source_error`
     pub network: &'static str,
     pub candidates: Vec<Candidate>,
+    /// 清单里**全部**未 yanked、平台/架构匹配的版本（含等于/低于本地的）。
+    /// 给 AI 工具区分「清单里没有」与「有但不比本地新」；UI 不使用。
+    pub known_versions: Vec<String>,
     /// 结果来自本地缓存（联网检查失败）。界面不能把它当成实时结果。
     pub cached: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,6 +197,33 @@ struct ActiveJob {
     id: String,
     cancel: Arc<AtomicBool>,
 }
+
+/// 一条升级任务记录。`JobGet` 与设置页共用；`origin` 区分是谁发起的。
+#[derive(Debug, Clone)]
+struct JobRecord {
+    job_id: String,
+    state: &'static str,
+    stage: String,
+    progress: f64,
+    message: Option<String>,
+    result: Option<serde_json::Value>,
+    error: Option<serde_json::Value>,
+    origin: String,
+    created_ms: i64,
+    updated_ms: i64,
+}
+
+fn now_ms() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+fn iso_from_ms(ms: i64) -> String {
+    chrono::DateTime::<Utc>::from_timestamp_millis(ms)
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+const JOB_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// `core_upgrade` 的同步结果：调用方可以原样转述当前版本与目标版本。
 #[derive(Debug, Clone, Serialize)]
@@ -181,6 +244,8 @@ pub struct UpdateManager {
     root: PathBuf,
     client: reqwest::Client,
     active: Arc<Mutex<Option<ActiveJob>>>,
+    /// 最近 24 小时的任务，供 `JobGet` 查询。AI 与设置页共用。
+    jobs: Arc<Mutex<HashMap<String, JobRecord>>>,
     manifest_url: String,
     /// 测试用：缩短单次请求超时，避免重试测试真的等 10 秒。
     #[cfg(test)]
@@ -212,6 +277,7 @@ impl UpdateManager {
             root: root.into(),
             client,
             active: Arc::new(Mutex::new(None)),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
             manifest_url: MANIFEST_URL.to_string(),
             #[cfg(test)]
             request_timeout: Duration::from_secs(5),
@@ -270,6 +336,7 @@ impl UpdateManager {
                 Ok(UpdateCheck {
                     network: "ok",
                     candidates: self.candidates(&manifest.manifest),
+                    known_versions: self.known_versions(&manifest.manifest),
                     cached: false,
                     message: None,
                 })
@@ -282,6 +349,7 @@ impl UpdateManager {
                         "source_error"
                     },
                     candidates: self.candidates(&manifest),
+                    known_versions: self.known_versions(&manifest),
                     cached: true,
                     message: Some(error.message),
                 }),
@@ -293,9 +361,14 @@ impl UpdateManager {
     /// 启动一次升级。
     ///
     /// **不假设调用方已经检查过**：每次调用都重新拉取并验签清单、核对版本、
-    /// 预检磁盘；任何一步失败都在建任务之前返回，不写临时文件、不发下载请求。
-    /// 本地缓存一律不参与升级放行。
-    pub async fn start(&self, version: &str) -> Result<StartedUpgrade, UpdateError> {
+    /// 比对确认时绑定的产物哈希；任何一步失败都在建任务之前返回，不写临时文件、
+    /// 不发下载请求。本地缓存一律不参与升级放行。
+    pub async fn start(
+        &self,
+        version: &str,
+        origin: &str,
+        expected_sha256: Option<&str>,
+    ) -> Result<StartedUpgrade, UpdateError> {
         if semver::Version::parse(version).is_err() {
             return Err(UpdateError::new("NOT_FOUND", "版本号格式不对"));
         }
@@ -313,7 +386,7 @@ impl UpdateManager {
         }
 
         // 预留槽位之后再联网：并发的第二次调用会立刻得到 BUSY。
-        let prepared = match self.prepare(version).await {
+        let prepared = match self.prepare(version, expected_sha256).await {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.active.lock().unwrap().take();
@@ -322,6 +395,13 @@ impl UpdateManager {
         };
 
         let manager = self.clone();
+        // 任务记录要在返回前就存在：调用方拿到 job_id 后可能立刻 JobGet。
+        self.record_start(
+            &job_id,
+            origin,
+            &prepared.current_version,
+            &prepared.release.version,
+        );
         let task_job = job_id.clone();
         let task_release = prepared.release.clone();
         let task_version = prepared.release.version.clone();
@@ -357,7 +437,11 @@ impl UpdateManager {
     /// 候选展示与可升级判断是两层：展示层只列「新于本地」的版本，
     /// 这里必须能在**全部**未 yanked 版本里找到目标，才能对「相等/更低」给出
     /// 明确的 `not_newer`，而不是变成不可达分支。
-    async fn prepare(&self, version: &str) -> Result<PreparedUpgrade, UpdateError> {
+    async fn prepare(
+        &self,
+        version: &str,
+        expected_sha256: Option<&str>,
+    ) -> Result<PreparedUpgrade, UpdateError> {
         let manifest = self.fetch_for_upgrade().await?.manifest;
         let release = manifest
             .releases
@@ -379,9 +463,11 @@ impl UpdateManager {
         if target <= current {
             return Err(UpdateError::not_newer(&current_version, &release.version));
         }
+        // 一次性同意绑定的是「版本 + 产物哈希」：两次拉取之间内容变了，
+        // 不能借用上一次的同意，要求用户重新确认。
+        ensure_artifact_matches(expected_sha256, &release, &current_version)?;
 
         checked_url(&release.url)?;
-        self.check_disk(release.size)?;
         Ok(PreparedUpgrade {
             release,
             current_version,
@@ -413,6 +499,7 @@ impl UpdateManager {
     }
 
     fn finish(&self, result: &Result<(), UpdateError>, job_id: &str, version: &str) {
+        let origin = self.job_origin(job_id);
         let emitted_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let contract = crate::runtime::EVENT_CONTRACT_VERSION;
         let payload = match result {
@@ -421,6 +508,7 @@ impl UpdateManager {
                 "job_id": job_id,
                 "ok": true,
                 "version": version,
+                "origin": origin,
                 "emitted_at": emitted_at,
             }),
             Err(error) if error.code == "CANCELLED" => serde_json::json!({
@@ -428,6 +516,7 @@ impl UpdateManager {
                 "job_id": job_id,
                 "ok": false,
                 "code": "CANCELLED",
+                "origin": origin,
                 "emitted_at": emitted_at,
             }),
             Err(error) => serde_json::json!({
@@ -436,6 +525,7 @@ impl UpdateManager {
                 "ok": false,
                 "code": error.code,
                 "message": error.message,
+                "origin": origin,
                 "emitted_at": emitted_at,
             }),
         };
@@ -443,9 +533,65 @@ impl UpdateManager {
             crate::claurst_session::events::EV_CORE_UPGRADE_FINISHED,
             payload,
         );
+
+        let (state, stage, message, record_result, record_error) = match result {
+            Ok(()) => (
+                "succeeded",
+                "done",
+                None,
+                Some(serde_json::json!({ "version": version })),
+                None,
+            ),
+            Err(error) if error.code == "CANCELLED" => {
+                ("cancelled", "cancelled", Some("已取消".to_string()), None, None)
+            }
+            Err(error) => (
+                "failed",
+                "failed",
+                Some(error.message.clone()),
+                None,
+                Some(serde_json::json!({
+                    "code": error.code,
+                    "message": error.message,
+                    "retryable": false,
+                    "details": error.details,
+                })),
+            ),
+        };
+        self.update_record(job_id, |record| {
+            record.state = state;
+            record.stage = stage.into();
+            record.progress = if state == "succeeded" { 1.0 } else { record.progress };
+            record.message = message.clone();
+            record.result = record_result;
+            record.error = record_error.clone();
+        });
+        self.emit_job_progress(
+            job_id,
+            state,
+            stage,
+            self.job_progress(job_id),
+            message,
+            record_error,
+        );
     }
 
-    fn emit_progress(&self, job_id: &str, phase: &str, received: u64, total: u64) {
+    fn emit_progress(&self, job_id: &str, phase: &str, received: u64, total: Option<u64>) {
+        // 分母只认 Content-Length；没有就不更新百分比，UI 显示阶段/不确定进度。
+        if let Some(total) = total.filter(|total| *total > 0) {
+            let progress = (received as f64 / total as f64).clamp(0.0, 1.0);
+            self.update_record(job_id, |record| {
+                record.state = "running";
+                record.stage = phase.into();
+                record.progress = progress;
+            });
+        } else {
+            self.update_record(job_id, |record| {
+                record.state = "running";
+                record.stage = phase.into();
+            });
+        }
+        let origin = self.job_origin(job_id);
         crate::agent::app_handle::emit(
             crate::claurst_session::events::EV_CORE_UPGRADE_PROGRESS,
             serde_json::json!({
@@ -454,10 +600,120 @@ impl UpdateManager {
                 "phase": phase,
                 "received": received,
                 "total": total,
+                "origin": origin,
                 "emitted_at": chrono::Utc::now()
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             }),
         );
+        self.emit_job_progress(
+            job_id,
+            "running",
+            phase,
+            self.job_progress(job_id),
+            None,
+            None,
+        );
+    }
+
+    fn record_start(&self, job_id: &str, origin: &str, current: &str, target: &str) {
+        let now = now_ms();
+        {
+            let mut jobs = self.jobs.lock().unwrap();
+            jobs.retain(|_, record| now - record.created_ms <= JOB_RETENTION_MS);
+            jobs.insert(
+                job_id.to_string(),
+                JobRecord {
+                    job_id: job_id.to_string(),
+                    state: "queued",
+                    stage: "queued".into(),
+                    progress: 0.0,
+                    message: None,
+                    result: None,
+                    error: None,
+                    origin: origin.to_string(),
+                    created_ms: now,
+                    updated_ms: now,
+                },
+            );
+        }
+        log::info!(
+            "升级任务 {job_id} 已创建 origin={origin} {current} → {target}"
+        );
+        self.emit_job_progress(job_id, "queued", "queued", 0.0, None, None);
+    }
+
+    fn update_record(&self, job_id: &str, update: impl FnOnce(&mut JobRecord)) {
+        let mut jobs = self.jobs.lock().unwrap();
+        if let Some(record) = jobs.get_mut(job_id) {
+            update(record);
+            record.updated_ms = now_ms();
+        }
+    }
+
+    fn job_progress(&self, job_id: &str) -> f64 {
+        self.jobs
+            .lock()
+            .unwrap()
+            .get(job_id)
+            .map(|record| record.progress)
+            .unwrap_or(0.0)
+    }
+
+    fn job_origin(&self, job_id: &str) -> String {        self.jobs
+            .lock()
+            .unwrap()
+            .get(job_id)
+            .map(|record| record.origin.clone())
+            .unwrap_or_else(|| "ui".into())
+    }
+
+    /// `job-progress` 帧。升级还有专用的 `core-upgrade-*` 事件；这一份给
+    /// 通用任务列表使用，两处都带 `origin`，UI 可据此区分谁发起的。
+    fn emit_job_progress(
+        &self,
+        job_id: &str,
+        state: &str,
+        stage: &str,
+        progress: f64,
+        message: Option<String>,
+        error: Option<serde_json::Value>,
+    ) {
+        let origin = self.job_origin(job_id);
+        crate::agent::app_handle::emit(
+            crate::claurst_session::events::EV_JOB_PROGRESS,
+            serde_json::json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "job_id": job_id,
+                "kind": "core_upgrade",
+                "state": state,
+                "stage": stage,
+                "progress": progress,
+                "message": message,
+                "error": error,
+                "origin": origin,
+                "emitted_at": chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            }),
+        );
+    }
+
+    /// `JobGet` 的快照。没有 `contract_version`，由工具层补。
+    pub fn job(&self, job_id: &str) -> Option<serde_json::Value> {
+        let jobs = self.jobs.lock().unwrap();
+        let record = jobs.get(job_id)?;
+        Some(serde_json::json!({
+            "job_id": record.job_id,
+            "kind": "core_upgrade",
+            "state": record.state,
+            "stage": record.stage,
+            "progress": record.progress,
+            "message": record.message,
+            "result": record.result,
+            "error": record.error,
+            "origin": record.origin,
+            "created_at": iso_from_ms(record.created_ms),
+            "updated_at": iso_from_ms(record.updated_ms),
+        }))
     }
 
     async fn run_job(
@@ -467,7 +723,6 @@ impl UpdateManager {
         cancel: &AtomicBool,
     ) -> Result<(), UpdateError> {
         let url = checked_url(&release.url)?;
-        self.check_disk(release.size)?;
 
         if cancel.load(Ordering::SeqCst) {
             return Err(UpdateError::new("CANCELLED", "已取消"));
@@ -508,9 +763,7 @@ impl UpdateManager {
             });
         let archive_path = staging.join(format!("download.{}", format.extension()));
 
-        let downloaded_sha = self
-            .download(job_id, url, &archive_path, release.size, cancel)
-            .await?;
+        let downloaded_sha = self.download(job_id, url, &archive_path, cancel).await?;
         if !downloaded_sha.eq_ignore_ascii_case(&release.sha256) {
             return Err(UpdateError::new(
                 "HASH_MISMATCH",
@@ -521,9 +774,9 @@ impl UpdateManager {
         if cancel.load(Ordering::SeqCst) {
             return Err(UpdateError::new("CANCELLED", "已取消"));
         }
-        self.emit_progress(job_id, "verifying", release.size, release.size);
+        self.emit_progress(job_id, "verifying", 0, None);
 
-        self.emit_progress(job_id, "unpacking", release.size, release.size);
+        self.emit_progress(job_id, "unpacking", 0, None);
         archive::extract(&archive_path, staging, format).map_err(|error| {
             UpdateError::source(format!("解压更新包失败：{error}"))
         })?;
@@ -531,8 +784,9 @@ impl UpdateManager {
             .ok_or_else(|| UpdateError::source("更新包里没有 sing-box"))?;
 
         // 更新源上的产物必须是我们重签过的。
-        signature::verify_downloaded_runtime(&binary)
-            .map_err(|detail| UpdateError::source(format!("更新包未通过签名校验：{detail}")))?;
+        signature::verify_downloaded_runtime(&binary).map_err(|detail| {
+            UpdateError::new("SIGNATURE_INVALID", format!("更新包未通过签名校验：{detail}"))
+        })?;
 
         let reported = install::read_binary_version(&binary)
             .await
@@ -552,7 +806,7 @@ impl UpdateManager {
         if cancel.load(Ordering::SeqCst) {
             return Err(UpdateError::new("CANCELLED", "已取消"));
         }
-        self.emit_progress(job_id, "installing", release.size, release.size);
+        self.emit_progress(job_id, "installing", 0, None);
 
         let installer = Installer::new(&self.root);
         installer
@@ -567,7 +821,6 @@ impl UpdateManager {
         job_id: &str,
         url: &reqwest::Url,
         dest: &Path,
-        total: u64,
         cancel: &AtomicBool,
     ) -> Result<String, UpdateError> {
         let response = self
@@ -582,12 +835,12 @@ impl UpdateManager {
                 response.status()
             )));
         }
+        // 清单的 size 只是展示值；进度分母只认服务端这次实际给的 Content-Length。
+        let total = response.content_length();
 
         let mut file = tokio::fs::File::create(dest)
             .await
-            .map_err(|error| UpdateError::internal(format!("写入临时文件失败：{error}")))?;
-        let mut hasher = sha2::Sha256::new();
-        use sha2::Digest as _;
+            .map_err(write_error)?;
         let mut received: u64 = 0;
         let mut last_emit = Instant::now();
         let mut stream = response.bytes_stream();
@@ -603,67 +856,62 @@ impl UpdateManager {
             };
             let chunk = chunk.map_err(|error| UpdateError::source(format!("下载中断：{error}")))?;
             received = received.saturating_add(chunk.len() as u64);
-            if total > 0 && received > total {
-                drop(file);
-                let _ = std::fs::remove_file(dest);
-                return Err(UpdateError::new(
-                    "SOURCE_UNAVAILABLE",
-                    "下载内容超过清单大小，已停止",
-                ));
+            if let Some(total) = total {
+                if received > total {
+                    drop(file);
+                    let _ = std::fs::remove_file(dest);
+                    return Err(UpdateError::source(
+                        "下载内容超过服务端声明的长度，已停止",
+                    ));
+                }
             }
-            hasher.update(&chunk);
-            file.write_all(&chunk)
-                .await
-                .map_err(|error| UpdateError::internal(format!("写入临时文件失败：{error}")))?;
+            file.write_all(&chunk).await.map_err(write_error)?;
             if last_emit.elapsed() >= PROGRESS_INTERVAL {
                 self.emit_progress(job_id, "downloading", received, total);
                 last_emit = Instant::now();
             }
         }
 
-        file.flush()
-            .await
-            .map_err(|error| UpdateError::internal(format!("写入临时文件失败：{error}")))?;
-        file.sync_all()
-            .await
-            .map_err(|error| UpdateError::internal(format!("写入临时文件失败：{error}")))?;
+        file.flush().await.map_err(write_error)?;
+        file.sync_all().await.map_err(write_error)?;
         drop(file);
 
-        if total > 0 && received != total {
-            let _ = std::fs::remove_file(dest);
-            return Err(UpdateError::new(
-                "SOURCE_UNAVAILABLE",
-                format!("下载不完整（期望 {total} 字节，实际 {received}）"),
-            ));
-        }
-        self.emit_progress(job_id, "downloading", received, total);
-        Ok(hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect())
-    }
-
-    fn check_disk(&self, size: u64) -> Result<(), UpdateError> {
-        let needed = size.saturating_mul(2).saturating_add(100 * 1024 * 1024);
-        if let Some(free) = fsutil::free_space(&self.root) {
-            if free < needed {
-                return Err(UpdateError::new(
-                    "DISK_FULL",
-                    format!(
-                        "磁盘空间不足：需要约 {} MB，可用 {} MB",
-                        needed / (1024 * 1024),
-                        free / (1024 * 1024)
-                    ),
-                ));
+        if let Some(total) = total {
+            if received != total {
+                let _ = std::fs::remove_file(dest);
+                return Err(UpdateError::source(format!(
+                    "下载不完整（期望 {total} 字节，实际 {received}）"
+                )));
             }
         }
-        Ok(())
+        self.emit_progress(job_id, "downloading", received, total);
+        // 对**落盘文件**重算哈希：流式哈希抓不到短写，文件才是要安装的那份。
+        fsutil::sha256_file(dest)
+            .map_err(|error| UpdateError::internal(format!("计算下载文件哈希失败：{error}")))
+    }
+
+
+    /// 清单里全部可执行版本（不按新旧过滤），用于区分 `not_newer` 与 `NOT_FOUND`。
+    fn known_versions(&self, manifest: &UpdateManifest) -> Vec<String> {
+        let mut items: Vec<(semver::Version, String)> = manifest
+            .releases
+            .iter()
+            .filter(|release| {
+                release.platform == host_platform()
+                    && release.arch == host_arch()
+                    && !release.yanked
+            })
+            .filter_map(|release| {
+                let version = semver::Version::parse(&release.version).ok()?;
+                Some((version, release.version.clone()))
+            })
+            .collect();
+        items.sort_by(|left, right| right.0.cmp(&left.0));
+        items.into_iter().map(|(_, version)| version).collect()
     }
 
     /// 只返回**新于当前激活版本**的候选，按版本降序（契约 `CoreCheckUpdatesData`）。
-    fn candidates(&self, manifest: &UpdateManifest) -> Vec<Candidate> {
-        let active = Installer::new(&self.root)
+    fn candidates(&self, manifest: &UpdateManifest) -> Vec<Candidate> {        let active = Installer::new(&self.root)
             .active()
             .ok()
             .flatten()
@@ -689,7 +937,8 @@ impl UpdateManager {
                     version,
                     Candidate {
                         version: release.version.clone(),
-                        size: release.size,
+                        size: release.size.unwrap_or(0),
+                        sha256: release.sha256.clone(),
                     },
                 ))
             })
@@ -820,6 +1069,33 @@ fn archive_format(value: &str) -> ArchiveFormat {
     } else {
         ArchiveFormat::TarGz
     }
+}
+
+/// 确认时绑定的产物哈希必须与本次清单一致；换内容 = 换同意。
+fn ensure_artifact_matches(
+    expected: Option<&str>,
+    release: &UpdateRelease,
+    current_version: &str,
+) -> Result<(), UpdateError> {
+    match expected {
+        Some(expected) if !expected.eq_ignore_ascii_case(&release.sha256) => {
+            Err(UpdateError::artifact_changed(
+                current_version,
+                &release.version,
+                expected,
+                &release.sha256,
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn write_error(error: std::io::Error) -> UpdateError {
+    // ENOSPC(28) / Windows ERROR_DISK_FULL(112)：只有真的写不下才报磁盘满。
+    if matches!(error.raw_os_error(), Some(28) | Some(112)) {
+        return UpdateError::new("DISK_FULL", format!("磁盘空间不足：{error}"));
+    }
+    UpdateError::internal(format!("写入临时文件失败：{error}"))
 }
 
 fn internal(error: super::error::RuntimeError) -> UpdateError {
@@ -1074,7 +1350,7 @@ mod tests {
             arch: host_arch().into(),
             url: format!("https://updates.veyl.app/{version}.tar.gz"),
             sha256: "0".repeat(64),
-            size: 1,
+            size: Some(1),
             format: Some("tar.gz".into()),
             yanked: false,
         }
@@ -1107,6 +1383,12 @@ mod tests {
             .map(|candidate| candidate.version)
             .collect();
         assert_eq!(versions, vec!["1.15.0", "1.14.10", "1.14.4"]);
+        // 执行层用的全量版本不受「新于本地」过滤：相等/更低也要能查到，
+        // 才能把 not_newer 与 NOT_FOUND 分开。
+        assert_eq!(
+            manager.known_versions(&manifest),
+            vec!["1.15.0", "1.14.10", "1.14.4"]
+        );
 
         // 激活 1.14.10 之后，只应看到更新的 1.15.0。
         let runtime_dir = dir.join("runtime").join("1.14.10");
@@ -1163,7 +1445,7 @@ mod tests {
         assert!(manager.busy());
         assert_eq!(manager.active_job_id().as_deref(), Some("job-1"));
         assert_eq!(
-            manager.start("1.15.0").await.err().unwrap().code,
+            manager.start("1.15.0", "ui", None).await.err().unwrap().code,
             "BUSY",
             "槽位被占用时不能再起第二个任务"
         );
@@ -1275,7 +1557,7 @@ mod tests {
     async fn a_network_failure_creates_no_job() {
         let dir = temp_dir("upgrade-offline");
         let manager = UpdateManager::new(&dir).with_test_endpoint(closed_endpoint(), Duration::from_millis(200));
-        let error = manager.start("1.15.0").await.err().expect("断网必须失败");
+        let error = manager.start("1.15.0", "ui", None).await.err().expect("断网必须失败");
         assert_eq!(error.code, "NETWORK_UNREACHABLE");
         assert!(!manager.busy(), "失败后不能留下任务槽位");
         assert!(manager.active_job_id().is_none());
@@ -1295,7 +1577,7 @@ mod tests {
         let manager = UpdateManager::new(&dir)
             .with_test_endpoint(closed_endpoint(), Duration::from_millis(200))
             .with_test_keys(keys);
-        let error = manager.start("1.15.0").await.err().expect("缓存不能放行升级");
+        let error = manager.start("1.15.0", "ui", None).await.err().expect("缓存不能放行升级");
         assert_eq!(error.code, "NETWORK_UNREACHABLE");
         assert!(!manager.busy());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1313,7 +1595,7 @@ mod tests {
                 .with_test_endpoint(url, Duration::from_secs(2))
                 .with_test_keys(keys);
 
-            let error = manager.start(target).await.err().expect("不能升级到不更新的版本");
+            let error = manager.start(target, "ui", None).await.err().expect("不能升级到不更新的版本");
             assert_eq!(error.code, "PRECONDITION_FAILED", "{target}");
             let details = error.details.expect("要带 current_version");
             assert_eq!(details["reason"], "not_newer");
@@ -1334,7 +1616,7 @@ mod tests {
         let manager = UpdateManager::new(&dir)
             .with_test_endpoint(url, Duration::from_secs(2))
             .with_test_keys(keys);
-        let error = manager.start("1.15.0").await.err().expect("yanked 不能升级");
+        let error = manager.start("1.15.0", "ui", None).await.err().expect("yanked 不能升级");
         assert_eq!(error.code, "NOT_FOUND");
         assert!(!manager.busy());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1372,7 +1654,7 @@ mod tests {
             Duration::from_millis(100),
         );
         let started = Instant::now();
-        let error = manager.start("1.15.0").await.err().expect("两次超时都要失败");
+        let error = manager.start("1.15.0", "ui", None).await.err().expect("两次超时都要失败");
         assert_eq!(error.code, "NETWORK_UNREACHABLE");
         // 接受连接的计数可能略晚于客户端超时，等一小会儿再断言。
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -1382,5 +1664,56 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), 2, "只重试一次");
         assert!(started.elapsed() < Duration::from_secs(12), "同步阶段要在 12 秒内结束");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// size 只是展示值：缺失、0、类型不对都不能让整条清单失效。
+    #[test]
+    fn an_optional_or_invalid_size_does_not_block_the_manifest() {
+        let base = serde_json::json!({
+            "version": "1.15.0",
+            "platform": "macos",
+            "arch": "aarch64",
+            "url": "https://updates.veyl.app/runtime/x.tar.gz",
+            "sha256": "aa"
+        });
+        let release: UpdateRelease = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(release.size, None, "缺失按未知");
+
+        for size in [serde_json::json!(0), serde_json::json!("bad"), serde_json::json!(-1), serde_json::Value::Null] {
+            let mut value = base.clone();
+            value["size"] = size.clone();
+            let release: UpdateRelease = serde_json::from_value(value).unwrap();
+            assert_eq!(release.size, None, "{size} 应按未知处理");
+        }
+
+        let mut value = base;
+        value["size"] = serde_json::json!(1024);
+        let release: UpdateRelease = serde_json::from_value(value).unwrap();
+        assert_eq!(release.size, Some(1024));
+    }
+
+    /// 同意后产物哈希变了：不建任务，返回 artifact_changed 要求重新确认。
+    #[test]
+    fn a_changed_artifact_requires_a_new_confirmation() {
+        let release = UpdateRelease {
+            version: "1.15.0".into(),
+            platform: "macos".into(),
+            arch: "aarch64".into(),
+            url: "https://updates.veyl.app/runtime/x.tar.gz".into(),
+            sha256: "bb".into(),
+            size: None,
+            format: None,
+            yanked: false,
+        };
+        let error = ensure_artifact_matches(Some("aa"), &release, "1.14.4").unwrap_err();
+        assert_eq!(error.code, "PRECONDITION_FAILED");
+        let details = error.details.unwrap();
+        assert_eq!(details["reason"], "artifact_changed");
+        assert_eq!(details["expected_sha256"], "aa");
+        assert_eq!(details["actual_sha256"], "bb");
+
+        // 大小写不同不算变化；没有绑定时照常放行。
+        assert!(ensure_artifact_matches(Some("BB"), &release, "1.14.4").is_ok());
+        assert!(ensure_artifact_matches(None, &release, "1.14.4").is_ok());
     }
 }

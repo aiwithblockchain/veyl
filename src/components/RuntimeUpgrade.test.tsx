@@ -25,6 +25,7 @@ const INSTALLED: CoreInfo = {
 function harness(
   info: CoreInfo,
   overrides: Partial<Record<keyof AgentBridge, unknown>> = {},
+  connected = false,
 ) {
   let listener: ((event: AgentEvent) => void) | null = null;
   const bridge = {
@@ -48,7 +49,7 @@ function harness(
   } as unknown as AgentBridge;
 
   function Harness() {
-    const controller = useRuntimeUpgrade({ bridge, enabled: true });
+    const controller = useRuntimeUpgrade({ bridge, enabled: true, connected });
     return <RuntimeUpgradeRow controller={controller} />;
   }
 
@@ -174,6 +175,7 @@ describe("RuntimeUpgradeRow", () => {
       },
     });
     expect(await screen.findByText("正在下载 50%")).toBeTruthy();
+    expect(screen.queryByText("由对话发起")).toBeNull();
 
     emit({
       name: AGENT_EVENTS.coreUpgradeProgress,
@@ -199,7 +201,7 @@ describe("RuntimeUpgradeRow", () => {
     expect(screen.getByRole("button", { name: "关闭" })).toBeTruthy();
   });
 
-  it("restart_required 为 true 时提示重启 App", async () => {
+  it("restart_required 为 true 时提示重启 Veyl", async () => {
     const coreInfo = vi
       .fn()
       .mockResolvedValueOnce(BUNDLED)
@@ -213,7 +215,23 @@ describe("RuntimeUpgradeRow", () => {
     });
 
     expect(
-      await screen.findByText("新版本会在重启 App 后生效", {
+      await screen.findByText("新版本会在重启 Veyl 后生效", {
+        selector: ".core-upgrade__status",
+      }),
+    ).toBeTruthy();
+  });
+
+  it("有连接且不需要重启 App 时提示断开重连", async () => {
+    const { emit } = harness(BUNDLED, {}, true);
+    await startUpgrade();
+
+    emit({
+      name: AGENT_EVENTS.coreUpgradeFinished,
+      payload: { job_id: "job_1", ok: true, version: "1.15.0" },
+    });
+
+    expect(
+      await screen.findByText("新版本会在断开并重新连接后生效", {
         selector: ".core-upgrade__status",
       }),
     ).toBeTruthy();
@@ -424,5 +442,53 @@ describe("RuntimeUpgradeRow", () => {
     });
     expect(await screen.findByText("暂时读不到运行时信息。")).toBeTruthy();
     expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("接管对话发起的升级并标注来源、可取消", async () => {
+    const { bridge, emit } = harness(BUNDLED);
+    await screen.findByText("正在使用随包版本 1.14.4", {
+      selector: ".core-upgrade__status",
+    });
+
+    emit({
+      name: AGENT_EVENTS.coreUpgradeProgress,
+      payload: {
+        job_id: "job_chat",
+        phase: "downloading",
+        received: 6 * 1024 * 1024,
+        total: 12 * 1024 * 1024,
+        origin: "agent",
+      },
+    });
+
+    expect(await screen.findByText("正在下载 50%")).toBeTruthy();
+    expect(screen.getByText("由对话发起")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(bridge.coreCancelUpgrade).toHaveBeenCalledWith("job_chat"));
+  });
+
+  it("对话任务结束时也保留来源标注", async () => {
+    const { emit } = harness(BUNDLED);
+    await screen.findByText("正在使用随包版本 1.14.4", {
+      selector: ".core-upgrade__status",
+    });
+
+    emit({
+      name: AGENT_EVENTS.coreUpgradeFinished,
+      payload: {
+        job_id: "job_chat",
+        ok: true,
+        version: "1.15.0",
+        origin: "agent",
+      },
+    });
+
+    expect(
+      await screen.findByText("新版本会在下次连接时生效", {
+        selector: ".core-upgrade__status",
+      }),
+    ).toBeTruthy();
+    expect(screen.getByText("由对话发起")).toBeTruthy();
   });
 });

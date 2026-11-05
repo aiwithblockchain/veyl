@@ -6,6 +6,7 @@
 pub mod catalog;
 pub mod configs;
 pub mod core;
+pub mod core_upgrade;
 pub mod deepseek;
 pub mod diag;
 pub mod envelope;
@@ -142,7 +143,9 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(runtime::RuntimeRestartTool::new(Arc::clone(&services))),
         Box::new(runtime::RuntimeLogsTool::new(Arc::clone(&services))),
         Box::new(core::CoreListVersionsTool::new(Arc::clone(&services))),
-        // CoreInstall 已移除：运行库安装/升级只能由用户在高级设置里发起。
+        // CoreInstall 已移除；CoreUpgrade 只做「检查 → 确认卡 → 调用 core_upgrade」，
+        // 没有确认就不能下载。
+        Box::new(core_upgrade::CoreUpgradeTool::new(Arc::clone(&services))),
         Box::new(catalog::CatalogSearchTool::new(Arc::clone(&services))),
         Box::new(configs::ConfigListTool::new(Arc::clone(&services))),
         Box::new(configs::ConfigDetailTool::new(Arc::clone(&services))),

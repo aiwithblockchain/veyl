@@ -182,7 +182,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 53 | `network_force_reset` | `{}` | `NetworkForceResetData`（`{ ok, verified, exit_ip, steps }`） | **2.4.0 新增** |
 | 54 | `core_info` | `{}` | `CoreInfoData` | **2.5.0 新增（仅 UI）** |
 | 55 | `core_check_updates` | `{}` | `CoreCheckUpdatesData` | **2.5.0 新增（仅 UI）** |
-| 56 | `core_upgrade` | `{ version }` | `{ job_id, current_version, target_version }` | **2.5.0 新增（仅 UI）** |
+| 56 | `core_upgrade` | `{ version }` | `{ job_id, current_version, target_version }` | **2.5.0 新增（UI + `CoreUpgrade` 工具）** |
 | 57 | `core_cancel_upgrade` | `{ jobId }` | `{ cancelled: boolean }` | **2.5.0 新增（仅 UI）** |
 | 58 | `core_rollback` | `{}` | `{ ok: true }` | **2.5.0 新增（仅 UI）** |
 | 59 | `tun_helper_info` | `{}` | `TunHelperInfoData` | **2.6.0 新增（仅 UI）** |
@@ -919,15 +919,15 @@ type NetworkForceResetData = {
 - **不给 AI 工具**：`tools/net.rs` 不注册对应工具，模型不能自行触发这条破坏性路径。这条命令只属于 UI（设置 › 高级 › 诊断 ›「强制重置网络」）。
 - 与卸载清理共用同一段代码（`capabilities.md` §3.1）。
 
-### 7.10 运行时核心版本管理（`core_*`，仅 UI）
+### 7.10 运行时核心版本管理（`core_*`，默认仅 UI，`core_upgrade` 例外）
 
-这一组命令只服务于「设置 › 高级 › 运行时版本」页。**模型不能调用**：`tools.md` §3 不注册任何对应工具，删除的 `CoreInstall` 也不再补回。原因是这组操作会下载并替换一个会以特权身份运行的二进制，必须由用户看见并显式点击。
+这一组命令只服务于「设置 › 高级 › 运行时版本」页。**默认只属于 UI**：`tools.md` §3 不为 `core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback` 注册工具，删除的 `CoreInstall` 也不再补回。**唯一例外是 `core_upgrade`**：模型只能经 `CoreUpgrade` 工具调用它，且必须由用户逐字确认（见下）。原因是这组操作会下载并替换一个会以特权身份运行的二进制，必须由用户看见并显式点击。
 
 四条行为约束（契约级，不是实现建议）：
 
 1. **随包运行时用验签判定。** 启动时校验随包二进制的签名清单（macOS 为代码签名，Windows 为 Authenticode）；校验失败视为不可用，**报错而不是运行**。
 2. **已安装版本校验失败自动回落随包。** 启动校验已安装版本失败时，隔离该版本并回落到随包版本，`core_info.active_source` 变为 `"bundled"`；不回落到「无运行时」。
-3. **绝不静默下载。** 只有 `core_upgrade` 被用户在界面上显式触发才允许下载。连接、诊断、启动、`core_list_versions`、`core_check_updates` 都不得触发下载。
+3. **绝不静默下载。** 只有 `core_upgrade` 被用户显式触发（设置页）或经 `CoreUpgrade` 工具且用户在确认卡上同意后才允许下载。连接、诊断、启动、`core_list_versions`、`core_check_updates` 都不得触发下载。
 4. **启动过程不联网。** App 启动不检查更新、不拉清单、不下载；`core_check_updates` 只能由设置页上的「检查更新」按钮调用。
 
 #### `core_info {}` → `CoreInfoData`
@@ -975,6 +975,29 @@ type CoreCheckUpdatesData = {
 - 同一时刻只允许一个升级任务：已有任务在跑 → `BUSY`，`details.job_id` 指向进行中的任务。
 - 升级在**后台完成下载、验签、解包与安装**；不改当前正在运行的进程，`restart_required` 置 `true`，由用户重启生效。
 - 错误码：`NETWORK_UNREACHABLE` / `SOURCE_UNAVAILABLE` / `HASH_MISMATCH` / `DISK_FULL` / `BUSY` / `NOT_FOUND` / `PRECONDITION_FAILED` / `INTERNAL`。（任务被取消时 `core-upgrade-finished.code = "CANCELLED"`，它是事件级的结束标记，不属于命令错误码。）
+
+**AI 代劳路径（`CoreUpgrade` 工具）**
+
+- 工具必须先完成一次 `core_check_updates`（网络检查）；网络不通时**不调用本命令**，本次 `core_upgrade` 调用次数为 0。仅 `NETWORK_UNREACHABLE` 允许重试一次；`SOURCE_UNAVAILABLE` / 验签失败不重试。
+- 只有目标版本严格高于 `active_version`（为空按 `bundled_version`）时才弹确认卡；无新版本时确认卡出现 0 次。
+- 确认卡复用 `AskUserQuestion` 阻塞通道（`events.md` §4.8）：Host 填 `kind: "core_upgrade_confirm"` 与 `details`，**模型无法伪造、无法代答**。
+
+```ts
+type CoreUpgradeConfirmDetails = {
+  current_version: string;
+  target_version: string;
+  size?: number | null;        // 字节；清单未给时为 null
+  source: "official";          // 当前只有官方清单；新增来源要先改契约
+  restart_required: boolean;   // Host 弹卡时从 core_info 取
+};
+```
+
+- `restart_required` 为 `true` 时，卡上要说明「升级后需重启 App 才生效」；UI 按「有则分支」处理，字段缺失时默认按「下次连接生效」展示。
+- `source` 目前恒为 `"official"`；它不是 URL，不得把清单地址透给模型或 UI。
+
+- 用户同意后，Host 才调用本命令。同意一次性绑定 `(session_id, request_id, target_version, artifact_sha256)`：换版本、或清单哈希变化，都必须重新确认；绑定只对本次请求有效。
+- 用户拒绝 → 工具返回 `CANCELLED`，本命令不被调用。
+- 由 Agent 触发时任务 `origin = "agent"`，设置页触发时为 `"ui"`。`origin` 由 Host 按调用路径写入，**不是入参**，模型与前端都不能指定。
 
 #### `core_cancel_upgrade { jobId }` → `{ cancelled: boolean }`
 
@@ -1481,10 +1504,11 @@ type RulesStatus = {
 | `rules_status` | `RulesStatus`（2.1 新增） | **必须** |
 | `rules_update` | `RulesUpdate`（2.1 新增） | **必须** |
 | `net_repair` | `NetRepair` | **必须** |
-| `core_info` / `core_check_updates` / `core_upgrade` / `core_cancel_upgrade` / `core_rollback` | **无**（UI 专用，见 §7.10） | — |
+| `core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback` | **无**（UI 专用，见 §7.10） | — |
+| `core_upgrade` | `CoreUpgrade`（**唯一有确认点的工具**，见 `tools.md` §4.45） | **必须共用**，且必须用户逐字确认 |
 | `tun_helper_info` / `tun_helper_restart` | **无**（UI 专用，见 §7.8.1–§7.8.2） | — |
 
-> **UI 专用、没有 AI 工具的命令**：`core_*` 五条与 `tun_helper_info` / `tun_helper_restart`。前者替换特权运行时，后者重启特权组件，都必须由用户显式点击；`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
+> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback` 与 `tun_helper_info` / `tun_helper_restart`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
@@ -1555,9 +1579,9 @@ type RulesStatus = {
 | 文件 | 版本 | 状态 |
 |---|---|---|
 | `contracts/commands.md` | **2.6.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 |
-| `contracts/events.md` | **2.5.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 |
+| `contracts/events.md` | **2.6.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` |
 | `contracts/runtime.md` | **2.3.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` |
-| `contracts/tools.md` | **3.4.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + UI 专用命令说明 |
+| `contracts/tools.md` | **3.5.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级） |
 | `data-model.md` | **3** | 批 0 + 批 3 表 + 种子排除表 |
 | `contracts/routing.md` | **1.2.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 |
 | `contracts/tun-backend.md` | **1.0.6** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险） |
@@ -1573,14 +1597,17 @@ type RulesStatus = {
 
 ## 16. 变更记录
 
-### 2.6.0（2026-11-05，helper 状态/重启与退出流程）
+### 2.6.0（2026-11-05，helper 状态/重启、退出流程与 AI 代劳升级）
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
 | 1 | 本文件版本升到 `2.6.0`；§2 新增 59 `tun_helper_info`、60 `tun_helper_restart`，详解见 §7.8.1 / §7.8.2 | 新增命令 | 后台组件需要可自助换新映像 |
 | 2 | 两条命令均为 **UI 专用**：`tools.md` §3 不注册对应工具；§13 补行 | AI 边界 | 重启特权组件属于系统管理动作 |
 | 3 | 新增 §7.8.3 应用退出流程：**先停 TUN、再停代理运行时**；与 `network_force_reset` 共用清理代码；清理失败不阻塞退出 | 缺陷修复约束 | 当前实现只停代理运行时 |
-| 4 | §15.5 矩阵同步本文件 2.6.0、`tun-backend.md` 1.0.7、`tools.md` 3.4.1 | 元数据 | — |
+| 4 | §7.10 AI 边界改为「`core_upgrade` 只能经 `CoreUpgrade` 且必须用户逐字确认」；其余 `core_*` 仍无工具 | AI 边界 | 产品负责人 2026-11-05：AI 代劳升级定稿 |
+| 5 | 确认卡复用 `AskUserQuestion` 阻塞通道：Host 填 `kind: "core_upgrade_confirm"` 与 `details`（含 `restart_required`，取自 `core_info`）；同意一次性绑定 `(session_id, request_id, target_version, artifact_sha256)`，换版本重新确认 | 约束 | 模型不能伪造确认 |
+| 6 | `JobGet` 与 `core-upgrade-progress` / `core-upgrade-finished` 增必填 `origin: "ui" \| "agent"`（旧记录按 `"ui"`）；`origin` 由 Host 写入，不是入参 | 字段扩展 | 区分 UI 与 Agent 发起的任务 |
+| 7 | §15.5 矩阵同步 `events.md` 2.6.0、`tools.md` 3.5.0 | 元数据 | — |
 
 ### 2.5.0（2026-11-05，运行时核心版本管理）
 
