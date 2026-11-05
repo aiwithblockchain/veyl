@@ -1,12 +1,12 @@
 /**
  * 事件与 UI → Host 调用的前端契约。
  *
- * 唯一来源：`docs/contracts/events.md` v2.4.0。
+ * 唯一来源：`docs/contracts/events.md` v2.5.0。
  * 本文件是事件名常量的唯一来源——组件、store、bridge 只能引用
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.4.0" as const;
+export const CONTRACT_VERSION = "2.5.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",

@@ -393,6 +393,7 @@ sing-geosite / sing-geoip 是 GPL-3.0-or-later。`rules:fetch` 通过 `api.githu
 | `VEYL_WIN_SIGN_CMD` | Windows 云 HSM 签名命令 | 否 |
 | `VEYL_WIN_CERT_THUMBPRINT` | Windows 本地证书指纹 | 否 |
 | `VEYL_UPDATE_PUBKEYS` | 运行库更新清单的 Ed25519 公钥（`key_id=hex`） | 公钥可以进；私钥绝不 |
+| `VEYL_SIGN_TIMESTAMP` | `1`（默认）带安全时间戳；`0` 关闭，仅限本机调试签名 | 可以有默认值；发布脚本强制 `1` |
 | `RUST_LOG` | 开发日志级别 | 可以有默认值 |
 | `MOCK_CATALOG_PORT` / `MOCK_LLM_PORT` / `MOCK_ECHO_PORT` | 测试 mock 端口 | 有默认值即可 |
 
@@ -488,6 +489,22 @@ trap cleanup EXIT INT TERM
 4. `trap` 必须覆盖 `EXIT INT TERM`，正常结束和 Ctrl-C 都要清。
 
 > 背景：`ui-smoke.sh` 初版在 cleanup 里写了 `pkill -f "tauri dev"`，任何人跑一次冒烟测试就会把同机所有 Tauri 项目的开发进程一起杀掉，包括别人正在调试的会话。
+
+### 5.5 已知限制：Apple 时间戳服务不可达
+
+**现象**：本机网络到不了 `https://timestamp.apple.com/ts01`（TLS 握手失败，`curl` exit 35；HTTP 302 能通但 443 被挡）。此时 `codesign --timestamp` 拿不到时间戳，后续 `codesign --verify --deep --strict` 报：
+
+```
+A timestamp was expected but was not found.
+```
+
+**影响**：Developer ID 证书默认会自动请求时间戳，所以 `scripts/packaging/build-dmg.sh` 的发布包在这一网络下**必然失败**，这不是脚本缺陷。`build-dmg.sh` 会忽略残留的 `VEYL_SIGN_TIMESTAMP=0` 并强制带时间戳，发布路径不允许关闭。
+
+**处理**：
+
+- 本机调试：用 `VEYL_SIGN_TIMESTAMP=0 bash scripts/dev/tun-dev.sh --kill-existing`。签名库会显式传 `--timestamp=none`（只省略 `--timestamp` 仍会去连 Apple），并打印「不含安全时间戳」提示。
+- 发布：必须先恢复能访问 Apple 时间戳服务的网络（或走可访问该服务的代理），再重跑 `build-dmg.sh`。**不要**为发布包关闭时间戳——公证与 Gatekeeper 都依赖它。
+- 只影响签名时间戳时，代码构建本身仍可完成；`--timestamp=none` 的签名能通过 `codesign --verify --strict`，但不能用于分发。
 
 ---
 

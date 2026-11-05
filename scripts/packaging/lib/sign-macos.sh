@@ -45,10 +45,13 @@ _codesign() {
   fi
   # Developer ID 必须带安全时间戳；开发证书不保证被 timestamp 服务接受，
   # 开发脚本用 VEYL_SIGN_TIMESTAMP=0 关掉它。
+  # 关闭时必须显式写 --timestamp=none：Developer ID 证书默认会自动请求时间戳，
+  # 只省略 --timestamp 仍会去连 Apple（服务不可达时验签报
+  # "A timestamp was expected but was not found"）。
   # 用字符串而不是数组：macOS 自带的 bash 3.2 在 `set -u` 下展开空数组会报错。
   local extra="--timestamp"
   if [ "${VEYL_SIGN_TIMESTAMP:-1}" = "0" ]; then
-    extra=""
+    extra="--timestamp=none"
   fi
   # shellcheck disable=SC2086  # extra 只会是空串或一个不含空格的开关
   if [ -n "$VEYL_APP_ENTITLEMENTS" ] && [ -f "$VEYL_APP_ENTITLEMENTS" ]; then

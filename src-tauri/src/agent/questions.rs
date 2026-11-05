@@ -119,7 +119,7 @@ pub fn register(session_id: &str, request_id: &str, event: UserQuestionEvent) {
     app_handle::emit(
         EV_ASK_USER_QUESTION,
         json!({
-            "contract_version": "2.4.0",
+            "contract_version": "2.5.0",
             "session_id": session_id,
             "request_id": request_id,
             "question_id": question_id,

@@ -214,11 +214,19 @@ printf '[1/5] 构建 debug .app\n'
 export VEYL_TEAM_ID="$TEAM"
 export VEYL_DEV_ID_APP="$IDENTITY"
 # 开发证书不保证被 timestamp 服务接受；Developer ID 必须带时间戳。
+# 调用方显式设置 VEYL_SIGN_TIMESTAMP 时尊重它（例如 Apple 时间戳服务不可达时
+# 用 0 只做本机调试）；未设置时才按身份推导。
 # 必须在签名运行时之前定下来——它决定运行时的签名内容。
-if [ "$IDENTITY_KIND" = "development" ]; then
-  export VEYL_SIGN_TIMESTAMP=0
-else
-  export VEYL_SIGN_TIMESTAMP=1
+if [ -z "${VEYL_SIGN_TIMESTAMP+x}" ]; then
+  if [ "$IDENTITY_KIND" = "development" ]; then
+    VEYL_SIGN_TIMESTAMP=0
+  else
+    VEYL_SIGN_TIMESTAMP=1
+  fi
+  export VEYL_SIGN_TIMESTAMP
+fi
+if [ "$IDENTITY_KIND" = "developer-id" ] && [ "${VEYL_SIGN_TIMESTAMP:-1}" = "0" ]; then
+  printf '本地开发签名：不含安全时间戳（仅限本机调试，发布包不可用这种方式）\n\n'
 fi
 # shellcheck source=../packaging/lib/sign-macos.sh
 source "$ROOT/scripts/packaging/lib/sign-macos.sh"
