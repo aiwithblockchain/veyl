@@ -45,7 +45,14 @@ pub fn app_requirement() -> String {
 // 其余一律拒绝，并在错误里点名是哪一段的哪个键。
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL: &[&str] = &["log", "dns", "inbounds", "outbounds", "route", "experimental"];
+const TOP_LEVEL: &[&str] = &[
+    "log",
+    "dns",
+    "inbounds",
+    "outbounds",
+    "route",
+    "experimental",
+];
 // `output` 放行进来是为了**删掉它**：由 force_log 处理，不是采信它的值。
 const LOG_KEYS: &[&str] = &["level", "timestamp", "disabled", "output"];
 const INBOUND_KEYS: &[&str] = &[
@@ -174,8 +181,9 @@ pub fn prepare_config(
         ));
     }
 
-    let mut root: Value = serde_json::from_str(raw)
-        .map_err(|error| ProtocolError::new(ERR_CONFIG_INVALID, format!("配置不是合法 JSON：{error}")))?;
+    let mut root: Value = serde_json::from_str(raw).map_err(|error| {
+        ProtocolError::new(ERR_CONFIG_INVALID, format!("配置不是合法 JSON：{error}"))
+    })?;
     let object = root
         .as_object_mut()
         .ok_or_else(|| ProtocolError::new(ERR_CONFIG_INVALID, "配置必须是一个 JSON 对象"))?;
@@ -213,7 +221,10 @@ fn enforce_allowlist(object: &Map<String, Value>) -> Result<(), ProtocolError> {
                 ProtocolError::new(ERR_CONFIG_INVALID, "outbounds 的每一项都必须是对象")
             })?;
             deny_unknown(map, OUTBOUND_KEYS, "outbounds")?;
-            let kind = map.get("type").and_then(|value| value.as_str()).unwrap_or("");
+            let kind = map
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
             if !OUTBOUND_TYPES.contains(&kind) {
                 return Err(ProtocolError::new(
                     ERR_CONFIG_FORBIDDEN,
@@ -241,7 +252,10 @@ fn enforce_allowlist(object: &Map<String, Value>) -> Result<(), ProtocolError> {
                     ProtocolError::new(ERR_CONFIG_INVALID, "dns.servers 的每一项都必须是对象")
                 })?;
                 deny_unknown(map, DNS_SERVER_KEYS, "dns.servers")?;
-                let kind = map.get("type").and_then(|value| value.as_str()).unwrap_or("");
+                let kind = map
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
                 if !DNS_SERVER_TYPES.contains(&kind) {
                     return Err(ProtocolError::new(
                         ERR_CONFIG_FORBIDDEN,
@@ -280,7 +294,10 @@ fn enforce_allowlist(object: &Map<String, Value>) -> Result<(), ProtocolError> {
         }
     }
 
-    if let Some(experimental) = object.get("experimental").and_then(|value| value.as_object()) {
+    if let Some(experimental) = object
+        .get("experimental")
+        .and_then(|value| value.as_object())
+    {
         deny_unknown(experimental, EXPERIMENTAL_KEYS, "experimental")?;
     }
 
@@ -297,14 +314,12 @@ fn deny_unknown(
         if allowed.contains(&key.as_str()) {
             continue;
         }
-        let hint = if key.ends_with("_path")
-            || key.ends_with("_file")
-            || key.contains("certificate")
-        {
-            "（这类字段会把 root 的文件读写指到别处）"
-        } else {
-            ""
-        };
+        let hint =
+            if key.ends_with("_path") || key.ends_with("_file") || key.contains("certificate") {
+                "（这类字段会把 root 的文件读写指到别处）"
+            } else {
+                ""
+            };
         return Err(ProtocolError::new(
             ERR_CONFIG_FORBIDDEN,
             format!("{where_} 不允许字段 {key}{hint}"),
@@ -316,7 +331,10 @@ fn deny_unknown(
 /// `log.output` 决定 root 往哪写文件。不采信请求方的值，直接删掉；
 /// helper 用重定向把输出写进自己的固定日志。
 fn force_log(object: &mut Map<String, Value>) {
-    if let Some(log) = object.get_mut("log").and_then(|value| value.as_object_mut()) {
+    if let Some(log) = object
+        .get_mut("log")
+        .and_then(|value| value.as_object_mut())
+    {
         log.remove("output");
     }
 }
@@ -387,9 +405,7 @@ fn force_clash_api(
     if port == 0 {
         return Err(ProtocolError::new(ERR_BAD_REQUEST, "clash 端口不能为 0"));
     }
-    let experimental = object
-        .entry("experimental")
-        .or_insert_with(|| json!({}));
+    let experimental = object.entry("experimental").or_insert_with(|| json!({}));
     let Some(experimental) = experimental.as_object_mut() else {
         return Err(ProtocolError::new(
             ERR_CONFIG_INVALID,
@@ -475,7 +491,8 @@ mod tests {
     #[test]
     fn forces_clash_api_onto_loopback_with_our_secret() {
         let (dir, rules) = rules_dir(&[]);
-        let config = prepare_config(&tun_config(json!([])), &rules, 19090, "helper-secret").unwrap();
+        let config =
+            prepare_config(&tun_config(json!([])), &rules, 19090, "helper-secret").unwrap();
         assert_eq!(
             config["experimental"]["clash_api"]["external_controller"],
             "127.0.0.1:19090"
@@ -493,7 +510,8 @@ mod tests {
         for forbidden in ["url", "http_client", "download_detour"] {
             let mut entry = json!({"tag": "geosite-cn", "type": "remote"});
             entry[forbidden] = json!("http://evil.example/x.srs");
-            let error = prepare_config(&tun_config(json!([entry])), &rules, 19090, "s").unwrap_err();
+            let error =
+                prepare_config(&tun_config(json!([entry])), &rules, 19090, "s").unwrap_err();
             assert_eq!(
                 error.code, ERR_CONFIG_FORBIDDEN,
                 "root 去拉远程规则就是以 root 做 SSRF（{forbidden}）"
@@ -542,12 +560,8 @@ mod tests {
             {"type": "tun", "tag": "a"},
             {"type": "mixed", "listen": "0.0.0.0", "listen_port": 1080}
         ]);
-        let error =
-            prepare_config(&config.to_string(), &rules, 19090, "s").unwrap_err();
-        assert_eq!(
-            error.code, ERR_CONFIG_FORBIDDEN,
-            "不能悄悄多开一个监听"
-        );
+        let error = prepare_config(&config.to_string(), &rules, 19090, "s").unwrap_err();
+        assert_eq!(error.code, ERR_CONFIG_FORBIDDEN, "不能悄悄多开一个监听");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -560,7 +574,9 @@ mod tests {
             ERR_CONFIG_TOO_LARGE
         );
         assert_eq!(
-            prepare_config("{not json", &rules, 19090, "s").unwrap_err().code,
+            prepare_config("{not json", &rules, 19090, "s")
+                .unwrap_err()
+                .code,
             ERR_CONFIG_INVALID
         );
         assert_eq!(
@@ -570,7 +586,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-
     #[test]
     fn allowlist_rejects_fields_that_give_root_side_effects() {
         let (dir, rules) = rules_dir(&[]);
@@ -579,7 +594,9 @@ mod tests {
         let mut config: Value = serde_json::from_str(&tun_config(json!([]))).unwrap();
         config["v2ray_api"] = json!({"listen": "127.0.0.1:8080"});
         assert_eq!(
-            prepare_config(&config.to_string(), &rules, 19090, "s").unwrap_err().code,
+            prepare_config(&config.to_string(), &rules, 19090, "s")
+                .unwrap_err()
+                .code,
             ERR_CONFIG_FORBIDDEN
         );
 
@@ -587,7 +604,9 @@ mod tests {
         let mut config: Value = serde_json::from_str(&tun_config(json!([]))).unwrap();
         config["experimental"]["cache_file"] = json!("/tmp/evil.db");
         assert_eq!(
-            prepare_config(&config.to_string(), &rules, 19090, "s").unwrap_err().code,
+            prepare_config(&config.to_string(), &rules, 19090, "s")
+                .unwrap_err()
+                .code,
             ERR_CONFIG_FORBIDDEN
         );
 
@@ -595,7 +614,9 @@ mod tests {
         let mut config: Value = serde_json::from_str(&tun_config(json!([]))).unwrap();
         config["experimental"]["external_ui"] = json!("/Users/x/ui");
         assert_eq!(
-            prepare_config(&config.to_string(), &rules, 19090, "s").unwrap_err().code,
+            prepare_config(&config.to_string(), &rules, 19090, "s")
+                .unwrap_err()
+                .code,
             ERR_CONFIG_FORBIDDEN
         );
 
@@ -603,15 +624,20 @@ mod tests {
         let mut config: Value = serde_json::from_str(&tun_config(json!([]))).unwrap();
         config["ntp"] = json!({"enabled": true, "server": "x"});
         assert_eq!(
-            prepare_config(&config.to_string(), &rules, 19090, "s").unwrap_err().code,
+            prepare_config(&config.to_string(), &rules, 19090, "s")
+                .unwrap_err()
+                .code,
             ERR_CONFIG_FORBIDDEN
         );
 
         // 出站里的证书路径
         let mut config: Value = serde_json::from_str(&tun_config(json!([]))).unwrap();
-        config["outbounds"][0] = json!({"type": "direct", "tag": "direct", "tls": {"certificate_path": "/tmp/x"}});
+        config["outbounds"][0] =
+            json!({"type": "direct", "tag": "direct", "tls": {"certificate_path": "/tmp/x"}});
         assert_eq!(
-            prepare_config(&config.to_string(), &rules, 19090, "s").unwrap_err().code,
+            prepare_config(&config.to_string(), &rules, 19090, "s")
+                .unwrap_err()
+                .code,
             ERR_CONFIG_FORBIDDEN
         );
 
@@ -619,7 +645,9 @@ mod tests {
         let mut config: Value = serde_json::from_str(&tun_config(json!([]))).unwrap();
         config["outbounds"][0] = json!({"type": "tor", "tag": "x"});
         assert_eq!(
-            prepare_config(&config.to_string(), &rules, 19090, "s").unwrap_err().code,
+            prepare_config(&config.to_string(), &rules, 19090, "s")
+                .unwrap_err()
+                .code,
             ERR_CONFIG_FORBIDDEN
         );
 
@@ -659,7 +687,8 @@ mod tests {
             },
             "experimental": {"clash_api": {"external_controller": "127.0.0.1:1", "secret": "x"}}
         });
-        prepare_config(&config.to_string(), &rules, 19090, "helper-secret").expect("真实形状必须通过");
+        prepare_config(&config.to_string(), &rules, 19090, "helper-secret")
+            .expect("真实形状必须通过");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -680,7 +709,10 @@ mod tests {
             requirement.contains(&format!("identifier \"{identifier}\"")),
             "requirement 里的 identifier 与 tauri.conf.json 不一致：{requirement}"
         );
-        assert!(!requirement.contains("com.veyl.app"), "这是之前写错的那个值");
+        assert!(
+            !requirement.contains("com.veyl.app"),
+            "这是之前写错的那个值"
+        );
         assert!(
             requirement.contains(&format!("subject.OU] = \"{TEAM_ID}\"")),
             "Team ID 必须进 requirement：{requirement}"

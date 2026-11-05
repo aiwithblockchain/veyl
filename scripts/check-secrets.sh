@@ -92,7 +92,7 @@ else
     done < <(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}')
   fi
 
-  PRUNE_EXPR=(-name .git -o -name node_modules -o -name target -o -name dist -o -name build -o -name .run -o -name out)
+  PRUNE_EXPR=(-name .git -o -name .claude -o -name node_modules -o -name target -o -name dist -o -name build -o -name .run -o -name out)
   for sm in "${SUBMODULES[@]}"; do
     PRUNE_EXPR+=(-o -path "$ROOT/$sm")
   done
