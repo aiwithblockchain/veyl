@@ -20,6 +20,7 @@ import { Console } from "./components/Console";
 import { IconClose } from "./components/icons";
 import { NewConfigDialog } from "./components/NewConfigDialog";
 import { Onboarding } from "./components/Onboarding";
+import { PaneHandle } from "./components/PaneHandle";
 import { Settings, describeImportError } from "./components/Settings";
 import type { ConnectMode } from "./config/model";
 import {
@@ -36,6 +37,8 @@ import {
 } from "./ui/breakpoints";
 import { isDisconnectFailure } from "./ui/middleArea";
 import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
+import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
+import { usePaneLayout } from "./ui/usePaneLayout";
 import { pushRateSample, shouldPushRateSample, type RateSample } from "./ui/rateSeries";
 import {
   isZeroConfigAskSuppressed,
@@ -935,10 +938,19 @@ export default function App() {
 
   const shell = shellLayout(viewportWidth);
   dockedRef.current = shell.docked;
+  const panes = usePaneLayout({
+    windowWidth: viewportWidth,
+    mode: shell.mode,
+    docked: shell.docked,
+    panelOpen,
+  });
 
   const appStyle = {
-    "--rail-w": `${shell.rail}px`,
-    "--assistant-w": `${assistantColumnWidth(shell, panelOpen)}px`,
+    "--rail-w": `${panes.rail}px`,
+    "--assistant-w": `${assistantColumnWidth(
+      { ...shell, assistant: panes.assistant },
+      panelOpen,
+    )}px`,
   } as CSSProperties;
 
   const aiPanel = (
@@ -988,6 +1000,18 @@ export default function App() {
         onOpenSettings={() => openSettings()}
         compact={shell.mode === "drawer"}
       />
+      {panes.canDragRail ? (
+        <PaneHandle
+          side="rail"
+          label="调整配置列表宽度"
+          controls="config-rail"
+          value={panes.rail}
+          min={RAIL_MIN}
+          max={panes.railMax}
+          dragging={panes.draggingPane === "rail"}
+          {...panes.railHandlers}
+        />
+      ) : null}
       <Console
         config={vpn.activeConfig}
         onStart={handleVpnStart}
@@ -1018,6 +1042,18 @@ export default function App() {
           openButtonRef={assistantTabRef}
         />
       )}
+      {panes.canDragPanel ? (
+        <PaneHandle
+          side="assistant"
+          label="调整 AI 对话宽度"
+          controls="ai-panel"
+          value={panes.assistant}
+          min={ASSISTANT_MIN}
+          max={panes.assistantMax}
+          dragging={panes.draggingPane === "assistant"}
+          {...panes.assistantHandlers}
+        />
+      ) : null}
 
       {appNotice ? (
         <div className={`app-toast app-toast--${appNotice.level}`} role="status">
