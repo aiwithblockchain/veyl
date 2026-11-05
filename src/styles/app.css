@@ -3372,6 +3372,7 @@ body[data-resizing] {
 /* ---------- 右栏：AI 面板 ---------- */
 
 .ai-panel {
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
