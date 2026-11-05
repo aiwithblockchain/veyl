@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.3.5`
+> 契约版本：`2.4.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -179,6 +179,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 50 | `rules_update` | `{}` | `{ queued: boolean, job_id: string \| null }` | **2.1 新增** |
 | 51 | `tun_helper_open_settings` | `{}` | `{ opened: true }` | **2.3.5 新增** |
 | 52 | `tun_helper_uninstall` | `{}` | `{ ok: true }` | **2.3.5 新增** |
+| 53 | `network_force_reset` | `{}` | `NetworkForceResetData`（`{ ok, verified, exit_ip, steps }`） | **2.4.0 新增** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -598,7 +599,7 @@ type IssueDetail = IssueSummary & {
 };
 ```
 
-`actions` 是给 UI 的按钮提示，不是命令：`retry` → 重试 `runtime_start`；`handoff` → `issue_handoff`；`reset_network` → 批 6 的 E3；`ignore` → `issue_ignore`。列表由 `type` 决定（`docs/issue-management.md` §6），Host 给的就是最终结果，UI 不再按类型自己判断。
+`actions` 是给 UI 的按钮提示，不是命令：`retry` → 重试 `runtime_start`；`handoff` → `issue_handoff`；`reset_network` → E3，界面调 `network_force_reset`（§7.9）；`ignore` → `issue_ignore`。列表由 `type` 决定（`docs/issue-management.md` §6），Host 给的就是最终结果，UI 不再按类型自己判断。
 
 **没有 `issue_create` 命令。** J1（登记）是 Host 内部行为，由 `probe_run`、运行时事件、启动自检触发。UI 与 AI 都不能凭空造一条问题——否则「问题列表」会变成第二个随便写文案的地方，而它存在的意义恰恰是不依赖 AI 也能说清发生了什么。
 
@@ -780,7 +781,7 @@ type NetRepairResult = {
 - `ok = false` 时 `detail` 必须说明卡在哪一步；可重试的操作不要把用户引向「重装」。
 - 未知 `action` → `INVALID_ARGUMENT`，`details.supported` 列出四个取值。
 
-> **E3 重置网络（高破坏性，需二次确认）** 在批 6 落地，届时新增 `reset_network` 动作（五步顺序见 `docs/capabilities.md` §3），与卸载清理共用同一段代码。本批不下发该动作，避免「契约里有、实现里没有」。
+> **E3 重置网络（高破坏性，需二次确认）已下发**，但**不是** `net_repair` 的一个 action，而是独立命令 `network_force_reset`（§7.9）：它要跑八个固定步骤并回逐项结果，塞进 `net_repair` 的四值 `action` 里会让返回形状分裂。`net_repair` 保持上面四个 action 不变。
 
 ### 7.5 `open_log_dir {}` → `{ path: string }`
 
@@ -818,6 +819,43 @@ type NetRepairResult = {
 - **不做任何提权**：注销由系统完成，不需要管理员密码，也不弹授权框。
 - **不负责停 sing-box**：TUN 正在运行时应先 `runtime_stop` 再调本命令（清理顺序见 `capabilities.md` §3.1）。
 - 失败返回 `{ code, message }`，`code` 取自权限层错误码（当前只会是 `helper_install_failed`）。**这是 §1.2 通用 `AivpnError` 的刻意例外**：本命令没有重试语义，也不需要 `request_id`；若将来要统一，以 `AivpnError` 为准，不要两套并存。
+
+### 7.9 `network_force_reset {}` → `NetworkForceResetData`
+
+E3：高破坏性。先断开当前连接，再按固定顺序把整台机器的网络恢复原状。**必须二次确认**，确认文案要说清「会发生什么 / 不会发生什么 / 现在做什么」。
+
+```ts
+type NetworkForceResetStep = {
+  id: string;      // 八项固定，见下表
+  ok: boolean;
+  detail: string;  // 诊断文本
+};
+
+type NetworkForceResetData = {
+  ok: boolean;
+  verified: boolean;              // 复查是否通过；false 时 ok 必须为 false
+  exit_ip: string | null;         // 不带代理探测到的出口 IP
+  steps: NetworkForceResetStep[]; // 恒八项，顺序固定
+};
+```
+
+| # | `id` | 做什么 |
+|---|---|---|
+| 1 | `stop_runtime` | 停运行时 |
+| 2 | `stop_tun` | 关闭接管 |
+| 3 | `sweep_processes` | 清理残留组件 |
+| 4 | `clear_routes` | 恢复系统路由 |
+| 5 | `flush_dns` | 恢复 DNS |
+| 6 | `restore_proxy` | 撤销系统代理 |
+| 7 | `clear_plaintext` | 删除临时配置 |
+| 8 | `verify` | 复查网络状态 |
+
+- **无参数**。尤其不接受路径——运行时、规则、日志、临时文件的位置全由 Host 决定。
+- `steps` **恒为八项、顺序固定**。UI 按数组顺序渲染，不重排、不按 id 查找缺失项；`id` 不认识时按「其它检查」兜底显示，**不要丢行**。
+- `detail` 是**诊断文本**，可能含系统信息。界面不得把它当作主文案直接展示（避免把内部路径、命令行甩给用户），只把它放进「复制诊断信息」；界面主文案按 `id` 用固定中文。
+- **单步失败不算命令失败**：整体返回 `ok: false` 与逐项结果，由 UI 呈现下一步。只有命令本身起不来（内部错误、版本不支持）才 `Err`。
+- **不给 AI 工具**：`tools/net.rs` 不注册对应工具，模型不能自行触发这条破坏性路径。这条命令只属于 UI（设置 › 高级 › 诊断 ›「强制重置网络」）。
+- 与卸载清理共用同一段代码（`capabilities.md` §3.1）。
 
 ---
 
@@ -1222,6 +1260,7 @@ type RulesStatus = {
 | `runtime_stop` | **A2** 断开连接 / **A3** | 顶部主按钮 | |
 | `runtime_status` | **A4** 连接状态 | 顶部状态文字 | 配合 `runtime-state-changed` |
 | `net_repair` | **E1** 恢复直连 / **E2** 刷新 DNS | `issue_card`、设置页 | |
+| `network_force_reset` | **E3** 强制重置网络（破坏性） | 设置 › 高级 › 诊断 | 二次确认；**不进 AI 工具**，见 §7.9 |
 | `open_log_dir` | **E4** 打开日志目录 | 状态区链接 | |
 | `default_profile_status` / `_refresh` | **C1** / **C2** / **C3** | `update_hint`、`source_choice` |
 | `route_get` | **G1** 查看当前分流方式 | 设置页 / 分流文本 | |
@@ -1246,7 +1285,7 @@ type RulesStatus = {
 | `proxy_card` | A5 | `proxy_params` |
 | `source_choice` | C1 / B4 | `config_create`（选「用测试节点」带 `source: "seed"`） |
 | `reachability` | D1 | `probe_run` |
-| `issue_card` | J1–J4 / E1–E3 | `issue_*`、`net_repair` |
+| `issue_card` | J1–J4 / E1–E2 | `issue_*`、`net_repair`（**E3 不在其中**：重置网络是独立命令 `network_force_reset`，见 §7.9） |
 | `update_hint` | C2 / C3 | `default_profile_status` |
 
 ### 12.3 对不上的地方（需要 PM 在 `capabilities.md` 增补或改口径）
@@ -1362,7 +1401,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.3.5** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 |
+| `contracts/commands.md` | **2.4.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 |
 | `contracts/events.md` | **2.4.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` |
 | `contracts/runtime.md` | **2.3.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` |
 | `contracts/tools.md` | **3.3.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 |
@@ -1380,6 +1419,15 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.4.0（2026-11-05，强制重置网络下发）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.4.0`；§2 新增 53 `network_force_reset`，详解见 §7.9（无参数、八步固定、`{ok, verified, exit_ip, steps}`）；明确它是 **UI 专用命令**，`tools/net.rs` 不注册对应工具 | 新增命令 | 强制重置网络落地；破坏性路径不交给模型 |
+| 2 | §7.4 的 E3 说明由「本批不下发」改为「已下发为独立命令」——不并入 `net_repair` 的四个 action | 更正 | 返回形状不同，混进 action 会让同一命令有两种载荷 |
+| 3 | §6 的 `reset_network` 动作、§12.1 / §12.2 的能力映射补上 E3 → `network_force_reset` | 映射 | 同上 |
+| 4 | §15.5 矩阵同步本文件 2.4.0 | 元数据 | — |
 
 ### 2.3.5（2026-11-05，助手设置/卸载补录）
 
