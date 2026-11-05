@@ -158,6 +158,7 @@ describe("状态矩阵", () => {
         state: "running",
         connected_since: since,
         latency_ms: 42,
+        node_latency_ms: 42,
         traffic: {
           up_bytes: 300000,
           down_bytes: 748576,
@@ -230,6 +231,7 @@ describe("状态矩阵", () => {
         state: "running",
         connected_since: since,
         latency_ms: 42,
+        node_latency_ms: 42,
         traffic: {
           up_bytes: 0,
           down_bytes: 1_048_576,
@@ -265,6 +267,31 @@ describe("状态矩阵", () => {
     const r = renderConsole({ loading: true });
     expect(r.container.querySelector(".console-node__skeleton")).not.toBeNull();
     expect(r.tech).toBeNull();
+  });
+
+  it("10 延迟只显示节点延迟，出口探测耗时不上界面", () => {
+    const r = renderConsole({
+      connection: "connected",
+      runtime: makeRuntime({
+        state: "running",
+        latency_ms: 999,
+        node_latency_ms: 42,
+      }),
+    });
+    expect(r.summaryText).toContain("延迟 42 毫秒");
+    expect(r.summaryText).not.toContain("999");
+    const ds = Array.from(r.stats?.querySelectorAll("dd") ?? []).map(
+      (d) => d.textContent,
+    );
+    expect(ds[1]).toBe("42 毫秒");
+    expect(r.cardText).not.toContain("999");
+
+    const onlyExit = renderConsole({
+      connection: "connected",
+      runtime: makeRuntime({ state: "running", latency_ms: 999 }),
+    });
+    expect(onlyExit.summaryText).toContain("延迟确认中…");
+    expect(onlyExit.summaryText).not.toContain("999");
   });
 
   it("9 选中的节点消失：回退到当前节点", () => {

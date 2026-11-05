@@ -1,12 +1,12 @@
 /**
  * 事件与 UI → Host 调用的前端契约。
  *
- * 唯一来源：`docs/contracts/events.md` v2.2.0。
+ * 唯一来源：`docs/contracts/events.md` v2.4.0。
  * 本文件是事件名常量的唯一来源——组件、store、bridge 只能引用
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.2.0" as const;
+export const CONTRACT_VERSION = "2.4.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -89,7 +89,8 @@ export type AivpnErrorCode =
   | "RUNTIME_STOP_TIMEOUT";
 
 export interface AivpnError {
-  contract_version: typeof CONTRACT_VERSION;
+  /** runtime.md 的版本，和事件契约不同步，不要拿 CONTRACT_VERSION 比。 */
+  contract_version: string;
   code: AivpnErrorCode;
   message: string;
   retryable: boolean;
@@ -258,8 +259,10 @@ export interface RuntimeHealthChangedPayload {
   traffic?: TrafficStats | null;
   /** 活跃连接数；旧版后端不返回。 */
   connections?: number | null;
-  /** 当前节点延迟；旧版后端不返回。 */
+  /** 出口 IP 探测耗时，界面不展示；旧版后端不返回。 */
   latency_ms?: number | null;
+  /** 当前节点延迟（2.4.0 起界面只认这个）；旧版后端不返回。 */
+  node_latency_ms?: number | null;
   emitted_at: string;
 }
 
@@ -520,7 +523,8 @@ export interface TrafficStats {
 }
 
 export interface RuntimeSnapshot {
-  contract_version: typeof CONTRACT_VERSION;
+  /** runtime.md 的版本，和事件契约不同步，不要拿 CONTRACT_VERSION 比。 */
+  contract_version: string;
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
@@ -543,7 +547,10 @@ export interface RuntimeSnapshot {
   mixed_port: number | null;
   /** 连接成功时刻（ISO 8601）；未连接为 null。 */
   connected_since: string | null;
+  /** 出口 IP 探测耗时，界面不展示。 */
   latency_ms: number | null;
+  /** 当前节点延迟（2.4.0）；界面只显示这个。 */
+  node_latency_ms: number | null;
   /** 本次连接生成配置时的 route_revision；未连接为 null。 */
   applied_route_revision: number | null;
   /** 不经代理测得的直连出口 IP（1.1.0）；用于对照「是否真的走了代理」。 */
@@ -569,7 +576,10 @@ export interface RuntimeView {
   last_error: AivpnError | null;
   mixed_port: number | null;
   connected_since: string | null;
+  /** 出口 IP 探测耗时，界面不展示。 */
   latency_ms: number | null;
+  /** 当前节点延迟（2.4.0）；界面只显示这个。 */
+  node_latency_ms: number | null;
   applied_route_revision: number | null;
   direct_ip: string | null;
 }

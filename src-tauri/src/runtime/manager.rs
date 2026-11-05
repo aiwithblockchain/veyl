@@ -12,11 +12,14 @@ use super::error::{RuntimeError, RuntimeResult};
 use super::health::{ClashApi, ConnectionSample, DataPlaneProbe, DirectIpProbe, ExitIpProbe, DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE};
 use super::process::{self, SpawnOptions};
 
-pub const CONTRACT_VERSION: &str = "2.1.0";
-pub const EVENT_CONTRACT_VERSION: &str = "2.3.0";
+pub const CONTRACT_VERSION: &str = "2.3.0";
+pub const EVENT_CONTRACT_VERSION: &str = "2.4.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
 pub const DEFAULT_DATA_PLANE_PROBE: &str = "http://cp.cloudflare.com/generate_204";
+
+/// 节点延迟（Clash delay）刷新间隔。每次测试都是一次真实请求，不跟 2s 健康循环同频。
+const LATENCY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,7 +142,10 @@ pub struct RuntimeStatus {
     pub node_name: Option<String>,
     pub applied_route_revision: Option<i64>,
     pub connected_since: Option<String>,
+    /// 出口 IP 探测往返耗时（契约固定语义，**不是**节点延迟）。
     pub latency_ms: Option<u64>,
+    /// 经该节点出网的真实延迟（Clash delay）；与 `latency_ms` 是两个指标。
+    pub node_latency_ms: Option<u64>,
     pub direct_ip: Option<String>,
     pub config_hash: Option<String>,
     pub system_proxy_enabled: bool,
@@ -180,6 +186,7 @@ impl RuntimeStatus {
             applied_route_revision: input.applied_route_revision,
             connected_since: input.connected_since.clone(),
             latency_ms: None,
+            node_latency_ms: None,
             direct_ip: None,
             config_hash: None,
             system_proxy_enabled: false,
@@ -248,9 +255,10 @@ pub struct RuntimeHealthChangedPayload {
     pub traffic: Option<serde_json::Value>,
     /// 活跃连接数，与 `traffic` 同一次采样；未连接或没采到为 `null`。
     pub connections: Option<u32>,
-    /// 出口 IP 探测往返耗时；未连接或没测到为 `null`。
-    /// 放进事件里，前端才不用额外拉一次快照就能刷新延迟。
+    /// 出口 IP 探测往返耗时（契约固定语义）；未连接或没测到为 `null`。
     pub latency_ms: Option<u64>,
+    /// 经该节点出网的真实延迟（Clash delay）；未连接或没测到为 `null`。
+    pub node_latency_ms: Option<u64>,
     pub emitted_at: String,
 }
 
@@ -393,6 +401,9 @@ struct Inner {
     health: HealthSnapshot,
     /// 最近一次成功探测出口 IP 的往返耗时；`health.exit_ip` 为空时视为无效。
     last_exit_ip_latency_ms: Option<u64>,
+    /// 最近一次 Clash delay 测得的节点延迟（毫秒）。与出口 IP 无关，单独成字段，
+    /// 不占用契约里的 `latency_ms`（那是出口探测耗时）。
+    last_node_latency_ms: Option<u64>,
     /// 不经代理测得的直连出口 IP；连接期间才有效。
     direct_ip: Option<String>,
     /// 最近一次成功采到的流量快照；未连接或没采到时为 None。
@@ -423,6 +434,7 @@ impl Inner {
             traffic: None,
             connections: None,
             last_exit_ip_latency_ms: None,
+            last_node_latency_ms: None,
             direct_ip: None,
         }
     }
@@ -479,8 +491,15 @@ impl Inner {
             } else {
                 None
             },
+            // 出口探测延迟：维持契约原义（出口 IP 探测往返耗时）。
             latency_ms: if connected && self.health.exit_ip.is_some() {
                 self.last_exit_ip_latency_ms
+            } else {
+                None
+            },
+            // 节点延迟单独给，不受出口 IP 是否测到影响。
+            node_latency_ms: if connected {
+                self.last_node_latency_ms
             } else {
                 None
             },
@@ -562,11 +581,18 @@ impl RuntimeManager {
 
     /// selector 热切节点后同步快照里的 node_id/node_name，不重启进程。
     pub async fn set_plan_node(&self, node_id: String, node_name: String) {
-        let mut inner = self.inner.lock().await;
-        if let Some(plan) = inner.plan.as_mut() {
-            plan.node_id = Some(node_id);
-            plan.node_name = Some(node_name);
+        {
+            let mut inner = self.inner.lock().await;
+            if let Some(plan) = inner.plan.as_mut() {
+                plan.node_id = Some(node_id);
+                plan.node_name = Some(node_name);
+            }
+            // 切换瞬间不能再展示上一个节点的延迟；supervise 下一拍会用新 tag 重测。
+            inner.last_node_latency_ms = None;
         }
+        // 叫醒 supervise，让它立刻按新节点重测，而不是等下一个 tick。
+        self.wake.notify_waiters();
+        self.emit_health().await;
     }
 
     /// 出口 IP 由连接编排层探测后回填，用于状态快照展示。
@@ -632,14 +658,6 @@ impl RuntimeManager {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-    }
-
-    /// 最近一次出口 IP 探测的往返耗时（毫秒），供 `VpnConnect` 的 `latency_ms` 使用。
-    /// 没有出口 IP 时不返回陈旧值。
-    pub async fn exit_ip_latency_ms(&self) -> Option<u64> {
-        let inner = self.inner.lock().await;
-        inner.health.exit_ip.as_ref()?;
-        inner.last_exit_ip_latency_ms
     }
 
     /// 正在使用（含启动、切换、停止中）的配置；`None` 表示没有活动连接。
@@ -709,6 +727,8 @@ impl RuntimeManager {
             // 上一次连接的流量与连接数不能带进这一次。
             inner.traffic = None;
             inner.connections = None;
+            inner.last_exit_ip_latency_ms = None;
+            inner.last_node_latency_ms = None;
             inner.config_hash = hash_file(&plan.config_path);
             inner.version = Some(plan.version.clone());
             inner.plan = Some(plan.clone());
@@ -806,6 +826,8 @@ impl RuntimeManager {
             inner.direct_ip = None;
             inner.traffic = None;
             inner.connections = None;
+            inner.last_exit_ip_latency_ms = None;
+            inner.last_node_latency_ms = None;
             inner.last_transition_at = now_iso();
             inner.snapshot()
         };
@@ -1128,7 +1150,7 @@ impl RuntimeManager {
         }
     }
 
-    async fn supervise(&self, gen: u64, plan: &StartPlan) -> SuperviseExit {
+    async fn supervise(self: &Arc<Self>, gen: u64, plan: &StartPlan) -> SuperviseExit {
         let api = ClashApi::new(&plan.clash_addr, &plan.clash_secret);
         let probe = self
             .cfg
@@ -1140,6 +1162,11 @@ impl RuntimeManager {
         let mut degraded_since: Option<Instant> = None;
         let mut next_health = Instant::now() + self.cfg.health_interval;
         let mut next_probe = Instant::now() + Duration::from_secs(10);
+        // 延迟不进 2s 健康循环：每次 delay 都是一次真实请求。
+        let mut next_latency = Instant::now() + LATENCY_REFRESH_INTERVAL;
+        // 热切换只改 inner.plan、不换 gen，也不重进 enter_running：
+        // 记住最近一次探测用的节点，不一致就作废旧值并立刻重测。
+        let mut probed_node = plan.node_id.clone();
         // 上一次流量采样，用来算速率。
         let mut last_traffic: Option<(ConnectionSample, Instant)> = None;
 
@@ -1179,6 +1206,9 @@ impl RuntimeManager {
                     let mut inner = self.inner.lock().await;
                     inner.traffic = None;
                     inner.connections = None;
+                    // 进程没了，上一段连接的两种延迟都不再可信。
+                    inner.last_exit_ip_latency_ms = None;
+                    inner.last_node_latency_ms = None;
                 }
                 self.emit_health().await;
                 return SuperviseExit::Crash(reason);
@@ -1271,6 +1301,31 @@ impl RuntimeManager {
                 }
             }
 
+            // 延迟必须跟着当前节点走：循环里捕获的 plan 可能已经是旧节点。
+            let current_node = self.plan_of(gen).await.and_then(|plan| plan.node_id);
+            if current_node != probed_node {
+                {
+                    let mut inner = self.inner.lock().await;
+                    if inner.generation == gen {
+                        inner.last_node_latency_ms = None;
+                    }
+                }
+                probed_node = current_node;
+                next_latency = Instant::now();
+                self.emit_health().await;
+            }
+
+            if Instant::now() >= next_latency {
+                next_latency = Instant::now() + LATENCY_REFRESH_INTERVAL;
+                if let Some(current) = self.plan_of(gen).await {
+                    // spawn 出去：delay 最长 6s，不能挡住健康检查和崩溃检测。
+                    let manager = Arc::clone(self);
+                    tokio::spawn(async move {
+                        manager.probe_latency(gen, current).await;
+                    });
+                }
+            }
+
             if let Some(since) = degraded_since {
                 if since.elapsed() >= self.cfg.degraded_restart_after {
                     return SuperviseExit::Crash(
@@ -1312,8 +1367,14 @@ impl RuntimeManager {
         // 出口 IP 只探一次，不放进每 10 秒的健康循环。
         if let Some(plan) = plan {
             let manager = Arc::clone(self);
+            let latency_plan = plan.clone();
             tokio::spawn(async move {
                 manager.probe_exit_ip(gen, plan).await;
+            });
+            // 节点延迟一进入 running 就测一次；之后的刷新在 supervise 里每 30s 一次。
+            let manager = Arc::clone(self);
+            tokio::spawn(async move {
+                manager.probe_latency(gen, latency_plan).await;
             });
         }
 
@@ -1373,7 +1434,7 @@ impl RuntimeManager {
 
         let started = Instant::now();
         let result = probe.check().await;
-        // 这次请求经 mixed 入站打到远端，往返耗时就是天然的出口延迟。
+        // 契约：`latency_ms` 就是这次出口探测的往返耗时（含 DNS + TLS）。
         let latency_ms = started.elapsed().as_millis() as u64;
 
         // 探测是异步的：这期间可能已经断开或切了节点，只有仍是同一代且仍在运行才回填。
@@ -1397,6 +1458,43 @@ impl RuntimeManager {
             Ok(None) => log::warn!("出口 IP 探测返回的不是 IP，忽略（exit_ip 保持未知）"),
             Err(error) => log::warn!("出口 IP 探测失败：{error}（exit_ip 保持未知）"),
         }
+    }
+
+    /// 用 Clash API 的 delay 端点测「经该节点出网」的真实延迟。
+    ///
+    /// 失败写 `None`（契约要求「探测失败为 null」），不影响连接状态。
+    /// 热切换不走 enter_running：由 `set_plan_node` 清空、`supervise` 察觉节点变化后重测；
+    /// 晚到的旧节点结果会被下面的 node_id 校验丢弃。
+    async fn probe_latency(self: Arc<Self>, gen: u64, plan: StartPlan) {
+        let Some(node_id) = plan.node_id.clone() else {
+            return;
+        };
+        // 配置生成时节点的 outbound tag 就是 node-{node_id}（与 node_probe 一致）。
+        let tag = format!("node-{node_id}");
+        let api = ClashApi::new(&plan.clash_addr, &plan.clash_secret);
+        // 失败也要把值清成 null：契约要求「探测失败为 null」，
+        // 保留上一次的数字会让面板显示一个并不成立的延迟。
+        let delay = match api.delay(&tag).await {
+            Ok(delay) => Some(delay),
+            Err(error) => {
+                log::debug!("节点延迟测试失败（{tag}）：{error}");
+                None
+            }
+        };
+
+        let mut inner = self.inner.lock().await;
+        // 晚到的探测不能写回去：热切换后 inner.plan 已经是新节点，
+        // 用它挡住旧 tag 的结果（否则切换后会被旧值覆盖一秒）。
+        let current_node = inner.plan.as_ref().and_then(|plan| plan.node_id.as_deref());
+        if inner.generation != gen
+            || !matches!(inner.state, RuntimeState::Running | RuntimeState::Degraded)
+            || current_node != Some(node_id.as_str())
+        {
+            return;
+        }
+        inner.last_node_latency_ms = delay;
+        drop(inner);
+        self.emit_health().await;
     }
 
     async fn fail(&self, gen: u64, code: &'static str, reason: String) {
@@ -1444,6 +1542,9 @@ impl RuntimeManager {
                 inner.connected_since = None;
                 inner.health.exit_ip = None;
                 inner.direct_ip = None;
+                // 两种延迟都属于上一段连接，进终态后不能再展示。
+                inner.last_exit_ip_latency_ms = None;
+                inner.last_node_latency_ms = None;
                 // 配置可能已被 guard 删除；清掉 plan，restart 会返回 InvalidState，
                 // 而不是拿死路径去启动、报一个用户看不懂的底层错误。
                 inner.plan = None;
@@ -1490,7 +1591,7 @@ impl RuntimeManager {
     }
 
     async fn emit_health(&self) {
-        let (health, traffic, connections, latency_ms) = {
+        let (health, traffic, connections, latency_ms, node_latency_ms) = {
             let inner = self.inner.lock().await;
             // 事件里的流量/连接数/延迟只在连接期间给值：
             // 断开的瞬间状态先变、采样可能还没回来，按 state 门控才不会发出旧值。
@@ -1502,8 +1603,15 @@ impl RuntimeManager {
                 inner.health.clone(),
                 if connected { inner.traffic.clone() } else { None },
                 if connected { inner.connections } else { None },
+                // 出口探测延迟维持契约原义：出口 IP 没测到就不给。
                 if connected && inner.health.exit_ip.is_some() {
                     inner.last_exit_ip_latency_ms
+                } else {
+                    None
+                },
+                // 节点延迟单独给，不受出口 IP 影响。
+                if connected {
+                    inner.last_node_latency_ms
                 } else {
                     None
                 },
@@ -1515,6 +1623,7 @@ impl RuntimeManager {
             traffic,
             connections,
             latency_ms,
+            node_latency_ms,
             emitted_at: now_iso(),
         }));
     }
@@ -1732,7 +1841,8 @@ mod tests {
         }
     }
 
-    /// 只回 `/version` 的假 Clash API，让 wait_until_ready 能通过。
+    /// 假 Clash API：`/version` 返回可解析的版本；delay 端点按 tag 给不同结果
+    /// （n1 = 123ms、n2 = 456ms、bad = HTTP 500），用来验证热切换换的是 tag。
     async fn fake_clash_server() -> (u16, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1744,10 +1854,25 @@ mod tests {
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     let mut buf = [0u8; 2048];
-                    let _ = socket.read(&mut buf).await;
-                    let body = r#"{"version":"test","meta":false,"premium":false}"#;
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let (status, body) = if request.contains("/proxies/node-n2/delay") {
+                        ("200 OK", r#"{"delay":456}"#.to_string())
+                    } else if request.contains("/proxies/node-bad/delay") {
+                        (
+                            "500 Internal Server Error",
+                            r#"{"message":"timeout"}"#.to_string(),
+                        )
+                    } else if request.contains("/delay") {
+                        ("200 OK", r#"{"delay":123}"#.to_string())
+                    } else {
+                        (
+                            "200 OK",
+                            r#"{"version":"test","meta":false,"premium":false}"#.to_string(),
+                        )
+                    };
                     let head = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = socket.write_all(head.as_bytes()).await;
@@ -1962,7 +2087,7 @@ mod tests {
         );
         assert_eq!(
             status.last_error.as_ref().unwrap().contract_version,
-            "2.1.0"
+            "2.3.0"
         );
 
         let mut restarts = 0;
@@ -2256,6 +2381,7 @@ mod tests {
         inner.health.exit_ip = Some("203.0.113.10".into());
         inner.direct_ip = Some("198.51.100.7".into());
         inner.last_exit_ip_latency_ms = Some(123);
+        inner.last_node_latency_ms = Some(45);
 
         let snapshot = inner.snapshot();
         assert_eq!(snapshot.mixed_port, Some(4321));
@@ -2264,8 +2390,15 @@ mod tests {
             snapshot.connected_since.as_deref(),
             Some("2026-11-02T00:00:00Z")
         );
-        assert_eq!(snapshot.latency_ms, Some(123));
+        assert_eq!(snapshot.latency_ms, Some(123), "latency_ms 仍是出口探测耗时");
+        assert_eq!(snapshot.node_latency_ms, Some(45), "节点延迟单独成字段");
         assert_eq!(snapshot.direct_ip.as_deref(), Some("198.51.100.7"));
+
+        // 两个指标互不门控：出口 IP 没测到，latency_ms 变 null，节点延迟照常展示。
+        inner.health.exit_ip = None;
+        let snapshot = inner.snapshot();
+        assert!(snapshot.latency_ms.is_none());
+        assert_eq!(snapshot.node_latency_ms, Some(45));
 
         inner.state = RuntimeState::Failed;
         let snapshot = inner.snapshot();
@@ -2273,6 +2406,7 @@ mod tests {
         assert!(snapshot.config_name.is_none());
         assert!(snapshot.connected_since.is_none());
         assert!(snapshot.latency_ms.is_none());
+        assert!(snapshot.node_latency_ms.is_none());
         assert!(snapshot.direct_ip.is_none());
     }
 
@@ -2441,6 +2575,7 @@ mod tests {
             traffic: None,
             connections: None,
             latency_ms: None,
+            node_latency_ms: None,
             emitted_at: now_iso(),
         });
         let (name, payload) = runtime_event_to_emit(&health_event).unwrap();
@@ -2451,6 +2586,7 @@ mod tests {
             "没有采样必须是 null，不能用 0 冒充"
         );
         assert!(payload["connections"].is_null());
+        assert!(payload["node_latency_ms"].is_null());
     }
 
     #[cfg(unix)]
@@ -2495,6 +2631,152 @@ mod tests {
         }
         assert!(reached_running, "必须收到进入 running 的迁移事件");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 节点延迟来自 Clash delay，且与 `latency_ms`（出口探测耗时）是两个字段。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn node_latency_is_separate_from_exit_probe_latency() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("node-latency");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-sing-box");
+        std::fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (clash_port, server) = fake_clash_server().await;
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+        let mut events = manager.subscribe();
+
+        let mut launch = plan(fake, &dir);
+        launch.clash_addr = format!("127.0.0.1:{clash_port}");
+        launch.node_id = Some("n1".into());
+
+        let status = manager.start(launch).await.unwrap();
+        assert_eq!(status.state, RuntimeState::Running);
+
+        // 一进入 running 就会测一次；等第一条带 node_latency_ms 的 health 事件。
+        let mut node_latency = None;
+        let mut exit_latency = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while node_latency.is_none() && Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(300), events.recv()).await {
+                Ok(Ok(RuntimeEvent::HealthChanged(payload))) => {
+                    node_latency = payload.node_latency_ms;
+                    if node_latency.is_some() {
+                        exit_latency = payload.latency_ms;
+                    }
+                }
+                Ok(Ok(_)) | Ok(Err(_)) => {}
+                Err(_) => {}
+            }
+        }
+        assert_eq!(node_latency, Some(123), "health 事件必须带 Clash delay 的值");
+        assert!(
+            exit_latency.is_none(),
+            "latency_ms 是出口探测耗时：出口没测到就只能是 null，不能拿节点延迟顶替"
+        );
+        assert_eq!(
+            manager.status().await.node_latency_ms,
+            Some(123),
+            "快照里必须有节点延迟"
+        );
+
+        manager.stop().await.unwrap();
+        let stopped = manager.status().await;
+        assert!(stopped.latency_ms.is_none(), "断开后出口探测延迟要清空");
+        assert!(stopped.node_latency_ms.is_none(), "断开后节点延迟要清空");
+        let inner = manager.inner.lock().await;
+        assert!(inner.last_exit_ip_latency_ms.is_none());
+        assert!(inner.last_node_latency_ms.is_none());
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 等到一条 `node_latency_ms == want` 的 health 事件。
+    async fn wait_for_latency(events: &mut broadcast::Receiver<RuntimeEvent>, want: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(300), events.recv()).await {
+                Ok(Ok(RuntimeEvent::HealthChanged(payload)))
+                    if payload.node_latency_ms == Some(want) =>
+                {
+                    return true;
+                }
+                Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
+            }
+        }
+        false
+    }
+
+    /// 热切换只改 inner.plan，不换 gen：延迟必须清空并用新节点的 tag 重测。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hot_switching_nodes_clears_and_remeasures_latency() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("latency-switch");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-sing-box");
+        std::fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (clash_port, server) = fake_clash_server().await;
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+        let mut events = manager.subscribe();
+
+        let mut launch = plan(fake, &dir);
+        launch.clash_addr = format!("127.0.0.1:{clash_port}");
+        launch.node_id = Some("n1".into());
+
+        manager.start(launch).await.unwrap();
+        assert!(wait_for_latency(&mut events, 123).await, "n1 必须先测出 123");
+
+        // 热切换：不换 gen、不重进 enter_running。
+        manager.set_plan_node("n2".into(), "节点二".into()).await;
+        assert!(
+            manager.status().await.node_latency_ms.is_none(),
+            "切换瞬间必须清空旧节点的延迟"
+        );
+        assert!(
+            wait_for_latency(&mut events, 456).await,
+            "必须用 node-n2 的 tag 重测，而不是继续测旧节点"
+        );
+
+        manager.stop().await.unwrap();
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 探测失败必须清成 null，不能保留上一次的数字。
+    #[tokio::test]
+    async fn a_failed_delay_probe_clears_the_previous_latency() {
+        let dir = temp_dir("latency-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (clash_port, server) = fake_clash_server().await;
+
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+        let mut bad = plan(PathBuf::from("/tmp/sing-box"), &dir);
+        bad.clash_addr = format!("127.0.0.1:{clash_port}");
+        bad.node_id = Some("bad".into());
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.state = RuntimeState::Running;
+            inner.generation = 7;
+            inner.last_node_latency_ms = Some(999);
+            inner.plan = Some(bad.clone());
+        }
+
+        manager.clone().probe_latency(7, bad).await;
+        assert!(
+            manager.inner.lock().await.last_node_latency_ms.is_none(),
+            "探测失败后延迟必须是 null，不能留着上一次的值"
+        );
+
+        server.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

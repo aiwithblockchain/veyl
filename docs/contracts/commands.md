@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.3.3`
+> 契约版本：`2.3.4`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -707,17 +707,17 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 | 顺序 | **先撤系统代理，再停运行时**。顺序不可交换 |
 | 代理撤销失败 | **中止断开**，运行时保持运行，返回 `PRECONDITION_FAILED`，`details.reason = "proxy_restore_failed"`。不可以在代理没撤掉的情况下停掉 sing-box——那等于把用户直接断网 |
 | 已经断开 | 幂等：返回当前快照（`state = "idle"`），不报错 |
-| 成功后 | `state = "idle"`，`mixed_port` / `config_id` / `node_id` / `connected_since` / `exit_ip` / `latency_ms` 全为 `null`，渲染配置已删除 |
+| 成功后 | `state = "idle"`，`mixed_port` / `config_id` / `node_id` / `connected_since` / `exit_ip` / `latency_ms` / `node_latency_ms` 全为 `null`，渲染配置已删除 |
 
 > 这条规则与退出流程一致：**宁可断开失败，也不能留下指向死端口的系统代理**。
 
 ### 7.3 `runtime_status {}` → `RuntimeSnapshot`
 
-2.0 的 `RuntimeSnapshot`（与 `runtime.md` §2.5 的 2.0.0 一致）：
+2.0 的 `RuntimeSnapshot`（与 `runtime.md` §2.5 的 `2.3.0` 一致，**版本号跟 `runtime.md`，不跟本文件**）：
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.0.0";
+  contract_version: "2.3.0";
   state: RuntimeState;                // runtime.md §2.1，七态不变
   mode: "system_proxy" | "tun" | null;
   pid: number | null;
@@ -730,8 +730,10 @@ type RuntimeSnapshot = {
   connected_since: string | null;     // ISO 8601 UTC
   mixed_port: number | null;
   latency_ms: number | null;          // 出口 IP 探测耗时，不是节点 ping
+  node_latency_ms: number | null;     // 2.3：到节点的真实延迟（Clash API delay 测试）
   direct_ip: string | null;           // 不经代理测得的直连出口 IP
   config_hash: string | null;         // "sha256:<hex>"
+  applied_route_revision: number | null; // runtime.md 2.1：建连时 configs.route_revision 的值
   system_proxy_enabled: boolean;
   health: HealthSnapshot;
   traffic: TrafficStats | null;
@@ -1339,10 +1341,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.3.3** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 |
-| `contracts/events.md` | **2.2.0** | 批 0 + 批 3 + 流量进健康事件 |
-| `contracts/runtime.md` | **2.2.0** | 批 0 + `applied_route_revision` + 流量口径 |
-| `contracts/tools.md` | **3.2.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 |
+| `contracts/commands.md` | **2.3.4** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 |
+| `contracts/events.md` | **2.4.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` |
+| `contracts/runtime.md` | **2.3.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` |
+| `contracts/tools.md` | **3.3.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 |
 | `data-model.md` | **3** | 批 0 + 批 3 表 + 种子排除表 |
 | `contracts/routing.md` | **1.1.0** | 批 3 设计依据 |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
@@ -1356,6 +1358,16 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.3.4（2026-11-05，节点延迟与出口延迟分开）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.3.4` | 元数据 | 产品：「2098 毫秒」是出口 IP 探测，不是节点延迟 |
+| 2 | §7.3 `RuntimeSnapshot` 新增 `node_latency_ms: number \| null`（归属 `runtime.md` 2.3.0） | 字段新增 | 同上 |
+| 3 | §7.2 断开成功后置 `null` 的字段清单补上 `node_latency_ms` | 说明 | 避免断开后还显示上一个节点的延迟 |
+| 4 | §15.5 版本矩阵同步 `events.md` 2.4.0、`runtime.md` 2.3.0 | 元数据 | 矩阵再次滞后于各文件的真实版本 |
+| 5 | §7.3 明确其中的 `contract_version` 跟 `runtime.md`，不跟本文件 | 说明 | 全文只有这一处副本，容易误判 |
 
 ### 2.3.3（2026-11-04，流量口径）
 

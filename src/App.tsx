@@ -3,7 +3,7 @@ import type { CSSProperties } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { AgentEvent, NextAction, RuntimeView } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
-import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, snapshotToView } from "./agent";
+import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
 import { isTauri } from "./agent/bridge";
 import type {
   DefaultProfileStatus,
@@ -171,13 +171,7 @@ export default function App() {
       setRuntime((current) =>
         versionAtRequest === healthVersion.current
           ? base
-          : {
-              ...base,
-              health: current.health,
-              traffic: current.traffic,
-              connections: current.connections,
-              latency_ms: current.latency_ms,
-            },
+          : keepLiveHealth(base, current),
       );
     });
   }, [bridge]);

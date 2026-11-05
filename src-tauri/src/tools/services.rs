@@ -167,6 +167,7 @@ fn idle_snapshot() -> Value {
         "applied_route_revision": null,
         "connected_since": null,
         "latency_ms": null,
+        "node_latency_ms": null,
         "direct_ip": null,
         "config_hash": null,
         "system_proxy_enabled": false,
@@ -640,33 +641,10 @@ async fn clash_get_selector(
 
 /// 已连接的节点延迟：Clash API `GET /proxies/{tag}/delay`。
 async fn clash_delay(addr: &str, secret: &str, tag: &str) -> Result<u64, String> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(6))
-        .build()
-        .map_err(|error| format!("创建延迟测试客户端失败：{error}"))?;
-    let response = client
-        .get(format!("http://{addr}/proxies/{tag}/delay"))
-        .bearer_auth(secret)
-        .query(&[
-            ("timeout", "3000"),
-            ("url", "http://cp.cloudflare.com/generate_204"),
-        ])
-        .send()
+    crate::runtime::health::ClashApi::new(addr, secret)
+        .delay(tag)
         .await
-        .map_err(|error| format!("延迟测试请求失败：{error}"))?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        let detail = body.chars().take(200).collect::<String>();
-        return Err(format!("延迟测试返回 HTTP {status}：{detail}"));
-    }
-    let value: Value =
-        serde_json::from_str(&body).map_err(|_| "延迟测试响应不是合法 JSON".to_string())?;
-    value
-        .get("delay")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "延迟测试响应缺少 delay".to_string())
+        .map_err(|error| error.to_string())
 }
 
 async fn http_reachable(url: &str) -> bool {
@@ -3102,7 +3080,7 @@ impl VpnToolServices for WiredServices {
         };
 
         Ok(json!({
-            "contract_version": "3.2.0",
+            "contract_version": "3.3.0",
             "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "app_version": env!("CARGO_PKG_VERSION"),
             "platform": crate::netcfg::platform_name(),
@@ -3642,14 +3620,8 @@ impl WiredServices {
 
         let status = self.manager.status().await;
         let exit_ip = status.health.exit_ip.clone().or(awaited_ip);
-        let latency_ms = if exit_ip.is_some() {
-            self.manager.exit_ip_latency_ms().await
-        } else {
-            None
-        };
         let mut data = serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))?;
         data["exit_ip"] = exit_ip.map(Value::String).unwrap_or(Value::Null);
-        data["latency_ms"] = latency_ms.map(Value::from).unwrap_or(Value::Null);
 
         guard.disarm();
         Ok(data)
@@ -4698,6 +4670,14 @@ mod main_flow_tests {
             .await
             .unwrap();
         assert_eq!(connected["state"], "running", "{connected}");
+        assert!(
+            connected.get("node_latency_ms").is_some(),
+            "工具结果必须带 node_latency_ms（模型直接读它）"
+        );
+        assert!(
+            connected.get("latency_ms").is_some(),
+            "latency_ms 仍是出口探测耗时，异步未测到时为 null"
+        );
 
         // ---- 4. 查询状态 ----
         //

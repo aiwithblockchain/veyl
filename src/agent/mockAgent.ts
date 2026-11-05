@@ -115,6 +115,7 @@ export class MockAgentBridge implements AgentBridge {
     mixed_port: null,
     connected_since: null,
     latency_ms: null,
+    node_latency_ms: null,
     applied_route_revision: null,
     direct_ip: MOCK_DIRECT_IP,
   };
@@ -555,6 +556,7 @@ export class MockAgentBridge implements AgentBridge {
       mixed_port: 2080,
       connected_since: now(),
       latency_ms: 42,
+      node_latency_ms: 42,
       direct_ip: MOCK_DIRECT_IP,
       system_proxy_enabled: true,
       connections: 3,

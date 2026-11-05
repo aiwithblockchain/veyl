@@ -316,6 +316,7 @@ export function emptyRuntimeView(): RuntimeView {
     mixed_port: null,
     connected_since: null,
     latency_ms: null,
+    node_latency_ms: null,
     traffic: null,
     applied_route_revision: null,
     direct_ip: null,
@@ -337,6 +338,7 @@ export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): Runtime
         last_error: event.payload.error,
         connected_since: keepConnection ? view.connected_since : null,
         latency_ms: keepConnection ? view.latency_ms : null,
+        node_latency_ms: keepConnection ? view.node_latency_ms : null,
         traffic: keepConnection ? view.traffic : null,
         connections: keepConnection ? view.connections : null,
       };
@@ -359,6 +361,11 @@ export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): Runtime
           ? payload.latency_ms ?? null
           : view.latency_ms
         : null;
+      const nodeLatency = online
+        ? "node_latency_ms" in payload
+          ? payload.node_latency_ms ?? null
+          : view.node_latency_ms
+        : null;
       return {
         ...view,
         health: payload.health
@@ -367,11 +374,27 @@ export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): Runtime
         traffic,
         connections,
         latency_ms: latency,
+        node_latency_ms: nodeLatency,
       };
     }
     default:
       return view;
   }
+}
+
+/**
+ * 快照请求发出后如果又收到健康事件，快照回来时这些字段可能比事件里的值旧。
+ * 只覆盖健康事件会写的字段（health / 流量 / 连接数 / 两种延迟），其余仍以快照为准。
+ */
+export function keepLiveHealth(base: RuntimeView, current: RuntimeView): RuntimeView {
+  return {
+    ...base,
+    health: current.health,
+    traffic: current.traffic,
+    connections: current.connections,
+    latency_ms: current.latency_ms,
+    node_latency_ms: current.node_latency_ms,
+  };
 }
 
 export function snapshotToView(snapshot: RuntimeSnapshot): RuntimeView {
@@ -396,6 +419,7 @@ export function snapshotToView(snapshot: RuntimeSnapshot): RuntimeView {
     mixed_port: snapshot.mixed_port ?? null,
     connected_since: snapshot.connected_since ?? null,
     latency_ms: snapshot.latency_ms ?? null,
+    node_latency_ms: snapshot.node_latency_ms ?? null,
     traffic: snapshot.traffic ?? null,
     applied_route_revision: snapshot.applied_route_revision ?? null,
     direct_ip: snapshot.direct_ip ?? null,

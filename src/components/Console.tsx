@@ -183,7 +183,7 @@ export function Console({
     : null;
   const trafficLabel = usedBytes === null ? "—" : formatTraffic(usedBytes);
   const latencyLabel =
-    runtime.latency_ms === null ? "确认中…" : `${runtime.latency_ms} 毫秒`;
+    runtime.node_latency_ms === null ? "确认中…" : `${runtime.node_latency_ms} 毫秒`;
   const linkStateLabel =
     connection === "starting"
       ? "正在连接"
@@ -301,7 +301,7 @@ export function Console({
             <span className="console-summary__item">{durationLabel}</span>
             <span className="console-summary__item">已用 {trafficLabel}</span>
             <span className="console-summary__item">
-              {runtime.latency_ms === null ? "延迟确认中…" : `延迟 ${latencyLabel}`}
+              {runtime.node_latency_ms === null ? "延迟确认中…" : `延迟 ${latencyLabel}`}
             </span>
             {exitAddress ? (
               <button

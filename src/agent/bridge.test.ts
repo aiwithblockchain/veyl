@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyRuntimeEvent, emptyRuntimeView, snapshotToView } from "./bridge";
+import { applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, snapshotToView } from "./bridge";
 import {
   AGENT_EVENTS,
   CONTRACT_VERSION,
@@ -37,6 +37,7 @@ const SNAPSHOT: RuntimeSnapshot = {
   mixed_port: 7890,
   connected_since: new Date().toISOString(),
   latency_ms: 42,
+  node_latency_ms: 42,
   applied_route_revision: 1,
   direct_ip: "203.0.113.1",
 };
@@ -63,12 +64,14 @@ describe("runtime 快照与事件兜底", () => {
         traffic: TRAFFIC,
         connections: 7,
         latency_ms: 42,
+        node_latency_ms: 42,
         emitted_at: "",
       },
     });
     expect(next.traffic).toBeNull();
     expect(next.connections).toBeNull();
     expect(next.latency_ms).toBeNull();
+    expect(next.node_latency_ms).toBeNull();
   });
 
   it("在线态采用健康事件里的流量/连接数/延迟", () => {
@@ -81,12 +84,14 @@ describe("runtime 快照与事件兜底", () => {
         traffic: TRAFFIC,
         connections: 7,
         latency_ms: 42,
+        node_latency_ms: 38,
         emitted_at: "",
       },
     });
     expect(next.traffic?.down_bytes).toBe(20);
     expect(next.connections).toBe(7);
     expect(next.latency_ms).toBe(42);
+    expect(next.node_latency_ms).toBe(38);
   });
 
   it("离开在线态清空流量/连接数/延迟和连接时刻", () => {
@@ -96,6 +101,7 @@ describe("runtime 快照与事件兜底", () => {
       traffic: TRAFFIC,
       connections: 7,
       latency_ms: 42,
+      node_latency_ms: 38,
       connected_since: new Date().toISOString(),
     };
     const next = applyRuntimeEvent(view, {
@@ -116,6 +122,41 @@ describe("runtime 快照与事件兜底", () => {
     expect(next.traffic).toBeNull();
     expect(next.connections).toBeNull();
     expect(next.latency_ms).toBeNull();
+    expect(next.node_latency_ms).toBeNull();
     expect(next.connected_since).toBeNull();
+  });
+
+  it("快照晚到时保留请求期间收到的节点延迟，不被打回确认中", () => {
+    const base = snapshotToView({
+      ...SNAPSHOT,
+      latency_ms: null,
+      node_latency_ms: null,
+      traffic: null,
+      connections: null,
+    });
+    const live = applyRuntimeEvent(
+      { ...emptyRuntimeView(), state: "running" },
+      {
+        name: AGENT_EVENTS.runtimeHealthChanged,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          health: EMPTY_HEALTH,
+          traffic: TRAFFIC,
+          connections: 2,
+          latency_ms: 999,
+          node_latency_ms: 38,
+          emitted_at: "",
+        },
+      },
+    );
+
+    const merged = keepLiveHealth(base, live);
+    expect(merged.node_latency_ms).toBe(38);
+    expect(merged.latency_ms).toBe(999);
+    expect(merged.traffic?.down_bytes).toBe(20);
+    expect(merged.connections).toBe(2);
+    // 其余字段仍以快照为准。
+    expect(merged.state).toBe("running");
+    expect(merged.mixed_port).toBe(7890);
   });
 });

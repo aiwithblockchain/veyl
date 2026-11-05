@@ -669,3 +669,17 @@ bash scripts/test/wiring-check.sh --strict
 | **来源** | 运行时日志限容那一轮的遗漏（PM 2026-11-04 核实） |
 
 **验收时怎么处理**：看到 TUN 日志持续增大按本缺口记录，不当作功能缺陷；清理磁盘时可以用管理员权限手工删这个文件（helper 下次启动会重新创建），但要先断开 TUN。
+
+#### GAP-03｜TUN 的 `VpnConnect` 返回手拼 JSON，字段只有快照的一半
+
+| 项 | 内容 |
+|---|---|
+| **现象** | `WiredServices::start_tun_connection` 成功时返回的是**手拼的 `json!`**（`src-tauri/src/tools/services.rs:3512-3529`），只有 16 个字段：`contract_version` / `state` / `mode` / `pid` / `mixed_port` / `config_id` / `config_name` / `routing_mode` / `node_id` / `node_name` / `applied_route_revision` / `connected_since` / `system_proxy_enabled` / `tun_device_up` / `tun_default_route` / `exit_ip`。`RuntimeStatus` 里的 `health` / `traffic` / `connections` / `latency_ms` / `node_latency_ms` / `direct_ip` / `uptime_seconds` / `upstream_version` / `config_hash` / `restart_count` / `last_error` / `last_transition_at` **一个都没带** |
+| **触发条件** | 配置的 `connection_mode = "tun"`，AI 或 UI 调 `VpnConnect`。代理模式下同一次调用返回的是 `serde_json::to_value(status)`，字段齐全 |
+| **当前影响** | 模型按 `tools.md` §4.11 读 `data.health` / `data.node_latency_ms` 会拿到 `undefined`，TUN 下 AI 看不见健康、流量、延迟。**界面不受同样影响**：`runtime_status` 的 TUN 分支走的是 `RuntimeStatus::tun()`（`src-tauri/src/tools/services.rs:1467-1483`），形状完整、不会白屏，但 `traffic` / `connections` / `latency_ms` / `node_latency_ms` 恒为 `null`、`health.clash_api` 恒为 `false`——**形状有了，值拿不到** |
+| **根因** | TUN 的 sing-box 是 helper 的子进程，不归 `RuntimeManager` 管，因此没有 `Inner::snapshot()` 这条统一的序列化路径；连接结果只能在 TUN 那段代码里另拼一份 |
+| **正确修法** | 让 TUN 的连接结果也走统一序列化，别手拼。**最小版**：`start_tun_connection` 的返回值改成 `RuntimeStatus::tun(...)` 序列化 + 顶层 `exit_ip`，与代理模式的返回结构对齐（契约里 `TunConnectData` 随之删除）。**完整版**：把 TUN 状态接进 `RuntimeManager`，由 `Inner::snapshot()` 一处产出，同时补上真实值——流量、节点延迟需要 TUN 进程的 Clash API，见 `docs/tun-mode.md` |
+| **为什么现在不做** | TUN 在目标机器上还没跑通全链路，改完无法端到端验证。契约已单列 `TunConnectData` 并写明「要查这些值请调 `RuntimeStatus`」，模型不会误读 |
+| **来源** | 契约修订时核对 `tools.md` §4.11 与实现（PM 2026-11-05 核实）。与 GAP-02 同属 TUN 那条绕开 `RuntimeManager` 的独立路径，建议作为一件事一起收口 |
+
+**验收时怎么处理**：TUN 模式下 AI 说「拿不到节点延迟 / 流量」按本缺口记录，不当作新缺陷；需要这些数时让它改调 `RuntimeStatus`（同样受本条限制，值仍是 `null`）。

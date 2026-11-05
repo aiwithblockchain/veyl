@@ -89,7 +89,7 @@ proxyUser = config.connect_mode === "system_proxy"
 | 数据 | 为什么不用 |
 |---|---|
 | `runtime.connected_since` | 进入失败终态时后端已把它清空，失败快照里永远是 null，判不出「之前连上过」 |
-| `runtime.traffic`、`runtime.latency_ms` | 顶部摘要已经展示，中间重复即噪音 |
+| `runtime.traffic`、`runtime.node_latency_ms` | 顶部摘要已经展示，中间重复即噪音。`runtime.latency_ms` 是出口 IP 探测耗时，界面不再展示 |
 | `runtime.direct_ip` | 底部技术详情已有 |
 | `config.name`、节点名 / 地址 / 端口 / 加密方式 | 顶部状态与底部节点卡已有 |
 | `routing targets`（分流目标清单） | 不在配置详情里，本地拿不到 |

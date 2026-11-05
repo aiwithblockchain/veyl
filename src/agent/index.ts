@@ -16,4 +16,4 @@ export function getAgentBridge(): AgentBridge {
   return bridge;
 }
 
-export { applyRuntimeEvent, emptyRuntimeView, snapshotToView } from "./bridge";
+export { applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, snapshotToView } from "./bridge";

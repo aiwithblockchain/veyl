@@ -1,6 +1,6 @@
 # 契约：分流与 DNS
 
-> 契约版本：`1.1.0`（已并入 `commands.md` 2.3.1 / `events.md` 2.1.0 / `tools.md` 3.2.0 / `runtime.md` 2.1.0 / `data-model.md` 3）
+> 契约版本：`1.1.0`（**已并入**。并入时基线：`commands.md` 2.3.1 / `events.md` 2.1.0 / `tools.md` 3.2.0 / `runtime.md` 2.1.0 / `data-model.md` 3。此后各文件独立演进，一律以各文件头为准，本行不再追更）
 > 状态：**已定稿并并入**，2026-11-04。`capabilities.md` 由 PM 维护，本文件不改它。
 > 依据：`docs/user-flows.md` §1.4、`docs/config-execution.md` §7、`docs/capabilities.md` G/I 组、`docs/tun-mode.md` §3/§5、`docs/upgrade.md` §3、`docs/review-checklist.md` B3-01～B3-08
 > 实现：`src-tauri/src/config/`（生成）、`src-tauri/src/rules/`（资源与更新）、Clash API（热切换）
@@ -514,11 +514,13 @@ type RulesStatus = {
 
 ## 8. 事件
 
+> **§8 的两个载荷归 `events.md` 所有**：`contract_version` 跟 `events.md`（当前 `2.4.0`），不跟本文件；字段语义以 `events.md` §4.14 / §4.15 为准。
+
 ### 8.1 `routing-changed`
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.1.0";
+  contract_version: "2.4.0";
   config_id: string;
   routing_mode: RoutingMode;
   applied_mode: RoutingMode | null;   // 热切后为实际生效值；仅写库时保持旧值
@@ -541,7 +543,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.1.0";
+  contract_version: "2.4.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;

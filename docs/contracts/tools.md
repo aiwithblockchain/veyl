@@ -1,8 +1,8 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.2.1`
+> 契约版本：`3.3.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
-> 上游：`docs/contracts/commands.md` 2.0.0、`docs/contracts/runtime.md` 2.0.0、`docs/capabilities.md`
+> 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
 > 变更记录：见 §8
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.3.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.0.0";
+  contract_version: "3.3.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -651,19 +651,48 @@ type CatalogSearchData = {
 - **没有 `node_id` 参数**：用该配置的 `current_node_id`，为空时用节点集第一个。要指定节点先调 `NodeSwitch`（未连接时只改选择，连接中则热切），再调本工具。
 - 节点集为空 → `PRECONDITION_FAILED / no_nodes`。
 
-`data`：
+`data`（**按 `mode` 分两种形状，返回类型是 `VpnConnectData | TunConnectData`，不要混用**）：
 
 ```ts
-type VpnConnectData = {
-  state: "running";
+// mode = "system_proxy"：就是 `RuntimeSnapshot`（runtime.md §2.5）原样序列化，再插入一个顶层 `exit_ip`。
+// 这里不另列字段表：快照新增字段时本类型自动跟随，避免又一次「契约比实现窄」。
+type VpnConnectData = RuntimeSnapshot & {
+  state: "running";              // Ok 只在这种状态下返回
   config_id: string;
   node_id: string;
-  exit_ip: string | null;        // null = 已连接但出口尚未测到，不是失败
-  latency_ms: number | null;
   upstream_version: string;
-  system_proxy_enabled: boolean; // tun 模式恒为 false
+  exit_ip: string | null;        // 顶层字段：等待最多 3s 后的出口 IP；null = 还没测到，不是失败
 };
 ```
+
+```ts
+// mode = "tun"：目前是单独手拼的一份窄对象，只有下面这些字段。
+// **它不是 RuntimeSnapshot**：health / traffic / connections / latency_ms / node_latency_ms /
+// direct_ip / uptime_seconds 都不出现，读它们会拿到 undefined。
+// 这是已知缺口，等 TUN 接进 RuntimeManager 后统一；在此之前要查这些值请调 RuntimeStatus。
+type TunConnectData = {
+  contract_version: string;
+  state: "running";
+  mode: "tun";
+  pid: number;
+  mixed_port: null;
+  config_id: string;
+  config_name: string;
+  routing_mode: string;
+  node_id: string;
+  node_name: string;
+  applied_route_revision: number | null;
+  connected_since: string;
+  system_proxy_enabled: false;
+  tun_device_up: boolean;
+  tun_default_route: boolean;
+  exit_ip: null;
+};
+```
+
+**`mode = "system_proxy"` 时，`data` 里的所有快照字段都要原样转述**，包括 `direct_ip`、`health`、`traffic`、`connections`、`restart_count`、`last_error`。连接刚建立时 `traffic` / `connections` 通常还是 `null`（2 秒后才采到第一份样本）——`null` 是「还没采到」，**不是 0**。
+
+顶层 `exit_ip` 与 `health.exit_ip` 的关系（仅 `system_proxy`）：顶层是「等了最多 3 秒，仍没有就 `null`」的结果，`health.exit_ip` 是最近一次探测的值；两者不一致时以判定连接成功为准的那条规则为先——**只看 `state`**。
 
 语义（按顺序）：
 
@@ -677,13 +706,15 @@ type VpnConnectData = {
 
 **连接是否成功只看 `state`，不看 `exit_ip`。**
 
-> `latency_ms` 的语义固定为**出口 IP 探测的往返耗时**，与 `runtime.md` §2.5 的同名字段同源。
-> 它不是「到节点的 ping / 握手延迟」——那个指标属于 `NodeProbe.latency_ms`，**不同的字段、不同的命令**。两个含义共用一个名字，会让状态面板的数字无法解释。
+> `latency_ms` 的语义固定为**出口 IP 探测的往返耗时**，与 `runtime.md` §2.5 的同名字段同源。它含 DNS + TLS，实测常在 2000 ms 量级。
+> **节点延迟是另一个字段 `node_latency_ms`**：Clash API delay 测试（`GET /proxies/node-<id>/delay`）的毫秒数；未连接、还没测到、或当前没有选中节点时为 `null`。两个字段不同源，**不得互相填充**，更不要把 `latency_ms` 说成「节点快慢」。
+> `NodeProbe.latency_ms` 同样是节点延迟（手动测单个节点），与 `node_latency_ms` 同源，只是触发方式不同。
 
 | 字段 | 含义 |
 |---|---|
 | `state = "running"` | 已连上。**这是唯一判定依据** |
 | `exit_ip = null` | 已连接，出口 IP 还没测到。**不代表连接失败**，可用 `RuntimeStatus` 再查 |
+| `node_latency_ms = null` | （仅 `system_proxy`）已连接，节点延迟还没测到（进入 `running` 后才开始测）。**不代表节点不可用**；`tun` 模式没有这个字段 |
 
 把「出口未知」判成失败，会让模型在连接其实好着的时候反复重连、换节点，用户看到的是「明明能用却被反复断开」。因此工具描述里必须原句写明这条。
 
@@ -763,7 +794,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.0.0";
+  contract_version: "3.3.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -926,7 +957,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.0.0";
+  contract_version: "3.3.0";
   job_id: string;
   kind: "core_install" | "diag";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -1755,6 +1786,17 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 ---
 
 ## 8. 变更记录
+
+### 3.3.0（2026-11-05，`VpnConnect` 的返回类型对齐真实快照）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.3.0` | 元数据 | 返回类型从 7 个字段扩到整份快照，属字段扩展 |
+| 2 | §4.11 `VpnConnectData` 改为 `RuntimeSnapshot & { ... }`，不再手抄字段表 | 类型修正 | 实现返回的就是 `RuntimeStatus` 序列化 + 一个顶层 `exit_ip`，契约比实现窄，模型照契约写会漏读 `node_latency_ms` / `direct_ip` / `traffic` 等字段 |
+| 3 | 单独写出 `tun` 分支的 `TunConnectData`，并注明它**不是**快照、缺 `health` / `traffic` / 延迟等字段 | 缺口登记 | TUN 走的是另一条手拼 JSON 的路径，不写清会让模型读到 `undefined` |
+| 4 | 明确 `node_latency_ms`（Clash delay，节点延迟）与 `latency_ms`（出口探测耗时）不同源、不得互相填充 | 语义 | 产品：面板上的「2098 毫秒」不是节点快慢 |
+| 5 | 补 `node_latency_ms = null` 的含义：还没测到，不代表节点不可用 | 说明 | 与 `exit_ip = null` 同一条原则 |
+| 6 | 顶层 `exit_ip` 与 `health.exit_ip` 的区别写清：前者是「等 3s 仍没有就 null」，判定连接成功仍只看 `state` | 说明 | 防止模型把「出口未知」判成失败 |
 
 ### 3.2.1（2026-11-04，节点来源对外叫「测试节点」）
 

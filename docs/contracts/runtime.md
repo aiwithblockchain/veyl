@@ -1,6 +1,6 @@
 # 契约：Runtime Manager
 
-> 契约版本：`2.2.0`
+> 契约版本：`2.3.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 冻结前评审：PM / Alice / Bob
 > 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5、`docs/tun-mode.md`
@@ -17,6 +17,7 @@
 - 所有 JSON 字段使用 **snake_case**；所有时间是 **ISO 8601 UTC，带 `Z` 后缀**（`2026-11-02T09:15:03Z`），不带毫秒之外的其他格式。
 - 所有错误码是 **大写下划线**（`RUNTIME_START_TIMEOUT`）。
 - `contract_version` 出现在每一个对外结构里；破坏性变更必须升次版本号并同步本文档。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.3.0`），升版时全文替换。实现侧只允许有一个常量对应本文件，不得按结构分别发不同版本号。
 
 **P1 范围**：单版本、单进程、系统代理模式。多版本并行、TUN、外部 MCP 宿主不在本契约内。
 
@@ -115,7 +116,7 @@ type HealthCheckName =
   | "traffic";
 
 type HealthSnapshot = {
-  contract_version: "2.1.0";
+  contract_version: "2.3.0";
   process: boolean;
   clash_api: boolean;
   data_plane: boolean;
@@ -155,7 +156,7 @@ type TrafficStats = {
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.1.0";
+  contract_version: "2.3.0";
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
@@ -168,6 +169,7 @@ type RuntimeSnapshot = {
   connected_since: string | null;    // 本次进入 running 的 ISO 8601 UTC 时刻
   mixed_port: number | null;         // 本地 mixed 入站实际监听端口；tun 模式为 null
   latency_ms: number | null;         // 出口 IP 探测往返耗时
+  node_latency_ms: number | null;    // 2.3：到节点的真实延迟（Clash API delay 测试）
   direct_ip: string | null;          // 不经代理的直连出口 IP
   config_hash: string | null;        // "sha256:<hex>"，配置文件的摘要
   applied_route_revision: number | null; // 2.1：建连时 configs.route_revision 的值
@@ -197,12 +199,13 @@ type RuntimeSnapshot = {
 | `connected_since` | 本次进入 `running` 的时刻，ISO 8601 UTC | 仅在 `running` / `degraded` 下非 `null`；与 `uptime_seconds` **同源**：`uptime_seconds ≈ now − connected_since`。两者不得互相矛盾 |
 | `mixed_port` | 本次实际监听的本地 mixed 入站端口 | `mode = "system_proxy"` 且状态为 `running` / `degraded` 时非 `null`；`tun` 模式恒为 `null`。**禁止写常量**（1.0.10 的缺陷是把 2080 硬编码在 UI 里，而实际端口每次随机） |
 | `latency_ms` | 最近一次**出口 IP 探测**的往返耗时（毫秒） | 未探测/探测失败为 `null`。**不是**节点 ping 延迟 |
+| `node_latency_ms` | 最近一次 **Clash API delay 测试**的毫秒数：`GET /proxies/node-<id>/delay?url=<generate_204>`，由 sing-box 自己去连节点 | 未连接、还没测到、或当前没有选中节点（`node_id = null`）时为 `null`。**与 `latency_ms` 是两个指标，不得互相填充**：`latency_ms` 是含 DNS + TLS 的整次 HTTP 往返（实测常在 2000 ms 量级），`node_latency_ms` 是节点本身的可达性与往返。断开、失败、节点热切换后必须复位为 `null`，不能把上一个节点的数字留在面板上 |
 | `applied_route_revision` | 本次连接生成配置时的 `configs.route_revision` | 建连时读入并随进程保存；未连接为 `null`。与库里的 `route_revision` 比较：相等 = 分流规则已生效，不等 = 改了但当前连接还没用上，UI 显示「下次连接生效」 |
 | `direct_ip` | 不经代理测得的**直连**出口 IP | 与 `exit_ip` 配对展示，用于让用户判断「是否真的走了代理」。未测到为 `null`。**不得**在探测时带上系统代理，否则两个值会相同、失去意义 |
 
 **`latency_ms` 的定义必须固定为「出口 IP 探测往返耗时」**，理由是它已经有实现、有含义，且能在没有额外网络请求的前提下反映链路质量。
 
-> 若产品要展示的是「到节点的 ping / 握手延迟」，那是另一个指标（`node_probe` 的 `latency_ms`），**不能复用这个字段名**。两个不同含义共用 `latency_ms` 会让状态面板的数字无法解释。
+> 若要展示「到节点的 ping / 握手延迟」，用 `node_latency_ms`（2.3 新增）或 `node_probe` 的 `latency_ms`，**不能复用 `latency_ms`**。两个不同含义共用一个字段名，会让状态面板的数字无法解释。
 
 **字段恒存在**：所有字段在任何状态下都必须出现在 JSON 里，不可省略键。没有值写 `null`——省略键会让 TypeScript 消费方拿到 `undefined`，绕过类型检查、静默失败。
 
@@ -212,7 +215,7 @@ type RuntimeSnapshot = {
 
 ```ts
 type AivpnError = {
-  contract_version: "2.1.0";
+  contract_version: "2.3.0";
   code: AivpnErrorCode;
   message: string;        // 面向用户，可本地化
   retryable: boolean;
@@ -296,6 +299,7 @@ type AivpnError = {
 | `clash_api` | 2s | 1s | `GET /version` 返回 200 且 body 可解析 |
 | `data_plane` | 10s | 5s | 经本地 mixed 入站访问探测 URL 成功 |
 | `exit_ip` | 连接成功后一次 + 每 60s | 5s | 返回合法 IP |
+| `node_latency` | 连接成功后一次 + 每 30s | 6s（上游 `timeout=3000`） | `GET /proxies/node-<id>/delay` 返回 200 且 `delay` ≥ 0。非 200 表示**节点不可达**——那是业务结果，写进 `node_latency_ms = null`，**不判 `HEALTH_FAIL`**（同 §4.3 的延迟测试特殊语义）。单独 spawn，不阻塞 2s 健康循环 |
 | `traffic` | 2s（与 `clash_api` 同频） | 2s | `GET /connections` 返回 200 且 body 可解析；取 `uploadTotal` / `downloadTotal` 算累计与速率 |
 
 判定规则：
@@ -367,7 +371,7 @@ Accept: application/json
 | GET | `/version` | 就绪探测、运行版本 | 1s |
 | GET | `/connections` | 活动连接数；**累计流量 `uploadTotal` / `downloadTotal`**（`traffic` 的唯一数据源） | 2s |
 | GET | `/proxies` | 出站列表 | 2s |
-| GET | `/proxies/{name}/delay?url=<u>&timeout=<ms>` | 延迟测试 | 2s |
+| GET | `/proxies/{name}/delay?url=<u>&timeout=<ms>` | 延迟测试（`node_latency_ms` 与 `NodeProbe` 的唯一数据源） | 6s（上游 `timeout=3000`） |
 | PUT | `/configs?force=true` | 热更新配置 | 5s |
 | GET | `/logs?level=<lvl>` | 流式日志 | 长连接 |
 | POST | `/close`（若版本支持） | 优雅退出；不支持则发信号 | 2s |
@@ -578,6 +582,16 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 
 ## 12. 变更记录
 
+### 2.3.0（2026-11-05，节点延迟与出口延迟分开）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 契约版本升到 `2.3.0` | 元数据 | 产品：「2098 毫秒」那类数字是出口 IP 探测，不是节点延迟 |
+| 2 | §2.5 / §2.5.1 新增 `node_latency_ms: number \| null`：Clash API delay 测试的毫秒数 | 字段新增 | 同上 |
+| 3 | 明确 `latency_ms` 与 `node_latency_ms` **不得互相填充**；断开 / 失败 / 节点热切换后 `node_latency_ms` 必须复位为 `null` | 不变量 | 防止把上一个节点的数字留在面板上 |
+| 4 | §4.1 健康检查表新增 `node_latency`：连接后一次 + 每 30s，6s 超时（上游 `timeout=3000`），测不到不等于不健康；§5.3 的 delay 超时由 2s 修正为实际的 6s | 新增检查项 | 与实现一致（`LATENCY_REFRESH_INTERVAL`），避免对节点另起一套探测节奏 |
+| 5 | §2.3 / §2.5 / §2.6 的 `contract_version` 字面量统一为本文件版本 | 元数据 | 见 §0 的版本约定 |
+
 ### 2.2.0（2026-11-04，流量采样的真实口径）
 
 | # | 变更 | 类型 | 决议来源 |
@@ -588,7 +602,7 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 | 4 | §4.1 健康检查表：`traffic` 由「30s 一次、探测 `/traffic` 可连通」改为「2s 一次、`/connections` 可解析」 | 修正 | 同上 |
 | 5 | §5.3 把 `/traffic` 从「使用的端点」移出，明确标为**未实现的可选优化**，不是现状 | 澄清 | 代码里除注释外没有任何 `/traffic` 引用 |
 
-> 本文件版本升到 `2.2.0` 表示**语义**已更新；线上 `RuntimeSnapshot.contract_version` 仍是 `2.1.0`（快照形状没变，代码常量未动），等下次改 runtime 代码时再一起升，届时 §2.5 / §2.6 里的字面量同步。
+> 本文件版本升到 `2.2.0` 表示**语义**已更新；线上 `RuntimeSnapshot.contract_version` 当时仍是 `2.1.0`，已在 2.3.0 这次一并改齐。
 
 ### 2.1.0（2026-11-03，批 3 · 分流与 DNS）
 

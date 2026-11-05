@@ -1,9 +1,9 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.3.0`
+> 契约版本：`2.4.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
-> 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，2.0.0）
+> 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，版本以该文件头为准）
 > 实现方：Rust（Host 发送）、TypeScript（UI 订阅）
 > 参考实现：`TweetPilot/src-tauri/src/claurst_session.rs`
 > 变更记录：见 §10
@@ -22,6 +22,7 @@
 - **落库实体字段的时间戳**（`created_at` / `first_seen` / `last_seen` / `checked_at` 等）：**Unix 毫秒整数**，与 `data-model.md` 的列类型一致。见 §2.3。
 - 错误码 **大写下划线**。
 - 所有 payload 带 `contract_version`。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.4.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
 
 > **命名决策**：事件名沿用 TweetPilot 的真实名称（`message-chunk`、`thinking-chunk`、`tool-call-start`、`tool-call-end`、`ai-status`、`ai-compact`、`ai-request-end`），**不**加 `ai-` 前缀。`docs/phase-1-technical-design.md` §4.2 写的 `agent://delta` / `agent://tool` 是笔误，以本契约为准。
 
@@ -99,7 +100,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -121,7 +122,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -139,7 +140,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -181,7 +182,7 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 
 ```ts
 type ToolCallEndPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -221,7 +222,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -260,7 +261,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -288,7 +289,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -326,7 +327,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -348,6 +349,7 @@ type RuntimeStateChangedPayload = {
 
 - `snapshot.state === to`。不一致说明有人绕过了单写者，属于实现缺陷。
 - `snapshot.mixed_port` 是 `to = "running" | "degraded"` 时 `proxy_card` 的唯一端口来源（`proxy_params` 的 `runtime` 来源）。
+- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.3.0`），与顶层的 `contract_version`（本文件 `2.4.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
 - payload ≤ 64 KB；`RuntimeSnapshot` 本身远小于上限，不需要截断。
 
 UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断入口；用 `snapshot.mixed_port` 重渲染代理卡。
@@ -358,7 +360,7 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.3.0";
+  contract_version: "2.4.0";
   health: HealthSnapshot;
   // 2.2 新增：本次运行累计流量与速率。
   // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
@@ -370,6 +372,11 @@ type RuntimeHealthChangedPayload = {
   // 2.3 新增：出口 IP 探测往返耗时（毫秒）。
   // 未连接或尚未测到出口 IP 时为 null。放进事件后，前端刷新延迟不用再拉快照。
   latency_ms: number | null;
+  // 2.4 新增：到节点的真实延迟——Clash API delay 测试（`/proxies/node-<id>/delay`）的毫秒数。
+  // 未连接、还没测到、或当前没有选中节点时为 null。
+  // **与 latency_ms 是两个指标，不得互相填充**：latency_ms 含 DNS + TLS，数值常在 2000 ms 量级；
+  // 这个才是用户说的「节点延迟」。断开、失败、节点热切换后立即复位为 null。
+  node_latency_ms: number | null;
   emitted_at: string;
 };
 ```
@@ -381,7 +388,7 @@ type RuntimeHealthChangedPayload = {
 **不是每秒精确值**。采样失败或缺字段时保留上一次的值，不会把流量清成 0；
 进程退出、主动断开后立即变回 `null`。
 
-UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；`degraded` 时在状态栏加黄色标记。
+UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；面板上给用户看的「延迟」取 `node_latency_ms`，`latency_ms` 只用于诊断视图；`degraded` 时在状态栏加黄色标记。
 
 ---
 
@@ -389,7 +396,7 @@ UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；`degraded` 时�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   job_id: string;
   kind: "core_install" | "diag" | "rules_update";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -419,7 +426,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -436,7 +443,7 @@ type AppLifecycleChangedPayload = {
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   seed_id: "veyl_seed";
   content_sha256: string;           // 2.0：变化判定依据
   version: string | null;           // 文件里的 version，仅展示
@@ -491,7 +498,7 @@ type DefaultProfileUpdatedPayload = {
 
 ```ts
 type AskUserQuestionPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   session_id: string;
   request_id: string;
   question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
@@ -566,7 +573,7 @@ tool-call-end    (同一 request_id)
 
 ```ts
 type ConfigChangedPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   change: "created" | "updated" | "deleted" | "activated";
   config_id: string;
   config: ConfigSummary | null;      // deleted 时为 null；类型见 commands.md §3.0
@@ -602,7 +609,7 @@ type NodeListChangedReason =
   | "bindings_changed";       // config_update 整体替换了节点集
 
 type NodeListChangedPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   reason: NodeListChangedReason;
   config_id: string | null;        // 只有 bindings_changed 时非空
   node_count_total: number;        // 节点池总数
@@ -624,7 +631,7 @@ type NodeListChangedPayload = {
 
 ```ts
 type NodeSwitchedPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   config_id: string;
   from_node_id: string | null;
   to_node_id: string;
@@ -652,7 +659,7 @@ type NodeSwitchedPayload = {
 
 ```ts
 type IssueChangedPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
   issue: IssueSummary;                  // 变更后的状态
   blocking_issue_id: string | null;     // 当前应插卡的那一条；null = 中间不插卡
@@ -690,7 +697,7 @@ type IssueChangedPayload = {
 
 ```ts
 type LayoutUpdatedPayload = {
-  contract_version: "2.0.0";
+  contract_version: "2.4.0";
   config_id: string;
   revision: number;            // 每配置单调递增，从 1 开始
   layout: Layout;              // 见 commands.md §3.0
@@ -714,7 +721,7 @@ type LayoutUpdatedPayload = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.1.0";
+  contract_version: "2.4.0";
   config_id: string;
   routing_mode: "direct" | "proxy_all" | "proxy_selected";
   applied_mode: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -740,7 +747,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.1.0";
+  contract_version: "2.4.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
@@ -879,6 +886,15 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.4.0（2026-11-05，节点延迟与出口延迟分开）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.4.0` | 元数据 | 产品：面板上的「2098 毫秒」是出口 IP 探测，不是节点延迟 |
+| 2 | `runtime-health-changed` 载荷新增 `node_latency_ms: number \| null`（Clash API delay 测试的毫秒数） | 字段扩展 | 用户要看的是节点本身快不快 |
+| 3 | 明确 `latency_ms` 与 `node_latency_ms` **不得互相填充**，断开 / 失败 / 节点热切换后前者复位 | 不变量 | 防止把上一个节点的数字留在面板上 |
+| 4 | `contract_version` 字面量统一为本文件当前版本（原先是「引入时的版本」，线上发出的一直是当前版本，两边对不上） | 修正 | 见 §0 的统一约定 |
 
 ### 2.3.0（2026-11-04，健康事件补齐连接数与延迟）
 

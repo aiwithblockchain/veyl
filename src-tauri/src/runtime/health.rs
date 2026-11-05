@@ -96,6 +96,41 @@ impl ClashApi {
             .map_err(|e| RuntimeError::ClashApi(format!("GET /connections body: {e}")))?;
         Ok(body.into_sample())
     }
+
+    /// 节点延迟：`GET /proxies/{tag}/delay`。
+    ///
+    /// 由 Clash 自己发起一次真实请求并返回毫秒数——测的是节点这一跳，
+    /// 不是本机到控制口的往返。请求走控制口（`no_proxy` 直连），不经过代理。
+    pub async fn delay(&self, tag: &str) -> RuntimeResult<u64> {
+        let response = self
+            .http
+            .get(format!("{}/proxies/{tag}/delay", self.base))
+            .bearer_auth(&self.secret)
+            .query(&[
+                ("timeout", "3000"),
+                ("url", "http://cp.cloudflare.com/generate_204"),
+            ])
+            // 比单次超时长：给 Clash 留出返回错误体（例如 timeout）的时间。
+            .timeout(Duration::from_secs(6))
+            .send()
+            .await
+            .map_err(|e| RuntimeError::ClashApi(format!("GET /proxies/{tag}/delay: {e}")))?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            let detail = body.chars().take(200).collect::<String>();
+            return Err(RuntimeError::ClashApi(format!(
+                "GET /proxies/{tag}/delay returned HTTP {status}: {detail}"
+            )));
+        }
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|_| RuntimeError::ClashApi("delay response is not valid JSON".into()))?;
+        value
+            .get("delay")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| RuntimeError::ClashApi("delay response missing delay".into()))
+    }
 }
 
 /// 一次 `/connections` 采样：累计上下行字节 + 活跃连接数。
