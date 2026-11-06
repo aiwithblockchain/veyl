@@ -134,6 +134,22 @@ describe("节点面板", () => {
     expect(screen.getAllByText("当前")).toHaveLength(1);
   });
 
+  it("打开面板时焦点默认落在当前节点", () => {
+    render(
+      <NodeSheet
+        open
+        config={makeConfig(3, "n2")}
+        probes={controller()}
+        onClose={noop}
+        onSwitch={async () => ({ ok: true })}
+      />,
+    );
+
+    const active = document.querySelectorAll(".node-row.is-active");
+    expect(active).toHaveLength(1);
+    expect(active[0].textContent).toContain("大阪 02");
+  });
+
   it("点一行立即切换，面板不关，当前标记随后移动", async () => {
     vi.useFakeTimers();
     const onSwitch = vi.fn(async () => ({ ok: true }));
@@ -150,9 +166,13 @@ describe("节点面板", () => {
     expect(onSwitch).toHaveBeenCalledWith("n2");
     expect(document.querySelector("#node-sheet")).not.toBeNull();
     expect(screen.getByText("切换中…")).toBeTruthy();
+    // 焦点跟着点的那行走，不再停在上一个当前节点上。
+    expect(document.querySelectorAll(".node-row.is-active")).toHaveLength(1);
+    expect(document.querySelector(".node-row.is-active")?.textContent).toContain("大阪 02");
 
     await settleSwitch();
     expect(document.querySelector("#node-sheet")).not.toBeNull();
+    expect(document.querySelector(".node-row.is-active")?.textContent).toContain("大阪 02");
 
     rerender(
       <NodeSheet
@@ -168,7 +188,7 @@ describe("节点面板", () => {
     expect(screen.getAllByText("当前")).toHaveLength(1);
   });
 
-  it("切换失败时当前节点不变，行内给一句原因", async () => {
+  it("切换失败时当前节点不变，焦点留在被点的行", async () => {
     vi.useFakeTimers();
     const onSwitch = vi.fn(async () => ({ ok: false, message: "切换节点失败" }));
     render(
@@ -189,6 +209,8 @@ describe("节点面板", () => {
 
     expect(screen.getByText("没切成，还在原来的节点", { selector: ".node-row__error" })).toBeTruthy();
     expect(document.querySelector(".node-row.is-current")?.textContent).toContain("东京 01");
+    // 不弹回旧行：用户还要在原地点重试。
+    expect(document.querySelector(".node-row.is-active")?.textContent).toContain("大阪 02");
     expect(screen.queryByRole("alert")).toBeNull();
   });
 

@@ -374,6 +374,8 @@ export function NodeSheet({
   const activate = useCallback(
     async (node: NodeSummary) => {
       if (!openRef.current) return;
+      // 焦点跟着用户点的行：即使这次切不动，重试也还在原地。
+      setActiveId(node.node_id);
       if (switchingRef.current || reorderingRef.current) return;
       if (node.node_id === config.current_node_id) return;
       setBatchError(null);

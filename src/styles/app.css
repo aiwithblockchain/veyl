@@ -4073,13 +4073,21 @@ body[data-resizing] {
   cursor: pointer;
 }
 
-.node-row:hover,
-.node-row.is-active {
+/* 悬停只加一层浅底。 */
+.node-row:hover {
   background: var(--bg-hover);
 }
 
+/* 焦点（键盘移动或点选）只描一层极细的淡线：当前节点靠左侧墨条和
+   「当前」徽标标记，焦点不能和它同重量——否则两行都像被选中。 */
 .node-row.is-active {
-  box-shadow: inset 0 0 0 1px var(--ink-3);
+  box-shadow: inset 0 0 0 1px var(--hair-strong);
+}
+
+/* 键盘焦点单独一档：列表本身拿到焦点时才把线加深一点，保证键盘用户看得见；
+   仍然远轻于「当前」的 2px 墨条。 */
+.node-sheet__list:focus-visible .node-row.is-active {
+  box-shadow: inset 0 0 0 1px var(--ink-4);
 }
 
 .node-row.is-switching {
