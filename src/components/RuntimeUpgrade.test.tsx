@@ -22,6 +22,18 @@ const INSTALLED: CoreInfo = {
   restartRequired: false,
 };
 
+const NO_UPDATE = () => ({
+  network: "ok" as const,
+  candidates: [],
+  cached: false,
+});
+
+const WITH_UPDATE = () => ({
+  network: "ok" as const,
+  candidates: [{ version: "1.15.0", size: 12 * 1024 * 1024 }],
+  cached: false,
+});
+
 function harness(
   info: CoreInfo,
   overrides: Partial<Record<keyof AgentBridge, unknown>> = {},
@@ -37,11 +49,7 @@ function harness(
       };
     }),
     coreInfo: vi.fn(async () => info),
-    coreCheckUpdates: vi.fn(async () => ({
-      network: "ok" as const,
-      candidates: [{ version: "1.15.0", size: 12 * 1024 * 1024 }],
-      cached: false,
-    })),
+    coreCheckUpdates: vi.fn(async () => WITH_UPDATE()),
     coreUpgrade: vi.fn(async () => ({ jobId: "job_1" })),
     coreCancelUpgrade: vi.fn(async () => ({ cancelled: true })),
     coreRollback: vi.fn(async () => {}),
@@ -61,9 +69,7 @@ function harness(
 }
 
 async function startUpgrade() {
-  fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-  await screen.findByText("可升级到 1.15.0（约 12 MB）");
-  fireEvent.click(screen.getByRole("button", { name: "升级" }));
+  fireEvent.click(await screen.findByRole("button", { name: "升级" }));
   await act(async () => {});
 }
 
@@ -76,89 +82,57 @@ function deferred<T>() {
 }
 
 describe("RuntimeUpgradeRow", () => {
-  it("随包版本：展示版本与检查更新", async () => {
-    harness(BUNDLED);
+  it("打开即自动检查；已是最新时不给任何按钮", async () => {
+    const { bridge } = harness(BUNDLED, { coreCheckUpdates: vi.fn(async () => NO_UPDATE()) });
+
     expect(
-      await screen.findByText("正在使用随包版本 1.14.4", {
+      await screen.findByText("已是最新 · 版本 1.14.4", {
         selector: ".core-upgrade__status",
       }),
     ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "检查更新" })).toBeTruthy();
+    expect(bridge.coreCheckUpdates).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("连接程序")).toBeTruthy();
+    expect(screen.getByText("真正建立连接的程序。")).toBeTruthy();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("有新版本时只有一个主按钮，没有取消", async () => {
+    harness(BUNDLED);
+    expect(await screen.findByText("有新版本 1.15.0（约 12 MB）")).toBeTruthy();
+    const upgrade = screen.getByRole("button", { name: "升级" });
+    expect(upgrade.className).toContain("btn--primary");
+    expect(screen.queryByRole("button", { name: "取消" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "检查更新" })).toBeNull();
+  });
+
+  it("使用已升级版本时提供换回自带的版本", async () => {
+    harness(INSTALLED, { coreCheckUpdates: vi.fn(async () => NO_UPDATE()) });
+    expect(
+      await screen.findByText("已是最新 · 版本 1.15.0", {
+        selector: ".core-upgrade__status",
+      }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "换回自带的版本" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "回到随包版本" })).toBeNull();
   });
 
-  it("已安装版本：提供回到随包版本", async () => {
-    harness(INSTALLED);
-    expect(
-      await screen.findByText("正在使用 1.15.0（随包 1.14.4）", {
-        selector: ".core-upgrade__status",
-      }),
-    ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "回到随包版本" })).toBeTruthy();
-  });
-
-  it("检查后展示可升级版本与体积", async () => {
-    harness(BUNDLED);
-    fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    expect(await screen.findByText("可升级到 1.15.0（约 12 MB）")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "升级" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "取消" })).toBeTruthy();
-  });
-
-  it("缓存结果标注可能过期，且不提供升级按钮", async () => {
-    const coreCheckUpdates = vi.fn(async () => ({
-      network: "unreachable" as const,
-      candidates: [{ version: "1.15.0", size: 12 * 1024 * 1024 }],
-      cached: true,
-    }));
-    const { bridge } = harness(BUNDLED, { coreCheckUpdates });
-
-    fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    expect(
-      await screen.findByText("可升级到 1.15.0（约 12 MB）", {
-        selector: ".core-upgrade__status",
-      }),
-    ).toBeTruthy();
-    expect(screen.getByText("上次检查的结果，可能不是最新")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "升级" })).toBeNull();
-    expect(screen.getByRole("button", { name: "重新检查" })).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "重新检查" }));
-    await waitFor(() => expect(bridge.coreCheckUpdates).toHaveBeenCalledTimes(2));
-  });
-
-  it("缓存里没有候选时仍按连不上处理", async () => {
-    harness(BUNDLED, {
-      coreCheckUpdates: vi.fn(async () => ({
-        network: "unreachable" as const,
-        candidates: [],
-        cached: true,
-      })),
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    expect(
-      await screen.findByText("连不上更新服务器", {
-        selector: ".core-upgrade__status",
-      }),
-    ).toBeTruthy();
-    expect(screen.queryByText("上次检查的结果，可能不是最新")).toBeNull();
-  });
-
-  it("非缓存且联网失败时不展示候选", async () => {
+  it("断网时只说明继续用自带版本，并给再试一次", async () => {
     harness(BUNDLED, {
       coreCheckUpdates: vi.fn(async () => ({
         network: "unreachable" as const,
         candidates: [{ version: "1.15.0", size: 12 * 1024 * 1024 }],
-        cached: false,
+        cached: true,
       })),
     });
-    fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+
     expect(
-      await screen.findByText("连不上更新服务器", {
+      await screen.findByText("暂时连不上更新服务器，继续用自带的版本。", {
         selector: ".core-upgrade__status",
       }),
     ).toBeTruthy();
-    expect(screen.queryByText("可升级到 1.15.0（约 12 MB）")).toBeNull();
+    const buttons = screen.getAllByRole("button").map((button) => button.textContent);
+    expect(buttons).toEqual(["再试一次"]);
+    expect(screen.queryByText(/用随包版本继续/)).toBeNull();
   });
 
   it("下载、校验、安装到生效", async () => {
@@ -249,7 +223,7 @@ describe("RuntimeUpgradeRow", () => {
       payload: { job_id: "job_1", ok: false, code: "CANCELLED" },
     });
 
-    expect(await screen.findByText("可升级到 1.15.0（约 12 MB）")).toBeTruthy();
+    expect(await screen.findByText("有新版本 1.15.0（约 12 MB）")).toBeTruthy();
     expect(screen.queryByText("升级没有完成。")).toBeNull();
   });
 
@@ -267,7 +241,7 @@ describe("RuntimeUpgradeRow", () => {
       payload: { job_id: "job_1", ok: false },
     });
 
-    expect(await screen.findByText("可升级到 1.15.0（约 12 MB）")).toBeTruthy();
+    expect(await screen.findByText("有新版本 1.15.0（约 12 MB）")).toBeTruthy();
     expect(screen.queryByText("升级没有完成。")).toBeNull();
   });
 
@@ -276,11 +250,7 @@ describe("RuntimeUpgradeRow", () => {
     const { emit, bridge } = harness(BUNDLED, {
       coreUpgrade: vi.fn(() => gate.promise),
     });
-
-    fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    await screen.findByText("可升级到 1.15.0（约 12 MB）");
-    fireEvent.click(screen.getByRole("button", { name: "升级" }));
-    await act(async () => {});
+    await startUpgrade();
 
     // 后端先 spawn 任务再返回 job_id：失败事件抢在 invoke 前面到。
     const finished = {
@@ -323,7 +293,6 @@ describe("RuntimeUpgradeRow", () => {
     observer.observe(document.body, { childList: true, subtree: true });
 
     try {
-      fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
       await waitFor(() => expect(bridge.coreUpgrade).toHaveBeenCalledWith("1.15.0"));
       expect(await screen.findByText("正在下载 0%")).toBeTruthy();
     } finally {
@@ -341,10 +310,7 @@ describe("RuntimeUpgradeRow", () => {
       coreUpgrade: vi.fn(() => gate.promise),
     });
 
-    fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    await screen.findByText("可升级到 1.15.0（约 12 MB）");
-    fireEvent.click(screen.getByRole("button", { name: "升级" }));
-    await act(async () => {});
+    await startUpgrade();
 
     emit({
       name: AGENT_EVENTS.coreUpgradeProgress,
@@ -371,10 +337,7 @@ describe("RuntimeUpgradeRow", () => {
       coreUpgrade: vi.fn(() => gate.promise),
     });
 
-    fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    await screen.findByText("可升级到 1.15.0（约 12 MB）");
-    fireEvent.click(screen.getByRole("button", { name: "升级" }));
-    await act(async () => {});
+    await startUpgrade();
 
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(screen.getByText("正在取消…")).toBeTruthy();
@@ -385,7 +348,7 @@ describe("RuntimeUpgradeRow", () => {
     });
 
     await waitFor(() => expect(bridge.coreCancelUpgrade).toHaveBeenCalledWith("job_1"));
-    expect(await screen.findByText("可升级到 1.15.0（约 12 MB）")).toBeTruthy();
+    expect(await screen.findByText("有新版本 1.15.0（约 12 MB）")).toBeTruthy();
   });
 
   it("百分比变化不重复播报，只在阶段变化时播报", async () => {
@@ -435,7 +398,7 @@ describe("RuntimeUpgradeRow", () => {
 
     expect(await screen.findByText("安装包校验没有通过。")).toBeTruthy();
     expect(
-      screen.getByText("当前的运行时没有被替换，连接和配置都没有改动。"),
+      screen.getByText("当前的连接程序没有被替换，连接和配置都没有改动。"),
     ).toBeTruthy();
     expect(
       screen.getByText(
@@ -446,39 +409,21 @@ describe("RuntimeUpgradeRow", () => {
     expect(screen.getByRole("button", { name: "复制诊断" })).toBeTruthy();
   });
 
-  it("连不上更新服务器", async () => {
-    harness(BUNDLED, {
-      coreCheckUpdates: vi.fn(async () => ({
-        network: "unreachable" as const,
-        candidates: [],
-        cached: false,
-      })),
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    expect(
-      await screen.findByText("连不上更新服务器", {
-        selector: ".core-upgrade__status",
-      }),
-    ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
-    expect(
-      screen.getByRole("button", { name: "用随包版本继续" }),
-    ).toBeTruthy();
-  });
-
   it("命令不存在时降级为只读展示", async () => {
     harness(BUNDLED, {
       coreInfo: vi.fn(async () => {
         throw new Error("Command core_info not found");
       }),
     });
-    expect(await screen.findByText("暂时读不到运行时信息。")).toBeTruthy();
+    expect(await screen.findByText("暂时读不到连接程序信息。")).toBeTruthy();
     expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("接管对话发起的升级并标注来源、可取消", async () => {
-    const { bridge, emit } = harness(BUNDLED);
-    await screen.findByText("正在使用随包版本 1.14.4", {
+    const { bridge, emit } = harness(BUNDLED, {
+      coreCheckUpdates: vi.fn(async () => NO_UPDATE()),
+    });
+    await screen.findByText("已是最新 · 版本 1.14.4", {
       selector: ".core-upgrade__status",
     });
 
@@ -501,26 +446,30 @@ describe("RuntimeUpgradeRow", () => {
   });
 
   it("对话任务结束时也保留来源标注", async () => {
-    const { emit } = harness(BUNDLED);
-    await screen.findByText("正在使用随包版本 1.14.4", {
+    const { emit } = harness(BUNDLED, {
+      coreCheckUpdates: vi.fn(async () => NO_UPDATE()),
+    });
+    await screen.findByText("已是最新 · 版本 1.14.4", {
       selector: ".core-upgrade__status",
     });
 
     emit({
-      name: AGENT_EVENTS.coreUpgradeFinished,
+      name: AGENT_EVENTS.coreUpgradeProgress,
       payload: {
-        job_id: "job_chat",
-        ok: true,
-        version: "1.15.0",
+        job_id: "job_chat2",
+        phase: "downloading",
+        received: 1,
+        total: 2,
         origin: "agent",
       },
     });
+    await screen.findByText("由对话发起");
 
-    expect(
-      await screen.findByText("新版本会在下次连接时生效", {
-        selector: ".core-upgrade__status",
-      }),
-    ).toBeTruthy();
-    expect(screen.getByText("由对话发起")).toBeTruthy();
+    emit({
+      name: AGENT_EVENTS.coreUpgradeFinished,
+      payload: { job_id: "job_chat2", ok: true, version: "1.15.0", origin: "agent" },
+    });
+
+    expect(await screen.findByText("由对话发起")).toBeTruthy();
   });
 });

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type {
   AgentBridge,
-  DeepSeekKeyState,
   DefaultProfileStatus,
   ImportSeedResult,
   LlmProtocol,
@@ -18,7 +17,6 @@ import { toBridgeError } from "../agent/errors";
 import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
 import { useFocusTrap } from "../ui/focus";
 import { copyText } from "../ui/clipboard";
-import { formatPort } from "../format";
 import { IconClose } from "./icons";
 import { RuntimeUpgradeRow, useRuntimeUpgrade } from "./RuntimeUpgrade";
 import { TunDiagnosticsRow } from "./TunDiagnostics";
@@ -33,6 +31,8 @@ interface Props {
   defaultProfile: DefaultProfileStatus | null;
   /** 当前配置的连接方式；只用于展示，不参与任何命令。 */
   connectMode?: ConfigConnectMode | null;
+  /** 当前配置正在使用的节点名；没有配置或没有节点时为 null。 */
+  currentNodeName?: string | null;
   onClose: () => void;
   onNotice: (notice: { level: "info" | "error"; text: string }) => void;
   importing: boolean;
@@ -48,8 +48,6 @@ interface Props {
   initialSection?: SectionId;
 }
 
-type Feedback = { kind: "ok" | "warn" | "error"; text: string } | null;
-type ApiMode = "basic" | "advanced";
 type SectionId = "ai" | "network" | "advanced" | "about";
 
 interface ProviderForm {
@@ -93,7 +91,7 @@ const RESET_STEP_ALIASES: Record<string, ResetStepKey> = {
 };
 
 const RESET_STEP_LABELS: Record<ResetStepKey, string> = {
-  stop_runtime: "停止运行时",
+  stop_runtime: "停止连接程序",
   stop_tun: "关闭接管",
   sweep_processes: "清理残留组件",
   clear_routes: "恢复系统路由",
@@ -116,7 +114,7 @@ const RESET_STEP_NEXT: Record<ResetStepKey, string> = {
 
 /** 成功行用设计文档的固定说明；后端 detail 可能带内部路径，不适合直接展示。 */
 const RESET_STEP_DONE: Record<ResetStepKey, string> = {
-  stop_runtime: "运行时进程已停止。",
+  stop_runtime: "连接程序已停止。",
   stop_tun: "接管已关闭。",
   sweep_processes: "没有遗留的 Veyl 网络组件。",
   clear_routes: "系统路由已恢复。",
@@ -127,7 +125,7 @@ const RESET_STEP_DONE: Record<ResetStepKey, string> = {
 };
 
 const RESET_STEP_FAILED: Record<ResetStepKey, string> = {
-  stop_runtime: "还有运行时没停下来。",
+  stop_runtime: "还有连接程序没停下来。",
   stop_tun: "接管没有关闭。",
   sweep_processes: "还有残留组件。",
   clear_routes: "系统路由还有残留。",
@@ -267,12 +265,11 @@ function seedCheckedAt(info: SeedRefreshInfo | null): number | null {
 }
 
 export function seedSummary(info: SeedRefreshInfo | null): string {
-  if (!info) return "从未检查";
-  const parts: string[] = [];
-  if (info.version) parts.push(`v${info.version}`);
-  parts.push(info.nodeCount > 0 ? `${info.nodeCount} 个节点` : "还没有节点");
-  parts.push(`${seedAgeLabel(seedCheckedAt(info))}检查`);
-  return parts.join(" · ");
+  if (!info) return "Veyl 提供的试用节点 · 从未检查过";
+  const head =
+    info.nodeCount > 0 ? `Veyl 提供的 ${info.nodeCount} 个节点` : "Veyl 提供的试用节点";
+  const age = seedAgeLabel(seedCheckedAt(info));
+  return `${head} · ${age === "从未" ? "从未检查过" : `${age}检查过`}`;
 }
 
 function seedChanged(before: SeedRefreshInfo | null, next: SeedRefreshInfo): boolean {
@@ -285,29 +282,29 @@ function seedChanged(before: SeedRefreshInfo | null, next: SeedRefreshInfo): boo
   );
 }
 
-function seedStatusText(phase: SeedPhase, connected: boolean): string | null {
+function seedStatusText(phase: SeedPhase, connected: boolean, nodeCount: number): string | null {
   switch (phase.kind) {
     case "checking":
-      return "正在检查测试节点…";
+      return "正在检查…";
     case "latest":
-      return "已经是最新（刚刚检查）";
+      return "刚刚检查过，已经是最新。";
     case "updated": {
       const text =
         phase.added !== null && phase.added > 0
-          ? `已更新 ${phase.added} 个节点（共 ${phase.total} 个）`
-          : `已更新（共 ${phase.total} 个节点）`;
-      return connected ? `${text}，下次连接生效` : text;
+          ? `已更新 ${phase.added} 个节点，共 ${phase.total} 个。`
+          : `已更新，共 ${phase.total} 个节点。`;
+      return connected ? `${text}下次连接生效。` : text;
     }
     case "offline":
-      return phase.at === null
-        ? "现在连不上，继续用上次的节点"
-        : `现在连不上，继续用上次的节点（${seedAgeLabel(phase.at)}）`;
+      return nodeCount > 0
+        ? `暂时连不上，继续用上次的 ${nodeCount} 个节点。`
+        : "暂时连不上，继续用上次的节点。";
     case "invalid":
-      return "新内容有问题，已保留原来的节点";
+      return "新内容有问题，保留了原来的节点。";
     case "local_write":
-      return "没能保存到本机";
+      return "没能保存到本机，检查磁盘空间后重试。";
     case "failed":
-      return "拿不到测试节点，请检查网络";
+      return "拿不到试用节点，请检查网络。";
     default:
       return null;
   }
@@ -337,14 +334,12 @@ function SeedRefreshRow({
   onInfo,
   connected,
   open,
-  onAskAi,
 }: {
   bridge: AgentBridge;
   info: SeedRefreshInfo | null;
   onInfo: (next: SeedRefreshInfo) => void;
   connected: boolean;
   open: boolean;
-  onAskAi: (field: string, value: string) => void;
 }) {
   const [phase, setPhase] = useState<SeedPhase>({ kind: "idle" });
   const [removedNotice, setRemovedNotice] = useState<{
@@ -420,13 +415,13 @@ function SeedRefreshRow({
     copyTimer.current = window.setTimeout(() => setCopyState("idle"), 2000);
   };
 
-  const status = seedStatusText(phase, connected);
+  const status = seedStatusText(phase, connected, info?.nodeCount ?? 0);
   const checking = phase.kind === "checking";
 
   return (
     <div className="settings-row seed-refresh">
       <div className="seed-refresh__main">
-        <div className="settings-row__label">测试节点</div>
+        <div className="settings-row__label">更新试用节点</div>
         <div className="settings-row__value num">{seedSummary(info)}</div>
         {status ? (
           <p
@@ -436,11 +431,6 @@ function SeedRefreshRow({
             title={phase.kind === "failed" ? phase.message : undefined}
           >
             {status}
-          </p>
-        ) : null}
-        {phase.kind === "local_write" ? (
-          <p className="seed-refresh__note">
-            检查磁盘空间后重试，已经拉到的内容不会丢。
           </p>
         ) : null}
         {removedNotice ? (
@@ -472,22 +462,15 @@ function SeedRefreshRow({
         >
           {checking ? "检查中…" : "检查更新"}
         </button>
-        <button
-          type="button"
-          className="ask-ai"
-          onClick={() => onAskAi(ADVANCED_FIELDS.defaultSource, seedSummary(info))}
-        >
-          问 AI
-        </button>
       </div>
     </div>
   );
 }
 
 const SECTIONS: Array<{ id: SectionId; label: string }> = [
-  { id: "ai", label: "账号与 AI" },
-  { id: "network", label: "网络" },
-  { id: "advanced", label: "高级" },
+  { id: "ai", label: "AI 助手" },
+  { id: "network", label: "连接" },
+  { id: "advanced", label: "遇到问题" },
   { id: "about", label: "关于" },
 ];
 
@@ -555,6 +538,7 @@ export function Settings({
   runtime,
   defaultProfile,
   connectMode = null,
+  currentNodeName = null,
   onClose,
   onNotice,
   importing,
@@ -569,22 +553,22 @@ export function Settings({
   initialSection = "ai",
 }: Props) {
   const connected = runtime.state === "running" || runtime.state === "degraded";
+  const runtimeActive =
+    runtime.state === "running" ||
+    runtime.state === "degraded" ||
+    runtime.state === "starting" ||
+    runtime.state === "restarting" ||
+    runtime.state === "stopping";
+  const showCleanupProxy =
+    !runtimeActive && (connectMode === "system_proxy" || runtime.system_proxy_enabled);
   const [section, setSection] = useState<SectionId>("ai");
   const [seedInfo, setSeedInfo] = useState<SeedRefreshInfo | null>(defaultProfile);
-  const coreUpgrade = useRuntimeUpgrade({ bridge, enabled: open, connected });
-  const tunHelper = useTunHelper({ bridge, enabled: open });
-  const [state, setState] = useState<DeepSeekKeyState>({
-    masked: null,
-    verified: false,
-    validation: "unverified",
+  const coreUpgrade = useRuntimeUpgrade({
+    bridge,
+    enabled: open && section === "advanced",
+    connected,
   });
-  const [loading, setLoading] = useState(false);
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState("");
-  const [reveal, setReveal] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<Feedback>(null);
-  const [apiMode, setApiMode] = useState<ApiMode>("basic");
+  const tunHelper = useTunHelper({ bridge, enabled: open && section === "advanced" });
   const [providers, setProviders] = useState<LlmProvider[]>([]);
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
   const [providersLoading, setProvidersLoading] = useState(false);
@@ -596,6 +580,11 @@ export function Settings({
   const [providerSaving, setProviderSaving] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
   const [providerTest, setProviderTest] = useState<TestState>({ state: "idle", text: "" });
+  const [listTest, setListTest] = useState<{
+    providerId: string;
+    state: "running" | "ok" | "error";
+    text: string;
+  } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<LlmProvider | null>(null);
   const [diagnosticNotice, setDiagnosticNotice] = useState<string | null>(null);
   const [resetPhase, setResetPhase] = useState<ResetPhase>("idle");
@@ -608,7 +597,7 @@ export function Settings({
   } | null>(null);
   const [resetCopy, setResetCopy] = useState<"idle" | "ok" | "error">("idle");
   const [routeCopy, setRouteCopy] = useState<"idle" | "ok" | "error">("idle");
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [proxyCopy, setProxyCopy] = useState<"idle" | "ok" | "error">("idle");
   const dialogRef = useRef<HTMLDivElement>(null);
   const resetDialogRef = useRef<HTMLDivElement>(null);
   const resetTriggerRef = useRef<HTMLButtonElement>(null);
@@ -626,34 +615,20 @@ export function Settings({
       setProviders(data.providers);
       setActiveProviderId(data.activeProviderId);
     } catch {
-      // provider 命令未接线时保持空列表，基础模式不受影响。
+      // 旧后端没有列表命令时保持空列表。
     } finally {
       setProvidersLoading(false);
     }
   }, [bridge]);
 
-  const refresh = useCallback(() => {
-    setLoading(true);
-    void bridge
-      .getDeepSeekKey()
-      .then((next) => {
-        setState(next);
-        setEditing(next.masked === null);
-      })
-      .finally(() => setLoading(false));
-  }, [bridge]);
-
   useEffect(() => {
     if (!open) return;
     setSection(initialSection);
-    setFeedback(null);
-    setValue("");
-    setReveal(false);
-    setApiMode("basic");
     setProviderForm(null);
     setProviderNotice(null);
     setProviderError(null);
     setProviderTest({ state: "idle", text: "" });
+    setListTest(null);
     setPendingDelete(null);
     setDiagnosticNotice(null);
     setResetPhase("idle");
@@ -662,9 +637,9 @@ export function Settings({
     setLastReset(null);
     setResetCopy("idle");
     setRouteCopy("idle");
+    setProxyCopy("idle");
     void refreshProviders();
-    refresh();
-  }, [open, refresh, refreshProviders, initialSection]);
+  }, [open, refreshProviders, initialSection]);
 
   useEffect(() => {
     setSeedInfo(defaultProfile);
@@ -710,48 +685,6 @@ export function Settings({
     },
     [],
   );
-
-  useEffect(() => {
-    if (open && editing) inputRef.current?.focus();
-  }, [open, editing]);
-
-  const save = async () => {
-    const key = value.trim();
-    if (!key || saving) return;
-
-    setSaving(true);
-    setFeedback(null);
-    try {
-      const next = await bridge.saveDeepSeekKey(key);
-      setState(next);
-      setEditing(next.masked === null);
-      setValue("");
-      setReveal(false);
-      setFeedback(
-        next.verified
-          ? { kind: "ok", text: "已保存，并验证可用。" }
-          : { kind: "warn", text: "已保存，但当前没能验证（网络不可用）。稍后可以重试。" },
-      );
-      void refreshProviders();
-    } catch (error) {
-      setFeedback({ kind: "error", text: describeKeyError(error) });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const clear = async () => {
-    setFeedback(null);
-    try {
-      await bridge.clearDeepSeekKey();
-      setState({ masked: null, verified: false, validation: "unverified" });
-      setEditing(true);
-      setFeedback({ kind: "ok", text: "已从本机移除。" });
-      void refreshProviders();
-    } catch (error) {
-      setFeedback({ kind: "error", text: describeClearError(error) });
-    }
-  };
 
   const openNewProvider = () => {
     setProviderForm(emptyForm());
@@ -832,7 +765,6 @@ export function Settings({
         text: hadActive ? "已保存。" : "已保存，并设为当前。",
       });
       await refreshProviders();
-      refresh();
     } catch (error) {
       setProviderError(describeProviderError(error));
     } finally {
@@ -872,6 +804,38 @@ export function Settings({
     }
   };
 
+  const testExistingProvider = async (provider: LlmProvider) => {
+    if (listTest?.state === "running") return;
+    setListTest({
+      providerId: provider.providerId,
+      state: "running",
+      text: "正在发送最小请求…",
+    });
+    try {
+      const result = await bridge.llmProviderTest({
+        providerId: provider.providerId,
+        name: provider.name,
+        protocol: provider.protocol,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        apiKey: "",
+      });
+      setListTest({
+        providerId: provider.providerId,
+        state: result.ok ? "ok" : "error",
+        text: result.ok
+          ? `连接成功${result.latencyMs !== null ? ` · ${result.latencyMs} ms` : ""}`
+          : result.error || "测试失败，请检查端点和 Key",
+      });
+    } catch (error) {
+      setListTest({
+        providerId: provider.providerId,
+        state: "error",
+        text: describeProviderError(error),
+      });
+    }
+  };
+
   const activateProvider = async (provider: LlmProvider) => {
     try {
       await bridge.llmProviderActivate(provider.providerId);
@@ -890,11 +854,10 @@ export function Settings({
       setProviderNotice({
         kind: "ok",
         text: wasActive
-          ? "已删除，同时清除了该 provider 的 Key。没有当前 provider，请选择一个。"
-          : "已删除，同时清除了该 provider 的 Key。",
+          ? "已删除，同时清除了它的 Key。没有当前服务，请选择一个。"
+          : "已删除，同时清除了它的 Key。",
       });
       await refreshProviders();
-      refresh();
     } catch (error) {
       setPendingDelete(null);
       setProviderNotice({ kind: "error", text: describeProviderError(error) });
@@ -933,6 +896,12 @@ export function Settings({
     setState(next);
     if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
     copyTimerRef.current = window.setTimeout(() => setState("idle"), 2000);
+  };
+
+  const copyProxyAddress = async () => {
+    if (runtime.mixed_port === null) return;
+    const ok = await copyText(`127.0.0.1:${runtime.mixed_port}`);
+    flashCopy(setProxyCopy, ok ? "ok" : "error");
   };
 
   const runNetworkReset = async () => {
@@ -1053,136 +1022,26 @@ export function Settings({
 
         {section === "ai" ? (
           <section className="settings-section">
-            <div className="settings-section__head">
-              <h3 className="settings-section__title">模型 API</h3>
-              <div className="settings-mode" role="tablist" aria-label="API 设置模式">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={apiMode === "basic"}
-                  className={apiMode === "basic" ? "is-active" : ""}
-                  onClick={() => setApiMode("basic")}
-                >
-                  基础
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={apiMode === "advanced"}
-                  className={apiMode === "advanced" ? "is-active" : ""}
-                  onClick={() => {
-                    setApiMode("advanced");
-                    void refreshProviders();
-                  }}
-                >
-                  高级
-                </button>
-              </div>
-            </div>
+            <h3 className="settings-section__title">AI 助手</h3>
 
-            {apiMode === "basic" ? (
-              <>
-                {loading ? (
-                  <p className="settings-muted">读取当前配置…</p>
-                ) : editing ? (
-                  <form
-                    className="settings-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void save();
-                    }}
-                  >
-                    {state.masked && activeProviderId === "deepseek" ? (
-                      <p className="settings-warning">
-                        更换 Key 会重建当前会话，对话上下文将清空。
-                      </p>
-                    ) : null}
-                    <div className="settings-input">
-                      <input
-                        ref={inputRef}
-                        type={reveal ? "text" : "password"}
-                        value={value}
-                        onChange={(event) => setValue(event.target.value)}
-                        placeholder="sk-..."
-                        autoComplete="off"
-                        autoCorrect="off"
-                        spellCheck={false}
-                        aria-label="DeepSeek API Key"
-                      />
-                      <button
-                        type="button"
-                        className="settings-reveal"
-                        onClick={() => setReveal((shown) => !shown)}
-                      >
-                        {reveal ? "隐藏" : "显示"}
-                      </button>
-                    </div>
-                    <div className="settings-actions">
-                      <button
-                        type="submit"
-                        className="btn btn--primary"
-                        disabled={saving || value.trim().length === 0}
-                      >
-                        {saving ? "保存中…" : "保存"}
-                      </button>
-                      {state.masked ? (
-                        <button
-                          type="button"
-                          className="btn btn--ghost"
-                          onClick={() => {
-                            setEditing(false);
-                            setValue("");
-                            setFeedback(null);
-                          }}
-                        >
-                          取消
-                        </button>
-                      ) : null}
-                    </div>
-                  </form>
-                ) : (
-                  <div className="settings-saved">
-                    <code className="settings-key">{state.masked}</code>
-                    <div className="settings-actions">
-                      <button
-                        type="button"
-                        className="btn btn--ghost"
-                        onClick={() => setEditing(true)}
-                      >
-                        更换
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn--danger-ghost"
-                        onClick={() => void clear()}
-                      >
-                        清除
-                      </button>
-                    </div>
+            <div className="settings-providers">
+              <div className="settings-row">
+                <div>
+                  <div className="settings-row__label">用哪个 AI 服务</div>
+                  <div className="settings-row__value">
+                    AI 助手用这里的服务回答你；换服务或换模型都在这里。
                   </div>
-                )}
-
-                {feedback ? (
-                  <p className={`settings-feedback settings-feedback--${feedback.kind}`}>
-                    {feedback.text}
-                  </p>
-                ) : null}
-
-                <p className="settings-note">
-                  Key 加密保存在本机，仅用于调用模型接口；界面只显示打码后的末四位。
-                </p>
-              </>
-            ) : (
-              <div className="settings-providers">
+                </div>
+              </div>
                 <p className="settings-risk">请求会发往你填写的端点，请确认你信任它。</p>
                 <p className="settings-note">
                   切换当前使用的服务会开始一个新会话，之前对话的上下文不会带过去。
                 </p>
 
                 {providersLoading ? (
-                  <p className="settings-muted">读取 provider…</p>
+                  <p className="settings-muted">读取服务…</p>
                 ) : providers.length === 0 ? (
-                  <p className="settings-muted">还没有 provider。可以用下面的预设一键填充。</p>
+                  <p className="settings-muted">还没有服务。可以从下面的预设一键添加。</p>
                 ) : (
                   <ul className="provider-list">
                     {providers.map((provider) => {
@@ -1225,6 +1084,18 @@ export function Settings({
                             <button
                               type="button"
                               className="btn btn--ghost provider-item__btn"
+                              onClick={() => void testExistingProvider(provider)}
+                              disabled={!canActivate || listTest?.state === "running"}
+                              title={canActivate ? undefined : "先编辑并保存 API Key"}
+                            >
+                              {listTest?.providerId === provider.providerId &&
+                              listTest.state === "running"
+                                ? "测试中…"
+                                : "测试"}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn--ghost provider-item__btn"
                               onClick={() => openEditProvider(provider)}
                             >
                               编辑
@@ -1234,11 +1105,25 @@ export function Settings({
                               className="btn btn--danger-ghost provider-item__btn"
                               onClick={() => setPendingDelete(provider)}
                               disabled={provider.isBuiltin}
-                              title={provider.isBuiltin ? "内置 provider 不可删除" : undefined}
+                              title={provider.isBuiltin ? "内置服务不可删除" : undefined}
                             >
                               删除
                             </button>
                           </div>
+
+                          {listTest?.providerId === provider.providerId ? (
+                            <p
+                              className={`settings-feedback settings-feedback--${
+                                listTest.state === "ok"
+                                  ? "ok"
+                                  : listTest.state === "error"
+                                    ? "error"
+                                    : "warn"
+                              }`}
+                            >
+                              {listTest.text}
+                            </p>
+                          ) : null}
 
                           {pendingDelete?.providerId === provider.providerId ? (
                             <div className="provider-item__confirm">
@@ -1269,14 +1154,7 @@ export function Settings({
 
                 <div className="settings-actions">
                   <button type="button" className="btn btn--ghost" onClick={openNewProvider}>
-                    新增 Provider
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn--ghost"
-                    onClick={() => void refreshProviders()}
-                  >
-                    刷新
+                    添加 AI 服务
                   </button>
                 </div>
 
@@ -1295,7 +1173,7 @@ export function Settings({
                     }}
                   >
                     <h4 className="provider-form__title">
-                      {providerForm.providerId ? "编辑 Provider" : "新增 Provider"}
+                      {providerForm.providerId ? "编辑 AI 服务" : "添加 AI 服务"}
                     </h4>
 
                     <div className="provider-form__presets">
@@ -1454,54 +1332,74 @@ export function Settings({
                     </div>
                   </form>
                 ) : null}
-              </div>
-            )}
+            </div>
           </section>
         ) : null}
 
         {section === "network" ? (
           <section className="settings-section">
-            <h3 className="settings-section__title">网络</h3>
+            <h3 className="settings-section__title">连接</h3>
 
             <div className="settings-row">
               <div>
-                <div className="settings-row__label">当前连接</div>
+                <div className="settings-row__label">现在怎么连</div>
                 <div className="settings-row__value">
                   {connectMode === "tun"
-                    ? "全部流量"
+                    ? "全部流量走 VPN"
                     : connectMode === "system_proxy"
-                      ? "只给代理地址"
+                      ? "只有设置了代理的软件走 VPN"
                       : "还没有配置"}
                 </div>
+                {connectMode === "system_proxy" &&
+                connected &&
+                runtime.mixed_port !== null ? (
+                  <div className="settings-address">
+                    <code className="num">127.0.0.1:{runtime.mixed_port}</code>
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => void copyProxyAddress()}
+                    >
+                      {proxyCopy === "ok" ? "已复制" : proxyCopy === "error" ? "复制失败" : "复制"}
+                    </button>
+                  </div>
+                ) : null}
+                {connectMode === "system_proxy" &&
+                connected &&
+                runtime.system_proxy_enabled ? (
+                  <p className="settings-note">浏览器已经设好了；其它软件按上面的地址填。</p>
+                ) : null}
                 {connectMode ? (
-                  <p className="settings-note">这套配置的连接方式，在新建配置时选择。</p>
+                  <p className="settings-note">
+                    连接方式在新建配置时确定；想换需要新建一套配置。
+                  </p>
+                ) : (
+                  <p className="settings-note">先在左侧新建一套配置，再回来这里看。</p>
+                )}
+              </div>
+            </div>
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">用哪个节点</div>
+                <div className="settings-row__value">
+                  {currentNodeName ?? (connectMode ? "还没有节点" : "还没有配置")}
+                </div>
+                {currentNodeName ? (
+                  <p className="settings-note">在主界面点节点行可以切换。</p>
+                ) : connectMode ? (
+                  <p className="settings-note">先导入节点或更新试用节点。</p>
                 ) : null}
               </div>
             </div>
 
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">本地端口</div>
-                <div className="settings-row__value num">
-                  {formatPort(runtime.mixed_port)}
-                </div>
-              </div>
-            </div>
-
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">恢复直连</div>
-                <div className="settings-row__value">
-                  撤销系统代理并停止运行时；不会断开「全部流量」。
-                </div>
-                <p className="settings-note">
-                  要断开「全部流量」，回主界面点「断开 VPN」。
-                </p>
-              </div>
-              <button type="button" className="btn btn--ghost" onClick={onRestoreNetwork}>
-                恢复直连
-              </button>
-            </div>
+            <SeedRefreshRow
+              bridge={bridge}
+              info={seedInfo}
+              onInfo={setSeedInfo}
+              connected={connected}
+              open={open}
+            />
 
             <div className="settings-subhead">导入节点文件</div>
             <div
@@ -1559,7 +1457,7 @@ export function Settings({
             ) : null}
 
             <p className="settings-note">
-              没有网络也能导入：文件在本地解析，不依赖测试节点。测试节点暂时不可达属于正常现象。
+              没有网络也能导入：文件在本地解析，不依赖试用节点。
             </p>
             <p className="settings-note">这份文件包含共享凭据，请勿外传。</p>
           </section>
@@ -1567,52 +1465,41 @@ export function Settings({
 
         {section === "advanced" ? (
           <section className="settings-section">
-            <h3 className="settings-section__title">高级</h3>
+            <h3 className="settings-section__title">遇到问题</h3>
+            <p className="settings-note">
+              这里的东西平时不用改。连不上网、打不开网页时再看。
+            </p>
 
-            <RuntimeUpgradeRow controller={coreUpgrade} />
-            <SeedRefreshRow
-              bridge={bridge}
-              info={seedInfo}
-              onInfo={setSeedInfo}
-              connected={connected}
-              open={open}
-              onAskAi={askAi}
-            />
-            <TunHelperRow controller={tunHelper} activeConnection={connected} />
+            <div className="settings-subhead">修复网络</div>
 
-            <div className="settings-subhead">诊断</div>
-
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">诊断信息</div>
-                <div className="settings-row__value">
-                  复制当前状态，便于排查问题；不包含 Key。
+            {showCleanupProxy ? (
+              <div className="settings-row">
+                <div>
+                  <div className="settings-row__label">清除残留代理</div>
+                  <div className="settings-row__value">
+                    清除系统里残留的代理设置；已经断开 VPN，但仍上不了网时用。
+                  </div>
+                  <p className="settings-note">不会影响「全部流量」的接管。</p>
                 </div>
-              </div>
-              <div className="settings-row__aside">
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => void copyDiagnostics()}
-                >
-                  复制诊断信息
+                <button type="button" className="btn btn--ghost" onClick={onRestoreNetwork}>
+                  清除残留代理
                 </button>
               </div>
-            </div>
-            {diagnosticNotice ? (
-              <p className="settings-feedback settings-feedback--ok">{diagnosticNotice}</p>
             ) : null}
 
-            {/* tun_probe 只在 debug 构建注册，release 里连入口一起隐藏。 */}
-            {import.meta.env.DEV ? <TunDiagnosticsRow bridge={bridge} /> : null}
-
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">强制重置网络</div>
-                <div className="settings-row__value">
-                  停掉接管并恢复系统网络设置；保留配置和助手授权。
-                </div>
-                <p className="settings-note">只在「恢复直连」无效时使用。</p>
+            <div className="danger-zone">
+              <div className="danger-zone__body">
+                <div className="danger-zone__title">强制重置网络</div>
+                <p className="settings-row__value">
+                  网络出问题时用。停掉 Veyl 的后台服务，把网络恢复到没有 VPN 的状态；
+                  不会删除配置和节点。
+                </p>
+                <p className="settings-note">
+                  先试上面的「清除残留代理」；还是不行，再用这个。
+                </p>
+                <p className="settings-note">
+                  能正常上网时不要用。只想断开连接，回主界面点「断开 VPN」。
+                </p>
                 {lastReset ? (
                   <p
                     className={`settings-note ${
@@ -1634,6 +1521,71 @@ export function Settings({
                 强制重置网络
               </button>
             </div>
+
+            <details className="settings-fold">
+              <summary className="settings-fold__summary">
+                更新与诊断
+                <span className="settings-fold__hint">平时不用管</span>
+              </summary>
+              <div className="settings-fold__body">
+                <RuntimeUpgradeRow controller={coreUpgrade} />
+                <TunHelperRow controller={tunHelper} activeConnection={connected} />
+
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row__label">打开日志</div>
+                    <div className="settings-row__value">
+                      在文件管理器中定位最近的日志文件。
+                    </div>
+                  </div>
+                  <button type="button" className="btn btn--ghost" onClick={onOpenLogs}>
+                    打开日志目录
+                  </button>
+                </div>
+
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row__label">复制诊断信息</div>
+                    <div className="settings-row__value">
+                      复制当前状态，便于排查问题；不包含 Key。
+                    </div>
+                  </div>
+                  <div className="settings-row__aside">
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => void copyDiagnostics()}
+                    >
+                      复制诊断信息
+                    </button>
+                  </div>
+                </div>
+                {diagnosticNotice ? (
+                  <p className="settings-feedback settings-feedback--ok">{diagnosticNotice}</p>
+                ) : null}
+
+                {/* tun_probe 只在 debug 构建注册，release 里连入口一起隐藏。 */}
+                {import.meta.env.DEV ? <TunDiagnosticsRow bridge={bridge} /> : null}
+
+                {import.meta.env.DEV ? (
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-row__label">重新运行引导</div>
+                      <div className="settings-row__value">
+                        不会删除已有 Key 或节点。仅开发构建可见。
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={onRestartOnboarding}
+                    >
+                      重新运行
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </details>
           </section>
         ) : null}
 
@@ -1646,28 +1598,6 @@ export function Settings({
                 <div className="settings-row__label">版本</div>
                 <div className="settings-row__value num">v{APP_VERSION}</div>
               </div>
-            </div>
-
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">首次引导</div>
-                <div className="settings-row__value">
-                  重新走一遍两步引导，不会删除已有 Key 或节点。
-                </div>
-              </div>
-              <button type="button" className="btn btn--ghost" onClick={onRestartOnboarding}>
-                重新运行
-              </button>
-            </div>
-
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">日志</div>
-                <div className="settings-row__value">在文件管理器中定位最近的日志文件。</div>
-              </div>
-              <button type="button" className="btn btn--ghost" onClick={onOpenLogs}>
-                打开日志目录
-              </button>
             </div>
           </section>
         ) : null}
@@ -1707,28 +1637,10 @@ export function Settings({
             {resetPhase === "confirm" ? (
               <div className="reset-confirm">
                 <p className="reset-confirm__warning">
-                  这是最后手段。先到「网络」里点「恢复直连」；只有它无效时再继续。
+                  当前连接会立即断开。Veyl 会停掉后台服务、撤销系统代理、恢复路由和 DNS；
+                  不会删除配置和节点。
                 </p>
-                <section className="reset-confirm__section">
-                  <h3 className="reset-confirm__label">会发生什么</h3>
-                  <p className="reset-confirm__text">
-                    当前连接会立即断开。Veyl
-                    会停止接管、清理残留组件和临时文件、恢复路由和 DNS，并撤销系统代理。
-                  </p>
-                </section>
-                <section className="reset-confirm__section">
-                  <h3 className="reset-confirm__label">不会发生什么</h3>
-                  <p className="reset-confirm__text">
-                    不会删除配置和节点，不会撤销助手的授权，也不会改动其它设置。
-                  </p>
-                </section>
-                <section className="reset-confirm__section">
-                  <h3 className="reset-confirm__label">现在做什么</h3>
-                  <p className="reset-confirm__text">
-                    先退出其它 VPN、代理或网络加速软件；如果正在开会或下载，等结束再做。确认后网络会短暂中断，通常几秒内恢复；需要时再点「启动
-                    VPN」。
-                  </p>
-                </section>
+                <p className="reset-confirm__text">正在开会或下载时，等结束再做。</p>
                 <div className="settings-actions">
                   <button
                     ref={resetCancelRef}
@@ -1954,14 +1866,14 @@ function describeResetError(error: unknown): string {
 export function describeProviderError(error: unknown): string {
   const bridgeError = toBridgeError(error);
   if (/not found|unknown command/i.test(bridgeError.message)) {
-    return "provider 命令还没有接入当前版本，请稍后再试。";
+    return "AI 服务功能还没有接入当前版本，请稍后再试。";
   }
   if (bridgeError.code === "NOT_FOUND") {
     return "这个 provider 已经不存在了。";
   }
   if (bridgeError.code === "PRECONDITION_FAILED") {
     const reason = bridgeError.details?.reason;
-    if (reason === "builtin_provider") return "内置 provider 不可删除";
+    if (reason === "builtin_provider") return "内置服务不可删除";
     if (reason === "no_active_provider") return "没有可用的 AI 服务，请到设置里选择一个";
     return bridgeError.message || "这个操作暂时不可用。";
   }
@@ -1987,15 +1899,6 @@ export function describeKeyError(error: unknown): string {
 
   const message = readMessage(error);
   return message ? `保存失败：${message}` : "保存失败，请稍后重试。";
-}
-
-function describeClearError(error: unknown): string {
-  const code = readCode(error);
-  if (code === "SECRET_STORE") {
-    return "本地加密凭据文件删除失败（secrets.enc），请检查磁盘权限后重试。";
-  }
-  const message = readMessage(error);
-  return message ? `清除失败：${message}` : "清除失败，请稍后重试。";
 }
 
 function readCode(error: unknown): string {

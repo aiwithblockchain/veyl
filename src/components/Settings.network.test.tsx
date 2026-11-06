@@ -1,11 +1,15 @@
 /** @vitest-environment jsdom */
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, LlmProvider } from "../agent/bridge";
 import { emptyRuntimeView } from "../agent/bridge";
+import type { RuntimeView } from "../agent/protocol";
 import { Settings } from "./Settings";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllEnvs();
+});
 
 function provider(over: Partial<LlmProvider> = {}): LlmProvider {
   return {
@@ -24,9 +28,8 @@ function provider(over: Partial<LlmProvider> = {}): LlmProvider {
 function makeBridge(
   {
     activeProviderId = "deepseek",
-    masked = "sk-****abcd",
-  }: { activeProviderId?: string | null; masked?: string | null } = {},
-  overrides: Partial<Record<keyof AgentBridge, unknown>> = {},
+    providers = [provider()],
+  }: { activeProviderId?: string | null; providers?: LlmProvider[] } = {},
 ): AgentBridge {
   return {
     mode: "mock",
@@ -37,42 +40,48 @@ function makeBridge(
       activeSource: "bundled" as const,
       restartRequired: false,
     })),
+    coreCheckUpdates: vi.fn(async () => ({ network: "ok" as const, candidates: [], cached: false })),
     tunHelperInfo: vi.fn(async () => ({
       runningBuild: null,
+      helperVersion: null,
       expectedBuild: "2026.11.1",
       stale: false,
       state: "not_running" as const,
       needsAdminRestart: false,
     })),
     tunHelperRestart: vi.fn(async () => ({ ok: true, restarted: true, needsAdminRestart: false })),
-    getDeepSeekKey: vi.fn(async () => ({
-      masked,
-      verified: true,
-      validation: "ok" as const,
-    })),
-    llmProviderList: vi.fn(async () => ({
-      providers: [provider({ isActive: activeProviderId === "deepseek" })],
-      activeProviderId,
-    })),
+    llmProviderList: vi.fn(async () => ({ providers, activeProviderId })),
     defaultProfileRefresh: vi.fn(),
-    ...overrides,
+    defaultProfileStatus: vi.fn(),
   } as unknown as AgentBridge;
+}
+
+function runtime(over: Partial<RuntimeView> = {}): RuntimeView {
+  return { ...emptyRuntimeView(), ...over };
 }
 
 function renderSettings(
   bridge: AgentBridge,
   {
     connectMode = null,
+    currentNodeName = null,
     section = "network",
-  }: { connectMode?: "tun" | "system_proxy" | null; section?: "ai" | "network" | "advanced" | "about" } = {},
+    runtimeView = runtime(),
+  }: {
+    connectMode?: "tun" | "system_proxy" | null;
+    currentNodeName?: string | null;
+    section?: "ai" | "network" | "advanced" | "about";
+    runtimeView?: RuntimeView;
+  } = {},
 ) {
   return render(
     <Settings
       open
       bridge={bridge}
-      runtime={emptyRuntimeView()}
+      runtime={runtimeView}
       defaultProfile={null}
       connectMode={connectMode}
+      currentNodeName={currentNodeName}
       onClose={() => {}}
       onNotice={() => {}}
       importing={false}
@@ -89,90 +98,183 @@ function renderSettings(
   );
 }
 
-describe("网络 → 当前连接", () => {
-  it("全部流量的配置显示「全部流量」", async () => {
+describe("连接 tab", () => {
+  it("全部流量配置显示行为描述与换方式说明", async () => {
     renderSettings(makeBridge(), { connectMode: "tun" });
-    expect(await screen.findByText("当前连接")).toBeTruthy();
-    expect(screen.getByText("全部流量")).toBeTruthy();
-    expect(screen.getByText("这套配置的连接方式，在新建配置时选择。")).toBeTruthy();
-  });
-
-  it("只给代理地址的配置显示对应文案", async () => {
-    renderSettings(makeBridge(), { connectMode: "system_proxy" });
-    expect(await screen.findByText("只给代理地址")).toBeTruthy();
-    expect(screen.queryByText("全部流量")).toBeNull();
-  });
-
-  it("没有配置时如实说还没有配置，不给来源说明", async () => {
-    renderSettings(makeBridge(), { connectMode: null });
-    expect(await screen.findByText("还没有配置")).toBeTruthy();
-    expect(screen.queryByText("这套配置的连接方式，在新建配置时选择。")).toBeNull();
-  });
-
-  it("旧的「代理模式」整行已删除", async () => {
-    renderSettings(makeBridge(), { connectMode: "tun" });
-    await screen.findByText("当前连接");
-    expect(screen.queryByText("代理模式")).toBeNull();
-    expect(screen.queryByText("系统代理")).toBeNull();
-  });
-
-  it("网络页不再有只读行的「问 AI」", async () => {
-    renderSettings(makeBridge(), { connectMode: "tun" });
-    await screen.findByText("当前连接");
-    expect(screen.queryByRole("button", { name: "问 AI" })).toBeNull();
-  });
-});
-
-describe("被删除的只读设置项", () => {
-  it("高级页不再有测试节点地址、日志级别", async () => {
-    renderSettings(makeBridge(), { section: "advanced" });
-    await screen.findByText("测试节点");
-    expect(screen.queryByText("测试节点地址")).toBeNull();
-    expect(screen.queryByText("日志级别")).toBeNull();
-    expect(screen.queryByText("bootstrap.json")).toBeNull();
-  });
-
-  it("关于页不再有事件源", async () => {
-    renderSettings(makeBridge(), { section: "about" });
-    expect(await screen.findByText("版本")).toBeTruthy();
-    expect(screen.queryByText("事件源")).toBeNull();
-    expect(screen.queryByText(/MOCK 事件源|已连接 Host/)).toBeNull();
-  });
-
-  it("诊断信息行只保留复制，不再有问 AI", async () => {
-    renderSettings(makeBridge(), { section: "advanced" });
-    const row = (await screen.findByText("诊断信息")).closest(".settings-row") as HTMLElement;
-    expect(within(row).getByRole("button", { name: "复制诊断信息" })).toBeTruthy();
-    expect(within(row).queryByRole("button", { name: "问 AI" })).toBeNull();
-  });
-});
-
-describe("会话重建提示", () => {
-  it("当前服务是 DeepSeek 时，更换 Key 才警告会清空上下文", async () => {
-    renderSettings(makeBridge({ activeProviderId: "deepseek" }), { section: "ai" });
-    fireEvent.click(await screen.findByRole("button", { name: "更换" }));
+    expect(await screen.findByText("现在怎么连")).toBeTruthy();
+    expect(screen.getByText("全部流量走 VPN")).toBeTruthy();
     expect(
-      await screen.findByText("更换 Key 会重建当前会话，对话上下文将清空。"),
+      screen.getByText("连接方式在新建配置时确定；想换需要新建一套配置。"),
     ).toBeTruthy();
   });
 
-  it("当前服务不是 DeepSeek 时不再显示这条警告", async () => {
-    const bridge = makeBridge({ activeProviderId: "anthropic" });
-    renderSettings(bridge, { section: "ai" });
-    fireEvent.click(await screen.findByRole("button", { name: "更换" }));
-    // 等 provider 列表真的回来，否则「没有警告」可能只是还没读到。
-    await waitFor(() => expect(bridge.llmProviderList).toHaveBeenCalled());
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(await screen.findByRole("button", { name: "显示" })).toBeTruthy();
-    expect(screen.queryByText("更换 Key 会重建当前会话，对话上下文将清空。")).toBeNull();
+  it("代理配置显示行为描述", async () => {
+    renderSettings(makeBridge(), { connectMode: "system_proxy" });
+    expect(await screen.findByText("只有设置了代理的软件走 VPN")).toBeTruthy();
+    expect(screen.queryByText("全部流量走 VPN")).toBeNull();
   });
 
-  it("高级 provider 列表说明切换服务会开始新会话", async () => {
-    renderSettings(makeBridge(), { section: "ai" });
-    fireEvent.click(await screen.findByRole("tab", { name: "高级" }));
+  it("没有配置时说明先去新建", async () => {
+    renderSettings(makeBridge(), { connectMode: null });
+    const values = await screen.findAllByText("还没有配置");
+    expect(values.length).toBeGreaterThan(0);
+    expect(screen.getByText("先在左侧新建一套配置，再回来这里看。")).toBeTruthy();
+  });
 
+  it("代理已连接时给出可复制的本机地址", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    renderSettings(makeBridge(), {
+      connectMode: "system_proxy",
+      runtimeView: runtime({ state: "running", mixed_port: 2080, system_proxy_enabled: true }),
+    });
+
+    expect(await screen.findByText("127.0.0.1:2080")).toBeTruthy();
+    expect(screen.getByText("浏览器已经设好了；其它软件按上面的地址填。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "复制" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("127.0.0.1:2080"));
+  });
+
+  it("显示当前节点并说明去哪切换", async () => {
+    renderSettings(makeBridge(), { connectMode: "tun", currentNodeName: "东京 01" });
+    expect(await screen.findByText("用哪个节点")).toBeTruthy();
+    expect(screen.getByText("东京 01")).toBeTruthy();
+    expect(screen.getByText("在主界面点节点行可以切换。")).toBeTruthy();
+  });
+
+  it("没有节点时指到导入或试用节点", async () => {
+    renderSettings(makeBridge(), { connectMode: "tun", currentNodeName: null });
+    expect(await screen.findByText("还没有节点")).toBeTruthy();
+    expect(screen.getByText("先导入节点或更新试用节点。")).toBeTruthy();
+  });
+
+  it("网络页不出现修复动作", async () => {
+    renderSettings(makeBridge(), { connectMode: "system_proxy" });
+    await screen.findByText("现在怎么连");
+    expect(screen.queryByText("清除残留代理")).toBeNull();
+    expect(screen.queryByText("强制重置网络")).toBeNull();
+  });
+});
+
+describe("删除项与旧入口", () => {
+  it("网络页不再有代理模式、本地端口、恢复直连与问 AI", async () => {
+    renderSettings(makeBridge(), { connectMode: "tun" });
+    await screen.findByText("现在怎么连");
+    expect(screen.queryByText("代理模式")).toBeNull();
+    expect(screen.queryByText("本地端口")).toBeNull();
+    expect(screen.queryByText("恢复直连")).toBeNull();
+    expect(screen.queryByRole("button", { name: "问 AI" })).toBeNull();
+  });
+
+  it("高级页不再有日志级别、测试节点地址、事件源与旧按钮", async () => {
+    renderSettings(makeBridge(), { section: "advanced" });
+    await screen.findByText("遇到问题", { selector: ".settings-section__title" });
+    expect(screen.queryByText("日志级别")).toBeNull();
+    expect(screen.queryByText("测试节点地址")).toBeNull();
+    expect(screen.queryByText("事件源")).toBeNull();
+    expect(screen.queryByText("bootstrap.json")).toBeNull();
+    expect(screen.queryByRole("button", { name: "检查并更新" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "用随包版本继续" })).toBeNull();
+  });
+
+  it("关于页只剩版本，不再有日志与首次引导", async () => {
+    renderSettings(makeBridge(), { section: "about" });
+    expect(await screen.findByText("版本")).toBeTruthy();
+    expect(screen.queryByText("日志")).toBeNull();
+    expect(screen.queryByText("首次引导")).toBeNull();
+  });
+
+  it("正式构建不出现重新运行引导，DEV 才保留", async () => {
+    vi.stubEnv("DEV", false);
+    renderSettings(makeBridge(), { section: "advanced" });
+    await screen.findByText("更新与诊断");
+    expect(screen.queryByText("重新运行引导")).toBeNull();
+  });
+});
+
+describe("遇到问题 tab", () => {
+  it("代理模式未连接时在修复组显示清除残留代理", async () => {
+    renderSettings(makeBridge(), { section: "advanced", connectMode: "system_proxy" });
+    expect(
+      await screen.findByText("清除残留代理", { selector: ".settings-row__label" }),
+    ).toBeTruthy();
+    expect(screen.getByText("不会影响「全部流量」的接管。")).toBeTruthy();
+  });
+
+  it("全部流量且没有残留时不显示清除残留代理", async () => {
+    renderSettings(makeBridge(), { section: "advanced", connectMode: "tun" });
+    await screen.findByText("修复网络");
+    expect(screen.queryByText("清除残留代理")).toBeNull();
+  });
+
+  it("正在连接代理时不显示清除残留代理", async () => {
+    renderSettings(makeBridge(), {
+      section: "advanced",
+      connectMode: "system_proxy",
+      runtimeView: runtime({ state: "running", mixed_port: 2080 }),
+    });
+    await screen.findByText("修复网络");
+    expect(screen.queryByText("清除残留代理")).toBeNull();
+  });
+
+  it("首句说明平时不用改，维护区默认收起", async () => {
+    renderSettings(makeBridge(), { section: "advanced" });
+    expect(
+      await screen.findByText("这里的东西平时不用改。连不上网、打不开网页时再看。"),
+    ).toBeTruthy();
+    const fold = document.querySelector("details.settings-fold") as HTMLDetailsElement;
+    expect(fold).not.toBeNull();
+    expect(fold.open).toBe(false);
+    expect(screen.getByText("更新与诊断")).toBeTruthy();
+    expect(screen.getByText("平时不用管")).toBeTruthy();
+  });
+
+  it("强制重置独立成危险区域，说明什么时候用与不该用", async () => {
+    renderSettings(makeBridge(), { section: "advanced" });
+    const zone = (
+      await screen.findByText("强制重置网络", { selector: ".danger-zone__title" })
+    ).closest(".danger-zone") as HTMLElement;
+    expect(zone).not.toBeNull();
+    expect(
+      screen.getByText(/网络出问题时用。停掉 Veyl 的后台服务/),
+    ).toBeTruthy();
+    expect(screen.getByText("能正常上网时不要用。只想断开连接，回主界面点「断开 VPN」。")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "强制重置网络" }).className,
+    ).toContain("btn--danger-ghost");
+  });
+});
+
+describe("AI 助手 tab", () => {
+  it("只有一个服务列表，没有基础/高级切换与独立 Key 表单", async () => {
+    renderSettings(makeBridge(), { section: "ai" });
+    expect(await screen.findByText("用哪个 AI 服务")).toBeTruthy();
+    expect(screen.getByText("DeepSeek")).toBeTruthy();
+    expect(screen.getByText("添加 AI 服务")).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "基础" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "高级" })).toBeNull();
+    expect(screen.queryByLabelText("DeepSeek API Key")).toBeNull();
+    expect(screen.queryByRole("button", { name: "刷新" })).toBeNull();
+  });
+
+  it("列表项可以直接测试当前服务", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { llmProviderTest: unknown }).llmProviderTest = vi.fn(async () => ({
+      ok: true,
+      latencyMs: 42,
+    }));
+    renderSettings(bridge, { section: "ai" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "测试" }));
+    expect(await screen.findByText("连接成功 · 42 ms")).toBeTruthy();
+  });
+
+  it("说明切换服务会开始新会话", async () => {
+    renderSettings(makeBridge(), { section: "ai" });
     expect(
       await screen.findByText(
         "切换当前使用的服务会开始一个新会话，之前对话的上下文不会带过去。",

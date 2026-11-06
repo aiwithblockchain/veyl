@@ -1141,6 +1141,11 @@ export default function App() {
         runtime={runtime}
         defaultProfile={defaultProfile}
         connectMode={vpn.activeConfig?.connect_mode ?? null}
+        currentNodeName={
+          vpn.activeConfig?.nodes.find(
+            (node) => node.node_id === vpn.activeConfig?.current_node_id,
+          )?.name ?? null
+        }
         onClose={closeSettings}
         onNotice={setAppNotice}
         importing={importing}

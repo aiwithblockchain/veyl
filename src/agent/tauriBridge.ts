@@ -221,6 +221,7 @@ const HELPER_STATES: TunHelperState[] = [
 
 function normalizeHelperInfo(raw: {
   running_build?: unknown;
+  helper_version?: unknown;
   expected_build?: unknown;
   stale?: unknown;
   state?: unknown;
@@ -229,6 +230,8 @@ function normalizeHelperInfo(raw: {
   const state = HELPER_STATES.find((item) => item === raw.state) ?? "unknown";
   return {
     runningBuild: typeof raw.running_build === "string" && raw.running_build ? raw.running_build : null,
+    helperVersion:
+      typeof raw.helper_version === "string" && raw.helper_version ? raw.helper_version : null,
     expectedBuild:
       typeof raw.expected_build === "string" && raw.expected_build ? raw.expected_build : null,
     stale: raw.stale === true,
@@ -528,6 +531,7 @@ export class TauriAgentBridge implements AgentBridge {
     return normalizeHelperInfo(
       await call<{
         running_build?: unknown;
+        helper_version?: unknown;
         expected_build?: unknown;
         stale?: unknown;
         state?: unknown;

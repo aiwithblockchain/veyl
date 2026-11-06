@@ -486,6 +486,7 @@ export class MockAgentBridge implements AgentBridge {
     const state: TunHelperState = this.helperState ?? forced ?? (active ? "running" : "not_running");
     return {
       runningBuild: state === "running" ? "2026.11.1" : state === "stale" ? "2026.10.2" : null,
+      helperVersion: state === "running" ? "2026.11.1" : state === "stale" ? "2026.10.2" : null,
       expectedBuild: "2026.11.1",
       stale: state === "stale",
       state,

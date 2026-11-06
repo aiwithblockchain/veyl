@@ -9,7 +9,6 @@ export function advancedPrompt(field: string, value: string): string {
 }
 
 export const ADVANCED_FIELDS = {
-  defaultSource: "测试节点",
   apiProtocol: "API 类型与 Base URL",
   model: "模型选择",
 } as const;

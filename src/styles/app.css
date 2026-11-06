@@ -4819,3 +4819,89 @@ body[data-resizing] {
     transform: none;
   }
 }
+
+/* ---------- 设置的连接地址、危险区域与折叠区 ---------- */
+
+.settings-address {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.settings-address code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.settings-address .btn {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.danger-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--err-line);
+  border-radius: var(--r-sm);
+}
+
+.danger-zone__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.danger-zone__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--err-text);
+}
+
+.settings-fold {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hair);
+}
+
+.settings-fold__summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+  list-style: none;
+}
+
+.settings-fold__summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-fold__summary::before {
+  content: "▸";
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+details[open] > .settings-fold__summary::before {
+  content: "▾";
+}
+
+.settings-fold__hint {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.settings-fold__body {
+  display: flex;
+  flex-direction: column;
+  margin-top: 10px;
+}

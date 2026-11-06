@@ -42,8 +42,14 @@ function makeBridge(
       activeSource: "bundled" as const,
       restartRequired: false,
     })),
+    coreCheckUpdates: vi.fn(async () => ({
+      network: "ok" as const,
+      candidates: [],
+      cached: false,
+    })),
     tunHelperInfo: vi.fn(async () => ({
       runningBuild: null,
+      helperVersion: null,
       expectedBuild: "2026.11.1",
       stale: false,
       state: "not_running" as const,
@@ -53,11 +59,6 @@ function makeBridge(
       ok: true,
       restarted: true,
       needsAdminRestart: false,
-    })),
-    getDeepSeekKey: vi.fn(async () => ({
-      masked: null,
-      verified: false,
-      validation: "unverified",
     })),
     llmProviderList: vi.fn(async () => ({ providers: [], activeProviderId: null })),
     defaultProfileRefresh: vi.fn(refresh),
@@ -92,13 +93,15 @@ function renderSettings(
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}
       onAskAi={() => {}}
-      initialSection="advanced"
+      initialSection="network"
     />,
   );
 }
 
 function seedRow(): HTMLElement {
-  return screen.getByText("测试节点").closest(".settings-row") as HTMLElement;
+  return screen
+    .getByText("更新试用节点", { selector: ".settings-row__label" })
+    .closest(".settings-row") as HTMLElement;
 }
 
 function deferred<T>() {
@@ -111,7 +114,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-describe("测试节点纯函数", () => {
+describe("试用节点纯函数", () => {
   it("相对时间按分钟、小时、天分档", () => {
     const now = 10 * 86_400_000;
     expect(seedAgeLabel(now - 30_000, now)).toBe("刚刚");
@@ -121,7 +124,8 @@ describe("测试节点纯函数", () => {
     expect(seedAgeLabel(null, now)).toBe("从未");
   });
 
-  it("摘要省略空版本，节点为 0 时显示还没有节点", () => {
+  it("摘要说明来源、节点数与检查时间，不再显示版本号", () => {
+    expect(seedSummary(profile())).toBe("Veyl 提供的 12 个节点 · 3 小时前检查过");
     expect(
       seedSummary({
         packageId: "veyl_seed",
@@ -131,22 +135,20 @@ describe("测试节点纯函数", () => {
         nodeCount: 0,
         checkedAt: null,
       } as unknown as DefaultProfileStatus),
-    ).toBe("还没有节点 · 从未检查");
+    ).toBe("Veyl 提供的试用节点 · 从未检查过");
   });
 });
 
-describe("设置页测试节点行", () => {
-  it("高级页展示测试节点与检查更新，网络页不再保留默认配置源", async () => {
+describe("设置页试用节点行", () => {
+  it("连接页展示试用节点与检查更新，不再有问 AI 与地址行", async () => {
     renderSettings(makeBridge(async () => profile()));
 
-    expect(await screen.findByText("测试节点")).toBeTruthy();
+    expect(await screen.findByText("更新试用节点")).toBeTruthy();
     expect(within(seedRow()).getByRole("button", { name: "检查更新" })).toBeTruthy();
+    expect(screen.getByText("Veyl 提供的 12 个节点 · 3 小时前检查过")).toBeTruthy();
+    expect(within(seedRow()).queryByRole("button", { name: "问 AI" })).toBeNull();
     expect(screen.queryByText("测试节点地址")).toBeNull();
-    expect(screen.getByText(/v3 · 12 个节点 · 3 小时前检查/)).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "网络" }));
-    expect(screen.queryByText("默认配置源")).toBeNull();
-    expect(screen.queryByText("测试节点")).toBeNull();
+    expect(screen.queryByText("v3")).toBeNull();
   });
 
   it("检查中禁用按钮，完成后回到可用", async () => {
@@ -157,19 +159,23 @@ describe("设置页测试节点行", () => {
     const button = await screen.findByRole("button", { name: "检查更新" });
     fireEvent.click(button);
 
-    expect(await screen.findByText("正在检查测试节点…")).toBeTruthy();
-    expect((within(seedRow()).getByRole("button", { name: "检查中…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(await screen.findByText("正在检查…")).toBeTruthy();
+    expect(
+      (within(seedRow()).getByRole("button", { name: "检查中…" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
     expect(bridge.defaultProfileRefresh).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      gate.resolve(
-        profile({ version: "3", nodeCount: 12, source: "network", changed: false }),
-      );
+      gate.resolve(profile({ version: "3", nodeCount: 12, source: "network", changed: false }));
       await Promise.resolve();
     });
 
-    expect(await screen.findByText("已经是最新（刚刚检查）")).toBeTruthy();
-    expect((within(seedRow()).getByRole("button", { name: "检查更新" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(await screen.findByText("刚刚检查过，已经是最新。")).toBeTruthy();
+    expect(
+      (within(seedRow()).getByRole("button", { name: "检查更新" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
   });
 
   it("连点只发一次请求", async () => {
@@ -197,19 +203,18 @@ describe("设置页测试节点行", () => {
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
 
     expect(
-      await screen.findByText("已更新 3 个节点（共 12 个），下次连接生效"),
+      await screen.findByText("已更新 3 个节点，共 12 个。下次连接生效。"),
     ).toBeTruthy();
-    expect(screen.getByText(/v4 · 12 个节点/)).toBeTruthy();
   });
 
-  it("没有 added 时退回「已更新（共 M 个节点）」", async () => {
+  it("没有 added 时只说共多少个", async () => {
     const bridge = makeBridge(async () =>
       profile({ nodeCount: 12, source: "network", changed: true, added: null }),
     );
     renderSettings(bridge);
 
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    expect(await screen.findByText("已更新（共 12 个节点）")).toBeTruthy();
+    expect(await screen.findByText("已更新，共 12 个节点。")).toBeTruthy();
   });
 
   it("离线保留缓存时用 warn 文案，按钮不被锁死", async () => {
@@ -223,10 +228,11 @@ describe("设置页测试节点行", () => {
     renderSettings(bridge);
 
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+    expect(await screen.findByText("暂时连不上，继续用上次的 12 个节点。")).toBeTruthy();
     expect(
-      await screen.findByText("现在连不上，继续用上次的节点（2 小时前）"),
-    ).toBeTruthy();
-    expect((within(seedRow()).getByRole("button", { name: "检查更新" }) as HTMLButtonElement).disabled).toBe(false);
+      (within(seedRow()).getByRole("button", { name: "检查更新" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
   });
 
   it("内容异常时保留旧节点，并提供复制诊断信息", async () => {
@@ -241,7 +247,7 @@ describe("设置页测试节点行", () => {
     renderSettings(bridge);
 
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    expect(await screen.findByText("新内容有问题，已保留原来的节点")).toBeTruthy();
+    expect(await screen.findByText("新内容有问题，保留了原来的节点。")).toBeTruthy();
     const copy = within(seedRow()).getByRole("button", { name: "复制诊断信息" });
     fireEvent.click(copy);
 
@@ -250,34 +256,33 @@ describe("设置页测试节点行", () => {
     expect(await within(seedRow()).findByRole("button", { name: "已复制" })).toBeTruthy();
   });
 
-  it("无缓存且拉取失败时提示检查网络，不显示已是最新", async () => {
+  it("无缓存且拉取失败时提示检查网络", async () => {
     const bridge = makeBridge(async () => {
-      throw { code: "UPSTREAM_ERROR", message: "现在拿不到测试节点：offline" };
+      throw { code: "UPSTREAM_ERROR", message: "现在拿不到试用节点：offline" };
     });
     renderSettings(bridge);
 
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    expect(await screen.findByText("拿不到测试节点，请检查网络")).toBeTruthy();
+    expect(await screen.findByText("拿不到试用节点，请检查网络。")).toBeTruthy();
     expect(screen.queryByText(/已经是最新/)).toBeNull();
-    expect((within(seedRow()).getByRole("button", { name: "检查更新" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("刷新后切到网络再回高级，版本与节点数保持", async () => {
+  it("刷新后切走再回来，节点数保持", async () => {
     const bridge = makeBridge(async () =>
       profile({ version: "4", nodeCount: 18, source: "network", changed: true, added: 6 }),
     );
     renderSettings(bridge);
 
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    expect(await screen.findByText("已更新 6 个节点（共 18 个）")).toBeTruthy();
+    expect(await screen.findByText("已更新 6 个节点，共 18 个。")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "网络" }));
-    fireEvent.click(screen.getByRole("button", { name: "高级" }));
+    fireEvent.click(screen.getByRole("button", { name: "遇到问题" }));
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
 
-    expect(await screen.findByText(/v4 · 18 个节点/)).toBeTruthy();
+    expect(await screen.findByText(/Veyl 提供的 18 个节点/)).toBeTruthy();
   });
 
-  it("本机写入失败时提示没能保存到本机，旧缓存保留且按钮可用", async () => {
+  it("本机写入失败压成一行，旧缓存保留且按钮可用", async () => {
     // 真实形态是 source = network、changed = false：内容没问题，只是没写进本机。
     const bridge = makeBridge(async () =>
       profile({ source: "network", changed: false, reason: "local_write" }),
@@ -285,17 +290,14 @@ describe("设置页测试节点行", () => {
     renderSettings(bridge);
 
     fireEvent.click(within(seedRow()).getByRole("button", { name: "检查更新" }));
-    expect(await screen.findByText("没能保存到本机")).toBeTruthy();
-    expect(
-      screen.getByText("检查磁盘空间后重试，已经拉到的内容不会丢。"),
-    ).toBeTruthy();
-    expect(screen.getByText(/v3 · 12 个节点/)).toBeTruthy();
+    expect(await screen.findByText("没能保存到本机，检查磁盘空间后重试。")).toBeTruthy();
+    expect(screen.getByText(/Veyl 提供的 12 个节点/)).toBeTruthy();
     expect(
       (within(seedRow()).getByRole("button", { name: "检查更新" }) as HTMLButtonElement)
         .disabled,
     ).toBe(false);
-    expect(screen.queryByText("新内容有问题，已保留原来的节点")).toBeNull();
-    expect(screen.queryByText(/现在连不上/)).toBeNull();
+    expect(screen.queryByText(/新内容有问题/)).toBeNull();
+    expect(screen.queryByText(/现在连不上|暂时连不上/)).toBeNull();
   });
 
   it("当前节点被新版本删除时提示替代节点，连接中追加生效时机", async () => {

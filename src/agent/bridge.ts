@@ -313,6 +313,8 @@ export type TunHelperState =
 
 export interface TunHelperInfo {
   runningBuild: string | null;
+  /** 人读的版本号（旧 helper 不返回时为 null）；界面只显示这个，不显示构建哈希。 */
+  helperVersion: string | null;
   expectedBuild: string | null;
   stale: boolean;
   state: TunHelperState;

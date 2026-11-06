@@ -2,37 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentBridge, TunHelperInfo } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 
-interface Failure {
-  reason: string;
-  impact: string;
-  next: string;
-}
-
-const IMPACT = "直连可用，接管全部流量暂时不可用。";
-const RETRY_NEXT = "点「检查并更新」再试一次；仍失败就复制诊断信息发给助手。";
-
-const UPDATE_FAILED: Failure = {
-  reason: "后台组件没有更新成功。",
-  impact: IMPACT,
-  next: RETRY_NEXT,
-};
-
-const UPDATE_DENIED: Failure = {
-  reason: "没有获得管理员授权。",
-  impact: IMPACT,
-  next: "需要时再点「检查并更新」，输入管理员密码即可。",
-};
-
 export interface TunHelperController {
   loading: boolean;
   info: TunHelperInfo | null;
   available: boolean;
   busy: boolean;
-  failure: Failure | null;
+  failure: string | null;
   hint: string | null;
   adminHint: boolean;
-  loadFailed: boolean;
-  retry: () => void;
   restart: () => void;
 }
 
@@ -64,7 +41,7 @@ function isBusy(error: unknown): boolean {
   );
 }
 
-/** 后台组件状态与「检查并更新」；状态放在设置页顶层，切换分区不丢失。 */
+/** 后台组件状态与「更新」；状态放在设置页顶层，切换分区不丢失。 */
 export function useTunHelper({
   bridge,
   enabled,
@@ -76,10 +53,9 @@ export function useTunHelper({
   const [info, setInfo] = useState<TunHelperInfo | null>(null);
   const [available, setAvailable] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<Failure | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [adminHint, setAdminHint] = useState(false);
-  const [loadFailed, setLoadFailed] = useState(false);
 
   const mounted = useRef(true);
   const seq = useRef(0);
@@ -96,7 +72,6 @@ export function useTunHelper({
     async (showLoading: boolean) => {
       const id = ++seq.current;
       if (showLoading) setLoading(true);
-      setLoadFailed(false);
       try {
         const next = await bridge.tunHelperInfo();
         if (!mounted.current || id !== seq.current) return;
@@ -109,7 +84,7 @@ export function useTunHelper({
           setInfo(null);
           setAvailable(false);
         } else {
-          setLoadFailed(true);
+          setInfo(null);
         }
       } finally {
         if (mounted.current && id === seq.current) setLoading(false);
@@ -125,12 +100,6 @@ export function useTunHelper({
     void load(true);
   }, [enabled, load]);
 
-  const retry = useCallback(() => {
-    setFailure(null);
-    setHint(null);
-    void load(true);
-  }, [load]);
-
   const restart = useCallback(async () => {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -142,10 +111,14 @@ export function useTunHelper({
       if (!mounted.current) return;
       setAdminHint(result.needsAdminRestart);
       if (!result.ok) {
-        setFailure(UPDATE_FAILED);
+        setFailure(
+          result.needsAdminRestart
+            ? "这次没有授权，可以再试一次。"
+            : "更新没有完成，请稍后再试。",
+        );
         return;
       }
-      setHint(result.needsAdminRestart ? null : "后台组件已更新。");
+      setHint("后台组件已更新。");
       await load(false);
     } catch (error) {
       if (!mounted.current) return;
@@ -154,12 +127,12 @@ export function useTunHelper({
         return;
       }
       if (isBusy(error)) {
-        setFailure(null);
-        setAdminHint(false);
-        setHint("正在准备，请稍后再试");
+        setHint("正在准备，请稍后再试。");
         return;
       }
-      setFailure(isDenied(error) ? UPDATE_DENIED : UPDATE_FAILED);
+      setFailure(
+        isDenied(error) ? "这次没有授权，可以再试一次。" : "更新没有完成，请稍后再试。",
+      );
     } finally {
       busyRef.current = false;
       if (mounted.current) setBusy(false);
@@ -174,8 +147,6 @@ export function useTunHelper({
     failure,
     hint,
     adminHint,
-    loadFailed,
-    retry,
     restart,
   };
 }
@@ -191,37 +162,31 @@ function StatusLine({
     case "running":
       return (
         <p className="tun-helper__status">
-          {info.runningBuild ? `正在使用 ${info.runningBuild}` : "正在使用"}
+          {info.helperVersion ? `已是最新（${info.helperVersion}）` : "已是最新"}
         </p>
       );
     case "not_running":
-      return <p className="tun-helper__status">空闲已退出，下次连接会自动启动</p>;
+      return <p className="tun-helper__status">现在没有运行，连接时会自动启动。</p>;
     case "stale":
       return (
-        <p className={`tun-helper__status${activeConnection ? "" : " is-warn"}`}>
-          需要更新，连接结束后生效
+        <p className="tun-helper__status">
+          {activeConnection ? "有更新，断开后自动完成。" : "有更新，下次连接时自动完成。"}
         </p>
       );
     case "start_failed":
       return (
-        <>
-          <p className="tun-helper__status is-error">没有启动成功</p>
-          <p className="settings-note">{IMPACT}</p>
-          <p className="settings-note">{RETRY_NEXT}</p>
-        </>
+        <p className="tun-helper__status is-error">
+          没有启动成功，连接「全部流量」时会再试一次。
+        </p>
       );
     case "file_invalid":
       return (
-        <>
-          <p className="tun-helper__status is-error">文件校验失败，重新安装可修复</p>
-          <p className="settings-note">{IMPACT}</p>
-          <p className="settings-note">
-            点「检查并更新」重新安装；仍失败就复制诊断信息发给助手。
-          </p>
-        </>
+        <p className="tun-helper__status is-error">
+          文件校验失败，重新安装 Veyl 可以修复。
+        </p>
       );
     default:
-      return <p className="tun-helper__status">状态未知</p>;
+      return <p className="tun-helper__status">暂时读不到后台组件状态。</p>;
   }
 }
 
@@ -231,27 +196,14 @@ interface RowProps {
 }
 
 export function TunHelperRow({ controller, activeConnection }: RowProps) {
-  const {
-    loading,
-    info,
-    available,
-    busy,
-    failure,
-    hint,
-    adminHint,
-    loadFailed,
-    retry,
-    restart,
-  } = controller;
-
-  const staleWaiting = info?.state === "stale" && activeConnection;
-  const canRestart = available && !loading && !busy && !staleWaiting;
+  const { loading, info, available, busy, failure, hint, adminHint, restart } = controller;
+  const showAdmin = adminHint && available && !loading && info?.state !== "file_invalid";
 
   return (
     <div className="settings-row settings-row--stack">
       <div className="tun-helper">
-        <div className="settings-row__label">后台组件</div>
-        <div className="settings-row__value">接管全部流量所需的系统服务。</div>
+        <div className="settings-row__label">更新后台组件</div>
+        <div className="settings-row__value">接管全部流量时要用的系统服务。</div>
 
         {loading ? <p className="settings-note tun-helper__status">正在读取状态…</p> : null}
         {!loading && info ? (
@@ -261,41 +213,30 @@ export function TunHelperRow({ controller, activeConnection }: RowProps) {
           <p className="settings-note tun-helper__status">暂时读不到后台组件状态。</p>
         ) : null}
 
-        {adminHint && available && !loading && info?.state !== "file_invalid" ? (
-          <p className="settings-note">
-            后台组件需要更新：连接「全部流量」时会请求一次系统授权。
-          </p>
-        ) : null}
-        {staleWaiting ? (
-          <p className="settings-note">连接结束后会自动更新。</p>
+        {showAdmin ? (
+          <p className="settings-note">需要更新：连接「全部流量」时会请求一次系统授权。</p>
         ) : null}
 
         {failure ? (
-          <div className="tun-helper__failure" role="alert">
-            <p className="settings-feedback settings-feedback--error">{failure.reason}</p>
-            <p className="settings-note">{failure.impact}</p>
-            <p className="settings-note">{failure.next}</p>
-          </div>
+          <p className="settings-feedback settings-feedback--error" role="alert">
+            {failure}
+          </p>
         ) : null}
         {hint ? <p className="settings-feedback settings-feedback--ok">{hint}</p> : null}
       </div>
 
-      <div className="settings-row__aside">
-        {!available || loading ? null : loadFailed && !info ? (
-          <button type="button" className="btn btn--ghost" onClick={retry}>
-            重试
-          </button>
-        ) : (
+      {showAdmin ? (
+        <div className="settings-row__aside">
           <button
             type="button"
             className="btn btn--ghost"
-            disabled={!canRestart}
+            disabled={busy}
             onClick={() => void restart()}
           >
-            {busy ? "正在检查…" : staleWaiting ? "连接结束后自动更新" : "检查并更新"}
+            {busy ? "更新中…" : "更新"}
           </button>
-        )}
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }

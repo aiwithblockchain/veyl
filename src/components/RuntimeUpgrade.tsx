@@ -14,7 +14,7 @@ type UpgradePhase =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "up_to_date" }
-  | { kind: "available"; candidate: CoreUpdateCandidate; cached: boolean }
+  | { kind: "available"; candidate: CoreUpdateCandidate }
   | { kind: "unreachable"; network: "unreachable" | "source_error" }
   | {
       kind: "downloading";
@@ -52,13 +52,11 @@ export interface RuntimeUpgradeController {
   /** 当前有连接在跑；决定升级成功后的生效时机文案。 */
   connected: boolean;
   startCheck: () => void;
-  cancelCheck: () => void;
   startUpgrade: () => void;
   cancelUpgrade: () => void;
   rollback: () => void;
   retry: () => void;
   dismiss: () => void;
-  useBundled: () => void;
   copyDiagnostics: () => void;
 }
 
@@ -233,7 +231,7 @@ export function useRuntimeUpgrade({
             : targetRef.current
               ? { version: targetRef.current, size: 0 }
               : null;
-        setPhase(candidate ? { kind: "available", candidate, cached: false } : { kind: "idle" });
+        setPhase(candidate ? { kind: "available", candidate } : { kind: "idle" });
         void refreshInfo();
       } else {
         setPhase({
@@ -307,18 +305,15 @@ export function useRuntimeUpgrade({
       try {
         const result = await bridge.coreCheckUpdates();
         if (checkEpochRef.current !== epoch) return;
-        // 非缓存结果只要联网失败就短路，候选一律不展示。
-        if (result.network !== "ok" && !result.cached) {
+        // 联网失败一律按「继续用自带的版本」处理，不拿缓存结果提供升级。
+        if (result.network !== "ok") {
           setPhase({ kind: "unreachable", network: result.network });
           return;
         }
         const best = pickLatest(result.candidates);
         if (best) {
           candidateRef.current = best;
-          setPhase({ kind: "available", candidate: best, cached: result.cached });
-        } else if (result.network !== "ok") {
-          // 缓存里也没有比当前新的版本，仍然按连不上处理。
-          setPhase({ kind: "unreachable", network: result.network });
+          setPhase({ kind: "available", candidate: best });
         } else {
           setPhase({ kind: "up_to_date" });
         }
@@ -335,10 +330,24 @@ export function useRuntimeUpgrade({
     })();
   }, [bridge]);
 
-  const cancelCheck = useCallback(() => {
-    checkEpochRef.current += 1;
-    setPhase({ kind: "idle" });
-  }, []);
+  // 打开这一页时自动检查一次：只取版本清单，不下载。
+  const autoCheckedRef = useRef(false);
+  useEffect(() => {
+    if (!enabled) {
+      autoCheckedRef.current = false;
+      return;
+    }
+    if (autoCheckedRef.current) return;
+    if (
+      phase.kind !== "idle" &&
+      phase.kind !== "up_to_date" &&
+      phase.kind !== "unreachable"
+    ) {
+      return;
+    }
+    autoCheckedRef.current = true;
+    startCheck();
+  }, [enabled, phase.kind, startCheck]);
 
   const cancelUpgrade = useCallback(() => {
     const jobId = jobRef.current;
@@ -367,7 +376,7 @@ export function useRuntimeUpgrade({
             : target
               ? { version: target, size: 0 }
               : null;
-        setPhase(candidate ? { kind: "available", candidate, cached: false } : { kind: "idle" });
+        setPhase(candidate ? { kind: "available", candidate } : { kind: "idle" });
       } catch (error) {
         if (isMissingCommand(error)) setNote("当前版本还不支持取消升级。");
       }
@@ -449,7 +458,7 @@ export function useRuntimeUpgrade({
 
   const startUpgrade = useCallback(() => {
     const current = phaseRef.current;
-    if (current.kind === "available" && !current.cached) runUpgrade(current.candidate);
+    if (current.kind === "available") runUpgrade(current.candidate);
   }, [runUpgrade]);
 
   const runRollback = useCallback(async () => {
@@ -471,12 +480,12 @@ export function useRuntimeUpgrade({
     } catch (error) {
       if (isMissingCommand(error)) {
         setReadOnly(true);
-        setNote("当前版本还不支持切回随包版本。");
+        setNote("当前版本还不支持换回自带的版本。");
         return;
       }
       const { code } = toBridgeError(error);
       if (code === "NOT_FOUND") {
-        // 没有可回退的版本，等价于已经在用随包版本。
+        // 没有可回退的版本，等价于已经在用自带的版本。
         setInfo((current) =>
           current
             ? { ...current, activeVersion: current.bundledVersion, activeSource: "bundled" }
@@ -523,14 +532,6 @@ export function useRuntimeUpgrade({
     setPhase({ kind: "idle" });
   }, []);
 
-  const useBundled = useCallback(() => {
-    if (info?.activeSource === "installed") {
-      void runRollback();
-      return;
-    }
-    dismiss();
-  }, [dismiss, info?.activeSource, runRollback]);
-
   const copyDiagnostics = useCallback(() => {
     const current = phaseRef.current;
     const payload = {
@@ -565,13 +566,11 @@ export function useRuntimeUpgrade({
     fromChat,
     connected,
     startCheck,
-    cancelCheck,
     startUpgrade,
     cancelUpgrade,
     rollback,
     retry,
     dismiss,
-    useBundled,
     copyDiagnostics,
   };
 }
@@ -579,30 +578,26 @@ export function useRuntimeUpgrade({
 function statusText(phase: UpgradePhase, info: CoreInfo | null, connected: boolean): string {
   switch (phase.kind) {
     case "loading":
-      return "正在读取运行时信息…";
+      return "正在读取连接程序信息…";
     case "unsupported":
-      return "暂时读不到运行时信息。";
+      return "暂时读不到连接程序信息。";
     case "idle":
-      if (!info) return "暂时读不到运行时信息。";
+      if (!info) return "暂时读不到连接程序信息。";
       if (info.activeSource === "installed") {
-        const bundled = info.bundledVersion ? `（随包 ${info.bundledVersion}）` : "";
+        const bundled = info.bundledVersion ? `（自带 ${info.bundledVersion}）` : "";
         return `正在使用 ${info.activeVersion || "已安装版本"}${bundled}`;
       }
-      return info.activeVersion
-        ? `正在使用随包版本 ${info.activeVersion}`
-        : "正在使用随包版本";
+      return info.activeVersion ? `正在使用 ${info.activeVersion}` : "正在使用自带的版本";
     case "checking":
       return "正在检查更新…";
     case "up_to_date":
-      return "已是最新版本";
+      return info?.activeVersion ? `已是最新 · 版本 ${info.activeVersion}` : "已是最新";
     case "available": {
       const size = formatByteSize(phase.candidate.size);
-      return `可升级到 ${phase.candidate.version}${size ? `（约 ${size}）` : ""}`;
+      return `有新版本 ${phase.candidate.version}${size ? `（约 ${size}）` : ""}`;
     }
     case "unreachable":
-      return phase.network === "source_error"
-        ? "更新源暂时不可用"
-        : "连不上更新服务器";
+      return "暂时连不上更新服务器，继续用自带的版本。";
     case "downloading": {
       const ratio =
         phase.total && phase.total > 0 ? phase.received / phase.total : null;
@@ -631,19 +626,17 @@ function announceText(
 ): string {
   switch (phase.kind) {
     case "loading":
-      return "正在读取运行时信息";
+      return "正在读取连接程序信息";
     case "unsupported":
-      return "暂时读不到运行时信息";
+      return "暂时读不到连接程序信息";
     case "idle":
       return statusText(phase, info, connected);
     case "checking":
       return "正在检查更新";
     case "up_to_date":
-      return "已是最新版本";
+      return "已是最新";
     case "available":
-      return phase.cached
-        ? `发现新版本 ${phase.candidate.version}，来自上次检查`
-        : `发现新版本 ${phase.candidate.version}`;
+      return `发现新版本 ${phase.candidate.version}`;
     case "unreachable":
       return statusText(phase, info, connected);
     case "downloading":
@@ -682,7 +675,7 @@ function statusTone(phase: UpgradePhase): string {  if (phase.kind === "failed")
 }
 
 function failureReason(phase: Extract<UpgradePhase, { kind: "failed" }>): string {
-  if (phase.operation === "rollback") return "没有切回随包版本。";
+  if (phase.operation === "rollback") return "没有换回自带的版本。";
   const code = (phase.code ?? "").toUpperCase();
   if (code.includes("HASH") || code.includes("CHECKSUM") || code.includes("INTEGRITY")) {
     return "安装包校验没有通过。";
@@ -729,8 +722,8 @@ export function RuntimeUpgradeRow({
   return (
     <div className="settings-row core-upgrade">
       <div className="core-upgrade__main">
-        <div className="settings-row__label">运行时</div>
-        <div className="settings-row__value">建立连接时实际运行的程序。</div>
+        <div className="settings-row__label">连接程序</div>
+        <div className="settings-row__value">真正建立连接的程序。</div>
 
         <p className="sr-only" role="status" aria-live="polite">
           {announceText(phase, info, connected)}
@@ -741,8 +734,8 @@ export function RuntimeUpgradeRow({
             <p>{failureReason(phase)}</p>
             <p>
               {phase.operation === "rollback"
-                ? "当前的运行时没有被改动，连接和配置也没有变化。"
-                : "当前的运行时没有被替换，连接和配置都没有改动。"}
+                ? "当前的连接程序没有被改动，连接和配置也没有变化。"
+                : "当前的连接程序没有被替换，连接和配置都没有改动。"}
             </p>
             <p>
               {phase.operation === "rollback"
@@ -760,9 +753,6 @@ export function RuntimeUpgradeRow({
 
         {phase.kind === "idle" && info?.restartRequired ? (
           <p className="core-upgrade__note">新版本会在重启 Veyl 后生效。</p>
-        ) : null}
-        {phase.kind === "available" && phase.cached ? (
-          <p className="core-upgrade__cached">上次检查的结果，可能不是最新</p>
         ) : null}
         {note ? <p className="core-upgrade__note">{note}</p> : null}
 
@@ -785,58 +775,23 @@ export function RuntimeUpgradeRow({
 
       {controller.readOnly ? null : (
         <div className="settings-row__aside core-upgrade__actions" ref={actionsRef}>
-        {phase.kind === "idle" ? (
-          <>
-            <button type="button" className="btn btn--ghost" onClick={controller.startCheck}>
-              检查更新
-            </button>
-            {info?.activeSource === "installed" ? (
-              <button type="button" className="btn btn--ghost" onClick={controller.rollback}>
-                回到随包版本
-              </button>
-            ) : null}
-          </>
-        ) : null}
-
-        {phase.kind === "checking" ? (
-          <button type="button" className="btn btn--ghost" onClick={controller.cancelCheck}>
-            取消
-          </button>
-        ) : null}
-
-        {phase.kind === "up_to_date" ? (
-          <button type="button" className="btn btn--ghost" onClick={controller.startCheck}>
-            重新检查
+        {(phase.kind === "idle" || phase.kind === "up_to_date") &&
+        info?.activeSource === "installed" ? (
+          <button type="button" className="btn btn--ghost" onClick={controller.rollback}>
+            换回自带的版本
           </button>
         ) : null}
 
         {phase.kind === "available" ? (
-          <>
-            {phase.cached ? (
-              // 缓存结果可能过期：先重新检查，不直接给升级入口。
-              <button type="button" className="btn btn--primary" onClick={controller.startCheck}>
-                重新检查
-              </button>
-            ) : (
-              <button type="button" className="btn btn--primary" onClick={controller.startUpgrade}>
-                升级
-              </button>
-            )}
-            <button type="button" className="btn btn--ghost" onClick={controller.dismiss}>
-              取消
-            </button>
-          </>
+          <button type="button" className="btn btn--primary" onClick={controller.startUpgrade}>
+            升级
+          </button>
         ) : null}
 
         {phase.kind === "unreachable" ? (
-          <>
-            <button type="button" className="btn btn--ghost" onClick={controller.startCheck}>
-              重试
-            </button>
-            <button type="button" className="btn btn--ghost" onClick={controller.useBundled}>
-              用随包版本继续
-            </button>
-          </>
+          <button type="button" className="btn btn--ghost" onClick={controller.startCheck}>
+            再试一次
+          </button>
         ) : null}
 
         {phase.kind === "downloading" || phase.kind === "verifying" ? (

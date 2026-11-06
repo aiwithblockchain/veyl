@@ -34,10 +34,16 @@ function makeBridge(
     })),
     tunHelperInfo: vi.fn(async () => ({
       runningBuild: null,
+      helperVersion: null,
       expectedBuild: "2026.11.1",
       stale: false,
       state: "not_running" as const,
       needsAdminRestart: false,
+    })),
+    coreCheckUpdates: vi.fn(async () => ({
+      network: "ok" as const,
+      candidates: [],
+      cached: false,
     })),
     tunHelperRestart: vi.fn(async () => ({
       ok: true,
@@ -174,21 +180,14 @@ describe("强制重置网络的纯函数", () => {
   });
 });
 
-describe("设置 → 高级 → 诊断", () => {
-  it("网络分区改叫「恢复直连」，说明写清它不会断开「全部流量」", async () => {
+describe("设置 → 遇到问题 → 修复网络", () => {
+  it("强制重置独立成危险区域，入口在修复组里", async () => {
     const bridge = makeBridge();
     renderSettings(bridge);
-    await screen.findByRole("button", { name: "强制重置网络" });
-
-    fireEvent.click(screen.getByRole("button", { name: "网络" }));
-    expect(screen.getByText("恢复直连", { selector: ".settings-row__label" })).toBeTruthy();
-    expect(
-      screen.getByText("撤销系统代理并停止运行时；不会断开「全部流量」。"),
-    ).toBeTruthy();
-    expect(
-      screen.getByText("要断开「全部流量」，回主界面点「断开 VPN」。"),
-    ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "恢复网络" })).toBeNull();
+    const trigger = await screen.findByRole("button", { name: "强制重置网络" });
+    expect(trigger.className).toContain("btn--danger-ghost");
+    expect(trigger.closest(".danger-zone")).not.toBeNull();
+    expect(screen.getByText("修复网络")).toBeTruthy();
   });
 
   it("入口先弹二次确认，初始焦点在「取消」而不是危险按钮", async () => {
@@ -196,10 +195,13 @@ describe("设置 → 高级 → 诊断", () => {
     renderSettings(bridge);
     const { dialog } = await openConfirm();
 
-    expect(within(dialog).getByText("这是最后手段。先到「网络」里点「恢复直连」；只有它无效时再继续。")).toBeTruthy();
-    expect(within(dialog).getByText("会发生什么")).toBeTruthy();
-    expect(within(dialog).getByText("不会发生什么")).toBeTruthy();
-    expect(within(dialog).getByText("现在做什么")).toBeTruthy();
+    expect(
+      within(dialog).getByText(
+        "当前连接会立即断开。Veyl 会停掉后台服务、撤销系统代理、恢复路由和 DNS； 不会删除配置和节点。",
+        { normalizer: (text) => text.replace(/\s+/g, " ").trim() },
+      ),
+    ).toBeTruthy();
+    expect(within(dialog).getByText("正在开会或下载时，等结束再做。")).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "强制重置" }).className).toContain(
       "btn--danger-ghost",
     );
@@ -256,7 +258,7 @@ describe("设置 → 高级 → 诊断", () => {
     const result = await screen.findByRole("dialog", { name: "网络已重置" });
     expect(within(result).getByText("八项检查都通过。需要时再点「启动 VPN」。")).toBeTruthy();
     expect(within(result).getAllByText("已完成")).toHaveLength(8);
-    expect(within(result).getByText("停止运行时")).toBeTruthy();
+    expect(within(result).getByText("停止连接程序")).toBeTruthy();
     expect(within(result).getByText("关闭接管")).toBeTruthy();
     expect(within(result).getByText("复查网络状态")).toBeTruthy();
     // 成功行用固定说明，不直接抛后端里带内部路径的 detail。
