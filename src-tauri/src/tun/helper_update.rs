@@ -91,6 +91,9 @@ struct Flags {
     /// 管理员授权只尝试一次。
     #[cfg(target_os = "macos")]
     admin_attempted: bool,
+    /// 静默路径发现旧 helper 不认识 `restart`：等用户真正请求 TUN 时再要授权。
+    #[cfg(target_os = "macos")]
+    admin_required: bool,
 }
 
 pub struct HelperUpdater {
@@ -99,6 +102,13 @@ pub struct HelperUpdater {
     /// App 启动到退出的 presence 租约。进程结束时内核关闭连接，helper 据此
     /// 在 5 秒后停隧道并退出——崩溃/强杀也一样。
     presence: Mutex<Option<TunLease>>,
+    /// 弹管理员授权对话框的唯一出口；测试里换成计数器。
+    #[cfg(target_os = "macos")]
+    admin_restart: Arc<dyn Fn() -> bool + Send + Sync>,
+    #[cfg(test)]
+    poll_timeout: Duration,
+    #[cfg(test)]
+    info_override: Mutex<Option<HelperInfo>>,
 }
 
 impl HelperUpdater {
@@ -107,6 +117,27 @@ impl HelperUpdater {
             backend,
             flags: Mutex::new(Flags::default()),
             presence: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            admin_restart: Arc::new(macos::run_admin_restart),
+            #[cfg(test)]
+            poll_timeout: POLL_TIMEOUT,
+            #[cfg(test)]
+            info_override: Mutex::new(None),
+        }
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    fn for_test(
+        backend: Arc<dyn TunBackend>,
+        admin_restart: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Self {
+        Self {
+            backend,
+            flags: Mutex::new(Flags::default()),
+            presence: Mutex::new(None),
+            admin_restart,
+            poll_timeout: Duration::ZERO,
+            info_override: Mutex::new(None),
         }
     }
 
@@ -145,6 +176,11 @@ impl HelperUpdater {
 
     /// 当前状态。只读、不写盘；status 调用本身会让 launchd 按需拉起 helper。
     pub fn info(&self) -> HelperInfo {
+        #[cfg(test)]
+        if let Some(info) = self.info_override.lock().unwrap().clone() {
+            return info;
+        }
+
         #[cfg(not(target_os = "macos"))]
         {
             HelperInfo {
@@ -189,16 +225,28 @@ impl HelperUpdater {
                             (true, HelperState::Stale)
                         }
                     };
+                    let needs_admin_restart = match state {
+                        HelperState::Running => false,
+                        // 静默换不动（旧 helper）或上次失败：界面要能提前说
+                        // 「连接全部流量时会请求授权」，别等点了才弹。
+                        _ => {
+                            let flags = self.flags.lock().unwrap();
+                            flags.admin_required || flags.start_failed
+                        }
+                    };
                     HelperInfo {
                         running_build,
                         expected_build: expected,
                         stale,
                         state,
-                        needs_admin_restart: false,
+                        needs_admin_restart,
                     }
                 }
                 Err(error) => {
-                    let start_failed = self.flags.lock().unwrap().start_failed;
+                    let (start_failed, admin_required) = {
+                        let flags = self.flags.lock().unwrap();
+                        (flags.start_failed, flags.admin_required)
+                    };
                     log::debug!("helper status 不可用：{error}");
                     HelperInfo {
                         running_build: None,
@@ -209,16 +257,27 @@ impl HelperUpdater {
                         } else {
                             HelperState::NotRunning
                         },
-                        needs_admin_restart: start_failed,
+                        needs_admin_restart: start_failed || admin_required,
                     }
                 }
             }
         }
     }
 
-    /// 换新映像并等到 cdhash 一致。TUN 在跑时调用方应先断开。
-    pub fn restart(&self) -> HelperRestartReport {
+    /// 静默换新：启动检查与 6 小时轮询只走这条路。
+    /// 旧 helper 不认识 `restart` 时**不弹管理员授权**，只记下待授权状态。
+    pub fn restart_silent(&self) -> HelperRestartReport {
         let info = self.info();
+        self.restart_with(info, false)
+    }
+
+    /// 用户主动请求 TUN、或显式点「重启」时才允许走这条路：旧 helper 会弹一次授权。
+    pub fn restart_with_admin(&self) -> HelperRestartReport {
+        let info = self.info();
+        self.restart_with(info, true)
+    }
+
+    fn restart_with(&self, info: HelperInfo, allow_admin: bool) -> HelperRestartReport {
         if info.state == HelperState::FileInvalid {
             return HelperRestartReport {
                 ok: false,
@@ -234,10 +293,10 @@ impl HelperUpdater {
             Err(error) if is_bad_request(&error) => {
                 // 只有旧 helper 不认识 restart 才值得走管理员授权：
                 // 服务没注册/未批准时 kickstart 必然失败，不能白弹一次密码框。
-                log::warn!("旧 helper 不认识 restart，转入管理员重启：{}", error.message);
-                #[cfg(not(target_os = "macos"))]
-                {
-                    self.flags.lock().unwrap().start_failed = true;
+                log::warn!("旧 helper 不认识 restart：{}", error.message);
+                if !allow_admin {
+                    log::info!("后台组件待更新，需要管理员授权；等用户连接全部流量时再请求");
+                    self.mark_admin_required();
                     return HelperRestartReport {
                         ok: false,
                         restarted: false,
@@ -246,7 +305,11 @@ impl HelperUpdater {
                     };
                 }
                 #[cfg(target_os = "macos")]
-                if !self.try_admin_restart() {
+                let granted = self.try_admin_restart();
+                #[cfg(not(target_os = "macos"))]
+                let granted = false;
+                if !granted {
+                    self.mark_admin_required();
                     self.flags.lock().unwrap().start_failed = true;
                     return HelperRestartReport {
                         ok: false,
@@ -285,8 +348,17 @@ impl HelperUpdater {
         let ok = self.poll_until_fresh();
         // 换映像后旧 presence 连接已断：立刻给新 helper 一条新租约。
         let _ = self.refresh_presence();
-        if !ok {
-            self.flags.lock().unwrap().start_failed = true;
+        {
+            let mut flags = self.flags.lock().unwrap();
+            if ok {
+                flags.start_failed = false;
+                #[cfg(target_os = "macos")]
+                {
+                    flags.admin_required = false;
+                }
+            } else {
+                flags.start_failed = true;
+            }
         }
         HelperRestartReport {
             ok,
@@ -296,13 +368,21 @@ impl HelperUpdater {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn mark_admin_required(&self) {
+        self.flags.lock().unwrap().admin_required = true;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn mark_admin_required(&self) {}
+
     /// 用户显式点「重试授权」时调用：允许再尝试一次管理员授权。
     pub fn restart_from_user(&self) -> HelperRestartReport {
         #[cfg(target_os = "macos")]
         {
             self.flags.lock().unwrap().admin_attempted = false;
         }
-        self.restart()
+        self.restart_with_admin()
     }
 
     /// 连接 TUN 之前再比对一次：不一致就先升级；升级不成让本次连接失败。
@@ -339,12 +419,10 @@ impl HelperUpdater {
                         .into(),
                     "helper_file_invalid",
                 )),
-                HelperState::StartFailed => Err((
-                    "后台组件启动失败，需要管理员重新授权。代理模式与直连仍可用。".into(),
-                    "helper_needs_admin",
-                )),
-                HelperState::NotRunning | HelperState::Stale => {
-                    let report = self.restart();
+                // 用户这次确实要用全部流量：允许在这里弹一次管理员授权。
+                // 静默路径失败过（旧 helper）时，正是这一下把它换新。
+                HelperState::StartFailed | HelperState::NotRunning | HelperState::Stale => {
+                    let report = self.restart_with_admin();
                     if report.ok {
                         Ok(())
                     } else if report.busy {
@@ -365,6 +443,10 @@ impl HelperUpdater {
     }
 
     /// 后台检查：启动后一次 + 每 6 小时一次。TUN 在跑时等断开 5 秒再换。
+    ///
+    /// **只走静默路径**：用户可能根本不用全部流量，不能因为 helper 待更新就在
+    /// 启动时弹 root 密码框。旧 helper 只记 `needs_admin_restart`，等用户请求
+    /// TUN（或自己点「重启」）时再授权。
     pub fn check_and_upgrade(&self) {
         // 每轮都刷新 presence：helper 被外部重启/空闲退出过也能自动补上。
         let _ = self.refresh_presence();
@@ -388,7 +470,7 @@ impl HelperUpdater {
             }
         }
 
-        let report = self.restart();
+        let report = self.restart_silent();
         log::info!(
             "helper 自助升级 ok={} restarted={} needs_admin={} busy={}",
             report.ok,
@@ -419,7 +501,11 @@ impl HelperUpdater {
     }
 
     fn poll_until_fresh(&self) -> bool {
-        let deadline = Instant::now() + POLL_TIMEOUT;
+        #[cfg(test)]
+        let timeout = self.poll_timeout;
+        #[cfg(not(test))]
+        let timeout = POLL_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             std::thread::sleep(POLL_INTERVAL);
             if self.info().state == HelperState::Running {
@@ -439,32 +525,7 @@ impl HelperUpdater {
             }
             flags.admin_attempted = true;
         }
-        let script = "do shell script \"/bin/launchctl kickstart -k system/com.veyl.helper\" with administrator privileges";
-        match std::process::Command::new("/usr/bin/osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-        {
-            Ok(output) => {
-                // 密码只进系统对话框；这里只根据退出码与「用户取消」标记记录，
-                // 绝不把 stderr 原文写进日志。
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let cancelled = stderr.contains("-128") || stderr.contains("User canceled");
-                if cancelled {
-                    log::info!("管理员授权被用户取消（-128），本次不自动重试；界面可重试授权");
-                } else {
-                    log::info!(
-                        "管理员重启 helper 结束 exit={:?}",
-                        output.status.code()
-                    );
-                }
-                output.status.success()
-            }
-            Err(error) => {
-                log::warn!("调用 osascript 失败：{error}");
-                false
-            }
-        }
+        (self.admin_restart)()
     }
 }
 
@@ -506,6 +567,48 @@ fn is_precondition_failed(error: &super::backend::TunError) -> bool {
 mod macos {
     use std::ffi::{c_char, c_void, CString};
     use std::path::Path;
+
+    /// 授权对话框正文。标题从 Monterey 起固定是 "osascript"（经 osascript 调用
+    /// 的已知限制），所以身份说明必须写在正文里。
+    /// 界面设计定稿（`docs/design/helper-update.md`）到位后以定稿为准。
+    pub(super) const ADMIN_PROMPT: &str = "Veyl 需要更新后台组件，它负责「全部流量走 VPN」。这次授权只用于更新，之后会自动完成，不会再要求输入密码。";
+
+    /// AppleScript 字符串字面量：`"` 与 `\` 必须转义；中文引号「」是普通字符。
+    pub(super) fn applescript_quote(text: &str) -> String {
+        let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    }
+
+    /// 管理员重启：唯一会弹系统密码框的地方。
+    ///
+    /// 密码只进系统对话框；这里只根据退出码与「用户取消」标记记录，
+    /// 绝不把 stderr 原文写进日志。
+    pub(super) fn run_admin_restart() -> bool {
+        let script = format!(
+            "do shell script \"/bin/launchctl kickstart -k system/com.veyl.helper\" with prompt {} with administrator privileges",
+            applescript_quote(ADMIN_PROMPT)
+        );
+        match std::process::Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+        {
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let cancelled = stderr.contains("-128") || stderr.contains("User canceled");
+                if cancelled {
+                    log::info!("管理员授权被用户取消（-128），本次不自动重试；界面可重试授权");
+                } else {
+                    log::info!("管理员重启 helper 结束 exit={:?}", output.status.code());
+                }
+                output.status.success()
+            }
+            Err(error) => {
+                log::warn!("调用 osascript 失败：{error}");
+                false
+            }
+        }
+    }
 
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
@@ -855,5 +958,133 @@ mod tests {
 
         assert!(is_precondition_failed(&error));
         assert!(!is_bad_request(&error), "不能被当成旧 helper");
+    }
+
+    /// 授权时机（PM 2026-11-06）：只用代理模式的用户，启动时不能被弹 root 密码。
+    #[cfg(target_os = "macos")]
+    mod admin_restart_tests {
+        use crate::tun::backend::{StartReply, TunError, TunErrorCode, TunSnapshot};
+        use crate::tun::privilege::HelperStatus;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum RestartReply {
+            /// 新 helper，认识 `restart`。
+            Supported,
+            /// 旧 helper，回 `bad_request`。
+            OldHelper,
+        }
+
+        struct FakeBackend {
+            reply: RestartReply,
+        }
+
+        impl TunBackend for FakeBackend {
+            fn availability(&self) -> Result<HelperStatus, TunError> {
+                Ok(HelperStatus::Enabled)
+            }
+
+            fn ensure_available(&self) -> Result<HelperStatus, TunError> {
+                Ok(HelperStatus::Enabled)
+            }
+
+            fn start(&self, _config: &str) -> Result<StartReply, TunError> {
+                unreachable!("测试不启动隧道")
+            }
+
+            fn stop(&self) -> Result<(), TunError> {
+                Ok(())
+            }
+
+            fn status(&self) -> Result<TunSnapshot, TunError> {
+                Ok(TunSnapshot {
+                    running: false,
+                    pid: None,
+                    clash_api: None,
+                    since: None,
+                    last_error: None,
+                    helper_build: None,
+                    helper_version: None,
+                    helper_pid: None,
+                })
+            }
+
+            fn restart(&self) -> Result<(), TunError> {
+                match self.reply {
+                    RestartReply::Supported => Ok(()),
+                    RestartReply::OldHelper => Err(TunError::new(
+                        TunErrorCode::BadRequest,
+                        "未知方法 restart",
+                    )
+                    .with_detail(serde_json::json!({ "wire_code": "bad_request" }))),
+                }
+            }
+        }
+
+        /// cdhash 不一致、且还不知道 helper 认不认识 `restart`。
+        fn stale_info() -> HelperInfo {
+            HelperInfo {
+                running_build: Some("old".into()),
+                expected_build: "new".into(),
+                stale: true,
+                state: HelperState::Stale,
+                needs_admin_restart: false,
+            }
+        }
+
+        /// 返回更新器与「管理员授权被调用次数」。授权一律模拟用户取消，
+        /// 好验证「一次会话只弹一次」。
+        fn updater(reply: RestartReply) -> (HelperUpdater, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&calls);
+            let updater = HelperUpdater::for_test(
+                Arc::new(FakeBackend { reply }),
+                Arc::new(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    false
+                }),
+            );
+            *updater.info_override.lock().unwrap() = Some(stale_info());
+            (updater, calls)
+        }
+
+        /// 启动时与 6 小时轮询：旧 helper 也绝不调用 osascript，只记待授权。
+        #[test]
+        fn background_checks_never_ask_for_admin_on_an_old_helper() {
+            let (updater, calls) = updater(RestartReply::OldHelper);
+            updater.check_and_upgrade();
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "启动检查不能弹密码框");
+            assert!(
+                updater.flags.lock().unwrap().admin_required,
+                "静默换不动时要记下 needs_admin_restart，界面才能提前提示"
+            );
+        }
+
+        /// 用户真正请求 TUN 时允许弹一次；用户取消后不再反复弹。
+        #[test]
+        fn connecting_all_traffic_asks_for_admin_exactly_once() {
+            let (updater, calls) = updater(RestartReply::OldHelper);
+            let first = updater.ensure_current_for_connect();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(first.is_err(), "授权被取消时本次连接要失败");
+
+            let second = updater.ensure_current_for_connect();
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "同一次会话不再弹第二次");
+            assert!(second.is_err());
+
+            // 设置页显式点「重试授权」是用户主动行为，允许再弹一次。
+            let _ = updater.restart_from_user();
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+
+        /// helper 认识 `restart` 时，两条路径都不该弹授权。
+        #[test]
+        fn a_current_helper_never_asks_for_admin() {
+            let (updater, calls) = updater(RestartReply::Supported);
+            updater.check_and_upgrade();
+            let _ = updater.ensure_current_for_connect();
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
     }
 }
