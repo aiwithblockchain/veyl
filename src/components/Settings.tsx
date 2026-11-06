@@ -275,9 +275,8 @@ function seedCheckedAt(info: SeedRefreshInfo | null): number | null {
 }
 
 export function seedSummary(info: SeedRefreshInfo | null): string {
-  if (!info) return "Veyl 提供的试用节点 · 从未检查过";
-  const head =
-    info.nodeCount > 0 ? `Veyl 提供的 ${info.nodeCount} 个节点` : "Veyl 提供的试用节点";
+  if (!info) return "还没有试用节点 · 从未检查过";
+  const head = info.nodeCount > 0 ? `${info.nodeCount} 个节点` : "还没有试用节点";
   const age = seedAgeLabel(seedCheckedAt(info));
   return `${head} · ${age === "从未" ? "从未检查过" : `${age}检查过`}`;
 }
@@ -613,6 +612,7 @@ export function Settings({
   const [resetCopy, setResetCopy] = useState<"idle" | "ok" | "error">("idle");
   const [routeCopy, setRouteCopy] = useState<"idle" | "ok" | "error">("idle");
   const [proxyCopy, setProxyCopy] = useState<"idle" | "ok" | "error">("idle");
+  const [portEditing, setPortEditing] = useState(false);
   const [portInput, setPortInput] = useState(String(proxyPort));
   const [portSaving, setPortSaving] = useState(false);
   const [portFeedback, setPortFeedback] = useState<string | null>(null);
@@ -621,6 +621,9 @@ export function Settings({
     useState<ProxyPortAvailability>("free");
   const lastSavedPort = useRef(proxyPort);
   const portSavingRef = useRef(false);
+  const portInputRef = useRef<HTMLInputElement>(null);
+  const portEditButtonRef = useRef<HTMLButtonElement>(null);
+  const returnPortFocusRef = useRef(false);
   const [importOpen, setImportOpen] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const importDialogRef = useRef<HTMLDivElement>(null);
@@ -634,11 +637,61 @@ export function Settings({
   useFocusTrap(resetPhase !== "idle", resetDialogRef);
   useFocusTrap(importOpen, importDialogRef);
 
-  // App 层的端口变了（初次读取或别处保存），输入框跟着走。
+  // App 层的端口变了（初次读取或别处保存），输入框跟着走；编辑中不打断输入。
   useEffect(() => {
     lastSavedPort.current = proxyPort;
-    setPortInput(String(proxyPort));
-  }, [proxyPort]);
+    if (!portEditing) setPortInput(String(proxyPort));
+  }, [proxyPort, portEditing]);
+
+  // 进入编辑态：自动聚焦并全选端口号。
+  useEffect(() => {
+    if (!portEditing) return;
+    const input = portInputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, [portEditing]);
+
+  // 保存成功 / 取消 / Esc 退出编辑后，焦点回到「编辑」，键盘用户不用从头 Tab。
+  useEffect(() => {
+    if (portEditing || !returnPortFocusRef.current) return;
+    returnPortFocusRef.current = false;
+    portEditButtonRef.current?.focus();
+  }, [portEditing]);
+
+  const portLow = Number(portInput) < 1024 && Number(portInput) > 0;
+  const portDescribedBy =
+    [
+      portLow ? "settings-proxy-port-low" : null,
+      portError ? "settings-proxy-port-error" : null,
+    ]
+      .filter(Boolean)
+      .join(" ") || undefined;
+
+  // 关闭设置或离开这个 tab：放弃未保存的改动与本次的探测提示。
+  useEffect(() => {
+    if (open && section === "network") return;
+    setPortEditing(false);
+    setPortError(null);
+    setPortFeedback(null);
+    if (!open) setPortAvailability("free");
+    setPortInput(String(lastSavedPort.current));
+  }, [open, section]);
+
+  const beginProxyPortEdit = () => {
+    setPortInput(String(lastSavedPort.current));
+    setPortError(null);
+    setPortFeedback(null);
+    setPortEditing(true);
+  };
+
+  const cancelProxyPortEdit = useCallback(() => {
+    if (portSavingRef.current) return;
+    returnPortFocusRef.current = true;
+    setPortEditing(false);
+    setPortInput(String(lastSavedPort.current));
+    setPortError(null);
+  }, []);
 
   const saveProxyPort = async () => {
     const raw = portInput.trim();
@@ -649,12 +702,14 @@ export function Settings({
       value < 1 ||
       value > 65535
     ) {
-      setPortError("请填一个 1–65535 之间的数字");
+      setPortError("端口要填 1–65535 之间的整数。");
       setPortFeedback(null);
       return;
     }
     if (value === lastSavedPort.current) {
       setPortError(null);
+      returnPortFocusRef.current = true;
+      setPortEditing(false);
       return;
     }
     // 失焦与点「保存」会连着触发：只发一次命令。
@@ -669,9 +724,17 @@ export function Settings({
       setPortInput(String(result.port));
       setPortAvailability(result.availability);
       setPortFeedback(connected ? "已保存，下次连接生效" : "已保存");
+      returnPortFocusRef.current = true;
+      setPortEditing(false);
       onProxyPortSaved?.(result.port);
     } catch (error) {
-      setPortError(toBridgeError(error).message || "端口没有保存，请重试。");
+      const message = toBridgeError(error).message;
+      // toBridgeError 对没有 message 的错误会补「操作失败」，那不是后端原话。
+      setPortError(
+        message && message !== "操作失败"
+          ? message
+          : "没有保存，端口还是原来的。再试一次。",
+      );
     } finally {
       portSavingRef.current = false;
       setPortSaving(false);
@@ -740,11 +803,16 @@ export function Settings({
         if (resetPhase !== "running") closeReset();
         return;
       }
+      // 端口编辑态先拦下 Esc：只退编辑，不关设置。
+      if (portEditing) {
+        cancelProxyPortEdit();
+        return;
+      }
       onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose, resetPhase, closeReset, importOpen]);
+  }, [open, onClose, resetPhase, closeReset, importOpen, portEditing, cancelProxyPortEdit]);
 
   useEffect(() => {
     if (resetPhase === "confirm") resetCancelRef.current?.focus();
@@ -974,9 +1042,26 @@ export function Settings({
     copyTimerRef.current = window.setTimeout(() => setState("idle"), 2000);
   };
 
+  // 地址行显示哪个端口，复制就复制哪个：已连接代理模式用实际端口，其余用设置值。
+  const displayPort =
+    connected && connectMode === "system_proxy"
+      ? runtime.mixed_port ?? proxyPort
+      : proxyPort;
+
+  // 代理配置的说明：已连接但显示端口和保存值不同时，先把两个数字说清楚。
+  let portNote: string | null = null;
+  if (connectMode === "system_proxy") {
+    if (connected && runtime.mixed_port !== null && runtime.mixed_port !== proxyPort) {
+      portNote = `现在用的是 ${runtime.mixed_port}；保存的是 ${proxyPort}，下次连接生效。`;
+    } else if (connected && runtime.system_proxy_enabled) {
+      portNote = "浏览器已经设好了；其它软件填这个地址。";
+    } else {
+      portNote = "别的软件要填代理地址时，填这个。";
+    }
+  }
+
   const copyProxyAddress = async () => {
-    if (runtime.mixed_port === null) return;
-    const ok = await copyText(`127.0.0.1:${runtime.mixed_port}`);
+    const ok = await copyText(`127.0.0.1:${displayPort}`);
     flashCopy(setProxyCopy, ok ? "ok" : "error");
   };
 
@@ -1414,8 +1499,6 @@ export function Settings({
 
         {section === "network" ? (
           <section className="settings-section">
-            <h3 className="settings-section__title">连接</h3>
-
             <div className="settings-row">
               <div>
                 <div className="settings-row__label">现在怎么连</div>
@@ -1426,25 +1509,6 @@ export function Settings({
                       ? "只有设置了代理的软件走 VPN"
                       : "还没有配置"}
                 </div>
-                {connectMode === "system_proxy" &&
-                connected &&
-                runtime.mixed_port !== null ? (
-                  <div className="settings-address">
-                    <code className="num">127.0.0.1:{runtime.mixed_port}</code>
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={() => void copyProxyAddress()}
-                    >
-                      {proxyCopy === "ok" ? "已复制" : proxyCopy === "error" ? "复制失败" : "复制"}
-                    </button>
-                  </div>
-                ) : null}
-                {connectMode === "system_proxy" &&
-                connected &&
-                runtime.system_proxy_enabled ? (
-                  <p className="settings-note">浏览器已经设好了；其它软件按上面的地址填。</p>
-                ) : null}
                 {connectMode ? (
                   <p className="settings-note">
                     要换方式：
@@ -1471,8 +1535,10 @@ export function Settings({
                 <div>
                   <div className="settings-row__label">用哪个节点</div>
                   <div className="settings-row__value">{currentNodeName}</div>
-                  <p className="settings-note">点这里可以换节点。</p>
                 </div>
+                <span className="settings-row__chevron" aria-hidden>
+                  ›
+                </span>
               </button>
             ) : (
               <div className="settings-row">
@@ -1481,77 +1547,142 @@ export function Settings({
                   <div className="settings-row__value">
                     {currentNodeName ?? (connectMode ? "还没有节点" : "还没有配置")}
                   </div>
-                  {currentNodeName ? (
-                    <p className="settings-note">这套配置只有一个节点。</p>
-                  ) : connectMode ? (
+                  {currentNodeName ? null : connectMode ? (
                     <p className="settings-note">先导入节点或更新试用节点。</p>
                   ) : null}
                 </div>
               </div>
             )}
 
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">本地代理端口</div>
-                <div className="settings-row__value">
-                  别的软件要填代理地址时，用的是这个端口。改一次，以后每次连接都用它。
+            {connectMode !== "tun" ? (
+              portEditing ? (
+              <div className="settings-row">
+                <div>
+                  <label
+                    className="settings-row__label"
+                    htmlFor="settings-proxy-port"
+                  >
+                    本地代理端口
+                  </label>
+                  <div className="settings-port-line">
+                    <span className="settings-port__prefix">127.0.0.1:</span>
+                    <input
+                      ref={portInputRef}
+                      id="settings-proxy-port"
+                      className="settings-port__input num"
+                      value={portInput}
+                      inputMode="numeric"
+                      maxLength={5}
+                      readOnly={portSaving}
+                      aria-describedby={portDescribedBy}
+                      onChange={(event) => {
+                        setPortInput(event.target.value);
+                        setPortError(null);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void saveProxyPort();
+                        } else if (event.key === "Escape") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          cancelProxyPortEdit();
+                        }
+                      }}
+                    />
+                  </div>
+                  {portNote ? (
+                    <p className="settings-note">{portNote}</p>
+                  ) : null}
+                  {portLow ? (
+                    <p id="settings-proxy-port-low" className="settings-note">
+                      小于 1024 的端口通常要管理员权限，不建议用。
+                    </p>
+                  ) : null}
+                  {portError ? (
+                    <p
+                      id="settings-proxy-port-error"
+                      className="settings-feedback settings-feedback--error"
+                      role="alert"
+                    >
+                      {portError}
+                    </p>
+                  ) : null}
                 </div>
-                {Number(portInput) < 1024 &&
-                Number(portInput) > 0 &&
-                portAvailability !== "unavailable" ? (
-                  <p className="settings-note">
-                    小于 1024 的端口在系统里通常需要管理员权限，不建议用。
-                  </p>
-                ) : null}
-                {portAvailability === "occupied" ? (
-                  <p className="settings-feedback settings-feedback--warn">
-                    现在被占用了，连接时会自动顺延
-                  </p>
-                ) : null}
-                {portAvailability === "unavailable" ? (
-                  <p className="settings-feedback settings-feedback--warn">
-                    这个端口在这台机器上用不了（需要管理员权限），连接时会自动顺延
-                  </p>
-                ) : null}
-                {portError ? (
-                  <p className="settings-feedback settings-feedback--error">{portError}</p>
-                ) : null}
-                {portFeedback ? (
-                  <p className="settings-feedback settings-feedback--ok">{portFeedback}</p>
-                ) : null}
+                <div className="settings-row__aside">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => void saveProxyPort()}
+                    disabled={portSaving}
+                  >
+                    {portSaving ? "保存中…" : "保存"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={cancelProxyPortEdit}
+                    disabled={portSaving}
+                  >
+                    取消
+                  </button>
+                </div>
               </div>
-              <div className="settings-port">
-                <span className="settings-port__prefix">127.0.0.1 :</span>
-                <input
-                  className="settings-port__input num"
-                  value={portInput}
-                  inputMode="numeric"
-                  maxLength={5}
-                  aria-label="本地代理端口"
-                  onChange={(event) => {
-                    setPortInput(event.target.value);
-                    setPortError(null);
-                    setPortFeedback(null);
-                    setPortAvailability("free");
-                  }}
-                  onBlur={() => void saveProxyPort()}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void saveProxyPort();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => void saveProxyPort()}
-                  disabled={portSaving}
-                >
-                  {portSaving ? "保存中…" : "保存"}
-                </button>
+            ) : (
+              <div className="settings-row">
+                <div>
+                  <div className="settings-row__label">本地代理端口</div>
+                  <div className="settings-port-line">
+                    <code className="settings-port-address num">
+                      127.0.0.1:{displayPort}
+                    </code>
+                  </div>
+                  {portNote ? (
+                    <p className="settings-note">{portNote}</p>
+                  ) : null}
+                  {portFeedback ? (
+                    <p
+                      className="settings-feedback settings-feedback--ok"
+                      role="status"
+                    >
+                      {portFeedback}
+                    </p>
+                  ) : null}
+                  {portAvailability === "occupied" ? (
+                    <p className="settings-feedback settings-feedback--warn">
+                      现在被别的软件占用，连接时会自动顺延。
+                    </p>
+                  ) : null}
+                  {portAvailability === "unavailable" ? (
+                    <p className="settings-feedback settings-feedback--warn">
+                      这台机器绑不了这个端口（需要管理员权限），连接时会自动顺延。
+                    </p>
+                  ) : null}
+                </div>
+                <div className="settings-row__aside">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => void copyProxyAddress()}
+                  >
+                    {proxyCopy === "ok"
+                      ? "已复制"
+                      : proxyCopy === "error"
+                        ? "复制失败"
+                        : "复制"}
+                  </button>
+                  <button
+                    ref={portEditButtonRef}
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={beginProxyPortEdit}
+                  >
+                    编辑
+                  </button>
+                </div>
               </div>
-            </div>
+              )
+            ) : null}
 
             <SeedRefreshRow
               bridge={bridge}
@@ -1564,7 +1695,6 @@ export function Settings({
             <div className="settings-row">
               <div>
                 <div className="settings-row__label">导入节点文件</div>
-                <div className="settings-row__value">导入不需要联网。</div>
               </div>
               <button
                 type="button"

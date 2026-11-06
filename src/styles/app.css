@@ -1370,35 +1370,47 @@ body[data-resizing] {
   flex: none;
 }
 
-/* 本地代理端口 */
-.settings-port {
+/* 本地代理端口：默认态与编辑态共用同一行高，切换时不跳 */
+.settings-port-line {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex: none;
+  gap: 2px;
+  min-height: 24px;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--ink-2);
 }
 
 .settings-port__prefix {
   font-family: var(--mono);
-  font-size: 13px;
-  color: var(--ink-3);
+  font-size: 14px;
+  color: var(--ink-2);
 }
 
 .settings-port__input {
-  width: 5.5em;
-  padding: 6px 8px;
+  box-sizing: content-box;
+  width: 5ch;
+  padding: 1px 4px;
   border: 1px solid var(--hair-strong);
-  border-radius: 6px;
+  border-radius: 4px;
   background: var(--card);
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 13px;
-  text-align: right;
+  font-size: 14px;
+  line-height: 20px;
 }
 
 .settings-port__input:focus {
   outline: 2px solid var(--cobalt);
   outline-offset: 1px;
+}
+
+.settings-row__chevron {
+  flex: none;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--ink-4);
 }
 
 /* TUN 诊断（仅 debug 构建） */
@@ -4856,24 +4868,6 @@ body[data-resizing] {
 }
 
 /* ---------- 设置的连接地址、危险区域与折叠区 ---------- */
-
-.settings-address {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-}
-
-.settings-address code {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--ink-2);
-}
-
-.settings-address .btn {
-  padding: 2px 8px;
-  font-size: 12px;
-}
 
 .danger-zone {
   display: flex;

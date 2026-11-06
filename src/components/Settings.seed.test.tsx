@@ -125,7 +125,7 @@ describe("试用节点纯函数", () => {
   });
 
   it("摘要说明来源、节点数与检查时间，不再显示版本号", () => {
-    expect(seedSummary(profile())).toBe("Veyl 提供的 12 个节点 · 3 小时前检查过");
+    expect(seedSummary(profile())).toBe("12 个节点 · 3 小时前检查过");
     expect(
       seedSummary({
         packageId: "veyl_seed",
@@ -135,7 +135,7 @@ describe("试用节点纯函数", () => {
         nodeCount: 0,
         checkedAt: null,
       } as unknown as DefaultProfileStatus),
-    ).toBe("Veyl 提供的试用节点 · 从未检查过");
+    ).toBe("还没有试用节点 · 从未检查过");
   });
 });
 
@@ -145,7 +145,7 @@ describe("设置页试用节点行", () => {
 
     expect(await screen.findByText("更新试用节点")).toBeTruthy();
     expect(within(seedRow()).getByRole("button", { name: "检查更新" })).toBeTruthy();
-    expect(screen.getByText("Veyl 提供的 12 个节点 · 3 小时前检查过")).toBeTruthy();
+    expect(screen.getByText("12 个节点 · 3 小时前检查过")).toBeTruthy();
     expect(within(seedRow()).queryByRole("button", { name: "问 AI" })).toBeNull();
     expect(screen.queryByText("测试节点地址")).toBeNull();
     expect(screen.queryByText("v3")).toBeNull();
@@ -279,7 +279,7 @@ describe("设置页试用节点行", () => {
     fireEvent.click(screen.getByRole("button", { name: "遇到问题" }));
     fireEvent.click(screen.getByRole("button", { name: "连接" }));
 
-    expect(await screen.findByText(/Veyl 提供的 18 个节点/)).toBeTruthy();
+    expect(await screen.findByText(/18 个节点/)).toBeTruthy();
   });
 
   it("本机写入失败压成一行，旧缓存保留且按钮可用", async () => {
@@ -291,7 +291,7 @@ describe("设置页试用节点行", () => {
 
     fireEvent.click(within(seedRow()).getByRole("button", { name: "检查更新" }));
     expect(await screen.findByText("没能保存到本机，检查磁盘空间后重试。")).toBeTruthy();
-    expect(screen.getByText(/Veyl 提供的 12 个节点/)).toBeTruthy();
+    expect(screen.getByText(/12 个节点/)).toBeTruthy();
     expect(
       (within(seedRow()).getByRole("button", { name: "检查更新" }) as HTMLButtonElement)
         .disabled,

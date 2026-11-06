@@ -144,7 +144,9 @@ describe("连接 tab", () => {
     });
 
     expect(await screen.findByText("127.0.0.1:2080")).toBeTruthy();
-    expect(screen.getByText("浏览器已经设好了；其它软件按上面的地址填。")).toBeTruthy();
+    expect(
+      screen.getByText("现在用的是 2080；保存的是 7890，下次连接生效。"),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "复制" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("127.0.0.1:2080"));
   });
@@ -160,19 +162,22 @@ describe("连接 tab", () => {
 
     expect(await screen.findByText("用哪个节点")).toBeTruthy();
     expect(screen.getByText("东京 01")).toBeTruthy();
-    expect(screen.getByText("点这里可以换节点。")).toBeTruthy();
+    expect(screen.getByText("›")).toBeTruthy();
+    expect(screen.queryByText("点这里可以换节点。")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /用哪个节点/ }));
     expect(onOpenNodePanel).toHaveBeenCalledTimes(1);
   });
 
-  it("只有一个节点时不可点，说明只有一个节点", async () => {
+  it("只有一个节点时不可点，也没有 ›", async () => {
     renderSettings(makeBridge(), {
       connectMode: "tun",
       currentNodeName: "东京 01",
       nodeCount: 1,
     });
-    expect(await screen.findByText("这套配置只有一个节点。")).toBeTruthy();
+    expect(await screen.findByText("东京 01")).toBeTruthy();
+    expect(screen.queryByText("这套配置只有一个节点。")).toBeNull();
     expect(screen.queryByRole("button", { name: /用哪个节点/ })).toBeNull();
+    expect(screen.queryByText("›")).toBeNull();
   });
 
   it("没有节点时指到导入或试用节点", async () => {
@@ -184,7 +189,7 @@ describe("连接 tab", () => {
   it("导入收成一行，点开弹层才有拖放区与密码提醒", async () => {
     renderSettings(makeBridge(), { connectMode: "tun" });
     expect(await screen.findByText("导入节点文件")).toBeTruthy();
-    expect(screen.getByText("导入不需要联网。")).toBeTruthy();
+    expect(screen.queryByText("导入不需要联网。")).toBeNull();
     expect(screen.queryByRole("button", { name: "选择文件" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "导入" }));
