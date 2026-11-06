@@ -130,6 +130,7 @@ export default function App() {
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const [pendingConfigId, setPendingConfigId] = useState<string | null>(null);
   const [newConfigOpen, setNewConfigOpen] = useState(false);
+  const [nodeSheetSignal, setNodeSheetSignal] = useState(0);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const [justOnboarded, setJustOnboarded] = useState(false);
   const vpn = useVpnSession(
@@ -1031,6 +1032,7 @@ export default function App() {
         onNewConfig={() => setNewConfigOpen(true)}
         onImportNodes={() => openSettings("network")}
         seedUpdate={Boolean(defaultProfile?.newVersionAvailable)}
+        openNodeSheetSignal={nodeSheetSignal}
         loading={vpn.loading}
         runtime={runtime}
         failedAfterConnected={failedAfterConnected}
@@ -1146,6 +1148,15 @@ export default function App() {
             (node) => node.node_id === vpn.activeConfig?.current_node_id,
           )?.name ?? null
         }
+        nodeCount={vpn.activeConfig?.nodes.length ?? 0}
+        onOpenNodePanel={() => {
+          setSettingsOpen(false);
+          setNodeSheetSignal((current) => current + 1);
+        }}
+        onNewConfig={() => {
+          setSettingsOpen(false);
+          setNewConfigOpen(true);
+        }}
         onClose={closeSettings}
         onNotice={setAppNotice}
         importing={importing}

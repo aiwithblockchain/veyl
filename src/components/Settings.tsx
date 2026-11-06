@@ -33,6 +33,12 @@ interface Props {
   connectMode?: ConfigConnectMode | null;
   /** 当前配置正在使用的节点名；没有配置或没有节点时为 null。 */
   currentNodeName?: string | null;
+  /** 当前配置的节点数量；大于 1 时「用哪个节点」可以直接打开节点面板。 */
+  nodeCount?: number;
+  /** 打开节点面板（会先关闭设置）。 */
+  onOpenNodePanel?: () => void;
+  /** 新建一套配置（会先关闭设置）。 */
+  onNewConfig?: () => void;
   onClose: () => void;
   onNotice: (notice: { level: "info" | "error"; text: string }) => void;
   importing: boolean;
@@ -539,6 +545,9 @@ export function Settings({
   defaultProfile,
   connectMode = null,
   currentNodeName = null,
+  nodeCount = 0,
+  onOpenNodePanel,
+  onNewConfig,
   onClose,
   onNotice,
   importing,
@@ -598,15 +607,18 @@ export function Settings({
   const [resetCopy, setResetCopy] = useState<"idle" | "ok" | "error">("idle");
   const [routeCopy, setRouteCopy] = useState<"idle" | "ok" | "error">("idle");
   const [proxyCopy, setProxyCopy] = useState<"idle" | "ok" | "error">("idle");
+  const [importOpen, setImportOpen] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const importDialogRef = useRef<HTMLDivElement>(null);
   const resetDialogRef = useRef<HTMLDivElement>(null);
   const resetTriggerRef = useRef<HTMLButtonElement>(null);
   const resetCancelRef = useRef<HTMLButtonElement>(null);
   const resetCloseRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef(false);
   const copyTimerRef = useRef<number | null>(null);
-  useFocusTrap(open && resetPhase === "idle", dialogRef);
+  useFocusTrap(open && resetPhase === "idle" && !importOpen, dialogRef);
   useFocusTrap(resetPhase !== "idle", resetDialogRef);
+  useFocusTrap(importOpen, importDialogRef);
 
   const refreshProviders = useCallback(async () => {
     setProvidersLoading(true);
@@ -638,6 +650,7 @@ export function Settings({
     setResetCopy("idle");
     setRouteCopy("idle");
     setProxyCopy("idle");
+    setImportOpen(false);
     void refreshProviders();
   }, [open, refreshProviders, initialSection]);
 
@@ -659,6 +672,11 @@ export function Settings({
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      // 导入弹层在设置之上：先关它。
+      if (importOpen) {
+        setImportOpen(false);
+        return;
+      }
       // 重置弹层在上层：先关它，运行中则完全忽略。
       if (resetPhase !== "idle") {
         if (resetPhase !== "running") closeReset();
@@ -668,7 +686,7 @@ export function Settings({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose, resetPhase, closeReset]);
+  }, [open, onClose, resetPhase, closeReset, importOpen]);
 
   useEffect(() => {
     if (resetPhase === "confirm") resetCancelRef.current?.focus();
@@ -1371,7 +1389,14 @@ export function Settings({
                 ) : null}
                 {connectMode ? (
                   <p className="settings-note">
-                    连接方式在新建配置时确定；想换需要新建一套配置。
+                    要换方式：
+                    {onNewConfig ? (
+                      <button type="button" className="settings-link" onClick={onNewConfig}>
+                        新建一套配置
+                      </button>
+                    ) : (
+                      "新建一套配置"
+                    )}
                   </p>
                 ) : (
                   <p className="settings-note">先在左侧新建一套配置，再回来这里看。</p>
@@ -1379,19 +1404,33 @@ export function Settings({
               </div>
             </div>
 
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">用哪个节点</div>
-                <div className="settings-row__value">
-                  {currentNodeName ?? (connectMode ? "还没有节点" : "还没有配置")}
+            {currentNodeName && nodeCount > 1 && onOpenNodePanel ? (
+              <button
+                type="button"
+                className="settings-row settings-row--button"
+                onClick={onOpenNodePanel}
+              >
+                <div>
+                  <div className="settings-row__label">用哪个节点</div>
+                  <div className="settings-row__value">{currentNodeName}</div>
+                  <p className="settings-note">点这里可以换节点。</p>
                 </div>
-                {currentNodeName ? (
-                  <p className="settings-note">在主界面点节点行可以切换。</p>
-                ) : connectMode ? (
-                  <p className="settings-note">先导入节点或更新试用节点。</p>
-                ) : null}
+              </button>
+            ) : (
+              <div className="settings-row">
+                <div>
+                  <div className="settings-row__label">用哪个节点</div>
+                  <div className="settings-row__value">
+                    {currentNodeName ?? (connectMode ? "还没有节点" : "还没有配置")}
+                  </div>
+                  {currentNodeName ? (
+                    <p className="settings-note">这套配置只有一个节点。</p>
+                  ) : connectMode ? (
+                    <p className="settings-note">先导入节点或更新试用节点。</p>
+                  ) : null}
+                </div>
               </div>
-            </div>
+            )}
 
             <SeedRefreshRow
               bridge={bridge}
@@ -1401,65 +1440,107 @@ export function Settings({
               open={open}
             />
 
-            <div className="settings-subhead">导入节点文件</div>
-            <div
-              className={`dropzone ${dragging ? "is-dragging" : ""} ${
-                importing ? "is-busy" : ""
-              }`}
-            >
-              {importing
-                ? "正在导入…"
-                : dragging
-                  ? "松手即可导入"
-                  : `拖入文件，或选择`}{" "}
-              {dragging ? null : (
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => void pickFile()}
-                  disabled={importing}
-                >
-                  选择文件
-                </button>
-              )}
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">导入节点文件</div>
+                <div className="settings-row__value">导入不需要联网。</div>
+              </div>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => setImportOpen(true)}
+              >
+                导入
+              </button>
             </div>
 
-            {importResult ? (
-              <div className="settings-import">
-                <p className="settings-feedback settings-feedback--ok">
-                  已导入 {importResult.imported} 个节点
-                </p>
-                <ul className="settings-import__list">
-                  {importResult.profiles.map((profile) => (
-                    <li key={profile.id}>
-                      <span className="settings-import__name">{profile.name}</span>
-                      <code>
-                        {profile.server}
-                        {profile.server_port ? `:${profile.server_port}` : ""}
-                      </code>
-                    </li>
-                  ))}
-                </ul>
-                {importResult.skipped.length > 0 ? (
-                  <ul className="settings-import__skipped">
-                    {importResult.skipped.map((item) => (
-                      <li key={`${item.name}-${item.reason}`}>
-                        {item.name}：{item.reason}
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
+            {importOpen ? (
+              <div
+                className="modal-backdrop modal-backdrop--nested"
+                onMouseDown={() => setImportOpen(false)}
+              >
+                <div
+                  ref={importDialogRef}
+                  className="modal modal--confirm"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="import-dialog-title"
+                  onMouseDown={(event) => event.stopPropagation()}
+                >
+                  <header className="modal__head">
+                    <h2 id="import-dialog-title" className="modal__title">
+                      导入节点文件
+                    </h2>
+                    <button
+                      type="button"
+                      className="modal__close"
+                      onClick={() => setImportOpen(false)}
+                      aria-label="关闭"
+                    >
+                      <IconClose size={14} />
+                    </button>
+                  </header>
+
+                  <p className="settings-note">
+                    导入不需要联网。文件里有节点密码，不要外传。
+                  </p>
+
+                  <div
+                    className={`dropzone ${dragging ? "is-dragging" : ""} ${
+                      importing ? "is-busy" : ""
+                    }`}
+                  >
+                    {importing
+                      ? "正在导入…"
+                      : dragging
+                        ? "松手即可导入"
+                        : `拖入文件，或选择`}{" "}
+                    {dragging ? null : (
+                      <button
+                        type="button"
+                        className="btn btn--ghost"
+                        onClick={() => void pickFile()}
+                        disabled={importing}
+                      >
+                        选择文件
+                      </button>
+                    )}
+                  </div>
+
+                  {importResult ? (
+                    <div className="settings-import">
+                      <p className="settings-feedback settings-feedback--ok">
+                        已导入 {importResult.imported} 个节点
+                      </p>
+                      <ul className="settings-import__list">
+                        {importResult.profiles.map((profile) => (
+                          <li key={profile.id}>
+                            <span className="settings-import__name">{profile.name}</span>
+                            <code>
+                              {profile.server}
+                              {profile.server_port ? `:${profile.server_port}` : ""}
+                            </code>
+                          </li>
+                        ))}
+                      </ul>
+                      {importResult.skipped.length > 0 ? (
+                        <ul className="settings-import__skipped">
+                          {importResult.skipped.map((item) => (
+                            <li key={`${item.name}-${item.reason}`}>
+                              {item.name}：{item.reason}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {importError ? (
+                    <p className="settings-feedback settings-feedback--error">{importError}</p>
+                  ) : null}
+                </div>
               </div>
             ) : null}
-
-            {importError ? (
-              <p className="settings-feedback settings-feedback--error">{importError}</p>
-            ) : null}
-
-            <p className="settings-note">
-              没有网络也能导入：文件在本地解析，不依赖试用节点。
-            </p>
-            <p className="settings-note">这份文件包含共享凭据，请勿外传。</p>
           </section>
         ) : null}
 

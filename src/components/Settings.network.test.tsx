@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, LlmProvider } from "../agent/bridge";
 import { emptyRuntimeView } from "../agent/bridge";
@@ -65,13 +65,19 @@ function renderSettings(
   {
     connectMode = null,
     currentNodeName = null,
+    nodeCount = 0,
     section = "network",
     runtimeView = runtime(),
+    onOpenNodePanel,
+    onNewConfig,
   }: {
     connectMode?: "tun" | "system_proxy" | null;
     currentNodeName?: string | null;
+    nodeCount?: number;
     section?: "ai" | "network" | "advanced" | "about";
     runtimeView?: RuntimeView;
+    onOpenNodePanel?: () => void;
+    onNewConfig?: () => void;
   } = {},
 ) {
   return render(
@@ -82,6 +88,9 @@ function renderSettings(
       defaultProfile={null}
       connectMode={connectMode}
       currentNodeName={currentNodeName}
+      nodeCount={nodeCount}
+      onOpenNodePanel={onOpenNodePanel}
+      onNewConfig={onNewConfig}
       onClose={() => {}}
       onNotice={() => {}}
       importing={false}
@@ -99,13 +108,14 @@ function renderSettings(
 }
 
 describe("连接 tab", () => {
-  it("全部流量配置显示行为描述与换方式说明", async () => {
-    renderSettings(makeBridge(), { connectMode: "tun" });
+  it("全部流量配置显示行为描述与换方式的入口", async () => {
+    const onNewConfig = vi.fn();
+    renderSettings(makeBridge(), { connectMode: "tun", onNewConfig });
     expect(await screen.findByText("现在怎么连")).toBeTruthy();
     expect(screen.getByText("全部流量走 VPN")).toBeTruthy();
-    expect(
-      screen.getByText("连接方式在新建配置时确定；想换需要新建一套配置。"),
-    ).toBeTruthy();
+    expect(screen.getByText(/要换方式/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "新建一套配置" }));
+    expect(onNewConfig).toHaveBeenCalledTimes(1);
   });
 
   it("代理配置显示行为描述", async () => {
@@ -139,17 +149,54 @@ describe("连接 tab", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("127.0.0.1:2080"));
   });
 
-  it("显示当前节点并说明去哪切换", async () => {
-    renderSettings(makeBridge(), { connectMode: "tun", currentNodeName: "东京 01" });
+  it("多个节点时整行可点，直接打开节点面板", async () => {
+    const onOpenNodePanel = vi.fn();
+    renderSettings(makeBridge(), {
+      connectMode: "tun",
+      currentNodeName: "东京 01",
+      nodeCount: 2,
+      onOpenNodePanel,
+    });
+
     expect(await screen.findByText("用哪个节点")).toBeTruthy();
     expect(screen.getByText("东京 01")).toBeTruthy();
-    expect(screen.getByText("在主界面点节点行可以切换。")).toBeTruthy();
+    expect(screen.getByText("点这里可以换节点。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /用哪个节点/ }));
+    expect(onOpenNodePanel).toHaveBeenCalledTimes(1);
+  });
+
+  it("只有一个节点时不可点，说明只有一个节点", async () => {
+    renderSettings(makeBridge(), {
+      connectMode: "tun",
+      currentNodeName: "东京 01",
+      nodeCount: 1,
+    });
+    expect(await screen.findByText("这套配置只有一个节点。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /用哪个节点/ })).toBeNull();
   });
 
   it("没有节点时指到导入或试用节点", async () => {
     renderSettings(makeBridge(), { connectMode: "tun", currentNodeName: null });
     expect(await screen.findByText("还没有节点")).toBeTruthy();
     expect(screen.getByText("先导入节点或更新试用节点。")).toBeTruthy();
+  });
+
+  it("导入收成一行，点开弹层才有拖放区与密码提醒", async () => {
+    renderSettings(makeBridge(), { connectMode: "tun" });
+    expect(await screen.findByText("导入节点文件")).toBeTruthy();
+    expect(screen.getByText("导入不需要联网。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "选择文件" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "导入" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "导入节点文件" });
+    expect(
+      within(dialog).getByText("导入不需要联网。文件里有节点密码，不要外传。"),
+    ).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "选择文件" })).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
+    expect(screen.queryByRole("dialog", { name: "导入节点文件" })).toBeNull();
   });
 
   it("网络页不出现修复动作", async () => {

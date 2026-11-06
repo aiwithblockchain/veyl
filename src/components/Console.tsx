@@ -47,6 +47,8 @@ interface Props {
   failedAfterConnected?: boolean;
   /** 连接「全部流量」前正在更新后台组件：先说明系统会请求授权，再弹窗。 */
   helperPreparing?: boolean;
+  /** 递增信号：从设置页点「用哪个节点」时打开节点面板。 */
+  openNodeSheetSignal?: number;
   /** 健康事件累积的最近 60 秒速率（前端内存，重启即丢）。 */
   rateSamples?: RateSample[];
 }
@@ -102,6 +104,7 @@ export function Console({
   runtime,
   failedAfterConnected = false,
   helperPreparing = false,
+  openNodeSheetSignal = 0,
   rateSamples = NO_RATE,
 }: Props) {
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -113,6 +116,7 @@ export function Console({
   const detailRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef(false);
+  const handledNodeSheetSignal = useRef(0);
   const configId = config?.config_id ?? null;
   const currentNodeId = config?.current_node_id ?? null;
   const exitAddress = runtime.health.exit_ip?.trim() || null;
@@ -152,6 +156,13 @@ export function Console({
   useEffect(() => {
     if (sheetOpen && (config?.nodes.length ?? 0) <= 1) setSheetOpen(false);
   }, [sheetOpen, config?.nodes.length]);
+
+  // 设置页点「用哪个节点」：收到一次新的信号才打开，配置变化不重复触发。
+  useEffect(() => {
+    if (openNodeSheetSignal === handledNodeSheetSignal.current) return;
+    handledNodeSheetSignal.current = openNodeSheetSignal;
+    if (openNodeSheetSignal > 0 && (config?.nodes.length ?? 0) > 1) setSheetOpen(true);
+  }, [openNodeSheetSignal, config?.nodes.length]);
 
   // 关闭面板后焦点回到节点行，不回到页面顶部。
   useEffect(() => {

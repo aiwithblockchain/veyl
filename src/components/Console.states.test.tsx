@@ -85,6 +85,7 @@ interface RenderOptions {
   loading?: boolean;
   failedAfterConnected?: boolean;
   helperPreparing?: boolean;
+  openNodeSheetSignal?: number;
 }
 
 function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
@@ -107,6 +108,7 @@ function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
       runtime={opts.runtime ?? makeRuntime()}
       failedAfterConnected={opts.failedAfterConnected}
       helperPreparing={opts.helperPreparing}
+      openNodeSheetSignal={opts.openNodeSheetSignal}
     />
   );
 }
@@ -171,6 +173,13 @@ describe("状态矩阵", () => {
     expect(r.container.querySelector('[role="status"]')?.textContent).toBe(
       "正在准备后台组件，系统会请求一次授权",
     );
+  });
+
+  it("2d 收到设置页的节点面板信号时直接展开", () => {
+    const r = renderConsole({ openNodeSheetSignal: 1 });
+    expect(
+      r.container.querySelector(".node-card__select")?.getAttribute("aria-expanded"),
+    ).toBe("true");
   });
 
   it("3 刚连上：计时器 00:00:00，读数都是占位", () => {
