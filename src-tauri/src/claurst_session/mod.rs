@@ -461,6 +461,11 @@ impl AivpnSession {
         let (raw_text, mut filter) = consumer.await.unwrap_or_default();
         // 以整段复核为准：流式状态机万一漏字/多字，这里兜住。
         let (final_text, layout) = layout::strip(&raw_text);
+        // 裸 JSON 计数只用于评估提示词有没有收住，不参与任何分支。
+        let (bare_ok, bare_invalid) = layout::bare_stats();
+        log::info!(
+            "layout.bare_stats request={request_id} ok={bare_ok} invalid={bare_invalid}"
+        );
         // 用户取消：未闭合的候选围栏一律丢弃（半截 JSON 只会更困惑）。
         let cancelled = matches!(&outcome, Ok(QueryOutcome::Cancelled));
         let tail = if cancelled {
@@ -689,8 +694,17 @@ fn commit_layout(config_id: &str, layout: Value) {
 
     let revision = {
         let conn = store.conn();
-        let connect_mode = match crate::store::configs::get(&conn, config_id) {
-            Ok(Some(config)) => config.connection_mode,
+        let (connect_mode, node_count) = match crate::store::configs::get(&conn, config_id) {
+            Ok(Some(config)) => {
+                let node_count = match crate::store::configs::node_count(&conn, config_id) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        log::warn!("布局未写入：统计节点失败：{error}");
+                        return;
+                    }
+                };
+                (config.connection_mode, node_count)
+            }
             Ok(None) => {
                 log::warn!("布局未写入：配置不存在");
                 return;
@@ -700,8 +714,13 @@ fn commit_layout(config_id: &str, layout: Value) {
                 return;
             }
         };
-        // 白名单是类型级的，意义要看配置形态：TUN 配置里的 proxy_card 指向一个没监听的端口。
-        let layout = match layout::validate_for(&connect_mode, &layout) {
+        // 白名单是类型级的，意义要看配置形态：TUN 下的 proxy_card、已有节点时的
+        // source_choice 都指向一个不成立的事实。
+        let context = layout::ConfigContext {
+            connect_mode: &connect_mode,
+            node_count,
+        };
+        let layout = match layout::validate_for(&context, &layout) {
             Ok(layout) => layout,
             Err(reason) => {
                 log::warn!("layout.invalid reason={}", reason.code());
@@ -1105,6 +1124,10 @@ mod prompt_tests {
             "提示词里不能再出现 json 围栏示例"
         );
         assert!(text.contains("一条回复最多一份"));
+        assert!(
+            text.contains("不要直接在正文里写 JSON"),
+            "要明确要求模型不要裸发 JSON（安全网仍保留）"
+        );
         assert!(text.contains("故障卡由系统叠加"), "要说明故障卡不可写");
         assert!(
             !text.contains("`issue_card`"),

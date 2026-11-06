@@ -1,10 +1,12 @@
-//! 中间区域布局：从模型正文里提取 ``layout`` 围栏、校验并过滤。
+//! 中间区域布局：从模型正文里识别布局并过滤。
 //!
-//! 规则（`docs/design/ai-layout.md`）：
-//! - 只有**行首**的三个反引号才是围栏；行内反引号是正文。
-//! - 语言标记 `layout` → 布局；`json` 或空 → 兼容候选（闭合后整份校验通过才当布局）；
-//!   其它 → 普通代码块，原样显示。
-//! - 候选围栏体在闭合前一个字符都不发；一条消息取最后一份合法布局。
+//! 规则（`docs/design/ai-layout.md` §2、§3）：
+//! - `layout` 围栏是显式声明：**一律不进正文**，能解析且合法才写库。
+//! - `json`/无标记围栏与行首裸 JSON 按形状判定：对象同时有 `version` 与 `blocks`
+//!   才算「布局形状」；形状是就**永远不进正文**，形状否就按普通内容放行。
+//! - 合不合法只在写入时判断，不影响显不显示。
+//! - 只有**行首**才是候选：行内反引号、「把 {"version":1} 发给我」里的 `{` 都是正文。
+//! - 一条消息取最后一份合法布局。
 //!
 //! 两份实现、一份规则：
 //! - [`strip`]：纯函数，整段扫描。正文出口、历史写库、请求结束复核都用它。
@@ -16,8 +18,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Map, Value};
 
-/// 候选围栏体上限。超过就放弃候选，按普通代码块补发，防止模型吐一个巨大 JSON。
+/// 围栏候选体上限。超过就放弃候选，按普通代码块补发。
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
+/// 裸候选上限。正常布局不到 1 KiB，8 KiB 足够宽松。
+pub const MAX_BARE_BYTES: usize = 8 * 1024;
 pub const MAX_BLOCKS: usize = 8;
 pub const MAX_TARGETS: usize = 6;
 pub const MAX_TARGET_CHARS: usize = 24;
@@ -41,8 +45,8 @@ pub enum Reason {
     BadProps,
     TooManyBlocks,
     UnsafeString,
-    /// 块本身合法，但与配置形态不符（例如 TUN 配置里的 `proxy_card`）。
-    WrongConfigMode,
+    /// 块本身合法，但与当前配置不符（TUN 下的 `proxy_card`、已有节点时的 `source_choice`）。
+    BlockNotApplicable,
 }
 
 impl Reason {
@@ -55,9 +59,17 @@ impl Reason {
             Reason::BadProps => "bad_props",
             Reason::TooManyBlocks => "too_many_blocks",
             Reason::UnsafeString => "unsafe_string",
-            Reason::WrongConfigMode => "wrong_config_mode",
+            Reason::BlockNotApplicable => "block_not_applicable",
         }
     }
+}
+
+/// 形状判定：同时有 `version` 与 `blocks` 的对象。**不看类型**——
+/// `"blocks": "oops"` 也是「模型想写布局」，漏到正文里才是事故。
+pub fn is_layout_shape(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("version") && object.contains_key("blocks"))
 }
 
 /// 整段解析 + 校验。返回规范化后的布局（`targets` 已 trim、去重）。
@@ -66,15 +78,24 @@ pub fn parse_and_validate(text: &str) -> Result<Value, Reason> {
     validate(&value)
 }
 
-/// 按配置形态校验：`proxy_card` 只在系统代理配置下有意义——TUN 配置没有监听端口。
-pub fn validate_for(connect_mode: &str, value: &Value) -> Result<Value, Reason> {
+/// 写入那一刻的配置形态。语义校验只看这两条明确不可能成立的情况。
+pub struct ConfigContext<'a> {
+    pub connect_mode: &'a str,
+    pub node_count: i64,
+}
+
+/// 结构校验 + 与配置的兼容性。后者只在写入时做：配置后来变了，渲染时跳过块即可。
+pub fn validate_for(config: &ConfigContext<'_>, value: &Value) -> Result<Value, Reason> {
     let layout = validate(value)?;
-    if connect_mode != crate::store::configs::CONNECTION_SYSTEM_PROXY {
-        let has_proxy_card = layout["blocks"]
-            .as_array()
-            .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "proxy_card"));
-        if has_proxy_card {
-            return Err(Reason::WrongConfigMode);
+    for block in layout["blocks"].as_array().into_iter().flatten() {
+        match block["type"].as_str().unwrap_or_default() {
+            "proxy_card" if config.connect_mode != crate::store::configs::CONNECTION_SYSTEM_PROXY => {
+                return Err(Reason::BlockNotApplicable);
+            }
+            "source_choice" if config.node_count > 0 => {
+                return Err(Reason::BlockNotApplicable);
+            }
+            _ => {}
         }
     }
     Ok(layout)
@@ -188,11 +209,16 @@ fn unsafe_target(text: &str) -> bool {
     lower.starts_with("javascript:") || lower.starts_with("data:")
 }
 
-/// 正文里裸 JSON 的计数（只记行数，不含内容）。用于判断提示词是否收住了。
-static BARE_JSON_LINES: AtomicU64 = AtomicU64::new(0);
+/// 计数只用于评估提示词有没有收住，不决定行为。
+static BARE_OK: AtomicU64 = AtomicU64::new(0);
+static BARE_INVALID: AtomicU64 = AtomicU64::new(0);
 
-pub fn bare_json_lines() -> u64 {
-    BARE_JSON_LINES.load(Ordering::Relaxed)
+/// `(bare_ok, bare_invalid)`。形状是布局且合法 / 形状是布局但非法。
+pub fn bare_stats() -> (u64, u64) {
+    (
+        BARE_OK.load(Ordering::Relaxed),
+        BARE_INVALID.load(Ordering::Relaxed),
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -234,35 +260,206 @@ fn is_close_line(line: &str) -> bool {
     trimmed.len() >= 3 && trimmed.chars().all(|c| c == '`')
 }
 
+/// 行首裸 JSON：前导只有空白，第一个非空白字符是 `{`。返回 `{` 的字节偏移。
+fn bare_start(content: &str) -> Option<usize> {
+    let prefix = content
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .count();
+    content[prefix..].starts_with('{').then_some(prefix)
+}
+
+enum BareStep {
+    Open,
+    Closed,
+    Overflow,
+}
+
+/// 喂给 `feed_bare` 的结果，带「消费到哪个字节」。
+enum BareProgress {
+    Open,
+    Closed(usize),
+    Overflow(usize),
+}
+
+/// 裸对象的括号配对：识别 JSON 字符串与转义，不是简单数括号。
+struct BareScan {
+    /// 候选前面的行首空白：吞掉时一起吞，放行时一起放。
+    leading: String,
+    /// 从 `{` 开始的对象原文。
+    body: String,
+    depth: i32,
+    in_string: bool,
+    escaped: bool,
+}
+
+impl BareScan {
+    /// 调用方已经看见行首的 `{`。
+    fn start(leading: String) -> Self {
+        Self {
+            leading,
+            body: "{".to_string(),
+            depth: 1,
+            in_string: false,
+            escaped: false,
+        }
+    }
+
+    fn step(&mut self, ch: char) -> BareStep {
+        self.body.push(ch);
+        if self.in_string {
+            if self.escaped {
+                self.escaped = false;
+            } else if ch == '\\' {
+                self.escaped = true;
+            } else if ch == '"' {
+                self.in_string = false;
+            }
+        } else {
+            match ch {
+                '"' => self.in_string = true,
+                '{' => self.depth += 1,
+                '}' => {
+                    self.depth -= 1;
+                    if self.depth == 0 {
+                        return BareStep::Closed;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.body.len() > MAX_BARE_BYTES {
+            return BareStep::Overflow;
+        }
+        BareStep::Open
+    }
+}
+
+fn feed_bare(scan: &mut BareScan, text: &str) -> BareProgress {
+    for (index, ch) in text.char_indices() {
+        match scan.step(ch) {
+            BareStep::Open => {}
+            BareStep::Closed => return BareProgress::Closed(index + ch.len_utf8()),
+            BareStep::Overflow => return BareProgress::Overflow(index + ch.len_utf8()),
+        }
+    }
+    BareProgress::Open
+}
+
+fn emit_overflow(scan: &BareScan, out: &mut String) {
+    log::warn!("layout.bare_too_large");
+    out.push_str(&scan.leading);
+    out.push_str(&scan.body);
+}
+
+/// 闭合的裸候选：形状是布局就吞掉（合法的写库），否则连前导空白一起放行。
+fn conclude_bare(scan: BareScan, out: &mut String, layout: &mut Option<Value>) {
+    match serde_json::from_str::<Value>(&scan.body) {
+        Ok(value) if is_layout_shape(&value) => match validate(&value) {
+            Ok(value) => {
+                BARE_OK.fetch_add(1, Ordering::Relaxed);
+                record_layout(value, layout, "layout.bare_ok");
+            }
+            Err(reason) => {
+                BARE_INVALID.fetch_add(1, Ordering::Relaxed);
+                log::warn!("layout.bare_invalid reason={}", reason.code());
+            }
+        },
+        _ => {
+            out.push_str(&scan.leading);
+            out.push_str(&scan.body);
+        }
+    }
+}
+
+/// 未闭合的裸候选：永远不补发半截 JSON。能解析且形状是布局就采用。
+fn discard_unclosed_bare(scan: BareScan, layout: &mut Option<Value>) {
+    match serde_json::from_str::<Value>(&scan.body) {
+        Ok(value) if is_layout_shape(&value) => match validate(&value) {
+            Ok(value) => {
+                BARE_OK.fetch_add(1, Ordering::Relaxed);
+                record_layout(value, layout, "layout.bare_ok");
+            }
+            Err(reason) => log::warn!("layout.unclosed_invalid reason={}", reason.code()),
+        },
+        _ => log::warn!("layout.bare_unclosed"),
+    }
+}
+
+fn record_layout(value: Value, layout: &mut Option<Value>, label: &str) {
+    log::info!(
+        "{label} blocks={}",
+        value["blocks"].as_array().map_or(0, Vec::len)
+    );
+    *layout = Some(value);
+}
+
+/// 围栏候选是否「长得像布局」。是就吞掉，不合法只记原因码。
+fn absorb_layout_like(text: &str, closed: bool, layout: &mut Option<Value>) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    if !is_layout_shape(&value) {
+        return false;
+    }
+    match validate(&value) {
+        Ok(value) => record_layout(value, layout, "layout.ok"),
+        Err(reason) => {
+            if closed {
+                log::warn!("layout.invalid reason={}", reason.code());
+            } else {
+                log::warn!("layout.unclosed_invalid reason={}", reason.code());
+            }
+        }
+    }
+    true
+}
+
 /// 整段过滤：返回（可见正文，最后一份合法布局）。
 pub fn strip(text: &str) -> (String, Option<Value>) {
     let mut out = String::new();
     let mut layout: Option<Value> = None;
     let mut mode = Mode::Prose;
     let mut candidate: Option<Candidate> = None;
-    let mut bare_lines = 0u64;
+    let mut bare: Option<BareScan> = None;
 
     for line in text.split_inclusive('\n') {
         let content = line.strip_suffix('\n').unwrap_or(line);
         match mode {
-            Mode::Prose => match opening_info(content) {
-                Some(info) => match classify(info) {
-                    Kind::Ordinary => {
-                        out.push_str(line);
-                        mode = Mode::CodeFence;
+            Mode::Prose => {
+                if let Some(info) = opening_info(content) {
+                    match classify(info) {
+                        Kind::Ordinary => {
+                            out.push_str(line);
+                            mode = Mode::CodeFence;
+                        }
+                        kind => {
+                            candidate = Some(Candidate::new(kind, line));
+                            mode = Mode::Candidate;
+                        }
                     }
-                    kind => {
-                        candidate = Some(Candidate::new(kind, line));
-                        mode = Mode::Candidate;
-                    }
-                },
-                None => {
-                    if content.trim_start().starts_with('{') {
-                        bare_lines += 1;
-                    }
-                    out.push_str(line);
+                    continue;
                 }
-            },
+                if let Some(start) = bare_start(content) {
+                    let mut scan = BareScan::start(content[..start].to_string());
+                    match feed_bare(&mut scan, &line[start + 1..]) {
+                        BareProgress::Open => {
+                            bare = Some(scan);
+                            mode = Mode::Bare;
+                        }
+                        BareProgress::Closed(end) => {
+                            conclude_bare(scan, &mut out, &mut layout);
+                            out.push_str(&line[start + 1 + end..]);
+                        }
+                        BareProgress::Overflow(end) => {
+                            emit_overflow(&scan, &mut out);
+                            out.push_str(&line[start + 1 + end..]);
+                        }
+                    }
+                    continue;
+                }
+                out.push_str(line);
+            }
             Mode::CodeFence => {
                 out.push_str(line);
                 if is_close_line(content) {
@@ -286,40 +483,65 @@ pub fn strip(text: &str) -> (String, Option<Value>) {
                     }
                 }
             }
+            Mode::Bare => {
+                let scan = bare.as_mut().expect("裸候选状态必有候选");
+                match feed_bare(scan, line) {
+                    BareProgress::Open => {}
+                    BareProgress::Closed(end) => {
+                        let scan = bare.take().expect("裸候选状态必有候选");
+                        conclude_bare(scan, &mut out, &mut layout);
+                        out.push_str(&line[end..]);
+                        mode = Mode::Prose;
+                    }
+                    BareProgress::Overflow(end) => {
+                        let scan = bare.take().expect("裸候选状态必有候选");
+                        emit_overflow(&scan, &mut out);
+                        out.push_str(&line[end..]);
+                        mode = Mode::Prose;
+                    }
+                }
+            }
         }
     }
 
-    if let Some(candidate) = candidate.take() {
-        conclude_unclosed(candidate, &mut out, &mut layout);
-    }
-
-    if bare_lines > 0 {
-        BARE_JSON_LINES.fetch_add(bare_lines, Ordering::Relaxed);
-        log::debug!("layout.bare_json lines={bare_lines}");
+    match mode {
+        Mode::Candidate => {
+            if let Some(candidate) = candidate.take() {
+                conclude_unclosed(candidate, &mut out, &mut layout);
+            }
+        }
+        Mode::Bare => {
+            if let Some(scan) = bare.take() {
+                discard_unclosed_bare(scan, &mut layout);
+            }
+        }
+        Mode::Prose | Mode::CodeFence => {}
     }
 
     (out, layout)
 }
 
-/// 闭合的候选：显式 `layout` 一律不显示；兼容候选只有整份通过校验才吞掉。
-fn conclude(candidate: Candidate, close_raw: Option<&str>, out: &mut String, layout: &mut Option<Value>) {
+/// 闭合的围栏候选：显式 `layout` 一律不显示；兼容候选只有长得像布局才吞掉。
+fn conclude(
+    candidate: Candidate,
+    close_raw: Option<&str>,
+    out: &mut String,
+    layout: &mut Option<Value>,
+) {
+    let parsed = serde_json::from_str::<Value>(&candidate.body).ok();
+    let shaped = parsed.as_ref().is_some_and(is_layout_shape);
     match candidate.kind {
-        Kind::Layout => match parse_and_validate(&candidate.body) {
-            Ok(value) => record_layout(value, layout),
-            Err(reason) => log::warn!("layout.invalid reason={}", reason.code()),
-        },
-        Kind::Compat => match parse_and_validate(&candidate.body) {
-            Ok(value) => record_layout(value, layout),
-            Err(_) => {
-                out.push_str(&candidate.opening);
-                out.push_str(&candidate.body);
-                if let Some(close) = close_raw {
-                    out.push_str(close);
-                }
+        // `layout` 是显式声明，比形状更严：不论内容是什么都不进正文。
+        Kind::Layout => {
+            if !absorb_layout_like(&candidate.body, true, layout) {
+                log::warn!("layout.invalid reason=bad_json");
             }
-        },
-        // 普通代码块不进入候选状态；真到了这里就原样显示，别丢用户的内容。
-        Kind::Ordinary => {
+        }
+        // `json` / 无标记围栏可能是举例或在讨论代码，只有形状像布局才吞。
+        Kind::Compat if shaped => {
+            absorb_layout_like(&candidate.body, true, layout);
+        }
+        Kind::Compat | Kind::Ordinary => {
             out.push_str(&candidate.opening);
             out.push_str(&candidate.body);
             if let Some(close) = close_raw {
@@ -329,12 +551,9 @@ fn conclude(candidate: Candidate, close_raw: Option<&str>, out: &mut String, lay
     }
 }
 
-/// 未闭合的候选：显式 `layout` 永远不显示（合法的照样生效）；兼容候选校验不过就原样显示。
-fn conclude_unclosed(
-    mut candidate: Candidate,
-    out: &mut String,
-    layout: &mut Option<Value>,
-) {
+/// 未闭合的围栏候选：显式 `layout` 永远不显示（合法的照样生效）；
+/// 兼容候选只有长得像布局才吞掉，否则按模型打出来的样子补发。
+fn conclude_unclosed(mut candidate: Candidate, out: &mut String, layout: &mut Option<Value>) {
     // 流式路径下最后一行可能还没换行，闭合判定要在摘掉它之前做。
     let trailing_close = if is_close_line(&candidate.line) {
         let line = std::mem::take(&mut candidate.line);
@@ -345,22 +564,20 @@ fn conclude_unclosed(
         None
     };
 
+    let shaped = serde_json::from_str::<Value>(&candidate.body)
+        .ok()
+        .as_ref()
+        .is_some_and(is_layout_shape);
     match candidate.kind {
-        Kind::Layout => match parse_and_validate(&candidate.body) {
-            Ok(value) => record_layout(value, layout),
-            Err(reason) => log::warn!("layout.unclosed_invalid reason={}", reason.code()),
-        },
-        Kind::Compat => match parse_and_validate(&candidate.body) {
-            Ok(value) => record_layout(value, layout),
-            Err(_) => {
-                out.push_str(&candidate.opening);
-                out.push_str(&candidate.body);
-                if let Some(close) = trailing_close {
-                    out.push_str(&close);
-                }
+        Kind::Layout => {
+            if !absorb_layout_like(&candidate.body, false, layout) {
+                log::warn!("layout.unclosed_invalid reason=bad_json");
             }
-        },
-        Kind::Ordinary => {
+        }
+        Kind::Compat if shaped => {
+            absorb_layout_like(&candidate.body, false, layout);
+        }
+        Kind::Compat | Kind::Ordinary => {
             out.push_str(&candidate.opening);
             out.push_str(&candidate.body);
             if let Some(close) = trailing_close {
@@ -368,14 +585,6 @@ fn conclude_unclosed(
             }
         }
     }
-}
-
-fn record_layout(value: Value, layout: &mut Option<Value>) {
-    log::info!(
-        "layout.ok blocks={}",
-        value["blocks"].as_array().map_or(0, Vec::len)
-    );
-    *layout = Some(value);
 }
 
 struct Candidate {
@@ -403,15 +612,17 @@ enum Mode {
     Prose,
     CodeFence,
     Candidate,
+    Bare,
 }
 
 /// 流式过滤器：逐 delta 喂入，返回本次可以显示的正文（可能为空串）。
 pub struct Filter {
     mode: Mode,
-    /// 行首缓冲：只保存可能的围栏起始前缀。
+    /// 行首缓冲：前导空白 + 可能的围栏起始前缀。
     line: String,
     at_line_start: bool,
     candidate: Option<Candidate>,
+    bare: Option<BareScan>,
     layout: Option<Value>,
 }
 
@@ -428,6 +639,7 @@ impl Filter {
             line: String::new(),
             at_line_start: true,
             candidate: None,
+            bare: None,
             layout: None,
         }
     }
@@ -444,16 +656,17 @@ impl Filter {
                 Mode::Prose => self.step_prose(ch, &mut out),
                 Mode::CodeFence => self.step_fence(ch, &mut out),
                 Mode::Candidate => self.step_candidate(ch, &mut out),
+                Mode::Bare => self.step_bare(ch, &mut out),
             }
         }
         out
     }
 
-    /// 取消时的收尾：未闭合的候选围栏整段丢弃，不补发半截 JSON。
-    /// 用户按了停止，消息本来就不完整，突然多出一段 JSON 只会更困惑。
+    /// 取消时的收尾：未闭合的候选（围栏与裸 JSON）整段丢弃，不补发半截 JSON。
     pub fn finish_discarding(&mut self) -> String {
-        if matches!(self.mode, Mode::Candidate) {
+        if matches!(self.mode, Mode::Candidate | Mode::Bare) {
             self.candidate = None;
+            self.bare = None;
             self.mode = Mode::Prose;
             self.line.clear();
             self.at_line_start = true;
@@ -462,7 +675,7 @@ impl Filter {
         self.finish()
     }
 
-    /// 流结束：冲刷持有区、判定未闭合围栏。
+    /// 流结束：冲刷持有区、判定未闭合围栏与裸候选。
     pub fn finish(&mut self) -> String {
         let mut out = String::new();
         match std::mem::replace(&mut self.mode, Mode::Prose) {
@@ -498,6 +711,12 @@ impl Filter {
                     conclude_unclosed(candidate, &mut out, &mut self.layout);
                 }
             }
+            Mode::Bare => {
+                if let Some(scan) = self.bare.take() {
+                    // 未闭合的裸候选永远不补发；能解析且形状是布局就采用。
+                    discard_unclosed_bare(scan, &mut self.layout);
+                }
+            }
         }
         self.line.clear();
         self.at_line_start = true;
@@ -513,41 +732,72 @@ impl Filter {
             return;
         }
 
-        if self.line.is_empty() {
+        // 行首：持有前导空白，直到第一个非空白字符能判定为止。
+        let whitespace_only = self
+            .line
+            .chars()
+            .all(|c| c == ' ' || c == '\t');
+        if self.line.is_empty() || whitespace_only {
             match ch {
-                '\n' => out.push('\n'),
-                ' ' | '`' => self.line.push(ch),
-                _ => {
-                    out.push(ch);
-                    self.at_line_start = false;
+                ' ' | '\t' => {
+                    self.line.push(ch);
+                    return;
                 }
-            }
-            return;
-        }
-
-        let spaces = self.line.chars().take_while(|c| *c == ' ').count();
-        let ticks = self.line.chars().filter(|c| *c == '`').count();
-        if ticks < 3 && spaces + ticks == self.line.chars().count() {
-            // 还只是空格/少量反引号：可能继续长成围栏起始。
-            match ch {
-                ' ' if ticks == 0 && spaces < 3 => self.line.push(ch),
-                '`' => self.line.push(ch),
                 '\n' => {
                     let line = std::mem::take(&mut self.line);
                     out.push_str(&line);
                     out.push('\n');
+                    return;
+                }
+                '{' => {
+                    let leading = std::mem::take(&mut self.line);
+                    self.bare = Some(BareScan::start(leading));
+                    self.mode = Mode::Bare;
+                    return;
+                }
+                '`' => {
+                    self.line.push(ch);
+                    return;
                 }
                 _ => {
                     let line = std::mem::take(&mut self.line);
                     out.push_str(&line);
                     out.push(ch);
                     self.at_line_start = false;
+                    return;
                 }
+            }
+        }
+
+        // 行首已经出现反引号：判定是不是围栏起始行。
+        let spaces = self.line.chars().take_while(|c| *c == ' ').count();
+        let rest: String = self.line.chars().skip(spaces).collect();
+        let ticks = rest.chars().take_while(|c| *c == '`').count();
+        let indent_ok = spaces <= 3 && self.line.chars().take(spaces).all(|c| c == ' ');
+
+        if ticks < 3 {
+            // 1–2 个反引号：下一个字符不是反引号就不是围栏。
+            if ch == '`' {
+                self.line.push(ch);
+            } else {
+                let line = std::mem::take(&mut self.line);
+                out.push_str(&line);
+                out.push(ch);
+                // 消费的可能是换行：下一行仍然是行首，否则裸 JSON 会被当成行内正文漏出。
+                self.at_line_start = ch == '\n';
             }
             return;
         }
 
-        // 已有 ≥3 个反引号：整行是起始行，等到换行才能知道语言标记。
+        if !indent_ok {
+            // 缩进超过 3 个空格（或夹了制表符）：不是围栏，整行按正文走。
+            let line = std::mem::take(&mut self.line);
+            out.push_str(&line);
+            out.push(ch);
+            self.at_line_start = ch == '\n';
+            return;
+        }
+
         if ch == '\n' {
             let mut opening = std::mem::take(&mut self.line);
             opening.push('\n');
@@ -614,7 +864,33 @@ impl Filter {
             self.mode = Mode::CodeFence;
         }
     }
+
+    fn step_bare(&mut self, ch: char, out: &mut String) {
+        let step = self
+            .bare
+            .as_mut()
+            .expect("裸候选状态必有候选")
+            .step(ch);
+        match step {
+            BareStep::Open => {}
+            BareStep::Closed => {
+                let scan = self.bare.take().expect("裸候选状态必有候选");
+                conclude_bare(scan, out, &mut self.layout);
+                self.mode = Mode::Prose;
+                // 闭合的 `}` 之后还可能有余下的正文，仍在行内。
+                self.at_line_start = false;
+            }
+            BareStep::Overflow => {
+                let scan = self.bare.take().expect("裸候选状态必有候选");
+                emit_overflow(&scan, out);
+                self.mode = Mode::Prose;
+                // 溢出恰好落在换行时，下一行仍是行首。
+                self.at_line_start = ch == '\n';
+            }
+        }
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -640,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn json_fences_are_candidates_only_when_the_whole_body_validates() {
+    fn json_fences_are_swallowed_only_when_the_body_looks_like_a_layout() {
         let with_layout = "看这个：\n```json\n{\"version\":1,\"blocks\":[{\"type\":\"empty_hint\"}]}\n```\n好了。\n";
         assert_eq!(strip_text(with_layout), "看这个：\n好了。\n");
         assert_eq!(
@@ -653,6 +929,30 @@ mod tests {
         assert!(strip(ordinary).1.is_none());
     }
 
+    /// `layout` 是显式声明：坏 JSON 也不显示，否则用户会看到一个标着 layout 的
+    /// 代码块里全是半截 JSON。
+    #[test]
+    fn a_layout_fence_with_broken_json_is_never_shown() {
+        let text = "```layout\n{ \"version\": 1, \"blocks\": [ { \"type\": \"empty_hint\" }, ] }\n```\n";
+        assert_eq!(strip_text(text), "");
+        assert!(strip(text).1.is_none());
+    }
+
+    #[test]
+    fn a_layout_fence_with_plain_text_is_never_shown() {
+        let text = "```layout\n这里不是 JSON\n```\n后面\n";
+        assert_eq!(strip_text(text), "后面\n");
+        assert!(strip(text).1.is_none());
+    }
+
+    /// 旧规则会显示「形状是布局但校验不过」的 json 围栏；现在统一为永远不显示。
+    #[test]
+    fn a_json_fence_with_a_layout_shape_but_invalid_blocks_is_still_swallowed() {
+        let text = "```json\n{\"version\":1,\"blocks\":[{\"type\":\"nope\"}]}\n```\n";
+        assert_eq!(strip_text(text), "");
+        assert!(strip(text).1.is_none());
+    }
+
     #[test]
     fn unmarked_fences_are_candidates_too() {
         let text = "```\n{\"version\":1,\"blocks\":[]}\n```\n";
@@ -661,10 +961,101 @@ mod tests {
     }
 
     #[test]
-    fn bare_json_in_prose_is_never_parsed_or_swallowed() {
-        let text = "布局长这样：{\"version\":1,\"blocks\":[]}，记住了吗？\n";
+    fn a_bare_layout_on_its_own_line_is_swallowed() {
+        let text = "已经连上了。\n\n{ \"version\": 1, \"blocks\": [ { \"type\": \"proxy_card\" } ] }\n\n需要换线路吗？\n";
+        let visible = strip_text(text);
+        assert!(!visible.contains("version"), "正文里不该出现布局：{visible:?}");
+        assert_eq!(
+            layout_of(text)["blocks"][0]["type"],
+            json!("proxy_card")
+        );
+        assert!(visible.contains("已经连上了。"));
+        assert!(visible.contains("需要换线路吗？"));
+    }
+
+    /// 判定看行首，不看前面有没有空行。
+    #[test]
+    fn a_bare_layout_right_after_a_label_line_is_swallowed() {
+        let text = "布局：\n{\"version\":1,\"blocks\":[]}\n好了\n";
+        assert_eq!(strip_text(text), "布局：\n\n好了\n");
+        assert_eq!(layout_of(text)["blocks"], json!([]));
+    }
+
+    #[test]
+    fn a_brace_in_the_middle_of_a_sentence_is_prose() {
+        let text = "把 {\"version\":1} 发给我\n";
         assert_eq!(strip_text(text), text);
         assert!(strip(text).1.is_none());
+    }
+
+    #[test]
+    fn a_bare_layout_shape_with_invalid_content_is_swallowed() {
+        let text = "前面\n{\"version\":1,\"blocks\":\"oops\"}\n后面\n";
+        let visible = strip_text(text);
+        assert!(!visible.contains("version"));
+        assert!(visible.contains("前面"));
+        assert!(visible.contains("后面"));
+        assert!(strip(text).1.is_none(), "形状是布局但校验不过，不写库");
+    }
+
+    #[test]
+    fn a_bare_json_that_is_not_layout_shaped_is_shown() {
+        let text = "{\"a\":1}\n";
+        assert_eq!(strip_text(text), text);
+        assert!(strip(text).1.is_none());
+    }
+
+    #[test]
+    fn a_truncated_bare_layout_is_dropped_entirely() {
+        let text = "前面\n{\"version\":1,\"blocks\":[";
+        let visible = strip_text(text);
+        assert_eq!(visible, "前面\n");
+        assert!(!visible.contains('{'));
+        assert!(strip(text).1.is_none());
+    }
+
+    #[test]
+    fn braced_strings_inside_a_bare_object_pair_correctly() {
+        // 简单的数括号会在这里提前闭合；按 JSON 字符串规则配对才正确。
+        let text =
+            "{\"version\":1,\"blocks\":[{\"type\":\"reachability\",\"props\":{\"targets\":[\"a}b\"]}}]}\n";
+        assert_eq!(strip_text(text), "\n");
+        assert_eq!(
+            layout_of(text)["blocks"][0]["props"]["targets"],
+            json!(["a}b"])
+        );
+
+        let non_shape = "{\"a\":\"}\"}\n";
+        assert_eq!(strip_text(non_shape), non_shape);
+    }
+
+    #[test]
+    fn leading_whitespace_before_a_bare_layout_is_swallowed_with_it() {
+        let text = "   {\"version\":1,\"blocks\":[]}\n";
+        assert_eq!(strip_text(text), "\n");
+    }
+
+    #[test]
+    fn bare_json_in_prose_is_not_mistaken_for_a_candidate() {
+        let text = "布局长这样：{\"version\":1,\"blocks\":[]}，记住了吗？\n";
+        assert_eq!(strip_text(text), text);
+    }
+
+    /// 1–2 个反引号的行会整行按正文放行；如果那一行以换行结束，下一行仍是行首。
+    #[test]
+    fn a_short_backtick_line_keeps_the_next_line_at_line_start() {
+        let text = "`\n{\"version\":1,\"blocks\":[]}\n尾\n";
+        assert_eq!(strip_text(text), "`\n\n尾\n");
+        assert!(strip(text).1.is_some());
+
+        let mut filter = Filter::new();
+        let mut out = String::new();
+        for ch in text.chars() {
+            out.push_str(&filter.push(&ch.to_string()));
+        }
+        out.push_str(&filter.finish());
+        assert_eq!(out, "`\n\n尾\n", "流式不能把下一行当行内正文发出去");
+        assert!(filter.layout().is_some());
     }
 
     #[test]
@@ -705,19 +1096,33 @@ mod tests {
     }
 
     #[test]
+    fn an_unclosed_bare_object_never_leaks_half_json() {
+        let text = "前面\n{\"version\":1,\"blocks\":[]";
+        assert_eq!(strip_text(text), "前面\n");
+        assert!(strip(text).1.is_none());
+    }
+
+    #[test]
+    fn a_multiline_bare_layout_is_swallowed() {
+        let text = "前面\n{\n  \"version\": 1,\n  \"blocks\": [ { \"type\": \"empty_hint\" } ]\n}\n后面\n";
+        let visible = strip_text(text);
+        assert!(!visible.contains("version"));
+        assert!(visible.contains("前面"));
+        assert!(visible.contains("后面"));
+        assert_eq!(layout_of(text)["blocks"][0]["type"], json!("empty_hint"));
+    }
+
+    #[test]
     fn the_last_valid_layout_wins_and_all_fences_disappear() {
-        let text = "```layout\n{\"version\":1,\"blocks\":[{\"type\":\"empty_hint\"}]}\n```\n中间\n```layout\n{\"version\":1,\"blocks\":[{\"type\":\"proxy_card\"}]}\n```\n";
-        assert_eq!(strip_text(text), "中间\n");
+        let text = "```layout\n{\"version\":1,\"blocks\":[{\"type\":\"empty_hint\"}]}\n```\n中间\n{\"version\":1,\"blocks\":[{\"type\":\"proxy_card\"}]}\n";
+        assert_eq!(strip_text(text), "中间\n\n");
         assert_eq!(layout_of(text)["blocks"][0]["type"], json!("proxy_card"));
     }
 
     #[test]
     fn an_invalid_later_layout_does_not_erase_an_earlier_valid_one() {
         let text = "```layout\n{\"version\":1,\"blocks\":[{\"type\":\"empty_hint\"}]}\n```\n```layout\n{\"version\":2}\n```\n";
-        assert_eq!(
-            layout_of(text)["blocks"][0]["type"],
-            json!("empty_hint")
-        );
+        assert_eq!(layout_of(text)["blocks"][0]["type"], json!("empty_hint"));
     }
 
     #[test]
@@ -742,32 +1147,6 @@ mod tests {
         let text = "```layout\n{\"version\":1,\"blocks\":[]}\n```\n";
         assert_eq!(strip_text(text), "");
         assert_eq!(layout_of(text)["blocks"], json!([]));
-    }
-
-    /// `proxy_card` 只在系统代理配置下有意义：TUN 配置它指向一个没监听的端口。
-    #[test]
-    fn proxy_card_is_only_valid_for_proxy_configs() {
-        let layout = json!({"version":1,"blocks":[{"type":"proxy_card"}]});
-        assert!(validate_for("system_proxy", &layout).is_ok());
-        assert_eq!(
-            validate_for("tun", &layout),
-            Err(Reason::WrongConfigMode)
-        );
-
-        let other = json!({"version":1,"blocks":[{"type":"empty_hint"}]});
-        assert!(validate_for("tun", &other).is_ok());
-    }
-
-    /// 取消时未闭合的候选整段丢弃；正常结束仍然按「模型打出来的样子」补发。
-    #[test]
-    fn cancelling_discards_unclosed_candidates() {
-        let mut filter = Filter::new();
-        assert_eq!(filter.push("正在写\n```json\n{\"a\":"), "正在写\n");
-        assert_eq!(filter.finish_discarding(), "");
-
-        let mut filter = Filter::new();
-        assert_eq!(filter.push("正在写\n```json\n{\"a\":"), "正在写\n");
-        assert_eq!(filter.finish(), "```json\n{\"a\":");
     }
 
     #[test]
@@ -836,8 +1215,43 @@ mod tests {
         );
     }
 
+    /// 语义校验只在写入时做：TUN 下 `proxy_card`、已有节点时 `source_choice` 整份丢弃。
     #[test]
-    fn oversized_candidates_fall_back_to_a_code_block() {
+    fn block_applicability_depends_on_the_config() {
+        let proxy = json!({"version":1,"blocks":[{"type":"proxy_card"}]});
+        let ctx = ConfigContext {
+            connect_mode: "system_proxy",
+            node_count: 0,
+        };
+        assert!(validate_for(&ctx, &proxy).is_ok());
+
+        let tun = ConfigContext {
+            connect_mode: "tun",
+            node_count: 0,
+        };
+        assert_eq!(
+            validate_for(&tun, &proxy),
+            Err(Reason::BlockNotApplicable)
+        );
+
+        let source = json!({"version":1,"blocks":[{"type":"source_choice"}]});
+        let empty = ConfigContext {
+            connect_mode: "system_proxy",
+            node_count: 0,
+        };
+        assert!(validate_for(&empty, &source).is_ok());
+        let with_nodes = ConfigContext {
+            connect_mode: "system_proxy",
+            node_count: 2,
+        };
+        assert_eq!(
+            validate_for(&with_nodes, &source),
+            Err(Reason::BlockNotApplicable)
+        );
+    }
+
+    #[test]
+    fn oversized_fence_candidates_fall_back_to_a_code_block() {
         let body = "x".repeat(MAX_BODY_BYTES + 10);
         let text = format!("```layout\n{body}\n```\n尾\n");
         let out = strip_text(&text);
@@ -846,9 +1260,58 @@ mod tests {
     }
 
     #[test]
+    fn oversized_bare_candidates_fall_back_to_plain_text() {
+        let body = format!("{{\"version\":1,\"blocks\":[{}", "x".repeat(MAX_BARE_BYTES + 10));
+        let text = format!("{body}\n尾\n");
+        let out = strip_text(&text);
+        assert!(out.contains("{\"version\""), "超限后原样放行");
+        assert!(out.contains("尾"));
+    }
+
+    #[test]
     fn stripping_is_idempotent() {
-        let once = strip_text(SAMPLE);
-        assert_eq!(strip_text(&once), once);
+        for sample in [
+            SAMPLE,
+            "前面\n{\"version\":1,\"blocks\":[]}\n后面\n",
+            "把 {\"version\":1} 发给我\n",
+        ] {
+            let once = strip_text(sample);
+            assert_eq!(strip_text(&once), once);
+        }
+    }
+
+    /// 流式全程不能出现 `{"version` 片段：候选闭合前一个字符都不发。
+    #[test]
+    fn streaming_never_leaks_a_layout_fragment() {
+        let text = "已经连上了。\n\n{ \"version\": 1, \"blocks\": [ { \"type\": \"proxy_card\" } ] }\n\n需要换线路吗？\n";
+        let mut filter = Filter::new();
+        let mut emitted = String::new();
+        for ch in text.chars() {
+            emitted.push_str(&filter.push(&ch.to_string()));
+            assert!(
+                !emitted.contains("{\"version"),
+                "流式过程中泄露了布局片段：{emitted:?}"
+            );
+        }
+        emitted.push_str(&filter.finish());
+        assert!(!emitted.contains("version"));
+        assert!(filter.layout().is_some());
+    }
+
+    /// 取消时未闭合的候选（围栏与裸 JSON）都不补发。
+    #[test]
+    fn cancelling_discards_unclosed_candidates() {
+        let mut filter = Filter::new();
+        assert_eq!(filter.push("正在写\n```json\n{\"a\":"), "正在写\n");
+        assert_eq!(filter.finish_discarding(), "");
+
+        let mut filter = Filter::new();
+        assert_eq!(filter.push("正在写\n```json\n{\"a\":"), "正在写\n");
+        assert_eq!(filter.finish(), "```json\n{\"a\":");
+
+        let mut filter = Filter::new();
+        assert_eq!(filter.push("正在写\n{\"version\":1,"), "正在写\n");
+        assert_eq!(filter.finish_discarding(), "");
     }
 
     #[test]
@@ -863,6 +1326,22 @@ mod tests {
             "```json".to_string(),
             "```layout".to_string(),
             "   ```layout\n{\"version\":1,\"blocks\":[]}\n```\n尾".to_string(),
+            "已经连上了。\n\n{ \"version\": 1, \"blocks\": [ { \"type\": \"proxy_card\" } ] }\n\n需要换线路吗？\n".to_string(),
+            "布局：\n{\"version\":1,\"blocks\":[]}\n好了\n".to_string(),
+            "把 {\"version\":1} 发给我\n".to_string(),
+            "{\"a\":1}\n".to_string(),
+            "   {\"version\":1,\"blocks\":[]}\n".to_string(),
+            "`\n{\"version\":1,\"blocks\":[]}\n尾\n".to_string(),
+            "    ```\n{\"version\":1,\"blocks\":[]}\n尾\n".to_string(),
+            "{".to_string() + &"x".repeat(MAX_BARE_BYTES - 1) + "\n{\"version\":1,\"blocks\":[]}\n尾\n",
+            "前面\n{\"version\":1,\"blocks\":[".to_string(),
+            "{\"a\":\"}\",\"version\":1,\"blocks\":[]}\n".to_string(),
+            "{\"blocks\":[],\"version\":1}\n尾".to_string(),
+            "```layout\n{\"a\":1}\n```\n尾\n".to_string(),
+            "```json\n{\"version\":1,\"blocks\":[{\"type\":\"nope\"}]}\n```\n尾\n".to_string(),
+            "前面\n{\n  \"version\": 1,\n  \"blocks\": [ { \"type\": \"empty_hint\" } ]\n}\n后面\n".to_string(),
+            "{".to_string(),
+            "   {".to_string(),
         ];
 
         for text in samples {
