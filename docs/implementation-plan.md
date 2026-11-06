@@ -131,7 +131,7 @@ activity bar、左栏配置列表、中间三段骨架、块系统、`source_cho
 |---|---|
 | 提问 | 两/四问，走 `AskUserQuestion`（一级线一次能力提问、二级线一次、三级合流追问） |
 | 二选一 | `source_choice`：用测试节点 / 用我自己的节点 |
-| 块系统 | 六个块：`empty_hint` / `proxy_card` / `source_choice` / `reachability` / `issue_card` / `update_hint` |
+| 块系统 | 六个块：`empty_hint` / `proxy_card` / `source_choice` / `reachability` / `issue_card` / `update_hint`（AI 可写前五种，`issue_card` 只由系统叠加） |
 | 布局持久化 | AI 输出的布局描述落库，下次直接还原 |
 | 系统提示词 v1 | 把整套流程写成 AI 可执行的指令，能力清单与 `capabilities.md` 同源 |
 | 文案约束 | 界面不出现 proxy / TUN / 分流 / 规则集 |

@@ -479,14 +479,14 @@ grep -rn "app_data_dir\|veyl.db" src-tauri/src/store/db.rs | head
 | B4-01 | 提问次数按用户类型 | 界面：一级走一次、二级走一次、三级走合流追问 | 与 `implementation-plan.md` 批 4 一致；问题数不超 |
 | B4-02 | `source_choice` 出现条件 | 界面：面板已生成但还没节点 | 出现「用 Veyl 提供的测试节点（仅供试用）/ 用我自己的节点」；已有节点后不再出现 |
 | B4-03 | 六个块都能渲染 | 界面：逐个触发六种块的显示条件 | 六种都渲染正确，样式来自设计规范（`center-panel.md` §2.5） |
-| B4-04 | 未知块被忽略并记日志 | 自动：mock-llm 剧本返回 `{ "type": "banner" }` | 界面不崩、不渲染该块；日志有一行 ignore 记录（`center-panel.md` §3） |
+| B4-04 | 非法块整份丢弃 | 自动：mock-llm 剧本返回 `{ "type": "banner" }` | 界面不崩、**布局不变**（保留旧布局）；日志记一行原因码；不逐块过滤（`center-panel.md` §3） |
 | B4-05 | 布局持久化并还原 | 读文件 + 界面：`sqlite3 <db> "select * from layout"`；重启应用 | 布局已落库；重启后中间区与关闭前一致，不再走一遍提问（`center-panel.md` §3） |
-| B4-06 | 提示词与文档同源 | 自动：见命令块 B4-06 | 提示词里的块清单 = 六项，一个不多一个不少；能力 ID 双向差集为空（`capabilities.md` 开头 + `center-panel.md` §2.5.1 第 5 步） |
+| B4-06 | 提示词与文档同源 | 自动：见命令块 B4-06 | 提示词里的块清单 = **五项**（AI 可写的那五个，`issue_card` 不在表里），一个不多一个不少；能力 ID 双向差集为空（`capabilities.md` 开头 + `center-panel.md` §2.5.1 第 5 步） |
 | B4-07 | AI 不可用时本地规则兜底 | 界面：断网 + 清空 key + 制造一个 P0 | 中间出现 `issue_card`，带「重置网络」入口；无 AI 请求（`capabilities.md` §4） |
 | B4-08 | `empty_hint` 不依赖 AI | 界面：清空 key，已配置未连接；再连上 | 未连接时 `empty_hint` 仍显示完整一句话，并包含那行「有问题问右侧的助手」；**连上之后这句不再出现**（2026-11-03 裁定：不常驻）。注意它的参数来自 H1（AI 工具），必须有静态回退，不能因为拿不到 H1 就空着 |
 | B4-09 | 首次 0–20s 中间非空 | 界面：全新用户首次启动 | 有一句话说明，不是空白（`center-panel.md` §4） |
 | B4-10 | 提问走 `AskUserQuestion` | 自动：`docs/contracts/tools.md` 里存在该工具；mock-llm 剧本走到它 | 提问经工具通道，不是让 AI 在正文里问 |
-| B4-11 | AI 不能改样式 | 自动：mock-llm 返回带 `props.color` / `props.style` 的块 | 颜色/样式被忽略并记日志；渲染结果与设计规范一致（`center-panel.md` §3） |
+| B4-11 | AI 不能改样式 | 自动：mock-llm 返回带 `props.color` / `props.style` 的块 | 出现白名单外的键 → **整份布局丢弃**，中间区保持不变；日志记原因码；渲染结果与设计规范一致（`center-panel.md` §3） |
 | B4-12 | AI 不能发明块 | 自动 + 读代码：块 type 的入参校验 | 非法 type 在写入布局前就被拒，或渲染时忽略并日志；不写进库更佳 |
 | B4-13 | 文案禁止词 | 自动：G-07 | 见 G-07 |
 

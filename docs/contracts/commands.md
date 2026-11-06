@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.10.0`
+> 契约版本：`2.11.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -251,6 +251,7 @@ type ConfigDetail = ConfigSummary & {
   dns: DnsConfig;                    // 本地 / 境外 DNS 候选
   tun_excludes: string[];            // 仅 tun；system_proxy 恒为空数组
   layout: Layout | null;             // null = 这个配置还没有编排布局
+  layout_revision: number | null;    // 与 layout 同源：layout 为 null 时它也为 null
 };
 ```
 
@@ -386,6 +387,7 @@ type ConfigActivateData = {
 - 中间底部节点详情与节点下拉的数据源（`docs/center-panel.md` §2.5.1：固定骨架「底部节点详情 / 下拉」→ B1）。
 - `nodes` 按配置内顺序返回；UI **不重排、不按名字排序**——用户拖过的顺序就是顺序。
 - `layout` 随配置一起返回：切配置后 UI 立即拿到该配置的布局，不需要再发一次请求。布局写入走 AI 编排（批 4），UI 没有写布局的命令。
+- `layout_revision` 用于**丢弃迟到的 `layout-updated`**：UI 收到 `revision <= layout_revision` 的事件直接忽略。没有这个字段，同配置内「先发的事件后到」会让中间区闪回上一版——`config_id` 只能挡住跨配置的迟到事件。
 - 不存在 → `NOT_FOUND`。
 - 只读，不联网，不发事件。
 
@@ -1711,8 +1713,8 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.10.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 |
-| `contracts/events.md` | **2.9.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 |
+| `contracts/commands.md` | **2.11.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` |
+| `contracts/events.md` | **2.10.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 |
 | `contracts/runtime.md` | **2.3.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` |
 | `contracts/tools.md` | **3.6.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 |
 | `data-model.md` | **3** | 批 0 + 批 3 表 + 种子排除表 |
@@ -1729,6 +1731,15 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.11.0（2026-11-06，配置详情带布局版本）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.11.0`；`ConfigDetail` 增 `layout_revision: number \| null`，与 `layout` 同源（`layout` 为 null 时它也恒为 null） | 字段扩展 | 同配置内迟到的 `layout-updated` 无法判断先后，中间区会闪回上一版 |
+| 2 | §3.6 写明 `layout_revision` 的用途：UI 收到 `revision <= layout_revision` 的事件直接丢弃 | 说明 | — |
+| 3 | 与 `events.md` 2.10.0 的「非法布局整份丢弃」配套；布局校验策略变化不影响本文件其它命令 | 关联 | — |
+| 4 | §15.5 矩阵同步本文件 2.11.0、`events.md` 2.10.0 | 元数据 | — |
 
 ### 2.10.0（2026-11-06，测速支持节点子集）
 

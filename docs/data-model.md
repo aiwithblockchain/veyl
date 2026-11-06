@@ -185,9 +185,11 @@ CREATE TABLE layout (
 | 列 | 规则 |
 |---|---|
 | `revision` | 每配置单调递增。UI 收到 `revision <= 当前` 的 `layout-updated` 时丢弃 |
-| `layout_json` | 只存**已通过块词汇表校验**的块；非法块在写入前被过滤并记日志 |
+| `layout_json` | 只存**整份通过校验**的布局。块未知、重复、props 非法或含不安全字符时，**整份丢弃**：不写库、不发事件、保留旧布局、记日志。**不逐块过滤** |
 
 - 一套配置一份布局。切配置时布局随 `config_detail` 返回，不额外查询。
+- **`revision` 同时随 `config_detail` 返回**（`ConfigDetail.layout_revision`）：UI 用它丢弃同配置内的迟到事件（`revision <= 当前` 即忽略）。只靠事件的 `config_id` 只能挡住跨配置的迟到，挡不住同一配置内「先发后到」，那时中间区会闪回上一版。`config_detail.layout` 为 `null` 时 `layout_revision` 也为 `null`。
+- **不逐块过滤非法块**（PM 裁定，2026-11-06）：逐块过滤会让中间区呈现一个模型没打算要的构成——比如把 `issue_card` 滤掉，用户就少了自救入口，而且没有任何提示。所以校验是原子的：整份合法才写，否则不覆盖旧布局。
 - **「空布局」与「没有布局」是两件事**（PM 裁定）：
   - `layout` 有行且 `blocks = []` → AI 明确选择「中间什么都不放」。合法，保留。
   - `layout` 没有行 → 还没编排过，UI 按本地规则渲染（固定骨架之外不插块）。
@@ -485,6 +487,7 @@ CREATE TABLE rules_state (
 | `configs.route_revision` | `RouteState.route_revision` |
 | `nodes.id` | `NodeSummary.node_id` |
 | `layout.layout_json` | `ConfigDetail.layout` |
+| `layout.revision` | `ConfigDetail.layout_revision` |
 
 ---
 

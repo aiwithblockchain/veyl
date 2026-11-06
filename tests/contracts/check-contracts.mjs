@@ -1656,6 +1656,82 @@ check("OfflineReason 的取值与契约一致（实现）", () => {
   return problems;
 });
 
+// --- 16：中间区布局：非法整份丢弃、可写块数量、配置详情带布局版本 ---
+
+check("布局非法块整份丢弃，AI 可写块为 5 个（契约）", () => {
+  const md = read("docs/contracts/events.md");
+  const start = md.indexOf("### 4.13");
+  const end = md.indexOf("### 4.14");
+  if (start < 0 || end < 0) return ["events.md 找不到 §4.13 layout-updated"];
+  const s = md.slice(start, end);
+  const problems = [];
+
+  for (const phrase of [
+    "整份丢弃",
+    "不逐块过滤",
+    "同一条消息出现多份布局时只认最后一份",
+    "请求被取消或出错时不写入",
+    "1–6 项",
+    "24 字符",
+    "`://`",
+    "layout_revision",
+  ]) {
+    if (!s.includes(phrase)) problems.push(`§4.13 缺少「${phrase}」`);
+  }
+
+  // 旧策略的话术不得残留：逐块过滤会让中间区出现模型没打算要的构成。
+  for (const stale of ["过滤掉并记日志", "不写库、不发事件里的那一项", "六个块"]) {
+    if (s.includes(stale)) problems.push(`§4.13 仍保留旧策略「${stale}」`);
+  }
+
+  for (const block of ["empty_hint", "proxy_card", "source_choice", "reachability", "update_hint"]) {
+    if (!s.includes(`\`${block}\``)) problems.push(`§4.13 的可写块清单缺少 ${block}`);
+  }
+  if (!/issue_card[^。]*叠加|叠加[^。]*issue_card/.test(s)) {
+    problems.push("§4.13 没有写清 issue_card 是叠加层、不写进布局");
+  }
+
+  const fields = payloadFields("docs/contracts/events.md", "LayoutUpdatedPayload");
+  if (!fields) problems.push("events.md 找不到 LayoutUpdatedPayload");
+  else if (!fields.includes("revision")) problems.push("LayoutUpdatedPayload 缺少 revision");
+
+  return problems;
+});
+
+check("ConfigDetail 带 layout_revision（契约）", () => {
+  const md = read("docs/contracts/commands.md");
+  const m = md.match(/type ConfigDetail = [^{]*\{([\s\S]*?)\n\};/);
+  if (!m) return ["commands.md 找不到 ConfigDetail"];
+  const problems = [];
+  if (!/^\s*layout_revision\s*:\s*number\s*\|\s*null\s*;/m.test(m[1])) {
+    problems.push("ConfigDetail.layout_revision 必须是 number | null");
+  }
+  if (!md.includes("revision <= layout_revision")) {
+    problems.push("commands.md §3.6 没有写「revision <= layout_revision 的事件丢弃」");
+  }
+  return problems;
+});
+
+check(
+  "系统提示的块词汇表为 5 个、不含 issue_card（实现）",
+  () => {
+    const rs = read("src-tauri/src/claurst_session/mod.rs");
+    const m = rs.match(/const BLOCK_CATALOG: &str = "\\\n([\s\S]*?)";/);
+    if (!m) return ["找不到 BLOCK_CATALOG"];
+    const problems = [];
+    if (m[1].includes("`issue_card`")) {
+      problems.push("BLOCK_CATALOG 仍包含 issue_card（叠加层不进布局，写进去故障卡会渲染两次）");
+    }
+    const rows = [...m[1].matchAll(/^\|\s*`([a-z_]+)`\s*\|/gm)].map((x) => x[1]);
+    const expected = ["empty_hint", "proxy_card", "source_choice", "reachability", "update_hint"];
+    if (rows.join(",") !== expected.join(",")) {
+      problems.push(`BLOCK_CATALOG 应为 ${expected.join(" / ")}，实际是 ${rows.join(" / ")}`);
+    }
+    return problems;
+  },
+  { advisory: true },
+);
+
 // --- 输出 ---
 
 const strict = process.env.AIVPN_CONTRACT_STRICT === "1";
