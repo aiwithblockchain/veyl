@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { ConfigDetail, NodeSummary, RuntimeView } from "../agent/protocol";
 import type { ProbeResult } from "../config/useVpnSession";
+import type { NodeProbesController } from "../config/useNodeProbes";
 import { copyText } from "../ui/clipboard";
 import { modeSummary, scopeSummary } from "../ui/configLabels";
 import {
@@ -11,16 +12,18 @@ import {
 } from "../ui/consoleActions";
 import { formatCheckedAgo, formatClock, formatTraffic } from "../ui/format";
 import { failureHeadline, middleBlocks, middleLevel } from "../ui/middleArea";
+import { probeBadge, formatLatency } from "../ui/nodeList";
 import { rateChart, rateLabel, type RateSample } from "../ui/rateSeries";
 import { MiddleArea } from "./MiddleArea";
+import { NodeSheet } from "./NodeSheet";
 
 interface Props {
   config: ConfigDetail | null;
   onStart: () => void;
   onStop: () => void;
-  onSwitchNode: (nodeId: string) => void;
+  onSwitchNode: (nodeId: string) => Promise<{ ok: boolean; message?: string }>;
   onProbe: (nodeId: string) => Promise<ProbeResult>;
-  nodeSwitchAvailable: boolean;
+  nodeProbes: NodeProbesController;
   nodeProbeAvailable: boolean;
   aiReady: boolean;
   justOnboarded: boolean;
@@ -28,6 +31,7 @@ interface Props {
   hasConfigs: boolean;
   onAskAi: () => void;
   onNewConfig: () => void;
+  onOpenDiagnostics?: () => void;
   loading?: boolean;
   runtime: RuntimeView;
   /** 最近一次失败是否来自已连接态；决定失败卡标题是「连接断了」还是「没有连上节点」。 */
@@ -72,7 +76,7 @@ export function Console({
   onStop,
   onSwitchNode,
   onProbe,
-  nodeSwitchAvailable,
+  nodeProbes,
   nodeProbeAvailable,
   aiReady,
   justOnboarded,
@@ -80,20 +84,21 @@ export function Console({
   hasConfigs,
   onAskAi,
   onNewConfig,
+  onOpenDiagnostics,
   loading = false,
   runtime,
   failedAfterConnected = false,
   rateSamples = NO_RATE,
 }: Props) {
-  const [selectedId, setSelectedId] = useState<string | null>(
-    config?.current_node_id ?? null,
-  );
-  const [pickerOpen, setPickerOpen] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
   const [probe, setProbe] = useState<Probe | null>(null);
   const [exitCopy, setExitCopy] = useState<"idle" | "copied" | "failed">("idle");
   const [now, setNow] = useState(() => Date.now());
+  const [cardNow, setCardNow] = useState(() => Date.now());
   const copyTimer = useRef<number | null>(null);
   const detailRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const returnFocusRef = useRef(false);
   const configId = config?.config_id ?? null;
   const currentNodeId = config?.current_node_id ?? null;
   const exitAddress = runtime.health.exit_ip?.trim() || null;
@@ -118,30 +123,28 @@ export function Console({
     [],
   );
 
-  // 换配置或真正切换节点后，详情回到这套配置当前在用的节点。
+  // 换配置时收起面板；同一配置内切换节点（面板里点一行）不关面板。
   useEffect(() => {
-    setSelectedId(currentNodeId);
-    setPickerOpen(false);
+    setSheetOpen(false);
     setProbe(null);
-  }, [configId, currentNodeId]);
+  }, [configId]);
 
+  // 当前节点变化后，旧的单测结果不再属于正在显示的节点。
   useEffect(() => {
-    if (!pickerOpen) return;
-    const onMouseDown = (event: MouseEvent) => {
-      if (detailRef.current && !detailRef.current.contains(event.target as Node)) {
-        setPickerOpen(false);
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setPickerOpen(false);
-    };
-    document.addEventListener("mousedown", onMouseDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onMouseDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [pickerOpen]);
+    setProbe(null);
+  }, [currentNodeId]);
+
+  // 节点只剩 1 个（或没有）时不再有可选列表，面板随之关闭。
+  useEffect(() => {
+    if (sheetOpen && (config?.nodes.length ?? 0) <= 1) setSheetOpen(false);
+  }, [sheetOpen, config?.nodes.length]);
+
+  // 关闭面板后焦点回到节点行，不回到页面顶部。
+  useEffect(() => {
+    if (sheetOpen || !returnFocusRef.current) return;
+    returnFocusRef.current = false;
+    triggerRef.current?.focus();
+  }, [sheetOpen]);
 
   // 计时器每秒跳一次；连接时刻来自 runtime，不轮询快照。
   useEffect(() => {
@@ -151,20 +154,25 @@ export function Console({
     return () => window.clearInterval(timer);
   }, [connected]);
 
+  // 延迟新鲜度按 30 秒刷新，未连接时也要走。
+  useEffect(() => {
+    setCardNow(Date.now());
+    const timer = window.setInterval(() => setCardNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   useEffect(() => {
     if (!connected) setProbe(null);
   }, [connected]);
 
   const selectedNode: NodeSummary | null =
-    config?.nodes.find((node) => node.node_id === selectedId) ??
     config?.nodes.find((node) => node.node_id === config.current_node_id) ??
     config?.nodes[0] ??
     null;
   const selectedNodeId = selectedNode?.node_id ?? null;
   const canPick = (config?.nodes.length ?? 0) > 1;
-  const switching = Boolean(
-    selectedNode && config && selectedNode.node_id !== config.current_node_id,
-  );
+  const currentBatch =
+    config && nodeProbes.run?.configId === config.config_id ? nodeProbes.run : null;
 
   const connectedAt = runtime.connected_since
     ? Date.parse(runtime.connected_since)
@@ -190,7 +198,7 @@ export function Console({
     config && config.layout == null ? middleBlocks(runtime, config, aiReady) : [];
 
   const runProbe = async () => {
-    if (!selectedNode || probe?.status === "testing") return;
+    if (!selectedNode || probe?.status === "testing" || currentBatch) return;
     const node = selectedNode;
     setProbe({ nodeId: node.node_id, status: "testing" });
     const result = await onProbe(node.node_id);
@@ -216,12 +224,55 @@ export function Console({
   };
 
   let probeLabel: string | null = null;
-  if (probe?.status === "testing") probeLabel = "检查中…";
+  if (probe?.status === "testing") probeLabel = "测速中…";
   else if (probe?.status === "ok") {
-    probeLabel = probe.latency === null ? "可达" : `延迟 ${probe.latency} ms`;
+    probeLabel = probe.latency === null ? "可达" : `延迟 ${probe.latency} 毫秒`;
   } else if (probe?.status === "fail") {
-    probeLabel = probe.unreachable ? "连不上" : "检查失败";
+    probeLabel = probe.unreachable ? "连不上" : "测速失败";
   }
+
+  const currentProbe = selectedNodeId ? nodeProbes.results[selectedNodeId] : undefined;
+  const runtimeProbe =
+    !currentProbe &&
+    connected &&
+    selectedNodeId &&
+    runtime.node_id === selectedNodeId &&
+    runtime.node_latency_ms !== null
+      ? {
+          node_id: selectedNodeId,
+          reachable: true,
+          latency_ms: runtime.node_latency_ms,
+          probe_method: "tcp" as const,
+          checked_at: Date.parse(runtime.health.checked_at) || 0,
+          error: null,
+        }
+      : undefined;
+  const cardBadge = selectedNodeId
+    ? probeBadge(
+        currentProbe ?? runtimeProbe,
+        cardNow,
+        nodeProbes.probing.has(selectedNodeId),
+        currentBatch?.phase === "preparing",
+      )
+    : null;
+  const cardLatency = cardBadge
+    ? cardBadge.kind === "preparing" || cardBadge.kind === "probing"
+      ? cardBadge.label
+      : currentProbe?.reachable && currentProbe.latency_ms !== null
+        ? formatLatency(currentProbe.latency_ms)
+        : runtimeProbe?.reachable && runtimeProbe.latency_ms !== null
+          ? formatLatency(runtimeProbe.latency_ms)
+          : cardBadge.label
+    : null;
+  const cardAgo =
+    !currentBatch && cardBadge?.time && cardBadge.kind !== "probing"
+      ? `${cardBadge.time}测过`
+      : null;
+
+  const closeSheet = () => {
+    returnFocusRef.current = true;
+    setSheetOpen(false);
+  };
 
   const zeroMode = zeroConfigMode(aiReady, justOnboarded, zeroConfigSettled);
   const zeroContent = zeroConfigContent(zeroMode);
@@ -464,110 +515,143 @@ export function Console({
           ) : null}
         </div>
 
-        {hasNodes && selectedNode ? (
-            <footer className="node-card" ref={detailRef}>
-              <div className="node-card__head">
-                <div>
-                  <span className="node-card__label">
-                    {switching ? "选中的节点" : "当前节点"}
-                  </span>
+        {config ? (
+          <div className="console__dock" ref={detailRef}>
+            <NodeSheet
+              open={sheetOpen}
+              config={config}
+              probes={nodeProbes}
+              onClose={closeSheet}
+              onSwitch={onSwitchNode}
+              onOpenDiagnostics={
+                onOpenDiagnostics
+                  ? () => {
+                      closeSheet();
+                      onOpenDiagnostics();
+                    }
+                  : undefined
+              }
+            />
+            <footer className="node-card">
+              {config.nodes.length > 0 ? (
+                <span className="node-card__label">当前节点</span>
+              ) : null}
+              {selectedNode ? (
+                canPick ? (
+                  <button
+                    ref={triggerRef}
+                    type="button"
+                    className="node-card__select"
+                    aria-haspopup="dialog"
+                    aria-expanded={sheetOpen}
+                    aria-controls="node-sheet"
+                    onClick={() => {
+                      if (sheetOpen) closeSheet();
+                      else setSheetOpen(true);
+                    }}
+                  >
+                    <span className="node-card__name" title={selectedNode.name}>
+                      {selectedNode.name}
+                    </span>
+                    <span className="node-card__chevron" aria-hidden>
+                      ⌄
+                    </span>
+                    <span className="node-card__meta">
+                      <span className="node-card__count">
+                        {config.nodes.length} 个节点
+                      </span>
+                      {cardBadge && cardBadge.kind !== "untested" ? (
+                        <span className={`node-card__latency tone-${cardBadge.tone}`}>
+                          {cardLatency}
+                        </span>
+                      ) : null}
+                    </span>
+                  </button>
+                ) : (
+                  <div className="node-card__static">
+                    <span className="node-card__name" title={selectedNode.name}>
+                      {selectedNode.name}
+                    </span>
+                    {cardBadge && cardBadge.kind !== "untested" ? (
+                      <span className={`node-card__latency tone-${cardBadge.tone}`}>
+                        {cardLatency}
+                      </span>
+                    ) : null}
+                  </div>
+                )
+              ) : (
+                <p className="node-card__empty">还没有节点</p>
+              )}
+
+              {selectedNode ? (
+                currentBatch ? (
+                  <button
+                    type="button"
+                    className="node-card__progress"
+                    onClick={() => setSheetOpen(true)}
+                  >
+                    {currentBatch.phase === "preparing"
+                      ? "正在准备测速…"
+                      : `正在测速 ${currentBatch.done}/${currentBatch.total} · 点开可停止`}
+                  </button>
+                ) : (
+                  <>
+                    <div className="node-card__facts num">
+                      {selectedNode.server} : {selectedNode.port}
+                      <span className="sep">·</span>
+                      {selectedNode.method}
+                    </div>
+                    {cardAgo ? <p className="node-card__ago">{cardAgo}</p> : null}
+                    {probeLabel ? (
+                      <p
+                        className={`node-card__probe ${
+                          probe?.status === "ok"
+                            ? "is-ok"
+                            : probe?.status === "fail"
+                              ? "is-err"
+                              : ""
+                        }`}
+                        title={
+                          probe?.status === "fail"
+                            ? probe.message ?? undefined
+                            : undefined
+                        }
+                      >
+                        {probeLabel}
+                      </p>
+                    ) : null}
+                  </>
+                )
+              ) : null}
+
+              {config.nodes.length > 0 ? (
+                <div className="node-card__actions">
                   {canPick ? (
                     <button
                       type="button"
-                      className="node-card__name node-card__name--button"
-                      aria-haspopup="listbox"
-                      aria-expanded={pickerOpen}
-                      onClick={() => setPickerOpen((open) => !open)}
-                    >
-                      {selectedNode.name}
-                    </button>
-                  ) : (
-                    <span className="node-card__name">{selectedNode.name}</span>
-                  )}
-                </div>
-                <div className="node-card__actions">
-                  {switching ? (
-                    <button
-                      type="button"
                       className="btn btn--ghost"
-                      disabled={!nodeSwitchAvailable}
-                      onClick={() => onSwitchNode(selectedNode.node_id)}
+                      onClick={() => setSheetOpen(true)}
                     >
-                      用这个节点
+                      选择节点
                     </button>
                   ) : null}
                   <button
                     type="button"
                     className="btn btn--ghost"
-                    disabled={!canPick}
-                    onClick={() => setPickerOpen((open) => !open)}
+                    disabled={
+                      !nodeProbeAvailable ||
+                      probe?.status === "testing" ||
+                      Boolean(currentBatch)
+                    }
+                    onClick={() => void runProbe()}
                   >
-                    更换
+                    测这个节点
                   </button>
-                  {connected ? (
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      disabled={!nodeProbeAvailable || probe?.status === "testing"}
-                      onClick={() => void runProbe()}
-                    >
-                      检查
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-
-              <div className="node-card__facts num">
-                {selectedNode.server} : {selectedNode.port}
-                <span className="sep">·</span>
-                {selectedNode.method}
-              </div>
-
-              {probeLabel ? (
-                <p
-                  className={`node-card__probe ${
-                    probe?.status === "ok" ? "is-ok" : probe?.status === "fail" ? "is-err" : ""
-                  }`}
-                  title={probe?.status === "fail" ? probe.message ?? undefined : undefined}
-                >
-                  {probeLabel}
-                </p>
-              ) : null}
-              {switching ? (
-                <p className="node-card__hint">
-                  {nodeSwitchAvailable
-                    ? "点「用这个节点」才会真正切换。"
-                    : "这个版本还不能切换节点。"}
-                </p>
-              ) : null}
-
-              {pickerOpen ? (
-                <div className="node-picker" role="listbox" aria-label="这个配置里的节点">
-                  {config.nodes.map((node) => (
-                    <button
-                      key={node.node_id}
-                      type="button"
-                      role="option"
-                      aria-selected={node.node_id === selectedNodeId}
-                      className={`node-picker__item ${
-                        node.node_id === selectedNodeId ? "is-selected" : ""
-                      }`}
-                      onClick={() => {
-                        setSelectedId(node.node_id);
-                        setPickerOpen(false);
-                        setProbe(null);
-                      }}
-                    >
-                      <span className="node-picker__name">{node.name}</span>
-                      {node.node_id === config.current_node_id ? (
-                        <span className="node-picker__badge">当前</span>
-                      ) : null}
-                    </button>
-                  ))}
                 </div>
               ) : null}
             </footer>
-          ) : null}
+          </div>
+        ) : null}
         </>
       )}
     </main>

@@ -83,6 +83,18 @@ function failedRuntime(code: string, over: Partial<RuntimeView> = {}): RuntimeVi
 
 const noop = () => {};
 const never = async () => ({ ok: false, latencyMs: null, unreachable: false });
+const emptyProbes = {
+  results: {},
+  run: null,
+  probing: new Set<string>(),
+  finished: null,
+  notice: null,
+  available: true,
+  loadSnapshot: async () => {},
+  start: async () => ({ ok: true }),
+  cancel: async () => {},
+  clearNotice: () => {},
+};
 
 function renderConsole(
   config: ConfigDetail,
@@ -95,9 +107,9 @@ function renderConsole(
       config={config}
       onStart={noop}
       onStop={noop}
-      onSwitchNode={noop}
+      onSwitchNode={async () => ({ ok: true })}
       onProbe={never}
-      nodeSwitchAvailable={false}
+      nodeProbes={emptyProbes}
       nodeProbeAvailable={false}
       aiReady={aiReady}
       justOnboarded={false}
@@ -261,7 +273,7 @@ describe("中间区验收用例", () => {
     const root = renderConsole(makeConfig({ nodes: [], node_count: 0 }), makeRuntime());
     expect(text(body(root).querySelector(".note"))).toBe("这套配置还没有节点。");
     expect(body(root).querySelector(".ledger")).toBeNull();
-    expect(body(root).querySelector(".node-card")).toBeNull();
+    expect(root.querySelector(".node-card__empty")?.textContent).toBe("还没有节点");
   });
 
   it("13 layout.blocks 非空：不在本次范围，不硬塞本地块", () => {

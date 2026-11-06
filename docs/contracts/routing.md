@@ -517,7 +517,7 @@ type RulesStatus = {
 
 ## 8. 事件
 
-> **§8 的两个载荷归 `events.md` 所有**：`contract_version` 跟 `events.md`（当前 `2.6.0`），不跟本文件；字段语义以 `events.md` §4.14 / §4.15 为准。
+> **§8 的两个载荷归 `events.md` 所有**：`contract_version` 跟 `events.md`（当前 `2.9.0`），不跟本文件；字段语义以 `events.md` §4.14 / §4.15 为准。
 
 ### 8.1 `routing-changed`
 

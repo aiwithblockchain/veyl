@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult, UserQuestionEvent};
 use serde_json::{json, Value};
 
+use super::display::Changed;
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::{ServiceError, VpnToolServices};
 use crate::agent::questions::{self, QuestionExtras};
@@ -42,7 +43,7 @@ impl Tool for CoreUpgradeTool {
 
     fn description(&self) -> &str {
         "仅在用户明确要求更新运行库时使用：检查官方更新并弹确认卡，用户逐字选「升级」后才会下载安装。\
-询问版本、排查连接、给安装建议都不得调用本工具。"
+询问版本、排查连接、给安装建议都不得调用本工具。\n说「新版本」「下次连接生效」，不出现清单、sha256、URL。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -66,7 +67,24 @@ impl Tool for CoreUpgradeTool {
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match self.run(input, ctx).await {
             Ok(outcome) => outcome,
-            Err(error) => ToolOutcome::fail(error),
+            Err(error) => {
+                let facts = error
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("current_version"))
+                    .and_then(Value::as_str)
+                    .map(|version| vec![format!("当前版本：{version}")])
+                    .unwrap_or_default();
+                // 升级失败时版本没变；临时文件由启动清理，不算改动。
+                let text = if error.code == "CANCELLED" {
+                    "已取消升级"
+                } else if error.code == "BUSY" {
+                    "本轮没有再次升级"
+                } else {
+                    "没能升级，仍是旧版本"
+                };
+                ToolOutcome::fail(error).with_display(text, facts, Changed::None)
+            }
         };
         envelope::finish(ctx, "CoreUpgrade", outcome)
     }
@@ -100,16 +118,23 @@ impl CoreUpgradeTool {
         let check = self.check_with_retry(&current).await?;
 
         let Some(target) = pick_target(&check, &current, requested.as_deref())? else {
-            return Ok(ToolOutcome::ok(
-                format!("运行库 {current} 已是最新版本，没有需要下载的内容。"),
-                json!({
-                    "job_id": null,
-                    "current_version": current,
-                    "target_version": current,
-                    "changed": false,
-                    "confirmation": "not_needed",
-                }),
-            ));
+            return Ok(
+                ToolOutcome::ok(
+                    format!("运行库 {current} 已是最新版本，没有需要下载的内容。"),
+                    json!({
+                        "job_id": null,
+                        "current_version": current,
+                        "target_version": current,
+                        "changed": false,
+                        "confirmation": "not_needed",
+                    }),
+                )
+                .with_display(
+                    "运行库已是最新",
+                    vec![format!("当前版本：{current}")],
+                    Changed::None,
+                ),
+            );
         };
 
         // ---- 确认卡：默认焦点「取消」，Esc/关闭/超时都视为取消 ----
@@ -160,6 +185,14 @@ impl CoreUpgradeTool {
                         "changed": true,
                         "confirmation": "accepted",
                     }),
+                )
+                .with_display(
+                    "升级已开始",
+                    vec![
+                        format!("版本：{} → {}", current, target.version),
+                        format!("生效：{effective}"),
+                    ],
+                    Changed::None,
                 ))
             }
             Err(error) => Err(upgrade_error(&error, &current)),

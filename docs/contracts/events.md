@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.6.0`
+> 契约版本：`2.9.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，版本以该文件头为准）
@@ -22,7 +22,7 @@
 - **落库实体字段的时间戳**（`created_at` / `first_seen` / `last_seen` / `checked_at` 等）：**Unix 毫秒整数**，与 `data-model.md` 的列类型一致。见 §2.3。
 - 错误码 **大写下划线**。
 - 所有 payload 带 `contract_version`。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.6.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.8.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
 
 > **命名决策**：事件名沿用 TweetPilot 的真实名称（`message-chunk`、`thinking-chunk`、`tool-call-start`、`tool-call-end`、`ai-status`、`ai-compact`、`ai-request-end`），**不**加 `ai-` 前缀。`docs/phase-1-technical-design.md` §4.2 写的 `agent://delta` / `agent://tool` 是笔误，以本契约为准。
 
@@ -54,8 +54,10 @@
 | 20 | `rules-changed` | Host → UI | `RulesChangedPayload` | **2.1 新增**：规则数据版本切换 |
 | 21 | `core-upgrade-progress` | Host → UI | `CoreUpgradeProgressPayload` | **2.5 新增**：核心升级进度 |
 | 22 | `core-upgrade-finished` | Host → UI | `CoreUpgradeFinishedPayload` | **2.5 新增**：核心升级结束 |
+| 23 | `node-probe-progress` | Host → UI | `NodeProbeProgressPayload` | **2.8 新增**：批量测速单个节点完成 |
+| 24 | `node-probe-finished` | Host → UI | `NodeProbeFinishedPayload` | **2.8 新增**：批量测速结束（跑完或取消） |
 
-1–8 是 AI 会话事件，9–22 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
+1–8 是 AI 会话事件，9–24 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
 
 > **事件与命令成对**：每个改变持久状态的命令都必须有一条对应事件。没有事件的变更只允许发生在「只读命令」上。例外是 `probe_run`——它不改状态，但探测失败的副作用（登记问题）由 `issue-changed` 表达。
 
@@ -102,7 +104,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -124,7 +126,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -142,7 +144,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -163,7 +165,7 @@ type ToolCallStartPayload = {
 - 没有实现的工具退化为 `Using <tool>`。
 - **不得包含凭据**。
 
-`args_preview` 规则（见 `tools.md` §2.5）：
+`args_preview` 规则（见 `tools.md` §2.3）：
 
 - **默认展示所有非敏感字段**。
 - 命中 `sensitive: true` 的字段值替换为 `"***"`，**键名保留**。
@@ -174,7 +176,7 @@ type ToolCallStartPayload = {
 
 例：`VpnConnect({ node_id: "seed-jp-01" })` → `{ "node_id": "seed-jp-01" }`；`DeepseekSaveKey({ key: "sk-…" })` → 省略。
 
-`source` 规则（见 `tools.md` §2.4）：由 Host 的调用通道决定，UI 不能伪造。UI 点击 `next_actions` 产生的调用其 `source` 仍是 `"agent"`——因为它是经 Agent 转发的。
+`source` 规则（见 `tools.md` §2.2）：由 Host 的调用通道决定，UI 不能伪造。UI 点击 `next_actions` 产生的调用其 `source` 仍是 `"agent"`——因为它是经 Agent 转发的。
 
 UI 处理：插入工具卡，状态 `running`，开始计时。
 
@@ -183,8 +185,14 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 ### 3.4 `tool-call-end`
 
 ```ts
+type ToolDisplay = {
+  text: string;                              // 面向用户的一句话，≤24 字
+  facts?: string[];                          // 可选：≤4 行，只放用户看得懂的名称与数值
+  changed: "none" | "restored" | "unknown";  // 这次调用有没有改动用户的设置
+};
+
 type ToolCallEndPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -195,6 +203,7 @@ type ToolCallEndPayload = {
   error_code: string | null;    // 失败时为 AivpnErrorCode
   duration_ms: number;
   next_actions: NextAction[];   // 来自 metadata.aivpn.next_actions
+  display?: ToolDisplay;        // 缺失 = 旧后端或未适配工具，UI 静默回落
   emitted_at: string;
 };
 ```
@@ -202,6 +211,19 @@ type ToolCallEndPayload = {
 来源：`QueryEvent::ToolEnd { tool_name, tool_id, result, is_error }`。
 
 `error_code` 的取法：Host 从 `ToolResult.metadata["aivpn"]["error"]["code"]` 读取；没有 metadata 时为 `null`（说明是 Claurst 内置工具报错）。
+
+`display` 规则（2.7.0）：
+
+- **这是给用户看的唯一工具文案。** `result` 是给模型的，UI 不得直接渲染；缺 `display` 时用前端映射表（`tools.md` §2.4）的通用文案兜底，不报错、不丢事件。
+- `text` ≤24 字，不含工具名、`cfg_…` / `nod_…` 等 id、路径、错误码、英文或原始 JSON。
+- `facts` 可选，≤4 行；只放用户关心的名称与数值（配置名、节点名、出口 IP、延迟）。没有就省略，不要填空串。
+- `changed` 必填（不是可选）：
+  - 只读工具固定 `"none"`；
+  - `VpnConnect` / `NetRepair` / `CoreUpgrade` / `ConfigDelete` 四个会改系统设置的工具**必须显式声明**；
+  - `"none"` = **没有改动任何设置**；`"restored"` = **已经恢复原样**；`"unknown"` = **不确定，诊断日志里有记录**。
+  - 这三句由界面统一渲染，面向全部工具，**不得出现「网络」二字**：`ConfigCreate` 校验失败、`ConfigDelete` 失败时根本不碰网络设置，写「网络设置」对它们是错的。
+- `AskUserQuestion` **不产生展示行**（提问由 `ask-user-question` 的问答浮层承担），其 `tool-call-end` 省略 `display`；UI 不为它渲染工具行。
+- 不得把 `display.text` 塞进 `result`：`result` 要留给模型，两者不能是同一根字符串。
 
 UI 处理：
 
@@ -224,11 +246,11 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
-  text: string;                 // 面向用户的一行状态，例 "VpnConnect 仍在运行"
+  text: string;                 // 面向用户的一行状态，例 "正在检查连接状态"
   emitted_at: string;
 };
 ```
@@ -250,8 +272,14 @@ type AiStatusPayload = {
 
 ```
 上游临时波动（429），正在重试 1/3，2 秒后重试…
-VpnConnect 仍在运行
+正在检查连接状态
 ```
+
+`text` 约束（2.7.0）：
+
+- 面向用户的一行，**不得包含工具名**、字段名、错误码、`cfg_…` / `nod_…` 等 id；不得拼成「{tool} 正在运行」「正在执行 {tool}」。
+- `running_tool` 的文案来自前端映射表（`tools.md` §2.4）；**未知工具固定「正在处理…」**，不得回落到原始工具名。
+- 提示词只降低模型说错话的概率；文案的最终闸门在渲染层（`tool-call-end.display` + 映射表）。
 
 UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限卡。
 
@@ -263,7 +291,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -291,7 +319,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -329,7 +357,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -362,7 +390,7 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   health: HealthSnapshot;
   // 2.2 新增：本次运行累计流量与速率。
   // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
@@ -398,7 +426,7 @@ UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；面板上给用�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag" | "rules_update";
   origin: "ui" | "agent";       // 必填；第一帧也带，旧记录按 "ui"
@@ -432,7 +460,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -449,7 +477,7 @@ type AppLifecycleChangedPayload = {
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   seed_id: "veyl_seed";
   content_sha256: string;           // 2.0：变化判定依据
   version: string | null;           // 文件里的 version，仅展示
@@ -504,7 +532,7 @@ type DefaultProfileUpdatedPayload = {
 
 ```ts
 type AskUserQuestionPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   session_id: string;
   request_id: string;
   question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
@@ -589,7 +617,7 @@ tool-call-end    (同一 request_id)
 
 ```ts
 type ConfigChangedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   change: "created" | "updated" | "deleted" | "activated";
   config_id: string;
   config: ConfigSummary | null;      // deleted 时为 null；类型见 commands.md §3.0
@@ -625,7 +653,7 @@ type NodeListChangedReason =
   | "bindings_changed";       // config_update 整体替换了节点集
 
 type NodeListChangedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   reason: NodeListChangedReason;
   config_id: string | null;        // 只有 bindings_changed 时非空
   node_count_total: number;        // 节点池总数
@@ -647,7 +675,7 @@ type NodeListChangedPayload = {
 
 ```ts
 type NodeSwitchedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   config_id: string;
   from_node_id: string | null;
   to_node_id: string;
@@ -675,7 +703,7 @@ type NodeSwitchedPayload = {
 
 ```ts
 type IssueChangedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
   issue: IssueSummary;                  // 变更后的状态
   blocking_issue_id: string | null;     // 当前应插卡的那一条；null = 中间不插卡
@@ -713,7 +741,7 @@ type IssueChangedPayload = {
 
 ```ts
 type LayoutUpdatedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   config_id: string;
   revision: number;            // 每配置单调递增，从 1 开始
   layout: Layout;              // 见 commands.md §3.0
@@ -737,7 +765,7 @@ type LayoutUpdatedPayload = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   config_id: string;
   routing_mode: "direct" | "proxy_all" | "proxy_selected";
   applied_mode: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -763,7 +791,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
@@ -796,7 +824,7 @@ Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 
 ```ts
 type CoreUpgradeProgressPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   job_id: string;
   origin: "ui" | "agent";         // 必填
   phase: "downloading" | "verifying" | "unpacking" | "installing" | "activating";
@@ -819,7 +847,7 @@ type CoreUpgradeProgressPayload = {
 
 ```ts
 type CoreUpgradeFinishedPayload = {
-  contract_version: "2.6.0";
+  contract_version: "2.9.0";
   job_id: string;
   origin: "ui" | "agent";   // 必填
   ok: boolean;
@@ -834,6 +862,73 @@ type CoreUpgradeFinishedPayload = {
 - `ok = true` 时 UI 重新调用 `core_info`，并按 `restart_required` 提示「重启后生效」；**不自动重启**。
 - `ok = false` 时保留当前版本继续可用；`code` 用于区分网络 / 源 / 校验 / 磁盘 / 忙等失败。
 - 取消的任务同样发本事件，`ok = false`、`code = "CANCELLED"`。
+
+### 4.19 `node-probe-progress`（2.8.0 新增；2.9.0 增 `phase` / `method`）
+
+批量测速的阶段与逐节点结果。
+
+```ts
+type NodeProbeProgressPayload = {
+  contract_version: "2.9.0";
+  run_id: string;
+  config_id: string;
+  phase: "preparing" | "probing";
+  method: "tcp" | "clash";       // clash = 真实可用性（「可用」）；tcp = 仅可达（「可达」）
+  done: number;                  // 已完成节点数；preparing 阶段为 0
+  total: number;
+  result: NodeProbeData | null;  // preparing 阶段为 null；probing 的逐节点事件非空
+  emitted_at: string;
+};
+```
+
+触发：`node_probe_all` 启动的批次。
+
+- **批次开始时先发一条 `phase = "preparing"`**（`done = 0`、`result = null`）：临时运行时尚未就绪。
+- 进入探测后发一条 `phase = "probing"`（`done = 0`、`result = null`）；它的 `method` 是**最终**方式——如果运行时启动失败/8 秒未就绪，这里就是降级后的 `"tcp"`。
+- 之后每测完一个节点发一条 `phase = "probing"`、`result` 非空的事件。
+- `method` 术语固定，不得混用：**`clash` = 真实可用性（界面写「可用」）；`tcp` = 仅可达（界面写「可达」）**。
+- 只在批次运行时出现；关闭面板不影响，批次继续在后台跑完（用户没点取消）。
+- `done` 单调递增，按完成顺序发出，**不按节点顺序**。
+- UI 按 `run_id` 匹配：忽略不是当前批次的事件；按 `done` 去重（重开面板可能先收到一条早于 `snapshot.run.done` 的迟到事件）。
+- `config_id` 让 UI 能丢弃「已经切走的配置」的迟到事件。
+- 单节点失败也照常发：`result.reachable = false` 是正常结果，不是错误事件。
+- **不改变任何持久状态**：本事件与 `node-probe-finished` 都不对应 `*-changed`，不得据此刷新节点列表或运行状态。
+
+### 4.20 `node-probe-finished`（2.8.0 新增；2.9.0 增 `method` / `reason`）
+
+```ts
+type NodeProbeFinishedPayload = {
+  contract_version: "2.9.0";
+  run_id: string;
+  config_id: string;
+  total: number;
+  ok: number;
+  failed: number;
+  method: "tcp" | "clash";       // 整批实际使用的方式；降级时为 "tcp"
+  cancelled: boolean;
+  reason: "connected" | null;    // 用户中途启动 VPN 导致取消时为 "connected"
+  network: "ok" | "offline";
+  emitted_at: string;
+};
+```
+
+触发：批次结束（跑完或取消）。每个 `run_id` **恰好一条**，且是该批次最后一条事件。
+
+四个终态（UI 据此给汇总文案）：
+
+| 终态 | 判据 | 界面 |
+|---|---|---|
+| 正常结束 | `cancelled = false`，`ok > 0` | `method = "clash"`：「18 个可用 · 5 个超时」；`method = "tcp"`：「18 个可达 · 5 个超时」+「没连上，只能确认服务器连得上，不验证密码和出口」 |
+| 全部失败、本机有网 | `cancelled = false`，`ok = 0`，`network = "ok"` | 「都没测通」+「这些节点可能都不可用」 |
+| 全部失败、本机离线 | `cancelled = false`，`ok = 0`，`network = "offline"` | 顶部提示「现在没有网络，测速结果不代表节点状态」 |
+| 取消 | `cancelled = true` | 回到「上次测速：N 分钟前」，不加错误；`reason = "connected"` 时说明「启动 VPN 后测速已停止」 |
+
+- **降级必须看得出来**：`method = "tcp"` 时界面只能写「可达」，不得写「可用」；两词不得混用或简写。
+- 不取消时 `ok + failed = total`；取消时两者之和是**已测完**的数量，可能小于 `total`。
+- `network` 只在**全部节点都失败**时才检查本机连通性（直连 204，不走 Veyl 代理）；否则固定 `"ok"`。
+- 取消后不再有 `node-probe-progress`；已出的结果保留在内存缓存里（`node_probe_snapshot` 可见）。
+- 批次不跨进程：应用退出直接丢弃，**不补发本事件**、不等待、不落库。
+- 不发任何 `*-changed`；不登记问题。
 
 ---
 
@@ -898,7 +993,7 @@ idle
 | 审批事件 | ~~审批作用域~~ → **审批机制整体移除，`approval-requested` 与 `ai_approval_decision` 均删除**（2026-11-02） | §4.4、§5 |
 | `next_actions` 点击语义 | 等价于用户发一条消息给 Agent（label + args），**UI 不得直接执行工具**，可预填输入框 | §3.4、`tools.md` §1.3 |
 | `args_preview` 是否保留 | **保留**，默认展示非敏感字段；`sensitive` / 黑名单字段打码；脱敏后无可展示字段才省略整个字段 | §3.3、§4.4 |
-| 无 AI 模式的来源校验 | Host 边界注入 `source: "ui" \| "agent"`，不可由参数传入；**没有审批机制，破坏性操作无论来源都直接执行**（1.0.8 起） | §5、`tools.md` §2.4 |
+| 无 AI 模式的来源校验 | Host 边界注入 `source: "ui" \| "agent"`，不可由参数传入；**没有审批机制，破坏性操作无论来源都直接执行**（1.0.8 起） | §5、`tools.md` §2.2 |
 
 ### 8.2 仍需 PM 决定
 
@@ -945,6 +1040,37 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.9.0（2026-11-06，未连接时的真实延迟与降级）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.9.0` | 元数据 | 未连接时临时起运行时测真实延迟 |
+| 2 | `node-probe-progress` 增 `phase: "preparing" \| "probing"`、`method: "tcp" \| "clash"`；`result: NodeProbeData \| null`（preparing 阶段为空） | 字段扩展 | 重开面板要能恢复「正在准备」与测试方式 |
+| 3 | 批次开始先发 `preparing`，进入探测发一条 `probing`（method 为最终方式），随后每个结果一条 `probing` | 约束 | 运行时启动失败降级 tcp 时，界面要能立即改词 |
+| 4 | `node-probe-finished` 增 `method`（整批实际方式）与 `reason: "connected" \| null`（用户中途启动 VPN） | 字段扩展 | 降级时文案从「可用」变「可达」；中途连 VPN 要说明原因 |
+| 5 | 术语固定：`clash` = 真实可用性（可用），`tcp` = 仅可达（可达）；两词不得混用 | 约束 | 用户按「可达」挑节点不会误以为密码与出口已验证 |
+
+### 2.8.0（2026-11-06，批量测速）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.8.0`；事件总数 22 → 24 | 元数据 | 节点面板需要整表测速 |
+| 2 | 新增 `node-probe-progress`（§4.19）：每完成一个节点一条，`done` 单调递增，按 `run_id` 匹配、按 `done` 去重 | 新增事件 | 进度要能恢复，迟到事件不能回退 |
+| 3 | 新增 `node-probe-finished`（§4.20）：每个 `run_id` 恰好一条；`ok` / `failed` / `cancelled` / `network` 区分四个终态 | 新增事件 | 部分失败、全失败在线、全失败离线、取消要分开说 |
+| 4 | 明确两事件都不发 `*-changed`、不登记问题；批次不跨进程，退出不补发完成事件 | 约束 | 延迟是快照，不是 Job |
+| 5 | 本版同时包含 2.7.0 的 `tool-call-end.display`（两者尚未发版，合并进同一开发周期） | 说明 | 文件头统一为 2.8.0 |
+| 6 | 失败第二行的三句定稿：`none` → 「没有改动任何设置」、`restored` → 「已经恢复原样」、`unknown` → 「不确定，诊断日志里有记录」；**三句都不得出现「网络」**，因为界面统一渲染、面向全部工具 | 措辞定稿 | `ConfigCreate` / `ConfigDelete` 失败时不碰网络设置 |
+
+### 2.7.0（2026-11-06，对话过程展示）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.7.0` | 元数据 | 工具调用要按用户语言展示，而不是模型措辞 |
+| 2 | `tool-call-end` 新增可选 `display: { text, facts?, changed }`：`text` ≤24 字；`facts` ≤4 行；`changed: "none" \| "restored" \| "unknown"` | 字段扩展 | 给模型的 `result` 不能直接展示给用户 |
+| 3 | `display` 缺失不报错、不丢事件，UI 回落到前端映射表；`AskUserQuestion` 不产生展示行，可省略 `display` | 约束 | 旧后端与未适配工具必须可平滑降级 |
+| 4 | 只读工具 `changed` 固定 `"none"`；`VpnConnect` / `NetRepair` / `CoreUpgrade` / `ConfigDelete` 必须显式声明 | 约束 | 失败时用户要知道网络设置有没有被改动 |
+| 5 | `ai-status.text` 不得包含工具名、字段名、错误码与 id；`running_tool` 文案来自映射表，未知工具固定「正在处理…」 | 约束 | 状态行也是面向用户的正文 |
 
 ### 2.6.0（2026-11-05，确认卡结构化与任务来源）
 

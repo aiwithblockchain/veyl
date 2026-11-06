@@ -74,13 +74,20 @@ function codeEventEntries() {
   return entries;
 }
 
-check("事件名与 docs/contracts/events.md 一致", () => {
+check("事件名：代码有、契约没有（漂移）", () => {
   const contract = new Set(contractEventNames());
-  const code = codeEventEntries();
-  const codeValues = new Set(code.map((e) => e.value));
+  const codeValues = new Set(codeEventEntries().map((e) => e.value));
+  const problems = [];
+  for (const n of codeValues) if (!contract.has(n)) problems.push(`代码有、契约没有：${n}`);
+  return problems;
+});
+
+// 测速事件已落地（2026-11-06），两个方向都按漂移处理。
+check("事件名：契约有、代码没有", () => {
+  const contract = new Set(contractEventNames());
+  const codeValues = new Set(codeEventEntries().map((e) => e.value));
   const problems = [];
   for (const n of contract) if (!codeValues.has(n)) problems.push(`契约有、代码没有：${n}`);
-  for (const n of codeValues) if (!contract.has(n)) problems.push(`代码有、契约没有：${n}`);
   return problems;
 });
 
@@ -697,6 +704,9 @@ const UI_ONLY_COMMANDS = [
   "core_rollback",
   "tun_helper_info",
   "tun_helper_restart",
+  "node_probe_all",
+  "node_probe_cancel",
+  "node_probe_snapshot",
 ];
 
 const pascalCase = (s) => s.replace(/(^|_)([a-z0-9])/g, (_, __, c) => c.toUpperCase());
@@ -1000,6 +1010,651 @@ check(
   },
   { advisory: true }
 );
+
+// --- 12：对话过程展示 ---
+//
+// 工具调用对用户只呈现一行「做了什么 + 结果」：完成/失败文案在 tool-call-end.display，
+// 进行中与兜底文案在前端静态映射表。这里锁三件事：display 形状、映射表与 §3 的 44 个
+// 名字集合相等、AskUserQuestion 不产生展示行。前端尚未实现时映射表只报 advisory。
+
+const TOOL_DISPLAY_FILE = "src/components/toolDisplay.ts";
+
+check("tool-call-end 的 display 形状完备（契约）", () => {
+  const fields = payloadFields("docs/contracts/events.md", "ToolCallEndPayload");
+  if (!fields) return ["events.md 找不到 ToolCallEndPayload"];
+  const problems = [];
+
+  if (!fields.includes("display")) {
+    problems.push("ToolCallEndPayload 缺少 display");
+  } else if (payloadFieldIsOptional("docs/contracts/events.md", "ToolCallEndPayload", "display") !== true) {
+    problems.push("display 必须是可选字段（旧后端缺失时静默回落）");
+  }
+
+  const md = read("docs/contracts/events.md");
+  const m = md.match(/type ToolDisplay = \{([\s\S]*?)\n\};/);
+  if (!m) {
+    problems.push("events.md 找不到 ToolDisplay 类型");
+    return problems;
+  }
+  const body = m[1];
+  for (const f of ["text", "facts", "changed"]) {
+    if (!new RegExp(`^\\s*${f}\\??\\s*:`, "m").test(body)) problems.push(`ToolDisplay 缺少 ${f}`);
+  }
+  if (!/^\s*facts\?\s*:/m.test(body)) problems.push("ToolDisplay.facts 必须是可选字段");
+  if (!/changed\s*:\s*"none"\s*\|\s*"restored"\s*\|\s*"unknown"/.test(body)) {
+    problems.push('ToolDisplay.changed 必须是 "none" | "restored" | "unknown"');
+  }
+
+  for (const phrase of ["≤24 字", "≤4 行", "只读工具固定", "不产生展示行"]) {
+    if (!md.includes(phrase)) problems.push(`events.md 的 display 说明缺少「${phrase}」`);
+  }
+  for (const tool of ["VpnConnect", "NetRepair", "CoreUpgrade", "ConfigDelete"]) {
+    if (!md.includes(tool)) problems.push(`events.md 的 display 说明没有点名 ${tool} 必须声明 changed`);
+  }
+  return problems;
+});
+
+check("失败第二行三句定稿且不含「网络」（契约）", () => {
+  const md = read("docs/contracts/events.md");
+  const m = md.match(
+    /`"none"`\s*=\s*\*\*([^*]+)\*\*；\s*`"restored"`\s*=\s*\*\*([^*]+)\*\*；\s*`"unknown"`\s*=\s*\*\*([^*]+)\*\*/
+  );
+  if (!m) return ["events.md §3.4 找不到 changed 的三句定稿文案"];
+
+  const expected = ["没有改动任何设置", "已经恢复原样", "不确定，诊断日志里有记录"];
+  const actual = [m[1], m[2], m[3]].map((s) => s.trim());
+  const problems = [];
+  expected.forEach((want, i) => {
+    if (actual[i] !== want) problems.push(`changed 文案应为「${want}」，实际是「${actual[i]}」`);
+    if (actual[i].includes("网络")) problems.push(`changed 文案不得出现「网络」：「${actual[i]}」`);
+  });
+  return problems;
+});
+
+check(
+  "changedLabel 文案不含「网络」（实现，advisory）",
+  () => {
+    if (!existsSync(join(ROOT, TOOL_DISPLAY_FILE))) return [];
+    const ts = read(TOOL_DISPLAY_FILE);
+    const fn = ts.match(/export function changedLabel[\s\S]*?\n\}/);
+    if (!fn) return ["toolDisplay.ts 找不到 changedLabel"];
+    return /网络/.test(fn[0]) ? ["changedLabel 的文案含「网络」；三句必须面向全部工具"] : [];
+  },
+  { advisory: true }
+);
+
+/** 前端映射表的工具名集合；文件不存在时返回 null（实现尚未落地）。 */
+function frontendToolDisplayNames() {
+  if (!existsSync(join(ROOT, TOOL_DISPLAY_FILE))) return null;
+  const ts = read(TOOL_DISPLAY_FILE);
+  const arr = ts.match(/TOOL_DISPLAY_NAMES\s*(?::[^=]+)?=\s*\[([\s\S]*?)\]/);
+  if (arr) {
+    return new Set([...arr[1].matchAll(/"([A-Za-z][A-Za-z0-9]*)"/g)].map((x) => x[1]));
+  }
+  // 实现名 `TOOL_COPY`，设计文档里写作 `TOOL_DISPLAY`；两个都认，断的是键集合。
+  const obj = ts.match(/export const (?:TOOL_COPY|TOOL_DISPLAY)\s*(?::[^=]+)?=\s*\{([\s\S]*?)\n\};/);
+  if (obj) {
+    return new Set([...obj[1].matchAll(/^\s*([A-Z][A-Za-z0-9]*)\s*:/gm)].map((x) => x[1]));
+  }
+  return new Set();
+}
+
+check("前端映射表工具名集合与 tools.md §3 的 44 个相等", () => {
+  const names = frontendToolDisplayNames();
+  if (names === null) return []; // 未实现时由下一条 advisory 报，不在这里制造红
+  const tools = contractTools();
+  const missing = [...tools.keys()].filter((n) => !names.has(n));
+  const extra = [...names].filter((n) => !tools.has(n));
+  const problems = [];
+  if (missing.length) problems.push(`映射表缺少 ${missing.length} 个：${missing.join(", ")}`);
+  if (extra.length) problems.push(`映射表多出 ${extra.length} 个：${extra.join(", ")}`);
+  return problems;
+});
+
+check(
+  "前端映射表尚未实现（advisory）",
+  () => {
+    if (frontendToolDisplayNames() !== null) return [];
+    return [`${TOOL_DISPLAY_FILE} 不存在，集合相等断言暂不生效`];
+  },
+  { advisory: true }
+);
+
+check("AskUserQuestion 不产生展示行（契约）", () => {
+  const md = read("docs/contracts/events.md");
+  if (!/AskUserQuestion[\s\S]{0,120}不产生展示行/.test(md)) {
+    return ["events.md 没有写明 AskUserQuestion 不产生展示行"];
+  }
+  return [];
+});
+
+check(
+  "AskUserQuestion 不产生展示行（实现，advisory）",
+  () => {
+    if (frontendToolDisplayNames() === null) return [];
+    const files = [
+      "src/components/ToolCallCard.tsx",
+      "src/components/MessageItem.tsx",
+      "src/state/chatStore.ts",
+    ].filter((f) => existsSync(join(ROOT, f)));
+    const ui = files.map((f) => read(f)).join("\n");
+    if (!/tool\s*===\s*"AskUserQuestion"/.test(ui)) {
+      return ["渲染层没有跳过 AskUserQuestion，它会被画成普通工具行（应由提问浮层承担）"];
+    }
+    return [];
+  },
+  { advisory: true }
+);
+
+check(
+  "前端 ChangedState 与契约的 changed 取值一致（advisory）",
+  () => {
+    if (!existsSync(join(ROOT, TOOL_DISPLAY_FILE))) return [];
+    const ts = read(TOOL_DISPLAY_FILE);
+    const m = ts.match(/type ChangedState\s*=\s*([^;]+);/);
+    if (!m) return ["toolDisplay.ts 找不到 ChangedState"];
+    const values = [...m[1].matchAll(/"([a-z]+)"/g)].map((x) => x[1]);
+    const expected = ["none", "restored", "unknown"];
+    const problems = [];
+    for (const v of expected) if (!values.includes(v)) problems.push(`ChangedState 缺少 "${v}"`);
+    const extra = values.filter((v) => !expected.includes(v));
+    if (extra.length) problems.push(`ChangedState 多出 ${extra.map((v) => `"${v}"`).join(", ")}`);
+    return problems;
+  },
+  { advisory: true }
+);
+
+// --- 13：提示词、工具描述与状态文案 ---
+//
+// 提示词降低概率，渲染层是唯一结构闸门。这里防的是回归：
+//   1. 系统提示「怎么说话」八条与 SAFETY_RULES 新增两条，删任一条即红；
+//   2. 危险工具的 description 末尾有表达约束、第一行没有（第一行进能力清单）；
+//   3. running 状态文案不拼工具名，未知工具落到「正在处理…」。
+
+const DANGEROUS_EXPRESSION_TOOLS = [
+  "VpnConnect",
+  "VpnDisconnect",
+  "NetRepair",
+  "CoreUpgrade",
+  "ConfigDelete",
+  "RouteSetMode",
+];
+
+const EXPRESSION_MARKERS = [
+  "对用户只说",
+  "对用户说",
+  "不要念给用户",
+  "不出现",
+  "不提",
+  "说「",
+  "不要复述",
+  "是否已恢复",
+  "恢复原样",
+];
+
+check("系统提示含「怎么说话」八条", () => {
+  const rel = "resources/prompts/zh/first-run.md";
+  if (!existsSync(join(ROOT, rel))) return [`找不到 ${rel}`];
+  const md = read(rel);
+  const problems = [];
+  if (!md.includes("# 怎么说话")) problems.push("first-run.md 缺少「# 怎么说话」一节");
+  const needles = [
+    "只说结果和影响",
+    "这些词和写法不出现在正文里",
+    "不叙述你在调用什么",
+    "也不要提前报",
+    "失败固定三句",
+    "技术细节在诊断日志里",
+    "不重复界面上已经显示的内容",
+    "只有用户主动问技术问题",
+  ];
+  for (const n of needles) if (!md.includes(n)) problems.push(`「怎么说话」缺少规则：${n}`);
+  return problems;
+});
+
+check("SAFETY_RULES 含新增两条", () => {
+  const rs = read("src-tauri/src/claurst_session/mod.rs");
+  const m = rs.match(/const SAFETY_RULES: &str = "([\s\S]*?)";/);
+  if (!m) return ["mod.rs 找不到 SAFETY_RULES"];
+  const problems = [];
+  for (const n of [
+    "面向用户的正文不出现工具名、字段名、错误码、节点/配置 ID 与内部名词",
+    "失败时说明有没有改动用户当前的网络设置",
+  ]) {
+    if (!m[1].includes(n)) problems.push(`SAFETY_RULES 缺少：${n}`);
+  }
+  return problems;
+});
+
+/** Rust 字符串字面量 → 实际文本：处理行尾反斜杠续行、\n、\". */
+function rustStringBody(lit) {
+  return lit
+    .replace(/\\\n\s*/g, "")
+    .replace(/\\n/g, "\n")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+}
+
+/** 工具名 → description 文本（按 `impl Tool for X` 里的 name()/description() 配对）。 */
+function rustDescriptions() {
+  const dir = join(ROOT, "src-tauri", "src", "tools");
+  const out = new Map();
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (!e.isFile() || !e.name.endsWith(".rs")) continue;
+    const rel = `src-tauri/src/tools/${e.name}`;
+    const src = read(rel);
+    const re =
+      /fn name\(&self\) -> &str \{\s*"([A-Za-z]+)"\s*\}[\s\S]*?fn description\(&self\) -> &str \{\s*"((?:[^"\\]|\\[\s\S])*)"/g;
+    for (const m of src.matchAll(re)) {
+      out.set(m[1], { body: rustStringBody(m[2]), file: rel });
+    }
+  }
+  return out;
+}
+
+check("危险工具 description 末尾有表达约束、首行没有", () => {
+  const descs = rustDescriptions();
+  const problems = [];
+  for (const tool of DANGEROUS_EXPRESSION_TOOLS) {
+    const d = descs.get(tool);
+    if (!d) {
+      problems.push(`找不到 ${tool} 的 description()`);
+      continue;
+    }
+    const [first, ...rest] = d.body.split("\n");
+    const hitFirst = EXPRESSION_MARKERS.find((m) => first.includes(m));
+    if (hitFirst) {
+      problems.push(`${tool} 的第一行含表达约束「${hitFirst}」，会污染能力清单：${first.trim()}`);
+    }
+    const tail = rest.join("\n").trim();
+    if (!tail) {
+      problems.push(`${tool} 的 description 没有末尾表达约束（追加句必须用 \\n 分段）`);
+    } else if (!EXPRESSION_MARKERS.some((m) => tail.includes(m))) {
+      problems.push(`${tool} 的末尾没有约定措辞的表达约束：${tail}`);
+    }
+  }
+  return problems;
+});
+
+check("ai-status 文案的约束写进了契约", () => {
+  const md = read("docs/contracts/events.md");
+  const problems = [];
+  if (!md.includes("不得包含工具名")) problems.push("events.md 没有写明 ai-status.text 不得包含工具名");
+  if (!md.includes("正在处理…")) problems.push("events.md 没有写明未知工具的 running 文案是「正在处理…」");
+  return problems;
+});
+
+check("running 状态文案不拼工具名，未知工具落到「正在处理…」", () => {
+  const problems = [];
+
+  const mod = read("src-tauri/src/claurst_session/mod.rs");
+  mod.split("\n").forEach((line, i) => {
+    if (line.includes("正在运行") && line.includes("tool_name")) {
+      problems.push(`mod.rs:${i + 1} 用工具名拼 running 文案：${line.trim()}`);
+    }
+  });
+
+  const store = read("src/state/chatStore.ts");
+  store.split("\n").forEach((line, i) => {
+    if (/正在执行\s*\$\{\s*tool\s*\}/.test(line)) {
+      problems.push(`chatStore.ts:${i + 1} 用工具名拼 running 文案：${line.trim()}`);
+    }
+  });
+
+  if (!existsSync(join(ROOT, TOOL_DISPLAY_FILE))) {
+    problems.push(`${TOOL_DISPLAY_FILE} 不存在，未知工具没有兜底`);
+    return problems;
+  }
+  // 行为断言放在 src/components/toolDisplay.test.ts（vitest 真跑）：
+  // 这里只做结构性检查，不把实现写法（??、if、查表顺序）变成契约。
+  const ts = read(TOOL_DISPLAY_FILE);
+  if (!/export const FALLBACK_COPY/.test(ts)) problems.push("toolDisplay.ts 缺少 FALLBACK_COPY");
+  if (!/export function toolCopy\s*\(/.test(ts)) problems.push("toolDisplay.ts 未导出 toolCopy");
+  return problems;
+});
+
+check("ToolEnvelope 不含 display（契约）", () => {
+  const fields = payloadFields("docs/contracts/tools.md", "ToolEnvelope");
+  if (!fields) return ["tools.md 找不到 ToolEnvelope"];
+  return fields.includes("display")
+    ? ["ToolEnvelope 不应包含 display：用户文案只走 tool-call-end.display"]
+    : [];
+});
+
+// 后端已删除 display（2026-11-06），这里转成硬失败：再被塞回模型可见的信封就红。
+check("to_envelope() 输出不含 display（实现）", () => {
+  const rs = read("src-tauri/src/tools/envelope.rs");
+  const m = rs.match(/fn to_envelope\(&self\) -> Value \{([\s\S]*?)\n    \}/);
+  if (!m) return ["envelope.rs 找不到 to_envelope()"];
+  if (/\bdisplay\b/.test(m[1])) {
+    return ["to_envelope() 又输出了 display：用户文案只走 tool-call-end.display"];
+  }
+  return [];
+});
+
+// --- 14：批量测速 ---
+//
+// 三条 UI 专用命令 + 两条事件。锁形状、BUSY 的 run_id、snapshot.run 的两种取值、
+// 「有缓存 ≠ 已测完」、四个终态，以及「不发 *-changed」。
+
+function tsTypeBlock(rel, typeName) {
+  const md = read(rel);
+  const m = md.match(new RegExp(`type ${typeName} = \\{([\\s\\S]*?)\\n\\};`));
+  return m ? m[1] : null;
+}
+
+check("批量测速三命令的入参与返回（契约）", () => {
+  const cmds = contractCommands();
+  const problems = [];
+
+  for (const [name, params] of [
+    ["node_probe_all", ["configId", "nodeIds"]],
+    ["node_probe_cancel", ["runId"]],
+    ["node_probe_snapshot", ["configId"]],
+  ]) {
+    const row = cmds.get(name);
+    if (!row) {
+      problems.push(`commands.md §2 缺少 ${name}`);
+      continue;
+    }
+    const actual = parseParamList(row.params);
+    if (actual.join(",") !== params.join(",")) {
+      problems.push(`${name} 入参应为 ${params.join(", ")}，实际是 ${actual.join(", ")}`);
+    }
+  }
+
+  const md = read("docs/contracts/commands.md");
+  for (const ret of ["NodeProbeAllData", "NodeProbeSnapshotData", "{ cancelled: boolean }"]) {
+    if (!md.includes(ret)) problems.push(`commands.md 命令总表缺少返回 ${ret}`);
+  }
+
+  const all = tsTypeBlock("docs/contracts/commands.md", "NodeProbeAllData");
+  if (!all) problems.push("commands.md 找不到 NodeProbeAllData");
+  else {
+    for (const f of ["run_id", "config_id", "total", "concurrency", "ignored_node_ids"]) {
+      if (!new RegExp(`^\\s*${f}\\s*:`, "m").test(all)) problems.push(`NodeProbeAllData 缺少 ${f}`);
+    }
+    if (!/ignored_node_ids\s*:\s*string\[\]/.test(all)) {
+      problems.push("ignored_node_ids 必须是 string[]");
+    }
+  }
+
+  const snap = tsTypeBlock("docs/contracts/commands.md", "NodeProbeSnapshotData");
+  if (!snap) problems.push("commands.md 找不到 NodeProbeSnapshotData");
+  else {
+    for (const f of ["config_id", "results", "run"]) {
+      if (!new RegExp(`^\\s*${f}\\s*:`, "m").test(snap)) problems.push(`NodeProbeSnapshotData 缺少 ${f}`);
+    }
+    if (!/run\s*:\s*null\s*\|/.test(snap)) problems.push("NodeProbeSnapshotData.run 必须允许 null");
+    for (const f of ["run_id", "done", "total", "started_at", "phase", "method"]) {
+      if (!new RegExp(`^\\s*${f}\\s*:`, "m").test(snap)) problems.push(`snapshot.run 缺少 ${f}`);
+    }
+    if (!/phase\s*:\s*"preparing"\s*\|\s*"probing"/.test(snap)) {
+      problems.push('snapshot.run.phase 必须是 "preparing" | "probing"');
+    }
+    if (!/method\s*:\s*"tcp"\s*\|\s*"clash"/.test(snap)) {
+      problems.push('snapshot.run.method 必须是 "tcp" | "clash"');
+    }
+  }
+
+  for (const phrase of ["全局同时只允许一个批次", "`BUSY`，`details.run_id`", "固定 6", "3 秒超时", "**不重试**", "不中断整批"]) {
+    if (!md.includes(phrase)) problems.push(`commands.md 缺少批量测速约束：${phrase}`);
+  }
+  const s46 = md.slice(md.indexOf("### 4.6"), md.indexOf("### 4.7"));
+  for (const phrase of ["忽略并记入 `ignored_node_ids`", "`nodeIds = []`", "`total` = 实际要测的节点数", "即使为空数组", "该文案不可用"]) {
+    if (!s46.includes(phrase)) problems.push(`commands.md §4.6 缺少节点子集规则：${phrase}`);
+  }
+  for (const phrase of ["只在该 `configId` 有批次在跑时非空", "`run` 为空 ≠ 已测完", "`results` 有内容也 ≠ 已测完"]) {
+    if (!md.includes(phrase)) problems.push(`commands.md 缺少 snapshot.run 约束：${phrase}`);
+  }
+  if (!md.includes("不发任何 `*-changed`")) problems.push("commands.md 没有写明批次不发 `*-changed`");
+  if (!md.includes("不进 Job")) problems.push("commands.md 没有写明批次不进 Job");
+  if (!md.includes("不发网络请求")) problems.push("commands.md 没有写明 snapshot 不发网络请求");
+  return problems;
+});
+
+check("批量测速两事件与四个终态（契约）", () => {
+  const names = contractEventNames();
+  const problems = [];
+
+  for (const e of ["node-probe-progress", "node-probe-finished"]) {
+    if (!names.includes(e)) problems.push(`events.md 事件总表缺少 ${e}`);
+  }
+
+  const progress = payloadFields("docs/contracts/events.md", "NodeProbeProgressPayload");
+  if (!progress) problems.push("events.md 找不到 NodeProbeProgressPayload");
+  else {
+    for (const f of ["run_id", "config_id", "phase", "method", "done", "total", "result"]) {
+      if (!progress.includes(f)) problems.push(`NodeProbeProgressPayload 缺少 ${f}`);
+    }
+    if (progress.includes("origin")) problems.push("批量测速是 UI 专用，载荷不应带 origin");
+    const block = tsTypeBlock("docs/contracts/events.md", "NodeProbeProgressPayload") ?? "";
+    if (!/phase\s*:\s*"preparing"\s*\|\s*"probing"/.test(block)) {
+      problems.push('NodeProbeProgressPayload.phase 必须是 "preparing" | "probing"');
+    }
+    if (!/method\s*:\s*"tcp"\s*\|\s*"clash"/.test(block)) {
+      problems.push('NodeProbeProgressPayload.method 必须是 "tcp" | "clash"');
+    }
+    if (!/result\s*:\s*NodeProbeData\s*\|\s*null/.test(block)) {
+      problems.push("NodeProbeProgressPayload.result 必须允许 null（preparing 阶段为空）");
+    }
+  }
+
+  const finished = payloadFields("docs/contracts/events.md", "NodeProbeFinishedPayload");
+  if (!finished) problems.push("events.md 找不到 NodeProbeFinishedPayload");
+  else {
+    for (const f of ["run_id", "config_id", "total", "ok", "failed", "method", "cancelled", "reason", "network"]) {
+      if (!finished.includes(f)) problems.push(`NodeProbeFinishedPayload 缺少 ${f}`);
+    }
+    const block = tsTypeBlock("docs/contracts/events.md", "NodeProbeFinishedPayload") ?? "";
+    if (!/method\s*:\s*"tcp"\s*\|\s*"clash"/.test(block)) {
+      problems.push('NodeProbeFinishedPayload.method 必须是 "tcp" | "clash"');
+    }
+    if (!/reason\s*:\s*"connected"\s*\|\s*null/.test(block)) {
+      problems.push('NodeProbeFinishedPayload.reason 必须是 "connected" | null');
+    }
+  }
+
+  const md = read("docs/contracts/events.md");
+  if (!/network\s*:\s*"ok"\s*\|\s*"offline"/.test(md)) {
+    problems.push('NodeProbeFinishedPayload.network 必须是 "ok" | "offline"');
+  }
+  for (const phrase of ["恰好一条", "正常结束", "全部失败、本机有网", "全部失败、本机离线", "取消"]) {
+    if (!md.includes(phrase)) problems.push(`events.md 缺少终态说明：${phrase}`);
+  }
+  for (const phrase of ["`clash` = 真实可用性", "`tcp` = 仅可达"]) {
+    if (!md.includes(phrase)) problems.push(`events.md 缺少术语定义：${phrase}`);
+  }
+  if (names.some((n) => /probe.*-changed/.test(n))) {
+    problems.push("事件总表出现了 probe 相关的 *-changed 事件（批次是只读的，不应发状态变更事件）");
+  }
+  if (!md.includes("不发任何 `*-changed`")) problems.push("events.md 没有写明批量测速不发 `*-changed`");
+  return problems;
+});
+
+check(
+  "node_probe_all 节点子集参数待实现（advisory）",
+  () => {
+    const rs = read("src-tauri/src/agent/commands.rs");
+    const open = rs.indexOf("pub async fn node_probe_all");
+    if (open < 0) return ["commands.rs 找不到 node_probe_all"];
+    const close = rs.indexOf("\n}", open);
+    const body = rs.slice(open, close < 0 ? undefined : close);
+    if (!/node_ids/.test(body)) {
+      return ["commands.rs 的 node_probe_all 还没有 nodeIds 参数；后端落地前「测这 N 个」不可用"];
+    }
+    return [];
+  },
+  { advisory: true }
+);
+
+check("node_probe_all 返回必须带 ignored_node_ids（实现）", () => {
+  const rs = read("src-tauri/src/tools/services.rs");
+  const open = rs.indexOf("async fn node_probe_all(");
+  if (open < 0) return ["services.rs 找不到 node_probe_all"];
+  const close = rs.indexOf("async fn node_probe_cancel", open);
+  const body = rs.slice(open, close < 0 ? undefined : close);
+  if (!/ignored_node_ids/.test(body)) {
+    return ["node_probe_all 的返回值缺少 ignored_node_ids（即使为空数组也必须带，否则前端无法解释实际测的数量）"];
+  }
+  return [];
+});
+
+// --- 15：种子刷新字段与当前节点回落 ---
+
+check("DefaultProfileResult 的刷新字段（契约）", () => {
+  const block = tsTypeBlock("docs/contracts/commands.md", "DefaultProfileResult");
+  if (!block) return ["commands.md 找不到 DefaultProfileResult"];
+  const problems = [];
+  for (const f of ["source", "changed", "reason", "added", "removed", "removed_node_name", "replacement_node_name"]) {
+    if (!new RegExp(`^\\s*${f}\\s*:`, "m").test(block)) problems.push(`DefaultProfileResult 缺少 ${f}`);
+  }
+  if (!/removed_node_name\s*:\s*string\s*\|\s*null/.test(block)) {
+    problems.push("removed_node_name 必须是 string | null");
+  }
+  if (!/replacement_node_name\s*:\s*string\s*\|\s*null/.test(block)) {
+    problems.push("replacement_node_name 必须是 string | null");
+  }
+  if (!/source\s*:\s*"network"\s*\|\s*"cache"/.test(block)) {
+    problems.push('source 必须是 "network" | "cache"');
+  }
+  const reasonM = block.match(/reason\s*:\s*([^;]+);/);
+  if (!reasonM) {
+    problems.push("DefaultProfileResult 缺少 reason");
+  } else {
+    const vals = [...reasonM[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]).sort();
+    const expected = ["invalid_content", "local_write", "offline"];
+    if (vals.join(",") !== expected.join(",")) {
+      problems.push(`reason 取值必须是 ${expected.join(" | ")} | null，实际是 ${vals.join(" | ")}`);
+    }
+    if (!/null/.test(reasonM[1])) problems.push("reason 必须允许 null");
+  }
+  if (!/added\s*:\s*number\s*\|\s*null/.test(block)) problems.push("added 必须是 number | null");
+  if (!/removed\s*:\s*number\s*\|\s*null/.test(block)) problems.push("removed 必须是 number | null");
+  if (!/changed\s*:\s*boolean/.test(block)) problems.push("changed 必须是 boolean");
+
+  const md = read("docs/contracts/commands.md");
+  for (const phrase of ["离线且有缓存仍返回 `Ok`", "分不出「离线」「内容异常」「本地写入失败」", "不得合并", "原来的 X 已下架，已切换到 Y"]) {
+    if (!md.includes(phrase)) problems.push(`commands.md 缺少说明：${phrase}`);
+  }
+  for (const bad of ["previous_node_name", "new_node_name"]) {
+    if (new RegExp(`^\\s*${bad}\\s*:`, "m").test(block)) {
+      problems.push(`DefaultProfileResult 仍在用已作废的字段名 ${bad}`);
+    }
+  }
+
+  const s81 = md.slice(md.indexOf("### 8.1"), md.indexOf("### 8.2"));
+  for (const phrase of ["仍返回被下架的那个节点名", "`replacement_node_name = null`"]) {
+    if (!s81.includes(phrase)) problems.push(`commands.md §8.1 缺少空列表语义：${phrase}`);
+  }
+  if (s81.includes("两者都为 `null`")) {
+    problems.push("§8.1 仍写着剩余为空时两个名字都为 null（removed_node_name 必须保留旧名）");
+  }
+
+  const s82 = md.slice(md.indexOf("### 8.2"), md.indexOf("### 8.3"));
+  for (const phrase of ["同步失败整体回滚", "不推进 hash"]) {
+    if (!s82.includes(phrase)) problems.push(`commands.md §8.2 缺少回滚规则：${phrase}`);
+  }
+  return problems;
+});
+
+check(
+  "种子刷新提示字段用契约名（实现，advisory）",
+  () => {
+    const blob = walkRs(join(ROOT, "src-tauri", "src"))
+      .map((f) => readFileSync(f, "utf8"))
+      .join("\n");
+    const problems = [];
+    if (/previous_node_name|new_node_name/.test(blob)) {
+      problems.push("实现仍用已作废的 previous_node_name / new_node_name");
+    }
+    if (!/removed_node_name/.test(blob) || !/replacement_node_name/.test(blob)) {
+      problems.push("实现还没返回 removed_node_name / replacement_node_name（前端按契约名读取）");
+    }
+    return problems;
+  },
+  { advisory: true }
+);
+
+check("种子刷新后当前节点落到第一个（契约）", () => {
+  const md = read("docs/contracts/commands.md");
+  const problems = [];
+  for (const phrase of ["设为剩余列表的第一个节点", "剩余为空才置 `null`", "不得静默替换", "已下架，已切换到"]) {
+    if (!md.includes(phrase)) problems.push(`commands.md 缺少回落规则：${phrase}`);
+  }
+  return problems;
+});
+
+check("default_profile_refresh 命令固定 force=true（实现）", () => {
+  const problems = [];
+  const md = read("docs/contracts/commands.md");
+  if (!md.includes("固定以 `force = true` 调用")) {
+    problems.push("commands.md §8.2 没有写明命令层固定 force=true");
+  }
+
+  const rs = read("src-tauri/src/agent/commands.rs");
+  const open = rs.indexOf("pub async fn default_profile_refresh");
+  if (open < 0) {
+    problems.push("commands.rs 找不到 default_profile_refresh");
+    return problems;
+  }
+  const close = rs.indexOf("\n}", open);
+  const body = rs.slice(open, close < 0 ? undefined : close);
+  if (/default_profile_refresh\s*\(\s*false\s*\)/.test(body)) {
+    problems.push("命令层以 force=false 调用，会复用 6 小时短路；设置页点下去等于没检查");
+  }
+  if (!/default_profile_refresh\s*\(\s*true\s*\)/.test(body)) {
+    problems.push("命令层没有固定以 force=true 调用");
+  }
+  return problems;
+});
+
+check("§4.6 探测方式与 §6.5 定稿一致（契约）", () => {
+  const md = read("docs/contracts/commands.md");
+  const problems = [];
+  for (const phrase of [
+    "完全未连接",
+    "临时起一次运行时",
+    "8 秒内未就绪",
+    "已连接**别的配置**",
+    "整批降级 `tcp`",
+    "不启动运行时",
+  ]) {
+    if (!md.includes(phrase)) problems.push(`commands.md §4.6 缺少探测方式：${phrase}`);
+  }
+  return problems;
+});
+
+check(
+  "§4.6 临时运行时路径待实现（advisory）",
+  () => {
+    const rs = read("src-tauri/src/tools/services.rs");
+    const open = rs.indexOf("async fn node_probe_all(");
+    if (open < 0) return ["services.rs 找不到 node_probe_all"];
+    const close = rs.indexOf("async fn node_probe_cancel", open);
+    const body = rs.slice(open, close < 0 ? undefined : close);
+    // 结构信号：实现里必须出现探针运行时的痕迹；命名可变，但至少要提到 runtime。
+    if (!/runtime/i.test(body)) {
+      return ["node_probe_all 还没有临时运行时路径（未连接时应先起探针运行时，失败/8 秒降级 tcp）"];
+    }
+    return [];
+  },
+  { advisory: true }
+);
+
+check("OfflineReason 的取值与契约一致（实现）", () => {
+  const rs = read("src-tauri/src/seed.rs");
+  const m = rs.match(/impl OfflineReason \{[\s\S]*?fn as_str\(self\)[\s\S]*?match self \{([\s\S]*?)\n        \}/);
+  if (!m) return ["seed.rs 找不到 OfflineReason::as_str"];
+  const values = [...m[1].matchAll(/=> "([a-z_]+)"/g)].map((x) => x[1]);
+  const expected = ["offline", "invalid_content", "local_write"];
+  const missing = expected.filter((v) => !values.includes(v));
+  const extra = values.filter((v) => !expected.includes(v));
+  const problems = [];
+  if (missing.length) problems.push(`OfflineReason 缺少：${missing.join(", ")}`);
+  if (extra.length) problems.push(`OfflineReason 出现契约外取值：${extra.join(", ")}`);
+  return problems;
+});
 
 // --- 输出 ---
 

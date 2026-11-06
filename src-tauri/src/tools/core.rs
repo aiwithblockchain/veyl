@@ -37,11 +37,40 @@ impl Tool for CoreListVersionsTool {
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match self.services.core_list_versions().await {
-            Ok(data) => ToolOutcome::ok(summarise_versions(&data), data),
+            Ok(data) => {
+                let facts = version_facts(&data);
+                ToolOutcome::ok(summarise_versions(&data), data).with_facts(facts)
+            }
             Err(error) => ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string())),
         };
         envelope::finish(ctx, "CoreListVersions", outcome)
     }
+}
+
+fn version_facts(data: &Value) -> Vec<String> {
+    let installed = data
+        .get("installed")
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let mut facts = Vec::new();
+    if let Some(active) = data.get("active_version").and_then(Value::as_str) {
+        facts.push(format!("当前：{active}"));
+    } else if installed > 0 {
+        // 启动时会把随包版本记为 active；有安装记录却没有 active，就是没激活。
+        facts.push("当前：未激活".to_string());
+    }
+    facts.push(format!("已安装：{installed} 个"));
+    if let Some(latest) = data
+        .get("available")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("version"))
+        .and_then(Value::as_str)
+    {
+        facts.push(format!("最新：{latest}"));
+    }
+    facts
 }
 
 
@@ -110,6 +139,38 @@ fn summarise_versions(data: &Value) -> String {
 mod version_summary_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_empty_active_version_is_not_invented() {
+        // 有安装记录却没有 active：说「未激活」，不编一个版本号。
+        let facts = version_facts(&json!({
+            "active_version": null,
+            "installed": [{ "version": "1.14.4", "state": "installed" }],
+            "available": []
+        }));
+        assert!(facts.contains(&"当前：未激活".to_string()), "{facts:?}");
+
+        // 没有任何安装记录时保持省略，不写 null / 假版本。
+        let facts = version_facts(&json!({
+            "active_version": null,
+            "installed": [],
+            "available": []
+        }));
+        assert!(
+            !facts.iter().any(|fact| fact.starts_with("当前：")),
+            "{facts:?}"
+        );
+    }
+
+    #[test]
+    fn an_active_version_is_the_first_fact() {
+        let facts = version_facts(&json!({
+            "active_version": "1.14.4",
+            "installed": [{ "version": "1.14.4", "state": "active" }],
+            "available": [{ "version": "1.15.0" }]
+        }));
+        assert_eq!(facts[0], "当前：1.14.4");
+    }
 
     #[test]
     fn lists_versions_instead_of_counting_them() {

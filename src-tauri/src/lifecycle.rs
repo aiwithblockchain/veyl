@@ -343,6 +343,8 @@ fn perform_shutdown(
     parts: &Parts,
     applied: &mut Option<crate::proxy::ProxyEndpoint>,
 ) -> Result<(), String> {
+    // 探针运行时是测速临时进程，先停掉，不参与连接状态。
+    tauri::async_runtime::block_on(parts.manager.stop_probe());
     // 先停 TUN：它的 sing-box 由 helper 持有，退出后 App 的租约也会断，
     // 但等 5 秒兜底太慢，用户点「退出」就应当立刻断开。
     // 失败只记日志、继续退出——契约 §7.8.3 不允许清理失败卡住退出。
@@ -394,6 +396,7 @@ fn perform_shutdown(
 
 /// 强制退出：跳过代理校验，但仍尽力停运行时、清明文配置。
 fn force_cleanup(parts: &Parts) {
+    tauri::async_runtime::block_on(parts.manager.stop_probe());
     if let Err(error) = parts
         .tun
         .stop_with_deadline(std::time::Duration::from_secs(10))

@@ -7,6 +7,8 @@ import type {
   TokenUsage,
   ToolPermissionLevel,
 } from "../agent/protocol";
+import { readToolDisplay, toolCopy } from "../components/toolDisplay";
+import type { ToolDisplayInfo } from "../components/toolDisplay";
 
 export type ToolCallState = "running" | "ok" | "error";
 
@@ -22,6 +24,7 @@ export interface ToolCall {
   errorCode?: string | null;
   nextActions: NextAction[];
   durationMs?: number;
+  display?: ToolDisplayInfo | null;
   startedAt: number;
 }
 
@@ -423,7 +426,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
                 startedAt: Date.now(),
               },
             },
-            status: { text: `正在执行 ${tool}`, phase: "running_tool" },
+            status: { text: toolCopy(tool).running, phase: "running_tool" },
           }));
         }
 
@@ -452,6 +455,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
                   errorCode: error_code,
                   durationMs: duration_ms,
                   nextActions: next_actions ?? [],
+                  display: readToolDisplay(event.payload.display),
                 },
               },
               updatedAt: Date.now(),
@@ -462,7 +466,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         case AGENT_EVENTS.status:
           return patchSession(state, current.id, (session) => ({
             ...session,
-            status: { text: event.payload.text, phase: event.payload.phase },
+            // running_tool 的原始文案可能带工具名，保留 tool-call-start 写的用户语言。
+            status: {
+              text:
+                event.payload.phase === "running_tool"
+                  ? session.status?.phase === "running_tool"
+                    ? session.status.text
+                    : "正在处理…"
+                  : event.payload.text,
+              phase: event.payload.phase,
+            },
           }));
 
         case AGENT_EVENTS.compact:
@@ -537,6 +550,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         // 运行时升级由设置页的升级状态机消费，不进对话流。
         case AGENT_EVENTS.coreUpgradeProgress:
         case AGENT_EVENTS.coreUpgradeFinished:
+        // 批量测速由节点面板消费，不进对话流。
+        case AGENT_EVENTS.nodeProbeProgress:
+        case AGENT_EVENTS.nodeProbeFinished:
           return state;
 
         default:

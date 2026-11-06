@@ -20,7 +20,10 @@ import type {
   NetworkForceResetResult,
   NetworkForceResetStep,
   NetworkResetStepStatus,
+  NodeProbeAllData,
   NodeProbeResult,
+  NodeProbeRun,
+  NodeProbeSnapshotData,
   NodeSwitchResult,
   PendingQuestion,
   RenamedSession,
@@ -52,18 +55,52 @@ interface RawPendingQuestion {  question_id?: string;
 interface RawDefaultProfile {
   package_id?: string | null;
   version?: string | null;
-  applied_at?: string | null;
+  applied_at?: string | number | null;
   new_version_available?: boolean;
   node_count?: number;
+  checked_at?: string | number | null;
+  source?: string | null;
+  changed?: boolean;
+  reason?: string | null;
+  added?: number | null;
+  removed?: number | null;
+}
+
+/** 契约里的时间是 Unix 毫秒，界面统一用 ISO 8601；字符串原样保留。 */
+function toIsoString(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  return null;
+}
+
+function countOrZero(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
 }
 
 function normalizeDefaultProfile(raw: RawDefaultProfile): DefaultProfileStatus {
   return {
     packageId: raw.package_id ?? null,
     version: raw.version ?? null,
-    appliedAt: raw.applied_at ?? null,
+    appliedAt: toIsoString(raw.applied_at),
     newVersionAvailable: raw.new_version_available === true,
     nodeCount: raw.node_count ?? 0,
+    checkedAt: toIsoString(raw.checked_at),
+    source:
+      raw.source === "network" || raw.source === "cache" ? raw.source : null,
+    changed: raw.changed === true,
+    reason:
+      raw.reason === "offline" ||
+      raw.reason === "invalid_content" ||
+      raw.reason === "local_write"
+        ? raw.reason
+        : null,
+    added: countOrZero(raw.added),
+    removed: countOrZero(raw.removed),
   };
 }
 
@@ -99,6 +136,66 @@ function normalizeCoreCheck(raw: {
       .map((item) => ({ version: item.version as string, size: item.size ?? 0 })),
     cached: raw.cached === true,
     message: raw.message ?? undefined,
+  };
+}
+
+interface RawNodeProbeRun {
+  run_id?: string;
+  done?: number;
+  total?: number;
+  started_at?: number;
+  phase?: string;
+  method?: string;
+}
+
+function normalizeProbeRun(raw: RawNodeProbeRun | null | undefined): NodeProbeRun | null {
+  if (!raw || typeof raw.run_id !== "string" || raw.run_id.length === 0) return null;
+  return {
+    runId: raw.run_id,
+    done: typeof raw.done === "number" ? raw.done : 0,
+    total: typeof raw.total === "number" ? raw.total : 0,
+    startedAt: typeof raw.started_at === "number" ? raw.started_at : 0,
+    phase: raw.phase === "preparing" ? "preparing" : "probing",
+    // 未知方式按 tcp：只有在明确 clash 时才允许写「可用」。
+    method: raw.method === "clash" ? "clash" : "tcp",
+  };
+}
+
+function normalizeProbeResult(raw: unknown): NodeProbeResult | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as {
+    node_id?: unknown;
+    reachable?: unknown;
+    latency_ms?: unknown;
+    probe_method?: unknown;
+    checked_at?: unknown;
+    error?: unknown;
+  };
+  if (typeof value.node_id !== "string" || value.node_id.length === 0) return null;
+  const error =
+    value.error && typeof value.error === "object"
+      ? {
+          code:
+            typeof (value.error as { code?: unknown }).code === "string"
+              ? ((value.error as { code: string }).code)
+              : "",
+          message:
+            typeof (value.error as { message?: unknown }).message === "string"
+              ? ((value.error as { message: string }).message)
+              : "",
+        }
+      : null;
+  return {
+    node_id: value.node_id,
+    reachable: value.reachable === true,
+    latency_ms:
+      typeof value.latency_ms === "number" && Number.isFinite(value.latency_ms)
+        ? value.latency_ms
+        : null,
+    // 未知探测方式按 TCP 处理：界面只用来区分「真实可用性」，不展示方式。
+    probe_method: value.probe_method === "clash_delay" ? "clash_delay" : "tcp",
+    checked_at: typeof value.checked_at === "number" ? value.checked_at : 0,
+    error,
   };
 }
 
@@ -275,6 +372,49 @@ export class TauriAgentBridge implements AgentBridge {
 
   async nodeProbe(nodeId: string): Promise<NodeProbeResult> {
     return call<NodeProbeResult>("node_probe", { nodeId });
+  }
+
+  async nodeProbeAll(configId?: string, nodeIds?: string[]): Promise<NodeProbeAllData> {
+    const args: Record<string, unknown> = {};
+    if (configId) args.configId = configId;
+    // 不传 nodeIds 才是「全部」；传一个全量数组会让未知 id 语义混在一起。
+    if (nodeIds) args.nodeIds = nodeIds;
+    const raw = await call<{
+      run_id?: string;
+      config_id?: string;
+      total?: number;
+      concurrency?: number;
+      ignored_node_ids?: unknown[];
+    }>("node_probe_all", Object.keys(args).length > 0 ? args : undefined);
+    return {
+      runId: raw.run_id ?? "",
+      configId: raw.config_id ?? configId ?? "",
+      total: raw.total ?? 0,
+      concurrency: raw.concurrency ?? 0,
+      ignoredNodeIds: (raw.ignored_node_ids ?? []).filter(
+        (item): item is string => typeof item === "string",
+      ),
+    };
+  }
+
+  async nodeProbeCancel(runId: string): Promise<{ cancelled: boolean }> {
+    const raw = await call<{ cancelled?: boolean }>("node_probe_cancel", { runId });
+    return { cancelled: raw.cancelled === true };
+  }
+
+  async nodeProbeSnapshot(configId?: string): Promise<NodeProbeSnapshotData> {
+    const raw = await call<{
+      config_id?: string;
+      results?: unknown[];
+      run?: RawNodeProbeRun | null;
+    }>("node_probe_snapshot", configId ? { configId } : undefined);
+    return {
+      configId: raw.config_id ?? configId ?? "",
+      results: (raw.results ?? [])
+        .map(normalizeProbeResult)
+        .filter((item): item is NodeProbeResult => item !== null),
+      run: normalizeProbeRun(raw.run),
+    };
   }
 
   async defaultProfileStatus(): Promise<DefaultProfileStatus> {

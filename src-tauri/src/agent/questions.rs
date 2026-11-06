@@ -226,7 +226,7 @@ pub fn register_with(
     }
 
     let mut payload = json!({
-        "contract_version": "2.6.0",
+        "contract_version": "2.9.0",
         "session_id": session_id,
         "request_id": request_id,
         "question_id": question_id,

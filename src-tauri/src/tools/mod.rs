@@ -9,10 +9,12 @@ pub mod core;
 pub mod core_upgrade;
 pub mod deepseek;
 pub mod diag;
+pub mod display;
 pub mod envelope;
 pub mod job;
 pub mod net;
 pub mod policy;
+pub mod probe_batch;
 pub mod routing;
 pub mod runtime;
 pub mod services;
@@ -28,6 +30,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::Value;
 
+pub use display::{Changed, Display};
 pub use envelope::{AivpnError, NextAction, ToolOutcome};
 pub use services::{
     CatalogQuery, ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, NotWiredServices,
@@ -38,13 +41,18 @@ pub use services::{
 /// 作为 INVALID_ARGUMENT 结束，让模型带选项重问（不能静默丢弃成「跳过」）。
 struct AskUserQuestionGuard {
     inner: claurst_tools::AskUserQuestionTool,
+    description: String,
 }
 
 impl AskUserQuestionGuard {
     fn new() -> Self {
-        Self {
-            inner: claurst_tools::AskUserQuestionTool,
-        }
+        let inner = claurst_tools::AskUserQuestionTool;
+        // 表达约束另起一行，不污染能力清单的第一行。
+        let description = format!(
+            "{}\n问题与选项是给人看的，不写工具名、字段名、配置 ID。",
+            inner.description()
+        );
+        Self { inner, description }
     }
 }
 
@@ -55,7 +63,7 @@ impl Tool for AskUserQuestionGuard {
     }
 
     fn description(&self) -> &str {
-        self.inner.description()
+        &self.description
     }
 
     fn permission_level(&self) -> PermissionLevel {

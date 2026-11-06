@@ -7,7 +7,7 @@
 //! 更新判据是**内容哈希**，不是 `version` 字段。
 //! 拉取失败永远不清空缓存，也不返回致命错误：离线是正常场景。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -81,11 +81,41 @@ pub struct ParsedSeed {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshOutcome {
-    Updated { node_count: i64 },
+    Updated {
+        node_count: i64,
+        added: Option<i64>,
+        removed: Option<i64>,
+        removed_node_name: Option<String>,
+        replacement_node_name: Option<String>,
+    },
     /// 304 或内容哈希未变。`node_count` 为缓存里的数量。
-    Unchanged { node_count: i64 },
+    Unchanged {
+        node_count: i64,
+    },
     /// 拉取或解析失败；缓存原样保留。
-    Offline { cached: bool, error: String },
+    Offline {
+        cached: bool,
+        error: String,
+        reason: OfflineReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfflineReason {
+    Offline,
+    InvalidContent,
+    /// 本地写入失败（钥匙串、磁盘、数据库）；不是节点内容的问题。
+    LocalWrite,
+}
+
+impl OfflineReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OfflineReason::Offline => "offline",
+            OfflineReason::InvalidContent => "invalid_content",
+            OfflineReason::LocalWrite => "local_write",
+        }
+    }
 }
 
 /// 调试可用环境变量覆盖；正常构建只认固定地址。
@@ -235,6 +265,7 @@ where
             return RefreshOutcome::Offline {
                 cached: cached_content_available(store),
                 error,
+                reason: OfflineReason::Offline,
             };
         }
     };
@@ -249,6 +280,7 @@ where
                 return RefreshOutcome::Offline {
                     cached: cached_content_available(store),
                     error,
+                    reason: OfflineReason::Offline,
                 };
             }
         };
@@ -261,6 +293,7 @@ where
             return RefreshOutcome::Offline {
                 cached: false,
                 error: "种子元数据还在但内容缺失，远端未返回内容".into(),
+                reason: OfflineReason::Offline,
             };
         }
         let conn = store.conn();
@@ -304,6 +337,7 @@ async fn apply_fetch(
             return RefreshOutcome::Offline {
                 cached: cached_content_available(store),
                 error,
+                reason: OfflineReason::InvalidContent,
             };
         }
     };
@@ -329,16 +363,23 @@ async fn apply_fetch(
         return RefreshOutcome::Offline {
             cached: cached_content_available(store),
             error: format!("保存种子缓存失败：{error}"),
+            reason: OfflineReason::LocalWrite,
         };
     }
 
-    let changed_ids = match sync_seed_nodes(store, &parsed.nodes) {
-        Ok(changed) => changed,
+    let sync = match sync_seed_nodes(store, &parsed.nodes) {
+        Ok(sync) => sync,
         Err(error) => {
-            log::warn!("种子节点同步失败（缓存已更新，下次刷新再补）：{error}");
-            Vec::new()
+            // 整体回滚，且**不写新哈希**：下一次刷新（含 force）还能再来一次。
+            log::warn!("种子节点同步失败，整批回滚并保留旧缓存：{error}");
+            return RefreshOutcome::Offline {
+                cached: cached_content_available(store),
+                error: format!("保存测试节点失败：{error}"),
+                reason: OfflineReason::LocalWrite,
+            };
         }
     };
+    let changed_ids = sync.changed_ids.clone();
 
     let row = seed_cache::SeedCacheRow {
         content_sha256: hash.clone(),
@@ -357,6 +398,7 @@ async fn apply_fetch(
         return RefreshOutcome::Offline {
             cached: cached_content_available(store),
             error: error.to_string(),
+            reason: OfflineReason::LocalWrite,
         };
     }
 
@@ -386,7 +428,13 @@ async fn apply_fetch(
     }
     log::info!("种子已更新：{node_count} 个节点");
 
-    RefreshOutcome::Updated { node_count }
+    RefreshOutcome::Updated {
+        node_count,
+        added: sync.added,
+        removed: sync.removed,
+        removed_node_name: sync.removed_node_name,
+        replacement_node_name: sync.replacement_node_name,
+    }
 }
 
 /// 让已物化的种子节点层跟随新种子：按 `source_key` upsert，删掉新种子里没有的。
@@ -394,7 +442,15 @@ async fn apply_fetch(
 /// 从未创建过 seed 配置时不物化任何节点——没被用过的种子不该出现在节点池里。
 /// 新增节点会自动绑到「已经在引用种子节点」的配置上；用户移除过的节点由
 /// `seed_node_exclusions` 跳过，不自动复活。
-fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<Vec<String>, String> {
+struct SeedSync {
+    added: Option<i64>,
+    removed: Option<i64>,
+    changed_ids: Vec<String>,
+    removed_node_name: Option<String>,
+    replacement_node_name: Option<String>,
+}
+
+fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<SeedSync, String> {
     let (existing, exclusions, following_configs) = {
         let conn = store.conn();
         (
@@ -405,11 +461,50 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<Vec<String>
         )
     };
     if existing.is_empty() {
-        return Ok(Vec::new());
+        return Ok(SeedSync {
+            added: Some(0),
+            removed: Some(0),
+            changed_ids: Vec::new(),
+            removed_node_name: None,
+            replacement_node_name: None,
+        });
     }
 
+    let existing_names: HashMap<String, String> = existing
+        .iter()
+        .map(|node| (node.id.clone(), node.name.clone()))
+        .collect();
+    let mut added = 0;
+    let mut removed = 0;
     let mut keep = HashSet::new();
     let mut changed = Vec::new();
+    // 先记下刷新前每套配置的当前节点：删除节点时外键可能已把它置空，
+    // 事后就再也说不出「原来的 X 已下架」了。
+    let previous_current: HashMap<String, String> = following_configs
+        .iter()
+        .filter_map(|config_id| {
+            let conn = store.conn();
+            configs::get(&conn, config_id)
+                .ok()
+                .flatten()
+                .and_then(|config| config.current_node_id)
+                .map(|node_id| (config_id.clone(), node_id))
+        })
+        .collect();
+    let active_id = {
+        let conn = store.conn();
+        configs::active(&conn)
+            .ok()
+            .flatten()
+            .map(|config| config.id)
+    };
+
+    // 整层替换必须原子：任何一步失败都回滚，不能留下「部分新增、部分删除」。
+    let conn = store.conn();
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+
     for node in seed_nodes {
         let key = nodes::source_key(&node.name, &node.server, node.port, &node.method);
         if exclusions.contains(&key) {
@@ -418,28 +513,25 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<Vec<String>
         let id = nodes::node_id(configs::SOURCE_SEED, &key);
         let reference = nodes::password_ref(&id);
         crate::secrets::set_secret(&reference, &node.password).map_err(|error| error.to_string())?;
-        {
-            let conn = store.conn();
-            configs::upsert_node(
-                &conn,
-                &configs::NewNode {
-                    id: &id,
-                    name: &node.name,
-                    server: &node.server,
-                    port: node.port,
-                    method: &node.method,
-                    password_ref: &reference,
-                    source: configs::SOURCE_SEED,
-                    source_key: &key,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-            for config_id in &following_configs {
-                configs::attach_node(&conn, config_id, &id)
-                    .map_err(|error| error.to_string())?;
-            }
+        configs::upsert_node(
+            &tx,
+            &configs::NewNode {
+                id: &id,
+                name: &node.name,
+                server: &node.server,
+                port: node.port,
+                method: &node.method,
+                password_ref: &reference,
+                source: configs::SOURCE_SEED,
+                source_key: &key,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        for config_id in &following_configs {
+            configs::attach_node(&tx, config_id, &id).map_err(|error| error.to_string())?;
         }
         if !existing.iter().any(|row| row.id == id) {
+            added += 1;
             changed.push(id.clone());
         }
         keep.insert(id);
@@ -452,15 +544,106 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<Vec<String>
             continue;
         }
         if !keep.contains(&row.id) {
-            {
-                let conn = store.conn();
-                configs::delete_node(&conn, &row.id).map_err(|error| error.to_string())?;
-            }
+            configs::delete_node(&tx, &row.id).map_err(|error| error.to_string())?;
             let _ = crate::secrets::delete_secret(&row.password_ref);
+            removed += 1;
             changed.push(row.id);
         }
     }
-    Ok(changed)
+
+    // 当前节点被下架：落到剩余列表的第一个；剩余为空才置 null。
+    // 必须让界面知道「原来的 X 已下架，已切换到 Y」，不能静默替换。
+    let (mut removed_node_name, mut replacement_node_name) = (None, None);
+    let mut affected: Vec<String> = following_configs.clone();
+    if let Some(active) = active_id.as_ref() {
+        affected.sort_by_key(|id| id != active);
+    }
+    let mut updated_configs = Vec::new();
+    for config_id in &affected {
+        let nodes = configs::list_nodes(&tx, config_id).unwrap_or_default();
+        let Some(current) = previous_current.get(config_id).cloned() else {
+            continue;
+        };
+        if nodes.iter().any(|node| node.id == current) {
+            continue;
+        }
+
+        let removed_name = existing_names.get(&current).cloned();
+        let replacement = nodes.first().cloned();
+        let new_current = replacement.as_ref().map(|node| node.id.clone());
+        configs::update(
+            &tx,
+            config_id,
+            &configs::ConfigPatch {
+                current_node_id: Some(new_current),
+                ..Default::default()
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        if removed_node_name.is_none() {
+            removed_node_name = removed_name;
+            replacement_node_name = replacement.as_ref().map(|node| node.name.clone());
+        }
+        updated_configs.push(config_id.clone());
+    }
+
+    tx.commit().map_err(|error| error.to_string())?;
+    // 先释放连接再去发事件：事件读取同一把 store 锁，持有连接会死锁。
+    drop(conn);
+
+    // 提交成功后才通知界面，避免「事件说切了、库里没切」。
+    for config_id in updated_configs {
+        emit_config_updated(store, &config_id);
+    }
+
+    Ok(SeedSync {
+        added: Some(added),
+        removed: Some(removed),
+        changed_ids: changed,
+        removed_node_name,
+        replacement_node_name,
+    })
+}
+
+/// 当前节点被种子刷新换掉后，通知 UI 更新这套配置的摘要。
+fn emit_config_updated(store: &Store, config_id: &str) {
+    let (config, node_count, active_id) = {
+        let conn = store.conn();
+        (
+            configs::get(&conn, config_id).ok().flatten(),
+            configs::node_count(&conn, config_id).unwrap_or(0),
+            configs::active(&conn)
+                .ok()
+                .flatten()
+                .map(|config| config.id),
+        )
+    };
+    let Some(config) = config else { return };
+    let summary = json!({
+        "config_id": config.id,
+        "name": config.name,
+        "connect_mode": config.connection_mode,
+        "routing_mode": config.routing_mode,
+        "node_count": node_count,
+        "listen_port": config.listen_port,
+        "is_active": config.is_active,
+        "current_node_id": config.current_node_id,
+        "created_at": config.created_at,
+        "updated_at": config.updated_at,
+        "last_used_at": config.last_used_at,
+    });
+    crate::agent::app_handle::emit(
+        "config-changed",
+        json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "change": "updated",
+            "config_id": config.id,
+            "config": summary,
+            "active_config_id": active_id,
+            "emitted_at": chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }),
+    );
 }
 
 /// 离线兜底：把一份 `veyl_seed.json` 文件合并进节点池。
@@ -535,6 +718,13 @@ pub fn status(store: &Store) -> Value {
         "applied_at": row.fetched_at,
         "checked_at": row.checked_at,
         "new_version_available": false,
+        "source": "cache",
+        "changed": false,
+        "reason": null,
+        "added": null,
+        "removed": null,
+        "removed_node_name": null,
+        "replacement_node_name": null,
     })
 }
 
@@ -547,6 +737,13 @@ fn no_cache_status() -> Value {
         "applied_at": null,
         "checked_at": null,
         "new_version_available": false,
+        "source": "cache",
+        "changed": false,
+        "reason": null,
+        "added": null,
+        "removed": null,
+        "removed_node_name": null,
+        "replacement_node_name": null,
     })
 }
 
@@ -682,6 +879,110 @@ mod tests {
         assert_eq!(value["node_count"], 2);
 
         crate::secrets::delete_secret(&secret_key(&hash)).unwrap();
+    }
+
+    /// 当前节点被新种子下架：落到剩余第一个，并把两个名字带回去给界面提示。
+    #[test]
+    fn a_removed_current_node_falls_back_to_the_first_remaining() {
+        crate::test_support::install_test_secrets();
+        let store = Store::open_in_memory().unwrap();
+
+        let old = r#"{"nodes":[
+            {"name":"东京 01","server":"203.0.113.41","port":8388,"method":"aes-256-gcm","password":"p1"},
+            {"name":"香港 01","server":"203.0.113.42","port":8389,"method":"aes-256-gcm","password":"p2"}
+        ]}"#;
+        let new = r#"{"nodes":[
+            {"name":"东京 01","server":"203.0.113.41","port":8388,"method":"aes-256-gcm","password":"p1"}
+        ]}"#;
+        let parsed_old = parse_seed(old.as_bytes()).unwrap();
+        let parsed_new = parse_seed(new.as_bytes()).unwrap();
+
+        let id_for = |node: &SeedNode| {
+            let key = nodes::source_key(&node.name, &node.server, node.port, &node.method);
+            nodes::node_id(configs::SOURCE_SEED, &key)
+        };
+        let tokyo_id = id_for(&parsed_old.nodes[0]);
+        let hong_kong_id = id_for(&parsed_old.nodes[1]);
+
+        {
+            let conn = store.conn();
+            configs::create(
+                &conn,
+                &configs::NewConfig {
+                    id: "cfg_1",
+                    name: "跟随种子",
+                    connection_mode: configs::CONNECTION_SYSTEM_PROXY,
+                    routing_mode: configs::ROUTING_PROXY_ALL,
+                    listen_port: Some(7890),
+                    dns: &json!({ "mode": "auto", "local": [], "remote": [] }),
+                    tun_excludes: &json!([]),
+                },
+            )
+            .unwrap();
+            for node in &parsed_old.nodes {
+                let id = id_for(node);
+                let key = nodes::source_key(&node.name, &node.server, node.port, &node.method);
+                let reference = nodes::password_ref(&id);
+                crate::secrets::set_secret(&reference, &node.password).unwrap();
+                configs::upsert_node(
+                    &conn,
+                    &configs::NewNode {
+                        id: &id,
+                        name: &node.name,
+                        server: &node.server,
+                        port: node.port,
+                        method: &node.method,
+                        password_ref: &reference,
+                        source: configs::SOURCE_SEED,
+                        source_key: &key,
+                    },
+                )
+                .unwrap();
+                configs::attach_node(&conn, "cfg_1", &id).unwrap();
+            }
+            configs::update(
+                &conn,
+                "cfg_1",
+                &configs::ConfigPatch {
+                    current_node_id: Some(Some(hong_kong_id.clone())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let config = configs::get(&conn, "cfg_1").unwrap().unwrap();
+            assert_eq!(config.current_node_id.as_deref(), Some(hong_kong_id.as_str()));
+        }
+
+        let sync = sync_seed_nodes(&store, &parsed_new.nodes).unwrap();
+        assert_eq!(sync.added, Some(0));
+        assert_eq!(sync.removed, Some(1));
+        assert_eq!(sync.removed_node_name.as_deref(), Some("香港 01"));
+        assert_eq!(sync.replacement_node_name.as_deref(), Some("东京 01"));
+
+        let conn = store.conn();
+        let config = configs::get(&conn, "cfg_1").unwrap().unwrap();
+        assert_eq!(config.current_node_id.as_deref(), Some(tokyo_id.as_str()));
+        assert_eq!(configs::list_nodes(&conn, "cfg_1").unwrap().len(), 1);
+    }
+
+    /// 结果字段齐全：设置页据此分「离线」与「内容异常」以及「更新了几个」。
+    #[test]
+    fn status_and_refresh_results_carry_the_ui_fields() {
+        let store = Store::open_in_memory().unwrap();
+        let value = status(&store);
+        for field in [
+            "source",
+            "changed",
+            "reason",
+            "added",
+            "removed",
+            "removed_node_name",
+            "replacement_node_name",
+        ] {
+            assert!(value.get(field).is_some(), "缺少字段 {field}");
+        }
+        assert_eq!(value["reason"], Value::Null);
+        assert_eq!(value["source"], "cache");
     }
 
     #[test]

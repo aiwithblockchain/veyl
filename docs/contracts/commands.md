@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.6.0`
+> 契约版本：`2.10.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -187,7 +187,10 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 58 | `core_rollback` | `{}` | `{ ok: true }` | **2.5.0 新增（仅 UI）** |
 | 59 | `tun_helper_info` | `{}` | `TunHelperInfoData` | **2.6.0 新增（仅 UI）** |
 | 60 | `tun_helper_restart` | `{}` | `{ ok, restarted, needs_admin_restart }` | **2.6.0 新增（仅 UI）** |
-| 59 | `tun_probe` | `{}` | `TunProbeData` | **仅 debug 构建注册；AI 不可调用** |
+| 61 | `tun_probe` | `{}` | `TunProbeData` | **仅 debug 构建注册；AI 不可调用** |
+| 62 | `node_probe_all` | `{ configId?, nodeIds? }` | `NodeProbeAllData` | **2.8.0 新增（仅 UI）；2.10.0 增节点子集** |
+| 63 | `node_probe_cancel` | `{ runId }` | `{ cancelled: boolean }` | **2.8.0 新增（仅 UI）** |
+| 64 | `node_probe_snapshot` | `{ configId? }` | `NodeProbeSnapshotData` | **2.8.0 新增（仅 UI）** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -519,6 +522,90 @@ type ProxyParams = {
 - `reason`：`tun_mode`（active 配置是接管全部，不需要代理地址）、`not_running`、`no_config`。
 - **端口被占用时自动顺延，并如实回显**：`runtime` 来源必须是实际值，不得回显配置里的期望值。卡片写一个、实际跑另一个，是三级用户会直接踩进去的坑。
 - 成功后**不发事件**。端口变化由 `runtime-state-changed` 的 `snapshot.mixed_port` 推送，UI 收到后重渲染卡片，不再轮询本命令。
+
+### 4.6 `node_probe_all { configId?, nodeIds? }` → `NodeProbeAllData`
+
+节点面板的「全部测速」；带 `nodeIds` 时只测搜索过滤后的子集。**只读**：不改配置、不改当前节点、不登记问题、不发任何 `*-changed` 事件。
+
+```ts
+type NodeProbeAllData = {
+  run_id: string;
+  config_id: string;
+  total: number;                 // 实际要测的节点数（nodeIds 过滤后）
+  concurrency: number;           // 固定 6
+  ignored_node_ids: string[];    // nodeIds 里不属于该配置、被忽略的 id
+};
+```
+
+| 项 | 规则 |
+|---|---|
+| `configId` 省略 | 用 active 配置；**没有任何配置** → `PRECONDITION_FAILED`，`details.reason = "no_config"` |
+| `nodeIds` 省略 | 测该配置**全部**节点 |
+| `nodeIds` 提供 | 只测这些节点；**必须是该配置节点集里的 id**。不在集合里的 id **忽略并记入 `ignored_node_ids`**，不报错——一次搜索里有一个脏 id 不应让整批失败 |
+| `nodeIds = []` | `PRECONDITION_FAILED`，`details.reason = "no_nodes"`（与无节点一致） |
+| 节点集为空 | `PRECONDITION_FAILED`，`details.reason = "no_nodes"` |
+| 已有批次在跑 | `BUSY`，`details.run_id` 指向进行中的批次。**全局同时只允许一个批次**，跨配置也一样 |
+| 并发 | 固定 6；单个节点沿用 `node_probe` 的 3 秒超时，**不重试** |
+| 探测方法 | 见下方「探测方式」；单节点探测复用同一个函数，不复制逻辑 |
+| 单节点失败 | 不中断整批；失败也是一种结果（`reachable = false`），照常发进度 |
+| 结果顺序 | 按完成顺序发 `node-probe-progress`，**不按节点顺序** |
+| 生命周期 | 批次不跨进程、**不进 Job**、不落库；应用退出即结束，不发完成事件 |
+
+- `total` = 实际要测的节点数；`node-probe-progress.total` 同值。**响应必须带 `ignored_node_ids`，即使为空数组**——漏掉它，前端就不知道「实际测的比按钮少」，提示永远不出现。
+- 每测完一个节点发一条 `node-probe-progress`（`events.md` §4.19）；整批结束（含取消）发且只发一条 `node-probe-finished`（§4.20）。
+- 关闭面板**不取消**批次；只有 `node_probe_cancel` 或进程退出会结束它。
+- 错误：`PRECONDITION_FAILED`（`no_config` / `no_nodes`）、`BUSY`、`INTERNAL`。
+
+> 前端「测这 N 个」文案依赖 `nodeIds`：**后端实现该参数之前，该文案不可用**，按钮按「全部测速」展示；否则过滤后点按钮会实际测全部节点。
+
+**探测方式（`node-list.md` §6.5 定稿）**：
+
+| 情形 | 方式 |
+|---|---|
+| 已连接，且是当前配置 | `clash_delay`，直接复用运行中的 Clash API |
+| **完全未连接** | **临时起一次运行时**（探针槽：不写系统代理、不启 TUN、临时端口、只绑 `127.0.0.1`）→ `clash_delay`；启动失败或 **8 秒内未就绪 → 整批降级 `tcp`**，不报错、不中断 |
+| 已连接**别的配置** | 不起第二个运行时，**整批降级 `tcp`** |
+
+- 临时运行时**不能污染连接状态**：`runtime_status` 与 `runtime-state-changed` 在探针期间仍报「未连接」，顶部按钮不能变成「断开」。
+- 批次结束或取消时停止**自己起的**运行时；期间用户点了「启动 VPN」→ 批次取消（`cancelled = true`、`reason = "connected"`），**先停探针运行时，再走正常连接流程**。
+- 单节点「测这个节点」**不启动运行时**：未连接时仍走 `tcp` 并标「可达」。
+- `method` 与文案口径不变：`clash` = 可用，`tcp` = 可达；降级时整批只能写「可达」。
+
+### 4.7 `node_probe_cancel { runId }` → `{ cancelled: boolean }`
+
+尽力而为地取消一个批次。
+
+- `runId` 命中正在跑的批次 → 停止调度，在飞的探测丢弃，不再发新的 `node-probe-progress`；随后发一条 `node-probe-finished`，`cancelled = true`。已出的结果保留在内存缓存里。
+- `runId` 不存在或已结束 → `{ cancelled: false }`，**不报错**（幂等；重复点「停止」不应变成失败）。
+- 错误：`INTERNAL`。
+
+### 4.8 `node_probe_snapshot { configId? }` → `NodeProbeSnapshotData`
+
+打开面板时读取缓存与运行态；**不发网络请求**。
+
+```ts
+type NodeProbeSnapshotData = {
+  config_id: string;
+  results: NodeProbeData[];        // 该配置节点集在内存缓存里的结果
+  run: null | {
+    run_id: string;
+    done: number;                  // 已完成的节点数
+    total: number;
+    started_at: number;            // Unix 毫秒
+    phase: "preparing" | "probing";
+    method: "tcp" | "clash";       // clash = 真实可用性（可用）；tcp = 仅可达（可达）
+  };
+};
+```
+
+- `run` **只在该 `configId` 有批次在跑时非空**。全局只有一个批次；别的配置在跑时，本配置拿到 `null`——不能据此认为「没有批次在跑」。
+- **`run` 为空 ≠ 已测完；`results` 有内容也 ≠ 已测完。** 有缓存只说明以前测过，可能已经过期；判断是否在测只看 `run`。这条是契约，不是 UI 细节。
+- `run` 非空时，UI 显示进度条与「停止测速」，并从 `snapshot.run.done` 之后继续接收进度事件。重开面板可能先收到一条 `done` 更小的迟到事件：按 `run_id` 匹配、按 `done` 去重。
+- `run.phase` 让重开面板能恢复「正在准备」：`preparing` 时显示准备态、`done` 通常为 0；`probing` 时显示进度。`run.method` 让面板从第一帧就能标明测试方式，不必等结果事件。
+- 术语固定，不得混用：**`clash` = 真实可用性（界面写「可用」）；`tcp` = 仅可达（界面写「可达」）**。降级发生在探测开始之后时，`run.method` 以最新值为准。
+- `results` 只含该配置节点集里有缓存的节点，没有缓存的节点不出现在数组里；缓存键是 `node_id`，跨配置共用（延迟是节点属性）。
+- `configId` 省略 → active 配置；没有任何配置 → `PRECONDITION_FAILED`，`details.reason = "no_config"`。节点集为空是合法状态：`results: []`、`run: null`。
+- 错误：`PRECONDITION_FAILED`（`no_config`）、`INTERNAL`。
 
 ---
 
@@ -1046,8 +1133,28 @@ type DefaultProfileResult = {
   applied_at: number | null;       // Unix 毫秒
   checked_at: number | null;       // Unix 毫秒
   new_version_available: boolean;  // 只有 refresh 之后才可能为 true
+  source: "network" | "cache";     // network = 本次拿到远端；cache = 用本地缓存
+  changed: boolean;                // 本次是否真的换了内容
+  reason: "offline" | "invalid_content" | "local_write" | null;  // 失败细分；成功时 null
+  added: number | null;            // 新增节点数；拿不到时为 null
+  removed: number | null;          // 移除节点数；拿不到时为 null
+  removed_node_name: string | null;      // 原来在用、但已被新种子下架的节点名
+  replacement_node_name: string | null;  // 自动落到的新节点名
 };
 ```
+
+- `source` / `changed` / `reason` / `added` / `removed` 是给 UI 出文案的，**不能从别的字段推**。
+- `reason` 只在没换成远端内容时出现；三种取值必须分开，**不得合并**：
+  - `offline`：拉不到（断网 / 超时）；
+  - `invalid_content`：内容拉到了但解析 / 校验不过，是**我们的内容**有问题；
+  - `local_write`：内容拉到了、解析成功，但**写入本机失败**（钥匙串 / 磁盘 / DB），是**用户环境**问题，可重试且缓存未变。
+  没有它就分不出「离线」「内容异常」「本地写入失败」。
+- `added` / `removed` 来自 `sync_seed_nodes` 的变更集；拿不到时返回 `null`，文案退回「已更新，共 M 个节点」。
+- `removed_node_name` / `replacement_node_name` 只在种子刷新后当前节点消失时出现：后端把 `current_node_id` 改到剩余第一个节点，同时给出这两个名字，UI 据此显示「原来的 X 已下架，已切换到 Y」。
+  - **剩余列表为空时**：`current_node_id` 置空，`removed_node_name` **仍返回被下架的那个节点名**，`replacement_node_name = null`。UI 显示「原来的 X 已下架，现在没有可用节点」——没有旧名字，这句话说不完整，用户不知道自己丢的是哪个。
+  - **字段名固定为这两个**：前端已按此读取。旧的 `previous_node_name` / `new_node_name` 已作废；名字对不上时前端不报错，提示会静默消失。
+- **离线且有缓存仍返回 `Ok`**（`source = "cache"`、`changed = false`、`reason = "offline"`）：用缓存是正常场景，不是失败。无缓存且拉取失败才返回 `UPSTREAM_ERROR`。
+- `default_profile_status` 不联网：`source = "cache"`、`changed = false`、`reason = null`、`added = removed = null`。
 
 - **只读，不联网**。
 - 变化判定用**内容哈希**，不依赖 `version` 字段：`version` 要人手动改，「改了文件忘了改版本号」正是 TweetPilot 那次事故的根因（`docs/issues/tweetpilot-resource-version-gap.md`）。
@@ -1055,11 +1162,18 @@ type DefaultProfileResult = {
 
 ### 8.2 `default_profile_refresh {}` → `DefaultProfileResult`
 
+**本命令是用户显式触发，语义恒为强制检查**：实现必须固定以 `force = true` 调用服务层，不得复用「距上次检查不足 6 小时就返回 Unchanged」的短路逻辑。设置页按钮点下去什么都没发、只回「已是最新」，是假成功。
+
+与 AI 工具 `CatalogRefresh` 的 `force` 参数不冲突：那条走服务层、参数由模型给；命令层保持无参、语义恒为强制。
+
 - 拉取 `https://meshnetprotocol.github.io/veyl_seed.json`，**直接拉全文自己算哈希**；先带 `If-None-Match`，304 直接结束。
 - **同一时刻只允许一个请求在飞**，避免并发写坏缓存（`docs/config-execution.md` §10）。
 - 成功且哈希变化 → 原子替换种子节点层：按 `source_key` upsert，删掉新文件里不存在的 seed 节点。
+- **同步失败整体回滚，不推进 hash**：任何一步失败都不写新的 `content_sha256`、不部分应用节点变更；下次刷新仍会重新拉取、重试。哈希只在同步成功后才推进——否则失败一次就会把「内容已是最新」写死。
 - **不打断在线连接**：缓存照换；当前连接的进程不动；下一次连接生效。若正在连接，`new_version_available = true`，由 UI 提示「下次连接生效」。
-- 新版本里没有当前正在用的节点 → 缓存照换，`configs.current_node_id` 因节点删除置 `null`，下次连接落到新列表第一个可用节点。**当前连接保持到用户主动断开。**
+- 新版本里没有当前正在用的节点 → 缓存照换；把这些配置的 `configs.current_node_id` **设为剩余列表的第一个节点**，剩余为空才置 `null`。**当前连接保持到用户主动断开。**
+  - **不得静默替换**：必须通过 `config-changed(reason = "seed_refreshed")` 让 UI 提示「原来的『香港 01』已下架，已切换到『东京 02』」；已连接时加「下次连接生效」。名字取自 `DefaultProfileResult.removed_node_name` / `replacement_node_name`。没有替代节点时提示「原来的『香港 01』已下架，这套配置现在没有节点」。
+  - 为什么不是留 `null`：节点卡与节点面板靠 `current_node_id` 画「当前」标记；置 `null` 会出现「卡片显示某个节点、却没有当前标记」，用户无法确认下次连哪个。落到第一个节点是确定行为，但仍须告知用户。
 - 拉取失败 / 校验不过 → 保留旧缓存，返回 `UPSTREAM_ERROR` 或 `INVALID_ARGUMENT`，`new_version_available = false`。
 - 发 `default-profile-updated` 与 `node-list-changed`（`reason = "seed_refreshed"`）。
 
@@ -1257,6 +1371,24 @@ type PendingQuestion = {
 - 返回值统一套 `{ questions: [...] }` 外壳。
 - 只返回未答且未超时的；会话不存在时返回空数组，不报错。
 - 顺序不保证；UI 需要稳定顺序时按 `created_at` 自己排。
+
+### 9.8 面向用户的表达（规范性）
+
+Host 必须在发给模型的两处写入**同一套**表达规则（全文见 `tools.md` §2.4）：
+
+1. **系统提示正文**（`resources/prompts/zh/first-run.md`「怎么说话」）：不叙述工具调用、不出现内部术语与 ID、失败三段式、长流程分阶段、用户主动问技术才用术语且首次出现紧跟白话解释。
+2. **工具 description**：只补该工具「结果怎么说、失败改没改」，通用规则不重复。`capability_catalog` 只取第一行进清单，完整 description 作为 schema 交给模型，所以这类句子放末尾。
+
+UI 侧不依赖模型的措辞：
+
+- `tool-call-end.display`（`events.md` §3.4）是完成 / 失败的唯一用户文案；缺失时回落到前端映射表，不报错、不丢事件。
+- 前端映射表位于 `src/components/toolDisplay.ts`（`TOOL_COPY`，设计文档里也称 `TOOL_DISPLAY`），键集合必须与 `tools.md` §3 的 44 个工具名**双向相等**；`AskUserQuestion` 虽在表中，但渲染层必须跳过它的工具行（提问由问答浮层承担）。
+- **不做输出正则改写**：静默替换模型正文（例如抹掉 `cfg_` 开头的串）比漏一句更难排查；拦截放在渲染层，不改写生成内容。
+- 工具 description 的表达约束放 `\n` 之后的末尾：`capability_catalog` 只取第一行进系统提示清单，第一行出现约束句会污染能力清单。
+- running 状态文案来自映射表，不得拼工具名；未知工具固定「正在处理…」（`events.md` §3.5）。
+- 映射表以 `docs/design/tool-display.md` 为准；「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归，删任一条即红。
+
+> 这是表达约束，不改变 §7.10 的 AI 边界：模型能调用什么仍只由 `tools.md` §3 决定。
 
 ---
 
@@ -1488,6 +1620,7 @@ type RulesStatus = {
 | `config_update` | `ConfigUpdate`（2.0 新增） | **必须** |
 | `node_switch` | `NodeSwitch`（2.0 新增） | **必须** |
 | `node_probe` | `NodeProbe`（2.0 新增） | **必须** |
+| `node_probe_all` / `node_probe_cancel` / `node_probe_snapshot` | **无**（UI 专用，见 §4.6–§4.8） | — |
 | `probe_run` | `ProbeRun`（2.0 新增） | **必须** |
 | `proxy_params` | `ProxyParams`（2.0 新增） | **必须** |
 | `node_import_url` | `NodeImportUrl`（2.0 新增，取代 `ProfileImport`） | **必须** |
@@ -1512,7 +1645,7 @@ type RulesStatus = {
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
-`tools.md` 已升到 3.4.1，上表的工具名与它一一对应（§0.2）。
+`tools.md` 已升到 3.6.0，上表的工具名与它一一对应（§0.2）。
 
 ---
 
@@ -1578,13 +1711,13 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.6.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 |
-| `contracts/events.md` | **2.6.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` |
+| `contracts/commands.md` | **2.10.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 |
+| `contracts/events.md` | **2.9.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 |
 | `contracts/runtime.md` | **2.3.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` |
-| `contracts/tools.md` | **3.5.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级） |
+| `contracts/tools.md` | **3.6.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 |
 | `data-model.md` | **3** | 批 0 + 批 3 表 + 种子排除表 |
 | `contracts/routing.md` | **1.2.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 |
-| `contracts/tun-backend.md` | **1.0.6** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险） |
+| `contracts/tun-backend.md` | **1.0.7** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
 
 ### 15.6 2.1.0 新增（非破坏性）
@@ -1596,6 +1729,54 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.10.0（2026-11-06，测速支持节点子集）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.10.0`；`node_probe_all` 入参增可选 `nodeIds`，返回增 `ignored_node_ids` | 字段扩展 | 搜索过滤后点「测这 N 个」实际测了全部节点 |
+| 2 | `nodeIds` 省略测全部；提供时只测子集，非本配置的 id 忽略并记入 `ignored_node_ids`；空数组 → `PRECONDITION_FAILED / no_nodes`；`total` 为实际节点数 | 语义 | 一次搜索有脏 id 不应让整批失败 |
+| 3 | 前端「测这 N 个」文案依赖该参数；后端实现前按「全部测速」展示 | 说明 | 避免文案与实际行为不符 |
+| 4 | **响应必须带 `ignored_node_ids`，即使为空数组**；漏掉会让「实际测的比按钮少」没有解释 | 约束 | 前端提示依赖该字段 |
+| 5 | §8.1 更正：剩余列表为空时 `removed_node_name` 仍返回被下架节点名，只有 `replacement_node_name` 为 null | 更正 | 界面要能说「原来的 X 已下架，现在没有可用节点」 |
+| 6 | §8.2 写明种子同步失败整体回滚、**不推进 hash**，下次仍会重试 | 约束 | 失败一次不该把「内容已是最新」写死 |
+| 7 | `reason` 增 `local_write`：内容拉到并解析成功、但写入本机失败；与 `invalid_content`（我们的内容有问题）必须分开，不得合并 | 字段扩展 | 用户环境问题与内容问题要能区分 |
+| 8 | §15.5 矩阵同步本文件 2.10.0、`events.md` 2.9.0 | 元数据 | — |
+
+### 2.9.0（2026-11-06，未连接时的真实延迟、种子刷新字段与节点回落）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.9.0` | 元数据 | 三处设计增量同步 |
+| 2 | `NodeProbeSnapshotData.run` 增 `phase: "preparing" \| "probing"` 与 `method: "tcp" \| "clash"`；术语固定 `clash` = 可用、`tcp` = 可达 | 字段扩展 | 未连接时临时起运行时测真实延迟，重开面板要能恢复准备态与方式 |
+| 3 | `DefaultProfileResult` 增 `source` / `changed` / `reason` / `added` / `removed`；`reason` 区分 `offline` 与 `invalid_content`；离线有缓存仍返回 `Ok` | 字段扩展 | 没有这些字段分不出两种失败，也说不出「已更新 N 个节点」 |
+| 4 | §8.2 新版本里当前节点消失：**落到剩余列表的第一个节点**，空列表才置 `null`；必须经 `config-changed(seed_refreshed)` 告知 UI「原来的 X 已下架，已切换到 Y」，不得静默替换 | 语义变更 | 置 null 会让节点卡有节点却没有当前标记 |
+| 5 | §8.2 写明 `default_profile_refresh` 是用户显式触发，**命令层固定 `force = true`**，不得复用 6 小时短路；与 `CatalogRefresh` 的 `force` 参数不冲突 | 语义约束 | 按钮点下去没检查却回「已是最新」是假成功 |
+| 6 | §4.6 探测方式改为：已连接本配置 → `clash_delay`；**完全未连接 → 临时起探针运行时**，失败/8 秒未就绪 → 整批降级 `tcp`；已连接别的配置 → 不起第二个运行时、整批降级 `tcp` | 语义变更 | 未连接时 TCP 只能证明端口活着，用户按「可达」挑节点会误判 |
+| 7 | `DefaultProfileResult` 增 `removed_node_name` / `replacement_node_name`（均可空）；种子刷新当前节点消失时由后端填，UI 据此显示「原来的 X 已下架，已切换到 Y」；旧名 `previous_node_name` / `new_node_name` 作废 | 字段扩展 | 前端已按契约名读取，名字不一致会让提示静默消失 |
+| 8 | §15.5 矩阵同步本文件 2.9.0、`events.md` 2.9.0 | 元数据 | — |
+
+### 2.8.0（2026-11-06，批量测速）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.8.0`；§2 新增 62–64 `node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`，详解见 §4.6–§4.8 | 新增命令 | 节点面板需要一次测完整张表 |
+| 2 | 三条命令均为 **UI 专用**：`tools.md` §3 不注册工具；§13 补行 | AI 边界 | 批量探测是界面尺度操作，不做成工具 |
+| 3 | 全局同时只允许一个批次；已有批次 → `BUSY` + `details.run_id` | 约束 | 避免多批探测互相压端口/DNS |
+| 4 | `node_probe_snapshot.run` 只在该配置有批次在跑时非空；**有缓存 ≠ 已测完，`results` 有内容 ≠ 已测完** | 约束 | 重开面板必须能恢复「正在测速」而不是显示成已完成 |
+| 5 | 批次不跨进程、不进 Job、不发 `*-changed`；退出即结束。并发 6、单节点 3 秒超时、不重试、单点失败不中断 | 约束 | 延迟是快照，不是需要持久化的任务 |
+| 6 | §15.5 矩阵同步本文件 2.8.0、`events.md` 2.8.0、`tools.md` 3.6.1 | 元数据 | — |
+
+### 2.7.0（2026-11-06，面向用户的表达）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.7.0`；新增 §9.8「面向用户的表达」：提示词规则同时落在系统提示正文与工具 description，全文见 `tools.md` §2.4 | 新增 | 产品负责人 2026-11-06：工具调用不能把模型措辞直接展示给用户 |
+| 2 | UI 侧完成文案改为只认 `tool-call-end.display`（`events.md` §3.4），缺失时回落前端映射表 | 约束 | 给模型的 `result` 不是给用户的文案 |
+| 3 | 前端映射表 `src/components/toolDisplay.ts`（`TOOL_COPY`）的键集合必须与 `tools.md` §3 的 44 个双向相等；`AskUserQuestion` 由渲染层跳过，不产生展示行 | 约束 | 新增工具若漏映射会露出原始名 |
+| 4 | 明确不做输出正则改写，拦截在渲染层；running 文案不得拼工具名；description 约束放 `\n` 之后的末尾 | 约束 | 静默改写模型正文更难排查 |
+| 5 | 「怎么说话」八条、`SAFETY_RULES` 新增两条、危险工具 description 正反位置、状态文案兜底纳入契约测试 | 测试 | 防回归 |
+| 5 | §15.5 矩阵同步本文件 2.7.0、`events.md` 2.7.0、`tools.md` 3.6.0、`tun-backend.md` 1.0.7 | 元数据 | — |
 
 ### 2.6.0（2026-11-05，helper 状态/重启、退出流程与 AI 代劳升级）
 

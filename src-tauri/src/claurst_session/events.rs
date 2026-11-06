@@ -6,9 +6,9 @@
 use serde_json::{json, Value};
 
 use crate::agent::app_handle;
-use crate::tools::{AivpnError, NextAction};
+use crate::tools::{AivpnError, Display, NextAction};
 
-pub const CONTRACT_VERSION: &str = "2.6.0";
+pub const CONTRACT_VERSION: &str = "2.9.0";
 
 pub const EV_MESSAGE_CHUNK: &str = "message-chunk";
 pub const EV_THINKING_CHUNK: &str = "thinking-chunk";
@@ -119,7 +119,33 @@ impl SessionEmitter {
         error_code: Option<String>,
         duration_ms: u64,
         next_actions: Vec<NextAction>,
+        display: Option<Display>,
     ) {
+        let payload = self.tool_end_payload(
+            tool_call_id,
+            tool,
+            success,
+            result,
+            error_code,
+            duration_ms,
+            next_actions,
+            display,
+        );
+        self.emit(EV_TOOL_CALL_END, payload);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tool_end_payload(
+        &self,
+        tool_call_id: &str,
+        tool: &str,
+        success: bool,
+        result: &str,
+        error_code: Option<String>,
+        duration_ms: u64,
+        next_actions: Vec<NextAction>,
+        display: Option<Display>,
+    ) -> Value {
         let (text, truncated) = truncate_result(result);
         let mut payload = self.base();
         payload["tool_call_id"] = Value::String(tool_call_id.to_string());
@@ -130,7 +156,9 @@ impl SessionEmitter {
         payload["error_code"] = json!(error_code);
         payload["duration_ms"] = json!(duration_ms);
         payload["next_actions"] = serde_json::to_value(next_actions).unwrap_or(Value::Array(vec![]));
-        self.emit(EV_TOOL_CALL_END, payload);
+        // 卡片只读这份摘要；`result` 是给模型的，含操作指令，不能直接渲染。
+        payload["display"] = serde_json::to_value(display).unwrap_or(Value::Null);
+        payload
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -161,4 +189,54 @@ fn truncate_result(text: &str) -> (String, bool) {
         cut -= 1;
     }
     (format!("{}…(truncated)", &text[..cut]), true)
+}
+
+#[cfg(test)]
+mod display_projection_tests {
+    use super::*;
+    use crate::tools::Changed;
+
+    fn payload(display: Option<Display>) -> Value {
+        let emitter = SessionEmitter::new("req_1", "msg_1");
+        emitter.tool_end_payload(
+            "tool_1",
+            "ConfigList",
+            true,
+            "给模型看的正文",
+            None,
+            12,
+            vec![],
+            display,
+        )
+    }
+
+    #[test]
+    fn display_is_projected_into_tool_call_end() {
+        let display = Display::new("已读取配置列表", Changed::None).with_facts(vec![
+            "3 套配置".to_string(),
+        ]);
+        let payload = payload(Some(display));
+        assert_eq!(payload["display"]["text"], json!("已读取配置列表"));
+        assert_eq!(payload["display"]["facts"], json!(["3 套配置"]));
+        assert_eq!(payload["display"]["changed"], json!("none"));
+    }
+
+    /// AskUserQuestion 这类没有 ToolOutcome 的调用不产生展示行。
+    #[test]
+    fn missing_display_is_null() {
+        let payload = payload(None);
+        assert_eq!(payload["display"], Value::Null);
+    }
+
+    /// 卡片数据与给模型的 result 是两条线，前者不能带出指令文本。
+    #[test]
+    fn display_text_is_independent_from_the_model_facing_result() {
+        let display = Display::new("已读取配置列表", Changed::None);
+        let payload = payload(Some(display));
+        assert!(payload["result"].as_str().unwrap().contains("给模型看"));
+        assert!(!payload["display"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("给模型看"));
+    }
 }

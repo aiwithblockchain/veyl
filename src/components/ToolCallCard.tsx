@@ -1,23 +1,14 @@
 import { useState } from "react";
 import type { NextAction } from "../agent/protocol";
 import type { ToolCall } from "../state/chatStore";
-
-const STATE_LABEL: Record<ToolCall["state"], string> = {
-  running: "运行中",
-  ok: "完成",
-  error: "失败",
-};
-
-const SOURCE_LABEL: Record<ToolCall["source"], string> = {
-  ui: "界面发起",
-  agent: "Agent 发起",
-};
-
-function formatDuration(ms?: number): string | null {
-  if (ms === undefined) return null;
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
+import {
+  DURATION_THRESHOLD_MS,
+  changedLabel,
+  exactDuration,
+  factsFromArgs,
+  shortDuration,
+  toolCopy,
+} from "./toolDisplay";
 
 export function ToolCallCard({
   call,
@@ -27,69 +18,232 @@ export function ToolCallCard({
   onNextAction: (action: NextAction) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const duration = formatDuration(call.durationMs);
-  const hasDetail =
-    call.result !== undefined ||
+  const [techOpen, setTechOpen] = useState(false);
+  const copy = toolCopy(call.tool);
+  const failed = call.state === "error";
+  const running = call.state === "running";
+
+  // 后端 display.facts 优先；缺失时只用参数里的名称，绝不显示 id。
+  const facts =
+    call.display?.facts?.length
+      ? call.display.facts
+      : factsFromArgs(call.argsPreview);
+  const hasTech =
     call.argsPreview !== undefined ||
-    call.errorCode !== undefined;
+    call.result !== undefined ||
+    call.errorCode != null;
+  const hasBody = failed || facts.length > 0 || call.durationMs !== undefined || call.source === "ui" || hasTech;
+  const showDuration =
+    !running && call.durationMs !== undefined && call.durationMs >= DURATION_THRESHOLD_MS;
+
+  const text = running
+    ? copy.running
+    : call.display?.text ??
+      (failed ? copy.failed : copy.done);
+
+  const changed = call.display?.changed ?? null;
+  const nextAction = call.nextActions[0];
 
   return (
-    <div className={`tool-card tool-card--${call.state}`}>
+    <div className={`tool-line tool-line--${call.state}`}>
       <button
         type="button"
-        className="tool-card__row"
-        onClick={() => setOpen((value) => !value)}
+        className="tool-line__row"
         aria-expanded={open}
+        disabled={!hasBody}
+        onClick={() => setOpen((value) => !value)}
       >
-        <span className={`tool-card__chevron ${open ? "is-open" : ""}`} aria-hidden />
-        <span className="tool-card__name">{call.tool}</span>
-        <span className="tool-card__action">{call.action}</span>
-        <span className="tool-card__meta">
-          {duration ? <span className="tool-card__duration">{duration}</span> : null}
-          <span className="tool-card__dot" aria-hidden />
-          <span className="tool-card__status">{STATE_LABEL[call.state]}</span>
+        <StateIcon state={call.state} />
+        <span className="tool-line__text">{text}</span>
+        <span className="sr-only">
+          {running ? "进行中" : failed ? "失败" : "已完成"}
         </span>
+        {showDuration ? (
+          <span className="tool-line__duration">用时 {shortDuration(call.durationMs!)}</span>
+        ) : null}
+        {hasBody ? (
+          <span className={`tool-line__chevron ${open ? "is-open" : ""}`} aria-hidden>
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m6 4 4 4-4 4" />
+            </svg>
+          </span>
+        ) : null}
       </button>
 
-      {open && hasDetail ? (
-        <div className="tool-card__body">
-          {call.argsPreview ? (
-            <div className="tool-card__field">
-              <span className="tool-card__label">参数</span>
-              <code>{JSON.stringify(call.argsPreview)}</code>
+      {open && hasBody ? (
+        <div className="tool-line__body">
+          {failed ? (
+            <dl className="tool-line__facts">
+              <FactRow label="发生了什么" value={call.display?.text ?? copy.failed} />
+              <FactRow
+                label="有没有改动"
+                value={changedLabel(changed, copy.readOnly)}
+              />
+              <FactRow
+                label="现在能做什么"
+                value={nextAction?.label ?? copy.advice}
+              />
+            </dl>
+          ) : (
+            <dl className="tool-line__facts">
+              {facts.map((fact, index) => (
+                <FactRow key={`${fact.label}-${index}`} label={fact.label} value={fact.value} />
+              ))}
+              {call.durationMs !== undefined ? (
+                <FactRow label="用时" value={exactDuration(call.durationMs)} />
+              ) : null}
+              {call.source === "ui" ? (
+                <FactRow label="来源" value="从设置页发起" />
+              ) : null}
+            </dl>
+          )}
+
+          {call.nextActions.length > 0 ? (
+            <div className="tool-line__actions">
+              {call.nextActions.map((action) => (
+                <button
+                  key={`${action.tool}-${action.label}`}
+                  type="button"
+                  className="chip chip--small"
+                  onClick={() => onNextAction(action)}
+                >
+                  {action.label}
+                </button>
+              ))}
             </div>
           ) : null}
-          <div className="tool-card__field">
-            <span className="tool-card__label">结果</span>
-            <code>{call.result ?? (call.state === "running" ? "等待返回…" : "无摘要")}</code>
-          </div>
-          {call.errorCode ? (
-            <div className="tool-card__field">
-              <span className="tool-card__label">错误码</span>
-              <code>{call.errorCode}</code>
-            </div>
+
+          {hasTech ? (
+            <>
+              <button
+                type="button"
+                className="tool-line__tech"
+                aria-expanded={techOpen}
+                onClick={() => setTechOpen((value) => !value)}
+              >
+                技术细节
+              </button>
+              {techOpen ? (
+                <dl className="tool-line__tech-body">
+                  <FactRow label="工具" value={call.tool} mono />
+                  {call.argsPreview !== undefined ? (
+                    <FactRow
+                      label="参数"
+                      value={JSON.stringify(call.argsPreview, null, 2)}
+                      mono
+                    />
+                  ) : null}
+                  <FactRow
+                    label="结果"
+                    value={call.result ?? (running ? "等待返回…" : "无摘要")}
+                    mono
+                  />
+                  {call.errorCode ? (
+                    <FactRow label="错误码" value={call.errorCode} mono />
+                  ) : null}
+                  {call.durationMs !== undefined ? (
+                    <FactRow label="耗时" value={exactDuration(call.durationMs)} mono />
+                  ) : null}
+                </dl>
+              ) : null}
+            </>
           ) : null}
-          <div className="tool-card__field">
-            <span className="tool-card__label">来源</span>
-            <code>{SOURCE_LABEL[call.source]}</code>
-          </div>
         </div>
       ) : null}
+    </div>
+  );
+}
 
-      {call.nextActions.length > 0 ? (
-        <div className="tool-card__actions">
-          {call.nextActions.map((action) => (
-            <button
-              key={`${action.tool}-${action.label}`}
-              type="button"
-              className="chip chip--small"
-              onClick={() => onNextAction(action)}
-            >
-              {action.label}
-            </button>
+/** 连续 ≥3 条成功合并成一行；失败与进行中永不并入。 */
+export function ToolCallGroup({
+  calls,
+  onNextAction,
+}: {
+  calls: ToolCall[];
+  onNextAction: (action: NextAction) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="tool-group">
+      <button
+        type="button"
+        className="tool-line__row tool-group__row"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <StateIcon state="ok" />
+        <span className="tool-line__text">完成 {calls.length} 步</span>
+        <span className="sr-only">已完成</span>
+        <span className={`tool-line__chevron ${open ? "is-open" : ""}`} aria-hidden>
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m6 4 4 4-4 4" />
+          </svg>
+        </span>
+      </button>
+      {open ? (
+        <div className="tool-group__body">
+          {calls.map((call) => (
+            <ToolCallCard key={call.id} call={call} onNextAction={onNextAction} />
           ))}
         </div>
       ) : null}
     </div>
+  );
+}
+
+function FactRow({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="tool-line__fact">
+      {label ? <dt>{label}</dt> : <dt className="is-empty" aria-hidden />}
+      <dd className={mono ? "is-mono" : undefined}>{value}</dd>
+    </div>
+  );
+}
+
+function StateIcon({ state }: { state: ToolCall["state"] }) {
+  if (state === "running") {
+    return (
+      <span className="tool-line__icon is-running" aria-hidden>
+        <svg className="tool-line__spinner" viewBox="0 0 16 16" width="14" height="14">
+          <circle
+            cx="8"
+            cy="8"
+            r="6"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeDasharray="26"
+            strokeDashoffset="9"
+          />
+        </svg>
+      </span>
+    );
+  }
+  if (state === "ok") {
+    return (
+      <span className="tool-line__icon is-ok" aria-hidden>
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="m3.5 8.5 3 3 6-7" />
+        </svg>
+      </span>
+    );
+  }
+  return (
+    <span className="tool-line__icon is-error" aria-hidden>
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+        <circle cx="8" cy="8" r="6.2" />
+        <path d="M8 4.8v4.1" />
+        <circle cx="8" cy="11.3" r="0.9" fill="currentColor" stroke="none" />
+      </svg>
+    </span>
   );
 }

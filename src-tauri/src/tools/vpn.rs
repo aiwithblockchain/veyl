@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
+use super::display::Changed;
 use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
-use super::services::VpnToolServices;
+use super::services::{ServiceError, VpnToolServices};
 
 pub struct VpnConnectTool {
     services: Arc<dyn VpnToolServices>,
@@ -27,7 +28,7 @@ impl Tool for VpnConnectTool {
         "连接一套配置并设置系统代理。省略 config_id 时使用当前激活配置。\
          切换当前节点请用 NodeSwitch，不要用本工具。\
          state=running 即已连上；exit_ip 为 null 表示已连接但出口尚未测到，\
-         不代表连接失败，可用 RuntimeStatus 再查。"
+         不代表连接失败，可用 RuntimeStatus 再查。\n只说「已经连上了」；不提代理端口、入站、selector、路由表。失败时说明系统网络设置是否已恢复原样。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -57,23 +58,28 @@ impl Tool for VpnConnectTool {
         let outcome = match self.services.vpn_connect(config_id).await {
             Ok(data) => {
                 let summary = connect_summary(&data);
-                ToolOutcome::ok(summary, data).with_next(
-                    NextAction {
+                let (text, facts) = connect_display(&data);
+                ToolOutcome::ok(summary, data)
+                    .with_display(text, facts, Changed::None)
+                    .with_next(NextAction {
                         label: "断开连接".to_string(),
                         tool: "VpnDisconnect".to_string(),
                         args: json!({}),
-                    },
-                )
+                    })
             }
-            Err(error) => ToolOutcome::fail(
-                AivpnError::new("UPSTREAM_ERROR", error.to_string())
-                    .with_details(json!({ "hint": "换一个同地区节点，或运行 DiagRun 诊断" })),
-            )
-            .with_next(NextAction {
-                label: "诊断一下".to_string(),
-                tool: "DiagRun".to_string(),
-                args: json!({}),
-            }),
+            Err(error) => {
+                let (changed, text) = connect_failure(&error);
+                ToolOutcome::fail(
+                    AivpnError::new("UPSTREAM_ERROR", error.to_string())
+                        .with_details(json!({ "hint": "换一个同地区节点，或运行 DiagRun 诊断" })),
+                )
+                .with_display(text, vec![], changed)
+                .with_next(NextAction {
+                    label: "诊断一下".to_string(),
+                    tool: "DiagRun".to_string(),
+                    args: json!({}),
+                })
+            }
         };
         envelope::finish(ctx, "VpnConnect", outcome)
     }
@@ -110,6 +116,53 @@ fn connect_summary(data: &Value) -> String {
         None => parts.push("出口 IP 仍在探测中".to_string()),
     }
     format!("{}。", parts.join("，"))
+}
+
+/// 连接失败时按服务带回的信号选 changed：回滚了说「已恢复原样」，
+/// 完全没动说「没有改动」，拿不到信号才说「不确定」。
+fn connect_failure(error: &anyhow::Error) -> (Changed, &'static str) {
+    let signal = error
+        .downcast_ref::<ServiceError>()
+        .and_then(|service| service.details.as_ref())
+        .and_then(|details| details.get("connect_changed"))
+        .and_then(Value::as_str);
+    match signal {
+        Some("restored") => (Changed::Restored, "没能连上，已恢复原样"),
+        Some("none") => (Changed::None, "没能连上，没有改动"),
+        _ => (Changed::Unknown, "没能连上"),
+    }
+}
+
+/// 卡片文案与事实。TUN 未确认接管时必须说「未确认」。
+fn connect_display(data: &Value) -> (&'static str, Vec<String>) {
+    let mut facts = Vec::new();
+    if let Some(name) = data.get("config_name").and_then(Value::as_str) {
+        facts.push(format!("配置：{name}"));
+    }
+    if let Some(node) = data.get("node_name").and_then(Value::as_str) {
+        facts.push(format!("节点：{node}"));
+    }
+    if let Some(ip) = data.get("exit_ip").and_then(Value::as_str) {
+        facts.push(format!("出口：{ip}"));
+    }
+
+    if data.get("mode").and_then(Value::as_str) != Some("tun") {
+        return ("已连接", facts);
+    }
+
+    let routing = data
+        .get("routing_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let device_up = data.get("tun_device_up").and_then(Value::as_bool);
+    let default_route = data.get("tun_default_route").and_then(Value::as_bool);
+    match (device_up, routing) {
+        (Some(true), "direct") => ("已启动，直连中", facts),
+        (Some(true), "proxy_all") if default_route == Some(true) => ("已开启接管", facts),
+        (Some(true), "proxy_all") => ("已启动，接管未确认", facts),
+        (Some(true), _) => ("已按设置接管", facts),
+        _ => ("已启动，接管未确认", facts),
+    }
 }
 
 /// TUN 的摘要不能说假话：
@@ -304,6 +357,58 @@ mod tests {
         assert!(text.contains("没有走进 VPN"), "{text}");
         assert!(!text.contains("全部流量已接管"), "{text}");
     }
+
+    /// 服务确认回滚过 → restored；完全没动 → none；没信号才 unknown。
+    #[test]
+    fn a_connect_failure_uses_the_service_rollback_signal() {
+        let with = |signal: Option<&str>| {
+            let details = signal.map(|value| json!({ "connect_changed": value }));
+            anyhow::Error::new(ServiceError {
+                code: "RUNTIME_EXITED".to_string(),
+                message: "启动失败".to_string(),
+                retryable: false,
+                details,
+            })
+        };
+
+        assert_eq!(
+            connect_failure(&with(Some("restored"))),
+            (Changed::Restored, "没能连上，已恢复原样")
+        );
+        assert_eq!(
+            connect_failure(&with(Some("none"))),
+            (Changed::None, "没能连上，没有改动")
+        );
+        assert_eq!(
+            connect_failure(&with(None)),
+            (Changed::Unknown, "没能连上")
+        );
+        assert_eq!(
+            connect_failure(&with(Some("unknown"))),
+            (Changed::Unknown, "没能连上")
+        );
+    }
+
+    /// 代理没恢复却报成功，会让用户以为网络正常；必须是失败。
+    #[test]
+    fn a_disconnect_without_proxy_restore_is_a_failure() {
+        let outcome = disconnect_outcome(json!({ "system_proxy_restored": false }));
+        assert!(!outcome.ok, "代理没恢复不能算成功");
+        assert_eq!(outcome.display.changed, Changed::Unknown);
+        assert!(outcome.display.text.contains("没恢复"), "{}", outcome.display.text);
+        assert_eq!(outcome.next_actions.len(), 1);
+        assert_eq!(outcome.next_actions[0].tool, "NetRepair");
+        assert_eq!(outcome.next_actions[0].args["action"], "restore_direct");
+        assert!(outcome.error.is_some());
+    }
+
+    #[test]
+    fn a_clean_disconnect_reports_no_change_on_success() {
+        let outcome = disconnect_outcome(json!({ "system_proxy_restored": true }));
+        assert!(outcome.ok);
+        assert_eq!(outcome.display.changed, Changed::None);
+        assert_eq!(outcome.display.text, "已断开");
+    }
 }
 
 pub struct VpnDisconnectTool {
@@ -323,7 +428,7 @@ impl Tool for VpnDisconnectTool {
     }
 
     fn description(&self) -> &str {
-        "断开当前连接并恢复系统代理设置。已是未连接状态时为幂等成功。"
+        "断开当前连接并恢复系统代理设置。已是未连接状态时为幂等成功。\n说「已经断开，网络恢复直连」。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -336,22 +441,36 @@ impl Tool for VpnDisconnectTool {
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match self.services.vpn_disconnect().await {
-            Ok(data) => {
-                let restored = data
-                    .get("system_proxy_restored")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
-                ToolOutcome::ok(
-                    if restored {
-                        "已断开，系统代理已恢复。"
-                    } else {
-                        "已断开，但系统代理未能恢复，请检查系统设置。"
-                    },
-                    data,
-                )
-            }
-            Err(error) => ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string())),
+            Ok(data) => disconnect_outcome(data),
+            Err(error) => ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string()))
+                .with_display("没能断开连接", vec![], Changed::Unknown),
         };
         envelope::finish(ctx, "VpnDisconnect", outcome)
     }
+}
+
+/// 断开成功但代理没恢复，对用户就是失败：系统代理还可能指向已关闭的端口。
+fn disconnect_outcome(data: Value) -> ToolOutcome {
+    let restored = data
+        .get("system_proxy_restored")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if restored {
+        return ToolOutcome::ok("已断开，系统代理已恢复。", data).with_display(
+            "已断开",
+            vec!["网络：已恢复直连".to_string()],
+            Changed::None,
+        );
+    }
+
+    ToolOutcome::fail(
+        AivpnError::new("INTERNAL", "已断开，但系统代理没有恢复")
+            .with_details(json!({ "reason": "proxy_not_restored" })),
+    )
+    .with_display("已断开，但设置没恢复", vec![], Changed::Unknown)
+    .with_next(NextAction {
+        label: "恢复网络".to_string(),
+        tool: "NetRepair".to_string(),
+        args: json!({ "action": "restore_direct" }),
+    })
 }

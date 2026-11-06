@@ -128,13 +128,27 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     );
   }, []);
 
-  const applyMock = useCallback((store: MockStore) => {
-    setConfigs(store.configs.map((config) => summarizeConfig(config, store.activeId)));
-    setActiveConfigId(store.activeId);
-    setActiveConfig(
-      store.configs.find((config) => config.config_id === store.activeId) ?? null,
-    );
-  }, []);
+  const applyMock = useCallback(
+    (store: MockStore) => {
+      setConfigs(store.configs.map((config) => summarizeConfig(config, store.activeId)));
+      setActiveConfigId(store.activeId);
+      const active =
+        store.configs.find((config) => config.config_id === store.activeId) ?? null;
+      setActiveConfig(active);
+      // 浏览器 mock 没有配置库：把节点登记给 mock 桥，批量测速才有东西可测。
+      if (mock) {
+        (
+          bridge as AgentBridge & {
+            registerProbeNodes?: (configId: string | null, nodeIds: string[]) => void;
+          }
+        ).registerProbeNodes?.(
+          active?.config_id ?? null,
+          active?.nodes.map((node) => node.node_id) ?? [],
+        );
+      }
+    },
+    [bridge, mock],
+  );
 
   const commitMock = useCallback(
     (store: MockStore) => {

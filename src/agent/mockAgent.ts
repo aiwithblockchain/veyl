@@ -16,7 +16,9 @@ import type {
   NetRepairAction,
   NetRepairResult,
   NetworkForceResetResult,
+  NodeProbeAllData,
   NodeProbeResult,
+  NodeProbeSnapshotData,
   NodeSwitchResult,
   RenamedSession,
   TunHelperInfo,
@@ -31,8 +33,11 @@ import type {
   AiStatusPhase,
   ConfigDetail,
   NextAction,
+  NodeProbeMethod,
+  NodeProbePhase,
   RuntimeSnapshot,
   RuntimeState,
+  ToolDisplayPayload,
   ToolPermissionLevel,
 } from "./protocol";
 
@@ -130,6 +135,23 @@ export class MockAgentBridge implements AgentBridge {
   private pendingUpgradeQuestion: { id: string; version: string } | null = null;
   /** 演示「检查并更新」成功后，后台组件回到 running。 */
   private helperState: TunHelperState | null = null;
+  /** 批量测速的节点目录：由 useVpnSession 的 mock 分支登记。 */
+  private probeNodes = new Map<string, string[]>();
+  private probeCache = new Map<string, NodeProbeResult>();
+  private probeRun: {
+    runId: string;
+    configId: string;
+    total: number;
+    done: number;
+    ok: number;
+    failed: number;
+    cancelled: boolean;
+    reason: "connected" | null;
+    phase: NodeProbePhase;
+    method: NodeProbeMethod;
+    startedAt: number;
+    timers: number[];
+  } | null = null;
   private runtime: RuntimeSnapshot = {
     contract_version: CONTRACT_VERSION,
     state: "idle",
@@ -177,6 +199,8 @@ export class MockAgentBridge implements AgentBridge {
   }
 
   async runtimeStart(configId?: string): Promise<void> {
+    // 契约：用户中途启动 VPN，正在跑的测速取消，reason = connected。
+    this.cancelProbeForConnect();
     const profile =
       this.profiles.find((item) => item.id === configId) ??
       this.profiles.find((item) => item.id === this.runtime.config_id) ??
@@ -246,21 +270,67 @@ export class MockAgentBridge implements AgentBridge {
     appliedAt: "2026-11-01T00:00:00.000Z",
     newVersionAvailable: false,
     nodeCount: this.profiles.length,
+    checkedAt: null,
+    source: "cache",
+    changed: false,
+    reason: null,
+    added: 0,
+    removed: 0,
   };
 
   async defaultProfileStatus(): Promise<DefaultProfileStatus> {
-    return { ...this.defaultProfile, nodeCount: this.profiles.length };
+    // 只读、不联网：状态接口永远报告缓存口径。
+    return {
+      ...this.defaultProfile,
+      nodeCount: this.profiles.length,
+      source: "cache",
+      changed: false,
+      reason: null,
+      added: 0,
+      removed: 0,
+    };
   }
 
   async defaultProfileRefresh(): Promise<DefaultProfileStatus> {
-    await sleep(900);
+    const offline = mockFlag("veyl.mock.seed.offline") === "1";
+    const invalid = mockFlag("veyl.mock.seed.invalid") === "1";
+    const localWrite = mockFlag("veyl.mock.seed.localwrite") === "1";
+    await sleep(offline ? 500 : 900);
+    const checkedAt = now();
+    if (offline || invalid || localWrite) {
+      // 浏览器演示：三种失败都保留原节点，不报错。
+      const next: DefaultProfileStatus = {
+        ...this.defaultProfile,
+        nodeCount: this.profiles.length,
+        checkedAt,
+        // 内容异常/离线都没拿到可用的远端内容；写入失败是拿到了但没落盘。
+        source: localWrite ? "network" : "cache",
+        changed: false,
+        reason: offline
+          ? "offline"
+          : invalid
+            ? "invalid_content"
+            : "local_write",
+        added: 0,
+        removed: 0,
+      };
+      this.defaultProfile = next;
+      return { ...next };
+    }
+    const changed = this.defaultProfile.version !== "2026.11.2";
     const next: DefaultProfileStatus = {
       packageId: "pkg_demo",
       version: "2026.11.2",
       appliedAt: now(),
       // 模拟「刷新拿到新包，但下次连接才生效」。
-      newVersionAvailable: this.defaultProfile.version !== "2026.11.2",
+      newVersionAvailable: changed,
       nodeCount: this.profiles.length,
+      checkedAt,
+      source: "network",
+      changed,
+      reason: null,
+      added: changed ? 1 : 0,
+      removed: 0,
     };
     this.defaultProfile = next;
     return { ...next };
@@ -713,6 +783,7 @@ export class MockAgentBridge implements AgentBridge {
       argsPreview?: Record<string, unknown>;
       nextActions?: NextAction[];
       errorCode?: string | null;
+      display?: ToolDisplayPayload;
     } = {},
   ) {
     if (this.cancelled.has(requestId)) return false;
@@ -748,6 +819,7 @@ export class MockAgentBridge implements AgentBridge {
           | null,
         duration_ms: durationMs,
         next_actions: cancelled ? [] : options.nextActions ?? [],
+        display: cancelled ? null : options.display,
         emitted_at: now(),
       },
     });
@@ -812,6 +884,9 @@ export class MockAgentBridge implements AgentBridge {
   private async run(sessionId: string, requestId: string, assistantId: string, text: string) {
     if (text.includes("第一次用")) return this.firstRunFlow(sessionId, requestId, assistantId);
     if (text.includes("断开")) return this.disconnectFlow(requestId, assistantId);
+    if (text.includes("模拟失败") || text.includes("连不上")) {
+      return this.failureDemoFlow(requestId, assistantId);
+    }
     if (text.includes("状态")) return this.statusFlow(requestId, assistantId);
     if (
       text.includes("升级运行时") ||
@@ -845,6 +920,12 @@ export class MockAgentBridge implements AgentBridge {
         "查询可用版本",
         640,
         "随包 1.14.4（active）",
+        {
+          display: {
+            text: "运行库 1.14.4（随包）",
+            changed: "none",
+          },
+        },
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
@@ -858,7 +939,14 @@ export class MockAgentBridge implements AgentBridge {
         "region=jp, limit=10",
         880,
         "找到 1 个节点：东京 01（42ms）。",
-        { argsPreview: { region: "jp", limit: 10 } },
+        {
+          argsPreview: { region: "jp", limit: 10 },
+          display: {
+            text: "找到 1 个可用节点",
+            changed: "none",
+            facts: ["地区 日本"],
+          },
+        },
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
@@ -874,8 +962,13 @@ export class MockAgentBridge implements AgentBridge {
         "已连接到 东京 01，出口 IP 203.0.113.7，延迟 42ms。",
         {
           permissionLevel: "execute",
-          argsPreview: { node_id: "seed-jp-01", strategy: "latency" },
+          argsPreview: { node_name: "东京 01", strategy: "latency" },
           nextActions: [{ label: "断开连接", tool: "VpnDisconnect", args: {} }],
+          display: {
+            text: "已连接",
+            changed: "none",
+            facts: ["「东京 01」", `出口 ${MOCK_EXIT_IP}`, "延迟 42 毫秒"],
+          },
         },
       ))
     ) {
@@ -923,7 +1016,7 @@ export class MockAgentBridge implements AgentBridge {
         "保存到本机",
         520,
         "Key 已保存到本机，并验证可用。",
-        { permissionLevel: "write", argsPreview: undefined },
+        { permissionLevel: "write", argsPreview: undefined, display: { text: "密钥已保存（只在本机）", changed: "none" } },
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
@@ -939,12 +1032,52 @@ export class MockAgentBridge implements AgentBridge {
     const summary = running
       ? `运行中，sing-box ${this.runtime.upstream_version}，出口 ${this.runtime.health.exit_ip}`
       : "未运行";
-    if (!(await this.tool(requestId, assistantId, "RuntimeStatus", "查询状态", 380, summary))) {
+    if (
+      !(await this.tool(requestId, assistantId, "RuntimeStatus", "查询状态", 380, summary, {
+        display: {
+          text: running ? "已经连上" : "还没连接",
+          changed: "none",
+        },
+      }))
+    ) {
       return this.finish(requestId, assistantId, "cancelled", null);
     }
     const reply = running
       ? `当前已连接，出口 IP ${this.runtime.health.exit_ip}，本地代理监听 127.0.0.1:${this.runtime.mixed_port ?? "未知"}。`
       : "当前没有连接。要连的话直接说地区，例如「连到日本」。";
+    await this.type(requestId, assistantId, reply);
+    this.finish(requestId, assistantId, "success", reply);
+  }
+
+  /** 演示失败：节点没响应，三行展开与用时阈值都能看到。 */
+  private async failureDemoFlow(requestId: string, assistantId: string) {
+    this.status(requestId, assistantId, "正在连接", "preparing_tool");
+    if (
+      !(await this.tool(
+        requestId,
+        assistantId,
+        "VpnConnect",
+        "连接 东京 01",
+        5200,
+        "节点 东京 01 连接超时。",
+        {
+          permissionLevel: "execute",
+          errorCode: "NODE_UNREACHABLE",
+          argsPreview: { node_name: "东京 01" },
+          display: {
+            text: "节点没有响应，没能连上",
+            changed: "none",
+            facts: ["「东京 01」"],
+          },
+          nextActions: [
+            { label: "换一个节点", tool: "CatalogSearch", args: { region: "jp" } },
+          ],
+        },
+      ))
+    ) {
+      return this.finish(requestId, assistantId, "cancelled", null);
+    }
+    const reply = "没连上「东京 01」。现在还是直连状态，网络没有被改动。可以换一个节点再试。";
     await this.type(requestId, assistantId, reply);
     this.finish(requestId, assistantId, "success", reply);
   }
@@ -964,6 +1097,12 @@ export class MockAgentBridge implements AgentBridge {
         "查询可用版本",
         640,
         "随包 1.14.4（active）",
+        {
+          display: {
+            text: "运行库 1.14.4（随包）",
+            changed: "none",
+          },
+        },
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
@@ -990,6 +1129,12 @@ export class MockAgentBridge implements AgentBridge {
         "查询可用版本",
         640,
         `随包 ${this.coreBundledVersion}（active）`,
+        {
+          display: {
+            text: `运行库 ${this.coreBundledVersion}（随包）`,
+            changed: "none",
+          },
+        },
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
@@ -1039,7 +1184,10 @@ export class MockAgentBridge implements AgentBridge {
         "断开当前节点",
         700,
         "已断开，系统代理已恢复。",
-        { permissionLevel: "write" },
+        {
+          permissionLevel: "write",
+          display: { text: "已断开，已恢复直连", changed: "none" },
+        },
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
@@ -1140,7 +1288,7 @@ export class MockAgentBridge implements AgentBridge {
   }
 
   async nodeProbe(nodeId: string): Promise<NodeProbeResult> {
-    return {
+    const result: NodeProbeResult = {
       node_id: nodeId,
       reachable: true,
       latency_ms: 42,
@@ -1148,6 +1296,227 @@ export class MockAgentBridge implements AgentBridge {
       checked_at: Date.now(),
       error: null,
     };
+    this.probeCache.set(nodeId, result);
+    return result;
+  }
+
+  /** 浏览器通道没有真实配置库：由 useVpnSession 在切换配置时登记节点。 */
+  registerProbeNodes(configId: string | null, nodeIds: string[]): void {
+    if (!configId) return;
+    this.probeNodes.set(configId, [...nodeIds]);
+  }
+
+  async nodeProbeAll(
+    configId?: string,
+    nodeIds?: string[],
+  ): Promise<NodeProbeAllData> {
+    const target = this.resolveProbeConfig(configId);
+    if (this.probeRun) {
+      throw {
+        code: "BUSY",
+        message: "已经有测速在跑，等它结束再试。",
+        details: { run_id: this.probeRun.runId },
+      };
+    }
+    const configured = this.probeNodes.get(target) ?? [];
+    const ids = nodeIds
+      ? nodeIds.filter((id) => configured.includes(id))
+      : configured;
+    const ignored = nodeIds
+      ? nodeIds.filter((id) => !configured.includes(id))
+      : [];
+    if (ids.length === 0) {
+      throw {
+        code: "PRECONDITION_FAILED",
+        message: "这套配置还没有节点。",
+        details: { reason: "no_nodes" },
+      };
+    }
+
+    const connected =
+      this.runtime.state === "running" || this.runtime.state === "degraded";
+    const method: NodeProbeMethod = connected ? "clash" : "tcp";
+    const run = {
+      runId: `probe_${Date.now().toString(36)}`,
+      configId: target,
+      total: ids.length,
+      done: 0,
+      ok: 0,
+      failed: 0,
+      cancelled: false,
+      reason: null as "connected" | null,
+      phase: "preparing" as NodeProbePhase,
+      method,
+      startedAt: Date.now(),
+      timers: [] as number[],
+    };
+    this.probeRun = run;
+    const slow = mockFlag("veyl.mock.probe.slow") === "1";
+    const allFail = mockFlag("veyl.mock.probe.allfail") === "1";
+    const timeoutEvery = Math.max(2, Math.min(4, Math.floor(ids.length / 3) + 2));
+
+    this.emitProbePhase(run);
+    run.timers.push(
+      window.setTimeout(() => {
+        if (!this.probeRun || this.probeRun.runId !== run.runId) return;
+        run.phase = "probing";
+        this.emitProbePhase(run);
+      }, slow ? 320 : 90),
+    );
+
+    ids.forEach((nodeId, index) => {
+      const delay = (slow ? 900 : 180) + index * (slow ? 120 : 45);
+      const timer = window.setTimeout(() => {
+        if (!this.probeRun || this.probeRun.runId !== run.runId || run.cancelled) {
+          return;
+        }
+        const unreachable = allFail || index % timeoutEvery === timeoutEvery - 1;
+        const failureCode = index % 2 === 0 ? "PROBE_TIMEOUT" : "CONNECT_FAILED";
+        const result: NodeProbeResult = unreachable
+          ? {
+              node_id: nodeId,
+              reachable: false,
+              latency_ms: null,
+              probe_method: connected ? "clash_delay" : "tcp",
+              checked_at: Date.now(),
+              error: {
+                code: failureCode,
+                message: failureCode === "PROBE_TIMEOUT" ? "探测超时" : "连不上这个节点",
+              },
+            }
+          : {
+              node_id: nodeId,
+              reachable: true,
+              latency_ms: 26 + ((index * 37) % 140),
+              probe_method: connected ? "clash_delay" : "tcp",
+              checked_at: Date.now(),
+              error: null,
+            };
+        this.probeCache.set(nodeId, result);
+        run.done += 1;
+        if (result.reachable) run.ok += 1;
+        else run.failed += 1;
+        this.emit({
+          name: AGENT_EVENTS.nodeProbeProgress,
+          payload: {
+            contract_version: CONTRACT_VERSION,
+            run_id: run.runId,
+            config_id: run.configId,
+            phase: "probing",
+            method: run.method,
+            done: run.done,
+            total: run.total,
+            result,
+            emitted_at: now(),
+          },
+        });
+        if (run.done >= run.total) this.finishProbeRun(run);
+      }, delay);
+      run.timers.push(timer);
+    });
+
+    return {
+      runId: run.runId,
+      configId: run.configId,
+      total: run.total,
+      concurrency: 6,
+      ignoredNodeIds: ignored,
+    };
+  }
+
+  async nodeProbeCancel(runId: string): Promise<{ cancelled: boolean }> {
+    const run = this.probeRun;
+    if (!run || run.runId !== runId) return { cancelled: false };
+    run.cancelled = true;
+    for (const timer of run.timers) window.clearTimeout(timer);
+    run.timers = [];
+    this.finishProbeRun(run);
+    return { cancelled: true };
+  }
+
+  async nodeProbeSnapshot(configId?: string): Promise<NodeProbeSnapshotData> {
+    const target = this.resolveProbeConfig(configId);
+    const ids = this.probeNodes.get(target) ?? [];
+    const results = ids
+      .map((nodeId) => this.probeCache.get(nodeId))
+      .filter((item): item is NodeProbeResult => Boolean(item));
+    const run = this.probeRun;
+    return {
+      configId: target,
+      results,
+      run:
+        run && run.configId === target
+          ? {
+              runId: run.runId,
+              done: run.done,
+              total: run.total,
+              startedAt: run.startedAt,
+              phase: run.phase,
+              method: run.method,
+            }
+          : null,
+    };
+  }
+
+  private cancelProbeForConnect(): void {
+    const run = this.probeRun;
+    if (!run) return;
+    run.cancelled = true;
+    run.reason = "connected";
+    for (const timer of run.timers) window.clearTimeout(timer);
+    run.timers = [];
+    this.finishProbeRun(run);
+  }
+
+  private emitProbePhase(run: NonNullable<MockAgentBridge["probeRun"]>): void {    this.emit({
+      name: AGENT_EVENTS.nodeProbeProgress,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        run_id: run.runId,
+        config_id: run.configId,
+        phase: run.phase,
+        method: run.method,
+        done: run.done,
+        total: run.total,
+        result: null,
+        emitted_at: now(),
+      },
+    });
+  }
+
+  private resolveProbeConfig(configId?: string): string {
+    if (configId) return configId;
+    const first = this.probeNodes.keys().next().value;
+    if (first) return first;
+    throw {
+      code: "PRECONDITION_FAILED",
+      message: "还没有配置。",
+      details: { reason: "no_config" },
+    };
+  }
+
+  private finishProbeRun(run: NonNullable<MockAgentBridge["probeRun"]>): void {
+    if (this.probeRun !== run) return;
+    this.probeRun = null;
+    for (const timer of run.timers) window.clearTimeout(timer);
+    run.timers = [];
+    this.emit({
+      name: AGENT_EVENTS.nodeProbeFinished,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        run_id: run.runId,
+        config_id: run.configId,
+        total: run.total,
+        ok: run.ok,
+        failed: run.failed,
+        method: run.method,
+        cancelled: run.cancelled,
+        reason: run.reason,
+        network:
+          run.ok === 0 && mockFlag("veyl.mock.probe.offline") === "1" ? "offline" : "ok",
+        emitted_at: now(),
+      },
+    });
   }
 
   private unsupportedConfigCommand(command: string) {
@@ -1397,6 +1766,10 @@ export class MockAgentBridge implements AgentBridge {
   }
 
   dispose(): void {
+    if (this.probeRun) {
+      for (const timer of this.probeRun.timers) window.clearTimeout(timer);
+      this.probeRun = null;
+    }
     this.listeners.clear();
   }
 }

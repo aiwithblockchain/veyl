@@ -4,11 +4,24 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
+use super::display::Changed;
 use super::envelope::{self, AivpnError, ToolOutcome};
-use super::services::VpnToolServices;
+use super::services::{ServiceError, VpnToolServices};
 
 fn failure(error: anyhow::Error) -> ToolOutcome {
-    ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string()))
+    // 启动失败时服务会带 `connect_changed`；只读工具由 `finish` 统一压成 none。
+    let changed = error
+        .downcast_ref::<ServiceError>()
+        .and_then(|service| service.details.as_ref())
+        .and_then(|details| details.get("connect_changed"))
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "restored" => Changed::Restored,
+            "none" => Changed::None,
+            _ => Changed::Unknown,
+        })
+        .unwrap_or(Changed::Unknown);
+    ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string())).with_changed(changed)
 }
 
 pub struct RuntimeStatusTool {
@@ -30,7 +43,7 @@ impl Tool for RuntimeStatusTool {
     fn description(&self) -> &str {
         "读取 sing-box 运行时的状态快照（进程、版本、来源、健康、出口 IP、流量、连接数）。\
 未连接时也会报告当前可用的运行时版本与来源；只有确实没有可用运行时时才会说不可用。\
-运行时随安装包自带，AI 不需要也不能安装它。只读。"
+运行时随安装包自带，AI 不需要也不能安装它。只读。\n一律说「后台组件」，不出现 runtime、sing-box、进程名。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -49,11 +62,38 @@ impl Tool for RuntimeStatusTool {
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match self.services.runtime_status().await {
-            Ok(snapshot) => ToolOutcome::ok(summary(&snapshot), snapshot),
+            Ok(snapshot) => {
+                let facts = status_facts(&snapshot);
+                ToolOutcome::ok(summary(&snapshot), snapshot).with_facts(facts)
+            }
             Err(error) => failure(error),
         };
         envelope::finish(ctx, "RuntimeStatus", outcome)
     }
+}
+
+/// 卡片上的短事实：连接状态、版本、出口。都是用户能看懂的值。
+fn status_facts(snapshot: &Value) -> Vec<String> {
+    let state = snapshot
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let mut facts = vec![if matches!(state, "running" | "degraded") {
+        "连接状态：已连接".to_string()
+    } else {
+        "连接状态：未连接".to_string()
+    }];
+    if let Some(version) = snapshot.get("upstream_version").and_then(Value::as_str) {
+        facts.push(format!("版本：{version}"));
+    }
+    if let Some(ip) = snapshot
+        .get("health")
+        .and_then(|health| health.get("exit_ip"))
+        .and_then(Value::as_str)
+    {
+        facts.push(format!("出口：{ip}"));
+    }
+    facts
 }
 
 fn source_label(source: &str) -> &'static str {
@@ -155,7 +195,7 @@ impl Tool for RuntimeStartTool {
     }
 
     fn description(&self) -> &str {
-        "启动 sing-box 运行时进程（使用当前激活配置）。不设置系统代理；需要代理请用 VpnConnect。"
+        "启动 sing-box 运行时进程（使用当前激活配置）。不设置系统代理；需要代理请用 VpnConnect。\n一律说「后台组件」，不出现 runtime、sing-box、进程名。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -178,7 +218,7 @@ impl Tool for RuntimeStartTool {
 lifecycle_tool!(
     RuntimeStopTool,
     "RuntimeStop",
-    "停止 sing-box 运行时并恢复系统代理。已是 idle 时为幂等成功。",
+    "停止 sing-box 运行时并恢复系统代理。已是 idle 时为幂等成功。\n一律说「后台组件」，不出现 runtime、sing-box、进程名。",
     "运行时已停止，系统代理已恢复。",
     runtime_stop,
     false
@@ -187,7 +227,7 @@ lifecycle_tool!(
 lifecycle_tool!(
     RuntimeRestartTool,
     "RuntimeRestart",
-    "重启 sing-box 运行时，用于应用新配置或恢复异常状态。",
+    "重启 sing-box 运行时，用于应用新配置或恢复异常状态。\n一律说「后台组件」，不出现 runtime、sing-box、进程名。",
     "运行时已重启。",
     runtime_restart,
     None
@@ -263,7 +303,19 @@ impl Tool for RuntimeLogsTool {
         };
 
         let outcome = match self.services.runtime_logs(lines, level).await {
-            Ok(data) => ToolOutcome::ok(format_logs(&data), data),
+            Ok(data) => {
+                let count = data
+                    .get("lines")
+                    .and_then(Value::as_array)
+                    .map(|items| items.len())
+                    .unwrap_or(0);
+                let facts = if count == 0 {
+                    vec!["记录：空".to_string()]
+                } else {
+                    vec![format!("最近：{count} 行")]
+                };
+                ToolOutcome::ok(format_logs(&data), data).with_facts(facts)
+            }
             Err(error) => failure(error),
         };
         envelope::finish(ctx, "RuntimeLogs", outcome)

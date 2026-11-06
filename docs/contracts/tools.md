@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.5.0`
+> 契约版本：`3.6.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.5.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.6.1`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.5.0";
+  contract_version: "3.6.1";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -86,6 +86,7 @@ type NextAction = {
 - `ok = true` 时 `error` 必须为 `null`，`data` 可为 `null`。
 - `ok = false` 时 `data` 必须为 `null`，`error` 不得为 `null`。
 - `next_actions` 只用于 UI；模型通过 `content` 中的文字获得同样信息。
+- **`ToolEnvelope` 不含 `display`**：用户文案只走 `tool-call-end.display`（`events.md` §3.4），不塞进模型可见的信封。
 
 **`next_actions` 的点击语义（已定）**：
 
@@ -217,6 +218,49 @@ type CallSource = "ui" | "agent";
 | 其余 17 个工具 | 无 |
 
 所以 P1 只有 `DeepseekSaveKey` 会因为「全是敏感字段」而省略 preview，其余工具都正常展示参数。
+
+---
+
+### 2.4 面向用户的表达
+
+工具卡片、模型正文、`ai-status` 文案都会把内部词带到用户面前。规则**写死在系统提示与工具 description 两处**，且内容同一套：
+
+| 落点 | 文件 | 管什么 |
+|---|---|---|
+| 系统提示正文 | `resources/prompts/zh/first-run.md`「怎么说话」 | 全部风格规则 |
+| 安全底线 | `src-tauri/src/claurst_session/mod.rs` 的 `SAFETY_RULES` | 两句底线：正文不出现内部名词/标识符；失败必须说清有没有改动 |
+| 工具 description | 各 `src-tauri/src/tools/*.rs` 的 `description()` | 只补该工具「结果怎么说、失败改没改」，通用规则不重复 |
+
+`capability_catalog` 只取 description 的**第一行**进系统提示清单，完整 description 作为工具 schema 交给模型。所以「对用户说…」这类句子放 description **末尾**：不会污染能力清单，但模型调工具时一定看得到。
+
+规则（系统提示与工具 description 必须同时体现）：
+
+1. **不叙述工具调用**。只说结果和影响。写「我先看一下现在的连接状态」，不写「我调用 `RuntimeStatus`」「`RuntimeStatus` 返回 ok」。
+2. **正文不出现内部术语与 ID**：`proxy`、`TUN`、`分流`、`规则集`、`selector`、`入站/出站`、`runtime`、`sing-box`、工具名、字段名、错误码、`cfg_…` / `nod_…` 等 id、路径。
+3. **失败三段式**：发生了什么（用户语言）→ 有没有改动（`VpnConnect` / `NetRepair` / `CoreUpgrade` / `ConfigDelete` 必须说清）→ 现在能做什么（只给一个动作）。不确定有没有改动就说「不确定，诊断日志里有记录」。
+4. **长流程分阶段**，一个阶段一句；不逐步骤报，也不提前报还没发生的阶段。
+5. 需要技术细节时只说「技术细节在诊断日志里」并告诉用户在哪复制；不贴字段名、错误码、原始返回。
+6. **用户主动问技术问题才用术语**；第一次出现时紧跟一句白话解释。
+7. 不重复界面上已经显示的内容（连接状态、出口、流量、卡片里的数字）。界面负责实时状态，模型负责解释下一步。
+
+前端展示契约（`commands.md` §9.8）：
+
+```ts
+// src/components/toolDisplay.ts（设计文档里也称 TOOL_DISPLAY）
+export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 44 个工具名完全相等
+```
+
+进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 44 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
+
+**提示词只降低出错概率，最终闸门在渲染层**：UI 永远不渲染工具名、JSON、错误码；不做输出正则改写（静默替换模型正文比漏一句更难排查）。
+
+边界与落点：
+
+- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「44 个名字必须都有」与「`AskUserQuestion` 不占行」。
+- **running 状态文案**同样来自映射表（`events.md` §3.5）：不得拼工具名，未知工具固定「正在处理…」。
+- **工具 description**：通用表达约束放 `\n` 之后的末尾。`capability_catalog` 只取第一行进系统提示清单，所以第一行**不得**出现「对用户说…」这类句子，否则会污染每次请求的能力清单。
+- **「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归**：删任一条即红。
+- **不做输出正则改写**：拦截在渲染层，不改写生成内容。
 
 ---
 
@@ -779,7 +823,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.5.0";
+  contract_version: "3.6.1";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -942,7 +986,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.5.0";
+  contract_version: "3.6.1";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1347,6 +1391,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 - 其余情况 → TCP 握手，只能说明端口活着。
 - **节点不可达不是工具错误**：返回 `ok: true` + `reachable: false` + `error`。只有 `node_id` 不存在才是 `Err`。
 - 不登记问题（J1）：单节点手动测试失败不等于用户被阻断。
+- **一次只测一个**：批量测速是 UI 专用（`commands.md` §4.6–§4.8），没有对应工具；不要循环调用本工具模拟批量。
 
 权限：`ReadOnly`。
 
@@ -1829,6 +1874,24 @@ type CoreUpgradeData = {
 ---
 
 ## 8. 变更记录
+
+### 3.6.1（2026-11-06，`NodeProbe` 单测边界）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.6.1`；工具总数不变（仍 44 个） | 元数据 | 批量测速只有 UI 命令，不加工具 |
+| 2 | §4.28 `NodeProbe` 补一句「一次只测一个；批量测速是 UI 专用，不要循环调用模拟批量」 | 约束 | 防止模型用单测循环代替批量，把界面尺度操作变成工具调用 |
+| 3 | §1.3 明确 `ToolEnvelope` **不含 `display`**：用户文案只走 `tool-call-end.display` | 约束 | 信封是给模型的，卡片文案是给用户的 |
+
+### 3.6.0（2026-11-06，面向用户的表达）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.6.0` | 元数据 | 工具调用要按用户语言展示，而不是模型措辞 |
+| 2 | 新增 §2.4「面向用户的表达」：7 条提示词规则（不叙述工具调用、不出现内部术语与 ID、失败三段式、长流程分阶段、问技术才用术语），并明确规则同时落在系统提示与工具 description | 新增 | 产品负责人 2026-11-06 |
+| 3 | 声明前端映射表 `src/components/toolDisplay.ts`（`TOOL_COPY`）的键集合必须与 §3 的 44 个工具名双向相等；`AskUserQuestion` 虽在表中，渲染层必须跳过它的工具行 | 约束 | 缺一个名字就意味着新工具会露出原始名 |
+| 4 | 注明渲染层是最终闸门：UI 不渲染工具名、JSON、错误码；不做输出正则改写；running 文案不得拼工具名；description 约束必须放在 `\n` 之后，第一行保持能力清单可用 | 约束 | 提示词只降低概率 |
+| 5 | 「怎么说话」八条、`SAFETY_RULES` 新增两条、危险工具 description 的正反位置、未知工具「正在处理…」纳入契约测试，删任一条即红 | 测试 | 防回归，不是防写错 |
 
 ### 3.5.0（2026-11-05，AI 代劳升级 `CoreUpgrade`）
 

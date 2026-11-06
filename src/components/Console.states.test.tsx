@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConfigDetail, NodeSummary, RuntimeView } from "../agent/protocol";
 import { CONTRACT_VERSION } from "../agent/protocol";
@@ -60,6 +60,23 @@ function makeRuntime(over: Partial<RuntimeView> = {}): RuntimeView {
 
 const noop = () => {};
 const never = async () => ({ ok: false, latencyMs: null, unreachable: false });
+const switchNode = vi.fn(async () => ({ ok: true }));
+const emptyProbes = {
+  results: {},
+  run: null,
+  probing: new Set<string>(),
+  finished: null,
+  notice: null,
+  available: true,
+  loadSnapshot: async () => {},
+  start: async () => ({ ok: true }),
+  cancel: async () => {},
+  clearNotice: () => {},
+};
+
+afterEach(() => {
+  switchNode.mockClear();
+});
 
 interface RenderOptions {
   runtime?: RuntimeView;
@@ -74,9 +91,9 @@ function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
       config={config}
       onStart={noop}
       onStop={noop}
-      onSwitchNode={noop}
+      onSwitchNode={switchNode}
       onProbe={never}
-      nodeSwitchAvailable={false}
+      nodeProbes={emptyProbes}
       nodeProbeAvailable={false}
       aiReady
       justOnboarded={false}
@@ -217,18 +234,23 @@ describe("状态矩阵", () => {
     expect(r.text(".console")).not.toContain("0 B");
   });
 
-  it("5a 选中别的节点：卡片换成选中节点，出现用这个节点", () => {
+  it("5a 点节点行打开面板，点一行立即切换且面板不关", async () => {
+    vi.useFakeTimers();
     const r = renderConsole({ runtime: makeRuntime({ state: "running" }) });
-    fireEvent.click(r.container.querySelector(".node-card__name")!);
-    const items = Array.from(
-      r.container.querySelectorAll<HTMLButtonElement>(".node-picker__item"),
-    );
-    fireEvent.click(items.find((el) => el.textContent?.includes("大阪 02"))!);
-    expect(r.text(".node-card__label")).toBe("选中的节点");
-    expect(r.text(".node-card__name")).toBe("大阪 02");
-    expect(r.cardText()).toContain("osaka.example.com");
-    expect(r.cardText()).toContain("用这个节点");
-    expect(r.cardText()).not.toContain("当前节点");
+    fireEvent.click(r.container.querySelector(".node-card__select")!);
+    expect(r.container.querySelector("#node-sheet")).not.toBeNull();
+    expect(r.text(".node-card__label")).toBe("当前节点");
+    expect(r.text(".node-card__select")).toContain("东京 01");
+    expect(r.text(".node-card__select")).toContain("2 个节点");
+
+    const rows = Array.from(r.container.querySelectorAll<HTMLElement>(".node-row"));
+    fireEvent.click(rows.find((el) => el.textContent?.includes("大阪 02"))!);
+    expect(switchNode).toHaveBeenCalledWith("n-osaka");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    expect(r.container.querySelector("#node-sheet")).not.toBeNull();
+    expect(r.text(".node-card__label")).toBe("当前节点");
   });
 
   it("8 加载中：骨架出现，真实卡片不出现", () => {
@@ -237,20 +259,16 @@ describe("状态矩阵", () => {
     expect(r.container.querySelector(".node-card")).toBeNull();
   });
 
-  it("9 选中的节点消失：回退到当前节点", () => {
+  it("9 节点变少后回退到当前节点", () => {
     const r = renderConsole({});
-    fireEvent.click(r.container.querySelector(".node-card__name")!);
-    const items = Array.from(
-      r.container.querySelectorAll<HTMLButtonElement>(".node-picker__item"),
-    );
-    fireEvent.click(items.find((el) => el.textContent?.includes("大阪 02"))!);
-    expect(r.text(".node-card__label")).toBe("选中的节点");
+    fireEvent.click(r.container.querySelector(".node-card__select")!);
+    expect(r.container.querySelectorAll(".node-row")).toHaveLength(2);
 
     r.rerender(
       consoleElement({ ...makeConfig("n-tokyo"), nodes: NODES.slice(0, 1) }, {}),
     );
+    expect(r.container.querySelector("#node-sheet")).toBeNull();
     expect(r.text(".node-card__name")).toBe("东京 01");
-    expect(r.text(".node-card__label")).toBe("当前节点");
     expect(r.cardText()).not.toContain("还没有节点");
   });
 

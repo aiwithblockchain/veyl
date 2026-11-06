@@ -501,4 +501,201 @@ describe("chatReducer", () => {
     expect(session.activeRequestId).toBe("req_1");
     expect(session.status?.text).toBe("正在思考");
   });
+
+  it("tool-call-end 把 display 归一化到工具调用上", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "连到日本",
+      localRequestId: "local_display",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_display",
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.toolCallStart,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_display",
+          assistant_message_id: "asst_display",
+          tool_call_id: "call_display",
+          tool: "VpnConnect",
+          action: "连接 seed-jp-01",
+          permission_level: "execute",
+          source: "agent",
+          emitted_at: "2026-11-06T00:00:00Z",
+        },
+      },
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.toolCallEnd,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_display",
+          assistant_message_id: "asst_display",
+          tool_call_id: "call_display",
+          tool: "VpnConnect",
+          success: true,
+          result: "已连接到 东京 01。",
+          result_truncated: false,
+          error_code: null,
+          duration_ms: 3200,
+          next_actions: [],
+          display: {
+            text: "已连接",
+            facts: ["出口 203.0.113.7", "延迟 42 毫秒"],
+            changed: "none",
+          },
+          emitted_at: "2026-11-06T00:00:05Z",
+        },
+      },
+    });
+
+    const call = activeSession(state)!.toolCalls.call_display;
+    expect(call.state).toBe("ok");
+    expect(call.display).toEqual({
+      text: "已连接",
+      facts: [
+        { label: "", value: "出口 203.0.113.7" },
+        { label: "", value: "延迟 42 毫秒" },
+      ],
+      changed: "none",
+    });
+  });
+
+  it("display 缺失时保持为空，界面走静态兜底", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "查状态",
+      localRequestId: "local_plain",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_plain",
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.toolCallEnd,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_plain",
+          assistant_message_id: "asst_plain",
+          tool_call_id: "call_plain",
+          tool: "RuntimeStatus",
+          success: true,
+          result: "运行中。",
+          result_truncated: false,
+          error_code: null,
+          duration_ms: 380,
+          next_actions: [],
+          emitted_at: "2026-11-06T00:00:05Z",
+        },
+      },
+    });
+
+    expect(activeSession(state)!.toolCalls.call_plain.display).toBeNull();
+  });
+
+  it("运行中的状态文案不暴露工具名", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "查状态",
+      localRequestId: "local_running",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_running",
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.toolCallStart,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_running",
+          assistant_message_id: "asst_running",
+          tool_call_id: "call_running",
+          tool: "RuntimeStatus",
+          action: "查询状态",
+          permission_level: "read_only",
+          source: "agent",
+          emitted_at: "2026-11-06T00:00:00Z",
+        },
+      },
+    });
+    const status = activeSession(state)!.status!;
+    expect(status.text).toBe("正在检查连接状态");
+    expect(status.text).not.toContain("RuntimeStatus");
+    expect(status.text).not.toBe("正在执行 RuntimeStatus");
+    expect(status.text).not.toBe("RuntimeStatus 正在运行");
+
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.status,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_running",
+          assistant_message_id: "asst_running",
+          phase: "running_tool",
+          text: "RuntimeStatus 正在运行",
+          emitted_at: "2026-11-06T00:00:01Z",
+        },
+      },
+    });
+
+    expect(activeSession(state)!.status?.text).toBe("正在检查连接状态");
+  });
+
+  it("未映射工具的运行中状态走同一个兜底文案", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "试试新工具",
+      localRequestId: "local_unknown",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_unknown",
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.toolCallStart,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_unknown",
+          assistant_message_id: "asst_unknown",
+          tool_call_id: "call_unknown",
+          tool: "FooBar",
+          action: "Using FooBar",
+          permission_level: "read_only",
+          source: "agent",
+          emitted_at: "2026-11-06T00:00:00Z",
+        },
+      },
+    });
+
+    expect(activeSession(state)!.status?.text).toBe("正在处理…");
+  });
 });

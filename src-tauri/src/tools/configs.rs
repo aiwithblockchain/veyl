@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
+use super::display::Changed;
 use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
 use super::services::{ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, VpnToolServices};
 
@@ -125,7 +126,7 @@ impl Tool for ConfigListTool {
 
     fn description(&self) -> &str {
         "列出本地全部配置（不联网）。返回 config_id、名称、节点数与分流策略；\
-         不含节点明细与凭据。用户用名称指代配置时，先匹配出 config_id，不要猜。"
+         不含节点明细与凭据。用户用名称指代配置时，先匹配出 config_id，不要猜。\n配置 ID 只用于你自己匹配，不要念给用户。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -138,7 +139,28 @@ impl Tool for ConfigListTool {
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match self.services.config_list().await {
-            Ok(data) => ToolOutcome::ok(summarise_configs(&data), data),
+            Ok(data) => {
+                let configs = data
+                    .get("configs")
+                    .and_then(Value::as_array)
+                    .map(|items| items.len())
+                    .unwrap_or(0);
+                let mut facts = vec![format!("配置数：{configs}")];
+                if let Some(name) = data
+                    .get("configs")
+                    .and_then(Value::as_array)
+                    .and_then(|items| {
+                        items.iter().find(|item| {
+                            item.get("is_active").and_then(Value::as_bool).unwrap_or(false)
+                        })
+                    })
+                    .and_then(|item| item.get("name"))
+                    .and_then(Value::as_str)
+                {
+                    facts.push(format!("当前配置：{name}"));
+                }
+                ToolOutcome::ok(summarise_configs(&data), data).with_facts(facts)
+            }
             Err(error) => ToolOutcome::fail(failure(error)),
         };
         envelope::finish(ctx, "ConfigList", outcome)
@@ -162,7 +184,7 @@ impl Tool for ConfigDetailTool {
     }
 
     fn description(&self) -> &str {
-        "读取一套配置的节点集、DNS、端口与布局。不含密码；要测连通性用 NodeProbe。"
+        "读取一套配置的节点集、DNS、端口与布局。不含密码；要测连通性用 NodeProbe。\n配置 ID 只用于你自己匹配，不要念给用户。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -187,7 +209,31 @@ impl Tool for ConfigDetailTool {
             );
         };
         let outcome = match self.services.config_detail(config_id).await {
-            Ok(data) => ToolOutcome::ok(summarise_detail(&data), data),
+            Ok(data) => {
+                let name = data.get("name").and_then(Value::as_str).unwrap_or("未命名");
+                let nodes = data
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .map(|items| items.len())
+                    .unwrap_or(0);
+                let mut facts = vec![format!("配置：{name}"), format!("节点数：{nodes}")];
+                let current = data.get("current_node_id").and_then(Value::as_str);
+                if let Some(node_name) = data
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .and_then(|items| {
+                        items.iter().find(|node| {
+                            current.is_some()
+                                && node.get("node_id").and_then(Value::as_str) == current
+                        })
+                    })
+                    .and_then(|node| node.get("name"))
+                    .and_then(Value::as_str)
+                {
+                    facts.push(format!("当前节点：{node_name}"));
+                }
+                ToolOutcome::ok(summarise_detail(&data), data).with_facts(facts)
+            }
             Err(error) => ToolOutcome::fail(failure(error)),
         };
         envelope::finish(ctx, "ConfigDetail", outcome)
@@ -212,7 +258,7 @@ impl Tool for ConfigCreateTool {
 
     fn description(&self) -> &str {
         "新建一套配置。source = seed 绑定当前种子的全部节点；不传 source 则创建空配置。\
-         connect_mode 与 routing_mode 必须显式给出，没有默认值。"
+         connect_mode 与 routing_mode 必须显式给出，没有默认值。\n配置 ID 只用于你自己匹配，不要念给用户。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -243,27 +289,36 @@ impl Tool for ConfigCreateTool {
             return envelope::finish(
                 ctx,
                 "ConfigCreate",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 name")),
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 name"))
+                    .with_changed(Changed::None),
             );
         };
         let Some(connect_mode) = input.get("connect_mode").and_then(Value::as_str) else {
             return envelope::finish(
                 ctx,
                 "ConfigCreate",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 connect_mode")),
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 connect_mode"))
+                    .with_changed(Changed::None),
             );
         };
         let Some(routing_mode) = input.get("routing_mode").and_then(Value::as_str) else {
             return envelope::finish(
                 ctx,
                 "ConfigCreate",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 routing_mode")),
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 routing_mode"))
+                    .with_changed(Changed::None),
             );
         };
 
         let source = match super::optional_string(&input, "source") {
             Ok(value) => value,
-            Err(error) => return envelope::finish(ctx, "ConfigCreate", ToolOutcome::fail(error)),
+            Err(error) => {
+                return envelope::finish(
+                    ctx,
+                    "ConfigCreate",
+                    ToolOutcome::fail(error).with_changed(Changed::None),
+                )
+            }
         };
         // 唯一的硬门禁：`seed` 会把用户接到我们的服务器上，必须先问过并得到明确选择。
         // 空配置与 nodeIds 这两条目前只有提示词约束——它们不涉及我们的服务器，
@@ -285,7 +340,8 @@ impl Tool for ConfigCreateTool {
                              用户选了「用 Veyl 提供的测试节点（仅供试用）」之后才能用测试节点",
                         )
                         .with_details(json!({ "reason": "seed_source_not_confirmed" })),
-                    ),
+                    )
+                    .with_changed(Changed::None),
                 );
             }
         }
@@ -330,13 +386,27 @@ impl Tool for ConfigCreateTool {
         {
             Ok(data) => {
                 let config_id = data.get("config_id").cloned().unwrap_or(Value::Null);
-                ToolOutcome::ok(summarise_created(&data), data).with_next(NextAction {
-                    label: "连接".to_string(),
-                    tool: "VpnConnect".to_string(),
-                    args: json!({ "config_id": config_id }),
-                })
+                let name = data.get("name").and_then(Value::as_str).unwrap_or("未命名");
+                let nodes = data
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .map(|items| items.len())
+                    .unwrap_or(0);
+                let mut facts = vec![format!("配置：{name}")];
+                facts.push(if nodes == 0 {
+                    "节点：暂无".to_string()
+                } else {
+                    format!("节点数：{nodes}")
+                });
+                ToolOutcome::ok(summarise_created(&data), data)
+                    .with_facts(facts)
+                    .with_next(NextAction {
+                        label: "连接".to_string(),
+                        tool: "VpnConnect".to_string(),
+                        args: json!({ "config_id": config_id }),
+                    })
             }
-            Err(error) => ToolOutcome::fail(failure(error)),
+            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
         envelope::finish(ctx, "ConfigCreate", outcome)
     }
@@ -360,7 +430,7 @@ impl Tool for ConfigUpdateTool {
 
     fn description(&self) -> &str {
         "编辑一套配置（名称 / 分流 / DNS / 端口 / 节点集）。\
-         没有 connect_mode：改接管方式必须新建配置。node_ids 是整体替换。"
+         没有 connect_mode：改接管方式必须新建配置。node_ids 是整体替换。\n配置 ID 只用于你自己匹配，不要念给用户。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -390,7 +460,8 @@ impl Tool for ConfigUpdateTool {
             return envelope::finish(
                 ctx,
                 "ConfigUpdate",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 config_id")),
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 config_id"))
+                    .with_changed(Changed::None),
             );
         };
         let node_ids = input.get("node_ids").and_then(Value::as_array).map(|items| {
@@ -408,13 +479,21 @@ impl Tool for ConfigUpdateTool {
                     name: match super::optional_string(&input, "name") {
                         Ok(value) => value,
                         Err(error) => {
-                            return envelope::finish(ctx, "ConfigUpdate", ToolOutcome::fail(error))
+                            return envelope::finish(
+                                ctx,
+                                "ConfigUpdate",
+                                ToolOutcome::fail(error).with_changed(Changed::None),
+                            )
                         }
                     },
                     routing_mode: match super::optional_string(&input, "routing_mode") {
                         Ok(value) => value,
                         Err(error) => {
-                            return envelope::finish(ctx, "ConfigUpdate", ToolOutcome::fail(error))
+                            return envelope::finish(
+                                ctx,
+                                "ConfigUpdate",
+                                ToolOutcome::fail(error).with_changed(Changed::None),
+                            )
                         }
                     },
                     listen_port: input
@@ -449,8 +528,16 @@ impl Tool for ConfigUpdateTool {
             )
             .await
         {
-            Ok(data) => ToolOutcome::ok("配置已更新，下一次连接生效。", data),
-            Err(error) => ToolOutcome::fail(failure(error)),
+            Ok(data) => {
+                let name = data
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("未命名")
+                    .to_string();
+                ToolOutcome::ok("配置已更新，下一次连接生效。", data)
+                    .with_facts(vec![format!("配置：{name}")])
+            }
+            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
         envelope::finish(ctx, "ConfigUpdate", outcome)
     }
@@ -473,7 +560,7 @@ impl Tool for ConfigDeleteTool {
     }
 
     fn description(&self) -> &str {
-        "删除一套配置。幂等；正在连接的配置不能删。节点与密码留在共享池里。"
+        "删除一套配置。幂等；正在连接的配置不能删。节点与密码留在共享池里。\n配置 ID 只用于你自己匹配，不要念给用户。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -498,12 +585,20 @@ impl Tool for ConfigDeleteTool {
             return envelope::finish(
                 ctx,
                 "ConfigDelete",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "config_id 不能为空")),
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "config_id 不能为空"))
+                    .with_changed(Changed::None),
             );
         };
         let outcome = match self.services.config_delete(config_id).await {
-            Ok(data) => ToolOutcome::ok("配置已删除。", data),
-            Err(error) => ToolOutcome::fail(failure(error)),
+            Ok(data) => {
+                ToolOutcome::ok("配置已删除。", data).with_display(
+                    "配置已删除",
+                    vec![],
+                    Changed::None,
+                )
+            }
+            Err(error) => ToolOutcome::fail(failure(error))
+                .with_display("没能删除配置", vec![], Changed::None),
         };
         envelope::finish(ctx, "ConfigDelete", outcome)
     }
@@ -527,7 +622,7 @@ impl Tool for NodeSwitchTool {
 
     fn description(&self) -> &str {
         "切换一套配置的当前节点。未连接只改选择，不启动 VPN；\
-         已连接走 selector 热切，进程不重启、不断流。"
+         已连接走 selector 热切，进程不重启、不断流。\n说节点名称，不说节点 ID。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -557,22 +652,29 @@ impl Tool for NodeSwitchTool {
                 ToolOutcome::fail(AivpnError::new(
                     "INVALID_ARGUMENT",
                     "缺少 config_id 或 node_id",
-                )),
+                ))
+                .with_changed(Changed::None),
             );
         };
         let outcome = match self.services.node_switch(config_id, node_id).await {
             Ok(data) => {
                 let connected = data.get("connected").and_then(Value::as_bool).unwrap_or(false);
+                let (text, facts) = if connected {
+                    ("已切换节点", vec!["连接：未中断".to_string()])
+                } else {
+                    ("已选择节点", vec!["生效：下次连接".to_string()])
+                };
                 ToolOutcome::ok(
                     if connected {
-                        "已切换节点并重连。"
+                        "已切换节点（热切，连接未中断）。"
                     } else {
                         "已切换当前节点（未连接，未启动 VPN）。"
                     },
                     data,
                 )
+                .with_display(text, facts, Changed::None)
             }
-            Err(error) => ToolOutcome::fail(failure(error)),
+            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
         envelope::finish(ctx, "NodeSwitch", outcome)
     }
@@ -597,7 +699,7 @@ impl Tool for NodeProbeTool {
     fn description(&self) -> &str {
         "测试单个节点连通性。已连接且是当前节点时走 Clash API 延迟；\
          其余情况对 server:port 做 3 秒 TCP 握手，不启动运行时。\
-         节点不可达是正常结果，不算工具错误。"
+         节点不可达是正常结果，不算工具错误。\n说「能连上 / 连不上」和毫秒数，不说 TCP/TLS/握手。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -638,7 +740,19 @@ impl Tool for NodeProbeTool {
                         .unwrap_or("节点不可达。")
                         .to_string()
                 };
-                ToolOutcome::ok(summary, data)
+                let facts = if reachable {
+                    vec![format!(
+                        "延迟：{} ms",
+                        data.get("latency_ms").and_then(Value::as_u64).unwrap_or(0)
+                    )]
+                } else {
+                    vec!["结果：不可达".to_string()]
+                };
+                ToolOutcome::ok(summary, data).with_display(
+                    if reachable { "能连上" } else { "连不上" },
+                    facts,
+                    Changed::None,
+                )
             }
             Err(error) => ToolOutcome::fail(failure(error)),
         };
@@ -689,13 +803,18 @@ impl Tool for NodeImportUrlTool {
             return envelope::finish(
                 ctx,
                 "NodeImportUrl",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 url")),
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 url"))
+                    .with_changed(Changed::None),
             );
         };
         let config_id = match super::optional_string(&input, "config_id") {
             Ok(value) => value,
             Err(error) => {
-                return envelope::finish(ctx, "NodeImportUrl", ToolOutcome::fail(error))
+                return envelope::finish(
+                    ctx,
+                    "NodeImportUrl",
+                    ToolOutcome::fail(error).with_changed(Changed::None),
+                )
             }
         };
 
@@ -707,12 +826,28 @@ impl Tool for NodeImportUrlTool {
                     .and_then(Value::as_array)
                     .map(|items| items.len())
                     .unwrap_or(0);
+                let mut facts = Vec::new();
+                if imported > 0 {
+                    facts.push(format!("新增：{imported} 个"));
+                }
+                if skipped > 0 {
+                    facts.push(format!("跳过：{skipped} 个"));
+                }
                 ToolOutcome::ok(
                     format!("导入 {imported} 个节点，跳过 {skipped} 个。请复述节点名、地址、端口与加密方式给用户确认。"),
                     data,
                 )
+                .with_display(
+                    if imported > 0 {
+                        "节点已导入"
+                    } else {
+                        "没有新增节点"
+                    },
+                    facts,
+                    Changed::None,
+                )
             }
-            Err(error) => ToolOutcome::fail(failure(error)),
+            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
         envelope::finish(ctx, "NodeImportUrl", outcome)
     }
@@ -769,7 +904,8 @@ impl Tool for NodeCreateTool {
                     ToolOutcome::fail(AivpnError::new(
                         "INVALID_ARGUMENT",
                         format!("缺少 {field}"),
-                    )),
+                    ))
+                    .with_changed(Changed::None),
                 );
             }
         }
@@ -781,7 +917,8 @@ impl Tool for NodeCreateTool {
             return envelope::finish(
                 ctx,
                 "NodeCreate",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "port 不合法")),
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "port 不合法"))
+                    .with_changed(Changed::None),
             );
         };
 
@@ -791,7 +928,11 @@ impl Tool for NodeCreateTool {
                 config_id: match super::optional_string(&input, "config_id") {
                     Ok(value) => value,
                     Err(error) => {
-                        return envelope::finish(ctx, "NodeCreate", ToolOutcome::fail(error))
+                        return envelope::finish(
+                            ctx,
+                            "NodeCreate",
+                            ToolOutcome::fail(error).with_changed(Changed::None),
+                        )
                     }
                 },
                 name: input["name"].as_str().unwrap_or_default().to_string(),
@@ -803,10 +944,15 @@ impl Tool for NodeCreateTool {
             .await
         {
             Ok(data) => {
-                let name = data.get("name").and_then(Value::as_str).unwrap_or("-");
+                let name = data
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+                    .to_string();
                 ToolOutcome::ok(format!("节点「{name}」已创建。"), data)
+                    .with_facts(vec![format!("节点：{name}")])
             }
-            Err(error) => ToolOutcome::fail(failure(error)),
+            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
         envelope::finish(ctx, "NodeCreate", outcome)
     }

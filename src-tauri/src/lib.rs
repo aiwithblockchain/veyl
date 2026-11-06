@@ -270,7 +270,7 @@ pub fn run() {
                             | crate::runtime::RuntimeState::Degraded
                     );
                     match crate::seed::refresh(&refresh_store, running, false).await {
-                        crate::seed::RefreshOutcome::Offline { cached, error } => {
+                        crate::seed::RefreshOutcome::Offline { cached, error, .. } => {
                             log::warn!("默认节点刷新失败（cached={cached}）：{error}")
                         }
                         outcome => log::info!("默认节点刷新：{outcome:?}"),
@@ -324,6 +324,9 @@ pub fn run() {
                 agent::commands::node_create,
                 agent::commands::node_switch,
                 agent::commands::node_probe,
+                agent::commands::node_probe_all,
+                agent::commands::node_probe_cancel,
+                agent::commands::node_probe_snapshot,
                 agent::commands::route_get,
                 agent::commands::route_set_mode,
                 agent::commands::route_targets_set,
@@ -377,6 +380,9 @@ pub fn run() {
                 agent::commands::node_create,
                 agent::commands::node_switch,
                 agent::commands::node_probe,
+                agent::commands::node_probe_all,
+                agent::commands::node_probe_cancel,
+                agent::commands::node_probe_snapshot,
                 agent::commands::route_get,
                 agent::commands::route_set_mode,
                 agent::commands::route_targets_set,

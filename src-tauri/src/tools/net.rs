@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
+use super::display::Changed;
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::VpnToolServices;
 
@@ -44,7 +45,7 @@ impl Tool for NetConfigGetTool {
 
     fn description(&self) -> &str {
         "读取本机网络配置：逐网络服务的系统代理、DNS、默认路由与接口、回环监听端口。\
-         只读，不修改任何设置，不返回 MAC / Wi-Fi 名称。"
+         只读，不修改任何设置，不返回 MAC / Wi-Fi 名称。\n说检查结果；不出现 DNS 地址列表、路由表、字段名。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -67,7 +68,8 @@ impl Tool for NetConfigGetTool {
                     .get("route")
                     .and_then(|route| route.get("default_interface"))
                     .and_then(Value::as_str)
-                    .unwrap_or("未知");
+                    .unwrap_or("未知")
+                    .to_string();
                 ToolOutcome::ok(
                     format!(
                         "读取到 {} 个网络服务的代理设置；默认接口 {interface}。",
@@ -75,6 +77,10 @@ impl Tool for NetConfigGetTool {
                     ),
                     data,
                 )
+                .with_facts(vec![
+                    format!("网络服务：{services} 个"),
+                    format!("默认接口：{interface}"),
+                ])
             }
             Err(error) => ToolOutcome::fail(tool_error(error)),
         };
@@ -101,7 +107,7 @@ impl Tool for NetRepairTool {
     fn description(&self) -> &str {
         "有限的网络修复：restore_direct（撤销 Veyl 的代理并停运行时）、flush_dns（刷新 DNS 缓存）、\
          set_proxy / clear_proxy（只改 Veyl 自己的代理端口）。\
-         不要用本工具修改与 Veyl 无关的网络配置。"
+         不要用本工具修改与 Veyl 无关的网络配置。\n说检查结果；不出现 DNS 地址列表、路由表、字段名。失败必须说明是否已恢复。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -136,6 +142,14 @@ impl Tool for NetRepairTool {
             .and_then(Value::as_u64)
             .and_then(|port| u16::try_from(port).ok());
 
+        let action_label = match action {
+            "restore_direct" => "已恢复直连",
+            "flush_dns" => "已刷新域名缓存",
+            "set_proxy" => "已设置代理",
+            "clear_proxy" => "已清除代理",
+            _ => "已修复",
+        };
+
         let outcome = match self.services.net_repair(action, port).await {
             Ok(data) => {
                 let detail = data
@@ -146,6 +160,7 @@ impl Tool for NetRepairTool {
                 let verified = data.get("verified").and_then(Value::as_bool).unwrap_or(false);
                 if verified {
                     ToolOutcome::ok(detail, data)
+                        .with_display(action_label, vec![], Changed::None)
                 } else {
                     ToolOutcome::fail(
                         AivpnError::new("PRECONDITION_FAILED", detail).with_details(json!({
@@ -153,9 +168,11 @@ impl Tool for NetRepairTool {
                             "action": action,
                         })),
                     )
+                    .with_display("修复未通过检查", vec![], Changed::Unknown)
                 }
             }
-            Err(error) => ToolOutcome::fail(tool_error(error)),
+            Err(error) => ToolOutcome::fail(tool_error(error))
+                .with_display("没能完成修复", vec![], Changed::Unknown),
         };
         envelope::finish(ctx, "NetRepair", outcome)
     }
@@ -202,7 +219,17 @@ impl Tool for CatalogRefreshTool {
                     .get("node_count")
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
+                let changed = data.get("changed").and_then(Value::as_bool).unwrap_or(false);
+                let source = data.get("source").and_then(Value::as_str).unwrap_or("");
+                let (text, changed) = if changed {
+                    ("测试节点已更新", Changed::None)
+                } else if source == "cache" {
+                    ("使用的是本地缓存", Changed::None)
+                } else {
+                    ("测试节点已是最新", Changed::None)
+                };
                 ToolOutcome::ok(format!("测试节点已检查（{node_count} 个）"), data)
+                    .with_display(text, vec![format!("节点数：{node_count}")], changed)
             }
             Err(error) => ToolOutcome::fail(tool_error(error)),
         };
@@ -257,7 +284,23 @@ impl Tool for DefaultProfileStatusTool {
                 } else {
                     "还没有测试节点缓存，先运行 CatalogRefresh。".to_string()
                 };
-                ToolOutcome::ok(summary, data)
+                let facts = if available {
+                    vec![format!(
+                        "节点数：{}",
+                        data.get("node_count").and_then(Value::as_i64).unwrap_or(0)
+                    )]
+                } else {
+                    vec!["缓存：还没有".to_string()]
+                };
+                ToolOutcome::ok(summary, data).with_display(
+                    if available {
+                        "已读取测试节点状态"
+                    } else {
+                        "还没有测试节点"
+                    },
+                    facts,
+                    Changed::None,
+                )
             }
             Err(error) => ToolOutcome::fail(tool_error(error)),
         };

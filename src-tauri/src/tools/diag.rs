@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
+use super::display::Changed;
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::VpnToolServices;
 
@@ -26,7 +27,7 @@ impl Tool for DiagRunTool {
     fn description(&self) -> &str {
         "跑一次网络诊断：运行时/进程/控制面/数据面、系统代理逐服务、DNS、默认路由、\
          出口 IP、测试节点源/GitHub/DeepSeek 可达性、当前配置与测试节点版本。\
-         每项带 ok、detail、remediation 与可点击 action。连接失败时用它定位原因。"
+         每项带 ok、detail、remediation 与可点击 action。连接失败时用它定位原因。\n说检查结果；不出现 DNS 地址列表、路由表、字段名。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -70,6 +71,19 @@ impl Tool for DiagRunTool {
                         "诊断完成，有检查项未通过，详情见 data.checks。"
                     },
                     data,
+                )
+                .with_display(
+                    if failed == 0 {
+                        "诊断通过"
+                    } else {
+                        "诊断发现问题"
+                    },
+                    vec![if failed == 0 {
+                        "结果：全部检查正常".to_string()
+                    } else {
+                        format!("结果：{failed} 项异常")
+                    }],
+                    Changed::None,
                 )
             }
             Err(error) => ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string())),

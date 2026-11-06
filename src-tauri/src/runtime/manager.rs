@@ -13,7 +13,7 @@ use super::health::{ClashApi, ConnectionSample, DataPlaneProbe, DirectIpProbe, E
 use super::process::{self, SpawnOptions};
 
 pub const CONTRACT_VERSION: &str = "2.3.0";
-pub const EVENT_CONTRACT_VERSION: &str = "2.6.0";
+pub const EVENT_CONTRACT_VERSION: &str = "2.9.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
 pub const DEFAULT_DATA_PLANE_PROBE: &str = "http://cp.cloudflare.com/generate_204";
@@ -524,10 +524,18 @@ enum SuperviseExit {
 pub struct RuntimeManager {
     pub cfg: RuntimeConfig,
     inner: Mutex<Inner>,
+    /// 测速用的临时运行时。**不进 `inner`**：它不算连接，不能改状态、
+    /// 不能发 `runtime-state-changed`，也不能让 `runtime_status` 报已连接。
+    probe: Mutex<Option<ProbeProcess>>,
     events: broadcast::Sender<RuntimeEvent>,
     wake: Notify,
     /// 进入 Failed 时回调宿主（例如撤销系统代理）；运行时不认识代理模块。
     terminal_failure_hook: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+struct ProbeProcess {
+    child: Child,
+    plan: StartPlan,
 }
 
 impl RuntimeManager {
@@ -536,6 +544,7 @@ impl RuntimeManager {
         Arc::new(Self {
             cfg,
             inner: Mutex::new(Inner::new()),
+            probe: Mutex::new(None),
             events,
             wake: Notify::new(),
             terminal_failure_hook: std::sync::Mutex::new(None),
@@ -769,6 +778,105 @@ impl RuntimeManager {
         self.wait_settled(gen, budget).await
     }
 
+    /// 启动测速用的临时运行时。它不进入连接状态机、不发事件、不设系统代理。
+    pub async fn start_probe(&self, plan: StartPlan) -> RuntimeResult<()> {
+        if !plan.binary.is_file() {
+            return Err(RuntimeError::NotInstalled);
+        }
+        self.stop_probe().await;
+        let options = SpawnOptions {
+            binary: plan.binary.clone(),
+            config: plan.config_path.clone(),
+            work_dir: plan.work_dir.clone(),
+            log_path: plan.log_path.clone(),
+        };
+        let child = process::spawn(&options).await?;
+        if let Some(pid) = child.id() {
+            self.record_probe_pid(&plan, pid);
+        }
+        *self.probe.lock().await = Some(ProbeProcess { child, plan });
+        Ok(())
+    }
+
+    /// 停掉探针运行时并清掉它自己的临时配置、pid 与日志。幂等。
+    pub async fn stop_probe(&self) {
+        if let Some(mut probe) = self.probe.lock().await.take() {
+            let _ = process::terminate(&mut probe.child, self.cfg.stop_grace).await;
+            let _ = std::fs::remove_file(&probe.plan.config_path);
+            let _ = std::fs::remove_file(probe.plan.config_path.with_extension("meta.json"));
+            let _ = std::fs::remove_file(&probe.plan.log_path);
+            self.clear_probe_pid();
+        }
+    }
+
+    fn probe_pid_path(&self) -> PathBuf {
+        self.cfg.app_data_dir.join("probe.pid")
+    }
+
+    fn record_probe_pid(&self, plan: &StartPlan, pid: u32) {
+        let record = RunningPid {
+            pid,
+            binary: plan.binary.to_string_lossy().into_owned(),
+            config: plan.config_path.to_string_lossy().into_owned(),
+            started_at: crate::store::db::now_ms(),
+        };
+        if let Err(error) =
+            crate::runtime::fsutil::write_atomic_json(&self.probe_pid_path(), &record)
+        {
+            log::warn!("写入 probe.pid 失败：{error}");
+        }
+    }
+
+    fn clear_probe_pid(&self) {
+        let _ = std::fs::remove_file(self.probe_pid_path());
+    }
+
+    /// 上次进程被强杀留下的探针进程：和正常连接同一套三重核对，只杀自己的。
+    async fn reclaim_stale_probe(&self) {
+        let path = self.probe_pid_path();
+        let record = match crate::runtime::fsutil::read_json::<RunningPid>(&path) {
+            Ok(Some(record)) => record,
+            Ok(None) => return,
+            Err(error) => {
+                log::warn!("读取 probe.pid 失败：{error}");
+                return;
+            }
+        };
+        if !process::is_alive(record.pid) {
+            self.clear_probe_pid();
+            return;
+        }
+        match process::command_line(record.pid) {
+            Some(command)
+                if process::matches_launch(&command, &record.binary, &record.config) =>
+            {
+                if process::terminate_pid(record.pid, self.cfg.stop_grace).await {
+                    self.clear_probe_pid();
+                    log::warn!("回收了遗留的测速运行时 pid={}", record.pid);
+                }
+            }
+            _ => log::warn!(
+                "无法确认 pid={} 是遗留的测速运行时，跳过回收（保留 probe.pid）",
+                record.pid
+            ),
+        }
+    }
+
+    /// Clash API 是否已经可用；只有探针槽里的进程算数。
+    pub async fn probe_healthy(&self) -> bool {
+        let (addr, secret) = {
+            let probe = self.probe.lock().await;
+            match probe.as_ref() {
+                Some(probe) => (
+                    probe.plan.clash_addr.clone(),
+                    probe.plan.clash_secret.clone(),
+                ),
+                None => return false,
+            }
+        };
+        ClashApi::new(&addr, &secret).healthy().await
+    }
+
     pub async fn stop(&self) -> RuntimeResult<RuntimeStatus> {
         let (child, from, snapshot) = {
             let mut inner = self.inner.lock().await;
@@ -911,6 +1019,7 @@ impl RuntimeManager {
     /// 只回收「还在跑、且命令行确实是我们启动的那个进程」——pid 会被系统复用，
     /// 认错就会误杀别人的程序。宁可漏掉一个孤儿，也不能杀错用户进程。
     pub async fn reclaim_stale(&self) -> RuntimeResult<Option<u32>> {
+        self.reclaim_stale_probe().await;
         let path = self.running_pid_path();
         let Some(record) = crate::runtime::fsutil::read_json::<RunningPid>(&path)? else {
             return Ok(None);
@@ -2836,6 +2945,42 @@ mod tests {
         );
 
         server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 测速临时运行时单开一个槽：不能改连接状态，也不能让状态快照多出 pid。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_probe_process_does_not_pollute_connection_status() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("probe-slot");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("sing-box");
+        std::fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+        let before = manager.status().await;
+        let probe_plan = plan(fake, &dir);
+        std::fs::write(&probe_plan.config_path, "{}").unwrap();
+        std::fs::write(probe_plan.config_path.with_extension("meta.json"), "{}").unwrap();
+        std::fs::write(&probe_plan.log_path, "log").unwrap();
+        manager.start_probe(probe_plan.clone()).await.unwrap();
+        assert!(dir.join("probe.pid").exists(), "探针也要写 pid 供下次回收");
+
+        let during = manager.status().await;
+        assert_eq!(during.state, before.state, "探针不能改连接状态");
+        assert_eq!(during.pid, None, "探针进程不能出现在连接快照里");
+        assert!(!manager.probe_healthy().await);
+
+        manager.stop_probe().await;
+        assert!(!dir.join("probe.pid").exists());
+        assert!(!probe_plan.config_path.exists());
+        assert!(!probe_plan.config_path.with_extension("meta.json").exists());
+        assert!(!probe_plan.log_path.exists());
+        let after = manager.status().await;
+        assert_eq!(after.state, before.state);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

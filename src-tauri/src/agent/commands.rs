@@ -452,6 +452,46 @@ pub async fn node_probe(
         .map_err(error_value)
 }
 
+/// 启动一批节点测速（UI 专用，只读；全局同时只允许一批）。
+#[tauri::command]
+pub async fn node_probe_all(
+    state: State<'_, Arc<AppState>>,
+    config_id: Option<String>,
+    node_ids: Option<Vec<String>>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .node_probe_all(config_id, node_ids)
+        .await
+        .map_err(error_value)
+}
+
+/// 尽力取消一批测速；批次不存在时返回 `{ cancelled: false }`。
+#[tauri::command]
+pub async fn node_probe_cancel(
+    state: State<'_, Arc<AppState>>,
+    run_id: String,
+) -> Result<Value, Value> {
+    state
+        .services
+        .node_probe_cancel(&run_id)
+        .await
+        .map_err(error_value)
+}
+
+/// 读取该配置的缓存结果与运行态；不发起网络请求。
+#[tauri::command]
+pub async fn node_probe_snapshot(
+    state: State<'_, Arc<AppState>>,
+    config_id: Option<String>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .node_probe_snapshot(config_id)
+        .await
+        .map_err(error_value)
+}
+
 /// 默认节点缓存状态（离线可读，不联网）。
 #[tauri::command]
 pub async fn default_profile_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
@@ -467,9 +507,10 @@ pub async fn default_profile_status(state: State<'_, Arc<AppState>>) -> Result<V
 pub async fn default_profile_refresh(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Value, Value> {
+    // 用户手动点「检查更新」，意图就是立刻查一次；不能被 6 小时短路成「已是最新」。
     state
         .services
-        .default_profile_refresh(false)
+        .default_profile_refresh(true)
         .await
         .map_err(error_value)
 }

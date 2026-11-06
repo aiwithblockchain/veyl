@@ -1,12 +1,12 @@
 /**
  * 事件与 UI → Host 调用的前端契约。
  *
- * 唯一来源：`docs/contracts/events.md` v2.5.0。
+ * 唯一来源：`docs/contracts/events.md` v2.9.0。
  * 本文件是事件名常量的唯一来源——组件、store、bridge 只能引用
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.6.0" as const;
+export const CONTRACT_VERSION = "2.9.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -31,6 +31,8 @@ export const AGENT_EVENTS = {
   rulesChanged: "rules-changed",
   coreUpgradeProgress: "core-upgrade-progress",
   coreUpgradeFinished: "core-upgrade-finished",
+  nodeProbeProgress: "node-probe-progress",
+  nodeProbeFinished: "node-probe-finished",
 } as const;
 
 export type AgentEventName = (typeof AGENT_EVENTS)[keyof typeof AGENT_EVENTS];
@@ -62,6 +64,8 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.rulesChanged,
   AGENT_EVENTS.coreUpgradeProgress,
   AGENT_EVENTS.coreUpgradeFinished,
+  AGENT_EVENTS.nodeProbeProgress,
+  AGENT_EVENTS.nodeProbeFinished,
 ] as const;
 
 /* ------------------------------------------------------------------ */
@@ -140,6 +144,13 @@ export interface ToolCallStartPayload {
   emitted_at: string;
 }
 
+/** 面向用户的完成/失败文案；缺失时前端回落到本地静态表。 */
+export interface ToolDisplayPayload {
+  text?: string | null;
+  facts?: string[] | null;
+  changed?: "none" | "restored" | "unknown" | null;
+}
+
 export interface ToolCallEndPayload {
   contract_version: typeof CONTRACT_VERSION;
   request_id: string;
@@ -152,6 +163,7 @@ export interface ToolCallEndPayload {
   error_code: AivpnErrorCode | null;
   duration_ms: number;
   next_actions: NextAction[];
+  display?: ToolDisplayPayload | null;
   emitted_at: string;
 }
 
@@ -307,6 +319,54 @@ export interface CoreUpgradeFinishedPayload {
   /** 任务发起方；agent 表示由对话发起，ui 表示设置页。 */
   origin?: "ui" | "agent" | null;
   emitted_at?: string;
+}
+
+/** `node_probe` / 批量测速共用的单节点结果（commands.md §4.4）。 */
+export interface NodeProbeData {
+  node_id: string;
+  reachable: boolean;
+  latency_ms: number | null;
+  probe_method: "clash_delay" | "tcp";
+  /** Unix 毫秒。 */
+  checked_at: number;
+  error: { code: string; message: string } | null;
+}
+
+/** 批量测速的阶段：preparing 时临时运行时尚未就绪，没有任何结果。 */
+export type NodeProbePhase = "preparing" | "probing";
+
+/** 批量测速的方式；clash = 真实可用性（可用），tcp = 仅可达（可达）。 */
+export type NodeProbeMethod = "tcp" | "clash";
+
+/** 批量测速单个节点完成；面板关闭后批次仍在后台跑（events.md §4.19）。 */
+export interface NodeProbeProgressPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  run_id: string;
+  config_id: string;
+  phase: NodeProbePhase;
+  method: NodeProbeMethod;
+  done: number;
+  total: number;
+  /** preparing 阶段为 null；逐节点完成事件非空。 */
+  result: NodeProbeData | null;
+  emitted_at: string;
+}
+
+/** 批次结束（跑完或取消），每个 run_id 恰好一条（events.md §4.20）。 */
+export interface NodeProbeFinishedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  run_id: string;
+  config_id: string;
+  total: number;
+  ok: number;
+  failed: number;
+  /** 整批实际使用的方式；降级时为 tcp（界面写「可达」）。 */
+  method: NodeProbeMethod;
+  cancelled: boolean;
+  /** 用户中途启动 VPN 导致取消时为 connected。 */
+  reason: "connected" | null;
+  network: "ok" | "offline";
+  emitted_at: string;
 }
 
 export type AppLifecycleState = "foreground" | "background";
@@ -539,6 +599,8 @@ export interface AgentEventMap {
   [AGENT_EVENTS.rulesChanged]: RulesChangedPayload;
   [AGENT_EVENTS.coreUpgradeProgress]: CoreUpgradeProgressPayload;
   [AGENT_EVENTS.coreUpgradeFinished]: CoreUpgradeFinishedPayload;
+  [AGENT_EVENTS.nodeProbeProgress]: NodeProbeProgressPayload;
+  [AGENT_EVENTS.nodeProbeFinished]: NodeProbeFinishedPayload;
 }
 
 export type AgentEvent = {

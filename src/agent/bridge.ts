@@ -5,6 +5,9 @@ import type {
   ConfigDetail,
   ConfigRouteMode,
   ConfigSummary,
+  NodeProbeData,
+  NodeProbeMethod,
+  NodeProbePhase,
   RuntimeSnapshot,
   RuntimeView,
 } from "./protocol";
@@ -99,13 +102,34 @@ export interface NodeSwitchResult {
   runtime: RuntimeSnapshot | null;
 }
 
-export interface NodeProbeResult {
-  node_id: string;
-  reachable: boolean;
-  latency_ms: number | null;
-  probe_method: "clash_delay" | "tcp";
-  checked_at: number;
-  error: { code: string; message: string } | null;
+/** `node_probe` 的单节点结果；线格式与 commands.md §4.4 完全一致。 */
+export type NodeProbeResult = NodeProbeData;
+
+/** 批量测速的运行态；`run` 非空才代表有批次在跑，缓存内容不代表已测完。 */
+export interface NodeProbeRun {
+  runId: string;
+  done: number;
+  total: number;
+  /** Unix 毫秒。 */
+  startedAt: number;
+  phase: NodeProbePhase;
+  method: NodeProbeMethod;
+}
+
+export interface NodeProbeAllData {
+  runId: string;
+  configId: string;
+  /** 实际要测的节点数；带 nodeIds 时是过滤后的数量。 */
+  total: number;
+  concurrency: number;
+  /** nodeIds 里不属于该配置、被忽略的 id。 */
+  ignoredNodeIds: string[];
+}
+
+export interface NodeProbeSnapshotData {
+  configId: string;
+  results: NodeProbeData[];
+  run: NodeProbeRun | null;
 }
 
 /** 模型提出、尚未回答的问题（1.2.0）。 */
@@ -183,13 +207,24 @@ export function readQuestionDetail(raw: Record<string, unknown>): {
 /** UI 发起的连接/断开正在进行中；按钮据此禁用，防止重复提交。 */
 export type RuntimeAction = "start" | "stop";
 
-/** 默认配置包状态（commands.md §3.7）。 */
+/** 默认配置包状态（commands.md §8.1–8.2）。 */
 export interface DefaultProfileStatus {
   packageId: string | null;
   version: string | null;
   appliedAt: string | null;
   newVersionAvailable: boolean;
   nodeCount: number;
+  /** 上次检查时间（ISO 8601）；从未检查为 null。 */
+  checkedAt: string | null;
+  /** 这次结果来自网络还是缓存。 */
+  source: "network" | "cache" | null;
+  /** 本次是否真的更新了节点。 */
+  changed: boolean;
+  /** 没换成远端内容时的细分原因；local_write = 内容没问题，写到本机失败。 */
+  reason: "offline" | "invalid_content" | "local_write" | null;
+  /** 新增 / 移除节点数；后端拿不到时给 0。 */
+  added: number;
+  removed: number;
 }
 
 /** UI 只用前两种；后两种留给 AI 工具，共用同一实现。 */
@@ -386,6 +421,12 @@ export interface AgentBridge {
   nodeSwitch(configId: string, nodeId: string): Promise<NodeSwitchResult>;
   /** 测试单个节点连通性。不可达是正常结果，不抛错。 */
   nodeProbe(nodeId: string): Promise<NodeProbeResult>;
+  /** 批量测速：全局同时只允许一个批次；关闭面板不取消。nodeIds 省略 = 全部。 */
+  nodeProbeAll(configId?: string, nodeIds?: string[]): Promise<NodeProbeAllData>;
+  /** 取消批次；runId 不存在或已结束时 cancelled=false，不报错。 */
+  nodeProbeCancel(runId: string): Promise<{ cancelled: boolean }>;
+  /** 打开面板时读取缓存与运行态；不发网络请求。 */
+  nodeProbeSnapshot(configId?: string): Promise<NodeProbeSnapshotData>;
   /** 只读的默认配置包状态，不联网。 */
   defaultProfileStatus(): Promise<DefaultProfileStatus>;
   /** 拉取并应用默认配置包；不打断在线连接，下次连接生效。 */

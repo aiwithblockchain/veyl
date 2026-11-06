@@ -31,6 +31,7 @@ import {
   shouldShowOnboarding,
 } from "./config/onboarding";
 import { useVpnSession } from "./config/useVpnSession";
+import { useNodeProbes } from "./config/useNodeProbes";
 import {
   assistantColumnWidth,
   shellLayout,
@@ -134,6 +135,7 @@ export default function App() {
     bridge,
     import.meta.env.VITE_MOCK === "1" || bridge.mode === "mock",
   );
+  const nodeProbes = useNodeProbes({ bridge });
   // 断点只看窗口宽度：三栏宽度、助手停靠/浮层都由它决定。
   const dockedRef = useRef(true);
   useEffect(() => {
@@ -920,11 +922,7 @@ export default function App() {
     }
   };
 
-  const handleSwitchNode = (nodeId: string) => {
-    void vpn
-      .switchNode(nodeId)
-      .then((result) => showActionResult(result, "切换节点失败"));
-  };
+  const handleSwitchNode = (nodeId: string) => vpn.switchNode(nodeId);
 
   const pendingConfig =
     vpn.configs.find((config) => config.config_id === pendingConfigId) ?? null;
@@ -1021,7 +1019,8 @@ export default function App() {
         onStop={handleVpnStop}
         onSwitchNode={handleSwitchNode}
         onProbe={vpn.probe}
-        nodeSwitchAvailable={vpn.nodeSwitchAvailable}
+        nodeProbes={nodeProbes}
+        onOpenDiagnostics={() => openSettings("advanced")}
         nodeProbeAvailable={vpn.nodeProbeAvailable}
         aiReady={aiReady}
         justOnboarded={justOnboarded}

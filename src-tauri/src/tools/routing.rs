@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::envelope::{self, AivpnError, ToolOutcome};
+use super::display::Changed;
+use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
 use super::services::VpnToolServices;
 
 fn failure(error: anyhow::Error) -> AivpnError {
@@ -21,6 +22,15 @@ fn failure(error: anyhow::Error) -> AivpnError {
             AivpnError::new(code, message)
         }
         _ => AivpnError::new("INTERNAL", text),
+    }
+}
+
+fn mode_label(mode: &str) -> &'static str {
+    match mode {
+        "direct" => "直连",
+        "proxy_all" => "全部走 VPN",
+        "proxy_selected" => "指定服务走 VPN",
+        _ => "未识别",
     }
 }
 
@@ -103,6 +113,98 @@ fn summarise_route_change(data: &Value) -> String {
     }
 }
 
+fn route_change_facts(data: &Value) -> Vec<String> {
+    let mode = data
+        .get("routing_mode")
+        .and_then(Value::as_str)
+        .map(mode_label)
+        .unwrap_or("未识别");
+    let mut facts = vec![format!("当前：{mode}")];
+
+    let state = data.get("runtime_state").and_then(Value::as_str);
+    if state == Some("tun_unconfirmed") {
+        facts.push("接管：未确认".to_string());
+    } else if state == Some("tun_unknown") {
+        facts.push("接管：无法确认".to_string());
+    } else if data
+        .get("hot_switched")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        facts.push("连接：未中断".to_string());
+    } else {
+        match data.get("reconnect").and_then(Value::as_str) {
+            Some("reconnected") => facts.push("连接：已重新连接".to_string()),
+            Some("reconnect_failed") => facts.push("结果：自动重连失败".to_string()),
+            _ => facts.push("生效：下次连接".to_string()),
+        }
+    }
+
+    if let Some(count) = data
+        .get("targets")
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .filter(|count| *count > 0)
+    {
+        facts.push(format!("服务数：{count}"));
+    }
+    facts
+}
+
+/// 重连失败 / 接管未确认时操作目标没达成，不能报成功。
+/// `connect_changed` 由服务从连接失败信号带出：已回滚 → restored，没动 → none。
+fn route_set_mode_outcome(data: Value) -> ToolOutcome {
+    let state = data.get("runtime_state").and_then(Value::as_str);
+    let reconnect_failed = data.get("reconnect").and_then(Value::as_str)
+        == Some("reconnect_failed");
+    let tun_unconfirmed = state == Some("tun_unconfirmed");
+
+    if tun_unconfirmed || reconnect_failed {
+        let changed = match data.get("connect_changed").and_then(Value::as_str) {
+            Some("restored") => Changed::Restored,
+            Some("none") => Changed::None,
+            _ => Changed::Unknown,
+        };
+        let text = if tun_unconfirmed {
+            "没能切换走法，接管未确认"
+        } else {
+            "没能切换走法，重连失败"
+        };
+        let reason = if tun_unconfirmed {
+            "tun_unconfirmed"
+        } else {
+            "reconnect_failed"
+        };
+        return ToolOutcome::fail(
+            AivpnError::new("PRECONDITION_FAILED", summarise_route_change(&data)).with_details(
+                json!({
+                    "reason": reason,
+                    "runtime_state": data.get("runtime_state").cloned().unwrap_or(Value::Null),
+                }),
+            ),
+        )
+        .with_display(text, route_change_facts(&data), changed)
+        .with_next(NextAction {
+            label: "诊断一下".to_string(),
+            tool: "DiagRun".to_string(),
+            args: json!({}),
+        });
+    }
+
+    let text = if state == Some("tun_unknown") {
+        "走法已切换，接管未确认"
+    } else if data.get("hot_switched").and_then(Value::as_bool).unwrap_or(false) {
+        "走法已切换，连接未中断"
+    } else if data.get("reconnect").and_then(Value::as_str) == Some("reconnected") {
+        "走法已切换，已重新连接"
+    } else {
+        "走法已切换"
+    };
+    let facts = route_change_facts(&data);
+    ToolOutcome::ok(summarise_route_change(&data), data)
+        .with_display(text, facts, Changed::None)
+}
+
 fn summarise_route(data: &Value) -> String {
     let mode = data
         .get("routing_mode")
@@ -154,7 +256,7 @@ impl Tool for RouteGetTool {
     }
 
     fn description(&self) -> &str {
-        "读取一套配置的分流模式、指定服务分类、当前是否已生效。只读，不联网。"
+        "读取一套配置的分流模式、指定服务分类、当前是否已生效。只读，不联网。\n说「哪些软件走 VPN」「直连」，不出现分流、规则集、rule、category id。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -175,7 +277,19 @@ impl Tool for RouteGetTool {
             Err(error) => return envelope::finish(ctx, "RouteGet", ToolOutcome::fail(error)),
         };
         let outcome = match self.services.route_get(config_id).await {
-            Ok(data) => ToolOutcome::ok(summarise_route(&data), data),
+            Ok(data) => {
+                let mode = data
+                    .get("routing_mode")
+                    .and_then(Value::as_str)
+                    .map(mode_label)
+                    .unwrap_or("未识别");
+                let effective = match data.get("effective").and_then(Value::as_str) {
+                    Some("current_connection") => "已生效",
+                    _ => "下次连接生效",
+                };
+                ToolOutcome::ok(summarise_route(&data), data)
+                    .with_facts(vec![format!("当前：{mode}"), format!("生效：{effective}")])
+            }
             Err(error) => ToolOutcome::fail(failure(error)),
         };
         envelope::finish(ctx, "RouteGet", outcome)
@@ -200,7 +314,7 @@ impl Tool for RouteSetModeTool {
 
     fn description(&self) -> &str {
         "切换分流模式。direct ↔ proxy_all 且已连接时热切不断流；\
-         涉及 proxy_selected 的跨家族切换会断开重连，必须先问用户再带 confirm_reconnect=true。"
+         涉及 proxy_selected 的跨家族切换会断开重连，必须先问用户再带 confirm_reconnect=true。\n说「哪些软件走 VPN」「直连」，不出现分流、规则集、rule、category id。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -225,13 +339,18 @@ impl Tool for RouteSetModeTool {
             return envelope::finish(
                 ctx,
                 "RouteSetMode",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 mode")),
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 mode"))
+                    .with_changed(Changed::None),
             );
         };
         let config_id = match super::optional_string(&input, "config_id") {
             Ok(value) => value,
             Err(error) => {
-                return envelope::finish(ctx, "RouteSetMode", ToolOutcome::fail(error))
+                return envelope::finish(
+                    ctx,
+                    "RouteSetMode",
+                    ToolOutcome::fail(error).with_changed(Changed::None),
+                )
             }
         };
         let confirm = input
@@ -243,8 +362,8 @@ impl Tool for RouteSetModeTool {
             .route_set_mode(config_id, mode, confirm)
             .await
         {
-            Ok(data) => ToolOutcome::ok(summarise_route_change(&data), data),
-            Err(error) => ToolOutcome::fail(failure(error)),
+            Ok(data) => route_set_mode_outcome(data),
+            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
         envelope::finish(ctx, "RouteSetMode", outcome)
     }
@@ -268,7 +387,7 @@ impl Tool for RouteTargetsSetTool {
 
     fn description(&self) -> &str {
         "整体替换「指定服务走 VPN」的分类集合。分类 id 必须先用 CategoryList 查，\
-         不要把用户说的服务名直接当 id；不热切，下一次连接生效。"
+         不要把用户说的服务名直接当 id；不热切，下一次连接生效。\n说「哪些软件走 VPN」「直连」，不出现分流、规则集、rule、category id。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -298,7 +417,8 @@ impl Tool for RouteTargetsSetTool {
                 ToolOutcome::fail(AivpnError::new(
                     "INVALID_ARGUMENT",
                     "缺少 config_id 或 categories",
-                )),
+                ))
+                .with_changed(Changed::None),
             );
         };
         let categories = categories
@@ -306,13 +426,16 @@ impl Tool for RouteTargetsSetTool {
             .filter_map(Value::as_str)
             .map(str::to_string)
             .collect::<Vec<_>>();
+        let count = categories.len();
         let outcome = match self
             .services
             .route_targets_set(config_id, categories)
             .await
         {
-            Ok(data) => ToolOutcome::ok("指定服务已更新，下一次连接生效。", data),
-            Err(error) => ToolOutcome::fail(failure(error)),
+            Ok(data) => ToolOutcome::ok("指定服务已更新，下一次连接生效。", data)
+                .with_facts(vec![format!("服务数：{count}"), "生效：下次连接".to_string()]),
+            // 校验在写入前完成；写入失败会整笔回滚，没有留下改动。
+            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::None),
         };
         envelope::finish(ctx, "RouteTargetsSet", outcome)
     }
@@ -335,7 +458,7 @@ impl Tool for CategoryListTool {
     }
 
     fn description(&self) -> &str {
-        "列出可用于「指定服务走 VPN」的分类。用户说服务名时先用本工具翻成分类 id。"
+        "列出可用于「指定服务走 VPN」的分类。用户说服务名时先用本工具翻成分类 id。\n用「直连名单」「分类」；不出现 rule id、分类 id、数据版本号。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -372,6 +495,7 @@ impl Tool for CategoryListTool {
                     .map(|items| items.len())
                     .unwrap_or(0);
                 ToolOutcome::ok(format!("找到 {count} 个分类。"), data)
+                    .with_facts(vec![format!("分类数：{count}")])
             }
             Err(error) => ToolOutcome::fail(failure(error)),
         };
@@ -396,7 +520,7 @@ impl Tool for RulesStatusTool {
     }
 
     fn description(&self) -> &str {
-        "读取规则数据版本与新鲜度。只读；stale 只用于提示，不阻断连接。"
+        "读取规则数据版本与新鲜度。只读；stale 只用于提示，不阻断连接。\n用「直连名单」「分类」；不出现 rule id、分类 id、数据版本号。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -415,6 +539,14 @@ impl Tool for RulesStatusTool {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 let stale = data.get("stale").and_then(Value::as_bool).unwrap_or(true);
+                let facts = if version.is_empty() {
+                    vec!["状态：还没有数据".to_string()]
+                } else {
+                    vec![
+                        format!("版本：{version}"),
+                        format!("状态：{}", if stale { "可能已过期" } else { "已是最新" }),
+                    ]
+                };
                 ToolOutcome::ok(
                     if version.is_empty() {
                         "规则数据尚未就绪。".to_string()
@@ -426,6 +558,7 @@ impl Tool for RulesStatusTool {
                     },
                     data,
                 )
+                .with_facts(facts)
             }
             Err(error) => ToolOutcome::fail(failure(error)),
         };
@@ -523,6 +656,7 @@ mod tests {
     }
 
     /// 设备状态未采集（Windows）不是失败，也不能说成「连接未中断」。
+    /// 设备状态未采集（Windows）不是失败，也不能说成「连接未中断」。
     #[test]
     fn an_uncollected_tun_device_state_is_reported_as_unknown() {
         let text = changed(json!({
@@ -535,5 +669,76 @@ mod tests {
         assert!(text.contains("系统命令"), "要给出确认途径：{text}");
         assert!(!text.contains("连接未中断"), "不确定性不能被盖掉：{text}");
         assert!(!text.contains("没有连上"), "{text}");
+    }
+
+    /// 重连失败时不能报成功：目标（连上）没达成，绿色对勾会误导用户。
+    #[test]
+    fn a_failed_reconnect_is_reported_as_failure() {
+        let outcome = route_set_mode_outcome(json!({
+            "routing_mode": "proxy_selected",
+            "targets": ["social"],
+            "hot_switched": false,
+            "reconnect": "reconnect_failed",
+            "runtime_state": "running",
+            "connect_changed": "restored",
+        }));
+        assert!(!outcome.ok);
+        assert_eq!(outcome.display.changed, Changed::Restored);
+        assert!(outcome.display.text.contains("重连失败"), "{}", outcome.display.text);
+        assert_eq!(outcome.next_actions[0].tool, "DiagRun");
+    }
+
+    /// 没确认接管时 changed 只能是 unknown，不能假装没改动。
+    #[test]
+    fn an_unconfirmed_tun_takeover_is_a_failure_with_unknown_change() {
+        let outcome = route_set_mode_outcome(json!({
+            "routing_mode": "proxy_all",
+            "targets": [],
+            "hot_switched": false,
+            "reconnect": "reconnect_failed",
+            "runtime_state": "tun_unconfirmed",
+        }));
+        assert!(!outcome.ok);
+        assert_eq!(outcome.display.changed, Changed::Unknown);
+        assert!(outcome.display.text.contains("接管未确认"));
+        assert!(
+            outcome.display.facts.iter().any(|fact| fact == "接管：未确认"),
+            "{:?}",
+            outcome.display.facts
+        );
+        assert!(
+            !outcome.display.facts.iter().any(|fact| fact.contains("重连失败")),
+            "接管未确认不能复用重连失败的详情：{:?}",
+            outcome.display.facts
+        );
+    }
+
+    #[test]
+    fn a_successful_mode_change_reports_no_change() {
+        let outcome = route_set_mode_outcome(json!({
+            "routing_mode": "direct",
+            "targets": [],
+            "hot_switched": true,
+            "reconnect": null,
+        }));
+        assert!(outcome.ok);
+        assert_eq!(outcome.display.changed, Changed::None);
+        assert!(outcome.display.text.contains("连接未中断"));
+        assert!(outcome.next_actions.is_empty());
+    }
+
+    /// 未采集设备状态不是失败，但也不能说「连接未中断」。
+    #[test]
+    fn an_uncollected_tun_state_stays_successful_but_unconfirmed() {
+        let outcome = route_set_mode_outcome(json!({
+            "routing_mode": "proxy_all",
+            "targets": [],
+            "hot_switched": true,
+            "reconnect": "reconnected",
+            "runtime_state": "tun_unknown",
+        }));
+        assert!(outcome.ok);
+        assert_eq!(outcome.display.changed, Changed::None);
+        assert!(outcome.display.text.contains("接管未确认"));
     }
 }

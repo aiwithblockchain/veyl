@@ -92,7 +92,10 @@ const SAFETY_RULES: &str = "\
 7. **运行库升级只能由用户明确要求时调用 `CoreUpgrade`**：询问版本、排查连接、
    给安装/升级建议都不得调用。调用后必须等确认卡，用户逐字选「升级」前不得
    自行假设同意，也不得用任何方式绕过确认或直接下载。一次请求最多调用一次，
-   失败不自动重试、不换源。";
+   失败不自动重试、不换源。
+8. 面向用户的正文不出现工具名、字段名、错误码、节点/配置 ID 与内部名词；
+   需要细节时说「技术细节在诊断日志里」。
+9. 失败时说明有没有改动用户当前的网络设置；不确定就说不确定，不要用「可能」蒙混。";
 
 /// 本地是否已经有配置。读不到存储时按「有」处理——
 /// 30 轮只该给确定的首启，判断不了就别放宽。
@@ -106,6 +109,10 @@ fn has_any_config() -> bool {
         Err(_) => true,
     }
 }
+
+/// ai-status 的进行中文案。具体工具的人话由前端静态表渲染；
+/// 后端这里只给一句不带工具名的兜底，避免模型不说话时也露出 `RuntimeStatus`。
+const RUNNING_TOOL_STATUS: &str = "正在处理…";
 
 /// 普通对话每轮最多几次「模型 → 工具 → 模型」。
 ///
@@ -150,7 +157,11 @@ impl AivpnSession {
         query_config.max_turns = MAX_TURNS;
         // 工具先建出来：提示词里的能力清单是从它们的 schema 渲染的。
         let tools = crate::tools::vpn_tools(services);
-        query_config.system_prompt = Some(format!("{}\n\n{}", system_prompt(&tools), SAFETY_RULES));
+        query_config.system_prompt = Some(format!(
+            "{}\n\n{}",
+            system_prompt(&tools),
+            SAFETY_RULES
+        ));
         query_config.effort_level = Some(EffortLevel::Medium);
         query_config.working_directory = Some(working_dir.to_string_lossy().to_string());
         query_config.provider_registry = Some(Arc::clone(&setup.registry));
@@ -328,7 +339,8 @@ impl AivpnSession {
                             &level,
                             preview,
                         );
-                        consumer_emitter.status("running_tool", &format!("{tool_name} 正在运行"));
+                        // 状态行不拼工具名：模型可见名（RuntimeStatus 等）不能出现在用户面前。
+                        consumer_emitter.status("running_tool", RUNNING_TOOL_STATUS);
                     }
                     QueryEvent::ToolEnd {
                         tool_name,
@@ -344,10 +356,14 @@ impl AivpnSession {
                             !*is_error,
                             result.chars().count()
                         );
-                        let error_code = outcome
-                            .as_ref()
-                            .and_then(|outcome| outcome.error.as_ref())
-                            .map(|error| error.code.clone());
+                        let (error_code, next_actions, display) = match outcome {
+                            Some(outcome) => (
+                                outcome.error.as_ref().map(|error| error.code.clone()),
+                                outcome.next_actions,
+                                Some(outcome.display),
+                            ),
+                            None => (None, Vec::new(), None),
+                        };
 
                         record_tool_call_end(&tool_call_id, &result, *is_error);
 
@@ -358,7 +374,8 @@ impl AivpnSession {
                             &result,
                             error_code,
                             duration_ms,
-                            outcome.map(|outcome| outcome.next_actions).unwrap_or_default(),
+                            next_actions,
+                            display,
                         );
                     }
                     QueryEvent::Status(text) => {
@@ -781,6 +798,102 @@ mod prompt_tests {
     /// 节点来源：三条路都要写出来，且必须先问过用户才能建配置。
     /// 写成「只能来自 CatalogSearch」会让 AI 在种子可用时拒绝配置；
     /// 写成「默认节点开箱即用」会让它不问就替用户用我们的服务器。
+    /// 表达规则既要在系统提示里，也要落到每个工具描述上：模型转述结果时
+    /// 看的是 tool description，只写系统提示会被它忽略。
+    #[test]
+    fn expression_rules_reach_the_system_prompt_and_every_tool_description() {
+        let prompt = system_prompt(&[]);
+        assert!(prompt.contains("# 怎么说话"), "系统提示缺少「怎么说话」一节");
+        for needle in [
+            "只说结果和影响",
+            "这些词和写法不出现在正文里",
+            "不叙述你在调用什么",
+            "也不要提前报",
+            "失败固定三句",
+            "技术细节在诊断日志里",
+            "不重复界面上已经显示的内容",
+            "只有用户主动问技术问题",
+        ] {
+            assert!(prompt.contains(needle), "「怎么说话」缺了：{needle}");
+        }
+        for needle in [
+            "面向用户的正文不出现工具名、字段名、错误码、节点/配置 ID 与内部名词",
+            "失败时说明有没有改动用户当前的网络设置",
+        ] {
+            assert!(SAFETY_RULES.contains(needle), "安全底线缺了：{needle}");
+        }
+
+        use crate::tools::services::NotWiredServices;
+        let tools = crate::tools::vpn_tools(std::sync::Arc::new(NotWiredServices));
+        let markers = [
+            "对用户说",
+            "不提",
+            "不说",
+            "不写",
+            "不出现",
+            "不要念",
+            "不复述",
+            "只说",
+            "说「",
+        ];
+        // 这些工具的结果最容易被模型原样转述，必须有专属约束；
+        // 约束必须在第二行，第一行会进能力清单。
+        for name in [
+            "VpnConnect",
+            "VpnDisconnect",
+            "RuntimeStatus",
+            "RuntimeStart",
+            "RuntimeStop",
+            "RuntimeRestart",
+            "CoreUpgrade",
+            "NodeSwitch",
+            "ConfigList",
+            "ConfigDetail",
+            "ConfigCreate",
+            "ConfigUpdate",
+            "ConfigDelete",
+            "NodeProbe",
+            "DiagRun",
+            "NetConfigGet",
+            "NetRepair",
+            "RouteGet",
+            "RouteSetMode",
+            "RouteTargetsSet",
+            "CategoryList",
+            "RulesStatus",
+            "JobGet",
+            "DeepseekSaveKey",
+            "AskUserQuestion",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name() == name)
+                .unwrap_or_else(|| panic!("工具清单里缺少 {name}"));
+            let description = tool.description();
+            let mut lines = description.lines();
+            let first = lines.next().unwrap_or_default();
+            assert!(
+                !markers.iter().any(|marker| first.contains(marker)),
+                "{name} 的第一行含表达约束，会污染能力清单：{first}"
+            );
+            let tail = lines.collect::<Vec<_>>().join("\n");
+            assert!(
+                markers.iter().any(|marker| tail.contains(marker)),
+                "{name} 的 description 末尾缺表达约束"
+            );
+        }
+    }
+
+    /// running 状态文案不能拼工具名：模型不说话时也会显示给用户。
+    #[test]
+    fn the_running_status_never_contains_a_tool_name() {
+        assert_eq!(RUNNING_TOOL_STATUS, "正在处理…");
+        for tool in ["RuntimeStatus", "VpnConnect", "FooBar"] {
+            assert!(!RUNNING_TOOL_STATUS.contains(tool));
+            assert_ne!(RUNNING_TOOL_STATUS, format!("{tool} 正在运行"));
+        }
+    }
+
     #[test]
     fn node_sources_are_listed_and_gated_on_user_choice() {
         assert!(SAFETY_RULES.contains("seed"), "必须写明默认节点这条路");

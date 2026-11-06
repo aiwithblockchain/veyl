@@ -8,7 +8,9 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub const CONTRACT_VERSION: &str = "3.5.0";
+use super::display::{self, Changed, Display};
+
+pub const CONTRACT_VERSION: &str = "3.6.1";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AivpnError {
@@ -57,6 +59,8 @@ pub struct ToolOutcome {
     pub data: Option<Value>,
     pub error: Option<AivpnError>,
     pub next_actions: Vec<NextAction>,
+    /// 给用户看的完成/失败摘要；工具没填时由 `finish` 按工具名兜底。
+    pub display: Display,
 }
 
 impl ToolOutcome {
@@ -67,6 +71,7 @@ impl ToolOutcome {
             data: Some(data),
             error: None,
             next_actions: Vec::new(),
+            display: Display::default(),
         }
     }
 
@@ -77,6 +82,7 @@ impl ToolOutcome {
             data: None,
             error: Some(error),
             next_actions: Vec::new(),
+            display: Display::default(),
         }
     }
 
@@ -85,7 +91,31 @@ impl ToolOutcome {
         self
     }
 
+    /// 显式给出给用户看的文案与 changed（VpnConnect 等关键工具用）。
+    pub fn with_display(
+        mut self,
+        text: impl Into<String>,
+        facts: Vec<String>,
+        changed: Changed,
+    ) -> Self {
+        self.display = Display::new(text, changed).with_facts(facts);
+        self
+    }
+
+    /// 保留自动文案，只补充结构化事实。
+    pub fn with_facts(mut self, facts: Vec<String>) -> Self {
+        self.display.facts = facts;
+        self
+    }
+
+    /// 显式声明改动状态；失败点在写入前 / 回滚后 / 真不确定时各写各的。
+    pub fn with_changed(mut self, changed: Changed) -> Self {
+        self.display.changed = changed;
+        self
+    }
+
     fn to_envelope(&self) -> Value {
+        // 用户文案只给 UI，不进信封：信封是给模型看的上下文。
         json!({
             "contract_version": CONTRACT_VERSION,
             "ok": self.ok,
@@ -124,7 +154,8 @@ pub fn take_outcome(session_id: &str, tool: &str) -> Option<ToolOutcome> {
 }
 
 /// 把结果登记进注册表，并转成 Claurst 的 `ToolResult`。
-pub fn finish(ctx: &ToolContext, tool: &str, outcome: ToolOutcome) -> ToolResult {
+pub fn finish(ctx: &ToolContext, tool: &str, mut outcome: ToolOutcome) -> ToolResult {
+    normalize_display(tool, &mut outcome);
     {
         let mut guard = registry().lock();
         guard
@@ -160,6 +191,35 @@ pub fn finish(ctx: &ToolContext, tool: &str, outcome: ToolOutcome) -> ToolResult
     } else {
         ToolResult::error(content).with_metadata(metadata)
     }
+}
+
+/// 补齐工具没写的 display，并压到契约上限。
+fn normalize_display(tool: &str, outcome: &mut ToolOutcome) {
+    let fallback = display::fallback(tool, outcome.ok);
+    if outcome.display.text.trim().is_empty() {
+        outcome.display.text = fallback.text;
+        if outcome.display.facts.is_empty() {
+            outcome.display.facts = fallback.facts;
+        }
+        // Unknown 是默认值；显式写过 `with_display` 的工具不会走到这里。
+        if outcome.display.changed == Changed::Unknown && fallback.changed != Changed::Unknown {
+            outcome.display.changed = fallback.changed;
+        }
+    }
+
+    // 成功时界面不显示「有没有改动」；`restored` 的参照点是调用前，不能当「已生效」用。
+    if outcome.ok {
+        outcome.display.changed = Changed::None;
+    }
+
+    // 只读工具永远没有改动，避免调用点漏填时 UI 误报。
+    if display::is_readonly(tool) {
+        outcome.display.changed = Changed::None;
+    }
+
+    outcome.display.text = display::clamp_text(&outcome.display.text);
+    outcome.display.facts.retain(|fact| !fact.trim().is_empty());
+    outcome.display.facts.truncate(4);
 }
 
 /// `tools.md` §2.5：输入参数预览，敏感字段打码；全被打码时返回 None。
@@ -214,5 +274,85 @@ fn truncate(value: &Value) -> Value {
             Value::String(format!("{}…", text.chars().take(200).collect::<String>()))
         }
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod display_projection_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn failed(tool: &str) -> ToolOutcome {
+        let mut outcome = ToolOutcome::fail(AivpnError::new(
+            "INTERNAL",
+            "proxy failed at /Users/x/config.json (code INTERNAL)",
+        ));
+        normalize_display(tool, &mut outcome);
+        outcome
+    }
+
+    /// 失败文案只描述「没做到什么」，错误码与内部路径留在 error.details。
+    #[test]
+    fn failure_display_never_leaks_the_error_code_or_internal_paths() {
+        for tool in ["VpnConnect", "ConfigDelete", "NetRepair", "CoreUpgrade"] {
+            let outcome = failed(tool);
+            let text = &outcome.display.text;
+            for needle in ["INTERNAL", "/Users", "config.json"] {
+                assert!(!text.contains(needle), "{tool} 的展示文案泄露了 {needle}：{text}");
+            }
+            assert!(outcome.error.is_some(), "错误对象本身不能丢");
+        }
+    }
+
+    /// 工具没给 display 时按工具名兜底，成功与失败各有文案。
+    #[test]
+    fn missing_display_is_filled_from_the_tool_table() {
+        let mut ok = ToolOutcome::ok("internal model text", json!({}));
+        normalize_display("ConfigCreate", &mut ok);
+        assert_eq!(ok.display.text, "配置已创建");
+        // 成功时 changed 固定 none；restored 只用于「改过又恢复」。
+        assert_eq!(ok.display.changed, Changed::None);
+
+        let failed = failed("VpnConnect");
+        assert_eq!(failed.display.text, "没能连上");
+        assert_eq!(failed.display.changed, Changed::Unknown);
+    }
+
+    /// 只读工具即使调用点漏填，也不能报「有改动」。
+    #[test]
+    fn read_only_tools_are_forced_to_changed_none() {
+        let mut outcome =
+            ToolOutcome::ok("x", json!({})).with_display("已读取", vec![], Changed::Restored);
+        normalize_display("RuntimeStatus", &mut outcome);
+        assert_eq!(outcome.display.changed, Changed::None);
+    }
+
+    #[test]
+    fn explicit_display_is_kept_and_facts_are_capped_at_four() {
+        let mut outcome = ToolOutcome::ok("x", json!({})).with_display(
+            "已连接",
+            ["a", "b", "c", "d", "e"]
+                .iter()
+                .map(|item| item.to_string())
+                .collect(),
+            Changed::Restored,
+        );
+        normalize_display("VpnConnect", &mut outcome);
+        assert_eq!(outcome.display.text, "已连接");
+        assert_eq!(outcome.display.facts.len(), 4);
+        assert_eq!(outcome.display.changed, Changed::None);
+    }
+
+    /// `display` 只进 `tool-call-end`，不能写进给模型的信封。
+    #[test]
+    fn envelope_does_not_carry_display() {
+        let mut outcome = ToolOutcome::ok("x", json!({}))
+            .with_display("已断开", vec!["网络：已恢复直连".into()], Changed::None);
+        normalize_display("VpnDisconnect", &mut outcome);
+        let envelope = outcome.to_envelope();
+        assert!(envelope.get("display").is_none(), "{envelope}");
+        // 事件投影仍能从同一份 outcome 读到 display。
+        assert_eq!(outcome.display.text, "已断开");
+        assert_eq!(outcome.display.changed, Changed::None);
     }
 }

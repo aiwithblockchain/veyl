@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { NextAction } from "../agent/protocol";
 import { PRODUCT_NAME } from "../brand";
 import type { ChatMessage, TimelineItem, ToolCall } from "../state/chatStore";
 import { Markdown } from "./Markdown";
 import { ThinkingBlock } from "./ThinkingBlock";
-import { ToolCallCard } from "./ToolCallCard";
+import { ToolCallCard, ToolCallGroup } from "./ToolCallCard";
 
 interface Props {
   message: ChatMessage;
@@ -48,34 +49,7 @@ export function MessageItem({ message, toolCalls, onNextAction }: Props) {
       </div>
 
       <div className="msg__items">
-        {message.items.map((item) => {
-          switch (item.kind) {
-            case "text":
-              return (
-                <div key={item.id} className="msg__text">
-                  <Markdown text={item.content} />
-                  {message.streaming && item === message.items[message.items.length - 1] ? (
-                    <span className="msg__caret" aria-hidden />
-                  ) : null}
-                </div>
-              );
-            case "thinking":
-              return <ThinkingBlock key={item.id} content={item.content} complete={item.complete} />;
-            case "tool": {
-              const call = toolCalls[item.callId];
-              if (!call) return null;
-              return <ToolCallCard key={item.id} call={call} onNextAction={onNextAction} />;
-            }
-            case "notice":
-              return (
-                <div key={item.id} className="msg__notice">
-                  {item.text}
-                </div>
-              );
-            default:
-              return null;
-          }
-        })}
+        {renderTimeline(message, toolCalls, onNextAction)}
       </div>
 
       {!message.streaming ? <CopyAnswerButton text={bodyText} /> : null}
@@ -84,6 +58,86 @@ export function MessageItem({ message, toolCalls, onNextAction }: Props) {
 }
 
 type CopyState = "idle" | "copied" | "failed";
+
+/**
+ * 工具行按连续成功合并：≥3 条变「完成 N 步」，失败与进行中永远单独成行。
+ * AskUserQuestion 交给确认弹层，不渲染工具行，并断开合并。
+ */
+function renderTimeline(
+  message: Extract<ChatMessage, { role: "assistant" }>,
+  toolCalls: Record<string, ToolCall>,
+  onNextAction: (action: NextAction) => void,
+): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  let run: ToolCall[] = [];
+  let runKey = "";
+
+  const flushRun = () => {
+    if (run.length >= 3) {
+      nodes.push(
+        <ToolCallGroup key={`group-${runKey}`} calls={run} onNextAction={onNextAction} />,
+      );
+    } else {
+      for (const call of run) {
+        nodes.push(
+          <ToolCallCard key={call.id} call={call} onNextAction={onNextAction} />,
+        );
+      }
+    }
+    run = [];
+  };
+
+  message.items.forEach((item, index) => {
+    if (item.kind === "tool") {
+      const call = toolCalls[item.callId];
+      if (!call || call.tool === "AskUserQuestion") {
+        flushRun();
+        return;
+      }
+      if (call.state === "ok") {
+        if (run.length === 0) runKey = item.id;
+        run.push(call);
+        return;
+      }
+      flushRun();
+      nodes.push(
+        <ToolCallCard key={item.id} call={call} onNextAction={onNextAction} />,
+      );
+      return;
+    }
+
+    flushRun();
+    switch (item.kind) {
+      case "text":
+        nodes.push(
+          <div key={item.id} className="msg__text">
+            <Markdown text={item.content} />
+            {message.streaming && index === message.items.length - 1 ? (
+              <span className="msg__caret" aria-hidden />
+            ) : null}
+          </div>,
+        );
+        break;
+      case "thinking":
+        nodes.push(
+          <ThinkingBlock key={item.id} content={item.content} complete={item.complete} />,
+        );
+        break;
+      case "notice":
+        nodes.push(
+          <div key={item.id} className="msg__notice">
+            {item.text}
+          </div>,
+        );
+        break;
+      default:
+        break;
+    }
+  });
+
+  flushRun();
+  return nodes;
+}
 
 /** 整条回答一个按钮：拼接所有正文文本块，不含思考与工具卡。 */
 function CopyAnswerButton({ text }: { text: string }) {

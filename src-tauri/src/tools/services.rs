@@ -126,6 +126,24 @@ pub trait VpnToolServices: Send + Sync {
     async fn node_switch(&self, config_id: &str, node_id: &str) -> anyhow::Result<Value>;
     async fn node_probe(&self, node_id: &str) -> anyhow::Result<Value>;
 
+    /// UI 专用：启动一批节点测速。默认未接入，测试替身不必实现。
+    /// 探针 runtime 路径由 `WiredServices` 实现；未连接时先起临时运行时。
+    async fn node_probe_all(
+        &self,
+        _config_id: Option<String>,
+        _node_ids: Option<Vec<String>>,
+    ) -> anyhow::Result<Value> {
+        // 探针 runtime 路径由 WiredServices 实现；测试替身不接入。
+        // 正式实现返回 `{ run_id, config_id, total, concurrency, ignored_node_ids }`。
+        Err(anyhow::anyhow!("批量测速未接入"))
+    }
+    async fn node_probe_cancel(&self, _run_id: &str) -> anyhow::Result<Value> {
+        Err(anyhow::anyhow!("批量测速未接入"))
+    }
+    async fn node_probe_snapshot(&self, _config_id: Option<String>) -> anyhow::Result<Value> {
+        Err(anyhow::anyhow!("批量测速未接入"))
+    }
+
     async fn default_profile_status(&self) -> anyhow::Result<Value>;
     async fn default_profile_refresh(&self, force: bool) -> anyhow::Result<Value>;
     async fn import_seed_file(&self, path: &str) -> anyhow::Result<Value>;
@@ -507,6 +525,97 @@ fn service_error_fields(error: &anyhow::Error) -> (String, Option<String>, Optio
         .and_then(|value| value.as_str())
         .map(str::to_string);
     (service.code.clone(), reason, wire_code)
+}
+
+/// 连接失败后，用户的网络设置有没有改动、有没有恢复原样。
+///
+/// 只挂在错误的 `details.connect_changed` 上，供 `VpnConnect` 的展示层选择
+/// 「已恢复原样 / 没有改动 / 不确定」。不改任何服务签名。
+fn connect_changed_state(error: &anyhow::Error) -> &'static str {
+    let Some(service) = error.downcast_ref::<ServiceError>() else {
+        return "none";
+    };
+    let details = service.details.as_ref();
+    let reason = details
+        .and_then(|value| value.get("reason"))
+        .and_then(Value::as_str);
+    let detail = details.and_then(|value| value.get("detail"));
+    let detail_reason = detail
+        .and_then(|value| value.get("reason"))
+        .and_then(Value::as_str);
+
+    // 想过恢复但没成功：不能再声称「没有改动」。
+    if reason == Some("proxy_restore_failed") {
+        return "unknown";
+    }
+    if detail_reason == Some("node_server_unresolved") {
+        return "none";
+    }
+    if detail_reason == Some("takeover_incomplete") {
+        let stopped = detail
+            .and_then(|value| value.get("stopped"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let residual = detail
+            .and_then(|value| value.get("residual_routes"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let dns_flushed = detail
+            .and_then(|value| value.get("dns_flushed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        return if stopped && !residual && dns_flushed {
+            "restored"
+        } else {
+            "unknown"
+        };
+    }
+    // 启动失败但没拿到回滚证据：可能起了一半。
+    if service.code == "tun_start_failed" {
+        return "unknown";
+    }
+    if matches!(
+        reason,
+        Some(
+            "quitting"
+                | "no_config"
+                | "config_not_found"
+                | "rules_not_ready"
+                | "helper_missing"
+                | "helper_install_failed"
+                | "tun_denied"
+        )
+    ) {
+        return "none";
+    }
+
+    // 进程启动/代理设置失败后都会 abort：撤代理、停运行时。
+    let after_start = details
+        .and_then(|value| value.get("runtime_log_tail"))
+        .is_some()
+        || matches!(
+            service.code.as_str(),
+            "RUNTIME_START_TIMEOUT" | "RUNTIME_EXITED"
+        )
+        || (service.code == "INTERNAL" && service.message.starts_with("设置系统代理失败"));
+    if after_start {
+        "restored"
+    } else {
+        "none"
+    }
+}
+
+fn with_connect_changed(error: anyhow::Error, changed: &'static str) -> anyhow::Error {
+    let (code, message, mut details) = match error.downcast_ref::<ServiceError>() {
+        Some(service) => (
+            service.code.clone(),
+            service.message.clone(),
+            service.details.clone().unwrap_or_else(|| json!({})),
+        ),
+        None => ("INTERNAL".to_string(), error.to_string(), json!({})),
+    };
+    details["connect_changed"] = json!(changed);
+    svc_error_with_details(code, message, details)
 }
 
 /// 把错误映射成「卡在哪一步」，只用于 debug 日志。
@@ -1160,6 +1269,7 @@ fn takeover_incomplete_error(
             "detail": {
                 "reason": "takeover_incomplete",
                 "missing": missing,
+                "stopped": stop_error.is_none(),
                 "residual_routes": residual_routes,
                 "dns_flushed": dns_error.is_none(),
             },
@@ -1442,7 +1552,7 @@ fn diag_check(
     })
 }
 
-fn probe_result(
+pub(crate) fn probe_result(
     node_id: &str,
     reachable: bool,
     latency_ms: Option<u64>,
@@ -1460,7 +1570,7 @@ fn probe_result(
 }
 
 /// 未连接时的降级探测：对 server:port 做 TCP 握手，3 秒超时。
-async fn tcp_probe(server: &str, port: u16) -> Result<u64, String> {
+pub(crate) async fn tcp_probe(server: &str, port: u16) -> Result<u64, String> {
     let address = if server.contains(':') {
         format!("[{server}]:{port}")
     } else {
@@ -1573,7 +1683,7 @@ async fn clash_selector_members(
 }
 
 /// 已连接的节点延迟：Clash API `GET /proxies/{tag}/delay`。
-async fn clash_delay(addr: &str, secret: &str, tag: &str) -> Result<u64, String> {
+pub(crate) async fn clash_delay(addr: &str, secret: &str, tag: &str) -> Result<u64, String> {
     crate::runtime::health::ClashApi::new(addr, secret)
         .delay(tag)
         .await
@@ -1651,6 +1761,7 @@ pub struct WiredServices {
     device_gate: RegistrationGate,
     tun: Arc<crate::tun::session::TunSession>,
     helper: Arc<crate::tun::helper_update::HelperUpdater>,
+    probes: Arc<crate::tools::probe_batch::ProbeBatchState>,
 }
 
 impl WiredServices {
@@ -1677,6 +1788,7 @@ impl WiredServices {
             device_gate: RegistrationGate::new(),
             tun,
             helper,
+            probes: Arc::new(crate::tools::probe_batch::ProbeBatchState::default()),
         }
     }
 
@@ -2305,12 +2417,26 @@ impl WiredServices {
         )
     }
 
-    fn seed_status_json(&self, source: &str, changed: bool) -> Value {
+    fn seed_status_json(
+        &self,
+        source: &str,
+        changed: bool,
+        reason: Option<&str>,
+        added: Option<i64>,
+        removed: Option<i64>,
+        removed_node_name: Option<String>,
+        replacement_node_name: Option<String>,
+    ) -> Value {
         let mut status = crate::seed::status(&self.store);
         // `source = cache` 表示本次没有成功访问远端，用的是本地缓存；
         // `changed = true` 才表示这次刷新真的换了内容。
         status["source"] = json!(source);
         status["changed"] = json!(changed);
+        status["reason"] = json!(reason);
+        status["added"] = json!(added);
+        status["removed"] = json!(removed);
+        status["removed_node_name"] = json!(removed_node_name);
+        status["replacement_node_name"] = json!(replacement_node_name);
         status
     }
 
@@ -2574,24 +2700,36 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn runtime_start(&self, config_id: Option<String>) -> anyhow::Result<Value> {
+        // 用户开始连接：正在跑的测速批次让路，finished.reason = "connected"。
+        // 探针运行时先停掉，不做进程移交；正常连接随后自己起。
+        self.probes.cancel_for_connection();
+        self.manager.stop_probe().await;
         if crate::lifecycle::is_quitting() {
-            return Err(svc_error_with_details(
-                "PRECONDITION_FAILED",
-                "应用正在退出，不能再发起连接",
-                json!({ "reason": "quitting" }),
+            return Err(with_connect_changed(
+                svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    "应用正在退出，不能再发起连接",
+                    json!({ "reason": "quitting" }),
+                ),
+                "none",
             ));
         }
         let config_id = match config_id {
             Some(id) => id,
             None => self.active_config_id().ok_or_else(|| {
-                svc_error_with_details(
-                    "PRECONDITION_FAILED",
-                    "还没有配置，先新建一套",
-                    json!({ "reason": "no_config" }),
+                with_connect_changed(
+                    svc_error_with_details(
+                        "PRECONDITION_FAILED",
+                        "还没有配置，先新建一套",
+                        json!({ "reason": "no_config" }),
+                    ),
+                    "none",
                 )
             })?,
         };
-        let config = self.require_config(&config_id)?;
+        let config = self
+            .require_config(&config_id)
+            .map_err(|error| with_connect_changed(error, "none"))?;
         self.connect(&config).await
     }
 
@@ -3815,29 +3953,198 @@ impl VpnToolServices for WiredServices {
         }
     }
 
+    async fn node_probe_all(
+        &self,
+        config_id: Option<String>,
+        node_ids: Option<Vec<String>>,
+    ) -> anyhow::Result<Value> {
+        use crate::tools::probe_batch;
+
+        let config = self.resolve_config(config_id)?;
+        let all_nodes = {
+            let conn = self.store.conn();
+            configs::list_nodes(&conn, &config.id)
+                .map_err(|error| svc_error(error.code(), error))?
+        };
+        // 「测这 N 个」只测该配置里的 id；未知 id 忽略并在返回里点名。
+        let (nodes, ignored_node_ids) = probe_batch::select_nodes(&all_nodes, node_ids.as_deref());
+        if nodes.is_empty() {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "这套配置还没有节点，先添加节点再测速",
+                json!({ "reason": "no_nodes" }),
+            ));
+        }
+
+        // 一批只用一种方式：只有已连接本配置才走 Clash 延迟；其余整批 TCP。
+        // 已连接别的配置时不能起第二个运行时，也不该混用两种结果。
+        let status = self.manager.status().await;
+        let connected = self.is_connected(&status);
+        let connected_config = self.connected_config_id().await;
+        let target = if connected && connected_config.as_deref() == Some(config.id.as_str()) {
+            self.manager
+                .current_plan()
+                .await
+                .map(|plan| probe_batch::ClashTarget {
+                    addr: plan.clash_addr,
+                    secret: plan.clash_secret,
+                })
+        } else {
+            None
+        };
+        // 「完全未连接」才起探针：Starting/Restarting 也算有连接流程在跑，
+        // 这时起第二个运行时会让测速被正常隧道接管，数字失真。
+        let needs_probe = status.state == crate::runtime::RuntimeState::Idle;
+        let installed = if needs_probe {
+            self.ensure_runtime().await.ok()
+        } else {
+            None
+        };
+        let method = if target.is_some() || (needs_probe && installed.is_some()) {
+            "clash"
+        } else {
+            "tcp"
+        };
+
+        let started = match self.probes.start(&config.id, nodes.len(), method) {
+            Ok(started) => started,
+            Err(run_id) => {
+                return Err(svc_error_with_details(
+                    "BUSY",
+                    "已有一批测速在进行",
+                    json!({ "run_id": run_id }),
+                ))
+            }
+        };
+
+        let run_id = started.run_id.clone();
+        let total = started.total;
+        let state = Arc::clone(&self.probes);
+        let manager = Arc::clone(&self.manager);
+        let store = Arc::clone(&self.store);
+        let data_dir = self.data_dir.clone();
+        let probe_config = config.clone();
+        let meta = started.meta;
+        let cancel = meta.cancel_token();
+        tokio::spawn(async move {
+            if needs_probe {
+                // 准备阶段：未连接时才临时起运行时；起不来就整批降级 tcp。
+                probe_batch::emit_preparing(&meta);
+                let mut target = None;
+                if let Some(installed) = installed {
+                    if !cancel.is_cancelled() {
+                        target = probe_batch::start_probe_runtime(
+                            store,
+                            Arc::clone(&manager),
+                            &data_dir,
+                            &probe_config,
+                            &installed,
+                            &cancel,
+                        )
+                        .await;
+                    }
+                }
+                probe_batch::set_method(&meta, if target.is_some() { "clash" } else { "tcp" });
+                let probe = move |node: &configs::Node| {
+                    let node = node.clone();
+                    let target = target.clone();
+                    async move { probe_batch::probe_node(&node, target.as_ref()).await }
+                };
+                let _ = probe_batch::run_batch_probing(state, meta, nodes, probe).await;
+                manager.stop_probe().await;
+            } else {
+                let probe = move |node: &configs::Node| {
+                    let node = node.clone();
+                    let target = target.clone();
+                    async move { probe_batch::probe_node(&node, target.as_ref()).await }
+                };
+                let _ = probe_batch::run_batch(state, meta, nodes, probe).await;
+            }
+        });
+
+        Ok(json!({
+            "run_id": run_id,
+            "config_id": config.id,
+            "total": total,
+            "concurrency": probe_batch::CONCURRENCY,
+            "ignored_node_ids": ignored_node_ids,
+        }))
+    }
+
+    async fn node_probe_cancel(&self, run_id: &str) -> anyhow::Result<Value> {
+        Ok(json!({ "cancelled": self.probes.cancel(run_id) }))
+    }
+
+    async fn node_probe_snapshot(&self, config_id: Option<String>) -> anyhow::Result<Value> {
+        let config = self.resolve_config(config_id)?;
+        let nodes = {
+            let conn = self.store.conn();
+            configs::list_nodes(&conn, &config.id)
+                .map_err(|error| svc_error(error.code(), error))?
+        };
+        let node_ids: Vec<String> = nodes.iter().map(|node| node.id.clone()).collect();
+        let (results, run) = self.probes.snapshot(&config.id, &node_ids);
+        Ok(json!({
+            "config_id": config.id,
+            "results": results,
+            "run": run,
+        }))
+    }
+
     async fn default_profile_status(&self) -> anyhow::Result<Value> {
-        Ok(self.seed_status_json("cache", false))
+        Ok(self.seed_status_json("cache", false, None, None, None, None, None))
     }
 
     async fn default_profile_refresh(&self, force: bool) -> anyhow::Result<Value> {
         let running = self.is_connected(&self.manager.status().await);
         match crate::seed::refresh(&self.store, running, force).await {
-            crate::seed::RefreshOutcome::Updated { .. } => {
-                Ok(self.seed_status_json("network", true))
-            }
-            crate::seed::RefreshOutcome::Unchanged { .. } => {
-                Ok(self.seed_status_json("network", false))
-            }
-            crate::seed::RefreshOutcome::Offline { cached: true, .. } => {
-                // 有缓存时离线是正常场景：明确告诉调用方「这次用的是缓存」，
-                // 不把刷新失败变成用户可见的错误。
-                Ok(self.seed_status_json("cache", false))
-            }
-            crate::seed::RefreshOutcome::Offline { error, .. } => Err(svc_error_with_details(
-                "UPSTREAM_ERROR",
-                format!("现在拿不到测试节点：{error}"),
-                json!({ "reason": "fetch_failed" }),
+            crate::seed::RefreshOutcome::Updated {
+                added,
+                removed,
+                removed_node_name,
+                replacement_node_name,
+                ..
+            } => Ok(self.seed_status_json(
+                "network",
+                true,
+                None,
+                added,
+                removed,
+                removed_node_name,
+                replacement_node_name,
             )),
+            crate::seed::RefreshOutcome::Unchanged { .. } => {
+                Ok(self.seed_status_json("network", false, None, Some(0), Some(0), None, None))
+            }
+            crate::seed::RefreshOutcome::Offline {
+                cached: true,
+                reason,
+                ..
+            } => Ok(self.seed_status_json(
+                "cache",
+                false,
+                Some(reason.as_str()),
+                None,
+                None,
+                None,
+                None,
+            )),
+            crate::seed::RefreshOutcome::Offline {
+                cached: false,
+                error,
+                reason,
+            } => {
+                let code = match reason {
+                    crate::seed::OfflineReason::InvalidContent => "INVALID_ARGUMENT",
+                    crate::seed::OfflineReason::LocalWrite => "INTERNAL",
+                    crate::seed::OfflineReason::Offline => "UPSTREAM_ERROR",
+                };
+                Err(svc_error_with_details(
+                    code,
+                    format!("现在拿不到测试节点：{error}"),
+                    json!({ "reason": reason.as_str(), "detail": { "reason": reason.as_str() } }),
+                ))
+            }
         }
     }
 
@@ -4080,11 +4387,22 @@ impl VpnToolServices for WiredServices {
                 let takeover = tun_takeover(&started);
                 if takeover == TunTakeover::Unconfirmed {
                     log::warn!("分流切换后 TUN 已启动，但没确认接管");
+                    // 自己起的运行时收尾：停成功才算回到调用前；停不掉就只能是 unknown。
+                    let stop_error = self.tun.stop().err();
+                    if let Some(error) = &stop_error {
+                        log::warn!("接管未确认后停止 TUN 失败：{error}");
+                    }
+                    let changed = if stop_error.is_none() {
+                        "restored"
+                    } else {
+                        "unknown"
+                    };
                     self.emit_routing_changed(&updated, "mode", None, None, false);
                     let mut data = self.route_state_json(&updated, None, None);
                     data["hot_switched"] = json!(false);
                     data["reconnect"] = json!("reconnect_failed");
                     data["runtime_state"] = json!("tun_unconfirmed");
+                    data["connect_changed"] = json!(changed);
                     return Ok(data);
                 }
                 let status = self.manager.status().await;
@@ -4117,10 +4435,18 @@ impl VpnToolServices for WiredServices {
                 // `abort_connection` 只撤系统代理、不停 runtime，引擎可能还在
                 // Starting/Running。摘要必须按真实状态说，不能写死「未连接」。
                 let status = self.manager.status().await;
+                let changed = error
+                    .downcast_ref::<ServiceError>()
+                    .and_then(|service| service.details.as_ref())
+                    .and_then(|details| details.get("connect_changed"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
                 let mut data = self.route_state_json(&updated, None, None);
                 data["hot_switched"] = json!(false);
                 data["reconnect"] = json!("reconnect_failed");
                 data["runtime_state"] = json!(status.state.as_str());
+                data["connect_changed"] = json!(changed);
                 Ok(data)
             }
         }
@@ -4559,7 +4885,7 @@ impl VpnToolServices for WiredServices {
         };
 
         Ok(json!({
-            "contract_version": "3.5.0",
+            "contract_version": "3.6.1",
             "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "app_version": env!("CARGO_PKG_VERSION"),
             "platform": crate::netcfg::platform_name(),
@@ -4777,7 +5103,10 @@ impl WiredServices {
                 }
             }
         }
-        result
+        result.map_err(|error| {
+            let changed = connect_changed_state(&error);
+            with_connect_changed(error, changed)
+        })
     }
 
     async fn connect_inner(&self, config: &configs::Config) -> anyhow::Result<Value> {
@@ -7345,5 +7674,100 @@ mod force_reset_tests {
         let step = services(&dir).reset_clear_plaintext();
         assert_eq!(step["ok"], true, "{step}");
         assert!(!dir.join("runtime.pid").exists());
+    }
+}
+
+#[cfg(test)]
+mod connect_changed_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn error(code: &str, message: &str, details: Option<Value>) -> anyhow::Error {
+        anyhow::Error::new(ServiceError {
+            code: code.to_string(),
+            message: message.to_string(),
+            retryable: false,
+            details,
+        })
+    }
+
+    #[test]
+    fn failures_before_touching_the_network_report_none() {
+        for reason in ["no_config", "rules_not_ready", "helper_missing", "tun_denied"] {
+            let error = error("PRECONDITION_FAILED", "x", Some(json!({ "reason": reason })));
+            assert_eq!(connect_changed_state(&error), "none", "{reason}");
+        }
+        let error = error(
+            "tun_start_failed",
+            "x",
+            Some(json!({
+                "reason": "tun_start_failed",
+                "detail": { "reason": "node_server_unresolved" },
+            })),
+        );
+        assert_eq!(connect_changed_state(&error), "none");
+    }
+
+    /// 启动后失败都会 abort：撤代理、停运行时，环境回到调用前。
+    #[test]
+    fn failures_after_start_report_restored_when_cleanup_ran() {
+        let with_tail = error(
+            "RUNTIME_EXITED",
+            "x",
+            Some(json!({ "runtime_log_tail": ["fatal"] })),
+        );
+        assert_eq!(connect_changed_state(&with_tail), "restored");
+
+        let timeout = error("RUNTIME_START_TIMEOUT", "x", None);
+        assert_eq!(connect_changed_state(&timeout), "restored");
+
+        let proxy = error("INTERNAL", "设置系统代理失败：x", None);
+        assert_eq!(connect_changed_state(&proxy), "restored");
+    }
+
+    #[test]
+    fn an_unconfirmed_rollback_reports_unknown() {
+        let restore_failed = error(
+            "PRECONDITION_FAILED",
+            "撤销系统代理失败：x",
+            Some(json!({ "reason": "proxy_restore_failed" })),
+        );
+        assert_eq!(connect_changed_state(&restore_failed), "unknown");
+
+        let tun = error("tun_start_failed", "x", Some(json!({ "reason": "tun_start_failed" })));
+        assert_eq!(connect_changed_state(&tun), "unknown");
+
+        let residual = error(
+            "tun_start_failed",
+            "x",
+            Some(json!({
+                "reason": "tun_start_failed",
+                "detail": {
+                    "reason": "takeover_incomplete",
+                    "stopped": true,
+                    "residual_routes": true,
+                    "dns_flushed": true,
+                },
+            })),
+        );
+        assert_eq!(connect_changed_state(&residual), "unknown");
+    }
+
+    #[test]
+    fn a_clean_tun_rollback_reports_restored() {
+        let error = error(
+            "tun_start_failed",
+            "x",
+            Some(json!({
+                "reason": "tun_start_failed",
+                "detail": {
+                    "reason": "takeover_incomplete",
+                    "stopped": true,
+                    "residual_routes": false,
+                    "dns_flushed": true,
+                },
+            })),
+        );
+        assert_eq!(connect_changed_state(&error), "restored");
     }
 }

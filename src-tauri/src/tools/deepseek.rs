@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
+use super::display::Changed;
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::VpnToolServices;
 
@@ -68,7 +69,7 @@ impl Tool for DeepseekSaveKeyTool {
 
     fn description(&self) -> &str {
         "把用户提供的 DeepSeek API Key 存进系统钥匙串，并尽量验证一次。\
-         返回结果不含 Key。验证不通过时要如实告诉用户「Key 可能无效」或「已保存但未验证」。"
+         返回结果不含 Key。验证不通过时要如实告诉用户「Key 可能无效」或「已保存但未验证」。\n不复述密钥，不说保存路径。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -96,7 +97,8 @@ impl Tool for DeepseekSaveKeyTool {
             return envelope::finish(
                 ctx,
                 "DeepseekSaveKey",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 key 参数")),
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 key 参数"))
+                    .with_changed(Changed::None),
             );
         };
         if key.len() < 20 || !key.starts_with("sk-") {
@@ -106,7 +108,8 @@ impl Tool for DeepseekSaveKeyTool {
                 ToolOutcome::fail(AivpnError::new(
                     "INVALID_ARGUMENT",
                     "Key 格式看起来不对，应以 sk- 开头",
-                )),
+                ))
+                .with_changed(Changed::None),
             );
         }
 
@@ -121,9 +124,19 @@ impl Tool for DeepseekSaveKeyTool {
                     "invalid" => "Key 已保存，但验证失败：这个 Key 无效，请检查后重发。",
                     _ => "Key 已保存，但当前无法联网验证，稍后可以再试。",
                 };
-                ToolOutcome::ok(summary, data)
+                let (text, fact) = match validation {
+                    "ok" => ("密钥已保存", "验证：可用"),
+                    "invalid" => ("密钥已保存但无效", "验证：失败"),
+                    _ => ("密钥已保存，未验证", "验证：暂时无法完成"),
+                };
+                ToolOutcome::ok(summary, data).with_display(
+                    text,
+                    vec![fact.to_string()],
+                    Changed::None,
+                )
             }
-            Err(error) => ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string())),
+            Err(error) => ToolOutcome::fail(AivpnError::new("INTERNAL", error.to_string()))
+                .with_changed(Changed::Unknown),
         };
         envelope::finish(ctx, "DeepseekSaveKey", outcome)
     }

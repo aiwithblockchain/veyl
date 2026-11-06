@@ -16,7 +16,8 @@ import type { RuntimeView } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
 import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
 import { useFocusTrap } from "../ui/focus";
-import { formatPort, formatDate } from "../format";
+import { copyText } from "../ui/clipboard";
+import { formatPort } from "../format";
 import { IconClose } from "./icons";
 import { RuntimeUpgradeRow, useRuntimeUpgrade } from "./RuntimeUpgrade";
 import { TunDiagnosticsRow } from "./TunDiagnostics";
@@ -223,6 +224,264 @@ export function resetTimeLabel(at: number, now = Date.now()): string {
   return `今天 ${hh}:${mm}`;
 }
 
+/**
+ * 桥接层已提供 checkedAt / source / changed / reason / added / removed；
+ * 下架节点名暂时没有正式字段，读到才显示，字段到位即生效。
+ */
+type SeedRefreshInfo = DefaultProfileStatus & {
+  removedNodeName?: string | null;
+  replacementNodeName?: string | null;
+};
+
+type SeedPhase =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "latest" }
+  | { kind: "updated"; added: number | null; total: number }
+  | { kind: "offline"; at: number | null }
+  | { kind: "invalid"; reason: string | null; message: string | null }
+  | { kind: "local_write" }
+  | { kind: "failed"; message: string };
+
+export function seedTimestamp(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? at : null;
+}
+
+export function seedAgeLabel(at: number | null, now = Date.now()): string {
+  if (at === null) return "从未";
+  const diff = Math.max(0, now - at);
+  if (diff < 60_000) return "刚刚";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  return `${Math.floor(diff / 86_400_000)} 天前`;
+}
+
+function seedCheckedAt(info: SeedRefreshInfo | null): number | null {
+  if (!info) return null;
+  return seedTimestamp(info.checkedAt) ?? seedTimestamp(info.appliedAt);
+}
+
+export function seedSummary(info: SeedRefreshInfo | null): string {
+  if (!info) return "从未检查";
+  const parts: string[] = [];
+  if (info.version) parts.push(`v${info.version}`);
+  parts.push(info.nodeCount > 0 ? `${info.nodeCount} 个节点` : "还没有节点");
+  parts.push(`${seedAgeLabel(seedCheckedAt(info))}检查`);
+  return parts.join(" · ");
+}
+
+function seedChanged(before: SeedRefreshInfo | null, next: SeedRefreshInfo): boolean {
+  if (typeof next.changed === "boolean") return next.changed;
+  if (!before) return next.nodeCount > 0 || next.version !== null;
+  return (
+    before.version !== next.version ||
+    before.nodeCount !== next.nodeCount ||
+    before.appliedAt !== next.appliedAt
+  );
+}
+
+function seedStatusText(phase: SeedPhase, connected: boolean): string | null {
+  switch (phase.kind) {
+    case "checking":
+      return "正在检查测试节点…";
+    case "latest":
+      return "已经是最新（刚刚检查）";
+    case "updated": {
+      const text =
+        phase.added !== null && phase.added > 0
+          ? `已更新 ${phase.added} 个节点（共 ${phase.total} 个）`
+          : `已更新（共 ${phase.total} 个节点）`;
+      return connected ? `${text}，下次连接生效` : text;
+    }
+    case "offline":
+      return phase.at === null
+        ? "现在连不上，继续用上次的节点"
+        : `现在连不上，继续用上次的节点（${seedAgeLabel(phase.at)}）`;
+    case "invalid":
+      return "新内容有问题，已保留原来的节点";
+    case "local_write":
+      return "没能保存到本机";
+    case "failed":
+      return "拿不到测试节点，请检查网络";
+    default:
+      return null;
+  }
+}
+
+function seedStatusTone(phase: SeedPhase): string {
+  switch (phase.kind) {
+    case "checking":
+      return "is-muted";
+    case "latest":
+    case "updated":
+      return "is-ok";
+    case "offline":
+      return "is-warn";
+    case "invalid":
+    case "local_write":
+    case "failed":
+      return "is-error";
+    default:
+      return "";
+  }
+}
+
+function SeedRefreshRow({
+  bridge,
+  info,
+  onInfo,
+  connected,
+  open,
+  onAskAi,
+}: {
+  bridge: AgentBridge;
+  info: SeedRefreshInfo | null;
+  onInfo: (next: SeedRefreshInfo) => void;
+  connected: boolean;
+  open: boolean;
+  onAskAi: (field: string, value: string) => void;
+}) {
+  const [phase, setPhase] = useState<SeedPhase>({ kind: "idle" });
+  const [removedNotice, setRemovedNotice] = useState<{
+    from: string;
+    to: string | null;
+  } | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "ok" | "error">("idle");
+  const copyTimer = useRef<number | null>(null);
+  const busy = useRef(false);
+
+  useEffect(() => {
+    if (open) return;
+    setPhase({ kind: "idle" });
+    setRemovedNotice(null);
+    setCopyState("idle");
+  }, [open]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    };
+  }, []);
+
+  const refresh = async () => {
+    if (busy.current) return;
+    busy.current = true;
+    const before = info;
+    setPhase({ kind: "checking" });
+    setRemovedNotice(null);
+    setCopyState("idle");
+    try {
+      const next = (await bridge.defaultProfileRefresh()) as SeedRefreshInfo;
+      onInfo(next);
+      if (next.removedNodeName) {
+        setRemovedNotice({
+          from: next.removedNodeName,
+          to: next.replacementNodeName ?? null,
+        });
+      }
+      if (next.reason === "invalid_content") {
+        setPhase({ kind: "invalid", reason: next.reason, message: null });
+      } else if (next.reason === "local_write") {
+        setPhase({ kind: "local_write" });
+      } else if (next.source === "cache" || next.reason === "offline") {
+        setPhase({ kind: "offline", at: seedCheckedAt(next) });
+      } else if (seedChanged(before, next)) {
+        setPhase({ kind: "updated", added: next.added ?? null, total: next.nodeCount });
+      } else {
+        setPhase({ kind: "latest" });
+      }
+    } catch (failure) {
+      setPhase({ kind: "failed", message: toBridgeError(failure).message });
+    } finally {
+      busy.current = false;
+    }
+  };
+
+  const copyDiagnostics = async (phase: Extract<SeedPhase, { kind: "invalid" }>) => {
+    const text = JSON.stringify(
+      {
+        at: new Date().toISOString(),
+        version: info?.version ?? null,
+        node_count: info?.nodeCount ?? 0,
+        reason: phase.reason,
+        message: phase.message,
+      },
+      null,
+      2,
+    );
+    const ok = await copyText(text);
+    setCopyState(ok ? "ok" : "error");
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopyState("idle"), 2000);
+  };
+
+  const status = seedStatusText(phase, connected);
+  const checking = phase.kind === "checking";
+
+  return (
+    <div className="settings-row seed-refresh">
+      <div className="seed-refresh__main">
+        <div className="settings-row__label">测试节点</div>
+        <div className="settings-row__value num">{seedSummary(info)}</div>
+        {status ? (
+          <p
+            className={`seed-refresh__status ${seedStatusTone(phase)}`}
+            role="status"
+            aria-live="polite"
+            title={phase.kind === "failed" ? phase.message : undefined}
+          >
+            {status}
+          </p>
+        ) : null}
+        {phase.kind === "local_write" ? (
+          <p className="seed-refresh__note">
+            检查磁盘空间后重试，已经拉到的内容不会丢。
+          </p>
+        ) : null}
+        {removedNotice ? (
+          <p className="seed-refresh__note">
+            {removedNotice.to
+              ? `原来的「${removedNotice.from}」已下架，已切换到「${removedNotice.to}」${
+                  connected ? "，下次连接生效" : ""
+                }`
+              : `原来的「${removedNotice.from}」已下架，这套配置现在没有节点`}
+          </p>
+        ) : null}
+        {phase.kind === "invalid" ? (
+          <button
+            type="button"
+            className="seed-refresh__copy"
+            onClick={() => void copyDiagnostics(phase)}
+          >
+            {copyState === "ok" ? "已复制" : copyState === "error" ? "复制失败" : "复制诊断信息"}
+          </button>
+        ) : null}
+      </div>
+
+      <div className="settings-row__aside seed-refresh__actions">
+        <button
+          type="button"
+          className="btn btn--ghost"
+          disabled={checking}
+          onClick={() => void refresh()}
+        >
+          {checking ? "检查中…" : "检查更新"}
+        </button>
+        <button
+          type="button"
+          className="ask-ai"
+          onClick={() => onAskAi(ADVANCED_FIELDS.defaultSource, seedSummary(info))}
+        >
+          问 AI
+        </button>
+      </div>
+    </div>
+  );
+}
+
 const SECTIONS: Array<{ id: SectionId; label: string }> = [
   { id: "ai", label: "账号与 AI" },
   { id: "network", label: "网络" },
@@ -308,6 +567,7 @@ export function Settings({
 }: Props) {
   const connected = runtime.state === "running" || runtime.state === "degraded";
   const [section, setSection] = useState<SectionId>("ai");
+  const [seedInfo, setSeedInfo] = useState<SeedRefreshInfo | null>(defaultProfile);
   const coreUpgrade = useRuntimeUpgrade({ bridge, enabled: open, connected });
   const tunHelper = useTunHelper({ bridge, enabled: open });
   const [state, setState] = useState<DeepSeekKeyState>({
@@ -402,6 +662,10 @@ export function Settings({
     void refreshProviders();
     refresh();
   }, [open, refresh, refreshProviders, initialSection]);
+
+  useEffect(() => {
+    setSeedInfo(defaultProfile);
+  }, [defaultProfile]);
 
   const closeReset = useCallback(() => {
     if (resetPhase === "running") return;
@@ -1232,29 +1496,6 @@ export function Settings({
 
             <div className="settings-row">
               <div>
-                <div className="settings-row__label">默认配置源</div>
-                <div className="settings-row__value">
-                  {defaultProfile?.version
-                    ? `v${defaultProfile.version} · ${defaultProfile.nodeCount} 个节点 · 更新于 ${formatDate(defaultProfile.appliedAt)}`
-                    : "未启用"}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="ask-ai"
-                onClick={() =>
-                  askAi(
-                    ADVANCED_FIELDS.defaultSource,
-                    defaultProfile?.version ? `v${defaultProfile.version}` : "未启用",
-                  )
-                }
-              >
-                问 AI
-              </button>
-            </div>
-
-            <div className="settings-row">
-              <div>
                 <div className="settings-row__label">恢复直连</div>
                 <div className="settings-row__value">
                   撤销系统代理并停止运行时；不处理接管残留。
@@ -1321,7 +1562,7 @@ export function Settings({
             ) : null}
 
             <p className="settings-note">
-              没有网络也能导入：文件在本地解析，不依赖默认配置源。默认源暂时不可达属于正常现象。
+              没有网络也能导入：文件在本地解析，不依赖测试节点。测试节点暂时不可达属于正常现象。
             </p>
             <p className="settings-note">这份文件包含共享凭据，请勿外传。</p>
           </section>
@@ -1332,11 +1573,19 @@ export function Settings({
             <h3 className="settings-section__title">高级</h3>
 
             <RuntimeUpgradeRow controller={coreUpgrade} />
+            <SeedRefreshRow
+              bridge={bridge}
+              info={seedInfo}
+              onInfo={setSeedInfo}
+              connected={connected}
+              open={open}
+              onAskAi={askAi}
+            />
             <TunHelperRow controller={tunHelper} activeConnection={connected} />
 
             <div className="settings-row">
               <div>
-                <div className="settings-row__label">默认配置源地址</div>
+                <div className="settings-row__label">测试节点地址</div>
                 <div className="settings-row__value num">{DEFAULT_SOURCE_URL}</div>
               </div>
               <button
