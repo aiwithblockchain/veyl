@@ -1679,6 +1679,16 @@ check("布局非法块整份丢弃，AI 可写块为 5 个（契约）", () => {
     "请求结束时",
     "首启无配置",
     "不落到旧配置",
+    "长得像布局的东西永远不进正文",
+    "同时有 `version` 与 `blocks`",
+    "不校验字段类型",
+    "8 KiB",
+    "bare_too_large",
+    "bare_invalid",
+    "block_not_applicable",
+    "语义校验只在写入时做",
+    "不整份丢弃",
+    "跳过不适用的块",
   ]) {
     if (!s.includes(phrase)) problems.push(`§4.13 缺少「${phrase}」`);
   }
