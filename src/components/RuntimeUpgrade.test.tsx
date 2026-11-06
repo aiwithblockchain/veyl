@@ -303,6 +303,38 @@ describe("RuntimeUpgradeRow", () => {
     expect(bridge.coreInfo).toHaveBeenCalledTimes(2);
   });
 
+  it("可用态刚渲染就点升级也能开始（不等 effect 同步阶段）", async () => {
+    const gate = deferred<{ jobId: string }>();
+    const { bridge } = harness(BUNDLED, {
+      coreUpgrade: vi.fn(() => gate.promise),
+    });
+
+    // 提交可用态到 passive effect 之间有个窗口：DOM 已经显示「升级」，
+    // 阶段却还没同步进 ref。MutationObserver 在提交后、effect 前触发，
+    // 用来稳定复现这段窗口里的点击。
+    let clicked = false;
+    const observer = new MutationObserver(() => {
+      if (clicked) return;
+      const button = screen.queryByRole("button", { name: "升级" });
+      if (!button) return;
+      clicked = true;
+      act(() => (button as HTMLButtonElement).click());
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    try {
+      fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+      await waitFor(() => expect(bridge.coreUpgrade).toHaveBeenCalledWith("1.15.0"));
+      expect(await screen.findByText("正在下载 0%")).toBeTruthy();
+    } finally {
+      observer.disconnect();
+      await act(async () => {
+        gate.resolve({ jobId: "job_1" });
+        await Promise.resolve();
+      });
+    }
+  });
+
   it("jobId 返回前的进度事件会回放", async () => {
     const gate = deferred<{ jobId: string }>();
     const { emit } = harness(BUNDLED, {

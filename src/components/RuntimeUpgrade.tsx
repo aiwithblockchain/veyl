@@ -116,7 +116,7 @@ export function useRuntimeUpgrade({
   enabled: boolean;
   connected: boolean;
 }): RuntimeUpgradeController {
-  const [phase, setPhase] = useState<UpgradePhase>({ kind: "loading" });
+  const [phase, setPhaseState] = useState<UpgradePhase>({ kind: "loading" });
   const [info, setInfo] = useState<CoreInfo | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<CopyState>("idle");
@@ -134,9 +134,12 @@ export function useRuntimeUpgrade({
   const bufferedEventsRef = useRef<BufferedCoreEvent[]>([]);
   const copyTimerRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    phaseRef.current = phase;
-  }, [phase]);
+  // phaseRef 必须和 state 同步写入：用 effect 同步会晚于提交，按钮已渲染成
+  // 「可用」时点下去仍读到上一帧（checking），点击会被静默吞掉。
+  const setPhase = useCallback((next: UpgradePhase) => {
+    phaseRef.current = next;
+    setPhaseState(next);
+  }, []);
 
   useEffect(
     () => () => {
@@ -168,7 +171,8 @@ export function useRuntimeUpgrade({
     void (async () => {
       const next = await refreshInfo(true);
       if (!alive || !next) return;
-      setPhase((current) =>
+      const current = phaseRef.current;
+      setPhase(
         current.kind === "loading" || current.kind === "unsupported"
           ? { kind: "idle" }
           : current,
@@ -177,7 +181,7 @@ export function useRuntimeUpgrade({
     return () => {
       alive = false;
     };
-  }, [enabled, refreshInfo]);
+  }, [enabled, refreshInfo, setPhase]);
 
   const applyProgress = useCallback((payload: CoreUpgradeProgressPayload) => {
     const stage = normalizePhase(payload.phase);
