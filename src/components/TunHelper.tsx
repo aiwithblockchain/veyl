@@ -261,8 +261,10 @@ export function TunHelperRow({ controller, activeConnection }: RowProps) {
           <p className="settings-note tun-helper__status">暂时读不到后台组件状态。</p>
         ) : null}
 
-        {adminHint && available && !loading ? (
-          <p className="settings-note">需要输入一次管理员密码</p>
+        {adminHint && available && !loading && info?.state !== "file_invalid" ? (
+          <p className="settings-note">
+            后台组件需要更新：连接「全部流量」时会请求一次系统授权。
+          </p>
         ) : null}
         {staleWaiting ? (
           <p className="settings-note">连接结束后会自动更新。</p>

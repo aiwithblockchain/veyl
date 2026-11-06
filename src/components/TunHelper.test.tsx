@@ -83,7 +83,9 @@ describe("TunHelperRow", () => {
     expect(
       screen.getByText("点「检查并更新」再试一次；仍失败就复制诊断信息发给助手。"),
     ).toBeTruthy();
-    expect(screen.getByText("需要输入一次管理员密码")).toBeTruthy();
+    expect(
+      screen.getByText("后台组件需要更新：连接「全部流量」时会请求一次系统授权。"),
+    ).toBeTruthy();
     expect(screen.getByRole("button", { name: "检查并更新" })).toBeTruthy();
   });
 
@@ -97,8 +99,32 @@ describe("TunHelperRow", () => {
 
   it("需要管理员授权时如实提示", async () => {
     harness(helperInfo("not_running", { needsAdminRestart: true }));
-    expect(await screen.findByText("需要输入一次管理员密码")).toBeTruthy();
+    expect(
+      await screen.findByText("后台组件需要更新：连接「全部流量」时会请求一次系统授权。"),
+    ).toBeTruthy();
+    expect(screen.queryByText("需要输入一次管理员密码")).toBeNull();
     expect(screen.getByRole("button", { name: "检查并更新" })).toBeTruthy();
+  });
+
+  it("文件校验失败不说会请求授权，授权修不好它", async () => {
+    harness(helperInfo("file_invalid", { needsAdminRestart: true }));
+    expect(await screen.findByText("文件校验失败，重新安装可修复")).toBeTruthy();
+    expect(screen.queryByText(/会请求一次系统授权/)).toBeNull();
+  });
+
+  it("静默换新的 stale 不说会请求授权", async () => {
+    harness(helperInfo("stale"));
+    expect(await screen.findByText("需要更新，连接结束后生效")).toBeTruthy();
+    expect(screen.queryByText(/会请求一次系统授权/)).toBeNull();
+  });
+
+  it("待授权又连着时，同时说明授权与结束后更新", async () => {
+    harness(helperInfo("stale", { needsAdminRestart: true }), { active: true });
+    expect(await screen.findByText("需要更新，连接结束后生效")).toBeTruthy();
+    expect(
+      screen.getByText("后台组件需要更新：连接「全部流量」时会请求一次系统授权。"),
+    ).toBeTruthy();
+    expect(screen.getByText("连接结束后会自动更新。")).toBeTruthy();
   });
 
   it("更新成功后刷新状态", async () => {

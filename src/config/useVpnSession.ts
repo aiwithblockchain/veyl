@@ -34,6 +34,8 @@ export interface VpnSession {
   /** 后端还没实现命令时，界面不再让用户点到必然失败的按钮。 */
   nodeSwitchAvailable: boolean;
   nodeProbeAvailable: boolean;
+  /** 连接「全部流量」前正在更新后台组件：系统即将请求一次授权。 */
+  preparingHelper: boolean;
   createConfig: (name: string, mode: ConnectMode) => Promise<ActionResult>;
   deleteConfig: (configId: string) => Promise<ActionResult>;
   selectConfig: (configId: string, confirmDisconnect?: boolean) => Promise<ActionResult>;
@@ -87,6 +89,54 @@ function isMissingCommand(error: unknown): boolean {
   return /unknown command/i.test(message) || /command\s+\S+\s+not\s+found/i.test(message);
 }
 
+/** 连接「全部流量」会先换后台组件；旧组件需要一次管理员授权。 */
+async function helperNeedsAdmin(bridge: AgentBridge): Promise<boolean> {
+  try {
+    const info = await bridge.tunHelperInfo();
+    // 文件校验失败只能重装，授权帮不上忙，不要许诺一个不会出现的弹窗。
+    return info.needsAdminRestart && info.state !== "file_invalid";
+  } catch {
+    // 旧后端没有这条命令：按不需要授权处理，连接照旧。
+    return false;
+  }
+}
+
+function isHelperAdminFailure(error: unknown): boolean {
+  const bridgeError = toBridgeError(error);
+  if (
+    ["AUTH_DENIED", "PERMISSION_DENIED", "USER_CANCELLED", "CANCELLED"].includes(
+      bridgeError.code,
+    )
+  ) {
+    return true;
+  }
+  return bridgeError.details?.reason === "helper_needs_admin";
+}
+
+/**
+ * 等浏览器把 React 这次更新画到屏幕上。
+ * 系统弹窗会一直阻塞到用户处理完；如果先发请求，用户看到的就只有一个
+ * 不知道是谁弹的密码框。窗口被切走时 rAF 可能停住，用 50ms 兜底，
+ * 不能因为等一帧把连接挂起。
+ */
+function nextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      resolve();
+    };
+    const timer = window.setTimeout(done, 50);
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(done);
+    } else {
+      done();
+    }
+  });
+}
+
 /**
  * 配置与连接状态。默认走真实命令；`mock` 只在 VITE_MOCK=1（或浏览器里的
  * mock 通道）时启用，供离线演示与测试用。
@@ -101,6 +151,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
   const [error, setError] = useState<string | null>(null);
   const [nodeSwitchAvailable, setNodeSwitchAvailable] = useState(true);
   const [nodeProbeAvailable, setNodeProbeAvailable] = useState(true);
+  const [preparingHelper, setPreparingHelper] = useState(false);
 
   const mockStore = useRef<MockStore>({ configs: [], activeId: null });
   const timer = useRef<number | null>(null);
@@ -356,24 +407,31 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       return { ok: false, message: "这套配置还没有节点。" };
     }
 
-    if (mock) {
-      clearTimer();
-      setConnection("starting");
-      setConnectedConfigId(null);
-      const configId = activeConfigId;
-      pendingConfigIdRef.current = configId;
-      // 同时驱动 mock 运行时的状态事件，让面板按真实事件流更新。
-      void bridge.runtimeStart(configId).catch(() => undefined);
-      timer.current = window.setTimeout(() => {
-        timer.current = null;
-        pendingConfigIdRef.current = null;
-        setConnection("connected");
-        setConnectedConfigId(configId);
-      }, 700);
-      return { ok: true };
+    // 接管全部流量先换后台组件；旧组件会弹一次管理员授权。
+    // 必须先让界面说出这件事，再发起会阻塞在系统弹窗上的调用。
+    if (activeConfig.connect_mode === "tun" && (await helperNeedsAdmin(bridge))) {
+      setPreparingHelper(true);
+      await nextPaint();
     }
 
     try {
+      if (mock) {
+        clearTimer();
+        setConnection("starting");
+        setConnectedConfigId(null);
+        const configId = activeConfigId;
+        pendingConfigIdRef.current = configId;
+        // 同时驱动 mock 运行时的状态事件，让面板按真实事件流更新。
+        void bridge.runtimeStart(configId).catch(() => undefined);
+        timer.current = window.setTimeout(() => {
+          timer.current = null;
+          pendingConfigIdRef.current = null;
+          setConnection("connected");
+          setConnectedConfigId(configId);
+        }, 700);
+        return { ok: true };
+      }
+
       setConnection("starting");
       setConnectedConfigId(null);
       await bridge.runtimeStart(activeConfigId);
@@ -381,7 +439,12 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       return { ok: true };
     } catch (err) {
       await refreshReal();
+      if (isHelperAdminFailure(err)) {
+        return { ok: false, message: "这次没有授权，可以再试一次。" };
+      }
       return { ok: false, message: actionMessage(err, "启动失败") };
+    } finally {
+      setPreparingHelper(false);
     }
   };
 
@@ -491,6 +554,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     error,
     nodeSwitchAvailable,
     nodeProbeAvailable,
+    preparingHelper,
     createConfig,
     deleteConfig,
     selectConfig,

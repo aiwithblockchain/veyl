@@ -1,14 +1,17 @@
 /** @vitest-environment jsdom */
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge } from "../agent/bridge";
 import type {
   AgentEvent,
+  ConfigDetail,
+  ConfigSummary,
   RuntimeSnapshot,
   RuntimeState,
 } from "../agent/protocol";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "../agent/protocol";
 import { useVpnSession } from "./useVpnSession";
+import type { ActionResult } from "./useVpnSession";
 
 afterEach(cleanup);
 
@@ -99,5 +102,165 @@ describe("useVpnSession 状态迁移", () => {
 
     act(() => bus.emit?.(stateEvent("idle", "starting")));
     expect(calls.snapshots).toBe(2);
+  });
+});
+
+const CONFIG_ID = "cfg_1";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function startDetail(mode: "tun" | "system_proxy"): ConfigDetail {
+  return {
+    config_id: CONFIG_ID,
+    name: "测试配置",
+    connect_mode: mode,
+    routing_mode: "proxy_all",
+    node_count: 1,
+    listen_port: null,
+    is_active: true,
+    current_node_id: "node_1",
+    created_at: 0,
+    updated_at: 0,
+    last_used_at: null,
+    nodes: [
+      {
+        node_id: "node_1",
+        name: "东京 01",
+        server: "203.0.113.1",
+        port: 8388,
+        method: "aes-128-gcm",
+        protocol: "shadowsocks",
+        source: "seed",
+        created_at: 0,
+      },
+    ],
+    dns: { mode: "auto", local: [], remote: [] },
+    tun_excludes: [],
+    layout: null,
+  };
+}
+
+function startSummary(mode: "tun" | "system_proxy"): ConfigSummary {
+  const detail = startDetail(mode);
+  return {
+    config_id: detail.config_id,
+    name: detail.name,
+    connect_mode: detail.connect_mode,
+    routing_mode: detail.routing_mode,
+    node_count: detail.node_count,
+    listen_port: detail.listen_port,
+    is_active: detail.is_active,
+    current_node_id: detail.current_node_id,
+    created_at: detail.created_at,
+    updated_at: detail.updated_at,
+    last_used_at: detail.last_used_at,
+  };
+}
+
+function makeStartBridge(
+  mode: "tun" | "system_proxy",
+  {
+    needsAdmin = false,
+    runtimeStart,
+  }: { needsAdmin?: boolean; runtimeStart?: () => Promise<unknown> } = {},
+) {
+  return {
+    subscribe: () => () => {},
+    configList: async () => ({ configs: [startSummary(mode)], active_config_id: CONFIG_ID }),
+    configDetail: async () => startDetail(mode),
+    getRuntimeSnapshot: async () => null,
+    runtimeStart: vi.fn(runtimeStart ?? (async () => ({}))),
+    tunHelperInfo: vi.fn(async () => ({
+      runningBuild: "2026.11.1",
+      expectedBuild: "2026.11.1",
+      stale: needsAdmin,
+      state: needsAdmin ? ("stale" as const) : ("running" as const),
+      needsAdminRestart: needsAdmin,
+    })),
+  } as unknown as AgentBridge;
+}
+
+describe("连接前告知后台组件授权", () => {
+  it("接管全部流量需要授权时，准备提示先出现并一直显示到连接返回", async () => {
+    const gate = deferred<unknown>();
+    const bridge = makeStartBridge("tun", {
+      needsAdmin: true,
+      runtimeStart: () => gate.promise,
+    });
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let pending!: Promise<ActionResult>;
+    act(() => {
+      pending = result.current.start();
+    });
+
+    // 后端这一步会卡在系统弹窗上：弹窗期间提示必须一直在。
+    await waitFor(() => expect(result.current.preparingHelper).toBe(true));
+    expect(bridge.runtimeStart).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      gate.resolve({});
+      await pending;
+    });
+    expect(result.current.preparingHelper).toBe(false);
+  });
+
+  it("不需要授权时不显示准备提示", async () => {
+    const bridge = makeStartBridge("tun");
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let result_: ActionResult | undefined;
+    await act(async () => {
+      result_ = await result.current.start();
+    });
+
+    expect(result_?.ok).toBe(true);
+    expect(bridge.tunHelperInfo).toHaveBeenCalledTimes(1);
+    expect(result.current.preparingHelper).toBe(false);
+  });
+
+  it("代理模式不查后台组件，也不显示准备提示", async () => {
+    const bridge = makeStartBridge("system_proxy", { needsAdmin: true });
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(bridge.tunHelperInfo).not.toHaveBeenCalled();
+    expect(result.current.preparingHelper).toBe(false);
+  });
+
+  it("用户取消授权后回到可重试状态", async () => {
+    const bridge = makeStartBridge("tun", {
+      needsAdmin: true,
+      runtimeStart: async () => {
+        throw {
+          code: "PRECONDITION_FAILED",
+          message: "后台组件未能换新，需要管理员重新授权。代理模式与直连仍可用。",
+          details: { reason: "helper_needs_admin" },
+        };
+      },
+    });
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let result_: ActionResult | undefined;
+    await act(async () => {
+      result_ = await result.current.start();
+    });
+
+    expect(result_).toEqual({ ok: false, message: "这次没有授权，可以再试一次。" });
+    expect(result.current.preparingHelper).toBe(false);
+    expect(result.current.connection).toBe("idle");
   });
 });

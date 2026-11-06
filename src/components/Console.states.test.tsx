@@ -83,6 +83,7 @@ interface RenderOptions {
   config?: ConfigDetail | null;
   loading?: boolean;
   failedAfterConnected?: boolean;
+  helperPreparing?: boolean;
 }
 
 function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
@@ -104,6 +105,7 @@ function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
       loading={opts.loading}
       runtime={opts.runtime ?? makeRuntime()}
       failedAfterConnected={opts.failedAfterConnected}
+      helperPreparing={opts.helperPreparing}
     />
   );
 }
@@ -156,6 +158,18 @@ describe("状态矩阵", () => {
     const button = r.container.querySelector<HTMLButtonElement>(".hero .btn");
     expect(button?.textContent).toBe("正在断开…");
     expect(button?.disabled).toBe(true);
+  });
+
+  it("2c 准备后台组件：先说会请求授权，按钮禁用", () => {
+    const r = renderConsole({ helperPreparing: true });
+    expect(r.stateWord).toBe("正在准备后台组件");
+    expect(r.caption).toBe("系统会请求一次授权。");
+    const button = r.container.querySelector<HTMLButtonElement>(".hero .btn");
+    expect(button?.textContent).toBe("启动 VPN");
+    expect(button?.disabled).toBe(true);
+    expect(r.container.querySelector('[role="status"]')?.textContent).toBe(
+      "正在准备后台组件，系统会请求一次授权",
+    );
   });
 
   it("3 刚连上：计时器 00:00:00，读数都是占位", () => {

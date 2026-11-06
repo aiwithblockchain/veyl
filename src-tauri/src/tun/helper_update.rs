@@ -568,10 +568,10 @@ mod macos {
     use std::ffi::{c_char, c_void, CString};
     use std::path::Path;
 
-    /// 授权对话框正文。标题从 Monterey 起固定是 "osascript"（经 osascript 调用
-    /// 的已知限制），所以身份说明必须写在正文里。
-    /// 界面设计定稿（`docs/design/helper-update.md`）到位后以定稿为准。
-    pub(super) const ADMIN_PROMPT: &str = "Veyl 需要更新后台组件，它负责「全部流量走 VPN」。这次授权只用于更新，之后会自动完成，不会再要求输入密码。";
+    /// 授权对话框正文，`docs/design/helper-update.md` §4.3.1 定稿。
+    /// 标题从 Monterey 起固定是 "osascript"（经 osascript 调用的已知限制），
+    /// 所以身份说明和「哪些功能不受影响」必须写在正文里。
+    pub(super) const ADMIN_PROMPT: &str = "Veyl 更新后台组件，它负责让「全部流量」走 VPN。不是新权限，只用于这个功能，这次之后不再需要手动授权；代理模式不需要授权。";
 
     /// AppleScript 字符串字面量：`"` 与 `\` 必须转义；中文引号「」是普通字符。
     pub(super) fn applescript_quote(text: &str) -> String {
@@ -960,9 +960,34 @@ mod tests {
         assert!(!is_bad_request(&error), "不能被当成旧 helper");
     }
 
+    /// 授权弹窗正文必须自带身份说明（标题固定是 osascript），且能安全嵌进 AppleScript。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_admin_prompt_is_an_identity_statement() {
+        let prompt = macos::ADMIN_PROMPT;
+        assert!(prompt.contains("Veyl"));
+        assert!(prompt.contains("后台组件"));
+        assert!(
+            prompt.contains("代理模式不需要授权"),
+            "要明确说出不受影响的功能，用户才不会以为自己装了什么"
+        );
+        assert!(
+            !prompt.contains('"') && !prompt.contains('\\'),
+            "正文里的引号/反斜杠要转义，别直接拼进脚本"
+        );
+        assert_eq!(macos::applescript_quote(prompt), format!("\"{prompt}\""));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn applescript_strings_escape_quotes_and_backslashes() {
+        assert_eq!(macos::applescript_quote(r#"a"b\c"#), r#""a\"b\\c""#);
+    }
+
     /// 授权时机（PM 2026-11-06）：只用代理模式的用户，启动时不能被弹 root 密码。
     #[cfg(target_os = "macos")]
     mod admin_restart_tests {
+        use super::super::*;
         use crate::tun::backend::{StartReply, TunError, TunErrorCode, TunSnapshot};
         use crate::tun::privilege::HelperStatus;
         use std::sync::atomic::{AtomicUsize, Ordering};

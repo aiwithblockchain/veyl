@@ -1031,6 +1031,7 @@ export default function App() {
         loading={vpn.loading}
         runtime={runtime}
         failedAfterConnected={failedAfterConnected}
+        helperPreparing={vpn.preparingHelper}
         rateSamples={rateSamples}
       />
       {panelOpen && shell.docked ? (

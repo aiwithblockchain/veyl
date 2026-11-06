@@ -36,6 +36,8 @@ interface Props {
   runtime: RuntimeView;
   /** 最近一次失败是否来自已连接态；决定失败卡标题是「连接断了」还是「没有连上节点」。 */
   failedAfterConnected?: boolean;
+  /** 连接「全部流量」前正在更新后台组件：先说明系统会请求授权，再弹窗。 */
+  helperPreparing?: boolean;
   /** 健康事件累积的最近 60 秒速率（前端内存，重启即丢）。 */
   rateSamples?: RateSample[];
 }
@@ -88,6 +90,7 @@ export function Console({
   loading = false,
   runtime,
   failedAfterConnected = false,
+  helperPreparing = false,
   rateSamples = NO_RATE,
 }: Props) {
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -300,22 +303,29 @@ export function Console({
       </section>
     );
   } else {
-    const word = stopping
-      ? "正在断开"
-      : transitioning
-        ? "正在连接"
-        : level === "failed"
-          ? "连接失败"
-          : "未连接";
-    const led = stopping
-      ? ""
-      : transitioning
-        ? "is-connecting"
-        : level === "failed"
-          ? "is-err"
-          : null;
-    const caption =
-      level === "failed" ? failureHeadline(failedAfterConnected) : null;
+    const word = helperPreparing
+      ? "正在准备后台组件"
+      : stopping
+        ? "正在断开"
+        : transitioning
+          ? "正在连接"
+          : level === "failed"
+            ? "连接失败"
+            : "未连接";
+    const led = helperPreparing
+      ? "is-connecting"
+      : stopping
+        ? ""
+        : transitioning
+          ? "is-connecting"
+          : level === "failed"
+            ? "is-err"
+            : null;
+    const caption = helperPreparing
+      ? "系统会请求一次授权。"
+      : level === "failed"
+        ? failureHeadline(failedAfterConnected)
+        : null;
     hero = (
       <section className="hero">
         <div className="hero__main">
@@ -338,7 +348,7 @@ export function Console({
           <button
             type="button"
             className="btn btn--primary"
-            disabled={!canConnect}
+            disabled={!canConnect || helperPreparing}
             onClick={onStart}
           >
             重新连接
@@ -347,7 +357,7 @@ export function Console({
           <button
             type="button"
             className="btn btn--primary"
-            disabled={!canConnect}
+            disabled={!canConnect || helperPreparing}
             onClick={onStart}
           >
             启动 VPN
@@ -357,17 +367,19 @@ export function Console({
     );
   }
 
-  const srStatus = stopping
-    ? "正在断开"
-    : transitioning
-      ? "正在连接"
-      : level === "failed"
-        ? "连接失败"
-        : degraded
-          ? "连接不稳定"
-          : connected
-            ? "已连接"
-            : "未连接";
+  const srStatus = helperPreparing
+    ? "正在准备后台组件，系统会请求一次授权"
+    : stopping
+      ? "正在断开"
+      : transitioning
+        ? "正在连接"
+        : level === "failed"
+          ? "连接失败"
+          : degraded
+            ? "连接不稳定"
+            : connected
+              ? "已连接"
+              : "未连接";
 
   return (
     <main className="console">
