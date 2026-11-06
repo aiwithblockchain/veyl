@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ConfigDetail, HealthSnapshot, RuntimeView } from "../agent/protocol";
 import { CONTRACT_VERSION } from "../agent/protocol";
@@ -274,6 +274,25 @@ describe("中间区验收用例", () => {
     expect(text(body(root).querySelector(".note"))).toBe("这套配置还没有节点。");
     expect(body(root).querySelector(".ledger")).toBeNull();
     expect(root.querySelector(".node-card__empty")?.textContent).toBe("还没有节点");
+  });
+
+  it("12b 节点卡只有一个入口：整行打开列表，动作只剩测这个节点", () => {
+    const root = renderConsole(makeConfig(), makeRuntime());
+    const actions = Array.from(root.querySelectorAll(".node-card__actions button"));
+    expect(actions.map((button) => button.textContent)).toEqual(["测这个节点"]);
+    // 视觉上不能变成主按钮：同屏唯一主按钮仍是顶部连接。
+    expect(actions[0].className).toContain("btn--ghost");
+    expect(actions[0].className).not.toContain("btn--primary");
+    expect(
+      Array.from(root.querySelectorAll("button")).some(
+        (button) => button.textContent === "选择节点",
+      ),
+    ).toBe(false);
+    const trigger = root.querySelector(".node-card__select");
+    expect(trigger?.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(trigger as Element);
+    expect(trigger?.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("13 layout.blocks 非空：不在本次范围，不硬塞本地块", () => {

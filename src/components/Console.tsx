@@ -638,15 +638,6 @@ export function Console({
 
               {config.nodes.length > 0 ? (
                 <div className="node-card__actions">
-                  {canPick ? (
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={() => setSheetOpen(true)}
-                    >
-                      选择节点
-                    </button>
-                  ) : null}
                   <button
                     type="button"
                     className="btn btn--ghost"
