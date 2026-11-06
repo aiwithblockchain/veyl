@@ -4,7 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { AgentEvent, NextAction, RuntimeView } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
-import { isTauri, readQuestionDetail } from "./agent/bridge";
+import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail } from "./agent/bridge";
 import type {
   DefaultProfileStatus,
   ImportSeedResult,
@@ -126,6 +126,8 @@ export default function App() {
   const [rateSamples, setRateSamples] = useState<RateSample[]>([]);
   const [aiUnread, setAiUnread] = useState(false);
   const [defaultProfile, setDefaultProfile] = useState<DefaultProfileStatus | null>(null);
+  // 本地代理端口是应用级设置：设置页写，控制台与设置行都读这一份。
+  const [proxyPort, setProxyPort] = useState(DEFAULT_PROXY_PORT);
   const [repairing, setRepairing] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const [pendingConfigId, setPendingConfigId] = useState<string | null>(null);
@@ -216,6 +218,20 @@ export default function App() {
     } catch {
       // wave2 命令未接线时不显示默认配置信息，不影响主流程。
     }
+  }, [bridge]);
+
+  // 端口设置启动时读一次；读不到就保持默认值，不阻塞主流程。
+  useEffect(() => {
+    let alive = true;
+    bridge
+      .proxyPortGet()
+      .then((state) => {
+        if (alive) setProxyPort(state.port);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
   }, [bridge]);
 
   // 右栏第一次配置 AI 成功后自动展开一次；用户手动关过就不再自动开。
@@ -1032,6 +1048,7 @@ export default function App() {
         onNewConfig={() => setNewConfigOpen(true)}
         onImportNodes={() => openSettings("network")}
         seedUpdate={Boolean(defaultProfile?.newVersionAvailable)}
+        proxyPort={proxyPort}
         openNodeSheetSignal={nodeSheetSignal}
         loading={vpn.loading}
         runtime={runtime}
@@ -1142,6 +1159,8 @@ export default function App() {
         bridge={bridge}
         runtime={runtime}
         defaultProfile={defaultProfile}
+        proxyPort={proxyPort}
+        onProxyPortSaved={setProxyPort}
         connectMode={vpn.activeConfig?.connect_mode ?? null}
         currentNodeName={
           vpn.activeConfig?.nodes.find(

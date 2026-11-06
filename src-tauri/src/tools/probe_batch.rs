@@ -482,10 +482,16 @@ pub async fn start_probe_runtime(
     }
     let current_descriptor = descriptors.iter().find(|node| node.id == current.id)?.clone();
 
-    let mixed_port = vpn_config::pick_free_port().ok()?;
-    let mut clash_port = vpn_config::pick_free_port().ok()?;
+    // 探针在独立槽里跑，必须避开用户设置的代理端口：否则批次中点「启动 VPN」
+    // 会被我们自己占掉端口，白白制造一次降级（port-stability.md §7）。
+    let excluded = {
+        let conn = store.conn();
+        vec![crate::store::settings::proxy_port(&conn)]
+    };
+    let mixed_port = vpn_config::pick_free_port_excluding(&excluded).ok()?;
+    let mut clash_port = vpn_config::pick_free_port_excluding(&excluded).ok()?;
     while clash_port == mixed_port {
-        clash_port = vpn_config::pick_free_port().ok()?;
+        clash_port = vpn_config::pick_free_port_excluding(&excluded).ok()?;
     }
     let secret = vpn_config::random_secret();
     let value = vpn_config::build_routed_multi(
@@ -523,6 +529,8 @@ pub async fn start_probe_runtime(
         clash_addr: format!("127.0.0.1:{clash_port}"),
         clash_secret: secret.clone(),
         mixed_port,
+        requested_port: None,
+        fallback_reason: None,
         config_id: None,
         config_name: None,
         node_id: None,

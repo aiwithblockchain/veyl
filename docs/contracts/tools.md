@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.6.1`
+> 契约版本：`3.7.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.6.1`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.7.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -279,9 +279,9 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 7 | `CoreUpgrade` | `CoreUpgradeTool` | 检查并安装运行时更新（唯一有确认点的工具） | `Execute` | 高 |
 | 8 | `CatalogSearch` | `CatalogSearchTool` | 查询**远端**节点目录（不含本地导入） | `ReadOnly` | 只读 |
 | 9 | `ConfigList` | `ConfigListTool` | 列**本地**全部配置 | `ReadOnly` | 只读 |
-| 10 | `ConfigDetail` | `ConfigDetailTool` | 一套配置的节点集、DNS、端口、布局 | `ReadOnly` | 只读 |
+| 10 | `ConfigDetail` | `ConfigDetailTool` | 一套配置的节点集、DNS、布局 | `ReadOnly` | 只读 |
 | 11 | `ConfigCreate` | `ConfigCreateTool` | 新建一套配置（种子 / 空 / 指定节点） | `Write` | 中 |
-| 12 | `ConfigUpdate` | `ConfigUpdateTool` | 编辑配置（名称 / 分流 / DNS / 端口 / 节点集） | `Write` | 中 |
+| 12 | `ConfigUpdate` | `ConfigUpdateTool` | 编辑配置（名称 / 分流 / DNS / 节点集） | `Write` | 中 |
 | 13 | `ConfigDelete` | `ConfigDeleteTool` | 删除一套配置 | `Write` | 中 |
 | 14 | `NodeImportUrl` | `NodeImportUrlTool` | 从订阅 URL 解析并导入节点 | `Write` | 中 |
 | 15 | `NodeCreate` | `NodeCreateTool` | 手动创建一个节点 | `Write` | 中 |
@@ -1259,7 +1259,6 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
     "targets": { "type": "array", "items": { "type": "string" } },
     "source": { "type": "string", "enum": ["seed", "empty"] },
     "node_ids": { "type": "array", "items": { "type": "string" } },
-    "listen_port": { "type": "integer", "minimum": 1000, "maximum": 65535 },
     "dns": { "type": "object" },
     "tun_excludes": { "type": "array", "items": { "type": "string" } }
   },
@@ -1273,7 +1272,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 - `source = "seed"` 绑定**当前种子的全部节点**；种子为空 → `PRECONDITION_FAILED / seed_unavailable`。与 `node_ids` 互斥。
 - `source = "empty"` 或不传 → 创建空节点集的配置；可以存在，但 `VpnConnect` 会报 `no_nodes`。
 - `routing_mode = "proxy_selected"` 时必须传 `targets`（非空，分类 id 有效），否则 `PRECONDITION_FAILED / route_targets_empty`。
-- `listen_port` 只允许 `system_proxy`；`tun` 传了 → `INVALID_ARGUMENT / listen_port_not_allowed`。
+- **不接受 `listen_port`**：本地代理端口是用户设置（`commands.md` §7.11），不在配置里；带上该字段会被 schema 拒绝（`additionalProperties: false`）。
 - **连接方式不给默认值**：`system_proxy` 与 `tun` 是两种接管方式，模型必须显式选。
 - 未连接时新建的配置会自动成为 active；已连接时不自动切换（与 `commands.md` §3.2 一致）。
 
@@ -1293,7 +1292,6 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
     "name": { "type": "string", "maxLength": 40 },
     "routing_mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
     "targets": { "type": "array", "items": { "type": "string" } },
-    "listen_port": { "type": "integer", "minimum": 1000, "maximum": 65535 },
     "dns": { "type": "object" },
     "tun_excludes": { "type": "array", "items": { "type": "string" } },
     "node_ids": { "type": "array", "items": { "type": "string" } }
@@ -1406,7 +1404,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 `data`：`ProxyParams`（`commands.md` §4.5）。
 
 - 三级用户问「填什么地址」时用它；`host` 恒为 `127.0.0.1`，`protocols` 恒为 HTTP + SOCKS5 同端口。
-- `port_source = "runtime"` 时才是可用的实际端口；`pending` 时**不要编一个端口给用户**。
+- `port_source = "runtime"` 时是实际监听端口；`configured` 时是用户设置值（`proxy_port_get`）；`pending` 已废弃，不要编一个端口给用户。
 - `reason = "tun_mode"` 时说明当前配置不需要代理地址，不要引导用户去填。
 
 权限：`ReadOnly`。
@@ -1874,6 +1872,14 @@ type CoreUpgradeData = {
 ---
 
 ## 8. 变更记录
+
+### 3.7.0（2026-11-06，端口改为用户设置）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.7.0`；工具总数不变（仍 44 个） | 元数据 | 端口设置只有 UI 命令，不加工具 |
+| 2 | `ConfigCreate` / `ConfigUpdate` 的 schema 删除 `listen_port`；传了会被 `additionalProperties: false` 拒绝 | 参数删除 | 只要 AI 还能写配置端口，用户在设置里改的值就会静默不生效 |
+| 3 | 端口只有一个来源：用户设置（`commands.md` §7.11）；工具不提供改端口的能力 | 约束 | — |
 
 ### 3.6.1（2026-11-06，`NodeProbe` 单测边界）
 

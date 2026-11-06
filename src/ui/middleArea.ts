@@ -4,6 +4,7 @@
  * 规则来源 `docs/middle-area-local-rules.md`。纯函数：同样的 runtime + config + aiReady
  * 必须得到同样的块与文案，不读时间、不猜国家、不调 AI。
  */
+import { DEFAULT_PROXY_PORT } from "../agent/bridge";
 import type { ConfigDetail, Layout, RuntimeView } from "../agent/protocol";
 
 export type MiddleLevel = "idle" | "running" | "degraded" | "failed" | "transition";
@@ -21,6 +22,12 @@ export type MiddleBlock =
       connected: boolean;
       address: string | null;
       systemProxyEnabled: boolean;
+      /** 设置端口被占用而顺延时非空；正常连接为 null，桌面不写死数字。 */
+      fallback: {
+        requested: number;
+        actual: number;
+        reason: "occupied" | "unavailable";
+      } | null;
     }
   | {
       kind: "issue_card";
@@ -164,15 +171,20 @@ export function proxyBlock(
   runtime: RuntimeView,
   config: ConfigDetail,
   connected: boolean,
+  proxyPort = DEFAULT_PROXY_PORT,
 ): MiddleBlock {
-  // 已连接只认 runtime.mixed_port，不回退到配置里的预计端口。
-  // 老后端可能不带 listen_port，宽松比较把 undefined 也当作没有。
-  const port = connected ? runtime.mixed_port : config.listen_port;
+  // 已连接只认 runtime.mixed_port；未连接显示用户在设置里填的端口。
+  // listen_port 已废弃，不再参与任何展示。
+  const port = connected ? runtime.mixed_port : proxyPort;
   return {
     kind: "proxy_card",
     connected,
     address: port == null ? null : `127.0.0.1:${port}`,
     systemProxyEnabled: connected && runtime.system_proxy_enabled,
+    fallback:
+      connected && config.connect_mode === "system_proxy"
+        ? runtime.port_fallback
+        : null,
   };
 }
 
@@ -198,6 +210,7 @@ export function middleBlocks(
   runtime: RuntimeView,
   config: ConfigDetail,
   aiReady: boolean,
+  proxyPort = DEFAULT_PROXY_PORT,
 ): MiddleBlock[] {
   const level = middleLevel(runtime.state);
 
@@ -225,12 +238,12 @@ export function middleBlocks(
         next: "能继续用就先不动；网页打不开时，点上面的「断开 VPN」再重新连接。",
       },
     ];
-    if (isProxyUser(config)) blocks.push(proxyBlock(runtime, config, true));
+    if (isProxyUser(config)) blocks.push(proxyBlock(runtime, config, true, proxyPort));
     return blocks;
   }
 
   if (isProxyUser(config)) {
-    return [proxyBlock(runtime, config, level === "running")];
+    return [proxyBlock(runtime, config, level === "running", proxyPort)];
   }
 
   return [emptyHintBlock(config, level === "running")];
@@ -239,6 +252,8 @@ export function middleBlocks(
 export interface LayoutRenderContext {
   /** 种子包确实有新版本时才放 update_hint。 */
   hasSeedUpdate: boolean;
+  /** 设置里的本地代理端口；布局块不携带数值，渲染时从这里读。 */
+  proxyPort: number;
 }
 
 /** 只有模型能填的 props 是 targets；其它一律从本地事实生成。 */
@@ -286,7 +301,9 @@ export function resolveLayoutBlocks(
       case "proxy_card":
         // TUN 配置没有 mixed 入站，连接后 runtime.mixed_port 仍会给值；
         // 照渲染会得到一个没人监听的地址，所以非代理用户直接跳过。
-        if (isProxyUser(config)) blocks.push(proxyBlock(runtime, config, connected));
+        if (isProxyUser(config)) {
+          blocks.push(proxyBlock(runtime, config, connected, context.proxyPort));
+        }
         else skipBlock("proxy_card 只用于本机代理配置，已跳过");
         break;
       case "source_choice":

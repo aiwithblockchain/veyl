@@ -1,3 +1,4 @@
+import { DEFAULT_PROXY_PORT } from "../agent/bridge";
 import type {
   ConfigConnectMode,
   ConfigDetail,
@@ -19,10 +20,12 @@ export function suggestedConfigName(mode: ConnectMode): string {
 }
 
 export function portLabel(
-  config: Pick<ConfigSummary, "connect_mode" | "listen_port">,
+  config: Pick<ConfigSummary, "connect_mode">,
+  proxyPort = DEFAULT_PROXY_PORT,
 ): string {
-  if (config.connect_mode === "tun" || config.listen_port === null) return "自动";
-  return String(config.listen_port);
+  // TUN 不使用这个端口；本机代理由全局设置决定，listen_port 已废弃。
+  if (config.connect_mode === "tun") return "自动";
+  return String(proxyPort);
 }
 
 export function nameTaken(

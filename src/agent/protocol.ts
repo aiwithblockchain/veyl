@@ -644,6 +644,13 @@ export interface RuntimeSnapshot {
   last_transition_at: string;
   /** 本地 mixed 入口端口；每次连接可能不同，UI 不得硬编码。 */
   mixed_port: number | null;
+  /** 用户设置的端口被占用、本次顺延时非空；正常连接、未连接、TUN 均为 null。 */
+  port_fallback: {
+    requested: number;
+    actual: number;
+    /** occupied = 被别的软件占用；unavailable = 低端口没权限等用不了。 */
+    reason: "occupied" | "unavailable";
+  } | null;
   /** 连接成功时刻（ISO 8601）；未连接为 null。 */
   connected_since: string | null;
   /** 出口 IP 探测耗时，界面不展示。 */
@@ -674,6 +681,12 @@ export interface RuntimeView {
   restart_count: number;
   last_error: AivpnError | null;
   mixed_port: number | null;
+  /** 本次连接是否因端口降级而顺延；只有 system_proxy 且真降级时非空。 */
+  port_fallback: {
+    requested: number;
+    actual: number;
+    reason: "occupied" | "unavailable";
+  } | null;
   connected_since: string | null;
   /** 出口 IP 探测耗时，界面不展示。 */
   latency_ms: number | null;

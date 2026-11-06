@@ -3,6 +3,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type {
   AgentBridge,
   DefaultProfileStatus,
+  ProxyPortAvailability,
   ImportSeedResult,
   LlmProtocol,
   LlmProvider,
@@ -10,7 +11,7 @@ import type {
   NetworkForceResetResult,
   NetworkForceResetStep,
 } from "../agent/bridge";
-import { isHttpUrl, isLocalEndpoint } from "../agent/bridge";
+import { DEFAULT_PROXY_PORT, isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import type { RuntimeView } from "../agent/protocol";
 import type { ConfigConnectMode } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
@@ -29,6 +30,9 @@ interface Props {
   bridge: AgentBridge;
   runtime: RuntimeView;
   defaultProfile: DefaultProfileStatus | null;
+  /** 本地代理端口；由 App 持有，设置页保存后回写同一份状态。 */
+  proxyPort?: number;
+  onProxyPortSaved?: (port: number) => void;
   /** 当前配置的连接方式；只用于展示，不参与任何命令。 */
   connectMode?: ConfigConnectMode | null;
   /** 当前配置正在使用的节点名；没有配置或没有节点时为 null。 */
@@ -543,6 +547,8 @@ export function Settings({
   bridge,
   runtime,
   defaultProfile,
+  proxyPort = DEFAULT_PROXY_PORT,
+  onProxyPortSaved,
   connectMode = null,
   currentNodeName = null,
   nodeCount = 0,
@@ -607,6 +613,14 @@ export function Settings({
   const [resetCopy, setResetCopy] = useState<"idle" | "ok" | "error">("idle");
   const [routeCopy, setRouteCopy] = useState<"idle" | "ok" | "error">("idle");
   const [proxyCopy, setProxyCopy] = useState<"idle" | "ok" | "error">("idle");
+  const [portInput, setPortInput] = useState(String(proxyPort));
+  const [portSaving, setPortSaving] = useState(false);
+  const [portFeedback, setPortFeedback] = useState<string | null>(null);
+  const [portError, setPortError] = useState<string | null>(null);
+  const [portAvailability, setPortAvailability] =
+    useState<ProxyPortAvailability>("free");
+  const lastSavedPort = useRef(proxyPort);
+  const portSavingRef = useRef(false);
   const [importOpen, setImportOpen] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const importDialogRef = useRef<HTMLDivElement>(null);
@@ -619,6 +633,50 @@ export function Settings({
   useFocusTrap(open && resetPhase === "idle" && !importOpen, dialogRef);
   useFocusTrap(resetPhase !== "idle", resetDialogRef);
   useFocusTrap(importOpen, importDialogRef);
+
+  // App 层的端口变了（初次读取或别处保存），输入框跟着走。
+  useEffect(() => {
+    lastSavedPort.current = proxyPort;
+    setPortInput(String(proxyPort));
+  }, [proxyPort]);
+
+  const saveProxyPort = async () => {
+    const raw = portInput.trim();
+    const value = Number(raw);
+    if (
+      !/^\d+$/.test(raw) ||
+      !Number.isInteger(value) ||
+      value < 1 ||
+      value > 65535
+    ) {
+      setPortError("请填一个 1–65535 之间的数字");
+      setPortFeedback(null);
+      return;
+    }
+    if (value === lastSavedPort.current) {
+      setPortError(null);
+      return;
+    }
+    // 失焦与点「保存」会连着触发：只发一次命令。
+    if (portSavingRef.current) return;
+    portSavingRef.current = true;
+    setPortSaving(true);
+    setPortError(null);
+    setPortFeedback(null);
+    try {
+      const result = await bridge.proxyPortSet(value);
+      lastSavedPort.current = result.port;
+      setPortInput(String(result.port));
+      setPortAvailability(result.availability);
+      setPortFeedback(connected ? "已保存，下次连接生效" : "已保存");
+      onProxyPortSaved?.(result.port);
+    } catch (error) {
+      setPortError(toBridgeError(error).message || "端口没有保存，请重试。");
+    } finally {
+      portSavingRef.current = false;
+      setPortSaving(false);
+    }
+  };
 
   const refreshProviders = useCallback(async () => {
     setProvidersLoading(true);
@@ -1431,6 +1489,69 @@ export function Settings({
                 </div>
               </div>
             )}
+
+            <div className="settings-row">
+              <div>
+                <div className="settings-row__label">本地代理端口</div>
+                <div className="settings-row__value">
+                  别的软件要填代理地址时，用的是这个端口。改一次，以后每次连接都用它。
+                </div>
+                {Number(portInput) < 1024 &&
+                Number(portInput) > 0 &&
+                portAvailability !== "unavailable" ? (
+                  <p className="settings-note">
+                    小于 1024 的端口在系统里通常需要管理员权限，不建议用。
+                  </p>
+                ) : null}
+                {portAvailability === "occupied" ? (
+                  <p className="settings-feedback settings-feedback--warn">
+                    现在被占用了，连接时会自动顺延
+                  </p>
+                ) : null}
+                {portAvailability === "unavailable" ? (
+                  <p className="settings-feedback settings-feedback--warn">
+                    这个端口在这台机器上用不了（需要管理员权限），连接时会自动顺延
+                  </p>
+                ) : null}
+                {portError ? (
+                  <p className="settings-feedback settings-feedback--error">{portError}</p>
+                ) : null}
+                {portFeedback ? (
+                  <p className="settings-feedback settings-feedback--ok">{portFeedback}</p>
+                ) : null}
+              </div>
+              <div className="settings-port">
+                <span className="settings-port__prefix">127.0.0.1 :</span>
+                <input
+                  className="settings-port__input num"
+                  value={portInput}
+                  inputMode="numeric"
+                  maxLength={5}
+                  aria-label="本地代理端口"
+                  onChange={(event) => {
+                    setPortInput(event.target.value);
+                    setPortError(null);
+                    setPortFeedback(null);
+                    setPortAvailability("free");
+                  }}
+                  onBlur={() => void saveProxyPort()}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void saveProxyPort();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => void saveProxyPort()}
+                  disabled={portSaving}
+                >
+                  {portSaving ? "保存中…" : "保存"}
+                </button>
+              </div>
+            </div>
 
             <SeedRefreshRow
               bridge={bridge}

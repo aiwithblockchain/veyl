@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { ConfigDetail, NodeSummary, RuntimeView } from "../agent/protocol";
+import { DEFAULT_PROXY_PORT } from "../agent/bridge";
 import type { ProbeResult } from "../config/useVpnSession";
 import type { NodeProbesController } from "../config/useNodeProbes";
 import { copyText } from "../ui/clipboard";
@@ -40,6 +41,8 @@ interface Props {
   onImportNodes?: () => void;
   /** 种子包有新版本：决定 update_hint 是否有内容可渲染。 */
   seedUpdate?: boolean;
+  /** 设置里的本地代理端口；未连接时代理卡显示它。 */
+  proxyPort?: number;
   onOpenDiagnostics?: () => void;
   loading?: boolean;
   runtime: RuntimeView;
@@ -99,6 +102,7 @@ export function Console({
   onNewConfig,
   onImportNodes,
   seedUpdate = false,
+  proxyPort = DEFAULT_PROXY_PORT,
   onOpenDiagnostics,
   loading = false,
   runtime,
@@ -220,11 +224,14 @@ export function Console({
   const rates = rateLabel(rateSamples);
 
   // null 走本地兜底；[] 是 AI 明确选择空白；非空但一块都渲染不出时退回本地。
-  const localBlocks = config ? middleBlocks(runtime, config, aiReady) : [];
+  const localBlocks = config ? middleBlocks(runtime, config, aiReady, proxyPort) : [];
   const layout = config?.layout ?? null;
   const layoutBlocks =
     config && layout
-      ? resolveLayoutBlocks(layout, runtime, config, { hasSeedUpdate: seedUpdate })
+      ? resolveLayoutBlocks(layout, runtime, config, {
+          hasSeedUpdate: seedUpdate,
+          proxyPort,
+        })
       : [];
   const layoutHadBlocks =
     Array.isArray(layout?.blocks) && layout.blocks.length > 0;

@@ -78,6 +78,13 @@ function ProxyCard({ block }: { block: ProxyBlock }) {
           </button>
         ) : null}
       </div>
+      {block.fallback ? (
+        <p className="card__action card__action--warn">
+          {block.fallback.reason === "unavailable"
+            ? `你设置的 ${block.fallback.requested} 用不了（需要管理员权限），这次用的是 ${block.fallback.actual}。`
+            : `你设置的 ${block.fallback.requested} 被别的软件占用了，这次用的是 ${block.fallback.actual}。`}
+        </p>
+      ) : null}
       <p className="card__action">
         {block.connected
           ? "HTTP 和 SOCKS5 都支持，填同一个地址。只在本机可用，别的设备连不上。"

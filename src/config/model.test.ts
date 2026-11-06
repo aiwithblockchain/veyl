@@ -36,20 +36,16 @@ describe("nameTaken", () => {
 });
 
 describe("portLabel", () => {
-  it("接管全部显示自动", () => {
-    expect(portLabel({ connect_mode: "tun", listen_port: null })).toBe("自动");
+  it("接管全部不使用本地代理端口，仍显示自动", () => {
+    expect(portLabel({ connect_mode: "tun" }, 8080)).toBe("自动");
   });
 
-  it("本机代理但端口为空也显示自动", () => {
-    expect(portLabel({ connect_mode: "system_proxy", listen_port: null })).toBe(
-      "自动",
-    );
+  it("本机代理显示设置里的端口，与 listen_port 无关", () => {
+    expect(portLabel({ connect_mode: "system_proxy" }, 8080)).toBe("8080");
   });
 
-  it("本机代理显示实际端口", () => {
-    expect(
-      portLabel({ connect_mode: "system_proxy", listen_port: 7890 }),
-    ).toBe("7890");
+  it("没有传设置值时用默认端口", () => {
+    expect(portLabel({ connect_mode: "system_proxy" })).toBe("7890");
   });
 });
 

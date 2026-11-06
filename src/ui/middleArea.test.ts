@@ -348,30 +348,61 @@ describe("middleBlocks 块矩阵", () => {
     expect(blocks.map((b) => b.kind)).toEqual(["issue_card", "proxy_card"]);
   });
 
-  it("未连接的代理用户只给预计地址，没有 actual", () => {
+  it("未连接的代理用户显示设置端口，listen_port 不参与", () => {
     const blocks = middleBlocks(
       makeRuntime(),
-      makeConfig({ routing_mode: "proxy_selected", listen_port: 7890 }),
+      makeConfig({ routing_mode: "proxy_selected", listen_port: 9999 }),
       true,
+      8080,
     );
     expect(blocks[0]).toMatchObject({
       kind: "proxy_card",
       connected: false,
-      address: "127.0.0.1:7890",
+      address: "127.0.0.1:8080",
+      fallback: null,
     });
   });
 
-  it("已连接的代理用户用 runtime.mixed_port，配置端口不参与", () => {
+  it("已连接的代理用户用 runtime.mixed_port，设置端口不参与", () => {
     const blocks = middleBlocks(
       makeRuntime({ state: "running", mixed_port: 7891 }),
       makeConfig({ routing_mode: "proxy_selected", listen_port: 7890 }),
       true,
+      8080,
     );
     expect(blocks[0]).toMatchObject({
       kind: "proxy_card",
       connected: true,
       address: "127.0.0.1:7891",
     });
+  });
+
+  it("端口被占用顺延时带上 requested / actual", () => {
+    const blocks = middleBlocks(
+      makeRuntime({
+        state: "running",
+        mixed_port: 7891,
+        port_fallback: { requested: 7890, actual: 7891, reason: "occupied" },
+      }),
+      makeConfig({ routing_mode: "proxy_selected" }),
+      true,
+      7890,
+    );
+    expect(blocks[0]).toMatchObject({
+      kind: "proxy_card",
+      address: "127.0.0.1:7891",
+      fallback: { requested: 7890, actual: 7891, reason: "occupied" },
+    });
+  });
+
+  it("正常连接不带顺延说明", () => {
+    const blocks = middleBlocks(
+      makeRuntime({ state: "running", mixed_port: 7890 }),
+      makeConfig({ routing_mode: "proxy_selected" }),
+      true,
+      7890,
+    );
+    expect(blocks[0]).toMatchObject({ kind: "proxy_card", fallback: null });
   });
 
   it("已连接但 mixed_port 还没到：给确认中，不回退配置端口", () => {
@@ -383,7 +414,7 @@ describe("middleBlocks 块矩阵", () => {
     expect(blocks[0]).toMatchObject({ kind: "proxy_card", address: null });
   });
 
-  it("老后端缺 listen_port：不给地址，不能拼出 undefined", () => {
+  it("老后端缺 listen_port：仍显示设置端口，不拼出 undefined", () => {
     const blocks = middleBlocks(
       makeRuntime(),
       makeConfig({
@@ -391,8 +422,12 @@ describe("middleBlocks 块矩阵", () => {
         listen_port: undefined as unknown as number,
       }),
       true,
+      7890,
     );
-    expect(blocks[0]).toMatchObject({ kind: "proxy_card", address: null });
+    expect(blocks[0]).toMatchObject({
+      kind: "proxy_card",
+      address: "127.0.0.1:7890",
+    });
   });
 });
 
@@ -400,7 +435,7 @@ function layoutOf(blocks: Layout["blocks"]): Layout {
   return { version: 1, blocks };
 }
 
-const NO_SEED_UPDATE = { hasSeedUpdate: false };
+const NO_SEED_UPDATE = { hasSeedUpdate: false, proxyPort: 7890 };
 
 describe("resolveLayoutBlocks", () => {
   it("认识的块按布局顺序生成，内容从本地事实读", () => {
@@ -516,7 +551,7 @@ describe("resolveLayoutBlocks", () => {
       layoutOf([{ type: "update_hint" }]),
       makeRuntime(),
       makeConfig(),
-      { hasSeedUpdate: true },
+      { hasSeedUpdate: true, proxyPort: 7890 },
     );
     expect(some).toEqual([{ kind: "update_hint" }]);
   });

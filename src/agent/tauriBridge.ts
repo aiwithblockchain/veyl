@@ -26,6 +26,8 @@ import type {
   NodeProbeSnapshotData,
   NodeSwitchResult,
   PendingQuestion,
+  ProxyPortSaveResult,
+  ProxyPortSettings,
   RenamedSession,
   StoredChatMessage,
   StoredSessionSummary,
@@ -34,7 +36,7 @@ import type {
   TunHelperState,
   TunProbeData,
 } from "./bridge";
-import { readQuestionDetail } from "./bridge";
+import { DEFAULT_PROXY_PORT, readQuestionDetail } from "./bridge";
 import { toBridgeError } from "./errors";
 import { createListenerManager } from "./listeners";
 import { AGENT_EVENTS, APP_EVENT_NAMES, AI_EVENT_NAMES } from "./protocol";
@@ -80,6 +82,53 @@ function countOrZero(value: number | null | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.floor(value)
     : 0;
+}
+
+function normalizePortFallback(
+  raw: unknown,
+): { requested: number; actual: number; reason: "occupied" | "unavailable" } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as { requested?: unknown; actual?: unknown; reason?: unknown };
+  if (
+    typeof value.requested !== "number" ||
+    !Number.isFinite(value.requested) ||
+    typeof value.actual !== "number" ||
+    !Number.isFinite(value.actual)
+  ) {
+    return null;
+  }
+  // 认不出原因就不显示这句说明：说错（占用 vs 权限）比不说更糟。
+  if (value.reason !== "occupied" && value.reason !== "unavailable") return null;
+  return { requested: value.requested, actual: value.actual, reason: value.reason };
+}
+
+function readPort(value: unknown, fallbackPort: number): number {
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= 65535
+    ? value
+    : fallbackPort;
+}
+
+function normalizeProxyPortSettings(
+  raw: { port?: unknown; default_port?: unknown } | null | undefined,
+): ProxyPortSettings {
+  return {
+    port: readPort(raw?.port, DEFAULT_PROXY_PORT),
+    defaultPort: readPort(raw?.default_port, DEFAULT_PROXY_PORT),
+  };
+}
+
+function normalizeProxyPortSave(
+  raw: { port?: unknown; availability?: unknown } | null | undefined,
+  fallbackPort: number,
+): ProxyPortSaveResult {
+  const availability =
+    raw?.availability === "occupied" || raw?.availability === "unavailable"
+      ? raw.availability
+      : "free";
+  return { port: readPort(raw?.port, fallbackPort), availability };
 }
 
 function normalizeConfigDetail(raw: ConfigDetail & { layout_revision?: unknown }): ConfigDetail {
@@ -334,7 +383,10 @@ export class TauriAgentBridge implements AgentBridge {
 
   async getRuntimeSnapshot(): Promise<RuntimeSnapshot | null> {
     try {
-      return await call<RuntimeSnapshot>("runtime_status");
+      const raw = await call<RuntimeSnapshot & { port_fallback?: unknown }>(
+        "runtime_status",
+      );
+      return { ...raw, port_fallback: normalizePortFallback(raw.port_fallback) };
     } catch {
       // 状态面板拿不到快照时保持 idle，不打断对话。
       return null;
@@ -446,6 +498,21 @@ export class TauriAgentBridge implements AgentBridge {
   async defaultProfileRefresh(): Promise<DefaultProfileStatus> {
     const raw = await call<RawDefaultProfile>("default_profile_refresh");
     return normalizeDefaultProfile(raw);
+  }
+
+  async proxyPortGet(): Promise<ProxyPortSettings> {
+    return normalizeProxyPortSettings(
+      await call<{ port?: unknown; default_port?: unknown }>("proxy_port_get"),
+    );
+  }
+
+  async proxyPortSet(port: number): Promise<ProxyPortSaveResult> {
+    return normalizeProxyPortSave(
+      await call<{ port?: unknown; availability?: unknown }>("proxy_port_set", {
+        port,
+      }),
+      port,
+    );
   }
 
   async netRepair(action: NetRepairAction): Promise<NetRepairResult> {

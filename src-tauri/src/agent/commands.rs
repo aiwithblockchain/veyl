@@ -79,6 +79,68 @@ pub async fn runtime_status(state: State<'_, Arc<AppState>>) -> Result<Value, St
         .map_err(|error| error.to_string())
 }
 
+fn command_error(code: &str, message: impl std::fmt::Display, details: Value) -> Value {
+    json!({
+        "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+        "code": code,
+        "message": message.to_string(),
+        "retryable": false,
+        "details": details,
+        "request_id": "",
+    })
+}
+
+/// 用户设置的本地代理端口。未设置过返回默认值，读不写库。
+#[tauri::command]
+pub async fn proxy_port_get() -> Result<Value, Value> {
+    let Some(store) = crate::store::global() else {
+        return Err(command_error("INTERNAL", "本地数据库不可用", Value::Null));
+    };
+    let port = {
+        let conn = store.conn();
+        crate::store::settings::proxy_port(&conn)
+    };
+    // `default_port` 给界面画「恢复默认」，省得前端硬编码 7890。
+    Ok(json!({
+        "port": port,
+        "default_port": crate::config::DEFAULT_PROXY_PORT,
+    }))
+}
+
+/// 保存本地代理端口。整数 1–65535；<1024 只提示；当前被占用也允许保存。
+#[tauri::command]
+pub async fn proxy_port_set(port: Value) -> Result<Value, Value> {
+    let Some(port) = port
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|port| *port > 0)
+    else {
+        return Err(command_error(
+            "INVALID_ARGUMENT",
+            "请填一个 1–65535 之间的数字",
+            json!({ "reason": "invalid_port" }),
+        ));
+    };
+
+    let Some(store) = crate::store::global() else {
+        return Err(command_error("INTERNAL", "本地数据库不可用", Value::Null));
+    };
+    {
+        let conn = store.conn();
+        crate::store::settings::set_proxy_port(&conn, port)
+            .map_err(|error| command_error("INTERNAL", error, Value::Null))?;
+    }
+
+    // 占用只是临时状态：允许保存，界面据此决定显示哪句提示。
+    // 三态直接映射保存那一刻的实测结果，不再多包一层布尔。
+    let availability = match crate::config::port_availability(port) {
+        crate::config::PortAvailability::Free => "free",
+        crate::config::PortAvailability::Occupied => "occupied",
+        crate::config::PortAvailability::Unavailable => "unavailable",
+    };
+    Ok(json!({ "port": port, "availability": availability }))
+}
+
 /// 服务层错误已经是结构化的 `ServiceError`；还原成契约里的 AivpnError 形状。
 fn error_value(error: anyhow::Error) -> Value {
     if let Some(service) = error.downcast_ref::<crate::tools::services::ServiceError>() {
@@ -235,7 +297,6 @@ pub async fn config_create(
     source: Option<String>,
     node_ids: Option<Vec<String>>,
     targets: Option<Vec<String>>,
-    listen_port: Option<u16>,
     dns: Option<Value>,
     tun_excludes: Option<Vec<String>>,
 ) -> Result<Value, Value> {
@@ -248,7 +309,7 @@ pub async fn config_create(
             source,
             node_ids,
             targets,
-            listen_port,
+            listen_port: None,
             dns,
             tun_excludes,
         })
@@ -258,9 +319,7 @@ pub async fn config_create(
 
 /// 就地更新一套配置。改连接方式必须新建，`connectMode` 会被拒绝。
 ///
-/// 用原始 `Request` 解析参数：只有这样才能区分 `listenPort` 的三种状态
-/// 「没传 / 传了 null / 传了数字」。Tauri 的 `Option<Option<T>>` 会把
-/// 缺失与 null 都折成 None。
+/// 用原始 `Request` 解析参数：`configId` / `name` 等允许缺省，未知字段忽略。
 #[tauri::command]
 pub async fn config_update(
     state: State<'_, Arc<AppState>>,
@@ -307,17 +366,6 @@ pub async fn config_update(
     let routing_mode = arg("routingMode", "routing_mode")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let listen_port = match arg("listenPort", "listen_port") {
-        None => None,
-        Some(Value::Null) => Some(None),
-        Some(value) => match value
-            .as_u64()
-            .and_then(|port| u16::try_from(port).ok())
-        {
-            Some(port) => Some(Some(port)),
-            None => return Err(invalid("invalid_listen_port", "listenPort 必须是数字或 null")),
-        },
-    };
     let dns = arg("dns", "dns").cloned();
     let tun_excludes = arg("tunExcludes", "tun_excludes").and_then(Value::as_array).map(|items| {
         items
@@ -348,7 +396,7 @@ pub async fn config_update(
             crate::tools::ConfigUpdateInput {
                 name,
                 routing_mode,
-                listen_port,
+                listen_port: None,
                 dns,
                 tun_excludes,
                 node_ids,
@@ -1202,5 +1250,46 @@ mod hidden_message_tests {
         let messages = crate::store::chat::messages(&conn, "ses_visible").unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "你好");
+    }
+}
+
+#[cfg(test)]
+mod proxy_port_command_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn install_store() {
+        if crate::store::global().is_none() {
+            let store = Arc::new(crate::store::Store::open_in_memory().expect("内存库"));
+            crate::store::install_global(store);
+        }
+    }
+
+    #[tokio::test]
+    async fn set_validates_and_reports_three_states() {
+        install_store();
+
+        // 被占：占用者仍活着。
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let occupied = listener.local_addr().unwrap().port();
+        let saved = proxy_port_set(json!(occupied)).await.unwrap();
+        assert_eq!(saved["port"], json!(occupied));
+        assert_eq!(saved["availability"], "occupied");
+
+        // 可绑定。
+        let free = crate::config::any_free_port().unwrap();
+        let saved = proxy_port_set(json!(free)).await.unwrap();
+        assert_eq!(saved["availability"], "free");
+
+        // 非法值全部拒绝，且不能改库。
+        for bad in [json!(0), json!(65536), json!(-1), json!(12.5), json!("8080")] {
+            let error = proxy_port_set(bad.clone()).await.unwrap_err();
+            assert_eq!(error["code"], "INVALID_ARGUMENT", "{bad}");
+            assert_eq!(error["details"]["reason"], "invalid_port", "{bad}");
+        }
+
+        let current = proxy_port_get().await.unwrap();
+        assert_eq!(current["port"], json!(free), "非法值不能改库");
+        assert_eq!(current["default_port"], json!(7890));
     }
 }

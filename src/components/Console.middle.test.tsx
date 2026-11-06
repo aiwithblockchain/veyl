@@ -107,7 +107,11 @@ function renderConsole(
   runtime: RuntimeView,
   aiReady = true,
   failedAfterConnected = false,
-  extra: { seedUpdate?: boolean; onImportNodes?: () => void } = {},
+  extra: {
+    seedUpdate?: boolean;
+    proxyPort?: number;
+    onImportNodes?: () => void;
+  } = {},
 ): HTMLElement {
   const { container } = render(
     <Console
@@ -126,6 +130,7 @@ function renderConsole(
       onNewConfig={noop}
       onImportNodes={extra.onImportNodes}
       seedUpdate={extra.seedUpdate ?? false}
+      proxyPort={extra.proxyPort}
       runtime={runtime}
       failedAfterConnected={failedAfterConnected}
     />,
@@ -166,14 +171,18 @@ describe("中间区验收用例", () => {
     );
   });
 
-  it("3 未连接代理用户：预计地址，不可复制", () => {
+  it("3 未连接代理用户：显示设置端口，不可复制", () => {
     const root = renderConsole(
-      makeConfig({ routing_mode: "proxy_selected", listen_port: 7890 }),
+      makeConfig({ routing_mode: "proxy_selected", listen_port: 9999 }),
       makeRuntime(),
+      true,
+      false,
+      { proxyPort: 8080 },
     );
     const card = body(root).querySelector(".card--proxy");
     expect(text(card)).toContain("连上后，这里会给你一个代理地址");
-    expect(text(body(root).querySelector(".proxy__addr"))).toBe("127.0.0.1:7890");
+    expect(text(body(root).querySelector(".proxy__addr"))).toBe("127.0.0.1:8080");
+    expect(text(body(root))).not.toContain("9999");
     expect(body(root).querySelector(".copy-btn")).toBeNull();
     expect(text(card)).toContain("实际端口连上后确认；被占用会自动换。");
   });
@@ -190,6 +199,55 @@ describe("中间区验收用例", () => {
     expect(body(root).querySelector(".copy-btn")).not.toBeNull();
     expect(body(root).querySelector(".copy-btn [aria-live='polite']")).not.toBeNull();
     expect(text(body(root))).not.toContain("浏览器现在能用了");
+  });
+
+  it("4b 端口被占用降级：说明里两个数字都来自字段", () => {
+    const root = renderConsole(
+      makeConfig({ routing_mode: "proxy_selected" }),
+      makeRuntime({
+        state: "running",
+        mixed_port: 8081,
+        port_fallback: { requested: 8080, actual: 8081, reason: "occupied" },
+      }),
+      true,
+      false,
+      { proxyPort: 8080 },
+    );
+    const card = body(root).querySelector(".card--proxy");
+    expect(text(body(root).querySelector(".proxy__addr"))).toBe("127.0.0.1:8081");
+    expect(text(card)).toContain(
+      "你设置的 8080 被别的软件占用了，这次用的是 8081。",
+    );
+  });
+
+  it("4d 低端口不可用：按权限原因说，不冒充被占用", () => {
+    const root = renderConsole(
+      makeConfig({ routing_mode: "proxy_selected" }),
+      makeRuntime({
+        state: "running",
+        mixed_port: 7890,
+        port_fallback: { requested: 80, actual: 7890, reason: "unavailable" },
+      }),
+      true,
+      false,
+      { proxyPort: 80 },
+    );
+    const card = body(root).querySelector(".card--proxy");
+    expect(text(card)).toContain(
+      "你设置的 80 用不了（需要管理员权限），这次用的是 7890。",
+    );
+    expect(text(card)).not.toContain("被别的软件占用了");
+  });
+
+  it("4c 正常连接：代理卡不出现顺延说明", () => {
+    const root = renderConsole(
+      makeConfig({ routing_mode: "proxy_selected" }),
+      makeRuntime({ state: "running", mixed_port: 7890 }),
+      true,
+      false,
+      { proxyPort: 7890 },
+    );
+    expect(text(body(root))).not.toContain("被别的软件占用了");
   });
 
   it("5 已连接 system_proxy + proxy_all：浏览器现在能用了", () => {

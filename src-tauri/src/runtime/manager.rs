@@ -12,7 +12,7 @@ use super::error::{RuntimeError, RuntimeResult};
 use super::health::{ClashApi, ConnectionSample, DataPlaneProbe, DirectIpProbe, ExitIpProbe, DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE};
 use super::process::{self, SpawnOptions};
 
-pub const CONTRACT_VERSION: &str = "2.3.0";
+pub const CONTRACT_VERSION: &str = "2.4.0";
 pub const EVENT_CONTRACT_VERSION: &str = "2.10.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
@@ -127,6 +127,25 @@ impl Default for HealthSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PortFallbackReason {
+    /// 用户设置的端口被别的程序占着（`AddrInUse`）。
+    Occupied,
+    /// 绑不上但不是被占：通常是 <1024 的端口没有管理员权限。
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct PortFallback {
+    /// 用户设置的端口。
+    pub requested: u16,
+    /// 本次实际监听的端口。
+    pub actual: u16,
+    /// 为什么没用设置值；界面据此说不同的话，不能按文本猜。
+    pub reason: PortFallbackReason,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeStatus {
     pub contract_version: &'static str,
@@ -137,6 +156,8 @@ pub struct RuntimeStatus {
     pub uptime_seconds: Option<u64>,
     pub config_id: Option<String>,
     pub mixed_port: Option<u16>,
+    /// 用户设置的端口被占用、本次用了别的端口时非 null；正常连接 / TUN / 未连接为 null。
+    pub port_fallback: Option<PortFallback>,
     pub config_name: Option<String>,
     pub node_id: Option<String>,
     pub node_name: Option<String>,
@@ -180,6 +201,7 @@ impl RuntimeStatus {
             uptime_seconds: input.uptime_seconds,
             config_id: input.config_id,
             mixed_port: None,
+            port_fallback: None,
             config_name: input.config_name,
             node_id: input.node_id,
             node_name: input.node_name,
@@ -329,6 +351,10 @@ pub struct StartPlan {
     pub clash_addr: String,
     pub clash_secret: String,
     pub mixed_port: u16,
+    /// 用户设置的本地代理端口。用于快照回显「设置的是哪个」；TUN 与探针为 None。
+    pub requested_port: Option<u16>,
+    /// 为什么没用设置值；`requested_port` 与实际端口相同时无意义。
+    pub fallback_reason: Option<PortFallbackReason>,
     pub config_id: Option<String>,
     pub config_name: Option<String>,
     pub node_id: Option<String>,
@@ -348,6 +374,8 @@ impl std::fmt::Debug for StartPlan {
             .field("clash_addr", &self.clash_addr)
             .field("clash_secret", &"<redacted>")
             .field("mixed_port", &self.mixed_port)
+            .field("requested_port", &self.requested_port)
+            .field("fallback_reason", &self.fallback_reason)
             .field("config_id", &self.config_id)
             .field("config_name", &self.config_name)
             .field("node_id", &self.node_id)
@@ -463,6 +491,20 @@ impl Inner {
             },
             mixed_port: if connected {
                 self.plan.as_ref().map(|p| p.mixed_port)
+            } else {
+                None
+            },
+            // 只有系统代理连接才会带用户设置端口；被占用顺延后告诉界面「设置的是哪个」。
+            port_fallback: if connected {
+                self.plan.as_ref().and_then(|p| {
+                    p.requested_port
+                        .filter(|requested| *requested != p.mixed_port)
+                        .map(|requested| PortFallback {
+                            requested,
+                            actual: p.mixed_port,
+                            reason: p.fallback_reason.unwrap_or(PortFallbackReason::Unavailable),
+                        })
+                })
             } else {
                 None
             },
@@ -2001,6 +2043,8 @@ mod tests {
             clash_addr: "127.0.0.1:1".into(),
             clash_secret: "secret".into(),
             mixed_port: 1,
+            requested_port: None,
+            fallback_reason: None,
             config_id: Some("profile-1".into()),
             config_name: None,
             node_id: None,
@@ -2081,6 +2125,8 @@ mod tests {
             clash_addr: format!("127.0.0.1:{clash_port}"),
             clash_secret: "new-secret".into(),
             mixed_port: 4321,
+            requested_port: Some(7890),
+            fallback_reason: Some(PortFallbackReason::Occupied),
             config_id: Some("profile-2".into()),
             config_name: None,
             node_id: None,
@@ -2100,6 +2146,15 @@ mod tests {
 
         assert_eq!(status.state, RuntimeState::Running);
         assert_ne!(status.pid, Some(old_pid), "切换必须换成新进程");
+        assert_eq!(
+            status.port_fallback,
+            Some(PortFallback {
+                requested: 7890,
+                actual: 4321,
+                reason: PortFallbackReason::Occupied,
+            }),
+            "设置端口与实际端口不同时必须回显降级"
+        );
         assert!(!process::is_alive(old_pid), "旧 child 必须先被终止");
         let current = manager.current_plan().await.unwrap();
         assert_eq!(current.mixed_port, 4321, "新 plan 的端口必须生效");
@@ -2133,6 +2188,8 @@ mod tests {
             clash_addr: format!("127.0.0.1:{clash_port}"),
             clash_secret: "secret".into(),
             mixed_port: 4321,
+            requested_port: None,
+            fallback_reason: None,
             config_id: Some("profile-1".into()),
             config_name: None,
             node_id: None,
@@ -2255,7 +2312,7 @@ mod tests {
         );
         assert_eq!(
             status.last_error.as_ref().unwrap().contract_version,
-            "2.3.0"
+            "2.4.0"
         );
 
         let mut restarts = 0;

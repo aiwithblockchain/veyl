@@ -227,6 +227,23 @@ export interface DefaultProfileStatus {
   removed: number;
 }
 
+/** 全局本地代理端口（设置 → 连接）。命令只给 UI 用，AI 不可调用。 */
+export const DEFAULT_PROXY_PORT = 7890;
+
+export interface ProxyPortSettings {
+  port: number;
+  /** 后端常量默认值；「恢复默认」一类文案用它，不在界面写死 7890。 */
+  defaultPort: number;
+}
+
+export type ProxyPortAvailability = "free" | "occupied" | "unavailable";
+
+export interface ProxyPortSaveResult {
+  port: number;
+  /** 保存那一刻的探测结果：可用 / 被占用 / 这台机器上用不了。 */
+  availability: ProxyPortAvailability;
+}
+
 /** UI 只用前两种；后两种留给 AI 工具，共用同一实现。 */
 export type NetRepairAction = "restore_direct" | "flush_dns";
 
@@ -433,6 +450,10 @@ export interface AgentBridge {
   defaultProfileStatus(): Promise<DefaultProfileStatus>;
   /** 拉取并应用默认配置包；不打断在线连接，下次连接生效。 */
   defaultProfileRefresh(): Promise<DefaultProfileStatus>;
+  /** 读取「本地代理端口」设置；从未设置过时后端给默认值。 */
+  proxyPortGet(): Promise<ProxyPortSettings>;
+  /** 保存「本地代理端口」；端口被占用也允许保存，只在行内提示。 */
+  proxyPortSet(port: number): Promise<ProxyPortSaveResult>;
   /** 恢复网络：撤代理 → 停运行时 → 清明文配置（不依赖 AI）。 */
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
   /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */
@@ -522,6 +543,7 @@ export function emptyRuntimeView(): RuntimeView {
     restart_count: 0,
     last_error: null,
     mixed_port: null,
+    port_fallback: null,
     connected_since: null,
     latency_ms: null,
     node_latency_ms: null,
@@ -545,6 +567,7 @@ export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): Runtime
         upstream_version: event.payload.upstream_version ?? view.upstream_version,
         last_error: event.payload.error,
         connected_since: keepConnection ? view.connected_since : null,
+        port_fallback: keepConnection ? view.port_fallback : null,
         latency_ms: keepConnection ? view.latency_ms : null,
         node_latency_ms: keepConnection ? view.node_latency_ms : null,
         traffic: keepConnection ? view.traffic : null,
@@ -625,6 +648,7 @@ export function snapshotToView(snapshot: RuntimeSnapshot): RuntimeView {
     restart_count: snapshot.restart_count,
     last_error: snapshot.last_error,
     mixed_port: snapshot.mixed_port ?? null,
+    port_fallback: snapshot.port_fallback ?? null,
     connected_since: snapshot.connected_since ?? null,
     latency_ms: snapshot.latency_ms ?? null,
     node_latency_ms: snapshot.node_latency_ms ?? null,

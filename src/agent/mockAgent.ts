@@ -10,6 +10,8 @@ import type {
   DeepSeekKeyState,
   DefaultProfileStatus,
   ImportSeedResult,
+  ProxyPortSaveResult,
+  ProxyPortSettings,
   LlmProvider,
   LlmProviderInput,
   LlmProviderTestResult,
@@ -26,7 +28,7 @@ import type {
   TunHelperState,
   TunProbeData,
 } from "./bridge";
-import { isLocalEndpoint, maskKey } from "./bridge";
+import { DEFAULT_PROXY_PORT, isLocalEndpoint, maskKey } from "./bridge";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
   AgentEvent,
@@ -180,6 +182,7 @@ export class MockAgentBridge implements AgentBridge {
     last_error: null,
     last_transition_at: now(),
     mixed_port: null,
+    port_fallback: null,
     connected_since: null,
     latency_ms: null,
     node_latency_ms: null,
@@ -227,6 +230,24 @@ export class MockAgentBridge implements AgentBridge {
       exit_ip: MOCK_EXIT_IP,
       consecutive_failures: 0,
     });
+    const configuredPort = this.mockProxyPort();
+    const fallbackMode = mockFlag("veyl.mock.portFallback");
+    const fallbackReason: "occupied" | "unavailable" | null =
+      fallbackMode === null
+        ? null
+        : fallbackMode === "unavailable"
+          ? "unavailable"
+          : "occupied";
+    const fallbackPort =
+      fallbackReason === null
+        ? null
+        : fallbackReason === "unavailable"
+          ? configuredPort === DEFAULT_PROXY_PORT
+            ? DEFAULT_PROXY_PORT + 1
+            : DEFAULT_PROXY_PORT
+          : configuredPort < 65535
+            ? configuredPort + 1
+            : null;
     this.transition("running", "process_ready", {
       pid: 48213,
       uptime_seconds: 0,
@@ -234,7 +255,15 @@ export class MockAgentBridge implements AgentBridge {
       config_name: profile.name,
       node_id: profile.id,
       node_name: profile.name,
-      mixed_port: 2080,
+      mixed_port: fallbackPort ?? configuredPort,
+      port_fallback:
+        fallbackPort === null || fallbackReason === null
+          ? null
+          : {
+              requested: configuredPort,
+              actual: fallbackPort,
+              reason: fallbackReason,
+            },
       connected_since: now(),
       latency_ms: profile.id === "prf_2" ? 68 : 42,
       node_latency_ms: profile.id === "prf_2" ? 68 : 42,
@@ -257,6 +286,7 @@ export class MockAgentBridge implements AgentBridge {
       node_id: null,
       node_name: null,
       mixed_port: null,
+      port_fallback: null,
       connected_since: null,
       latency_ms: null,
       system_proxy_enabled: false,
@@ -289,6 +319,44 @@ export class MockAgentBridge implements AgentBridge {
       added: 0,
       removed: 0,
     };
+  }
+
+  async proxyPortGet(): Promise<ProxyPortSettings> {
+    return {
+      port: this.mockProxyPort(),
+      defaultPort: DEFAULT_PROXY_PORT,
+    };
+  }
+
+  async proxyPortSet(port: number): Promise<ProxyPortSaveResult> {
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw {
+        code: "INVALID_ARGUMENT",
+        message: "请填一个 1–65535 之间的数字",
+      };
+    }
+    try {
+      localStorage.setItem("veyl.mock.proxyPort", String(port));
+    } catch {
+      // 存不了就只在这次会话里生效。
+    }
+    return {
+      port,
+      availability:
+        mockFlag("veyl.mock.proxyPort.unavailable") === "1"
+          ? "unavailable"
+          : mockFlag("veyl.mock.proxyPort.occupied") === "1"
+            ? "occupied"
+            : "free",
+    };
+  }
+
+  private mockProxyPort(): number {
+    const raw = mockFlag("veyl.mock.proxyPort");
+    const value = raw === null ? Number.NaN : Number(raw);
+    return Number.isInteger(value) && value >= 1 && value <= 65535
+      ? value
+      : DEFAULT_PROXY_PORT;
   }
 
   async defaultProfileRefresh(): Promise<DefaultProfileStatus> {
@@ -1201,6 +1269,7 @@ export class MockAgentBridge implements AgentBridge {
       node_id: null,
       node_name: null,
       mixed_port: null,
+      port_fallback: null,
       connected_since: null,
       latency_ms: null,
       system_proxy_enabled: false,

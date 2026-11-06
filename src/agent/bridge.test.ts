@@ -35,6 +35,7 @@ const SNAPSHOT: RuntimeSnapshot = {
   last_error: null,
   last_transition_at: "",
   mixed_port: 7890,
+  port_fallback: null,
   connected_since: new Date().toISOString(),
   latency_ms: 42,
   node_latency_ms: 42,

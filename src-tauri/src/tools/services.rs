@@ -206,6 +206,7 @@ fn idle_snapshot() -> Value {
         "uptime_seconds": null,
         "config_id": null,
         "mixed_port": null,
+        "port_fallback": null,
         "config_name": null,
         "node_id": null,
         "node_name": null,
@@ -494,6 +495,179 @@ fn svc_error_with_details(
         retryable: false,
         details: Some(details),
     })
+}
+
+/// 一次连接最多试几个候选端口（预检查通过后仍可能在 bind 前被抢）。
+const PORT_TRIAL_LIMIT: usize = 3;
+
+/// 本轮要试的端口：候选链里当前可用的前三个；不够就少试，不拿随机端口补位
+/// （补位会破坏「候选链确定」这个前提）。
+///
+/// `own_port` 是当前运行时正占着的端口：它马上会被 `manager.start` 停掉，
+/// 不能当成「被别的软件占用」，否则重连/切配置会白降一级。
+fn proxy_port_trials(configured: u16, own_port: Option<u16>) -> Vec<u16> {
+    let mut trials = Vec::with_capacity(PORT_TRIAL_LIMIT);
+    for port in vpn_config::proxy_port_candidates(configured) {
+        if trials.len() >= PORT_TRIAL_LIMIT {
+            break;
+        }
+        if Some(port) == own_port || vpn_config::is_port_free(port) {
+            trials.push(port);
+        }
+    }
+    // 候选链整体都不可用时才走最后一步「系统分配」，不拿随机端口把 3 个名额补满。
+    if trials.is_empty() {
+        if let Ok(port) = vpn_config::any_free_port() {
+            trials.push(port);
+        }
+    }
+    trials
+}
+
+/// Clash API 用独立端口，不能和 mixed 端口撞，也不占用户设置的端口。
+fn clash_port_for(mixed_port: u16, excluded: &[u16]) -> anyhow::Result<u16> {
+    for _ in 0..6 {
+        let port = vpn_config::pick_free_port_excluding(excluded)
+            .map_err(|e| svc_error(e.code(), e))?;
+        if port != mixed_port {
+            return Ok(port);
+        }
+    }
+    let port = vpn_config::any_free_port().map_err(|e| svc_error(e.code(), e))?;
+    if port == mixed_port {
+        return Err(svc_error("RUNTIME_PORT_UNAVAILABLE", "无法为控制面分配独立端口"));
+    }
+    Ok(port)
+}
+
+/// 启动失败是否因为端口在预检查之后被抢。
+///
+/// **只看本次尝试追加的日志段**（`start_connection` 打的标记），不读共享日志尾巴：
+/// 日志是 append 且只在超过上限时轮转，历史行里的 "address already in use"
+/// 会把任何失败都误判成端口冲突，白重试三次并掩盖真实错误。
+fn is_port_conflict(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ServiceError>()
+        .and_then(|service| service.details.as_ref())
+        .and_then(|details| details.get("port_conflict"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn log_size(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+/// 本次启动追加到日志里的内容；文件被轮转（变短）时返回 None，
+/// 宁可漏判一次竞态，也不拿历史行当本次失败。
+fn log_appended(path: &std::path::Path, offset: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len <= offset {
+        return None;
+    }
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(64 * 1024).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn is_bind_conflict_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("address already in use")
+        // Windows 的措辞；未在 Windows 真机验证过，按 Go 的 `net` 报错加一条。
+        || lower.contains("only one usage of each socket address")
+}
+
+fn port_unavailable_error(tried: &[u16]) -> anyhow::Error {
+    let tried_text = tried
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join("、");
+    svc_error_with_details(
+        "RUNTIME_PORT_UNAVAILABLE",
+        if tried_text.is_empty() {
+            "本地代理端口都不可用，请在设置里换一个端口".to_string()
+        } else {
+            format!(
+                "本地代理端口 {tried_text} 都被占用了，请在设置里换一个端口，或先关掉占用它的软件"
+            )
+        },
+        json!({ "tried_ports": tried }),
+    )
+}
+
+#[cfg(test)]
+mod port_trial_tests {
+    use super::*;
+
+    #[test]
+    fn trials_skip_taken_ports_and_are_distinct() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let taken = listener.local_addr().unwrap().port();
+        let trials = proxy_port_trials(taken, None);
+        assert!(!trials.is_empty());
+        assert!(trials.len() <= PORT_TRIAL_LIMIT);
+        assert!(!trials.contains(&taken), "被占的端口不能进候选");
+        let mut unique = trials.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), trials.len(), "候选不能重复");
+        for port in &trials {
+            assert!(vpn_config::is_port_free(*port));
+        }
+    }
+
+    #[test]
+    fn the_runtimes_own_port_is_not_treated_as_occupied() {
+        // 重连/切配置时旧进程还占着 7890，但它会在 start 前被停掉。
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let own = listener.local_addr().unwrap().port();
+        let trials = proxy_port_trials(own, Some(own));
+        assert_eq!(trials[0], own, "自己的端口必须留在候选第一位");
+    }
+
+    #[test]
+    fn bind_conflict_text_covers_both_platforms() {
+        assert!(is_bind_conflict_text(
+            "FATAL listen tcp 127.0.0.1:7890: bind: address already in use"
+        ));
+        assert!(is_bind_conflict_text(
+            "Only one usage of each socket address (protocol/network address/port) is normally permitted."
+        ));
+        assert!(!is_bind_conflict_text("FATAL something else"));
+    }
+
+    #[test]
+    fn conflict_detection_uses_the_marker_not_history() {
+        let marked = svc_error_with_details(
+            "RUNTIME_EXITED",
+            "boom",
+            json!({ "port_conflict": true }),
+        );
+        assert!(is_port_conflict(&marked));
+        let text_only = svc_error("RUNTIME_EXITED", "bind: address already in use");
+        assert!(
+            !is_port_conflict(&text_only),
+            "不能拿历史日志文本当本次冲突"
+        );
+    }
+
+    #[test]
+    fn port_unavailable_carries_the_tried_ports() {
+        let error = port_unavailable_error(&[7890, 7891, 7892]);
+        let service = error
+            .downcast_ref::<ServiceError>()
+            .expect("应当是结构化错误");
+        assert_eq!(service.code, "RUNTIME_PORT_UNAVAILABLE");
+        assert_eq!(
+            service.details.as_ref().unwrap()["tried_ports"],
+            json!([7890, 7891, 7892])
+        );
+    }
 }
 
 fn update_error(error: crate::runtime::updates::UpdateError) -> anyhow::Error {
@@ -4889,7 +5063,7 @@ impl VpnToolServices for WiredServices {
         };
 
         Ok(json!({
-            "contract_version": "3.6.1",
+            "contract_version": "3.7.0",
             "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "app_version": env!("CARGO_PKG_VERSION"),
             "platform": crate::netcfg::platform_name(),
@@ -5159,17 +5333,6 @@ impl WiredServices {
         let installed = self.ensure_runtime().await?;
         self.drop_previous_rendered_config(&config.id);
 
-        let mixed_port = match config.listen_port {
-            Some(port) => port,
-            None => vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?,
-        };
-        let mut clash_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
-        for _ in 0..5 {
-            if clash_port != mixed_port {
-                break;
-            }
-            clash_port = vpn_config::pick_free_port().map_err(|e| svc_error(e.code(), e))?;
-        }
         let clash_secret = vpn_config::random_secret();
 
         // 配置内全部节点都进 selector：Clash API 才能对任意节点测延迟，
@@ -5210,6 +5373,15 @@ impl WiredServices {
             .ok_or_else(|| svc_error("PRECONDITION_FAILED", "当前节点凭据缺失，请重新导入"))?;
 
         let started = if config.connection_mode == configs::CONNECTION_TUN {
+            // TUN 的 mixed 入站继续随机、不上报，也不使用用户设置；
+            // 只是随机时避开设置端口，避免和之后的系统代理连接抢同一个端口。
+            let configured_port = {
+                let conn = self.store.conn();
+                crate::store::settings::proxy_port(&conn)
+            };
+            let mixed_port = vpn_config::pick_free_port_excluding(&[configured_port])
+                .map_err(|e| svc_error(e.code(), e))?;
+            let clash_port = clash_port_for(mixed_port, &[configured_port])?;
             self.start_tun_connection(
                 config,
                 &descriptors,
@@ -5221,25 +5393,97 @@ impl WiredServices {
             )
             .await
         } else {
-            let input = vpn_config::BuildInput::new(
-                current_descriptor,
-                mixed_port,
-                clash_port,
-                clash_secret,
-            );
-            let value = vpn_config::build_routed_multi(&input, &descriptors, &node.id, &plan)
-                .map_err(|e| svc_error(e.code(), e))?;
-            self.start_connection(
-                &installed,
-                &config.id,
-                Some(config.id.clone()),
-                Some(config.name.clone()),
-                Some(node.id.clone()),
-                Some(node.name.clone()),
-                Some(config.route_revision),
-                &value,
-            )
-            .await
+            let configured_port = {
+                let conn = self.store.conn();
+                crate::store::settings::proxy_port(&conn)
+            };
+            // 先预检查再启动；启动时被抢（竞态）再顺延，最多三个候选。
+            // 当前运行时自己的端口会被 manager.start 先停掉，不算被占用。
+            let own_port = {
+                let state = self.manager.status().await.state;
+                if matches!(
+                    state,
+                    crate::runtime::RuntimeState::Running
+                        | crate::runtime::RuntimeState::Degraded
+                        | crate::runtime::RuntimeState::Starting
+                        | crate::runtime::RuntimeState::Restarting
+                        | crate::runtime::RuntimeState::Stopping
+                ) {
+                    self.manager.current_plan().await.map(|plan| plan.mixed_port)
+                } else {
+                    None
+                }
+            };
+            let trials = proxy_port_trials(configured_port, own_port);
+            // 设置值为什么没用上：被占还是没权限，界面要能说不同的话。
+            let mut fallback_reason = match if Some(configured_port) == own_port {
+                crate::config::PortAvailability::Free
+            } else {
+                crate::config::port_availability(configured_port)
+            } {
+                crate::config::PortAvailability::Free => None,
+                crate::config::PortAvailability::Occupied => {
+                    Some(crate::runtime::PortFallbackReason::Occupied)
+                }
+                crate::config::PortAvailability::Unavailable => {
+                    Some(crate::runtime::PortFallbackReason::Unavailable)
+                }
+            };
+            let mut tried = Vec::new();
+            let mut success: Option<Value> = None;
+            let mut hard_error: Option<anyhow::Error> = None;
+            for mixed_port in trials {
+                tried.push(mixed_port);
+                let clash_port = clash_port_for(mixed_port, &[configured_port])?;
+                let input = vpn_config::BuildInput::new(
+                    current_descriptor.clone(),
+                    mixed_port,
+                    clash_port,
+                    clash_secret.clone(),
+                );
+                let value = vpn_config::build_routed_multi(&input, &descriptors, &node.id, &plan)
+                    .map_err(|e| svc_error(e.code(), e))?;
+                match self
+                    .start_connection(
+                        &installed,
+                        &config.id,
+                        Some(config.id.clone()),
+                        Some(config.name.clone()),
+                        Some(node.id.clone()),
+                        Some(node.name.clone()),
+                        Some(config.route_revision),
+                        Some(configured_port),
+                        fallback_reason,
+                        &value,
+                    )
+                    .await
+                {
+                    Ok(data) => {
+                        success = Some(data);
+                        break;
+                    }
+                    Err(error) if is_port_conflict(&error) => {
+                        // 设置值预检查时是空的、启动时被抢：原因改成「被占用」。
+                        if mixed_port == configured_port {
+                            fallback_reason =
+                                Some(crate::runtime::PortFallbackReason::Occupied);
+                        }
+                        log::warn!("本地端口 {mixed_port} 启动时被占用，顺延下一个候选");
+                    }
+                    Err(error) => {
+                        hard_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            match (success, hard_error) {
+                (Some(data), _) => Ok(data),
+                (None, Some(error)) => Err(error),
+                (None, None) => Err(self.attach_runtime_log_tail(
+                    port_unavailable_error(&tried),
+                    &installed.version,
+                )),
+            }
         };
 
         match started {
@@ -5459,6 +5703,7 @@ impl WiredServices {
             "mode": "tun",
             "pid": pid,
             "mixed_port": null,
+            "port_fallback": null,
             "config_id": config.id,
             "config_name": config.name,
             "routing_mode": config.routing_mode,
@@ -5483,6 +5728,9 @@ impl WiredServices {
         node_id: Option<String>,
         node_name: Option<String>,
         applied_route_revision: Option<i64>,
+        // 用户设置的代理端口；用于快照回显「设置的是哪个」。TUN 不经过这里。
+        requested_port: Option<u16>,
+        fallback_reason: Option<crate::runtime::PortFallbackReason>,
         value: &Value,
     ) -> anyhow::Result<Value> {
         let guard = RenderedConfigGuard::new(self.config_dir(), config_key.to_string());
@@ -5505,15 +5753,21 @@ impl WiredServices {
         let (mixed_port, clash_port, secret) = Self::config_endpoints(&value)
             .ok_or_else(|| svc_error("PRECONDITION_FAILED", "本地配置缺少端口或 secret"))?;
 
+        // 冲突判定只看本次启动追加的日志段，历史行不参与。
+        let log_path = StartPlan::log_path(&self.manager.cfg, &installed.version);
+        let log_offset = log_size(&log_path);
+
         let plan = StartPlan {
             version: installed.version.clone(),
             binary: installed.binary.clone(),
             config_path: path,
             work_dir: installed.dir.clone(),
-            log_path: StartPlan::log_path(&self.manager.cfg, &installed.version),
+            log_path: log_path.clone(),
             clash_addr: format!("127.0.0.1:{clash_port}"),
             clash_secret: secret,
             mixed_port,
+            requested_port,
+            fallback_reason,
             config_id: db_config_id.clone(),
             config_name,
             node_id,
@@ -5537,7 +5791,15 @@ impl WiredServices {
         let started = match self.manager.start(plan).await {
             Ok(status) => status,
             Err(error) => {
-                let error = self.abort_connection(svc_error(error.code(), error));
+                let conflict = log_appended(&log_path, log_offset)
+                    .map(|text| is_bind_conflict_text(&text))
+                    .unwrap_or(false);
+                let error = if conflict {
+                    svc_error_with_details(error.code(), error, json!({ "port_conflict": true }))
+                } else {
+                    svc_error(error.code(), error)
+                };
+                let error = self.abort_connection(error);
                 return Err(self.attach_runtime_log_tail(error, &installed.version));
             }
         };
@@ -6948,6 +7210,10 @@ mod config_service_tests {
     async fn a_tun_snapshot_has_every_key_the_proxy_snapshot_has() {
         let dir = temp_dir();
         let services = services(&dir);
+        {
+            let conn = services.store.conn();
+            crate::store::settings::set_proxy_port(&conn, 8080).unwrap();
+        }
         services.tun.force_running_for_test(6161, Some("cfg_tun"));
 
         let tun = services.runtime_status().await.unwrap();
@@ -6979,6 +7245,11 @@ mod config_service_tests {
         assert!(tun["traffic"].is_null());
         assert!(tun["connections"].is_null());
         assert!(tun["latency_ms"].is_null());
+        assert!(tun["mixed_port"].is_null(), "TUN 不上报 mixed 端口");
+        assert!(
+            tun["port_fallback"].is_null(),
+            "TUN 不读设置端口，也不存在降级"
+        );
     }
 }
 
@@ -7239,6 +7510,12 @@ mod main_flow_tests {
     #[tokio::test]
     async fn create_activate_connect_status_disconnect() {
         let h = harness();
+        // 与端口降级测试并行：用独立设置端口，避免都去抢 7890。
+        let configured = crate::config::any_free_port().unwrap();
+        {
+            let conn = h.services.store.conn();
+            crate::store::settings::set_proxy_port(&conn, configured).unwrap();
+        }
         let dir = h.dir.clone();
         // 端口监听必须在连接之前起：配置一落盘它就去占 mixed / clash 两个端口。
         let watcher = spawn_port_watcher(dir.clone());
@@ -7386,6 +7663,88 @@ mod main_flow_tests {
             "断开后运行时进程 {pid} 仍然活着"
         );
 
+        drop(watcher);
+    }
+
+    async fn create_config_with_node(
+        services: &WiredServices,
+        name: &str,
+        password: &str,
+    ) -> String {
+        let created = services.config_create(auto_port_input(name)).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "东京".into(),
+                server: "198.51.100.30".into(),
+                port: 8388,
+                password: password.into(), // secret-scan:allow 测试夹具口令
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        config_id
+    }
+
+    /// 手动停掉运行时，绕开 `runtime_stop` 的 TUN XPC（同主流程测试的降级说明）。
+    async fn stop_runtime(h: &Harness) {
+        let _ = h.services.restore_system_proxy();
+        h.services.manager.set_system_proxy_enabled(false).await;
+        let _ = h.services.manager.stop().await;
+    }
+
+    #[tokio::test]
+    async fn configured_proxy_port_is_used_without_fallback() {
+        let h = harness();
+        let watcher = spawn_port_watcher(h.dir.clone());
+        let configured = crate::config::any_free_port().unwrap();
+        {
+            let conn = h.services.store.conn();
+            crate::store::settings::set_proxy_port(&conn, configured).unwrap();
+        }
+        let config_id = create_config_with_node(&h.services, "固定端口", "pw-fixed").await;
+
+        let connected = h
+            .services
+            .runtime_start(Some(config_id))
+            .await
+            .unwrap();
+        assert_eq!(connected["state"], "running", "{connected}");
+        assert_eq!(connected["mixed_port"], json!(configured));
+        assert!(
+            connected["port_fallback"].is_null(),
+            "用了设置值就不该有降级：{connected}"
+        );
+
+        stop_runtime(&h).await;
+        drop(watcher);
+    }
+
+    #[tokio::test]
+    async fn occupied_configured_port_falls_back_and_reports_occupied() {
+        let h = harness();
+        let watcher = spawn_port_watcher(h.dir.clone());
+        // 占住 7890；若它已被别的进程占着，也是同一个场景。
+        let _held = std::net::TcpListener::bind(("127.0.0.1", 7890)).ok();
+        {
+            let conn = h.services.store.conn();
+            crate::store::settings::set_proxy_port(&conn, 7890).unwrap();
+        }
+        let config_id = create_config_with_node(&h.services, "占用端口", "pw-busy").await;
+
+        let connected = h
+            .services
+            .runtime_start(Some(config_id))
+            .await
+            .unwrap();
+        let actual = connected["mixed_port"].as_u64().unwrap() as u16;
+        assert_ne!(actual, 7890, "设置端口被占时必须顺延");
+        assert_eq!(connected["port_fallback"]["requested"], json!(7890));
+        assert_eq!(connected["port_fallback"]["actual"], json!(actual));
+        assert_eq!(connected["port_fallback"]["reason"], "occupied");
+
+        stop_runtime(&h).await;
         drop(watcher);
     }
 }

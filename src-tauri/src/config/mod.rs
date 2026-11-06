@@ -6,7 +6,11 @@ pub use builder::{
     build, build_routed, build_routed_multi, BuildInput, ConnectMode, NodeDescriptor,
     ProtocolConfig, PROXY_TAG,
 };
-pub use ports::{any_free_port, is_port_free, pick_free_port, random_secret};
+pub use ports::{
+    any_free_port, is_port_free, pick_free_port, pick_free_port_excluding, port_availability,
+    proxy_port_candidates, random_secret, PortAvailability, DEFAULT_PROXY_PORT,
+    FALLBACK_PROXY_PORTS,
+};
 pub use validate::{
     check, install, install_profile, remove_all_profile_configs,
     remove_all_profile_configs_checked, remove_profile_config,

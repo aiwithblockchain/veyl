@@ -1370,6 +1370,37 @@ body[data-resizing] {
   flex: none;
 }
 
+/* 本地代理端口 */
+.settings-port {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.settings-port__prefix {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.settings-port__input {
+  width: 5.5em;
+  padding: 6px 8px;
+  border: 1px solid var(--hair-strong);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: right;
+}
+
+.settings-port__input:focus {
+  outline: 2px solid var(--cobalt);
+  outline-offset: 1px;
+}
+
 /* TUN 诊断（仅 debug 构建） */
 
 .settings-row--stack {
@@ -3456,6 +3487,10 @@ body[data-resizing] {
   font-size: 13.5px;
   line-height: 1.55;
   color: var(--ink-3);
+}
+
+.card__action--warn {
+  color: var(--amber);
 }
 
 .proxy__row {

@@ -1,6 +1,6 @@
 # 契约：Runtime Manager
 
-> 契约版本：`2.3.0`
+> 契约版本：`2.4.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 冻结前评审：PM / Alice / Bob
 > 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5、`docs/tun-mode.md`
@@ -17,7 +17,7 @@
 - 所有 JSON 字段使用 **snake_case**；所有时间是 **ISO 8601 UTC，带 `Z` 后缀**（`2026-11-02T09:15:03Z`），不带毫秒之外的其他格式。
 - 所有错误码是 **大写下划线**（`RUNTIME_START_TIMEOUT`）。
 - `contract_version` 出现在每一个对外结构里；破坏性变更必须升次版本号并同步本文档。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.3.0`），升版时全文替换。实现侧只允许有一个常量对应本文件，不得按结构分别发不同版本号。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.4.0`），升版时全文替换。实现侧只允许有一个常量对应本文件，不得按结构分别发不同版本号。
 
 **P1 范围**：单版本、单进程、系统代理模式。多版本并行、TUN、外部 MCP 宿主不在本契约内。
 
@@ -116,7 +116,7 @@ type HealthCheckName =
   | "traffic";
 
 type HealthSnapshot = {
-  contract_version: "2.3.0";
+  contract_version: "2.4.0";
   process: boolean;
   clash_api: boolean;
   data_plane: boolean;
@@ -156,7 +156,7 @@ type TrafficStats = {
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.3.0";
+  contract_version: "2.4.0";
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
@@ -169,6 +169,11 @@ type RuntimeSnapshot = {
   node_name: string | null;          // 2.0 新增
   connected_since: string | null;    // 本次进入 running 的 ISO 8601 UTC 时刻
   mixed_port: number | null;         // 本地 mixed 入站实际监听端口；tun 模式为 null
+  port_fallback: {                   // 用户设置端口没用上、本次使用别的端口时非 null
+    requested: number;               // settings.proxy_port
+    actual: number;                  // = mixed_port
+    reason: "occupied" | "unavailable"; // 被占用 / 环境绑不上（如 <1024 无权限）
+  } | null;
   latency_ms: number | null;         // 出口 IP 探测往返耗时
   node_latency_ms: number | null;    // 2.3：到节点的真实延迟（Clash API delay 测试）
   direct_ip: string | null;          // 不经代理的直连出口 IP
@@ -202,7 +207,8 @@ type RuntimeSnapshot = {
 | `config_id` / `config_name` | 当前连接所用的配置 | 与 `node_id` 同生同灭；未连接时为 `null`。2.0 之前叫 `profile_id` / `profile_name`，**没有默认配置包的特殊情形**——没有配置就报 `no_config`，不存在 `config_id = null` 但 `config_name` 非空的合法状态 |
 | `node_id` / `node_name` | 本次实际连接的节点 | 未连接时为 `null`；连接中切换节点后立即变新值（热切换不重启进程） |
 | `connected_since` | 本次进入 `running` 的时刻，ISO 8601 UTC | 仅在 `running` / `degraded` 下非 `null`；与 `uptime_seconds` **同源**：`uptime_seconds ≈ now − connected_since`。两者不得互相矛盾 |
-| `mixed_port` | 本次实际监听的本地 mixed 入站端口 | `mode = "system_proxy"` 且状态为 `running` / `degraded` 时非 `null`；`tun` 模式恒为 `null`。**禁止写常量**（1.0.10 的缺陷是把 2080 硬编码在 UI 里，而实际端口每次随机） |
+| `mixed_port` | 本次实际监听的本地 mixed 入站端口 | `mode = "system_proxy"` 且状态为 `running` / `degraded` 时非 `null`；`tun` 模式恒为 `null`。端口来自用户设置 + 候选链（§5.1），**禁止写常量** |
+| `port_fallback` | 用户设置的端口没用上、本次改用别的端口 | `mode = "system_proxy"`、`running` / `degraded` 且 `actual != requested` 时非 `null`；TUN 与未连接恒为 `null`。`requested` 是 `settings.proxy_port`，`actual` 等于 `mixed_port`，`reason` 只有 `"occupied"` / `"unavailable"` 两个值 |
 | `latency_ms` | 最近一次**出口 IP 探测**的往返耗时（毫秒） | 未探测/探测失败为 `null`。**不是**节点 ping 延迟 |
 | `node_latency_ms` | 最近一次 **Clash API delay 测试**的毫秒数：`GET /proxies/node-<id>/delay?url=<generate_204>`，由 sing-box 自己去连节点 | 未连接、还没测到、或当前没有选中节点（`node_id = null`）时为 `null`。**与 `latency_ms` 是两个指标，不得互相填充**：`latency_ms` 是含 DNS + TLS 的整次 HTTP 往返（实测常在 2000 ms 量级），`node_latency_ms` 是节点本身的可达性与往返。断开、失败、节点热切换后必须复位为 `null`，不能把上一个节点的数字留在面板上 |
 | `applied_route_revision` | 本次连接生成配置时的 `configs.route_revision` | 建连时读入并随进程保存；未连接为 `null`。与库里的 `route_revision` 比较：相等 = 分流规则已生效，不等 = 改了但当前连接还没用上，UI 显示「下次连接生效」 |
@@ -220,7 +226,7 @@ type RuntimeSnapshot = {
 
 ```ts
 type AivpnError = {
-  contract_version: "2.3.0";
+  contract_version: "2.4.0";
   code: AivpnErrorCode;
   message: string;        // 面向用户，可本地化
   retryable: boolean;
@@ -342,7 +348,7 @@ UI 必须能区分「未探测」与「探测失败」——前者在 P1 不会�
 | 监听地址 | `127.0.0.1`，禁止 `0.0.0.0` / `::` |
 | 端口范围 | 49152–65535 |
 | 端口选取 | 随机试选 → 以 `SO_REUSEADDR` 绑定探测 → 立即释放 → 交给 sing-box |
-| 端口冲突重试 | 最多 5 次，全失败返回 `RUNTIME_PORT_UNAVAILABLE` |
+| 端口冲突重试 | 本地代理（mixed）端口：`[用户设置] → 7890–7899 → 系统分配`，先预检查；启动时被抢（bind 竞态）最多试 3 个候选，全失败返回 `RUNTIME_PORT_UNAVAILABLE`（`details.tried_ports`）。Clash API 端口仍随机选取，且不得与 mixed 端口相同 |
 | `secret` | 32 字节 CSPRNG → base64url 无填充（43 字符） |
 | 认证头 | `Authorization: Bearer <secret>` |
 | `secret` 生命周期 | 仅在本次进程存活期间有效；`stopping` 时清除内存中的副本 |
@@ -454,7 +460,7 @@ type ClashConnections = {
 | `RUNTIME_BUSY` | 正在 `starting` / `restarting` / `stopping` | 是 | `{ "state": "starting", "retry_after_ms": 1000 }` |
 | `RUNTIME_START_TIMEOUT` | 10s 内 Clash API 未就绪 | 是 | `{ "elapsed_ms": 10000 }` |
 | `RUNTIME_CRASH_LOOP` | 重启次数耗尽 | 否 | `{ "restart_count": 3 }` |
-| `RUNTIME_PORT_UNAVAILABLE` | 5 次都选不到可用端口 | 是 | `{ "tried_ports": [...] }` |
+| `RUNTIME_PORT_UNAVAILABLE` | 候选链最多 3 个候选都失败 | 是 | `{ "tried_ports": [...] }` |
 | `RUNTIME_CONFIG_INVALID` | `sing-box check` 失败 | 否 | `{ "field": "outbounds[0].uuid", "stderr": "..." }` |
 | `RUNTIME_BINARY_MISSING` | 版本目录里没有可执行文件 | 否 | `{ "version": "1.14.4", "path": "..." }` |
 | `RUNTIME_BINARY_NOT_EXECUTABLE` | 有文件但无法执行（权限/架构） | 否 | `{ "os_error": "..." }` |
@@ -586,6 +592,15 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 ---
 
 ## 12. 变更记录
+
+### 2.4.0（2026-11-06，本地代理端口可设置）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 契约版本升到 `2.4.0` | 元数据 | 端口设置落地 |
+| 2 | §5.1 端口冲突重试改为：本地代理端口候选链 `[设置] → 7890–7899 → 系统分配`，预检查 + bind 竞态最多 3 个候选；Clash API 端口仍随机且不得与 mixed 相同 | 语义变更 | 用户设置的端口被占时顺延并说明，不再随机换掉 |
+| 3 | `RUNTIME_PORT_UNAVAILABLE` 从「已定义未实现」变为真实现：`details.tried_ports` 为本轮试过的端口 | 实现约束 | 预检查通过后 bind 前仍可能被抢 |
+| 4 | `RuntimeSnapshot.port_fallback`（`commands.md` §7.3）：设置端口没用上、本次用别的值时回显 `{ requested, actual, reason }`；`reason` 区分 `occupied`（被占）与 `unavailable`（环境绑不上，如 <1024 无权限）；TUN 与未连接为 null | 字段扩展 | 界面不能把权限失败说成「被别的软件占用了」 |
 
 ### 2.3.0（2026-11-05，节点延迟与出口延迟分开）
 

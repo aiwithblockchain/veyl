@@ -707,6 +707,8 @@ const UI_ONLY_COMMANDS = [
   "node_probe_all",
   "node_probe_cancel",
   "node_probe_snapshot",
+  "proxy_port_get",
+  "proxy_port_set",
 ];
 
 const pascalCase = (s) => s.replace(/(^|_)([a-z0-9])/g, (_, __, c) => c.toUpperCase());
@@ -1756,6 +1758,193 @@ check(
   },
   { advisory: true },
 );
+
+// --- 17：本地代理端口 ---
+
+function mdSection(md, startMarker, endMarker) {
+  const s = md.indexOf(startMarker);
+  if (s < 0) return null;
+  const e = md.indexOf(endMarker, s + startMarker.length);
+  return md.slice(s, e < 0 ? undefined : e);
+}
+
+check("本地代理端口两条命令的形状与原因枚举（契约）", () => {
+  const md = read("docs/contracts/commands.md");
+  const cmds = contractCommands();
+  const problems = [];
+
+  for (const [name, params] of [
+    ["proxy_port_get", []],
+    ["proxy_port_set", ["port"]],
+  ]) {
+    const row = cmds.get(name);
+    if (!row) {
+      problems.push(`commands.md §2 缺少 ${name}`);
+      continue;
+    }
+    const actual = parseParamList(row.params);
+    if (actual.join(",") !== params.join(",")) {
+      problems.push(`${name} 入参应为 ${params.join(", ") || "空"}，实际是 ${actual.join(", ")}`);
+    }
+  }
+
+  const s = mdSection(md, "### 7.11", "\n## ");
+  if (!s) return [...problems, "commands.md 找不到 §7.11"];
+  if (!/type ProxyPortGetData = \{\s*port: number;\s*default_port: number;?\s*\};/.test(s)) {
+    problems.push("ProxyPortGetData 必须是 { port: number; default_port: number }");
+  }
+  if (
+    !/availability\s*:\s*"free"\s*\|\s*"occupied"\s*\|\s*"unavailable"/.test(s)
+  ) {
+    problems.push('ProxyPortSetData.availability 必须是 "free" | "occupied" | "unavailable"');
+  }
+  for (const phrase of ["写死", "没有第四种"]) {
+    if (!s.includes(phrase)) problems.push(`§7.11 缺少「${phrase}」`);
+  }
+
+  // RuntimeSnapshot 的 port_fallback 也要带 reason，取值同样是那两个。
+  for (const [rel, label] of [
+    ["docs/contracts/commands.md", "commands.md §7.3"],
+    ["docs/contracts/runtime.md", "runtime.md"],
+  ]) {
+    const text = read(rel);
+    const m = text.match(/port_fallback\s*:\s*\{([\s\S]*?)\}\s*\|\s*null/);
+    if (!m) {
+      problems.push(`${label} 缺少 port_fallback { ... } | null`);
+      continue;
+    }
+    for (const f of ["requested", "actual", "reason"]) {
+      if (!new RegExp(`\\b${f}\\s*:`).test(m[1])) problems.push(`${label} 的 port_fallback 缺少 ${f}`);
+    }
+    const vals = [...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
+    if (vals.join(",") !== "occupied,unavailable") {
+      problems.push(`${label} 的 port_fallback.reason 只能有 occupied | unavailable，实际是 ${vals.join(" | ")}`);
+    }
+  }
+  return problems;
+});
+
+check("配置端口字段不再可写（契约）", () => {
+  const problems = [];
+  const md = read("docs/contracts/commands.md");
+  const cmds = contractCommands();
+
+  for (const name of ["config_create", "config_update"]) {
+    const row = cmds.get(name);
+    if (!row) problems.push(`commands.md §2 缺少 ${name}`);
+    else if (/listenPort/.test(row.params)) problems.push(`${name} 的入参仍列着 listenPort`);
+  }
+  for (const heading of ["### 3.2", "### 3.3"]) {
+    const s = mdSection(md, heading, "\n### ");
+    if (!s) {
+      problems.push(`commands.md 找不到 ${heading}`);
+      continue;
+    }
+    if (/listenPort\?/.test(s.split("\n")[0])) problems.push(`${heading} 的签名仍列着 listenPort`);
+  }
+  // listen_port 在 ConfigSummary 上（ConfigDetail 继承它），所以在全文里找标注。
+  if (!/^\s*listen_port\s*:[^\n]*废弃/m.test(md)) {
+    problems.push("ConfigSummary.listen_port（ConfigDetail 继承）必须保留并标注废弃");
+  }
+
+  const tools = read("docs/contracts/tools.md");
+  for (const [heading, label] of [
+    ["### 4.24 `ConfigCreate`", "ConfigCreate"],
+    ["### 4.25 `ConfigUpdate`", "ConfigUpdate"],
+  ]) {
+    const s = mdSection(tools, heading, "\n### ");
+    if (!s) {
+      problems.push(`tools.md 找不到 ${label}`);
+      continue;
+    }
+    const json = s.match(/```json([\s\S]*?)```/);
+    if (!json) {
+      problems.push(`tools.md ${label} 缺少 schema 代码块`);
+      continue;
+    }
+    if (/listen_port/.test(json[1])) problems.push(`tools.md ${label} 的 schema 仍有 listen_port`);
+  }
+  return problems;
+});
+
+check("端口冲突规则与各契约版本引用一致（契约）", () => {
+  const problems = [];
+  const runtime = read("docs/contracts/runtime.md");
+  for (const phrase of ["最多试 3 个候选", "tried_ports", "RUNTIME_PORT_UNAVAILABLE"]) {
+    if (!runtime.includes(phrase)) problems.push(`runtime.md 缺少「${phrase}」`);
+  }
+  for (const stale of ["最多 5 次", "重试 5 次"]) {
+    if (runtime.includes(stale)) problems.push(`runtime.md 仍保留旧承诺「${stale}」`);
+  }
+
+  const versionOf = (rel) => {
+    const m = read(rel).match(/契约版本：`([^`]+)`/);
+    return m ? m[1] : null;
+  };
+  const runtimeV = versionOf("docs/contracts/runtime.md");
+  if (runtimeV && !read("docs/contracts/events.md").includes(`当前 \`${runtimeV}\``)) {
+    problems.push(`events.md 引用的 runtime.md 版本不是 ${runtimeV}`);
+  }
+
+  const commands = read("docs/contracts/commands.md");
+  const matrix = new Map();
+  for (const m of commands.matchAll(/^\|\s*`(contracts\/[a-z-]+\.md|data-model\.md)`\s*\|\s*\*\*([^*]+)\*\*/gm)) {
+    matrix.set(m[1], m[2]);
+  }
+  for (const [key, rel, label] of [
+    ["contracts/commands.md", "docs/contracts/commands.md", "commands.md"],
+    ["contracts/events.md", "docs/contracts/events.md", "events.md"],
+    ["contracts/runtime.md", "docs/contracts/runtime.md", "runtime.md"],
+    ["contracts/tools.md", "docs/contracts/tools.md", "tools.md"],
+  ]) {
+    const actual = versionOf(rel);
+    if (matrix.has(key) && actual && matrix.get(key) !== actual) {
+      problems.push(`§15.5 矩阵写 ${label} ${matrix.get(key)}，文件头是 ${actual}`);
+    }
+  }
+  return problems;
+});
+
+check(
+  "proxy_port_set 返回 availability 三态（实现）",
+  () => {
+    const rs = read("src-tauri/src/agent/commands.rs");
+    const start = rs.indexOf("pub async fn proxy_port_set");
+    if (start < 0) return ["agent/commands.rs 找不到 proxy_port_set"];
+    const body = rs.slice(start, rs.indexOf("\n}", start));
+    const problems = [];
+    for (const value of ["free", "occupied", "unavailable"]) {
+      if (!body.includes(`"${value}"`)) {
+        problems.push(`proxy_port_set 的 availability 缺少 ${value}`);
+      }
+    }
+    if (/"occupied":/.test(body)) problems.push("proxy_port_set 不该再返回 occupied 布尔");
+    return problems;
+  },
+  { advisory: true },
+);
+
+check("config_create / config_update 不再接受 listenPort（实现）", () => {
+  const rs = read("src-tauri/src/agent/commands.rs");
+  const problems = [];
+
+  const createStart = rs.indexOf("pub async fn config_create");
+  if (createStart < 0) {
+    problems.push("agent/commands.rs 找不到 config_create");
+  } else {
+    const sig = rs.slice(createStart, rs.indexOf(") ->", createStart));
+    if (/listen_port/.test(sig)) problems.push("config_create 的形参仍有 listen_port");
+  }
+
+  const updateStart = rs.indexOf("pub async fn config_update");
+  if (updateStart < 0) {
+    problems.push("agent/commands.rs 找不到 config_update");
+  } else {
+    const body = rs.slice(updateStart, rs.indexOf("\n}", updateStart));
+    if (/arg\(\s*"listenPort"/.test(body)) problems.push("config_update 仍在解析 listenPort");
+  }
+  return problems;
+});
 
 // --- 输出 ---
 

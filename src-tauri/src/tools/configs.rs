@@ -89,14 +89,7 @@ fn summarise_detail(data: &Value) -> String {
         .map(|items| items.iter().collect())
         .unwrap_or_default();
     let current = data.get("current_node_id").and_then(Value::as_str);
-    let mut lines = vec![format!(
-        "配置「{name}」：{} 个节点，监听 {}",
-        nodes.len(),
-        data.get("listen_port")
-            .and_then(Value::as_u64)
-            .map(|port| port.to_string())
-            .unwrap_or_else(|| "自动".into())
-    )];
+    let mut lines = vec![format!("配置「{name}」：{} 个节点", nodes.len())];
     for node in nodes {
         let id = node.get("node_id").and_then(Value::as_str).unwrap_or("-");
         let node_name = node.get("name").and_then(Value::as_str).unwrap_or("-");
@@ -184,7 +177,7 @@ impl Tool for ConfigDetailTool {
     }
 
     fn description(&self) -> &str {
-        "读取一套配置的节点集、DNS、端口与布局。不含密码；要测连通性用 NodeProbe。\n配置 ID 只用于你自己匹配，不要念给用户。"
+        "读取一套配置的节点集、DNS 与布局。不含密码；要测连通性用 NodeProbe。\n配置 ID 只用于你自己匹配，不要念给用户。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -275,7 +268,6 @@ impl Tool for ConfigCreateTool {
                 "source": { "type": "string", "enum": ["seed", "empty"] },
                 "node_ids": { "type": "array", "items": { "type": "string" } },
                 "targets": { "type": "array", "items": { "type": "string" } },
-                "listen_port": { "type": "integer", "minimum": 1000, "maximum": 65535 },
                 "dns": { "type": "object" },
                 "tun_excludes": { "type": "array", "items": { "type": "string" } }
             },
@@ -369,10 +361,7 @@ impl Tool for ConfigCreateTool {
                         .map(str::to_string)
                         .collect()
                 }),
-                listen_port: input
-                    .get("listen_port")
-                    .and_then(Value::as_u64)
-                    .and_then(|port| u16::try_from(port).ok()),
+                listen_port: None,
                 dns: input.get("dns").cloned(),
                 tun_excludes: input.get("tun_excludes").and_then(Value::as_array).map(|items| {
                     items
@@ -429,7 +418,7 @@ impl Tool for ConfigUpdateTool {
     }
 
     fn description(&self) -> &str {
-        "编辑一套配置（名称 / 分流 / DNS / 端口 / 节点集）。\
+        "编辑一套配置（名称 / 分流 / DNS / 节点集）。\
          没有 connect_mode：改接管方式必须新建配置。node_ids 是整体替换。\n配置 ID 只用于你自己匹配，不要念给用户。"
     }
 
@@ -444,7 +433,6 @@ impl Tool for ConfigUpdateTool {
                 "config_id": { "type": "string" },
                 "name": { "type": "string", "maxLength": 40 },
                 "routing_mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
-                "listen_port": { "type": "integer", "minimum": 1000, "maximum": 65535 },
                 "dns": { "type": "object" },
                 "tun_excludes": { "type": "array", "items": { "type": "string" } },
                 "node_ids": { "type": "array", "items": { "type": "string" } },
@@ -496,11 +484,7 @@ impl Tool for ConfigUpdateTool {
                             )
                         }
                     },
-                    listen_port: input
-                        .get("listen_port")
-                        .and_then(Value::as_u64)
-                        .and_then(|port| u16::try_from(port).ok())
-                        .map(Some),
+                    listen_port: None,
                     dns: input.get("dns").cloned(),
                     tun_excludes: input
                         .get("tun_excludes")

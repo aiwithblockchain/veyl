@@ -1,6 +1,6 @@
 # 数据模型
 
-> 版本：`3`（对应契约 `commands.md` 2.3.1）
+> 版本：`4`（对应契约 `commands.md` 2.12.0 / `runtime.md` 2.4.0）
 > 日期：2026-11-03
 > 范围：配置、节点、问题、布局，以及它们与 `secrets.enc`、种子缓存的关系
 > 依据：`docs/configs-and-nav.md` §3、§8，`docs/config-execution.md` §6–§10，`docs/issue-management.md` §3、`docs/center-panel.md` §3
@@ -73,7 +73,7 @@ CREATE TABLE configs (
     connection_mode   TEXT NOT NULL CHECK (connection_mode IN ('system_proxy', 'tun')),
     -- direct：本地直连 / proxy_all：全部走 VPN / proxy_selected：指定服务走 VPN（批 3）
     routing_mode      TEXT NOT NULL CHECK (routing_mode IN ('direct', 'proxy_all', 'proxy_selected')),
-    -- 本机 mixed 入站端口。NULL = 由运行时自动挑选。
+    -- ⚠️ 废弃：仅保留旧数据 / 回滚；连接不再读它。本地代理端口来自 settings.proxy_port。
     -- tun 模式恒为 NULL——接管全部不需要代理端口。
     listen_port       INTEGER CHECK (listen_port BETWEEN 1 AND 65535),
     -- DNS 候选：{"mode":"auto"|"custom","local":[...],"remote":[...]}
@@ -100,7 +100,7 @@ CREATE INDEX idx_configs_last_used ON configs (last_used_at DESC);
 
 | 列 | 规则 |
 |---|---|
-| `listen_port` | `NULL` = 自动；1000–65535 是应用层限制（表只校验 1–65535，避免把产品策略写死进 schema）。`tun` 必须 `NULL` |
+| `listen_port` | **已废弃**：仅旧数据与回滚使用，连接不再读。本地代理端口只有一个来源——`settings.proxy_port`（默认 7890）。`tun` 行必须 `NULL` |
 | `dns_json` | 空数组 = 「按国家自动选」，**不预填常量**。常量会被当成用户的选择，从此不跟随国家变化 |
 | `tun_excludes_json` | 只存**用户补充**的网段；`10.0.0.0/8` 等固定排除表写死在生成器，避免每行配置重复一份 |
 | `route_targets_json` | 分类 id 数组，仅 `routing_mode = 'proxy_selected'` 使用；空数组表示还没选目标 |
@@ -346,7 +346,7 @@ CREATE TABLE rules_state (
 
 | 表 | 作用 |
 |---|---|
-| `settings` | `key`/`value`。已知键：`llm_active_provider`。旧 `onboarding_completed` 随引导页删除，无写入方 |
+| `settings` | `key`/`value`。已知键：`llm_active_provider`、`proxy_port`（本地代理端口，十进制字符串；缺失/损坏时读回 `7890`，读不写库）。旧 `onboarding_completed` 随引导页删除，无写入方 |
 | `runtime_versions` | 已安装的 sing-box 版本与状态 |
 | `proxy_backup` | 系统代理备份，E3 重置网络的依据；单行 |
 | `catalog_cache` | 远端目录缓存（AI 工具仍可读；`catalog_list_nodes` 命令已删除） |
@@ -547,6 +547,13 @@ CREATE TABLE rules_state (
 ---
 
 ## 11. 变更记录
+
+### 4（2026-11-06，本地代理端口设置）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | `settings` 新增键 `proxy_port`：十进制字符串；缺失或损坏时读回 `7890`，读不写库 | 键新增 |
+| 2 | `configs.listen_port` 标注废弃：仅保留旧数据与回滚，连接不再读取；端口来源改为全局设置 | 废弃 |
 
 ### 3（2026-11-04，批 3 修订）
 

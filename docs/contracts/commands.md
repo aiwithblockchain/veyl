@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.11.0`
+> 契约版本：`2.12.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -128,8 +128,8 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | # | 命令 | 入参 | 返回 | 状态 |
 |---|---|---|---|---|
 | 1 | `config_list` | `{}` | `ConfigListData` | **2.0 新增** |
-| 2 | `config_create` | `{ name, connectMode, routingMode, targets?, source?, nodeIds?, listenPort?, dns?, tunExcludes? }` | `ConfigDetail` | **2.0 新增** |
-| 3 | `config_update` | `{ configId, name?, routingMode?, targets?, listenPort?, dns?, tunExcludes?, nodeIds? }` | `ConfigDetail` | **2.0 新增** |
+| 2 | `config_create` | `{ name, connectMode, routingMode, targets?, source?, nodeIds?, dns?, tunExcludes? }` | `ConfigDetail` | **2.0 新增；2.12.0 移除 `listenPort`** |
+| 3 | `config_update` | `{ configId, name?, routingMode?, targets?, dns?, tunExcludes?, nodeIds? }` | `ConfigDetail` | **2.0 新增；2.12.0 移除 `listenPort`** |
 | 4 | `config_delete` | `{ configId }` | `ConfigDeleteData` | **2.0 新增** |
 | 5 | `config_activate` | `{ configId, confirmDisconnect? }` | `ConfigActivateData` | **2.0 新增** |
 | 6 | `config_detail` | `{ configId }` | `ConfigDetail` | **2.0 新增** |
@@ -191,6 +191,8 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 62 | `node_probe_all` | `{ configId?, nodeIds? }` | `NodeProbeAllData` | **2.8.0 新增（仅 UI）；2.10.0 增节点子集** |
 | 63 | `node_probe_cancel` | `{ runId }` | `{ cancelled: boolean }` | **2.8.0 新增（仅 UI）** |
 | 64 | `node_probe_snapshot` | `{ configId? }` | `NodeProbeSnapshotData` | **2.8.0 新增（仅 UI）** |
+| 65 | `proxy_port_get` | `{}` | `{ port, default_port }` | **2.12.0 新增（仅 UI）** |
+| 66 | `proxy_port_set` | `{ port }` | `{ port, availability }` | **2.12.0 新增（仅 UI）；可用性三态，保存始终成功** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -222,7 +224,7 @@ type ConfigSummary = {
   connect_mode: ConfigMode;          // system_proxy = 只给代理地址；tun = 接管全部
   routing_mode: RoutingMode;
   node_count: number;
-  listen_port: number | null;        // system_proxy：本机代理端口；null = 自动。tun 恒为 null
+  listen_port: number | null;        // ⚠️ 废弃：仅回显旧数据；连接端口来自全局设置 proxy_port
   is_active: boolean;
   current_node_id: string | null;    // 节点集为空时为 null
   created_at: number;                // Unix 毫秒
@@ -262,7 +264,7 @@ type ConfigDetail = ConfigSummary & {
 1. 同一时刻最多一个 `is_active = true` 的配置（数据库层用部分唯一索引兜底）。
 2. `node_count` 是 `config_nodes` 的实时计数，不是缓存列。
 3. `current_node_id` 必须是该配置节点集里的一个；节点被删时置 `null`。
-4. `connect_mode = "tun"` 时 `listen_port` 恒为 `null`；`system_proxy` 时 `listen_port` 可为配置值或 `null`（自动）。`tun_excludes` 只在 `tun` 下允许非空。
+4. `connect_mode = "tun"` 时 `listen_port` 恒为 `null`。**`listen_port` 已废弃**：列与返回值保留只为旧数据/回滚，连接不再读它；本地代理端口只有一个来源——全局设置 `proxy_port`（`proxy_port_get` §7.11）。`tun_excludes` 只在 `tun` 下允许非空。
 
 ### 3.1 `config_list {}` → `ConfigListData`
 
@@ -278,7 +280,7 @@ type ConfigListData = {
 - 空列表是合法状态，返回 `configs: []`，**不报错**。空态由 UI 渲染（`docs/configs-and-nav.md` §2.1）。
 - 列表里**不返回节点明细**，避免左栏为 N 个配置各拉一遍；要节点看 `config_detail`。
 
-### 3.2 `config_create { name, connectMode, routingMode, targets?, source?, nodeIds?, listenPort?, dns?, tunExcludes? }` → `ConfigDetail`
+### 3.2 `config_create { name, connectMode, routingMode, targets?, source?, nodeIds?, dns?, tunExcludes? }` → `ConfigDetail`
 
 | 参数 | 必填 | 规则 |
 |---|---|---|
@@ -288,9 +290,10 @@ type ConfigListData = {
 | `targets` | 否 | 分类 id 数组，仅 `proxy_selected` 有意义；id 不在分类目录 → `NOT_FOUND / category_unknown` |
 | `source` | 否 | `"seed"`：绑定当前种子里的全部节点；与 `nodeIds` **互斥** |
 | `nodeIds` | 否 | 绑定已有节点，顺序即节点顺序 |
-| `listenPort` | 否 | 仅 `system_proxy`；1000–65535。`tun` 传了 → `INVALID_ARGUMENT`，`details.reason = "listen_port_not_allowed"` |
 | `dns` | 否 | `DnsConfig`；省略 = `{ mode: "auto", local: [], remote: [] }`。`custom` 时 `local` 至少 1 条，地址必须是合法 IP |
 | `tunExcludes` | 否 | 仅 `tun`；CIDR 字符串数组，≤ 32 项。格式非法 → `INVALID_ARGUMENT`，`details.reason = "invalid_cidr"` |
+
+**`listenPort` 已移除**：本地代理端口是全局设置（`proxy_port_set`，§7.11），不属于配置。`ConfigDetail.listen_port` 只为旧数据回显保留并标注废弃，界面不读它。
 
 规则：
 
@@ -312,18 +315,19 @@ type ConfigListData = {
 
 错误：`INVALID_ARGUMENT`、`CONFLICT`、`NOT_FOUND`、`PRECONDITION_FAILED`、`UNSUPPORTED`、`INTERNAL`。
 
-### 3.3 `config_update { configId, name?, routingMode?, targets?, listenPort?, dns?, tunExcludes?, nodeIds? }` → `ConfigDetail`
+### 3.3 `config_update { configId, name?, routingMode?, targets?, dns?, tunExcludes?, nodeIds? }` → `ConfigDetail`
 
 | 字段 | 可改 | 说明 |
 |---|---|---|
 | `name` | ✅ | 同样的非空 / ≤ 40 / 不重名校验 |
 | `routingMode` | ✅ | 只影响下一次生成配置；**不在线切换**（在线切换走 `route_set_mode`，G2） |
 | `targets` | ✅ | 整套替换；切到 `proxy_selected` 时必须非空 |
-| `listenPort` | ✅ | 仅 `system_proxy` 配置；改端口在下一次连接生效 |
 | `dns` | ✅ | 整体替换；`custom` 的校验同 §3.2 |
 | `tunExcludes` | ✅ | 仅 `tun` 配置 |
 | `nodeIds` | ✅ | **整体替换**节点集，顺序即新顺序；`current_node_id` 不在新集合里时落到第一个 |
 | `connectMode` | ❌ | **没有这个参数**。带上它 → `INVALID_ARGUMENT`，`details.reason = "connect_mode_immutable"` |
+
+**`listenPort` 已移除**：`config_update` 不再接受它，端口只在设置里改（§7.11）。
 
 - **改连接方式必须新建一套配置**（`docs/configs-and-nav.md` §4）：system_proxy 与 tun 是两种完全不同的接管方式，就地改会让「我刚才明明配好了」变成「它自己变了」。
 - `routingMode = "proxy_selected"` 时 `targets` 必须非空（同 §3.2）。
@@ -518,11 +522,11 @@ type ProxyParams = {
 
 - `host` **恒为 `127.0.0.1`**，不给局域网开关（`docs/user-flows.md`「选只给我一个代理地址之后给什么」）。
 - `port_source`：
-  - `runtime`：运行时在跑，`port` 是**实际监听**的端口（`RuntimeSnapshot.mixed_port`）。这是唯一能拿去填软件的值。
-  - `configured`：未连接，但配置里显式设了 `listenPort`。
-  - `pending`：未连接且端口是自动分配，此刻**不存在**可用端口，`port = null`。
+  - `runtime`：运行时在跑，`port` 是**实际监听**的端口（`RuntimeSnapshot.mixed_port`）。这是唯一能拿去填软件的值。设置了端口但被占用顺延时，界面用 `RuntimeSnapshot.port_fallback` 说明「设置的是哪个」。
+  - `configured`：未连接。`port` 是**用户设置值**（`proxy_port_get`，默认 7890）。这是用户自己填过的数，不是预测。
+  - `pending`：**已废弃**，不再产生。端口只有一个来源（全局设置），未连接时也有确定值。
 - `reason`：`tun_mode`（active 配置是接管全部，不需要代理地址）、`not_running`、`no_config`。
-- **端口被占用时自动顺延，并如实回显**：`runtime` 来源必须是实际值，不得回显配置里的期望值。卡片写一个、实际跑另一个，是三级用户会直接踩进去的坑。
+- **端口被占用时自动顺延，并如实回显**：候选链 `[设置值] → 7890–7899 → 系统分配`；`runtime` 来源必须是实际值，不得回显设置里的期望值。降级时 `RuntimeSnapshot.port_fallback = { requested, actual, reason }`，界面按 `reason` 说明「被占用」或「环境绑不上」。
 - 成功后**不发事件**。端口变化由 `runtime-state-changed` 的 `snapshot.mixed_port` 推送，UI 收到后重渲染卡片，不再轮询本命令。
 
 ### 4.6 `node_probe_all { configId?, nodeIds? }` → `NodeProbeAllData`
@@ -817,7 +821,7 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.3.0";
+  contract_version: "2.4.0";
   state: RuntimeState;                // runtime.md §2.1，七态不变
   mode: "system_proxy" | "tun" | null;
   pid: number | null;
@@ -829,6 +833,11 @@ type RuntimeSnapshot = {
   node_name: string | null;           // 2.0 新增
   connected_since: string | null;     // ISO 8601 UTC
   mixed_port: number | null;
+  port_fallback: {                    // 用户设置的端口没用上、本次用了别的；其余为 null
+    requested: number;                // 设置值
+    actual: number;                   // 本次实际监听
+    reason: "occupied" | "unavailable"; // 被占用 / 环境绑不上（如 <1024 无权限）
+  } | null;
   latency_ms: number | null;          // 出口 IP 探测耗时，不是节点 ping
   node_latency_ms: number | null;     // 2.3：到节点的真实延迟（Clash API delay 测试）
   direct_ip: string | null;           // 不经代理测得的直连出口 IP
@@ -849,6 +858,7 @@ type RuntimeSnapshot = {
 - `traffic` 为 `null` 表示**没有数据**（未连接 / 刚连上还没采到 / TUN 模式），不是 0 字节；采样失败保留上一次的值。数据源、频率与速率算法见 `runtime.md` §2.4。
 - `config_id` / `node_id` 与 `connected_since` 同生同灭：只在 `running` / `degraded` 下非 `null`。
 - 字段恒存在，无值写 `null`，**不得省略键**。
+- `port_fallback` 只在 `system_proxy`、已连接（`running` / `degraded`）且 `actual != requested` 时非 `null`；TUN 与未连接恒为 `null`。`reason` 只有 `"occupied"`（被别的程序占着）与 `"unavailable"`（环境绑不上，如 <1024 无管理员权限）两个值，**写死**；界面按 `reason` 说不同的话，不能按文本猜。
 
 ### 7.4 `net_repair { action, port? }` → `NetRepairResult`
 
@@ -1117,6 +1127,41 @@ type TunProbeData = {
 - **只在 debug 构建注册**到 `invoke_handler`；release 没有这条命令，也不在 `tools.md` 的工具总表里——AI 无法调用。
 - TUN 未连接 → `PRECONDITION_FAILED`。只读：不改路由、不改连接。
 - 用于「连上但网络不通」的二分：先看 `node` 与 `https`，再看 `utun` 的关键段覆盖；详见 `docs/tun-diagnostics.md`。
+
+### 7.11 本地代理端口（仅 UI）
+
+```ts
+type ProxyPortGetData = { port: number; default_port: number };
+type ProxyPortSetData = {
+  port: number;
+  availability: "free" | "occupied" | "unavailable";   // 保存那一刻的探测结果
+};
+```
+
+| 命令 | 入参 | 返回 | 规则 |
+|---|---|---|---|
+| `proxy_port_get` | `{}` | `ProxyPortGetData` | 返回**用户设置值**；从未设置过返回默认 `7890`。`default_port` 恒为 `7890`，给界面画「恢复默认」。**读不写库**；不返回占用状态（打开设置那刻的占用会过期）。 |
+| `proxy_port_set` | `{ port: number }` | `ProxyPortSetData` | 整数 1–65535；不满足 → `INVALID_ARGUMENT / invalid_port`。**<1024 不拒绝**；**当前被占用也不拒绝**，`availability` 是保存那一刻实测的三态结果，给界面决定显示哪句提示。 |
+
+`availability` 只有三个取值，**写死，没有第四种**：
+
+| 取值 | 含义 | 界面 |
+|---|---|---|
+| `"free"` | 保存那一刻可绑定 | 不提示，连接时大概率直接用它 |
+| `"occupied"` | 端口被别的程序占着（`AddrInUse`，临时状态，允许保存） | 「这个端口现在被占用了，连接时会自动顺延」 |
+| `"unavailable"` | 不是被占用，而是当前环境绑不上（如 <1024 无管理员权限、系统保留端口） | 「这个端口现在用不了，连接时会自动顺延」 |
+
+- 出现契约外的取值按 `"unavailable"` 处理，不得自行扩出「其他」。
+- 保存始终成功；三态只用于界面提示，不改变保存结果。
+- 连接时 `RuntimeSnapshot.port_fallback.reason` 用同样两个原因值（`occupied` / `unavailable`），但那是**连接时的降级事实**，与保存时的探测是两件事。
+
+- 存储：`settings` 表键 `proxy_port`，十进制字符串；全局一个，不按配置。键缺失或值损坏 → 读回 `7890`（`data-model.md` §3）。
+- **端口只影响 `system_proxy` 连接**。TUN 的 mixed 入站继续随机、不上报（`runtime.md` §2.5.1）；探针运行时避开这个端口。
+- 连接时的候选链：`[设置值] → 7890–7899 依次 → 系统分配`，去重保序；**不记忆**上一次降级的结果。设置值没用上时顺延，`RuntimeSnapshot.port_fallback` 回显 `{ requested, actual, reason }`（§7.3）。
+- **运行时每次连接前自己重读 `settings.proxy_port`**，不依赖 UI 传值：设置值是 App 层状态，连接必须和库对齐。
+- 竞态（预检查通过后 bind 前被抢）：顺延到下一个候选，最多试 3 个；全失败 → `RUNTIME_PORT_UNAVAILABLE`，`details.tried_ports` 是本轮试过的端口（`runtime.md` §6.2）。
+- **不发事件**：设置值由前端 App 层持有，保存成功后回显返回值即可（与 `events.md` 保持一致，不新增事件）。
+- AI 不可调用：不在任何工具 schema 里，模型不能改端口。
 
 ---
 
@@ -1642,12 +1687,13 @@ type RulesStatus = {
 | `core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback` | **无**（UI 专用，见 §7.10） | — |
 | `core_upgrade` | `CoreUpgrade`（**唯一有确认点的工具**，见 `tools.md` §4.45） | **必须共用**，且必须用户逐字确认 |
 | `tun_helper_info` / `tun_helper_restart` | **无**（UI 专用，见 §7.8.1–§7.8.2） | — |
+| `proxy_port_get` / `proxy_port_set` | **无**（UI 专用，见 §7.11；端口是用户自己的设置） | — |
 
-> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback` 与 `tun_helper_info` / `tun_helper_restart`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
+> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
-`tools.md` 已升到 3.6.0，上表的工具名与它一一对应（§0.2）。
+`tools.md` 已升到 3.7.0，上表的工具名与它一一对应（§0.2）。
 
 ---
 
@@ -1713,11 +1759,11 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.11.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` |
+| `contracts/commands.md` | **2.12.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` |
 | `contracts/events.md` | **2.10.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 |
-| `contracts/runtime.md` | **2.3.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` |
-| `contracts/tools.md` | **3.6.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 |
-| `data-model.md` | **3** | 批 0 + 批 3 表 + 种子排除表 |
+| `contracts/runtime.md` | **2.4.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 |
+| `contracts/tools.md` | **3.7.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` |
+| `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
 | `contracts/routing.md` | **1.2.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 |
 | `contracts/tun-backend.md` | **1.0.7** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
@@ -1731,6 +1777,18 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.12.0（2026-11-06，本地代理端口设置）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.12.0`；新增 `proxy_port_get` / `proxy_port_set`（仅 UI，AI 不可调用） | 命令新增 | 端口每次随机，用户填过的地址重连就失效 |
+| 2 | `RuntimeSnapshot` 增 `port_fallback: { requested, actual, reason } \| null`；只在该端口没用上时非 null，`reason` 区分 `occupied` / `unavailable` | 字段扩展 | 降级时要说清「设置的是哪个、为什么没用上」 |
+| 3 | §4.5 `proxy_params.port_source`：`configured` 改为全局设置值；`pending` 废弃 | 语义变更 | 端口只有一个来源，未连接时也有确定值 |
+| 4 | `config_create` / `config_update` 移除 `listenPort` 入参；`ConfigDetail.listen_port` 保留回显并标注废弃，列不删 | 参数删除 | AI 还能写配置端口时，设置里的值会静默不生效 |
+| 5 | §7.11 写明候选链、预检查、最多 3 个候选、`RUNTIME_PORT_UNAVAILABLE.details.tried_ports`、TUN 不使用该端口、探针避开该端口 | 说明 | — |
+| 6 | §15.5 矩阵同步：本文件 2.12.0、`runtime.md` 2.4.0、`tools.md` 3.7.0、`data-model.md` 4 | 元数据 | — |
+| 7 | §7.11 `ProxyPortSetData` 改为 `{ port, availability: "free" \| "occupied" \| "unavailable" }`，三个值写死；`occupied` 与 `port_fallback` 两个字段删除 | 字段调整 | 两个字段说同一件事，保留会漂；三态直接映射探测结果 |
 
 ### 2.11.0（2026-11-06，配置详情带布局版本）
 
