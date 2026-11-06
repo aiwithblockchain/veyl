@@ -13,6 +13,7 @@ import type {
 } from "../agent/bridge";
 import { isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import type { RuntimeView } from "../agent/protocol";
+import type { ConfigConnectMode } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
 import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
 import { useFocusTrap } from "../ui/focus";
@@ -23,7 +24,6 @@ import { RuntimeUpgradeRow, useRuntimeUpgrade } from "./RuntimeUpgrade";
 import { TunDiagnosticsRow } from "./TunDiagnostics";
 import { TunHelperRow, useTunHelper } from "./TunHelper";
 
-const DEFAULT_SOURCE_URL = "https://meshnetprotocol.github.io/bootstrap.json";
 const APP_VERSION = "0.1.0";
 
 interface Props {
@@ -31,6 +31,8 @@ interface Props {
   bridge: AgentBridge;
   runtime: RuntimeView;
   defaultProfile: DefaultProfileStatus | null;
+  /** 当前配置的连接方式；只用于展示，不参与任何命令。 */
+  connectMode?: ConfigConnectMode | null;
   onClose: () => void;
   onNotice: (notice: { level: "info" | "error"; text: string }) => void;
   importing: boolean;
@@ -552,6 +554,7 @@ export function Settings({
   bridge,
   runtime,
   defaultProfile,
+  connectMode = null,
   onClose,
   onNotice,
   importing,
@@ -1089,7 +1092,7 @@ export function Settings({
                       void save();
                     }}
                   >
-                    {state.masked ? (
+                    {state.masked && activeProviderId === "deepseek" ? (
                       <p className="settings-warning">
                         更换 Key 会重建当前会话，对话上下文将清空。
                       </p>
@@ -1172,6 +1175,9 @@ export function Settings({
             ) : (
               <div className="settings-providers">
                 <p className="settings-risk">请求会发往你填写的端点，请确认你信任它。</p>
+                <p className="settings-note">
+                  切换当前使用的服务会开始一个新会话，之前对话的上下文不会带过去。
+                </p>
 
                 {providersLoading ? (
                   <p className="settings-muted">读取 provider…</p>
@@ -1459,17 +1465,17 @@ export function Settings({
 
             <div className="settings-row">
               <div>
-                <div className="settings-row__label">代理模式</div>
-                <div className="settings-row__value">系统代理</div>
-              </div>
-              <div className="settings-row__aside">
-                <button
-                  type="button"
-                  className="ask-ai"
-                  onClick={() => askAi(ADVANCED_FIELDS.proxyMode, "系统代理")}
-                >
-                  问 AI
-                </button>
+                <div className="settings-row__label">当前连接</div>
+                <div className="settings-row__value">
+                  {connectMode === "tun"
+                    ? "全部流量"
+                    : connectMode === "system_proxy"
+                      ? "只给代理地址"
+                      : "还没有配置"}
+                </div>
+                {connectMode ? (
+                  <p className="settings-note">这套配置的连接方式，在新建配置时选择。</p>
+                ) : null}
               </div>
             </div>
 
@@ -1480,26 +1486,17 @@ export function Settings({
                   {formatPort(runtime.mixed_port)}
                 </div>
               </div>
-              <button
-                type="button"
-                className="ask-ai"
-                onClick={() =>
-                  askAi(
-                    ADVANCED_FIELDS.mixedPort,
-                    runtime.mixed_port === null ? "（未连接）" : String(runtime.mixed_port),
-                  )
-                }
-              >
-                问 AI
-              </button>
             </div>
 
             <div className="settings-row">
               <div>
                 <div className="settings-row__label">恢复直连</div>
                 <div className="settings-row__value">
-                  撤销系统代理并停止运行时；不处理接管残留。
+                  撤销系统代理并停止运行时；不会断开「全部流量」。
                 </div>
+                <p className="settings-note">
+                  要断开「全部流量」，回主界面点「断开 VPN」。
+                </p>
               </div>
               <button type="button" className="btn btn--ghost" onClick={onRestoreNetwork}>
                 恢复直连
@@ -1583,34 +1580,6 @@ export function Settings({
             />
             <TunHelperRow controller={tunHelper} activeConnection={connected} />
 
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">测试节点地址</div>
-                <div className="settings-row__value num">{DEFAULT_SOURCE_URL}</div>
-              </div>
-              <button
-                type="button"
-                className="ask-ai"
-                onClick={() => askAi(ADVANCED_FIELDS.defaultSource, DEFAULT_SOURCE_URL)}
-              >
-                问 AI
-              </button>
-            </div>
-
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">日志级别</div>
-                <div className="settings-row__value">info（固定）</div>
-              </div>
-              <button
-                type="button"
-                className="ask-ai"
-                onClick={() => askAi("日志级别", "info")}
-              >
-                问 AI
-              </button>
-            </div>
-
             <div className="settings-subhead">诊断</div>
 
             <div className="settings-row">
@@ -1621,13 +1590,6 @@ export function Settings({
                 </div>
               </div>
               <div className="settings-row__aside">
-                <button
-                  type="button"
-                  className="ask-ai"
-                  onClick={() => askAi("诊断信息", "当前应用与运行时状态")}
-                >
-                  问 AI
-                </button>
                 <button
                   type="button"
                   className="btn btn--ghost"
@@ -1683,15 +1645,6 @@ export function Settings({
               <div>
                 <div className="settings-row__label">版本</div>
                 <div className="settings-row__value num">v{APP_VERSION}</div>
-              </div>
-            </div>
-
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">事件源</div>
-                <div className="settings-row__value">
-                  {bridge.mode === "mock" ? "MOCK 事件源" : "已连接 Host"}
-                </div>
               </div>
             </div>
 

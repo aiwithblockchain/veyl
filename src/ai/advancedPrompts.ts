@@ -9,9 +9,7 @@ export function advancedPrompt(field: string, value: string): string {
 }
 
 export const ADVANCED_FIELDS = {
-  proxyMode: "代理模式",
-  mixedPort: "本地端口",
-  defaultSource: "默认配置源",
+  defaultSource: "测试节点",
   apiProtocol: "API 类型与 Base URL",
   model: "模型选择",
 } as const;

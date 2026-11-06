@@ -141,7 +141,7 @@ describe("设置页测试节点行", () => {
 
     expect(await screen.findByText("测试节点")).toBeTruthy();
     expect(within(seedRow()).getByRole("button", { name: "检查更新" })).toBeTruthy();
-    expect(screen.getByText("测试节点地址")).toBeTruthy();
+    expect(screen.queryByText("测试节点地址")).toBeNull();
     expect(screen.getByText(/v3 · 12 个节点 · 3 小时前检查/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "网络" }));

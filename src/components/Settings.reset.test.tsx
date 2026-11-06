@@ -175,7 +175,7 @@ describe("强制重置网络的纯函数", () => {
 });
 
 describe("设置 → 高级 → 诊断", () => {
-  it("网络分区改叫「恢复直连」，说明不再暗示它会清理接管残留", async () => {
+  it("网络分区改叫「恢复直连」，说明写清它不会断开「全部流量」", async () => {
     const bridge = makeBridge();
     renderSettings(bridge);
     await screen.findByRole("button", { name: "强制重置网络" });
@@ -183,7 +183,10 @@ describe("设置 → 高级 → 诊断", () => {
     fireEvent.click(screen.getByRole("button", { name: "网络" }));
     expect(screen.getByText("恢复直连", { selector: ".settings-row__label" })).toBeTruthy();
     expect(
-      screen.getByText("撤销系统代理并停止运行时；不处理接管残留。"),
+      screen.getByText("撤销系统代理并停止运行时；不会断开「全部流量」。"),
+    ).toBeTruthy();
+    expect(
+      screen.getByText("要断开「全部流量」，回主界面点「断开 VPN」。"),
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "恢复网络" })).toBeNull();
   });

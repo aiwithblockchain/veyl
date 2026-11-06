@@ -1137,6 +1137,7 @@ export default function App() {
         bridge={bridge}
         runtime={runtime}
         defaultProfile={defaultProfile}
+        connectMode={vpn.activeConfig?.connect_mode ?? null}
         onClose={closeSettings}
         onNotice={setAppNotice}
         importing={importing}
