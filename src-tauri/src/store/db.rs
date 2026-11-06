@@ -23,13 +23,19 @@ impl Store {
                 source,
             })?;
         }
+        create_database_file(&path)?;
+        // 老库可能是 0644：先纠正再打开，别把凭据写进一个别人可读的文件。
+        restrict_permissions(&path)?;
         let conn = Connection::open(&path)?;
         configure(&conn)?;
         migrations::migrate(&conn)?;
-        Ok(Self {
+        let store = Self {
             conn: Mutex::new(conn),
             path,
-        })
+        };
+        // -wal / -shm 由 SQLite 自己按 umask 建，写完才有，建库后再纠一次。
+        restrict_permissions(store.path())?;
+        Ok(store)
     }
 
     pub fn open_in_memory() -> StoreResult<Self> {
@@ -63,6 +69,62 @@ fn configure(conn: &Connection) -> StoreResult<()> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(Duration::from_secs(5))?;
     Ok(())
+}
+
+/// 库里有节点口令与凭据备份，文件只给本人读写。先以 0600 建，避免「按 umask 建完再 chmod」的读取窗口。
+#[cfg(unix)]
+fn create_database_file(path: &Path) -> StoreResult<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(source) => Err(StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+#[cfg(not(unix))]
+fn create_database_file(_path: &Path) -> StoreResult<()> {
+    Ok(())
+}
+
+/// 已有的库文件也要纠正，否则老用户会一直停在 0644。
+#[cfg(unix)]
+fn restrict_permissions(path: &Path) -> StoreResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    for file in [
+        path.to_path_buf(),
+        sidecar(path, "-wal"),
+        sidecar(path, "-shm"),
+    ] {
+        match std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(StoreError::Io { path: file, source }),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &Path) -> StoreResult<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 /// 出口统一 ISO 8601 UTC + `Z`；库里存毫秒，别把裸时间戳丢给 UI。
@@ -195,6 +257,42 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert!(path.exists());
         assert_eq!(store.path(), path);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_database_file_is_private_and_legacy_modes_are_corrected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("veyl-store-{:016x}", rand::random::<u64>()));
+        let path = dir.join("veyl.db");
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = sidecar(&path, suffix);
+            if sidecar.exists() {
+                assert_eq!(
+                    std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777,
+                    0o600,
+                    "{suffix} 不是 0600"
+                );
+            }
+        }
+        drop(store);
+
+        // 老用户库：打开时也要纠正到 0600。
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
