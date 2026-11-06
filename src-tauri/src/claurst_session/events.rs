@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::agent::app_handle;
 use crate::tools::{AivpnError, Display, NextAction};
 
-pub const CONTRACT_VERSION: &str = "2.9.0";
+pub const CONTRACT_VERSION: &str = "2.10.0";
 
 pub const EV_MESSAGE_CHUNK: &str = "message-chunk";
 pub const EV_THINKING_CHUNK: &str = "thinking-chunk";
@@ -23,6 +23,7 @@ pub const EV_CORE_UPGRADE_PROGRESS: &str = "core-upgrade-progress";
 pub const EV_CORE_UPGRADE_FINISHED: &str = "core-upgrade-finished";
 pub const EV_JOB_PROGRESS: &str = "job-progress";
 pub const EV_ASK_USER_QUESTION: &str = "ask-user-question";
+pub const EV_LAYOUT_UPDATED: &str = "layout-updated";
 
 const RESULT_LIMIT: usize = 8 * 1024;
 
@@ -180,8 +181,21 @@ impl SessionEmitter {
     }
 }
 
-fn truncate_result(text: &str) -> (String, bool) {
-    if text.len() <= RESULT_LIMIT {
+/// 布局落库后通知中间区。`revision` 由 `store::layout::set` 返回，UI 用它丢弃迟到事件。
+pub fn layout_updated(config_id: &str, revision: i64, layout: &Value) {
+    app_handle::emit(
+        EV_LAYOUT_UPDATED,
+        json!({
+            "contract_version": CONTRACT_VERSION,
+            "config_id": config_id,
+            "revision": revision,
+            "layout": layout,
+            "emitted_at": now(),
+        }),
+    );
+}
+
+fn truncate_result(text: &str) -> (String, bool) {    if text.len() <= RESULT_LIMIT {
         return (text.to_string(), false);
     }
     let mut cut = RESULT_LIMIT;

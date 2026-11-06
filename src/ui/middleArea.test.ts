@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import type { ConfigDetail, HealthSnapshot, RuntimeView } from "../agent/protocol";
+import { describe, expect, it, vi } from "vitest";
+import type {
+  ConfigDetail,
+  HealthSnapshot,
+  Layout,
+  RuntimeView,
+} from "../agent/protocol";
 import { CONTRACT_VERSION } from "../agent/protocol";
 import { emptyRuntimeView } from "../agent/bridge";
 import {
@@ -12,6 +17,7 @@ import {
   isProxyUser,
   middleBlocks,
   middleLevel,
+  resolveLayoutBlocks,
 } from "./middleArea";
 
 const HEALTHY: HealthSnapshot = {
@@ -62,6 +68,7 @@ function makeConfig(over: Partial<ConfigDetail> = {}): ConfigDetail {
     dns: { mode: "auto", local: [], remote: [] },
     tun_excludes: [],
     layout: null,
+    layout_revision: null,
     ...over,
   } as ConfigDetail;
 }
@@ -386,5 +393,131 @@ describe("middleBlocks 块矩阵", () => {
       true,
     );
     expect(blocks[0]).toMatchObject({ kind: "proxy_card", address: null });
+  });
+});
+
+function layoutOf(blocks: Layout["blocks"]): Layout {
+  return { version: 1, blocks };
+}
+
+const NO_SEED_UPDATE = { hasSeedUpdate: false };
+
+describe("resolveLayoutBlocks", () => {
+  it("认识的块按布局顺序生成，内容从本地事实读", () => {
+    const config = makeConfig({ routing_mode: "proxy_selected", listen_port: 7890 });
+    const blocks = resolveLayoutBlocks(
+      layoutOf([{ type: "proxy_card" }, { type: "empty_hint" }]),
+      makeRuntime(),
+      config,
+      NO_SEED_UPDATE,
+    );
+    expect(blocks.map((block) => block.kind)).toEqual(["proxy_card", "empty_hint"]);
+    expect(blocks[0]).toMatchObject({ address: "127.0.0.1:7890" });
+    expect(blocks[1]).toMatchObject({ tone: "idle" });
+  });
+
+  it("不认识的块跳过，不影响其它块", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const blocks = resolveLayoutBlocks(
+      layoutOf([
+        { type: "banner" } as unknown as Layout["blocks"][number],
+        { type: "empty_hint" },
+      ]),
+      makeRuntime(),
+      makeConfig(),
+      NO_SEED_UPDATE,
+    );
+    expect(blocks.map((block) => block.kind)).toEqual(["empty_hint"]);
+    expect(warn).toHaveBeenCalledWith("[layout] 不认识的块类型：banner");
+    warn.mockRestore();
+  });
+
+  it("issue_card 是叠加层：布局里的这一块跳过并记日志", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const blocks = resolveLayoutBlocks(
+      layoutOf([{ type: "issue_card" }]),
+      makeRuntime(),
+      makeConfig(),
+      NO_SEED_UPDATE,
+    );
+    expect(blocks).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("proxy_card 只给本机代理用户：TUN 配置跳过", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const blocks = resolveLayoutBlocks(
+      layoutOf([{ type: "proxy_card" }]),
+      makeRuntime({ state: "running", mixed_port: 7890 }),
+      makeConfig({ connect_mode: "tun" }),
+      NO_SEED_UPDATE,
+    );
+    expect(blocks).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("source_choice 只在没有节点时生成", () => {
+    const withNodes = resolveLayoutBlocks(
+      layoutOf([{ type: "source_choice" }]),
+      makeRuntime(),
+      makeConfig(),
+      NO_SEED_UPDATE,
+    );
+    expect(withNodes).toEqual([]);
+
+    const empty = resolveLayoutBlocks(
+      layoutOf([{ type: "source_choice" }]),
+      makeRuntime(),
+      makeConfig({ nodes: [], node_count: 0 }),
+      NO_SEED_UPDATE,
+    );
+    expect(empty).toEqual([{ kind: "source_choice" }]);
+  });
+
+  it("reachability 只用 targets：去空白、去重、忽略非字符串", () => {
+    const blocks = resolveLayoutBlocks(
+      layoutOf([
+        {
+          type: "reachability",
+          props: { targets: [" ChatGPT ", "", 3, "ChatGPT", "Claude Code"] },
+        },
+      ]),
+      makeRuntime({ state: "running", mixed_port: 7890 }),
+      makeConfig(),
+      NO_SEED_UPDATE,
+    );
+    expect(blocks).toEqual([
+      { kind: "reachability", targets: ["ChatGPT", "Claude Code"], connected: true },
+    ]);
+  });
+
+  it("reachability 没有可用 targets 时不生成", () => {
+    const blocks = resolveLayoutBlocks(
+      layoutOf([{ type: "reachability", props: { targets: [] } }]),
+      makeRuntime(),
+      makeConfig(),
+      NO_SEED_UPDATE,
+    );
+    expect(blocks).toEqual([]);
+  });
+
+  it("update_hint 只在新版本确实存在时生成", () => {
+    const none = resolveLayoutBlocks(
+      layoutOf([{ type: "update_hint" }]),
+      makeRuntime(),
+      makeConfig(),
+      NO_SEED_UPDATE,
+    );
+    expect(none).toEqual([]);
+
+    const some = resolveLayoutBlocks(
+      layoutOf([{ type: "update_hint" }]),
+      makeRuntime(),
+      makeConfig(),
+      { hasSeedUpdate: true },
+    );
+    expect(some).toEqual([{ kind: "update_hint" }]);
   });
 });

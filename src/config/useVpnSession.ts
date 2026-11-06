@@ -273,6 +273,17 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
         });
         return;
       }
+      if (event.name === AGENT_EVENTS.layoutUpdated) {
+        // 事件带全量布局，不重拉 config_detail；只认当前配置、只认更新的 revision。
+        const { config_id, revision, layout } = event.payload;
+        setActiveConfig((current) => {
+          if (!current || current.config_id !== config_id) return current;
+          const known = current.layout_revision ?? 0;
+          if (!Number.isFinite(revision) || revision <= known) return current;
+          return { ...current, layout: layout ?? null, layout_revision: revision };
+        });
+        return;
+      }
       if (
         event.name === AGENT_EVENTS.configChanged ||
         event.name === AGENT_EVENTS.nodeListChanged ||

@@ -1028,6 +1028,8 @@ export default function App() {
         hasConfigs={vpn.configs.length > 0}
         onAskAi={handleAskAiFromConsole}
         onNewConfig={() => setNewConfigOpen(true)}
+        onImportNodes={() => openSettings("network")}
+        seedUpdate={Boolean(defaultProfile?.newVersionAvailable)}
         loading={vpn.loading}
         runtime={runtime}
         failedAfterConnected={failedAfterConnected}

@@ -4,7 +4,7 @@
  * 规则来源 `docs/middle-area-local-rules.md`。纯函数：同样的 runtime + config + aiReady
  * 必须得到同样的块与文案，不读时间、不猜国家、不调 AI。
  */
-import type { ConfigDetail, RuntimeView } from "../agent/protocol";
+import type { ConfigDetail, Layout, RuntimeView } from "../agent/protocol";
 
 export type MiddleLevel = "idle" | "running" | "degraded" | "failed" | "transition";
 
@@ -29,7 +29,10 @@ export type MiddleBlock =
       steps: FailureStep[];
       /** 降级卡的一句话行动；失败卡用 steps。 */
       next: string | null;
-    };
+    }
+  | { kind: "source_choice" }
+  | { kind: "reachability"; targets: string[]; connected: boolean }
+  | { kind: "update_hint" };
 
 /** 三态以 runtime.state 归并；过渡态单独一档，中间不渲染任何块。 */
 export function middleLevel(state: RuntimeView["state"]): MiddleLevel {
@@ -81,6 +84,14 @@ export function emptyHintText(config: ConfigDetail, connected: boolean): string 
     return "点上面的「启动 VPN」，浏览器就能用了。所有流量都会从节点出去。";
   }
   return "点上面的「启动 VPN」，浏览器就能用了。";
+}
+
+export function emptyHintBlock(config: ConfigDetail, connected: boolean): MiddleBlock {
+  return {
+    kind: "empty_hint",
+    text: emptyHintText(config, connected),
+    tone: connected ? "ok" : "idle",
+  };
 }
 
 const TIMEOUT_CODES: ReadonlyArray<string> = [
@@ -149,7 +160,7 @@ export function degradedReason(runtime: RuntimeView): string {
   return "网络检查没有通过。";
 }
 
-function proxyCard(
+export function proxyBlock(
   runtime: RuntimeView,
   config: ConfigDetail,
   connected: boolean,
@@ -214,19 +225,92 @@ export function middleBlocks(
         next: "能继续用就先不动；网页打不开时，点上面的「断开 VPN」再重新连接。",
       },
     ];
-    if (isProxyUser(config)) blocks.push(proxyCard(runtime, config, true));
+    if (isProxyUser(config)) blocks.push(proxyBlock(runtime, config, true));
     return blocks;
   }
 
   if (isProxyUser(config)) {
-    return [proxyCard(runtime, config, level === "running")];
+    return [proxyBlock(runtime, config, level === "running")];
   }
 
-  return [
-    {
-      kind: "empty_hint",
-      text: emptyHintText(config, level === "running"),
-      tone: level === "running" ? "ok" : "idle",
-    },
-  ];
+  return [emptyHintBlock(config, level === "running")];
+}
+
+export interface LayoutRenderContext {
+  /** 种子包确实有新版本时才放 update_hint。 */
+  hasSeedUpdate: boolean;
+}
+
+/** 只有模型能填的 props 是 targets；其它一律从本地事实生成。 */
+function readTargets(props: Record<string, unknown> | undefined): string[] {
+  const raw = props?.targets;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const targets: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const value = item.trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    targets.push(value);
+    if (targets.length === 6) break;
+  }
+  return targets;
+}
+
+function skipBlock(reason: string): void {
+  console.warn(`[layout] ${reason}`);
+}
+
+/**
+ * 按 AI 布局生成块。不认识的块跳过；数据条件不成立的块也跳过。
+ * 回退到本地兜底由调用方判断（一块都没生成且 blocks 非空时）。
+ */
+export function resolveLayoutBlocks(
+  layout: Layout | null | undefined,
+  runtime: RuntimeView,
+  config: ConfigDetail,
+  context: LayoutRenderContext,
+): MiddleBlock[] {
+  if (!layout || !Array.isArray(layout.blocks)) return [];
+  const level = middleLevel(runtime.state);
+  const connected = level === "running" || level === "degraded";
+  const blocks: MiddleBlock[] = [];
+
+  for (const block of layout.blocks) {
+    const type = (block as { type?: unknown } | null)?.type;
+    switch (type) {
+      case "empty_hint":
+        blocks.push(emptyHintBlock(config, connected));
+        break;
+      case "proxy_card":
+        // TUN 配置没有 mixed 入站，连接后 runtime.mixed_port 仍会给值；
+        // 照渲染会得到一个没人监听的地址，所以非代理用户直接跳过。
+        if (isProxyUser(config)) blocks.push(proxyBlock(runtime, config, connected));
+        else skipBlock("proxy_card 只用于本机代理配置，已跳过");
+        break;
+      case "source_choice":
+        if (config.nodes.length === 0) blocks.push({ kind: "source_choice" });
+        break;
+      case "reachability": {
+        const props = (block as { props?: Record<string, unknown> } | null)?.props;
+        const targets = readTargets(props);
+        if (targets.length > 0) {
+          blocks.push({ kind: "reachability", targets, connected });
+        }
+        break;
+      }
+      case "update_hint":
+        if (context.hasSeedUpdate) blocks.push({ kind: "update_hint" });
+        break;
+      case "issue_card":
+        // 故障卡是本地叠加层，布局里的这份不能渲染，否则会出两张。
+        skipBlock("issue_card 不进布局，已跳过");
+        break;
+      default:
+        skipBlock(`不认识的块类型：${typeof type === "string" ? type : "(缺失)"}`);
+    }
+  }
+
+  return blocks;
 }

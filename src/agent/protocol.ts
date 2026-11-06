@@ -1,12 +1,12 @@
 /**
  * 事件与 UI → Host 调用的前端契约。
  *
- * 唯一来源：`docs/contracts/events.md` v2.9.0。
+ * 唯一来源：`docs/contracts/events.md` v2.10.0。
  * 本文件是事件名常量的唯一来源——组件、store、bridge 只能引用
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.9.0" as const;
+export const CONTRACT_VERSION = "2.10.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -454,6 +454,8 @@ export interface ConfigDetail extends ConfigSummary {
   dns: DnsConfig;
   tun_excludes: string[];
   layout: Layout | null;
+  /** 与 layout 配套；从没编排过为 null。用来丢弃迟到的 layout-updated。 */
+  layout_revision: number | null;
 }
 
 export interface ConfigChangedPayload {

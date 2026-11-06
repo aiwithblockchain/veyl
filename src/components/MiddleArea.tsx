@@ -109,21 +109,131 @@ function IssueCard({ block }: { block: IssueBlock }) {
   );
 }
 
-/** 中间区那「一件事」：一句话、代理卡或失败/降级卡。块顺序由 middleBlocks 决定。 */
-export function MiddleArea({ blocks }: { blocks: MiddleBlock[] }) {
+function SourceChoice({
+  onUseSeedNodes,
+  onUseOwnNodes,
+}: {
+  onUseSeedNodes?: () => void;
+  onUseOwnNodes?: () => void;
+}) {
+  return (
+    <div className="card card--choice">
+      <p className="card__title">这套配置还没有节点，先选一种</p>
+      <div className="choice">
+        <button
+          type="button"
+          className="choice__option"
+          onClick={onUseSeedNodes}
+          disabled={!onUseSeedNodes}
+        >
+          <strong>用 Veyl 提供的测试节点（仅供试用）</strong>
+          <small>从默认节点包里挑一台，先试试。</small>
+        </button>
+        <button
+          type="button"
+          className="choice__option"
+          onClick={onUseOwnNodes}
+          disabled={!onUseOwnNodes}
+        >
+          <strong>用我自己的节点</strong>
+          <small>导入配置文件，或者自己填。</small>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Reachability({
+  targets,
+  connected,
+}: {
+  targets: string[];
+  connected: boolean;
+}) {
+  return (
+    <div className="card card--reach">
+      <p className="card__title">
+        {connected ? "这些服务还没确认" : "连上后会确认这些能不能打开"}
+      </p>
+      <ul className="reach">
+        {targets.map((target) => (
+          <li key={target} className="reach__row">
+            <span>{target}</span>
+            <span className="reach__status">待确认</span>
+          </li>
+        ))}
+      </ul>
+      <p className="card__action">
+        {connected
+          ? "现在还没有检查结果。"
+          : "连上之后逐个确认。"}
+      </p>
+    </div>
+  );
+}
+
+function UpdateHint() {
+  const [dismissed, setDismissed] = useState(false);
+  if (dismissed) return null;
+  return (
+    <div className="card card--hint">
+      <p className="card__title">默认节点包有新版本。</p>
+      <p className="card__action">不影响当前连接，下次连接时生效。</p>
+      <button
+        type="button"
+        className="btn btn--ghost"
+        onClick={() => setDismissed(true)}
+      >
+        稍后提醒
+      </button>
+    </div>
+  );
+}
+
+/** 中间区那「一件事」：本地兜底块与 AI 布局块共用同一套渲染。 */
+export function MiddleArea({
+  blocks,
+  onUseSeedNodes,
+  onUseOwnNodes,
+}: {
+  blocks: MiddleBlock[];
+  onUseSeedNodes?: () => void;
+  onUseOwnNodes?: () => void;
+}) {
   if (blocks.length === 0) return null;
   return (
     <div className="one-thing">
       {blocks.map((block, index) => {
         if (block.kind === "empty_hint") {
           return (
-            <p key="empty_hint" className={`note note--${block.tone}`}>
+            <p key={`empty_hint_${index}`} className={`note note--${block.tone}`}>
               {block.text}
             </p>
           );
         }
         if (block.kind === "proxy_card") {
-          return <ProxyCard key="proxy_card" block={block} />;
+          return <ProxyCard key={`proxy_card_${index}`} block={block} />;
+        }
+        if (block.kind === "source_choice") {
+          return (
+            <SourceChoice
+              key={`source_choice_${index}`}
+              onUseSeedNodes={onUseSeedNodes}
+              onUseOwnNodes={onUseOwnNodes}
+            />
+          );
+        }
+        if (block.kind === "reachability") {
+          return (
+            <Reachability
+              key={`reachability_${index}`}
+              targets={block.targets}
+              connected={block.connected}
+            />
+          );
+        }
+        if (block.kind === "update_hint") {
+          return <UpdateHint key={`update_hint_${index}`} />;
         }
         return <IssueCard key={`issue_${index}`} block={block} />;
       })}

@@ -1,7 +1,12 @@
 /** @vitest-environment jsdom */
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ConfigDetail, HealthSnapshot, RuntimeView } from "../agent/protocol";
+import type {
+  ConfigDetail,
+  HealthSnapshot,
+  Layout,
+  RuntimeView,
+} from "../agent/protocol";
 import { CONTRACT_VERSION } from "../agent/protocol";
 import { emptyRuntimeView } from "../agent/bridge";
 import { Console } from "./Console";
@@ -58,6 +63,7 @@ function makeConfig(over: Partial<ConfigDetail> = {}): ConfigDetail {
     dns: { mode: "auto", local: [], remote: [] },
     tun_excludes: [],
     layout: null,
+    layout_revision: null,
     ...over,
   } as ConfigDetail;
 }
@@ -101,6 +107,7 @@ function renderConsole(
   runtime: RuntimeView,
   aiReady = true,
   failedAfterConnected = false,
+  extra: { seedUpdate?: boolean; onImportNodes?: () => void } = {},
 ): HTMLElement {
   const { container } = render(
     <Console
@@ -117,6 +124,8 @@ function renderConsole(
       hasConfigs
       onAskAi={noop}
       onNewConfig={noop}
+      onImportNodes={extra.onImportNodes}
+      seedUpdate={extra.seedUpdate ?? false}
       runtime={runtime}
       failedAfterConnected={failedAfterConnected}
     />,
@@ -130,6 +139,14 @@ function text(el: Element | null | undefined): string {
 
 function body(root: HTMLElement): HTMLElement {
   return root.querySelector(".console__body") as HTMLElement;
+}
+
+function textButton(root: HTMLElement, label: string): Element {
+  const button = Array.from(root.querySelectorAll("button")).find(
+    (el) => (el.textContent ?? "").trim() === label,
+  );
+  if (!button) throw new Error(`找不到按钮：${label}`);
+  return button;
 }
 
 describe("中间区验收用例", () => {
@@ -295,13 +312,183 @@ describe("中间区验收用例", () => {
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("13 layout.blocks 非空：不在本次范围，不硬塞本地块", () => {
+  it("13 布局里的 empty_hint：按布局渲染", () => {
     const root = renderConsole(
       makeConfig({ layout: { version: 1, blocks: [{ type: "empty_hint" }] } }),
       makeRuntime(),
     );
+    expect(text(body(root).querySelector(".note"))).toBe(
+      "点上面的「启动 VPN」，浏览器就能用了。",
+    );
+  });
+
+  it("13b 布局里只有不认识的块：退回本地兜底", () => {
+    const root = renderConsole(
+      makeConfig({
+        layout: {
+          version: 1,
+          blocks: [{ type: "banner" } as unknown as Layout["blocks"][number]],
+        },
+      }),
+      makeRuntime(),
+    );
+    expect(text(body(root).querySelector(".note"))).toBe(
+      "点上面的「启动 VPN」，浏览器就能用了。",
+    );
+  });
+
+  it("13c 布局里只有 issue_card：跳过并退回本地兜底，不出两张卡", () => {
+    const root = renderConsole(
+      makeConfig({ layout: { version: 1, blocks: [{ type: "issue_card" }] } }),
+      makeRuntime(),
+    );
     expect(body(root).querySelector(".card")).toBeNull();
+    expect(text(body(root).querySelector(".note"))).toBe(
+      "点上面的「启动 VPN」，浏览器就能用了。",
+    );
+  });
+
+  it("13d 不认识的块跳过，认识的块照常渲染", () => {
+    const root = renderConsole(
+      makeConfig({
+        layout: {
+          version: 1,
+          blocks: [
+            { type: "banner" } as unknown as Layout["blocks"][number],
+            { type: "empty_hint" },
+          ],
+        },
+      }),
+      makeRuntime(),
+    );
+    expect(text(body(root).querySelector(".note"))).toBe(
+      "点上面的「启动 VPN」，浏览器就能用了。",
+    );
+    expect(body(root).querySelector(".card")).toBeNull();
+  });
+
+  it("13i 失败时故障卡是叠加层：布局有内容也照常出现且排第一", () => {
+    const root = renderConsole(
+      makeConfig({ layout: { version: 1, blocks: [{ type: "empty_hint" }] } }),
+      failedRuntime("RUNTIME_EXITED"),
+    );
+    const oneThing = body(root).querySelector(".one-thing") as HTMLElement;
+    expect(oneThing.firstElementChild?.className).toContain("card");
+    expect(text(body(root).querySelector(".note"))).toBe(
+      "点上面的「启动 VPN」，浏览器就能用了。",
+    );
+  });
+
+  it("13j 空白布局也不盖住故障卡", () => {
+    const root = renderConsole(
+      makeConfig({ layout: { version: 1, blocks: [] } }),
+      failedRuntime("RUNTIME_EXITED"),
+    );
+    expect(text(body(root).querySelector(".card--err .card__lead"))).toBe(
+      "节点一直没有响应。",
+    );
+  });
+
+  it("13k TUN 配置的 proxy_card 跳过：不出现代理卡，也没有可复制地址", () => {
+    const root = renderConsole(
+      makeConfig({
+        connect_mode: "tun",
+        layout: {
+          version: 1,
+          blocks: [{ type: "proxy_card" }, { type: "empty_hint" }],
+        },
+      }),
+      makeRuntime({ state: "running", mixed_port: 7890 }),
+    );
+    expect(root.querySelector(".card--proxy")).toBeNull();
+    expect(root.querySelector(".proxy__addr")).toBeNull();
+    expect(root.querySelector(".card--proxy .copy-btn")).toBeNull();
+    expect(root.textContent).not.toContain("127.0.0.1:7890");
+    expect(text(body(root).querySelector(".note"))).toBe("所有软件现在都能用了。");
+  });
+
+  it("13e source_choice：没有节点时给两个选项", () => {
+    const root = renderConsole(
+      makeConfig({
+        nodes: [],
+        node_count: 0,
+        layout: { version: 1, blocks: [{ type: "source_choice" }] },
+      }),
+      makeRuntime(),
+    );
+    const options = Array.from(root.querySelectorAll(".choice__option")).map((el) =>
+      text(el),
+    );
+    expect(options[0]).toContain("用 Veyl 提供的测试节点（仅供试用）");
+    expect(options[1]).toContain("用我自己的节点");
     expect(body(root).querySelector(".note")).toBeNull();
+  });
+
+  it("13f source_choice 在已有节点时跳过；只剩它时退回本地兜底", () => {
+    const root = renderConsole(
+      makeConfig({ layout: { version: 1, blocks: [{ type: "source_choice" }] } }),
+      makeRuntime(),
+    );
+    expect(root.querySelector(".choice")).toBeNull();
+    expect(text(body(root).querySelector(".note"))).toBe(
+      "点上面的「启动 VPN」，浏览器就能用了。",
+    );
+  });
+
+  it("13g reachability：没有探测数据时只标待确认，不下结论", () => {
+    const root = renderConsole(
+      makeConfig({
+        layout: {
+          version: 1,
+          blocks: [{ type: "reachability", props: { targets: ["ChatGPT", "Claude Code"] } }],
+        },
+      }),
+      makeRuntime({ state: "running", mixed_port: 7890 }),
+    );
+    expect(
+      Array.from(root.querySelectorAll(".reach__row > span:first-child")).map((el) =>
+        text(el),
+      ),
+    ).toEqual(["ChatGPT", "Claude Code"]);
+    expect(
+      Array.from(root.querySelectorAll(".reach__status")).map((el) => text(el)),
+    ).toEqual(["待确认", "待确认"]);
+    expect(text(root.querySelector(".card--reach .card__title"))).toBe(
+      "这些服务还没确认",
+    );
+    const cardText = text(root.querySelector(".card--reach"));
+    expect(cardText).not.toMatch(/✓|可用|可达|已确认|打不开/);
+  });
+
+  it("13g2 未连接时 reachability 说明是连上后才检查", () => {
+    const root = renderConsole(
+      makeConfig({
+        layout: {
+          version: 1,
+          blocks: [{ type: "reachability", props: { targets: ["ChatGPT"] } }],
+        },
+      }),
+      makeRuntime(),
+    );
+    expect(text(root.querySelector(".card--reach .card__title"))).toBe(
+      "连上后会确认这些能不能打开",
+    );
+  });
+
+  it("13h update_hint：有新版本才出现，稍后提醒可收起", () => {
+    const config = makeConfig({ layout: { version: 1, blocks: [{ type: "update_hint" }] } });
+    const without = renderConsole(config, makeRuntime());
+    expect(without.querySelector(".card--hint")).toBeNull();
+    cleanup();
+
+    const root = renderConsole(config, makeRuntime(), true, false, {
+      seedUpdate: true,
+    });
+    expect(text(root.querySelector(".card--hint .card__title"))).toBe(
+      "默认节点包有新版本。",
+    );
+    fireEvent.click(textButton(root, "稍后提醒"));
+    expect(root.querySelector(".card--hint")).toBeNull();
   });
 
   it("14 老后端不带 layout 字段：仍按未编排处理", () => {

@@ -65,6 +65,7 @@ function makeConfig(count = 3, current = "n1"): ConfigDetail {
     dns: { mode: "auto", local: [], remote: [] },
     tun_excludes: [],
     layout: null,
+    layout_revision: null,
   } as ConfigDetail;
 }
 

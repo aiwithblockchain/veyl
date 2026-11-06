@@ -11,7 +11,12 @@ import {
   zeroConfigMode,
 } from "../ui/consoleActions";
 import { formatCheckedAgo, formatClock, formatTraffic } from "../ui/format";
-import { failureHeadline, middleBlocks, middleLevel } from "../ui/middleArea";
+import {
+  failureHeadline,
+  middleBlocks,
+  middleLevel,
+  resolveLayoutBlocks,
+} from "../ui/middleArea";
 import { probeBadge, formatLatency } from "../ui/nodeList";
 import { rateChart, rateLabel, type RateSample } from "../ui/rateSeries";
 import { MiddleArea } from "./MiddleArea";
@@ -31,6 +36,10 @@ interface Props {
   hasConfigs: boolean;
   onAskAi: () => void;
   onNewConfig: () => void;
+  /** 「用我自己的节点」：去设置页导入节点文件。 */
+  onImportNodes?: () => void;
+  /** 种子包有新版本：决定 update_hint 是否有内容可渲染。 */
+  seedUpdate?: boolean;
   onOpenDiagnostics?: () => void;
   loading?: boolean;
   runtime: RuntimeView;
@@ -86,6 +95,8 @@ export function Console({
   hasConfigs,
   onAskAi,
   onNewConfig,
+  onImportNodes,
+  seedUpdate = false,
   onOpenDiagnostics,
   loading = false,
   runtime,
@@ -197,8 +208,26 @@ export function Console({
   const latencySub = formatCheckedAgo(runtime.health.checked_at, now);
   const rates = rateLabel(rateSamples);
 
-  const blocks =
-    config && config.layout == null ? middleBlocks(runtime, config, aiReady) : [];
+  // null 走本地兜底；[] 是 AI 明确选择空白；非空但一块都渲染不出时退回本地。
+  const localBlocks = config ? middleBlocks(runtime, config, aiReady) : [];
+  const layout = config?.layout ?? null;
+  const layoutBlocks =
+    config && layout
+      ? resolveLayoutBlocks(layout, runtime, config, { hasSeedUpdate: seedUpdate })
+      : [];
+  const layoutHadBlocks =
+    Array.isArray(layout?.blocks) && layout.blocks.length > 0;
+  // 故障卡是本地叠加层：布局有内容时它同样要在，且排第一；空白布局也不盖住它。
+  const overlayBlocks = localBlocks.filter((block) => block.kind === "issue_card");
+  let blocks: typeof localBlocks;
+  if (!config || !layout) {
+    blocks = localBlocks;
+  } else {
+    const base =
+      layoutBlocks.length === 0 && layoutHadBlocks ? localBlocks : layoutBlocks;
+    const hasIssue = base.some((block) => block.kind === "issue_card");
+    blocks = hasIssue ? base : [...overlayBlocks, ...base];
+  }
 
   const runProbe = async () => {
     if (!selectedNode || probe?.status === "testing" || currentBatch) return;
@@ -520,7 +549,11 @@ export function Console({
             </dl>
           ) : null}
 
-          <MiddleArea blocks={blocks} />
+          <MiddleArea
+            blocks={blocks}
+            onUseSeedNodes={onNewConfig}
+            onUseOwnNodes={onImportNodes}
+          />
 
           {showStrip ? (
             <RateStrip samples={rateSamples} warn={degraded} current={rates} />

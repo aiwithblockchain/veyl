@@ -82,6 +82,18 @@ function countOrZero(value: number | null | undefined): number {
     : 0;
 }
 
+function normalizeConfigDetail(raw: ConfigDetail & { layout_revision?: unknown }): ConfigDetail {
+  return {
+    ...raw,
+    layout: raw.layout ?? null,
+    // 老后端不带 revision：按「还没编排过」处理，别拿 undefined 去比大小。
+    layout_revision:
+      typeof raw.layout_revision === "number" && Number.isFinite(raw.layout_revision)
+        ? raw.layout_revision
+        : null,
+  };
+}
+
 function normalizeDefaultProfile(raw: RawDefaultProfile): DefaultProfileStatus {
   return {
     packageId: raw.package_id ?? null,
@@ -343,13 +355,19 @@ export class TauriAgentBridge implements AgentBridge {
   }
 
   async configDetail(configId: string): Promise<ConfigDetail> {
-    return call<ConfigDetail>("config_detail", { configId });
+    return normalizeConfigDetail(
+      await call<ConfigDetail & { layout_revision?: unknown }>("config_detail", {
+        configId,
+      }),
+    );
   }
 
   async configCreate(input: ConfigCreateInput): Promise<ConfigDetail> {
-    return call<ConfigDetail>("config_create", {
-      ...input,
-    } as unknown as Record<string, unknown>);
+    return normalizeConfigDetail(
+      await call<ConfigDetail & { layout_revision?: unknown }>("config_create", {
+        ...input,
+      } as unknown as Record<string, unknown>),
+    );
   }
 
   async configDelete(configId: string): Promise<ConfigDeleteData> {

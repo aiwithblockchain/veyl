@@ -100,5 +100,6 @@ export function createMockConfig(name: string, mode: ConnectMode): ConfigDetail 
     dns: { mode: "auto", local: [], remote: [] },
     tun_excludes: [],
     layout: null,
+    layout_revision: null,
   };
 }

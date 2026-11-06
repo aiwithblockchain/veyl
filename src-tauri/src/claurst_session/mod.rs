@@ -7,6 +7,7 @@
 //! 3. `run_query_loop` 包 `catch_unwind`，panic 不拖垮应用。
 
 pub mod events;
+pub mod layout;
 pub mod provider;
 
 use std::path::PathBuf;
@@ -37,7 +38,8 @@ use self::provider::LlmCredentials;
 /// 运行时不依赖任何外部文件，离线也能用。
 const FIRST_RUN_PROMPT: &str = include_str!("../../../resources/prompts/zh/first-run.md");
 
-/// 中间区域可以出现的六种块。与 `docs/center-panel.md` §2.5 同源。
+/// 中间区域 AI 能写的五种块。与 `docs/design/ai-layout.md` §4.1 同源。
+/// `issue_card` 是系统叠加层，**不可写**：写进布局会渲染两张故障卡。
 const BLOCK_CATALOG: &str = "\
 | 块 | 用途 |
 |---|---|
@@ -45,8 +47,9 @@ const BLOCK_CATALOG: &str = "\
 | `proxy_card` | 代理地址 + 端口 + 复制 |
 | `source_choice` | 让用户在「测试节点 / 自己提供」之间选 |
 | `reachability` | 对用户提过的目标逐个确认能不能打开 |
-| `issue_card` | 网络异常，带「重试」和「让 AI 定位」 |
-| `update_hint` | 资源有新版本 |";
+| `update_hint` | 资源有新版本 |
+
+故障卡由系统叠加，你不能写。";
 
 /// 把工具清单渲染成人能读的一段。**不手写**：工具增减时提示词自动跟着变。
 fn capability_catalog(tools: &[Box<dyn Tool>]) -> String {
@@ -261,6 +264,9 @@ impl AivpnSession {
         let emitter = SessionEmitter::new(request_id.clone(), format!("asst_{request_id}"));
         let (tx, mut rx) = mpsc::unbounded_channel::<QueryEvent>();
 
+        // 布局归属：开始时先取一份快照，结束时再取一次，后者优先（见 `layout_owner`）。
+        let layout_config_id = active_config_id();
+
         emitter.status("thinking", "正在思考");
 
         let session_id = self.session_id.clone();
@@ -280,7 +286,9 @@ impl AivpnSession {
         let consumer = tokio::spawn(async move {
             let mut tool_call_id = String::new();
             let mut tool_started = Instant::now();
-            let mut final_text = String::new();
+            // 原始文本（含布局围栏）：请求结束时再用 `strip` 复核一次。
+            let mut raw_text = String::new();
+            let mut filter = layout::Filter::new();
 
             while let Some(event) = rx.recv().await {
                 match &event {
@@ -288,11 +296,23 @@ impl AivpnSession {
                         use claurst_api::streaming::ContentDelta;
                         use claurst_api::AnthropicStreamEvent;
 
+                        // 每个 assistant turn 是独立 message：两轮文本直接相接会把
+                        // 第二轮的 ```layout 粘到上一行行尾，围栏就不在行首了。
+                        if let AnthropicStreamEvent::MessageStart { .. } = stream_event {
+                            if let Some(separator) = begin_assistant_turn(&mut raw_text, &mut filter) {
+                                consumer_emitter.message_chunk(&separator);
+                            }
+                        }
+
                         if let AnthropicStreamEvent::ContentBlockDelta { delta, .. } = stream_event {
                             match delta {
                                 ContentDelta::TextDelta { text } => {
-                                    final_text.push_str(text);
-                                    consumer_emitter.message_chunk(text);
+                                    raw_text.push_str(text);
+                                    // 布局围栏在流式阶段就吃掉，用户不会看到 JSON 先出现再消失。
+                                    let visible = filter.push(text);
+                                    if !visible.is_empty() {
+                                        consumer_emitter.message_chunk(&visible);
+                                    }
                                     consumer_emitter
                                         .status("streaming_answer", "正在回复");
                                 }
@@ -416,7 +436,8 @@ impl AivpnSession {
                 }
             }
 
-            final_text
+            // 冲刷什么由请求结果决定（取消时要丢弃未闭合候选），交给 send_message。
+            (raw_text, filter)
         });
 
         let loop_future = run_query_loop(
@@ -437,19 +458,36 @@ impl AivpnSession {
             .await;
 
         drop(messages);
-        let streamed_text = consumer.await.unwrap_or_default();
+        let (raw_text, mut filter) = consumer.await.unwrap_or_default();
+        // 以整段复核为准：流式状态机万一漏字/多字，这里兜住。
+        let (final_text, layout) = layout::strip(&raw_text);
+        // 用户取消：未闭合的候选围栏一律丢弃（半截 JSON 只会更困惑）。
+        let cancelled = matches!(&outcome, Ok(QueryOutcome::Cancelled));
+        let tail = if cancelled {
+            filter.finish_discarding()
+        } else {
+            filter.finish()
+        };
+        if !tail.is_empty() {
+            emitter.message_chunk(&tail);
+        }
         // 先清当前请求，再作废问题：反过来时提问泵可能读到旧 request_id 又 register 一次。
         crate::tools::policy::clear_current_request(&self.session_id);
         crate::agent::questions::cleanup_request(&request_session_id, &request_id);
         *self.cancel.lock().await = None;
 
         let duration_ms = started.elapsed().as_millis() as u64;
+        // 只有正常收尾（含达到长度上限）才落库布局；取消/出错/超预算都不写。
+        let completed = matches!(
+            &outcome,
+            Ok(QueryOutcome::EndTurn { .. }) | Ok(QueryOutcome::MaxTokens { .. })
+        );
 
         match outcome {
             Ok(QueryOutcome::EndTurn { usage, .. }) => {
                 emitter.request_end(
                     "success",
-                    Some(streamed_text),
+                    Some(final_text),
                     None,
                     Some(usage_json(&usage)),
                     duration_ms,
@@ -459,7 +497,7 @@ impl AivpnSession {
                 emitter.status("completed", "输出达到长度上限，已截断");
                 emitter.request_end(
                     "success",
-                    Some(streamed_text),
+                    Some(final_text),
                     None,
                     Some(usage_json(&usage)),
                     duration_ms,
@@ -471,7 +509,7 @@ impl AivpnSession {
             Ok(QueryOutcome::Error(error)) => {
                 emitter.request_end(
                     "error",
-                    Some(streamed_text),
+                    Some(final_text),
                     Some(AivpnError::new("UPSTREAM_ERROR", error.to_string())),
                     None,
                     duration_ms,
@@ -483,16 +521,27 @@ impl AivpnSession {
                     format!("已用 ${cost_usd:.4}，超过本轮上限 ${limit_usd:.2}"),
                 );
                 error.details = Some(serde_json::json!({ "reason": "budget_exceeded" }));
-                emitter.request_end("error", Some(streamed_text), Some(error), None, duration_ms);
+                emitter.request_end("error", Some(final_text), Some(error), None, duration_ms);
             }
             Err(panic) => {
                 emitter.request_end(
                     "error",
-                    Some(streamed_text),
+                    Some(final_text),
                     Some(AivpnError::new("INTERNAL", panic_message(panic))),
                     None,
                     duration_ms,
                 );
+            }
+        }
+
+        // 先 request_end 再 layout-updated：对话先收尾，中间区再变。
+        if completed {
+            if let Some(layout) = layout {
+                // 首启时请求开始还没有配置（AI 会在这一轮里创建并激活）；
+                // 已有配置时也可能换成新激活的那套。归属以结束时的活动配置为准。
+                if let Some(config_id) = layout_owner(layout_config_id, active_config_id()) {
+                    commit_layout(&config_id, layout);
+                }
             }
         }
 
@@ -602,6 +651,85 @@ fn record_tool_call_end(tool_id: &str, result: &str, is_error: bool) {
     );
 }
 
+/// 布局归属哪套配置：请求结束时的活动配置优先。
+///
+/// 首启时请求开始还没有配置（AI 在这一轮里才创建并激活）；已有配置时也可能
+/// 在请求内换成新激活的那套。两者都以结束时为准，读不到再回退到开始时的快照。
+fn layout_owner(start: Option<String>, end: Option<String>) -> Option<String> {
+    end.or(start)
+}
+
+/// 当前激活的配置 ID。请求开始与结束各取一次，用来确定布局归属。
+fn active_config_id() -> Option<String> {
+    let store = crate::store::global()?;
+    let conn = store.conn();
+    crate::store::configs::active(&conn)
+        .ok()
+        .flatten()
+        .map(|config| config.id)
+}
+
+/// 新的 assistant turn 开始。两轮文本直接相接会把第二轮的围栏粘到上一行行尾，
+/// 围栏不在行首就不生效；这里补一个换行，流式与整段复核走同一条原文。
+fn begin_assistant_turn(raw: &mut String, filter: &mut layout::Filter) -> Option<String> {
+    if raw.is_empty() || raw.ends_with('\n') {
+        return None;
+    }
+    raw.push('\n');
+    let pushed = filter.push("\n");
+    (!pushed.is_empty()).then_some(pushed)
+}
+
+/// 一个请求至多写一次布局；内容与库里相同则不写、不发事件。
+fn commit_layout(config_id: &str, layout: Value) {
+    let Some(store) = crate::store::global() else {
+        log::warn!("布局未写入：本地存储不可用");
+        return;
+    };
+
+    let revision = {
+        let conn = store.conn();
+        let connect_mode = match crate::store::configs::get(&conn, config_id) {
+            Ok(Some(config)) => config.connection_mode,
+            Ok(None) => {
+                log::warn!("布局未写入：配置不存在");
+                return;
+            }
+            Err(error) => {
+                log::warn!("布局未写入：读取配置失败：{error}");
+                return;
+            }
+        };
+        // 白名单是类型级的，意义要看配置形态：TUN 配置里的 proxy_card 指向一个没监听的端口。
+        let layout = match layout::validate_for(&connect_mode, &layout) {
+            Ok(layout) => layout,
+            Err(reason) => {
+                log::warn!("layout.invalid reason={}", reason.code());
+                return;
+            }
+        };
+        match crate::store::layout::get(&conn, config_id) {
+            Ok(Some((_, current))) if current == layout => {
+                log::debug!("布局未变化，不写库");
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("读取旧布局失败：{error}"),
+        }
+        match crate::store::layout::set(&conn, config_id, &layout) {
+            Ok(revision) => Some(revision),
+            Err(error) => {
+                log::warn!("布局写入失败：{error}");
+                None
+            }
+        }
+    };
+
+    if let Some(revision) = revision {
+        events::layout_updated(config_id, revision, &layout);
+    }
+}
+
 /// 会话消息落库：重启后聊天记录还在。
 fn persist_committed_message(session_id: &str, message: &Message) {
     let Some(store) = crate::store::global() else {
@@ -624,6 +752,8 @@ fn persist_committed_message(session_id: &str, message: &Message) {
             .collect::<Vec<_>>()
             .join("\n"),
     };
+    // 历史从库里读，前端改不了：布局 JSON 必须在写库前就过滤掉。
+    let (text, _) = layout::strip(&text);
     if text.trim().is_empty() {
         return;
     }
@@ -719,6 +849,217 @@ mod audit_tests {
         assert!(last.content.contains("东京"));
     }
 
+    /// 历史从库里读，前端改不了：写库前必须把布局围栏滤掉。
+    #[test]
+    fn committed_messages_never_store_layout_json() {
+        install_store();
+        let store = crate::store::global().expect("全局库已安装");
+
+        let message = Message::assistant(
+            "看这里\n```layout\n{\"version\":1,\"blocks\":[{\"type\":\"empty_hint\"}]}\n```\n好了",
+        );
+        persist_committed_message("ses_layout", &message);
+
+        let conn = store.conn();
+        let messages = crate::store::chat::messages(&conn, "ses_layout").unwrap();
+        let last = messages.last().expect("至少有一条");
+        assert!(last.content.contains("看这里"));
+        assert!(last.content.contains("好了"));
+        assert!(!last.content.contains("blocks"), "布局 JSON 不该进历史");
+        assert!(!last.content.contains("```"));
+    }
+
+    /// 一个请求写一次；内容相同不写，revision 不能被模型每轮复述推高。
+    #[test]
+    fn a_layout_is_written_once_and_identical_content_is_skipped() {
+        install_store();
+        let store = crate::store::global().expect("全局库已安装");
+        let config_id = format!("cfg_layout_{:016x}", rand::random::<u64>());
+        {
+            let conn = store.conn();
+            crate::store::configs::create(
+                &conn,
+                &crate::store::configs::NewConfig {
+                    id: &config_id,
+                    name: "布局测试",
+                    connection_mode: crate::store::configs::CONNECTION_SYSTEM_PROXY,
+                    routing_mode: crate::store::configs::ROUTING_PROXY_ALL,
+                    listen_port: Some(7890),
+                    dns: &serde_json::json!({ "mode": "auto", "local": [], "remote": [] }),
+                    tun_excludes: &serde_json::json!([]),
+                },
+            )
+            .unwrap();
+        }
+
+        let layout = serde_json::json!({"version":1,"blocks":[{"type":"empty_hint"}]});
+        commit_layout(&config_id, layout.clone());
+        let first = {
+            let conn = store.conn();
+            crate::store::layout::get(&conn, &config_id)
+                .unwrap()
+                .expect("应当已写入")
+                .0
+        };
+        assert_eq!(first, 1);
+
+        commit_layout(&config_id, layout);
+        let unchanged = {
+            let conn = store.conn();
+            crate::store::layout::get(&conn, &config_id).unwrap().unwrap().0
+        };
+        assert_eq!(unchanged, first, "内容相同不该推高 revision");
+
+        commit_layout(
+            &config_id,
+            serde_json::json!({"version":1,"blocks":[{"type":"proxy_card"}]}),
+        );
+        let changed = {
+            let conn = store.conn();
+            crate::store::layout::get(&conn, &config_id).unwrap().unwrap()
+        };
+        assert_eq!(changed.0, first + 1);
+        assert_eq!(changed.1["blocks"][0]["type"], serde_json::json!("proxy_card"));
+    }
+
+    /// 布局归属：首启时开始时没有配置，结束时才有；请求内激活的配置优先。
+    #[test]
+    fn layout_ownership_follows_the_config_active_at_the_end() {
+        assert_eq!(
+            layout_owner(None, Some("new".into())).as_deref(),
+            Some("new"),
+            "首启：开始时没有配置，结束时新建并激活的那套获胜"
+        );
+        assert_eq!(
+            layout_owner(Some("old".into()), Some("new".into())).as_deref(),
+            Some("new"),
+            "请求内新激活的配置获胜"
+        );
+        assert_eq!(
+            layout_owner(Some("old".into()), None).as_deref(),
+            Some("old"),
+            "结束时读不到活动配置就回退到开始时的快照"
+        );
+        assert_eq!(layout_owner(None, None), None);
+    }
+
+    #[test]
+    fn a_config_activated_inside_a_request_owns_the_layout() {
+        install_store();
+        let store = crate::store::global().expect("全局库已安装");
+        let first = format!("cfg_owner_a_{:016x}", rand::random::<u64>());
+        let second = format!("cfg_owner_b_{:016x}", rand::random::<u64>());
+        for id in [&first, &second] {
+            let name = format!("归属测试 {id}");
+            let conn = store.conn();
+            crate::store::configs::create(
+                &conn,
+                &crate::store::configs::NewConfig {
+                    id,
+                    name: &name,
+                    connection_mode: crate::store::configs::CONNECTION_SYSTEM_PROXY,
+                    routing_mode: crate::store::configs::ROUTING_PROXY_ALL,
+                    listen_port: Some(7890),
+                    dns: &serde_json::json!({ "mode": "auto", "local": [], "remote": [] }),
+                    tun_excludes: &serde_json::json!([]),
+                },
+            )
+            .unwrap();
+        }
+
+        {
+            let conn = store.conn();
+            crate::store::configs::activate(&conn, &first).unwrap();
+        }
+        let captured = active_config_id();
+        assert_eq!(captured.as_deref(), Some(first.as_str()));
+
+        // 请求进行中 AI 新建并激活了第二套。
+        {
+            let conn = store.conn();
+            crate::store::configs::activate(&conn, &second).unwrap();
+        }
+        assert_eq!(
+            layout_owner(captured, active_config_id()).as_deref(),
+            Some(second.as_str())
+        );
+    }
+
+    /// 两个 assistant turn 直接相接会把围栏粘到上一行行尾，围栏就不在行首了。
+    #[test]
+    fn a_fence_at_the_start_of_a_second_turn_is_still_extracted() {
+        let mut raw = String::new();
+        let mut filter = layout::Filter::new();
+        let first = filter.push("先看一下");
+        raw.push_str("先看一下");
+        assert!(!first.is_empty());
+
+        let separator = begin_assistant_turn(&mut raw, &mut filter);
+        assert_eq!(separator.as_deref(), Some("\n"), "两轮之间要补换行");
+
+        let second = "```layout\n{\"version\":1,\"blocks\":[{\"type\":\"proxy_card\"}]}\n```\n就这样。\n";
+        raw.push_str(second);
+        let visible = filter.push(second);
+        assert_eq!(visible, "就这样。\n", "围栏与 JSON 不该出现在流式正文里");
+        assert_eq!(filter.finish(), "");
+
+        let (text, layout) = layout::strip(&raw);
+        assert_eq!(text, "先看一下\n就这样。\n");
+        assert!(layout.is_some(), "跨 turn 的布局也要提取出来");
+    }
+
+    /// 取消时未闭合的兼容围栏不补发，避免按了停止后突然多一段半截 JSON。
+    #[test]
+    fn a_cancelled_turn_discards_unclosed_candidates() {
+        let mut filter = layout::Filter::new();
+        let visible = filter.push("正在写\n```json\n{\"version\":1,");
+        assert_eq!(visible, "正在写\n", "候选体一个字符都不发");
+        assert_eq!(filter.finish_discarding(), "", "取消时不补发半截 JSON");
+    }
+
+    /// `proxy_card` 只在系统代理配置下有意义：TUN 配置没有监听端口。
+    #[test]
+    fn a_proxy_card_is_rejected_for_a_tun_config() {
+        install_store();
+        let store = crate::store::global().expect("全局库已安装");
+        let tun_id = format!("cfg_tun_{:016x}", rand::random::<u64>());
+        let proxy_id = format!("cfg_proxy_{:016x}", rand::random::<u64>());
+        for (id, mode) in [
+            (&tun_id, crate::store::configs::CONNECTION_TUN),
+            (&proxy_id, crate::store::configs::CONNECTION_SYSTEM_PROXY),
+        ] {
+            let name = format!("形态测试 {id}");
+            let conn = store.conn();
+            crate::store::configs::create(
+                &conn,
+                &crate::store::configs::NewConfig {
+                    id,
+                    name: &name,
+                    connection_mode: mode,
+                    routing_mode: crate::store::configs::ROUTING_PROXY_ALL,
+                    listen_port: None,
+                    dns: &serde_json::json!({ "mode": "auto", "local": [], "remote": [] }),
+                    tun_excludes: &serde_json::json!([]),
+                },
+            )
+            .unwrap();
+        }
+
+        let layout = serde_json::json!({"version":1,"blocks":[{"type":"proxy_card"}]});
+        commit_layout(&tun_id, layout.clone());
+        {
+            let conn = store.conn();
+            assert!(
+                crate::store::layout::get(&conn, &tun_id).unwrap().is_none(),
+                "TUN 配置不该写入 proxy_card 布局"
+            );
+        }
+
+        commit_layout(&proxy_id, layout);
+        let conn = store.conn();
+        assert!(crate::store::layout::get(&conn, &proxy_id).unwrap().is_some());
+    }
+
     #[test]
     fn user_messages_are_not_written_twice() {
         install_store();
@@ -752,6 +1093,23 @@ mod prompt_tests {
         );
         // 构建说明注释不该发给模型
         assert!(!text.contains("构建时与回访"), "文件头的构建注释应被去掉");
+    }
+
+    /// 布局示例必须是 `layout` 围栏；正文里不能再给裸 JSON 示例（模型会照抄）。
+    #[test]
+    fn the_layout_example_uses_a_layout_fence() {
+        let text = system_prompt(&[]);
+        assert!(text.contains("```layout"), "布局示例要用 layout 围栏");
+        assert!(
+            !text.contains("```json"),
+            "提示词里不能再出现 json 围栏示例"
+        );
+        assert!(text.contains("一条回复最多一份"));
+        assert!(text.contains("故障卡由系统叠加"), "要说明故障卡不可写");
+        assert!(
+            !text.contains("`issue_card`"),
+            "issue_card 是叠加层，不能出现在可写块清单里"
+        );
     }
 
     /// 能力清单是从真实工具清单渲染的，不是手写列表。

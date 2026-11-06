@@ -6,6 +6,7 @@ import type {
   AgentEvent,
   ConfigDetail,
   ConfigSummary,
+  Layout,
   RuntimeSnapshot,
   RuntimeState,
 } from "../agent/protocol";
@@ -143,6 +144,7 @@ function startDetail(mode: "tun" | "system_proxy"): ConfigDetail {
     dns: { mode: "auto", local: [], remote: [] },
     tun_excludes: [],
     layout: null,
+    layout_revision: null,
   };
 }
 
@@ -262,5 +264,100 @@ describe("连接前告知后台组件授权", () => {
     expect(result_).toEqual({ ok: false, message: "这次没有授权，可以再试一次。" });
     expect(result.current.preparingHelper).toBe(false);
     expect(result.current.connection).toBe("idle");
+  });
+});
+
+function makeLayoutBridge(detail: ConfigDetail = startDetail("tun")) {
+  let emit: ((event: AgentEvent) => void) | null = null;
+  const bridge = {
+    subscribe: (listener: (event: AgentEvent) => void) => {
+      emit = listener;
+      return () => {
+        emit = null;
+      };
+    },
+    configList: async () => ({
+      configs: [startSummary("tun")],
+      active_config_id: CONFIG_ID,
+    }),
+    configDetail: async () => ({ ...detail }),
+    getRuntimeSnapshot: async () => null,
+  } as unknown as AgentBridge;
+  return {
+    bridge,
+    emit: (event: AgentEvent) => {
+      emit?.(event);
+    },
+  };
+}
+
+function layoutEvent(
+  configId: string,
+  revision: number,
+  blocks: Layout["blocks"],
+): AgentEvent {
+  return {
+    name: AGENT_EVENTS.layoutUpdated,
+    payload: {
+      contract_version: CONTRACT_VERSION,
+      config_id: configId,
+      revision,
+      layout: { version: 1, blocks },
+      emitted_at: "",
+    },
+  };
+}
+
+describe("layout-updated 消费", () => {
+  it("当前配置的更新 revision 直接打补丁，不改其它字段", async () => {
+    const { bridge, emit } = makeLayoutBridge();
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    act(() => {
+      emit(layoutEvent(CONFIG_ID, 1, [{ type: "empty_hint" }]));
+    });
+
+    expect(result.current.activeConfig?.layout).toEqual({
+      version: 1,
+      blocks: [{ type: "empty_hint" }],
+    });
+    expect(result.current.activeConfig?.layout_revision).toBe(1);
+    expect(result.current.activeConfig?.name).toBe("测试配置");
+  });
+
+  it("revision 不更新的迟到事件丢弃", async () => {
+    const detail = { ...startDetail("tun") };
+    detail.layout = { version: 1, blocks: [{ type: "source_choice" }] };
+    detail.layout_revision = 3;
+    const { bridge, emit } = makeLayoutBridge(detail);
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    act(() => {
+      emit(layoutEvent(CONFIG_ID, 3, [{ type: "empty_hint" }]));
+      emit(layoutEvent(CONFIG_ID, 2, [{ type: "empty_hint" }]));
+    });
+    expect(result.current.activeConfig?.layout).toEqual({
+      version: 1,
+      blocks: [{ type: "source_choice" }],
+    });
+
+    act(() => {
+      emit(layoutEvent(CONFIG_ID, 4, [{ type: "empty_hint" }]));
+    });
+    expect(result.current.activeConfig?.layout_revision).toBe(4);
+  });
+
+  it("别的配置的事件不会串到当前配置", async () => {
+    const { bridge, emit } = makeLayoutBridge();
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    act(() => {
+      emit(layoutEvent("cfg_other", 99, [{ type: "proxy_card" }]));
+    });
+    expect(result.current.activeConfig?.layout).toBeNull();
+    expect(result.current.activeConfig?.layout_revision).toBeNull();
   });
 });

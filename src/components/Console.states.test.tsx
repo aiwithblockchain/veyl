@@ -51,6 +51,7 @@ function makeConfig(currentNodeId: string | null): ConfigDetail {
     dns: { mode: "auto", local: [], remote: [] },
     tun_excludes: [],
     layout: null,
+    layout_revision: null,
   } as ConfigDetail;
 }
 

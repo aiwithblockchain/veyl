@@ -2225,20 +2225,24 @@ impl WiredServices {
 
     /// `ConfigDetail`：摘要 + 节点集 + DNS + 内网排除 + 布局。
     fn config_detail_json(&self, config: &configs::Config) -> anyhow::Result<Value> {
-        let (nodes, layout) = {
+        let (nodes, layout, layout_revision) = {
             let conn = self.store.conn();
             let nodes = configs::list_nodes(&conn, &config.id)
                 .map_err(|error| svc_error(error.code(), error))?;
-            let layout = crate::store::layout::get(&conn, &config.id)
-                .map_err(|error| svc_error(error.code(), error))?
-                .map(|(_revision, layout)| layout);
-            (nodes, layout)
+            let stored = crate::store::layout::get(&conn, &config.id)
+                .map_err(|error| svc_error(error.code(), error))?;
+            match stored {
+                Some((revision, layout)) => (nodes, layout, Some(revision)),
+                None => (nodes, Value::Null, None),
+            }
         };
         let mut detail = self.config_summary_json(config)?;
         detail["nodes"] = Value::Array(nodes.iter().map(node_json).collect());
         detail["dns"] = config.dns.clone();
         detail["tun_excludes"] = config.tun_excludes.clone();
-        detail["layout"] = layout.unwrap_or(Value::Null);
+        detail["layout"] = layout;
+        // 与 layout 同源：layout 为 null 时它也是 null。UI 靠它丢弃同配置的迟到事件。
+        detail["layout_revision"] = json!(layout_revision);
         Ok(detail)
     }
 
@@ -6449,6 +6453,41 @@ mod config_service_tests {
             dns: None,
             tun_excludes: None,
         }
+    }
+
+    #[tokio::test]
+    async fn config_detail_carries_the_layout_revision() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+
+        let created = services
+            .config_create(create_input("布局 · 本机代理"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        let detail = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(detail["layout"], serde_json::json!(null));
+        assert_eq!(detail["layout_revision"], serde_json::json!(null));
+
+        let revision = {
+            let conn = services.store.conn();
+            crate::store::layout::set(
+                &conn,
+                &config_id,
+                &serde_json::json!({"version":1,"blocks":[{"type":"empty_hint"}]}),
+            )
+            .unwrap()
+        };
+        assert_eq!(revision, 1);
+
+        let detail = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(detail["layout_revision"], serde_json::json!(1));
+        assert_eq!(
+            detail["layout"]["blocks"][0]["type"],
+            serde_json::json!("empty_hint")
+        );
     }
 
     #[tokio::test]
