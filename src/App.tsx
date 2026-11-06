@@ -17,6 +17,7 @@ import { AssistantOverlay } from "./components/AssistantOverlay";
 import { AssistantTab } from "./components/AssistantTab";
 import { ConfigRail } from "./components/ConfigRail";
 import { Console } from "./components/Console";
+import { ConnectionOverlay } from "./components/ConnectionOverlay";
 import { IconClose } from "./components/icons";
 import { NewConfigDialog } from "./components/NewConfigDialog";
 import { Onboarding } from "./components/Onboarding";
@@ -1161,6 +1162,13 @@ export default function App() {
           setSettingsOpen(false);
           handleAskAi(text);
         }}
+      />
+
+      <ConnectionOverlay
+        connection={vpn.connection}
+        preparingHelper={vpn.preparingHelper}
+        runtime={runtime}
+        connectMode={vpn.activeConfig?.connect_mode ?? null}
       />
     </div>
   );

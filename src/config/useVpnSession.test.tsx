@@ -361,3 +361,49 @@ describe("layout-updated 消费", () => {
     expect(result.current.activeConfig?.layout_revision).toBeNull();
   });
 });
+
+describe("过渡状态在请求结束时必须收敛", () => {
+  it("启动成功但刷新快照失败：连接状态落到已连接，过渡层不会挂住", async () => {
+    const bridge = makeStartBridge("tun");
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce({ configs: [startSummary("tun")], active_config_id: CONFIG_ID })
+      .mockRejectedValue(new Error("boom"));
+    (bridge as unknown as { configList: unknown }).configList = list;
+
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let res: ActionResult | undefined;
+    await act(async () => {
+      res = await result.current.start();
+    });
+
+    expect(res?.ok).toBe(true);
+    expect(result.current.connection).toBe("connected");
+  });
+
+  it("启动失败且刷新快照也失败：回到 idle，不让遮罩停在「正在连接」", async () => {
+    const bridge = makeStartBridge("tun", {
+      runtimeStart: async () => {
+        throw { code: "INTERNAL", message: "启动失败" };
+      },
+    });
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce({ configs: [startSummary("tun")], active_config_id: CONFIG_ID })
+      .mockRejectedValue(new Error("boom"));
+    (bridge as unknown as { configList: unknown }).configList = list;
+
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let res: ActionResult | undefined;
+    await act(async () => {
+      res = await result.current.start();
+    });
+
+    expect(res?.ok).toBe(false);
+    expect(result.current.connection).toBe("idle");
+  });
+});

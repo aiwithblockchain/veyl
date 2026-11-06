@@ -447,9 +447,12 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       setConnectedConfigId(null);
       await bridge.runtimeStart(activeConfigId);
       await refreshReal();
+      // 请求已经结束：状态没跟上（例如刷新快照失败）也不能让过渡层挂住。
+      setConnection((current) => (current === "starting" ? "connected" : current));
       return { ok: true };
     } catch (err) {
       await refreshReal();
+      setConnection((current) => (current === "starting" ? "idle" : current));
       if (isHelperAdminFailure(err)) {
         return { ok: false, message: "这次没有授权，可以再试一次。" };
       }
@@ -477,9 +480,11 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       setConnection("stopping");
       await bridge.runtimeStop();
       await refreshReal();
+      setConnection((current) => (current === "stopping" ? "idle" : current));
       return { ok: true };
     } catch (err) {
       await refreshReal();
+      setConnection((current) => (current === "stopping" ? "idle" : current));
       return { ok: false, message: actionMessage(err, "断开失败") };
     }
   };
