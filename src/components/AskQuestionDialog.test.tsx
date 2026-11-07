@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PendingQuestion } from "../agent/bridge";
 import { AskQuestionDialog } from "./AskQuestionDialog";
@@ -106,8 +106,8 @@ describe("AskQuestionDialog：升级确认卡", () => {
     expect(dialog.textContent).not.toContain("重启 Veyl 后生效");
   });
 
-  it("普通提问保持原样，跳过回传空串", async () => {
-    const { onAnswer } = renderQuestion({
+  it("普通提问不再弹这个模态", () => {
+    renderQuestion({
       ...confirmQuestion(),
       kind: null,
       upgradeConfirm: null,
@@ -115,12 +115,8 @@ describe("AskQuestionDialog：升级确认卡", () => {
       options: ["浏览网页", "桌面软件"],
     });
 
-    expect(await screen.findByText("需要你的确认")).toBeTruthy();
-    expect(screen.queryByText("更新后台运行库")).toBeNull();
-
-    await act(async () => {
-      fireEvent.keyDown(window, { key: "Escape" });
-    });
-    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith(""));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByText("需要你的确认")).toBeNull();
+    expect(screen.queryByText("你主要用它做什么？")).toBeNull();
   });
 });

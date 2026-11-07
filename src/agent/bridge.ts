@@ -508,7 +508,7 @@ export interface AgentBridge {
   saveDeepSeekKey(key: string): Promise<DeepSeekKeyState>;
   /** 从本机存储删除 Key。 */
   clearDeepSeekKey(): Promise<void>;
-  /** 回答模型的提问：answer 必须是选项之一，空字符串表示跳过。 */
+  /** 回答模型的提问：普通提问接受任何非空文本，空字符串表示跳过；升级确认卡仍只认 options 原文。 */
   replyUserQuestion(sessionId: string, questionId: string, answer: string): Promise<void>;
   /** 会话里尚未回答的问题（重连恢复用）。 */
   listPendingQuestions(sessionId: string): Promise<PendingQuestion[]>;

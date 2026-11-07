@@ -1,7 +1,8 @@
 //! AskUserQuestion 的一等通道：Claurst 的 `UserQuestionEvent` → Tauri 事件 → 回答回传。
 //!
-//! 语义（契约 1.2.0）：单选，answer 必须是 options 之一；空字符串表示跳过。
-//! 300 秒未答由 Host 自动回空串；请求结束 / 取消 / 会话删除时清理，避免 oneshot 永远挂着。
+//! 语义（契约 2.16.0）：普通提问接受任何非空文本，空字符串表示跳过；
+//! 升级确认卡（`core_upgrade_confirm`）是装包授权，仍必须逐字等于 options 之一。
+//! 15 分钟未答由 Host 自动回空串；请求结束 / 取消 / 会话删除时清理，避免 oneshot 永远挂着。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -88,13 +89,6 @@ fn record_seed_consent(session_id: &str, request_id: &str) {
         .insert((session_id.to_string(), request_id.to_string()));
 }
 
-fn revoke_seed_consent(session_id: &str, request_id: &str) {
-    seed_consents()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&(session_id.to_string(), request_id.to_string()));
-}
-
 /// 本请求里用户是否明确选过「用 Veyl 提供的测试节点（仅供试用）」。
 pub fn seed_consent_granted(session_id: &str, request_id: &str) -> bool {
     seed_consents()
@@ -116,18 +110,6 @@ fn record_upgrade_consent(session_id: &str, request_id: &str, target: &str, sha:
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert((
-            session_id.to_string(),
-            request_id.to_string(),
-            target.to_string(),
-            sha.to_ascii_lowercase(),
-        ));
-}
-
-fn revoke_upgrade_consent(session_id: &str, request_id: &str, target: &str, sha: &str) {
-    upgrade_consents()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&(
             session_id.to_string(),
             request_id.to_string(),
             target.to_string(),
@@ -206,7 +188,9 @@ pub fn register_with(
     };
 
     {
-        let mut guard = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = pending()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.insert(
             question_id.clone(),
             PendingQuestion {
@@ -274,7 +258,8 @@ fn settle(question_id: &str, answer: String) -> bool {
     true
 }
 
-/// UI 回答。`answer` 必须是 options 之一，或空串（跳过）。
+/// UI 回答。普通提问接受任何非空文本，空串 = 跳过；
+/// `core_upgrade_confirm` 只认 options 里的原文。
 ///
 /// **只认内存里的 pending。** 进程重启后 pending 就没了——这是刻意的：
 /// 恢复出来的问题即使能显示，答案也传不回模型（那一轮对话已经结束，
@@ -282,7 +267,9 @@ fn settle(question_id: &str, answer: String) -> bool {
 /// 让 AI 重新问一遍。
 pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (String, String)> {
     let matched = {
-        let guard = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = pending()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match guard.get(question_id) {
             None => None,
             Some(question) if question.session_id != session_id => {
@@ -301,45 +288,77 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
     let Some((options, request_id, kind, target_version, artifact_sha256)) = matched else {
         return Err(not_pending());
     };
-    if !answer.is_empty() && !options.iter().any(|option| option == answer) {
+    // 装包授权不能靠打字确认：卡片上的选项才是唯一的「同意」。
+    let confirm_card = kind.as_deref() == Some("core_upgrade_confirm");
+    let skipping = answer.trim().is_empty();
+    if confirm_card && !skipping && !options.iter().any(|option| option == answer) {
         return Err((
             "answer_not_in_options".into(),
-            "回答必须是给定选项之一".into(),
+            "升级确认只能逐字选择给定选项".into(),
         ));
     }
+    let answer = if skipping {
+        String::new()
+    } else {
+        answer.to_string()
+    };
 
-    // 先记同意、再唤醒模型：反过来的话，模型可能抢在记录之前调 ConfigCreate，
-    // 白白失败一次。settle 失败说明问题已被别处处理，把记录回滚掉。
-    let granted = grants_seed_consent(&options, answer);
+    // 先认领、再记账、最后送通道。
+    //
+    // take 是原子的：并发的第二个回答在这里拿到 None，什么都还没记，直接报不存在。
+    // 反过来（先记账、settle 失败再回滚）会让第二个回答把第一个刚记的同意删掉。
+    let Some(mut question) = take(question_id) else {
+        return Err(not_pending());
+    };
+    // 记账在送通道之前：模型收到答案就会继续跑，可能立刻调 ConfigCreate。
+    let granted = grants_seed_consent(&options, &answer);
     if granted {
         record_seed_consent(session_id, &request_id);
     }
     // 升级确认只认逐字「升级」，并且绑定本次的目标版本与产物哈希。
-    let upgrade_granted = kind.as_deref() == Some("core_upgrade_confirm")
-        && answer == "升级"
-        && target_version.is_some()
-        && artifact_sha256.is_some();
+    let upgrade_granted =
+        confirm_card && answer == "升级" && target_version.is_some() && artifact_sha256.is_some();
     if let (true, Some(target), Some(sha)) = (upgrade_granted, &target_version, &artifact_sha256) {
         record_upgrade_consent(session_id, &request_id, target, sha);
     }
-    if !settle(question_id, answer.to_string()) {
-        if granted {
-            revoke_seed_consent(session_id, &request_id);
-        }
-        if let (true, Some(target), Some(sha)) = (upgrade_granted, &target_version, &artifact_sha256)
-        {
-            revoke_upgrade_consent(session_id, &request_id, target, sha);
-        }
-        return Err(not_pending());
+    if let Some(tx) = question.reply.take() {
+        let _ = tx.send(answer.clone());
+    }
+    if !answer.is_empty() {
+        record_user_answer(session_id, &answer);
     }
     Ok(())
+}
+
+/// 回答落库，只作聊天历史。
+///
+/// 答案已经通过工具结果送回模型，写库是给重启后的聊天记录用的，不会再喂一遍。
+/// 在成功认领这条问题之后写：认领失败说明它已被别处处理（超时 / 取消 / 请求结束），
+/// 那条答案根本没送到模型，不该出现在历史里。
+fn record_user_answer(session_id: &str, answer: &str) {
+    let Some(store) = crate::store::global() else {
+        return;
+    };
+    let conn = store.conn();
+    if let Err(error) = crate::store::chat::append_message(
+        &conn,
+        &crate::store::chat::new_message_id(),
+        session_id,
+        "user",
+        answer,
+        None,
+    ) {
+        log::warn!("AskUserQuestion 的回答没写进聊天历史：{error}");
+    }
 }
 
 /// 当前 session 未回答的问题（同一进程内重连用）。
 ///
 /// 只读内存：跨进程不做恢复，理由见 [`reply`]。
 pub fn list_pending(session_id: &str) -> Value {
-    let guard = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = pending()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut entries: Vec<(&String, &PendingQuestion)> = guard
         .iter()
         .filter(|(_, question)| question.session_id == session_id)
@@ -368,7 +387,9 @@ pub fn list_pending(session_id: &str) -> Value {
 /// 请求结束 / 取消：把该请求下未答的问题作废。
 pub fn cleanup_request(session_id: &str, request_id: &str) {
     let ids: Vec<String> = {
-        let guard = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = pending()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard
             .iter()
             .filter(|(_, question)| {
@@ -397,7 +418,9 @@ pub fn cleanup_request(session_id: &str, request_id: &str) {
 /// 会话删除：作废该会话所有未答问题。
 pub fn cleanup_session(session_id: &str) {
     let ids: Vec<String> = {
-        let guard = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = pending()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard
             .iter()
             .filter(|(_, question)| question.session_id == session_id)
@@ -469,22 +492,188 @@ mod memory_tests {
         assert!(reply("ses_after_restart", "q_whatever", "A").is_err());
     }
 
+    /// 全进程的库（正式启动时由 `lib.rs` 装）。
+    ///
+    /// `install_global` 先到先得：别的测试模块可能已经装过自己的内存库，
+    /// 那就用它的——`reply` 落库写的是 `global()`，读必须读同一个。
+    fn test_store() -> std::sync::Arc<crate::store::Store> {
+        static STORE: OnceLock<std::sync::Arc<crate::store::Store>> = OnceLock::new();
+        crate::store::install_global(
+            STORE
+                .get_or_init(|| {
+                    std::sync::Arc::new(
+                        crate::store::Store::open_in_memory().expect("内存库打不开"),
+                    )
+                })
+                .clone(),
+        );
+        crate::store::global().expect("全局库已装").clone()
+    }
+
+    /// 一条 `role = "user"` 的回答记录（没有就别返回空）。
+    fn answer_rows(session_id: &str) -> Vec<crate::store::chat::ChatMessage> {
+        let store = test_store();
+        let conn = store.conn();
+        crate::store::chat::messages(&conn, session_id)
+            .expect("读聊天记录")
+            .into_iter()
+            .filter(|message| message.role == "user")
+            .collect()
+    }
+
+    /// 普通提问是自由文本：用户想补充说明时不该被选项卡住。
     #[tokio::test]
-    async fn an_answer_outside_the_options_is_rejected_and_the_question_stays() {
-        let (event, _rx) = event("选一个", &["A", "B"]);
-        register("ses_options", "req_options", event);
-        let id = list_pending("ses_options")["questions"][0]["question_id"]
+    async fn a_free_text_answer_is_accepted_and_reaches_the_tool() {
+        test_store();
+        let (event, rx) = event("你主要想用它做什么？", &["仅浏览网页", "APP 也要用"]);
+        register("ses_free", "req_free", event);
+        let id = list_pending("ses_free")["questions"][0]["question_id"]
             .as_str()
             .unwrap()
             .to_string();
 
-        let error = reply("ses_options", &id, "C").unwrap_err();
+        reply("ses_free", &id, "上班要查资料，手机上也要刷视频").unwrap();
+        assert_eq!(rx.await.unwrap(), "上班要查资料，手机上也要刷视频");
+        assert!(
+            list_pending("ses_free")["questions"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "回答之后问题必须消失"
+        );
+
+        let rows = answer_rows("ses_free");
+        assert_eq!(rows.len(), 1, "回答落库恰好一条：{rows:?}");
+        assert_eq!(rows[0].content, "上班要查资料，手机上也要刷视频");
+        assert!(rows[0].tool.is_none());
+        cleanup_request("ses_free", "req_free");
+    }
+
+    /// 装包授权不能靠自由文本：卡片上的选项才是唯一的「同意」。
+    #[tokio::test]
+    async fn the_upgrade_card_still_rejects_free_text() {
+        test_store();
+        let (event, _rx) = event("是否升级？", &["升级", "取消"]);
+        register_with(
+            "ses_up_free",
+            "req_up_free",
+            event,
+            Some(QuestionExtras {
+                kind: "core_upgrade_confirm",
+                details: json!({}),
+                default_index: 1,
+                target_version: Some("1.15.0".into()),
+                artifact_sha256: Some("ab".into()),
+            }),
+        );
+        let id = list_pending("ses_up_free")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let error = reply("ses_up_free", &id, "那就升吧").unwrap_err();
         assert_eq!(error.0, "answer_not_in_options");
         assert_eq!(
-            list_pending("ses_options")["questions"].as_array().unwrap().len(),
+            list_pending("ses_up_free")["questions"]
+                .as_array()
+                .unwrap()
+                .len(),
             1,
             "被拒绝的回答不能让问题消失"
         );
+        assert!(
+            answer_rows("ses_up_free").is_empty(),
+            "没送出去的答案不能落库"
+        );
+        cleanup_request("ses_up_free", "req_up_free");
+    }
+
+    /// 自由作答不授予默认节点同意：同意必须逐字选中规范选项。
+    #[tokio::test]
+    async fn free_text_does_not_grant_seed_consent() {
+        let (event, _rx) = event(
+            "节点从哪来？",
+            &["用 Veyl 提供的测试节点（仅供试用）", "用我自己的节点"],
+        );
+        register("ses_seed_free", "req_seed_free", event);
+        let id = list_pending("ses_seed_free")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        reply("ses_seed_free", &id, "先用你们的试试").unwrap();
+        assert!(!seed_consent_granted("ses_seed_free", "req_seed_free"));
+        cleanup_request("ses_seed_free", "req_seed_free");
+    }
+
+    /// 两条提交路径（点选项 / 输入框回车）同时回答同一条问题：只有一个能认领，
+    /// 认领失败的那个不能把赢家刚记下的同意删掉。
+    ///
+    /// 跑多轮是为了让「输家回滚晚于赢家记账」的交错一定出现一次——单轮有概率躲过去。
+    #[tokio::test]
+    async fn concurrent_answers_do_not_revoke_the_consent_that_was_granted() {
+        for round in 0..8 {
+            let session = format!("ses_race_{round}");
+            let request = format!("req_race_{round}");
+            let (event, rx) = event(
+                "节点从哪来？",
+                &["用 Veyl 提供的测试节点（仅供试用）", "用我自己的节点"],
+            );
+            register(&session, &request, event);
+            let id = list_pending(&session)["questions"][0]["question_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+
+            let barrier = std::sync::Barrier::new(2);
+            let results: Vec<Result<(), (String, String)>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..2)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            reply(&session, &id, SEED_OPTION)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("线程不该 panic"))
+                    .collect()
+            });
+
+            assert_eq!(
+                results.iter().filter(|result| result.is_ok()).count(),
+                1,
+                "第 {round} 轮：只能有一个回答被接受：{results:?}"
+            );
+            let rejected = results
+                .iter()
+                .find_map(|result| result.as_ref().err())
+                .expect("另一个必须被拒");
+            assert_eq!(rejected.0, "question_not_pending");
+            assert!(
+                seed_consent_granted(&session, &request),
+                "第 {round} 轮：赢家记下的同意不能被输家的回滚删掉"
+            );
+            assert_eq!(rx.await.unwrap(), SEED_OPTION);
+            cleanup_request(&session, &request);
+        }
+    }
+
+    /// 跳过（空串）不落库：历史里只该有用户真说过的话。
+    #[tokio::test]
+    async fn skipping_a_question_is_not_written_to_history() {
+        test_store();
+        let (event, _rx) = event("选一个", &["A", "B"]);
+        register("ses_skip_store", "req_skip_store", event);
+        let id = list_pending("ses_skip_store")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        reply("ses_skip_store", &id, "").unwrap();
+        assert!(answer_rows("ses_skip_store").is_empty());
+        cleanup_request("ses_skip_store", "req_skip_store");
     }
 
     /// 选了「用 Veyl 提供的测试节点（仅供试用）」才留下同意记录，且只对当前请求有效。
@@ -516,7 +705,8 @@ mod memory_tests {
     }
 
     #[tokio::test]
-    async fn choosing_own_nodes_does_not_grant_consent() {        let (event, _rx) = event(
+    async fn choosing_own_nodes_does_not_grant_consent() {
+        let (event, _rx) = event(
             "节点从哪来？",
             &["用 Veyl 提供的测试节点（仅供试用）", "用我自己的节点"],
         );
@@ -546,11 +736,16 @@ mod memory_tests {
         let listed = list_pending("ses_up");
         assert_eq!(listed["questions"][0]["kind"], "core_upgrade_confirm");
         assert_eq!(listed["questions"][0]["default_index"], 1);
-        let id = listed["questions"][0]["question_id"].as_str().unwrap().to_string();
+        let id = listed["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         reply("ses_up", &id, "升级").unwrap();
         assert_eq!(rx.await.unwrap(), "升级");
-        assert!(upgrade_consent_granted("ses_up", "req_up", "1.15.0", "aabb"));
+        assert!(upgrade_consent_granted(
+            "ses_up", "req_up", "1.15.0", "aabb"
+        ));
         assert!(
             !upgrade_consent_granted("ses_up", "req_up", "1.16.0", "aabb"),
             "换版本必须重新确认"
@@ -560,10 +755,16 @@ mod memory_tests {
             "换产物必须重新确认"
         );
         // 建任务时消费掉：同一份同意不能再用第二次。
-        assert!(consume_upgrade_consent("ses_up", "req_up", "1.15.0", "aabb"));
-        assert!(!upgrade_consent_granted("ses_up", "req_up", "1.15.0", "aabb"));
+        assert!(consume_upgrade_consent(
+            "ses_up", "req_up", "1.15.0", "aabb"
+        ));
+        assert!(!upgrade_consent_granted(
+            "ses_up", "req_up", "1.15.0", "aabb"
+        ));
         cleanup_request("ses_up", "req_up");
-        assert!(!upgrade_consent_granted("ses_up", "req_up", "1.15.0", "aabb"));
+        assert!(!upgrade_consent_granted(
+            "ses_up", "req_up", "1.15.0", "aabb"
+        ));
     }
 
     #[tokio::test]
@@ -633,7 +834,10 @@ mod memory_tests {
     async fn only_the_canonical_option_grants_consent() {
         let (event, _rx) = event(
             "节点从哪来？",
-            &["用 Veyl 提供的测试节点（仅供试用）（推荐）", "用我自己的节点"],
+            &[
+                "用 Veyl 提供的测试节点（仅供试用）（推荐）",
+                "用我自己的节点",
+            ],
         );
         register("ses_variant", "req_variant", event);
         let id = list_pending("ses_variant")["questions"][0]["question_id"]
@@ -641,7 +845,12 @@ mod memory_tests {
             .unwrap()
             .to_string();
 
-        reply("ses_variant", &id, "用 Veyl 提供的测试节点（仅供试用）（推荐）").unwrap();
+        reply(
+            "ses_variant",
+            &id,
+            "用 Veyl 提供的测试节点（仅供试用）（推荐）",
+        )
+        .unwrap();
         assert!(
             !seed_consent_granted("ses_variant", "req_variant"),
             "变体选项不能授权：同意必须对应提示词规定的那个选项"

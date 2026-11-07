@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.15.0`
+> 契约版本：`2.16.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -156,7 +156,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 27 | `chat_history` | `{ sessionId? }` | `ChatHistory` | 保留 |
 | 28 | `chat_delete` | `{ sessionId }` | `{ ok: true }` | 保留 |
 | 29 | `rename_session` | `{ sessionId, title }` | `{ id, title, created_at }` | 保留 |
-| 30 | `reply_user_question` | `{ sessionId, questionId, answer }` | `{ ok: true }` | 保留 |
+| 30 | `reply_user_question` | `{ sessionId, questionId, answer }` | `{ ok: true }` | 保留；**2.16.0 起普通提问接受自由文本，回答落库** |
 | 31 | `list_pending_questions` | `{ sessionId }` | `{ questions: PendingQuestion[] }` | 保留 |
 | 32 | `llm_provider_list` | `{}` | `LlmProviderList` | 保留 |
 | 33 | `llm_provider_save` | `{ providerId?, name, protocol, baseUrl?, model, apiKey? }` | `LlmProvider` | 保留 |
@@ -1432,7 +1432,10 @@ type LlmTestResult = { ok: boolean; latency_ms: number | null; error?: string };
 
 | 规则 | 说明 |
 |---|---|
-| `answer` 取值 | 必须是该问题 `options` 之一，**逐字节相等**（不 trim、不归一大小写）；空字符串 = 跳过 |
+| `answer` 取值（普通提问） | 接受**任何非空文本**，原样作为回答回给模型；空字符串 = 跳过。用户不必被选项卡住，打字说清楚就行 |
+| `answer` 取值（`core_upgrade_confirm`） | 装包授权**必须逐字等于该问题 `options` 之一**（不 trim、不归一大小写），否则 → `INVALID_ARGUMENT / answer_not_in_options`；空字符串仍是跳过 |
+| 默认节点同意 | 只有逐字选中规范选项「用 Veyl 提供的测试节点（仅供试用）」才授予；用户自由作答不授予，模型重问一次是预期行为 |
+| 回答落库 | 送达模型后写一条 `role = "user"` 的聊天记录（`content` 为回答原文）；只是历史，不会重复喂给模型。空字符串（跳过）不写 |
 | 一个 `questionId` 只能回答一次 | 第二次及以后 → `NOT_FOUND / question_not_pending` |
 | 超时后 | 同上（Host 已代答空串） |
 | 会话不匹配 | **同样返回 `question_not_pending`**，不区分「不存在」与「属于别的会话」——否则这个命令会变成跨会话探测问题的工具 |
@@ -1445,7 +1448,7 @@ type PendingQuestion = {
   question: string;
   options: string[];
   created_at: number;   // Unix 毫秒
-  expires_at: number;   // Unix 毫秒 = created_at + 300_000
+  expires_at: number;   // Unix 毫秒 = created_at + 900_000（15 分钟）
 };
 ```
 
@@ -1815,7 +1818,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.15.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 |
+| `contracts/commands.md` | **2.16.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 |
 | `contracts/events.md` | **2.10.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 |
 | `contracts/runtime.md` | **2.5.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` |
 | `contracts/tools.md` | **3.8.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` |
@@ -1833,6 +1836,15 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.16.0（2026-11-07，提问接受自由文本）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.0`；`reply_user_question` 的 `answer` 普通提问接受任何非空文本（自由作答原样回给模型），空串仍是跳过 | 语义变更 | 提问卡片一开就是整轮阻塞，只许点选项等于不让用户说话；用户想补充说明时只能干等 |
+| 2 | `core_upgrade_confirm` 维持严格：`answer` 必须逐字等于 `options` 之一，否则 `INVALID_ARGUMENT / answer_not_in_options` | 约束 | 装包授权不能靠模型引导出来的自由文本确认 |
+| 3 | 回答送达模型后写一条 `role = "user"` 聊天记录（跳过不写）；只作历史，不重复进上下文 | 行为新增 | 原来答案只存在内存 `tool_calls` 里，重启后只剩问题没有答案 |
+| 4 | §15.5 矩阵同步本文件 2.16.0 | 元数据 | — |
 
 ### 2.15.0（2026-11-07，当前所在地区）
 

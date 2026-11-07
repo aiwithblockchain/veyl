@@ -801,8 +801,16 @@ export default function App() {
       .catch(() => {});
   };
 
-  const busyNotice = () =>
-    setAppNotice({ level: "info", text: "上一条还在回复，等它结束再发。" });
+  // 请求占着槽位不一定是在回复：提问待答时 AI 其实在等回答。
+  const busyNotice = (sessionId: string) => {
+    const waiting = pendingQuestions.some((item) => item.sessionId === sessionId);
+    setAppNotice({
+      level: "info",
+      text: waiting
+        ? "先回答上面的问题，或者点跳过。"
+        : "上一条还在回复，等它结束再发。",
+    });
+  };
 
   const sendToSession = async (
     sessionId: string,
@@ -821,7 +829,7 @@ export default function App() {
       target?.requesting ||
       target?.activeRequestId
     ) {
-      busyNotice();
+      busyNotice(sessionId);
       return false;
     }
 
@@ -843,7 +851,7 @@ export default function App() {
       const bridgeError = toBridgeError(error);
       if (bridgeError.code === "BUSY") {
         dispatch({ type: "send_rejected", sessionId, localRequestId });
-        busyNotice();
+        busyNotice(sessionId);
         return false;
       }
       dispatch({
@@ -932,8 +940,8 @@ export default function App() {
     void bridge.replyUserQuestion(sessionId, questionId, "").catch(() => undefined);
   };
 
-  const handleAnswerQuestion = async (answer: string) => {
-    if (!currentQuestion) return;
+  const handleAnswerQuestion = async (answer: string): Promise<boolean> => {
+    if (!currentQuestion) return false;
     const { sessionId, questionId } = currentQuestion;
     try {
       await bridge.replyUserQuestion(sessionId, questionId, answer);
@@ -941,6 +949,12 @@ export default function App() {
       setPendingQuestions((current) =>
         current.filter((item) => item.questionId !== questionId),
       );
+      // 后端会把回答落成一条 user 消息；本地同步追加，实时和重启后看到的一致。
+      // 跳过（空串）不落库，这里也不追加。
+      if (answer.length > 0) {
+        dispatch({ type: "append_user_message", sessionId, text: answer });
+      }
+      return true;
     } catch (error) {
       if (toBridgeError(error).code === "NOT_FOUND") {
         // 已经回答或随请求作废：本地关掉浮层即可，不弹错误。
@@ -948,9 +962,23 @@ export default function App() {
         setPendingQuestions((current) =>
           current.filter((item) => item.questionId !== questionId),
         );
-        return;
+        return false;
       }
       throw error;
+    }
+  };
+
+  // 输入框里打的字也是对提问的回答：不能走 sendToSession，那条会被单飞拒掉。
+  const answerQuestionFromComposer = async (text: string): Promise<boolean> => {
+    try {
+      // 问题刚好作废时返回 false：让 Composer 把文字放回输入框，不能悄悄清掉。
+      return await handleAnswerQuestion(text);
+    } catch (error) {
+      setAppNotice({
+        level: "error",
+        text: describeCommandError(error, "回答失败"),
+      });
+      return false;
     }
   };
 
@@ -1111,6 +1139,10 @@ export default function App() {
       onDeleteSession={handleDeleteSession}
       onSend={handleSend}
       onEmptySend={handleEmptySend}
+      question={currentQuestion}
+      onAnswerQuestion={handleAnswerQuestion}
+      onAnswerFromComposer={answerQuestionFromComposer}
+      onQuestionExpired={handleQuestionExpired}
       onStop={handleStop}
       onNextAction={handleNextAction}
       onOpenSettings={() => openSettings("ai")}

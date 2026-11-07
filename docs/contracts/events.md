@@ -541,7 +541,7 @@ type AskUserQuestionPayload = {
   kind?: string;            // Host 填充的结构化用途；模型提问时省略
   details?: Record<string, unknown>;  // 与 kind 配套的结构化数据；模型提问时省略
   created_at: number;       // Unix 毫秒，问题生成时刻
-  expires_at: number;       // Unix 毫秒，= created_at + 300_000
+  expires_at: number;       // Unix 毫秒，= created_at + 900_000（15 分钟）
   emitted_at: string;       // ISO 8601 UTC
 };
 ```
@@ -556,7 +556,7 @@ type AskUserQuestionPayload = {
 
 #### 4.8.1 语义
 
-- **单选**：`answer` 必须是 `options` 中的一个字符串，**逐字节相等**（不做 trim、不做大小写归一）。
+- **回答**：普通提问接受**任何非空文本**，原样回给模型——提问不是选择题，用户想补充说明时不能只能点按钮。`kind: "core_upgrade_confirm"` 是装包授权，`answer` 必须逐字等于 `options` 之一（不做 trim、不做大小写归一）。规则与 `commands.md` 2.16.0 §9.6 一致。
 - **跳过**：`answer` 为空字符串表示用户跳过，模型会收到"用户跳过了这个问题"。
 - **没有多选**：Claurst 的通道不支持。需要多选时只能连续提问，或另立工具（本期不做）。
 - **`options` 必须非空，且每一项都是非空字符串**：

@@ -14,24 +14,26 @@ const UNKNOWN_CONFIRM: CoreUpgradeConfirmData = {
 
 interface Props {
   question: PendingQuestion | null;
-  onAnswer: (answer: string) => Promise<void>;
-  /** 后端 300 秒超时后已自动作废：前端直接收起，不再调用回答命令。 */
+  onAnswer: (answer: string) => Promise<unknown>;
+  /** 后端 15 分钟超时后已自动作废：前端直接收起，不再调用回答命令。 */
   onExpire: () => void;
   /** 当前是否有连接在跑；决定升级确认卡的生效时机文案。 */
   connected?: boolean;
 }
 
-/** 模型提问的居中模态：单选项；普通提问跳过回传空串，升级确认卡的跳过等于取消选项。 */
+/**
+ * 装包授权用的居中模态：必须挡住别处操作，所以保留焦点陷阱。
+ * 普通提问改为消息流里的内联卡片，不再走这里。
+ */
 export function AskQuestionDialog({ question, onAnswer, onExpire, connected = false }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
-  const firstOptionRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const submittingRef = useRef(false);
   const expireRef = useRef(onExpire);
   expireRef.current = onExpire;
-  useFocusTrap(Boolean(question), dialogRef);
+  useFocusTrap(Boolean(question && question.kind === "core_upgrade_confirm"), dialogRef);
 
   const confirm =
     question?.kind === "core_upgrade_confirm"
@@ -47,12 +49,11 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
     "升级";
   const cancelAnswer =
     options.find((option) => /取消|暂不|稍后|不升|不更新|不用|以后/.test(option)) ?? "取消";
-  const skipValue = confirm ? cancelAnswer : "";
 
-  // 后端 300 秒后静默回空串；倒计时只读后端给的 expires_at。
+  // 后端 15 分钟后静默回空串；倒计时只读后端给的 expires_at。
   // 回答或 request end 会把 question 置空，cleanup 会清掉这个定时器。
   useEffect(() => {
-    if (!question) return;
+    if (!question || question.kind !== "core_upgrade_confirm") return;
     const remaining = question.expiresAt - Date.now();
     if (remaining <= 0) {
       expireRef.current();
@@ -60,18 +61,14 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
     }
     const timer = window.setTimeout(() => expireRef.current(), remaining);
     return () => window.clearTimeout(timer);
-  }, [question?.questionId, question?.expiresAt]);
+  }, [question?.questionId, question?.expiresAt, question?.kind]);
 
   useEffect(() => {
-    if (!question) return;
+    if (!question || question.kind !== "core_upgrade_confirm") return;
     submittingRef.current = false;
     setSubmitting(false);
     setError(null);
-    if (question.kind === "core_upgrade_confirm") {
-      cancelRef.current?.focus();
-    } else {
-      firstOptionRef.current?.focus();
-    }
+    cancelRef.current?.focus();
   }, [question?.questionId, question?.kind]);
 
   const answer = useCallback(
@@ -93,19 +90,19 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
   );
 
   const skip = useCallback(() => {
-    if (!submittingRef.current) void answer(skipValue);
-  }, [answer, skipValue]);
+    if (!submittingRef.current) void answer(cancelAnswer);
+  }, [answer, cancelAnswer]);
 
   useEffect(() => {
-    if (!question) return;
+    if (!question || question.kind !== "core_upgrade_confirm") return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") skip();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [question, skip]);
+  }, [question?.questionId, question?.kind, skip]);
 
-  if (!question) return null;
+  if (!question || question.kind !== "core_upgrade_confirm") return null;
 
   return (
     <div
@@ -124,12 +121,12 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
       >
         <header className="ask-question__head">
           <h2 id="ask-question-title" className="ask-question__title">
-            {confirm ? "更新后台运行库" : "需要你的确认"}
+            更新后台运行库
           </h2>
           <button
             type="button"
             className="ask-question__close"
-            aria-label={confirm ? "关闭" : "稍后回答"}
+            aria-label="关闭"
             disabled={submitting}
             onClick={skip}
           >
@@ -137,83 +134,49 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
           </button>
         </header>
 
-        {confirm ? (
-          <dl className="core-confirm">
-            <div className="core-confirm__row">
-              <dt>版本</dt>
-              <dd>
-                当前 {confirm.currentVersion ?? "未知"} → 目标{" "}
-                {confirm.targetVersion ?? "未知"}
-              </dd>
-            </div>
-            <div className="core-confirm__row">
-              <dt>下载大小</dt>
-              <dd>{formatByteSize(confirm.size) ?? "大小未知"}</dd>
-            </div>
-            <div className="core-confirm__row">
-              <dt>来源</dt>
-              <dd>官方更新</dd>
-            </div>
-            <div className="core-confirm__row">
-              <dt>生效</dt>
-              <dd>{upgradeEffectText(confirm.restartRequired, connected)}</dd>
-            </div>
-          </dl>
-        ) : (
-          <p className="ask-question__text">{question.question}</p>
-        )}
-
-        {confirm ? (
-          <div className="core-confirm__actions">
-            <button
-              type="button"
-              className="btn btn--ghost"
-              disabled={submitting}
-              onClick={() => void answer(upgradeAnswer)}
-            >
-              升级
-            </button>
-            <button
-              ref={cancelRef}
-              type="button"
-              className="btn btn--primary"
-              disabled={submitting}
-              onClick={() => void answer(cancelAnswer)}
-            >
-              取消
-            </button>
+        <dl className="core-confirm">
+          <div className="core-confirm__row">
+            <dt>版本</dt>
+            <dd>
+              当前 {confirm?.currentVersion ?? "未知"} → 目标{" "}
+              {confirm?.targetVersion ?? "未知"}
+            </dd>
           </div>
-        ) : question.options.length > 0 ? (
-          <div className="ask-question__options">
-            {question.options.map((option, index) => (
-              <button
-                key={index}
-                ref={index === 0 ? firstOptionRef : undefined}
-                type="button"
-                className="ask-question__option"
-                disabled={submitting}
-                onClick={() => void answer(option)}
-              >
-                {option}
-              </button>
-            ))}
+          <div className="core-confirm__row">
+            <dt>下载大小</dt>
+            <dd>{formatByteSize(confirm?.size ?? null) ?? "大小未知"}</dd>
           </div>
-        ) : (
-          <p className="ask-question__empty">模型没有给出选项，可以直接跳过。</p>
-        )}
+          <div className="core-confirm__row">
+            <dt>来源</dt>
+            <dd>官方更新</dd>
+          </div>
+          <div className="core-confirm__row">
+            <dt>生效</dt>
+            <dd>{upgradeEffectText(confirm?.restartRequired ?? false, connected)}</dd>
+          </div>
+        </dl>
 
-        {error ? <p className="ask-question__error">{error}</p> : null}
-
-        {confirm ? null : (
+        <div className="core-confirm__actions">
           <button
             type="button"
-            className="ask-question__skip"
+            className="btn btn--ghost"
             disabled={submitting}
-            onClick={skip}
+            onClick={() => void answer(upgradeAnswer)}
           >
-            稍后回答
+            升级
           </button>
-        )}
+          <button
+            ref={cancelRef}
+            type="button"
+            className="btn btn--primary"
+            disabled={submitting}
+            onClick={() => void answer(cancelAnswer)}
+          >
+            取消
+          </button>
+        </div>
+
+        {error ? <p className="ask-question__error">{error}</p> : null}
       </div>
     </div>
   );

@@ -848,3 +848,52 @@ describe("单飞与 BUSY", () => {
     expect(activeSession(state)!.activeRequestId).toBeNull();
   });
 });
+
+describe("追问回答追加", () => {
+  it("只追加一条 user 消息，不动请求状态", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "帮我配一下",
+      localRequestId: "local_1",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_1",
+    });
+    const before = activeSession(state)!;
+
+    state = chatReducer(state, {
+      type: "append_user_message",
+      sessionId,
+      text: "我想给手机用",
+    });
+
+    const after = activeSession(state)!;
+    expect(after.messages).toHaveLength(before.messages.length + 1);
+    expect(after.messages[after.messages.length - 1]).toMatchObject({
+      role: "user",
+      text: "我想给手机用",
+    });
+    expect(after.requesting).toBe(true);
+    expect(after.activeRequestId).toBe("req_1");
+    expect(after.status).toEqual(before.status);
+  });
+
+  it("跳过（空串）不追加", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    const before = activeSession(state)!.messages.length;
+
+    state = chatReducer(state, {
+      type: "append_user_message",
+      sessionId,
+      text: "",
+    });
+
+    expect(activeSession(state)!.messages).toHaveLength(before);
+  });
+});

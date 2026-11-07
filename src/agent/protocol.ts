@@ -405,7 +405,7 @@ export interface AskUserQuestionPayload {
   /** kind = "core_upgrade_confirm" 时的明细（线格式 snake_case）。 */
   details?: Record<string, unknown> | null;
   created_at: number;
-  /** Unix 毫秒，= created_at + 300_000；前端只读这个值做倒计时。 */
+  /** Unix 毫秒，= created_at + 900_000；前端只读这个值做倒计时。 */
   expires_at: number;
   emitted_at: string;
 }

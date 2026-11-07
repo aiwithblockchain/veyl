@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import type { PendingQuestion } from "../agent/bridge";
 import type { NextAction } from "../agent/protocol";
 import type { Session } from "../state/chatStore";
 import { useFocusTrap } from "../ui/focus";
+import { AskQuestionCard } from "./AskQuestionCard";
 import { ChatView } from "./ChatView";
 import { Composer } from "./Composer";
 import {
@@ -31,6 +33,12 @@ interface Props {
   hasConfigs: boolean;
   /** 递增这个值会把焦点移到输入框，并切回对话页。 */
   focusSignal: number;
+  /** 当前会话待回答的提问；普通提问渲染在消息流末尾。 */
+  question?: PendingQuestion | null;
+  onAnswerQuestion?: (answer: string) => void | boolean | Promise<void | boolean>;
+  /** 输入框发送时走的回答路径；失败返回 false，让文字留在输入框。 */
+  onAnswerFromComposer?: (text: string) => void | boolean | Promise<void | boolean>;
+  onQuestionExpired?: () => void;
   onSelectSession: (sessionId: string) => void;
   onNewSession: () => void;
   onRenameSession: (sessionId: string, title: string) => Promise<RenameResult>;
@@ -65,6 +73,10 @@ export function AiPanel({
   hasEverConnected,
   hasConfigs,
   focusSignal,
+  question = null,
+  onAnswerQuestion,
+  onAnswerFromComposer,
+  onQuestionExpired,
   onSelectSession,
   onNewSession,
   onRenameSession,
@@ -154,6 +166,8 @@ export function AiPanel({
 
   const hasMessages = Boolean(session && session.messages.length > 0);
   const needsFirstConfig = aiReady && !hasConfigs;
+  const inlineQuestion =
+    question && question.kind !== "core_upgrade_confirm" ? question : null;
 
   return (
     <aside id="ai-panel" className="ai-panel" aria-label="AI 对话">
@@ -311,6 +325,10 @@ export function AiPanel({
           <ChatView
             session={session}
             onSend={onSend}
+            question={question}
+            onAnswerQuestion={onAnswerQuestion}
+            onAnswerFromComposer={onAnswerFromComposer}
+            onQuestionExpired={onQuestionExpired}
             onStop={onStop}
             onNextAction={onNextAction}
             hasKey={aiReady}
@@ -337,7 +355,11 @@ export function AiPanel({
                     <button
                       key={suggestion}
                       type="button"
-                      onClick={() => onEmptySend(suggestion)}
+                      onClick={() =>
+                        inlineQuestion && onAnswerFromComposer
+                          ? void onAnswerFromComposer(suggestion)
+                          : onEmptySend(suggestion)
+                      }
                     >
                       · {suggestion}
                     </button>
@@ -345,10 +367,22 @@ export function AiPanel({
                 </div>
               ) : null}
             </div>
+            {inlineQuestion ? (
+              <div className="ask-question-slot">
+                <AskQuestionCard
+                  question={inlineQuestion}
+                  onAnswer={onAnswerQuestion ?? (async () => undefined)}
+                  onExpire={onQuestionExpired ?? (() => undefined)}
+                />
+              </div>
+            ) : null}
             <Composer
               streaming={false}
+              questionPending={Boolean(inlineQuestion)}
               statusText={null}
-              onSend={onEmptySend}
+              onSend={
+                inlineQuestion && onAnswerFromComposer ? onAnswerFromComposer : onEmptySend
+              }
               onStop={onStop}
               disabled={!aiReady}
               onConfigure={onConfigureKey}

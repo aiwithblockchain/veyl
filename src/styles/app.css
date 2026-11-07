@@ -669,6 +669,10 @@ pre {
   color: var(--text-dim);
 }
 
+.composer__question-hint {
+  color: var(--ink-2);
+}
+
 .composer__hint {
   display: flex;
   justify-content: space-between;
@@ -3001,6 +3005,109 @@ body[data-resizing] {
 
 /* ---------- 模型提问（AskUserQuestion） ---------- */
 
+/* 普通提问：消息流里的内联卡片，不挡输入框。 */
+.ask-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-card);
+}
+
+.ask-card__head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.ask-card__question {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--ink);
+}
+
+.ask-card__countdown {
+  flex: none;
+  font-size: 11px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.ask-card__options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ask-card__option {
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+  transition: background 120ms ease-out, border-color 120ms ease-out;
+}
+
+.ask-card__option:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.ask-card__option:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ask-card__hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.ask-card__error {
+  margin: 0;
+  font-size: 13px;
+  color: var(--err-text);
+}
+
+.ask-card__skip {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 13px;
+}
+
+.ask-card__skip:hover:not(:disabled) {
+  color: var(--ink-2);
+}
+
+.ask-card__skip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 没有消息时可提问的卡片，和输入框同宽。 */
+.ask-question-slot {
+  padding: 0 16px 4px;
+}
+
+.ask-question-slot .ask-card {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+/* 装包授权：居中模态 + 焦点陷阱，必须挡住别处操作。 */
 .ask-question-backdrop {
   position: fixed;
   inset: 0;
@@ -3060,65 +3167,10 @@ body[data-resizing] {
   color: var(--ink);
 }
 
-.ask-question__text {
-  margin: 0;
-  font-size: 14px;
-  line-height: 1.65;
-  color: var(--ink);
-  white-space: pre-wrap;
-}
-
-.ask-question__options {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.ask-question__option {
-  width: 100%;
-  min-height: 38px;
-  padding: 8px 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--ink);
-  font-size: 14px;
-  text-align: left;
-  transition: background 120ms ease-out, border-color 120ms ease-out;
-}
-
-.ask-question__option:hover:not(:disabled) {
-  background: var(--bg-hover);
-  border-color: var(--accent);
-}
-
-.ask-question__option:disabled {
-  opacity: 0.55;
-}
-
-.ask-question__empty {
-  margin: 0;
-  font-size: 13px;
-  color: var(--ink-3);
-}
-
 .ask-question__error {
   margin: 0;
   font-size: 13px;
   color: var(--err-text);
-}
-
-.ask-question__skip {
-  align-self: flex-start;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--ink-3);
-  font-size: 13px;
-}
-
-.ask-question__skip:hover {
-  color: var(--ink-2);
 }
 
 /* AI 代劳升级的确认卡 */

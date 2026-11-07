@@ -108,3 +108,48 @@ describe("Composer 单飞", () => {
     await waitFor(() => expect(textarea().value).toBe(""));
   });
 });
+
+describe("Composer 提问待回答", () => {
+  it("请求还挂着也照常能用，不显示阻塞态", () => {
+    const onSend = vi.fn(() => true);
+    render(
+      <Composer
+        streaming
+        questionPending
+        statusText="正在回复"
+        onSend={onSend}
+        onStop={() => {}}
+      />,
+    );
+
+    type("我自己说");
+    expect(
+      (screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(screen.queryByRole("button", { name: "等待回复" })).toBeNull();
+    expect(screen.queryByText("正在回复")).toBeNull();
+    expect(
+      screen.getByText("回答上面的问题，也可以直接说你的想法"),
+    ).toBeTruthy();
+    // 仍然能停止这一轮。
+    expect(screen.getByRole("button", { name: "停止" })).toBeTruthy();
+  });
+
+  it("打字发送直接交给回答路径", () => {
+    const onSend = vi.fn(() => true);
+    render(
+      <Composer
+        streaming
+        questionPending
+        statusText={null}
+        onSend={onSend}
+        onStop={() => {}}
+      />,
+    );
+
+    type("我自己说");
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+
+    expect(onSend).toHaveBeenCalledWith("我自己说");
+  });
+});

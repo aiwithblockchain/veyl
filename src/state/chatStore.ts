@@ -72,6 +72,7 @@ export type ChatAction =
   | { type: "new_session" }
   | { type: "add_session"; session: Session }
   | { type: "send_user_message"; sessionId: string; text: string; localRequestId: string }
+  | { type: "append_user_message"; sessionId: string; text: string }
   | { type: "request_pending"; sessionId: string }
   | {
       type: "request_started";
@@ -327,6 +328,21 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             at: now,
           },
           assistant,
+        ],
+      }));
+    }
+
+    // 回答提问只追加一条历史消息，不动请求状态：这一轮本来就没结束。
+    case "append_user_message": {
+      const target = state.sessions.find((session) => session.id === action.sessionId);
+      if (!target || action.text.length === 0) return state;
+      const now = Date.now();
+      return patchSession(state, target.id, (session) => ({
+        ...session,
+        updatedAt: now,
+        messages: [
+          ...session.messages,
+          { id: nextId("user"), role: "user", text: action.text, at: now },
         ],
       }));
     }

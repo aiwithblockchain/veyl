@@ -117,7 +117,10 @@ async fn send_message_for_state(
 }
 
 #[tauri::command]
-pub async fn ai_cancel(state: State<'_, Arc<AppState>>, request_id: String) -> Result<Value, String> {
+pub async fn ai_cancel(
+    state: State<'_, Arc<AppState>>,
+    request_id: String,
+) -> Result<Value, String> {
     // 令牌存在 AppState 里，不依赖会话实例：spawn 前、切 provider 后都能取消。
     Ok(json!({ "cancelled": state.cancel_request(&request_id) }))
 }
@@ -210,10 +213,7 @@ fn error_value(error: anyhow::Error) -> Value {
     let text = error.to_string();
     match text.split_once(": ") {
         Some((code, message))
-            if !code.is_empty()
-                && code
-                    .chars()
-                    .all(|c| c.is_ascii_uppercase() || c == '_') =>
+            if !code.is_empty() && code.chars().all(|c| c.is_ascii_uppercase() || c == '_') =>
         {
             json!({
                 "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
@@ -251,7 +251,11 @@ pub async fn runtime_start(
 /// 面板主按钮：断开。
 #[tauri::command]
 pub async fn runtime_stop(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
-    state.services.runtime_stop(false).await.map_err(error_value)
+    state
+        .services
+        .runtime_stop(false)
+        .await
+        .map_err(error_value)
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +271,11 @@ pub async fn core_info(state: State<'_, Arc<AppState>>) -> Result<Value, Value> 
 /// 检查更新。断网时返回 `NETWORK_UNREACHABLE`，不进入下载。
 #[tauri::command]
 pub async fn core_check_updates(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
-    state.services.core_check_updates().await.map_err(error_value)
+    state
+        .services
+        .core_check_updates()
+        .await
+        .map_err(error_value)
 }
 
 /// 开始升级，立即返回 `{ job_id }`；进度走 `core-upgrade-progress` 事件。
@@ -310,7 +318,11 @@ pub async fn tun_helper_info(state: State<'_, Arc<AppState>>) -> Result<Value, V
 /// 换新后台组件映像。仅 UI；TUN 在跑时拒绝。
 #[tauri::command]
 pub async fn tun_helper_restart(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
-    state.services.tun_helper_restart().await.map_err(error_value)
+    state
+        .services
+        .tun_helper_restart()
+        .await
+        .map_err(error_value)
 }
 
 /// 仅 debug 构建：TUN 已连接时采集一次诊断，返回结论与报告路径。
@@ -420,27 +432,33 @@ pub async fn config_update(
         .and_then(Value::as_str)
         .map(str::to_string);
     let dns = arg("dns", "dns").cloned();
-    let tun_excludes = arg("tunExcludes", "tun_excludes").and_then(Value::as_array).map(|items| {
-        items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    });
-    let node_ids = arg("nodeIds", "node_ids").and_then(Value::as_array).map(|items| {
-        items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    });
-    let targets = arg("targets", "targets").and_then(Value::as_array).map(|items| {
-        items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    });
+    let tun_excludes = arg("tunExcludes", "tun_excludes")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
+    let node_ids = arg("nodeIds", "node_ids")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
+    let targets = arg("targets", "targets")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
 
     state
         .services
@@ -558,10 +576,7 @@ pub async fn node_switch(
 
 /// 测试单个节点连通性。未连接退化为 TCP 探测，不启动运行时。
 #[tauri::command]
-pub async fn node_probe(
-    state: State<'_, Arc<AppState>>,
-    node_id: String,
-) -> Result<Value, Value> {
+pub async fn node_probe(state: State<'_, Arc<AppState>>, node_id: String) -> Result<Value, Value> {
     state
         .services
         .node_probe(&node_id)
@@ -621,9 +636,7 @@ pub async fn default_profile_status(state: State<'_, Arc<AppState>>) -> Result<V
 
 /// 拉取并应用默认节点；有缓存时离线沿用缓存，不报死错。
 #[tauri::command]
-pub async fn default_profile_refresh(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Value, Value> {
+pub async fn default_profile_refresh(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
     // 用户手动点「检查更新」，意图就是立刻查一次；不能被 6 小时短路成「已是最新」。
     state
         .services
@@ -651,7 +664,11 @@ pub async fn route_get(
     state: State<'_, Arc<AppState>>,
     config_id: Option<String>,
 ) -> Result<Value, Value> {
-    state.services.route_get(config_id).await.map_err(error_value)
+    state
+        .services
+        .route_get(config_id)
+        .await
+        .map_err(error_value)
 }
 
 /// 切换分流模式。`direct` ↔ `proxy_all` 已连接时走 selector 热切；
@@ -737,7 +754,10 @@ fn latest_log_file(dir: &std::path::Path) -> Option<std::path::PathBuf> {
             if !path.is_file() {
                 return None;
             }
-            let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok())?;
+            let modified = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())?;
             Some((modified, path))
         })
         .max_by_key(|(modified, _)| *modified)
@@ -1007,28 +1027,32 @@ pub async fn llm_provider_test(
     crate::llm::test(store, input).await.map_err(llm_error)
 }
 
-/// AskUserQuestion 的回答。answer 必须是选项之一，空字符串表示跳过。
+/// AskUserQuestion 的回答。普通提问接受任何非空文本，空字符串表示跳过；
+/// 升级确认卡仍只认 options 里的原文。
 #[tauri::command]
 pub async fn reply_user_question(
     session_id: String,
     question_id: String,
     answer: String,
 ) -> Result<Value, Value> {
-    crate::agent::questions::reply(&session_id, &question_id, &answer).map_err(|(reason, message)| {
-        let code = match reason.as_str() {
-            "question_not_pending" => "NOT_FOUND",
-            "answer_not_in_options" => "INVALID_ARGUMENT",
-            _ => "INTERNAL",
-        };
-        json!({
-            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
-            "code": code,
-            "message": message,
-            "retryable": false,
-            "details": { "reason": reason },
-            "request_id": "",
-        })
-    })?;
+    crate::agent::questions::reply(&session_id, &question_id, &answer).map_err(
+        |(reason, message)| {
+            let code = match reason.as_str() {
+                "question_not_pending" => "NOT_FOUND",
+                // 只剩升级确认卡会走到这里：装包授权不能靠打字。
+                "answer_not_in_options" => "INVALID_ARGUMENT",
+                _ => "INTERNAL",
+            };
+            json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "code": code,
+                "message": message,
+                "retryable": false,
+                "details": { "reason": reason },
+                "request_id": "",
+            })
+        },
+    )?;
     Ok(json!({ "ok": true }))
 }
 
@@ -1041,10 +1065,7 @@ pub async fn list_pending_questions(session_id: String) -> Result<Value, Value> 
 /// 用系统浏览器打开白名单内的链接（目前只有 DeepSeek 开放平台）。
 /// 域名写死在这里，避免变成任意 URL 打开器。
 #[tauri::command]
-pub async fn open_external(
-    app: tauri::AppHandle,
-    url: String,
-) -> Result<Value, Value> {
+pub async fn open_external(app: tauri::AppHandle, url: String) -> Result<Value, Value> {
     use tauri_plugin_opener::OpenerExt;
 
     const ALLOWED_PREFIX: &str = "https://platform.deepseek.com/";
@@ -1059,16 +1080,16 @@ pub async fn open_external(
         }));
     }
 
-    app.opener()
-        .open_url(url, None::<&str>)
-        .map_err(|error| json!({
+    app.opener().open_url(url, None::<&str>).map_err(|error| {
+        json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INTERNAL",
             "message": format!("打开浏览器失败：{error}"),
             "retryable": false,
             "details": null,
             "request_id": "",
-        }))?;
+        })
+    })?;
     Ok(json!({ "opened": true }))
 }
 
@@ -1194,7 +1215,6 @@ pub async fn deepseek_clear_key(_state: State<'_, Arc<AppState>>) -> Result<Valu
         })),
     }
 }
-
 
 pub const MAX_TITLE_CHARS: usize = 80;
 
@@ -1374,7 +1394,9 @@ mod send_message_tests {
         let store = crate::store::global().expect("全局库已安装");
         let conn = store.conn();
         assert!(
-            crate::store::chat::messages(&conn, session_id).unwrap().is_empty(),
+            crate::store::chat::messages(&conn, session_id)
+                .unwrap()
+                .is_empty(),
             "被拒绝的消息不能落库"
         );
 
@@ -1472,11 +1494,17 @@ mod send_message_tests {
         assert!(token.is_cancelled());
 
         state.finish_request(&first);
-        assert!(!state.cancel_request(&first), "迟到的取消不能命中已结束的请求");
+        assert!(
+            !state.cancel_request(&first),
+            "迟到的取消不能命中已结束的请求"
+        );
 
         let second = AppState::next_request_id();
         let token = state.reserve_request(&second, "ses_cancel").unwrap();
-        assert!(!state.cancel_request(&first), "旧 request_id 不能取消新请求");
+        assert!(
+            !state.cancel_request(&first),
+            "旧 request_id 不能取消新请求"
+        );
         assert!(!token.is_cancelled());
         state.finish_request(&second);
     }
@@ -1511,7 +1539,13 @@ mod proxy_port_command_tests {
         assert_eq!(saved["availability"], "free");
 
         // 非法值全部拒绝，且不能改库。
-        for bad in [json!(0), json!(65536), json!(-1), json!(12.5), json!("8080")] {
+        for bad in [
+            json!(0),
+            json!(65536),
+            json!(-1),
+            json!(12.5),
+            json!("8080"),
+        ] {
             let error = proxy_port_set(bad.clone()).await.unwrap_err();
             assert_eq!(error["code"], "INVALID_ARGUMENT", "{bad}");
             assert_eq!(error["details"]["reason"], "invalid_port", "{bad}");
