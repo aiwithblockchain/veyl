@@ -37,6 +37,8 @@ export interface VpnSession {
   nodeProbeAvailable: boolean;
   /** 连接「全部流量」前正在更新后台组件：系统即将请求一次授权。 */
   preparingHelper: boolean;
+  /** 正在查后台组件状态（还没开始连接），遮罩据此说明当前阶段。 */
+  checkingHelper: boolean;
   createConfig: (input: ConfigCreateInput) => Promise<ActionResult>;
   deleteConfig: (configId: string) => Promise<ActionResult>;
   selectConfig: (configId: string, confirmDisconnect?: boolean) => Promise<ActionResult>;
@@ -158,11 +160,17 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
   const [nodeSwitchAvailable, setNodeSwitchAvailable] = useState(true);
   const [nodeProbeAvailable, setNodeProbeAvailable] = useState(true);
   const [preparingHelper, setPreparingHelper] = useState(false);
+  const [checkingHelper, setCheckingHelper] = useState(false);
 
   const mockStore = useRef<MockStore>({ configs: [], activeId: null });
   const timer = useRef<number | null>(null);
   const pendingConfigIdRef = useRef<string | null>(null);
   const disposed = useRef(false);
+  // 同一帧里的第二次点击等不到按钮禁用，这里直接挡住重入。
+  const startingRef = useRef(false);
+  // start / stop 各推进一个序号：start 每次 await 回来先确认自己还是有效的。
+  const startSeqRef = useRef(0);
+  const cancelSeqRef = useRef(0);
 
   const clearTimer = () => {
     if (timer.current !== null) {
@@ -424,19 +432,27 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     if (!activeConfig || activeConfig.node_count === 0) {
       return { ok: false, message: "这套配置还没有节点。" };
     }
+    // 同一意图的重复触发：首次还在跑，这里按成功返回，调用方不会弹错误。
+    // 首次失败时自己会报错，重复这次不再重复报。
+    if (startingRef.current) return { ok: true };
+    startingRef.current = true;
+    const startSeq = ++startSeqRef.current;
+    const cancelSeq = cancelSeqRef.current;
+    // 新一轮 start 或 stop 都会让这次 start 作废。
+    const stale = () =>
+      startSeqRef.current !== startSeq || cancelSeqRef.current !== cancelSeq;
 
-    // 接管全部流量先换后台组件；旧组件会弹一次管理员授权。
-    // 必须先让界面说出这件事，再发起会阻塞在系统弹窗上的调用。
-    if (activeConfig.connect_mode === "tun" && (await helperNeedsAdmin(bridge))) {
-      setPreparingHelper(true);
-      await nextPaint();
-    }
+    // 先把「点到了」画出来：下面查后台组件可能卡十秒以上，这段界面必须有反应。
+    setConnection("starting");
+    setConnectedConfigId(null);
+    // 还没开始连，先查后台组件：遮罩要说明是检查阶段，不能拿残留的健康快照
+    // 显示成「正在建立连接」或「正在确认出口」。
+    const willCheckHelper = !mock && activeConfig.connect_mode === "tun";
+    if (willCheckHelper) setCheckingHelper(true);
 
     try {
       if (mock) {
         clearTimer();
-        setConnection("starting");
-        setConnectedConfigId(null);
         const configId = activeConfigId;
         pendingConfigIdRef.current = configId;
         // 同时驱动 mock 运行时的状态事件，让面板按真实事件流更新。
@@ -450,14 +466,43 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
         return { ok: true };
       }
 
-      setConnection("starting");
-      setConnectedConfigId(null);
+      // 接管全部流量先换后台组件；旧组件会弹一次管理员授权。
+      // 这一步只决定文案，不影响「已经在连接」这件事。
+      let needsAdmin = false;
+      if (willCheckHelper) {
+        needsAdmin = await helperNeedsAdmin(bridge);
+        // 查询期间被取消：不发起连接，状态由 stop() 负责收尾。
+        if (stale()) return { ok: true };
+        setCheckingHelper(false);
+      }
+      if (needsAdmin) {
+        setPreparingHelper(true);
+        // 系统弹窗会一直阻塞到用户处理完；先让这一句画出来，再发请求。
+        await nextPaint();
+        if (stale()) return { ok: true };
+      }
+
       await bridge.runtimeStart(activeConfigId);
+      if (startSeqRef.current !== startSeq) {
+        // 已被新一轮 start 接管：运行时交给新一轮处理，不能把它停掉。
+        return { ok: true };
+      }
+      if (cancelSeqRef.current !== cancelSeq) {
+        // runtimeStart 已经发出去了才被取消：补一次 stop，别留下跑着的运行时。
+        await bridge.runtimeStop().catch(() => undefined);
+        await refreshReal();
+        return { ok: true };
+      }
       await refreshReal();
-      // 请求已经结束：状态没跟上（例如刷新快照失败）也不能让过渡层挂住。
-      setConnection((current) => (current === "starting" ? "connected" : current));
+      if (stale()) return { ok: true };
+      // runtimeStart 返回成功就是连上了。刷新快照可能晚一拍（甚至拿不到），
+      // 不能再拿它的结果否定这次成功，否则界面会停在未连接。
+      setConnection("connected");
+      setConnectedConfigId(activeConfigId);
       return { ok: true };
     } catch (err) {
+      // 主动取消或已被新一轮接管：不报错、也不改连接状态。
+      if (stale()) return { ok: true };
       await refreshReal();
       setConnection((current) => (current === "starting" ? "idle" : current));
       if (isHelperAdminFailure(err)) {
@@ -465,11 +510,21 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       }
       return { ok: false, message: actionMessage(err, "启动失败") };
     } finally {
-      setPreparingHelper(false);
+      if (startSeqRef.current === startSeq) {
+        startingRef.current = false;
+        setCheckingHelper(false);
+        setPreparingHelper(false);
+      }
     }
   };
 
   const stop = async (): Promise<ActionResult> => {
+    // 取消还在进行的 start：它后续 await 回来会发现序号失效，不再往下走。
+    cancelSeqRef.current += 1;
+    startingRef.current = false;
+    setCheckingHelper(false);
+    setPreparingHelper(false);
+
     if (mock) {
       clearTimer();
       pendingConfigIdRef.current = null;
@@ -578,6 +633,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     nodeSwitchAvailable,
     nodeProbeAvailable,
     preparingHelper,
+    checkingHelper,
     createConfig,
     deleteConfig,
     selectConfig,

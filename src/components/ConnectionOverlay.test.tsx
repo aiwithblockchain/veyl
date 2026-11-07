@@ -52,6 +52,24 @@ describe("connectionStage 阶段映射", () => {
     });
   });
 
+  it("查后台组件优先于残留的健康快照", () => {
+    const stage = connectionStage({
+      connection: "starting",
+      preparingHelper: false,
+      checkingHelper: true,
+      // 上一次连接留下的出口信息，不能被当成这次已经在确认出口。
+      runtime: runtime({
+        health: health({ process: true, clash_api: true, data_plane: true, exit_ip: "203.0.113.9" }),
+      }),
+      connectMode: "tun",
+    });
+    expect(stage).toMatchObject({
+      kind: "prepare",
+      title: "正在准备连接",
+      caption: "正在检查后台组件。",
+    });
+  });
+
   it("连接按健康快照推进：准备 → 建立 → 确认出口", () => {
     const stub = {
       connection: "starting" as const,
@@ -100,10 +118,21 @@ describe("connectionStage 阶段映射", () => {
     ).toMatchObject({ kind: "finish", title: "正在收尾" });
   });
 
-  it("失败与回到 idle 都不再显示遮罩", () => {
+  it("失败后重新连接：运行时还没离开 failed 也立刻显示准备阶段", () => {
     expect(
       connectionStage({
         connection: "starting",
+        preparingHelper: false,
+        runtime: runtime({ state: "failed" }),
+        connectMode: null,
+      }),
+    ).toMatchObject({ kind: "prepare", title: "正在准备连接" });
+  });
+
+  it("没有新的连接动作时，失败与回到 idle 都不显示遮罩", () => {
+    expect(
+      connectionStage({
+        connection: "idle",
         preparingHelper: false,
         runtime: runtime({ state: "failed" }),
         connectMode: null,
@@ -121,6 +150,15 @@ describe("connectionStage 阶段映射", () => {
 });
 
 describe("ConnectionOverlay 渲染与释放", () => {
+  it("失败后点重连，运行时还停在 failed 也会立即显示遮罩", () => {
+    renderOverlay({
+      connection: "starting",
+      runtime: runtime({ state: "failed" }),
+    });
+
+    expect(screen.getByText("正在准备连接")).toBeTruthy();
+  });
+
   it("连接中显示阶段，焦点落在状态卡片上", () => {
     const { container } = renderOverlay({
       runtime: runtime({ health: health({ process: true, clash_api: true }) }),
@@ -147,9 +185,11 @@ describe("ConnectionOverlay 渲染与释放", () => {
     expect(screen.queryByText("正在准备连接")).toBeNull();
   });
 
-  it("失败：进入失败态立即释放，交给失败卡", () => {
+  it("失败：连接状态回到 idle 后释放，交给失败卡", () => {
     const { rerenderOverlay } = renderOverlay();
-    rerenderOverlay({ runtime: runtime({ state: "failed" }) });
+    // 运行时事件是 failed 时，useVpnSession 同步把 connection 收回 idle；
+    // 两者一起更新，遮罩才让位给失败卡。
+    rerenderOverlay({ connection: "idle", runtime: runtime({ state: "failed" }) });
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 

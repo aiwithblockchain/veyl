@@ -1367,6 +1367,7 @@ export default function App() {
       <ConnectionOverlay
         connection={vpn.connection}
         preparingHelper={vpn.preparingHelper}
+        checkingHelper={vpn.checkingHelper}
         runtime={runtime}
         connectMode={vpn.activeConfig?.connect_mode ?? null}
       />
