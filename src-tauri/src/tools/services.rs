@@ -5631,6 +5631,16 @@ impl WiredServices {
                 Ok(data)
             }
             Err(error) => {
+                // 连接失败必须留痕：界面只显示一句话，日志里没有记录就没法定位。
+                match error.downcast_ref::<ServiceError>() {
+                    Some(service) => log::error!(
+                        "连接失败 code={} message={} details={:?}",
+                        service.code,
+                        service.message,
+                        service.details
+                    ),
+                    None => log::error!("连接失败：{error:#}"),
+                }
                 // 种子节点连不上时立即强制刷新一次，不等 6 小时轮询。
                 if node.source == configs::SOURCE_SEED {
                     let store = Arc::clone(&self.store);
