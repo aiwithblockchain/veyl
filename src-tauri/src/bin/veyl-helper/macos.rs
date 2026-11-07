@@ -270,6 +270,7 @@ pub fn run() {
             std::thread::sleep(Duration::from_millis(200));
         }
         watchdog.stop();
+        clear_start_record(&watchdog.root);
         std::process::exit(0);
     });
 
@@ -397,6 +398,7 @@ fn handle_message(
                 // 给 libxpc 一点时间把回复排出去；退出码 75 由 KeepAlive 拉起新映像。
                 std::thread::sleep(Duration::from_millis(100));
                 supervisor.note("restart：回复后以 75 退出，等待 launchd 拉起新映像");
+                clear_start_record(&supervisor.root);
                 std::process::exit(RESTART_EXIT_CODE);
             }
             Err(_) => Err(ProtocolError::new(
@@ -546,10 +548,12 @@ fn spawn_lease_loss_check(supervisor: &Arc<Supervisor>, generation: u64) {
             LeaseLossAction::StopAndExit => {
                 supervisor.note("[diag] presence 租约断开且无新租约，停止隧道后退出");
                 supervisor.stop_child("lease_lost");
+                clear_start_record(&supervisor.root);
                 std::process::exit(0);
             }
             LeaseLossAction::Exit => {
                 supervisor.note("[diag] presence 租约断开且无隧道，退出");
+                clear_start_record(&supervisor.root);
                 std::process::exit(0);
             }
         }
@@ -566,6 +570,7 @@ fn spawn_idle_watchdog(supervisor: Arc<Supervisor>) {
         let in_flight = supervisor.in_flight.load(Ordering::SeqCst);
         if should_exit_idle(running, leases, in_flight, supervisor.idle_for()) {
             supervisor.note("空闲退出：无连接、无租约、10 分钟无请求");
+            clear_start_record(&supervisor.root);
             std::process::exit(0);
         }
     });
@@ -1777,6 +1782,12 @@ fn crash_loop_tripped_now(root: &Path) -> bool {
     starts.push(now);
     starts.retain(|at| now.saturating_sub(*at) <= CRASH_LOOP_WINDOW);
     let tripped = crash_loop_tripped(&starts, now);
+    if tripped {
+        // 这次退出是保护自己决定的，不是崩溃。撤掉刚写的这条，否则每被拉起
+        // 一次就续一次窗口：应用一天里重建几次 app 就会把 helper 永久锁死。
+        starts.pop();
+    }
+
     let text = starts
         .iter()
         .map(|at| at.to_string())
@@ -1786,6 +1797,26 @@ fn crash_loop_tripped_now(root: &Path) -> bool {
         eprintln!("veyl-helper: 写启动记录失败：{error}");
     }
     tripped
+}
+
+/// 干净退出时撤掉本次启动记录。
+///
+/// 崩溃循环保护只该统计真正的崩溃。升级重启、空闲退出、收到 SIGTERM、租约断开
+/// 都是正常生命周期——把它们算进去，开发期重建几次 app 就会触发保护，而保护
+/// 一旦触发 helper 就再也起不来。
+fn clear_start_record(root: &Path) {
+    let path = root.join("helper-starts");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let mut lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    lines.pop();
+    if let Err(error) = std::fs::write(&path, lines.join("\n")) {
+        eprintln!("veyl-helper: 清理启动记录失败：{error}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3436,6 +3467,40 @@ mod tests {
         assert!(
             !crash_loop_tripped(&[now - 601, now - 30, now], now),
             "窗口外的启动不算"
+        );
+    }
+
+    /// 升级重启、空闲退出这些正常生命周期不该累计成崩溃。
+    #[test]
+    fn clean_exits_do_not_accumulate_towards_the_crash_guard() {
+        let root = temp("clean-exit");
+        for _ in 0..5 {
+            assert!(
+                !crash_loop_tripped_now(&root),
+                "干净退出后清掉记录，不该被判定为崩溃循环"
+            );
+            clear_start_record(&root);
+        }
+    }
+
+    /// 保护自己决定的退出不能留下记录：每被拉起一次就续一次窗口的话，
+    /// helper 会被永久锁死，再也起不来。
+    #[test]
+    fn a_tripped_guard_does_not_extend_its_own_window() {
+        let root = temp("tripped");
+        let path = root.join("helper-starts");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(&path, format!("{}\n{}", now - 30, now - 10)).unwrap();
+
+        assert!(crash_loop_tripped_now(&root));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text.lines().filter(|line| !line.is_empty()).count(),
+            2,
+            "保护自己这次退出不该写进窗口"
         );
     }
 }
