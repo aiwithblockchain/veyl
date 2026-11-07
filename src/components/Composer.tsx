@@ -22,13 +22,43 @@ export function Composer({
   focusSignal = 0,
 }: Props) {
   const [value, setValue] = useState("");
+  const [blockedHint, setBlockedHint] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const submittingRef = useRef(false);
+  const blockedTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!focusSignal) return;
     textareaRef.current?.focus();
   }, [focusSignal]);
+
+  const clearBlockedHint = () => {
+    if (blockedTimerRef.current !== null) {
+      window.clearTimeout(blockedTimerRef.current);
+      blockedTimerRef.current = null;
+    }
+    setBlockedHint(false);
+  };
+
+  const notifyBlocked = () => {
+    if (blockedTimerRef.current !== null) {
+      window.clearTimeout(blockedTimerRef.current);
+    }
+    setBlockedHint(true);
+    blockedTimerRef.current = window.setTimeout(() => {
+      blockedTimerRef.current = null;
+      setBlockedHint(false);
+    }, 2500);
+  };
+
+  // 回复结束就收回提示，不让它留成常驻状态。
+  useEffect(() => {
+    if (!streaming) clearBlockedHint();
+  }, [streaming]);
+
+  useEffect(() => () => {
+    if (blockedTimerRef.current !== null) window.clearTimeout(blockedTimerRef.current);
+  }, []);
 
   useEffect(() => {
     const node = textareaRef.current;
@@ -39,8 +69,12 @@ export function Composer({
 
   const submit = () => {
     if (submittingRef.current) return;
+    if (streaming) {
+      notifyBlocked();
+      return;
+    }
     const text = value.trim();
-    if (!text || streaming || disabled) return;
+    if (!text || disabled) return;
     submittingRef.current = true;
     setValue("");
     void Promise.resolve(onSend(text))
@@ -79,19 +113,31 @@ export function Composer({
               停止
             </button>
           ) : null}
-          <button
-            type="button"
-            className="btn btn--primary btn--send"
-            disabled={disabled || streaming || value.trim().length === 0}
-            onClick={submit}
+          <span
+            className="composer__send-wrap"
+            data-testid="composer-send-wrap"
+            onClick={streaming ? notifyBlocked : undefined}
           >
-            {streaming ? "等待回复" : "发送"}
-          </button>
+            <button
+              type="button"
+              className="btn btn--primary btn--send"
+              disabled={disabled || streaming || value.trim().length === 0}
+              // 禁用按钮在部分浏览器里吞掉点击；让指针落到外层，才接得到这次点击。
+              style={streaming ? { pointerEvents: "none" } : undefined}
+              onClick={submit}
+            >
+              {streaming ? "等待回复" : "发送"}
+            </button>
+          </span>
         </div>
       </div>
       <div className="composer__hint">
         {statusText ? <span className="composer__status">{statusText}</span> : null}
-        {disabled && onConfigure ? (
+        {blockedHint ? (
+          <span className="composer__blocked" role="status">
+            上一条还在回复，回完再发
+          </span>
+        ) : disabled && onConfigure ? (
           <button type="button" className="composer__configure" onClick={onConfigure}>
             去配置 Key
           </button>

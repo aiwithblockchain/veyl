@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Composer } from "./Composer";
 
@@ -38,6 +38,53 @@ describe("Composer 单飞", () => {
 
     expect(onSend).not.toHaveBeenCalled();
     expect(textarea().value).toBe("第二条");
+  });
+
+  it("回复中回车发送给出即时反馈，回复结束后收回", async () => {
+    const onSend = vi.fn(() => true);
+    const { rerender } = render(
+      <Composer streaming statusText={null} onSend={onSend} onStop={() => {}} />,
+    );
+
+    type("第二条");
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+
+    expect(screen.getByText("上一条还在回复，回完再发")).toBeTruthy();
+    expect(onSend).not.toHaveBeenCalled();
+    expect(textarea().value).toBe("第二条");
+
+    rerender(<Composer streaming={false} statusText={null} onSend={onSend} onStop={() => {}} />);
+    await waitFor(() =>
+      expect(screen.queryByText("上一条还在回复，回完再发")).toBeNull(),
+    );
+  });
+
+  it("回复中点击发送按钮同样给提示，输入内容不清空", () => {
+    render(<Composer streaming statusText={null} onSend={() => true} onStop={() => {}} />);
+
+    type("第二条");
+    fireEvent.click(screen.getByTestId("composer-send-wrap"));
+
+    expect(screen.getByText("上一条还在回复，回完再发")).toBeTruthy();
+    expect(textarea().value).toBe("第二条");
+  });
+
+  it("提示 2.5 秒后自动消失", () => {
+    vi.useFakeTimers();
+    try {
+      render(<Composer streaming statusText={null} onSend={() => true} onStop={() => {}} />);
+      type("第二条");
+      fireEvent.keyDown(textarea(), { key: "Enter" });
+      expect(screen.getByText("上一条还在回复，回完再发")).toBeTruthy();
+
+      act(() => {
+        vi.advanceTimersByTime(2600);
+      });
+
+      expect(screen.queryByText("上一条还在回复，回完再发")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("发送被拦下时把文字放回输入框", async () => {

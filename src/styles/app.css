@@ -661,6 +661,14 @@ pre {
   flex-shrink: 0;
 }
 
+.composer__send-wrap {
+  display: inline-flex;
+}
+
+.composer__blocked {
+  color: var(--text-dim);
+}
+
 .composer__hint {
   display: flex;
   justify-content: space-between;
