@@ -15,7 +15,13 @@ export interface FailureStep {
 }
 
 export type MiddleBlock =
-  | { kind: "empty_hint"; text: string; tone: "idle" | "ok" }
+  | {
+      kind: "empty_hint";
+      text: string;
+      tone: "idle" | "ok";
+      /** 已连接且路由为「本地网站直连」时，说明当前直连口径；其余为 null。 */
+      note: string | null;
+    }
   | {
       kind: "proxy_card";
       /** 已连接（含降级）才有实际端口，未连接只给预计端口。 */
@@ -93,11 +99,40 @@ export function emptyHintText(config: ConfigDetail, connected: boolean): string 
   return "点上面的「启动 VPN」，浏览器就能用了。";
 }
 
-export function emptyHintBlock(config: ConfigDetail, connected: boolean): MiddleBlock {
+/** §7.6：已连接且本地直连时那行口径说明。未知地区如实说做不到。 */
+export function directBasisNote(region: string | null): string {
+  if (region === null) return "没识别出你在哪个地区，所有网站都走 VPN";
+  if (region === "cn") return "国内网站直连，其他走 VPN";
+  return "这个地区的网站直连，其他走 VPN";
+}
+
+/**
+ * 口径说明该用哪个地区：已连接用本次连接实际使用的 `route_region`，
+ * 避免连接后系统时区变了、界面报出一个当前运行配置并不使用的地区。
+ * 断开时退回实时系统地区。
+ */
+export function directNoteRegion(
+  runtime: RuntimeView,
+  systemRegion: string | null,
+): string | null {
+  const level = middleLevel(runtime.state);
+  return level === "running" || level === "degraded"
+    ? runtime.route_region
+    : systemRegion;
+}
+
+export function emptyHintBlock(
+  config: ConfigDetail,
+  connected: boolean,
+  region: string | null = null,
+): MiddleBlock {
   return {
     kind: "empty_hint",
     text: emptyHintText(config, connected),
     tone: connected ? "ok" : "idle",
+    // proxy_all 也引用本地规则集，但同样路由到代理；proxy_selected 不经过本地层。
+    note:
+      connected && config.routing_mode === "direct" ? directBasisNote(region) : null,
   };
 }
 
@@ -211,6 +246,7 @@ export function middleBlocks(
   config: ConfigDetail,
   aiReady: boolean,
   proxyPort = DEFAULT_PROXY_PORT,
+  region: string | null = null,
 ): MiddleBlock[] {
   const level = middleLevel(runtime.state);
 
@@ -246,7 +282,7 @@ export function middleBlocks(
     return [proxyBlock(runtime, config, level === "running", proxyPort)];
   }
 
-  return [emptyHintBlock(config, level === "running")];
+  return [emptyHintBlock(config, level === "running", directNoteRegion(runtime, region))];
 }
 
 export interface LayoutRenderContext {
@@ -254,6 +290,8 @@ export interface LayoutRenderContext {
   hasSeedUpdate: boolean;
   /** 设置里的本地代理端口；布局块不携带数值，渲染时从这里读。 */
   proxyPort: number;
+  /** 系统地区；只用于本地直连口径那行，null = 未知。 */
+  region?: string | null;
 }
 
 /** 只有模型能填的 props 是 targets；其它一律从本地事实生成。 */
@@ -296,7 +334,9 @@ export function resolveLayoutBlocks(
     const type = (block as { type?: unknown } | null)?.type;
     switch (type) {
       case "empty_hint":
-        blocks.push(emptyHintBlock(config, connected));
+        blocks.push(
+          emptyHintBlock(config, connected, directNoteRegion(runtime, context.region ?? null)),
+        );
         break;
       case "proxy_card":
         // TUN 配置没有 mixed 入站，连接后 runtime.mixed_port 仍会给值；

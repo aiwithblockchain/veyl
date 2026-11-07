@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.13.0`
+> 契约版本：`2.15.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -193,6 +193,8 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 64 | `node_probe_snapshot` | `{ configId? }` | `NodeProbeSnapshotData` | **2.8.0 新增（仅 UI）** |
 | 65 | `proxy_port_get` | `{}` | `{ port, default_port }` | **2.12.0 新增（仅 UI）** |
 | 66 | `proxy_port_set` | `{ port }` | `{ port, availability }` | **2.12.0 新增（仅 UI）；可用性三态，保存始终成功** |
+| 67 | `node_import_text` | `{ text, configId? }` | `NodeImportResult` | **2.14.0 新增（仅 UI；AI 走 `NodeImportText` 工具，共用实现）** |
+| 68 | `system_region` | `{}` | `{ region: string \| null }` | **2.15.0 新增（仅 UI）** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -434,6 +436,29 @@ type ImportSkipReason =
 
 错误：`INVALID_ARGUMENT`（`insecure_url`、`invalid_url`、`not_subscription`）、`NOT_FOUND`（`configId`）、`UPSTREAM_ERROR`、`TIMEOUT`、`SECRET_STORE`、`INTERNAL`。
 
+### 4.1.1 `node_import_text { text, configId? }` → `NodeImportResult`
+
+用户粘贴的节点文本（手工流程的「粘贴分享链接」）。**不发任何网络请求**——这是它与 §4.1 分成两条命令的原因：URL 那条的 SSRF / https 限制是为「我们替用户去拉」设计的，混用会把口子开大。
+
+> AI 通道走 `NodeImportText` 工具（`tools.md` §4.10.1），与本命令**共用同一个服务层实现**；行为、返回形状、错误码一致，只是通道不同。
+
+| 边界 | 要求 |
+|---|---|
+| 支持的格式 | 与 §4.1 同一套逐行解析：换行的 `ss://` 列表，或整段 base64 编码的 `ss://` 列表；两种 SIP002 形态都认 |
+| 逐条解析 | 一行失败只影响该行：成功的进 `nodes`，失败的进 `skipped`（`unsupported_scheme` / `unsupported_method` / `malformed`），**不整批作废** |
+| 一条都用不了 | `INVALID_ARGUMENT`，`details.reason = "not_node_text"`，可读消息「粘贴的内容里没有可用的节点（支持多行 ss:// 链接）」 |
+| 去重 | 沿用 `source_key`（`server` + `port` + `method` + `name`）。重复不报错，计入 `skipped`（`reason = "duplicate"`），不新建记录 |
+| 来源 | 落库为 `source = "manual"`（用户自己提供，不是订阅） |
+| 自动连接 | **不做** |
+
+- 传了 `configId` → 新节点按解析顺序追加到该配置；配置已有 `current_node_id` 时不动它，没有时取第一个。发 `node-list-changed`（`reason = "manual_create"`，沿用现有枚举）+ `config-changed`（`change = "updated"`）。
+- 文本导入能出现的 `skipped.reason` 只有四种：`unsupported_scheme` / `unsupported_method` / `malformed` / `duplicate`。整段都解析不出时直接报 `not_node_text`，**不产生 `subscription_empty`**（那个值只属于 URL / 订阅路径）。
+- 不传 `configId` → 只进节点池。
+- 返回值与日志**永不含密码**，也不回显粘贴内容。
+- 本阶段只做 Shadowsocks，方法白名单同 §4.1。
+
+错误：`INVALID_ARGUMENT`（`not_node_text`）、`NOT_FOUND`（`configId`）、`SECRET_STORE`、`INTERNAL`。
+
 ### 4.2 `node_create { name, server, port, method, password, configId? }` → `NodeSummary`
 
 手动编辑一个节点。只有五个字段，与 `docs/config-execution.md` §6 一致。
@@ -451,7 +476,10 @@ type ImportSkipReason =
 - 成功后发 `node-list-changed`（`reason = "manual_create"`），有 `configId` 再发 `config-changed`（`change = "updated"`）。
 - **不自动连接**，不触发探测。
 
-错误：`INVALID_ARGUMENT`（`invalid_name`、`invalid_server`、`invalid_port`、`unsupported_method`、`invalid_password`）、`NOT_FOUND`、`SECRET_STORE`、`INTERNAL`。
+错误：`INVALID_ARGUMENT`（`invalid_argument`、`unsupported_method`）、`NOT_FOUND`、`SECRET_STORE`、`INTERNAL`。
+
+- **具体校验由前端先做**：名字非空/≤64、地址不带 scheme 与端口、端口 1–65535、密码非空/≤256。Host 侧不区分具体原因，一律 `details.reason = "invalid_argument"`；只有 method 不在白名单时是 `unsupported_method`。
+- **`port` 在 Host 侧是 `u16`**：`70000`、非整数或缺字段会**在反序列化阶段直接失败**，拿不到本契约的结构化错误——前端必须先校验，不要指望 Host 兜住。
 
 ### 4.3 `node_switch { configId, nodeId }` → `NodeSwitchData`
 
@@ -817,11 +845,11 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 ### 7.3 `runtime_status {}` → `RuntimeSnapshot`
 
-2.0 的 `RuntimeSnapshot`（与 `runtime.md` §2.5 的 `2.3.0` 一致，**版本号跟 `runtime.md`，不跟本文件**）：
+2.0 的 `RuntimeSnapshot`（与 `runtime.md` §2.5 的 `2.5.0` 一致，**版本号跟 `runtime.md`，不跟本文件**）：
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   state: RuntimeState;                // runtime.md §2.1，七态不变
   mode: "system_proxy" | "tun" | null;
   pid: number | null;
@@ -843,6 +871,7 @@ type RuntimeSnapshot = {
   direct_ip: string | null;           // 不经代理测得的直连出口 IP
   config_hash: string | null;         // "sha256:<hex>"
   applied_route_revision: number | null; // runtime.md 2.1：建连时 configs.route_revision 的值
+  route_region: string | null;        // 2.5：生成当前配置时判定的地区（小写 cc；未知为 null）
   system_proxy_enabled: boolean;
   health: HealthSnapshot;
   traffic: TrafficStats | null;
@@ -859,6 +888,7 @@ type RuntimeSnapshot = {
 - `config_id` / `node_id` 与 `connected_since` 同生同灭：只在 `running` / `degraded` 下非 `null`。
 - 字段恒存在，无值写 `null`，**不得省略键**。
 - `port_fallback` 只在 `system_proxy`、已连接（`running` / `degraded`）且 `actual != requested` 时非 `null`；TUN 与未连接恒为 `null`。`reason` 只有 `"occupied"`（被别的程序占着）与 `"unavailable"`（环境绑不上，如 <1024 无管理员权限）两个值，**写死**；界面按 `reason` 说不同的话，不能按文本猜。
+- `route_region` 是建连时判定的地区（小写 cc），断开为 `null`。已连接时它反映**本次连接所用的地区**；`null` 只表示当时判不出地区，**不表示可以回退到实时值**——界面按「未知」显示，不得拿 `route_get.detected_region` 顶上。`route_get.applied_region` 与它同源。
 
 ### 7.4 `net_repair { action, port? }` → `NetRepairResult`
 
@@ -1476,8 +1506,9 @@ type RouteState = {
   applied_revision: number | null;    // = RuntimeSnapshot.applied_route_revision
   effective: "current_connection" | "next_connection";
   reconnect_required: boolean;
-  local_direct_basis: "domain_and_ip" | "ip_only";
-  detected_region: string | null;     // ISO 3166-1 alpha-2
+  local_direct_basis: "domain_and_ip" | "ip_only" | "none";
+  detected_region: string | null;     // 实时判定的小写 cc；未知为 null
+  applied_region: string | null;      // 运行配置实际使用的地区；未连接或当时未知为 null
 };
 
 type RouteSetModeData = RouteState & {
@@ -1515,6 +1546,10 @@ type RulesStatus = {
 
 - **G1** 查看当前分流方式。`configId` 省略用 active 配置。
 - `applied_mode` / `applied_revision` 一律取自 `RuntimeSnapshot`，不从库里推。
+- `detected_region` 与 `system_region`（§10.10）**同源**：同一个判定函数、同一次进程内的结果必须一致。
+- `applied_region` 是**运行配置实际使用的地区**（`RuntimeSnapshot.route_region`）：用户中途改系统时区，配置不会重算，已连接时界面以它为准；未连接为 `null`。
+- **`applied_region = null` 表示建连时判不出地区，不是「回退到实时值」的开关。** 已连接时它即使是 `null` 也以它为准，按「未知」显示，**不得**用 `detected_region` 顶上——那会把一个实时重算值说成「正在生效的地区」。
+- `local_direct_basis`：已连接时按 `applied_region` 报，未连接按实时地区报；`"domain_and_ip"` = 域名级 + IP 级本地层（CN），`"ip_only"` = 只有 IP 级本地层（其它已知地区），`"none"` = 未知地区，没有本地直连层。
 - 只读，不联网，不发事件。
 
 ### 10.2 `route_set_mode { configId?, mode, confirmReconnect? }` → `RouteSetModeData`
@@ -1572,6 +1607,15 @@ type RulesStatus = {
 - 已有任务在跑 → `CONFLICT`，`details.job_id` 指向进行中的任务。
 - 成功后发 `rules-changed`，`effective = "next_connect"`。
 
+### 10.10 `system_region {}` → `{ region: string | null }`
+
+- **仅 UI**。给新建配置与中间区的「当前所在地区」用；AI 不调用——它拿的是系统提示词里注入的那句。
+- `region`：小写 ISO 3166-1 alpha-2（`"cn"` / `"jp"`）；判不出为 `null`。
+- 判定离线、不测 IP、不联网，顺序：`VEYL_REGION` → 系统时区 → 系统区域 → `LANG` → 未知。
+- 不依赖配置：全新安装、一套配置都没有时也能返回（这正是它不并进 `route_get` 的原因）。
+- 与 `route_get.detected_region` 同源，两处结果必须一致。
+- 不落库、不发事件：地区随系统变，缓存只会制造「设置改了但没生效」。
+
 ---
 
 ## 11. 已删除与已作废
@@ -1607,6 +1651,7 @@ type RulesStatus = {
 | `config_delete` | **K5** 删除配置（破坏性，需二次确认） | 左栏项操作 | |
 | `config_activate` | **K3** 切换配置 | 左栏切换 | 与 B2「切换节点」是两个层级，不可混用 |
 | `node_import_url` | **B4** 导入配置文件 | 导入按钮 / `source_choice` 后置 | |
+| `node_import_text` | **B4** 导入配置文件 | 手工表单「粘贴分享链接」 | 只解析粘贴文本，不联网；与 `node_import_url` 分开（2.14.0） |
 | `node_create` | **B4** 导入配置文件 | 手动编辑表单 | |
 | `node_switch` | **B2** 切换节点 | 底部「切换到此节点」 | ⚠️ 旧映射写 `runtime_start(profile_id)`，见表后说明 |
 | `node_probe` | **D6** 测试单个节点连通性 | 底部「测试连通」 | D6 由 PM 在批 0 审查时新增 |
@@ -1627,6 +1672,7 @@ type RulesStatus = {
 | `route_targets_set` | **G4** 用户自定义分流（目标服务） | 设置页 / 表单 | |
 | `rule_custom_list` / `_add` / `_delete` | **G4** 用户自定义分流（逐条规则） | 设置页 / 对话 | |
 | `category_list` | **I1** 读取分类目录 | 表单 / AI 工具 | |
+| `system_region` | —（UI 展示用，无用户能力 ID） | 新建配置的地区提示 / 中间区直连口径行 | 与 `route_get.detected_region` 同源；AI 拿提示词里的注入句 |
 | `rules_status` | **G3** 更新分流规则数据 / **I2** | `update_hint`、设置页 | |
 | `rules_update` | **G3** / **I2** | 设置页按钮 | 未连接时排队 |
 
@@ -1679,6 +1725,7 @@ type RulesStatus = {
 | `probe_run` | `ProbeRun`（2.0 新增） | **必须** |
 | `proxy_params` | `ProxyParams`（2.0 新增） | **必须** |
 | `node_import_url` | `NodeImportUrl`（2.0 新增，取代 `ProfileImport`） | **必须** |
+| `node_import_text` | `NodeImportText`（3.8.0 新增，与 UI 命令共用实现） | **必须共用** |
 | `node_create` | `NodeCreate`（2.0 新增） | **必须** |
 | `config_delete` | `ConfigDelete`（2.0 改名） | **必须** |
 | `issue_list` | `IssueList`（2.0 新增） | **必须** |
@@ -1689,6 +1736,7 @@ type RulesStatus = {
 | `route_targets_set` | `RouteTargetsSet`（2.1 新增） | **必须** |
 | `rule_custom_list` / `_add` / `_delete` | `RuleCustomList` / `RuleCustomAdd` / `RuleCustomDelete`（2.1 新增） | **必须** |
 | `category_list` | `CategoryList`（2.1 新增） | **必须** |
+| `system_region` | **无**（UI 专用，见 §10.10；AI 走系统提示词注入） | — |
 | `rules_status` | `RulesStatus`（2.1 新增） | **必须** |
 | `rules_update` | `RulesUpdate`（2.1 新增） | **必须** |
 | `net_repair` | `NetRepair` | **必须** |
@@ -1767,12 +1815,12 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.13.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 |
+| `contracts/commands.md` | **2.15.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 |
 | `contracts/events.md` | **2.10.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 |
-| `contracts/runtime.md` | **2.4.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 |
-| `contracts/tools.md` | **3.7.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` |
+| `contracts/runtime.md` | **2.5.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` |
+| `contracts/tools.md` | **3.8.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` |
 | `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
-| `contracts/routing.md` | **1.2.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 |
+| `contracts/routing.md` | **1.3.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.0.7** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
 
@@ -1785,6 +1833,27 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.15.0（2026-11-07，当前所在地区）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.15.0`；新增 `system_region {}` → `{ region: string \| null }`（仅 UI） | 命令新增 | 新建配置要在没有配置时也知道用户所在地区；`route_get` 需要一套配置，盖不住全新安装 |
+| 2 | `route_get.detected_region` 明确与 `system_region` 同源；未知地区不再回落 `cn`，改为无本地直连层 + 国际 DNS | 语义变更 | 给非中国用户套中国规则会让解析异常；宁可少优化，不要错优化 |
+| 3 | §15.5 矩阵同步本文件 2.15.0 | 元数据 | — |
+| 4 | §4.2 更正为实际行为：不再承诺 `invalid_name` / `invalid_server` / `invalid_port` / `invalid_password`，Host 统一 `invalid_argument`（method 白名单除外）；写明 `port` 是 `u16`，越界在反序列化阶段失败、返回不了结构化错误 | 更正 | 契约与实现不一致，且这些细分原因前端用不上；`tools.md` 同步 3.7.1 |
+| 5 | `RouteState` 新增 `applied_region`（运行配置实际使用的地区）；`local_direct_basis` 增加 `"none"`（未知地区） | 字段/枚举新增 | 用户中途改时区时，界面不能把实时地区当成正在生效的地区；未知地区报 `ip_only` 与事实不符 |
+| 6 | `RuntimeSnapshot.route_region` 同步进 `runtime.md` 2.5.0 | 元数据 | — |
+| 7 | `node_import_text` 增加 AI 通道：`NodeImportText` 工具（`tools.md` 3.8.0）与本命令共用实现；命令本身仍是 UI 专用 | 工具新增 | 用户从「AI 协助」贴链接时不能被踢回手工表单 |
+
+### 2.14.0（2026-11-07，粘贴文本导入节点）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.14.0`；新增 `node_import_text { text, configId? }`（仅 UI），返回与 `NodeImportResult` 同形 | 命令新增 | 新建配置的手工流程要能接收用户粘贴的 `ss://`，而 `node_import_url` 的 SSRF 限制只适用于「我们替用户去拉」 |
+| 2 | 逐条解析：一条失败不影响其余；整段都不可用时 `INVALID_ARGUMENT / not_node_text`；重复节点计 `skipped.duplicate`，不报错 | 语义 | 一次粘贴多行是常态，整批作废会让用户以为全部失败 |
+| 3 | 落库 `source = "manual"`，事件 `node-list-changed.reason = "manual_create"`（沿用既有枚举，`events.md` 不变） | 实现约束 | 节点由用户提供，不是订阅来源 |
+| 4 | §15.5 矩阵同步本文件 2.14.0 | 元数据 | — |
 
 ### 2.13.0（2026-11-07，同会话单请求）
 

@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.7.0`
+> 契约版本：`3.8.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.6.1";
+  contract_version: "3.8.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -247,16 +247,16 @@ type CallSource = "ui" | "agent";
 
 ```ts
 // src/components/toolDisplay.ts（设计文档里也称 TOOL_DISPLAY）
-export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 44 个工具名完全相等
+export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 45 个工具名完全相等
 ```
 
-进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 44 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
+进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 45 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
 
 **提示词只降低出错概率，最终闸门在渲染层**：UI 永远不渲染工具名、JSON、错误码；不做输出正则改写（静默替换模型正文比漏一句更难排查）。
 
 边界与落点：
 
-- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「44 个名字必须都有」与「`AskUserQuestion` 不占行」。
+- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「45 个名字必须都有」与「`AskUserQuestion` 不占行」。
 - **running 状态文案**同样来自映射表（`events.md` §3.5）：不得拼工具名，未知工具固定「正在处理…」。
 - **工具 description**：通用表达约束放 `\n` 之后的末尾。`capability_catalog` 只取第一行进系统提示清单，所以第一行**不得**出现「对用户说…」这类句子，否则会污染每次请求的能力清单。
 - **「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归**：删任一条即红。
@@ -284,36 +284,37 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 12 | `ConfigUpdate` | `ConfigUpdateTool` | 编辑配置（名称 / 分流 / DNS / 节点集） | `Write` | 中 |
 | 13 | `ConfigDelete` | `ConfigDeleteTool` | 删除一套配置 | `Write` | 中 |
 | 14 | `NodeImportUrl` | `NodeImportUrlTool` | 从订阅 URL 解析并导入节点 | `Write` | 中 |
-| 15 | `NodeCreate` | `NodeCreateTool` | 手动创建一个节点 | `Write` | 中 |
-| 16 | `NodeSwitch` | `NodeSwitchTool` | 切换某套配置的当前节点 | `Execute` | 中 |
-| 17 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `ReadOnly` | 只读 |
-| 18 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 / TUN | `Execute` | 高 |
-| 19 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
-| 20 | `ProxyParams` | `ProxyParamsTool` | 本机代理地址与端口（A5） | `ReadOnly` | 只读 |
-| 21 | `ProbeRun` | `ProbeRunTool` | 连接后四项探测，失败登记问题 | `Write` | 低 |
-| 22 | `IssueList` | `IssueListTool` | 列出问题记录 | `ReadOnly` | 只读 |
-| 23 | `IssueGet` | `IssueGetTool` | 单条问题的诊断包 | `ReadOnly` | 只读 |
-| 24 | `IssueHandoff` | `IssueHandoffTool` | 把问题转交 AI 会话 | `Write` | 低 |
-| 25 | `IssueResolve` | `IssueResolveTool` | 复测通过后标记已解决 | `Write` | 低 |
-| 26 | `IssueIgnore` | `IssueIgnoreTool` | 忽略 / 恢复问题 | `Write` | 低 |
-| 27 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
-| 28 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
-| 29 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
-| 30 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
-| 31 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
-| 32 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口 | `ReadOnly` | 只读 |
-| 33 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
-| 34 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
-| 35 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
-| 36 | `RouteGet` | `RouteGetTool` | 分流模式、目标、自定义规则、生效状态 | `ReadOnly` | 只读 |
-| 37 | `RouteSetMode` | `RouteSetModeTool` | 切换分流模式（A↔B 热切） | `Execute` | 中 |
-| 38 | `RouteTargetsSet` | `RouteTargetsSetTool` | 设置「指定服务」分类集合 | `Write` | 中 |
-| 39 | `RuleCustomList` | `RuleCustomListTool` | 列自定义分流规则 | `ReadOnly` | 只读 |
-| 40 | `RuleCustomAdd` | `RuleCustomAddTool` | 追加一条自定义规则 | `Write` | 中 |
-| 41 | `RuleCustomDelete` | `RuleCustomDeleteTool` | 删除一条自定义规则 | `Write` | 中 |
-| 42 | `CategoryList` | `CategoryListTool` | 分类目录（I1） | `ReadOnly` | 只读 |
-| 43 | `RulesStatus` | `RulesStatusTool` | 规则数据版本与新鲜度 | `ReadOnly` | 只读 |
-| 44 | `RulesUpdate` | `RulesUpdateTool` | 更新规则数据（未连接时排队） | `Write` | 中 |
+| 15 | `NodeImportText` | `NodeImportTextTool` | 解析用户粘贴的 `ss://`（不联网） | `Write` | 中 |
+| 16 | `NodeCreate` | `NodeCreateTool` | 手动创建一个节点 | `Write` | 中 |
+| 17 | `NodeSwitch` | `NodeSwitchTool` | 切换某套配置的当前节点 | `Execute` | 中 |
+| 18 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `ReadOnly` | 只读 |
+| 19 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 / TUN | `Execute` | 高 |
+| 20 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
+| 21 | `ProxyParams` | `ProxyParamsTool` | 本机代理地址与端口（A5） | `ReadOnly` | 只读 |
+| 22 | `ProbeRun` | `ProbeRunTool` | 连接后四项探测，失败登记问题 | `Write` | 低 |
+| 23 | `IssueList` | `IssueListTool` | 列出问题记录 | `ReadOnly` | 只读 |
+| 24 | `IssueGet` | `IssueGetTool` | 单条问题的诊断包 | `ReadOnly` | 只读 |
+| 25 | `IssueHandoff` | `IssueHandoffTool` | 把问题转交 AI 会话 | `Write` | 低 |
+| 26 | `IssueResolve` | `IssueResolveTool` | 复测通过后标记已解决 | `Write` | 低 |
+| 27 | `IssueIgnore` | `IssueIgnoreTool` | 忽略 / 恢复问题 | `Write` | 低 |
+| 28 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
+| 29 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
+| 30 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
+| 31 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
+| 32 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
+| 33 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口 | `ReadOnly` | 只读 |
+| 34 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
+| 35 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
+| 36 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
+| 37 | `RouteGet` | `RouteGetTool` | 分流模式、目标、自定义规则、生效状态 | `ReadOnly` | 只读 |
+| 38 | `RouteSetMode` | `RouteSetModeTool` | 切换分流模式（A↔B 热切） | `Execute` | 中 |
+| 39 | `RouteTargetsSet` | `RouteTargetsSetTool` | 设置「指定服务」分类集合 | `Write` | 中 |
+| 40 | `RuleCustomList` | `RuleCustomListTool` | 列自定义分流规则 | `ReadOnly` | 只读 |
+| 41 | `RuleCustomAdd` | `RuleCustomAddTool` | 追加一条自定义规则 | `Write` | 中 |
+| 42 | `RuleCustomDelete` | `RuleCustomDeleteTool` | 删除一条自定义规则 | `Write` | 中 |
+| 43 | `CategoryList` | `CategoryListTool` | 分类目录（I1） | `ReadOnly` | 只读 |
+| 44 | `RulesStatus` | `RulesStatusTool` | 规则数据版本与新鲜度 | `ReadOnly` | 只读 |
+| 45 | `RulesUpdate` | `RulesUpdateTool` | 更新规则数据（未连接时排队） | `Write` | 中 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
@@ -340,6 +341,7 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(ConfigUpdateTool::new(store.clone())),
     Box::new(ConfigDeleteTool::new(store.clone())),
     Box::new(NodeImportUrlTool::new(store.clone(), secrets.clone())),
+    Box::new(NodeImportTextTool::new(store.clone(), secrets.clone())),
     Box::new(NodeCreateTool::new(store.clone(), secrets.clone())),
     Box::new(NodeSwitchTool::new(rt.clone(), store.clone())),
     Box::new(NodeProbeTool::new(rt.clone(), store.clone())),
@@ -662,6 +664,35 @@ type CatalogSearchData = {
 
 ---
 
+### 4.10.1 `NodeImportText`（3.8.0 新增）
+
+用户**直接粘贴**的 `ss://` 分享链接（一行或多行）。与 UI 的 `node_import_text`（`commands.md` §4.1.1）**共用同一个服务层实现**，区别只在通道：一条是模型调用，一条是界面调用。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "text": { "type": "string", "maxLength": 65536 },
+    "config_id": { "type": "string" }
+  },
+  "required": ["text"],
+  "additionalProperties": false
+}
+```
+
+`data`：`NodeImportResult`（`commands.md` §4.1）。
+
+- **不发任何网络请求**；只解析文本。链接里的字段由解析器读，模型不得自己解码或编造。
+- 逐条解析：坏行只进 `skipped`，不影响其余；去重沿用 `source_key`，重复计 `skipped.duplicate`，**不报错**；落库 `source = "manual"`。
+- 整段都解析不出节点 → `INVALID_ARGUMENT / not_node_text`，`content` 说明「粘贴的内容里没有可用的节点」。
+- `config_id` 省略时只进节点池；带 `config_id` 时按顺序追加并触发 `config-changed`。
+- 密码只进 `secrets.enc`；返回值与日志永不含密码，也不回显粘贴内容。
+- **写操作**：`PermissionLevel::Write`，与 `ConfigCreate` 同档，必须走工具调用与展示链路，不能静默建节点。
+
+错误：`INVALID_ARGUMENT`（`not_node_text`）、`NOT_FOUND`、`SECRET_STORE`。
+
+---
+
 ### 4.11 `VpnConnect`
 
 ```json
@@ -823,7 +854,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.6.1";
+  contract_version: "3.8.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -986,7 +1017,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.6.1";
+  contract_version: "3.8.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1337,7 +1368,10 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 - `config_id` 指定时追加到该配置；不指定只进节点池。
 - 不自动连接、不触发探测。
 
-错误：`INVALID_ARGUMENT`（`invalid_name` / `invalid_server` / `invalid_port` / `unsupported_method` / `invalid_password`）、`NOT_FOUND`、`SECRET_STORE`。
+错误：`INVALID_ARGUMENT`（`invalid_argument` / `unsupported_method`）、`NOT_FOUND`、`SECRET_STORE`。
+
+- 细分校验（名字、地址、端口、密码）由前端/调用方先做；Host 统一 `invalid_argument`，只有 method 不在白名单才是 `unsupported_method`。
+- `port` 是 `u16`：越界或非整数在反序列化阶段就失败，不是本工具的结构化错误。
 
 ---
 
@@ -1872,6 +1906,20 @@ type CoreUpgradeData = {
 ---
 
 ## 8. 变更记录
+
+### 3.8.0（2026-11-07，新增 `NodeImportText`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.8.0`；工具总数 44 → 45 | 元数据 | — |
+| 2 | 新增 §4.10.1 `NodeImportText { text, config_id? }`：解析用户直接粘贴的 `ss://`，与 UI 的 `node_import_text` 共用服务层实现；写操作，`PermissionLevel::Write`，与 `ConfigCreate` 同档 | 工具新增 | 用户从「AI 协助」进来贴链接，不能被踢回手工表单；AI 侧此前没有对应工具 |
+
+### 3.7.1（2026-11-07，`NodeCreate` 错误原因对齐实现）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.7.1`；工具总数不变（仍 44 个） | 元数据 | — |
+| 2 | §4.26 `NodeCreate` 的错误原因改为实际行为：`invalid_argument` / `unsupported_method`；细分校验交给调用方，并写明 `port` 越界在反序列化阶段失败 | 更正 | 契约承诺的 `invalid_name` / `invalid_server` / `invalid_port` / `invalid_password` 实现从未返回过 |
 
 ### 3.7.0（2026-11-06，端口改为用户设置）
 

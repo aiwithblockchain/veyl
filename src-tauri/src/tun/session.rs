@@ -48,6 +48,8 @@ pub struct TunLaunchMeta {
     pub node_id: Option<String>,
     pub node_name: Option<String>,
     pub applied_route_revision: Option<i64>,
+    /// 生成这份 TUN 配置时判定的地区；界面显示实际生效值。
+    pub route_region: Option<String>,
 }
 
 pub struct TunSession {
@@ -209,6 +211,7 @@ impl TunSession {
             node_id: None,
             node_name: None,
             applied_route_revision: None,
+            route_region: None,
         });
         *self.connected.lock().unwrap() = Some("2026-11-04T00:00:00Z".into());
         *self.last_check.lock().unwrap() = Some(Instant::now());
@@ -499,6 +502,7 @@ mod tests {
             node_id: None,
             node_name: None,
             applied_route_revision: None,
+            route_region: None,
         }
     }
 

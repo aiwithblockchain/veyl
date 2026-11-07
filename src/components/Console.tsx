@@ -43,6 +43,8 @@ interface Props {
   seedUpdate?: boolean;
   /** 设置里的本地代理端口；未连接时代理卡显示它。 */
   proxyPort?: number;
+  /** 系统地区；决定已连接时那行本地直连口径，null = 未知。 */
+  region?: string | null;
   onOpenDiagnostics?: () => void;
   loading?: boolean;
   runtime: RuntimeView;
@@ -103,6 +105,7 @@ export function Console({
   onImportNodes,
   seedUpdate = false,
   proxyPort = DEFAULT_PROXY_PORT,
+  region = null,
   onOpenDiagnostics,
   loading = false,
   runtime,
@@ -224,13 +227,16 @@ export function Console({
   const rates = rateLabel(rateSamples);
 
   // null 走本地兜底；[] 是 AI 明确选择空白；非空但一块都渲染不出时退回本地。
-  const localBlocks = config ? middleBlocks(runtime, config, aiReady, proxyPort) : [];
+  const localBlocks = config
+    ? middleBlocks(runtime, config, aiReady, proxyPort, region)
+    : [];
   const layout = config?.layout ?? null;
   const layoutBlocks =
     config && layout
       ? resolveLayoutBlocks(layout, runtime, config, {
           hasSeedUpdate: seedUpdate,
           proxyPort,
+          region,
         })
       : [];
   const layoutHadBlocks =

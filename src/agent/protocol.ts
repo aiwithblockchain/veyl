@@ -443,6 +443,44 @@ export interface NodeSummary {
   created_at: number;
 }
 
+/** `node_import_url` / `node_import_text` 的返回（commands.md §4.1）。 */
+export interface NodeImportSkipped {
+  name: string | null;
+  reason:
+    | "unsupported_scheme"
+    | "unsupported_method"
+    | "malformed"
+    | "duplicate"
+    | "subscription_empty";
+}
+
+export interface NodeImportResult {
+  imported: number;
+  skipped: NodeImportSkipped[];
+  /** 本次新增的节点；已存在的不在这里。 */
+  nodes: NodeSummary[];
+}
+
+export interface NodeCreateInput {
+  name: string;
+  server: string;
+  port: number;
+  method: string;
+  password: string;
+  configId?: string;
+}
+
+/** 服务分类（commands.md §10.7）。`proxy_selected` 的 targets 只能取这里的 id。 */
+export interface Category {
+  id: string;
+  name_zh: string;
+  name_en: string;
+  description: string;
+  item_count: number;
+  rule_sets: string[];
+  dns_classifiable: boolean;
+}
+
 export interface DnsConfig {
   mode: "auto" | "custom";
   local: string[];
@@ -547,6 +585,25 @@ export interface LayoutUpdatedPayload {
   revision: number;
   layout: Layout;
   emitted_at: string;
+}
+
+/** `route_get` 的返回（commands.md §10.1）；前端暂未接线。 */
+export interface RouteState {
+  config_id: string;
+  routing_mode: ConfigRouteMode;
+  applied_mode: ConfigRouteMode | null;
+  targets: string[];
+  custom_rules: Array<Record<string, unknown>>;
+  route_revision: number;
+  applied_revision: number | null;
+  effective: "current_connection" | "next_connection";
+  reconnect_required: boolean;
+  /** 本地直连层依据：CN = domain_and_ip，其它 = ip_only，未知 = none。 */
+  local_direct_basis: "domain_and_ip" | "ip_only" | "none";
+  /** 实时判定的小写 cc；未知为 null。 */
+  detected_region: string | null;
+  /** 运行配置实际使用的地区；未连接或当时未知为 null。 */
+  applied_region: string | null;
 }
 
 export interface RoutingChangedPayload {
@@ -659,6 +716,8 @@ export interface RuntimeSnapshot {
   node_latency_ms: number | null;
   /** 本次连接生成配置时的 route_revision；未连接为 null。 */
   applied_route_revision: number | null;
+  /** 本次运行配置实际使用的地区（小写 cc）；断开为 null。 */
+  route_region: string | null;
   /** 不经代理测得的直连出口 IP（1.1.0）；用于对照「是否真的走了代理」。 */
   direct_ip: string | null;
 }
@@ -693,5 +752,7 @@ export interface RuntimeView {
   /** 当前节点延迟（2.4.0）；界面只显示这个。 */
   node_latency_ms: number | null;
   applied_route_revision: number | null;
+  /** 本次运行配置实际使用的地区（小写 cc）；断开为 null。 */
+  route_region: string | null;
   direct_ip: string | null;
 }

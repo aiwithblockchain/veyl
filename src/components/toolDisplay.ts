@@ -139,6 +139,13 @@ export const TOOL_COPY: Record<string, ToolCopy> = {
     advice: "检查订阅地址是否可用后再试。",
     readOnly: false,
   },
+  NodeImportText: {
+    running: "正在导入节点",
+    done: "已导入节点",
+    failed: "没能导入节点",
+    advice: "检查粘贴的内容是不是节点链接后再试。",
+    readOnly: false,
+  },
   NodeCreate: {
     running: "正在添加节点",
     done: "已添加节点",

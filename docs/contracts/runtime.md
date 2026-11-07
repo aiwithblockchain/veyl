@@ -1,6 +1,6 @@
 # 契约：Runtime Manager
 
-> 契约版本：`2.4.0`
+> 契约版本：`2.5.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 冻结前评审：PM / Alice / Bob
 > 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5、`docs/tun-mode.md`
@@ -17,7 +17,7 @@
 - 所有 JSON 字段使用 **snake_case**；所有时间是 **ISO 8601 UTC，带 `Z` 后缀**（`2026-11-02T09:15:03Z`），不带毫秒之外的其他格式。
 - 所有错误码是 **大写下划线**（`RUNTIME_START_TIMEOUT`）。
 - `contract_version` 出现在每一个对外结构里；破坏性变更必须升次版本号并同步本文档。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.4.0`），升版时全文替换。实现侧只允许有一个常量对应本文件，不得按结构分别发不同版本号。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.5.0`），升版时全文替换。实现侧只允许有一个常量对应本文件，不得按结构分别发不同版本号。
 
 **P1 范围**：单版本、单进程、系统代理模式。多版本并行、TUN、外部 MCP 宿主不在本契约内。
 
@@ -116,7 +116,7 @@ type HealthCheckName =
   | "traffic";
 
 type HealthSnapshot = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   process: boolean;
   clash_api: boolean;
   data_plane: boolean;
@@ -156,7 +156,7 @@ type TrafficStats = {
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
@@ -179,6 +179,7 @@ type RuntimeSnapshot = {
   direct_ip: string | null;          // 不经代理的直连出口 IP
   config_hash: string | null;        // "sha256:<hex>"，配置文件的摘要
   applied_route_revision: number | null; // 2.1：建连时 configs.route_revision 的值
+  route_region: string | null;       // 2.5：生成当前配置时判定的地区（小写 cc；未知为 null）
   system_proxy_enabled: boolean;
   health: HealthSnapshot;
   traffic: TrafficStats | null;
@@ -212,6 +213,7 @@ type RuntimeSnapshot = {
 | `latency_ms` | 最近一次**出口 IP 探测**的往返耗时（毫秒） | 未探测/探测失败为 `null`。**不是**节点 ping 延迟 |
 | `node_latency_ms` | 最近一次 **Clash API delay 测试**的毫秒数：`GET /proxies/node-<id>/delay?url=<generate_204>`，由 sing-box 自己去连节点 | 未连接、还没测到、或当前没有选中节点（`node_id = null`）时为 `null`。**与 `latency_ms` 是两个指标，不得互相填充**：`latency_ms` 是含 DNS + TLS 的整次 HTTP 往返（实测常在 2000 ms 量级），`node_latency_ms` 是节点本身的可达性与往返。断开、失败、节点热切换后必须复位为 `null`，不能把上一个节点的数字留在面板上 |
 | `applied_route_revision` | 本次连接生成配置时的 `configs.route_revision` | 建连时读入并随进程保存；未连接为 `null`。与库里的 `route_revision` 比较：相等 = 分流规则已生效，不等 = 改了但当前连接还没用上，UI 显示「下次连接生效」 |
+| `route_region` | 生成本次运行配置时判定的地区（小写 cc，未知为 `null`） | 建连时随 plan 保存，**不因用户中途改系统时区而重算**。已连接时界面显示的地区与直连口径以它为准；`route_get.detected_region` 是实时重算值，两者可能不同。**`null` 表示当时判不出地区，不是「回退到实时值」的开关**——已连接时按「未知」显示。地区未知时本次连接**不做本地直连层**（`geoip-<cc>`/`geosite-cn` 为空，DNS 走国际组） |
 | `direct_ip` | 不经代理测得的**直连**出口 IP | 与 `exit_ip` 配对展示，用于让用户判断「是否真的走了代理」。未测到为 `null`。**不得**在探测时带上系统代理，否则两个值会相同、失去意义 |
 
 **`latency_ms` 的定义必须固定为「出口 IP 探测往返耗时」**，理由是它已经有实现、有含义，且能在没有额外网络请求的前提下反映链路质量。
@@ -226,7 +228,7 @@ type RuntimeSnapshot = {
 
 ```ts
 type AivpnError = {
-  contract_version: "2.4.0";
+  contract_version: "2.5.0";
   code: AivpnErrorCode;
   message: string;        // 面向用户，可本地化
   retryable: boolean;
@@ -592,6 +594,13 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 ---
 
 ## 12. 变更记录
+
+### 2.5.0（2026-11-07，记录本次连接所用地区）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 契约版本升到 `2.5.0`；`RuntimeSnapshot` 新增 `route_region: string \| null` | 字段新增 | 运行配置不会因用户中途改时区而重算，界面要显示**实际生效**的地区 |
+| 2 | 地区未知时本次连接不做本地直连层（无 `geosite-cn` / `geoip-<cc>`，DNS 用国际组）；判定来源见 `commands.md` §10.10 与 `routing.md` §3.7 | 语义说明 | `design/create-config.md` §7.5 |
 
 ### 2.4.0（2026-11-06，本地代理端口可设置）
 

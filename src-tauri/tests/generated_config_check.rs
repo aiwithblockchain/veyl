@@ -23,7 +23,7 @@ use veyl_lib::config::{
 };
 use veyl_lib::rules::plan::{self, RouteInput, RoutePlan};
 use veyl_lib::rules::{
-    Category, InstalledRules, ManifestItem, ManifestSource, RulesManifest,
+    Category, InstalledRules, ManifestItem, ManifestSource, Region, RulesManifest,
 };
 
 fn sing_box() -> Option<PathBuf> {
@@ -111,10 +111,11 @@ fn installed_rules() -> InstalledRules {
 /// 真实生成器的输出，只抹掉规则集引用。
 fn real_plan(mode: &str, region: &str, targets: &[&str]) -> RoutePlan {
     let rules = installed_rules();
+    let region = Region::from_code(region);
     let targets = targets.iter().map(|id| id.to_string()).collect::<Vec<_>>();
     let mut plan = plan::build(&RouteInput {
         mode,
-        region: Some(region),
+        region: &region,
         targets: &targets,
         rules: &rules,
     })
@@ -128,6 +129,46 @@ fn real_plan(mode: &str, region: &str, targets: &[&str]) -> RoutePlan {
         rules.retain(|rule| rule.get("rule_set").is_none());
     }
     plan
+}
+
+/// 未知地区：没有本地直连层，DNS 走国际组，不能回落成 `cn`。
+#[test]
+fn unknown_region_has_no_local_layer() {
+    let rules = installed_rules();
+    let targets: Vec<String> = Vec::new();
+    let plan = plan::build(&RouteInput {
+        mode: "direct",
+        region: &Region::Unknown,
+        targets: &targets,
+        rules: &rules,
+    })
+    .expect("未知地区不该让建配置失败");
+
+    assert!(plan.referenced.is_empty(), "{:?}", plan.referenced);
+    assert!(plan.rule_sets.is_empty());
+    let servers = plan.dns["servers"].to_string();
+    assert!(servers.contains("1.1.1.1"), "{servers}");
+    assert!(!servers.contains("223.5.5.5"), "{servers}");
+    assert!(!servers.contains("119.29.29.29"), "{servers}");
+}
+
+/// 系统推断出的地区缺 `geoip-<cc>` 时降级为「无本地层」，而不是让连接失败。
+#[test]
+fn missing_local_rule_set_degrades_instead_of_failing() {
+    let rules = installed_rules();
+    let targets: Vec<String> = Vec::new();
+    let region = Region::from_code("zz"); // 规则包里没有 geoip-zz
+    let plan = plan::build(&RouteInput {
+        mode: "direct",
+        region: &region,
+        targets: &targets,
+        rules: &rules,
+    })
+    .expect("系统推断的地区缺规则集应降级");
+    assert!(plan.referenced.is_empty());
+    let servers = plan.dns["servers"].to_string();
+    assert!(servers.contains("1.1.1.1"), "{servers}");
+    assert!(!servers.contains("223.5.5.5"), "{servers}");
 }
 
 fn input(mode: ConnectMode) -> BuildInput {

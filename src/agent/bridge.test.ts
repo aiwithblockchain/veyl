@@ -40,6 +40,7 @@ const SNAPSHOT: RuntimeSnapshot = {
   latency_ms: 42,
   node_latency_ms: 42,
   applied_route_revision: 1,
+  route_region: "cn",
   direct_ip: "203.0.113.1",
 };
 
@@ -104,7 +105,9 @@ describe("runtime 快照与事件兜底", () => {
       latency_ms: 42,
       node_latency_ms: 38,
       connected_since: new Date().toISOString(),
+      route_region: "cn",
     };
+    expect(snapshotToView(SNAPSHOT).route_region).toBe("cn");
     const next = applyRuntimeEvent(view, {
       name: AGENT_EVENTS.runtimeStateChanged,
       payload: {
@@ -125,6 +128,7 @@ describe("runtime 快照与事件兜底", () => {
     expect(next.latency_ms).toBeNull();
     expect(next.node_latency_ms).toBeNull();
     expect(next.connected_since).toBeNull();
+    expect(next.route_region).toBeNull();
   });
 
   it("快照晚到时保留请求期间收到的节点延迟，不被打回确认中", () => {

@@ -1,6 +1,6 @@
 # 契约：分流与 DNS
 
-> 契约版本：`1.2.0`（**已并入**。并入时基线：`commands.md` 2.3.1 / `events.md` 2.1.0 / `tools.md` 3.2.0 / `runtime.md` 2.1.0 / `data-model.md` 3。此后各文件独立演进，一律以各文件头为准，本行不再追更）
+> 契约版本：`1.3.0`（**已并入**。并入时基线：`commands.md` 2.3.1 / `events.md` 2.1.0 / `tools.md` 3.2.0 / `runtime.md` 2.1.0 / `data-model.md` 3。此后各文件独立演进，一律以各文件头为准，本行不再追更）
 > 状态：**已定稿并并入**，2026-11-04。`capabilities.md` 由 PM 维护，本文件不改它。
 > 依据：`docs/user-flows.md` §1.4、`docs/config-execution.md` §7、`docs/capabilities.md` G/I 组、`docs/tun-mode.md` §3/§5、`docs/upgrade.md` §3、`docs/review-checklist.md` B3-01～B3-08
 > 实现：`src-tauri/src/config/`（生成）、`src-tauri/src/rules/`（资源与更新）、Clash API（热切换）
@@ -205,7 +205,7 @@ route-local = proxy
 | `route-local` | `direct` | `proxy` | 不存在 |
 | `final` | `proxy` | `proxy` | `direct` |
 | 目标分类规则 | 无 | 无 | 有 |
-| 本地层规则集 | CN：`geosite-cn`+`geoip-cn`；其它：`geoip-<cc>` | 同左 | 无 |
+| 本地层规则集 | CN：`geosite-cn`+`geoip-cn`；其它：`geoip-<cc>`；**未知：无** | 同左 | 无 |
 | 能否热切 | ↔ `proxy_all` | ↔ `direct` | **否** |
 
 > DNS 那一层不随这张表走：它由「地区 + 模式」共同决定，见 §6.2。非中国的 `direct` / `proxy_all` 是 `route.final = proxy` 而 `dns.final = local`——**两个 final 本来就可以不一致**，它们分别管流量默认出口与解析默认出口。
@@ -229,6 +229,7 @@ sniff → hijack-dns → ip_is_private → 自定义规则 → 本地层/目标�
 |---|---|---|---|
 | CN | `geosite-cn` + `geoip-cn` | 域名级 + IP 级 | 按域名分流：本地规则集 → local，其余 → remote |
 | 其它国家 | `geoip-<cc>`（如 `geoip-jp`） | **仅 IP 级近似** | **所有域名走本地 DNS 直连解析**，再用 IP 判定走直连还是 VPN |
+| 未知 | **无** | — | 国际组（`1.1.1.1` / `8.8.8.8`），不做本地直连层 |
 
 **为什么非中国必须本地解析**：若走代理 DNS，本地网站会被解析成境外 IP，`geoip-<cc>` 判不出本地，`direct` 等于没生效——那还不如不提供这个选项。
 
@@ -236,7 +237,8 @@ sniff → hijack-dns → ip_is_private → 自定义规则 → 本地层/目标�
 
 - 非中国用户的 `direct` 模式**照常提供服务**，不报错、不隐藏。
 - **文案仍要如实说明近似**：「尽量让你的本地网站直连；判断按 IP 归属，可能有个别网站不准」。
-- 地区判定来自 H1（系统区域），不联网。
+- 地区判定来自系统时区 / 系统区域 / `LANG`（`VEYL_REGION` 可显式覆盖），**离线、不测 IP**；判不出就是未知，**不再回落 `cn`**。
+- 未知地区 + 用户手选「本地网站直连」：没有本地规则集，实际等价于「全部走 VPN」；界面如实说明（`design/create-config.md` §7.4.1）。
 
 ---
 
@@ -347,6 +349,8 @@ DNS 规则与 `final` **由同一个 `RoutePlan` 生成**，按「地区 + 模�
 | CN | `proxy_selected` | 目标层 + 自定义 `proxy` → `dns-remote-1`；自定义 `direct` → `dns-local-1` | `dns-local-1` | 域名级 |
 | 其它 | `direct` / `proxy_all` | **无域名规则** | `dns-local-1` | IP 级 + 全本地解析 |
 | 其它 | `proxy_selected` | 目标层 + 自定义 `proxy` → `dns-remote-1`；自定义 `direct` → `dns-local-1` | `dns-local-1` | 域名级（目标）+ 全本地（其余） |
+| 未知 | `direct` / `proxy_all` | **无域名规则** | `dns-local-1` | 无本地层（等价全走 VPN），DNS 用国际组 |
+| 未知 | `proxy_selected` | 目标层 + 自定义 `proxy` → `dns-remote-1`；自定义 `direct` → `dns-local-1` | `dns-local-1` | 域名级（目标）+ 全本地（其余） |
 
 **同源不变量（覆盖两种形态，必须写成测试）**
 
@@ -409,8 +413,9 @@ type RouteState = {
   applied_revision: number | null; // 当前连接生成时的 revision；建连时记录，断开清空
   effective: "current_connection" | "next_connection";
   reconnect_required: boolean;
-  local_direct_basis: "domain_and_ip" | "ip_only"; // CN = domain_and_ip，其它 = ip_only
-  detected_region: string | null;  // ISO 3166-1 alpha-2
+  local_direct_basis: "domain_and_ip" | "ip_only" | "none"; // CN = domain_and_ip，其它 = ip_only，未知 = none
+  detected_region: string | null;  // 实时判定的小写 cc；未知为 null
+  applied_region: string | null;   // 运行配置实际使用的地区；未连接或当时未知为 null
 };
 ```
 
@@ -419,6 +424,9 @@ type RouteState = {
 - **G1** 查看当前分流方式。`configId` 省略用 active 配置。
 - 只读，不联网，不发事件。
 - `applied_mode` 从运行时 selector 读回，不是从库里推——两者可能不同（见 `applied_revision`）。
+- `detected_region` 是**实时**判定（`system_region` 同源）；`applied_region` 是**本次连接生成配置时**用的地区（`RuntimeSnapshot.route_region`）。已连接时两者可能不同，界面以 `applied_region` 为准。
+- **`applied_region = null` 表示建连时判不出地区，不是「回退到 `detected_region`」的开关。** 已连接时它是 `null` 就按「未知」显示，不得用实时值顶上；未连接时 `applied_region` 本来即为 `null`，此时才用 `detected_region`。
+- `local_direct_basis` 三个取值：`"domain_and_ip"` = 域名级 + IP 级本地层（CN）；`"ip_only"` = 只有 IP 级本地层（其它已知地区）；`"none"` = 未知地区，**没有本地直连层**（连接时 `geosite-cn` / `geoip-<cc>` 为空，DNS 走国际组，等价于全部走 VPN）。
 
 ### 7.3 `route_set_mode { configId?, mode, confirmReconnect? }` → `RouteSetModeData`
 
@@ -523,7 +531,7 @@ type RulesStatus = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.10.0";
   config_id: string;
   routing_mode: RoutingMode;
   applied_mode: RoutingMode | null;   // 热切后为实际生效值；仅写库时保持旧值
@@ -546,7 +554,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.4.0";
+  contract_version: "2.10.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
@@ -697,6 +705,15 @@ applied_route_revision: number | null;  // 本次连接生成配置时的 config
 ---
 
 ## 14. 变更记录
+
+### 1.3.0（2026-11-07，地区判定与未知地区）
+
+| # | 变更 | 类型 | 来源 |
+|---|---|---|---|
+| 1 | 地区判定改为 `VEYL_REGION` → 系统时区 → 系统区域 → `LANG` → 未知；离线、不测 IP | 语义修正 | 原来只读 `LANG`，GUI 下常是 `en_US` 甚至缺失，中国用户会被判成美国 |
+| 2 | 未知地区**不再回落 `cn`**：无本地层规则集，DNS 用国际组（`1.1.1.1` / `8.8.8.8`）；`design/create-config.md` §7.4 | 语义修正 | 给非中国用户套中国 DNS 与 `geosite-cn` 会让解析异常；宁可少优化，不要错优化 |
+| 3 | 四个入口（连接 / 测速 / `route_get` / `system_region`）统一读同一个 `Region`，删除各处 `unwrap_or("cn")` | 实现约束 | 折返点在 `plan.rs normalized_region`，只改调用方不会改变行为 |
+| 4 | `RouteState` 新增 `applied_region`，`local_direct_basis` 增加 `"none"`；本地层规则集缺失时降级为无本地层（仅系统推断的地区；用户显式选的分类缺规则集仍报错） | 字段/语义 | 已连接时要报运行配置实际使用的地区；未知地区报 `ip_only` 与事实不符 |
 
 ### 1.2.0（2026-11-05，DNS strategy 按平台）
 

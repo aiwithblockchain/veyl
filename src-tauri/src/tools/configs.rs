@@ -837,6 +837,100 @@ impl Tool for NodeImportUrlTool {
     }
 }
 
+/// 用户直接粘贴的 `ss://` 分享链接。与 UI 的 `node_import_text` 共用服务层实现。
+pub struct NodeImportTextTool {
+    services: Arc<dyn VpnToolServices>,
+}
+
+impl NodeImportTextTool {
+    pub fn new(services: Arc<dyn VpnToolServices>) -> Self {
+        Self { services }
+    }
+}
+
+#[async_trait]
+impl Tool for NodeImportTextTool {
+    fn name(&self) -> &str {
+        "NodeImportText"
+    }
+
+    fn description(&self) -> &str {
+        "解析用户直接粘贴的 Shadowsocks 分享链接（一行或多行 ss://），导入节点池。\
+         逐条解析：坏行只跳过，不影响其余；重复节点会标出来。只解析、不联网。\
+         config_id 省略时只进节点池。返回值不含密码；导入成功后要复述节点名、地址、端口与加密方式。"
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Write
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "maxLength": 65536 },
+                "config_id": { "type": "string" }
+            },
+            "required": ["text"],
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let Some(text) = input.get("text").and_then(Value::as_str) else {
+            return envelope::finish(
+                ctx,
+                "NodeImportText",
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 text"))
+                    .with_changed(Changed::None),
+            );
+        };
+        let config_id = match super::optional_string(&input, "config_id") {
+            Ok(value) => value,
+            Err(error) => {
+                return envelope::finish(
+                    ctx,
+                    "NodeImportText",
+                    ToolOutcome::fail(error).with_changed(Changed::None),
+                )
+            }
+        };
+
+        let outcome = match self.services.node_import_text(config_id, text).await {
+            Ok(data) => {
+                let imported = data.get("imported").and_then(Value::as_i64).unwrap_or(0);
+                let skipped = data
+                    .get("skipped")
+                    .and_then(Value::as_array)
+                    .map(|items| items.len())
+                    .unwrap_or(0);
+                let mut facts = Vec::new();
+                if imported > 0 {
+                    facts.push(format!("新增：{imported} 个"));
+                }
+                if skipped > 0 {
+                    facts.push(format!("跳过：{skipped} 个"));
+                }
+                ToolOutcome::ok(
+                    format!("导入 {imported} 个节点，跳过 {skipped} 个。请复述节点名、地址、端口与加密方式给用户确认。"),
+                    data,
+                )
+                .with_display(
+                    if imported > 0 {
+                        "节点已导入"
+                    } else {
+                        "没有新增节点"
+                    },
+                    facts,
+                    Changed::None,
+                )
+            }
+            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
+        };
+        envelope::finish(ctx, "NodeImportText", outcome)
+    }
+}
+
 pub struct NodeCreateTool {
     services: Arc<dyn VpnToolServices>,
 }

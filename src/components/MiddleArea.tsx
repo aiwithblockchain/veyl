@@ -215,6 +215,7 @@ export function MiddleArea({
           return (
             <p key={`empty_hint_${index}`} className={`note note--${block.tone}`}>
               {block.text}
+              {block.note ? <span className="note__detail">{block.note}</span> : null}
             </p>
           );
         }

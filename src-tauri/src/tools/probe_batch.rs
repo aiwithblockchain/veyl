@@ -439,10 +439,10 @@ pub async fn start_probe_runtime(
         return None;
     }
     let rules = crate::rules::load_active(&store, data_dir)?;
-    let region = crate::rules::detected_region();
+    let region = crate::rules::detect_region();
     let route_plan = crate::rules::plan::build(&crate::rules::plan::RouteInput {
         mode: "proxy_all",
-        region: region.as_deref(),
+        region: &region,
         targets: &[],
         rules: &rules,
     })
@@ -536,6 +536,7 @@ pub async fn start_probe_runtime(
         node_id: None,
         node_name: None,
         applied_route_revision: None,
+        route_region: region.code().map(str::to_string),
     };
     if cancel.is_cancelled() {
         let _ = std::fs::remove_file(&config_path);

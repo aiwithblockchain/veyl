@@ -709,6 +709,7 @@ const UI_ONLY_COMMANDS = [
   "node_probe_snapshot",
   "proxy_port_get",
   "proxy_port_set",
+  "system_region",
 ];
 
 const pascalCase = (s) => s.replace(/(^|_)([a-z0-9])/g, (_, __, c) => c.toUpperCase());
@@ -1101,7 +1102,7 @@ function frontendToolDisplayNames() {
   return new Set();
 }
 
-check("前端映射表工具名集合与 tools.md §3 的 44 个相等", () => {
+check("前端映射表工具名集合与 tools.md §3 的 45 个相等", () => {
   const names = frontendToolDisplayNames();
   if (names === null) return []; // 未实现时由下一条 advisory 报，不在这里制造红
   const tools = contractTools();
@@ -1896,6 +1897,7 @@ check("端口冲突规则与各契约版本引用一致（契约）", () => {
     ["contracts/events.md", "docs/contracts/events.md", "events.md"],
     ["contracts/runtime.md", "docs/contracts/runtime.md", "runtime.md"],
     ["contracts/tools.md", "docs/contracts/tools.md", "tools.md"],
+    ["contracts/routing.md", "docs/contracts/routing.md", "routing.md"],
   ]) {
     const actual = versionOf(rel);
     if (matrix.has(key) && actual && matrix.get(key) !== actual) {
@@ -1942,6 +1944,153 @@ check("config_create / config_update 不再接受 listenPort（实现）", () =>
   } else {
     const body = rs.slice(updateStart, rs.indexOf("\n}", updateStart));
     if (/arg\(\s*"listenPort"/.test(body)) problems.push("config_update 仍在解析 listenPort");
+  }
+  return problems;
+});
+
+// --- 18：地区判定与粘贴导入 ---
+
+check("system_region / node_import_text 的形状、错误码与注册（契约）", () => {
+  const md = read("docs/contracts/commands.md");
+  const cmds = contractCommands();
+  const problems = [];
+
+  const start = md.indexOf("## 2. 命令总表");
+  const table = md.slice(start, md.indexOf("\n## ", start + 10));
+  const nums = [...table.matchAll(/^\|\s*(\d+)\s*\|/gm)].map((m) => Number(m[1]));
+  const dup = [...new Set(nums.filter((n, i) => nums.indexOf(n) !== i))];
+  if (dup.length) problems.push(`§2 命令编号重复：${dup.join(", ")}`);
+  if (nums.some((n, i) => i > 0 && n <= nums[i - 1])) problems.push("§2 命令编号不是单调递增");
+
+  for (const [name, params] of [
+    ["node_import_text", ["text", "configId"]],
+    ["system_region", []],
+  ]) {
+    const row = cmds.get(name);
+    if (!row) {
+      problems.push(`commands.md §2 缺少 ${name}`);
+      continue;
+    }
+    const actual = parseParamList(row.params);
+    if (actual.join(",") !== params.join(",")) {
+      problems.push(`${name} 入参应为 ${params.join(", ") || "空"}，实际是 ${actual.join(", ")}`);
+    }
+  }
+
+  const s41 = mdSection(md, "### 4.1.1", "\n### ");
+  if (!s41) problems.push("commands.md 找不到 §4.1.1");
+  else {
+    for (const phrase of [
+      "not_node_text",
+      "unsupported_scheme",
+      "unsupported_method",
+      "malformed",
+      "duplicate",
+      "不产生 `subscription_empty`",
+    ]) {
+      if (!s41.includes(phrase)) problems.push(`§4.1.1 缺少「${phrase}」`);
+    }
+  }
+
+  const s1010 = mdSection(md, "### 10.10", "\n## ");
+  if (!s1010) problems.push("commands.md 找不到 §10.10");
+  else {
+    for (const phrase of ["小写 ISO 3166-1 alpha-2", "判不出为 `null`", "与 `route_get.detected_region` 同源"]) {
+      if (!s1010.includes(phrase)) problems.push(`§10.10 缺少「${phrase}」`);
+    }
+  }
+
+  const lib = read("src-tauri/src/lib.rs");
+  for (const fn of ["node_import_text", "system_region"]) {
+    const count = (lib.match(new RegExp(`agent::commands::${fn}`, "g")) || []).length;
+    if (count < 2) {
+      problems.push(`${fn} 在 handler 列表里只出现 ${count} 次（debug 与 release 两份都要注册）`);
+    }
+  }
+  return problems;
+});
+
+check("地区字段与「null 不回退」语义（契约）", () => {
+  const problems = [];
+  const commands = read("docs/contracts/commands.md");
+  const runtime = read("docs/contracts/runtime.md");
+  const routing = read("docs/contracts/routing.md");
+
+  const snap = commands.match(/type RuntimeSnapshot = \{([\s\S]*?)\n\};/);
+  if (!snap) {
+    problems.push("commands.md 找不到 RuntimeSnapshot");
+  } else {
+    if (!/route_region\s*:\s*string\s*\|\s*null/.test(snap[1])) {
+      problems.push("commands.md 的 RuntimeSnapshot 缺少 route_region");
+    }
+    const v = snap[1].match(/contract_version\s*:\s*"([0-9.]+)"/);
+    const rv = runtime.match(/契约版本：`([^`]+)`/);
+    if (!v || !rv) problems.push("取不到 RuntimeSnapshot / runtime.md 的版本");
+    else if (v[1] !== rv[1]) {
+      problems.push(`commands.md 的 RuntimeSnapshot 写 ${v[1]}，runtime.md 是 ${rv[1]}`);
+    }
+  }
+  if (!/route_region\s*:\s*string\s*\|\s*null/.test(runtime)) {
+    problems.push("runtime.md 缺少 route_region");
+  }
+
+  for (const [label, text] of [
+    ["commands.md", commands],
+    ["routing.md", routing],
+  ]) {
+    if (!/applied_region\s*:\s*string\s*\|\s*null/.test(text)) {
+      problems.push(`${label} 的 RouteState 缺少 applied_region`);
+    }
+    const basis = text.match(/local_direct_basis\s*:\s*([^;\n]+)/);
+    if (!basis) {
+      problems.push(`${label} 缺少 local_direct_basis`);
+    } else {
+      const vals = [...basis[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
+      if (vals.join(",") !== "domain_and_ip,ip_only,none") {
+        problems.push(
+          `${label} 的 local_direct_basis 必须是 domain_and_ip | ip_only | none，实际是 ${vals.join(" | ")}`,
+        );
+      }
+    }
+  }
+
+  for (const [label, text] of [
+    ["commands.md", commands],
+    ["routing.md", routing],
+    ["runtime.md", runtime],
+  ]) {
+    if (!text.includes("回退到")) {
+      problems.push(`${label} 没写明地区为 null 时不得回退到实时值`);
+    }
+    if (!/(没有|不做)本地直连层/.test(text)) {
+      problems.push(`${label} 没定义 none = 没有本地直连层`);
+    }
+  }
+  return problems;
+});
+
+check("各契约文件内的 contract_version 字面量等于文件版本（契约）", () => {
+  const problems = [];
+
+  for (const rel of ["docs/contracts/events.md", "docs/contracts/runtime.md", "docs/contracts/tools.md"]) {
+    const expected = docContractVersion(rel);
+    if (!expected) {
+      problems.push(`${rel} 取不到文件版本`);
+      continue;
+    }
+    const text = read(rel);
+    for (const m of text.matchAll(/contract_version: "([0-9.]+)"/g)) {
+      if (m[1] !== expected) problems.push(`${rel} 有 contract_version "${m[1]}"，文件版本是 ${expected}`);
+    }
+  }
+
+  // routing.md 里的事件载荷是副本，按它自己的说明跟 events.md，不跟 routing.md。
+  const eventsV = docContractVersion("docs/contracts/events.md");
+  const routing = read("docs/contracts/routing.md");
+  for (const m of routing.matchAll(/contract_version: "([0-9.]+)"/g)) {
+    if (eventsV && m[1] !== eventsV) {
+      problems.push(`routing.md 的事件载荷写 ${m[1]}，应跟 events.md ${eventsV}`);
+    }
   }
   return problems;
 });

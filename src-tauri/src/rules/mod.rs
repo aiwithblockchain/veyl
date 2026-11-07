@@ -17,23 +17,367 @@ use crate::store::{self, rules_state::RulesState, Store};
 
 pub const RULES_DIR_NAME: &str = "rules";
 
-/// 地区判定（H1 系统区域）。当前先读环境变量，缺失时回落到 `cn`；
-/// UI 接上系统区域后改为传入。
-pub fn detected_region() -> Option<String> {
-    if let Ok(region) = std::env::var("VEYL_REGION") {
-        let region = region.trim().to_ascii_lowercase();
-        if !region.is_empty() {
-            return Some(region);
+/// 用户所在地区。**判定只做一次，四个入口共用同一个类型**：
+/// 连接、批量测速、`route_get`、`system_region` 都读 [`detect_region`]，
+/// 调用方不许再自己 `unwrap_or("cn")`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Region {
+    /// 中国大陆。
+    Cn,
+    /// 其它国家/地区，小写 ISO 3166-1 alpha-2。
+    Cc(String),
+    /// 判不出来。
+    Unknown,
+}
+
+impl Region {
+    /// 小写国家码；未知为 `None`。
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Region::Cn => Some("cn"),
+            Region::Cc(code) => Some(code.as_str()),
+            Region::Unknown => None,
         }
     }
-    let locale = std::env::var("LANG").ok()?;
-    let locale = locale.split(['.', '@']).next().unwrap_or(&locale);
-    let region = locale.split(['_', '-']).nth(1)?;
-    if region.len() >= 2 {
-        Some(region[..2].to_ascii_lowercase())
-    } else {
-        None
+
+    pub fn is_cn(&self) -> bool {
+        matches!(self, Region::Cn)
     }
+
+    /// 给提示词用的中文说法；没有中文名的国家回落到大写国家码（小写代码对模型没有意义）。
+    pub fn label(&self) -> String {
+        match self {
+            Region::Cn => "中国大陆".to_string(),
+            Region::Cc(code) => country_label(code)
+                .map(str::to_string)
+                .unwrap_or_else(|| code.to_uppercase()),
+            Region::Unknown => "未知".to_string(),
+        }
+    }
+
+    /// 允许外部（`VEYL_REGION`、时区表）给任意写法；不合法按未知处理。
+    pub fn from_code(value: &str) -> Self {
+        let code = value.trim().to_ascii_lowercase();
+        if code == "cn" {
+            return Region::Cn;
+        }
+        if code.len() == 2 && code.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Region::Cc(code);
+        }
+        Region::Unknown
+    }
+}
+
+impl std::fmt::Display for Region {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Region::Cn => f.write_str("cn"),
+            Region::Cc(code) => f.write_str(code),
+            Region::Unknown => f.write_str("unknown"),
+        }
+    }
+}
+
+/// 只有时区表里出现的国家才给中文名；其余回落到大写国家码。
+fn country_label(code: &str) -> Option<&'static str> {
+    let name = match code {
+        "hk" => "中国香港",
+        "tw" => "中国台湾",
+        "mo" => "中国澳门",
+        "jp" => "日本",
+        "kr" => "韩国",
+        "sg" => "新加坡",
+        "my" => "马来西亚",
+        "th" => "泰国",
+        "vn" => "越南",
+        "ph" => "菲律宾",
+        "id" => "印度尼西亚",
+        "in" => "印度",
+        "ae" => "阿联酋",
+        "sa" => "沙特阿拉伯",
+        "il" => "以色列",
+        "tr" => "土耳其",
+        "ru" => "俄罗斯",
+        "ua" => "乌克兰",
+        "md" => "摩尔多瓦",
+        "gb" => "英国",
+        "ie" => "爱尔兰",
+        "pt" => "葡萄牙",
+        "de" => "德国",
+        "fr" => "法国",
+        "nl" => "荷兰",
+        "es" => "西班牙",
+        "it" => "意大利",
+        "ch" => "瑞士",
+        "at" => "奥地利",
+        "cz" => "捷克",
+        "pl" => "波兰",
+        "se" => "瑞典",
+        "no" => "挪威",
+        "dk" => "丹麦",
+        "fi" => "芬兰",
+        "gr" => "希腊",
+        "ca" => "加拿大",
+        "us" => "美国",
+        "mx" => "墨西哥",
+        "br" => "巴西",
+        "ar" => "阿根廷",
+        "cl" => "智利",
+        "co" => "哥伦比亚",
+        "pe" => "秘鲁",
+        "ve" => "委内瑞拉",
+        "au" => "澳大利亚",
+        "nz" => "新西兰",
+        "za" => "南非",
+        "eg" => "埃及",
+        _ => return None,
+    };
+    Some(name)
+}
+
+/// 判定顺序：`VEYL_REGION` → 系统时区 → 系统区域 → `LANG` → 未知。
+///
+/// 全部离线：不测 IP、不联网。时区优先于区域设置，因为分流关心的是位置，
+/// 而区域设置反映的是语言偏好（双语机器、旅行中、公司统一装机都会对不上）。
+pub fn detect_region() -> Region {
+    region_from_sources(
+        std::env::var("VEYL_REGION").ok().as_deref(),
+        system_timezone().as_deref(),
+        system_locale().as_deref(),
+        std::env::var("LANG").ok().as_deref(),
+    )
+}
+
+/// 纯函数：便于测试顺序与时区表，不读环境。
+fn region_from_sources(
+    veyl_region: Option<&str>,
+    timezone: Option<&str>,
+    locale: Option<&str>,
+    lang: Option<&str>,
+) -> Region {
+    if let Some(region) = veyl_region.map(Region::from_code) {
+        if region != Region::Unknown {
+            return region;
+        }
+    }
+    if let Some(code) = timezone.and_then(region_from_timezone) {
+        let region = Region::from_code(code);
+        if region != Region::Unknown {
+            return region;
+        }
+    }
+    for value in [locale, lang] {
+        if let Some(region) = value.and_then(region_from_locale).map(Region::from_code) {
+            if region != Region::Unknown {
+                return region;
+            }
+        }
+    }
+    Region::Unknown
+}
+
+/// 时区 → 国家码。表外返回 `None`，交给下一级。
+///
+/// 常见项一张表，不引第三方库。`America/*` 兜底算 `us`，但先把明确的国家列出来
+/// （巴西/墨西哥/加拿大/阿根廷…）——把巴西用户标成「美国」比标成「未知」更误导模型。
+/// Windows 显示名按「该时区的主要国家」取一个；同一条 Windows 时区覆盖多国时
+/// 只能近似，这是区域设置的固有歧义。
+fn region_from_timezone(timezone: &str) -> Option<&'static str> {
+    let tz = timezone.trim();
+    let tz = tz.rsplit("zoneinfo/").next().unwrap_or(tz);
+    let code = match tz {
+        "Asia/Shanghai" | "Asia/Chongqing" | "Asia/Harbin" | "Asia/Urumqi"
+        | "Asia/Kashgar" | "PRC" => "cn",
+        "Asia/Hong_Kong" => "hk",
+        "Asia/Macau" => "mo",
+        "Asia/Taipei" => "tw",
+        "Asia/Tokyo" => "jp",
+        "Asia/Seoul" => "kr",
+        "Asia/Singapore" => "sg",
+        "Asia/Kuala_Lumpur" => "my",
+        "Asia/Bangkok" => "th",
+        "Asia/Ho_Chi_Minh" | "Asia/Saigon" => "vn",
+        "Asia/Manila" => "ph",
+        "Asia/Jakarta" => "id",
+        "Asia/Kolkata" | "Asia/Calcutta" => "in",
+        "Asia/Dubai" => "ae",
+        "Asia/Riyadh" => "sa",
+        "Asia/Jerusalem" => "il",
+        "Asia/Istanbul" | "Europe/Istanbul" => "tr",
+        "Europe/Moscow" => "ru",
+        "Europe/Kyiv" | "Europe/Kiev" => "ua",
+        "Europe/Chisinau" | "Europe/Tiraspol" => "md",
+        "Europe/London" => "gb",
+        "Europe/Dublin" => "ie",
+        "Europe/Lisbon" => "pt",
+        "Europe/Berlin" => "de",
+        "Europe/Vienna" => "at",
+        "Europe/Prague" => "cz",
+        "Europe/Warsaw" => "pl",
+        "Europe/Paris" => "fr",
+        "Europe/Amsterdam" => "nl",
+        "Europe/Madrid" => "es",
+        "Europe/Rome" => "it",
+        "Europe/Stockholm" => "se",
+        "Europe/Oslo" => "no",
+        "Europe/Copenhagen" => "dk",
+        "Europe/Helsinki" => "fi",
+        "Europe/Athens" => "gr",
+        "Europe/Zurich" => "ch",
+        "Australia/Sydney" | "Australia/Melbourne" => "au",
+        "Pacific/Auckland" => "nz",
+        // 美洲先列明确国家，剩下的才兜底成 us。
+        "America/Sao_Paulo" | "America/Bahia" | "America/Recife" => "br",
+        "America/Mexico_City" | "America/Monterrey" | "America/Mazatlan"
+        | "America/Tijuana" => "mx",
+        "America/Toronto" | "America/Vancouver" | "America/Edmonton"
+        | "America/Winnipeg" | "America/Regina" | "America/Halifax"
+        | "America/St_Johns" => "ca",
+        "America/Argentina/Buenos_Aires" | "America/Buenos_Aires" => "ar",
+        "America/Santiago" => "cl",
+        "America/Bogota" => "co",
+        "America/Lima" => "pe",
+        "America/Caracas" => "ve",
+        // Windows 显示名；注册表里的 `TimeZoneKeyName` 就是这种写法。
+        "China Standard Time" => "cn",
+        "Hong Kong Standard Time" => "hk",
+        "Taipei Standard Time" => "tw",
+        "Tokyo Standard Time" => "jp",
+        "Korea Standard Time" => "kr",
+        "Singapore Standard Time" => "sg",
+        "SE Asia Standard Time" => "th",
+        "India Standard Time" => "in",
+        "Arabian Standard Time" => "ae",
+        "Israel Standard Time" => "il",
+        "Turkey Standard Time" => "tr",
+        "Russian Standard Time" => "ru",
+        "FLE Standard Time" => "fi",
+        "GTB Standard Time" => "gr",
+        "E. Europe Standard Time" => "md",
+        "GMT Standard Time" => "gb",
+        "Central Europe Standard Time" => "cz",
+        "Central European Standard Time" => "pl",
+        "W. Europe Standard Time" => "de",
+        "Romance Standard Time" => "fr",
+        "AUS Eastern Standard Time" | "AUS Central Standard Time"
+        | "W. Australia Standard Time" => "au",
+        "New Zealand Standard Time" => "nz",
+        "Atlantic Standard Time" | "Newfoundland Standard Time" => "ca",
+        "E. South America Standard Time" => "br",
+        "Pacific Standard Time (Mexico)" | "Central Standard Time (Mexico)"
+        | "Mountain Standard Time (Mexico)" => "mx",
+        "South Africa Standard Time" => "za",
+        "Egypt Standard Time" => "eg",
+        "Eastern Standard Time" | "Central Standard Time" | "Mountain Standard Time"
+        | "Pacific Standard Time" => "us",
+        _ if tz.starts_with("America/") => "us",
+        _ => return None,
+    };
+    Some(code)
+}
+
+/// 从 `zh_CN.UTF-8` / `zh-Hans-CN` / `AppleLocale` 一类字符串里取国家码。
+///
+/// 按 BCP-47：**跳过第一段语言**，取之后第一个恰好两个字母的子标签
+/// （`sr-Latn-RS` → `RS`；`zh-Hans-CN` → `CN`）。4 字母 script 段自然不会被选中。
+fn region_from_locale(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("C") || value.eq_ignore_ascii_case("POSIX") {
+        return None;
+    }
+    let base = value.split(['.', '@']).next().unwrap_or(value);
+    base.split(['_', '-'])
+        .skip(1)
+        .find(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_alphabetic()))
+}
+
+#[cfg(target_os = "macos")]
+fn system_timezone() -> Option<String> {
+    if let Ok(tz) = std::env::var("TZ") {
+        if !tz.trim().is_empty() {
+            return Some(tz);
+        }
+    }
+    let path = std::fs::read_link("/etc/localtime").ok()?;
+    let path = path.to_string_lossy().to_string();
+    let name = path.rsplit("zoneinfo/").next()?.to_string();
+    (!name.is_empty() && !name.contains("zoneinfo")).then_some(name)
+}
+
+#[cfg(target_os = "windows")]
+fn system_timezone() -> Option<String> {
+    if let Ok(tz) = std::env::var("TZ") {
+        if !tz.trim().is_empty() {
+            return Some(tz);
+        }
+    }
+    reg_query(
+        r"HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation",
+        "TimeZoneKeyName",
+    )
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn system_timezone() -> Option<String> {
+    if let Ok(tz) = std::env::var("TZ") {
+        if !tz.trim().is_empty() {
+            return Some(tz);
+        }
+    }
+    let path = std::fs::read_link("/etc/localtime").ok()?;
+    let path = path.to_string_lossy().to_string();
+    let name = path.rsplit("zoneinfo/").next()?.to_string();
+    (!name.is_empty() && !name.contains("zoneinfo")).then_some(name)
+}
+
+#[cfg(target_os = "macos")]
+fn system_locale() -> Option<String> {
+    let output = std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleLocale"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+#[cfg(target_os = "windows")]
+fn system_locale() -> Option<String> {
+    reg_query(r"HKCU\Control Panel\International", "LocaleName")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn system_locale() -> Option<String> {
+    std::env::var("LC_ALL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// `reg query … /v <name>` 的输出里取 `REG_SZ` 后面那段。
+///
+/// `CREATE_NO_WINDOW`（0x08000000）不能省：Tauri 是 windows 子系统进程，
+/// 不带的子进程会闪一个控制台窗口；而这条路径每轮对话与每次连接都会走。
+#[cfg(target_os = "windows")]
+fn reg_query(key: &str, name: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = std::process::Command::new("reg")
+        .args(["query", key, "/v", name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text
+        .lines()
+        .find(|line| line.contains(name) && line.contains("REG_SZ"))?;
+    let value = line.split("REG_SZ").nth(1)?.trim().to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -510,5 +854,122 @@ mod tests {
 
         std::env::remove_var("VEYL_RULES_ARCHIVE");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+
+    #[test]
+    fn timezone_beats_locale_for_location() {
+        // 双语机器 / 公司统一装机：区域设置是 en_US，但机器在东京。
+        let region = region_from_sources(
+            None,
+            Some("Asia/Tokyo"),
+            Some("en_US"),
+            Some("en_US.UTF-8"),
+        );
+        assert_eq!(region, Region::Cc("jp".into()));
+    }
+
+    #[test]
+    fn veyl_region_beats_everything() {
+        assert_eq!(
+            region_from_sources(Some("hk"), Some("Asia/Tokyo"), Some("en_US"), None),
+            Region::Cc("hk".into())
+        );
+    }
+
+    #[test]
+    fn locale_is_used_when_timezone_is_unknown() {
+        assert_eq!(
+            region_from_sources(None, Some("Mars/Olympus"), Some("zh_CN"), None),
+            Region::Cn
+        );
+        assert_eq!(
+            region_from_sources(None, None, None, Some("zh_CN.UTF-8")),
+            Region::Cn
+        );
+    }
+
+    #[test]
+    fn unknown_stays_unknown() {
+        assert_eq!(
+            region_from_sources(None, Some("Mars/Olympus"), Some("C"), Some("POSIX")),
+            Region::Unknown
+        );
+    }
+
+    #[test]
+    fn locale_subtags_are_parsed_per_bcp47() {
+        // 第二段可能是 4 字母 script，不能截成两字母当成国家。
+        assert_eq!(region_from_locale("sr-Latn-RS"), Some("RS"));
+        assert_eq!(region_from_locale("zh-Hans-CN"), Some("CN"));
+        assert_eq!(region_from_locale("en_US"), Some("US"));
+        assert_eq!(region_from_locale("en_CN"), Some("CN"));
+        assert_eq!(region_from_locale("zh_CN.UTF-8"), Some("CN"));
+        // 只有语言没有地区：不能凭空造一个。
+        assert_eq!(region_from_locale("de"), None);
+        assert_eq!(region_from_locale("C"), None);
+        assert_eq!(region_from_locale("POSIX"), None);
+    }
+
+    #[test]
+    fn timezone_table_covers_common_zones() {
+        for (tz, code) in [
+            ("Asia/Shanghai", "cn"),
+            ("Asia/Hong_Kong", "hk"),
+            ("Asia/Taipei", "tw"),
+            ("Asia/Tokyo", "jp"),
+            ("Europe/Prague", "cz"),
+            ("Europe/Warsaw", "pl"),
+            ("Europe/Vienna", "at"),
+            ("Europe/Oslo", "no"),
+            ("Europe/Copenhagen", "dk"),
+            ("Europe/Helsinki", "fi"),
+            ("Europe/Athens", "gr"),
+            ("Europe/Istanbul", "tr"),
+            ("Europe/Lisbon", "pt"),
+            ("Europe/Dublin", "ie"),
+            ("Europe/Kyiv", "ua"),
+            ("China Standard Time", "cn"),
+            ("Tokyo Standard Time", "jp"),
+            ("Central Europe Standard Time", "cz"),
+            ("Central European Standard Time", "pl"),
+            ("FLE Standard Time", "fi"),
+            ("GTB Standard Time", "gr"),
+            ("Turkey Standard Time", "tr"),
+            ("/var/db/timezone/zoneinfo/Asia/Tokyo", "jp"),
+        ] {
+            assert_eq!(region_from_timezone(tz), Some(code), "{tz}");
+        }
+        assert_eq!(region_from_timezone("Mars/Olympus"), None);
+    }
+
+    #[test]
+    fn america_is_not_all_the_united_states() {
+        for (tz, code) in [
+            ("America/New_York", "us"),
+            ("America/Sao_Paulo", "br"),
+            ("America/Mexico_City", "mx"),
+            ("America/Toronto", "ca"),
+            ("America/Vancouver", "ca"),
+            ("America/Argentina/Buenos_Aires", "ar"),
+            ("America/Santiago", "cl"),
+        ] {
+            assert_eq!(region_from_timezone(tz), Some(code), "{tz}");
+        }
+    }
+
+    #[test]
+    fn region_codes_are_normalised_and_validated() {
+        assert!(Region::from_code("CN").is_cn());
+        assert_eq!(Region::from_code(" JP "), Region::Cc("jp".into()));
+        assert_eq!(Region::from_code("日本"), Region::Unknown);
+        assert_eq!(Region::from_code(""), Region::Unknown);
+        assert_eq!(Region::Unknown.code(), None);
+        assert_eq!(Region::Cn.label(), "中国大陆");
+        assert_eq!(Region::Cc("jp".into()).label(), "日本");
     }
 }

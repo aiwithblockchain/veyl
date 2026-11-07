@@ -9,6 +9,7 @@ import { CONTRACT_VERSION } from "../agent/protocol";
 import { emptyRuntimeView } from "../agent/bridge";
 import {
   degradedReason,
+  directNoteRegion,
   emptyHintText,
   failureHeadline,
   failureReason,
@@ -554,5 +555,76 @@ describe("resolveLayoutBlocks", () => {
       { hasSeedUpdate: true, proxyPort: 7890 },
     );
     expect(some).toEqual([{ kind: "update_hint" }]);
+  });
+});
+
+describe("已连接时的本地直连口径（§7.6）", () => {
+  const running = (route_region: string | null = null) =>
+    makeRuntime({ state: "running", route_region });
+  const directConfig = () => makeConfig({ connect_mode: "tun", routing_mode: "direct" });
+
+  it("cn：显示国内网站直连", () => {
+    const [block] = middleBlocks(running("cn"), directConfig(), true, 7890, "cn");
+    expect(block).toMatchObject({
+      kind: "empty_hint",
+      note: "国内网站直连，其他走 VPN",
+    });
+  });
+
+  it("其它地区：显示这个地区的网站直连", () => {
+    const [block] = middleBlocks(running("jp"), directConfig(), true, 7890, "jp");
+    expect(block).toMatchObject({
+      kind: "empty_hint",
+      note: "这个地区的网站直连，其他走 VPN",
+    });
+  });
+
+  it("已连接 + route_region = null：不回退实时地区，按未知显示", () => {
+    const [block] = middleBlocks(running(), directConfig(), true, 7890, "cn");
+    expect(block).toMatchObject({
+      kind: "empty_hint",
+      note: "没识别出你在哪个地区，所有网站都走 VPN",
+    });
+  });
+
+  it("全部走 VPN、只指定服务、未连接时都不显示", () => {
+    for (const routing of ["proxy_all", "proxy_selected"] as const) {
+      const [block] = middleBlocks(
+        running("cn"),
+        makeConfig({ connect_mode: "tun", routing_mode: routing }),
+        true,
+        7890,
+        "cn",
+      );
+      expect(block).toMatchObject({ kind: "empty_hint", note: null });
+    }
+    const [idle] = middleBlocks(
+      makeRuntime({ state: "idle" }),
+      directConfig(),
+      true,
+      7890,
+      "cn",
+    );
+    expect(idle).toMatchObject({ kind: "empty_hint", note: null });
+  });
+
+  it("已连接优先用 route_region：实时地区变了也不改口；断开时用实时值", () => {
+    const [block] = middleBlocks(running("cn"), directConfig(), true, 7890, "jp");
+    expect(block).toMatchObject({ note: "国内网站直连，其他走 VPN" });
+    expect(directNoteRegion(makeRuntime({ state: "idle" }), "jp")).toBe("jp");
+    expect(directNoteRegion(running(null), "jp")).toBeNull();
+  });
+
+  it("布局里的 empty_hint 也带同一行，地区从 context 读", () => {
+    const blocks = resolveLayoutBlocks(
+      layoutOf([{ type: "empty_hint" }]),
+      running("cn"),
+      directConfig(),
+      { hasSeedUpdate: false, proxyPort: 7890, region: "cn" },
+    );
+    expect(blocks[0]).toMatchObject({
+      kind: "empty_hint",
+      note: "国内网站直连，其他走 VPN",
+    });
   });
 });

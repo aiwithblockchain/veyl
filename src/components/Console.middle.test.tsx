@@ -110,6 +110,7 @@ function renderConsole(
   extra: {
     seedUpdate?: boolean;
     proxyPort?: number;
+    region?: string | null;
     onImportNodes?: () => void;
   } = {},
 ): HTMLElement {
@@ -131,6 +132,7 @@ function renderConsole(
       onImportNodes={extra.onImportNodes}
       seedUpdate={extra.seedUpdate ?? false}
       proxyPort={extra.proxyPort}
+      region={extra.region}
       runtime={runtime}
       failedAfterConnected={failedAfterConnected}
     />,
@@ -263,7 +265,62 @@ describe("中间区验收用例", () => {
       makeConfig({ connect_mode: "tun" }),
       makeRuntime({ state: "running", mixed_port: 7891 }),
     );
-    expect(text(body(root).querySelector(".note"))).toBe("所有软件现在都能用了。");
+    const note = body(root).querySelector(".note");
+    expect(text(note)).toContain("所有软件现在都能用了。");
+    // 默认地区未知：直连口径如实说所有网站都走 VPN。
+    expect(text(note?.querySelector(".note__detail"))).toBe(
+      "没识别出你在哪个地区，所有网站都走 VPN",
+    );
+  });
+
+  it("6b 已连接 + 本地直连 + cn：显示国内网站直连", () => {
+    const root = renderConsole(
+      makeConfig({ connect_mode: "tun", routing_mode: "direct" }),
+      makeRuntime({ state: "running", route_region: "cn" }),
+      true,
+      false,
+      { region: "cn" },
+    );
+    expect(text(body(root).querySelector(".note__detail"))).toBe(
+      "国内网站直连，其他走 VPN",
+    );
+  });
+
+  it("6d 已连接用 route_region：实时地区是 jp 也显示国内直连", () => {
+    const root = renderConsole(
+      makeConfig({ connect_mode: "tun", routing_mode: "direct" }),
+      makeRuntime({ state: "running", route_region: "cn" }),
+      true,
+      false,
+      { region: "jp" },
+    );
+    expect(text(body(root).querySelector(".note__detail"))).toBe(
+      "国内网站直连，其他走 VPN",
+    );
+  });
+
+  it("6e 已连接 route_region = null、实时地区 cn：仍显示未知那句", () => {
+    const root = renderConsole(
+      makeConfig({ connect_mode: "tun", routing_mode: "direct" }),
+      makeRuntime({ state: "running", route_region: null }),
+      true,
+      false,
+      { region: "cn" },
+    );
+    expect(text(body(root).querySelector(".note__detail"))).toBe(
+      "没识别出你在哪个地区，所有网站都走 VPN",
+    );
+  });
+
+  it("6c 切到全部走 VPN：直连口径那行消失", () => {
+    const root = renderConsole(
+      makeConfig({ connect_mode: "tun", routing_mode: "proxy_all" }),
+      makeRuntime({ state: "running" }),
+      true,
+      false,
+      { region: "cn" },
+    );
+    expect(body(root).querySelector(".note__detail")).toBeNull();
   });
 
   it("7 失败：H1 连接失败 + 原因 + 三步自救，卡里没有按钮", () => {
@@ -462,7 +519,7 @@ describe("中间区验收用例", () => {
     expect(root.querySelector(".proxy__addr")).toBeNull();
     expect(root.querySelector(".card--proxy .copy-btn")).toBeNull();
     expect(root.textContent).not.toContain("127.0.0.1:7890");
-    expect(text(body(root).querySelector(".note"))).toBe("所有软件现在都能用了。");
+    expect(text(body(root).querySelector(".note"))).toContain("所有软件现在都能用了。");
   });
 
   it("13e source_choice：没有节点时给两个选项", () => {

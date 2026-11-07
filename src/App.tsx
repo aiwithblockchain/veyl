@@ -6,6 +6,7 @@ import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
 import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail } from "./agent/bridge";
 import type {
+  ConfigCreateInput,
   DefaultProfileStatus,
   ImportSeedResult,
   PendingQuestion,
@@ -23,7 +24,6 @@ import { NewConfigDialog } from "./components/NewConfigDialog";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
 import { Settings, describeImportError } from "./components/Settings";
-import type { ConnectMode } from "./config/model";
 import {
   FIRST_RUN_KICKOFF,
   isAiReady,
@@ -69,6 +69,8 @@ const EVER_CONNECTED_KEY = "veyl.hasEverConnected";
 const PANEL_CLOSED_BY_USER_KEY = "veyl.ui.panelClosedByUser";
 const PANEL_AUTO_OPENED_KEY = "veyl.ui.panelAutoOpened";
 const ONBOARDING_SKIPPED_KEY = "veyl.onboarding.skipped";
+/** 新建配置走 AI 协助时的开场消息：必须是用户可见的一条。 */
+const NEW_CONFIG_AI_ASK = "帮我新建一套配置。";
 
 function readFlag(key: string): boolean {
   try {
@@ -132,6 +134,9 @@ export default function App() {
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const [pendingConfigId, setPendingConfigId] = useState<string | null>(null);
   const [newConfigOpen, setNewConfigOpen] = useState(false);
+  // 新建配置里点「AI 协助」但还没配 AI：先交给 AI 配置模块，结束后回到同一入口。
+  const [newConfigAiSetup, setNewConfigAiSetup] = useState(false);
+  const [systemRegion, setSystemRegion] = useState<string | null>(null);
   const [nodeSheetSignal, setNodeSheetSignal] = useState(0);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const [justOnboarded, setJustOnboarded] = useState(false);
@@ -232,6 +237,20 @@ export default function App() {
       .proxyPortGet()
       .then((state) => {
         if (alive) setProxyPort(state.port);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [bridge]);
+
+  // 地区只决定手工表单的初始分流选择；读不到按未知处理。
+  useEffect(() => {
+    let alive = true;
+    bridge
+      .systemRegion()
+      .then((region) => {
+        if (alive) setSystemRegion(region);
       })
       .catch(() => {});
     return () => {
@@ -785,8 +804,13 @@ export default function App() {
   const busyNotice = () =>
     setAppNotice({ level: "info", text: "上一条还在回复，等它结束再发。" });
 
-  const sendToSession = async (sessionId: string, text: string): Promise<boolean> => {
-    if (!aiReady) {
+  const sendToSession = async (
+    sessionId: string,
+    text: string,
+    options: { aiJustConfigured?: boolean } = {},
+  ): Promise<boolean> => {
+    // 刚配好 AI 时 aiReady 状态还没落到这次渲染里，这条路径已经确认可用。
+    if (!aiReady && !options.aiJustConfigured) {
       setAppNotice({ level: "error", text: "还没有配置 AI，先配置后再对话。" });
       openSettings("ai");
       return false;
@@ -941,16 +965,43 @@ export default function App() {
     }
   };
 
-  const handleCreateConfig = (name: string, mode: ConnectMode) => {
-    void vpn.createConfig(name, mode).then((result) => {
-      if (!result.ok) {
-        setAppNotice({ level: "error", text: result.message ?? "创建配置失败" });
-        return;
-      }
-      if (!result.activated) {
-        setAppNotice({ level: "info", text: "已创建，从左侧切换过去。" });
-      }
-    });
+  const handleCreateConfig = async (
+    input: ConfigCreateInput,
+  ): Promise<{ ok: boolean; message?: string; reason?: string }> => {
+    const result = await vpn.createConfig(input);
+    // 失败只在表单里说一次：贴着字段，用户能直接改。
+    if (!result.ok) {
+      return { ok: false, message: result.message, reason: result.reason };
+    }
+    if (!result.activated) {
+      setAppNotice({ level: "info", text: "已创建，从左侧切换过去。" });
+    }
+    return { ok: true };
+  };
+
+  // AI 协助：关弹窗 → 新会话 → 打开右栏 → 发一条用户可见的开场消息。
+  const startNewConfigAiFlow = (aiJustConfigured = false) => {
+    setNewConfigOpen(false);
+    // 用户已经显式点名要 AI 配，零配置的自动 kickoff 不再另外发一条。
+    kickoffStartedRef.current = true;
+    kickoffSessionCreatedRef.current = true;
+    const fresh = createSession();
+    dispatch({ type: "add_session", session: fresh });
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
+    setComposerFocusSignal((value) => value + 1);
+    void sendToSession(fresh.id, NEW_CONFIG_AI_ASK, { aiJustConfigured });
+  };
+
+  // AI 配置模块结束：配好了接上 AI 协助；放弃了回到两张卡（弹窗仍在）。
+  const handleNewConfigAiSetupDone = (skipped: boolean) => {
+    setNewConfigAiSetup(false);
+    if (skipped) return;
+    void (async () => {
+      await refreshAiStatus();
+      startNewConfigAiFlow(true);
+    })();
   };
 
   // 已连接时换配置：先说清会断一次，确认后再切并重新连上。
@@ -1078,6 +1129,11 @@ export default function App() {
     );
   }
 
+  // 新建配置里缺 AI：先配 AI，结束后由新建配置自己的回调接住，不跑首启收尾逻辑。
+  if (newConfigAiSetup) {
+    return <Onboarding bridge={bridge} onDone={handleNewConfigAiSetupDone} />;
+  }
+
   return (
     <div style={appStyle} className="app">
       <ConfigRail
@@ -1122,6 +1178,7 @@ export default function App() {
         onImportNodes={() => openSettings("network")}
         seedUpdate={Boolean(defaultProfile?.newVersionAvailable)}
         proxyPort={proxyPort}
+        region={systemRegion}
         openNodeSheetSignal={nodeSheetSignal}
         loading={vpn.loading}
         runtime={runtime}
@@ -1211,12 +1268,15 @@ export default function App() {
 
       {newConfigOpen ? (
         <NewConfigDialog
+          bridge={bridge}
           configs={vpn.configs}
+          aiReady={aiReady}
+          region={systemRegion}
           onClose={() => setNewConfigOpen(false)}
-          onCreate={(name, mode) => {
-            handleCreateConfig(name, mode);
-            setNewConfigOpen(false);
-          }}
+          onAiAssist={() => startNewConfigAiFlow()}
+          onNeedAiSetup={() => setNewConfigAiSetup(true)}
+          onCreate={handleCreateConfig}
+          onCreated={() => setNewConfigOpen(false)}
         />
       ) : null}
 

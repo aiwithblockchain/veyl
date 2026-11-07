@@ -501,6 +501,22 @@ pub async fn node_import_url(
         .map_err(error_value)
 }
 
+/// 粘贴文本模式：解析用户贴进来的 `ss://`（可多行），只解析、不联网。
+/// 与 `node_import_url` 分开：URL 那条要为「我们替用户去拉」做 SSRF 限制，
+/// 混用会把口子开大。
+#[tauri::command]
+pub async fn node_import_text(
+    state: State<'_, Arc<AppState>>,
+    text: String,
+    config_id: Option<String>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .node_import_text(config_id, &text)
+        .await
+        .map_err(error_value)
+}
+
 /// 手动模式：五个字段创建节点。密码只进 secrets.enc。
 #[tauri::command]
 pub async fn node_create(
@@ -686,6 +702,13 @@ pub async fn category_list(
         .category_list(query, limit)
         .await
         .map_err(error_value)
+}
+
+/// 系统地区（离线；由时区与区域设置推断，不是 IP 定位）。
+/// 全新安装还没有配置时也要能拿到，所以不依赖 `route_get`。
+#[tauri::command]
+pub async fn system_region() -> Result<Value, Value> {
+    Ok(json!({ "region": crate::rules::detect_region().code() }))
 }
 
 /// 面板三级折叠里的「打开日志」：用系统文件管理器定位到日志文件。

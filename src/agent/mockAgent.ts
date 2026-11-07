@@ -10,6 +10,10 @@ import type {
   DeepSeekKeyState,
   DefaultProfileStatus,
   ImportSeedResult,
+  NodeProbeAllData,
+  NodeProbeResult,
+  NodeProbeSnapshotData,
+  NodeSwitchResult,
   ProxyPortSaveResult,
   ProxyPortSettings,
   LlmProvider,
@@ -18,10 +22,6 @@ import type {
   NetRepairAction,
   NetRepairResult,
   NetworkForceResetResult,
-  NodeProbeAllData,
-  NodeProbeResult,
-  NodeProbeSnapshotData,
-  NodeSwitchResult,
   RenamedSession,
   TunHelperInfo,
   TunHelperRestartResult,
@@ -33,10 +33,14 @@ import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
   AgentEvent,
   AiStatusPhase,
+  Category,
   ConfigDetail,
   NextAction,
+  NodeCreateInput,
+  NodeImportResult,
   NodeProbeMethod,
   NodeProbePhase,
+  NodeSummary,
   RuntimeSnapshot,
   RuntimeState,
   ToolDisplayPayload,
@@ -68,6 +72,36 @@ const HELPER_STATES: TunHelperState[] = [
 export const MOCK_EXIT_IP = "203.0.113.7";
 /** 直连出口：与代理出口不同，面板才能看出代理真的生效。 */
 export const MOCK_DIRECT_IP = "198.51.100.9";
+
+function mockNodeId(): string {
+  return `node_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+}
+
+function mockNode(name: string, server = "203.0.113.50", port = 8388): NodeSummary {
+  return {
+    node_id: mockNodeId(),
+    name,
+    server,
+    port,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "manual",
+    created_at: Date.now(),
+  };
+}
+
+const MOCK_CATEGORIES: Category[] = [
+  { id: "chatgpt", name_zh: "ChatGPT", name_en: "ChatGPT", description: "OpenAI 对话服务", item_count: 2, rule_sets: ["openai"], dns_classifiable: true },
+  { id: "github", name_zh: "GitHub", name_en: "GitHub", description: "代码托管", item_count: 1, rule_sets: ["github"], dns_classifiable: true },
+  { id: "youtube", name_zh: "YouTube", name_en: "YouTube", description: "视频", item_count: 3, rule_sets: ["google"], dns_classifiable: true },
+  { id: "netflix", name_zh: "Netflix", name_en: "Netflix", description: "流媒体", item_count: 2, rule_sets: ["netflix"], dns_classifiable: true },
+  { id: "telegram", name_zh: "Telegram", name_en: "Telegram", description: "即时通讯", item_count: 1, rule_sets: ["telegram"], dns_classifiable: true },
+  { id: "spotify", name_zh: "Spotify", name_en: "Spotify", description: "音乐", item_count: 1, rule_sets: ["spotify"], dns_classifiable: true },
+  { id: "discord", name_zh: "Discord", name_en: "Discord", description: "语音与社群", item_count: 1, rule_sets: ["discord"], dns_classifiable: true },
+  { id: "steam", name_zh: "Steam", name_en: "Steam", description: "游戏平台", item_count: 1, rule_sets: ["steam"], dns_classifiable: true },
+  { id: "google", name_zh: "Google", name_en: "Google", description: "搜索与账号", item_count: 4, rule_sets: ["google"], dns_classifiable: true },
+  { id: "twitter", name_zh: "X（Twitter）", name_en: "X", description: "社交", item_count: 1, rule_sets: ["twitter"], dns_classifiable: true },
+];
 
 function splitForStreaming(text: string): string[] {
   const chars = Array.from(text);
@@ -189,6 +223,7 @@ export class MockAgentBridge implements AgentBridge {
     latency_ms: null,
     node_latency_ms: null,
     applied_route_revision: null,
+    route_region: null,
     direct_ip: MOCK_DIRECT_IP,
   };
 
@@ -272,6 +307,7 @@ export class MockAgentBridge implements AgentBridge {
       direct_ip: MOCK_DIRECT_IP,
       system_proxy_enabled: true,
       connections: 2,
+      route_region: this.mockRegion(),
     });
   }
 
@@ -293,6 +329,7 @@ export class MockAgentBridge implements AgentBridge {
       latency_ms: null,
       system_proxy_enabled: false,
       connections: null,
+      route_region: null,
     });
   }
 
@@ -1294,6 +1331,7 @@ export class MockAgentBridge implements AgentBridge {
       latency_ms: null,
       system_proxy_enabled: false,
       connections: null,
+      route_region: null,
     });
     this.health({ process: false, clash_api: false, data_plane: false, exit_ip: null });
     const reply = "已断开，系统代理恢复成你原来的设置。";
@@ -1377,6 +1415,111 @@ export class MockAgentBridge implements AgentBridge {
 
   async nodeSwitch(_configId: string, _nodeId: string): Promise<NodeSwitchResult> {
     throw this.unsupportedConfigCommand("node_switch");
+  }
+
+  async nodeCreate(input: NodeCreateInput): Promise<NodeSummary> {
+    await sleep(200);
+    const name = input.name.trim();
+    if (!name) {
+      throw { code: "INVALID_ARGUMENT", message: "节点名称不能为空" };
+    }
+    const server = input.server.trim();
+    if (!server) {
+      throw { code: "INVALID_ARGUMENT", message: "服务器地址不能为空" };
+    }
+    if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535) {
+      throw { code: "INVALID_ARGUMENT", message: "端口要填 1–65535 之间的整数" };
+    }
+    return {
+      node_id: mockNodeId(),
+      name,
+      server,
+      port: input.port,
+      method: input.method,
+      protocol: "shadowsocks",
+      source: "manual",
+      created_at: Date.now(),
+    };
+  }
+
+  async nodeImportUrl(url: string): Promise<NodeImportResult> {
+    await sleep(300);
+    if (!/^https:\/\//i.test(url.trim())) {
+      throw {
+        code: "INVALID_ARGUMENT",
+        message: "订阅地址必须以 https:// 开头",
+        details: { reason: "insecure_url" },
+      };
+    }
+    if (/fail|error/i.test(url)) {
+      throw {
+        code: "UPSTREAM_ERROR",
+        message: "没拉到节点，检查地址或网络",
+        details: { reason: "fetch_failed" },
+      };
+    }
+    const nodes = [mockNode("订阅节点 01"), mockNode("订阅节点 02")];
+    return { imported: nodes.length, skipped: [], nodes };
+  }
+
+  async nodeImportText(text: string): Promise<NodeImportResult> {
+    await sleep(250);
+    const lines = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const nodes: NodeSummary[] = [];
+    const skipped: NodeImportResult["skipped"] = [];
+    for (const line of lines) {
+      if (!line.startsWith("ss://")) {
+        skipped.push({ name: null, reason: "unsupported_scheme" });
+        continue;
+      }
+      let name = `节点 ${nodes.length + 1}`;
+      const fragment = line.split("#")[1];
+      if (fragment) {
+        try {
+          name = decodeURIComponent(fragment) || name;
+        } catch {
+          // 片段编码不合法时仍按位置命名，不整行作废。
+        }
+      }
+      nodes.push(mockNode(name));
+    }
+    if (nodes.length === 0) {
+      throw {
+        code: "INVALID_ARGUMENT",
+        message: "粘贴的内容里没有可用的节点（支持多行 ss:// 链接）",
+        details: { reason: "not_node_text" },
+      };
+    }
+    return { imported: nodes.length, skipped, nodes };
+  }
+
+  async categoryList(
+    query?: string,
+    limit = 50,
+  ): Promise<{ categories: Category[]; total: number }> {
+    const needle = query?.trim().toLowerCase() ?? "";
+    const matched = MOCK_CATEGORIES.filter(
+      (category) =>
+        !needle ||
+        category.id.toLowerCase().includes(needle) ||
+        category.name_zh.includes(needle) ||
+        category.name_en.toLowerCase().includes(needle),
+    );
+    return { categories: matched.slice(0, limit), total: matched.length };
+  }
+
+  async systemRegion(): Promise<string | null> {
+    return this.mockRegion();
+  }
+
+  private mockRegion(): string | null {
+    // 浏览器里默认按中国大陆演示；localStorage 设 veyl.mock.region=unknown 可试未知分支。
+    const value = mockFlag("veyl.mock.region");
+    if (value === "unknown" || value === "none") return null;
+    return value ? value.toLowerCase() : "cn";
   }
 
   async nodeProbe(nodeId: string): Promise<NodeProbeResult> {

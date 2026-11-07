@@ -1,13 +1,17 @@
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
   AgentEvent,
+  Category,
   ConfigConnectMode,
   ConfigDetail,
   ConfigRouteMode,
   ConfigSummary,
+  NodeCreateInput,
+  NodeImportResult,
   NodeProbeData,
   NodeProbeMethod,
   NodeProbePhase,
+  NodeSummary,
   RuntimeSnapshot,
   RuntimeView,
 } from "./protocol";
@@ -76,6 +80,8 @@ export interface ConfigCreateInput {
   name: string;
   connectMode: ConfigConnectMode;
   routingMode: ConfigRouteMode;
+  /** 仅 proxy_selected 有意义：分类 id，来自 `category_list`。 */
+  targets?: string[];
   source?: "seed" | "empty";
   nodeIds?: string[];
   listenPort?: number;
@@ -447,6 +453,16 @@ export interface AgentBridge {
   nodeProbeCancel(runId: string): Promise<{ cancelled: boolean }>;
   /** 打开面板时读取缓存与运行态；不发网络请求。 */
   nodeProbeSnapshot(configId?: string): Promise<NodeProbeSnapshotData>;
+  /** 手动建一个 Shadowsocks 节点；不自动连接。 */
+  nodeCreate(input: NodeCreateInput): Promise<NodeSummary>;
+  /** 从订阅地址导入节点；只接受 https，拉取失败整体失败。 */
+  nodeImportUrl(url: string, configId?: string): Promise<NodeImportResult>;
+  /** 导入用户粘贴的 ss:// 文本；不发网络请求。 */
+  nodeImportText(text: string, configId?: string): Promise<NodeImportResult>;
+  /** 服务分类目录（只读），「只指定服务」的 targets 从这里取 id。 */
+  categoryList(query?: string, limit?: number): Promise<{ categories: Category[]; total: number }>;
+  /** 系统时区 / 区域推断出的地区（小写 cc）；取不到为 null。 */
+  systemRegion(): Promise<string | null>;
   /** 只读的默认配置包状态，不联网。 */
   defaultProfileStatus(): Promise<DefaultProfileStatus>;
   /** 拉取并应用默认配置包；不打断在线连接，下次连接生效。 */
@@ -550,6 +566,7 @@ export function emptyRuntimeView(): RuntimeView {
     node_latency_ms: null,
     traffic: null,
     applied_route_revision: null,
+    route_region: null,
     direct_ip: null,
   };
 }
@@ -569,6 +586,7 @@ export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): Runtime
         last_error: event.payload.error,
         connected_since: keepConnection ? view.connected_since : null,
         port_fallback: keepConnection ? view.port_fallback : null,
+        route_region: keepConnection ? view.route_region : null,
         latency_ms: keepConnection ? view.latency_ms : null,
         node_latency_ms: keepConnection ? view.node_latency_ms : null,
         traffic: keepConnection ? view.traffic : null,
@@ -655,6 +673,7 @@ export function snapshotToView(snapshot: RuntimeSnapshot): RuntimeView {
     node_latency_ms: snapshot.node_latency_ms ?? null,
     traffic: snapshot.traffic ?? null,
     applied_route_revision: snapshot.applied_route_revision ?? null,
+    route_region: snapshot.route_region ?? null,
     direct_ip: snapshot.direct_ip ?? null,
   };
 }

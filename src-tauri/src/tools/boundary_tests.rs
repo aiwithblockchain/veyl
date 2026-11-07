@@ -19,6 +19,7 @@ use claurst_tools::{Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
 use crate::agent::permission_handler::AivpnPermissionHandler;
+use crate::tools::permission_level_of;
 use crate::tools::services::{
     CatalogQuery, ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, VpnToolServices,
 };
@@ -68,14 +69,32 @@ impl Recorder {
 struct FakeServices {
     rec: Arc<Recorder>,
     data: Value,
+    /// `node_import_text` 专用：模拟解析失败时返回的错误码。
+    text_error: Option<&'static str>,
 }
 
 impl FakeServices {
     fn new() -> (Arc<Self>, Arc<Recorder>) {
+        Self::with_data(json!({}))
+    }
+
+    fn with_data(data: Value) -> (Arc<Self>, Arc<Recorder>) {
         let rec = Arc::new(Recorder::default());
         let services = Arc::new(Self {
             rec: Arc::clone(&rec),
+            data,
+            text_error: None,
+        });
+        (services, rec)
+    }
+
+    /// 模拟「整段都解析不出节点」：服务层返回结构化错误。
+    fn with_text_error(code: &'static str) -> (Arc<Self>, Arc<Recorder>) {
+        let (services, rec) = Self::with_data(json!({}));
+        let services = Arc::new(Self {
+            rec: services.rec.clone(),
             data: json!({}),
+            text_error: Some(code),
         });
         (services, rec)
     }
@@ -198,6 +217,22 @@ impl VpnToolServices for FakeServices {
             "node_import_url({config_id:?},{}chars)",
             url.chars().count()
         ));
+        Ok(self.data.clone())
+    }
+    async fn node_import_text(
+        &self,
+        config_id: Option<String>,
+        text: &str,
+    ) -> anyhow::Result<Value> {
+        self.rec.record(format!(
+            "node_import_text({config_id:?},{}chars)",
+            text.chars().count()
+        ));
+        if let Some(code) = self.text_error {
+            return Err(anyhow::anyhow!(
+                "{code}: 粘贴的内容里没有可用的节点（支持多行 ss:// 链接）"
+            ));
+        }
         Ok(self.data.clone())
     }
     async fn node_create(&self, input: NodeCreateInput) -> anyhow::Result<Value> {
@@ -697,6 +732,7 @@ fn base_input(name: &str) -> Option<Value> {
         "CoreUpgrade" => json!({}),
         "RouteSetMode" => json!({ "mode": "proxy_all" }),
         "NodeImportUrl" => json!({ "url": "https://example.com/sub" }),
+        "NodeImportText" => json!({ "text": "ss://aes-256-gcm:pw@203.0.113.10:8388#A" }),
         "ConfigCreate" => json!({
             "name": "公司", "connect_mode": "tun", "routing_mode": "proxy_all"
         }),
@@ -740,6 +776,68 @@ async fn valid_input_reaches_the_service_and_succeeds() {
             "{name} 应当把参数原样交给服务层"
         );
     }
+}
+
+#[tokio::test]
+async fn node_import_text_reports_imported_and_skipped() {
+    let (svc, rec) = FakeServices::with_data(json!({
+        "imported": 2,
+        "skipped": [
+            { "name": "B", "reason": "unsupported_method" },
+            { "name": null, "reason": "malformed" }
+        ],
+        "nodes": [{ "name": "A" }, { "name": "C" }]
+    }));
+    let all = tools(svc);
+    let text = "ss://aes-256-gcm:pw@203.0.113.10:8388#A\n\
+                坏行\n\
+                ss://chacha20-ietf-poly1305:pw@203.0.113.12:8388#C";
+
+    rec.take();
+    let (is_error, env) = run(tool(&all, "NodeImportText"), json!({ "text": text })).await;
+    assert!(!is_error, "{env}");
+    assert_eq!(env["ok"], true);
+    assert_eq!(env["data"]["imported"], 2);
+    assert!(
+        env["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("导入 2 个节点，跳过 2 个"),
+        "{env}"
+    );
+    assert_eq!(
+        rec.take(),
+        vec![format!("node_import_text(None,{}chars)", text.chars().count())]
+    );
+}
+
+/// 整段都解析不出节点时必须是结构化错误，不能当成「导入 0 个」的成功。
+#[tokio::test]
+async fn node_import_text_rejects_unusable_text() {
+    let (svc, rec) = FakeServices::with_text_error("INVALID_ARGUMENT");
+    let all = tools(svc);
+
+    rec.take();
+    let (is_error, env) = run(tool(&all, "NodeImportText"), json!({ "text": "hello" })).await;
+    assert!(is_error, "{env}");
+    assert_eq!(env["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(
+        env["error"]["message"],
+        "粘贴的内容里没有可用的节点（支持多行 ss:// 链接）"
+    );
+    assert_eq!(rec.take(), vec!["node_import_text(None,5chars)".to_string()]);
+}
+
+/// 写操作：与 `ConfigCreate` 同档，不能是只读。
+#[test]
+fn node_import_text_is_a_write_tool() {
+    let (svc, _) = FakeServices::new();
+    let all = tools(svc);
+    assert_eq!(
+        permission_level_of(&all, "NodeImportText"),
+        permission_level_of(&all, "ConfigCreate")
+    );
+    assert_eq!(permission_level_of(&all, "NodeImportText"), "write");
 }
 
 #[tokio::test]
@@ -866,6 +964,9 @@ async fn service_failure_becomes_a_structured_error_with_next_actions() {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn node_import_url(&self, _: Option<String>, _: &str) -> anyhow::Result<Value> {
+            Err(anyhow::anyhow!("磁盘满了"))
+        }
+        async fn node_import_text(&self, _: Option<String>, _: &str) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn node_create(&self, _: NodeCreateInput) -> anyhow::Result<Value> {

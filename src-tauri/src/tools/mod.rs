@@ -161,6 +161,7 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(configs::ConfigUpdateTool::new(Arc::clone(&services))),
         Box::new(configs::ConfigDeleteTool::new(Arc::clone(&services))),
         Box::new(configs::NodeImportUrlTool::new(Arc::clone(&services))),
+        Box::new(configs::NodeImportTextTool::new(Arc::clone(&services))),
         Box::new(configs::NodeCreateTool::new(Arc::clone(&services))),
         Box::new(configs::NodeSwitchTool::new(Arc::clone(&services))),
         Box::new(configs::NodeProbeTool::new(Arc::clone(&services))),

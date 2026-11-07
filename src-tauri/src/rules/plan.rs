@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 
-use super::{Category, InstalledRules};
+use super::{Category, InstalledRules, Region};
 
 pub const MAX_RULE_SETS: usize = 32;
 
@@ -55,7 +55,8 @@ impl std::fmt::Display for PlanError {
 
 pub struct RouteInput<'a> {
     pub mode: &'a str,
-    pub region: Option<&'a str>,
+    /// 由 [`crate::rules::detect_region`] 判定；**未知就是未知**，不要在这里兜底。
+    pub region: &'a Region,
     pub targets: &'a [String],
     pub rules: &'a InstalledRules,
 }
@@ -96,11 +97,16 @@ impl RoutePlan {
     }
 }
 
-fn normalized_region(region: Option<&str>) -> String {
-    region
-        .unwrap_or("cn")
-        .trim()
-        .to_ascii_lowercase()
+/// 未知地区返回 `None`。**不要在这里回落 `cn`**：那会让非中国用户套上中国规则集与国内 DNS。
+fn normalized_region(region: &Region) -> Option<String> {
+    match region {
+        Region::Cn => Some("cn".to_string()),
+        Region::Cc(code) => {
+            let code = code.trim().to_ascii_lowercase();
+            (!code.is_empty()).then_some(code)
+        }
+        Region::Unknown => None,
+    }
 }
 
 fn category_rule_sets<'a>(
@@ -131,18 +137,19 @@ fn dedup_preserve(ids: Vec<String>) -> Vec<String> {
     out
 }
 
-fn local_layer(region: &str) -> Vec<String> {
-    if region == "cn" {
-        vec!["geosite-cn".into(), "geoip-cn".into()]
-    } else {
-        vec![format!("geoip-{region}")]
+fn local_layer(region: Option<&str>) -> Vec<String> {
+    match region {
+        Some("cn") => vec!["geosite-cn".into(), "geoip-cn".into()],
+        Some(code) => vec![format!("geoip-{code}")],
+        // 判不出地区：没有本地直连层，除内网外全部走代理。
+        None => Vec::new(),
     }
 }
 
 /// 1.14 起旧写法（`{"tag","address"}`）已被**删除**，不是弃用——
 /// 生成的配置连 `sing-box check` 都过不去。新格式必须带 `type` + `server`。
-fn dns_servers(region: &str, include_remote: bool) -> Vec<Value> {
-    let (local, remote) = if region == "cn" {
+fn dns_servers(region: Option<&str>, include_remote: bool) -> Vec<Value> {
+    let (local, remote) = if region == Some("cn") {
         (
             vec!["223.5.5.5", "119.29.29.29"],
             vec!["1.1.1.1", "dns.google"],
@@ -187,15 +194,31 @@ pub fn build(input: &RouteInput<'_>) -> Result<RoutePlan, PlanError> {
     let region = normalized_region(input.region);
     let local_mode = mode != "proxy_selected";
 
-    let referenced = if local_mode {
-        local_layer(&region)
+    let (referenced, local_downgraded) = if local_mode {
+        let ids = local_layer(region.as_deref());
+        // 本地层是**系统推断**出来的：规则包缺这个国家的 `geoip-<cc>` 时降级成
+        // 「无本地层 + 国际 DNS」，不能让一次连接直接失败。
+        // 用户显式选的分类（`proxy_selected`）缺规则集仍然报错——两者性质不同。
+        if ids.iter().any(|id| input.rules.rule_set(id).is_none()) {
+            log::warn!(
+                "本地层规则集缺失（region={}，rule_set={}），本次不做本地直连",
+                region.as_deref().unwrap_or("unknown"),
+                ids.join(",")
+            );
+            (Vec::new(), true)
+        } else {
+            (ids, false)
+        }
     } else {
         let categories = category_rule_sets(input.rules, input.targets)?;
-        dedup_preserve(
-            categories
-                .iter()
-                .flat_map(|category| category.rule_sets.iter().cloned())
-                .collect(),
+        (
+            dedup_preserve(
+                categories
+                    .iter()
+                    .flat_map(|category| category.rule_sets.iter().cloned())
+                    .collect(),
+            ),
+            false,
         )
     };
 
@@ -225,23 +248,35 @@ pub fn build(input: &RouteInput<'_>) -> Result<RoutePlan, PlanError> {
     })];
 
     let (route_final, outbound_local) = if local_mode {
-        route_rules.push(json!({
-            "rule_set": referenced.clone(),
-            "action": "route",
-            "outbound": "route-local",
-        }));
+        if !referenced.is_empty() {
+            route_rules.push(json!({
+                "rule_set": referenced.clone(),
+                "action": "route",
+                "outbound": "route-local",
+            }));
+        }
         (
             "proxy",
             Some(if mode == "direct" { "direct" } else { "proxy" }),
         )
     } else {
-        route_rules.push(json!({
-            "rule_set": referenced.clone(),
-            "action": "route",
-            "outbound": "proxy",
-        }));
+        if !referenced.is_empty() {
+            route_rules.push(json!({
+                "rule_set": referenced.clone(),
+                "action": "route",
+                "outbound": "proxy",
+            }));
+        }
         ("direct", None)
     };
+
+    // 本地层降级后 DNS 也走国际组：规则集都没了，再指向国内 DNS 没有依据。
+    let dns_region = if local_downgraded {
+        None
+    } else {
+        region.as_deref()
+    };
+    let dns_region_is_cn = dns_region == Some("cn");
 
     // DNS 只引用 geosite：查询阶段还没有目标 IP，geoip 规则在这里不会命中。
     let geosite_ids = referenced
@@ -257,7 +292,7 @@ pub fn build(input: &RouteInput<'_>) -> Result<RoutePlan, PlanError> {
         .collect::<Vec<_>>();
 
     let mut dns_rules = Vec::new();
-    let dns_final = if region == "cn" && local_mode {
+    let dns_final = if dns_region_is_cn && local_mode {
         if !geosite_ids.is_empty() {
             dns_rules.push(json!({
                 "rule_set": geosite_ids,
@@ -265,7 +300,7 @@ pub fn build(input: &RouteInput<'_>) -> Result<RoutePlan, PlanError> {
             }));
         }
         "dns-remote-1"
-    } else if !local_mode && region == "cn" {
+    } else if !local_mode && dns_region_is_cn {
         if !geosite_ids.is_empty() {
             dns_rules.push(json!({
                 "rule_set": geosite_ids,
@@ -291,7 +326,7 @@ pub fn build(input: &RouteInput<'_>) -> Result<RoutePlan, PlanError> {
             .iter()
             .any(|rule| rule["server"] == "dns-remote-1");
     let dns = json!({
-        "servers": dns_servers(&region, include_remote),
+        "servers": dns_servers(dns_region, include_remote),
         "rules": dns_rules,
         "final": dns_final,
         "strategy": "prefer_ipv4",
@@ -354,9 +389,13 @@ mod tests {
     }
 
     fn plan(mode: &str, region: &str, targets: &[&str]) -> RoutePlan {
+        plan_region(mode, &Region::from_code(region), targets)
+    }
+
+    fn plan_region(mode: &str, region: &Region, targets: &[&str]) -> RoutePlan {
         build(&RouteInput {
             mode,
-            region: Some(region),
+            region,
             targets: &targets.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
             rules: &rules(),
         })
@@ -403,12 +442,41 @@ mod tests {
         assert_eq!(plan.outbound_local, Some("direct"));
     }
 
+    /// 未知地区**不再回落 `cn`**：没有本地直连层，DNS 用国际组。
+    #[test]
+    fn unknown_region_has_no_local_layer_and_uses_international_dns() {
+        for mode in ["direct", "proxy_all"] {
+            let plan = plan_region(mode, &Region::Unknown, &[]);
+            assert!(plan.referenced.is_empty(), "{mode} 不该引用任何规则集");
+            assert!(plan.rule_sets.is_empty(), "{mode} 不该有 rule_set 定义");
+            assert_eq!(plan.route_final, "proxy");
+            // 只剩内网直连那一条。
+            assert_eq!(plan.route_rules.len(), 1, "{mode}");
+            assert_eq!(plan.route_rules[0]["ip_is_private"], true);
+
+            let servers = plan.dns["servers"].to_string();
+            assert!(servers.contains("1.1.1.1"), "{mode} 应用国际 DNS");
+            assert!(!servers.contains("223.5.5.5"), "{mode} 不该用国内 DNS");
+            assert!(!servers.contains("119.29.29.29"), "{mode} 不该用国内 DNS");
+            assert_eq!(plan.dns["final"], "dns-local-1");
+        }
+    }
+
+    /// 未知地区时也不许出现 `geosite-cn` / `geoip-cn`——这是那个折返点的回归断言。
+    #[test]
+    fn unknown_region_never_emits_cn_rule_sets() {
+        let plan = plan_region("proxy_all", &Region::Unknown, &[]);
+        let text = plan.referenced.join(",");
+        assert!(!text.contains("geosite-cn"), "{text}");
+        assert!(!text.contains("geoip-cn"), "{text}");
+    }
+
     #[test]
     fn target_required_and_unknown_category_fails() {
         let rules = rules();
         let err = build(&RouteInput {
             mode: "proxy_selected",
-            region: Some("cn"),
+            region: &Region::Cn,
             targets: &[],
             rules: &rules,
         })
@@ -418,7 +486,7 @@ mod tests {
         let targets = vec!["nope".to_string()];
         let err = build(&RouteInput {
             mode: "proxy_selected",
-            region: Some("cn"),
+            region: &Region::Cn,
             targets: &targets,
             rules: &rules,
         })

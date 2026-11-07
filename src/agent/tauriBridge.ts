@@ -40,7 +40,16 @@ import { DEFAULT_PROXY_PORT, readQuestionDetail } from "./bridge";
 import { toBridgeError } from "./errors";
 import { createListenerManager } from "./listeners";
 import { AGENT_EVENTS, APP_EVENT_NAMES, AI_EVENT_NAMES } from "./protocol";
-import type { AgentEvent, ConfigDetail, RuntimeSnapshot } from "./protocol";
+import type {
+  AgentEvent,
+  Category,
+  ConfigDetail,
+  NodeCreateInput,
+  NodeImportResult,
+  NodeImportSkipped,
+  NodeSummary,
+  RuntimeSnapshot,
+} from "./protocol";
 
 const EVENT_NAMES = [...AI_EVENT_NAMES, ...APP_EVENT_NAMES];
 
@@ -257,6 +266,79 @@ function normalizeProbeResult(raw: unknown): NodeProbeResult | null {
     probe_method: value.probe_method === "clash_delay" ? "clash_delay" : "tcp",
     checked_at: typeof value.checked_at === "number" ? value.checked_at : 0,
     error,
+  };
+}
+
+function normalizeNodeSummary(raw: unknown): NodeSummary | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.node_id !== "string" || value.node_id.length === 0) return null;
+  const source =
+    value.source === "seed" || value.source === "url" ? value.source : "manual";
+  return {
+    node_id: value.node_id,
+    name: typeof value.name === "string" ? value.name : "",
+    server: typeof value.server === "string" ? value.server : "",
+    port: typeof value.port === "number" ? value.port : 0,
+    method: typeof value.method === "string" ? value.method : "",
+    protocol: "shadowsocks",
+    source,
+    created_at: typeof value.created_at === "number" ? value.created_at : Date.now(),
+  };
+}
+
+const IMPORT_SKIP_REASONS = [
+  "unsupported_scheme",
+  "unsupported_method",
+  "malformed",
+  "duplicate",
+  "subscription_empty",
+] as const;
+
+function normalizeNodeImport(raw: {
+  imported?: unknown;
+  skipped?: unknown;
+  nodes?: unknown;
+}): NodeImportResult {
+  const nodes = Array.isArray(raw.nodes)
+    ? raw.nodes
+        .map(normalizeNodeSummary)
+        .filter((node): node is NodeSummary => node !== null)
+    : [];
+  const skipped: NodeImportSkipped[] = Array.isArray(raw.skipped)
+    ? raw.skipped.flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const value = item as { name?: unknown; reason?: unknown };
+        const reason = IMPORT_SKIP_REASONS.find((known) => known === value.reason) ?? "malformed";
+        return [
+          {
+            name: typeof value.name === "string" ? value.name : null,
+            reason,
+          },
+        ];
+      })
+    : [];
+  return {
+    imported: typeof raw.imported === "number" ? raw.imported : nodes.length,
+    skipped,
+    nodes,
+  };
+}
+
+function normalizeCategory(raw: unknown): Category | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.id !== "string" || value.id.length === 0) return null;
+  return {
+    id: value.id,
+    name_zh: typeof value.name_zh === "string" ? value.name_zh : value.id,
+    name_en: typeof value.name_en === "string" ? value.name_en : "",
+    description: typeof value.description === "string" ? value.description : "",
+    item_count: typeof value.item_count === "number" ? value.item_count : 0,
+    rule_sets: Array.isArray(value.rule_sets)
+      ? value.rule_sets.filter((item): item is string => typeof item === "string")
+      : [],
+    dns_classifiable: value.dns_classifiable === true,
   };
 }
 
@@ -488,6 +570,66 @@ export class TauriAgentBridge implements AgentBridge {
         .filter((item): item is NodeProbeResult => item !== null),
       run: normalizeProbeRun(raw.run),
     };
+  }
+
+  async nodeCreate(input: NodeCreateInput): Promise<NodeSummary> {
+    const raw = await call<unknown>("node_create", {
+      name: input.name,
+      server: input.server,
+      port: input.port,
+      method: input.method,
+      password: input.password,
+      ...(input.configId ? { configId: input.configId } : {}),
+    });
+    const node = normalizeNodeSummary(raw);
+    if (!node) {
+      throw { code: "INTERNAL", message: "后端返回的节点缺少标识", details: null };
+    }
+    return node;
+  }
+
+  async nodeImportUrl(url: string, configId?: string): Promise<NodeImportResult> {
+    return normalizeNodeImport(
+      await call<{ imported?: unknown; skipped?: unknown; nodes?: unknown }>(
+        "node_import_url",
+        configId ? { url, configId } : { url },
+      ),
+    );
+  }
+
+  async nodeImportText(text: string, configId?: string): Promise<NodeImportResult> {
+    return normalizeNodeImport(
+      await call<{ imported?: unknown; skipped?: unknown; nodes?: unknown }>(
+        "node_import_text",
+        configId ? { text, configId } : { text },
+      ),
+    );
+  }
+
+  async categoryList(
+    query?: string,
+    limit?: number,
+  ): Promise<{ categories: Category[]; total: number }> {
+    const raw = await call<{ categories?: unknown; total?: unknown }>("category_list", {
+      ...(query ? { query } : {}),
+      ...(limit ? { limit } : {}),
+    });
+    const categories = Array.isArray(raw.categories)
+      ? raw.categories
+          .map(normalizeCategory)
+          .filter((item): item is Category => item !== null)
+      : [];
+    return {
+      categories,
+      total: typeof raw.total === "number" ? raw.total : categories.length,
+    };
+  }
+
+  async systemRegion(): Promise<string | null> {
+    const raw = await call<{ region?: unknown }>("system_region");
+    return typeof raw.region === "string" && raw.region.trim()
+      ? raw.region.trim().toLowerCase()
+      : null;
   }
 
   async defaultProfileStatus(): Promise<DefaultProfileStatus> {

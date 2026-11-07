@@ -2604,26 +2604,102 @@ body[data-resizing] {
 }
 
 .new-config .modal__head {
+  gap: 12px;
   padding: 16px 24px 14px;
 }
 
 .new-config .modal__title {
+  margin-right: auto;
   font-size: 17px;
   font-weight: 600;
 }
 
-.new-config__modes {
-  margin: 16px 24px 0;
-}
-
-.new-config__label {
-  display: block;
-  margin-bottom: 6px;
+.new-config__back {
+  padding: 0;
+  border: 0;
+  background: transparent;
   font-size: 13px;
   color: var(--ink-3);
 }
 
-.new-config__mode-row {
+.new-config__back:hover {
+  color: var(--ink);
+}
+
+.new-config__choices {
+  display: flex;
+  gap: 12px;
+  margin: 16px 24px 0;
+}
+
+.new-config__choice {
+  flex: 1;
+  min-height: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: transparent;
+  text-align: left;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.new-config__choice:hover {
+  border-color: var(--ink-3);
+  background: var(--bg-hover);
+}
+
+.new-config__choice-title {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.new-config__choice-note {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink-3);
+}
+
+.new-config__choice-text {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.new-config__label {
+  display: block;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.new-config__manual {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  margin: 16px 24px 0;
+}
+
+.new-config__group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.new-config__group > legend.new-config__label {
+  margin: 0;
+  padding: 0;
+}
+
+.new-config__options {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2631,15 +2707,15 @@ body[data-resizing] {
 
 .new-config__mode {
   display: flex;
-  flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
+  gap: 10px;
   width: 100%;
-  padding: 12px 16px;
+  padding: 10px 12px;
   border: 1px solid var(--line-strong);
   border-radius: var(--r-sm);
   background: transparent;
   text-align: left;
+  cursor: pointer;
   transition: background 120ms ease, border-color 120ms ease;
 }
 
@@ -2651,6 +2727,19 @@ body[data-resizing] {
 .new-config__mode.is-selected {
   border-color: var(--ink);
   background: var(--bg-hover);
+}
+
+.new-config__mode input[type="radio"] {
+  flex-shrink: 0;
+  margin: 3px 0 0;
+  accent-color: var(--ink);
+}
+
+.new-config__mode-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
 }
 
 .new-config__mode-title {
@@ -2666,11 +2755,22 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
+.new-config__mode-text--warn {
+  color: var(--warn-text);
+}
+
+.new-config__region {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
 .new-config__field {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin: 16px 24px 0;
+  min-width: 0;
 }
 
 .new-config__input {
@@ -2690,21 +2790,189 @@ body[data-resizing] {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.new-config__input--mono {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.new-config__textarea {
+  width: 100%;
+  min-height: 68px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-card);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-family: var(--mono);
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.new-config__textarea:focus {
+  outline: 0;
+  border-color: var(--signal);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .new-config__note {
-  margin: 16px 24px 0;
+  margin: 0;
   font-size: 13px;
   line-height: 1.65;
   color: var(--ink-3);
 }
 
+.new-config__hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
 .new-config__error {
-  margin: 12px 24px 0;
+  margin: 0;
   font-size: 13px;
   color: var(--err-text);
 }
 
-.new-config .confirm__actions {
+.new-config__error--form {
+  padding: 8px 10px;
+  border: 1px solid var(--err-line);
+  border-radius: var(--r-sm);
+  background: var(--danger-soft);
+}
+
+.new-config__services {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 22px;
+}
+
+.new-config__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.new-config__tag {
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: transparent;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.new-config__tag:hover {
+  border-color: var(--ink-3);
+  color: var(--ink);
+}
+
+.new-config__service-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.new-config__service {
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: transparent;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.new-config__service:hover {
+  border-color: var(--ink-3);
+  color: var(--ink);
+}
+
+.new-config__service.is-selected {
+  border-color: var(--ink);
+  color: var(--ink);
+  background: var(--bg-hover);
+}
+
+.new-config__source-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 22px;
+}
+
+.new-config__node-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+
+.new-config__node-index {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.new-config__node-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.new-config__field--grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.new-config__field--port {
+  width: 96px;
+  flex-shrink: 0;
+}
+
+.new-config__password {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.new-config__password .new-config__input {
+  flex: 1;
+  min-width: 0;
+}
+
+.new-config__password .btn {
+  height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.new-config__add-node {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.new-config__add-node:hover {
+  text-decoration: underline;
+}
+
+.new-config__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
   margin: 24px 24px 0;
+}
+
+.new-config__manual .new-config__actions {
+  margin: 0;
 }
 
 /* 输入框的发送按钮不是主按钮：对话页的唯一实心按钮属于右栏。 */
@@ -3565,6 +3833,15 @@ body[data-resizing] {
 
 .note--err::before {
   background: var(--red);
+}
+
+/* 已连接、本地网站直连时那行口径说明：同一块里的小字。 */
+.note__detail {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
 }
 
 /* 卡片：代理 / 失败 / 降级 */

@@ -63,15 +63,38 @@ fn capability_catalog(tools: &[Box<dyn Tool>]) -> String {
     lines.join("\n")
 }
 
-/// 去掉文件顶部的构建说明注释，再填两个占位符。
-fn system_prompt(tools: &[Box<dyn Tool>]) -> String {
+/// 去掉文件顶部的构建说明注释，再填两个占位符，并追加离线判定的地区。
+fn system_prompt(tools: &[Box<dyn Tool>], region: &crate::rules::Region) -> String {
     let raw = FIRST_RUN_PROMPT;
     let body = match raw.find("-->") {
         Some(index) if raw.trim_start().starts_with("<!--") => raw[index + 3..].trim_start(),
         _ => raw,
     };
-    body.replace("{{CAPABILITY_CATALOG}}", &capability_catalog(tools))
-        .replace("{{BLOCK_CATALOG}}", BLOCK_CATALOG)
+    let rendered = body
+        .replace("{{CAPABILITY_CATALOG}}", &capability_catalog(tools))
+        .replace("{{BLOCK_CATALOG}}", BLOCK_CATALOG);
+    format!("{rendered}\n\n{}", environment_section(region))
+}
+
+/// 每轮都要用到、几乎不变的上下文，走系统提示词，不做成工具。
+/// 未知就如实说未知——让模型猜国别是这类事实性错误的老来源。
+fn environment_section(region: &crate::rules::Region) -> String {
+    match region {
+        crate::rules::Region::Unknown => "\
+# 环境
+
+用户所在地区：未知（系统时区与区域设置都读不出）。
+需要地区时直接问用户，不要猜。"
+            .to_string(),
+        known => format!(
+            "\
+# 环境
+
+用户所在地区：{}（由系统时区与区域设置推断，不是 IP 定位）。
+给分流建议时按这个地区说。用户说不对，就以用户为准，照着他的说法继续。",
+            known.label()
+        ),
+    }
 }
 
 /// 原来那 6 条安全规则并入提示词末尾。第 2 条改写过：节点不再「只能来自
@@ -205,7 +228,7 @@ impl AivpnSession {
         let tools = crate::tools::vpn_tools(services);
         query_config.system_prompt = Some(format!(
             "{}\n\n{}",
-            system_prompt(&tools),
+            system_prompt(&tools, &crate::rules::detect_region()),
             SAFETY_RULES
         ));
         query_config.effort_level = Some(EffortLevel::Medium);
@@ -305,6 +328,12 @@ impl AivpnSession {
         // 每轮按场景选上限，不改会话默认值。
         let mut query_config = self.query_config.clone();
         query_config.max_turns = if first_run { FIRST_RUN_MAX_TURNS } else { MAX_TURNS };
+        // 环境信息每轮重取一次：系统时区/区域改了，下一轮就该是新值。
+        query_config.system_prompt = Some(format!(
+            "{}\n\n{}",
+            system_prompt(&self.tools, &crate::rules::detect_region()),
+            SAFETY_RULES
+        ));
 
         // 工具审计要把调用记到当前请求上（工具自己拿不到 request_id）。
         crate::tools::policy::set_current_request(&self.session_id, &request_id);
@@ -1178,7 +1207,7 @@ mod prompt_tests {
     /// 提示词是从文件编进来的，不是手写的常量。这条守住「确实加载了」。
     #[test]
     fn the_first_run_prompt_is_loaded_and_rendered() {
-        let text = system_prompt(&[]);
+        let text = system_prompt(&[], &crate::rules::Region::Cn);
         assert!(text.contains("首次配置"), "提示词正文没加载进来");
         // 节点来源一问是产品硬规则：不许默认用我们提供的服务器。
         assert!(text.contains("节点从哪来"), "节点来源一问没渲染进提示词");
@@ -1193,10 +1222,51 @@ mod prompt_tests {
         assert!(!text.contains("构建时与回访"), "文件头的构建注释应被去掉");
     }
 
+    /// 地区进系统提示；未知时要求问用户，不能猜。
+    ///
+    /// 这是对 `first-run.md` 「环境信息每轮由系统提供」那份承诺的兑现——
+    /// 在那之前宿主什么环境信息都没给过，模型只能自己编。
+    #[test]
+    fn the_environment_section_carries_the_detected_region() {
+        let cn = system_prompt(&[], &crate::rules::Region::Cn);
+        assert!(cn.contains("# 环境"));
+        assert!(cn.contains("用户所在地区：中国大陆"));
+        assert!(cn.contains("由系统时区与区域设置推断"), "{cn}");
+        assert!(cn.contains("不是 IP 定位"));
+        assert!(cn.contains("用户说不对，就以用户为准"));
+
+        let unknown = system_prompt(&[], &crate::rules::Region::Unknown);
+        assert!(unknown.contains("用户所在地区：未知"));
+        assert!(unknown.contains("直接问用户，不要猜"));
+
+        let jp = system_prompt(&[], &crate::rules::Region::from_code("jp"));
+        assert!(jp.contains("用户所在地区：日本"));
+    }
+
+    /// 「再建一套配置」是 AI 协助入口的整条流程：跳过环境检测、三问、确认后落库。
+    #[test]
+    fn the_add_another_config_section_is_present() {
+        let text = system_prompt(&[], &crate::rules::Region::Cn);
+        assert!(text.contains("# 再建一套配置"), "缺少「再建一套配置」一节");
+        for needle in [
+            "不要重新做环境检测",
+            "三问",
+            "节点从哪来",
+            "用户确认之前不调用 `ConfigCreate`",
+            "不要因为已经有一套配置就拒绝",
+            "不要复用旧配置的参数",
+            "用 Veyl 提供的测试节点（仅供试用）",
+            "NodeImportText",
+            "不要自己解析链接",
+        ] {
+            assert!(text.contains(needle), "「再建一套配置」缺少：{needle}");
+        }
+    }
+
     /// 布局示例必须是 `layout` 围栏；正文里不能再给裸 JSON 示例（模型会照抄）。
     #[test]
     fn the_layout_example_uses_a_layout_fence() {
-        let text = system_prompt(&[]);
+        let text = system_prompt(&[], &crate::rules::Region::Cn);
         assert!(text.contains("```layout"), "布局示例要用 layout 围栏");
         assert!(
             !text.contains("```json"),
@@ -1234,7 +1304,7 @@ mod prompt_tests {
                 "工具描述是空的，AI 只能从名字猜用途：{line}"
             );
         }
-        let rendered = system_prompt(&tools);
+        let rendered = system_prompt(&tools, &crate::rules::Region::Cn);
         assert!(rendered.contains("ConfigCreate"), "占位符没被真实清单替换");
         assert!(!rendered.contains("{{CAPABILITY_CATALOG}}"));
 
@@ -1262,7 +1332,7 @@ mod prompt_tests {
     /// 看的是 tool description，只写系统提示会被它忽略。
     #[test]
     fn expression_rules_reach_the_system_prompt_and_every_tool_description() {
-        let prompt = system_prompt(&[]);
+        let prompt = system_prompt(&[], &crate::rules::Region::Cn);
         assert!(prompt.contains("# 怎么说话"), "系统提示缺少「怎么说话」一节");
         for needle in [
             "只说结果和影响",

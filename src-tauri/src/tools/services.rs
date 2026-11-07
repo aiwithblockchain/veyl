@@ -122,6 +122,9 @@ pub trait VpnToolServices: Send + Sync {
     ) -> anyhow::Result<Value>;
 
     async fn node_import_url(&self, config_id: Option<String>, url: &str) -> anyhow::Result<Value>;
+    /// 用户粘贴的节点文本：逐行解析 `ss://`，**不发网络请求**。
+    async fn node_import_text(&self, config_id: Option<String>, text: &str)
+        -> anyhow::Result<Value>;
     async fn node_create(&self, input: NodeCreateInput) -> anyhow::Result<Value>;
     async fn node_switch(&self, config_id: &str, node_id: &str) -> anyhow::Result<Value>;
     async fn node_probe(&self, node_id: &str) -> anyhow::Result<Value>;
@@ -211,6 +214,7 @@ fn idle_snapshot() -> Value {
         "node_id": null,
         "node_name": null,
         "applied_route_revision": null,
+        "route_region": null,
         "connected_since": null,
         "latency_ms": null,
         "node_latency_ms": null,
@@ -352,6 +356,14 @@ impl VpnToolServices for NotWiredServices {
         _url: &str,
     ) -> anyhow::Result<Value> {
         not_wired("导入节点")
+    }
+
+    async fn node_import_text(
+        &self,
+        _config_id: Option<String>,
+        _text: &str,
+    ) -> anyhow::Result<Value> {
+        not_wired("粘贴导入节点")
     }
 
     async fn node_create(&self, _input: NodeCreateInput) -> anyhow::Result<Value> {
@@ -2193,6 +2205,8 @@ impl WiredServices {
         config: &configs::Config,
         applied_mode: Option<&str>,
         applied_revision: Option<i64>,
+        running: bool,
+        applied_region: Option<&str>,
     ) -> Value {
         let targets = config
             .route_targets
@@ -2206,12 +2220,10 @@ impl WiredServices {
             })
             .unwrap_or_default();
         let applied = applied_mode.is_some() && applied_revision == Some(config.route_revision);
-        let region = crate::rules::detected_region();
-        let basis = if region.as_deref().unwrap_or("cn") == "cn" {
-            "domain_and_ip"
-        } else {
-            "ip_only"
-        };
+        let region = crate::rules::detect_region();
+        // 已连接时报**运行配置实际用的地区**：用户中途改时区，配置不会重算。
+        let basis_region = if running { applied_region } else { region.code() };
+        let basis = local_direct_basis(basis_region);
         json!({
             "config_id": config.id,
             "routing_mode": config.routing_mode,
@@ -2223,7 +2235,8 @@ impl WiredServices {
             "effective": if applied { "current_connection" } else { "next_connection" },
             "reconnect_required": !applied,
             "local_direct_basis": basis,
-            "detected_region": region,
+            "detected_region": region.code(),
+            "applied_region": applied_region,
         })
     }
 
@@ -2235,7 +2248,7 @@ impl WiredServices {
         applied_revision: Option<i64>,
         hot_switched: bool,
     ) {
-        let state = self.route_state_json(config, applied_mode, applied_revision);
+        let state = self.route_state_json(config, applied_mode, applied_revision, false, None);
         crate::agent::app_handle::emit(
             "routing-changed",
             json!({
@@ -2700,6 +2713,15 @@ fn node_json(node: &configs::Node) -> Value {
     })
 }
 
+/// 本地直连的判定依据。未知地区没有本地层，不能报 `ip_only`。
+fn local_direct_basis(region: Option<&str>) -> &'static str {
+    match region {
+        Some("cn") => "domain_and_ip",
+        Some(_) => "ip_only",
+        None => "none",
+    }
+}
+
 fn validate_connect_mode(value: &str) -> anyhow::Result<()> {
     if matches!(
         value,
@@ -2855,6 +2877,7 @@ impl VpnToolServices for WiredServices {
                 node_id: meta.as_ref().and_then(|meta| meta.node_id.clone()),
                 node_name: meta.as_ref().and_then(|meta| meta.node_name.clone()),
                 applied_route_revision: meta.as_ref().and_then(|meta| meta.applied_route_revision),
+                route_region: meta.as_ref().and_then(|meta| meta.route_region.clone()),
                 connected_since: self.tun.connected_since(),
                 uptime_seconds: self.tun.uptime_seconds(),
             })
@@ -3856,6 +3879,72 @@ impl VpnToolServices for WiredServices {
         }))
     }
 
+    /// 粘贴导入：与订阅解析共用同一套逐行逻辑，但不联网。
+    async fn node_import_text(
+        &self,
+        config_id: Option<String>,
+        text: &str,
+    ) -> anyhow::Result<Value> {
+        if let Some(config_id) = &config_id {
+            self.require_config(config_id)?;
+        }
+        let subscription = crate::nodes::parse_subscription(text).map_err(|error| {
+            log::debug!("粘贴导入解析失败：{error}");
+            svc_error_with_details(
+                "INVALID_ARGUMENT",
+                "粘贴的内容里没有可用的节点（支持多行 ss:// 链接）",
+                json!({ "reason": "not_node_text" }),
+            )
+        })?;
+        // 粘贴来的节点算「手动添加」：来源是用户自己，不是我们替他拉取。
+        let (added, duplicates) = self.add_parsed_nodes(
+            config_id.as_deref(),
+            &subscription.nodes,
+            configs::SOURCE_MANUAL,
+            true,
+        )?;
+
+        let mut skipped = subscription
+            .skipped
+            .iter()
+            .map(|skip| {
+                json!({
+                    "name": skip.name,
+                    "reason": skip.reason.as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+        skipped.extend(duplicates.iter().map(|skip| {
+            json!({
+                "name": skip.name,
+                "reason": skip.reason.as_str(),
+            })
+        }));
+
+        let added_ids = added.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+        if !added_ids.is_empty() {
+            crate::seed::emit_node_list_changed(
+                &self.store,
+                "manual_create",
+                config_id.as_deref(),
+                &added_ids,
+            );
+        }
+        if let Some(config_id) = &config_id {
+            if !added.is_empty() {
+                if let Ok(config) = self.require_config(config_id) {
+                    self.emit_config_changed("updated", Some(&config));
+                }
+            }
+        }
+
+        Ok(json!({
+            "imported": added.len(),
+            "skipped": skipped,
+            "nodes": added.iter().map(node_json).collect::<Vec<_>>(),
+        }))
+    }
+
     async fn node_create(&self, input: NodeCreateInput) -> anyhow::Result<Value> {
         if let Some(config_id) = &input.config_id {
             self.require_config(config_id)?;
@@ -4425,7 +4514,14 @@ impl VpnToolServices for WiredServices {
         let running = connected && connected_config.as_deref() == Some(config.id.as_str());
         let applied_mode = running.then(|| config.routing_mode.clone());
         let applied_revision = running.then_some(status.applied_route_revision).flatten();
-        Ok(self.route_state_json(&config, applied_mode.as_deref(), applied_revision))
+        let applied_region = running.then(|| status.route_region.clone()).flatten();
+        Ok(self.route_state_json(
+            &config,
+            applied_mode.as_deref(),
+            applied_revision,
+            running,
+            applied_region.as_deref(),
+        ))
     }
 
     async fn route_set_mode(
@@ -4463,8 +4559,13 @@ impl VpnToolServices for WiredServices {
         let applied_revision = running.then_some(status.applied_route_revision).flatten();
 
         if config.routing_mode == mode {
-            let mut data =
-                self.route_state_json(&config, applied_mode.as_deref(), applied_revision);
+            let mut data = self.route_state_json(
+                &config,
+                applied_mode.as_deref(),
+                applied_revision,
+                running,
+                status.route_region.as_deref(),
+            );
             data["hot_switched"] = json!(false);
             data["reconnect"] = Value::Null;
             return Ok(data);
@@ -4527,7 +4628,13 @@ impl VpnToolServices for WiredServices {
 
             let updated = self.update_routing_mode(&config.id, mode)?;
             self.emit_routing_changed(&updated, "mode", Some(mode), applied_revision, true);
-            let mut data = self.route_state_json(&updated, Some(mode), applied_revision);
+            let mut data = self.route_state_json(
+                &updated,
+                Some(mode),
+                applied_revision,
+                true,
+                status.route_region.as_deref(),
+            );
             data["hot_switched"] = json!(true);
             data["reconnect"] = Value::Null;
             return Ok(data);
@@ -4552,7 +4659,7 @@ impl VpnToolServices for WiredServices {
 
         if !running {
             self.emit_routing_changed(&updated, "mode", None, None, false);
-            let mut data = self.route_state_json(&updated, None, None);
+            let mut data = self.route_state_json(&updated, None, None, false, None);
             data["hot_switched"] = json!(false);
             data["reconnect"] = json!("not_running");
             return Ok(data);
@@ -4576,7 +4683,7 @@ impl VpnToolServices for WiredServices {
                         "unknown"
                     };
                     self.emit_routing_changed(&updated, "mode", None, None, false);
-                    let mut data = self.route_state_json(&updated, None, None);
+                    let mut data = self.route_state_json(&updated, None, None, false, None);
                     data["hot_switched"] = json!(false);
                     data["reconnect"] = json!("reconnect_failed");
                     data["runtime_state"] = json!("tun_unconfirmed");
@@ -4591,8 +4698,13 @@ impl VpnToolServices for WiredServices {
                     status.applied_route_revision,
                     false,
                 );
-                let mut data =
-                    self.route_state_json(&updated, Some(mode), status.applied_route_revision);
+                let mut data = self.route_state_json(
+                    &updated,
+                    Some(mode),
+                    status.applied_route_revision,
+                    true,
+                    status.route_region.as_deref(),
+                );
                 data["reconnect"] = json!("reconnected");
                 if takeover == TunTakeover::Unknown {
                     // 未采集不是失败：切换本身成功，只是无法确认接管。
@@ -4620,7 +4732,7 @@ impl VpnToolServices for WiredServices {
                     .and_then(Value::as_str)
                     .unwrap_or("unknown")
                     .to_string();
-                let mut data = self.route_state_json(&updated, None, None);
+                let mut data = self.route_state_json(&updated, None, None, false, None);
                 data["hot_switched"] = json!(false);
                 data["reconnect"] = json!("reconnect_failed");
                 data["runtime_state"] = json!(status.state.as_str());
@@ -4645,7 +4757,19 @@ impl VpnToolServices for WiredServices {
                 .map_err(|error| config_store_error(error))?
         };
         self.emit_routing_changed(&updated, "targets", None, None, false);
-        Ok(self.route_state_json(&updated, None, None))
+        // 已连接且跑的就是这套配置时，基础口径按运行配置的地区报。
+        let status = self.manager.status().await;
+        let connected = self.is_connected(&status);
+        let connected_config = self.connected_config_id().await;
+        let running = connected && connected_config.as_deref() == Some(config_id);
+        let applied_region = running.then(|| status.route_region.clone()).flatten();
+        Ok(self.route_state_json(
+            &updated,
+            None,
+            None,
+            running,
+            applied_region.as_deref(),
+        ))
     }
 
     async fn vpn_connect(&self, config_id: Option<String>) -> anyhow::Result<Value> {
@@ -5063,7 +5187,7 @@ impl VpnToolServices for WiredServices {
         };
 
         Ok(json!({
-            "contract_version": "3.7.0",
+            "contract_version": "3.8.0",
             "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "app_version": env!("CARGO_PKG_VERSION"),
             "platform": crate::netcfg::platform_name(),
@@ -5314,10 +5438,11 @@ impl WiredServices {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let region = crate::rules::detected_region();
+        let region = crate::rules::detect_region();
+        let route_region = region.code().map(str::to_string);
         let plan = crate::rules::plan::build(&crate::rules::plan::RouteInput {
             mode: &config.routing_mode,
-            region: region.as_deref(),
+            region: &region,
             targets: &targets,
             rules: &installed_rules,
         })
@@ -5390,6 +5515,7 @@ impl WiredServices {
                 mixed_port,
                 clash_port,
                 clash_secret,
+                route_region.clone(),
             )
             .await
         } else {
@@ -5452,6 +5578,7 @@ impl WiredServices {
                         Some(node.id.clone()),
                         Some(node.name.clone()),
                         Some(config.route_revision),
+                        route_region.clone(),
                         Some(configured_port),
                         fallback_reason,
                         &value,
@@ -5535,6 +5662,7 @@ impl WiredServices {
         mixed_port: u16,
         clash_port: u16,
         clash_secret: String,
+        route_region: Option<String>,
     ) -> anyhow::Result<Value> {
         // 排除表 = 固定表 + 本机反推 + 用户补充 + 节点服务器旁路。
         // 最后一项不能省：节点服务器若落在被接管段里，sing-box 连自己也会绕成环路。
@@ -5632,6 +5760,7 @@ impl WiredServices {
                 node_id: Some(current.id.clone()),
                 node_name: Some(current.name.clone()),
                 applied_route_revision: Some(config.route_revision),
+                route_region: route_region.clone(),
             },
         ) {
             Ok(started) => {
@@ -5710,6 +5839,7 @@ impl WiredServices {
             "node_id": current.id,
             "node_name": current.name,
             "applied_route_revision": config.route_revision,
+            "route_region": route_region,
             "connected_since": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "system_proxy_enabled": false,
             "tun_device_up": tun_device_up,
@@ -5728,6 +5858,7 @@ impl WiredServices {
         node_id: Option<String>,
         node_name: Option<String>,
         applied_route_revision: Option<i64>,
+        route_region: Option<String>,
         // 用户设置的代理端口；用于快照回显「设置的是哪个」。TUN 不经过这里。
         requested_port: Option<u16>,
         fallback_reason: Option<crate::runtime::PortFallbackReason>,
@@ -5773,6 +5904,7 @@ impl WiredServices {
             node_id,
             node_name,
             applied_route_revision,
+            route_region,
         };
 
         // 切配置/重连：先撤旧代理，避免旧进程已停、代理还指着旧端口。
@@ -6927,6 +7059,133 @@ mod config_service_tests {
             service.details.as_ref().unwrap()["reason"],
             "route_targets_empty"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 粘贴多行：逐条解析，一条坏的不作废整批。
+    #[tokio::test]
+    async fn pasted_node_text_imports_good_lines_and_reports_bad_ones() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let text = "ss://aes-256-gcm:pw-a@203.0.113.10:8388#A\n\
+                    不是节点\n\
+                    ss://rc4-md5:pw@203.0.113.11:8388#B\n\
+                    ss://chacha20-ietf-poly1305:pw-c@203.0.113.12:8388#C";
+
+        let data = services.node_import_text(None, text).await.unwrap();
+        assert_eq!(data["imported"], 2);
+        let names = data["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["A", "C"]);
+
+        let skipped = data["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 2);
+        assert_eq!(skipped[0]["reason"], "unsupported_scheme");
+        assert_eq!(skipped[1]["reason"], "unsupported_method");
+        assert_eq!(skipped[1]["name"], "B");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 重复粘贴同一个节点不是错误，`skipped` 里标 `duplicate`。
+    #[tokio::test]
+    async fn importing_the_same_pasted_node_twice_marks_the_duplicate() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let text = "ss://aes-256-gcm:pw@203.0.113.10:8388#A";
+
+        let first = services.node_import_text(None, text).await.unwrap();
+        assert_eq!(first["imported"], 1);
+
+        let again = services.node_import_text(None, text).await.unwrap();
+        assert_eq!(again["imported"], 0);
+        assert_eq!(again["nodes"].as_array().unwrap().len(), 0);
+        assert_eq!(again["skipped"][0]["reason"], "duplicate");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 整段都不是节点时给可读原因，前端据此提示「这行内容不是节点」。
+    #[tokio::test]
+    async fn text_without_any_node_is_rejected_with_a_reason() {
+        let dir = temp_dir();
+        let services = services(&dir);
+
+        let error = services
+            .node_import_text(None, "hello\nworld")
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "INVALID_ARGUMENT");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "not_node_text"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 带 configId 时按解析顺序追加；配置原先没有当前节点则取第一个。
+    #[tokio::test]
+    async fn pasted_nodes_are_appended_to_the_given_config() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("粘贴")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        let text = "ss://aes-256-gcm:pw-a@203.0.113.10:8388#A\n\
+                    ss://aes-256-gcm:pw-b@203.0.113.11:8388#B";
+        let data = services
+            .node_import_text(Some(config_id.clone()), text)
+            .await
+            .unwrap();
+        assert_eq!(data["imported"], 2);
+
+        let detail = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(detail["node_count"], 2);
+        let nodes = detail["nodes"].as_array().unwrap();
+        assert_eq!(nodes[0]["name"], "A");
+        assert_eq!(nodes[1]["name"], "B");
+        assert_eq!(detail["current_node_id"], nodes[0]["node_id"]);
+        assert_eq!(nodes[0]["source"], "manual");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未知地区没有本地直连层，口径必须是 `none`，不能报成 `ip_only`。
+    #[test]
+    fn local_direct_basis_reports_none_for_unknown_region() {
+        assert_eq!(local_direct_basis(Some("cn")), "domain_and_ip");
+        assert_eq!(local_direct_basis(Some("jp")), "ip_only");
+        assert_eq!(local_direct_basis(None), "none");
+    }
+
+    /// 四个入口（连接 / 测速 / `route_get` / `system_region`）读同一个来源。
+    /// 连接与测速的取值没法在单测里直接观察，但它们调用的是同一个
+    /// `detect_region()`；这里断言两个可观察入口一致，防止再出现各自兜底。
+    #[tokio::test]
+    async fn region_entry_points_agree() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("地区")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        let route = services.route_get(Some(config_id)).await.unwrap();
+        let command = crate::agent::commands::system_region().await.unwrap();
+        let detected = json!(crate::rules::detect_region().code());
+
+        assert_eq!(command["region"], route["detected_region"]);
+        assert_eq!(route["detected_region"], detected);
+        assert_eq!(command["region"], detected);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

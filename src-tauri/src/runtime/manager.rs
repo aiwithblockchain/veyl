@@ -12,7 +12,7 @@ use super::error::{RuntimeError, RuntimeResult};
 use super::health::{ClashApi, ConnectionSample, DataPlaneProbe, DirectIpProbe, ExitIpProbe, DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE};
 use super::process::{self, SpawnOptions};
 
-pub const CONTRACT_VERSION: &str = "2.4.0";
+pub const CONTRACT_VERSION: &str = "2.5.0";
 pub const EVENT_CONTRACT_VERSION: &str = "2.10.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
@@ -67,6 +67,8 @@ pub struct TunSnapshotInput {
     pub node_id: Option<String>,
     pub node_name: Option<String>,
     pub applied_route_revision: Option<i64>,
+    /// 生成这份配置时判定的地区；界面显示「实际生效」的那个。
+    pub route_region: Option<String>,
     pub connected_since: Option<String>,
     pub uptime_seconds: Option<u64>,
 }
@@ -162,6 +164,9 @@ pub struct RuntimeStatus {
     pub node_id: Option<String>,
     pub node_name: Option<String>,
     pub applied_route_revision: Option<i64>,
+    /// 生成当前运行配置时判定的地区（小写 cc；未知为 null）。
+    /// 用户中途改系统时区不会重算，界面以这个值为准。
+    pub route_region: Option<String>,
     pub connected_since: Option<String>,
     /// 出口 IP 探测往返耗时（契约固定语义，**不是**节点延迟）。
     pub latency_ms: Option<u64>,
@@ -206,6 +211,7 @@ impl RuntimeStatus {
             node_id: input.node_id,
             node_name: input.node_name,
             applied_route_revision: input.applied_route_revision,
+            route_region: input.route_region,
             connected_since: input.connected_since.clone(),
             latency_ms: None,
             node_latency_ms: None,
@@ -361,6 +367,9 @@ pub struct StartPlan {
     pub node_name: Option<String>,
     /// 建连时 `configs.route_revision` 的值。
     pub applied_route_revision: Option<i64>,
+    /// 生成这份配置时判定的地区（小写 cc，未知为 `None`）。
+    /// 运行配置不会因为用户中途改时区而重算，界面要显示**实际生效**的那个。
+    pub route_region: Option<String>,
 }
 
 impl std::fmt::Debug for StartPlan {
@@ -381,6 +390,7 @@ impl std::fmt::Debug for StartPlan {
             .field("node_id", &self.node_id)
             .field("node_name", &self.node_name)
             .field("applied_route_revision", &self.applied_route_revision)
+            .field("route_region", &self.route_region)
             .finish()
     }
 }
@@ -525,6 +535,11 @@ impl Inner {
             },
             applied_route_revision: if connected {
                 self.plan.as_ref().and_then(|p| p.applied_route_revision)
+            } else {
+                None
+            },
+            route_region: if connected {
+                self.plan.as_ref().and_then(|p| p.route_region.clone())
             } else {
                 None
             },
@@ -2050,6 +2065,7 @@ mod tests {
             node_id: None,
             node_name: None,
             applied_route_revision: None,
+            route_region: None,
         }
     }
 
@@ -2132,6 +2148,7 @@ mod tests {
             node_id: None,
             node_name: None,
             applied_route_revision: None,
+            route_region: None,
         };
 
         {
@@ -2195,6 +2212,7 @@ mod tests {
             node_id: None,
             node_name: None,
             applied_route_revision: None,
+            route_region: None,
         };
 
         let first = manager.start(start_plan.clone()).await.unwrap();
@@ -2312,7 +2330,7 @@ mod tests {
         );
         assert_eq!(
             status.last_error.as_ref().unwrap().contract_version,
-            "2.4.0"
+            "2.5.0"
         );
 
         let mut restarts = 0;
@@ -2601,6 +2619,7 @@ mod tests {
         let mut current = plan(PathBuf::from("/tmp/sing-box"), std::path::Path::new("/tmp"));
         current.mixed_port = 4321;
         current.config_name = Some("东京 01".into());
+        current.route_region = Some("jp".into());
         inner.plan = Some(current);
         inner.connected_since = Some("2026-11-02T00:00:00Z".into());
         inner.health.exit_ip = Some("203.0.113.10".into());
@@ -2618,6 +2637,11 @@ mod tests {
         assert_eq!(snapshot.latency_ms, Some(123), "latency_ms 仍是出口探测耗时");
         assert_eq!(snapshot.node_latency_ms, Some(45), "节点延迟单独成字段");
         assert_eq!(snapshot.direct_ip.as_deref(), Some("198.51.100.7"));
+        assert_eq!(
+            snapshot.route_region.as_deref(),
+            Some("jp"),
+            "快照要报运行配置实际使用的地区"
+        );
 
         // 两个指标互不门控：出口 IP 没测到，latency_ms 变 null，节点延迟照常展示。
         inner.health.exit_ip = None;
@@ -2629,6 +2653,7 @@ mod tests {
         let snapshot = inner.snapshot();
         assert!(snapshot.mixed_port.is_none());
         assert!(snapshot.config_name.is_none());
+        assert!(snapshot.route_region.is_none(), "断开后不能再报上次的地区");
         assert!(snapshot.connected_since.is_none());
         assert!(snapshot.latency_ms.is_none());
         assert!(snapshot.node_latency_ms.is_none());

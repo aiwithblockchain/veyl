@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentBridge } from "../agent/bridge";
+import type { AgentBridge, ConfigCreateInput } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { AGENT_EVENTS } from "../agent/protocol";
 import type { ConfigDetail, ConfigSummary, RuntimeSnapshot } from "../agent/protocol";
-import type { ConnectMode } from "./model";
 import { createMockConfig, summarizeConfig } from "./model";
 import { deleteConfigWithDisconnect, shouldDisconnectOnDelete, withoutConfig } from "./deleteConfig";
 
@@ -13,6 +12,8 @@ export interface ActionResult {
   ok: boolean;
   activated?: boolean;
   message?: string;
+  /** 后端 `details.reason`；界面需要按原因分支时用，不解析 message。 */
+  reason?: string;
 }
 
 export interface ProbeResult {
@@ -36,7 +37,7 @@ export interface VpnSession {
   nodeProbeAvailable: boolean;
   /** 连接「全部流量」前正在更新后台组件：系统即将请求一次授权。 */
   preparingHelper: boolean;
-  createConfig: (name: string, mode: ConnectMode) => Promise<ActionResult>;
+  createConfig: (input: ConfigCreateInput) => Promise<ActionResult>;
   deleteConfig: (configId: string) => Promise<ActionResult>;
   selectConfig: (configId: string, confirmDisconnect?: boolean) => Promise<ActionResult>;
   switchNode: (nodeId: string) => Promise<ActionResult>;
@@ -81,6 +82,11 @@ function toConnectionState(state: RuntimeSnapshot["state"]): VpnConnectionState 
 function actionMessage(error: unknown, fallback: string): string {
   const bridgeError = toBridgeError(error);
   return bridgeError.message || fallback;
+}
+
+function actionReason(error: unknown): string | undefined {
+  const reason = toBridgeError(error).details?.reason;
+  return typeof reason === "string" ? reason : undefined;
 }
 
 /** Tauri 对未注册命令的报错形如 `Command node_probe not found`。 */
@@ -294,12 +300,12 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     });
   }, [bridge, mock, applySnapshot, refreshReal]);
 
-  const createConfig = async (
-    name: string,
-    mode: ConnectMode,
-  ): Promise<ActionResult> => {
+  const createConfig = async (input: ConfigCreateInput): Promise<ActionResult> => {
     if (mock) {
-      const detail = createMockConfig(name, mode);
+      const detail = createMockConfig(input.name, input.connectMode, {
+        routingMode: input.routingMode,
+        nodeIds: input.nodeIds,
+      });
       const store = mockStore.current;
       const connected = connection === "connected" || connection === "starting";
       const activate = !connected || store.activeId === null;
@@ -309,13 +315,6 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       });
       return { ok: true, activated: activate };
     }
-
-    const input = {
-      name,
-      connectMode: mode,
-      routingMode: "proxy_all" as const,
-      source: "seed" as const,
-    };
 
     try {
       const created = await bridge.configCreate(input);
@@ -330,10 +329,18 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
           await refreshReal();
           return { ok: true, activated: created.is_active };
         } catch (retryErr) {
-          return { ok: false, message: actionMessage(retryErr, "创建配置失败") };
+          return {
+            ok: false,
+            message: actionMessage(retryErr, "创建配置失败"),
+            reason: actionReason(retryErr),
+          };
         }
       }
-      return { ok: false, message: actionMessage(err, "创建配置失败") };
+      return {
+        ok: false,
+        message: actionMessage(err, "创建配置失败"),
+        reason: actionReason(err),
+      };
     }
   };
 
