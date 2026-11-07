@@ -157,6 +157,11 @@ export default function App() {
   }, []);
   const importingRef = useRef(false);
   const endWaiters = useRef(new Map<string, () => void>());
+  // 同一会话同时只允许一条请求：ref 挡住在重渲染之前连点第二下。
+  const sendBusyRef = useRef(new Set<string>());
+  const requestSessionRef = useRef(new Map<string, string>());
+  // 用户在这条请求的 requestId 回来之前就点了停止：拿到 id 后补一次 cancel。
+  const pendingStopRef = useRef(new Set<string>());
   // 已经回答/超时/作废的问题 id：防止重连或重试路径把旧问题再插回来。
   const settledQuestionIds = useRef(new Set<string>());
   const panelOpenRef = useRef(panelOpen);
@@ -383,6 +388,12 @@ export default function App() {
       }
       if (event.name === AGENT_EVENTS.requestEnd) {
         const requestId = event.payload.request_id;
+        const sessionId = requestSessionRef.current.get(requestId);
+        if (sessionId) {
+          requestSessionRef.current.delete(requestId);
+          sendBusyRef.current.delete(sessionId);
+          pendingStopRef.current.delete(sessionId);
+        }
         setPendingQuestions((current) => {
           for (const item of current) {
             if (item.requestId === requestId) markQuestionSettled(item.questionId);
@@ -544,10 +555,26 @@ export default function App() {
     dispatch({ type: "request_pending", sessionId: session.id });
     void bridge
       .sendMessage(session.id, FIRST_RUN_KICKOFF, { hidden: true })
-      .then(({ requestId }) =>
-        dispatch({ type: "request_started", sessionId: session.id, requestId }),
-      )
+      .then(({ requestId }) => {
+        requestSessionRef.current.set(requestId, session.id);
+        dispatch({ type: "request_started", sessionId: session.id, requestId });
+        if (pendingStopRef.current.delete(session.id)) {
+          void bridge
+            .cancel(requestId)
+            .then((cancelled) => {
+              if (cancelled) return;
+              requestSessionRef.current.delete(requestId);
+              dispatch({
+                type: "request_cancelled_locally",
+                sessionId: session.id,
+                requestId,
+              });
+            })
+            .catch(() => {});
+        }
+      })
       .catch((error: unknown) => {
+        pendingStopRef.current.delete(session.id);
         const message =
           toBridgeError(error).message || "AI 没能开始第一轮对话，请稍后重试。";
         dispatch({ type: "request_failed", sessionId: session.id, message });
@@ -736,41 +763,81 @@ export default function App() {
     }
   };
 
-  const handleSend = (text: string) => {
-    if (!session) return;
-    sendToSession(session.id, text);
+  const handleSend = (text: string): Promise<boolean> => {
+    if (!session) return Promise.resolve(false);
+    return sendToSession(session.id, text);
   };
 
-  const sendToSession = (sessionId: string, text: string) => {
+  // ai_cancel 返回 false = 后端确认这条请求已经不在跑了：本地立即收尾，不等 request_end。
+  const cancelInFlight = (sessionId: string, requestId: string) => {
+    void bridge
+      .cancel(requestId)
+      .then((cancelled) => {
+        if (cancelled) return;
+        sendBusyRef.current.delete(sessionId);
+        requestSessionRef.current.delete(requestId);
+        pendingStopRef.current.delete(sessionId);
+        dispatch({ type: "request_cancelled_locally", sessionId, requestId });
+      })
+      .catch(() => {});
+  };
+
+  const busyNotice = () =>
+    setAppNotice({ level: "info", text: "上一条还在回复，等它结束再发。" });
+
+  const sendToSession = async (sessionId: string, text: string): Promise<boolean> => {
     if (!aiReady) {
       setAppNotice({ level: "error", text: "还没有配置 AI，先配置后再对话。" });
       openSettings("ai");
-      return;
+      return false;
     }
+    const target = state.sessions.find((item) => item.id === sessionId);
+    if (
+      sendBusyRef.current.has(sessionId) ||
+      target?.requesting ||
+      target?.activeRequestId
+    ) {
+      busyNotice();
+      return false;
+    }
+
     const localRequestId = nextId("local");
+    sendBusyRef.current.add(sessionId);
     dispatch({ type: "send_user_message", sessionId, text, localRequestId });
 
-    void bridge
-      .sendMessage(sessionId, text)
-      .then(({ requestId }) =>
-        dispatch({ type: "request_started", sessionId, requestId }),
-      )
-      .catch((error: unknown) => {
-        dispatch({
-          type: "request_failed",
-          sessionId,
-          message: error instanceof Error ? error.message : String(error),
-        });
+    try {
+      const { requestId } = await bridge.sendMessage(sessionId, text);
+      requestSessionRef.current.set(requestId, sessionId);
+      dispatch({ type: "request_started", sessionId, requestId, localRequestId });
+      if (pendingStopRef.current.delete(sessionId)) {
+        cancelInFlight(sessionId, requestId);
+      }
+      return true;
+    } catch (error: unknown) {
+      sendBusyRef.current.delete(sessionId);
+      pendingStopRef.current.delete(sessionId);
+      const bridgeError = toBridgeError(error);
+      if (bridgeError.code === "BUSY") {
+        dispatch({ type: "send_rejected", sessionId, localRequestId });
+        busyNotice();
+        return false;
+      }
+      dispatch({
+        type: "request_failed",
+        sessionId,
+        message: bridgeError.message || "这条没有发出去，再试一次。",
       });
+      return true;
+    }
   };
 
-  const handleEmptySend = (text: string) => {
+  const handleEmptySend = (text: string): Promise<boolean> => {
     let target = session;
     if (!target) {
       target = createSession();
       dispatch({ type: "add_session", session: target });
     }
-    sendToSession(target.id, text);
+    return sendToSession(target.id, text);
   };
 
   const handleAskAi = (text: string) => {
@@ -785,9 +852,15 @@ export default function App() {
   };
 
   const handleStop = () => {
-    const requestId = session?.activeRequestId ?? null;
+    if (!session) return;
+    const requestId = session.activeRequestId;
     dispatch({ type: "cancel_request" });
-    if (requestId) void bridge.cancel(requestId);
+    if (requestId) {
+      cancelInFlight(session.id, requestId);
+      return;
+    }
+    // requestId 还没回来（正在发送）：等它到了再取消这一条。
+    if (session.requesting) pendingStopRef.current.add(session.id);
   };
 
   const handleNextAction = (action: NextAction) => {

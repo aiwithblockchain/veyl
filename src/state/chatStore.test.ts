@@ -45,6 +45,8 @@ describe("chatReducer", () => {
     });
     session = activeSession(state)!;
     expect(session.activeRequestId).toBe("req_1");
+    // request_started 只代表后端已开始，忙碌态要等 request_end 才解除。
+    expect(session.requesting).toBe(true);
 
     state = chatReducer(state, {
       type: "agent_event",
@@ -697,5 +699,152 @@ describe("chatReducer", () => {
     });
 
     expect(activeSession(state)!.status?.text).toBe("正在处理…");
+  });
+});
+
+
+// 单飞回归：requesting 到 request_end、气泡按 localRequestId 认领、BUSY 撤回。
+describe("单飞与 BUSY", () => {
+  function requestEnd(requestId: string) {
+    return {
+      name: AGENT_EVENTS.requestEnd,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        request_id: requestId,
+        assistant_message_id: `asst_${requestId}`,
+        result: "success" as const,
+        final_text: "好了",
+        error: null,
+        usage: null,
+        duration_ms: 10,
+        emitted_at: "",
+      },
+    };
+  }
+
+  it("发送后保持 requesting，直到该请求的 request_end", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "你好",
+      localRequestId: "local_fly",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_fly",
+      localRequestId: "local_fly",
+    });
+    expect(activeSession(state)!.requesting).toBe(true);
+
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: requestEnd("req_fly"),
+    });
+    expect(activeSession(state)!.requesting).toBe(false);
+    expect(activeSession(state)!.activeRequestId).toBeNull();
+  });
+
+  it("只把本次 localRequestId 的气泡绑到新 requestId", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "第一条",
+      localRequestId: "local_a",
+    });
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "第二条",
+      localRequestId: "local_b",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_b",
+      localRequestId: "local_b",
+    });
+
+    const messages = activeSession(state)!.messages;
+    const first = messages.find((message) => message.id === "pending_local_a");
+    const second = messages.find((message) => message.id === "pending_local_b");
+    expect(first?.role === "assistant" ? first.requestId : null).toBe("local_a");
+    expect(second?.role === "assistant" ? second.requestId : null).toBe("req_b");
+  });
+
+  it("ai_cancel 返回 false 时本地立即收尾，不等 request_end", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "连到日本",
+      localRequestId: "local_gone",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_gone",
+      localRequestId: "local_gone",
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: {
+        name: AGENT_EVENTS.messageChunk,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          request_id: "req_gone",
+          assistant_message_id: "asst_gone",
+          chunk: "说到一半。",
+          emitted_at: "",
+        },
+      },
+    });
+
+    state = chatReducer(state, {
+      type: "request_cancelled_locally",
+      sessionId,
+      requestId: "req_gone",
+    });
+
+    const session = activeSession(state)!;
+    expect(session.requesting).toBe(false);
+    expect(session.activeRequestId).toBeNull();
+    expect(session.status).toBeNull();
+    const assistant = session.messages[session.messages.length - 1];
+    expect(assistant.role === "assistant" ? assistant.streaming : true).toBe(false);
+  });
+
+  it("BUSY 被拒：撤回这次乐观插入的两条消息，其它内容不动", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "先前的",
+      localRequestId: "local_old",
+    });
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "这次的",
+      localRequestId: "local_reject",
+    });
+    state = chatReducer(state, {
+      type: "send_rejected",
+      sessionId,
+      localRequestId: "local_reject",
+    });
+
+    expect(activeSession(state)!.messages.map((message) => message.id)).toEqual([
+      "user_local_old",
+      "pending_local_old",
+    ]);
+    expect(activeSession(state)!.requesting).toBe(false);
+    expect(activeSession(state)!.activeRequestId).toBeNull();
   });
 });

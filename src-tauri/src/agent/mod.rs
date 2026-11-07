@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::claurst_session::provider::LlmCredentials;
 use crate::claurst_session::AivpnSession;
@@ -19,8 +20,11 @@ use crate::tools::VpnToolServices;
 pub struct AppState {
     pub services: Arc<dyn VpnToolServices>,
     sessions: Mutex<HashMap<String, SessionEntry>>,
-    /// request_id → session_id，用于取消。
+    /// request_id → session_id，用于占用会话槽与删除前检查。
     active_requests: parking_lot::Mutex<HashMap<String, String>>,
+    /// request_id → 取消令牌。令牌不挂在会话实例上：切 provider 会重建会话，
+    /// 但取消必须始终能找到正在跑的那一轮。
+    request_cancels: parking_lot::Mutex<HashMap<String, CancellationToken>>,
     credentials: parking_lot::RwLock<Option<LlmCredentials>>,
     /// 凭据每变一次 +1；已经建好的会话拿着旧凭据，下次取用时按代数重建。
     credential_generation: AtomicU64,
@@ -66,6 +70,7 @@ impl AppState {
             credential_generation: AtomicU64::new(0),
             sessions: Mutex::new(HashMap::new()),
             active_requests: parking_lot::Mutex::new(HashMap::new()),
+            request_cancels: parking_lot::Mutex::new(HashMap::new()),
             credentials: parking_lot::RwLock::new(credentials),
             working_dir: working_dir(),
         }
@@ -142,14 +147,47 @@ impl AppState {
         Ok(session)
     }
 
-    pub fn track_request(&self, request_id: &str, session_id: &str) {
-        self.active_requests
+    /// 占住会话的请求槽并创建取消令牌。同一会话已有请求在跑时返回它的
+    /// request_id，不覆盖、不排队；调用方据此拒绝这次发送。
+    ///
+    /// 令牌在占槽时就建好并存进 `AppState`：spawn 之前、切 provider 重建
+    /// 会话之后，`ai_cancel` 都能直接找到它。
+    pub fn reserve_request(
+        &self,
+        request_id: &str,
+        session_id: &str,
+    ) -> Result<CancellationToken, String> {
+        let mut active = self.active_requests.lock();
+        if let Some((existing, _)) = active
+            .iter()
+            .find(|(_, value)| value.as_str() == session_id)
+        {
+            return Err(existing.clone());
+        }
+        active.insert(request_id.to_string(), session_id.to_string());
+        let token = CancellationToken::new();
+        self.request_cancels
             .lock()
-            .insert(request_id.to_string(), session_id.to_string());
+            .insert(request_id.to_string(), token.clone());
+        Ok(token)
     }
 
-    pub fn untrack_request(&self, request_id: &str) {
+    /// 只取消指定请求；已结束或不存在返回 false，不误伤别的请求。
+    pub fn cancel_request(&self, request_id: &str) -> bool {
+        let cancels = self.request_cancels.lock();
+        match cancels.get(request_id) {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 释放会话槽与取消令牌。幂等；RAII guard 的 Drop 会调它。
+    pub fn finish_request(&self, request_id: &str) {
         self.active_requests.lock().remove(request_id);
+        self.request_cancels.lock().remove(request_id);
     }
 
     /// 该会话是否还有进行中的 AI 请求（删除会话前必须为空）。
@@ -158,12 +196,6 @@ impl AppState {
             .lock()
             .values()
             .any(|value| value == session_id)
-    }
-
-    /// 取消时由 request_id 找回会话；找不到说明这一轮已经结束。
-    pub async fn session_for_request(&self, request_id: &str) -> Option<Arc<AivpnSession>> {
-        let session_id = self.active_requests.lock().get(request_id).cloned()?;
-        self.existing(&session_id).await
     }
 
     pub async fn drop_session(&self, session_id: &str) {

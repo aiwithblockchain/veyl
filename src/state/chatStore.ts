@@ -73,7 +73,15 @@ export type ChatAction =
   | { type: "add_session"; session: Session }
   | { type: "send_user_message"; sessionId: string; text: string; localRequestId: string }
   | { type: "request_pending"; sessionId: string }
-  | { type: "request_started"; sessionId: string; requestId: string }
+  | {
+      type: "request_started";
+      sessionId: string;
+      requestId: string;
+      /** 这次发送的本地临时 id；只认领它对应的那条气泡。 */
+      localRequestId?: string;
+    }
+  | { type: "send_rejected"; sessionId: string; localRequestId: string }
+  | { type: "request_cancelled_locally"; sessionId: string; requestId: string }
   | { type: "request_failed"; sessionId: string; message: string }
   | { type: "agent_event"; event: import("../agent/protocol").AgentEvent }
   | { type: "cancel_request" }
@@ -312,7 +320,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         status: { text: "正在思考", phase: "thinking" },
         messages: [
           ...session.messages,
-          { id: nextId("user"), role: "user", text: action.text, at: now },
+          {
+            id: `user_${action.localRequestId}`,
+            role: "user",
+            text: action.text,
+            at: now,
+          },
           assistant,
         ],
       }));
@@ -334,13 +347,64 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return patchSession(state, target.id, (session) => ({
         ...session,
         activeRequestId: action.requestId,
+        // request_started 只表示「后端已经开始」，忙碌态要等 request_end 才解除。
+        requesting: true,
+        messages: action.localRequestId
+          ? session.messages.map((message) =>
+              message.role === "assistant" &&
+              (message.id === `pending_${action.localRequestId}` ||
+                message.requestId === action.localRequestId)
+                ? { ...message, requestId: action.requestId }
+                : message,
+            )
+          : session.messages,
+      }));
+    }
+
+    case "request_cancelled_locally": {
+      // 后端说这条请求已经不在了（ai_cancel 返回 false）：本地立即收尾，
+      // 不再等一个可能永远不会到的 request_end。
+      const target = state.sessions.find((session) => session.id === action.sessionId);
+      if (!target) return state;
+      return patchSession(state, target.id, (session) => {
+        if (
+          session.activeRequestId !== null &&
+          session.activeRequestId !== action.requestId
+        ) {
+          return session;
+        }
+        return {
+          ...session,
+          requesting: false,
+          activeRequestId: null,
+          status: null,
+          messages: session.messages.map((message) =>
+            message.role === "assistant" &&
+            message.requestId === action.requestId
+              ? {
+                  ...message,
+                  streaming: false,
+                  items: closeOpenThinking(message.items),
+                }
+              : message,
+          ),
+        };
+      });
+    }
+
+    case "send_rejected": {
+      // 发送被后端拒绝（例如 BUSY）：撤回这次乐观插入的用户气泡与等待气泡。
+      const target = state.sessions.find((session) => session.id === action.sessionId);
+      if (!target) return state;
+      return patchSession(state, target.id, (session) => ({
+        ...session,
         requesting: false,
-        messages: session.messages.map((message) =>
-          message.role === "assistant" &&
-          message.id.startsWith("pending_") &&
-          message.items.length === 0
-            ? { ...message, requestId: action.requestId }
-            : message,
+        activeRequestId: null,
+        status: null,
+        messages: session.messages.filter(
+          (message) =>
+            message.id !== `user_${action.localRequestId}` &&
+            message.id !== `pending_${action.localRequestId}`,
         ),
       }));
     }

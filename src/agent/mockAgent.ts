@@ -105,6 +105,8 @@ export class MockAgentBridge implements AgentBridge {
   private listeners = new Set<(event: AgentEvent) => void>();
   private cancelled = new Set<string>();
   private activeRequests = new Set<string>();
+  private activeBySession = new Map<string, string>();
+  private sessionByRequest = new Map<string, string>();
   private healthTimer: number | null = null;
   private trafficUp = 0;
   private trafficDown = 0;
@@ -903,6 +905,13 @@ export class MockAgentBridge implements AgentBridge {
     errorText?: string,
   ) {
     this.activeRequests.delete(requestId);
+    const sessionId = this.sessionByRequest.get(requestId);
+    if (sessionId !== undefined) {
+      this.sessionByRequest.delete(requestId);
+      if (this.activeBySession.get(sessionId) === requestId) {
+        this.activeBySession.delete(sessionId);
+      }
+    }
     this.emit({
       name: AGENT_EVENTS.requestEnd,
       payload: {
@@ -940,11 +949,22 @@ export class MockAgentBridge implements AgentBridge {
     text: string,
     _options?: { hidden?: boolean },
   ): Promise<{ requestId: string }> {
+    // 同一会话同一时刻只跑一条：与 Host 的单飞约束保持一致。
+    const active = this.activeBySession.get(sessionId);
+    if (active) {
+      throw {
+        code: "BUSY",
+        message: "上一条还在回复，等它结束再发。",
+        details: { reason: "request_in_flight", active_request_id: active },
+      };
+    }
     // 浏览器 mock 不落历史，hidden 与普通消息没有区别。
     const requestId = `req_${Math.random().toString(36).slice(2, 10)}`;
     const assistantId = `asst_${requestId}`;
     this.cancelled.delete(requestId);
     this.activeRequests.add(requestId);
+    this.activeBySession.set(sessionId, requestId);
+    this.sessionByRequest.set(requestId, sessionId);
 
     void this.run(sessionId, requestId, assistantId, text);
     return { requestId };
@@ -1281,8 +1301,10 @@ export class MockAgentBridge implements AgentBridge {
     this.finish(requestId, assistantId, "success", reply);
   }
 
-  async cancel(requestId: string): Promise<void> {
+  async cancel(requestId: string): Promise<boolean> {
+    if (!this.activeRequests.has(requestId)) return false;
     this.cancelled.add(requestId);
+    return true;
   }
 
   async renameSession(sessionId: string, title: string): Promise<RenamedSession> {    await sleep(250);

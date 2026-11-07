@@ -135,7 +135,50 @@ pub struct AivpnSession {
     tools: Vec<Box<dyn Tool>>,
     context: ToolContext,
     cost_tracker: Arc<CostTracker>,
-    cancel: Mutex<Option<CancellationToken>>,
+    cancel: CancelSlot,
+}
+
+/// 当前请求的取消令牌。**按 request_id 绑定**：
+/// 迟到的取消只能命中它自己那一轮，上一轮结束时也不会清掉下一轮的令牌。
+#[derive(Default)]
+struct CancelSlot(Mutex<Option<(String, CancellationToken)>>);
+
+impl CancelSlot {
+    async fn bind(&self, request_id: &str, token: CancellationToken) {
+        let mut slot = self.0.lock().await;
+        if let Some((existing_id, existing)) = slot.as_ref() {
+            if existing_id != request_id && !existing.is_cancelled() {
+                // 第二道防线：正常情况下同会话单请求，走到这里说明有人绕过了占槽。
+                log::warn!(
+                    "会话内已有未取消的请求 {existing_id}，又绑定了 {request_id}；单飞约束被绕过"
+                );
+            }
+        }
+        *slot = Some((request_id.to_string(), token));
+    }
+
+    /// 只清本请求的槽；别的请求已经接管时保持不动。
+    async fn clear(&self, request_id: &str) {
+        let mut slot = self.0.lock().await;
+        if slot
+            .as_ref()
+            .map(|(id, _)| id == request_id)
+            .unwrap_or(false)
+        {
+            *slot = None;
+        }
+    }
+
+    async fn cancel(&self, request_id: &str) -> bool {
+        let slot = self.0.lock().await;
+        match slot.as_ref() {
+            Some((id, token)) if id == request_id => {
+                token.cancel();
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 impl AivpnSession {
@@ -230,7 +273,7 @@ impl AivpnSession {
             tools,
             context,
             cost_tracker,
-            cancel: Mutex::new(None),
+            cancel: CancelSlot::default(),
         }))
     }
 
@@ -238,9 +281,15 @@ impl AivpnSession {
         &self.session_id
     }
 
-    pub async fn send_message(&self, request_id: String, text: String) -> anyhow::Result<()> {
-        let cancel = CancellationToken::new();
-        *self.cancel.lock().await = Some(cancel.clone());
+    pub async fn send_message<G: Send + 'static>(
+        &self,
+        request_id: String,
+        text: String,
+        cancel: CancellationToken,
+        slot_guard: G,
+    ) -> anyhow::Result<()> {
+        // 令牌由 AppState 在占槽时就建好并传入；这里只做会话内的辅助记录。
+        self.cancel.bind(&request_id, cancel.clone()).await;
 
         let request_session_id = self.session_id.clone();
         // 首启 = 新会话 + 本地还没有任何配置。只在这种时候放宽轮次上限：
@@ -479,7 +528,10 @@ impl AivpnSession {
         // 先清当前请求，再作废问题：反过来时提问泵可能读到旧 request_id 又 register 一次。
         crate::tools::policy::clear_current_request(&self.session_id);
         crate::agent::questions::cleanup_request(&request_session_id, &request_id);
-        *self.cancel.lock().await = None;
+        self.cancel.clear(&request_id).await;
+
+        // 先释放会话槽位，再发 request_end：前端收到结束立刻发下一条不会撞 BUSY。
+        drop(slot_guard);
 
         let duration_ms = started.elapsed().as_millis() as u64;
         // 只有正常收尾（含达到长度上限）才落库布局；取消/出错/超预算都不写。
@@ -553,10 +605,9 @@ impl AivpnSession {
         Ok(())
     }
 
-    pub async fn cancel(&self) {
-        if let Some(token) = self.cancel.lock().await.as_ref() {
-            token.cancel();
-        }
+    /// 只取消 `request_id` 对应的那一轮；不匹配返回 false，不误伤别的请求。
+    pub async fn cancel(&self, request_id: &str) -> bool {
+        self.cancel.cancel(request_id).await
     }
 }
 
@@ -825,6 +876,34 @@ mod audit_tests {
             let store = Arc::new(crate::store::Store::open_in_memory().expect("内存库"));
             crate::store::install_global(store);
         }
+    }
+
+    /// 取消与清理都按 request_id 绑定：迟到的取消不能误伤下一轮，
+    /// 上一轮收尾也不能把下一轮的令牌清掉。
+    #[tokio::test]
+    async fn cancel_and_clear_are_bound_to_the_request() {
+        let slot = CancelSlot::default();
+
+        let first = CancellationToken::new();
+        slot.bind("r1", first.clone()).await;
+        assert!(!slot.cancel("r2").await, "不能取消别的请求");
+        assert!(!first.is_cancelled(), "别的请求的令牌必须保持原样");
+
+        let second = CancellationToken::new();
+        slot.bind("r2", second.clone()).await;
+        slot.clear("r1").await;
+        assert!(
+            slot.cancel("r2").await,
+            "上一轮的收尾不能清掉下一轮的令牌"
+        );
+        assert!(second.is_cancelled());
+
+        let third = CancellationToken::new();
+        slot.bind("r3", third.clone()).await;
+        assert!(slot.cancel("r3").await, "匹配的请求必须能取消");
+        assert!(third.is_cancelled());
+        slot.clear("r3").await;
+        assert!(!slot.cancel("r3").await, "清掉后不再命中");
     }
 
     #[test]

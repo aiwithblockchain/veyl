@@ -420,7 +420,8 @@ export interface AgentBridge {
     text: string,
     options?: { hidden?: boolean },
   ): Promise<{ requestId: string }>;
-  cancel(requestId: string): Promise<void>;
+  /** 取消一条请求；返回 false = 后端确认这条请求已经不在跑了。 */
+  cancel(requestId: string): Promise<boolean>;
   /** 事件不可达时的兜底快照（契约 §5 `runtime_status`）。 */
   getRuntimeSnapshot(): Promise<RuntimeSnapshot | null>;
   /** UI 直连：发起连接；不传 configId 时用当前激活配置。 */

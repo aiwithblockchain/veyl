@@ -6,7 +6,7 @@ import { MessageItem } from "./MessageItem";
 
 interface Props {
   session: Session;
-  onSend: (text: string) => void;
+  onSend: (text: string) => void | boolean | Promise<void | boolean>;
   onStop: () => void;
   onNextAction: (action: NextAction) => void;
   hasKey: boolean;

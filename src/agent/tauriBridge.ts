@@ -642,8 +642,9 @@ export class TauriAgentBridge implements AgentBridge {
     return { requestId: response.request_id };
   }
 
-  async cancel(requestId: string): Promise<void> {
-    await call("ai_cancel", { requestId });
+  async cancel(requestId: string): Promise<boolean> {
+    const raw = await call<{ cancelled?: unknown }>("ai_cancel", { requestId });
+    return raw?.cancelled === true;
   }
 
   async getChatHistory(sessionId?: string): Promise<ChatHistory> {

@@ -35,8 +35,8 @@ interface Props {
   onNewSession: () => void;
   onRenameSession: (sessionId: string, title: string) => Promise<RenameResult>;
   onDeleteSession: (sessionId: string) => Promise<{ ok: boolean; message?: string }>;
-  onSend: (text: string) => void;
-  onEmptySend: (text: string) => void;
+  onSend: (text: string) => void | boolean | Promise<void | boolean>;
+  onEmptySend: (text: string) => void | boolean | Promise<void | boolean>;
   onStop: () => void;
   onNextAction: (action: NextAction) => void;
   onOpenSettings: () => void;

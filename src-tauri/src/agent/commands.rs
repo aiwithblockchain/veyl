@@ -33,26 +33,84 @@ pub async fn ai_send_message(
     session_id: String,
     text: String,
     hidden: Option<bool>,
-) -> Result<Value, String> {
-    let session = state
-        .session(&session_id)
-        .await
-        .map_err(|error| error.to_string())?;
+) -> Result<Value, Value> {
+    send_message_for_state(state.inner(), &session_id, &text, hidden.unwrap_or(false)).await
+}
 
-    if let Some(store) = crate::store::global() {
-        record_user_message(store, &session_id, &text, hidden.unwrap_or(false));
+/// 请求槽的 RAII 兜底：任务 panic、提前返回或被丢弃时照样释放，
+/// 不会给会话留下永久的 BUSY。
+struct RequestSlotGuard {
+    state: Arc<AppState>,
+    request_id: String,
+}
+
+impl Drop for RequestSlotGuard {
+    fn drop(&mut self) {
+        self.state.finish_request(&self.request_id);
+    }
+}
+
+/// 同一会话同一时刻只处理一条请求；第二条直接拒绝，**不落库、不排队**。
+async fn send_message_for_state(
+    state: &Arc<AppState>,
+    session_id: &str,
+    text: &str,
+    hidden: bool,
+) -> Result<Value, Value> {
+    if text.trim().is_empty() {
+        return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "INVALID_ARGUMENT",
+            "message": "消息不能为空",
+            "retryable": false,
+            "details": { "reason": "empty_text" },
+            "request_id": "",
+        }));
     }
 
     let request_id = AppState::next_request_id();
-    state.track_request(&request_id, &session_id);
+    let cancel = match state.reserve_request(&request_id, session_id) {
+        Ok(token) => token,
+        Err(active_request_id) => {
+            return Err(json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "code": "BUSY",
+                "message": "上一条消息还在处理中，等它回完再发",
+                "retryable": true,
+                "details": {
+                    "reason": "request_in_flight",
+                    "active_request_id": active_request_id,
+                },
+                "request_id": "",
+            }))
+        }
+    };
+    // 一旦占槽成功，释放交给 Drop：panic / 会话创建失败 / 任务被丢弃都覆盖。
+    let slot = RequestSlotGuard {
+        state: Arc::clone(state),
+        request_id: request_id.clone(),
+    };
 
-    let state_handle = Arc::clone(state.inner());
+    let session = match state.session(session_id).await {
+        Ok(session) => session,
+        // 提前返回时 slot 在这里析构，槽位不会卡住。
+        Err(error) => return Err(error_value(error)),
+    };
+
+    // 占槽成功后才落库：被拒绝的消息不能出现在聊天记录里。
+    if let Some(store) = crate::store::global() {
+        record_user_message(store, session_id, text, hidden);
+    }
+
+    let task_text = text.to_string();
     let task_request_id = request_id.clone();
     tokio::spawn(async move {
-        if let Err(error) = session.send_message(task_request_id.clone(), text).await {
+        if let Err(error) = session
+            .send_message(task_request_id, task_text, cancel, slot)
+            .await
+        {
             log::error!("[agent] send_message failed: {error}");
         }
-        state_handle.untrack_request(&task_request_id);
     });
 
     Ok(json!({ "request_id": request_id }))
@@ -60,13 +118,8 @@ pub async fn ai_send_message(
 
 #[tauri::command]
 pub async fn ai_cancel(state: State<'_, Arc<AppState>>, request_id: String) -> Result<Value, String> {
-    match state.session_for_request(&request_id).await {
-        Some(session) => {
-            session.cancel().await;
-            Ok(json!({ "cancelled": true }))
-        }
-        None => Ok(json!({ "cancelled": false })),
-    }
+    // 令牌存在 AppState 里，不依赖会话实例：spawn 前、切 provider 后都能取消。
+    Ok(json!({ "cancelled": state.cancel_request(&request_id) }))
 }
 
 /// 状态快照；事件不可达时 UI 的兜底（契约 §5）。
@@ -1250,6 +1303,159 @@ mod hidden_message_tests {
         let messages = crate::store::chat::messages(&conn, "ses_visible").unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "你好");
+    }
+}
+
+#[cfg(test)]
+mod send_message_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn install_store() {
+        if crate::store::global().is_none() {
+            let store = Arc::new(crate::store::Store::open_in_memory().expect("内存库"));
+            crate::store::install_global(store);
+        }
+    }
+
+    fn test_state() -> Arc<AppState> {
+        Arc::new(crate::agent::AppState::new_without_keychain(Arc::new(
+            crate::tools::services::NotWiredServices,
+        )))
+    }
+
+    /// 同一会话第二条请求必须被拒绝，而且**不能落库**。
+    #[tokio::test]
+    async fn a_second_send_is_rejected_without_persisting() {
+        install_store();
+        let state = test_state();
+        let session_id = "ses_busy_test";
+
+        let first = AppState::next_request_id();
+        let token = state.reserve_request(&first, session_id).unwrap();
+        assert!(!token.is_cancelled());
+        let second = AppState::next_request_id();
+        assert_eq!(
+            state.reserve_request(&second, session_id).unwrap_err(),
+            first,
+            "同一会话只能有一个请求槽"
+        );
+
+        let error = send_message_for_state(&state, session_id, "第二条", false)
+            .await
+            .unwrap_err();
+        assert_eq!(error["code"], "BUSY");
+        assert_eq!(error["details"]["reason"], "request_in_flight");
+        assert_eq!(error["details"]["active_request_id"], first.as_str());
+
+        let store = crate::store::global().expect("全局库已安装");
+        let conn = store.conn();
+        assert!(
+            crate::store::chat::messages(&conn, session_id).unwrap().is_empty(),
+            "被拒绝的消息不能落库"
+        );
+
+        state.finish_request(&first);
+    }
+
+    /// 成功路径：占槽 → guard 释放 → 可再次占槽。
+    #[tokio::test]
+    async fn the_slot_is_released_by_the_guard() {
+        let state = test_state();
+        let id = AppState::next_request_id();
+        state.reserve_request(&id, "ses_guard").unwrap();
+        drop(RequestSlotGuard {
+            state: Arc::clone(&state),
+            request_id: id,
+        });
+        assert!(state
+            .reserve_request(&AppState::next_request_id(), "ses_guard")
+            .is_ok());
+    }
+
+    /// 任务 panic 时 guard 照样释放，不会留下永久 BUSY。
+    #[tokio::test]
+    async fn a_panicking_task_releases_the_slot() {
+        let state = test_state();
+        let id = AppState::next_request_id();
+        state.reserve_request(&id, "ses_panic").unwrap();
+        let guard = RequestSlotGuard {
+            state: Arc::clone(&state),
+            request_id: id,
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held = guard;
+            panic!("boom");
+        }));
+        assert!(outcome.is_err());
+        assert!(
+            state
+                .reserve_request(&AppState::next_request_id(), "ses_panic")
+                .is_ok(),
+            "panic 后槽位必须释放"
+        );
+    }
+
+    /// 会话创建失败（没有凭据）也要释放槽位，不留下一条永远没人处理的“进行中”。
+    #[tokio::test]
+    async fn a_failed_session_creation_releases_the_slot() {
+        let state = test_state();
+        let session_id = "ses_no_credentials";
+        let error = send_message_for_state(&state, session_id, "你好", false)
+            .await
+            .unwrap_err();
+        assert_eq!(error["code"], "INTERNAL", "{error}");
+        assert!(
+            state
+                .reserve_request(&AppState::next_request_id(), session_id)
+                .is_ok(),
+            "会话创建失败后槽位必须释放"
+        );
+    }
+
+    /// 空文本在占槽与落库之前就被拒绝。
+    #[tokio::test]
+    async fn empty_text_is_rejected_before_reserving() {
+        install_store();
+        let state = test_state();
+        let session_id = "ses_empty";
+        let error = send_message_for_state(&state, session_id, "   ", false)
+            .await
+            .unwrap_err();
+        assert_eq!(error["code"], "INVALID_ARGUMENT");
+        assert_eq!(error["details"]["reason"], "empty_text");
+        assert!(
+            state
+                .reserve_request(&AppState::next_request_id(), session_id)
+                .is_ok(),
+            "被拒绝的空消息不能占槽"
+        );
+        let store = crate::store::global().expect("全局库已安装");
+        let conn = store.conn();
+        assert!(crate::store::chat::messages(&conn, session_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// 取消只命中指定请求；迟到的取消与旧 request_id 都不能误伤新请求。
+    #[tokio::test]
+    async fn cancel_targets_only_the_matching_request() {
+        let state = test_state();
+        let first = AppState::next_request_id();
+        let token = state.reserve_request(&first, "ses_cancel").unwrap();
+        assert!(!state.cancel_request("req_other"));
+        assert!(!token.is_cancelled(), "别的 request_id 不能取消它");
+        assert!(state.cancel_request(&first));
+        assert!(token.is_cancelled());
+
+        state.finish_request(&first);
+        assert!(!state.cancel_request(&first), "迟到的取消不能命中已结束的请求");
+
+        let second = AppState::next_request_id();
+        let token = state.reserve_request(&second, "ses_cancel").unwrap();
+        assert!(!state.cancel_request(&first), "旧 request_id 不能取消新请求");
+        assert!(!token.is_cancelled());
+        state.finish_request(&second);
     }
 }
 

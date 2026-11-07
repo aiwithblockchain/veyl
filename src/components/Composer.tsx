@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 interface Props {
   streaming: boolean;
   statusText: string | null;
-  onSend: (text: string) => void;
+  onSend: (text: string) => void | boolean | Promise<void | boolean>;
   onStop: () => void;
   /** 没有可用 AI 时禁用输入，并给出配置入口。 */
   disabled?: boolean;
@@ -23,6 +23,7 @@ export function Composer({
 }: Props) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const submittingRef = useRef(false);
 
   useEffect(() => {
     if (!focusSignal) return;
@@ -37,10 +38,20 @@ export function Composer({
   }, [value]);
 
   const submit = () => {
+    if (submittingRef.current) return;
     const text = value.trim();
     if (!text || streaming || disabled) return;
+    submittingRef.current = true;
     setValue("");
-    onSend(text);
+    void Promise.resolve(onSend(text))
+      .then((accepted) => {
+        // 被拦下（例如上一条还在回复）：把刚打的字放回去。
+        if (accepted === false) setValue((current) => current || text);
+      })
+      .catch(() => {})
+      .finally(() => {
+        submittingRef.current = false;
+      });
   };
 
   return (
@@ -74,7 +85,7 @@ export function Composer({
             disabled={disabled || streaming || value.trim().length === 0}
             onClick={submit}
           >
-            发送
+            {streaming ? "等待回复" : "发送"}
           </button>
         </div>
       </div>

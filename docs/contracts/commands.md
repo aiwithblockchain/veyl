@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.12.0`
+> 契约版本：`2.13.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -1268,11 +1268,19 @@ type SeedImportResult = {
 
 发送一条用户消息，返回本轮请求 id。事件见 `events.md` §3。
 
+**同一会话同一时刻只处理一条请求，不做排队。** 已有请求在跑时直接拒绝：
+
+- `code = BUSY`，`details = { "reason": "request_in_flight", "active_request_id": "<在跑的那条>" }`；
+- **不写 `chat_messages`、不启动请求**——落库再失败会让用户看到一条永远不回的消息，比拒绝更糟；
+- 前端应在发送入口就拦住（或把这条错误按「等上一条回完再发」展示），不要当普通失败重试。
+
 | 参数 | 规则 |
 |---|---|
-| `sessionId` | 必须存在；不存在 → `NOT_FOUND`。本命令**不创建会话** |
-| `text` | trim 后非空；为空 → `INVALID_ARGUMENT`，`details.reason = "empty_text"` |
+| `sessionId` | 不存在时**随首条消息创建**，不是错误：前端 `createSession()` 本地生成 id，换会话不需要额外 IPC。本命令不返回 `NOT_FOUND` |
+| `text` | trim 后非空；为空 → `INVALID_ARGUMENT`，`details.reason = "empty_text"`。**在占槽与落库之前拒绝** |
 | `hidden` | 可选，默认 `false` |
+
+**会话创建**：`sessionId` 由前端本地生成；首次发送时 Host 随用户消息一起创建会话记录（`chat_sessions`）。因此「不存在」是正常状态，不要为此加 `create_session` 前置命令，也不要按 `NOT_FOUND` 拒绝。
 
 `hidden` 的语义：
 
@@ -1288,7 +1296,7 @@ type SeedImportResult = {
 
 ### 9.2 `ai_cancel { requestId }` → `{ cancelled: boolean }`
 
-取消进行中的请求。已经结束 → `cancelled: false`，不报错。
+取消进行中的请求。**只取消 `requestId` 对应的那一轮**：请求已结束或它不是当前请求时返回 `cancelled: false`，不报错，也不误伤别的请求。
 
 ### 9.3 `chat_history { sessionId? }` / `chat_delete { sessionId }` / `rename_session { sessionId, title }`
 
@@ -1759,7 +1767,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.12.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` |
+| `contracts/commands.md` | **2.13.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 |
 | `contracts/events.md` | **2.10.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 |
 | `contracts/runtime.md` | **2.4.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 |
 | `contracts/tools.md` | **3.7.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` |
@@ -1777,6 +1785,15 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.13.0（2026-11-07，同会话单请求）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.13.0`；`ai_send_message` 在同一会话已有请求时返回 `BUSY / request_in_flight`（`details.active_request_id`），**不落库、不排队** | 语义变更 | 并发发送会让一条消息落库却没有回复，比拒绝更糟 |
+| 2 | `ai_cancel` 只取消 `requestId` 匹配的那一轮；不匹配返回 `cancelled: false`，不误伤其它请求 | 语义变更 | 旧实现共享一个取消令牌，第二轮会顶掉第一轮 |
+| 3 | §9.1 更正：`sessionId` 不存在时**随首条消息创建**，删掉「返回 `NOT_FOUND`」的旧写法（与前端本地生成 id、后端 `ensure_session` 的实现冲突）；`empty_text` 明确在**占槽与落库之前**拒绝 | 更正 | 强判 `NOT_FOUND` 会拒掉每个新会话的第一条消息 |
+| 4 | §15.5 矩阵同步本文件 2.13.0 | 元数据 | — |
 
 ### 2.12.0（2026-11-06，本地代理端口设置）
 
