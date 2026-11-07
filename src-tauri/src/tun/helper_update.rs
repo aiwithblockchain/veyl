@@ -868,6 +868,12 @@ mod macos {
                 SecCodeCopyGuestWithAttributes(std::ptr::null(), attributes, 0, &mut code);
             CFRelease(attributes);
             if status != 0 || code.is_null() {
+                // 这个调用失败会直接导致「判定为过期 → 重启 → 仍读不到 → 连接失败」，
+                // 必须把 OSStatus 留下，否则只能看到「无法确认 cdhash」这一句。
+                log::warn!(
+                    "读取运行中 helper 的代码签名失败 pid={pid} status={status} null={}",
+                    code.is_null()
+                );
                 return None;
             }
 
@@ -880,6 +886,9 @@ mod macos {
                 if matches {
                     unique_hex(info)
                 } else {
+                    log::warn!(
+                        "运行中 helper 的签名对不上 identifier={identifier:?} team={team:?}"
+                    );
                     None
                 }
             });
