@@ -855,11 +855,14 @@ mod macos {
             }
             let keys = [key];
             let values = [value];
+            // 回调传 null：字典不 retain 键值，所以这两个对象必须活到调用结束之后
+            // 再释放。曾经在调用前就 CFRelease，字典里留下悬垂指针，Security 读到
+            // 了垃圾，拿一个不存在的 pid 去查，返回 errSecCSGuestInvalid(-67067)。
             let attributes =
                 CFDictionaryCreate(std::ptr::null(), keys.as_ptr(), values.as_ptr(), 1, std::ptr::null(), std::ptr::null());
-            CFRelease(key);
-            CFRelease(value);
             if attributes.is_null() {
+                CFRelease(key);
+                CFRelease(value);
                 return None;
             }
 
@@ -867,6 +870,8 @@ mod macos {
             let status =
                 SecCodeCopyGuestWithAttributes(std::ptr::null(), attributes, 0, &mut code);
             CFRelease(attributes);
+            CFRelease(value);
+            CFRelease(key);
             if status != 0 || code.is_null() {
                 // 这个调用失败会直接导致「判定为过期 → 重启 → 仍读不到 → 连接失败」，
                 // 必须把 OSStatus 留下，否则只能看到「无法确认 cdhash」这一句。
