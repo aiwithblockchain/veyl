@@ -2596,6 +2596,117 @@ body[data-resizing] {
   margin: 18px 20px 0;
 }
 
+/* ---------- 新建配置 ---------- */
+
+.new-config {
+  width: min(480px, calc(100vw - 48px));
+  padding-bottom: 24px;
+}
+
+.new-config .modal__head {
+  padding: 16px 24px 14px;
+}
+
+.new-config .modal__title {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.new-config__modes {
+  margin: 16px 24px 0;
+}
+
+.new-config__label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.new-config__mode-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.new-config__mode {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: transparent;
+  text-align: left;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.new-config__mode:hover {
+  border-color: var(--ink-3);
+  background: var(--bg-hover);
+}
+
+.new-config__mode.is-selected {
+  border-color: var(--ink);
+  background: var(--bg-hover);
+}
+
+.new-config__mode-title {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.new-config__mode-text {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-3);
+}
+
+.new-config__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 16px 24px 0;
+}
+
+.new-config__input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-card);
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+}
+
+.new-config__input:focus {
+  outline: 0;
+  border-color: var(--signal);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.new-config__note {
+  margin: 16px 24px 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--ink-3);
+}
+
+.new-config__error {
+  margin: 12px 24px 0;
+  font-size: 13px;
+  color: var(--err-text);
+}
+
+.new-config .confirm__actions {
+  margin: 24px 24px 0;
+}
+
 /* 输入框的发送按钮不是主按钮：对话页的唯一实心按钮属于右栏。 */
 .btn--send {
   border: 1px solid var(--line-strong);

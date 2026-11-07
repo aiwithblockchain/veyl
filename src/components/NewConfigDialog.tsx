@@ -132,8 +132,8 @@ export function NewConfigDialog({ configs, onClose, onCreate }: Props) {
 
         <p className="new-config__note">
           {mode === "tun"
-            ? "这套会接管全部流量。以后可以在左侧随时切回来。"
-            : "这套只提供一个本机代理地址，需要填代理设置的软件才走。以后可以在左侧随时切回来。"}
+            ? "以后可以在左侧随时切回代理方式。"
+            : "以后可以在左侧随时切回接管全部流量。"}
         </p>
 
         {error ? <p className="new-config__error">{error}</p> : null}
