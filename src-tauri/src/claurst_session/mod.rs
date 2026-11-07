@@ -1243,14 +1243,15 @@ mod prompt_tests {
         assert!(jp.contains("用户所在地区：日本"));
     }
 
-    /// 「再建一套配置」是 AI 协助入口的整条流程：跳过环境检测、三问、确认后落库。
+    /// 「再建一套配置」是 AI 协助入口的整条流程：跳过环境检测、两问、确认后落库。
     #[test]
     fn the_add_another_config_section_is_present() {
         let text = system_prompt(&[], &crate::rules::Region::Cn);
         assert!(text.contains("# 再建一套配置"), "缺少「再建一套配置」一节");
         for needle in [
             "不要重新做环境检测",
-            "三问",
+            "两问",
+            "浏览器上网页",
             "节点从哪来",
             "用户确认之前不调用 `ConfigCreate`",
             "不要因为已经有一套配置就拒绝",
