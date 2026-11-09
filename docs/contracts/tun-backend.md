@@ -1,6 +1,6 @@
 # 契约：TUN 特权后端
 
-> 契约版本：`1.0.7`
+> 契约版本：`1.1.0`
 > 状态：**已定稿，待实现**（2026-11-05）
 > 定位：`TunBackend` 抽象、请求/回复信封、错误码、快照形状、四条不变式。**只定契约，不含实现。**
 > 上游：[`../tun-privilege-implementation-plan.md`](../tun-privilege-implementation-plan.md)（双平台计划）、[`../tun-privilege.md`](../tun-privilege.md)（macOS 信任模型）、[`../windows-tun.md`](../windows-tun.md)（Windows 设计）、[`../tun-mode.md`](../tun-mode.md)（连接语义与失败处理）
@@ -294,7 +294,16 @@ type TunError = {
 
 只放行生成器真的会产出的字段；**多余键拒绝，不是忽略**——忽略等于让它静静地影响特权进程的行为。
 
-allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端共用同一份实现（`protocol::prepare_config` 平台无关）。Windows 需要的 `stack` / `strict_route` / `interface_name` 已在 `INBOUND_KEYS` 内；将来若新增平台专属键，**必须同时加到 allowlist 并在本文登记**，不允许 Windows 侧另抄一份。
+allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端共用同一份实现（`protocol::prepare_config` 平台无关）。`INBOUND_KEYS` 已包含 `stack` / `mtu` / `strict_route` / `interface_name`；将来若新增键，**必须同时加到 allowlist 并在本文登记**，不允许某个平台另抄一份。
+
+#### 5.2.1 `stack` / `mtu` 必须显式写（1.1.0）
+
+| 字段 | 值 | 不写会怎样 |
+|---|---|---|
+| `stack` | `gvisor`（两个平台相同） | sing-box 1.14 在 Darwin 上（`WithGVisor && !GSO`）默认落到 `mixed`：UDP 走 gvisor、TCP 走**系统栈的内核 NAT**。2026-11-09 实测：mixed 的 TCP 握手永远不完成——SYN 进了 utun4 没有 SYN-ACK，sing-box 侧零 `inbound connection`，用户侧就是「已连接但网页打不开」 |
+| `mtu` | `9000` | Darwin 在非 Network Extension 模式下默认 65535（`protocol/tun/inbound.go`），MSS 变成 65495；64KB 段在真实 1500 路径上只能靠分片兜底，UDP 大包容易被中间设备丢掉 |
+
+两个字段都必须出现在生成的配置里，不能依赖 sing-box 的平台默认值——默认值是随版本和运行形态变的，不是契约。
 
 ### 5.3 不变式 3：只收 tun 入站
 
@@ -339,7 +348,7 @@ allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端�
 | 3 | 对端校验（**双向**） | 两侧都由系统兜住：服务端由 libxpc 验签，客户端由 launchd 的服务命名空间保证 | 两侧都要自己写：服务端验客户端签名，客户端把 SCM 的服务 PID 与 `GetNamedPipeServerProcessId` 比对 | 否（机制不同，顺序不变量相同） |
 | 4 | 请求内容 | `method` + `config` 文本 | 同左 | **是** |
 | 5 | 回复内容 | 同一组键 | 同左 | **是** |
-| 6 | 配置值 | `interface_name` 留空、无 `strict_route` | 可设 `strict_route` / `stack`、Wintun 由 sing-box 自带 | **是**（信封同形，值不同；都过同一份 allowlist） |
+| 6 | 配置值 | `interface_name` 留空；`stack: "gvisor"` / `mtu: 9000` | `strict_route` 额外为 `true`，Wintun 由 sing-box 自带；`stack` / `mtu` 同值 | **是**（信封同形，值不同；都过同一份 allowlist） |
 
 结论：**共享层只处理 `(method, config_text) → (ok, code, message, payload)`**，平台后端只负责把这三个值搬过承载并做对端校验。任何平台专属字段都不许进信封——需要平台差异时，写进配置文本，让 allowlist 管。
 
@@ -397,6 +406,15 @@ allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端�
 macOS 侧没有 R1 / R2：XPC 的对端校验由 libxpc 基于连接上的审计令牌完成，不读路径、不依赖磁盘状态；签名有效性由系统在加载时判定。这也是 §6 第 3 项「机制不同」的实际含义——Windows 自己实现的那一侧，把 macOS 由系统兜住的保证接管过来，也就接管了它的边界。
 
 ## 10. 变更记录
+
+### 1.1.0（2026-11-09，TUN 显式 gvisor 与 MTU）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `1.1.0` | 元数据 | TUN 能连上但不通 |
+| 2 | 新增 §5.2.1：`stack` 固定 `gvisor`、`mtu` 固定 `9000`，两个平台都显式写；写明不写时的默认值（Darwin 落 `mixed`、MTU 65535）与 2026-11-09 实测的 TCP 握手不完成 | 约束新增 | mixed 的 TCP 走内核 NAT，SYN 进 utun4 后没有 SYN-ACK，sing-box 零 `inbound connection` |
+| 3 | §6 平台矩阵第 6 行改为「`stack` / `mtu` 两平台同值，Windows 另有 `strict_route`」 | 澄清 | 契约原来只把 `stack` 写成 Windows 专属 |
+| 4 | `INBOUND_KEYS` 已含 `mtu` / `stack`，本次没有新增键 | 元数据 | — |
 
 ### 1.0.7（2026-11-05，helper 自更新与版本探针）
 

@@ -39,9 +39,20 @@ pub const TUN_ADDRESS: &str = TUN_ADDRESS_WINDOWS;
 #[cfg(not(target_os = "windows"))]
 pub const TUN_ADDRESS: &str = TUN_ADDRESS_MACOS;
 
-/// Windows TUN 入站的协议栈。`gvisor` 是纯用户态实现，不依赖系统栈，
-/// Windows 上与其它 VPN / 安全软件的共存问题最少；更换前先看交接文档里的实测项。
-pub const WINDOWS_TUN_STACK: &str = "gvisor";
+/// TUN 入站的协议栈，两个平台用同一个值。
+///
+/// **必须显式写。** 不写时 sing-box 1.14 在 Darwin 上落到 `mixed`：UDP 走 gvisor、
+/// TCP 走系统栈的内核 NAT。实测（2026-11-09）macOS 上 mixed 的 TCP 永远握手不完成——
+/// SYN 进了 utun4 没有 SYN-ACK，sing-box 侧一条 `inbound connection` 都没有，
+/// 表现就是「连上了但网页打不开」。gvisor 全部在用户态，不依赖内核 NAT。
+pub const TUN_STACK: &str = "gvisor";
+
+/// TUN 设备的 MTU。
+///
+/// 不写时 sing-box 在 Darwin 上默认 65535（`protocol/tun/inbound.go`，非 Network
+/// Extension 分支），MSS 会变成 65495。显式给 9000 让 MSS 落到 8960，
+/// 避开 64KB 段在 UDP 大包与真实 1500 路径上的分片风险。
+pub const TUN_MTU: u32 = 9000;
 
 /// TUN 模式下 DNS 的地址族策略。
 ///
@@ -483,6 +494,12 @@ pub fn excludes(local: &[String], user: &[String]) -> Vec<String> {
 /// 而不是按字面量匹配——用户把段写成 `198.18.0.0/16` 也躲不过。
 ///
 /// macOS 保持不变：那边 TUN 是 `172.19.0.1/30`，固定表里的私有段不参与本轮调整。
+///
+/// **观测项**（2026-11-09「能连不能通」排查）：`172.19.0.1/30` 落在排除段
+/// `172.16.0.0/12` 里。当时怀疑过它——`mixed` 栈的 TCP 走内核 NAT，改写目标是 utun 的
+/// 对端 `172.19.0.2`，整段被排除可能让内核不把它当本地地址。后来改成显式
+/// `gvisor`（见 [`TUN_STACK`]）不再依赖内核 NAT，这条没有改。**若再出现
+/// 「切了 gvisor 还不通」，先查这里**：临时去掉 `172.16.0.0/12` 或换 TUN 地址段验证。
 pub fn fixed_excludes() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {

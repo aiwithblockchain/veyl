@@ -1194,16 +1194,7 @@ impl Supervisor {
 
         #[cfg(debug_assertions)]
         {
-            let address = prepared["inbounds"]
-                .as_array()
-                .and_then(|entries| entries.first())
-                .and_then(|entry| entry.get("address"))
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .split('/')
-                .next()
-                .unwrap_or_default()
-                .to_string();
+            let address = diag_tun_address(&prepared);
             diag(self, uid, &format!("接管开始 等待路由 address={address}"));
             let phase = Instant::now();
             let mut found = None;
@@ -1836,6 +1827,28 @@ fn short_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let digest = hex(Sha256::digest(bytes).as_slice());
     digest.get(..12).unwrap_or(&digest).to_string()
+}
+
+/// 从配置里取第一个 TUN 入站的地址，去掉前缀长度。
+///
+/// `address` 在 sing-box 配置里是**数组**（`["172.19.0.1/30"]`）。早先按字符串取，
+/// 结果永远是空串，诊断固定打成「未找到 TUN 设备」，误导过一轮排查。
+#[cfg(any(debug_assertions, test))]
+fn diag_tun_address(config: &serde_json::Value) -> String {
+    config["inbounds"]
+        .as_array()
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry.get("address"))
+        .and_then(|value| match value {
+            serde_json::Value::Array(list) => list.first(),
+            other => Some(other),
+        })
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// 从 `ifconfig -a` 里找持有该地址的 utun。地址不带前缀长度。
@@ -2564,6 +2577,29 @@ mod tests {
             std::env::temp_dir().join(format!("veyl-helper-{tag}-{:016x}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn diag_reads_the_tun_address_from_the_array() {
+        let config = serde_json::json!({
+            "inbounds": [{ "type": "tun", "address": ["172.19.0.1/30"] }]
+        });
+        assert_eq!(diag_tun_address(&config), "172.19.0.1");
+
+        // 老形状（字符串）也认，别在换写法时把诊断再打回空串。
+        let single = serde_json::json!({
+            "inbounds": [{ "type": "tun", "address": "198.18.0.1/15" }]
+        });
+        assert_eq!(diag_tun_address(&single), "198.18.0.1");
+    }
+
+    #[test]
+    fn diag_address_is_empty_when_the_config_has_none() {
+        assert_eq!(diag_tun_address(&serde_json::json!({})), "");
+        assert_eq!(
+            diag_tun_address(&serde_json::json!({ "inbounds": [{ "type": "tun" }] })),
+            ""
+        );
     }
 
     #[test]

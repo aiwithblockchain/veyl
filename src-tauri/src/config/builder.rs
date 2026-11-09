@@ -206,7 +206,7 @@ fn inbound(input: &BuildInput) -> Value {
             "listen_port": input.mixed_port,
         }),
         ConnectMode::Tun => {
-            // Windows 才追加平台字段，其它平台上这个 `mut` 用不到。
+            // 只有 Windows 会再追加字段，其它平台上这个 `mut` 用不到。
             #[allow(unused_mut)]
             let mut inbound = json!({
                 "type": "tun",
@@ -214,15 +214,17 @@ fn inbound(input: &BuildInput) -> Value {
                 // 留空 interface_name：macOS 只接受 utunN，写死名字会 `bad tun name`；
                 // Windows 交给 Wintun 自己命名。
                 "address": [crate::tun::TUN_ADDRESS],
+                // stack / mtu 两个平台一致，理由见 `tun::TUN_STACK` / `tun::TUN_MTU`。
+                // 不写这两个字段时 macOS 上 TCP 走内核 NAT、握手不完成（2026-11-09 实测）。
+                "stack": crate::tun::TUN_STACK,
+                "mtu": crate::tun::TUN_MTU,
                 "auto_route": true,
                 "route_exclude_address": input.tun_excludes,
             });
             #[cfg(target_os = "windows")]
             {
                 // 平台差异（`docs/windows-tun-w3-handover.md` §2）：
-                // strict_route 用 WFP 挡住 TUN 之外的 DNS/流量泄漏；
-                // gvisor 栈不依赖系统栈，与其它 VPN / 安全软件共存问题最少。
-                inbound["stack"] = json!(crate::tun::WINDOWS_TUN_STACK);
+                // strict_route 用 WFP 挡住 TUN 之外的 DNS/流量泄漏。
                 inbound["strict_route"] = json!(true);
             }
             inbound
@@ -738,6 +740,10 @@ mod tests {
         assert_eq!(tun["inbounds"][0]["tag"], "tun-in");
         assert_eq!(tun["inbounds"][0]["address"][0], crate::tun::TUN_ADDRESS);
         assert_eq!(tun["inbounds"][0]["auto_route"], true);
+        // 这两个字段不能省：空 `stack` 在 macOS 上落到 mixed，TCP 走内核 NAT，
+        // 实测握手永远不完成；空 `mtu` 落到 65535，MSS 会变成 65495。
+        assert_eq!(tun["inbounds"][0]["stack"], "gvisor");
+        assert_eq!(tun["inbounds"][0]["mtu"], 9000);
         assert!(
             tun["inbounds"][0].get("listen_port").is_none(),
             "TUN 没有代理端口"
@@ -839,7 +845,8 @@ mod tests {
         let config = build_routed(&tun_input(), &routed_plan()).unwrap();
         let inbound = &config["inbounds"][0];
         assert_eq!(inbound["address"][0], crate::tun::TUN_ADDRESS_WINDOWS);
-        assert_eq!(inbound["stack"], crate::tun::WINDOWS_TUN_STACK);
+        assert_eq!(inbound["stack"], crate::tun::TUN_STACK);
+        assert_eq!(inbound["mtu"], crate::tun::TUN_MTU);
         assert_eq!(inbound["strict_route"], true);
         assert!(
             inbound.get("interface_name").is_none(),

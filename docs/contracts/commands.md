@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.16.0`
+> 契约版本：`2.16.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -1824,7 +1824,7 @@ type RulesStatus = {
 | `contracts/tools.md` | **3.8.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` |
 | `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
 | `contracts/routing.md` | **1.3.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 + 地区判定统一与未知地区不回落 |
-| `contracts/tun-backend.md` | **1.0.7** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 |
+| `contracts/tun-backend.md` | **1.1.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack: "gvisor"` / `mtu: 9000` |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
 
 ### 15.6 2.1.0 新增（非破坏性）
@@ -1836,6 +1836,12 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.16.1（2026-11-09，矩阵同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.1`；§15.5 矩阵同步 `tun-backend.md` 1.1.0（TUN 显式 `stack: "gvisor"` / `mtu: 9000`） | 元数据 | TUN 能连不能通的修复在 `tun-backend.md` |
 
 ### 2.16.0（2026-11-07，提问接受自由文本）
 
