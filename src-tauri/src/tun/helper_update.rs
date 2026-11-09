@@ -678,6 +678,10 @@ mod macos {
             flags: u32,
             information: *mut *const c_void,
         ) -> i32;
+        // Security 按 CFString 键查字典，依赖字典本身带键回调；传 null 回调的
+        // 字典它查不到 pid，直接返回 errSecCSGuestInvalid(-67067)。
+        static kCFTypeDictionaryKeyCallBacks: c_void;
+        static kCFTypeDictionaryValueCallBacks: c_void;
     }
 
     const UTF8: u32 = 0x0800_0100;
@@ -855,11 +859,18 @@ mod macos {
             }
             let keys = [key];
             let values = [value];
-            // 回调传 null：字典不 retain 键值，所以这两个对象必须活到调用结束之后
-            // 再释放。曾经在调用前就 CFRelease，字典里留下悬垂指针，Security 读到
-            // 了垃圾，拿一个不存在的 pid 去查，返回 errSecCSGuestInvalid(-67067)。
-            let attributes =
-                CFDictionaryCreate(std::ptr::null(), keys.as_ptr(), values.as_ptr(), 1, std::ptr::null(), std::ptr::null());
+            // 必须用 CFType 回调。传 null 回调时字典没有键比较能力，Security 按
+            // "pid" 查不到，直接返回 errSecCSGuestInvalid(-67067)——命令行探针对
+            // 同一个 pid 用标准回调就能正常取到签名，是这段差异暴露了原因。
+            // 回调会 retain，所以两个对象在调用后再释放是安全的。
+            let attributes = CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                std::ptr::addr_of!(kCFTypeDictionaryKeyCallBacks),
+                std::ptr::addr_of!(kCFTypeDictionaryValueCallBacks),
+            );
             if attributes.is_null() {
                 CFRelease(key);
                 CFRelease(value);
