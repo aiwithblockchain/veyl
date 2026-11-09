@@ -4,7 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { AgentEvent, NextAction, RuntimeView } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
-import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, viewAfterConnected } from "./agent/bridge";
+import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
 import type {
   ConfigCreateInput,
   DefaultProfileStatus,
@@ -200,6 +200,8 @@ export default function App() {
   const lastSampleAtRef = useRef<string | null>(null);
   // 快照请求的单调序号：只接受最新一次请求，避免旧快照晚到覆盖新状态。
   const snapshotSeq = useRef(0);
+  // 断开命令返回前，迟到的 online 事件/快照不能把界面推回已连接。
+  const stoppingRef = useRef(false);
 
   const session = activeSession(state);
 
@@ -213,6 +215,10 @@ export default function App() {
     const versionAtRequest = healthVersion.current;
     void bridge.getRuntimeSnapshot().then((snapshot) => {
       if (!snapshot || requestId !== snapshotSeq.current) return;
+      // 断开还没结束：在线快照是上一段连接的残留，不能把状态推回去。
+      if (stoppingRef.current && (snapshot.state === "running" || snapshot.state === "degraded")) {
+        return;
+      }
       const base = snapshotToView(snapshot);
       setRuntime((current) =>
         versionAtRequest === healthVersion.current
@@ -362,6 +368,14 @@ export default function App() {
 
   useEffect(() => {
     return bridge.subscribe((event) => {
+      if (
+        event.name === AGENT_EVENTS.runtimeStateChanged &&
+        stoppingRef.current &&
+        (event.payload.to === "running" || event.payload.to === "degraded")
+      ) {
+        // 断开过程中迟到的在线事件：以 stop 的结果为准，不让界面翻回已连接。
+        return;
+      }
       if (event.name === AGENT_EVENTS.runtimeHealthChanged) {
         healthVersion.current += 1;
         const traffic = event.payload.traffic;
@@ -1054,6 +1068,7 @@ export default function App() {
   };
 
   const handleVpnStart = () => {
+    stoppingRef.current = false;
     void vpn.start().then((result) => {
       showActionResult(result, "启动失败");
       if (!result.connected) return;
@@ -1066,7 +1081,33 @@ export default function App() {
   };
 
   const handleVpnStop = () => {
-    void vpn.stop().then((result) => showActionResult(result, "断开失败"));
+    // 记下点断开这一刻是不是已连接：断开失败时只有原本在线才恢复在线。
+    const wasConnected = runtime.state === "running" || runtime.state === "degraded";
+    stoppingRef.current = true;
+    void vpn.stop().then(
+      (result) => {
+        showActionResult(result, "断开失败");
+        stoppingRef.current = false;
+        if (result.stopped) {
+          // stop 成功说明已经断开；清掉连接期字段，别让界面停在已连接。
+          setFailedAfterConnected(false);
+          setRuntime((view) => viewAfterStopped(view));
+          refreshSnapshot();
+          return;
+        }
+        if (!result.ok) {
+          // 断开失败：原本在线就回到已连接并报错，不能显示成断开成功。
+          if (wasConnected) setRuntime((view) => viewAfterConnected(view));
+          refreshSnapshot();
+          return;
+        }
+        // 被新一轮 start 接管等空返回：只把快照补回来。
+        refreshSnapshot();
+      },
+      () => {
+        stoppingRef.current = false;
+      },
+    );
   };
 
   // 用户主动点「让 AI 帮我配」：打开右栏、给焦点；会话空闲时直接发一条可见的用户消息。

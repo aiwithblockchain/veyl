@@ -14,6 +14,8 @@ export interface ActionResult {
   message?: string;
   /** 这次 start 真的把运行时连上了（不是重入、取消或被作废的空返回）。 */
   connected?: boolean;
+  /** 这次 stop 真的把运行时断开了（不是重入或失败的返回）。 */
+  stopped?: boolean;
   /** 后端 `details.reason`；界面需要按原因分支时用，不解析 message。 */
   reason?: string;
 }
@@ -173,6 +175,9 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
   // start / stop 各推进一个序号：start 每次 await 回来先确认自己还是有效的。
   const startSeqRef = useRef(0);
   const cancelSeqRef = useRef(0);
+  const stopSeqRef = useRef(0);
+  // 断开命令返回前，迟到的 online 事件不能把连接态推回已连接。
+  const stopPendingRef = useRef(false);
 
   const clearTimer = () => {
     if (timer.current !== null) {
@@ -281,6 +286,13 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     if (mock) return;
     return bridge.subscribe((event) => {
       if (event.name === AGENT_EVENTS.runtimeStateChanged) {
+        if (
+          stopPendingRef.current &&
+          (event.payload.to === "running" || event.payload.to === "degraded")
+        ) {
+          // 断开还没结束：迟到的在线事件以 stop 的结果为准。
+          return;
+        }
         // 先按事件把按钮状态切过去，别等快照：两者之间隔着一次 IPC，
         // 这期间中间区已经按新 state 渲染，顶部却还停在旧文案。
         setConnection(toConnectionState(event.payload.to));
@@ -440,6 +452,9 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     startingRef.current = true;
     const startSeq = ++startSeqRef.current;
     const cancelSeq = cancelSeqRef.current;
+    // 新一轮 start 接管：还没结束的 stop 不要再把界面按已断开收尾。
+    stopSeqRef.current += 1;
+    stopPendingRef.current = false;
     // 新一轮 start 或 stop 都会让这次 start 作废。
     const stale = () =>
       startSeqRef.current !== startSeq || cancelSeqRef.current !== cancelSeq;
@@ -526,6 +541,10 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     startingRef.current = false;
     setCheckingHelper(false);
     setPreparingHelper(false);
+    const stopSeq = ++stopSeqRef.current;
+    const wasConnected = connection === "connected";
+    const wasConfigId = connectedConfigId;
+    stopPendingRef.current = true;
 
     if (mock) {
       clearTimer();
@@ -534,21 +553,31 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       void bridge.runtimeStop().catch(() => undefined);
       timer.current = window.setTimeout(() => {
         timer.current = null;
+        stopPendingRef.current = false;
         setConnection("idle");
         setConnectedConfigId(null);
       }, 400);
       return { ok: true };
     }
 
+    setConnection("stopping");
     try {
-      setConnection("stopping");
       await bridge.runtimeStop();
       await refreshReal();
-      setConnection((current) => (current === "stopping" ? "idle" : current));
-      return { ok: true };
+      // 被新一轮 start 接管：停止结果不能覆盖新一轮。
+      if (stopSeqRef.current !== stopSeq) return { ok: true };
+      stopPendingRef.current = false;
+      // runtimeStop 成功就是断开了。快照可能还停在 running，不能让它否定这次结果。
+      setConnection("idle");
+      setConnectedConfigId(null);
+      return { ok: true, stopped: true };
     } catch (err) {
+      // 被接管时静默让位；否则断开失败必须保持原状态并报错。
+      if (stopSeqRef.current !== stopSeq) return { ok: true };
       await refreshReal();
-      setConnection((current) => (current === "stopping" ? "idle" : current));
+      stopPendingRef.current = false;
+      setConnection(wasConnected ? "connected" : "idle");
+      setConnectedConfigId(wasConnected ? wasConfigId : null);
       return { ok: false, message: actionMessage(err, "断开失败") };
     }
   };

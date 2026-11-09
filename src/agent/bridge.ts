@@ -577,6 +577,23 @@ export function viewAfterConnected(view: RuntimeView): RuntimeView {
   return { ...view, state: "running", last_error: null };
 }
 
+/** stop 返回成功即已经断开；清掉连接期字段，避免面板继续显示出口与计时。 */
+export function viewAfterStopped(view: RuntimeView): RuntimeView {
+  return {
+    ...view,
+    state: "idle",
+    pid: null,
+    connected_since: null,
+    port_fallback: null,
+    route_region: null,
+    latency_ms: null,
+    node_latency_ms: null,
+    traffic: null,
+    connections: null,
+    last_error: null,
+  };
+}
+
 /** 把快照与事件合并成状态面板的视图。 */
 export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): RuntimeView {
   switch (event.name) {

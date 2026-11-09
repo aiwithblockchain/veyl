@@ -611,6 +611,78 @@ describe("mock 启动", () => {
   });
 });
 
+describe("断开的状态收尾", () => {
+  async function connectedHook(bridge: AgentBridge) {
+    const utils = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(utils.result.current.activeConfig).not.toBeNull());
+    await act(async () => {
+      await utils.result.current.start();
+    });
+    expect(utils.result.current.connection).toBe("connected");
+    return utils;
+  }
+
+  it("断开成功后进入 idle，并标记 stopped", async () => {
+    const bridge = makeStartBridge("system_proxy");
+    const { result } = await connectedHook(bridge);
+
+    let outcome: ActionResult | undefined;
+    await act(async () => {
+      outcome = await result.current.stop();
+    });
+
+    expect(outcome).toEqual({ ok: true, stopped: true });
+    expect(result.current.connection).toBe("idle");
+    expect(result.current.connectedConfigId).toBeNull();
+  });
+
+  it("断开期间收到迟到的 running 事件，完成后仍是 idle", async () => {
+    const stopGate = deferred<void>();
+    const { bridge, emit } = makeEventedStartBridge("system_proxy");
+    const { result } = await connectedHook(bridge);
+    (bridge as unknown as { runtimeStop: unknown }).runtimeStop = vi.fn(
+      () => stopGate.promise,
+    );
+
+    let pending!: Promise<ActionResult>;
+    let outcome: ActionResult | undefined;
+    act(() => {
+      pending = result.current.stop().then((value) => (outcome = value));
+    });
+    await waitFor(() => expect(bridge.runtimeStop).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      emit(stateEvent("stopping", "running"));
+    });
+    // 断开中的迟到在线事件被忽略，界面继续停在「正在断开」。
+    expect(result.current.connection).toBe("stopping");
+
+    await act(async () => {
+      stopGate.resolve();
+      await pending;
+    });
+    expect(outcome).toEqual({ ok: true, stopped: true });
+    expect(result.current.connection).toBe("idle");
+  });
+
+  it("断开失败保持已连接并报错", async () => {
+    const bridge = makeStartBridge("system_proxy");
+    const { result } = await connectedHook(bridge);
+    (bridge as unknown as { runtimeStop: unknown }).runtimeStop = vi.fn(async () => {
+      throw { code: "INTERNAL", message: "断开失败" };
+    });
+
+    let outcome: ActionResult | undefined;
+    await act(async () => {
+      outcome = await result.current.stop();
+    });
+
+    expect(outcome).toEqual({ ok: false, message: "断开失败" });
+    expect(result.current.connection).toBe("connected");
+    expect(result.current.connectedConfigId).toBe(CONFIG_ID);
+  });
+});
+
 function makeLayoutBridge(detail: ConfigDetail = startDetail("tun")) {
   let emit: ((event: AgentEvent) => void) | null = null;
   const bridge = {

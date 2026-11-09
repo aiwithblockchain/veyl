@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, readQuestionDetail, snapshotToView, viewAfterConnected } from "./bridge";
+import { applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, readQuestionDetail, snapshotToView, viewAfterConnected, viewAfterStopped } from "./bridge";
 import {
   AGENT_EVENTS,
   CONTRACT_VERSION,
@@ -244,5 +244,44 @@ describe("start 成功后的视图校正", () => {
     expect(viewAfterConnected(running)).toBe(running);
     const degraded = { ...emptyRuntimeView(), state: "degraded" as const };
     expect(viewAfterConnected(degraded)).toBe(degraded);
+  });
+});
+
+describe("stop 成功后的视图校正", () => {
+  it("进入 idle 并清掉连接期字段", () => {
+    const oldError = {
+      contract_version: "1.0.0",
+      code: "PRECONDITION_FAILED" as const,
+      message: "旧错误",
+      retryable: false,
+      details: null,
+      request_id: "",
+    };
+    const running = {
+      ...emptyRuntimeView(),
+      state: "running" as const,
+      pid: 123,
+      connected_since: "2026-11-09T00:00:00Z",
+      route_region: "jp",
+      latency_ms: 42,
+      node_latency_ms: 30,
+      traffic: TRAFFIC,
+      connections: 3,
+      port_fallback: { requested: 7890, actual: 7891, reason: "occupied" as const },
+      last_error: oldError,
+    };
+
+    expect(viewAfterStopped(running)).toMatchObject({
+      state: "idle",
+      pid: null,
+      connected_since: null,
+      route_region: null,
+      latency_ms: null,
+      node_latency_ms: null,
+      traffic: null,
+      connections: null,
+      port_fallback: null,
+      last_error: null,
+    });
   });
 });
