@@ -4,7 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { AgentEvent, NextAction, RuntimeView } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
-import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail } from "./agent/bridge";
+import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, viewAfterConnected } from "./agent/bridge";
 import type {
   ConfigCreateInput,
   DefaultProfileStatus,
@@ -1054,7 +1054,15 @@ export default function App() {
   };
 
   const handleVpnStart = () => {
-    void vpn.start().then((result) => showActionResult(result, "启动失败"));
+    void vpn.start().then((result) => {
+      showActionResult(result, "启动失败");
+      if (!result.connected) return;
+      // start 成功说明后端已经连上。事件/快照可能还停在 starting 或 failed，
+      // 不校正的话中间区会继续显示未连接/失败。先按在线显示，再拉快照补细节。
+      setFailedAfterConnected(false);
+      setRuntime((view) => viewAfterConnected(view));
+      refreshSnapshot();
+    });
   };
 
   const handleVpnStop = () => {

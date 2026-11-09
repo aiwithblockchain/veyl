@@ -571,6 +571,12 @@ export function emptyRuntimeView(): RuntimeView {
   };
 }
 
+/** start 返回成功即已经连上；事件/快照竞态可能还停在非在线态，先校正为在线。 */
+export function viewAfterConnected(view: RuntimeView): RuntimeView {
+  if (view.state === "running" || view.state === "degraded") return view;
+  return { ...view, state: "running", last_error: null };
+}
+
 /** 把快照与事件合并成状态面板的视图。 */
 export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): RuntimeView {
   switch (event.name) {

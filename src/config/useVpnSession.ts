@@ -12,6 +12,8 @@ export interface ActionResult {
   ok: boolean;
   activated?: boolean;
   message?: string;
+  /** 这次 start 真的把运行时连上了（不是重入、取消或被作废的空返回）。 */
+  connected?: boolean;
   /** 后端 `details.reason`；界面需要按原因分支时用，不解析 message。 */
   reason?: string;
 }
@@ -499,7 +501,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       // 不能再拿它的结果否定这次成功，否则界面会停在未连接。
       setConnection("connected");
       setConnectedConfigId(activeConfigId);
-      return { ok: true };
+      return { ok: true, connected: true };
     } catch (err) {
       // 主动取消或已被新一轮接管：不报错、也不改连接状态。
       if (stale()) return { ok: true };

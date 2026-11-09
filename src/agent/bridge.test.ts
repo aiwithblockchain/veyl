@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, readQuestionDetail, snapshotToView } from "./bridge";
+import { applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, readQuestionDetail, snapshotToView, viewAfterConnected } from "./bridge";
 import {
   AGENT_EVENTS,
   CONTRACT_VERSION,
@@ -217,5 +217,32 @@ describe("readQuestionDetail", () => {
       kind: null,
       upgradeConfirm: null,
     });
+  });
+});
+
+describe("start 成功后的视图校正", () => {
+  it("failed / idle / starting 都校正为 running，并清掉上次错误", () => {
+    const oldError = {
+      contract_version: "1.0.0",
+      code: "PRECONDITION_FAILED" as const,
+      message: "旧错误",
+      retryable: false,
+      details: null,
+      request_id: "",
+    };
+    for (const state of ["failed", "idle", "starting", "restarting", "stopping"] as const) {
+      const view = { ...emptyRuntimeView(), state, last_error: oldError };
+      expect(viewAfterConnected(view)).toMatchObject({
+        state: "running",
+        last_error: null,
+      });
+    }
+  });
+
+  it("已经是 running / degraded 时原样保留", () => {
+    const running = { ...emptyRuntimeView(), state: "running" as const };
+    expect(viewAfterConnected(running)).toBe(running);
+    const degraded = { ...emptyRuntimeView(), state: "degraded" as const };
+    expect(viewAfterConnected(degraded)).toBe(degraded);
   });
 });

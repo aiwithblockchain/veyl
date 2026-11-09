@@ -192,6 +192,26 @@ function makeStartBridge(
   } as unknown as AgentBridge;
 }
 
+/** 拿得到事件回调的启动桥，用来模拟 start 挂起期间的后端事件。 */
+function makeEventedStartBridge(
+  mode: "tun" | "system_proxy",
+  options: { needsAdmin?: boolean; runtimeStart?: () => Promise<unknown> } = {},
+) {
+  const bridge = makeStartBridge(mode, options);
+  let emit: ((event: AgentEvent) => void) | null = null;
+  (
+    bridge as unknown as {
+      subscribe: (listener: (event: AgentEvent) => void) => () => void;
+    }
+  ).subscribe = (listener) => {
+    emit = listener;
+    return () => {
+      emit = null;
+    };
+  };
+  return { bridge, emit: (event: AgentEvent) => emit?.(event) };
+}
+
 describe("连接前告知后台组件授权", () => {
   it("接管全部流量需要授权时，准备提示先出现并一直显示到连接返回", async () => {
     const gate = deferred<unknown>();
@@ -501,6 +521,60 @@ describe("点击后立即反馈", () => {
 
     expect(res?.ok).toBe(true);
     expect(bridge.runtimeStart).toHaveBeenCalledTimes(1);
+    expect(result.current.connection).toBe("connected");
+  });
+
+  it("runtimeStart 挂起（日志里的 28 秒）后成功，最终仍是 connected", async () => {
+    const gate = deferred<unknown>();
+    const bridge = makeStartBridge("tun", { runtimeStart: () => gate.promise });
+
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let pending!: Promise<ActionResult>;
+    act(() => {
+      pending = result.current.start();
+    });
+    await waitFor(() => expect(bridge.runtimeStart).toHaveBeenCalledTimes(1));
+    // 这 28 秒里没有状态事件，界面应一直停在 starting，不能被别的快照推回去。
+    expect(result.current.connection).toBe("starting");
+
+    await act(async () => {
+      gate.resolve({});
+      await pending;
+    });
+    expect(result.current.connection).toBe("connected");
+    expect(result.current.connectedConfigId).toBe(CONFIG_ID);
+  });
+
+  it("runtimeStart 挂起期间收到 failed 状态事件，成功后仍回到 connected", async () => {
+    const gate = deferred<unknown>();
+    const { bridge, emit } = makeEventedStartBridge("tun", {
+      runtimeStart: () => gate.promise,
+    });
+
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let pending!: Promise<ActionResult>;
+    let outcome: ActionResult | undefined;
+    act(() => {
+      pending = result.current.start().then((value) => (outcome = value));
+    });
+    await waitFor(() => expect(bridge.runtimeStart).toHaveBeenCalledTimes(1));
+
+    // 后端在挂起期间先报了一个非 running 的状态。
+    act(() => {
+      emit(stateEvent("starting", "failed"));
+    });
+    await waitFor(() => expect(result.current.connection).toBe("idle"));
+
+    await act(async () => {
+      gate.resolve({});
+      await pending;
+    });
+    // runtimeStart 最终成功，说明连接是成功的，不能被中间事件留在未连接。
+    expect(outcome).toEqual({ ok: true, connected: true });
     expect(result.current.connection).toBe("connected");
   });
 });
