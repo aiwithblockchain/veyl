@@ -7,7 +7,8 @@
 # 前置：
 #   macOS、node/npm、cargo、Xcode Command Line Tools
 #   rustup target add x86_64-apple-darwin（universal 构建需要）
-#   完整流程还需 VEYL_DEV_ID_APP 与 VEYL_NOTARY_PROFILE
+#   签名证书与公证 profile 已内置默认值（见 lib/sign-macos.sh），开箱即用；
+#   需要换证书/换 profile 时用同名环境变量覆盖。本机没有证书时只能 --skip-notarize。
 #
 # 产物：build/packages/Veyl-<version>.dmg
 # 日志：build/logs/build-dmg-<timestamp>.log
@@ -76,16 +77,13 @@ printf '\n签名环境：\n'
 describe_signing_env
 
 if [ "$SKIP_NOTARIZE" -eq 0 ]; then
-  if [ -z "${VEYL_DEV_ID_APP:-}" ] || [ -z "${VEYL_NOTARY_PROFILE:-}" ]; then
+  if [ "$(signing_identity)" = "-" ]; then
     printf '\n' >&2
-    if [ -z "${VEYL_DEV_ID_APP:-}" ]; then
-      printf '缺少 VEYL_DEV_ID_APP（Developer ID Application 证书名）\n' >&2
-    fi
-    if [ -z "${VEYL_NOTARY_PROFILE:-}" ]; then
-      printf '缺少 VEYL_NOTARY_PROFILE（xcrun notarytool store-credentials 保存的 profile 名）\n' >&2
-    fi
-    printf '本地验证可以先跳过公证：\n  bash scripts/packaging/build-dmg.sh --skip-notarize\n' >&2
-    die "签名/公证凭据不完整"
+    die "本机钥匙串里没有 Developer ID 证书，无法公证。本地验证可以加 --skip-notarize"
+  fi
+  if ! has_notary_credentials; then
+    printf '\n' >&2
+    die "缺少 VEYL_NOTARY_PROFILE（xcrun notarytool store-credentials 保存的 profile 名）"
   fi
 else
   printf '\n--skip-notarize：只签名，不公证\n'

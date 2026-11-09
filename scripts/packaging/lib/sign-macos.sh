@@ -7,16 +7,28 @@
 # 由 build-dmg.sh 调用，也可单独执行 --check-env 看凭据是否就位。
 #
 # 环境变量：
-#   VEYL_DEV_ID_APP       Developer ID Application 证书名；缺失时用 ad-hoc 签名（仅本地）
-#   VEYL_NOTARY_PROFILE   notarytool store-credentials 里的 profile 名
+#   VEYL_DEV_ID_APP       Developer ID Application 证书名；默认用本机那把，
+#                         钥匙串里找不到时退回 ad-hoc 签名（仅本地验证）
+#   VEYL_NOTARY_PROFILE   notarytool store-credentials 里的 profile 名；默认 notary-profile
 #   VEYL_SIGN_TIMESTAMP   1（默认）带安全时间戳；0 用于开发证书（timestamp 服务不保证接受）
 #
 # 打印环境时只输出「是否设置」，绝不输出值。
 
 VEYL_APP_ENTITLEMENTS="${VEYL_APP_ENTITLEMENTS:-}"
 
+# 本机默认凭据。证书名和 profile 名都不是机密——真正的密码存在钥匙串里，
+# 这里只是指向它。两者都能用同名环境变量覆盖，CI 里换成自己的 secret。
+# 继承 TweetPilot 那把公证凭据（同一个 Team、同一张 Developer ID 证书）。
+VEYL_DEV_ID_APP_DEFAULT="Developer ID Application: Yushian (Beijing) Technology Co., Ltd. (2XYK8RBB6M)"
+VEYL_NOTARY_PROFILE_DEFAULT="notary-profile"
+
+: "${VEYL_DEV_ID_APP:=$VEYL_DEV_ID_APP_DEFAULT}"
+: "${VEYL_NOTARY_PROFILE:=$VEYL_NOTARY_PROFILE_DEFAULT}"
+
 signing_identity() {
-  if [ -n "${VEYL_DEV_ID_APP:-}" ]; then
+  # 证书不在本机钥匙串时退回 ad-hoc，保住「没有证书也能本地出包」这条路径。
+  if [ -n "${VEYL_DEV_ID_APP:-}" ] &&
+    security find-identity -v -p codesigning 2>/dev/null | grep -qF "$VEYL_DEV_ID_APP"; then
     printf '%s' "$VEYL_DEV_ID_APP"
   else
     printf '%s' "-"
@@ -30,7 +42,7 @@ has_notary_credentials() {
 describe_signing_env() {
   local identity_state="未设置（将使用 ad-hoc 签名）"
   local notary_state="未设置"
-  [ -n "${VEYL_DEV_ID_APP:-}" ] && identity_state="已设置"
+  [ "$(signing_identity)" != "-" ] && identity_state="已找到证书"
   [ -n "${VEYL_NOTARY_PROFILE:-}" ] && notary_state="已设置"
   printf '  VEYL_DEV_ID_APP      %s\n' "$identity_state"
   printf '  VEYL_NOTARY_PROFILE  %s\n' "$notary_state"
