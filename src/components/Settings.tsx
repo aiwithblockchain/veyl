@@ -27,8 +27,6 @@ import { RuntimeUpgradeRow, useRuntimeUpgrade } from "./RuntimeUpgrade";
 import { TunDiagnosticsRow } from "./TunDiagnostics";
 import { TunHelperRow, useTunHelper } from "./TunHelper";
 
-const APP_VERSION = "0.1.0";
-/** 待产品给出最终仓库地址；没有 URL 就不摆空链接。 */
 const OPEN_SOURCE_URL: string | null = null;
 
 interface Props {
@@ -618,6 +616,7 @@ export function Settings({
   } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<LlmProvider | null>(null);
   const [diagnosticNotice, setDiagnosticNotice] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [resetPhase, setResetPhase] = useState<ResetPhase>("idle");
   const [resetResult, setResetResult] = useState<NetworkForceResetResult | null>(null);
   const [resetError, setResetError] = useState<string | null>(null);
@@ -1104,9 +1103,25 @@ export function Settings({
     tabRefs.current[next]?.focus();
   };
 
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    bridge
+      .getAppVersion()
+      .then((version) => {
+        if (alive) setAppVersion(version);
+      })
+      .catch(() => {
+        if (alive) setAppVersion(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, bridge]);
+
   const copyDiagnostics = async () => {
     const payload = {
-      app: APP_VERSION,
+      app: appVersion,
       eventSource: bridge.mode,
       runtimeState: runtime.state,
       singBox: runtime.upstream_version,
@@ -1193,7 +1208,7 @@ export function Settings({
 
   const copyResetReport = async () => {
     const payload = {
-      app: APP_VERSION,
+      app: appVersion,
       eventSource: bridge.mode,
       runtimeState: runtime.state,
       reset: resetResult
@@ -2078,7 +2093,9 @@ export function Settings({
             <div className="settings-row">
               <div>
                 <div className="settings-row__label">版本</div>
-                <div className="settings-row__value num">v{APP_VERSION}</div>
+                <div className="settings-row__value num">
+                  v{appVersion ?? "—"}
+                </div>
               </div>
             </div>
 

@@ -111,6 +111,12 @@ export default function App() {
   // 每次状态迁移都整体覆盖，非失败迁移自然复位。
   const [failedAfterConnected, setFailedAfterConnected] = useState(false);
   const [appNotice, setAppNotice] = useState<AppNotice | null>(null);
+  // 成功类提示 4 秒自动消失；错误提示留到用户手动关闭。
+  useEffect(() => {
+    if (!appNotice || appNotice.level !== "info") return;
+    const timer = window.setTimeout(() => setAppNotice(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [appNotice]);
   const [aiReady, setAiReady] = useState(false);
   // 当前服务商的显示名；未配置或读取失败时为空，由助手头部决定回退文案。
   const [aiProviderName, setAiProviderName] = useState<string | null>(null);
@@ -1234,6 +1240,7 @@ export default function App() {
         error={vpn.error}
         onSelect={handleSelectConfig}
         onNewConfig={() => setNewConfigOpen(true)}
+        onRetry={vpn.reload}
         onDelete={vpn.deleteConfig}
         onOpenSettings={() => openSettings()}
         compact={shell.mode === "drawer"}

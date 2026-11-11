@@ -36,6 +36,8 @@ export interface VpnSession {
   connectedConfigId: string | null;
   loading: boolean;
   error: string | null;
+  /** 重新读取配置列表与详情；左栏错误态就地重试用。 */
+  reload: () => void;
   /** 后端还没实现命令时，界面不再让用户点到必然失败的按钮。 */
   nodeSwitchAvailable: boolean;
   nodeProbeAvailable: boolean;
@@ -281,6 +283,21 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       disposed.current = true;
     };
   }, [mock, refreshReal, applyMock]);
+
+  // 左栏「重新读取」：和首次加载走同一条路径。
+  const reload = useCallback(() => {
+    if (mock) {
+      const store = readMock();
+      mockStore.current = store;
+      applyMock(store);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    void refreshReal().finally(() => {
+      if (!disposed.current) setLoading(false);
+    });
+  }, [mock, applyMock, refreshReal]);
 
   useEffect(() => {
     if (mock) return;
@@ -661,6 +678,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     connectedConfigId,
     loading,
     error,
+    reload,
     nodeSwitchAvailable,
     nodeProbeAvailable,
     preparingHelper,

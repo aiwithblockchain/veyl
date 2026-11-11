@@ -13,6 +13,8 @@ interface Props {
   error?: string | null;
   onSelect: (configId: string) => void;
   onNewConfig: () => void;
+  /** 读取失败时就地重试，和首次加载同一条路径。 */
+  onRetry: () => void;
   onDelete: (configId: string) => Promise<{ ok: boolean; message?: string }>;
   onOpenSettings: () => void;
   /** <1024：收成 72px 图标栏，列表放进抽屉。 */
@@ -27,6 +29,7 @@ export function ConfigRail({
   error = null,
   onSelect,
   onNewConfig,
+  onRetry,
   onDelete,
   onOpenSettings,
   compact = false,
@@ -101,11 +104,25 @@ export function ConfigRail({
         <div className="rail__empty">
           <p className="rail__empty-title">配置读取失败</p>
           <p className="rail__empty-text">{error}</p>
+          <button
+            type="button"
+            className="btn btn--ghost rail__empty-action"
+            onClick={onRetry}
+          >
+            重新读取
+          </button>
         </div>
       ) : configs.length === 0 ? (
         <div className="rail__empty">
           <p className="rail__empty-title">还没有配置</p>
           <p className="rail__empty-text">让助手配一条，或自己新建一套。</p>
+          <button
+            type="button"
+            className="btn btn--ghost rail__empty-action"
+            onClick={onNewConfig}
+          >
+            新建配置
+          </button>
         </div>
       ) : (
         <ul className="configs">

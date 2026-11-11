@@ -125,8 +125,6 @@ export function Onboarding({ bridge, onDone }: Props) {
     }
   };
 
-  const primaryClass = customOpen ? "btn--ghost" : "btn--primary";
-
   return (
     <div className="onboarding">
       <div className="onboarding__shell">
@@ -136,41 +134,43 @@ export function Onboarding({ bridge, onDone }: Props) {
           Key 只保存在本机。配好之后，我来找节点、建立连接。
         </p>
 
-        <form
-          className="onboarding__form"
-          aria-busy={saving === "key"}
-          onSubmit={(event) => {
-            event.preventDefault();
-            void saveKey();
-          }}
-        >
-          <div className="onboarding__field">
-            <label className="onboarding__field-label" htmlFor="onboarding-deepseek-key">
-              DeepSeek API Key
-            </label>
-            <div className="onboarding__keybox">
-              <IconKey size={16} />
-              <input
-                id="onboarding-deepseek-key"
-                className="onboarding__input"
-                type="password"
-                value={value}
-                placeholder="粘贴 sk- 开头的 Key"
-                autoComplete="off"
-                spellCheck={false}
-                autoFocus
-                onChange={(event) => setValue(event.target.value)}
-              />
-            </div>
-          </div>
-          <button
-            type="submit"
-            className={`btn ${primaryClass} onboarding__submit`}
-            disabled={saving !== null || value.trim().length === 0}
+        {customOpen ? null : (
+          <form
+            className="onboarding__form"
+            aria-busy={saving === "key"}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveKey();
+            }}
           >
-            {saving === "key" ? "验证中…" : "保存并验证"}
-          </button>
-        </form>
+            <div className="onboarding__field">
+              <label className="onboarding__field-label" htmlFor="onboarding-deepseek-key">
+                DeepSeek API Key
+              </label>
+              <div className="onboarding__keybox">
+                <IconKey size={16} />
+                <input
+                  id="onboarding-deepseek-key"
+                  className="onboarding__input"
+                  type="password"
+                  value={value}
+                  placeholder="粘贴 sk- 开头的 Key"
+                  autoComplete="off"
+                  spellCheck={false}
+                  autoFocus
+                  onChange={(event) => setValue(event.target.value)}
+                />
+              </div>
+            </div>
+            <button
+              type="submit"
+              className="btn btn--primary onboarding__submit"
+              disabled={saving !== null || value.trim().length === 0}
+            >
+              {saving === "key" ? "验证中…" : "保存并验证"}
+            </button>
+          </form>
+        )}
 
         {error ? <p className="onboarding__error">{error}</p> : null}
 

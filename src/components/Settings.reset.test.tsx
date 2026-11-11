@@ -56,6 +56,7 @@ function makeBridge(
       validation: "unverified",
     })),
     llmProviderList: vi.fn(async () => ({ providers: [], activeProviderId: null })),
+    getAppVersion: vi.fn(async () => "0.1.0"),
     networkForceReset: vi.fn(),
     ...overrides,
   } as unknown as AgentBridge;

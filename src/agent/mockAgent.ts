@@ -239,6 +239,11 @@ export class MockAgentBridge implements AgentBridge {
     return this.runtime;
   }
 
+  /** mock 扮演后端：浏览器演示里给一个固定版本。 */
+  async getAppVersion(): Promise<string> {
+    return "0.1.0";
+  }
+
   async runtimeStart(configId?: string): Promise<void> {
     // 契约：用户中途启动 VPN，正在跑的测速取消，reason = connected。
     this.cancelProbeForConnect();

@@ -430,6 +430,8 @@ export interface AgentBridge {
   cancel(requestId: string): Promise<boolean>;
   /** 事件不可达时的兜底快照（契约 §5 `runtime_status`）。 */
   getRuntimeSnapshot(): Promise<RuntimeSnapshot | null>;
+  /** 应用自身版本；设置「关于」与诊断信息用。 */
+  getAppVersion(): Promise<string>;
   /** UI 直连：发起连接；不传 configId 时用当前激活配置。 */
   runtimeStart(configId?: string): Promise<void>;
   /** UI 直连：断开连接并恢复系统代理。 */

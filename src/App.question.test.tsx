@@ -114,7 +114,7 @@ describe("提问的回答路径", () => {
     await waitFor(() => expect(document.querySelector(".ask-card")).toBeNull());
     await waitFor(() => expect(textarea().value).toBe(""));
     await waitFor(() => {
-      const matches = [...document.querySelectorAll(".msg--user")].filter(
+      const matches = [...document.querySelectorAll(".msg--user .msg__text")].filter(
         (element) => element.textContent?.trim() === "我想给手机用",
       );
       expect(matches).toHaveLength(1);

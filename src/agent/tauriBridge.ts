@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AgentBridge,
@@ -481,6 +482,10 @@ export class TauriAgentBridge implements AgentBridge {
       // 状态面板拿不到快照时保持 idle，不打断对话。
       return null;
     }
+  }
+
+  async getAppVersion(): Promise<string> {
+    return getVersion();
   }
 
   async runtimeStart(configId?: string): Promise<void> {

@@ -50,6 +50,7 @@ function makeBridge(
     proxyPortGet: vi.fn(async () => ({ port: 7890, defaultPort: 7890 })),
     proxyPortSet,
     llmProviderList: vi.fn(async () => ({ providers: [], activeProviderId: null })),
+    getAppVersion: vi.fn(async () => "0.1.0"),
     defaultProfileRefresh: vi.fn(),
     defaultProfileStatus: vi.fn(),
   } as unknown as AgentBridge;

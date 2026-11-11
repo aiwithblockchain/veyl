@@ -51,6 +51,7 @@ function makeBridge(
     })),
     tunHelperRestart: vi.fn(async () => ({ ok: true, restarted: true, needsAdminRestart: false })),
     llmProviderList: vi.fn(async () => ({ providers, activeProviderId })),
+    getAppVersion: vi.fn(async () => "0.1.0"),
     defaultProfileRefresh: vi.fn(),
     defaultProfileStatus: vi.fn(),
     nodeImportText: vi.fn(async () => ({ imported: 1, skipped: [], nodes: [] })),
@@ -451,6 +452,7 @@ describe("关于 tab", () => {
   it("版本与数据去向；没有仓库地址时不摆空链接", async () => {
     renderSettings(makeBridge(), { section: "about" });
     expect(await screen.findByText("版本")).toBeTruthy();
+    expect(await screen.findByText("v0.1.0")).toBeTruthy();
     expect(
       screen.getByText("AI 对话会发给你选的服务；配置、节点和日志都留在本机。"),
     ).toBeTruthy();

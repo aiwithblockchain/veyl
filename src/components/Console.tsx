@@ -434,10 +434,6 @@ export function Console({
 
   return (
     <main className="console">
-      <header className="console__head">
-        <span className="console__crumb">控制台</span>
-      </header>
-
       {!loading && !hasConfigs ? (
         <div className="console__body console__body--welcome">
           <p className="sr-only" role="status" aria-live="polite">

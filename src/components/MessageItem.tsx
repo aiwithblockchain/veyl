@@ -17,7 +17,10 @@ export function MessageItem({ message, toolCalls, onNextAction }: Props) {
   if (message.role === "user") {
     return (
       <div className="msg msg--user">
-        <div className="msg__bubble">{message.text}</div>
+        <div className="msg__role">
+          <span>你</span>
+        </div>
+        <div className="msg__text msg__text--user">{message.text}</div>
       </div>
     );
   }
