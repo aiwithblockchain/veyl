@@ -247,12 +247,6 @@ pre {
 
 .msg__streaming {
   color: var(--accent);
-  animation: pulse 1.6s ease-in-out infinite;
-}
-
-.msg__usage {
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
 }
 
 .msg__items {
@@ -681,7 +675,6 @@ pre {
 
 .composer__status {
   color: var(--accent);
-  animation: pulse 1.8s ease-in-out infinite;
 }
 
 .chip {
@@ -701,16 +694,6 @@ pre {
 }
 
 /* ---------- motion ---------- */
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
 
 @keyframes blink {
   0%,
@@ -946,7 +929,7 @@ body[data-resizing] {
 .assistant-tab__label {
   writing-mode: vertical-rl;
   font-size: 11px;
-  letter-spacing: 0.12em;
+  letter-spacing: 0;
   color: var(--ink-3);
 }
 
@@ -1072,11 +1055,27 @@ body[data-resizing] {
   color: var(--ink);
 }
 
+/* 输入框的发送按钮不是主按钮：对话页的唯一实心按钮属于右栏。 */
 .btn--send {
   height: 30px;
   padding: 0 16px;
+  border: 1px solid var(--line-strong);
   border-radius: 7px;
+  background: transparent;
+  color: var(--ink-2);
   font-size: 13px;
+}
+
+.btn--send:not(:disabled):hover {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.btn--send:disabled {
+  border-color: var(--line);
+  background: var(--bg-hover);
+  color: var(--ink-3);
+  opacity: 1;
 }
 
 /* ---------- modal ---------- */
@@ -2194,7 +2193,7 @@ body[data-resizing] {
 }
 
 .onboarding__brand {
-  margin-bottom: 26px;
+  margin-bottom: 24px;
   font-size: var(--fs-card);
   font-weight: 600;
   line-height: 1.35;
@@ -2210,7 +2209,7 @@ body[data-resizing] {
 }
 
 .onboarding__text {
-  margin: 10px 0 0;
+  margin: 12px 0 0;
   font-size: var(--fs-small);
   line-height: 1.65;
   color: var(--ink-3);
@@ -2220,14 +2219,14 @@ body[data-resizing] {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin-top: 28px;
+  margin-top: 24px;
 }
 
 /* 标签在上，输入框自带明确描边：不再让标签和输入框共用一条弱边框 */
 .onboarding__field {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 8px;
 }
 
 .onboarding__field-label {
@@ -2263,7 +2262,7 @@ body[data-resizing] {
 .onboarding__keybox {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   height: 44px;
   padding: 0 12px;
   border: 1px solid var(--line-field);
@@ -2351,8 +2350,8 @@ body[data-resizing] {
   align-items: center;
   justify-content: center;
   flex-wrap: wrap;
-  gap: 8px 18px;
-  margin-top: 14px;
+  gap: 8px 16px;
+  margin-top: 16px;
 }
 
 .onboarding__link,
@@ -2407,7 +2406,7 @@ body[data-resizing] {
 .onboarding__custom {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   margin-top: 16px;
   padding: 14px;
   border: 1px solid var(--line);
@@ -2416,7 +2415,7 @@ body[data-resizing] {
 }
 
 .onboarding__custom .onboarding__field {
-  gap: 5px;
+  gap: 8px;
 }
 
 .onboarding__custom .onboarding__input {
@@ -2474,7 +2473,7 @@ body[data-resizing] {
 .onboarding__divider {
   width: 48px;
   height: 1px;
-  margin: 28px auto 18px;
+  margin: 24px auto 16px;
   background: var(--line);
 }
 
@@ -2924,18 +2923,6 @@ body[data-resizing] {
   margin: 0;
 }
 
-/* 输入框的发送按钮不是主按钮：对话页的唯一实心按钮属于右栏。 */
-.btn--send {
-  border: 1px solid var(--line-strong);
-  background: transparent;
-  color: var(--ink-2);
-}
-
-.btn--send:not(:disabled):hover {
-  background: var(--bg-hover);
-  color: var(--ink);
-}
-
 /* ---------- 思考标签 / 复制标签 / 引导徽标 ---------- */
 
 .thinking-block__label {
@@ -3192,7 +3179,7 @@ body[data-resizing] {
   display: block;
   font-size: 20px;
   line-height: 1;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.01em;
   color: var(--ink);
 }
@@ -3275,8 +3262,11 @@ body[data-resizing] {
 
 .config {
   position: relative;
-  display: block;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   width: 100%;
+  min-height: 64px;
   padding: 11px 34px 11px 14px;
   border: 0;
   border-radius: 6px;
@@ -3484,8 +3474,10 @@ body[data-resizing] {
 .skeleton-row {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 10px 11px;
+  justify-content: center;
+  gap: 8px;
+  height: 64px;
+  padding: 0 11px;
 }
 
 .skeleton {
@@ -3796,7 +3788,7 @@ body[data-resizing] {
 .note {
   position: relative;
   max-width: 52ch;
-  margin: 30px 0 0;
+  margin: 32px 0 0;
   padding-left: 14px;
   font-size: 15px;
   line-height: 1.6;
@@ -4133,11 +4125,15 @@ body[data-resizing] {
 
 .node-card__name {
   display: block;
+  min-width: 0;
   margin-top: 3px;
-  font-size: 17px;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 500;
   line-height: 1.35;
-  font-weight: 600;
   color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .node-card__name--button {
@@ -4269,17 +4265,8 @@ body[data-resizing] {
   background: var(--bg-hover);
 }
 
-.node-card__name {
-  display: block;
-  min-width: 0;
+.node-card__select .node-card__name {
   margin-top: 0;
-  overflow: hidden;
-  font-size: 15px;
-  font-weight: 500;
-  line-height: 1.35;
-  color: var(--ink);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .node-card__chevron {
@@ -4924,9 +4911,10 @@ body[data-resizing] {
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 8px 24px;
+  padding: 8px 24px 8px 22px;
   border-bottom: 1px solid var(--hair);
-  background: var(--cobalt-soft);
+  border-left: 2px solid var(--cobalt);
+  background: transparent;
   font-size: 13px;
   color: var(--ink-2);
 }
@@ -5144,9 +5132,9 @@ body[data-resizing] {
 .app-toast {
   position: fixed;
   left: 50%;
-  bottom: 24px;
+  top: 96px;
   transform: translateX(-50%);
-  z-index: 80;
+  z-index: 90;
   display: flex;
   align-items: center;
   gap: 12px;

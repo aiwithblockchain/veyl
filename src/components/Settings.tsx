@@ -428,7 +428,7 @@ function SeedRefreshRow({
     <div className="settings-row seed-refresh">
       <div className="seed-refresh__main">
         <div className="settings-row__label">更新试用节点</div>
-        <div className="settings-row__value num">{seedSummary(info)}</div>
+        <div className="settings-row__value">{withMonoDigits(seedSummary(info))}</div>
         {status ? (
           <p
             className={`seed-refresh__status ${seedStatusTone(phase)}`}
@@ -557,6 +557,22 @@ const IMPORT_SKIP_REASONS: Record<NodeImportSkipped["reason"], string> = {
 
 function importSkipReason(reason: string): string {
   return IMPORT_SKIP_REASONS[reason as NodeImportSkipped["reason"]] ?? "没法导入";
+}
+
+/** 只把数字送进 mono；中文和单位保持正文。 */
+function withMonoDigits(text: string) {
+  return text
+    .split(/(\d+)/)
+    .filter(Boolean)
+    .map((part, index) =>
+      /^\d+$/.test(part) ? (
+        <span key={index} className="num">
+          {part}
+        </span>
+      ) : (
+        <span key={index}>{part}</span>
+      ),
+    );
 }
 
 function emptyForm(): ProviderForm {

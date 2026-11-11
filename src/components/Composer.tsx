@@ -125,7 +125,7 @@ export function Composer({
           >
             <button
               type="button"
-              className="btn btn--primary btn--send"
+              className="btn btn--send"
               disabled={disabled || blocked || value.trim().length === 0}
               // 禁用按钮在部分浏览器里吞掉点击；让指针落到外层，才接得到这次点击。
               style={blocked ? { pointerEvents: "none" } : undefined}
@@ -150,7 +150,7 @@ export function Composer({
           </span>
         ) : disabled && onConfigure ? (
           <button type="button" className="composer__configure" onClick={onConfigure}>
-            去配置 Key
+            去配置 AI
           </button>
         ) : (
           <span>Enter 发送 · Shift + Enter 换行</span>

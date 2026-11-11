@@ -141,7 +141,9 @@ describe("设置页试用节点行", () => {
 
     expect(await screen.findByText("更新试用节点")).toBeTruthy();
     expect(within(seedRow()).getByRole("button", { name: "检查更新" })).toBeTruthy();
-    expect(screen.getByText("12 个节点 · 3 小时前检查过")).toBeTruthy();
+    expect(
+      seedRow().querySelector(".settings-row__value")?.textContent,
+    ).toBe("12 个节点 · 3 小时前检查过");
     expect(within(seedRow()).queryByRole("button", { name: "问 AI" })).toBeNull();
     expect(screen.queryByText("测试节点地址")).toBeNull();
     expect(screen.queryByText("v3")).toBeNull();

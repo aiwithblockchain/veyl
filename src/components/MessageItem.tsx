@@ -46,9 +46,6 @@ export function MessageItem({ message, toolCalls, onNextAction }: Props) {
         <span className="msg__avatar" aria-hidden />
         <span>{PRODUCT_NAME}</span>
         {message.streaming ? <span className="msg__streaming">输出中</span> : null}
-        {message.usage?.output_tokens ? (
-          <span className="msg__usage">{message.usage.output_tokens} tokens</span>
-        ) : null}
       </div>
 
       <div className="msg__items">
