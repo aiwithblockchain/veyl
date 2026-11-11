@@ -20,8 +20,14 @@ use super::privilege::{
 /// 客户端等 `status` / `stop` 回复的上限（契约 §1.3）。
 pub const TUN_REPLY_DEADLINE_CONTROL: Duration = Duration::from_secs(10);
 
-/// 客户端等 `start` 回复的上限。首次 start 可能要复制运行时并跑 check，给足时间。
-pub const TUN_REPLY_DEADLINE_START: Duration = Duration::from_secs(30);
+/// 客户端等 `start` 回复的上限。
+///
+/// 必须覆盖 helper 的**最慢一次冷启动**：2026-11-11 真机 `runtime=33018ms`
+/// （随包运行时验签 + 读取 + 哈希 + 写盘）+ `check=3626ms`，helper 侧另有两段
+/// 自有上限——等规则 ≤15s（`RULES_WAIT_DEADLINE`）、准备阶段含 check ≤25s
+/// （`START_PREPARE_DEADLINE`）。33 + 15 + 25 = 73 秒，再留 IPC 与慢盘余量，
+/// 取 90 秒。**旧值 30 秒会让冷启动必然误报失败**，而隧道其实几秒后就起来了。
+pub const TUN_REPLY_DEADLINE_START: Duration = Duration::from_secs(90);
 
 /// 会话租约句柄：TUN 运行期间 App 保持的一条空闲连接。
 ///
@@ -327,11 +333,16 @@ pub fn unsupported_platform_error() -> TunError {
 #[cfg(target_os = "macos")]
 mod macos {
     use std::sync::Arc;
+    use std::time::Instant;
 
     use super::*;
     use crate::tun::privilege::{app_location_hint, Registration};
     use crate::tun::protocol::MACH_SERVICE;
     use crate::tun::xpc::{self, Reply, XpcError};
+
+    /// `start` 超时后核对真实状态的宽限：helper 可能只差几秒就完成。
+    /// 超时不能直接判失败——2026-11-11 真机就是「界面报失败、隧道已经起来」。
+    const TUN_START_RECONCILE: Duration = Duration::from_secs(10);
 
     /// 把现有 XPC 通道与 SMAppService 注册包成契约后端。
     pub struct MacXpcBackend {
@@ -387,7 +398,17 @@ mod macos {
                     TunErrorCode::Internal,
                     "特权助手回了意料之外的结果",
                 )),
-                Err(error) => Err(map_xpc_error(error)),
+                Err(error) => {
+                    let mapped = map_xpc_error(error);
+                    // 超时 ≠ 失败：冷启动时 helper 可能只差几秒就完成。先核对一次
+                    // 真实状态（见 `reconcile_late_start`），接上已经在跑的隧道。
+                    if mapped.code == TunErrorCode::Timeout {
+                        if let Some(reply) = self.reconcile_late_start() {
+                            return Ok(reply);
+                        }
+                    }
+                    Err(mapped)
+                }
             }
         }
 
@@ -498,6 +519,38 @@ mod macos {
             xpc::open_lease(MACH_SERVICE, TUN_REPLY_DEADLINE_CONTROL)
                 .map(Some)
                 .map_err(map_xpc_error)
+        }
+    }
+
+    impl MacXpcBackend {
+        /// `start` 超时后的核对：隧道可能已经在跑，只是回复晚于客户端期限。
+        ///
+        /// 只认 `running` 的 status；没在跑就继续等到宽限结束，仍没有才返回 None
+        /// （调用方报超时）。轮询而不是只查一次：2026-11-11 真机里 helper 用了 38 秒，
+        /// 客户端 30 秒就超时了，只查一次会落在它完成前的空窗里。
+        fn reconcile_late_start(&self) -> Option<StartReply> {
+            let deadline = Instant::now() + TUN_START_RECONCILE;
+            loop {
+                if let Ok(snapshot) = self.status() {
+                    if let (true, Some(pid), Some(clash_api)) =
+                        (snapshot.running, snapshot.pid, snapshot.clash_api)
+                    {
+                        return Some(StartReply {
+                            pid,
+                            clash_api,
+                            since: snapshot.since.unwrap_or_else(|| {
+                                chrono::Utc::now()
+                                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                            }),
+                            dns_hijack: snapshot.dns_hijack,
+                        });
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
         }
     }
 

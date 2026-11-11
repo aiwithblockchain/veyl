@@ -1,6 +1,6 @@
 # 契约：TUN 特权后端
 
-> 契约版本：`1.5.1`
+> 契约版本：`1.6.0`
 > 状态：**已定稿，待实现**（2026-11-05）
 > 定位：`TunBackend` 抽象、请求/回复信封、错误码、快照形状、四条不变式。**只定契约，不含实现。**
 > 上游：[`../tun-privilege-implementation-plan.md`](../tun-privilege-implementation-plan.md)（双平台计划）、[`../tun-privilege.md`](../tun-privilege.md)（macOS 信任模型）、[`../windows-tun.md`](../windows-tun.md)（Windows 设计）、[`../tun-mode.md`](../tun-mode.md)（连接语义与失败处理）
@@ -89,16 +89,19 @@ type TunReply =
 | `TUN_CONNECT_TIMEOUT` | 5 s | 客户端等连接建立 | 关闭，报本地错误 `timeout` |
 | `TUN_FIRST_FRAME_TIMEOUT` | 5 s | **服务端**等首帧 | `DisconnectNamedPipe`，不读后续字节，不产生任何进程或写盘 |
 | `TUN_REPLY_DEADLINE_CONTROL` | 10 s | **客户端**等 `status` / `stop` / `restart` 的完整回复 | 关闭，报本地错误 `timeout` |
-| `TUN_REPLY_DEADLINE_START` | 30 s | **客户端**等 `start` 的完整回复 | 关闭，报本地错误 `timeout` |
+| `TUN_REPLY_DEADLINE_START` | macOS `90 s`；Windows `30 s` | **客户端**等 `start` 的完整回复 | 关闭，报本地错误 `timeout`；**但必须先核对 `status`**（见下） |
 
-`start` 单独给 30 s，不是保守：Windows 首次 `start` 要把 `sing-box.exe`（约 78 MB）与 `wintun.dll` 复制到服务目录，在慢盘、Defender 实时扫描、企业终端的加密盘上都会显著变慢。10 s 在这些环境里会稳定误判为超时，而误判的代价是一次失败的连接加一次无意义的回滚。
+`start` 单独给足时间，不是保守：Windows 首次 `start` 要把 `sing-box.exe`（约 78 MB）与 `wintun.dll` 复制到服务目录，在慢盘、Defender 实时扫描、企业终端的加密盘上都会显著变慢；macOS 首次 `start` 要验整个 `.app` 的签名、读取并哈希随包 `sing-box`（约 173 MB）、必要时写盘再过一次签名校验。2026-11-11 真机实测 macOS 冷启动 `runtime=33018ms`（验签 + 读取 + 哈希 + 写盘）+ `check=3626ms`，30 秒期限必然误报失败。
+
+macOS 的 90 s 是算出来的，不是拍的：33 s（实测最慢 runtime）+ 15 s（`RULES_WAIT_DEADLINE`）+ 25 s（`START_PREPARE_DEADLINE`，含 check）+ IPC 与慢盘余量 ≈ 90 s。改这个值要重新核算这三段。
 
 配套规则：
 
+- **超时后必须核对**：客户端等 `start` 超时后，**不得直接判失败**——先查 `status`（最多 10 秒宽限，每秒一次）：隧道已经在跑就按成功接上（用 status 里的 pid / Clash API / since / DNS 状态），只有确认没起来才报 `timeout`。2026-11-11 真机就是「界面报失败、隧道其实已经起来」：用户看到的结论与事实相反。
 - **超时必须可区分**：调用方拿到的是一条明确的 `timeout`，不是「回复解析失败」这种含混结果（§4.4）。
 - **服务端超时要回滚**：`start` 若在 `TUN_REPLY_DEADLINE_START` 内没能把回复写完（客户端此时已断开），必须停掉已经 spawn 的进程并记 `last_error`。**不得**留下一个客户端不知道存在的 TUN。
 - **超时不重试**：超时后不自动重发。重试由用户点「重试」触发，避免在服务卡死时反复 spawn。
-- 四个值都是契约常量，两端同一个数，测试按这组值写。改值只改常量，不改变上面四条规则。
+- 这些值都是契约常量，**除 `TUN_REPLY_DEADLINE_START` 外两端同一个数**（macOS 90 s / Windows 30 s，Windows 侧另行评估），测试按这组值写。改值只改常量，不改变上面几条规则。
 
 ---
 
@@ -477,6 +480,14 @@ allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端�
 macOS 侧没有 R1 / R2：XPC 的对端校验由 libxpc 基于连接上的审计令牌完成，不读路径、不依赖磁盘状态；签名有效性由系统在加载时判定。这也是 §6 第 3 项「机制不同」的实际含义——Windows 自己实现的那一侧，把 macOS 由系统兜住的保证接管过来，也就接管了它的边界。
 
 ## 10. 变更记录
+
+### 1.6.0（2026-11-11，start 超时覆盖冷启动）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | §1.3：macOS 的 `TUN_REPLY_DEADLINE_START` 由 `30 s` 改为 `90 s`（33 s 实测 runtime + 15 s 规则等待 + 25 s 准备/check + 余量）；Windows 仍 30 s，注明另行评估 | 语义变更（破坏性） | 真机冷启动：helper 用 38 s 完成，客户端 30 s 先超时，界面报失败但隧道已起来 |
+| 2 | §1.3：新增「超时后必须核对」——`start` 超时不得直接判失败，先查 `status`（最多 10 s 宽限），已在跑就按成功接上，确认没起来才报 `timeout` | 行为修正 | 同上 |
+| 3 | §1.3 的「四个值两端同一个数」改为「除 start 外两端同一个数」 | 契约澄清 | 平台冷启动成本不同 |
 
 ### 1.5.1（2026-11-11，复查收口）
 

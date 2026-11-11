@@ -3,7 +3,7 @@ import type { ConfigConnectMode, RuntimeView } from "../agent/protocol";
 import type { VpnConnectionState } from "../config/useVpnSession";
 import { useFocusTrap } from "../ui/focus";
 
-/** 超过这个时长仍在进行，就换成「还在……，请稍候」；只改文案，不释放遮罩。 */
+/** 超过这个时长仍在进行，就换成等待更久的说明；只改文案，不释放遮罩。 */
 export const SLOW_AFTER_MS = 10_000;
 
 export type ConnectionStageKind =
@@ -176,7 +176,9 @@ export function ConnectionOverlay({
         ) : null}
         {slow ? (
           <p className="connection-overlay__slow" role="status" aria-live="polite">
-            {stage.mode === "connect" ? "还在连接，请稍候。" : "还在断开，请稍候。"}
+            {stage.mode === "connect"
+              ? "第一次连接需要准备一会儿，可能要半分钟。还在连，请稍候。"
+              : "还在断开，请稍候。"}
           </p>
         ) : null}
       </div>

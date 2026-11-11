@@ -226,7 +226,7 @@ describe("ConnectionOverlay 渲染与释放", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("超过 10 秒只换文案，不释放", () => {
+  it("超过 10 秒换成等待更久的说明，不释放", () => {
     vi.useFakeTimers();
     renderOverlay();
     expect(screen.getByText("正在准备连接")).toBeTruthy();
@@ -235,7 +235,9 @@ describe("ConnectionOverlay 渲染与释放", () => {
       vi.advanceTimersByTime(SLOW_AFTER_MS);
     });
 
-    expect(screen.getByText("还在连接，请稍候。")).toBeTruthy();
+    expect(
+      screen.getByText("第一次连接需要准备一会儿，可能要半分钟。还在连，请稍候。"),
+    ).toBeTruthy();
     expect(screen.getByRole("dialog")).toBeTruthy();
   });
 

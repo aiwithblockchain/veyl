@@ -107,13 +107,16 @@ fn crash_loop_tripped(starts: &[u64], now: u64) -> bool {
 const TUN_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const TUN_LOG_KEEP: usize = 1;
 
-/// `start` 的准备阶段上限。客户端等 30 秒，留 5 秒给 IPC 与收尾。
-/// 从**规则就绪之后**开始算：等待规则另有 60 秒上限。
+/// `start` 的准备阶段上限。
+///
+/// 只约束**规则就绪之后**的 spawn + `sing-box check`；等待规则另有 15 秒上限，
+/// 运行时暂存与验签发生在更早的 `resolve_runtime`，不在这个预算里。客户端等 90 秒
+/// （见 `TUN_REPLY_DEADLINE_START`），这里留出足够余量给收尾与 IPC。
 const START_PREPARE_DEADLINE: Duration = Duration::from_secs(25);
 
 /// 首连等待规则就绪的上限。
 ///
-/// 必须**短于**客户端的 start 期限（30 秒）：后台线程还在解包时，
+/// 必须**短于**客户端的 start 期限（90 秒）：后台线程还在解包时，
 /// 连接宁可快点返回「正在准备」，也不要让客户端先超时、用户重试又排在
 /// 这次等待后面。超时不会 spawn，也不会留下孤儿。
 const RULES_WAIT_DEADLINE: Duration = Duration::from_secs(15);
@@ -254,8 +257,8 @@ pub fn run() {
     ));
 
     // 规则解包 + 逐项校验是首跑最慢的一步（真机 2233 个规则集约 30 秒）。
-    // 放到后台线程做、监听先起：`start` 只等结果（最多 60 秒），
-    // 不能因为解包比客户端的 30 秒还慢就必然失败。
+    // 放到后台线程做、监听先起：`start` 只等结果（最多 `RULES_WAIT_DEADLINE`），
+    // 不能因为解包比客户端期限（90 秒）还慢就必然失败。
     let staging = Arc::clone(&supervisor);
     std::thread::spawn(move || {
         let started = Instant::now();
@@ -829,7 +832,7 @@ impl Supervisor {
 
     /// 规则就绪前最多等 `timeout`；失败原因原样带出去。
     ///
-    /// 循环里也看 `stop_requested`：客户端 30 秒超时后的 stop 不能被
+    /// 循环里也看 `stop_requested`：客户端超时后的 stop 不能被
     /// 这次等待挡住——否则它继续握着 `start_lock`，用户重试只能排队再超时。
     fn wait_for_rules(&self, timeout: Duration) -> Result<(), ProtocolError> {
         let deadline = Instant::now() + timeout;
@@ -1603,21 +1606,60 @@ impl Supervisor {
         // **先验来源，再读内容。** 顺序不能反：bundle 的属主可能就是当前用户，
         // 先读再验会让「读到的字节」与「被验证的 bundle」脱钩——读时换进恶意
         // 字节、验前再换回正版，恶意内容就会被写进 root 目录。
+        //
+        // 冷启动的耗时几乎都在这里：真机复现过 runtime 阶段 33 秒，客户端 30 秒
+        // 就超时了。下面每一步都打点，下次直接看 helper.log 就知道是验签还是 I/O。
+        // **必须走 `note`**：launchd 的 plist 没配 `StandardErrorPath`，`eprintln!`
+        // 会被直接丢掉；`note` 写用户日志（首连时先缓存、建好日志再补写）。
+        let phase = Instant::now();
         verify_bundle()?;
+        self.note(&format!(
+            "[runtime] bundle_verify={}ms",
+            phase.elapsed().as_millis()
+        ));
 
         // O_NOFOLLOW：`is_file()` 与读取之间若被换成软链，这里直接失败。
+        let phase = Instant::now();
         let bytes = read_no_follow(&bundled).map_err(|error| {
             ProtocolError::new(
                 protocol::ERR_RUNTIME_MISSING,
                 format!("读取安装包内的运行时失败：{error}"),
             )
         })?;
+        self.note(&format!(
+            "[runtime] read={}ms bytes={}",
+            phase.elapsed().as_millis(),
+            bytes.len()
+        ));
+        let phase = Instant::now();
         let digest = sha256_hex(&bytes);
+        self.note(&format!(
+            "[runtime] sha256={}ms digest={}",
+            phase.elapsed().as_millis(),
+            short_digest(&digest)
+        ));
+        if let Some(expected) = protocol::runtime_sha256() {
+            if expected != digest.as_str() {
+                // bundle 签名已经验过；这里不一致说明 helper 与包不是同一次构建，
+                // 值得在日志里留一条（不算安全问题，但排查时很关键）。
+                self.note(&format!(
+                    "[warn] 包内运行时哈希与构建期不一致（包内 {} / 构建期 {}）",
+                    short_digest(&digest),
+                    short_digest(expected)
+                ));
+            }
+        }
         let dir = self.root.join("runtime").join(&digest);
         let dest = dir.join("sing-box");
 
         if dest.exists() {
-            if verify_staged_runtime_file(&dest, &digest, expect_uid).is_ok() {
+            let phase = Instant::now();
+            let reused = verify_staged_runtime_file(&dest, &digest, expect_uid).is_ok();
+            self.note(&format!(
+                "[runtime] reuse_verify={}ms reused={reused}",
+                phase.elapsed().as_millis()
+            ));
+            if reused {
                 return Ok(dest);
             }
             // 磁盘上的副本坏了（上次写到一半、或被人动过）：删掉，用刚读到的
@@ -1625,21 +1667,36 @@ impl Supervisor {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
+        let phase = Instant::now();
         write_staged_runtime(&dir, &dest, &bytes)?;
+        self.note(&format!(
+            "[runtime] write={}ms",
+            phase.elapsed().as_millis()
+        ));
         // 内容绑定的最后一环：写进 root 目录的字节必须带着我们的签名。
         // 没有这一步，「先验 bundle 再读」之间仍留着一个可替换的窗口。
+        let phase = Instant::now();
         if let Err(error) = verify_signature(&dest) {
             let _ = std::fs::remove_dir_all(&dir);
             return Err(error);
         }
+        self.note(&format!(
+            "[runtime] code_sign={}ms",
+            phase.elapsed().as_millis()
+        ));
         if let Err(error) = set_mode(&dest, 0o755) {
             let _ = std::fs::remove_dir_all(&dir);
             return Err(error);
         }
+        let phase = Instant::now();
         if let Err(error) = verify_staged_runtime_file(&dest, &digest, expect_uid) {
             let _ = std::fs::remove_dir_all(&dir);
             return Err(error);
         }
+        self.note(&format!(
+            "[runtime] staged_verify={}ms",
+            phase.elapsed().as_millis()
+        ));
 
         // 清理旧运行时**不在这里做**：此刻旧的 sing-box 可能还在跑。
         // 提前删目录会让它在 helper 崩溃重启后 `proc_pidpath` 认不出来，
@@ -1652,6 +1709,11 @@ impl Supervisor {
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex(Sha256::digest(bytes).as_slice())
+}
+
+/// 日志里只留前 12 位，够对照、又不至于刷屏。
+fn short_digest(digest: &str) -> &str {
+    digest.get(..12).unwrap_or(digest)
 }
 
 /// 读一个文件并拒绝软链。用在「路径来自 bundle、内容是执行候选」的地方。
