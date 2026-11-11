@@ -1474,6 +1474,17 @@ export class MockAgentBridge implements AgentBridge {
     return { imported: nodes.length, skipped: [], nodes };
   }
 
+  async nodeImportFile(_path: string): Promise<NodeImportResult> {
+    await sleep(250);
+    const nodes = [mockNode("文件节点 01")];
+    return { imported: nodes.length, skipped: [], nodes };
+  }
+
+  async pickNodeFile(): Promise<string | null> {
+    // 浏览器预览没有系统文件对话框：给一个假路径，让文件导入流程可以走通。
+    return "/mock/nodes.txt";
+  }
+
   async nodeImportText(text: string): Promise<NodeImportResult> {
     await sleep(250);
     const lines = text

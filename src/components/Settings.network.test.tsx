@@ -56,6 +56,8 @@ function makeBridge(
     defaultProfileStatus: vi.fn(),
     nodeImportText: vi.fn(async () => ({ imported: 1, skipped: [], nodes: [] })),
     nodeImportUrl: vi.fn(async () => ({ imported: 2, skipped: [], nodes: [] })),
+    nodeImportFile: vi.fn(async () => ({ imported: 1, skipped: [], nodes: [] })),
+    pickNodeFile: vi.fn(async () => null),
   } as unknown as AgentBridge;
 }
 
@@ -74,6 +76,7 @@ function renderSettings(
     proxyPort,
     onNewConfig,
     onAskAi,
+    onNotice,
   }: {
     connectMode?: "tun" | "system_proxy" | null;
     routingMode?: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -83,6 +86,7 @@ function renderSettings(
     proxyPort?: number;
     onNewConfig?: () => void;
     onAskAi?: (text: string, section: string) => void;
+    onNotice?: (notice: { level: "info" | "error"; text: string }) => void;
   } = {},
 ) {
   return render(
@@ -97,6 +101,7 @@ function renderSettings(
       proxyPort={proxyPort}
       onNewConfig={onNewConfig}
       onClose={() => {}}
+      onNotice={onNotice ?? (() => {})}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}
@@ -241,7 +246,7 @@ describe("连接 tab", () => {
 });
 
 describe("添加节点", () => {
-  it("空输入时「添加」禁用，弹层不再有文件选择", async () => {
+  it("空输入时「添加」禁用，文件入口在弹层里", async () => {
     renderSettings(makeBridge(), { connectMode: "tun" });
     expect(await screen.findByText("添加节点")).toBeTruthy();
     const dialog = await openAddDialog();
@@ -251,14 +256,14 @@ describe("添加节点", () => {
         "支持多行 ss:// 链接或 https 订阅地址；文件里的节点密码不要外传。",
       ),
     ).toBeTruthy();
-    expect(within(dialog).queryByRole("button", { name: "选择文件" })).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "从文件导入" })).toBeTruthy();
     expect(
       (within(dialog).getByRole("button", { name: "添加" }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
   });
 
-  it("ss:// 文本走 node_import_text，跳过原因用中文", async () => {
+  it("ss:// 文本走 node_import_text，成功提示走 toast，跳过原因用中文", async () => {
     const bridge = makeBridge();
     (bridge as unknown as { nodeImportText: ReturnType<typeof vi.fn> }).nodeImportText =
       vi.fn(async () => ({
@@ -266,8 +271,9 @@ describe("添加节点", () => {
         skipped: [{ name: "旧节点", reason: "duplicate" }],
         nodes: [],
       }));
+    const onNotice = vi.fn();
 
-    renderSettings(bridge, { connectMode: "tun" });
+    renderSettings(bridge, { connectMode: "tun", onNotice });
     const dialog = await openAddDialog();
     const field = within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" });
 
@@ -277,14 +283,20 @@ describe("添加节点", () => {
     await waitFor(() =>
       expect(bridge.nodeImportText).toHaveBeenCalledWith("ss://abc\nss://def", "cfg_1"),
     );
-    expect(await within(dialog).findByText("已添加 1 个节点")).toBeTruthy();
+    await waitFor(() =>
+      expect(onNotice).toHaveBeenCalledWith({
+        level: "info",
+        text: "已添加 1 个节点",
+      }),
+    );
     expect(within(dialog).getByText("旧节点：已有同名节点")).toBeTruthy();
     expect(within(dialog).queryByText("duplicate")).toBeNull();
   });
 
   it("https 订阅走 node_import_url", async () => {
     const bridge = makeBridge();
-    renderSettings(bridge, { connectMode: "tun" });
+    const onNotice = vi.fn();
+    renderSettings(bridge, { connectMode: "tun", onNotice });
     const dialog = await openAddDialog();
     fireEvent.change(
       within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
@@ -298,7 +310,64 @@ describe("添加节点", () => {
         "cfg_1",
       ),
     );
-    expect(await within(dialog).findByText("已添加 2 个节点")).toBeTruthy();
+    await waitFor(() =>
+      expect(onNotice).toHaveBeenCalledWith({
+        level: "info",
+        text: "已添加 2 个节点",
+      }),
+    );
+  });
+
+  it("从文件导入：先显示文件名确认，再调 node_import_file", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { pickNodeFile: ReturnType<typeof vi.fn> }).pickNodeFile =
+      vi.fn(async () => "/Users/me/nodes.txt");
+    const onNotice = vi.fn();
+
+    renderSettings(bridge, { connectMode: "tun", onNotice });
+    const dialog = await openAddDialog();
+    fireEvent.click(within(dialog).getByRole("button", { name: "从文件导入" }));
+
+    expect(await within(dialog).findByText("nodes.txt")).toBeTruthy();
+    expect(bridge.nodeImportFile).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "导入" }));
+    await waitFor(() =>
+      expect(bridge.nodeImportFile).toHaveBeenCalledWith(
+        "/Users/me/nodes.txt",
+        "cfg_1",
+      ),
+    );
+    await waitFor(() =>
+      expect(onNotice).toHaveBeenCalledWith({
+        level: "info",
+        text: "已添加 1 个节点",
+      }),
+    );
+  });
+
+  it("文件导入失败按错误码给三段文案", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { pickNodeFile: ReturnType<typeof vi.fn> }).pickNodeFile =
+      vi.fn(async () => "/Users/me/big.txt");
+    (bridge as unknown as { nodeImportFile: ReturnType<typeof vi.fn> }).nodeImportFile =
+      vi.fn(async () => {
+        throw {
+          code: "INVALID_ARGUMENT",
+          message: "file too large",
+          details: { reason: "file_too_large", max_bytes: 1048576 },
+        };
+      });
+
+    renderSettings(bridge, { connectMode: "tun" });
+    const dialog = await openAddDialog();
+    fireEvent.click(within(dialog).getByRole("button", { name: "从文件导入" }));
+    await within(dialog).findByText("big.txt");
+    fireEvent.click(within(dialog).getByRole("button", { name: "导入" }));
+
+    expect(
+      await within(dialog).findByText("文件太大了，最大 1 MB。换一个小一点的文件。"),
+    ).toBeTruthy();
   });
 
   it("http 订阅直接拒绝，不发请求", async () => {
@@ -316,19 +385,27 @@ describe("添加节点", () => {
     expect(bridge.nodeImportUrl).not.toHaveBeenCalled();
   });
 
-  it("没有当前配置时给出提示，不静默只进节点池", async () => {
+  it("没有当前配置时禁用导入并说明先在左侧新建", async () => {
     const bridge = makeBridge();
     renderSettings(bridge, { connectMode: "system_proxy", configId: null });
     const dialog = await openAddDialog();
+    expect(
+      within(dialog).getByText("先在左侧新建一套配置，再添加节点。"),
+    ).toBeTruthy();
+
     fireEvent.change(
       within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
       { target: { value: "ss://abc" } },
     );
-    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
-
     expect(
-      await within(dialog).findByText("先在左侧选一套配置，再添加节点。"),
-    ).toBeTruthy();
+      (within(dialog).getByRole("button", { name: "添加" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      (
+        within(dialog).getByRole("button", { name: "从文件导入" }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
     expect(bridge.nodeImportText).not.toHaveBeenCalled();
   });
 });

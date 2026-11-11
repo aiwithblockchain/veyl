@@ -7198,6 +7198,87 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 文件通道：读文件后与粘贴导入共用解析；传 configId 时追加到该配置。
+    #[tokio::test]
+    async fn importing_a_file_appends_to_the_given_config() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("文件")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        let path = dir.join("nodes.txt");
+        std::fs::write(
+            &path,
+            "ss://aes-256-gcm:pw-a@203.0.113.10:8388#F\n垃圾行",
+        )
+        .unwrap();
+
+        let data = crate::agent::commands::import_nodes_from_file(
+            &services,
+            path.to_str().unwrap(),
+            Some(config_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(data["imported"], 1, "一行坏的不作废整批");
+        assert_eq!(data["skipped"][0]["reason"], "unsupported_scheme");
+
+        let detail = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(detail["node_count"], 1, "追加到指定配置后节点数增加");
+        assert_eq!(detail["nodes"][0]["name"], "F");
+        assert_eq!(detail["nodes"][0]["source"], "manual");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空文件：可读，但解析不出节点 → `not_node_text`，消息用文件措辞。
+    #[tokio::test]
+    async fn an_empty_file_is_rejected_as_not_node_text() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let path = dir.join("empty.txt");
+        std::fs::write(&path, "").unwrap();
+
+        let error = crate::agent::commands::import_nodes_from_file(
+            &services,
+            path.to_str().unwrap(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error["code"], "INVALID_ARGUMENT");
+        assert_eq!(error["details"]["reason"], "not_node_text");
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .contains("这个文件里没有可用的节点"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未知 `configId` 的服务层错误原样透传，不能被文件侧错误码盖掉。
+    #[tokio::test]
+    async fn a_missing_config_id_keeps_the_not_found_error() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let path = dir.join("nodes.txt");
+        std::fs::write(&path, "ss://aes-256-gcm:pw-a@203.0.113.10:8388#F\n").unwrap();
+
+        let error = crate::agent::commands::import_nodes_from_file(
+            &services,
+            path.to_str().unwrap(),
+            Some("config-missing".into()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error["code"], "NOT_FOUND");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 未知地区没有本地直连层，口径必须是 `none`，不能报成 `ip_only`。
     #[test]
     fn local_direct_basis_reports_none_for_unknown_region() {

@@ -46,6 +46,7 @@ interface Props {
   /** 新建一套配置（会先关闭设置）。 */
   onNewConfig?: () => void;
   onClose: () => void;
+  onNotice: (notice: { level: "info" | "error"; text: string }) => void;
   onRestartOnboarding: () => void;
   onOpenLogs: () => void;
   onRestoreNetwork: () => void;
@@ -559,6 +560,35 @@ function importSkipReason(reason: string): string {
   return IMPORT_SKIP_REASONS[reason as NodeImportSkipped["reason"]] ?? "没法导入";
 }
 
+function fileNameOf(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? path;
+}
+
+function describeFileImportError(error: unknown): string {
+  const bridgeError = toBridgeError(error);
+  const reason =
+    typeof bridgeError.details?.reason === "string" ? bridgeError.details.reason : null;
+  switch (reason) {
+    case "invalid_path":
+      return "这个文件路径用不了。重新选一次文件。";
+    case "file_unreadable":
+      return "读不了这个文件。它可能已被移动、删除，或没有读取权限。重新选一次。";
+    case "file_too_large":
+      return "文件太大了，最大 1 MB。换一个小一点的文件。";
+    case "not_node_text":
+      return "这个文件里没有可用的节点（支持多行 ss:// 链接）。换一个文件。";
+    default:
+      break;
+  }
+  if (bridgeError.code === "NOT_FOUND") {
+    return "这套配置已经不在了。先在左侧重新选一套，再导入。";
+  }
+  return bridgeError.message && bridgeError.message !== "操作失败"
+    ? bridgeError.message
+    : "没有导入成功。再试一次。";
+}
+
 /** 只把数字送进 mono；中文和单位保持正文。 */
 function withMonoDigits(text: string) {
   return text
@@ -591,6 +621,7 @@ export function Settings({
   configId = null,
   onNewConfig,
   onClose,
+  onNotice,
   onRestartOnboarding,
   onOpenLogs,
   onRestoreNetwork,
@@ -658,6 +689,7 @@ export function Settings({
   const returnPortFocusRef = useRef(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
+  const [importFile, setImportFile] = useState<string | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [importResult, setImportResult] = useState<NodeImportResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -817,6 +849,7 @@ export function Settings({
     setProxyCopy("idle");
     setImportOpen(false);
     setImportText("");
+    setImportFile(null);
     setImportBusy(false);
     setImportResult(null);
     setImportError(null);
@@ -1068,10 +1101,36 @@ export function Settings({
   const importIsUrl = /^https:\/\//i.test(importFirstLine);
 
   const submitImport = async () => {
-    const text = importText.trim();
-    if (!text || importBusy) return;
+    if (importBusy) return;
     setImportError(null);
     setImportResult(null);
+
+    const applyResult = (result: NodeImportResult) => {
+      setImportResult(result);
+      if (result.imported === 0) return;
+      setImportText("");
+      setImportFile(null);
+      onNotice({ level: "info", text: `已添加 ${result.imported} 个节点` });
+    };
+
+    if (importFile) {
+      if (!configId) {
+        setImportError("先在左侧选一套配置，再添加节点。");
+        return;
+      }
+      setImportBusy(true);
+      try {
+        applyResult(await bridge.nodeImportFile(importFile, configId));
+      } catch (error) {
+        setImportError(describeFileImportError(error));
+      } finally {
+        setImportBusy(false);
+      }
+      return;
+    }
+
+    const text = importText.trim();
+    if (!text) return;
     if (/^http:\/\//i.test(importFirstLine)) {
       setImportError("订阅地址要用 https，不能是 http。");
       return;
@@ -1082,11 +1141,11 @@ export function Settings({
     }
     setImportBusy(true);
     try {
-      const result = importIsUrl
-        ? await bridge.nodeImportUrl(importFirstLine, configId)
-        : await bridge.nodeImportText(text, configId);
-      setImportResult(result);
-      if (result.imported > 0) setImportText("");
+      applyResult(
+        importIsUrl
+          ? await bridge.nodeImportUrl(importFirstLine, configId)
+          : await bridge.nodeImportText(text, configId),
+      );
     } catch (error) {
       const message = toBridgeError(error).message;
       setImportError(
@@ -1096,6 +1155,20 @@ export function Settings({
       );
     } finally {
       setImportBusy(false);
+    }
+  };
+
+  const chooseImportFile = async () => {
+    if (importBusy) return;
+    setImportError(null);
+    try {
+      const path = await bridge.pickNodeFile();
+      if (!path) return;
+      setImportFile(path);
+      setImportText("");
+      setImportResult(null);
+    } catch {
+      setImportError("没有打开文件选择器，再试一次。");
     }
   };
 
@@ -1900,34 +1973,41 @@ export function Settings({
                     支持多行 ss:// 链接或 https 订阅地址；文件里的节点密码不要外传。
                   </p>
 
-                  <div className="settings-input">
-                    <textarea
-                      aria-label="节点链接或订阅地址"
-                      value={importText}
-                      rows={4}
-                      disabled={importBusy}
-                      placeholder={"ss://...\nhttps://..."}
-                      onChange={(event) => {
-                        setImportText(event.target.value);
-                        setImportError(null);
-                      }}
-                    />
-                  </div>
+                  {!configId ? (
+                    <p className="settings-note">先在左侧新建一套配置，再添加节点。</p>
+                  ) : null}
 
-                  {importResult ? (
+                  {importFile ? (
+                    <p className="settings-row__value">
+                      将导入：<span className="num">{fileNameOf(importFile)}</span>
+                    </p>
+                  ) : (
+                    <div className="settings-input">
+                      <textarea
+                        aria-label="节点链接或订阅地址"
+                        value={importText}
+                        rows={4}
+                        disabled={importBusy}
+                        placeholder={"ss://...\nhttps://..."}
+                        onChange={(event) => {
+                          setImportText(event.target.value);
+                          setImportError(null);
+                        }}
+                      />
+                    </div>
+                  )}
+
+                  {importResult &&
+                  (importResult.imported === 0 || importResult.skipped.length > 0) ? (
                     <div className="settings-import">
-                      <p
-                        className={`settings-feedback ${
-                          importResult.imported > 0
-                            ? "settings-feedback--ok"
-                            : "settings-feedback--warn"
-                        }`}
-                        role="status"
-                      >
-                        {importResult.imported > 0
-                          ? `已添加 ${importResult.imported} 个节点`
-                          : "没有添加节点"}
-                      </p>
+                      {importResult.imported === 0 ? (
+                        <p
+                          className="settings-feedback settings-feedback--warn"
+                          role="status"
+                        >
+                          没有添加节点
+                        </p>
+                      ) : null}
                       {importResult.skipped.length > 0 ? (
                         <ul className="settings-import__skipped">
                           {importResult.skipped.map((item, index) => (
@@ -1951,6 +2031,35 @@ export function Settings({
                   ) : null}
 
                   <div className="settings-actions">
+                    {importFile ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn--ghost"
+                          onClick={() => void chooseImportFile()}
+                          disabled={importBusy}
+                        >
+                          重新选择
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn--ghost"
+                          onClick={() => setImportFile(null)}
+                          disabled={importBusy}
+                        >
+                          改用文本
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn--ghost"
+                        onClick={() => void chooseImportFile()}
+                        disabled={importBusy || !configId}
+                      >
+                        从文件导入
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn btn--ghost"
@@ -1963,13 +2072,21 @@ export function Settings({
                       type="button"
                       className="btn btn--primary"
                       onClick={() => void submitImport()}
-                      disabled={importBusy || importText.trim() === ""}
+                      disabled={
+                        importBusy ||
+                        !configId ||
+                        (!importFile && importText.trim() === "")
+                      }
                     >
                       {importBusy
-                        ? importIsUrl
-                          ? "正在获取…"
-                          : "正在添加…"
-                        : "添加"}
+                        ? importFile
+                          ? "正在导入…"
+                          : importIsUrl
+                            ? "正在获取…"
+                            : "正在添加…"
+                        : importFile
+                          ? "导入"
+                          : "添加"}
                     </button>
                   </div>
                 </div>

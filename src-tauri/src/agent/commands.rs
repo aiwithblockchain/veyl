@@ -535,6 +535,146 @@ pub async fn node_import_text(
         .map_err(error_value)
 }
 
+/// 文件导入上限：与 `import_seed_file`、URL 拉取一致（契约 §4.1.2）。
+///
+/// 大小以打开后的**句柄**为准，读取再用 `take(MAX + 1)` 卡住，最多只读
+/// 1 MiB + 1 字节。
+pub(crate) const MAX_NODE_FILE_BYTES: u64 = 1024 * 1024;
+
+/// 本地文件导入：与 `node_import_text` 共用解析与落库，只多一步路径校验和读取。
+///
+/// **仅 UI**：不注册为 AI 工具——AI 侧继续走 `NodeImportText`，不给模型读本地
+/// 文件的能力（契约 §4.1.2）。
+#[tauri::command]
+pub async fn node_import_file(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+    config_id: Option<String>,
+) -> Result<Value, Value> {
+    import_nodes_from_file(state.services.as_ref(), &path, config_id).await
+}
+
+/// 文件导入的核心，抽出来是为了能脱离 Tauri `State` 测。
+///
+/// 读文件失败用契约 §4.1.2 的三个 reason；解析失败沿用文本导入的
+/// `not_node_text`，只把可读消息换成文件措辞（解析器是共用的）。
+pub(crate) async fn import_nodes_from_file(
+    services: &dyn crate::tools::VpnToolServices,
+    path: &str,
+    config_id: Option<String>,
+) -> Result<Value, Value> {
+    let path = path.to_string();
+    // 同步读放进阻塞池：慢盘或网络卷不能占住 async 线程。
+    let text = tokio::task::spawn_blocking(move || read_node_file(&path))
+        .await
+        .map_err(|error| {
+            command_error(
+                "INTERNAL",
+                format!("读取文件任务异常：{error}"),
+                Value::Null,
+            )
+        })??;
+    match services.node_import_text(config_id, &text).await {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let mut value = error_value(error);
+            if value["details"]["reason"] == "not_node_text" {
+                value["message"] = json!("这个文件里没有可用的节点（支持多行 ss:// 链接）");
+            }
+            Err(value)
+        }
+    }
+}
+
+/// 路径校验 + 读取。错误码与 `details.reason` 按契约 §4.1.2。
+///
+/// 只打开一次：类型与大小都看句柄上的 metadata，读取再用 `take` 卡在
+/// `MAX + 1` 字节——「先查后读」之间文件被换掉或长大也不会超读。
+/// 消息里**不出现路径**（与日志口径一致），也不回显文件内容。
+fn read_node_file(path: &str) -> Result<String, Value> {
+    use std::io::Read;
+
+    let candidate = std::path::Path::new(path);
+    if path.is_empty() || !candidate.is_absolute() {
+        return Err(file_error(
+            "invalid_path",
+            "请选择要导入的文件（必须是绝对路径）",
+            None,
+        ));
+    }
+    let mut file = open_for_read(candidate).map_err(|_| unreadable_file_error())?;
+    let metadata = file.metadata().map_err(|_| unreadable_file_error())?;
+    if !metadata.is_file() {
+        return Err(file_error(
+            "file_unreadable",
+            "只能导入普通文件，不能是目录或特殊文件",
+            None,
+        ));
+    }
+    if metadata.len() > MAX_NODE_FILE_BYTES {
+        return Err(file_too_large_error());
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_NODE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| unreadable_file_error())?;
+    // 读的是句柄，但仍可能边读边长：截断后刚好超限也算超限。
+    if bytes.len() as u64 > MAX_NODE_FILE_BYTES {
+        return Err(file_too_large_error());
+    }
+    // 不做编码猜测：非法字节替换为 U+FFFD（契约 §4.1.2）。
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// 只读打开。unix 上加 `O_NONBLOCK`：FIFO 这类特殊文件会在 `open` 处
+/// 一直等到有写端，占住阻塞线程；普通文件不受该标志影响。
+fn open_for_read(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        return std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path);
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::open(path)
+    }
+}
+
+fn unreadable_file_error() -> Value {
+    file_error(
+        "file_unreadable",
+        "这个文件无法读取（可能不存在或没有权限）",
+        None,
+    )
+}
+
+fn file_too_large_error() -> Value {
+    file_error(
+        "file_too_large",
+        "文件超过 1 MiB，请选择更小的文件",
+        Some(MAX_NODE_FILE_BYTES),
+    )
+}
+
+fn file_error(reason: &str, message: &str, max_bytes: Option<u64>) -> Value {
+    let mut details = json!({ "reason": reason });
+    if let Some(max) = max_bytes {
+        details["max_bytes"] = json!(max);
+    }
+    json!({
+        "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+        "code": "INVALID_ARGUMENT",
+        "message": message,
+        "retryable": false,
+        "details": details,
+        "request_id": "",
+    })
+}
+
 /// 手动模式：五个字段创建节点。密码只进 secrets.enc。
 #[tauri::command]
 pub async fn node_create(
@@ -1273,6 +1413,151 @@ pub async fn rename_session(session_id: String, title: String) -> Result<Value, 
             "code": "INTERNAL",
             "message": error.to_string(),
         })),
+    }
+}
+
+#[cfg(test)]
+mod node_import_file_tests {
+    use super::*;
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "veyl-import-{tag}-{:016x}",
+            rand::random::<u64>()
+        ))
+    }
+
+    #[test]
+    fn relative_or_empty_paths_are_rejected() {
+        for path in ["", "nodes.txt", "./nodes.txt", "~/nodes.txt"] {
+            let error = read_node_file(path).unwrap_err();
+            assert_eq!(error["code"], "INVALID_ARGUMENT");
+            assert_eq!(error["details"]["reason"], "invalid_path", "{path:?}");
+        }
+    }
+
+    #[test]
+    fn a_directory_is_not_a_readable_file() {
+        let dir = std::env::temp_dir();
+        let error = read_node_file(dir.to_str().unwrap()).unwrap_err();
+        assert_eq!(error["code"], "INVALID_ARGUMENT");
+        assert_eq!(error["details"]["reason"], "file_unreadable");
+    }
+
+    #[test]
+    fn a_missing_path_is_reported_as_unreadable() {
+        let missing = temp_path("missing");
+        let error = read_node_file(missing.to_str().unwrap()).unwrap_err();
+        assert_eq!(error["details"]["reason"], "file_unreadable");
+    }
+
+    #[test]
+    fn files_over_one_mib_are_rejected_with_the_limit() {
+        let path = temp_path("big");
+        std::fs::write(&path, vec![b'a'; (MAX_NODE_FILE_BYTES + 1) as usize]).unwrap();
+        let error = read_node_file(path.to_str().unwrap()).unwrap_err();
+        assert_eq!(error["details"]["reason"], "file_too_large");
+        assert_eq!(error["details"]["max_bytes"], MAX_NODE_FILE_BYTES);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 边界另一侧：恰好 1 MiB 是允许的，不能被上限本身挡掉。
+    #[test]
+    fn exactly_one_mib_is_accepted() {
+        let path = temp_path("limit");
+        std::fs::write(&path, vec![b'a'; MAX_NODE_FILE_BYTES as usize]).unwrap();
+        let text = read_node_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(text.len() as u64, MAX_NODE_FILE_BYTES);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_directory_is_rejected() {
+        let link = temp_path("dirlink");
+        std::os::unix::fs::symlink(std::env::temp_dir(), &link).unwrap();
+        let error = read_node_file(link.to_str().unwrap()).unwrap_err();
+        assert_eq!(error["code"], "INVALID_ARGUMENT");
+        assert_eq!(error["details"]["reason"], "file_unreadable");
+        let _ = std::fs::remove_file(&link);
+    }
+
+    /// 符号链接指向 FIFO：必须被判为不可读，且不能卡在 `open` 上。
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_fifo_is_rejected_without_blocking() {
+        let fifo = temp_path("fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let link = temp_path("fifolink");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = link.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_node_file(target.to_str().unwrap()));
+        });
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("读取 FIFO 不能阻塞");
+        let error = outcome.unwrap_err();
+        assert_eq!(error["details"]["reason"], "file_unreadable");
+
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&fifo);
+    }
+
+    /// 报错消息里不能回显路径：路径可能带用户名等身份信息。
+    #[test]
+    fn error_messages_do_not_echo_the_path() {
+        let missing = temp_path("hidden");
+        let shown = missing.to_str().unwrap().to_string();
+        let error = read_node_file(&shown).unwrap_err();
+        assert!(!error["message"].as_str().unwrap().contains(&shown));
+
+        let dir = std::env::temp_dir();
+        let shown = dir.to_str().unwrap().to_string();
+        let error = read_node_file(&shown).unwrap_err();
+        assert!(!error["message"].as_str().unwrap().contains(&shown));
+
+        let big = temp_path("hiddenbig");
+        std::fs::write(&big, vec![b'a'; (MAX_NODE_FILE_BYTES + 1) as usize]).unwrap();
+        let shown = big.to_str().unwrap().to_string();
+        let error = read_node_file(&shown).unwrap_err();
+        assert!(!error["message"].as_str().unwrap().contains(&shown));
+        let _ = std::fs::remove_file(&big);
+    }
+
+    #[test]
+    fn a_valid_file_is_read_as_lossy_utf8() {
+        let path = temp_path("ok");
+        std::fs::write(&path, b"ss://aes-256-gcm:pw@203.0.113.10:8388#A").unwrap();
+        assert_eq!(
+            read_node_file(path.to_str().unwrap()).unwrap(),
+            "ss://aes-256-gcm:pw@203.0.113.10:8388#A"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        // 非法字节替换为 U+FFFD；不做编码猜测，也不因此报错。
+        let path = temp_path("utf8");
+        std::fs::write(&path, [b's', b's', b':', 0xff]).unwrap();
+        assert!(read_node_file(path.to_str().unwrap())
+            .unwrap()
+            .ends_with('\u{FFFD}'));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_empty_file_reads_as_empty_text() {
+        // 空文件本身可读；「没有可用节点」由共用的解析器判断。
+        let path = temp_path("empty");
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(read_node_file(path.to_str().unwrap()).unwrap(), "");
+        let _ = std::fs::remove_file(&path);
     }
 }
 

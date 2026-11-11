@@ -321,7 +321,10 @@ export default function App() {
   const importPath = useCallback(
     async (path: string) => {
       if (!/\.json$/i.test(path)) {
-        setAppNotice({ level: "error", text: "只支持 .json 格式的节点文件，请换一个文件。" });
+        setAppNotice({
+          level: "error",
+          text: "窗口拖入只支持 .json 种子文件；节点文本请到 设置 › 连接 › 添加节点导入。",
+        });
         return;
       }
       if (importingRef.current) return;
@@ -1398,6 +1401,7 @@ export default function App() {
           setNewConfigOpen(true);
         }}
         onClose={closeSettings}
+        onNotice={setAppNotice}
         onRestartOnboarding={() => {
           setSettingsOpen(false);
           setShowOnboarding(true);

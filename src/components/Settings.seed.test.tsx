@@ -85,6 +85,7 @@ function renderSettings(
       defaultProfile={options.profile ?? profile()}
       connectMode="system_proxy"
       onClose={() => {}}
+      onNotice={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}
@@ -277,7 +278,9 @@ describe("设置页试用节点行", () => {
     fireEvent.click(screen.getByRole("tab", { name: "遇到问题" }));
     fireEvent.click(screen.getByRole("tab", { name: "连接" }));
 
-    expect(await screen.findByText(/18 个节点/)).toBeTruthy();
+    expect(
+      seedRow().querySelector(".settings-row__value")?.textContent,
+    ).toBe("18 个节点 · 3 小时前检查过");
   });
 
   it("本机写入失败压成一行，旧缓存保留且按钮可用", async () => {
@@ -289,7 +292,9 @@ describe("设置页试用节点行", () => {
 
     fireEvent.click(within(seedRow()).getByRole("button", { name: "检查更新" }));
     expect(await screen.findByText("没能保存到本机，检查磁盘空间后重试。")).toBeTruthy();
-    expect(screen.getByText(/12 个节点/)).toBeTruthy();
+    expect(
+      seedRow().querySelector(".settings-row__value")?.textContent,
+    ).toBe("12 个节点 · 3 小时前检查过");
     expect(
       (within(seedRow()).getByRole("button", { name: "检查更新" }) as HTMLButtonElement)
         .disabled,

@@ -89,6 +89,7 @@ function Harness({
         setOpen(false);
         onClose();
       }}
+      onNotice={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}

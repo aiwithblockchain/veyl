@@ -8,6 +8,7 @@ import type {
   ConfigSummary,
   NodeCreateInput,
   NodeImportResult,
+  NodeImportSkipped,
   NodeProbeData,
   NodeProbeMethod,
   NodeProbePhase,
@@ -55,19 +56,15 @@ export interface RenamedSession {
   createdAt: number;
 }
 
-/** `import_seed_file` 的返回。**永远不含 password**。 */
-export interface ImportedProfile {
-  id: string;
-  name: string;
-  server: string;
-  server_port?: number;
-  method: string;
-}
-
+/**
+ * `import_seed_file` 的返回（commands.md §8.3）。形状与 `NodeImportResult` 相同，
+ * 但语义不同：种子导入的 `skipped` 恒为空，`nodes[].source` 写死为 `seed`。
+ * **永远不含 password**。
+ */
 export interface ImportSeedResult {
   imported: number;
-  skipped: { name: string; reason: string }[];
-  profiles: ImportedProfile[];
+  skipped: NodeImportSkipped[];
+  nodes: NodeSummary[];
 }
 
 export interface ConfigListData {
@@ -461,6 +458,10 @@ export interface AgentBridge {
   nodeImportUrl(url: string, configId?: string): Promise<NodeImportResult>;
   /** 导入用户粘贴的 ss:// 文本；不发网络请求。 */
   nodeImportText(text: string, configId?: string): Promise<NodeImportResult>;
+  /** 从本地文件导入节点；path 必须来自系统文件对话框或窗口拖放。 */
+  nodeImportFile(path: string, configId?: string): Promise<NodeImportResult>;
+  /** 用系统文件对话框选一个节点文件；取消返回 null。仅 UI 使用。 */
+  pickNodeFile(): Promise<string | null>;
   /** 服务分类目录（只读），「只指定服务」的 targets 从这里取 id。 */
   categoryList(query?: string, limit?: number): Promise<{ categories: Category[]; total: number }>;
   /** 系统时区 / 区域推断出的地区（小写 cc）；取不到为 null。 */

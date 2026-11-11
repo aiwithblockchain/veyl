@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AgentBridge,
@@ -619,6 +620,24 @@ export class TauriAgentBridge implements AgentBridge {
     );
   }
 
+  async nodeImportFile(path: string, configId?: string): Promise<NodeImportResult> {
+    return normalizeNodeImport(
+      await call<{ imported?: unknown; skipped?: unknown; nodes?: unknown }>(
+        "node_import_file",
+        configId ? { path, configId } : { path },
+      ),
+    );
+  }
+
+  async pickNodeFile(): Promise<string | null> {
+    const path = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "节点文件", extensions: ["txt", "json"] }],
+    });
+    return typeof path === "string" && path.trim() ? path : null;
+  }
+
   async categoryList(
     query?: string,
     limit?: number,
@@ -842,7 +861,7 @@ export class TauriAgentBridge implements AgentBridge {
     return {
       imported: raw.imported ?? 0,
       skipped: raw.skipped ?? [],
-      profiles: raw.profiles ?? [],
+      nodes: raw.nodes ?? [],
     };
   }
 
