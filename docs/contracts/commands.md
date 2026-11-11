@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.16.5`
+> 契约版本：`2.16.10`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -1819,13 +1819,13 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.16.5** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` |
+| `contracts/commands.md` | **2.16.10** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` |
 | `contracts/events.md` | **2.10.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 |
 | `contracts/runtime.md` | **2.6.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` |
 | `contracts/tools.md` | **3.8.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` |
 | `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
 | `contracts/routing.md` | **1.3.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 + 地区判定统一与未知地区不回落 |
-| `contracts/tun-backend.md` | **1.3.1** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、5s 复核与还原判定） |
+| `contracts/tun-backend.md` | **1.5.1** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限） |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
 
 ### 15.6 2.1.0 新增（非破坏性）
@@ -1837,6 +1837,36 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.16.10（2026-11-11，矩阵同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.10`；§15.5 矩阵同步 `tun-backend.md` 1.5.1（救援不复制自身地址、复核双向、退出预算真实生效） | 元数据 | 修复在 `tun-backend.md` §5.2.2/§5.2.3 |
+
+### 2.16.9（2026-11-11，矩阵同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.9`；§15.5 矩阵同步 `tun-backend.md` 1.5.0（连接期系统 DNS 由 TUN 对端改指公网 `223.5.5.5`；无快照清扫不碰该公网地址） | 元数据 | 修复在 `tun-backend.md` §5.2.2/§5.2.3 |
+
+### 2.16.8（2026-11-11，矩阵同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.8`；§15.5 矩阵同步 `tun-backend.md` 1.4.2（清扫只认整组相等、RemovePeer 保留搜索域、flush 命令时限） | 元数据 | 修复在 `tun-backend.md` §5.2.3 |
+
+### 2.16.7（2026-11-11，矩阵同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.7`；§15.5 矩阵同步 `tun-backend.md` 1.4.1（空键救援、部分命中、写后回读、多服务兜底、退出时限） | 元数据 | 修复在 `tun-backend.md` §5.2.3 |
+
+### 2.16.6（2026-11-11，矩阵同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.6`；§15.5 矩阵同步 `tun-backend.md` 1.4.0（还原改为写回可用地址、校验改看服务级 DNS 键） | 元数据 | 修复在 `tun-backend.md` §5.2.2/§5.2.3 |
 
 ### 2.16.5（2026-11-09，矩阵同步）
 

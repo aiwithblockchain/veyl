@@ -65,7 +65,7 @@ pub trait TunBackend: Send + Sync {
         })
     }
 
-    /// 还原连接期间被改写的系统 DNS（指向 TUN 对端的那一步）。
+    /// 还原连接期间被改写的系统 DNS（指向公网地址、让查询进隧道的那一步）。
     ///
     /// 幂等：没改过就是空操作。默认实现什么都不做——只有会改系统 DNS 的平台需要覆盖。
     fn restore_dns(&self) -> Result<(), TunError> {

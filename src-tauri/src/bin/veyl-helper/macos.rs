@@ -430,10 +430,11 @@ fn handle_message(
             Ok(())
         }
         // 降级兜底：App 崩溃、helper 重启后原始快照已经丢了，
-        // 但系统 DNS 可能还指着隧道。只在当前值正好是我们设的地址时才清掉。
+        // 但系统 DNS 可能还指着旧版本写进去的隧道对端。只清那种整组残留，
+        // 不碰我们新写的公网地址（它自己能解析，也可能本来就是用户设的）。
         "restore_dns" => {
-            let peer = dns::peer_from_config(&supervisor.config_path());
-            match dns::restore_or_clear(peer.as_deref()) {
+            let legacy = dns::legacy_peer_from_config(&supervisor.config_path());
+            match dns::restore_or_clear(legacy.as_deref()) {
                 Ok(()) => {
                     unsafe { xpc::dict_set_bool(reply, "ok", true) };
                     Ok(())
@@ -508,11 +509,20 @@ fn handle_message(
 /// mDNSResponder 丢掉解析缓存的那一步。普通用户跑第二条会直接失败，
 /// 所以这条能力必须留在特权侧。
 fn flush_system_dns() -> Result<(), String> {
+    flush_system_dns_within(None)
+}
+
+/// `deadline` 是退出路径的总预算：flush 只是收尾，超了就跳过，不能拖住 launchd。
+fn flush_system_dns_within(deadline: Option<Instant>) -> Result<(), String> {
+    if deadline.is_some_and(|at| Instant::now() >= at) {
+        eprintln!("veyl-helper: [warn] 还原超过退出时限，跳过 DNS 缓存刷新");
+        return Ok(());
+    }
     let mut failures = Vec::new();
-    if let Err(error) = run_command("/usr/bin/dscacheutil", &["-flushcache"]) {
+    if let Err(error) = run_command_within("/usr/bin/dscacheutil", &["-flushcache"], deadline) {
         failures.push(format!("dscacheutil：{error}"));
     }
-    if let Err(error) = run_command("/usr/bin/killall", &["-HUP", "mDNSResponder"]) {
+    if let Err(error) = run_command_within("/usr/bin/killall", &["-HUP", "mDNSResponder"], deadline) {
         failures.push(format!("mDNSResponder：{error}"));
     }
     if failures.is_empty() {
@@ -522,15 +532,45 @@ fn flush_system_dns() -> Result<(), String> {
     }
 }
 
+/// 单次外部命令的上限：退出路径上不能有无限等待——`dscacheutil` 卡住会让
+/// launchd 等不到旧进程退出。
+const COMMAND_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// 仅测试用的无预算版本（生产路径都带退出预算）。
+#[cfg(test)]
 fn run_command(program: &str, args: &[&str]) -> Result<(), String> {
-    let output = Command::new(program)
+    run_command_within(program, args, None)
+}
+
+fn run_command_within(
+    program: &str,
+    args: &[&str],
+    budget: Option<Instant>,
+) -> Result<(), String> {
+    let mut child = Command::new(program)
         .args(args)
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|error| error.to_string())?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!("退出状态 {}", output.status))
+    let timeout = budget.map_or(COMMAND_TIMEOUT, |at| {
+        at.saturating_duration_since(Instant::now()).min(COMMAND_TIMEOUT)
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(format!("退出状态 {status}")),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("命令超时，已终止".to_string());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
     }
 }
 
@@ -643,8 +683,8 @@ struct Supervisor {
     /// 单独存一份而不是塞进 `Running`：激活发生在 `register_child` 之后，
     /// 但 status 可能在激活完成前被问到。
     last_dns: Mutex<Option<dns::DnsHijack>>,
-    /// 本次连接写进系统的地址；连接期复核用。
-    dns_peer: Mutex<Option<String>>,
+    /// 本次连接写进系统的地址（公网 DNS）；连接期复核用。
+    dns_target: Mutex<Option<String>>,
     /// 上一次复核系统 DNS 的时刻。轮询很频繁，`scutil` 要起进程，必须节流。
     dns_checked_at: Mutex<Option<Instant>>,
     /// 最近一次请求时刻。空闲退出用它判断「真的没人用了」。
@@ -668,7 +708,7 @@ impl Supervisor {
             last_uid: Mutex::new(None),
             leases: Mutex::new(std::collections::HashSet::new()),
             last_dns: Mutex::new(None),
-            dns_peer: Mutex::new(None),
+            dns_target: Mutex::new(None),
             dns_checked_at: Mutex::new(None),
             last_request: Mutex::new(Instant::now()),
             in_flight: AtomicUsize::new(0),
@@ -981,10 +1021,10 @@ impl Supervisor {
     /// 没人管的 root 进程。先把它收掉。
     fn sweep_stale(&self) {
         self.kill_orphan();
-        // 崩溃后系统 DNS 可能还指着隧道。**先趁 active.json 还在**清一次：
-        // 删掉之后连 peer 都只能靠常量猜，原始值就更没机会拿回来了。
-        let peer = dns::peer_from_config(&self.config_path());
-        let _ = dns::restore_or_clear(peer.as_deref());
+        // 崩溃后系统 DNS 可能还指着旧版本写进去的隧道对端。**先趁 active.json
+        // 还在**取一次对端：删掉之后只能靠常量猜。公网地址不清（见 `dns` 模块）。
+        let legacy = dns::legacy_peer_from_config(&self.config_path());
+        let _ = dns::restore_or_clear(legacy.as_deref());
         for path in [self.config_path(), self.pid_path()] {
             match std::fs::remove_file(&path) {
                 Ok(()) => eprintln!("veyl-helper: 清理残留 {}", path.display()),
@@ -1009,7 +1049,7 @@ impl Supervisor {
         if exited {
             *self.running.lock().unwrap() = None;
             *self.last_dns.lock().unwrap() = None;
-            *self.dns_peer.lock().unwrap() = None;
+            *self.dns_target.lock().unwrap() = None;
             *self.dns_checked_at.lock().unwrap() = None;
             // 子进程自己退出了：DNS 不能继续指向已经消失的隧道。
             let _ = dns::restore();
@@ -1031,11 +1071,8 @@ impl Supervisor {
         let Some(current) = self.last_dns() else {
             return;
         };
-        if !current.applied {
-            return;
-        }
-        let peer = self.dns_peer.lock().unwrap().clone();
-        let Some(peer) = peer else {
+        let target = self.dns_target.lock().unwrap().clone();
+        let Some(target) = target else {
             return;
         };
         let due = {
@@ -1051,15 +1088,25 @@ impl Supervisor {
         if !due {
             return;
         }
-        let probe = dns::peer_still_applied(&peer);
+        let probe = dns::target_still_applied(&target);
         if let Err(error) = &probe {
             // 读不到系统 DNS 不等于失效：保留上一次的结论，下次再查。
             eprintln!("veyl-helper: 复核系统 DNS 失败：{error}");
         }
-        if let Some(failed) = dns_recheck_outcome(probe) {
-            *self.last_dns.lock().unwrap() = Some(failed);
-            eprintln!("veyl-helper: 系统 DNS 已不再指向隧道（连接期间网络或 DNS 设置变了）");
+        let Some(outcome) = dns_recheck_outcome(probe) else {
+            return;
+        };
+        if outcome == current {
+            return;
         }
+        // 双向：用户把 DNS 改回来、或网络恢复后，界面要能回到「已接管」，
+        // 不能一降级就锁死到下次重连。
+        if outcome.applied {
+            eprintln!("veyl-helper: 系统 DNS 已重新含我们写入的地址，恢复接管状态");
+        } else {
+            eprintln!("veyl-helper: 系统 DNS 已不再含我们写入的地址（连接期间网络或 DNS 设置变了）");
+        }
+        *self.last_dns.lock().unwrap() = Some(outcome);
     }
 
     fn start(&self, config: &str, uid: u32) -> Result<Started, ProtocolError> {
@@ -1319,11 +1366,12 @@ impl Supervisor {
             uid,
         )?;
 
-        // 系统解析器指向 TUN 对端，否则 `hijack-dns` 永远收不到查询（见 `dns` 模块注释）。
+        // 系统解析器指向公网 DNS（不是 TUN 对端——对端落在排除段里，查询出物理网卡后
+        // 黑洞，2026-11-11 真机）。查询进 TUN 后由 `hijack-dns` 回答。
         // **失败不阻断连接**：DNS 是优化项，隧道才是产品；但要如实回报，
         // 让界面能说明「国外网站可能较慢」，不能静默降级。
         let phase = Instant::now();
-        let hijack = dns::activate(&prepared);
+        let hijack = dns::activate();
         if !hijack.applied {
             self.note_for(
                 uid,
@@ -1334,7 +1382,7 @@ impl Supervisor {
             );
         }
         *self.last_dns.lock().unwrap() = Some(hijack.clone());
-        *self.dns_peer.lock().unwrap() = dns::configured_peer(&prepared);
+        *self.dns_target.lock().unwrap() = Some(dns::SYSTEM_DNS_TARGET.to_string());
         *self.dns_checked_at.lock().unwrap() = Some(Instant::now());
         self.note_for(
             uid,
@@ -1435,7 +1483,7 @@ impl Supervisor {
         // 幂等：没改过 DNS 时这里是空操作。
         let _ = dns::restore();
         *self.last_dns.lock().unwrap() = None;
-        *self.dns_peer.lock().unwrap() = None;
+        *self.dns_target.lock().unwrap() = None;
         *self.dns_checked_at.lock().unwrap() = None;
 
         #[cfg(debug_assertions)]
@@ -2010,11 +2058,12 @@ fn diag_tun_address(config: &serde_json::Value) -> String {
 
 /// 复核探测结果的解释。单独抽出来，测试不用真的去读系统 DNS。
 ///
-/// 只有「读到了、而且已经不是我们的地址」才算降级；读不到保留上一次的结论。
+/// 双向：读到我们的地址 = 已接管，读不到 = 降级，读不到系统 DNS 保留上一次结论。
 fn dns_recheck_outcome(probe: Result<bool, String>) -> Option<dns::DnsHijack> {
     match probe {
+        Ok(true) => Some(dns::DnsHijack::applied()),
         Ok(false) => Some(dns::DnsHijack::failed("连接期间网络或 DNS 设置变了")),
-        _ => None,
+        Err(_) => None,
     }
 }
 
@@ -2916,13 +2965,17 @@ mod tests {
             .unwrap_or_default()
             .contains("网络或 DNS"));
         assert!(
-            dns_recheck_outcome(Ok(true)).is_none(),
-            "仍然是我们写的地址，不降级"
-        );
-        assert!(
             dns_recheck_outcome(Err("scutil 失败".into())).is_none(),
             "读不到不等于失效，保留上一次的结论"
         );
+    }
+
+    /// 降级不能是单向闩锁：用户把 DNS 改回来要能恢复「已接管」。
+    #[test]
+    fn a_restored_system_dns_brings_the_hijack_status_back() {
+        let applied = dns_recheck_outcome(Ok(true)).expect("地址回来了必须恢复");
+        assert!(applied.applied);
+        assert!(applied.reason.is_none(), "恢复后不能留着上一次的原因");
     }
 
     #[test]

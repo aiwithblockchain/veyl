@@ -216,7 +216,7 @@ type RuntimeSnapshot = {
 | `applied_route_revision` | 本次连接生成配置时的 `configs.route_revision` | 建连时读入并随进程保存；未连接为 `null`。与库里的 `route_revision` 比较：相等 = 分流规则已生效，不等 = 改了但当前连接还没用上，UI 显示「下次连接生效」 |
 | `route_region` | 生成本次运行配置时判定的地区（小写 cc，未知为 `null`） | 建连时随 plan 保存，**不因用户中途改系统时区而重算**。已连接时界面显示的地区与直连口径以它为准；`route_get.detected_region` 是实时重算值，两者可能不同。**`null` 表示当时判不出地区，不是「回退到实时值」的开关**——已连接时按「未知」显示。地区未知时本次连接**不做本地直连层**（`geoip-<cc>`/`geosite-cn` 为空，DNS 走国际组） |
 | `direct_ip` | 不经代理测得的**直连**出口 IP | 与 `exit_ip` 配对展示，用于让用户判断「是否真的走了代理」。未测到为 `null`。**不得**在探测时带上系统代理，否则两个值会相同、失去意义 |
-| `system_dns` | `"tunnel"` / `"unchanged"` / `null` | **只有真的把系统解析器切到隧道才报 `"tunnel"`**（TUN 连接期把当前网络服务的 DNS 指向 utun 对端，查询进 TUN 后被 `hijack-dns` 接住）。切不过去（降级）报 `"unchanged"`——**界面必须据此常驻一行提示，不能静默**：此时境外域名仍走运营商 DNS，可能解析到污染地址、国外网站变慢。未连接、`failed`、`system_proxy` 模式恒为 `null`。DNS 接管是优化项，失败**不**影响连接状态（见 `tun-backend.md` §5.2.2） |
+| `system_dns` | `"tunnel"` / `"unchanged"` / `null` | **只有真的把系统解析器切到隧道才报 `"tunnel"`**（TUN 连接期把当前网络服务的 DNS 指向公网 `223.5.5.5`，查询被 `auto_route` 收进 TUN 后由 `hijack-dns` 接住）。切不过去（降级）报 `"unchanged"`——**界面必须据此常驻一行提示，不能静默**：此时境外域名仍走运营商 DNS，可能解析到污染地址、国外网站变慢。未连接、`failed`、`system_proxy` 模式恒为 `null`。DNS 接管是优化项，失败**不**影响连接状态（见 `tun-backend.md` §5.2.2） |
 
 **`latency_ms` 的定义必须固定为「出口 IP 探测往返耗时」**，理由是它已经有实现、有含义，且能在没有额外网络请求的前提下反映链路质量。
 
