@@ -1404,12 +1404,27 @@ impl Supervisor {
             }
             match found {
                 Some(name) => {
-                    let (count, missing) = diag_route_snapshot(&name);
+                    // 路由表比设备晚一步装好：spawn 后立刻查会固定看到「缺失 0/1、128/1」，
+                    // 那是还没装完，不是结论。最多再等 500ms 复查一次稳定结果。
+                    let mut snapshot = diag_route_snapshot(&name);
+                    for _ in 0..5 {
+                        if snapshot.1.is_empty() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                        snapshot = diag_route_snapshot(&name);
+                    }
+                    let (count, missing) = snapshot;
+                    let suffix = if missing.is_empty() {
+                        ""
+                    } else {
+                        "（路由仍在安装，非结论）"
+                    };
                     diag(
                         self,
                         uid,
                         &format!(
-                            "接管结束 tun={name} 路由数={count} 关键段={}/4 缺失={missing:?} 耗时={}ms",
+                            "接管结束 tun={name} 路由数={count} 关键段={}/4 缺失={missing:?} 耗时={}ms{suffix}",
                             4 - missing.len(),
                             phase.elapsed().as_millis()
                         ),

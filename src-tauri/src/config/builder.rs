@@ -324,12 +324,9 @@ pub fn build_routed_multi(
         route["auto_detect_interface"] = json!(true);
     }
 
-    // 只有 Windows 会改它，其它平台上这个 `mut` 用不到。
-    #[allow(unused_mut)]
+    // TUN 只分配 IPv4 地址（两个平台都是），我们不接管 IPv6。不把 DNS 限成 v4，
+    // AAAA 要么被 strict_route 黑洞、要么绕开隧道——macOS 真机上就是这样黑洞的。
     let mut dns = plan.dns.clone();
-    // Windows 的 TUN 只有 IPv4 地址；不把 DNS 限成 v4，AAAA 要么被
-    // strict_route 黑洞、要么绕开隧道。macOS 保持 plan 里的 prefer_ipv4。
-    #[cfg(target_os = "windows")]
     if input.connect_mode.is_tun() {
         if let Some(object) = dns.as_object_mut() {
             object.insert("strategy".into(), json!(crate::tun::TUN_DNS_STRATEGY));
@@ -678,7 +675,9 @@ mod tests {
             })],
             route_final: "proxy",
             dns: json!({
-                "servers": [{"type": "udp", "tag": "dns-local-1", "server": "223.5.5.5", "detour": "direct"}],
+                // 本地 DNS **不带** `detour`：我们的 `direct` 出站是空对象，
+                // 1.14 的 run 会 FATAL，check 查不出来（见 `rules/plan.rs`）。
+                "servers": [{"type": "udp", "tag": "dns-local-1", "server": "223.5.5.5"}],
                 "rules": [{"rule_set": ["geosite-cn"], "server": "dns-local-1"}],
                 "final": "dns-local-1",
                 "strategy": "prefer_ipv4"
@@ -717,7 +716,7 @@ mod tests {
             route_final: "proxy",
             dns: json!({
                 "servers": [
-                    {"type": "udp", "tag": "dns-local-1", "server": "223.5.5.5", "detour": "direct"},
+                    {"type": "udp", "tag": "dns-local-1", "server": "223.5.5.5"},
                     {"type": "https", "tag": "dns-remote-1", "server": "1.1.1.1", "detour": "proxy"}
                 ],
                 "rules": [{"rule_set": ["geosite-cn"], "server": "dns-local-1"}],
@@ -734,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn tun_swaps_only_the_inbound() {
+    fn tun_differs_from_proxy_only_in_inbound_and_dns_strategy() {
         let tun = build_routed(&tun_input(), &routed_plan()).unwrap();
         let proxy = build_routed(&input(vless_node()), &routed_plan()).unwrap();
 
@@ -765,11 +764,24 @@ mod tests {
         assert_eq!(proxy["inbounds"][0]["type"], "mixed");
         assert_eq!(proxy["inbounds"][0]["listen"], "127.0.0.1");
 
-        // 出站与分流两层必须逐字相同：入站是唯一差异。
+        // 出站与分流两层必须逐字相同。**有意为之的差异只有两处**：入站（tun vs
+        // mixed），以及 TUN 的 DNS 强制 `ipv4_only`（我们不接管 IPv6，见
+        // `tun::TUN_DNS_STRATEGY`）。再改策略时这条会提醒。
         assert_eq!(tun["outbounds"], proxy["outbounds"]);
         assert_eq!(tun["route"]["final"], proxy["route"]["final"]);
-        assert_eq!(tun["dns"], proxy["dns"]);
         assert_eq!(tun["route"]["rule_set"], proxy["route"]["rule_set"]);
+        assert_eq!(tun["dns"]["strategy"], "ipv4_only");
+        assert_eq!(proxy["dns"]["strategy"], "prefer_ipv4");
+        // 除 strategy 外，DNS 配置必须逐字相同。
+        let mut tun_dns = tun["dns"].clone();
+        let mut proxy_dns = proxy["dns"].clone();
+        assert!(tun_dns.as_object_mut().unwrap().remove("strategy").is_some());
+        assert!(proxy_dns
+            .as_object_mut()
+            .unwrap()
+            .remove("strategy")
+            .is_some());
+        assert_eq!(tun_dns, proxy_dns, "DNS 除 strategy 外不许有差异");
     }
 
     #[test]
@@ -879,26 +891,21 @@ mod tests {
     }
 
     #[test]
-    fn tun_dns_strategy_follows_the_platform_recipe() {
+    fn tun_dns_strategy_is_ipv4_only_on_both_platforms() {
         let tun = build_routed(&tun_input(), &routed_plan()).unwrap();
+        assert_eq!(tun["dns"]["strategy"], "ipv4_only");
         assert_eq!(tun["dns"]["strategy"], crate::tun::TUN_DNS_STRATEGY);
+        // 将来给 TUN 做 IPv6 接管时，把这里、TUN_DNS_STRATEGY 与 routing.md §6.3
+        // 一起改回来；在那之前放 AAAA 进去只会指向一个没有出口的 TUN。
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
-    fn windows_tun_forces_ipv4_only_dns_but_proxy_mode_is_untouched() {
+    fn tun_forces_ipv4_only_dns_but_proxy_mode_is_untouched() {
         let tun = build_routed(&tun_input(), &routed_plan()).unwrap();
         assert_eq!(tun["dns"]["strategy"], "ipv4_only");
         // 系统代理模式不经过 TUN，IPv6 仍然可用，不要一起改。
         let proxy = build_routed(&input(vless_node()), &routed_plan()).unwrap();
         assert_eq!(proxy["dns"]["strategy"], "prefer_ipv4");
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn macos_tun_keeps_prefer_ipv4() {
-        let tun = build_routed(&tun_input(), &routed_plan()).unwrap();
-        assert_eq!(tun["dns"]["strategy"], "prefer_ipv4");
     }
 
     #[test]

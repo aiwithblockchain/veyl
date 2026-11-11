@@ -525,6 +525,30 @@ mod tests {
         assert_eq!(servers[0]["server"], "223.5.5.5");
     }
 
+    /// 本地 DNS 服务器**不能**带 `detour: "direct"`：我们的 `direct` 出站是空对象，
+    /// 1.14 的 `run` 会 FATAL（`detour to an empty direct outbound makes no sense`），
+    /// 而 `sing-box check` 查不出来。测试夹具曾经自己加了它，和真实产出一致性全靠这条。
+    #[test]
+    fn local_dns_servers_never_detour_to_direct() {
+        for (mode, region, targets) in [
+            ("direct", "cn", vec![]),
+            ("proxy_all", "cn", vec![]),
+            ("proxy_selected", "cn", vec!["openai"]),
+            ("direct", "jp", vec![]),
+        ] {
+            let plan = plan(mode, region, &targets);
+            let servers = plan.dns["servers"].as_array().unwrap();
+            assert!(!servers.is_empty());
+            for server in servers {
+                let tag = server["tag"].as_str().unwrap_or_default();
+                assert!(
+                    !tag.starts_with("dns-local") || server.get("detour").is_none(),
+                    "{mode}/{region} 的本地 DNS 不能写 detour：{server}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn remote_dns_servers_are_doh_over_the_proxy() {
         let plan = plan("direct", "cn", &[]);

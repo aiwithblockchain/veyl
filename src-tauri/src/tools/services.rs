@@ -628,6 +628,12 @@ fn port_unavailable_error(tried: &[u16]) -> anyhow::Error {
 mod port_trial_tests {
     use super::*;
 
+    /// 候选的形状约束：非空、不超上限、跳过被占端口、不重复。
+    ///
+    /// **不要在这里再断言「每个候选都空闲」**：那是在 `proxy_port_trials` 查过一遍
+    /// 之后的二次检查，而同一测试二进制里并行跑的用例也在 `bind(0)`，两次检查之间
+    /// 系统完全可能把同一个临时端口发出去——这条断言天生有竞态，随机红。
+    /// 「被占端口会被跳过」由下面的确定性断言覆盖。
     #[test]
     fn trials_skip_taken_ports_and_are_distinct() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -640,9 +646,6 @@ mod port_trial_tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), trials.len(), "候选不能重复");
-        for port in &trials {
-            assert!(vpn_config::is_port_free(*port));
-        }
     }
 
     #[test]

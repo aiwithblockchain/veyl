@@ -1,6 +1,6 @@
 # 契约：分流与 DNS
 
-> 契约版本：`1.3.0`（**已并入**。并入时基线：`commands.md` 2.3.1 / `events.md` 2.1.0 / `tools.md` 3.2.0 / `runtime.md` 2.1.0 / `data-model.md` 3。此后各文件独立演进，一律以各文件头为准，本行不再追更）
+> 契约版本：`1.4.0`（**已并入**。并入时基线：`commands.md` 2.3.1 / `events.md` 2.1.0 / `tools.md` 3.2.0 / `runtime.md` 2.1.0 / `data-model.md` 3。此后各文件独立演进，一律以各文件头为准，本行不再追更）
 > 状态：**已定稿并并入**，2026-11-04。`capabilities.md` 由 PM 维护，本文件不改它。
 > 依据：`docs/user-flows.md` §1.4、`docs/config-execution.md` §7、`docs/capabilities.md` G/I 组、`docs/tun-mode.md` §3/§5、`docs/upgrade.md` §3、`docs/review-checklist.md` B3-01～B3-08
 > 实现：`src-tauri/src/config/`（生成）、`src-tauri/src/rules/`（资源与更新）、Clash API（热切换）
@@ -366,10 +366,11 @@ DNS 规则与 `final` **由同一个 `RoutePlan` 生成**，按「地区 + 模�
 - 必须配 `route.default_domain_resolver`（取第一个 `dns-local` 的 tag）。配了多条 DNS 却缺它不是降级，是 **FATAL 起不来**（`tun-mode.md` §5）。
 - 规则顺序：`sniff` → `hijack-dns` → `ip_is_private` → 分流。
 - sniffer 必须含 `dns`，否则劫持规则不命中。
-- `strategy` **按平台取值**，由生成器决定，仍然不是配置项：
-  - **macOS：`prefer_ipv4`** —— 不启用 IPv6 解析优先，避免本地 IPv6 半通状态把用户卡住。
-  - **Windows：`ipv4_only`** —— Windows 的 TUN 接口只分配 IPv4 地址（地址段见 `tun-privilege-implementation-plan.md` W4）。`prefer_ipv4` 只是「优先」，解析结果里仍会带 AAAA；这些流量进入一个没有 IPv6 出口的 TUN，表现就是黑洞，或绕过隧道的泄漏。`ipv4_only` 直接不要 AAAA，把这个分支消灭在解析阶段。
-  - 两边取值不同是**有意的平台差异**，不是其中一边还没改完。改 `strategy` 属于契约变更，不是实现细节。
+- `strategy` **两个平台统一 `ipv4_only`**，由生成器决定，仍然不是配置项：
+  - 两个平台的 TUN 接口都只分配 IPv4 地址（macOS `172.19.0.1/30`、Windows `198.18.0.1/15`），我们不接管 IPv6。`prefer_ipv4` 只是「优先」，解析结果里仍会带 AAAA；这些流量进入一个没有 IPv6 出口的 TUN，表现就是黑洞，或绕过隧道的泄漏。macOS 真机：`www.facebook.com` 的 AAAA 被客户端优先使用，指向系统里别人留下的 `utun0`–`utun3`，`curl` 反复报 `SSL_ERROR_SYSCALL`；只有支持 happy eyeballs 的客户端才会回落到 IPv4。
+  - `ipv4_only` 直接不要 AAAA，把这个分支消灭在解析阶段。
+  - **这是「没有 IPv6 出口」的结论，不是平台差异遗留**：将来给 TUN 做 IPv6 接管时，`tun/mod.rs` 的 `TUN_DNS_STRATEGY`、生成器的覆盖逻辑与本节要一起改回来。改 `strategy` 属于契约变更，不是实现细节。
+- **已知边界**：`ipv4_only` 下 AAAA 返回空，只提供 IPv6 入口的站点在 TUN 模式下不可用。要支持纯 IPv6 站点必须先做 IPv6 接管，**不能**只把 `strategy` 改回 `prefer_ipv4`——那样又回到 AAAA 黑洞。
 
 ### 6.4 DNS 与热切
 
@@ -705,6 +706,13 @@ applied_route_revision: number | null;  // 本次连接生成配置时的 config
 ---
 
 ## 14. 变更记录
+
+### 1.4.0（2026-11-11，macOS 也改 `ipv4_only`）
+
+| # | 变更 | 类型 | 来源 |
+|---|---|---|---|
+| 1 | §6.3 的 `dns.strategy` 由「macOS `prefer_ipv4`、Windows `ipv4_only`」改为**两个平台统一 `ipv4_only`**；写明「因为我们不接管 IPv6，不是平台差异遗留」，以及将来做 IPv6 接管时要一起改动的位置 | 语义变更（破坏性） | 真机：macOS TUN 只有 IPv4，AAAA 指向系统里别人留下的 utun 后黑洞，`curl` 报 `SSL_ERROR_SYSCALL` |
+| 2 | §6.3 新增已知边界：`ipv4_only` 下纯 IPv6 站点在 TUN 模式不可用；要支持必须先做 IPv6 接管 | 已知边界 | 同上 |
 
 ### 1.3.0（2026-11-07，地区判定与未知地区）
 

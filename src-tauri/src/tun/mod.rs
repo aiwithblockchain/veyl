@@ -56,14 +56,16 @@ pub const TUN_MTU: u32 = 9000;
 
 /// TUN 模式下 DNS 的地址族策略。
 ///
-/// Windows 的 TUN 只有 IPv4 地址（`198.18.0.1/15`），AAAA 查询交给应用后
-/// 要么被 `strict_route` 黑洞、要么绕开隧道，两者都不是我们要的。
-/// `ipv4_only` 让 sing-box 直接不返回 AAAA 记录，行为是确定的。
-/// macOS 继续用 `prefer_ipv4`（配方见 `docs/tun-windows-notes.md` §5.1）。
-#[cfg(target_os = "windows")]
+/// 两个平台的 TUN 都**只分配 IPv4 地址**（macOS `172.19.0.1/30`、Windows
+/// `198.18.0.1/15`），我们不接管 IPv6。`prefer_ipv4` 只是「优先」，解析结果里
+/// 仍会带 AAAA；这些流量进入一个没有 IPv6 出口的 TUN，表现就是黑洞或绕开隧道的
+/// 泄漏——macOS 真机上 `www.facebook.com` 因 AAAA 指向别人留下的 utun0–utun3，
+/// curl 反复报 `SSL_ERROR_SYSCALL`。`ipv4_only` 直接不要 AAAA，把这个分支消灭在
+/// 解析阶段。
+///
+/// 这是「没有 IPv6 出口」的结论，不是平台差异遗留：**将来给 TUN 做 IPv6 接管时，
+/// 这里、`config/builder.rs` 的覆盖逻辑、`routing.md` §6.3 要一起改回来**。
 pub const TUN_DNS_STRATEGY: &str = "ipv4_only";
-#[cfg(not(target_os = "windows"))]
-pub const TUN_DNS_STRATEGY: &str = "prefer_ipv4";
 
 /// TUN 设备是否真的起来了：本机接口里能看到我们固定的 TUN 地址。
 ///

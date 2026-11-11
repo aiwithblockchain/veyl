@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.16.10`
+> 契约版本：`2.16.12`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -150,7 +150,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 21 | `net_repair` | `{ action, port? }` | `NetRepairResult` | 保留 |
 | 22 | `default_profile_status` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
 | 23 | `default_profile_refresh` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
-| 24 | `import_seed_file` | `{ path }` | `SeedImportResult` | 保留（语义 2.0 改） |
+| 24 | `import_seed_file` | `{ path }` | `SeedImportResult` | 保留；**目标状态：UI 不再使用**。设置页的粘贴 / 订阅入口在 A 批次迁到 `node_import_text` / `node_import_url`；文件入口与窗口级拖放待 `node_import_file`。当前设置页「选择文件」与窗口拖放仍调用本命令 |
 | 25 | `ai_send_message` | `{ sessionId, text, hidden? }` | `{ request_id }` | 保留（2.3 增 `hidden`，删 `attachments`） |
 | 26 | `ai_cancel` | `{ requestId }` | `{ cancelled: boolean }` | 保留 |
 | 27 | `chat_history` | `{ sessionId? }` | `ChatHistory` | 保留 |
@@ -909,10 +909,12 @@ type NetRepairResult = {
 
 | action | 行为 | UI 是否使用 |
 |---|---|---|
-| `restore_direct` | 撤系统代理（含复核）→ 停运行时 → 删渲染配置 → 不带代理探测出口 IP | ✅「恢复网络」（E1） |
-| `flush_dns` | macOS：`dscacheutil -flushcache` + `killall -HUP mDNSResponder`，**经特权助手以 root 执行**（普通用户 HUP 不动 mDNSResponder，退出码 0 不代表已刷新）；Windows：`ipconfig /flushdns` | ✅ 诊断页（E2） |
+| `restore_direct` | 撤系统代理（含复核）→ 停运行时 → 删渲染配置 → 不带代理探测出口 IP | ✅ 设置 › 遇到问题 ›「清除残留代理」（E1） |
+| `flush_dns` | macOS：`dscacheutil -flushcache` + `killall -HUP mDNSResponder`，**经特权助手以 root 执行**（普通用户 HUP 不动 mDNSResponder，退出码 0 不代表已刷新）；Windows：`ipconfig /flushdns` | ❌ 正式界面未使用；当前只有 AI 工具能调用（E2） |
 | `set_proxy` | 把系统代理指向 Veyl 自己的 mixed 端口，`port` 必填且必须等于当前运行时的端口 | ❌ 留给模型 |
 | `clear_proxy` | 撤代理并恢复备份，不停运行时 | ❌ 留给模型 |
+
+**UI 实际调用**：只有 `restore_direct`（`App.tsx:941`）。`flush_dns` 没有正式界面入口，只能由 AI 工具 `NetRepair` 调用；本轮不补设置页入口，`settings-ia.md` §3.3 P17 已记录理由（与「重置网络」重叠，用户无法判断何时该用）。
 
 - `exit_ip` / `verified` **恒存在**，没有值时写 `null` / `false`，不要省略键。
 - `verified = false` 时 `ok` 必须为 `false`。
@@ -1259,6 +1261,8 @@ type DefaultProfileResult = {
 
 **保留，但语义收窄：不再创建配置，只并节点。**
 
+自 `2.16.12` 起，本命令的**目标状态是退出 UI**：设置页「添加节点」迁到 `node_import_text`（粘贴）与 `node_import_url`（订阅），文件通道待定的 `node_import_file` 接管，窗口级拖放随后一并迁走。**当前状态**：设置页「选择文件」与窗口级拖放仍调用本命令；迁移完成后更新此段。
+
 ```ts
 type SeedImportResult = {
   imported: number;
@@ -1276,7 +1280,7 @@ type SeedImportResult = {
 
 - 只接受 `veyl_seed.json` 结构（`{ version, updated_at, nodes[] }`），扩展名 `.json`、≤ 1 MB、存在且可读。
 - 节点以 `source = "seed"` 合并进节点池，**只增不删**：手工导入不删除种子拉取层已有的节点，避免一次误操作把用户正在用的节点删掉。
-- 仍是两项 UI 入口、一个命令：窗口级拖放（`onDragDropEvent`）与设置页「选择文件」（`plugin-dialog` 的 `open()`，只授 `dialog:allow-open`）。用户取消时 `open()` 返回 `null`，前端直接返回，**不调用本命令**。
+- UI 入口现状：设置页「选择文件」与**窗口级拖放**（`App.tsx:341-375` 的 `onDragDropEvent` → `importPath`）都还调用本命令。目标状态是 **0 个 UI 调用方**：设置页的粘贴与订阅入口在 A 批次先接 `node_import_text` / `node_import_url`；文件入口与窗口拖放在 `node_import_file` 落地后迁走。用户取消文件选择时 `open()` 返回 `null`，前端直接返回，**不调用本命令**。
 - 只接受 shadowsocks 出站、method 白名单；部分成功不算失败；返回值与日志**永不含 password**；不回显文件内容。
 
 | 错误码 | `details.reason` | 场景 |
@@ -1667,8 +1671,8 @@ type RulesStatus = {
 | `runtime_start` | **A1** 建立连接 / **A3** 取消重连 | 顶部主按钮 | |
 | `runtime_stop` | **A2** 断开连接 / **A3** | 顶部主按钮 | |
 | `runtime_status` | **A4** 连接状态 | 顶部状态文字 | 配合 `runtime-state-changed` |
-| `net_repair` | **E1** 恢复直连 / **E2** 刷新 DNS | `issue_card`、设置页 | |
-| `network_force_reset` | **E3** 强制重置网络（破坏性） | 设置 › 高级 › 诊断 | 二次确认；**不进 AI 工具**，见 §7.9 |
+| `net_repair` | **E1** 恢复直连 / **E2** 刷新 DNS | `issue_card`（E1/E2）；设置页（仅 E1「清除残留代理」） | E2 目前没有正式界面入口，只有 AI 工具调用 |
+| `network_force_reset` | **E3** 强制重置网络（破坏性） | 设置 › 遇到问题 ›「重置网络」 | 二次确认；**不进 AI 工具**，见 §7.9 |
 | `open_log_dir` | **E4** 打开日志目录 | 状态区链接 | |
 | `default_profile_status` / `_refresh` | **C1** / **C2** / **C3** | `update_hint`、`source_choice` |
 | `route_get` | **G1** 查看当前分流方式 | 设置页 / 分流文本 | |
@@ -1819,12 +1823,12 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.16.10** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` |
+| `contracts/commands.md` | **2.16.12** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注） |
 | `contracts/events.md` | **2.10.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 |
 | `contracts/runtime.md` | **2.6.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` |
 | `contracts/tools.md` | **3.8.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` |
 | `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
-| `contracts/routing.md` | **1.3.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 + 地区判定统一与未知地区不回落 |
+| `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.5.1** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限） |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
 
@@ -1837,6 +1841,21 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.16.12（2026-11-11，设置 IA 文档同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.12`；#24 `import_seed_file` 标注**目标状态：UI 不再使用**——设置页粘贴 / 订阅入口迁到 `node_import_text` / `node_import_url`，文件入口与窗口拖放待 `node_import_file`。当前两者仍调用本命令，迁移完成后更新 | 标注 | PM 2026-11-11；`settings-ia.md` P1 |
+| 2 | §7.4 `net_repair` 的「UI 是否使用」改为实际状态：UI 只调 `restore_direct`；`flush_dns` 只有 AI 工具能调。§12.1 同步 | 更正 | PM 2026-11-11：该标注与真实行为不符，测试文档已按真实行为写 |
+| 3 | §12.1 `network_force_reset` 的入口从「设置 › 高级 › 诊断」改为「设置 › 遇到问题 › 重置网络」 | 更正 | 设置分区名与重置入口的现状 |
+| 4 | 接口未变：无新增 / 删除命令，无字段形状变化，无事件变化 | 元数据 | — |
+
+### 2.16.11（2026-11-11，矩阵同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.11`；§15.5 矩阵同步 `routing.md` 1.4.0（TUN 的 `dns.strategy` 两个平台统一 `ipv4_only`） | 元数据 | 修复在 `routing.md` §6.3 |
 
 ### 2.16.10（2026-11-11，矩阵同步）
 

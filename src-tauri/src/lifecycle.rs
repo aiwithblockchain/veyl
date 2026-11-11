@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
@@ -17,6 +18,7 @@ use tauri_plugin_dialog::{
 
 use crate::proxy::ProxyController;
 use crate::runtime::{RuntimeEvent, RuntimeManager, RuntimeState};
+use crate::tun::session::{TunSession, TunState};
 
 const TRAY_ID: &str = "veyl-tray";
 const MAIN_WINDOW: &str = "main";
@@ -100,23 +102,39 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>, parts: Parts) -> tauri::Result
         })
         .build(app)?;
 
-    spawn_tray_state_loop(app.clone(), parts.manager);
+    spawn_tray_state_loop(app.clone(), parts.manager, parts.tun);
     Ok(())
 }
 
-fn spawn_tray_state_loop<R: Runtime>(app: AppHandle<R>, manager: Arc<RuntimeManager>) {
+/// 托盘状态的兜底轮询间隔。
+///
+/// manager 的状态变化有广播事件，TUN 的 sing-box 却是特权助手的子进程、不经过
+/// manager，发不出事件。用短超时把 `recv` 打断再全量算一次，TUN 断开后一两秒内
+/// 就能反映到托盘；再加上循环启动时先算一次，App 重启接手活着的 TUN 也不会显示
+/// 「未连接」。
+const TRAY_RECHECK_INTERVAL: Duration = Duration::from_secs(2);
+
+fn spawn_tray_state_loop<R: Runtime>(
+    app: AppHandle<R>,
+    manager: Arc<RuntimeManager>,
+    tun: Arc<TunSession>,
+) {
     let mut events = manager.subscribe();
     tauri::async_runtime::spawn(async move {
-        let mut current = TrayState::Idle;
+        let mut current =
+            combined_tray_state(manager.status().await.state, tun_running(&tun));
         set_tray_icon(&app, current);
         loop {
-            let next = match events.recv().await {
-                Ok(RuntimeEvent::StateChanged(payload)) => state_to_tray(payload.to),
-                Ok(RuntimeEvent::HealthChanged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    state_to_tray(manager.status().await.state)
+            let next = match tokio::time::timeout(TRAY_RECHECK_INTERVAL, events.recv()).await {
+                Ok(Ok(RuntimeEvent::StateChanged(payload))) => {
+                    combined_tray_state(payload.to, tun_running(&tun))
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Ok(Ok(RuntimeEvent::HealthChanged(_))) => continue,
+                // 事件丢了或这一轮没有事件：直接问两条路径的当前状态。
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) | Err(_) => {
+                    combined_tray_state(manager.status().await.state, tun_running(&tun))
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
             };
             if next != current {
                 current = next;
@@ -124,6 +142,22 @@ fn spawn_tray_state_loop<R: Runtime>(app: AppHandle<R>, manager: Arc<RuntimeMana
             }
         }
     });
+}
+
+fn tun_running(tun: &TunSession) -> bool {
+    matches!(tun.status(), TunState::Running { .. })
+}
+
+/// manager 与 TUN 两条路径合成托盘状态。
+///
+/// **TUN Running 优先报已连接**：它的 sing-box 不经过 manager，manager 那边永远
+/// 停在 Idle，只看 manager 就会「连上了但图标未连接」。TUN 只有 Stopped / Running
+/// 两种，没有独立的失败态，所以不会抢走 manager 的 Error 语义。
+fn combined_tray_state(manager: RuntimeState, tun_running: bool) -> TrayState {
+    if tun_running {
+        return TrayState::Connected;
+    }
+    state_to_tray(manager)
 }
 
 fn state_to_tray(state: RuntimeState) -> TrayState {
@@ -439,5 +473,48 @@ mod tests {
         ] {
             assert_eq!(state_to_tray(state), TrayState::Idle, "{state:?}");
         }
+    }
+
+    /// 托盘必须同时反映 manager（代理模式）与 TUN（特权助手的子进程）两条路径。
+    #[test]
+    fn tray_combines_manager_and_tun_state() {
+        // TUN 连着、manager 不知道：这正是「连上了但图标未连接」的修复点。
+        assert_eq!(
+            combined_tray_state(RuntimeState::Idle, true),
+            TrayState::Connected
+        );
+        // manager 连着、TUN 没开：代理模式。
+        assert_eq!(
+            combined_tray_state(RuntimeState::Running, false),
+            TrayState::Connected
+        );
+        // 两边都连着。
+        assert_eq!(
+            combined_tray_state(RuntimeState::Running, true),
+            TrayState::Connected
+        );
+        // 两边都没连。
+        assert_eq!(
+            combined_tray_state(RuntimeState::Idle, false),
+            TrayState::Idle
+        );
+        assert_eq!(
+            combined_tray_state(RuntimeState::Starting, false),
+            TrayState::Idle
+        );
+    }
+
+    /// TUN 只有 Stopped / Running，不能抢 manager 的失败语义；
+    /// 但 TUN 真的在跑时优先级最高。
+    #[test]
+    fn tun_does_not_steal_the_manager_error_state() {
+        assert_eq!(
+            combined_tray_state(RuntimeState::Failed, false),
+            TrayState::Error
+        );
+        assert_eq!(
+            combined_tray_state(RuntimeState::Failed, true),
+            TrayState::Connected
+        );
     }
 }
