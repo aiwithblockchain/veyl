@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, readQuestionDetail, snapshotToView, viewAfterConnected, viewAfterStopped } from "./bridge";
+import { HEALTH_SNAPSHOT_REFRESH_MS, applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, readQuestionDetail, shouldRefreshSnapshotOnHealth, snapshotToView, viewAfterConnected, viewAfterStopped } from "./bridge";
 import {
   AGENT_EVENTS,
   CONTRACT_VERSION,
   type RuntimeSnapshot,
+  type RuntimeState,
 } from "./protocol";
 
 const EMPTY_HEALTH = emptyRuntimeView().health;
@@ -28,6 +29,7 @@ const SNAPSHOT: RuntimeSnapshot = {
   node_name: "节点",
   config_hash: "hash",
   system_proxy_enabled: true,
+  system_dns: null,
   health: EMPTY_HEALTH,
   traffic: null,
   connections: 2,
@@ -106,8 +108,12 @@ describe("runtime 快照与事件兜底", () => {
       node_latency_ms: 38,
       connected_since: new Date().toISOString(),
       route_region: "cn",
+      system_dns: "unchanged" as const,
     };
     expect(snapshotToView(SNAPSHOT).route_region).toBe("cn");
+    expect(snapshotToView({ ...SNAPSHOT, system_dns: "unchanged" }).system_dns).toBe(
+      "unchanged",
+    );
     const next = applyRuntimeEvent(view, {
       name: AGENT_EVENTS.runtimeStateChanged,
       payload: {
@@ -129,6 +135,32 @@ describe("runtime 快照与事件兜底", () => {
     expect(next.node_latency_ms).toBeNull();
     expect(next.connected_since).toBeNull();
     expect(next.route_region).toBeNull();
+    expect(next.system_dns).toBeNull();
+  });
+
+  it("重新上线时清掉上一次连接的 system_dns，在线态之间保留", () => {
+    const stale = { ...emptyRuntimeView(), system_dns: "unchanged" as const };
+    const transition = (from: RuntimeState, to: RuntimeState) => ({
+      name: AGENT_EVENTS.runtimeStateChanged,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        from,
+        to,
+        event: "health_ok" as const,
+        pid: 1,
+        upstream_version: null,
+        reason: null,
+        error: null,
+        snapshot: SNAPSHOT,
+        emitted_at: "",
+      },
+    });
+    expect(applyRuntimeEvent(stale, transition("idle", "running")).system_dns).toBeNull();
+    expect(applyRuntimeEvent(stale, transition("failed", "running")).system_dns).toBeNull();
+    const online = { ...stale, state: "running" as const };
+    expect(
+      applyRuntimeEvent(online, transition("running", "degraded")).system_dns,
+    ).toBe("unchanged");
   });
 
   it("快照晚到时保留请求期间收到的节点延迟，不被打回确认中", () => {
@@ -263,6 +295,7 @@ describe("stop 成功后的视图校正", () => {
       pid: 123,
       connected_since: "2026-11-09T00:00:00Z",
       route_region: "jp",
+      system_dns: "unchanged" as const,
       latency_ms: 42,
       node_latency_ms: 30,
       traffic: TRAFFIC,
@@ -276,6 +309,7 @@ describe("stop 成功后的视图校正", () => {
       pid: null,
       connected_since: null,
       route_region: null,
+      system_dns: null,
       latency_ms: null,
       node_latency_ms: null,
       traffic: null,
@@ -283,5 +317,26 @@ describe("stop 成功后的视图校正", () => {
       port_fallback: null,
       last_error: null,
     });
+  });
+});
+
+describe("健康事件驱动的快照刷新", () => {
+  it("连接态且距上次刷新满 5 秒才拉", () => {
+    const last = 1_000_000;
+    expect(shouldRefreshSnapshotOnHealth("running", last, last + 4_999)).toBe(false);
+    expect(
+      shouldRefreshSnapshotOnHealth(
+        "running",
+        last,
+        last + HEALTH_SNAPSHOT_REFRESH_MS,
+      ),
+    ).toBe(true);
+    expect(shouldRefreshSnapshotOnHealth("degraded", 0, 5_000)).toBe(true);
+  });
+
+  it("未连接与过渡态不拉", () => {
+    for (const state of ["idle", "starting", "restarting", "stopping", "failed"] as const) {
+      expect(shouldRefreshSnapshotOnHealth(state, 0, 60_000)).toBe(false);
+    }
   });
 });

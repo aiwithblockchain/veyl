@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { getAgentBridge } from "./agent";
+import { emptyRuntimeView, getAgentBridge } from "./agent";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./agent/protocol";
 import type { AgentEvent, ConfigDetail, ConfigSummary, RuntimeState } from "./agent/protocol";
 
@@ -78,6 +78,17 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function healthEvent(): AgentEvent {
+  return {
+    name: AGENT_EVENTS.runtimeHealthChanged,
+    payload: {
+      contract_version: CONTRACT_VERSION,
+      health: emptyRuntimeView().health,
+      emitted_at: "",
+    },
+  };
+}
+
 const bridge = getAgentBridge();
 const modeDescriptor = Object.getOwnPropertyDescriptor(bridge, "mode");
 
@@ -136,5 +147,47 @@ describe("TUN 启动成功后的界面状态", () => {
       expect(container.querySelector(".state-line__label")?.textContent).toContain("已连接"),
     );
     expect(container.querySelector(".state-word")).toBeNull();
+  }, 15_000);
+
+  it("连接态的健康事件最多每 5 秒补拉一次快照", async () => {
+    Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
+    localStorage.setItem("veyl.onboarding.skipped", "1");
+
+    vi.spyOn(bridge, "configList").mockResolvedValue({
+      configs: [SUMMARY],
+      active_config_id: CONFIG_ID,
+    });
+    vi.spyOn(bridge, "configDetail").mockResolvedValue(DETAIL);
+    const snapshots = vi.spyOn(bridge, "getRuntimeSnapshot").mockResolvedValue(null);
+    vi.spyOn(bridge, "tunHelperInfo").mockResolvedValue({
+      runningBuild: "2026.11.1",
+      expectedBuild: "2026.11.1",
+      stale: false,
+      state: "running",
+      needsAdminRestart: false,
+    } as never);
+    vi.spyOn(bridge, "runtimeStart").mockResolvedValue(undefined);
+
+    const { container } = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+    await waitFor(() =>
+      expect(container.querySelector(".state-line__label")?.textContent).toContain("已连接"),
+    );
+
+    const base = Date.now();
+    const before = snapshots.mock.calls.length;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(base + 4_000);
+    act(() => {
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(healthEvent());
+    });
+    await act(async () => {});
+    expect(snapshots.mock.calls.length).toBe(before);
+
+    nowSpy.mockReturnValue(base + 6_000);
+    act(() => {
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(healthEvent());
+    });
+    await act(async () => {});
+    expect(snapshots.mock.calls.length).toBe(before + 1);
   }, 15_000);
 });

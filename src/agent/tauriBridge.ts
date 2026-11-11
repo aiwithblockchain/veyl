@@ -111,6 +111,10 @@ function normalizePortFallback(
   return { requested: value.requested, actual: value.actual, reason: value.reason };
 }
 
+function normalizeSystemDns(value: unknown): "tunnel" | "unchanged" | null {
+  return value === "tunnel" || value === "unchanged" ? value : null;
+}
+
 function readPort(value: unknown, fallbackPort: number): number {
   return typeof value === "number" &&
     Number.isInteger(value) &&
@@ -465,10 +469,14 @@ export class TauriAgentBridge implements AgentBridge {
 
   async getRuntimeSnapshot(): Promise<RuntimeSnapshot | null> {
     try {
-      const raw = await call<RuntimeSnapshot & { port_fallback?: unknown }>(
+      const raw = await call<RuntimeSnapshot & { port_fallback?: unknown; system_dns?: unknown }>(
         "runtime_status",
       );
-      return { ...raw, port_fallback: normalizePortFallback(raw.port_fallback) };
+      return {
+        ...raw,
+        system_dns: normalizeSystemDns(raw.system_dns),
+        port_fallback: normalizePortFallback(raw.port_fallback),
+      };
     } catch {
       // 状态面板拿不到快照时保持 idle，不打断对话。
       return null;

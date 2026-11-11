@@ -290,7 +290,7 @@ Host 就不该再用形状去二次猜测。否则模型写坏一个逗号，用
 
 ### 4.1 块白名单：AI 能写 5 块
 
-`center-panel.md` §2.5 列了 6 块，但 `issue_card` 是**叠加渲染**、不进布局
+`center-panel.md` §2.5 列了 7 块，但 `dns_note` 与 `issue_card` 是**叠加渲染**、不进布局
 （`data-model.md` §3.4、`events.md` §4.12）。所以：
 
 | 块 | AI 可写 | 说明 |
@@ -300,6 +300,7 @@ Host 就不该再用形状去二次猜测。否则模型写坏一个逗号，用
 | `source_choice` | ✅ | |
 | `reachability` | ✅ | 唯一带 props 的块 |
 | `update_hint` | ✅ | |
+| `dns_note` | ❌ | 系统叠加，由 `system_dns` 状态决定；出现即整份非法 |
 | `issue_card` | ❌ | 系统叠加。写进布局会导致故障卡渲染两次，出现即整份非法 |
 
 `BLOCK_CATALOG` 与提示词里的「六种块」同步改成五种，并注明故障卡不可写。

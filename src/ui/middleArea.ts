@@ -45,6 +45,7 @@ export type MiddleBlock =
     }
   | { kind: "source_choice" }
   | { kind: "reachability"; targets: string[]; connected: boolean }
+  | { kind: "dns_note" }
   | { kind: "update_hint" };
 
 /** 三态以 runtime.state 归并；过渡态单独一档，中间不渲染任何块。 */
@@ -66,6 +67,19 @@ export function middleLevel(state: RuntimeView["state"]): MiddleLevel {
     default:
       return "transition";
   }
+}
+
+/** 系统 DNS 没接管时那一行；界面与读屏共用同一句。 */
+export const DNS_NOTE_TEXT =
+  "这次没能给国外网站提速，访问可能慢一些。连接不受影响。";
+
+/** 只有真正连上、且后端明确说没接管时才提示；过渡态与旧值滞留都不算。 */
+export function hasDnsDegradation(runtime: RuntimeView): boolean {
+  const level = middleLevel(runtime.state);
+  return (
+    (level === "running" || level === "degraded") &&
+    runtime.system_dns === "unchanged"
+  );
 }
 
 /**
@@ -240,7 +254,7 @@ export function failureHeadline(wasConnected: boolean): string {
   return wasConnected ? "连接断了。" : "没有连上节点。";
 }
 
-/** §3 状态 × 块矩阵，最多两块，issue_card 永远排第一。 */
+/** §3 状态 × 块矩阵；系统叠加块（issue_card、dns_note）排最前。 */
 export function middleBlocks(
   runtime: RuntimeView,
   config: ConfigDetail,
@@ -274,15 +288,19 @@ export function middleBlocks(
         next: "能继续用就先不动；网页打不开时，点上面的「断开 VPN」再重新连接。",
       },
     ];
+    if (hasDnsDegradation(runtime)) blocks.push({ kind: "dns_note" });
     if (isProxyUser(config)) blocks.push(proxyBlock(runtime, config, true, proxyPort));
     return blocks;
   }
 
+  const blocks: MiddleBlock[] = [];
+  if (hasDnsDegradation(runtime)) blocks.push({ kind: "dns_note" });
   if (isProxyUser(config)) {
-    return [proxyBlock(runtime, config, level === "running", proxyPort)];
+    blocks.push(proxyBlock(runtime, config, level === "running", proxyPort));
+  } else {
+    blocks.push(emptyHintBlock(config, level === "running", directNoteRegion(runtime, region)));
   }
-
-  return [emptyHintBlock(config, level === "running", directNoteRegion(runtime, region))];
+  return blocks;
 }
 
 export interface LayoutRenderContext {
@@ -326,6 +344,11 @@ export function resolveLayoutBlocks(
   context: LayoutRenderContext,
 ): MiddleBlock[] {
   if (!layout || !Array.isArray(layout.blocks)) return [];
+  // dns_note 是系统叠加块：布局里出现即非法，整份丢弃（与后端校验一致）。
+  if (layout.blocks.some((block) => (block as { type?: unknown } | null)?.type === "dns_note")) {
+    skipBlock("布局里出现系统块 dns_note，整份布局丢弃");
+    return [];
+  }
   const level = middleLevel(runtime.state);
   const connected = level === "running" || level === "degraded";
   const blocks: MiddleBlock[] = [];

@@ -9,6 +9,7 @@ import type {
 } from "../agent/protocol";
 import { CONTRACT_VERSION } from "../agent/protocol";
 import { emptyRuntimeView } from "../agent/bridge";
+import { DNS_NOTE_TEXT } from "../ui/middleArea";
 import { Console } from "./Console";
 
 afterEach(cleanup);
@@ -624,5 +625,75 @@ describe("中间区验收用例", () => {
   it("7c 从来没连上：副标题写没有连上节点", () => {
     const root = renderConsole(makeConfig(), failedRuntime("RUNTIME_EXITED"), true, false);
     expect(text(body(root).querySelector(".hero__caption"))).toBe("没有连上节点。");
+  });
+
+  it("15 DNS 没接管：没配 AI 也出现一行，读屏也播报", () => {
+    const root = renderConsole(
+      makeConfig({ connect_mode: "tun" }),
+      makeRuntime({ state: "running", system_dns: "unchanged" }),
+      false,
+    );
+    expect(text(body(root).querySelector(".note.note--warn"))).toBe(DNS_NOTE_TEXT);
+    expect(text(root.querySelector('[role="status"]'))).toContain(
+      "这次没能给国外网站提速",
+    );
+  });
+
+  it("15b 接管成功或正在断开：不出现", () => {
+    const ok = renderConsole(
+      makeConfig({ connect_mode: "tun" }),
+      makeRuntime({ state: "running", system_dns: "tunnel" }),
+    );
+    expect(ok.querySelector(".note--warn")).toBeNull();
+    cleanup();
+
+    const unknown = renderConsole(
+      makeConfig({ connect_mode: "tun" }),
+      makeRuntime({ state: "running", system_dns: null }),
+    );
+    expect(unknown.querySelector(".note--warn")).toBeNull();
+    cleanup();
+
+    const stopping = renderConsole(
+      makeConfig({ connect_mode: "tun" }),
+      makeRuntime({ state: "stopping", system_dns: "unchanged" }),
+    );
+    expect(stopping.querySelector(".note--warn")).toBeNull();
+  });
+
+  it("15c 有 AI 布局时仍在，排在布局块前", () => {
+    const config = makeConfig({
+      connect_mode: "tun",
+      layout: { version: 1, blocks: [{ type: "update_hint" }] },
+    });
+    const root = renderConsole(
+      config,
+      makeRuntime({ state: "running", system_dns: "unchanged" }),
+      true,
+      false,
+      { seedUpdate: true },
+    );
+    const one = body(root).querySelector(".one-thing") as HTMLElement;
+    expect(one.firstElementChild?.classList.contains("note--warn")).toBe(true);
+    expect(one.querySelector(".card--hint")).not.toBeNull();
+  });
+
+  it("15d 布局里写了 dns_note：整份丢弃，只留系统叠加的那份", () => {
+    const config = makeConfig({
+      connect_mode: "tun",
+      layout: {
+        version: 1,
+        blocks: [
+          { type: "dns_note" },
+          { type: "reachability", props: { targets: ["ChatGPT"] } },
+        ],
+      } as unknown as ConfigDetail["layout"],
+    });
+    const root = renderConsole(
+      config,
+      makeRuntime({ state: "running", system_dns: "unchanged" }),
+    );
+    expect(root.querySelectorAll(".note--warn")).toHaveLength(1);
+    expect(root.querySelector(".card--reach")).toBeNull();
   });
 });

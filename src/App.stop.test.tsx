@@ -98,6 +98,7 @@ function makeSnapshot(state: RuntimeState): RuntimeSnapshot {
     node_name: "东京 01",
     config_hash: null,
     system_proxy_enabled: false,
+    system_dns: null,
     health: emptyRuntimeView().health,
     traffic: null,
     connections: null,

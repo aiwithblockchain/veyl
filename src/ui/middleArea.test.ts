@@ -14,6 +14,7 @@ import {
   failureHeadline,
   failureReason,
   failureSteps,
+  hasDnsDegradation,
   isDisconnectFailure,
   isProxyUser,
   middleBlocks,
@@ -338,6 +339,69 @@ describe("middleBlocks 块矩阵", () => {
   it("降级：非代理用户只有一张卡", () => {
     const blocks = middleBlocks(makeRuntime({ state: "degraded" }), makeConfig(), true);
     expect(blocks.map((b) => b.kind)).toEqual(["issue_card"]);
+  });
+
+  it("DNS 降级：一行说明排在最前，接管成功不出现", () => {
+    const failed = middleBlocks(
+      makeRuntime({ state: "running", system_dns: "unchanged" }),
+      makeConfig(),
+      true,
+    );
+    expect(failed.map((b) => b.kind)).toEqual(["dns_note", "empty_hint"]);
+
+    const ok = middleBlocks(
+      makeRuntime({ state: "running", system_dns: "tunnel" }),
+      makeConfig(),
+      true,
+    );
+    expect(ok.map((b) => b.kind)).not.toContain("dns_note");
+  });
+
+  it("DNS 降级：降级态排在故障卡之后", () => {
+    const blocks = middleBlocks(
+      makeRuntime({ state: "degraded", system_dns: "unchanged" }),
+      makeConfig(),
+      true,
+    );
+    expect(blocks.map((b) => b.kind)).toEqual(["issue_card", "dns_note"]);
+  });
+
+  it("DNS 降级：未连接与过渡态不显示，旧值滞留也不显示", () => {
+    expect(
+      middleBlocks(
+        makeRuntime({ state: "idle", system_dns: "unchanged" }),
+        makeConfig(),
+        true,
+      ).map((b) => b.kind),
+    ).not.toContain("dns_note");
+    expect(
+      middleBlocks(
+        makeRuntime({ state: "stopping", system_dns: "unchanged" }),
+        makeConfig(),
+        true,
+      ),
+    ).toEqual([]);
+    expect(
+      hasDnsDegradation(makeRuntime({ state: "running", system_dns: "unchanged" })),
+    ).toBe(true);
+    expect(
+      hasDnsDegradation(makeRuntime({ state: "running", system_dns: "tunnel" })),
+    ).toBe(false);
+  });
+
+  it("布局里写 dns_note：整份布局丢弃，避免和系统叠加出两份", () => {
+    // 外来布局可能写出系统块；类型上不开放，运行时整份丢弃。
+    const layout = {
+      version: 1,
+      blocks: [{ type: "dns_note" }, { type: "reachability", props: { targets: ["ChatGPT"] } }],
+    } as unknown as Layout;
+    const blocks = resolveLayoutBlocks(
+      layout,
+      makeRuntime({ state: "running", system_dns: "unchanged" }),
+      makeConfig(),
+      { hasSeedUpdate: false, proxyPort: 7890 },
+    );
+    expect(blocks).toEqual([]);
   });
 
   it("降级：代理用户先卡后代理", () => {

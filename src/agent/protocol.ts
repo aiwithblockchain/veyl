@@ -233,6 +233,9 @@ export type RuntimeState =
 
 export type RuntimeMode = "system_proxy" | "tun";
 
+/** 连接期系统解析器是否已指向隧道（runtime.md 2.6.0）。 */
+export type SystemDns = "tunnel" | "unchanged";
+
 export type RuntimeTransitionEvent =
   | "start_req"
   | "process_ready"
@@ -718,6 +721,8 @@ export interface RuntimeSnapshot {
   applied_route_revision: number | null;
   /** 本次运行配置实际使用的地区（小写 cc）；断开为 null。 */
   route_region: string | null;
+  /** 连接期系统解析器是否已指向隧道；未连接 / 代理模式 / failed 为 null。 */
+  system_dns: SystemDns | null;
   /** 不经代理测得的直连出口 IP（1.1.0）；用于对照「是否真的走了代理」。 */
   direct_ip: string | null;
 }
@@ -754,5 +759,7 @@ export interface RuntimeView {
   applied_route_revision: number | null;
   /** 本次运行配置实际使用的地区（小写 cc）；断开为 null。 */
   route_region: string | null;
+  /** 连接期系统解析器是否已指向隧道；未连接 / 代理模式 / failed 为 null。 */
+  system_dns: SystemDns | null;
   direct_ip: string | null;
 }

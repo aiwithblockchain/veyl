@@ -203,6 +203,7 @@ export class MockAgentBridge implements AgentBridge {
     node_name: null,
     config_hash: null,
     system_proxy_enabled: false,
+    system_dns: null,
     health: {
       contract_version: CONTRACT_VERSION,
       process: false,
@@ -292,6 +293,8 @@ export class MockAgentBridge implements AgentBridge {
       config_name: profile.name,
       node_id: profile.id,
       node_name: profile.name,
+      // 演示开关：强制展示「系统 DNS 没接管」那一行。
+      system_dns: mockFlag("veyl.mock.dnsUnchanged") === "1" ? "unchanged" : null,
       mixed_port: fallbackPort ?? configuredPort,
       port_fallback:
         fallbackPort === null || fallbackReason === null
@@ -328,6 +331,7 @@ export class MockAgentBridge implements AgentBridge {
       connected_since: null,
       latency_ms: null,
       system_proxy_enabled: false,
+      system_dns: null,
       connections: null,
       route_region: null,
     });
@@ -739,7 +743,9 @@ export class MockAgentBridge implements AgentBridge {
         upstream_version: this.runtime.upstream_version,
         reason: null,
         error: null,
-        snapshot: this.runtime,
+        // 真实后端的事件快照来自运行管理器，system_dns 恒为 null；
+        // 只有 runtime_status 才带本次连接的接管结果。
+        snapshot: { ...this.runtime, system_dns: null },
         emitted_at: now(),
       },
     });
@@ -1330,6 +1336,7 @@ export class MockAgentBridge implements AgentBridge {
       connected_since: null,
       latency_ms: null,
       system_proxy_enabled: false,
+      system_dns: null,
       connections: null,
       route_region: null,
     });

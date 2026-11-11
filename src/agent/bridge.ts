@@ -555,6 +555,7 @@ export function emptyRuntimeView(): RuntimeView {
     node_name: null,
     config_hash: null,
     system_proxy_enabled: false,
+    system_dns: null,
     health: { ...EMPTY_HEALTH },
     connections: null,
     restart_count: 0,
@@ -586,12 +587,29 @@ export function viewAfterStopped(view: RuntimeView): RuntimeView {
     connected_since: null,
     port_fallback: null,
     route_region: null,
+    system_dns: null,
     latency_ms: null,
     node_latency_ms: null,
     traffic: null,
     connections: null,
     last_error: null,
   };
+}
+
+/** 健康事件逐条拉快照太贵；与 helper 侧 5 秒复核对齐。 */
+export const HEALTH_SNAPSHOT_REFRESH_MS = 5_000;
+
+/**
+ * 健康事件要不要顺带刷新快照。只在连接态、且距上次刷新满 5 秒时才拉：
+ * TUN 的系统 DNS 复核结果只出现在 runtime_status 里，不进事件快照。
+ */
+export function shouldRefreshSnapshotOnHealth(
+  state: RuntimeView["state"],
+  lastRefreshAt: number,
+  now: number,
+): boolean {
+  if (state !== "running" && state !== "degraded") return false;
+  return now - lastRefreshAt >= HEALTH_SNAPSHOT_REFRESH_MS;
 }
 
 /** 把快照与事件合并成状态面板的视图。 */
@@ -601,6 +619,9 @@ export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): Runtime
       const to = event.payload.to;
       // 离开在线态就清掉连接时刻，避免面板继续计时。
       const keepConnection = to === "running" || to === "degraded";
+      // 新连接不继承旧连接：上一次离开在线态的事件可能没到，上线时先清掉，交给随后的快照。
+      const fromOnline =
+        event.payload.from === "running" || event.payload.from === "degraded";
       return {
         ...view,
         state: to,
@@ -610,6 +631,7 @@ export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): Runtime
         connected_since: keepConnection ? view.connected_since : null,
         port_fallback: keepConnection ? view.port_fallback : null,
         route_region: keepConnection ? view.route_region : null,
+        system_dns: keepConnection ? (fromOnline ? view.system_dns : null) : null,
         latency_ms: keepConnection ? view.latency_ms : null,
         node_latency_ms: keepConnection ? view.node_latency_ms : null,
         traffic: keepConnection ? view.traffic : null,
@@ -683,6 +705,7 @@ export function snapshotToView(snapshot: RuntimeSnapshot): RuntimeView {
     node_name: snapshot.node_name ?? null,
     config_hash: snapshot.config_hash ?? null,
     system_proxy_enabled: snapshot.system_proxy_enabled,
+    system_dns: snapshot.system_dns ?? null,
     health: snapshot.health
       ? { ...EMPTY_HEALTH, ...snapshot.health }
       : { ...EMPTY_HEALTH },

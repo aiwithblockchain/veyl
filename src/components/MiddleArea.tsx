@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { copyText } from "../ui/clipboard";
 import type { MiddleBlock } from "../ui/middleArea";
+import { DNS_NOTE_TEXT } from "../ui/middleArea";
 
 type ProxyBlock = Extract<MiddleBlock, { kind: "proxy_card" }>;
 type IssueBlock = Extract<MiddleBlock, { kind: "issue_card" }>;
@@ -238,6 +239,13 @@ export function MiddleArea({
               targets={block.targets}
               connected={block.connected}
             />
+          );
+        }
+        if (block.kind === "dns_note") {
+          return (
+            <p key={`dns_note_${index}`} className="note note--warn">
+              {DNS_NOTE_TEXT}
+            </p>
           );
         }
         if (block.kind === "update_hint") {

@@ -13,7 +13,9 @@ import {
 } from "../ui/consoleActions";
 import { formatCheckedAgo, formatClock, formatTraffic } from "../ui/format";
 import {
+  DNS_NOTE_TEXT,
   failureHeadline,
+  hasDnsDegradation,
   middleBlocks,
   middleLevel,
   resolveLayoutBlocks,
@@ -241,16 +243,18 @@ export function Console({
       : [];
   const layoutHadBlocks =
     Array.isArray(layout?.blocks) && layout.blocks.length > 0;
-  // 故障卡是本地叠加层：布局有内容时它同样要在，且排第一；空白布局也不盖住它。
-  const overlayBlocks = localBlocks.filter((block) => block.kind === "issue_card");
+  // 系统叠加块（故障卡、DNS 降级说明）在任何布局下都要在：先取出本地生成的系统块，
+  // 再把布局里可能重复的同类块去掉，保证只渲染一份。
+  const isSystemBlock = (block: (typeof localBlocks)[number]) =>
+    block.kind === "issue_card" || block.kind === "dns_note";
+  const systemBlocks = localBlocks.filter(isSystemBlock);
   let blocks: typeof localBlocks;
   if (!config || !layout) {
     blocks = localBlocks;
   } else {
     const base =
       layoutBlocks.length === 0 && layoutHadBlocks ? localBlocks : layoutBlocks;
-    const hasIssue = base.some((block) => block.kind === "issue_card");
-    blocks = hasIssue ? base : [...overlayBlocks, ...base];
+    blocks = [...systemBlocks, ...base.filter((block) => !isSystemBlock(block))];
   }
 
   const runProbe = async () => {
@@ -420,6 +424,7 @@ export function Console({
     );
   }
 
+  const dnsDegraded = hasDnsDegradation(runtime);
   const srStatus = helperPreparing
     ? "正在准备后台组件，系统会请求一次授权"
     : stopping
@@ -429,9 +434,13 @@ export function Console({
         : level === "failed"
           ? "连接失败"
           : degraded
-            ? "连接不稳定"
+            ? dnsDegraded
+              ? `连接不稳定。${DNS_NOTE_TEXT}`
+              : "连接不稳定"
             : connected
-              ? "已连接"
+              ? dnsDegraded
+                ? `已连接。${DNS_NOTE_TEXT}`
+                : "已连接"
               : "未连接";
 
   return (

@@ -4,7 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { AgentEvent, NextAction, RuntimeView } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
-import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
+import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, shouldRefreshSnapshotOnHealth, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
 import type {
   ConfigCreateInput,
   DefaultProfileStatus,
@@ -202,6 +202,10 @@ export default function App() {
   const snapshotSeq = useRef(0);
   // 断开命令返回前，迟到的 online 事件/快照不能把界面推回已连接。
   const stoppingRef = useRef(false);
+  // 健康事件里判断当前是不是连接态；用 ref 避免把 runtime.state 放进订阅依赖。
+  const runtimeStateRef = useRef<RuntimeView["state"]>(runtime.state);
+  // 上次拉快照的时刻：健康事件驱动的刷新最多 5 秒一次。
+  const lastSnapshotAtRef = useRef(0);
 
   const session = activeSession(state);
 
@@ -211,6 +215,7 @@ export default function App() {
   };
 
   const refreshSnapshot = useCallback(() => {
+    lastSnapshotAtRef.current = Date.now();
     const requestId = ++snapshotSeq.current;
     const versionAtRequest = healthVersion.current;
     void bridge.getRuntimeSnapshot().then((snapshot) => {
@@ -227,6 +232,10 @@ export default function App() {
       );
     });
   }, [bridge]);
+
+  useEffect(() => {
+    runtimeStateRef.current = runtime.state;
+  }, [runtime.state]);
 
   const refreshDefaultProfile = useCallback(async () => {
     try {
@@ -388,6 +397,16 @@ export default function App() {
           setRateSamples((samples) =>
             pushRateSample(samples, { up: traffic.up_rate, down: traffic.down_rate }),
           );
+        }
+        // TUN 的系统 DNS 复核结果只在 runtime_status 里，连接态下节流补拉。
+        if (
+          shouldRefreshSnapshotOnHealth(
+            runtimeStateRef.current,
+            lastSnapshotAtRef.current,
+            Date.now(),
+          )
+        ) {
+          refreshSnapshot();
         }
       }
       setRuntime((view) => applyRuntimeEvent(view, event));
