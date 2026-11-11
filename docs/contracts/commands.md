@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.16.13`
+> 契约版本：`2.16.14`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -150,7 +150,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 21 | `net_repair` | `{ action, port? }` | `NetRepairResult` | 保留 |
 | 22 | `default_profile_status` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
 | 23 | `default_profile_refresh` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
-| 24 | `import_seed_file` | `{ path }` | `SeedImportResult` | 保留；**目标状态：UI 不再使用**。设置页的粘贴 / 订阅入口在 A 批次迁到 `node_import_text` / `node_import_url`；文件入口与窗口级拖放待 `node_import_file`。当前设置页「选择文件」与窗口拖放仍调用本命令 |
+| 24 | `import_seed_file` | `{ path }` | `SeedImportResult` | 保留；**目标状态：UI 不再使用**。设置页的粘贴 / 订阅 / 文件入口已改走 `node_import_text` / `node_import_url` / `node_import_file`。**当前唯一 UI 调用方：窗口级拖放**（只收种子 `.json`）；拖放**不随批 B 迁移**，等种子分发退场再定（§4.1.2、§8.3） |
 | 25 | `ai_send_message` | `{ sessionId, text, hidden? }` | `{ request_id }` | 保留（2.3 增 `hidden`，删 `attachments`） |
 | 26 | `ai_cancel` | `{ requestId }` | `{ cancelled: boolean }` | 保留 |
 | 27 | `chat_history` | `{ sessionId? }` | `ChatHistory` | 保留 |
@@ -195,6 +195,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 66 | `proxy_port_set` | `{ port }` | `{ port, availability }` | **2.12.0 新增（仅 UI）；可用性三态，保存始终成功** |
 | 67 | `node_import_text` | `{ text, configId? }` | `NodeImportResult` | **2.14.0 新增（仅 UI；AI 走 `NodeImportText` 工具，共用实现）** |
 | 68 | `system_region` | `{}` | `{ region: string \| null }` | **2.15.0 新增（仅 UI）** |
+| 69 | `node_import_file` | `{ path, configId? }` | `NodeImportResult` | **2.16.14 新增（仅 UI）；与 `node_import_text` 共用解析；批 B 实现** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -458,6 +459,68 @@ type ImportSkipReason =
 - 本阶段只做 Shadowsocks，方法白名单同 §4.1。
 
 错误：`INVALID_ARGUMENT`（`not_node_text`）、`NOT_FOUND`（`configId`）、`SECRET_STORE`、`INTERNAL`。
+
+### 4.1.2 `node_import_file { path, configId? }` → `NodeImportResult`
+
+用户从本地文件导入节点（设置 › 连接 ›「添加节点」的文件入口）。**仅 UI，不注册为 AI 工具**——AI 侧继续走 `NodeImportText`，不给模型读本地文件的能力。
+
+> **窗口级拖放不走本命令。** 它只收种子文件，当前仍由 `import_seed_file`（#24）承担，本批不迁移——理由见下方「为什么窗口拖放不迁移」。
+
+> 与 §4.1.1 **共用同一个解析实现**：返回形状、跳过原因、去重键、来源、事件完全一致，只是输入从文本换成文件路径。
+
+**为什么不复用 `import_seed_file`**：
+
+1. **格式不同**：它只接受 `veyl_seed.json`（`{ version, updated_at, nodes[] }`）且扩展名必须是 `.json`；用户的普通节点列表（`.txt`、多行 `ss://`）会被直接拒绝。
+2. **语义不同**：它把节点以 `source = "seed"` 并入种子池、发 `seed_refreshed`；用户文件应落 `source = "manual"`、走文本解析与 `manual_create`。复用等于同时改语义和调用方。
+3. **它还有活路径**：窗口级拖放当前仍在调用（§8.3），拖进来的是种子文件（`{ version, updated_at, nodes[] }`），与本命令的逐行 `ss://` 是两种格式。不能标成废弃，也不该为了新格式去动它的返回与来源。
+4. **新增的代价可控**：两处 handler 注册、一个版本位、一个契约条目；换来文本/文件两条通道共用解析，错误码 `not_node_text` 与四种 `skipped.reason` 全部复用，只新增路径相关的三个 reason。
+
+**为什么窗口拖放不迁移（2026-11-11 决议）**
+
+窗口拖放继续走 `import_seed_file`，只收 `.json` 种子文件；设置页的文件入口走本命令。两条入口**按用途分开**，不是两个半成品：
+
+| 理由 | 说明 |
+|---|---|
+| 能力不能丢 | 种子文件是当前内测分发方式（`shadowsocks.md` §5.6）。把拖放切到逐行 `ss://`，等于让用户拖入一份可用文件却被判成「没有可用的节点」 |
+| 不让临时格式塑造永久契约 | 种子随计费上线退场。若本命令按文件首字节分派（JSON → 种子、否则 → 节点文本），这个分支会留在一个长期命令里，且种子分支的 `configId` 无意义、事件是 `seed_refreshed` 而不是 `manual_create`——一条命令携带两套来源与事件 |
+| 返回形状虽然同形，语义不同 | `import_seed_file` 也返回 `{ imported, skipped[], nodes[] }`，但 `skipped` 恒为空、来源写死 `source = "seed"`。同形不等于同义，不能靠形状判断 |
+| 迁移成本没有变高 | 种子退场时把 `App.tsx` 的 `importPath` 从 `importSeedFile` 换成 `nodeImportFile` 即可，不需要分派分支；届时拖放才真正只需要一种格式 |
+
+**两条入口的分工（用户可见）**：窗口拖入 = 种子文件（`.json`）；设置 › 添加节点 › 选择文件 = 节点文本。拖入非 `.json` 时的提示要指向设置页，例如「窗口拖入只支持 .json 种子文件；节点文本请到 设置 › 连接 › 添加节点导入」，**不要只说「请换一个文件」**——用户手里可能根本没有 `.json`。反过来，在设置页选中一份种子 `.json` 会落到 `not_node_text`，这是预期行为：错误文案已写明支持多行 `ss://` 链接，不再为它单独识别种子格式。
+
+| 边界 | 要求 |
+|---|---|
+| `path` | **绝对路径**，只能来自设置页的系统文件对话框（`plugin-dialog open()`）。前端**不得**把文本框里的内容当路径传入；**不接受窗口拖放事件**（拖放走 #24） |
+| 路径校验 | 空或非绝对 → `invalid_path`；不存在、不是普通文件、不可读、IO 错误 → `file_unreadable` |
+| 编码 | 按 UTF-8 解码，非法字节替换为 U+FFFD，**不做编码猜测**。GBK 等文本里的 `ss://` 行是 ASCII，仍能解析；只有中文节点名可能变成替换字符。JSON 也按文本逐行处理，不要求是合法 JSON |
+| 大小上限 | **1 MiB**（与 `import_seed_file`、URL 拉取一致）。先看 `metadata.len()`，超限不读全文 → `file_too_large`，`details.max_bytes = 1048576` |
+| 扩展名 | **不按扩展名过滤**。`.txt` / `.json` / 无扩展名都收；对话框建议 `.txt,.json`，命令不据此拒绝——扩展名不代表内容 |
+| 支持的格式 | 与 §4.1.1 同一套：多行 `ss://` 链接，或整段 base64 的 `ss://` 列表。**本轮不解析 Clash YAML**；YAML 或其它格式落到 `not_node_text`，不新增 `unsupported_format`——解析器无法可靠区分「格式不对」与「格式对但没有节点」 |
+| 一条都用不了 | `INVALID_ARGUMENT`，`details.reason = "not_node_text"`，可读消息「这个文件里没有可用的节点（支持多行 ss:// 链接）」 |
+| 去重 | 同 `source_key`。重复计入 `skipped`（`duplicate`），不新建记录 |
+| 来源 | `source = "manual"`（用户自己提供） |
+| 自动连接 | **不做** |
+
+- 返回原样复用 `NodeImportResult`（§4.1）：`imported`、`skipped[]`（`unsupported_scheme` / `unsupported_method` / `malformed` / `duplicate`）、`nodes[]`。**不返回 `path`，不回显文件内容**；日志同样不写路径与内容。
+- 传 `configId` → 按解析顺序追加，配置没有 `current_node_id` 时取第一个；发 `node-list-changed(reason = "manual_create")` + `config-changed(change = "updated")`。不传 → 只进节点池。
+- 安全边界：**Host 无法验证路径是否真由用户选出**，保证来自四层约束——仅 UI 注册（不注册 AI 工具，模型不能传路径）+ 绝对路径 + 1 MiB 上限 + 不返回路径与内容。若需要密码学意义上的来源证明，要改成 Host 侧拉起文件对话框并直接导入（路径不经过前端），本轮不做。
+- 联动：`runtime.md` **不涉及**（只写节点池 / 配置节点集，不经过 Runtime Manager，不改变 `RuntimeSnapshot`，不重启连接）；`events.md` **不涉及**（复用 `manual_create`；该枚举注释目前只写了 `node_create`，等下次 events 升版再补文本，不为此单独升版）；`tools.md` **不涉及**（无 AI 工具）；`data-model.md` **不涉及**（节点表与 `source` 已存在）。
+
+**前端行为约定**：文件入口用**系统对话框**（`plugin-dialog open()`，复用现有 `dialog:allow-open`，不新增权限），不用应用内文件树，也**不接窗口拖放**。选完**不立刻导入**：先显示文件名并要一次「导入」确认，确认后调用本命令；**不把文件内容填进文本框**——那需要前端读文件（fs 权限）或命令返回全文，两者都会破坏「不回显内容」与最小权限。必须传当前配置的 `configId`；没有当前配置时不调用本命令，先让用户在左侧选或新建一套配置，避免节点只进池却在界面上看不见。
+
+| 错误码 | `details.reason` | 场景 |
+|---|---|---|
+| `INVALID_ARGUMENT` | `invalid_path` | 空、非绝对路径 |
+| `INVALID_ARGUMENT` | `file_unreadable` | 不存在、不是普通文件、不可读、IO 错误 |
+| `INVALID_ARGUMENT` | `file_too_large` | 超过 1 MiB，`details.max_bytes` |
+| `INVALID_ARGUMENT` | `not_node_text` | 解析后没有可用节点 |
+| `NOT_FOUND` | — | `configId` 不存在 |
+| `SECRET_STORE` | — | `secrets.enc` 写入失败 |
+| `INTERNAL` | — | 内部错误 |
+
+- 部分成功不算失败：与文本导入一致。
+- **已知限制**：`not_node_text` 的 `details` 目前只有 `reason`——解析器在「全部失败」时不保留逐条跳过原因，所以界面只能说「这个文件里没有可用的节点」，无法区分「全是加密方式不支持」还是「全是格式错误」。若要区分，需要给 #67 / #69 的 `not_node_text` 增加 `details.skipped`（两条命令共用解析，必须一起改），本轮不做。
+- 本阶段只做 Shadowsocks，方法白名单同 §4.1。
 
 ### 4.2 `node_create { name, server, port, method, password, configId? }` → `NodeSummary`
 
@@ -1261,7 +1324,7 @@ type DefaultProfileResult = {
 
 **保留，但语义收窄：不再创建配置，只并节点。**
 
-自 `2.16.12` 起，本命令的**目标状态是退出 UI**：设置页「添加节点」迁到 `node_import_text`（粘贴）与 `node_import_url`（订阅），文件通道待定的 `node_import_file` 接管，窗口级拖放随后一并迁走。**当前状态**：设置页「选择文件」与窗口级拖放仍调用本命令；迁移完成后更新此段。
+自 `2.16.12` 起，本命令的**目标状态是退出 UI**：设置页「添加节点」的粘贴 / 订阅入口在 A 批次迁到 `node_import_text` / `node_import_url`，文件入口由 `node_import_file`（2.16.14）接管。**当前唯一 UI 调用方：窗口级拖放**；拖放**不随批 B 迁移**（§4.1.2「为什么窗口拖放不迁移」），种子分发退场后再定去向。迁移完成后更新此段。
 
 ```ts
 type SeedImportResult = {
@@ -1280,7 +1343,7 @@ type SeedImportResult = {
 
 - 只接受 `veyl_seed.json` 结构（`{ version, updated_at, nodes[] }`），扩展名 `.json`、≤ 1 MB、存在且可读。
 - 节点以 `source = "seed"` 合并进节点池，**只增不删**：手工导入不删除种子拉取层已有的节点，避免一次误操作把用户正在用的节点删掉。
-- UI 入口现状：设置页「选择文件」与**窗口级拖放**（`App.tsx:341-375` 的 `onDragDropEvent` → `importPath`）都还调用本命令。目标状态是 **0 个 UI 调用方**：设置页的粘贴与订阅入口在 A 批次先接 `node_import_text` / `node_import_url`；文件入口与窗口拖放在 `node_import_file` 落地后迁走。用户取消文件选择时 `open()` 返回 `null`，前端直接返回，**不调用本命令**。
+- UI 入口现状：只剩**窗口级拖放**（`App.tsx:341-375` 的 `onDragDropEvent` → `importPath` → `importSeedFile`），只接受 `.json` 种子文件，前端先按扩展名拦截。设置页的粘贴 / 订阅入口在 A 批次接 `node_import_text` / `node_import_url`，文件入口接 `node_import_file`。窗口拖放**不随批 B 迁移**：种子是 `{ version, updated_at, nodes[] }`，与逐行 `ss://` 不同格式，迁过去等于让一份可用文件被判成「没有可用的节点」。拖入非 `.json` 时提示要指向设置页，不能只说「请换一个文件」。
 - 只接受 shadowsocks 出站、method 白名单；部分成功不算失败；返回值与日志**永不含 password**；不回显文件内容。
 
 | 错误码 | `details.reason` | 场景 |
@@ -1660,6 +1723,7 @@ type RulesStatus = {
 | `config_activate` | **K3** 切换配置 | 左栏切换 | 与 B2「切换节点」是两个层级，不可混用 |
 | `node_import_url` | **B4** 导入配置文件 | 导入按钮 / `source_choice` 后置 | |
 | `node_import_text` | **B4** 导入配置文件 | 手工表单「粘贴分享链接」 | 只解析粘贴文本，不联网；与 `node_import_url` 分开（2.14.0） |
+| `node_import_file` | **B4** 导入配置文件 | 设置 › 添加节点（文件） | 仅 UI；与 `node_import_text` 共用解析，不联网、不涉及运行时；**不含窗口拖放**（拖放仍走 #24，2.16.14） |
 | `node_create` | **B4** 导入配置文件 | 手动编辑表单 | |
 | `node_switch` | **B2** 切换节点 | 底部「切换到此节点」 | ⚠️ 旧映射写 `runtime_start(profile_id)`，见表后说明 |
 | `node_probe` | **D6** 测试单个节点连通性 | 底部「测试连通」 | D6 由 PM 在批 0 审查时新增 |
@@ -1823,7 +1887,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.16.13** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注） |
+| `contracts/commands.md` | **2.16.14** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + `tun-backend.md` 1.6.0 矩阵同步 |
 | `contracts/events.md` | **2.10.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 |
 | `contracts/runtime.md` | **2.6.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` |
 | `contracts/tools.md` | **3.8.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` |
@@ -1842,6 +1906,21 @@ type RulesStatus = {
 
 ## 16. 变更记录
 
+### 2.16.14（2026-11-11，节点文件导入契约）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.14`；新增 #69 `node_import_file { path, configId? } → NodeImportResult`（仅 UI） | 新增命令 | PM 2026-11-11；`settings-ia.md` 批 B |
+| 2 | 明确与 `node_import_text` 共用解析、`source = "manual"`、复用 `manual_create` 事件；不涉及 runtime / events / tools / data-model | 约定 | 同上 |
+| 3 | 安全边界：仅 UI 注册、绝对路径、1 MiB 上限、不返回路径与内容；不支持 Clash YAML | 安全 | 同上 |
+| 4 | **同日修订**：窗口级拖放**不迁移**到本命令，继续调 #24 `import_seed_file`（种子 `.json` 与逐行 `ss://` 是两种格式，迁过去会让可用文件被判成「没有可用节点」）。`path` 只来自设置页对话框；不做内容分派。版本位不变 | 边界澄清 | PM 2026-11-11 提问；本文件 §4.1.2、§8.3、#24 |
+
+### 2.16.13（2026-11-11，矩阵同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.13`；§15.5 矩阵同步 `tun-backend.md` 1.6.0（macOS `start` 期限 30→90 s、超时后先核对 `status`） | 元数据 | 修复在 `tun-backend.md` §1.3 |
+
 ### 2.16.12（2026-11-11，设置 IA 文档同步）
 
 | # | 变更 | 类型 | 决议来源 |
@@ -1850,12 +1929,6 @@ type RulesStatus = {
 | 2 | §7.4 `net_repair` 的「UI 是否使用」改为实际状态：UI 只调 `restore_direct`；`flush_dns` 只有 AI 工具能调。§12.1 同步 | 更正 | PM 2026-11-11：该标注与真实行为不符，测试文档已按真实行为写 |
 | 3 | §12.1 `network_force_reset` 的入口从「设置 › 高级 › 诊断」改为「设置 › 遇到问题 › 重置网络」 | 更正 | 设置分区名与重置入口的现状 |
 | 4 | 接口未变：无新增 / 删除命令，无字段形状变化，无事件变化 | 元数据 | — |
-
-### 2.16.13（2026-11-11，矩阵同步）
-
-| # | 变更 | 类型 | 决议来源 |
-|---|---|---|---|
-| 1 | 本文件版本升到 `2.16.13`；§15.5 矩阵同步 `tun-backend.md` 1.6.0（macOS `start` 期限 30→90 s、超时后先核对 `status`） | 元数据 | 修复在 `tun-backend.md` §1.3 |
 
 ### 2.16.11（2026-11-11，矩阵同步）
 

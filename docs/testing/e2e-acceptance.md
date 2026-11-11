@@ -8,6 +8,70 @@
 
 ---
 
+## 如何用 AI 执行本手册
+
+> 面向：同事把这份文档交给 AI，由 AI 逐条执行并回填结论。
+> 原则：**界面类断言读 DOM / 计算样式，系统类断言读日志 / 数据库 / 系统命令；不写「看起来是否舒服」。**
+
+### 两种执行通道
+
+| 通道 | 用在哪 | 谁启动 | AI 能拿到什么 |
+|---|---|---|---|
+| **M1 浏览器预览** | 第 6 章、第 8.2 节的 DOM / CSS / 键盘 / 提示类用例 | 测试者执行 `npm run dev -- --port 1440` | DOM、`getComputedStyle`、截图、Console |
+| **M2 原生应用** | TUN、系统代理、授权、托盘、真实网络、版本号、重置网络 | 测试者启动 `.app` 或 `npm run app:dev` | 截图、`APP_LOG` / `HELPER_LOG` / `SINGBOX_LOG`、SQLite、`scutil` / `netstat` / `lsof` |
+
+- **AI 不执行** `npm`、`cargo`、构建脚本，也不启动/停止/强杀应用；这些由测试者做。
+- AI 可以在 M1 里点击、输入、执行 JS；M2 里的系统弹窗、断网、强杀由测试者操作，AI 负责取证。
+- 两端是同一份前端代码；M1 的 mock bridge 不覆盖 TUN、真实授权和系统网络，所以这两类只走 M2。
+
+### 每轮开始前的清场
+
+**M1（浏览器预览）**：在 Console 执行，清掉上一轮的本地状态后刷新：
+
+```js
+(() => {
+  for (const key of Object.keys(localStorage)) {
+    if (key.startsWith("veyl.")) localStorage.removeItem(key);
+  }
+  location.reload();
+})()
+```
+
+**M2（原生应用）**：
+
+1. 断开 VPN，关闭设置与所有弹窗。
+2. 窗口调到 **1440×900**（除用例另有说明）；系统主题浅色（除深色用例外）。
+3. 确认前置里指定的配置存在且已选中。
+4. 记录基线：应用版本、`sw_vers -productVersion`、`scutil --dns`、`scutil --proxy`、`netstat -rn -f inet | grep '^default'`。
+
+### 证据怎么采
+
+| 类型 | 怎么采 | 命名 |
+|---|---|---|
+| 截图 | 全窗口 + 用例指定的局部裁切 | `<用例号>-<序号>.png` |
+| DOM | 把用例里的 JS 返回值原样保存 | `<用例号>.json` |
+| 日志 | `tail` / `grep` 指定时间段 | `<用例号>-app.log` |
+| 系统状态 | `scutil --dns` / `scutil --proxy` / `netstat` 原文 | `<用例号>-system.txt` |
+| 数据库 | `sqlite3 -readonly` 的 SELECT 输出 | `<用例号>-db.txt` |
+
+证据目录沿用 §0.5：`~/Desktop/veyl-e2e/<日期>/<用例号>/`。
+
+### 结果怎么回填
+
+每条用例结束后，在当天的 `summary.md` 追加一行：
+
+```
+E6-07 | 通过 | shots/E6-07-1.png, dom/E6-07.json | 首屏无眉标，padding-top=28px
+```
+
+| 结论 | 含义 |
+|---|---|
+| **通过** | 预期里的每一条都能从 DOM / 截图 / 日志 / 系统输出中二值确认 |
+| **不通过** | 至少一条预期不满足；必须写清预期编号、期望值、实际值 |
+| **阻塞** | 前置不满足、构造不出状态、需要人操作但没人、或工具读不到（例如原生 DOM）。**不能把阻塞写成通过。** |
+
+---
+
 ## 0. 使用说明
 
 ### 0.1 两个角色
@@ -22,8 +86,8 @@
 ### 0.2 判定口径
 
 - **通过**：可观察预期里的每一条都能被证据或人眼观察到。
-- **失败**：任意一条可观察预期不满足。
-- **无法判定**：前置条件不满足、命令没有输出、证据不足，或该条属于「只能人判断」而人没有确认。不要用「应该没问题」代替证据。
+- **不通过**：任意一条可观察预期不满足（旧用例里写「失败」，含义相同）。
+- **阻塞**：前置条件不满足、命令没有输出、证据不足、构造不出状态，或该条属于「只能人判断」而人没有确认（旧用例里写「无法判定」，含义相同）。不要用「应该没问题」代替证据。
 
 ### 0.3 环境与基线（开始前记录一次）
 
@@ -759,149 +823,1010 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 ## 6. 界面
 
-本章以人眼判断为主，AI 只核对日志与本地数据库。视觉、文案、图标形状属于第 9 章列出的「不可自动化」项。
+> 本章按「同事驱动 AI 执行」写：E6-01…E6-06 是原场景的改写，E6-07…E6-14 是 P1 十一条里与界面直接相关的八条，E6-15…E6-22 是 P2 的八条。
+> 执行通道：除 E6-02、E6-04 必须用原生应用外，其余优先用浏览器预览（M1）。DOM 断言的 JS 直接在 Console 执行，返回值保存为 JSON。
 
-### E6-01 中间控制台各块的出现条件（未连接 / 已连接 / 过渡态）
+| P1 项 | 用例 |
+|---|---|
+| 去掉控制台眉标、首屏上边距 28px | E6-07 |
+| 四个弹窗 + 设置页内联表单的壳统一（两档标题 / 关闭 / 宽度） | E6-08 |
+| 用户消息改时间线、长文本不溢出 | E6-09 |
+| 左栏空态 / 错误态的就地按钮 | E6-10 |
+| 首启「其他 AI 服务」只剩一个保存按钮 | E6-11 |
+| info 提示 4 秒消失、error 保留 | E6-12 |
+| 关于页版本读构建版本 | E6-13 |
+| 字号收敛、深色 `--ink-3`、`--ink-4` 不作文字色 | E6-14 |
 
-- **目的**：验证控制台不会在过渡态乱说话，未连接和已连接的提示符合当前配置。
-- **前置条件**：至少一套 TUN 配置、一套代理配置；节点可用。
-- **步骤（人做）**
-  1. 未连接时观察 TUN 配置的控制台。
-  2. 连接过程中观察遮罩；记录过渡态是否出现控制台块。
-  3. 已连接时观察 TUN 配置的控制台。
-  4. 切到代理配置，重复一次。
-- **AI 取证**
-  ```bash
-  grep -E '连接开始|连接完成|TUN 已连接' "$APP_LOG" | tail -4
-  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, connection_mode, routing_mode, is_active from configs;"
-  ```
-  看什么：当前配置的 `connection_mode`/`routing_mode`，与界面提示是否对应。
-- **可观察预期**
-  - 未连接 + TUN：显示「点上面的「启动 VPN」，所有软件都会自动走节点。」
-  - 已连接 + TUN：显示「所有软件现在都能用了。」；如果是本地直连，多一行「国内网站直连，其他走 VPN」（地区未知时是「没识别出你在哪个地区，所有网站都走 VPN」）。
-  - 未连接 / 已连接 + 代理：分别显示「点上面的「启动 VPN」，浏览器就能用了。」与「浏览器现在能用了。」；全部走 VPN 的代理配置在第一句后面多「所有流量都会从节点出去。」
-  - 过渡态（正在连接 / 正在断开 / 正在重启）不渲染这些块。
-  - 没有节点时统一显示「这套配置还没有节点。」
-- **判定**
-  - [ ] 通过
-  - [ ] 失败
-- **失败时收集**：四种状态截图、配置表 SQL。
+| P2 项 | 用例 |
+|---|---|
+| 配置骨架行与真实行同为 64px | E6-15 |
+| 提示条 top 96 / z-index 90 / 4 秒 / 不挡主按钮 | E6-16 |
+| 节点名两种状态同为 15px/500、超长省略 | E6-17 |
+| 发送按钮禁用态 `--bg-hover` | E6-18 |
+| 消息不含 tokens、状态文字无动画 | E6-19 |
+| 未配置 AI 横幅 2px 竖线 + 透明底 | E6-20 |
+| 零配置自动展开、本次运行内关闭、重启再展开 | E6-21 |
+| 全局间距未归格：只记已知，不做断言 | E6-22 |
+
+### E6-01 中间控制台各块的出现条件
+
+**前置**：M1；1440×900；浅色；清空 `veyl.*` 后新建两套配置——A「所有软件都走 VPN + 本地网站直连」，B「只让能填代理的软件走 + 只有我指定的服务走 VPN」并选中至少一个服务。
+
+**步骤**：
+
+1. 选中配置 A，未连接。执行 DOM 取证：
+
+```js
+(() => {
+  const q = (s) => [...document.querySelectorAll(s)].map((e) => e.textContent.trim());
+  return {
+    state: document.querySelector(".state-word, .state-line")?.textContent.trim() ?? null,
+    notes: q(".console .note"),
+    proxyCard: Boolean(document.querySelector(".console .card--proxy")),
+    issueCard: Boolean(document.querySelector(".console .card--err, .console .card--warn")),
+    buttons: q("button").filter((t) => /启动 VPN|重新连接|取消|断开 VPN/.test(t)),
+  };
+})()
+```
+
+2. 点「启动 VPN」，等状态变成「已连接」后重复上面的 JS。
+3. 点「断开 VPN」，等状态回到「未连接」。
+4. 选中配置 B，重复未连接 / 连接两次取证。
+5. 再连接一次配置 A，在点击后 200ms 内执行一次取证（此时应处于过渡态），1.5 秒后再执行一次。
+
+**预期**：
+
+1. 配置 A 未连接：`.console .note` 只有「点上面的「启动 VPN」，所有软件都会自动走节点。」；没有 `.card--proxy`；没有 `.card--err/--warn`。
+2. 配置 A 已连接：主提示「所有软件现在都能用了。」，另有 `.note__detail` 文本「国内网站直连，其他走 VPN」；没有 `.card--proxy`。
+3. 配置 B 已连接：主提示「浏览器现在能用了。」，且有 `.card--proxy`，地址为 `127.0.0.1:{端口}`。
+4. 过渡态：`.console .note`、`.card--proxy`、`.card--err/--warn` 的数量都是 0；状态词是「正在连接」。
+5. 全程不出现英文错误码、`proxy`、`TUN`、`分流`、`规则集`。
+
+**不合格时记录什么**：
+
+- 每次取证的完整 JSON（五次）。
+- 对应状态的 `.console` 区域截图。
+- 实际状态词与期望状态词的差异。
+- `APP_LOG` 最后 50 行（M2 对照用）。
 
 ### E6-02 故障与降级时的块
 
-- **目的**：验证失败卡标题、原因、步骤按状态区分；降级不等于失败。
-- **前置条件**：能制造一次连接失败（错误节点地址最方便）；另需一次降级场景（连接中断网，见 E7-04）。
-- **步骤（人做）**
-  1. 连接一个错误节点，观察失败卡。
-  2. 记录标题、原因、编号步骤。
-  3. 在已连接时断开网络，观察降级卡（见 E7-04）。
-- **AI 取证**
-  ```bash
-  grep -E '连接失败|失败 code=|last_error' "$APP_LOG" | tail -8
-  ```
-  看什么：失败码与界面原因是否能对上；失败卡步骤是否包含「重新连接」。
-- **可观察预期**
-  - 首次连接失败标题是「没有连上节点。」；已连接后掉线是「连接断了。」。
-  - 原因用用户语言，不出现英文 error、错误码、字段名。
-  - 步骤最多三步：重新连接 → 换一个节点（多节点时）→ 让助手定位 / 新建一套配置。
-  - 降级时标题「连接不稳定」，原因与「流量没有真正出去 / 最近的网络检查没有通过」对应。
-- **判定**
-  - [ ] 通过
-  - [ ] 失败
-- **失败时收集**：失败卡与降级卡截图、日志错误行。
+**前置**：M2 原生应用；一套正常的 TUN 配置可用；另准备一个地址错误的节点（测试者创建）；能临时断网（降级分支）。
 
-### E6-03 右栏默认隐藏与开关
+**步骤**：
 
-- **目的**：验证右栏默认收起，展开/收起有明确入口，宽度可拖动。
-- **前置条件**：已有一套配置、有可用 AI。
-- **步骤（人做）**
-  1. 冷启动应用，观察右栏是否默认收起。
-  2. 点右边缘「助手」tab 展开，再点「收起助手」。
-  3. 拖动右栏与中间区之间的分隔条，重启后看宽度是否保留。
-- **AI 取证**
-  ```bash
-  grep '启动 日志=' "$APP_LOG" | tail -1
-  ```
-  看什么：只能确认应用正常启动；右栏状态属于本地界面状态，AI 不做推断。
-- **可观察预期**
-  - 冷启动时右栏收起，只显示右边缘的「助手」tab。
-  - 点 tab 展开，点「收起助手」收起；展开/收起不改变连接状态。
-  - 拖动分隔条时中间区保底宽度不被挤没；重启后宽度保留。
-- **判定**
-  - [ ] 通过
-  - [ ] 失败
-- **失败时收集**：冷启动、展开、收起、拖动后的截图。
+1. 用错误节点连接，等遮罩结束，截失败卡；执行：
+
+```bash
+grep -E '连接失败|失败 code=|last_error' "$APP_LOG" | tail -8
+```
+
+2. 用正常节点连接，等「已连接」；由测试者关闭 Wi-Fi，等 15 秒，截降级卡 / 当前状态。
+3. 恢复 Wi-Fi，等 30 秒，记录是否回到「已连接」；必要时手动断开重连。
+4. 如果无法安全制造降级，只执行失败分支，并在结果里注明「降级分支阻塞」。
+5. 如果断网后界面仍显示「已连接」（当前设计规定数据面失败不单独降级），把这一现象记为观察项；**不要**因此判本条失败，降级分支记「阻塞（未触发降级）」。
+
+**预期**：
+
+1. 首次连接失败标题是「没有连上节点。」；从已连接掉线是「连接断了。」。
+2. 失败原因用用户语言（例如「节点一直没有响应。」），不出现英文错误码、字段名。
+3. 失败卡最多三步：重新连接 → 换一个节点（多节点时）→ 让助手定位 / 新建一套配置。
+4. 降级时标题「连接不稳定」，原因与「流量没有真正出去 / 最近的网络检查没有通过」对应；不是「连接失败」。
+5. 失败时不再显示代理卡；降级时按配置决定是否保留代理卡。
+
+**不合格时记录什么**：
+
+- 失败卡 / 降级卡裁切截图。
+- `APP_LOG` 对应时间段原始行。
+- 当时的 `scutil --proxy`、`scutil --dns`、`netstat -rn -f inet | grep '^default'`。
+- 标题、原因、步骤数分别与预期第几条不符。
+
+### E6-03 右栏默认状态与开关
+
+**前置**：M1；1440×900；清空 `veyl.*`；已有一套配置。另准备一次 1024×900 的窗口尺寸。
+
+**步骤**：
+
+1. 1440×900 载入，执行：
+
+```js
+(() => {
+  const panel = document.querySelector("#ai-panel");
+  const slot = document.querySelector(".assistant-slot");
+  const tab = document.querySelector(".assistant-tab");
+  const r = panel?.getBoundingClientRect();
+  return {
+    panel: Boolean(panel),
+    panelWidth: r ? Math.round(r.width) : null,
+    slotWidth: slot ? Math.round(slot.getBoundingClientRect().width) : null,
+    tab: Boolean(tab),
+    tabWidth: tab ? Math.round(tab.getBoundingClientRect().width) : null,
+    assistantVar: getComputedStyle(document.documentElement).getPropertyValue("--assistant-w").trim(),
+  };
+})()
+```
+
+2. 点 `[aria-label="收起助手"]`，重复取证；再点 `.assistant-tab__open` 展开，重复取证。
+3. 把窗口调到 1024×900 并刷新，重复取证；点右边缘「助手」tab，检查 `.assistant-overlay` 是否出现及其宽度。
+4. 收起后刷新一次，确认收起状态是否保留。
+
+**预期**：
+
+1. 1440×900 首次进入：`#ai-panel` 存在，宽度 420（±1）；`.assistant-tab` 不存在；`--assistant-w` 为 `420px`。
+2. 收起：`#ai-panel` 不存在；`.assistant-tab` 存在，宽度 56；标题/标签是「助手」。
+3. 展开：`#ai-panel` 回来，宽度 420。
+4. 1024×900：默认是 `.assistant-tab`（56），不是展开的第三栏；点开后 `.assistant-overlay` 出现，宽度 400（±1）。
+5. 用户收起后刷新：仍保持收起；再展开后刷新：仍保持展开。
+6. 展开/收起不触发连接或断开。
+
+**不合格时记录什么**：
+
+- 三次取证的 JSON。
+- 1440 展开、1440 收起、1024 默认、1024 浮层四张截图。
+- 实际宽度与期望宽度的差值。
 
 ### E6-04 托盘图标三态与菜单
 
-- **目的**：验证菜单栏图标能区分未连接 / 已连接 / 连接异常，菜单只有两个可点击项。
-- **前置条件**：macOS；应用运行中。
-- **步骤（人做）**
-  1. 未连接时看菜单栏图标形状；打开菜单，记录菜单项。
-  2. 连接后看图标变化；再打开菜单。
-  3. 制造一次失败（错误节点），看是否变成异常态。
-  4. 点「显示 Veyl」，确认窗口回到前台。
-- **AI 取证**
-  ```bash
-  ps -Ao pid,comm,args | grep -E 'Veyl|veyl' | grep -v grep
-  ```
-  看什么：应用进程仍在；托盘属于 UI，AI 只记录进程状态，不判断图标形状。
-- **可观察预期**
-  - 三种状态图标肉眼可辨，不只靠颜色（剪影形状不同：盾 / 勾 / 三角）。
-  - 菜单只有「显示 Veyl」和「退出」两个可点击项。
-  - 连接中关闭窗口，连接不断，图标仍是已连接态。
-  - 「显示 Veyl」把窗口带回前台并聚焦。
-- **判定**
-  - [ ] 通过
-  - [ ] 失败
-- **失败时收集**：三种图标截图、菜单截图、关闭窗口后的连接状态截图。
+**前置**：M2；macOS 菜单栏可见；能分别制造未连接 / 已连接 / 连接失败三种状态。
+
+**步骤**：
+
+1. 未连接时截菜单栏图标（裁 40×40）和打开后的菜单。
+2. 连接后重复截图。
+3. 用错误节点制造失败，重复截图；执行：
+
+```bash
+ps -Ao pid,comm,args | grep -E 'Veyl|veyl' | grep -v grep
+```
+
+4. 连接中关闭主窗口，确认进程还在、连接还在；点「显示 Veyl」，确认窗口回到前台。
+
+**预期**：
+
+1. 三种状态图标形状不同（盾 / 勾 / 三角），不只靠颜色区分。
+2. 菜单只有两个可点击项：「显示 Veyl」「退出」。
+3. 连接中关闭窗口后，进程仍在、连接仍在、图标仍是已连接态。
+4. 「显示 Veyl」把窗口带回前台并聚焦。
+5. 托盘创建失败不应导致应用无法启动（日志只告警）。
+
+**不合格时记录什么**：
+
+- 三种图标裁切图、两次菜单截图、关闭窗口后的状态截图。
+- `ps` 输出。
+- 图标是形状相同只换颜色，还是完全没变。
 
 ### E6-05 深色模式
 
-- **目的**：验证系统切深色后界面跟随，不出现白底黑字错配。
-- **前置条件**：macOS 外观可切换。
-- **步骤（人做）**
-  1. 系统设置切换为深色。
-  2. 依次查看主控制台、设置、新建配置、右栏对话。
-  3. 切回浅色，重复一遍。
-- **AI 取证**
-  ```bash
-  defaults read -g AppleInterfaceStyle 2>/dev/null || echo Light
-  ```
-  看什么：当前系统外观；界面是否跟随由人判断。
-- **可观察预期**
-  - 深色下背景、文字、分隔线、按钮都能看清，没有白底黑字或黑底黑字。
-  - 浅色仍是默认观感；切换不需要重启应用。
-  - 没有出现「只有部分区域变深」的错配。
-- **判定**
-  - [ ] 通过
-  - [ ] 失败
-- **失败时收集**：四个界面在深色下的截图，以及 `defaults read` 的输出。
+**前置**：M1；1440×900；已有一套配置；能在浏览器里模拟 `prefers-color-scheme: dark`。
+
+**步骤**：
+
+1. 浅色下执行一次取证。
+2. 切到深色（浏览器设备模拟或系统外观），刷新后执行：
+
+```js
+(() => {
+  const root = getComputedStyle(document.documentElement);
+  const pick = (sel, prop = "color") => {
+    const el = document.querySelector(sel);
+    return el ? getComputedStyle(el)[prop] : null;
+  };
+  return {
+    dark: matchMedia("(prefers-color-scheme: dark)").matches,
+    canvas: root.getPropertyValue("--canvas").trim(),
+    ink: root.getPropertyValue("--ink").trim(),
+    ink3: root.getPropertyValue("--ink-3").trim(),
+    ink4: root.getPropertyValue("--ink-4").trim(),
+    bodyBg: getComputedStyle(document.body).backgroundColor,
+    bodyColor: getComputedStyle(document.body).color,
+    consoleBg: pick(".console", "backgroundColor"),
+    settingsBg: pick(".modal--settings", "backgroundColor"),
+    aiBg: pick("#ai-panel", "backgroundColor"),
+  };
+})()
+```
+
+3. 依次打开设置、新建配置、右栏，记录三处背景与文字色。
+4. 切回浅色，重复一次。
+
+**预期**：
+
+1. 深色：`--canvas` 为 `#16181b`，`--ink` 为 `#e9e9e7`，`--ink-3` 为 `#90908a`，`--ink-4` 为 `#77776f`。
+2. `bodyBg` 为 `rgb(22, 24, 27)`；`bodyColor` 不是深色（不是 `rgb(23, 22, 20)`）。
+3. 控制台、设置、右栏背景都来自深色 token，没有纯白 `rgb(255, 255, 255)` 大块。
+4. 浅色恢复为 `--canvas: #EFEBE1`、`--ink: #171614`。
+5. 切换不需要重启应用。
+
+**不合格时记录什么**：
+
+- 浅色 / 深色两次取证的 JSON。
+- 控制台、设置、新建配置、右栏四张深色截图。
+- 出现纯白块的元素选择器与计算样式。
 
 ### E6-06 空态文案
 
-- **目的**：验证没有配置、没有节点、没有对话时都有明确的下一步。
-- **前置条件**：干净数据；或删除所有配置（由测试者操作）。
-- **步骤（人做）**
-  1. 看左侧配置列表的空态。
-  2. 新建一套没有节点的配置，看中间区和节点面板。
-  3. 打开右栏历史会话，看空态。
-- **AI 取证**
-  ```bash
-  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
-  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from nodes;"
-  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from chat_sessions;"
-  ```
-  看什么：三张表的计数是否与界面空态一致。
-- **可观察预期**
-  - 配置列表空态：「还没有配置」，旁边有新建入口。
-  - 没有节点：「这套配置还没有节点。」；控制台显示「这套配置还没有节点，先选一种」。
-  - 历史会话空态：「还没有对话。新建一个，或者直接问我。」
-  - 空态不说「proxy」「TUN」「分流」「规则集」这类词。
-- **判定**
-  - [ ] 通过
-  - [ ] 失败
-- **失败时收集**：三处空态截图、SQL 计数。
+**前置**：M1；清空 `veyl.*`；跳过首启 AI（点「我懂网络，不用 AI」）；没有任何配置。
+
+**步骤**：
+
+1. 读取左栏空态：
+
+```js
+(() => ({
+  title: document.querySelector(".rail__empty-title")?.textContent.trim() ?? null,
+  text: document.querySelector(".rail__empty-text")?.textContent.trim() ?? null,
+  action: document.querySelector(".rail__empty-action")?.textContent.trim() ?? null,
+  actionClass: document.querySelector(".rail__empty-action")?.className ?? null,
+}))()
+```
+
+2. 新建一套配置后，把它的节点数组改成空，刷新，读取控制台空态：
+
+```js
+(() => {
+  const store = JSON.parse(localStorage.getItem("veyl.configs.mock.v1"));
+  store.configs[0].nodes = [];
+  store.configs[0].node_count = 0;
+  localStorage.setItem("veyl.configs.mock.v1", JSON.stringify(store));
+  location.reload();
+})()
+```
+
+3. 打开右栏 › 历史会话，读取 `.ai-history__empty`。
+
+**预期**：
+
+1. 左栏：「还没有配置」+「让助手配一条，或自己新建一套。」+ 一个 `btn btn--ghost rail__empty-action` 按钮「新建配置」。
+2. 没有节点时：控制台出现「这套配置还没有节点。」，不出现端口行。
+3. 历史会话空态：「还没有对话。新建一个，或者直接问我。」。
+4. 三处空态都不出现 `proxy`、`TUN`、`分流`、`规则集`。
+
+**不合格时记录什么**：
+
+- 三处空态的 DOM JSON 与截图。
+- 缺失的文案或按钮。
+- 是否出现禁用词。
+
+### E6-07 控制台首屏没有「控制台」眉标
+
+**前置**：M1；1440×900；已有一套配置；浅色；未连接。
+
+**步骤**：
+
+1. 载入主界面，执行：
+
+```js
+(() => {
+  const consoleEl = document.querySelector(".console");
+  const body = consoleEl?.querySelector(".console__body");
+  const eyebrow = [...(consoleEl?.querySelectorAll("*") ?? [])]
+    .filter((el) => el.children.length === 0 && el.textContent.trim() === "控制台")
+    .map((el) => {
+      const r = el.getBoundingClientRect();
+      return { tag: el.tagName, cls: el.className, top: Math.round(r.top) };
+    });
+  return {
+    consoleHead: Boolean(document.querySelector(".console__head")),
+    crumb: Boolean(document.querySelector(".console__crumb")),
+    firstChildClass: consoleEl?.firstElementChild?.className ?? null,
+    bodyPaddingTop: body ? getComputedStyle(body).paddingTop : null,
+    eyebrow,
+  };
+})()
+```
+
+2. 截控制台顶部 120px。
+
+**预期**：
+
+1. `consoleHead` 为 `false`，`crumb` 为 `false`。
+2. `.console` 的第一个元素是 `.console__body`（或含 `console__body--welcome`），不是眉标。
+3. `.console__body` 的 `paddingTop` 等于 `28px`。
+4. `eyebrow` 为空数组；顶部 64px 内没有任何「控制台」文本。
+
+**不合格时记录什么**：
+
+- 上述 JSON 原样。
+- `console-top.png`（裁切 120px）。
+- 多出来的元素选择器与 `getBoundingClientRect()`。
+
+### E6-08 四个弹窗 + 设置页内联表单的壳
+
+**前置**：M1；1440×900；已有一套配置；能分别打开四个弹窗（新建配置、添加节点、重置网络、提问/授权）和设置页里的「添加 AI 服务」内联表单。设置弹窗本身是容器，不计入这四个。
+
+**步骤**：
+
+1. 逐个打开面，一次只开一个；每个面执行下面的 JS，记录返回对象：
+
+```js
+(() => {
+  const surfaces = [
+    ["新建配置", ".modal.new-config"],
+    ["设置（容器）", ".modal.modal--settings"],
+    ["添加节点", ".modal.modal--confirm:not(.reset-dialog)"],
+    ["重置网络", ".modal.reset-dialog"],
+    ["提问/授权", ".ask-question"],
+    ["添加 AI 服务（内联）", ".provider-form"],
+  ];
+  return surfaces.map(([name, sel]) => {
+    const el = document.querySelector(sel);
+    if (!el) return { name, found: false };
+    const title = el.querySelector(".modal__title, .ask-question__title, .provider-form__title");
+    const close = el.querySelector(".modal__close, .ask-question__close");
+    const head = el.querySelector(".modal__head, .ask-question__head");
+    const r = el.getBoundingClientRect();
+    const cr = close?.getBoundingClientRect();
+    const ts = title ? getComputedStyle(title) : null;
+    return {
+      name,
+      found: true,
+      role: el.getAttribute("role"),
+      width: Math.round(r.width),
+      titleText: title?.textContent.trim() ?? null,
+      titleSize: ts?.fontSize ?? null,
+      titleWeight: ts?.fontWeight ?? null,
+      close: close ? { w: Math.round(cr.width), h: Math.round(cr.height), rightGap: Math.round(r.right - cr.right) } : null,
+      headPad: head ? `${getComputedStyle(head).paddingTop} ${getComputedStyle(head).paddingRight} ${getComputedStyle(head).paddingBottom} ${getComputedStyle(head).paddingLeft}` : null,
+    };
+  });
+})()
+```
+
+2. 打开方式：新建配置点 `[aria-label="新建配置"]`；设置点左栏设置按钮；添加节点在设置 › 连接 ›「添加节点」行点「添加」；重置网络在设置 › 遇到问题点「重置网络」；提问/授权在右栏发「升级运行时」，等 `.ask-question` 出现；添加 AI 服务在设置 › AI 服务点「添加 AI 服务」。
+3. 对每个面截全图，并记录关闭按钮距弹窗右边缘的距离。
+4. 把四个弹窗分成两档：**确认类**（添加节点、重置网络、提问/授权）与**复杂类**（新建配置）。
+
+**预期**：
+
+1. **确认类三个弹窗内部一致**：标题都是 15px / 600；header padding 都是 `14px 20px`；关闭按钮都是 28×28，位于 header 最右侧，右间距都是 20px。添加节点宽度 400（±1），重置网络 480（±1），提问/授权 400（±1）。
+2. **复杂类单独一档**：新建配置标题 17px / 600；header padding `16px 24px 14px`；关闭按钮 28×28，右间距 24px；宽度 480（±1）。
+3. **设置弹窗是容器**：`.modal.modal--settings` 宽度 760（±1），标题「设置」15px / 600，关闭按钮 28×28，右间距 20px。它不是四个弹窗之一，只用于确认内联表单的宿主宽度。
+4. **「添加 AI 服务」是内联表单**：`.provider-form`，不是 `role=dialog`，没有关闭按钮，不做宽度断言；标题 `.provider-form__title` 为 13px / 500。它只做「在 760 容器内展开」的断言。
+5. **宽度只允许 400 / 480 / 760 三档**；没有 440 / 560 / 420 等旧值。
+6. **不能断言四个弹窗标题同字号**：确认类 15/600、复杂类 17/600 是 `ui-refresh-plan.md` P1-4 规定的两档；只断言「同一档内部一致」。
+7. 不出现 16 / 18 / 24 等第三种标题字号，也不出现 26px 旧关闭按钮。
+
+**不合格时记录什么**：
+
+- 六个面的 `getBoundingClientRect()` 与计算样式 JSON。
+- 每个面的全图 + header 裁切图。
+- 确认类内部哪一项不一致（标题 / padding / 关闭尺寸 / 右间距）。
+- 复杂类与确认类是否被误当成同一档。
+- 内联表单是否被误判成弹窗。
+
+### E6-09 对话改成时间线
+
+**前置**：M1；1440×900；AI 可用；右栏展开；至少已有一条用户消息和一条助手回复。
+
+**步骤**：
+
+1. 发送一条包含超长 URL 与超长无空格串的消息，例如 `https://example.com/` 加 200 个字符，再加 300 个 `A`；等助手回复结束。
+2. 执行：
+
+```js
+(() => {
+  const user = document.querySelector(".msg--user");
+  const asst = document.querySelector(".msg--assistant");
+  const roleText = (el) => el?.querySelector(".msg__role")?.textContent.replace("输出中", "").trim() ?? null;
+  const text = user?.querySelector(".msg__text");
+  const overflows = [...document.querySelectorAll(".msg__text")].map((el) => el.scrollWidth - el.clientWidth);
+  return {
+    bubbles: document.querySelectorAll(".msg__bubble").length,
+    userRole: roleText(user),
+    assistantRole: roleText(asst),
+    roleSize: user ? getComputedStyle(user.querySelector(".msg__role")).fontSize : null,
+    textSize: text ? getComputedStyle(text).fontSize : null,
+    userAlign: user ? getComputedStyle(user).alignItems : null,
+    userGap: user ? getComputedStyle(user).gap : null,
+    docOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    textOverflow: overflows,
+  };
+})()
+```
+
+3. 截用户消息与助手消息各一张。
+
+**预期**：
+
+1. `bubbles` 为 0；DOM 里没有任何 `.msg__bubble`。
+2. 用户消息署名是「你」，助手署名是「Veyl」。
+3. `.msg__role` 字号 11px；`.msg__text` 字号 14.5px。
+4. 用户消息不再右对齐：`userAlign` 不是 `flex-end`；`userGap` 为 `8px`。
+5. `docOverflow` 为 0；`textOverflow` 每一项 ≤ 1px（没有横向溢出）。
+6. 超长 URL 与无空格串在消息内换行，不撑破右栏。
+
+**不合格时记录什么**：
+
+- 上述 JSON。
+- 用户 / 助手消息截图。
+- 溢出的元素选择器与 `scrollWidth/clientWidth`。
+- 是否仍存在 `.msg__bubble`。
+
+### E6-10 左栏空态与错误态的 ghost 按钮
+
+**前置**：空态用 M1（清空 `veyl.*`，没有配置）；错误态用 M2 原生应用构造。测试者能恢复被改动的权限 / 文件。
+
+**步骤**：
+
+1. 空态执行：
+
+```js
+(() => {
+  const b = document.querySelector(".rail__empty-action");
+  return {
+    title: document.querySelector(".rail__empty-title")?.textContent.trim() ?? null,
+    text: document.querySelector(".rail__empty-text")?.textContent.trim() ?? null,
+    action: b?.textContent.trim() ?? null,
+    classes: b?.className ?? null,
+  };
+})()
+```
+
+2. 点「新建配置」，确认 `.modal.new-config` 出现。
+3. 创建一套配置后，确认左栏空态消失、列表至少 1 行。
+4. 错误态构造（M2，由测试者执行；先退出应用）：
+   - 方法 A：把配置目录改成不可读，再启动应用：
+
+```bash
+chmod 000 "$HOME/.veyl/config"
+# 测完恢复
+chmod 755 "$HOME/.veyl/config"
+```
+
+   - 方法 B：用一份非法 JSON 的配置文件启动（先把原文件备份）：
+
+```bash
+cp "$HOME/.veyl/config/active.json" "$HOME/.veyl/config/active.json.bak"
+printf '{invalid' > "$HOME/.veyl/config/active.json"
+# 测完恢复
+mv "$HOME/.veyl/config/active.json.bak" "$HOME/.veyl/config/active.json"
+```
+
+   - 如果两种方法都没有让左栏进入错误态（当前 `config_list` 从 SQLite 读，可能不受配置目录权限影响），记「阻塞（未构造）」，并写明尝试过的方法；不要静默跳过。
+5. 进入错误态后，读取左栏：
+
+```js
+(() => ({
+  title: document.querySelector(".rail__empty-title")?.textContent.trim() ?? null,
+  text: document.querySelector(".rail__empty-text")?.textContent.trim() ?? null,
+  action: document.querySelector(".rail__empty-action")?.textContent.trim() ?? null,
+  actionClass: document.querySelector(".rail__empty-action")?.className ?? null,
+}))()
+```
+
+6. 恢复权限 / 文件，点「重新读取」，记录按钮是否消失、列表是否刷新。
+
+**预期**：
+
+1. 空态按钮文本「新建配置」，类名同时包含 `btn`、`btn--ghost`、`rail__empty-action`。
+2. 点它打开新建配置弹窗；创建成功后空态和按钮消失，列表出现新配置。
+3. 错误态标题「配置读取失败」，`.rail__empty-text` 显示具体错误；按钮文本「重新读取」，类名同样包含 `btn btn--ghost`。
+4. 恢复权限后点「重新读取」：按钮消失，列表刷新出配置行。
+5. 读取仍失败时按钮保留，不静默、不显示空列表冒充成功。
+6. 错误态和空态都不出现两个以上同级按钮。
+
+**不合格时记录什么**：
+
+- 空态 / 错误态的 DOM JSON 与截图。
+- 按钮的 `className`、点击前后的列表行数。
+- 用过的构造方法（chmod / 非法 JSON）与恢复命令是否执行。
+- 如果未构造成功，记录「阻塞（未构造）」及尝试过的方法。
+
+**不合格时记录什么**：
+
+- 空态 / 错误态的 DOM JSON 与截图。
+- 按钮的 `className`、点击前后的列表行数。
+- 如果错误态未构造，记录「阻塞（未构造）」及原因。
+
+### E6-11 首启「使用其他 AI 服务」只有一个保存按钮
+
+**前置**：M1；清空 `veyl.*`；刷新后出现首启页（没有可用 AI）。
+
+**步骤**：
+
+1. 点「使用其他 AI 服务」，执行：
+
+```js
+(() => {
+  const save = [...document.querySelectorAll("button")].filter((b) => b.textContent.trim() === "保存并验证");
+  return {
+    saveButtons: save.length,
+    deepseekInput: Boolean(document.querySelector("#onboarding-deepseek-key")),
+    customForm: Boolean(document.querySelector("#onboarding-base-url")),
+    submitInCustom: Boolean(document.querySelector(".onboarding__custom .onboarding__submit")),
+  };
+})()
+```
+
+2. 在可见的自定义表单里填一个会被拒绝的 Base URL（例如 `http://example.com`），点唯一的「保存并验证」。
+3. 读取 `.onboarding__error` 文本，确认它属于自定义表单。
+
+**预期**：
+
+1. `saveButtons` 为 1；屏幕上只有一个「保存并验证」。
+2. 展开自定义表单后，DeepSeek 表单被卸载：`deepseekInput` 为 `false`；`customForm` 为 `true`。
+3. 唯一的提交按钮在 `.onboarding__custom` 内。
+4. 提交后错误出现在 `.onboarding__custom .onboarding__error`（或自定义表单的错误节点），不是被卸载的 DeepSeek 表单。
+5. 收起自定义表单后，DeepSeek 表单回来，仍只有一个「保存并验证」。
+
+**不合格时记录什么**：
+
+- 上述 JSON。
+- 展开前后截图。
+- 两个保存按钮各自的父表单选择器与错误文本。
+
+### E6-12 成功提示与错误提示的消失行为
+
+**前置**：M1；清空 `veyl.*`；跳过首启 AI；有一套可创建的配置流程。
+
+**步骤**：
+
+1. 用「新建配置 › 我自己配置」创建一个默认配置，触发 info 提示；记录首次出现的时刻 `t0`。
+2. 每 200ms 检查 `.app-toast`，记录消失时刻 `t1`。
+3. 在未配置 AI 的状态下，打开右栏发一条消息，触发 error 提示；等 6 秒。
+4. 点 `.app-toast__close`（`aria-label="关闭提示"`）。
+
+**预期**：
+
+1. info 提示文本是「已创建，从左侧切换过去。」，类名含 `app-toast--info`。
+2. `t1 - t0` 在 4 秒 ±1 秒（3.0–5.0 秒）内，元素从 DOM 移除。
+3. error 提示类名含 `app-toast--error`；6 秒后仍在 DOM 中，不自动消失。
+4. 点关闭按钮后 error 提示立即移除。
+5. 替换提示时旧定时器不会把新提示提前清掉（连续触发 info → error，error 仍在 6 秒后存在）。
+
+**不合格时记录什么**：
+
+- 两次提示的文本、类名、`t0/t1`。
+- 消失 / 保留的截图或 DOM 存在性。
+- 是否出现提示被提前清掉、或 error 自动消失。
+
+### E6-13 「关于」版本号等于构建版本
+
+**前置**：M2 原生应用；能读到源码或安装包的版本。
+
+**步骤**：
+
+1. 打开设置 › 关于，截版本行。
+2. 执行：
+```bash
+grep -n '"version"' src-tauri/tauri.conf.json
+grep -n 'APP_VERSION\|getAppVersion' src/components/Settings.tsx
+plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBundleShortVersionString|CFBundleVersion'
+```
+   （安装包不在 `/Applications/Veyl.app` 时，把路径换成实际位置。）
+
+3. 对比界面文本、`tauri.conf.json`（或 Info.plist）的值。
+
+**预期**：
+
+1. 关于页显示 `v{版本}`，与 `tauri.conf.json` 的 `version`（或安装包 Info.plist 的 `CFBundleShortVersionString`）完全一致。
+2. 不是写死的占位：`Settings.tsx` 里没有 `const APP_VERSION = "..."`，版本来自 `getAppVersion()`（`grep APP_VERSION` 没有输出也算满足）。
+3. 版本读取失败时显示 `v—`，不显示错误的旧版本号。
+4. 诊断信息里的 `app` 字段、重置报告里的版本与关于页一致。
+
+**不合格时记录什么**：
+
+- 关于页截图与诊断信息文本。
+- 三条命令的原始输出。
+- 界面版本、构建版本、源码硬编码值三者对比。
+
+### E6-14 字号与 `--ink-4` 用法
+
+**前置**：M1；1440×900；首启页与主界面都要覆盖（先扫首启页，再进主界面）；浅色 + 深色各一次。
+
+**步骤**：
+
+1. 主界面 + 设置 + 新建配置 + 右栏 + 首启页都打开过一遍后，执行字号 / token 扫描：
+
+```js
+(() => {
+  const allowed = new Set(["9.5px", "11px", "12px", "13px", "14px", "14.5px", "15px", "17px", "20px", "22px", "44px", "64px"]);
+  const bad = [];
+  const seen = new Set();
+  for (const el of document.querySelectorAll("body *")) {
+    if (["SCRIPT", "STYLE", "SVG", "PATH"].includes(el.tagName)) continue;
+    if (el.closest(".sr-only")) continue;
+    const hasText = [...el.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim());
+    if (!hasText) continue;
+    const s = getComputedStyle(el);
+    if (s.display === "none" || s.visibility === "hidden") continue;
+    seen.add(s.fontSize);
+    if (!allowed.has(s.fontSize)) {
+      bad.push({ tag: el.tagName, cls: String(el.className), text: el.textContent.trim().slice(0, 40), size: s.fontSize });
+    }
+  }
+  const probe = document.createElement("span");
+  probe.style.color = "var(--ink-4)";
+  document.body.appendChild(probe);
+  const ink4 = getComputedStyle(probe).color;
+  probe.style.color = "var(--ink-3)";
+  const ink3 = getComputedStyle(probe).color;
+  probe.remove();
+  const ink4Text = [...document.querySelectorAll("body *")].filter((el) => {
+    const hasText = [...el.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim());
+    return hasText && getComputedStyle(el).color === ink4;
+  }).map((el) => ({ tag: el.tagName, cls: String(el.className), text: el.textContent.trim().slice(0, 40) }));
+  return { seen: [...seen].sort(), bad, ink3, ink4, ink4Text };
+})()
+```
+
+2. 深色下再执行一次，读取 `--ink-3`。
+
+**预期**：
+
+1. `bad` 为空数组；可见文字只使用 `{9.5, 11, 12, 13, 14, 14.5, 15, 17, 20, 22, 44, 64}px`。
+2. 深色下 `--ink-3` 为 `#90908a`（计算值为 `rgb(144, 144, 138)`）。
+3. `ink4Text` 为空数组；`--ink-4` 只出现在线条 / 点 / 焦点环（例如 `.led` 的背景、focus ring 的 `box-shadow`），不用于文字。
+4. 没有 16 / 18 / 24 / 13.5 / 12.5 / 10px 的可见文字。
+5. 首启页主标题使用 `--fs-display: 22px`，属于允许集合；扫描时必须包含首启页，不能把它排除后再判通过。
+
+**不合格时记录什么**：
+
+- 两次扫描的 JSON。
+- `bad` 里每个元素的选择器、文本、计算字号。
+- `ink4Text` 里的元素与颜色。
+- 深色下 `--ink-3` 的实际值。
+
+### E6-15 配置骨架行与真实配置行同为 64px
+
+**前置**：M1；1440×900；至少有一套配置。骨架行在加载时出现；如果加载太快没抓到，用同父容器临时插入一个 `.skeleton-row` 测高度，并在备注里写「半合成」。
+
+**步骤**：
+
+1. 刷新列表，加载时（或抓不到时临时插入）执行：
+
+```js
+(() => {
+  const list = document.querySelector(".configs");
+  let sk = document.querySelector(".skeleton-row");
+  let synthetic = false;
+  if (!sk && list) {
+    sk = document.createElement("div");
+    sk.className = "skeleton-row";
+    sk.innerHTML = '<span class="skeleton skeleton--name"></span><span class="skeleton skeleton--meta"></span>';
+    list.prepend(sk);
+    synthetic = true;
+  }
+  const real = document.querySelector(".config");
+  const a = sk?.getBoundingClientRect().height ?? null;
+  const b = real?.getBoundingClientRect().height ?? null;
+  sk?.remove();
+  return {
+    skeletonHeight: a,
+    realHeight: b,
+    diff: a !== null && b !== null ? Math.abs(a - b) : null,
+    synthetic,
+  };
+})()
+```
+
+2. 截左栏列表顶部，标出骨架行与真实行。
+
+**预期**：
+
+1. `skeletonHeight` 与 `realHeight` 都是 64（±0.5）。
+2. `diff ≤ 0.5`。
+3. 真实配置行的内容没有把行高撑到 64 以上。
+4. 如果用了临时插入，`synthetic=true`，结论只证明样式规则一致；不能写成「真实加载过程也观察到」。
+
+**不合格时记录什么**：
+
+- 上述 JSON。
+- 左栏截图。
+- 两个元素的 `height / paddingTop / paddingBottom / lineHeight`。
+
+### E6-16 提示条的位置、层级与遮挡
+
+**前置**：M1；1440×900；未连接；没有任何配置（用于触发 info 提示），或未配置 AI（用于触发 error 提示）。
+
+**步骤**：
+
+1. 用「新建配置 › 我自己配置」创建一套配置，触发 info 提示；立即执行：
+
+```js
+(() => {
+  const t = document.querySelector(".app-toast");
+  const b = [...document.querySelectorAll("button")].find((x) => x.textContent.trim() === "启动 VPN");
+  const tr = t?.getBoundingClientRect();
+  const br = b?.getBoundingClientRect();
+  const s = t ? getComputedStyle(t) : null;
+  const overlap = tr && br ? !(tr.right <= br.left || tr.left >= br.right || tr.bottom <= br.top || tr.top >= br.bottom) : null;
+  return {
+    top: tr ? Math.round(tr.top) : null,
+    zIndex: s?.zIndex ?? null,
+    level: t?.className ?? null,
+    overlap,
+    toast: tr ? { w: Math.round(tr.width), h: Math.round(tr.height) } : null,
+    button: br ? { x: Math.round(br.x), y: Math.round(br.y), w: Math.round(br.width), h: Math.round(br.height) } : null,
+  };
+})()
+```
+
+2. 记录 info 提示出现 / 消失时间，确认 4 秒 ±1 秒。
+3. 在未配置 AI 的状态下发一条消息，触发 error 提示；等 6 秒后再查 `.app-toast` 是否还在。
+
+**预期**：
+
+1. `.app-toast` 的 `top` 为 96px（±1）；`zIndex` 为 `"90"`。
+2. info 提示类名含 `app-toast--info`；`t1 - t0` 在 3.0–5.0 秒之间。
+3. error 提示类名含 `app-toast--error`；6 秒后仍在 DOM 中。
+4. `overlap` 为 `false`：提示条与未连接态的「启动 VPN」主按钮矩形不相交。
+5. 提示条不覆盖主按钮、不改变主按钮的点击区域。
+
+**不合格时记录什么**：
+
+- 上述 JSON、info 的 `t0/t1`、error 的 6 秒后存在性。
+- 提示条与主按钮的截图（带矩形标注）。
+- `top / zIndex / overflow` 的计算值。
+
+### E6-17 节点名字号与超长省略
+
+**前置**：M1；1440×900；准备两套配置：A 两个节点、B 一个节点；节点名改成超过栏宽的长串。
+
+**步骤**：
+
+1. 用 localStorage 改两套配置的节点名并刷新：
+
+```js
+(() => {
+  const store = JSON.parse(localStorage.getItem("veyl.configs.mock.v1"));
+  const long = "这是一个非常非常长的节点名称用于测试省略号是否生效ABCDEFGHIJKLMN";
+  store.configs.forEach((c, i) => {
+    c.nodes = c.nodes.length ? c.nodes : [{
+      node_id: `n_${i}`, name: long, server: "203.0.113.9", port: 8388,
+      method: "aes-256-gcm", protocol: "shadowsocks", source: "manual", created_at: Date.now(),
+    }];
+    c.nodes[0].name = long;
+    if (i === 0) c.nodes = [c.nodes[0], { ...c.nodes[0], node_id: "n_extra", name: long + "2" }];
+  });
+  store.activeId = store.configs[0].config_id;
+  localStorage.setItem("veyl.configs.mock.v1", JSON.stringify(store));
+  location.reload();
+})()
+```
+
+2. 选中配置 A（多节点），执行：
+
+```js
+(() => {
+  const read = (sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return null;
+    const s = getComputedStyle(el);
+    return {
+      text: el.textContent.trim().slice(0, 24),
+      fontSize: s.fontSize,
+      fontWeight: s.fontWeight,
+      textOverflow: s.textOverflow,
+      whiteSpace: s.whiteSpace,
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+      height: Math.round(el.getBoundingClientRect().height),
+    };
+  };
+  return { select: read(".node-card__select .node-card__name"), static: read(".node-card__static .node-card__name") };
+})()
+```
+
+3. 切到配置 B（单节点），再执行一次。
+
+**预期**：
+
+1. 多节点态 `.node-card__select .node-card__name`：`fontSize=15px`、`fontWeight=500`。
+2. 单节点态 `.node-card__static .node-card__name`：同样是 `15px / 500`。
+3. 两种状态都是 `textOverflow=ellipsis`、`whiteSpace=nowrap`。
+4. 长名字下 `scrollWidth > clientWidth`，且 `height ≤ 21`（单行，没有换行撑高）。
+5. 节点卡宽度不变，不因长名字横向溢出。
+
+**不合格时记录什么**：
+
+- 两次 JSON。
+- 多节点 / 单节点截图。
+- 长名字的 `scrollWidth / clientWidth / height`。
+
+### E6-18 发送按钮禁用态的底色
+
+**前置**：M1；AI 可用；输入框为空；浅色和深色各一次。
+
+**步骤**：
+
+1. 执行：
+
+```js
+(() => {
+  const btn = document.querySelector(".btn--send");
+  const probe = document.createElement("span");
+  probe.style.background = "var(--bg-hover)";
+  document.body.appendChild(probe);
+  const expected = getComputedStyle(probe).backgroundColor;
+  probe.remove();
+  const s = getComputedStyle(btn);
+  return {
+    disabled: btn?.disabled ?? null,
+    background: s.backgroundColor,
+    expected,
+    opacity: s.opacity,
+    color: s.color,
+  };
+})()
+```
+
+2. 切深色后再执行一次。
+
+**预期**：
+
+1. 输入为空时 `disabled=true`。
+2. `background` 等于 `--bg-hover` 的计算值：浅色 `rgba(255, 255, 255, 0.55)`，深色 `rgba(255, 255, 255, 0.06)`。
+3. `opacity` 为 `"1"`（不是 0.38 的整块变淡）。
+4. 按钮不是透明背景；浅色 / 深色都有可见底色。
+
+**不合格时记录什么**：
+
+- 两次 JSON。
+- 浅色 / 深色按钮截图。
+- `background / expected / opacity` 的差异。
+
+### E6-19 消息不含 tokens、状态文字无动画
+
+**前置**：M1；AI 可用；右栏展开。
+
+**步骤**：
+
+1. 发送「你好」，在流式回复期间执行：
+
+```js
+(() => {
+  const a = document.querySelector(".msg__streaming");
+  const c = document.querySelector(".composer__status");
+  return {
+    streaming: a ? { text: a.textContent.trim(), animationName: getComputedStyle(a).animationName } : null,
+    status: c ? { text: c.textContent.trim(), animationName: getComputedStyle(c).animationName } : null,
+  };
+})()
+```
+
+2. 回复结束后执行：
+
+```js
+(() => {
+  const text = document.querySelector(".msg--assistant")?.innerText ?? "";
+  return { tokens: /\btokens?\b/i.test(text), sample: text.slice(0, 120) };
+})()
+```
+
+**预期**：
+
+1. 流式期间 `.msg__streaming` 存在，`animationName` 为 `"none"`。
+2. `.composer__status` 渲染时 `animationName` 为 `"none"`；没有渲染时记 `null`，不判失败。
+3. 回复结束后，助手消息里不出现 `tokens` / `token` 计数（大小写不敏感）。
+4. 消息正文、工具行、思考块都不出现 token 计数。
+
+**不合格时记录什么**：
+
+- 两次 JSON。
+- 流式期间与结束后的截图。
+- 出现 `tokens` 的元素选择器与文本片段。
+
+### E6-20 未配置 AI 横幅的左侧竖线与透明底
+
+**前置**：M1；清空 `veyl.*`；跳过首启 AI（点「我懂网络，不用 AI」）；右栏展开。
+
+**步骤**：
+
+1. 执行：
+
+```js
+(() => {
+  const b = document.querySelector(".ai-panel__banner");
+  if (!b) return { found: false };
+  const s = getComputedStyle(b);
+  const probe = document.createElement("span");
+  probe.style.color = "var(--cobalt)";
+  document.body.appendChild(probe);
+  const cobalt = getComputedStyle(probe).color;
+  probe.remove();
+  return {
+    found: true,
+    borderLeftWidth: s.borderLeftWidth,
+    borderLeftColor: s.borderLeftColor,
+    cobalt,
+    background: s.backgroundColor,
+    text: b.textContent.trim(),
+  };
+})()
+```
+
+2. 浅色、深色各执行一次。
+
+**预期**：
+
+1. `borderLeftWidth` 为 `2px`。
+2. `borderLeftColor` 等于 `--cobalt` 的计算值（浅色 `rgb(31, 70, 184)`，深色 `rgb(91, 141, 239)`）。
+3. `background` 为 `rgba(0, 0, 0, 0)`（透明），没有整条底色。
+4. 文案包含「还没有配置 AI，现在只能手动操作网络。」与「去配置」。
+5. 横幅高度由内容决定，不因透明底变成一块卡片。
+
+**不合格时记录什么**：
+
+- 两次 JSON。
+- 横幅截图。
+- `borderLeftWidth / borderLeftColor / background` 与期望的差异。
+
+### E6-21 零配置时助手自动展开与本次运行内关闭
+
+**前置**：M1；1440×900；清空 `veyl.*`；先在首启页保存一个 mock Key 使 AI 可用；保持零配置。
+
+**步骤**：
+
+1. 进入主界面后等 300ms，执行：
+
+```js
+(() => ({
+  panel: Boolean(document.querySelector("#ai-panel")),
+  tab: Boolean(document.querySelector(".assistant-tab")),
+  configs: document.querySelectorAll(".config").length,
+}))()
+```
+
+2. 点 `[aria-label="收起助手"]`，立即执行一次；等 1 秒再执行一次。
+3. 刷新页面，等 300ms，再执行一次。
+
+**预期**：
+
+1. 零配置进入：`panel=true`、`tab=false`、`configs=0`（§1.2 自动展开）。
+2. 手动收起后：`panel=false`、`tab=true`；1 秒后仍是收起，**本次运行内不再强制展开**。
+3. 刷新后：`panel=true`、`tab=false`，按 §1.2 重新展开。
+4. **不实现「记住上次关闭」**：不要断言「刷新后仍保持收起」；如果观察到刷新后仍收起，才是失败。
+5. 自动展开不改变连接状态，不新建配置。
+
+**不合格时记录什么**：
+
+- 三次 JSON 与截图。
+- `veyl.ui.panelOpen` / `veyl.ui.panelVersion` / `veyl.ui.panelClosedByUser` 的 localStorage 值。
+- 刷新前后的面板状态。
+
+### E6-22 全局间距：只记录已知，不做断言
+
+> 已知：全局间距尚未完全归到统一栅格；本条只记录，不把任何间距值判成通过或不通过。
+
+**前置**：M1；1440×900；主界面、设置、新建配置、右栏都打开过一遍。
+
+**步骤**：
+
+1. 抽查下列容器的 `marginTop / marginBottom / paddingTop / paddingBottom / gap`，记录不是 4 或 8 的倍数的值：
+
+```js
+(() => {
+  const sels = [".console", ".hero", ".settings-section", ".modal", ".rail", ".ai-panel"];
+  return sels.map((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return { sel, found: false };
+    const s = getComputedStyle(el);
+    return {
+      sel,
+      found: true,
+      margin: [s.marginTop, s.marginRight, s.marginBottom, s.marginLeft],
+      padding: [s.paddingTop, s.paddingRight, s.paddingBottom, s.paddingLeft],
+      gap: s.gap,
+    };
+  });
+})()
+```
+
+2. 把结果写进当天的 `spacing-known.md`；发现元素重叠、裁切或点不到时，单独开缺陷。
+
+**预期**：
+
+1. 本条结论只写「已记录」，不写「间距合格」；不能拿它当通过依据。
+2. `spacing-known.md` 至少包含上面六个容器的 margin / padding / gap 原值。
+3. 发现重叠、裁切、不可点击时，另开缺陷并附截图；不在本条判失败。
+4. 本手册其他用例不对未归格的间距做断言。
+
+**不合格时记录什么**：
+
+- 六个容器的计算样式 JSON。
+- 发现重叠 / 裁切 / 不可点击的元素与截图。
+- `spacing-known.md` 的路径。
 
 ---
 
@@ -1030,7 +1955,7 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 | 2 | tab 语义与键盘 | 普通按钮 + `aria-current`，方向键不能切 | `tablist / tab / tabpanel`，左右方向键、Home / End 可切，焦点跟随 |
 | 3 | 页内标题 | AI 助手、遇到问题、关于各有一行与 tab 同名的标题 | 三处页内标题删除，不与 tab 名重复 |
 | 4 | 连接 tab 的节点行 | 有「用哪个节点」整行，可打开节点面板 | 删除；主界面底部是**唯一**节点切换入口 |
-| 5 | 添加节点 | 「导入节点文件」，实际只收 Veyl 种子 JSON | 「添加节点」弹层：粘贴 `ss://`、https 订阅、选择文件（文件通道待 `node_import_file`） |
+| 5 | 添加节点 | 「导入节点文件」，实际只收 Veyl 种子 JSON | 「添加节点」弹层：粘贴 `ss://`、https 订阅、从文件导入（已实现） |
 | 6 | 无配置时的连接 tab | 仍显示端口行（条件只排除 tun） | 只留「还没有配置」+ 新建；端口与节点来源都不出现 |
 | 7 | 端口行的出现条件 | 非 tun 就显示 | 仅 `system_proxy` 且有配置时显示；tun 与无配置都不显示 |
 | 8 | 端口顺延说明 | 用 `mixed_port !== proxyPort` 推断，可能与「已保存，下次连接生效」叠成两句 | 用 `runtime.port_fallback`；同一时刻只显示一句，合成句不再叠加保存提示 |
@@ -1039,14 +1964,14 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 | 11 | 问 AI 后返回 | 关闭设置，重开落回 AI 助手 tab | 重开设置回到刚才那个 tab |
 | 12 | 导入跳过原因 | 显示英文枚举 `duplicate` / `malformed` | 中文原因：已有同名节点 / 不是 ss:// 链接 / 加密方式不支持 / 内容不完整 |
 | 13 | 连接方式文案 | 「全部流量 / 接管全部 / 系统代理」等混用 | 全部软件走 VPN / 浏览器走 VPN / 只有填了地址的软件走 VPN |
-| 14 | 文件通道 | 未实现，`node_import_file` 待派 | 文件通道接入后执行 E8-05；未接入时该条记「未实现」 |
+| 14 | 文件通道 | 未实现，`node_import_file` 待派 | 已实现，随本批次验证 |
 
 ### 8.1 执行前提
 
 - 设置改版已经落地到被测构建；构建版本记录在 `notes.md`。
 - 至少准备三套配置：一套「全部软件走 VPN」（tun）、一套「浏览器走 VPN」（system_proxy + direct）、一套「只有填了地址的软件走 VPN」（system_proxy + proxy_selected）。
 - 准备一份可用的 `ss://` 文本（两行）、一个 https 订阅地址、一个 http 订阅地址；E8-05 另需 .txt / .json / 超过 1 MB 的文件。
-- 本章多数条目是界面与键盘判断，**AI 不能替人看界面**；「AI 取证」只负责把数据库、日志、系统状态整理出来。
+- 本章多数条目是界面与键盘判断。**§8.1 的 E8-01…E8-14 保留为改版基线（人工 + 截图/DB 取证）；本次 P1 设置改动一律执行 §8.2 的 E8-15…E8-20**，它们用 M1 的 DOM 断言，只有真实导入 / 真实端口 / 失败构造才用 M2 补证。两者冲突时以 §8.2 为准。
 
 ---
 
@@ -1153,31 +2078,52 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
   - [ ] 失败
 - **失败时收集**：两种地址的提示截图、节点/配置 SQL、订阅地址打码后的记录。
 
-### E8-05 添加节点：选择文件
+### E8-05 添加节点：从文件导入
 
-- **目的**：验证文件通道能导入 .txt / .json，超过 1 MB 与格式问题有明确提示，界面不显示文件路径。依据 IA §3.2 C13 / C15 / §4.1。
-- **前置条件**：`node_import_file` 已接入（IA 批次 B）；准备 1 个含两条 `ss://` 的 .txt、1 个 .json、1 个超过 1 MB 的文件、1 个含不支持加密方式的文件。
+- **目的**：验证文件通道的「选文件 → 确认 → 点导入」流程、1 MB 限制、空结果文案与文件名展示。依据 `node_import_file` 契约 §4.1.2 / IA §3.2 C13 / C15。
+- **前置条件**：`node_import_file` 已实现（随本批次验证）；准备四个文件：
+  - `nodes.txt`：两行 `ss://`。
+  - `nodes.json`：内容同样是两行 `ss://`（命令按文本逐行解析，**不解析 Clash / 种子 JSON**）。
+  - `big.txt`：超过 1 MB 的任意文本。
+  - `clash.json`：一个真实的 Clash 配置 JSON（没有 `ss://` 行），用来验证空结果。
+  - 可选：一个只含不支持加密方式的 `ss://` 文件，用来验证逐条跳过。
+
+  可用的 `ss://` 样本（两行，直接复制）：
+
+  ```
+  ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@203.0.113.9:8388#测试节点一
+  ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@203.0.113.10:8388#测试节点二
+  ```
+
 - **步骤（人做）**
-  1. 打开「添加节点」弹层，点「选择文件」。
-  2. 依次选择上述四个文件，记录每次结果。
-  3. 确认界面没有显示文件完整路径。
+  1. 打开设置 › 连接 ›「添加节点」弹层。底部同一排应有「从文件导入」「取消」「添加」。
+  2. 点「从文件导入」，选择 `nodes.txt`。
+  3. **先不要点导入**，记录弹层内容与按钮：应显示「将导入：nodes.txt」，文本框消失，出现「重新选择」「改用文本」「取消」「导入」。
+  4. 点「导入」，等结果；记录按钮是否短暂变成「正在导入…」。
+  5. 依次用 `nodes.json`、`big.txt`、`clash.json`、可选的不支持加密方式文件重复 2–4 步；每次记录结果**完整文本**与 `.settings-feedback--error` / `role="alert"`。
+  6. 确认界面只显示文件名，不显示完整路径。
 - **AI 取证**
   ```bash
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select source, count(*) from nodes group by source;"
-  tail -n 80 "$APP_LOG" | grep -E '文件|导入|节点|warn|error' | tail -12
+  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select config_id, count(*) from config_nodes group by config_id;"
+  tail -n 100 "$APP_LOG" | grep -E '文件|导入|节点|warn|error' | tail -15
+  grep -F "<本次选择的完整路径>" "$APP_LOG"
   ```
-  看什么：合法文件导入后节点数增加；超限/空文件/不支持格式没有新增节点；日志没有 panic。
+  看什么：合法文件导入后节点数增加；超限 / 空结果没有新增节点；完整路径不在日志里（最后一条应无输出）；日志没有 panic。
 - **可观察预期**
-  - .txt 与 .json 都能导入，结果用中文说明。
-  - 超过 1 MB 提示「文件过大，最大 1 MB」。
-  - 没有可用节点提示「这个文件里没有可用的节点」；不支持的加密方式提示「这个节点的加密方式暂不支持」。
-  - 界面只显示文件名和原因，不显示完整路径。
-  - **如果文件通道尚未接入**：本条记为「未实现」，不判失败，把界面实际状态（有没有「选择文件」）报给 PM。
+  1. 入口按钮是「从文件导入」，与「取消」「添加」同一排；不是「选择文件」。
+  2. 选完文件**不会立刻导入**：停在「将导入：<文件名>」，文本框隐藏，主按钮从「添加」变成「导入」；这时数据库节点数尚未变化。
+  3. 点「导入」后才调用命令；导入中主按钮显示「正在导入…」。
+  4. `nodes.txt` 与 `nodes.json`（内容为两行 `ss://`）都导入成功，显示「已添加 2 个节点」，节点数 +2。
+  5. `big.txt` 提示 **「文件太大了，最大 1 MB。换一个小一点的文件。」**。
+  6. `clash.json`（没有 `ss://` 行）提示 **「这个文件里没有可用的节点（支持多行 ss:// 链接）。换一个文件。」**；命令层的 message 是同一句去掉「换一个文件。」。
+  7. 只有部分节点成功、其余被跳过时，才出现逐条中文原因；加密方式不支持的文案按 `IMPORT_SKIP_REASONS` 为 **「加密方式不支持」**。
+  8. 界面显示文件名（`将导入：<文件名>`）是设计要求，用于确认；**完整路径不能显示，也不能写进日志**。
+  9. `.json` 能导入的前提是文件里是逐行 `ss://`；拿真实的 Clash / 种子 JSON 会得到第 6 条的空结果，这是预期，不是失败。
 - **判定**
   - [ ] 通过
   - [ ] 失败
-  - [ ] 未实现（文件通道尚未接入）
-- **失败时收集**：四个文件的结果截图、节点表 SQL、日志尾；文件名可保留，路径打码。
+- **失败时收集**：四个 / 五个文件的结果截图、节点与配置 SQL、日志尾、完整路径 grep 的结果；文件名可保留，路径打码。
 
 ### E8-06 端口的两种形态
 
@@ -1418,9 +2364,305 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
   - [ ] 失败
 - **失败时收集**：问 AI 前后的截图、`chat_messages` SQL、重开设置落在哪个 tab 的截图。
 
+### 8.2 P1 设置改动（AI 执行）
+
+> 本节对应 P1 十一条里的设置项。E8-15…E8-20 优先用浏览器预览（M1）执行；涉及真实导入 / 真实端口的步骤用原生应用（M2）补证。
+
+| P1 设置项 | 用例 |
+|---|---|
+| tab 名称「AI 服务」、删除「用哪个节点」 | E8-15 |
+| 添加节点：文本 / https / http 拒绝 | E8-16 |
+| 端口复制值 = 运行时实际端口 | E8-17 |
+| 重置网络标题中性、成功只有一个标题、步骤折叠 | E8-18 |
+| tab 键盘与 `role` / `aria-selected` | E8-19 |
+| 问 AI 后回到原 tab | E8-20 |
+
+### E8-15 tab 名称与「用哪个节点」已删除
+
+**前置**：M1；1440×900；已有一套带 2 个节点的配置；设置已打开。
+
+**步骤**：
+
+1. 执行：
+
+```js
+(() => {
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  const panel = document.querySelector("#settings-panel-network");
+  return {
+    tabCount: tabs.length,
+    tabs: tabs.map((t) => ({
+      text: t.textContent.trim(),
+      selected: t.getAttribute("aria-selected"),
+      controls: t.getAttribute("aria-controls"),
+      tabIndex: t.tabIndex,
+    })),
+    nodeRow: panel ? /用哪个节点/.test(panel.textContent) : null,
+    panelRole: panel?.getAttribute("role") ?? null,
+    panelLabelledBy: panel?.getAttribute("aria-labelledby") ?? null,
+  };
+})()
+```
+
+2. 关闭设置，确认主界面底部仍有 `.node-card`：
+
+```js
+(() => ({
+  nodeCard: Boolean(document.querySelector(".node-card")),
+  nodeName: document.querySelector(".node-card__name")?.textContent.trim() ?? null,
+  canPick: Boolean(document.querySelector(".node-card__select")),
+}))()
+```
+
+**预期**：
+
+1. `tabCount` 为 4；依次是「AI 服务」「连接」「遇到问题」「关于」。
+2. 第一个 tab 的 `aria-selected` 为 `"true"`，其余为 `"false"`。
+3. 每个 tab 的 `controls` 都指向存在的 `role="tabpanel"`，且该面板的 `aria-labelledby` 指回 tab。
+4. `#settings-panel-network` 的文本里没有「用哪个节点」；`nodeRow` 为 `false`。
+5. 主界面底部仍有 `.node-card`，显示当前节点名；多节点时 `.node-card__select` 存在且可点。
+6. 设置里没有残留节点行的空白或孤立说明。
+
+**不合格时记录什么**：
+
+- 上述两个 JSON。
+- 设置导航与连接 tab 截图、主界面底部截图。
+- 实际 tab 文案 / `aria-selected` / `aria-controls` 与期望的差异。
+
+### E8-16 添加节点的三条输入路径
+
+**前置**：M1（路径与错误样式）+ M2（落库与可连接）；M1 已有一套配置；准备 `ss://a`、`ss://b`、`https://example.com/sub`、`http://example.com/sub`。
+
+**步骤**：
+
+1. M1：设置 › 连接 ›「添加节点」行点「添加」，粘贴两行 `ss://`，点「添加」，执行：
+
+```js
+(() => ({
+  title: document.querySelector("#import-dialog-title")?.textContent.trim() ?? null,
+  result: document.querySelector(".settings-import .settings-feedback")?.textContent.trim() ?? null,
+  resultClass: document.querySelector(".settings-import .settings-feedback")?.className ?? null,
+  error: document.querySelector(".settings-feedback--error")?.textContent.trim() ?? null,
+  addDisabled: [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "添加")?.disabled ?? null,
+}))()
+```
+
+2. 输入 `http://example.com/sub`，点「添加」，记录错误文本与按钮是否短暂变成「正在获取…」。
+3. 输入 `https://example.com/sub`，点「添加」，记录按钮文字变化与结果。
+4. M2：用同样的 `ss://` 文本导入；执行：
+
+```bash
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select source, count(*) from nodes group by source;"
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select config_id, count(*) from config_nodes group by config_id;"
+grep -E '连接完成|连接失败 卡在' "$APP_LOG" | tail -3
+```
+
+5. M2：打开节点面板选中新导入的节点，连接一次。
+
+**预期**：
+
+1. 弹窗标题「添加节点」；文本框提示包含「支持多行 ss:// 链接或 https 订阅地址」。
+2. `ss://` 文本走导入文本：结果「已添加 2 个节点」，类名含 `settings-feedback--ok`。
+3. `http://` 在本地被拒绝：出现 `settings-feedback--error`，文本包含「订阅地址要用 https」，没有出现「正在获取…」。
+4. `https://` 走订阅地址：按钮先变成「正在获取…」，成功后结果「已添加 2 个节点」。
+5. M2：`nodes` 表新增节点，`config_nodes` 有对应绑定；新节点可在节点面板选中，连接日志出现 `连接完成`。
+6. 空文本时「添加」按钮 `disabled=true`。
+
+**不合格时记录什么**：
+
+- 三次输入的结果文本、类名、按钮状态。
+- M2 的 SQL 输出与连接日志。
+- 哪条路径走错（文本 / 订阅 / http）、是否出现英文错误。
+
+### E8-17 端口复制值等于实际端口
+
+**前置**：M1；设置 `localStorage` 的 `veyl.mock.proxyPort=7890`、`veyl.mock.portFallback=occupied`；刷新；选中代理配置并连接。
+
+**步骤**：
+
+1. 打开设置 › 连接，执行：
+
+```js
+(() => {
+  const addr = document.querySelector(".settings-port-address");
+  const row = addr?.closest(".settings-row");
+  return {
+    settingsAddress: addr?.textContent.trim() ?? null,
+    consoleAddress: document.querySelector(".proxy__addr")?.textContent.trim() ?? null,
+    portNote: row?.querySelector(".settings-note")?.textContent.trim() ?? null,
+  };
+})()
+```
+
+2. 点端口行的复制按钮，执行 `await navigator.clipboard.readText()`（需要浏览器授予剪贴板读权限）；若被拒绝，记录「剪贴板读取阻塞」。
+3. M2 可选：原生应用连接后，测试者点一次复制，AI 执行 `pbpaste` 与 `scutil --proxy` 对比。
+
+**预期**：
+
+1. 设置端口文本是 `127.0.0.1:7891`（7890 被占用后顺延），与 `.proxy__addr` 完全一致。
+2. 剪贴板内容与设置文本完全一致；不是保存值 7890。
+3. 顺延说明只有一条，包含「被别的软件占用」；不再额外出现「已保存，下次连接生效」。
+4. M2 下 `pbpaste` 的端口与 `scutil --proxy` 的 `HTTPPort` / `SOCKSPort` 一致。
+
+**不合格时记录什么**：
+
+- 上述 JSON、剪贴板文本（如有）。
+- 设置行与代理卡截图。
+- `scutil --proxy` 原文。
+- 保存值、显示值、复制值三者对照。
+
+### E8-18 重置网络的标题与成功结果
+
+**前置**：成功分支用 M1（mock 返回成功）；失败分支用 M2 原生应用，按下面任一方法构造。构造不出时记「阻塞」并写明尝试过的方法。
+
+**步骤**：
+
+1. 点「重置网络」，读取确认弹层：
+
+```js
+(() => ({
+  entryText: document.querySelector(".danger-zone__title")?.textContent.trim() ?? null,
+  dialogTitle: document.querySelector("#reset-dialog-title")?.textContent.trim() ?? null,
+  buttons: [...document.querySelectorAll(".reset-confirm button")].map((b) => b.textContent.trim()),
+  body: document.querySelector(".reset-confirm")?.textContent.trim() ?? null,
+}))()
+```
+
+2. 点确认里的「重置网络」，等结果出现，执行：
+
+```js
+(() => ({
+  titles: [...document.querySelectorAll(".reset-result__title")].map((e) => e.textContent.trim()),
+  sub: document.querySelector(".reset-result__sub")?.textContent.trim() ?? null,
+  detailsOpen: document.querySelector(".reset-result details.reset-route-help")?.hasAttribute("open") ?? null,
+  steps: document.querySelectorAll(".reset-result .reset-step").length,
+  summary: document.querySelector(".reset-result details.reset-route-help summary")?.textContent.trim() ?? null,
+}))()
+```
+
+3. 点「查看详情」，再执行一次，记录步骤是否展开到 8 条。
+4. **失败分支构造（M2，由测试者执行）**，二选一：
+   - **方法 A（复查失败）**：先断开 Wi-Fi，再执行「重置网络」。`verify` 的 DNS/HTTPS 探测会失败，结果应为 `unverified`，标题「网络已重置，但复查没有通过」。
+   - **方法 B（关键步骤失败）**：先连接 TUN，再到「系统设置 › 登录项与扩展」停用/移除 Veyl 的后台助手，然后执行「重置网络」。`stop_tun` 会失败，结果应为 `failed`，标题「重置没有完成」。
+   - 如果两种方法都没有产生非成功结果，记「阻塞（未构造）」并写明尝试过的方法，不要静默跳过。
+
+**预期**：
+
+1. 入口是「重置网络」，不是「强制重置网络」。
+2. 确认标题「重置网络？」；按钮「取消」「重置网络」；正文包含「会立刻断开当前连接」「不会删除配置和节点」。
+3. 成功结果只有 **一个** `.reset-result__title`，文本「网络已恢复。可以重新连接了。」。
+4. `sub` 为空或不存在，不重复第二句结论。
+5. 步骤默认折叠：`detailsOpen=false`；点「查看详情」后 `steps=8`。
+6. 入口、确认页不出现「强制重置」；结果详情里允许出现「关闭接管 / 系统代理 / 系统路由 / DNS」。
+7. **失败分支**：八步默认展开（不再需要点「查看详情」）；标题是「网络已重置，但复查没有通过」或「重置没有完成」，不能是「网络已恢复」；失败步骤有原因与下一步；有「再试一次」。
+8. 失败分支构造不出来时记「阻塞（未构造）」，不判通过。
+
+**不合格时记录什么**：
+
+- 两个 JSON、确认弹层与结果截图。
+- 标题数量、`detailsOpen`、步骤数。
+- 出现「强制重置」或重复标题的位置。
+
+### E8-19 tab 的键盘与 ARIA
+
+**前置**：M1；设置已打开；焦点在第一个 tab。
+
+**步骤**：
+
+1. 优先用浏览器自动化的真实按键：按 `ArrowRight`、`ArrowLeft`、`Home`、`End`。
+2. 如果只能执行 JS，用下面的合成事件，并在备注里注明「合成事件」：
+
+```js
+(() => {
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  const state = () => tabs.map((t) => ({
+    text: t.textContent.trim(),
+    selected: t.getAttribute("aria-selected"),
+    tabIndex: t.tabIndex,
+    focused: document.activeElement === t,
+  }));
+  tabs[0].focus();
+  tabs[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  const afterRight = state();
+  tabs[1].dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+  const afterHome = state();
+  tabs[0].dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+  const afterEnd = state();
+  return {
+    roles: tabs.map((t) => t.getAttribute("role")),
+    tablist: document.querySelector(".settings-nav")?.getAttribute("role") ?? null,
+    panels: [...document.querySelectorAll('[role="tabpanel"]')].map((p) => ({
+      id: p.id,
+      labelledBy: p.getAttribute("aria-labelledby"),
+    })),
+    afterRight,
+    afterHome,
+    afterEnd,
+  };
+})()
+```
+
+**预期**：
+
+1. `.settings-nav` 的 `role` 为 `tablist`；四个子项 `role` 都是 `tab`。
+2. 四个 `tabpanel` 存在，id 与对应 tab 的 `aria-controls` 一致，`aria-labelledby` 指回 tab。
+3. `ArrowRight` 后第二个 tab `selected=true`、`tabIndex=0`、`focused=true`，其余 `selected=false`、`tabIndex=-1`。
+4. `Home` 回到第一个；`End` 到最后一个；焦点跟随选中项。
+5. 任一时刻只有一个 `aria-selected="true"`。
+6. 切换 tab 不关闭设置，不触发连接/断开。
+
+**不合格时记录什么**：
+
+- 上述 JSON。
+- 每次按键后的截图（可选）。
+- 哪个 tab 的 `aria-selected` / `tabIndex` / 焦点不对。
+
+### E8-20 「问 AI」后回到原 tab
+
+**前置**：M1；AI 可用；设置 › 连接，当前有代理配置（端口行可见）；右栏收起或展开均可。
+
+**步骤**：
+
+1. 在「本地代理端口」行旁点 `.ask-ai`「问 AI」，执行：
+
+```js
+(() => ({
+  settingsOpen: Boolean(document.querySelector(".modal--settings")),
+  panel: Boolean(document.querySelector("#ai-panel")),
+  lastUser: [...document.querySelectorAll(".msg--user .msg__text")].at(-1)?.textContent.trim().slice(0, 180) ?? null,
+  askAiLabels: [...document.querySelectorAll(".ask-ai")].map((b) => b.textContent.trim()),
+}))()
+```
+
+2. 重新打开设置，读取选中 tab：
+
+```js
+(() => ({
+  selected: document.querySelector('[role="tab"][aria-selected="true"]')?.textContent.trim() ?? null,
+}))()
+```
+
+3. 切到「AI 服务」tab，在「API 类型」或「模型」旁点一次「问 AI」，重开设置，再读选中 tab。
+
+**预期**：
+
+1. 点「问 AI」后设置关闭，右栏出现（或保持展开），输入框获得焦点。
+2. 最近一条用户消息以「我在 Veyl 的高级设置里调整「本地代理端口」。当前值是 127.0.0.1:{端口}」开头；当前值与界面显示一致。
+3. 重开设置后 `selected` 为「连接」，不跳回「AI 服务」。
+4. 从「AI 服务」tab 提问，重开后 `selected` 为「AI 服务」。
+5. 不出现「连接方式」「更新试用节点」的「问 AI」入口；在 AI 服务 tab 打开添加/编辑表单时，`.ask-ai` 只出现在 API 类型与模型两处，连接 tab 只出现在本地代理端口一处。
+
+**不合格时记录什么**：
+
+- 两次 JSON、问 AI 前后的截图。
+- 最近用户消息原文（截前 180 字）。
+- 重开设置落点与期望 tab 的差异。
+
 ---
 
 ## 9. 协作协议
+
+> 第 6 章与 §8.2 按开头「如何用 AI 执行本手册」执行：AI 可以操作浏览器预览、读 DOM、执行 JS；第 1–5 章、第 7 章和 §8.1 的系统/基线用例仍按本节的人机分工（系统动作由人做，AI 读日志 / DB / 截图）。
 
 ### 9.1 一条用例怎么交给 AI
 
@@ -1434,28 +2676,30 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 AI 收到后只做三件事：
 
-1. 执行该用例「AI 取证」里的命令，原样贴出输出。
-2. 对照「可观察预期」逐条写「满足 / 不满足 / 无法判定」，并引用输出来源。
-3. 给结论：通过 / 失败 / 无法判定。失败时按 §0.5 生成 `evidence.txt` 和一行失败摘要。
+1. 执行该用例里写出的「AI 取证」命令或步骤中的 JS，原样保存返回值。
+2. 对照「预期 / 可观察预期」逐条写「满足 / 不满足 / 无法判定」，并引用输出来源。
+3. 给结论：通过 / 不通过 / 阻塞。失败时按 §0.5 生成 `evidence.txt` 和一行摘要。
 
-### 9.2 AI 执行哪些命令
+### 9.2 AI 可以执行什么
 
-- 只执行本文写出的只读命令。
-- 需要看界面时，让测试者截图或转述；AI 不根据日志猜界面。
+- **M1 浏览器预览**：可以点击、输入、执行用例里的 JS，读取 DOM / `getComputedStyle` / 截图；可以清空 `veyl.*` localStorage 做清场。
+- **M2 原生应用**：只读日志、SQLite、系统状态和截图；系统弹窗、断网、强杀、授权由测试者操作。
+- 只执行本文写出的命令；不自己发明删除、改权限、改网络的命令。
 - 需要读数据库时，只用 `sqlite3 -readonly`，且只跑 `SELECT`。
 - 需要读日志时，用 `tail` / `grep`，不要 `cat` 整个大文件。
 
 ### 9.3 什么情况必须停下来问人
 
-出现任意一条，AI 停止取证并把原始输出交给测试者：
+出现任意一条，AI 停止并把原始输出交给测试者：
 
 1. 命令需要 `sudo`、管理员密码或系统授权。
 2. 命令会修改网络、代理、DNS、路由、防火墙或系统设置。
 3. 需要启动/停止应用、编译、安装、删除文件、杀进程。
-4. 命令输出为空，或与用例写的字段完全对不上（例如日志里没有当天的文件）。
-5. 前置条件不满足（例如要求 TUN 已连接，但当前是代理模式）。
-6. 同一条用例出现两个以上异常，或异常影响继续测试。
-7. 日志里出现密码、订阅链接、私钥等敏感内容——停止转发，先让测试者脱敏。
+4. 需要修改 `src/` 或 `src-tauri/` 代码。
+5. 命令输出为空，或与用例写的字段完全对不上（例如日志里没有当天的文件）。
+6. 前置条件不满足（例如要求 TUN 已连接，但当前是代理模式）。
+7. 同一条用例出现两个以上异常，或异常影响继续测试。
+8. 日志里出现密码、订阅链接、私钥等敏感内容——停止转发，先让测试者脱敏。
 
 ### 9.4 失败怎么归档
 
@@ -1473,23 +2717,21 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | scutil 里没有 223.5.5.5，仍是 192.168.
 
 ---
 
-## 10. 不可自动化的部分
+## 10. 仍需人判断的部分
 
-以下项目 AI 不能下结论，必须由人观察并明确说「通过 / 不通过」。AI 可以记录人的结论，但不能替人判断。
+第 6 章与 §8.2 已经把可量化的视觉项改成 DOM 断言：字号、颜色 token、宽度、DOM 层级、`aria-*`、文案是否存在，都能二值判定。下面这些仍然只能由人判断：
 
 | 类别 | 具体项 | 为什么 AI 不能判 |
 |---|---|---|
-| 视觉 | 布局是否对齐、间距是否舒服、浅色/深色是否错配、图标三态是否肉眼可辨 | 需要真实屏幕与设计判断 |
-| 文案 | 措辞是否自然、是否像人话、是否出现不合适的词 | 需要产品/语言判断 |
-| 授权弹窗 | 系统弹窗是否出现、文案是否说清、用户是否理解 | 涉及系统 UI 与人的感受 |
+| 审美 | 是否「舒服」「协调」「好看」 | 主观，无法二值判定；本手册不写这类验收项 |
 | 体感速度 | 连接快慢、页面加载快慢、动画是否卡顿 | 依赖机器、网络和人的感受 |
-| 可理解性 | 用户是否知道下一步点哪、失败后是否知道怎么办 | 需要真实用户视角 |
-| 网络「能不能用」 | 浏览器是否真的能打开网站、视频是否流畅 | AI 只能看日志和退出 IP，不能代替真实使用 |
-| 颜色/对比度 | 深色模式是否可读、状态色是否可区分 | 需要屏幕与视觉判断 |
-| 托盘图标 | 形状是否可辨、菜单是否易用 | 需要看菜单栏 |
-| 布局持久化的「观感」 | 重启后中间区是否「看起来一样」 | AI 可以查数据库，但不能判断视觉一致性 |
+| 文案语气 | 措辞是否自然、是否让人误解 | 需要产品/语言判断 |
+| 授权弹窗 | 用户是否理解为什么要授权 | 需要真实用户视角 |
+| 真实网络 | 浏览器是否真的能打开网站、视频是否流畅 | AI 只能看日志、退出 IP 和截图 |
+| 托盘图标 | 形状是否容易辨认 | 需要看菜单栏 |
+| 读屏体验 | VoiceOver 朗读是否顺畅 | 需要人听 |
 
-AI 可以做的是：把日志、数据库、系统状态整理成证据，帮助人更快判断；**结论仍然由人签字**。
+AI 可以把这些整理成观察记录（截图、录屏、日志），但**结论由人签字**；本手册的其他条目都应能从 DOM / 截图 / 日志 / 系统输出中二值判定。
 
 ---
 
