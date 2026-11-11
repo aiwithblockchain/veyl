@@ -198,6 +198,17 @@ fn not_wired<T>(what: &str) -> anyhow::Result<T> {
     ))
 }
 
+/// `system_dns` 的取值：连接期系统解析器是否已指向隧道。
+///
+/// DNS 是优化项，切不过去也照常连接；前端用这个字段常驻一行提示，
+/// 不能让降级变成静默。
+fn system_dns_label(hijack: Option<&crate::tun::backend::DnsHijack>) -> &'static str {
+    match hijack {
+        Some(value) if value.applied => "tunnel",
+        _ => "unchanged",
+    }
+}
+
 fn idle_snapshot() -> Value {
     json!({
         "contract_version": crate::runtime::CONTRACT_VERSION,
@@ -221,6 +232,7 @@ fn idle_snapshot() -> Value {
         "direct_ip": null,
         "config_hash": null,
         "system_proxy_enabled": false,
+        "system_dns": null,
         "health": {
             "contract_version": crate::runtime::CONTRACT_VERSION,
             "process": false,
@@ -2880,6 +2892,7 @@ impl VpnToolServices for WiredServices {
                 route_region: meta.as_ref().and_then(|meta| meta.route_region.clone()),
                 connected_since: self.tun.connected_since(),
                 uptime_seconds: self.tun.uptime_seconds(),
+                system_dns: Some(system_dns_label(self.tun.dns_hijack().as_ref()).to_string()),
             })
         } else {
             self.manager.status().await
@@ -5852,6 +5865,7 @@ impl WiredServices {
             "route_region": route_region,
             "connected_since": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "system_proxy_enabled": false,
+            "system_dns": system_dns_label(self.tun.dns_hijack().as_ref()),
             "tun_device_up": tun_device_up,
             "tun_default_route": tun_default_route,
             "exit_ip": Value::Null,
@@ -6082,6 +6096,17 @@ impl WiredServices {
 
         let mut steps = Vec::with_capacity(8);
         steps.push(self.reset_stop_tun().await);
+        // 兜底：连接期系统 DNS 指向了隧道；helper 崩溃重启后原始快照会丢，
+        // 这里让它再清一次（幂等，没改过就是空操作，也不会动用户自己的 DNS）。
+        // 放 spawn_blocking：XPC 调用可能等到超时，不能占住 async 线程。
+        {
+            let tun = Arc::clone(&self.tun);
+            match tokio::task::spawn_blocking(move || tun.restore_dns()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!("强制重置：系统 DNS 还原失败：{error}"),
+                Err(error) => log::warn!("强制重置：系统 DNS 还原任务失败：{error}"),
+            }
+        }
         steps.push(self.reset_stop_runtime().await);
         steps.push(self.reset_restore_proxy(applied.as_ref(), plan_port));
         steps.push(self.reset_sweep_processes().await);
@@ -7544,6 +7569,28 @@ mod main_flow_tests {
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
+
+    /// 连接结果里 `system_dns` 的取值：只有真的接管成功才是 `tunnel`。
+    #[test]
+    fn system_dns_reports_tunnel_only_when_hijack_applied() {
+        use crate::tun::backend::DnsHijack;
+        assert_eq!(system_dns_label(None), "unchanged");
+        assert_eq!(
+            system_dns_label(Some(&DnsHijack {
+                applied: true,
+                reason: None,
+            })),
+            "tunnel"
+        );
+        assert_eq!(
+            system_dns_label(Some(&DnsHijack {
+                applied: false,
+                reason: Some("读不到当前网络服务".into()),
+            })),
+            "unchanged",
+            "没接管成功就不能报 tunnel"
+        );
+    }
 
     // ---------- 记录型系统代理后端 ----------
 

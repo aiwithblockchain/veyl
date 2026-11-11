@@ -12,7 +12,7 @@ use super::error::{RuntimeError, RuntimeResult};
 use super::health::{ClashApi, ConnectionSample, DataPlaneProbe, DirectIpProbe, ExitIpProbe, DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE};
 use super::process::{self, SpawnOptions};
 
-pub const CONTRACT_VERSION: &str = "2.5.0";
+pub const CONTRACT_VERSION: &str = "2.6.0";
 pub const EVENT_CONTRACT_VERSION: &str = "2.10.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
@@ -71,6 +71,8 @@ pub struct TunSnapshotInput {
     pub route_region: Option<String>,
     pub connected_since: Option<String>,
     pub uptime_seconds: Option<u64>,
+    /// 连接期系统解析器是否指向隧道；系统代理没有这一步，恒为 None。
+    pub system_dns: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -175,6 +177,9 @@ pub struct RuntimeStatus {
     pub direct_ip: Option<String>,
     pub config_hash: Option<String>,
     pub system_proxy_enabled: bool,
+    /// 连接期系统解析器是否指向隧道（`runtime.md` 2.6）：
+    /// `"tunnel"` / `"unchanged"`；系统代理与未连接为 `null`。
+    pub system_dns: Option<String>,
     pub health: HealthSnapshot,
     /// 每 2s 随健康检查从 `/connections` 采样；未连接或采不到时为 null。
     pub traffic: Option<serde_json::Value>,
@@ -218,6 +223,7 @@ impl RuntimeStatus {
             direct_ip: None,
             config_hash: None,
             system_proxy_enabled: false,
+            system_dns: input.system_dns,
             health: HealthSnapshot {
                 contract_version: CONTRACT_VERSION,
                 process: true,
@@ -563,6 +569,8 @@ impl Inner {
             direct_ip: if connected { self.direct_ip.clone() } else { None },
             config_hash: self.config_hash.clone(),
             system_proxy_enabled: self.system_proxy_enabled,
+            // 系统代理模式下没有 DNS 接管这一步。
+            system_dns: None,
             health: self.health.clone(),
             traffic: if connected { self.traffic.clone() } else { None },
             connections: if connected { self.connections } else { None },
@@ -2330,7 +2338,7 @@ mod tests {
         );
         assert_eq!(
             status.last_error.as_ref().unwrap().contract_version,
-            "2.5.0"
+            "2.6.0"
         );
 
         let mut restarts = 0;

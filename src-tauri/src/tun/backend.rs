@@ -65,6 +65,13 @@ pub trait TunBackend: Send + Sync {
         })
     }
 
+    /// 还原连接期间被改写的系统 DNS（指向 TUN 对端的那一步）。
+    ///
+    /// 幂等：没改过就是空操作。默认实现什么都不做——只有会改系统 DNS 的平台需要覆盖。
+    fn restore_dns(&self) -> Result<(), TunError> {
+        Ok(())
+    }
+
     /// 读快照。随时可调，不改变状态；必须便宜（一次 IPC，不读大文件、不 spawn）。
     fn status(&self) -> Result<TunSnapshot, TunError>;
 
@@ -89,12 +96,23 @@ pub struct ClashApi {
     pub secret: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DnsHijack {
+    /// 连接期系统 DNS 是否已指向隧道。
+    pub applied: bool,
+    /// 未接管的原因；`applied = true` 时为 null。
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartReply {
     pub pid: u32,
     pub clash_api: ClashApi,
     /// ISO 8601 UTC，由特权侧生成。
     pub since: String,
+    /// DNS 接管结果。**失败不影响连接**：DNS 是优化项，隧道才是产品。
+    #[serde(default)]
+    pub dns_hijack: DnsHijack,
 }
 
 /// 字段恒存在，无值写 `null`——省略键会让 TS 消费方拿到 `undefined`。
@@ -105,6 +123,9 @@ pub struct TunSnapshot {
     pub clash_api: Option<ClashApi>,
     pub since: Option<String>,
     pub last_error: Option<TunErrorRecord>,
+    /// 连接期系统 DNS 接管结果；未连接时为默认值（applied=false, reason=null）。
+    #[serde(default)]
+    pub dns_hijack: DnsHijack,
     /// 特权组件构建标识，仅诊断用。旧 helper 不返回时为 null。
     #[serde(default)]
     pub helper_build: Option<String>,
@@ -347,6 +368,8 @@ mod macos {
                     clash_addr,
                     clash_secret,
                     since,
+                    dns_applied,
+                    dns_reason,
                 }) => Ok(StartReply {
                     pid,
                     clash_api: ClashApi {
@@ -355,6 +378,10 @@ mod macos {
                     },
                     // `since` 由 helper 生成（契约 §3.1），不是调用方时刻。
                     since,
+                    dns_hijack: DnsHijack {
+                        applied: dns_applied,
+                        reason: dns_reason,
+                    },
                 }),
                 Ok(_) => Err(TunError::new(
                     TunErrorCode::Internal,
@@ -391,6 +418,22 @@ mod macos {
             }
         }
 
+        fn restore_dns(&self) -> Result<(), TunError> {
+            match xpc::call_with_timeout(
+                MACH_SERVICE,
+                "restore_dns",
+                None,
+                TUN_REPLY_DEADLINE_CONTROL,
+            ) {
+                Ok(Reply::Flushed) => Ok(()),
+                Ok(_) => Err(TunError::new(
+                    TunErrorCode::Internal,
+                    "特权助手回了意料之外的结果",
+                )),
+                Err(error) => Err(map_xpc_error(error)),
+            }
+        }
+
         fn status(&self) -> Result<TunSnapshot, TunError> {
             match xpc::call_with_timeout_peer(
                 MACH_SERVICE,
@@ -405,6 +448,8 @@ mod macos {
                         clash_addr,
                         clash_secret,
                         since,
+                        dns_applied,
+                        dns_reason,
                         helper_build,
                         helper_version,
                     },
@@ -419,6 +464,10 @@ mod macos {
                     },
                     since: if running { since } else { None },
                     last_error: None,
+                    dns_hijack: DnsHijack {
+                        applied: dns_applied,
+                        reason: dns_reason,
+                    },
                     helper_build,
                     helper_version,
                     helper_pid: Some(helper_pid).filter(|pid| *pid > 0),
@@ -656,6 +705,7 @@ mod tests {
             clash_api: None,
             since: None,
             last_error: None,
+            dns_hijack: DnsHijack::default(),
             helper_build: None,
             helper_version: None,
             helper_pid: None,
@@ -667,6 +717,7 @@ mod tests {
             "clash_api",
             "since",
             "last_error",
+            "dns_hijack",
             "helper_build",
             "helper_version",
         ] {

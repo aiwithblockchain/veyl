@@ -1,6 +1,6 @@
 # 契约：TUN 特权后端
 
-> 契约版本：`1.1.0`
+> 契约版本：`1.3.1`
 > 状态：**已定稿，待实现**（2026-11-05）
 > 定位：`TunBackend` 抽象、请求/回复信封、错误码、快照形状、四条不变式。**只定契约，不含实现。**
 > 上游：[`../tun-privilege-implementation-plan.md`](../tun-privilege-implementation-plan.md)（双平台计划）、[`../tun-privilege.md`](../tun-privilege.md)（macOS 信任模型）、[`../windows-tun.md`](../windows-tun.md)（Windows 设计）、[`../tun-mode.md`](../tun-mode.md)（连接语义与失败处理）
@@ -31,7 +31,7 @@
 
 ```ts
 type TunRequest = {
-  method: "start" | "stop" | "status" | "restart";
+  method: "start" | "stop" | "status" | "restart" | "restore_dns";
   config: string | null;   // UTF-8 的 sing-box 配置文本；仅 method = "start" 时非 null
 };
 ```
@@ -138,6 +138,7 @@ pub trait TunBackend: Send + Sync {
 | `stop` | 现有实例存在则终止并等其退出；不存在也返回 `Ok`。不返回 `not_running`。 |
 | `status` | 不依赖调用方缓存。App 崩溃重启后第一次 `status` 必须能拿回 `pid` 与 `clash_api`（§3.2）。 |
 | `restart` | 无参。回 `{ ok: true }` 后 helper 自行 `exit(75)`，launchd 拉起新映像。**旧 helper 返回 `bad_request`**，调用方据此判定版本并转 `needs_admin_restart`，不重试、不比较版本号。重启会中断当前 TUN——调用前必须先 `stop`。 |
+| `restore_dns` | 无参。还原连接期被改写的系统 DNS（§5.2.2）。幂等；没有原始快照时只清理「当前解析器正好是 TUN 对端」的残留，不动用户自己的 DNS。**旧 helper 返回 `bad_request`**，调用方只记日志、不因此让重置失败。 |
 
 ### 2.1 给将来接入留的口子（I2）
 
@@ -178,6 +179,7 @@ type StartReply = {
 - `clash_api.addr` **必须**是回环地址，端口范围 49152–65535（`runtime.md` §5.1 同一条规则）。
 - `secret` 是本次进程生命周期内有效的随机串；**不得**写进日志、不得出现在错误 `message` 里。
 - `since` 由特权侧生成，不是调用方时间。
+- `dns_hijack`（1.3.0）：连接期系统 DNS 是否已指向隧道。**失败不影响 start 成功**——DNS 是优化项，隧道才是产品；失败时 `applied = false`，`reason` 说明原因，连接照常可用。
 
 ### 3.2 `TunSnapshot`
 
@@ -187,6 +189,7 @@ type TunSnapshot = {
   pid: number | null;              // running = false 时为 null
   clash_api: { addr: string; secret: string } | null;  // running = false 时为 null
   since: string | null;            // running = false 时为 null
+  dns_hijack: { applied: boolean; reason: string | null };  // 未连接时 applied=false、reason=null
   last_error: { code: TunErrorCode; message: string; at: string } | null;
   helper_build: string | null;     // 特权组件构建标识，诊断用
   helper_version: string | null;   // 特权组件版本，诊断用
@@ -199,6 +202,7 @@ type TunSnapshot = {
 - `last_error` 只在「最近一次 start 失败且此后没有成功 start」时非 null；成功 start 后清空。
 - `status` 在未运行时**不是错误**：返回 `running: false` 与 `pid: null`。
 - App 崩溃重启后，`status` 必须仍能返回 `pid` 与 `clash_api`——这是 TUN 的流量/延迟采样与「删配置守卫」的前提（`review-checklist` GAP-03 的根因之一）。
+- `dns_hijack` 随 `status` 一起返回：helper 重启后界面仍要能说清这次连接有没有接管 DNS。未运行时为 `{ applied: false, reason: null }`，不要拿它推断别的。
 
 ### 3.3 `TunError`
 
@@ -296,14 +300,58 @@ type TunError = {
 
 allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端共用同一份实现（`protocol::prepare_config` 平台无关）。`INBOUND_KEYS` 已包含 `stack` / `mtu` / `strict_route` / `interface_name`；将来若新增键，**必须同时加到 allowlist 并在本文登记**，不允许某个平台另抄一份。
 
-#### 5.2.1 `stack` / `mtu` 必须显式写（1.1.0）
+#### 5.2.1 `stack` / `mtu` / `dns_mode` 必须显式写（1.1.0 / 1.2.0）
 
 | 字段 | 值 | 不写会怎样 |
 |---|---|---|
 | `stack` | `gvisor`（两个平台相同） | sing-box 1.14 在 Darwin 上（`WithGVisor && !GSO`）默认落到 `mixed`：UDP 走 gvisor、TCP 走**系统栈的内核 NAT**。2026-11-09 实测：mixed 的 TCP 握手永远不完成——SYN 进了 utun4 没有 SYN-ACK，sing-box 侧零 `inbound connection`，用户侧就是「已连接但网页打不开」 |
 | `mtu` | `9000` | Darwin 在非 Network Extension 模式下默认 65535（`protocol/tun/inbound.go`），MSS 变成 65495；64KB 段在真实 1500 路径上只能靠分片兜底，UDP 大包容易被中间设备丢掉 |
+| `dns_mode` | `hijack` | 没有它，发往 TUN 对端的 DNS 要在嗅探之后才可能命中 `hijack-dns`；显式 hijack 让判定发生在连接建立之前（`JudgeFlow`），不依赖嗅探能不能识别出 DNS |
 
 两个字段都必须出现在生成的配置里，不能依赖 sing-box 的平台默认值——默认值是随版本和运行形态变的，不是契约。
+
+#### 5.2.2 连接期系统 DNS（1.2.0）
+
+**连接期间，helper 必须把当前网络服务的系统解析器指向 TUN 对端**（`172.19.0.2`，由配置里的 TUN 地址 +1 推得），断开时原样还原。
+
+为什么必须做：
+
+- `hijack-dns` 只能截住**进入 TUN** 的查询。macOS 默认用当前服务的 DNS（家庭网络就是路由器），查询从 en0 直接出去，永远不经过 TUN——`routing.md` 里「境外域名走 DoH over proxy」那套规则在运行时是死代码。
+- 后果不是「解析失败」而是「解析到污染 IP」：境外域名被运营商 DNS 返回劣质/污染地址，代理再逐字拿这些 IP 去连。1.14 的 `sniff` action **没有** `override_destination`（`sing-box check` 会报 unknown field），嗅到的域名只参与路由匹配，不改变拨号目标。实测 Facebook / TikTok 慢即由此而来。
+
+为什么是 `.2` 不是 `.1`：
+
+- `172.19.0.1` 是 utun 自己的地址，内核当成本机地址走 lo0，包根本不会进 TUN。
+- sing-box 的 `dns_mode: "hijack"` 劫持的正是「下一个地址」：sing-tun 的 `Inet4DNSAddress()` 在没有显式 `dns_address` 时返回 `Inet4Address.Next()`，与本条一致。
+
+实现约束：
+
+- 用 per-service 的 `State:/Network/Service/<uuid>/DNS`（scutil），**不要**用 `networksetup`：服务名随系统语言变，UUID 不会。
+- **`scutil` 用 `show`，不能用 `get`。** `get` 只把值读进会话里的 `d` 字典、不打印任何输出；用它解析永远是空，表现为「读不到当前网络服务」。2026-11-09 就是这么把连接整个弄挂的——别改回去。
+- **失败不阻断连接（fail-open）**：DNS 是优化项，隧道才是产品。设置失败时先重试一次（服务刚起来时可能读不到），仍失败就照常返回成功，回 `dns_hijack.applied = false` + `reason`，日志打 WARN。
+- **降级必须可见**：App 的状态快照带 `system_dns: "tunnel" | "unchanged"`，界面常驻一行说明「DNS 未接管：国外网站可能较慢」。**不允许**静默降级——那正是「连上了但国外网站慢」的原始症状。
+- **幂等**：原始值只在**第一次**改写前记录；重复 `start` 不能把「我们设的值」记成原始值，否则再也恢复不回去。上一次连接崩溃遗留的地址同样不算原始值。
+- **恢复原样**：用户本来有自定义 DNS 就写回他的值；原本没有 DNS 状态键的删键恢复自动。**不要**一律清空。写回的前提见 §5.2.3。
+- 覆盖四条路径：正常 `stop`、子进程退出、helper 重启（进程 `atexit`）、强制重置网络（`restore_dns` 兜底）。
+- 设置后**回读** `scutil --dns` 的首个 nameserver 校验；不生效就恢复原状并报 `applied = false`（连接继续）。
+- 恢复后 flush 系统 DNS 缓存。
+- **反方向的 fail-safe 不放松**：恢复失败绝不能让 DNS 留在死地址上——回滚 + 强制重置兜底，这条不随 fail-open 改变。
+
+#### 5.2.3 连接期复核与还原判定（1.3.1）
+
+**复核（可观察行为，界面依赖）：**
+
+- helper 在 `status` 路径复核系统 DNS，同一连接内**两次复核至少间隔 5 秒**——`status` 是轮询热路径，`scutil` 每次都要起进程。
+- 判定依据：回读当前主服务（`State:/Network/Global/IPv4` 的 `PrimaryService`）的 `ServerAddresses`，看它**是否仍等于 TUN 对端地址**。
+- 不一致 → `dns_hijack.applied = false`，`reason` 固定为 **`连接期间网络或 DNS 设置变了`**。前端可能直接展示这句话，改文案必须同步通知前端。
+- 读不到系统 DNS **不**判定失效：保留上一次结论，下个周期再查。
+- 用轮询而不是 SCDynamicStore 通知是**有意的取舍**：当前 helper 没有可挂的事件循环，5 秒滞后对「换网络后提示降级」够用。
+
+**还原判定（防串网）：**
+
+- 写回原始值之前必须先回读该服务当前 DNS：**只有它仍等于我们写入的对端地址**，才写回快照里的原始值。
+- 不相等（网络换了、服务键被 DHCP 重建、用户手动改过 DNS）→ **什么都不写**，只丢弃快照；原本没有 DNS 状态键的则删键交给 DHCP。
+- 反例：把 Wi-Fi A 的 DNS（如 `192.168.1.1`）写进 Wi-Fi B（`192.168.43.x`），断连后完全解析不了。
 
 ### 5.3 不变式 3：只收 tun 入站
 
@@ -406,6 +454,33 @@ allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端�
 macOS 侧没有 R1 / R2：XPC 的对端校验由 libxpc 基于连接上的审计令牌完成，不读路径、不依赖磁盘状态；签名有效性由系统在加载时判定。这也是 §6 第 3 项「机制不同」的实际含义——Windows 自己实现的那一侧，把 macOS 由系统兜住的保证接管过来，也就接管了它的边界。
 
 ## 10. 变更记录
+
+### 1.3.1（2026-11-09，连接期复核与还原判定）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `1.3.1`；§5.2.3 新增连接期复核：`status` 路径节流 5 秒、以「当前主服务 DNS 是否仍等于对端地址」判定、不一致时 `applied=false` + 固定原因「连接期间网络或 DNS 设置变了」 | 行为澄清 | 换 Wi-Fi 后界面还显示已接管，前端需要一个可依赖的约定 |
+| 2 | §5.2.3 写明还原判定：仅当前值仍等于对端地址才写回原始值，否则删键交给 DHCP | 行为澄清 | 防止把 A 网络的 DNS 写进 B 网络 |
+
+### 1.3.0（2026-11-09，DNS 接管改为 fail-open）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `1.3.0` | 元数据 | DNS 设置失败把整个 TUN 连接弄挂了 |
+| 2 | `StartReply` / `TunSnapshot` 新增 `dns_hijack: { applied, reason }`；`status` 也回报，helper 重启后界面仍能说清有没有接管 | 字段新增 | 降级必须可见 |
+| 3 | §5.2.2 改为 **fail-open**：激活失败先重试一次，仍失败就照常返回成功并回 `applied = false` + 原因；日志 WARN | 语义变更 | DNS 是优化项，隧道才是产品；一次 helper bug 不该让整个功能不可用 |
+| 4 | 记录 `scutil` 必须用 `show` 不能用 `get`（`get` 不打印，解析恒为空） | 补充 | 2026-11-09 的实际故障根因 |
+| 5 | App 侧状态新增 `system_dns: "tunnel" \| "unchanged"`，供界面常驻提示 | 字段新增 | 不允许静默降级 |
+
+### 1.2.0（2026-11-09，连接期系统 DNS）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `1.2.0` | 元数据 | Facebook / TikTok 经代理仍很慢 |
+| 2 | 新增 §5.2.2：连接期系统解析器指向 TUN 对端 `172.19.0.2`，断开原样还原；写明为什么不能用 `.1`、为什么用 per-service scutil、幂等与四条恢复路径、回读校验 | 约束新增 | 实测 DNS 全程不进 TUN，系统解析器一直是路由器 |
+| 3 | §5.2.1 新增 `dns_mode: "hijack"`：让 DNS 劫持发生在 `JudgeFlow`，不依赖嗅探 | 约束新增 | 同上 |
+| 4 | 新增方法 `restore_dns`（无参，幂等）：强制重置的兜底，旧 helper 返回 `bad_request` 时只记日志 | 新增方法 | helper 崩溃重启后原始快照会丢 |
+| 5 | `INBOUND_KEYS` 新增 `dns_mode` | 元数据 | 与 §5.2 的 allowlist 同步 |
 
 ### 1.1.0（2026-11-09，TUN 显式 gvisor 与 MTU）
 

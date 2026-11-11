@@ -32,6 +32,13 @@ use std::time::{Duration, Instant};
 use protocol::ProtocolError;
 use xpc::xpc_object_t;
 
+mod dns;
+
+/// 进程退出时还原系统 DNS。`restart` 走 `exit(75)`，不放回收拾会把 DNS 留指向隧道。
+extern "C" fn restore_dns_at_exit() {
+    dns::restore_at_exit();
+}
+
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 /// `restart` 的退出码（`EX_TEMPFAIL`）。launchd 的 KeepAlive 只对非零退出重启。
@@ -43,6 +50,8 @@ const IDLE_EXIT_AFTER: Duration = Duration::from_secs(10 * 60);
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 /// 租约断开后等多久再停隧道：给 App 重连/重启留出窗口。
 const LEASE_LOSS_GRACE: Duration = Duration::from_secs(5);
+/// 连接期复核系统 DNS 的最小间隔：`status` 是轮询热路径，`scutil` 要起进程。
+const DNS_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 崩溃循环打断：10 分钟内第 3 次启动就正常退出，避免无限拉起。
 const CRASH_LOOP_WINDOW: u64 = 10 * 60;
@@ -217,6 +226,8 @@ pub fn run() {
         eprintln!("veyl-helper: 必须以 root 运行");
         std::process::exit(1);
     }
+    // 任何 exit 路径都先把系统 DNS 还回去（含 restart 的 exit(75)）。
+    unsafe { libc::atexit(restore_dns_at_exit) };
 
     let root = match prepare_trust_root() {
         Ok(root) => root,
@@ -375,6 +386,12 @@ fn handle_message(
                     unsafe { xpc::dict_set_string(reply, "clash_addr", &started.clash_addr) };
                     unsafe { xpc::dict_set_string(reply, "clash_secret", &started.clash_secret) };
                     unsafe { xpc::dict_set_string(reply, "since", &started.since) };
+                    unsafe {
+                        xpc::dict_set_bool(reply, "dns_applied", started.dns.applied);
+                    }
+                    if let Some(reason) = &started.dns.reason {
+                        unsafe { xpc::dict_set_string(reply, "dns_reason", reason) };
+                    }
                     Ok(())
                 }
                 Err(error) => Err(error),
@@ -412,6 +429,18 @@ fn handle_message(
             unsafe { xpc::dict_set_bool(reply, "ok", true) };
             Ok(())
         }
+        // 降级兜底：App 崩溃、helper 重启后原始快照已经丢了，
+        // 但系统 DNS 可能还指着隧道。只在当前值正好是我们设的地址时才清掉。
+        "restore_dns" => {
+            let peer = dns::peer_from_config(&supervisor.config_path());
+            match dns::restore_or_clear(peer.as_deref()) {
+                Ok(()) => {
+                    unsafe { xpc::dict_set_bool(reply, "ok", true) };
+                    Ok(())
+                }
+                Err(message) => Err(ProtocolError::new(protocol::ERR_INTERNAL, message)),
+            }
+        }
         // 只有 root 能 HUP mDNSResponder：普通用户执行 killall 会失败，
         // 而 `dscacheutil -flushcache` 即使返回 0 也清不掉它的缓存。
         // 强制重置与 TUN 回滚都依赖这条路径。
@@ -438,6 +467,13 @@ fn handle_message(
                     unsafe { xpc::dict_set_string(reply, "clash_addr", &running.clash_addr) };
                     unsafe { xpc::dict_set_string(reply, "clash_secret", &running.clash_secret) };
                     unsafe { xpc::dict_set_string(reply, "since", &running.since) };
+                    // DNS 接管结果随之回报：设置失败时界面要能说「国外网站可能较慢」。
+                    if let Some(dns) = supervisor.last_dns() {
+                        unsafe { xpc::dict_set_bool(reply, "dns_applied", dns.applied) };
+                        if let Some(reason) = &dns.reason {
+                            unsafe { xpc::dict_set_string(reply, "dns_reason", reason) };
+                        }
+                    }
                 }
                 // 未运行时三项都不写，客户端按缺失处理成 null（契约 §3.2）。
                 None => {
@@ -506,6 +542,8 @@ struct Started {
     clash_addr: String,
     clash_secret: String,
     since: String,
+    /// 系统 DNS 是否已指向隧道。失败不影响连接，但必须如实回报。
+    dns: dns::DnsHijack,
 }
 
 /// 正在运行的那个 sing-box 的完整信息。
@@ -601,6 +639,14 @@ struct Supervisor {
     last_uid: Mutex<Option<u32>>,
     /// TUN 运行期间 App 保持的会话租约（按连接指针记）。
     leases: Mutex<std::collections::HashSet<usize>>,
+    /// 最近一次连接的系统 DNS 接管结果。`None` = 没有连接或已停止。
+    /// 单独存一份而不是塞进 `Running`：激活发生在 `register_child` 之后，
+    /// 但 status 可能在激活完成前被问到。
+    last_dns: Mutex<Option<dns::DnsHijack>>,
+    /// 本次连接写进系统的地址；连接期复核用。
+    dns_peer: Mutex<Option<String>>,
+    /// 上一次复核系统 DNS 的时刻。轮询很频繁，`scutil` 要起进程，必须节流。
+    dns_checked_at: Mutex<Option<Instant>>,
     /// 最近一次请求时刻。空闲退出用它判断「真的没人用了」。
     last_request: Mutex<Instant>,
     /// 正在处理的请求数。空闲退出不能在处理中退出。
@@ -621,6 +667,9 @@ impl Supervisor {
             pending_notes: Mutex::new(Vec::new()),
             last_uid: Mutex::new(None),
             leases: Mutex::new(std::collections::HashSet::new()),
+            last_dns: Mutex::new(None),
+            dns_peer: Mutex::new(None),
+            dns_checked_at: Mutex::new(None),
             last_request: Mutex::new(Instant::now()),
             in_flight: AtomicUsize::new(0),
         }
@@ -648,6 +697,11 @@ impl Supervisor {
 
     fn lease_count(&self) -> usize {
         self.leases.lock().unwrap().len()
+    }
+
+    /// 最近一次连接的系统 DNS 接管结果（`None` = 没在连接）。
+    fn last_dns(&self) -> Option<dns::DnsHijack> {
+        self.last_dns.lock().unwrap().clone()
     }
 
     fn idle_for(&self) -> Duration {
@@ -927,6 +981,10 @@ impl Supervisor {
     /// 没人管的 root 进程。先把它收掉。
     fn sweep_stale(&self) {
         self.kill_orphan();
+        // 崩溃后系统 DNS 可能还指着隧道。**先趁 active.json 还在**清一次：
+        // 删掉之后连 peer 都只能靠常量猜，原始值就更没机会拿回来了。
+        let peer = dns::peer_from_config(&self.config_path());
+        let _ = dns::restore_or_clear(peer.as_deref());
         for path in [self.config_path(), self.pid_path()] {
             match std::fs::remove_file(&path) {
                 Ok(()) => eprintln!("veyl-helper: 清理残留 {}", path.display()),
@@ -937,15 +995,70 @@ impl Supervisor {
     }
 
     fn status(&self) -> Option<Running> {
-        let mut guard = self.child.lock().unwrap();
-        let child = guard.as_mut()?;
-        match child.try_wait() {
-            Ok(None) => self.running.lock().unwrap().clone(),
-            _ => {
-                *guard = None;
-                *self.running.lock().unwrap() = None;
-                None
+        let exited = {
+            let mut guard = self.child.lock().unwrap();
+            let child = guard.as_mut()?;
+            match child.try_wait() {
+                Ok(None) => false,
+                _ => {
+                    *guard = None;
+                    true
+                }
             }
+        };
+        if exited {
+            *self.running.lock().unwrap() = None;
+            *self.last_dns.lock().unwrap() = None;
+            *self.dns_peer.lock().unwrap() = None;
+            *self.dns_checked_at.lock().unwrap() = None;
+            // 子进程自己退出了：DNS 不能继续指向已经消失的隧道。
+            let _ = dns::restore();
+            return None;
+        }
+        self.recheck_dns();
+        self.running.lock().unwrap().clone()
+    }
+
+    /// 连接期复核系统 DNS 是否还指向隧道。
+    ///
+    /// 换 Wi-Fi 或用户手动改 DNS 会冲掉我们的键，`dns.applied` 必须回落，
+    /// 否则界面会一直显示「已接管」。
+    ///
+    /// **节流到 5 秒**：`status` 是轮询热路径，每次起一个 `scutil` 代价太高。
+    /// 这里刻意用轮询而不是 SCDynamicStore 通知——当前结构没有可挂的事件循环，
+    /// 5 秒的滞后对「换网络后提示降级」够用；真要缩短再上通知，这是有意的取舍。
+    fn recheck_dns(&self) {
+        let Some(current) = self.last_dns() else {
+            return;
+        };
+        if !current.applied {
+            return;
+        }
+        let peer = self.dns_peer.lock().unwrap().clone();
+        let Some(peer) = peer else {
+            return;
+        };
+        let due = {
+            let mut at = self.dns_checked_at.lock().unwrap();
+            match *at {
+                Some(checked) if checked.elapsed() < DNS_RECHECK_INTERVAL => false,
+                _ => {
+                    *at = Some(Instant::now());
+                    true
+                }
+            }
+        };
+        if !due {
+            return;
+        }
+        let probe = dns::peer_still_applied(&peer);
+        if let Err(error) = &probe {
+            // 读不到系统 DNS 不等于失效：保留上一次的结论，下次再查。
+            eprintln!("veyl-helper: 复核系统 DNS 失败：{error}");
+        }
+        if let Some(failed) = dns_recheck_outcome(probe) {
+            *self.last_dns.lock().unwrap() = Some(failed);
+            eprintln!("veyl-helper: 系统 DNS 已不再指向隧道（连接期间网络或 DNS 设置变了）");
         }
     }
 
@@ -1129,20 +1242,34 @@ impl Supervisor {
         if let Some(logs) = &user_logs {
             self.note_for(uid, &format!("sing-box 日志={}", logs.sing_box_path.display()));
         }
-        let sing_box_log = user_logs.and_then(|logs| match logs.open_sing_box() {
-            Ok(file) => Some(file),
-            Err(error) => {
-                self.note_for(uid, &format!("sing-box 日志打开失败，输出丢弃：{error}"));
-                None
-            }
-        });
-        if sing_box_log.is_none() {
+        let capture = match &user_logs {
+            Some(logs) => match logs.begin_sing_box() {
+                Ok(session) => Some((Arc::clone(logs), session)),
+                Err(error) => {
+                    self.note_for(uid, &format!("sing-box 日志打开失败，输出丢弃：{error}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        if capture.is_none() {
             self.note_for(uid, "用户日志目录不可用，sing-box 输出将被丢弃");
         }
 
         let phase = Instant::now();
-        let spawned = match sing_box_log {
-            Some(file) => spawn_with_log(&binary, &self.config_path(), file),
+        let spawned = match &capture {
+            Some((logs, session)) => {
+                let mut command = Command::new(&binary);
+                command.arg("run").arg("-c").arg(self.config_path());
+                match spawn_with_pipe(command, logs, *session) {
+                    Ok(child) => Ok(child),
+                    Err(error) => {
+                        // 管道/读线程起不来就丢弃输出，绝不把没人读的管道交给子进程。
+                        self.note_for(uid, &format!("日志管道不可用，输出丢弃：{error}"));
+                        spawn_without_log(&binary, &self.config_path())
+                    }
+                }
+            }
             None => spawn_without_log(&binary, &self.config_path()),
         };
         let child = spawned.map_err(|error| {
@@ -1192,6 +1319,28 @@ impl Supervisor {
             uid,
         )?;
 
+        // 系统解析器指向 TUN 对端，否则 `hijack-dns` 永远收不到查询（见 `dns` 模块注释）。
+        // **失败不阻断连接**：DNS 是优化项，隧道才是产品；但要如实回报，
+        // 让界面能说明「国外网站可能较慢」，不能静默降级。
+        let phase = Instant::now();
+        let hijack = dns::activate(&prepared);
+        if !hijack.applied {
+            self.note_for(
+                uid,
+                &format!(
+                    "[warn] 系统 DNS 未接管（连接照常，国外网站可能较慢）：{}",
+                    hijack.reason.as_deref().unwrap_or("未知原因")
+                ),
+            );
+        }
+        *self.last_dns.lock().unwrap() = Some(hijack.clone());
+        *self.dns_peer.lock().unwrap() = dns::configured_peer(&prepared);
+        *self.dns_checked_at.lock().unwrap() = Some(Instant::now());
+        self.note_for(
+            uid,
+            &format!("start 阶段 dns={}ms", phase.elapsed().as_millis()),
+        );
+
         #[cfg(debug_assertions)]
         {
             let address = diag_tun_address(&prepared);
@@ -1238,6 +1387,7 @@ impl Supervisor {
             clash_addr,
             clash_secret,
             since,
+            dns: hijack,
         })
     }
 
@@ -1280,6 +1430,13 @@ impl Supervisor {
         // 代号没变才删：变了说明新 start 已经接管这些文件，
         // 删掉会让 live root 进程失去孤儿回收线索。
         self.cleanup_files(generation);
+
+        // 子进程没了，系统 DNS 必须还回去：留着指向隧道等于把所有解析都打死。
+        // 幂等：没改过 DNS 时这里是空操作。
+        let _ = dns::restore();
+        *self.last_dns.lock().unwrap() = None;
+        *self.dns_peer.lock().unwrap() = None;
+        *self.dns_checked_at.lock().unwrap() = None;
 
         #[cfg(debug_assertions)]
         self.note(&format!(
@@ -1851,6 +2008,16 @@ fn diag_tun_address(config: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// 复核探测结果的解释。单独抽出来，测试不用真的去读系统 DNS。
+///
+/// 只有「读到了、而且已经不是我们的地址」才算降级；读不到保留上一次的结论。
+fn dns_recheck_outcome(probe: Result<bool, String>) -> Option<dns::DnsHijack> {
+    match probe {
+        Ok(false) => Some(dns::DnsHijack::failed("连接期间网络或 DNS 设置变了")),
+        _ => None,
+    }
+}
+
 /// 从 `ifconfig -a` 里找持有该地址的 utun。地址不带前缀长度。
 #[cfg(debug_assertions)]
 fn diag_tun_interface(address: &str) -> Option<String> {
@@ -2190,8 +2357,22 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 // uid 由 XPC 连接对端推出（getpwuid），不采信客户端传来的任何路径。
 // ---------------------------------------------------------------------------
 
+/// 一次连接的日志写入端。`session` 让上一轮读线程收尾迟到时被丢弃，
+/// 不会把旧连接的尾巴写进新连接的文件。
+struct SingBoxSink {
+    file: std::fs::File,
+    written: u64,
+    session: u64,
+}
+
 struct UserLogs {
     helper: Mutex<std::fs::File>,
+    sing_box: Mutex<Option<SingBoxSink>>,
+    /// 上一轮读线程的完成信号。新连接最多等它 500ms，避免新一轮的轮转
+    /// 落在旧一轮还在写的时刻。
+    reader_done: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    sing_box_session: AtomicU64,
+    sing_box_write_failed: AtomicBool,
     sing_box_path: PathBuf,
     uid: u32,
     /// 已经校验过的 `helper-logs` 目录。之后的 openat / renameat / unlinkat
@@ -2225,6 +2406,10 @@ impl UserLogs {
         let helper = open_log_at(dir.raw(), "helper.log", uid)?;
         Ok(Self {
             helper: Mutex::new(helper),
+            sing_box: Mutex::new(None),
+            reader_done: Mutex::new(None),
+            sing_box_session: AtomicU64::new(0),
+            sing_box_write_failed: AtomicBool::new(false),
             sing_box_path,
             uid,
             dir,
@@ -2246,15 +2431,121 @@ impl UserLogs {
         let _ = writeln!(file, "{line}");
     }
 
-    /// 为一次 start 打开 sing-box 日志。轮转与打开都相对已校验的目录。
-    fn open_sing_box(&self) -> Result<std::fs::File, String> {
+    /// 为新一次连接准备 sing-box 日志：等上一轮读线程收尾、轮转过大的旧文件、
+    /// 打开新的写入端。返回这一轮的会话号。
+    fn begin_sing_box(&self) -> Result<u64, String> {
+        let previous = self.reader_done.lock().unwrap().take();
+        if let Some(done) = previous {
+            // 子进程已经退出，读线程通常立刻返回；等不到就继续，
+            // 最坏只是让旧读线程多写一个管道缓冲进新文件，会话号会挡住它。
+            let _ = done.recv_timeout(Duration::from_millis(500));
+        }
+        let session = self.sing_box_session.fetch_add(1, Ordering::SeqCst) + 1;
+        self.sing_box_write_failed.store(false, Ordering::SeqCst);
+        // 旧版本或异常中断可能留下远超上限的文件：整份留成备份等于没上限，直接丢掉。
+        let existing = stat_at(self.dir.raw(), "sing-box.log")
+            .map(|stat| stat.st_size.max(0) as u64)
+            .unwrap_or(0);
+        if existing > TUN_LOG_MAX_BYTES {
+            unlink_at(self.dir.raw(), "sing-box.log");
+        } else {
+            rotate_in_dir(
+                self.dir.raw(),
+                "sing-box.log",
+                TUN_LOG_MAX_BYTES,
+                TUN_LOG_KEEP,
+            );
+        }
+        let file = open_log_at(self.dir.raw(), "sing-box.log", self.uid)?;
+        // 没到阈值时上一次的文件会继续用，计数必须从实际大小起算，
+        // 否则能一路涨到接近两倍才轮转。
+        let written = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        *self.sing_box.lock().unwrap() = Some(SingBoxSink {
+            file,
+            written,
+            session,
+        });
+        Ok(session)
+    }
+
+    /// 起常驻读线程。必须在子进程 spawn **之前**调用：管道没人读会写满，
+    /// 子进程会阻塞在写日志上。
+    fn start_capture(self: &Arc<Self>, read: std::fs::File, session: u64) -> Result<(), String> {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let logs = Arc::clone(self);
+        // 句柄丢掉即分离：线程读到 EOF 自己退出，收尾靠 `done_rx` 判断。
+        let _reader = std::thread::Builder::new()
+            .name("veyl-singbox-log".into())
+            .spawn(move || {
+                logs.pump(read, session);
+                let _ = done_tx.send(());
+            })
+            .map_err(|error| format!("启动日志读线程失败：{error}"))?;
+        *self.reader_done.lock().unwrap() = Some(done_rx);
+        Ok(())
+    }
+
+    /// 把管道内容搬进文件；子进程退出（写端全关）时读到 EOF 自然结束。
+    fn pump(&self, read: std::fs::File, session: u64) {
+        use std::io::Read;
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, read);
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(len) => self.append_sing_box(session, &buf[..len]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    }
+
+    fn append_sing_box(&self, session: u64, chunk: &[u8]) {
+        use std::io::Write;
+        let failed = {
+            let mut slot = self.sing_box.lock().unwrap();
+            let Some(sink) = slot.as_mut() else { return };
+            if sink.session != session {
+                return;
+            }
+            if sink.written + chunk.len() as u64 > TUN_LOG_MAX_BYTES {
+                self.rotate_sing_box(sink);
+            }
+            match sink.file.write_all(chunk) {
+                Ok(()) => {
+                    sink.written += chunk.len() as u64;
+                    false
+                }
+                Err(_) => true,
+            }
+        };
+        if failed {
+            // 写不进去（磁盘满等）不能阻塞子进程：继续读并丢弃，只在 helper.log 记一次。
+            if !self.sing_box_write_failed.swap(true, Ordering::SeqCst) {
+                self.append_helper("sing-box 日志写入失败，本次连接剩余输出丢弃");
+            }
+        }
+    }
+
+    /// 轮转运行中的日志。rename 没成功时打开的还是原文件，就地清空兜住上限；
+    /// 打不开就清空旧句柄（此时它已经是 `.1`），同样不让文件继续长。
+    fn rotate_sing_box(&self, sink: &mut SingBoxSink) {
         rotate_in_dir(
             self.dir.raw(),
             "sing-box.log",
             TUN_LOG_MAX_BYTES,
             TUN_LOG_KEEP,
         );
-        open_log_at(self.dir.raw(), "sing-box.log", self.uid)
+        match open_log_at(self.dir.raw(), "sing-box.log", self.uid) {
+            Ok(file) => {
+                let _ = file.set_len(0);
+                sink.file = file;
+            }
+            Err(_) => {
+                let _ = sink.file.set_len(0);
+            }
+        }
+        sink.written = 0;
     }
 }
 
@@ -2494,19 +2785,56 @@ fn rename_at(
 }
 
 /// 正常路径：sing-box 的 stdout/stderr 直接写用户日志。
-fn spawn_with_log(
-    binary: &Path,
-    config: &Path,
-    log: std::fs::File,
+/// 子进程的 stdout/stderr 接到同一根管道，由 helper 按大小轮转写入文件。
+///
+/// 读线程必须在 `spawn` **之前**就位：管道没人读会写满，子进程会阻塞在日志上。
+/// helper 被 SIGKILL 时读端消失，sing-box 会在下一次写日志时收到 SIGPIPE 退出
+/// （实测 1.14.4 退出码 141，不是忽略）；即便如此，`kill_orphan` 仍是兜底，
+/// 不能只靠这个——发布版日志级别是 warn，可能很久才写下一行。
+///
+/// `Command` 必须按值传入：spawn 之后它仍持有写端的副本，只有 Command 被 drop
+/// 才会关闭。调用方若把 Command 留在作用域里，读线程永远等不到 EOF。
+fn spawn_with_pipe(
+    mut command: Command,
+    logs: &Arc<UserLogs>,
+    session: u64,
 ) -> std::io::Result<Child> {
-    let log_err = log.try_clone()?;
-    Command::new(binary)
-        .arg("run")
-        .arg("-c")
-        .arg(config)
+    use std::os::fd::FromRawFd;
+
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    // 别让别的线程 fork 出来的进程继承写端，否则子进程退出后管道永远等不到 EOF。
+    for fd in [read_fd, write_fd] {
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    let stderr_fd = unsafe { libc::dup(write_fd) };
+    if stderr_fd < 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+        return Err(error);
+    }
+    unsafe { libc::fcntl(stderr_fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    // 所有权转移：读端归读线程，两个写端归 Command（spawn 后父进程里的副本自动关闭）。
+    let read = unsafe { std::fs::File::from_raw_fd(read_fd) };
+    if let Err(error) = logs.start_capture(read, session) {
+        unsafe {
+            libc::close(write_fd);
+            libc::close(stderr_fd);
+        }
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, error));
+    }
+    let stdout = unsafe { Stdio::from_raw_fd(write_fd) };
+    let stderr = unsafe { Stdio::from_raw_fd(stderr_fd) };
+    command
         .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
 }
 
@@ -2577,6 +2905,24 @@ mod tests {
             std::env::temp_dir().join(format!("veyl-helper-{tag}-{:016x}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_changed_system_dns_downgrades_the_hijack_status() {
+        let failed = dns_recheck_outcome(Ok(false)).expect("探测到已改写必须降级");
+        assert!(!failed.applied);
+        assert!(failed
+            .reason
+            .unwrap_or_default()
+            .contains("网络或 DNS"));
+        assert!(
+            dns_recheck_outcome(Ok(true)).is_none(),
+            "仍然是我们写的地址，不降级"
+        );
+        assert!(
+            dns_recheck_outcome(Err("scutil 失败".into())).is_none(),
+            "读不到不等于失效，保留上一次的结论"
+        );
     }
 
     #[test]
@@ -3063,6 +3409,128 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    fn sing_box_size(dir: &Path) -> u64 {
+        std::fs::metadata(dir.join("sing-box.log"))
+            .map(|meta| meta.len())
+            .unwrap_or(0)
+    }
+
+    /// 会话进行中写穿阈值也必须轮转：不能等下一次连接。
+    #[test]
+    fn an_oversized_sing_box_log_rotates_while_the_session_is_running() {
+        let home = temp("sing-box-rotate");
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let logs = UserLogs::open(&home, uid, gid).unwrap();
+        let dir = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home));
+        let session = logs.begin_sing_box().unwrap();
+
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..(TUN_LOG_MAX_BYTES / chunk.len() as u64 + 20) {
+            logs.append_sing_box(session, &chunk);
+        }
+
+        assert!(dir.join("sing-box.log.1").exists(), "超限的日志要挪走");
+        assert!(sing_box_size(&dir) <= TUN_LOG_MAX_BYTES);
+        let backup = std::fs::metadata(dir.join("sing-box.log.1")).unwrap().len();
+        assert!(backup <= TUN_LOG_MAX_BYTES, "备份也不能超限：{backup}");
+        assert!(
+            std::fs::metadata(dir.join("sing-box.log.2")).is_err(),
+            "只保留一份备份"
+        );
+
+        logs.append_sing_box(session, b"after-rotation\n");
+        let current = std::fs::read_to_string(dir.join("sing-box.log")).unwrap();
+        assert!(current.contains("after-rotation"), "{current}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 上一轮读线程迟到的尾巴不能写进新一轮的文件。
+    #[test]
+    fn a_late_writer_from_the_previous_session_is_ignored() {
+        let home = temp("sing-box-session");
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let logs = UserLogs::open(&home, uid, gid).unwrap();
+        let dir = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home));
+
+        let previous = logs.begin_sing_box().unwrap();
+        let current = logs.begin_sing_box().unwrap();
+        logs.append_sing_box(previous, b"stale\n");
+        logs.append_sing_box(current, b"fresh\n");
+
+        let text = std::fs::read_to_string(dir.join("sing-box.log")).unwrap();
+        assert!(!text.contains("stale"), "旧会话的尾巴必须丢弃：{text}");
+        assert!(text.contains("fresh"), "{text}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 管道版：stdout/stderr 都进同一个文件，写端关闭后读线程必须 drain 完再退出。
+    #[test]
+    fn a_childs_stdout_and_stderr_are_drained_into_the_log() {
+        use std::sync::Arc;
+
+        let home = temp("sing-box-pipe");
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let logs = Arc::new(UserLogs::open(&home, uid, gid).unwrap());
+        let dir = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home));
+        let session = logs.begin_sing_box().unwrap();
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("printf 'from-stdout\\n'; printf 'from-stderr\\n' 1>&2");
+        let mut child = spawn_with_pipe(command, &logs, session).unwrap();
+        child.wait().unwrap();
+
+        let done = logs.reader_done.lock().unwrap().take().unwrap();
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("写端关闭后读线程必须退出");
+
+        let text = std::fs::read_to_string(dir.join("sing-box.log")).unwrap();
+        assert!(text.contains("from-stdout"), "{text}");
+        assert!(text.contains("from-stderr"), "{text}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// helper 崩溃后重启：崩溃前刚好写满的文件在重新打开时轮转；
+    /// 旧版本留下的超大文件直接丢掉，不能整份留成备份。
+    #[test]
+    fn a_log_left_oversized_by_a_crashed_helper_is_brought_back_under_the_cap() {
+        let home = temp("sing-box-crash");
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let logs = UserLogs::open(&home, uid, gid).unwrap();
+        let dir = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home));
+        std::fs::write(
+            dir.join("sing-box.log"),
+            vec![b'x'; TUN_LOG_MAX_BYTES as usize],
+        )
+        .unwrap();
+
+        logs.begin_sing_box().unwrap();
+
+        assert!(dir.join("sing-box.log.1").exists());
+        assert!(sing_box_size(&dir) <= TUN_LOG_MAX_BYTES);
+        let backup = std::fs::metadata(dir.join("sing-box.log.1")).unwrap().len();
+        assert!(backup <= TUN_LOG_MAX_BYTES, "备份也不能超限：{backup}");
+
+        std::fs::write(
+            dir.join("sing-box.log"),
+            vec![b'x'; TUN_LOG_MAX_BYTES as usize * 3],
+        )
+        .unwrap();
+        logs.begin_sing_box().unwrap();
+
+        assert_eq!(sing_box_size(&dir), 0, "超大遗留文件必须清空");
+        assert!(
+            std::fs::metadata(dir.join("sing-box.log.2")).is_err(),
+            "超大文件不能整份留成备份"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// 打开之后把 `helper-logs` 换成软链：写入和新建都必须留在原目录。
     #[test]
     fn a_replaced_logs_dir_does_not_redirect_writes() {
@@ -3079,7 +3547,7 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, &real).unwrap();
 
         logs.append_helper("after-swap");
-        drop(logs.open_sing_box().unwrap());
+        logs.begin_sing_box().unwrap();
 
         assert!(
             std::fs::read_to_string(moved.join("helper.log"))

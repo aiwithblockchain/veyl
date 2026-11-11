@@ -218,6 +218,8 @@ fn inbound(input: &BuildInput) -> Value {
                 // 不写这两个字段时 macOS 上 TCP 走内核 NAT、握手不完成（2026-11-09 实测）。
                 "stack": crate::tun::TUN_STACK,
                 "mtu": crate::tun::TUN_MTU,
+                // 系统解析器连接期指向 TUN 对端；没有它 `hijack-dns` 收不到任何查询。
+                "dns_mode": "hijack",
                 "auto_route": true,
                 "route_exclude_address": input.tun_excludes,
             });
@@ -744,6 +746,8 @@ mod tests {
         // 实测握手永远不完成；空 `mtu` 落到 65535，MSS 会变成 65495。
         assert_eq!(tun["inbounds"][0]["stack"], "gvisor");
         assert_eq!(tun["inbounds"][0]["mtu"], 9000);
+        // 系统解析器连接期指向 TUN 对端（172.19.0.2），由 dns_mode 接管。
+        assert_eq!(tun["inbounds"][0]["dns_mode"], "hijack");
         assert!(
             tun["inbounds"][0].get("listen_port").is_none(),
             "TUN 没有代理端口"

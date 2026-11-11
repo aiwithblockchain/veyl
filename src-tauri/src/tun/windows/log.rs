@@ -25,6 +25,15 @@ impl ServiceLog {
         }
     }
 
+    /// 测试用：不写文件、不碰 ProgramData，只让调用方拿到一个可用的日志对象。
+    #[cfg(test)]
+    pub fn disabled() -> Self {
+        Self {
+            file: Mutex::new(None),
+            echo: false,
+        }
+    }
+
     pub fn info(&self, message: impl AsRef<str>) {
         self.line("info", message.as_ref());
     }

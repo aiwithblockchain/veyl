@@ -1054,6 +1054,7 @@ mod tests {
                     clash_api: None,
                     since: None,
                     last_error: None,
+                    dns_hijack: Default::default(),
                     helper_build: None,
                     helper_version: None,
                     helper_pid: None,

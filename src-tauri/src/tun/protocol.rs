@@ -67,6 +67,7 @@ const INBOUND_KEYS: &[&str] = &[
     "mtu",
     "stack",
     "strict_route",
+    "dns_mode",
 ];
 const OUTBOUND_KEYS: &[&str] = &[
     "type",
@@ -665,7 +666,7 @@ mod tests {
             "log": {"level": "info", "timestamp": true},
             "inbounds": [{
                 "type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"],
-                "stack": "gvisor", "mtu": 9000,
+                "stack": "gvisor", "mtu": 9000, "dns_mode": "hijack",
                 "auto_route": true, "route_exclude_address": ["10.0.0.0/8"]
             }],
             "outbounds": [

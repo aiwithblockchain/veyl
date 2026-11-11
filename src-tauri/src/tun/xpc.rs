@@ -169,6 +169,9 @@ pub enum Reply {
         clash_secret: String,
         /// 特权侧生成的启动时刻（契约 §3.1）。
         since: String,
+        /// 系统 DNS 是否已指向隧道；失败不影响连接，只如实回报。
+        dns_applied: bool,
+        dns_reason: Option<String>,
     },
     Stopped,
     /// `restart` 的应答：helper 已经答应换映像，随后以 75 退出。
@@ -184,6 +187,9 @@ pub enum Reply {
         clash_addr: Option<String>,
         clash_secret: Option<String>,
         since: Option<String>,
+        /// 系统 DNS 接管结果（契约 §3.2）。
+        dns_applied: bool,
+        dns_reason: Option<String>,
         /// 特权组件自身构建标识；旧 helper 不返回。
         helper_build: Option<String>,
         /// 特权组件版本；旧 helper 不返回。
@@ -469,11 +475,16 @@ fn parse_reply(service: &CString, method: &str, reply: xpc_object_t) -> Result<R
             clash_addr: get_string(reply, "clash_addr").unwrap_or_default(),
             clash_secret: get_string(reply, "clash_secret").unwrap_or_default(),
             since: get_string(reply, "since").unwrap_or_default(),
+            dns_applied: unsafe {
+                xpc_dictionary_get_bool(reply, cstring("dns_applied").as_ptr())
+            },
+            dns_reason: get_string(reply, "dns_reason").filter(|value| !value.is_empty()),
         }),
         "stop" => Ok(Reply::Stopped),
         "restart" => Ok(Reply::Restarted),
         "lease" => Ok(Reply::Leased),
         "flush_dns" => Ok(Reply::Flushed),
+        "restore_dns" => Ok(Reply::Flushed),
         "status" => {
             let running = unsafe { xpc_dictionary_get_bool(reply, cstring("running").as_ptr()) };
             // 未运行时 helper 不写这三项；按契约给 None，不留空串冒充有效值。
@@ -496,6 +507,10 @@ fn parse_reply(service: &CString, method: &str, reply: xpc_object_t) -> Result<R
                 clash_addr: text("clash_addr"),
                 clash_secret: text("clash_secret"),
                 since: text("since"),
+                dns_applied: unsafe {
+                    xpc_dictionary_get_bool(reply, cstring("dns_applied").as_ptr())
+                },
+                dns_reason: get_string(reply, "dns_reason").filter(|value| !value.is_empty()),
                 // 诊断字段：旧 helper 没有这两个键，按 null 处理（契约 §3.2）。
                 helper_build: get_string(reply, "helper_build").filter(|value| !value.is_empty()),
                 helper_version: get_string(reply, "helper_version")
@@ -764,6 +779,8 @@ mod tests {
                     clash_addr: Some("127.0.0.1:50000".into()),
                     clash_secret: Some("s3cret".into()),
                     since: Some("2026-11-05T00:00:00Z".into()),
+                    dns_applied: false,
+                    dns_reason: None,
                     helper_build: None,
                     helper_version: None,
                 }
@@ -786,6 +803,8 @@ mod tests {
                     clash_addr: None,
                     clash_secret: None,
                     since: None,
+                    dns_applied: false,
+                    dns_reason: None,
                     helper_build: None,
                     helper_version: None,
                 }
@@ -803,6 +822,7 @@ mod tests {
             dict_set_string(dict, "clash_addr", "127.0.0.1:50001");
             dict_set_string(dict, "clash_secret", "s");
             dict_set_string(dict, "since", "2026-11-05T01:02:03Z");
+            dict_set_bool(dict, "dns_applied", true);
             let parsed = parse_reply(&cstring("svc"), "start", dict).unwrap();
             release(dict);
             assert_eq!(
@@ -812,8 +832,38 @@ mod tests {
                     clash_addr: "127.0.0.1:50001".into(),
                     clash_secret: "s".into(),
                     since: "2026-11-05T01:02:03Z".into(),
+                    dns_applied: true,
+                    dns_reason: None,
                 }
             );
+        }
+    }
+
+    /// DNS 接管失败不影响 start 成功：回 `applied=false` + 原因，连接照常。
+    #[test]
+    fn a_start_reply_can_report_dns_degradation() {
+        unsafe {
+            let dict = xpc_dictionary_create(std::ptr::null(), std::ptr::null(), 0);
+            dict_set_bool(dict, "ok", true);
+            dict_set_int64(dict, "pid", 9);
+            dict_set_string(dict, "clash_addr", "127.0.0.1:50001");
+            dict_set_string(dict, "clash_secret", "s");
+            dict_set_string(dict, "since", "2026-11-05T01:02:03Z");
+            dict_set_bool(dict, "dns_applied", false);
+            dict_set_string(dict, "dns_reason", "读不到当前网络服务");
+            let parsed = parse_reply(&cstring("svc"), "start", dict).unwrap();
+            release(dict);
+            match parsed {
+                Reply::Started {
+                    dns_applied,
+                    dns_reason,
+                    ..
+                } => {
+                    assert!(!dns_applied);
+                    assert_eq!(dns_reason.as_deref(), Some("读不到当前网络服务"));
+                }
+                other => panic!("期望 Started：{other:?}"),
+            }
         }
     }
 }

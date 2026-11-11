@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::backend::{
-    ClashApi, StartReply, TunBackend, TunError, TunErrorCode, TunSnapshot,
+    ClashApi, DnsHijack, StartReply, TunBackend, TunError, TunErrorCode, TunSnapshot,
     TUN_REPLY_DEADLINE_CONTROL,
 };
 use super::privilege::{HelperStatus, Registration};
@@ -65,6 +65,8 @@ pub struct TunSession {
     connected: Mutex<Option<String>>,
     /// 本次进程的 Clash API；App 崩溃接手时从 helper 的 status 补回来。
     clash: Mutex<Option<ClashApi>>,
+    /// 连接期系统 DNS 接管结果；未连接时为 None。来自 start 回复或 status 快照。
+    dns: Mutex<Option<DnsHijack>>,
     /// 上一次向后端复核的时刻。缓存不能永远不出门：helper 死了要能发现。
     last_check: Mutex<Option<Instant>>,
     /// App 崩溃重启后 TUN 还活着，这时内存里没有 pid。
@@ -115,6 +117,7 @@ impl TunSession {
             meta: Mutex::new(None),
             connected: Mutex::new(None),
             clash: Mutex::new(None),
+            dns: Mutex::new(None),
             last_check: Mutex::new(None),
             probed: AtomicBool::new(false),
             start_attempted: AtomicBool::new(false),
@@ -151,6 +154,7 @@ impl TunSession {
         *self.meta.lock().unwrap() = Some(meta.clone());
         *self.connected.lock().unwrap() = Some(reply.since.clone());
         *self.clash.lock().unwrap() = Some(reply.clash_api.clone());
+        *self.dns.lock().unwrap() = Some(reply.dns_hijack.clone());
         *self.last_check.lock().unwrap() = Some(Instant::now());
 
         Ok(Started {
@@ -262,7 +266,13 @@ impl TunSession {
         *self.meta.lock().unwrap() = None;
         *self.connected.lock().unwrap() = None;
         *self.clash.lock().unwrap() = None;
+        *self.dns.lock().unwrap() = None;
         *self.last_check.lock().unwrap() = None;
+    }
+
+    /// 连接期系统 DNS 的接管结果；没在连接时是 None。
+    pub fn dns_hijack(&self) -> Option<DnsHijack> {
+        self.dns.lock().unwrap().clone()
     }
 
     /// 刷新系统 DNS 缓存。
@@ -271,6 +281,11 @@ impl TunSession {
     /// mDNSResponder 的坏缓存还在，要一起清掉。
     pub fn flush_dns(&self) -> Result<(), TunError> {
         self.backend.flush_dns()
+    }
+
+    /// 还原连接期被改写的系统 DNS。幂等：没改过就是空操作。
+    pub fn restore_dns(&self) -> Result<(), TunError> {
+        self.backend.restore_dns()
     }
 
     /// 热路径：缓存有效时只读内存，超过复核间隔才问一次后端。
@@ -354,6 +369,7 @@ impl TunSession {
         if let Some(api) = snapshot.clash_api.clone() {
             *self.clash.lock().unwrap() = Some(api);
         }
+        *self.dns.lock().unwrap() = Some(snapshot.dns_hijack.clone());
         *self.last_check.lock().unwrap() = Some(Instant::now());
     }
 }
@@ -459,6 +475,7 @@ mod tests {
                 pid,
                 clash_api,
                 since,
+                dns_hijack: DnsHijack::default(),
             })
         }
         fn stop(&self) -> Result<(), TunError> {
@@ -479,6 +496,7 @@ mod tests {
                 clash_api: self.clash.lock().unwrap().clone(),
                 since: self.since.lock().unwrap().clone(),
                 last_error: None,
+                dns_hijack: DnsHijack::default(),
                 helper_build: None,
                 helper_version: None,
                 helper_pid: None,

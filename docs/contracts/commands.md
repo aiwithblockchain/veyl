@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.16.1`
+> 契约版本：`2.16.5`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -845,11 +845,11 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 ### 7.3 `runtime_status {}` → `RuntimeSnapshot`
 
-2.0 的 `RuntimeSnapshot`（与 `runtime.md` §2.5 的 `2.5.0` 一致，**版本号跟 `runtime.md`，不跟本文件**）：
+2.0 的 `RuntimeSnapshot`（与 `runtime.md` §2.5 的 `2.6.0` 一致，**版本号跟 `runtime.md`，不跟本文件**）：
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.5.0";
+  contract_version: "2.6.0";
   state: RuntimeState;                // runtime.md §2.1，七态不变
   mode: "system_proxy" | "tun" | null;
   pid: number | null;
@@ -873,6 +873,7 @@ type RuntimeSnapshot = {
   applied_route_revision: number | null; // runtime.md 2.1：建连时 configs.route_revision 的值
   route_region: string | null;        // 2.5：生成当前配置时判定的地区（小写 cc；未知为 null）
   system_proxy_enabled: boolean;
+  system_dns: "tunnel" | "unchanged" | null; // runtime.md 2.6：连接期系统解析器是否已指向隧道
   health: HealthSnapshot;
   traffic: TrafficStats | null;
   connections: number | null;
@@ -1818,13 +1819,13 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.16.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 |
+| `contracts/commands.md` | **2.16.5** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` |
 | `contracts/events.md` | **2.10.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 |
-| `contracts/runtime.md` | **2.5.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` |
+| `contracts/runtime.md` | **2.6.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` |
 | `contracts/tools.md` | **3.8.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` |
 | `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
 | `contracts/routing.md` | **1.3.0** | 批 3 设计依据 + `dns.strategy` 按平台取值 + 地区判定统一与未知地区不回落 |
-| `contracts/tun-backend.md` | **1.1.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack: "gvisor"` / `mtu: 9000` |
+| `contracts/tun-backend.md` | **1.3.1** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、5s 复核与还原判定） |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
 
 ### 15.6 2.1.0 新增（非破坏性）
@@ -1836,6 +1837,30 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.16.5（2026-11-09，矩阵同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.5`；§15.5 矩阵同步 `tun-backend.md` 1.3.1（连接期 5 秒复核与还原判定） | 元数据 | 修复在 `tun-backend.md` §5.2.3 |
+
+### 2.16.4（2026-11-09，§7.3 同步 RuntimeSnapshot 2.6.0）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.4`；§7.3 的 `RuntimeSnapshot` 同步 `runtime.md` 2.6.0 的 `system_dns: "tunnel" \| "unchanged" \| null` 与 `contract_version` 字面量；§15.5 矩阵同步 `runtime.md` 2.6.0 | 元数据 | `RuntimeSnapshot` 的所有者是 `runtime.md` §2.5，本文件只镜像 |
+
+### 2.16.3（2026-11-09，矩阵同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.3`；§15.5 矩阵同步 `tun-backend.md` 1.3.0（DNS 接管 fail-open、`dns_hijack` / `system_dns`） | 元数据 | 修复在 `tun-backend.md` |
+
+### 2.16.2（2026-11-09，矩阵同步）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.2`；§15.5 矩阵同步 `tun-backend.md` 1.2.0（`dns_mode: "hijack"` + 连接期系统 DNS） | 元数据 | 修复在 `tun-backend.md` |
 
 ### 2.16.1（2026-11-09，矩阵同步）
 
