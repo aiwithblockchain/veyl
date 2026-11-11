@@ -38,7 +38,7 @@
 | **B1** | 列出节点 | 节点列表 | 是 | 否 | `profile_list` |
 | **B2** | 切换节点 | 节点项 | 是 | 否 | `runtime_start(profile_id)` |
 | **B3** | 删除节点配置 | 列表项操作 | 是 | 是 | `profile_delete` |
-| **B4** | 导入配置文件 | 导入按钮 | 是 | 否 | `import_seed_file` |
+| **B4** | 导入配置文件 | 导入按钮 | 是 | 否 | 当前：`import_seed_file`（设置页「选择文件」+ 窗口级拖放）；目标：文本 / 订阅 / 文件三条通道（`node_import_text` / `node_import_url` / 待定 `node_import_file`，见 `contracts/commands.md` #24） |
 | **C1** | 使用官方默认配置 | 按钮 | 是 | 否 | `default_profile_refresh` |
 | **C2** | 刷新默认配置 | 按钮 | 是 | 否 | `default_profile_refresh` |
 | **C3** | 查看配置版本 | 文本 | 是 | 否 | `default_profile_status` |

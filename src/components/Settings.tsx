@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type {
   AgentBridge,
   DefaultProfileStatus,
   ProxyPortAvailability,
-  ImportSeedResult,
   LlmProtocol,
   LlmProvider,
   LlmProviderInput,
@@ -12,8 +11,13 @@ import type {
   NetworkForceResetStep,
 } from "../agent/bridge";
 import { DEFAULT_PROXY_PORT, isHttpUrl, isLocalEndpoint } from "../agent/bridge";
-import type { RuntimeView } from "../agent/protocol";
-import type { ConfigConnectMode } from "../agent/protocol";
+import type {
+  ConfigConnectMode,
+  ConfigRouteMode,
+  NodeImportResult,
+  NodeImportSkipped,
+  RuntimeView,
+} from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
 import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
 import { useFocusTrap } from "../ui/focus";
@@ -24,6 +28,8 @@ import { TunDiagnosticsRow } from "./TunDiagnostics";
 import { TunHelperRow, useTunHelper } from "./TunHelper";
 
 const APP_VERSION = "0.1.0";
+/** 待产品给出最终仓库地址；没有 URL 就不摆空链接。 */
+const OPEN_SOURCE_URL: string | null = null;
 
 interface Props {
   open: boolean;
@@ -35,25 +41,18 @@ interface Props {
   onProxyPortSaved?: (port: number) => void;
   /** 当前配置的连接方式；只用于展示，不参与任何命令。 */
   connectMode?: ConfigConnectMode | null;
-  /** 当前配置正在使用的节点名；没有配置或没有节点时为 null。 */
-  currentNodeName?: string | null;
-  /** 当前配置的节点数量；大于 1 时「用哪个节点」可以直接打开节点面板。 */
-  nodeCount?: number;
-  /** 打开节点面板（会先关闭设置）。 */
-  onOpenNodePanel?: () => void;
+  /** 当前配置的路由方式；只用于把连接方式说准确。 */
+  routingMode?: ConfigRouteMode | null;
+  /** 当前配置 id；节点导入必须落到这套配置，而不仅是节点池。 */
+  configId?: string | null;
   /** 新建一套配置（会先关闭设置）。 */
   onNewConfig?: () => void;
   onClose: () => void;
-  onNotice: (notice: { level: "info" | "error"; text: string }) => void;
-  importing: boolean;
-  dragging: boolean;
-  importResult: ImportSeedResult | null;
-  importError: string | null;
-  onImportPath: (path: string) => void;
   onRestartOnboarding: () => void;
   onOpenLogs: () => void;
   onRestoreNetwork: () => void;
-  onAskAi: (text: string) => void;
+  /** 带着当前 tab 一起回到 App，重新打开设置时落回原处。 */
+  onAskAi: (text: string, section: SectionId) => void;
   /** 从导入入口进来时直接落到「网络」；默认「账号与 AI」。 */
   initialSection?: SectionId;
 }
@@ -194,8 +193,8 @@ export function resetOutcome(result: NetworkForceResetResult): ResetOutcome {
     if (result.ok && result.verified) {
       return {
         kind: "success",
-        title: "网络已重置",
-        sub: "八项检查都通过。需要时再点「启动 VPN」。",
+        title: "网络已恢复。可以重新连接了。",
+        sub: "",
       };
     }
     // 没有逐项结果时不能凭空说「有 n 项没完成」；下面也没有对应的失败行。
@@ -477,7 +476,7 @@ function SeedRefreshRow({
 }
 
 const SECTIONS: Array<{ id: SectionId; label: string }> = [
-  { id: "ai", label: "AI 助手" },
+  { id: "ai", label: "AI 服务" },
   { id: "network", label: "连接" },
   { id: "advanced", label: "遇到问题" },
   { id: "about", label: "关于" },
@@ -537,6 +536,31 @@ function protocolLabel(protocol: LlmProtocol): string {
   return protocol === "anthropic" ? "anthropic 兼容" : "openai 兼容";
 }
 
+/** 连接方式与左栏、主界面用同一套词；设置里只读。 */
+function connectModeText(
+  mode: ConfigConnectMode | null,
+  routing: ConfigRouteMode | null,
+): string {
+  if (mode === "tun") return "全部软件走 VPN";
+  if (mode === "system_proxy" && routing === "proxy_selected") {
+    return "只有填了地址的软件走 VPN";
+  }
+  if (mode === "system_proxy") return "浏览器走 VPN";
+  return "还没有配置";
+}
+
+const IMPORT_SKIP_REASONS: Record<NodeImportSkipped["reason"], string> = {
+  duplicate: "已有同名节点",
+  unsupported_scheme: "不是 ss:// 链接",
+  unsupported_method: "加密方式不支持",
+  malformed: "内容不完整",
+  subscription_empty: "订阅里没有节点",
+};
+
+function importSkipReason(reason: string): string {
+  return IMPORT_SKIP_REASONS[reason as NodeImportSkipped["reason"]] ?? "没法导入";
+}
+
 function emptyForm(): ProviderForm {
   return { name: "", protocol: "openai", baseUrl: "", model: "", apiKey: "", hasKey: false };
 }
@@ -549,17 +573,10 @@ export function Settings({
   proxyPort = DEFAULT_PROXY_PORT,
   onProxyPortSaved,
   connectMode = null,
-  currentNodeName = null,
-  nodeCount = 0,
-  onOpenNodePanel,
+  routingMode = null,
+  configId = null,
   onNewConfig,
   onClose,
-  onNotice,
-  importing,
-  dragging,
-  importResult,
-  importError,
-  onImportPath,
   onRestartOnboarding,
   onOpenLogs,
   onRestoreNetwork,
@@ -625,8 +642,13 @@ export function Settings({
   const portEditButtonRef = useRef<HTMLButtonElement>(null);
   const returnPortFocusRef = useRef(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importResult, setImportResult] = useState<NodeImportResult | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const importDialogRef = useRef<HTMLDivElement>(null);
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const resetDialogRef = useRef<HTMLDivElement>(null);
   const resetTriggerRef = useRef<HTMLButtonElement>(null);
   const resetCancelRef = useRef<HTMLButtonElement>(null);
@@ -723,7 +745,14 @@ export function Settings({
       lastSavedPort.current = result.port;
       setPortInput(String(result.port));
       setPortAvailability(result.availability);
-      setPortFeedback(connected ? "已保存，下次连接生效" : "已保存");
+      // 顺延说明已经带「保存的是 X，下次连接生效」，不再叠一句。
+      const pendingNext =
+        connected &&
+        runtime.port_fallback !== null &&
+        result.port !== runtime.port_fallback.requested;
+      setPortFeedback(
+        pendingNext ? null : connected ? "已保存，下次连接生效" : "已保存",
+      );
       returnPortFocusRef.current = true;
       setPortEditing(false);
       onProxyPortSaved?.(result.port);
@@ -772,6 +801,10 @@ export function Settings({
     setRouteCopy("idle");
     setProxyCopy("idle");
     setImportOpen(false);
+    setImportText("");
+    setImportBusy(false);
+    setImportResult(null);
+    setImportError(null);
     void refreshProviders();
   }, [open, refreshProviders, initialSection]);
 
@@ -1009,7 +1042,66 @@ export function Settings({
   };
 
   const askAi = (field: string, value: string) => {
-    onAskAi(advancedPrompt(field, value));
+    onAskAi(advancedPrompt(field, value), section);
+  };
+
+  const importFirstLine =
+    importText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? "";
+  const importIsUrl = /^https:\/\//i.test(importFirstLine);
+
+  const submitImport = async () => {
+    const text = importText.trim();
+    if (!text || importBusy) return;
+    setImportError(null);
+    setImportResult(null);
+    if (/^http:\/\//i.test(importFirstLine)) {
+      setImportError("订阅地址要用 https，不能是 http。");
+      return;
+    }
+    if (!configId) {
+      setImportError("先在左侧选一套配置，再添加节点。");
+      return;
+    }
+    setImportBusy(true);
+    try {
+      const result = importIsUrl
+        ? await bridge.nodeImportUrl(importFirstLine, configId)
+        : await bridge.nodeImportText(text, configId);
+      setImportResult(result);
+      if (result.imported > 0) setImportText("");
+    } catch (error) {
+      const message = toBridgeError(error).message;
+      setImportError(
+        message && message !== "操作失败"
+          ? message
+          : "没有添加成功，检查地址后再试。",
+      );
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const onTabKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    let next: number | null = null;
+    if (event.key === "ArrowRight") {
+      next = (index + 1) % SECTIONS.length;
+    } else if (event.key === "ArrowLeft") {
+      next = (index - 1 + SECTIONS.length) % SECTIONS.length;
+    } else if (event.key === "Home") {
+      next = 0;
+    } else if (event.key === "End") {
+      next = SECTIONS.length - 1;
+    }
+    if (next === null) return;
+    event.preventDefault();
+    setSection(SECTIONS[next].id);
+    tabRefs.current[next]?.focus();
   };
 
   const copyDiagnostics = async () => {
@@ -1048,11 +1140,23 @@ export function Settings({
       ? runtime.mixed_port ?? proxyPort
       : proxyPort;
 
-  // 代理配置的说明：已连接但显示端口和保存值不同时，先把两个数字说清楚。
+  // 顺延只看 runtime.port_fallback；同一时刻只显示一句。
+  const portFallback =
+    connected && connectMode === "system_proxy" ? runtime.port_fallback : null;
   let portNote: string | null = null;
   if (connectMode === "system_proxy") {
-    if (connected && runtime.mixed_port !== null && runtime.mixed_port !== proxyPort) {
-      portNote = `现在用的是 ${runtime.mixed_port}；保存的是 ${proxyPort}，下次连接生效。`;
+    if (portFallback) {
+      if (proxyPort !== portFallback.requested) {
+        const short =
+          portFallback.reason === "unavailable" ? "需要管理员权限" : "被占用";
+        portNote = `这次连接用的是 ${portFallback.actual}（${portFallback.requested} ${short}）；保存的是 ${proxyPort}，下次连接生效。`;
+      } else {
+        const why =
+          portFallback.reason === "unavailable"
+            ? "这个端口需要管理员权限"
+            : "被别的软件占用了";
+        portNote = `保存的是 ${portFallback.requested}；现在用的是 ${portFallback.actual}，${why}。`;
+      }
     } else if (connected && runtime.system_proxy_enabled) {
       portNote = "浏览器已经设好了；其它软件填这个地址。";
     } else {
@@ -1118,19 +1222,6 @@ export function Settings({
     }
   };
 
-  const pickFile = useCallback(async () => {
-    try {
-      const path = await openDialog({
-        multiple: false,
-        directory: false,
-        filters: [{ name: "节点配置", extensions: ["json"] }],
-      });
-      if (typeof path === "string") onImportPath(path);
-    } catch (error) {
-      onNotice({ level: "error", text: describePickerError(error) });
-    }
-  }, [onImportPath, onNotice]);
-
   const outcome = resetError
     ? { kind: "failed" as const, title: "重置没有开始", sub: resetError }
     : resetResult
@@ -1138,10 +1229,43 @@ export function Settings({
       : null;
   const resetTitle =
     resetPhase === "confirm"
-      ? "强制重置网络？"
+      ? "重置网络？"
       : resetPhase === "running"
         ? "正在重置网络"
-        : (outcome?.title ?? "强制重置网络？");
+        : "重置网络";
+
+  const resetStepItems = resetResult
+    ? resetResult.steps.map((step, index) => {
+        const status = resetStepStatus(step);
+        const key = canonicalResetStep(step.id);
+        const next = status === "failed" ? resetStepNext(step.id) : null;
+        const detail =
+          status === "skipped"
+            ? "前面一步没有完成，已跳过。"
+            : status === "ok"
+              ? key
+                ? RESET_STEP_DONE[key]
+                : ""
+              : key
+                ? RESET_STEP_FAILED[key]
+                : "这一步没有完成。";
+        return (
+          <li key={`${step.id}-${index}`} className={`reset-step is-${status}`}>
+            <span className="reset-step__icon" aria-hidden="true">
+              <ResetStepIcon status={status} />
+            </span>
+            <div className="reset-step__body">
+              <span className="reset-step__label">{resetStepLabel(step.id)}</span>
+              {detail ? <span className="reset-step__detail">{detail}</span> : null}
+              {next ? <span className="reset-step__next">{next}</span> : null}
+            </div>
+            <span className="reset-step__status">
+              {status === "ok" ? "已完成" : status === "failed" ? "未完成" : "未执行"}
+            </span>
+          </li>
+        );
+      })
+    : null;
 
   if (!open) return null;
 
@@ -1167,24 +1291,38 @@ export function Settings({
           </button>
         </header>
 
-        <nav className="settings-nav" aria-label="设置分区">
-          {SECTIONS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={section === item.id ? "is-active" : ""}
-              aria-current={section === item.id}
-              onClick={() => setSection(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
+        <div className="settings-nav" role="tablist" aria-label="设置分区">
+          {SECTIONS.map((item, index) => {
+            const selected = section === item.id;
+            return (
+              <button
+                key={item.id}
+                ref={(node) => {
+                  tabRefs.current[index] = node;
+                }}
+                type="button"
+                role="tab"
+                id={`settings-tab-${item.id}`}
+                aria-selected={selected}
+                aria-controls={`settings-panel-${item.id}`}
+                tabIndex={selected ? 0 : -1}
+                className={selected ? "is-active" : ""}
+                onClick={() => setSection(item.id)}
+                onKeyDown={(event) => onTabKeyDown(event, index)}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
 
         {section === "ai" ? (
-          <section className="settings-section">
-            <h3 className="settings-section__title">AI 助手</h3>
-
+          <section
+            className="settings-section"
+            role="tabpanel"
+            id="settings-panel-ai"
+            aria-labelledby="settings-tab-ai"
+          >
             <div className="settings-providers">
               <div className="settings-row">
                 <div>
@@ -1498,16 +1636,17 @@ export function Settings({
         ) : null}
 
         {section === "network" ? (
-          <section className="settings-section">
+          <section
+            className="settings-section"
+            role="tabpanel"
+            id="settings-panel-network"
+            aria-labelledby="settings-tab-network"
+          >
             <div className="settings-row">
               <div>
                 <div className="settings-row__label">现在怎么连</div>
                 <div className="settings-row__value">
-                  {connectMode === "tun"
-                    ? "全部流量走 VPN"
-                    : connectMode === "system_proxy"
-                      ? "只有设置了代理的软件走 VPN"
-                      : "还没有配置"}
+                  {connectModeText(connectMode, routingMode)}
                 </div>
                 {connectMode ? (
                   <p className="settings-note">
@@ -1521,40 +1660,19 @@ export function Settings({
                     )}
                   </p>
                 ) : (
-                  <p className="settings-note">先在左侧新建一套配置，再回来这里看。</p>
+                  <p className="settings-note">
+                    还没有配置。先在左侧新建一套。
+                    {onNewConfig ? (
+                      <button type="button" className="settings-link" onClick={onNewConfig}>
+                        新建一套配置
+                      </button>
+                    ) : null}
+                  </p>
                 )}
               </div>
             </div>
 
-            {currentNodeName && nodeCount > 1 && onOpenNodePanel ? (
-              <button
-                type="button"
-                className="settings-row settings-row--button"
-                onClick={onOpenNodePanel}
-              >
-                <div>
-                  <div className="settings-row__label">用哪个节点</div>
-                  <div className="settings-row__value">{currentNodeName}</div>
-                </div>
-                <span className="settings-row__chevron" aria-hidden>
-                  ›
-                </span>
-              </button>
-            ) : (
-              <div className="settings-row">
-                <div>
-                  <div className="settings-row__label">用哪个节点</div>
-                  <div className="settings-row__value">
-                    {currentNodeName ?? (connectMode ? "还没有节点" : "还没有配置")}
-                  </div>
-                  {currentNodeName ? null : connectMode ? (
-                    <p className="settings-note">先导入节点或更新试用节点。</p>
-                  ) : null}
-                </div>
-              </div>
-            )}
-
-            {connectMode !== "tun" ? (
+            {connectMode === "system_proxy" ? (
               portEditing ? (
               <div className="settings-row">
                 <div>
@@ -1631,7 +1749,18 @@ export function Settings({
             ) : (
               <div className="settings-row">
                 <div>
-                  <div className="settings-row__label">本地代理端口</div>
+                  <div className="settings-row__label">
+                    本地代理端口{" "}
+                    <button
+                      type="button"
+                      className="ask-ai"
+                      onClick={() =>
+                        askAi("本地代理端口", `127.0.0.1:${displayPort}`)
+                      }
+                    >
+                      问 AI
+                    </button>
+                  </div>
                   <div className="settings-port-line">
                     <code className="settings-port-address num">
                       127.0.0.1:{displayPort}
@@ -1648,12 +1777,12 @@ export function Settings({
                       {portFeedback}
                     </p>
                   ) : null}
-                  {portAvailability === "occupied" ? (
+                  {!portFallback && portAvailability === "occupied" ? (
                     <p className="settings-feedback settings-feedback--warn">
                       现在被别的软件占用，连接时会自动顺延。
                     </p>
                   ) : null}
-                  {portAvailability === "unavailable" ? (
+                  {!portFallback && portAvailability === "unavailable" ? (
                     <p className="settings-feedback settings-feedback--warn">
                       这台机器绑不了这个端口（需要管理员权限），连接时会自动顺延。
                     </p>
@@ -1684,26 +1813,30 @@ export function Settings({
               )
             ) : null}
 
-            <SeedRefreshRow
-              bridge={bridge}
-              info={seedInfo}
-              onInfo={setSeedInfo}
-              connected={connected}
-              open={open}
-            />
+            {connectMode ? (
+              <>
+                <SeedRefreshRow
+                  bridge={bridge}
+                  info={seedInfo}
+                  onInfo={setSeedInfo}
+                  connected={connected}
+                  open={open}
+                />
 
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">导入节点文件</div>
-              </div>
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => setImportOpen(true)}
-              >
-                导入
-              </button>
-            </div>
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row__label">添加节点</div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => setImportOpen(true)}
+                  >
+                    添加
+                  </button>
+                </div>
+              </>
+            ) : null}
 
             {importOpen ? (
               <div
@@ -1720,7 +1853,7 @@ export function Settings({
                 >
                   <header className="modal__head">
                     <h2 id="import-dialog-title" className="modal__title">
-                      导入节点文件
+                      添加节点
                     </h2>
                     <button
                       type="button"
@@ -1733,52 +1866,43 @@ export function Settings({
                   </header>
 
                   <p className="settings-note">
-                    导入不需要联网。文件里有节点密码，不要外传。
+                    支持多行 ss:// 链接或 https 订阅地址；文件里的节点密码不要外传。
                   </p>
 
-                  <div
-                    className={`dropzone ${dragging ? "is-dragging" : ""} ${
-                      importing ? "is-busy" : ""
-                    }`}
-                  >
-                    {importing
-                      ? "正在导入…"
-                      : dragging
-                        ? "松手即可导入"
-                        : `拖入文件，或选择`}{" "}
-                    {dragging ? null : (
-                      <button
-                        type="button"
-                        className="btn btn--ghost"
-                        onClick={() => void pickFile()}
-                        disabled={importing}
-                      >
-                        选择文件
-                      </button>
-                    )}
+                  <div className="settings-input">
+                    <textarea
+                      aria-label="节点链接或订阅地址"
+                      value={importText}
+                      rows={4}
+                      disabled={importBusy}
+                      placeholder={"ss://...\nhttps://..."}
+                      onChange={(event) => {
+                        setImportText(event.target.value);
+                        setImportError(null);
+                      }}
+                    />
                   </div>
 
                   {importResult ? (
                     <div className="settings-import">
-                      <p className="settings-feedback settings-feedback--ok">
-                        已导入 {importResult.imported} 个节点
+                      <p
+                        className={`settings-feedback ${
+                          importResult.imported > 0
+                            ? "settings-feedback--ok"
+                            : "settings-feedback--warn"
+                        }`}
+                        role="status"
+                      >
+                        {importResult.imported > 0
+                          ? `已添加 ${importResult.imported} 个节点`
+                          : "没有添加节点"}
                       </p>
-                      <ul className="settings-import__list">
-                        {importResult.profiles.map((profile) => (
-                          <li key={profile.id}>
-                            <span className="settings-import__name">{profile.name}</span>
-                            <code>
-                              {profile.server}
-                              {profile.server_port ? `:${profile.server_port}` : ""}
-                            </code>
-                          </li>
-                        ))}
-                      </ul>
                       {importResult.skipped.length > 0 ? (
                         <ul className="settings-import__skipped">
-                          {importResult.skipped.map((item) => (
-                            <li key={`${item.name}-${item.reason}`}>
-                              {item.name}：{item.reason}
+                          {importResult.skipped.map((item, index) => (
+                            <li key={`${item.name}-${item.reason}-${index}`}>
+                              {item.name ? `${item.name}：` : ""}
+                              {importSkipReason(item.reason)}
                             </li>
                           ))}
                         </ul>
@@ -1787,8 +1911,36 @@ export function Settings({
                   ) : null}
 
                   {importError ? (
-                    <p className="settings-feedback settings-feedback--error">{importError}</p>
+                    <p
+                      className="settings-feedback settings-feedback--error"
+                      role="alert"
+                    >
+                      {importError}
+                    </p>
                   ) : null}
+
+                  <div className="settings-actions">
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => setImportOpen(false)}
+                      disabled={importBusy}
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--primary"
+                      onClick={() => void submitImport()}
+                      disabled={importBusy || importText.trim() === ""}
+                    >
+                      {importBusy
+                        ? importIsUrl
+                          ? "正在获取…"
+                          : "正在添加…"
+                        : "添加"}
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : null}
@@ -1796,8 +1948,12 @@ export function Settings({
         ) : null}
 
         {section === "advanced" ? (
-          <section className="settings-section">
-            <h3 className="settings-section__title">遇到问题</h3>
+          <section
+            className="settings-section"
+            role="tabpanel"
+            id="settings-panel-advanced"
+            aria-labelledby="settings-tab-advanced"
+          >
             <p className="settings-note">
               这里的东西平时不用改。连不上网、打不开网页时再看。
             </p>
@@ -1821,17 +1977,11 @@ export function Settings({
 
             <div className="danger-zone">
               <div className="danger-zone__body">
-                <div className="danger-zone__title">强制重置网络</div>
+                <div className="danger-zone__title">重置网络</div>
                 <p className="settings-row__value">
-                  网络出问题时用。停掉 Veyl 的后台服务，把网络恢复到没有 VPN 的状态；
-                  不会删除配置和节点。
+                  把网络恢复成没装 VPN 的样子。不会删除配置和节点。
                 </p>
-                <p className="settings-note">
-                  先试上面的「清除残留代理」；还是不行，再用这个。
-                </p>
-                <p className="settings-note">
-                  能正常上网时不要用。只想断开连接，回主界面点「断开 VPN」。
-                </p>
+                <p className="settings-note">只在连不上网、其它方法都无效时用。</p>
                 {lastReset ? (
                   <p
                     className={`settings-note ${
@@ -1850,15 +2000,12 @@ export function Settings({
                 className="btn btn--danger-ghost"
                 onClick={() => setResetPhase("confirm")}
               >
-                强制重置网络
+                重置网络
               </button>
             </div>
 
             <details className="settings-fold">
-              <summary className="settings-fold__summary">
-                更新与诊断
-                <span className="settings-fold__hint">平时不用管</span>
-              </summary>
+              <summary className="settings-fold__summary">更新与诊断</summary>
               <div className="settings-fold__body">
                 <RuntimeUpgradeRow controller={coreUpgrade} />
                 <TunHelperRow controller={tunHelper} activeConnection={connected} />
@@ -1922,15 +2069,37 @@ export function Settings({
         ) : null}
 
         {section === "about" ? (
-          <section className="settings-section">
-            <h3 className="settings-section__title">关于</h3>
-
+          <section
+            className="settings-section"
+            role="tabpanel"
+            id="settings-panel-about"
+            aria-labelledby="settings-tab-about"
+          >
             <div className="settings-row">
               <div>
                 <div className="settings-row__label">版本</div>
                 <div className="settings-row__value num">v{APP_VERSION}</div>
               </div>
             </div>
+
+            {OPEN_SOURCE_URL ? (
+              <div className="settings-row">
+                <div>
+                  <div className="settings-row__label">开源与反馈</div>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => void bridge.openExternal(OPEN_SOURCE_URL)}
+                >
+                  打开仓库
+                </button>
+              </div>
+            ) : null}
+
+            <p className="settings-note">
+              AI 对话会发给你选的服务；配置、节点和日志都留在本机。
+            </p>
           </section>
         ) : null}
       </div>
@@ -1969,8 +2138,7 @@ export function Settings({
             {resetPhase === "confirm" ? (
               <div className="reset-confirm">
                 <p className="reset-confirm__warning">
-                  当前连接会立即断开。Veyl 会停掉后台服务、撤销系统代理、恢复路由和 DNS；
-                  不会删除配置和节点。
+                  会立刻断开当前连接，并撤销 Veyl 对网络的改动。不会删除配置和节点。
                 </p>
                 <p className="reset-confirm__text">正在开会或下载时，等结束再做。</p>
                 <div className="settings-actions">
@@ -1987,7 +2155,7 @@ export function Settings({
                     className="btn btn--danger-ghost"
                     onClick={() => void runNetworkReset()}
                   >
-                    强制重置
+                    重置网络
                   </button>
                 </div>
               </div>
@@ -2015,7 +2183,9 @@ export function Settings({
                   <h3 className={`reset-result__title is-${outcome.kind}`}>
                     {outcome.title}
                   </h3>
-                  <p className="reset-result__sub">{outcome.sub}</p>
+                  {outcome.sub ? (
+                    <p className="reset-result__sub">{outcome.sub}</p>
+                  ) : null}
                 </div>
 
                 {resetResult && !resetResult.verified ? (
@@ -2025,51 +2195,14 @@ export function Settings({
                 ) : null}
 
                 {resetResult && resetResult.steps.length > 0 ? (
-                  <ul className="reset-steps">
-                    {resetResult.steps.map((step, index) => {
-                      const status = resetStepStatus(step);
-                      const key = canonicalResetStep(step.id);
-                      const next = status === "failed" ? resetStepNext(step.id) : null;
-                      const detail =
-                        status === "skipped"
-                          ? "前面一步没有完成，已跳过。"
-                          : status === "ok"
-                            ? key
-                              ? RESET_STEP_DONE[key]
-                              : ""
-                            : key
-                              ? RESET_STEP_FAILED[key]
-                              : "这一步没有完成。";
-                      return (
-                        <li
-                          key={`${step.id}-${index}`}
-                          className={`reset-step is-${status}`}
-                        >
-                          <span className="reset-step__icon" aria-hidden="true">
-                            <ResetStepIcon status={status} />
-                          </span>
-                          <div className="reset-step__body">
-                            <span className="reset-step__label">
-                              {resetStepLabel(step.id)}
-                            </span>
-                            {detail ? (
-                              <span className="reset-step__detail">{detail}</span>
-                            ) : null}
-                            {next ? (
-                              <span className="reset-step__next">{next}</span>
-                            ) : null}
-                          </div>
-                          <span className="reset-step__status">
-                            {status === "ok"
-                              ? "已完成"
-                              : status === "failed"
-                                ? "未完成"
-                                : "未执行"}
-                          </span>
-                        </li>
-                      );
-                    })}
-                  </ul>
+                  outcome.kind === "success" ? (
+                    <details className="reset-route-help">
+                      <summary>查看详情</summary>
+                      <ul className="reset-steps">{resetStepItems}</ul>
+                    </details>
+                  ) : (
+                    <ul className="reset-steps">{resetStepItems}</ul>
+                  )
                 ) : null}
 
                 {resetResult?.steps.some(
@@ -2098,7 +2231,7 @@ export function Settings({
                         如果命令提示需要网关，按诊断信息里的网关补在末尾；不要删 default。
                       </li>
                       <li>不要删除 default，也不要删除你不认识的路由。</li>
-                      <li>删除后重新运行「强制重置网络」做复查。</li>
+                      <li>删除后重新运行「重置网络」做复查。</li>
                       <li>
                         Windows 用户不要执行上面的命令；请在系统设置里使用「网络重置」，或重启电脑。
                       </li>
@@ -2189,7 +2322,7 @@ function ResetStepIcon({ status }: { status: "ok" | "failed" | "skipped" }) {
 function describeResetError(error: unknown): string {
   const bridgeError = toBridgeError(error);
   if (/not found|unknown command/i.test(bridgeError.message)) {
-    return "当前版本还没有接入强制重置，请更新应用后再试。";
+    return "当前版本还没有接入重置网络，请更新应用后再试。";
   }
   // 原始错误可能带路径或英文命令，只进「复制诊断信息」。
   return "重置没有开始，请稍后再试；仍失败就复制诊断信息发给助手。";
@@ -2247,14 +2380,6 @@ function readMessage(error: unknown): string {
     return String((error as { message: unknown }).message);
   }
   return "";
-}
-
-function describePickerError(error: unknown): string {
-  const message = readMessage(error);
-  if (/plugin dialog|dialog\|open|__TAURI_INTERNALS__/i.test(message)) {
-    return "文件选择器暂时不可用，请把文件直接拖进窗口。";
-  }
-  return "无法打开文件选择器，请把文件直接拖进窗口。";
 }
 
 export function describeImportError(error: unknown): string {

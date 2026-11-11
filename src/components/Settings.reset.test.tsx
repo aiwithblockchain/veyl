@@ -69,12 +69,6 @@ function renderSettings(bridge: AgentBridge) {
       runtime={emptyRuntimeView()}
       defaultProfile={null}
       onClose={() => {}}
-      onNotice={() => {}}
-      importing={false}
-      dragging={false}
-      importResult={null}
-      importError={null}
-      onImportPath={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}
@@ -111,17 +105,17 @@ function successResult(): NetworkForceResetResult {
 }
 
 async function openConfirm() {
-  const trigger = await screen.findByRole("button", { name: "强制重置网络" });
+  const trigger = await screen.findByRole("button", { name: "重置网络" });
   // jsdom 的 click 不会移动焦点，显式模拟浏览器里点按钮后的焦点位置。
   trigger.focus();
   fireEvent.click(trigger);
   return {
     trigger,
-    dialog: await screen.findByRole("dialog", { name: "强制重置网络？" }),
+    dialog: await screen.findByRole("dialog", { name: "重置网络？" }),
   };
 }
 
-describe("强制重置网络的纯函数", () => {
+describe("重置网络的纯函数", () => {
   it("后端 id 与设计文档 id 都映射到同一个中文名", () => {
     expect(resetStepLabel("sweep_processes")).toBe("清理残留组件");
     expect(resetStepLabel("clean_leftovers")).toBe("清理残留组件");
@@ -181,10 +175,10 @@ describe("强制重置网络的纯函数", () => {
 });
 
 describe("设置 → 遇到问题 → 修复网络", () => {
-  it("强制重置独立成危险区域，入口在修复组里", async () => {
+  it("重置网络独立成危险区域，入口在修复组里", async () => {
     const bridge = makeBridge();
     renderSettings(bridge);
-    const trigger = await screen.findByRole("button", { name: "强制重置网络" });
+    const trigger = await screen.findByRole("button", { name: "重置网络" });
     expect(trigger.className).toContain("btn--danger-ghost");
     expect(trigger.closest(".danger-zone")).not.toBeNull();
     expect(screen.getByText("修复网络")).toBeTruthy();
@@ -197,12 +191,12 @@ describe("设置 → 遇到问题 → 修复网络", () => {
 
     expect(
       within(dialog).getByText(
-        "当前连接会立即断开。Veyl 会停掉后台服务、撤销系统代理、恢复路由和 DNS； 不会删除配置和节点。",
+        "会立刻断开当前连接，并撤销 Veyl 对网络的改动。不会删除配置和节点。",
         { normalizer: (text) => text.replace(/\s+/g, " ").trim() },
       ),
     ).toBeTruthy();
     expect(within(dialog).getByText("正在开会或下载时，等结束再做。")).toBeTruthy();
-    expect(within(dialog).getByRole("button", { name: "强制重置" }).className).toContain(
+    expect(within(dialog).getByRole("button", { name: "重置网络" }).className).toContain(
       "btn--danger-ghost",
     );
 
@@ -222,7 +216,7 @@ describe("设置 → 遇到问题 → 修复网络", () => {
     renderSettings(makeBridge({ networkForceReset }));
 
     const { dialog } = await openConfirm();
-    fireEvent.click(within(dialog).getByRole("button", { name: "强制重置" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "重置网络" }));
 
     const running = await screen.findByRole("dialog", { name: "正在重置网络" });
     expect(networkForceReset).toHaveBeenCalledTimes(1);
@@ -246,17 +240,28 @@ describe("设置 → 遇到问题 → 修复网络", () => {
       await pending;
     });
 
-    expect(await screen.findByRole("dialog", { name: "网络已重置" })).toBeTruthy();
+    const result = await screen.findByRole("dialog", { name: "重置网络" });
+    expect(
+      within(result).getByRole("heading", {
+        name: "网络已恢复。可以重新连接了。",
+      }),
+    ).toBeTruthy();
   });
 
-  it("成功后逐条显示八步，关闭后设置页记下上次结果", async () => {
+  it("成功只留一行结论，八步收进可展开的详情", async () => {
     const networkForceReset = vi.fn(async () => successResult());
     renderSettings(makeBridge({ networkForceReset }));
     const { trigger, dialog } = await openConfirm();
-    fireEvent.click(within(dialog).getByRole("button", { name: "强制重置" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "重置网络" }));
 
-    const result = await screen.findByRole("dialog", { name: "网络已重置" });
-    expect(within(result).getByText("八项检查都通过。需要时再点「启动 VPN」。")).toBeTruthy();
+    const result = await screen.findByRole("dialog", { name: "重置网络" });
+    expect(
+      within(result).getByText("网络已恢复。可以重新连接了。"),
+    ).toBeTruthy();
+    const details = within(result).getByText("查看详情").closest("details");
+    expect(details).not.toBeNull();
+    expect((details as HTMLDetailsElement).open).toBe(false);
+
     expect(within(result).getAllByText("已完成")).toHaveLength(8);
     expect(within(result).getByText("停止连接程序")).toBeTruthy();
     expect(within(result).getByText("关闭接管")).toBeTruthy();
@@ -269,7 +274,9 @@ describe("设置 → 遇到问题 → 修复网络", () => {
 
     fireEvent.click(within(result).getAllByRole("button", { name: "关闭" })[1]);
     await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "网络已重置" })).toBeNull(),
+      expect(
+        screen.queryByRole("dialog", { name: "网络已恢复。可以重新连接了。" }),
+      ).toBeNull(),
     );
     expect(screen.getByText("上次重置：刚刚 · 8 项全部完成")).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(trigger));
@@ -294,9 +301,12 @@ describe("设置 → 遇到问题 → 修复网络", () => {
     const networkForceReset = vi.fn(async () => failure);
     renderSettings(makeBridge({ networkForceReset }));
     const { dialog } = await openConfirm();
-    fireEvent.click(within(dialog).getByRole("button", { name: "强制重置" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "重置网络" }));
 
-    const result = await screen.findByRole("dialog", { name: "重置没有完成" });
+    const result = await screen.findByRole("dialog", { name: "重置网络" });
+    expect(
+      within(result).getByRole("heading", { name: "重置没有完成" }),
+    ).toBeTruthy();
     expect(within(result).getByText("未完成")).toBeTruthy();
     // 后端 detail 可能带命令和路径：界面用固定文案，原文只进诊断复制。
     expect(within(result).getByText("系统路由还有残留。")).toBeTruthy();
@@ -317,10 +327,13 @@ describe("设置 → 遇到问题 → 修复网络", () => {
     const networkForceReset = vi.fn(async () => partial);
     renderSettings(makeBridge({ networkForceReset }));
     const { dialog } = await openConfirm();
-    fireEvent.click(within(dialog).getByRole("button", { name: "强制重置" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "重置网络" }));
 
+    const result = await screen.findByRole("dialog", { name: "重置网络" });
     expect(
-      await screen.findByRole("dialog", { name: "网络已重置，但有 1 项没完成" }),
+      within(result).getByRole("heading", {
+        name: "网络已重置，但有 1 项没完成",
+      }),
     ).toBeTruthy();
   });
 
@@ -330,10 +343,13 @@ describe("设置 → 遇到问题 → 修复网络", () => {
     });
     renderSettings(makeBridge({ networkForceReset }));
     const { dialog } = await openConfirm();
-    fireEvent.click(within(dialog).getByRole("button", { name: "强制重置" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "重置网络" }));
 
-    const result = await screen.findByRole("dialog", { name: "重置没有开始" });
-    expect(within(result).getByText("当前版本还没有接入强制重置，请更新应用后再试。")).toBeTruthy();
+    const result = await screen.findByRole("dialog", { name: "重置网络" });
+    expect(
+      within(result).getByRole("heading", { name: "重置没有开始" }),
+    ).toBeTruthy();
+    expect(within(result).getByText("当前版本还没有接入重置网络，请更新应用后再试。")).toBeTruthy();
     expect(within(result).queryByText("已完成")).toBeNull();
   });
 
@@ -343,7 +359,7 @@ describe("设置 → 遇到问题 → 修复网络", () => {
     fireEvent.keyDown(window, { key: "Escape" });
 
     await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "强制重置网络？" })).toBeNull(),
+      expect(screen.queryByRole("dialog", { name: "重置网络？" })).toBeNull(),
     );
     expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
   });
@@ -354,12 +370,12 @@ describe("设置 → 遇到问题 → 修复网络", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
 
     await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "强制重置网络？" })).toBeNull(),
+      expect(screen.queryByRole("dialog", { name: "重置网络？" })).toBeNull(),
     );
     expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
   });
 
-  it("连点两次「强制重置」只调用一次命令", async () => {
+  it("连点两次「重置网络」只调用一次命令", async () => {
     let resolveReset!: (value: NetworkForceResetResult) => void;
     const pending = new Promise<NetworkForceResetResult>((resolve) => {
       resolveReset = resolve;
@@ -368,7 +384,7 @@ describe("设置 → 遇到问题 → 修复网络", () => {
     renderSettings(makeBridge({ networkForceReset }));
     const { dialog } = await openConfirm();
 
-    const confirm = within(dialog).getByRole("button", { name: "强制重置" });
+    const confirm = within(dialog).getByRole("button", { name: "重置网络" });
     fireEvent.click(confirm);
     fireEvent.click(confirm);
 
@@ -391,7 +407,7 @@ describe("设置 → 遇到问题 → 修复网络", () => {
     const focusInSettings = vi.fn();
     settingsDialog!.addEventListener("focusin", focusInSettings);
 
-    const confirm = within(dialog).getByRole("button", { name: "强制重置" });
+    const confirm = within(dialog).getByRole("button", { name: "重置网络" });
     confirm.focus();
     focusInSettings.mockClear();
 

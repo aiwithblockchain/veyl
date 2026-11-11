@@ -8,7 +8,6 @@ import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, shouldRefreshSnapshotO
 import type {
   ConfigCreateInput,
   DefaultProfileStatus,
-  ImportSeedResult,
   PendingQuestion,
 } from "./agent/bridge";
 import { BridgeError, toBridgeError } from "./agent/errors";
@@ -112,11 +111,9 @@ export default function App() {
   // 每次状态迁移都整体覆盖，非失败迁移自然复位。
   const [failedAfterConnected, setFailedAfterConnected] = useState(false);
   const [appNotice, setAppNotice] = useState<AppNotice | null>(null);
-  const [dragging, setDragging] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<ImportSeedResult | null>(null);
-  const [importError, setImportError] = useState<string | null>(null);
   const [aiReady, setAiReady] = useState(false);
+  // 当前服务商的显示名；未配置或读取失败时为空，由助手头部决定回退文案。
+  const [aiProviderName, setAiProviderName] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingLoaded, setOnboardingLoaded] = useState(false);
   const [historyReady, setHistoryReady] = useState(false);
@@ -137,7 +134,6 @@ export default function App() {
   // 新建配置里点「AI 协助」但还没配 AI：先交给 AI 配置模块，结束后回到同一入口。
   const [newConfigAiSetup, setNewConfigAiSetup] = useState(false);
   const [systemRegion, setSystemRegion] = useState<string | null>(null);
-  const [nodeSheetSignal, setNodeSheetSignal] = useState(0);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const [justOnboarded, setJustOnboarded] = useState(false);
   const vpn = useVpnSession(
@@ -209,8 +205,9 @@ export default function App() {
 
   const session = activeSession(state);
 
-  const openSettings = (section: SettingsSection = "ai") => {
-    setSettingsSection(section);
+  // 不带分区时沿用上次记住的 tab（问 AI 返回靠它）；诊断、导入、AI 未配置会显式指定。
+  const openSettings = (section?: SettingsSection) => {
+    if (section) setSettingsSection(section);
     setSettingsOpen(true);
   };
 
@@ -290,9 +287,14 @@ export default function App() {
         bridge.llmProviderList().catch(() => null),
       ]);
       const ready = isAiReady({ key, providers });
+      const activeProvider =
+        providers?.providers.find(
+          (provider) => provider.providerId === providers?.activeProviderId,
+        ) ?? null;
       const wasReady = aiConfiguredRef.current;
       aiConfiguredRef.current = ready;
       setAiReady(ready);
+      setAiProviderName(activeProvider?.name?.trim() || null);
       if (!initial && !wasReady && ready) maybeAutoOpenPanel();
       return {
         ready,
@@ -319,20 +321,13 @@ export default function App() {
       if (importingRef.current) return;
 
       importingRef.current = true;
-      setImporting(true);
-      setImportError(null);
-      setImportResult(null);
       try {
         const result = await bridge.importSeedFile(path);
-        setImportResult(result);
         setAppNotice({ level: "info", text: `已导入 ${result.imported} 个节点` });
       } catch (error) {
-        const message = describeImportError(error);
-        setImportError(message);
-        setAppNotice({ level: "error", text: message });
+        setAppNotice({ level: "error", text: describeImportError(error) });
       } finally {
         importingRef.current = false;
-        setImporting(false);
       }
     },
     [bridge],
@@ -347,22 +342,16 @@ export default function App() {
     void getCurrentWebview()
       .onDragDropEvent((event) => {
         const payload = event.payload;
-        if (payload.type === "enter" || payload.type === "over") {
-          setDragging(true);
-        } else if (payload.type === "leave") {
-          setDragging(false);
-        } else if (payload.type === "drop") {
-          setDragging(false);
-          if (payload.paths.length > 1) {
-            setAppNotice({
-              level: "error",
-              text: `一次只能导入一个文件，你拖入了 ${payload.paths.length} 个，请逐个拖入。`,
-            });
-            return;
-          }
-          const path = payload.paths[0];
-          if (path) void importPath(path);
+        if (payload.type !== "drop") return;
+        if (payload.paths.length > 1) {
+          setAppNotice({
+            level: "error",
+            text: `一次只能导入一个文件，你拖入了 ${payload.paths.length} 个，请逐个拖入。`,
+          });
+          return;
         }
+        const path = payload.paths[0];
+        if (path) void importPath(path);
       })
       .then((off) => {
         if (disposed) off();
@@ -1198,6 +1187,7 @@ export default function App() {
       sessions={state.sessions}
       activeSessionId={state.activeSessionId}
       aiReady={aiReady}
+      aiProviderName={aiProviderName}
       hasEverConnected={hasEverConnected}
       hasConfigs={vpn.configs.length > 0}
       focusSignal={composerFocusSignal}
@@ -1279,7 +1269,6 @@ export default function App() {
         seedUpdate={Boolean(defaultProfile?.newVersionAvailable)}
         proxyPort={proxyPort}
         region={systemRegion}
-        openNodeSheetSignal={nodeSheetSignal}
         loading={vpn.loading}
         runtime={runtime}
         failedAfterConnected={failedAfterConnected}
@@ -1395,27 +1384,13 @@ export default function App() {
         proxyPort={proxyPort}
         onProxyPortSaved={setProxyPort}
         connectMode={vpn.activeConfig?.connect_mode ?? null}
-        currentNodeName={
-          vpn.activeConfig?.nodes.find(
-            (node) => node.node_id === vpn.activeConfig?.current_node_id,
-          )?.name ?? null
-        }
-        nodeCount={vpn.activeConfig?.nodes.length ?? 0}
-        onOpenNodePanel={() => {
-          setSettingsOpen(false);
-          setNodeSheetSignal((current) => current + 1);
-        }}
+        routingMode={vpn.activeConfig?.routing_mode ?? null}
+        configId={vpn.activeConfig?.config_id ?? null}
         onNewConfig={() => {
           setSettingsOpen(false);
           setNewConfigOpen(true);
         }}
         onClose={closeSettings}
-        onNotice={setAppNotice}
-        importing={importing}
-        dragging={settingsOpen && dragging}
-        importResult={importResult}
-        importError={importError}
-        onImportPath={importPath}
         onRestartOnboarding={() => {
           setSettingsOpen(false);
           setShowOnboarding(true);
@@ -1426,8 +1401,9 @@ export default function App() {
           setSettingsOpen(false);
           void handleRestoreNetwork();
         }}
-        onAskAi={(text) => {
-          setSettingsOpen(false);
+        onAskAi={(text, section) => {
+          setSettingsSection(section);
+          closeSettings();
           handleAskAi(text);
         }}
       />

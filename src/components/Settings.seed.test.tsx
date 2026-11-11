@@ -82,13 +82,8 @@ function renderSettings(
       bridge={bridge}
       runtime={runtime}
       defaultProfile={options.profile ?? profile()}
+      connectMode="system_proxy"
       onClose={() => {}}
-      onNotice={() => {}}
-      importing={false}
-      dragging={false}
-      importResult={null}
-      importError={null}
-      onImportPath={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}
@@ -276,8 +271,8 @@ describe("设置页试用节点行", () => {
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
     expect(await screen.findByText("已更新 6 个节点，共 18 个。")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "遇到问题" }));
-    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    fireEvent.click(screen.getByRole("tab", { name: "遇到问题" }));
+    fireEvent.click(screen.getByRole("tab", { name: "连接" }));
 
     expect(await screen.findByText(/18 个节点/)).toBeTruthy();
   });

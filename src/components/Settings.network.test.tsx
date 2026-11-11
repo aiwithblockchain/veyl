@@ -53,6 +53,8 @@ function makeBridge(
     llmProviderList: vi.fn(async () => ({ providers, activeProviderId })),
     defaultProfileRefresh: vi.fn(),
     defaultProfileStatus: vi.fn(),
+    nodeImportText: vi.fn(async () => ({ imported: 1, skipped: [], nodes: [] })),
+    nodeImportUrl: vi.fn(async () => ({ imported: 2, skipped: [], nodes: [] })),
   } as unknown as AgentBridge;
 }
 
@@ -64,20 +66,22 @@ function renderSettings(
   bridge: AgentBridge,
   {
     connectMode = null,
-    currentNodeName = null,
-    nodeCount = 0,
+    routingMode = null,
+    configId = "cfg_1",
     section = "network",
     runtimeView = runtime(),
-    onOpenNodePanel,
+    proxyPort,
     onNewConfig,
+    onAskAi,
   }: {
     connectMode?: "tun" | "system_proxy" | null;
-    currentNodeName?: string | null;
-    nodeCount?: number;
+    routingMode?: "direct" | "proxy_all" | "proxy_selected" | null;
+    configId?: string | null;
     section?: "ai" | "network" | "advanced" | "about";
     runtimeView?: RuntimeView;
-    onOpenNodePanel?: () => void;
+    proxyPort?: number;
     onNewConfig?: () => void;
+    onAskAi?: (text: string, section: string) => void;
   } = {},
 ) {
   return render(
@@ -87,51 +91,74 @@ function renderSettings(
       runtime={runtimeView}
       defaultProfile={null}
       connectMode={connectMode}
-      currentNodeName={currentNodeName}
-      nodeCount={nodeCount}
-      onOpenNodePanel={onOpenNodePanel}
+      routingMode={routingMode}
+      configId={configId}
+      proxyPort={proxyPort}
       onNewConfig={onNewConfig}
       onClose={() => {}}
-      onNotice={() => {}}
-      importing={false}
-      dragging={false}
-      importResult={null}
-      importError={null}
-      onImportPath={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}
-      onAskAi={() => {}}
+      onAskAi={onAskAi ?? (() => {})}
       initialSection={section}
     />,
   );
 }
 
+async function openAddDialog() {
+  fireEvent.click(await screen.findByRole("button", { name: "添加" }));
+  return screen.findByRole("dialog", { name: "添加节点" });
+}
+
 describe("连接 tab", () => {
-  it("全部流量配置显示行为描述与换方式的入口", async () => {
+  it("三种连接方式各用一句行为描述", async () => {
+    renderSettings(makeBridge(), { connectMode: "tun" });
+    expect(await screen.findByText("全部软件走 VPN")).toBeTruthy();
+    cleanup();
+
+    renderSettings(makeBridge(), {
+      connectMode: "system_proxy",
+      routingMode: "proxy_selected",
+    });
+    expect(await screen.findByText("只有填了地址的软件走 VPN")).toBeTruthy();
+    cleanup();
+
+    renderSettings(makeBridge(), {
+      connectMode: "system_proxy",
+      routingMode: "proxy_all",
+    });
+    expect(await screen.findByText("浏览器走 VPN")).toBeTruthy();
+  });
+
+  it("全部软件配置显示换方式的入口", async () => {
     const onNewConfig = vi.fn();
     renderSettings(makeBridge(), { connectMode: "tun", onNewConfig });
     expect(await screen.findByText("现在怎么连")).toBeTruthy();
-    expect(screen.getByText("全部流量走 VPN")).toBeTruthy();
     expect(screen.getByText(/要换方式/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "新建一套配置" }));
     expect(onNewConfig).toHaveBeenCalledTimes(1);
   });
 
-  it("代理配置显示行为描述", async () => {
-    renderSettings(makeBridge(), { connectMode: "system_proxy" });
-    expect(await screen.findByText("只有设置了代理的软件走 VPN")).toBeTruthy();
-    expect(screen.queryByText("全部流量走 VPN")).toBeNull();
+  it("没有配置时只留一句指路和新建链接，不显示端口、试用节点与添加节点", async () => {
+    const onNewConfig = vi.fn();
+    renderSettings(makeBridge(), { connectMode: null, onNewConfig });
+    expect(await screen.findByText("还没有配置")).toBeTruthy();
+    expect(screen.getByText(/先在左侧新建一套/)).toBeTruthy();
+    expect(screen.queryByText("本地代理端口")).toBeNull();
+    expect(document.querySelector(".seed-refresh")).toBeNull();
+    expect(screen.queryByText("添加节点")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "新建一套配置" }));
+    expect(onNewConfig).toHaveBeenCalledTimes(1);
   });
 
-  it("没有配置时说明先去新建", async () => {
-    renderSettings(makeBridge(), { connectMode: null });
-    const values = await screen.findAllByText("还没有配置");
-    expect(values.length).toBeGreaterThan(0);
-    expect(screen.getByText("先在左侧新建一套配置，再回来这里看。")).toBeTruthy();
+  it("用哪个节点整行已删除，节点切换只在主界面底部", async () => {
+    renderSettings(makeBridge(), { connectMode: "tun" });
+    await screen.findByText("现在怎么连");
+    expect(screen.queryByText("用哪个节点")).toBeNull();
   });
 
-  it("代理已连接时给出可复制的本机地址", async () => {
+  it("已连接代理时显示实际端口与系统已设好的说明", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -140,168 +167,211 @@ describe("连接 tab", () => {
 
     renderSettings(makeBridge(), {
       connectMode: "system_proxy",
+      routingMode: "proxy_selected",
       runtimeView: runtime({ state: "running", mixed_port: 2080, system_proxy_enabled: true }),
     });
 
     expect(await screen.findByText("127.0.0.1:2080")).toBeTruthy();
     expect(
-      screen.getByText("现在用的是 2080；保存的是 7890，下次连接生效。"),
+      screen.getByText("浏览器已经设好了；其它软件填这个地址。"),
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "复制" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("127.0.0.1:2080"));
   });
 
-  it("多个节点时整行可点，直接打开节点面板", async () => {
-    const onOpenNodePanel = vi.fn();
+  it("端口顺延时只出现一条说明，用 port_fallback 的两个数字", async () => {
     renderSettings(makeBridge(), {
-      connectMode: "tun",
-      currentNodeName: "东京 01",
-      nodeCount: 2,
-      onOpenNodePanel,
+      connectMode: "system_proxy",
+      routingMode: "proxy_selected",
+      runtimeView: runtime({
+        state: "running",
+        mixed_port: 8080,
+        system_proxy_enabled: true,
+        port_fallback: { requested: 7890, actual: 8080, reason: "occupied" },
+      }),
     });
 
-    expect(await screen.findByText("用哪个节点")).toBeTruthy();
-    expect(screen.getByText("东京 01")).toBeTruthy();
-    expect(screen.getByText("›")).toBeTruthy();
-    expect(screen.queryByText("点这里可以换节点。")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /用哪个节点/ }));
-    expect(onOpenNodePanel).toHaveBeenCalledTimes(1);
-  });
-
-  it("只有一个节点时不可点，也没有 ›", async () => {
-    renderSettings(makeBridge(), {
-      connectMode: "tun",
-      currentNodeName: "东京 01",
-      nodeCount: 1,
-    });
-    expect(await screen.findByText("东京 01")).toBeTruthy();
-    expect(screen.queryByText("这套配置只有一个节点。")).toBeNull();
-    expect(screen.queryByRole("button", { name: /用哪个节点/ })).toBeNull();
-    expect(screen.queryByText("›")).toBeNull();
-  });
-
-  it("没有节点时指到导入或试用节点", async () => {
-    renderSettings(makeBridge(), { connectMode: "tun", currentNodeName: null });
-    expect(await screen.findByText("还没有节点")).toBeTruthy();
-    expect(screen.getByText("先导入节点或更新试用节点。")).toBeTruthy();
-  });
-
-  it("导入收成一行，点开弹层才有拖放区与密码提醒", async () => {
-    renderSettings(makeBridge(), { connectMode: "tun" });
-    expect(await screen.findByText("导入节点文件")).toBeTruthy();
-    expect(screen.queryByText("导入不需要联网。")).toBeNull();
-    expect(screen.queryByRole("button", { name: "选择文件" })).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "导入" }));
-
-    const dialog = await screen.findByRole("dialog", { name: "导入节点文件" });
     expect(
-      within(dialog).getByText("导入不需要联网。文件里有节点密码，不要外传。"),
+      await screen.findByText("保存的是 7890；现在用的是 8080，被别的软件占用了。"),
     ).toBeTruthy();
-    expect(within(dialog).getByRole("button", { name: "选择文件" })).toBeTruthy();
+    expect(screen.queryByText(/下次连接生效/)).toBeNull();
+    expect(screen.queryByText("浏览器已经设好了；其它软件填这个地址。")).toBeNull();
+  });
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
-    expect(screen.queryByRole("dialog", { name: "导入节点文件" })).toBeNull();
+  it("权限原因用另一句，不冒充被占用", async () => {
+    renderSettings(makeBridge(), {
+      connectMode: "system_proxy",
+      routingMode: "proxy_selected",
+      proxyPort: 80,
+      runtimeView: runtime({
+        state: "running",
+        mixed_port: 7890,
+        port_fallback: { requested: 80, actual: 7890, reason: "unavailable" },
+      }),
+    });
+
+    expect(
+      await screen.findByText("保存的是 80；现在用的是 7890，这个端口需要管理员权限。"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/被别的软件占用了/)).toBeNull();
+  });
+
+  it("端口行标签旁有「问 AI」，并把当前 tab 一起带出去", async () => {
+    const onAskAi = vi.fn();
+    renderSettings(makeBridge(), {
+      connectMode: "system_proxy",
+      routingMode: "proxy_selected",
+      onAskAi,
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "问 AI" }));
+    expect(onAskAi).toHaveBeenCalledWith(
+      expect.stringContaining("127.0.0.1:7890"),
+      "network",
+    );
   });
 
   it("网络页不出现修复动作", async () => {
     renderSettings(makeBridge(), { connectMode: "system_proxy" });
     await screen.findByText("现在怎么连");
     expect(screen.queryByText("清除残留代理")).toBeNull();
-    expect(screen.queryByText("强制重置网络")).toBeNull();
+    expect(screen.queryByText("重置网络")).toBeNull();
   });
 });
 
-describe("删除项与旧入口", () => {
-  it("网络页不再有代理模式、本地端口、恢复直连与问 AI", async () => {
+describe("添加节点", () => {
+  it("空输入时「添加」禁用，弹层不再有文件选择", async () => {
     renderSettings(makeBridge(), { connectMode: "tun" });
+    expect(await screen.findByText("添加节点")).toBeTruthy();
+    const dialog = await openAddDialog();
+
+    expect(
+      within(dialog).getByText(
+        "支持多行 ss:// 链接或 https 订阅地址；文件里的节点密码不要外传。",
+      ),
+    ).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "选择文件" })).toBeNull();
+    expect(
+      (within(dialog).getByRole("button", { name: "添加" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("ss:// 文本走 node_import_text，跳过原因用中文", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeImportText: ReturnType<typeof vi.fn> }).nodeImportText =
+      vi.fn(async () => ({
+        imported: 1,
+        skipped: [{ name: "旧节点", reason: "duplicate" }],
+        nodes: [],
+      }));
+
+    renderSettings(bridge, { connectMode: "tun" });
+    const dialog = await openAddDialog();
+    const field = within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" });
+
+    fireEvent.change(field, { target: { value: "ss://abc\nss://def" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
+
+    await waitFor(() =>
+      expect(bridge.nodeImportText).toHaveBeenCalledWith("ss://abc\nss://def", "cfg_1"),
+    );
+    expect(await within(dialog).findByText("已添加 1 个节点")).toBeTruthy();
+    expect(within(dialog).getByText("旧节点：已有同名节点")).toBeTruthy();
+    expect(within(dialog).queryByText("duplicate")).toBeNull();
+  });
+
+  it("https 订阅走 node_import_url", async () => {
+    const bridge = makeBridge();
+    renderSettings(bridge, { connectMode: "tun" });
+    const dialog = await openAddDialog();
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
+      { target: { value: "https://sub.example/nodes" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
+
+    await waitFor(() =>
+      expect(bridge.nodeImportUrl).toHaveBeenCalledWith(
+        "https://sub.example/nodes",
+        "cfg_1",
+      ),
+    );
+    expect(await within(dialog).findByText("已添加 2 个节点")).toBeTruthy();
+  });
+
+  it("http 订阅直接拒绝，不发请求", async () => {
+    const bridge = makeBridge();
+    renderSettings(bridge, { connectMode: "tun" });
+    const dialog = await openAddDialog();
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
+      { target: { value: "http://sub.example/nodes" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
+
+    expect(await within(dialog).findByText("订阅地址要用 https，不能是 http。")).toBeTruthy();
+    expect(bridge.nodeImportText).not.toHaveBeenCalled();
+    expect(bridge.nodeImportUrl).not.toHaveBeenCalled();
+  });
+
+  it("没有当前配置时给出提示，不静默只进节点池", async () => {
+    const bridge = makeBridge();
+    renderSettings(bridge, { connectMode: "system_proxy", configId: null });
+    const dialog = await openAddDialog();
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
+      { target: { value: "ss://abc" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
+
+    expect(
+      await within(dialog).findByText("先在左侧选一套配置，再添加节点。"),
+    ).toBeTruthy();
+    expect(bridge.nodeImportText).not.toHaveBeenCalled();
+  });
+});
+
+describe("tab 语义与键盘", () => {
+  it("第一个 tab 改名 AI 服务，四个 tab 有 tab 角色", async () => {
+    renderSettings(makeBridge(), { section: "ai" });
+    await screen.findByText("用哪个 AI 服务");
+    expect(
+      screen.getAllByRole("tab").map((tab) => tab.textContent),
+    ).toEqual(["AI 服务", "连接", "遇到问题", "关于"]);
+    expect(document.querySelector(".settings-section__title")).toBeNull();
+  });
+
+  it("四个 tab 都有对应的 tabpanel", async () => {
+    for (const section of ["ai", "network", "advanced", "about"] as const) {
+      renderSettings(makeBridge(), { section, connectMode: "system_proxy" });
+      await screen.findByRole("tabpanel");
+      const panel = screen.getByRole("tabpanel");
+      expect(panel.id).toBe(`settings-panel-${section}`);
+      expect(panel.getAttribute("aria-labelledby")).toBe(`settings-tab-${section}`);
+      cleanup();
+    }
+  });
+
+  it("方向键切换 tab 并移动焦点", async () => {
+    renderSettings(makeBridge(), { section: "network" });
     await screen.findByText("现在怎么连");
-    expect(screen.queryByText("代理模式")).toBeNull();
-    expect(screen.queryByText("本地端口")).toBeNull();
-    expect(screen.queryByText("恢复直连")).toBeNull();
-    expect(screen.queryByRole("button", { name: "问 AI" })).toBeNull();
-  });
+    const tabs = screen.getAllByRole("tab");
 
-  it("高级页不再有日志级别、测试节点地址、事件源与旧按钮", async () => {
-    renderSettings(makeBridge(), { section: "advanced" });
-    await screen.findByText("遇到问题", { selector: ".settings-section__title" });
-    expect(screen.queryByText("日志级别")).toBeNull();
-    expect(screen.queryByText("测试节点地址")).toBeNull();
-    expect(screen.queryByText("事件源")).toBeNull();
-    expect(screen.queryByText("bootstrap.json")).toBeNull();
-    expect(screen.queryByRole("button", { name: "检查并更新" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "用随包版本继续" })).toBeNull();
-  });
+    fireEvent.keyDown(tabs[1], { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: "遇到问题" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "遇到问题" }));
 
-  it("关于页只剩版本，不再有日志与首次引导", async () => {
-    renderSettings(makeBridge(), { section: "about" });
-    expect(await screen.findByText("版本")).toBeTruthy();
-    expect(screen.queryByText("日志")).toBeNull();
-    expect(screen.queryByText("首次引导")).toBeNull();
-  });
-
-  it("正式构建不出现重新运行引导，DEV 才保留", async () => {
-    vi.stubEnv("DEV", false);
-    renderSettings(makeBridge(), { section: "advanced" });
-    await screen.findByText("更新与诊断");
-    expect(screen.queryByText("重新运行引导")).toBeNull();
+    fireEvent.keyDown(screen.getByRole("tab", { name: "遇到问题" }), { key: "End" });
+    expect(screen.getByRole("tab", { name: "关于" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
   });
 });
 
-describe("遇到问题 tab", () => {
-  it("代理模式未连接时在修复组显示清除残留代理", async () => {
-    renderSettings(makeBridge(), { section: "advanced", connectMode: "system_proxy" });
-    expect(
-      await screen.findByText("清除残留代理", { selector: ".settings-row__label" }),
-    ).toBeTruthy();
-    expect(screen.getByText("不会影响「全部流量」的接管。")).toBeTruthy();
-  });
-
-  it("全部流量且没有残留时不显示清除残留代理", async () => {
-    renderSettings(makeBridge(), { section: "advanced", connectMode: "tun" });
-    await screen.findByText("修复网络");
-    expect(screen.queryByText("清除残留代理")).toBeNull();
-  });
-
-  it("正在连接代理时不显示清除残留代理", async () => {
-    renderSettings(makeBridge(), {
-      section: "advanced",
-      connectMode: "system_proxy",
-      runtimeView: runtime({ state: "running", mixed_port: 2080 }),
-    });
-    await screen.findByText("修复网络");
-    expect(screen.queryByText("清除残留代理")).toBeNull();
-  });
-
-  it("首句说明平时不用改，维护区默认收起", async () => {
-    renderSettings(makeBridge(), { section: "advanced" });
-    expect(
-      await screen.findByText("这里的东西平时不用改。连不上网、打不开网页时再看。"),
-    ).toBeTruthy();
-    const fold = document.querySelector("details.settings-fold") as HTMLDetailsElement;
-    expect(fold).not.toBeNull();
-    expect(fold.open).toBe(false);
-    expect(screen.getByText("更新与诊断")).toBeTruthy();
-    expect(screen.getByText("平时不用管")).toBeTruthy();
-  });
-
-  it("强制重置独立成危险区域，说明什么时候用与不该用", async () => {
-    renderSettings(makeBridge(), { section: "advanced" });
-    const zone = (
-      await screen.findByText("强制重置网络", { selector: ".danger-zone__title" })
-    ).closest(".danger-zone") as HTMLElement;
-    expect(zone).not.toBeNull();
-    expect(
-      screen.getByText(/网络出问题时用。停掉 Veyl 的后台服务/),
-    ).toBeTruthy();
-    expect(screen.getByText("能正常上网时不要用。只想断开连接，回主界面点「断开 VPN」。")).toBeTruthy();
-    expect(
-      screen.getByRole("button", { name: "强制重置网络" }).className,
-    ).toContain("btn--danger-ghost");
-  });
-});
-
-describe("AI 助手 tab", () => {
+describe("AI 服务 tab", () => {
   it("只有一个服务列表，没有基础/高级切换与独立 Key 表单", async () => {
     renderSettings(makeBridge(), { section: "ai" });
     expect(await screen.findByText("用哪个 AI 服务")).toBeTruthy();
@@ -332,5 +402,73 @@ describe("AI 助手 tab", () => {
         "切换当前使用的服务会开始一个新会话，之前对话的上下文不会带过去。",
       ),
     ).toBeTruthy();
+  });
+});
+
+describe("遇到问题 tab", () => {
+  it("页内标题已删除，首句说明仍在", async () => {
+    renderSettings(makeBridge(), { section: "advanced" });
+    expect(
+      await screen.findByText("这里的东西平时不用改。连不上网、打不开网页时再看。"),
+    ).toBeTruthy();
+    expect(document.querySelector(".settings-section__title")).toBeNull();
+  });
+
+  it("代理模式未连接时在修复组显示清除残留代理", async () => {
+    renderSettings(makeBridge(), { section: "advanced", connectMode: "system_proxy" });
+    expect(
+      await screen.findByText("清除残留代理", { selector: ".settings-row__label" }),
+    ).toBeTruthy();
+    expect(screen.getByText("不会影响「全部流量」的接管。")).toBeTruthy();
+  });
+
+  it("全部流量且没有残留时不显示清除残留代理", async () => {
+    renderSettings(makeBridge(), { section: "advanced", connectMode: "tun" });
+    await screen.findByText("修复网络");
+    expect(screen.queryByText("清除残留代理")).toBeNull();
+  });
+
+  it("正在连接代理时不显示清除残留代理", async () => {
+    renderSettings(makeBridge(), {
+      section: "advanced",
+      connectMode: "system_proxy",
+      runtimeView: runtime({ state: "running", mixed_port: 2080 }),
+    });
+    await screen.findByText("修复网络");
+    expect(screen.queryByText("清除残留代理")).toBeNull();
+  });
+
+  it("维护区默认收起", async () => {
+    renderSettings(makeBridge(), { section: "advanced" });
+    const fold = document.querySelector("details.settings-fold") as HTMLDetailsElement;
+    expect(fold).not.toBeNull();
+    expect(fold.open).toBe(false);
+    expect(screen.getByText("更新与诊断")).toBeTruthy();
+  });
+});
+
+describe("关于 tab", () => {
+  it("版本与数据去向；没有仓库地址时不摆空链接", async () => {
+    renderSettings(makeBridge(), { section: "about" });
+    expect(await screen.findByText("版本")).toBeTruthy();
+    expect(
+      screen.getByText("AI 对话会发给你选的服务；配置、节点和日志都留在本机。"),
+    ).toBeTruthy();
+    expect(screen.queryByText("开源与反馈")).toBeNull();
+    expect(screen.queryByRole("button", { name: "打开仓库" })).toBeNull();
+    expect(document.querySelector(".settings-section__title")).toBeNull();
+  });
+});
+
+describe("文案扫描", () => {
+  it("可见文本没有禁用词与英文跳过原因", async () => {
+    for (const section of ["ai", "network", "advanced", "about"] as const) {
+      renderSettings(makeBridge(), { section, connectMode: "system_proxy" });
+      await screen.findByRole("tab", { name: "AI 服务" });
+      const text = document.querySelector(".modal--settings")?.textContent ?? "";
+      expect(text).not.toMatch(/proxy|TUN|分流|规则集/i);
+      expect(text).not.toMatch(/duplicate|malformed|unsupported/);
+      cleanup();
+    }
   });
 });

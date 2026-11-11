@@ -29,6 +29,8 @@ interface Props {
   sessions: Session[];
   activeSessionId: string;
   aiReady: boolean;
+  /** 当前服务商显示名；未知为 null，未配置时助手头部显示「未连接 AI」。 */
+  aiProviderName: string | null;
   hasEverConnected: boolean;
   hasConfigs: boolean;
   /** 递增这个值会把焦点移到输入框，并切回对话页。 */
@@ -70,6 +72,7 @@ export function AiPanel({
   sessions,
   activeSessionId,
   aiReady,
+  aiProviderName,
   hasEverConnected,
   hasConfigs,
   focusSignal,
@@ -188,7 +191,9 @@ export function AiPanel({
         ) : (
           <div className="ai-panel__id">
             <span className="ai-panel__name">助手</span>
-            <span className="ai-panel__model">{aiReady ? "DeepSeek" : "未连接 AI"}</span>
+            <span className="ai-panel__model">
+              {aiReady ? aiProviderName?.trim() || "AI" : "未连接 AI"}
+            </span>
           </div>
         )}
         <div className="ai-panel__head-right">

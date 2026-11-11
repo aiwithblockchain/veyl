@@ -14,7 +14,7 @@
 | 协议 | `NodeProtocol` 增加 `shadowsocks`，wire 值为 `"shadowsocks"` |
 | method | P1 **只支持 `aes-256-gcm`**，其余返回 `UNSUPPORTED`，**不静默降级** |
 | 凭据 | `password` 与 uuid 同级，属凭据：列表接口不返回、不进 SQLite 明文、不进日志、不进模型上下文 |
-| 导入通道 | **两条入口、一套实现**：窗口级拖放 + 设置页「选择文件」按钮，都调 `import_seed_file({ path })`（§5.2） |
+| 导入通道 | **当前**：两条入口、一套实现——窗口级拖放 + 设置页「选择文件」按钮，都调 `import_seed_file({ path })`。**目标**：设置页改走文本 / 订阅 / 文件三条通道（`node_import_text` / `node_import_url` / 待定 `node_import_file`），拖放随文件通道迁走（§5.2） |
 | UI | 设置页加一个「选择文件」按钮；窗口接受拖放。profile 列表的协议标签可选 |
 
 ---
@@ -123,11 +123,13 @@ ProtocolConfig::Shadowsocks { server, server_port, method, password }
 
 现在只有 `ProfileImport(node_id)` 走目录服务。种子文件里的节点不在目录服务里，没有 `node_id` 可查。为了做真实连通性验证，需要一个把「本地文件 → profile + 凭据」落地的通道。
 
-### 5.2 通道选择：两条入口，一套实现
+### 5.2 通道选择：两条入口，一套实现（当前）
 
 > **2026-11-02 最终决定（当日修订一次）**。此前试过五条路，被否决的理由都记在下面 —— 它们不是「没想到」，是试过之后有意不用。
 >
 > 最初只定了拖放；同一天用户明确要求还要能从目录里选文件。**这不是第二条导入管线**：两条入口共用同一个前端 handler，最终都调 `import_seed_file({ path })`。
+>
+> **2026-11-11 口径**：以下是当时的现状，不是最终形态。当前调用方仍是这两条，都调 `import_seed_file`；**目标状态**是设置页改走文本 / 订阅 / 文件三条通道（`node_import_text` / `node_import_url` / 待定 `node_import_file`），窗口拖放随文件通道迁走。B 批次真正落地前，不要写成「已不再使用」。
 
 | 通道 | 结论 | 说明 |
 |---|---|---|
@@ -154,7 +156,9 @@ ProtocolConfig::Shadowsocks { server, server_port, method, password }
 
 自动化（CI / 测试）继续用 `veyl-runtime-selftest import-seeds`，**它与两条 UI 入口共用同一套 `seed_import` 解析**。
 
-### 5.3 导入流程：拿到路径 → `import_seed_file`
+### 5.3 当前导入流程：拿到路径 → `import_seed_file`
+
+> 这是 **2026-11-11 前的当前流程**。目标流程见 §5.2 的迁移目标：设置页先接文本 / 订阅，文件入口与拖放等 `node_import_file` 落地后迁走。
 
 ```
 用户拖放 或 点「选择文件」
@@ -341,7 +345,7 @@ seed 文件的 sing-box outbound ┘
 
 ### 5.7 产品化的本地导入
 
-P1 已有最小形态：窗口拖放 + 设置页「选择文件」按钮，共用 `import_seed_file`。
+P1 已有最小形态：窗口拖放 + 设置页「选择文件」按钮，共用 `import_seed_file`。这是**当前状态**；目标状态见 §5.2 的迁移目标（设置页改走文本 / 订阅 / 文件三条通道，拖放随文件通道迁走）。
 
 P2 要做的是**节点管理**（列出 / 重命名 / 删除本地导入项），不是再开第三条导入路径 —— 任何新入口都必须汇到同一个 handler。
 

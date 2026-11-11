@@ -88,12 +88,6 @@ function Harness({
         setOpen(false);
         onClose();
       }}
-      onNotice={() => {}}
-      importing={false}
-      dragging={false}
-      importResult={null}
-      importError={null}
-      onImportPath={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}
@@ -157,16 +151,21 @@ describe("端口行默认态", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("127.0.0.1:2080"));
   });
 
-  it("已连接且实际端口不同于保存值：两个数字都说清楚", () => {
+  it("已连接且本次端口顺延：两个数字都说清楚，只讲一句", () => {
     renderHarness({
       bridge: makeBridge().bridge,
       initialPort: 7890,
-      runtimeView: runtime({ state: "running", mixed_port: 8081 }),
+      runtimeView: runtime({
+        state: "running",
+        mixed_port: 8081,
+        port_fallback: { requested: 7890, actual: 8081, reason: "occupied" },
+      }),
     });
     expect(screen.getByText("127.0.0.1:8081")).toBeTruthy();
     expect(
-      screen.getByText("现在用的是 8081；保存的是 7890，下次连接生效。"),
+      screen.getByText("保存的是 7890；现在用的是 8081，被别的软件占用了。"),
     ).toBeTruthy();
+    expect(screen.queryByText(/下次连接生效/)).toBeNull();
   });
 
   it("已连接且端口一致：用系统代理已设好的说明", () => {
@@ -241,7 +240,7 @@ describe("端口行编辑态", () => {
     beginEdit();
     fireEvent.change(input(), { target: { value: "8081" } });
 
-    fireEvent.click(screen.getByText("导入节点文件"));
+    fireEvent.click(screen.getByText("添加节点"));
 
     expect(input().value).toBe("8081");
     expect(screen.getByRole("button", { name: /保存/ })).toBeTruthy();
@@ -263,8 +262,8 @@ describe("端口行编辑态", () => {
     beginEdit();
     fireEvent.change(input(), { target: { value: "8081" } });
 
-    fireEvent.click(screen.getByRole("button", { name: "关于" }));
-    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    fireEvent.click(screen.getByRole("tab", { name: "关于" }));
+    fireEvent.click(screen.getByRole("tab", { name: "连接" }));
 
     expect(screen.queryByLabelText("本地代理端口")).toBeNull();
     expect(screen.getByText("127.0.0.1:7890")).toBeTruthy();
@@ -386,6 +385,30 @@ describe("端口保存", () => {
     expect(screen.getByText("127.0.0.1:2080")).toBeTruthy();
   });
 
+  it("已连接且本次顺延时，保存新端口合成一句，不叠第二次", async () => {
+    const { bridge } = makeBridge();
+    renderHarness({
+      bridge,
+      initialPort: 7890,
+      runtimeView: runtime({
+        state: "running",
+        mixed_port: 8080,
+        port_fallback: { requested: 7890, actual: 8080, reason: "occupied" },
+      }),
+    });
+    beginEdit();
+    fireEvent.change(input(), { target: { value: "9000" } });
+    save();
+
+    expect(
+      await screen.findByText(
+        "这次连接用的是 8080（7890 被占用）；保存的是 9000，下次连接生效。",
+      ),
+    ).toBeTruthy();
+    expect(screen.getAllByText(/下次连接生效/)).toHaveLength(1);
+    expect(screen.getByText("127.0.0.1:8080")).toBeTruthy();
+  });
+
   it("保存失败：留在编辑态，输入不丢，用后端 message", async () => {
     const { bridge } = makeBridge(async () => {
       throw { code: "INVALID_ARGUMENT", message: "端口被系统拒绝" };
@@ -496,13 +519,15 @@ describe("连接页其它行", () => {
     expect(within(row).queryByText(/Veyl 提供的/)).toBeNull();
   });
 
-  it("导入行不再写「导入不需要联网」，弹层里有", async () => {
+  it("添加节点行不再写文件导入，弹层说明支持链接与订阅", async () => {
     renderHarness({ bridge: makeBridge().bridge });
     expect(screen.queryByText("导入不需要联网。")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "导入" }));
-    const dialog = await screen.findByRole("dialog", { name: "导入节点文件" });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    const dialog = await screen.findByRole("dialog", { name: "添加节点" });
     expect(
-      within(dialog).getByText("导入不需要联网。文件里有节点密码，不要外传。"),
+      within(dialog).getByText(
+        "支持多行 ss:// 链接或 https 订阅地址；文件里的节点密码不要外传。",
+      ),
     ).toBeTruthy();
   });
 });
