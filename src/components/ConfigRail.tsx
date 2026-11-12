@@ -139,7 +139,9 @@ export function ConfigRail({
                     setDrawerOpen(false);
                   }}
                 >
-                  <span className="config__name">{config.name}</span>
+                  <span className="config__name" title={config.name}>
+                    {config.name}
+                  </span>
                   <span className="config__meta">
                     {config.node_count} 个节点 · {levelLabel(config)}
                   </span>
