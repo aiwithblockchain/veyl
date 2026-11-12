@@ -869,6 +869,60 @@ async fn config_create_requires_a_node_source() {
     }
 }
 
+/// 用户点过「解释这个设置的含义」后，模型不能把解释当确认去建配置。
+#[tokio::test]
+async fn config_create_refuses_while_an_explanation_is_pending() {
+    let (svc, rec) = FakeServices::new();
+    let all = tools(svc);
+    const SESSION: &str = "boundary-explain-pending";
+    const REQUEST: &str = "req_explain";
+
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    crate::agent::questions::register(
+        SESSION,
+        REQUEST,
+        claurst_tools::UserQuestionEvent {
+            question: "怎么接管？".into(),
+            options: Some(vec!["TUN 模式".into(), "Proxy 模式".into()]),
+            reply_tx: tx,
+        },
+    );
+    let question_id = crate::agent::questions::list_pending(SESSION)["questions"][0]
+        ["question_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    crate::agent::questions::reply(
+        SESSION,
+        &question_id,
+        crate::agent::questions::EXPLAIN_ANSWER,
+    )
+    .unwrap();
+    crate::tools::policy::set_current_request(SESSION, REQUEST);
+
+    let (is_error, env) = run_in_session(
+        tool(&all, "ConfigCreate"),
+        json!({
+            "name": "公司",
+            "connect_mode": "tun",
+            "routing_mode": "proxy_all",
+            "node_ids": ["nod_1"]
+        }),
+        SESSION,
+    )
+    .await;
+    assert!(is_error, "{env}");
+    assert_eq!(env["error"]["code"], "PRECONDITION_FAILED", "{env}");
+    assert_eq!(
+        env["error"]["details"]["reason"], "explanation_pending",
+        "{env}"
+    );
+    assert!(rec.take().is_empty(), "门禁命中时不能产生任何副作用：{env}");
+
+    crate::tools::policy::clear_current_request(SESSION);
+    crate::agent::questions::cleanup_request(SESSION, REQUEST);
+}
+
 /// 三个写入路径的 schema 只收两档；`proxy_selected` 已下线。
 #[test]
 fn routing_mode_schemas_only_allow_two_values() {

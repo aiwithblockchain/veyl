@@ -246,7 +246,7 @@ grep -a -c "sk-" "$HOME/.veyl/secrets.enc" || true
 在右栏输入一句明确的指令，例如：
 
 ```
-用你们的测试节点，帮我建一套「只给代理地址」的配置并连上，尽量别问我太多。
+用 Veyl 免费节点，帮我建一套「只给代理地址」的配置并连上，尽量别问我太多。
 ```
 
 ### 6.2 应该看到什么
@@ -277,7 +277,7 @@ ls -la "$HOME/.veyl/runtime"
 
 | 现象 | 最可能的原因 | 怎么办 |
 |---|---|---|
-| AI 调 `CatalogSearch` 后报 `CATALOG_UNAVAILABLE` | **默认节点目录指向本地 mock**（`http://127.0.0.1:18090/v1`），真机上没有这个服务 | 这是已知问题，记录下来；改口说「不要用目录，直接用测试节点（seed）建配置」 |
+| AI 调 `CatalogSearch` 后报 `CATALOG_UNAVAILABLE` | **默认节点目录指向本地 mock**（`http://127.0.0.1:18090/v1`），真机上没有这个服务 | 这是已知问题，记录下来；改口说「不要用目录，直接用 Veyl 免费节点（seed）建配置」 |
 | AI 直接调 `VpnConnect`，报「还没有安装 sing-box，先调用 CoreInstall」 | 没有任何 UI 能装内核，只有 AI 工具能装 | 明确说「先 CoreInstall 1.14.4，再建配置、再连接」 |
 | `CoreInstall` 失败 | GitHub 下载被墙/被现有 VPN 干扰 | 先确认 §1 干净；看 `runtime-*.log` 和终端输出；换网络再试 |
 | 配置建好了但中间没有节点 | `source` 不是 `seed`，建了空配置 | 让 AI 用 `ConfigCreate` 带 `source: "seed"` 重来 |

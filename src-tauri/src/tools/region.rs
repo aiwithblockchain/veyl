@@ -1,4 +1,4 @@
-//! 生效地区写入工具（`docs/contracts/tools.md` 3.10.0）。
+//! 生效地区写入工具（`docs/contracts/tools.md` 3.10.1）。
 
 use std::sync::Arc;
 

@@ -883,7 +883,7 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 **2.0 删掉了「没有 active 就用默认配置包」的第二级回退。**
 
-> 旧回退存在的理由是「全新安装没有 profile，只有默认包」。新模型里测试节点也必须落成一套配置才会出现在左栏，全新安装的空态是「还没有配置」，此时**应该引导用户新建，而不是替他连一条他没选过的线路**。没有配置就报 `no_config`，由 UI 的空态与 AI 的 `source_choice` 接住。
+> 旧回退存在的理由是「全新安装没有 profile，只有默认包」。新模型里 Veyl 免费节点也必须落成一套配置才会出现在左栏，全新安装的空态是「还没有配置」，此时**应该引导用户新建，而不是替他连一条他没选过的线路**。没有配置就报 `no_config`，由 UI 的空态与 AI 的 `source_choice` 接住。
 
 **不变量（必须实现，不是行为描述）**
 
@@ -1557,11 +1557,15 @@ type LlmTestResult = { ok: boolean; latency_ms: number | null; error?: string };
 |---|---|
 | `answer` 取值（普通提问） | 接受**任何非空文本**，原样作为回答回给模型；空字符串 = 跳过。用户不必被选项卡住，打字说清楚就行 |
 | `answer` 取值（`core_upgrade_confirm`） | 装包授权**必须逐字等于该问题 `options` 之一**（不 trim、不归一大小写），否则 → `INVALID_ARGUMENT / answer_not_in_options`；空字符串仍是跳过 |
-| 默认节点同意 | 只有逐字选中规范选项「用 Veyl 提供的测试节点（仅供试用）」才授予；用户自由作答不授予，模型重问一次是预期行为 |
+| 默认节点同意 | 只有逐字选中规范选项「Veyl 免费节点（仅供试用）」才授予；用户自由作答不授予，模型重问一次是预期行为 |
+| 解释答案 | `解释这个设置的含义` 是提问卡片上的固定按钮，回传时就是这串字。协议上它仍是普通非空文本：Host 不解析、不拦截、不特殊处理；语义（不当作答、不推进、不构成节点同意）由提示词约束。Host 只在本请求内记一个「收到过解释串」的标记，用于 `ConfigCreate` 的解释门禁；用户任意其它回答即清除该标记 |
 | 回答落库 | 送达模型后写一条 `role = "user"` 的聊天记录（`content` 为回答原文）；只是历史，不会重复喂给模型。空字符串（跳过）不写 |
 | 一个 `questionId` 只能回答一次 | 第二次及以后 → `NOT_FOUND / question_not_pending` |
 | 超时后 | 同上（Host 已代答空串） |
 | 会话不匹配 | **同样返回 `question_not_pending`**，不区分「不存在」与「属于别的会话」——否则这个命令会变成跨会话探测问题的工具 |
+
+**「解释这个设置的含义」不改变协议**：回答仍是非空文本，没有新增字段或事件，本文件版本不变（2.18.0）；
+它是提示词层的保留值，不是新的回答类型。
 
 ```ts
 type PendingQuestion = {
@@ -1777,7 +1781,7 @@ type RulesStatus = {
 | 命令 | 能力 ID | 界面元素 / 块 | 说明 |
 |---|---|---|---|
 | `config_list` | **K1** 列出与查看配置 | 左栏配置列表 | 配置级导航；节点级是 B1 |
-| `config_create` | **K2** 新建配置（数据来源：C1 / B4） | `source_choice` | 块只负责「用测试节点 / 用我自己的节点」两个选项；落库是本命令 |
+| `config_create` | **K2** 新建配置（数据来源：C1 / B4） | `source_choice` | 块只负责「用 Veyl 免费节点 / 用我自己的节点」两个选项；落库是本命令 |
 | `config_detail` | **K1** 列出与查看配置 / **B1** 列出节点 | 底部节点详情 + 节点下拉 | 固定骨架元素 |
 | `config_update` | **K4** 编辑配置（分流持久化侧：G1） | 设置页 / 左栏编辑 | 在线切换是 G2，批 3 |
 | `config_delete` | **K5** 删除配置（破坏性，需二次确认） | 左栏项操作 | |
@@ -1824,7 +1828,7 @@ type RulesStatus = {
 | `测试连通` | D6 | `node_probe` |
 | `empty_hint` | 无（纯文本） | — |
 | `proxy_card` | A5 | `proxy_params` |
-| `source_choice` | C1 / B4 | `config_create`（选「用测试节点」带 `source: "seed"`） |
+| `source_choice` | C1 / B4 | `config_create`（选「用 Veyl 免费节点」带 `source: "seed"`） |
 | `reachability` | D1 | `probe_run` |
 | `issue_card` | J1–J4 / E1–E2 | `issue_*`、`net_repair`（**E3 不在其中**：重置网络是独立命令 `network_force_reset`，见 §7.9） |
 | `update_hint` | C2 / C3 | `default_profile_status` |
@@ -1951,10 +1955,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.18.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.10.0 / `events.md` 2.12.0 矩阵同步 |
+| `contracts/commands.md` | **2.18.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.10.1 / `events.md` 2.12.0 矩阵同步 |
 | `contracts/events.md` | **2.12.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.10.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 |
+| `contracts/tools.md` | **3.10.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 |
 | `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -1980,6 +1984,7 @@ type RulesStatus = {
 | 4 | §7.3 的 `RuntimeSnapshot.contract_version` 同步 `runtime.md` 2.8.0；§15.5 矩阵同步 `events.md` 2.12.0、`runtime.md` 2.8.0、`tools.md` 3.10.0 | 元数据 | `RuntimeSnapshot` 的所有者是 `runtime.md` |
 | 5 | **不向后兼容**：`config_create` / `config_update` / `route_set_mode` 的写入路径只接受 `direct \| proxy_all`；`proxy_selected` → `INVALID_ARGUMENT / routing_mode_not_supported`，未知值仍是 `invalid_routing_mode`；`targets` 参数保留但无效果；读旧值仍允许 | 枚举收紧 | 产品拍板界面只有两档；数据层留旧值，不做迁移 |
 | 6 | **不向后兼容**：`config_create` 的 `source` 与非空 `nodeIds` 必须给一个；都缺、`source = "empty"`、空 `nodeIds` → `INVALID_ARGUMENT / source_required`。界面与 AI 都不再允许创建空配置 | 语义收紧 | 两问流程必有一个来源；空配置会在连接时才暴露 `no_nodes` |
+| 7 | §9.6 补「解释这个设置的含义」：它是提问卡片上的固定按钮，回传时只是普通非空文本，Host 不解析；免费节点同意选项原文修正为 `Veyl 免费节点（仅供试用）` | 说明 | 选项文案与后端逐字匹配对齐；协议与版本不变 |
 
 ### 2.17.0（2026-11-12，问题报告：开文件夹与开邮件）
 

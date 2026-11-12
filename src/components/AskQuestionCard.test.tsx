@@ -108,6 +108,166 @@ describe("AskQuestionCard", () => {
     expect(screen.getByText("直接在下面说你的想法。")).toBeTruthy();
   });
 
+  it("有选项时有「解释这个设置的含义」入口", () => {
+    render(
+      <AskQuestionCard question={question()} onAnswer={vi.fn(async () => {})} onExpire={() => {}} />,
+    );
+
+    expect(screen.getByRole("button", { name: "解释这个设置的含义" })).toBeTruthy();
+  });
+
+  it("没有选项时不出现解释入口", () => {
+    render(
+      <AskQuestionCard
+        question={question({ options: [] })}
+        onAnswer={vi.fn(async () => {})}
+        onExpire={() => {}}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "解释这个设置的含义" })).toBeNull();
+  });
+
+  it("选项里只有解释文案时按无选项处理", () => {
+    render(
+      <AskQuestionCard
+        question={question({ options: ["解释这个设置的含义"] })}
+        onAnswer={vi.fn(async () => {})}
+        onExpire={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("直接在下面说你的想法。")).toBeTruthy();
+    expect(document.querySelector(".ask-card__explain")).toBeNull();
+    expect(document.querySelector(".ask-card__option")).toBeNull();
+  });
+
+  it("确认卡不出现解释入口，选项照常渲染", () => {
+    render(
+      <AskQuestionCard
+        question={question({ options: ["创建", "取消"] })}
+        onAnswer={vi.fn(async () => {})}
+        onExpire={() => {}}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "解释这个设置的含义" })).toBeNull();
+    expect(screen.getByRole("button", { name: "创建" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "取消" })).toBeTruthy();
+  });
+
+  it("「关闭」类确认卡同样不出现解释入口", () => {
+    render(
+      <AskQuestionCard
+        question={question({ options: ["升级", "关闭"] })}
+        onAnswer={vi.fn(async () => {})}
+        onExpire={() => {}}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "解释这个设置的含义" })).toBeNull();
+    expect(screen.getByRole("button", { name: "升级" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "关闭" })).toBeTruthy();
+  });
+
+  it("普通两选项设置卡仍有解释入口", () => {
+    render(
+      <AskQuestionCard
+        question={question({ options: ["浏览器上网页", "桌面软件也要用"] })}
+        onAnswer={vi.fn(async () => {})}
+        onExpire={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "解释这个设置的含义" })).toBeTruthy();
+  });
+
+  it("尾随空格的解释文案同样被过滤", () => {
+    render(
+      <AskQuestionCard
+        question={question({ options: ["解释这个设置的含义 "] })}
+        onAnswer={vi.fn(async () => {})}
+        onExpire={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("直接在下面说你的想法。")).toBeTruthy();
+    expect(document.querySelector(".ask-card__explain")).toBeNull();
+    expect(document.querySelector(".ask-card__option")).toBeNull();
+  });
+
+  it("点解释说逐字回传约定值", async () => {
+    const onAnswer = vi.fn(async () => {});
+    render(<AskQuestionCard question={question()} onAnswer={onAnswer} onExpire={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "解释这个设置的含义" }));
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith("解释这个设置的含义"));
+  });
+
+  it("submitting 期间解释行不可点", () => {
+    const onAnswer = vi.fn(() => new Promise<void>(() => {}));
+    render(<AskQuestionCard question={question()} onAnswer={onAnswer} onExpire={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "解释这个设置的含义" }));
+
+    expect(onAnswer).toHaveBeenCalledTimes(1);
+    expect(
+      (screen.getByRole("button", { name: "解释这个设置的含义" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("换下一题后解释行恢复可用", () => {
+    const onAnswer = vi.fn(() => new Promise<void>(() => {}));
+    const { rerender } = render(
+      <AskQuestionCard question={question()} onAnswer={onAnswer} onExpire={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "解释这个设置的含义" }));
+    const explain = screen.getByRole("button", { name: "解释这个设置的含义" });
+    expect((explain as HTMLButtonElement).disabled).toBe(true);
+
+    rerender(
+      <AskQuestionCard
+        question={question({ questionId: "q_2" })}
+        onAnswer={onAnswer}
+        onExpire={() => {}}
+      />,
+    );
+
+    expect(
+      (screen.getByRole("button", { name: "解释这个设置的含义" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("解释行在选项容器之外", () => {
+    render(
+      <AskQuestionCard question={question()} onAnswer={vi.fn(async () => {})} onExpire={() => {}} />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "解释这个设置的含义" }).closest(".ask-card__options"),
+    ).toBeNull();
+  });
+
+  it("模型把解释文案写进选项时只留一个，选项区不含它", () => {
+    const onAnswer = vi.fn(async () => {});
+    render(
+      <AskQuestionCard
+        question={question({ options: ["浏览网页", "解释这个设置的含义", "桌面软件"] })}
+        onAnswer={onAnswer}
+        onExpire={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getAllByRole("button", { name: "解释这个设置的含义" }),
+    ).toHaveLength(1);
+    const optionLabels = Array.from(
+      document.querySelectorAll(".ask-card__options .ask-card__option"),
+    ).map((option) => option.textContent);
+    expect(optionLabels).toEqual(["浏览网页", "桌面软件"]);
+  });
+
   it("跳过回传空串，只结束这一问", async () => {
     const onAnswer = vi.fn(async () => {});
     render(<AskQuestionCard question={question()} onAnswer={onAnswer} onExpire={() => {}} />);

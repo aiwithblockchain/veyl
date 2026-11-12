@@ -1,4 +1,3 @@
-import { DEFAULT_PROXY_PORT } from "../agent/bridge";
 import type {
   ConfigConnectMode,
   ConfigDetail,
@@ -13,34 +12,6 @@ export type ConnectMode = ConfigConnectMode;
 export const MOCK_CONFIG_STORAGE_KEY = "veyl.configs.mock.v1";
 
 const MOCK_PROXY_PORT = 7890;
-
-export function portLabel(
-  config: Pick<ConfigSummary, "connect_mode">,
-  proxyPort = DEFAULT_PROXY_PORT,
-): string {
-  // TUN 不使用这个端口；本机代理由全局设置决定，listen_port 已废弃。
-  if (config.connect_mode === "tun") return "自动";
-  return String(proxyPort);
-}
-
-export function nameTaken(
-  name: string,
-  configs: readonly Pick<ConfigSummary, "name">[],
-): boolean {
-  const trimmed = name.trim();
-  return configs.some((config) => config.name === trimmed);
-}
-
-export function uniqueConfigName(
-  base: string,
-  configs: readonly Pick<ConfigSummary, "name">[],
-): string {
-  const names = new Set(configs.map((config) => config.name));
-  if (!names.has(base)) return base;
-  let index = 2;
-  while (names.has(`${base} ${index}`)) index += 1;
-  return `${base} ${index}`;
-}
 
 /** 新建配置的默认名：「配置 N」，N 取当前未被占用的最小整数。 */
 export function nextConfigName(

@@ -58,9 +58,9 @@
 | **F4** | 切换当前服务商 | 列表操作 | 是 | 否 | `llm_provider_activate` |
 | **F5** | 测试服务商连通性 | 按钮 | 是 | 否 | `llm_provider_test` |
 | **G1** | 查看当前分流方式 | 文本 | 是 | 否 | ⚠️ 需新增 `route_get`。返回里要能区分「已生效到当前连接」与「下次连接生效」 |
-| **G2** | 切换分流方式 | 选项 | 是 | 否 | ⚠️ 需新增 `route_set_mode`。三种模式 direct / proxy_all / proxy_selected；前两者之间热切，跨家族**必须确认后重连** |
+| **G2** | 切换分流方式 | 选项 | 是 | 否 | ⚠️ 需新增 `route_set_mode`。**只有两档 `direct` / `proxy_all`**，已连接时热切；旧配置 `proxy_selected` 切出才需确认后重连 |
 | **G3** | 更新分流规则数据 | 按钮 | 是 | 否 | ⚠️ 需新增 `rules_status` / `rules_update`。未连接时排队，下次连上再执行，不报失败 |
-| **G4** | 用户自定义分流 | 表单 / 对话 | 是 | 否 | ⚠️ 需新增 `rule_custom_add` / `rule_custom_list` / `rule_custom_delete`，以及 `route_targets_set`（指定服务）。叠在预置规则之上，**种子更新时不被覆盖** |
+| **G4** | 用户自定义分流 | 表单 / 对话 | 是 | 否 | ⚠️ 需新增 `rule_custom_add` / `rule_custom_list` / `rule_custom_delete`；按服务挑选（`route_targets_set`）已随 `proxy_selected` 下线。自定义规则叠在预置规则之上，**种子更新时不被覆盖** |
 | **H1** | 读取本机环境参数 | AI 工具 | 是 | 否 | ⚠️ 需新增：时区、区域、语言，**不需要联网** |
 | **H2** | 读取出口 IP 与归属国家 | AI 工具 | **否**（未连接时返回空） | 否 | ⚠️ 需新增 |
 | **I1** | 读取分类目录 | AI 工具 | 是 | 否 | ⚠️ 需新增 `category_list`：分类 id、中英文名、描述、条目数 |

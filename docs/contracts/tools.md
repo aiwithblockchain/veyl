@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.10.0`
+> 契约版本：`3.10.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.10.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.10.1`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.10.0";
+  contract_version: "3.10.1";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -859,7 +859,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.10.0";
+  contract_version: "3.10.1";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1022,7 +1022,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.10.0";
+  contract_version: "3.10.1";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1253,6 +1253,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 | 回答 | 用户通过 `reply_user_question` 回传：普通提问接受任何非空文本，`core_upgrade_confirm` 必须逐字等于 `options` 之一；空串 = 跳过（`commands.md` §9.6） |
 | 超时 | 15 分钟未答 → Host 代回空串（等同跳过） |
 | 多选 | **不支持**（Claurst 通道本身不支持） |
+| 解释行 | UI 在**带选项、且不是确认卡**的卡片底部加固定按钮 `解释这个设置的含义`；点击回传的就是这串字，工具层只当普通文本，语义由提示词约束（不当作答、不推进、不构成节点同意） |
 
 **`options` 必须非空，且每一项都是非空字符串**：`options` 缺失、为空数组、或含全空白项时，**不发事件**，直接把这次工具调用以 `INVALID_ARGUMENT` 结束。
 
@@ -1314,11 +1315,15 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 - `targets` **已废弃**：写入路径不再接受 `proxy_selected`，本参数不产生任何效果。
 - **不接受 `listen_port`**：本地代理端口是用户设置（`commands.md` §7.11），不在配置里；带上该字段会被 schema 拒绝（`additionalProperties: false`）。
 - **连接方式不给默认值**：`system_proxy` 与 `tun` 是两种接管方式，模型必须显式选。
+- **解释门禁**：本请求里用户刚点过或打过 `解释这个设置的含义`、还没有做任何真实选择时，
+  `ConfigCreate` → `PRECONDITION_FAILED`，`details.reason = "explanation_pending"`。
+  模型**不得重试或换参数绕过**：把原问题（或确认问题）逐字重问，等用户真正选完再建。
+  用户做出任何其它回答即离开解释状态。
 - 未连接时新建的配置会自动成为 active；已连接时不自动切换（与 `commands.md` §3.2 一致）。
 
 `next_actions`：创建成功后给出 `VpnConnect`（一级/二级）或 `ProxyParams`（三级）。
 
-错误：`INVALID_ARGUMENT`（`source_required` / `routing_mode_not_supported` / `invalid_routing_mode`）、`CONFLICT`（`duplicate_name`）、`NOT_FOUND`、`PRECONDITION_FAILED`、`UNSUPPORTED`。
+错误：`INVALID_ARGUMENT`（`source_required` / `routing_mode_not_supported` / `invalid_routing_mode`）、`CONFLICT`（`duplicate_name`）、`NOT_FOUND`、`PRECONDITION_FAILED`（`seed_unavailable` / `explanation_pending`）、`UNSUPPORTED`。
 
 ---
 
@@ -1914,7 +1919,7 @@ type CoreUpgradeData = {
 ### 5.1 标准连接链路
 
 ```
-用测试节点：    ConfigCreate(source = "seed") → VpnConnect
+用 Veyl 免费节点：ConfigCreate(source = "seed") → VpnConnect
 用我自己的节点：NodeImportUrl / NodeCreate → ConfigCreate(node_ids) → VpnConnect
 换节点：        NodeSwitch
 换一套方案：    ConfigCreate → ConfigActivate（UI）/ VpnConnect({ config_id })
@@ -2010,6 +2015,14 @@ type CoreUpgradeData = {
 
 ## 8. 变更记录
 
+### 3.10.1（2026-11-12，解释门禁）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.10.1` | 元数据 | `ConfigCreate` 增解释门禁 |
+| 2 | §4.24 错误原因新增 `PRECONDITION_FAILED / explanation_pending`：本请求收到过解释串、用户尚未选择，禁止建配置；模型应把原问题重问，不得重试绕过 | 约束 | 评审：解释入口需要 Host 兜底 |
+| 3 | §4.22 解释行明确只挂在设置类卡片，确认卡（`创建` / `取消`）不显示 | 说明 | 同一评审：确认卡没有设置可解释 |
+
 ### 3.10.0（2026-11-12，新增 `SetUserRegion` 地区写入）
 
 | # | 变更 | 类型 | 决议来源 |
@@ -2021,6 +2034,7 @@ type CoreUpgradeData = {
 | 5 | `TOOL_COPY` 键集合要求同步到 47 个（实现侧待补 `SetUserRegion`） | 元数据 | 少一个名字，新工具就会露出原始名 |
 | 6 | **不向后兼容**：`ConfigCreate` / `ConfigUpdate` / `RouteSetMode` 的 schema 只收 `direct \| proxy_all`；`proxy_selected` → `INVALID_ARGUMENT / routing_mode_not_supported`，未知值 → `invalid_routing_mode`；`targets` 参数保留但无效果 | 枚举收紧 | 产品拍板界面只有两档；数据层留旧值 |
 | 7 | **不向后兼容**：`ConfigCreate` 的 `source` 或非空 `node_ids` 必须给一个（schema `anyOf` + `minItems: 1`）；都缺、`source = "empty"`、空数组 → `source_required`。AI 不再允许创建空配置 | 语义收紧 | 两问流程必有一个来源 |
+| 8 | §4.22 补一行：带选项卡片底部的 `解释这个设置的含义` 由 UI 提供，回传文本原样透传，工具层不感知 | 说明 | 与 `commands.md` §9.6 同批；版本不变 |
 
 ### 3.9.0（2026-11-12，新增 `IssueReport` 问题报告）
 

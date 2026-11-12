@@ -9,6 +9,17 @@ interface Props {
   onExpire: () => void;
 }
 
+/** 与后端约定的逐字回答：不算选择，只请 AI 解释这道题的选项含义。 */
+export const EXPLAIN_ANSWER = "解释这个设置的含义";
+
+const CANCEL_LABEL =
+  /^(取消|关闭|不了|暂不|暂时不|不用|稍后|先不|不创建|不升级|不更新)$/;
+
+/** 两选一且有一个是取消，就是确认卡：没有「设置」可解释，解释答案也最容易被当成同意。 */
+function isConfirmCard(options: readonly string[]): boolean {
+  return options.length === 2 && options.some((option) => CANCEL_LABEL.test(option.trim()));
+}
+
 function formatCountdown(ms: number): string {
   const total = Math.max(0, Math.ceil(ms / 1000));
   const minutes = Math.floor(total / 60);
@@ -72,6 +83,11 @@ export function AskQuestionCard({ question, onAnswer, onExpire }: Props) {
     if (!submittingRef.current) void answer("");
   }, [answer]);
 
+  // 模型可能把解释文案写进选项：界面固定行只留一个，尾随空格的变体也算。
+  const options = question.options.filter((option) => option.trim() !== EXPLAIN_ANSWER);
+  const hasOptions = options.length > 0;
+  const showExplain = hasOptions && !isConfirmCard(options);
+
   return (
     <section className="ask-card" aria-label="需要你的回答">
       <div className="ask-card__head">
@@ -84,9 +100,9 @@ export function AskQuestionCard({ question, onAnswer, onExpire }: Props) {
         </span>
       </div>
 
-      {question.options.length > 0 ? (
+      {hasOptions ? (
         <div className="ask-card__options">
-          {question.options.map((option, index) => (
+          {options.map((option, index) => (
             <button
               key={index}
               type="button"
@@ -101,6 +117,17 @@ export function AskQuestionCard({ question, onAnswer, onExpire }: Props) {
       ) : (
         <p className="ask-card__hint">直接在下面说你的想法。</p>
       )}
+
+      {showExplain ? (
+        <button
+          type="button"
+          className="ask-card__explain"
+          disabled={submitting}
+          onClick={() => void answer(EXPLAIN_ANSWER)}
+        >
+          {EXPLAIN_ANSWER}
+        </button>
+      ) : null}
 
       <button
         type="button"

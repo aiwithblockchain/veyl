@@ -327,6 +327,25 @@ impl Tool for ConfigCreateTool {
                 )
             }
         };
+        // 用户刚点过「解释这个设置的含义」、还没做真实选择：模型可能把它当成确认。
+        // 必须先把同一问题再问一遍，等用户选完才能建配置。
+        if let Some(request_id) = crate::tools::policy::current_request_id(&ctx.session_id) {
+            if crate::agent::questions::explain_pending(&ctx.session_id, &request_id) {
+                return envelope::finish(
+                    ctx,
+                    "ConfigCreate",
+                    ToolOutcome::fail(
+                        AivpnError::new(
+                            "PRECONDITION_FAILED",
+                            "用户点了解释，还没有做选择。把同一个问题重新问一遍，等用户选完再建。",
+                        )
+                        .with_details(json!({ "reason": "explanation_pending" })),
+                    )
+                    .with_changed(Changed::None),
+                );
+            }
+        }
+
         // `seed` 会把用户接到我们的服务器上，必须先问过并得到明确选择——这是与
         // 节点来源分开的另一道门禁。来源本身由 `require_node_source` 在工具层与
         // 命令层校验：source 与 node_ids 都缺省、`source: "empty"` 或空数组都会

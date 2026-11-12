@@ -62,6 +62,9 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// 提问卡片上的固定入口「解释这个设置的含义」回传的原文。与前端逐字一致。
+pub const EXPLAIN_ANSWER: &str = "解释这个设置的含义";
+
 /// 节点来源那一问的规范选项。**只认这一串，逐字相等**。
 ///
 /// 曾经用「答案包含『默认节点』」判断，模型问「不使用默认节点」、用户选了它，
@@ -87,6 +90,36 @@ fn record_seed_consent(session_id: &str, request_id: &str) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert((session_id.to_string(), request_id.to_string()));
+}
+
+/// 用户点了「解释这个设置的含义」、还没做真实选择的记录，键是 (session_id, request_id)。
+///
+/// 确认卡（创建 / 取消）上也有这个入口；模型若把解释当成「创建」，用户点一次解释
+/// 就会多出一套配置。这里保存「解释过、还没选」的状态，由 `ConfigCreate` 拒绝建配置。
+/// 同一请求里任何其它回答都视为真实选择并清掉；请求结束一并清理，不跨请求泄漏。
+fn explain_pendings() -> &'static Mutex<HashSet<(String, String)>> {
+    static PENDINGS: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    PENDINGS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn record_explain_pending(session_id: &str, request_id: &str, pending: bool) {
+    let key = (session_id.to_string(), request_id.to_string());
+    let mut guard = explain_pendings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if pending {
+        guard.insert(key);
+    } else {
+        guard.remove(&key);
+    }
+}
+
+/// 本请求里用户是否刚点过「解释这个设置的含义」、还没做真实选择。
+pub fn explain_pending(session_id: &str, request_id: &str) -> bool {
+    explain_pendings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&(session_id.to_string(), request_id.to_string()))
 }
 
 /// 本请求里用户是否明确选过「Veyl 免费节点（仅供试用）」。
@@ -311,6 +344,14 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
         return Err(not_pending());
     };
     // 记账在送通道之前：模型收到答案就会继续跑，可能立刻调 ConfigCreate。
+    // 「解释这个设置的含义」不是选择；空回答（跳过 / 超时兜底）也不算做了选择，
+    // 保持原状，否则模型可以把跳过当成默认值去建配置。
+    let trimmed = answer.trim();
+    if trimmed == EXPLAIN_ANSWER {
+        record_explain_pending(session_id, &request_id, true);
+    } else if !trimmed.is_empty() {
+        record_explain_pending(session_id, &request_id, false);
+    }
     let granted = grants_seed_consent(&options, &answer);
     if granted {
         record_seed_consent(session_id, &request_id);
@@ -413,6 +454,12 @@ pub fn cleanup_request(session_id: &str, request_id: &str) {
         .retain(|(session, request, _, _)| {
             !(session.as_str() == session_id && request.as_str() == request_id)
         });
+    explain_pendings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(session, request)| {
+            !(session.as_str() == session_id && request.as_str() == request_id)
+        });
 }
 
 /// 会话删除：作废该会话所有未答问题。
@@ -438,6 +485,10 @@ pub fn cleanup_session(session_id: &str) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .retain(|(session, _, _, _)| session.as_str() != session_id);
+    explain_pendings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(session, _)| session.as_str() != session_id);
 }
 
 #[cfg(test)]
@@ -606,6 +657,42 @@ mod memory_tests {
         cleanup_request("ses_seed_free", "req_seed_free");
     }
 
+    /// 卡片上的「解释这个设置的含义」也是自由文本，不是同意。
+    ///
+    /// 固定入口的答案必须逐字等于规范项才算同意；同一请求里紧接着选中规范项时，
+    /// 同意要正常记下来——证明前一条只是没被误记，不是把同意吞掉了。
+    #[tokio::test]
+    async fn explain_answer_does_not_grant_seed_consent() {
+        let options = ["Veyl 免费节点（仅供试用）", "用我自己的节点"];
+
+        let (first, _rx) = event("节点从哪来？", &options);
+        register("ses_seed_explain", "req_seed_explain", first);
+        let id = list_pending("ses_seed_explain")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        reply("ses_seed_explain", &id, "解释这个设置的含义").unwrap();
+        assert!(
+            !seed_consent_granted("ses_seed_explain", "req_seed_explain"),
+            "「解释这个设置的含义」只是自由文本，不能记成同意"
+        );
+
+        let (second, _rx) = event("节点从哪来？", &options);
+        register("ses_seed_explain", "req_seed_explain", second);
+        let id = list_pending("ses_seed_explain")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        reply("ses_seed_explain", &id, "Veyl 免费节点（仅供试用）").unwrap();
+        assert!(
+            seed_consent_granted("ses_seed_explain", "req_seed_explain"),
+            "紧接着逐字选中规范项必须记成同意"
+        );
+        cleanup_request("ses_seed_explain", "req_seed_explain");
+    }
+
     /// 两条提交路径（点选项 / 输入框回车）同时回答同一条问题：只有一个能认领，
     /// 认领失败的那个不能把赢家刚记下的同意删掉。
     ///
@@ -719,6 +806,98 @@ mod memory_tests {
         reply("ses_own", &id, "用我自己的节点").unwrap();
         assert!(!seed_consent_granted("ses_own", "req_own"));
         cleanup_request("ses_own", "req_own");
+    }
+
+    /// 解释入口的回传不是选择：先记「等解释后选择」，真实回答再清掉。
+    #[tokio::test]
+    async fn explaining_a_setting_marks_a_pending_explanation() {
+        let (event, _rx) = event("怎么接管？", &["TUN 模式", "Proxy 模式"]);
+        register("ses_explain", "req_explain", event);
+        let id = list_pending("ses_explain")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert!(!explain_pending("ses_explain", "req_explain"));
+        reply("ses_explain", &id, EXPLAIN_ANSWER).unwrap();
+        assert!(explain_pending("ses_explain", "req_explain"));
+        assert!(
+            !explain_pending("ses_explain", "req_other"),
+            "只属于当前请求"
+        );
+
+        cleanup_request("ses_explain", "req_explain");
+    }
+
+    #[tokio::test]
+    async fn a_real_answer_clears_the_pending_explanation() {
+        let (question, _rx) = event("怎么接管？", &["TUN 模式", "Proxy 模式"]);
+        register("ses_explain_done", "req_explain_done", question);
+        let id = list_pending("ses_explain_done")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        reply("ses_explain_done", &id, EXPLAIN_ANSWER).unwrap();
+        assert!(explain_pending("ses_explain_done", "req_explain_done"));
+
+        let (question, _rx) = event("怎么接管？", &["TUN 模式", "Proxy 模式"]);
+        register("ses_explain_done", "req_explain_done", question);
+        let id = list_pending("ses_explain_done")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        reply("ses_explain_done", &id, "TUN 模式").unwrap();
+        assert!(
+            !explain_pending("ses_explain_done", "req_explain_done"),
+            "用户已经做了真实选择"
+        );
+
+        cleanup_request("ses_explain_done", "req_explain_done");
+    }
+
+    /// 跳过 / 超时兜底回的是空串，不能把「解释后跳过」当成做了选择。
+    #[tokio::test]
+    async fn skipping_after_an_explanation_keeps_the_marker() {
+        let (question, _rx) = event("怎么接管？", &["TUN 模式", "Proxy 模式"]);
+        register("ses_explain_skip", "req_explain_skip", question);
+        let id = list_pending("ses_explain_skip")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        reply("ses_explain_skip", &id, EXPLAIN_ANSWER).unwrap();
+        assert!(explain_pending("ses_explain_skip", "req_explain_skip"));
+
+        let (question, _rx) = event("怎么接管？", &["TUN 模式", "Proxy 模式"]);
+        register("ses_explain_skip", "req_explain_skip", question);
+        let id = list_pending("ses_explain_skip")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        reply("ses_explain_skip", &id, "").unwrap();
+        assert!(
+            explain_pending("ses_explain_skip", "req_explain_skip"),
+            "跳过不是选择，标记必须保留"
+        );
+
+        cleanup_request("ses_explain_skip", "req_explain_skip");
+    }
+
+    #[tokio::test]
+    async fn cleanup_request_drops_the_pending_explanation() {
+        let (event, _rx) = event("怎么接管？", &["TUN 模式", "Proxy 模式"]);
+        register("ses_explain_cleanup", "req_explain_cleanup", event);
+        let id = list_pending("ses_explain_cleanup")["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        reply("ses_explain_cleanup", &id, EXPLAIN_ANSWER).unwrap();
+        assert!(explain_pending("ses_explain_cleanup", "req_explain_cleanup"));
+
+        cleanup_request("ses_explain_cleanup", "req_explain_cleanup");
+        assert!(
+            !explain_pending("ses_explain_cleanup", "req_explain_cleanup"),
+            "请求结束后必须清掉，不能跨请求泄漏"
+        );
     }
 
     /// 升级同意只绑定本次的目标版本与产物哈希，且只认逐字「升级」。

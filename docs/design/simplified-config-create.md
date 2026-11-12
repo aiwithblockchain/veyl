@@ -25,8 +25,8 @@
 | 事实 | 证据 |
 |---|---|
 | 弹窗第一步是「AI 协助 / 我自己配置」两张卡，选「我自己配置」才进表单 | `NewConfigDialog.tsx:35`、`:112`、`:124` |
-| 表单已经是「名字 + 怎么连 + 哪些走 VPN + 节点来源四选一 + 手动五字段」 | `ManualConfigForm.tsx`；`create-config.md` §5 |
-| 新建时 `routingMode` 由地区决定：中国/已知地区默认 `direct`，未知默认 `proxy_all` | `ManualConfigForm.tsx:109-131` |
+| 旧表单已经是「名字 + 怎么连 + 哪些走 VPN + 节点来源四选一 + 手动五字段」 | `create-config.md` §5（该组件已删除） |
+| 新建时 `routingMode` 由地区决定：中国/已知地区默认 `direct`，未知默认 `proxy_all` | 旧表单的地区默认规则（组件已删除）；现行见 §10.5 |
 | 默认名字带模式：`公司 · 接管全部` / `公司 · 本机代理` | `src/config/model.ts:12-20` |
 | `config_create` 必须显式给 `connectMode` 与 `routingMode`，没有默认值 | `commands.md` §3.2 |
 | `source: "seed"` 只读本地缓存；缓存为空直接报 `seed_unavailable`，**不会自动联网刷新** | `services.rs:3532-3541`、`:3562` |
@@ -657,7 +657,7 @@ AI 不自己读系统时区，也不自己查 IP。
 | 审视页（未知地区时默认就是全局模式） | `没识别出你在哪个地区，所以按全局模式创建；之后可以在控制台切换。` |
 | 中间区原有那行直连口径（`middleArea.ts`） | 保持 `没识别出你在哪个地区，所有网站都走 VPN`，不另起一句 |
 
-**默认值配合**：地区未知时，新建配置的 `routing_mode` 默认 `proxy_all`（沿用 `ManualConfigForm.tsx:114-118`），
+**默认值配合**：地区未知时，新建配置的 `routing_mode` 默认 `proxy_all`（沿用旧表单的地区默认规则），
 不让用户进一个名字叫「智能」、行为却是「全局」的模式。用户之后手动切到智能，才出现上面那条提示。
 
 **已知地区但规则包缺失的情况不解释**：`local_direct_basis` 只按地区取值（CN = 域名+IP、其它已知 = 仅 IP、未知 = `none`），
@@ -708,7 +708,7 @@ AI 不自己读系统时区，也不自己查 IP。
 
 | 项 | 默认 | 理由 |
 |---|---|---|
-| 接管方式 | `TUN 模式`（`tun`） | 与现有实现一致（`ManualConfigForm.tsx:184` 默认 `tun`）；这是多数一级用户的目标 |
+| 接管方式 | `TUN 模式`（`tun`） | 旧表单默认也是 `tun`（组件已删除）；这是多数一级用户的目标 |
 | 节点来源 | `Veyl 免费节点` | 最低门槛，先把「能连上」跑通 |
 | 地区 | `effective_region(store)`；未知为 `null` | 系统推断或 AI 写入值；未知时按全代理 |
 | 流量范围 | 地区已知 → `direct`；未知 → `proxy_all` | 沿用现有地区逻辑；未知时不制造「名不副实」的智能模式 |
@@ -745,6 +745,50 @@ AI 不自己读系统时区，也不自己查 IP。
 | 设置 → 高级「免费节点 · 检查更新」 | **同一个命令，两个用途**：设置页是完整五态 + 结果播报；新建弹窗只在池空时静默调用，只区分成功/失败，**不复述「已是最新」「已更新 N 个」**。同一个事实不在两处播报。设置页现有文案「测试节点」需要与本页统一（§13） |
 | 左栏节点数 / 节点面板 | 新建完成后由 `config-changed` / `node-list-changed` 照常刷新；弹窗不自己维护节点列表 |
 | 窗口拖放（`import_seed_file`） | 无关，不动。拖入的种子只并节点，不建配置（`commands.md` §8.3） |
+
+### 11.2 AI 路径：带选项提问的「解释这个设置的含义」
+
+AI 新建走对话，问题以带选项的卡片出现。卡片只有选项按钮时，「点了就选」没有任何解释价值；
+所以每张**带选项**的卡片底部多一行固定文字按钮，回传的答案逐字是：
+
+```
+解释这个设置的含义
+```
+
+**它不是选择。** 收到这串字时：
+
+| 不许 | 必须 |
+|---|---|
+| 推进流程、记成同意、当成沉默或跳过、调用 `ConfigCreate` | 用三句话回答，然后**把同一个问题逐字再问一次，选项不变** |
+
+三句话（各占一行，总共最多 4 行）：
+
+1. 每个选项选下去实际会发生什么（用户语言，不上术语）；
+2. 什么情况下该选哪个（给判断依据；可以说选项名让用户对得上，但不整段复述原文）；
+3. 选错了以后怎么改回来（改哪里、要不要重建）。
+
+**它不是节点来源同意**：后端 `grants_seed_consent` 只认逐字等于 `Veyl 免费节点（仅供试用）` 的回答
+（`questions.rs:69`）。用户看完解释仍要自己点那一项，免费节点才被授权。
+
+**协议不变**：回答仍是任意非空文本（`commands.md` §9.6），没有新增字段、没有新事件，**不升 commands 版本**。
+这一串字只是提示词里的保留值，Host 不解析；卡片上的那一行由前端加（`AskQuestionCard`），
+模型不得自己把它写进 `options`——它是界面固定行，不是选项。
+
+**Host 门禁**：Host 在本请求内记录「收到过解释串」，期间 `ConfigCreate` 回
+`PRECONDITION_FAILED / explanation_pending`（`tools.md` 3.10.1 §4.24）；用户任意其它回答即清除该标记。
+这样即使模型把解释误当确认，也建不出配置。
+
+自由提问（无选项）没有这一行；用户打什么字就是什么，不做解释约定。
+
+**确认卡例外**：确认卡（`创建` / `取消`，旧路径 `开始配置` / `取消`）没有设置可解释，界面不显示这一行。
+判定口径与取消类词表以 `tool-display.md` §3.5 为准（两个选项、其中一个整串等于词表项）；下文不再重复词表。
+如果用户在确认卡上手打这串字（输入框作答与点按钮在文本上无法区分）：不套三句模板，只用一句说清
+「创建会做什么、取消会怎样」，然后重问同一个确认问题、选项不变。同一个请求里第三次收到解释串时，
+不再展开三句，只说明「已经解释过两次，直接选一个就行」并请用户选择或跳过。
+
+发这两问之前，AI 还各先说一句「这一问决定什么」，例如：
+「这一步决定是只有浏览器走 VPN，还是聊天、会议、游戏这些软件也一起走。」卡片没有上下文，这一句就是上下文。
+**只限这两张设置卡**：确认卡前已有复述，解释后的重问已有那三句解释，都不再加这一句。
 
 ---
 
@@ -784,7 +828,7 @@ AI 不自己读系统时区，也不自己查 IP。
 |---|---|---|
 | `commands.md` | `system_region` 增 `source`；`config_create` / `config_update` / `route_set_mode` 的 `routingMode` 收紧为 `direct \| proxy_all` | **2.17.0 → 2.18.0（含不向后兼容项；若期间已有并行升版，顺延 +0.1.0）** |
 | `events.md` | 新增 `region-changed` | **2.11.0 → 2.12.0** |
-| `tools.md` | 新增 `SetUserRegion`（Write）；`ConfigCreate` / `ConfigUpdate` / `RouteSetMode` 的枚举同步收紧；工具数 46 → 47 | **3.9.0 → 3.10.0（含不向后兼容项）** |
+| `tools.md` | 新增 `SetUserRegion`（Write）；`ConfigCreate` / `ConfigUpdate` / `RouteSetMode` 的枚举同步收紧；工具数 46 → 47 | **3.9.0 → 3.10.x（含不向后兼容项；本批收尾为 3.10.1）** |
 | `runtime.md` | 地区优先级改为 `VEYL_REGION` → `user_region` → 系统推断；四个入口同源 | **2.7.0 → 2.8.0** |
 | `data-model.md` | `settings` 新增键 `user_region`；`routing_mode` 的 `proxy_selected` 保留为**旧数据专用** | 文档更新，schema 版本不动 |
 | `config_create` | 参数形状加 `anyOf`（来源必填）；`routingMode` 不再接受 `proxy_selected` | 随 commands 2.18.0 |
@@ -862,7 +906,7 @@ region-changed { region: string | null, source: "system" | "ai", emitted_at }
 |---|---|
 | `docs/contracts/commands.md` | `system_region` 增 `source`；`routingMode` 收紧为两档（破坏性）；§12.1 命令表相应更新；版本 2.18.0（并行升版则顺延） |
 | `docs/contracts/events.md` | 新增 `region-changed`；版本 2.12.0 |
-| `docs/contracts/tools.md` | 新增 #47 `SetUserRegion`；`ConfigCreate` / `ConfigUpdate` / `RouteSetMode` 枚举收紧；工具计数 46 → 47；版本 3.10.0 |
+| `docs/contracts/tools.md` | 新增 #47 `SetUserRegion`；`ConfigCreate` / `ConfigUpdate` / `RouteSetMode` 枚举收紧；工具计数 46 → 47；版本 3.10.1（含解释门禁 `explanation_pending`） |
 | `docs/contracts/runtime.md` | 地区优先级与「四个入口同源」；`route_region` 的说明补「来自 effective_region」；版本 2.8.0 |
 | `docs/data-model.md` | §settings 已知键补 `user_region`；`routing_mode` 的 `proxy_selected` 标为旧数据专用；变更记录加一行 |
 | `docs/design/create-config.md` | 头部加一行「入口设计已被 `simplified-config-create.md` 取代」；§3 标失效；节点字段、地区分析保留 |
@@ -929,7 +973,7 @@ region-changed { region: string | null, source: "system" | "ai", emitted_at }
 | `src/components/NewConfigDialog.tsx` | 重写为两问 + 审视两步；删除 AI 卡与 `step: "manual"`；「其它节点」进入供应商广场静态预览页 |
 | 新组件（如 `ConfigReview.tsx`） | 审视页；五项只读（含地区只读展示）、主按钮按连接状态两态、错误条；没有输入框与地区控件 |
 | 新组件（如 `VendorMarketPage.tsx`） | 本批静态预览页：标题、说明、3 条示例条目、disabled 按钮、页脚边界说明、返回；不做筛选、不做购买、不做跳转 |
-| `src/components/ManualConfigForm.tsx` | **不再被新建流程使用**；本批不接进流程，文件可暂留（未来供应商页可能复用节点段），不新增入口 |
+| `src/components/ManualConfigForm.tsx` | **已删除**：新建流程不再使用，也没有任何入口；未来若复用节点段，按新流程重新设计，不复活旧表单 |
 | `src/components/Console.tsx` | hero 内新增「流量范围」第二行；未连接读数删除「范围」行；地区展示接 `region-changed` |
 | 新组件（如 `TrafficScopeSwitch.tsx`） | 两态分段控件、地区未知提示、`route_set_mode` 调用 |
 | `src/ui/configLabels.ts` | `levelLabel` 只看 `connect_mode`；`modeSummary` 与 `scopeSummary` 拆分职责，或新增 `routeLabel` |
@@ -1008,4 +1052,4 @@ region-changed { region: string | null, source: "system" | "ai", emitted_at }
   - *Focus States*（High）：模态内所有控件都要有可见焦点环 → §5.2 键盘规则。
   - *Touch Target Size*（High）：整卡可点、命中区 ≥ 64px → §5.2。
 - **现有契约与实现**：`commands.md` §3.2 / §8.1–8.2 / §10.1–10.2；`rules/mod.rs`、`rules/plan.rs`；
-  `ManualConfigForm.tsx` 的地区默认；`configLabels.ts` 的既有词。
+  `configLabels.ts` 的既有词；旧表单的地区默认（组件已删除，只作行为参考）。

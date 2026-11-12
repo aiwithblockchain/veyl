@@ -214,8 +214,8 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 - **步骤（人做）**
   1. 记录第二问的问题与选项。
   2. 选「会」。
-  3. 记录后续两个问题；在「哪些流量走 VPN？」里选「只有我指定的服务走 VPN」。
-  4. 记录「哪些服务？」这一步。
+  3. 记录后续两个问题；在「哪些流量走 VPN？」里选「全部走 VPN」。
+  4. 确认这一步没有「哪些服务？」之类的追问。
 - **AI 取证**
   ```bash
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, substr(args_json,1,300) from tool_calls order by created_at desc limit 12;"
@@ -226,7 +226,7 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
   - APP 路径的第二问是「你会在软件里自己填代理地址吗？」；网页路径才是「你会自己设置网络代理吗？」。
   - 回答「不会」时不再追问接管方式和分流范围。
   - 回答「会」后才出现「网络怎么接管？」和「哪些流量走 VPN？」。
-  - 选「只有我指定的服务走 VPN」后追问「哪些服务？」。
+  - 「哪些流量走 VPN？」只有两项：本地网站直连其余走 VPN / 全部走 VPN；没有按服务挑选的第三项，也不追问「哪些服务」。
   - 全程不显示「第一类 / 第二类 / 第三类」。
 - **判定**
   - [ ] 通过
@@ -2041,7 +2041,7 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 
 ### E6-01 中间控制台各块的出现条件
 
-**前置**：M1；1440×900；浅色；清空 `veyl.*` 后新建两套配置——A「所有软件都走 VPN + 本地网站直连」，B「只让能填代理的软件走 + 只有我指定的服务走 VPN」并选中至少一个服务。
+**前置**：M1；1440×900；浅色；清空 `veyl.*` 后新建两套配置——A「所有软件都走 VPN + 本地网站直连」，B「只让能填代理的软件走 + 全部走 VPN」。
 
 **步骤**：
 
@@ -3978,7 +3978,7 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 - **可观察预期**
   - 只有「还没有配置」和新建入口（「新建一套配置」或「先在左侧新建一套配置」）。
   - 没有「本地代理端口」行。
-  - 没有「更新试用节点」「添加节点」行。
+  - 没有「Veyl 免费节点」「添加节点」行。
   - 没有连接方式、节点来源或空白占位。
   - 点新建入口能回到新建配置流程，不跳到别处。
 - **判定**
@@ -4054,7 +4054,7 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
   看什么：最近一条用户消息是否以「我在 Veyl 的高级设置里调整「本地代理端口」」开头；当前值是否与实际端口一致。
 - **可观察预期**
   - 点「问 AI」后设置关闭，右栏打开，输入框获得焦点。
-  - 发出的消息使用固定前缀，字段名是「本地代理端口」，当前值与界面显示一致；不出现「连接方式」「更新试用节点」的问 AI 入口。
+  - 发出的消息使用固定前缀，字段名是「本地代理端口」，当前值与界面显示一致；不出现「连接方式」「Veyl 免费节点」的问 AI 入口。
   - 重新打开设置时回到**刚才那个 tab**（连接 → 连接，AI 服务 → AI 服务），不跳回 AI 服务。
   - 如果从 AI 服务 tab 提问，回来仍在 AI 服务。
 - **判定**
@@ -4348,13 +4348,195 @@ grep -E '连接完成|连接失败 卡在' "$APP_LOG" | tail -3
 2. 最近一条用户消息以「我在 Veyl 的高级设置里调整「本地代理端口」。当前值是 127.0.0.1:{端口}」开头；当前值与界面显示一致。
 3. 重开设置后 `selected` 为「连接」，不跳回「AI 服务」。
 4. 从「AI 服务」tab 提问，重开后 `selected` 为「AI 服务」。
-5. 不出现「连接方式」「更新试用节点」的「问 AI」入口；在 AI 服务 tab 打开添加/编辑表单时，`.ask-ai` 只出现在 API 类型与模型两处，连接 tab 只出现在本地代理端口一处。
+5. 不出现「连接方式」「Veyl 免费节点」的「问 AI」入口；在 AI 服务 tab 打开添加/编辑表单时，`.ask-ai` 只出现在 API 类型与模型两处，连接 tab 只出现在本地代理端口一处。
 
 **不合格时记录什么**：
 
 - 两次 JSON、问 AI 前后的截图。
 - 最近用户消息原文（截前 180 字）。
 - 重开设置落点与期望 tab 的差异。
+
+### E8-21 带选项的提问卡片有「解释这个设置的含义」这一行
+
+**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。对助手说「再建一套配置」，停在第一问卡片（2 个选项：浏览器上网页 / 浏览器，还有聊天、会议、游戏这类软件也要用）。
+
+**步骤**：
+
+1. 第一问卡片出现后执行：
+
+```js
+(() => {
+  const card = document.querySelector(".ask-card");
+  const options = [...document.querySelectorAll(".ask-card__option")];
+  const explains = document.querySelectorAll(".ask-card__explain");
+  const explain = explains[0] ?? null;
+  return {
+    optionTexts: options.map((b) => b.textContent.trim()),
+    explainCount: explains.length,
+    inOptions: explain ? Boolean(explain.closest(".ask-card__options")) : null,
+    explainText: explain?.textContent.trim() ?? null,
+    skipText: document.querySelector(".ask-card__skip")?.textContent.trim() ?? null,
+  };
+})()
+```
+
+2. 点「浏览器上网页」，等「节点从哪来」卡片（4 个选项）出现，在同一张卡上再执行上面那段 JS，记录 `optionTexts.length` 与 `explainCount`。
+
+**预期**：
+
+1. 两处 `explainText` 都逐字为 `解释这个设置的含义`；`explainCount` 都是 `1`（每张卡只有一行解释入口）。
+2. `inOptions` 为 `false`（不在选项容器里，不参与选中态）。
+3. 第一问 `optionTexts.length` 为 2，节点来源为 4；两张卡的选项顺序、文字与契约一致，解释行没有把选项挤掉或换行。
+4. 解释行与「跳过」是两行独立按钮，且都不是主按钮（无实心填充）。
+
+**不合格时记录什么**：两次 JSON；两张卡片截图；解释行与选项的相对位置；若 mock 与真实流程选项数不一致，记录 mock 版本（`src/agent/mockAgent.ts`）。
+
+### E8-22 点「解释这个设置的含义」→ 三句解释 → 原问题原选项重问
+
+**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。对助手说「再建一套配置」，停在第一问卡片（2 个选项）。
+
+**步骤**：
+
+1. 点 `.ask-card__explain`。
+2. 等 AI 回复，记录最近几条消息与新的卡片：
+
+```js
+(() => {
+  const texts = [...document.querySelectorAll(".msg .msg__text")].slice(-4).map((n) => n.textContent.trim());
+  const card = document.querySelector(".ask-card");
+  return {
+    lastTexts: texts,
+    newQuestion: card?.querySelector(".ask-card__question")?.textContent.trim() ?? null,
+    newOptions: [...document.querySelectorAll(".ask-card__option")].map((b) => b.textContent.trim()),
+  };
+})()
+```
+
+3. 用数据库确认没有新建配置：
+
+```bash
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
+```
+
+**预期**：
+
+1. 最近一条用户消息逐字是 `解释这个设置的含义`。
+2. AI 回复是解释，不是选择结果；最多三句、不超过 4 行，覆盖「每个选项会发生什么 / 怎么选 / 选错怎么改」。
+3. 解释后出现**同一张问题卡片**：`newQuestion` 与刚才逐字相同，`newOptions` 与刚才逐字相同、顺序不变。
+4. 没有合并到下一问，也没有替用户选中任何选项（没有卡片处于选中态）。
+5. `configs` 数量与点击前相同。
+
+**不合格时记录什么**：`lastTexts`、新旧问题与选项、配置数前后、AI 回复全文。
+
+### E8-23 解释不算作答：不推进、不建配置
+
+**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。对助手说「再建一套配置」，停在第一问卡片（2 个选项）；记录点击前的配置数与当前问题。
+
+**步骤**：
+
+1. 连续点两次「解释这个设置的含义」（第二次在新卡片上）。
+2. 观察有没有出现确认语、第二问或「正在创建」。
+3. 再查配置数与最近消息。
+
+**预期**：
+
+1. 两次都只得到解释 + 同一问题重问；不出现确认复述、不出现第二问、不出现「正在创建 / 已创建」。
+2. 没有调用 `ConfigCreate`（`configs` 数量不变）；没有 `seed_source_not_confirmed` 之类的错误浮出到界面。
+3. 解释不写进聊天历史之外的任何地方：刷新窗口后，问题仍可正常回答（同一 `questionId` 只回传过一次，没有第二次作答）。
+
+**不合格时记录什么**：两次卡片文本、配置数、`chat_messages` 最近 6 条、是否出现确认语。
+
+### E8-24 节点来源这一问点解释后，再选 Veyl 免费节点仍能创建
+
+**前置**：M2（原生应用，走真实后端）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。对助手说「再建一套配置」，答完第一问，停在「节点从哪来」卡片（4 个选项）。
+
+**步骤**：
+
+1. 在节点来源卡片点「解释这个设置的含义」。
+2. 等解释与原问题重问。
+3. 点 `Veyl 免费节点（仅供试用）` 选项（逐字）。
+4. 按 AI 的确认复述回答「创建」。
+5. 查配置与工具结果：
+
+```bash
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select role, substr(content,1,160) from chat_messages order by created_at desc limit 6;"
+```
+
+**预期**：
+
+1. 解释本身没有授予节点同意；点选项后才继续。
+2. 创建成功，`configs` 数量 +1；没有出现 `seed_source_not_confirmed` / `source_required`。
+3. 配置的节点来自 Veyl 免费节点（左栏节点数与免费节点池一致）。
+4. 解释那一步既没有被当成同意，也没有把同意吞掉——用户点了选项就能建。
+
+**不合格时记录什么**：`chat_messages` 最近 6 条、配置数、创建结果与错误码（如有）、每一步的卡片截图。
+
+### E8-25 确认卡上没有「解释这个设置的含义」
+
+**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；对助手说「再建一套配置」，答完两问，停在确认卡（`创建` / `取消`；确认卡判定词表以 `docs/design/tool-display.md` §3.5 为准）。
+
+**步骤**：
+
+1. 在确认卡上执行：
+
+```js
+(() => {
+  const card = document.querySelector(".ask-card");
+  return {
+    question: card?.querySelector(".ask-card__question")?.textContent.trim() ?? null,
+    options: [...document.querySelectorAll(".ask-card__option")].map((b) => b.textContent.trim()),
+    explainCount: document.querySelectorAll(".ask-card__explain").length,
+    bodyHasExplain: document.body.innerText.includes("解释这个设置的含义"),
+  };
+})()
+```
+
+2. 尝试用 Tab 遍历卡片内可聚焦元素，确认没有解释入口。
+
+**预期**：
+
+1. `options` 恰好是 `["创建","取消"]`；`explainCount` 为 `0`，`bodyHasExplain` 为 `false`。
+2. 卡片内可聚焦元素只有两个选项与「跳过」，没有解释按钮、也没有同名文字按钮。
+3. 两张设置卡上仍各有一行解释（E8-21 已验），确认卡不继承。
+
+**不合格时记录什么**：上述 JSON、卡片截图、可聚焦元素列表。
+
+### E8-26 确认卡上手打「解释这个设置的含义」：只回一句、重问确认、不建配置
+
+**前置**：M2（原生应用，走真实后端）；已有一套可用配置；停在确认卡（`创建` / `取消`）；记录当前配置数。
+
+**步骤**：
+
+1. 在输入框发送逐字 `解释这个设置的含义`（不是点按钮）。
+2. 等 AI 回复，记录最近消息与卡片：
+
+```js
+(() => {
+  const texts = [...document.querySelectorAll(".msg .msg__text")].slice(-4).map((n) => n.textContent.trim());
+  const card = document.querySelector(".ask-card");
+  return {
+    lastTexts: texts,
+    question: card?.querySelector(".ask-card__question")?.textContent.trim() ?? null,
+    options: [...document.querySelectorAll(".ask-card__option")].map((b) => b.textContent.trim()),
+    createdWord: document.body.innerText.includes("已创建"),
+  };
+})()
+```
+
+3. 查配置数与最近消息：
+
+```bash
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select role, substr(content,1,160) from chat_messages order by created_at desc limit 6;"
+```
+
+**预期**：
+
+1. AI **只回一句**说清「创建会做什么、取消会怎样」，不套三句模板、不展开选项。
+2. 随后重问**同一个确认问题**，`options` 仍是 `["创建","取消"]`；没有推进到执行，也没有替用户选。
+3. `configs` 数量不变；`createdWord` 为 `false`，界面没有「已创建」。
+4. 若模型违规调用 `ConfigCreate`：工具返回 `PRECONDITION_FAILED / explanation_pending`，界面仍无「已创建」，AI 按契约把确认问题重问；不得重试或换参数绕过。
+
+**不合格时记录什么**：`lastTexts`、确认卡前后对比、配置数、`chat_messages` 最近 6 条、工具错误（如有）。
 
 ---
 
