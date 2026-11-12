@@ -2885,6 +2885,7 @@ impl VpnToolServices for WiredServices {
         // 就会让 `bridge.ts` 读 undefined 直接崩（helper 在 App 崩溃后仍存活的接手场景）。
         let mut status = if let crate::tun::session::TunState::Running { pid } = self.tun.status() {
             let meta = self.tun.launch_meta();
+            let (data_plane, health_checked_at) = self.tun.data_plane_health();
             crate::runtime::RuntimeStatus::tun(crate::runtime::TunSnapshotInput {
                 pid,
                 config_id: meta.as_ref().map(|meta| meta.config_id.clone()),
@@ -2896,6 +2897,8 @@ impl VpnToolServices for WiredServices {
                 connected_since: self.tun.connected_since(),
                 uptime_seconds: self.tun.uptime_seconds(),
                 system_dns: Some(system_dns_label(self.tun.dns_hijack().as_ref()).to_string()),
+                data_plane,
+                health_checked_at,
             })
         } else {
             self.manager.status().await
@@ -7541,6 +7544,50 @@ mod config_service_tests {
         );
         assert!(status["traffic"].is_null(), "没有数据必须是 null");
         assert!(status["connections"].is_null(), "没有数据必须是 null");
+    }
+
+    /// TUN 下 `data_plane` 必须来自真实探测：未探测乐观 true，单次失败不改值，
+    /// 连续两次才报不通，一次成功立即恢复。`checked_at` 是探测时刻，不是查询时刻。
+    #[tokio::test]
+    async fn a_tun_connection_reports_the_probed_data_plane() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        services.tun.force_running_for_test(6262, Some("cfg_tun"));
+
+        let status = services.runtime_status().await.unwrap();
+        assert_eq!(status["health"]["data_plane"], true, "未探测时乐观为 true");
+        assert!(
+            status["traffic"].is_null(),
+            "没有流量是 null，不能被读成探测失败"
+        );
+        let first_checked_at = status["health"]["checked_at"].as_str().unwrap().to_string();
+
+        services.tun.record_data_plane(false);
+        let status = services.runtime_status().await.unwrap();
+        assert_eq!(status["health"]["data_plane"], true, "一次失败不改值");
+        let second_checked_at = status["health"]["checked_at"].as_str().unwrap().to_string();
+        assert!(
+            second_checked_at >= first_checked_at,
+            "探测时刻只会往前走"
+        );
+
+        services.tun.record_data_plane(false);
+        let status = services.runtime_status().await.unwrap();
+        assert_eq!(
+            status["health"]["data_plane"], false,
+            "连续两次失败必须报不通行"
+        );
+        let failed_checked_at = status["health"]["checked_at"].as_str().unwrap().to_string();
+
+        // 再查一次快照：checked_at 不能被查询时刻顶替，否则陈旧结论会被当成新鲜。
+        let again = services.runtime_status().await.unwrap();
+        assert_eq!(again["health"]["checked_at"], failed_checked_at);
+
+        services.tun.record_data_plane(true);
+        let status = services.runtime_status().await.unwrap();
+        assert_eq!(status["health"]["data_plane"], true, "一次成功立即恢复");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 未连接时也要报可用的运行时版本与来源：

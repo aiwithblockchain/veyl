@@ -9,10 +9,13 @@ use tokio::sync::{broadcast, Mutex, Notify};
 use tokio::time::Instant;
 
 use super::error::{RuntimeError, RuntimeResult};
-use super::health::{ClashApi, ConnectionSample, DataPlaneProbe, DirectIpProbe, ExitIpProbe, DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE};
+use super::health::{
+    ClashApi, ConnectionSample, DataPlaneGate, DataPlaneProbe, DirectIpProbe, ExitIpProbe,
+    DEFAULT_DIRECT_IP_PROBE, DEFAULT_EXIT_IP_PROBE,
+};
 use super::process::{self, SpawnOptions};
 
-pub const CONTRACT_VERSION: &str = "2.6.0";
+pub const CONTRACT_VERSION: &str = "2.7.0";
 pub const EVENT_CONTRACT_VERSION: &str = "2.10.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
@@ -73,6 +76,10 @@ pub struct TunSnapshotInput {
     pub uptime_seconds: Option<u64>,
     /// 连接期系统解析器是否指向隧道；系统代理没有这一步，恒为 None。
     pub system_dns: Option<String>,
+    /// 最近一次数据面探测的结论；连接后还没探过时为 true（契约 §2.3.1）。
+    pub data_plane: bool,
+    /// 上面那个结论的探测时刻；还没探过时是连接时刻。
+    pub health_checked_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -199,7 +206,7 @@ impl RuntimeStatus {
     /// 都会让界面直接崩。所以复用同一个结构体来拼，不手工构造 JSON。
     ///
     /// TUN 没有 Clash API 探测通道：`clash_api` 如实给 `false` 而不是假装探测过；
-    /// `data_plane` 按契约「未探测时为 true」。
+    /// `data_plane` 来自 TUN 侧的真实探测（契约 §2.3.1），不再是写死的 `true`。
     pub fn tun(input: TunSnapshotInput) -> Self {
         let now = now_iso();
         Self {
@@ -228,10 +235,12 @@ impl RuntimeStatus {
                 contract_version: CONTRACT_VERSION,
                 process: true,
                 clash_api: false,
-                data_plane: true,
+                data_plane: input.data_plane,
                 exit_ip: None,
+                // TUN 不查控制面，这个计数按代理模式的口径留 0；
+                // 「不通」由 `data_plane` 单独表达。
                 consecutive_failures: 0,
-                checked_at: now.clone(),
+                checked_at: input.health_checked_at,
             },
             traffic: None,
             connections: None,
@@ -1351,6 +1360,8 @@ impl RuntimeManager {
             .and_then(|url| DataPlaneProbe::new(url.clone(), plan.mixed_port).ok());
 
         let mut failures: u32 = 0;
+        // 数据面去抖：单次失败不改值，连续两次才置 false（契约 §2.3.1）。
+        let mut data_plane = DataPlaneGate::default();
         let mut degraded_since: Option<Instant> = None;
         let mut next_health = Instant::now() + self.cfg.health_interval;
         let mut next_probe = Instant::now() + Duration::from_secs(10);
@@ -1483,9 +1494,12 @@ impl RuntimeManager {
                 if Instant::now() >= next_probe {
                     next_probe = Instant::now() + Duration::from_secs(10);
                     // 契约：数据面失败只更新快照，不单独判 HEALTH_FAIL。
+                    // 单次失败不改值，连续两次才翻成 false；成功立即回 true。
                     let ok = probe.ok().await;
+                    data_plane.record(ok);
+                    let up = data_plane.up();
                     self.update_health(|health| {
-                        health.data_plane = ok;
+                        health.data_plane = up;
                         health.checked_at = now_iso();
                     })
                     .await;
@@ -1500,8 +1514,12 @@ impl RuntimeManager {
                     let mut inner = self.inner.lock().await;
                     if inner.generation == gen {
                         inner.last_node_latency_ms = None;
+                        // 换节点不继承旧节点的失败次数：新节点还没被探测过，
+                        // 按「未知从乐观开始」处理（契约 §2.3.1）。
+                        inner.health.data_plane = true;
                     }
                 }
+                data_plane.reset();
                 probed_node = current_node;
                 next_latency = Instant::now();
                 self.emit_health().await;
@@ -2028,6 +2046,32 @@ mod tests {
         std::env::temp_dir().join(format!("veyl-{tag}-{:016x}", rand::random::<u64>()))
     }
 
+    /// TUN 快照的 health 必须来自真实探测：不能再写死 true，
+    /// `checked_at` 也必须保留探测时刻（查询时刻会让 UI 把陈旧结论当成新鲜）。
+    #[test]
+    fn the_tun_snapshot_carries_the_probed_data_plane() {
+        let status = RuntimeStatus::tun(TunSnapshotInput {
+            pid: 1,
+            config_id: None,
+            config_name: None,
+            node_id: None,
+            node_name: None,
+            applied_route_revision: None,
+            route_region: None,
+            connected_since: Some("2026-11-12T00:00:00Z".into()),
+            uptime_seconds: Some(10),
+            system_dns: None,
+            data_plane: false,
+            health_checked_at: "2026-11-12T00:00:10Z".into(),
+        });
+        assert!(!status.health.data_plane);
+        assert_eq!(status.health.checked_at, "2026-11-12T00:00:10Z");
+        // TUN 没有控制面通道：如实给 false，不当成故障（契约 §2.3.1）。
+        assert!(!status.health.clash_api);
+        assert!(status.health.process);
+        assert_eq!(status.health.consecutive_failures, 0);
+    }
+
     #[test]
     fn the_default_data_dir_is_dot_veyl() {
         let path = default_app_data_dir();
@@ -2338,7 +2382,7 @@ mod tests {
         );
         assert_eq!(
             status.last_error.as_ref().unwrap().contract_version,
-            "2.6.0"
+            "2.7.0"
         );
 
         let mut restarts = 0;

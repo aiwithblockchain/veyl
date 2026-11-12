@@ -16,6 +16,7 @@ use super::backend::{
     TUN_REPLY_DEADLINE_CONTROL,
 };
 use super::privilege::{HelperStatus, Registration};
+use crate::runtime::health::DataPlaneGate;
 
 /// 缓存中的 pid 超过这个间隔就向后端复核一次：helper 崩溃或被停掉时，
 /// 界面不能一直报「已连接」。测试里缩短，避免用例等 5 秒。
@@ -77,6 +78,31 @@ pub struct TunSession {
     /// 与 pid 分开记：start 超时后本地没有 pid，但 helper 里可能已经有
     /// root 进程。只看 pid 会把这种情况下的 `helper_missing` 当成「没东西可停」。
     start_attempted: AtomicBool,
+    /// 数据面探测结果。只由健康循环写，`runtime_status` 读；
+    /// 去抖口径与代理模式共用 `DataPlaneGate`（契约 §2.3.1）。
+    data_plane: Mutex<DataPlaneSnapshot>,
+}
+
+/// 一次连接内的数据面结论 + 探测时刻。
+///
+/// 新连接开始时整体重置：上一条连接的失败不能算到下一条头上。
+#[derive(Debug, Clone)]
+struct DataPlaneSnapshot {
+    gate: DataPlaneGate,
+    checked_at: String,
+}
+
+impl DataPlaneSnapshot {
+    fn fresh(checked_at: String) -> Self {
+        Self {
+            gate: DataPlaneGate::default(),
+            checked_at,
+        }
+    }
+}
+
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 impl TunSession {
@@ -121,6 +147,7 @@ impl TunSession {
             last_check: Mutex::new(None),
             probed: AtomicBool::new(false),
             start_attempted: AtomicBool::new(false),
+            data_plane: Mutex::new(DataPlaneSnapshot::fresh(now_iso())),
         }
     }
 
@@ -205,6 +232,43 @@ impl TunSession {
         Some(elapsed.num_seconds().max(0) as u64)
     }
 
+    /// 连接身份：`pid@启动时刻`；未连接为 None。
+    ///
+    /// 健康循环据此判断「是不是新的一次连接」——App 崩溃接手、重新连接、
+    /// 停止后再连都会换身份，去抖计数随之清零。
+    pub fn running_identity(&self) -> Option<String> {
+        match self.status() {
+            TunState::Running { pid } => {
+                let since = self.connected.lock().unwrap().clone().unwrap_or_default();
+                Some(format!("{pid}@{since}"))
+            }
+            TunState::Stopped => None,
+        }
+    }
+
+    /// 新连接的第一轮探测之前：乐观 `true`，时刻用连接时刻。
+    ///
+    /// 契约 §2.3.1：连接后还没跑完第一轮探测时按未知的乐观值处理，
+    /// 这样界面不会在刚连上的头 10 秒里先闪一条「没有流量」。
+    pub fn begin_data_plane(&self) {
+        let since = self.connected.lock().unwrap().clone();
+        *self.data_plane.lock().unwrap() = DataPlaneSnapshot::fresh(since.unwrap_or_else(now_iso));
+    }
+
+    /// 记一次探测结果，返回 `data_plane` 是否翻转。只由健康循环调用。
+    pub fn record_data_plane(&self, ok: bool) -> bool {
+        let mut snapshot = self.data_plane.lock().unwrap();
+        let changed = snapshot.gate.record(ok);
+        snapshot.checked_at = now_iso();
+        changed
+    }
+
+    /// `runtime_status` 用：`(data_plane, 该结论的探测时刻)`。
+    pub fn data_plane_health(&self) -> (bool, String) {
+        let snapshot = self.data_plane.lock().unwrap();
+        (snapshot.gate.up(), snapshot.checked_at.clone())
+    }
+
     /// 测试用：直接摆出「正在跑 + 记得是哪套配置」的状态，不碰后端。
     #[cfg(test)]
     pub fn force_running_for_test(&self, pid: u32, config_id: Option<&str>) {
@@ -218,7 +282,10 @@ impl TunSession {
             route_region: None,
         });
         *self.connected.lock().unwrap() = Some("2026-11-04T00:00:00Z".into());
-        *self.last_check.lock().unwrap() = Some(Instant::now());
+        // 复核时刻放到未来：测试里没有真 helper，不能让 20ms（测试用的复核间隔）
+        // 一到就去问后端，把「正在跑」清成 Stopped。`elapsed()` 对未来时刻返回 0。
+        *self.last_check.lock().unwrap() = Some(Instant::now() + Duration::from_secs(3600));
+        *self.data_plane.lock().unwrap() = DataPlaneSnapshot::fresh(now_iso());
     }
 
     /// 幂等，且**永远发请求**。
@@ -268,6 +335,8 @@ impl TunSession {
         *self.clash.lock().unwrap() = None;
         *self.dns.lock().unwrap() = None;
         *self.last_check.lock().unwrap() = None;
+        // 断开后旧结论作废；下次连接由 begin_data_plane 重新开始。
+        *self.data_plane.lock().unwrap() = DataPlaneSnapshot::fresh(now_iso());
     }
 
     /// 连接期系统 DNS 的接管结果；没在连接时是 None。
@@ -681,5 +750,79 @@ mod tests {
         assert!(matches!(session.status(), TunState::Stopped));
         session.flush_dns().unwrap();
         assert_eq!(backend.flushes.load(Ordering::SeqCst), 1);
+    }
+
+    /// 契约 §2.3.1：未探测时乐观 true；**连续两次**失败才置 false。
+    #[test]
+    fn tun_data_plane_needs_two_consecutive_failures() {
+        let session = TunSession::new(Arc::new(FakeRegistration { ready: true }));
+        session.force_running_for_test(9, Some("cfg"));
+        session.begin_data_plane();
+        assert!(session.data_plane_health().0, "连接后头 10s 按乐观处理");
+
+        assert!(!session.record_data_plane(false), "第一次失败不能翻转");
+        assert!(session.data_plane_health().0, "单次失败不该让界面闪红");
+
+        assert!(session.record_data_plane(false), "连续第二次失败才翻转");
+        assert!(!session.data_plane_health().0);
+    }
+
+    /// 一次成功立即回 true；之后要重新连续两次失败才会再降级。
+    #[test]
+    fn tun_data_plane_recovers_on_the_first_success() {
+        let session = TunSession::new(Arc::new(FakeRegistration { ready: true }));
+        session.force_running_for_test(9, Some("cfg"));
+        session.begin_data_plane();
+        session.record_data_plane(false);
+        session.record_data_plane(false);
+        assert!(!session.data_plane_health().0);
+
+        assert!(session.record_data_plane(true), "成功要立刻翻转回 true");
+        assert!(session.data_plane_health().0);
+
+        session.record_data_plane(false);
+        assert!(session.data_plane_health().0, "恢复后单次失败不再翻回去");
+    }
+
+    /// 没有用户流量不是失败：判据只有探测请求的结果，
+    /// session 里根本没有「流量」这个输入，不会因为用户没上网就报不通。
+    #[test]
+    fn tun_data_plane_does_not_read_user_traffic() {
+        let session = TunSession::new(Arc::new(FakeRegistration { ready: true }));
+        session.force_running_for_test(9, Some("cfg"));
+        session.begin_data_plane();
+
+        let (data_plane, checked_at) = session.data_plane_health();
+        assert!(data_plane, "零流量 + 未探测时仍然是乐观 true");
+        assert!(!checked_at.is_empty(), "checked_at 必须有值，UI 要算新鲜度");
+    }
+
+    /// 新连接（身份变化）不能继承上一条连接的失败次数。
+    #[test]
+    fn a_new_tun_connection_starts_optimistic_again() {
+        let session = TunSession::new(Arc::new(FakeRegistration { ready: true }));
+        session.force_running_for_test(9, Some("cfg"));
+        session.begin_data_plane();
+        session.record_data_plane(false);
+        session.record_data_plane(false);
+        assert!(!session.data_plane_health().0);
+
+        session.force_running_for_test(10, Some("cfg"));
+        session.begin_data_plane();
+        assert!(session.data_plane_health().0);
+    }
+
+    /// 健康循环靠身份判断「是不是新连接」：pid 变了必须算新连接。
+    #[test]
+    fn the_running_identity_follows_the_connection() {
+        let session = TunSession::new(Arc::new(FakeRegistration { ready: true }));
+        assert_eq!(session.running_identity(), None);
+
+        session.force_running_for_test(1, Some("cfg"));
+        let first = session.running_identity();
+        assert!(first.is_some());
+
+        session.force_running_for_test(2, Some("cfg"));
+        assert_ne!(first, session.running_identity(), "换了进程就是新连接");
     }
 }

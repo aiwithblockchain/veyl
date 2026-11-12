@@ -283,6 +283,9 @@ pub fn run() {
             if let Err(error) = lifecycle::setup_tray(app.handle(), tray_parts.clone()) {
                 log::error!("托盘创建失败，应用继续运行：{error}");
             }
+            // TUN 的数据面探测：代理模式由 manager 的 supervise 循环负责，
+            // TUN 的 sing-box 不归 manager 管，需要独立的一条。
+            lifecycle::spawn_tun_data_plane_loop(tray_parts.tun.clone());
             Ok(())
         })
         // 红灯 / Cmd+W：只隐藏，不退出、不提示。只对主窗口生效。

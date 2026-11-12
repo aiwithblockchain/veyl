@@ -12,6 +12,7 @@ import {
   zeroConfigMode,
 } from "../ui/consoleActions";
 import { formatCheckedAgo, formatClock, formatTraffic } from "../ui/format";
+import { dataPlaneDown } from "../ui/dataPlane";
 import {
   DNS_NOTE_TEXT,
   failureHeadline,
@@ -29,6 +30,8 @@ interface Props {
   config: ConfigDetail | null;
   onStart: () => void;
   onStop: () => void;
+  /** 已连接但不通时的「重新连接」：先停再连。 */
+  onReconnect: () => void;
   onSwitchNode: (nodeId: string) => Promise<{ ok: boolean; message?: string }>;
   onProbe: (nodeId: string) => Promise<ProbeResult>;
   nodeProbes: NodeProbesController;
@@ -65,6 +68,9 @@ type Probe =
 
 const NO_RATE: RateSample[] = [];
 
+const NO_TRAFFIC_ACTION =
+  "网页打不开时，点上面的「重新连接」；还是不行，就换下面的节点再试。";
+
 function CopyIcon() {
   return (
     <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden>
@@ -92,6 +98,7 @@ export function Console({
   config,
   onStart,
   onStop,
+  onReconnect,
   onSwitchNode,
   onProbe,
   nodeProbes,
@@ -328,9 +335,27 @@ export function Console({
 
   const showLedger = Boolean(config && hasNodes && !transitioning && level !== "failed");
   const showStrip = Boolean(connected && config && !isProxy(config));
+  // 只有 running 且探测新鲜失败才算；degraded 仍走「连接不稳定」。
+  const noTraffic = dataPlaneDown(runtime, now);
 
   let hero: ReactNode;
-  if (connected) {
+  if (connected && noTraffic) {
+    // 连着但流量出不去：不显示计时器，边跑秒边说正常等于撒谎。
+    hero = (
+      <section className="hero">
+        <div className="hero__main">
+          <h1 className="state-word">
+            <span className="led is-warn" aria-hidden />
+            <span>已连接，不通</span>
+          </h1>
+          <p className="hero__action">{NO_TRAFFIC_ACTION}</p>
+        </div>
+        <button type="button" className="btn btn--primary" onClick={onReconnect}>
+          重新连接
+        </button>
+      </section>
+    );
+  } else if (connected) {
     hero = (
       <section className="hero">
         <div className="hero__main">
@@ -427,9 +452,11 @@ export function Console({
               ? `连接不稳定。${DNS_NOTE_TEXT}`
               : "连接不稳定"
             : connected
-              ? dnsDegraded
-                ? `已连接。${DNS_NOTE_TEXT}`
-                : "已连接"
+              ? noTraffic
+                ? `已连接，不通。${NO_TRAFFIC_ACTION}`
+                : dnsDegraded
+                  ? `已连接。${DNS_NOTE_TEXT}`
+                  : "已连接"
               : "未连接";
 
   return (

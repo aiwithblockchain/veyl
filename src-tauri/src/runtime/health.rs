@@ -177,11 +177,28 @@ pub struct DataPlaneProbe {
 }
 
 impl DataPlaneProbe {
+    /// 代理模式：经本地 mixed 入站出网，测的是「配置 + 节点」这条路径。
     pub fn new(url: impl Into<String>, mixed_port: u16) -> RuntimeResult<Self> {
         let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{mixed_port}"))
             .map_err(|e| RuntimeError::ClashApi(format!("invalid probe proxy: {e}")))?;
         let http = reqwest::Client::builder()
             .proxy(proxy)
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| RuntimeError::ClashApi(format!("probe client: {e}")))?;
+        Ok(Self {
+            url: url.into(),
+            http,
+        })
+    }
+
+    /// TUN 模式：**不设代理**，交给系统路由——请求被 TUN 接管，
+    /// 测的是「TUN 捕获 + 路由 + 节点」整条路径（`runtime.md` §2.3.1）。
+    ///
+    /// `no_proxy` 只关掉环境变量里的代理，避免测到用户给终端配的代理上。
+    pub fn direct(url: impl Into<String>) -> RuntimeResult<Self> {
+        let http = reqwest::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(5))
             .build()
             .map_err(|e| RuntimeError::ClashApi(format!("probe client: {e}")))?;
@@ -203,6 +220,62 @@ impl DataPlaneProbe {
 
     pub async fn ok(&self) -> bool {
         matches!(self.check().await, Ok(status) if (200..400).contains(&status))
+    }
+}
+
+/// `data_plane` 连续失败多少次才置 `false`（契约 §2.3.1）。
+///
+/// 一次失败不改值：上游或探测 URL 抖一下不该让界面闪红。
+pub const DATA_PLANE_FAILURES_BEFORE_DOWN: u32 = 2;
+
+/// `data_plane` 的去抖状态：**连续两次**失败才降级，一次成功立即恢复。
+///
+/// 纯计数、不做 IO，也不管间隔——间隔与循环属于各自连接的持有者
+/// （代理在 `RuntimeManager::supervise`，TUN 在 `TunSession` + 健康循环）。
+/// 放在这里是因为代理与 TUN 两条路径必须用同一套口径，不能各写一份。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataPlaneGate {
+    up: bool,
+    consecutive_failures: u32,
+}
+
+impl Default for DataPlaneGate {
+    fn default() -> Self {
+        // 还没探测过：乐观。契约规定「连接后头 10s 未知按乐观处理」。
+        Self {
+            up: true,
+            consecutive_failures: 0,
+        }
+    }
+}
+
+impl DataPlaneGate {
+    pub fn up(&self) -> bool {
+        self.up
+    }
+
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+
+    /// 新连接 / 换节点：回到乐观初值。
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// 记一次探测结果，返回 `up` 是否翻转。
+    pub fn record(&mut self, ok: bool) -> bool {
+        let before = self.up;
+        if ok {
+            self.up = true;
+            self.consecutive_failures = 0;
+        } else {
+            self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+            if self.consecutive_failures >= DATA_PLANE_FAILURES_BEFORE_DOWN {
+                self.up = false;
+            }
+        }
+        self.up != before
     }
 }
 
@@ -360,6 +433,61 @@ mod tests {
     #[test]
     fn probe_rejects_unusable_proxy_address() {
         assert!(DataPlaneProbe::new("https://example.com", 2080).is_ok());
+        assert!(DataPlaneProbe::direct("https://example.com").is_ok());
+    }
+
+    /// 契约 §2.3.1：单次失败不改值——上游抖一下不该让界面闪红。
+    #[test]
+    fn one_failure_keeps_data_plane_up() {
+        let mut gate = DataPlaneGate::default();
+        assert!(!gate.record(false), "第一次失败不能翻转");
+        assert!(gate.up());
+        assert_eq!(gate.consecutive_failures(), 1);
+    }
+
+    #[test]
+    fn two_consecutive_failures_take_data_plane_down() {
+        let mut gate = DataPlaneGate::default();
+        gate.record(false);
+        assert!(gate.record(false), "连续第二次失败要翻转");
+        assert!(!gate.up());
+    }
+
+    /// 一次成功立刻回 true，并把计数清零：之后要重新连续两次失败才会再降级。
+    #[test]
+    fn a_single_success_recovers_immediately() {
+        let mut gate = DataPlaneGate::default();
+        gate.record(false);
+        gate.record(false);
+        assert!(!gate.up());
+
+        assert!(gate.record(true));
+        assert!(gate.up());
+        assert_eq!(gate.consecutive_failures(), 0);
+
+        gate.record(false);
+        assert!(gate.up(), "恢复后单次失败不该再翻回去");
+    }
+
+    /// 失败不连续（中间夹着成功）不算「连续失败」。
+    #[test]
+    fn failures_separated_by_a_success_do_not_accumulate() {
+        let mut gate = DataPlaneGate::default();
+        gate.record(false);
+        gate.record(true);
+        gate.record(false);
+        assert!(gate.up());
+        assert_eq!(gate.consecutive_failures(), 1);
+    }
+
+    #[test]
+    fn reset_returns_to_the_optimistic_value() {
+        let mut gate = DataPlaneGate::default();
+        gate.record(false);
+        gate.record(false);
+        gate.reset();
+        assert!(gate.up());
+        assert_eq!(gate.consecutive_failures(), 0);
     }
 
     #[test]

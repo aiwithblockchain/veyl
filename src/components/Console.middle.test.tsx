@@ -120,6 +120,7 @@ function renderConsole(
       config={config}
       onStart={noop}
       onStop={noop}
+      onReconnect={noop}
       onSwitchNode={async () => ({ ok: true })}
       onProbe={never}
       nodeProbes={emptyProbes}

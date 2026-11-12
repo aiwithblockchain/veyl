@@ -760,9 +760,12 @@ export class MockAgentBridge implements AgentBridge {
   }
 
   private health(patch: Partial<RuntimeSnapshot["health"]>) {
+    // 演示开关：让连接后判成「已连接，不通」，验收同事不用等真实连续失败。
+    const forced =
+      mockFlag("veyl.mock.dataPlaneDown") === "1" ? { data_plane: false } : {};
     this.runtime = {
       ...this.runtime,
-      health: { ...this.runtime.health, ...patch, checked_at: now() },
+      health: { ...this.runtime.health, ...patch, ...forced, checked_at: now() },
     };
     this.emit({
       name: AGENT_EVENTS.runtimeHealthChanged,
@@ -792,9 +795,13 @@ export class MockAgentBridge implements AgentBridge {
     const tick = () => {
       if (this.runtime.state !== "running" && this.runtime.state !== "degraded") return;
       this.trafficTick += 1;
-      const up = 240_000 + Math.round(180_000 * Math.abs(Math.sin(this.trafficTick / 2.6)));
-      const down =
-        1_800_000 + Math.round(1_500_000 * Math.abs(Math.sin(this.trafficTick / 3.1)));
+      const dataPlaneDown = mockFlag("veyl.mock.dataPlaneDown") === "1";
+      const up = dataPlaneDown
+        ? 0
+        : 240_000 + Math.round(180_000 * Math.abs(Math.sin(this.trafficTick / 2.6)));
+      const down = dataPlaneDown
+        ? 0
+        : 1_800_000 + Math.round(1_500_000 * Math.abs(Math.sin(this.trafficTick / 3.1)));
       this.trafficUp += up * 2;
       this.trafficDown += down * 2;
       this.runtime = {
@@ -808,7 +815,8 @@ export class MockAgentBridge implements AgentBridge {
           sampled_at: now(),
         },
       };
-      this.health({});
+      // 开关关掉后下一次心跳恢复 data_plane，界面随即回到「已连接」。
+      this.health({ data_plane: !dataPlaneDown });
     };
     tick();
     this.healthTimer = window.setInterval(tick, 2000);
