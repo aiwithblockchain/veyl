@@ -85,6 +85,7 @@ interface RenderOptions {
   loading?: boolean;
   failedAfterConnected?: boolean;
   helperPreparing?: boolean;
+  onReconnect?: () => void;
 }
 
 function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
@@ -93,6 +94,7 @@ function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
       config={config}
       onStart={noop}
       onStop={noop}
+      onReconnect={opts.onReconnect ?? noop}
       onSwitchNode={switchNode}
       onProbe={never}
       nodeProbes={emptyProbes}
@@ -227,6 +229,61 @@ describe("状态矩阵", () => {
     expect(r.rows[1].value).toBe("42 ms");
     expect(r.rows[1].sub).toBe("刚刚检测");
     expect(r.rows[2].value).toBe("203.0.113.9");
+    expect(r.text(".hero .btn")).toBe("断开 VPN");
+  });
+
+  it("11 已连接但不通：44px 状态词、琥珀点、无计时器，主按钮换成重新连接", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-12T10:00:00Z"));
+    const onReconnect = vi.fn();
+    const r = renderConsole({
+      runtime: makeRuntime({
+        state: "running",
+        connected_since: new Date(Date.now() - 60_000).toISOString(),
+        health: {
+          contract_version: CONTRACT_VERSION,
+          process: true,
+          clash_api: true,
+          data_plane: false,
+          exit_ip: "203.0.113.9",
+          consecutive_failures: 2,
+          checked_at: new Date().toISOString(),
+        } as RuntimeView["health"],
+      }),
+      onReconnect,
+    });
+
+    expect(r.stateWord).toBe("已连接，不通");
+    expect(r.timecode).toBeNull();
+    expect(r.text(".hero__action")).toContain("点上面的「重新连接」");
+    expect(r.container.querySelector(".state-word .led")?.className).toContain("is-warn");
+    expect(r.text(".hero .btn")).toBe("重新连接");
+    fireEvent.click(r.getByRole("button", { name: "重新连接" }));
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+    expect(r.text(".console")).not.toContain("连接不稳定");
+  });
+
+  it("12 degraded 且探测失败：只显示连接不稳定，两个词不叠加", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-12T10:00:00Z"));
+    const r = renderConsole({
+      runtime: makeRuntime({
+        state: "degraded",
+        connected_since: new Date(Date.now() - 60_000).toISOString(),
+        health: {
+          contract_version: CONTRACT_VERSION,
+          process: true,
+          clash_api: true,
+          data_plane: false,
+          exit_ip: "203.0.113.9",
+          consecutive_failures: 2,
+          checked_at: new Date().toISOString(),
+        } as RuntimeView["health"],
+      }),
+    });
+
+    expect(r.text(".state-line")).toContain("连接不稳定");
+    expect(r.text(".console")).not.toContain("已连接，不通");
     expect(r.text(".hero .btn")).toBe("断开 VPN");
   });
 

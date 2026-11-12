@@ -1,6 +1,6 @@
 # 契约：Runtime Manager
 
-> 契约版本：`2.6.0`
+> 契约版本：`2.7.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 冻结前评审：PM / Alice / Bob
 > 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5、`docs/tun-mode.md`
@@ -17,7 +17,7 @@
 - 所有 JSON 字段使用 **snake_case**；所有时间是 **ISO 8601 UTC，带 `Z` 后缀**（`2026-11-02T09:15:03Z`），不带毫秒之外的其他格式。
 - 所有错误码是 **大写下划线**（`RUNTIME_START_TIMEOUT`）。
 - `contract_version` 出现在每一个对外结构里；破坏性变更必须升次版本号并同步本文档。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.6.0`），升版时全文替换。实现侧只允许有一个常量对应本文件，不得按结构分别发不同版本号。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.7.0`），升版时全文替换。实现侧只允许有一个常量对应本文件，不得按结构分别发不同版本号。
 
 **P1 范围**：单版本、单进程、系统代理模式。多版本并行、TUN、外部 MCP 宿主不在本契约内。
 
@@ -116,7 +116,7 @@ type HealthCheckName =
   | "traffic";
 
 type HealthSnapshot = {
-  contract_version: "2.6.0";
+  contract_version: "2.7.0";
   process: boolean;
   clash_api: boolean;
   data_plane: boolean;
@@ -125,6 +125,31 @@ type HealthSnapshot = {
   checked_at: string;              // ISO 8601 UTC
 };
 ```
+
+#### 2.3.1 `data_plane` 的判定口径（2.7.0 收紧）
+
+`data_plane` 是「连上了但流量到底通不通」的**唯一**依据，不新造字段、不改状态枚举。
+
+| 值 | 含义 |
+|---|---|
+| `true` | 最近一次探测成功，**或**本次连接还没跑完第一轮探测（连接后头 10s，未知按乐观处理） |
+| `false` | **连续两次**探测失败（约 20s）。单次失败不改值——上游或探测 URL 抖一下不该让界面闪红 |
+
+- 探测 URL 固定 `http://cp.cloudflare.com/generate_204`（`DEFAULT_DATA_PLANE_PROBE`），**10s 一次、5s 超时**。
+- **两种模式都必须探测。** `system_proxy` 经本地 mixed 入站；`tun` 直接发起普通请求、由 TUN 接管（TUN 不按进程排除 Veyl 自身）。**不得因为「TUN 没有 Clash API」就跳过探测、把 `data_plane` 写死成 `true`**——那正是「连上了但打不开网页，界面仍显示已连接」的来源。
+- 探测本身要经过当前连接路径，**不得**绕开它（否则测的是用户的裸网络，不是节点）。
+
+**各模式下每项检查是否适用**（消费方不得跨模式读）：
+
+| 检查 | `system_proxy` | `tun` |
+|---|---|---|
+| `process` | 有效 | 有效（helper 子进程存活） |
+| `clash_api` | 有效 | **不适用**：恒为 `false`，**不得**当成控制面故障 |
+| `data_plane` | 有效 | 有效（2.7.0 起必须探测） |
+| `exit_ip` | 有效 | 不适用：恒为 `null` |
+| `node_latency` | 有效 | 不适用：恒为 `null` |
+
+> TUN 没有 Clash API，所以「控制面」和「数据面」在 TUN 下只剩数据面一个信号。`clash_api = false` 在 `tun` 下不构成任何告警。
 
 ### 2.4 流量快照
 
@@ -156,7 +181,7 @@ type TrafficStats = {
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.6.0";
+  contract_version: "2.7.0";
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
@@ -230,7 +255,7 @@ type RuntimeSnapshot = {
 
 ```ts
 type AivpnError = {
-  contract_version: "2.6.0";
+  contract_version: "2.7.0";
   code: AivpnErrorCode;
   message: string;        // 面向用户，可本地化
   retryable: boolean;
@@ -280,6 +305,10 @@ type AivpnError = {
 | `starting` / `running` / `restarting` | `GIVE_UP` | `failed` | 上报错误；关闭系统代理 |
 | `failed` | `START_REQ` | `starting` | 先自检（二进制存在、端口可用）再启动 |
 
+> **只有 `process` / `clash_api` 会产生 `HEALTH_FAIL`。** `data_plane` 失败只更新快照（§4.1），**不迁移任何状态**：`degraded` 的 30s 自动重启是为「控制面坏了」准备的，套到「节点或上游不通」上会白白断掉用户正在用的连接，而重启修不好一个坏节点。
+>
+> 由此推出：**「已连接但没有流量」不是 `RuntimeState` 的取值**，而是 `state ∈ {running, degraded}` 与 `health.data_plane = false` 的组合（判定函数见 §4.3）。
+
 ### 3.3 不变量（测试必须覆盖）
 
 1. 同一时刻最多一个 `sing-box` 进程。
@@ -312,17 +341,35 @@ type AivpnError = {
 |---|---|---|---|
 | `process` | 1s | — | `kill(pid, 0)` 成功 |
 | `clash_api` | 2s | 1s | `GET /version` 返回 200 且 body 可解析 |
-| `data_plane` | 10s | 5s | 经本地 mixed 入站访问探测 URL 成功 |
+| `data_plane` | 10s | 5s | `system_proxy`：经本地 mixed 入站访问探测 URL 成功；`tun`：直接发起普通请求、由 TUN 接管后成功。**连续两次失败**才置 `false`，一次成功即回 `true`（§2.3.1） |
 | `exit_ip` | 连接成功后一次 + 每 60s | 5s | 返回合法 IP |
-| `node_latency` | 连接成功后一次 + 每 30s | 6s（上游 `timeout=3000`） | `GET /proxies/node-<id>/delay` 返回 200 且 `delay` ≥ 0。非 200 表示**节点不可达**——那是业务结果，写进 `node_latency_ms = null`，**不判 `HEALTH_FAIL`**（同 §4.3 的延迟测试特殊语义）。单独 spawn，不阻塞 2s 健康循环 |
+| `node_latency` | 连接成功后一次 + 每 30s | 6s（上游 `timeout=3000`） | `GET /proxies/node-<id>/delay` 返回 200 且 `delay` ≥ 0。非 200 表示**节点不可达**——那是业务结果，写进 `node_latency_ms = null`，**不判 `HEALTH_FAIL`**（同 §5.3 的延迟测试特殊语义）。单独 spawn，不阻塞 2s 健康循环 |
 | `traffic` | 2s（与 `clash_api` 同频） | 2s | `GET /connections` 返回 200 且 body 可解析；取 `uploadTotal` / `downloadTotal` 算累计与速率 |
 
 判定规则：
 
 - `process` 或 `clash_api` 失败 → 该次检查直接判 `HEALTH_FAIL`。
-- `data_plane` 失败 → 记失败，但不单独判 `HEALTH_FAIL`（可能只是探测 URL 不可达）。
-- `exit_ip` / `traffic` 失败只影响展示，不影响状态。
-- 连续 3 次 `HEALTH_FAIL` → `degraded`。
+- `data_plane` 失败 → 只更新快照，**不判 `HEALTH_FAIL`**；连续两次失败才置 `false`（§2.3.1）。
+- `exit_ip` / `traffic` / `node_latency` 失败只影响展示，不影响状态。
+- 连续 3 次 `HEALTH_FAIL` → `degraded`。**只有 `process` / `clash_api` 能凑出这个 3 次。**
+
+**看似能用、但不作为判据的信号**（写实现前先看这条，别自己发明）：
+
+| 信号 | 为什么不能用 |
+|---|---|
+| `traffic = 0` / 速率 0 | 用户可能根本没在用网，或只走了直连。零流量不是故障 |
+| `node_latency_ms = null` | 它来自 Clash API delay 测试，TUN 下恒 `null`；非 200 只说明节点回显失败，未必承载不了流量。拿它判「不通」会和 `data_plane` 重复计数 |
+| `exit_ip = null` | 只探一次、失败即清空，`null` 混着「没探测」与「探测失败」 |
+| 系统代理开关 | 用户可能只用 TUN，开关状态与「经 Veyl 的流量通不通」不是一回事 |
+
+**探测失败的误报面（`data_plane = false` 时，下面这些也会让它为假）**：
+
+| 情况 | 是否会误报 | 处理 |
+|---|---|---|
+| 探测 URL 本身不可达 | 是（极少） | `generate_204` 是稳定端点；连两次失败才置假，已把单次抖动挡掉。文案说「流量没有出去」，不说「节点坏了」 |
+| 用户自己断网 / 上游断（TUN 下尤其） | 是 | 此时「经 Veyl 的流量确实不通」是事实，文案保持中立；由用户或 AI 判断是本地网络还是节点 |
+| 节点失效 / 被限速 | 否（正是要抓的） | 正常触发 |
+| 系统代理没生效（只影响走代理的软件） | 部分 | 探测经 mixed 入站，测的是「代理链路」；系统代理开关另由 `system_proxy_enabled` 表达，不混用 |
 
 ### 4.2 隐私模式（P1 不做）
 
@@ -337,9 +384,37 @@ type AivpnError = {
 | `health.data_plane = true` | 通过，**或未探测** |
 | `health.data_plane = false` | 探测过且失败 |
 
-UI 必须能区分「未探测」与「探测失败」——前者在 P1 不会出现（因为检查恒开），但 P2 加开关后会出现，届时前端不需要改。
+`data_plane` 是布尔值，**表达不了「未探测」**。P1 不受影响：连接期间探测恒开（`system_proxy` 与 `tun` 都开），`false` 一定是真的探测失败。**P2 若加开关，必须把 `data_plane` 改成 `boolean | null` 并升主版本**——不能沿用「true 即通过」的读法，否则关掉检查会被读成「一切正常」。
 
 > 实现时不要写「`exit_ip == null` 就当失败」的逻辑；`null` 只表示没有数据。
+
+### 4.3 「已连接但没有流量」的判定与消费方责任
+
+**判定函数（唯一口径）**：
+
+```ts
+dataPlaneDown(snapshot) =
+  (snapshot.state === "running" || snapshot.state === "degraded") &&
+  snapshot.health.data_plane === false;
+```
+
+- **所有消费方只认这一个函数**：界面状态词、诊断报告、AI 工具描述都由它推导。不要各自写 `!health.data_plane`——那会把 `failed` 下的 `process` / `clash_api` 问题也算进来，掩盖真正的原因。
+- **为什么不扩 `RuntimeState`**：`degraded` 会启动 30s 自动重启（§3.4），而重启修不好节点或上游；它还会断掉用户正在用的连接。`failed` 更重：关系统代理、停运行时。把「数据面不通」塞进状态机，等于用「重启」回答一个「换节点」的问题。
+- **为什么不加 `degraded_reason` / `health.verdict` 字段**：`data_plane` 已经是「经当前连接路径能不能出去」的实测结论；再包一层只是给同一个布尔改名字，还要维护第二套真值。
+
+**恢复**：
+
+- `data_plane` 回到 `true` 时**不发新事件**：`runtime-health-changed` 每次探测后都发，且带完整 `health`。
+- **不做自动切换节点，也不做自动重连。** 探测失败分不出「节点坏了」「本地上游断了」「探测目标临时不可达」；自动切换会让用户不知道自己在哪台服务器上，还会绕过配置里选定的节点。恢复由用户触发。
+- 自动重启仍然只属于 `degraded`（`clash_api` 连续失败），与本节无关。
+
+**消费方最少要做的事**（不写视觉细节）：
+
+1. `dataPlaneDown` 为真时，状态词不得只写「已连接」；写成「已连接，但没有流量」一类，并给出 `health.checked_at` 的新鲜度（超过 30s 未刷新即视为未知）。
+2. 同一状态下必须给两个不依赖 AI 的动作：**重新连接**、**更换节点**。两者都不自动执行。
+3. 降级原因只读 `health` 与 `state`；`last_error` 只在 `failed` 下使用。`tun` 模式下**不得**把 `clash_api = false` 当成故障（§2.3.1）。
+
+**托盘**：维持 `idle` / `connected` / `error` 三态，不新增第四态。`degraded` 与 `dataPlaneDown` 都继续映射为 `connected`——托盘回答的是「Veyl 还在不在接管」，进程确实在；标成 `error` 与「连接没断、可能自己恢复」矛盾，而且托盘没有文字，红色只会被读成「断了」。更细的表达留在界面里。
 
 ---
 
@@ -495,6 +570,8 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 
 去抖要求：同一秒内的多次健康变化只发一次，`health.checked_at` 取最新值。
 
+**不新增事件**：「已连接但没有流量」完全由 `runtime-health-changed` 携带的 `health` 表达（§4.3）；`runtime-state-changed` 只在真正的状态迁移时发，`data_plane` 变化不算迁移。
+
 **在线切换节点不发 `runtime-state-changed`**：进程没停、状态没迁移，只是出口换了。它由 `node-switched`（`events.md` §4.11）表达，载荷里带切换后的 `RuntimeSnapshot`。
 
 ---
@@ -596,6 +673,19 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 ---
 
 ## 12. 变更记录
+
+### 2.7.0（2026-11-12，连接健康：连上了但流量不通）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 契约版本升到 `2.7.0`；`health.data_plane` 成为「已连接但没有流量」的**唯一**依据，判定收紧为**连续两次探测失败**（约 20s）才为 `false`，一次成功即回 `true` | 语义变更 | PM 2026-11-12：连上了但节点实际不通时界面仍显示「已连接」 |
+| 2 | **TUN 必须探测数据面**：普通请求经 TUN 出网，10s 一次；不得再写死 `data_plane = true`。新增「各模式检查是否适用」表：TUN 下 `clash_api` / `exit_ip` / `node_latency` 均不适用，不得当故障读 | 新增约束 | TUN 下没有任何健康信号，是本次缺口的主要来源 |
+| 3 | §3.2 明确：只有 `process` / `clash_api` 产生 `HEALTH_FAIL`；`data_plane` 失败不迁移状态、不触发 30s 自动重启（重启修不好节点，还会断掉用户连接） | 语义澄清 | 防止把数据面故障塞进 `degraded` |
+| 4 | 新增 §4.3：判定函数 `dataPlaneDown`、恢复规则（不自动切换节点、不自动重连）、消费方最少责任（状态词、不依赖 AI 的两个动作、TUN 下不读 `clash_api`）、托盘维持三态 | 新增章节 | 同上；视觉细节留给设计 |
+| 5 | §4.1 增列「不用作判据的信号」（`traffic = 0`、`node_latency_ms = null`、`exit_ip = null`、系统代理开关）与误报面 | 说明 | 每条都要能落成断言，避免实现自行发明判据 |
+| 6 | §4.2 更正：`data_plane` 是布尔，**表达不了「未探测」**；P2 加开关时须改成 `boolean \| null` 并升主版本 | 语义修正 | 原文说「UI 必须能区分」，类型做不到 |
+| 7 | 事件不变：不新增事件、不改 `runtime-health-changed` 载荷；`events.md` 不升版 | 说明 | 现有事件已够用 |
+| 8 | 元数据：全文 `contract_version` 字面量替换为 `2.7.0`（实现侧唯一常量是 `manager.rs::CONTRACT_VERSION`） | 元数据 | §0 版本约定 |
 
 ### 2.6.0（2026-11-09，连接期系统 DNS 状态）
 

@@ -1097,11 +1097,11 @@ export default function App() {
     });
   };
 
-  const handleVpnStop = () => {
+  const handleVpnStop = (): Promise<boolean> => {
     // 记下点断开这一刻是不是已连接：断开失败时只有原本在线才恢复在线。
     const wasConnected = runtime.state === "running" || runtime.state === "degraded";
     stoppingRef.current = true;
-    void vpn.stop().then(
+    return vpn.stop().then(
       (result) => {
         showActionResult(result, "断开失败");
         stoppingRef.current = false;
@@ -1110,21 +1110,30 @@ export default function App() {
           setFailedAfterConnected(false);
           setRuntime((view) => viewAfterStopped(view));
           refreshSnapshot();
-          return;
+          return true;
         }
         if (!result.ok) {
           // 断开失败：原本在线就回到已连接并报错，不能显示成断开成功。
           if (wasConnected) setRuntime((view) => viewAfterConnected(view));
           refreshSnapshot();
-          return;
+          return false;
         }
         // 被新一轮 start 接管等空返回：只把快照补回来。
         refreshSnapshot();
+        return false;
       },
       () => {
         stoppingRef.current = false;
+        return false;
       },
     );
+  };
+
+  // 已连接但不通：先停稳再起；不先等 stop 回来，stop 命令可能落在新连接上把它关掉。
+  const handleVpnReconnect = () => {
+    void handleVpnStop().then((stopped) => {
+      if (stopped) handleVpnStart();
+    });
   };
 
   // 用户主动点「让 AI 帮我配」：打开右栏、给焦点；会话空闲时直接发一条可见的用户消息。
@@ -1264,6 +1273,7 @@ export default function App() {
         config={vpn.activeConfig}
         onStart={handleVpnStart}
         onStop={handleVpnStop}
+        onReconnect={handleVpnReconnect}
         onSwitchNode={handleSwitchNode}
         onProbe={vpn.probe}
         nodeProbes={nodeProbes}

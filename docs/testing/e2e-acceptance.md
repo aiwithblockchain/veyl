@@ -823,7 +823,7 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 ## 6. 界面
 
-> 本章按「同事驱动 AI 执行」写：E6-01…E6-06 是原场景的改写，E6-07…E6-14 是 P1 十一条里与界面直接相关的八条，E6-15…E6-22 是 P2 的八条。
+> 本章按「同事驱动 AI 执行」写：E6-01…E6-06 是原场景的改写，E6-07…E6-14 是 P1 十一条里与界面直接相关的八条，E6-15…E6-22 是 P2 的八条，E6-23、E6-24 是打磨批的两条，E6-25…E6-31 是「已连接，不通」的一组。
 > 执行通道：除 E6-02、E6-04 必须用原生应用外，其余优先用浏览器预览（M1）。DOM 断言的 JS 直接在 Console 执行，返回值保存为 JSON。
 
 | P1 项 | 用例 |
@@ -846,7 +846,22 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 | 消息不含 tokens、状态文字无动画 | E6-19 |
 | 未配置 AI 横幅 2px 竖线 + 透明底 | E6-20 |
 | 零配置自动展开、本次运行内关闭、重启再展开 | E6-21 |
-| 全局间距未归格：只记已知，不做断言 | E6-22 |
+| 全局间距：四个容器已归格，其余只记已知 | E6-22 |
+
+| 打磨批项 | 用例 |
+|---|---|
+| 设置弹窗打开时提示条让到弹窗头下方 | E6-23 |
+| 配置名单行省略、行高仍 64px、删除按钮不被挤 | E6-24 |
+
+| 「已连接，不通」 | 用例 |
+|---|---|
+| 进入本状态的版式、文案与中间区 | E6-25 |
+| 探测恢复后回到「已连接」 | E6-26 |
+| 「重新连接」的过渡与按钮唯一性 | E6-27 |
+| 与「连接不稳定」不叠加 | E6-28 |
+| 健康快照过期后退出本状态 | E6-29 |
+| 读屏只播报一次 | E6-30 |
+| 真实断流的进入与恢复（M2，可选） | E6-31 |
 
 ### E6-01 中间控制台各块的出现条件
 
@@ -1785,15 +1800,29 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 - `veyl.ui.panelOpen` / `veyl.ui.panelVersion` / `veyl.ui.panelClosedByUser` 的 localStorage 值。
 - 刷新前后的面板状态。
 
-### E6-22 全局间距：只记录已知，不做断言
+### E6-22 全局间距：四个容器已归格，其余只记已知
 
-> 已知：全局间距尚未完全归到统一栅格；本条只记录，不把任何间距值判成通过或不通过。
+> 打磨批把四处间距归到 4px 网格：`.config`、`.chat__scroll`、`.ledger__row`、`.app-toast`。这四处可以断言；其余容器仍有未归格的值，照旧只记录、不判失败。
 
-**前置**：M1；1440×900；主界面、设置、新建配置、右栏都打开过一遍。
+**前置**：M1；1440×900；主界面、设置、新建配置、右栏都打开过一遍；对话里至少一轮回复（渲染出 `.ledger__row`）；触发过一次提示条（`.app-toast` 在 DOM 中）。
 
 **步骤**：
 
-1. 抽查下列容器的 `marginTop / marginBottom / paddingTop / paddingBottom / gap`，记录不是 4 或 8 的倍数的值：
+1. 抽查四个已归格容器的 `padding`：
+
+```js
+(() => {
+  const sels = [".config", ".chat__scroll", ".ledger__row", ".app-toast"];
+  return sels.map((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return { sel, found: false };
+    const s = getComputedStyle(el);
+    return { sel, found: true, padding: [s.paddingTop, s.paddingRight, s.paddingBottom, s.paddingLeft] };
+  });
+})()
+```
+
+2. 再抽查其余容器的 `marginTop / marginBottom / paddingTop / paddingBottom / gap`，记录不是 4 或 8 的倍数的值：
 
 ```js
 (() => {
@@ -1813,20 +1842,510 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 })()
 ```
 
-2. 把结果写进当天的 `spacing-known.md`；发现元素重叠、裁切或点不到时，单独开缺陷。
+3. 把两次结果写进当天的 `spacing-known.md`；发现元素重叠、裁切或点不到时，单独开缺陷。
 
 **预期**：
 
-1. 本条结论只写「已记录」，不写「间距合格」；不能拿它当通过依据。
-2. `spacing-known.md` 至少包含上面六个容器的 margin / padding / gap 原值。
-3. 发现重叠、裁切、不可点击时，另开缺陷并附截图；不在本条判失败。
-4. 本手册其他用例不对未归格的间距做断言。
+1. 四个已归格容器的 `padding` 等于已知值（偏差 ≤0.5px，亚像素四舍五入可接受）：
+   - `.config`：`["12px", "36px", "12px", "12px"]`
+   - `.chat__scroll`：`["24px", "16px", "8px", "16px"]`
+   - `.ledger__row`：`["16px", "0px", "16px", "0px"]`
+   - `.app-toast`：`["8px", "12px", "8px", "16px"]`
+2. 其余容器只写「已记录」，不写「间距合格」；未归格的值不能当失败依据。
+3. `spacing-known.md` 至少包含步骤 2 六个容器的 margin / padding / gap 原值，以及步骤 1 四个容器的 padding 原值。
+4. 发现重叠、裁切、不可点击时，另开缺陷并附截图；不在本条判失败。
+5. 本手册其他用例不对未归格的间距做断言。
 
 **不合格时记录什么**：
 
-- 六个容器的计算样式 JSON。
+- 步骤 1、2 的完整 JSON。
+- 四个已归格容器中偏差的那一个：选择器、实际值、期望值。
 - 发现重叠 / 裁切 / 不可点击的元素与截图。
 - `spacing-known.md` 的路径。
+
+### E6-23 设置弹窗打开时提示条让到弹窗头下方
+
+**前置**：M1；1440×900；已有一套配置；设置弹窗可打开。
+
+**步骤**：
+
+1. 打开设置（左栏底部「设置」），停在「连接」页。
+2. 在设置里触发一次 info 提示：用「添加节点 › 文本导入」粘贴一条合法 `ss://` 链接并点「导入」，出现「已添加 N 个节点」提示；**立即**执行下面的脚本（提示条 4 秒后消失，超时就再触发一次）：
+
+```js
+(() => {
+  const t = document.querySelector(".app-toast");
+  const h = document.querySelector(".modal--settings .modal__head");
+  if (!t || !h) return { found: { toast: !!t, head: !!h } };
+  const tr = t.getBoundingClientRect();
+  const hr = h.getBoundingClientRect();
+  const s = getComputedStyle(t);
+  const close = document.querySelector(".app-toast__close");
+  const cr = close?.getBoundingClientRect();
+  const hit = cr ? document.elementFromPoint(cr.left + cr.width / 2, cr.top + cr.height / 2) : null;
+  const vh = window.innerHeight;
+  const expected = Math.max(0.07 * vh, 0.5 * vh - 390, 24) + 64;
+  return {
+    viewport: [window.innerWidth, window.innerHeight],
+    toastTop: Math.round(tr.top * 10) / 10,
+    headTop: Math.round(hr.top * 10) / 10,
+    headBottom: Math.round(hr.bottom * 10) / 10,
+    zIndex: s.zIndex,
+    expectedTop: Math.round(expected * 10) / 10,
+    overlap: !(tr.bottom <= hr.top || tr.top >= hr.bottom || tr.right <= hr.left || tr.left >= hr.right),
+    closeHit: close && hit ? close === hit || close.contains(hit) : null,
+    hasSupport: CSS.supports("selector(:has(*))"),
+  };
+})()
+```
+
+3. 把窗口高度依次改为 720 和 1200（宽度保持 1440），每次重新触发 info 提示后执行同一段脚本，记录 `toastTop` 与 `expectedTop`。
+
+**预期**：
+
+1. 1440×900 时 `toastTop` 为 **127（±2）**，`expectedTop` 同为 127；`zIndex` 为 `"90"`。
+2. `overlap` 为 `false`：提示条与 `.modal--settings .modal__head` 矩形不相交（900 高时头部底边约 120，提示条顶边约 127）。
+3. `closeHit` 为 `true`：提示条完整可见，关闭按钮没有被弹窗遮住。
+4. 720 高时 `toastTop` 约 114、1200 高时约 274，均与 `expectedTop` 相差 ≤2。规则是 `.app:has(.modal--settings) .app-toast { top: calc(max(7vh, 50vh - 390px, 24px) + 64px) }`，**窗口高度不同期望值不同**；127 只是 1440×900 的基准值，不要当固定值判。
+5. 若 `hasSupport` 为 `false`，或 `toastTop` 约为 96 且 `overlap` 为 `true`：记为「环境不支持」并写入 `notes.md`（WebView 不支持 `:has()`），不算产品不通过。
+
+**不合格时记录什么**：
+
+- 三种窗口高度下的完整 JSON。
+- 提示条与设置弹窗头部的截图（带矩形标注）。
+- `CSS.supports("selector(:has(*))")` 的结果与实际生效的 `top` 值。
+
+### E6-24 配置名超长时单行省略
+
+**前置**：M1；1440×900；左栏为默认宽度；至少一套配置。
+
+> 造数说明：配置名在界面上最长 40 个字符（`ManualConfigForm` 的 `maxLength={40}`，超出提示「名字最多 40 个字符。」），**通过界面造不出 60 个字符的名字**。40 个中文字符在默认栏宽下已远超可用宽度，足以验证省略。若确需更长的名字，只能由测试者直接改数据库（不属于本用例的必经步骤，也不代表产品路径）。
+
+**步骤**：
+
+1. 新建或编辑一套「我自己配置」的配置，名称填 40 个字符（例如「超长名称测试」重复 6 次再加 4 个字），保存。
+2. 执行：
+
+```js
+(() => {
+  const rows = [...document.querySelectorAll(".configs__row")];
+  const row = rows.find((r) => {
+    const n = r.querySelector(".config__name");
+    return n && n.textContent.trim().length >= 30;
+  });
+  if (!row) return { found: false };
+  const n = row.querySelector(".config__name");
+  const d = row.querySelector(".config__delete");
+  const s = getComputedStyle(n);
+  const nr = n.getBoundingClientRect();
+  const rr = row.getBoundingClientRect();
+  const dr = d?.getBoundingClientRect();
+  return {
+    textLength: [...n.textContent.trim()].length,
+    title: n.getAttribute("title"),
+    titleEqualsText: n.getAttribute("title") === n.textContent.trim(),
+    whiteSpace: s.whiteSpace,
+    textOverflow: s.textOverflow,
+    overflow: s.overflow,
+    lineHeight: s.lineHeight,
+    fontSize: s.fontSize,
+    nameHeight: Math.round(nr.height * 10) / 10,
+    rowHeight: Math.round(rr.height),
+    scrollWidth: n.scrollWidth,
+    clientWidth: n.clientWidth,
+    truncated: n.scrollWidth > n.clientWidth,
+    nameRight: Math.round(nr.right * 10) / 10,
+    deleteLeft: dr ? Math.round(dr.left * 10) / 10 : null,
+    deleteInsideRow: dr ? dr.left >= rr.left && dr.right <= rr.right && dr.top >= rr.top && dr.bottom <= rr.bottom : null,
+    gapToDelete: dr ? Math.round((dr.left - nr.right) * 10) / 10 : null,
+  };
+})()
+```
+
+3. 把鼠标移到该行上，确认删除按钮出现且可点。
+
+**预期**：
+
+1. `whiteSpace` 为 `"nowrap"`，`textOverflow` 为 `"ellipsis"`，`overflow` 为 `"hidden"`。
+2. `truncated` 为 `true`（`scrollWidth > clientWidth`），说明确实被截断而不是撑开。
+3. 名称只有一行：`nameHeight` 约 19.5–20（15px × 1.3），与 `lineHeight` 一致；没有第二行。
+4. `rowHeight` 为 64（±1），与 E6-15 的骨架行同高。
+5. `titleEqualsText` 为 `true`：`title` 是完整名字，不是省略后的文本。
+6. `deleteInsideRow` 为 `true`，且 `gapToDelete ≥ 0`：删除按钮完整落在行内，没有被挤出或被文字覆盖。
+
+**不合格时记录什么**：
+
+- 上述完整 JSON（含 `textLength` / `title` 原文）。
+- 该行的截图：完整栏宽，能看出省略号与删除按钮位置。
+- 若名称换行或行高被撑开：`nameHeight`、`lineHeight`、`rowHeight` 三个值与截图。
+
+### E6-25 进入「已连接，不通」的版式与文案
+
+依据：`docs/design/connected-no-traffic.md` §3–§6、§8；判定函数 `src/ui/dataPlane.ts`；hero 分支 `src/components/Console.tsx`。
+
+**前置**：M1；1440×900；浅色；一套可连接的配置（默认「所有软件都走 VPN」，至少一个节点）；页面已重新加载。
+
+**步骤**：
+
+1. 连接成功，看到「已连接」与计时器后，先记录正常状态下的中间区块签名：
+
+```js
+(() => {
+  const body = document.querySelector(".console__body");
+  const status = body?.querySelector("p[role='status']");
+  return body
+    ? [...body.children]
+        .filter((el) => el !== status && !el.classList.contains("hero"))
+        .map((el) => el.tagName + "." + (el.className || ""))
+    : null;
+})()
+```
+
+2. 断开 VPN；执行 `localStorage.setItem("veyl.mock.dataPlaneDown", "1")`；再点「启动 VPN」。连接前先设这个开关也可以。
+3. 等 2 秒，执行：
+
+```js
+(() => {
+  const q = (s) => document.querySelector(s);
+  const body = q(".console__body");
+  const word = body?.querySelector(".state-word");
+  const led = word?.querySelector(".led");
+  const action = body?.querySelector(".hero__action");
+  const ws = word ? getComputedStyle(word) : null;
+  const as = action ? getComputedStyle(action) : null;
+  const primary = [...(body?.querySelectorAll(".hero .btn--primary") ?? [])];
+
+  const probeBg = document.createElement("span");
+  probeBg.style.background = "var(--amber)";
+  const probeInk = document.createElement("span");
+  probeInk.style.color = "var(--ink-2)";
+  const probeCh = document.createElement("span");
+  probeCh.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;";
+  if (as) {
+    probeCh.style.fontSize = as.fontSize;
+    probeCh.style.fontFamily = as.fontFamily;
+    probeCh.style.fontWeight = as.fontWeight;
+    probeCh.style.letterSpacing = as.letterSpacing;
+  }
+  probeCh.textContent = "0".repeat(46);
+  document.body.append(probeBg, probeInk, probeCh);
+  const amber = getComputedStyle(probeBg).backgroundColor;
+  const ink2 = getComputedStyle(probeInk).color;
+  const ch46 = probeCh.getBoundingClientRect().width;
+  probeBg.remove();
+  probeInk.remove();
+  probeCh.remove();
+
+  const status = body?.querySelector("p[role='status']");
+  const blocks = body
+    ? [...body.children]
+        .filter((el) => el !== status && !el.classList.contains("hero"))
+        .map((el) => el.tagName + "." + (el.className || ""))
+    : [];
+
+  return {
+    stateWord: word ? word.textContent.trim() : null,
+    fontSize: ws?.fontSize ?? null,
+    timecode: !!body?.querySelector(".timecode"),
+    ledClass: led?.className ?? null,
+    ledBg: led ? getComputedStyle(led).backgroundColor : null,
+    amber,
+    primaryCount: primary.length,
+    primaryText: primary.map((b) => b.textContent.trim()),
+    primaryClass: primary[0]?.className ?? null,
+    action: action ? action.textContent.trim() : null,
+    actionFontSize: as?.fontSize ?? null,
+    actionColor: as?.color ?? null,
+    ink2,
+    actionMaxWidth: as?.maxWidth ?? null,
+    ch46: Math.round(ch46 * 10) / 10,
+    blocks,
+    visiblePhraseLeaves: body
+      ? [...body.querySelectorAll("*")].filter(
+          (el) =>
+            el.children.length === 0 &&
+            !el.closest(".sr-only") &&
+            el.textContent.includes("已连接，不通"),
+        ).length
+      : null,
+  };
+})()
+```
+
+**预期**：
+
+1. `stateWord` 为 `已连接，不通`；`fontSize` 为 `44px`。
+2. `timecode` 为 `false`：本状态没有 64px 计时器。
+3. `ledClass` 含 `is-warn`；`ledBg` 等于 `amber`（脚本用 `--amber` 现算，不写死色值）。
+4. `primaryCount` 为 1；`primaryText[0]` 为 `重新连接`；`primaryClass` 含 `btn--primary`。
+5. `action` 逐字等于 `网页打不开时，点上面的「重新连接」；还是不行，就换下面的节点再试。`；`actionFontSize` 为 `15px`；`actionColor` 等于 `ink2`；`actionMaxWidth` 与 `ch46` 相差 ≤1。
+6. `blocks` 与步骤 1 的记录逐项相同：本状态**不新增中间区块**。
+7. `visiblePhraseLeaves` 为 1：可见区域只有 hero 里那一处状态词，没有第二处重复。
+
+**不合格时记录什么**：
+
+- 步骤 1 与步骤 3 的两个数组。
+- 上述 JSON 全文与截图（hero、行动句、按钮一起入画）。
+- 字号 / 颜色 / 最大宽度不符时：计算值与期望值各写一遍。
+
+### E6-26 探测恢复后回到「已连接」
+
+**前置**：接 E6-25，界面处于「已连接，不通」。
+
+**步骤**：
+
+1. 执行 `localStorage.removeItem("veyl.mock.dataPlaneDown")`。
+2. 立刻执行下面的脚本，每 500ms 轮询一次，最多等 10 秒：
+
+```js
+(async () => {
+  const t0 = performance.now();
+  const from = document.querySelector(".console__body .state-word")?.textContent.trim() ?? null;
+  while (performance.now() - t0 < 10000) {
+    if (document.querySelector(".console__body .timecode")) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  const body = document.querySelector(".console__body");
+  return {
+    from,
+    elapsedMs: Math.round(performance.now() - t0),
+    timecode: !!body?.querySelector(".timecode"),
+    stateLine: body?.querySelector(".state-line__label")?.textContent.trim() ?? null,
+    action: body?.querySelector(".hero__action")?.textContent.trim() ?? null,
+    ledClass: body?.querySelector(".state-line .led")?.className ?? null,
+  };
+})()
+```
+
+**预期**：
+
+1. `from` 为 `已连接，不通`；`elapsedMs ≤ 10000`（mock 通道下通常 ≤2500）。
+2. `timecode` 为 `true`；`stateLine` 为 `已连接`；`ledClass` 含 `is-ok`。
+3. `action` 为 `null`：行动句随状态消失。
+
+**不合格时记录什么**：
+
+- 上述 JSON；超时则附每 500ms 的状态词序列（在轮询里加 `samples.push(s)`）。
+- 恢复前后的两张截图。
+
+### E6-27 「重新连接」的过渡与按钮唯一性
+
+**前置**：接 E6-25，界面处于「已连接，不通」；`veyl.mock.dataPlaneDown` 仍为 `1`。
+
+**步骤**：
+
+1. 用同一句脚本「先清开关、再点按钮」，保证点击发生在下一次 2 秒健康事件之前：
+
+```js
+(() => {
+  localStorage.removeItem("veyl.mock.dataPlaneDown");
+  const btn = [...document.querySelectorAll(".console__body .hero .btn--primary")].find(
+    (b) => b.textContent.trim() === "重新连接",
+  );
+  btn?.click();
+  return { clicked: !!btn };
+})()
+```
+
+2. 执行下面的观察脚本（200ms 采样，最多 15 秒）：
+
+```js
+(async () => {
+  const t0 = performance.now();
+  const samples = [];
+  let sawConnecting = false;
+  const snap = () => {
+    const body = document.querySelector(".console__body");
+    const word = body?.querySelector(".state-word, .state-line__label")?.textContent.trim() ?? null;
+    const buttons = [...(body?.querySelectorAll(".hero .btn") ?? [])].map((b) => b.textContent.trim());
+    return {
+      word,
+      timecode: !!body?.querySelector(".timecode"),
+      buttons,
+      primaryCount: body?.querySelectorAll(".hero .btn--primary").length ?? null,
+    };
+  };
+  while (performance.now() - t0 < 15000) {
+    const s = snap();
+    samples.push({ t: Math.round(performance.now() - t0), ...s });
+    if (s.word === "正在连接") sawConnecting = true;
+    if (sawConnecting && s.timecode) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return { sawConnecting, elapsedMs: Math.round(performance.now() - t0), final: snap(), samples };
+})()
+```
+
+**预期**：
+
+1. `clicked` 为 `true`；`sawConnecting` 为 `true`：中间经过「正在连接」。
+2. `final.word` 为 `已连接`；`final.timecode` 为 `true`；`elapsedMs ≤ 15000`（mock 下约 2.4–4 秒）。
+3. 任一采样里 `primaryCount ≤ 1`；`buttons` 至多两个元素，且没有一项同时包含「重新连接」与「断开 VPN」——按钮文案不叠加。
+4. 整个过程没有出现两个主按钮并排（`primaryCount` 没有 ≥2 的采样）。
+
+**不合格时记录什么**：
+
+- `clicked`、`samples` 全文。
+- 「正在连接」与结束态两张截图。
+- 出现两个主按钮的采样时间点。
+
+### E6-28 与「连接不稳定」不叠加
+
+**前置**：M2 原生应用；TUN 配置可连接；终端能 `pgrep -f sing-box`；测试者愿意暂停再恢复核心进程。
+
+**步骤**（构造由测试者执行，AI 只读界面与日志）：
+
+1. 连接成功，确认是普通「已连接」。
+2. 取核心 pid：`pgrep -f "/sing-box" | head -1`。
+3. `kill -STOP <pid>` 暂停核心（不是杀掉，进程仍在，能恢复）。
+4. 等 8–12 秒：健康检查每 2 秒一次，连续 3 次失败进入降级。
+5. 读取界面。能开 DevTools 就执行下面的脚本，否则按同样四点用截图核对：
+
+```js
+(() => {
+  const body = document.querySelector(".console__body");
+  return {
+    stateLine: body?.querySelector(".state-line__label")?.textContent.trim() ?? null,
+    stateWord: body?.querySelector(".state-word")?.textContent.trim() ?? null,
+    timecode: !!body?.querySelector(".timecode"),
+    action: body?.querySelector(".hero__action")?.textContent.trim() ?? null,
+    textHasNoTraffic: body?.textContent.includes("已连接，不通") ?? null,
+  };
+})()
+```
+
+6. 恢复：`kill -CONT <pid>`；等 ≤10 秒，或断开后重连。
+
+**预期**：
+
+1. `stateLine` 为 `连接不稳定`；`stateWord` 为 `null`。
+2. `textHasNoTraffic` 为 `false`：**不出现**「已连接，不通」。
+3. `action` 为 `null`：不显示本状态的行动句。
+4. `timecode` 为 `true`：降级仍显示计时器（与 E6-25 相反）。
+
+> 降级 30 秒左右会触发自动重启；在 8–12 秒的窗口内读数即可，不要等到重启后。
+
+**不合格时记录什么**：
+
+- 上述 JSON 与降级前后两张截图。
+- `pgrep -f "/sing-box"` 的原始输出。
+- `grep -E '健康|degraded|clash|重启' "$APP_LOG" | tail -20`。
+
+### E6-29 健康快照过期后退出本状态
+
+依据：`DATA_PLANE_FRESH_MS = 30_000`（`src/ui/dataPlane.ts`）；`connected-no-traffic.md` §7「新鲜度」。
+
+**前置**：M1；接 E6-25，界面处于「已连接，不通」。
+
+**步骤**：
+
+1. 停掉 mock 的健康源。它和界面在同一个页面里，所以界面自己的 1 秒时钟仍继续走，`checked_at` 却不再更新：
+
+```js
+(async () => {
+  const mod = await import("/src/agent/index.ts");
+  const bridge = mod.getAgentBridge();
+  if (typeof bridge.stopTrafficTicker !== "function") {
+    return { ok: false, reason: "bridge 上没有 stopTrafficTicker" };
+  }
+  bridge.stopTrafficTicker();
+  return { ok: true, checkedAt: bridge.runtime?.health?.checked_at ?? null, now: Date.now() };
+})()
+```
+
+2. 等 31–32 秒，执行：
+
+```js
+(() => {
+  const body = document.querySelector(".console__body");
+  return {
+    stateWord: body?.querySelector(".state-word")?.textContent.trim() ?? null,
+    stateLine: body?.querySelector(".state-line__label")?.textContent.trim() ?? null,
+    timecode: !!body?.querySelector(".timecode"),
+    action: body?.querySelector(".hero__action")?.textContent.trim() ?? null,
+  };
+})()
+```
+
+3. 刷新页面恢复（会重新建连）。
+
+**预期**：
+
+1. `stateWord` 为 `null`；`stateLine` 为 `已连接`；`timecode` 为 `true`；`action` 为 `null`。
+2. 退出原因是「快照过期」，不是 `data_plane` 变 `true`（后者由 E6-26 覆盖）：本步骤里没有任何新快照进来。
+
+**不合格时记录什么**：
+
+- 步骤 1、2 的 JSON。
+- `bridge.runtime.health.checked_at` 与读取时 `Date.now()` 的差值。
+- 截图与当时的状态词。
+
+**构造失败时**：动态 import 取不到 bridge（非 dev 构建、模块路径变了）就记「阻塞（M1 构造失败）」，改走 M2：应用主进程与界面所在 WebContent 是不同进程，`kill -STOP <应用主进程 pid>` 后界面仍继续渲染；35 秒后应看到「已连接」+ 计时器，用屏幕录制留证（主进程暂停期间 DevTools 可能不可用），随后 `kill -CONT` 恢复。拿不到可判读画面则记「阻塞（未取证）」。
+
+### E6-30 读屏只播报一次
+
+**前置**：M1；接 E6-25，界面处于「已连接，不通」。
+
+**步骤**：
+
+1. 执行下面的脚本，观察 12 秒（覆盖约 6 次健康事件）：
+
+```js
+(async () => {
+  const region = document.querySelector(".console__body > p[role='status'][aria-live='polite']");
+  if (!region) return { found: false };
+  const initial = region.textContent;
+  const changes = [];
+  const mo = new MutationObserver(() => changes.push(region.textContent));
+  mo.observe(region, { childList: true, characterData: true, subtree: true });
+  await new Promise((r) => setTimeout(r, 12000));
+  mo.disconnect();
+  return {
+    found: true,
+    initial,
+    mutations: changes.length,
+    final: region.textContent,
+    unchanged: region.textContent === initial,
+    ariaLive: region.getAttribute("aria-live"),
+  };
+})()
+```
+
+**预期**：
+
+1. `found` 为 `true`；`ariaLive` 为 `polite`。
+2. `initial` 逐字等于 `已连接，不通。网页打不开时，点上面的「重新连接」；还是不行，就换下面的节点再试。`
+3. 12 秒内 `mutations` 为 `0`，`unchanged` 为 `true`：健康事件重发、文本不变时不重复播报。
+
+**不合格时记录什么**：
+
+- 上述 JSON（含 `initial` 与 `mutations`）。
+- 若反复变更：每次变更后的文本与时间。
+- 录屏或截图。
+
+### E6-31 真实断流的进入与恢复（M2，可选）
+
+**前置**：M2 原生应用；真实 TUN 配置可连接；测试者能断开网络（关 Wi-Fi 或拔网线）并恢复。
+
+**步骤**：
+
+1. 连接成功，记下「已连接」与计时器。
+2. 断开网络，开始计时。
+3. 每 5 秒记录一次状态词与计时器是否存在，最多观察 40 秒。
+4. 进入「已连接，不通」后恢复网络；继续每 2 秒记录一次，最多 15 秒。
+
+**预期**：
+
+1. 20–30 秒内状态词变为「已连接，不通」，计时器消失，状态点为琥珀色，出现行动句。
+2. 恢复网络后 ≤10 秒回到「已连接」+ 计时器，行动句消失。
+3. 本构造只断上行，Clash API 在本地仍然可达，预期不会进入「连接不稳定」；若出现，记录发生时刻与日志，不直接判失败。
+
+**不合格时记录什么**：
+
+- 状态序列（含时间戳）、三张截图（进入前 / 进入后 / 恢复后）。
+- `grep -E '健康|data_plane|探测|degraded' "$APP_LOG" | tail -20`。
+
+**做不到时**：无法制造真实数据面失败（探测目标不可达、或只有代理模式没有 TUN）就记「阻塞」，写明尝试过的构造与现象，不判产品不通过。本条标为可选，其余六条必做。
 
 ---
 

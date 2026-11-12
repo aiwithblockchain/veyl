@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
@@ -17,7 +17,11 @@ use tauri_plugin_dialog::{
 };
 
 use crate::proxy::ProxyController;
-use crate::runtime::{RuntimeEvent, RuntimeManager, RuntimeState};
+use crate::runtime::health::DataPlaneProbe;
+use crate::runtime::{
+    HealthSnapshot, RuntimeEvent, RuntimeHealthChangedPayload, RuntimeManager, RuntimeState,
+    CONTRACT_VERSION, DEFAULT_DATA_PLANE_PROBE, EVENT_CONTRACT_VERSION,
+};
 use crate::tun::session::{TunSession, TunState};
 
 const TRAY_ID: &str = "veyl-tray";
@@ -146,6 +150,94 @@ fn spawn_tray_state_loop<R: Runtime>(
 
 fn tun_running(tun: &TunSession) -> bool {
     matches!(tun.status(), TunState::Running { .. })
+}
+
+/// TUN 数据面探测间隔（契约 `runtime.md` §2.3.1：10s 一次、5s 超时）。
+const TUN_DATA_PLANE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// 驱动 TUN 的数据面探测。
+///
+/// 代理模式由 `RuntimeManager::supervise` 自己的 10s 循环探；TUN 的 sing-box
+/// 是 helper 的子进程、不归 manager 管，那条循环覆盖不到它。没有这条循环，
+/// `health.data_plane` 在 TUN 下只能写死 `true`——正是「连上了但打不开网页，
+/// 界面仍显示已连接」的来源。
+///
+/// 判据：**经 TUN 出网的普通请求**（不设代理，由系统路由接管），不是某个
+/// 具体站点是否可达；也不看用户有没有流量——没流量不等于不通。
+pub fn spawn_tun_data_plane_loop(tun: Arc<TunSession>) {
+    let probe = match DataPlaneProbe::direct(DEFAULT_DATA_PLANE_PROBE) {
+        Ok(probe) => probe,
+        Err(error) => {
+            log::error!("TUN 数据面探测无法启动：{error}");
+            return;
+        }
+    };
+
+    tauri::async_runtime::spawn(async move {
+        let mut identity: Option<String> = None;
+        let mut next_probe = Instant::now();
+        loop {
+            // 与托盘轮询同频；`tun.status()` 自带 5s 缓存，这一跳很便宜。
+            tokio::time::sleep(TRAY_RECHECK_INTERVAL).await;
+
+            let current = tun.running_identity();
+            if current != identity {
+                // 新连接（含 App 崩溃后接手）：去抖从零开始，第一轮探测放 10s 后，
+                // 头 10 秒按契约保持乐观。
+                identity = current;
+                tun.begin_data_plane();
+                next_probe = Instant::now() + TUN_DATA_PLANE_INTERVAL;
+                if identity.is_none() {
+                    continue;
+                }
+            }
+
+            if identity.is_none() || Instant::now() < next_probe {
+                continue;
+            }
+            next_probe = Instant::now() + TUN_DATA_PLANE_INTERVAL;
+
+            let ok = probe.ok().await;
+            // 去抖在 session 里：单次失败不改值，连续两次才置 false。
+            tun.record_data_plane(ok);
+            emit_tun_health(&tun);
+        }
+    });
+}
+
+/// 每次探测后发一条 `runtime-health-changed`，与代理模式同频同形状。
+///
+/// TUN 下 `clash_api` / `exit_ip` / `node_latency` 都不适用，如实给 `false` / `null`，
+/// 让消费方按契约 §2.3.1 的「各模式适用表」读。
+fn emit_tun_health(tun: &TunSession) {
+    if !tun_running(tun) {
+        return;
+    }
+    let (data_plane, checked_at) = tun.data_plane_health();
+    let payload = RuntimeHealthChangedPayload {
+        contract_version: EVENT_CONTRACT_VERSION,
+        health: HealthSnapshot {
+            contract_version: CONTRACT_VERSION,
+            process: true,
+            clash_api: false,
+            data_plane,
+            exit_ip: None,
+            // 这个计数按控制面口径统计；TUN 不查控制面，恒为 0。
+            consecutive_failures: 0,
+            checked_at,
+        },
+        traffic: None,
+        connections: None,
+        latency_ms: None,
+        node_latency_ms: None,
+        emitted_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    };
+    if let Ok(value) = serde_json::to_value(payload) {
+        crate::agent::app_handle::emit(
+            crate::claurst_session::events::EV_RUNTIME_HEALTH_CHANGED,
+            value,
+        );
+    }
 }
 
 /// manager 与 TUN 两条路径合成托盘状态。
