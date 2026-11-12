@@ -36,6 +36,7 @@ function harness(
       restarted: true,
       needsAdminRestart: false,
     })),
+    tunHelperOpenSettings: vi.fn(async () => undefined),
     ...overrides,
   } as unknown as AgentBridge;
 
@@ -61,13 +62,13 @@ describe("TunHelperRow", () => {
     expect(await screen.findByText("已是最新")).toBeTruthy();
   });
 
-  it("空闲退出时说明下次连接会启动", async () => {
+  it("空闲退出时说明下次连接会启动，并给系统设置入口", async () => {
     harness(helperInfo("not_running"));
     expect(await screen.findByText("现在没有运行，连接时会自动启动。")).toBeTruthy();
-    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByRole("button", { name: "打开系统设置" })).toBeTruthy();
   });
 
-  it("有更新时说明下次连接自动完成", async () => {
+  it("有更新时说明下次连接自动完成，不给跳转入口", async () => {
     harness(helperInfo("stale"));
     expect(await screen.findByText("有更新，下次连接时自动完成。")).toBeTruthy();
     expect(screen.queryByRole("button")).toBeNull();
@@ -78,12 +79,18 @@ describe("TunHelperRow", () => {
     expect(await screen.findByText("有更新，断开后自动完成。")).toBeTruthy();
   });
 
+  it("打开系统设置按钮调用后端引导命令", async () => {
+    const { bridge } = harness(helperInfo("not_running"));
+    fireEvent.click(await screen.findByRole("button", { name: "打开系统设置" }));
+    await waitFor(() => expect(bridge.tunHelperOpenSettings).toHaveBeenCalledTimes(1));
+  });
+
   it("启动失败压成一行", async () => {
     harness(helperInfo("start_failed"));
     expect(
       await screen.findByText("没有启动成功，连接「全部流量」时会再试一次。"),
     ).toBeTruthy();
-    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByRole("button", { name: "打开系统设置" })).toBeTruthy();
   });
 
   it("文件校验失败只给重装建议，不提授权", async () => {

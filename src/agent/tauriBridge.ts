@@ -820,6 +820,10 @@ export class TauriAgentBridge implements AgentBridge {
     };
   }
 
+  async tunHelperOpenSettings(): Promise<void> {
+    await call("tun_helper_open_settings");
+  }
+
   async openLogDir(): Promise<void> {
     await call("open_log_dir");
   }

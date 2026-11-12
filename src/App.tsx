@@ -18,6 +18,7 @@ import { AssistantTab } from "./components/AssistantTab";
 import { ConfigRail } from "./components/ConfigRail";
 import { Console } from "./components/Console";
 import { ConnectionOverlay } from "./components/ConnectionOverlay";
+import { HelperPermissionDialog } from "./components/HelperPermissionDialog";
 import { IconClose } from "./components/icons";
 import { NewConfigDialog } from "./components/NewConfigDialog";
 import { Onboarding } from "./components/Onboarding";
@@ -32,7 +33,7 @@ import {
   shouldOpenPanelForEmptyConfigs,
   shouldShowOnboarding,
 } from "./config/onboarding";
-import { useVpnSession } from "./config/useVpnSession";
+import { useVpnSession, isHelperPermissionReason } from "./config/useVpnSession";
 import { useNodeProbes } from "./config/useNodeProbes";
 import {
   assistantColumnWidth,
@@ -114,6 +115,8 @@ export default function App() {
   // 每次状态迁移都整体覆盖，非失败迁移自然复位。
   const [failedAfterConnected, setFailedAfterConnected] = useState(false);
   const [appNotice, setAppNotice] = useState<AppNotice | null>(null);
+  // 连接失败但原因只是「系统还没允许后台助手」：弹引导，不用 toast。
+  const [helperGuideOpen, setHelperGuideOpen] = useState(false);
   // 成功类提示 4 秒自动消失；错误提示留到用户手动关闭。
   useEffect(() => {
     if (!appNotice || appNotice.level !== "info") return;
@@ -1149,6 +1152,10 @@ export default function App() {
   const handleVpnStart = () => {
     stoppingRef.current = false;
     void vpn.start().then((result) => {
+      if (!result.ok && isHelperPermissionReason(result.reason)) {
+        setHelperGuideOpen(true);
+        return;
+      }
       showActionResult(result, "启动失败");
       if (!result.connected) return;
       // start 成功说明后端已经连上。事件/快照可能还停在 starting 或 failed，
@@ -1459,6 +1466,12 @@ export default function App() {
         onAnswer={handleAnswerQuestion}
         onExpire={handleQuestionExpired}
         connected={runtime.state === "running" || runtime.state === "degraded"}
+      />
+
+      <HelperPermissionDialog
+        open={helperGuideOpen}
+        onClose={() => setHelperGuideOpen(false)}
+        onOpenSettings={() => bridge.tunHelperOpenSettings()}
       />
 
       <Settings

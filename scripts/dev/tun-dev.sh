@@ -153,8 +153,16 @@ RULES_ARCHIVE="$(ls "$ROOT"/src-tauri/resources/rules/veyl-rules-*.tar.zst 2>/de
 # ---- 1. 挑签名身份 ----
 # 对端验签要求里写死了 Team ID（build.rs 编进 helper），所以证书的 Team 必须一致，
 # 否则 App 装得上、连不上，而且编译期完全无感。
+#
+# Team 只能从证书的 OU 读：Apple Development 的 CN 括号里是证书 ID（例如
+# 7983JC3HCR），不是 Team；只有 Developer ID 的 CN 括号才是 Team。按 CN 解析会把
+# 本地开发证书误判成另一个 Team，构建时编进错误的常量，运行时与 helper 全部
+# 验签失败（-67050）。
 team_of() {
-  printf '%s' "$1" | sed -n 's/.*(\([A-Z0-9]\{10\}\))$/\1/p'
+  security find-certificate -c "$1" -p 2>/dev/null \
+    | openssl x509 -noout -subject -nameopt RFC2253 2>/dev/null \
+    | sed -n 's/.*OU=\([A-Z0-9]\{10\}\).*/\1/p' \
+    | head -1
 }
 
 identities() {

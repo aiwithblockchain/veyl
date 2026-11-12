@@ -510,6 +510,8 @@ export interface AgentBridge {
   tunHelperInfo(): Promise<TunHelperInfo>;
   /** 检查并更新后台组件；可能需要一次管理员授权。 */
   tunHelperRestart(): Promise<TunHelperRestartResult>;
+  /** 把用户送到「系统设置 › 通用 › 登录项与扩展」，由用户自己允许后台助手。 */
+  tunHelperOpenSettings(): Promise<void>;
   /** 用系统文件管理器定位日志文件。 */
   openLogDir(): Promise<void>;
   /** 在文件管理器中显示问题报告目录；只认 Host 登记过的 reportId。 */

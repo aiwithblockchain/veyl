@@ -11,6 +11,7 @@ export interface TunHelperController {
   hint: string | null;
   adminHint: boolean;
   restart: () => void;
+  openSettings: () => void;
 }
 
 function isMissingCommand(error: unknown): boolean {
@@ -139,6 +140,19 @@ export function useTunHelper({
     }
   }, [bridge, load]);
 
+  const openSettings = useCallback(async () => {
+    setFailure(null);
+    try {
+      await bridge.tunHelperOpenSettings();
+    } catch (error) {
+      if (isMissingCommand(error)) {
+        setAvailable(false);
+        return;
+      }
+      setFailure("没能打开系统设置，请手动打开「系统设置 › 通用 › 登录项与扩展」。");
+    }
+  }, [bridge]);
+
   return {
     loading,
     info,
@@ -148,6 +162,7 @@ export function useTunHelper({
     hint,
     adminHint,
     restart,
+    openSettings: () => void openSettings(),
   };
 }
 
@@ -196,8 +211,13 @@ interface RowProps {
 }
 
 export function TunHelperRow({ controller, activeConnection }: RowProps) {
-  const { loading, info, available, busy, failure, hint, adminHint, restart } = controller;
+  const { loading, info, available, busy, failure, hint, adminHint, restart, openSettings } =
+    controller;
   const showAdmin = adminHint && available && !loading && info?.state !== "file_invalid";
+  // 「已是最新」和「文件校验失败」不需要这个入口：前者没事可做，后者只能重装。
+  // stale 也不给：它已经有「下次连接自动完成」的说明，再放跳转入口语义冲突。
+  const showSettings =
+    !loading && available && info !== null && ["not_running", "start_failed"].includes(info.state);
 
   return (
     <div className="settings-row settings-row--stack">
@@ -225,16 +245,23 @@ export function TunHelperRow({ controller, activeConnection }: RowProps) {
         {hint ? <p className="settings-feedback settings-feedback--ok">{hint}</p> : null}
       </div>
 
-      {showAdmin ? (
+      {showAdmin || showSettings ? (
         <div className="settings-row__aside">
-          <button
-            type="button"
-            className="btn btn--ghost"
-            disabled={busy}
-            onClick={() => void restart()}
-          >
-            {busy ? "更新中…" : "更新"}
-          </button>
+          {showSettings ? (
+            <button type="button" className="btn btn--ghost" onClick={openSettings}>
+              打开系统设置
+            </button>
+          ) : null}
+          {showAdmin ? (
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={busy}
+              onClick={() => void restart()}
+            >
+              {busy ? "更新中…" : "更新"}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>
