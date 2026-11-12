@@ -213,12 +213,21 @@ impl TunSession {
         self.connected.lock().unwrap().clone()
     }
 
-    /// 本次进程的 Clash API；App 崩溃接手后也能从 helper 的 status 拿到。
+    /// 本次连接的 Clash API；App 崩溃接手后也能从 helper 的 status 拿到。
     pub fn clash_api(&self) -> Option<ClashApi> {
         if !matches!(self.status(), TunState::Running { .. }) {
             return None;
         }
         self.clash.lock().unwrap().clone()
+    }
+
+    /// 节点热切后同步本次连接的节点信息；否则界面刷新会读到旧节点。
+    pub fn set_current_node(&self, node_id: &str, node_name: &str) {
+        let mut guard = self.meta.lock().unwrap();
+        if let Some(meta) = guard.as_mut() {
+            meta.node_id = Some(node_id.to_string());
+            meta.node_name = Some(node_name.to_string());
+        }
     }
 
     /// 连接已持续多少秒。按 helper 报的启动时刻算，接手老连接也一样。
@@ -267,6 +276,28 @@ impl TunSession {
     pub fn data_plane_health(&self) -> (bool, String) {
         let snapshot = self.data_plane.lock().unwrap();
         (snapshot.gate.up(), snapshot.checked_at.clone())
+    }
+
+    /// 测试用：摆出「正在跑 + 记得是哪套配置」，并可带一个 Clash 端点。
+    #[cfg(test)]
+    pub fn force_running_with_clash_for_test(
+        &self,
+        pid: u32,
+        config_id: &str,
+        route_revision: Option<i64>,
+        addr: &str,
+        secret: &str,
+    ) {
+        self.force_running_for_test(pid, Some(config_id));
+        if let Some(revision) = route_revision {
+            if let Some(meta) = self.meta.lock().unwrap().as_mut() {
+                meta.applied_route_revision = Some(revision);
+            }
+        }
+        *self.clash.lock().unwrap() = Some(ClashApi {
+            addr: addr.to_string(),
+            secret: secret.to_string(),
+        });
     }
 
     /// 测试用：直接摆出「正在跑 + 记得是哪套配置」的状态，不碰后端。

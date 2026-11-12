@@ -1411,14 +1411,15 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 |---|---|
 | 未连接 | 只改 `current_node_id`；**不启动 VPN** |
 | 已连接、这套配置正在跑 | selector 热切换，进程不重启 |
-| 已连接、但不是这套配置 | `PRECONDITION_FAILED / config_not_running` |
+| 已连接、但这套配置不是当前配置 | `PRECONDITION_FAILED / config_not_running`（身份已知：连的是另一套） |
+| 已连接（接手上次运行的 TUN）、但读不到连接属于哪套配置 | `PRECONDITION_FAILED / config_unknown`（身份未知，不能当成「另一套」）；提示用户先断开再切换节点，**不要重试** |
 | 节点不属于该配置 | `NOT_FOUND / node_not_in_config` |
 
 - **「选中」不是「切换」**：模型不要为了「看看别的节点」调用本工具——那会真的改出口。
 - 热切换失败 → `PRECONDITION_FAILED / runtime_switch_failed`，`current_node_id` 不变。
 - 不要用 `VpnConnect` 表达切换：它没有 `node_id` 参数；换节点只走 `NodeSwitch`，未连接时不会启动 VPN。
 
-错误：`NOT_FOUND`、`PRECONDITION_FAILED`、`TIMEOUT`。
+错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`config_not_running` / `config_unknown` / `runtime_switch_failed`）、`TIMEOUT`。
 
 ---
 
@@ -1638,8 +1639,13 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 - **`mode` 只有 `direct` / `proxy_all` 两档**：`"proxy_selected"` → `INVALID_ARGUMENT / routing_mode_not_supported`；未知值 → `invalid_routing_mode`。
 - `direct` ↔ `proxy_all` 且已连接 → selector 热切，不断流。
 - 只有**旧配置仍是 `proxy_selected`** 时，切到两档才属于跨家族切换 → 未带 `confirm_reconnect` 时返回 `PRECONDITION_FAILED / will_disconnect`；**必须先问用户**，得到同意后再带 `true` 调一次。不得自行重试。
+- 有连接在跑、但**读不到它属于哪套配置**（重启后接手 TUN）→ `PRECONDITION_FAILED / config_unknown`；
+  这时不能写库、也不能说「下次生效」，用一句话请用户先重连再切换分流方式，**不得重试或改参数绕过**。
 - 该工具会改网络；即使没有确认点，模型也应在调用前用一句话说明会断一下（§2.1.1）。
 - 跨家族的确认一句话要包含两点：会断开并自动重连、**域名解析方式也会改变**（`routing.md` §6.4）。
+
+错误：`INVALID_ARGUMENT`（`routing_mode_not_supported` / `invalid_routing_mode`）、`NOT_FOUND`、
+`PRECONDITION_FAILED`（`will_disconnect` / `config_unknown`）、`INTERNAL`。
 
 ---
 
@@ -2022,6 +2028,7 @@ type CoreUpgradeData = {
 | 1 | `contract_version` 升到 `3.10.1` | 元数据 | `ConfigCreate` 增解释门禁 |
 | 2 | §4.24 错误原因新增 `PRECONDITION_FAILED / explanation_pending`：本请求收到过解释串、用户尚未选择，禁止建配置；模型应把原问题重问，不得重试绕过 | 约束 | 评审：解释入口需要 Host 兜底 |
 | 3 | §4.22 解释行明确只挂在设置类卡片，确认卡（`创建` / `取消`）不显示 | 说明 | 同一评审：确认卡没有设置可解释 |
+| 4 | **本批新增**：§4.27 `NodeSwitch` 与 §4.37 `RouteSetMode` 新增 `PRECONDITION_FAILED / config_unknown`——连接在跑但读不到它属于哪套配置（重启后接手 TUN），与 `config_not_running`（身份已知）区分；`connected_config_id` 在 `will_disconnect` 上可为 null 的说明只属于 `config_activate`（`commands.md` §4.2），这两条工具的错误载荷没有该字段 | 错误细分 | 本批新增 reason（仅错误细分、不改协议字段、不升版本） |
 
 ### 3.10.0（2026-11-12，新增 `SetUserRegion` 地区写入）
 

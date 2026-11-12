@@ -385,7 +385,7 @@ type ConfigActivateData = {
 |---|---|
 | 未连接 | 直接切 active，无感；`reconnect = "not_running"` |
 | 已连接、目标就是当前配置 | 幂等返回，不发事件 |
-| 已连接、换到另一套、**没带 `confirmDisconnect`** | `PRECONDITION_FAILED`，`details.reason = "will_disconnect"`，`details.connected_config_id` 给出当前连接的是哪套。**不静默切换** |
+| 已连接、换到另一套、**没带 `confirmDisconnect`** | `PRECONDITION_FAILED`，`details.reason = "will_disconnect"`，`details.connected_config_id` 给出当前连接的是哪套；**身份未知时（接手 TUN 且读不到配置）为 `null`**，界面按「未知」展示，不要编一个名字。**不静默切换** |
 | 已连接、带 `confirmDisconnect: true` | 先 `runtime_stop` → 改 active → 用新配置 `runtime_start`（自动重连），`reconnect = "reconnected"` 或 `"reconnect_failed"` |
 | 目标配置节点集为空 | 允许激活，但不自动重连（`reconnect = "skipped_no_nodes"`）；UI 应在左栏标「无节点」 |
 
@@ -568,14 +568,15 @@ type NodeSwitchData = {
 |---|---|
 | 未连接 | 只改 `configs.current_node_id` → `connected = false`、`runtime = null`。**不启动 VPN** |
 | 已连接、这套配置就是当前连接的配置 | 通过 selector 热切换（`runtime.md` §5.3 的 `PUT /configs?force=true` 或 Clash 选择器），不重启进程 → `connected = true` |
-| 已连接、但这套配置不是当前连接的配置 | `PRECONDITION_FAILED`，`details.reason = "config_not_running"`。先切配置还是先切节点，是两个动作，不合并 |
+| 已连接、但这套配置不是当前连接的配置 | `PRECONDITION_FAILED`，`details.reason = "config_not_running"`（**身份已知**：连接属于另一套）。先切配置还是先切节点，是两个动作，不合并 |
+| 已连接（接手上一次运行的 TUN）、但读不到连接属于哪套配置 | `PRECONDITION_FAILED`，`details.reason = "config_unknown"`。与 `config_not_running` 的区别是**身份未知**，不能当成「连的是另一套」；提示用户先断开再切换节点，不要自行重试 |
 | `nodeId` 不属于该配置 | `NOT_FOUND`，`details.reason = "node_not_in_config"` |
 
 - 热切换失败 → `PRECONDITION_FAILED` / `runtime_switch_failed`，**`current_node_id` 不变**：库里记的必须是实际在跑的那个节点，否则重启后用户会连到另一台而不知道为什么。
 - `nodeId` 就是当前节点 → 幂等返回，不发事件。
 - 成功后发 `node-switched`（`events.md` §4.11）。
 
-错误：`NOT_FOUND`、`PRECONDITION_FAILED`、`TIMEOUT`、`INTERNAL`。
+错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`config_not_running` / `config_unknown` / `runtime_switch_failed`）、`TIMEOUT`、`INTERNAL`。
 
 ### 4.4 `node_probe { nodeId }` → `NodeProbeData`
 
@@ -1689,6 +1690,8 @@ type RulesStatus = {
   `"proxy_selected"` → `INVALID_ARGUMENT / routing_mode_not_supported`（字段已知但已下线，不产生任何变更）；
   其它未知值 → `INVALID_ARGUMENT / invalid_routing_mode`。
 - `direct` ↔ `proxy_all` 且已连接 → 走 Clash API selector 热切，`hot_switched = true`、`effective = "current_connection"`。
+- 有连接在跑、但**读不到它属于哪套配置**（常见于应用重启后接手 TUN）→ `PRECONDITION_FAILED`，`details.reason = "config_unknown"`，
+  **不写库、不热切**。提示用户先重连再切换分流方式；不要当成「未连接」走只写库的分支（`effective = "next_connection"` 会是假话）。
 - 只有**旧数据的 `proxy_selected`** 切到 `direct` / `proxy_all` 才是跨家族切换：已连接且未带 `confirmReconnect` →
   `PRECONDITION_FAILED`，`details.reason = "will_disconnect"`，**不产生任何变更**。新数据不会遇到这条。
 - 带 `confirmReconnect: true` → 按「停运行时 → 写库 → 启运行时」执行，`reconnect` 给出结果。**重连失败不抛错**：切换本身已成功。
@@ -1696,6 +1699,9 @@ type RulesStatus = {
 - 未连接 → 只写库，`effective = "next_connection"`、`reconnect = "not_running"`。
 - ~~`mode = "proxy_selected"` 且 `targets` 为空 → `route_targets_empty`~~：模式已不可写，这条触发器下线。
 - 同一模式 → 幂等返回，不发事件。
+
+错误：`INVALID_ARGUMENT`（`routing_mode_not_supported` / `invalid_routing_mode`）、`NOT_FOUND`、
+`PRECONDITION_FAILED`（`will_disconnect` / `config_unknown`）、`INTERNAL`。
 
 ### 10.3 `route_targets_set { configId, categories }` → `RouteState`
 
@@ -1985,6 +1991,7 @@ type RulesStatus = {
 | 5 | **不向后兼容**：`config_create` / `config_update` / `route_set_mode` 的写入路径只接受 `direct \| proxy_all`；`proxy_selected` → `INVALID_ARGUMENT / routing_mode_not_supported`，未知值仍是 `invalid_routing_mode`；`targets` 参数保留但无效果；读旧值仍允许 | 枚举收紧 | 产品拍板界面只有两档；数据层留旧值，不做迁移 |
 | 6 | **不向后兼容**：`config_create` 的 `source` 与非空 `nodeIds` 必须给一个；都缺、`source = "empty"`、空 `nodeIds` → `INVALID_ARGUMENT / source_required`。界面与 AI 都不再允许创建空配置 | 语义收紧 | 两问流程必有一个来源；空配置会在连接时才暴露 `no_nodes` |
 | 7 | §9.6 补「解释这个设置的含义」：它是提问卡片上的固定按钮，回传时只是普通非空文本，Host 不解析；免费节点同意选项原文修正为 `Veyl 免费节点（仅供试用）` | 说明 | 选项文案与后端逐字匹配对齐；协议与版本不变 |
+| 8 | **本批新增**：`node_switch`（§4.3）与 `route_set_mode`（§10.2）新增 `PRECONDITION_FAILED / config_unknown`——连接在跑但读不到它属于哪套配置（重启后接手 TUN），与 `config_not_running`（身份已知）区分；`connected_config_id` 的 null 说明补在 `config_activate`（§4.2），`route_set_mode` 的错误载荷没有这个字段 | 错误细分 | 本批新增 reason（仅错误细分、不改协议字段、不升版本） |
 
 ### 2.17.0（2026-11-12，问题报告：开文件夹与开邮件）
 

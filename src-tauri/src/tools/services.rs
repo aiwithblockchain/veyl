@@ -147,8 +147,11 @@ pub trait VpnToolServices: Send + Sync {
 
     async fn node_import_url(&self, config_id: Option<String>, url: &str) -> anyhow::Result<Value>;
     /// 用户粘贴的节点文本：逐行解析 `ss://`，**不发网络请求**。
-    async fn node_import_text(&self, config_id: Option<String>, text: &str)
-        -> anyhow::Result<Value>;
+    async fn node_import_text(
+        &self,
+        config_id: Option<String>,
+        text: &str,
+    ) -> anyhow::Result<Value>;
     async fn node_create(&self, input: NodeCreateInput) -> anyhow::Result<Value>;
     async fn node_switch(&self, config_id: &str, node_id: &str) -> anyhow::Result<Value>;
     async fn node_probe(&self, node_id: &str) -> anyhow::Result<Value>;
@@ -626,15 +629,18 @@ fn proxy_port_trials(configured: u16, own_port: Option<u16>) -> Vec<u16> {
 /// Clash API 用独立端口，不能和 mixed 端口撞，也不占用户设置的端口。
 fn clash_port_for(mixed_port: u16, excluded: &[u16]) -> anyhow::Result<u16> {
     for _ in 0..6 {
-        let port = vpn_config::pick_free_port_excluding(excluded)
-            .map_err(|e| svc_error(e.code(), e))?;
+        let port =
+            vpn_config::pick_free_port_excluding(excluded).map_err(|e| svc_error(e.code(), e))?;
         if port != mixed_port {
             return Ok(port);
         }
     }
     let port = vpn_config::any_free_port().map_err(|e| svc_error(e.code(), e))?;
     if port == mixed_port {
-        return Err(svc_error("RUNTIME_PORT_UNAVAILABLE", "无法为控制面分配独立端口"));
+        return Err(svc_error(
+            "RUNTIME_PORT_UNAVAILABLE",
+            "无法为控制面分配独立端口",
+        ));
     }
     Ok(port)
 }
@@ -745,11 +751,8 @@ mod port_trial_tests {
 
     #[test]
     fn conflict_detection_uses_the_marker_not_history() {
-        let marked = svc_error_with_details(
-            "RUNTIME_EXITED",
-            "boom",
-            json!({ "port_conflict": true }),
-        );
+        let marked =
+            svc_error_with_details("RUNTIME_EXITED", "boom", json!({ "port_conflict": true }));
         assert!(is_port_conflict(&marked));
         let text_only = svc_error("RUNTIME_EXITED", "bind: address already in use");
         assert!(
@@ -1060,7 +1063,8 @@ mod tun_takeover_tests {
             descriptor("2001:db8::1"),
         ];
         let plan = node_bypass_plan(&list).await;
-        for expected in ["64.177.43.69/32", "64.177.57.184/32", "2001:db8::1/128"] { // secret-scan:allow 测试常量：节点绕过计划
+        for expected in ["64.177.43.69/32", "64.177.57.184/32", "2001:db8::1/128"] {
+            // secret-scan:allow 测试常量：节点绕过计划
             assert!(
                 plan.prefixes.iter().any(|item| item == expected),
                 "{:?}",
@@ -2294,6 +2298,57 @@ impl WiredServices {
         crate::rules::effective_region(&self.store)
     }
 
+    /// Clash 端点：按当前连接身份选，TUN 与代理模式不互相兜底。
+    async fn clash_endpoint(&self, tun_connected: bool) -> Option<(String, String)> {
+        let plan = if tun_connected {
+            None
+        } else {
+            self.manager
+                .current_plan()
+                .await
+                .map(|plan| (plan.clash_addr, plan.clash_secret))
+        };
+        let tun = if tun_connected {
+            self.tun.clash_api().map(|api| (api.addr, api.secret))
+        } else {
+            None
+        };
+        resolve_clash_endpoint(tun_connected, plan, tun)
+    }
+
+    /// 连接状态：TUN 的进程不归 manager 管，必须先看 `TunSession`，
+    /// 否则 TUN 已连接时会被当成「未连接」。
+    async fn connection_state(&self) -> ConnectionState {
+        if let crate::tun::session::TunState::Running { .. } = self.tun.status() {
+            let meta = self.tun.launch_meta();
+            return ConnectionState {
+                connected: true,
+                config_id: meta.as_ref().map(|meta| meta.config_id.clone()),
+                applied_route_revision: meta.as_ref().and_then(|meta| meta.applied_route_revision),
+                route_region: meta.as_ref().and_then(|meta| meta.route_region.clone()),
+                tun: true,
+            };
+        }
+        let status = self.manager.status().await;
+        let connected = self.is_connected(&status);
+        // 与旧的 `connected_config_id` 一致：状态里没有就回落到 plan。
+        let mut config_id = status.config_id.clone();
+        if config_id.is_none() {
+            config_id = self
+                .manager
+                .current_plan()
+                .await
+                .and_then(|plan| plan.config_id);
+        }
+        ConnectionState {
+            connected,
+            config_id,
+            applied_route_revision: status.applied_route_revision,
+            route_region: status.route_region,
+            tun: false,
+        }
+    }
+
     fn route_state_json(
         &self,
         config: &configs::Config,
@@ -2316,7 +2371,11 @@ impl WiredServices {
         let applied = applied_mode.is_some() && applied_revision == Some(config.route_revision);
         let (region, _) = self.effective_region();
         // 已连接时报**运行配置实际用的地区**：用户中途改时区，配置不会重算。
-        let basis_region = if running { applied_region } else { region.code() };
+        let basis_region = if running {
+            applied_region
+        } else {
+            region.code()
+        };
         let basis = local_direct_basis(basis_region);
         json!({
             "config_id": config.id,
@@ -2453,16 +2512,14 @@ impl WiredServices {
             .select_runtime()
             .await
             .map_err(|error| match &error {
-                crate::runtime::RuntimeError::BundledUnavailable(detail) => {
-                    svc_error_with_details(
-                        error.code(),
-                        format!(
-                            "{}（{detail}）",
-                            crate::runtime::signature::rejection_hint()
-                        ),
-                        json!({ "reason": "runtime_unavailable" }),
-                    )
-                }
+                crate::runtime::RuntimeError::BundledUnavailable(detail) => svc_error_with_details(
+                    error.code(),
+                    format!(
+                        "{}（{detail}）",
+                        crate::runtime::signature::rejection_hint()
+                    ),
+                    json!({ "reason": "runtime_unavailable" }),
+                ),
                 _ => svc_error(error.code(), error),
             })
     }
@@ -2949,6 +3006,29 @@ fn validate_tun_excludes(
     Ok(json!(entries))
 }
 
+/// 连接状态的统一视图：TUN 与代理模式都映射到这里，调用方不再各自读 manager。
+struct ConnectionState {
+    connected: bool,
+    config_id: Option<String>,
+    applied_route_revision: Option<i64>,
+    route_region: Option<String>,
+    tun: bool,
+}
+
+/// Clash 端点按**连接身份**选：TUN 连接只用 TUN 的 `ClashApi`，代理连接只用
+/// manager 的 plan。不能互相兜底——旧 plan 可能把 selector 写进另一个进程。
+fn resolve_clash_endpoint(
+    tun_connected: bool,
+    plan: Option<(String, String)>,
+    tun: Option<(String, String)>,
+) -> Option<(String, String)> {
+    if tun_connected {
+        tun
+    } else {
+        plan
+    }
+}
+
 fn validate_cidr(value: &str) -> Result<(), String> {
     let (address, prefix) = value.split_once('/').ok_or_else(|| value.to_string())?;
     let ip: std::net::IpAddr = address.parse().map_err(|_| value.to_string())?;
@@ -3265,8 +3345,8 @@ impl VpnToolServices for WiredServices {
         let addrs = tokio::task::spawn_blocking(crate::tun::collect)
             .await
             .unwrap_or_default();
-        let netstat = crate::netcfg::run("/usr/sbin/netstat", &["-rn", "-f", "inet"])
-            .unwrap_or_default();
+        let netstat =
+            crate::netcfg::run("/usr/sbin/netstat", &["-rn", "-f", "inet"]).unwrap_or_default();
         let mut utuns: Vec<String> = Vec::new();
         for addr in addrs.iter().filter(|addr| addr.name.starts_with("utun")) {
             let (routes, key) = tun_route_stats(&netstat, &addr.name);
@@ -3299,12 +3379,12 @@ impl VpnToolServices for WiredServices {
                                 true
                             }
                             Ok(Err(error)) => {
-                                node_line = format!("{}:{} 直连失败：{error}", node.server, node.port);
+                                node_line =
+                                    format!("{}:{} 直连失败：{error}", node.server, node.port);
                                 false
                             }
                             Err(_) => {
-                                node_line =
-                                    format!("{}:{} 直连超时（4s）", node.server, node.port);
+                                node_line = format!("{}:{} 直连超时（4s）", node.server, node.port);
                                 false
                             }
                         }
@@ -3592,7 +3672,8 @@ impl VpnToolServices for WiredServices {
             }
         }
 
-        let running = self.is_connected(&self.manager.status().await);
+        // 连接状态要能看见 TUN：manager 只认识代理模式。
+        let running = self.connection_state().await.connected;
         // 只返回 `seed_unavailable`，不在这里刷新重试：是否刷新由上层决定一次。
         if source.as_deref() == Some("seed") && crate::seed::load_nodes(&self.store).is_none() {
             return Err(svc_error_with_details(
@@ -3902,9 +3983,10 @@ impl VpnToolServices for WiredServices {
             ));
         }
         let target = self.require_config(config_id)?;
-        let status = self.manager.status().await;
-        let connected = self.is_connected(&status);
-        let connected_config = self.connected_config_id().await;
+        // TUN 的进程不在 manager 里，必须按连接状态统一判定，否则会静默切配置。
+        let connection = self.connection_state().await;
+        let connected = connection.connected;
+        let connected_config = connection.config_id.clone();
 
         if !connected {
             {
@@ -3929,7 +4011,7 @@ impl VpnToolServices for WiredServices {
             return Ok(json!({
                 "active_config_id": config_id,
                 "reconnect": "reconnected",
-                "runtime": serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))?,
+                "runtime": self.runtime_status().await?,
             }));
         }
 
@@ -3971,12 +4053,10 @@ impl VpnToolServices for WiredServices {
             })),
             Err(error) => {
                 log::warn!("切换配置后自动重连失败：{error}");
-                let status = self.manager.status().await;
                 Ok(json!({
                     "active_config_id": config_id,
                     "reconnect": "reconnect_failed",
-                    "runtime": serde_json::to_value(status)
-                        .map_err(|e| svc_error("INTERNAL", e))?,
+                    "runtime": self.runtime_status().await?,
                 }))
             }
         }
@@ -4179,9 +4259,9 @@ impl VpnToolServices for WiredServices {
         }
 
         let previous = config.current_node_id.clone();
-        let status = self.manager.status().await;
-        let connected = self.is_connected(&status);
-        let connected_config = self.connected_config_id().await;
+        let connection = self.connection_state().await;
+        let connected = connection.connected;
+        let connected_config = connection.config_id.clone();
 
         if previous.as_deref() == Some(node_id) {
             return Ok(json!({
@@ -4190,7 +4270,7 @@ impl VpnToolServices for WiredServices {
                 "previous_node_id": previous,
                 "connected": connected,
                 "runtime": if connected {
-                    serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))?
+                    self.runtime_status().await?
                 } else {
                     Value::Null
                 },
@@ -4233,24 +4313,37 @@ impl VpnToolServices for WiredServices {
         }
 
         if connected_config.as_deref() != Some(config_id) {
+            // 接手老 TUN 时 meta 里没有配置 id；这和「连的是另一套」不是同一件事。
+            let config_unknown = connection.tun && connected_config.is_none();
             return Err(svc_error_with_details(
                 "PRECONDITION_FAILED",
-                "这套配置不是当前连接的配置",
-                json!({ "reason": "config_not_running" }),
+                if config_unknown {
+                    "当前接管连接读不到用的是哪套配置；先断开再切换节点"
+                } else {
+                    "这套配置不是当前连接的配置"
+                },
+                json!({
+                    "reason": if config_unknown {
+                        "config_unknown"
+                    } else {
+                        "config_not_running"
+                    }
+                }),
             ));
         }
 
-        let plan = self.manager.current_plan().await.ok_or_else(|| {
-            svc_error_with_details(
-                "PRECONDITION_FAILED",
-                "当前没有运行中的配置",
-                json!({ "reason": "config_not_running" }),
-            )
-        })?;
+        let (clash_addr, clash_secret) =
+            self.clash_endpoint(connection.tun).await.ok_or_else(|| {
+                svc_error_with_details(
+                    "PRECONDITION_FAILED",
+                    "当前没有运行中的配置",
+                    json!({ "reason": "config_not_running" }),
+                )
+            })?;
         let to_tag = format!("node-{node_id}");
         // 本次连接的 selector 里可能没有它（TUN 会剔除解析失败的节点）。
         // 先查成员表，给一个用户能懂的理由，而不是一句 HTTP 400。
-        match clash_selector_members(&plan.clash_addr, &plan.clash_secret, "proxy").await {
+        match clash_selector_members(&clash_addr, &clash_secret, "proxy").await {
             Ok(members) if !members.is_empty() && !members.iter().any(|tag| tag == &to_tag) => {
                 return Err(svc_error_with_details(
                     "PRECONDITION_FAILED",
@@ -4266,21 +4359,19 @@ impl VpnToolServices for WiredServices {
             // 读不到成员表不据此拒绝，继续走原来的 PUT 路径。
             Err(error) => log::warn!("读取 selector 成员失败，跳过预检：{error}"),
         }
-        if let Err(error) =
-            clash_put_selector(&plan.clash_addr, &plan.clash_secret, "proxy", &to_tag).await
-        {
+        if let Err(error) = clash_put_selector(&clash_addr, &clash_secret, "proxy", &to_tag).await {
             return Err(svc_error_with_details(
                 "PRECONDITION_FAILED",
                 format!("切换节点失败：{error}"),
                 json!({ "reason": "runtime_switch_failed" }),
             ));
         }
-        let read_back = clash_get_selector(&plan.clash_addr, &plan.clash_secret, "proxy").await;
+        let read_back = clash_get_selector(&clash_addr, &clash_secret, "proxy").await;
         if !matches!(read_back, Ok(Some(ref now)) if now == &to_tag) {
             if let Some(previous) = &previous {
                 let _ = clash_put_selector(
-                    &plan.clash_addr,
-                    &plan.clash_secret,
+                    &clash_addr,
+                    &clash_secret,
                     "proxy",
                     &format!("node-{previous}"),
                 )
@@ -4298,9 +4389,14 @@ impl VpnToolServices for WiredServices {
             .find(|node| node.id == node_id)
             .map(|node| node.name.clone())
             .unwrap_or_default();
-        self.manager
-            .set_plan_node(node_id.to_string(), node_name)
-            .await;
+        // TUN 的 meta 不在 manager 里，单独同步，界面刷新后才显示新节点。
+        if connection.tun {
+            self.tun.set_current_node(node_id, &node_name);
+        } else {
+            self.manager
+                .set_plan_node(node_id.to_string(), node_name)
+                .await;
+        }
         {
             let conn = self.store.conn();
             configs::update(
@@ -4314,8 +4410,7 @@ impl VpnToolServices for WiredServices {
             .map_err(|error| svc_error(error.code(), error))?;
         }
 
-        let status = self.manager.status().await;
-        let runtime = serde_json::to_value(&status).map_err(|e| svc_error("INTERNAL", e))?;
+        let runtime = self.runtime_status().await?;
         crate::agent::app_handle::emit(
             "node-switched",
             json!({
@@ -4357,9 +4452,9 @@ impl VpnToolServices for WiredServices {
             configs::config_ids_for_node(&conn, node_id)
                 .map_err(|error| svc_error(error.code(), error))?
         };
-        let status = self.manager.status().await;
-        let connected = self.is_connected(&status);
-        let connected_config = self.connected_config_id().await;
+        let connection = self.connection_state().await;
+        let connected = connection.connected;
+        let connected_config = connection.config_id.clone();
 
         // 运行时在跑，且节点属于当前连接的配置 → Clash 延迟。
         // 不要求它是当前选中的节点：用户最需要「先测一下另一个节点」。
@@ -4369,9 +4464,9 @@ impl VpnToolServices for WiredServices {
                 .map(|id| candidates.iter().any(|candidate| candidate == id))
                 .unwrap_or(false);
         if can_clash {
-            if let Some(plan) = self.manager.current_plan().await {
+            if let Some((clash_addr, clash_secret)) = self.clash_endpoint(connection.tun).await {
                 let tag = format!("node-{node_id}");
-                if let Ok(delay) = clash_delay(&plan.clash_addr, &plan.clash_secret, &tag).await {
+                if let Ok(delay) = clash_delay(&clash_addr, &clash_secret, &tag).await {
                     return Ok(probe_result(
                         node_id,
                         true,
@@ -4421,23 +4516,20 @@ impl VpnToolServices for WiredServices {
 
         // 一批只用一种方式：只有已连接本配置才走 Clash 延迟；其余整批 TCP。
         // 已连接别的配置时不能起第二个运行时，也不该混用两种结果。
-        let status = self.manager.status().await;
-        let connected = self.is_connected(&status);
-        let connected_config = self.connected_config_id().await;
-        let target = if connected && connected_config.as_deref() == Some(config.id.as_str()) {
-            self.manager
-                .current_plan()
+        let connection = self.connection_state().await;
+        let connected = connection.connected;
+        let target = if connected && connection.config_id.as_deref() == Some(config.id.as_str()) {
+            self.clash_endpoint(connection.tun)
                 .await
-                .map(|plan| probe_batch::ClashTarget {
-                    addr: plan.clash_addr,
-                    secret: plan.clash_secret,
-                })
+                .map(|(addr, secret)| probe_batch::ClashTarget { addr, secret })
         } else {
             None
         };
         // 「完全未连接」才起探针：Starting/Restarting 也算有连接流程在跑，
         // 这时起第二个运行时会让测速被正常隧道接管，数字失真。
-        let needs_probe = status.state == crate::runtime::RuntimeState::Idle;
+        // TUN 已连接时 manager 可能是 Idle，绝不能据此另起一个探针运行时。
+        let needs_probe =
+            !connected && self.manager.status().await.state == crate::runtime::RuntimeState::Idle;
         let installed = if needs_probe {
             self.ensure_runtime().await.ok()
         } else {
@@ -4539,7 +4631,8 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn default_profile_refresh(&self, force: bool) -> anyhow::Result<Value> {
-        let running = self.is_connected(&self.manager.status().await);
+        // 已连接（含 TUN）时只标记「下次连接生效」，不直接改在线连接。
+        let running = self.connection_state().await.connected;
         match crate::seed::refresh(&self.store, running, force).await {
             crate::seed::RefreshOutcome::Updated {
                 added,
@@ -4684,13 +4777,20 @@ impl VpnToolServices for WiredServices {
 
     async fn route_get(&self, config_id: Option<String>) -> anyhow::Result<Value> {
         let config = self.resolve_config(config_id)?;
-        let status = self.manager.status().await;
-        let connected = self.is_connected(&status);
-        let connected_config = self.connected_config_id().await;
-        let running = connected && connected_config.as_deref() == Some(config.id.as_str());
+        let connection = self.connection_state().await;
+        let running =
+            connection.connected && connection.config_id.as_deref() == Some(config.id.as_str());
         let applied_mode = running.then(|| config.routing_mode.clone());
-        let applied_revision = running.then_some(status.applied_route_revision).flatten();
-        let applied_region = running.then(|| status.route_region.clone()).flatten();
+        let applied_revision = if running {
+            connection.applied_route_revision
+        } else {
+            None
+        };
+        let applied_region = if running {
+            connection.route_region.clone()
+        } else {
+            None
+        };
         Ok(self.route_state_json(
             &config,
             applied_mode.as_deref(),
@@ -4733,12 +4833,8 @@ impl VpnToolServices for WiredServices {
         }
         {
             let conn = self.store.conn();
-            crate::store::settings::set(
-                &conn,
-                crate::store::settings::USER_REGION_KEY,
-                &code,
-            )
-            .map_err(|error| svc_error("INTERNAL", error))?;
+            crate::store::settings::set(&conn, crate::store::settings::USER_REGION_KEY, &code)
+                .map_err(|error| svc_error("INTERNAL", error))?;
         }
         crate::agent::app_handle::emit(
             "region-changed",
@@ -4777,12 +4873,22 @@ impl VpnToolServices for WiredServices {
             ));
         }
 
-        let status = self.manager.status().await;
-        let connected = self.is_connected(&status);
-        let connected_config = self.connected_config_id().await;
-        let running = connected && connected_config.as_deref() == Some(config.id.as_str());
+        let conn = self.connection_state().await;
+        let running = conn.connected && conn.config_id.as_deref() == Some(config.id.as_str());
         let applied_mode = running.then(|| config.routing_mode.clone());
-        let applied_revision = running.then_some(status.applied_route_revision).flatten();
+        let applied_revision = if running {
+            conn.applied_route_revision
+        } else {
+            None
+        };
+        let applied_region = if running {
+            conn.route_region.clone()
+        } else {
+            None
+        };
+
+        // 有连接在跑但读不到它是哪套配置（接手老 TUN）：不能静默写库后说「下次生效」。
+        // 幂等分支在上面先返回：设成当前值时仍给快照，不报错。
 
         if config.routing_mode == mode {
             let mut data = self.route_state_json(
@@ -4790,11 +4896,19 @@ impl VpnToolServices for WiredServices {
                 applied_mode.as_deref(),
                 applied_revision,
                 running,
-                status.route_region.as_deref(),
+                applied_region.as_deref(),
             );
             data["hot_switched"] = json!(false);
             data["reconnect"] = Value::Null;
             return Ok(data);
+        }
+
+        if conn.connected && conn.config_id.is_none() {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "有一个接管连接在运行，但读不到它用的是哪套配置；先重连再切换分流方式",
+                json!({ "reason": "config_unknown" }),
+            ));
         }
 
         let same_family = matches!(
@@ -4803,13 +4917,14 @@ impl VpnToolServices for WiredServices {
         ) && matches!(mode, configs::ROUTING_DIRECT | configs::ROUTING_PROXY_ALL);
 
         if running && same_family {
-            let plan = self.manager.current_plan().await.ok_or_else(|| {
-                svc_error_with_details(
-                    "PRECONDITION_FAILED",
-                    "当前没有运行中的配置",
-                    json!({ "reason": "config_not_running" }),
-                )
-            })?;
+            let (clash_addr, clash_secret) =
+                self.clash_endpoint(conn.tun).await.ok_or_else(|| {
+                    svc_error_with_details(
+                        "PRECONDITION_FAILED",
+                        "当前没有运行中的配置",
+                        json!({ "reason": "config_not_running" }),
+                    )
+                })?;
             let from_selector = if config.routing_mode == configs::ROUTING_DIRECT {
                 "direct"
             } else {
@@ -4820,13 +4935,8 @@ impl VpnToolServices for WiredServices {
             } else {
                 "proxy"
             };
-            if let Err(error) = clash_put_selector(
-                &plan.clash_addr,
-                &plan.clash_secret,
-                "route-local",
-                to_selector,
-            )
-            .await
+            if let Err(error) =
+                clash_put_selector(&clash_addr, &clash_secret, "route-local", to_selector).await
             {
                 return Err(svc_error_with_details(
                     "PRECONDITION_FAILED",
@@ -4834,17 +4944,12 @@ impl VpnToolServices for WiredServices {
                     json!({ "reason": "route_switch_failed" }),
                 ));
             }
-            let read_back =
-                clash_get_selector(&plan.clash_addr, &plan.clash_secret, "route-local").await;
+            let read_back = clash_get_selector(&clash_addr, &clash_secret, "route-local").await;
             let applied = matches!(read_back, Ok(Some(ref now)) if now == to_selector);
             if !applied {
-                let _ = clash_put_selector(
-                    &plan.clash_addr,
-                    &plan.clash_secret,
-                    "route-local",
-                    from_selector,
-                )
-                .await;
+                let _ =
+                    clash_put_selector(&clash_addr, &clash_secret, "route-local", from_selector)
+                        .await;
                 return Err(svc_error_with_details(
                     "PRECONDITION_FAILED",
                     "切换分流模式后读回不一致",
@@ -4859,7 +4964,7 @@ impl VpnToolServices for WiredServices {
                 Some(mode),
                 applied_revision,
                 true,
-                status.route_region.as_deref(),
+                applied_region.as_deref(),
             );
             data["hot_switched"] = json!(true);
             data["reconnect"] = Value::Null;
@@ -4916,20 +5021,20 @@ impl VpnToolServices for WiredServices {
                     data["connect_changed"] = json!(changed);
                     return Ok(data);
                 }
-                let status = self.manager.status().await;
+                let after = self.connection_state().await;
                 self.emit_routing_changed(
                     &updated,
                     "mode",
                     Some(mode),
-                    status.applied_route_revision,
+                    after.applied_route_revision,
                     false,
                 );
                 let mut data = self.route_state_json(
                     &updated,
                     Some(mode),
-                    status.applied_route_revision,
+                    after.applied_route_revision,
                     true,
-                    status.route_region.as_deref(),
+                    after.route_region.as_deref(),
                 );
                 data["reconnect"] = json!("reconnected");
                 if takeover == TunTakeover::Unknown {
@@ -4983,19 +5088,15 @@ impl VpnToolServices for WiredServices {
                 .map_err(|error| config_store_error(error))?
         };
         self.emit_routing_changed(&updated, "targets", None, None, false);
-        // 已连接且跑的就是这套配置时，基础口径按运行配置的地区报。
-        let status = self.manager.status().await;
-        let connected = self.is_connected(&status);
-        let connected_config = self.connected_config_id().await;
-        let running = connected && connected_config.as_deref() == Some(config_id);
-        let applied_region = running.then(|| status.route_region.clone()).flatten();
-        Ok(self.route_state_json(
-            &updated,
-            None,
-            None,
-            running,
-            applied_region.as_deref(),
-        ))
+        // 已连接且跑的就是这套配置时，基础口径按运行配置的地区报（TUN 也算连接）。
+        let conn = self.connection_state().await;
+        let running = conn.connected && conn.config_id.as_deref() == Some(config_id);
+        let applied_region = if running {
+            conn.route_region.clone()
+        } else {
+            None
+        };
+        Ok(self.route_state_json(&updated, None, None, running, applied_region.as_deref()))
     }
 
     async fn vpn_connect(&self, config_id: Option<String>) -> anyhow::Result<Value> {
@@ -5522,15 +5623,16 @@ impl VpnToolServices for WiredServices {
             }
             let active_node_count = active
                 .as_ref()
-                .map(|config| configs::list_nodes(&conn, &config.id).unwrap_or_default().len())
+                .map(|config| {
+                    configs::list_nodes(&conn, &config.id)
+                        .unwrap_or_default()
+                        .len()
+                })
                 .unwrap_or(0);
-            let allows = crate::store::settings::get(
-                &conn,
-                crate::reports::INCLUDE_DOMAINS_KEY,
-            )
-            .ok()
-            .flatten()
-            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes"));
+            let allows = crate::store::settings::get(&conn, crate::reports::INCLUDE_DOMAINS_KEY)
+                .ok()
+                .flatten()
+                .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes"));
             (
                 configs.len(),
                 active_node_count,
@@ -5901,7 +6003,10 @@ impl WiredServices {
                         | crate::runtime::RuntimeState::Restarting
                         | crate::runtime::RuntimeState::Stopping
                 ) {
-                    self.manager.current_plan().await.map(|plan| plan.mixed_port)
+                    self.manager
+                        .current_plan()
+                        .await
+                        .map(|plan| plan.mixed_port)
                 } else {
                     None
                 }
@@ -5958,8 +6063,7 @@ impl WiredServices {
                     Err(error) if is_port_conflict(&error) => {
                         // 设置值预检查时是空的、启动时被抢：原因改成「被占用」。
                         if mixed_port == configured_port {
-                            fallback_reason =
-                                Some(crate::runtime::PortFallbackReason::Occupied);
+                            fallback_reason = Some(crate::runtime::PortFallbackReason::Occupied);
                         }
                         log::warn!("本地端口 {mixed_port} 启动时被占用，顺延下一个候选");
                     }
@@ -5972,10 +6076,8 @@ impl WiredServices {
             match (success, hard_error) {
                 (Some(data), _) => Ok(data),
                 (None, Some(error)) => Err(error),
-                (None, None) => Err(self.attach_runtime_log_tail(
-                    port_unavailable_error(&tried),
-                    &installed.version,
-                )),
+                (None, None) => Err(self
+                    .attach_runtime_log_tail(port_unavailable_error(&tried), &installed.version)),
             }
         };
 
@@ -6115,11 +6217,7 @@ impl WiredServices {
             .await
             .map_err(|error| svc_error("INTERNAL", format!("检查后台组件失败：{error}")))?
             .map_err(|(message, reason)| {
-                svc_error_with_details(
-                    "PRECONDITION_FAILED",
-                    message,
-                    json!({ "reason": reason }),
-                )
+                svc_error_with_details("PRECONDITION_FAILED", message, json!({ "reason": reason }))
             })?;
 
         // TUN 不设系统代理：接管靠路由表（`docs/config-execution.md` §2 第 4 步）。
@@ -7431,6 +7529,162 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// TUN 连接时 manager 是 Idle；热切换必须走 TUN 端点，不能落进「未连接」分支。
+    #[tokio::test]
+    async fn route_set_mode_hot_switches_over_the_tun_endpoint() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("TUN 热切"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        // 不可达端点：只要请求真的发向 TUN 的 Clash API，就会以 route_switch_failed 结束。
+        services.tun.force_running_with_clash_for_test(
+            4242,
+            &config_id,
+            None,
+            "127.0.0.1:9",
+            "tun-secret",
+        );
+
+        let error = services
+            .route_set_mode(Some(config_id), configs::ROUTING_DIRECT, false)
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "route_switch_failed"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TUN 连接时 route_get 必须报「已生效」，而不是「下次连接生效」。
+    #[tokio::test]
+    async fn route_get_reports_the_tun_connection_as_applied() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("TUN 读取"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let before = services.route_get(Some(config_id.clone())).await.unwrap();
+        let revision = before["route_revision"].as_i64().unwrap();
+
+        services.tun.force_running_with_clash_for_test(
+            5151,
+            &config_id,
+            Some(revision),
+            "127.0.0.1:9",
+            "tun-secret",
+        );
+        let route = services.route_get(Some(config_id)).await.unwrap();
+        assert_eq!(route["applied_mode"], configs::ROUTING_PROXY_ALL);
+        assert_eq!(route["applied_revision"], revision);
+        assert_eq!(route["effective"], "current_connection");
+        assert_eq!(route["reconnect_required"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TUN 连接时切到另一套配置：必须先要求确认，不能静默切走。
+    #[tokio::test]
+    async fn config_activate_sees_a_running_tun_connection() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let a = services
+            .config_create(create_input("TUN 激活 A"))
+            .await
+            .unwrap();
+        let a_id = a["config_id"].as_str().unwrap().to_string();
+        let b = services
+            .config_create(create_input("TUN 激活 B"))
+            .await
+            .unwrap();
+        let b_id = b["config_id"].as_str().unwrap().to_string();
+
+        services.tun.force_running_for_test(4242, Some(&b_id));
+        let error = services.config_activate(&a_id, false).await.unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "will_disconnect"
+        );
+        assert_eq!(
+            service.details.as_ref().unwrap()["connected_config_id"],
+            b_id
+        );
+
+        // 未确认时活动配置不变。
+        let list = services.config_list().await.unwrap();
+        assert_eq!(list["active_config_id"], b_id);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TUN 已连接时新建配置不能自动成为活动配置，否则界面与运行时不一致。
+    #[tokio::test]
+    async fn config_create_does_not_activate_while_tun_is_connected() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let a = services
+            .config_create(create_input("TUN 活动 A"))
+            .await
+            .unwrap();
+        let a_id = a["config_id"].as_str().unwrap().to_string();
+        assert_eq!(a["is_active"], true);
+
+        services.tun.force_running_for_test(4242, Some(&a_id));
+        let b = services
+            .config_create(create_input("TUN 活动 B"))
+            .await
+            .unwrap();
+        assert_eq!(b["is_active"], false);
+
+        let list = services.config_list().await.unwrap();
+        assert_eq!(list["active_config_id"], a_id);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 接手老 TUN、meta 里没有 config_id：切分流要显式说明，不能假装「下次生效」。
+    #[tokio::test]
+    async fn route_set_mode_reports_config_unknown_for_a_legacy_tun_connection() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("老 TUN"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        services.tun.force_running_for_test(4343, None);
+        let error = services
+            .route_set_mode(Some(config_id.clone()), configs::ROUTING_DIRECT, false)
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "config_unknown"
+        );
+
+        // 设成当前值走幂等分支：仍返回快照，不报错。
+        let same = services
+            .route_set_mode(Some(config_id), configs::ROUTING_PROXY_ALL, false)
+            .await
+            .unwrap();
+        assert_eq!(same["routing_mode"], configs::ROUTING_PROXY_ALL);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn proxy_selected_is_rejected_on_route_set_mode() {
         let dir = temp_dir();
@@ -7512,10 +7766,7 @@ mod config_service_tests {
             .unwrap_err();
         let service = error.downcast_ref::<ServiceError>().unwrap();
         assert_eq!(service.code, "INVALID_ARGUMENT");
-        assert_eq!(
-            service.details.as_ref().unwrap()["reason"],
-            "not_node_text"
-        );
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "not_node_text");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7558,11 +7809,7 @@ mod config_service_tests {
         let config_id = created["config_id"].as_str().unwrap().to_string();
 
         let path = dir.join("nodes.txt");
-        std::fs::write(
-            &path,
-            "ss://aes-256-gcm:pw-a@203.0.113.10:8388#F\n垃圾行",
-        )
-        .unwrap();
+        std::fs::write(&path, "ss://aes-256-gcm:pw-a@203.0.113.10:8388#F\n垃圾行").unwrap();
 
         let data = crate::agent::commands::import_nodes_from_file(
             &services,
@@ -7591,13 +7838,10 @@ mod config_service_tests {
         let path = dir.join("empty.txt");
         std::fs::write(&path, "").unwrap();
 
-        let error = crate::agent::commands::import_nodes_from_file(
-            &services,
-            path.to_str().unwrap(),
-            None,
-        )
-        .await
-        .unwrap_err();
+        let error =
+            crate::agent::commands::import_nodes_from_file(&services, path.to_str().unwrap(), None)
+                .await
+                .unwrap_err();
         assert_eq!(error["code"], "INVALID_ARGUMENT");
         assert_eq!(error["details"]["reason"], "not_node_text");
         assert!(error["message"]
@@ -7652,6 +7896,27 @@ mod config_service_tests {
             false
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Clash 端点按连接身份选：TUN 只认 TUN，代理只认 plan，绝不互相兜底。
+    #[test]
+    fn clash_endpoint_follows_the_connection_identity() {
+        let plan = ("127.0.0.1:41000".to_string(), "plan-secret".to_string());
+        let tun = ("127.0.0.1:42000".to_string(), "tun-secret".to_string());
+
+        // TUN 连接：即使旧 plan 还在，也只用 TUN 的端点。
+        assert_eq!(
+            resolve_clash_endpoint(true, Some(plan.clone()), Some(tun.clone())),
+            Some(tun.clone())
+        );
+        // 代理连接：只用 plan。
+        assert_eq!(
+            resolve_clash_endpoint(false, Some(plan.clone()), Some(tun.clone())),
+            Some(plan)
+        );
+        // 身份对不上时为 None，不能写到另一个进程。
+        assert_eq!(resolve_clash_endpoint(false, None, Some(tun)), None);
+        assert_eq!(resolve_clash_endpoint(true, None, None), None);
     }
 
     /// 未知地区没有本地直连层，口径必须是 `none`，不能报成 `ip_only`。
@@ -7730,7 +7995,8 @@ mod config_service_tests {
     }
 
     #[tokio::test]
-    async fn invalid_user_region_is_rejected_without_writing() {        crate::test_support::install_test_secrets();
+    async fn invalid_user_region_is_rejected_without_writing() {
+        crate::test_support::install_test_secrets();
         let dir = temp_dir();
         let services = services(&dir);
 
@@ -7756,10 +8022,8 @@ mod config_service_tests {
 
     #[test]
     fn region_changed_event_has_the_contract_shape() {
-        let payload = region_changed_payload(
-            &crate::rules::Region::Cn,
-            crate::rules::RegionSource::Ai,
-        );
+        let payload =
+            region_changed_payload(&crate::rules::Region::Cn, crate::rules::RegionSource::Ai);
         assert_eq!(
             payload["contract_version"],
             crate::runtime::EVENT_CONTRACT_VERSION
@@ -8079,10 +8343,7 @@ mod config_service_tests {
         let status = services.runtime_status().await.unwrap();
         assert_eq!(status["health"]["data_plane"], true, "一次失败不改值");
         let second_checked_at = status["health"]["checked_at"].as_str().unwrap().to_string();
-        assert!(
-            second_checked_at >= first_checked_at,
-            "探测时刻只会往前走"
-        );
+        assert!(second_checked_at >= first_checked_at, "探测时刻只会往前走");
 
         services.tun.record_data_plane(false);
         let status = services.runtime_status().await.unwrap();
@@ -8665,11 +8926,7 @@ mod main_flow_tests {
         }
         let config_id = create_config_with_node(&h.services, "固定端口", "pw-fixed").await;
 
-        let connected = h
-            .services
-            .runtime_start(Some(config_id))
-            .await
-            .unwrap();
+        let connected = h.services.runtime_start(Some(config_id)).await.unwrap();
         assert_eq!(connected["state"], "running", "{connected}");
         assert_eq!(connected["mixed_port"], json!(configured));
         assert!(
@@ -8693,11 +8950,7 @@ mod main_flow_tests {
         }
         let config_id = create_config_with_node(&h.services, "占用端口", "pw-busy").await;
 
-        let connected = h
-            .services
-            .runtime_start(Some(config_id))
-            .await
-            .unwrap();
+        let connected = h.services.runtime_start(Some(config_id)).await.unwrap();
         let actual = connected["mixed_port"].as_u64().unwrap() as u16;
         assert_ne!(actual, 7890, "设置端口被占时必须顺延");
         assert_eq!(connected["port_fallback"]["requested"], json!(7890));
@@ -9051,8 +9304,17 @@ mod connect_changed_tests {
 
     #[test]
     fn failures_before_touching_the_network_report_none() {
-        for reason in ["no_config", "rules_not_ready", "helper_missing", "tun_denied"] {
-            let error = error("PRECONDITION_FAILED", "x", Some(json!({ "reason": reason })));
+        for reason in [
+            "no_config",
+            "rules_not_ready",
+            "helper_missing",
+            "tun_denied",
+        ] {
+            let error = error(
+                "PRECONDITION_FAILED",
+                "x",
+                Some(json!({ "reason": reason })),
+            );
             assert_eq!(connect_changed_state(&error), "none", "{reason}");
         }
         let error = error(
@@ -9092,7 +9354,11 @@ mod connect_changed_tests {
         );
         assert_eq!(connect_changed_state(&restore_failed), "unknown");
 
-        let tun = error("tun_start_failed", "x", Some(json!({ "reason": "tun_start_failed" })));
+        let tun = error(
+            "tun_start_failed",
+            "x",
+            Some(json!({ "reason": "tun_start_failed" })),
+        );
         assert_eq!(connect_changed_state(&tun), "unknown");
 
         let residual = error(
