@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.10.0`
+> 契约版本：`2.11.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，版本以该文件头为准）
@@ -22,7 +22,7 @@
 - **落库实体字段的时间戳**（`created_at` / `first_seen` / `last_seen` / `checked_at` 等）：**Unix 毫秒整数**，与 `data-model.md` 的列类型一致。见 §2.3。
 - 错误码 **大写下划线**。
 - 所有 payload 带 `contract_version`。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.10.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.11.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
 
 > **命名决策**：事件名沿用 TweetPilot 的真实名称（`message-chunk`、`thinking-chunk`、`tool-call-start`、`tool-call-end`、`ai-status`、`ai-compact`、`ai-request-end`），**不**加 `ai-` 前缀。`docs/phase-1-technical-design.md` §4.2 写的 `agent://delta` / `agent://tool` 是笔误，以本契约为准。
 
@@ -104,7 +104,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -126,7 +126,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -144,7 +144,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -189,10 +189,16 @@ type ToolDisplay = {
   text: string;                              // 面向用户的一句话，≤24 字
   facts?: string[];                          // 可选：≤4 行，只放用户看得懂的名称与数值
   changed: "none" | "restored" | "unknown";  // 这次调用有没有改动用户的设置
+  actions?: DisplayAction[];                 // 2.11.0：可直接点击的动作，≤2 个
 };
 
+/// 2.11.0。**只能由 Host 填，模型看不到也传不进**；只带不透明 id，不带路径。
+type DisplayAction =
+  | { kind: "reveal_report_dir"; report_id: string }
+  | { kind: "compose_report_mail"; report_id: string };
+
 type ToolCallEndPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -225,10 +231,19 @@ type ToolCallEndPayload = {
 - `AskUserQuestion` **不产生展示行**（提问由 `ask-user-question` 的问答浮层承担），其 `tool-call-end` 省略 `display`；UI 不为它渲染工具行。
 - 不得把 `display.text` 塞进 `result`：`result` 要留给模型，两者不能是同一根字符串。
 
+**`display.actions` 规则（2.11.0）**：
+
+- 只有 Host 能填；模型无法用工具入参产生动作，也看不到动作。
+- 每个动作只带 `report_id`（不透明标识），**不得**出现路径、命令、URL。需要路径时由命令自行解析，且只解析到 Host 登记过的报告目录。
+- UI 点击 = **调命令**（`issue_report_reveal` / `issue_report_mail`），**不是**发一条用户消息——这一点与 `next_actions` 相反，两者不得混用。
+- 未识别的 `kind` 忽略，卡片按无动作渲染（前向兼容）。
+- 动作失败（`NOT_FOUND`；邮件客户端调起失败时是 `opened: false, method: "copy_only"`）由 UI 就地提示，不自动重试、不发事件。
+
 UI 处理：
 
 - 更新卡片状态 `ok` / `error`。
 - 渲染 `next_actions` 为一到两个按钮，点击等价于用户发出对应工具调用意图（**不直接执行工具**，要做成一条用户消息）。
+- 渲染 `display.actions` 为独立按钮，点击**直接调命令**（见上）。两组按钮同时存在时，`display.actions` 排在 `next_actions` 之前。
 
 ---
 
@@ -246,7 +261,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -291,7 +306,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -319,7 +334,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -357,7 +372,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -379,7 +394,7 @@ type RuntimeStateChangedPayload = {
 
 - `snapshot.state === to`。不一致说明有人绕过了单写者，属于实现缺陷。
 - `snapshot.mixed_port` 是 `to = "running" | "degraded"` 时 `proxy_card` 的唯一端口来源（`proxy_params` 的 `runtime` 来源）。
-- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.7.0`），与顶层的 `contract_version`（本文件 `2.10.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
+- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.7.0`），与顶层的 `contract_version`（本文件 `2.11.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
 - payload ≤ 64 KB；`RuntimeSnapshot` 本身远小于上限，不需要截断。
 
 UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断入口；用 `snapshot.mixed_port` 重渲染代理卡。
@@ -390,7 +405,7 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   health: HealthSnapshot;
   // 2.2 新增：本次运行累计流量与速率。
   // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
@@ -426,7 +441,7 @@ UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；面板上给用�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag" | "rules_update";
   origin: "ui" | "agent";       // 必填；第一帧也带，旧记录按 "ui"
@@ -460,7 +475,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -477,7 +492,7 @@ type AppLifecycleChangedPayload = {
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   seed_id: "veyl_seed";
   content_sha256: string;           // 2.0：变化判定依据
   version: string | null;           // 文件里的 version，仅展示
@@ -532,7 +547,7 @@ type DefaultProfileUpdatedPayload = {
 
 ```ts
 type AskUserQuestionPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   session_id: string;
   request_id: string;
   question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
@@ -617,7 +632,7 @@ tool-call-end    (同一 request_id)
 
 ```ts
 type ConfigChangedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   change: "created" | "updated" | "deleted" | "activated";
   config_id: string;
   config: ConfigSummary | null;      // deleted 时为 null；类型见 commands.md §3.0
@@ -653,7 +668,7 @@ type NodeListChangedReason =
   | "bindings_changed";       // config_update 整体替换了节点集
 
 type NodeListChangedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   reason: NodeListChangedReason;
   config_id: string | null;        // 只有 bindings_changed 时非空
   node_count_total: number;        // 节点池总数
@@ -675,7 +690,7 @@ type NodeListChangedPayload = {
 
 ```ts
 type NodeSwitchedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   config_id: string;
   from_node_id: string | null;
   to_node_id: string;
@@ -703,7 +718,7 @@ type NodeSwitchedPayload = {
 
 ```ts
 type IssueChangedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
   issue: IssueSummary;                  // 变更后的状态
   blocking_issue_id: string | null;     // 当前应插卡的那一条；null = 中间不插卡
@@ -741,7 +756,7 @@ type IssueChangedPayload = {
 
 ```ts
 type LayoutUpdatedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   config_id: string;
   revision: number;            // 每配置单调递增，从 1 开始
   layout: Layout;              // 见 commands.md §3.0
@@ -789,7 +804,7 @@ type LayoutUpdatedPayload = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   config_id: string;
   routing_mode: "direct" | "proxy_all" | "proxy_selected";
   applied_mode: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -815,7 +830,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
@@ -848,7 +863,7 @@ Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 
 ```ts
 type CoreUpgradeProgressPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   job_id: string;
   origin: "ui" | "agent";         // 必填
   phase: "downloading" | "verifying" | "unpacking" | "installing" | "activating";
@@ -871,7 +886,7 @@ type CoreUpgradeProgressPayload = {
 
 ```ts
 type CoreUpgradeFinishedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   job_id: string;
   origin: "ui" | "agent";   // 必填
   ok: boolean;
@@ -893,7 +908,7 @@ type CoreUpgradeFinishedPayload = {
 
 ```ts
 type NodeProbeProgressPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   run_id: string;
   config_id: string;
   phase: "preparing" | "probing";
@@ -922,7 +937,7 @@ type NodeProbeProgressPayload = {
 
 ```ts
 type NodeProbeFinishedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   run_id: string;
   config_id: string;
   total: number;
@@ -1064,6 +1079,16 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.11.0（2026-11-12，`tool-call-end.display.actions`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.11.0` | 元数据 | 问题报告功能 |
+| 2 | §3.4 `ToolDisplay` 增可选 `actions: DisplayAction[]`（≤2 个），只有 `reveal_report_dir` / `compose_report_mail` 两种，只带 `report_id` | 字段扩展 | 会话里要出现「在文件夹中显示 / 打开发送邮件」，而 `next_actions` 的语义是「发一条用户消息」，不能用来开文件夹 |
+| 3 | 明确动作只能由 Host 填、模型看不到也传不进；UI 点击是**调命令**而非发消息 | 安全约束 | 一旦允许模型生成动作，就能诱导 UI 打开任意路径 |
+| 4 | 未识别的 `kind` 忽略并降级为无动作渲染 | 兼容 | 前向兼容 |
+| 5 | 全文 `contract_version` 字面量替换为 `2.11.0`（实现侧常量 `EVENT_CONTRACT_VERSION`） | 元数据 | §0 版本约定 |
 
 ### 2.10.0（2026-11-06，非法布局整份丢弃）
 

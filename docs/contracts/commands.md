@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.16.16`
+> 契约版本：`2.17.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -196,6 +196,9 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 67 | `node_import_text` | `{ text, configId? }` | `NodeImportResult` | **2.14.0 新增（仅 UI；AI 走 `NodeImportText` 工具，共用实现）** |
 | 68 | `system_region` | `{}` | `{ region: string \| null }` | **2.15.0 新增（仅 UI）** |
 | 69 | `node_import_file` | `{ path, configId? }` | `NodeImportResult` | **2.16.14 新增（仅 UI）；与 `node_import_text` 共用解析；批 B 实现** |
+| 70 | `issue_report_reveal` | `{ reportId }` | `ReportActionData` | **2.17.0 新增（仅 UI）；只认 Host 登记过的报告目录** |
+| 71 | `issue_report_mail` | `{ reportId }` | `ReportActionData`（含 `body`，仅 `copy_only` 时非 null） | **2.17.0 新增（仅 UI）；调起系统邮件客户端，不发送** |
+| 72 | `issue_report_preference` | `{ includeDomains? }` | `{ includeDomains }` | **2.17.0 新增（仅 UI）；省略参数为读取；脱敏开关的唯一写入路径** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -1259,6 +1262,55 @@ type ProxyPortSetData = {
 - **不发事件**：设置值由前端 App 层持有，保存成功后回显返回值即可（与 `events.md` 保持一致，不新增事件）。
 - AI 不可调用：不在任何工具 schema 里，模型不能改端口。
 
+### 7.12 问题报告的动作（仅 UI，2.17.0）
+
+材料由工具 `IssueReport`（`tools.md` §4.46）生成；这里两条命令只做「打开文件夹」和「打开发送邮件」。设计见 `docs/design/issue-report.md`。
+
+```ts
+type ReportActionData = {
+  opened: boolean;
+  method: "reveal" | "mail_client" | "copy_only";  // copy_only = 调不起邮件客户端
+  report_dir: string;                              // `~/Desktop/Veyl 问题报告/<目录名>`；不返回绝对路径，也不含用户名
+  body_chars: number;                              // 仅 mail：进入客户端的正文字符数（≤6000）
+  body: string | null;                             // 仅 mail 且 opened:false 时非 null：与组装好的正文逐字相同
+};
+
+// `body_chars` 不是必填项：只有 `mail_client` / `copy_only` 时才有意义，
+// `reveal` 返回时写 0 或省略即可——不要为了让字段「有值」去编一个数。
+```
+
+#### `issue_report_reveal { reportId }` → `ReportActionData`
+
+- 在 Finder / 资源管理器中显示该报告目录。
+- `reportId` 先查 Host 的内存登记，未命中再扫报告根目录下每个子目录的 `.report-id`（一行文本）。**不接受路径参数**；扫不到 → `NOT_FOUND`。
+- **只认写完的目录**：`.report-id` 是「这份报告已完整」的提交标记。Host 必须先写临时目录（`.tmp-<reportId>/`），全部文件成功后再写 `.report-id`、rename 成最终目录并登记；中途失败要删掉临时目录。
+  - 两个命令都**只解析带 `.report-id` 的目录**。半成品目录没有这个文件，扫不到，也就不会被打开或拿去发邮件——「文件写了一半却能被 lookup 命中」是必须排除的状态。
+  - 重启后扫盘的实现同样只认 `.report-id`；不要用「目录存在」当完成标志。
+- 只打开登记过的目录，不做「打开任意路径」。
+
+#### `issue_report_mail { reportId }` → `ReportActionData`
+
+- 调起系统邮件客户端（`mailto:` 或平台等价物），**预填收件人、标题、正文**；**不发送**，由用户自己按发送。
+- 收件人是常量 `FEEDBACK_EMAIL`（`ribencong@gmail.com`），**不可由 UI 覆盖，也不出现在任何设置项里**。用户要发给别人，自己复制正文——应用不提供改收件人的入口，避免误投与钓鱼式改址。
+- 标题：`[Veyl 问题报告] <yyyy-MM-dd HH:mm> <平台> · <错误码或一句话>`（≤ 80 字符）。
+- 正文：`报告.md` 全文 + 末尾固定一段「请附上同目录的 现场.json 与 日志/」；**上限 6000 字符**，超限按 `design/issue-report.md` §9.1 的顺序裁剪，**永不删**标题、开头声明行（含「`***` 表示已打码」那一行）、`现象`、版本/平台/模式/状态、附件提示。`***` 是唯一的打码占位符，不得替换成别的写法。
+- 打开失败（系统没有邮件客户端、被拒绝）→ **不报错甩给用户**：返回 `opened: false, method: "copy_only"`，并把**组装好的正文原样放进 `body`**，UI 用「复制正文」直接拷贝这一份。
+  - `body` 的出现条件写死：`method = "copy_only"` 时必定非 `null`；`opened: true`（真的调起了客户端）时必须是 `null`——那时正文已经在邮件里，再回传一份只会让 UI 复制到旧内容。
+  - `body` 与送进邮件客户端的正文**逐字相同**（同一根字符串，同一个裁剪结果），不允许为「复制」另生成一个更短或未脱敏的版本。
+- 正文里不出现节点地址、密码、配置名、用户名路径（材料已脱敏，本命令不再二次拼装原始数据）。
+- **任何返回值与展示都不出现绝对路径与用户名**：`report_dir` 统一写成 `~/Desktop/Veyl 问题报告/<目录名>`（Windows 同样以 `~` 开头，分隔符按平台渲染），`display.facts` 同样写 `~/…` 或只写目录名。**不得**出现 `/Users/<name>/…`、`/home/<name>/…`、`C:\Users\<name>\…`。
+  - 命令响应、工具返回、界面、邮件正文四处同一口径。UI 要打开目录时用 `report_id` 走 `reveal`，不需要真实路径；模型也不需要——它只需要知道「报告放在桌面」，回填给用户的也应是 `~` 形式。
+
+#### `issue_report_preference { includeDomains? }` → `{ includeDomains: boolean }`
+
+读取或设置「报告里保留完整域名」。**仅 UI，不注册为 AI 工具。**
+
+- 省略 `includeDomains` → 只读，返回当前值；默认 `false`（域名打码为 `***.<可注册域>`）。
+- 传 `true` / `false` → 写入本地设置表 `issue_report_include_domains`，返回写入后的值；幂等。
+- **这是用户放宽脱敏的唯一写入路径。** `IssueReport` 的 `include_domains` 入参只能收窄：`tools.md` §4.46 的实际值是 `设置值 && 入参`，模型既读不到也无权改这个设置。所以「模型把用户日志里的域名全放出去」在契约上不可能发生。
+- 不发事件（值由 UI 自己持有并回显）；不改任何网络设置；不涉及运行时。
+- 错误：`INTERNAL`（存储写入失败）。不校验多余字段——顶层的未知字段按 §1 统一规则拒绝。
+
 ---
 
 ## 8. 种子（官方默认配置，C 组）
@@ -1724,6 +1776,9 @@ type RulesStatus = {
 | `node_import_url` | **B4** 导入配置文件 | 导入按钮 / `source_choice` 后置 | |
 | `node_import_text` | **B4** 导入配置文件 | 手工表单「粘贴分享链接」 | 只解析粘贴文本，不联网；与 `node_import_url` 分开（2.14.0） |
 | `node_import_file` | **B4** 导入配置文件 | 设置 › 添加节点（文件） | 仅 UI；与 `node_import_text` 共用解析，不联网、不涉及运行时；**不含窗口拖放**（拖放仍走 #24，2.16.14） |
+| `issue_report_reveal` | —（仅 UI，2.17.0） | 会话内报告卡「在文件夹中显示」 | 只认 Host 登记过的报告目录，不接受路径 |
+| `issue_report_mail` | —（仅 UI，2.17.0） | 会话内报告卡「打开发送邮件」 | 调起系统邮件客户端，预填固定收件人；**不发送** |
+| `issue_report_preference` | —（仅 UI，2.17.0） | 报告入口的「保留完整域名」勾选 | 读 / 写 `issue_report_include_domains`；模型无权改 |
 | `node_create` | **B4** 导入配置文件 | 手动编辑表单 | |
 | `node_switch` | **B2** 切换节点 | 底部「切换到此节点」 | ⚠️ 旧映射写 `runtime_start(profile_id)`，见表后说明 |
 | `node_probe` | **D6** 测试单个节点连通性 | 底部「测试连通」 | D6 由 PM 在批 0 审查时新增 |
@@ -1887,10 +1942,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.16.16** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.7.0 矩阵同步 |
-| `contracts/events.md` | **2.10.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 |
+| `contracts/commands.md` | **2.17.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.7.0 矩阵同步 + `tools.md` 3.9.0 / `events.md` 2.11.0 矩阵同步 |
+| `contracts/events.md` | **2.11.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作） |
 | `contracts/runtime.md` | **2.7.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 |
-| `contracts/tools.md` | **3.8.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` |
+| `contracts/tools.md` | **3.9.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 |
 | `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -1905,6 +1960,18 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.17.0（2026-11-12，问题报告：开文件夹与开邮件）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.17.0`；新增 #70 `issue_report_reveal { reportId }`、#71 `issue_report_mail { reportId }`（均仅 UI） | 新增命令 | 用户要能把自己发现的问题与关键日志整理后发给产品方；材料由工具 `IssueReport` 生成（`tools.md` 3.9.0） |
+| 2 | 两条命令只接受 Host 登记的 `report_id`，**不接受路径**；`issue_report_mail` 只调起系统邮件客户端并预填，**不发送** | 安全约束 | 不内置凭据、不做后台上报；发送是用户动作 |
+| 3 | 收件人为常量 `ribencong@gmail.com`，不可由 UI 覆盖、不设设置项 | 约束 | 改址入口等于把「发给谁」交给调用方，容易被诱导误投 |
+| 4 | 正文 ≤ 6000 字符，裁剪顺序与「永不删」清单见 `docs/design/issue-report.md` §9.1；`***` 是唯一打码占位符，图例行不随裁剪删除；无邮件客户端时返回 `method = "copy_only"`，并**把同一根正文放进 `body`** 供界面复制（`opened: true` 时 `body` 为 `null`） | 边界 | 各客户端对长 `mailto:` 处理不一致，必须先定上限；缺 `body` 时「复制正文」无从实现 |
+| 5 | §15.5 矩阵同步 `tools.md` 3.9.0、`events.md` 2.11.0 | 元数据 | 同批 |
+| 6 | 新增 #72 `issue_report_preference { includeDomains? }`：省略即读取，写入 `issue_report_include_domains`。这是用户放宽脱敏的**唯一**写入路径，`IssueReport.include_domains` 只能收窄 | 新增命令 | 脱敏开关必须由用户掌握；模型传参不得放宽披露 |
+| 7 | `report_dir` 统一返回 `~/Desktop/Veyl 问题报告/<目录名>`：**不返回绝对路径、不含用户名**；命令响应、工具返回、界面、邮件正文同一口径 | 语义澄清 | 绝对路径会把 `/Users/<name>` 带进界面与模型上下文；打开目录只靠 `report_id` |
 
 ### 2.16.16（2026-11-12，矩阵同步 tun-backend.md 1.7.0）
 

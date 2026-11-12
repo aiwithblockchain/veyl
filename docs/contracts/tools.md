@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.8.0`
+> 契约版本：`3.9.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.8.0";
+  contract_version: "3.9.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -247,16 +247,16 @@ type CallSource = "ui" | "agent";
 
 ```ts
 // src/components/toolDisplay.ts（设计文档里也称 TOOL_DISPLAY）
-export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 45 个工具名完全相等
+export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 46 个工具名完全相等
 ```
 
-进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 45 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
+进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 46 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
 
 **提示词只降低出错概率，最终闸门在渲染层**：UI 永远不渲染工具名、JSON、错误码；不做输出正则改写（静默替换模型正文比漏一句更难排查）。
 
 边界与落点：
 
-- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「45 个名字必须都有」与「`AskUserQuestion` 不占行」。
+- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「46 个名字必须都有」与「`AskUserQuestion` 不占行」。
 - **running 状态文案**同样来自映射表（`events.md` §3.5）：不得拼工具名，未知工具固定「正在处理…」。
 - **工具 description**：通用表达约束放 `\n` 之后的末尾。`capability_catalog` 只取第一行进系统提示清单，所以第一行**不得**出现「对用户说…」这类句子，否则会污染每次请求的能力清单。
 - **「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归**：删任一条即红。
@@ -315,6 +315,7 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 43 | `CategoryList` | `CategoryListTool` | 分类目录（I1） | `ReadOnly` | 只读 |
 | 44 | `RulesStatus` | `RulesStatusTool` | 规则数据版本与新鲜度 | `ReadOnly` | 只读 |
 | 45 | `RulesUpdate` | `RulesUpdateTool` | 更新规则数据（未连接时排队） | `Write` | 中 |
+| 46 | `IssueReport` | `IssueReportTool` | 生成问题报告文件夹（两阶段，仅写固定目录） | `Write` | 低（只写桌面报告目录） |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
@@ -357,6 +358,7 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(IssueIgnoreTool::new(store.clone())),
     // 诊断与其它
     Box::new(DiagRunTool::new(rt.clone(), proxy.clone(), store.clone())),
+    Box::new(IssueReportTool::new(rt.clone(), store.clone(), reports.clone())),
     Box::new(DeepseekSetupKeyTool::new()),
     Box::new(DeepseekSaveKeyTool::new(keychain.clone())),
     Box::new(JobGetTool::new(jobs.clone())),
@@ -854,7 +856,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.8.0";
+  contract_version: "3.9.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1017,7 +1019,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.8.0";
+  contract_version: "3.9.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1805,6 +1807,71 @@ type CoreUpgradeData = {
 
 > 这是**唯一有确认点的工具**。它不恢复旧审批框架：`ApprovalPolicy` / `ApprovalScope` / `approval_id` 仍然全部删除；确认只是借用 `AskUserQuestion` 的阻塞通道，Host 提供结构化 `kind` / `details`，模型只能发起、不能代答。
 
+### 4.46 `IssueReport`（问题报告，3.9.0 新增）
+
+把现场材料写成用户桌面上的一个报告文件夹。设计见 `docs/design/issue-report.md`。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "log_lines": { "type": "integer", "minimum": 40, "maximum": 400, "default": 200 },
+    "include_domains": { "type": "boolean" },
+    "report_markdown": { "type": "string", "maxLength": 131072 }
+  },
+  "additionalProperties": false
+}
+```
+
+- **一个工具、两阶段**：不带 `report_markdown` = 收集（建目录、写 `先看我.txt` / `现场.json` / `日志/` / 模板 `报告.md`）；带 `report_markdown` = 写入（只覆盖本会话目录里的 `报告.md`）。
+- **每个会话一个目录**，按 `session_id` 绑定；重复调用复用，不新建、不改名。
+- **只读的边界靠 schema 保证**：没有 `path` / `file` / `dir` 参数；`additionalProperties: false` 让「传路径」在调用层直接失败（`INVALID_ARGUMENT`，`details.reason = "unknown_argument"`），不创建任何文件。
+- **`log_lines` 越界是拒绝，不是截断**：< 40 或 > 400 → `INVALID_ARGUMENT`，`details.reason = "log_lines_out_of_range"`，**一个文件都不写**。静默夹到 400 会让模型以为拿到了 400 行、实际更少，`报告.md` 里引用的行号会错位。
+- **`include_domains` 是三态，省略不等于关闭**（**省略即遵循用户设置，不接受 `null`**：显式 `null` 按 schema 校验失败处理，不要为它留一条路径）：
+
+  | 入参 | 用户设置 `true` | 用户设置 `false` |
+  |---|---|---|
+  | 省略 | **`true`（尊重用户）** | `false` |
+  | `false` | `false`（模型主动收窄） | `false` |
+  | `true` | `true` | **`false`（模型不能放宽）** |
+
+  即：`true` 这个取值**只能来自用户设置**；模型能做的只有「保持」或「收窄成 `false`」。设置**只能**由用户经 `commands.md` §7.12 的 `issue_report_preference` 写入，模型没有写入口。实际取值回写在 `data.domains_included`。
+  - **省略必须按用户设置执行**，不能默认 `false`：否则用户勾了开关，模型一次不传参就又全打码，等于开关失效。
+- `report_markdown` 是**报告正文**：Host 写盘前校验一级标题、三行声明与五个二级小节（现象 / 环境 / 时间线 / 可疑点 / 下一步建议）。缺什么补什么——补标题与声明、缺的小节插 `## <名>` + 一行「模型未提供这一节。」；**不替模型编内容**，`ai_report` 仍为 `true`。
+- `PermissionLevel::Write`：它会写盘。**不是 `ReadOnly`**——那会让未来的只读快速通道绕过检查。它不改配置、不碰网络，`display.changed = "none"`。
+
+`data`（完整形状见设计文档 §3.2）：
+
+```ts
+{
+  report_id: string;            // "rpt-…"，不透明，UI 用它调命令
+  report_dir: string;           // `~/Desktop/Veyl 问题报告/<目录名>`；不返回绝对路径，不含用户名
+  phase: "collected" | "written";
+  files: Array<{ name, bytes, lines, truncated, missing }>;
+  materials?: { runtime, checks, logs: Array<{ name, start_line, lines, total_lines }>, domains_included };
+  redactions: { domains, public_ips, paths, urls, node_refs, config_refs, mode: "minimal" | "detailed" };
+  ai_report: boolean;
+}
+```
+
+- `materials` 只给收集阶段，**已是脱敏后的内容**；模型可见日志上限 4 份 × `log_lines`、合计 ≤ 400 行、每行 ≤ 500 字符，超出优先保留 `runtime` 与 `sing-box`，并置 `truncated`。
+- 脱敏口径由 `docs/design/issue-report.md` §6 / §6.1 定义，契约只锁两条：**唯一占位符 `***`**；域名默认保留可注册域（`www.google.com` → `***.google.com`），只有用户开启开关才给完整域名。
+- `logs[].start_line` 是写入文件里的绝对行号，供 `报告.md` 的证据引用（`日志/<文件名>:<行号>`）。
+- `display`：**两个阶段都要给 `actions`**——收集成功时 `text`「材料已整理好」，写入成功后「问题报告已生成」；`actions` 一律由 Host 填 `reveal_report_dir` 与 `compose_report_mail`（`events.md` §3.4，2.11.0）。**动作不带路径，只带 `report_id`。**
+  - **不要等到写入阶段才给动作**：AI 超时或失败时材料与模板 `报告.md` 已经落盘，用户仍要能打开文件夹、发出邮件。收集成功即给，是这条产品路径的兜底。
+  - `facts` 最多两行（保存位置、包含几份日志）；保存位置**不得暴露用户名**：写 `~/Desktop/Veyl 问题报告/<目录名>` 或只写目录名，不得出现 `/Users/<name>/…`。
+- 失败：`INVALID_ARGUMENT`（见下表）、`INTERNAL`。日志缺失**不是**失败（`missing: true`）。
+
+**两个参数类 reason 必须分开，不许合并**：
+
+| 情况 | `details.reason` | 是否落盘 | 为什么要分开 |
+|---|---|---|---|
+| 传了未知字段（含 `path` / `file` / `dir`） | `unknown_argument` | 否 | 字段名不对，模型要去掉或改名 |
+| `log_lines` < 40 或 > 400 | `log_lines_out_of_range` | 否 | 字段名是对的、取值非法，模型只需换一个合法数字；合并成 `unknown_argument` 会让它以为字段名写错，去猜别的参数 |
+| `report_markdown` 是空串或仅空白 | `empty_report` | 否 | 只写标题与声明的空报告没有价值，还会让 `written` 相位名不副实；收集阶段已经给过模板报告，不需要再写一份空的 |
+
+其余错误：`INVALID_ARGUMENT`（`report_dir_unwritable`）、`INTERNAL`。
+
 ---
 
 ## 5. 工具间协作约定
@@ -1906,6 +1973,16 @@ type CoreUpgradeData = {
 ---
 
 ## 8. 变更记录
+
+### 3.9.0（2026-11-12，新增 `IssueReport` 问题报告）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.9.0`；工具总数 45 → 46 | 元数据 | — |
+| 2 | 新增 §4.46 `IssueReport { log_lines?, include_domains?, report_markdown? }`：两阶段（收集 / 写入），只写固定报告目录，`PermissionLevel::Write`，不改配置、不碰网络。脱敏默认**保留可注册域**（`***.google.com`），唯一占位符 `***` | 工具新增 | 用户要把「发现的问题 + 关键日志」整理成可发出去的材料；设计见 `docs/design/issue-report.md` |
+| 3 | `include_domains` 是 boolean，**省略 = 遵循本地设置 `issue_report_include_domains`**（不接受 `null`）；显式 `false` = 模型主动收窄；显式 `true` 不能放宽。设置唯一写入路径是 `commands.md` §7.12 的 `issue_report_preference` | 安全约束 | 模型不得自行放宽披露；省略若按 `false` 处理会让用户开关失效 |
+| 4 | 工具不接受任何路径参数（`additionalProperties: false`）；越界调用在 schema 层失败，不落盘。`log_lines` 越界同样拒绝（`log_lines_out_of_range`），不静默夹取 | 安全约束 | 只读边界靠参数形状保证；夹取会让报告里的证据行号错位 |
+| 5 | 新增 `display.actions` 两种动作（`reveal_report_dir` / `compose_report_mail`，只带 `report_id`）——定义在 `events.md` §3.4（2.11.0）；**收集阶段成功即给**，不等到写入阶段 | 联动 | 会话里要出现「在文件夹中显示 / 打开发送邮件」；AI 失败时材料已齐，用户仍要能发 |
 
 ### 3.8.0（2026-11-07，新增 `NodeImportText`）
 

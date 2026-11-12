@@ -710,6 +710,9 @@ const UI_ONLY_COMMANDS = [
   "proxy_port_get",
   "proxy_port_set",
   "system_region",
+  "issue_report_reveal",
+  "issue_report_mail",
+  "issue_report_preference",
 ];
 
 const pascalCase = (s) => s.replace(/(^|_)([a-z0-9])/g, (_, __, c) => c.toUpperCase());

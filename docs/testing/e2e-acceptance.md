@@ -786,7 +786,7 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 ## 5. AI 对话
 
-本章验证 AI 的问答、工具展示、布局渲染与降级。AI 的界面行为由人观察，AI 取证主要读本地对话库与日志，**不要根据截图猜测**。
+本章验证 AI 的问答、工具展示、布局渲染、降级与问题报告。AI 的界面行为由人观察，AI 取证主要读本地对话库与日志，**不要根据截图猜测**。
 
 ### E5-01 提问卡的问答路径
 
@@ -911,6 +911,408 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
   - [ ] 通过
   - [ ] 失败
 - **失败时收集**：右栏截图、失败卡截图、连接日志。
+
+### E5-06 问题报告的三处入口与 AI 门槛
+
+- **目的**：验证「报告问题」只在配置了 AI 之后出现，三处入口共用同一个动作；「已连接，不通」状态也有入口。
+- **前置条件**：M1 浏览器预览；1440×900；一套配置（用于中间底部与故障卡入口）；先不配置 AI。
+- **步骤（人做）**
+  1. 不配置 AI，刷新页面。打开设置 ›「遇到问题」，用下面的脚本记录三处入口是否存在。
+  2. 保存一个可用的 AI Key（或走 mock 的保存 Key 流程），刷新。
+  3. 再执行一次同样的脚本。
+  4. 连接后执行 `localStorage.setItem("veyl.mock.dataPlaneDown", "1")`，造出「已连接，不通」，确认故障卡位置的入口出现；取证后执行 `localStorage.removeItem("veyl.mock.dataPlaneDown")`。
+- **AI 取证**
+  ```js
+  (() => {
+    const reportBtn = document.querySelector(".console__report .btn");
+    const links = [...document.querySelectorAll(".issue-report-link")];
+    const label = [...document.querySelectorAll(".settings-row__label")].find(
+      (el) => el.textContent.trim() === "生成问题报告",
+    );
+    const settingsBtn = label?.closest(".settings-row")?.querySelector("button");
+    return {
+      reportButton: reportBtn
+        ? { text: reportBtn.textContent.trim(), disabled: reportBtn.disabled }
+        : null,
+      issueLinks: links.map((b) => ({ text: b.textContent.trim(), disabled: b.disabled })),
+      settingsLabel: label?.textContent.trim() ?? null,
+      settingsButton: settingsBtn
+        ? { text: settingsBtn.textContent.trim(), disabled: settingsBtn.disabled }
+        : null,
+    };
+  })()
+  ```
+- **可观察预期**
+  - 未配置 AI：`reportButton`、`issueLinks`、`settingsLabel` / `settingsButton` 全为 `null` —— 三处都不在 DOM。
+  - 配置 AI 后：`reportButton.text` 为 `报告问题`；`settingsLabel` 为 `生成问题报告`，`settingsButton.text` 为 `生成问题报告`；两处 `disabled` 为 `false`。
+  - 故障卡场景（失败 / 降级 / 已连接不通）：`issueLinks` 至少一项，`text` 为 `报告这个问题`，`disabled` 为 `false`。
+  - 「已连接，不通」时没有故障卡，但同一位置仍有 `报告这个问题`（选择器 `.console__body .issue-report-link`）。
+- **判定**
+  - [ ] 通过
+  - [ ] 失败
+- **失败时收集**：三种状态下各一次脚本 JSON、三处入口截图、AI 配置前后的 `veyl.*` 关键项。
+
+### E5-07 开场：右栏、披露条、会话与连点去重
+
+- **目的**：验证点入口后打开右栏、新建一条会话、界面渲染固定披露条、开场不产生用户气泡；连点两次只建一条会话、只发一条开场。
+- **前置条件**：M1；已配置 AI；右栏已收起或展开均可。
+- **步骤（人做）**
+  1. 记下当前会话数：点右栏的「历史会话」（`aria-label="历史会话"`），数 `.ai-history__item` 的数量，再点任一项回到对话。
+  2. 在**普通会话**（非报告会话）里确认没有披露条：`document.querySelector(".chat__disclosure") === null`。还没有普通会话就先随便问一句，别从报告入口进。
+  3. 回到主界面，用同一句脚本在**同一秒内**点两次「报告问题」：
+
+```js
+(() => {
+  document.querySelector(".console__report .btn")?.click();
+  document.querySelector(".console__report .btn")?.click();
+  return { clicked: true };
+})()
+```
+
+  4. 等 3 秒，记录右栏、披露条与会话：
+
+```js
+(async () => {
+  const panel = document.getElementById("ai-panel");
+  const disclosure = document.querySelector(".chat__disclosure");
+  const scroll = document.querySelector(".chat__scroll");
+  const userMsgs = [...document.querySelectorAll(".msg--user .msg__text")].map((el) => el.textContent);
+  const assistant = [...document.querySelectorAll(".msg--assistant .msg__text")].map((el) => el.textContent);
+  const disclosureInfo = disclosure
+    ? {
+        text: disclosure.textContent.trim(),
+        outsideScroll: !disclosure.closest(".chat__scroll"),
+        aboveScroll: scroll
+          ? disclosure.getBoundingClientRect().bottom <= scroll.getBoundingClientRect().top + 1
+          : null,
+      }
+    : null;
+  if (scroll) scroll.scrollTop = scroll.scrollHeight;
+  await new Promise((r) => setTimeout(r, 100));
+  const afterScroll = disclosure
+    ? {
+        text: disclosure.textContent.trim(),
+        top: Math.round(disclosure.getBoundingClientRect().top),
+      }
+    : null;
+  document.querySelector('[aria-label="历史会话"]')?.click();
+  await new Promise((r) => setTimeout(r, 200));
+  const sessions = document.querySelectorAll(".ai-history__item").length;
+  return {
+    panelOpen: !!panel,
+    sessionCount: sessions,
+    disclosure: disclosureInfo,
+    disclosureAfterScroll: afterScroll,
+    userMessages: userMsgs,
+    assistantMessages: assistant.slice(0, 2),
+  };
+})()
+```
+
+  5. （M2 才有）用 SQLite 复核会话与消息：
+     ```bash
+     sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from chat_sessions;"
+     sqlite3 -readonly "$HOME/.veyl/veyl.db" "select role, substr(content,1,60) from chat_messages order by created_at desc limit 6;"
+     ```
+  6. 重启应用，从历史打开这条报告会话，再看一次 `.chat__disclosure`。
+- **可观察预期**
+  - `panelOpen` 为 `true`；`sessionCount` 比步骤 1 多 **1**（连点两次没有多建）。
+  - `disclosure` 不为 `null`，`text` 逐字等于：
+    `报告只保存在你的电脑上；生成时，脱敏后的日志会发给你配置的 AI 服务。要不要把它发出去，由你决定。`
+  - `outsideScroll` 为 `true`、`aboveScroll` 为 `true`：披露条在消息滚动区**上方**，不随消息滚动；`disclosureAfterScroll.text` 与滚动前一致、`top` 不变。
+  - 普通会话里 `.chat__disclosure` 不存在（步骤 2）。
+  - 助手第一条包含 `先问两句：你遇到了什么问题？是刚连上就有，还是用着用着断的？`；披露句由界面渲染，不依赖模型是否复述。
+  - `userMessages` 里**没有**包含 `请帮我整理一份问题报告` 的项：开场是系统代发，不生成用户气泡。
+  - M2 的 `chat_sessions` 只增加 1 条；`chat_messages` 里没有用户角色、正文为开场指令的行。
+  - **已知限制**：重启后从历史恢复的报告会话可能没有披露条（会话的报告标记不保证随历史恢复）。这一步只记录「有 / 没有」，**不判失败**；同一进程内的报告会话必须有。
+- **判定**
+  - [ ] 通过
+  - [ ] 失败
+- **失败时收集**：脚本 JSON（含披露条滚动前后）、普通会话与报告会话截图、历史会话截图、SQLite 两条查询原文、重启后的披露条状态。
+
+### E5-08 生成产物：目录、权限、报告结构与空报告
+
+- **目的**：验证报告落盘的目录、权限、文件清单与 `报告.md` 的五节结构；「可疑点」的引用与磁盘行号对得上；空报告被拒且不落盘。
+- **前置条件**：M2 原生应用；已配置可用的 AI；一套可连接的配置；`~/Desktop` 存在；记下生成前的时间。若系统没有 `~/Desktop`（被重定向），报告会落到数据目录的 `reports/`，按 `先看我.txt` 里的实际位置取证，记「桌面兜底」，不判失败。
+- **步骤（人做）**
+  1. 点「报告问题」，等 AI 问两句。
+  2. 回答，例如：「连上之后网页打不开，其它软件也连不上」「刚连上就有」。回答里可以点名配置名（`报告脱敏测试配置`），方便 E5-09 验证配置名打码。
+  3. 等 AI 调完两次 IssueReport（收集 + 写入），最多等 180 秒。
+  4. 用下面的命令定位最新目录并核对。
+  5. **空报告**：记下报告目录列表，然后在会话里要求「直接调用 IssueReport，`report_markdown` 传空字符串，不要写别的」。若模型照做，核对返回的错误与目录列表；模型不照做就记「未覆盖（无法让模型发出空参数）」。
+- **AI 取证**
+  ```bash
+  root="$HOME/Desktop/Veyl 问题报告"
+  ls -1dt "$root"/*/ | head -3
+  d=$(ls -1dt "$root"/*/ | head -1); echo "$d"
+  basename "$d"
+  stat -f '%Lp %N' "$d"
+  find "$d" -maxdepth 2 -type f -exec stat -f '%Lp %N' {} \;
+  wc -l "$d/日志/"* 2>/dev/null
+  grep -nE '^## ' "$d/报告.md"
+  sed -n '/^## 可疑点/,/^## /p' "$d/报告.md"
+  sed -n '/^## 时间线/,/^## /p' "$d/报告.md"
+  # 报告里的每个 日志/文件:行号 是否在磁盘上存在
+  grep -oE '日志/[^ :，、]+:[0-9]+' "$d/报告.md" | sort -u | while IFS=: read -r f n; do
+    total=$(wc -l < "$d/$f" 2>/dev/null || echo 0)
+    printf '%s 引用行=%s 磁盘总行=%s\n' "$f" "$n" "$total"
+  done
+  # 工具返回的路径形态
+  sqlite3 -readonly "$HOME/.veyl/veyl.db" \
+    "select count(*) from tool_calls where tool_name='IssueReport';"
+  sqlite3 -readonly "$HOME/.veyl/veyl.db" \
+    "select substr(result_json,1,600) from tool_calls where tool_name='IssueReport' order by created_at desc limit 4;" \
+    | grep -nF "/Users/" ; echo "abs-path-hits=$?"
+  ```
+  工具卡事实（能开 DevTools 时）：
+  ```js
+  (() => {
+    const cards = [...document.querySelectorAll(".tool-line")];
+    const text = cards.map((c) => c.textContent).join("\n");
+    return {
+      hasAbsPath: text.includes("/Users/"),
+      hasFoldedLocation: /保存位置：~|保存位置：\d{4}-\d{2}-\d{2}-\d{4}/.test(text),
+    };
+  })()
+  ```
+- **可观察预期**
+  1. 目录在 `$HOME/Desktop/Veyl 问题报告/` 下，名称匹配 `^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{4}(-[0-9]+)?$`。
+  2. 目录权限是 `700`；`先看我.txt`、`报告.md`、`现场.json`、`日志/` 都存在；`日志/` 至少一份 `.log`，行数大于 0。
+  3. `报告.md` 依次有 `## 现象`、`## 环境`、`## 时间线`、`## 可疑点`、`## 下一步建议` 五个二级标题。
+  4. 「可疑点」里每一条编号项都至少有一处 `日志/<文件名>:<行号>` 或 `现场.json:<字段>`。
+  5. **行号对得上**：步骤 4 的循环里每个引用都满足 `引用行 ≤ 磁盘总行`，且 `sed -n "${n}p"` 抽出的那一行与报告里引用的内容属于同一件事（不是空行、不是另一条无关日志）。写入阶段只覆盖 `报告.md`，不改写日志与 `现场.json`。
+  6. **路径形态**：`tool_calls` 里 `IssueReport` 至少 2 条（收集 + 写入）；`abs-path-hits` 为 **1**；`hasAbsPath` 为 `false`；`hasFoldedLocation` 为 `true`——工具卡、返回的 `report_dir` 都是 `~` 形式或目录名。
+  7. **空报告**：模型照做时返回 `INVALID_ARGUMENT`，`details.reason` 为 `empty_report`；报告根目录列表与调用前一致，已有目录里的 `报告.md` / `现场.json` 内容与修改时间都不变（这次调用不写任何文件）。模型不照做时记「未覆盖」，不判失败。
+  8. **模板兜底**：若 `报告.md` 含「用户未补充描述」且没有「可疑点」，说明 AI 没产出，记「阻塞（AI 未产出）」，不判产品失败；材料与模板报告仍应齐全。
+- **判定**
+  - [ ] 通过
+  - [ ] 失败
+- **失败时收集**：`$d` 的完整路径、`ls -lR` 输出、`报告.md` 全文、`现场.json` 前 80 行、行号核对输出、`tool_calls` 的 `result_json` 片段、AI 那两轮工具卡截图。
+
+### E5-09 脱敏：现场、日志与标记口径
+
+- **目的**：验证落盘材料按契约脱敏：节点地址、配置名、家目录、域名、公网 IP 都打码，私网地址保留，只使用 `***` 一种占位符，日志不逐行插标记。
+- **前置条件**：M2；按 E5-08 生成一份报告；测试数据可识别：
+  - 配置名 `报告脱敏测试配置`，节点名 `脱敏节点甲`，服务器 `203.0.113.77`，端口 `8388`；
+  - 生成前先连接并访问 `https://www.google.com` 与 `https://www.cloudflare.com`，让日志里有域名与出口 IP。
+- **步骤（人做）**
+  1. 生成报告后定位最新目录（同 E5-08）。
+  2. 依次执行下面的只读检查。
+- **AI 取证**
+  ```bash
+  d=$(ls -1dt "$HOME/Desktop/Veyl 问题报告"/*/ | head -1); echo "$d"
+  grep -rnF "203.0.113.77" "$d" ; echo "node-ip-hits=$?"
+  grep -rnF "报告脱敏测试配置" "$d" ; echo "config-name-hits=$?"
+  grep -rnF "脱敏节点甲" "$d" ; echo "node-name-hits=$?"
+  grep -rnF "$HOME" "$d/现场.json" "$d/报告.md" "$d/日志" ; echo "home-hits=$?"
+  grep -rnF "~/Library" "$d/现场.json" "$d/报告.md" "$d/日志" | head -5
+  grep -rnF "google.com" "$d" | grep -vF "***.google.com" ; echo "bare-domain-hits=$?"
+  grep -rnE '\*\.\*\.\*\.\*' "$d/现场.json" "$d/报告.md" "$d/日志" | head -5
+  grep -rnF "127.0.0.1" "$d/现场.json" "$d/报告.md" "$d/日志" | head -5
+  grep -nF '"redaction_marker": "***"' "$d/现场.json"
+  grep -cF '"redacted": true' "$d/现场.json"
+  grep -rnE '^\[redacted\]|^<hidden>|^…|^xxxx' "$d/日志" ; echo "line-marker-hits=$?"
+  ```
+- **可观察预期**
+  1. `node-ip-hits` / `config-name-hits` / `node-name-hits` / `home-hits` 都是 **1**（`grep` 无命中）；`bare-domain-hits` 为 **1**。
+  2. 日志副本里节点地址形态是单独的 `***`；出现过的域名是 `***.<可注册域>`（例如 `***.google.com`）；公网出口 IP 是 `*.*.*.*`。
+  3. 私网地址保留：`127.0.0.1` 原样出现（没有变成 `*.*.*.*`）。
+  4. 家目录被压成 `~`（**只看 `现场.json`、`报告.md`、`日志/`**），例如 `~/Library/...`；这三处不再出现 `/Users/<用户名>`。
+     `先看我.txt` 的「实际保存位置」同样是 `~` 形式；折叠不了时整行不显示，不会回退到绝对路径。
+  5. `现场.json` 有 `"redaction_marker": "***"`；`"redacted": true` 的条数等于 `log_files` 的条数。
+  6. `line-marker-hits` 为 **1**：日志没有逐行插标记，打码只发生在 token 级。
+  7. 除 `***` 外不出现 `[redacted]`、`xxxx`、`<hidden>`、半掩码（`goo***.com`、`203.***.*.*`）。
+  8. **字段未覆盖时**：如果报告里根本没出现配置名（模型没写、日志也没有），把该项记为「未覆盖（材料里无配置名）」，并在结果里写清：先用 E5-08 的回答点名配置名再重生成；不要因此判失败。域名同理：先把 `https://www.google.com` 访问出日志，再生成。
+- **判定**
+  - [ ] 通过
+  - [ ] 失败
+- **失败时收集**：上面每条命令的原文与 `$?`、`现场.json` 全文、`日志/` 的文件名与行数、命中的真实值（只记录命中位置，不把真实 IP/域名贴进报告）。
+
+### E5-10 域名开关：生效、关闭与写入失败回滚
+
+- **目的**：验证「报告中包含我访问过的网站域名」只由用户控制：开关打开时即使模型**省略** `include_domains` 也保留完整域名；模型显式 `false` 只能收窄、显式 `true` 不能放宽；关闭后回到 `***.<域>`；开关保存失败时复选框回滚。
+- **前置条件**：M2 已生成过一份报告；M1 用于回滚分支。
+- **步骤（人做）**
+  1. **M2 开启**：设置 ›「遇到问题」勾选「报告中包含我访问过的网站域名」，重新生成一份报告（新建会话或让助手再生成一次）。
+  2. 读 `现场.json` 的 `domains_included`、域名形态，以及工具调用里模型实际传的 `include_domains`。
+  3. **M2 关闭**：取消勾选，再生成一份。
+  4. 读同样的字段。
+  5. **M1 回滚**：在浏览器预览里把偏好写入改成失败，再点复选框。
+- **AI 取证**
+  ```bash
+  d=$(ls -1dt "$HOME/Desktop/Veyl 问题报告"/*/ | head -1)
+  grep -nF '"domains_included"' "$d/现场.json"
+  grep -rnF "google.com" "$d" | head -5
+  grep -rnF "***.google.com" "$d" | head -5
+  sqlite3 -readonly "$HOME/.veyl/veyl.db" \
+    "select substr(args_json,1,400) from tool_calls where tool_name='IssueReport' order by created_at desc limit 4;"
+  ```
+  M1 回滚构造（DevTools）：
+  ```js
+  (async () => {
+    const mod = await import("/src/agent/index.ts");
+    const bridge = mod.getAgentBridge();
+    bridge.issueReportPreference = async () => {
+      throw { code: "INTERNAL", message: "mock：写入失败" };
+    };
+    return { patched: true };
+  })()
+  ```
+- **可观察预期**
+  - 开启后：`"domains_included": true`；报告与日志里出现完整域名（例如 `www.google.com`），不再出现 `***.google.com`。
+  - 关闭后：`"domains_included": false`；域名回到 `***.google.com`；除 `domains_included` 外其它字段与开启时同形。
+  - **参数语义**：工具调用里 `include_domains` **省略**时，结果跟随用户开关（开=完整、关=打码）；显式 `false` 时无论开关都打码；显式 `true` 而开关未开时仍打码。记录每次调用实际是「省略 / false / true」，以及对应的 `domains_included`。
+    （模型显式传值不由测试者控制；本条以「省略时跟随用户」为主，显式两种取值按实际出现记录，未出现不判失败——矩阵本身由工具层单测覆盖。）
+  - M1 回滚：复选框回到点击前的状态，旁边出现「没保存成功，设置没有改。」；错误提示消失前不改变其它设置。
+- **判定**
+  - [ ] 通过
+  - [ ] 失败
+- **失败时收集**：两次 `现场.json` 的相关字段、`tool_calls.args_json` 片段、域名 grep 结果、复选框回滚截图、DevTools 构造输出。
+
+### E5-11 两个动作：显示、发送邮件与复制兜底
+
+- **目的**：验证**收集阶段**的工具卡在折叠态就有「在文件夹中显示」「打开发送邮件」；能打开目录、能调起邮件并预填收件人；没有邮件客户端或正文编码后超过 7500 字节时给「复制正文」，复制内容与邮件正文逐字一致且不重试命令。
+- **前置条件**：M1（动作与兜底）；M2（真实打开 Finder / 邮件客户端）。
+- **步骤（人做）**
+  1. M1：走完 E5-07 的开场，回答一句，等**第一张**工具卡「现场材料已收集」出现；**不要展开**。
+  2. 记录第一张卡上的动作按钮，并分别点「在文件夹中显示」「打开发送邮件」。
+  3. 用下面的脚本把邮件命令换成固定的 `copy_only` 返回，并拦截剪贴板；再点「打开发送邮件」→「复制正文」。
+  4. M2：在真实报告卡上分别点两个按钮，确认 Finder 定位到目录、邮件窗口收件人为 `ribencong@gmail.com`。
+  5. （可选）M2 专测长度触发：让 AI 写一份编码后超过 7500 字节的报告，再点「打开发送邮件」；有邮件客户端也应返回 `copy_only`。
+- **AI 取证**
+  ```js
+  (() => {
+    const cards = [...document.querySelectorAll(".tool-line")];
+    const card = [...cards].reverse().find((c) => /现场材料已收集|已收集现场材料/.test(c.textContent)) ?? cards[0];
+    const buttons = [...(card?.querySelectorAll(".tool-line__actions button") ?? [])].map((b) =>
+      b.textContent.trim(),
+    );
+    const expanded = card?.querySelector(".tool-line__row")?.getAttribute("aria-expanded");
+    const cardText = card?.textContent ?? "";
+    return {
+      buttons,
+      expanded,
+      hasAbsPath: cardText.includes("/Users/"),
+      hasFoldedLocation: /保存位置：~|保存位置：\d{4}-\d{2}-\d{2}-\d{4}/.test(cardText),
+    };
+  })()
+  ```
+  ```js
+  (async () => {
+    const mod = await import("/src/agent/index.ts");
+    const bridge = mod.getAgentBridge();
+    window.__mailCalls = 0;
+    window.__mailBody = "正文样例：需要与复制内容逐字一致。";
+    bridge.issueReportMail = async () => {
+      window.__mailCalls += 1;
+      return {
+        opened: false,
+        method: "copy_only",
+        report_dir: "2026-11-12-1530",
+        body_chars: window.__mailBody.length,
+        body: window.__mailBody,
+      };
+    };
+    window.__copied = null;
+    const original = navigator.clipboard.writeText.bind(navigator.clipboard);
+    navigator.clipboard.writeText = async (text) => {
+      window.__copied = text;
+      return original(text);
+    };
+    return { patched: true };
+  })()
+  ```
+  点完「复制正文」后读取：
+  ```js
+  ({ calls: window.__mailCalls, copied: window.__copied, body: window.__mailBody })
+  ```
+- **可观察预期**
+  1. **收集阶段就有动作**：第一张卡（收集阶段，文案是「现场材料已收集」，mock 通道是「已收集现场材料」）在折叠态（`expanded` 为 `"false"` 或 `null`）就能看到 `在文件夹中显示`、`打开发送邮件` 两个按钮；不要求写入成功。
+  2. `hasAbsPath` 为 `false`，`hasFoldedLocation` 为 `true`：卡上的「保存位置」是 `~` 形式或目录名。
+  3. M1 点「在文件夹中显示」不报错；点「打开发送邮件」后没有额外提示（mock 返回 `opened: true`）。
+  4. 固定 `copy_only` 后：出现提示「没有打开邮件客户端。可以复制正文，或先打开报告文件夹。」和「复制正文」按钮。
+  5. 点「复制正文」后出现「正文已复制，可以粘贴到邮件里。」（失败时为「复制失败，可以到报告文件夹里手动复制。」）；`copied` 与 `body` **逐字相等**；`calls` 仍为 **1**，没有重试邮件命令。若浏览器拒绝剪贴板权限导致复制失败，记「阻塞（剪贴板不可用）」并附提示原文，不判产品失败。
+  6. M2：Finder 打开的是该 `report_id` 对应的目录；邮件窗口的收件人是 `ribencong@gmail.com`，标题含「[Veyl 问题报告]」；没有自动发送；邮件正文里没有 `/Users/`。
+  7. 长度触发（步骤 5）：正文编码后超过 7500 字节时，即使有邮件客户端也返回 `copy_only`，界面出现「复制正文」；正文被裁剪但开头声明与附件提示仍在。
+- **判定**
+  - [ ] 通过
+  - [ ] 失败
+- **失败时收集**：两张工具卡截图、按钮与 `expanded` 的 JSON、`calls / copied / body` 三个值、Finder 与邮件窗口截图、控制台错误。
+
+### E5-12 伪造 report_id：报错且不打开任何目录
+
+- **目的**：验证动作命令只认登记过的 `report_id`，`../`、随机串都会被拒，且不会打开任何目录；不接受路径参数。
+- **前置条件**：M2 原生应用，已生成过至少一份报告；能打开窗口 DevTools。
+- **步骤（人做）**
+  1. 先确认 Finder 当前没有打开「Veyl 问题报告」目录。
+  2. 在 DevTools 里执行：
+     ```js
+     (async () => {
+       const call = (reportId) =>
+         window.__TAURI_INTERNALS__
+           .invoke("issue_report_reveal", { reportId })
+           .then((r) => ({ ok: true, r }))
+           .catch((e) => ({ ok: false, e }));
+       return {
+         traversal: await call("../"),
+         absolute: await call("/tmp"),
+         random: await call("rpt-not-a-real-id"),
+       };
+     })()
+     ```
+  3. 再对 `issue_report_mail` 重复一次随机串。
+- **AI 取证**
+  ```bash
+  ls -1dt "$HOME/Desktop/Veyl 问题报告"/*/ | head -3
+  ```
+- **可观察预期**
+  - 三个调用都 `ok: false`；`e` 里的 `code` 为 `NOT_FOUND`（或 `details.reason` 为 `report_not_found`）。
+  - 调用前后 Finder 没有新窗口、没有定位到任何目录；报告目录列表与调用前一致。
+  - `issue_report_mail` 同样拒绝，且没有邮件窗口出现。
+  - 如果该构建打不开 DevTools、或 `window.__TAURI_INTERNALS__` 不存在：记「阻塞（无法直接调命令）」，写明尝试过的方式；不要用改 DOM 假装调用代替。
+- **判定**
+  - [ ] 通过
+  - [ ] 失败
+- **失败时收集**：三次调用的返回对象（错误码与消息）、调用前后目录列表、Finder / 邮件窗口截图。
+
+### E5-13 隐私文案：披露条、批准表述与禁用词
+
+- **目的**：验证报告会话上方有界面渲染的固定披露条、`先看我.txt` 首段使用同一句已批准声明，并且任何位置都没有「不出本机」「完全本地」这类错误保证。
+- **前置条件**：M1（披露条与普通会话对比）；M2（`先看我.txt` 与落盘材料）。
+- **步骤（人做）**
+  1. 在 M1 点「报告问题」，读 `.chat__disclosure` 的文本；再打开任一普通会话，确认没有这个元素。
+  2. 在 M2 生成一份报告，打开 `先看我.txt`。
+  3. 在三份文件（`先看我.txt`、`报告.md`、`现场.json`）与日志副本里搜禁用词。
+- **AI 取证**
+  ```js
+  (() => {
+    const el = document.querySelector(".chat__disclosure");
+    return {
+      present: !!el,
+      text: el?.textContent.trim() ?? null,
+      inScroll: el ? !!el.closest(".chat__scroll") : null,
+    };
+  })()
+  ```
+  ```bash
+  d=$(ls -1dt "$HOME/Desktop/Veyl 问题报告"/*/ | head -1); echo "$d"
+  sed -n '1,6p' "$d/先看我.txt"
+  grep -rnE '不出本机|完全本地|材料只在本机|日志不出本机' "$d" ; echo "forbidden-hits=$?"
+  grep -nF '报告只保存在你的电脑上；生成时，脱敏后的日志会发给你配置的 AI 服务。要不要把它发出去，由你决定。' "$d/先看我.txt"
+  sed -n '1,8p' "$d/报告.md"
+  ```
+- **可观察预期**
+  - 报告会话里 `present` 为 `true`、`inScroll` 为 `false`，`text` **逐字**等于：
+    `报告只保存在你的电脑上；生成时，脱敏后的日志会发给你配置的 AI 服务。要不要把它发出去，由你决定。`
+  - 普通会话里 `present` 为 `false`。
+  - `先看我.txt` 首段**逐字**出现同一句（`grep -F` 有命中）；`forbidden-hits` 为 **1**：`先看我.txt`、`报告.md`、`现场.json`、日志里都没有「不出本机」「完全本地」「材料只在本机」「日志不出本机」。
+  - `先看我.txt` 有 `***` 图例、文件清单与「实际保存位置」（`~` 形式）；`报告.md` 开头三行声明含 `***` 图例。
+  - 工具卡文案（「现场材料已收集 / 问题报告已生成」）里不重复这句声明。
+  - **已知限制**：重启后从历史恢复的报告会话可能没有披露条；只记录「有 / 没有」，不判失败（与 E5-07 同）。
+- **判定**
+  - [ ] 通过
+  - [ ] 失败
+- **失败时收集**：披露条脚本 JSON（报告会话与普通会话各一次）、`先看我.txt` 全文、禁用词 grep 原文、`报告.md` 前 8 行。
 
 ---
 

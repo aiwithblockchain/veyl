@@ -526,13 +526,13 @@ type RulesStatus = {
 
 ## 8. 事件
 
-> **§8 的两个载荷归 `events.md` 所有**：`contract_version` 跟 `events.md`（当前 `2.10.0`），不跟本文件；字段语义以 `events.md` §4.14 / §4.15 为准。
+> **§8 的两个载荷归 `events.md` 所有**：`contract_version` 跟 `events.md`（当前 `2.11.0`），不跟本文件；字段语义以 `events.md` §4.14 / §4.15 为准。
 
 ### 8.1 `routing-changed`
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   config_id: string;
   routing_mode: RoutingMode;
   applied_mode: RoutingMode | null;   // 热切后为实际生效值；仅写库时保持旧值
@@ -555,7 +555,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.10.0";
+  contract_version: "2.11.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
