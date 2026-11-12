@@ -5,6 +5,8 @@ import type { Session } from "../state/chatStore";
 import { AskQuestionCard } from "./AskQuestionCard";
 import { Composer } from "./Composer";
 import { MessageItem } from "./MessageItem";
+import type { DisplayActionOutcome } from "./ToolCallCard";
+import type { ToolDisplayAction } from "./toolDisplay";
 
 interface Props {
   session: Session;
@@ -16,6 +18,8 @@ interface Props {
   question?: PendingQuestion | null;
   onStop: () => void;
   onNextAction: (action: NextAction) => void;
+  /** 工具卡里的报告动作：直接调命令，不发消息。 */
+  onDisplayAction?: (action: ToolDisplayAction) => Promise<DisplayActionOutcome>;
   hasKey: boolean;
   onConfigureKey: () => void;
   /** 递增这个值会把焦点移到输入框。 */
@@ -31,6 +35,7 @@ export function ChatView({
   question = null,
   onStop,
   onNextAction,
+  onDisplayAction,
   hasKey,
   onConfigureKey,
   focusSignal = 0,
@@ -51,6 +56,11 @@ export function ChatView({
 
   return (
     <div className="chat">
+      {session.report ? (
+        <p className="chat__disclosure">
+          报告只保存在你的电脑上；生成时，脱敏后的日志会发给你配置的 AI 服务。要不要把它发出去，由你决定。
+        </p>
+      ) : null}
       <div
         className="chat__scroll"
         ref={scrollRef}
@@ -66,6 +76,7 @@ export function ChatView({
               message={message}
               toolCalls={session.toolCalls}
               onNextAction={onNextAction}
+              onDisplayAction={onDisplayAction}
             />
           ))}
           {inlineQuestion ? (

@@ -23,6 +23,8 @@ import { NewConfigDialog } from "./components/NewConfigDialog";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
 import { Settings, describeImportError } from "./components/Settings";
+import type { DisplayActionOutcome } from "./components/ToolCallCard";
+import type { ToolDisplayAction } from "./components/toolDisplay";
 import {
   FIRST_RUN_KICKOFF,
   isAiReady,
@@ -37,6 +39,7 @@ import {
   shellLayout,
 } from "./ui/breakpoints";
 import { isDisconnectFailure } from "./ui/middleArea";
+import { ISSUE_REPORT_OPENING } from "./ui/issueReport";
 import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
 import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
 import { usePaneLayout } from "./ui/usePaneLayout";
@@ -125,6 +128,9 @@ export default function App() {
   const [historyReady, setHistoryReady] = useState(false);
   const [hasEverConnected, setHasEverConnected] = useState(readEverConnected);
   const [panelOpen, setPanelOpen] = useState(readInitialPanelOpen);
+  /** 正在为问题报告开会话并发送开场：期间禁用三处入口。 */
+  const [reportOpening, setReportOpening] = useState(false);
+  const reportOpeningRef = useRef(false);
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === "undefined" ? 1440 : window.innerWidth,
   );
@@ -846,7 +852,7 @@ export default function App() {
   const sendToSession = async (
     sessionId: string,
     text: string,
-    options: { aiJustConfigured?: boolean } = {},
+    options: { aiJustConfigured?: boolean; hidden?: boolean } = {},
   ): Promise<boolean> => {
     // 刚配好 AI 时 aiReady 状态还没落到这次渲染里，这条路径已经确认可用。
     if (!aiReady && !options.aiJustConfigured) {
@@ -866,10 +872,16 @@ export default function App() {
 
     const localRequestId = nextId("local");
     sendBusyRef.current.add(sessionId);
-    dispatch({ type: "send_user_message", sessionId, text, localRequestId });
+    dispatch(
+      options.hidden
+        ? { type: "start_hidden_request", sessionId, localRequestId }
+        : { type: "send_user_message", sessionId, text, localRequestId },
+    );
 
     try {
-      const { requestId } = await bridge.sendMessage(sessionId, text);
+      const { requestId } = await bridge.sendMessage(sessionId, text, {
+        hidden: options.hidden,
+      });
       requestSessionRef.current.set(requestId, sessionId);
       dispatch({ type: "request_started", sessionId, requestId, localRequestId });
       if (pendingStopRef.current.delete(sessionId)) {
@@ -891,6 +903,56 @@ export default function App() {
         message: bridgeError.message || "这条没有发出去，再试一次。",
       });
       return true;
+    }
+  };
+
+  // 三处入口共用：打开右栏 + 新建会话 + 契约里的开场指令（hidden，不落用户气泡）。
+  const handleReportProblem = () => {
+    if (!aiReady || reportOpeningRef.current) return;
+    reportOpeningRef.current = true;
+    setReportOpening(true);
+    setSettingsOpen(false);
+    const fresh = { ...createSession(), report: true };
+    dispatch({ type: "add_session", session: fresh });
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
+    void sendToSession(fresh.id, ISSUE_REPORT_OPENING, { hidden: true }).finally(() => {
+      reportOpeningRef.current = false;
+      setReportOpening(false);
+    });
+  };
+
+  // 工具卡里的报告动作：直接调命令，不发用户消息（events.md §3.4）。
+  const handleDisplayAction = async (
+    action: ToolDisplayAction,
+  ): Promise<DisplayActionOutcome> => {
+    try {
+      const result =
+        action.kind === "reveal_report_dir"
+          ? await bridge.issueReportReveal(action.reportId)
+          : await bridge.issueReportMail(action.reportId);
+      if (result.opened) return {};
+      if (action.kind === "compose_report_mail" && result.method === "copy_only") {
+        return {
+          message: "没有打开邮件客户端。可以复制正文，或先打开报告文件夹。",
+          copyBody: result.body ?? undefined,
+        };
+      }
+      return {
+        message:
+          action.kind === "compose_report_mail"
+            ? "没有打开邮件客户端。可以点「在文件夹中显示」，把报告附到邮件里。"
+            : "没能打开文件夹。可以到桌面的「Veyl 问题报告」里找。",
+      };
+    } catch (error: unknown) {
+      const failure = toBridgeError(error);
+      return {
+        message:
+          failure.code === "NOT_FOUND"
+            ? "没找到这个报告，可能已被删除；请重新生成一次。"
+            : failure.message || "没打开成功，再试一次。",
+      };
     }
   };
 
@@ -1221,6 +1283,7 @@ export default function App() {
       onQuestionExpired={handleQuestionExpired}
       onStop={handleStop}
       onNextAction={handleNextAction}
+      onDisplayAction={handleDisplayAction}
       onOpenSettings={() => openSettings("ai")}
       onConfigureKey={() => openSettings("ai")}
       onCollapse={togglePanel}
@@ -1274,6 +1337,8 @@ export default function App() {
         onStart={handleVpnStart}
         onStop={handleVpnStop}
         onReconnect={handleVpnReconnect}
+        onReportProblem={aiReady ? handleReportProblem : undefined}
+        reportBusy={reportOpening}
         onSwitchNode={handleSwitchNode}
         onProbe={vpn.probe}
         nodeProbes={nodeProbes}
@@ -1422,6 +1487,8 @@ export default function App() {
           setSettingsOpen(false);
           void handleRestoreNetwork();
         }}
+        onReportProblem={aiReady ? handleReportProblem : undefined}
+        reportBusy={reportOpening}
         onAskAi={(text, section) => {
           setSettingsSection(section);
           closeSettings();

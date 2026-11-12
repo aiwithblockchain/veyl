@@ -6,6 +6,7 @@ import {
   chatReducer,
   createInitialState,
   createSession,
+  isReportSession,
 } from "./chatStore";
 
 function withOneSession(): ChatState {
@@ -570,6 +571,7 @@ describe("chatReducer", () => {
         { label: "", value: "延迟 42 毫秒" },
       ],
       changed: "none",
+      actions: [],
     });
   });
 
@@ -895,5 +897,91 @@ describe("追问回答追加", () => {
     });
 
     expect(activeSession(state)!.messages).toHaveLength(before);
+  });
+});
+
+describe("hidden 开场（问题报告）", () => {
+  it("只挂助手占位，不出现用户气泡；request_started 认领它", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "start_hidden_request",
+      sessionId,
+      localRequestId: "local_h",
+    });
+
+    const session = activeSession(state)!;
+    expect(session.messages).toHaveLength(1);
+    expect(session.messages[0]).toMatchObject({
+      role: "assistant",
+      requestId: "local_h",
+      streaming: true,
+    });
+    expect(session.requesting).toBe(true);
+
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_h",
+      localRequestId: "local_h",
+    });
+    expect(activeSession(state)!.messages[0]).toMatchObject({ requestId: "req_h" });
+  });
+});
+
+describe("报告会话判定", () => {
+  it("历史里出现过 IssueReport 工具调用即为报告会话", () => {
+    const session = createSession(1000);
+    session.toolCalls["call_1"] = {
+      id: "call_1",
+      tool: "IssueReport",
+      action: "",
+      permissionLevel: "write",
+      source: "agent",
+      state: "ok",
+      nextActions: [],
+      startedAt: 1000,
+    };
+    expect(isReportSession(session)).toBe(true);
+  });
+
+  it("只有普通工具调用不是报告会话", () => {
+    const session = createSession(1000);
+    session.toolCalls["call_1"] = {
+      id: "call_1",
+      tool: "RuntimeStatus",
+      action: "",
+      permissionLevel: "read_only",
+      source: "agent",
+      state: "ok",
+      nextActions: [],
+      startedAt: 1000,
+    };
+    expect(isReportSession(session)).toBe(false);
+  });
+
+  it("空会话不是报告会话", () => {
+    expect(isReportSession(createSession(1000))).toBe(false);
+  });
+
+  it("从历史恢复时按工具名判定，并置上 report", () => {
+    const state = chatReducer(createInitialState(), {
+      type: "hydrate_history",
+      history: {
+        sessions: [{ id: "s_rep", title: "问题报告", created_at: "2026-11-12T08:00:00.000Z" }],
+        activeSessionId: "s_rep",
+        messages: [
+          { id: "m1", role: "user", content: "打不开网页", created_at: "2026-11-12T08:00:00.000Z" },
+          {
+            id: "m2",
+            role: "assistant",
+            content: "已收集现场材料",
+            created_at: "2026-11-12T08:00:01.000Z",
+            tool: { tool: "IssueReport" },
+          },
+        ],
+      },
+    });
+    expect(state.sessions[0]?.report).toBe(true);
   });
 });

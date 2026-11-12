@@ -53,6 +53,8 @@ export interface Session {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** 问题报告会话：消息流顶部常驻隐私披露。仅本次运行内有效。 */
+  report?: boolean;
   messages: ChatMessage[];
   toolCalls: Record<string, ToolCall>;
   status: { text: string; phase: AiStatusPhase } | null;
@@ -72,6 +74,7 @@ export type ChatAction =
   | { type: "new_session" }
   | { type: "add_session"; session: Session }
   | { type: "send_user_message"; sessionId: string; text: string; localRequestId: string }
+  | { type: "start_hidden_request"; sessionId: string; localRequestId: string }
   | { type: "append_user_message"; sessionId: string; text: string }
   | { type: "request_pending"; sessionId: string }
   | {
@@ -246,6 +249,38 @@ export function titleFromText(text: string): string {
   return clean.length > 22 ? `${clean.slice(0, 22)}…` : clean || "新会话";
 }
 
+/**
+ * 报告会话：运行时标记，或历史里出现过 IssueReport 工具调用。
+ * 历史没有工具信息时只能靠运行时的 `report`。
+ */
+export function isReportSession(session: Session): boolean {
+  if (session.report) return true;
+  return Object.values(session.toolCalls).some((call) => call.tool === "IssueReport");
+}
+
+/** 只恢复工具名（够判定会话类型）；历史不重建工具卡，timeline 里没有引用。 */
+function toolCallsFromStored(
+  stored: import("../agent/bridge").StoredChatMessage[],
+): Record<string, ToolCall> {
+  const calls: Record<string, ToolCall> = {};
+  for (const message of stored) {
+    const name = message.tool?.tool;
+    if (!name) continue;
+    const id = `db_tool_${message.id}`;
+    calls[id] = {
+      id,
+      tool: name,
+      action: "",
+      permissionLevel: "read_only",
+      source: "agent",
+      state: "ok",
+      nextActions: [],
+      startedAt: parseTime(message.created_at),
+    };
+  }
+  return calls;
+}
+
 const REQUEST_RESULTS: Record<RequestResult, boolean> = {
   success: true,
   error: false,
@@ -328,6 +363,30 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             at: now,
           },
           assistant,
+        ],
+      }));
+    }
+
+    // 系统触发的开场指令不落成用户气泡：只挂一条等待回复的助手消息。
+    case "start_hidden_request": {
+      const target = state.sessions.find((session) => session.id === action.sessionId);
+      if (!target) return state;
+      const now = Date.now();
+      return patchSession(state, target.id, (session) => ({
+        ...session,
+        updatedAt: now,
+        requesting: true,
+        status: { text: "正在思考", phase: "thinking" },
+        messages: [
+          ...session.messages,
+          {
+            id: `pending_${action.localRequestId}`,
+            role: "assistant",
+            requestId: action.localRequestId,
+            items: [],
+            streaming: true,
+            at: now,
+          },
         ],
       }));
     }
@@ -680,7 +739,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
       const messages = messagesFromStored(history.messages);
       active.messages = messages;
+      active.toolCalls = toolCallsFromStored(history.messages);
       active.historyLoaded = true;
+      if (isReportSession(active)) active.report = true;
       const last = messages[messages.length - 1];
       if (last) active.updatedAt = Math.max(active.updatedAt, last.at);
 
@@ -695,12 +756,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         }
         const messages = messagesFromStored(action.messages);
         const last = messages[messages.length - 1];
-        return {
+        const next: Session = {
           ...session,
           messages,
+          toolCalls: toolCallsFromStored(action.messages),
           historyLoaded: true,
           updatedAt: last ? Math.max(session.updatedAt, last.at) : session.updatedAt,
         };
+        return isReportSession(next) ? { ...next, report: true } : next;
       });
 
     case "session_renamed":

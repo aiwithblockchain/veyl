@@ -20,11 +20,11 @@ function contractToolNames(): string[] {
 }
 
 describe("工具名映射集合", () => {
-  it("与 tools.md §3 的 45 个工具名完全相等", () => {
+  it("与 tools.md §3 的 46 个工具名完全相等", () => {
     const names = contractToolNames();
-    expect(names).toHaveLength(45);
+    expect(names).toHaveLength(46);
     expect(new Set(names)).toEqual(new Set(TOOL_NAMES));
-    expect(TOOL_NAMES).toHaveLength(45);
+    expect(TOOL_NAMES).toHaveLength(46);
   });
 
   it("每个工具都有进行中、完成、失败与建议文案", () => {
@@ -68,7 +68,33 @@ describe("readToolDisplay", () => {
         { label: "延迟", value: "42 毫秒" },
       ],
       changed: "none",
+      actions: [],
+    });  });
+
+  it("只认两个报告动作，未知 kind 与空 id 丢弃，最多两个", () => {
+    const display = readToolDisplay({
+      text: "报告已生成",
+      changed: "none",
+      actions: [
+        { kind: "reveal_report_dir", report_id: "rpt-1" },
+        { kind: "compose_report_mail", report_id: "rpt-1" },
+        { kind: "open_path", report_id: "rpt-1" },
+        { kind: "reveal_report_dir", report_id: "" },
+        { kind: "compose_report_mail", report_id: "rpt-2" },
+      ],
     });
+    expect(display?.actions).toEqual([
+      { kind: "reveal_report_dir", reportId: "rpt-1" },
+      { kind: "compose_report_mail", reportId: "rpt-1" },
+    ]);
+  });
+
+  it("只有 actions 也算有效 display", () => {
+    expect(
+      readToolDisplay({
+        actions: [{ kind: "reveal_report_dir", report_id: "rpt-1" }],
+      }),
+    ).not.toBeNull();
   });
 
   it("字段缺失或类型不对时返回 null", () => {

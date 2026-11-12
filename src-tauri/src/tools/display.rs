@@ -24,11 +24,25 @@ pub enum Changed {
     Unknown,
 }
 
+/// 卡片上可直接点击的动作（`events.md` §3.4，2.11.0）。
+///
+/// 只带不透明的 `report_id`，**不带路径**：一旦出现通用「打开路径」的动作，
+/// 模型就可能诱导 UI 打开任意位置。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DisplayAction {
+    RevealReportDir { report_id: String },
+    ComposeReportMail { report_id: String },
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Display {
     pub text: String,
     pub facts: Vec<String>,
     pub changed: Changed,
+    /// 2.11.0：最多两个；没有动作时不序列化，保持旧事件的形状。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<DisplayAction>,
 }
 
 impl Display {
@@ -37,11 +51,17 @@ impl Display {
             text: text.into(),
             facts: Vec::new(),
             changed,
+            actions: Vec::new(),
         }
     }
 
     pub fn with_facts(mut self, facts: Vec<String>) -> Self {
         self.facts = facts;
+        self
+    }
+
+    pub fn with_actions(mut self, actions: Vec<DisplayAction>) -> Self {
+        self.actions = actions;
         self
     }
 }
@@ -74,6 +94,7 @@ fn table(tool: &str) -> (&'static str, &'static str, bool) {
         "VpnConnect" => ("已连接", "没能连上", false),
         "VpnDisconnect" => ("已断开", "没能断开连接", false),
         "DiagRun" => ("诊断完成", "没能完成诊断", true),
+        "IssueReport" => ("问题报告已生成", "没能生成问题报告", false),
         "DeepseekSetupKey" => ("已给出开通步骤", "没能给出步骤", true),
         "DeepseekSaveKey" => ("密钥已保存", "没能保存密钥", false),
         "JobGet" => ("已读取任务进度", "没能读取任务进度", true),
@@ -101,6 +122,7 @@ pub fn fallback(tool: &str, ok: bool) -> Display {
         } else {
             Changed::Unknown
         },
+        actions: Vec::new(),
     }
 }
 
@@ -146,6 +168,7 @@ mod tests {
             "VpnConnect",
             "VpnDisconnect",
             "DiagRun",
+            "IssueReport",
             "DeepseekSetupKey",
             "DeepseekSaveKey",
             "JobGet",

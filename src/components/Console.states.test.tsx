@@ -85,7 +85,9 @@ interface RenderOptions {
   loading?: boolean;
   failedAfterConnected?: boolean;
   helperPreparing?: boolean;
+  aiReady?: boolean;
   onReconnect?: () => void;
+  onReportProblem?: () => void;
 }
 
 function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
@@ -95,11 +97,12 @@ function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
       onStart={noop}
       onStop={noop}
       onReconnect={opts.onReconnect ?? noop}
+      onReportProblem={opts.onReportProblem}
       onSwitchNode={switchNode}
       onProbe={never}
       nodeProbes={emptyProbes}
       nodeProbeAvailable={false}
-      aiReady
+      aiReady={opts.aiReady ?? true}
       justOnboarded={false}
       zeroConfigSettled
       hasConfigs={Boolean(config)}
@@ -285,6 +288,51 @@ describe("状态矩阵", () => {
     expect(r.text(".state-line")).toContain("连接不稳定");
     expect(r.text(".console")).not.toContain("已连接，不通");
     expect(r.text(".hero .btn")).toBe("断开 VPN");
+  });
+
+  it("13 报告入口跟随 AI 配置：未配置时控制台与故障卡都不出现", () => {
+    const onReportProblem = vi.fn();
+    const ready = renderConsole({
+      runtime: makeRuntime({ state: "failed" }),
+      onReportProblem,
+    });
+    expect(ready.getByRole("button", { name: "报告问题" })).toBeTruthy();
+    expect(ready.getByRole("button", { name: "报告这个问题" })).toBeTruthy();
+    cleanup();
+
+    const notReady = renderConsole({
+      runtime: makeRuntime({ state: "failed" }),
+      aiReady: false,
+      onReportProblem,
+    });
+    expect(notReady.queryByRole("button", { name: "报告问题" })).toBeNull();
+    expect(notReady.queryByRole("button", { name: "报告这个问题" })).toBeNull();
+  });
+
+  it("14 已连接但不通时，报告入口出现在原故障卡位置", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-12T10:00:00Z"));
+    const onReportProblem = vi.fn();
+    const r = renderConsole({
+      runtime: makeRuntime({
+        state: "running",
+        health: {
+          contract_version: CONTRACT_VERSION,
+          process: true,
+          clash_api: true,
+          data_plane: false,
+          exit_ip: null,
+          consecutive_failures: 2,
+          checked_at: new Date().toISOString(),
+        } as RuntimeView["health"],
+      }),
+      onReportProblem,
+    });
+
+    expect(r.getByRole("button", { name: "报告这个问题" })).toBeTruthy();
+    expect(r.container.querySelector(".card")).toBeNull();
+    fireEvent.click(r.getByRole("button", { name: "报告这个问题" }));
+    expect(onReportProblem).toHaveBeenCalledTimes(1);
   });
 
   it("6 断开瞬间：回到未连接读数行，不残留流量与计时器", () => {

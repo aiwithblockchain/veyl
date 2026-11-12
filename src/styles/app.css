@@ -201,6 +201,17 @@ pre {
   min-height: 0;
 }
 
+/* 问题报告会话的隐私披露：界面常驻，不经模型，不随消息滚动。 */
+.chat__disclosure {
+  flex: none;
+  margin: 12px 16px 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--hair-strong);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-3);
+}
+
 .chat__scroll {
   flex: 1;
   overflow-y: auto;
@@ -435,6 +446,19 @@ pre {
   color: var(--text-dim);
 }
 
+/* 摘要行与报告动作同行：折叠时也能直接点。 */
+.tool-line__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tool-line__head .tool-line__row {
+  width: auto;
+  flex: 1;
+  min-width: 0;
+}
+
 .tool-line__row:hover:not(:disabled) {
   background: var(--bg-hover);
 }
@@ -560,6 +584,18 @@ pre {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.tool-line__actions--header {
+  flex: none;
+  flex-wrap: nowrap;
+}
+
+.tool-line__hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
 }
 
 .tool-line__tech {
@@ -1237,6 +1273,20 @@ body[data-resizing] {
   font-size: 12px;
   line-height: 1.6;
   color: var(--ink-3);
+}
+
+.settings-hint {
+  margin: 2px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+.settings-checkbox {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--ink);
 }
 
 .settings-subhead {
@@ -3744,6 +3794,23 @@ body[data-resizing] {
   color: var(--amber);
 }
 
+/* 报告入口在卡外：卡里不放按钮（middle-area-local-rules §4.3.4）。 */
+.issue-report-link {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 13px;
+  line-height: 1.5;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.issue-report-link:hover {
+  color: var(--ink);
+}
+
 .proxy__row {
   display: flex;
   align-items: center;
@@ -4032,6 +4099,13 @@ body[data-resizing] {
 
 .console__dock .node-card {
   margin-top: 0;
+}
+
+/* 原型：AI 专属的报告入口，贴在节点卡上方、右对齐。 */
+.console__report {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
 }
 
 .node-card__select {

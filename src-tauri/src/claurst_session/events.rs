@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::agent::app_handle;
 use crate::tools::{AivpnError, Display, NextAction};
 
-pub const CONTRACT_VERSION: &str = "2.10.0";
+pub const CONTRACT_VERSION: &str = "2.11.0";
 
 pub const EV_MESSAGE_CHUNK: &str = "message-chunk";
 pub const EV_THINKING_CHUNK: &str = "thinking-chunk";
@@ -208,7 +208,7 @@ fn truncate_result(text: &str) -> (String, bool) {    if text.len() <= RESULT_LI
 #[cfg(test)]
 mod display_projection_tests {
     use super::*;
-    use crate::tools::Changed;
+    use crate::tools::{Changed, DisplayAction};
 
     fn payload(display: Option<Display>) -> Value {
         let emitter = SessionEmitter::new("req_1", "msg_1");
@@ -240,6 +240,38 @@ mod display_projection_tests {
     fn missing_display_is_null() {
         let payload = payload(None);
         assert_eq!(payload["display"], Value::Null);
+    }
+
+    /// `display.actions`（2.11.0）：只有两个 kind，只带不透明的 report_id，不带路径。
+    #[test]
+    fn report_actions_carry_only_the_report_id() {
+        let display = Display::new("问题报告已生成", Changed::None).with_actions(vec![
+            DisplayAction::RevealReportDir {
+                report_id: "rpt-20261112-153012-a1b2c3".into(),
+            },
+            DisplayAction::ComposeReportMail {
+                report_id: "rpt-20261112-153012-a1b2c3".into(),
+            },
+        ]);
+        let payload = payload(Some(display));
+        let actions = payload["display"]["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0]["kind"], json!("reveal_report_dir"));
+        assert_eq!(actions[1]["kind"], json!("compose_report_mail"));
+        assert_eq!(actions[0]["report_id"], json!("rpt-20261112-153012-a1b2c3"));
+        assert!(
+            !payload["display"]["actions"].to_string().contains('/'),
+            "动作里不能出现路径：{}",
+            payload["display"]["actions"]
+        );
+    }
+
+    /// 没有动作时事件形状与旧版一致（不出现 actions 字段）。
+    #[test]
+    fn displays_without_actions_keep_the_old_shape() {
+        let display = Display::new("已读取配置列表", Changed::None);
+        let payload = payload(Some(display));
+        assert!(payload["display"].get("actions").is_none());
     }
 
     /// 卡片数据与给模型的 result 是两条线，前者不能带出指令文本。

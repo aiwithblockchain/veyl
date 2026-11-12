@@ -41,6 +41,8 @@ export interface StoredChatMessage {
   role: string;
   content: string;
   created_at: string;
+  /** 后端若带回该条消息关联的工具，用它判断会话类型；没有就是 undefined。 */
+  tool?: { tool?: string } | null;
 }
 
 export interface ChatHistory {
@@ -65,6 +67,21 @@ export interface ImportSeedResult {
   imported: number;
   skipped: NodeImportSkipped[];
   nodes: NodeSummary[];
+}
+
+/** `issue_report_reveal` / `issue_report_mail` 的返回（commands.md §7.12）。 */
+export interface ReportActionData {
+  opened: boolean;
+  method: "reveal" | "mail_client" | "copy_only";
+  report_dir: string;
+  body_chars: number;
+  /** 仅 copy_only 返回：邮件正文，供界面「复制正文」兜底。 */
+  body?: string | null;
+}
+
+/** `issue_report_preference`：不传参数是读取，传参数是写入并回显。 */
+export interface IssueReportPreference {
+  includeDomains: boolean;
 }
 
 export interface ConfigListData {
@@ -495,6 +512,12 @@ export interface AgentBridge {
   tunHelperRestart(): Promise<TunHelperRestartResult>;
   /** 用系统文件管理器定位日志文件。 */
   openLogDir(): Promise<void>;
+  /** 在文件管理器中显示问题报告目录；只认 Host 登记过的 reportId。 */
+  issueReportReveal(reportId: string): Promise<ReportActionData>;
+  /** 调起系统邮件客户端并预填收件人、标题、正文；不发送。 */
+  issueReportMail(reportId: string): Promise<ReportActionData>;
+  /** 报告是否包含完整域名；这是脱敏宽松度的唯一入口。 */
+  issueReportPreference(includeDomains?: boolean): Promise<IssueReportPreference>;
   /** 用系统默认浏览器打开链接。tauri 侧等 Host 接 opener 后实现。 */
   openExternal(url: string): Promise<void>;
   /** 重启后恢复会话：不传 sessionId 时取最近一个会话。 */

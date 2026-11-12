@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ToolCall } from "../state/chatStore";
 import { ToolCallCard } from "./ToolCallCard";
@@ -219,5 +219,100 @@ describe("ToolCallCard：失败", () => {
     fireEvent.click(screen.getByRole("button", { name: /没能保存配置/ }));
     expect(screen.getByText("不确定，诊断日志里有记录")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "复制诊断信息" })).toBeNull();
+  });
+});
+
+describe("ToolCallCard：display.actions", () => {
+  const reportCall = () =>
+    call({
+      tool: "IssueReport",
+      display: {
+        text: "报告已生成",
+        facts: [],
+        changed: "none",
+        actions: [
+          { kind: "reveal_report_dir", reportId: "rpt-1" },
+          { kind: "compose_report_mail", reportId: "rpt-1" },
+        ],
+      },
+    });
+
+  it("两个按钮在折叠态就露出，点击直接交给调用方", async () => {
+    const onDisplayAction = vi.fn(async () => ({}));
+    const { container } = render(
+      <ToolCallCard
+        call={reportCall()}
+        onNextAction={vi.fn()}
+        onDisplayAction={onDisplayAction}
+      />,
+    );
+
+    const reveal = screen.getByRole("button", { name: "在文件夹中显示" });
+    expect(reveal.closest(".tool-line__head")).not.toBeNull();
+    expect(container.querySelector(".tool-line__body")).toBeNull();
+
+    fireEvent.click(reveal);
+    await waitFor(() =>
+      expect(onDisplayAction).toHaveBeenCalledWith({
+        kind: "reveal_report_dir",
+        reportId: "rpt-1",
+      }),
+    );
+    expect(screen.getByRole("button", { name: "打开发送邮件" })).toBeTruthy();
+  });
+
+  it("动作失败时就地提示，只调用一次", async () => {
+    const onDisplayAction = vi.fn(async () => ({
+      message: "没找到这个报告，可能已被删除；请重新生成一次。",
+    }));
+    render(
+      <ToolCallCard
+        call={reportCall()}
+        onNextAction={vi.fn()}
+        onDisplayAction={onDisplayAction}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "打开发送邮件" }));
+
+    expect(
+      await screen.findByText("没找到这个报告，可能已被删除；请重新生成一次。"),
+    ).toBeTruthy();
+    expect(onDisplayAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("copy_only：提示 + 复制正文 + 打开文件夹，复制不重试命令", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const onDisplayAction = vi.fn(async () => ({
+      message: "没有打开邮件客户端。可以复制正文，或先打开报告文件夹。",
+      copyBody: "# 问题报告\n正文",
+    }));
+    render(
+      <ToolCallCard
+        call={reportCall()}
+        onNextAction={vi.fn()}
+        onDisplayAction={onDisplayAction}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "打开发送邮件" }));
+    expect(await screen.findByText(/没有打开邮件客户端/)).toBeTruthy();
+    expect(onDisplayAction).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "复制正文" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("# 问题报告\n正文"));
+    expect(await screen.findByText("正文已复制，可以粘贴到邮件里。")).toBeTruthy();
+    expect(onDisplayAction).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "在文件夹中显示" }));
+    await waitFor(() =>
+      expect(onDisplayAction).toHaveBeenLastCalledWith({
+        kind: "reveal_report_dir",
+        reportId: "rpt-1",
+      }),
+    );
   });
 });

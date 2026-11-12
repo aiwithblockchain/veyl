@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PendingQuestion } from "../agent/bridge";
 import type { Session } from "../state/chatStore";
+import { chatReducer, createInitialState } from "../state/chatStore";
 import { ChatView } from "./ChatView";
 
 afterEach(cleanup);
@@ -113,5 +114,73 @@ describe("ChatView 的提问卡片", () => {
 
     expect(screen.queryByText("要更新吗？")).toBeNull();
     expect(screen.getByRole("button", { name: "等待回复" })).toBeTruthy();
+  });
+});
+
+describe("问题报告会话的隐私披露", () => {
+  const DISCLOSURE =
+    "报告只保存在你的电脑上；生成时，脱敏后的日志会发给你配置的 AI 服务。要不要把它发出去，由你决定。";
+
+  it("报告会话顶部固定这句披露，逐字一致", () => {
+    const { container } = render(
+      <ChatView
+        session={session({ report: true })}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        onNextAction={vi.fn()}
+        hasKey
+        onConfigureKey={vi.fn()}
+      />,
+    );
+
+    const banner = container.querySelector(".chat__disclosure");
+    expect(banner?.textContent).toBe(DISCLOSURE);
+    // 在滚动区外：不随消息滚走。
+    expect(container.querySelector(".chat__scroll .chat__disclosure")).toBeNull();
+  });
+
+  it("普通会话没有这句披露", () => {
+    const { container } = render(
+      <ChatView
+        session={session()}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        onNextAction={vi.fn()}
+        hasKey
+        onConfigureKey={vi.fn()}
+      />,
+    );
+    expect(container.querySelector(".chat__disclosure")).toBeNull();
+  });
+
+  it("从历史恢复的报告会话同样显示披露", () => {
+    const state = chatReducer(createInitialState(), {
+      type: "hydrate_history",
+      history: {
+        sessions: [{ id: "s_rep", title: "问题报告", created_at: "2026-11-12T08:00:00.000Z" }],
+        activeSessionId: "s_rep",
+        messages: [
+          {
+            id: "m1",
+            role: "assistant",
+            content: "已收集现场材料",
+            created_at: "2026-11-12T08:00:01.000Z",
+            tool: { tool: "IssueReport" },
+          },
+        ],
+      },
+    });
+    const restored = state.sessions[0];
+    const { container } = render(
+      <ChatView
+        session={restored}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        onNextAction={vi.fn()}
+        hasKey
+        onConfigureKey={vi.fn()}
+      />,
+    );
+    expect(container.querySelector(".chat__disclosure")?.textContent).toBe(DISCLOSURE);
   });
 });

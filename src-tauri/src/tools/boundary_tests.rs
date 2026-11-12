@@ -322,6 +322,15 @@ impl VpnToolServices for FakeServices {
         self.rec.record("vpn_disconnect");
         Ok(self.data.clone())
     }
+    async fn issue_report(
+        &self,
+        _session_id: &str,
+        _input: crate::reports::IssueReportInput,
+    ) -> anyhow::Result<Value> {
+        self.rec.record("issue_report");
+        Ok(self.data.clone())
+    }
+
     async fn diag_run(&self, include_logs: bool) -> anyhow::Result<Value> {
         self.rec.record(format!("diag_run({include_logs})"));
         Ok(self.data.clone())
@@ -729,6 +738,7 @@ fn optional_string_params(schema: &Value) -> Vec<String> {
 fn base_input(name: &str) -> Option<Value> {
     let value = match name {
         "VpnConnect" | "RouteGet" | "RuntimeLogs" | "CatalogSearch" | "CategoryList" => json!({}),
+        "IssueReport" => json!({}),
         "CoreUpgrade" => json!({}),
         "RouteSetMode" => json!({ "mode": "proxy_all" }),
         "NodeImportUrl" => json!({ "url": "https://example.com/sub" }),
@@ -776,6 +786,41 @@ async fn valid_input_reaches_the_service_and_succeeds() {
             "{name} 应当把参数原样交给服务层"
         );
     }
+}
+
+/// 收集阶段也要带两个动作：AI 写报告失败时按钮仍可用。
+#[tokio::test]
+async fn issue_report_shows_actions_while_collecting() {
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "report_id": "rpt-1",
+        "report_dir": "~/Desktop/Veyl 问题报告/2026-11-12-1530",
+        "phase": "collected",
+        "files": [],
+        "redactions": {},
+        "ai_report": false
+    }));
+    let all = tools(svc);
+    let (is_error, env) = run(tool(&all, "IssueReport"), json!({})).await;
+    assert!(!is_error, "{env}");
+    // display 不在给模型的信封里，从进程内结果登记表取。
+    let outcome = crate::tools::envelope::take_outcome("boundary-test", "IssueReport")
+        .expect("工具结果应当已登记");
+    let actions = outcome.display.actions;
+    assert_eq!(actions.len(), 2);
+    match &actions[0] {
+        crate::tools::DisplayAction::RevealReportDir { report_id } => {
+            assert_eq!(report_id, "rpt-1")
+        }
+        other => panic!("第一个动作不对：{other:?}"),
+    }
+    match &actions[1] {
+        crate::tools::DisplayAction::ComposeReportMail { report_id } => {
+            assert_eq!(report_id, "rpt-1")
+        }
+        other => panic!("第二个动作不对：{other:?}"),
+    }
+    let rendered = serde_json::to_string(&actions).unwrap();
+    assert!(!rendered.contains('/'), "动作里不能带路径：{rendered}");
 }
 
 #[tokio::test]

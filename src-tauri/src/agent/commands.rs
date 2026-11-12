@@ -554,6 +554,47 @@ pub async fn node_import_file(
     import_nodes_from_file(state.services.as_ref(), &path, config_id).await
 }
 
+/// 仅 UI：读/写「问题报告是否包含完整域名」。
+///
+/// 省略参数 = 读取；传 `includeDomains` = 写入。不注册为 AI 工具：
+/// 脱敏开关属于用户，模型只能收窄、不能放宽。
+#[tauri::command]
+pub async fn issue_report_preference(
+    state: State<'_, Arc<AppState>>,
+    include_domains: Option<bool>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .issue_report_preference(include_domains)
+        .await
+        .map_err(error_value)
+}
+
+/// 仅 UI：在文件管理器里显示问题报告目录。
+///
+/// 只认本机登记过的 `report_id`（内存或各目录的 `.report-id`），
+/// **不接受路径参数**——通用「打开任意路径」的能力会变成模型可诱导的入口。
+#[tauri::command]
+pub async fn issue_report_reveal(report_id: String) -> Result<Value, Value> {
+    crate::reports::reveal(&report_id, &crate::reports::default_report_root())
+        .map_err(report_error_value)
+}
+
+/// 仅 UI：调起系统邮件客户端，预填收件人、标题、正文（不发送）。
+#[tauri::command]
+pub async fn issue_report_mail(report_id: String) -> Result<Value, Value> {
+    crate::reports::compose_mail(&report_id, &crate::reports::default_report_root())
+        .map_err(report_error_value)
+}
+
+fn report_error_value(error: crate::reports::ReportError) -> Value {
+    let details = error
+        .reason
+        .map(|reason| json!({ "reason": reason }))
+        .unwrap_or(Value::Null);
+    command_error(error.code, error.message, details)
+}
+
 /// 文件导入的核心，抽出来是为了能脱离 Tauri `State` 测。
 ///
 /// 读文件失败用契约 §4.1.2 的三个 reason；解析失败沿用文本导入的

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { NextAction } from "../agent/protocol";
 import type { ToolCall } from "../state/chatStore";
+import { copyText } from "../ui/clipboard";
 import {
   DURATION_THRESHOLD_MS,
   changedLabel,
@@ -9,16 +10,28 @@ import {
   shortDuration,
   toolCopy,
 } from "./toolDisplay";
+import type { ToolDisplayAction } from "./toolDisplay";
+
+/** 动作失败时由调用方给一句就地提示；成功返回空对象。 */
+export interface DisplayActionOutcome {
+  message?: string;
+  /** copy_only 兜底：邮件正文（契约 §7.12），用于「复制正文」。 */
+  copyBody?: string;
+}
 
 export function ToolCallCard({
   call,
   onNextAction,
+  onDisplayAction,
 }: {
   call: ToolCall;
   onNextAction: (action: NextAction) => void;
+  onDisplayAction?: (action: ToolDisplayAction) => Promise<DisplayActionOutcome>;
 }) {
   const [open, setOpen] = useState(false);
   const [techOpen, setTechOpen] = useState(false);
+  const [actionPending, setActionPending] = useState(false);
+  const [actionOutcome, setActionOutcome] = useState<DisplayActionOutcome | null>(null);
   const copy = toolCopy(call.tool);
   const failed = call.state === "error";
   const running = call.state === "running";
@@ -28,11 +41,17 @@ export function ToolCallCard({
     call.display?.facts?.length
       ? call.display.facts
       : factsFromArgs(call.argsPreview);
+  const actions = call.display?.actions ?? [];
   const hasTech =
     call.argsPreview !== undefined ||
     call.result !== undefined ||
     call.errorCode != null;
-  const hasBody = failed || facts.length > 0 || call.durationMs !== undefined || call.source === "ui" || hasTech;
+  const hasBody =
+    failed ||
+    facts.length > 0 ||
+    call.durationMs !== undefined ||
+    call.source === "ui" ||
+    hasTech;
   const showDuration =
     !running && call.durationMs !== undefined && call.durationMs >= DURATION_THRESHOLD_MS;
 
@@ -44,8 +63,51 @@ export function ToolCallCard({
   const changed = call.display?.changed ?? null;
   const nextAction = call.nextActions[0];
 
+  const runDisplayAction = async (action: ToolDisplayAction) => {
+    if (!onDisplayAction || actionPending) return;
+    setActionPending(true);
+    setActionOutcome(null);
+    try {
+      const outcome = await onDisplayAction(action);
+      setActionOutcome(outcome);
+    } catch {
+      setActionOutcome({ message: "没打开成功，再试一次。" });
+    } finally {
+      setActionPending(false);
+    }
+  };
+
+  const copyReportBody = async () => {
+    const body = actionOutcome?.copyBody;
+    if (!body) return;
+    const ok = await copyText(body);
+    setActionOutcome((previous) =>
+      previous
+        ? {
+            ...previous,
+            message: ok
+              ? "正文已复制，可以粘贴到邮件里。"
+              : "复制失败，可以到报告文件夹里手动复制。",
+          }
+        : previous,
+    );
+  };
+
+  const actionButton = (action: ToolDisplayAction) => (
+    <button
+      key={`${action.kind}-${action.reportId}`}
+      type="button"
+      className="chip chip--small"
+      disabled={!action.reportId || actionPending}
+      onClick={() => void runDisplayAction(action)}
+    >
+      {action.kind === "reveal_report_dir" ? "在文件夹中显示" : "打开发送邮件"}
+    </button>
+  );
+
   return (
     <div className={`tool-line tool-line--${call.state}`}>
+      <div className="tool-line__head">
       <button
         type="button"
         className="tool-line__row"
@@ -69,6 +131,29 @@ export function ToolCallCard({
           </span>
         ) : null}
       </button>
+      {actions.length > 0 ? (
+        <div className="tool-line__actions tool-line__actions--header">
+          {actions.map(actionButton)}
+        </div>
+      ) : null}
+      </div>
+
+      {actionOutcome?.message ? (
+        <p className="tool-line__hint" role="status">
+          {actionOutcome.message}
+        </p>
+      ) : null}
+      {actionOutcome?.copyBody ? (
+        <div className="tool-line__actions tool-line__actions--header">
+          <button
+            type="button"
+            className="chip chip--small"
+            onClick={() => void copyReportBody()}
+          >
+            复制正文
+          </button>
+        </div>
+      ) : null}
 
       {open && hasBody ? (
         <div className="tool-line__body">
@@ -158,9 +243,11 @@ export function ToolCallCard({
 export function ToolCallGroup({
   calls,
   onNextAction,
+  onDisplayAction,
 }: {
   calls: ToolCall[];
   onNextAction: (action: NextAction) => void;
+  onDisplayAction?: (action: ToolDisplayAction) => Promise<DisplayActionOutcome>;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -183,7 +270,12 @@ export function ToolCallGroup({
       {open ? (
         <div className="tool-group__body">
           {calls.map((call) => (
-            <ToolCallCard key={call.id} call={call} onNextAction={onNextAction} />
+            <ToolCallCard
+              key={call.id}
+              call={call}
+              onNextAction={onNextAction}
+              onDisplayAction={onDisplayAction}
+            />
           ))}
         </div>
       ) : null}

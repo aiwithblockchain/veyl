@@ -13,10 +13,19 @@ export interface ToolFact {
   value: string;
 }
 
+/** events.md 2.11.0 的两个动作；未识别的 kind 直接丢弃。 */
+export type DisplayActionKind = "reveal_report_dir" | "compose_report_mail";
+
+export interface ToolDisplayAction {
+  kind: DisplayActionKind;
+  reportId: string;
+}
+
 export interface ToolDisplayInfo {
   text: string | null;
   facts: ToolFact[];
   changed: ChangedState | null;
+  actions?: ToolDisplayAction[];
 }
 
 export interface ToolCopy {
@@ -356,6 +365,13 @@ export const TOOL_COPY: Record<string, ToolCopy> = {
     advice: "旧数据继续用，可以稍后再试。",
     readOnly: false,
   },
+  IssueReport: {
+    running: "正在整理问题报告",
+    done: "问题报告已生成",
+    failed: "问题报告没生成",
+    advice: "可以再试一次；还是不行就先把日志留着。",
+    readOnly: false,
+  },
 };
 
 export const TOOL_NAMES = Object.keys(TOOL_COPY);
@@ -420,6 +436,16 @@ function readFact(raw: unknown): ToolFact | null {
   return { label, value };
 }
 
+function readDisplayAction(raw: unknown): ToolDisplayAction | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const kind = record.kind;
+  const reportId = readText(record.report_id);
+  if (kind !== "reveal_report_dir" && kind !== "compose_report_mail") return null;
+  if (!reportId) return null;
+  return { kind, reportId };
+}
+
 /** 后端 `display` 缺失或字段不全时返回 null，界面静默回落到静态表。 */
 export function readToolDisplay(raw: unknown): ToolDisplayInfo | null {
   if (!raw || typeof raw !== "object") return null;
@@ -430,10 +456,16 @@ export function readToolDisplay(raw: unknown): ToolDisplayInfo | null {
         .filter((fact): fact is ToolFact => fact !== null)
         .slice(0, 4)
     : [];
+  const actions = Array.isArray(record.actions)
+    ? record.actions
+        .map(readDisplayAction)
+        .filter((action): action is ToolDisplayAction => action !== null)
+        .slice(0, 2)
+    : [];
   const text = readText(record.text);
   const changed = readChanged(record.changed);
-  if (!text && facts.length === 0 && !changed) return null;
-  return { text, facts, changed };
+  if (!text && facts.length === 0 && !changed && actions.length === 0) return null;
+  return { text, facts, changed, actions };
 }
 
 const FACT_KEYS: Array<{

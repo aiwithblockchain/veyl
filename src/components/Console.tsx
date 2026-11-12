@@ -32,6 +32,10 @@ interface Props {
   onStop: () => void;
   /** 已连接但不通时的「重新连接」：先停再连。 */
   onReconnect: () => void;
+  /** 报告问题入口：与故障卡链接、设置行走同一个动作。 */
+  onReportProblem?: () => void;
+  /** 正在开会话发开场：期间禁用所有报告入口，防止连点。 */
+  reportBusy?: boolean;
   onSwitchNode: (nodeId: string) => Promise<{ ok: boolean; message?: string }>;
   onProbe: (nodeId: string) => Promise<ProbeResult>;
   nodeProbes: NodeProbesController;
@@ -99,6 +103,8 @@ export function Console({
   onStart,
   onStop,
   onReconnect,
+  onReportProblem,
+  reportBusy = false,
   onSwitchNode,
   onProbe,
   nodeProbes,
@@ -598,7 +604,21 @@ export function Console({
             blocks={blocks}
             onUseSeedNodes={onNewConfig}
             onUseOwnNodes={onImportNodes}
+            onReportProblem={aiReady ? onReportProblem : undefined}
+            reportBusy={reportBusy}
           />
+
+          {/* 连着但不通时没有故障卡：入口放在同一位置，不另造卡片。 */}
+          {noTraffic && aiReady && onReportProblem ? (
+            <button
+              type="button"
+              className="issue-report-link"
+              disabled={reportBusy}
+              onClick={onReportProblem}
+            >
+              报告这个问题
+            </button>
+          ) : null}
 
           {showStrip ? (
             <RateStrip samples={rateSamples} warn={degraded} current={rates} />
@@ -622,6 +642,18 @@ export function Console({
                   : undefined
               }
             />
+            {aiReady ? (
+              <div className="console__report">
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  disabled={!onReportProblem || reportBusy}
+                  onClick={onReportProblem}
+                >
+                  报告问题
+                </button>
+              </div>
+            ) : null}
             <footer className="node-card">
               {config.nodes.length > 0 ? (
                 <span className="node-card__label">当前节点</span>

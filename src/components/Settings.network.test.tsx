@@ -58,6 +58,9 @@ function makeBridge(
     nodeImportUrl: vi.fn(async () => ({ imported: 2, skipped: [], nodes: [] })),
     nodeImportFile: vi.fn(async () => ({ imported: 1, skipped: [], nodes: [] })),
     pickNodeFile: vi.fn(async () => null),
+    issueReportPreference: vi.fn(async (includeDomains?: boolean) => ({
+      includeDomains: includeDomains ?? false,
+    })),
   } as unknown as AgentBridge;
 }
 
@@ -77,6 +80,7 @@ function renderSettings(
     onNewConfig,
     onAskAi,
     onNotice,
+    onReportProblem,
   }: {
     connectMode?: "tun" | "system_proxy" | null;
     routingMode?: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -87,6 +91,7 @@ function renderSettings(
     onNewConfig?: () => void;
     onAskAi?: (text: string, section: string) => void;
     onNotice?: (notice: { level: "info" | "error"; text: string }) => void;
+    onReportProblem?: () => void;
   } = {},
 ) {
   return render(
@@ -106,6 +111,7 @@ function renderSettings(
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}
       onAskAi={onAskAi ?? (() => {})}
+      onReportProblem={onReportProblem}
       initialSection={section}
     />,
   );
@@ -549,5 +555,43 @@ describe("文案扫描", () => {
       expect(text).not.toMatch(/duplicate|malformed|unsupported/);
       cleanup();
     }
+  });
+});
+
+describe("问题报告偏好", () => {
+  it("默认关闭；勾选后写一次命令", async () => {
+    const bridge = makeBridge();
+    renderSettings(bridge, { section: "advanced", onReportProblem: () => {} });
+
+    const box = (await screen.findByRole("checkbox", {
+      name: "报告中包含我访问过的网站域名",
+    })) as HTMLInputElement;
+    await waitFor(() => expect(bridge.issueReportPreference).toHaveBeenCalledWith());
+    expect(box.checked).toBe(false);
+
+    fireEvent.click(box);
+    await waitFor(() =>
+      expect(bridge.issueReportPreference).toHaveBeenCalledWith(true),
+    );
+    expect(box.checked).toBe(true);
+  });
+
+  it("写入失败时复选框回滚并就地提示", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { issueReportPreference: ReturnType<typeof vi.fn> })
+      .issueReportPreference = vi.fn(async (includeDomains?: boolean) => {
+      if (includeDomains === undefined) return { includeDomains: false };
+      throw { code: "INTERNAL", message: "磁盘只读" };
+    });
+    renderSettings(bridge, { section: "advanced", onReportProblem: () => {} });
+
+    const box = (await screen.findByRole("checkbox", {
+      name: "报告中包含我访问过的网站域名",
+    })) as HTMLInputElement;
+    await waitFor(() => expect(bridge.issueReportPreference).toHaveBeenCalledWith());
+
+    fireEvent.click(box);
+    expect(await screen.findByText("没保存成功，设置没有改。")).toBeTruthy();
+    expect(box.checked).toBe(false);
   });
 });

@@ -10,6 +10,7 @@ import type {
   DeepSeekKeyState,
   DefaultProfileStatus,
   ImportSeedResult,
+  IssueReportPreference,
   NodeProbeAllData,
   NodeProbeResult,
   NodeProbeSnapshotData,
@@ -23,6 +24,7 @@ import type {
   NetRepairResult,
   NetworkForceResetResult,
   RenamedSession,
+  ReportActionData,
   TunHelperInfo,
   TunHelperRestartResult,
   TunHelperState,
@@ -72,6 +74,10 @@ const HELPER_STATES: TunHelperState[] = [
 export const MOCK_EXIT_IP = "203.0.113.7";
 /** 直连出口：与代理出口不同，面板才能看出代理真的生效。 */
 export const MOCK_DIRECT_IP = "198.51.100.9";
+
+/** mock 的问题报告目录与 id：让会话里的两个按钮有契约里的形状。 */
+export const MOCK_REPORT_ID = "rpt-20261112-153012-a1b2c3";
+export const MOCK_REPORT_DIR = "/Users/me/Desktop/Veyl 问题报告/2026-11-12-1530";
 
 function mockNodeId(): string {
   return `node_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -138,6 +144,10 @@ export class MockAgentBridge implements AgentBridge {
 
   private listeners = new Set<(event: AgentEvent) => void>();
   private cancelled = new Set<string>();
+  /** 等用户回答的「问题报告」会话：下一条用户消息走收集 + 写入。 */
+  private reportSessions = new Set<string>();
+  /** 报告是否包含完整域名；mock 只存在内存里，默认关闭。 */
+  private reportIncludeDomains = false;
   private activeRequests = new Set<string>();
   private activeBySession = new Map<string, string>();
   private sessionByRequest = new Map<string, string>();
@@ -722,6 +732,44 @@ export class MockAgentBridge implements AgentBridge {
     // 浏览器通道没有文件管理器；mock 里视为成功。
   }
 
+  async issueReportReveal(_reportId: string): Promise<ReportActionData> {
+    await sleep(120);
+    // 浏览器通道不真的打开 Finder，只回契约形状。
+    return {
+      opened: true,
+      method: "reveal",
+      report_dir: MOCK_REPORT_DIR,
+      body_chars: 0,
+    };
+  }
+
+  async issueReportPreference(includeDomains?: boolean): Promise<IssueReportPreference> {
+    // 浏览器通道只用内存变量，刷新即回到默认关闭。
+    if (includeDomains !== undefined) this.reportIncludeDomains = includeDomains;
+    return { includeDomains: this.reportIncludeDomains };
+  }
+
+  async issueReportMail(_reportId: string): Promise<ReportActionData> {
+    await sleep(120);
+    // 演示开关：模拟「没有邮件客户端」，返回可复制的正文。
+    if (mockFlag("veyl.mock.reportNoMail") === "1") {
+      const body = "# 问题报告\n\n（mock 正文，仅用于演示「复制正文」。）";
+      return {
+        opened: false,
+        method: "copy_only",
+        report_dir: MOCK_REPORT_DIR,
+        body_chars: body.length,
+        body,
+      };
+    }
+    return {
+      opened: true,
+      method: "mail_client",
+      report_dir: MOCK_REPORT_DIR,
+      body_chars: 1_860,
+    };
+  }
+
   async openExternal(_url: string): Promise<void> {
     // 浏览器通道没有系统浏览器调用能力；mock 里视为成功。
   }
@@ -1027,6 +1075,15 @@ export class MockAgentBridge implements AgentBridge {
   }
 
   private async run(sessionId: string, requestId: string, assistantId: string, text: string) {
+    // 问题报告：开场问两句，用户一回答就走收集 + 写入两阶段。
+    if (this.reportSessions.has(sessionId)) {
+      this.reportSessions.delete(sessionId);
+      return this.issueReportCollectFlow(requestId, assistantId);
+    }
+    if (text.includes("问题报告") || text.includes("IssueReport")) {
+      this.reportSessions.add(sessionId);
+      return this.issueReportOpeningFlow(requestId, assistantId);
+    }
     if (text.includes("第一次用")) return this.firstRunFlow(sessionId, requestId, assistantId);
     if (text.includes("断开")) return this.disconnectFlow(requestId, assistantId);
     if (text.includes("模拟失败") || text.includes("连不上")) {
@@ -1146,6 +1203,70 @@ export class MockAgentBridge implements AgentBridge {
     });
 
     const reply = `已连接到「东京 01」，出口 IP ${MOCK_EXIT_IP}，系统代理已生效。要换节点随时说。`;
+    await this.type(requestId, assistantId, reply);
+    this.finish(requestId, assistantId, "success", reply);
+  }
+
+  // 演示「问题报告」：第一句逐字披露，再问两句，不调用工具。
+  private async issueReportOpeningFlow(requestId: string, assistantId: string) {
+    const reply =
+      "报告只保存在你的电脑上；生成时，脱敏后的日志会发给你配置的 AI 服务。要不要把它发出去，由你决定。\n我会把现在的现场情况整理成一个报告文件夹，放在你的桌面上。先问两句：你遇到了什么问题？是刚连上就有，还是用着用着断的？";
+    await this.type(requestId, assistantId, reply);
+    this.finish(requestId, assistantId, "success", reply);
+  }
+
+  // 两阶段：先收集材料，再写入报告；写入阶段的 display 带两个动作。
+  private async issueReportCollectFlow(requestId: string, assistantId: string) {
+    this.status(requestId, assistantId, "收集现场材料", "preparing_tool");
+    if (
+      !(await this.tool(
+        requestId,
+        assistantId,
+        "IssueReport",
+        "收集现场材料",
+        900,
+        "已收集 2 份日志与现场快照，并写入报告目录。",
+        {
+          permissionLevel: "write",
+          argsPreview: { log_lines: 200 },
+          display: {
+            text: "已收集现场材料",
+            changed: "none",
+            facts: ["日志 2 份", "已脱敏"],
+          },
+        },
+      ))
+    ) {
+      return this.finish(requestId, assistantId, "cancelled", null);
+    }
+
+    this.status(requestId, assistantId, "写报告", "preparing_tool");
+    if (
+      !(await this.tool(
+        requestId,
+        assistantId,
+        "IssueReport",
+        "写入报告",
+        1200,
+        "报告已写入报告目录。",
+        {
+          permissionLevel: "write",
+          display: {
+            text: "报告已生成",
+            changed: "none",
+            actions: [
+              { kind: "reveal_report_dir", report_id: MOCK_REPORT_ID },
+              { kind: "compose_report_mail", report_id: MOCK_REPORT_ID },
+            ],
+          },
+        },
+      ))
+    ) {
+      return this.finish(requestId, assistantId, "cancelled", null);
+    }
+
+    const reply =
+      "报告已经整理好，放在桌面的「Veyl 问题报告」文件夹里了。要不要发给我们由你决定；发送前可以先打开文件夹看看内容。";
     await this.type(requestId, assistantId, reply);
     this.finish(requestId, assistantId, "success", reply);
   }

@@ -16,6 +16,7 @@ pub mod netcfg;
 pub mod nodes;
 pub mod proxy;
 pub mod public_http;
+pub mod reports;
 pub mod runtime;
 pub mod rules;
 pub mod secrets;
@@ -328,6 +329,9 @@ pub fn run() {
                 agent::commands::node_import_url,
                 agent::commands::node_import_text,
                 agent::commands::node_import_file,
+                agent::commands::issue_report_preference,
+                agent::commands::issue_report_reveal,
+                agent::commands::issue_report_mail,
                 agent::commands::node_create,
                 agent::commands::node_switch,
                 agent::commands::node_probe,
@@ -389,6 +393,9 @@ pub fn run() {
                 agent::commands::node_import_url,
                 agent::commands::node_import_text,
                 agent::commands::node_import_file,
+                agent::commands::issue_report_preference,
+                agent::commands::issue_report_reveal,
+                agent::commands::issue_report_mail,
                 agent::commands::node_create,
                 agent::commands::node_switch,
                 agent::commands::node_probe,

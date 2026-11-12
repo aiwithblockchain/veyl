@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { PendingQuestion } from "../agent/bridge";
 import type { NextAction } from "../agent/protocol";
 import type { Session } from "../state/chatStore";
+import type { DisplayActionOutcome } from "./ToolCallCard";
+import type { ToolDisplayAction } from "./toolDisplay";
 import { useFocusTrap } from "../ui/focus";
 import { AskQuestionCard } from "./AskQuestionCard";
 import { ChatView } from "./ChatView";
@@ -49,6 +51,7 @@ interface Props {
   onEmptySend: (text: string) => void | boolean | Promise<void | boolean>;
   onStop: () => void;
   onNextAction: (action: NextAction) => void;
+  onDisplayAction?: (action: ToolDisplayAction) => Promise<DisplayActionOutcome>;
   onOpenSettings: () => void;
   onConfigureKey: () => void;
   /** 收起助手；宽屏停靠时收成右边缘 tab。 */
@@ -88,6 +91,7 @@ export function AiPanel({
   onEmptySend,
   onStop,
   onNextAction,
+  onDisplayAction,
   onOpenSettings,
   onConfigureKey,
   onCollapse,
@@ -336,6 +340,7 @@ export function AiPanel({
             onQuestionExpired={onQuestionExpired}
             onStop={onStop}
             onNextAction={onNextAction}
+            onDisplayAction={onDisplayAction}
             hasKey={aiReady}
             onConfigureKey={onConfigureKey}
             focusSignal={focusSignal}

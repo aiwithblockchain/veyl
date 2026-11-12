@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { copyText } from "../ui/clipboard";
 import type { MiddleBlock } from "../ui/middleArea";
 import { DNS_NOTE_TEXT } from "../ui/middleArea";
@@ -203,10 +203,15 @@ export function MiddleArea({
   blocks,
   onUseSeedNodes,
   onUseOwnNodes,
+  onReportProblem,
+  reportBusy = false,
 }: {
   blocks: MiddleBlock[];
   onUseSeedNodes?: () => void;
   onUseOwnNodes?: () => void;
+  /** 卡里不放按钮：报告入口挂在卡片外面、紧跟其下。 */
+  onReportProblem?: () => void;
+  reportBusy?: boolean;
 }) {
   if (blocks.length === 0) return null;
   return (
@@ -251,7 +256,21 @@ export function MiddleArea({
         if (block.kind === "update_hint") {
           return <UpdateHint key={`update_hint_${index}`} />;
         }
-        return <IssueCard key={`issue_${index}`} block={block} />;
+        return (
+          <Fragment key={`issue_${index}`}>
+            <IssueCard block={block} />
+            {onReportProblem ? (
+              <button
+                type="button"
+                className="issue-report-link"
+                disabled={reportBusy}
+                onClick={onReportProblem}
+              >
+                报告这个问题
+              </button>
+            ) : null}
+          </Fragment>
+        );
       })}
     </div>
   );

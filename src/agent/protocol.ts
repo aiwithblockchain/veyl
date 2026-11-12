@@ -1,12 +1,12 @@
 /**
  * 事件与 UI → Host 调用的前端契约。
  *
- * 唯一来源：`docs/contracts/events.md` v2.10.0。
+ * 唯一来源：`docs/contracts/events.md` v2.11.0。
  * 本文件是事件名常量的唯一来源——组件、store、bridge 只能引用
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.10.0" as const;
+export const CONTRACT_VERSION = "2.11.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -144,11 +144,18 @@ export interface ToolCallStartPayload {
   emitted_at: string;
 }
 
+/** events.md 2.11.0：Host 填的可直接点击动作，只带不透明 id，不带路径。 */
+export interface DisplayActionPayload {
+  kind: "reveal_report_dir" | "compose_report_mail" | string;
+  report_id: string;
+}
+
 /** 面向用户的完成/失败文案；缺失时前端回落到本地静态表。 */
 export interface ToolDisplayPayload {
   text?: string | null;
   facts?: string[] | null;
   changed?: "none" | "restored" | "unknown" | null;
+  actions?: DisplayActionPayload[] | null;
 }
 
 export interface ToolCallEndPayload {

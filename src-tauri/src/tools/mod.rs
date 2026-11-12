@@ -11,6 +11,7 @@ pub mod deepseek;
 pub mod diag;
 pub mod display;
 pub mod envelope;
+pub mod issue_report;
 pub mod job;
 pub mod net;
 pub mod policy;
@@ -30,7 +31,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::Value;
 
-pub use display::{Changed, Display};
+pub use display::{Changed, Display, DisplayAction};
 pub use envelope::{AivpnError, NextAction, ToolOutcome};
 pub use services::{
     CatalogQuery, ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, NotWiredServices,
@@ -173,6 +174,7 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(vpn::VpnConnectTool::new(Arc::clone(&services))),
         Box::new(vpn::VpnDisconnectTool::new(Arc::clone(&services))),
         Box::new(diag::DiagRunTool::new(Arc::clone(&services))),
+        Box::new(issue_report::IssueReportTool::new(Arc::clone(&services))),
         Box::new(deepseek::DeepseekSetupKeyTool),
         Box::new(deepseek::DeepseekSaveKeyTool::new(Arc::clone(&services))),
         Box::new(job::JobGetTool::new(Arc::clone(&services))),

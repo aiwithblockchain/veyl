@@ -14,6 +14,7 @@ import type {
   DeepSeekKeyState,
   DefaultProfileStatus,
   ImportSeedResult,
+  IssueReportPreference,
   LlmProvider,
   LlmProviderInput,
   LlmProviderTestResult,
@@ -28,6 +29,7 @@ import type {
   NodeProbeSnapshotData,
   NodeSwitchResult,
   PendingQuestion,
+  ReportActionData,
   ProxyPortSaveResult,
   ProxyPortSettings,
   RenamedSession,
@@ -328,6 +330,30 @@ function normalizeNodeImport(raw: {
     imported: typeof raw.imported === "number" ? raw.imported : nodes.length,
     skipped,
     nodes,
+  };
+}
+
+const REPORT_ACTION_METHODS = ["reveal", "mail_client", "copy_only"] as const;
+
+/** 历史消息可能带 `{ tool }`（或裸工具名）；读不出来就当没有。 */
+function readStoredTool(raw: unknown): { tool: string } | null {
+  if (typeof raw === "string") return raw ? { tool: raw } : null;
+  if (!raw || typeof raw !== "object") return null;
+  const name = (raw as { tool?: unknown }).tool;
+  return typeof name === "string" && name ? { tool: name } : null;
+}
+
+function normalizeReportAction(
+  raw: Partial<ReportActionData>,
+  fallback: ReportActionData["method"],
+): ReportActionData {
+  const method = REPORT_ACTION_METHODS.find((item) => item === raw.method) ?? fallback;
+  return {
+    opened: raw.opened === true,
+    method,
+    report_dir: typeof raw.report_dir === "string" ? raw.report_dir : "",
+    body_chars: typeof raw.body_chars === "number" ? raw.body_chars : 0,
+    body: typeof raw.body === "string" ? raw.body : null,
   };
 }
 
@@ -798,6 +824,24 @@ export class TauriAgentBridge implements AgentBridge {
     await call("open_log_dir");
   }
 
+  async issueReportReveal(reportId: string): Promise<ReportActionData> {
+    const raw = await call<Partial<ReportActionData>>("issue_report_reveal", { reportId });
+    return normalizeReportAction(raw, "reveal");
+  }
+
+  async issueReportMail(reportId: string): Promise<ReportActionData> {
+    const raw = await call<Partial<ReportActionData>>("issue_report_mail", { reportId });
+    return normalizeReportAction(raw, "mail_client");
+  }
+
+  async issueReportPreference(includeDomains?: boolean): Promise<IssueReportPreference> {
+    const raw = await call<{ includeDomains?: unknown }>(
+      "issue_report_preference",
+      includeDomains === undefined ? {} : { includeDomains },
+    );
+    return { includeDomains: raw?.includeDomains === true };
+  }
+
   async openExternal(url: string): Promise<void> {
     // Host 已接 opener；命令本身只允许 DeepSeek 平台域名，前端不做白名单判断。
     await call("open_external", { url });
@@ -832,7 +876,10 @@ export class TauriAgentBridge implements AgentBridge {
       return {
         sessions: raw.sessions ?? [],
         activeSessionId: raw.active_session_id ?? null,
-        messages: raw.messages ?? [],
+        messages: (raw.messages ?? []).map((message) => ({
+          ...message,
+          tool: readStoredTool((message as { tool?: unknown }).tool),
+        })),
       };
     } catch {
       // 读历史失败不该拦住应用启动，降级成「没有历史」。

@@ -6,14 +6,22 @@ import type { ChatMessage, TimelineItem, ToolCall } from "../state/chatStore";
 import { Markdown } from "./Markdown";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallCard, ToolCallGroup } from "./ToolCallCard";
+import type { DisplayActionOutcome } from "./ToolCallCard";
+import type { ToolDisplayAction } from "./toolDisplay";
 
 interface Props {
   message: ChatMessage;
   toolCalls: Record<string, ToolCall>;
   onNextAction: (action: NextAction) => void;
+  onDisplayAction?: (action: ToolDisplayAction) => Promise<DisplayActionOutcome>;
 }
 
-export function MessageItem({ message, toolCalls, onNextAction }: Props) {
+export function MessageItem({
+  message,
+  toolCalls,
+  onNextAction,
+  onDisplayAction,
+}: Props) {
   if (message.role === "user") {
     return (
       <div className="msg msg--user">
@@ -49,7 +57,7 @@ export function MessageItem({ message, toolCalls, onNextAction }: Props) {
       </div>
 
       <div className="msg__items">
-        {renderTimeline(message, toolCalls, onNextAction)}
+        {renderTimeline(message, toolCalls, onNextAction, onDisplayAction)}
       </div>
 
       {!message.streaming ? <CopyAnswerButton text={bodyText} /> : null}
@@ -67,6 +75,7 @@ function renderTimeline(
   message: Extract<ChatMessage, { role: "assistant" }>,
   toolCalls: Record<string, ToolCall>,
   onNextAction: (action: NextAction) => void,
+  onDisplayAction?: (action: ToolDisplayAction) => Promise<DisplayActionOutcome>,
 ): ReactNode[] {
   const nodes: ReactNode[] = [];
   let run: ToolCall[] = [];
@@ -75,12 +84,22 @@ function renderTimeline(
   const flushRun = () => {
     if (run.length >= 3) {
       nodes.push(
-        <ToolCallGroup key={`group-${runKey}`} calls={run} onNextAction={onNextAction} />,
+        <ToolCallGroup
+          key={`group-${runKey}`}
+          calls={run}
+          onNextAction={onNextAction}
+          onDisplayAction={onDisplayAction}
+        />,
       );
     } else {
       for (const call of run) {
         nodes.push(
-          <ToolCallCard key={call.id} call={call} onNextAction={onNextAction} />,
+          <ToolCallCard
+            key={call.id}
+            call={call}
+            onNextAction={onNextAction}
+            onDisplayAction={onDisplayAction}
+          />,
         );
       }
     }
@@ -101,7 +120,12 @@ function renderTimeline(
       }
       flushRun();
       nodes.push(
-        <ToolCallCard key={item.id} call={call} onNextAction={onNextAction} />,
+        <ToolCallCard
+          key={item.id}
+          call={call}
+          onNextAction={onNextAction}
+          onDisplayAction={onDisplayAction}
+        />,
       );
       return;
     }

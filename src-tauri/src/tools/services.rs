@@ -184,6 +184,23 @@ pub trait VpnToolServices: Send + Sync {
     async fn vpn_disconnect(&self) -> anyhow::Result<Value>;
 
     async fn diag_run(&self, include_logs: bool) -> anyhow::Result<Value>;
+    /// 仅 UI：读/写「问题报告是否包含完整域名」。不注册为 AI 工具——
+    /// 脱敏开关属于用户，模型不能放宽（`design/issue-report.md` §1.2）。
+    async fn issue_report_preference(
+        &self,
+        _include_domains: Option<bool>,
+    ) -> anyhow::Result<Value> {
+        not_wired("问题报告偏好")
+    }
+    /// 问题报告（`docs/contracts/tools.md` §4.46）：收集或写入。
+    /// 默认未接入，测试替身不必实现。
+    async fn issue_report(
+        &self,
+        _session_id: &str,
+        _input: crate::reports::IssueReportInput,
+    ) -> anyhow::Result<Value> {
+        not_wired("问题报告")
+    }
 
     async fn save_deepseek_key(&self, key: &str) -> anyhow::Result<Value>;
     async fn job_get(&self, job_id: &str) -> anyhow::Result<Value>;
@@ -5282,7 +5299,7 @@ impl VpnToolServices for WiredServices {
         };
 
         Ok(json!({
-            "contract_version": "3.8.0",
+            "contract_version": "3.9.0",
             "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "app_version": env!("CARGO_PKG_VERSION"),
             "platform": crate::netcfg::platform_name(),
@@ -5298,6 +5315,146 @@ impl VpnToolServices for WiredServices {
             "checks": checks,
             "log_excerpt": log_excerpt,
         }))
+    }
+
+    async fn issue_report_preference(
+        &self,
+        include_domains: Option<bool>,
+    ) -> anyhow::Result<Value> {
+        let conn = self.store.conn();
+        if let Some(value) = include_domains {
+            crate::store::settings::set(
+                &conn,
+                crate::reports::INCLUDE_DOMAINS_KEY,
+                if value { "1" } else { "0" },
+            )
+            .map_err(|error| svc_error(error.code(), error))?;
+        }
+        let current = crate::store::settings::get(&conn, crate::reports::INCLUDE_DOMAINS_KEY)
+            .ok()
+            .flatten()
+            .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        Ok(json!({ "includeDomains": current }))
+    }
+
+    async fn issue_report(
+        &self,
+        session_id: &str,
+        input: crate::reports::IssueReportInput,
+    ) -> anyhow::Result<Value> {
+        // 材料里只能出现脱敏后的运行时子集：出口 IP 这类公网地址一律不带给模型。
+        let mut runtime = self.runtime_status().await?;
+        if let Some(object) = runtime.as_object_mut() {
+            object.remove("exit_ip");
+            object.remove("direct_ip");
+            object.remove("traffic");
+            object.remove("config_hash");
+            // 名称类字段不进材料：报告里只需要数量与协议（`design/issue-report.md` §7.2）。
+            object.remove("config_name");
+            object.remove("node_name");
+            if let Some(health) = object.get_mut("health").and_then(Value::as_object_mut) {
+                health.remove("exit_ip");
+            }
+        }
+        let checks = self
+            .diag_run(false)
+            .await
+            .ok()
+            .and_then(|value| value.get("checks").cloned())
+            .unwrap_or_else(|| json!([]));
+        let (
+            config_count,
+            node_count,
+            routing_mode,
+            node_hosts,
+            node_names,
+            config_names,
+            node_protocols,
+            user_allows,
+        ) = {
+            let conn = self.store.conn();
+            let configs = configs::list(&conn).unwrap_or_default();
+            let active = configs.iter().find(|config| config.is_active).cloned();
+            let config_names = configs.iter().map(|config| config.name.clone()).collect();
+            // 日志里可能出现任何一套配置的节点名与地址：汇总全部配置 + 节点池，
+            // 只取活动配置会漏掉其余节点，整值替换就失效了。
+            let mut nodes = Vec::new();
+            for config in &configs {
+                nodes.extend(configs::list_nodes(&conn, &config.id).unwrap_or_default());
+            }
+            nodes.extend(configs::list_pool_nodes(&conn).unwrap_or_default());
+            let mut seen: Vec<String> = Vec::new();
+            nodes.retain(|node| {
+                if seen.iter().any(|id| id == &node.id) {
+                    false
+                } else {
+                    seen.push(node.id.clone());
+                    true
+                }
+            });
+            let node_hosts = nodes.iter().map(|node| node.server.clone()).collect();
+            let node_names = nodes.iter().map(|node| node.name.clone()).collect();
+            let mut node_protocols: Vec<String> = Vec::new();
+            for node in &nodes {
+                let protocol = if crate::nodes::SUPPORTED_METHODS.contains(&node.method.as_str()) {
+                    "shadowsocks"
+                } else {
+                    "unknown"
+                };
+                if !node_protocols.iter().any(|known| known == protocol) {
+                    node_protocols.push(protocol.to_string());
+                }
+            }
+            let active_node_count = active
+                .as_ref()
+                .map(|config| configs::list_nodes(&conn, &config.id).unwrap_or_default().len())
+                .unwrap_or(0);
+            let allows = crate::store::settings::get(
+                &conn,
+                crate::reports::INCLUDE_DOMAINS_KEY,
+            )
+            .ok()
+            .flatten()
+            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes"));
+            (
+                configs.len(),
+                active_node_count,
+                active.map(|config| config.routing_mode),
+                node_hosts,
+                node_names,
+                config_names,
+                node_protocols,
+                allows,
+            )
+        };
+        let ctx = crate::reports::ReportContext {
+            data_dir: self.data_dir.clone(),
+            runtime,
+            checks,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            platform: crate::netcfg::platform_name().to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            routing_mode,
+            node_count,
+            config_count,
+            node_protocols,
+            node_hosts,
+            node_names,
+            config_names,
+            user_allows_domains: user_allows,
+        };
+        let root = crate::reports::reports_root(&self.data_dir);
+        crate::reports::generate(session_id, &input, &ctx, &root).map_err(|error| {
+            svc_error_with_details(
+                error.code,
+                error.message,
+                error
+                    .reason
+                    .map(|reason| json!({ "reason": reason }))
+                    .unwrap_or(Value::Null),
+            )
+        })
     }
 
     async fn save_deepseek_key(&self, key: &str) -> anyhow::Result<Value> {
@@ -7355,6 +7512,31 @@ mod config_service_tests {
         .unwrap_err();
         assert_eq!(error["code"], "NOT_FOUND");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 问题报告的域名开关：省略参数是读取，传值是写入；默认关闭。
+    #[tokio::test]
+    async fn issue_report_domain_preference_round_trips() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        assert_eq!(
+            services.issue_report_preference(None).await.unwrap()["includeDomains"],
+            false
+        );
+        assert_eq!(
+            services.issue_report_preference(Some(true)).await.unwrap()["includeDomains"],
+            true
+        );
+        assert_eq!(
+            services.issue_report_preference(None).await.unwrap()["includeDomains"],
+            true
+        );
+        assert_eq!(
+            services.issue_report_preference(Some(false)).await.unwrap()["includeDomains"],
+            false
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

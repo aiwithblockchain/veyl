@@ -50,6 +50,10 @@ interface Props {
   onRestartOnboarding: () => void;
   onOpenLogs: () => void;
   onRestoreNetwork: () => void;
+  /** AI 已配置时才由 App 传入：生成问题报告并打开右栏。 */
+  onReportProblem?: () => void;
+  /** 正在开会话发开场：期间禁用入口，防止连点。 */
+  reportBusy?: boolean;
   /** 带着当前 tab 一起回到 App，重新打开设置时落回原处。 */
   onAskAi: (text: string, section: SectionId) => void;
   /** 从导入入口进来时直接落到「网络」；默认「账号与 AI」。 */
@@ -625,6 +629,8 @@ export function Settings({
   onRestartOnboarding,
   onOpenLogs,
   onRestoreNetwork,
+  onReportProblem,
+  reportBusy = false,
   onAskAi,
   initialSection = "ai",
 }: Props) {
@@ -664,6 +670,9 @@ export function Settings({
   const [pendingDelete, setPendingDelete] = useState<LlmProvider | null>(null);
   const [diagnosticNotice, setDiagnosticNotice] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [includeDomains, setIncludeDomains] = useState(false);
+  const [domainBusy, setDomainBusy] = useState(false);
+  const [domainError, setDomainError] = useState<string | null>(null);
   const [resetPhase, setResetPhase] = useState<ResetPhase>("idle");
   const [resetResult, setResetResult] = useState<NetworkForceResetResult | null>(null);
   const [resetError, setResetError] = useState<string | null>(null);
@@ -1207,6 +1216,42 @@ export function Settings({
       alive = false;
     };
   }, [open, bridge]);
+
+  // 报告偏好：进设置时读一次。放宽域名只能由用户在这里点，任何会话流程都不自动打开。
+  const reportEntryEnabled = Boolean(onReportProblem);
+  useEffect(() => {
+    if (!open || !reportEntryEnabled) return;
+    let alive = true;
+    bridge.issueReportPreference().then(
+      (preference) => {
+        if (alive) setIncludeDomains(preference.includeDomains);
+      },
+      () => {
+        if (alive) setDomainError("没读到报告偏好，先按关闭处理。");
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [open, bridge, reportEntryEnabled]);
+
+  const toggleIncludeDomains = async () => {
+    if (domainBusy) return;
+    const next = !includeDomains;
+    setIncludeDomains(next);
+    setDomainError(null);
+    setDomainBusy(true);
+    try {
+      const preference = await bridge.issueReportPreference(next);
+      setIncludeDomains(preference.includeDomains);
+    } catch {
+      // 写入失败回滚勾选，不能只改界面骗人。
+      setIncludeDomains(!next);
+      setDomainError("没保存成功，设置没有改。");
+    } finally {
+      setDomainBusy(false);
+    }
+  };
 
   const copyDiagnostics = async () => {
     const payload = {
@@ -2121,6 +2166,54 @@ export function Settings({
                   清除残留代理
                 </button>
               </div>
+            ) : null}
+
+            {onReportProblem ? (
+              <>
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row__label">生成问题报告</div>
+                    <div className="settings-row__value">
+                      把现场材料和日志整理成一个文件夹，放到桌面上。
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    disabled={reportBusy}
+                    onClick={onReportProblem}
+                  >
+                    生成问题报告
+                  </button>
+                </div>
+
+                <div className="settings-row">
+                  <div>
+                    <label
+                      className="settings-row__label"
+                      htmlFor="report-include-domains"
+                    >
+                      报告中包含我访问过的网站域名
+                    </label>
+                    <p className="settings-hint">
+                      开启后诊断更准确；关闭时域名会打码成 ***.google.com。
+                    </p>
+                    {domainError ? (
+                      <p className="settings-note settings-feedback settings-feedback--error">
+                        {domainError}
+                      </p>
+                    ) : null}
+                  </div>
+                  <input
+                    id="report-include-domains"
+                    type="checkbox"
+                    className="settings-checkbox"
+                    checked={includeDomains}
+                    disabled={domainBusy}
+                    onChange={() => void toggleIncludeDomains()}
+                  />
+                </div>
+              </>
             ) : null}
 
             <div className="danger-zone">
