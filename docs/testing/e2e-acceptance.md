@@ -503,6 +503,8 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 ### E1-14 供应商广场（静态预览）
 
+> **已知缺口**：本版本供应商广场仅占位，此路径预期不生成配置（见设计 `simplified-config-create.md` §21）。
+
 **前置**：M1；清空 `veyl.*` 后打开新建。
 
 **步骤**：
@@ -551,6 +553,8 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 ### E1-15 从供应商广场返回
 
+> **已知缺口**：本版本供应商广场仅占位，此路径预期不生成配置（见设计 `simplified-config-create.md` §21）。
+
 **前置**：接 E1-14。
 
 **步骤**：
@@ -574,6 +578,8 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 **不合格时记录什么**：返回前后两组 `checked`、截图。
 
 ### E1-16 创建时节点已被删（供应商页落地后）
+
+> **已知缺口**：本版本供应商广场仅占位，此路径预期不生成配置（见设计 `simplified-config-create.md` §21）。
 
 **前置**：无——本批供应商广场只展示，拿不到节点 id，没有这条创建路径。
 
@@ -995,6 +1001,56 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 4. 未连接时最终只创建一套配置；已连接时原连接与出口不受影响。
 
 **不合格时记录什么**：四种尝试的弹窗与按钮状态截图、保存时长、连接日志、配置表行。
+
+### E1-35 其它节点当前不生成配置（已知缺口，不判失败）
+
+**目的**：把「其它节点」这条路径的现状钉死，避免测试同事把「选完什么也没生成」记成缺陷（设计 §21）。
+
+**前置**：M1；打开新建两问页。
+
+**步骤**：
+
+1. 选「其它节点」，点「下一步」进入供应商广场。
+2. 在广场里找有没有可用的选择入口（示例条目、`即将支持`、任何链接或按钮）。
+3. 按 `Esc` 返回两问页，执行：
+
+```js
+(() => ({
+  questions: !!document.querySelector(".new-config__questions"),
+  checked: [...document.querySelectorAll('.new-config__answer[aria-checked="true"] .new-config__answer-title')].map((e) => e.textContent.trim()),
+  selectable: document.querySelectorAll(".vendor-item a[href], .vendor-item button:not(:disabled)").length,
+  review: !!document.querySelector(".new-config__review"),
+  configs: document.querySelectorAll(".configs__row").length,
+}))()
+```
+
+4. 改选「Veyl 免费节点」，点「下一步」，确认能正常进审视页。
+
+**预期**：
+
+1. 广场只有三条示例与禁用的 `即将支持`；`selectable` 为 `0`，拿不到节点 id。
+2. 返回后 `questions` 为 `true`、`checked` 仍含 `其它节点`；`review` 为 `false`，没有带着节点进入审视页。
+3. `configs` 与进入前相同——**没有生成配置**。这是已知缺口，不出现「创建失败」类提示，也不判失败。
+4. 改选「Veyl 免费节点」后能正常进入审视页并建出配置。
+
+**不合格时记录什么**：上述 JSON、广场与两问页截图、配置数。若实现已能让「其它节点」生成配置，注明版本，改判为设计 §21 已落地并补测完整路径。
+
+### E1-36 地区已知但非中国：默认智能模式
+
+**前置**：M1；`veyl.mock.region=jp`（或可构造的其它非中国已知地区）后刷新；免费池有节点。
+
+**步骤**：
+
+1. 打开新建，点「下一步」，读审视页的地区与流量范围。
+2. 创建后读控制台开关与说明。
+
+**预期**：
+
+1. 审视页 `地区` 为 `日本`；`流量范围` 为 `智能模式`，说明为 `本国网站直连，其它走 VPN。保存后可以在控制台随时切换。`。
+2. 创建后控制台开关选中 `智能模式`；M2 可查到 `routing_mode = direct`。
+3. 规则是「**地区已知（任意国家）→ `direct`**，未知 → `proxy_all`」：非中国不等于走全局。
+
+**不合格时记录什么**：审视页地区与范围的值、开关说明、`routing_mode`。
 
 ---
 
@@ -4680,6 +4736,37 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
 3. 表单里不会预先改动用户已选的来源；走完能正常创建。
 
 **不合格时记录什么**：上述 JSON、来源卡与表单截图、创建结果。
+
+### E8-31 AI 路径：免费节点取不到时不建配置、只重试一次
+
+**前置**：M2（原生应用）；AI 已配置且可用；已有一套可用配置；先清空免费节点缓存并断网，使 `ConfigCreate(source: "seed")` 回 `PRECONDITION_FAILED / seed_unavailable`：
+
+```bash
+sqlite3 "$HOME/.veyl/veyl.db" "delete from seed_cache;"
+```
+
+（缓存有内容时断网不会失败，`ConfigCreate` 只用本地缓存；也可用从未拉过免费节点的干净环境代替。）
+
+**步骤**：
+
+1. 点「新建配置」，答「TUN 模式」→「Veyl 免费节点（仅供试用）」→ 在确认卡上点「创建」。
+2. 观察 AI 消息与是否重试；查工具调用与配置：
+
+```bash
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(result_json,1,80) from tool_calls order by created_at desc limit 8; select count(*) from configs;"
+```
+
+3. 恢复网络，重复第 1 步。
+
+**预期**：
+
+1. AI 如实说「现在取不到 Veyl 免费节点」，并给出两个出口（改用「其它节点」（贴链接 / 订阅地址 / 自己填） / 稍后再试）；不编造节点、不建空配置。
+2. 本请求内 `CatalogRefresh` **最多 1 次**；仍失败后不再自动重试。
+3. 消息里**不出现**错误码（`seed_unavailable`）、种子地址或节点密码；`configs` 数量不变。
+4. 没有偷偷换来源：`tool_calls` 里没有 `NodeCreate` / `NodeImportText` / `NodeImportUrl`。
+5. 恢复网络后再走一遍，能正常建成配置。
+
+**不合格时记录什么**：AI 回复全文、`tool_calls` 最近 8 条、配置数前后、重试次数；若池空是人为清空，记录清空方式。
 
 ---
 

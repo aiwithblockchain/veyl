@@ -1300,8 +1300,11 @@ mod prompt_tests {
         for needle in [
             "不要重新做环境检测",
             "两问",
-            "浏览器上网页",
+            "怎么接管",
+            "TUN 模式",
+            "Proxy 模式",
             "节点从哪来",
+            "其它节点",
             "用户确认之前不调用 `ConfigCreate`",
             "确认本身用 `AskUserQuestion`",
             "不要因为已经有一套配置就拒绝",
@@ -1309,9 +1312,15 @@ mod prompt_tests {
             "Veyl 免费节点（仅供试用）",
             "NodeImportText",
             "不要自己解析链接",
+            // 失败路径：最多刷新一次，然后如实说。
+            "最多重试一次",
+            "CatalogRefresh",
         ] {
             assert!(text.contains(needle), "「再建一套配置」缺少：{needle}");
         }
+        // 旧的两问文案已经下线，不能再被渲染出来。
+        assert!(!text.contains("这套配置主要用来做什么"), "旧问题不应再出现");
+        assert!(!text.contains("浏览器上网页"), "旧选项不应再出现");
     }
 
     /// 布局示例必须是 `layout` 围栏；正文里不能再给裸 JSON 示例（模型会照抄）。
