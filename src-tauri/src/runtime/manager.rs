@@ -15,8 +15,8 @@ use super::health::{
 };
 use super::process::{self, SpawnOptions};
 
-pub const CONTRACT_VERSION: &str = "2.7.0";
-pub const EVENT_CONTRACT_VERSION: &str = "2.11.0";
+pub const CONTRACT_VERSION: &str = "2.8.0";
+pub const EVENT_CONTRACT_VERSION: &str = "2.12.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
 pub const DEFAULT_DATA_PLANE_PROBE: &str = "http://cp.cloudflare.com/generate_204";
@@ -2382,7 +2382,7 @@ mod tests {
         );
         assert_eq!(
             status.last_error.as_ref().unwrap().contract_version,
-            "2.7.0"
+            CONTRACT_VERSION
         );
 
         let mut restarts = 0;

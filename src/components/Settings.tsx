@@ -13,7 +13,6 @@ import type {
 import { DEFAULT_PROXY_PORT, isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import type {
   ConfigConnectMode,
-  ConfigRouteMode,
   NodeImportResult,
   NodeImportSkipped,
   RuntimeView,
@@ -39,8 +38,6 @@ interface Props {
   onProxyPortSaved?: (port: number) => void;
   /** 当前配置的连接方式；只用于展示，不参与任何命令。 */
   connectMode?: ConfigConnectMode | null;
-  /** 当前配置的路由方式；只用于把连接方式说准确。 */
-  routingMode?: ConfigRouteMode | null;
   /** 当前配置 id；节点导入必须落到这套配置，而不仅是节点池。 */
   configId?: string | null;
   /** 新建一套配置（会先关闭设置）。 */
@@ -277,8 +274,9 @@ function seedCheckedAt(info: SeedRefreshInfo | null): number | null {
 }
 
 export function seedSummary(info: SeedRefreshInfo | null): string {
-  if (!info) return "还没有试用节点 · 从未检查过";
-  const head = info.nodeCount > 0 ? `${info.nodeCount} 个节点` : "还没有试用节点";
+  if (!info) return "还没有 Veyl 免费节点 · 从未检查过";
+  const head =
+    info.nodeCount > 0 ? `${info.nodeCount} 个节点` : "还没有 Veyl 免费节点";
   const age = seedAgeLabel(seedCheckedAt(info));
   return `${head} · ${age === "从未" ? "从未检查过" : `${age}检查过`}`;
 }
@@ -315,7 +313,7 @@ function seedStatusText(phase: SeedPhase, connected: boolean, nodeCount: number)
     case "local_write":
       return "没能保存到本机，检查磁盘空间后重试。";
     case "failed":
-      return "拿不到试用节点，请检查网络。";
+      return "拿不到 Veyl 免费节点，请检查网络。";
     default:
       return null;
   }
@@ -432,7 +430,7 @@ function SeedRefreshRow({
   return (
     <div className="settings-row seed-refresh">
       <div className="seed-refresh__main">
-        <div className="settings-row__label">更新试用节点</div>
+        <div className="settings-row__label">更新 Veyl 免费节点</div>
         <div className="settings-row__value">{withMonoDigits(seedSummary(info))}</div>
         {status ? (
           <p
@@ -539,16 +537,10 @@ function protocolLabel(protocol: LlmProtocol): string {
   return protocol === "anthropic" ? "anthropic 兼容" : "openai 兼容";
 }
 
-/** 连接方式与左栏、主界面用同一套词；设置里只读。 */
-function connectModeText(
-  mode: ConfigConnectMode | null,
-  routing: ConfigRouteMode | null,
-): string {
+/** 连接方式与左栏、主界面用同一套词；设置里只读，只看 connect_mode。 */
+function connectModeText(mode: ConfigConnectMode | null): string {
   if (mode === "tun") return "全部软件走 VPN";
-  if (mode === "system_proxy" && routing === "proxy_selected") {
-    return "只有填了地址的软件走 VPN";
-  }
-  if (mode === "system_proxy") return "浏览器走 VPN";
+  if (mode === "system_proxy") return "部分软件走 VPN";
   return "还没有配置";
 }
 
@@ -621,7 +613,6 @@ export function Settings({
   proxyPort = DEFAULT_PROXY_PORT,
   onProxyPortSaved,
   connectMode = null,
-  routingMode = null,
   configId = null,
   onNewConfig,
   onClose,
@@ -1795,7 +1786,7 @@ export function Settings({
               <div>
                 <div className="settings-row__label">现在怎么连</div>
                 <div className="settings-row__value">
-                  {connectModeText(connectMode, routingMode)}
+                  {connectModeText(connectMode)}
                 </div>
                 {connectMode ? (
                   <p className="settings-note">

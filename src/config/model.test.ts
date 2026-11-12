@@ -2,12 +2,22 @@ import { describe, expect, it } from "vitest";
 import {
   createMockConfig,
   nameTaken,
+  nextConfigName,
   portLabel,
   summarizeConfig,
   uniqueConfigName,
 } from "./model";
 
 const named = (...names: string[]) => names.map((name) => ({ name }));
+
+describe("nextConfigName", () => {
+  it("从「配置 1」开始，取最小可用整数", () => {
+    expect(nextConfigName(named())).toBe("配置 1");
+    expect(nextConfigName(named("配置 1"))).toBe("配置 2");
+    expect(nextConfigName(named("配置 1", "配置 3"))).toBe("配置 2");
+    expect(nextConfigName(named("配置 1", "配置 2"))).toBe("配置 3");
+  });
+});
 
 describe("uniqueConfigName", () => {
   it("没有重名时原样返回", () => {

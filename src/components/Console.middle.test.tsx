@@ -536,7 +536,7 @@ describe("中间区验收用例", () => {
     const options = Array.from(root.querySelectorAll(".choice__option")).map((el) =>
       text(el),
     );
-    expect(options[0]).toContain("用 Veyl 提供的测试节点（仅供试用）");
+    expect(options[0]).toContain("Veyl 免费节点");
     expect(options[1]).toContain("用我自己的节点");
     expect(body(root).querySelector(".note")).toBeNull();
   });

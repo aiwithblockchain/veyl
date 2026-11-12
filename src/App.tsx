@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { AgentEvent, NextAction, RuntimeView } from "./agent/protocol";
+import type { AgentEvent, ConfigRouteMode, NextAction, RuntimeView } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
 import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, shouldRefreshSnapshotOnHealth, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
@@ -72,8 +72,6 @@ const EVER_CONNECTED_KEY = "veyl.hasEverConnected";
 const PANEL_CLOSED_BY_USER_KEY = "veyl.ui.panelClosedByUser";
 const PANEL_AUTO_OPENED_KEY = "veyl.ui.panelAutoOpened";
 const ONBOARDING_SKIPPED_KEY = "veyl.onboarding.skipped";
-/** 新建配置走 AI 协助时的开场消息：必须是用户可见的一条。 */
-const NEW_CONFIG_AI_ASK = "帮我新建一套配置。";
 
 function readFlag(key: string): boolean {
   try {
@@ -134,6 +132,8 @@ export default function App() {
   /** 正在为问题报告开会话并发送开场：期间禁用三处入口。 */
   const [reportOpening, setReportOpening] = useState(false);
   const reportOpeningRef = useRef(false);
+  // 新建配置成功后要自动连接：等 activeConfig 刷新到新配置再启动。
+  const connectAfterCreateRef = useRef(false);
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === "undefined" ? 1440 : window.innerWidth,
   );
@@ -146,11 +146,16 @@ export default function App() {
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const [pendingConfigId, setPendingConfigId] = useState<string | null>(null);
   const [newConfigOpen, setNewConfigOpen] = useState(false);
-  // 新建配置里点「AI 协助」但还没配 AI：先交给 AI 配置模块，结束后回到同一入口。
-  const [newConfigAiSetup, setNewConfigAiSetup] = useState(false);
   const [systemRegion, setSystemRegion] = useState<string | null>(null);
-  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
+  /** AI 改地区时如果正连着：说明行要追加「地区已改，下次连接生效」。 */
+  const [regionChangedWhileConnected, setRegionChangedWhileConnected] = useState(false);
+  // route_set_mode / routing-changed 的权威值；只在活动配置上覆盖详情里的旧值。
+  const [routingOverride, setRoutingOverride] = useState<{
+    configId: string;
+    mode: ConfigRouteMode;
+  } | null>(null);
   const [justOnboarded, setJustOnboarded] = useState(false);
+  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const vpn = useVpnSession(
     bridge,
     import.meta.env.VITE_MOCK === "1" || bridge.mode === "mock",
@@ -219,6 +224,19 @@ export default function App() {
   const lastSnapshotAtRef = useRef(0);
 
   const session = activeSession(state);
+  const activeRoutingMode =
+    vpn.activeConfig && routingOverride?.configId === vpn.activeConfig.config_id
+      ? routingOverride.mode
+      : vpn.activeConfig?.routing_mode ?? null;
+  const connectedNow =
+    vpn.connection === "connected" ||
+    runtime.state === "running" ||
+    runtime.state === "degraded";
+  // 已连接用本次连接快照，未连接用实时推断，和中间区口径同源。
+  const scopeRegion =
+    runtime.state === "running" || runtime.state === "degraded"
+      ? runtime.route_region
+      : systemRegion;
 
   // 不带分区时沿用上次记住的 tab（问 AI 返回靠它）；诊断、导入、AI 未配置会显式指定。
   const openSettings = (section?: SettingsSection) => {
@@ -271,13 +289,13 @@ export default function App() {
     };
   }, [bridge]);
 
-  // 地区只决定手工表单的初始分流选择；读不到按未知处理。
+  // 地区只决定新建配置的默认流量范围；读不到按未知处理。
   useEffect(() => {
     let alive = true;
     bridge
       .systemRegion()
-      .then((region) => {
-        if (alive) setSystemRegion(region);
+      .then((result) => {
+        if (alive) setSystemRegion(result.region);
       })
       .catch(() => {});
     return () => {
@@ -465,6 +483,17 @@ export default function App() {
           finish();
         }
       }
+      if (event.name === AGENT_EVENTS.regionChanged) {
+        setSystemRegion(event.payload.region);
+        const online =
+          runtimeStateRef.current === "running" || runtimeStateRef.current === "degraded";
+        setRegionChangedWhileConnected(online);
+      }
+      if (event.name === AGENT_EVENTS.routingChanged) {
+        // AI 通过 RouteSetMode 改了分流：事件里的值就是权威值，不保留本地旧值。
+        const payload = event.payload;
+        setRoutingOverride({ configId: payload.config_id, mode: payload.routing_mode });
+      }
       if (event.name === AGENT_EVENTS.runtimeStateChanged) {
         setFailedAfterConnected(
           isDisconnectFailure(event.payload.from, event.payload.to),
@@ -474,6 +503,7 @@ export default function App() {
         if (!online) {
           lastSampleAtRef.current = null;
           setRateSamples([]);
+          setRegionChangedWhileConnected(false);
         }
         refreshSnapshot();
       }
@@ -855,10 +885,9 @@ export default function App() {
   const sendToSession = async (
     sessionId: string,
     text: string,
-    options: { aiJustConfigured?: boolean; hidden?: boolean } = {},
+    options: { hidden?: boolean } = {},
   ): Promise<boolean> => {
-    // 刚配好 AI 时 aiReady 状态还没落到这次渲染里，这条路径已经确认可用。
-    if (!aiReady && !options.aiJustConfigured) {
+    if (!aiReady) {
       setAppNotice({ level: "error", text: "还没有配置 AI，先配置后再对话。" });
       openSettings("ai");
       return false;
@@ -1103,29 +1132,21 @@ export default function App() {
     return { ok: true };
   };
 
-  // AI 协助：关弹窗 → 新会话 → 打开右栏 → 发一条用户可见的开场消息。
-  const startNewConfigAiFlow = (aiJustConfigured = false) => {
-    setNewConfigOpen(false);
-    // 用户已经显式点名要 AI 配，零配置的自动 kickoff 不再另外发一条。
-    kickoffStartedRef.current = true;
-    kickoffSessionCreatedRef.current = true;
-    const fresh = createSession();
-    dispatch({ type: "add_session", session: fresh });
-    panelOpenRef.current = true;
-    setPanelOpen(true);
-    setAiUnread(false);
-    setComposerFocusSignal((value) => value + 1);
-    void sendToSession(fresh.id, NEW_CONFIG_AI_ASK, { aiJustConfigured });
-  };
-
-  // AI 配置模块结束：配好了接上 AI 协助；放弃了回到两张卡（弹窗仍在）。
-  const handleNewConfigAiSetupDone = (skipped: boolean) => {
-    setNewConfigAiSetup(false);
-    if (skipped) return;
-    void (async () => {
-      await refreshAiStatus();
-      startNewConfigAiFlow(true);
-    })();
+  const handleSetRoutingMode = async (
+    mode: "direct" | "proxy_all",
+  ): Promise<{ ok: boolean; message?: string }> => {
+    const config = vpn.activeConfig;
+    if (!config) return { ok: false, message: "先建一套配置。" };
+    try {
+      const result = await bridge.routeSetMode(mode, config.config_id);
+      setRoutingOverride({ configId: config.config_id, mode: result.routing_mode });
+      // 热切不会断流；只有重连失败时才需要把 hero 切到失败态。
+      if (result.reconnect === "reconnect_failed") refreshSnapshot();
+      return { ok: true };
+    } catch {
+      // 行内说一次，不弹 toast；控件保持原值。
+      return { ok: false, message: "没切成功，还是原来的范围。" };
+    }
   };
 
   // 已连接时换配置：先说清会断一次，确认后再切并重新连上。
@@ -1165,6 +1186,22 @@ export default function App() {
       refreshSnapshot();
     });
   };
+
+  // 「创建并连接」：配置列表刷新到新配置后再启动，避免用到旧的 activeConfig。
+  useEffect(() => {
+    if (!connectAfterCreateRef.current) return;
+    if (vpn.loading) return;
+    if (!vpn.activeConfig) {
+      connectAfterCreateRef.current = false;
+      setAppNotice({
+        level: "error",
+        text: vpn.error ?? "新建的配置没读出来，请在左侧重新选择。",
+      });
+      return;
+    }
+    connectAfterCreateRef.current = false;
+    handleVpnStart();
+  }, [vpn.loading, vpn.activeConfig, vpn.start, vpn.error]);
 
   const handleVpnStop = (): Promise<boolean> => {
     // 记下点断开这一刻是不是已连接：断开失败时只有原本在线才恢复在线。
@@ -1307,11 +1344,6 @@ export default function App() {
     );
   }
 
-  // 新建配置里缺 AI：先配 AI，结束后由新建配置自己的回调接住，不跑首启收尾逻辑。
-  if (newConfigAiSetup) {
-    return <Onboarding bridge={bridge} onDone={handleNewConfigAiSetupDone} />;
-  }
-
   return (
     <div style={appStyle} className="app">
       <ConfigRail
@@ -1361,6 +1393,10 @@ export default function App() {
         seedUpdate={Boolean(defaultProfile?.newVersionAvailable)}
         proxyPort={proxyPort}
         region={systemRegion}
+        scopeRegion={scopeRegion}
+        regionChanged={regionChangedWhileConnected}
+        routingMode={activeRoutingMode}
+        onSetRoutingMode={handleSetRoutingMode}
         loading={vpn.loading}
         runtime={runtime}
         failedAfterConnected={failedAfterConnected}
@@ -1451,13 +1487,15 @@ export default function App() {
         <NewConfigDialog
           bridge={bridge}
           configs={vpn.configs}
-          aiReady={aiReady}
           region={systemRegion}
+          defaultNodeCount={defaultProfile?.nodeCount ?? null}
+          connected={connectedNow}
           onClose={() => setNewConfigOpen(false)}
-          onAiAssist={() => startNewConfigAiFlow()}
-          onNeedAiSetup={() => setNewConfigAiSetup(true)}
           onCreate={handleCreateConfig}
-          onCreated={() => setNewConfigOpen(false)}
+          onCreated={(connect) => {
+            setNewConfigOpen(false);
+            if (connect) connectAfterCreateRef.current = true;
+          }}
         />
       ) : null}
 
@@ -1482,7 +1520,6 @@ export default function App() {
         proxyPort={proxyPort}
         onProxyPortSaved={setProxyPort}
         connectMode={vpn.activeConfig?.connect_mode ?? null}
-        routingMode={vpn.activeConfig?.routing_mode ?? null}
         configId={vpn.activeConfig?.config_id ?? null}
         onNewConfig={() => {
           setSettingsOpen(false);

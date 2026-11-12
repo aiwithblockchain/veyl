@@ -9,16 +9,10 @@ import type {
 /** 与协议里的 `connect_mode` 同义，界面层用它表示用户的选择。 */
 export type ConnectMode = ConfigConnectMode;
 
-const SUGGESTED_NAMES: Record<ConnectMode, string> = {
-  tun: "公司 · 接管全部",
-  system_proxy: "公司 · 本机代理",
-};
+/** 浏览器 mock 的配置库；useVpnSession 与 mock 桥读写同一份。 */
+export const MOCK_CONFIG_STORAGE_KEY = "veyl.configs.mock.v1";
 
 const MOCK_PROXY_PORT = 7890;
-
-export function suggestedConfigName(mode: ConnectMode): string {
-  return SUGGESTED_NAMES[mode];
-}
 
 export function portLabel(
   config: Pick<ConfigSummary, "connect_mode">,
@@ -46,6 +40,16 @@ export function uniqueConfigName(
   let index = 2;
   while (names.has(`${base} ${index}`)) index += 1;
   return `${base} ${index}`;
+}
+
+/** 新建配置的默认名：「配置 N」，N 取当前未被占用的最小整数。 */
+export function nextConfigName(
+  configs: readonly Pick<ConfigSummary, "name">[],
+): string {
+  const names = new Set(configs.map((config) => config.name.trim()));
+  let index = 1;
+  while (names.has(`配置 ${index}`)) index += 1;
+  return `配置 ${index}`;
 }
 
 /** 只保留左栏需要的字段，与 `config_list` 的返回同形。 */

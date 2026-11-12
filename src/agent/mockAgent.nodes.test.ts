@@ -69,10 +69,56 @@ describe("浏览器演示用的节点命令", () => {
   });
 
   it("地区默认中国大陆，可用 localStorage 演示未知", async () => {
-    await expect(bridge!.systemRegion()).resolves.toBe("cn");
+    await expect(bridge!.systemRegion()).resolves.toEqual({ region: "cn", source: "system" });
     localStorage.setItem("veyl.mock.region", "unknown");
-    await expect(bridge!.systemRegion()).resolves.toBeNull();
+    await expect(bridge!.systemRegion()).resolves.toEqual({ region: null, source: "system" });
     localStorage.setItem("veyl.mock.region", "JP");
-    await expect(bridge!.systemRegion()).resolves.toBe("jp");
+    await expect(bridge!.systemRegion()).resolves.toEqual({ region: "jp", source: "system" });
+    localStorage.setItem("veyl.mock.regionSource", "ai");
+    await expect(bridge!.systemRegion()).resolves.toEqual({ region: "jp", source: "ai" });
+  });
+
+  it("route_get / route_set_mode：未连接只写库，返回 next_connection", async () => {
+    localStorage.setItem(
+      "veyl.configs.mock.v1",
+      JSON.stringify({
+        activeId: "cfg_1",
+        configs: [
+          {
+            config_id: "cfg_1",
+            name: "配置 1",
+            connect_mode: "tun",
+            routing_mode: "direct",
+            node_count: 1,
+            listen_port: null,
+            is_active: true,
+            current_node_id: "n1",
+            created_at: 1,
+            updated_at: 1,
+            last_used_at: null,
+            nodes: [],
+          },
+        ],
+      }),
+    );
+    const state = await bridge!.routeGet("cfg_1");
+    expect(state).toMatchObject({
+      config_id: "cfg_1",
+      routing_mode: "direct",
+      effective: "next_connection",
+      detected_region: "cn",
+      local_direct_basis: "domain_and_ip",
+    });
+
+    const result = await bridge!.routeSetMode("proxy_all", "cfg_1");
+    expect(result).toMatchObject({
+      routing_mode: "proxy_all",
+      hot_switched: false,
+      reconnect: "not_running",
+      effective: "next_connection",
+    });
+    expect((await bridge!.routeGet("cfg_1")).routing_mode).toBe("proxy_all");
+    const stored = JSON.parse(localStorage.getItem("veyl.configs.mock.v1") ?? "{}");
+    expect(stored.configs[0].routing_mode).toBe("proxy_all");
   });
 });

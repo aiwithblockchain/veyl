@@ -3,7 +3,7 @@ import type { AgentBridge, ConfigCreateInput } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { AGENT_EVENTS } from "../agent/protocol";
 import type { ConfigDetail, ConfigSummary, RuntimeSnapshot } from "../agent/protocol";
-import { createMockConfig, summarizeConfig } from "./model";
+import { createMockConfig, MOCK_CONFIG_STORAGE_KEY, summarizeConfig } from "./model";
 import { deleteConfigWithDisconnect, shouldDisconnectOnDelete, withoutConfig } from "./deleteConfig";
 
 export type VpnConnectionState = "idle" | "starting" | "connected" | "stopping";
@@ -59,7 +59,7 @@ interface MockStore {
   activeId: string | null;
 }
 
-const MOCK_STORAGE_KEY = "veyl.configs.mock.v1";
+const MOCK_STORAGE_KEY = MOCK_CONFIG_STORAGE_KEY;
 
 function readMock(): MockStore {
   try {

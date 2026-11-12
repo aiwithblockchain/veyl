@@ -685,6 +685,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         case AGENT_EVENTS.issueChanged:
         case AGENT_EVENTS.layoutUpdated:
         case AGENT_EVENTS.routingChanged:
+        case AGENT_EVENTS.regionChanged:
         case AGENT_EVENTS.rulesChanged:
         // 运行时升级由设置页的升级状态机消费，不进对话流。
         case AGENT_EVENTS.coreUpgradeProgress:

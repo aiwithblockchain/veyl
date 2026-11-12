@@ -72,7 +72,6 @@ function renderSettings(
   bridge: AgentBridge,
   {
     connectMode = null,
-    routingMode = null,
     configId = "cfg_1",
     section = "network",
     runtimeView = runtime(),
@@ -83,7 +82,6 @@ function renderSettings(
     onReportProblem,
   }: {
     connectMode?: "tun" | "system_proxy" | null;
-    routingMode?: "direct" | "proxy_all" | "proxy_selected" | null;
     configId?: string | null;
     section?: "ai" | "network" | "advanced" | "about";
     runtimeView?: RuntimeView;
@@ -101,7 +99,6 @@ function renderSettings(
       runtime={runtimeView}
       defaultProfile={null}
       connectMode={connectMode}
-      routingMode={routingMode}
       configId={configId}
       proxyPort={proxyPort}
       onNewConfig={onNewConfig}
@@ -123,23 +120,13 @@ async function openAddDialog() {
 }
 
 describe("连接 tab", () => {
-  it("三种连接方式各用一句行为描述", async () => {
+  it("两种连接方式各用一句行为描述，只看 connect_mode", async () => {
     renderSettings(makeBridge(), { connectMode: "tun" });
     expect(await screen.findByText("全部软件走 VPN")).toBeTruthy();
     cleanup();
 
-    renderSettings(makeBridge(), {
-      connectMode: "system_proxy",
-      routingMode: "proxy_selected",
-    });
-    expect(await screen.findByText("只有填了地址的软件走 VPN")).toBeTruthy();
-    cleanup();
-
-    renderSettings(makeBridge(), {
-      connectMode: "system_proxy",
-      routingMode: "proxy_all",
-    });
-    expect(await screen.findByText("浏览器走 VPN")).toBeTruthy();
+    renderSettings(makeBridge(), { connectMode: "system_proxy" });
+    expect(await screen.findByText("部分软件走 VPN")).toBeTruthy();
   });
 
   it("全部软件配置显示换方式的入口", async () => {
@@ -151,7 +138,7 @@ describe("连接 tab", () => {
     expect(onNewConfig).toHaveBeenCalledTimes(1);
   });
 
-  it("没有配置时只留一句指路和新建链接，不显示端口、试用节点与添加节点", async () => {
+  it("没有配置时只留一句指路和新建链接，不显示端口、免费节点与添加节点", async () => {
     const onNewConfig = vi.fn();
     renderSettings(makeBridge(), { connectMode: null, onNewConfig });
     expect(await screen.findByText("还没有配置")).toBeTruthy();
@@ -179,7 +166,6 @@ describe("连接 tab", () => {
 
     renderSettings(makeBridge(), {
       connectMode: "system_proxy",
-      routingMode: "proxy_selected",
       runtimeView: runtime({ state: "running", mixed_port: 2080, system_proxy_enabled: true }),
     });
 
@@ -194,7 +180,6 @@ describe("连接 tab", () => {
   it("端口顺延时只出现一条说明，用 port_fallback 的两个数字", async () => {
     renderSettings(makeBridge(), {
       connectMode: "system_proxy",
-      routingMode: "proxy_selected",
       runtimeView: runtime({
         state: "running",
         mixed_port: 8080,
@@ -213,7 +198,6 @@ describe("连接 tab", () => {
   it("权限原因用另一句，不冒充被占用", async () => {
     renderSettings(makeBridge(), {
       connectMode: "system_proxy",
-      routingMode: "proxy_selected",
       proxyPort: 80,
       runtimeView: runtime({
         state: "running",
@@ -232,7 +216,6 @@ describe("连接 tab", () => {
     const onAskAi = vi.fn();
     renderSettings(makeBridge(), {
       connectMode: "system_proxy",
-      routingMode: "proxy_selected",
       onAskAi,
     });
 

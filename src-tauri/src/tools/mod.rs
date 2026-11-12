@@ -16,6 +16,7 @@ pub mod job;
 pub mod net;
 pub mod policy;
 pub mod probe_batch;
+pub mod region;
 pub mod routing;
 pub mod runtime;
 pub mod services;
@@ -182,6 +183,7 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(net::NetRepairTool::new(Arc::clone(&services))),
         Box::new(net::CatalogRefreshTool::new(Arc::clone(&services))),
         Box::new(net::DefaultProfileStatusTool::new(Arc::clone(&services))),
+        Box::new(region::SetUserRegionTool::new(Arc::clone(&services))),
         Box::new(AskUserQuestionGuard::new()),
     ]
 }

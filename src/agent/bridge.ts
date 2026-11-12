@@ -15,6 +15,9 @@ import type {
   NodeSummary,
   RuntimeSnapshot,
   RuntimeView,
+  RouteSetModeData,
+  RouteState,
+  SystemRegion,
 } from "./protocol";
 
 export type BridgeMode = "tauri" | "mock";
@@ -481,8 +484,12 @@ export interface AgentBridge {
   pickNodeFile(): Promise<string | null>;
   /** 服务分类目录（只读），「只指定服务」的 targets 从这里取 id。 */
   categoryList(query?: string, limit?: number): Promise<{ categories: Category[]; total: number }>;
-  /** 系统时区 / 区域推断出的地区（小写 cc）；取不到为 null。 */
-  systemRegion(): Promise<string | null>;
+  /** 系统时区 / 区域推断或 AI 写入的地区；判不出时 region 为 null。 */
+  systemRegion(): Promise<SystemRegion>;
+  /** 当前配置的分流状态；只读、不联网、不发事件。 */
+  routeGet(configId?: string): Promise<RouteState>;
+  /** 切换两档流量范围；已连接且 direct ↔ proxy_all 时热切。 */
+  routeSetMode(mode: "direct" | "proxy_all", configId?: string): Promise<RouteSetModeData>;
   /** 只读的默认配置包状态，不联网。 */
   defaultProfileStatus(): Promise<DefaultProfileStatus>;
   /** 拉取并应用默认配置包；不打断在线连接，下次连接生效。 */

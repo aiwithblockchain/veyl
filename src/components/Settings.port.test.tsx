@@ -515,7 +515,7 @@ describe("连接页其它行", () => {
     expect(within(firstRow).queryByRole("button", { name: "复制" })).toBeNull();
   });
 
-  it("试用节点摘要不再写「Veyl 提供的」", async () => {
+  it("免费节点摘要不再写「Veyl 提供的」", async () => {
     renderHarness({ bridge: makeBridge().bridge });
     const row = document.querySelector(".seed-refresh") as HTMLElement;
     expect(within(row).queryByText(/Veyl 提供的/)).toBeNull();

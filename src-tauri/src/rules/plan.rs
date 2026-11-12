@@ -55,7 +55,7 @@ impl std::fmt::Display for PlanError {
 
 pub struct RouteInput<'a> {
     pub mode: &'a str,
-    /// 由 [`crate::rules::detect_region`] 判定；**未知就是未知**，不要在这里兜底。
+    /// 由 [`crate::rules::effective_region`] 判定；**未知就是未知**，不要在这里兜底。
     pub region: &'a Region,
     pub targets: &'a [String],
     pub rules: &'a InstalledRules,

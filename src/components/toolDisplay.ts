@@ -372,6 +372,13 @@ export const TOOL_COPY: Record<string, ToolCopy> = {
     advice: "可以再试一次；还是不行就先把日志留着。",
     readOnly: false,
   },
+  SetUserRegion: {
+    running: "正在记下地区",
+    done: "地区已记下",
+    failed: "没能记下地区",
+    advice: "可以在对话里再说一次你所在的地区。",
+    readOnly: false,
+  },
 };
 
 export const TOOL_NAMES = Object.keys(TOOL_COPY);

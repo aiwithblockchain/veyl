@@ -110,13 +110,60 @@ describe("新建配置用到的节点命令", () => {
     expect(result.total).toBe(2);
   });
 
-  it("system_region：小写 cc 或 null", async () => {
+  it("system_region：地区取小写 cc，并带 source", async () => {
     const bridge = new TauriAgentBridge();
-    invoke.mockResolvedValueOnce({ region: "CN" });
-    await expect(bridge.systemRegion()).resolves.toBe("cn");
+    invoke.mockResolvedValueOnce({ region: "CN", source: "ai" });
+    await expect(bridge.systemRegion()).resolves.toEqual({ region: "cn", source: "ai" });
     invoke.mockResolvedValueOnce({ region: null });
-    await expect(bridge.systemRegion()).resolves.toBeNull();
+    await expect(bridge.systemRegion()).resolves.toEqual({ region: null, source: "system" });
     invoke.mockResolvedValueOnce({});
-    await expect(bridge.systemRegion()).resolves.toBeNull();
+    await expect(bridge.systemRegion()).resolves.toEqual({ region: null, source: "system" });
+  });
+
+  it("route_get / route_set_mode：归一化模式与热切标记", async () => {
+    const bridge = new TauriAgentBridge();
+    invoke.mockResolvedValueOnce({
+      config_id: "cfg_1",
+      routing_mode: "direct",
+      applied_mode: null,
+      targets: [],
+      custom_rules: [],
+      route_revision: 2,
+      applied_revision: null,
+      effective: "next_connection",
+      reconnect_required: false,
+      local_direct_basis: "domain_and_ip",
+      detected_region: "CN",
+      applied_region: null,
+    });
+    await expect(bridge.routeGet("cfg_1")).resolves.toMatchObject({
+      routing_mode: "direct",
+      detected_region: "cn",
+      applied_mode: null,
+    });
+
+    invoke.mockResolvedValueOnce({
+      config_id: "cfg_1",
+      routing_mode: "proxy_all",
+      applied_mode: "proxy_all",
+      targets: [],
+      custom_rules: [],
+      route_revision: 3,
+      applied_revision: 3,
+      effective: "current_connection",
+      reconnect_required: false,
+      local_direct_basis: "domain_and_ip",
+      detected_region: "cn",
+      applied_region: "cn",
+      hot_switched: true,
+      reconnect: null,
+    });
+    const result = await bridge.routeSetMode("proxy_all", "cfg_1");
+    expect(result).toMatchObject({
+      routing_mode: "proxy_all",
+      hot_switched: true,
+      reconnect: "not_running",
+      effective: "current_connection",
+    });
   });
 });

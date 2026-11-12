@@ -97,7 +97,7 @@ function renderSettings(
 
 function seedRow(): HTMLElement {
   return screen
-    .getByText("更新试用节点", { selector: ".settings-row__label" })
+    .getByText("更新 Veyl 免费节点", { selector: ".settings-row__label" })
     .closest(".settings-row") as HTMLElement;
 }
 
@@ -111,7 +111,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-describe("试用节点纯函数", () => {
+describe("免费节点纯函数", () => {
   it("相对时间按分钟、小时、天分档", () => {
     const now = 10 * 86_400_000;
     expect(seedAgeLabel(now - 30_000, now)).toBe("刚刚");
@@ -132,15 +132,15 @@ describe("试用节点纯函数", () => {
         nodeCount: 0,
         checkedAt: null,
       } as unknown as DefaultProfileStatus),
-    ).toBe("还没有试用节点 · 从未检查过");
+    ).toBe("还没有 Veyl 免费节点 · 从未检查过");
   });
 });
 
-describe("设置页试用节点行", () => {
-  it("连接页展示试用节点与检查更新，不再有问 AI 与地址行", async () => {
+describe("设置页免费节点行", () => {
+  it("连接页展示免费节点与检查更新，不再有问 AI 与地址行", async () => {
     renderSettings(makeBridge(async () => profile()));
 
-    expect(await screen.findByText("更新试用节点")).toBeTruthy();
+    expect(await screen.findByText("更新 Veyl 免费节点")).toBeTruthy();
     expect(within(seedRow()).getByRole("button", { name: "检查更新" })).toBeTruthy();
     expect(
       seedRow().querySelector(".settings-row__value")?.textContent,
@@ -257,12 +257,12 @@ describe("设置页试用节点行", () => {
 
   it("无缓存且拉取失败时提示检查网络", async () => {
     const bridge = makeBridge(async () => {
-      throw { code: "UPSTREAM_ERROR", message: "现在拿不到试用节点：offline" };
+      throw { code: "UPSTREAM_ERROR", message: "现在拿不到免费节点：offline" };
     });
     renderSettings(bridge);
 
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    expect(await screen.findByText("拿不到试用节点，请检查网络。")).toBeTruthy();
+    expect(await screen.findByText("拿不到 Veyl 免费节点，请检查网络。")).toBeTruthy();
     expect(screen.queryByText(/已经是最新/)).toBeNull();
   });
 

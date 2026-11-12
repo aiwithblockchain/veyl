@@ -6,7 +6,7 @@
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.11.0" as const;
+export const CONTRACT_VERSION = "2.12.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -28,6 +28,7 @@ export const AGENT_EVENTS = {
   issueChanged: "issue-changed",
   layoutUpdated: "layout-updated",
   routingChanged: "routing-changed",
+  regionChanged: "region-changed",
   rulesChanged: "rules-changed",
   coreUpgradeProgress: "core-upgrade-progress",
   coreUpgradeFinished: "core-upgrade-finished",
@@ -61,6 +62,7 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.issueChanged,
   AGENT_EVENTS.layoutUpdated,
   AGENT_EVENTS.routingChanged,
+  AGENT_EVENTS.regionChanged,
   AGENT_EVENTS.rulesChanged,
   AGENT_EVENTS.coreUpgradeProgress,
   AGENT_EVENTS.coreUpgradeFinished,
@@ -597,7 +599,7 @@ export interface LayoutUpdatedPayload {
   emitted_at: string;
 }
 
-/** `route_get` 的返回（commands.md §10.1）；前端暂未接线。 */
+/** `route_get` 的返回（commands.md §10.1）。 */
 export interface RouteState {
   config_id: string;
   routing_mode: ConfigRouteMode;
@@ -616,6 +618,18 @@ export interface RouteState {
   applied_region: string | null;
 }
 
+/** `route_set_mode` 的返回（commands.md §10.2）。 */
+export interface RouteSetModeData extends RouteState {
+  hot_switched: boolean;
+  reconnect: "not_running" | "reconnected" | "reconnect_failed" | null;
+}
+
+/** `system_region` 的返回（commands.md §10.10）。 */
+export interface SystemRegion {
+  region: string | null;
+  source: "system" | "ai";
+}
+
 export interface RoutingChangedPayload {
   contract_version: typeof CONTRACT_VERSION;
   config_id: string;
@@ -627,6 +641,13 @@ export interface RoutingChangedPayload {
   change: "mode" | "targets" | "custom_rule";
   hot_switched: boolean;
   reconnect_required: boolean;
+  emitted_at: string;
+}
+
+export interface RegionChangedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  region: string | null;
+  source: "system" | "ai";
   emitted_at: string;
 }
 
@@ -665,6 +686,7 @@ export interface AgentEventMap {
   [AGENT_EVENTS.issueChanged]: IssueChangedPayload;
   [AGENT_EVENTS.layoutUpdated]: LayoutUpdatedPayload;
   [AGENT_EVENTS.routingChanged]: RoutingChangedPayload;
+  [AGENT_EVENTS.regionChanged]: RegionChangedPayload;
   [AGENT_EVENTS.rulesChanged]: RulesChangedPayload;
   [AGENT_EVENTS.coreUpgradeProgress]: CoreUpgradeProgressPayload;
   [AGENT_EVENTS.coreUpgradeFinished]: CoreUpgradeFinishedPayload;

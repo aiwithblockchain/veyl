@@ -331,6 +331,14 @@ impl VpnToolServices for FakeServices {
         Ok(self.data.clone())
     }
 
+    async fn set_user_region(&self, region: &str) -> anyhow::Result<Value> {
+        self.rec.record(format!("set_user_region({region})"));
+        Ok(json!({
+            "region": region.to_ascii_lowercase(),
+            "source": "ai",
+        }))
+    }
+
     async fn diag_run(&self, include_logs: bool) -> anyhow::Result<Value> {
         self.rec.record(format!("diag_run({include_logs})"));
         Ok(self.data.clone())
@@ -832,6 +840,78 @@ async fn issue_report_shows_actions_while_collecting() {
     assert!(!rendered.contains('/'), "动作里不能带路径：{rendered}");
 }
 
+/// AI 不能建空配置：source 与 node_ids 必须给一个，显式 `source: "empty"` 也不行。
+#[tokio::test]
+async fn config_create_requires_a_node_source() {
+    let (svc, rec) = FakeServices::new();
+    let all = tools(svc);
+    for extra in [
+        json!({}),
+        json!({ "source": "empty" }),
+        json!({ "node_ids": [] }),
+    ] {
+        let mut input = json!({
+            "name": "公司",
+            "connect_mode": "tun",
+            "routing_mode": "proxy_all"
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            input[key] = value.clone();
+        }
+        let (is_error, env) = run(tool(&all, "ConfigCreate"), input).await;
+        assert!(is_error, "{env}");
+        assert_eq!(env["error"]["code"], "INVALID_ARGUMENT", "{env}");
+        assert_eq!(
+            env["error"]["details"]["reason"], "source_required",
+            "{env}"
+        );
+        assert!(rec.take().is_empty(), "缺来源不能落到服务层：{env}");
+    }
+}
+
+/// 三个写入路径的 schema 只收两档；`proxy_selected` 已下线。
+#[test]
+fn routing_mode_schemas_only_allow_two_values() {
+    let (svc, _rec) = FakeServices::new();
+    let all = tools(svc);
+    for (name, key) in [
+        ("ConfigCreate", "routing_mode"),
+        ("ConfigUpdate", "routing_mode"),
+        ("RouteSetMode", "mode"),
+    ] {
+        let schema = tool(&all, name).input_schema();
+        assert_eq!(
+            schema["properties"][key]["enum"],
+            json!(["direct", "proxy_all"]),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn set_user_region_is_a_write_tool_with_the_contract_shape() {    let (svc, rec) = FakeServices::with_data(json!({}));
+    let all = tools(svc);
+    const SESSION: &str = "boundary-set-region";
+
+    let (is_error, env) = run_in_session(
+        tool(&all, "SetUserRegion"),
+        json!({ "region": "JP" }),
+        SESSION,
+    )
+    .await;
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["region"], "jp");
+    assert_eq!(env["data"]["source"], "ai");
+    assert_eq!(rec.take(), vec!["set_user_region(JP)"]);
+    assert_eq!(permission_level_of(&all, "SetUserRegion"), "write");
+
+    let outcome = crate::tools::envelope::take_outcome(SESSION, "SetUserRegion")
+        .expect("工具结果应当已登记");
+    assert_eq!(outcome.display.text, "地区已记下");
+    assert_eq!(outcome.display.facts, vec!["日本"]);
+    assert_eq!(outcome.display.changed, crate::tools::Changed::None);
+}
+
 #[tokio::test]
 async fn node_import_text_reports_imported_and_skipped() {
     let (svc, rec) = FakeServices::with_data(json!({
@@ -902,7 +982,12 @@ async fn config_create_and_node_create_pass_parsed_fields() {
     rec.take();
     let (is_error, env) = run(
         tool(&all, "ConfigCreate"),
-        json!({ "name": "公司", "connect_mode": "tun", "routing_mode": "proxy_all" }),
+        json!({
+            "name": "公司",
+            "connect_mode": "tun",
+            "routing_mode": "proxy_all",
+            "node_ids": ["nod_1"]
+        }),
     )
     .await;
     assert!(!is_error, "{env}");

@@ -7,6 +7,10 @@ use super::error::{StoreError, StoreResult};
 /// 本地代理端口（用户设置）。值是十进制字符串；缺失或损坏时回落默认值。
 pub const PROXY_PORT_KEY: &str = "proxy_port";
 
+/// 用户所在地区（小写 cc）。只有 AI 通过 `SetUserRegion` 写入；
+/// 缺失、空串或非法值一律视为「没有用户值」。
+pub const USER_REGION_KEY: &str = "user_region";
+
 /// 读用户设置的代理端口。**读不写库**：从未设置过时返回默认值。
 pub fn proxy_port(conn: &Connection) -> u16 {
     get(conn, PROXY_PORT_KEY)

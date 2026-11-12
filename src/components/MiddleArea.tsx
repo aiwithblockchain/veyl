@@ -134,8 +134,8 @@ function SourceChoice({
           onClick={onUseSeedNodes}
           disabled={!onUseSeedNodes}
         >
-          <strong>用 Veyl 提供的测试节点（仅供试用）</strong>
-          <small>从默认节点包里挑一台，先试试。</small>
+          <strong>Veyl 免费节点</strong>
+          <small>不用自己准备，先连上再说。</small>
         </button>
         <button
           type="button"

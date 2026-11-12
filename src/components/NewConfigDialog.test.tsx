@@ -2,77 +2,55 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, ConfigCreateInput } from "../agent/bridge";
-import type { Category, NodeSummary } from "../agent/protocol";
+import type { ConfigSummary } from "../agent/protocol";
 import { NewConfigDialog } from "./NewConfigDialog";
 
 afterEach(cleanup);
 
-const CATEGORIES: Category[] = [
-  {
-    id: "chatgpt",
-    name_zh: "ChatGPT",
-    name_en: "ChatGPT",
-    description: "对话",
-    item_count: 1,
-    rule_sets: ["openai"],
-    dns_classifiable: true,
-  },
-  {
-    id: "github",
-    name_zh: "GitHub",
-    name_en: "GitHub",
-    description: "代码托管",
-    item_count: 1,
-    rule_sets: ["github"],
-    dns_classifiable: true,
-  },
-];
-
-function node(id: string, name = id): NodeSummary {
+function status(nodeCount: number) {
   return {
-    node_id: id,
-    name,
-    server: "203.0.113.9",
-    port: 8388,
-    method: "aes-256-gcm",
-    protocol: "shadowsocks",
-    source: "manual",
-    created_at: Date.now(),
+    packageId: null,
+    version: null,
+    appliedAt: null,
+    newVersionAvailable: false,
+    nodeCount,
+    checkedAt: null,
+    source: "cache" as const,
+    changed: false,
+    reason: null,
+    added: 0,
+    removed: 0,
   };
 }
 
 function makeBridge(overrides: Partial<AgentBridge> = {}): AgentBridge {
   return {
     mode: "mock",
-    categoryList: vi.fn(async () => ({ categories: CATEGORIES, total: CATEGORIES.length })),
-    nodeImportText: vi.fn(async () => ({ imported: 0, skipped: [], nodes: [] })),
-    nodeImportUrl: vi.fn(async () => ({ imported: 0, skipped: [], nodes: [] })),
-    nodeCreate: vi.fn(async (input: { name: string }) => node(`n_${input.name}`, input.name)),
+    defaultProfileStatus: vi.fn(async () => status(3)),
+    defaultProfileRefresh: vi.fn(async () => status(3)),
     ...overrides,
   } as unknown as AgentBridge;
 }
 
 interface RenderOptions {
-  aiReady?: boolean;
   region?: string | null;
-  configs?: { name: string }[];
+  configs?: Partial<ConfigSummary>[];
   bridge?: AgentBridge;
-  onCreate?: (input: ConfigCreateInput) => Promise<{ ok: boolean; message?: string }>;
-  onAiAssist?: () => void;
-  onNeedAiSetup?: () => void;
+  defaultNodeCount?: number | null;
+  connected?: boolean;
+  onCreate?: (input: ConfigCreateInput) => Promise<{ ok: boolean; message?: string; reason?: string }>;
+  onCreated?: (connect: boolean) => void;
   onClose?: () => void;
-  onCreated?: () => void;
 }
 
 function renderDialog(options: RenderOptions = {}) {
   const props = {
     bridge: options.bridge ?? makeBridge(),
-    configs: (options.configs ?? []) as never,
-    aiReady: options.aiReady ?? false,
+    configs: (options.configs ?? []) as ConfigSummary[],
     region: options.region === undefined ? "cn" : options.region,
+    defaultNodeCount: options.defaultNodeCount === undefined ? 3 : options.defaultNodeCount,
+    connected: options.connected ?? false,
     onClose: options.onClose ?? vi.fn(),
-    onAiAssist: options.onAiAssist ?? vi.fn(),
-    onNeedAiSetup: options.onNeedAiSetup ?? vi.fn(),
     onCreate: options.onCreate ?? vi.fn(async () => ({ ok: true })),
     onCreated: options.onCreated ?? vi.fn(),
   };
@@ -80,33 +58,37 @@ function renderDialog(options: RenderOptions = {}) {
   return props;
 }
 
-function enterManual() {
-  fireEvent.click(screen.getByRole("button", { name: /我自己配置/ }));
-}
-
-function chooseSource(name: string | RegExp) {
-  fireEvent.click(screen.getByRole("radio", { name }));
-}
-
-describe("新建配置入口", () => {
-  it("两张卡、焦点在第一张、没有实心主按钮", () => {
+describe("新建配置两问页", () => {
+  it("只有两问，没有 AI 协助卡；默认 TUN + 免费节点，焦点在第一组", () => {
     renderDialog();
-    expect(screen.getByRole("button", { name: /AI 协助/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /我自己配置/ })).toBeTruthy();
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: /AI 协助/ }));
-    expect(document.querySelector(".btn--primary")).toBeNull();
+    expect(screen.getByText("怎么接管")).toBeTruthy();
+    expect(screen.getByText("节点从哪来")).toBeTruthy();
+    expect(screen.queryByText("AI 协助")).toBeNull();
+    expect(
+      (screen.getByRole("radio", { name: /TUN 模式/ }) as HTMLElement).getAttribute(
+        "aria-checked",
+      ),
+    ).toBe("true");
+    expect(
+      (screen.getByRole("radio", { name: /Veyl 免费节点/ }) as HTMLElement).getAttribute(
+        "aria-checked",
+      ),
+    ).toBe("true");
+    expect(document.activeElement).toBe(screen.getByRole("radio", { name: /TUN 模式/ }));
+    expect(screen.getByLabelText("第 1 步，共 2 步")).toBeTruthy();
   });
 
-  it("↑↓ 在两张卡之间移动焦点", () => {
+  it("↑↓ 在组内移动焦点并即时选中", () => {
     renderDialog();
-    const ai = screen.getByRole("button", { name: /AI 协助/ });
-    const manual = screen.getByRole("button", { name: /我自己配置/ });
-
-    fireEvent.keyDown(ai, { key: "ArrowDown" });
-    expect(document.activeElement).toBe(manual);
-
-    fireEvent.keyDown(manual, { key: "ArrowUp" });
-    expect(document.activeElement).toBe(ai);
+    const tun = screen.getByRole("radio", { name: /TUN 模式/ });
+    const proxy = screen.getByRole("radio", { name: /Proxy 模式/ });
+    fireEvent.keyDown(tun, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(proxy);
+    expect(proxy.getAttribute("aria-checked")).toBe("true");
+    expect(tun.getAttribute("aria-checked")).toBe("false");
+    fireEvent.keyDown(proxy, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(tun);
+    expect(tun.getAttribute("aria-checked")).toBe("true");
   });
 
   it("Esc 关闭弹窗", () => {
@@ -114,299 +96,237 @@ describe("新建配置入口", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
   });
-
-  it("已配好 AI：点卡片进入 AI 协助", () => {
-    const { onAiAssist, onNeedAiSetup } = renderDialog({ aiReady: true });
-    fireEvent.click(screen.getByRole("button", { name: /AI 协助/ }));
-    expect(onAiAssist).toHaveBeenCalled();
-    expect(onNeedAiSetup).not.toHaveBeenCalled();
-  });
-
-  it("未配 AI：卡片仍显示并直接进配置引导，不提示「先配置 AI」", () => {
-    const { onAiAssist, onNeedAiSetup } = renderDialog({ aiReady: false });
-    const card = screen.getByRole("button", { name: /AI 协助/ });
-    expect(card.textContent).toContain("还没配置 AI");
-    fireEvent.click(card);
-    expect(onNeedAiSetup).toHaveBeenCalled();
-    expect(onAiAssist).not.toHaveBeenCalled();
-    expect(screen.queryByText(/先配置 AI/)).toBeNull();
-    // 弹窗没关，两张卡还在。
-    expect(screen.getByRole("button", { name: /我自己配置/ })).toBeTruthy();
-  });
-
-  it("手工表单可以返回入口", () => {
-    renderDialog();
-    enterManual();
-    expect(screen.getByLabelText("名字")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /返回/ }));
-    expect(screen.getByRole("button", { name: /AI 协助/ })).toBeTruthy();
-  });
 });
 
-describe("手工表单", () => {
-  it("默认值直接提交：本地网站直连映射为 direct，测试节点走 source", async () => {
+describe("审视页与保存", () => {
+  it("默认值直接下一步：审视页只读，保存为 direct + seed", async () => {
     const onCreate = vi.fn(async () => ({ ok: true }));
     const onCreated = vi.fn();
     renderDialog({ onCreate, onCreated });
-    enterManual();
 
-    expect((screen.getByLabelText("名字") as HTMLInputElement).value).toBe("我的配置");
-    expect(
-      (screen.getByRole("radio", { name: /本地网站直连/ }) as HTMLInputElement).checked,
-    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    expect(await screen.findByText("看一眼，没问题就创建。")).toBeTruthy();
+    expect(screen.getByLabelText("第 2 步，共 2 步")).toBeTruthy();
+    expect(screen.getByText("配置 1")).toBeTruthy();
+    expect(screen.getByText("智能模式")).toBeTruthy();
+    expect(screen.getByText("中国大陆")).toBeTruthy();
+    // 审视页是只读事实列表：没有输入框、没有单选控件。
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByRole("radio")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-
+    fireEvent.click(screen.getByRole("button", { name: "创建并连接" }));
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
     expect(onCreate).toHaveBeenCalledWith({
-      name: "我的配置",
+      name: "配置 1",
       connectMode: "tun",
       routingMode: "direct",
       source: "seed",
     });
-    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(true));
   });
 
-  it("名字重复报在名字字段，不创建", () => {
+  it("默认名取最小可用整数", () => {
+    renderDialog({ configs: [{ name: "配置 1" }, { name: "配置 3" }] });
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    expect(screen.getByText("配置 2")).toBeTruthy();
+  });
+
+  it("已连接时主按钮是「创建配置」，创建后不自动连接", async () => {
     const onCreate = vi.fn(async () => ({ ok: true }));
-    renderDialog({ configs: [{ name: "我的配置" }], onCreate });
-    enterManual();
-
-    fireEvent.change(screen.getByLabelText("名字"), { target: { value: "我的配置" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-
-    expect(screen.getByText("已经有一套叫这个名字的配置了。")).toBeTruthy();
-    expect(onCreate).not.toHaveBeenCalled();
+    const onCreated = vi.fn();
+    renderDialog({ onCreate, onCreated, connected: true });
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建配置" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(false));
   });
 
-  it("节点名称为空、地址带 ss:// 时报在字段旁", () => {
-    const bridge = makeBridge();
-    renderDialog({ bridge });
-    enterManual();
-    chooseSource("自己填");
-
-    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "   " } });
-    fireEvent.change(screen.getByLabelText("地址"), {
-      target: { value: "ss://203.0.113.9" },
-    });
-    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-
-    expect(screen.getByText("填一个节点名称。")).toBeTruthy();
-    expect(screen.getByText("只填地址，不要带 ss://。")).toBeTruthy();
-    expect(bridge.nodeCreate).not.toHaveBeenCalled();
-  });
-
-  it("端口 70000 时不发命令", () => {
-    const bridge = makeBridge();
-    renderDialog({ bridge });
-    enterManual();
-    chooseSource("自己填");
-
-    fireEvent.change(screen.getByLabelText("端口"), { target: { value: "70000" } });
-    fireEvent.change(screen.getByLabelText("地址"), {
-      target: { value: "203.0.113.9" },
-    });
-    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-
-    expect(screen.getByText("端口要填 1–65535 之间的整数。")).toBeTruthy();
-    expect(bridge.nodeCreate).not.toHaveBeenCalled();
-  });
-
-  it("订阅地址不是 https 时停在字段，不发请求", () => {
-    const bridge = makeBridge();
-    renderDialog({ bridge });
-    enterManual();
-    chooseSource("订阅地址");
-
-    fireEvent.change(screen.getByRole("textbox", { name: "订阅地址" }), {
-      target: { value: "http://example.com/sub" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-
-    expect(screen.getByText("订阅地址要以 https:// 开头。")).toBeTruthy();
-    expect(bridge.nodeImportUrl).not.toHaveBeenCalled();
-  });
-
-  it("粘贴两条 ss:// 按顺序绑定，配置仍然只建一套", async () => {
-    const bridge = makeBridge({
-      nodeImportText: vi.fn(async () => ({
-        imported: 2,
-        skipped: [],
-        nodes: [node("n1", "东京"), node("n2", "大阪")],
-      })),
-    });
+  it("Proxy 模式：审视页不出现本机代理地址，保存 system_proxy", async () => {
     const onCreate = vi.fn(async () => ({ ok: true }));
-    renderDialog({ bridge, onCreate });
-    enterManual();
-    chooseSource(/粘贴分享链接/);
+    renderDialog({ onCreate });
+    fireEvent.click(screen.getByRole("radio", { name: /Proxy 模式/ }));
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
 
-    fireEvent.change(screen.getByLabelText("粘贴分享链接"), {
-      target: { value: "ss://a\nss://b" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+    expect(await screen.findByText("Proxy 模式（只给代理地址）")).toBeTruthy();
+    expect(screen.queryByText(/127\.0\.0\.1/)).toBeNull();
+    expect(screen.queryByText("本机代理地址在设置里改")).toBeNull();
 
-    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
-    expect(bridge.nodeImportText).toHaveBeenCalledWith("ss://a\nss://b");
-    expect(onCreate).toHaveBeenCalledWith(
-      expect.objectContaining({ nodeIds: ["n1", "n2"] }),
+    fireEvent.click(screen.getByRole("button", { name: "创建并连接" }));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ connectMode: "system_proxy", routingMode: "direct" }),
+      ),
     );
   });
 
-  it("node_create 失败时直接显示后端 message，不依赖 reason", async () => {
-    const bridge = makeBridge({
-      nodeCreate: vi.fn(async () => {
-        throw { code: "INVALID_ARGUMENT", message: "服务器地址不合法" };
-      }),
-    });
+  it("地区未知：按全局模式保存并解释", async () => {
     const onCreate = vi.fn(async () => ({ ok: true }));
-    renderDialog({ bridge, onCreate });
-    enterManual();
-    chooseSource("自己填");
+    renderDialog({ region: null, onCreate });
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
 
-    fireEvent.change(screen.getByLabelText("地址"), {
-      target: { value: "203.0.113.9" },
-    });
-    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-
-    await waitFor(() => expect(screen.getByText("服务器地址不合法")).toBeTruthy());
-    expect(onCreate).not.toHaveBeenCalled();
-  });
-
-  it("先建节点再建配置；配置失败后重试复用已建节点", async () => {
-    const bridge = makeBridge();
-    const onCreate = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, message: "创建配置失败" })
-      .mockResolvedValueOnce({ ok: true });
-    renderDialog({ bridge, onCreate });
-    enterManual();
-    chooseSource("自己填");
-
-    fireEvent.change(screen.getByLabelText("地址"), {
-      target: { value: "203.0.113.9" },
-    });
-    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-
-    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
-    expect(bridge.nodeCreate).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("创建配置失败")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(2));
-    expect(bridge.nodeCreate).toHaveBeenCalledTimes(1);
-    const second = onCreate.mock.calls[1][0] as ConfigCreateInput;
-    expect(second.nodeIds).toEqual(["n_节点 1"]);
-  });
-
-  it("重试前改了节点字段：重新建节点，不复用旧 id", async () => {
-    let created = 0;
-    const nodeCreate = vi.fn(async (input: { name: string }) =>
-      node(`n${++created}`, input.name),
+    expect(await screen.findByText("全局模式")).toBeTruthy();
+    expect(
+      screen.getByText(/没识别出你在哪个地区，所以按全局模式创建/),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "创建并连接" }));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ routingMode: "proxy_all" }),
+      ),
     );
-    const bridge = makeBridge({ nodeCreate });
-    const onCreate = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, message: "创建配置失败" })
-      .mockResolvedValueOnce({ ok: true });
-    renderDialog({ bridge, onCreate });
-    enterManual();
-    chooseSource("自己填");
-
-    fireEvent.change(screen.getByLabelText("地址"), {
-      target: { value: "203.0.113.9" },
-    });
-    fireEvent.change(screen.getByLabelText("密码"), { target: { value: "secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
-    expect(nodeCreate).toHaveBeenCalledTimes(1);
-
-    fireEvent.change(screen.getByLabelText("地址"), {
-      target: { value: "203.0.113.10" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(2));
-
-    expect(nodeCreate).toHaveBeenCalledTimes(2);
-    expect(nodeCreate.mock.calls[1][0]).toMatchObject({ server: "203.0.113.10" });
-    expect((onCreate.mock.calls[1][0] as ConfigCreateInput).nodeIds).toEqual(["n2"]);
   });
 
-  it("后端 duplicate_name 按 reason 报在名字字段", async () => {
+  it("保存中 Esc、遮罩、✕、返回都不能关窗", async () => {
+    let resolveCreate: (value: { ok: boolean }) => void = () => {};
+    const onCreate = vi.fn(
+      () => new Promise<{ ok: boolean }>((resolve) => (resolveCreate = resolve)),
+    );
+    const onClose = vi.fn();
+    renderDialog({ onCreate, onClose });
+
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建并连接" }));
+    expect(await screen.findByRole("button", { name: "正在创建…" })).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.mouseDown(document.querySelector(".modal-backdrop") as HTMLElement);
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    fireEvent.click(screen.getByRole("button", { name: /返回/ }));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByText("看一眼，没问题就创建。")).toBeTruthy();
+
+    resolveCreate({ ok: true });
+    await waitFor(() => expect(onClose).not.toHaveBeenCalled());
+  });
+
+  it("后端 duplicate_name 显示在页内错误条，不关闭审视页", async () => {
     const onCreate = vi.fn(async () => ({
       ok: false,
       reason: "duplicate_name",
-      message: "name exists",
+      message: "已经有一套叫这个名字的配置了。",
     }));
-    renderDialog({ onCreate });
-    enterManual();
+    renderDialog({ configs: [{ name: "配置 1" }], onCreate });
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    fireEvent.click(screen.getByRole("button", { name: "创建并连接" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-    await waitFor(() =>
-      expect(screen.getByText("已经有一套叫这个名字的配置了。")).toBeTruthy(),
-    );
-    expect(screen.queryByText("name exists")).toBeNull();
+    expect(
+      await screen.findByText("已经有一套叫这个名字的配置了。"),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "创建并连接" })).toBeTruthy();
   });
+});
 
-  it("只指定服务：展开多选，未选时不能创建", async () => {
+describe("免费节点失败", () => {
+  it("池为空：下一步才拉取；失败显示三段式，不自动跳转", async () => {
+    const bridge = makeBridge({
+      defaultProfileRefresh: vi.fn(async () => status(0)),
+    });
     const onCreate = vi.fn(async () => ({ ok: true }));
-    renderDialog({ onCreate });
-    enterManual();
+    renderDialog({ bridge, defaultNodeCount: 0, onCreate });
 
-    fireEvent.click(screen.getByRole("radio", { name: /只有我指定的服务/ }));
-    expect(screen.getByLabelText("搜索服务")).toBeTruthy();
-    const chatgpt = await screen.findByRole("button", { name: "ChatGPT" });
+    expect(screen.getByText("还没有免费节点，下一步时会去获取。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-    expect(screen.getByText("至少选一个服务。")).toBeTruthy();
+    expect(await screen.findByText("没能取到免费节点。")).toBeTruthy();
+    expect(screen.getByText("可能没联网，或免费节点服务暂时不可用。")).toBeTruthy();
+    expect(
+      screen.getByText("点「重试」；还是不行，就改选「其它节点」。"),
+    ).toBeTruthy();
+    expect((screen.getByRole("button", { name: "下一步" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
     expect(onCreate).not.toHaveBeenCalled();
 
-    fireEvent.click(chatgpt);
-    fireEvent.click(screen.getByRole("button", { name: "创建" }));
-    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
-    expect(onCreate).toHaveBeenCalledWith(
-      expect.objectContaining({ routingMode: "proxy_selected", targets: ["chatgpt"] }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(bridge.defaultProfileRefresh).toHaveBeenCalledTimes(2));
   });
 
-  it("地区未知：说明不写「检测到 IP」，默认全部走 VPN，手选直连时提示做不到", () => {
-    renderDialog({ region: null });
-    enterManual();
+  it("池为空但拉取成功：进入审视页", async () => {
+    const bridge = makeBridge({
+      defaultProfileRefresh: vi.fn(async () => status(2)),
+    });
+    renderDialog({ bridge, defaultNodeCount: 0 });
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    expect(await screen.findByText("看一眼，没问题就创建。")).toBeTruthy();
+  });
 
-    expect(screen.getByText(/没能识别你的地区/)).toBeTruthy();
-    expect(screen.queryByText(/检测到你的 IP/)).toBeNull();
-    expect(
-      (screen.getByRole("radio", { name: /全部走 VPN/ }) as HTMLInputElement).checked,
-    ).toBe(true);
+  it("保存时 seed_unavailable：弹窗只报错，重试再提交；刷新由 hook 负责", async () => {
+    const bridge = makeBridge({
+      defaultProfileRefresh: vi.fn(async () => status(0)),
+    });
+    const onCreate = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, reason: "seed_unavailable" })
+      .mockResolvedValueOnce({ ok: true });
+    const onCreated = vi.fn();
+    renderDialog({ bridge, onCreate, onCreated });
 
-    fireEvent.click(screen.getByRole("radio", { name: /本地网站直连/ }));
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建并连接" }));
+
+    expect(await screen.findByText("没能取到免费节点。")).toBeTruthy();
+    // 刷新 + 重试只在 useVpnSession.createConfig 一层，弹窗不再重复。
+    expect(bridge.defaultProfileRefresh).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    expect(onCreate).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("供应商广场", () => {
+  it("预览页三条示例、按钮 disabled、返回保留选择且不建配置", async () => {
+    const onCreate = vi.fn(async () => ({ ok: true }));
+    const { onClose } = renderDialog({ onCreate });
+
+    fireEvent.click(screen.getByRole("radio", { name: /Proxy 模式/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /其它节点/ }));
+    expect(screen.getByText("预览")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+
+    expect(await screen.findByText("示例供应商 A")).toBeTruthy();
+    expect(screen.getAllByText("供应商广场")).toHaveLength(1);
+    expect(screen.getByText("示例供应商 B")).toBeTruthy();
+    expect(screen.getByText("示例供应商 C")).toBeTruthy();
+    const pending = screen.getAllByRole("button", { name: "即将支持" });
+    expect(pending).toHaveLength(3);
+    pending.forEach((button) => expect((button as HTMLButtonElement).disabled).toBe(true));
     expect(
-      screen.getByText("认不出你所在的地区，选这个的话所有网站都会走 VPN。"),
+      screen.getByText("本页只做展示：不能购买、不能跳转、不能加入配置。"),
     ).toBeTruthy();
-  });
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
 
-  it("中国大陆：说明行用「你的电脑在中国大陆」，改选后也不再说「默认选了」", () => {
-    renderDialog({ region: "cn" });
-    enterManual();
-    expect(screen.getByText(/你的电脑在中国大陆/)).toBeTruthy();
-    expect(screen.getByText(/建议让国内网站直连/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /返回新建配置/ }));
     expect(
-      (screen.getByRole("radio", { name: /本地网站直连/ }) as HTMLInputElement).checked,
-    ).toBe(true);
-
-    fireEvent.click(screen.getByRole("radio", { name: /全部走 VPN/ }));
-    expect(screen.getByText(/建议让国内网站直连/)).toBeTruthy();
-    expect(screen.queryByText(/默认选了/)).toBeNull();
+      (screen.getByRole("radio", { name: /Proxy 模式/ }) as HTMLElement).getAttribute(
+        "aria-checked",
+      ),
+    ).toBe("true");
+    expect(
+      (screen.getByRole("radio", { name: /其它节点/ }) as HTMLElement).getAttribute(
+        "aria-checked",
+      ),
+    ).toBe("true");
   });
 
-  it("只展示 Shadowsocks 的能力边界", () => {
-    renderDialog();
-    enterManual();
-    expect(screen.getByText("目前只支持 Shadowsocks 服务器。")).toBeTruthy();
-    expect(screen.queryByText(/传输方式/)).toBeNull();
-    expect(screen.queryByText(/SNI/)).toBeNull();
+  it("Esc 先回两问页，再按才关弹窗", () => {
+    const onClose = vi.fn();
+    renderDialog({ onClose });
+    fireEvent.click(screen.getByRole("radio", { name: /其它节点/ }));
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    expect(screen.getByText("示例供应商 A")).toBeTruthy();
+    const back = screen.getByRole("button", { name: /返回新建配置/ });
+    expect(document.activeElement).toBe(back);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByText("怎么接管")).toBeTruthy();
+    expect(document.activeElement).toBe(
+      screen.getByRole("radio", { name: /其它节点/ }),
+    );
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
   });
 });

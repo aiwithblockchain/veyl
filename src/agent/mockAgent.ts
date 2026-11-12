@@ -31,20 +31,25 @@ import type {
   TunProbeData,
 } from "./bridge";
 import { DEFAULT_PROXY_PORT, isLocalEndpoint, maskKey } from "./bridge";
+import { MOCK_CONFIG_STORAGE_KEY } from "../config/model";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
   AgentEvent,
   AiStatusPhase,
   Category,
   ConfigDetail,
+  ConfigRouteMode,
   NextAction,
   NodeCreateInput,
   NodeImportResult,
   NodeProbeMethod,
   NodeProbePhase,
   NodeSummary,
+  RouteSetModeData,
+  RouteState,
   RuntimeSnapshot,
   RuntimeState,
+  SystemRegion,
   ToolDisplayPayload,
   ToolPermissionLevel,
 } from "./protocol";
@@ -186,6 +191,9 @@ export class MockAgentBridge implements AgentBridge {
   /** 批量测速的节点目录：由 useVpnSession 的 mock 分支登记。 */
   private probeNodes = new Map<string, string[]>();
   private probeCache = new Map<string, NodeProbeResult>();
+  /** mock 的流量范围与修订号：真实链路在配置库里，这里放内存。 */
+  private routeModes = new Map<string, ConfigRouteMode>();
+  private routeRevisions = new Map<string, number>();
   private probeRun: {
     runId: string;
     configId: string;
@@ -370,13 +378,21 @@ export class MockAgentBridge implements AgentBridge {
     // 只读、不联网：状态接口永远报告缓存口径。
     return {
       ...this.defaultProfile,
-      nodeCount: this.profiles.length,
+      nodeCount: this.mockSeedCount(),
       source: "cache",
       changed: false,
       reason: null,
       added: 0,
       removed: 0,
     };
+  }
+
+  private mockSeedEmpty(): boolean {
+    return mockFlag("veyl.mock.seed.empty") === "1";
+  }
+
+  private mockSeedCount(): number {
+    return this.mockSeedEmpty() ? 0 : this.profiles.length;
   }
 
   async proxyPortGet(): Promise<ProxyPortSettings> {
@@ -421,22 +437,25 @@ export class MockAgentBridge implements AgentBridge {
     const offline = mockFlag("veyl.mock.seed.offline") === "1";
     const invalid = mockFlag("veyl.mock.seed.invalid") === "1";
     const localWrite = mockFlag("veyl.mock.seed.localwrite") === "1";
+    const empty = this.mockSeedEmpty();
     await sleep(offline ? 500 : 900);
     const checkedAt = now();
-    if (offline || invalid || localWrite) {
-      // 浏览器演示：三种失败都保留原节点，不报错。
+    if (offline || invalid || localWrite || empty) {
+      // 浏览器演示：失败都保留原节点，不报错；empty 模拟池本身为空。
       const next: DefaultProfileStatus = {
         ...this.defaultProfile,
-        nodeCount: this.profiles.length,
+        nodeCount: this.mockSeedCount(),
         checkedAt,
         // 内容异常/离线都没拿到可用的远端内容；写入失败是拿到了但没落盘。
         source: localWrite ? "network" : "cache",
         changed: false,
-        reason: offline
-          ? "offline"
-          : invalid
-            ? "invalid_content"
-            : "local_write",
+        reason: empty
+          ? "invalid_content"
+          : offline
+            ? "offline"
+            : invalid
+              ? "invalid_content"
+              : "local_write",
         added: 0,
         removed: 0,
       };
@@ -1667,8 +1686,122 @@ export class MockAgentBridge implements AgentBridge {
     return { categories: matched.slice(0, limit), total: matched.length };
   }
 
-  async systemRegion(): Promise<string | null> {
-    return this.mockRegion();
+  async systemRegion(): Promise<SystemRegion> {
+    return {
+      region: this.mockRegion(),
+      source: mockFlag("veyl.mock.regionSource") === "ai" ? "ai" : "system",
+    };
+  }
+
+  private readMockConfigs(): ConfigDetail[] {
+    try {
+      const raw = localStorage.getItem(MOCK_CONFIG_STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as { configs?: unknown };
+      return Array.isArray(parsed.configs)
+        ? (parsed.configs as ConfigDetail[]).filter(
+            (config) => Boolean(config) && typeof config.config_id === "string",
+          )
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private routeSubject(configId?: string): { configId: string; mode: ConfigRouteMode } {
+    const stored = this.readMockConfigs();
+    const id =
+      configId ??
+      stored.find((config) => config.config_id === this.runtime.config_id)?.config_id ??
+      stored[0]?.config_id ??
+      this.runtime.config_id ??
+      "config_demo";
+    const storedMode = stored.find((config) => config.config_id === id)?.routing_mode;
+    return { configId: id, mode: this.routeModes.get(id) ?? storedMode ?? "direct" };
+  }
+
+  private routeState(configId: string, mode: ConfigRouteMode): RouteState {
+    const connected = this.runtime.state === "running" || this.runtime.state === "degraded";
+    const revision = this.routeRevisions.get(configId) ?? 1;
+    const region = this.mockRegion();
+    return {
+      config_id: configId,
+      routing_mode: mode,
+      applied_mode: connected ? mode : null,
+      targets: [],
+      custom_rules: [],
+      route_revision: revision,
+      applied_revision: connected ? revision : null,
+      effective: connected ? "current_connection" : "next_connection",
+      reconnect_required: false,
+      local_direct_basis: region === null ? "none" : region === "cn" ? "domain_and_ip" : "ip_only",
+      detected_region: region,
+      applied_region: connected ? this.runtime.route_region : null,
+    };
+  }
+
+  async routeGet(configId?: string): Promise<RouteState> {
+    const subject = this.routeSubject(configId);
+    return this.routeState(subject.configId, subject.mode);
+  }
+
+  async routeSetMode(
+    mode: "direct" | "proxy_all",
+    configId?: string,
+  ): Promise<RouteSetModeData> {
+    await sleep(180);
+    const subject = this.routeSubject(configId);
+    if (subject.mode === mode) {
+      return {
+        ...this.routeState(subject.configId, mode),
+        hot_switched: false,
+        reconnect: "not_running",
+      };
+    }
+
+    this.routeModes.set(subject.configId, mode);
+    const revision = (this.routeRevisions.get(subject.configId) ?? 1) + 1;
+    this.routeRevisions.set(subject.configId, revision);
+    // 同步到 mock 配置库，刷新页面后开关仍保持切换后的值。
+    try {
+      const raw = localStorage.getItem(MOCK_CONFIG_STORAGE_KEY);
+      if (raw) {
+        const store = JSON.parse(raw) as {
+          configs?: ConfigDetail[];
+          activeId?: string | null;
+        };
+        if (Array.isArray(store.configs)) {
+          store.configs = store.configs.map((config) =>
+            config.config_id === subject.configId
+              ? { ...config, routing_mode: mode, updated_at: Date.now() }
+              : config,
+          );
+          localStorage.setItem(MOCK_CONFIG_STORAGE_KEY, JSON.stringify(store));
+        }
+      }
+    } catch {
+      // 存不了就只在本次会话里生效。
+    }
+
+    const state = this.routeState(subject.configId, mode);
+    const connected = this.runtime.state === "running" || this.runtime.state === "degraded";
+    this.emit({
+      name: AGENT_EVENTS.routingChanged,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        config_id: subject.configId,
+        routing_mode: mode,
+        applied_mode: connected ? mode : null,
+        targets: [],
+        route_revision: revision,
+        applied_revision: connected ? revision : null,
+        change: "mode",
+        hot_switched: connected,
+        reconnect_required: false,
+        emitted_at: now(),
+      },
+    });
+    return { ...state, hot_switched: connected, reconnect: "not_running" };
   }
 
   private mockRegion(): string | null {

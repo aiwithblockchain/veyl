@@ -48,11 +48,15 @@ import type {
   AgentEvent,
   Category,
   ConfigDetail,
+  ConfigRouteMode,
   NodeCreateInput,
   NodeImportResult,
   NodeImportSkipped,
   NodeSummary,
+  RouteSetModeData,
+  RouteState,
   RuntimeSnapshot,
+  SystemRegion,
 } from "./protocol";
 
 const EVENT_NAMES = [...AI_EVENT_NAMES, ...APP_EVENT_NAMES];
@@ -354,6 +358,45 @@ function normalizeReportAction(
     report_dir: typeof raw.report_dir === "string" ? raw.report_dir : "",
     body_chars: typeof raw.body_chars === "number" ? raw.body_chars : 0,
     body: typeof raw.body === "string" ? raw.body : null,
+  };
+}
+
+function normalizeRouteMode(value: unknown): ConfigRouteMode {
+  return value === "direct" || value === "proxy_selected" ? value : "proxy_all";
+}
+
+function normalizeRegion(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : null;
+}
+
+function normalizeRouteState(raw: Record<string, unknown>): RouteState {
+  const mode = normalizeRouteMode(raw.routing_mode);
+  const appliedRaw = raw.applied_mode;
+  return {
+    config_id: typeof raw.config_id === "string" ? raw.config_id : "",
+    routing_mode: mode,
+    applied_mode:
+      appliedRaw === "direct" || appliedRaw === "proxy_all" || appliedRaw === "proxy_selected"
+        ? appliedRaw
+        : null,
+    targets: Array.isArray(raw.targets)
+      ? raw.targets.filter((item): item is string => typeof item === "string")
+      : [],
+    custom_rules: Array.isArray(raw.custom_rules)
+      ? raw.custom_rules.filter(
+          (item): item is Record<string, unknown> => Boolean(item) && typeof item === "object",
+        )
+      : [],
+    route_revision: typeof raw.route_revision === "number" ? raw.route_revision : 0,
+    applied_revision: typeof raw.applied_revision === "number" ? raw.applied_revision : null,
+    effective: raw.effective === "current_connection" ? "current_connection" : "next_connection",
+    reconnect_required: raw.reconnect_required === true,
+    local_direct_basis:
+      raw.local_direct_basis === "domain_and_ip" || raw.local_direct_basis === "ip_only"
+        ? raw.local_direct_basis
+        : "none",
+    detected_region: normalizeRegion(raw.detected_region),
+    applied_region: normalizeRegion(raw.applied_region),
   };
 }
 
@@ -683,11 +726,39 @@ export class TauriAgentBridge implements AgentBridge {
     };
   }
 
-  async systemRegion(): Promise<string | null> {
-    const raw = await call<{ region?: unknown }>("system_region");
-    return typeof raw.region === "string" && raw.region.trim()
-      ? raw.region.trim().toLowerCase()
-      : null;
+  async systemRegion(): Promise<SystemRegion> {
+    const raw = await call<{ region?: unknown; source?: unknown }>("system_region");
+    return {
+      region: normalizeRegion(raw.region),
+      source: raw.source === "ai" ? "ai" : "system",
+    };
+  }
+
+  async routeGet(configId?: string): Promise<RouteState> {
+    const raw = await call<Record<string, unknown>>(
+      "route_get",
+      configId ? { configId } : {},
+    );
+    return normalizeRouteState(raw ?? {});
+  }
+
+  async routeSetMode(
+    mode: "direct" | "proxy_all",
+    configId?: string,
+  ): Promise<RouteSetModeData> {
+    const raw = await call<Record<string, unknown>>("route_set_mode", {
+      ...(configId ? { configId } : {}),
+      mode,
+    });
+    const reconnect =
+      raw.reconnect === "reconnected" || raw.reconnect === "reconnect_failed"
+        ? raw.reconnect
+        : "not_running";
+    return {
+      ...normalizeRouteState(raw ?? {}),
+      hot_switched: raw.hot_switched === true,
+      reconnect,
+    };
   }
 
   async defaultProfileStatus(): Promise<DefaultProfileStatus> {

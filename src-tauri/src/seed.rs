@@ -374,7 +374,7 @@ async fn apply_fetch(
             log::warn!("种子节点同步失败，整批回滚并保留旧缓存：{error}");
             return RefreshOutcome::Offline {
                 cached: cached_content_available(store),
-                error: format!("保存测试节点失败：{error}"),
+                error: format!("保存 Veyl 免费节点失败：{error}"),
                 reason: OfflineReason::LocalWrite,
             };
         }

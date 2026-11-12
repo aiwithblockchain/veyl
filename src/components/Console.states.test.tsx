@@ -88,6 +88,13 @@ interface RenderOptions {
   aiReady?: boolean;
   onReconnect?: () => void;
   onReportProblem?: () => void;
+  region?: string | null;
+  scopeRegion?: string | null;
+  routingMode?: "direct" | "proxy_all" | null;
+  onSetRoutingMode?: (mode: "direct" | "proxy_all") => Promise<{
+    ok: boolean;
+    message?: string;
+  }>;
 }
 
 function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
@@ -112,6 +119,10 @@ function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
       runtime={opts.runtime ?? makeRuntime()}
       failedAfterConnected={opts.failedAfterConnected}
       helperPreparing={opts.helperPreparing}
+      region={opts.region}
+      scopeRegion={opts.scopeRegion}
+      routingMode={opts.routingMode}
+      onSetRoutingMode={opts.onSetRoutingMode}
     />
   );
 }
@@ -139,14 +150,37 @@ function renderConsole(opts: RenderOptions) {
   };
 }
 
+describe("流量范围开关", () => {
+  it("已连接用 scopeRegion（本次连接快照），不用实时 region", () => {
+    const { container } = render(
+      consoleElement(makeConfig("n-tokyo"), {
+        runtime: makeRuntime({ state: "running" }),
+        region: "cn",
+        scopeRegion: "jp",
+        routingMode: "direct",
+        onSetRoutingMode: async () => ({ ok: true }),
+      }),
+    );
+    expect(container.querySelector(".scope__note")?.textContent).toBe(
+      "本国网站直连，其它走 VPN。",
+    );
+    expect(container.textContent).not.toContain("国内网站直连，其它走 VPN。");
+  });
+
+  it("没有 onSetRoutingMode 时不渲染开关", () => {
+    const { container } = renderConsole({ routingMode: "direct" });
+    expect(container.querySelector(".scope")).toBeNull();
+  });
+});
+
 describe("状态矩阵", () => {
-  it("1 未连接：H1 未连接，读数行是方式 / 范围 / 节点", () => {
+  it("1 未连接：H1 未连接，读数行是方式 / 节点", () => {
     const r = renderConsole({});
     expect(r.stateWord).toBe("未连接");
     expect(r.timecode).toBeNull();
-    expect(r.rows.map((row) => row.label)).toEqual(["方式", "范围", "节点"]);
-    expect(r.rows[0].value).toBe("浏览器代理");
-    expect(r.rows[2].value).toBe("2 个可选");
+    expect(r.rows.map((row) => row.label)).toEqual(["方式", "节点"]);
+    expect(r.rows[0].value).toBe("本机代理");
+    expect(r.rows[1].value).toBe("2 个可选");
     expect(r.text(".hero .btn")).toBe("启动 VPN");
   });
 
@@ -349,7 +383,7 @@ describe("状态矩阵", () => {
       }),
     });
     expect(r.timecode).toBeNull();
-    expect(r.rows.map((row) => row.label)).toEqual(["方式", "范围", "节点"]);
+    expect(r.rows.map((row) => row.label)).toEqual(["方式", "节点"]);
     expect(r.text(".console")).not.toContain("上行");
     expect(r.text(".console")).not.toContain("已用");
   });

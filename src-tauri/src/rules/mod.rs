@@ -18,7 +18,7 @@ use crate::store::{self, rules_state::RulesState, Store};
 pub const RULES_DIR_NAME: &str = "rules";
 
 /// 用户所在地区。**判定只做一次，四个入口共用同一个类型**：
-/// 连接、批量测速、`route_get`、`system_region` 都读 [`detect_region`]，
+/// 连接、批量测速、`route_get`、`system_region` 都读 [`effective_region`]，
 /// 调用方不许再自己 `unwrap_or("cn")`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Region {
@@ -135,13 +135,74 @@ fn country_label(code: &str) -> Option<&'static str> {
     Some(name)
 }
 
-/// 判定顺序：`VEYL_REGION` → 系统时区 → 系统区域 → `LANG` → 未知。
+/// 生效地区来自哪里。`system_region` 与 `region-changed` 对外只报这两个值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionSource {
+    /// `VEYL_REGION`（测试/开发覆盖）或系统推断。
+    System,
+    /// 用户在对话里明示、由 `SetUserRegion` 写入 `settings.user_region`。
+    Ai,
+}
+
+impl RegionSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Ai => "ai",
+        }
+    }
+}
+
+/// 生效地区：`VEYL_REGION` → `settings.user_region` → 系统推断 → 未知。
+///
+/// 建连、测速、`route_get`、`system_region` 都读这里，不再各自调 [`detect_region`]。
+/// `user_region` 缺失、空串或非法（旧数据/手改库）按「没有用户值」回落，不报错。
+pub fn effective_region(store: &Store) -> (Region, RegionSource) {
+    let env_region = std::env::var("VEYL_REGION").ok();
+    let user_region = {
+        let conn = store.conn();
+        crate::store::settings::get(&conn, crate::store::settings::USER_REGION_KEY)
+            .ok()
+            .flatten()
+    };
+    effective_from_sources(
+        env_region.as_deref(),
+        user_region.as_deref(),
+        detect_region(),
+    )
+}
+
+/// 进程内取生效地区与来源（提示词注入等拿不到 `Store` 的场景）。
+pub fn effective_region_now() -> (Region, RegionSource) {
+    match crate::store::global() {
+        Some(store) => effective_region(store),
+        None => (detect_region(), RegionSource::System),
+    }
+}
+
+/// 纯函数：四档优先级便于单测，不读环境与数据库。
+fn effective_from_sources(
+    env_region: Option<&str>,
+    user_region: Option<&str>,
+    system: Region,
+) -> (Region, RegionSource) {
+    if let Some(region) = env_region.map(Region::from_code).filter(|r| r.code().is_some()) {
+        return (region, RegionSource::System);
+    }
+    if let Some(region) = user_region.map(Region::from_code).filter(|r| r.code().is_some()) {
+        return (region, RegionSource::Ai);
+    }
+    (system, RegionSource::System)
+}
+
+/// 系统推断：系统时区 → 系统区域 → `LANG` → 未知。
 ///
 /// 全部离线：不测 IP、不联网。时区优先于区域设置，因为分流关心的是位置，
 /// 而区域设置反映的是语言偏好（双语机器、旅行中、公司统一装机都会对不上）。
+/// `VEYL_REGION` 不在这里处理，见 [`effective_region`]。
 pub fn detect_region() -> Region {
     region_from_sources(
-        std::env::var("VEYL_REGION").ok().as_deref(),
+        None,
         system_timezone().as_deref(),
         system_locale().as_deref(),
         std::env::var("LANG").ok().as_deref(),
@@ -971,5 +1032,98 @@ mod region_tests {
         assert_eq!(Region::Unknown.code(), None);
         assert_eq!(Region::Cn.label(), "中国大陆");
         assert_eq!(Region::Cc("jp".into()).label(), "日本");
+    }
+
+    #[test]
+    fn effective_region_priority_is_env_user_system_unknown() {
+        let system = Region::Cc("us".into());
+        let cases = [
+            (
+                Some("hk"),
+                Some("jp"),
+                (Region::Cc("hk".into()), RegionSource::System),
+            ),
+            (
+                None,
+                Some("jp"),
+                (Region::Cc("jp".into()), RegionSource::Ai),
+            ),
+            // 非法 VEYL_REGION 不比合法用户值优先。
+            (
+                Some("nope"),
+                Some("JP"),
+                (Region::Cc("jp".into()), RegionSource::Ai),
+            ),
+            (None, None, (system.clone(), RegionSource::System)),
+            // 三档都没有 → 未知；建连侧按「无本地层、全代理」处理。
+            (
+                None,
+                None,
+                (Region::Unknown, RegionSource::System),
+            ),
+        ];
+        for (env, user, expected) in cases {
+            let system = if expected.0 == Region::Unknown {
+                Region::Unknown
+            } else {
+                system.clone()
+            };
+            assert_eq!(
+                effective_from_sources(env, user, system),
+                expected,
+                "env={env:?} user={user:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_empty_or_invalid_user_region_falls_back_to_system() {
+        let store = Store::open_in_memory().unwrap();
+        for value in [None, Some(""), Some("   "), Some("usa"), Some("日本")] {
+            {
+                let conn = store.conn();
+                match value {
+                    Some(text) => {
+                        crate::store::settings::set(
+                            &conn,
+                            crate::store::settings::USER_REGION_KEY,
+                            text,
+                        )
+                        .unwrap();
+                    }
+                    None => {
+                        crate::store::settings::delete(
+                            &conn,
+                            crate::store::settings::USER_REGION_KEY,
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+            let system = detect_region();
+            assert_eq!(
+                effective_region(&store),
+                (system, RegionSource::System),
+                "value={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_user_region_beats_system_inference() {
+        let store = Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn();
+            crate::store::settings::set(
+                &conn,
+                crate::store::settings::USER_REGION_KEY,
+                "JP",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            effective_region(&store),
+            (Region::Cc("jp".into()), RegionSource::Ai)
+        );
     }
 }

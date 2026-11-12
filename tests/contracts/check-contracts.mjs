@@ -1105,7 +1105,7 @@ function frontendToolDisplayNames() {
   return new Set();
 }
 
-check("前端映射表工具名集合与 tools.md §3 的 45 个相等", () => {
+check("前端映射表工具名集合与 tools.md §3 的 47 个相等", () => {
   const names = frontendToolDisplayNames();
   if (names === null) return []; // 未实现时由下一条 advisory 报，不在这里制造红
   const tools = contractTools();
@@ -1998,9 +1998,21 @@ check("system_region / node_import_text 的形状、错误码与注册（契约�
   const s1010 = mdSection(md, "### 10.10", "\n## ");
   if (!s1010) problems.push("commands.md 找不到 §10.10");
   else {
-    for (const phrase of ["小写 ISO 3166-1 alpha-2", "判不出为 `null`", "与 `route_get.detected_region` 同源"]) {
+    for (const phrase of [
+      "小写 ISO 3166-1 alpha-2",
+      "判不出为 `null`",
+      `"system" | "ai"`,
+      "`\"ai\"` = 来自 AI",
+      "与 `route_get.detected_region` 同源",
+    ]) {
       if (!s1010.includes(phrase)) problems.push(`§10.10 缺少「${phrase}」`);
     }
+  }
+
+  const regionRow = table.match(/^\|\s*68\s*\|\s*`system_region`\s*\|[^\n]*$/m);
+  if (!regionRow) problems.push("commands.md §2 找不到 system_region 行");
+  else if (!/source:\s*"system"\s*\\?\|\s*"ai"/.test(regionRow[0])) {
+    problems.push("commands.md §2 的 system_region 返回形状缺少 source");
   }
 
   const lib = read("src-tauri/src/lib.rs");
@@ -2096,6 +2108,107 @@ check("各契约文件内的 contract_version 字面量等于文件版本（契�
     }
   }
   return problems;
+});
+
+// --- 19：地区写入链路（SetUserRegion + region-changed） ---
+
+check("地区写入链路：SetUserRegion 与 region-changed（契约）", () => {
+  const tools = read("docs/contracts/tools.md");
+  const events = read("docs/contracts/events.md");
+  const commands = read("docs/contracts/commands.md");
+  const problems = [];
+
+  // 地区没有 UI 写入路径：命令表与工具表都不能有 region_preference。
+  if (contractCommands().has("region_preference")) {
+    problems.push("commands.md §2 仍列出 region_preference（地区没有 UI 写入路径）");
+  }
+  if (contractTools().has("RegionPreference")) {
+    problems.push("tools.md §3 仍列出 RegionPreference（地区没有 UI 写入路径）");
+  }
+
+  // AI 工具：表格行、权限、参数、JSON Schema、注册清单。
+  const toolRow = contractTools().get("SetUserRegion");
+  if (!toolRow) {
+    problems.push("tools.md §3 缺少 SetUserRegion");
+  } else if (!toolRow.includes("`Write`")) {
+    problems.push("SetUserRegion 的 PermissionLevel 不是 Write");
+  }
+
+  const s447 = mdSection(tools, "### 4.47", "\n## ");
+  if (!s447) {
+    problems.push("tools.md 找不到 §4.47 SetUserRegion");
+  } else {
+    const schemaBlock = s447.match(/```json\n([\s\S]*?)\n```/);
+    if (!schemaBlock) {
+      problems.push("§4.47 找不到 JSON Schema");
+    } else {
+      let schema = null;
+      try {
+        schema = JSON.parse(schemaBlock[1]);
+      } catch (err) {
+        problems.push(`§4.47 的 JSON Schema 不是合法 JSON：${err.message}`);
+      }
+      if (schema) {
+        const props = Object.keys(schema.properties || {});
+        if (props.join(",") !== "region") {
+          problems.push(`§4.47 只允许 region 一个参数，实际是 ${props.join(", ")}`);
+        }
+        if (!(schema.required || []).includes("region")) {
+          problems.push("§4.47 的 region 必须是必填");
+        }
+        if (schema.additionalProperties !== false) {
+          problems.push("§4.47 必须声明 additionalProperties: false");
+        }
+        const pattern = schema.properties?.region?.pattern;
+        if (pattern !== "^[A-Za-z]{2}$") {
+          problems.push(`§4.47 的 region pattern 应为两字母 ISO 码，实际是 ${JSON.stringify(pattern)}`);
+        }
+      }
+    }
+    for (const phrase of ["invalid_region", "settings.user_region", "region-changed", "不重连"]) {
+      if (!s447.includes(phrase)) problems.push(`§4.47 缺少「${phrase}」`);
+    }
+  }
+
+  const regStart = tools.indexOf("### 3.1 注册清单（照抄）");
+  const regEnd = tools.indexOf("### 3.2", regStart);
+  const regBlock = regStart < 0 ? "" : tools.slice(regStart, regEnd < 0 ? undefined : regEnd);
+  if (!/Box::new\(SetUserRegionTool::new/.test(regBlock)) {
+    problems.push("tools.md §3.1 的注册清单缺少 SetUserRegionTool");
+  }
+
+  // 事件：总表、载荷字段、触发与版本。
+  const eventNames = contractEventNames();
+  if (!eventNames.includes("region-changed")) problems.push("events.md §1 事件总表缺少 region-changed");
+  const dupEvents = [...new Set(eventNames.filter((n, i) => eventNames.indexOf(n) !== i))];
+  if (dupEvents.length) problems.push(`events.md §1 事件名重复：${dupEvents.join(", ")}`);
+
+  const s421 = mdSection(events, "### 4.21", "\n## ");
+  if (!s421) {
+    problems.push("events.md 找不到 §4.21 region-changed");
+  } else {
+    for (const field of ["region", "source", "emitted_at"]) {
+      if (!new RegExp(`^\\s*${field}\\s*:`, "m").test(s421)) {
+        problems.push(`RegionChangedPayload 缺少 ${field}`);
+      }
+    }
+    if (!/source\s*:\s*"system"\s*\|\s*"ai"/.test(s421)) {
+      problems.push('RegionChangedPayload.source 必须是 "system" | "ai"');
+    }
+    for (const phrase of ["SetUserRegion", "下一次建连", "不发 `routing-changed`"]) {
+      if (!s421.includes(phrase)) problems.push(`§4.21 缺少「${phrase}」`);
+    }
+  }
+
+  if (!/region_preference/.test(commands)) {
+    problems.push("commands.md 没有写明「没有 region_preference 命令」");
+  }
+  return problems;
+});
+
+check("SetUserRegion 已在 Rust 工具集注册（契约）", () => {
+  if (registeredToolTypes().has("SetUserRegion")) return [];
+  return ["src-tauri/src/tools/mod.rs 的 vpn_tools() 缺少 SetUserRegionTool；契约已定稿，必须注册"];
 });
 
 // --- 输出 ---

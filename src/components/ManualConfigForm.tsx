@@ -652,7 +652,7 @@ export function ManualConfigForm({
             />
             <span className="new-config__mode-body">
               <span className="new-config__mode-title">
-                用 Veyl 提供的测试节点（仅供试用）
+                用 Veyl 免费节点
               </span>
             </span>
           </label>

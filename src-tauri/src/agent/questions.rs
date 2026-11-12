@@ -66,7 +66,7 @@ fn now_ms() -> i64 {
 ///
 /// 曾经用「答案包含『默认节点』」判断，模型问「不使用默认节点」、用户选了它，
 /// 也会被记成同意——门槛形同虚设。问题里没给这个规范选项的，一律不算。
-const SEED_OPTION: &str = "用 Veyl 提供的测试节点（仅供试用）";
+const SEED_OPTION: &str = "Veyl 免费节点（仅供试用）";
 
 /// 这次回答算不算「同意用默认节点」：问题确实给了规范选项，且用户选的正是它。
 fn grants_seed_consent(options: &[String], answer: &str) -> bool {
@@ -89,7 +89,7 @@ fn record_seed_consent(session_id: &str, request_id: &str) {
         .insert((session_id.to_string(), request_id.to_string()));
 }
 
-/// 本请求里用户是否明确选过「用 Veyl 提供的测试节点（仅供试用）」。
+/// 本请求里用户是否明确选过「Veyl 免费节点（仅供试用）」。
 pub fn seed_consent_granted(session_id: &str, request_id: &str) -> bool {
     seed_consents()
         .lock()
@@ -210,7 +210,7 @@ pub fn register_with(
     }
 
     let mut payload = json!({
-        "contract_version": "2.11.0",
+        "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
         "session_id": session_id,
         "request_id": request_id,
         "question_id": question_id,
@@ -593,7 +593,7 @@ mod memory_tests {
     async fn free_text_does_not_grant_seed_consent() {
         let (event, _rx) = event(
             "节点从哪来？",
-            &["用 Veyl 提供的测试节点（仅供试用）", "用我自己的节点"],
+            &["Veyl 免费节点（仅供试用）", "用我自己的节点"],
         );
         register("ses_seed_free", "req_seed_free", event);
         let id = list_pending("ses_seed_free")["questions"][0]["question_id"]
@@ -617,7 +617,7 @@ mod memory_tests {
             let request = format!("req_race_{round}");
             let (event, rx) = event(
                 "节点从哪来？",
-                &["用 Veyl 提供的测试节点（仅供试用）", "用我自己的节点"],
+                &["Veyl 免费节点（仅供试用）", "用我自己的节点"],
             );
             register(&session, &request, event);
             let id = list_pending(&session)["questions"][0]["question_id"]
@@ -676,12 +676,12 @@ mod memory_tests {
         cleanup_request("ses_skip_store", "req_skip_store");
     }
 
-    /// 选了「用 Veyl 提供的测试节点（仅供试用）」才留下同意记录，且只对当前请求有效。
+    /// 选了「Veyl 免费节点（仅供试用）」才留下同意记录，且只对当前请求有效。
     #[tokio::test]
     async fn choosing_the_default_nodes_grants_consent_until_the_request_ends() {
         let (event, _rx) = event(
             "节点从哪来？",
-            &["用 Veyl 提供的测试节点（仅供试用）", "用我自己的节点"],
+            &["Veyl 免费节点（仅供试用）", "用我自己的节点"],
         );
         register("ses_seed", "req_seed", event);
         let id = list_pending("ses_seed")["questions"][0]["question_id"]
@@ -690,7 +690,7 @@ mod memory_tests {
             .to_string();
 
         assert!(!seed_consent_granted("ses_seed", "req_seed"));
-        reply("ses_seed", &id, "用 Veyl 提供的测试节点（仅供试用）").unwrap();
+        reply("ses_seed", &id, "Veyl 免费节点（仅供试用）").unwrap();
         assert!(seed_consent_granted("ses_seed", "req_seed"));
         assert!(
             !seed_consent_granted("ses_seed", "req_other"),
@@ -708,7 +708,7 @@ mod memory_tests {
     async fn choosing_own_nodes_does_not_grant_consent() {
         let (event, _rx) = event(
             "节点从哪来？",
-            &["用 Veyl 提供的测试节点（仅供试用）", "用我自己的节点"],
+            &["Veyl 免费节点（仅供试用）", "用我自己的节点"],
         );
         register("ses_own", "req_own", event);
         let id = list_pending("ses_own")["questions"][0]["question_id"]
@@ -801,7 +801,7 @@ mod memory_tests {
     async fn skipping_the_question_does_not_grant_consent() {
         let (event, _rx) = event(
             "节点从哪来？",
-            &["用 Veyl 提供的测试节点（仅供试用）", "用我自己的节点"],
+            &["Veyl 免费节点（仅供试用）", "用我自己的节点"],
         );
         register("ses_skip", "req_skip", event);
         let id = list_pending("ses_skip")["questions"][0]["question_id"]
@@ -835,7 +835,7 @@ mod memory_tests {
         let (event, _rx) = event(
             "节点从哪来？",
             &[
-                "用 Veyl 提供的测试节点（仅供试用）（推荐）",
+                "Veyl 免费节点（仅供试用）（推荐）",
                 "用我自己的节点",
             ],
         );
@@ -848,7 +848,7 @@ mod memory_tests {
         reply(
             "ses_variant",
             &id,
-            "用 Veyl 提供的测试节点（仅供试用）（推荐）",
+            "Veyl 免费节点（仅供试用）（推荐）",
         )
         .unwrap();
         assert!(

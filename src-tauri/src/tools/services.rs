@@ -15,12 +15,36 @@ pub struct CatalogQuery {
     pub cursor: Option<String>,
 }
 
+/// 新建配置必须指定节点来源；工具层与服务层共用同一句文案。
+pub const SOURCE_REQUIRED_MESSAGE: &str =
+    "新建配置必须指定节点来源：用 Veyl 免费节点（source=seed）或绑定已有节点（node_ids）";
+
+/// 命令层与工具层共用：`source` 与 `node_ids` 不能同时缺省，
+/// `source: "empty"` 与空数组也算缺省。UI 与 AI 都必须先选节点来源。
+pub fn require_node_source(
+    source: Option<&str>,
+    node_ids: Option<&[String]>,
+) -> anyhow::Result<()> {
+    let has_seed = source
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("seed"));
+    let has_nodes = node_ids.is_some_and(|ids| !ids.is_empty());
+    if has_seed || has_nodes {
+        return Ok(());
+    }
+    Err(svc_error_with_details(
+        "INVALID_ARGUMENT",
+        SOURCE_REQUIRED_MESSAGE,
+        json!({ "reason": "source_required" }),
+    ))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ConfigCreateInput {
     pub name: String,
     /// system_proxy | tun
     pub connect_mode: String,
-    /// direct | proxy_all | proxy_selected
+    /// direct | proxy_all（`proxy_selected` 只用于读旧数据，写入路径已拒绝）
     pub routing_mode: String,
     /// seed：绑定当前种子的全部节点；与 node_ids 互斥
     pub source: Option<String>,
@@ -170,6 +194,27 @@ pub trait VpnToolServices: Send + Sync {
         config_id: &str,
         categories: Vec<String>,
     ) -> anyhow::Result<Value>;
+
+    /// 生效地区与来源（`{ region, source }`）。只读；不写库。
+    /// 测试替身没有自己的 store 时走全局库；正式实现按自己的 store 读。
+    async fn system_region(&self) -> anyhow::Result<Value> {
+        let (region, source) = match crate::store::global() {
+            Some(store) => crate::rules::effective_region(store),
+            None => (
+                crate::rules::detect_region(),
+                crate::rules::RegionSource::System,
+            ),
+        };
+        Ok(json!({
+            "region": region.code(),
+            "source": source.as_str(),
+        }))
+    }
+
+    /// 写入 `settings.user_region` 并发 `region-changed`。**唯一**地区的写入路径。
+    async fn set_user_region(&self, _region: &str) -> anyhow::Result<Value> {
+        not_wired("设置地区")
+    }
 
     async fn net_config_get(&self) -> anyhow::Result<Value>;
     async fn net_repair(&self, action: &str, port: Option<u16>) -> anyhow::Result<Value>;
@@ -404,7 +449,7 @@ impl VpnToolServices for NotWiredServices {
     }
 
     async fn node_probe(&self, _node_id: &str) -> anyhow::Result<Value> {
-        not_wired("测试节点")
+        not_wired("Veyl 免费节点")
     }
 
     async fn default_profile_status(&self) -> anyhow::Result<Value> {
@@ -535,6 +580,19 @@ fn svc_error_with_details(
         message: message.to_string(),
         retryable: false,
         details: Some(details),
+    })
+}
+
+/// `region-changed` 的载荷（`events.md` 2.12.0）：生效值 + 来源 + 时间。
+fn region_changed_payload(
+    region: &crate::rules::Region,
+    source: crate::rules::RegionSource,
+) -> Value {
+    json!({
+        "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+        "region": region.code(),
+        "source": source.as_str(),
+        "emitted_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     })
 }
 
@@ -2232,6 +2290,10 @@ impl WiredServices {
         self.require_config(config_id)
     }
 
+    fn effective_region(&self) -> (crate::rules::Region, crate::rules::RegionSource) {
+        crate::rules::effective_region(&self.store)
+    }
+
     fn route_state_json(
         &self,
         config: &configs::Config,
@@ -2252,7 +2314,7 @@ impl WiredServices {
             })
             .unwrap_or_default();
         let applied = applied_mode.is_some() && applied_revision == Some(config.route_revision);
-        let region = crate::rules::detect_region();
+        let (region, _) = self.effective_region();
         // 已连接时报**运行配置实际用的地区**：用户中途改时区，配置不会重算。
         let basis_region = if running { applied_region } else { region.code() };
         let basis = local_direct_basis(basis_region);
@@ -2578,8 +2640,8 @@ impl WiredServices {
         let nodes = crate::seed::load_nodes(&self.store).ok_or_else(|| {
             svc_error_with_details(
                 "PRECONDITION_FAILED",
-                "现在拿不到测试节点，先刷新测试节点或手动添加一个",
-                json!({ "reason": "seed_unavailable", "hint": "先刷新测试节点或手动添加节点" }),
+                "现在拿不到 Veyl 免费节点，先刷新 Veyl 免费节点或手动添加一个",
+                json!({ "reason": "seed_unavailable", "hint": "先刷新 Veyl 免费节点或手动添加节点" }),
             )
         })?;
         let exclusions = {
@@ -2770,18 +2832,22 @@ fn validate_connect_mode(value: &str) -> anyhow::Result<()> {
 }
 
 fn validate_routing_mode(value: &str) -> anyhow::Result<()> {
-    if matches!(
-        value,
-        configs::ROUTING_DIRECT | configs::ROUTING_PROXY_ALL | configs::ROUTING_PROXY_SELECTED
-    ) {
-        Ok(())
-    } else {
-        Err(svc_error_with_details(
-            "INVALID_ARGUMENT",
-            format!("不支持的分流策略：{value}"),
-            json!({ "reason": "invalid_routing_mode" }),
-        ))
+    if matches!(value, configs::ROUTING_DIRECT | configs::ROUTING_PROXY_ALL) {
+        return Ok(());
     }
+    // `proxy_selected` 是已知但已下线的值：读旧数据可以，写入路径一律拒绝。
+    if value == configs::ROUTING_PROXY_SELECTED {
+        return Err(svc_error_with_details(
+            "INVALID_ARGUMENT",
+            "分流方式只有 direct / proxy_all 两档",
+            json!({ "reason": "routing_mode_not_supported" }),
+        ));
+    }
+    Err(svc_error_with_details(
+        "INVALID_ARGUMENT",
+        format!("不支持的分流策略：{value}"),
+        json!({ "reason": "invalid_routing_mode" }),
+    ))
 }
 
 fn validate_dns(dns: Option<&Value>) -> anyhow::Result<Value> {
@@ -3527,18 +3593,16 @@ impl VpnToolServices for WiredServices {
         }
 
         let running = self.is_connected(&self.manager.status().await);
+        // 只返回 `seed_unavailable`，不在这里刷新重试：是否刷新由上层决定一次。
         if source.as_deref() == Some("seed") && crate::seed::load_nodes(&self.store).is_none() {
-            crate::seed::refresh(&self.store, running, true).await;
-            if crate::seed::load_nodes(&self.store).is_none() {
-                return Err(svc_error_with_details(
-                    "PRECONDITION_FAILED",
-                    "现在拿不到测试节点",
-                    json!({
-                        "reason": "seed_unavailable",
-                        "hint": "先刷新测试节点或手动添加节点"
-                    }),
-                ));
-            }
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "现在拿不到 Veyl 免费节点",
+                json!({
+                    "reason": "seed_unavailable",
+                    "hint": "先刷新 Veyl 免费节点或手动添加节点"
+                }),
+            ));
         }
 
         let id = format!("cfg_{:016x}", rand::random::<u64>());
@@ -4520,7 +4584,7 @@ impl VpnToolServices for WiredServices {
                 };
                 Err(svc_error_with_details(
                     code,
-                    format!("现在拿不到测试节点：{error}"),
+                    format!("现在拿不到 Veyl 免费节点：{error}"),
                     json!({ "reason": reason.as_str(), "detail": { "reason": reason.as_str() } }),
                 ))
             }
@@ -4634,6 +4698,56 @@ impl VpnToolServices for WiredServices {
             running,
             applied_region.as_deref(),
         ))
+    }
+
+    async fn system_region(&self) -> anyhow::Result<Value> {
+        let (region, source) = self.effective_region();
+        Ok(json!({
+            "region": region.code(),
+            "source": source.as_str(),
+        }))
+    }
+
+    async fn set_user_region(&self, region: &str) -> anyhow::Result<Value> {
+        let parsed = crate::rules::Region::from_code(region);
+        let Some(code) = parsed.code().map(str::to_string) else {
+            return Err(svc_error_with_details(
+                "INVALID_ARGUMENT",
+                "地区必须是两字母国家/地区代码",
+                json!({ "reason": "invalid_region" }),
+            ));
+        };
+        let existing = {
+            let conn = self.store.conn();
+            crate::store::settings::get(&conn, crate::store::settings::USER_REGION_KEY)
+                .ok()
+                .flatten()
+                .map(|value| crate::rules::Region::from_code(&value))
+        };
+        // 同一地区重复写入：成功但不发事件（`tools.md` §5.2 幂等矩阵）。
+        if existing == Some(parsed.clone()) {
+            return Ok(json!({
+                "region": code,
+                "source": crate::rules::RegionSource::Ai.as_str(),
+            }));
+        }
+        {
+            let conn = self.store.conn();
+            crate::store::settings::set(
+                &conn,
+                crate::store::settings::USER_REGION_KEY,
+                &code,
+            )
+            .map_err(|error| svc_error("INTERNAL", error))?;
+        }
+        crate::agent::app_handle::emit(
+            "region-changed",
+            region_changed_payload(&parsed, crate::rules::RegionSource::Ai),
+        );
+        Ok(json!({
+            "region": code,
+            "source": crate::rules::RegionSource::Ai.as_str(),
+        }))
     }
 
     async fn route_set_mode(
@@ -5148,14 +5262,14 @@ impl VpnToolServices for WiredServices {
             "network",
             source_reachable,
             if source_reachable {
-                "测试节点源可达".into()
+                "Veyl 免费节点源可达".into()
             } else {
-                "测试节点源不可达".into()
+                "Veyl 免费节点源不可达".into()
             },
             if source_reachable {
                 None
             } else {
-                Some("连上网络后刷新测试节点")
+                Some("连上网络后刷新 Veyl 免费节点")
             },
             if source_reachable {
                 None
@@ -5205,16 +5319,16 @@ impl VpnToolServices for WiredServices {
             seed_available,
             if seed_available {
                 format!(
-                    "测试节点 {} 个",
+                    "Veyl 免费节点 {} 个",
                     seed.get("node_count").and_then(Value::as_i64).unwrap_or(0)
                 )
             } else {
-                "还没有测试节点缓存".into()
+                "还没有 Veyl 免费节点缓存".into()
             },
             if seed_available {
                 None
             } else {
-                Some("刷新测试节点")
+                Some("刷新 Veyl 免费节点")
             },
             if seed_available {
                 None
@@ -5236,14 +5350,14 @@ impl VpnToolServices for WiredServices {
             "config",
             !stale,
             if !seed_available {
-                "没有测试节点".into()
+                "没有 Veyl 免费节点".into()
             } else if stale {
-                "测试节点超过 6 小时未更新".into()
+                "Veyl 免费节点超过 6 小时未更新".into()
             } else {
-                "测试节点较新".into()
+                "Veyl 免费节点较新".into()
             },
             if stale {
-                Some("刷新测试节点")
+                Some("刷新 Veyl 免费节点")
             } else {
                 None
             },
@@ -5299,7 +5413,7 @@ impl VpnToolServices for WiredServices {
         };
 
         Ok(json!({
-            "contract_version": "3.9.0",
+            "contract_version": crate::tools::envelope::CONTRACT_VERSION,
             "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "app_version": env!("CARGO_PKG_VERSION"),
             "platform": crate::netcfg::platform_name(),
@@ -5690,7 +5804,7 @@ impl WiredServices {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let region = crate::rules::detect_region();
+        let (region, _) = self.effective_region();
         let route_region = region.code().map(str::to_string);
         let plan = crate::rules::plan::build(&crate::rules::plan::RouteInput {
             mode: &config.routing_mode,
@@ -7318,7 +7432,7 @@ mod config_service_tests {
     }
 
     #[tokio::test]
-    async fn proxy_selected_without_targets_is_rejected() {
+    async fn proxy_selected_is_rejected_on_route_set_mode() {
         let dir = temp_dir();
         let services = services(&dir);
         let created = services.config_create(create_input("A")).await.unwrap();
@@ -7328,10 +7442,10 @@ mod config_service_tests {
             .await
             .unwrap_err();
         let service = error.downcast_ref::<ServiceError>().unwrap();
-        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(service.code, "INVALID_ARGUMENT");
         assert_eq!(
             service.details.as_ref().unwrap()["reason"],
-            "route_targets_empty"
+            "routing_mode_not_supported"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -7550,7 +7664,7 @@ mod config_service_tests {
 
     /// 四个入口（连接 / 测速 / `route_get` / `system_region`）读同一个来源。
     /// 连接与测速的取值没法在单测里直接观察，但它们调用的是同一个
-    /// `detect_region()`；这里断言两个可观察入口一致，防止再出现各自兜底。
+    /// `effective_region()`；这里断言两个可观察入口一致，防止再出现各自兜底。
     #[tokio::test]
     async fn region_entry_points_agree() {
         crate::test_support::install_test_secrets();
@@ -7560,14 +7674,101 @@ mod config_service_tests {
         let config_id = created["config_id"].as_str().unwrap().to_string();
 
         let route = services.route_get(Some(config_id)).await.unwrap();
-        let command = crate::agent::commands::system_region().await.unwrap();
-        let detected = json!(crate::rules::detect_region().code());
+        let command = services.system_region().await.unwrap();
+        let (detected, source) = crate::rules::effective_region(&services.store);
 
         assert_eq!(command["region"], route["detected_region"]);
-        assert_eq!(route["detected_region"], detected);
-        assert_eq!(command["region"], detected);
+        assert_eq!(route["detected_region"], json!(detected.code()));
+        assert_eq!(command["region"], json!(detected.code()));
+        assert_eq!(command["source"], source.as_str());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 写入后四个入口同时换值；连接 / 测速读的 `effective_region()` 也换。
+    #[tokio::test]
+    async fn set_user_region_updates_every_entry_point() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("地区")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        let written = services.set_user_region("JP").await.unwrap();
+        assert_eq!(written["region"], "jp");
+        assert_eq!(written["source"], "ai");
+
+        let route = services.route_get(Some(config_id)).await.unwrap();
+        let command = services.system_region().await.unwrap();
+        let (effective, source) = crate::rules::effective_region(&services.store);
+        let basis = route["local_direct_basis"].as_str().unwrap();
+
+        assert_eq!(route["detected_region"], "jp");
+        assert_eq!(command["region"], "jp");
+        assert_eq!(command["source"], "ai");
+        assert_eq!(effective, crate::rules::Region::Cc("jp".into()));
+        assert_eq!(source, crate::rules::RegionSource::Ai);
+        assert_eq!(basis, "ip_only");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一地区重复写入仍成功（幂等；事件只在值真正变化时发）。
+    #[tokio::test]
+    async fn writing_the_same_region_twice_stays_ok() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+
+        let first = services.set_user_region("jp").await.unwrap();
+        let second = services.set_user_region("JP").await.unwrap();
+        assert_eq!(first, second);
+        assert_eq!(second["region"], "jp");
+        assert_eq!(second["source"], "ai");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn invalid_user_region_is_rejected_without_writing() {        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+
+        for bad in ["", "usa", "日本", "1"] {
+            let error = services.set_user_region(bad).await.unwrap_err();
+            let service = error.downcast_ref::<ServiceError>().unwrap();
+            assert_eq!(service.code, "INVALID_ARGUMENT", "{bad}");
+            assert_eq!(
+                service.details.as_ref().unwrap()["reason"],
+                "invalid_region",
+                "{bad}"
+            );
+        }
+
+        let stored = {
+            let conn = services.store.conn();
+            crate::store::settings::get(&conn, crate::store::settings::USER_REGION_KEY).unwrap()
+        };
+        assert!(stored.is_none(), "非法值不得落库");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn region_changed_event_has_the_contract_shape() {
+        let payload = region_changed_payload(
+            &crate::rules::Region::Cn,
+            crate::rules::RegionSource::Ai,
+        );
+        assert_eq!(
+            payload["contract_version"],
+            crate::runtime::EVENT_CONTRACT_VERSION
+        );
+        assert_eq!(payload["region"], "cn");
+        assert_eq!(payload["source"], "ai");
+        let emitted_at = payload["emitted_at"].as_str().unwrap();
+        assert!(emitted_at.ends_with('Z'), "{emitted_at}");
+        assert_eq!(payload.as_object().unwrap().len(), 4);
     }
 
     #[tokio::test]
@@ -7650,20 +7851,74 @@ mod config_service_tests {
     }
 
     #[tokio::test]
-    async fn proxy_selected_requires_targets() {
+    async fn proxy_selected_is_rejected_on_create_and_update() {
         let dir = temp_dir();
         let services = services(&dir);
         let mut input = create_input("A");
         input.routing_mode = configs::ROUTING_PROXY_SELECTED.into();
         let error = services.config_create(input).await.unwrap_err();
         let service = error.downcast_ref::<ServiceError>().unwrap();
-        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(service.code, "INVALID_ARGUMENT");
         assert_eq!(
             service.details.as_ref().unwrap()["reason"],
-            "route_targets_empty"
+            "routing_mode_not_supported"
+        );
+
+        let created = services.config_create(create_input("B")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let error = services
+            .config_update(
+                &config_id,
+                ConfigUpdateInput {
+                    routing_mode: Some(configs::ROUTING_PROXY_SELECTED.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "INVALID_ARGUMENT");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "routing_mode_not_supported"
+        );
+
+        // 不认识的值仍是 invalid_routing_mode，两种错误不能混。
+        let mut unknown = create_input("C");
+        unknown.routing_mode = "smart".into();
+        let error = services.config_create(unknown).await.unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "invalid_routing_mode"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 命令层直接调这个校验：缺省、`empty`、空数组都拒绝，文案与工具层一致。
+    #[test]
+    fn config_create_requires_a_node_source_at_the_service_layer() {
+        let empty: Vec<String> = Vec::new();
+        let nodes = vec!["nod_1".to_string()];
+        for (source, node_ids) in [
+            (None, None),
+            (Some("empty"), None),
+            (None, Some(empty.as_slice())),
+        ] {
+            let error = require_node_source(source, node_ids).unwrap_err();
+            let service = error.downcast_ref::<ServiceError>().unwrap();
+            assert_eq!(service.code, "INVALID_ARGUMENT");
+            assert_eq!(service.message, SOURCE_REQUIRED_MESSAGE);
+            assert_eq!(
+                service.details.as_ref().unwrap()["reason"],
+                "source_required"
+            );
+        }
+
+        assert!(require_node_source(Some("seed"), None).is_ok());
+        assert!(require_node_source(Some("SEED"), None).is_ok());
+        assert!(require_node_source(None, Some(nodes.as_slice())).is_ok());
     }
 
     #[tokio::test]

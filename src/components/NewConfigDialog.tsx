@@ -1,81 +1,233 @@
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { AgentBridge, ConfigCreateInput } from "../agent/bridge";
-import type { ConfigSummary } from "../agent/protocol";
+import { toBridgeError } from "../agent/errors";
+import type { ConfigConnectMode, ConfigSummary } from "../agent/protocol";
+import { nextConfigName } from "../config/model";
 import { useFocusTrap } from "../ui/focus";
+import { ConfigReview } from "./ConfigReview";
 import { IconClose } from "./icons";
-import { ManualConfigForm } from "./ManualConfigForm";
+import { VendorMarketPage } from "./VendorMarketPage";
 
 interface Props {
   bridge: AgentBridge;
   configs: ConfigSummary[];
-  aiReady: boolean;
-  /** 系统时区 / 区域推断出的地区；null = 未知。 */
+  /** 生效地区；null = 未知，按全局模式保存。 */
   region: string | null;
+  /** App 已读到的免费节点数；null / undefined 时弹窗自己补一次只读状态。 */
+  defaultNodeCount?: number | null;
   onClose: () => void;
-  /** 已配好 AI：关弹窗、开新会话、发开场消息。 */
-  onAiAssist: () => void;
-  /** 未配 AI：把控制权交给 AI 配置模块，结束后回到这里。 */
-  onNeedAiSetup: () => void;
-  onCreate: (input: ConfigCreateInput) => Promise<{ ok: boolean; message?: string }>;
-  onCreated: () => void;
+  onCreate: (
+    input: ConfigCreateInput,
+  ) => Promise<{ ok: boolean; message?: string; reason?: string }>;
+  onCreated: (connect: boolean) => void;
+  /** 当前是否已连接：决定主按钮文案与创建后是否自动连接。 */
+  connected?: boolean;
+}
+
+type View = "questions" | "review" | "vendor";
+type SeedState = "ready" | "empty" | "loading" | "failed";
+
+const SEED_ERROR = [
+  "没能取到免费节点。",
+  "可能没联网，或免费节点服务暂时不可用。",
+  "点「重试」；还是不行，就改选「其它节点」。",
+];
+
+function errorText(error: unknown, fallback: string): string {
+  const message = toBridgeError(error).message;
+  return message && message !== "操作失败" ? message : fallback;
+}
+
+function moveWithinGroup(event: ReactKeyboardEvent<HTMLDivElement>) {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const group = event.currentTarget;
+  const options = Array.from(group.querySelectorAll<HTMLElement>('[role="radio"]'));
+  if (options.length === 0) return;
+  event.preventDefault();
+  const current = options.indexOf(document.activeElement as HTMLElement);
+  const delta = event.key === "ArrowDown" ? 1 : -1;
+  const next = (current + delta + options.length) % options.length;
+  // 方向键切换即选中，符合 radiogroup 的键盘预期。
+  options[next]?.focus();
+  options[next]?.click();
 }
 
 export function NewConfigDialog({
   bridge,
   configs,
-  aiReady,
   region,
+  defaultNodeCount = null,
   onClose,
-  onAiAssist,
-  onNeedAiSetup,
   onCreate,
   onCreated,
+  connected = false,
 }: Props) {
-  const [step, setStep] = useState<"choose" | "manual">("choose");
+  const [view, setView] = useState<View>("questions");
+  const [connectMode, setConnectMode] = useState<ConfigConnectMode>("tun");
+  const [source, setSource] = useState<"seed" | "vendor">("seed");
+  const [seedState, setSeedState] = useState<SeedState>("empty");
+  const [seedCount, setSeedCount] = useState<number | null>(null);
+  const name = nextConfigName(configs);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [seedProblem, setSeedProblem] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const seedTouchedRef = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
-  const choicesRef = useRef<HTMLDivElement>(null);
+  const connectRef = useRef<HTMLDivElement>(null);
+  const sourceRef = useRef<HTMLDivElement>(null);
+  const previousViewRef = useRef<View>("questions");
   useFocusTrap(true, dialogRef);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape") return;
+      if (savingRef.current) return;
+      // 供应商广场是子页：Esc 先回两问，再按才关弹窗。
+      if (view === "vendor") setView("questions");
+      else onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  }, [onClose, view]);
 
-  // 每次回到入口都把焦点放回第一张卡，键盘用户不用重新 Tab。
+  // 打开弹窗不联网：读一次本地的池状态；App 已有值时直接复用。
   useEffect(() => {
-    if (step !== "choose") return;
-    choicesRef.current
-      ?.querySelector<HTMLButtonElement>(".new-config__choice")
-      ?.focus();
-  }, [step]);
-
-  const moveChoice = (event: ReactKeyboardEvent) => {
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    const buttons = Array.from(
-      choicesRef.current?.querySelectorAll<HTMLButtonElement>(".new-config__choice") ?? [],
-    );
-    if (buttons.length === 0) return;
-    event.preventDefault();
-    const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
-    const delta = event.key === "ArrowDown" ? 1 : -1;
-    const next = (current + delta + buttons.length) % buttons.length;
-    buttons[next]?.focus();
-  };
-
-  const chooseAi = () => {
-    if (aiReady) {
-      onAiAssist();
+    if (seedTouchedRef.current) return;
+    if (defaultNodeCount !== null) {
+      setSeedCount(defaultNodeCount);
+      setSeedState(defaultNodeCount > 0 ? "ready" : "empty");
       return;
     }
-    onNeedAiSetup();
+    let alive = true;
+    bridge
+      .defaultProfileStatus()
+      .then((status) => {
+        if (!alive || seedTouchedRef.current) return;
+        setSeedCount(status.nodeCount);
+        setSeedState(status.nodeCount > 0 ? "ready" : "empty");
+      })
+      .catch(() => {
+        if (!alive || seedTouchedRef.current) return;
+        setSeedCount(0);
+        setSeedState("empty");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [bridge, defaultNodeCount]);
+
+  // 回焦：vendor 聚焦唯一的返回入口；回两问时聚焦刚才操作的那组已选项。
+  useEffect(() => {
+    const previous = previousViewRef.current;
+    previousViewRef.current = view;
+    if (view === "vendor") {
+      dialogRef.current
+        ?.querySelector<HTMLButtonElement>(".vendor-page__back")
+        ?.focus();
+      return;
+    }
+    if (view !== "questions") return;
+    const group = previous === "vendor" ? sourceRef.current : connectRef.current;
+    group
+      ?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]')
+      ?.focus();
+  }, [view]);
+
+  const fetchSeed = async (): Promise<boolean> => {
+    seedTouchedRef.current = true;
+    setSeedState("loading");
+    try {
+      const status = await bridge.defaultProfileRefresh();
+      setSeedCount(status.nodeCount);
+      if (status.nodeCount > 0) {
+        setSeedState("ready");
+        return true;
+      }
+      setSeedState("failed");
+      return false;
+    } catch {
+      setSeedState("failed");
+      return false;
+    }
   };
 
+  const goNext = async () => {
+    if (source === "vendor") {
+      setView("vendor");
+      return;
+    }
+    if (seedState === "loading") return;
+    if (seedState === "ready" || (seedCount ?? 0) > 0) {
+      setView("review");
+      return;
+    }
+    const ok = await fetchSeed();
+    if (ok) setView("review");
+  };
+
+  const save = async () => {
+    if (savingRef.current) return;
+    const trimmed = name.trim();
+    setSaveError(null);
+    setSeedProblem(false);
+    setSaving(true);
+    savingRef.current = true;
+    const input: ConfigCreateInput = {
+      name: trimmed,
+      connectMode,
+      routingMode: region ? "direct" : "proxy_all",
+      source: "seed",
+    };
+    try {
+      let result: { ok: boolean; message?: string; reason?: string };
+      try {
+        result = await onCreate(input);
+      } catch (error) {
+        setSaveError(errorText(error, "创建配置失败，再试一次。"));
+        return;
+      }
+      // 免费节点的刷新与重试只留在 useVpnSession 一层，弹窗不重复。
+      if (!result.ok) {
+        if (result.reason === "seed_unavailable") {
+          setSeedProblem(true);
+        } else {
+          setSaveError(result.message ?? "创建配置失败，再试一次。");
+        }
+        return;
+      }
+      onCreated(!connected);
+    } finally {
+      setSaving(false);
+      savingRef.current = false;
+    }
+  };
+
+  const optionProps = (selected: boolean, onPick: () => void) => ({
+    role: "radio" as const,
+    "aria-checked": selected,
+    tabIndex: selected ? 0 : -1,
+    className: `new-config__answer ${selected ? "is-selected" : ""}`,
+    onClick: onPick,
+    onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => {
+      if (event.key === " " || event.key === "Enter") {
+        event.preventDefault();
+        onPick();
+      }
+    },
+  });
+
+  const title = "新建配置";
+  const step = view === "review" ? 2 : 1;
+
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
+    <div
+      className="modal-backdrop"
+      onMouseDown={() => {
+        if (!savingRef.current) onClose();
+      }}
+    >
       <div
         ref={dialogRef}
         className="modal new-config"
@@ -85,62 +237,179 @@ export function NewConfigDialog({
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="modal__head new-config__head">
-          {step === "manual" ? (
+          {view === "review" ? (
             <button
               type="button"
               className="new-config__back"
-              onClick={() => setStep("choose")}
+              disabled={saving}
+              onClick={() => setView("questions")}
             >
               ← 返回
             </button>
           ) : null}
           <h2 id="new-config-title" className="modal__title">
-            新建配置
+            {title}
           </h2>
-          <button type="button" className="modal__close" onClick={onClose} aria-label="关闭">
+          <span
+            className="new-config__steps"
+            aria-label={`第 ${step} 步，共 2 步`}
+          >
+            <span className={`new-config__dot ${step === 1 ? "is-current" : ""}`} />
+            <span className={`new-config__dot ${step === 2 ? "is-current" : ""}`} />
+          </span>
+          <button
+            type="button"
+            className="modal__close"
+            onClick={onClose}
+            disabled={saving}
+            aria-label="关闭"
+          >
             <IconClose size={14} />
           </button>
         </header>
 
-        {step === "choose" ? (
-          <>
+        {view === "questions" ? (
+          <div className="new-config__questions">
+            <p className="new-config__intro">先定两件事，以后随时能在中间改。</p>
+
             <div
-              ref={choicesRef}
-              className="new-config__choices"
-              onKeyDown={moveChoice}
+              ref={connectRef}
+              className="new-config__group"
+              role="radiogroup"
+              aria-label="怎么接管"
+              onKeyDown={moveWithinGroup}
             >
-              <button type="button" className="new-config__choice" onClick={chooseAi}>
-                <span className="new-config__choice-title">AI 协助</span>
-                {!aiReady ? (
-                  <span className="new-config__choice-note">还没配置 AI</span>
-                ) : null}
-                <span className="new-config__choice-text">我一步步问你，最后帮你建好。</span>
-              </button>
-              <button
-                type="button"
-                className="new-config__choice"
-                onClick={() => setStep("manual")}
+              <p className="new-config__group-title">
+                <span className="new-config__num">①</span>怎么接管
+              </p>
+              <div
+                {...optionProps(connectMode === "tun", () => setConnectMode("tun"))}
               >
-                <span className="new-config__choice-title">我自己配置</span>
-                <span className="new-config__choice-text">
-                  一次填完。知道服务器信息再用这个。
+                <span className="new-config__answer-head">
+                  <span className="new-config__marker" aria-hidden />
+                  <span className="new-config__answer-title">TUN 模式（接管全部流量）</span>
                 </span>
-              </button>
+                <span className="new-config__answer-lead">整台电脑都走 VPN。</span>
+                <span className="new-config__answer-note">
+                  浏览器、聊天、游戏、命令行都走 VPN，不用逐个软件设置。
+                </span>
+                <span className="new-config__answer-note">
+                  第一次连接时，系统会请求一次授权。
+                </span>
+              </div>
+              <div
+                {...optionProps(connectMode === "system_proxy", () =>
+                  setConnectMode("system_proxy"),
+                )}
+              >
+                <span className="new-config__answer-head">
+                  <span className="new-config__marker" aria-hidden />
+                  <span className="new-config__answer-title">
+                    Proxy 模式（只给代理地址）
+                  </span>
+                </span>
+                <span className="new-config__answer-lead">只让部分软件走 VPN。</span>
+                <span className="new-config__answer-note">
+                  只让能填代理地址的软件走 VPN，其它软件保持原样。
+                </span>
+                <span className="new-config__answer-note">
+                  需要在那个软件里填一次本机代理地址。
+                </span>
+              </div>
             </div>
+
+            <div
+              ref={sourceRef}
+              className="new-config__group"
+              role="radiogroup"
+              aria-label="节点从哪来"
+              onKeyDown={moveWithinGroup}
+            >
+              <p className="new-config__group-title">
+                <span className="new-config__num">②</span>节点从哪来
+              </p>
+              <div {...optionProps(source === "seed", () => setSource("seed"))}>
+                <span className="new-config__answer-head">
+                  <span className="new-config__marker" aria-hidden />
+                  <span className="new-config__answer-title">Veyl 免费节点</span>
+                </span>
+                <span className="new-config__answer-lead">不用自己准备，先连上再说。</span>
+                <span className="new-config__answer-text">
+                  用 Veyl 提供的免费节点，建好后直接连。
+                </span>
+                {source === "seed" && seedState === "empty" ? (
+                  <span className="new-config__answer-status">
+                    还没有免费节点，下一步时会去获取。
+                  </span>
+                ) : null}
+              </div>
+              {source === "seed" && seedState === "loading" ? (
+                <div className="new-config__seed-loading" role="status" aria-busy="true">
+                  <span className="new-config__spinner" aria-hidden />
+                  正在获取免费节点…
+                </div>
+              ) : null}
+              {source === "seed" && seedState === "failed" ? (
+                <div className="new-config__seed-error" role="alert">
+                  {SEED_ERROR.map((line) => (
+                    <p key={line}>{line}</p>
+                  ))}
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => void fetchSeed()}
+                  >
+                    重试
+                  </button>
+                </div>
+              ) : null}
+              <div {...optionProps(source === "vendor", () => setSource("vendor"))}>
+                <span className="new-config__answer-head">
+                  <span className="new-config__marker" aria-hidden />
+                  <span className="new-config__answer-title">其它节点</span>
+                  <span className="new-config__tagline">预览</span>
+                </span>
+                <span className="new-config__answer-lead">
+                  用你自己的机场或节点供应商。
+                </span>
+                <span className="new-config__answer-text">
+                  下一步打开「供应商广场」，从那里选节点。
+                </span>
+              </div>
+            </div>
+
             <div className="new-config__actions">
               <button type="button" className="btn btn--ghost" onClick={onClose}>
                 取消
               </button>
+              <button
+                type="button"
+                className="btn btn--primary"
+                disabled={
+                  source === "seed" &&
+                  (seedState === "loading" || seedState === "failed")
+                }
+                onClick={() => void goNext()}
+              >
+                {source === "seed" && seedState === "loading" ? "正在获取…" : "下一步"}
+              </button>
             </div>
-          </>
+          </div>
+        ) : view === "vendor" ? (
+          <VendorMarketPage onBack={() => setView("questions")} />
         ) : (
-          <ManualConfigForm
-            bridge={bridge}
-            configs={configs}
+          <ConfigReview
+            connectMode={connectMode}
             region={region}
-            onCreate={onCreate}
-            onCreated={onCreated}
+            name={name}
+            error={saveError}
+            saving={saving}
+            connected={connected}
+            seedProblem={seedProblem}
+            onRetrySeed={() => void save()}
+            onBack={() => setView("questions")}
             onCancel={onClose}
+            onSave={() => void save()}
           />
         )}
       </div>

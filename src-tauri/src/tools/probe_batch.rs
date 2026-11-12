@@ -439,7 +439,7 @@ pub async fn start_probe_runtime(
         return None;
     }
     let rules = crate::rules::load_active(&store, data_dir)?;
-    let region = crate::rules::detect_region();
+    let (region, _) = crate::rules::effective_region(&store);
     let route_plan = crate::rules::plan::build(&crate::rules::plan::RouteInput {
         mode: "proxy_all",
         region: &region,

@@ -313,8 +313,8 @@ impl Tool for RouteSetModeTool {
     }
 
     fn description(&self) -> &str {
-        "切换分流模式。direct ↔ proxy_all 且已连接时热切不断流；\
-         涉及 proxy_selected 的跨家族切换会断开重连，必须先问用户再带 confirm_reconnect=true。\n说「哪些软件走 VPN」「直连」，不出现分流、规则集、rule、category id。"
+        "切换分流模式，只有 direct / proxy_all 两档；已连接时热切不断流。\
+         旧配置仍是 proxy_selected 时，切到两档会断开重连，必须先问用户再带 confirm_reconnect=true。\n说「哪些软件走 VPN」「直连」，不出现分流、规则集、rule、category id。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -326,7 +326,7 @@ impl Tool for RouteSetModeTool {
             "type": "object",
             "properties": {
                 "config_id": { "type": "string" },
-                "mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
+                "mode": { "type": "string", "enum": ["direct", "proxy_all"] },
                 "confirm_reconnect": { "type": "boolean", "default": false }
             },
             "required": ["mode"],

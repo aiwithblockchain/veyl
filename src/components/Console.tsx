@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { ConfigDetail, NodeSummary, RuntimeView } from "../agent/protocol";
+import type { ConfigDetail, ConfigRouteMode, NodeSummary, RuntimeView } from "../agent/protocol";
 import { DEFAULT_PROXY_PORT } from "../agent/bridge";
 import type { ProbeResult } from "../config/useVpnSession";
 import type { NodeProbesController } from "../config/useNodeProbes";
 import { copyText } from "../ui/clipboard";
-import { modeSummary, scopeSummary } from "../ui/configLabels";
+import { modeSummary } from "../ui/configLabels";
 import {
   runZeroConfigPrimaryAction,
   zeroConfigContent,
@@ -25,6 +25,7 @@ import { probeBadge, formatLatency } from "../ui/nodeList";
 import { rateChart, rateLabel, type RateSample } from "../ui/rateSeries";
 import { MiddleArea } from "./MiddleArea";
 import { NodeSheet } from "./NodeSheet";
+import { TrafficScopeSwitch } from "./TrafficScopeSwitch";
 
 interface Props {
   config: ConfigDetail | null;
@@ -52,8 +53,18 @@ interface Props {
   seedUpdate?: boolean;
   /** 设置里的本地代理端口；未连接时代理卡显示它。 */
   proxyPort?: number;
-  /** 系统地区；决定已连接时那行本地直连口径，null = 未知。 */
+  /** 系统地区；决定中间区那行本地直连口径，null = 未知。 */
   region?: string | null;
+  /** 开关用的地区：已连接取本次快照，未连接取实时推断。 */
+  scopeRegion?: string | null;
+  /** 已连接时 AI 改了地区：说明行追加一次「下次连接生效」。 */
+  regionChanged?: boolean;
+  /** 当前配置的流量范围；proxy_selected 旧数据不显示开关。 */
+  routingMode?: ConfigRouteMode | null;
+  /** 切换流量范围；由 App 调 route_set_mode 并回写状态。 */
+  onSetRoutingMode?: (
+    mode: "direct" | "proxy_all",
+  ) => Promise<{ ok: boolean; message?: string }>;
   onOpenDiagnostics?: () => void;
   loading?: boolean;
   runtime: RuntimeView;
@@ -119,6 +130,10 @@ export function Console({
   seedUpdate = false,
   proxyPort = DEFAULT_PROXY_PORT,
   region = null,
+  scopeRegion,
+  regionChanged = false,
+  routingMode = null,
+  onSetRoutingMode,
   onOpenDiagnostics,
   loading = false,
   runtime,
@@ -344,6 +359,18 @@ export function Console({
   // 只有 running 且探测新鲜失败才算；degraded 仍走「连接不稳定」。
   const noTraffic = dataPlaneDown(runtime, now);
 
+  const scopeSwitch =
+    config && onSetRoutingMode ? (
+      <TrafficScopeSwitch
+        mode={routingMode}
+        region={scopeRegion === undefined ? region : scopeRegion}
+        regionChanged={regionChanged}
+        connected={connected}
+        disabled={transitioning || stopping || helperPreparing}
+        onChange={onSetRoutingMode}
+      />
+    ) : null;
+
   let hero: ReactNode;
   if (connected && noTraffic) {
     // 连着但流量出不去：不显示计时器，边跑秒边说正常等于撒谎。
@@ -355,6 +382,7 @@ export function Console({
             <span>已连接，不通</span>
           </h1>
           <p className="hero__action">{NO_TRAFFIC_ACTION}</p>
+          {scopeSwitch}
         </div>
         <button type="button" className="btn btn--primary" onClick={onReconnect}>
           重新连接
@@ -373,6 +401,7 @@ export function Console({
             <span className="timecode num">{clock}</span>
           </h1>
           <p className="hero__caption">本次连接</p>
+          {scopeSwitch}
         </div>
         <button type="button" className="btn btn--outline" onClick={onStop}>
           断开 VPN
@@ -411,6 +440,7 @@ export function Console({
             <span>{word}</span>
           </h1>
           {caption ? <p className="hero__caption">{caption}</p> : null}
+          {scopeSwitch}
         </div>
         {transitioning ? (
           <button
@@ -578,13 +608,6 @@ export function Console({
                       {modeSummary(config).value}
                     </dd>
                     <dd className="ledger__sub">{modeSummary(config).sub}</dd>
-                  </div>
-                  <div className="ledger__row">
-                    <dt className="ledger__label">范围</dt>
-                    <dd className="ledger__value ledger__value--text">
-                      {scopeSummary(config).value}
-                    </dd>
-                    <dd className="ledger__sub">{scopeSummary(config).sub}</dd>
                   </div>
                   <div className="ledger__row">
                     <dt className="ledger__label">节点</dt>

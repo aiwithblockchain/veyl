@@ -8,9 +8,14 @@ use serde_json::{json, Value};
 
 use super::display::Changed;
 use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
-use super::services::{ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, VpnToolServices};
+use super::services::{ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, ServiceError, VpnToolServices};
 
 fn failure(error: anyhow::Error) -> AivpnError {
+    if let Some(service) = error.downcast_ref::<ServiceError>() {
+        let mut mapped = AivpnError::new(&service.code, &service.message);
+        mapped.details = service.details.clone();
+        return mapped;
+    }
     let text = error.to_string();
     match text.split_once(": ") {
         Some((code, message))
@@ -32,7 +37,8 @@ fn summarise_configs(data: &Value) -> String {
         .map(|items| items.iter().collect())
         .unwrap_or_default();
     if configs.is_empty() {
-        return "本地还没有配置。可以新建一套空配置，或选择用 Veyl 提供的测试节点。".to_string();
+        return "本地还没有配置。可以先用 Veyl 免费节点，或导入用户自己的节点，再建一套配置。"
+            .to_string();
     }
 
     let mut lines = vec![format!("本地有 {} 套配置：", configs.len())];
@@ -250,8 +256,9 @@ impl Tool for ConfigCreateTool {
     }
 
     fn description(&self) -> &str {
-        "新建一套配置。source = seed 绑定当前种子的全部节点；不传 source 则创建空配置。\
-         connect_mode 与 routing_mode 必须显式给出，没有默认值。\n配置 ID 只用于你自己匹配，不要念给用户。"
+        "新建一套配置。source = seed 绑定 Veyl 免费节点的全部节点；或者传 node_ids 绑定已有节点。\
+         两者必须给一个，不能都缺省——AI 不允许创建空配置。\
+         connect_mode 与 routing_mode 必须显式给出，没有默认值；分流只有 direct / proxy_all 两档。\n配置 ID 只用于你自己匹配，不要念给用户。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -264,14 +271,22 @@ impl Tool for ConfigCreateTool {
             "properties": {
                 "name": { "type": "string", "maxLength": 40 },
                 "connect_mode": { "type": "string", "enum": ["system_proxy", "tun"] },
-                "routing_mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
-                "source": { "type": "string", "enum": ["seed", "empty"] },
-                "node_ids": { "type": "array", "items": { "type": "string" } },
+                "routing_mode": { "type": "string", "enum": ["direct", "proxy_all"] },
+                "source": {
+                    "type": "string",
+                    "enum": ["seed"],
+                    "description": "seed：绑定 Veyl 免费节点的全部节点。"
+                },
+                "node_ids": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
                 "targets": { "type": "array", "items": { "type": "string" } },
                 "dns": { "type": "object" },
                 "tun_excludes": { "type": "array", "items": { "type": "string" } }
             },
             "required": ["name", "connect_mode", "routing_mode"],
+            "anyOf": [
+                { "required": ["source"] },
+                { "required": ["node_ids"] }
+            ],
             "additionalProperties": false
         })
     }
@@ -312,9 +327,10 @@ impl Tool for ConfigCreateTool {
                 )
             }
         };
-        // 唯一的硬门禁：`seed` 会把用户接到我们的服务器上，必须先问过并得到明确选择。
-        // 空配置与 nodeIds 这两条目前只有提示词约束——它们不涉及我们的服务器，
-        // 加门禁的成本大于收益（见 `SAFETY_RULES` 第 2 条）。
+        // `seed` 会把用户接到我们的服务器上，必须先问过并得到明确选择——这是与
+        // 节点来源分开的另一道门禁。来源本身由 `require_node_source` 在工具层与
+        // 命令层校验：source 与 node_ids 都缺省、`source: "empty"` 或空数组都会
+        // 返回 `INVALID_ARGUMENT / source_required`。
         if source.as_deref() == Some("seed") {
             let granted = crate::tools::policy::current_request_id(&ctx.session_id)
                 .map(|request_id| {
@@ -329,7 +345,7 @@ impl Tool for ConfigCreateTool {
                         AivpnError::new(
                             "PRECONDITION_FAILED",
                             "还没有确认节点来源：先用 AskUserQuestion 问用户「节点从哪来」，\
-                             用户选了「用 Veyl 提供的测试节点（仅供试用）」之后才能用测试节点",
+                             用户选了「Veyl 免费节点（仅供试用）」之后才能用 Veyl 免费节点",
                         )
                         .with_details(json!({ "reason": "seed_source_not_confirmed" })),
                     )
@@ -345,6 +361,15 @@ impl Tool for ConfigCreateTool {
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         });
+        if let Err(error) =
+            super::services::require_node_source(source.as_deref(), node_ids.as_deref())
+        {
+            return envelope::finish(
+                ctx,
+                "ConfigCreate",
+                ToolOutcome::fail(failure(error)).with_changed(Changed::None),
+            );
+        }
 
         let outcome = match self
             .services
@@ -418,7 +443,7 @@ impl Tool for ConfigUpdateTool {
     }
 
     fn description(&self) -> &str {
-        "编辑一套配置（名称 / 分流 / DNS / 节点集）。\
+        "编辑一套配置（名称 / 分流 / DNS / 节点集）。分流只有 direct / proxy_all 两档。\
          没有 connect_mode：改接管方式必须新建配置。node_ids 是整体替换。\n配置 ID 只用于你自己匹配，不要念给用户。"
     }
 
@@ -432,7 +457,7 @@ impl Tool for ConfigUpdateTool {
             "properties": {
                 "config_id": { "type": "string" },
                 "name": { "type": "string", "maxLength": 40 },
-                "routing_mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
+                "routing_mode": { "type": "string", "enum": ["direct", "proxy_all"] },
                 "dns": { "type": "object" },
                 "tun_excludes": { "type": "array", "items": { "type": "string" } },
                 "node_ids": { "type": "array", "items": { "type": "string" } },

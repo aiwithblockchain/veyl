@@ -365,6 +365,9 @@ pub async fn config_create(
     dns: Option<Value>,
     tun_excludes: Option<Vec<String>>,
 ) -> Result<Value, Value> {
+    // 命令是公开入口：必须在服务层之前拦住空来源，不能只靠 UI 自觉。
+    crate::tools::services::require_node_source(source.as_deref(), node_ids.as_deref())
+        .map_err(error_value)?;
     state
         .services
         .config_create(crate::tools::ConfigCreateInput {
@@ -902,11 +905,11 @@ pub async fn category_list(
         .map_err(error_value)
 }
 
-/// 系统地区（离线；由时区与区域设置推断，不是 IP 定位）。
+/// 生效地区（离线；系统推断基线，可被用户明示的地区覆盖）。
 /// 全新安装还没有配置时也要能拿到，所以不依赖 `route_get`。
 #[tauri::command]
-pub async fn system_region() -> Result<Value, Value> {
-    Ok(json!({ "region": crate::rules::detect_region().code() }))
+pub async fn system_region(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state.services.system_region().await.map_err(error_value)
 }
 
 /// 面板三级折叠里的「打开日志」：用系统文件管理器定位到日志文件。

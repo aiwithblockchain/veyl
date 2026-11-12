@@ -89,6 +89,7 @@ fn table(tool: &str) -> (&'static str, &'static str, bool) {
         "RouteGet" => ("已读取上网设置", "没能读取上网设置", true),
         "RouteSetMode" => ("走法已切换", "没能切换走法", false),
         "RouteTargetsSet" => ("直连范围已更新", "没能修改直连范围", false),
+        "SetUserRegion" => ("地区已记下", "没能记下地区", false),
         "CategoryList" => ("已读取服务分类", "没能读取服务分类", true),
         "RulesStatus" => ("已读取直连数据状态", "没能读取直连数据状态", true),
         "VpnConnect" => ("已连接", "没能连上", false),
@@ -100,8 +101,8 @@ fn table(tool: &str) -> (&'static str, &'static str, bool) {
         "JobGet" => ("已读取任务进度", "没能读取任务进度", true),
         "NetConfigGet" => ("已读取网络设置", "没能读取网络设置", true),
         "NetRepair" => ("已恢复网络", "没能恢复网络", false),
-        "CatalogRefresh" => ("测试节点已更新", "没能更新测试节点", false),
-        "DefaultProfileStatus" => ("已读取测试节点状态", "没能读取测试节点状态", true),
+        "CatalogRefresh" => ("Veyl 免费节点已更新", "没能更新 Veyl 免费节点", false),
+        "DefaultProfileStatus" => ("已读取 Veyl 免费节点状态", "没能读取 Veyl 免费节点状态", true),
         // 未登记的工具（含 Claurst 内置工具）只给通用文案，不猜语义。
         _ => ("已完成", "没有完成", false),
     }
@@ -176,6 +177,7 @@ mod tests {
             "NetRepair",
             "CatalogRefresh",
             "DefaultProfileStatus",
+            "SetUserRegion",
         ];
         for tool in tools {
             for ok in [true, false] {
@@ -186,8 +188,10 @@ mod tests {
                     display.text
                 );
                 assert!(!display.text.is_empty(), "{tool} ok={ok} 没有文案");
+                // 「Veyl」是产品名，允许出现在用户文案里；其余英文一律不许。
+                let without_brand = display.text.replace("Veyl", "");
                 assert!(
-                    display.text.chars().all(|c| !c.is_ascii_alphabetic()),
+                    without_brand.chars().all(|c| !c.is_ascii_alphabetic()),
                     "{tool} ok={ok} 文案含英文：{}",
                     display.text
                 );
