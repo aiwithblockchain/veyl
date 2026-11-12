@@ -437,7 +437,7 @@ fn handle_message(
         // 不碰我们新写的公网地址（它自己能解析，也可能本来就是用户设的）。
         "restore_dns" => {
             let legacy = dns::legacy_peer_from_config(&supervisor.config_path());
-            match dns::restore_or_clear(legacy.as_deref()) {
+            match dns::restore_or_clear(legacy.as_deref(), &|line| supervisor.note(line)) {
                 Ok(()) => {
                     unsafe { xpc::dict_set_bool(reply, "ok", true) };
                     Ok(())
@@ -819,6 +819,16 @@ impl Supervisor {
         }
     }
 
+    /// 把一次 DNS 还原的执行记录逐条写进用户日志（停止 / 子进程退出路径用）。
+    ///
+    /// 必须走 `note()`：launchd 的 plist 没有 `StandardErrorPath`，`eprintln!`
+    /// 会被丢掉——2026-11-11 的排查就是卡在「停止时 DNS 到底写成了什么」没有记录。
+    fn log_restore(&self, context: &str, report: &dns::RestoreReport) {
+        for line in report.lines() {
+            self.note(&format!("[diag] {context} {line}"));
+        }
+    }
+
     fn emit_note(&self, message: &str) {
         eprintln!("veyl-helper: {message}");
     }
@@ -1027,7 +1037,7 @@ impl Supervisor {
         // 崩溃后系统 DNS 可能还指着旧版本写进去的隧道对端。**先趁 active.json
         // 还在**取一次对端：删掉之后只能靠常量猜。公网地址不清（见 `dns` 模块）。
         let legacy = dns::legacy_peer_from_config(&self.config_path());
-        let _ = dns::restore_or_clear(legacy.as_deref());
+        let _ = dns::restore_or_clear(legacy.as_deref(), &|line| self.note(line));
         for path in [self.config_path(), self.pid_path()] {
             match std::fs::remove_file(&path) {
                 Ok(()) => eprintln!("veyl-helper: 清理残留 {}", path.display()),
@@ -1055,7 +1065,8 @@ impl Supervisor {
             *self.dns_target.lock().unwrap() = None;
             *self.dns_checked_at.lock().unwrap() = None;
             // 子进程自己退出了：DNS 不能继续指向已经消失的隧道。
-            let _ = dns::restore();
+            let report = dns::restore();
+            self.log_restore("子进程退出", &report);
             return None;
         }
         self.recheck_dns();
@@ -1469,46 +1480,71 @@ impl Supervisor {
     /// 只收自己起的子进程，不动取消标志。`start` 的替换语义用它——
     /// 走 `stop()` 会把这次 start 自己取消掉。
     fn stop_child(&self, reason: &str) {
-        #[cfg(not(debug_assertions))]
-        let _ = reason;
+        let started = Instant::now();
         // 记下代号：等子进程最多 5 秒，这期间新一代 start 可能已经写好文件。
         let generation = self.generation.load(Ordering::SeqCst);
         let child = self.child.lock().unwrap().take();
         // 与 child 同步清空：App 崩溃后接手不到一个已经停掉的连接。
         *self.running.lock().unwrap() = None;
-        if let Some(mut child) = child {
-            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(100))
-                    }
-                    _ => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break;
+        let child_note = match child {
+            Some(mut child) => {
+                unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break describe_exit(&status),
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(100))
+                        }
+                        Ok(None) => {
+                            // 5 秒还不退：强杀后收尸，收尸结果要照实记。
+                            let _ = child.kill();
+                            break match child.wait() {
+                                Ok(status) => format!("超时后强杀 {}", describe_exit(&status)),
+                                Err(error) => format!("超时后强杀失败：{error}"),
+                            };
+                        }
+                        Err(error) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break format!("等待退出失败：{error}");
+                        }
                     }
                 }
             }
-        }
+            None => "无子进程".to_string(),
+        };
         // 代号没变才删：变了说明新 start 已经接管这些文件，
         // 删掉会让 live root 进程失去孤儿回收线索。
         self.cleanup_files(generation);
 
         // 子进程没了，系统 DNS 必须还回去：留着指向隧道等于把所有解析都打死。
         // 幂等：没改过 DNS 时这里是空操作。
-        let _ = dns::restore();
+        let dns_started = Instant::now();
+        // App 等 stop 回复上限 10 秒；这里把整条还原（含验证/兜底）压在 9 秒内。
+        let report = dns::restore_within(started + Duration::from_secs(9));
+        let dns_ms = dns_started.elapsed().as_millis();
         *self.last_dns.lock().unwrap() = None;
         *self.dns_target.lock().unwrap() = None;
         *self.dns_checked_at.lock().unwrap() = None;
 
-        #[cfg(debug_assertions)]
+        // helper 只承载 TUN；代理模式不经过这里。
         self.note(&format!(
-            "[diag] stop 原因={reason} 进程=已停止 残留utun路由={}",
-            diag_utun_route_count()
+            "[diag] stop 原因={reason} 模式=tun 子进程={child_note} DNS耗时={dns_ms}ms 总耗时={}ms",
+            started.elapsed().as_millis()
         ));
+        self.log_restore("stop", &report);
+        let utun_routes = diag_utun_route_count();
+        let utun_devices = diag_utun_interfaces();
+        if utun_routes > 0 {
+            self.note(&format!(
+                "[warn] stop 残留 utun 路由={utun_routes} 条 utun 设备={utun_devices:?}"
+            ));
+        } else {
+            self.note(&format!(
+                "[diag] stop 路由与设备 utun 设备={utun_devices:?} 残留utun路由=0"
+            ));
+        }
     }
 
     /// 收掉上次崩溃留下的 sing-box。
@@ -2209,7 +2245,9 @@ fn diag_route_snapshot(interface: &str) -> (usize, Vec<&'static str>) {
 }
 
 /// 全局 utun 路由数：stop 后用它判断有没有残留。
-#[cfg(debug_assertions)]
+///
+/// 只在停止时调用（每次起两个诊断进程），不进任何热路径，所以 release 也保留——
+/// 真机排查需要它。
 fn diag_utun_route_count() -> usize {
     let Ok(output) = std::process::Command::new("/usr/sbin/netstat")
         .args(["-rn", "-f", "inet"])
@@ -2224,6 +2262,33 @@ fn diag_utun_route_count() -> usize {
             tokens.len() >= 4 && tokens[3].starts_with("utun")
         })
         .count()
+}
+
+/// 当前存在的 utun 设备名。停止后用它回答「设备有没有收干净」。
+fn diag_utun_interfaces() -> Vec<String> {
+    let Ok(output) = std::process::Command::new("/sbin/ifconfig")
+        .arg("-a")
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.starts_with(char::is_whitespace))
+        .filter_map(|line| line.split(':').next())
+        .filter(|name| name.starts_with("utun"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// 子进程退出状态：退出码 / 信号，日志里一眼能看懂。
+fn describe_exit(status: &std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => format!("退出码={code}"),
+        (None, Some(signal)) => format!("被信号 {signal} 终止"),
+        _ => "退出状态未知".to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3076,6 +3141,38 @@ mod tests {
             diag_tun_address(&serde_json::json!({ "inbounds": [{ "type": "tun" }] })),
             ""
         );
+    }
+
+    /// 停止路径必须把「DNS 走了哪个分支、最终写了什么」写进用户日志（`note()` 管道），
+    /// 否则事后还是只能看到「已停止」，无从判断还原有没有写错。
+    #[test]
+    fn the_stop_path_logs_the_dns_branch_and_final_addresses() {
+        let dir = temp("restore-log");
+        let supervisor = Supervisor::new(dir.clone());
+        let report = dns::RestoreReport {
+            service: Some("ABC".into()),
+            before: Some(vec!["223.5.5.5".into()]),
+            resolver1: Some("223.5.5.5".into()),
+            target: Some("223.5.5.5".into()),
+            branch: "write",
+            written: Some(vec!["10.0.0.53".into()]),
+            readback: Some(vec!["10.0.0.53".into()]),
+            confirmed: true,
+            verify: Some("可用".into()),
+            ..dns::RestoreReport::default()
+        };
+
+        supervisor.log_restore("stop", &report);
+
+        let logged = supervisor.pending_notes.lock().unwrap().join("\n");
+        assert!(logged.contains("DNS 停止前"), "{logged}");
+        assert!(logged.contains("处理分支=write"), "{logged}");
+        assert!(
+            logged.contains("还原写入 地址=[\"10.0.0.53\"]"),
+            "还原写入的地址必须记下来：{logged}"
+        );
+        assert!(logged.contains("回读校验=一致"), "{logged}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -2954,23 +2954,89 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn runtime_stop(&self, _force: bool) -> anyhow::Result<Value> {
+        let started = std::time::Instant::now();
         let connected = self.connected_config_id().await;
+        // 断开前的现场：模式、配置、运行时状态。事后判断「停的时候到底是什么在跑」。
+        let before = self.manager.status().await;
+        let tun_running = matches!(
+            self.tun.status(),
+            crate::tun::session::TunState::Running { .. }
+        );
+        let mode = if tun_running {
+            "tun"
+        } else if before.mode.is_some() {
+            "system_proxy"
+        } else {
+            "none"
+        };
+        log::info!(
+            "断开：模式={mode} 配置={:?} 运行时状态={} TUN运行中={tun_running}",
+            connected,
+            before.state.as_str()
+        );
+
         // TUN 的 sing-box 是 helper 的子进程，manager 的 stop 碰不到它，单独停。
         // 幂等：本来就没在跑时直接返回。
         // 停不掉不能吞：界面上显示已停、流量却还在被接管，比报错糟得多。
+        let tun_started = std::time::Instant::now();
         let tun_stop_error = self.tun.stop().err();
-        self.restore_system_proxy()?;
+        let tun_ms = tun_started.elapsed().as_millis();
+        match &tun_stop_error {
+            None => log::info!("断开：停 TUN 成功 耗时={tun_ms}ms"),
+            Some(error) => log::warn!(
+                "断开：停 TUN 失败 耗时={tun_ms}ms code={:?} 原因={}",
+                error.code,
+                error.message
+            ),
+        }
+
+        let proxy_started = std::time::Instant::now();
+        let proxy_result = self.restore_system_proxy();
+        let proxy_ms = proxy_started.elapsed().as_millis();
+        match &proxy_result {
+            Ok(()) => log::info!("断开：撤系统代理成功 耗时={proxy_ms}ms"),
+            Err(error) => log::warn!("断开：撤系统代理失败 耗时={proxy_ms}ms 原因={error:#}"),
+        }
+        proxy_result?;
         self.manager.set_system_proxy_enabled(false).await;
-        let status = self
-            .manager
-            .stop()
-            .await
-            .map_err(|e| svc_error(e.code(), e))?;
+
+        let runtime_started = std::time::Instant::now();
+        let stopped = self.manager.stop().await;
+        let runtime_ms = runtime_started.elapsed().as_millis();
+        let status = match stopped {
+            Ok(status) => {
+                log::info!(
+                    "断开：停运行时成功 耗时={runtime_ms}ms 状态={}",
+                    status.state.as_str()
+                );
+                status
+            }
+            Err(error) => {
+                log::warn!(
+                    "断开：停运行时失败 耗时={runtime_ms}ms code={} 原因={}",
+                    error.code(),
+                    error
+                );
+                return Err(svc_error(error.code(), error));
+            }
+        };
         // 断开即删明文配置：它只在连接期间允许存在。
         if let Some(config_id) = connected {
             vpn_config::remove_profile_config(&self.config_dir(), &config_id);
         }
         if let Some(error) = tun_stop_error {
+            log::warn!(
+                "断开未完成：TUN 没停掉 code={:?} 原因={} 运行时状态={} 系统代理={} 总耗时={}ms",
+                error.code,
+                error.message,
+                status.state.as_str(),
+                if status.system_proxy_enabled {
+                    "仍开启"
+                } else {
+                    "已关闭"
+                },
+                started.elapsed().as_millis()
+            );
             return Err(svc_error_with_details(
                 "INTERNAL",
                 format!("特权连接没有停掉：{}", error.message),
@@ -2978,6 +3044,16 @@ impl VpnToolServices for WiredServices {
                 tun_error_details(&error),
             ));
         }
+        log::info!(
+            "断开完成：状态={} 系统代理={} 总耗时={}ms",
+            status.state.as_str(),
+            if status.system_proxy_enabled {
+                "仍开启"
+            } else {
+                "已关闭"
+            },
+            started.elapsed().as_millis()
+        );
         serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))
     }
 

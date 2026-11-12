@@ -144,6 +144,143 @@ fn strip_legacy_peer(servers: &mut Vec<String>, search: &mut Vec<String>) -> boo
     true
 }
 
+/// 一次系统 DNS 还原的执行记录，给停止路径写人类可读日志用。
+///
+/// 一行一个事实，地址不是敏感信息、照实打；回读不一致与任何失败都带实际值。
+/// 抽成结构是为了能在测试里断言「记了哪个分支、最终写了什么」，不必真改系统 DNS。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RestoreReport {
+    pub service: Option<String>,
+    /// 停止前读到的当前服务 DNS；读失败为 None。
+    pub before: Option<Vec<String>>,
+    /// 停止前系统实际使用的 `resolver #1` 的 nameserver（scutil --dns）。
+    pub resolver1: Option<String>,
+    /// 连接期我们写进去的地址（用来回答「当前里是不是还有我们的」）。
+    pub target: Option<String>,
+    /// 处理分支：write / remove_peer / rescue / nothing / no_snapshot / read_failed。
+    pub branch: &'static str,
+    /// 实际写进去的地址；没写为 None。
+    pub written: Option<Vec<String>>,
+    /// 最后一次回读到的地址。
+    pub readback: Option<Vec<String>>,
+    /// 回读是否确认成功。
+    pub confirmed: bool,
+    /// 还原后系统解析验证的结论（可用 / 本机离线 / 超时 / 兜底后…）。
+    pub verify: Option<String>,
+    /// 本机是否存在可用出口；没判过为 None。
+    pub online: Option<bool>,
+    /// 还原值不可用时写入的公网兜底地址。
+    pub fallback: Option<Vec<String>>,
+    /// 公网兜底后回读到的地址。
+    pub fallback_readback: Option<Vec<String>>,
+    /// 公网兜底的回读是否确认成功。
+    pub fallback_confirmed: bool,
+    /// 公网兜底后的二次验证结论。
+    pub fallback_verify: Option<String>,
+    /// 失败原因（第一个）。
+    pub error: Option<String>,
+}
+
+impl RestoreReport {
+    fn new(branch: &'static str) -> Self {
+        Self {
+            branch,
+            ..Self::default()
+        }
+    }
+
+    /// 逐条日志。需要人留意的是 `[warn]` 前缀，与 helper 其它日志一致。
+    pub(super) fn lines(&self) -> Vec<String> {
+        if self.branch == "no_snapshot" {
+            return vec![
+                "DNS 停止前 无快照（本次连接没有接管过系统 DNS）".to_string(),
+                format!("DNS 处理分支={}（无须处理）", self.branch),
+            ];
+        }
+        let before = match &self.before {
+            Some(values) => {
+                let ours = self
+                    .target
+                    .as_deref()
+                    .is_some_and(|target| values.iter().any(|value| value == target));
+                format!("当前={values:?} 条数={} 含我们的={ours}", values.len())
+            }
+            None => "当前=读不到".to_string(),
+        };
+        let mut lines = vec![
+            format!(
+                "DNS 停止前 服务={} resolver#1={} {before}",
+                self.service.as_deref().unwrap_or("未知"),
+                self.resolver1.as_deref().unwrap_or("读不到"),
+            ),
+            format!(
+                "DNS 处理分支={}（{}）",
+                self.branch,
+                branch_label(self.branch)
+            ),
+        ];
+        if let Some(written) = &self.written {
+            lines.push(format!("DNS 还原写入 地址={written:?}"));
+        }
+        if self.written.is_some() || self.readback.is_some() {
+            let found = self.readback.clone().unwrap_or_default();
+            if self.confirmed {
+                lines.push(format!("DNS 回读校验=一致 实际={found:?}"));
+            } else {
+                lines.push(format!("[warn] DNS 回读校验=不一致 实际={found:?}"));
+            }
+        }
+        if let Some(verify) = &self.verify {
+            lines.push(format!("DNS 还原后验证={verify}"));
+        }
+        if let Some(public) = &self.fallback {
+            let restored = self
+                .written
+                .as_ref()
+                .map(|values| format!("{values:?}"))
+                .unwrap_or_else(|| "未知".to_string());
+            let offline = match self.online {
+                Some(true) => "false",
+                Some(false) => "true",
+                None => "未知",
+            };
+            lines.push(format!(
+                "[warn] 还原值不可用 → 已退公网 还原值={restored} 本机离线={offline} 公网={public:?}"
+            ));
+            let found = self.fallback_readback.clone().unwrap_or_default();
+            if self.fallback_confirmed {
+                lines.push(format!("DNS 兜底回读=一致 实际={found:?}"));
+            } else {
+                lines.push(format!("[warn] DNS 兜底回读=不一致 实际={found:?}"));
+            }
+            if let Some(verify) = &self.fallback_verify {
+                lines.push(format!("DNS 兜底后验证={verify}"));
+            }
+        }
+        if let Some(error) = &self.error {
+            lines.push(format!(
+                "[warn] DNS 还原失败 分支={} 原因={error}",
+                self.branch
+            ));
+        }
+        lines
+    }
+}
+
+fn branch_label(branch: &str) -> &'static str {
+    match branch {
+        "write" => "还原原始值",
+        "remove_peer" => "摘掉我们的地址",
+        "rescue" => "救援",
+        "nothing" => "无须处理",
+        "read_failed" => "读取失败",
+        "deadline" => "超时放弃",
+        "sweep" => "清扫残留",
+        "fallback_public" => "还原值不可用，已退公网",
+        _ => "未分类",
+    }
+}
+
 static SAVED: Mutex<Option<SavedDns>> = Mutex::new(None);
 
 /// 连接期系统 DNS 是否被接管。`applied = false` 时 `reason` 说明原因。
@@ -270,9 +407,21 @@ fn remember_once(slot: &mut Option<SavedDns>, candidate: SavedDns) -> SavedDns {
 }
 
 /// 还原系统 DNS。没改过就什么都不做（幂等）。
-pub(super) fn restore() -> Result<(), String> {
+///
+/// 返回执行记录而不是 `Result`：停止路径要把「停止前是什么、走了哪个分支、
+/// 最终写了什么、回读是否一致」逐条写进日志，失败原因也在记录里。
+pub(super) fn restore() -> RestoreReport {
     let mut guard = SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     restore_locked(&mut guard, None)
+}
+
+/// 停止 RPC 用：整条还原（含验证与兜底）不超过这个时刻。
+///
+/// App 等 stop 回复的上限是 10 秒，停子进程最多再花 5 秒——这里留 1 秒余量，
+/// 验证预算取 `min(3 秒, 剩余)`、兜底再留 1.5 秒，两边都不会把停止流程拖过回复时限。
+pub(super) fn restore_within(deadline: Instant) -> RestoreReport {
+    let mut guard = SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    restore_locked(&mut guard, Some(deadline))
 }
 
 /// 退出路径专用：最后一道还原，尽量别放弃。
@@ -292,8 +441,10 @@ pub(super) fn restore_at_exit() {
         }
     };
     let deadline = Some(Instant::now() + EXIT_RESTORE_BUDGET);
-    if let Err(error) = restore_locked(&mut guard, deadline) {
-        eprintln!("veyl-helper: [warn] 退出时还原系统 DNS 失败：{error}");
+    // 这里没有 Supervisor，写不了用户日志；保留 stderr 兜底。
+    let report = restore_locked(&mut guard, deadline);
+    for line in report.lines() {
+        eprintln!("veyl-helper: [diag] {line}");
     }
 }
 
@@ -321,14 +472,24 @@ fn deadline_passed(deadline: Option<Instant>) -> bool {
 /// 等于才动。**不清 `SYSTEM_DNS_TARGET`**：`223.5.5.5` 是真实可用的公网 DNS，也是
 /// 用户可能自己设的值，我们没有可靠标记能证明它是我们写的。宁可留一组能用的 DNS，
 /// 也不误伤用户配置——崩溃后机器仍能正常解析，只是用户的原始自定义 DNS 丢了。
-pub(super) fn restore_or_clear(legacy_peer: Option<&str>) -> Result<(), String> {
+pub(super) fn restore_or_clear(
+    legacy_peer: Option<&str>,
+    log: &dyn Fn(&str),
+) -> Result<(), String> {
     let mut guard = SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if guard.is_some() {
-        return restore_locked(&mut guard, None);
+        let report = restore_locked(&mut guard, None);
+        for line in report.lines() {
+            log(&line);
+        }
+        return match report.error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        };
     }
     let candidates = sweep_candidates(legacy_peer);
     let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
-    // 救撰写入时同样不能把我们自己写的公网地址当候选（全局 DNS 可能是它的派生值）。
+    // 救援写入时同样不能把我们自己写的公网地址当候选（全局 DNS 可能是它的派生值）。
     let mut exclude_refs = candidate_refs.clone();
     exclude_refs.push(SYSTEM_DNS_TARGET);
 
@@ -347,16 +508,26 @@ pub(super) fn restore_or_clear(legacy_peer: Option<&str>) -> Result<(), String> 
         // **不能删键**：2026-11-11 真机验证，删掉服务级 DNS 键不会回到 DHCP，
         // 机器会直接「没有 nameserver、Not Reachable」，只能关开 Wi-Fi 才恢复。
         // 一个服务失败不中断其余服务。
-        if let Err(error) = rescue_service_dns(&service, &[], &exclude_refs, None) {
-            eprintln!("veyl-helper: 服务 {service} 的 DNS 改写失败：{error}");
-            first_error.get_or_insert(error);
-            continue;
+        let mut report = RestoreReport {
+            service: Some(service.clone()),
+            before: Some(servers.clone()),
+            target: Some(peer.to_string()),
+            branch: "sweep",
+            ..RestoreReport::default()
+        };
+        match rescue_service_dns(&service, &[], &exclude_refs, None, &mut report) {
+            Ok(()) => cleaned += 1,
+            Err(error) => {
+                report.error = Some(error.clone());
+                first_error.get_or_insert(error);
+            }
         }
-        cleaned += 1;
-        eprintln!("veyl-helper: 服务 {service} 的 DNS 仍指向 {peer}，已改写成可用 DNS");
+        for line in report.lines() {
+            log(&line);
+        }
     }
     if cleaned > 0 {
-        eprintln!("veyl-helper: 共清理 {cleaned} 个服务的 DNS 残留（没有原始快照可还原）");
+        log(&format!("共清理 {cleaned} 个服务的 DNS 残留（没有原始快照可还原）"));
     }
     match first_error {
         Some(error) => Err(error),
@@ -409,15 +580,246 @@ fn leftover_peer<'a>(servers: &[String], candidates: &[&'a str]) -> Option<&'a s
         .find(|peer| is_leftover(servers, *peer))
 }
 
-fn restore_locked(guard: &mut Option<SavedDns>, deadline: Option<Instant>) -> Result<(), String> {
+fn restore_locked(guard: &mut Option<SavedDns>, deadline: Option<Instant>) -> RestoreReport {
     let Some(saved) = guard.clone() else {
-        return Ok(());
+        return RestoreReport::new("no_snapshot");
     };
+    let mut report = RestoreReport {
+        service: Some(saved.service.clone()),
+        target: Some(saved.written.clone()),
+        ..RestoreReport::new("none")
+    };
+    // 系统实际使用的解析器，不是我们记录的配置值——事后判断「还原前机器在用什么」。
+    // 只剩不到 2 秒预算时不读：多一次 scutil 会吃掉退出/停止的剩余时间。
+    let has_room = deadline.map_or(true, |at| {
+        at.saturating_duration_since(Instant::now()) > Duration::from_secs(2)
+    });
+    if has_room {
+        report.resolver1 = primary_nameserver();
+    }
     if deadline_passed(deadline) {
-        return Err("还原超过退出时限，已放弃".to_string());
+        report.branch = "deadline";
+        report.error = Some("还原超过退出时限，已放弃".to_string());
+        return report;
     }
     let read = read_service_dns_within(&saved.service, deadline);
-    apply_restore(guard, &saved, read, deadline)
+    if let Err(error) = apply_restore(guard, &saved, read, deadline, &mut report) {
+        report.error = Some(error);
+    } else if matches!(report.branch, "write" | "remove_peer" | "rescue") {
+        // 还原代码写对了，不代表这台 DNS 在没有隧道时能用（2026-11-12 真机）。
+        // 只有真的写过 DNS 的分支才验证；`nothing` 不是我们写的，不该覆盖。
+        verify_after_restore(&saved, deadline, &mut report);
+    }
+    report
+}
+
+/// 还原后验证系统解析，坏了就退公网。
+///
+/// 判据必须走**系统解析**（`dscacheutil -q host`）：事故里 mDNSResponder 与路由
+/// 都正常，只有这条路径解析不了；直连 DNS 查询会看到另一个结论。
+///
+/// **超时就是不可用**：这台机器上的坏 DNS 会让 `dscacheutil` 挂到超时，
+/// 而「挂到超时」和「不答」是同一件事——不能当成「跳过兜底」。
+const RESOLVE_PROBE_NAME: &str = "cp.cloudflare.com";
+const RESOLVE_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+const RESOLVE_PROBE_ATTEMPTS: usize = 2;
+/// 验证（在线判定 + 系统解析）预算 ≤3 秒；兜底另留 1.5 秒，合计 4.5 秒。
+/// App 等 stop 回复的上限是 10 秒，helper 整条停止仍压在 9 秒内。
+const RESTORE_VERIFY_BUDGET: Duration = Duration::from_secs(3);
+const RESTORE_FALLBACK_BUDGET: Duration = Duration::from_millis(1500);
+const ONLINE_PROBE_TIMEOUT: Duration = Duration::from_millis(1000);
+/// 探测前清一次解析缓存：缓存里的旧答案会让「已经不可用」的 DNS 看起来正常。
+const FLUSH_BEFORE_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolveProbe {
+    Ok,
+    /// 不可用，附带是哪一种：超时 / 无输出 / 命令失败。三者同义，只是给日志看。
+    Unavailable(ProbeFailure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeFailure {
+    Timeout,
+    Empty,
+    Failed,
+}
+
+impl ProbeFailure {
+    fn label(self) -> &'static str {
+        match self {
+            ProbeFailure::Timeout => "超时",
+            ProbeFailure::Empty => "无输出",
+            ProbeFailure::Failed => "命令失败",
+        }
+    }
+}
+
+fn verify_after_restore(saved: &SavedDns, deadline: Option<Instant>, report: &mut RestoreReport) {
+    let end = verification_end(deadline);
+    let online = system_online(end);
+    report.online = online;
+    if let Some(false) = online {
+        report.verify = Some("本机离线，跳过".to_string());
+        return;
+    }
+    if online.is_none() {
+        // 判不出来时不当作离线：那会把用户留在坏 DNS 上。按在线继续验证。
+        log::warn!("DNS 还原后验证：无法判定本机是否在线，按在线处理");
+    }
+    match system_resolves(end) {
+        ResolveProbe::Ok => report.verify = Some("可用".to_string()),
+        ResolveProbe::Unavailable(failure) => {
+            let fallback_end = fallback_end(end, deadline);
+            apply_public_fallback(saved, failure, fallback_end, report);
+        }
+    }
+}
+
+fn verification_end(deadline: Option<Instant>) -> Instant {
+    let budget_end = Instant::now() + RESTORE_VERIFY_BUDGET;
+    match deadline {
+        Some(at) => at.min(budget_end),
+        None => budget_end,
+    }
+}
+
+/// 兜底用的截止时刻：验证预算之外再给 1.5 秒，且不越过整条停止的截止。
+fn fallback_end(verify_end: Instant, deadline: Option<Instant>) -> Instant {
+    let want = Instant::now() + RESTORE_FALLBACK_BUDGET;
+    match deadline {
+        Some(at) => want.min(at),
+        None => want.min(verify_end + RESTORE_FALLBACK_BUDGET),
+    }
+}
+
+/// 有没有可用出口：默认路由存在，且不在回环上。
+///
+/// - `Some(true)` / `Some(false)`：明确判出来了；
+/// - `None`：判定不了（命令不存在、权限、超时）。调用方按「在线」继续——
+///   宁可多写一次公网，也不能把用户留在不答的 DNS 上。
+///
+/// **macOS 没有默认路由时 `route` 是非零退出 + `not in table`**，这是明确的
+/// 离线，不能和「命令失败」混为一谈：Wi-Fi 关掉时走到这里若按在线处理，
+/// 探测必然失败，进而把用户的 DNS 覆盖成公网——那是这条规则存在的理由。
+fn system_online(end: Instant) -> Option<bool> {
+    let remaining = end.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
+    match run_capture(
+        "/sbin/route",
+        &["-n", "get", "default"],
+        remaining.min(ONLINE_PROBE_TIMEOUT),
+    ) {
+        Ok(text) => {
+            let interface = text
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("interface:").map(str::trim));
+            Some(text.contains("gateway:") && interface.is_some_and(|name| name != "lo0"))
+        }
+        Err(error) if error.contains("not in table") => Some(false),
+        Err(_) => None,
+    }
+}
+
+fn system_resolves(end: Instant) -> ResolveProbe {
+    // 先清缓存再查：否则刚连过时留下的缓存会让坏 DNS 看起来「可用」。
+    let flush_timeout = end
+        .saturating_duration_since(Instant::now())
+        .min(FLUSH_BEFORE_PROBE_TIMEOUT);
+    if !flush_timeout.is_zero() {
+        let _ = run_capture("/usr/bin/dscacheutil", &["-flushcache"], flush_timeout);
+    }
+
+    let mut last = ProbeFailure::Timeout;
+    for _ in 0..RESOLVE_PROBE_ATTEMPTS {
+        let remaining = end.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return ResolveProbe::Unavailable(ProbeFailure::Timeout);
+        }
+        let timeout = remaining.min(RESOLVE_PROBE_TIMEOUT);
+        match run_capture(
+            "/usr/bin/dscacheutil",
+            &["-q", "host", "-a", "name", RESOLVE_PROBE_NAME],
+            timeout,
+        ) {
+            Ok(text) if text.contains("ip_address:") => return ResolveProbe::Ok,
+            Ok(_) => last = ProbeFailure::Empty,
+            Err(failure) => {
+                // 超时与命令失败都算不可用；保留第一次的原因给日志。
+                last = if failure.contains("超时") {
+                    ProbeFailure::Timeout
+                } else {
+                    ProbeFailure::Failed
+                };
+            }
+        }
+    }
+    ResolveProbe::Unavailable(last)
+}
+
+/// 还原值不可用（超时/无输出/命令失败同义）：改写成公网兜底并 flush，再验证一次。
+///
+/// 搜索域沿用快照：那是用户的，不能因为退公网就丢掉。
+fn apply_public_fallback(
+    saved: &SavedDns,
+    failure: ProbeFailure,
+    end: Instant,
+    report: &mut RestoreReport,
+) {
+    if Instant::now() >= end {
+        report.error = Some("兜底预算不足，未写入公网".to_string());
+        report.verify = Some(format!("不可用（{}）→ 退公网失败", failure.label()));
+        return;
+    }
+    let public: Vec<String> = PUBLIC_DNS.iter().map(|value| (*value).to_string()).collect();
+    let refs: Vec<&str> = public.iter().map(String::as_str).collect();
+    let search_refs: Vec<&str> = saved.search.iter().map(String::as_str).collect();
+    if let Err(error) = write_service_dns_within(&saved.service, &refs, &search_refs, Some(end)) {
+        report.error = Some(format!("退公网写入失败：{error}"));
+        report.verify = Some(format!("不可用（{}）→ 退公网失败", failure.label()));
+        return;
+    }
+    report.fallback = Some(public.clone());
+    report.branch = "fallback_public";
+    // 回读给 600ms：剩下的时间要留给 flush 和二次验证。
+    let confirm_end = end.min(Instant::now() + Duration::from_millis(600));
+    report.fallback_confirmed = confirm_public(&saved.service, &public, confirm_end, report);
+    if Instant::now() < end && !external_commands_are_simulated() {
+        let _ = super::flush_system_dns_within(Some(end));
+    }
+    report.verify = Some(format!("不可用（{}）→ 已退公网", failure.label()));
+    report.fallback_verify = Some(match system_resolves(end) {
+        ResolveProbe::Ok => "可用的".to_string(),
+        ResolveProbe::Unavailable(failure) => format!("仍不可用（{}）", failure.label()),
+    });
+}
+
+fn confirm_public(
+    service: &str,
+    expected: &[String],
+    end: Instant,
+    report: &mut RestoreReport,
+) -> bool {
+    for _ in 0..VERIFY_ATTEMPTS {
+        if Instant::now() >= end {
+            return false;
+        }
+        let Ok((_, written, _)) = read_service_dns_within(service, Some(end)) else {
+            return false;
+        };
+        report.fallback_readback = Some(written.clone());
+        if written == expected {
+            return true;
+        }
+        let sleep_for = VERIFY_INTERVAL.min(end.saturating_duration_since(Instant::now()));
+        if sleep_for.is_zero() {
+            return false;
+        }
+        std::thread::sleep(sleep_for);
+    }
+    false
 }
 
 /// 把「快照 + 回读结果」变成实际动作。
@@ -430,20 +832,27 @@ fn apply_restore(
     saved: &SavedDns,
     read: Result<(bool, Vec<String>, Vec<String>), String>,
     deadline: Option<Instant>,
+    report: &mut RestoreReport,
 ) -> Result<(), String> {
     let current = match read {
         Ok((_, servers, _)) => servers,
         Err(error) => {
+            report.branch = "read_failed";
+            // 直接调用 `apply_restore` 的调用方（含测试）拿不到外层 `restore_locked`
+            // 的 error 填充，所以这里必须自己写：读失败永远是失败，调用方要能判断。
+            report.error = Some(error.clone());
             *guard = None;
             return Err(error);
         }
     };
+    report.before = Some(current.clone());
     // 救援时**不能**把我们自己写进去的地址当结果：全局 DNS 键此刻就是从我们的键
     // 派生的，读回来只有 223.5.5.5 时若照抄，等于「还原」成自己，用户的 DHCP /
     // 自定义 DNS 永远回不来。旧设计的对端同理。
     let exclude = [saved.written.as_str(), LEGACY_PEER];
     match restore_action(&current, saved) {
         RestoreAction::Nothing => {
+            report.branch = "nothing";
             eprintln!(
                 "veyl-helper: 系统 DNS 已被别处改写（当前 {current:?}），不写回旧网络的原始值"
             );
@@ -452,32 +861,42 @@ fn apply_restore(
             if servers.is_empty() {
                 // 只有 SearchDomains 的原始状态写不出去（写入会拒绝空服务器），
                 // 退回兜底，总比把机器留在我们的地址上好。
-                rescue_service_dns(&saved.service, &saved.global_servers, &exclude, deadline)?;
+                report.branch = "rescue";
+                rescue_service_dns(
+                    &saved.service,
+                    &saved.global_servers,
+                    &exclude,
+                    deadline,
+                    report,
+                )?;
             } else {
+                report.branch = "write";
                 let refs: Vec<&str> = servers.iter().map(String::as_str).collect();
                 let search_refs: Vec<&str> = search.iter().map(String::as_str).collect();
-                write_and_confirm(&saved.service, &refs, &search_refs, deadline)?;
+                write_and_confirm(&saved.service, &refs, &search_refs, deadline, report)?;
             }
         }
         RestoreAction::RemovePeer { remaining } => {
             // 用户连接期间手动加过 DNS：只摘掉我们的地址，其余保持；搜索域沿用快照。
+            report.branch = "remove_peer";
             let (servers, search) = remove_peer_plan(saved, &remaining);
             let refs: Vec<&str> = servers.iter().map(String::as_str).collect();
             let search_refs: Vec<&str> = search.iter().map(String::as_str).collect();
-            write_and_confirm(&saved.service, &refs, &search_refs, deadline)?;
+            write_and_confirm(&saved.service, &refs, &search_refs, deadline, report)?;
         }
         RestoreAction::Rescue { use_snapshot } => {
             // 空键只能用现读的全局 DNS：快照是旧网络的，用了就串网。
+            report.branch = "rescue";
             let snapshot: &[String] = if use_snapshot {
                 &saved.global_servers
             } else {
                 &[]
             };
-            rescue_service_dns(&saved.service, snapshot, &exclude, deadline)?;
+            rescue_service_dns(&saved.service, snapshot, &exclude, deadline, report)?;
         }
     }
     *guard = None;
-    if !deadline_passed(deadline) {
+    if !deadline_passed(deadline) && !external_commands_are_simulated() {
         let _ = super::flush_system_dns_within(deadline);
     }
     eprintln!("veyl-helper: 系统 DNS 已还原");
@@ -492,22 +911,28 @@ fn write_and_confirm(
     servers: &[&str],
     search: &[&str],
     deadline: Option<Instant>,
+    report: &mut RestoreReport,
 ) -> Result<(), String> {
     if deadline_passed(deadline) {
+        report.branch = "deadline";
         return Err("写入超过退出时限，已跳过".to_string());
     }
     write_service_dns_within(service, servers, search, deadline)?;
     let expected: Vec<String> = servers.iter().map(|value| (*value).to_string()).collect();
+    report.written = Some(expected.clone());
     for _ in 0..VERIFY_ATTEMPTS {
         if deadline_passed(deadline) {
             break;
         }
         let (_, written, _) = read_service_dns_within(service, deadline)?;
+        report.readback = Some(written.clone());
         if written == expected {
+            report.confirmed = true;
             return Ok(());
         }
         std::thread::sleep(VERIFY_INTERVAL);
     }
+    report.confirmed = false;
     Err(format!("写入后回读不一致：期望 {expected:?}"))
 }
 
@@ -669,12 +1094,14 @@ fn rescue_service_dns(
     snapshot_global: &[String],
     exclude: &[&str],
     deadline: Option<Instant>,
+    report: &mut RestoreReport,
 ) -> Result<(), String> {
     if deadline_passed(deadline) {
         return Err("救援超过退出时限，已跳过".to_string());
     }
     let live = global_dns_servers_within(deadline).unwrap_or_default();
     let servers = rescue_candidates(snapshot_global, &live, exclude);
+    report.written = Some(servers.clone());
     let used_public = servers
         .iter()
         .all(|value| PUBLIC_DNS.contains(&value.as_str()));
@@ -692,14 +1119,17 @@ fn rescue_service_dns(
             break;
         }
         let (_, written, _) = read_service_dns_within(service, deadline)?;
+        report.readback = Some(written.clone());
         if rescue_confirmed(&written, &servers) {
-            if !deadline_passed(deadline) {
+            report.confirmed = true;
+            if !deadline_passed(deadline) && !external_commands_are_simulated() {
                 let _ = super::flush_system_dns_within(deadline);
             }
             return Ok(());
         }
         std::thread::sleep(VERIFY_INTERVAL);
     }
+    report.confirmed = false;
     Err("写入兜底 DNS 后回读没有命中任何候选地址".to_string())
 }
 
@@ -794,7 +1224,88 @@ fn scutil_script(script: &str) -> Result<String, String> {
     scutil_script_within(script, None)
 }
 
+// 测试用：替换 scutil 的脚本执行，免得单测真的改系统 DNS。
+// 用 `//` 而不是 `///`：文档注释不能挂在宏调用上，rustdoc 会一直 warning。
+#[cfg(test)]
+thread_local! {
+    static SCRIPT_FAKE: std::cell::RefCell<
+        Option<Box<dyn FnMut(&str) -> Result<String, String>>>,
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn install_script_fake(fake: Option<Box<dyn FnMut(&str) -> Result<String, String>>>) {
+    SCRIPT_FAKE.with(|slot| *slot.borrow_mut() = fake);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 外部命令的假实现：`Some` = 由假实现给结果，`None` = 不关心的命令。
+    static COMMAND_FAKE: std::cell::RefCell<
+        Option<Box<dyn FnMut(&str, &[&str]) -> Option<Result<String, String>>>>,
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn install_command_fake(
+    fake: Option<Box<dyn FnMut(&str, &[&str]) -> Option<Result<String, String>>>>,
+) {
+    COMMAND_FAKE.with(|slot| *slot.borrow_mut() = fake);
+}
+
+/// 测试里一律不执行真实的外部副作用（flush 会 HUP mDNSResponder）。
+fn external_commands_are_simulated() -> bool {
+    #[cfg(test)]
+    {
+        return true;
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// 跑一次外部命令并拿 stdout。测试里只走假实现，绝不真的执行。
+fn run_capture(program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
+    #[cfg(test)]
+    {
+        let _ = timeout;
+        let faked = COMMAND_FAKE.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .and_then(|fake| fake(program, args))
+        });
+        return faked.unwrap_or_else(|| Err("测试环境未注入命令".to_string()));
+    }
+    #[cfg(not(test))]
+    {
+        let child = Command::new(program)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("无法执行 {program}：{error}"))?;
+        let output = wait_with_timeout(child, timeout)?;
+        if !output.status.success() {
+            // stdout 也带上：`route` 把 "not in table" 打在 stderr，但别的命令
+            // 可能打在 stdout，离线判定要能看到两种。
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("{program} 退出失败：{} {}", stdout.trim(), stderr.trim()));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+}
+
 fn scutil_script_within(script: &str, deadline: Option<Instant>) -> Result<String, String> {
+    #[cfg(test)]
+    {
+        let faked =
+            SCRIPT_FAKE.with(|slot| slot.borrow_mut().as_mut().map(|fake| fake(script)));
+        if let Some(result) = faked {
+            return result;
+        }
+    }
     let mut child = Command::new(SCUTIL)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -844,17 +1355,30 @@ fn wait_with_timeout(
 }
 
 fn run_scutil(args: &[&str]) -> Option<String> {
-    let child = Command::new(SCUTIL)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    let output = wait_with_timeout(child, SCUTIL_TIMEOUT).ok()?;
-    if !output.status.success() {
-        return None;
+    #[cfg(test)]
+    {
+        // 测试里不真的执行 scutil；没注入假实现就当读不到（离线语义）。
+        let faked = COMMAND_FAKE.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .and_then(|fake| fake(SCUTIL, args))
+        });
+        return faked.and_then(|result| result.ok());
     }
-    Some(String::from_utf8_lossy(&output.stdout).to_string())
+    #[cfg(not(test))]
+    {
+        let child = Command::new(SCUTIL)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()?;
+        let output = wait_with_timeout(child, SCUTIL_TIMEOUT).ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&output.stdout).to_string())
+    }
 }
 
 /// `scutil` 的 `<dictionary>` 输出。只解析我们用到的两种形态：标量与数组。
@@ -965,6 +1489,373 @@ mod tests {
         assert!(
             !ip.is_private() && !ip.is_loopback() && !ip.is_link_local() && !ip.is_multicast(),
             "落进排除段就会被 auto_route 放给物理网卡"
+        );
+    }
+
+    /// 会动全局快照 `SAVED` 的用例必须串行：测试默认并行跑在同一个进程里。
+    static RESTORE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 停止路径要能事后看出「停止前是什么、走了哪个分支、最终写了什么」。
+    /// 用假的 scutil：既不改系统 DNS，也能断言日志里的值。
+    #[test]
+    fn a_stop_restore_reports_the_branch_and_final_addresses() {
+        let _serial = RESTORE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        fn dns_state(servers: &[&str]) -> String {
+            let mut text = String::from("<dictionary> {\n  ServerAddresses : <array> {\n");
+            for (index, value) in servers.iter().enumerate() {
+                text.push_str(&format!("    {index} : {value}\n"));
+            }
+            text.push_str("  }\n}");
+            text
+        }
+
+        // 快照：用户原来是 10.0.0.53，连接期我们写成了 223.5.5.5。
+        *SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SavedDns {
+            service: "ABC".into(),
+            written: SYSTEM_DNS_TARGET.into(),
+            had_state: true,
+            servers: vec!["10.0.0.53".into()],
+            search: Vec::new(),
+            global_servers: Vec::new(),
+        });
+
+        let mut written = false;
+        install_script_fake(Some(Box::new(move |script: &str| {
+            if script.contains("set State:/Network/Service/ABC/DNS") {
+                written = true;
+                return Ok(String::new());
+            }
+            if script.contains("show State:/Network/Service/ABC/DNS") {
+                return Ok(if written {
+                    dns_state(&["10.0.0.53"])
+                } else {
+                    dns_state(&[SYSTEM_DNS_TARGET])
+                });
+            }
+            Ok(String::new())
+        })));
+        // 这条夹具证明的是「还原值可用 → 不写公网」，所以验证阶段必须是可用：
+        // 没有假命令时探测失败会退公网，那是另一个用例的事。
+        install_command_fake(Some(Box::new(|program: &str, args: &[&str]| match program {
+            "/sbin/route" => Some(Ok(ROUTE_ONLINE.to_string())),
+            "/usr/bin/dscacheutil" => {
+                if args.contains(&"-flushcache") {
+                    Some(Ok(String::new()))
+                } else {
+                    Some(Ok("name: cp.cloudflare.com\nip_address: 203.0.113.5\n".to_string()))
+                }
+            }
+            _ => None,
+        })));
+
+        let report = restore();
+        install_script_fake(None);
+        install_command_fake(None);
+        *SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+
+        assert_eq!(report.branch, "write");
+        assert_eq!(
+            report.before.as_deref(),
+            Some(&[SYSTEM_DNS_TARGET.to_string()][..])
+        );
+        assert_eq!(
+            report.written.as_deref(),
+            Some(&["10.0.0.53".to_string()][..])
+        );
+        assert!(report.confirmed);
+        assert!(report.error.is_none());
+
+        let lines = report.lines().join("\n");
+        assert!(lines.contains("处理分支=write"), "{lines}");
+        assert!(lines.contains("还原写入 地址=[\"10.0.0.53\"]"), "{lines}");
+        assert!(lines.contains("含我们的=true"), "{lines}");
+        assert!(lines.contains("回读校验=一致"), "{lines}");
+    }
+
+    /// 原本没有快照（没接管过 DNS）：停止路径也要记下「无须处理」。
+    #[test]
+    fn a_stop_without_a_snapshot_reports_no_snapshot() {
+        let _serial = RESTORE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        let report = restore();
+        assert_eq!(report.branch, "no_snapshot");
+        assert!(report.written.is_none());
+        assert!(report.error.is_none());
+        assert!(report
+            .lines()
+            .iter()
+            .any(|line| line.contains("处理分支=no_snapshot")));
+    }
+
+    // ---- 还原后验证：假的 scutil + 假的外部命令，不碰系统 DNS ----
+
+    fn format_dns_state(servers: &[String]) -> String {
+        let mut text = String::from("<dictionary> {\n  ServerAddresses : <array> {\n");
+        for (index, value) in servers.iter().enumerate() {
+            text.push_str(&format!("    {index} : {value}\n"));
+        }
+        text.push_str("  }\n}");
+        text
+    }
+
+    /// 假 scutil：`show` 返回当前值，`set` 把写入的地址变成新的当前值。
+    /// 返回的句柄用来断言最终系统里是什么。
+    fn install_dns_fake(initial: &[&str]) -> std::rc::Rc<std::cell::RefCell<Vec<String>>> {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let current = Rc::new(RefCell::new(
+            initial
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>(),
+        ));
+        let state = Rc::clone(&current);
+        install_script_fake(Some(Box::new(move |script: &str| {
+            if let Some(rest) = script
+                .lines()
+                .find_map(|line| line.strip_prefix("d.add ServerAddresses * "))
+            {
+                *state.borrow_mut() = rest.split_whitespace().map(str::to_string).collect();
+            }
+            if script.contains("show State:/Network/Service/ABC/DNS") {
+                return Ok(format_dns_state(&state.borrow()));
+            }
+            Ok(String::new())
+        })));
+        current
+    }
+
+    fn snapshot_for_test() -> Option<SavedDns> {
+        Some(SavedDns {
+            service: "ABC".into(),
+            written: SYSTEM_DNS_TARGET.into(),
+            had_state: true,
+            servers: vec!["10.0.0.53".into()],
+            search: Vec::new(),
+            global_servers: Vec::new(),
+        })
+    }
+
+    const ROUTE_ONLINE: &str = "route to: default\n  gateway: 192.168.1.1\n  interface: en0\n";
+
+    fn install_network_fake(
+        route: Option<&'static str>,
+        resolves: bool,
+    ) -> std::rc::Rc<std::cell::Cell<u32>> {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let calls = Rc::new(Cell::new(0));
+        let probes = Rc::clone(&calls);
+        install_command_fake(Some(Box::new(move |program: &str, _args: &[&str]| {
+            match program {
+                "/sbin/route" => Some(match route {
+                    Some(text) => Ok(text.to_string()),
+                    // 真机离线时 route 的真实输出：非零退出 + not in table。
+                    None => Err("route 退出失败：route: writing to routing socket: not in table"
+                        .to_string()),
+                }),
+                "/usr/bin/dscacheutil" => {
+                    probes.set(probes.get() + 1);
+                    Some(Ok(if resolves {
+                        "name: cp.cloudflare.com\nip_address: 203.0.113.5\n".to_string()
+                    } else {
+                        "name: cp.cloudflare.com\n".to_string()
+                    }))
+                }
+                _ => None,
+            }
+        })));
+        calls
+    }
+
+    fn clear_fakes() {
+        install_script_fake(None);
+        install_command_fake(None);
+    }
+
+    /// 还原值能解析：不写公网，分支仍是 write，且正常路径不拖慢停止。
+    #[test]
+    fn a_restored_resolver_that_resolves_is_kept() {
+        let current = install_dns_fake(&[SYSTEM_DNS_TARGET]);
+        install_network_fake(Some(ROUTE_ONLINE), true);
+
+        let mut slot = snapshot_for_test();
+        let started = Instant::now();
+        let report = restore_locked(&mut slot, None);
+        let elapsed = started.elapsed();
+        clear_fakes();
+
+        assert_eq!(report.branch, "write");
+        assert_eq!(
+            report.written.as_deref(),
+            Some(&["10.0.0.53".to_string()][..])
+        );
+        assert!(report.fallback.is_none(), "能解析就不该退公网");
+        assert_eq!(report.verify.as_deref(), Some("可用"));
+        assert_eq!(&*current.borrow(), &["10.0.0.53".to_string()]);
+        let lines = report.lines().join("\n");
+        assert!(!lines.contains("已退公网"), "{lines}");
+        assert!(lines.contains("还原后验证=可用"), "{lines}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "可用路径不该拖慢停止，实际 {elapsed:?}"
+        );
+    }
+
+    /// 还原值解析不了且本机在线：退到公网兜底，日志带上还原值。
+    #[test]
+    fn an_unusable_restored_resolver_falls_back_to_public_dns() {
+        let current = install_dns_fake(&[SYSTEM_DNS_TARGET]);
+        install_network_fake(Some(ROUTE_ONLINE), false);
+
+        let mut slot = snapshot_for_test();
+        let report = restore_locked(&mut slot, None);
+        clear_fakes();
+
+        let public: Vec<String> = PUBLIC_DNS.iter().map(|value| (*value).to_string()).collect();
+        assert_eq!(report.branch, "fallback_public");
+        assert_eq!(report.fallback.as_ref(), Some(&public));
+        assert_eq!(&*current.borrow(), &public, "系统里最终必须换成公网地址");
+        assert!(report.fallback_confirmed);
+
+        let lines = report.lines().join("\n");
+        assert!(lines.contains("[warn] 还原值不可用 → 已退公网"), "{lines}");
+        assert!(lines.contains("还原值=[\"10.0.0.53\"]"), "{lines}");
+        assert!(lines.contains("本机离线=false"), "{lines}");
+        assert!(lines.contains("223.5.5.5"), "{lines}");
+        assert!(
+            lines.contains("还原后验证=不可用（无输出）→ 已退公网"),
+            "{lines}"
+        );
+        assert!(lines.contains("DNS 兜底后验证=仍不可用"), "{lines}");
+    }
+
+    /// 本机离线：解析失败属正常，**不**覆盖用户 DNS、不写公网。
+    #[test]
+    fn an_offline_machine_keeps_the_restored_resolver() {
+        let current = install_dns_fake(&[SYSTEM_DNS_TARGET]);
+        let probes = install_network_fake(None, true);
+
+        let mut slot = snapshot_for_test();
+        let report = restore_locked(&mut slot, None);
+        clear_fakes();
+
+        assert_eq!(report.branch, "write");
+        assert!(report.fallback.is_none(), "离线时不许写公网地址");
+        assert_eq!(&*current.borrow(), &["10.0.0.53".to_string()]);
+        assert_eq!(probes.get(), 0, "离线时不该再做解析探测");
+        assert!(report
+            .verify
+            .as_deref()
+            .unwrap_or_default()
+            .contains("离线"));
+    }
+
+    /// 路由命令的**其它**失败（权限、命令不存在、超时）不是「没有默认路由」：
+    /// 判不出来就按在线继续，宁可多写一次公网，也不把用户留在坏 DNS 上。
+    #[test]
+    fn an_unknown_route_failure_is_treated_as_online() {
+        let current = install_dns_fake(&[SYSTEM_DNS_TARGET]);
+        install_command_fake(Some(Box::new(|program: &str, args: &[&str]| match program {
+            "/sbin/route" => Some(Err("route 退出失败：permission denied".to_string())),
+            "/usr/bin/dscacheutil" => {
+                if args.contains(&"-flushcache") {
+                    Some(Ok(String::new()))
+                } else {
+                    // 解析也不通：在线 + 不可用 → 必须兜底。
+                    Some(Ok("name: cp.cloudflare.com\n".to_string()))
+                }
+            }
+            _ => None,
+        })));
+
+        let mut slot = snapshot_for_test();
+        let report = restore_locked(&mut slot, None);
+        clear_fakes();
+
+        let public: Vec<String> = PUBLIC_DNS.iter().map(|value| (*value).to_string()).collect();
+        assert_eq!(report.branch, "fallback_public");
+        assert_eq!(&*current.borrow(), &public);
+        assert_eq!(report.online, None, "判不出来时不能记成离线");
+    }
+
+    /// 验证超时 = 不可用 = 必须兜底（线上就是漏了这一条，把用户留在不答的 DNS 上）。
+    /// 同时断言验证不会把停止拖过预算。
+    #[test]
+    fn a_resolution_timeout_falls_back_to_public_dns() {
+        let current = install_dns_fake(&[SYSTEM_DNS_TARGET]);
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = std::rc::Rc::clone(&calls);
+        install_command_fake(Some(Box::new(move |program: &str, args: &[&str]| {
+            match program {
+                "/sbin/route" => Some(Ok(ROUTE_ONLINE.to_string())),
+                "/usr/bin/dscacheutil" => {
+                    if args.contains(&"-flushcache") {
+                        return Some(Ok(String::new()));
+                    }
+                    counter.set(counter.get() + 1);
+                    // 模拟「挂到超时」：生产路径由 wait_with_timeout 在 1.5s 处杀掉，
+                    // 这里直接给出同样的结论，测试不必真等。
+                    std::thread::sleep(Duration::from_millis(20));
+                    Some(Err("scutil 超时，已终止".to_string()))
+                }
+                _ => None,
+            }
+        })));
+
+        let mut slot = snapshot_for_test();
+        let started = Instant::now();
+        let report = restore_locked(&mut slot, None);
+        let elapsed = started.elapsed();
+        clear_fakes();
+
+        let public: Vec<String> = PUBLIC_DNS.iter().map(|value| (*value).to_string()).collect();
+        assert_eq!(report.branch, "fallback_public");
+        assert_eq!(&*current.borrow(), &public, "超时也必须退到公网");
+        assert!(calls.get() >= 2, "应当重试过一次");
+        let lines = report.lines().join("\n");
+        assert!(
+            lines.contains("还原后验证=不可用（超时）→ 已退公网"),
+            "{lines}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "验证超时不能拖住停止，实际 {elapsed:?}"
+        );
+    }
+
+    /// 命令失败（起不来/退出非零）与超时同义：照样兜底。
+    #[test]
+    fn a_failing_probe_command_falls_back_to_public_dns() {
+        let current = install_dns_fake(&[SYSTEM_DNS_TARGET]);
+        install_command_fake(Some(Box::new(|program: &str, args: &[&str]| match program {
+            "/sbin/route" => Some(Ok(ROUTE_ONLINE.to_string())),
+            "/usr/bin/dscacheutil" => {
+                if args.contains(&"-flushcache") {
+                    return Some(Ok(String::new()));
+                }
+                Some(Err("dscacheutil 退出失败".to_string()))
+            }
+            _ => None,
+        })));
+
+        let mut slot = snapshot_for_test();
+        let report = restore_locked(&mut slot, None);
+        clear_fakes();
+
+        let public: Vec<String> = PUBLIC_DNS.iter().map(|value| (*value).to_string()).collect();
+        assert_eq!(report.branch, "fallback_public");
+        assert_eq!(&*current.borrow(), &public);
+        let lines = report.lines().join("\n");
+        assert!(
+            lines.contains("还原后验证=不可用（命令失败）→ 已退公网"),
+            "{lines}"
         );
     }
 
@@ -1384,9 +2275,12 @@ mod tests {
             global_servers: Vec::new(),
         };
         let mut slot = Some(saved.clone());
-        let result = apply_restore(&mut slot, &saved, Err("No such key".into()), None);
+        let mut report = RestoreReport::default();
+        let result = apply_restore(&mut slot, &saved, Err("No such key".into()), None, &mut report);
         assert!(result.is_err());
         assert_eq!(slot, None, "读不回来宁可丢原始值，也不能下次写错服务");
+        assert_eq!(report.branch, "read_failed");
+        assert!(report.error.is_some());
     }
 
     /// 旧版本崩溃留下的对端不算原始值；但公网目标可能是用户自己设的，必须照常记录。
