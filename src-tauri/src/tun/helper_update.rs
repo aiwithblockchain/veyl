@@ -399,6 +399,11 @@ impl HelperUpdater {
             // 连接是用户主动行为：先确保注册/批准，再确认 helper 在跑。
             // 不先这一步的话，未注册时 status 失败会被误判成「需要管理员重启」。
             if let Err(error) = self.backend.ensure_available() {
+                log::warn!(
+                    "后台组件不可用：{}（detail={:?}）",
+                    error.message,
+                    error.detail
+                );
                 return Err((error.message, "helper_unavailable"));
             }
             // 强制换一条新租约，避免 helper 被外部重启后「有隧道、无租约」。
@@ -409,7 +414,7 @@ impl HelperUpdater {
                         return Err((
                             "无法建立后台组件会话租约，暂时不能接管全部流量。代理模式与直连仍可用。"
                                 .into(),
-                            "helper_unavailable",
+                            "helper_lease_unavailable",
                         ));
                     }
                     Ok(())
@@ -1028,6 +1033,7 @@ mod tests {
 
         struct FakeBackend {
             reply: RestartReply,
+            available: bool,
         }
 
         impl TunBackend for FakeBackend {
@@ -1036,7 +1042,14 @@ mod tests {
             }
 
             fn ensure_available(&self) -> Result<HelperStatus, TunError> {
-                Ok(HelperStatus::Enabled)
+                if self.available {
+                    Ok(HelperStatus::Enabled)
+                } else {
+                    Err(TunError::new(
+                        TunErrorCode::HelperInstallFailed,
+                        "安装后台助手失败",
+                    ))
+                }
             }
 
             fn start(&self, _config: &str) -> Result<StartReply, TunError> {
@@ -1090,7 +1103,10 @@ mod tests {
             let calls = Arc::new(AtomicUsize::new(0));
             let counter = Arc::clone(&calls);
             let updater = HelperUpdater::for_test(
-                Arc::new(FakeBackend { reply }),
+                Arc::new(FakeBackend {
+                    reply,
+                    available: true,
+                }),
                 Arc::new(move || {
                     counter.fetch_add(1, Ordering::SeqCst);
                     false
@@ -1127,6 +1143,51 @@ mod tests {
             // 设置页显式点「重试授权」是用户主动行为，允许再弹一次。
             let _ = updater.restart_from_user();
             assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+
+        /// 后台组件不可用（未注册 / 未获系统允许 / 安装失败）统一归一成
+        /// `helper_unavailable`：界面靠这个 reason 决定是否弹「打开系统设置」引导。
+        #[test]
+        fn an_unavailable_helper_maps_to_helper_unavailable() {
+            let updater = HelperUpdater::for_test(
+                Arc::new(FakeBackend {
+                    reply: RestartReply::Supported,
+                    available: false,
+                }),
+                Arc::new(|| false),
+            );
+            let (message, reason) = updater
+                .ensure_current_for_connect()
+                .expect_err("后台组件不可用时连接必须失败");
+            assert_eq!(reason, "helper_unavailable");
+            assert_eq!(message, "安装后台助手失败");
+        }
+
+        /// 组件在跑但租约建立失败：这是会话问题，不是权限问题，
+        /// 不能复用 `helper_unavailable` 让界面去弹「打开系统设置」。
+        #[test]
+        fn a_lost_lease_has_its_own_reason() {
+            let updater = HelperUpdater::for_test(
+                Arc::new(FakeBackend {
+                    reply: RestartReply::Supported,
+                    available: true,
+                }),
+                Arc::new(|| false),
+            );
+            *updater.info_override.lock().unwrap() = Some(HelperInfo {
+                running_build: Some("new".into()),
+                expected_build: "new".into(),
+                stale: false,
+                state: HelperState::Running,
+                needs_admin_restart: false,
+            });
+            // FakeBackend 走默认 acquire_lease：返回 Ok(None)，租约建立不起来。
+            let (message, reason) = updater
+                .ensure_current_for_connect()
+                .expect_err("租约失败时连接必须失败");
+            assert_eq!(reason, "helper_lease_unavailable");
+            assert_ne!(reason, "helper_unavailable");
+            assert!(message.contains("无法建立后台组件会话租约"));
         }
 
         /// helper 认识 `restart` 时，两条路径都不该弹授权。

@@ -127,6 +127,13 @@ function isHelperAdminFailure(error: unknown): boolean {
   return bridgeError.details?.reason === "helper_needs_admin";
 }
 
+/** 去系统设置里允许后台助手就能解决的失败；界面弹引导，不用 toast。 */
+const HELPER_PERMISSION_REASONS = ["helper_unavailable", "tun_denied", "helper_needs_admin"];
+
+export function isHelperPermissionReason(reason: string | undefined): boolean {
+  return reason !== undefined && HELPER_PERMISSION_REASONS.includes(reason);
+}
+
 /**
  * 等浏览器把 React 这次更新画到屏幕上。
  * 系统弹窗会一直阻塞到用户处理完；如果先发请求，用户看到的就只有一个
@@ -539,10 +546,15 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       if (stale()) return { ok: true };
       await refreshReal();
       setConnection((current) => (current === "starting" ? "idle" : current));
-      if (isHelperAdminFailure(err)) {
-        return { ok: false, message: "这次没有授权，可以再试一次。" };
+      const reason = actionReason(err);
+      if (isHelperPermissionReason(reason)) {
+        // 需要用户去系统里允许后台助手：交给调用方弹引导，不用 toast。
+        return { ok: false, reason };
       }
-      return { ok: false, message: actionMessage(err, "启动失败") };
+      if (isHelperAdminFailure(err)) {
+        return { ok: false, message: "这次没有授权，可以再试一次。", reason };
+      }
+      return { ok: false, message: actionMessage(err, "启动失败"), reason };
     } finally {
       if (startSeqRef.current === startSeq) {
         startingRef.current = false;

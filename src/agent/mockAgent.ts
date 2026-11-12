@@ -638,6 +638,10 @@ export class MockAgentBridge implements AgentBridge {
     };
   }
 
+  async tunHelperOpenSettings(): Promise<void> {
+    await sleep(40);
+  }
+
   private async runMockUpgrade(
     job: { id: string; cancelled: boolean },
     version: string,

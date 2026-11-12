@@ -99,6 +99,28 @@ afterEach(() => {
   if (modeDescriptor) Object.defineProperty(bridge, "mode", modeDescriptor);
 });
 
+function renderStartWithFailure(error: unknown) {
+  Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
+  localStorage.setItem("veyl.onboarding.skipped", "1");
+
+  vi.spyOn(bridge, "configList").mockResolvedValue({
+    configs: [SUMMARY],
+    active_config_id: CONFIG_ID,
+  });
+  vi.spyOn(bridge, "configDetail").mockResolvedValue(DETAIL);
+  vi.spyOn(bridge, "getRuntimeSnapshot").mockResolvedValue(null);
+  vi.spyOn(bridge, "tunHelperInfo").mockResolvedValue({
+    runningBuild: null,
+    expectedBuild: "2026.11.1",
+    stale: false,
+    state: "not_running",
+    needsAdminRestart: false,
+  } as never);
+  vi.spyOn(bridge, "runtimeStart").mockRejectedValue(error);
+  vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
+  return render(<App />);
+}
+
 describe("TUN 启动成功后的界面状态", () => {
   it("runtimeStart 挂起时来了 failed 事件，成功后仍显示已连接", async () => {
     // 用真实分支（非 mock）跑 App；桥本身仍是 mock 实现。
@@ -189,5 +211,96 @@ describe("TUN 启动成功后的界面状态", () => {
     });
     await act(async () => {});
     expect(snapshots.mock.calls.length).toBe(before + 1);
+  }, 15_000);
+
+  it("后台助手没被允许时弹引导，不显示安装失败 toast", async () => {
+    Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
+    localStorage.setItem("veyl.onboarding.skipped", "1");
+
+    vi.spyOn(bridge, "configList").mockResolvedValue({
+      configs: [SUMMARY],
+      active_config_id: CONFIG_ID,
+    });
+    vi.spyOn(bridge, "configDetail").mockResolvedValue(DETAIL);
+    vi.spyOn(bridge, "getRuntimeSnapshot").mockResolvedValue(null);
+    vi.spyOn(bridge, "tunHelperInfo").mockResolvedValue({
+      runningBuild: null,
+      expectedBuild: "2026.11.1",
+      stale: false,
+      state: "not_running",
+      needsAdminRestart: false,
+    } as never);
+    vi.spyOn(bridge, "runtimeStart").mockRejectedValue({
+      code: "PRECONDITION_FAILED",
+      message: "安装后台助手失败",
+      details: { reason: "helper_unavailable" },
+    });
+    vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
+    const openSettings = vi.spyOn(bridge, "tunHelperOpenSettings").mockResolvedValue(undefined);
+
+    const { container } = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+
+    expect(await screen.findByRole("dialog", { name: "需要允许后台助手" })).toBeTruthy();
+    expect(container.querySelector(".app-toast")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开系统设置" }));
+    await waitFor(() => expect(openSettings).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  }, 15_000);
+
+  it("tun_denied 也打开引导，不显示 toast", async () => {
+    const { container } = renderStartWithFailure({
+      code: "PRECONDITION_FAILED",
+      message: "需要你在「系统设置 › 登录项与扩展」里允许 Veyl 的后台助手",
+      details: { reason: "tun_denied" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+
+    expect(await screen.findByRole("dialog", { name: "需要允许后台助手" })).toBeTruthy();
+    expect(container.querySelector(".app-toast")).toBeNull();
+  }, 15_000);
+
+  it("helper_busy 不打开引导，只报提示", async () => {
+    const { container } = renderStartWithFailure({
+      code: "PRECONDITION_FAILED",
+      retryable: true,
+      message: "后台组件正在准备，请稍后再试",
+      details: { reason: "helper_busy" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+
+    await waitFor(() =>
+      expect(container.querySelector(".app-toast")?.textContent).toContain("后台组件正在准备"),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+  }, 15_000);
+
+  it("helper_file_invalid 不打开引导，只报重装提示", async () => {
+    const { container } = renderStartWithFailure({
+      code: "PRECONDITION_FAILED",
+      message: "后台组件文件不可用（验签未通过），请重新安装 Veyl。代理模式与直连仍可用。",
+      details: { reason: "helper_file_invalid" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+
+    await waitFor(() =>
+      expect(container.querySelector(".app-toast")?.textContent).toContain("重新安装"),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+  }, 15_000);
+
+  it("未知 reason 不打开引导", async () => {
+    const { container } = renderStartWithFailure({
+      code: "PRECONDITION_FAILED",
+      message: "无法建立后台组件会话租约，暂时不能接管全部流量。",
+      details: { reason: "helper_lease_unavailable" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+
+    await waitFor(() =>
+      expect(container.querySelector(".app-toast")?.textContent).toContain("租约"),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
   }, 15_000);
 });

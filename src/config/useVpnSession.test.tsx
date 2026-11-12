@@ -266,7 +266,7 @@ describe("连接前告知后台组件授权", () => {
     expect(result.current.preparingHelper).toBe(false);
   });
 
-  it("用户取消授权后回到可重试状态", async () => {
+  it("需要管理员授权时把原因交给界面弹引导", async () => {
     const bridge = makeStartBridge("tun", {
       needsAdmin: true,
       runtimeStart: async () => {
@@ -285,9 +285,53 @@ describe("连接前告知后台组件授权", () => {
       result_ = await result.current.start();
     });
 
-    expect(result_).toEqual({ ok: false, message: "这次没有授权，可以再试一次。" });
+    expect(result_).toEqual({ ok: false, reason: "helper_needs_admin" });
     expect(result.current.preparingHelper).toBe(false);
     expect(result.current.connection).toBe("idle");
+  });
+
+  it("后台组件不可用时同样把原因交给界面", async () => {
+    const bridge = makeStartBridge("tun", {
+      runtimeStart: async () => {
+        throw {
+          code: "PRECONDITION_FAILED",
+          message: "安装后台助手失败",
+          details: { reason: "helper_unavailable" },
+        };
+      },
+    });
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let result_: ActionResult | undefined;
+    await act(async () => {
+      result_ = await result.current.start();
+    });
+
+    expect(result_).toEqual({ ok: false, reason: "helper_unavailable" });
+  });
+
+  it("文件校验失败仍然只报文案，不弹引导", async () => {
+    const bridge = makeStartBridge("tun", {
+      runtimeStart: async () => {
+        throw {
+          code: "PRECONDITION_FAILED",
+          message: "后台组件文件不可用，请重新安装 Veyl。代理模式与直连仍可用。",
+          details: { reason: "helper_file_invalid" },
+        };
+      },
+    });
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let result_: ActionResult | undefined;
+    await act(async () => {
+      result_ = await result.current.start();
+    });
+
+    expect(result_?.ok).toBe(false);
+    expect(result_?.reason).toBe("helper_file_invalid");
+    expect(result_?.message).toContain("重新安装");
   });
 });
 
