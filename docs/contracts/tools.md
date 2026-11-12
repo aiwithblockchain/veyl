@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.9.0`
+> 契约版本：`3.10.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.7.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.10.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.9.0";
+  contract_version: "3.10.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -247,10 +247,10 @@ type CallSource = "ui" | "agent";
 
 ```ts
 // src/components/toolDisplay.ts（设计文档里也称 TOOL_DISPLAY）
-export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 46 个工具名完全相等
+export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 47 个工具名完全相等
 ```
 
-进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 46 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
+进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 47 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
 
 **提示词只降低出错概率，最终闸门在渲染层**：UI 永远不渲染工具名、JSON、错误码；不做输出正则改写（静默替换模型正文比漏一句更难排查）。
 
@@ -280,7 +280,7 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 8 | `CatalogSearch` | `CatalogSearchTool` | 查询**远端**节点目录（不含本地导入） | `ReadOnly` | 只读 |
 | 9 | `ConfigList` | `ConfigListTool` | 列**本地**全部配置 | `ReadOnly` | 只读 |
 | 10 | `ConfigDetail` | `ConfigDetailTool` | 一套配置的节点集、DNS、布局 | `ReadOnly` | 只读 |
-| 11 | `ConfigCreate` | `ConfigCreateTool` | 新建一套配置（种子 / 空 / 指定节点） | `Write` | 中 |
+| 11 | `ConfigCreate` | `ConfigCreateTool` | 新建一套配置（免费节点 / 指定节点，必须有来源） | `Write` | 中 |
 | 12 | `ConfigUpdate` | `ConfigUpdateTool` | 编辑配置（名称 / 分流 / DNS / 节点集） | `Write` | 中 |
 | 13 | `ConfigDelete` | `ConfigDeleteTool` | 删除一套配置 | `Write` | 中 |
 | 14 | `NodeImportUrl` | `NodeImportUrlTool` | 从订阅 URL 解析并导入节点 | `Write` | 中 |
@@ -316,6 +316,7 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 44 | `RulesStatus` | `RulesStatusTool` | 规则数据版本与新鲜度 | `ReadOnly` | 只读 |
 | 45 | `RulesUpdate` | `RulesUpdateTool` | 更新规则数据（未连接时排队） | `Write` | 中 |
 | 46 | `IssueReport` | `IssueReportTool` | 生成问题报告文件夹（两阶段，仅写固定目录） | `Write` | 低（只写桌面报告目录） |
+| 47 | `SetUserRegion` | `SetUserRegionTool` | 记录用户所在地区（AI 唯一写入路径） | `Write` | 低（只写本地设置） |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
@@ -377,6 +378,8 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(CategoryListTool::new(rules.clone())),
     Box::new(RulesStatusTool::new(rules.clone())),
     Box::new(RulesUpdateTool::new(rules.clone(), rt.clone())),
+    // 地区
+    Box::new(SetUserRegionTool::new(store.clone())),
 ];
 ```
 
@@ -856,7 +859,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.9.0";
+  contract_version: "3.10.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1019,7 +1022,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.9.0";
+  contract_version: "3.10.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1288,30 +1291,34 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
   "properties": {
     "name": { "type": "string", "maxLength": 40 },
     "connect_mode": { "type": "string", "enum": ["system_proxy", "tun"] },
-    "routing_mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
+    "routing_mode": { "type": "string", "enum": ["direct", "proxy_all"] },
     "targets": { "type": "array", "items": { "type": "string" } },
-    "source": { "type": "string", "enum": ["seed", "empty"] },
-    "node_ids": { "type": "array", "items": { "type": "string" } },
+    "source": { "type": "string", "enum": ["seed"] },
+    "node_ids": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
     "dns": { "type": "object" },
     "tun_excludes": { "type": "array", "items": { "type": "string" } }
   },
   "required": ["name", "connect_mode", "routing_mode"],
+  "anyOf": [{ "required": ["source"] }, { "required": ["node_ids"] }],
   "additionalProperties": false
 }
 ```
 
 `data`：`ConfigDetail`。
 
-- `source = "seed"` 绑定**当前种子的全部节点**；种子为空 → `PRECONDITION_FAILED / seed_unavailable`。与 `node_ids` 互斥。
-- `source = "empty"` 或不传 → 创建空节点集的配置；可以存在，但 `VpnConnect` 会报 `no_nodes`。
-- `routing_mode = "proxy_selected"` 时必须传 `targets`（非空，分类 id 有效），否则 `PRECONDITION_FAILED / route_targets_empty`。
+- **节点来源必填**：`source` 或非空 `node_ids` 必须给一个。都缺、`source = "empty"`、`node_ids = []` 一律
+  `INVALID_ARGUMENT / source_required`，不落到服务层。**AI 不允许创建空配置**；界面同样不再提供这条路径。
+- `source = "seed"` 绑定**当前免费节点的全部节点**；种子为空 → `PRECONDITION_FAILED / seed_unavailable`。与 `node_ids` 互斥。
+- `routing_mode` **只有 `direct` / `proxy_all` 两档**：`"proxy_selected"` → `INVALID_ARGUMENT / routing_mode_not_supported`；
+  其它未知值 → `INVALID_ARGUMENT / invalid_routing_mode`（两种原因不能混）。
+- `targets` **已废弃**：写入路径不再接受 `proxy_selected`，本参数不产生任何效果。
 - **不接受 `listen_port`**：本地代理端口是用户设置（`commands.md` §7.11），不在配置里；带上该字段会被 schema 拒绝（`additionalProperties: false`）。
 - **连接方式不给默认值**：`system_proxy` 与 `tun` 是两种接管方式，模型必须显式选。
 - 未连接时新建的配置会自动成为 active；已连接时不自动切换（与 `commands.md` §3.2 一致）。
 
 `next_actions`：创建成功后给出 `VpnConnect`（一级/二级）或 `ProxyParams`（三级）。
 
-错误：`INVALID_ARGUMENT`、`CONFLICT`（`duplicate_name`）、`NOT_FOUND`、`PRECONDITION_FAILED`、`UNSUPPORTED`。
+错误：`INVALID_ARGUMENT`（`source_required` / `routing_mode_not_supported` / `invalid_routing_mode`）、`CONFLICT`（`duplicate_name`）、`NOT_FOUND`、`PRECONDITION_FAILED`、`UNSUPPORTED`。
 
 ---
 
@@ -1323,7 +1330,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
   "properties": {
     "config_id": { "type": "string" },
     "name": { "type": "string", "maxLength": 40 },
-    "routing_mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
+    "routing_mode": { "type": "string", "enum": ["direct", "proxy_all"] },
     "targets": { "type": "array", "items": { "type": "string" } },
     "dns": { "type": "object" },
     "tun_excludes": { "type": "array", "items": { "type": "string" } },
@@ -1337,6 +1344,8 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 `data`：`ConfigDetail`。
 
 - **没有 `connect_mode`**：改接管方式必须新建配置。带上 → `INVALID_ARGUMENT / connect_mode_immutable`。
+- `routing_mode` **只有 `direct` / `proxy_all` 两档**：`"proxy_selected"` → `INVALID_ARGUMENT / routing_mode_not_supported`；未知值 → `invalid_routing_mode`。
+- `targets` **已废弃**：不产生任何效果（同 §4.24）。
 - `node_ids` 是**整体替换**，不是增量追加；顺序即新顺序。
 - 修改不打断当前连接，下一次连接生效。
 - 意图是「换节点」而不是「换节点集」时，用 `NodeSwitch`，不要用本工具。
@@ -1611,7 +1620,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
   "type": "object",
   "properties": {
     "config_id": { "type": "string" },
-    "mode": { "type": "string", "enum": ["direct", "proxy_all", "proxy_selected"] },
+    "mode": { "type": "string", "enum": ["direct", "proxy_all"] },
     "confirm_reconnect": { "type": "boolean", "default": false }
   },
   "required": ["mode"],
@@ -1621,8 +1630,9 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 
 `data`：`RouteSetModeData`（`commands.md` §10.0）。
 
+- **`mode` 只有 `direct` / `proxy_all` 两档**：`"proxy_selected"` → `INVALID_ARGUMENT / routing_mode_not_supported`；未知值 → `invalid_routing_mode`。
 - `direct` ↔ `proxy_all` 且已连接 → selector 热切，不断流。
-- 涉及 `proxy_selected` 的跨家族切换 → 未带 `confirm_reconnect` 时返回 `PRECONDITION_FAILED / will_disconnect`；**必须先问用户**，得到同意后再带 `true` 调一次。不得自行重试。
+- 只有**旧配置仍是 `proxy_selected`** 时，切到两档才属于跨家族切换 → 未带 `confirm_reconnect` 时返回 `PRECONDITION_FAILED / will_disconnect`；**必须先问用户**，得到同意后再带 `true` 调一次。不得自行重试。
 - 该工具会改网络；即使没有确认点，模型也应在调用前用一句话说明会断一下（§2.1.1）。
 - 跨家族的确认一句话要包含两点：会断开并自动重连、**域名解析方式也会改变**（`routing.md` §6.4）。
 
@@ -1645,6 +1655,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 `data`：`RouteState`。
 
 - 分类 id 先用 `CategoryList` 查；**不要把用户说的服务名直接当 id**。
+- **只对旧数据的 `proxy_selected` 有意义**：写入路径不再产生该模式，新配置的分类集合不影响生成。
 - `dns_classifiable = false` 的分类不能用（`UNSUPPORTED`）。
 - 不热切，`effective = "next_connection"`。
 
@@ -1872,6 +1883,30 @@ type CoreUpgradeData = {
 
 其余错误：`INVALID_ARGUMENT`（`report_dir_unwritable`）、`INTERNAL`。
 
+### 4.47 `SetUserRegion`（地区，3.10.0 新增）
+
+记录用户所在 / 常用地区。设计见 `docs/design/simplified-config-create.md` §9。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "region": { "type": "string", "pattern": "^[A-Za-z]{2}$" }
+  },
+  "required": ["region"],
+  "additionalProperties": false
+}
+```
+
+- **唯一写入路径**：写 `settings.user_region`。没有任何 UI 命令可以改地区——`commands.md` 没有 `region_preference`，界面也没有地区控件。模型必须结合系统推断与对话内容自行决定；用户明确说过国家 / 地区时以用户为准，判不出就不要调用，**不要为了确认地区追问用户**。
+- 校验：两字母 ISO 3166-1 alpha-2，统一规范化为小写；`cn` 走 `Region::Cn`。非法值 → `INVALID_ARGUMENT`，`details.reason = "invalid_region"`，不写库。
+- 写入成功后发 `region-changed`（`events.md` §4.21）。只影响下一次建连；已连接时不断开、不重连。
+- 同一地区重复写入 → `ok: true`，不发事件。
+- `PermissionLevel::Write`：只写本地设置，不改配置、不碰网络。
+- `data`：`{ region: string, source: "ai" }`。
+- `display`：成功 `text`「地区已记下」、`changed = "none"`、`facts` 放地区名（如「中国大陆」）；失败 `text`「没能记下地区」。**不把来源（系统 / AI）念给用户。**
+- 没有清除动作：本批不提供「恢复系统推断」的工具；用户换地区时直接说新的，AI 覆盖即可。
+
 ---
 
 ## 5. 工具间协作约定
@@ -1898,6 +1933,7 @@ type CoreUpgradeData = {
 | `ConfigUpdate` | 参数与现状一致 → `ok: true`，不发事件 |
 | `ConfigDelete` | 已不存在 → `ok: true`，`deleted: false`，`already_absent: true`；**正在连接 → `PRECONDITION_FAILED`** |
 | `RouteSetMode` | 目标模式与当前一致 → `ok: true`，不发事件 |
+| `SetUserRegion` | 地区与当前 `user_region` 一致 → `ok: true`，不发事件 |
 | `RouteTargetsSet` | 集合与现状一致 → `ok: true`，`route_revision` 不变 |
 | `RuleCustomAdd` | 同一 `(action, match_type, value)` 已存在 → `CONFLICT / duplicate_rule` |
 | `RuleCustomDelete` | 已不存在 → `ok: true`，`deleted: false`，`already_absent: true` |
@@ -1973,6 +2009,18 @@ type CoreUpgradeData = {
 ---
 
 ## 8. 变更记录
+
+### 3.10.0（2026-11-12，新增 `SetUserRegion` 地区写入）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.10.0`；工具总数 46 → 47 | 元数据 | 地区链路（`docs/design/simplified-config-create.md` §14） |
+| 2 | 新增 §4.47 `SetUserRegion { region }`：写 `settings.user_region`，`PermissionLevel::Write`，是地区唯一的写入路径 | 工具新增 | 系统推断无法被用户修正；用户只能在对话里纠正，AI 负责写入 |
+| 3 | 校验：两字母 ISO 码、规范化为小写，非法 → `INVALID_ARGUMENT / invalid_region`；同值重复写入不发事件 | 约束 | 地区取值直接决定本地直连层，不能接受模糊输入 |
+| 4 | 写入成功发 `region-changed`（`events.md` 2.12.0）；只影响下次建连，不重连 | 联动 | 已连接时不能打断用户；界面必须说清「下次生效」 |
+| 5 | `TOOL_COPY` 键集合要求同步到 47 个（实现侧待补 `SetUserRegion`） | 元数据 | 少一个名字，新工具就会露出原始名 |
+| 6 | **不向后兼容**：`ConfigCreate` / `ConfigUpdate` / `RouteSetMode` 的 schema 只收 `direct \| proxy_all`；`proxy_selected` → `INVALID_ARGUMENT / routing_mode_not_supported`，未知值 → `invalid_routing_mode`；`targets` 参数保留但无效果 | 枚举收紧 | 产品拍板界面只有两档；数据层留旧值 |
+| 7 | **不向后兼容**：`ConfigCreate` 的 `source` 或非空 `node_ids` 必须给一个（schema `anyOf` + `minItems: 1`）；都缺、`source = "empty"`、空数组 → `source_required`。AI 不再允许创建空配置 | 语义收紧 | 两问流程必有一个来源 |
 
 ### 3.9.0（2026-11-12，新增 `IssueReport` 问题报告）
 

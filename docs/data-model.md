@@ -1,7 +1,7 @@
 # 数据模型
 
-> 版本：`4`（对应契约 `commands.md` 2.15.0 / `runtime.md` 2.5.0）
-> 日期：2026-11-03
+> 版本：`5`（对应契约 `commands.md` 2.18.0 / `runtime.md` 2.8.0）
+> 日期：2026-11-12
 > 范围：配置、节点、问题、布局，以及它们与 `secrets.enc`、种子缓存的关系
 > 依据：`docs/configs-and-nav.md` §3、§8，`docs/config-execution.md` §6–§10，`docs/issue-management.md` §3、`docs/center-panel.md` §3
 > 状态：待 PM 审核（批 0）
@@ -346,12 +346,27 @@ CREATE TABLE rules_state (
 
 | 表 | 作用 |
 |---|---|
-| `settings` | `key`/`value`。已知键：`llm_active_provider`、`proxy_port`（本地代理端口，十进制字符串；缺失/损坏时读回 `7890`，读不写库）。旧 `onboarding_completed` 随引导页删除，无写入方 |
+| `settings` | `key`/`value`。已知键：`llm_active_provider`、`proxy_port`（本地代理端口，十进制字符串；缺失/损坏时读回 `7890`，读不写库）、`user_region`（AI 确定的地区，见下）。旧 `onboarding_completed` 随引导页删除，无写入方 |
 | `runtime_versions` | 已安装的 sing-box 版本与状态 |
 | `proxy_backup` | 系统代理备份，E3 重置网络的依据；单行 |
 | `catalog_cache` | 远端目录缓存（AI 工具仍可读；`catalog_list_nodes` 命令已删除） |
 | `chat_sessions` / `chat_messages` | AI 会话与消息 |
 | `tool_calls` | 工具调用审计。**没有外键**——`chat_delete` 必须显式删，见 `commands.md` §9.3 |
+
+#### `settings.user_region`
+
+AI 在对话里确定的地区，只由 AI 工具 `SetUserRegion` 写入（`tools.md`），UI 没有写入路径。
+
+| 项 | 规则 |
+|---|---|
+| 值 | 两字母 ISO 3166 国家码，**小写**（`cn`、`jp`）；写入时规范化成小写 |
+| 缺失 | 视为「没有 AI 写入值」，回落系统推断；不报错、不补写 |
+| 空串 / 非法（旧数据、手改库） | 同上，按「没有 AI 写入值」处理 |
+| 清除 | 本批没有清除动作；AI 写新值即覆盖 |
+| 优先级 | `effective_region` = `VEYL_REGION`（测试）→ `user_region` → 系统推断（时区 / 区域 / LANG）→ 未知。它是第二优先级，不是最高 |
+| 消费方 | 建连、测速、`route_get.detected_region`、`system_region` 四处同源；未知时按「无本地直连层、全部走 VPN」生成 |
+
+写入成功发 `region-changed`（`events.md`）；设置键本身不改任何配置行，也不触发重连。
 
 ---
 
@@ -547,6 +562,13 @@ CREATE TABLE rules_state (
 ---
 
 ## 11. 变更记录
+
+### 5（2026-11-12，AI 决定地区）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | `settings` 新增键 `user_region`：小写两位国家码；缺失/空串/非法按无用户值回落；`effective_region` 的第二优先级 | 键新增 |
+| 2 | `configs.routing_mode` 的 `proxy_selected` 标为旧数据专用：界面不展示、创建/更新拒绝新写入，保留列值不做迁移 | 语义收紧（不向后兼容） |
 
 ### 4（2026-11-06，本地代理端口设置）
 

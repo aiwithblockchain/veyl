@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.17.0`
+> 契约版本：`2.18.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -128,7 +128,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | # | 命令 | 入参 | 返回 | 状态 |
 |---|---|---|---|---|
 | 1 | `config_list` | `{}` | `ConfigListData` | **2.0 新增** |
-| 2 | `config_create` | `{ name, connectMode, routingMode, targets?, source?, nodeIds?, dns?, tunExcludes? }` | `ConfigDetail` | **2.0 新增；2.12.0 移除 `listenPort`** |
+| 2 | `config_create` | `{ name, connectMode, routingMode, targets?, source?, nodeIds?, dns?, tunExcludes? }` | `ConfigDetail` | **2.0 新增；2.12.0 移除 `listenPort`；2.18.0 来源必填** |
 | 3 | `config_update` | `{ configId, name?, routingMode?, targets?, dns?, tunExcludes?, nodeIds? }` | `ConfigDetail` | **2.0 新增；2.12.0 移除 `listenPort`** |
 | 4 | `config_delete` | `{ configId }` | `ConfigDeleteData` | **2.0 新增** |
 | 5 | `config_activate` | `{ configId, confirmDisconnect? }` | `ConfigActivateData` | **2.0 新增** |
@@ -194,7 +194,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 65 | `proxy_port_get` | `{}` | `{ port, default_port }` | **2.12.0 新增（仅 UI）** |
 | 66 | `proxy_port_set` | `{ port }` | `{ port, availability }` | **2.12.0 新增（仅 UI）；可用性三态，保存始终成功** |
 | 67 | `node_import_text` | `{ text, configId? }` | `NodeImportResult` | **2.14.0 新增（仅 UI；AI 走 `NodeImportText` 工具，共用实现）** |
-| 68 | `system_region` | `{}` | `{ region: string \| null }` | **2.15.0 新增（仅 UI）** |
+| 68 | `system_region` | `{}` | `{ region: string \| null, source: "system" \| "ai" }` | **2.15.0 新增（仅 UI）；2.18.0 增 `source`** |
 | 69 | `node_import_file` | `{ path, configId? }` | `NodeImportResult` | **2.16.14 新增（仅 UI）；与 `node_import_text` 共用解析；批 B 实现** |
 | 70 | `issue_report_reveal` | `{ reportId }` | `ReportActionData` | **2.17.0 新增（仅 UI）；只认 Host 登记过的报告目录** |
 | 71 | `issue_report_mail` | `{ reportId }` | `ReportActionData`（含 `body`，仅 `copy_only` 时非 null） | **2.17.0 新增（仅 UI）；调起系统邮件客户端，不发送** |
@@ -213,6 +213,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 
 ```ts
 type ConfigMode = "system_proxy" | "tun";
+// 读：三种都可能出现（旧数据）；写：只接受 direct / proxy_all（见 §3.2 / §3.3）。
 type RoutingMode = "direct" | "proxy_all" | "proxy_selected";
 
 // DNS 候选：local 直连查询，remote 经代理查询。
@@ -292,10 +293,10 @@ type ConfigListData = {
 |---|---|---|
 | `name` | 是 | trim 后非空、≤ 40 字符；**不允许重名**（trim 后逐字节比较）。重复 → `CONFLICT`，`details.reason = "duplicate_name"` |
 | `connectMode` | 是 | `"system_proxy"` / `"tun"`。**故意没有默认值**——连接方式是用户明确选的，见下 |
-| `routingMode` | 是 | 三种取值都接受。`"proxy_selected"` 时 `targets` 必填且非空 |
-| `targets` | 否 | 分类 id 数组，仅 `proxy_selected` 有意义；id 不在分类目录 → `NOT_FOUND / category_unknown` |
-| `source` | 否 | `"seed"`：绑定当前种子里的全部节点；与 `nodeIds` **互斥** |
-| `nodeIds` | 否 | 绑定已有节点，顺序即节点顺序 |
+| `routingMode` | 是 | **只接受 `"direct"` / `"proxy_all"`**。`"proxy_selected"` → `INVALID_ARGUMENT / routing_mode_not_supported`；其它未知值 → `INVALID_ARGUMENT / invalid_routing_mode` |
+| `targets` | 否 | **已废弃**：写入路径不再接受 `proxy_selected`，本参数不产生任何效果；保留字段只为旧调用不报 schema 错误 |
+| `source` | 条件必填 | `"seed"`：绑定当前种子里的全部节点；与 `nodeIds` **互斥**。`"empty"` 不再接受（见下方来源规则） |
+| `nodeIds` | 条件必填 | 绑定已有节点，顺序即节点顺序；非空数组才算提供了来源 |
 | `dns` | 否 | `DnsConfig`；省略 = `{ mode: "auto", local: [], remote: [] }`。`custom` 时 `local` 至少 1 条，地址必须是合法 IP |
 | `tunExcludes` | 否 | 仅 `tun`；CIDR 字符串数组，≤ 32 项。格式非法 → `INVALID_ARGUMENT`，`details.reason = "invalid_cidr"` |
 
@@ -303,9 +304,11 @@ type ConfigListData = {
 
 规则：
 
-- `source = "seed"` 且种子为空 → `PRECONDITION_FAILED`，`details.reason = "seed_unavailable"`，`details.hint = "先刷新默认配置或手动添加节点"`。
+- `source = "seed"` 且种子为空 → `PRECONDITION_FAILED`，`details.reason = "seed_unavailable"`，`details.hint = "先刷新 Veyl 免费节点或手动添加节点"`。
 - `nodeIds` 里有不存在的 id → `NOT_FOUND`，`details.node_ids` 列出全部无效项（一次报全，不让用户试错）。
-- **不传 `source` 也不传 `nodeIds`** → 允许，创建空节点集的配置。空配置可以存在、可以在左栏看到、可以激活，但**不能连接**（`runtime_start` 报 `no_nodes`）。这是给「先建壳子、稍后导入」用的。
+- **`source` 与非空 `nodeIds` 必须给一个**：`source = "seed"`，或至少一个有效节点 id。
+  两者都缺、显式 `source = "empty"`、或 `nodeIds = []` → `INVALID_ARGUMENT`，`details.reason = "source_required"`。
+  **界面与 AI 都不再允许创建空配置**：新建流程的两问里必有一个节点来源；AI 工具同样拒绝（`tools.md` §4.24）。
 - `current_node_id` 取节点集里的第一个。
 - 新建后是否自动激活：
 
@@ -326,8 +329,8 @@ type ConfigListData = {
 | 字段 | 可改 | 说明 |
 |---|---|---|
 | `name` | ✅ | 同样的非空 / ≤ 40 / 不重名校验 |
-| `routingMode` | ✅ | 只影响下一次生成配置；**不在线切换**（在线切换走 `route_set_mode`，G2） |
-| `targets` | ✅ | 整套替换；切到 `proxy_selected` 时必须非空 |
+| `routingMode` | ✅ | 只影响下一次生成配置；**不在线切换**（在线切换走 `route_set_mode`，G2）。**只接受 `"direct"` / `"proxy_all"`**，`proxy_selected` → `routing_mode_not_supported` |
+| `targets` | ✅ | **已废弃**：写入路径不再接受 `proxy_selected`，本参数不产生任何效果 |
 | `dns` | ✅ | 整体替换；`custom` 的校验同 §3.2 |
 | `tunExcludes` | ✅ | 仅 `tun` 配置 |
 | `nodeIds` | ✅ | **整体替换**节点集，顺序即新顺序；`current_node_id` 不在新集合里时落到第一个 |
@@ -336,7 +339,7 @@ type ConfigListData = {
 **`listenPort` 已移除**：`config_update` 不再接受它，端口只在设置里改（§7.11）。
 
 - **改连接方式必须新建一套配置**（`docs/configs-and-nav.md` §4）：system_proxy 与 tun 是两种完全不同的接管方式，就地改会让「我刚才明明配好了」变成「它自己变了」。
-- `routingMode = "proxy_selected"` 时 `targets` 必须非空（同 §3.2）。
+- ~~`routingMode = "proxy_selected"` 时 `targets` 必须非空~~：写入路径已不接受 `proxy_selected`，这条随模式一起下线。
 - 修改**不打断当前连接**：新值只写库；下一次连接或下一次切换节点时生效。UI 需要提示「下次连接生效」时，用返回值与当前 `RuntimeSnapshot` 自行比较，Host 不额外发信号。
 - 改的是 active 配置且当前已连接 → `runtime_status.config_hash` 与新配置不一致，但**不自动重连**。
 - 幂等：参数与现状完全一致时仍返回同一份 `ConfigDetail`，不发事件。
@@ -911,11 +914,11 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 ### 7.3 `runtime_status {}` → `RuntimeSnapshot`
 
-2.0 的 `RuntimeSnapshot`（与 `runtime.md` §2.5 的 `2.7.0` 一致，**版本号跟 `runtime.md`，不跟本文件**）：
+2.0 的 `RuntimeSnapshot`（与 `runtime.md` §2.5 的 `2.8.0` 一致，**版本号跟 `runtime.md`，不跟本文件**）：
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.7.0";
+  contract_version: "2.8.0";
   state: RuntimeState;                // runtime.md §2.1，七态不变
   mode: "system_proxy" | "tun" | null;
   pid: number | null;
@@ -1607,6 +1610,7 @@ UI 侧不依赖模型的措辞：
 ### 10.0 共用类型
 
 ```ts
+// 读：三种都可能出现（旧数据）；写：只接受 direct / proxy_all（§10.2）。
 type RoutingMode = "direct" | "proxy_all" | "proxy_selected";
 
 type CustomRule = {
@@ -1623,7 +1627,7 @@ type RouteState = {
   config_id: string;
   routing_mode: RoutingMode;
   applied_mode: RoutingMode | null;   // 取自 RuntimeSnapshot；未连接为 null
-  targets: string[];                  // 分类 id，仅 proxy_selected
+  targets: string[];                  // 分类 id；只有旧数据 proxy_selected 非空，新写入恒为空
   custom_rules: CustomRule[];
   route_revision: number;
   applied_revision: number | null;    // = RuntimeSnapshot.applied_route_revision
@@ -1677,18 +1681,22 @@ type RulesStatus = {
 
 ### 10.2 `route_set_mode { configId?, mode, confirmReconnect? }` → `RouteSetModeData`
 
-- **G2** 切换分流方式。
+- **G2** 切换分流方式。**`mode` 只接受 `"direct"` / `"proxy_all"`。**
+  `"proxy_selected"` → `INVALID_ARGUMENT / routing_mode_not_supported`（字段已知但已下线，不产生任何变更）；
+  其它未知值 → `INVALID_ARGUMENT / invalid_routing_mode`。
 - `direct` ↔ `proxy_all` 且已连接 → 走 Clash API selector 热切，`hot_switched = true`、`effective = "current_connection"`。
-- 涉及 `proxy_selected` 的跨家族切换、且已连接、未带 `confirmReconnect` → `PRECONDITION_FAILED`，`details.reason = "will_disconnect"`，**不产生任何变更**。
+- 只有**旧数据的 `proxy_selected`** 切到 `direct` / `proxy_all` 才是跨家族切换：已连接且未带 `confirmReconnect` →
+  `PRECONDITION_FAILED`，`details.reason = "will_disconnect"`，**不产生任何变更**。新数据不会遇到这条。
 - 带 `confirmReconnect: true` → 按「停运行时 → 写库 → 启运行时」执行，`reconnect` 给出结果。**重连失败不抛错**：切换本身已成功。
 - 确认文案必须包含两点：会断开一次并自动重连；**域名解析方式也会改变**（`routing.md` §6.4）。
 - 未连接 → 只写库，`effective = "next_connection"`、`reconnect = "not_running"`。
-- `mode = "proxy_selected"` 且 `targets` 为空 → `PRECONDITION_FAILED / route_targets_empty`。
+- ~~`mode = "proxy_selected"` 且 `targets` 为空 → `route_targets_empty`~~：模式已不可写，这条触发器下线。
 - 同一模式 → 幂等返回，不发事件。
 
 ### 10.3 `route_targets_set { configId, categories }` → `RouteState`
 
-- **G4** 整体替换「指定服务」的分类集合。
+- **G4** 整体替换「指定服务」的分类集合。**只对旧数据的 `proxy_selected` 有意义**：新写入路径不再产生该模式，
+  新配置的分类集合不影响生成。
 - 任何一个 id 不在分类目录 → `NOT_FOUND / category_unknown`，`details.unknown` 一次列全。
 - `dns_classifiable = false` 的分类 → `UNSUPPORTED / category_not_dns_classifiable`。
 - 不热切：`effective = "next_connection"`。
@@ -1730,14 +1738,15 @@ type RulesStatus = {
 - 已有任务在跑 → `CONFLICT`，`details.job_id` 指向进行中的任务。
 - 成功后发 `rules-changed`，`effective = "next_connect"`。
 
-### 10.10 `system_region {}` → `{ region: string | null }`
+### 10.10 `system_region {}` → `{ region: string | null, source: "system" | "ai" }`（2.18.0 增 `source`）
 
-- **仅 UI**。给新建配置与中间区的「当前所在地区」用；AI 不调用——它拿的是系统提示词里注入的那句。
-- `region`：小写 ISO 3166-1 alpha-2（`"cn"` / `"jp"`）；判不出为 `null`。
-- 判定离线、不测 IP、不联网，顺序：`VEYL_REGION` → 系统时区 → 系统区域 → `LANG` → 未知。
+- **仅 UI**。给新建配置与中间区的「当前所在地区」展示与默认值用；AI 不调用——它拿的是系统提示词里注入的生效值与来源。
+- `region`：生效地区的小写 ISO 3166-1 alpha-2（`"cn"` / `"jp"`）；判不出为 `null`。
+- `source`：`"ai"` = 来自 AI 通过 `SetUserRegion`（`tools.md` §4.47）写入的 `settings.user_region`；`"system"` = 系统推断。`region = null` 时 `source` 恒为 `"system"`。
+- 判定顺序：`VEYL_REGION` → `settings.user_region` → 系统时区 → 系统区域 → `LANG` → 未知（`runtime.md` §2.5.2）。
 - 不依赖配置：全新安装、一套配置都没有时也能返回（这正是它不并进 `route_get` 的原因）。
 - 与 `route_get.detected_region` 同源，两处结果必须一致。
-- 不落库、不发事件：地区随系统变，缓存只会制造「设置改了但没生效」。
+- **只读**：不写库、不发事件——写库与 `region-changed` 只属于 `SetUserRegion`。地区随系统或 AI 设置变，缓存只会制造「设置改了但没生效」。
 
 ---
 
@@ -1942,10 +1951,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.17.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.7.0 矩阵同步 + `tools.md` 3.9.0 / `events.md` 2.11.0 矩阵同步 |
-| `contracts/events.md` | **2.11.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作） |
-| `contracts/runtime.md` | **2.7.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 |
-| `contracts/tools.md` | **3.9.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 |
+| `contracts/commands.md` | **2.18.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.10.0 / `events.md` 2.12.0 矩阵同步 |
+| `contracts/events.md` | **2.12.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值） |
+| `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
+| `contracts/tools.md` | **3.10.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 |
 | `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -1960,6 +1969,17 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.18.0（2026-11-12，地区生效值与来源）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.18.0`；`system_region` 返回从 `{ region }` 变成 `{ region, source: "system" \| "ai" }`（**不向后兼容**：前端绑定同步改） | 字段新增 | 界面要能说清当前地区是 AI 记下的还是系统推断的 |
+| 2 | `region` 明确为**生效值**（`VEYL_REGION` → `settings.user_region` → 系统推断 → 未知），与 `route_get.detected_region` 同源 | 语义变更 | 四个入口必须读同一个值，不能再各自调系统推断 |
+| 3 | **没有 `region_preference` 命令**：地区没有 UI 写入路径，唯一写入口是 AI 工具 `SetUserRegion`（`tools.md` 3.10.0），写入后发 `region-changed`（`events.md` 2.12.0） | 边界 | 产品拍板界面不提供地区控件；用户只能在对话里纠正 |
+| 4 | §7.3 的 `RuntimeSnapshot.contract_version` 同步 `runtime.md` 2.8.0；§15.5 矩阵同步 `events.md` 2.12.0、`runtime.md` 2.8.0、`tools.md` 3.10.0 | 元数据 | `RuntimeSnapshot` 的所有者是 `runtime.md` |
+| 5 | **不向后兼容**：`config_create` / `config_update` / `route_set_mode` 的写入路径只接受 `direct \| proxy_all`；`proxy_selected` → `INVALID_ARGUMENT / routing_mode_not_supported`，未知值仍是 `invalid_routing_mode`；`targets` 参数保留但无效果；读旧值仍允许 | 枚举收紧 | 产品拍板界面只有两档；数据层留旧值，不做迁移 |
+| 6 | **不向后兼容**：`config_create` 的 `source` 与非空 `nodeIds` 必须给一个；都缺、`source = "empty"`、空 `nodeIds` → `INVALID_ARGUMENT / source_required`。界面与 AI 都不再允许创建空配置 | 语义收紧 | 两问流程必有一个来源；空配置会在连接时才暴露 `no_nodes` |
 
 ### 2.17.0（2026-11-12，问题报告：开文件夹与开邮件）
 

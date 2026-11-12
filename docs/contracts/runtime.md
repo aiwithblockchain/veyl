@@ -1,6 +1,6 @@
 # 契约：Runtime Manager
 
-> 契约版本：`2.7.0`
+> 契约版本：`2.8.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 冻结前评审：PM / Alice / Bob
 > 上游：`docs/architecture.md` §2、`docs/phase-1-technical-design.md` §4.5、`docs/tun-mode.md`
@@ -17,7 +17,7 @@
 - 所有 JSON 字段使用 **snake_case**；所有时间是 **ISO 8601 UTC，带 `Z` 后缀**（`2026-11-02T09:15:03Z`），不带毫秒之外的其他格式。
 - 所有错误码是 **大写下划线**（`RUNTIME_START_TIMEOUT`）。
 - `contract_version` 出现在每一个对外结构里；破坏性变更必须升次版本号并同步本文档。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.7.0`），升版时全文替换。实现侧只允许有一个常量对应本文件，不得按结构分别发不同版本号。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.8.0`），升版时全文替换。实现侧只允许有一个常量对应本文件，不得按结构分别发不同版本号。
 
 **P1 范围**：单版本、单进程、系统代理模式。多版本并行、TUN、外部 MCP 宿主不在本契约内。
 
@@ -116,7 +116,7 @@ type HealthCheckName =
   | "traffic";
 
 type HealthSnapshot = {
-  contract_version: "2.7.0";
+  contract_version: "2.8.0";
   process: boolean;
   clash_api: boolean;
   data_plane: boolean;
@@ -181,7 +181,7 @@ type TrafficStats = {
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.7.0";
+  contract_version: "2.8.0";
   state: RuntimeState;
   mode: RuntimeMode | null;
   pid: number | null;
@@ -249,13 +249,31 @@ type RuntimeSnapshot = {
 
 **字段恒存在**：所有字段在任何状态下都必须出现在 JSON 里，不可省略键。没有值写 `null`——省略键会让 TypeScript 消费方拿到 `undefined`，绕过类型检查、静默失败。
 
+#### 2.5.2 地区的来源（2.8.0）
+
+`route_region` 与所有地区的判定读同一个 `effective_region`，优先级固定：
+
+| 顺序 | 来源 | 说明 |
+|---|---|---|
+| 1 | `VEYL_REGION` | 测试 / 开发覆盖，最高 |
+| 2 | `settings.user_region` | AI 通过 `SetUserRegion` 写入（`tools.md` §4.47）；写入后压过系统推断 |
+| 3 | 系统推断（时区 → 区域 → `LANG`） | 没有 AI 写入值时使用 |
+| 4 | 未知（`null`） | 全代理 + 解释；本次连接不做本地直连层 |
+
+- **四个入口同源**：建连、批量测速、`route_get.detected_region`、`system_region` 都读
+  `effective_region`，不得各自再调系统推断函数。
+- `route_region` 是建连那一刻的 `effective_region` 快照。建连后 AI 改写地区**不重算、不重连**，
+  只影响下一次连接（`events.md` §4.21）；已连接时界面仍以它为唯一口径。
+- `user_region` 缺失、空串或非法（旧数据 / 手改库）一律按「没有 AI 写入值」处理，
+  回落到系统推断，不报错。
+
 **与 `last_transition_at` 的区别**：`last_transition_at` 是**任何**状态迁移的时刻（含 `stopping`），`connected_since` 只在进入 `running` 时刷新。断开再连，`connected_since` 变新，`last_transition_at` 也变——两者不同源，不要互相推导。
 
 ### 2.6 错误对象（全契约共用）
 
 ```ts
 type AivpnError = {
-  contract_version: "2.7.0";
+  contract_version: "2.8.0";
   code: AivpnErrorCode;
   message: string;        // 面向用户，可本地化
   retryable: boolean;
@@ -673,6 +691,15 @@ Runtime Manager 通过 Host 发出以下事件，payload 定义见 `docs/contrac
 ---
 
 ## 12. 变更记录
+
+### 2.8.0（2026-11-12，地区来源统一）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 契约版本升到 `2.8.0`；全文 `contract_version` 字面量替换为 `2.8.0`（实现侧唯一常量是 `manager.rs::CONTRACT_VERSION`） | 元数据 | 地区链路（`docs/design/simplified-config-create.md` §14） |
+| 2 | 新增 §2.5.2：地区优先级 `VEYL_REGION` → `settings.user_region` → 系统推断 → 未知；四个入口（建连 / 批量测速 / `route_get.detected_region` / `system_region`）同源 | 语义变更 | `detect_region()` 无法被用户修正，GUI 环境下 `LANG` 常判错 |
+| 3 | `route_region` 说明补「来自建连时的 `effective_region`」；建连后改地区不重算、不重连，只影响下一次连接 | 约束 | 已连接时不能把实时值当成正在生效的地区 |
+| 4 | `user_region` 缺失 / 空串 / 非法一律按「没有 AI 写入值」处理，回落系统推断 | 兼容 | 旧数据与手改库不得让读取报错 |
 
 ### 2.7.0（2026-11-12，连接健康：连上了但流量不通）
 
