@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.16.14`
+> 契约版本：`2.16.15`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -908,11 +908,11 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 ### 7.3 `runtime_status {}` → `RuntimeSnapshot`
 
-2.0 的 `RuntimeSnapshot`（与 `runtime.md` §2.5 的 `2.6.0` 一致，**版本号跟 `runtime.md`，不跟本文件**）：
+2.0 的 `RuntimeSnapshot`（与 `runtime.md` §2.5 的 `2.7.0` 一致，**版本号跟 `runtime.md`，不跟本文件**）：
 
 ```ts
 type RuntimeSnapshot = {
-  contract_version: "2.6.0";
+  contract_version: "2.7.0";
   state: RuntimeState;                // runtime.md §2.1，七态不变
   mode: "system_proxy" | "tun" | null;
   pid: number | null;
@@ -1887,9 +1887,9 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.16.14** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + `tun-backend.md` 1.6.0 矩阵同步 |
+| `contracts/commands.md` | **2.16.15** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令 + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + `tun-backend.md` 1.6.0 矩阵同步 + `runtime.md` 2.7.0 矩阵同步 |
 | `contracts/events.md` | **2.10.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 |
-| `contracts/runtime.md` | **2.6.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` |
+| `contracts/runtime.md` | **2.7.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 |
 | `contracts/tools.md` | **3.8.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` |
 | `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
@@ -1905,6 +1905,12 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.16.15（2026-11-12，矩阵同步 runtime.md 2.7.0）
+
+| # | 变更 | 类型 | 触发 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.16.15`；§7.3 的 `RuntimeSnapshot.contract_version` 与 §15.5 矩阵同步 `runtime.md` 2.7.0 | 元数据 | `data_plane` 判定收紧（连续两次失败才 `false`）与 TUN 必须探测，所有者是 `runtime.md` §2.3.1 / §4.3 |
 
 ### 2.16.14（2026-11-11，节点文件导入契约）
 
