@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PendingQuestion } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { EXPLAIN_ANSWER } from "../ui/askQuestion";
 
 interface Props {
   question: PendingQuestion;
@@ -8,9 +9,6 @@ interface Props {
   /** 后端 15 分钟超时后已自动作废：前端直接收起，不再调用回答命令。 */
   onExpire: () => void;
 }
-
-/** 与后端约定的逐字回答：不算选择，只请 AI 解释这道题的选项含义。 */
-export const EXPLAIN_ANSWER = "解释这个设置的含义";
 
 const CANCEL_LABEL =
   /^(取消|关闭|不了|暂不|暂时不|不用|稍后|先不|不创建|不升级|不更新)$/;

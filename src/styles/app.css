@@ -240,6 +240,16 @@ pre {
   gap: 8px;
 }
 
+/* 动作记录（如「已请求解释」）：不是用户发言，弱于普通消息。 */
+.msg--action {
+  /* 列表 gap 是 22，动作记录上下留白更少，不抢视线。 */
+  margin: -4px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-3);
+  text-align: left;
+}
+
 .msg__role {
   display: flex;
   align-items: center;

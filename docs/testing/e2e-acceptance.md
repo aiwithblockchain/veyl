@@ -4460,10 +4460,14 @@ grep -E '连接完成|连接失败 卡在' "$APP_LOG" | tail -3
 
 ```js
 (() => {
-  const texts = [...document.querySelectorAll(".msg .msg__text")].slice(-4).map((n) => n.textContent.trim());
+  const tail = [...document.querySelectorAll(".msg")].slice(-6).map((m) => ({
+    action: m.classList.contains("msg--action") ? m.textContent.trim() : null,
+    role: m.classList.contains("msg--user") ? "user" : m.classList.contains("msg--assistant") ? "ai" : m.classList.contains("msg--system") ? "system" : null,
+    text: [...m.querySelectorAll(".msg__text")].map((n) => n.textContent.trim()).filter(Boolean).join("\n"),
+  }));
   const card = document.querySelector(".ask-card");
   return {
-    lastTexts: texts,
+    tail,
     newQuestion: card?.querySelector(".ask-card__question")?.textContent.trim() ?? null,
     newOptions: [...document.querySelectorAll(".ask-card__option")].map((b) => b.textContent.trim()),
   };
@@ -4473,18 +4477,18 @@ grep -E '连接完成|连接失败 卡在' "$APP_LOG" | tail -3
 3. 用数据库确认没有新建配置：
 
 ```bash
-sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select role, substr(content,1,60) from chat_messages order by created_at desc limit 4;"
 ```
 
 **预期**：
 
-1. 最近一条用户消息逐字是 `解释这个设置的含义`。
-2. AI 回复是解释，不是选择结果；最多三句、不超过 4 行，覆盖「每个选项会发生什么 / 怎么选 / 选错怎么改」。
+1. 最近一条**动作记录**是 `已请求解释`（`.msg--action`），它不渲染成用户气泡——`tail` 里这一条 `role` 为 `null`，没有「你」的气泡。
+2. 该动作记录之后紧跟一条 AI 消息，其 `text`（该条消息内全部 `.msg__text` 拼接）非空，且不是选择结果；最多三句、不超过 4 行，覆盖「每个选项会发生什么 / 怎么选 / 选错怎么改」。
 3. 解释后出现**同一张问题卡片**：`newQuestion` 与刚才逐字相同，`newOptions` 与刚才逐字相同、顺序不变。
 4. 没有合并到下一问，也没有替用户选中任何选项（没有卡片处于选中态）。
-5. `configs` 数量与点击前相同。
+5. `configs` 数量与点击前相同；`chat_messages` 里这条内容仍是逐字的 `解释这个设置的含义`（渲染成动作行，不改原文）。
 
-**不合格时记录什么**：`lastTexts`、新旧问题与选项、配置数前后、AI 回复全文。
+**不合格时记录什么**：`tail`、新旧问题与选项、配置数前后、AI 回复全文。
 
 ### E8-23 解释不算作答：不推进、不建配置
 
@@ -4570,10 +4574,14 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select ro
 
 ```js
 (() => {
-  const texts = [...document.querySelectorAll(".msg .msg__text")].slice(-4).map((n) => n.textContent.trim());
+  const tail = [...document.querySelectorAll(".msg")].slice(-4).map((m) => ({
+    action: m.classList.contains("msg--action") ? m.textContent.trim() : null,
+    role: m.classList.contains("msg--user") ? "user" : m.classList.contains("msg--assistant") ? "ai" : null,
+    text: [...m.querySelectorAll(".msg__text")].map((n) => n.textContent.trim()).filter(Boolean).join("\n"),
+  }));
   const card = document.querySelector(".ask-card");
   return {
-    lastTexts: texts,
+    tail,
     question: card?.querySelector(".ask-card__question")?.textContent.trim() ?? null,
     options: [...document.querySelectorAll(".ask-card__option")].map((b) => b.textContent.trim()),
     createdWord: document.body.innerText.includes("已创建"),
@@ -4589,12 +4597,12 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select ro
 
 **预期**：
 
-1. AI **只回一句**说清「创建会做什么、取消会怎样」，不套三句模板、不展开选项。
+1. 手打这串字同样渲染成动作行 `已请求解释`（不是用户气泡）；AI **只回一句**说清「创建会做什么、取消会怎样」，不套三句模板、不展开选项。
 2. 随后重问**同一个确认问题**，`options` 仍是 `["创建","取消"]`；没有推进到执行，也没有替用户选。
 3. `configs` 数量不变；`createdWord` 为 `false`，界面没有「已创建」。
 4. 若模型违规调用 `ConfigCreate`：工具返回 `PRECONDITION_FAILED / explanation_pending`，界面仍无「已创建」，AI 按契约把确认问题重问；不得重试或换参数绕过。
 
-**不合格时记录什么**：`lastTexts`、确认卡前后对比、配置数、`chat_messages` 最近 6 条、工具错误（如有）。
+**不合格时记录什么**：`tail`、确认卡前后对比、配置数、`chat_messages` 最近 6 条、工具错误（如有）。
 
 ### E8-27 AI 就绪时点「新建配置」直接进对话
 
@@ -4767,6 +4775,45 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(resu
 5. 恢复网络后再走一遍，能正常建成配置。
 
 **不合格时记录什么**：AI 回复全文、`tool_calls` 最近 8 条、配置数前后、重试次数；若池空是人为清空，记录清空方式。
+
+### E8-32 连续两次点解释：每次都必须先有解释文字，再出卡片
+
+**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；点「新建配置」进对话，停在第一问卡片（`TUN 模式` / `Proxy 模式`）。
+
+**步骤**：
+
+1. 点一次「解释这个设置的含义」，等稳定后执行：
+
+```js
+(() => {
+  const tail = [...document.querySelectorAll(".msg")].slice(-4).map((m) => ({
+    action: m.classList.contains("msg--action") ? m.textContent.trim() : null,
+    role: m.classList.contains("msg--user") ? "user" : m.classList.contains("msg--assistant") ? "ai" : null,
+    text: [...m.querySelectorAll(".msg__text")].map((n) => n.textContent.trim()).filter(Boolean).join("\n"),
+  }));
+  return {
+    tail,
+    card: document.querySelector(".ask-card__question")?.textContent.trim() ?? null,
+    options: [...document.querySelectorAll(".ask-card__option")].map((b) => b.textContent.trim()),
+  };
+})()
+```
+
+2. 在新出现的同一张卡片上**再点一次**「解释这个设置的含义」，等稳定后再执行上面同一段 JS。
+3. 对比两次的 `tail`，并查配置数：
+
+```bash
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
+```
+
+**预期**：
+
+1. 每一次都先出现 `{action: 已请求解释}` 的**动作行**（不是用户气泡，`role` 为 `null`），紧接着出现 AI 的解释正文，然后才是同一张卡片；两次之间不能只有动作行和卡片。
+2. AI 消息的 `text`（该条消息内全部 `.msg__text` 拼接）非空，且不等于问题原文；两次都有（第二次可以是不同措辞，但不能为空、不能只发卡片）。
+3. 每次重问的 `card` 与 `options` 和点击前逐字相同、顺序不变。
+4. 全程不出现确认复述、不出现第二问；`configs` 数量与点击前相同。
+
+**不合格时记录什么**：两次 `tail` 全文、两次卡片与选项、配置数；若第二次只有卡片没有文字，附截图与请求时间线。
 
 ---
 

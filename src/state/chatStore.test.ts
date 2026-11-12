@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "../agent/protocol";
-import type { ChatState } from "./chatStore";
+import type { AgentEvent } from "../agent/protocol";
+import type { ChatState, ChatMessage } from "./chatStore";
 import {
   activeSession,
   chatReducer,
@@ -983,5 +984,339 @@ describe("报告会话判定", () => {
       },
     });
     expect(state.sessions[0]?.report).toBe(true);
+  });
+});
+
+describe("助手消息与追问的交错", () => {
+  function chunkEvent(assistantId: string, chunk: string, requestId = "req_1"): AgentEvent {
+    return {
+      name: AGENT_EVENTS.messageChunk,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        request_id: requestId,
+        assistant_message_id: assistantId,
+        chunk,
+        emitted_at: "2026-11-12T00:00:00Z",
+      },
+    };
+  }
+
+  function askedOnce() {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "帮我配一下",
+      localRequestId: "local_1",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_1",
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: chunkEvent("asst_1", "你主要用它做什么？"),
+    });
+    return { state, sessionId };
+  }
+
+  function assistantText(message: ChatMessage): string {
+    if (message.role !== "assistant") throw new Error("不是助手消息");
+    return message.items
+      .filter((item) => item.kind === "text")
+      .map((item) => (item.kind === "text" ? item.content : ""))
+      .join("");
+  }
+
+  it("回答之后的续写另起一条助手气泡，旧气泡不再增长", () => {
+    const setup = askedOnce();
+    let state = setup.state;
+
+    state = chatReducer(state, {
+      type: "append_user_message",
+      sessionId: setup.sessionId,
+      text: "浏览网页",
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: chunkEvent("asst_1", "那就只让浏览器走 VPN。"),
+    });
+
+    let messages = activeSession(state)!.messages;
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+    ]);
+    expect(messages[1]).toMatchObject({ id: "asst_1", streaming: false });
+    expect(assistantText(messages[1])).toBe("你主要用它做什么？");
+    expect(messages[3]).toMatchObject({ id: "asst_1#2", streaming: true });
+    expect(assistantText(messages[3])).toBe("那就只让浏览器走 VPN。");
+
+    // 后续同一请求的 chunk 继续进新气泡，不再新建。
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: chunkEvent("asst_1", "还差一步。"),
+    });
+    messages = activeSession(state)!.messages;
+    expect(messages).toHaveLength(4);
+    expect(messages[1]).toMatchObject({ streaming: false });
+    expect(assistantText(messages[1])).toBe("你主要用它做什么？");
+    expect(assistantText(messages[3])).toBe(
+      "那就只让浏览器走 VPN。还差一步。",
+    );
+  });
+
+  it("没有回答插入时，多块 chunk 仍合并进同一条气泡", () => {
+    const setup = askedOnce();
+    let state = setup.state;
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: chunkEvent("asst_1", "接着说。"),
+    });
+
+    const messages = activeSession(state)!.messages;
+    expect(messages.filter((message) => message.role === "assistant")).toHaveLength(1);
+    expect(assistantText(messages[1])).toBe("你主要用它做什么？接着说。");
+  });
+
+  it("问两次产生两条续写气泡，顺序严格交错", () => {
+    const setup = askedOnce();
+    let state = setup.state;
+    state = chatReducer(state, {
+      type: "append_user_message",
+      sessionId: setup.sessionId,
+      text: "浏览网页",
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: chunkEvent("asst_1", "只给浏览器用？"),
+    });
+    state = chatReducer(state, {
+      type: "append_user_message",
+      sessionId: setup.sessionId,
+      text: "对",
+    });
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: chunkEvent("asst_1", "好，开始配置。"),
+    });
+
+    const messages = activeSession(state)!.messages;
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+    ]);
+    expect(messages.map((message) => message.id)).toEqual([
+      "user_local_1",
+      "asst_1",
+      expect.any(String),
+      "asst_1#2",
+      expect.any(String),
+      "asst_1#3",
+    ]);
+    expect(assistantText(messages[3])).toBe("只给浏览器用？");
+    expect(assistantText(messages[5])).toBe("好，开始配置。");
+  });
+});
+
+describe("助手消息合并的边界", () => {
+  it("没有用户消息的开场（hidden）仍合并进占位气泡", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "start_hidden_request",
+      sessionId,
+      localRequestId: "local_h",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_h",
+    });
+
+    const chunk = (text: string): AgentEvent => ({
+      name: AGENT_EVENTS.messageChunk,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        request_id: "req_h",
+        assistant_message_id: "asst_h",
+        chunk: text,
+        emitted_at: "2026-11-12T00:00:00Z",
+      },
+    });
+    state = chatReducer(state, { type: "agent_event", event: chunk("报告在整理。") });
+    state = chatReducer(state, { type: "agent_event", event: chunk("稍等。") });
+
+    const messages = activeSession(state)!.messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: "assistant",
+      id: "asst_h",
+      requestId: "req_h",
+    });
+    if (messages[0].role !== "assistant") throw new Error("不是助手消息");
+    expect(
+      messages[0].items
+        .filter((item) => item.kind === "text")
+        .map((item) => (item.kind === "text" ? item.content : ""))
+        .join(""),
+    ).toBe("报告在整理。稍等。");
+  });
+
+  it("跳过（空回答）不追加用户消息，续写原地合并", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "帮我配一下",
+      localRequestId: "local_1",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_1",
+    });
+    const chunk = (text: string): AgentEvent => ({
+      name: AGENT_EVENTS.messageChunk,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        request_id: "req_1",
+        assistant_message_id: "asst_1",
+        chunk: text,
+        emitted_at: "2026-11-12T00:00:00Z",
+      },
+    });
+    state = chatReducer(state, { type: "agent_event", event: chunk("先问一句。") });
+
+    const before = activeSession(state)!.messages.length;
+    state = chatReducer(state, {
+      type: "append_user_message",
+      sessionId,
+      text: "",
+    });
+    expect(activeSession(state)!.messages).toHaveLength(before);
+
+    state = chatReducer(state, { type: "agent_event", event: chunk("那我按默认来。") });
+    const messages = activeSession(state)!.messages;
+    expect(messages).toHaveLength(before);
+    if (messages[1].role !== "assistant") throw new Error("不是助手消息");
+    expect(
+      messages[1].items
+        .filter((item) => item.kind === "text")
+        .map((item) => (item.kind === "text" ? item.content : ""))
+        .join(""),
+    ).toBe("先问一句。那我按默认来。");
+  });
+});
+
+describe("request_end 收尾", () => {
+  const USAGE = {
+    input_tokens: 10,
+    output_tokens: 20,
+    cache_read_tokens: null,
+    cache_write_tokens: null,
+  };
+
+  function requestEndEvent(usage: typeof USAGE | null = null): AgentEvent {
+    return {
+      name: AGENT_EVENTS.requestEnd,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        request_id: "req_1",
+        assistant_message_id: "asst_1",
+        result: "success",
+        final_text: null,
+        error: null,
+        usage,
+        duration_ms: 120,
+        emitted_at: "2026-11-12T00:00:01Z",
+      },
+    };
+  }
+
+  function chunkEvent(text: string): AgentEvent {
+    return {
+      name: AGENT_EVENTS.messageChunk,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        request_id: "req_1",
+        assistant_message_id: "asst_1",
+        chunk: text,
+        emitted_at: "2026-11-12T00:00:00Z",
+      },
+    };
+  }
+
+  function askedOnce(text = "你主要用它做什么？") {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "帮我配一下",
+      localRequestId: "local_1",
+    });
+    state = chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_1",
+    });
+    state = chatReducer(state, { type: "agent_event", event: chunkEvent(text) });
+    return { state, sessionId };
+  }
+
+  it("回答后直接结束：旧气泡收尾，不新建空助手气泡", () => {
+    const setup = askedOnce();
+    let state = chatReducer(setup.state, {
+      type: "append_user_message",
+      sessionId: setup.sessionId,
+      text: "浏览网页",
+    });
+
+    state = chatReducer(state, { type: "agent_event", event: requestEndEvent() });
+
+    const session = activeSession(state)!;
+    expect(session.messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect(session.messages[1]).toMatchObject({ id: "asst_1", streaming: false });
+    expect(session.activeRequestId).toBeNull();
+  });
+
+  it("续写后结束：新气泡收尾并拿到 usage，旧气泡保持已收尾", () => {
+    const setup = askedOnce();
+    let state = chatReducer(setup.state, {
+      type: "append_user_message",
+      sessionId: setup.sessionId,
+      text: "浏览网页",
+    });
+    state = chatReducer(state, { type: "agent_event", event: chunkEvent("那就只给浏览器用。") });
+
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: requestEndEvent(USAGE),
+    });
+
+    const session = activeSession(state)!;
+    expect(session.messages).toHaveLength(4);
+    expect(session.messages[1]).toMatchObject({ id: "asst_1", streaming: false });
+    expect(session.messages[3]).toMatchObject({
+      id: "asst_1#2",
+      streaming: false,
+      usage: USAGE,
+      durationMs: 120,
+    });
+    expect(session.activeRequestId).toBeNull();
   });
 });

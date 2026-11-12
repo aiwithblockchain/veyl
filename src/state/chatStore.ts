@@ -144,20 +144,37 @@ function patchSession(
 /**
  * 事件按 `assistant_message_id` 定位消息。Host 的 id 可能比 UI 的占位消息晚到，
  * 所以这里做一次「认领」：把本轮占位消息改名为 Host 的 id，而不是新开一条。
+ *
+ * 只合并最近一条用户消息之后的助手消息：用户回答把同一请求切成两段时，
+ * 续写不能追回回答之前那条气泡，要在末尾另起一条。
  */
 function withAssistant(
   session: Session,
   assistantId: string,
   requestId: string,
   update: (message: Extract<ChatMessage, { role: "assistant" }>) => ChatMessage,
+  create = true,
 ): Session {
   const messages = [...session.messages];
 
+  let found = -1;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const candidate = messages[i];
+    // 只有用户的回答真正切断请求；中途插入的系统消息不影响续写归位。
+    if (candidate.role === "user") break;
     if (candidate.role !== "assistant") continue;
-    if (candidate.id !== assistantId && candidate.requestId !== requestId) continue;
-    messages[i] = update(assistantId ? { ...candidate, id: assistantId, requestId } : candidate);
+    if (candidate.id === assistantId || candidate.requestId === requestId) {
+      found = i;
+      break;
+    }
+  }
+
+  if (found >= 0) {
+    const candidate = messages[found] as Extract<ChatMessage, { role: "assistant" }>;
+    // 续写气泡用了带后缀的 id：别改名，否则会和前一段气泡撞 id。
+    const idTaken = messages.some((message, index) => index !== found && message.id === assistantId);
+    const renamed = assistantId && !idTaken ? { ...candidate, id: assistantId, requestId } : candidate;
+    messages[found] = update(renamed);
     return { ...session, messages, updatedAt: Date.now() };
   }
 
@@ -174,8 +191,35 @@ function withAssistant(
     return { ...session, messages, updatedAt: Date.now() };
   }
 
+  // 同一请求被用户回答隔开：前一段到此为止，续写在末尾新开一条。
+  for (let i = 0; i < messages.length; i += 1) {
+    const message = messages[i];
+    if (
+      message.role === "assistant" &&
+      message.streaming &&
+      (message.id === assistantId || message.requestId === requestId)
+    ) {
+      messages[i] = {
+        ...message,
+        streaming: false,
+        items: closeOpenThinking(message.items),
+      };
+    }
+  }
+
+  // request_end 只收尾，不新建：没有内容就不该多出一条空气泡。
+  if (!create) return { ...session, messages, updatedAt: Date.now() };
+
+  const taken = new Set(messages.map((message) => message.id));
+  let createdId = assistantId;
+  let suffix = 1;
+  while (createdId && taken.has(createdId)) {
+    suffix += 1;
+    createdId = `${assistantId}#${suffix}`;
+  }
+
   const created: ChatMessage = {
-    id: assistantId,
+    id: createdId,
     role: "assistant",
     requestId,
     items: [],
@@ -642,6 +686,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
                 usage,
                 durationMs: duration_ms,
               }),
+              false,
             );
 
             if (!REQUEST_RESULTS[result]) {

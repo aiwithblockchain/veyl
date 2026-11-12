@@ -120,3 +120,34 @@ describe("MessageItem：工具行合并", () => {
     expect(screen.queryByText("第四步")).toBeNull();
   });
 });
+
+describe("MessageItem：解释动作", () => {
+  function renderUser(text: string) {
+    const message: ChatMessage = { id: "user_1", role: "user", text, at: 1 };
+    return render(
+      <MessageItem message={message} toolCalls={{}} onNextAction={vi.fn()} />,
+    );
+  }
+
+  it("解释文案渲染成动作记录，不是用户气泡", () => {
+    const { container } = renderUser("解释这个设置的含义");
+
+    expect(container.querySelector(".msg--action")?.textContent).toBe("已请求解释");
+    expect(container.querySelector(".msg--user")).toBeNull();
+    expect(screen.queryByText("你")).toBeNull();
+  });
+
+  it("普通用户消息仍是用户气泡", () => {
+    const { container } = renderUser("帮我看看为什么连不上");
+
+    expect(container.querySelector(".msg--user")).toBeTruthy();
+    expect(container.querySelector(".msg--action")).toBeNull();
+  });
+
+  it("带前后空格的解释文案同样按动作处理", () => {
+    const { container } = renderUser("  解释这个设置的含义  ");
+
+    expect(container.querySelector(".msg--action")).toBeTruthy();
+    expect(container.querySelector(".msg--user")).toBeNull();
+  });
+});

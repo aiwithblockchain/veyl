@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { NextAction } from "../agent/protocol";
 import { PRODUCT_NAME } from "../brand";
 import type { ChatMessage, TimelineItem, ToolCall } from "../state/chatStore";
+import { EXPLAIN_ANSWER } from "../ui/askQuestion";
 import { Markdown } from "./Markdown";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallCard, ToolCallGroup } from "./ToolCallCard";
@@ -22,6 +23,11 @@ export function MessageItem({
   onNextAction,
   onDisplayAction,
 }: Props) {
+  // 请求解释是动作，不是用户说的话：不渲染成用户气泡。
+  if (message.role === "user" && message.text.trim() === EXPLAIN_ANSWER) {
+    return <div className="msg msg--action">已请求解释</div>;
+  }
+
   if (message.role === "user") {
     return (
       <div className="msg msg--user">
