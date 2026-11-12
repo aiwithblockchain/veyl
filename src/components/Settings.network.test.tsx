@@ -578,3 +578,14 @@ describe("问题报告偏好", () => {
     expect(box.checked).toBe(false);
   });
 });
+
+describe("原生表单与输入法", () => {
+  it("组合态回车被拦，普通回车不拦", async () => {
+    renderSettings(makeBridge(), { section: "ai" });
+    fireEvent.click(await screen.findByRole("button", { name: "添加 AI 服务" }));
+    const name = await screen.findByLabelText("名称");
+
+    expect(fireEvent.keyDown(name, { key: "Enter", keyCode: 229 })).toBe(false);
+    expect(fireEvent.keyDown(name, { key: "Enter" })).toBe(true);
+  });
+});

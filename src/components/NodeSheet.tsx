@@ -23,6 +23,7 @@ import {
   writeNodeSort,
   type NodeSort,
 } from "../ui/nodeList";
+import { isComposingEvent } from "../ui/ime";
 import { IconClose } from "./icons";
 
 const ROW_H = 44;
@@ -287,7 +288,7 @@ export function NodeSheet({
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.isComposing || event.keyCode === 229) return;
+      if (isComposingEvent(event)) return;
       if (event.key === "Escape") {
         event.stopPropagation();
         onClose();
@@ -417,7 +418,7 @@ export function NodeSheet({
   );
 
   const onListKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (isComposingEvent(event)) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       moveActive(event.key === "ArrowDown" ? 1 : -1);
@@ -552,7 +553,7 @@ export function NodeSheet({
               setScrollTop(0);
             }}
             onKeyDown={(event) => {
-              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+              if (isComposingEvent(event)) return;
               if (event.key === "ArrowDown") {
                 event.preventDefault();
                 listRef.current?.focus();

@@ -1525,6 +1525,14 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 
 本章验证 AI 的问答、工具展示、布局渲染、降级与问题报告。AI 的界面行为由人观察，AI 取证主要读本地对话库与日志，**不要根据截图猜测**。
 
+> **已知问题（不算缺陷）**：AI 回复里的中文偶发出现 `�`。这是上游 claurst 流式解码按网络 chunk 做 `from_utf8_lossy` 造成的，详见 `docs/issues/claurst-streaming-utf8-mojibake.md`。遇到时先取证：
+>
+> ```bash
+> sqlite3 -readonly "$HOME/.veyl/veyl.db" "select id, role, substr(content,1,120) from chat_messages where content like '%�%' order by created_at desc limit 5;"
+> ```
+>
+> 查得到坏行 → 按该问题记录提交，**不算新缺陷**；界面有 `�` 但库里查不到 → 不是这个问题，另记。
+
 ### E5-01 提问卡的问答路径
 
 - **目的**：验证 AI 提问以消息流内联卡片出现，点选项后继续对话，不挡输入框。

@@ -41,4 +41,36 @@ describe("AssistantOverlay", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it("组合态（isComposing）的 Esc 不关闭浮层", () => {
+    const onClose = vi.fn();
+    render(
+      <AssistantOverlay onClose={onClose}>
+        <button type="button">唯一</button>
+      </AssistantOverlay>,
+    );
+
+    const composing = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(composing, "isComposing", { value: true });
+    window.dispatchEvent(composing);
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("组合态（keyCode 229）的 Esc 不关闭浮层", () => {
+    const onClose = vi.fn();
+    render(
+      <AssistantOverlay onClose={onClose}>
+        <button type="button">唯一</button>
+      </AssistantOverlay>,
+    );
+
+    fireEvent.keyDown(window, { key: "Escape", keyCode: 229 });
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

@@ -351,6 +351,18 @@ describe("端口保存", () => {
     await waitFor(() => expect(proxyPortSet).toHaveBeenCalledWith(8081));
   });
 
+  it("组合态下的回车不保存", () => {
+    const { bridge, proxyPortSet } = makeBridge();
+    renderHarness({ bridge });
+    beginEdit();
+    fireEvent.change(input(), { target: { value: "8081" } });
+
+    fireEvent.keyDown(input(), { key: "Enter", keyCode: 229 });
+
+    expect(proxyPortSet).not.toHaveBeenCalled();
+    expect(input().value).toBe("8081");
+  });
+
   it("保存中：按钮变文案、取消禁用、输入只读", async () => {
     const gate = deferred<{ port: number; availability: Availability }>();
     const { bridge } = makeBridge(() => gate.promise);

@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { useFocusTrap } from "../ui/focus";
+import { isComposingEvent } from "../ui/ime";
 
 interface Props {
   onClose: () => void;
@@ -16,6 +17,8 @@ export function AssistantOverlay({ onClose, children }: Props) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // 输入法取消候选词的 Esc 不能冒到关浮层：否则草稿随 AiPanel 一起卸载。
+      if (isComposingEvent(event)) return;
       if (event.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKeyDown);

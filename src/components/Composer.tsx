@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { isComposingEvent } from "../ui/ime";
 
 interface Props {
   streaming: boolean;
@@ -28,6 +29,8 @@ export function Composer({
   const [blockedHint, setBlockedHint] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const submittingRef = useRef(false);
+  // 中文输入法选词时按 Enter 是上屏，不是发送。
+  const isComposingRef = useRef(false);
   const blockedTimerRef = useRef<number | null>(null);
   // 提问待回答时请求仍挂着，但输入框是用来回答的，不能按「等待回复」挡住。
   const blocked = streaming && !questionPending;
@@ -105,7 +108,18 @@ export function Composer({
           placeholder={disabled ? "配置 AI 后可以直接对话" : undefined}
           disabled={disabled}
           onChange={(event) => setValue(event.target.value)}
+          onCompositionStart={() => {
+            isComposingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            isComposingRef.current = false;
+          }}
+          // 失焦不一定先发 compositionend：不复位会让之后按 Enter 一直发不出去。
+          onBlur={() => {
+            isComposingRef.current = false;
+          }}
           onKeyDown={(event) => {
+            if (isComposingEvent(event, isComposingRef.current)) return;
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
               submit();

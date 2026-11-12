@@ -5,6 +5,7 @@ import type { Session } from "../state/chatStore";
 import type { DisplayActionOutcome } from "./ToolCallCard";
 import type { ToolDisplayAction } from "./toolDisplay";
 import { useFocusTrap } from "../ui/focus";
+import { isComposingEvent } from "../ui/ime";
 import { AskQuestionCard } from "./AskQuestionCard";
 import { ChatView } from "./ChatView";
 import { Composer } from "./Composer";
@@ -267,6 +268,7 @@ export function AiPanel({
                             setEditError(null);
                           }}
                           onKeyDown={(event) => {
+                            if (isComposingEvent(event)) return;
                             if (event.key === "Enter") {
                               event.preventDefault();
                               void submitRename();

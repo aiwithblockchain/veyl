@@ -20,6 +20,7 @@ import type {
 import { toBridgeError } from "../agent/errors";
 import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
 import { useFocusTrap } from "../ui/focus";
+import { isComposingEvent } from "../ui/ime";
 import { copyText } from "../ui/clipboard";
 import { IconClose } from "./icons";
 import { RuntimeUpgradeRow, useRuntimeUpgrade } from "./RuntimeUpgrade";
@@ -873,6 +874,8 @@ export function Settings({
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
+      // 输入法取消组合的 Esc 不能冒到关窗逻辑：否则刚填的内容全丢。
+      if (isComposingEvent(event)) return;
       if (event.key !== "Escape") return;
       // 导入弹层在设置之上：先关它。
       if (importOpen) {
@@ -1610,6 +1613,10 @@ export function Settings({
                       event.preventDefault();
                       void saveProvider();
                     }}
+                    onKeyDown={(event) => {
+                      // 组合期间不让表单隐式提交（WebKit 会把组合态回车当提交）。
+                      if (isComposingEvent(event)) event.preventDefault();
+                    }}
                   >
                     <h4 className="provider-form__title">
                       {providerForm.providerId ? "编辑 AI 服务" : "添加 AI 服务"}
@@ -1838,6 +1845,7 @@ export function Settings({
                         setPortError(null);
                       }}
                       onKeyDown={(event) => {
+                        if (isComposingEvent(event)) return;
                         if (event.key === "Enter") {
                           event.preventDefault();
                           void saveProxyPort();

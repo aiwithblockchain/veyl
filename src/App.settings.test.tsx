@@ -266,3 +266,31 @@ describe("设置 → 新建配置", () => {
     expect((call[2] as { hidden?: boolean }).hidden).toBeFalsy();
   }, 15_000);
 });
+
+describe("设置页 Esc 与输入法", () => {
+  it("组合态的 Esc 不关闭设置，普通 Esc 才关", async () => {
+    render(<App />);
+    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await act(async () => {});
+
+    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape", keyCode: 229 });
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
+
+    const composing = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(composing, "isComposing", { value: true });
+    window.dispatchEvent(composing);
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull(),
+    );
+  });
+});

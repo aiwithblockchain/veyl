@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { AgentBridge, LlmProtocol, LlmProviderInput } from "../agent/bridge";
 import { isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import { describeKeyError, describeProviderError } from "./Settings";
+import { isComposingEvent } from "../ui/ime";
 import { IconKey } from "./icons";
 import { PRODUCT_NAME } from "../brand";
 
@@ -142,6 +143,10 @@ export function Onboarding({ bridge, onDone }: Props) {
               event.preventDefault();
               void saveKey();
             }}
+            onKeyDown={(event) => {
+              // 组合期间不让表单隐式提交（WebKit 会把组合态回车当提交）。
+              if (isComposingEvent(event)) event.preventDefault();
+            }}
           >
             <div className="onboarding__field">
               <label className="onboarding__field-label" htmlFor="onboarding-deepseek-key">
@@ -198,6 +203,10 @@ export function Onboarding({ bridge, onDone }: Props) {
             onSubmit={(event) => {
               event.preventDefault();
               void saveProvider();
+            }}
+            onKeyDown={(event) => {
+              // 组合期间不让表单隐式提交（WebKit 会把组合态回车当提交）。
+              if (isComposingEvent(event)) event.preventDefault();
             }}
           >
             <div className="onboarding__field">

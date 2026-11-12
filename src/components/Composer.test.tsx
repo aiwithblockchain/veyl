@@ -153,3 +153,48 @@ describe("Composer 提问待回答", () => {
     expect(onSend).toHaveBeenCalledWith("我自己说");
   });
 });
+
+describe("Composer 输入法组合态", () => {
+  it("组合中（isComposing）按 Enter 不发送，文字仍在", () => {
+    const onSend = vi.fn(() => true);
+    render(<Composer streaming={false} statusText={null} onSend={onSend} onStop={() => {}} />);
+    type("nihao");
+
+    const event = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(event, "isComposing", { value: true });
+    textarea().dispatchEvent(event);
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+    expect(textarea().value).toBe("nihao");
+  });
+
+  it("keyCode 229 也不发送", () => {
+    const onSend = vi.fn(() => true);
+    render(<Composer streaming={false} statusText={null} onSend={onSend} onStop={() => {}} />);
+    type("nihao");
+
+    fireEvent.keyDown(textarea(), { key: "Enter", keyCode: 229, which: 229 });
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(textarea().value).toBe("nihao");
+  });
+
+  it("compositionstart 后按 Enter 不发送，compositionend 后正常发送", () => {
+    const onSend = vi.fn(() => true);
+    render(<Composer streaming={false} statusText={null} onSend={onSend} onStop={() => {}} />);
+    type("你好");
+
+    fireEvent.compositionStart(textarea());
+    fireEvent.keyDown(textarea(), { key: "Enter", keyCode: 13, which: 13 });
+    expect(onSend).not.toHaveBeenCalled();
+
+    fireEvent.compositionEnd(textarea());
+    fireEvent.keyDown(textarea(), { key: "Enter", keyCode: 13, which: 13 });
+    expect(onSend).toHaveBeenCalledWith("你好");
+  });
+});
