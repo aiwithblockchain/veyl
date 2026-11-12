@@ -376,7 +376,15 @@ fn envelope(result: &ToolResult) -> Value {
 
 /// 调一次工具，返回 (是否错误, 信封信封)。
 async fn run(tool: &dyn Tool, input: Value) -> (bool, Value) {
-    let result = tool.execute(input, &context()).await;
+    run_in_session(tool, input, "boundary-test").await
+}
+
+/// 指定会话 id 运行：进程级结果登记表按 (session_id, tool) 排队，
+/// 需要读 `take_outcome` 的用例必须用自己的 id，避免并行时取到别人的记录。
+async fn run_in_session(tool: &dyn Tool, input: Value, session_id: &str) -> (bool, Value) {
+    let mut ctx = context();
+    ctx.session_id = session_id.to_string();
+    let result = tool.execute(input, &ctx).await;
     let env = envelope(&result);
     assert_eq!(
         env["ok"].as_bool(),
@@ -800,10 +808,11 @@ async fn issue_report_shows_actions_while_collecting() {
         "ai_report": false
     }));
     let all = tools(svc);
-    let (is_error, env) = run(tool(&all, "IssueReport"), json!({})).await;
+    const SESSION: &str = "boundary-issue-report";
+    let (is_error, env) = run_in_session(tool(&all, "IssueReport"), json!({}), SESSION).await;
     assert!(!is_error, "{env}");
-    // display 不在给模型的信封里，从进程内结果登记表取。
-    let outcome = crate::tools::envelope::take_outcome("boundary-test", "IssueReport")
+    // display 不在给模型的信封里，从进程内结果登记表取（用本用例专属的会话 id）。
+    let outcome = crate::tools::envelope::take_outcome(SESSION, "IssueReport")
         .expect("工具结果应当已登记");
     let actions = outcome.display.actions;
     assert_eq!(actions.len(), 2);
