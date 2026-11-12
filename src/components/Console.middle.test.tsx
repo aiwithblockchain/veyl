@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { cleanup, fireEvent, render } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ConfigDetail,
   HealthSnapshot,
@@ -113,6 +113,8 @@ function renderConsole(
     proxyPort?: number;
     region?: string | null;
     onImportNodes?: () => void;
+    onNewConfig?: () => void;
+    onUseSeedNodes?: () => void;
   } = {},
 ): HTMLElement {
   const { container } = render(
@@ -130,7 +132,8 @@ function renderConsole(
       zeroConfigSettled
       hasConfigs
       onAskAi={noop}
-      onNewConfig={noop}
+      onNewConfig={extra.onNewConfig ?? noop}
+      onUseSeedNodes={extra.onUseSeedNodes}
       onImportNodes={extra.onImportNodes}
       seedUpdate={extra.seedUpdate ?? false}
       proxyPort={extra.proxyPort}
@@ -539,6 +542,46 @@ describe("中间区验收用例", () => {
     expect(options[0]).toContain("Veyl 免费节点");
     expect(options[1]).toContain("用我自己的节点");
     expect(body(root).querySelector(".note")).toBeNull();
+  });
+
+  it("13e-1 来源卡「Veyl 免费节点」只调免费节点入口，不走新建配置总入口", () => {
+    const onUseSeedNodes = vi.fn();
+    const onNewConfig = vi.fn();
+    const root = renderConsole(
+      makeConfig({
+        nodes: [],
+        node_count: 0,
+        layout: { version: 1, blocks: [{ type: "source_choice" }] },
+      }),
+      makeRuntime(),
+      true,
+      false,
+      { onUseSeedNodes, onNewConfig },
+    );
+
+    fireEvent.click(root.querySelector(".choice__option") as HTMLElement);
+
+    expect(onUseSeedNodes).toHaveBeenCalledTimes(1);
+    expect(onNewConfig).not.toHaveBeenCalled();
+  });
+
+  it("13e-2 没传免费节点入口时回退到新建配置", () => {
+    const onNewConfig = vi.fn();
+    const root = renderConsole(
+      makeConfig({
+        nodes: [],
+        node_count: 0,
+        layout: { version: 1, blocks: [{ type: "source_choice" }] },
+      }),
+      makeRuntime(),
+      true,
+      false,
+      { onNewConfig },
+    );
+
+    fireEvent.click(root.querySelector(".choice__option") as HTMLElement);
+
+    expect(onNewConfig).toHaveBeenCalledTimes(1);
   });
 
   it("13f source_choice 在已有节点时跳过；只剩它时退回本地兜底", () => {

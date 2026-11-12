@@ -5,6 +5,7 @@ import App from "./App";
 import { emptyRuntimeView, getAgentBridge } from "./agent";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./agent/protocol";
 import type { AgentEvent, ConfigDetail, ConfigSummary, RuntimeState } from "./agent/protocol";
+import { PANEL_VERSION } from "./ui/panelPreference";
 
 const CONFIG_ID = "cfg_tun_1";
 
@@ -78,6 +79,26 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function requestEnd(
+  requestId: string,
+  result: "success" | "error" | "cancelled",
+): AgentEvent {
+  return {
+    name: AGENT_EVENTS.requestEnd,
+    payload: {
+      contract_version: CONTRACT_VERSION,
+      request_id: requestId,
+      assistant_message_id: "m_1",
+      result,
+      final_text: null,
+      error: null,
+      usage: null,
+      duration_ms: 1,
+      emitted_at: "",
+    },
+  };
+}
+
 function healthEvent(): AgentEvent {
   return {
     name: AGENT_EVENTS.runtimeHealthChanged,
@@ -91,12 +112,18 @@ function healthEvent(): AgentEvent {
 
 const bridge = getAgentBridge();
 const modeDescriptor = Object.getOwnPropertyDescriptor(bridge, "mode");
+const widthDescriptor = Object.getOwnPropertyDescriptor(window, "innerWidth");
 
 afterEach(() => {
   cleanup();
   localStorage.clear();
   vi.restoreAllMocks();
   if (modeDescriptor) Object.defineProperty(bridge, "mode", modeDescriptor);
+  if (widthDescriptor) {
+    Object.defineProperty(window, "innerWidth", widthDescriptor);
+  } else {
+    Object.defineProperty(window, "innerWidth", { value: 1024, configurable: true });
+  }
 });
 
 function renderStartWithFailure(error: unknown) {
@@ -302,5 +329,152 @@ describe("TUN 启动成功后的界面状态", () => {
       expect(container.querySelector(".app-toast")?.textContent).toContain("租约"),
     );
     expect(screen.queryByRole("dialog")).toBeNull();
+  }, 15_000);
+});
+
+function setupAi(ready: boolean) {
+  Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
+  Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true });
+  localStorage.setItem("veyl.onboarding.skipped", "1");
+  vi.spyOn(bridge, "configList").mockResolvedValue({
+    configs: [SUMMARY],
+    active_config_id: CONFIG_ID,
+  });
+  vi.spyOn(bridge, "configDetail").mockResolvedValue(DETAIL);
+  vi.spyOn(bridge, "getRuntimeSnapshot").mockResolvedValue(null);
+  vi.spyOn(bridge, "tunHelperInfo").mockResolvedValue({
+    runningBuild: null,
+    expectedBuild: "2026.11.1",
+    stale: false,
+    state: "not_running",
+    needsAdminRestart: false,
+  } as never);
+  vi.spyOn(bridge, "getDeepSeekKey").mockResolvedValue(
+    (ready
+      ? { masked: "sk-****abcd", verified: true, validation: "ok" }
+      : { masked: null, verified: false, validation: "unverified" }) as never,
+  );
+  vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
+    providers: ready
+      ? [
+          {
+            providerId: "deepseek",
+            name: "DeepSeek",
+            protocol: "openai",
+            baseUrl: "https://api.deepseek.com",
+            model: "deepseek-chat",
+            hasKey: true,
+            isActive: true,
+            isBuiltin: true,
+          },
+        ]
+      : [],
+    activeProviderId: ready ? "deepseek" : null,
+  } as never);
+  return {
+    sendMessage: vi.spyOn(bridge, "sendMessage").mockResolvedValue({
+      requestId: "req_new_config",
+    }),
+  };
+}
+
+describe("新建配置入口", () => {
+  it("AI 已就绪时进 AI 对话，不弹静态表单；连点只开一条", async () => {
+    const { sendMessage } = setupAi(true);
+    // 先收起右栏，才能证明是入口把它打开的。
+    localStorage.setItem("veyl.ui.panelOpen", "0");
+    localStorage.setItem("veyl.ui.panelVersion", PANEL_VERSION);
+    const { container } = render(<App />);
+    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await act(async () => {});
+    expect(container.querySelector(".assistant-slot")).toBeNull();
+
+    const entry = await screen.findByRole("button", { name: "新建配置" });
+    fireEvent.click(entry);
+    fireEvent.click(entry);
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    expect(container.querySelector(".assistant-slot")).toBeTruthy();
+    expect(container.querySelector(".modal.new-config")).toBeNull();
+
+    const call = (sendMessage as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[1]).toBe("帮我新建一套配置。");
+    expect((call[2] as { hidden?: boolean }).hidden).toBeFalsy();
+    expect(container.querySelectorAll(".msg--user")).toHaveLength(1);
+  }, 15_000);
+
+  it("开场没发出去时回退到手动表单", async () => {
+    const { sendMessage } = setupAi(true);
+    sendMessage.mockRejectedValue({ code: "INTERNAL", message: "AI 服务连不上" });
+    const { container } = render(<App />);
+    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await act(async () => {});
+
+    fireEvent.click(await screen.findByRole("button", { name: "新建配置" }));
+
+    await waitFor(() =>
+      expect(container.querySelector(".modal.new-config")).toBeTruthy(),
+    );
+    expect(screen.getByText("怎么接管")).toBeTruthy();
+  }, 15_000);
+
+  it("后台把开场判为失败时回退表单并提示", async () => {
+    const { sendMessage } = setupAi(true);
+    const { container } = render(<App />);
+    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await act(async () => {});
+
+    fireEvent.click(await screen.findByRole("button", { name: "新建配置" }));
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+
+    act(() => {
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
+        requestEnd("req_new_config", "error"),
+      );
+    });
+
+    await waitFor(() =>
+      expect(container.querySelector(".modal.new-config")).toBeTruthy(),
+    );
+    expect(screen.getByText("AI 没接上，先用表单建一套。")).toBeTruthy();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it.each(["success", "cancelled"] as const)(
+    "开场请求以 %s 结束时不弹表单",
+    async (result) => {
+      const { sendMessage } = setupAi(true);
+      const { container } = render(<App />);
+      await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+      await act(async () => {});
+
+      fireEvent.click(await screen.findByRole("button", { name: "新建配置" }));
+      await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+      await act(async () => {});
+
+      act(() => {
+        (bridge as unknown as { emit(event: AgentEvent): void }).emit(
+          requestEnd("req_new_config", result),
+        );
+      });
+      await act(async () => {});
+
+      expect(container.querySelector(".modal.new-config")).toBeNull();
+      expect(screen.queryByText("AI 没接上，先用表单建一套。")).toBeNull();
+    },
+    15_000,
+  );
+
+  it("没有 AI 时仍弹两问表单", async () => {
+    setupAi(false);
+    const { container } = render(<App />);
+    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await act(async () => {});
+
+    fireEvent.click(await screen.findByRole("button", { name: "新建配置" }));
+
+    expect(container.querySelector(".modal.new-config")).toBeTruthy();
+    expect(screen.getByText("怎么接管")).toBeTruthy();
   }, 15_000);
 });

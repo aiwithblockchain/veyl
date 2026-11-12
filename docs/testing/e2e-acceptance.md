@@ -308,7 +308,7 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
   看什么：`可用=false`（或 provider 为空）；配置数 ≥ 1；没有 AI 首启消息；连接日志存在。
 - **可观察预期**
   - 跳过 AI 后应用正常进入主界面；点右边缘的「助手」展开后，顶部显示「未连接 AI」和「还没有配置 AI，现在只能手动操作网络。」。
-  - 新建配置弹窗只有两问（怎么接管 / 节点从哪来），**没有**「AI 协助」「我自己配置」两张卡。
+  - 无 AI 兜底的新建配置弹窗只有两问（怎么接管 / 节点从哪来），**没有**「AI 协助」「我自己配置」两张卡。
   - 默认值（TUN 模式 + Veyl 免费节点）可以创建配置并连接；全程不依赖 AI。
 - **判定**
   - [ ] 通过
@@ -2490,7 +2490,7 @@ mv "$HOME/.veyl/config/active.json.bak" "$HOME/.veyl/config/active.json"
 **预期**：
 
 1. 空态按钮文本「新建配置」，类名同时包含 `btn`、`btn--ghost`、`rail__empty-action`。
-2. 点它打开新建配置弹窗；创建成功后空态和按钮消失，列表出现新配置。
+2. 点它：AI 就绪时打开右栏会话并发出「帮我新建一套配置。」（不弹窗）；无 AI 时打开两问弹窗。创建成功后空态和按钮消失，列表出现新配置。
 3. 错误态标题「配置读取失败」，`.rail__empty-text` 显示具体错误；按钮文本「重新读取」，类名同样包含 `btn btn--ghost`。
 4. 恢复权限后点「重新读取」：按钮消失，列表刷新出配置行。
 5. 读取仍失败时按钮保留，不静默、不显示空列表冒充成功。
@@ -4358,7 +4358,7 @@ grep -E '连接完成|连接失败 卡在' "$APP_LOG" | tail -3
 
 ### E8-21 带选项的提问卡片有「解释这个设置的含义」这一行
 
-**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。对助手说「再建一套配置」，停在第一问卡片（2 个选项：浏览器上网页 / 浏览器，还有聊天、会议、游戏这类软件也要用）。
+**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。点左侧「新建配置」（AI 就绪，应直接进对话），停在第一问卡片（2 个选项：浏览器上网页 / 浏览器，还有聊天、会议、游戏这类软件也要用）。
 
 **步骤**：
 
@@ -4393,7 +4393,7 @@ grep -E '连接完成|连接失败 卡在' "$APP_LOG" | tail -3
 
 ### E8-22 点「解释这个设置的含义」→ 三句解释 → 原问题原选项重问
 
-**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。对助手说「再建一套配置」，停在第一问卡片（2 个选项）。
+**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。点左侧「新建配置」（AI 就绪，应直接进对话），停在第一问卡片（2 个选项）。
 
 **步骤**：
 
@@ -4430,7 +4430,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
 
 ### E8-23 解释不算作答：不推进、不建配置
 
-**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。对助手说「再建一套配置」，停在第一问卡片（2 个选项）；记录点击前的配置数与当前问题。
+**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。点左侧「新建配置」（AI 就绪，应直接进对话），停在第一问卡片（2 个选项）；记录点击前的配置数与当前问题。
 
 **步骤**：
 
@@ -4448,7 +4448,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
 
 ### E8-24 节点来源这一问点解释后，再选 Veyl 免费节点仍能创建
 
-**前置**：M2（原生应用，走真实后端）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。对助手说「再建一套配置」，答完第一问，停在「节点从哪来」卡片（4 个选项）。
+**前置**：M2（原生应用，走真实后端）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。点左侧「新建配置」（AI 就绪，应直接进对话），答完第一问，停在「节点从哪来」卡片（4 个选项）。
 
 **步骤**：
 
@@ -4473,7 +4473,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select ro
 
 ### E8-25 确认卡上没有「解释这个设置的含义」
 
-**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；对助手说「再建一套配置」，答完两问，停在确认卡（`创建` / `取消`；确认卡判定词表以 `docs/design/tool-display.md` §3.5 为准）。
+**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；点左侧「新建配置」（AI 就绪，应直接进对话），答完两问，停在确认卡（`创建` / `取消`；确认卡判定词表以 `docs/design/tool-display.md` §3.5 为准）。
 
 **步骤**：
 
@@ -4537,6 +4537,147 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select ro
 4. 若模型违规调用 `ConfigCreate`：工具返回 `PRECONDITION_FAILED / explanation_pending`，界面仍无「已创建」，AI 按契约把确认问题重问；不得重试或换参数绕过。
 
 **不合格时记录什么**：`lastTexts`、确认卡前后对比、配置数、`chat_messages` 最近 6 条、工具错误（如有）。
+
+### E8-27 AI 就绪时点「新建配置」直接进对话
+
+**前置**：M2（原生应用，走真实 AI）；AI 已配置且可用；已有一套可用配置；左栏标题行有 `+`。
+
+**步骤**：
+
+1. 点左栏 `+` 或空态的「新建配置」。
+2. 等界面稳定后执行：
+
+```js
+(() => {
+  const msgs = [...document.querySelectorAll(".msg__text")].map((n) => n.textContent.trim());
+  return {
+    modal: Boolean(document.querySelector(".modal")),
+    panel: Boolean(document.querySelector("#ai-panel")),
+    composerFocused: document.activeElement?.closest(".ai-panel, #ai-panel, .composer") !== null,
+    userMessages: [...document.querySelectorAll(".msg--user .msg__text")].map((n) => n.textContent.trim()).slice(-2),
+    hasAskCard: Boolean(document.querySelector(".ask-card")),
+    allTexts: msgs.slice(-3),
+  };
+})()
+```
+
+3. 查会话记录：
+
+```bash
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select role, substr(content,1,80) from chat_messages order by created_at desc limit 4;"
+```
+
+**预期**：
+
+1. `modal` 为 `false`：没有新建配置弹窗。
+2. `panel` 为 `true`，右栏打开；`userMessages` 最后一条逐字是 `帮我新建一套配置。`，且它是**用户可见**消息（不是 hidden）。
+3. 紧接着出现第一问卡片（`hasAskCard` 为 `true`），选项为第一个问题的 2 个选项。
+4. `chat_messages` 里能查到这条用户消息；没有「AI 协助 / 我自己配置」两张卡。
+
+**不合格时记录什么**：上述 JSON、`chat_messages` 最近 4 条、点击前后的截图。
+
+### E8-28 无 AI 时点「新建配置」走两问表单兜底
+
+**前置**：M2（原生应用）；干净安装、未配置 AI；首启页选「我懂网络，不用 AI」跳过引导，回到主界面（左栏无配置，空态有「新建配置」）。
+
+**步骤**：
+
+1. 点左栏 `+` 或「新建配置」。
+2. 读弹窗与页面状态：
+
+```js
+(() => {
+  const modal = document.querySelector(".modal");
+  const texts = [...document.querySelectorAll(".msg__text")].map((n) => n.textContent.trim());
+  return {
+    modal: Boolean(modal),
+    modalText: modal?.textContent.slice(0, 120) ?? null,
+    newUserMessage: texts.includes("帮我新建一套配置。"),
+    askCard: Boolean(document.querySelector(".ask-card")),
+  };
+})()
+```
+
+3. 按默认值走完两问 → 审视页，点主按钮，等连接结束。
+4. 查配置与连接：
+
+```bash
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
+```
+
+**预期**：
+
+1. `modal` 为 `true`，弹窗里是两问（怎么接管 / 节点从哪来）；`newUserMessage` 为 `false`，`askCard` 为 `false`——表单不进对话、不产生会话消息。
+2. 审视页五项只读，主按钮是 `创建并连接`（未连接）。
+3. 创建成功并自动连接；`configs` 数量 +1；左栏出现新配置且成为当前配置。
+
+**不合格时记录什么**：上述 JSON、弹窗与审视页截图、配置数、连接结果。
+
+### E8-29 AI 开场失败时自动落到手动表单
+
+**前置**：M2（原生应用）；AI 已配置过、但 Key 可改；已有一套可用配置；未连接。
+
+**步骤**：
+
+1. 设置 → AI 服务，把 API Key 改成一个明显错误的值并保存（允许保存后 `verified = false`）。
+2. 回主界面点 `+` 或「新建配置」。
+3. 等几秒，读页面状态：
+
+```js
+(() => {
+  const modal = document.querySelector(".modal");
+  return {
+    modal: Boolean(modal),
+    modalText: modal?.textContent.slice(0, 160) ?? null,
+    hintVisible: document.body.innerText.includes("AI 没接上，先用表单建一套"),
+    askError: [...document.querySelectorAll(".msg__text, .notice, .error")]
+      .map((n) => n.textContent.trim())
+      .filter((t) => /失败|没接上|错误/.test(t)).slice(-2),
+  };
+})()
+```
+
+4. 在自动打开的表单里按默认值走完两问 → 审视页，点主按钮创建。
+5. 查配置：
+
+```bash
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
+```
+
+**预期**：
+
+1. 会话里能看到开场失败的提示（`askError` 非空），不是无声无息。
+2. `modal` 为 `true`，且页面出现 `AI 没接上，先用表单建一套`。
+3. 表单两问可正常选择，审视页与主按钮正常；创建成功，`configs` 数量 +1。
+4. 断网时同样落到表单（可选复验）：表单能出现；若免费节点池为空，允许建不出配置，但必须停在表单内给出失败原因，不回到空会话。
+
+**不合格时记录什么**：上述 JSON、会话错误提示、弹窗截图、配置数。
+
+### E8-30 中间区来源卡保持表单（唯一例外）
+
+**前置**：M2（原生应用）；AI 已配置且可用；中间区出现「用 Veyl 免费节点」来源卡（如零配置引导后 AI 已生成面板、还没有节点）。
+
+**步骤**：
+
+1. 点中间区来源卡上的「用 Veyl 免费节点」。
+2. 读页面状态：
+
+```js
+(() => ({
+  modal: Boolean(document.querySelector(".modal")),
+  modalText: document.querySelector(".modal")?.textContent.slice(0, 120) ?? null,
+  lastUser: [...document.querySelectorAll(".msg--user .msg__text")].map((n) => n.textContent.trim()).slice(-1)[0] ?? null,
+  askCard: Boolean(document.querySelector(".ask-card")),
+}))()
+```
+
+**预期**：
+
+1. `modal` 为 `true`，直接出现两问表单；`askCard` 为 `false`，没有走 AI 提问。
+2. 最新用户消息不是 `帮我新建一套配置。`——用户已明确选了来源，不再让 AI 重问一遍。
+3. 表单里不会预先改动用户已选的来源；走完能正常创建。
+
+**不合格时记录什么**：上述 JSON、来源卡与表单截图、创建结果。
 
 ---
 

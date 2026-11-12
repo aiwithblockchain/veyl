@@ -5,6 +5,7 @@ import App from "./App";
 import { getAgentBridge } from "./agent";
 import type { LlmProvider } from "./agent/bridge";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./agent/protocol";
+import { PANEL_VERSION } from "./ui/panelPreference";
 import type {
   AgentEvent,
   ConfigDetail,
@@ -238,5 +239,30 @@ describe("设置 → 添加节点", () => {
     fireEvent.click(screen.getByRole("button", { name: "关闭设置" }));
 
     await waitFor(() => expect(screen.getByText("2 个节点")).toBeTruthy());
+  }, 15_000);
+});
+
+describe("设置 → 新建配置", () => {
+  it("AI 已就绪时关掉设置页进 AI 对话，不发静态表单", async () => {
+    // 先收起右栏，才能证明是入口把它打开的。
+    localStorage.setItem("veyl.ui.panelOpen", "0");
+    localStorage.setItem("veyl.ui.panelVersion", PANEL_VERSION);
+    const { container } = render(<App />);
+    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await act(async () => {});
+    expect(container.querySelector(".assistant-slot")).toBeNull();
+
+    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "连接" }));
+    fireEvent.click(await screen.findByRole("button", { name: "新建一套配置" }));
+
+    await waitFor(() => expect(bridge.sendMessage).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull();
+    expect(container.querySelector(".assistant-slot")).toBeTruthy();
+    expect(container.querySelector(".modal.new-config")).toBeNull();
+
+    const call = (bridge.sendMessage as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[1]).toBe("帮我新建一套配置。");
+    expect((call[2] as { hidden?: boolean }).hidden).toBeFalsy();
   }, 15_000);
 });

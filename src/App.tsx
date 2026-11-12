@@ -72,6 +72,8 @@ const EVER_CONNECTED_KEY = "veyl.hasEverConnected";
 const PANEL_CLOSED_BY_USER_KEY = "veyl.ui.panelClosedByUser";
 const PANEL_AUTO_OPENED_KEY = "veyl.ui.panelAutoOpened";
 const ONBOARDING_SKIPPED_KEY = "veyl.onboarding.skipped";
+/** 新建配置走 AI 协助时的开场消息：必须是用户可见的一条。 */
+const NEW_CONFIG_AI_ASK = "帮我新建一套配置。";
 
 function readFlag(key: string): boolean {
   try {
@@ -198,6 +200,8 @@ export default function App() {
   const kickoffSessionCreatedRef = useRef(false);
   const zeroConfigAskedRef = useRef(false);
   const askedMessageCountRef = useRef(0);
+  // 新建配置的 AI 流程：记下开场消息发给哪个会话，防止连点再开一条。
+  const newConfigFlowRef = useRef<string | null>(null);
   const confirmConfigRef = useRef<HTMLDivElement>(null);
   useFocusTrap(Boolean(pendingConfigId), confirmConfigRef);
 
@@ -208,6 +212,15 @@ export default function App() {
       const oldest = settled.values().next().value;
       if (oldest) settled.delete(oldest);
     }
+  };
+
+  // 请求结束 / 失败 / 取消后流程才算完；失败时把人送回手动表单，AI 不可用也能建配置。
+  const endNewConfigFlow = (sessionId: string, fallbackToForm = true) => {
+    if (newConfigFlowRef.current !== sessionId) return;
+    newConfigFlowRef.current = null;
+    if (!fallbackToForm) return;
+    setAppNotice({ level: "error", text: "AI 没接上，先用表单建一套。" });
+    setNewConfigOpen(true);
   };
   // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
   const healthVersion = useRef(0);
@@ -470,6 +483,7 @@ export default function App() {
           requestSessionRef.current.delete(requestId);
           sendBusyRef.current.delete(sessionId);
           pendingStopRef.current.delete(sessionId);
+          endNewConfigFlow(sessionId, event.payload.result === "error");
         }
         setPendingQuestions((current) => {
           for (const item of current) {
@@ -867,6 +881,7 @@ export default function App() {
         requestSessionRef.current.delete(requestId);
         pendingStopRef.current.delete(sessionId);
         dispatch({ type: "request_cancelled_locally", sessionId, requestId });
+        endNewConfigFlow(sessionId, false);
       })
       .catch(() => {});
   };
@@ -934,6 +949,8 @@ export default function App() {
         sessionId,
         message: bridgeError.message || "这条没有发出去，再试一次。",
       });
+      // 新建配置的开场没送出去（Key 失效、断网）：回退到手动表单。
+      endNewConfigFlow(sessionId, true);
       return true;
     }
   };
@@ -1010,6 +1027,7 @@ export default function App() {
 
   const handleStop = () => {
     if (!session) return;
+    endNewConfigFlow(session.id, false);
     const requestId = session.activeRequestId;
     dispatch({ type: "cancel_request" });
     if (requestId) {
@@ -1242,6 +1260,36 @@ export default function App() {
     });
   };
 
+  // 新建配置走 AI 对话：关掉兜底表单 → 新会话 → 打开右栏 → 发一条用户可见的开场。
+  const startNewConfigAiFlow = () => {
+    setNewConfigOpen(false);
+    if (newConfigFlowRef.current) {
+      // 同一流程里再点入口：只把右栏亮出来并给焦点，不重复开会话和发消息。
+      kickoffStartedRef.current = true;
+      kickoffSessionCreatedRef.current = true;
+      panelOpenRef.current = true;
+      setPanelOpen(true);
+      setAiUnread(false);
+      setComposerFocusSignal((value) => value + 1);
+      return;
+    }
+    // 用户已经显式点名要 AI 配，零配置的自动 kickoff 不再另外发一条。
+    kickoffStartedRef.current = true;
+    kickoffSessionCreatedRef.current = true;
+    const fresh = createSession();
+    dispatch({ type: "add_session", session: fresh });
+    newConfigFlowRef.current = fresh.id;
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
+    setComposerFocusSignal((value) => value + 1);
+    void sendToSession(fresh.id, NEW_CONFIG_AI_ASK)
+      .then((ok) => {
+        if (!ok) endNewConfigFlow(fresh.id, true);
+      })
+      .catch(() => endNewConfigFlow(fresh.id, true));
+  };
+
   // 用户主动点「让 AI 帮我配」：打开右栏、给焦点；会话空闲时直接发一条可见的用户消息。
   const handleAskAiFromConsole = () => {
     // 用户已经显式点名要 AI 配，自动 kickoff 不再另外发一条。
@@ -1353,7 +1401,7 @@ export default function App() {
         loading={vpn.loading}
         error={vpn.error}
         onSelect={handleSelectConfig}
-        onNewConfig={() => setNewConfigOpen(true)}
+        onNewConfig={aiReady ? startNewConfigAiFlow : () => setNewConfigOpen(true)}
         onRetry={vpn.reload}
         onDelete={vpn.deleteConfig}
         onOpenSettings={() => openSettings()}
@@ -1388,7 +1436,8 @@ export default function App() {
         zeroConfigSettled={zeroConfigSettled}
         hasConfigs={vpn.configs.length > 0}
         onAskAi={handleAskAiFromConsole}
-        onNewConfig={() => setNewConfigOpen(true)}
+        onNewConfig={aiReady ? startNewConfigAiFlow : () => setNewConfigOpen(true)}
+        onUseSeedNodes={() => setNewConfigOpen(true)}
         onImportNodes={() => openSettings("network")}
         seedUpdate={Boolean(defaultProfile?.newVersionAvailable)}
         proxyPort={proxyPort}
@@ -1522,8 +1571,10 @@ export default function App() {
         connectMode={vpn.activeConfig?.connect_mode ?? null}
         configId={vpn.activeConfig?.config_id ?? null}
         onNewConfig={() => {
+          // 先关设置页，再走 AI 流程：后者会打开右栏，不能被设置页盖住。
           setSettingsOpen(false);
-          setNewConfigOpen(true);
+          if (aiReady) startNewConfigAiFlow();
+          else setNewConfigOpen(true);
         }}
         onClose={closeSettings}
         onNotice={setAppNotice}

@@ -47,6 +47,8 @@ interface Props {
   hasConfigs: boolean;
   onAskAi: () => void;
   onNewConfig: () => void;
+  /** 中间块「用 Veyl 免费节点」：用户已定来源，直接开手动表单，不再让 AI 问一遍。 */
+  onUseSeedNodes?: () => void;
   /** 「用我自己的节点」：去设置页导入节点文件。 */
   onImportNodes?: () => void;
   /** 种子包有新版本：决定 update_hint 是否有内容可渲染。 */
@@ -126,6 +128,7 @@ export function Console({
   hasConfigs,
   onAskAi,
   onNewConfig,
+  onUseSeedNodes,
   onImportNodes,
   seedUpdate = false,
   proxyPort = DEFAULT_PROXY_PORT,
@@ -625,7 +628,7 @@ export function Console({
 
           <MiddleArea
             blocks={blocks}
-            onUseSeedNodes={onNewConfig}
+            onUseSeedNodes={onUseSeedNodes ?? onNewConfig}
             onUseOwnNodes={onImportNodes}
             onReportProblem={aiReady ? onReportProblem : undefined}
             reportBusy={reportBusy}
