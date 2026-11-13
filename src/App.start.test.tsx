@@ -243,7 +243,7 @@ describe("切换配置只改 active", () => {
     const { secondSummary, activate } = setupTwoConfigs();
 
     render(<App />);
-    await screen.findByText("全部流量");
+    await screen.findByText("全部流量", { selector: ".config__name-text" });
     act(() => {
       (bridge as unknown as { emit(event: AgentEvent): void }).emit(
         stateEvent("idle", "running"),
@@ -255,7 +255,7 @@ describe("切换配置只改 active", () => {
       ),
     );
 
-    fireEvent.click(screen.getByText("家里"));
+    fireEvent.click(screen.getByText("家里", { selector: ".config__name-text" }));
 
     await waitFor(() =>
       expect(activate).toHaveBeenCalledWith(secondSummary.config_id),
@@ -278,7 +278,7 @@ describe("切换配置只改 active", () => {
     vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
 
     render(<App />);
-    await screen.findByText("全部流量");
+    await screen.findByText("全部流量", { selector: ".config__name-text" });
     act(() => {
       (bridge as unknown as { emit(event: AgentEvent): void }).emit(
         stateEvent("idle", "running"),
@@ -290,13 +290,13 @@ describe("切换配置只改 active", () => {
       ),
     );
 
-    fireEvent.click(screen.getByText("家里"));
+    fireEvent.click(screen.getByText("家里", { selector: ".config__name-text" }));
     await waitFor(() =>
       expect(screen.getByText("当前连接：全部流量")).toBeTruthy(),
     );
 
     const connect = screen.getByRole("button", {
-      name: "连接 VPN（会先断开 全部流量）",
+      name: "连接 VPN",
     });
     fireEvent.click(connect);
 
@@ -315,7 +315,7 @@ describe("切换配置只改 active", () => {
     vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
 
     render(<App />);
-    await screen.findByText("全部流量");
+    await screen.findByText("全部流量", { selector: ".config__name-text" });
     fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
     await waitFor(() => expect(bridge.runtimeStart).toHaveBeenCalledTimes(1));
     act(() => {
@@ -329,7 +329,7 @@ describe("切换配置只改 active", () => {
       ),
     );
 
-    fireEvent.click(screen.getByText("家里"));
+    fireEvent.click(screen.getByText("家里", { selector: ".config__name-text" }));
     await waitFor(() =>
       expect(activate).toHaveBeenCalledWith(secondSummary.config_id),
     );
@@ -337,7 +337,7 @@ describe("切换配置只改 active", () => {
       await screen.findByText("已切到「家里」，正在连接的是「全部流量」。"),
     ).toBeTruthy();
 
-    fireEvent.click(screen.getByText("公司"));
+    fireEvent.click(screen.getByText("公司", { selector: ".config__name-text" }));
     await waitFor(() =>
       expect(activate).toHaveBeenCalledWith(thirdSummary.config_id),
     );
@@ -359,7 +359,7 @@ describe("切换配置只改 active", () => {
     vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
 
     render(<App />);
-    await screen.findByText("全部流量");
+    await screen.findByText("全部流量", { selector: ".config__name-text" });
     fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
     await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
     act(() => {
@@ -373,14 +373,14 @@ describe("切换配置只改 active", () => {
       ),
     );
 
-    fireEvent.click(screen.getByText("家里"));
+    fireEvent.click(screen.getByText("家里", { selector: ".config__name-text" }));
     await waitFor(() =>
       expect(activate).toHaveBeenCalledWith(secondSummary.config_id),
     );
     expect(await screen.findByText("正在连接：全部流量")).toBeTruthy();
 
     fireEvent.click(
-      screen.getByRole("button", { name: "连接 VPN（会先断开 全部流量）" }),
+      screen.getByRole("button", { name: "连接 VPN" }),
     );
     await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
     expect(start.mock.calls[1][0]).toBe(secondSummary.config_id);
@@ -394,7 +394,7 @@ describe("切换配置只改 active", () => {
     const { activate } = setupTwoConfigs();
 
     render(<App />);
-    await screen.findByText("全部流量");
+    await screen.findByText("全部流量", { selector: ".config__name-text" });
     act(() => {
       (bridge as unknown as { emit(event: AgentEvent): void }).emit(
         stateEvent("idle", "running"),
@@ -406,12 +406,12 @@ describe("切换配置只改 active", () => {
       ),
     );
 
-    fireEvent.click(screen.getByText("家里"));
+    fireEvent.click(screen.getByText("家里", { selector: ".config__name-text" }));
     await waitFor(() =>
       expect(screen.getByText(/已切到「家里」/)).toBeTruthy(),
     );
 
-    fireEvent.click(screen.getByText("全部流量"));
+    fireEvent.click(screen.getByText("全部流量", { selector: ".config__name-text" }));
     await waitFor(() => expect(activate).toHaveBeenCalledTimes(2));
     await act(async () => {});
 
@@ -422,7 +422,7 @@ describe("切换配置只改 active", () => {
     const { secondSummary, activate } = setupTwoConfigs();
 
     render(<App />);
-    await screen.findByText("全部流量");
+    await screen.findByText("全部流量", { selector: ".config__name-text" });
     act(() => {
       (bridge as unknown as { emit(event: AgentEvent): void }).emit(
         stateEvent("idle", "running", null),
@@ -434,7 +434,7 @@ describe("切换配置只改 active", () => {
       ),
     );
 
-    fireEvent.click(screen.getByText("家里"));
+    fireEvent.click(screen.getByText("家里", { selector: ".config__name-text" }));
     await waitFor(() =>
       expect(activate).toHaveBeenCalledWith(secondSummary.config_id),
     );
@@ -448,9 +448,9 @@ describe("切换配置只改 active", () => {
     const { secondSummary, activate } = setupTwoConfigs();
 
     render(<App />);
-    await screen.findByText("全部流量");
+    await screen.findByText("全部流量", { selector: ".config__name-text" });
 
-    fireEvent.click(screen.getByText("家里"));
+    fireEvent.click(screen.getByText("家里", { selector: ".config__name-text" }));
 
     await waitFor(() =>
       expect(activate).toHaveBeenCalledWith(secondSummary.config_id),

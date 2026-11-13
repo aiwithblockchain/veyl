@@ -173,28 +173,28 @@ export function Console({
   const degraded = level === "degraded";
   const transitioning = level === "transition";
   const stopping = runtime.state === "stopping";
-  // 已连接但不是 active 那套：主按钮改成连当前 active，点它会先断开这一套。
   // 连接身份以运行时快照为准；快照还没带上时用 hook 里本地记下的那套。
   const runningConfigId = runtime.config_id ?? connectedConfigId ?? null;
+  // 已连接但不是 active 那套（或身份未知）：主按钮改成连当前 active，点了会先停旧连接。
+  const connectElsewhere = Boolean(
+    connected && configId && runningConfigId !== configId,
+  );
   const elsewhereName =
     connected && configId && runningConfigId && runningConfigId !== configId
       ? connectedConfigName?.trim() ||
         runtime.config_name?.trim() ||
         "另一套配置"
       : null;
-  // 连着但读不到属于哪套：也要能一键连当前 active，不能只剩「断开」。
-  const unknownConnection = connected && !runningConfigId;
   const startingLabel =
     transitioning && !stopping ? startingConfigName?.trim() || null : null;
   // 正在启动另一套：hero 的「正在连接」不是 active 这套，主按钮要能连过去。
-  const startingElsewhereName =
+  const startingElsewhere = Boolean(
     transitioning &&
-    !stopping &&
-    startingConfigId &&
-    configId &&
-    startingConfigId !== configId
-      ? startingLabel || "另一套配置"
-      : null;
+      !stopping &&
+      startingConfigId &&
+      configId &&
+      startingConfigId !== configId,
+  );
 
   const canConnect = Boolean(config && config.nodes.length > 0);
   const hasNodes = (config?.nodes.length ?? 0) > 0;
@@ -427,7 +427,7 @@ export function Console({
             disabled={!canConnect || helperPreparing}
             onClick={onStart}
           >
-            连接 VPN（会先断开 {elsewhereName}）
+            连接 VPN
           </button>
         ) : (
           <button type="button" className="btn btn--primary" onClick={onReconnect}>
@@ -447,28 +447,19 @@ export function Console({
             </span>
             <span className="timecode num">{clock}</span>
           </h1>
-          <p className="hero__caption">
-            {elsewhereName ? `当前连接：${elsewhereName}` : "本次连接"}
-          </p>
+          {elsewhereName ? (
+            <p className="hero__caption">当前连接：{elsewhereName}</p>
+          ) : null}
           {scopeSwitch}
         </div>
-        {elsewhereName ? (
+        {connectElsewhere ? (
           <button
             type="button"
             className="btn btn--primary"
             disabled={!canConnect || helperPreparing}
             onClick={onStart}
           >
-            连接 VPN（会先断开 {elsewhereName}）
-          </button>
-        ) : unknownConnection ? (
-          <button
-            type="button"
-            className="btn btn--primary"
-            disabled={!canConnect || helperPreparing}
-            onClick={onStart}
-          >
-            连接 VPN（会先断开当前连接）
+            连接 VPN
           </button>
         ) : (
           <button type="button" className="btn btn--outline" onClick={onStop}>
@@ -516,14 +507,14 @@ export function Console({
           {scopeSwitch}
         </div>
         {transitioning ? (
-          startingElsewhereName ? (
+          startingElsewhere ? (
             <button
               type="button"
               className="btn btn--primary"
               disabled={!canConnect || helperPreparing}
               onClick={onStart}
             >
-              连接 VPN（会先断开 {startingElsewhereName}）
+              连接 VPN
             </button>
           ) : (
             <button
@@ -767,6 +758,13 @@ export function Console({
               </div>
             ) : null}
             <footer className="node-card">
+              <p className="node-card__config">
+                <span className="node-card__label">配置</span>
+                <span className="node-card__sep" aria-hidden>·</span>
+                <span className="node-card__config-name" title={config.name}>
+                  {config.name}
+                </span>
+              </p>
               {config.nodes.length > 0 ? (
                 <span className="node-card__label">当前节点</span>
               ) : null}

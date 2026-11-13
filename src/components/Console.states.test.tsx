@@ -408,7 +408,7 @@ describe("状态矩阵", () => {
     const r = renderConsole({ runtime: makeRuntime({ state: "running" }) });
     fireEvent.click(r.container.querySelector(".node-card__select")!);
     expect(r.container.querySelector("#node-sheet")).not.toBeNull();
-    expect(r.text(".node-card__label")).toBe("当前节点");
+    expect(r.text(".node-card > .node-card__label")).toBe("当前节点");
     expect(r.text(".node-card__select")).toContain("东京 01");
     expect(r.text(".node-card__select")).toContain("2 个节点");
 
@@ -419,7 +419,7 @@ describe("状态矩阵", () => {
       await vi.advanceTimersByTimeAsync(400);
     });
     expect(r.container.querySelector("#node-sheet")).not.toBeNull();
-    expect(r.text(".node-card__label")).toBe("当前节点");
+    expect(r.text(".node-card > .node-card__label")).toBe("当前节点");
   });
 
   it("8 加载中：骨架出现，真实卡片不出现", () => {
@@ -470,7 +470,7 @@ describe("active 不是正在连接的那套", () => {
 
     expect(r.text(".state-line__label")).toContain("已连接");
     expect(r.text(".hero__caption")).toBe("当前连接：全部流量");
-    const button = r.getByRole("button", { name: "连接 VPN（会先断开 全部流量）" });
+    const button = r.getByRole("button", { name: "连接 VPN" });
     fireEvent.click(button);
     expect(onStart).toHaveBeenCalledTimes(1);
     expect(onStop).not.toHaveBeenCalled();
@@ -499,7 +499,7 @@ describe("active 不是正在连接的那套", () => {
 
     expect(r.text(".hero__caption")).toBe("正在连接：全部流量");
     fireEvent.click(
-      r.getByRole("button", { name: "连接 VPN（会先断开 全部流量）" }),
+      r.getByRole("button", { name: "连接 VPN" }),
     );
     expect(onStart).toHaveBeenCalledTimes(1);
   });
@@ -526,8 +526,57 @@ describe("active 不是正在连接的那套", () => {
     });
 
     fireEvent.click(
-      r.getByRole("button", { name: "连接 VPN（会先断开当前连接）" }),
+      r.getByRole("button", { name: "连接 VPN" }),
     );
     expect(onStart).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("底部节点卡的配置名", () => {
+  const activeName = "测试配置";
+
+  it("未连接：首行是「配置」+ active 名", () => {
+    const r = renderConsole({});
+    expect(r.text(".node-card__config .node-card__label")).toBe("配置");
+    expect(r.text(".node-card__config-name")).toBe(activeName);
+    expect(r.text(".node-card__config")).toBe(`配置·${activeName}`);
+    expect(
+      r.container.querySelector(".node-card__sep")?.getAttribute("aria-hidden"),
+    ).toBe("true");
+  });
+
+  it("已连接（active 就是连接那套）：首行仍是 active 名，hero 第二行留空", () => {
+    const r = renderConsole({ runtime: makeRuntime({ state: "running" }) });
+    expect(r.text(".node-card__config-name")).toBe(activeName);
+    expect(r.text(".hero__caption")).toBe("");
+    expect(r.container.textContent).not.toContain("本次连接");
+  });
+
+  it("已连接另一套：首行仍是 active 名，hero 第二行说连接的那套", () => {
+    const r = renderConsole({
+      runtime: makeRuntime({
+        state: "running",
+        config_id: "cfg-other",
+        config_name: "全部流量",
+      }),
+    });
+    expect(r.text(".node-card__config-name")).toBe(activeName);
+    expect(r.text(".hero__caption")).toBe("当前连接：全部流量");
+  });
+
+  it("没有节点时首行仍在，「还没有节点」在它下面", () => {
+    const r = renderConsole({
+      config: { ...makeConfig(null), nodes: [], node_count: 0 },
+    });
+    expect(r.text(".node-card__config-name")).toBe(activeName);
+    expect(r.container.textContent).toContain("还没有节点");
+  });
+
+  it("长名字单行省略，title 放全名", () => {
+    const long = "这是一个特别长特别长的配置名字用来验证省略号是否生效";
+    const r = renderConsole({ config: { ...makeConfig("n-tokyo"), name: long } });
+    const el = r.container.querySelector(".node-card__config-name")!;
+    expect(el.getAttribute("title")).toBe(long);
+    expect(el.textContent).toBe(long);
   });
 });
