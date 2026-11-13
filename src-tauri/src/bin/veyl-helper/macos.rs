@@ -220,6 +220,18 @@ const RUNTIME_IDENTIFIER: &str = "sing-box";
 /// 超过这个数只可能是读错对象（或有人塞了个大文件），没必要读进内存。
 const MAX_RUNTIME_BYTES: u64 = 256 * 1024 * 1024;
 
+/// staged 运行时的「已验证」封条文件名。
+///
+/// 复用前重算 166MB 的内容哈希要 50ms（asm）到 293ms（soft），每次连接都付一次
+/// 不值。封条存放在 `runtime/<digest>/`（0755 的 TRUST_ROOT 之下，该目录与
+/// `runtime/` 都是 root 0700），staged 文件与封条都由 root 拥有——**非 root 既
+/// 换不掉 staged 文件，也伪造不了封条**；而 root 级攻击者能做的事本来就等价于
+/// 替换 helper 本身，不在本层的防线内。
+///
+/// 所以复用只核对「结构可信（非软链、普通文件、uid 0、0755）+ 文件身份与封条一致」。
+/// 封条缺失、损坏、任何字段不符，都回退到全量哈希；哈希不符则删掉重建。
+const STAGED_SEAL: &str = ".seal";
+
 extern "C" fn on_signal(_signal: libc::c_int) {
     SHUTDOWN.store(true, Ordering::SeqCst);
 }
@@ -264,6 +276,28 @@ pub fn run() {
         let started = Instant::now();
         let outcome = staging.ensure_rules_staged();
         staging.record_rules(outcome, started.elapsed());
+    });
+
+    // 运行时解析（读 + 校验 166MB）也挪出连接必经路径：后台先预校验一次，
+    // `start` 命中缓存就不必付这一段。预热失败或没跑完时缓存为空，
+    // 连接路径仍会自己完整校验一遍——不会用到未验证的路径。
+    //
+    // 不用 `begin_request`：这段最长几百毫秒，而空闲退出要 10 分钟无请求、
+    // 无连接、无租约才会触发；预热本身不碰 child、不写连接状态，
+    // 即便恰好被空闲退出打断也只是线程随进程结束，没有需要收尾的东西。
+    let prewarming = Arc::clone(&supervisor);
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        match prewarming.resolve_runtime() {
+            Ok(_) => prewarming.note(&format!(
+                "运行时预热完成 耗时={}ms",
+                started.elapsed().as_millis()
+            )),
+            Err(error) => prewarming.note(&format!(
+                "运行时预热失败（连接时会重新校验）：{}",
+                error.message
+            )),
+        }
     });
 
     // SAFETY: 处理器只写一个原子变量。
@@ -694,6 +728,22 @@ struct Supervisor {
     last_request: Mutex<Instant>,
     /// 正在处理的请求数。空闲退出不能在处理中退出。
     in_flight: AtomicUsize,
+    /// 后台预热得到的、已完整校验过的运行时路径与它的内容哈希。
+    ///
+    /// 只由 `resolve_runtime` 在**校验成功后**写入；命中前还会做一次廉价身份复核
+    /// （见 `cached_runtime`），staged 被删或被换时缓存立即失效，不会一直返回
+    /// 一个用不了的路径。预热没跑完或失败时这里是 `None`，连接仍走完整校验。
+    prewarmed: Mutex<Option<Prewarmed>>,
+    /// 测试用：封条命中次数。seal 退化成一味回退时用例要能发现。
+    #[cfg(test)]
+    seal_hits: AtomicUsize,
+}
+
+/// 预热缓存：路径 + 内容哈希（目录名即内容哈希，见 `resolve_runtime_from`）。
+#[derive(Clone)]
+struct Prewarmed {
+    path: PathBuf,
+    digest: String,
 }
 
 impl Supervisor {
@@ -715,6 +765,9 @@ impl Supervisor {
             dns_checked_at: Mutex::new(None),
             last_request: Mutex::new(Instant::now()),
             in_flight: AtomicUsize::new(0),
+            prewarmed: Mutex::new(None),
+            #[cfg(test)]
+            seal_hits: AtomicUsize::new(0),
         }
     }
 
@@ -1607,20 +1660,77 @@ impl Supervisor {
         Ok(())
     }
 
-    /// 运行时只来自 helper 自己的 bundle，落到 root 目录，
-    /// **每次 start 都重新校验**：普通文件、非软链、uid 0、0755、完整 256 位哈希。
+    /// 运行时只来自 helper 自己的 bundle，落到 root 目录。
+    ///
+    /// **每次真正解析都重新校验**：普通文件、非软链、uid 0、0755，内容必须是
+    /// 包内文件当前字节的哈希；复用已有副本时用 root 属主的封条（`STAGED_SEAL`）
+    /// 代替重算内容哈希。进程内解析成功后缓存，后续 start 直接用（预热走的就是
+    /// 同一条校验路径）；预热失败或没跑完时这里仍会完整校验一遍。
     ///
     /// 哈希以**包内文件当前的内容**为准，不用 `build.rs` 的构建期值：
     /// 打包签名会重签这个 Mach-O，字节随签名改变，构建期哈希只对未签名的产物成立。
     /// 目录名与内容哈希绑定，所以「staged 文件被换掉」和「目录名对不上内容」
     /// 都会在启动前被发现。
     fn resolve_runtime(&self) -> Result<PathBuf, ProtocolError> {
-        self.resolve_runtime_from(
+        // 预热已经完整校验过一次；命中前再做一次廉价身份复核（见 `cached_runtime`），
+        // 连接时不必再等一遍 166MB 的读取与哈希。
+        if let Some(path) = self.cached_runtime(0) {
+            return Ok(path);
+        }
+        let path = self.resolve_runtime_from(
             bundled_runtime(),
             ensure_bundle_trusted,
             verify_staged_signature,
             0,
-        )
+        )?;
+        if let Some(digest) = staged_digest(&path) {
+            *self.prewarmed.lock().unwrap() = Some(Prewarmed {
+                path: path.clone(),
+                digest: digest.to_string(),
+            });
+        }
+        Ok(path)
+    }
+
+    /// 预热缓存命中前的廉价复核。
+    ///
+    /// staged 可能在预热之后被删或被换（磁盘清理、有人手动动过 root 目录）：
+    /// 不查就一直返回一个用不了的路径，用户只能重启组件才能恢复。这里复用封条
+    /// 那条零重算的校验（`stat` + 结构 + 身份），失败就清缓存、走完整校验。
+    fn cached_runtime(&self, expect_uid: u32) -> Option<PathBuf> {
+        let cached = self.prewarmed.lock().unwrap().clone()?;
+        if verify_staged_runtime_seal(&cached.path, &cached.digest, expect_uid).is_ok() {
+            return Some(cached.path);
+        }
+        self.note(&format!(
+            "[warn] 预热缓存失效（staged 可能被删或被换），重新校验：{}",
+            cached.path.display()
+        ));
+        *self.prewarmed.lock().unwrap() = None;
+        None
+    }
+
+    #[cfg(test)]
+    fn force_prewarmed_for_test(&self, path: PathBuf, digest: &str) {
+        *self.prewarmed.lock().unwrap() = Some(Prewarmed {
+            path,
+            digest: digest.to_string(),
+        });
+    }
+
+    #[cfg(test)]
+    fn seal_hits_for_test(&self) -> usize {
+        self.seal_hits.load(Ordering::SeqCst)
+    }
+
+    /// 给刚校验通过的 staged 副本写封条。失败只记一条日志：
+    /// 下次连接会重新全量校验，正确性不受影响。
+    fn seal_staged(&self, dir: &Path, dest: &Path, digest: &str) {
+        if let Err(error) = write_staged_seal(dir, dest, digest) {
+            self.note(&format!(
+                "[warn] 写入运行时封条失败（下次连接会重新全量校验）：{error}"
+            ));
+        }
     }
 
     /// `resolve_runtime` 的可注入版本：验签闭包与期望 uid 由调用方给，
@@ -1689,6 +1799,22 @@ impl Supervisor {
         let dest = dir.join("sing-box");
 
         if dest.exists() {
+            // 封条命中：只做结构与身份核对，不再重算内容哈希（见 `STAGED_SEAL`）。
+            let phase = Instant::now();
+            let sealed = verify_staged_runtime_seal(&dest, &digest, expect_uid).is_ok();
+            self.note(&format!(
+                "[runtime] seal_verify={}ms sealed={sealed}",
+                phase.elapsed().as_millis()
+            ));
+            #[cfg(test)]
+            if sealed {
+                self.seal_hits.fetch_add(1, Ordering::SeqCst);
+            }
+            if sealed {
+                return Ok(dest);
+            }
+            // 封条缺失或不符（老版本留下的、或文件被动过）：先按老办法全量复核。
+            // 内容对得上就补写封条并复用，省掉一次重建；对不上才删掉重建。
             let phase = Instant::now();
             let reused = verify_staged_runtime_file(&dest, &digest, expect_uid).is_ok();
             self.note(&format!(
@@ -1696,6 +1822,7 @@ impl Supervisor {
                 phase.elapsed().as_millis()
             ));
             if reused {
+                self.seal_staged(&dir, &dest, &digest);
                 return Ok(dest);
             }
             // 磁盘上的副本坏了（上次写到一半、或被人动过）：删掉，用刚读到的
@@ -1733,6 +1860,9 @@ impl Supervisor {
             "[runtime] staged_verify={}ms",
             phase.elapsed().as_millis()
         ));
+        // 记下这份副本的身份：下次连接只比封条，不再重算 166MB。
+        // 写不进去也不影响正确性——下次会重新全量校验。
+        self.seal_staged(&dir, &dest, &digest);
 
         // 清理旧运行时**不在这里做**：此刻旧的 sing-box 可能还在跑。
         // 提前删目录会让它在 helper 崩溃重启后 `proc_pidpath` 认不出来，
@@ -1745,6 +1875,12 @@ impl Supervisor {
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex(Sha256::digest(bytes).as_slice())
+}
+
+/// staged 路径的目录名就是内容哈希（`runtime/<digest>/sing-box`）。
+fn staged_digest(path: &Path) -> Option<&str> {
+    let name = path.parent()?.file_name()?.to_str()?;
+    trust::is_full_sha256(name).then_some(name)
 }
 
 /// 日志里只留前 12 位，够对照、又不至于刷屏。
@@ -1799,6 +1935,95 @@ fn verify_staged_runtime_file(
             format!("运行时校验未通过：{error}"),
         )
     })
+}
+
+/// staged 副本的「已验证」记录：内容哈希 + 文件身份。
+///
+/// 只用于**免去重算**，不参与信任判断——信任来自 bundle 签名、root 目录与
+/// 上一层的内容哈希；封条本身就是这套校验的缓存，篡改它只会导致重算。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StagedSeal {
+    digest: String,
+    size: u64,
+    dev: u64,
+    ino: u64,
+    /// 纳秒精度：同一 inode 被原地改写时，size 与 mtime 至少变一个。
+    mtime_ns: i128,
+}
+
+fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64, u64, i128) {
+    use std::os::unix::fs::MetadataExt;
+    (
+        metadata.len(),
+        metadata.dev(),
+        metadata.ino(),
+        metadata.mtime() as i128 * 1_000_000_000 + metadata.mtime_nsec() as i128,
+    )
+}
+
+fn write_staged_seal(dir: &Path, dest: &Path, digest: &str) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(dest)?;
+    let (size, dev, ino, mtime_ns) = file_identity(&metadata);
+    let seal = StagedSeal {
+        digest: digest.to_string(),
+        size,
+        dev,
+        ino,
+        mtime_ns,
+    };
+    let bytes = serde_json::to_vec(&seal)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let seal_path = dir.join(STAGED_SEAL);
+    // temp + rename：并发或半写都不会留下半个封条；rename 换掉的是 inode，
+    // 旧封条就算被改成软链、或权限被改过，也随之消失。
+    let temp = dir.join(format!(".seal.tmp.{:016x}", rand::random::<u64>()));
+    if let Err(error) = write_private(&temp, &bytes) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temp, &seal_path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// 复用前的廉价复核：结构（非软链、普通文件、uid、0755）沿用 `verify_file`，
+/// 内容用封条里的「digest + 文件身份」代替重算。
+///
+/// 封条缺失、损坏、权限不对、或 size/dev/ino/mtime 与当前文件不符，一律返回 Err；
+/// 调用方会回退到全量哈希，哈希不符再重建——不存在「跳过校验直接用」的路径。
+fn verify_staged_runtime_seal(
+    dest: &Path,
+    digest: &str,
+    expect_uid: u32,
+) -> Result<(), ProtocolError> {
+    let reject = |detail: String| ProtocolError::new(protocol::ERR_RUNTIME_MISSING, detail);
+
+    trust::verify_file(dest, expect_uid, 0o755, None)
+        .map_err(|error| reject(format!("运行时校验未通过：{error}")))?;
+    let dir = dest
+        .parent()
+        .ok_or_else(|| reject("运行时路径没有父目录".into()))?;
+    let seal_path = dir.join(STAGED_SEAL);
+    trust::verify_file(&seal_path, expect_uid, 0o600, None)
+        .map_err(|error| reject(format!("运行时封条不可信：{error}")))?;
+    let bytes = std::fs::read(&seal_path)
+        .map_err(|error| reject(format!("读取运行时封条失败：{error}")))?;
+    let seal: StagedSeal = serde_json::from_slice(&bytes)
+        .map_err(|error| reject(format!("运行时封条损坏：{error}")))?;
+    let metadata = std::fs::symlink_metadata(dest)
+        .map_err(|error| reject(format!("读取运行时信息失败：{error}")))?;
+    let (size, dev, ino, mtime_ns) = file_identity(&metadata);
+    if seal.digest != digest
+        || seal.size != size
+        || seal.dev != dev
+        || seal.ino != ino
+        || seal.mtime_ns != mtime_ns
+    {
+        return Err(reject("运行时与封条不一致".into()));
+    }
+    Ok(())
 }
 
 fn set_mode(path: &Path, mode: u32) -> Result<(), ProtocolError> {
@@ -3453,6 +3678,166 @@ mod tests {
             bytes,
             "必须用包内字节重建，不能沿用被替换的副本"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 封条命中：第二次解析直接复用，不重建、不改封条。
+    #[test]
+    fn a_sealed_runtime_is_reused_without_a_rebuild() {
+        let root = temp("seal-hit");
+        let bundled = root.join("bundle-sing-box");
+        let bytes = b"sealed runtime";
+        std::fs::write(&bundled, bytes).unwrap();
+        let supervisor = Supervisor::new(root.clone());
+
+        let dest = stage(&supervisor, bundled.clone()).unwrap();
+        let seal_path = dest.parent().unwrap().join(STAGED_SEAL);
+        assert!(seal_path.exists(), "staging 完成后必须留下封条");
+        let seal_before = std::fs::read(&seal_path).unwrap();
+
+        let hits_before = supervisor.seal_hits_for_test();
+        let again = stage(&supervisor, bundled).unwrap();
+        assert_eq!(again, dest);
+        assert_eq!(std::fs::read(&again).unwrap(), bytes);
+        assert!(
+            supervisor.seal_hits_for_test() > hits_before,
+            "复用必须走封条命中；这里退化成每次全量哈希时性能目标会悄悄丢掉"
+        );
+        assert_eq!(
+            std::fs::read(&seal_path).unwrap(),
+            seal_before,
+            "复用路径不该重写封条（命中就直接返回）"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 预热缓存命中前要复核 staged：文件被删掉后不能继续放行，
+    /// 否则用户会一直连不上、只能重启组件。
+    #[test]
+    fn the_prewarmed_runtime_is_dropped_when_the_staged_file_disappears() {
+        let root = temp("prewarm-gone");
+        let bundled = root.join("bundle-sing-box");
+        let bytes = b"prewarmed runtime";
+        std::fs::write(&bundled, bytes).unwrap();
+        let supervisor = Supervisor::new(root.clone());
+
+        let dest = stage(&supervisor, bundled).unwrap();
+        supervisor.force_prewarmed_for_test(dest.clone(), &sha256_hex(bytes));
+        assert_eq!(
+            supervisor.cached_runtime(current_uid()).as_deref(),
+            Some(dest.as_path()),
+            "文件没动时缓存应命中"
+        );
+
+        std::fs::remove_file(&dest).unwrap();
+        assert!(
+            supervisor.cached_runtime(current_uid()).is_none(),
+            "staged 被删后不能再用缓存"
+        );
+        assert!(
+            supervisor.cached_runtime(current_uid()).is_none(),
+            "失效的缓存要被清掉，而不是每次再试一遍"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// staged 被换成另一份内容：缓存同样要失效（身份不符）。
+    #[test]
+    fn the_prewarmed_runtime_is_dropped_when_the_staged_file_is_replaced() {
+        let root = temp("prewarm-swapped");
+        let bundled = root.join("bundle-sing-box");
+        let bytes = b"prewarmed runtime";
+        std::fs::write(&bundled, bytes).unwrap();
+        let supervisor = Supervisor::new(root.clone());
+
+        let dest = stage(&supervisor, bundled).unwrap();
+        supervisor.force_prewarmed_for_test(dest.clone(), &sha256_hex(bytes));
+        std::fs::write(&dest, b"swapped runtime").unwrap();
+
+        assert!(
+            supervisor.cached_runtime(current_uid()).is_none(),
+            "内容被换掉后不能再放行缓存路径"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// asm 与 build.rs 共用 `sha256_hex`：实现错了会两边一致地错，
+    /// 整条链都发现不了，所以这里钉已知答案。
+    #[test]
+    fn sha256_matches_the_known_answer_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // 1M 个 'a'：跨多个块，硬件实现的分块拼接错了这条会红。
+        assert_eq!(
+            sha256_hex(&vec![b'a'; 1_000_000]),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    /// 封条损坏或与内容对不上：回退全量哈希；内容一致就补写封条继续复用。
+    #[test]
+    fn a_stale_seal_falls_back_to_a_full_hash() {
+        let root = temp("seal-stale");
+        let bundled = root.join("bundle-sing-box");
+        let bytes = b"sealed runtime";
+        std::fs::write(&bundled, bytes).unwrap();
+        let supervisor = Supervisor::new(root.clone());
+
+        let dest = stage(&supervisor, bundled.clone()).unwrap();
+        let seal_path = dest.parent().unwrap().join(STAGED_SEAL);
+        std::fs::write(&seal_path, b"{\"digest\":\"deadbeef\"}").unwrap();
+
+        let again = stage(&supervisor, bundled).unwrap();
+        assert_eq!(again, dest, "内容没变：复核通过后应继续复用，而不是重建");
+        let seal: StagedSeal = serde_json::from_slice(&std::fs::read(&seal_path).unwrap()).unwrap();
+        assert_eq!(seal.digest, sha256_hex(bytes), "复核通过后要补写正确的封条");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 封条缺失（老版本留下的 staged 目录）：全量复核通过后补写封条。
+    #[test]
+    fn a_missing_seal_falls_back_to_a_full_hash_and_is_rewritten() {
+        let root = temp("seal-missing");
+        let bundled = root.join("bundle-sing-box");
+        let bytes = b"sealed runtime";
+        std::fs::write(&bundled, bytes).unwrap();
+        let supervisor = Supervisor::new(root.clone());
+
+        let dest = stage(&supervisor, bundled.clone()).unwrap();
+        let seal_path = dest.parent().unwrap().join(STAGED_SEAL);
+        std::fs::remove_file(&seal_path).unwrap();
+
+        let again = stage(&supervisor, bundled).unwrap();
+        assert_eq!(again, dest);
+        assert!(seal_path.exists(), "复核通过后必须补写封条");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 封条权限不对（被人改过）：不采信封条，回退全量哈希。
+    #[test]
+    fn a_seal_with_wrong_permissions_is_not_trusted() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp("seal-mode");
+        let bundled = root.join("bundle-sing-box");
+        std::fs::write(&bundled, b"sealed runtime").unwrap();
+        let supervisor = Supervisor::new(root.clone());
+
+        let dest = stage(&supervisor, bundled.clone()).unwrap();
+        let seal_path = dest.parent().unwrap().join(STAGED_SEAL);
+        std::fs::set_permissions(&seal_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let again = stage(&supervisor, bundled).unwrap();
+        assert_eq!(again, dest);
+        // 复核通过后按 0600 重写。
+        let mode = std::fs::metadata(&seal_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
         let _ = std::fs::remove_dir_all(&root);
     }
 

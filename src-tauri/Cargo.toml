@@ -42,6 +42,9 @@ path = "src/bin/veyl-service/main.rs"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 sha2 = "0.10"
+# macOS 构建额外开 asm（见下方 target 段）：build.rs 也要哈希 166MB 运行时。
+[target.'cfg(target_os = "macos")'.build-dependencies]
+sha2 = { version = "0.10", features = ["asm"] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
@@ -97,6 +100,11 @@ libc = "0.2"
 # TUN 提权：SMAppService 只在 macOS 13+ 存在，按需引入。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
+# sha256 走硬件指令：aarch64 默认只有纯 Rust 实现（实测 166MB 慢 6 倍）；
+# x86_64 默认已有 SHA-NI 派发。`asm` 依赖 sha2-asm（GAS 汇编，需要 cc），
+# 所以在 Windows MSVC 上**不启用**——那边默认实现本来就够快，
+# 而 sha2-asm 的 `.S` 在 MSVC 工具链下不可用。
+sha2 = { version = "0.10", features = ["asm"] }
 block2 = { version = "0.6", default-features = false }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
@@ -138,3 +146,9 @@ windows-sys = { version = "0.59", features = [
 # agent 的 run_query_loop 用 catch_unwind 隔离 panic，abort 会让整个应用退出。
 [profile.release]
 panic = "unwind"
+
+# 只给 sha2 开优化，不全局改 dev：helper 在 `tun-dev.sh` 里是 debug 构建，
+# 而 166MB 运行时的哈希在未优化时是 5.8s（优化后 0.29s，开 asm 后 0.05s）。
+# 这会把每次 TUN 启动的等待从十几秒压到零点几秒，又不牺牲其余代码的可调试性。
+[profile.dev.package.sha2]
+opt-level = 3
