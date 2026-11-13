@@ -454,7 +454,9 @@ type RuntimeStartData = RuntimeSnapshot & {
 };
 ```
 
-错误：`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `other_config_running` / `tun_helper_missing`）、`NOT_FOUND`、`RUNTIME_BUSY`、`RUNTIME_NOT_INSTALLED`、`RUNTIME_START_TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`。
+错误：`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `other_config_running` / `tun_denied` / `helper_missing`）、`NOT_FOUND`、`RUNTIME_BUSY`、`RUNTIME_NOT_INSTALLED`、`RUNTIME_START_TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`。
+
+`tun` 连接换新后台组件失败时，`PRECONDITION_FAILED` 的 `details.reason` 取值见 `commands.md` §7.1：`tun_denied` / `helper_admin_cancelled` / `helper_start_failed` / `helper_missing` / `dev_unbundled` / `helper_busy` / `helper_lease_unavailable` / `helper_file_invalid`。模型只按 `message` 转述，不暴露 code；`dev_unbundled` 表示当前是未打包的调试进程，需要引导用户用 `bash scripts/dev/tun-dev.sh` 启动打包后的 App；`helper_admin_cancelled` 是用户取消了授权，可以让用户再试一次，不要说成「去系统设置允许」。2026-11-13 补记，字段不变，不升版本。
 
 ---
 
@@ -763,7 +765,7 @@ type TunConnectData = {
 
 1. 确保运行时可用；不可用 → `RUNTIME_NOT_INSTALLED`（**不自动安装、不自动下载**；`next_actions` 提示用户到设置页检查运行时版本）。
 2. 解析配置与节点。
-3. 生成配置 → `sing-box check`；`connection_mode = "tun"` 时先确认特权助手可用，否则 `PRECONDITION_FAILED / tun_helper_missing`。
+3. 生成配置 → `sing-box check`；`connection_mode = "tun"` 时先确认特权助手可用，否则 `PRECONDITION_FAILED`，`details.reason` 为 `tun_denied`（未批准 / 用户拒绝）或 `helper_missing`（未安装 / 安装失败 / 平台不支持，完整取值见 `commands.md` §7.1）。
 4. 启动或热更新。
 5. 设置系统代理（`system_proxy` 模式；无确认点，直接执行）。
 6. 异步探测出口 IP（**不阻塞返回**；未测到时 `exit_ip` 为 `null`，后台测到后经健康事件推给 UI）。
@@ -2029,6 +2031,7 @@ type CoreUpgradeData = {
 | 2 | §4.24 错误原因新增 `PRECONDITION_FAILED / explanation_pending`：本请求收到过解释串、用户尚未选择，禁止建配置；模型应把原问题重问，不得重试绕过 | 约束 | 评审：解释入口需要 Host 兜底 |
 | 3 | §4.22 解释行明确只挂在设置类卡片，确认卡（`创建` / `取消`）不显示 | 说明 | 同一评审：确认卡没有设置可解释 |
 | 4 | **本批新增**：§4.27 `NodeSwitch` 与 §4.37 `RouteSetMode` 新增 `PRECONDITION_FAILED / config_unknown`——连接在跑但读不到它属于哪套配置（重启后接手 TUN），与 `config_not_running`（身份已知）区分；`connected_config_id` 在 `will_disconnect` 上可为 null 的说明只属于 `config_activate`（`commands.md` §4.2），这两条工具的错误载荷没有该字段 | 错误细分 | 本批新增 reason（仅错误细分、不改协议字段、不升版本） |
+| 5 | **文档更正**：删掉幽灵 reason `tun_helper_missing`（实现从不产出）；`RuntimeStart` 的助手不可用改用实际取值 `tun_denied` / `helper_missing`（`commands.md` §7.1 的完整取值表） | 文档更正 | 按实现对齐；协议不变、不升版本 |
 
 ### 3.10.0（2026-11-12，新增 `SetUserRegion` 地区写入）
 

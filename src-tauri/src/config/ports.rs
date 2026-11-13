@@ -187,9 +187,26 @@ mod tests {
     fn availability_distinguishes_occupied_from_free() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let taken = listener.local_addr().unwrap().port();
-        assert_eq!(port_availability(taken), PortAvailability::Occupied);
-        let free = any_free_port().unwrap();
-        assert_eq!(port_availability(free), PortAvailability::Free);
+        assert_eq!(
+            port_availability(taken),
+            PortAvailability::Occupied,
+            "端口 {taken} 正被本测试监听，应判为 Occupied"
+        );
+        drop(listener);
+
+        // `any_free_port()` 返回前已经释放监听，别的进程可能在这两步之间抢走它。
+        // 不断言单次结果，最多重试 3 次：每次都重新取一个端口再判。
+        let mut last = None;
+        for _ in 0..3 {
+            let free = any_free_port().unwrap();
+            let availability = port_availability(free);
+            if availability == PortAvailability::Free {
+                return;
+            }
+            last = Some((free, availability));
+        }
+        let (port, availability) = last.expect("至少试过一次");
+        panic!("端口 {port} 取到后立即被判为 {availability:?}，连续 3 次都不是 Free");
     }
 
     #[test]

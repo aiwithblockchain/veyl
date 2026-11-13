@@ -7,6 +7,7 @@ import type {
   ChatHistory,
   ConfigActivateResult,
   ConfigCreateInput,
+  ConfigUpdateInput,
   ConfigDeleteData,
   ConfigListData,
   CoreCheckUpdatesResult,
@@ -585,6 +586,14 @@ export class TauriAgentBridge implements AgentBridge {
   async configCreate(input: ConfigCreateInput): Promise<ConfigDetail> {
     return normalizeConfigDetail(
       await call<ConfigDetail & { layout_revision?: unknown }>("config_create", {
+        ...input,
+      } as unknown as Record<string, unknown>),
+    );
+  }
+
+  async configUpdate(input: ConfigUpdateInput): Promise<ConfigDetail> {
+    return normalizeConfigDetail(
+      await call<ConfigDetail & { layout_revision?: unknown }>("config_update", {
         ...input,
       } as unknown as Record<string, unknown>),
     );

@@ -11,7 +11,7 @@ import type {
   RuntimeState,
 } from "../agent/protocol";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "../agent/protocol";
-import { useVpnSession } from "./useVpnSession";
+import { isHelperPermissionReason, useVpnSession } from "./useVpnSession";
 import type { ActionResult } from "./useVpnSession";
 
 afterEach(() => {
@@ -272,8 +272,8 @@ describe("连接前告知后台组件授权", () => {
       runtimeStart: async () => {
         throw {
           code: "PRECONDITION_FAILED",
-          message: "后台组件未能换新，需要管理员重新授权。代理模式与直连仍可用。",
-          details: { reason: "helper_needs_admin" },
+          message: "需要你在「系统设置 › 登录项与扩展」里允许 Veyl 的后台助手",
+          details: { reason: "tun_denied" },
         };
       },
     });
@@ -285,18 +285,70 @@ describe("连接前告知后台组件授权", () => {
       result_ = await result.current.start();
     });
 
-    expect(result_).toEqual({ ok: false, reason: "helper_needs_admin" });
+    expect(result_).toEqual({ ok: false, reason: "tun_denied" });
     expect(result.current.preparingHelper).toBe(false);
     expect(result.current.connection).toBe("idle");
   });
 
-  it("后台组件不可用时同样把原因交给界面", async () => {
+  it("取消管理员授权只给普通重试提示，不弹去系统设置的引导", async () => {
+    const bridge = makeStartBridge("tun", {
+      runtimeStart: async () => {
+        throw {
+          code: "PRECONDITION_FAILED",
+          message: "需要管理员授权",
+          details: { reason: "helper_admin_cancelled" },
+        };
+      },
+    });
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let result_: ActionResult | undefined;
+    await act(async () => {
+      result_ = await result.current.start();
+    });
+
+    expect(result_).toEqual({
+      ok: false,
+      message: "这次没有授权，可以再试一次。",
+      reason: "helper_admin_cancelled",
+    });
+    expect(isHelperPermissionReason("helper_admin_cancelled")).toBe(false);
+  });
+
+  it("用户取消授权只给普通重试提示，不弹去系统设置的引导", async () => {
+    const bridge = makeStartBridge("tun", {
+      runtimeStart: async () => {
+        throw {
+          code: "USER_CANCELLED",
+          message: "已取消",
+          details: { reason: "user_cancelled" },
+        };
+      },
+    });
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let result_: ActionResult | undefined;
+    await act(async () => {
+      result_ = await result.current.start();
+    });
+
+    expect(result_).toEqual({
+      ok: false,
+      message: "这次没有授权，可以再试一次。",
+      reason: "user_cancelled",
+    });
+    expect(isHelperPermissionReason("user_cancelled")).toBe(false);
+  });
+
+  it("组件缺失不算权限问题：原因照旧带回，但不弹引导", async () => {
     const bridge = makeStartBridge("tun", {
       runtimeStart: async () => {
         throw {
           code: "PRECONDITION_FAILED",
           message: "安装后台助手失败",
-          details: { reason: "helper_unavailable" },
+          details: { reason: "helper_missing" },
         };
       },
     });
@@ -308,7 +360,15 @@ describe("连接前告知后台组件授权", () => {
       result_ = await result.current.start();
     });
 
-    expect(result_).toEqual({ ok: false, reason: "helper_unavailable" });
+    // 后端给的原因和文案都要原样到界面：它决定用户该做什么，不能被换成「去点允许」。
+    expect(result_).toEqual({
+      ok: false,
+      message: "安装后台助手失败",
+      reason: "helper_missing",
+    });
+    expect(isHelperPermissionReason("helper_missing")).toBe(false);
+    expect(isHelperPermissionReason("dev_unbundled")).toBe(false);
+    expect(isHelperPermissionReason("tun_denied")).toBe(true);
   });
 
   it("文件校验失败仍然只报文案，不弹引导", async () => {

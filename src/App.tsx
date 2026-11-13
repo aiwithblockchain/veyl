@@ -1404,6 +1404,7 @@ export default function App() {
         onNewConfig={aiReady ? startNewConfigAiFlow : () => setNewConfigOpen(true)}
         onRetry={vpn.reload}
         onDelete={vpn.deleteConfig}
+        onRename={vpn.renameConfig}
         onOpenSettings={() => openSettings()}
         compact={shell.mode === "drawer"}
       />

@@ -754,7 +754,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs where rout
 
 1. 第一套名称是 `配置 1`，第二套是 `配置 2`（中间有删除时取下一个空号）。
 2. 名称是只读文本：`dd` 里没有 `input` / `textarea` / `select` / `contenteditable`；不能聚焦编辑。
-3. 名称只出现在审视页与左栏，没有额外的改名入口。
+3. 名称只出现在审视页与左栏；**创建流程里没有改名入口**（改名在建立后由左栏双击提供，见 E6-32）。
 
 **不合格时记录什么**：两次名称与截图、可编辑控件计数。
 
@@ -3159,7 +3159,7 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 
 **前置**：M1；1440×900；左栏为默认宽度；至少一套配置。
 
-> 名称现在由界面自动生成（`配置 N`）且只读，创建流程里没有名称输入框；长名只可能来自旧数据。本条核对左栏的单行渲染规则，并确认建配置时没有再开一个改名入口。
+> 名称由界面自动生成（`配置 N`），**创建流程里没有名称输入框**；建立后在左栏双击改名（E6-32）。本条核对左栏的单行渲染规则，并确认建配置时没有再开一个改名入口。
 
 **步骤**：
 
@@ -3213,7 +3213,7 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 1. 左栏名称只有一行：`whiteSpace` 为 `"nowrap"`，`textOverflow` 为 `"ellipsis"`，`overflow` 为 `"hidden"`；`nameHeight` 约 19.5–20，与 `lineHeight` 一致。
 2. `rowHeight` 为 64（±1），与 E6-15 的骨架行同高；`titleEqualsText` 为 `true`（`title` 是完整名字）。
 3. `gapToDelete ≥ 0`、`deleteInsideRow` 为 `true`：删除按钮完整落在行内，没有被文字覆盖。
-4. 审视页名称是自动名（`配置 N`，与 E1-23 的只读断言一致）；`inputs` 为 **0**，`focusableName` 为 `false`——名称没有输入框、不可聚焦编辑。
+4. 审视页名称是自动名（`配置 N`，与 E1-23 的只读断言一致）；`inputs` 为 **0**，`focusableName` 为 `false`——创建流程里名称没有输入框、不可聚焦编辑。改名入口在建立后的左栏（E6-32）。
 5. `truncated` 在当前自动名下通常为 `false`（名字短）；它只用于旧数据的长名，`false` 不算失败。
 
 **不合格时记录什么**：
@@ -3589,6 +3589,48 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 - `grep -E '健康|data_plane|探测|degraded' "$APP_LOG" | tail -20`。
 
 **做不到时**：无法制造真实数据面失败（探测目标不可达、或只有代理模式没有 TUN）就记「阻塞」，写明尝试过的构造与现象，不判产品不通过。本条标为可选，其余六条必做。
+
+### E6-32 左栏双击改名：保存 / 取消 / 空值 / 失败 / 组合态 / 已连接
+
+**前置**：M2 原生应用；至少两套配置（第二套叫 `配置 2`）；未连接（步骤 5 再连）。
+
+**步骤**：
+
+1. **保存**：双击左栏第一行的名称，输入 `家里`，按 Enter。读：
+
+```js
+(() => {
+  const rows = [...document.querySelectorAll(".configs__row")];
+  return rows.map((r) => ({
+    name: r.querySelector(".config__name")?.textContent.trim() ?? null,
+    editing: Boolean(r.querySelector(".config__name input, .config__name textarea")),
+  }));
+})()
+```
+
+2. **取消**：双击刚改名的行，把文字改成 `临时`，按 Esc，再读上面同一段 JS。
+3. **空值 / 未改动**：双击后删光文字按 Enter；再双击后不输入直接按 Enter。各读一次，并在每步前后查：
+
+```bash
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, updated_at from configs order by created_at;"
+```
+
+4. **失败回滚**：双击改名，输入与另一套完全相同的名字（如 `配置 2`）按 Enter。
+5. **已连接时改名**：连接其中一套，等「已连接」出现，双击另一行改成 `公司` 按 Enter；观察连接状态与计时器。
+6. **组合态回车**：双击一行，用中文输入法输入 `出`，在候选词未确认时按 Enter；确认后再按 Enter。
+7. **跨行切换**：双击第一行改成 `书房`，不按 Enter，直接双击第二行的名称进入编辑；查 `configs` 与 `tool_calls` 里 `config_update` 的次数。
+
+**预期**：
+
+1. 保存后该行 `name` 为 `家里`，`editing` 恢复 `false`；刷新窗口后仍是 `家里`（已落库）。
+2. Esc 后名称回到 `家里`，没有变成 `临时`；数据库不变。
+3. 空值按 Enter 不提交（名称还原、不发请求）；未改动按 Enter 同理。`updated_at` 在这两步前后不变。
+4. 重名时**关闭编辑、名称恢复原值**，该行下方出现行内提示「已经有一套叫这个名字」；数据库里两条名字不同。改成一个新名字能保存。
+5. 已连接配置以外的行可以改名，连接保持「已连接」、计时器不中断；把**正在连接的那套**改名同样不断连、不重连。
+6. 输入法组合态的那次 Enter 只确认候选词、不提交；组合结束后再按 Enter 才保存。
+7. 跨行切换时第一行被保存为 `书房`（等同点行外保存），且 `config_update` **只调用一次**；第二行进入编辑态，没有带着第一行的请求重复提交。
+
+**不合格时记录什么**：每次的 `rows` JSON、`configs` 名称与 `updated_at`、失败提示截图、连接状态与计时器截图；组合态记录输入法名称与版本。
 
 ---
 

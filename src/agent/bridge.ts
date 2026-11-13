@@ -104,6 +104,12 @@ export interface ConfigCreateInput {
   listenPort?: number;
 }
 
+/** `config_update` 的命令参数；本轮界面只用改名。 */
+export interface ConfigUpdateInput {
+  configId: string;
+  name?: string;
+}
+
 export interface ConfigActivateResult {
   active_config_id: string;
   reconnect: "not_running" | "reconnected" | "reconnect_failed" | "skipped_no_nodes";
@@ -458,6 +464,8 @@ export interface AgentBridge {
   /** 中间底部节点详情的数据源。 */
   configDetail(configId: string): Promise<ConfigDetail>;
   configCreate(input: ConfigCreateInput): Promise<ConfigDetail>;
+  /** 就地修改一套配置；改连接方式必须新建。 */
+  configUpdate(input: ConfigUpdateInput): Promise<ConfigDetail>;
   /** 删除一套配置；正在连接的配置由 UI 先断开。 */
   configDelete(configId: string): Promise<ConfigDeleteData>;
   /** 切换 active 配置；已连接时需带 confirmDisconnect。 */

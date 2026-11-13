@@ -328,7 +328,7 @@ type ConfigListData = {
 
 | 字段 | 可改 | 说明 |
 |---|---|---|
-| `name` | ✅ | 同样的非空 / ≤ 40 / 不重名校验 |
+| `name` | ✅ | trim 后非空、≤ 40 字符；trim 后逐字节不重名（重复 → `CONFLICT / duplicate_name`），规则同 §3.2。为空或只有空白 → `INVALID_ARGUMENT`；**只改显示名，不打断连接，正在连接的配置也能改** |
 | `routingMode` | ✅ | 只影响下一次生成配置；**不在线切换**（在线切换走 `route_set_mode`，G2）。**只接受 `"direct"` / `"proxy_all"`**，`proxy_selected` → `routing_mode_not_supported` |
 | `targets` | ✅ | **已废弃**：写入路径不再接受 `proxy_selected`，本参数不产生任何效果 |
 | `dns` | ✅ | 整体替换；`custom` 的校验同 §3.2 |
@@ -876,7 +876,7 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 | `configId` 省略 | 用 active 配置；**没有任何配置** → `PRECONDITION_FAILED`，`details.reason = "no_config"` |
 | 用哪个节点 | 一律用 `config.current_node_id`；为空时用节点集第一个。**本命令没有 `nodeId` 参数** |
 | 节点集为空 | `PRECONDITION_FAILED`，`details.reason = "no_nodes"` |
-| 连接方式为 `tun` 且特权助手不可用 | `PRECONDITION_FAILED`，`details.reason = "tun_helper_missing"`（批 5） |
+| 连接方式为 `tun` 且特权助手不可用 | `PRECONDITION_FAILED`，`details.reason ∈ { "tun_denied", "helper_missing" }`（未批准 / 用户拒绝 → `tun_denied`；未安装、安装失败、平台不支持 → `helper_missing`；完整取值见 §7.1） |
 | 已在连接中、同一套配置 | 幂等：返回当前快照 |
 | 已在连接中、指定了另一套配置 | `PRECONDITION_FAILED`，`details.reason = "other_config_running"`。换配置走 `config_activate`（会先确认断开），**不在这里静默切换** |
 | 成功后 | 系统代理已按连接方式设置、运行时 `state = running`；返回的 `RuntimeSnapshot` 必须满足 §7.3 |
@@ -900,7 +900,20 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 - `connected_since` 为本次进入 running 的时刻（ISO 8601）。
 - `exit_ip` / `latency_ms` 允许为 `null`（探测是异步的），**不代表连接失败**。
 
-错误码：`RUNTIME_NOT_INSTALLED`、`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `other_config_running` / `tun_helper_missing`）、`NOT_FOUND`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`TIMEOUT`、`UPSTREAM_ERROR`、`INTERNAL`。
+错误码：`RUNTIME_NOT_INSTALLED`、`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `other_config_running` / `tun_denied` / `helper_missing`）、`NOT_FOUND`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`TIMEOUT`、`UPSTREAM_ERROR`、`INTERNAL`。
+
+**`tun` 连接在换新后台组件这一步失败时的 `details.reason`**（错误码均为 `PRECONDITION_FAILED`，`message` 已是可直接展示的中文）：
+
+| `details.reason` | 含义 | 界面 |
+|---|---|---|
+| `tun_denied` | 系统还没批准后台助手（未批准 / 用户拒绝） | **只有这一类弹「打开系统设置」引导**；用户允许后原地重试连接 |
+| `helper_admin_cancelled` | 旧组件换新要一次管理员授权，用户取消了密码框（或授权没给到） | 普通错误提示：这次没有授权，可以再试一次；**不弹系统设置引导**——系统开关本来就不决定这件事 |
+| `helper_start_failed` | 换新命令成功但 daemon 没起来（launchd 拉不起、崩溃循环），或换新失败但没有更具体的原因 | 普通错误提示，显示 `message` |
+| `helper_missing` | 组件缺失、安装失败、验签不过，或连不上特权助手；**保留底层原因**，不得合并成「未批准」 | 普通错误提示，显示 `message` |
+| `dev_unbundled` | 当前进程不是打包后的 `.app`（`tauri dev` 的裸二进制），系统按 main bundle 解析不到这份 daemon | 普通错误提示；文案给出 `bash scripts/dev/tun-dev.sh`，**不要再弹「打开系统设置」** |
+| `helper_busy` / `helper_lease_unavailable` / `helper_file_invalid` | 组件正在启动 / 会话租约建不起来 / 文件验签不通过 | 普通错误提示 |
+
+> 2026-11-13 补记：新增 `dev_unbundled`、`helper_admin_cancelled`、`helper_start_failed`；删除已无人产出的 `helper_unavailable`（它曾把安装失败、缺组件、未打包全归一成「去系统设置允许」，用户照做也连不上）与 `helper_needs_admin`（取消授权被当成「去系统设置允许」，开关本来就是开的）。换新的失败现在一律原样带回底层 `message` 与码。只补 reason 取值，字段与错误码不变，本文件版本不升。
 
 ### 7.2 `runtime_stop {}` → `RuntimeSnapshot`
 
@@ -1992,6 +2005,7 @@ type RulesStatus = {
 | 6 | **不向后兼容**：`config_create` 的 `source` 与非空 `nodeIds` 必须给一个；都缺、`source = "empty"`、空 `nodeIds` → `INVALID_ARGUMENT / source_required`。界面与 AI 都不再允许创建空配置 | 语义收紧 | 两问流程必有一个来源；空配置会在连接时才暴露 `no_nodes` |
 | 7 | §9.6 补「解释这个设置的含义」：它是提问卡片上的固定按钮，回传时只是普通非空文本，Host 不解析；免费节点同意选项原文修正为 `Veyl 免费节点（仅供试用）` | 说明 | 选项文案与后端逐字匹配对齐；协议与版本不变 |
 | 8 | **本批新增**：`node_switch`（§4.3）与 `route_set_mode`（§10.2）新增 `PRECONDITION_FAILED / config_unknown`——连接在跑但读不到它属于哪套配置（重启后接手 TUN），与 `config_not_running`（身份已知）区分；`connected_config_id` 的 null 说明补在 `config_activate`（§4.2），`route_set_mode` 的错误载荷没有这个字段 | 错误细分 | 本批新增 reason（仅错误细分、不改协议字段、不升版本） |
+| 9 | **文档更正**：删掉幽灵 reason `tun_helper_missing`（实现从不产出）；`runtime_start` 的助手不可用改用实际取值 `tun_denied`（未批准 / 被拒）与 `helper_missing`（未安装 / 安装失败 / 平台不支持） | 文档更正 | 按实现对齐，避免按旧文档写永不命中的分支；协议不变、不升版本 |
 
 ### 2.17.0（2026-11-12，问题报告：开文件夹与开邮件）
 

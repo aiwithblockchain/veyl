@@ -94,6 +94,8 @@ struct Flags {
     /// 静默路径发现旧 helper 不认识 `restart`：等用户真正请求 TUN 时再要授权。
     #[cfg(target_os = "macos")]
     admin_required: bool,
+    /// 最近一次换新的失败原因。连接路径原样带回，不再统一说成「需要管理员授权」。
+    last_failure: Option<(String, &'static str)>,
 }
 
 pub struct HelperUpdater {
@@ -105,6 +107,9 @@ pub struct HelperUpdater {
     /// 弹管理员授权对话框的唯一出口；测试里换成计数器。
     #[cfg(target_os = "macos")]
     admin_restart: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// 进程是否跑在打包后的 `.app` 里；只在构造时取一次，进程生命周期内不会变。
+    #[cfg(target_os = "macos")]
+    in_app_bundle: Mutex<bool>,
     #[cfg(test)]
     poll_timeout: Duration,
     #[cfg(test)]
@@ -119,6 +124,8 @@ impl HelperUpdater {
             presence: Mutex::new(None),
             #[cfg(target_os = "macos")]
             admin_restart: Arc::new(macos::run_admin_restart),
+            #[cfg(target_os = "macos")]
+            in_app_bundle: Mutex::new(crate::tun::privilege::smappservice::runs_in_app_bundle()),
             #[cfg(test)]
             poll_timeout: POLL_TIMEOUT,
             #[cfg(test)]
@@ -136,6 +143,8 @@ impl HelperUpdater {
             flags: Mutex::new(Flags::default()),
             presence: Mutex::new(None),
             admin_restart,
+            // 测试进程本身是裸二进制；默认按「打包后」跑，专门的用例再改。
+            in_app_bundle: Mutex::new(true),
             poll_timeout: Duration::ZERO,
             info_override: Mutex::new(None),
         }
@@ -278,6 +287,7 @@ impl HelperUpdater {
     }
 
     fn restart_with(&self, info: HelperInfo, allow_admin: bool) -> HelperRestartReport {
+        self.flags.lock().unwrap().last_failure = None;
         if info.state == HelperState::FileInvalid {
             return HelperRestartReport {
                 ok: false,
@@ -311,6 +321,11 @@ impl HelperUpdater {
                 if !granted {
                     self.mark_admin_required();
                     self.flags.lock().unwrap().start_failed = true;
+                    // 用户取消密码框：不是「去系统设置允许」能解决的事，单独给 reason。
+                    self.record_failure(
+                        "这次没有授权换新后台组件，可以再试一次。代理模式与直连仍可用。",
+                        "helper_admin_cancelled",
+                    );
                     return HelperRestartReport {
                         ok: false,
                         restarted: false,
@@ -336,6 +351,9 @@ impl HelperUpdater {
                     error.message
                 );
                 self.flags.lock().unwrap().start_failed = true;
+                // 连不上特权助手、系统拒绝重启这类失败，去系统设置也解决不了：
+                // 原样带回底层 message 与 code，别统一说成「需要管理员重新授权」。
+                self.record_failure(error.message.clone(), error.code.ui_reason());
                 return HelperRestartReport {
                     ok: false,
                     restarted: false,
@@ -352,12 +370,20 @@ impl HelperUpdater {
             let mut flags = self.flags.lock().unwrap();
             if ok {
                 flags.start_failed = false;
+                flags.last_failure = None;
                 #[cfg(target_os = "macos")]
                 {
                     flags.admin_required = false;
                 }
             } else {
                 flags.start_failed = true;
+                // 换新成功但 daemon 没起来（launchd 拉不起、崩溃循环）：
+                // 这是启动失败，不是权限问题。
+                flags.last_failure = Some((
+                    "后台组件换新后没有启动起来，暂时不能接管全部流量。代理模式与直连仍可用。"
+                        .into(),
+                    "helper_start_failed",
+                ));
             }
         }
         HelperRestartReport {
@@ -375,6 +401,14 @@ impl HelperUpdater {
 
     #[cfg(not(target_os = "macos"))]
     fn mark_admin_required(&self) {}
+
+    fn record_failure(&self, message: impl Into<String>, reason: &'static str) {
+        self.flags.lock().unwrap().last_failure = Some((message.into(), reason));
+    }
+
+    fn take_failure(&self) -> Option<(String, &'static str)> {
+        self.flags.lock().unwrap().last_failure.take()
+    }
 
     /// 用户显式点「重试授权」时调用：允许再尝试一次管理员授权。
     pub fn restart_from_user(&self) -> HelperRestartReport {
@@ -396,6 +430,16 @@ impl HelperUpdater {
 
         #[cfg(target_os = "macos")]
         {
+            // 裸二进制（`tauri dev`）没有 `.app` 外壳，系统按 main bundle 解析不到
+            // 这份 daemon，去系统设置点「允许」永远点不出结果。先如实说清楚，
+            // 不要让它落到底下那些安装/授权文案里。
+            if !*self.in_app_bundle.lock().unwrap() {
+                return Err((
+                    "当前是未打包的调试进程，系统不认这个后台助手；请用 bash scripts/dev/tun-dev.sh 启动打包后的 Veyl.app。代理模式与直连仍可用。"
+                        .into(),
+                    "dev_unbundled",
+                ));
+            }
             // 连接是用户主动行为：先确保注册/批准，再确认 helper 在跑。
             // 不先这一步的话，未注册时 status 失败会被误判成「需要管理员重启」。
             if let Err(error) = self.backend.ensure_available() {
@@ -404,7 +448,9 @@ impl HelperUpdater {
                     error.message,
                     error.detail
                 );
-                return Err((error.message, "helper_unavailable"));
+                // 保留底层原因：只有确实未批准（`tun_denied`）才该引导去系统设置；
+                // 安装失败、缺组件、系统不支持都在这里被打开设置也解决不了。
+                return Err((error.message, error.code.ui_reason()));
             }
             // 强制换一条新租约，避免 helper 被外部重启后「有隧道、无租约」。
             let info = self.info();
@@ -436,11 +482,15 @@ impl HelperUpdater {
                             "helper_busy",
                         ))
                     } else {
-                        Err((
-                            "后台组件未能换新，需要管理员重新授权。代理模式与直连仍可用。"
-                                .into(),
-                            "helper_needs_admin",
-                        ))
+                        // 用户取消授权、daemon 起不来、连不上特权助手是不同的问题，
+                        // 各带各的 message 与 reason，不要再统一说成「需要管理员授权」。
+                        Err(self.take_failure().unwrap_or_else(|| {
+                            (
+                                "后台组件没能换新，暂时不能接管全部流量。代理模式与直连仍可用。"
+                                    .into(),
+                                "helper_start_failed",
+                            )
+                        }))
                     }
                 }
             }
@@ -1029,11 +1079,14 @@ mod tests {
             Supported,
             /// 旧 helper，回 `bad_request`。
             OldHelper,
+            /// daemon 崩了 / launchd 拉不起：连不上特权助手。
+            Unreachable,
         }
 
         struct FakeBackend {
             reply: RestartReply,
-            available: bool,
+            /// `None` = 组件可用；`Some(code)` = `ensure_available` 报这个错误。
+            ensure_error: Option<TunErrorCode>,
         }
 
         impl TunBackend for FakeBackend {
@@ -1042,13 +1095,9 @@ mod tests {
             }
 
             fn ensure_available(&self) -> Result<HelperStatus, TunError> {
-                if self.available {
-                    Ok(HelperStatus::Enabled)
-                } else {
-                    Err(TunError::new(
-                        TunErrorCode::HelperInstallFailed,
-                        "安装后台助手失败",
-                    ))
+                match self.ensure_error {
+                    Some(code) => Err(TunError::new(code, "安装后台助手失败")),
+                    None => Ok(HelperStatus::Enabled),
                 }
             }
 
@@ -1077,11 +1126,14 @@ mod tests {
             fn restart(&self) -> Result<(), TunError> {
                 match self.reply {
                     RestartReply::Supported => Ok(()),
-                    RestartReply::OldHelper => Err(TunError::new(
-                        TunErrorCode::BadRequest,
-                        "未知方法 restart",
-                    )
-                    .with_detail(serde_json::json!({ "wire_code": "bad_request" }))),
+                    RestartReply::OldHelper => {
+                        Err(TunError::new(TunErrorCode::BadRequest, "未知方法 restart")
+                            .with_detail(serde_json::json!({ "wire_code": "bad_request" })))
+                    }
+                    RestartReply::Unreachable => Err(TunError::new(
+                        TunErrorCode::HelperMissing,
+                        "连不上特权助手，接管全部流量需要它",
+                    )),
                 }
             }
         }
@@ -1105,7 +1157,7 @@ mod tests {
             let updater = HelperUpdater::for_test(
                 Arc::new(FakeBackend {
                     reply,
-                    available: true,
+                    ensure_error: None,
                 }),
                 Arc::new(move || {
                     counter.fetch_add(1, Ordering::SeqCst);
@@ -1134,7 +1186,11 @@ mod tests {
             let (updater, calls) = updater(RestartReply::OldHelper);
             let first = updater.ensure_current_for_connect();
             assert_eq!(calls.load(Ordering::SeqCst), 1);
-            assert!(first.is_err(), "授权被取消时本次连接要失败");
+            let (message, reason) = first.expect_err("授权被取消时本次连接要失败");
+            // 取消密码框不是「去系统设置允许」，两者不能共用一个 reason。
+            assert_eq!(reason, "helper_admin_cancelled");
+            assert_ne!(reason, "tun_denied");
+            assert!(message.contains("这次没有授权"));
 
             let second = updater.ensure_current_for_connect();
             assert_eq!(calls.load(Ordering::SeqCst), 1, "同一次会话不再弹第二次");
@@ -1145,32 +1201,85 @@ mod tests {
             assert_eq!(calls.load(Ordering::SeqCst), 2);
         }
 
-        /// 后台组件不可用（未注册 / 未获系统允许 / 安装失败）统一归一成
-        /// `helper_unavailable`：界面靠这个 reason 决定是否弹「打开系统设置」引导。
+        /// daemon 起不来时 `restart` 直接报错：底层 message 与码要原样带回，
+        /// 不能报成「需要管理员去系统设置授权」——开关本来就是开的。
         #[test]
-        fn an_unavailable_helper_maps_to_helper_unavailable() {
+        fn a_failed_restart_keeps_the_backend_reason() {
+            let (updater, _calls) = updater(RestartReply::Unreachable);
+            let (message, reason) = updater
+                .ensure_current_for_connect()
+                .expect_err("连不上特权助手时连接必须失败");
+            assert_eq!(reason, "helper_missing");
+            assert_ne!(reason, "helper_admin_cancelled");
+            assert_eq!(message, "连不上特权助手，接管全部流量需要它");
+        }
+
+        /// 用户还没批准：保留 `tun_denied`，界面据此弹「打开系统设置」引导。
+        #[test]
+        fn a_pending_approval_keeps_tun_denied() {
             let updater = HelperUpdater::for_test(
                 Arc::new(FakeBackend {
                     reply: RestartReply::Supported,
-                    available: false,
+                    ensure_error: Some(TunErrorCode::TunDenied),
                 }),
                 Arc::new(|| false),
             );
+            let (_message, reason) = updater
+                .ensure_current_for_connect()
+                .expect_err("未批准时连接必须失败");
+            assert_eq!(reason, "tun_denied");
+        }
+
+        /// 缺组件 / 安装失败都不能伪装成「未批准」：去系统设置点了也没用。
+        #[test]
+        fn a_missing_or_uninstallable_helper_keeps_its_own_reason() {
+            for code in [
+                TunErrorCode::HelperMissing,
+                TunErrorCode::HelperInstallFailed,
+            ] {
+                let updater = HelperUpdater::for_test(
+                    Arc::new(FakeBackend {
+                        reply: RestartReply::Supported,
+                        ensure_error: Some(code),
+                    }),
+                    Arc::new(|| false),
+                );
+                let (_message, reason) = updater
+                    .ensure_current_for_connect()
+                    .expect_err("组件不可用时连接必须失败");
+                assert_eq!(reason, code.ui_reason(), "底层原因不能被吞掉");
+                assert_ne!(reason, "tun_denied", "这不是权限问题，不要引导去系统设置");
+            }
+        }
+
+        /// 裸二进制（`tauri dev`）下系统不认这份 daemon：必须独立成一个 reason，
+        /// 并且抢在前面——否则会被「安装失败」的文案盖住，用户照做还是连不上。
+        #[test]
+        fn an_unbundled_dev_process_reports_dev_unbundled() {
+            let updater = HelperUpdater::for_test(
+                Arc::new(FakeBackend {
+                    reply: RestartReply::Supported,
+                    ensure_error: Some(TunErrorCode::HelperInstallFailed),
+                }),
+                Arc::new(|| false),
+            );
+            *updater.in_app_bundle.lock().unwrap() = false;
             let (message, reason) = updater
                 .ensure_current_for_connect()
-                .expect_err("后台组件不可用时连接必须失败");
-            assert_eq!(reason, "helper_unavailable");
-            assert_eq!(message, "安装后台助手失败");
+                .expect_err("未打包时连接必须失败");
+            assert_eq!(reason, "dev_unbundled");
+            assert!(message.contains("bash scripts/dev/tun-dev.sh"));
+            assert!(!message.contains("系统设置"), "未打包时点系统设置没用");
         }
 
         /// 组件在跑但租约建立失败：这是会话问题，不是权限问题，
-        /// 不能复用 `helper_unavailable` 让界面去弹「打开系统设置」。
+        /// 不能复用权限类 reason 让界面去弹「打开系统设置」。
         #[test]
         fn a_lost_lease_has_its_own_reason() {
             let updater = HelperUpdater::for_test(
                 Arc::new(FakeBackend {
                     reply: RestartReply::Supported,
-                    available: true,
+                    ensure_error: None,
                 }),
                 Arc::new(|| false),
             );
@@ -1186,7 +1295,7 @@ mod tests {
                 .ensure_current_for_connect()
                 .expect_err("租约失败时连接必须失败");
             assert_eq!(reason, "helper_lease_unavailable");
-            assert_ne!(reason, "helper_unavailable");
+            assert_ne!(reason, "tun_denied", "这不是权限问题");
             assert!(message.contains("无法建立后台组件会话租约"));
         }
 

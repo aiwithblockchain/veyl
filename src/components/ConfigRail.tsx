@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { ConfigSummary } from "../agent/protocol";
 import { levelLabel } from "../ui/configLabels";
 import { useFocusTrap } from "../ui/focus";
-import { IconClose, IconList, IconTrash } from "./icons";
+import { isComposingEvent } from "../ui/ime";
+import { IconClose, IconList, IconPencil, IconTrash } from "./icons";
 
 interface Props {
   configs: ConfigSummary[];
@@ -16,6 +17,8 @@ interface Props {
   /** 读取失败时就地重试，和首次加载同一条路径。 */
   onRetry: () => void;
   onDelete: (configId: string) => Promise<{ ok: boolean; message?: string }>;
+  /** 只改名字；成功后由上层就地更新列表，不整表重载。 */
+  onRename: (configId: string, name: string) => Promise<{ ok: boolean; message?: string }>;
   onOpenSettings: () => void;
   /** <1024：收成 72px 图标栏，列表放进抽屉。 */
   compact?: boolean;
@@ -31,6 +34,7 @@ export function ConfigRail({
   onNewConfig,
   onRetry,
   onDelete,
+  onRename,
   onOpenSettings,
   compact = false,
 }: Props) {
@@ -38,9 +42,19 @@ export function ConfigRail({
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [renameError, setRenameError] = useState<{ id: string; message: string } | null>(
+    null,
+  );
   const confirmRef = useRef<HTMLDivElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
   const railRef = useRef<HTMLElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const renameTargetRef = useRef<ConfigSummary | null>(null);
+  const renameDraftRef = useRef("");
+  const savingRenameRef = useRef(false);
+  const cancelRenameRef = useRef(false);
   useFocusTrap(Boolean(confirming), confirmRef);
   // 确认框开着时把抽屉的陷阱让出去，否则两层会互相抢 Tab 和 Esc。
   useFocusTrap(drawerOpen && !confirming, drawerRef);
@@ -68,6 +82,56 @@ export function ConfigRail({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [drawerOpen, confirming]);
+
+  useEffect(() => {
+    if (!renameId) return;
+    renameInputRef.current?.focus();
+    renameInputRef.current?.select();
+  }, [renameId]);
+
+  useEffect(() => {
+    if (renameId && !configs.some((config) => config.config_id === renameId)) {
+      renameTargetRef.current = null;
+      setRenameId(null);
+      setRenameError(null);
+    }
+  }, [configs, renameId]);
+
+  const closeRename = () => {
+    renameTargetRef.current = null;
+    setRenameId(null);
+  };
+
+  const startRename = (config: ConfigSummary) => {
+    renameTargetRef.current = config;
+    renameDraftRef.current = config.name;
+    savingRenameRef.current = false;
+    cancelRenameRef.current = false;
+    setRenameId(config.config_id);
+    setRenameDraft(config.name);
+    setRenameError(null);
+  };
+
+  const submitRename = async () => {
+    const target = renameTargetRef.current;
+    if (!target || savingRenameRef.current || cancelRenameRef.current) return;
+    const next = renameDraftRef.current.trim();
+    if (!next || next === target.name) {
+      closeRename();
+      return;
+    }
+    savingRenameRef.current = true;
+    const result = await onRename(target.config_id, next);
+    savingRenameRef.current = false;
+    if (cancelRenameRef.current) return;
+    // 保存期间已经切到别的行时，不要关掉新的编辑态。
+    if (renameTargetRef.current?.config_id === target.config_id) closeRename();
+    setRenameError(
+      result.ok
+        ? null
+        : { id: target.config_id, message: result.message ?? "改名失败，请重试" },
+    );
+  };
 
   const submitDelete = async () => {
     if (!confirming || deleting) return;
@@ -128,36 +192,90 @@ export function ConfigRail({
         <ul className="configs">
           {configs.map((config) => {
             const active = config.config_id === activeConfigId;
+            const editing = config.config_id === renameId;
             return (
               <li key={config.config_id} className="configs__row">
-                <button
-                  type="button"
-                  className={`config ${active ? "is-active" : ""}`}
-                  aria-current={active ? "true" : undefined}
-                  onClick={() => {
-                    onSelect(config.config_id);
-                    setDrawerOpen(false);
-                  }}
-                >
-                  <span className="config__name" title={config.name}>
-                    {config.name}
-                  </span>
-                  <span className="config__meta">
-                    {config.node_count} 个节点 · {levelLabel(config)}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className="config__delete"
-                  aria-label={`删除配置 ${config.name}`}
-                  title={`删除「${config.name}」`}
-                  onClick={() => {
-                    setConfirming(config);
-                    setDeleteError(null);
-                  }}
-                >
-                  <IconTrash size={13} />
-                </button>
+                {editing ? (
+                  <div className={`config config--editing ${active ? "is-active" : ""}`}>
+                    <input
+                      ref={renameInputRef}
+                      className="config__rename-input"
+                      value={renameDraft}
+                      maxLength={40}
+                      aria-label="配置名称"
+                      onChange={(event) => {
+                        renameDraftRef.current = event.target.value;
+                        setRenameDraft(event.target.value);
+                      }}
+                      onKeyDown={(event) => {
+                        if (isComposingEvent(event)) return;
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void submitRename();
+                        } else if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelRenameRef.current = true;
+                          closeRename();
+                        }
+                      }}
+                      onBlur={() => void submitRename()}
+                    />
+                    <span className="config__meta">
+                      {config.node_count} 个节点 · {levelLabel(config)}
+                    </span>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className={`config ${active ? "is-active" : ""}`}
+                    aria-current={active ? "true" : undefined}
+                    onClick={() => {
+                      onSelect(config.config_id);
+                      setDrawerOpen(false);
+                    }}
+                  >
+                    <span
+                      className="config__name"
+                      title={config.name}
+                      onDoubleClick={() => startRename(config)}
+                    >
+                      {config.name}
+                    </span>
+                    <span className="config__meta">
+                      {config.node_count} 个节点 · {levelLabel(config)}
+                    </span>
+                  </button>
+                )}
+                {!editing ? (
+                  <>
+                    <button
+                      type="button"
+                      className="config__rename"
+                      aria-label={`重命名配置 ${config.name}`}
+                      title={`重命名「${config.name}」`}
+                      onClick={() => startRename(config)}
+                    >
+                      <IconPencil size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      className="config__delete"
+                      aria-label={`删除配置 ${config.name}`}
+                      title={`删除「${config.name}」`}
+                      onClick={() => {
+                        setConfirming(config);
+                        setDeleteError(null);
+                      }}
+                    >
+                      <IconTrash size={13} />
+                    </button>
+                  </>
+                ) : null}
+                {renameError?.id === config.config_id ? (
+                  <p className="config__rename-error" role="status">
+                    {renameError.message}
+                  </p>
+                ) : null}
               </li>
             );
           })}

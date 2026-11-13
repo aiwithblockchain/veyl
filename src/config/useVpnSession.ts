@@ -46,6 +46,8 @@ export interface VpnSession {
   /** 正在查后台组件状态（还没开始连接），遮罩据此说明当前阶段。 */
   checkingHelper: boolean;
   createConfig: (input: ConfigCreateInput) => Promise<ActionResult>;
+  /** 只改名字；成功后左栏就地更新，不整表重载。 */
+  renameConfig: (configId: string, name: string) => Promise<ActionResult>;
   deleteConfig: (configId: string) => Promise<ActionResult>;
   selectConfig: (configId: string, confirmDisconnect?: boolean) => Promise<ActionResult>;
   switchNode: (nodeId: string) => Promise<ActionResult>;
@@ -115,23 +117,35 @@ async function helperNeedsAdmin(bridge: AgentBridge): Promise<boolean> {
   }
 }
 
+/** 没有更细的 reason 时，权限类错误码按「这次没授权」处理。 */
 function isHelperAdminFailure(error: unknown): boolean {
-  const bridgeError = toBridgeError(error);
-  if (
-    ["AUTH_DENIED", "PERMISSION_DENIED", "USER_CANCELLED", "CANCELLED"].includes(
-      bridgeError.code,
-    )
-  ) {
-    return true;
-  }
-  return bridgeError.details?.reason === "helper_needs_admin";
+  return ["AUTH_DENIED", "PERMISSION_DENIED", "USER_CANCELLED", "CANCELLED"].includes(
+    toBridgeError(error).code,
+  );
 }
 
-/** 去系统设置里允许后台助手就能解决的失败；界面弹引导，不用 toast。 */
-const HELPER_PERMISSION_REASONS = ["helper_unavailable", "tun_denied", "helper_needs_admin"];
+/**
+ * 权限类失败按 reason 决定怎么引导。
+ * `settings`：去系统设置允许后台助手，界面弹引导，不用 toast；
+ * `retry`：只是这次没授权，普通提示再试一次。
+ * 新 reason 由后端给出后在这里加一行，不改下面的分支。
+ * 缺组件、装不上、未打包的调试进程都不是「点允许」能解决的，不要加进来。
+ */
+type HelperPermissionOutcome = "settings" | "retry";
+
+const HELPER_PERMISSION_REASONS: Record<string, HelperPermissionOutcome> = {
+  tun_denied: "settings",
+  helper_admin_cancelled: "retry",
+};
+
+function helperPermissionOutcome(
+  reason: string | undefined,
+): HelperPermissionOutcome | null {
+  return reason === undefined ? null : HELPER_PERMISSION_REASONS[reason] ?? null;
+}
 
 export function isHelperPermissionReason(reason: string | undefined): boolean {
-  return reason !== undefined && HELPER_PERMISSION_REASONS.includes(reason);
+  return helperPermissionOutcome(reason) === "settings";
 }
 
 /**
@@ -547,11 +561,12 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       await refreshReal();
       setConnection((current) => (current === "starting" ? "idle" : current));
       const reason = actionReason(err);
-      if (isHelperPermissionReason(reason)) {
+      const permission = helperPermissionOutcome(reason);
+      if (permission === "settings") {
         // 需要用户去系统里允许后台助手：交给调用方弹引导，不用 toast。
         return { ok: false, reason };
       }
-      if (isHelperAdminFailure(err)) {
+      if (permission === "retry" || isHelperAdminFailure(err)) {
         return { ok: false, message: "这次没有授权，可以再试一次。", reason };
       }
       return { ok: false, message: actionMessage(err, "启动失败"), reason };
@@ -608,6 +623,42 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       setConnection(wasConnected ? "connected" : "idle");
       setConnectedConfigId(wasConnected ? wasConfigId : null);
       return { ok: false, message: actionMessage(err, "断开失败") };
+    }
+  };
+
+  const renameConfig = async (
+    configId: string,
+    name: string,
+  ): Promise<ActionResult> => {
+    if (mock) {
+      const store = mockStore.current;
+      if (!store.configs.some((config) => config.config_id === configId)) {
+        return { ok: true };
+      }
+      commitMock({
+        ...store,
+        configs: store.configs.map((config) =>
+          config.config_id === configId ? { ...config, name } : config,
+        ),
+      });
+      return { ok: true };
+    }
+
+    try {
+      const detail = await bridge.configUpdate({ configId, name });
+      setConfigs((current) =>
+        current.map((config) =>
+          config.config_id === configId ? { ...config, name: detail.name } : config,
+        ),
+      );
+      setActiveConfig((current) =>
+        current && current.config_id === configId
+          ? { ...current, name: detail.name }
+          : current,
+      );
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, message: actionMessage(err, "改名失败") };
     }
   };
 
@@ -696,6 +747,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     preparingHelper,
     checkingHelper,
     createConfig,
+    renameConfig,
     deleteConfig,
     selectConfig,
     switchNode,

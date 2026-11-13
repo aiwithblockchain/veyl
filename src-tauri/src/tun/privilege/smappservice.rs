@@ -9,7 +9,7 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
-use objc2_foundation::NSString;
+use objc2_foundation::{NSBundle, NSString};
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 use super::{
@@ -185,6 +185,23 @@ pub(crate) fn open_login_items() {
     unsafe { SMAppService::openSystemSettingsLoginItems() }
 }
 
+/// 当前进程的 main bundle 是不是一个 `.app`。
+///
+/// `daemonServiceWithPlistName` 按 main bundle 解析 daemon plist：裸二进制
+/// （`npm run tauri dev` 出的 `target/debug/veyl`）没有 `.app` 外壳，系统找到的
+/// 是另一个 bundle，`status()` 永远不会是 `Enabled`，`register()` 也装不上。
+/// 这种情况下去系统设置点「允许」不会有用，必须先告诉用户换打包后的 App。
+pub fn runs_in_app_bundle() -> bool {
+    let bundle = unsafe { NSBundle::mainBundle() };
+    let path = unsafe { bundle.bundlePath() };
+    bundle_path_is_app(&path.to_string())
+}
+
+/// 判据单独拿出来，便于直接对路径单测。
+pub fn bundle_path_is_app(path: &str) -> bool {
+    path.trim_end_matches('/').ends_with(".app")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +336,25 @@ mod tests {
     #[test]
     fn kind_is_stable() {
         assert_eq!(SmAppService.kind(), "smappservice");
+    }
+
+    /// 打包后的 App 才注册得上 daemon；裸二进制必须被认出来。
+    #[test]
+    fn only_an_app_bundle_counts_as_packaged() {
+        assert!(bundle_path_is_app("/Applications/Veyl.app"));
+        assert!(bundle_path_is_app("/Applications/Veyl.app/"));
+        assert!(bundle_path_is_app("/Users/x/build/Veyl.app"));
+        assert!(!bundle_path_is_app(
+            "/Users/x/ai/veyl/src-tauri/target/debug"
+        ));
+        assert!(!bundle_path_is_app(
+            "/Users/x/ai/veyl/src-tauri/target/debug/veyl"
+        ));
+    }
+
+    /// 测试进程本身就是裸二进制：真实检测必须返回「未打包」。
+    #[test]
+    fn the_test_binary_runs_outside_an_app_bundle() {
+        assert!(!runs_in_app_bundle());
     }
 }

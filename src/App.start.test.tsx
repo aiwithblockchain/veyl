@@ -240,40 +240,33 @@ describe("TUN 启动成功后的界面状态", () => {
     expect(snapshots.mock.calls.length).toBe(before + 1);
   }, 15_000);
 
-  it("后台助手没被允许时弹引导，不显示安装失败 toast", async () => {
-    Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
-    localStorage.setItem("veyl.onboarding.skipped", "1");
-
-    vi.spyOn(bridge, "configList").mockResolvedValue({
-      configs: [SUMMARY],
-      active_config_id: CONFIG_ID,
-    });
-    vi.spyOn(bridge, "configDetail").mockResolvedValue(DETAIL);
-    vi.spyOn(bridge, "getRuntimeSnapshot").mockResolvedValue(null);
-    vi.spyOn(bridge, "tunHelperInfo").mockResolvedValue({
-      runningBuild: null,
-      expectedBuild: "2026.11.1",
-      stale: false,
-      state: "not_running",
-      needsAdminRestart: false,
-    } as never);
-    vi.spyOn(bridge, "runtimeStart").mockRejectedValue({
+  it("dev_unbundled 不弹引导，只说要换打包后的 App", async () => {
+    const { container } = renderStartWithFailure({
       code: "PRECONDITION_FAILED",
-      message: "安装后台助手失败",
-      details: { reason: "helper_unavailable" },
+      message:
+        "当前是未打包的调试进程，系统不认这个后台助手；请用 bash scripts/dev/tun-dev.sh 启动打包后的 Veyl.app。代理模式与直连仍可用。",
+      details: { reason: "dev_unbundled" },
     });
-    vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
-    const openSettings = vi.spyOn(bridge, "tunHelperOpenSettings").mockResolvedValue(undefined);
-
-    const { container } = render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
 
-    expect(await screen.findByRole("dialog", { name: "需要允许后台助手" })).toBeTruthy();
-    expect(container.querySelector(".app-toast")).toBeNull();
+    await waitFor(() =>
+      expect(container.querySelector(".app-toast")?.textContent).toContain("tun-dev.sh"),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+  }, 15_000);
 
-    fireEvent.click(screen.getByRole("button", { name: "打开系统设置" }));
-    await waitFor(() => expect(openSettings).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  it("helper_missing 不弹引导，原样显示后端的失败原因", async () => {
+    const { container } = renderStartWithFailure({
+      code: "PRECONDITION_FAILED",
+      message: "安装后台助手失败",
+      details: { reason: "helper_missing" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+
+    await waitFor(() =>
+      expect(container.querySelector(".app-toast")?.textContent).toContain("安装后台助手失败"),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
   }, 15_000);
 
   it("tun_denied 也打开引导，不显示 toast", async () => {

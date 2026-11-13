@@ -93,7 +93,7 @@ type RuntimeMode = "system_proxy" | "tun";
 | 取值 | 含义 | 进入条件 |
 |---|---|---|
 | `system_proxy` | 起 mixed 入站 + 设置系统代理 | 配置的 `connection_mode = "system_proxy"` |
-| `tun` | 起 TUN 入站，接管全部流量 | 配置的 `connection_mode = "tun"`（批 5；特权助手不可用时报 `tun_helper_missing`） |
+| `tun` | 起 TUN 入站，接管全部流量 | 配置的 `connection_mode = "tun"`（批 5；特权助手不可用时报 `tun_denied` / `helper_missing`，取值见 `commands.md` §7.1） |
 
 `disabled`（只起进程不设代理）保留给诊断用，不出现在工具入参里。
 

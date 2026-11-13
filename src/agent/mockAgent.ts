@@ -3,6 +3,7 @@ import type {
   ChatHistory,
   ConfigActivateResult,
   ConfigCreateInput,
+  ConfigUpdateInput,
   ConfigDeleteData,
   ConfigListData,
   CoreCheckUpdatesResult,
@@ -1558,6 +1559,10 @@ export class MockAgentBridge implements AgentBridge {
 
   async configCreate(_input: ConfigCreateInput): Promise<ConfigDetail> {
     throw this.unsupportedConfigCommand("config_create");
+  }
+
+  async configUpdate(_input: ConfigUpdateInput): Promise<ConfigDetail> {
+    throw this.unsupportedConfigCommand("config_update");
   }
 
   async configDelete(configId: string): Promise<ConfigDeleteData> {
