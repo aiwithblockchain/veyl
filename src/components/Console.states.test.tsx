@@ -179,7 +179,7 @@ describe("状态矩阵", () => {
     expect(r.stateWord).toBe("未连接");
     expect(r.timecode).toBeNull();
     expect(r.rows.map((row) => row.label)).toEqual(["方式", "节点"]);
-    expect(r.rows[0].value).toBe("本机代理");
+    expect(r.rows[0].value).toBe("Proxy 模式");
     expect(r.rows[1].value).toBe("2 个可选");
     expect(r.text(".hero .btn")).toBe("启动 VPN");
   });

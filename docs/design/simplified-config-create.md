@@ -34,7 +34,7 @@
 | 强制刷新是独立命令 `default_profile_refresh`，恒为 `force = true` | `commands.md` §8.2 |
 | 「哪些走 VPN」今天只在**未连接**的读数行里出现，且是只读文字 | `Console.tsx:578-590`；`configLabels.ts:27-39` |
 | `route_get` / `route_set_mode` 契约齐全，但前端 bridge **一条都没接** | `bridge.ts` 无 `routeGet` / `routeSetMode`；`commands.md` §10.1–10.2 |
-| 左栏标签把两个维度揉在一起：`tun → 全部软件`，`system_proxy + proxy_selected → 本机代理`，`system_proxy + direct → 浏览器` | `configLabels.ts:4-10` |
+| **历史**：左栏标签曾把两个维度揉在一起（`tun → 全部软件`，`system_proxy + proxy_selected → 本机代理`，`system_proxy + direct → 浏览器`）；现行改为名称前的模式标记 + 「TUN 模式 / Proxy 模式」，只看 `connect_mode` | §4；`configLabels.ts` 的 `levelLabel` |
 | 地区只看 `VEYL_REGION` → 系统时区 → 系统区域 → `LANG`，**没有用户明示的入口**；GUI 里 `LANG` 常是 `en_US`，中国用户会被判成美国 | `rules/mod.rs:138-200` |
 | 免费节点来自网络种子源，**没有随包种子**；随包资源只有 `rules` / `runtime` / `launchd` | `seed.rs:122-128`、`src-tauri/resources/` |
 
@@ -143,11 +143,12 @@ config_create({
 
 | `connect_mode` | 左栏标签 | 未连接读数「方式」 |
 |---|---|---|
-| `tun` | TUN 模式 | 接管全部软件 |
-| `system_proxy` | Proxy 模式 | 本机代理 |
+| `tun` | TUN 模式 | TUN 模式（副标题：所有软件都走节点） |
+| `system_proxy` | Proxy 模式 | Proxy 模式（副标题：需要手动填地址） |
 
-> 左栏标签与新建弹窗的选项标题现在用同一组词（`TUN 模式` / `Proxy 模式`），并配 6×6 形状标记（`rail-mode-distinction.md`）；
-> 未连接读数仍是「接管全部软件 / 本机代理」，说的是实际行为。两处都只看 `connect_mode`，不要再造第三套。
+> 左栏标签、新建选项标题与**中间区未连接读数的「方式」值**现在统一为 `TUN 模式` / `Proxy 模式`，
+> 左栏另配 6×6 形状标记（`rail-mode-distinction.md`）；读数副标题保持「所有软件都走节点 / 需要手动填地址」。
+> 三处都只看 `connect_mode`，不要再造第三套。
 
 **左栏标签只由 `connect_mode` 决定**，不再看 `routing_mode`。今天 `system_proxy + direct` 显示「浏览器」，
 是把两个维度揉在一起的残留；改完之后同一个配置不会因为切了一下开关就从「浏览器」变成「本机代理」。
@@ -221,7 +222,7 @@ config_create({
 标题给懂的人，括号给不懂的人，两行都不省。
 
 `veyl-ui` §6 目前把 `proxy` / `TUN` 列为界面禁词。产品指定的例外**只包括**：
-新建配置的选项标题（表单带括号、AI 卡用短词）与**左栏每行的接管方式小字**；
+新建配置的选项标题（表单带括号、AI 卡用短词）、**左栏每行的接管方式小字**与**中间区未连接读数的「方式」值**；
 正文、按钮、状态、设置页仍不得使用。同步 `veyl-ui` 时把这条例外写清楚，不要顺手把禁词规则删掉。
 
 内部讨论、代码注释、契约里的枚举仍是 `system_proxy` / `tun`，映射表（§4）保留两种叫法。
@@ -1091,7 +1092,7 @@ region-changed { region: string | null, source: "system" | "ai", emitted_at }
   - §2.1 一屏一个主按钮 → 审视页只有 `创建并连接` / `创建配置` 是实心；开关是分段控件。
   - §2.2 每个事实只有一个住处 → 流量范围只住在 hero 开关；删掉未连接读数的「范围」行。
   - §3.2 / §3.3 字号与 4px 网格 → §5.2、§8 的行高/间距。
-  - §6 界面禁词 → `Proxy 模式` / `TUN 模式` 只作为新建配置的选项标题与左栏接管方式小字（产品指定），正文仍禁用。
+  - §6 界面禁词 → `Proxy 模式` / `TUN 模式` 只作为新建配置的选项标题、左栏接管方式小字与中间区未连接读数的「方式」值（产品指定），正文仍禁用。
 - **产品决定（2026-11-12，用户拍板）**
   - 「供应商广场」先做静态预览页：只展示示例条目，不购买、不跳转、不支付。
   - 免费节点不随包发布；失败时只提示 + 重试，不自动跳转。

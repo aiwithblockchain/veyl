@@ -18,9 +18,9 @@ describe("左栏接管方式标签", () => {
   });
 
   it("方式读数也只描述接管范围", () => {
-    expect(modeSummary(base)).toEqual({ value: "本机代理", sub: "需要手动填地址" });
+    expect(modeSummary(base)).toEqual({ value: "Proxy 模式", sub: "需要手动填地址" });
     expect(modeSummary({ ...base, connect_mode: "tun" })).toEqual({
-      value: "接管全部软件",
+      value: "TUN 模式",
       sub: "所有软件都走节点",
     });
   });

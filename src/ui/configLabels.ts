@@ -12,9 +12,9 @@ export function modeSummary(
   config: Pick<ConfigSummary, "connect_mode">,
 ): { value: string; sub: string } {
   if (config.connect_mode === "tun") {
-    return { value: "接管全部软件", sub: "所有软件都走节点" };
+    return { value: "TUN 模式", sub: "所有软件都走节点" };
   }
-  return { value: "本机代理", sub: "需要手动填地址" };
+  return { value: "Proxy 模式", sub: "需要手动填地址" };
 }
 
 const REGION_LABELS: Record<string, string> = {
