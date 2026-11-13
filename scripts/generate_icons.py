@@ -80,8 +80,10 @@ def pick_master(
 def hairline(image: Image.Image, size: int) -> Image.Image:
     """在最终尺寸上给圆角方加一圈极淡描边。
 
-    白底图标放在浅色桌面上，边界会整个糊掉。描边必须在**最终尺寸**上画：
-    在 1024 母版上画 2px，缩到 16px 只剩 0.03px，等于没有。
+    容器是深青，放在深色桌面上边界会糊，所以描边用**浅色**——白色不到一成
+    透明度，只在深色背景上浮出来一条极细的轮廓，浅色桌面上几乎看不见。
+
+    描边必须在最终尺寸上画：在 1024 母版上画 2px，缩到 16px 只剩 0.03px。
     """
     # 16px 上 1px 描边就占掉图标宽度的 6%，看起来像一个灰框。
     # 那个尺寸下球体本身就是对比，不需要靠描边定义边界。
@@ -94,7 +96,7 @@ def hairline(image: Image.Image, size: int) -> Image.Image:
     draw.rounded_rectangle(
         [margin, margin, size - margin - 1, size - margin - 1],
         radius=radius,
-        outline=(0, 0, 0, 22),
+        outline=(255, 255, 255, 30),
         width=1,
     )
     return edge
