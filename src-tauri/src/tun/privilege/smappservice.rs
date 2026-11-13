@@ -192,8 +192,8 @@ pub(crate) fn open_login_items() {
 /// 是另一个 bundle，`status()` 永远不会是 `Enabled`，`register()` 也装不上。
 /// 这种情况下去系统设置点「允许」不会有用，必须先告诉用户换打包后的 App。
 pub fn runs_in_app_bundle() -> bool {
-    let bundle = unsafe { NSBundle::mainBundle() };
-    let path = unsafe { bundle.bundlePath() };
+    let bundle = NSBundle::mainBundle();
+    let path = bundle.bundlePath();
     bundle_path_is_app(&path.to_string())
 }
 
