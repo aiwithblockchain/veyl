@@ -494,16 +494,15 @@ pub async fn config_delete(
         .map_err(error_value)
 }
 
-/// 切换激活配置。已连接且换到另一套时必须带 `confirmDisconnect`。
+/// 切换当前使用的配置。只改 active，不断开、不重连——连接由 `runtime_start` 负责。
 #[tauri::command]
 pub async fn config_activate(
     state: State<'_, Arc<AppState>>,
     config_id: String,
-    confirm_disconnect: Option<bool>,
 ) -> Result<Value, Value> {
     state
         .services
-        .config_activate(&config_id, confirm_disconnect.unwrap_or(false))
+        .config_activate(&config_id)
         .await
         .map_err(error_value)
 }

@@ -34,6 +34,7 @@ import type {
   ProxyPortSaveResult,
   ProxyPortSettings,
   RenamedSession,
+  RuntimeStartResult,
   StoredChatMessage,
   StoredSessionSummary,
   TunHelperInfo,
@@ -559,8 +560,11 @@ export class TauriAgentBridge implements AgentBridge {
     return getVersion();
   }
 
-  async runtimeStart(configId?: string): Promise<void> {
-    await call("runtime_start", configId ? { configId } : undefined);
+  async runtimeStart(configId?: string): Promise<RuntimeStartResult> {
+    return call<RuntimeStartResult>(
+      "runtime_start",
+      configId ? { configId } : undefined,
+    );
   }
 
   async runtimeStop(): Promise<void> {
@@ -603,14 +607,8 @@ export class TauriAgentBridge implements AgentBridge {
     return call<ConfigDeleteData>("config_delete", { configId });
   }
 
-  async configActivate(
-    configId: string,
-    confirmDisconnect = false,
-  ): Promise<ConfigActivateResult> {
-    return call<ConfigActivateResult>("config_activate", {
-      configId,
-      ...(confirmDisconnect ? { confirmDisconnect: true } : {}),
-    });
+  async configActivate(configId: string): Promise<ConfigActivateResult> {
+    return call<ConfigActivateResult>("config_activate", { configId });
   }
 
   async nodeSwitch(configId: string, nodeId: string): Promise<NodeSwitchResult> {

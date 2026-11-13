@@ -56,7 +56,7 @@ function makeConfig(currentNodeId: string | null): ConfigDetail {
 }
 
 function makeRuntime(over: Partial<RuntimeView> = {}): RuntimeView {
-  return { ...emptyRuntimeView(), ...over };
+  return { ...emptyRuntimeView(), config_id: "cfg-1", ...over };
 }
 
 const noop = () => {};
@@ -86,11 +86,16 @@ interface RenderOptions {
   failedAfterConnected?: boolean;
   helperPreparing?: boolean;
   aiReady?: boolean;
+  onStart?: () => void;
+  onStop?: () => void;
   onReconnect?: () => void;
   onReportProblem?: () => void;
   region?: string | null;
   scopeRegion?: string | null;
   routingMode?: "direct" | "proxy_all" | null;
+  startingConfigId?: string | null;
+  startingConfigName?: string | null;
+  connectedConfigName?: string | null;
   onSetRoutingMode?: (mode: "direct" | "proxy_all") => Promise<{
     ok: boolean;
     message?: string;
@@ -101,8 +106,8 @@ function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
   return (
     <Console
       config={config}
-      onStart={noop}
-      onStop={noop}
+      onStart={opts.onStart ?? noop}
+      onStop={opts.onStop ?? noop}
       onReconnect={opts.onReconnect ?? noop}
       onReportProblem={opts.onReportProblem}
       onSwitchNode={switchNode}
@@ -117,6 +122,9 @@ function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
       onNewConfig={noop}
       loading={opts.loading}
       runtime={opts.runtime ?? makeRuntime()}
+      connectedConfigName={opts.connectedConfigName}
+      startingConfigId={opts.startingConfigId}
+      startingConfigName={opts.startingConfigName}
       failedAfterConnected={opts.failedAfterConnected}
       helperPreparing={opts.helperPreparing}
       region={opts.region}
@@ -445,5 +453,81 @@ describe("状态矩阵", () => {
     });
     expect(onlyExit.rows[1].value).toBe("—");
     expect(onlyExit.text(".console")).not.toContain("999");
+  });
+});
+
+describe("active 不是正在连接的那套", () => {
+  const elsewhere = makeRuntime({
+    state: "running",
+    config_id: "cfg-other",
+    config_name: "全部流量",
+  });
+
+  it("hero 仍显示已连接，主按钮改成连接当前配置并点名另一套", () => {
+    const onStart = vi.fn();
+    const onStop = vi.fn();
+    const r = renderConsole({ runtime: elsewhere, onStart, onStop });
+
+    expect(r.text(".state-line__label")).toContain("已连接");
+    expect(r.text(".hero__caption")).toBe("当前连接：全部流量");
+    const button = r.getByRole("button", { name: "连接 VPN（会先断开 全部流量）" });
+    fireEvent.click(button);
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(onStop).not.toHaveBeenCalled();
+  });
+
+  it("这套配置的节点面板不能换节点，只说明原因", () => {
+    switchNode.mockClear();
+    const r = renderConsole({ runtime: elsewhere });
+
+    fireEvent.click(r.container.querySelector(".node-card__select")!);
+    expect(r.container.textContent).toContain("先连这套再换节点");
+
+    fireEvent.click(r.getByText("大阪 02"));
+    expect(switchNode).not.toHaveBeenCalled();
+    expect(r.container.textContent).not.toContain("没切成");
+  });
+
+  it("正在连接另一套时：说明在连谁，主按钮能连过去", () => {
+    const onStart = vi.fn();
+    const r = renderConsole({
+      runtime: makeRuntime({ state: "starting" }),
+      startingConfigId: "cfg-other",
+      startingConfigName: "全部流量",
+      onStart,
+    });
+
+    expect(r.text(".hero__caption")).toBe("正在连接：全部流量");
+    fireEvent.click(
+      r.getByRole("button", { name: "连接 VPN（会先断开 全部流量）" }),
+    );
+    expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("正在连接的就是当前这套：保持取消按钮", () => {
+    const onStop = vi.fn();
+    const r = renderConsole({
+      runtime: makeRuntime({ state: "starting" }),
+      startingConfigId: "cfg-1",
+      startingConfigName: "测试配置",
+      onStop,
+    });
+
+    expect(r.getByRole("button", { name: "取消" })).toBeTruthy();
+    fireEvent.click(r.getByRole("button", { name: "取消" }));
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("身份未知的已连接：给一键连接，不只给断开", () => {
+    const onStart = vi.fn();
+    const r = renderConsole({
+      runtime: makeRuntime({ state: "running", config_id: null }),
+      onStart,
+    });
+
+    fireEvent.click(
+      r.getByRole("button", { name: "连接 VPN（会先断开当前连接）" }),
+    );
+    expect(onStart).toHaveBeenCalledTimes(1);
   });
 });

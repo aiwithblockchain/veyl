@@ -163,6 +163,38 @@ describe("runtime 快照与事件兜底", () => {
     ).toBe("unchanged");
   });
 
+  it("重复/迟到事件不能改写连接身份", () => {
+    const view = {
+      ...emptyRuntimeView(),
+      state: "running" as const,
+      config_id: "cfg_new",
+      config_name: "新配置",
+    };
+    const event = {
+      name: AGENT_EVENTS.runtimeStateChanged,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        from: "idle" as const,
+        to: "running" as const,
+        event: "process_ready" as const,
+        pid: 1,
+        upstream_version: null,
+        reason: null,
+        error: null,
+        snapshot: SNAPSHOT,
+        emitted_at: "",
+      },
+    };
+
+    const stale = applyRuntimeEvent(view, event, { identity: false });
+    expect(stale.config_id).toBe("cfg_new");
+    expect(stale.config_name).toBe("新配置");
+
+    const fresh = applyRuntimeEvent(view, event, { identity: true });
+    expect(fresh.config_id).toBe("cfg");
+    expect(fresh.config_name).toBe("配置");
+  });
+
   it("快照晚到时保留请求期间收到的节点延迟，不被打回确认中", () => {
     const base = snapshotToView({
       ...SNAPSHOT,

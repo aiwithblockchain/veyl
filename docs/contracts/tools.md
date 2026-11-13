@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.10.1`
+> 契约版本：`3.11.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.10.1`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.11.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.10.1";
+  contract_version: "3.11.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -444,17 +444,21 @@ P1 移除审批后，`VpnConnect` 直接执行：它会修改系统代理，不�
 - **没有 `node_id` 参数**：用该配置的 `current_node_id`，为空时用节点集第一个。要换节点先调 `NodeSwitch`。
 - **没有 `mode` 参数**：代理还是 TUN 由配置的 `connection_mode` 决定，不由调用方临时指定。
 - 与 `VpnConnect` 的区别：本工具只起进程，**不设置系统代理**。要用户可用请用 `VpnConnect`。
-- 已连接且指定了另一套配置 → `PRECONDITION_FAILED / other_config_running`。换配置走 `ConfigActivate`（会先确认断开），不在这里静默切换。
+- 已有连接在跑（已连接或正在启动）、指定另一套配置 → **先停旧连接再启动**（`runtime_start` 自动收口）；不再报 `other_config_running`，也不需要调用方先断开。
+- 切配置本身不改连接：`ConfigActivate` 只改 active，不重连（`commands.md` §3.5 2.20.0）。
 
 `data`：
 
 ```ts
 type RuntimeStartData = RuntimeSnapshot & {
-  already_running: boolean;     // 幂等命中时为 true
+  already_running: boolean;     // 幂等命中时为 true（同一套已连接，或同一套正在启动）
 };
 ```
 
-错误：`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `other_config_running` / `tun_denied` / `helper_missing`）、`NOT_FOUND`、`RUNTIME_BUSY`、`RUNTIME_NOT_INSTALLED`、`RUNTIME_START_TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`。
+- 幂等命中时 `state` 可能是 `running`（已连接）或 `starting`（同一套正在启动，不重启在途连接）；后者是 `state != "running"` 的唯一成功情形（`commands.md` §7.1.1）。模型把 `already_running = true` 当作「已经在连 / 正在连」，不要再催促用户重试。
+- `VpnConnect` 复用同一条连接路径，返回里也可能带 `already_running`；那是附加字段，按 `RuntimeStartData` 同样理解即可。
+
+错误：`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `tun_denied` / `helper_missing`）、`NOT_FOUND`、`RUNTIME_BUSY`、`RUNTIME_NOT_INSTALLED`、`RUNTIME_START_TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`。
 
 `tun` 连接换新后台组件失败时，`PRECONDITION_FAILED` 的 `details.reason` 取值见 `commands.md` §7.1：`tun_denied` / `helper_admin_cancelled` / `helper_start_failed` / `helper_missing` / `dev_unbundled` / `helper_busy` / `helper_lease_unavailable` / `helper_file_invalid`；连接被切配置 / 断开取代时是 `cancelled`（请求作废，不是故障，不要重试）。模型只按 `message` 转述，不暴露 code；`dev_unbundled` 表示当前是未打包的调试进程，需要引导用户用 `bash scripts/dev/tun-dev.sh` 启动打包后的 App；`helper_admin_cancelled` 是用户取消了授权，可以让用户再试一次，不要说成「去系统设置允许」。2026-11-13 补记，字段不变，不升版本。
 
@@ -717,6 +721,7 @@ type CatalogSearchData = {
 - `config_id` 省略 → 用 active 配置；没有任何配置 → `PRECONDITION_FAILED / no_config`。
 - **没有 `node_id` 参数**：用该配置的 `current_node_id`，为空时用节点集第一个。要指定节点先调 `NodeSwitch`（未连接时只改选择，连接中则热切），再调本工具。
 - 节点集为空 → `PRECONDITION_FAILED / no_nodes`。
+- **连接前自动停旧连接**：已有连接在跑（已连接或正在启动）、目标为另一套配置时，先停干净再连；不要求调用方先断开，也不报 `other_config_running`。
 
 `data`（**按 `mode` 分两种形状，返回类型是 `VpnConnectData | TunConnectData`，不要混用**）：
 
@@ -861,7 +866,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.10.1";
+  contract_version: "3.11.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1024,7 +1029,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.10.1";
+  contract_version: "3.11.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -2023,6 +2028,14 @@ type CoreUpgradeData = {
 ---
 
 ## 8. 变更记录
+
+### 3.11.0（2026-11-13，连接前自动停旧连接）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.11.0` | 元数据 | `RuntimeStart` / `VpnConnect` 语义变更 |
+| 2 | `RuntimeStart` 与 `VpnConnect` 在目标为另一套配置时**先停旧连接再启动**，删除 `PRECONDITION_FAILED / other_config_running`；模型不再需要先断开或调用 `ConfigActivate` 收口 | 语义变更 | 用户：切换配置不断开，点连接时才断旧连接 |
+| 3 | `ConfigActivate` 只改 active、不重连（`commands.md` 2.20.0）；工具侧路径不受影响 | 说明 | 同批 |
 
 ### 3.10.1（2026-11-12，解释门禁）
 

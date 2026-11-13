@@ -139,11 +139,8 @@ pub trait VpnToolServices: Send + Sync {
         input: ConfigUpdateInput,
     ) -> anyhow::Result<Value>;
     async fn config_delete(&self, config_id: &str) -> anyhow::Result<Value>;
-    async fn config_activate(
-        &self,
-        config_id: &str,
-        confirm_disconnect: bool,
-    ) -> anyhow::Result<Value>;
+    /// 只改 active（当前用哪套），不碰运行时；断开只发生在 `runtime_start`。
+    async fn config_activate(&self, config_id: &str) -> anyhow::Result<Value>;
 
     async fn node_import_url(&self, config_id: Option<String>, url: &str) -> anyhow::Result<Value>;
     /// 用户粘贴的节点文本：逐行解析 `ss://`，**不发网络请求**。
@@ -419,11 +416,7 @@ impl VpnToolServices for NotWiredServices {
         not_wired("删除配置")
     }
 
-    async fn config_activate(
-        &self,
-        _config_id: &str,
-        _confirm_disconnect: bool,
-    ) -> anyhow::Result<Value> {
+    async fn config_activate(&self, _config_id: &str) -> anyhow::Result<Value> {
         not_wired("激活配置")
     }
 
@@ -810,7 +803,28 @@ fn service_error_fields(error: &anyhow::Error) -> (String, Option<String>, Optio
 ///
 /// 只挂在错误的 `details.connect_changed` 上，供 `VpnConnect` 的展示层选择
 /// 「已恢复原样 / 没有改动 / 不确定」。不改任何服务签名。
+///
+/// 连接新配置前会先停掉旧连接（`runtime_start` 自动收口）：停过之后再失败，
+/// 绝不能报「没有改动」——旧连接已经不在了。
 fn connect_changed_state(error: &anyhow::Error) -> &'static str {
+    let old_stopped = error
+        .downcast_ref::<ServiceError>()
+        .and_then(|service| service.details.as_ref())
+        .and_then(|details| details.get("old_connection_stopped"))
+        .and_then(Value::as_bool);
+    if old_stopped == Some(false) {
+        // 停旧失败：网络状态不确定。
+        return "unknown";
+    }
+    let base = connect_changed_base(error);
+    if old_stopped == Some(true) && base == "none" {
+        "restored"
+    } else {
+        base
+    }
+}
+
+fn connect_changed_base(error: &anyhow::Error) -> &'static str {
     let Some(service) = error.downcast_ref::<ServiceError>() else {
         return "none";
     };
@@ -895,6 +909,26 @@ fn with_connect_changed(error: anyhow::Error, changed: &'static str) -> anyhow::
     };
     details["connect_changed"] = json!(changed);
     svc_error_with_details(code, message, details)
+}
+
+/// 这次连接已被切配置 / 断开取代：不是失败，由新连接的事件接续。
+fn is_cancelled_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ServiceError>()
+        .and_then(|service| service.details.as_ref())
+        .and_then(|details| details.get("reason"))
+        .and_then(Value::as_str)
+        == Some("cancelled")
+}
+
+/// 给失败打上「旧连接已经被停掉 / 停旧失败」的标记，供 `connect_changed_state` 用。
+fn mark_old_connection_stopped(error: anyhow::Error, stopped: bool) -> anyhow::Error {
+    let Some(service) = error.downcast_ref::<ServiceError>() else {
+        return error;
+    };
+    let mut details = service.details.clone().unwrap_or_else(|| json!({}));
+    details["old_connection_stopped"] = json!(stopped);
+    svc_error_with_details(service.code.clone(), service.message.clone(), details)
 }
 
 /// 把错误映射成「卡在哪一步」，只用于 debug 日志。
@@ -2051,6 +2085,9 @@ pub struct WiredServices {
     tun: Arc<crate::tun::session::TunSession>,
     helper: Arc<crate::tun::helper_update::HelperUpdater>,
     probes: Arc<crate::tools::probe_batch::ProbeBatchState>,
+    /// 最近一次 TUN 状态事件的目标状态：事件链的 `from` 用它，
+    /// 不能硬编码 idle（失败后再连应当是 failed → starting）。
+    tun_event_state: std::sync::Mutex<crate::runtime::RuntimeState>,
 }
 
 impl WiredServices {
@@ -2078,6 +2115,7 @@ impl WiredServices {
             tun,
             helper,
             probes: Arc::new(crate::tools::probe_batch::ProbeBatchState::default()),
+            tun_event_state: std::sync::Mutex::new(crate::runtime::RuntimeState::Idle),
         }
     }
 
@@ -2323,6 +2361,55 @@ impl WiredServices {
             None
         };
         resolve_clash_endpoint(tun_connected, plan, tun)
+    }
+
+    /// 当前连接（TUN 或代理）的完整快照。`runtime_status` 与状态事件共用。
+    async fn connection_status(&self) -> crate::runtime::RuntimeStatus {
+        if let crate::tun::session::TunState::Running { pid } = self.tun.status() {
+            let meta = self.tun.launch_meta();
+            let (data_plane, health_checked_at) = self.tun.data_plane_health();
+            crate::runtime::RuntimeStatus::tun(crate::runtime::TunSnapshotInput {
+                pid,
+                config_id: meta.as_ref().map(|meta| meta.config_id.clone()),
+                config_name: meta.as_ref().and_then(|meta| meta.config_name.clone()),
+                node_id: meta.as_ref().and_then(|meta| meta.node_id.clone()),
+                node_name: meta.as_ref().and_then(|meta| meta.node_name.clone()),
+                applied_route_revision: meta.as_ref().and_then(|meta| meta.applied_route_revision),
+                route_region: meta.as_ref().and_then(|meta| meta.route_region.clone()),
+                connected_since: self.tun.connected_since(),
+                uptime_seconds: self.tun.uptime_seconds(),
+                system_dns: Some(system_dns_label(self.tun.dns_hijack().as_ref()).to_string()),
+                data_plane,
+                health_checked_at,
+            })
+        } else {
+            self.manager.status().await
+        }
+    }
+
+    /// 当前可用运行时的版本。`runtime.md` §2.5：未运行时 `upstream_version`
+    /// 不得为 `null`（只要还有可用运行时），事件快照同样适用。
+    async fn available_runtime_version(&self) -> Option<String> {
+        self.available_runtime().await.map(|(version, _)| version)
+    }
+
+    /// 最近一次 TUN 事件的目标状态，用作下一条事件的 `from`。
+    fn last_tun_state(&self) -> crate::runtime::RuntimeState {
+        *self.tun_event_state.lock().unwrap()
+    }
+
+    /// TUN 的状态变化并进 manager 的事件流：界面与托盘只订阅这一条。
+    fn publish_tun_state(
+        &self,
+        from: crate::runtime::RuntimeState,
+        to: crate::runtime::RuntimeState,
+        event: crate::runtime::RuntimeEventKind,
+        reason: Option<String>,
+        snapshot: crate::runtime::RuntimeStatus,
+    ) {
+        log::debug!("TUN 状态变化 {from:?} → {to:?} event={event:?}");
+        self.manager.publish_state(from, to, event, reason, snapshot);
+        *self.tun_event_state.lock().unwrap() = to;
     }
 
     /// 连接状态：TUN 的进程不归 manager 管，必须先看 `TunSession`，
@@ -3067,26 +3154,7 @@ impl VpnToolServices for WiredServices {
         // TUN 的进程不归 RuntimeManager 管，状态得单独报，否则界面会显示「未连接」。
         // **必须返回与代理模式同形状的完整快照**：手工拼 JSON 少一个 `health`
         // 就会让 `bridge.ts` 读 undefined 直接崩（helper 在 App 崩溃后仍存活的接手场景）。
-        let mut status = if let crate::tun::session::TunState::Running { pid } = self.tun.status() {
-            let meta = self.tun.launch_meta();
-            let (data_plane, health_checked_at) = self.tun.data_plane_health();
-            crate::runtime::RuntimeStatus::tun(crate::runtime::TunSnapshotInput {
-                pid,
-                config_id: meta.as_ref().map(|meta| meta.config_id.clone()),
-                config_name: meta.as_ref().and_then(|meta| meta.config_name.clone()),
-                node_id: meta.as_ref().and_then(|meta| meta.node_id.clone()),
-                node_name: meta.as_ref().and_then(|meta| meta.node_name.clone()),
-                applied_route_revision: meta.as_ref().and_then(|meta| meta.applied_route_revision),
-                route_region: meta.as_ref().and_then(|meta| meta.route_region.clone()),
-                connected_since: self.tun.connected_since(),
-                uptime_seconds: self.tun.uptime_seconds(),
-                system_dns: Some(system_dns_label(self.tun.dns_hijack().as_ref()).to_string()),
-                data_plane,
-                health_checked_at,
-            })
-        } else {
-            self.manager.status().await
-        };
+        let mut status = self.connection_status().await;
 
         // 未运行时 `upstream_version` 由 manager 置 null，但「不可用」和「没运行」
         // 是两件事：把当前可用的运行时版本与来源一并报出来，消费方不必再去猜。
@@ -3148,6 +3216,48 @@ impl VpnToolServices for WiredServices {
         );
         // 启动窗口里 stop 也必须算数：此时还没 pid，但确实有一次连接在途。
         let tun_launching = self.tun.is_launching();
+        let tun_live = tun_running || tun_launching;
+        // 停止失败时要如实报出「哪套配置没停掉」：`stop` 内部会清掉在途登记。
+        let stop_config = if tun_launching {
+            self.tun.launching_config_id()
+        } else {
+            connected.clone()
+        };
+        // TUN 的断开同样要进事件流：主界面与托盘都靠它才知道「真的断了」。
+        // 运行时版本一次操作只查一次：它要起 `sing-box version` 并验签，别为每条事件重复付。
+        let mut tun_runtime_version: Option<String> = None;
+        if tun_live {
+            tun_runtime_version = self.available_runtime_version().await;
+            let snapshot = if tun_running {
+                let mut snapshot = self.connection_status().await;
+                snapshot.state = crate::runtime::RuntimeState::Stopping;
+                snapshot
+            } else {
+                crate::runtime::RuntimeStatus::tun_pending(
+                    crate::runtime::RuntimeState::Stopping,
+                    self.tun.launching_config_id(),
+                    tun_runtime_version.clone(),
+                )
+            };
+            // `from` 跟上一条 TUN 事件（停过一次失败后再断，接的是 failed 而不是 running）；
+            // 只有从没发过事件时（接手旧连接 / 测试夹具）才按现实补一个。
+            let from = match self.last_tun_state() {
+                crate::runtime::RuntimeState::Idle if tun_running => {
+                    crate::runtime::RuntimeState::Running
+                }
+                crate::runtime::RuntimeState::Idle if tun_launching => {
+                    crate::runtime::RuntimeState::Starting
+                }
+                other => other,
+            };
+            self.publish_tun_state(
+                from,
+                crate::runtime::RuntimeState::Stopping,
+                crate::runtime::RuntimeEventKind::StopReq,
+                None,
+                snapshot,
+            );
+        }
         let mode = if tun_running || tun_launching {
             "tun"
         } else if before.mode.is_some() {
@@ -3174,6 +3284,20 @@ impl VpnToolServices for WiredServices {
                 error.code,
                 error.message
             ),
+        }
+        if tun_live && tun_stop_error.is_none() {
+            // TUN 已经真的停了：立刻发 idle，界面与托盘先一步达成一致。
+            self.publish_tun_state(
+                crate::runtime::RuntimeState::Stopping,
+                crate::runtime::RuntimeState::Idle,
+                crate::runtime::RuntimeEventKind::Stopped,
+                None,
+                crate::runtime::RuntimeStatus::tun_pending(
+                    crate::runtime::RuntimeState::Idle,
+                    None,
+                    tun_runtime_version.clone(),
+                ),
+            );
         }
 
         let proxy_started = std::time::Instant::now();
@@ -3223,6 +3347,30 @@ impl VpnToolServices for WiredServices {
                 },
                 started.elapsed().as_millis()
             );
+            // 停在 stopping 会让界面与托盘分叉；但也绝不能报 running——登记已被清掉，
+            // 那样会得到「在跑却没有 pid / 配置」的假快照。如实报失败并带上原因。
+            if tun_live {
+                let mut snapshot = crate::runtime::RuntimeStatus::tun_pending(
+                    crate::runtime::RuntimeState::Failed,
+                    stop_config,
+                    tun_runtime_version,
+                );
+                snapshot.last_error = Some(crate::runtime::RuntimeErrorInfo {
+                    contract_version: crate::runtime::CONTRACT_VERSION,
+                    code: "INTERNAL".into(),
+                    message: format!("特权连接没有停掉：{}", error.message),
+                    retryable: false,
+                    details: None,
+                    request_id: String::new(),
+                });
+                self.publish_tun_state(
+                    crate::runtime::RuntimeState::Stopping,
+                    crate::runtime::RuntimeState::Failed,
+                    crate::runtime::RuntimeEventKind::GiveUp,
+                    Some(format!("stop_failed: {}", error.message)),
+                    snapshot,
+                );
+            }
             return Err(svc_error_with_details(
                 "INTERNAL",
                 format!("特权连接没有停掉：{}", error.message),
@@ -3996,11 +4144,7 @@ impl VpnToolServices for WiredServices {
         }))
     }
 
-    async fn config_activate(
-        &self,
-        config_id: &str,
-        confirm_disconnect: bool,
-    ) -> anyhow::Result<Value> {
+    async fn config_activate(&self, config_id: &str) -> anyhow::Result<Value> {
         if crate::lifecycle::is_quitting() {
             return Err(svc_error_with_details(
                 "PRECONDITION_FAILED",
@@ -4008,92 +4152,26 @@ impl VpnToolServices for WiredServices {
                 json!({ "reason": "quitting" }),
             ));
         }
+        // 只改 active：切换是导航，连接是动作。旧连接留到用户点「连接」时由
+        // `runtime_start` 先停再起（§7.1），这里不断开、不重连、不碰运行时。
         let target = self.require_config(config_id)?;
-        // TUN 的进程不在 manager 里，必须按连接状态统一判定，否则会静默切配置。
-        let connection = self.connection_state().await;
-        // 正在连也算「有连接」：TUN 首次启动要十几秒，这期间既没 pid 也没 meta，
-        // 只看 `connected` 就会把「正在连」当成「没在连」，静默改 active。
-        let live = connection.connected || connection.launching;
-        let live_config = if connection.connected {
-            connection.config_id.clone()
-        } else {
-            connection.launching_config.clone()
-        };
-
-        if !live {
-            {
-                let conn = self.store.conn();
-                configs::activate(&conn, config_id)
-                    .map_err(|error| svc_error(error.code(), error))?;
-            }
-            self.emit_config_changed("activated", Some(&target));
+        // 已经是 active：幂等返回，不再发「切换」事件。
+        if self.active_config_id().as_deref() == Some(config_id) {
             return Ok(json!({
                 "active_config_id": config_id,
-                "reconnect": "not_running",
-                "runtime": Value::Null,
-            }));
-        }
-
-        if live_config.as_deref() == Some(config_id) {
-            {
-                let conn = self.store.conn();
-                configs::activate(&conn, config_id)
-                    .map_err(|error| svc_error(error.code(), error))?;
-            }
-            return Ok(json!({
-                "active_config_id": config_id,
-                // 已经连在这套（或正在连它）：这里没有重新连一次，不能报 reconnected。
-                "reconnect": "already_connected",
                 "runtime": self.runtime_status().await?,
             }));
         }
-
-        if !confirm_disconnect {
-            return Err(svc_error_with_details(
-                "PRECONDITION_FAILED",
-                "切换配置会断开当前连接",
-                json!({
-                    "reason": "will_disconnect",
-                    "connected_config_id": live_config,
-                }),
-            ));
-        }
-
-        // 启动窗口里也在这一步收口：先作废在途启动，再等它停干净。
-        self.runtime_stop(false).await?;
         {
             let conn = self.store.conn();
             configs::activate(&conn, config_id).map_err(|error| svc_error(error.code(), error))?;
         }
         self.emit_config_changed("activated", Some(&target));
-
-        let node_count = {
-            let conn = self.store.conn();
-            configs::node_count(&conn, config_id).map_err(|error| svc_error(error.code(), error))?
-        };
-        if node_count == 0 {
-            return Ok(json!({
-                "active_config_id": config_id,
-                "reconnect": "skipped_no_nodes",
-                "runtime": Value::Null,
-            }));
-        }
-
-        match self.runtime_start(Some(config_id.to_string())).await {
-            Ok(runtime) => Ok(json!({
-                "active_config_id": config_id,
-                "reconnect": "reconnected",
-                "runtime": runtime,
-            })),
-            Err(error) => {
-                log::warn!("切换配置后自动重连失败：{error}");
-                Ok(json!({
-                    "active_config_id": config_id,
-                    "reconnect": "reconnect_failed",
-                    "runtime": self.runtime_status().await?,
-                }))
-            }
-        }
+        Ok(json!({
+            "active_config_id": config_id,
+            // 当前连接快照；可能仍属于另一套配置，调用方不得据此推断「已断开」。
+            "runtime": self.runtime_status().await?,
+        }))
     }
 
     async fn node_import_url(&self, config_id: Option<String>, url: &str) -> anyhow::Result<Value> {
@@ -5933,7 +6011,68 @@ impl WiredServices {
         })
     }
 
+    /// 连接一套配置：先把上一套（或还在启动的那一套）收干净，再交给 `connect_body`。
     async fn connect_inner(&self, config: &configs::Config) -> anyhow::Result<Value> {
+        let connection = self.connection_state().await;
+        let same_config = |id: Option<&str>| id == Some(config.id.as_str());
+
+        // 已连接同一套：幂等返回当前快照。
+        if connection.connected
+            && !connection.launching
+            && same_config(connection.config_id.as_deref())
+        {
+            log::info!("同一套配置已连接，幂等返回：{}", config.id);
+            let mut snapshot = self.runtime_status().await?;
+            snapshot["already_running"] = json!(true);
+            return Ok(snapshot);
+        }
+        // 同一套还在启动：也幂等——别为了一个重复请求把正在起来的连接重启一遍。
+        // 契约 §7.1：幂等只有这一种例外，返回的是 `starting` 快照。
+        if connection.launching
+            && !connection.connected
+            && same_config(connection.launching_config.as_deref())
+        {
+            log::info!("同一套配置正在启动，幂等返回：{}", config.id);
+            let snapshot = crate::runtime::RuntimeStatus::tun_pending(
+                crate::runtime::RuntimeState::Starting,
+                Some(config.id.clone()),
+                self.available_runtime_version().await,
+            );
+            let mut value = serde_json::to_value(snapshot).map_err(|e| svc_error("INTERNAL", e))?;
+            value["already_running"] = json!(true);
+            return Ok(value);
+        }
+
+        let mut old_stopped = false;
+        if connection.connected || connection.launching {
+            log::info!(
+                "连接前先停旧连接：connected={} launching={} old={:?} target={}",
+                connection.connected,
+                connection.launching,
+                connection.config_id,
+                config.id
+            );
+            // 停不掉就如实报错，不继续启动——报「失败」却起了第二条连接是最坏的组合。
+            if let Err(error) = self.runtime_stop(false).await {
+                // 用户的网络已经被动过（哪怕只动了一半）：不能说「没有改动」。
+                return Err(mark_old_connection_stopped(error, false));
+            }
+            old_stopped = true;
+        }
+
+        let result = self.connect_body(config).await;
+        match result {
+            Ok(mut value) => {
+                value["already_running"] = json!(false);
+                Ok(value)
+            }
+            // 旧连接已经被停掉：之后的失败不能让工具说「没有改动」。
+            Err(error) if old_stopped => Err(mark_old_connection_stopped(error, true)),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn connect_body(&self, config: &configs::Config) -> anyhow::Result<Value> {
         log::info!(
             "连接开始 config={} mode={} routing={}",
             config.id,
@@ -6019,7 +6158,25 @@ impl WiredServices {
             .cloned()
             .ok_or_else(|| svc_error("PRECONDITION_FAILED", "当前节点凭据缺失，请重新导入"))?;
 
-        let started = if config.connection_mode == configs::CONNECTION_TUN {
+        // TUN 的进程不归 manager 管，但主界面与托盘只认同一条 `runtime-state-changed`：
+        // 不发事件，就只能各读一份状态，迟早出现「界面已断开、托盘还连着」。
+        let is_tun = config.connection_mode == configs::CONNECTION_TUN;
+        if is_tun {
+            // `from` 取上一条 TUN 事件的目标状态：失败后再连应当是 failed → starting。
+            let from = self.last_tun_state();
+            self.publish_tun_state(
+                from,
+                crate::runtime::RuntimeState::Starting,
+                crate::runtime::RuntimeEventKind::StartReq,
+                None,
+                crate::runtime::RuntimeStatus::tun_pending(
+                    crate::runtime::RuntimeState::Starting,
+                    Some(config.id.clone()),
+                    self.available_runtime_version().await,
+                ),
+            );
+        }
+        let started = if is_tun {
             // TUN 的 mixed 入站继续随机、不上报，也不使用用户设置；
             // 只是随机时避开设置端口，避免和之后的系统代理连接抢同一个端口。
             let configured_port = {
@@ -6137,6 +6294,16 @@ impl WiredServices {
 
         match started {
             Ok(data) => {
+                if is_tun {
+                    let snapshot = self.connection_status().await;
+                    self.publish_tun_state(
+                        crate::runtime::RuntimeState::Starting,
+                        crate::runtime::RuntimeState::Running,
+                        crate::runtime::RuntimeEventKind::ProcessReady,
+                        None,
+                        snapshot,
+                    );
+                }
                 {
                     let conn = self.store.conn();
                     let _ = configs::mark_used(&conn, &config.id);
@@ -6153,6 +6320,32 @@ impl WiredServices {
                 Ok(data)
             }
             Err(error) => {
+                // 启动失败也要进事件流：界面与托盘不能一个停在「连接中」、另一个回到空闲。
+                // 被新操作取代（`cancelled`）不报失败：紧接着会有新连接的 starting。
+                if is_tun && !is_cancelled_error(&error) {
+                    let mut snapshot = crate::runtime::RuntimeStatus::tun_pending(
+                        crate::runtime::RuntimeState::Failed,
+                        Some(config.id.clone()),
+                        self.available_runtime_version().await,
+                    );
+                    if let Some(service) = error.downcast_ref::<ServiceError>() {
+                        snapshot.last_error = Some(crate::runtime::RuntimeErrorInfo {
+                            contract_version: crate::runtime::CONTRACT_VERSION,
+                            code: service.code.clone(),
+                            message: service.message.clone(),
+                            retryable: service.retryable,
+                            details: service.details.clone(),
+                            request_id: String::new(),
+                        });
+                    }
+                    self.publish_tun_state(
+                        crate::runtime::RuntimeState::Starting,
+                        crate::runtime::RuntimeState::Failed,
+                        crate::runtime::RuntimeEventKind::GiveUp,
+                        Some(error.to_string()),
+                        snapshot,
+                    );
+                }
                 // 连接失败必须留痕：界面只显示一句话，日志里没有记录就没法定位。
                 match error.downcast_ref::<ServiceError>() {
                     Some(service) => log::error!(
@@ -6199,6 +6392,43 @@ impl WiredServices {
         // 从这一步起就算「正在连」：下面要建配置、等 helper 检查、再让 helper 拉
         // sing-box，真机要十几秒。这期间切配置 / 断开必须看得见这次连接在途。
         let launch = self.tun.begin_launch(&config.id);
+        let result = self
+            .start_tun_connection_inner(
+                &launch,
+                config,
+                descriptors,
+                current,
+                plan,
+                mixed_port,
+                clash_port,
+                clash_secret,
+                route_region,
+            )
+            .await;
+        // 任何早退（节点解析、建配置、helper 检查……）之后都要再看一眼代次：
+        // 被取代的连接不能「迟到的失败」把新连接的事件链打断。
+        match result {
+            Err(_) if launch.cancelled() => {
+                log::info!("连接已被新的操作取代，放弃这次 TUN 启动：{}", config.id);
+                Err(cancelled_connection_error())
+            }
+            other => other,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_tun_connection_inner(
+        &self,
+        launch: &crate::tun::session::LaunchSlot<'_>,
+        config: &configs::Config,
+        descriptors: &[vpn_config::NodeDescriptor],
+        current: &vpn_config::NodeDescriptor,
+        plan: &crate::rules::plan::RoutePlan,
+        mixed_port: u16,
+        clash_port: u16,
+        clash_secret: String,
+        route_region: Option<String>,
+    ) -> anyhow::Result<Value> {
         // 排除表 = 固定表 + 本机反推 + 用户补充 + 节点服务器旁路。
         // 最后一项不能省：节点服务器若落在被接管段里，sing-box 连自己也会绕成环路。
         let local = crate::tun::subnets(&crate::tun::collect());
@@ -7707,9 +7937,9 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// TUN 连接时切到另一套配置：必须先要求确认，不能静默切走。
+    /// 已连接时切到另一套：只改 active，连接保持原样、不断开也不重连。
     #[tokio::test]
-    async fn config_activate_sees_a_running_tun_connection() {
+    async fn config_activate_only_switches_active_while_connected() {
         let dir = temp_dir();
         let services = services(&dir);
         let a = services
@@ -7723,29 +7953,34 @@ mod config_service_tests {
             .unwrap();
         let b_id = b["config_id"].as_str().unwrap().to_string();
 
-        services.tun.force_running_for_test(4242, Some(&b_id));
-        let error = services.config_activate(&a_id, false).await.unwrap_err();
-        let service = error.downcast_ref::<ServiceError>().unwrap();
-        assert_eq!(service.code, "PRECONDITION_FAILED");
-        assert_eq!(
-            service.details.as_ref().unwrap()["reason"],
-            "will_disconnect"
-        );
-        assert_eq!(
-            service.details.as_ref().unwrap()["connected_config_id"],
-            b_id
+        // 先把 active 摆到 A（新建的 B 默认会变成 active），再在 A 已连接时切到 B。
+        services.config_activate(&a_id).await.unwrap();
+        services.tun.force_running_for_test(4242, Some(&a_id));
+        let result = services.config_activate(&b_id).await.unwrap();
+        assert_eq!(result["active_config_id"], b_id);
+        assert!(
+            result.get("reconnect").is_none(),
+            "reconnect 字段已从契约删除：{result}"
         );
 
-        // 未确认时活动配置不变。
+        // 连接没被动过：跑的还是原来那一套。
+        assert_eq!(
+            services.tun.status(),
+            crate::tun::session::TunState::Running { pid: 4242 }
+        );
+        assert_eq!(
+            services.tun.connected_config_id().as_deref(),
+            Some(a_id.as_str())
+        );
         let list = services.config_list().await.unwrap();
         assert_eq!(list["active_config_id"], b_id);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 启动窗口里切到别的配置：不算「没在连」，必须先要确认。
+    /// 启动窗口里切配置：同样只改 active，不取消在途启动。
     #[tokio::test]
-    async fn config_activate_requires_confirmation_while_tun_is_starting() {
+    async fn config_activate_does_not_touch_a_launch_in_flight() {
         let dir = temp_dir();
         let services = services(&dir);
         let a = services
@@ -7761,59 +7996,13 @@ mod config_service_tests {
 
         // TUN 正在启动：还没有 pid，但这次连接已经算在途。
         services.tun.force_launching_for_test(&b_id);
-        let error = services.config_activate(&a_id, false).await.unwrap_err();
-        let service = error.downcast_ref::<ServiceError>().unwrap();
-        assert_eq!(service.code, "PRECONDITION_FAILED");
+        let result = services.config_activate(&a_id).await.unwrap();
+        assert_eq!(result["active_config_id"], a_id);
+        assert!(services.tun.is_launching(), "切换不能取消在途启动");
         assert_eq!(
-            service.details.as_ref().unwrap()["reason"],
-            "will_disconnect"
+            services.tun.launching_config_id().as_deref(),
+            Some(b_id.as_str())
         );
-        assert_eq!(
-            service.details.as_ref().unwrap()["connected_config_id"],
-            b_id
-        );
-
-        // 未确认时活动配置不变，启动也不受影响。
-        let list = services.config_list().await.unwrap();
-        assert_eq!(list["active_config_id"], b_id);
-        assert!(services.tun.is_launching(), "拒绝切换不能把在途启动吞掉");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 目标就是正在启动的那套：幂等返回，不要取消它、也不要谎报重连过。
-    #[tokio::test]
-    async fn config_activate_to_the_launching_config_is_idempotent() {
-        let dir = temp_dir();
-        let services = services(&dir);
-        let created = services
-            .config_create(create_input("启动窗口回切"))
-            .await
-            .unwrap();
-        let config_id = created["config_id"].as_str().unwrap().to_string();
-
-        services.tun.force_launching_for_test(&config_id);
-        let result = services.config_activate(&config_id, false).await.unwrap();
-        assert_eq!(result["reconnect"], "already_connected");
-        assert!(services.tun.is_launching(), "幂等分支不能取消在途启动");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 已连接的目标配置同样如实报 `already_connected`。
-    #[tokio::test]
-    async fn config_activate_to_the_connected_config_reports_already_connected() {
-        let dir = temp_dir();
-        let services = services(&dir);
-        let created = services
-            .config_create(create_input("已连回切"))
-            .await
-            .unwrap();
-        let config_id = created["config_id"].as_str().unwrap().to_string();
-
-        services.tun.force_running_for_test(4242, Some(&config_id));
-        let result = services.config_activate(&config_id, false).await.unwrap();
-        assert_eq!(result["reconnect"], "already_connected");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -8815,7 +9004,7 @@ mod main_flow_tests {
     use super::*;
     use crate::proxy::backup::MemoryBackupStore;
     use crate::proxy::PlatformProxy;
-    use crate::runtime::{RuntimeConfig, RuntimeManager, RuntimeResult};
+    use crate::runtime::{RuntimeConfig, RuntimeManager, RuntimeResult, RuntimeState};
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -9131,12 +9320,14 @@ mod main_flow_tests {
         );
 
         // ---- 2. 激活 ----
-        // 从「未连接」切过来不会顺带连接：替用户连等于替他做决定。
-        // 已经连着的时候才会重连（`reconnect: "reconnected"`）。
-        let activated = h.services.config_activate(&config_id, false).await.unwrap();
+        // 从「未连接」切过来不会顺带连接，也不会碰运行时：切换只是导航。
+        let activated = h.services.config_activate(&config_id).await.unwrap();
         assert_eq!(activated["active_config_id"], config_id.as_str());
-        assert_eq!(activated["reconnect"], "not_running", "{activated}");
-        assert!(activated["runtime"].is_null());
+        assert!(
+            activated.get("reconnect").is_none(),
+            "reconnect 字段已删除：{activated}"
+        );
+        assert_eq!(activated["runtime"]["state"], "idle");
 
         let list = h.services.config_list().await.unwrap();
         assert_eq!(
@@ -9304,6 +9495,448 @@ mod main_flow_tests {
 
         stop_runtime(&h).await;
         drop(watcher);
+    }
+
+    // ---------- 静默 TUN 后端：只记录 stop，不碰真实 XPC ----------
+    #[derive(Default)]
+    struct SilentTun {
+        stops: std::sync::atomic::AtomicUsize,
+        fail_stop: bool,
+    }
+
+    impl SilentTun {
+        fn failing() -> Self {
+            Self {
+                stops: Default::default(),
+                fail_stop: true,
+            }
+        }
+
+        fn stops(&self) -> usize {
+            self.stops.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl crate::tun::backend::TunBackend for SilentTun {
+        fn availability(
+            &self,
+        ) -> Result<crate::tun::privilege::HelperStatus, crate::tun::backend::TunError> {
+            Ok(crate::tun::privilege::HelperStatus::Enabled)
+        }
+
+        fn ensure_available(
+            &self,
+        ) -> Result<crate::tun::privilege::HelperStatus, crate::tun::backend::TunError> {
+            Ok(crate::tun::privilege::HelperStatus::Enabled)
+        }
+
+        fn start(
+            &self,
+            _config: &str,
+        ) -> Result<crate::tun::backend::StartReply, crate::tun::backend::TunError> {
+            unreachable!("这些用例只验证「连之前先停」")
+        }
+
+        fn stop(&self) -> Result<(), crate::tun::backend::TunError> {
+            self.stops
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_stop {
+                return Err(crate::tun::backend::TunError::new(
+                    crate::tun::backend::TunErrorCode::TunStartFailed,
+                    "停不掉旧隧道",
+                ));
+            }
+            Ok(())
+        }
+
+        fn status(
+            &self,
+        ) -> Result<crate::tun::backend::TunSnapshot, crate::tun::backend::TunError> {
+            Ok(crate::tun::backend::TunSnapshot {
+                running: false,
+                pid: None,
+                clash_api: None,
+                since: None,
+                last_error: None,
+                dns_hijack: Default::default(),
+                helper_build: None,
+                helper_version: None,
+                helper_pid: None,
+            })
+        }
+
+        fn restart(&self) -> Result<(), crate::tun::backend::TunError> {
+            Ok(())
+        }
+    }
+
+    fn inject_silent_tun(services: &mut WiredServices, backend: Arc<SilentTun>) {
+        services.tun = Arc::new(crate::tun::session::TunSession::with_backend(
+            backend, "silent",
+        ));
+    }
+
+    /// 连新配置前先把在跑的 TUN 停掉：不允许两条连接并存。
+    #[tokio::test]
+    async fn connecting_another_config_stops_the_running_tun_first() {
+        let mut h = harness();
+        let old = h.services.config_create(auto_port_input("旧 TUN")).await.unwrap();
+        let old_id = old["config_id"].as_str().unwrap().to_string();
+        // 新配置没有节点：连到「取节点」这一步就会失败，正好证明旧的已经先停了。
+        let new = h.services.config_create(auto_port_input("新代理")).await.unwrap();
+        let new_id = new["config_id"].as_str().unwrap().to_string();
+
+        let backend = Arc::new(SilentTun::default());
+        inject_silent_tun(&mut h.services, Arc::clone(&backend));
+        h.services
+            .tun
+            .force_running_for_test(4242, Some(&old_id));
+
+        let error = h
+            .services
+            .runtime_start(Some(new_id))
+            .await
+            .expect_err("新配置没有节点，连接应当失败");
+        assert_eq!(backend.stops(), 1, "旧 TUN 必须在启动新连接前被停掉");
+        assert_eq!(
+            h.services.tun.status(),
+            crate::tun::session::TunState::Stopped
+        );
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "no_nodes",
+            "停完旧连接后应当继续走到新连接的准备阶段"
+        );
+    }
+
+    /// 反向同样成立：连 TUN 配置前先把在跑的代理运行时停掉。
+    #[tokio::test]
+    async fn connecting_a_tun_config_stops_the_running_proxy_first() {
+        let mut h = harness();
+        // 假运行时不会自己监听端口；启动判定要看到端口才成立。
+        let watcher = spawn_port_watcher(h.dir.clone());
+        let proxy_id = create_config_with_node(&h.services, "旧代理", "pw-old").await;
+        let connected = h.services.runtime_start(Some(proxy_id)).await.unwrap();
+        assert_eq!(connected["state"], "running");
+
+        let mut tun_input = auto_port_input("新 TUN");
+        tun_input.connect_mode = configs::CONNECTION_TUN.into();
+        let tun = h.services.config_create(tun_input).await.unwrap();
+        let tun_id = tun["config_id"].as_str().unwrap().to_string();
+        // 给 TUN 配置一个节点：否则会先倒在 no_nodes，走不到组件检查。
+        h.services
+            .node_create(NodeCreateInput {
+                config_id: Some(tun_id.clone()),
+                name: "东京".into(),
+                server: "198.51.100.30".into(),
+                port: 8388,
+                password: "pw-tun".into(), // secret-scan:allow 测试夹具口令
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+
+        let backend = Arc::new(SilentTun::default());
+        inject_silent_tun(&mut h.services, Arc::clone(&backend));
+        let error = h
+            .services
+            .runtime_start(Some(tun_id))
+            .await
+            .expect_err("测试进程不是打包后的 .app，TUN 必然连不上");
+        assert_eq!(backend.stops(), 1, "连 TUN 前必须停掉在跑的代理运行时");
+        assert_eq!(
+            h.services.manager.status().await.state,
+            RuntimeState::Idle,
+            "旧代理运行时必须停干净"
+        );
+        assert_eq!(h.proxy_calls.lock().unwrap().restored, 1, "系统代理要撤掉");
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "dev_unbundled",
+            "旧连接停完后才走到 TUN 的组件检查"
+        );
+        drop(watcher);
+    }
+
+    /// 旧连接停不掉：必须报错，且不能继续启动第二条连接。
+    #[tokio::test]
+    async fn a_failing_stop_blocks_the_new_connection() {
+        let mut h = harness();
+        let old = h.services.config_create(auto_port_input("旧 TUN")).await.unwrap();
+        let old_id = old["config_id"].as_str().unwrap().to_string();
+        let new = h.services.config_create(auto_port_input("新代理")).await.unwrap();
+        let new_id = new["config_id"].as_str().unwrap().to_string();
+
+        let backend = Arc::new(SilentTun::failing());
+        inject_silent_tun(&mut h.services, Arc::clone(&backend));
+        h.services
+            .tun
+            .force_running_for_test(4242, Some(&old_id));
+
+        let mut events = h.services.manager.subscribe();
+        let error = h.services.runtime_start(Some(new_id)).await.unwrap_err();
+        assert_eq!(backend.stops(), 1);
+        let message = error.to_string();
+        assert!(
+            message.contains("特权连接没有停掉"),
+            "要如实报停止失败，不能继续启动：{message}"
+        );
+        // 停止失败要发 stopping → failed，并带上确实是哪套没停掉。
+        let seen = drain_state_events(&mut events);
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0].to, RuntimeState::Stopping);
+        assert_eq!(seen[1].to, RuntimeState::Failed);
+        assert_eq!(seen[1].snapshot.state, RuntimeState::Failed);
+        assert_eq!(
+            seen[1].snapshot.config_id.as_deref(),
+            Some(old_id.as_str()),
+            "停止内部会清在途登记，事件必须保留停止前的配置 id"
+        );
+        assert!(seen[1].snapshot.mode.is_none());
+        assert!(seen[1].snapshot.last_error.is_some());
+        assert_eq!(
+            h.services.manager.status().await.state,
+            RuntimeState::Idle,
+            "新连接不能起来"
+        );
+    }
+
+    /// 同一套已连接 / 正在启动：`runtime_start` 幂等，返回 `already_running`。
+    #[tokio::test]
+    async fn runtime_start_is_idempotent_for_the_same_config() {
+        let mut h = harness();
+        let created = h
+            .services
+            .config_create(auto_port_input("幂等连接"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
+        h.services
+            .tun
+            .force_running_for_test(4242, Some(&config_id));
+        let running = h
+            .services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(running["already_running"], true);
+        assert_eq!(running["state"], "running");
+        assert_eq!(running["pid"], 4242);
+
+        // 换一个干净的会话摆成「启动中」：不能为了重复请求把在途连接重启一遍。
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
+        h.services.tun.force_launching_for_test(&config_id);
+        let starting = h.services.runtime_start(Some(config_id)).await.unwrap();
+        assert_eq!(starting["already_running"], true);
+        assert_eq!(starting["state"], "starting");
+        assert!(h.services.tun.is_launching(), "幂等返回不能取消在途启动");
+    }
+
+    /// 启动中停止失败：事件里的 config 必须是停止前记下的那套
+    /// （`tun.stop` 内部会先 `cancel_launch` 清掉在途登记）。
+    #[tokio::test]
+    async fn stopping_a_launch_that_cannot_stop_keeps_its_config() {
+        let mut h = harness();
+        let created = h
+            .services
+            .config_create(auto_port_input("启动中停不掉"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::failing()));
+        h.services.tun.force_launching_for_test(&config_id);
+
+        let mut events = h.services.manager.subscribe();
+        h.services
+            .runtime_stop(false)
+            .await
+            .expect_err("停不掉必须报错");
+        let seen = drain_state_events(&mut events);
+
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0].from, RuntimeState::Starting);
+        assert_eq!(seen[0].to, RuntimeState::Stopping);
+        assert_eq!(
+            seen[0].snapshot.config_id.as_deref(),
+            Some(config_id.as_str())
+        );
+        assert_eq!(seen[1].to, RuntimeState::Failed);
+        assert_eq!(seen[1].snapshot.state, RuntimeState::Failed);
+        assert_eq!(
+            seen[1].snapshot.config_id.as_deref(),
+            Some(config_id.as_str()),
+            "停止前必须先把在途配置 id 取下来"
+        );
+        assert!(seen[1].snapshot.mode.is_none());
+        assert!(seen[1].snapshot.last_error.is_some());
+    }
+
+    /// 收集订阅到的状态事件（非阻塞）。TUN 现在与代理共用同一条事件流。
+    fn drain_state_events(
+        events: &mut tokio::sync::broadcast::Receiver<crate::runtime::RuntimeEvent>,
+    ) -> Vec<crate::runtime::RuntimeStateChangedPayload> {
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let crate::runtime::RuntimeEvent::StateChanged(payload) = event {
+                seen.push(payload);
+            }
+        }
+        seen
+    }
+
+    /// 启动窗口要有 starting 事件；启动失败要有 failed，且快照与 `to` 一致。
+    #[tokio::test]
+    async fn tun_start_failure_emits_starting_then_failed() {
+        let h = harness();
+        let mut events = h.services.manager.subscribe();
+        let mut input = auto_port_input("TUN 事件");
+        input.connect_mode = configs::CONNECTION_TUN.into();
+        let created = h.services.config_create(input).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        h.services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "东京".into(),
+                server: "198.51.100.30".into(),
+                port: 8388,
+                password: "pw-event".into(), // secret-scan:allow 测试夹具口令
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+
+        let _ = h
+            .services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .expect_err("测试进程不是打包后的 .app，TUN 必然连不上");
+        let seen = drain_state_events(&mut events);
+
+        assert_eq!(seen.len(), 2, "启动窗口只该有 starting → failed：{seen:?}");
+        assert_eq!(seen[0].from, RuntimeState::Idle);
+        assert_eq!(seen[0].to, RuntimeState::Starting);
+        assert_eq!(seen[0].event, "start_req");
+        assert_eq!(seen[0].snapshot.state, RuntimeState::Starting);
+        assert_eq!(
+            seen[0].snapshot.mode,
+            Some(crate::runtime::RuntimeMode::Tun)
+        );
+        assert_eq!(
+            seen[0].snapshot.config_id.as_deref(),
+            Some(config_id.as_str())
+        );
+        assert!(
+            seen[0].snapshot.upstream_version.is_some(),
+            "未运行时 upstream_version 不得为 null（runtime.md §2.5）"
+        );
+
+        assert_eq!(seen[1].from, RuntimeState::Starting);
+        assert_eq!(seen[1].to, RuntimeState::Failed);
+        assert_eq!(seen[1].event, "give_up");
+        assert_eq!(seen[1].snapshot.state, RuntimeState::Failed);
+        assert!(
+            seen[1].snapshot.mode.is_none(),
+            "failed 下 mode 必须为 null（runtime.md §2.5）"
+        );
+        assert!(
+            seen[1].snapshot.upstream_version.is_some(),
+            "未运行时 upstream_version 不得为 null（runtime.md §2.5）"
+        );
+        assert!(
+            seen[1].snapshot.last_error.is_some(),
+            "失败事件要带上原因，界面与托盘显示同一句话"
+        );
+
+        // 失败后再连：`from` 应当是 failed，而不是硬编码的 idle。
+        let _ = h.services.runtime_start(Some(config_id)).await;
+        let retry = drain_state_events(&mut events);
+        assert_eq!(retry[0].from, RuntimeState::Failed);
+        assert_eq!(retry[0].to, RuntimeState::Starting);
+    }
+
+    /// 断开要有 stopping → idle；快照跟着走，不能停在 stopping。
+    #[tokio::test]
+    async fn tun_stop_emits_stopping_then_idle() {
+        let mut h = harness();
+        let created = h
+            .services
+            .config_create(auto_port_input("TUN 断开事件"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
+        h.services
+            .tun
+            .force_running_for_test(4242, Some(&config_id));
+
+        let mut events = h.services.manager.subscribe();
+        h.services.runtime_stop(false).await.unwrap();
+        let seen = drain_state_events(&mut events);
+
+        assert_eq!(seen.len(), 2, "断开只该有 stopping → idle：{seen:?}");
+        assert_eq!(seen[0].from, RuntimeState::Running);
+        assert_eq!(seen[0].to, RuntimeState::Stopping);
+        assert_eq!(seen[0].event, "stop_req");
+        assert_eq!(seen[0].snapshot.state, RuntimeState::Stopping);
+        assert_eq!(seen[0].snapshot.pid, Some(4242));
+
+        assert_eq!(seen[1].from, RuntimeState::Stopping);
+        assert_eq!(seen[1].to, RuntimeState::Idle);
+        assert_eq!(seen[1].event, "stopped");
+        assert_eq!(seen[1].snapshot.state, RuntimeState::Idle);
+        assert!(
+            seen[1].snapshot.mode.is_none(),
+            "idle 下 mode 必须为 null（runtime.md §2.5）"
+        );
+        assert!(
+            seen[1].snapshot.upstream_version.is_some(),
+            "未运行时 upstream_version 不得为 null（runtime.md §2.5）"
+        );
+    }
+
+    /// 连接成功事件的快照必须就是当时的连接状态（TUN 合成的那一份）。
+    #[tokio::test]
+    async fn a_tun_running_event_carries_the_live_snapshot() {
+        let mut h = harness();
+        let created = h
+            .services
+            .config_create(auto_port_input("TUN 成功事件"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
+        h.services
+            .tun
+            .force_running_for_test(4242, Some(&config_id));
+
+        let mut events = h.services.manager.subscribe();
+        let snapshot = h.services.connection_status().await;
+        h.services.publish_tun_state(
+            RuntimeState::Starting,
+            RuntimeState::Running,
+            crate::runtime::RuntimeEventKind::ProcessReady,
+            None,
+            snapshot,
+        );
+        let seen = drain_state_events(&mut events);
+
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].to, RuntimeState::Running);
+        assert_eq!(seen[0].event, "process_ready");
+        assert_eq!(seen[0].snapshot.state, RuntimeState::Running);
+        assert_eq!(seen[0].snapshot.pid, Some(4242));
+        assert_eq!(
+            seen[0].snapshot.mode,
+            Some(crate::runtime::RuntimeMode::Tun)
+        );
+        assert_eq!(
+            seen[0].snapshot.config_id.as_deref(),
+            Some(config_id.as_str())
+        );
     }
 }
 
@@ -9671,6 +10304,25 @@ mod connect_changed_tests {
             })),
         );
         assert_eq!(connect_changed_state(&error), "none");
+    }
+
+    /// 连接前已经停掉旧连接：之后的失败不能再报「没有改动」——旧连接已经不在了。
+    #[test]
+    fn a_failure_after_stopping_the_old_connection_is_not_untouched() {
+        let after_stop = error(
+            "PRECONDITION_FAILED",
+            "x",
+            Some(json!({ "reason": "no_nodes", "old_connection_stopped": true })),
+        );
+        assert_eq!(connect_changed_state(&after_stop), "restored");
+
+        // 停旧本身失败：网络状态不确定。
+        let stop_failed = error(
+            "INTERNAL",
+            "x",
+            Some(json!({ "reason": "stop_failed", "old_connection_stopped": false })),
+        );
+        assert_eq!(connect_changed_state(&stop_failed), "unknown");
     }
 
     /// 启动后失败都会 abort：撤代理、停运行时，环境回到调用前。

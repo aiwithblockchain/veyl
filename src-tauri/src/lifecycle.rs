@@ -112,10 +112,9 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>, parts: Parts) -> tauri::Result
 
 /// 托盘状态的兜底轮询间隔。
 ///
-/// manager 的状态变化有广播事件，TUN 的 sing-box 却是特权助手的子进程、不经过
-/// manager，发不出事件。用短超时把 `recv` 打断再全量算一次，TUN 断开后一两秒内
-/// 就能反映到托盘；再加上循环启动时先算一次，App 重启接手活着的 TUN 也不会显示
-/// 「未连接」。
+/// 2.20.0 起 TUN 的状态变化也并进 manager 的同一条广播（`RuntimeManager::publish_state`），
+/// 托盘与主界面订阅的是同一条流，不会再一个说断开、一个说连着。短超时轮询保留作兜底：
+/// 事件丢失、或 App 重启接手已有 TUN 时，一两秒内也能算对；循环启动时先算一次。
 const TRAY_RECHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 fn spawn_tray_state_loop<R: Runtime>(
@@ -590,6 +589,32 @@ mod tests {
             combined_tray_state(RuntimeState::Idle, false),
             TrayState::Idle
         );
+        assert_eq!(
+            combined_tray_state(RuntimeState::Starting, false),
+            TrayState::Idle
+        );
+    }
+
+    /// 托盘与主界面同源：事件流的 `to` 与快照 `state` 是同一个值，
+    /// 两边读同一份状态，不可能再互相矛盾。
+    #[test]
+    fn tray_state_agrees_with_the_event_snapshot() {
+        for (state, tun_running) in [
+            (RuntimeState::Starting, false),
+            (RuntimeState::Running, true),
+            (RuntimeState::Stopping, true),
+            (RuntimeState::Idle, false),
+            (RuntimeState::Failed, false),
+        ] {
+            let snapshot = crate::runtime::RuntimeStatus::tun_pending(state, None, None);
+            assert_eq!(snapshot.state, state, "事件不变量：snapshot.state == to");
+            assert_eq!(
+                combined_tray_state(state, tun_running),
+                combined_tray_state(snapshot.state, tun_running),
+                "{state:?}"
+            );
+        }
+        // 启动窗口不算「连着」：主界面这时也显示连接中，而不是已连接。
         assert_eq!(
             combined_tray_state(RuntimeState::Starting, false),
             TrayState::Idle

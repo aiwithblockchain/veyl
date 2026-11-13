@@ -11,6 +11,15 @@ import type {
   RuntimeSnapshot,
   RuntimeState,
 } from "./agent/protocol";
+import type { RuntimeStartResult } from "./agent/bridge";
+
+function startResult(): RuntimeStartResult {
+  return {
+    state: "running",
+    config_id: CONFIG_ID,
+    last_transition_at: new Date().toISOString(),
+  } as RuntimeStartResult;
+}
 
 const CONFIG_ID = "cfg_tun_stop";
 
@@ -145,7 +154,7 @@ function prepareBridge() {
     state: "running",
     needsAdminRestart: false,
   } as never);
-  vi.spyOn(bridge, "runtimeStart").mockResolvedValue(undefined);
+  vi.spyOn(bridge, "runtimeStart").mockResolvedValue(startResult());
 }
 
 function emit(event: AgentEvent) {

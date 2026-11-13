@@ -41,6 +41,8 @@ interface Props {
   probes: NodeProbesController;
   onClose: () => void;
   onSwitch: (nodeId: string) => Promise<{ ok: boolean; message?: string }>;
+  /** 有值时不能换节点：这套配置不是当前连接的那套，卡片里说明原因。 */
+  switchBlockedReason?: string | null;
   onOpenDiagnostics?: () => void;
 }
 
@@ -68,6 +70,7 @@ export function NodeSheet({
   probes,
   onClose,
   onSwitch,
+  switchBlockedReason = null,
   onOpenDiagnostics,
 }: Props) {
   const [search, setSearch] = useState("");
@@ -375,6 +378,8 @@ export function NodeSheet({
   const activate = useCallback(
     async (node: NodeSummary) => {
       if (!openRef.current) return;
+      // 这套配置不是当前连接的那套：后端会拒绝，点了也不该闪一下错误。
+      if (switchBlockedReason) return;
       // 焦点跟着用户点的行：即使这次切不动，重试也还在原地。
       setActiveId(node.node_id);
       if (switchingRef.current || reorderingRef.current) return;
@@ -414,7 +419,7 @@ export function NodeSheet({
         if (reorderPendingRef.current) scheduleReorder();
       }
     },
-    [config.current_node_id, onSwitch, scheduleReorder],
+    [config.current_node_id, onSwitch, scheduleReorder, switchBlockedReason],
   );
 
   const onListKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -599,6 +604,9 @@ export function NodeSheet({
       {allFailed ? (
         <p className="node-sheet__hint">这些节点可能都不可用</p>
       ) : null}
+      {switchBlockedReason ? (
+        <p className="node-sheet__hint">{switchBlockedReason}</p>
+      ) : null}
 
       {run && run.phase === "probing" ? (
         <div
@@ -684,6 +692,7 @@ export function NodeSheet({
                   aria-selected={isCurrent}
                   aria-current={isCurrent ? "true" : undefined}
                   aria-busy={isSwitching || undefined}
+                  aria-disabled={switchBlockedReason ? true : undefined}
                   data-node-id={node.node_id}
                   className={[
                     "node-row",

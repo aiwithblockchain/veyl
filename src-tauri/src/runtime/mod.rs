@@ -22,7 +22,7 @@ pub use manager::{
     default_app_data_dir, prepare_app_data_dir, runtime_event_to_emit, HealthSnapshot,
     PortFallback, PortFallbackReason, RuntimeConfig, RuntimeEvent,
     RuntimeEventKind, RuntimeHealthChangedPayload, RuntimeManager, RuntimeMode, RuntimeState,
-    RuntimeStateChangedPayload, RuntimeStatus, StartPlan, TunSnapshotInput, CONTRACT_VERSION,
-    DEFAULT_DATA_PLANE_PROBE, EVENT_CONTRACT_VERSION,
+    RuntimeStateChangedPayload, RuntimeStatus, RuntimeErrorInfo, StartPlan, TunSnapshotInput,
+    CONTRACT_VERSION, DEFAULT_DATA_PLANE_PROBE, EVENT_CONTRACT_VERSION,
 };
 pub use manifest::{current_release, Artifact, ArchiveFormat, Release, RuntimeManifest};

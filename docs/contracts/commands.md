@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.19.0`
+> 契约版本：`2.20.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -131,7 +131,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 2 | `config_create` | `{ name, connectMode, routingMode, targets?, source?, nodeIds?, dns?, tunExcludes? }` | `ConfigDetail` | **2.0 新增；2.12.0 移除 `listenPort`；2.18.0 来源必填** |
 | 3 | `config_update` | `{ configId, name?, routingMode?, targets?, dns?, tunExcludes?, nodeIds? }` | `ConfigDetail` | **2.0 新增；2.12.0 移除 `listenPort`** |
 | 4 | `config_delete` | `{ configId }` | `ConfigDeleteData` | **2.0 新增** |
-| 5 | `config_activate` | `{ configId, confirmDisconnect? }` | `ConfigActivateData` | **2.0 新增** |
+| 5 | `config_activate` | `{ configId }` | `ConfigActivateData` | **2.0 新增；2.20.0 起只改 active，不再断开/重连** |
 | 6 | `config_detail` | `{ configId }` | `ConfigDetail` | **2.0 新增** |
 | 7 | `node_import_url` | `{ url, configId? }` | `NodeImportResult` | **2.0 新增** |
 | 8 | `node_create` | `{ name, server, port, method, password, configId? }` | `NodeSummary` | **2.0 新增** |
@@ -371,38 +371,31 @@ type ConfigDeleteData = {
 
 错误：`PRECONDITION_FAILED`（`connected`）、`INTERNAL`。
 
-### 3.5 `config_activate { configId, confirmDisconnect? }` → `ConfigActivateData`
+### 3.5 `config_activate { configId }` → `ConfigActivateData`
+
+**只改 active（当前用哪套），不碰运行时。**
 
 ```ts
 type ConfigActivateData = {
   active_config_id: string;
-  reconnect:
-    | "not_running"
-    | "already_connected"
-    | "reconnected"
-    | "reconnect_failed"
-    | "skipped_no_nodes";
-  runtime: RuntimeSnapshot | null;   // not_running / skipped_no_nodes 时为 null
+  runtime: RuntimeSnapshot;          // 当前连接快照；可能属于另一套配置
 };
 ```
 
 | 当前状态 | 行为 |
 |---|---|
-| 未连接（也没有在途启动） | 直接切 active，无感；`reconnect = "not_running"` |
-| 已连接、目标就是当前配置 | 幂等返回，不发事件；`reconnect = "already_connected"` |
-| **正在启动**（TUN 启动窗口，还没起来）、目标就是这套 | 幂等返回，`reconnect = "already_connected"`；不要取消在途启动 |
-| 已连接 / **正在启动**、换到另一套、**没带 `confirmDisconnect`** | `PRECONDITION_FAILED`，`details.reason = "will_disconnect"`，`details.connected_config_id` 给出当前连接（或正在连）的是哪套；**身份未知时（接手 TUN 且读不到配置）为 `null`**，界面按「未知」展示，不要编一个名字。**不静默切换** |
-| 已连接 / **正在启动**、带 `confirmDisconnect: true` | 先 `runtime_stop`（**启动中也要真的取消在途启动，并等它停干净**）→ 改 active → 用新配置 `runtime_start`（自动重连），`reconnect = "reconnected"` 或 `"reconnect_failed"` |
-| 目标配置节点集为空 | 允许激活，但不自动重连（`reconnect = "skipped_no_nodes"`）；UI 应在左栏标「无节点」 |
+| 未连接 | 直接切 active，发 `config-changed(change = "activated")` |
+| 已连接 / 正在启动、目标不是当前连接的那套 | **同样只切 active**；不断开、不重连、不报错。界面用一句轻提示说明“仍连着原来那套” |
+| 已连接 / 正在启动、目标就是当前 active | 幂等返回，不发事件 |
+| 目标配置节点集为空 | 允许激活；UI 在左栏标「无节点」，连接时按 `no_nodes` 处理 |
 
-- **「正在启动」算已连接**：TUN 首次启动真机要十几秒，这期间还没有 pid。只看运行状态会把「正在连」当成「没在连」，切配置会静默改 active、断开也停不掉正在起来的那次连接。
-- **`already_connected` 不等于重连过**：Host 没有断开再连，`runtime` 是当前快照。旧实现报 `reconnected` 属于谎报。
+- **删除 `confirmDisconnect` 参数**：切换不再有需要确认的破坏性动作。
+- **删除 `reconnect` 字段**（`not_running` / `already_connected` / `reconnected` / `reconnect_failed` / `skipped_no_nodes` 都不再产生）。
+- **删除 `PRECONDITION_FAILED / will_disconnect` 这个分支**。`will_disconnect` 仍用于 `route_set_mode` 的旧数据跨家族分流切换（§10.2），与本命令无关。
+- 断开只发生在用户点「连接 VPN」时：`runtime_start` 先停旧连接再启动（§7.1）。
+- 成功后发 `config-changed`（`change = "activated"`），`runtime` 原样返回当前快照，调用方不得据此推断“已断开”。
 
-- **确认的粒度是「这一次切换」**：`confirmDisconnect` 不记忆、不复用。每次换配置都要重新确认。
-- `reconnect_failed` **不抛错**：切换本身成功了，失败的是重连。`runtime` 里带失败后的快照，`last_error` 说明原因；这样 UI 能同时表达「已切到新配置」和「没连上」，而不是笼统报一个错误让用户不知道 active 变没变。
-- 成功后发 `config-changed`（`change = "activated"`）。
-
-错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`will_disconnect`、`quitting`）、`INTERNAL`。
+错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`quitting`）、`INTERNAL`。
 
 ### 3.6 `config_detail { configId }` → `ConfigDetail`
 
@@ -887,8 +880,10 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 | 用哪个节点 | 一律用 `config.current_node_id`；为空时用节点集第一个。**本命令没有 `nodeId` 参数** |
 | 节点集为空 | `PRECONDITION_FAILED`，`details.reason = "no_nodes"` |
 | 连接方式为 `tun` 且特权助手不可用 | `PRECONDITION_FAILED`，`details.reason ∈ { "tun_denied", "helper_missing" }`（未批准 / 用户拒绝 → `tun_denied`；未安装、安装失败、平台不支持 → `helper_missing`；完整取值见 §7.1） |
-| 已在连接中、同一套配置 | 幂等：返回当前快照 |
-| 已在连接中、指定了另一套配置 | `PRECONDITION_FAILED`，`details.reason = "other_config_running"`。换配置走 `config_activate`（会先确认断开），**不在这里静默切换** |
+| 已在连接中、同一套配置 | 幂等：返回当前快照（`already_running = true`） |
+| 同一套配置**正在启动**（还没有 pid） | 幂等：不重启正在起来的连接，返回 `state = "starting"` 的快照 + `already_running = true`。这是**唯一**可以「成功但 `state != running`」的情形（§7.1.1） |
+| 已有连接在跑（已连接**或正在启动**）、目标是另一套配置 | **先停旧连接**（`runtime_stop(force = false)`，启动中也要真的作废在途启动并等停干净），再用目标配置启动；**不报错、不要求调用方先断开**。停不掉 → 如实返回停止阶段的错误，**不启动第二套** |
+| 已有连接在跑、但读不到它属于哪套（接手 TUN） | 同样先停再启动；停不掉则报错，不静默并行 |
 | 成功后 | 系统代理已按连接方式设置、运行时 `state = running`；返回的 `RuntimeSnapshot` 必须满足 §7.3 |
 | `last_used_at` | 成功后刷新为该配置的当前毫秒时间 |
 
@@ -904,13 +899,13 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 **7.1.1 返回状态的不变量**
 
-- `state` 只可能是 `running` 或 `degraded`；其它状态一律视为失败并返回错误。**不允许「返回成功但 state 不是 running」**（这是 1.0.10 的 D-36 缺陷）。
+- `state` 只可能是 `running` 或 `degraded`；其它状态一律视为失败并返回错误。**不允许「返回成功但 state 不是 running」**（这是 1.0.10 的 D-36 缺陷）。**唯一例外**：同一套配置正在启动时的幂等返回（`already_running = true`，`state = "starting"`），见 §7.1 的表。
 - `mixed_port` 必须是本次实际监听的端口，不得为常量或 `null`。
 - `config_id` / `config_name` / `node_id` / `node_name` 与目标一致；**未连接时四者为 `null`**。
 - `connected_since` 为本次进入 running 的时刻（ISO 8601）。
 - `exit_ip` / `latency_ms` 允许为 `null`（探测是异步的），**不代表连接失败**。
 
-错误码：`RUNTIME_NOT_INSTALLED`、`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `other_config_running` / `tun_denied` / `helper_missing`）、`NOT_FOUND`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`TIMEOUT`、`UPSTREAM_ERROR`、`INTERNAL`。
+错误码：`RUNTIME_NOT_INSTALLED`、`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `tun_denied` / `helper_missing`）、`NOT_FOUND`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`TIMEOUT`、`UPSTREAM_ERROR`、`INTERNAL`。
 
 **`tun` 连接在换新后台组件这一步失败时的 `details.reason`**（错误码均为 `PRECONDITION_FAILED`，`message` 已是可直接展示的中文）：
 
@@ -1986,10 +1981,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.19.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.10.1 / `events.md` 2.12.0 矩阵同步 |
+| `contracts/commands.md` | **2.20.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ **切换配置只改 active、连接前自动停旧连接（2.20.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.11.0 / `events.md` 2.12.0 矩阵同步 |
 | `contracts/events.md` | **2.12.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.10.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 |
+| `contracts/tools.md` | **3.11.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** |
 | `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -2004,6 +1999,17 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.20.0（2026-11-13，切换配置不再断开）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.20.0`；`config_activate` 删除 `confirmDisconnect` 参数与 `reconnect` 返回字段，只改 active（**不向后兼容**：前端绑定同步改） | 语义变更 | 用户：点左栏只换“当前用哪套”，不要弹窗、不断开 |
+| 2 | `config_activate` 删除 `PRECONDITION_FAILED / will_disconnect`；`will_disconnect` 只保留给 `route_set_mode` 的旧数据跨家族切换 | 错误分支删除 | 切换不再有破坏性动作，无需确认 |
+| 3 | `runtime_start` 增加「连接前自动停旧连接」：已连接或正在启动、目标为另一套时先停干净再启动；删除 `PRECONDITION_FAILED / other_config_running` | 语义变更 | 断开只发生在用户点「连接 VPN」时 |
+| 4 | §15.5 矩阵同步 `tools.md` 3.11.0 | 元数据 | 同批 |
+| 5 | `runtime_start` 的返回补 `already_running`（同一套已连接 / 正在启动时幂等为 true）；启动窗口内重复请求不重启在途连接 | 字段补录 | 契约早就声明了该字段，实现从未产出 |
+| 6 | 连接前已停掉旧连接、之后仍失败时，错误带 `details.old_connection_stopped = true`，`connect_changed` 由 `"none"` 升级为 `"restored"`；停旧失败为 `false` → `"unknown"` | 语义修正 | 旧连接已被断开，不能说「没有改动」 |
 
 ### 2.19.0（2026-11-13，启动窗口里的切换与断开）
 

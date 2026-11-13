@@ -55,7 +55,7 @@ struct Launching {
 pub struct LaunchSlot<'a> {
     session: &'a TunSession,
     seq: u64,
-    settled: bool,
+    settled: AtomicBool,
 }
 
 impl<'a> LaunchSlot<'a> {
@@ -65,8 +65,8 @@ impl<'a> LaunchSlot<'a> {
     }
 
     /// 本次启动生效：把 pid 与连接上下文写进状态。返回 false 表示已被取消。
-    pub fn commit(mut self, meta: &TunLaunchMeta, reply: &StartReply) -> bool {
-        self.settled = true;
+    pub fn commit(&self, meta: &TunLaunchMeta, reply: &StartReply) -> bool {
+        self.settled.store(true, Ordering::SeqCst);
         self.session.commit_launch(self.seq, meta, reply)
     }
 }
@@ -74,7 +74,7 @@ impl<'a> LaunchSlot<'a> {
 impl Drop for LaunchSlot<'_> {
     /// 失败、超时或提前返回：把登记撤掉，别让「正在连」永远挂着。
     fn drop(&mut self) {
-        if !self.settled {
+        if !self.settled.load(Ordering::SeqCst) {
             self.session.abandon_launch(self.seq);
         }
     }
@@ -225,7 +225,7 @@ impl TunSession {
     /// 否则连不上时用户只会看到一个无意义的超时。
     pub fn launch(&self, config: &str, meta: &TunLaunchMeta) -> Result<Started, TunError> {
         let slot = self.begin_launch(&meta.config_id);
-        self.launch_registered(slot, config, meta)
+        self.launch_registered(&slot, config, meta)
     }
 
     /// 登记一次在途启动。调用方从拿到凭据的那一刻起就算「正在连」，
@@ -241,7 +241,7 @@ impl TunSession {
         LaunchSlot {
             session: self,
             seq,
-            settled: false,
+            settled: AtomicBool::new(false),
         }
     }
 
@@ -249,7 +249,7 @@ impl TunSession {
     /// 否则界面说「切换了」，流量还在旧连接上。
     pub fn launch_registered(
         &self,
-        slot: LaunchSlot<'_>,
+        slot: &LaunchSlot<'_>,
         config: &str,
         meta: &TunLaunchMeta,
     ) -> Result<Started, TunError> {
@@ -1244,7 +1244,7 @@ mod tests {
         assert!(session.cancel_launch());
 
         let error = session
-            .launch_registered(slot, "{}", &meta())
+            .launch_registered(&slot, "{}", &meta())
             .expect_err("已取消的启动必须提前返回");
         assert_eq!(error.code, TunErrorCode::Cancelled);
         assert_eq!(

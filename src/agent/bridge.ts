@@ -112,14 +112,8 @@ export interface ConfigUpdateInput {
 
 export interface ConfigActivateResult {
   active_config_id: string;
-  reconnect:
-    | "not_running"
-    | "reconnected"
-    | "reconnect_failed"
-    | "skipped_no_nodes"
-    /** 目标就是当前连着的配置：只把 active 对齐，没有断线或重连。 */
-    | "already_connected";
-  runtime: RuntimeSnapshot | null;
+  /** 当前连接快照；可能仍属于另一套配置，不能据此推断「已断开」。 */
+  runtime: RuntimeSnapshot;
 }
 
 export interface ConfigDeleteData {
@@ -446,6 +440,12 @@ function hostOf(url: string): string | null {
   }
 }
 
+/** `runtime_start` 的返回：完整快照 + 幂等命中标记。 */
+export interface RuntimeStartResult extends RuntimeSnapshot {
+  /** 同一套已连接 / 正在启动：没有重新启动，`state` 可能是 `starting`。 */
+  already_running?: boolean;
+}
+
 export interface AgentBridge {
   readonly mode: BridgeMode;
   /** 订阅全部事件（AI 会话 + 应用事件）；返回取消订阅函数。 */
@@ -461,8 +461,8 @@ export interface AgentBridge {
   getRuntimeSnapshot(): Promise<RuntimeSnapshot | null>;
   /** 应用自身版本；设置「关于」与诊断信息用。 */
   getAppVersion(): Promise<string>;
-  /** UI 直连：发起连接；不传 configId 时用当前激活配置。 */
-  runtimeStart(configId?: string): Promise<void>;
+  /** UI 直连：发起连接；不传 configId 时用当前激活配置。返回启动后的快照。 */
+  runtimeStart(configId?: string): Promise<RuntimeStartResult>;
   /** UI 直连：断开连接并恢复系统代理。 */
   runtimeStop(): Promise<void>;
   /** 左栏配置列表。只读本地库，不联网。 */
@@ -474,8 +474,8 @@ export interface AgentBridge {
   configUpdate(input: ConfigUpdateInput): Promise<ConfigDetail>;
   /** 删除一套配置；正在连接的配置由 UI 先断开。 */
   configDelete(configId: string): Promise<ConfigDeleteData>;
-  /** 切换 active 配置；已连接时需带 confirmDisconnect。 */
-  configActivate(configId: string, confirmDisconnect?: boolean): Promise<ConfigActivateResult>;
+  /** 只改「当前用哪套」，不碰运行时：断开只发生在启动新连接时。 */
+  configActivate(configId: string): Promise<ConfigActivateResult>;
   /** 切换某套配置的当前节点；已连接时由 Host 热切换，不断流。 */
   nodeSwitch(configId: string, nodeId: string): Promise<NodeSwitchResult>;
   /** 测试单个节点连通性。不可达是正常结果，不抛错。 */
@@ -662,7 +662,12 @@ export function shouldRefreshSnapshotOnHealth(
 }
 
 /** 把快照与事件合并成状态面板的视图。 */
-export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): RuntimeView {
+export function applyRuntimeEvent(
+  view: RuntimeView,
+  event: AgentEvent,
+  options: { identity?: boolean } = {},
+): RuntimeView {
+  const identity = options.identity ?? true;
   switch (event.name) {
     case AGENT_EVENTS.runtimeStateChanged: {
       const to = event.payload.to;
@@ -671,11 +676,33 @@ export function applyRuntimeEvent(view: RuntimeView, event: AgentEvent): Runtime
       // 新连接不继承旧连接：上一次离开在线态的事件可能没到，上线时先清掉，交给随后的快照。
       const fromOnline =
         event.payload.from === "running" || event.payload.from === "degraded";
+      // 事件自带完整快照：连接属于哪套配置从这里取，别等下一次 runtime_status。
+      const snapshot = event.payload.snapshot;
       return {
         ...view,
         state: to,
         pid: event.payload.pid,
         upstream_version: event.payload.upstream_version ?? view.upstream_version,
+        config_id: keepConnection
+          ? identity
+            ? (snapshot?.config_id ?? view.config_id)
+            : view.config_id
+          : null,
+        config_name: keepConnection
+          ? identity
+            ? (snapshot?.config_name ?? view.config_name)
+            : view.config_name
+          : null,
+        node_id: keepConnection
+          ? identity
+            ? (snapshot?.node_id ?? view.node_id)
+            : view.node_id
+          : null,
+        node_name: keepConnection
+          ? identity
+            ? (snapshot?.node_name ?? view.node_name)
+            : view.node_name
+          : null,
         last_error: event.payload.error,
         connected_since: keepConnection ? view.connected_since : null,
         port_fallback: keepConnection ? view.port_fallback : null,

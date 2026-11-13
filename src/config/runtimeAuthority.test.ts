@@ -54,4 +54,20 @@ describe("createRuntimeAuthority", () => {
     expect(authority.acceptEvent(event)).toBe(true);
     expect(authority.current()).toEqual({ state: "starting", at: 1000 });
   });
+
+  it("重复事件的快照不算「更新」：不能用它改写连接身份", () => {
+    const authority = createRuntimeAuthority();
+    const event = { from: "idle" as const, to: "running" as const, emitted_at: iso(1000) };
+
+    expect(authority.isNewer(event)).toBe(true);
+    authority.acceptEvent(event);
+    // App 与 hook 各订阅一次：同一条事件的第二个订阅者仍然按「新」处理。
+    expect(authority.isNewer(event)).toBe(true);
+    expect(authority.acceptEvent(event)).toBe(true);
+    // 更旧的重复事件不能改写身份。
+    expect(authority.isNewer({ emitted_at: iso(999) })).toBe(false);
+    expect(authority.isNewer({ emitted_at: iso(1001) })).toBe(true);
+    // 解析不出时刻时不能判定为旧，退化到修复前行为。
+    expect(authority.isNewer({})).toBe(true);
+  });
 });

@@ -1,0 +1,148 @@
+# 切换配置不再断开连接：点左栏只换「当前用哪套」
+
+> 日期：2026-11-13
+> 状态：目标设计，替换旧的「切换前确认断开」交互
+> 依据：用户原话「切换提示的时候，我点击了确定，旧的 VPN 连接没有断开，菜单栏的状态也是连接中，只有 UI 显示的是断开连接的。修改一下逻辑，不要弹窗了，切换之后，如果用户选择新配置上的连接 VPN 的时候，自动把旧的 VPN 连接断开」
+> 范围：只改「配置切换」的交互与契约；不重写 `configs-and-nav.md`、`commands.md` 全文
+
+---
+
+## 1. 新交互
+
+| 动作 | 行为 |
+|---|---|
+| 点左栏另一套配置 | **只改 active**（当前用哪套），不弹窗、不断开、不重连；无论当前未连接 / 连接中 / 已连接，行为一致 |
+| 点「连接 VPN」 | 若已有连接在跑（已连接**或正在启动**，不论哪一套），**先停干净**，再用当前 active 配置连接 |
+| 当前 active 就是正在连接的那套 | 点连接 = 幂等（不重启） |
+
+一句话：**切换是导航，连接是动作；断开只发生在连接时。**
+
+---
+
+## 2. 契约增量
+
+### 2.1 `config_activate`：只改 active
+
+```ts
+// 输入
+config_activate { configId }            // 删除 confirmDisconnect
+// 输出
+type ConfigActivateData = {
+  active_config_id: string;
+  runtime: RuntimeSnapshot;             // 当前连接快照（可能属于另一套）
+};
+```
+
+- 删除 `reconnect` 字段（`not_running` / `already_connected` / `reconnected` / `reconnect_failed` / `skipped_no_nodes` 全部不再出现）。
+- 删除 `PRECONDITION_FAILED / will_disconnect` 这个**属于切换配置**的分支。
+- 目标配置就是当前 active → 幂等返回，不发事件。
+- 成功 → 写 active + 发 `config-changed(change = "activated")`；**不碰运行时**。
+- 目标配置没有节点也允许激活；界面在左栏标「无节点」，连接时按现有 `no_nodes` 处理。
+
+> `will_disconnect` 仍保留给**旧数据的 `proxy_selected` 跨家族分流切换**（`route_set_mode`），与配置切换无关；那条不在本次范围。
+
+### 2.2 `runtime_start`：连接前自动停旧连接
+
+这段落在 **Host 的 `runtime_start` 服务实现**（UI 命令 `runtime_start` 与工具 `VpnConnect` 共用同一实现），不属于前端编排：
+
+```
+runtime_start(config_id?)
+  ├─ 解析目标配置（省略 = active）
+  ├─ 读 connection_state：connected / launching 都算「有连接」
+  ├─ 有连接且不是目标配置
+  │    ├─ runtime_stop(force = false)
+  │    └─ 等停止完成（含在途启动作废）
+  ├─ 启动目标配置
+  └─ 返回 RuntimeSnapshot
+```
+
+- **删除 `PRECONDITION_FAILED / other_config_running`**：不再让调用方先断开；Host 自己收口。
+- 有连接且目标就是同一套 → 幂等返回当前快照。
+- 停止失败 → 如实返回停止阶段错误，**不要继续启动第二套**（两个运行时同时跑是更糟的状态）。
+- 身份未知（接手 TUN、读不到属于哪套）→ 同样先停再启动；停不掉就报错，不静默并行。
+
+### 2.3 reason 的去留
+
+| reason | 结论 | 理由 |
+|---|---|---|
+| `will_disconnect`（config_activate） | **删除** | 切换不再断开，没有需要用户确认的破坏性动作 |
+| `already_connected`（config_activate.reconnect） | **删除** | 切换不再重连，该值没有产生路径 |
+| `other_config_running`（runtime_start） | **删除** | 连接时自动停旧连接，不再要求调用方先处理 |
+| `will_disconnect`（route_set_mode 旧数据跨家族） | **保留** | 分流切换仍会断流，属于另一条命令 |
+| `no_nodes` / `no_config` | 保留 | 连接前校验不变 |
+
+版本：`commands.md` 升 **2.20.0**（`config_activate` 参数/返回与 `runtime_start` 原因变更，**不向后兼容**；2.19.0 已被“启动窗口”那批占用）；`tools.md` 升 **3.11.0**（`RuntimeStart` 语义变更；无新工具）。`runtime.md`、`events.md` 不变。
+
+---
+
+## 3. 界面与状态来源
+
+### 3.1 唯一事实源
+
+- **界面不因切换配置把连接状态改成「未连接」**。切换只更新 active；连接状态只跟随 `runtime-state-changed` / `runtime_status`。
+- 菜单栏与界面都必须读同一份后端状态（见 §5）。
+- 切换过程中不显示「未连接」；如果后端仍在连接中，界面就显示「连接中」。
+
+### 3.2 切换时的轻提示（不弹窗）
+
+| 切换时状态 | 提示 |
+|---|---|
+| 当前已连接（或连接中），切到另一套 | 一句话 toast：`已切到「配置 2」，当前仍连着「配置 1」。点连接会先断开再连。` |
+| 当前已连接，切到**同一套** | 不提示 |
+| 当前未连接 | 不提示（切换本身无副作用） |
+
+- 用现有 `app-toast`，3 秒自动消失；**不是确认框**，没有按钮。
+- 名称取自后端快照里的连接配置名；身份未知时用：`已切到「配置 2」，当前仍有一条连接。点连接会先断开再连。`
+- 文案遵守 `veyl-ui`：不出现 proxy / TUN / 分流；「配置 2」原样引用用户名字。
+
+### 3.3 hero 不得说谎
+
+active 与「正在连接的那套」可能不同。hero 的连接状态、计时器、流量、出口都来自运行时快照；当两者不同时，hero 状态行下方补一行 13px 说明：
+
+> 当前连接：配置 1
+
+不把 hero 的节点/分流信息当作正在连接那套的事实；底部节点卡仍属于 active 配置（它是“这套配置用的节点”）。
+
+---
+
+## 4. 验收影响
+
+| 用例 | 变更 |
+|---|---|
+| 旧「切换已连接配置 → 确认框 → 自动重连」 | **删除** |
+| 新增「切换不断开」 | 已连接 A，点 B：无弹窗、无断开事件、hero 仍显示已连接、toast 提示“仍连着 A”；`config_activate` 无 `will_disconnect` |
+| 新增「连接时自动停旧」 | 已连接 A（或 A 启动中），点 B 上的「连接 VPN」：先出现停止再启动；最终只有 B 在跑；旧 A 无残留在跑 |
+| 新增「状态一致」 | 切换 A→B 后 5 秒内，界面与菜单栏状态一致；界面不得出现“未连接”而 tray 仍连接中 |
+| 删除 `already_connected` / `other_config_running` 断言 | 对应 reason 不再出现 |
+
+---
+
+## 5. 菜单栏（tray）状态为什么和界面不一致
+
+**tray 读的是两份后端状态合成**（`src-tauri/src/lifecycle.rs:121-145`、`:248-252`）：
+
+- `RuntimeManager::status().state`（代理模式运行时）；
+- `TunSession::status()`——**只要 TUN 是 Running 就直接报「已连接」**，优先于 manager。
+
+**界面读的是另一条路径**：`runtime_status` 快照 + `runtime-state-changed` 事件，并在前端用 `runtimeAuthority` 做“新旧快照取舍”，切换时还会先本地写状态（`src/config/useVpnSession.ts`）。
+
+所以「界面已断开、tray 仍连接中」完全可能：
+
+1. 切换时 Host 先 `runtime_stop`，manager 很快报 Idle，界面据此显示「未连接」；
+2. TUN helper 的停止是异步的，`TunSession` 仍处于 Running，tray 继续显示「已连接」；
+3. 两边各自更新、没有共同的时间戳/版本比较，就出现分叉。
+
+新设计要消除的是第 1 步：**切换不再触发停止**，界面不再有“切完就断开”的本地状态；只有用户点连接时才停，届时两边都按同一个后端状态走。仍建议后续把 tray 与界面统一到同一个 `runtime_status` 快照（含 `config_id` 与 `revision`），而不是 tray 自己合成两路状态——这是独立的小改动，不在本次必做范围。
+
+---
+
+## 6. 受影响文档清单
+
+| 文档 | 改动 |
+|---|---|
+| `docs/contracts/commands.md` | 2.20.0：`config_activate` 去掉 `confirmDisconnect` / `reconnect` / `will_disconnect`；`runtime_start` 改为先停旧连接，去掉 `other_config_running`；§15.5 矩阵同步 `tools.md` 3.11.0 |
+| `docs/contracts/tools.md` | 3.11.0：`RuntimeStart` / `VpnConnect` 语义同步；删除 `other_config_running`；补 `ConfigActivate` 只改 active 的说明 |
+| `docs/configs-and-nav.md` | §6「切换的代价」改为“切换无代价，断开只发生在点连接时” |
+| `.claude/skills/veyl-ui/SKILL.md` | 左栏规则补：单击只改当前看哪套、不弹确认；已连接时给轻提示 |
+| `docs/testing/e2e-acceptance.md` | 新增 E6-34（切换不断开）、E6-35（连接时停旧）、E6-36（tray 与界面一致）；删除旧的“确认后重连”断言 |
+| `docs/design/my-servers.md` | 仅版本号让位：`commands.md` 计划版本改为 2.21.0、`tools.md` 改为 3.12.0 |

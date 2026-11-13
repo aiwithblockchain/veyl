@@ -40,6 +40,8 @@ export interface VpnSession {
   activeConfig: ConfigDetail | null;
   connection: VpnConnectionState;
   connectedConfigId: string | null;
+  /** 正在启动的那套配置；starting 期间取，其余状态为 null。 */
+  startingConfigId: string | null;
   loading: boolean;
   error: string | null;
   /** 重新读取配置列表与详情；左栏错误态就地重试用。 */
@@ -55,7 +57,7 @@ export interface VpnSession {
   /** 只改名字；成功后左栏就地更新，不整表重载。 */
   renameConfig: (configId: string, name: string) => Promise<ActionResult>;
   deleteConfig: (configId: string) => Promise<ActionResult>;
-  selectConfig: (configId: string, confirmDisconnect?: boolean) => Promise<ActionResult>;
+  selectConfig: (configId: string) => Promise<ActionResult>;
   switchNode: (nodeId: string) => Promise<ActionResult>;
   start: () => Promise<ActionResult>;
   stop: () => Promise<ActionResult>;
@@ -189,6 +191,7 @@ export function useVpnSession(
   const [activeConfig, setActiveConfig] = useState<ConfigDetail | null>(null);
   const [connection, setConnection] = useState<VpnConnectionState>("idle");
   const [connectedConfigId, setConnectedConfigId] = useState<string | null>(null);
+  const [startingConfigId, setStartingConfigId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [nodeSwitchAvailable, setNodeSwitchAvailable] = useState(true);
@@ -201,7 +204,9 @@ export function useVpnSession(
   const pendingConfigIdRef = useRef<string | null>(null);
   const disposed = useRef(false);
   // 同一帧里的第二次点击等不到按钮禁用，这里直接挡住重入。
+  // 但目标是另一套配置时允许接管：用户在启动 A 的过程中点了「连接 B」。
   const startingRef = useRef(false);
+  const startingTargetRef = useRef<string | null>(null);
   // start / stop 各推进一个序号：start 每次 await 回来先确认自己还是有效的。
   const startSeqRef = useRef(0);
   const cancelSeqRef = useRef(0);
@@ -222,17 +227,27 @@ export function useVpnSession(
 
   useEffect(() => clearTimer, []);
 
-  const applySnapshot = useCallback((snap: RuntimeSnapshot | null) => {
-    if (!snap) {
-      setConnection("idle");
-      setConnectedConfigId(null);
-      return;
-    }
-    setConnection(toConnectionState(snap.state));
-    setConnectedConfigId(
-      snap.state === "running" || snap.state === "degraded" ? snap.config_id : null,
-    );
-  }, []);
+  const applySnapshot = useCallback(
+    (snap: RuntimeSnapshot | null, options: { identity?: boolean } = {}) => {
+      const identity = options.identity ?? true;
+      if (!snap) {
+        setConnection("idle");
+        setConnectedConfigId(null);
+        setStartingConfigId(null);
+        return;
+      }
+      const online = snap.state === "running" || snap.state === "degraded";
+      setConnection(toConnectionState(snap.state));
+      if (identity) setConnectedConfigId(online ? snap.config_id : null);
+      // starting / restarting 期间快照可能还不带 config_id：保留本地 start 记下的那套。
+      setStartingConfigId((current) =>
+        snap.state === "starting" || snap.state === "restarting"
+          ? (snap.config_id ?? current)
+          : null,
+      );
+    },
+    [],
+  );
 
   const applyMock = useCallback(
     (store: MockStore) => {
@@ -355,8 +370,9 @@ export function useVpnSession(
         }
         // 状态事件自带完整快照，直接落；不再拉 runtime_status（events.md §4.1）。
         // 比已知状态旧的事件（Tauri 不保证跨 emit 顺序）由共享权威判断丢弃。
+        const fresh = runtimeAuthority.current.isNewer(event.payload);
         if (!runtimeAuthority.current.acceptEvent(event.payload)) return;
-        applySnapshot(event.payload.snapshot);
+        applySnapshot(event.payload.snapshot, { identity: fresh });
         return;
       }
       if (event.name === AGENT_EVENTS.layoutUpdated) {
@@ -424,48 +440,21 @@ export function useVpnSession(
     }
   };
 
-  const selectConfig = async (
-    configId: string,
-    confirmDisconnect = false,
-  ): Promise<ActionResult> => {
+  const selectConfig = async (configId: string): Promise<ActionResult> => {
     if (mock) {
       const store = mockStore.current;
       if (store.activeId === configId) return { ok: true };
       if (!store.configs.some((config) => config.config_id === configId)) {
         return { ok: false, message: "这套配置已经不存在了。" };
       }
-
-      clearTimer();
+      // 只换 active：模拟「连接保持原样」，断开只发生在下次启动。
       commitMock({ ...store, activeId: configId });
-      if (connection === "connected" || connection === "starting") {
-        setConnection("starting");
-        setConnectedConfigId(null);
-        pendingConfigIdRef.current = configId;
-        timer.current = window.setTimeout(() => {
-          timer.current = null;
-          pendingConfigIdRef.current = null;
-          setConnection("connected");
-          setConnectedConfigId(configId);
-        }, 700);
-      } else {
-        setConnection("idle");
-        setConnectedConfigId(null);
-      }
       return { ok: true };
     }
 
     try {
-      const result = await bridge.configActivate(configId, confirmDisconnect);
+      await bridge.configActivate(configId);
       await refreshReal();
-      if (result.reconnect === "already_connected") {
-        return { ok: true, message: "已经连在这套配置上。" };
-      }
-      if (result.reconnect === "reconnect_failed") {
-        return { ok: true, message: "已切换配置，但没能重新连上。" };
-      }
-      if (result.reconnect === "skipped_no_nodes") {
-        return { ok: true, message: "已切换配置。这套还没有节点，没有自动连接。" };
-      }
       return { ok: true };
     } catch (err) {
       return { ok: false, message: actionMessage(err, "切换配置失败") };
@@ -500,14 +489,22 @@ export function useVpnSession(
       }
       const reason = actionReason(err);
       if (reason === "config_launching") {
+        const another = startingConfigId !== null && startingConfigId !== activeConfigId;
         return {
           ok: false,
-          message: "这套配置正在连接，等连上以后再切换节点。",
+          message: another
+            ? "另一套配置正在连接，等它连上或断开后再切换节点。"
+            : "这套配置正在连接，等连上以后再切换节点。",
           reason,
         };
       }
-      if (reason === "cancelled") {
-        return { ok: true, message: "这次切换已取消。", reason };
+      if (reason === "config_not_running") {
+        // 连的是另一套：节点属于这套配置，等这套连上才能热切换。
+        return {
+          ok: false,
+          message: "当前连着另一套配置，先连这套再换节点。",
+          reason,
+        };
       }
       return { ok: false, message: actionMessage(err, "切换节点失败") };
     }
@@ -520,8 +517,11 @@ export function useVpnSession(
     }
     // 同一意图的重复触发：首次还在跑，这里按成功返回，调用方不会弹错误。
     // 首次失败时自己会报错，重复这次不再重复报。
-    if (startingRef.current) return { ok: true };
+    if (startingRef.current && startingTargetRef.current === activeConfigId) {
+      return { ok: true };
+    }
     startingRef.current = true;
+    startingTargetRef.current = activeConfigId;
     const startSeq = ++startSeqRef.current;
     const cancelSeq = cancelSeqRef.current;
     // 新一轮 start 接管：还没结束的 stop 不要再把界面按已断开收尾。
@@ -534,6 +534,7 @@ export function useVpnSession(
     // 先把「点到了」画出来：下面查后台组件可能卡十秒以上，这段界面必须有反应。
     setConnection("starting");
     setConnectedConfigId(null);
+    setStartingConfigId(activeConfigId);
     // 还没开始连，先查后台组件：遮罩要说明是检查阶段，不能拿残留的健康快照
     // 显示成「正在建立连接」或「正在确认出口」。
     const willCheckHelper = !mock && activeConfig.connect_mode === "tun";
@@ -550,6 +551,8 @@ export function useVpnSession(
           timer.current = null;
           pendingConfigIdRef.current = null;
           setConnection("connected");
+          // startingConfigId 留给运行时事件收尾：mock 的 running 事件稍后才到，
+          // 先清掉会让过渡态短暂说不清「正在连接的是哪套」。
           setConnectedConfigId(configId);
         }, 700);
         return { ok: true };
@@ -571,7 +574,7 @@ export function useVpnSession(
         if (stale()) return { ok: true };
       }
 
-      await bridge.runtimeStart(activeConfigId);
+      const started = await bridge.runtimeStart(activeConfigId);
       if (startSeqRef.current !== startSeq) {
         // 已被新一轮 start 接管：运行时交给新一轮处理，不能把它停掉。
         return { ok: true };
@@ -584,10 +587,18 @@ export function useVpnSession(
       }
       await refreshReal();
       if (stale()) return { ok: true };
+      // 后端幂等命中（同一套正在启动）：返回的是 starting 快照，不能当成已连接。
+      if (started?.state === "starting" || started?.state === "restarting") {
+        setConnection("starting");
+        setStartingConfigId(started.config_id ?? activeConfigId);
+        setConnectedConfigId(null);
+        return { ok: true };
+      }
       // runtimeStart 返回成功就是连上了。刷新快照可能晚一拍（甚至拿不到），
       // 不能再拿它的结果否定这次成功，否则界面会停在未连接。
       runtimeAuthority.current.markLocal("running");
       setConnection("connected");
+      setStartingConfigId(null);
       setConnectedConfigId(activeConfigId);
       return { ok: true, connected: true };
     } catch (err) {
@@ -595,6 +606,7 @@ export function useVpnSession(
       if (stale()) return { ok: true };
       await refreshReal();
       setConnection((current) => (current === "starting" ? "idle" : current));
+      setStartingConfigId(null);
       const reason = actionReason(err);
       // 后端把这代 start 作废（断开 / 换配置抢先）：静默收尾，不弹错误。
       if (reason === "cancelled") return { ok: true };
@@ -610,6 +622,7 @@ export function useVpnSession(
     } finally {
       if (startSeqRef.current === startSeq) {
         startingRef.current = false;
+        startingTargetRef.current = null;
         setCheckingHelper(false);
         setPreparingHelper(false);
       }
@@ -620,12 +633,14 @@ export function useVpnSession(
     // 取消还在进行的 start：它后续 await 回来会发现序号失效，不再往下走。
     cancelSeqRef.current += 1;
     startingRef.current = false;
+    startingTargetRef.current = null;
     setCheckingHelper(false);
     setPreparingHelper(false);
     const stopSeq = ++stopSeqRef.current;
     const wasConnected = connection === "connected";
     const wasConfigId = connectedConfigId;
     stopPendingRef.current = true;
+    setStartingConfigId(null);
 
     if (mock) {
       clearTimer();
@@ -778,6 +793,7 @@ export function useVpnSession(
     activeConfig,
     connection,
     connectedConfigId,
+    startingConfigId,
     loading,
     error,
     reload,

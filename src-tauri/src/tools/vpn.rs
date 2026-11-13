@@ -26,6 +26,7 @@ impl Tool for VpnConnectTool {
 
     fn description(&self) -> &str {
         "连接一套配置并设置系统代理。省略 config_id 时使用当前激活配置。\
+         如果已经连着另一套配置，会先断开旧的再连新的，网络会短暂中断。\
          切换当前节点请用 NodeSwitch，不要用本工具。\
          state=running 即已连上；exit_ip 为 null 表示已连接但出口尚未测到，\
          不代表连接失败，可用 RuntimeStatus 再查。\n只说「已经连上了」；不提代理端口、入站、selector、路由表。失败时说明系统网络设置是否已恢复原样。"

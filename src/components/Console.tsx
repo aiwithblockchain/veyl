@@ -70,6 +70,13 @@ interface Props {
   onOpenDiagnostics?: () => void;
   loading?: boolean;
   runtime: RuntimeView;
+  /** 正在连接的那套配置名；runtime 快照不一定带名字，由 App 用配置列表补齐。 */
+  connectedConfigName?: string | null;
+  /** 连接属于哪套配置的本地已知值；快照还没带上时用它判断身份。 */
+  connectedConfigId?: string | null;
+  /** 正在启动的那套配置；active 可能已经切到别的，hero 要说清在连谁。 */
+  startingConfigId?: string | null;
+  startingConfigName?: string | null;
   /** 最近一次失败是否来自已连接态；决定失败卡标题是「连接断了」还是「没有连上节点」。 */
   failedAfterConnected?: boolean;
   /** 连接「全部流量」前正在更新后台组件：先说明系统会请求授权，再弹窗。 */
@@ -140,6 +147,10 @@ export function Console({
   onOpenDiagnostics,
   loading = false,
   runtime,
+  connectedConfigName = null,
+  connectedConfigId = null,
+  startingConfigId = null,
+  startingConfigName = null,
   failedAfterConnected = false,
   helperPreparing = false,
   rateSamples = NO_RATE,
@@ -162,6 +173,28 @@ export function Console({
   const degraded = level === "degraded";
   const transitioning = level === "transition";
   const stopping = runtime.state === "stopping";
+  // 已连接但不是 active 那套：主按钮改成连当前 active，点它会先断开这一套。
+  // 连接身份以运行时快照为准；快照还没带上时用 hook 里本地记下的那套。
+  const runningConfigId = runtime.config_id ?? connectedConfigId ?? null;
+  const elsewhereName =
+    connected && configId && runningConfigId && runningConfigId !== configId
+      ? connectedConfigName?.trim() ||
+        runtime.config_name?.trim() ||
+        "另一套配置"
+      : null;
+  // 连着但读不到属于哪套：也要能一键连当前 active，不能只剩「断开」。
+  const unknownConnection = connected && !runningConfigId;
+  const startingLabel =
+    transitioning && !stopping ? startingConfigName?.trim() || null : null;
+  // 正在启动另一套：hero 的「正在连接」不是 active 这套，主按钮要能连过去。
+  const startingElsewhereName =
+    transitioning &&
+    !stopping &&
+    startingConfigId &&
+    configId &&
+    startingConfigId !== configId
+      ? startingLabel || "另一套配置"
+      : null;
 
   const canConnect = Boolean(config && config.nodes.length > 0);
   const hasNodes = (config?.nodes.length ?? 0) > 0;
@@ -387,9 +420,20 @@ export function Console({
           <p className="hero__action">{NO_TRAFFIC_ACTION}</p>
           {scopeSwitch}
         </div>
-        <button type="button" className="btn btn--primary" onClick={onReconnect}>
-          重新连接
-        </button>
+        {elsewhereName ? (
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={!canConnect || helperPreparing}
+            onClick={onStart}
+          >
+            连接 VPN（会先断开 {elsewhereName}）
+          </button>
+        ) : (
+          <button type="button" className="btn btn--primary" onClick={onReconnect}>
+            重新连接
+          </button>
+        )}
       </section>
     );
   } else if (connected) {
@@ -403,12 +447,34 @@ export function Console({
             </span>
             <span className="timecode num">{clock}</span>
           </h1>
-          <p className="hero__caption">本次连接</p>
+          <p className="hero__caption">
+            {elsewhereName ? `当前连接：${elsewhereName}` : "本次连接"}
+          </p>
           {scopeSwitch}
         </div>
-        <button type="button" className="btn btn--outline" onClick={onStop}>
-          断开 VPN
-        </button>
+        {elsewhereName ? (
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={!canConnect || helperPreparing}
+            onClick={onStart}
+          >
+            连接 VPN（会先断开 {elsewhereName}）
+          </button>
+        ) : unknownConnection ? (
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={!canConnect || helperPreparing}
+            onClick={onStart}
+          >
+            连接 VPN（会先断开当前连接）
+          </button>
+        ) : (
+          <button type="button" className="btn btn--outline" onClick={onStop}>
+            断开 VPN
+          </button>
+        )}
       </section>
     );
   } else {
@@ -442,18 +508,33 @@ export function Console({
             {led ? <span className={`led ${led}`} aria-hidden /> : null}
             <span>{word}</span>
           </h1>
-          {caption ? <p className="hero__caption">{caption}</p> : null}
+          {caption ? (
+            <p className="hero__caption">{caption}</p>
+          ) : startingLabel ? (
+            <p className="hero__caption">正在连接：{startingLabel}</p>
+          ) : null}
           {scopeSwitch}
         </div>
         {transitioning ? (
-          <button
-            type="button"
-            className="btn btn--outline"
-            disabled={stopping}
-            onClick={stopping ? undefined : onStop}
-          >
-            {stopping ? "正在断开…" : "取消"}
-          </button>
+          startingElsewhereName ? (
+            <button
+              type="button"
+              className="btn btn--primary"
+              disabled={!canConnect || helperPreparing}
+              onClick={onStart}
+            >
+              连接 VPN（会先断开 {startingElsewhereName}）
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn btn--outline"
+              disabled={stopping}
+              onClick={stopping ? undefined : onStop}
+            >
+              {stopping ? "正在断开…" : "取消"}
+            </button>
+          )
         ) : level === "failed" ? (
           <button
             type="button"
@@ -657,6 +738,11 @@ export function Console({
               open={sheetOpen}
               config={config}
               probes={nodeProbes}
+              switchBlockedReason={
+                elsewhereName
+                  ? `当前连着「${elsewhereName}」，先连这套再换节点。`
+                  : null
+              }
               onClose={closeSheet}
               onSwitch={onSwitchNode}
               onOpenDiagnostics={

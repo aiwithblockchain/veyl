@@ -320,6 +320,7 @@ type AivpnError = {
 | `restarting` | `STOPPED` | `starting` | 用同版本同配置重新拉起 |
 | `restarting` | `CRASH` | `failed` | 重启失败；若存在 standby 版本则回滚 |
 | `stopping` | `STOPPED` | `idle` | 清除 secret、临时配置、`restart_intent` |
+| `stopping` | `GIVE_UP` | `failed` | 停不掉（TUN 的 `stop` 返回错误）：如实上报「特权连接没有停掉」并写 `last_error`；界面与托盘**不得显示已断开**，`pid` / `config_id` 按停止前记录 |
 | `starting` / `running` / `restarting` | `GIVE_UP` | `failed` | 上报错误；关闭系统代理 |
 | `failed` | `START_REQ` | `starting` | 先自检（二进制存在、端口可用）再启动 |
 

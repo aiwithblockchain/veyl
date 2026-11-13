@@ -26,6 +26,7 @@ import type {
   NetworkForceResetResult,
   RenamedSession,
   ReportActionData,
+  RuntimeStartResult,
   TunHelperInfo,
   TunHelperRestartResult,
   TunHelperState,
@@ -263,9 +264,10 @@ export class MockAgentBridge implements AgentBridge {
     return "0.1.0";
   }
 
-  async runtimeStart(configId?: string): Promise<void> {
+  async runtimeStart(configId?: string): Promise<RuntimeStartResult> {
     // 契约：用户中途启动 VPN，正在跑的测速取消，reason = connected。
     this.cancelProbeForConnect();
+    const stored = this.readMockConfigs();
     const profile =
       this.profiles.find((item) => item.id === configId) ??
       this.profiles.find((item) => item.id === this.runtime.config_id) ??
@@ -273,18 +275,68 @@ export class MockAgentBridge implements AgentBridge {
     if (!profile) {
       throw { code: "PRECONDITION_FAILED", message: "还没有可用的节点" };
     }
+    // 界面建出来的配置（cfg_*）与演示节点（prf_*）是两套 id：连接身份以配置库为准，
+    // 否则切换配置后 hero 会把两套 id 当成「连接的是另一套」。
+    const targetId =
+      configId ??
+      stored.find((config) => config.config_id === this.runtime.config_id)?.config_id ??
+      stored[0]?.config_id ??
+      profile.id;
+    const target = stored.find((config) => config.config_id === targetId) ?? null;
+    const targetName = target?.name ?? profile.name;
+    const startNodeId = target?.current_node_id ?? profile.id;
+    const startNodeName =
+      target?.nodes.find((node) => node.node_id === startNodeId)?.name ?? profile.name;
 
-    const switching = this.runtime.state === "running" || this.runtime.state === "degraded";
-    this.transition(switching ? "restarting" : "starting", switching ? "restart_req" : "start_req", {
-      config_id: profile.id,
-      config_name: profile.name,
-      node_id: profile.id,
-      node_name: profile.name,
+    const sameTarget = this.runtime.config_id === targetId;
+    if (
+      sameTarget &&
+      (this.runtime.state === "running" ||
+        this.runtime.state === "degraded" ||
+        this.runtime.state === "starting" ||
+        this.runtime.state === "restarting")
+    ) {
+      // 契约 §7.1：同一套已连接 / 正在启动时幂等返回，不重启在途连接。
+      return { ...this.runtime, already_running: true };
+    }
+
+    const switching =
+      this.runtime.state === "running" ||
+      this.runtime.state === "degraded" ||
+      this.runtime.state === "starting" ||
+      this.runtime.state === "restarting";
+    if (switching) {
+      // 真实后端换配置是「先停旧连接，再启动新的」，不是重启同一个进程。
+      this.transition("stopping", "stop_req");
+      await sleep(300);
+      this.health({ process: false, clash_api: false, data_plane: false, exit_ip: null });
+      this.transition("idle", "stopped", {
+        pid: null,
+        uptime_seconds: null,
+        config_id: null,
+        config_name: null,
+        node_id: null,
+        node_name: null,
+        mixed_port: null,
+        port_fallback: null,
+        connected_since: null,
+        latency_ms: null,
+        system_proxy_enabled: false,
+        system_dns: null,
+        connections: null,
+        route_region: null,
+      });
+    }
+    this.transition("starting", "start_req", {
+      config_id: targetId,
+      config_name: targetName,
+      node_id: startNodeId,
+      node_name: startNodeName,
       connected_since: null,
       latency_ms: null,
     });
 
-    await sleep(switching ? 1400 : 1000);
+    await sleep(1000);
     this.health({
       process: true,
       clash_api: true,
@@ -313,10 +365,10 @@ export class MockAgentBridge implements AgentBridge {
     this.transition("running", "process_ready", {
       pid: 48213,
       uptime_seconds: 0,
-      config_id: profile.id,
-      config_name: profile.name,
-      node_id: profile.id,
-      node_name: profile.name,
+      config_id: targetId,
+      config_name: targetName,
+      node_id: startNodeId,
+      node_name: startNodeName,
       // 演示开关：强制展示「系统 DNS 没接管」那一行。
       system_dns: mockFlag("veyl.mock.dnsUnchanged") === "1" ? "unchanged" : null,
       mixed_port: fallbackPort ?? configuredPort,
@@ -336,6 +388,7 @@ export class MockAgentBridge implements AgentBridge {
       connections: 2,
       route_region: this.mockRegion(),
     });
+    return { ...this.runtime, already_running: false };
   }
 
   async runtimeStop(): Promise<void> {
@@ -1575,10 +1628,7 @@ export class MockAgentBridge implements AgentBridge {
     };
   }
 
-  async configActivate(
-    _configId: string,
-    _confirmDisconnect = false,
-  ): Promise<ConfigActivateResult> {
+  async configActivate(_configId: string): Promise<ConfigActivateResult> {
     throw this.unsupportedConfigCommand("config_activate");
   }
 

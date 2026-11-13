@@ -249,6 +249,60 @@ impl RuntimeStatus {
             last_transition_at: input.connected_since.unwrap_or(now),
         }
     }
+
+    /// 启动 / 停止过程中的 TUN 快照：还没有 pid，除状态与目标配置外全为空。
+    ///
+    /// 事件不变量要求 `snapshot.state == to`，所以不能拿「已连接」那份快照改字段。
+    /// 另外两条 `runtime.md` §2.5 的不变量也必须满足：`idle` / `failed` 的
+    /// `mode` 为 `null`；未运行时 `upstream_version` 报**当前可用运行时**的版本。
+    pub fn tun_pending(
+        state: RuntimeState,
+        config_id: Option<String>,
+        upstream_version: Option<String>,
+    ) -> Self {
+        let now = now_iso();
+        let mode = match state {
+            RuntimeState::Idle | RuntimeState::Failed => None,
+            _ => Some(RuntimeMode::Tun),
+        };
+        Self {
+            contract_version: CONTRACT_VERSION,
+            state,
+            mode,
+            pid: None,
+            upstream_version,
+            uptime_seconds: None,
+            config_id,
+            mixed_port: None,
+            port_fallback: None,
+            config_name: None,
+            node_id: None,
+            node_name: None,
+            applied_route_revision: None,
+            route_region: None,
+            connected_since: None,
+            latency_ms: None,
+            node_latency_ms: None,
+            direct_ip: None,
+            config_hash: None,
+            system_proxy_enabled: false,
+            system_dns: None,
+            health: HealthSnapshot {
+                contract_version: CONTRACT_VERSION,
+                process: false,
+                clash_api: false,
+                data_plane: false,
+                exit_ip: None,
+                consecutive_failures: 0,
+                checked_at: now.clone(),
+            },
+            traffic: None,
+            connections: None,
+            restart_count: 0,
+            last_error: None,
+            last_transition_at: now,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1938,6 +1992,31 @@ impl RuntimeManager {
 
     fn emit(&self, event: RuntimeEvent) {
         let _ = self.events.send(event);
+    }
+
+    /// 把 manager 之外（TUN 的 sing-box 不归它管）产生的状态变化并进同一条事件流。
+    ///
+    /// 界面与托盘只订阅这一条：TUN 再单开一条，迟早出现「主界面已断开、托盘仍连着」。
+    /// 调用方负责保证 `snapshot.state == to`。
+    pub fn publish_state(
+        &self,
+        from: RuntimeState,
+        to: RuntimeState,
+        event: RuntimeEventKind,
+        reason: Option<String>,
+        snapshot: RuntimeStatus,
+    ) {
+        let pid = snapshot.pid;
+        let upstream_version = snapshot.upstream_version.clone();
+        self.emit(RuntimeEvent::StateChanged(state_payload(
+            from,
+            to,
+            event,
+            reason,
+            pid,
+            upstream_version,
+            snapshot,
+        )));
     }
 }
 

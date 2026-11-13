@@ -11,6 +11,7 @@ import type {
   RuntimeSnapshot,
   RuntimeState,
 } from "./agent/protocol";
+import type { RuntimeStartResult } from "./agent/bridge";
 import { PANEL_VERSION } from "./ui/panelPreference";
 
 const CONFIG_ID = "cfg_tun_1";
@@ -59,13 +60,12 @@ const SUMMARY: ConfigSummary = {
   last_used_at: null,
 };
 
-const STALE_AT = Date.now() - 120_000;
 let appClock = Date.now() - 60_000;
 
 function stateEvent(
   from: RuntimeState,
   to: RuntimeState,
-  configId = CONFIG_ID,
+  configId: string | null = CONFIG_ID,
 ): AgentEvent {
   appClock += 1000;
   const at = new Date(appClock).toISOString();
@@ -96,22 +96,19 @@ function stateEvent(
   };
 }
 
-function configChangedEvent(): AgentEvent {
+/** runtime_start 的返回：默认按成功连上。 */
+function startResult(
+  configId: string | null = CONFIG_ID,
+  state: RuntimeState = "running",
+): RuntimeStartResult {
   return {
-    name: AGENT_EVENTS.configChanged,
-    payload: {
-      contract_version: CONTRACT_VERSION,
-      change: "updated",
-      config_id: CONFIG_ID,
-      config: null,
-      active_config_id: CONFIG_ID,
-      emitted_at: "",
-    },
-  };
+    state,
+    config_id: state === "running" || state === "degraded" ? configId : null,
+    last_transition_at: new Date(appClock).toISOString(),
+  } as RuntimeStartResult;
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
+function deferred<T>() {  let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
     resolve = done;
   });
@@ -187,45 +184,66 @@ function renderStartWithFailure(error: unknown) {
   return render(<App />);
 }
 
-describe("断开后的配置切换确认", () => {
+describe("切换配置只改 active", () => {
   function setupTwoConfigs() {
     Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
     localStorage.setItem("veyl.onboarding.skipped", "1");
 
-    const secondSummary = {
+    const base = {
       ...SUMMARY,
+      connect_mode: "system_proxy" as const,
+      listen_port: 7890,
+    };
+    const firstSummary = { ...base, config_id: CONFIG_ID, name: "全部流量", is_active: true };
+    const secondSummary = {
+      ...base,
       config_id: "cfg_proxy_2",
       name: "家里",
       is_active: false,
     };
-    const secondDetail = {
-      ...DETAIL,
-      config_id: secondSummary.config_id,
-      name: secondSummary.name,
+    const thirdSummary = {
+      ...base,
+      config_id: "cfg_proxy_3",
+      name: "公司",
       is_active: false,
     };
-    vi.spyOn(bridge, "configList").mockResolvedValue({
-      configs: [SUMMARY, secondSummary],
-      active_config_id: CONFIG_ID,
+    const detailOf = (summary: ConfigSummary): ConfigDetail => ({
+      ...DETAIL,
+      config_id: summary.config_id,
+      name: summary.name,
+      connect_mode: summary.connect_mode,
+      listen_port: summary.listen_port,
+      is_active: summary.is_active,
     });
-    vi.spyOn(bridge, "configDetail").mockImplementation(async (configId: string) =>
-      configId === secondSummary.config_id ? secondDetail : DETAIL,
-    );
+    const summaries = [firstSummary, secondSummary, thirdSummary];
+    let activeId = CONFIG_ID;
+
+    vi.spyOn(bridge, "configList").mockImplementation(async () => ({
+      configs: summaries.map((summary) => ({
+        ...summary,
+        is_active: summary.config_id === activeId,
+      })),
+      active_config_id: activeId,
+    }));
+    vi.spyOn(bridge, "configDetail").mockImplementation(async (configId: string) => {
+      const summary = summaries.find((item) => item.config_id === configId);
+      return summary ? detailOf(summary) : DETAIL;
+    });
     vi.spyOn(bridge, "getRuntimeSnapshot").mockResolvedValue(null);
-    return { secondSummary };
+    const activate = vi
+      .spyOn(bridge, "configActivate")
+      .mockImplementation(async (configId: string) => {
+        activeId = configId;
+        return { active_config_id: configId, runtime: {} as RuntimeSnapshot };
+      });
+    return { firstSummary, secondSummary, thirdSummary, activate };
   }
 
-  it("断开事件后的陈旧 running 快照不会让切换弹确认", async () => {
-    const { secondSummary } = setupTwoConfigs();
-    vi.spyOn(bridge, "configActivate").mockResolvedValue({
-      active_config_id: secondSummary.config_id,
-      reconnect: "not_running",
-      runtime: null,
-    });
+  it("已连接时切换：不弹确认、不断开，提示仍连着哪套", async () => {
+    const { secondSummary, activate } = setupTwoConfigs();
 
     render(<App />);
     await screen.findByText("全部流量");
-
     act(() => {
       (bridge as unknown as { emit(event: AgentEvent): void }).emit(
         stateEvent("idle", "running"),
@@ -237,56 +255,33 @@ describe("断开后的配置切换确认", () => {
       ),
     );
 
-    // 停止事件走完整序列。
-    act(() => {
-      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
-        stateEvent("running", "stopping"),
-      );
-      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
-        stateEvent("stopping", "idle"),
-      );
-    });
-    await act(async () => {});
-
-    // 改名 / 重新读取触发的 refreshReal 拿到的快照仍是滞后的 running。
-    vi.mocked(bridge.getRuntimeSnapshot).mockResolvedValue({
-      state: "running",
-      config_id: CONFIG_ID,
-      last_transition_at: new Date(STALE_AT).toISOString(),
-    } as RuntimeSnapshot);
-    act(() => {
-      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
-        configChangedEvent(),
-      );
-    });
-    await act(async () => {});
-
     fireEvent.click(screen.getByText("家里"));
 
     await waitFor(() =>
-      expect(bridge.configActivate).toHaveBeenCalledWith(
-        secondSummary.config_id,
-        false,
-      ),
+      expect(activate).toHaveBeenCalledWith(secondSummary.config_id),
     );
-    expect(screen.queryByText(/会先断开当前连接/)).toBeNull();
+    expect(activate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog", { name: "切换配置" })).toBeNull();
+    expect(
+      await screen.findByText(
+        "已切到「家里」，当前仍连着「全部流量」。点连接会先断开再连。",
+      ),
+    ).toBeTruthy();
+    expect(document.querySelector(".state-line__label")?.textContent).toContain(
+      "已连接",
+    );
   }, 15_000);
 
-  it("active 与真正连接的配置分叉时，点已连接的那套不弹确认", async () => {
+  it("已连接时主按钮变成连接新配置，点一次只启动一次", async () => {
     const { secondSummary } = setupTwoConfigs();
-    vi.spyOn(bridge, "configActivate").mockResolvedValue({
-      active_config_id: secondSummary.config_id,
-      reconnect: "already_connected",
-      runtime: null,
-    });
+    const start = vi.spyOn(bridge, "runtimeStart").mockResolvedValue(startResult());
+    vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
 
     render(<App />);
     await screen.findByText("全部流量");
-
-    // 真正连着的是第二套，active 仍是第一套。
     act(() => {
       (bridge as unknown as { emit(event: AgentEvent): void }).emit(
-        stateEvent("idle", "running", secondSummary.config_id),
+        stateEvent("idle", "running"),
       );
     });
     await waitFor(() =>
@@ -296,29 +291,33 @@ describe("断开后的配置切换确认", () => {
     );
 
     fireEvent.click(screen.getByText("家里"));
+    await waitFor(() =>
+      expect(screen.getByText("当前连接：全部流量")).toBeTruthy(),
+    );
+
+    const connect = screen.getByRole("button", {
+      name: "连接 VPN（会先断开 全部流量）",
+    });
+    fireEvent.click(connect);
 
     await waitFor(() =>
-      expect(bridge.configActivate).toHaveBeenCalledWith(
-        secondSummary.config_id,
-        false,
-      ),
+      expect(start).toHaveBeenCalledWith(secondSummary.config_id),
     );
-    expect(bridge.configActivate).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText(/会先断开当前连接/)).toBeNull();
-    expect(await screen.findByText("已经连在这套配置上。")).toBeTruthy();
+    expect(start).toHaveBeenCalledTimes(1);
   }, 15_000);
 
-  it("正在连接时切换，确认框说的是会取消这次连接", async () => {
-    const { secondSummary } = setupTwoConfigs();
-    const activate = vi.spyOn(bridge, "configActivate").mockResolvedValue({
-      active_config_id: secondSummary.config_id,
-      reconnect: "not_running",
-      runtime: null,
-    });
+  it("正在连接时切换：提示按真正的启动配置取名，不随 active 抖动", async () => {
+    const { secondSummary, thirdSummary, activate } = setupTwoConfigs();
+    const gate = deferred<unknown>();
+    vi.spyOn(bridge, "runtimeStart").mockImplementation(
+      () => gate.promise as unknown as Promise<RuntimeStartResult>,
+    );
+    vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
 
     render(<App />);
     await screen.findByText("全部流量");
-
+    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+    await waitFor(() => expect(bridge.runtimeStart).toHaveBeenCalledTimes(1));
     act(() => {
       (bridge as unknown as { emit(event: AgentEvent): void }).emit(
         stateEvent("idle", "starting"),
@@ -331,12 +330,134 @@ describe("断开后的配置切换确认", () => {
     );
 
     fireEvent.click(screen.getByText("家里"));
+    await waitFor(() =>
+      expect(activate).toHaveBeenCalledWith(secondSummary.config_id),
+    );
+    expect(
+      await screen.findByText("已切到「家里」，正在连接的是「全部流量」。"),
+    ).toBeTruthy();
 
-    const dialog = await screen.findByRole("dialog", { name: "切换配置" });
-    expect(dialog.textContent).toContain("正在连接");
-    expect(dialog.textContent).toContain("切换会取消这次连接");
-    expect(dialog.textContent).not.toContain("会先断开当前连接");
-    expect(activate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("公司"));
+    await waitFor(() =>
+      expect(activate).toHaveBeenCalledWith(thirdSummary.config_id),
+    );
+    expect(
+      await screen.findByText("已切到「公司」，正在连接的是「全部流量」。"),
+    ).toBeTruthy();
+
+    await act(async () => {
+      gate.resolve({});
+    });
+  }, 15_000);
+
+  it("正在连接 A 时切到 B：hero 说明在连谁，主按钮能连 B", async () => {
+    const { secondSummary, activate } = setupTwoConfigs();
+    const gate = deferred<RuntimeStartResult>();
+    const start = vi
+      .spyOn(bridge, "runtimeStart")
+      .mockImplementation(() => gate.promise);
+    vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
+
+    render(<App />);
+    await screen.findByText("全部流量");
+    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+    act(() => {
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
+        stateEvent("idle", "starting"),
+      );
+    });
+    await waitFor(() =>
+      expect(document.querySelector(".state-word")?.textContent).toContain(
+        "正在连接",
+      ),
+    );
+
+    fireEvent.click(screen.getByText("家里"));
+    await waitFor(() =>
+      expect(activate).toHaveBeenCalledWith(secondSummary.config_id),
+    );
+    expect(await screen.findByText("正在连接：全部流量")).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "连接 VPN（会先断开 全部流量）" }),
+    );
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    expect(start.mock.calls[1][0]).toBe(secondSummary.config_id);
+
+    await act(async () => {
+      gate.resolve(startResult(secondSummary.config_id));
+    });
+  }, 15_000);
+
+  it("切回正在连着的那套：不提示", async () => {
+    const { activate } = setupTwoConfigs();
+
+    render(<App />);
+    await screen.findByText("全部流量");
+    act(() => {
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
+        stateEvent("idle", "running"),
+      );
+    });
+    await waitFor(() =>
+      expect(document.querySelector(".state-line__label")?.textContent).toContain(
+        "已连接",
+      ),
+    );
+
+    fireEvent.click(screen.getByText("家里"));
+    await waitFor(() =>
+      expect(screen.getByText(/已切到「家里」/)).toBeTruthy(),
+    );
+
+    fireEvent.click(screen.getByText("全部流量"));
+    await waitFor(() => expect(activate).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+
+    expect(screen.queryByText(/已切到「全部流量」/)).toBeNull();
+  }, 15_000);
+
+  it("连接身份未知时：只说还有一条连接，不编名字", async () => {
+    const { secondSummary, activate } = setupTwoConfigs();
+
+    render(<App />);
+    await screen.findByText("全部流量");
+    act(() => {
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
+        stateEvent("idle", "running", null),
+      );
+    });
+    await waitFor(() =>
+      expect(document.querySelector(".state-line__label")?.textContent).toContain(
+        "已连接",
+      ),
+    );
+
+    fireEvent.click(screen.getByText("家里"));
+    await waitFor(() =>
+      expect(activate).toHaveBeenCalledWith(secondSummary.config_id),
+    );
+
+    expect(
+      await screen.findByText("已切到「家里」，当前仍有一条连接。点连接会先断开再连。"),
+    ).toBeTruthy();
+  }, 15_000);
+
+  it("断开时切换：不弹也不提示", async () => {
+    const { secondSummary, activate } = setupTwoConfigs();
+
+    render(<App />);
+    await screen.findByText("全部流量");
+
+    fireEvent.click(screen.getByText("家里"));
+
+    await waitFor(() =>
+      expect(activate).toHaveBeenCalledWith(secondSummary.config_id),
+    );
+    await act(async () => {});
+    expect(screen.queryByRole("dialog", { name: "切换配置" })).toBeNull();
+    expect(screen.queryByText(/已切到/)).toBeNull();
   }, 15_000);
 });
 
@@ -360,7 +481,7 @@ describe("TUN 启动成功后的界面状态", () => {
       state: "running",
       needsAdminRestart: false,
     } as never);
-    vi.spyOn(bridge, "runtimeStart").mockImplementation(() => gate.promise as Promise<void>);
+    vi.spyOn(bridge, "runtimeStart").mockImplementation(() => gate.promise as unknown as Promise<RuntimeStartResult>);
     vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
 
     const { container } = render(<App />);
@@ -407,7 +528,7 @@ describe("TUN 启动成功后的界面状态", () => {
       state: "running",
       needsAdminRestart: false,
     } as never);
-    vi.spyOn(bridge, "runtimeStart").mockResolvedValue(undefined);
+    vi.spyOn(bridge, "runtimeStart").mockResolvedValue(startResult());
 
     const { container } = render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));

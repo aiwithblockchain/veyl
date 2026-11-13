@@ -389,6 +389,8 @@ type RuntimeStateChangedPayload = {
 
 触发：`runtime.md` §3.2 的每一条迁移，**每次都发**，不去重。
 
+**TUN 也在同一条流里（2.20.0 起）**：TUN 的 sing-box 是特权助手的子进程、不归 `RuntimeManager` 管，但它的状态变化（启动中 / 已连接 / 停止中 / 空闲 / 失败）也以同一形状推进同一条 `runtime-state-changed` 流，`snapshot` 用 TUN 合成的快照（`starting` / `stopping` 下 `mode = "tun"`；`idle` / `failed` 下 `mode = null`，见 `runtime.md` §2.5；`mixed_port = null`、`health.clash_api = false`）。界面与托盘只订阅这一条流——各读一份状态就是「主界面已断开、托盘仍连着」的来源。典型序列：启动 `idle → starting`（`start_req`）→ 成功 `starting → running`（`process_ready`）或失败 `starting → failed`（`give_up`）；断开 `running → stopping`（`stop_req`）→ `stopping → idle`（`stopped`），停不掉时是 `stopping → failed`（`give_up`，带 `last_error`）。换配置连新连接时是完整的 `stopping → idle → starting → running`，中间不会闪错状态。
+
 **为什么带 `snapshot`**：UI 需要的不只是「变成 running 了」，还需要「实际监听在哪个端口、连的是哪套配置、哪个节点」。不带快照的话，每个消费者都要在收到事件后再 `runtime_status()` 一次，而这两次调用之间状态可能又变了——代理卡片会短暂显示上一个端口。把快照挂在迁移事件上，顺序天然一致。
 
 不变量：
@@ -647,7 +649,7 @@ type ConfigChangedPayload = {
 | `created` | `config_create` 事务提交后 | 若自动激活，紧跟一条 `activated` |
 | `updated` | `config_update` 提交后；`node_import_url` / `node_create` 追加节点到配置后 | 同一秒内多次更新合并为一条（以最后一次为准） |
 | `deleted` | `config_delete` 提交后 | `config = null`；`active_config_id` 可能变成 `null` |
-| `activated` | `config_activate` 提交后（含自动激活） | 切换前若已连接，**先收到 `runtime-state-changed`（stopped）再收到本事件** |
+| `activated` | `config_activate` 提交后（含自动激活） | 切换只改 active、**不碰运行时**：不会先出现 `runtime-state-changed`（2.20.0） |
 
 规则：
 
@@ -853,7 +855,7 @@ type RulesChangedPayload = {
 Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 
 1. **配置先于连接**：`config-changed(activated)` 一定在随之而来的 `runtime-state-changed(starting)` 之前。
-2. **断开先于切换**：`config_activate` 带 `confirmDisconnect` 时，`runtime-state-changed(→ stopping/stopped)` 先于 `config-changed(activated)`。
+2. **切换不断开**：`config_activate` 只改 active、不碰运行时，因此切换本身不产生任何 `runtime-state-changed`；断开只发生在连接新配置时（`runtime_start` 先停旧连接，再出现新连接的 `starting`）。
 3. **节点切换不发运行时事件**（§4.11）。
 4. **问题事件与运行时事件互不阻塞**：一次崩溃可能同时产生 `runtime-state-changed(failed)` 与 `issue-changed(created)`，两者没有先后要求；UI 必须能处理任意顺序。
 5. **布局按 `revision` 丢弃旧值**（§4.13），不依赖到达顺序。
@@ -1104,6 +1106,12 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.12.0 补记（2026-11-13，TUN 状态并入同一条事件流）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | §4.1 补充：TUN 的启动中 / 已连接 / 停止中 / 失败也发 `runtime-state-changed`，与代理模式同形状、走同一条流；字段、`event` 取值与快照形状都不变，事件版本不升 | 行为补记 | 用户：主界面显示已断开、托盘仍显示连接；两边各读一份状态必然分叉 |
 
 ### 2.12.0（2026-11-12，地区生效值事件）
 

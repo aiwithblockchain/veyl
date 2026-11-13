@@ -199,13 +199,8 @@ impl VpnToolServices for FakeServices {
         self.rec.record(format!("config_delete({config_id})"));
         Ok(self.data.clone())
     }
-    async fn config_activate(
-        &self,
-        config_id: &str,
-        confirm_disconnect: bool,
-    ) -> anyhow::Result<Value> {
-        self.rec
-            .record(format!("config_activate({config_id},{confirm_disconnect})"));
+    async fn config_activate(&self, config_id: &str) -> anyhow::Result<Value> {
+        self.rec.record(format!("config_activate({config_id})"));
         Ok(self.data.clone())
     }
     async fn node_import_url(
@@ -469,8 +464,9 @@ async fn every_tool_survives_garbage_input() {
             let result = tool(&all, &name).execute(input.clone(), &context()).await;
             // 这里不能调用 `envelope()` 里的断言以外的东西——只要不 panic 就说明过了最硬的一条。
             let env = envelope(&result);
+            // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], crate::tools::envelope::CONTRACT_VERSION,
+                env["contract_version"], "3.11.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -1153,7 +1149,7 @@ async fn service_failure_becomes_a_structured_error_with_next_actions() {
         async fn config_delete(&self, _: &str) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
-        async fn config_activate(&self, _: &str, _: bool) -> anyhow::Result<Value> {
+        async fn config_activate(&self, _: &str) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn node_import_url(&self, _: Option<String>, _: &str) -> anyhow::Result<Value> {

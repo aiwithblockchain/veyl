@@ -812,14 +812,35 @@ describe("点击后立即反馈", () => {
   });
 });
 
-describe("切换配置结果", () => {
-  it("config_activate 返回 already_connected 时给出明确提示", async () => {
+describe("启动返回快照", () => {
+  it("幂等返回 starting：保持启动中，不假装已连接", async () => {
+    const bridge = makeStartBridge("system_proxy", {
+      runtimeStart: async () =>
+        ({
+          state: "starting",
+          config_id: CONFIG_ID,
+          last_transition_at: new Date().toISOString(),
+        }) as never,
+    });
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let outcome: ActionResult | undefined;
+    await act(async () => {
+      outcome = await result.current.start();
+    });
+
+    expect(outcome).toEqual({ ok: true });
+    expect(result.current.connection).toBe("starting");
+    expect(result.current.startingConfigId).toBe(CONFIG_ID);
+    expect(result.current.connectedConfigId).toBeNull();
+  });
+});
+
+describe("切换配置只改 active", () => {
+  it("只调用 configActivate(configId)，不带确认参数", async () => {
     const bridge = makeStartBridge("system_proxy");
-    const activate = vi.fn(async () => ({
-      active_config_id: CONFIG_ID,
-      reconnect: "already_connected" as const,
-      runtime: null,
-    }));
+    const activate = vi.fn(async () => ({ active_config_id: CONFIG_ID }));
     (
       bridge as unknown as { configActivate: typeof activate }
     ).configActivate = activate;
@@ -832,8 +853,29 @@ describe("切换配置结果", () => {
       res = await result.current.selectConfig(CONFIG_ID);
     });
 
-    expect(res).toEqual({ ok: true, message: "已经连在这套配置上。" });
-    expect(activate).toHaveBeenCalledWith(CONFIG_ID, false);
+    expect(res).toEqual({ ok: true });
+    expect(activate).toHaveBeenCalledWith(CONFIG_ID);
+    expect(activate.mock.calls[0]).toHaveLength(1);
+  });
+
+  it("已连接时切换不改变连接态", async () => {
+    const { bridge, emit } = makeEventedStartBridge("system_proxy");
+    const activate = vi.fn(async () => ({ active_config_id: CONFIG_ID }));
+    (
+      bridge as unknown as { configActivate: typeof activate }
+    ).configActivate = activate;
+
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+    act(() => emit(stateEvent("idle", "running")));
+    expect(result.current.connection).toBe("connected");
+
+    await act(async () => {
+      await result.current.selectConfig(CONFIG_ID);
+    });
+
+    expect(result.current.connection).toBe("connected");
+    expect(result.current.connectedConfigId).toBe(CONFIG_ID);
   });
 });
 
@@ -865,15 +907,6 @@ describe("切换节点结果", () => {
       ok: false,
       message: "这套配置正在连接，等连上以后再切换节点。",
       reason: "config_launching",
-    });
-  });
-
-  it("cancelled 时静默，不显示错误文案", async () => {
-    const { res } = await runSwitchNode("cancelled");
-    expect(res).toEqual({
-      ok: true,
-      message: "这次切换已取消。",
-      reason: "cancelled",
     });
   });
 });

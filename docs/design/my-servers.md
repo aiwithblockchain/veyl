@@ -563,7 +563,7 @@ Vultr 是否支持在创建实例时传 `user_data`（cloud-init）、字段名�
 
 版本规则：**按真正变化的那份升**，不齐升。
 
-### 10.1 `commands.md` → 2.19.0
+### 10.1 `commands.md` → 2.21.0
 
 新增命令（均为 UI 通道；命名沿用现有 snake_case）：
 
@@ -658,7 +658,7 @@ CREATE TABLE my_servers (
 
 不新增 `configs` / `config_nodes` 字段；`config_create(node_ids)` 直接复用。
 
-### 10.5 `tools.md` → 3.11.0（只读，不给模型建机/销毁）
+### 10.5 `tools.md` → 3.12.0（只读，不给模型建机/销毁）
 
 - 新增 `MyServers`（`ReadOnly`）：列出我的服务器与状态，供 AI 回答“我的服务器怎么样了”。
 - **不新增购买 / 销毁 / SSH 凭据工具**。建机、销毁与查看 SSH 密码只能由用户点界面；模型最多建议用户去「我的服务器」操作。SSH 密码不进 AI 上下文。

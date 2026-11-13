@@ -19,7 +19,6 @@ import { ConfigRail } from "./components/ConfigRail";
 import { Console } from "./components/Console";
 import { ConnectionOverlay } from "./components/ConnectionOverlay";
 import { HelperPermissionDialog } from "./components/HelperPermissionDialog";
-import { IconClose } from "./components/icons";
 import { NewConfigDialog } from "./components/NewConfigDialog";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
@@ -54,7 +53,6 @@ import {
   shouldSettleZeroConfig,
 } from "./ui/consoleActions";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
-import { useFocusTrap } from "./ui/focus";
 import "./styles/app.css";
 
 const AI_EVENTS = new Set<AgentEvent["name"]>([
@@ -147,7 +145,6 @@ export default function App() {
   const [proxyPort, setProxyPort] = useState(DEFAULT_PROXY_PORT);
   const [repairing, setRepairing] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
-  const [pendingConfigId, setPendingConfigId] = useState<string | null>(null);
   const [newConfigOpen, setNewConfigOpen] = useState(false);
   const [systemRegion, setSystemRegion] = useState<string | null>(null);
   /** AI 改地区时如果正连着：说明行要追加「地区已改，下次连接生效」。 */
@@ -206,8 +203,6 @@ export default function App() {
   const askedMessageCountRef = useRef(0);
   // 新建配置的 AI 流程：记下开场消息发给哪个会话，防止连点再开一条。
   const newConfigFlowRef = useRef<string | null>(null);
-  const confirmConfigRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(Boolean(pendingConfigId), confirmConfigRef);
 
   const markQuestionSettled = (questionId: string) => {
     const settled = settledQuestionIds.current;
@@ -419,6 +414,7 @@ export default function App() {
 
   useEffect(() => {
     return bridge.subscribe((event) => {
+      let identityFresh = true;
       if (
         event.name === AGENT_EVENTS.runtimeStateChanged &&
         stoppingRef.current &&
@@ -429,7 +425,10 @@ export default function App() {
       }
       if (event.name === AGENT_EVENTS.runtimeStateChanged) {
         // 乱序/迟到事件由共享权威判断挡掉，别让顶部状态倒退。
+        // 重复事件的快照可能带回旧的连接身份：只有更新的时刻才允许改 config_id。
+        const fresh = runtimeAuthorityRef.current.isNewer(event.payload);
         if (!runtimeAuthorityRef.current.acceptEvent(event.payload)) return;
+        identityFresh = fresh;
       }
       if (event.name === AGENT_EVENTS.runtimeHealthChanged) {
         healthVersion.current += 1;
@@ -455,7 +454,7 @@ export default function App() {
           refreshSnapshot();
         }
       }
-      setRuntime((view) => applyRuntimeEvent(view, event));
+      setRuntime((view) => applyRuntimeEvent(view, event, { identity: identityFresh }));
       if (
         (AI_EVENTS.has(event.name) || event.name === AGENT_EVENTS.askUserQuestion) &&
         !panelOpenRef.current
@@ -701,15 +700,6 @@ export default function App() {
     session,
     bridge,
   ]);
-
-  useEffect(() => {
-    if (!pendingConfigId) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setPendingConfigId(null);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [pendingConfigId]);
 
   const completeOnboarding = async () => {
     setShowOnboarding(false);
@@ -1175,32 +1165,48 @@ export default function App() {
     }
   };
 
-  // 已连接时换配置：先说清会断一次，确认后再切并重新连上。
+  // 点其它配置只切换「当前用哪套」：不断开、不重连，也不弹确认。
   const handleSelectConfig = (configId: string) => {
     if (configId === vpn.activeConfigId) return;
-    // 目标就是真正连着的配置：只把 active 对齐，不再断线重连，也不弹确认。
-    if (configId === vpn.connectedConfigId) {
-      void vpn
-        .selectConfig(configId)
-        .then((result) => showActionResult(result, "切换配置失败"));
-      return;
-    }
-    if (vpn.connection === "connected" || vpn.connection === "starting") {
-      setPendingConfigId(configId);
-      return;
-    }
-    void vpn
-      .selectConfig(configId)
-      .then((result) => showActionResult(result, "切换配置失败"));
-  };
+    const targetName =
+      vpn.configs.find((config) => config.config_id === configId)?.name ?? "这套配置";
+    // 连接/正在连接的那套在切换前取：切换只改 active，不会改这两个 id。
+    // starting 必须用真正的启动配置，不能拿 active 代替（切几次之后 active 已经不是它了）。
+    const connection = vpn.connection;
+    const launchId =
+      connection === "connected"
+        ? vpn.connectedConfigId
+        : connection === "starting"
+          ? vpn.startingConfigId
+          : null;
+    const launchName = launchId
+      ? (vpn.configs.find((config) => config.config_id === launchId)?.name ?? null)
+      : null;
+    const sameAsTarget = launchId !== null && launchId === configId;
 
-  const confirmConfigSwitch = () => {
-    if (!pendingConfigId) return;
-    const configId = pendingConfigId;
-    setPendingConfigId(null);
-    void vpn
-      .selectConfig(configId, true)
-      .then((result) => showActionResult(result, "切换配置失败"));
+    void vpn.selectConfig(configId).then((result) => {
+      if (!result.ok) {
+        showActionResult(result, "切换配置失败");
+        return;
+      }
+      // 切回正在连着/正在连的那套：没有变化，不用提示。
+      if (sameAsTarget) return;
+      if (connection === "connected") {
+        setAppNotice({
+          level: "info",
+          text: launchName
+            ? `已切到「${targetName}」，当前仍连着「${launchName}」。点连接会先断开再连。`
+            : `已切到「${targetName}」，当前仍有一条连接。点连接会先断开再连。`,
+        });
+      } else if (connection === "starting") {
+        setAppNotice({
+          level: "info",
+          text: launchName
+            ? `已切到「${targetName}」，正在连接的是「${launchName}」。`
+            : `已切到「${targetName}」，还有一条连接正在建立。`,
+        });
+      }
+    });
   };
 
   const handleVpnStart = () => {
@@ -1343,9 +1349,6 @@ export default function App() {
 
   const handleSwitchNode = (nodeId: string) => vpn.switchNode(nodeId);
 
-  const pendingConfig =
-    vpn.configs.find((config) => config.config_id === pendingConfigId) ?? null;
-
   const zeroConfigSettled = shouldSettleZeroConfig({
     requesting: session?.requesting ?? false,
     hasActiveRequest: Boolean(session?.activeRequestId),
@@ -1442,6 +1445,22 @@ export default function App() {
       ) : null}
       <Console
         config={vpn.activeConfig}
+        connectedConfigId={vpn.connectedConfigId}
+        connectedConfigName={
+          (runtime.config_id ?? vpn.connectedConfigId)
+            ? (vpn.configs.find(
+                (config) =>
+                  config.config_id === (runtime.config_id ?? vpn.connectedConfigId),
+              )?.name ?? runtime.config_name)
+            : runtime.config_name
+        }
+        startingConfigId={vpn.startingConfigId}
+        startingConfigName={
+          vpn.startingConfigId
+            ? (vpn.configs.find((config) => config.config_id === vpn.startingConfigId)
+                ?.name ?? null)
+            : null
+        }
         onStart={handleVpnStart}
         onStop={handleVpnStop}
         onReconnect={handleVpnReconnect}
@@ -1508,55 +1527,6 @@ export default function App() {
           >
             ×
           </button>
-        </div>
-      ) : null}
-
-      {pendingConfig ? (
-        <div className="modal-backdrop" onMouseDown={() => setPendingConfigId(null)}>
-          <div
-            ref={confirmConfigRef}
-            className="modal modal--confirm"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="switch-config-title"
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <header className="modal__head">
-              <h2 id="switch-config-title" className="modal__title">
-                切换配置
-              </h2>
-              <button
-                type="button"
-                className="modal__close"
-                onClick={() => setPendingConfigId(null)}
-                aria-label="关闭"
-              >
-                <IconClose size={14} />
-              </button>
-            </header>
-            <p className="confirm__text">
-              {vpn.connection === "starting" ? (
-                <>
-                  「{vpn.activeConfig?.name ?? "当前配置"}」正在连接。切换会取消这次连接，
-                  再按新配置重新连上。
-                </>
-              ) : (
-                <>切到「{pendingConfig.name}」会先断开当前连接，再按新配置重新连上。</>
-              )}
-            </p>
-            <div className="confirm__actions">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => setPendingConfigId(null)}
-              >
-                取消
-              </button>
-              <button type="button" className="btn btn--primary" onClick={confirmConfigSwitch}>
-                切换
-              </button>
-            </div>
-          </div>
         </div>
       ) : null}
 

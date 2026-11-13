@@ -27,6 +27,11 @@ export interface RuntimeAuthority {
     to: RuntimeState;
     emitted_at?: string;
   }): boolean;
+  /**
+   * 这条事件是否比权威时刻更新。重复/迟到事件仍会被 acceptEvent 接受（状态相同），
+   * 但它们的快照可能带回旧的连接身份，不能拿来更新 config_id。
+   */
+  isNewer(payload: { emitted_at?: string }): boolean;
   /** start / stop 的本地结果：比任何既存事件都新。 */
   markLocal(state: RuntimeState, at?: number): void;
   /** 快照能否覆盖运行时状态：同一阶段，或比权威更新。 */
@@ -41,6 +46,9 @@ function parseTime(value: string | null | undefined): number | null {
 
 export function createRuntimeAuthority(): RuntimeAuthority {
   let mark: RuntimeAuthorityMark | null = null;
+  // 最近一条被接受事件的时刻。App 与 hook 各订阅一次：两次都要算「新」，
+  // 只有比它更旧的重复事件才是不能改写连接身份的旧数据。
+  let latestEventAt: number | null = null;
 
   return {
     current: () => mark,
@@ -57,8 +65,17 @@ export function createRuntimeAuthority(): RuntimeAuthority {
         if (at === mark.at && payload.from !== mark.state) return false;
       }
       // 兼容口径：解析不出 emitted_at（旧事件/测试）时一律接受，退化到修复前行为。
+      if (at !== null && (latestEventAt === null || at > latestEventAt)) {
+        latestEventAt = at;
+      }
       mark = { state: payload.to, at: at ?? mark?.at ?? 0 };
       return true;
+    },
+
+    isNewer(payload) {
+      const at = parseTime(payload.emitted_at);
+      if (at === null || latestEventAt === null) return true;
+      return at >= latestEventAt;
     },
 
     markLocal(state, at = Date.now()) {
