@@ -3169,7 +3169,8 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 (() => {
   const row = document.querySelector(".configs__row");
   if (!row) return { found: false };
-  const n = row.querySelector(".config__name");
+  const nameBox = row.querySelector(".config__name");
+  const n = row.querySelector(".config__name-text") ?? nameBox;
   const d = row.querySelector(".config__delete");
   const s = getComputedStyle(n);
   const nr = n.getBoundingClientRect();
@@ -3177,8 +3178,8 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
   const dr = d?.getBoundingClientRect();
   return {
     text: n.textContent.trim(),
-    title: n.getAttribute("title"),
-    titleEqualsText: n.getAttribute("title") === n.textContent.trim(),
+    title: nameBox?.getAttribute("title") ?? null,
+    titleEqualsText: nameBox?.getAttribute("title") === n.textContent.trim(),
     whiteSpace: s.whiteSpace,
     textOverflow: s.textOverflow,
     overflow: s.overflow,
@@ -3602,7 +3603,7 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 (() => {
   const rows = [...document.querySelectorAll(".configs__row")];
   return rows.map((r) => ({
-    name: r.querySelector(".config__name")?.textContent.trim() ?? null,
+    name: r.querySelector(".config__name-text")?.textContent.trim() ?? null,
     editing: Boolean(r.querySelector(".config__name input, .config__name textarea")),
   }));
 })()
@@ -3631,6 +3632,49 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, updated_at from configs or
 7. 跨行切换时第一行被保存为 `书房`（等同点行外保存），且 `config_update` **只调用一次**；第二行进入编辑态，没有带着第一行的请求重复提交。
 
 **不合格时记录什么**：每次的 `rows` JSON、`configs` 名称与 `updated_at`、失败提示截图、连接状态与计时器截图；组合态记录输入法名称与版本。
+
+### E6-33 左栏两种模式的标记与小字
+
+**前置**：M1（浏览器预览）；已有一套 `TUN 模式` 配置和一套 `Proxy 模式` 配置（没有就先各建一套）；左栏 280px 宽；未连接。
+
+**步骤**：
+
+1. 不悬停、不点击任何行，执行：
+
+```js
+(() => {
+  const rows = [...document.querySelectorAll(".configs__row")];
+  const read = (r) => {
+    const mode = r.querySelector(".config__mode");
+    const meta = r.querySelector(".config__meta")?.textContent.trim() ?? null;
+    const ms = mode ? getComputedStyle(mode) : null;
+    return {
+      name: r.querySelector(".config__name-text")?.textContent.trim() ?? null,
+      modeClass: mode?.className ?? null,
+      size: mode ? [mode.getBoundingClientRect().width, mode.getBoundingClientRect().height] : null,
+      radius: ms?.borderRadius ?? null,
+      fill: ms?.backgroundColor ?? null,
+      border: ms?.borderTopWidth && ms?.borderStyle !== "none" ? `${ms.borderTopWidth} ${ms.borderStyle} ${ms.borderTopColor}` : null,
+      meta,
+      active: r.querySelector(".config.is-active") !== null,
+    };
+  };
+  return { rows: rows.map(read), ink3: getComputedStyle(document.documentElement).getPropertyValue("--ink-3").trim() };
+})()
+```
+
+2. 选中 `TUN 模式` 那一行，再执行同一段 JS，对比选中前后该行的 `modeClass`、`radius`、`fill`、`border`。
+3. 悬停该行，再读一次标记的计算样式。
+
+**预期**：
+
+1. 两行都有 `.config__mode`，`size` 都是 `[6, 6]`；`tun` 行是 `config__mode--tun`：`radius` 为 `1.5px`、`fill` 不透明；`system_proxy` 行是 `config__mode--proxy`：`radius` 为 `50%`、`border` 非空、内部无填充。
+2. 两者 `fill` / `border` 的颜色相同，且都是 `--ink-3`（与 `ink3` 对应，允许 rgb 表示）；不是钴蓝、不是绿 / 琥珀 / 红。
+3. `meta` 分别是 `N 个节点 · TUN 模式` 与 `N 个节点 · Proxy 模式`；**不出现**「全部软件」「本机代理」。
+4. 选中后该行标记的 `modeClass`、`radius`、`fill`、`border` 与选中前完全相同；选中仍由左竖条（`::before`）、卡底和名称加粗表达。
+5. 悬停不改变标记样式；改名输入态下标记仍在（可顺带在 E6-32 步骤 1 观察）。
+
+**不合格时记录什么**：两次 `rows` JSON（含 `ink3`）、三种状态（默认 / 选中 / 悬停）的截图、280px 与抽屉两种宽度各一张。
 
 ---
 
@@ -3767,13 +3811,13 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, updated_at from configs or
 | 10 | 关于页 | 只有版本 | 版本 + 开源与反馈（有 URL 才摆）+ 一句数据去向 |
 | 11 | 问 AI 后返回 | 关闭设置，重开落回 AI 助手 tab | 重开设置回到刚才那个 tab |
 | 12 | 导入跳过原因 | 显示英文枚举 `duplicate` / `malformed` | 中文原因：已有同名节点 / 不是 ss:// 链接 / 加密方式不支持 / 内容不完整 |
-| 13 | 连接方式文案 | 「全部流量 / 接管全部 / 系统代理」等混用 | 左栏只看接管方式：「全部软件」/「本机代理」；未连接读数行「接管全部软件」/「本机代理」 |
+| 13 | 连接方式文案 | 「全部流量 / 接管全部 / 系统代理」等混用 | 左栏只看接管方式：小字 `TUN 模式` / `Proxy 模式`（名称前另有方块 / 圆环标记）；未连接读数行仍用「接管全部软件」/「本机代理」 |
 | 14 | 文件通道 | 未实现，`node_import_file` 待派 | 已实现，随本批次验证 |
 
 ### 8.1 执行前提
 
 - 设置改版已经落地到被测构建；构建版本记录在 `notes.md`。
-- 至少准备三套配置：一套「全部软件」（tun + 智能模式）、两套「本机代理」（system_proxy，分别用智能模式与全局模式）；本批新建不会再产生 `proxy_selected`。
+- 至少准备三套配置：一套 `TUN 模式`（tun + 智能模式）、两套 `Proxy 模式`（system_proxy，分别用智能模式与全局模式）；本批新建不会再产生 `proxy_selected`。
 - 准备一份可用的 `ss://` 文本（两行）、一个 https 订阅地址、一个 http 订阅地址；E8-05 另需 .txt / .json / 超过 1 MB 的文件。
 - 本章多数条目是界面与键盘判断。**§8.1 的 E8-01…E8-14 保留为改版基线（人工 + 截图/DB 取证）；本次 P1 设置改动一律执行 §8.2 的 E8-15…E8-20**，它们用 M1 的 DOM 断言，只有真实导入 / 真实端口 / 失败构造才用 M2 补证。两者冲突时以 §8.2 为准。
 
@@ -3931,7 +3975,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, updated_at from configs or
 
 ### E8-06 端口的两种形态
 
-- **目的**：验证「全部软件」配置没有端口行，「代理」配置有可复制的端口行。依据 IA §2.6 / §3.2 C4 / C5 / §6 验收 2–4。
+- **目的**：验证 `TUN 模式`配置没有端口行，`Proxy 模式`配置有可复制的端口行。依据 IA §2.6 / §3.2 C4 / C5 / §6 验收 2–4。
 - **前置条件**：三套配置：tun、system_proxy + 智能模式、system_proxy + 全局模式；至少代理配置已连接一次。
 - **步骤（人做）**
   1. 切到 tun 配置，打开设置 › 连接，记录有没有「本地代理端口」行。

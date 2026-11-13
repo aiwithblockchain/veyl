@@ -5,6 +5,12 @@ import { useFocusTrap } from "../ui/focus";
 import { isComposingEvent } from "../ui/ime";
 import { IconClose, IconList, IconPencil, IconTrash } from "./icons";
 
+function modeClass(connectMode: ConfigSummary["connect_mode"]): string {
+  return connectMode === "tun"
+    ? "config__mode config__mode--tun"
+    : "config__mode config__mode--proxy";
+}
+
 interface Props {
   configs: ConfigSummary[];
   activeConfigId: string | null;
@@ -197,29 +203,32 @@ export function ConfigRail({
               <li key={config.config_id} className="configs__row">
                 {editing ? (
                   <div className={`config config--editing ${active ? "is-active" : ""}`}>
-                    <input
-                      ref={renameInputRef}
-                      className="config__rename-input"
-                      value={renameDraft}
-                      maxLength={40}
-                      aria-label="配置名称"
-                      onChange={(event) => {
-                        renameDraftRef.current = event.target.value;
-                        setRenameDraft(event.target.value);
-                      }}
-                      onKeyDown={(event) => {
-                        if (isComposingEvent(event)) return;
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          void submitRename();
-                        } else if (event.key === "Escape") {
-                          event.preventDefault();
-                          cancelRenameRef.current = true;
-                          closeRename();
-                        }
-                      }}
-                      onBlur={() => void submitRename()}
-                    />
+                    <div className="config__name config__name--editing">
+                      <span className={modeClass(config.connect_mode)} aria-hidden />
+                      <input
+                        ref={renameInputRef}
+                        className="config__rename-input"
+                        value={renameDraft}
+                        maxLength={40}
+                        aria-label="配置名称"
+                        onChange={(event) => {
+                          renameDraftRef.current = event.target.value;
+                          setRenameDraft(event.target.value);
+                        }}
+                        onKeyDown={(event) => {
+                          if (isComposingEvent(event)) return;
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void submitRename();
+                          } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            cancelRenameRef.current = true;
+                            closeRename();
+                          }
+                        }}
+                        onBlur={() => void submitRename()}
+                      />
+                    </div>
                     <span className="config__meta">
                       {config.node_count} 个节点 · {levelLabel(config)}
                     </span>
@@ -239,7 +248,8 @@ export function ConfigRail({
                       title={config.name}
                       onDoubleClick={() => startRename(config)}
                     >
-                      {config.name}
+                      <span className={modeClass(config.connect_mode)} aria-hidden />
+                      <span className="config__name-text">{config.name}</span>
                     </span>
                     <span className="config__meta">
                       {config.node_count} 个节点 · {levelLabel(config)}

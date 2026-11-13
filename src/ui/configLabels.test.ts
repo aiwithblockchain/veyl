@@ -10,11 +10,11 @@ const selected = {
 
 describe("左栏接管方式标签", () => {
   it("只由 connect_mode 决定", () => {
-    expect(levelLabel({ connect_mode: "tun" })).toBe("全部软件");
-    expect(levelLabel({ connect_mode: "system_proxy" })).toBe("本机代理");
+    expect(levelLabel({ connect_mode: "tun" })).toBe("TUN 模式");
+    expect(levelLabel({ connect_mode: "system_proxy" })).toBe("Proxy 模式");
     // routing_mode 不再参与：切换流量范围不会让标签变来变去。
-    expect(levelLabel(proxyAll)).toBe("本机代理");
-    expect(levelLabel(selected)).toBe("本机代理");
+    expect(levelLabel(proxyAll)).toBe("Proxy 模式");
+    expect(levelLabel(selected)).toBe("Proxy 模式");
   });
 
   it("方式读数也只描述接管范围", () => {

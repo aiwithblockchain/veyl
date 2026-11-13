@@ -31,15 +31,17 @@ interface RenameResult {
 function Harness({
   onRename,
   initial = [CONFIG],
+  activeConfigId = CONFIG.config_id,
 }: {
   onRename: (configId: string, name: string) => Promise<RenameResult>;
   initial?: ConfigSummary[];
+  activeConfigId?: string | null;
 }) {
   const [configs, setConfigs] = useState(initial);
   return (
     <ConfigRail
       configs={configs}
-      activeConfigId={CONFIG.config_id}
+      activeConfigId={activeConfigId}
       connectedConfigId={null}
       onSelect={noop}
       onNewConfig={noop}
@@ -66,6 +68,43 @@ function openByDoubleClick() {
   return screen.getByRole("textbox", { name: "配置名称" }) as HTMLInputElement;
 }
 
+describe("模式标记", () => {
+  it("tun 渲染实心方块，system_proxy 渲染圆环", () => {
+    const tun = { ...CONFIG, connect_mode: "tun" as const };
+    const square = render(
+      <Harness onRename={async () => ({ ok: true })} initial={[tun]} activeConfigId={null} />,
+    );
+    expect(square.container.querySelector(".config__mode--tun")).toBeTruthy();
+    expect(square.container.querySelector(".config__mode--proxy")).toBeNull();
+    square.unmount();
+
+    const ring = render(
+      <Harness onRename={async () => ({ ok: true })} activeConfigId={null} />,
+    );
+    expect(ring.container.querySelector(".config__mode--proxy")).toBeTruthy();
+    expect(ring.container.querySelector(".config__mode--tun")).toBeNull();
+  });
+
+  it("选中态不改变标记类，标记对读屏隐藏", () => {
+    const tun = { ...CONFIG, connect_mode: "tun" as const };
+    const idle = render(
+      <Harness onRename={async () => ({ ok: true })} initial={[tun]} activeConfigId={null} />,
+    );
+    const idleClass = idle.container
+      .querySelector(".config__mode")
+      ?.getAttribute("class");
+    idle.unmount();
+
+    const active = render(
+      <Harness onRename={async () => ({ ok: true })} initial={[tun]} />,
+    );
+    const marker = active.container.querySelector(".config.is-active .config__mode");
+    expect(marker?.getAttribute("class")).toBe(idleClass);
+    expect(marker?.getAttribute("class")).toBe("config__mode config__mode--tun");
+    expect(marker?.getAttribute("aria-hidden")).toBe("true");
+  });
+});
+
 describe("配置行内改名", () => {
   it("双击进入编辑，Enter 保存并就地更新名称", async () => {
     const onRename = vi.fn(async () => ({ ok: true }));
@@ -73,6 +112,7 @@ describe("配置行内改名", () => {
 
     const input = openByDoubleClick();
     expect(input.value).toBe("家里");
+    expect(document.querySelector(".config__mode--proxy")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "删除配置 家里" })).toBeNull();
 
     fireEvent.change(input, { target: { value: " 公司 " } });

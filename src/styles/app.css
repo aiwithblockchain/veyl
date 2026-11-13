@@ -10,6 +10,9 @@
   --ink-3: #6E6A5F;
   --ink-4: #746F63;
 
+  /* 左栏模式标记：浅色用 --ink-3；深色细线对比不足，提到 --ink-2（见深色覆盖）。 */
+  --config-mode: var(--ink-3);
+
   --hair: rgba(23, 22, 20, 0.1);
   --hair-strong: rgba(23, 22, 20, 0.18);
 
@@ -99,6 +102,8 @@
     --ink-2: #a5a5a0;
     --ink-3: #90908a;
     --ink-4: #77776f;
+
+    --config-mode: var(--ink-2);
 
     --hair: rgba(255, 255, 255, 0.1);
     --hair-strong: rgba(255, 255, 255, 0.16);
@@ -3375,12 +3380,35 @@ body[data-resizing] {
 }
 
 .config__name {
-  display: block;
-  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   font-size: 15px;
   font-weight: 500;
   line-height: 1.3;
   color: var(--ink);
+}
+
+.config__mode {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+}
+
+.config__mode--tun {
+  border-radius: 1.5px;
+  background: var(--config-mode);
+}
+
+.config__mode--proxy {
+  border: 1.5px solid var(--config-mode);
+  border-radius: 50%;
+}
+
+.config__name-text {
+  min-width: 0;
+  overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
@@ -3392,6 +3420,7 @@ body[data-resizing] {
 .config__meta {
   display: block;
   margin-top: 4px;
+  margin-left: 14px;
   font-size: 12px;
   line-height: 1.3;
   color: var(--ink-3);
@@ -3442,7 +3471,8 @@ body[data-resizing] {
 }
 
 .config__rename-input {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   padding: 2px 5px;
   border: 1px solid var(--hair-strong);
   border-radius: 4px;
