@@ -4,7 +4,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { emptyRuntimeView, getAgentBridge } from "./agent";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./agent/protocol";
-import type { AgentEvent, ConfigDetail, ConfigSummary, RuntimeState } from "./agent/protocol";
+import type {
+  AgentEvent,
+  ConfigDetail,
+  ConfigSummary,
+  RuntimeSnapshot,
+  RuntimeState,
+} from "./agent/protocol";
 import { PANEL_VERSION } from "./ui/panelPreference";
 
 const CONFIG_ID = "cfg_tun_1";
@@ -53,19 +59,52 @@ const SUMMARY: ConfigSummary = {
   last_used_at: null,
 };
 
-function stateEvent(from: RuntimeState, to: RuntimeState): AgentEvent {
+const STALE_AT = Date.now() - 120_000;
+let appClock = Date.now() - 60_000;
+
+function stateEvent(
+  from: RuntimeState,
+  to: RuntimeState,
+  configId = CONFIG_ID,
+): AgentEvent {
+  appClock += 1000;
+  const at = new Date(appClock).toISOString();
   return {
     name: AGENT_EVENTS.runtimeStateChanged,
     payload: {
       contract_version: CONTRACT_VERSION,
       from,
       to,
-      event: "stopped",
+      event:
+        to === "running"
+          ? "process_ready"
+          : to === "stopping"
+            ? "stop_req"
+            : "stopped",
       pid: null,
       upstream_version: null,
       reason: null,
       error: null,
-      snapshot: {} as never,
+      snapshot: {
+        state: to,
+        config_id:
+          to === "running" || to === "degraded" ? configId : null,
+        last_transition_at: at,
+      } as RuntimeSnapshot,
+      emitted_at: at,
+    },
+  };
+}
+
+function configChangedEvent(): AgentEvent {
+  return {
+    name: AGENT_EVENTS.configChanged,
+    payload: {
+      contract_version: CONTRACT_VERSION,
+      change: "updated",
+      config_id: CONFIG_ID,
+      config: null,
+      active_config_id: CONFIG_ID,
       emitted_at: "",
     },
   };
@@ -147,6 +186,159 @@ function renderStartWithFailure(error: unknown) {
   vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
   return render(<App />);
 }
+
+describe("断开后的配置切换确认", () => {
+  function setupTwoConfigs() {
+    Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
+    localStorage.setItem("veyl.onboarding.skipped", "1");
+
+    const secondSummary = {
+      ...SUMMARY,
+      config_id: "cfg_proxy_2",
+      name: "家里",
+      is_active: false,
+    };
+    const secondDetail = {
+      ...DETAIL,
+      config_id: secondSummary.config_id,
+      name: secondSummary.name,
+      is_active: false,
+    };
+    vi.spyOn(bridge, "configList").mockResolvedValue({
+      configs: [SUMMARY, secondSummary],
+      active_config_id: CONFIG_ID,
+    });
+    vi.spyOn(bridge, "configDetail").mockImplementation(async (configId: string) =>
+      configId === secondSummary.config_id ? secondDetail : DETAIL,
+    );
+    vi.spyOn(bridge, "getRuntimeSnapshot").mockResolvedValue(null);
+    return { secondSummary };
+  }
+
+  it("断开事件后的陈旧 running 快照不会让切换弹确认", async () => {
+    const { secondSummary } = setupTwoConfigs();
+    vi.spyOn(bridge, "configActivate").mockResolvedValue({
+      active_config_id: secondSummary.config_id,
+      reconnect: "not_running",
+      runtime: null,
+    });
+
+    render(<App />);
+    await screen.findByText("全部流量");
+
+    act(() => {
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
+        stateEvent("idle", "running"),
+      );
+    });
+    await waitFor(() =>
+      expect(document.querySelector(".state-line__label")?.textContent).toContain(
+        "已连接",
+      ),
+    );
+
+    // 停止事件走完整序列。
+    act(() => {
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
+        stateEvent("running", "stopping"),
+      );
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
+        stateEvent("stopping", "idle"),
+      );
+    });
+    await act(async () => {});
+
+    // 改名 / 重新读取触发的 refreshReal 拿到的快照仍是滞后的 running。
+    vi.mocked(bridge.getRuntimeSnapshot).mockResolvedValue({
+      state: "running",
+      config_id: CONFIG_ID,
+      last_transition_at: new Date(STALE_AT).toISOString(),
+    } as RuntimeSnapshot);
+    act(() => {
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
+        configChangedEvent(),
+      );
+    });
+    await act(async () => {});
+
+    fireEvent.click(screen.getByText("家里"));
+
+    await waitFor(() =>
+      expect(bridge.configActivate).toHaveBeenCalledWith(
+        secondSummary.config_id,
+        false,
+      ),
+    );
+    expect(screen.queryByText(/会先断开当前连接/)).toBeNull();
+  }, 15_000);
+
+  it("active 与真正连接的配置分叉时，点已连接的那套不弹确认", async () => {
+    const { secondSummary } = setupTwoConfigs();
+    vi.spyOn(bridge, "configActivate").mockResolvedValue({
+      active_config_id: secondSummary.config_id,
+      reconnect: "already_connected",
+      runtime: null,
+    });
+
+    render(<App />);
+    await screen.findByText("全部流量");
+
+    // 真正连着的是第二套，active 仍是第一套。
+    act(() => {
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
+        stateEvent("idle", "running", secondSummary.config_id),
+      );
+    });
+    await waitFor(() =>
+      expect(document.querySelector(".state-line__label")?.textContent).toContain(
+        "已连接",
+      ),
+    );
+
+    fireEvent.click(screen.getByText("家里"));
+
+    await waitFor(() =>
+      expect(bridge.configActivate).toHaveBeenCalledWith(
+        secondSummary.config_id,
+        false,
+      ),
+    );
+    expect(bridge.configActivate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/会先断开当前连接/)).toBeNull();
+    expect(await screen.findByText("已经连在这套配置上。")).toBeTruthy();
+  }, 15_000);
+
+  it("正在连接时切换，确认框说的是会取消这次连接", async () => {
+    const { secondSummary } = setupTwoConfigs();
+    const activate = vi.spyOn(bridge, "configActivate").mockResolvedValue({
+      active_config_id: secondSummary.config_id,
+      reconnect: "not_running",
+      runtime: null,
+    });
+
+    render(<App />);
+    await screen.findByText("全部流量");
+
+    act(() => {
+      (bridge as unknown as { emit(event: AgentEvent): void }).emit(
+        stateEvent("idle", "starting"),
+      );
+    });
+    await waitFor(() =>
+      expect(document.querySelector(".state-word")?.textContent).toContain(
+        "正在连接",
+      ),
+    );
+
+    fireEvent.click(screen.getByText("家里"));
+
+    const dialog = await screen.findByRole("dialog", { name: "切换配置" });
+    expect(dialog.textContent).toContain("正在连接");
+    expect(dialog.textContent).toContain("切换会取消这次连接");
+    expect(dialog.textContent).not.toContain("会先断开当前连接");
+    expect(activate).not.toHaveBeenCalled();
+  }, 15_000);
+});
 
 describe("TUN 启动成功后的界面状态", () => {
   it("runtimeStart 挂起时来了 failed 事件，成功后仍显示已连接", async () => {

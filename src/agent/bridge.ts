@@ -112,7 +112,13 @@ export interface ConfigUpdateInput {
 
 export interface ConfigActivateResult {
   active_config_id: string;
-  reconnect: "not_running" | "reconnected" | "reconnect_failed" | "skipped_no_nodes";
+  reconnect:
+    | "not_running"
+    | "reconnected"
+    | "reconnect_failed"
+    | "skipped_no_nodes"
+    /** 目标就是当前连着的配置：只把 active 对齐，没有断线或重连。 */
+    | "already_connected";
   runtime: RuntimeSnapshot | null;
 }
 

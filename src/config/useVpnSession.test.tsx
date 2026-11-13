@@ -19,20 +19,52 @@ afterEach(() => {
   localStorage.clear();
 });
 
+// 事件时刻从当前时间往前推，避免写死日期在不同时区跑成「未来事件」。
+const STALE_AT = Date.now() - 120_000;
+let runtimeClock = Date.now() - 60_000;
+
+function runtimeSnapshot(state: RuntimeState, at = runtimeClock): RuntimeSnapshot {
+  return {
+    state,
+    config_id: state === "running" || state === "degraded" ? "cfg_1" : null,
+    last_transition_at: new Date(at).toISOString(),
+  } as RuntimeSnapshot;
+}
+
 function stateEvent(from: RuntimeState, to: RuntimeState): AgentEvent {
+  runtimeClock += 1000;
   return {
     name: AGENT_EVENTS.runtimeStateChanged,
     payload: {
       contract_version: CONTRACT_VERSION,
       from,
       to,
-      event: "stopped",
+      event:
+        to === "running"
+          ? "process_ready"
+          : to === "stopping"
+            ? "stop_req"
+            : "stopped",
       pid: null,
       upstream_version: null,
       reason: null,
       error: null,
-      snapshot: {} as RuntimeSnapshot,
-      emitted_at: "",
+      snapshot: runtimeSnapshot(to),
+      emitted_at: new Date(runtimeClock).toISOString(),
+    },
+  };
+}
+
+function configChangedEvent(): AgentEvent {
+  return {
+    name: AGENT_EVENTS.configChanged,
+    payload: {
+      contract_version: CONTRACT_VERSION,
+      change: "updated",
+      config_id: "cfg_1",
+      config: null,
+      active_config_id: null,
+      emitted_at: new Date(runtimeClock).toISOString(),
     },
   };
 }
@@ -77,6 +109,35 @@ function makeBridge() {
 }
 
 describe("useVpnSession 状态迁移", () => {
+  /** 挂载时的快照立即返回，之后可随时改成本次用例需要的陈旧值。 */
+  function makeSnapshotBridge(initial: RuntimeSnapshot | null = null) {
+    const bus: { emit: ((event: AgentEvent) => void) | null } = { emit: null };
+    const calls = { snapshots: 0 };
+    let next = initial;
+    const bridge = {
+      subscribe: (listener: (event: AgentEvent) => void) => {
+        bus.emit = listener;
+        return () => {
+          bus.emit = null;
+        };
+      },
+      configList: async () => ({ configs: [], active_config_id: null }),
+      getRuntimeSnapshot: async () => {
+        calls.snapshots += 1;
+        return next;
+      },
+      runtimeStop: async () => undefined,
+    } as unknown as AgentBridge;
+    return {
+      bridge,
+      bus,
+      calls,
+      setSnapshot: (snap: RuntimeSnapshot | null) => {
+        next = snap;
+      },
+    };
+  }
+
   it("收到 runtimeStateChanged 时 connection 立即切换，不等快照", () => {
     const { bridge, bus } = makeBridge();
     const { result } = renderHook(() => useVpnSession(bridge, false));
@@ -92,10 +153,78 @@ describe("useVpnSession 状态迁移", () => {
     expect(result.current.connection).toBe("idle");
   });
 
-  it("健康事件不拉全量快照，只有状态迁移才拉", async () => {
+  it("断开后的 refreshReal 不会用滞后 running 快照把连接态改回已连接", async () => {
+    const { bridge, bus, calls, setSnapshot } = makeSnapshotBridge();
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => bus.emit?.(stateEvent("idle", "starting")));
+    act(() => bus.emit?.(stateEvent("starting", "running")));
+    act(() => bus.emit?.(stateEvent("running", "stopping")));
+    act(() => bus.emit?.(stateEvent("stopping", "idle")));
+    expect(result.current.connection).toBe("idle");
+
+    // 改名 / 重新读取触发的 refreshReal 拿到的仍是 running。
+    setSnapshot(runtimeSnapshot("running", STALE_AT));
+    act(() => bus.emit?.(configChangedEvent()));
+    await waitFor(() => expect(calls.snapshots).toBe(2));
+    expect(result.current.connection).toBe("idle");
+  });
+
+  it("已连接时 refreshReal 拿到滞后 idle 快照也不会改回未连接", async () => {
+    const { bridge, bus, calls, setSnapshot } = makeSnapshotBridge();
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => bus.emit?.(stateEvent("idle", "starting")));
+    act(() => bus.emit?.(stateEvent("starting", "running")));
+    expect(result.current.connection).toBe("connected");
+
+    setSnapshot(runtimeSnapshot("idle", STALE_AT));
+    act(() => bus.emit?.(configChangedEvent()));
+    await waitFor(() => expect(calls.snapshots).toBe(2));
+    expect(result.current.connection).toBe("connected");
+  });
+
+  it("乱序到达时先到的 idle 事件收尾，迟到的 stopping 不会卡住界面", () => {
+    const { bridge, bus } = makeBridge();
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+
+    act(() => bus.emit?.(stateEvent("idle", "starting")));
+    act(() => bus.emit?.(stateEvent("starting", "running")));
+    expect(result.current.connection).toBe("connected");
+
+    const stopping = stateEvent("running", "stopping");
+    const idle = stateEvent("stopping", "idle");
+    act(() => bus.emit?.(idle));
+    expect(result.current.connection).toBe("idle");
+
+    act(() => bus.emit?.(stopping));
+    expect(result.current.connection).toBe("idle");
+  });
+
+  it("stop() 成功后迟到的 stopping 事件不会把界面卡在正在断开", async () => {
+    const { bridge, bus } = makeSnapshotBridge();
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => bus.emit?.(stateEvent("idle", "starting")));
+    act(() => bus.emit?.(stateEvent("starting", "running")));
+    expect(result.current.connection).toBe("connected");
+
+    await act(async () => {
+      await result.current.stop();
+    });
+    expect(result.current.connection).toBe("idle");
+
+    act(() => bus.emit?.(stateEvent("running", "stopping")));
+    expect(result.current.connection).toBe("idle");
+  });
+
+  it("健康事件与状态迁移都不再拉全量快照（事件自带快照）", async () => {
     const { bridge, bus, calls } = makeBridge();
     renderHook(() => useVpnSession(bridge, false));
-    // 挂载时 refreshReal 自己拉一次，之后的计数以它为基线。
+    // 只有挂载时 refreshReal 拉一次。
     await waitFor(() => expect(calls.snapshots).toBe(1));
 
     act(() => bus.emit?.(healthEvent()));
@@ -105,7 +234,7 @@ describe("useVpnSession 状态迁移", () => {
     expect(calls.snapshots).toBe(1);
 
     act(() => bus.emit?.(stateEvent("idle", "starting")));
-    expect(calls.snapshots).toBe(2);
+    expect(calls.snapshots).toBe(1);
   });
 });
 
@@ -680,6 +809,97 @@ describe("点击后立即反馈", () => {
     // runtimeStart 最终成功，说明连接是成功的，不能被中间事件留在未连接。
     expect(outcome).toEqual({ ok: true, connected: true });
     expect(result.current.connection).toBe("connected");
+  });
+});
+
+describe("切换配置结果", () => {
+  it("config_activate 返回 already_connected 时给出明确提示", async () => {
+    const bridge = makeStartBridge("system_proxy");
+    const activate = vi.fn(async () => ({
+      active_config_id: CONFIG_ID,
+      reconnect: "already_connected" as const,
+      runtime: null,
+    }));
+    (
+      bridge as unknown as { configActivate: typeof activate }
+    ).configActivate = activate;
+
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let res: ActionResult | undefined;
+    await act(async () => {
+      res = await result.current.selectConfig(CONFIG_ID);
+    });
+
+    expect(res).toEqual({ ok: true, message: "已经连在这套配置上。" });
+    expect(activate).toHaveBeenCalledWith(CONFIG_ID, false);
+  });
+});
+
+describe("切换节点结果", () => {
+  async function runSwitchNode(reason: string) {
+    const bridge = makeStartBridge("system_proxy");
+    const nodeSwitch = vi.fn(async () => {
+      throw {
+        code: "PRECONDITION_FAILED",
+        message: "backend text",
+        details: { reason },
+      };
+    });
+    (bridge as unknown as { nodeSwitch: typeof nodeSwitch }).nodeSwitch = nodeSwitch;
+
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let res: ActionResult | undefined;
+    await act(async () => {
+      res = await result.current.switchNode("node_2");
+    });
+    return { res, nodeSwitch };
+  }
+
+  it("config_launching 给中文兜底文案", async () => {
+    const { res } = await runSwitchNode("config_launching");
+    expect(res).toEqual({
+      ok: false,
+      message: "这套配置正在连接，等连上以后再切换节点。",
+      reason: "config_launching",
+    });
+  });
+
+  it("cancelled 时静默，不显示错误文案", async () => {
+    const { res } = await runSwitchNode("cancelled");
+    expect(res).toEqual({
+      ok: true,
+      message: "这次切换已取消。",
+      reason: "cancelled",
+    });
+  });
+});
+
+describe("用户取消连接", () => {
+  it("reason=cancelled 时不报错、不弹提示，收回到未连接", async () => {
+    const bridge = makeStartBridge("tun", {
+      runtimeStart: async () => {
+        throw {
+          code: "PRECONDITION_FAILED",
+          message: "这次连接已被新的操作取消",
+          details: { reason: "cancelled" },
+        };
+      },
+    });
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.activeConfig).not.toBeNull());
+
+    let res: ActionResult | undefined;
+    await act(async () => {
+      res = await result.current.start();
+    });
+
+    // 没有 message 才会不弹 toast；成功标记避免调用方当失败处理。
+    expect(res).toEqual({ ok: true });
+    expect(result.current.connection).toBe("idle");
   });
 });
 

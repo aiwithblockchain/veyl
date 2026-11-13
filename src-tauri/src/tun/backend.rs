@@ -172,6 +172,8 @@ pub enum TunErrorCode {
     PeerUnverified,
     TransportError,
     UnsupportedPlatform,
+    /// 本次连接已被切配置 / 断开取代：请求作废，不是故障，也不跨线。
+    Cancelled,
 }
 
 impl TunErrorCode {
@@ -192,6 +194,7 @@ impl TunErrorCode {
             TunErrorCode::PeerUnverified => "peer_unverified",
             TunErrorCode::TransportError => "transport_error",
             TunErrorCode::UnsupportedPlatform => "unsupported_platform",
+            TunErrorCode::Cancelled => "cancelled",
         }
     }
 
@@ -234,6 +237,7 @@ impl TunErrorCode {
             | TunErrorCode::HelperInstallFailed
             | TunErrorCode::PeerUnverified => "helper_missing",
             TunErrorCode::UnsupportedPlatform => "unsupported_platform",
+            TunErrorCode::Cancelled => "cancelled",
             _ => "tun_start_failed",
         }
     }

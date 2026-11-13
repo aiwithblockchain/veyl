@@ -34,6 +34,7 @@ import {
   shouldShowOnboarding,
 } from "./config/onboarding";
 import { useVpnSession, isHelperPermissionReason } from "./config/useVpnSession";
+import { createRuntimeAuthority } from "./config/runtimeAuthority";
 import { useNodeProbes } from "./config/useNodeProbes";
 import {
   assistantColumnWidth,
@@ -158,9 +159,12 @@ export default function App() {
   } | null>(null);
   const [justOnboarded, setJustOnboarded] = useState(false);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
+  // 运行时状态的唯一权威：App 与 useVpnSession 共用同一份，避免两个实例的时钟分叉。
+  const runtimeAuthorityRef = useRef(createRuntimeAuthority());
   const vpn = useVpnSession(
     bridge,
     import.meta.env.VITE_MOCK === "1" || bridge.mode === "mock",
+    runtimeAuthorityRef.current,
   );
   const nodeProbes = useNodeProbes({ bridge });
   // 断点只看窗口宽度：三栏宽度、助手停靠/浮层都由它决定。
@@ -263,10 +267,10 @@ export default function App() {
     const versionAtRequest = healthVersion.current;
     void bridge.getRuntimeSnapshot().then((snapshot) => {
       if (!snapshot || requestId !== snapshotSeq.current) return;
-      // 断开还没结束：在线快照是上一段连接的残留，不能把状态推回去。
-      if (stoppingRef.current && (snapshot.state === "running" || snapshot.state === "degraded")) {
-        return;
-      }
+      const authority = runtimeAuthorityRef.current;
+      // 滞后快照（典型是断开收尾时的 running）不能把界面状态写回去。
+      if (!authority.acceptsSnapshot(snapshot)) return;
+      authority.markSnapshot(snapshot);
       const base = snapshotToView(snapshot);
       setRuntime((current) =>
         versionAtRequest === healthVersion.current
@@ -422,6 +426,10 @@ export default function App() {
       ) {
         // 断开过程中迟到的在线事件：以 stop 的结果为准，不让界面翻回已连接。
         return;
+      }
+      if (event.name === AGENT_EVENTS.runtimeStateChanged) {
+        // 乱序/迟到事件由共享权威判断挡掉，别让顶部状态倒退。
+        if (!runtimeAuthorityRef.current.acceptEvent(event.payload)) return;
       }
       if (event.name === AGENT_EVENTS.runtimeHealthChanged) {
         healthVersion.current += 1;
@@ -1170,6 +1178,13 @@ export default function App() {
   // 已连接时换配置：先说清会断一次，确认后再切并重新连上。
   const handleSelectConfig = (configId: string) => {
     if (configId === vpn.activeConfigId) return;
+    // 目标就是真正连着的配置：只把 active 对齐，不再断线重连，也不弹确认。
+    if (configId === vpn.connectedConfigId) {
+      void vpn
+        .selectConfig(configId)
+        .then((result) => showActionResult(result, "切换配置失败"));
+      return;
+    }
     if (vpn.connection === "connected" || vpn.connection === "starting") {
       setPendingConfigId(configId);
       return;
@@ -1200,6 +1215,8 @@ export default function App() {
       // start 成功说明后端已经连上。事件/快照可能还停在 starting 或 failed，
       // 不校正的话中间区会继续显示未连接/失败。先按在线显示，再拉快照补细节。
       setFailedAfterConnected(false);
+      // 权威先落，再刷新：否则滞后快照会把这个结果盖回去。
+      runtimeAuthorityRef.current.markLocal("running");
       setRuntime((view) => viewAfterConnected(view));
       refreshSnapshot();
     });
@@ -1232,12 +1249,15 @@ export default function App() {
         if (result.stopped) {
           // stop 成功说明已经断开；清掉连接期字段，别让界面停在已连接。
           setFailedAfterConnected(false);
+          // 权威先落 idle，再刷新：否则收尾滞后的 running 快照会把界面翻回已连接。
+          runtimeAuthorityRef.current.markLocal("idle");
           setRuntime((view) => viewAfterStopped(view));
           refreshSnapshot();
           return true;
         }
         if (!result.ok) {
           // 断开失败：原本在线就回到已连接并报错，不能显示成断开成功。
+          runtimeAuthorityRef.current.markLocal(wasConnected ? "running" : "idle");
           if (wasConnected) setRuntime((view) => viewAfterConnected(view));
           refreshSnapshot();
           return false;
@@ -1515,7 +1535,14 @@ export default function App() {
               </button>
             </header>
             <p className="confirm__text">
-              切到「{pendingConfig.name}」会先断开当前连接，再按新配置重新连上。
+              {vpn.connection === "starting" ? (
+                <>
+                  「{vpn.activeConfig?.name ?? "当前配置"}」正在连接。切换会取消这次连接，
+                  再按新配置重新连上。
+                </>
+              ) : (
+                <>切到「{pendingConfig.name}」会先断开当前连接，再按新配置重新连上。</>
+              )}
             </p>
             <div className="confirm__actions">
               <button

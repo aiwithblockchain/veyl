@@ -7,7 +7,7 @@
 //! 不是我们的子进程，manager 那套 Child 句柄的启停模型对它不适用。
 //! 代价是 TUN 连接不参与 manager 的重连/看门狗。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,48 @@ pub struct Started {
 pub enum TunState {
     Stopped,
     Running { pid: u32 },
+}
+
+/// 一次在途启动的登记。
+struct Launching {
+    seq: u64,
+    config_id: String,
+    /// 是否已经把 `start` 发给 helper。迟到的旧启动要靠它判断
+    /// 「新连接会不会替我收掉旧实例」——helper 的 start 是替换语义。
+    start_sent: bool,
+}
+
+/// 在途启动的凭据：只有登记时的代次仍然有效，才允许把结果写成「已连接」。
+///
+/// `TunState` 只有 `Stopped` / `Running`，而 TUN 首次启动要十几秒（真机
+/// 13.4 秒）；这段时间里既没有 pid 也没有 meta，只看状态会把「正在连」当成
+/// 「没在连」——切配置会静默改 active、断开也停不掉正在起来的那次连接。
+pub struct LaunchSlot<'a> {
+    session: &'a TunSession,
+    seq: u64,
+    settled: bool,
+}
+
+impl<'a> LaunchSlot<'a> {
+    /// 这次启动在 helper 动手期间是否已被取消（stop / 切配置）。
+    pub fn cancelled(&self) -> bool {
+        !self.session.launch_is_current(self.seq)
+    }
+
+    /// 本次启动生效：把 pid 与连接上下文写进状态。返回 false 表示已被取消。
+    pub fn commit(mut self, meta: &TunLaunchMeta, reply: &StartReply) -> bool {
+        self.settled = true;
+        self.session.commit_launch(self.seq, meta, reply)
+    }
+}
+
+impl Drop for LaunchSlot<'_> {
+    /// 失败、超时或提前返回：把登记撤掉，别让「正在连」永远挂着。
+    fn drop(&mut self) {
+        if !self.settled {
+            self.session.abandon_launch(self.seq);
+        }
+    }
 }
 
 /// 启动 TUN 时记住的上下文。
@@ -78,6 +120,10 @@ pub struct TunSession {
     /// 与 pid 分开记：start 超时后本地没有 pid，但 helper 里可能已经有
     /// root 进程。只看 pid 会把这种情况下的 `helper_missing` 当成「没东西可停」。
     start_attempted: AtomicBool,
+    /// 在途启动登记：`(代次, 配置 id)`。启动窗口里判断「有没有连接在途」只靠它。
+    launching: Mutex<Option<Launching>>,
+    /// 启动代次发生器。stop / 切配置会作废旧代次，迟到的 start 不得再写状态。
+    launch_seq: AtomicU64,
     /// 数据面探测结果。只由健康循环写，`runtime_status` 读；
     /// 去抖口径与代理模式共用 `DataPlaneGate`（契约 §2.3.1）。
     data_plane: Mutex<DataPlaneSnapshot>,
@@ -103,6 +149,11 @@ impl DataPlaneSnapshot {
 
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// 这次连接已被切配置 / 断开取代：不是该展示给用户的故障，只是这次请求作废了。
+fn cancelled_connection_error() -> TunError {
+    TunError::new(TunErrorCode::Cancelled, "这次连接已被新的操作取消")
 }
 
 impl TunSession {
@@ -147,6 +198,8 @@ impl TunSession {
             last_check: Mutex::new(None),
             probed: AtomicBool::new(false),
             start_attempted: AtomicBool::new(false),
+            launching: Mutex::new(None),
+            launch_seq: AtomicU64::new(0),
             data_plane: Mutex::new(DataPlaneSnapshot::fresh(now_iso())),
         }
     }
@@ -171,24 +224,168 @@ impl TunSession {
     /// 起 TUN。顺序不可换：**先确认特权组件可用**再发请求，
     /// 否则连不上时用户只会看到一个无意义的超时。
     pub fn launch(&self, config: &str, meta: &TunLaunchMeta) -> Result<Started, TunError> {
+        let slot = self.begin_launch(&meta.config_id);
+        self.launch_registered(slot, config, meta)
+    }
+
+    /// 登记一次在途启动。调用方从拿到凭据的那一刻起就算「正在连」，
+    /// 直到 `LaunchSlot::commit` 或它被丢弃。
+    pub fn begin_launch(&self, config_id: &str) -> LaunchSlot<'_> {
+        // 先取号再登记：切配置可能在两步之间把登记清掉，那时这次启动立即作废。
+        let seq = self.launch_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.launching.lock().unwrap() = Some(Launching {
+            seq,
+            config_id: config_id.to_string(),
+            start_sent: false,
+        });
+        LaunchSlot {
+            session: self,
+            seq,
+            settled: false,
+        }
+    }
+
+    /// 用已有的登记发起 start。`slot` 被取消时，刚起来的进程也要停掉——
+    /// 否则界面说「切换了」，流量还在旧连接上。
+    pub fn launch_registered(
+        &self,
+        slot: LaunchSlot<'_>,
+        config: &str,
+        meta: &TunLaunchMeta,
+    ) -> Result<Started, TunError> {
+        if slot.cancelled() {
+            return Err(cancelled_connection_error());
+        }
         self.backend.ensure_available()?;
+        // helper 检查可能弹授权、等十几秒：发 start 前再确认一次。已经断开或切走了
+        // 就不要再拉起隧道——helper 的 start 会把 `stop_requested` 置回 false。
+        if slot.cancelled() {
+            return Err(cancelled_connection_error());
+        }
         // 必须在调 start **之前**置位：start 失败或超时也意味着 helper
         // 可能已经动手了。标志只有 stop 成功才清。
         self.start_attempted.store(true, Ordering::SeqCst);
+        // 先标记再发：迟到的旧启动据此判断「新连接会不会替我收掉旧实例」。
+        self.mark_start_sent(slot.seq);
         let reply: StartReply = self.backend.start(config)?;
 
-        *self.pid.lock().unwrap() = Some(reply.pid);
-        *self.meta.lock().unwrap() = Some(meta.clone());
-        *self.connected.lock().unwrap() = Some(reply.since.clone());
-        *self.clash.lock().unwrap() = Some(reply.clash_api.clone());
-        *self.dns.lock().unwrap() = Some(reply.dns_hijack.clone());
-        *self.last_check.lock().unwrap() = Some(Instant::now());
+        if !slot.commit(meta, &reply) {
+            // 已经作废：helper 可能还是把实例拉起来了。
+            if self.newer_launch_sent_start() {
+                // 更晚的启动已经把 start 发出去，helper 的替换语义会收掉这个迟到的
+                // 实例。这里再停一次（stop 是全局的）会把新连接一起杀掉。
+                log::warn!(
+                    "启动已被取代，交给新连接的替换语义收掉旧实例 pid={} config={}",
+                    reply.pid,
+                    meta.config_id
+                );
+            } else {
+                log::warn!(
+                    "启动被取消，停掉 helper 刚拉起的实例 pid={} config={}",
+                    reply.pid,
+                    meta.config_id
+                );
+                self.stop_backend_only();
+            }
+            return Err(cancelled_connection_error());
+        }
 
         Ok(Started {
             pid: reply.pid,
             clash_addr: reply.clash_api.addr,
             clash_secret: reply.clash_api.secret,
         })
+    }
+
+    /// 有 start 在途（还没拿到 pid，也没确认失败）。
+    pub fn is_launching(&self) -> bool {
+        self.launching.lock().unwrap().is_some()
+    }
+
+    /// 在途启动对应的配置；没有在途启动时为 None。
+    pub fn launching_config_id(&self) -> Option<String> {
+        self.launching
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|launch| launch.config_id.clone())
+    }
+
+    /// 作废在途启动（切配置 / 断开）。返回是否确实有在途启动。
+    ///
+    /// 只清登记、不碰进程：调用方随后要自己 `stop`，那一步会排到在途 start 后面。
+    pub fn cancel_launch(&self) -> bool {
+        self.launching.lock().unwrap().take().is_some()
+    }
+
+    fn launch_is_current(&self, seq: u64) -> bool {
+        self.launching
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|launch| launch.seq)
+            == Some(seq)
+    }
+
+    fn mark_start_sent(&self, seq: u64) {
+        if let Some(launch) = self.launching.lock().unwrap().as_mut() {
+            if launch.seq == seq {
+                launch.start_sent = true;
+            }
+        }
+    }
+
+    /// 有没有更晚的一次启动已经把 `start` 发给 helper。
+    /// 有的话替换语义会收掉旧实例，这里再全局 stop 会把新连接一起杀掉。
+    fn newer_launch_sent_start(&self) -> bool {
+        self.launching
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|launch| launch.start_sent)
+            .unwrap_or(false)
+    }
+
+    /// 补停用：只停后端，**不动在途启动的登记**。
+    /// 迟到的旧启动收尾时，登记可能已经属于更新的那次启动。
+    fn stop_backend_only(&self) {
+        match self.backend.stop_with_deadline(TUN_REPLY_DEADLINE_CONTROL) {
+            Ok(()) => {
+                // 与 `stop_with_deadline` 的成功分支对齐：真的停掉了，之后那次
+                // `HelperMissing` 才该被当成「本来就没东西可停」。
+                self.start_attempted.store(false, Ordering::SeqCst);
+                self.clear_state();
+            }
+            Err(error) => log::warn!("取消后补停失败：{}", error.message),
+        }
+    }
+
+    fn commit_launch(&self, seq: u64, meta: &TunLaunchMeta, reply: &StartReply) -> bool {
+        let mut launching = self.launching.lock().unwrap();
+        if launching.as_ref().map(|launch| launch.seq) != Some(seq) {
+            return false;
+        }
+        // 先写 Running 再撤登记：反过来的话，两步之间有一瞬「既没连、也不在启动」，
+        // 这时切配置 / 断开正好读到这里，就会把在途连接当成不存在。
+        self.write_running(meta, reply);
+        *launching = None;
+        true
+    }
+
+    fn abandon_launch(&self, seq: u64) {
+        let mut launching = self.launching.lock().unwrap();
+        if launching.as_ref().map(|launch| launch.seq) == Some(seq) {
+            *launching = None;
+        }
+    }
+
+    fn write_running(&self, meta: &TunLaunchMeta, reply: &StartReply) {
+        *self.pid.lock().unwrap() = Some(reply.pid);
+        *self.meta.lock().unwrap() = Some(meta.clone());
+        *self.connected.lock().unwrap() = Some(reply.since.clone());
+        *self.clash.lock().unwrap() = Some(reply.clash_api.clone());
+        *self.dns.lock().unwrap() = Some(reply.dns_hijack.clone());
+        *self.last_check.lock().unwrap() = Some(Instant::now());
     }
 
     /// 正在接管的配置。只有 TUN 确实在跑时才回答；
@@ -303,6 +500,7 @@ impl TunSession {
     /// 测试用：直接摆出「正在跑 + 记得是哪套配置」的状态，不碰后端。
     #[cfg(test)]
     pub fn force_running_for_test(&self, pid: u32, config_id: Option<&str>) {
+        *self.launching.lock().unwrap() = None;
         *self.pid.lock().unwrap() = Some(pid);
         *self.meta.lock().unwrap() = config_id.map(|id| TunLaunchMeta {
             config_id: id.to_string(),
@@ -319,6 +517,17 @@ impl TunSession {
         *self.data_plane.lock().unwrap() = DataPlaneSnapshot::fresh(now_iso());
     }
 
+    /// 测试用：摆出「正在连、还没起来」的启动窗口，不碰后端。
+    #[cfg(test)]
+    pub fn force_launching_for_test(&self, config_id: &str) {
+        let seq = self.launch_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.launching.lock().unwrap() = Some(Launching {
+            seq,
+            config_id: config_id.to_string(),
+            start_sent: false,
+        });
+    }
+
     /// 幂等，且**永远发请求**。
     ///
     /// 不能因为本地缓存是 `Stopped` 就跳过：start 超时/失败时本地没记下 pid，
@@ -332,6 +541,9 @@ impl TunSession {
 
     /// 强制重置用：start 可能还在准备（真机首跑约 30 秒），stop 要能排到它后面。
     pub fn stop_with_deadline(&self, deadline: Duration) -> Result<(), TunError> {
+        // 启动窗口里 stop 也必须算数：先作废在途启动，迟到的 start 回来时
+        // 不会再写成「已连接」，也不会改连接上下文。
+        self.cancel_launch();
         // 先取本地状态再解锁：后面要据此判断「报错能不能吞」。
         let had_state = { self.pid.lock().unwrap().is_some() };
         let attempted = self.start_attempted.load(Ordering::SeqCst);
@@ -855,5 +1067,227 @@ mod tests {
 
         session.force_running_for_test(2, Some("cfg"));
         assert_ne!(first, session.running_identity(), "换了进程就是新连接");
+    }
+
+    /// 启动会卡在 `start` 的假后端：模拟 helper 正在拉 sing-box 的那段窗口。
+    struct SlowStartBackend {
+        entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        stops: AtomicUsize,
+    }
+
+    impl SlowStartBackend {
+        fn new(
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        ) -> Self {
+            Self {
+                entered: Mutex::new(Some(entered)),
+                release: Mutex::new(Some(release)),
+                stops: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl TunBackend for SlowStartBackend {
+        fn availability(&self) -> Result<HelperStatus, TunError> {
+            Ok(HelperStatus::Enabled)
+        }
+        fn ensure_available(&self) -> Result<HelperStatus, TunError> {
+            Ok(HelperStatus::Enabled)
+        }
+        fn start(&self, _config: &str) -> Result<StartReply, TunError> {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            let release = self.release.lock().unwrap().take().expect("只启动一次");
+            release
+                .recv_timeout(Duration::from_secs(5))
+                .expect("测试要放行这次 start");
+            Ok(StartReply {
+                pid: 7777,
+                clash_api: ClashApi {
+                    addr: "127.0.0.1:51234".into(),
+                    secret: "s".into(),
+                },
+                since: "2026-11-05T00:00:00Z".into(),
+                dns_hijack: DnsHijack::default(),
+            })
+        }
+        fn stop(&self) -> Result<(), TunError> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn status(&self) -> Result<TunSnapshot, TunError> {
+            // helper 还没拉起 sing-box：这段时间后端看到的就是没在跑。
+            Ok(TunSnapshot {
+                running: false,
+                pid: None,
+                clash_api: None,
+                since: None,
+                last_error: None,
+                dns_hijack: DnsHijack::default(),
+                helper_build: None,
+                helper_version: None,
+                helper_pid: None,
+            })
+        }
+        fn restart(&self) -> Result<(), TunError> {
+            Ok(())
+        }
+    }
+
+    /// 启动窗口里断开：迟到的 start 不得写成 Running、不得改连接上下文，
+    /// 而且 helper 刚拉起来的实例必须被停掉。
+    #[test]
+    fn a_cancelled_start_never_becomes_running() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let backend = Arc::new(SlowStartBackend::new(entered_tx, release_rx));
+        let session = Arc::new(TunSession::with_backend(backend.clone(), "fake"));
+
+        let worker_session = Arc::clone(&session);
+        let meta = meta();
+        let handle = std::thread::spawn(move || worker_session.launch("{}", &meta));
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("start 已经进入 helper");
+        assert!(session.is_launching(), "启动窗口必须对上层可见");
+        assert_eq!(session.launching_config_id().as_deref(), Some("cfg_test"));
+
+        session.stop().expect("断开要能取消在途启动");
+        assert!(!session.is_launching(), "取消后不能再报「正在连」");
+
+        release_tx.send(()).expect("放行迟到的 start");
+        let result = handle.join().expect("工作线程不能 panic");
+        assert!(result.is_err(), "被取消的启动不得报成功");
+
+        assert_eq!(session.status(), TunState::Stopped);
+        assert!(session.connected_config_id().is_none());
+        assert_eq!(
+            backend.stops.load(Ordering::SeqCst),
+            2,
+            "断开停一次，迟到的实例还要再停一次"
+        );
+    }
+
+    /// 新连接已经把 start 发出去：helper 的替换语义会收掉旧实例，
+    /// 这时旧启动再停一次（stop 是全局的）会误杀新连接。
+    #[test]
+    fn a_superseded_start_leaves_the_instance_to_the_newer_launch() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let backend = Arc::new(SlowStartBackend::new(entered_tx, release_rx));
+        let session = Arc::new(TunSession::with_backend(backend.clone(), "fake"));
+
+        let worker_session = Arc::clone(&session);
+        let meta = meta();
+        let handle = std::thread::spawn(move || worker_session.launch("{}", &meta));
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("start 已经进入 helper");
+
+        // 用户切到另一套：旧代次作废，新启动已经登记并发出了 start。
+        assert!(session.cancel_launch());
+        let newer = session.begin_launch("cfg_new");
+        session.mark_start_sent(newer.seq);
+
+        release_tx.send(()).expect("放行迟到的 start");
+        let result = handle.join().expect("工作线程不能 panic");
+        assert!(result.is_err(), "被取代的启动不得报成功");
+        assert_eq!(
+            backend.stops.load(Ordering::SeqCst),
+            0,
+            "新连接已发出 start，旧启动不能再停后端"
+        );
+        assert!(session.is_launching(), "新启动的登记不能被旧启动撤掉");
+        drop(newer);
+    }
+
+    /// 新启动还卡在检查 / 授权阶段，压根没发 start：旧实例没人收，必须由这里停掉，
+    /// 否则界面显示未连接、root 隧道还在。
+    #[test]
+    fn a_superseded_start_stops_the_old_instance_when_the_newer_never_started() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let backend = Arc::new(SlowStartBackend::new(entered_tx, release_rx));
+        let session = Arc::new(TunSession::with_backend(backend.clone(), "fake"));
+
+        let worker_session = Arc::clone(&session);
+        let meta = meta();
+        let handle = std::thread::spawn(move || worker_session.launch("{}", &meta));
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("start 已经进入 helper");
+
+        assert!(session.cancel_launch());
+        let newer = session.begin_launch("cfg_new");
+
+        release_tx.send(()).expect("放行迟到的 start");
+        assert!(handle.join().expect("工作线程不能 panic").is_err());
+        assert_eq!(
+            backend.stops.load(Ordering::SeqCst),
+            1,
+            "新启动还没发 start，旧实例必须在这里停掉"
+        );
+        assert!(session.is_launching(), "补停不能撤掉新启动的登记");
+        drop(newer);
+    }
+
+    /// 取消发生在 helper 检查之前：不要再发 start，提前返回。
+    #[test]
+    fn a_cancelled_launch_never_reaches_the_backend() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        let slot = session.begin_launch("cfg_a");
+        assert!(session.cancel_launch());
+
+        let error = session
+            .launch_registered(slot, "{}", &meta())
+            .expect_err("已取消的启动必须提前返回");
+        assert_eq!(error.code, TunErrorCode::Cancelled);
+        assert_eq!(
+            backend.starts.load(Ordering::SeqCst),
+            0,
+            "取消后不得再向 helper 发 start"
+        );
+        assert_eq!(session.status(), TunState::Stopped);
+    }
+
+    /// 在途启动对上层可见，收尾后变回 Running；丢弃凭据则撤销登记。
+    #[test]
+    fn a_launch_is_visible_until_it_lands() {
+        let session = TunSession::with_backend(Arc::new(FakeBackend::new()), "fake");
+        let meta = meta();
+        let slot = session.begin_launch(&meta.config_id);
+        assert!(session.is_launching());
+        assert_eq!(session.launching_config_id().as_deref(), Some("cfg_test"));
+
+        let reply = StartReply {
+            pid: 88,
+            clash_api: ClashApi {
+                addr: "127.0.0.1:51234".into(),
+                secret: "s".into(),
+            },
+            since: "2026-11-05T00:00:00Z".into(),
+            dns_hijack: DnsHijack::default(),
+        };
+        assert!(slot.commit(&meta, &reply));
+        assert!(!session.is_launching());
+        assert_eq!(session.status(), TunState::Running { pid: 88 });
+        assert_eq!(session.connected_config_id().as_deref(), Some("cfg_test"));
+    }
+
+    /// 失败或提前返回时凭据被丢弃：不能把「正在连」永远挂着。
+    #[test]
+    fn a_dropped_launch_clears_the_flag() {
+        let session = TunSession::with_backend(Arc::new(FakeBackend::new()), "fake");
+        {
+            let _slot = session.begin_launch("cfg_a");
+            assert!(session.is_launching());
+        }
+        assert!(!session.is_launching());
+        assert_eq!(session.status(), TunState::Stopped);
     }
 }

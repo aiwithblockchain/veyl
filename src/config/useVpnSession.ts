@@ -2,8 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentBridge, ConfigCreateInput } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { AGENT_EVENTS } from "../agent/protocol";
-import type { ConfigDetail, ConfigSummary, RuntimeSnapshot } from "../agent/protocol";
+import type {
+  ConfigDetail,
+  ConfigSummary,
+  RuntimeSnapshot,
+} from "../agent/protocol";
 import { createMockConfig, MOCK_CONFIG_STORAGE_KEY, summarizeConfig } from "./model";
+import { createRuntimeAuthority, runtimePhase } from "./runtimeAuthority";
+import type { RuntimeAuthority } from "./runtimeAuthority";
 import { deleteConfigWithDisconnect, shouldDisconnectOnDelete, withoutConfig } from "./deleteConfig";
 
 export type VpnConnectionState = "idle" | "starting" | "connected" | "stopping";
@@ -83,10 +89,7 @@ function readMock(): MockStore {
 }
 
 function toConnectionState(state: RuntimeSnapshot["state"]): VpnConnectionState {
-  if (state === "starting" || state === "restarting") return "starting";
-  if (state === "stopping") return "stopping";
-  if (state === "running" || state === "degraded") return "connected";
-  return "idle";
+  return runtimePhase(state);
 }
 
 function actionMessage(error: unknown, fallback: string): string {
@@ -176,7 +179,11 @@ function nextPaint(): Promise<void> {
  * 配置与连接状态。默认走真实命令；`mock` 只在 VITE_MOCK=1（或浏览器里的
  * mock 通道）时启用，供离线演示与测试用。
  */
-export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
+export function useVpnSession(
+  bridge: AgentBridge,
+  mock: boolean,
+  authority?: RuntimeAuthority,
+): VpnSession {
   const [configs, setConfigs] = useState<ConfigSummary[]>([]);
   const [activeConfigId, setActiveConfigId] = useState<string | null>(null);
   const [activeConfig, setActiveConfig] = useState<ConfigDetail | null>(null);
@@ -201,6 +208,10 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
   const stopSeqRef = useRef(0);
   // 断开命令返回前，迟到的 online 事件不能把连接态推回已连接。
   const stopPendingRef = useRef(false);
+  // 已知的运行时状态与时刻：状态事件、stop()/start() 的本地结果共同维护。
+  // 快照比它旧、或状态类别不同时只当陈旧数据，不覆盖连接态。
+  // App 会传入与它共用的一份，避免两个实例的时钟分叉。
+  const runtimeAuthority = useRef(authority ?? createRuntimeAuthority());
 
   const clearTimer = () => {
     if (timer.current !== null) {
@@ -277,7 +288,18 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       setActiveConfig(detail);
 
       const snap = await bridge.getRuntimeSnapshot();
-      if (!disposed.current) applySnapshot(snap);
+      if (!disposed.current) {
+        const authority = runtimeAuthority.current;
+        if (authority.current() === null) {
+          // 首次挂载、还没收到任何状态事件：快照就是起点。
+          if (snap) authority.markSnapshot(snap);
+          else authority.markLocal("idle", 0);
+          applySnapshot(snap);
+        } else if (snap && authority.acceptsSnapshot(snap)) {
+          authority.markSnapshot(snap);
+          applySnapshot(snap);
+        }
+      }
       if (detail !== null || list.active_config_id === null) setError(null);
     } catch (err) {
       if (!disposed.current) setError(actionMessage(err, "读取配置失败"));
@@ -331,12 +353,10 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
           // 断开还没结束：迟到的在线事件以 stop 的结果为准。
           return;
         }
-        // 先按事件把按钮状态切过去，别等快照：两者之间隔着一次 IPC，
-        // 这期间中间区已经按新 state 渲染，顶部却还停在旧文案。
-        setConnection(toConnectionState(event.payload.to));
-        void bridge.getRuntimeSnapshot().then((snap) => {
-          if (!disposed.current) applySnapshot(snap);
-        });
+        // 状态事件自带完整快照，直接落；不再拉 runtime_status（events.md §4.1）。
+        // 比已知状态旧的事件（Tauri 不保证跨 emit 顺序）由共享权威判断丢弃。
+        if (!runtimeAuthority.current.acceptEvent(event.payload)) return;
+        applySnapshot(event.payload.snapshot);
         return;
       }
       if (event.name === AGENT_EVENTS.layoutUpdated) {
@@ -437,6 +457,9 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
     try {
       const result = await bridge.configActivate(configId, confirmDisconnect);
       await refreshReal();
+      if (result.reconnect === "already_connected") {
+        return { ok: true, message: "已经连在这套配置上。" };
+      }
       if (result.reconnect === "reconnect_failed") {
         return { ok: true, message: "已切换配置，但没能重新连上。" };
       }
@@ -474,6 +497,17 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       if (isMissingCommand(err)) {
         setNodeSwitchAvailable(false);
         return { ok: false, message: "这个版本还不能切换节点。" };
+      }
+      const reason = actionReason(err);
+      if (reason === "config_launching") {
+        return {
+          ok: false,
+          message: "这套配置正在连接，等连上以后再切换节点。",
+          reason,
+        };
+      }
+      if (reason === "cancelled") {
+        return { ok: true, message: "这次切换已取消。", reason };
       }
       return { ok: false, message: actionMessage(err, "切换节点失败") };
     }
@@ -552,6 +586,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       if (stale()) return { ok: true };
       // runtimeStart 返回成功就是连上了。刷新快照可能晚一拍（甚至拿不到），
       // 不能再拿它的结果否定这次成功，否则界面会停在未连接。
+      runtimeAuthority.current.markLocal("running");
       setConnection("connected");
       setConnectedConfigId(activeConfigId);
       return { ok: true, connected: true };
@@ -561,6 +596,8 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       await refreshReal();
       setConnection((current) => (current === "starting" ? "idle" : current));
       const reason = actionReason(err);
+      // 后端把这代 start 作废（断开 / 换配置抢先）：静默收尾，不弹错误。
+      if (reason === "cancelled") return { ok: true };
       const permission = helperPermissionOutcome(reason);
       if (permission === "settings") {
         // 需要用户去系统里允许后台助手：交给调用方弹引导，不用 toast。
@@ -611,6 +648,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       // 被新一轮 start 接管：停止结果不能覆盖新一轮。
       if (stopSeqRef.current !== stopSeq) return { ok: true };
       stopPendingRef.current = false;
+      runtimeAuthority.current.markLocal("idle");
       // runtimeStop 成功就是断开了。快照可能还停在 running，不能让它否定这次结果。
       setConnection("idle");
       setConnectedConfigId(null);
@@ -620,6 +658,7 @@ export function useVpnSession(bridge: AgentBridge, mock: boolean): VpnSession {
       if (stopSeqRef.current !== stopSeq) return { ok: true };
       await refreshReal();
       stopPendingRef.current = false;
+      runtimeAuthority.current.markLocal(wasConnected ? "running" : "idle");
       setConnection(wasConnected ? "connected" : "idle");
       setConnectedConfigId(wasConnected ? wasConfigId : null);
       return { ok: false, message: actionMessage(err, "断开失败") };

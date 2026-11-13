@@ -1344,6 +1344,15 @@ fn judge_restore_proxy(facts: &ProxyResetFacts) -> Value {
     }
 }
 
+/// 这次连接已被切配置 / 断开取代：请求作废，不是要展示给用户的故障。
+fn cancelled_connection_error() -> anyhow::Error {
+    svc_error_with_details(
+        "PRECONDITION_FAILED",
+        "这次连接已被新的操作取消",
+        json!({ "reason": "cancelled" }),
+    )
+}
+
 /// 顶层错误码保持旧取值；安装失败也归到 `helper_missing`，不出现第五种理由。
 fn tun_error_code(error: &crate::tun::backend::TunError) -> &'static str {
     use crate::tun::backend::TunErrorCode;
@@ -2323,6 +2332,8 @@ impl WiredServices {
             let meta = self.tun.launch_meta();
             return ConnectionState {
                 connected: true,
+                launching: false,
+                launching_config: None,
                 config_id: meta.as_ref().map(|meta| meta.config_id.clone()),
                 applied_route_revision: meta.as_ref().and_then(|meta| meta.applied_route_revision),
                 route_region: meta.as_ref().and_then(|meta| meta.route_region.clone()),
@@ -2342,6 +2353,8 @@ impl WiredServices {
         }
         ConnectionState {
             connected,
+            launching: self.tun.is_launching(),
+            launching_config: self.tun.launching_config_id(),
             config_id,
             applied_route_revision: status.applied_route_revision,
             route_region: status.route_region,
@@ -2843,6 +2856,10 @@ impl WiredServices {
         if let Some(id) = self.tun.connected_config_id() {
             return Some(id);
         }
+        // 启动窗口里还没有 pid，但这套配置同样「正在用」：删掉它等于删掉正在连的东西。
+        if let Some(id) = self.tun.launching_config_id() {
+            return Some(id);
+        }
         self.manager
             .current_plan()
             .await
@@ -3009,6 +3026,10 @@ fn validate_tun_excludes(
 /// 连接状态的统一视图：TUN 与代理模式都映射到这里，调用方不再各自读 manager。
 struct ConnectionState {
     connected: bool,
+    /// 有 start 在途、还没起来（TUN 首次启动十几秒）。这期间不能再当成「没在连接」。
+    launching: bool,
+    /// 在途启动对应的配置；没有在途启动时为 None。
+    launching_config: Option<String>,
     config_id: Option<String>,
     applied_route_revision: Option<i64>,
     route_region: Option<String>,
@@ -3125,7 +3146,9 @@ impl VpnToolServices for WiredServices {
             self.tun.status(),
             crate::tun::session::TunState::Running { .. }
         );
-        let mode = if tun_running {
+        // 启动窗口里 stop 也必须算数：此时还没 pid，但确实有一次连接在途。
+        let tun_launching = self.tun.is_launching();
+        let mode = if tun_running || tun_launching {
             "tun"
         } else if before.mode.is_some() {
             "system_proxy"
@@ -3133,7 +3156,7 @@ impl VpnToolServices for WiredServices {
             "none"
         };
         log::info!(
-            "断开：模式={mode} 配置={:?} 运行时状态={} TUN运行中={tun_running}",
+            "断开：模式={mode} 配置={:?} 运行时状态={} TUN运行中={tun_running} TUN启动中={tun_launching}",
             connected,
             before.state.as_str()
         );
@@ -3673,7 +3696,10 @@ impl VpnToolServices for WiredServices {
         }
 
         // 连接状态要能看见 TUN：manager 只认识代理模式。
-        let running = self.connection_state().await.connected;
+        // 启动窗口里也算「有连接」：否则新配置会在旧配置正在起来时抢占 active，
+        // 而连接成功路径用的是开始时的 is_active 快照，界面上就会分叉。
+        let connection = self.connection_state().await;
+        let running = connection.connected || connection.launching;
         // 只返回 `seed_unavailable`，不在这里刷新重试：是否刷新由上层决定一次。
         if source.as_deref() == Some("seed") && crate::seed::load_nodes(&self.store).is_none() {
             return Err(svc_error_with_details(
@@ -3985,10 +4011,16 @@ impl VpnToolServices for WiredServices {
         let target = self.require_config(config_id)?;
         // TUN 的进程不在 manager 里，必须按连接状态统一判定，否则会静默切配置。
         let connection = self.connection_state().await;
-        let connected = connection.connected;
-        let connected_config = connection.config_id.clone();
+        // 正在连也算「有连接」：TUN 首次启动要十几秒，这期间既没 pid 也没 meta，
+        // 只看 `connected` 就会把「正在连」当成「没在连」，静默改 active。
+        let live = connection.connected || connection.launching;
+        let live_config = if connection.connected {
+            connection.config_id.clone()
+        } else {
+            connection.launching_config.clone()
+        };
 
-        if !connected {
+        if !live {
             {
                 let conn = self.store.conn();
                 configs::activate(&conn, config_id)
@@ -4002,7 +4034,7 @@ impl VpnToolServices for WiredServices {
             }));
         }
 
-        if connected_config.as_deref() == Some(config_id) {
+        if live_config.as_deref() == Some(config_id) {
             {
                 let conn = self.store.conn();
                 configs::activate(&conn, config_id)
@@ -4010,7 +4042,8 @@ impl VpnToolServices for WiredServices {
             }
             return Ok(json!({
                 "active_config_id": config_id,
-                "reconnect": "reconnected",
+                // 已经连在这套（或正在连它）：这里没有重新连一次，不能报 reconnected。
+                "reconnect": "already_connected",
                 "runtime": self.runtime_status().await?,
             }));
         }
@@ -4021,11 +4054,12 @@ impl VpnToolServices for WiredServices {
                 "切换配置会断开当前连接",
                 json!({
                     "reason": "will_disconnect",
-                    "connected_config_id": connected_config,
+                    "connected_config_id": live_config,
                 }),
             ));
         }
 
+        // 启动窗口里也在这一步收口：先作废在途启动，再等它停干净。
         self.runtime_stop(false).await?;
         {
             let conn = self.store.conn();
@@ -4261,7 +4295,14 @@ impl VpnToolServices for WiredServices {
         let previous = config.current_node_id.clone();
         let connection = self.connection_state().await;
         let connected = connection.connected;
-        let connected_config = connection.config_id.clone();
+        // 启动窗口里也要算「有连接」：隧道还没起来，selector 不存在，
+        // 这时改库会让「库里记的节点」和「隧道实际用的节点」分叉。
+        let live = connection.connected || connection.launching;
+        let live_config = if connection.connected {
+            connection.config_id.clone()
+        } else {
+            connection.launching_config.clone()
+        };
 
         if previous.as_deref() == Some(node_id) {
             return Ok(json!({
@@ -4269,7 +4310,7 @@ impl VpnToolServices for WiredServices {
                 "node_id": node_id,
                 "previous_node_id": previous,
                 "connected": connected,
-                "runtime": if connected {
+                "runtime": if live {
                     self.runtime_status().await?
                 } else {
                     Value::Null
@@ -4277,6 +4318,17 @@ impl VpnToolServices for WiredServices {
             }));
         }
 
+        // 有任何启动在途都拒绝：隧道正按启动那一刻捕获的节点起来，replace 之后
+        // 库里记的节点和实际在跑的会再次分叉。等它连上或断开再改。
+        if connection.launching {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "连接进行中，稍后再切换节点",
+                json!({ "reason": "config_launching" }),
+            ));
+        }
+
+        // 别的配置在启动时，本套仍是「没在连」：允许先记好节点选择，不碰在途连接。
         if !connected {
             {
                 let conn = self.store.conn();
@@ -4312,9 +4364,9 @@ impl VpnToolServices for WiredServices {
             }));
         }
 
-        if connected_config.as_deref() != Some(config_id) {
+        if live_config.as_deref() != Some(config_id) {
             // 接手老 TUN 时 meta 里没有配置 id；这和「连的是另一套」不是同一件事。
-            let config_unknown = connection.tun && connected_config.is_none();
+            let config_unknown = connection.tun && live_config.is_none();
             return Err(svc_error_with_details(
                 "PRECONDITION_FAILED",
                 if config_unknown {
@@ -4527,9 +4579,10 @@ impl VpnToolServices for WiredServices {
         };
         // 「完全未连接」才起探针：Starting/Restarting 也算有连接流程在跑，
         // 这时起第二个运行时会让测速被正常隧道接管，数字失真。
-        // TUN 已连接时 manager 可能是 Idle，绝不能据此另起一个探针运行时。
-        let needs_probe =
-            !connected && self.manager.status().await.state == crate::runtime::RuntimeState::Idle;
+        // TUN 已连接或**正在启动**时 manager 可能是 Idle，绝不能据此另起一个探针运行时。
+        let needs_probe = !connection.connected
+            && !connection.launching
+            && self.manager.status().await.state == crate::runtime::RuntimeState::Idle;
         let installed = if needs_probe {
             self.ensure_runtime().await.ok()
         } else {
@@ -4631,8 +4684,9 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn default_profile_refresh(&self, force: bool) -> anyhow::Result<Value> {
-        // 已连接（含 TUN）时只标记「下次连接生效」，不直接改在线连接。
-        let running = self.connection_state().await.connected;
+        // 已连接（含 TUN）或正在连接时只标记「下次连接生效」，不直接改在线连接。
+        let connection = self.connection_state().await;
+        let running = connection.connected || connection.launching;
         match crate::seed::refresh(&self.store, running, force).await {
             crate::seed::RefreshOutcome::Updated {
                 added,
@@ -6142,6 +6196,9 @@ impl WiredServices {
         clash_secret: String,
         route_region: Option<String>,
     ) -> anyhow::Result<Value> {
+        // 从这一步起就算「正在连」：下面要建配置、等 helper 检查、再让 helper 拉
+        // sing-box，真机要十几秒。这期间切配置 / 断开必须看得见这次连接在途。
+        let launch = self.tun.begin_launch(&config.id);
         // 排除表 = 固定表 + 本机反推 + 用户补充 + 节点服务器旁路。
         // 最后一项不能省：节点服务器若落在被接管段里，sing-box 连自己也会绕成环路。
         let local = crate::tun::subnets(&crate::tun::collect());
@@ -6210,6 +6267,13 @@ impl WiredServices {
         let config_json = serde_json::to_string(&value)
             .map_err(|e| svc_error("INTERNAL", format!("序列化配置失败：{e}")))?;
 
+        // 节点旁路解析与配置生成可能要好几秒：用户可能已经断开或切走了。
+        // 已经作废就不要再碰 helper（可能要弹授权）与系统代理。
+        if launch.cancelled() {
+            log::info!("连接已被取消，不再请求后台组件 config={}", config.id);
+            return Err(cancelled_connection_error());
+        }
+
         // 每次 TUN 连接前再比对一次 helper 构建：App 已升级但后台还是旧映像时，
         // 先换新再连；换不了就让本次连接失败，避免用旧 helper 接管流量。
         let helper = Arc::clone(&self.helper);
@@ -6226,20 +6290,27 @@ impl WiredServices {
         self.manager.set_system_proxy_enabled(false).await;
 
         log::debug!("连接 TUN 配置已生成");
-        let pid = match self.tun.launch(
-            &config_json,
-            &crate::tun::session::TunLaunchMeta {
-                config_id: config.id.clone(),
-                config_name: Some(config.name.clone()),
-                node_id: Some(current.id.clone()),
-                node_name: Some(current.name.clone()),
-                applied_route_revision: Some(config.route_revision),
-                route_region: route_region.clone(),
-            },
-        ) {
+        let launch_meta = crate::tun::session::TunLaunchMeta {
+            config_id: config.id.clone(),
+            config_name: Some(config.name.clone()),
+            node_id: Some(current.id.clone()),
+            node_name: Some(current.name.clone()),
+            applied_route_revision: Some(config.route_revision),
+            route_region: route_region.clone(),
+        };
+        // 这次启动可能在等 helper 的时候已被取消：`launch_registered` 会拒绝写入，
+        // 并把 helper 刚拉起的实例停掉。
+        let pid = match self
+            .tun
+            .launch_registered(launch, &config_json, &launch_meta)
+        {
             Ok(started) => {
                 log::info!("连接 TUN 运行时已启动 pid={}", started.pid);
                 started.pid
+            }
+            Err(error) if error.code == crate::tun::backend::TunErrorCode::Cancelled => {
+                log::info!("连接 TUN 启动已被新的操作取代 config={}", config.id);
+                return Err(cancelled_connection_error());
             }
             Err(error) => {
                 log::error!(
@@ -7303,7 +7374,52 @@ mod connect_guard_tests {
 mod config_service_tests {
     use super::*;
     use crate::proxy::backup::MemoryBackupStore;
+    use crate::tun::backend::{StartReply, TunBackend, TunError, TunSnapshot};
     use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
+
+    /// 只记录 stop 的假后端：启动窗口里断开的用例不碰真实 IPC。
+    #[derive(Default)]
+    struct QuietBackend {
+        stops: AtomicUsize,
+    }
+
+    impl TunBackend for QuietBackend {
+        fn availability(&self) -> Result<crate::tun::privilege::HelperStatus, TunError> {
+            Ok(crate::tun::privilege::HelperStatus::Enabled)
+        }
+
+        fn ensure_available(&self) -> Result<crate::tun::privilege::HelperStatus, TunError> {
+            Ok(crate::tun::privilege::HelperStatus::Enabled)
+        }
+
+        fn start(&self, _config: &str) -> Result<StartReply, TunError> {
+            unreachable!("这个用例不起进程")
+        }
+
+        fn stop(&self) -> Result<(), TunError> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn status(&self) -> Result<TunSnapshot, TunError> {
+            Ok(TunSnapshot {
+                running: false,
+                pid: None,
+                clash_api: None,
+                since: None,
+                last_error: None,
+                dns_hijack: Default::default(),
+                helper_build: None,
+                helper_version: None,
+                helper_pid: None,
+            })
+        }
+
+        fn restart(&self) -> Result<(), TunError> {
+            Ok(())
+        }
+    }
 
     fn services(dir: &Path) -> WiredServices {
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -7623,6 +7739,235 @@ mod config_service_tests {
         // 未确认时活动配置不变。
         let list = services.config_list().await.unwrap();
         assert_eq!(list["active_config_id"], b_id);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 启动窗口里切到别的配置：不算「没在连」，必须先要确认。
+    #[tokio::test]
+    async fn config_activate_requires_confirmation_while_tun_is_starting() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let a = services
+            .config_create(create_input("启动窗口 A"))
+            .await
+            .unwrap();
+        let a_id = a["config_id"].as_str().unwrap().to_string();
+        let b = services
+            .config_create(create_input("启动窗口 B"))
+            .await
+            .unwrap();
+        let b_id = b["config_id"].as_str().unwrap().to_string();
+
+        // TUN 正在启动：还没有 pid，但这次连接已经算在途。
+        services.tun.force_launching_for_test(&b_id);
+        let error = services.config_activate(&a_id, false).await.unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "will_disconnect"
+        );
+        assert_eq!(
+            service.details.as_ref().unwrap()["connected_config_id"],
+            b_id
+        );
+
+        // 未确认时活动配置不变，启动也不受影响。
+        let list = services.config_list().await.unwrap();
+        assert_eq!(list["active_config_id"], b_id);
+        assert!(services.tun.is_launching(), "拒绝切换不能把在途启动吞掉");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 目标就是正在启动的那套：幂等返回，不要取消它、也不要谎报重连过。
+    #[tokio::test]
+    async fn config_activate_to_the_launching_config_is_idempotent() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("启动窗口回切"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        services.tun.force_launching_for_test(&config_id);
+        let result = services.config_activate(&config_id, false).await.unwrap();
+        assert_eq!(result["reconnect"], "already_connected");
+        assert!(services.tun.is_launching(), "幂等分支不能取消在途启动");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 已连接的目标配置同样如实报 `already_connected`。
+    #[tokio::test]
+    async fn config_activate_to_the_connected_config_reports_already_connected() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("已连回切"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        services.tun.force_running_for_test(4242, Some(&config_id));
+        let result = services.config_activate(&config_id, false).await.unwrap();
+        assert_eq!(result["reconnect"], "already_connected");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 启动窗口里切节点：隧道还没用上库里这个值，改库会让「记的」和「跑的」分叉。
+    #[tokio::test]
+    async fn node_switch_is_rejected_while_the_config_is_starting() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("启动窗口切节点"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        for (name, port) in [("东京", 8388), ("大阪", 8389)] {
+            services
+                .node_create(NodeCreateInput {
+                    config_id: Some(config_id.clone()),
+                    name: name.into(),
+                    server: "203.0.113.10".into(),
+                    port,
+                    password: "pw".into(),
+                    method: "aes-256-gcm".into(),
+                })
+                .await
+                .unwrap();
+        }
+        let detail = services.config_detail(&config_id).await.unwrap();
+        let current = detail["current_node_id"].as_str().unwrap().to_string();
+        let other = detail["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["node_id"].as_str().unwrap().to_string())
+            .find(|id| id != &current)
+            .unwrap();
+
+        services.tun.force_launching_for_test(&config_id);
+        let error = services.node_switch(&config_id, &other).await.unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "config_launching"
+        );
+
+        // 库里的选择没被改：界面不能宣布「已切换到 X」。
+        let after = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(after["current_node_id"], current);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 别的配置正在启动时同样拒绝：这时热切会换到用旧节点构建的实例上。
+    #[tokio::test]
+    async fn node_switch_is_rejected_while_another_config_is_starting() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let a = services.config_create(create_input("A")).await.unwrap();
+        let a_id = a["config_id"].as_str().unwrap().to_string();
+        for (name, port) in [("东京", 8388), ("大阪", 8389)] {
+            services
+                .node_create(NodeCreateInput {
+                    config_id: Some(a_id.clone()),
+                    name: name.into(),
+                    server: "203.0.113.10".into(),
+                    port,
+                    password: "pw".into(),
+                    method: "aes-256-gcm".into(),
+                })
+                .await
+                .unwrap();
+        }
+        let detail = services.config_detail(&a_id).await.unwrap();
+        let current = detail["current_node_id"].as_str().unwrap().to_string();
+        let other = detail["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["node_id"].as_str().unwrap().to_string())
+            .find(|id| id != &current)
+            .unwrap();
+
+        let b = services.config_create(create_input("B")).await.unwrap();
+        let b_id = b["config_id"].as_str().unwrap().to_string();
+        services.tun.force_launching_for_test(&b_id);
+
+        let error = services.node_switch(&a_id, &other).await.unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "config_launching"
+        );
+
+        let after = services.config_detail(&a_id).await.unwrap();
+        assert_eq!(after["current_node_id"], current);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 启动窗口里新建配置：不能抢占 active，正在起来的是旧配置。
+    #[tokio::test]
+    async fn config_create_does_not_activate_while_tun_is_starting() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let a = services
+            .config_create(create_input("启动窗口活动 A"))
+            .await
+            .unwrap();
+        let a_id = a["config_id"].as_str().unwrap().to_string();
+        assert_eq!(a["is_active"], true);
+
+        services.tun.force_launching_for_test(&a_id);
+        let b = services
+            .config_create(create_input("启动窗口活动 B"))
+            .await
+            .unwrap();
+        assert_eq!(b["is_active"], false);
+
+        let list = services.config_list().await.unwrap();
+        assert_eq!(list["active_config_id"], a_id);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 启动窗口里按断开：取消在途启动并停掉后端，不能让迟到的 start 继续。
+    #[tokio::test]
+    async fn runtime_stop_cancels_a_tun_start_in_flight() {
+        let dir = temp_dir();
+        let mut services = services(&dir);
+        let created = services
+            .config_create(create_input("启动窗口断开"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        let backend = Arc::new(QuietBackend::default());
+        services.tun = Arc::new(crate::tun::session::TunSession::with_backend(
+            backend.clone(),
+            "quiet",
+        ));
+        services.tun.force_launching_for_test(&config_id);
+        assert!(services.tun.is_launching());
+
+        let snapshot = services
+            .runtime_stop(false)
+            .await
+            .expect("启动窗口里断开要成功");
+        assert_eq!(snapshot["state"], "idle");
+        assert!(!services.tun.is_launching(), "断开必须取消在途启动");
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

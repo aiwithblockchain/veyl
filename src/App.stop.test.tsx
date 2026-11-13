@@ -70,7 +70,10 @@ function stateEvent(from: RuntimeState, to: RuntimeState): AgentEvent {
       upstream_version: null,
       reason: null,
       error: null,
-      snapshot: {} as never,
+      snapshot: {
+        state: to,
+        config_id: to === "running" || to === "degraded" ? CONFIG_ID : null,
+      } as RuntimeSnapshot,
       emitted_at: "",
     },
   };
@@ -171,6 +174,24 @@ describe("断开成功后的界面状态", () => {
       expect(container.querySelector(".state-word")?.textContent).toContain("未连接"),
     );
     expect(container.querySelector(".state-line__label")).toBeNull();
+  }, 15_000);
+
+  it("断开成功后滞后的 running 快照不会把 hero 翻回已连接", async () => {
+    prepareBridge();
+    vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
+
+    const { container } = render(<App />);
+    await connect(container);
+
+    // 后端收尾滞后：断开后的快照仍是 running。
+    vi.mocked(bridge.getRuntimeSnapshot).mockResolvedValue(makeSnapshot("running"));
+    fireEvent.click(screen.getByRole("button", { name: "断开 VPN" }));
+
+    await waitFor(() =>
+      expect(container.querySelector(".state-word")?.textContent).toContain("未连接"),
+    );
+    await act(async () => {});
+    expect(container.querySelector(".state-word")?.textContent).toContain("未连接");
   }, 15_000);
 
   it("断开期间迟到的 running 事件不会把界面推回已连接", async () => {

@@ -456,7 +456,7 @@ type RuntimeStartData = RuntimeSnapshot & {
 
 错误：`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `other_config_running` / `tun_denied` / `helper_missing`）、`NOT_FOUND`、`RUNTIME_BUSY`、`RUNTIME_NOT_INSTALLED`、`RUNTIME_START_TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`。
 
-`tun` 连接换新后台组件失败时，`PRECONDITION_FAILED` 的 `details.reason` 取值见 `commands.md` §7.1：`tun_denied` / `helper_admin_cancelled` / `helper_start_failed` / `helper_missing` / `dev_unbundled` / `helper_busy` / `helper_lease_unavailable` / `helper_file_invalid`。模型只按 `message` 转述，不暴露 code；`dev_unbundled` 表示当前是未打包的调试进程，需要引导用户用 `bash scripts/dev/tun-dev.sh` 启动打包后的 App；`helper_admin_cancelled` 是用户取消了授权，可以让用户再试一次，不要说成「去系统设置允许」。2026-11-13 补记，字段不变，不升版本。
+`tun` 连接换新后台组件失败时，`PRECONDITION_FAILED` 的 `details.reason` 取值见 `commands.md` §7.1：`tun_denied` / `helper_admin_cancelled` / `helper_start_failed` / `helper_missing` / `dev_unbundled` / `helper_busy` / `helper_lease_unavailable` / `helper_file_invalid`；连接被切配置 / 断开取代时是 `cancelled`（请求作废，不是故障，不要重试）。模型只按 `message` 转述，不暴露 code；`dev_unbundled` 表示当前是未打包的调试进程，需要引导用户用 `bash scripts/dev/tun-dev.sh` 启动打包后的 App；`helper_admin_cancelled` 是用户取消了授权，可以让用户再试一次，不要说成「去系统设置允许」。2026-11-13 补记，字段不变，不升版本。
 
 ---
 
@@ -1412,6 +1412,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 | 当前状态 | 行为 |
 |---|---|
 | 未连接 | 只改 `current_node_id`；**不启动 VPN** |
+| **有连接正在启动**（还没起来，不论哪一套） | `PRECONDITION_FAILED / config_launching`；`current_node_id` 不变。这是正常拒绝，不是故障：等连接完成或断开后再切，**不要重试** |
 | 已连接、这套配置正在跑 | selector 热切换，进程不重启 |
 | 已连接、但这套配置不是当前配置 | `PRECONDITION_FAILED / config_not_running`（身份已知：连的是另一套） |
 | 已连接（接手上次运行的 TUN）、但读不到连接属于哪套配置 | `PRECONDITION_FAILED / config_unknown`（身份未知，不能当成「另一套」）；提示用户先断开再切换节点，**不要重试** |
@@ -1421,7 +1422,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 - 热切换失败 → `PRECONDITION_FAILED / runtime_switch_failed`，`current_node_id` 不变。
 - 不要用 `VpnConnect` 表达切换：它没有 `node_id` 参数；换节点只走 `NodeSwitch`，未连接时不会启动 VPN。
 
-错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`config_not_running` / `config_unknown` / `runtime_switch_failed`）、`TIMEOUT`。
+错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`config_not_running` / `config_unknown` / `config_launching` / `runtime_switch_failed`）、`TIMEOUT`。
 
 ---
 
