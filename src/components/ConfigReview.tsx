@@ -11,6 +11,8 @@ interface Props {
   connected: boolean;
   /** config_create 仍报免费节点不可用：留在审视页，给重试与返回。 */
   seedProblem: boolean;
+  /** 从「我的服务器」带回来的节点来源；null = Veyl 免费节点。 */
+  nodeSourceLabel?: string | null;
   onRetrySeed: () => void;
   onBack: () => void;
   onCancel: () => void;
@@ -47,6 +49,7 @@ export function ConfigReview({
   saving,
   connected,
   seedProblem,
+  nodeSourceLabel = null,
   onRetrySeed,
   onBack,
   onCancel,
@@ -88,7 +91,9 @@ export function ConfigReview({
         <div className="new-config__fact">
           <dt>节点来源</dt>
           <dd>
-            <span className="new-config__fact-value">Veyl 免费节点</span>
+            <span className="new-config__fact-value">
+              {nodeSourceLabel ?? "Veyl 免费节点"}
+            </span>
           </dd>
         </div>
         <div className="new-config__fact">

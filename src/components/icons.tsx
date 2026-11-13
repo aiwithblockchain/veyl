@@ -94,3 +94,26 @@ export function IconKey({ size = 16, className }: IconProps) {
     </>,
   );
 }
+
+export function IconConsole({ size = 16, className }: IconProps) {
+  return base(
+    size,
+    className,
+    <>
+      <rect x="2.5" y="3.5" width="11" height="7.5" rx="1.2" />
+      <path d="M6 13.5h4M8 11v2.5" />
+    </>,
+  );
+}
+
+export function IconServer({ size = 16, className }: IconProps) {
+  return base(
+    size,
+    className,
+    <>
+      <rect x="3" y="3" width="10" height="4.2" rx="1" />
+      <rect x="3" y="8.8" width="10" height="4.2" rx="1" />
+      <path d="M5.2 5.1h.01M5.2 10.9h.01" />
+    </>,
+  );
+}

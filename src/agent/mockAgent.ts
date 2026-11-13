@@ -23,6 +23,7 @@ import type {
   LlmProvider,
   LlmProviderInput,
   LlmProviderTestResult,
+  MyServerCreateInput,
   NetRepairAction,
   NetRepairResult,
   NetworkForceResetResult,
@@ -35,6 +36,7 @@ import type {
   TunProbeData,
 } from "./bridge";
 import { DEFAULT_PROXY_PORT, isLocalEndpoint, maskKey } from "./bridge";
+import { MockMyServerService } from "../myservers/mockMyServerService";
 import { MOCK_CONFIG_STORAGE_KEY } from "../config/model";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
@@ -479,6 +481,48 @@ export class MockAgentBridge implements AgentBridge {
             ? "occupied"
             : "free",
     };
+  }
+
+  private myServers = new MockMyServerService();
+
+  async myServerCatalog() {
+    return this.myServers.catalog();
+  }
+
+  async myServerList() {
+    return this.myServers.list();
+  }
+
+  async myServerGet(serverId: string) {
+    return this.myServers.get(serverId);
+  }
+
+  async myServerCreate(input: MyServerCreateInput) {
+    return this.myServers.create(input);
+  }
+
+  async myServerCheckout(orderId: string) {
+    return this.myServers.checkout(orderId);
+  }
+
+  async myServerCancelOrder(orderId: string) {
+    return this.myServers.cancelOrder(orderId);
+  }
+
+  async myServerRebuild(serverId: string, confirm: boolean) {
+    return this.myServers.rebuild(serverId, confirm);
+  }
+
+  async myServerDestroy(serverId: string, confirm: boolean) {
+    return this.myServers.destroy(serverId, confirm);
+  }
+
+  async myServerCredentials(serverId: string) {
+    return this.myServers.credentials(serverId);
+  }
+
+  async myServerSshCredentials(serverId: string) {
+    return this.myServers.sshCredentials(serverId);
   }
 
   /** 演示异常退出后的恢复结果：localStorage 里放状态名即可造四种状态。 */

@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, ConfigCreateInput } from "../agent/bridge";
-import type { ConfigSummary } from "../agent/protocol";
+import type { ConfigConnectMode, ConfigSummary } from "../agent/protocol";
 import { NewConfigDialog } from "./NewConfigDialog";
 
 afterEach(cleanup);
@@ -41,6 +41,9 @@ interface RenderOptions {
   onCreate?: (input: ConfigCreateInput) => Promise<{ ok: boolean; message?: string; reason?: string }>;
   onCreated?: (connect: boolean) => void;
   onClose?: () => void;
+  onChooseServers?: (connectMode: ConfigConnectMode) => void;
+  ownedNodes?: { nodeIds: string[]; label: string } | null;
+  initialConnectMode?: ConfigConnectMode;
 }
 
 function renderDialog(options: RenderOptions = {}) {
@@ -53,6 +56,9 @@ function renderDialog(options: RenderOptions = {}) {
     onClose: options.onClose ?? vi.fn(),
     onCreate: options.onCreate ?? vi.fn(async () => ({ ok: true })),
     onCreated: options.onCreated ?? vi.fn(),
+    onChooseServers: options.onChooseServers ?? vi.fn(),
+    ownedNodes: options.ownedNodes ?? null,
+    initialConnectMode: options.initialConnectMode,
   };
   render(<NewConfigDialog {...props} />);
   return props;
@@ -274,59 +280,44 @@ describe("免费节点失败", () => {
   });
 });
 
-describe("供应商广场", () => {
-  it("预览页三条示例、按钮 disabled、返回保留选择且不建配置", async () => {
+describe("其它节点入口", () => {
+  it("选「其它节点」并下一步：把接管方式交给服务器入口，不建配置", () => {
+    const onChooseServers = vi.fn();
     const onCreate = vi.fn(async () => ({ ok: true }));
-    const { onClose } = renderDialog({ onCreate });
+    const { onClose } = renderDialog({ onCreate, onChooseServers });
 
     fireEvent.click(screen.getByRole("radio", { name: /Proxy 模式/ }));
     fireEvent.click(screen.getByRole("radio", { name: /其它节点/ }));
-    expect(screen.getByText("预览")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
 
-    expect(await screen.findByText("示例供应商 A")).toBeTruthy();
-    expect(screen.getAllByText("供应商广场")).toHaveLength(1);
-    expect(screen.getByText("示例供应商 B")).toBeTruthy();
-    expect(screen.getByText("示例供应商 C")).toBeTruthy();
-    const pending = screen.getAllByRole("button", { name: "即将支持" });
-    expect(pending).toHaveLength(3);
-    pending.forEach((button) => expect((button as HTMLButtonElement).disabled).toBe(true));
-    expect(
-      screen.getByText("本页只做展示：不能购买、不能跳转、不能加入配置。"),
-    ).toBeTruthy();
+    expect(onChooseServers).toHaveBeenCalledWith("system_proxy");
     expect(onCreate).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: /返回新建配置/ }));
+  it("从服务器带回节点：直接进审视页，保存时带 nodeIds", async () => {
+    const onCreate = vi.fn(async (_input: ConfigCreateInput) => ({ ok: true }));
+    const { onCreated } = renderDialog({
+      onCreate,
+      ownedNodes: { nodeIds: ["node_9"], label: "东京 · Vultr" },
+    });
+
+    expect(screen.getByText("东京 · Vultr")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "创建并连接" }));
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
+    const input = onCreate.mock.calls[0][0] as ConfigCreateInput;
+    expect(input.nodeIds).toEqual(["node_9"]);
+    expect(input.source).toBe("empty");
+    expect(onCreated).toHaveBeenCalled();
+  });
+
+  it("从服务器返回时恢复已选接管方式", () => {
+    renderDialog({ initialConnectMode: "system_proxy" });
     expect(
       (screen.getByRole("radio", { name: /Proxy 模式/ }) as HTMLElement).getAttribute(
         "aria-checked",
       ),
     ).toBe("true");
-    expect(
-      (screen.getByRole("radio", { name: /其它节点/ }) as HTMLElement).getAttribute(
-        "aria-checked",
-      ),
-    ).toBe("true");
-  });
-
-  it("Esc 先回两问页，再按才关弹窗", () => {
-    const onClose = vi.fn();
-    renderDialog({ onClose });
-    fireEvent.click(screen.getByRole("radio", { name: /其它节点/ }));
-    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    expect(screen.getByText("示例供应商 A")).toBeTruthy();
-    const back = screen.getByRole("button", { name: /返回新建配置/ });
-    expect(document.activeElement).toBe(back);
-
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.getByText("怎么接管")).toBeTruthy();
-    expect(document.activeElement).toBe(
-      screen.getByRole("radio", { name: /其它节点/ }),
-    );
-    expect(onClose).not.toHaveBeenCalled();
-
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(onClose).toHaveBeenCalled();
   });
 });

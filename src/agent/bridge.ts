@@ -457,6 +457,109 @@ export interface ProxyRecoveryReportData {
   recovery: ProxyRecovery | null;
 }
 
+/** 我的服务器（契约 commands.md §10.1，设计 my-servers.md §5）。 */
+export type MyServerState =
+  | "creating"
+  | "booting"
+  | "installing"
+  | "verifying"
+  | "healthy"
+  | "active"
+  | "error"
+  | "destroying"
+  | "destroyed"
+  | "gone";
+
+export interface MyServerFailure {
+  stage: MyServerState;
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+export interface MyServer {
+  server_id: string;
+  name: string;
+  region: string;
+  plan: string;
+  state: MyServerState;
+  created_at: string;
+  ip: string | null;
+  port: number | null;
+  /** 安装成功后才有。 */
+  node_id: string | null;
+  hourly_usd: number;
+  monthly_usd: number;
+  failure: MyServerFailure | null;
+}
+
+export type MyServerOrderState =
+  | "pending_payment"
+  | "paid"
+  | "provisioning"
+  | "ready"
+  | "cancelled"
+  | "failed";
+
+export interface MyServerOrder {
+  order_id: string;
+  state: MyServerOrderState;
+  region: string;
+  plan: string;
+  /** 展示用金额快照。 */
+  amount_usd: number;
+  created_at: string;
+  expires_at: string | null;
+  server_id: string | null;
+  failure: { code: string; message: string; retryable: boolean } | null;
+}
+
+export interface MyServerRegion {
+  id: string;
+  name: string;
+  continent: "asia" | "europe" | "north_america" | "south_america" | "oceania" | "africa";
+}
+
+export interface MyServerPlan {
+  id: string;
+  label: string;
+  hourly_usd: number;
+  monthly_usd: number;
+}
+
+export interface MyServerCatalog {
+  regions: MyServerRegion[];
+  plans: MyServerPlan[];
+  currency: string;
+  updated_at: string;
+}
+
+export interface MyServerCreateInput {
+  region: string;
+  plan: string;
+  idempotencyKey: string;
+}
+
+export interface MyServerRebuildResult {
+  newServerId: string;
+  state: MyServerState;
+}
+
+export interface MyServerCredentials {
+  payload: string;
+  signature: string;
+}
+
+export interface MyServerSshCredentials {
+  host: string;
+  port: number;
+  username: string;
+  auth_type: "password" | "key";
+  password?: string | null;
+  public_key?: string | null;
+  updated_at: string;
+}
+
 /** `runtime_start` 的返回：完整快照 + 幂等命中标记。 */
 export interface RuntimeStartResult extends RuntimeSnapshot {
   /** 同一套已连接 / 正在启动：没有重新启动，`state` 可能是 `starting`。 */
@@ -531,6 +634,26 @@ export interface AgentBridge {
   proxyPortSet(port: number): Promise<ProxyPortSaveResult>;
   /** 异常退出后的系统代理恢复结果；仅用于首屏提示一次，没有恢复动作时为 null。 */
   proxyRecoveryReport(): Promise<ProxyRecoveryReportData | null>;
+  /** 「我的服务器」：可售地区 / 套餐 / 价格（本期只读展示）。 */
+  myServerCatalog(): Promise<MyServerCatalog>;
+  myServerList(): Promise<{ servers: MyServer[] }>;
+  myServerGet(serverId: string): Promise<MyServer>;
+  /** 下单；本期是假支付，只产生一张订单。 */
+  myServerCreate(input: MyServerCreateInput): Promise<MyServerOrder>;
+  /** 假支付：立即 paid 并开始编排。 */
+  myServerCheckout(orderId: string): Promise<MyServerOrder>;
+  /** 取消未完成订单（已建实例会先销毁）。 */
+  myServerCancelOrder(orderId: string): Promise<MyServerOrder>;
+  /** 销毁旧机并用同地区同套餐新建。 */
+  myServerRebuild(
+    serverId: string,
+    confirm: boolean,
+  ): Promise<MyServerRebuildResult>;
+  myServerDestroy(serverId: string, confirm: boolean): Promise<MyServer>;
+  /** 取凭据；客户端验签后落库，界面不展示。 */
+  myServerCredentials(serverId: string): Promise<MyServerCredentials>;
+  /** 取 SSH 登录信息；仅 UI 通道。 */
+  myServerSshCredentials(serverId: string): Promise<MyServerSshCredentials>;
   /** 恢复网络：撤代理 → 停运行时 → 清明文配置（不依赖 AI）。 */
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
   /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */

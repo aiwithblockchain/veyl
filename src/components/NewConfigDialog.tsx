@@ -7,7 +7,6 @@ import { nextConfigName } from "../config/model";
 import { useFocusTrap } from "../ui/focus";
 import { ConfigReview } from "./ConfigReview";
 import { IconClose } from "./icons";
-import { VendorMarketPage } from "./VendorMarketPage";
 
 interface Props {
   bridge: AgentBridge;
@@ -23,9 +22,15 @@ interface Props {
   onCreated: (connect: boolean) => void;
   /** 当前是否已连接：决定主按钮文案与创建后是否自动连接。 */
   connected?: boolean;
+  /** 第 2 问选「其它节点」：切到「我的服务器」destination，保留接管方式。 */
+  onChooseServers?: (connectMode: ConfigConnectMode) => void;
+  /** 从「我的服务器」带回来的节点：直接进审视页，节点来源已确定。 */
+  ownedNodes?: { nodeIds: string[]; label: string } | null;
+  /** 从「我的服务器」返回时恢复的接管方式。 */
+  initialConnectMode?: ConfigConnectMode;
 }
 
-type View = "questions" | "review" | "vendor";
+type View = "questions" | "review";
 type SeedState = "ready" | "empty" | "loading" | "failed";
 
 const SEED_ERROR = [
@@ -62,10 +67,17 @@ export function NewConfigDialog({
   onCreate,
   onCreated,
   connected = false,
+  onChooseServers,
+  ownedNodes = null,
+  initialConnectMode,
 }: Props) {
-  const [view, setView] = useState<View>("questions");
-  const [connectMode, setConnectMode] = useState<ConfigConnectMode>("tun");
-  const [source, setSource] = useState<"seed" | "vendor">("seed");
+  const [view, setView] = useState<View>(ownedNodes ? "review" : "questions");
+  const [connectMode, setConnectMode] = useState<ConfigConnectMode>(
+    initialConnectMode ?? "tun",
+  );
+  const [source, setSource] = useState<"seed" | "vendor">(
+    ownedNodes ? "vendor" : "seed",
+  );
   const [seedState, setSeedState] = useState<SeedState>("empty");
   const [seedCount, setSeedCount] = useState<number | null>(null);
   const name = nextConfigName(configs);
@@ -77,20 +89,17 @@ export function NewConfigDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   const connectRef = useRef<HTMLDivElement>(null);
   const sourceRef = useRef<HTMLDivElement>(null);
-  const previousViewRef = useRef<View>("questions");
   useFocusTrap(true, dialogRef);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       if (savingRef.current) return;
-      // 供应商广场是子页：Esc 先回两问，再按才关弹窗。
-      if (view === "vendor") setView("questions");
-      else onClose();
+      onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, view]);
+  }, [onClose]);
 
   // 打开弹窗不联网：读一次本地的池状态；App 已有值时直接复用。
   useEffect(() => {
@@ -118,19 +127,10 @@ export function NewConfigDialog({
     };
   }, [bridge, defaultNodeCount]);
 
-  // 回焦：vendor 聚焦唯一的返回入口；回两问时聚焦刚才操作的那组已选项。
+  // 回两问时聚焦刚才操作的那组已选项。
   useEffect(() => {
-    const previous = previousViewRef.current;
-    previousViewRef.current = view;
-    if (view === "vendor") {
-      dialogRef.current
-        ?.querySelector<HTMLButtonElement>(".vendor-page__back")
-        ?.focus();
-      return;
-    }
     if (view !== "questions") return;
-    const group = previous === "vendor" ? sourceRef.current : connectRef.current;
-    group
+    connectRef.current
       ?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]')
       ?.focus();
   }, [view]);
@@ -155,7 +155,7 @@ export function NewConfigDialog({
 
   const goNext = async () => {
     if (source === "vendor") {
-      setView("vendor");
+      onChooseServers?.(connectMode);
       return;
     }
     if (seedState === "loading") return;
@@ -174,12 +174,20 @@ export function NewConfigDialog({
     setSeedProblem(false);
     setSaving(true);
     savingRef.current = true;
-    const input: ConfigCreateInput = {
-      name: trimmed,
-      connectMode,
-      routingMode: region ? "direct" : "proxy_all",
-      source: "seed",
-    };
+    const input: ConfigCreateInput = ownedNodes
+      ? {
+          name: trimmed,
+          connectMode,
+          routingMode: region ? "direct" : "proxy_all",
+          source: "empty",
+          nodeIds: ownedNodes.nodeIds,
+        }
+      : {
+          name: trimmed,
+          connectMode,
+          routingMode: region ? "direct" : "proxy_all",
+          source: "seed",
+        };
     try {
       let result: { ok: boolean; message?: string; reason?: string };
       try {
@@ -367,13 +375,12 @@ export function NewConfigDialog({
                 <span className="new-config__answer-head">
                   <span className="new-config__marker" aria-hidden />
                   <span className="new-config__answer-title">其它节点</span>
-                  <span className="new-config__tagline">预览</span>
                 </span>
                 <span className="new-config__answer-lead">
                   用你自己的机场或节点供应商。
                 </span>
                 <span className="new-config__answer-text">
-                  下一步打开「供应商广场」，从那里选节点。
+                  下一步打开「我的服务器」，可以买一台，也可以在里面导入已有节点。
                 </span>
               </div>
             </div>
@@ -395,8 +402,6 @@ export function NewConfigDialog({
               </button>
             </div>
           </div>
-        ) : view === "vendor" ? (
-          <VendorMarketPage onBack={() => setView("questions")} />
         ) : (
           <ConfigReview
             connectMode={connectMode}
@@ -406,6 +411,7 @@ export function NewConfigDialog({
             saving={saving}
             connected={connected}
             seedProblem={seedProblem}
+            nodeSourceLabel={ownedNodes?.label ?? null}
             onRetrySeed={() => void save()}
             onBack={() => setView("questions")}
             onCancel={onClose}

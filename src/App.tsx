@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { AgentEvent, ConfigRouteMode, NextAction, RuntimeView } from "./agent/protocol";
+import type {
+  AgentEvent,
+  ConfigConnectMode,
+  ConfigRouteMode,
+  NextAction,
+  RuntimeView,
+} from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
 import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, shouldRefreshSnapshotOnHealth, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
@@ -20,6 +26,9 @@ import { Console } from "./components/Console";
 import { ConnectionOverlay } from "./components/ConnectionOverlay";
 import { HelperPermissionDialog } from "./components/HelperPermissionDialog";
 import { NewConfigDialog } from "./components/NewConfigDialog";
+import { MyServersPage } from "./components/MyServersPage";
+import { MyServersRail } from "./components/MyServersRail";
+import { useMyServers } from "./myservers/useMyServers";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
 import { Settings, describeImportError } from "./components/Settings";
@@ -43,6 +52,8 @@ import { isDisconnectFailure } from "./ui/middleArea";
 import { ISSUE_REPORT_OPENING } from "./ui/issueReport";
 import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
 import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
+import { readDestination, writeDestination, type Destination } from "./ui/destination";
+import { IconConsole, IconServer } from "./components/icons";
 import { usePaneLayout } from "./ui/usePaneLayout";
 import { pushRateSample, shouldPushRateSample, type RateSample } from "./ui/rateSeries";
 import {
@@ -130,6 +141,29 @@ export default function App() {
   const [historyReady, setHistoryReady] = useState(false);
   const [hasEverConnected, setHasEverConnected] = useState(readEverConnected);
   const [panelOpen, setPanelOpen] = useState(readInitialPanelOpen);
+  // destination 决定左栏与中间区：客户端是配置列表 + 控制台，服务器是服务器列表 + 选中那台。
+  const [destination, setDestination] = useState<Destination>(() =>
+    readDestination(localStorage),
+  );
+  const changeDestination = (next: Destination) => {
+    setDestination(next);
+    writeDestination(localStorage, next);
+  };
+  // 再点一次已激活的「服务器」图标：递增让服务器页回到根（默认选中第一台）。
+  const [serversRootSignal, setServersRootSignal] = useState(0);
+  const myServers = useMyServers(bridge, {
+    active: destination === "servers",
+    rootSignal: serversRootSignal,
+  });
+  /** 从新建流程切到服务器时保留接管方式；回客户端时恢复新建流程。 */
+  const [serverEntry, setServerEntry] = useState<{
+    connectMode: ConfigConnectMode;
+  } | null>(null);
+  /** 从服务器「用来建配置」带回来的节点；dialog 挂在 review。 */
+  const [ownedNodes, setOwnedNodes] = useState<{
+    nodeIds: string[];
+    label: string;
+  } | null>(null);
   /** 正在为问题报告开会话并发送开场：期间禁用三处入口。 */
   const [reportOpening, setReportOpening] = useState(false);
   const reportOpeningRef = useRef(false);
@@ -219,6 +253,33 @@ export default function App() {
     newConfigFlowRef.current = null;
     if (!fallbackToForm) return;
     setAppNotice({ level: "error", text: "AI 没接上，先用表单建一套。" });
+    openNewConfig();
+  };
+
+  const openNewConfig = () => {
+    setOwnedNodes(null);
+    setServerEntry(null);
+    setNewConfigOpen(true);
+  };
+
+  // 第 2 问选「其它节点」：中间区切到服务器，关掉表单并记住接管方式。
+  const handleChooseServers = (connectMode: ConfigConnectMode) => {
+    setServerEntry({ connectMode });
+    setNewConfigOpen(false);
+    changeDestination("servers");
+  };
+
+  // 回客户端只能点最左侧「客户端」图标：从新建流程来的顺带恢复表单。
+  const handleServersBack = () => {
+    changeDestination("client");
+    if (serverEntry) setNewConfigOpen(true);
+  };
+
+  // 从服务器带一个节点回新建流程：客户端 + 审视页。
+  const handleUseServer = (nodeId: string, serverName: string) => {
+    setServerEntry(null);
+    setOwnedNodes({ nodeIds: [nodeId], label: serverName });
+    changeDestination("client");
     setNewConfigOpen(true);
   };
   // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
@@ -1442,20 +1503,58 @@ export default function App() {
 
   return (
     <div style={appStyle} className="app">
-      <ConfigRail
-        configs={vpn.configs}
-        activeConfigId={vpn.activeConfigId}
-        connectedConfigId={vpn.connectedConfigId}
-        loading={vpn.loading}
-        error={vpn.error}
-        onSelect={handleSelectConfig}
-        onNewConfig={aiReady ? startNewConfigAiFlow : () => setNewConfigOpen(true)}
-        onRetry={vpn.reload}
-        onDelete={vpn.deleteConfig}
-        onRename={vpn.renameConfig}
-        onOpenSettings={() => openSettings()}
-        compact={shell.mode === "drawer"}
-      />
+      <nav className="activity" aria-label="切换主区">
+        <button
+          type="button"
+          className={`activity__item ${destination === "client" ? "is-active" : ""}`}
+          aria-pressed={destination === "client"}
+          aria-label="客户端"
+          title="客户端"
+          onClick={handleServersBack}
+        >
+          <IconConsole size={18} />
+        </button>
+        <button
+          type="button"
+          className={`activity__item ${destination === "servers" ? "is-active" : ""}`}
+          aria-pressed={destination === "servers"}
+          aria-label="服务器"
+          title="服务器"
+          onClick={() => {
+            if (destination === "servers") setServersRootSignal((value) => value + 1);
+            else changeDestination("servers");
+          }}
+        >
+          <IconServer size={18} />
+        </button>
+      </nav>
+      {destination === "servers" ? (
+        <MyServersRail
+          servers={myServers.servers}
+          selectedId={myServers.selectedId}
+          loading={myServers.loading}
+          account={myServers.account}
+          compact={shell.mode === "drawer"}
+          onSelect={myServers.select}
+          onNew={myServers.openWizard}
+          onOpenSettings={() => openSettings()}
+        />
+      ) : (
+        <ConfigRail
+          configs={vpn.configs}
+          activeConfigId={vpn.activeConfigId}
+          connectedConfigId={vpn.connectedConfigId}
+          loading={vpn.loading}
+          error={vpn.error}
+          onSelect={handleSelectConfig}
+          onNewConfig={aiReady ? startNewConfigAiFlow : openNewConfig}
+          onRetry={vpn.reload}
+          onDelete={vpn.deleteConfig}
+          onRename={vpn.renameConfig}
+          onOpenSettings={() => openSettings()}
+          compact={shell.mode === "drawer"}
+        />
+      )}
       {panes.canDragRail ? (
         <PaneHandle
           side="rail"
@@ -1468,6 +1567,30 @@ export default function App() {
           {...panes.railHandlers}
         />
       ) : null}
+      {destination === "servers" ? (
+        <MyServersPage
+          bridge={bridge}
+          account={myServers.account}
+          catalog={myServers.catalog}
+          servers={myServers.servers}
+          loading={myServers.loading}
+          error={myServers.error}
+          selected={myServers.selected}
+          view={myServers.view}
+          confirmLeave={myServers.confirmLeave}
+          loginOpen={myServers.loginOpen}
+          onOpenLogin={myServers.openLogin}
+          onCloseLogin={myServers.closeLogin}
+          onSignedIn={myServers.signedIn}
+          onNew={myServers.openWizard}
+          onUseServer={handleUseServer}
+          onChanged={() => void myServers.refresh()}
+          onLeaveWizard={myServers.leaveWizard}
+          onKeepWizard={myServers.keepWizard}
+          onOrdered={myServers.ordered}
+          onResetToRoot={myServers.resetToRoot}
+        />
+      ) : (
       <Console
         config={vpn.activeConfig}
         connectedConfigId={vpn.connectedConfigId}
@@ -1501,8 +1624,8 @@ export default function App() {
         zeroConfigSettled={zeroConfigSettled}
         hasConfigs={vpn.configs.length > 0}
         onAskAi={handleAskAiFromConsole}
-        onNewConfig={aiReady ? startNewConfigAiFlow : () => setNewConfigOpen(true)}
-        onUseSeedNodes={() => setNewConfigOpen(true)}
+        onNewConfig={aiReady ? startNewConfigAiFlow : openNewConfig}
+        onUseSeedNodes={openNewConfig}
         onImportNodes={() => openSettings("network")}
         seedUpdate={Boolean(defaultProfile?.newVersionAvailable)}
         proxyPort={proxyPort}
@@ -1517,6 +1640,7 @@ export default function App() {
         helperPreparing={vpn.preparingHelper}
         rateSamples={rateSamples}
       />
+      )}
       {panelOpen && shell.docked ? (
         <div className="assistant-slot">{aiPanel}</div>
       ) : panelOpen ? (
@@ -1562,10 +1686,19 @@ export default function App() {
           region={systemRegion}
           defaultNodeCount={defaultProfile?.nodeCount ?? null}
           connected={connectedNow}
-          onClose={() => setNewConfigOpen(false)}
+          initialConnectMode={serverEntry?.connectMode}
+          ownedNodes={ownedNodes}
+          onChooseServers={handleChooseServers}
+          onClose={() => {
+            setNewConfigOpen(false);
+            setOwnedNodes(null);
+            setServerEntry(null);
+          }}
           onCreate={handleCreateConfig}
           onCreated={(connect) => {
             setNewConfigOpen(false);
+            setOwnedNodes(null);
+            setServerEntry(null);
             if (connect) connectAfterCreateRef.current = true;
           }}
         />
@@ -1597,7 +1730,7 @@ export default function App() {
           // 先关设置页，再走 AI 流程：后者会打开右栏，不能被设置页盖住。
           setSettingsOpen(false);
           if (aiReady) startNewConfigAiFlow();
-          else setNewConfigOpen(true);
+          else openNewConfig();
         }}
         onClose={closeSettings}
         onNotice={setAppNotice}

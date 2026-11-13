@@ -19,6 +19,13 @@ import type {
   LlmProvider,
   LlmProviderInput,
   LlmProviderTestResult,
+  MyServer,
+  MyServerCatalog,
+  MyServerCreateInput,
+  MyServerCredentials,
+  MyServerOrder,
+  MyServerRebuildResult,
+  MyServerSshCredentials,
   NetRepairAction,
   NetRepairResult,
   NetworkForceResetResult,
@@ -63,6 +70,14 @@ import type {
 } from "./protocol";
 
 const EVENT_NAMES = [...AI_EVENT_NAMES, ...APP_EVENT_NAMES];
+
+/** 契约已定、Host 还没接线：按未实现报错，不改调用方的接口形状。 */
+function notWired<T>(what: string): Promise<T> {
+  return Promise.reject({
+    code: "INTERNAL",
+    message: `${what}还没接入这个版本。`,
+  });
+}
 
 interface RawPendingQuestion {  question_id?: string;
   session_id?: string;
@@ -796,6 +811,51 @@ export class TauriAgentBridge implements AgentBridge {
 
   async proxyRecoveryReport(): Promise<ProxyRecoveryReportData | null> {
     return call<ProxyRecoveryReportData | null>("proxy_recovery_report");
+  }
+
+  async myServerCatalog(): Promise<MyServerCatalog> {
+    return notWired("我的服务器");
+  }
+
+  async myServerList(): Promise<{ servers: MyServer[] }> {
+    return notWired("我的服务器");
+  }
+
+  async myServerGet(_serverId: string): Promise<MyServer> {
+    return notWired("我的服务器");
+  }
+
+  async myServerCreate(_input: MyServerCreateInput): Promise<MyServerOrder> {
+    return notWired("我的服务器");
+  }
+
+  async myServerCheckout(_orderId: string): Promise<MyServerOrder> {
+    return notWired("我的服务器");
+  }
+
+  async myServerCancelOrder(_orderId: string): Promise<MyServerOrder> {
+    return notWired("我的服务器");
+  }
+
+  async myServerRebuild(
+    _serverId: string,
+    _confirm: boolean,
+  ): Promise<MyServerRebuildResult> {
+    return notWired("我的服务器");
+  }
+
+  async myServerDestroy(_serverId: string, _confirm: boolean): Promise<MyServer> {
+    return notWired("我的服务器");
+  }
+
+  async myServerCredentials(_serverId: string): Promise<MyServerCredentials> {
+    return notWired("我的服务器");
+  }
+
+  async myServerSshCredentials(
+    _serverId: string,
+  ): Promise<MyServerSshCredentials> {
+    return notWired("我的服务器");
   }
 
   async netRepair(action: NetRepairAction): Promise<NetRepairResult> {
