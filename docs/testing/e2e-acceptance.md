@@ -3885,6 +3885,128 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, is_active from configs;"
   - [ ] 失败（卡死、无法断开、恢复后不可用）
 - **失败时收集**：断网前/断网中/恢复后三张截图、时间点、日志尾、路由输出。如果界面在断网期间一直显示「已连接」，把它单独写在总结的「体验问题」里。
 
+### E7-05 崩溃后代理自动还原（看门狗）
+
+- **目的**：验证 App 被强杀后 Wi-Fi 系统代理自动还原，不需要重新打开 App。
+- **前置**：M2；Proxy 模式连接成功（`networksetup -getwebproxy Wi-Fi` 显示 `127.0.0.1:<port>`）；预先记录连接前的原始值。
+- **步骤（人做）**
+  1. 连接 VPN，确认 `networksetup -getwebproxy Wi-Fi` 的 Server/Port 是 `127.0.0.1:<port>`、Enabled: Yes。
+  2. **不要点退出**，直接 `pkill -9 -f "Veyl.app/Contents/MacOS/veyl"`（或 `killall -9 veyl`）。
+  3. 立刻开始每 1 秒看一次 `networksetup -getwebproxy Wi-Fi`，记下还原所需秒数（上限 5 秒）。
+- **AI 取证**
+  ```bash
+  networksetup -getwebproxy Wi-Fi
+  networksetup -getsecurewebproxy Wi-Fi
+  ls -l ~/.veyl/proxy-lease.json ~/.veyl/proxy-recovery-report.json 2>&1
+  cat ~/.veyl/proxy-recovery-report.json 2>/dev/null
+  tail -20 ~/.veyl/logs/proxy-guard.log
+  launchctl print gui/$(id -u)/com.veyl.proxyguard | head -20
+  ```
+- **可观察预期**
+  - 5 秒内 `Enabled` 回到连接前的值；连接前没开代理时 `Server` 被清空、`Enabled: No`。
+  - `proxy-lease.json` 已删除；`proxy-recovery-report.json` 中 `status = "restored"`、`source = "watchdog"`。
+  - **App 不需要重新打开**；期间浏览器上网恢复。
+  - 看门狗进程已退出（`pgrep -f veyl-proxy-guard` 为空）。
+- **判定**
+  - [ ] 通过（≤5 秒还原、报告正确、无需重启 App）
+  - [ ] 失败（10 秒后仍是 `127.0.0.1` / 报告缺失 / 只有重开 App 才恢复）
+- **失败时收集**：还原前后 `-getwebproxy` 输出、报告 JSON、看门狗日志、`launchctl print` 输出。
+
+### E7-06 用户自己改过代理时不得覆盖
+
+- **目的**：验证自动还原只撤「我们写的那个端点」，不回滚用户自己的设置。
+- **前置**：同 E7-05。
+- **步骤（人做）**
+  1. 连接 VPN（系统代理指向 `127.0.0.1:<port>`）。
+  2. 在系统设置里把 Wi-Fi 代理改成 `192.0.2.10:3128`（测试值，不要填真实可用的代理），确认已生效。
+  3. `pkill -9 -f "Veyl.app/Contents/MacOS/veyl"`，等 10 秒。
+- **AI 取证**
+  ```bash
+  networksetup -getwebproxy Wi-Fi
+  cat ~/.veyl/proxy-recovery-report.json 2>/dev/null
+  # 重新打开 App 后再看一次
+  networksetup -getwebproxy Wi-Fi
+  ```
+- **可观察预期**
+  - 崩溃后系统代理**仍是** `192.0.2.10:3128`，没有被改回连接前的值。
+  - 报告 `status = "left_alone"`，`current` 是该用户值。
+  - 重新打开 App：不弹恢复 toast；`proxy_backup` 表已被清空（`sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from proxy_backup;"` 返回 0）。
+  - 之后再连接、断开一次，系统代理回到 `192.0.2.10:3128` 或用户当下的最新值，**不会**回到崩溃前那份旧备份。
+- **判定**
+  - [ ] 通过（不覆盖、报告 left_alone、备份被清）
+  - [ ] 失败（用户值被改回 / 旧备份在下一次断开时复活）
+- **失败时收集**：两次 `-getwebproxy`、报告 JSON、`proxy_backup` 表内容、日志。
+
+### E7-07 正常退出不留租约、不打扰用户
+
+- **目的**：验证正常路径没有多余动作。
+- **前置**：同 E7-05。
+- **步骤（人做）**
+  1. 连接 VPN，然后从菜单正常退出。
+  2. 查租约、报告、看门狗进程与界面提示。
+- **AI 取证**
+  ```bash
+  ls -l ~/.veyl/proxy-lease.json ~/.veyl/proxy-recovery-report.json 2>&1
+  networksetup -getwebproxy Wi-Fi
+  pgrep -fl veyl-proxy-guard
+  ```
+- **可观察预期**
+  - `proxy-lease.json` 不存在；`proxy-recovery-report.json` 不存在（看门狗没有动作）。
+  - 系统代理已还原；看门狗进程不存在或已退出。
+  - **没有**「网络设置已恢复」toast（那是给异常退出的）。
+- **判定**
+  - [ ] 通过
+  - [ ] 失败（残留租约 / 多余提示 / 看门狗常驻不退）
+- **失败时收集**：文件列表、`-getwebproxy`、看门狗日志。
+
+### E7-08 看门狗没跑时由启动恢复兜底
+
+- **目的**：验证「后台项被禁用 / plist 丢了」这类降级路径。
+- **前置**：同 E7-05。**必须用 `bash scripts/dev/tun-dev.sh` 安装并启动 App**；`npm run tauri dev` 不构建也不安装 `veyl-proxy-guard`，这一组用例跑不了。
+- **步骤（人做）**
+  1. 连接 VPN（先连接，确保 `enable()` 已把看门狗装上）。
+  2. `launchctl bootout gui/$(id -u)/com.veyl.proxyguard` 卸载看门狗（模拟用户关掉后台项）。
+  3. `pkill -9` App。
+  4. 等 10 秒，确认系统代理**仍是** `127.0.0.1:<port>`（这一步是预期内的：没有看门狗）。
+  5. 重新打开 App，等首屏。
+- **AI 取证**
+  ```bash
+  networksetup -getwebproxy Wi-Fi
+  cat ~/.veyl/proxy-recovery-report.json 2>/dev/null
+  grep -E '恢复上次异常退出|proxy' "$APP_LOG" | tail -10
+  ```
+- **可观察预期**
+  - 第 4 步仍断网（如实记录，这是降级路径的代价）。
+  - 重新打开 App 后 5 秒内代理还原，并出现一次性 toast「上次没退出干净，网络设置已恢复。」。
+  - **报告文件不存在**：启动恢复只在内存里把结果交给首屏命令（`proxy_recovery_report`），不写 `proxy-recovery-report.json`（避免正常退出后残留过期提示）；`proxy_backup` 表已清。
+  - 下一次连接时 `launchctl bootstrap` 会把看门狗重新装上。
+- **判定**
+  - [ ] 通过（App 启动后自动还原 + 提示）
+  - [ ] 失败（启动后仍断网 / 无提示 / 需手动重置）
+- **失败时收集**：启动前后 `-getwebproxy`、toast 截图、`launchctl print`、日志。
+
+### E7-09 `SIGTERM` 走进程内还原
+
+- **目的**：验证被 `kill`（不是 `-9`）时 App 自己就能撤代理。
+- **前置**：同 E7-05。
+- **步骤（人做）**
+  1. 连接 VPN，记录 `pgrep -f "Veyl.app/Contents/MacOS/veyl"` 的 pid。
+  2. `kill -TERM <pid>`（不是 `-9`）。
+  3. 3 秒内看系统代理与进程退出情况。
+- **AI 取证**
+  ```bash
+  networksetup -getwebproxy Wi-Fi
+  ls -l ~/.veyl/proxy-lease.json 2>&1
+  tail -10 ~/.veyl/logs/proxy-guard.log
+  ```
+- **可观察预期**
+  - 3 秒内代理还原、租约删除；看门狗没有产生 `restored` 报告（报告不存在或 `source = "signal"`，取决于实现取哪条路）。
+  - App 退出码 0，界面不再出现。
+- **判定**
+  - [ ] 通过（自行还原、无残留）
+  - [ ] 失败（要等看门狗 / 靠下次启动才恢复）
+- **失败时收集**：退出前后 `-getwebproxy`、租约文件、日志。
+
 ---
 
 ## 8. 设置（改版后）

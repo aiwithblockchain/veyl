@@ -259,6 +259,14 @@ mkdir -p "$APP_SRC/Contents/MacOS"
 cp "$HELPER_SRC" "$APP_SRC/Contents/MacOS/veyl-helper"
 chmod 755 "$APP_SRC/Contents/MacOS/veyl-helper"
 
+# 代理看门狗：App 异常退出后还原系统代理。与 helper 一样必须进 Contents/MacOS/
+# 并签名（sign_app 会签名 Contents 下所有 Mach-O），否则 LaunchAgent 起不来。
+(cd "$ROOT/src-tauri" && cargo build --bin veyl-proxy-guard)
+GUARD_SRC="$ROOT/src-tauri/target/debug/veyl-proxy-guard"
+[ -f "$GUARD_SRC" ] || die "找不到代理看门狗：$GUARD_SRC"
+cp "$GUARD_SRC" "$APP_SRC/Contents/MacOS/veyl-proxy-guard"
+chmod 755 "$APP_SRC/Contents/MacOS/veyl-proxy-guard"
+
 LAUNCHD_SRC="$ROOT/src-tauri/resources/launchd/com.veyl.helper.plist"
 [ -f "$LAUNCHD_SRC" ] || die "缺少 $LAUNCHD_SRC"
 mkdir -p "$APP_SRC/Contents/Library/LaunchDaemons"

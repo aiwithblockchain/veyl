@@ -206,6 +206,18 @@ else
   die "缺少 universal 的 veyl-helper，无法打包 TUN 特权助手"
 fi
 
+# 代理看门狗：和 helper 一样由脚本装进 Contents/MacOS/，随后由 sign_app 的
+# 嵌套文件签名统一签名。漏了它，崩溃后的自动还原在真机上不可用。
+GUARD_SRC="$ROOT/src-tauri/target/universal-apple-darwin/release/veyl-proxy-guard"
+if [ -f "$GUARD_SRC" ]; then
+  mkdir -p "$APP_PATH/Contents/MacOS"
+  cp "$GUARD_SRC" "$APP_PATH/Contents/MacOS/veyl-proxy-guard"
+  chmod 755 "$APP_PATH/Contents/MacOS/veyl-proxy-guard"
+  printf '  已安装代理看门狗：Contents/MacOS/veyl-proxy-guard\n'
+else
+  die "缺少 universal 的 veyl-proxy-guard，无法打包代理看门狗"
+fi
+
 # SMAppService 只认 Contents/Library/LaunchDaemons/ 下的 plist。
 LAUNCHD_SRC="$ROOT/src-tauri/resources/launchd/com.veyl.helper.plist"
 [ -f "$LAUNCHD_SRC" ] || die "缺少 $LAUNCHD_SRC"

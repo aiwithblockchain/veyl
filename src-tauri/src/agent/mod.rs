@@ -28,6 +28,8 @@ pub struct AppState {
     credentials: parking_lot::RwLock<Option<LlmCredentials>>,
     /// 凭据每变一次 +1；已经建好的会话拿着旧凭据，下次取用时按代数重建。
     credential_generation: AtomicU64,
+    /// 本次启动读到的系统代理自动恢复结果；`commands::proxy_recovery_report` 只读一次。
+    proxy_recovery: parking_lot::Mutex<Option<crate::proxy::ProxyRecoveryReport>>,
     working_dir: PathBuf,
 }
 
@@ -72,8 +74,18 @@ impl AppState {
             active_requests: parking_lot::Mutex::new(HashMap::new()),
             request_cancels: parking_lot::Mutex::new(HashMap::new()),
             credentials: parking_lot::RwLock::new(credentials),
+            proxy_recovery: parking_lot::Mutex::new(None),
             working_dir: working_dir(),
         }
+    }
+
+    /// Host 启动时读到的恢复结果；同一进程内重复调用返回同一个值。
+    pub fn set_proxy_recovery(&self, report: Option<crate::proxy::ProxyRecoveryReport>) {
+        *self.proxy_recovery.lock() = report;
+    }
+
+    pub fn proxy_recovery(&self) -> Option<crate::proxy::ProxyRecoveryReport> {
+        self.proxy_recovery.lock().clone()
     }
 
     /// 保存或清除 DeepSeek Key 后更新内存凭据（兼容旧入口）。

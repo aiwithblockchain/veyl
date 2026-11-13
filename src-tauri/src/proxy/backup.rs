@@ -20,6 +20,15 @@ impl Endpoint {
             port,
         }
     }
+
+    /// `server:port` → Endpoint。只用于把租约里的端点还原成备份结构。
+    pub fn parse(value: &str) -> Option<Self> {
+        let (server, port) = value.rsplit_once(':')?;
+        Some(Self {
+            server: server.to_string(),
+            port: port.parse().ok()?,
+        })
+    }
 }
 
 impl std::fmt::Display for Endpoint {

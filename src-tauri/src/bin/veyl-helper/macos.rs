@@ -10,6 +10,7 @@
 //! 避免把整个 Tauri 依赖图拖进一个 root 进程。
 
 #[path = "../../veyl_paths.rs"]
+#[allow(dead_code)]
 mod veyl_paths;
 #[path = "../../tun/protocol.rs"]
 mod protocol;

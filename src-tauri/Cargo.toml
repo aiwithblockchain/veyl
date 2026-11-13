@@ -33,6 +33,13 @@ required-features = ["runtime-selftest"]
 name = "veyl-helper"
 path = "src/bin/veyl-helper/main.rs"
 
+# 代理看门狗：App 异常退出后还原系统代理（用户级 LaunchAgent 拉起）。
+# 刻意不依赖 Tauri：源码用 `#[path]` 与 App 共用 proxy/{lease,recovery,guard,macos_wire}.rs，
+# 打包脚本按名字把它装进 Contents/MacOS/ 并与主程序一起签名。
+[[bin]]
+name = "veyl-proxy-guard"
+path = "src/bin/veyl-proxy-guard/main.rs"
+
 # Windows 特权服务（LocalSystem + 命名管道）。macOS 上编译成空壳，
 # 见 src/bin/veyl-service/main.rs 的门控。显式声明是为了打包脚本能按名字找到它。
 [[bin]]

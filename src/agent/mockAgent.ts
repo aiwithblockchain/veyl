@@ -18,6 +18,8 @@ import type {
   NodeSwitchResult,
   ProxyPortSaveResult,
   ProxyPortSettings,
+  ProxyRecovery,
+  ProxyRecoveryReportData,
   LlmProvider,
   LlmProviderInput,
   LlmProviderTestResult,
@@ -476,6 +478,29 @@ export class MockAgentBridge implements AgentBridge {
           : mockFlag("veyl.mock.proxyPort.occupied") === "1"
             ? "occupied"
             : "free",
+    };
+  }
+
+  /** 演示异常退出后的恢复结果：localStorage 里放状态名即可造四种状态。 */
+  async proxyRecoveryReport(): Promise<ProxyRecoveryReportData | null> {
+    const flag = mockFlag("veyl.mock.proxyRecovery");
+    const statuses: ProxyRecovery["status"][] = [
+      "restored",
+      "already_restored",
+      "left_alone",
+      "failed",
+    ];
+    if (!flag || !statuses.includes(flag as ProxyRecovery["status"])) return null;
+    const status = flag as ProxyRecovery["status"];
+    return {
+      recovery: {
+        status,
+        endpoint: "127.0.0.1:7890",
+        current: status === "failed" ? "127.0.0.1:7890" : null,
+        error: status === "failed" ? "系统代理设置被其他程序改掉了" : null,
+        at: Date.now(),
+        source: "watchdog",
+      },
     };
   }
 

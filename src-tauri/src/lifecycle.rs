@@ -4,7 +4,7 @@
 //! 退出流程严格按序：撤系统代理并校验 → 停运行时 → 删明文配置 → 退出。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,94 @@ const MAIN_WINDOW: &str = "main";
 
 static QUITTING: AtomicBool = AtomicBool::new(false);
 static EXIT_PROMPT_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// 信号处理器的 self-pipe 写端；`-1` = 未安装。
+#[cfg(unix)]
+static SIGNAL_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// 信号处理器里唯一允许做的事：往 self-pipe 写一个字节（async-signal-safe）。
+#[cfg(unix)]
+extern "C" fn forward_signal(_signal: libc::c_int) {
+    let fd = SIGNAL_WRITE_FD.load(Ordering::Relaxed);
+    if fd >= 0 {
+        let byte = 1u8;
+        unsafe {
+            libc::write(fd, &byte as *const u8 as *const libc::c_void, 1);
+        }
+    }
+}
+
+/// 安装 SIGTERM / SIGINT / SIGHUP 的进程内兜底。
+///
+/// 处理器只写 self-pipe；独立的清理线程按启动恢复同一套判定还原一次，
+/// 硬超时 2 秒后 `_exit(0)`。**不在 panic hook 里做还原**（见设计稿 §5）。
+pub fn install_signal_cleanup(proxy: Arc<ProxyController>) {
+    #[cfg(unix)]
+    {
+        let mut fds = [0i32; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            log::error!(
+                "信号清理：创建 self-pipe 失败：{}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+        unsafe {
+            let flags = libc::fcntl(write_fd, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(write_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+        SIGNAL_WRITE_FD.store(write_fd, Ordering::SeqCst);
+
+        let handler = forward_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        unsafe {
+            libc::signal(libc::SIGTERM, handler);
+            libc::signal(libc::SIGINT, handler);
+            libc::signal(libc::SIGHUP, handler);
+        }
+
+        std::thread::spawn(move || {
+            let mut byte = 0u8;
+            loop {
+                let read = unsafe {
+                    libc::read(read_fd, &mut byte as *mut u8 as *mut libc::c_void, 1)
+                };
+                if read < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    log::error!("信号清理：读 self-pipe 失败：{error}");
+                    return;
+                }
+                if read != 1 {
+                    return;
+                }
+                break;
+            }
+
+            // 硬超时：清理线程卡在 networksetup 或数据库锁上时也必须退出。
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(2));
+                log::error!("信号清理超时（2 秒），强制退出");
+                unsafe { libc::_exit(0) };
+            });
+
+            match proxy.recover_on_signal() {
+                Ok(Some(report)) => log::warn!("信号清理已完成：{:?}", report.status),
+                Ok(None) => log::info!("信号清理：没有需要恢复的代理"),
+                Err(error) => log::error!("信号清理失败（交给下次启动）：{error}"),
+            }
+            unsafe { libc::_exit(0) };
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = proxy;
+    }
+}
 
 #[derive(Clone)]
 pub struct Parts {

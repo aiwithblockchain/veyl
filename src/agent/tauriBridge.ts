@@ -33,6 +33,7 @@ import type {
   ReportActionData,
   ProxyPortSaveResult,
   ProxyPortSettings,
+  ProxyRecoveryReportData,
   RenamedSession,
   RuntimeStartResult,
   StoredChatMessage,
@@ -791,6 +792,10 @@ export class TauriAgentBridge implements AgentBridge {
       }),
       port,
     );
+  }
+
+  async proxyRecoveryReport(): Promise<ProxyRecoveryReportData | null> {
+    return call<ProxyRecoveryReportData | null>("proxy_recovery_report");
   }
 
   async netRepair(action: NetRepairAction): Promise<NetRepairResult> {

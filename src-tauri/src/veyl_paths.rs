@@ -18,6 +18,11 @@ pub fn helper_logs_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("helper-logs")
 }
 
+/// `~/.veyl/logs`：用户级后台组件（代理看门狗）的 stdout/stderr。
+pub fn proxy_logs_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("logs")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -197,6 +197,15 @@ pub async fn proxy_port_set(port: Value) -> Result<Value, Value> {
     Ok(json!({ "port": port, "availability": availability }))
 }
 
+/// 本次启动读到的系统代理自动恢复结果（契约 §7.13，仅 UI，只读）。
+///
+/// 恢复发生在 Host `setup` 阶段、webview 注册监听之前，所以用一次性读取而不是事件。
+/// 同一进程内重复调用返回同一个值，不清除、不需要 ack。
+#[tauri::command]
+pub async fn proxy_recovery_report(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    Ok(json!({ "recovery": state.proxy_recovery() }))
+}
+
 /// 服务层错误已经是结构化的 `ServiceError`；还原成契约里的 AivpnError 形状。
 fn error_value(error: anyhow::Error) -> Value {
     if let Some(service) = error.downcast_ref::<crate::tools::services::ServiceError>() {

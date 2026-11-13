@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.20.0`
+> 契约版本：`2.21.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -199,6 +199,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 70 | `issue_report_reveal` | `{ reportId }` | `ReportActionData` | **2.17.0 新增（仅 UI）；只认 Host 登记过的报告目录** |
 | 71 | `issue_report_mail` | `{ reportId }` | `ReportActionData`（含 `body`，仅 `copy_only` 时非 null） | **2.17.0 新增（仅 UI）；调起系统邮件客户端，不发送** |
 | 72 | `issue_report_preference` | `{ includeDomains? }` | `{ includeDomains }` | **2.17.0 新增（仅 UI）；省略参数为读取；脱敏开关的唯一写入路径** |
+| 73 | `proxy_recovery_report` | `{}` | `ProxyRecoveryReportData`（`{ recovery }`，无恢复时为 `null`） | **2.21.0 新增（仅 UI）；异常退出后系统代理自动还原的结果，只读** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -1335,6 +1336,32 @@ type ReportActionData = {
 - 不发事件（值由 UI 自己持有并回显）；不改任何网络设置；不涉及运行时。
 - 错误：`INTERNAL`（存储写入失败）。不校验多余字段——顶层的未知字段按 §1 统一规则拒绝。
 
+### 7.13 `proxy_recovery_report {}` → `ProxyRecoveryReportData`（仅 UI，2.21.0）
+
+App 异常退出后系统代理被自动还原的结果，供界面在首屏提示一次。设计见 `docs/design/proxy-crash-cleanup.md`。
+
+```ts
+type ProxyRecoveryReportData = {
+  recovery: {
+    status: "restored" | "already_restored" | "left_alone" | "failed";
+    endpoint: string;              // 我们写进去的端点，`server:port`
+    current: string | null;        // 还原后读到的系统代理；用户没有代理时为 null
+    error: string | null;          // 仅 failed 非 null，已脱敏，可直接展示
+    at: number;                    // epoch ms
+    source: "watchdog" | "startup" | "signal";
+  } | null;
+};
+```
+
+- **只读**：返回 Host 本次启动读到的恢复结果；`null` = 这次启动没有任何恢复动作。同一进程内重复调用返回同一个值，不清除、不需要 ack。
+- `restored` / `already_restored` / `left_alone` / `failed` 的语义与界面文案见设计稿 §6：
+  - `restored` → 一次性 toast；`failed` → 错误 toast + 指向「强制重置网络」；
+  - `already_restored` / `left_alone` → 界面静默，不提示。
+- `failed` 时 `current` 是**失败那刻重读**的系统代理；连读取本身都失败时（例如 `networksetup` 报错）为 `null`。
+- `left_alone` 表示「当前系统代理是用户自己设的」，Host **已经作废了旧备份**，不会再在下一次断开时覆盖它。
+- 不发事件：恢复发生在 webview 注册监听之前，事件必丢（设计稿 §8.2）。
+- 不注册为 AI 工具；不参与任何网络写入。
+
 ---
 
 ## 8. 种子（官方默认配置，C 组）
@@ -1910,8 +1937,9 @@ type RulesStatus = {
 | `core_upgrade` | `CoreUpgrade`（**唯一有确认点的工具**，见 `tools.md` §4.45） | **必须共用**，且必须用户逐字确认 |
 | `tun_helper_info` / `tun_helper_restart` | **无**（UI 专用，见 §7.8.1–§7.8.2） | — |
 | `proxy_port_get` / `proxy_port_set` | **无**（UI 专用，见 §7.11；端口是用户自己的设置） | — |
+| `proxy_recovery_report` | **无**（UI 专用，见 §7.13；异常退出的恢复结果只用于首屏提示） | — |
 
-> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
+> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`proxy_recovery_report`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
@@ -1981,7 +2009,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.20.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ **切换配置只改 active、连接前自动停旧连接（2.20.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.11.0 / `events.md` 2.12.0 矩阵同步 |
+| `contracts/commands.md` | **2.21.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.11.0 / `events.md` 2.12.0 矩阵同步 |
 | `contracts/events.md` | **2.12.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
 | `contracts/tools.md` | **3.11.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** |
@@ -1999,6 +2027,14 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.21.0（2026-11-13，异常退出后的代理恢复报告）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.21.0`；新增 §7.13 `proxy_recovery_report`（仅 UI，只读）：返回本次启动读到的系统代理自动还原结果（`restored` / `already_restored` / `left_alone` / `failed`），无恢复动作时为 `null` | 新增命令 | 用户：崩溃后 Wi-Fi 代理没被清掉，断网到下次启动；界面需要知道「已经修好了」 |
+| 2 | 不新增事件：恢复发生在 webview 注册监听之前，事件必丢（见 `design/proxy-crash-cleanup.md` §8.2） | 明确不做 | 同上 |
+| 3 | §15.5 矩阵同步本文件 2.21.0；`events.md` / `tools.md` / `runtime.md` / `data-model.md` 不变 | 元数据 | 同批 |
 
 ### 2.20.0（2026-11-13，切换配置不再断开）
 

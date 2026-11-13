@@ -440,6 +440,23 @@ function hostOf(url: string): string | null {
   }
 }
 
+/** 异常退出后系统代理被自动还原的结果（契约 commands.md §7.13）。 */
+export interface ProxyRecovery {
+  status: "restored" | "already_restored" | "left_alone" | "failed";
+  /** 我们写进去的端点，`server:port`。 */
+  endpoint: string;
+  /** 还原后读到的系统代理；用户没有代理时为 null。 */
+  current: string | null;
+  /** 仅 failed 非 null，已脱敏，可直接展示。 */
+  error: string | null;
+  at: number;
+  source: "watchdog" | "startup" | "signal";
+}
+
+export interface ProxyRecoveryReportData {
+  recovery: ProxyRecovery | null;
+}
+
 /** `runtime_start` 的返回：完整快照 + 幂等命中标记。 */
 export interface RuntimeStartResult extends RuntimeSnapshot {
   /** 同一套已连接 / 正在启动：没有重新启动，`state` 可能是 `starting`。 */
@@ -512,6 +529,8 @@ export interface AgentBridge {
   proxyPortGet(): Promise<ProxyPortSettings>;
   /** 保存「本地代理端口」；端口被占用也允许保存，只在行内提示。 */
   proxyPortSet(port: number): Promise<ProxyPortSaveResult>;
+  /** 异常退出后的系统代理恢复结果；仅用于首屏提示一次，没有恢复动作时为 null。 */
+  proxyRecoveryReport(): Promise<ProxyRecoveryReportData | null>;
   /** 恢复网络：撤代理 → 停运行时 → 清明文配置（不依赖 AI）。 */
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
   /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */

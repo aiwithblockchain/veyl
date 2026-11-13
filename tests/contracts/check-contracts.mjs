@@ -713,6 +713,7 @@ const UI_ONLY_COMMANDS = [
   "issue_report_reveal",
   "issue_report_mail",
   "issue_report_preference",
+  "proxy_recovery_report",
 ];
 
 const pascalCase = (s) => s.replace(/(^|_)([a-z0-9])/g, (_, __, c) => c.toUpperCase());

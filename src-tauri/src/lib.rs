@@ -28,6 +28,12 @@ pub mod tun;
 #[cfg(test)]
 mod test_support;
 
+// 看门狗二进制用 `#[path]` 引入 `proxy/{lease,recovery,guard}.rs`，这些模块里
+// 写的是 `crate::lease` / `crate::recovery`（bin 里它们就在 crate 根）。
+// 这里在 lib 根上也给同样的路径，两边共用同一份源码而不是各写一份。
+#[cfg(target_os = "macos")]
+pub use proxy::{lease, macos_wire, recovery};
+
 use std::sync::Arc;
 
 use tauri::Manager;
@@ -62,6 +68,15 @@ pub fn run() {
     }
     // 日志最先初始化：后面每一步失败都要能落盘。
     let log_file = crate::logging::init(&data_dir);
+    // panic 只记日志、不还原：hook 运行时可能握着配置库/数据库锁，
+    // 在里面 exec networksetup 的风险大于收益；进程随后死亡，看门狗接管。
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            log::error!("panic: {info}");
+            default_hook(info);
+        }));
+    }
     // 本地加密凭据文件；不访问系统钥匙串。
     crate::secrets::install(&data_dir);
 
@@ -76,9 +91,16 @@ pub fn run() {
     crate::store::install_global(Arc::clone(&store));
 
     let manager = RuntimeManager::new(RuntimeConfig::new(&data_dir));
-    let proxy = Arc::new(ProxyController::new(Box::new(SqliteBackupStore::new(
-        Arc::clone(&store),
-    ))));
+    let proxy = {
+        let controller =
+            ProxyController::new(Box::new(SqliteBackupStore::new(Arc::clone(&store))));
+        // 租约与看门狗是 macOS 的实现（Windows 版另立项，见设计稿 §7.6）。
+        #[cfg(target_os = "macos")]
+        let controller = controller
+            .with_lease(data_dir.clone())
+            .with_guard();
+        Arc::new(controller)
+    };
 
     // 运行时进入 Failed（重启失败、重试耗尽）时撤销系统代理。
     // 运行时不直接持有代理：分层靠这个钩子，由宿主接线。disable 是幂等的。
@@ -112,6 +134,9 @@ pub fn run() {
         config_dir: config_dir.clone(),
         tun: wired.tun_session(),
     };
+    // SIGTERM / SIGINT / SIGHUP：信号处理器只写 self-pipe，清理线程按启动恢复
+    // 同一套判定还原一次，硬超时 2 秒后退出。覆盖 kill、开发期重启、部分更新器。
+    lifecycle::install_signal_cleanup(Arc::clone(&lifecycle_parts.proxy));
     let tray_parts = lifecycle_parts.clone();
     let exit_parts = lifecycle_parts.clone();
     let recovery_parts = lifecycle_parts.clone();
@@ -119,6 +144,7 @@ pub fn run() {
 
     let services: Arc<dyn VpnToolServices> = wired;
     let state = Arc::new(agent::AppState::new(services));
+    let setup_state = Arc::clone(&state);
     // 工具路径没有 AppState 句柄，热更新凭据靠这个弱引用。
     agent::install_app_state(&state);
 
@@ -190,16 +216,23 @@ pub fn run() {
 
             // 恢复动作只能放在这里：第二实例在插件 setup 就退出了，
             // 不会撤掉第一实例的代理、杀它的 sing-box、删它的配置。
-            match recovery_parts.proxy.recover_stale() {
-                Ok(crate::proxy::RecoveryOutcome::Recovered { endpoint }) => {
-                    log::warn!("已恢复上次异常退出遗留的系统代理（{endpoint}）");
+            // 顺序（设计 §4.1）：拿锁 → 读看门狗报告 → 租约优先 / 表兜底。
+            let recovery_report = match recovery_parts.proxy.recover_on_startup() {
+                Ok(report) => report,
+                Err(error) => {
+                    log::error!("系统代理恢复失败：{error}");
+                    None
                 }
-                Ok(crate::proxy::RecoveryOutcome::LeftAlone { current, .. }) => {
-                    log::warn!("检测到未清理的代理备份，但当前代理是 {current}，按用户设置保留");
-                }
-                Ok(crate::proxy::RecoveryOutcome::Nothing) => {}
-                Err(error) => log::error!("系统代理恢复失败：{error}"),
+            };
+            if let Some(report) = &recovery_report {
+                log::warn!(
+                    "系统代理恢复：{:?} · 端点 {} · 当前 {:?}",
+                    report.status,
+                    report.endpoint,
+                    report.current
+                );
             }
+            setup_state.set_proxy_recovery(recovery_report);
 
             match tauri::async_runtime::block_on(recovery_parts.manager.reclaim_stale()) {
                 Ok(Some(pid)) => log::warn!("启动时回收了遗留的 sing-box pid={pid}"),
@@ -311,6 +344,7 @@ pub fn run() {
                 agent::commands::runtime_status,
                 agent::commands::proxy_port_get,
                 agent::commands::proxy_port_set,
+                agent::commands::proxy_recovery_report,
                 agent::commands::runtime_start,
                 agent::commands::runtime_stop,
                 agent::commands::core_info,
@@ -375,6 +409,7 @@ pub fn run() {
                 agent::commands::runtime_status,
                 agent::commands::proxy_port_get,
                 agent::commands::proxy_port_set,
+                agent::commands::proxy_recovery_report,
                 agent::commands::runtime_start,
                 agent::commands::runtime_stop,
                 agent::commands::core_info,

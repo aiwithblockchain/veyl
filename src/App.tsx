@@ -301,6 +301,31 @@ export default function App() {
     };
   }, [bridge]);
 
+  // 异常退出后的系统代理恢复结果：每次启动只读一次，按结果提示一次。
+  useEffect(() => {
+    let alive = true;
+    bridge
+      .proxyRecoveryReport()
+      .then((report) => {
+        if (!alive || !report) return;
+        if (report.recovery?.status === "restored") {
+          setAppNotice({
+            level: "info",
+            text: "上次没退出干净，网络设置已恢复。",
+          });
+        } else if (report.recovery?.status === "failed") {
+          setAppNotice({
+            level: "error",
+            text: "网络设置没能自动恢复。打开「设置 → 遇到问题 → 强制重置网络」。",
+          });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [bridge]);
+
   // 地区只决定新建配置的默认流量范围；读不到按未知处理。
   useEffect(() => {
     let alive = true;

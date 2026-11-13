@@ -84,6 +84,14 @@ impl PlatformProxy for WindowsProxy {
             Ok(Some(server))
         }
     }
+
+    fn original_endpoint(&self, payload: &serde_json::Value) -> Option<String> {
+        let payload: WinPayload = serde_json::from_value(payload.clone()).ok()?;
+        if payload.proxy_enable != Some(1) {
+            return None;
+        }
+        payload.proxy_server.filter(|server| !server.is_empty())
+    }
 }
 
 fn open() -> RuntimeResult<RegKey> {
