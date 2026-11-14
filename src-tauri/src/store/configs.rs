@@ -23,6 +23,8 @@ pub const ROUTING_PROXY_SELECTED: &str = "proxy_selected";
 pub const SOURCE_SEED: &str = "seed";
 pub const SOURCE_URL: &str = "url";
 pub const SOURCE_MANUAL: &str = "manual";
+/// 「我的服务器」下发的节点（云服务器代购）；凭据仍只存 secrets.enc。
+pub const SOURCE_OWNED: &str = "owned";
 
 pub const MAX_NAME_CHARS: usize = 40;
 pub const MAX_NODE_NAME_CHARS: usize = 64;
@@ -612,7 +614,7 @@ fn validate_listen_port(connection_mode: &str, port: Option<u16>) -> StoreResult
 }
 
 fn validate_source(value: &str) -> StoreResult<()> {
-    if matches!(value, SOURCE_SEED | SOURCE_URL | SOURCE_MANUAL) {
+    if matches!(value, SOURCE_SEED | SOURCE_URL | SOURCE_MANUAL | SOURCE_OWNED) {
         Ok(())
     } else {
         Err(StoreError::Invalid(format!("不支持的节点来源：{value}")))

@@ -26,7 +26,7 @@ const SUMMARY: ConfigSummary = {
 
 const SERVER: MyServer = {
   server_id: "srv_1",
-  name: "东京 · Vultr",
+  name: "新加坡 1 · DigitalOcean",
   region: "nrt",
   plan: "vc2-1c-1gb",
   state: "healthy",
@@ -88,13 +88,25 @@ function prepare(servers: MyServer[] = []) {
     needsAdminRestart: false,
   } as never);
   vi.spyOn(bridge, "myServerCatalog").mockResolvedValue({
-    regions: [{ id: "nrt", name: "东京", continent: "asia" }],
+    regions: [{ id: "sgp1", name: "新加坡 1", continent: "asia" }],
     plans: [
       {
-        id: "vc2-1c-1gb",
-        label: "1 核 · 1 GB 内存 · 25 GB 硬盘",
-        hourly_usd: 0.007,
-        monthly_usd: 5,
+        id: "s-1vcpu-512mb-10gb",
+        label: "1 核 · 512 MB",
+        hourly_usd: 0.00595,
+        monthly_usd: 4,
+      },
+      {
+        id: "s-1vcpu-1gb",
+        label: "1 核 · 1 GB",
+        hourly_usd: 0.00893,
+        monthly_usd: 6,
+      },
+      {
+        id: "s-1vcpu-2gb",
+        label: "1 核 · 2 GB",
+        hourly_usd: 0.01786,
+        monthly_usd: 12,
       },
     ],
     currency: "USD",
@@ -113,7 +125,7 @@ afterEach(() => {
 });
 
 describe("destination 切换", () => {
-  it("默认落在客户端；点服务器换成服务器列表 + 详情，不发运行时命令", async () => {
+  it("默认落在客户端；三个 destination 互相切换都不发运行时命令", async () => {
     const { runtimeStart } = prepare();
     const { container } = render(<App />);
 
@@ -121,10 +133,13 @@ describe("destination 切换", () => {
     expect(container.querySelector(".rail")).not.toBeNull();
     expect(screen.getByRole("button", { name: "客户端" })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "服务器" }));
+    fireEvent.click(screen.getByRole("button", { name: "节点组" }));
+    expect(await screen.findByRole("complementary", { name: "节点组列表" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Veyl 免费节点" })).toBeTruthy();
+    expect(container.querySelector(".console")).toBeNull();
 
+    fireEvent.click(screen.getByRole("button", { name: "我的服务器" }));
     expect(await screen.findByRole("complementary", { name: "服务器列表" })).toBeTruthy();
-    expect(screen.getByText("我的服务器")).toBeTruthy();
     expect(container.querySelector(".console")).toBeNull();
     expect(runtimeStart).not.toHaveBeenCalled();
 
@@ -132,14 +147,42 @@ describe("destination 切换", () => {
     expect(await screen.findByRole("button", { name: "启动 VPN" })).toBeTruthy();
   });
 
+  it("有服务器安装中时，我的服务器图标带一个小圆点", async () => {
+    prepare([
+      SERVER,
+      {
+        ...SERVER,
+        server_id: "srv_2",
+        name: "纽约 1 · DigitalOcean",
+        state: "installing",
+        node_id: null,
+      },
+    ]);
+    const { container } = render(<App />);
+    await screen.findByRole("button", { name: "启动 VPN" });
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "我的服务器，1 台安装中" }),
+      ).toBeTruthy(),
+    );
+    expect(container.querySelector(".activity__dot")).not.toBeNull();
+  });
+
   it("记住上次停留的 destination；版本不符回客户端", async () => {
     prepare();
-    localStorage.setItem(DESTINATION_KEY, "servers");
+    localStorage.setItem(DESTINATION_KEY, "groups");
     localStorage.setItem(DESTINATION_VERSION_KEY, DESTINATION_VERSION);
 
     const first = render(<App />);
-    expect(await screen.findByRole("complementary", { name: "服务器列表" })).toBeTruthy();
+    expect(await screen.findByRole("complementary", { name: "节点组列表" })).toBeTruthy();
     first.unmount();
+
+    localStorage.setItem(DESTINATION_KEY, "servers");
+    localStorage.setItem(DESTINATION_VERSION_KEY, DESTINATION_VERSION);
+    const second = render(<App />);
+    expect(await screen.findByRole("complementary", { name: "服务器列表" })).toBeTruthy();
+    second.unmount();
 
     localStorage.setItem(DESTINATION_KEY, "servers");
     localStorage.setItem(DESTINATION_VERSION_KEY, "old-version");
@@ -147,7 +190,7 @@ describe("destination 切换", () => {
     expect(await screen.findByRole("button", { name: "启动 VPN" })).toBeTruthy();
   });
 
-  it("新建流程选其它节点 → 服务器；点客户端图标恢复接管方式；用来建配置回审视页", async () => {
+  it("新建流程选其它节点 → 我的服务器；点客户端图标恢复接管方式；用来建配置回审视页", async () => {
     prepare([SERVER]);
     const { container } = render(<App />);
     await screen.findByRole("button", { name: "启动 VPN" });
@@ -178,7 +221,7 @@ describe("destination 切换", () => {
     await waitFor(() =>
       expect(screen.getByRole("dialog", { name: "新建配置" })).toBeTruthy(),
     );
-    expect(screen.getByText("东京 · Vultr")).toBeTruthy();
+    expect(screen.getByText("新加坡 1 · DigitalOcean")).toBeTruthy();
 
     await act(async () => {});
   });

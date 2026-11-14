@@ -130,6 +130,11 @@ pub trait VpnToolServices: Send + Sync {
 
     async fn catalog_search(&self, query: CatalogQuery) -> anyhow::Result<Value>;
 
+    /// 只读：「我的服务器」列表。默认未接入；结果不含地址、端口、密码。
+    async fn my_servers(&self) -> anyhow::Result<Value> {
+        Err(anyhow::anyhow!("我的服务器未接入"))
+    }
+
     async fn config_list(&self) -> anyhow::Result<Value>;
     async fn config_detail(&self, config_id: &str) -> anyhow::Result<Value>;
     async fn config_create(&self, input: ConfigCreateInput) -> anyhow::Result<Value>;
@@ -3752,6 +3757,32 @@ impl VpnToolServices for WiredServices {
             "fetched_at": response.fetched_at,
             "stale": false,
         }))
+    }
+
+    async fn my_servers(&self) -> anyhow::Result<Value> {
+        let servers = crate::control_plane::servers::list()
+            .await
+            .map_err(|error| svc_error(&error.code, error.message.clone()))?;
+        // 只给用户能理解的字段：不返回 IP、端口、密码或节点 id。
+        let summaries: Vec<Value> = servers
+            .into_iter()
+            .map(|server| {
+                json!({
+                    "server_id": server.server_id,
+                    "name": server.name,
+                    "region": server.region,
+                    "state": server.state,
+                    "node_ready": server.node_id.is_some(),
+                    "monthly_usd": server.monthly_usd,
+                    "failure": server.failure.map(|failure| json!({
+                        "code": failure.code,
+                        "message": failure.message,
+                        "retryable": failure.retryable,
+                    })),
+                })
+            })
+            .collect();
+        Ok(json!({ "servers": summaries }))
     }
 
     async fn config_list(&self) -> anyhow::Result<Value> {

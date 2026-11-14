@@ -466,7 +466,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.11.0",
+                env["contract_version"], "3.12.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(

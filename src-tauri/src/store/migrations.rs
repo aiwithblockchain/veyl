@@ -31,11 +31,11 @@ fn has_current_schema(conn: &Connection) -> StoreResult<bool> {
         "SELECT COUNT(*) FROM sqlite_master
           WHERE type = 'table'
             AND name IN ('configs', 'nodes', 'config_nodes', 'issues', 'layout', 'seed_cache',
-                         'seed_node_exclusions', 'rules_state')",
+                         'seed_node_exclusions', 'rules_state', 'my_servers')",
         [],
         |row| row.get(0),
     )?;
-    Ok(count == 8)
+    Ok(count == 9)
 }
 
 /// 删除所有用户表。`sqlite_*` 内部表不在 sqlite_master 的普通表里。

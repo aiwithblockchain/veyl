@@ -6,7 +6,7 @@
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.12.0" as const;
+export const CONTRACT_VERSION = "2.13.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -34,6 +34,8 @@ export const AGENT_EVENTS = {
   coreUpgradeFinished: "core-upgrade-finished",
   nodeProbeProgress: "node-probe-progress",
   nodeProbeFinished: "node-probe-finished",
+  myServerChanged: "my-server-changed",
+  myServerOrderChanged: "my-server-order-changed",
 } as const;
 
 export type AgentEventName = (typeof AGENT_EVENTS)[keyof typeof AGENT_EVENTS];
@@ -68,6 +70,8 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.coreUpgradeFinished,
   AGENT_EVENTS.nodeProbeProgress,
   AGENT_EVENTS.nodeProbeFinished,
+  AGENT_EVENTS.myServerChanged,
+  AGENT_EVENTS.myServerOrderChanged,
 ] as const;
 
 /* ------------------------------------------------------------------ */
@@ -662,6 +666,37 @@ export interface RulesChangedPayload {
   emitted_at: string;
 }
 
+/** `my-server-changed`（events.md 2.13.0）：只带状态增量，详情仍以 `my_server_get` 为准。 */
+export interface MyServerChangedPayload {
+  contract_version: string;
+  server_id: string;
+  state: string;
+  failure?: {
+    stage: string;
+    code: string;
+    message: string;
+    retryable: boolean;
+  } | null;
+  node_id?: string | null;
+  at: string;
+  emitted_at: string;
+}
+
+/** `my-server-order-changed`（events.md 2.13.0）：下单 / 开通进度。 */
+export interface MyServerOrderChangedPayload {
+  contract_version: string;
+  order_id: string;
+  state: string;
+  failure?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  } | null;
+  server_id?: string | null;
+  at: string;
+  emitted_at: string;
+}
+
 /* ------------------------------------------------------------------ */
 /* 事件联合类型                                                        */
 /* ------------------------------------------------------------------ */
@@ -692,6 +727,8 @@ export interface AgentEventMap {
   [AGENT_EVENTS.coreUpgradeFinished]: CoreUpgradeFinishedPayload;
   [AGENT_EVENTS.nodeProbeProgress]: NodeProbeProgressPayload;
   [AGENT_EVENTS.nodeProbeFinished]: NodeProbeFinishedPayload;
+  [AGENT_EVENTS.myServerChanged]: MyServerChangedPayload;
+  [AGENT_EVENTS.myServerOrderChanged]: MyServerOrderChangedPayload;
 }
 
 export type AgentEvent = {

@@ -7,7 +7,8 @@ interface Props {
   servers: MyServer[];
   selectedId: string | null;
   loading: boolean;
-  account: string | null;
+  /** 向导打开或身份不可用：行与「新建」都不可点。 */
+  disabled?: boolean;
   compact?: boolean;
   onSelect: (serverId: string) => void;
   onNew: () => void;
@@ -17,10 +18,12 @@ interface Props {
 function ServerRow({
   server,
   selected,
+  disabled,
   onSelect,
 }: {
   server: MyServer;
   selected: boolean;
+  disabled: boolean;
   onSelect: (serverId: string) => void;
 }) {
   return (
@@ -28,6 +31,8 @@ function ServerRow({
       type="button"
       className={`config ${selected ? "is-active" : ""}`}
       aria-current={selected ? "true" : undefined}
+      aria-disabled={disabled || undefined}
+      disabled={disabled}
       onClick={() => onSelect(server.server_id)}
     >
       <span className="config__name" title={server.name}>
@@ -45,7 +50,7 @@ export function MyServersRail({
   servers,
   selectedId,
   loading,
-  account,
+  disabled = false,
   compact = false,
   onSelect,
   onNew,
@@ -55,9 +60,7 @@ export function MyServersRail({
 
   const list = (
     <>
-      {!account ? (
-        <p className="rail__empty-text myservers__rail-hint">登录后查看你的服务器</p>
-      ) : loading ? (
+      {loading ? (
         <div className="rail__loading" role="status" aria-busy="true" aria-label="正在读取服务器">
           {[0, 1, 2].map((row) => (
             <div className="skeleton-row" key={row} aria-hidden>
@@ -75,6 +78,7 @@ export function MyServersRail({
               <ServerRow
                 server={server}
                 selected={server.server_id === selectedId}
+                disabled={disabled}
                 onSelect={(serverId) => {
                   onSelect(serverId);
                   setDrawerOpen(false);
@@ -122,6 +126,7 @@ export function MyServersRail({
               className="icon-btn rail__add"
               aria-label="新建服务器"
               title="新建服务器"
+              disabled={disabled}
               onClick={onNew}
             >
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
@@ -181,7 +186,15 @@ export function MyServersRail({
                 <IconClose size={14} />
               </button>
             </div>
-            <button type="button" className="btn btn--ghost rail-drawer__new" onClick={onNew}>
+            <button
+              type="button"
+              className="btn btn--ghost rail-drawer__new"
+              disabled={disabled}
+              onClick={() => {
+                setDrawerOpen(false);
+                onNew();
+              }}
+            >
               新建服务器
             </button>
             {list}

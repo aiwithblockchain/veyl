@@ -23,9 +23,15 @@ import type {
   MyServerCatalog,
   MyServerCreateInput,
   MyServerCredentials,
+  MyServerDeviceIdentity,
+  MyServerFailure,
   MyServerOrder,
+  MyServerOrderState,
+  MyServerPlan,
   MyServerRebuildResult,
+  MyServerRegion,
   MyServerSshCredentials,
+  MyServerState,
   NetRepairAction,
   NetRepairResult,
   NetworkForceResetResult,
@@ -508,6 +514,197 @@ function normalizeResetStep(raw: {
   };
 }
 
+const MY_SERVER_CONTINENTS = new Set<MyServerRegion["continent"]>([
+  "asia",
+  "europe",
+  "north_america",
+  "south_america",
+  "oceania",
+  "africa",
+]);
+
+/** 控制面目录已经是强类型；这里只防「未来字段形状漂移」把界面打崩。 */
+function normalizeMyServerCatalog(raw: {
+  currency?: unknown;
+  updated_at?: unknown;
+  regions?: unknown;
+  plans?: unknown;
+}): MyServerCatalog {
+  const regions = Array.isArray(raw.regions)
+    ? raw.regions
+        .map((value): MyServerRegion | null => {
+          if (!value || typeof value !== "object") return null;
+          const region = value as Record<string, unknown>;
+          const continent = region.continent;
+          if (
+            typeof region.id !== "string" ||
+            region.id.trim() === "" ||
+            typeof region.name !== "string" ||
+            typeof continent !== "string" ||
+            !MY_SERVER_CONTINENTS.has(continent as MyServerRegion["continent"])
+          ) {
+            return null;
+          }
+          return {
+            id: region.id,
+            name: region.name,
+            continent: continent as MyServerRegion["continent"],
+          };
+        })
+        .filter((region): region is MyServerRegion => region !== null)
+    : [];
+
+  const plans = Array.isArray(raw.plans)
+    ? raw.plans
+        .map((value): MyServerPlan | null => {
+          if (!value || typeof value !== "object") return null;
+          const plan = value as Record<string, unknown>;
+          const hourly = Number(plan.hourly_usd);
+          const monthly = Number(plan.monthly_usd);
+          if (
+            typeof plan.id !== "string" ||
+            plan.id.trim() === "" ||
+            typeof plan.label !== "string" ||
+            !Number.isFinite(hourly) ||
+            !Number.isFinite(monthly) ||
+            hourly < 0 ||
+            monthly < 0
+          ) {
+            return null;
+          }
+          return {
+            id: plan.id,
+            label: plan.label,
+            hourly_usd: hourly,
+            monthly_usd: monthly,
+          };
+        })
+        .filter((plan): plan is MyServerPlan => plan !== null)
+    : [];
+
+  return {
+    currency: typeof raw.currency === "string" ? raw.currency : "",
+    updated_at: typeof raw.updated_at === "string" ? raw.updated_at : "",
+    regions,
+    plans,
+  };
+}
+
+const MY_SERVER_STATES = new Set<MyServerState>([
+  "creating",
+  "booting",
+  "installing",
+  "verifying",
+  "healthy",
+  "active",
+  "error",
+  "destroying",
+  "destroyed",
+  "gone",
+]);
+
+const MY_SERVER_ORDER_STATES = new Set<MyServerOrderState>([
+  "pending_payment",
+  "paid",
+  "provisioning",
+  "ready",
+  "cancelled",
+  "failed",
+]);
+
+/** 服务器数据形状不对时直接报错，不在前端猜一个值。 */
+function serverDataError(): never {
+  throw { code: "UPSTREAM_ERROR", message: "服务器数据格式不正确" };
+}
+
+function normalizeMyServerFailure(value: unknown): MyServerFailure | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const stage =
+    typeof raw.stage === "string" && MY_SERVER_STATES.has(raw.stage as MyServerState)
+      ? (raw.stage as MyServerState)
+      : null;
+  if (!stage || typeof raw.code !== "string" || typeof raw.message !== "string") {
+    return null;
+  }
+  return {
+    stage,
+    code: raw.code,
+    message: raw.message,
+    retryable: raw.retryable === true,
+  };
+}
+
+function normalizeMyServer(raw: unknown): MyServer | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  const serverId = typeof value.server_id === "string" ? value.server_id : "";
+  const state =
+    typeof value.state === "string" && MY_SERVER_STATES.has(value.state as MyServerState)
+      ? (value.state as MyServerState)
+      : null;
+  if (!serverId || !state) return null;
+
+  return {
+    server_id: serverId,
+    name: typeof value.name === "string" ? value.name : "",
+    region: typeof value.region === "string" ? value.region : "",
+    plan: typeof value.plan === "string" ? value.plan : "",
+    state,
+    created_at: typeof value.created_at === "string" ? value.created_at : "",
+    ip: typeof value.ip === "string" ? value.ip : null,
+    port: typeof value.port === "number" ? value.port : null,
+    node_id: typeof value.node_id === "string" ? value.node_id : null,
+    hourly_usd:
+      typeof value.hourly_usd === "number" && Number.isFinite(value.hourly_usd)
+        ? value.hourly_usd
+        : 0,
+    monthly_usd:
+      typeof value.monthly_usd === "number" && Number.isFinite(value.monthly_usd)
+        ? value.monthly_usd
+        : 0,
+    failure: normalizeMyServerFailure(value.failure),
+  };
+}
+
+function normalizeMyServerOrder(raw: unknown): MyServerOrder | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  const orderId = typeof value.order_id === "string" ? value.order_id : "";
+  const state =
+    typeof value.state === "string" &&
+    MY_SERVER_ORDER_STATES.has(value.state as MyServerOrderState)
+      ? (value.state as MyServerOrderState)
+      : null;
+  if (!orderId || !state) return null;
+
+  const failure =
+    value.failure && typeof value.failure === "object"
+      ? (value.failure as Record<string, unknown>)
+      : null;
+  return {
+    order_id: orderId,
+    state,
+    region: typeof value.region === "string" ? value.region : "",
+    plan: typeof value.plan === "string" ? value.plan : "",
+    amount_usd:
+      typeof value.amount_usd === "number" && Number.isFinite(value.amount_usd)
+        ? value.amount_usd
+        : 0,
+    created_at: typeof value.created_at === "string" ? value.created_at : "",
+    expires_at: typeof value.expires_at === "string" ? value.expires_at : null,
+    server_id: typeof value.server_id === "string" ? value.server_id : null,
+    failure:
+      failure && typeof failure.code === "string" && typeof failure.message === "string"
+        ? {
+            code: failure.code,
+            message: failure.message,
+            retryable: failure.retryable === true,
+          }
+        : null,
+  };
+}
+
 /** 统一的 invoke 包装：失败一律抛 `BridgeError`，调用方只需要看 code / message。 */
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -814,42 +1011,107 @@ export class TauriAgentBridge implements AgentBridge {
   }
 
   async myServerCatalog(): Promise<MyServerCatalog> {
-    return notWired("我的服务器");
+    return normalizeMyServerCatalog(
+      await call<{
+        currency?: unknown;
+        updated_at?: unknown;
+        regions?: unknown;
+        plans?: unknown;
+      }>("my_server_catalog"),
+    );
   }
 
   async myServerList(): Promise<{ servers: MyServer[] }> {
-    return notWired("我的服务器");
+    const raw = await call<{ servers?: unknown }>("my_server_list");
+    if (!Array.isArray(raw?.servers)) serverDataError();
+    const servers = raw.servers
+      .map((value) => normalizeMyServer(value))
+      .filter((server): server is MyServer => server !== null);
+    return { servers };
   }
 
-  async myServerGet(_serverId: string): Promise<MyServer> {
-    return notWired("我的服务器");
+  async myServerGet(serverId: string): Promise<MyServer> {
+    const server = normalizeMyServer(
+      await call<unknown>("my_server_get", { serverId }),
+    );
+    if (!server) serverDataError();
+    return server;
   }
 
-  async myServerCreate(_input: MyServerCreateInput): Promise<MyServerOrder> {
-    return notWired("我的服务器");
+  async myServerCreate(input: MyServerCreateInput): Promise<MyServerOrder> {
+    const order = normalizeMyServerOrder(
+      await call<unknown>("my_server_create", {
+        region: input.region,
+        plan: input.plan,
+        idempotencyKey: input.idempotencyKey,
+      }),
+    );
+    if (!order) serverDataError();
+    return order;
   }
 
-  async myServerCheckout(_orderId: string): Promise<MyServerOrder> {
-    return notWired("我的服务器");
+  async myServerCheckout(orderId: string): Promise<MyServerOrder> {
+    const order = normalizeMyServerOrder(
+      await call<unknown>("my_server_checkout", { orderId }),
+    );
+    if (!order) serverDataError();
+    return order;
   }
 
-  async myServerCancelOrder(_orderId: string): Promise<MyServerOrder> {
-    return notWired("我的服务器");
+  async myServerCancelOrder(orderId: string): Promise<MyServerOrder> {
+    const order = normalizeMyServerOrder(
+      await call<unknown>("my_server_cancel_order", { orderId }),
+    );
+    if (!order) serverDataError();
+    return order;
   }
 
   async myServerRebuild(
-    _serverId: string,
-    _confirm: boolean,
+    serverId: string,
+    confirm: boolean,
   ): Promise<MyServerRebuildResult> {
-    return notWired("我的服务器");
+    const raw = await call<{ newServerId?: unknown; state?: unknown }>(
+      "my_server_rebuild",
+      { serverId, confirm },
+    );
+    const newServerId =
+      typeof raw?.newServerId === "string" ? raw.newServerId : "";
+    const state =
+      typeof raw?.state === "string" &&
+      MY_SERVER_STATES.has(raw.state as MyServerState)
+        ? (raw.state as MyServerState)
+        : null;
+    if (!newServerId || !state) serverDataError();
+    return { newServerId, state };
   }
 
-  async myServerDestroy(_serverId: string, _confirm: boolean): Promise<MyServer> {
-    return notWired("我的服务器");
+  async myServerDestroy(serverId: string, confirm: boolean): Promise<MyServer> {
+    const server = normalizeMyServer(
+      await call<unknown>("my_server_destroy", { serverId, confirm }),
+    );
+    if (!server) serverDataError();
+    return server;
   }
 
-  async myServerCredentials(_serverId: string): Promise<MyServerCredentials> {
-    return notWired("我的服务器");
+  async myServerCredentials(serverId: string): Promise<MyServerCredentials> {
+    const raw = await call<{ payload?: unknown; signature?: unknown }>(
+      "my_server_credentials",
+      { serverId },
+    );
+    if (typeof raw?.payload !== "string" || typeof raw?.signature !== "string") {
+      serverDataError();
+    }
+    return { payload: raw.payload, signature: raw.signature };
+  }
+
+  async myServerRegisterDevice(): Promise<MyServerDeviceIdentity> {
+    const raw = await call<{ account_id?: unknown; device_id?: unknown }>(
+      "my_server_register_device",
+    );
+    if (typeof raw?.account_id !== "string" || typeof raw?.device_id !== "string") {
+      serverDataError();
+    }
+    return { account_id: raw.account_id, device_id: raw.device_id };
   }
 
   async myServerSshCredentials(

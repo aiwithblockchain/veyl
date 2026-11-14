@@ -14,6 +14,7 @@ import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, shouldRefreshSnapshotO
 import type {
   ConfigCreateInput,
   DefaultProfileStatus,
+  MyServer,
   PendingQuestion,
 } from "./agent/bridge";
 import { BridgeError, toBridgeError } from "./agent/errors";
@@ -28,7 +29,11 @@ import { HelperPermissionDialog } from "./components/HelperPermissionDialog";
 import { NewConfigDialog } from "./components/NewConfigDialog";
 import { MyServersPage } from "./components/MyServersPage";
 import { MyServersRail } from "./components/MyServersRail";
+import { NodeGroupDetail } from "./components/NodeGroupDetail";
+import { NodeGroupsRail } from "./components/NodeGroupsRail";
 import { useMyServers } from "./myservers/useMyServers";
+import { useNodeGroups } from "./groups/useNodeGroups";
+import { isProvisioning } from "./myservers/labels";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
 import { Settings, describeImportError } from "./components/Settings";
@@ -53,7 +58,7 @@ import { ISSUE_REPORT_OPENING } from "./ui/issueReport";
 import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
 import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
 import { readDestination, writeDestination, type Destination } from "./ui/destination";
-import { IconConsole, IconServer } from "./components/icons";
+import { IconConsole, IconGroups, IconServer } from "./components/icons";
 import { usePaneLayout } from "./ui/usePaneLayout";
 import { pushRateSample, shouldPushRateSample, type RateSample } from "./ui/rateSeries";
 import {
@@ -149,12 +154,20 @@ export default function App() {
     setDestination(next);
     writeDestination(localStorage, next);
   };
-  // 再点一次已激活的「服务器」图标：递增让服务器页回到根（默认选中第一台）。
+  // 再点一次已激活的「节点组」图标：递增让节点组回到根（组列表 → 当前组详情）。
+  const [groupsRootSignal, setGroupsRootSignal] = useState(0);
+  // 再点一次已激活的「我的服务器」图标：回到列表根（默认第一台）。
   const [serversRootSignal, setServersRootSignal] = useState(0);
+  const groupsApi = useNodeGroups();
   const myServers = useMyServers(bridge, {
     active: destination === "servers",
     rootSignal: serversRootSignal,
   });
+  /** 从组详情「从我的服务器添加」进来时的目标组。 */
+  const [serverJoinTarget, setServerJoinTarget] = useState<{
+    groupId: string;
+    name: string;
+  } | null>(null);
   /** 从新建流程切到服务器时保留接管方式；回客户端时恢复新建流程。 */
   const [serverEntry, setServerEntry] = useState<{
     connectMode: ConfigConnectMode;
@@ -262,7 +275,7 @@ export default function App() {
     setNewConfigOpen(true);
   };
 
-  // 第 2 问选「其它节点」：中间区切到服务器，关掉表单并记住接管方式。
+  // 第 2 问选「其它节点」：切到「我的服务器」，关掉表单并记住接管方式。
   const handleChooseServers = (connectMode: ConfigConnectMode) => {
     setServerEntry({ connectMode });
     setNewConfigOpen(false);
@@ -271,16 +284,77 @@ export default function App() {
 
   // 回客户端只能点最左侧「客户端」图标：从新建流程来的顺带恢复表单。
   const handleServersBack = () => {
+    setServerJoinTarget(null);
     changeDestination("client");
     if (serverEntry) setNewConfigOpen(true);
   };
 
   // 从服务器带一个节点回新建流程：客户端 + 审视页。
   const handleUseServer = (nodeId: string, serverName: string) => {
+    setServerJoinTarget(null);
     setServerEntry(null);
     setOwnedNodes({ nodeIds: [nodeId], label: serverName });
     changeDestination("client");
     setNewConfigOpen(true);
+  };
+
+  // 组详情「添加节点 → 从我的服务器添加」：去服务器模块挑一台，带回目标组。
+  const handlePickServersForGroup = (groupId: string) => {
+    const target = groupsApi.groups.find((group) => group.group_id === groupId);
+    if (!target) return;
+    setServerJoinTarget({ groupId, name: target.name });
+    myServers.resetToRoot();
+    changeDestination("servers");
+  };
+
+  // 服务器详情里点「加入「X」」：变成组内节点并回到该组。
+  const handleJoinServer = (server: MyServer) => {
+    const target = serverJoinTarget;
+    if (!target) return;
+    groupsApi.addServerNode(target.groupId, {
+      serverName: server.name,
+      host: server.ip,
+      port: server.port,
+    });
+    groupsApi.select(target.groupId);
+    setServerJoinTarget(null);
+    setAppNotice({ level: "info", text: `已加入「${target.name}」。` });
+    changeDestination("groups");
+  };
+
+  // 控制台底部「组 · X」：跳到这个组的详情。
+  const handleOpenActiveGroup = () => {
+    if (!groupsApi.activeGroup) return;
+    groupsApi.select(groupsApi.activeGroup.group_id);
+    changeDestination("groups");
+  };
+
+  // 再点一次「节点组」图标：回根（当前节点组）。
+  const lastGroupsRootSignal = useRef(0);
+  useEffect(() => {
+    if (groupsRootSignal === lastGroupsRootSignal.current) return;
+    lastGroupsRootSignal.current = groupsRootSignal;
+    groupsApi.resetToRoot();
+    // groupsApi 每次渲染都是新对象，只跟着信号走。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupsRootSignal]);
+
+  // 激活组只登记、不重连：正在跑的那次连接不受影响，下次连接生效。
+  const handleActivateGroup = (groupId: string) => {
+    const target = groupsApi.groups.find((group) => group.group_id === groupId);
+    const previous = groupsApi.activeGroup;
+    groupsApi.activate(groupId);
+    if (!target) return;
+    if (vpn.connection === "connected") {
+      setAppNotice({
+        level: "info",
+        text: `已切到「${target.name}」，当前仍连着「${
+          previous?.name ?? "原来的节点"
+        }」，下次连接生效。`,
+      });
+      return;
+    }
+    setAppNotice({ level: "info", text: "已设为当前节点组。" });
   };
   // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
   const healthVersion = useRef(0);
@@ -297,6 +371,9 @@ export default function App() {
   const lastSnapshotAtRef = useRef(0);
 
   const session = activeSession(state);
+  const installingServerCount = myServers.servers.filter((server) =>
+    isProvisioning(server.state),
+  ).length;
   const activeRoutingMode =
     vpn.activeConfig && routingOverride?.configId === vpn.activeConfig.config_id
       ? routingOverride.mode
@@ -1516,16 +1593,40 @@ export default function App() {
         </button>
         <button
           type="button"
+          className={`activity__item ${destination === "groups" ? "is-active" : ""}`}
+          aria-pressed={destination === "groups"}
+          aria-label="节点组"
+          title="节点组"
+          onClick={() => {
+            setServerJoinTarget(null);
+            if (destination === "groups") setGroupsRootSignal((value) => value + 1);
+            else changeDestination("groups");
+          }}
+        >
+          <IconGroups size={18} />
+        </button>
+        <button
+          type="button"
           className={`activity__item ${destination === "servers" ? "is-active" : ""}`}
           aria-pressed={destination === "servers"}
-          aria-label="服务器"
-          title="服务器"
+          aria-label={
+            installingServerCount > 0
+              ? `我的服务器，${installingServerCount} 台安装中`
+              : "我的服务器"
+          }
+          title="我的服务器"
           onClick={() => {
             if (destination === "servers") setServersRootSignal((value) => value + 1);
-            else changeDestination("servers");
+            else {
+              setServerJoinTarget(null);
+              changeDestination("servers");
+            }
           }}
         >
           <IconServer size={18} />
+          {installingServerCount > 0 ? (
+            <span className="activity__dot" aria-hidden />
+          ) : null}
         </button>
       </nav>
       {destination === "servers" ? (
@@ -1533,10 +1634,20 @@ export default function App() {
           servers={myServers.servers}
           selectedId={myServers.selectedId}
           loading={myServers.loading}
-          account={myServers.account}
+          disabled={myServers.view === "wizard" || myServers.identityLost}
           compact={shell.mode === "drawer"}
           onSelect={myServers.select}
           onNew={myServers.openWizard}
+          onOpenSettings={() => openSettings()}
+        />
+      ) : destination === "groups" ? (
+        <NodeGroupsRail
+          groups={groupsApi.groups}
+          selectedId={groupsApi.selected?.group_id ?? null}
+          activeGroupId={groupsApi.activeGroupId}
+          compact={shell.mode === "drawer"}
+          onSelect={groupsApi.select}
+          onCreate={groupsApi.createGroup}
           onOpenSettings={() => openSettings()}
         />
       ) : (
@@ -1570,30 +1681,54 @@ export default function App() {
       {destination === "servers" ? (
         <MyServersPage
           bridge={bridge}
-          account={myServers.account}
           catalog={myServers.catalog}
           servers={myServers.servers}
           loading={myServers.loading}
           error={myServers.error}
+          detailError={myServers.detailError}
           selected={myServers.selected}
           view={myServers.view}
           confirmLeave={myServers.confirmLeave}
-          loginOpen={myServers.loginOpen}
-          onOpenLogin={myServers.openLogin}
-          onCloseLogin={myServers.closeLogin}
-          onSignedIn={myServers.signedIn}
+          identityLost={myServers.identityLost}
+          identityMessage={myServers.identityMessage}
+          joinGroupName={serverJoinTarget?.name ?? null}
           onNew={myServers.openWizard}
           onUseServer={handleUseServer}
+          onJoinServer={handleJoinServer}
           onChanged={() => void myServers.refresh()}
           onLeaveWizard={myServers.leaveWizard}
           onKeepWizard={myServers.keepWizard}
           onOrdered={myServers.ordered}
-          onResetToRoot={myServers.resetToRoot}
+          onReRegister={() => void myServers.reRegister()}
         />
+      ) : destination === "groups" ? (
+        groupsApi.selected ? (
+          <NodeGroupDetail
+            group={groupsApi.selected}
+            active={groupsApi.selected.group_id === groupsApi.activeGroupId}
+            activeConfigName={vpn.activeConfig?.name ?? null}
+            connection={vpn.connection}
+            onActivate={() => handleActivateGroup(groupsApi.selected!.group_id)}
+            onAddNode={(source) =>
+              groupsApi.addNode(groupsApi.selected!.group_id, source)
+            }
+            onCopy={() => groupsApi.copyGroup(groupsApi.selected!.group_id)}
+            onOpenServers={() =>
+              handlePickServersForGroup(groupsApi.selected!.group_id)
+            }
+            onRemoveNode={(nodeId) =>
+              groupsApi.removeNode(groupsApi.selected!.group_id, nodeId)
+            }
+            onRename={(name) => groupsApi.renameGroup(groupsApi.selected!.group_id, name)}
+            onDelete={() => groupsApi.deleteGroup(groupsApi.selected!.group_id)}
+          />
+        ) : null
       ) : (
       <Console
         config={vpn.activeConfig}
         connectedConfigId={vpn.connectedConfigId}
+        groupName={groupsApi.activeGroup?.name ?? null}
+        onOpenGroup={handleOpenActiveGroup}
         connectedConfigName={
           (runtime.config_id ?? vpn.connectedConfigId)
             ? (vpn.configs.find(

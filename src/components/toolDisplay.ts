@@ -379,6 +379,13 @@ export const TOOL_COPY: Record<string, ToolCopy> = {
     advice: "可以在对话里再说一次你所在的地区。",
     readOnly: false,
   },
+  MyServers: {
+    running: "正在看服务器列表",
+    done: "已查看服务器列表",
+    failed: "服务器列表读不到",
+    advice: "可以稍后再试一次；已有节点不受影响。",
+    readOnly: true,
+  },
 };
 
 export const TOOL_NAMES = Object.keys(TOOL_COPY);

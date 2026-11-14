@@ -5,6 +5,7 @@ import type {
   MyServerCredentials,
   MyServerFailure,
   MyServerOrder,
+  MyServerPlan,
   MyServerRebuildResult,
   MyServerRegion,
   MyServerSshCredentials,
@@ -19,55 +20,50 @@ export const MY_SERVER_PHASES: MyServerState[] = [
   "verifying",
 ];
 
-export const CONTINENT_LABELS: Record<MyServerRegion["continent"], string> = {
-  asia: "亚洲",
-  europe: "欧洲",
-  north_america: "北美洲",
-  south_america: "南美洲",
-  oceania: "大洋洲",
-  africa: "非洲",
-};
-
 const REGIONS: MyServerRegion[] = [
-  { id: "nrt", name: "东京", continent: "asia" },
-  { id: "kix", name: "大阪", continent: "asia" },
-  { id: "icn", name: "首尔", continent: "asia" },
-  { id: "sgp", name: "新加坡", continent: "asia" },
-  { id: "bom", name: "孟买", continent: "asia" },
-  { id: "del", name: "德里", continent: "asia" },
-  { id: "blr", name: "班加罗尔", continent: "asia" },
-  { id: "lax", name: "洛杉矶", continent: "north_america" },
-  { id: "sjc", name: "硅谷", continent: "north_america" },
-  { id: "sea", name: "西雅图", continent: "north_america" },
-  { id: "ord", name: "芝加哥", continent: "north_america" },
-  { id: "ewr", name: "纽约", continent: "north_america" },
-  { id: "atl", name: "亚特兰大", continent: "north_america" },
-  { id: "dfw", name: "达拉斯", continent: "north_america" },
-  { id: "yyz", name: "多伦多", continent: "north_america" },
-  { id: "mex", name: "墨西哥城", continent: "north_america" },
-  { id: "mia", name: "迈阿密", continent: "north_america" },
-  { id: "ams", name: "阿姆斯特丹", continent: "europe" },
-  { id: "lhr", name: "伦敦", continent: "europe" },
-  { id: "fra", name: "法兰克福", continent: "europe" },
-  { id: "cdg", name: "巴黎", continent: "europe" },
-  { id: "mad", name: "马德里", continent: "europe" },
-  { id: "mil", name: "米兰", continent: "europe" },
-  { id: "sto", name: "斯德哥尔摩", continent: "europe" },
-  { id: "waw", name: "华沙", continent: "europe" },
-  { id: "gru", name: "圣保罗", continent: "south_america" },
-  { id: "scl", name: "圣地亚哥", continent: "south_america" },
-  { id: "bog", name: "波哥大", continent: "south_america" },
-  { id: "syd", name: "悉尼", continent: "oceania" },
-  { id: "mel", name: "墨尔本", continent: "oceania" },
-  { id: "jnb", name: "约翰内斯堡", continent: "africa" },
+  { id: "sgp1", name: "新加坡 1", continent: "asia" },
+  { id: "blr1", name: "班加罗尔 1", continent: "asia" },
+  { id: "nyc1", name: "纽约 1", continent: "north_america" },
+  { id: "nyc2", name: "纽约 2", continent: "north_america" },
+  { id: "nyc3", name: "纽约 3", continent: "north_america" },
+  { id: "sfo2", name: "旧金山 2", continent: "north_america" },
+  { id: "sfo3", name: "旧金山 3", continent: "north_america" },
+  { id: "tor1", name: "多伦多 1", continent: "north_america" },
+  { id: "atl1", name: "亚特兰大 1", continent: "north_america" },
+  { id: "ric1", name: "里士满 1", continent: "north_america" },
+  { id: "mkc1", name: "堪萨斯城 1", continent: "north_america" },
+  { id: "mem1", name: "孟菲斯 1", continent: "north_america" },
+  { id: "ams3", name: "阿姆斯特丹 3", continent: "europe" },
+  { id: "fra1", name: "法兰克福 1", continent: "europe" },
+  { id: "lon1", name: "伦敦 1", continent: "europe" },
+  { id: "syd1", name: "悉尼 1", continent: "oceania" },
 ];
 
-const PLAN = {
-  id: "vc2-1c-1gb",
-  label: "1 核 · 1 GB 内存 · 25 GB 硬盘",
-  hourly_usd: 0.007,
-  monthly_usd: 5,
-};
+/** 和控制面一致的三档；中间一档是默认推荐。 */
+const PLANS: MyServerPlan[] = [
+  {
+    id: "s-1vcpu-512mb-10gb",
+    label: "1 核 · 512 MB",
+    hourly_usd: 0.00595,
+    monthly_usd: 4,
+  },
+  {
+    id: "s-1vcpu-1gb",
+    label: "1 核 · 1 GB",
+    hourly_usd: 0.00893,
+    monthly_usd: 6,
+  },
+  {
+    id: "s-1vcpu-2gb",
+    label: "1 核 · 2 GB",
+    hourly_usd: 0.01786,
+    monthly_usd: 12,
+  },
+];
+
+const DEFAULT_PLAN = PLANS[1];
+
+const PROVIDER = "DigitalOcean";
 
 const STORE_KEY = "veyl.mock.myServers";
 const FAIL_KEY = "veyl.mock.myServers.fail";
@@ -121,10 +117,10 @@ function readStore(): Store {
 
 /** 没配 seed 时的默认四台：可用、安装中、出错、可用，方便直接看效果。 */
 const DEFAULT_SERVERS: Array<{ region: string; state: MyServerState }> = [
-  { region: "nrt", state: "healthy" },
-  { region: "lax", state: "installing" },
-  { region: "sgp", state: "error" },
-  { region: "gru", state: "healthy" },
+  { region: "sgp1", state: "healthy" },
+  { region: "nyc1", state: "installing" },
+  { region: "fra1", state: "error" },
+  { region: "tor1", state: "healthy" },
 ];
 
 /** 默认演示数据里正在建的那台先停 30 秒，方便看清进度；之后照常推进。 */
@@ -149,17 +145,17 @@ function seedStore(): Store {
     const id = `srv_seed_${index + 1}`;
     store.servers.push({
       server_id: id,
-      name: `${region.name} · Vultr`,
+      name: `${region.name} · ${PROVIDER}`,
       region: region.id,
-      plan: PLAN.id,
+      plan: DEFAULT_PLAN.id,
       state,
       created_at: new Date(Date.now() - 60_000 * (index + 1)).toISOString(),
       ip: `45.76.${20 + index}.${100 + index}`,
       port: state === "creating" || state === "booting" ? null : 8388,
       node_id:
         state === "healthy" || state === "active" ? `node_${id}` : null,
-      hourly_usd: PLAN.hourly_usd,
-      monthly_usd: PLAN.monthly_usd,
+      hourly_usd: DEFAULT_PLAN.hourly_usd,
+      monthly_usd: DEFAULT_PLAN.monthly_usd,
       failure:
         state === "error"
           ? {
@@ -285,7 +281,7 @@ export class MockMyServerService {
     if (readFlag(DOWN_KEY) === "1") providerDown();
     return {
       regions: REGIONS.map((region) => ({ ...region })),
-      plans: [{ ...PLAN }],
+      plans: PLANS.map((plan) => ({ ...plan })),
       currency: "USD",
       updated_at: new Date().toISOString(),
     };
@@ -329,6 +325,7 @@ export class MockMyServerService {
       };
     }
     const store = readStore();
+    const plan = PLANS.find((item) => item.id === input.plan) ?? DEFAULT_PLAN;
     const existing = store.orders.find(
       (order) =>
         (order as MyServerOrder & { idempotency_key?: string }).idempotency_key ===
@@ -347,8 +344,8 @@ export class MockMyServerService {
       order_id: `ord_${store.next_id++}`,
       state: "pending_payment",
       region: region.id,
-      plan: PLAN.id,
-      amount_usd: PLAN.monthly_usd,
+      plan: plan.id,
+      amount_usd: plan.monthly_usd,
       created_at: new Date().toISOString(),
       expires_at: null,
       server_id: null,
@@ -369,19 +366,20 @@ export class MockMyServerService {
     }
     if (order.state !== "pending_payment") return { ...order };
     const region = REGIONS.find((item) => item.id === order.region) ?? REGIONS[0];
+    const plan = PLANS.find((item) => item.id === order.plan) ?? DEFAULT_PLAN;
     const id = `srv_${store.next_id++}`;
     const server: StoredServer = {
       server_id: id,
-      name: `${region.name} · Vultr`,
+      name: `${region.name} · ${PROVIDER}`,
       region: region.id,
-      plan: order.plan,
+      plan: plan.id,
       state: "creating",
       created_at: new Date().toISOString(),
       ip: `45.76.${40 + store.next_id}.${80 + store.next_id}`,
       port: null,
       node_id: null,
-      hourly_usd: PLAN.hourly_usd,
-      monthly_usd: PLAN.monthly_usd,
+      hourly_usd: plan.hourly_usd,
+      monthly_usd: plan.monthly_usd,
       failure: null,
       started_at: Date.now(),
     };
@@ -431,7 +429,7 @@ export class MockMyServerService {
     store.servers.push({
       ...old,
       server_id: id,
-      name: `${region.name} · Vultr`,
+      name: `${region.name} · ${PROVIDER}`,
       state: "creating",
       created_at: new Date().toISOString(),
       ip: `45.76.${50 + store.next_id}.${90 + store.next_id}`,

@@ -117,3 +117,17 @@ export function IconServer({ size = 16, className }: IconProps) {
     </>,
   );
 }
+
+/** 节点组：三个节点连成一个组。 */
+export function IconGroups({ size = 16, className }: IconProps) {
+  return base(
+    size,
+    className,
+    <>
+      <circle cx="8" cy="4" r="1.6" />
+      <circle cx="3.8" cy="11.6" r="1.6" />
+      <circle cx="12.2" cy="11.6" r="1.6" />
+      <path d="M6.7 5.2 5 10M9.3 5.2 11 10M5.4 11.6h5.2" />
+    </>,
+  );
+}

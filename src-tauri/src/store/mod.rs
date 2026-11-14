@@ -16,6 +16,7 @@ pub mod proxy_backup;
 pub mod runtime;
 pub mod rules_state;
 pub mod seed_cache;
+pub mod servers;
 pub mod settings;
 pub mod tool_calls;
 
@@ -38,6 +39,7 @@ pub use configs::{Config, ConfigPatch, NewConfig, NewNode, Node};
 pub use error::{StoreError, StoreResult};
 pub use proxy_backup::ProxyBackupRow;
 pub use runtime::RuntimeVersionRow;
+pub use servers::{MyServerRow, NewMyServer};
 pub use tool_calls::{NewCall, ToolCallRecord};
 
 /// 应用数据目录下的库文件名。

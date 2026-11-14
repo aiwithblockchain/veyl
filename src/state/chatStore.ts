@@ -738,6 +738,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         // 批量测速由节点面板消费，不进对话流。
         case AGENT_EVENTS.nodeProbeProgress:
         case AGENT_EVENTS.nodeProbeFinished:
+        // 建机状态由「我的服务器」destination 直接订阅，不进对话流。
+        case AGENT_EVENTS.myServerChanged:
+        case AGENT_EVENTS.myServerOrderChanged:
           return state;
 
         default:

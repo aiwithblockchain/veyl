@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     method        TEXT NOT NULL,
     -- secrets.enc 里的键；明文密码永不落库。
     password_ref  TEXT NOT NULL,
-    source        TEXT NOT NULL CHECK (source IN ('seed', 'url', 'manual')),
+    source        TEXT NOT NULL CHECK (source IN ('seed', 'url', 'manual', 'owned')),
     -- 去重键：sha256(name \x1f server \x1f port \x1f method) 的十六进制。
     source_key    TEXT NOT NULL,
     created_at    INTEGER NOT NULL,
@@ -69,6 +69,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_source_key
     ON nodes (source, source_key);
 CREATE INDEX IF NOT EXISTS idx_nodes_server
     ON nodes (server, port);
+
+-- 「我的服务器」：控制面 server 的本地镜像（离线展示与节点关联）。
+-- 不含任何凭据；密码只在 secrets.enc 里，节点经 nodes.password_ref 关联。
+CREATE TABLE IF NOT EXISTS my_servers (
+    id             TEXT PRIMARY KEY,
+    provider       TEXT NOT NULL DEFAULT 'digitalocean',
+    name           TEXT NOT NULL,
+    region         TEXT NOT NULL,
+    plan           TEXT NOT NULL,
+    state          TEXT NOT NULL,
+    node_id        TEXT REFERENCES nodes (id) ON DELETE SET NULL,
+    hourly_usd     REAL NOT NULL,
+    monthly_usd    REAL NOT NULL,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    last_synced_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_my_servers_created
+    ON my_servers (created_at DESC);
 
 CREATE TABLE IF NOT EXISTS config_nodes (
     config_id  TEXT NOT NULL REFERENCES configs (id) ON DELETE CASCADE,

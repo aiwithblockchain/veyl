@@ -72,6 +72,9 @@ interface Props {
   runtime: RuntimeView;
   /** 正在连接的那套配置名；runtime 快照不一定带名字，由 App 用配置列表补齐。 */
   connectedConfigName?: string | null;
+  /** 当前节点组名：底部节点卡第 2 行，可点进组详情。 */
+  groupName?: string | null;
+  onOpenGroup?: () => void;
   /** 连接属于哪套配置的本地已知值；快照还没带上时用它判断身份。 */
   connectedConfigId?: string | null;
   /** 正在启动的那套配置；active 可能已经切到别的，hero 要说清在连谁。 */
@@ -148,6 +151,8 @@ export function Console({
   loading = false,
   runtime,
   connectedConfigName = null,
+  groupName = null,
+  onOpenGroup,
   connectedConfigId = null,
   startingConfigId = null,
   startingConfigName = null,
@@ -765,6 +770,18 @@ export function Console({
                   {config.name}
                 </span>
               </p>
+              {groupName ? (
+                <button
+                  type="button"
+                  className="node-card__group"
+                  onClick={onOpenGroup}
+                  disabled={!onOpenGroup}
+                >
+                  <span className="node-card__label">组</span>
+                  <span className="node-card__sep" aria-hidden>·</span>
+                  <span>{groupName}</span>
+                </button>
+              ) : null}
               {config.nodes.length > 0 ? (
                 <span className="node-card__label">当前节点</span>
               ) : null}

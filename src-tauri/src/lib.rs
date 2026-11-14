@@ -6,6 +6,7 @@ pub mod agent;
 pub mod catalog;
 pub mod claurst_session;
 pub mod config;
+pub mod control_plane;
 pub mod lifecycle;
 pub mod llm;
 pub mod logging;
@@ -150,6 +151,13 @@ pub fn run() {
 
     // ---- 启动序列：一行一条，故障时能直接看出「应用此刻认为自己处于什么状态」 ----
     log::info!("启动 data_dir={}", short_path(&data_dir));
+    // 只打一行：环境与最终 base_url，便于排查连到了哪个 Worker；没有 secret。
+    let resolved_control_plane = crate::control_plane::env::current();
+    log::info!(
+        "控制面：{:?}（{}）",
+        resolved_control_plane.env,
+        resolved_control_plane.base_url
+    );
     log::info!(
         "启动 日志={}",
         log_file
@@ -345,6 +353,16 @@ pub fn run() {
                 agent::commands::proxy_port_get,
                 agent::commands::proxy_port_set,
                 agent::commands::proxy_recovery_report,
+                agent::commands::my_server_catalog,
+                agent::commands::my_server_list,
+                agent::commands::my_server_get,
+                agent::commands::my_server_create,
+                agent::commands::my_server_checkout,
+                agent::commands::my_server_cancel_order,
+                agent::commands::my_server_destroy,
+                agent::commands::my_server_rebuild,
+                agent::commands::my_server_credentials,
+                agent::commands::my_server_register_device,
                 agent::commands::runtime_start,
                 agent::commands::runtime_stop,
                 agent::commands::core_info,
@@ -410,6 +428,16 @@ pub fn run() {
                 agent::commands::proxy_port_get,
                 agent::commands::proxy_port_set,
                 agent::commands::proxy_recovery_report,
+                agent::commands::my_server_catalog,
+                agent::commands::my_server_list,
+                agent::commands::my_server_get,
+                agent::commands::my_server_create,
+                agent::commands::my_server_checkout,
+                agent::commands::my_server_cancel_order,
+                agent::commands::my_server_destroy,
+                agent::commands::my_server_rebuild,
+                agent::commands::my_server_credentials,
+                agent::commands::my_server_register_device,
                 agent::commands::runtime_start,
                 agent::commands::runtime_stop,
                 agent::commands::core_info,

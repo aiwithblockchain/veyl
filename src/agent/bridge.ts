@@ -550,6 +550,12 @@ export interface MyServerCredentials {
   signature: string;
 }
 
+/** 显式重新注册设备后的新身份（§19.2.4）；旧服务器的本地记录保留为只读。 */
+export interface MyServerDeviceIdentity {
+  account_id: string;
+  device_id: string;
+}
+
 export interface MyServerSshCredentials {
   host: string;
   port: number;
@@ -654,6 +660,8 @@ export interface AgentBridge {
   myServerCredentials(serverId: string): Promise<MyServerCredentials>;
   /** 取 SSH 登录信息；仅 UI 通道。 */
   myServerSshCredentials(serverId: string): Promise<MyServerSshCredentials>;
+  /** 身份丢失后的显式重新注册；丢弃旧身份，旧服务器记录保留为只读。 */
+  myServerRegisterDevice(): Promise<MyServerDeviceIdentity>;
   /** 恢复网络：撤代理 → 停运行时 → 清明文配置（不依赖 AI）。 */
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
   /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */

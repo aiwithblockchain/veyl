@@ -206,6 +206,118 @@ pub async fn proxy_recovery_report(state: State<'_, Arc<AppState>>) -> Result<Va
     Ok(json!({ "recovery": state.proxy_recovery() }))
 }
 
+/// 「我的服务器」目录：地区与套餐（只读，仅 UI；控制面公开接口）。
+///
+/// base_url 由 `control_plane::env` 决定，release 只认 prod；这里不写死域名。
+#[tauri::command]
+pub async fn my_server_catalog() -> Result<Value, Value> {
+    let base_url = crate::control_plane::env::current().base_url;
+    match crate::control_plane::catalog::fetch_catalog(&base_url).await {
+        Ok(catalog) => serde_json::to_value(catalog)
+            .map_err(|error| command_error("INTERNAL", error, Value::Null)),
+        Err(error) => Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": error.code,
+            "message": error.message,
+            "retryable": error.retryable,
+            "details": error.details,
+            "request_id": "",
+        })),
+    }
+}
+
+// ---- 我的服务器（§19.9，仅 UI 通道）----
+//
+// 命令层只做参数搬运；设备令牌、幂等键、验签与本地镜像都在
+// `control_plane::{auth,servers,credentials}`，AI 工具不经过这里。
+
+#[tauri::command]
+pub async fn my_server_list() -> Result<Value, Value> {
+    match crate::control_plane::servers::list().await {
+        Ok(servers) => Ok(json!({ "servers": servers })),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+#[tauri::command]
+pub async fn my_server_get(server_id: String) -> Result<Value, Value> {
+    match crate::control_plane::servers::get(&server_id).await {
+        Ok(server) => Ok(json!(server)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+#[tauri::command]
+pub async fn my_server_create(
+    region: String,
+    plan: String,
+    idempotency_key: String,
+) -> Result<Value, Value> {
+    match crate::control_plane::servers::create(&region, &plan, &idempotency_key).await {
+        Ok(order) => {
+            crate::control_plane::events::emit_order_changed(&order);
+            Ok(json!(order))
+        }
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+#[tauri::command]
+pub async fn my_server_checkout(order_id: String) -> Result<Value, Value> {
+    match crate::control_plane::servers::checkout(&order_id).await {
+        Ok(order) => {
+            crate::control_plane::events::emit_order_changed(&order);
+            Ok(json!(order))
+        }
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+#[tauri::command]
+pub async fn my_server_cancel_order(order_id: String) -> Result<Value, Value> {
+    match crate::control_plane::servers::cancel_order(&order_id).await {
+        Ok(order) => {
+            crate::control_plane::events::emit_order_changed(&order);
+            Ok(json!(order))
+        }
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+#[tauri::command]
+pub async fn my_server_destroy(server_id: String, confirm: bool) -> Result<Value, Value> {
+    match crate::control_plane::servers::destroy(&server_id, confirm).await {
+        Ok(server) => Ok(json!(server)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+#[tauri::command]
+pub async fn my_server_rebuild(server_id: String, confirm: bool) -> Result<Value, Value> {
+    match crate::control_plane::servers::rebuild(&server_id, confirm).await {
+        Ok(value) => Ok(value),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+#[tauri::command]
+pub async fn my_server_credentials(server_id: String) -> Result<Value, Value> {
+    match crate::control_plane::servers::credentials(&server_id).await {
+        Ok(value) => Ok(value),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+/// 显式重新注册设备（§19.2.4）：丢弃当前身份与令牌，生成新的并静默注册。
+/// 旧服务器的本地记录保留为只读；本命令只由界面上的「重新注册设备」触发。
+#[tauri::command]
+pub async fn my_server_register_device() -> Result<Value, Value> {
+    match crate::control_plane::auth::register_device().await {
+        Ok(value) => Ok(value),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
 /// 服务层错误已经是结构化的 `ServiceError`；还原成契约里的 AivpnError 形状。
 fn error_value(error: anyhow::Error) -> Value {
     if let Some(service) = error.downcast_ref::<crate::tools::services::ServiceError>() {

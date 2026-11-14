@@ -1,4 +1,13 @@
-import type { MyServerState } from "../agent/bridge";
+import type { MyServerRegion, MyServerState } from "../agent/bridge";
+
+export const CONTINENT_LABELS: Record<MyServerRegion["continent"], string> = {
+  asia: "亚洲",
+  europe: "欧洲",
+  north_america: "北美洲",
+  south_america: "南美洲",
+  oceania: "大洋洲",
+  africa: "非洲",
+};
 
 export const MY_SERVER_STATE_LABEL: Record<MyServerState, string> = {
   creating: "正在建机器",
@@ -55,6 +64,11 @@ export function isProvisioning(state: MyServerState): boolean {
 
 export function formatUsd(value: number): string {
   return Number.isInteger(value) ? `$${value}` : `$${value.toFixed(3)}`;
+}
+
+/** 小时价保留 5 位；按 3 位会把手里的 $0.00893 截成 $0.009。 */
+export function formatUsdHourly(value: number): string {
+  return `$${value.toFixed(5)}`;
 }
 
 export function formatServerTime(iso: string): string {

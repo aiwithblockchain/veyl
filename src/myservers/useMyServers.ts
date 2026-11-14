@@ -1,84 +1,177 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentBridge, MyServer, MyServerCatalog } from "../agent/bridge";
+import type { AgentBridge, MyServer, MyServerCatalog, MyServerState } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
-import { readAccount } from "./account";
+import { AGENT_EVENTS } from "../agent/protocol";
 import { isProvisioning } from "./labels";
 
-export type MyServersView = "detail" | "wizard";
+export type ServersView = "detail" | "wizard";
 
 interface Options {
-  /** 只有停在服务器 destination 时才读数据、听 Esc。 */
+  /** 停在「我的服务器」destination 时才听 Esc。 */
   active: boolean;
-  /** 再点一次「服务器」图标时递增。 */
+  /** 再点一次「我的服务器」图标时递增：回到列表根（默认第一台）。 */
   rootSignal: number;
 }
 
-function errorText(error: unknown): string {
-  const message = toBridgeError(error).message;
-  return message && message !== "操作失败"
-    ? message
-    : "暂时连不上服务器服务，稍后再试；已有节点不受影响。";
+const LIST_ERROR = "读不到你的服务器。已有服务器和节点不受影响；稍后再试。";
+const DETAIL_ERROR = "读不到这台服务器。已有服务器和节点不受影响；稍后再试。";
+const IDENTITY_LOST =
+  "这台设备的身份已丢失。已买的服务器仍在计费，这里无法管理。";
+
+/** 身份不可用时 Host 用 auth_required 回落；keychain 丢失时可能带更具体的原因。 */
+const IDENTITY_REASONS = new Set([
+  "auth_required",
+  "device_identity_lost",
+  "device_missing",
+  "device_mismatch",
+]);
+
+function identityLost(error: unknown): boolean {
+  const reason = toBridgeError(error).details?.reason;
+  return typeof reason === "string" && IDENTITY_REASONS.has(reason);
 }
 
-/** 服务器 destination 的主从状态：左栏列表 + 中间选中那台。 */
+/** 事件不可用时的兜底节奏（§19.9.2）：2s → 5s → 10s。 */
+const FALLBACK_DELAYS = [2000, 5000, 10_000];
+
+type RegisterCapable = AgentBridge & {
+  myServerRegisterDevice?: () => Promise<unknown>;
+};
+
+/** 「我的服务器」destination：左栏列表 + 中间选中那台。 */
 export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Options) {
-  const [account, setAccount] = useState<string | null>(() => readAccount());
   const [servers, setServers] = useState<MyServer[]>([]);
   const [catalog, setCatalog] = useState<MyServerCatalog | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  /** null = 用第一台（根视图）；用户点过某一行才有值。 */
+  const [identity, setIdentity] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [view, setView] = useState<MyServersView>("detail");
+  const [detail, setDetail] = useState<MyServer | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
+  const [view, setView] = useState<ServersView>("detail");
   const [confirmLeave, setConfirmLeave] = useState(false);
-  const [loginOpen, setLoginOpen] = useState(false);
-  const afterLoginRef = useRef<"wizard" | null>(null);
+  /** 已收到过 my-server-changed：事件在，就关掉兜底轮询。 */
+  const [eventsLive, setEventsLive] = useState(false);
 
   const refresh = useCallback(async () => {
-    if (!readAccount()) {
-      setServers([]);
-      setLoading(false);
-      return;
-    }
     try {
       const result = await bridge.myServerList();
       setServers(result.servers);
       setError(null);
+      setIdentity(false);
+      setRevision((value) => value + 1);
     } catch (err) {
-      setError(errorText(err));
+      if (identityLost(err)) {
+        setIdentity(true);
+        setError(null);
+      } else {
+        setError(LIST_ERROR);
+      }
     } finally {
       setLoading(false);
     }
   }, [bridge]);
 
-  // 进服务器 destination 时读一次目录和列表。
+  // 目录给向导用；失败时向导自己显示读取失败与重试。
   useEffect(() => {
-    if (!active) return;
     let alive = true;
     void bridge
       .myServerCatalog()
       .then((value) => {
         if (alive) setCatalog(value);
       })
-      .catch((err) => {
-        if (alive) setError(errorText(err));
+      .catch(() => {
+        // 目录失败由向导处理，列表不受影响。
       });
     void refresh();
     return () => {
       alive = false;
     };
-  }, [active, bridge, refresh]);
+  }, [bridge, refresh]);
 
-  // 有机器正在建时跟着进度轮询。
-  const provisioning = servers.some((server) => isProvisioning(server.state));
+  // 建机状态变化走事件；事件不可用时才用慢速兜底。
   useEffect(() => {
-    if (!active || !provisioning) return;
-    const timer = window.setInterval(() => void refresh(), 350);
-    return () => window.clearInterval(timer);
-  }, [active, provisioning, refresh]);
+    return bridge.subscribe((event) => {
+      if (event.name === AGENT_EVENTS.myServerChanged) {
+        const { server_id, state, node_id, failure } = event.payload;
+        setEventsLive(true);
+        setServers((current) =>
+          current.map((server) =>
+            server.server_id === server_id
+              ? {
+                  ...server,
+                  state: state as MyServerState,
+                  node_id: node_id ?? server.node_id,
+                  failure: (failure ?? null) as unknown as MyServer["failure"],
+                }
+              : server,
+          ),
+        );
+        setRevision((value) => value + 1);
+        void refresh();
+      } else if (event.name === AGENT_EVENTS.myServerOrderChanged) {
+        void refresh();
+      }
+    });
+  }, [bridge, refresh]);
+
+  const provisioning = servers.some((server) => isProvisioning(server.state));
+  const triesRef = useRef(0);
+  useEffect(() => {
+    if (!provisioning || eventsLive) {
+      if (!provisioning) triesRef.current = 0;
+      return;
+    }
+    let cancelled = false;
+    let timer = 0;
+    const schedule = () => {
+      const delay = FALLBACK_DELAYS[Math.min(triesRef.current, FALLBACK_DELAYS.length - 1)];
+      timer = window.setTimeout(async () => {
+        await refresh();
+        if (cancelled) return;
+        triesRef.current += 1;
+        schedule();
+      }, delay);
+    };
+    schedule();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [provisioning, refresh, eventsLive]);
+
+  const selectedFromList =
+    servers.find((server) => server.server_id === selectedId) ?? servers[0] ?? null;
+  const selectedKey = selectedFromList?.server_id ?? null;
+
+  // 详情以 my_server_get 为准；列表快照只作首帧占位。
+  useEffect(() => {
+    if (!selectedKey) {
+      setDetail(null);
+      setDetailError(null);
+      return;
+    }
+    if (!active) return;
+    let alive = true;
+    bridge
+      .myServerGet(selectedKey)
+      .then((server) => {
+        if (!alive) return;
+        setDetail(server);
+        setDetailError(null);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setDetailError(DETAIL_ERROR);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [active, bridge, selectedKey, revision]);
 
   const selected =
-    servers.find((server) => server.server_id === selectedId) ?? servers[0] ?? null;
+    detail && detail.server_id === selectedKey ? detail : selectedFromList;
 
   const select = (serverId: string) => {
     setSelectedId(serverId);
@@ -86,46 +179,28 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setConfirmLeave(false);
   };
 
-  /** 回根：不指定行，默认落到第一台。 */
   const resetToRoot = () => {
     setSelectedId(null);
     setView("detail");
     setConfirmLeave(false);
   };
 
-  const openLogin = () => {
-    afterLoginRef.current = null;
-    setLoginOpen(true);
-  };
-
   const openWizard = () => {
-    if (!readAccount()) {
-      afterLoginRef.current = "wizard";
-      setLoginOpen(true);
-      return;
-    }
     setConfirmLeave(false);
     setView("wizard");
   };
 
-  const closeLogin = () => {
-    setLoginOpen(false);
-    afterLoginRef.current = null;
-  };
-
-  const signedIn = (email: string) => {
-    setAccount(email);
-    setLoginOpen(false);
-    void refresh();
-    if (afterLoginRef.current === "wizard") {
-      afterLoginRef.current = null;
-      setConfirmLeave(false);
-      setView("wizard");
+  const reRegister = async () => {
+    const register = (bridge as RegisterCapable).myServerRegisterDevice;
+    try {
+      if (register) await register.call(bridge);
+      setIdentity(false);
+      await refresh();
+    } catch {
+      setError(LIST_ERROR);
     }
   };
 
-  const requestLeaveWizard = () => setConfirmLeave(true);
-  const keepWizard = () => setConfirmLeave(false);
   const leaveWizard = () => {
     setConfirmLeave(false);
     setView("detail");
@@ -138,7 +213,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     void refresh();
   };
 
-  // Esc 只在服务器页层级内上移：向导先确认，详情回根。
   const viewRef = useRef(view);
   viewRef.current = view;
   useEffect(() => {
@@ -155,7 +229,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [active, confirmLeave]);
 
-  // 再点已激活的「服务器」图标：向导先确认，详情回根。
   const lastRootSignalRef = useRef(rootSignal);
   useEffect(() => {
     if (rootSignal === lastRootSignalRef.current) return;
@@ -168,26 +241,25 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   }, [rootSignal]);
 
   return {
-    account,
     servers,
     catalog,
     loading,
     error,
+    refresh,
     selected,
     selectedId: selected?.server_id ?? null,
+    detailError,
+    identityLost: identity,
+    identityMessage: IDENTITY_LOST,
     view,
     confirmLeave,
-    loginOpen,
     select,
     resetToRoot,
-    openLogin,
     openWizard,
-    closeLogin,
-    signedIn,
-    requestLeaveWizard,
-    keepWizard,
+    reRegister,
     leaveWizard,
+    requestLeaveWizard: () => setConfirmLeave(true),
+    keepWizard: () => setConfirmLeave(false),
     ordered,
-    refresh,
   };
 }

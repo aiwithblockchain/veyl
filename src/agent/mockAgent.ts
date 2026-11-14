@@ -521,6 +521,11 @@ export class MockAgentBridge implements AgentBridge {
     return this.myServers.credentials(serverId);
   }
 
+  async myServerRegisterDevice() {
+    // 演示身份恢复：mock 里没有真实账户，给一组稳定的假 id。
+    return { account_id: "acct_mock", device_id: "dev_mock" };
+  }
+
   async myServerSshCredentials(serverId: string) {
     return this.myServers.sshCredentials(serverId);
   }

@@ -1,7 +1,9 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, MyServer, MyServerCatalog } from "../agent/bridge";
+import type { AgentEvent } from "../agent/protocol";
+import { AGENT_EVENTS } from "../agent/protocol";
 import { saveAccount } from "../myservers/account";
 import { useMyServers } from "../myservers/useMyServers";
 import { MyServersPage } from "./MyServersPage";
@@ -9,18 +11,27 @@ import { MyServersRail } from "./MyServersRail";
 
 const CATALOG: MyServerCatalog = {
   regions: [
-    { id: "nrt", name: "东京", continent: "asia" },
-    { id: "kix", name: "大阪", continent: "asia" },
-    { id: "icn", name: "首尔", continent: "asia" },
-    { id: "sgp", name: "新加坡", continent: "asia" },
-    { id: "lax", name: "洛杉矶", continent: "north_america" },
+    { id: "nyc1", name: "纽约 1", continent: "north_america" },
+    { id: "sgp1", name: "新加坡 1", continent: "asia" },
   ],
   plans: [
     {
-      id: "vc2-1c-1gb",
-      label: "1 核 · 1 GB 内存 · 25 GB 硬盘",
-      hourly_usd: 0.007,
-      monthly_usd: 5,
+      id: "s-1vcpu-512mb-10gb",
+      label: "1 核 · 512 MB",
+      hourly_usd: 0.00595,
+      monthly_usd: 4,
+    },
+    {
+      id: "s-1vcpu-1gb",
+      label: "1 核 · 1 GB",
+      hourly_usd: 0.00893,
+      monthly_usd: 6,
+    },
+    {
+      id: "s-1vcpu-2gb",
+      label: "1 核 · 2 GB",
+      hourly_usd: 0.01786,
+      monthly_usd: 12,
     },
   ],
   currency: "USD",
@@ -30,8 +41,8 @@ const CATALOG: MyServerCatalog = {
 function server(over: Partial<MyServer> = {}): MyServer {
   return {
     server_id: "srv_1",
-    name: "东京 · Vultr",
-    region: "nrt",
+    name: "新加坡 1 · DigitalOcean",
+    region: "sgp1",
     plan: "vc2-1c-1gb",
     state: "healthy",
     created_at: new Date(0).toISOString(),
@@ -45,38 +56,46 @@ function server(over: Partial<MyServer> = {}): MyServer {
   };
 }
 
-const FOUR: MyServer[] = [
-  server({ server_id: "srv_1", name: "东京 · Vultr" }),
-  server({ server_id: "srv_2", name: "洛杉矶 · Vultr", state: "installing", node_id: null }),
+const SERVERS: MyServer[] = [
+  server({ server_id: "srv_1", name: "新加坡 1 · DigitalOcean" }),
+  server({ server_id: "srv_2", name: "纽约 1 · DigitalOcean", state: "installing", node_id: null }),
   server({
     server_id: "srv_3",
-    name: "新加坡 · Vultr",
+    name: "法兰克福 1 · DigitalOcean",
     state: "error",
     node_id: null,
     failure: {
       stage: "installing",
       code: "install_failed",
-      message: "服务端没装好。这台已自动销毁。点「重新建一台」再试一次。",
+      message: "服务端没装好。这台还在，但没有可用节点。点「重新建一台」再试一次。",
       retryable: true,
     },
   }),
-  server({ server_id: "srv_4", name: "圣保罗 · Vultr" }),
 ];
 
-interface StubOptions {
-  servers?: MyServer[];
-  catalog?: MyServerCatalog;
-}
-
-function makeBridge(options: StubOptions = {}) {
-  const servers = options.servers ?? [];
+function makeBridge(servers: MyServer[] = SERVERS) {
+  const listeners = new Set<(event: AgentEvent) => void>();
   return {
-    myServerCatalog: vi.fn(async () => options.catalog ?? CATALOG),
+    myServerCatalog: vi.fn(async () => CATALOG),
     myServerList: vi.fn(async () => ({ servers })),
+    myServerGet: vi.fn(
+      async (serverId: string) =>
+        servers.find((item) => item.server_id === serverId) ??
+        server({ server_id: serverId }),
+    ),
+    subscribe: vi.fn((listener: (event: AgentEvent) => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    }),
+    emit: (event: AgentEvent) => {
+      for (const listener of listeners) listener(event);
+    },
     myServerCreate: vi.fn(async () => ({
       order_id: "ord_1",
       state: "pending_payment" as const,
-      region: "lax",
+      region: "nyc1",
       plan: "vc2-1c-1gb",
       amount_usd: 5,
       created_at: new Date(0).toISOString(),
@@ -87,7 +106,7 @@ function makeBridge(options: StubOptions = {}) {
     myServerCheckout: vi.fn(async () => ({
       order_id: "ord_1",
       state: "provisioning" as const,
-      region: "lax",
+      region: "nyc1",
       plan: "vc2-1c-1gb",
       amount_usd: 5,
       created_at: new Date(0).toISOString(),
@@ -96,29 +115,30 @@ function makeBridge(options: StubOptions = {}) {
       failure: null,
     })),
     myServerCancelOrder: vi.fn(),
-    myServerRebuild: vi.fn(async () => ({
-      newServerId: "srv_new",
-      state: "creating" as const,
-    })),
+    myServerRebuild: vi.fn(async () => ({ newServerId: "srv_new", state: "creating" as const })),
     myServerDestroy: vi.fn(async (id: string) =>
       server({ server_id: id, state: "destroyed", node_id: null }),
     ),
     myServerCredentials: vi.fn(),
-    myServerSshCredentials: vi.fn(async () => ({
-      host: "45.76.20.100",
-      port: 22,
-      username: "veyl",
-      auth_type: "password" as const,
-      password: "veyl-demo-2026",
-      public_key: null,
-      updated_at: new Date(0).toISOString(),
-    })),
+    myServerSshCredentials: vi.fn(),
   };
 }
 
 type StubBridge = ReturnType<typeof makeBridge>;
 
-function Harness({ bridge, rootSignal = 0 }: { bridge: StubBridge; rootSignal?: number }) {
+function Harness({
+  bridge,
+  rootSignal = 0,
+  joinGroupName = null,
+  onJoinServer = vi.fn(),
+  onUseServer = vi.fn(),
+}: {
+  bridge: StubBridge;
+  rootSignal?: number;
+  joinGroupName?: string | null;
+  onJoinServer?: (server: MyServer) => void;
+  onUseServer?: (nodeId: string, name: string) => void;
+}) {
   const state = useMyServers(bridge as unknown as AgentBridge, {
     active: true,
     rootSignal,
@@ -129,42 +149,44 @@ function Harness({ bridge, rootSignal = 0 }: { bridge: StubBridge; rootSignal?: 
         servers={state.servers}
         selectedId={state.selectedId}
         loading={state.loading}
-        account={state.account}
+        disabled={state.view === "wizard" || state.identityLost}
         onSelect={state.select}
         onNew={state.openWizard}
         onOpenSettings={() => {}}
       />
       <MyServersPage
         bridge={bridge as unknown as AgentBridge}
-        account={state.account}
         catalog={state.catalog}
         servers={state.servers}
         loading={state.loading}
         error={state.error}
+        detailError={state.detailError}
         selected={state.selected}
         view={state.view}
         confirmLeave={state.confirmLeave}
-        loginOpen={state.loginOpen}
-        onOpenLogin={state.openLogin}
-        onCloseLogin={state.closeLogin}
-        onSignedIn={state.signedIn}
+        identityLost={state.identityLost}
+        identityMessage={state.identityMessage}
+        joinGroupName={joinGroupName}
         onNew={state.openWizard}
-        onUseServer={() => {}}
+        onJoinServer={onJoinServer}
+        onUseServer={onUseServer}
         onChanged={() => void state.refresh()}
         onLeaveWizard={state.leaveWizard}
         onKeepWizard={state.keepWizard}
         onOrdered={state.ordered}
-        onResetToRoot={state.resetToRoot}
+        onReRegister={() => void state.reRegister()}
       />
     </>
   );
 }
 
-function renderHarness(bridge: StubBridge) {
-  const view = render(<Harness bridge={bridge} />);
+function renderHarness(bridge: StubBridge, joinGroupName: string | null = null) {
+  const view = render(<Harness bridge={bridge} joinGroupName={joinGroupName} />);
   return {
     rerenderWithSignal: (signal: number) =>
-      view.rerender(<Harness bridge={bridge} rootSignal={signal} />),
+      view.rerender(
+        <Harness bridge={bridge} joinGroupName={joinGroupName} rootSignal={signal} />,
+      ),
   };
 }
 
@@ -177,219 +199,348 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("服务器左栏与主从详情", () => {
-  it("未登录：中间是登录门，左栏提示登录", async () => {
+describe("我的服务器 destination", () => {
+  it("设备身份不可用：提示 + 重新注册设备入口", async () => {
     const bridge = makeBridge();
+    bridge.myServerList.mockRejectedValue({
+      code: "PRECONDITION_FAILED",
+      message: "身份需要重新注册",
+      details: { reason: "auth_required" },
+      retryable: true,
+    });
     renderHarness(bridge);
 
-    expect(await screen.findByText("登录后查看你的服务器", { selector: ".myservers__gate-text" })).toBeTruthy();
-    expect(screen.getByText("1 核 1 GB · $0.007/小时 · 约 $5/月")).toBeTruthy();
-    expect(screen.getByText("登录后查看你的服务器", { selector: ".myservers__rail-hint" })).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "这台设备的身份已丢失。已买的服务器仍在计费，这里无法管理。",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "登录" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "登录" }));
-    fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "me@example.com" } });
-    fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
-    fireEvent.change(screen.getByLabelText("验证码"), { target: { value: "123456" } });
-    fireEvent.click(
-      within(screen.getByRole("dialog", { name: "登录" })).getByRole("button", { name: "登录" }),
-    );
+    bridge.myServerList.mockClear();
+    bridge.myServerList.mockResolvedValue({ servers: SERVERS });
+    fireEvent.click(screen.getByRole("button", { name: "重新注册设备" }));
 
     await waitFor(() => expect(bridge.myServerList).toHaveBeenCalled());
-    expect(localStorage.getItem("veyl.myservers.account")).toBe("me@example.com");
-  });
-
-  it("左栏列出每台的名字与状态，默认选中第一台并在中间显示详情", async () => {
-    saveAccount("me@example.com");
-    renderHarness(makeBridge({ servers: FOUR }));
-
-    expect(await screen.findByRole("button", { name: /东京 · Vultr/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /洛杉矶 · Vultr/ }).textContent).toContain(
-      "安装中 65%",
-    );
-    expect(screen.getByRole("button", { name: /新加坡 · Vultr/ }).textContent).toContain(
-      "出错了",
-    );
-
-    expect(await screen.findByRole("heading", { level: 4, name: "东京 · Vultr" })).toBeTruthy();
-    expect(
-      screen.getByRole("button", { name: /东京 · Vultr/ }).getAttribute("aria-current"),
-    ).toBe("true");
-
-    fireEvent.click(screen.getByRole("button", { name: /洛杉矶 · Vultr/ }));
-    expect(await screen.findByRole("heading", { level: 4, name: "洛杉矶 · Vultr" })).toBeTruthy();
-    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("65");
-    expect(
-      screen.getByRole("button", { name: /洛杉矶 · Vultr/ }).getAttribute("aria-current"),
-    ).toBe("true");
-  });
-
-  it("详情不露节点 id；安装中显示四段进度", async () => {
-    saveAccount("me@example.com");
-    renderHarness(makeBridge({ servers: FOUR }));
-
-    expect(await screen.findByText("已就绪，可作为节点使用")).toBeTruthy();
-    expect(screen.queryByText("node_srv_1")).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: /洛杉矶 · Vultr/ }));
-    expect(await screen.findByText("正在安装 65%")).toBeTruthy();
-    ["正在建机器", "等待开机", "安装服务端", "检查是否可用"].forEach((label) =>
-      expect(screen.getAllByText(label).length).toBeGreaterThan(0),
+    await waitFor(() =>
+      expect(screen.queryByText(/这台设备的身份已丢失/)).toBeNull(),
     );
   });
 
-  it("出错那台：详情里有重新建一台", async () => {
-    saveAccount("me@example.com");
-    const bridge = makeBridge({ servers: FOUR });
+  it("空态显示目录价格；缺 1 GB 档时不显示价格", async () => {
+    const bridge = makeBridge([]);
     renderHarness(bridge);
+    await waitFor(() =>
+      expect(document.querySelector(".myservers__price")?.textContent).toContain(
+        "$0.00893/小时",
+      ),
+    );
+    cleanup();
 
-    fireEvent.click(await screen.findByRole("button", { name: /新加坡 · Vultr/ }));
-    expect(await screen.findByText(/服务端没装好/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "重新建一台" }));
-    await waitFor(() => expect(bridge.myServerRebuild).toHaveBeenCalledWith("srv_3", true));
+    const missing = makeBridge([]);
+    missing.myServerCatalog.mockResolvedValue({
+      ...CATALOG,
+      plans: CATALOG.plans.filter((plan) => plan.id !== "s-1vcpu-1gb"),
+    });
+    renderHarness(missing);
+    expect(
+      await screen.findByText("还没有服务器", { selector: ".myservers__empty-title" }),
+    ).toBeTruthy();
+    expect(document.querySelector(".myservers__price")).toBeNull();
   });
 
-  it("入口按状态出现：可用有两个入口；安装中、出错只剩销毁", async () => {
-    saveAccount("me@example.com");
-    renderHarness(makeBridge({ servers: FOUR }));
-
-    expect(await screen.findByRole("heading", { level: 4, name: "东京 · Vultr" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "用来建配置" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /SSH 登录/ })).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: /洛杉矶 · Vultr/ }));
-    expect(await screen.findByRole("heading", { level: 4, name: "洛杉矶 · Vultr" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "用来建配置" })).toBeNull();
-    expect(screen.queryByRole("button", { name: /SSH 登录/ })).toBeNull();
-    expect(screen.getByRole("button", { name: "销毁" })).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: /新加坡 · Vultr/ }));
-    expect(await screen.findByText(/服务端没装好/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "重新建一台" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "销毁" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "用来建配置" })).toBeNull();
-    expect(screen.queryByRole("button", { name: /SSH 登录/ })).toBeNull();
-  });
-
-  it("空态：中间只有一个「新建服务器」主按钮", async () => {
+  it("左栏列出服务器与状态，默认选中第一台", async () => {
     saveAccount("me@example.com");
     renderHarness(makeBridge());
 
-    expect(await screen.findByText("还没有服务器", { selector: ".myservers__empty-title" })).toBeTruthy();
-    // 左栏「+」是页头动作；中间空态块只留一个实心主按钮。
-    expect(document.querySelectorAll(".myservers .btn--primary")).toHaveLength(1);
-    expect(screen.getByText("还没有服务器", { selector: ".myservers__rail-hint" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /纽约 1 · DigitalOcean/ }).textContent).toContain(
+      "安装中 65%",
+    );
+    expect(screen.getByRole("button", { name: /法兰克福 1 · DigitalOcean/ }).textContent).toContain(
+      "出错了",
+    );
+    expect(
+      screen.getByRole("button", { name: /新加坡 1 · DigitalOcean/ }).getAttribute("aria-current"),
+    ).toBe("true");
+    expect(await screen.findByText("已就绪")).toBeTruthy();
   });
 
-  it("左栏「+」打开向导；Esc 先确认", async () => {
-    saveAccount("me@example.com");
-    renderHarness(makeBridge({ servers: FOUR }));
-
-    await screen.findByRole("heading", { level: 4, name: "东京 · Vultr" });
-    fireEvent.click(screen.getByRole("button", { name: "新建服务器" }));
-    expect(await screen.findByText("选择地区")).toBeTruthy();
-
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.getByText("还没下单，离开后这次选择不会保存。")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "离开" }));
-    expect(await screen.findByRole("heading", { level: 4, name: "东京 · Vultr" })).toBeTruthy();
-  });
-
-  it("详情 Esc 回根：重新选中第一台", async () => {
-    saveAccount("me@example.com");
-    renderHarness(makeBridge({ servers: FOUR }));
-
-    fireEvent.click(await screen.findByRole("button", { name: /圣保罗 · Vultr/ }));
-    expect(await screen.findByRole("heading", { level: 4, name: "圣保罗 · Vultr" })).toBeTruthy();
-
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(await screen.findByRole("heading", { level: 4, name: "东京 · Vultr" })).toBeTruthy();
-  });
-
-  it("再点服务器图标回根", async () => {
-    saveAccount("me@example.com");
-    const { rerenderWithSignal } = renderHarness(makeBridge({ servers: FOUR }));
-
-    fireEvent.click(await screen.findByRole("button", { name: /圣保罗 · Vultr/ }));
-    expect(await screen.findByRole("heading", { level: 4, name: "圣保罗 · Vultr" })).toBeTruthy();
-
-    rerenderWithSignal(1);
-    expect(await screen.findByRole("heading", { level: 4, name: "东京 · Vultr" })).toBeTruthy();
-  });
-
-  it("向导下单后回到详情并选中新机器", async () => {
-    saveAccount("me@example.com");
-    const bridge = makeBridge({ servers: FOUR });
+  it("收到 my-server-changed 后重新读取选中详情", async () => {
+    const bridge = makeBridge();
     renderHarness(bridge);
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建服务器" }));
-    fireEvent.click(await screen.findByRole("radio", { name: "洛杉矶" }));
-    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认下单" }));
+    await screen.findByText("已就绪");
+    const before = bridge.myServerGet.mock.calls.length;
 
-    await waitFor(() => expect(bridge.myServerCheckout).toHaveBeenCalledWith("ord_1"));
-    await waitFor(() => expect(bridge.myServerList).toHaveBeenCalledTimes(2));
-    expect(screen.queryByText("选择地区")).toBeNull();
+    act(() => {
+      bridge.emit({
+        name: AGENT_EVENTS.myServerChanged,
+        payload: {
+          contract_version: "2.13.0",
+          server_id: "srv_1",
+          state: "installing",
+          failure: null,
+          node_id: null,
+          at: new Date().toISOString(),
+          emitted_at: new Date().toISOString(),
+        },
+      });
+    });
+
+    await waitFor(() =>
+      expect(bridge.myServerGet.mock.calls.length).toBeGreaterThan(before),
+    );
   });
-});
 
-describe("详情、SSH 与销毁", () => {
-  it("SSH 折叠、密码默认打码；销毁要确认", async () => {
+  it("安装中：只有进度和销毁", async () => {
     saveAccount("me@example.com");
-    const bridge = makeBridge({ servers: FOUR });
+    renderHarness(makeBridge());
+
+    fireEvent.click(await screen.findByRole("button", { name: /纽约 1 · DigitalOcean/ }));
+    expect(await screen.findByText("正在安装 65%")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "用来建配置" })).toBeNull();
+    expect(screen.getByRole("button", { name: "销毁" })).toBeTruthy();
+  });
+
+  it("出错：重新建一台 + 销毁", async () => {
+    saveAccount("me@example.com");
+    const bridge = makeBridge();
     renderHarness(bridge);
 
-    await screen.findByRole("heading", { level: 4, name: "东京 · Vultr" });
-    expect(await screen.findByText("45.76.20.100")).toBeTruthy();
-    expect(screen.queryByText("veyl-demo-2026")).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: /法兰克福 1 · DigitalOcean/ }));
+    expect(await screen.findByText(/服务端没装好/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重新建一台" }));
+    await waitFor(() => expect(bridge.myServerRebuild).toHaveBeenCalledWith("srv_3", true));
+    expect(screen.getByRole("button", { name: "销毁" })).toBeTruthy();
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: /SSH 登录/ }));
-    expect(await screen.findByText(/••••••••/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "显示" }));
-    expect(screen.getByText("veyl-demo-2026")).toBeTruthy();
+  it("创建中销毁：确认文案说明会中断安装", async () => {
+    saveAccount("me@example.com");
+    renderHarness(makeBridge());
 
+    fireEvent.click(await screen.findByRole("button", { name: /纽约 1 · DigitalOcean/ }));
+    await screen.findByText("正在安装 65%");
+    fireEvent.click(screen.getByRole("button", { name: "销毁" }));
+    expect(
+      screen.getByText("取消创建并销毁这台服务器？正在进行的安装会中断。"),
+    ).toBeTruthy();
+  });
+
+  it("可用时销毁：二次确认后调用 myServerDestroy", async () => {
+    saveAccount("me@example.com");
+    const bridge = makeBridge();
+    renderHarness(bridge);
+
+    await screen.findByText("已就绪");
     fireEvent.click(screen.getByRole("button", { name: "销毁" }));
     expect(screen.getByText("销毁后这台服务器和它的节点都不能再用。")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "确认销毁" }));
-    await waitFor(() => expect(bridge.myServerDestroy).toHaveBeenCalledWith("srv_1", true));
+    await waitFor(() =>
+      expect(bridge.myServerDestroy).toHaveBeenCalledWith("srv_1", true),
+    );
+  });
+
+  it("零台：空态只有一个主按钮", async () => {
+    saveAccount("me@example.com");
+    renderHarness(makeBridge([]));
+
+    expect(await screen.findByText("还没有服务器", { selector: ".myservers__empty-title" })).toBeTruthy();
+    expect(document.querySelectorAll(".myservers .btn--primary")).toHaveLength(1);
+  });
+
+  it("Esc 回根：重新选中第一台；再点图标同理", async () => {
+    saveAccount("me@example.com");
+    const { rerenderWithSignal } = renderHarness(makeBridge());
+
+    fireEvent.click(await screen.findByRole("button", { name: /法兰克福 1 · DigitalOcean/ }));
+    expect(await screen.findByText(/服务端没装好/)).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(await screen.findByText("已就绪")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /法兰克福 1 · DigitalOcean/ }));
+    rerenderWithSignal(1);
+    expect(await screen.findByText("已就绪")).toBeTruthy();
+  });
+
+  it("左栏「+」打开单页向导：三区块、默认中档、底部汇总与唯一主按钮", async () => {
+    saveAccount("me@example.com");
+    renderHarness(makeBridge());
+
+    await screen.findByText("已就绪");
+    fireEvent.click(screen.getByRole("button", { name: "新建服务器" }));
+    expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
+
+    expect(screen.getByRole("radiogroup", { name: "地区" })).toBeTruthy();
+    expect(screen.getByText("亚洲")).toBeTruthy();
+    expect(screen.getByText("北美洲")).toBeTruthy();
+    expect(screen.getByRole("radiogroup", { name: "服务器类型" })).toBeTruthy();
+    expect(screen.getByText("Ubuntu 24.04 LTS")).toBeTruthy();
+
+    // 默认地区按大洲渲染顺序取第一组第一个，不是目录数组的第一个。
+    expect(
+      screen.getByRole("radio", { name: "新加坡 1" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    // 向导期间左栏行不可选，避免无确认丢掉已选。
+    const railRow = screen.getByRole("button", {
+      name: /纽约 1 · DigitalOcean/,
+    }) as HTMLButtonElement;
+    expect(railRow.disabled).toBe(true);
+    expect(railRow.getAttribute("aria-disabled")).toBe("true");
+
+    // 三档按目录顺序排；默认选中 1 GB 那档。
+    expect(
+      screen.getByRole("radio", { name: /1 GB/ }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(screen.getByText("入门")).toBeTruthy();
+    expect(screen.getByText("标准")).toBeTruthy();
+    expect(screen.getByText("进阶")).toBeTruthy();
+
+    expect(document.querySelector(".wizard-foot__price")?.textContent).toContain(
+      "约 $6/月 · $0.00893/小时",
+    );
+    expect(document.querySelectorAll(".myservers .btn--primary")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "创建服务器" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "下一步" })).toBeNull();
+    expect(screen.queryByText("确认订单")).toBeNull();
+    expect(screen.queryByRole("button", { name: "返回" })).toBeNull();
+  });
+
+  it("服务器类型卡 ↑↓ 切换选中，汇总跟着变", async () => {
+    saveAccount("me@example.com");
+    renderHarness(makeBridge());
+
+    await screen.findByText("已就绪");
+    fireEvent.click(screen.getByRole("button", { name: "新建服务器" }));
+    const group = await screen.findByRole("radiogroup", { name: "服务器类型" });
+    const oneGb = within(group).getByRole("radio", {
+      name: /1 GB/,
+    }) as HTMLButtonElement;
+    oneGb.focus();
+
+    fireEvent.keyDown(oneGb, { key: "ArrowDown" });
+    expect(
+      within(group).getByRole("radio", { name: /2 GB/ }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(document.querySelector(".wizard-foot__price")?.textContent).toContain(
+      "约 $12/月 · $0.01786/小时",
+    );
+
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "ArrowUp" });
+    expect(
+      within(group).getByRole("radio", { name: /1 GB/ }).getAttribute("aria-checked"),
+    ).toBe("true");
+  });
+
+  it("创建服务器按所选地区与档位下单", async () => {
+    saveAccount("me@example.com");
+    const bridge = makeBridge();
+    renderHarness(bridge);
+
+    await screen.findByText("已就绪");
+    fireEvent.click(screen.getByRole("button", { name: "新建服务器" }));
+    fireEvent.click(await screen.findByRole("radio", { name: "纽约 1" }));
+    fireEvent.click(await screen.findByRole("radio", { name: /2 GB/ }));
+    fireEvent.click(screen.getByRole("button", { name: "创建服务器" }));
+
+    await waitFor(() =>
+      expect(bridge.myServerCreate).toHaveBeenCalledWith({
+        region: "nyc1",
+        plan: "s-1vcpu-2gb",
+        idempotencyKey: expect.any(String),
+      }),
+    );
+    expect(bridge.myServerCheckout).toHaveBeenCalledWith("ord_1");
+  });
+
+  it("创建失败按可重试与否给不同下一步", async () => {
+    const bridge = makeBridge();
+    bridge.myServerCreate.mockRejectedValueOnce({
+      code: "UPSTREAM_ERROR",
+      message: "服务器没建起来。",
+      details: { reason: "instance_create_failed" },
+      retryable: true,
+    });
+    renderHarness(bridge);
+
+    await screen.findByText("已就绪");
+    fireEvent.click(screen.getByRole("button", { name: "新建服务器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建服务器" }));
+    expect(
+      await screen.findByText("可以点「创建服务器」再试一次。"),
+    ).toBeTruthy();
+
+    bridge.myServerCreate.mockRejectedValueOnce({
+      code: "PRECONDITION_FAILED",
+      message: "这个地区暂时没货。",
+      details: { reason: "region_unavailable" },
+      retryable: false,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建服务器" }));
+    expect(
+      await screen.findByText("换一个地区或档位，再点「创建服务器」。"),
+    ).toBeTruthy();
+  });
+
+  it("读不到目录：一句提示 + 重试，重试成功后进入向导", async () => {
+    saveAccount("me@example.com");
+    const bridge = makeBridge();
+    bridge.myServerCatalog.mockRejectedValue(new Error("catalog down"));
+    renderHarness(bridge);
+
+    await screen.findByText("已就绪");
+    fireEvent.click(screen.getByRole("button", { name: "新建服务器" }));
+    expect(await screen.findByText("读不到可选地区")).toBeTruthy();
+
+    bridge.myServerCatalog.mockResolvedValue(CATALOG);
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    expect(
+      await screen.findByRole("radiogroup", { name: "服务器类型" }),
+    ).toBeTruthy();
+  });
+
+  it("向导 Esc 先确认放弃", async () => {
+    saveAccount("me@example.com");
+    renderHarness(makeBridge());
+
+    await screen.findByText("已就绪");
+    fireEvent.click(screen.getByRole("button", { name: "新建服务器" }));
+    expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByText("还没下单，离开后这次选择不会保存。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "继续填写" }));
+    expect(screen.queryByText("还没下单，离开后这次选择不会保存。")).toBeNull();
   });
 
   it("用来建配置把 node_id 交回新建流程", async () => {
     saveAccount("me@example.com");
-    const bridge = makeBridge({ servers: FOUR });
     const onUseServer = vi.fn();
-    function One() {
-      const state = useMyServers(bridge as unknown as AgentBridge, {
-        active: true,
-        rootSignal: 0,
-      });
-      return (
-        <MyServersPage
-          bridge={bridge as unknown as AgentBridge}
-          account={state.account}
-          catalog={state.catalog}
-          servers={state.servers}
-          loading={state.loading}
-          error={state.error}
-          selected={state.selected}
-          view={state.view}
-          confirmLeave={state.confirmLeave}
-          loginOpen={state.loginOpen}
-          onOpenLogin={state.openLogin}
-          onCloseLogin={state.closeLogin}
-          onSignedIn={state.signedIn}
-          onNew={state.openWizard}
-          onUseServer={onUseServer}
-          onChanged={() => {}}
-          onLeaveWizard={state.leaveWizard}
-          onKeepWizard={state.keepWizard}
-          onOrdered={state.ordered}
-          onResetToRoot={state.resetToRoot}
-        />
-      );
-    }
-    render(<One />);
+    render(<Harness bridge={makeBridge()} onUseServer={onUseServer} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "用来建配置" }));
-    expect(onUseServer).toHaveBeenCalledWith("node_srv_1", "东京 · Vultr");
+    await screen.findByText("已就绪");
+    fireEvent.click(screen.getByRole("button", { name: "用来建配置" }));
+    expect(onUseServer).toHaveBeenCalledWith("node_srv_1", "新加坡 1 · DigitalOcean");
+  });
+
+  it("带着目标组进来：顶部横幅，可用那台给加入动作，安装中不给", async () => {
+    saveAccount("me@example.com");
+    const onJoinServer = vi.fn();
+    render(<Harness bridge={makeBridge()} joinGroupName="上海 1 号" onJoinServer={onJoinServer} />);
+
+    expect(
+      await screen.findByText("选择一台服务器，把节点加入「上海 1 号」"),
+    ).toBeTruthy();
+    expect(
+      await screen.findByRole("button", { name: "加入「上海 1 号」" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "用来建配置" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /纽约 1 · DigitalOcean/ }));
+    expect(await screen.findByText("正在安装 65%")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "加入「上海 1 号」" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /新加坡 1 · DigitalOcean/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "加入「上海 1 号」" }));
+    expect(onJoinServer).toHaveBeenCalled();
   });
 });

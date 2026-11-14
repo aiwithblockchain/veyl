@@ -412,6 +412,28 @@ function registeredCommands() {
   return names;
 }
 
+/** lib.rs 里有 debug / release 两份 generate_handler!，逐份解析。 */
+function registeredCommandLists() {
+  const rs = read("src-tauri/src/lib.rs");
+  const lists = [];
+  for (
+    let open = rs.indexOf("generate_handler![");
+    open >= 0;
+    open = rs.indexOf("generate_handler![", open + 1)
+  ) {
+    const close = rs.indexOf("]", open);
+    if (close < 0) throw new Error("lib.rs 的 generate_handler! 没有闭合的 ]");
+    const blob = rs.slice(open, close);
+    const names = new Set();
+    for (const m of blob.matchAll(/\b([a-z0-9_]+)\s*(?:,|\s*$)/gm)) {
+      if (m[1] !== "generate_handler") names.add(m[1]);
+    }
+    lists.push(names);
+  }
+  if (lists.length === 0) throw new Error("未在 lib.rs 找到 generate_handler!");
+  return lists;
+}
+
 /**
  * 从 tauriBridge.ts 抽出 `call("name")` / `call<T>("name", {...})`。
  * 泛型可能跨行（`call<{\n ... \n}>("x"`），所以按括号配对扫描，不用正则。
@@ -494,6 +516,123 @@ check("命令在文档 / 实现 / 注册 / 前端四方一致", () => {
     if (!impl.has(name)) problems.push(`前端 invoke 了一个不存在的命令：${name}`);
     if (!doc.has(name)) problems.push(`前端在调、但 commands.md §2 没写：${name}`);
   }
+  return problems;
+});
+
+// --- 6b：my_server_catalog 的定点检查 ---
+//
+// 四条通用检查覆盖不到「某条命令只注册了一份 handler」和「契约返回字段与前端
+// 类型漂移」。这条链路接的是控制面真实接口，接错不会在编译期报错，单独钉住。
+
+function myServerCatalogContractFields() {
+  const md = read("docs/contracts/commands.md");
+  const block = md.match(/type MyServerCatalogData = \{([\s\S]*?)\n\};/);
+  if (!block) return null;
+  const body = block[1];
+  const top = [...body.matchAll(/^  ([a-z_][a-z0-9_]*):/gm)].map((m) => m[1]);
+  const regionBlock = body.match(/regions: Array<\{([\s\S]*?)\n  \}>/);
+  const planBlock = body.match(/plans: Array<\{([\s\S]*?)\n  \}>/);
+  return {
+    top,
+    regions: regionBlock
+      ? [...regionBlock[1].matchAll(/^\s{4}([a-z_][a-z0-9_]*):/gm)].map((m) => m[1])
+      : [],
+    plans: planBlock
+      ? [...planBlock[1].matchAll(/^\s{4}([a-z_][a-z0-9_]*):/gm)].map((m) => m[1])
+      : [],
+  };
+}
+
+function tsInterfaceFields(name) {
+  const ts = read("src/agent/bridge.ts");
+  const block = ts.match(
+    new RegExp(`export interface ${name} \\{([\\s\\S]*?)\\n\\}`),
+  );
+  if (!block) return null;
+  return [...block[1].matchAll(/^\s*([a-z_][a-z0-9_]*)\??\s*:/gm)].map((m) => m[1]);
+}
+
+function sameFieldSet(left, right) {
+  const a = [...new Set(left)].sort();
+  const b = [...new Set(right)].sort();
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+check("my_server_catalog：契约、实现、前端调用一致", () => {
+  const doc = contractCommands();
+  const impl = rustCommands();
+  const ui = new Set(uiCalls().map((c) => c.name));
+  const problems = [];
+  if (!doc.has("my_server_catalog")) {
+    problems.push("commands.md §2 缺少 my_server_catalog");
+  }
+  if (!impl.has("my_server_catalog")) {
+    problems.push("agent/commands.rs 缺少 #[tauri::command] my_server_catalog");
+  } else if (impl.get("my_server_catalog").length > 0) {
+    problems.push("my_server_catalog 不应有入参");
+  }
+  if (!ui.has("my_server_catalog")) {
+    problems.push("tauriBridge.ts 没有调用 my_server_catalog");
+  }
+  return problems;
+});
+
+check("my_server_catalog：debug 与 release 两份 generate_handler 都注册", () => {
+  const lists = registeredCommandLists();
+  const problems = [];
+  lists.forEach((names, index) => {
+    if (!names.has("my_server_catalog")) {
+      problems.push(`第 ${index + 1} 份 generate_handler 未注册 my_server_catalog`);
+    }
+  });
+  return problems;
+});
+
+check("my_server_catalog：契约返回字段与 bridge.ts 的 MyServerCatalog 一致", () => {
+  const contract = myServerCatalogContractFields();
+  if (!contract) {
+    return ["commands.md §7.14 未找到 MyServerCatalogData 类型"];
+  }
+  const problems = [];
+  const pairs = [
+    ["MyServerCatalog", contract.top],
+    ["MyServerRegion", contract.regions],
+    ["MyServerPlan", contract.plans],
+  ];
+  for (const [name, expected] of pairs) {
+    const actual = tsInterfaceFields(name);
+    if (!actual) {
+      problems.push(`src/agent/bridge.ts 缺少 ${name}`);
+    } else if (!sameFieldSet(expected, actual)) {
+      problems.push(
+        `${name} 字段不一致：契约 [${expected.join(", ")}] / bridge [${actual.join(", ")}]`,
+      );
+    }
+  }
+  return problems;
+});
+
+check("my_server_register_device：契约、实现、双列表注册、前端调用一致", () => {
+  const doc = contractCommands();
+  const impl = rustCommands();
+  const ui = new Set(uiCalls().map((c) => c.name));
+  const problems = [];
+  if (!doc.has("my_server_register_device")) {
+    problems.push("commands.md §2 缺少 my_server_register_device");
+  }
+  if (!impl.has("my_server_register_device")) {
+    problems.push("agent/commands.rs 缺少 #[tauri::command] my_server_register_device");
+  } else if (impl.get("my_server_register_device").length > 0) {
+    problems.push("my_server_register_device 不应有入参");
+  }
+  if (!ui.has("my_server_register_device")) {
+    problems.push("tauriBridge.ts 没有调用 my_server_register_device");
+  }
+  registeredCommandLists().forEach((names, index) => {
+    if (!names.has("my_server_register_device")) {
+      problems.push(`第 ${index + 1} 份 generate_handler 未注册 my_server_register_device`);
+    }
+  });
   return problems;
 });
 

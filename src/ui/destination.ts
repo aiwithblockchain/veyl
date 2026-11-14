@@ -1,14 +1,16 @@
 import type { StorageLike } from "./panelPreference";
 
-export type Destination = "client" | "servers";
+export type Destination = "client" | "groups" | "servers";
 
 export const DESTINATION_KEY = "veyl.ui.destination";
 export const DESTINATION_VERSION_KEY = "veyl.ui.destinationVersion";
 /** 界面改版版本：变化后旧记录作废，回到默认的客户端。 */
-export const DESTINATION_VERSION = "servers-1";
+export const DESTINATION_VERSION = "destinations-3";
 
 function parse(value: string | null): Destination | null {
-  return value === "client" || value === "servers" ? value : null;
+  return value === "client" || value === "groups" || value === "servers"
+    ? value
+    : null;
 }
 
 /** 启动落点：没有记录、记录损坏、版本不符时一律回客户端。 */
