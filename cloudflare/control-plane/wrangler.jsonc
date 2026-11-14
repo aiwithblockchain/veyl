@@ -1,0 +1,45 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "veyl-control-plane",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-11-01",
+	"observability": {
+		"enabled": true,
+		"head_sampling_rate": 1,
+		"logs": {
+			"enabled": true,
+			"invocation_logs": true
+		}
+	},
+	// 让 Worker 尽量在离上游（Vultr API）近的机房执行，出口 IP 随之变化。
+	"placement": {
+		"mode": "smart"
+	},
+	// 默认环境 = 生产。部署：npm run deploy
+	"vars": {
+		"ENVIRONMENT": "production",
+		// 写进 cloud-init 的回传地址；必须与部署后的实际地址一致。
+		"ENROLL_BASE_URL": "https://veyl-control-plane.ribencong.workers.dev"
+	},
+	// Secrets（通过 wrangler secret put 设置，不写在此文件）：
+	// - DO_API_TOKEN（DigitalOcean；缺省时 /v1/catalog 返回 503）
+	// - VULTR_API_KEY（历史遗留，仅旧调试路由使用；供应商已换 DO）
+	"env": {
+		// 开发 / 联调环境。部署：npm run deploy:dev
+		"dev": {
+			"name": "veyl-control-plane-dev",
+			"vars": {
+				"ENVIRONMENT": "dev",
+				"ENROLL_BASE_URL": "https://veyl-control-plane-dev.ribencong.workers.dev"
+			},
+			// 代码里统一用 env.DB；生产环境后面单独建库再加一条顶层配置。
+			"d1_databases": [
+				{
+					"binding": "DB",
+					"database_name": "veyl-control-plane-dev",
+					"database_id": "0b723c86-c615-4460-b2a9-a09ecd19e960"
+				}
+			]
+		}
+	}
+}
