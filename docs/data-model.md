@@ -1,7 +1,7 @@
 # 数据模型
 
-> 版本：`5`（对应契约 `commands.md` 2.18.0 / `runtime.md` 2.8.0）
-> 日期：2026-11-12
+> 版本：`6`（对应契约 `commands.md` 2.23.0 / `events.md` 2.13.0 / `tools.md` 3.12.0 / `runtime.md` 2.8.0）
+> 日期：2026-11-14
 > 范围：配置、节点、问题、布局，以及它们与 `secrets.enc`、种子缓存的关系
 > 依据：`docs/configs-and-nav.md` §3、§8，`docs/config-execution.md` §6–§10，`docs/issue-management.md` §3、`docs/center-panel.md` §3
 > 状态：待 PM 审核（批 0）
@@ -131,7 +131,7 @@ CREATE TABLE nodes (
     -- secrets.enc 里的键，固定为 'node:' || id。明文密码永不落库。
     password_ref TEXT NOT NULL,
     -- 来源只影响去重与刷新策略，不影响使用
-    source       TEXT NOT NULL CHECK (source IN ('seed', 'url', 'manual')),
+    source       TEXT NOT NULL CHECK (source IN ('seed', 'url', 'manual', 'owned')),
     -- 去重键：sha256(name \x1f server \x1f port \x1f method) 的十六进制。
     -- seed 刷新按它 upsert；URL 导入按它判重。手动创建的节点也计算，便于将来合并。
     source_key   TEXT NOT NULL,
@@ -147,6 +147,7 @@ CREATE INDEX idx_nodes_server ON nodes (server, port);
 - **密码不在本表**。`password_ref` 是冗余列（等于 `'node:' || id`），但显式存下来是为了让「凭据在外部」这件事在 schema 里看得见，而不是靠命名约定。
 - `method` **不加 CHECK 枚举**：Shadowsocks 方法列表会随 sing-box 版本增长，白名单是应用层常量（`nodes::SUPPORTED_METHODS`）。把白名单写进 CHECK，每次扩列表都要重建表。
 - `server` 允许域名与 IP；手动模式**允许私网地址**（用户可能连自己的内网服务器）。私网限制只加在 `node_import_url` 的抓取侧（SSRF），不加在数据层。
+- `source = 'owned'` 是「我的服务器」下发节点（云服务器代购，`my-servers.md` §19.8）：凭据仍只存 `secrets.enc`，节点行本身不含密码；服务器销毁后节点行保留，连接时按「服务器已销毁」报错。
 
 ### 3.3 `config_nodes` — 配置与节点的多对多
 
@@ -367,6 +368,32 @@ AI 在对话里确定的地区，只由 AI 工具 `SetUserRegion` 写入（`tool
 | 消费方 | 建连、测速、`route_get.detected_region`、`system_region` 四处同源；未知时按「无本地直连层、全部走 VPN」生成 |
 
 写入成功发 `region-changed`（`events.md`）；设置键本身不改任何配置行，也不触发重连。
+
+### 3.11 `my_servers` — 我的服务器本地镜像（6 新增）
+
+控制面 `servers` 的本地副本，只用于离线展示与节点关联；**控制面仍是唯一事实源**，本表不含任何凭据。
+
+```sql
+CREATE TABLE my_servers (
+    id             TEXT PRIMARY KEY,          -- 控制面 server_id（srv_...）
+    provider       TEXT NOT NULL DEFAULT 'digitalocean',
+    name           TEXT NOT NULL,
+    region         TEXT NOT NULL,
+    plan           TEXT NOT NULL,
+    state          TEXT NOT NULL,             -- MyServerState，见 commands.md §7.15
+    node_id        TEXT REFERENCES nodes (id) ON DELETE SET NULL,
+    hourly_usd     REAL NOT NULL,
+    monthly_usd    REAL NOT NULL,
+    created_at     INTEGER NOT NULL,          -- Unix 毫秒
+    updated_at     INTEGER NOT NULL,
+    last_synced_at INTEGER NOT NULL
+);
+CREATE INDEX idx_my_servers_created ON my_servers (created_at DESC);
+```
+
+- `state = 'destroyed'` 的行**不进列表**（`commands.md` §7.15；界面不留墓碑行），行本身保留给离线诊断。
+- `node_id` 在凭据验签落库后写入；`ON DELETE SET NULL` 保证删节点不会连带删服务器记录。
+- 本表是**破坏性 schema 变更**（版本 5 → 6），按项目惯例整体重建：只有一份 `001_init.sql`，旧库打开时清空重建。
 
 ---
 

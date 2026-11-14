@@ -658,9 +658,9 @@ https://cdn.veyl.local/runtime/artifacts/{upstream_version}/{platform}-{arch}.{e
 ```json
 {
   "guide_id": "gd_01J...",
-  "recipe_version": "vultr/ubuntu-24.04/2026-10-01",
+  "recipe_version": "digitalocean/ubuntu-24.04/2026-11-14",
   "steps": [
-    { "id": "signup", "title": "注册 Vultr 账号", "url": "https://..." },
+    { "id": "signup", "title": "注册 DigitalOcean 账号", "url": "https://..." },
     { "id": "billing", "title": "绑定支付方式" },
     { "id": "deploy", "title": "创建服务器" },
     { "id": "userdata", "title": "粘贴启动脚本", "payload": "cloud-init..." },

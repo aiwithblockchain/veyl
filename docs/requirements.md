@@ -204,7 +204,7 @@ guide.start(provider, region, budget)
 - 一键销毁，二次确认。
 
 **F-2.6 支持范围（v1）**
-- 厂商：先接 Vultr，再扩 Hetzner、DigitalOcean、AWS Lightsail。
+- 厂商：先接 DigitalOcean，再扩 Hetzner、AWS Lightsail（Vultr 的 API 拒绝 Cloudflare Worker 出口，暂不列入）。
 - 协议：`VLESS + Reality`、`Hysteria2`。
 - 系统：Ubuntu 22.04/24.04。
 - 服务端运行时：官方 sing-box，与客户端同版本清单。

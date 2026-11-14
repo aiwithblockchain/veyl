@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.11.0`
+> 契约版本：`3.12.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.11.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.12.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.11.0";
+  contract_version: "3.12.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -317,6 +317,7 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 45 | `RulesUpdate` | `RulesUpdateTool` | 更新规则数据（未连接时排队） | `Write` | 中 |
 | 46 | `IssueReport` | `IssueReportTool` | 生成问题报告文件夹（两阶段，仅写固定目录） | `Write` | 低（只写桌面报告目录） |
 | 47 | `SetUserRegion` | `SetUserRegionTool` | 记录用户所在地区（AI 唯一写入路径） | `Write` | 低（只写本地设置） |
+| 48 | `MyServers` | `MyServersTool` | 我的服务器列表与状态（只读） | `ReadOnly` | 只读 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
@@ -380,6 +381,8 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(RulesUpdateTool::new(rules.clone(), rt.clone())),
     // 地区
     Box::new(SetUserRegionTool::new(store.clone())),
+    // 我的服务器（只读）
+    Box::new(MyServersTool::new(services.clone())),
 ];
 ```
 
@@ -866,7 +869,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.11.0";
+  contract_version: "3.12.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1029,7 +1032,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.11.0";
+  contract_version: "3.12.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1928,6 +1931,28 @@ type CoreUpgradeData = {
 
 ---
 
+### 4.48 `MyServers`（我的服务器，3.12.0 新增）
+
+只读地列出「我的服务器」与状态。**建机、销毁、取凭据只能由用户点界面**，没有对应的 AI 工具。
+
+```json
+{
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}
+```
+
+- `PermissionLevel::ReadOnly`；不访问云厂商 API，只读 Host 已有的服务器列表（与 UI 同一份）。
+- `data`：`{ servers: [{ server_id, name, region, state, node_ready, monthly_usd, failure }] }`。
+  - `state` 取值见 `commands.md` §7.15；`node_ready` 表示是否已可用来建配置。
+  - **不返回 IP、端口、节点 id、密码**；凭据永不进 AI 上下文。
+- 列表为空是合法结果（`ok: true`，`servers: []`）。
+- 身份未就绪 / 控制面不可用 → 按通用错误上报（`UPSTREAM_ERROR` / `PRECONDITION_FAILED`），不编造数据。
+- `display`：成功 `text`「共 N 台服务器」，`facts` 放「名称 · 地区 · 状态」；失败 `text`「没能读到服务器列表，稍后再试」。
+
+---
+
 ## 5. 工具间协作约定
 
 ### 5.1 标准连接链路
@@ -2028,6 +2053,14 @@ type CoreUpgradeData = {
 ---
 
 ## 8. 变更记录
+
+### 3.12.0（2026-11-14，我的服务器只读工具）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.12.0`；新增 §4.48 `MyServers`（`ReadOnly`）：列出我的服务器与状态，不返回 IP、端口、节点 id、密码 | 新增工具 | `docs/design/my-servers.md` §19.9 / §10.5 |
+| 2 | **不新增**购买 / 销毁 / 凭据工具；这些只能由用户点界面 | 明确不做 | §10.5 |
+| 3 | 实现侧常量 `tools/envelope.rs::CONTRACT_VERSION` 同步 3.12.0 | 元数据 | 同批 |
 
 ### 3.11.0（2026-11-13，连接前自动停旧连接）
 
