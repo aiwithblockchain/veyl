@@ -115,6 +115,25 @@ pub fn delete(conn: &Connection, id: &str) -> StoreResult<bool> {
     Ok(changed > 0)
 }
 
+/// 用控制面一次成功返回的完整 id 集合对齐本地镜像：不在集合里的行删除。
+///
+/// 集合为空表示云端一台都没有，直接清空。只删 `my_servers`，**不碰 `nodes`**：
+/// owned 节点可能正被某个配置引用，删节点会打断配置。
+pub fn retain_only(conn: &Connection, ids: &[&str]) -> StoreResult<usize> {
+    if ids.is_empty() {
+        return conn
+            .execute("DELETE FROM my_servers", [])
+            .map_err(StoreError::from);
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("DELETE FROM my_servers WHERE id NOT IN ({placeholders})");
+    conn.execute(&sql, rusqlite::params_from_iter(ids.iter().copied()))
+        .map_err(StoreError::from)
+}
+
 fn row_to_server(row: &rusqlite::Row<'_>) -> rusqlite::Result<MyServerRow> {
     Ok(MyServerRow {
         id: row.get(0)?,
@@ -172,6 +191,56 @@ mod tests {
         upsert(&conn, &new_server("srv_2", "destroyed")).unwrap();
         let ids: Vec<_> = list(&conn).unwrap().into_iter().map(|row| row.id).collect();
         assert_eq!(ids, vec!["srv_1"]);
+    }
+
+    #[test]
+    fn an_empty_remote_set_clears_the_mirror() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        upsert(&conn, &new_server("srv_1", "healthy")).unwrap();
+        upsert(&conn, &new_server("srv_2", "booting")).unwrap();
+        assert_eq!(retain_only(&conn, &[]).unwrap(), 2);
+        assert!(list(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ids_present_in_the_remote_set_are_kept() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        upsert(&conn, &new_server("srv_1", "healthy")).unwrap();
+        upsert(&conn, &new_server("srv_2", "booting")).unwrap();
+        assert_eq!(retain_only(&conn, &["srv_1", "srv_2"]).unwrap(), 0);
+        assert_eq!(list(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn ids_missing_from_the_remote_set_are_deleted_without_touching_nodes() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        crate::store::configs::upsert_node(
+            &conn,
+            &crate::store::NewNode {
+                id: "nd_1",
+                name: "Tokyo",
+                server: "203.0.113.10",
+                port: 20343,
+                method: "aes-256-gcm",
+                password_ref: "node:nd_1",
+                source: crate::store::configs::SOURCE_OWNED,
+                source_key: "srv_2",
+            },
+        )
+        .unwrap();
+        upsert(&conn, &new_server("srv_1", "healthy")).unwrap();
+        upsert(&conn, &new_server("srv_2", "booting")).unwrap();
+        set_node(&conn, "srv_2", "nd_1").unwrap();
+
+        assert_eq!(retain_only(&conn, &["srv_1"]).unwrap(), 1);
+        assert!(get(&conn, "srv_2").unwrap().is_none());
+        // owned 节点可能被配置引用：镜像收敛不能删节点行。
+        assert!(crate::store::configs::get_node(&conn, "nd_1")
+            .unwrap()
+            .is_some());
     }
 
     #[test]

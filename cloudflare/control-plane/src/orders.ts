@@ -47,8 +47,14 @@ function orderView(row: OrderRow) {
     created_at: new Date(row.created_at).toISOString(),
     expires_at: row.expires_at ? new Date(row.expires_at).toISOString() : null,
     server_id: row.server_id,
+    // 客户端要求 code / message / retryable 三个字段齐全才认这条失败（契约见 commands.md）。
     failure: row.failure_code
-      ? { code: row.failure_code, stage: row.failure_stage, retryable: false }
+      ? {
+          code: row.failure_code,
+          message: "服务器没建成，这笔订单已结束，没有产生服务器",
+          stage: row.failure_stage,
+          retryable: false,
+        }
       : null,
   };
 }
@@ -237,10 +243,22 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
       const now = Date.now();
       const serverId = randomId("srv_");
       const port = await pickPort(db, identity.accountId);
+      // 认领订单必须带状态守卫：双击、重放、两个窗口同时结账时只有一个能把
+      // pending_payment 推进到 provisioning，否则同一订单会建出两台机器，
+      // 其中一台成为没人管的计费实例。
+      const claim = await db
+        .prepare(
+          "UPDATE orders SET state = 'provisioning', paid_at = ?, server_id = ? " +
+            "WHERE id = ? AND state = 'pending_payment'",
+        )
+        .bind(now, serverId, row.id)
+        .run();
+      const claimed = (claim as { meta?: { changes?: number } }).meta?.changes ?? 0;
+      if (claimed === 0) {
+        const current = await loadOrder(db, identity.accountId, orderId);
+        return { status: 200, body: orderView(current as OrderRow) };
+      }
       await db.batch([
-        db
-          .prepare("UPDATE orders SET state = 'provisioning', paid_at = ?, server_id = ? WHERE id = ?")
-          .bind(now, serverId, row.id),
         db
           .prepare(
             "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at) " +

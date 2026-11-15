@@ -143,7 +143,7 @@ function SourceChoice({
           onClick={onUseOwnNodes}
           disabled={!onUseOwnNodes}
         >
-          <strong>用我自己的节点</strong>
+          <strong>其它节点</strong>
           <small>导入配置文件，或者自己填。</small>
         </button>
       </div>

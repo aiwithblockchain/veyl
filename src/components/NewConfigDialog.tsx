@@ -80,7 +80,7 @@ export function NewConfigDialog({
   );
   const [seedState, setSeedState] = useState<SeedState>("empty");
   const [seedCount, setSeedCount] = useState<number | null>(null);
-  const name = nextConfigName(configs);
+  const [name, setName] = useState(() => nextConfigName(configs));
   const [saveError, setSaveError] = useState<string | null>(null);
   const [seedProblem, setSeedProblem] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -170,6 +170,10 @@ export function NewConfigDialog({
   const save = async () => {
     if (savingRef.current) return;
     const trimmed = name.trim();
+    if (!trimmed) {
+      setSaveError("给这个配置起个名字。");
+      return;
+    }
     setSaveError(null);
     setSeedProblem(false);
     setSaving(true);
@@ -179,7 +183,7 @@ export function NewConfigDialog({
           name: trimmed,
           connectMode,
           routingMode: region ? "direct" : "proxy_all",
-          source: "empty",
+          // source 与 nodeIds 互斥（后端校验）：从自己的服务器建配置时只给 nodeIds。
           nodeIds: ownedNodes.nodeIds,
         }
       : {
@@ -407,6 +411,7 @@ export function NewConfigDialog({
             connectMode={connectMode}
             region={region}
             name={name}
+            onRename={setName}
             error={saveError}
             saving={saving}
             connected={connected}

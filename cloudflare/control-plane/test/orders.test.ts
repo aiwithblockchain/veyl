@@ -210,4 +210,85 @@ describe("orders", () => {
     const body = (await refused!.json()) as { details: { reason: string } };
     expect(body.details.reason).toBe("cancel_after_paid");
   });
+
+  it("同一订单重复结账只建一台机器", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+
+    const order = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-0011"), env as never)
+    )!.json()) as { order_id: string };
+
+    const checkout = (key: string) =>
+      handleOrders(
+        new Request(`https://example.com/v1/orders/${order.order_id}/checkout`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": key },
+          body: JSON.stringify({ channel: "fake" }),
+        }),
+        env as never,
+      );
+
+    expect((await checkout("idem-checkout-a"))?.status).toBe(200);
+    // 第二次带了不同的幂等键：认领时 state 已经不是 pending_payment，必须不再建机。
+    expect((await checkout("idem-checkout-b"))?.status).toBe(200);
+    expect(db.rows("servers")).toHaveLength(1);
+  });
+
+  it("建机请求的名称与 tag 符合 DigitalOcean 的字符约束", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    let dropletBody: { name?: string; tags?: string[] } = {};
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const href = String(input);
+        if (href.includes("/regions")) {
+          return new Response(
+            JSON.stringify({ regions: [{ slug: "sgp1", name: "Singapore 1", available: true }] }),
+            { status: 200 },
+          );
+        }
+        if (href.includes("/sizes")) {
+          return new Response(
+            JSON.stringify({
+              sizes: [
+                { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6 },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (href.endsWith("/droplets") && init?.method === "POST") {
+          dropletBody = JSON.parse(String(init.body)) as typeof dropletBody;
+          return new Response(
+            JSON.stringify({ droplet: { id: 42, status: "new", networks: { v4: [] } } }),
+            { status: 202 },
+          );
+        }
+        return new Response(JSON.stringify({ id: "fw_1" }), { status: 202 });
+      }),
+    );
+
+    const order = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-0009"), env as never)
+    )!.json()) as { order_id: string };
+    await handleOrders(
+      new Request(`https://example.com/v1/orders/${order.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-9" },
+        body: JSON.stringify({ channel: "fake" }),
+      }),
+      env as never,
+    );
+
+    // name 必须匹配 ^[a-zA-Z0-9]?[a-z0-9A-Z.\-]*[a-z0-9A-Z]$，tag 必须匹配 ^[a-zA-Z0-9_\-:]+$。
+    expect(dropletBody.name).toMatch(/^[a-zA-Z0-9]?[a-z0-9A-Z.\-]*[a-z0-9A-Z]$/);
+    expect(dropletBody.tags).toHaveLength(3);
+    for (const tag of dropletBody.tags ?? []) {
+      expect(tag).toMatch(/^[a-zA-Z0-9_\-:]+$/);
+    }
+  });
 });

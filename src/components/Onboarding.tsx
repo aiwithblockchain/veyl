@@ -1,5 +1,10 @@
-import { useState } from "react";
-import type { AgentBridge, LlmProtocol, LlmProviderInput } from "../agent/bridge";
+import { useEffect, useState } from "react";
+import type {
+  AgentBridge,
+  DeepSeekKeyState,
+  LlmProtocol,
+  LlmProviderInput,
+} from "../agent/bridge";
 import { isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import { describeKeyError, describeProviderError } from "./Settings";
 import { isComposingEvent } from "../ui/ime";
@@ -35,6 +40,33 @@ export function Onboarding({ bridge, onDone }: Props) {
   const [customOpen, setCustomOpen] = useState(false);
   const [custom, setCustom] = useState<CustomForm>(EMPTY_CUSTOM);
   const [customError, setCustomError] = useState<string | null>(null);
+  const [deepseek, setDeepseek] = useState<DeepSeekKeyState | null>(null);
+  const [deepseekFailed, setDeepseekFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    bridge
+      .getDeepSeekKey()
+      .then((state) => {
+        if (alive) setDeepseek(state);
+      })
+      .catch(() => {
+        if (alive) setDeepseekFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [bridge]);
+
+  const deepseekState = value.trim()
+    ? "已填写，未保存"
+    : deepseekFailed
+      ? "状态读不到"
+      : deepseek
+        ? deepseek.masked
+          ? `已配置 · ${deepseek.masked}`
+          : "未配置"
+        : "正在读取…";
 
   const saveKey = async () => {
     const key = value.trim();
@@ -135,7 +167,20 @@ export function Onboarding({ bridge, onDone }: Props) {
           Key 只保存在本机。配好之后，我来找节点、建立连接。
         </p>
 
-        {customOpen ? null : (
+        {customOpen ? (
+          <div className="onboarding__summary">
+            <span className="onboarding__summary-text">
+              DeepSeek Key：{deepseekState}
+            </span>
+            <button
+              type="button"
+              className="onboarding__link"
+              onClick={() => setCustomOpen(false)}
+            >
+              改回默认 AI
+            </button>
+          </div>
+        ) : (
           <form
             className="onboarding__form"
             aria-busy={saving === "key"}

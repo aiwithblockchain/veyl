@@ -208,37 +208,41 @@ describe("节点组 destination", () => {
   it("组详情 → 从我的服务器添加 → 加入目标组并回到组详情", async () => {
     prepare();
     saveAccount("me@example.com");
-    vi.spyOn(bridge, "myServerList").mockResolvedValue({
-      servers: [
-        {
-          server_id: "srv_1",
-          name: "新加坡 1 · DigitalOcean",
-          region: "gru",
-          plan: "vc2-1c-1gb",
-          state: "healthy",
-          created_at: new Date(0).toISOString(),
-          ip: "45.76.23.103",
-          port: 8388,
-          node_id: "node_srv_1",
-          hourly_usd: 0.007,
-          monthly_usd: 5,
-          failure: null,
-        },
-        {
-          server_id: "srv_2",
-          name: "纽约 1 · DigitalOcean",
-          region: "lax",
-          plan: "vc2-1c-1gb",
-          state: "installing",
-          created_at: new Date(0).toISOString(),
-          ip: "45.76.21.101",
-          port: null,
-          node_id: null,
-          hourly_usd: 0.007,
-          monthly_usd: 5,
-          failure: null,
-        },
-      ],
+    const servers = [
+      {
+        server_id: "srv_1",
+        name: "新加坡 1 · DigitalOcean",
+        region: "gru",
+        plan: "vc2-1c-1gb",
+        state: "healthy" as const,
+        created_at: new Date(0).toISOString(),
+        ip: "45.76.23.103",
+        port: 8388,
+        node_id: "node_srv_1",
+        hourly_usd: 0.007,
+        monthly_usd: 5,
+        failure: null,
+      },
+      {
+        server_id: "srv_2",
+        name: "纽约 1 · DigitalOcean",
+        region: "lax",
+        plan: "vc2-1c-1gb",
+        state: "installing" as const,
+        created_at: new Date(0).toISOString(),
+        ip: "45.76.21.101",
+        port: null,
+        node_id: null,
+        hourly_usd: 0.007,
+        monthly_usd: 5,
+        failure: null,
+      },
+    ];
+    vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers });
+    vi.spyOn(bridge, "myServerGet").mockImplementation(async (serverId: string) => {
+      const found = servers.find((server) => server.server_id === serverId);
+      if (!found) throw { code: "NOT_FOUND", message: "这台服务器已不存在。" };
+      return found;
     });
     render(<App />);
     await screen.findByRole("button", { name: "启动 VPN" });

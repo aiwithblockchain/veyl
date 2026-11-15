@@ -62,6 +62,8 @@ pub struct MyServer {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MyServerOrderFailure {
     pub code: String,
+    // 展示用文案：缺了它不该让整条订单解析失败。
+    #[serde(default)]
     pub message: String,
     pub retryable: bool,
 }
@@ -256,8 +258,20 @@ pub async fn list() -> Result<Vec<MyServer>, CpError> {
         validate_server(&server)?;
         servers.push(server);
     }
-    for server in &servers {
+    for server in &mut servers {
         cache_server(server);
+    }
+    // 响应是一次成功请求的完整集合：云端已经不存在的行要收敛，否则本机会
+    // 永远停在旧状态（Worker 不再返回 destroyed 行）。失败只告警，不影响列表。
+    if let Some(store) = crate::store::global() {
+        let conn = store.conn();
+        let ids: Vec<&str> = servers
+            .iter()
+            .map(|server| server.server_id.as_str())
+            .collect();
+        if let Err(error) = crate::store::servers::retain_only(&conn, &ids) {
+            log::warn!("收敛我的服务器镜像失败：{error}");
+        }
     }
     Ok(servers)
 }
@@ -269,10 +283,10 @@ pub async fn get(server_id: &str) -> Result<MyServer, CpError> {
 
 async fn get_with(client: &ControlPlane, server_id: &str) -> Result<MyServer, CpError> {
     let raw = client.get(&format!("/v1/servers/{server_id}")).await?;
-    let server: MyServer = serde_json::from_value(raw)
+    let mut server: MyServer = serde_json::from_value(raw)
         .map_err(|_| CpError::invalid_response("服务器详情格式不正确"))?;
     validate_server(&server)?;
-    cache_server(&server);
+    cache_server(&mut server);
     Ok(server)
 }
 
@@ -354,11 +368,39 @@ pub async fn destroy(server_id: &str, confirm: bool) -> Result<MyServer, CpError
     })?;
     server.state = "destroying".into();
     cache_server(&server);
-    if let Some(node_id) = server.node_id.as_deref() {
-        // 销毁即销毁凭据（§19.8）；节点记录保留并能在界面标「服务器已销毁」。
+    // 销毁即销毁凭据（§19.8）；节点记录保留并能在界面标「服务器已销毁」。
+    if let Some(store) = crate::store::global() {
+        let conn = store.conn();
+        forget_credentials(&conn, server_id, server.node_id.as_deref(), |key| {
+            let _ = crate::secrets::delete_secret(key);
+        });
+    } else if let Some(node_id) = server.node_id.as_deref() {
         let _ = crate::secrets::delete_secret(&format!("node:{node_id}"));
     }
     Ok(server)
+}
+
+/// 删除某台服务器在本地的节点密码。
+///
+/// 键以本地节点行的 `password_ref` 为准：控制面换发凭据后 `MyServer.node_id`
+/// 可能是远端 id，按它拼键会漏删本地密码。只有找不到本地节点时才用远端 id 兜底。
+fn forget_credentials(
+    conn: &rusqlite::Connection,
+    server_id: &str,
+    remote_node_id: Option<&str>,
+    mut delete: impl FnMut(&str),
+) {
+    if let Ok(Some(node)) = crate::store::configs::find_node_by_source_key(
+        conn,
+        crate::store::configs::SOURCE_OWNED,
+        server_id,
+    ) {
+        delete(&node.password_ref);
+        return;
+    }
+    if let Some(node_id) = remote_node_id {
+        delete(&format!("node:{node_id}"));
+    }
 }
 
 pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
@@ -394,7 +436,7 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
     validate_state(state, &SERVER_STATES, "新服务器")?;
 
     if let Some(old) = old {
-        let created = MyServer {
+        let mut created = MyServer {
             server_id: new_id.to_string(),
             name: old.name,
             region: old.region,
@@ -408,7 +450,7 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
             monthly_usd: old.monthly_usd,
             failure: None,
         };
-        cache_server(&created);
+        cache_server(&mut created);
     }
 
     Ok(json!({ "newServerId": new_id, "state": state }))
@@ -419,21 +461,78 @@ pub async fn credentials(server_id: &str) -> Result<Value, CpError> {
     let raw = client
         .post(&format!("/v1/servers/{server_id}/credentials"), None, None)
         .await?;
+    let response = credential_response(&raw)?;
+
+    let linked_before = local_server(server_id).and_then(|server| server.node_id);
+    let node = super::credentials::verify_and_store(
+        server_id,
+        response.payload,
+        response.signature,
+        response.key_id,
+    )?;
+    // 本地关联真的变了才发事件；重复取凭据不制造无意义的状态事件。
+    let linked_after = local_server(server_id);
+    if linked_after
+        .as_ref()
+        .and_then(|server| server.node_id.as_deref())
+        != linked_before.as_deref()
+    {
+        if let Some(server) = linked_after {
+            super::events::emit_server_changed(&server);
+        }
+    }
+    // 只回本地节点：密码留在 `secrets.enc`，不再把含密码的 payload 交给界面。
+    Ok(json!(node))
+}
+
+/// 凭据响应的三个字段缺一不可；缺字段按 `invalid_response` 报错，不猜默认值。
+fn credential_response(raw: &Value) -> Result<super::credentials::CredentialResponse<'_>, CpError> {
     let payload = raw
         .get("payload")
         .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| CpError::invalid_response("凭据响应缺少 payload"))?;
     let signature = raw
         .get("signature")
         .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| CpError::invalid_response("凭据响应缺少 signature"))?;
     let key_id = raw
         .get("key_id")
         .and_then(Value::as_str)
-        .unwrap_or_default();
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| CpError::invalid_response("凭据响应缺少 key_id"))?;
+    Ok(super::credentials::CredentialResponse {
+        payload,
+        signature,
+        key_id,
+    })
+}
 
-    super::credentials::verify_and_store(server_id, payload, signature, key_id)?;
-    Ok(json!({ "payload": payload, "signature": signature }))
+/// 本地节点关联以 `nodes(source='owned', source_key=server_id)` 为准。
+///
+/// 控制面换发凭据时可能给出新的 `node_id`，本地仍复用旧节点行；反过来，
+/// 本地行缺失时只有确实存在的节点 id 才能写进 `my_servers`（外键约束）。
+fn linked_node_id(
+    conn: &rusqlite::Connection,
+    server_id: &str,
+    remote: Option<&str>,
+) -> Option<String> {
+    if let Ok(Some(node)) = crate::store::configs::find_node_by_source_key(
+        conn,
+        crate::store::configs::SOURCE_OWNED,
+        server_id,
+    ) {
+        return Some(node.id);
+    }
+    remote
+        .filter(|id| {
+            crate::store::configs::get_node(conn, id)
+                .ok()
+                .flatten()
+                .is_some()
+        })
+        .map(str::to_string)
 }
 
 fn cache_server(server: &MyServer) {
@@ -447,16 +546,8 @@ fn cache_server(server: &MyServer) {
     let created_at = parse_iso_ms(&server.created_at).unwrap_or_else(crate::store::now_ms);
     // `my_servers.node_id` 有外键；远端可能比本地先给出 node_id（凭据还没取），
     // 此时先留空，等 `my_server_credentials` 建好节点行再回填。
-    let node_id = server
-        .node_id
-        .as_deref()
-        .or_else(|| before.as_ref().and_then(|row| row.node_id.as_deref()))
-        .filter(|id| {
-            crate::store::configs::get_node(&conn, id)
-                .ok()
-                .flatten()
-                .is_some()
-        });
+    // 关联以本地节点行为准：换发凭据后远端 id 可能已经变了。
+    let node_id = linked_node_id(&conn, &server.server_id, server.node_id.as_deref());
     let new = crate::store::NewMyServer {
         id: &server.server_id,
         provider: "digitalocean",
@@ -464,7 +555,7 @@ fn cache_server(server: &MyServer) {
         region: &server.region,
         plan: &server.plan,
         state: &server.state,
-        node_id,
+        node_id: node_id.as_deref(),
         hourly_usd: server.hourly_usd,
         monthly_usd: server.monthly_usd,
         created_at,
@@ -478,7 +569,11 @@ fn cache_server(server: &MyServer) {
         .map(|row| row.state.as_str() != server.state)
         .unwrap_or(true);
     if changed {
-        super::events::emit_server_changed(server);
+        // 事件里的 `node_id` 非空表示「节点已可用来建配置」，只能是本地节点 id；
+        // 控制面 `nd_…` 在本地节点建好前不可用，按 null 上报。
+        let mut event = server.clone();
+        event.node_id = node_id;
+        super::events::emit_server_changed(&event);
     }
 }
 
@@ -495,7 +590,7 @@ fn local_server(server_id: &str) -> Option<MyServer> {
         created_at: crate::store::iso_from_ms(row.created_at),
         ip: None,
         port: None,
-        node_id: row.node_id,
+        node_id: linked_node_id(&conn, server_id, row.node_id.as_deref()),
         hourly_usd: row.hourly_usd,
         monthly_usd: row.monthly_usd,
         failure: None,
@@ -575,5 +670,93 @@ mod tests {
     fn an_unknown_order_state_is_rejected() {
         let raw = parse_order(json!({ "state": "weird" })).unwrap();
         assert!(merge_order(raw, "ord_1", None, None, None).is_err());
+    }
+
+    #[test]
+    fn a_credential_response_needs_all_three_fields() {
+        let complete = json!({ "payload": "{}", "signature": "sig", "key_id": "cp-test" });
+        assert!(credential_response(&complete).is_ok());
+
+        for field in ["payload", "signature", "key_id"] {
+            let mut value = complete.clone();
+            let _ = value.as_object_mut().unwrap().remove(field);
+            let error = credential_response(&value).unwrap_err();
+            assert_eq!(error.code, "UPSTREAM_ERROR", "{field}");
+            assert_eq!(error.reason(), Some("invalid_response"), "{field}");
+        }
+
+        // 空串与缺字段同罪：别拿空 key_id 去撞「未知密钥」的误导文案。
+        let mut empty = complete;
+        empty["key_id"] = json!("");
+        assert_eq!(
+            credential_response(&empty).unwrap_err().reason(),
+            Some("invalid_response")
+        );
+    }
+
+    #[test]
+    fn destroying_a_server_forgets_the_local_password_key() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        crate::store::configs::upsert_node(
+            &conn,
+            &crate::store::NewNode {
+                id: "nd_local",
+                name: "Tokyo",
+                server: "203.0.113.10",
+                port: 20343,
+                method: "aes-256-gcm",
+                password_ref: "node:nd_local",
+                source: crate::store::configs::SOURCE_OWNED,
+                source_key: "srv_1",
+            },
+        )
+        .unwrap();
+
+        // 控制面换发后远端 id 与本地节点 id 不同：必须删本地 `password_ref`。
+        let mut deleted = Vec::new();
+        forget_credentials(&conn, "srv_1", Some("nd_remote"), |key| {
+            deleted.push(key.to_string())
+        });
+        assert_eq!(deleted, vec!["node:nd_local"]);
+
+        // 本地没有节点行时才用远端 id 兜底。
+        let mut deleted = Vec::new();
+        forget_credentials(&conn, "srv_2", Some("nd_remote"), |key| {
+            deleted.push(key.to_string())
+        });
+        assert_eq!(deleted, vec!["node:nd_remote"]);
+    }
+
+    #[test]
+    fn the_owned_node_link_wins_over_a_reissued_remote_id() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        crate::store::configs::upsert_node(
+            &conn,
+            &crate::store::NewNode {
+                id: "nd_local",
+                name: "Tokyo",
+                server: "203.0.113.10",
+                port: 20343,
+                method: "aes-256-gcm",
+                password_ref: "node:nd_local",
+                source: crate::store::configs::SOURCE_OWNED,
+                source_key: "srv_1",
+            },
+        )
+        .unwrap();
+
+        // 控制面换发了新 id：本地仍指向 `source_key = srv_1` 的节点行。
+        assert_eq!(
+            linked_node_id(&conn, "srv_1", Some("nd_new")),
+            Some("nd_local".into())
+        );
+        // 没有 source_key 命中时，只有真实存在的节点 id 能写进 `my_servers`（外键）。
+        assert_eq!(linked_node_id(&conn, "srv_2", Some("nd_missing")), None);
+        assert_eq!(
+            linked_node_id(&conn, "srv_2", Some("nd_local")),
+            Some("nd_local".into())
+        );
     }
 }

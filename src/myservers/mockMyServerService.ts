@@ -2,7 +2,7 @@ import type {
   MyServer,
   MyServerCatalog,
   MyServerCreateInput,
-  MyServerCredentials,
+  MyServerCredentialNode,
   MyServerFailure,
   MyServerOrder,
   MyServerPlan,
@@ -466,23 +466,22 @@ export class MockMyServerService {
     return destroyed;
   }
 
-  credentials(serverId: string): MyServerCredentials {
+  credentials(serverId: string): MyServerCredentialNode {
     const server = this.get(serverId);
-    if (!server.node_id) {
+    if (server.state !== "healthy" && server.state !== "active") {
       throw {
         code: "PRECONDITION_FAILED",
         message: "这台服务器还没装好，暂时拿不到凭据。",
       };
     }
-    const payload = JSON.stringify({
-      server_id: server.server_id,
-      node_id: server.node_id,
-      host: server.ip,
-      port: server.port,
-    });
     return {
-      payload: btoa(payload),
-      signature: `mock-${server.server_id}-signature`,
+      server_id: server.server_id,
+      // 本地节点 id 与控制面的 nd_ 不同：模拟 Host 落库后返回的 nodes.id。
+      node_id: `local_${server.server_id}`,
+      name: `${server.name.split(" · ")[0]} 01`,
+      host: server.ip ?? "127.0.0.1",
+      port: server.port ?? 8388,
+      method: "aes-256-gcm",
     };
   }
 

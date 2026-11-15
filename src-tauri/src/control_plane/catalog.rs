@@ -176,7 +176,7 @@ pub async fn fetch_catalog(base_url: &str) -> Result<Catalog, CatalogError> {
     }
     let url = format!("{base}{CATALOG_PATH}");
 
-    let client = reqwest::Client::builder()
+    let client = super::client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|error| {
@@ -194,6 +194,7 @@ pub async fn fetch_catalog(base_url: &str) -> Result<Catalog, CatalogError> {
         .send()
         .await
         .map_err(|error| {
+            super::client::warn_transport("catalog", "GET", CATALOG_PATH, &error);
             if error.is_timeout() {
                 CatalogError::new(
                     "TIMEOUT",
@@ -218,6 +219,19 @@ pub async fn fetch_catalog(base_url: &str) -> Result<Catalog, CatalogError> {
 
     let status = response.status().as_u16();
     if let Some(error) = map_status(status) {
+        super::client::warn_failure(
+            "catalog",
+            "GET",
+            CATALOG_PATH,
+            "status",
+            Some(status),
+            error.retryable,
+            error
+                .details
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+        );
         return Err(error);
     }
     if let Some(length) = response.content_length() {
@@ -227,6 +241,7 @@ pub async fn fetch_catalog(base_url: &str) -> Result<Catalog, CatalogError> {
     }
 
     let bytes = response.bytes().await.map_err(|error| {
+        super::client::warn_transport("catalog", "GET", CATALOG_PATH, &error);
         CatalogError::new(
             "UPSTREAM_ERROR",
             format!("读取控制面目录响应失败：{error}"),

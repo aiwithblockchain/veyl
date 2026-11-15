@@ -105,7 +105,7 @@ describe("新建配置两问页", () => {
 });
 
 describe("审视页与保存", () => {
-  it("默认值直接下一步：审视页只读，保存为 direct + seed", async () => {
+  it("默认值直接下一步：审视页只有名称可改，保存为 direct + seed", async () => {
     const onCreate = vi.fn(async () => ({ ok: true }));
     const onCreated = vi.fn();
     renderDialog({ onCreate, onCreated });
@@ -113,11 +113,11 @@ describe("审视页与保存", () => {
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     expect(await screen.findByText("看一眼，没问题就创建。")).toBeTruthy();
     expect(screen.getByLabelText("第 2 步，共 2 步")).toBeTruthy();
-    expect(screen.getByText("配置 1")).toBeTruthy();
+    expect(screen.getByDisplayValue("配置 1")).toBeTruthy();
     expect(screen.getByText("智能模式")).toBeTruthy();
     expect(screen.getByText("中国大陆")).toBeTruthy();
-    // 审视页是只读事实列表：没有输入框、没有单选控件。
-    expect(screen.queryByRole("textbox")).toBeNull();
+    // 审视页只有名称可以就地改，其余都是事实列表。
+    expect(screen.getAllByRole("textbox")).toHaveLength(1);
     expect(screen.queryByRole("radio")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "创建并连接" }));
@@ -134,7 +134,19 @@ describe("审视页与保存", () => {
   it("默认名取最小可用整数", () => {
     renderDialog({ configs: [{ name: "配置 1" }, { name: "配置 3" }] });
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    expect(screen.getByText("配置 2")).toBeTruthy();
+    expect(screen.getByDisplayValue("配置 2")).toBeTruthy();
+  });
+
+  it("名称可以就地改，并带进创建请求", async () => {
+    const onCreate = vi.fn(async () => ({ ok: true }));
+    renderDialog({ onCreate });
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    const input = await screen.findByDisplayValue("配置 1");
+    fireEvent.change(input, { target: { value: "东京 01" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建并连接" }));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ name: "东京 01" })),
+    );
   });
 
   it("已连接时主按钮是「创建配置」，创建后不自动连接", async () => {
@@ -308,7 +320,8 @@ describe("其它节点入口", () => {
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
     const input = onCreate.mock.calls[0][0] as ConfigCreateInput;
     expect(input.nodeIds).toEqual(["node_9"]);
-    expect(input.source).toBe("empty");
+    // source 与 nodeIds 互斥，两条一起发会被后端拒绝（source_and_node_ids_conflict）。
+    expect(input.source).toBeUndefined();
     expect(onCreated).toHaveBeenCalled();
   });
 

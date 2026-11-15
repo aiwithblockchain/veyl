@@ -13,6 +13,8 @@ interface Props {
   bridge: AgentBridge;
   catalog: MyServerCatalog | null;
   onOrdered: (serverId: string | null) => void;
+  /** 下单前确认设备身份；没有身份时由 Host 懒注册。 */
+  onEnsureIdentity: () => Promise<boolean>;
 }
 
 const CONTINENT_ORDER: MyServerRegion["continent"][] = [
@@ -47,6 +49,38 @@ function errorText(error: unknown): { message: string; retryable: boolean } {
   return { message, retryable: problem.retryable };
 }
 
+function makeIdempotencyKey(): string {
+  return `wiz_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** 结果未知（超时/网络/5xx/在途）重试保持同键；明确终态失败才换新键。 */
+function shouldKeepIdempotencyKey(error: unknown): boolean {
+  const problem = toBridgeError(error);
+  const reason =
+    typeof problem.details?.reason === "string" ? problem.details.reason : "";
+  if (
+    reason === "instance_create_failed" ||
+    reason === "region_unavailable" ||
+    reason === "idempotency_conflict" ||
+    reason === "account_blocked" ||
+    reason === "device_revoked"
+  ) {
+    return false;
+  }
+  if (
+    reason === "timeout" ||
+    reason === "idempotency_in_flight" ||
+    reason === "provider_unavailable" ||
+    reason === "rate_limited" ||
+    reason === "auth_required"
+  ) {
+    return true;
+  }
+  if (problem.code === "TIMEOUT" || problem.code === "NETWORK") return true;
+  // 5xx 等上游错误：可重试即视为结果未知。
+  return problem.code === "UPSTREAM_ERROR" && problem.retryable;
+}
+
 /** 方向键在同组单选里移动并选中，符合 radiogroup 的键盘预期。 */
 function moveWithinGroup(event: ReactKeyboardEvent<HTMLElement>) {
   const key = event.key;
@@ -71,18 +105,23 @@ function moveWithinGroup(event: ReactKeyboardEvent<HTMLElement>) {
   options[next]?.click();
 }
 
-export function MyServerWizard({ bridge, catalog, onOrdered }: Props) {
+export function MyServerWizard({
+  bridge,
+  catalog,
+  onOrdered,
+  onEnsureIdentity,
+}: Props) {
   const [fetched, setFetched] = useState<MyServerCatalog | null>(null);
   const [fetchState, setFetchState] = useState<"loading" | "ready" | "failed">(
     catalog ? "ready" : "loading",
   );
   const [regionId, setRegionId] = useState<string | null>(null);
   const [planId, setPlanId] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState<"identity" | "creating" | null>(null);
+  const busy = phase !== null;
   const [error, setError] = useState<{ message: string; retryable: boolean } | null>(null);
-  const idempotencyKey = useRef(
-    `wiz_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-  );
+  // 同一组重试复用键：超时/网络失败时结果未知，换键会建第二台。
+  const idempotencyKey = useRef("");
 
   const loadCatalog = useCallback(async () => {
     setFetchState("loading");
@@ -127,9 +166,19 @@ export function MyServerWizard({ bridge, catalog, onOrdered }: Props) {
 
   const placeOrder = async () => {
     if (!currentPlan || !currentRegion || busy) return;
-    setBusy(true);
     setError(null);
+    setPhase("identity");
     try {
+      const ready = await onEnsureIdentity();
+      if (!ready) {
+        setError({
+          message: "没能确认设备身份。没有产生服务器；稍后再点「创建服务器」。",
+          retryable: true,
+        });
+        return;
+      }
+      setPhase("creating");
+      if (!idempotencyKey.current) idempotencyKey.current = makeIdempotencyKey();
       const created = await bridge.myServerCreate({
         region: currentRegion.id,
         plan: currentPlan.id,
@@ -139,8 +188,9 @@ export function MyServerWizard({ bridge, catalog, onOrdered }: Props) {
       onOrdered(order.server_id ?? null);
     } catch (err) {
       setError(errorText(err));
+      if (!shouldKeepIdempotencyKey(err)) idempotencyKey.current = "";
     } finally {
-      setBusy(false);
+      setPhase(null);
     }
   };
 
@@ -294,7 +344,11 @@ export function MyServerWizard({ bridge, catalog, onOrdered }: Props) {
           aria-busy={busy || undefined}
           onClick={() => void placeOrder()}
         >
-          {busy ? "正在创建…" : "创建服务器"}
+          {phase === "identity"
+            ? "正在登录…"
+            : phase === "creating"
+              ? "正在创建…"
+              : "创建服务器"}
         </button>      </div>
     </div>
   );

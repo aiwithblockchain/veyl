@@ -88,7 +88,16 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("insert into audit_log")) {
-      this.tables.audit_log.push({ at: a[0], account_id: a[1], action: a[2], detail: a[3] });
+      // action 是语句里的字面量，不是绑定参数：从 SQL 里取，不能按下标猜。
+      const literal = /'([a-z_.]+)'/.exec(sql)?.[1];
+      const withServer = sql.includes("server_id");
+      this.tables.audit_log.push({
+        at: a[0],
+        account_id: a[1],
+        ...(withServer ? { server_id: a[2] } : {}),
+        action: literal ?? a[withServer ? 3 : 2],
+        detail: a[a.length - 1],
+      });
       return null;
     }
 
@@ -234,8 +243,51 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("update servers set state = 'error'")) {
+      // bind(reason, now, id)：失败原因现在也落到 servers 行上。
+      const server = this.tables.servers.find((s) => s.id === a[2]);
+      if (server) {
+        server.state = "error";
+        server.failure_code = a[0];
+      }
+      return null;
+    }
+    if (sql.startsWith("update servers set failure_code")) {
       const server = this.tables.servers.find((s) => s.id === a[1]);
-      if (server) server.state = "error";
+      if (server) server.failure_code = a[0];
+      return null;
+    }
+    if (sql.startsWith("select * from servers where id")) {
+      return this.tables.servers.find((s) => s.id === a[0] && s.account_id === a[1]) ?? null;
+    }
+    if (sql.startsWith("update servers set state = 'destroying'")) {
+      const server = this.tables.servers.find((s) => s.id === a[1]);
+      if (server) {
+        server.state = "destroying";
+        server.updated_at = a[0];
+      }
+      return null;
+    }
+    if (sql.startsWith("update servers set state = 'destroyed'")) {
+      const server = this.tables.servers.find((s) => s.id === a[2]);
+      if (server) {
+        server.state = "destroyed";
+        server.destroyed_at = a[0];
+        server.updated_at = a[1];
+      }
+      return null;
+    }
+    if (sql.startsWith("update servers set state = ?, updated_at")) {
+      const server = this.tables.servers.find((s) => s.id === a[2]);
+      if (server) {
+        server.state = a[0];
+        server.updated_at = a[1];
+      }
+      return null;
+    }
+    if (sql.startsWith("update credentials set destroyed_at")) {
+      for (const credential of this.tables.credentials) {
+        if (credential.server_id === a[1]) credential.destroyed_at = a[0];
+      }
       return null;
     }
     if (sql.startsWith("update orders set state = 'failed'")) {
@@ -291,9 +343,18 @@ export class FakeStatement {
     return this.db.exec(this.statement) as T | null;
   }
 
-  async run(): Promise<{ success: boolean }> {
+  async run(): Promise<{ success: boolean; meta: { changes: number } }> {
+    // 结账认领带状态守卫：state 不是 pending_payment 时 affected rows 为 0。
+    // 真实 D1 靠 SQL 的 WHERE 判断，这里按同一语义给 changes。
+    let changes = 1;
+    const sql = this.statement.sql.replace(/\s+/g, " ").trim().toLowerCase();
+    if (sql.startsWith("update orders set state = 'provisioning'")) {
+      const id = this.statement.args[2];
+      const row = this.db.rows("orders").find((order) => order.id === id);
+      changes = row && row.state === "pending_payment" ? 1 : 0;
+    }
     this.db.exec(this.statement);
-    return { success: true };
+    return { success: true, meta: { changes } };
   }
 
   async all<T>(): Promise<{ results: T[] }> {

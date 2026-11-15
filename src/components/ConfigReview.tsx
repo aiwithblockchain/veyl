@@ -5,6 +5,8 @@ interface Props {
   connectMode: ConfigConnectMode;
   region: string | null;
   name: string;
+  /** 名称可以就地改：自动生成的名字只是起点，不是结论。 */
+  onRename: (value: string) => void;
   error: string | null;
   saving: boolean;
   /** 当前是否已经连着；决定主按钮是「创建配置」还是「创建并连接」。 */
@@ -45,6 +47,7 @@ export function ConfigReview({
   connectMode,
   region,
   name,
+  onRename,
   error,
   saving,
   connected,
@@ -68,9 +71,18 @@ export function ConfigReview({
 
       <dl className="new-config__facts">
         <div className="new-config__fact">
-          <dt>名称</dt>
+          <dt>
+            <label htmlFor="new-config-name">名称</label>
+          </dt>
           <dd>
-            <span className="new-config__fact-value">{name}</span>
+            <input
+              id="new-config-name"
+              className="new-config__fact-value new-config__name-input"
+              value={name}
+              maxLength={40}
+              disabled={saving}
+              onChange={(event) => onRename(event.target.value)}
+            />
           </dd>
         </div>
         <div className="new-config__fact">

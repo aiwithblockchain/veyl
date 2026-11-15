@@ -3,8 +3,8 @@
 //! 优先级：URL 覆盖 > 环境覆盖 > 编译期 debug 标志。
 //! **release 构建只认 Prod**：环境变量不能把它骗到测试端点。
 
-pub const DEV_URL: &str = "https://veyl-control-plane-dev.ribencong.workers.dev";
-pub const PROD_URL: &str = "https://veyl-control-plane.ribencong.workers.dev";
+pub const DEV_URL: &str = "https://cp-dev.veyl.dessage.xyz";
+pub const PROD_URL: &str = "https://veyl.dessage.xyz";
 
 pub const ENV_VAR: &str = "VEYL_CONTROL_PLANE_ENV";
 pub const URL_VAR: &str = "VEYL_CONTROL_PLANE_URL";

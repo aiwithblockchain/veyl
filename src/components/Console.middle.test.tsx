@@ -540,7 +540,7 @@ describe("中间区验收用例", () => {
       text(el),
     );
     expect(options[0]).toContain("Veyl 免费节点");
-    expect(options[1]).toContain("用我自己的节点");
+    expect(options[1]).toContain("其它节点");
     expect(body(root).querySelector(".note")).toBeNull();
   });
 

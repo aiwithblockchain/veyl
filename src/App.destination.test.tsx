@@ -1,9 +1,9 @@
 /** @vitest-environment jsdom */
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { getAgentBridge } from "./agent";
-import type { MyServer } from "./agent/bridge";
+import type { MyServer, MyServerCredentialNode } from "./agent/bridge";
 import type { ConfigSummary } from "./agent/protocol";
 import { DESTINATION_KEY, DESTINATION_VERSION, DESTINATION_VERSION_KEY } from "./ui/destination";
 import { saveAccount } from "./myservers/account";
@@ -113,6 +113,15 @@ function prepare(servers: MyServer[] = []) {
     updated_at: new Date(0).toISOString(),
   });
   vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers });
+  vi.spyOn(bridge, "myServerGet").mockResolvedValue(SERVER);
+  vi.spyOn(bridge, "myServerCredentials").mockResolvedValue({
+    server_id: SERVER.server_id,
+    node_id: "local_node_srv_1",
+    name: "新加坡 1 01",
+    host: "45.76.20.100",
+    port: 8388,
+    method: "aes-256-gcm",
+  });
   const runtimeStart = vi.spyOn(bridge, "runtimeStart");
   return { runtimeStart };
 }
@@ -217,6 +226,9 @@ describe("destination 切换", () => {
     // 再走一次，点「用来建配置」应带着节点回到审视页。
     fireEvent.click(screen.getByRole("radio", { name: /其它节点/ }));
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "用来建配置" }));
     await waitFor(() =>
       expect(screen.getByRole("dialog", { name: "新建配置" })).toBeTruthy(),
@@ -224,5 +236,84 @@ describe("destination 切换", () => {
     expect(screen.getByText("新加坡 1 · DigitalOcean")).toBeTruthy();
 
     await act(async () => {});
+  });
+
+  it("取凭据失败：弹窗不打开，给出三段式提示", async () => {
+    prepare([SERVER]);
+    vi.mocked(bridge.myServerCredentials).mockRejectedValueOnce({
+      code: "TIMEOUT",
+      message: "请求超时。",
+      details: { reason: "timeout" },
+      retryable: true,
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: "启动 VPN" });
+
+    fireEvent.click(screen.getByRole("button", { name: "我的服务器" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "用来建配置" }));
+
+    expect(screen.queryByRole("dialog", { name: "新建配置" })).toBeNull();
+    expect(await screen.findByText(/没有改动任何配置/)).toBeTruthy();
+  });
+
+  it("取凭据期间切走：resolve 后不跳客户端、不弹窗", async () => {
+    prepare([SERVER]);
+    let release: (node: MyServerCredentialNode) => void = () => {};
+    vi.mocked(bridge.myServerCredentials).mockImplementationOnce(
+      () =>
+        new Promise<MyServerCredentialNode>((resolve) => {
+          release = resolve;
+        }),
+    );
+    render(<App />);
+    await screen.findByRole("button", { name: "启动 VPN" });
+
+    fireEvent.click(screen.getByRole("button", { name: "我的服务器" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "用来建配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "节点组" }));
+
+    await act(async () => {
+      release({
+        server_id: SERVER.server_id,
+        node_id: "local_node_srv_1",
+        name: "新加坡 1 01",
+        host: "45.76.20.100",
+        port: 8388,
+        method: "aes-256-gcm",
+      });
+    });
+
+    expect(screen.queryByRole("dialog", { name: "新建配置" })).toBeNull();
+    expect(
+      await screen.findByRole("complementary", { name: "节点组列表" }),
+    ).toBeTruthy();
+  });
+
+  it("取消新建配置后回到「我的服务器」", async () => {
+    prepare([SERVER]);
+    render(<App />);
+    await screen.findByRole("button", { name: "启动 VPN" });
+
+    fireEvent.click(screen.getByRole("button", { name: "我的服务器" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "用来建配置" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "新建配置" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("complementary", { name: "服务器列表" }),
+      ).toBeTruthy(),
+    );
+    expect(screen.queryByRole("dialog", { name: "新建配置" })).toBeNull();
   });
 });

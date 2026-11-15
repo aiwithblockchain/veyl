@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.24.0`
+> 契约版本：`2.26.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -208,8 +208,9 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 79 | `my_server_cancel_order` | `{ orderId }` | `MyServerOrder` | **2.23.0 新增（仅 UI）；取消订单** |
 | 80 | `my_server_destroy` | `{ serverId, confirm }` | `MyServer`（`state: "destroying"`） | **2.23.0 新增（仅 UI）；销毁** |
 | 81 | `my_server_rebuild` | `{ serverId, confirm }` | `MyServerRebuildResult`（`{ newServerId, state }`） | **2.23.0 新增（仅 UI）；销毁旧机并同地区同套餐重建** |
-| 82 | `my_server_credentials` | `{ serverId }` | `MyServerCredentials`（`{ payload, signature }`） | **2.23.0 新增（仅 UI）；客户端验签后落库，界面不展示** |
+| 82 | `my_server_credentials` | `{ serverId }` | `MyServerCredentialNode`（`{ server_id, node_id, name, host, port, method }`） | **2.23.0 新增（仅 UI）；2.26.0 起验签后直接返回本地节点，不再返回含密码的 `payload`** |
 | 83 | `my_server_register_device` | `{}` | `MyServerDeviceIdentity`（`{ account_id, device_id }`） | **2.24.0 新增（仅 UI）；丢弃当前设备身份并静默重新注册** |
+| 84 | `my_server_identity` | `{}` | `MyServerIdentity`（`{ has_identity, account_id }`） | **2.25.0 新增（仅 UI）；只读本地身份状态，不联网、不注册、不刷新令牌** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -1442,12 +1443,22 @@ type MyServerOrder = {
 };
 
 type MyServerRebuildResult = { newServerId: string; state: MyServerState };
-type MyServerCredentials = { payload: string; signature: string };
+type MyServerCredentialNode = {
+  server_id: string;
+  node_id: string;   // 本地节点 id（nodes.id），直接用于 config_create
+  name: string;
+  host: string;
+  port: number;
+  method: string;
+};
 ```
 
-- **`my_server_credentials` 的 `payload` 含节点密码**：Host 已用内置 Ed25519 公钥验签、校验 `key_id` / 有效期 / `server_id` 后才返回；验不过直接报错、不落库。界面不得展示 `payload`。
-- 列表 / 详情 / 事件**永不返回密码**；凭据写入 `secrets.enc` 的 `node:<node_id>`，节点行 `source = 'owned'`。
-- 销毁成功后本地删除 `node:<node_id>` 凭据；节点记录保留并标「服务器已销毁」（§6.5）。
+- **`my_server_credentials` 完成整条落库链路**：Host 用内置 Ed25519 公钥验签、校验 `key_id` / 有效期 / `server_id` 后，写 `nodes(source = 'owned', source_key = server_id)` → 写 `secrets.enc` 的 `node:<本地 nodes.id>` → 回填 `my_servers.node_id` → 返回本地节点。验签或载荷不过直接报错，一行都不写。
+- **重复调用幂等**：同一台服务器再次取凭据时按 `(source = 'owned', source_key = server_id)` 复用已有节点行，即使控制面换发了新的 `node_id` 也不新建、不改本地 `node_id`；密码覆盖写回同一个 `password_ref`。
+- **响应只回本地节点**：`2.26.0` 起 `MyServerCredentials` 删除 `payload` / `signature`（**不向后兼容**：前端绑定同步改读 `MyServerCredentialNode`）。密码只留在 Host 的 `secrets.enc`，不再进入界面进程。
+- **`node_id` 口径**：返回值和 `my_servers.node_id` 都是本地 `nodes.id`；`my_server_list` / `get` 里的 `node_id` 仍是控制面给出的值，界面建配置必须用本命令返回的 `node_id`。
+- 列表 / 详情 / 事件**永不返回密码**；凭据写入 `secrets.enc` 的 `node:<本地 nodes.id>`，节点行 `source = 'owned'`。
+- 销毁成功后按本地节点行的 `password_ref`（`node:<本地 nodes.id>`）删除密码，**不是**控制面换发后的 `node_id`；节点记录保留并标「服务器已销毁」（§6.5）。
 - 身份丢失（钥匙串/本地凭据不可解密）：不自动重新注册；命令报 `PRECONDITION_FAILED / auth_required`，界面按 §19.2.4 处理。
 - 错误码只用 `runtime.md` §6.1 通用码 + `details.reason`：
 
@@ -1482,6 +1493,19 @@ type MyServerDeviceIdentity = { account_id: string; device_id: string };
 - 成功后新账户从空列表开始；失败按通用错误返回（设备秘密已丢弃，允许用户再次点按钮重试）。
 - 与自动刷新/注册共用同一把单飞锁；执行期间不会有请求拿着旧令牌发出去。
 - 不注册为 AI 工具；不发事件（列表随后由界面重读）。
+
+### 7.17 `my_server_identity {}` → `MyServerIdentity`（仅 UI，2.25.0）
+
+**只读本地**：不联网、不注册、不刷新令牌、不写任何状态。界面打开「我的服务器」时先只拉公开目录；`has_identity` 为真才去拉列表，点「创建服务器」时才做身份初始化。
+
+```ts
+type MyServerIdentity = { has_identity: boolean; account_id: string | null };
+```
+
+- 判断依据只有本地 `secrets.enc`：`device_id` 与 `device_secret` **同时存在**才算有身份；任一缺失即 `false`。
+- 有账户标记但设备秘密丢失（身份丢失）时返回 `false`；**不自动重建**，恢复只能走 §7.16 的 `my_server_register_device`，由用户点按钮触发。
+- `account_id` 只在 `has_identity` 为真时给出；否则为 `null`。
+- 本地读取失败一律按 `false` 返回，不抛错、不发事件、不产生任何写入。
 
 ---
 
@@ -1955,7 +1979,7 @@ type RulesStatus = {
 | 命令 | 能力 ID | 界面元素 / 块 | 说明 |
 |---|---|---|---|
 | `config_list` | **K1** 列出与查看配置 | 左栏配置列表 | 配置级导航；节点级是 B1 |
-| `config_create` | **K2** 新建配置（数据来源：C1 / B4） | `source_choice` | 块只负责「用 Veyl 免费节点 / 用我自己的节点」两个选项；落库是本命令 |
+| `config_create` | **K2** 新建配置（数据来源：C1 / B4） | `source_choice` | 块只负责「Veyl 免费节点 / 其它节点」两个选项；落库是本命令 |
 | `config_detail` | **K1** 列出与查看配置 / **B1** 列出节点 | 底部节点详情 + 节点下拉 | 固定骨架元素 |
 | `config_update` | **K4** 编辑配置（分流持久化侧：G1） | 设置页 / 左栏编辑 | 在线切换是 G2，批 3 |
 | `config_delete` | **K5** 删除配置（破坏性，需二次确认） | 左栏项操作 | |
@@ -2002,7 +2026,7 @@ type RulesStatus = {
 | `测试连通` | D6 | `node_probe` |
 | `empty_hint` | 无（纯文本） | — |
 | `proxy_card` | A5 | `proxy_params` |
-| `source_choice` | C1 / B4 | `config_create`（选「用 Veyl 免费节点」带 `source: "seed"`） |
+| `source_choice` | C1 / B4 | `config_create`（选「Veyl 免费节点」带 `source: "seed"`；选「其它节点」走导入或手填） |
 | `reachability` | D1 | `probe_run` |
 | `issue_card` | J1–J4 / E1–E2 | `issue_*`、`net_repair`（**E3 不在其中**：重置网络是独立命令 `network_force_reset`，见 §7.9） |
 | `update_hint` | C2 / C3 | `default_profile_status` |
@@ -2063,8 +2087,9 @@ type RulesStatus = {
 | `my_server_list` / `my_server_get` | `MyServers`（只读，仅列表；详情与凭据不进 AI 上下文） | — |
 | `my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` | **无**（§10.5：建机、销毁、凭据只能由用户点界面） | — |
 | `my_server_register_device` | **无**（UI 专用，见 §7.16；身份恢复只能由用户触发） | — |
+| `my_server_identity` | **无**（UI 专用，见 §7.17；只读本地身份状态） | — |
 
-> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials`、`my_server_register_device`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
+> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials`、`my_server_register_device`、`my_server_identity`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
@@ -2134,7 +2159,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.24.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.12.0 / `events.md` 2.13.0 矩阵同步 |
+| `contracts/commands.md` | **2.26.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.12.0 / `events.md` 2.13.0 矩阵同步 |
 | `contracts/events.md` | **2.13.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
 | `contracts/tools.md` | **3.12.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** |
@@ -2152,6 +2177,25 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.26.0（2026-11-15，凭据落成本地节点）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.26.0`；`my_server_credentials` 验签后写 `secrets.enc` + `nodes(source='owned')`、回填 `my_servers.node_id`，返回 `MyServerCredentialNode`（本地节点） | 语义变更 | 用户：点「用来建配置」报「有节点不存在」——界面拿到的是控制面 `nd_…`，本地节点从未建立 |
+| 2 | 删除返回里的 `payload` / `signature`（含节点密码），**不向后兼容**：前端改读 `node_id` / `host` / `port` / `method` | 数据结构 | 密码不进入界面进程 |
+| 3 | 重复调用按 `(source='owned', source_key=server_id)` 幂等；控制面换发 `node_id` 时复用本地节点行 | 语义 | 重新取凭据不该产生重复节点 |
+| 4 | 销毁时按本地节点行的 `password_ref` 删除密码（换发后不能按远端 `node_id` 拼键）；密码在节点写成功后才写，新节点写密码失败会回删节点行 | 修正 | 评审：换发后销毁会漏删本地密码；失败路径可能留下孤儿密钥 |
+| 5 | `my_server_list` / `get` 的 `node_id` 仍是控制面值；建配置必须用本命令返回的本地 `node_id` | 说明 | 两套 id 不混用 |
+| 6 | §15.5 矩阵同步本文件 2.26.0；`events.md` / `tools.md` / `runtime.md` / `data-model.md` 不变 | 元数据 | 同批 |
+
+### 2.25.0（2026-11-14，本地身份查询）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.25.0`；新增 §7.17 `my_server_identity`（仅 UI，只读本地）：返回 `{ has_identity, account_id }`，不联网、不注册、不刷新令牌 | 新增命令 | 「我的服务器」首屏只在已有身份时拉列表，创建时才初始化身份 |
+| 2 | 身份判断只看本地 `secrets.enc` 的 `device_id` / `device_secret`；身份丢失返回 `false`，不自动重建 | 语义 | `my-servers.md` §19.2.4 |
+| 3 | §15.5 矩阵同步本文件 2.25.0；其它契约不变 | 元数据 | 同批 |
 
 ### 2.24.0（2026-11-14，重新注册设备）
 

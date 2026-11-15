@@ -94,9 +94,55 @@
 
 事实：`*.workers.dev` 在中国大陆不可用；自定义域名指向 Cloudflare 能否稳定访问**不确定**（视线路与域名状态）。这不是“待核就完了”的问题——控制面不可达会让购买与管理链路直接死，必须设计降级。
 
+**实测（2026-11-15，用户本机，未开 VPN）**
+
+```
+dig veyl-control-plane-dev.ribencong.workers.dev  → 128.242.240.59   （NTT America，不是 Cloudflare 段）
+dig veyl.dev                                      → 104.21.66.107    （Cloudflare 真实边缘）
+curl https://veyl-control-plane-dev.ribencong.workers.dev/v1/catalog
+  → curl: (7) Failed to connect ... 000 1.633s
+```
+
+定性：屏蔽发生在 **DNS 层**（`*.workers.dev` 被污染到第三方 IP，TCP 自然连不上），不是封 Cloudflare 的 IP 段——同一网络里 Cloudflare 托管的普通域名解析正常。所以**换自定义域名能解决**，不需要换服务商。
+
+**同机对照（2026-11-15，VPN 已断开，`scutil --nc list` 确认 Disconnected）**
+
+```
+baidu.com                         200  0.07s   （国内基准，通）
+google.com                        000  8.00s   （境外基准，断）  → 确认是直连国内网络
+veyl-control-plane-dev...workers.dev → 69.171.247.71（Facebook 段）000 10.00s
+veyl-edge-dev.pages.dev            → 172.66.47.47（Cloudflare）  200  0.74s
+```
+
+污染 IP 每次都不一样（前一次是 `128.242.240.59`，NTT America），是典型 DNS 污染；`*.pages.dev` 在同样条件下 0.74 秒可用。**结论：控制面入口走 Pages 域名可行，`workers.dev` 彻底不用。**
+
+**延迟（2026-11-15 实测）**：`cf-ray` 落地机房是 `SEA`（西雅图），入口耗时 0.75–1.8 秒；同机对照一个 Cloudflare 托管的普通站点是 1.4–1.5 秒。**成本在跨境线路，不在我们的实现**。界面上的读列表 / 下单要有等待态；健康探测超时不能按局域网标准设（§2.3 的 2s 是下限，不是余量）。
+
+**绑定自定义域名的硬前提**（Cloudflare 官方文档原文）：
+
+| 方式 | 前提 | DNS 在 GoDaddy 能用吗 |
+|---|---|---|
+| Workers Custom Domain | "An active Cloudflare zone"，且 "cannot create a Custom Domain on a zone you do not own" | 不能。CNAME 指 `*.workers.dev` 没有对应证书 |
+| Pages Custom Domain | 子域名 "it is not necessary for your site to be a Cloudflare zone"，外部 DNS 用 CNAME 指 `*.pages.dev` | 能 |
+
+**已定方案（2026-11-15）：Pages 承载域名，Workers 保持不动。**
+
+先例在同账号里已经跑着：`dessage.xyz` 的 DNS 在 GoDaddy，apex 指 GitHub Pages，两个子域名用外部 CNAME 接到 Pages 项目；账号的 `workers/domains`（Workers 自定义域名）**一个都没有**。控制面照这个模式接：
+
+```
+cp-dev.veyl.dessage.xyz ──CNAME──> veyl-edge-dev.pages.dev  ──service binding──> veyl-control-plane-dev
+veyl.dessage.xyz        ──CNAME──> veyl-edge.pages.dev      ──service binding──> veyl-control-plane
+```
+
+- 边缘代码在 `cloudflare/edge/`：一个 `functions/[[path]].ts` 把请求原样交给绑定的 Worker，**不过公网**，也就不依赖 `workers.dev` 这个被污染的域名。
+- **Pages 不认自定义配置文件路径**（实测报错 `Pages does not support custom paths for the Wrangler configuration file`），一个目录只能对应一个环境。先只建 dev（`veyl-edge-dev` → `cp-dev.veyl.dessage.xyz`）；生产上线时另建同名结构的目录，`service` 换成 `veyl-control-plane`。
+- 为什么不让控制面自己搬到 Pages Functions：那样会丢掉 Cron Triggers（将来的对账 / 超时销毁）和 Smart Placement（拉近与 DO API 的距离）；薄代理零改动、将来域名迁到 Cloudflare 时删掉即可。
+- 为什么不用 Workers Custom Domain：需要 zone 在 Cloudflare（见上表），而 `dessage.xyz` 的 DNS 在 GoDaddy。
+- `ENROLL_BASE_URL`（cloud-init 回传地址）必须改成边缘域名，否则机器建好后回传不到控制面。
+
 **服务端应对**
 
-1. **只使用自定义域名**，不把 `*.workers.dev` 作为任何生产入口；域名与 API 版本一起冻结在客户端。
+1. **只使用自定义域名**，不把 `*.workers.dev` 作为任何生产入口；域名与 API 版本一起冻结在客户端。`ENROLL_BASE_URL`（cloud-init 回传地址）必须与绑定的自定义域名一致，否则机器建好后回传不到控制面。
 2. **多域名列表**：客户端内置一个有序域名列表（主 + 备），逐个探测（`GET /v1/health`，2s 超时），选第一个可用的；失败按指数退避重试（1s→2s→4s→…上限 60s），**不无限重试、不弹窗刷屏**。M1 每个环境只有一个 origin（见 `docs/design/environments.md`），多域名是上线前换自有域名时的事；届时只改常量，不改判定逻辑。
 3. **备用出口**：备份域名可以指向同一 Cloudflare 服务（仅换域名，绕过域名级问题）；若域名级封锁，则需另一条非 Cloudflare 出口作为运维预案，架构不变。这条预案由运维决定，不影响客户端协议。
 4. **短请求**：全部走普通 HTTPS 短连接，不使用长连接 / WebSocket；轮询间隔在客户端侧（2s→5s→10s 退避）。
@@ -185,11 +231,13 @@ pub trait Provider: Send + Sync {
 | GET | `/v1/servers` | 我的服务器列表 | — | `servers[]`（§5.3） |
 | GET | `/v1/servers/{server_id}` | 详情与最新状态 | — | 同上单条 + `install_log_tail_redacted` |
 | POST | `/v1/servers/{server_id}/rebuild` | 安装失败后重建（**销毁旧机 + 用同地区同套餐新建**） | `confirm: true` | `new_server_id`, `state = creating` |
-| POST | `/v1/servers/{server_id}/destroy` | 销毁 | `confirm: true`, `reason?` | `state = destroying` |
+| POST | `/v1/servers/{server_id}/destroy` | 销毁 | `confirm: true`, `reason?` | 204；**远端删除失败 → 502 `UPSTREAM_ERROR`，状态保持不变、机器仍可见可重试** |
 | POST | `/v1/servers/{server_id}/credentials` | 取节点凭据（验签包） | — | `{ payload, signature }` |
 | POST | `/v1/enroll/{enrollment_token}` | **实例 → 控制面**：上报安装结果与凭据 | 见 §6.4 | `ok` |
 
 云厂商事件由控制面内部处理，不暴露给客户端；真实支付回调属于 M2（§3.1）。
+
+**销毁的顺序是硬约束（2026-11-15）**：先调云厂商删除，成功后才落 `destroyed`。反过来做（先标记已销毁再删除、且不看删除结果），一旦删除失败就会留下一台仍在计费、界面上却看不到的机器——用户既发现不了也无从重试。删除返回 404（机器已不存在）按成功处理，保证重试幂等；失败则把状态还原并返回 502，让用户能再点一次。
 
 ### 3.1 支付：本期只做假的（接口形状保留）
 
@@ -647,16 +695,24 @@ DigitalOcean 的 `POST /v2/droplets` 直接接受 `user_data`（cloud-init **明
 
 ### 7.5 空态与失败态
 
+**默认展示（2026-11-15 产品拍板）**：中间区域**永远先给「能建什么」**——地区、三档机型、系统、实时价格、`创建服务器`。没有服务器、没有身份、列表读不到，都不把创建页换掉，也不弹整页横幅。
+
 | 情况 | 界面 |
 |---|---|
-| 身份未就绪 | 列表区空态 + 一句「暂时连不上服务器服务」+ `重试`；价格仍可看。**不出现 `登录`** |
+| 无身份 | 左栏一行「登录后查看你的服务器」；中间仍是创建页；身份状态收在左栏底部的小按钮里（`未登录`） |
+| 列表读取失败 | 错误只在左栏就地显示 + `重试`；中间仍是创建页 |
+| 详情读取失败 | 中间保留详情卡片的位置与尺寸，卡片内三段式（连不上服务器 / 没有改动 / `重试`），不出现整页空白 |
+| 数据未到 | 左栏保留列表高度，2–3 个弱化占位行 + 一行「连不上服务器，稍后再试」+ `重试`；不把左栏塌成一行 |
+| 已有服务器且选中 | 中间显示该服务器详情；点左栏 `+` 回到创建页 |
 | 下单处理中 | 列表该行显示「正在开始…」，详情给一句进度；假支付通常不到 1 秒 |
 | 建机失败 | 详情错误块：发生了什么 / 这笔订单已结束，没有产生服务器 / `重新下单` 或 `换地区`；列表该行状态点转红 |
 | 装机失败 | 中间详情错误块：已自动销毁 + `重新建一台`；不说“重试安装” |
 | 实例已不存在 | 列表行标 `已失效`；**节点保留在组里并标「服务器已销毁」**，连接时给明确错误；用户可手动移除；详情给 `重新购买` 与 `改用自己的节点` |
-| 提供商不可用 | 页头提示「暂时连不上服务器服务，稍后再试」；不影响已有节点 |
+| 提供商不可用 | 同「列表读取失败」：左栏就地一句 + `重试`，不挡创建页 |
 
 所有错误按三段式：发生了什么 → 有没有产生服务器或改动 → 现在做什么。本期没有扣费，文案不要提“退款”。
+
+**身份状态的住处只有一个**：左栏底部的小按钮（`未登录` / `已登录 · 设备`）。点它才做身份动作；邮箱登录上线后，同一个入口打开共用登录弹窗。不在中间放登录横幅。
 
 ### 7.6 节点如何进池、如何建配置
 
@@ -909,7 +965,7 @@ CREATE TABLE my_servers (
 | N14 | 切换不改连接 | 已连接时切到服务器并停留，计时器继续、托盘不变、无 stop/start 记录；切回仍是同一份状态 |
 | N15 | 左栏随 destination 切换 | 客户端下左栏是配置列表；点「节点组」后同一列变成组列表（`免费` 段 → `我的组` 段）；点「我的服务器」后同一列变成服务器列表；三者的中间各自对应；点「客户端」换回配置列表 |
 | N16 | **建机闭环真的通了** | 用测试 key 实跑：droplet 到 `active` 且 `ip` 取的是 public v4；防火墙已绑定且入站只有节点的 TCP+UDP 两条；enrollment 恰好成功一次（同 token 再用 409）；凭据验签通过、客户端连上、`node_id` 出现在服务器与节点池；销毁返回 204、列表不再出现、`GET /v2/droplets/{id}` 404 |
-| N17 | **失败不留计费实例** | 注入防火墙创建失败与 enrollment 超时两种故障：每次都在 60 秒内销毁 droplet，订单 `failed`，按 tag `veyl:srv=*` 查询云账号为空；客户端不产生任何节点 |
+| N17 | **失败不留计费实例** | 注入防火墙创建失败与 enrollment 超时两种故障：每次都在 60 秒内销毁 droplet，订单 `failed`，按 tag `veyl:srv:*` 查询云账号为空；客户端不产生任何节点 |
 | N18 | **幂等与设备令牌** | 同一 `Idempotency-Key` 重复下单只产生一台 droplet；同 key 不同 body 返回 `idempotency_conflict`；本地秘密丢失后重启应用不会自动重新注册，而是给出「身份已丢失」提示且旧服务器不可管理；令牌与密码不出现在日志、界面、`chat_messages` 与 AI 上下文 |
 
 ### 12.2 其它文档
@@ -948,6 +1004,10 @@ CREATE TABLE my_servers (
 - `GET /v2/sizes` 返回 **43** 种；最便宜 5 档：`s-1vcpu-512mb-10gb` $4、`s-1vcpu-1gb` $6、`s-1vcpu-1gb-intel` $7、`s-1vcpu-1gb-35gb-intel` $8、`s-1vcpu-2gb` $12（均为月价，USD）。
 - `GET /v2/images?type=distribution` 中 `ubuntu-24-04-x64` 的 **id = `252242095`**，名称 `24.04 (LTS) x64`。
 - 权限边界实测（`/v1/debug/do-scopes`）：`regions` / `sizes` / `images` / `droplets` / `firewalls` 全部 **200 allowed**；`/account` 与 `/customers/my/balance` 都是 **403 denied**——token 恰好停在最小权限，没有多余的账户或计费权限。
+- **scopes 分资源，不能互相替代**（2026-11-15 实测踩坑）：`POST /v2/droplets` 的请求体带 `tags`，即使有 `droplet:admin` 也会因缺 `tag:create` 返回 **403**（订单记 `failure_code = upstream_403`、`failure_stage = creating`）。`droplet:admin` 只覆盖 droplet 资源内部，tag 是独立资源类型。
+- **预装镜像（后续）**：用自定义镜像建机只需 `image:read` + `droplet:create`；上传/导入镜像本身要 `image:create`（2026-11-15 经 DigitalOcean 官方 AI 确认，与 token 管理页的 scope 列表一致）。
+- **打快照的 scope 待实测**：DO 的 AI 说是 `droplet:action`，但 **token 管理页没有这个 scope**（droplet 只有 create/read/update/delete/admin），这条答复不可信。做镜像时用实测确认是 `droplet:update` 还是 `droplet:admin`，不要照抄。
+
 
 **2026-11-14 官方文档核实（`docs.digitalocean.com/reference/api/reference/`）**：
 
@@ -972,7 +1032,7 @@ CREATE TABLE my_servers (
 | 2 | 销毁后多久从 `GET /v2/droplets` 消失（返回码已知是 204） | “已销毁”能不能说 |
 | 3 | 计费粒度、关机是否仍收 IP / 存储费、账单周期 | “销毁即停”的说明口径（本期只写文档） |
 | 4 | 云厂商回收 / 欠费 / 滥用的通知机制（邮件 / API） | 实例消失的发现路径 |
-| 5 | **我们自己的控制面在中国大陆的可达性**：自定义域名是否稳定、`*.workers.dev` 的可达性、跨境延迟、是否需要备案 / 加速 | 付款成功但连不上控制面，整条链路仍直接死 |
+| 5 | ~~**我们自己的控制面在中国大陆的可达性**~~ | **已定性（2026-11-15，见 §2.3）**：`*.workers.dev` 被 DNS 污染到 `128.242.240.59`（NTT America），TCP 连接失败；Cloudflare 托管的普通域名解析正常。方案=Pages 边缘承接域名（dev `cp-dev.veyl.dessage.xyz`，prod `veyl.dessage.xyz`）。剩余待做：DNS 生效后在国内网络实测延迟 |
 | 6 | DO 是否返回 / 邮件发送 root 密码 | 仅记录；本设计不使用 root 密码（节点凭据由 cloud-init 生成） |
 
 补充：从中国大陆到各地区的实际延迟仍待实测，只影响默认地区排序，不阻塞实现。
@@ -1258,7 +1318,7 @@ POST /v1/auth/device
 | 本地秘密丢失（换机、抹盘、`secrets.enc` 损坏） | **该设备账户不可恢复**：旧服务器仍在你名下的云账号里**继续计费**，但客户端无法列出、无法销毁 | 若本地 `my_servers` 仍有记录：**不自动重新注册**，显示一条提示「这台设备的身份已丢失。已买的服务器仍在计费，这里无法管理。」+ 一个显式的 `重新注册设备` 按钮（点了才建新账户；旧记录保留为本地只读，操作按钮禁用） |
 | 账户被封禁 | 全部写操作 403 `account_blocked` | 只读本地缓存 |
 
-- **运维兜底**：每台 droplet 都打了 `veyl:srv=<server_id>` / `veyl:acct=<hash8>` tag，运维可按 tag 在云控制台直接销毁（§19.6.5 对账任务同一个入口）。M1 没有工单系统，文案只写「联系支持」。
+- **运维兜底**：每台 droplet 都打了 `veyl:srv:<server_id>` / `veyl:acct:<account_id>` tag，运维可按 tag 在云控制台直接销毁（§19.6.5 对账任务同一个入口）。M1 没有工单系统，文案只写「联系支持」。
 - 这是 M1 已知的、可接受的洞：登录 UI 后置的代价。**M2 邮箱登录上线就补上自助恢复。**
 
 #### 19.2.5 并入邮箱账户（M2，仅写规则）
@@ -1453,7 +1513,7 @@ CREATE TABLE rate_limits (
 POST /v2/droplets
 { "name": "veyl-srv_7f3a", "region": "sgp1", "size": "s-1vcpu-1gb",
   "image": "ubuntu-24-04-x64", "ipv6": false, "monitoring": false,
-  "tags": ["veyl", "veyl:env=prod", "veyl:acct=ab12cd34", "veyl:srv=srv_7f3a"],
+  "tags": ["veyl", "veyl:env:prod", "veyl:acct:acct_7Qm2x9Kd4LpRz1Ty", "veyl:srv:srv_7f3a"],
   "user_data": "<cloud-init 明文，≤ 64 KiB，目标 ≤ 16 KiB>" }
 ```
 
@@ -1502,9 +1562,40 @@ verify 端口不通                        → destroy(droplet) → 订单 faile
 1. `orders` 停在 `paid` / `provisioning` 超过 25 分钟 → `failed` + 销毁。
 2. `servers` 停在 `creating/booting/installing/verifying` 超过 30 分钟 → `error` + 销毁。
 3. `servers` 停在 `destroying` 超过 10 分钟 → 再发一次 `DELETE`；超过 1 小时 → 告警。
-4. **按 tag 反查**：`GET /v2/droplets?tag_name=veyl:env=<env>` 与本环境 `servers.provider_id` 求差集；有 droplet 但 D1 没有 → **孤儿，直接销毁并告警**（这是「Workflow 崩了也不留计费实例」的兜底）。
+4. **按 tag 反查**：`GET /v2/droplets?tag_name=veyl:env:<env>` 与本环境 `servers.provider_id` 求差集；有 droplet 但 D1 没有 → **孤儿，直接销毁并告警**（这是「Workflow 崩了也不留计费实例」的兜底）。
 5. 清理 24 小时前的幂等键、过期订单。
 6. 对账结果写 `audit_log`；单次最多处理 20 台，避免一次跑爆。
+
+#### 19.6.6 机器归属：从云上机器反查用户
+
+**需求**：拿到任意一台 droplet（云控制台里看到的、工单里提到的、或者对账发现的孤儿），必须能查出它属于哪个账户，以及在客服场景下从一个用户反查他名下的机器。
+
+**载体**：机器上的两个 tag + D1 里的两行记录。
+
+```
+droplet tag:  veyl:srv:<server_id>      veyl:acct:<account_id>
+                     │                        │
+D1 servers 表 ───────┘                        │
+   （account_id 外键）─────────────────────────┘
+                     ↓
+              accounts 表（id ↔ 邮箱，M2 才有邮箱）
+```
+
+**不用邮箱，用系统自己的 account_id**，三个理由：
+
+1. **字符集不允许**。DO 的 tag 名是 `^[a-zA-Z0-9_\-:]+$`，droplet `name` 是 `^[a-zA-Z0-9]?[a-z0-9A-Z.\-]*[a-z0-9A-Z]$`——两边都不允许 `@`，邮箱原样放不进去。
+2. **不把 PII 写进外部系统**。tag 会出现在云控制台、API 响应、工单截图里。邮箱一旦写进去，将来做隐私合规要逐条清理，用户换邮箱后还会过期。
+3. **账号合并时不变**（§19.2.5：不改 droplet 的 tag）。tag 是审计线索，身份归属以 D1 为准，因此合并邮箱账户时机器不需要重打标。
+
+**三条查询路径**
+
+| 场景 | 做法 |
+|---|---|
+| 云控制台看到一台机器 | 读 tag `veyl:acct:<account_id>` → `SELECT * FROM accounts WHERE id = ?` |
+| 用户问「我有哪几台」 | `SELECT * FROM servers WHERE account_id = ? AND state != 'destroyed'` |
+| 找孤儿机器 | `GET /v2/droplets?tag_name=veyl:env:<env>` 与本环境 `servers.provider_id` 求差集（§19.6.5 第 4 条） |
+
+**实现约束**：`veyl:acct:` 必须写**完整** `account_id`，不截断——它是反查的唯一线索，截断会引入碰撞。（2026-11-15 已按此实现，`src/provision.ts` 的 `tags`。）
 
 ### 19.7 装机与 enrollment
 
@@ -1607,7 +1698,7 @@ POST /v1/enroll/<token>
 | A2 | 防火墙已绑定该 droplet，入站**恰好两条**（节点端口 TCP + UDP），无 22；`droplet_ids` 含该 id |
 | A3 | enrollment 恰好成功一次：首个请求 200；同 token 第二次 409 `enrollment_invalid`；`servers.node_id`、`credentials` 行同时出现 |
 | A4 | `POST /servers/{id}/credentials` 的 payload 能用内置公钥验签；客户端写入 `secrets.enc` 后 `node_probe` 或真实连接成功（TCP 或 Clash 延迟二者其一） |
-| A5 | 销毁返回 **204**；`GET /v1/servers/{id}` = `destroyed`；列表不含；`GET /v2/droplets/{id}` = 404；`GET /v2/droplets?tag_name=veyl:srv=<id>` 为空 |
+| A5 | 销毁返回 **204**；`GET /v1/servers/{id}` = `destroyed`；列表不含；`GET /v2/droplets/{id}` = 404；`GET /v2/droplets?tag_name=veyl:srv:<id>` 为空 |
 | A6 | 故障注入（防火墙创建失败、enrollment 超时各一次）：60 秒内 droplet 被销毁，订单 `failed`，客户端零节点，tag 查询为空 |
 | A7 | 幂等：同 key 两次 `POST /orders` 只出现一个 `order_id`、一台 droplet；同 key 改 body → `idempotency_conflict`；并发同 key → 一个 `idempotency_in_flight` |
 | A8 | 令牌安全：`rg` 全部日志与 `chat_messages` 无 access/refresh token、无节点密码；前端 JS 侧拿不到令牌；撤销设备后旧 access 15 分钟内失效、refresh 立即失效 |

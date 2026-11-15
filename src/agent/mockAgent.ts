@@ -526,6 +526,11 @@ export class MockAgentBridge implements AgentBridge {
     return { account_id: "acct_mock", device_id: "dev_mock" };
   }
 
+  async myServerIdentity() {
+    // mock 里始终视为已注册，列表可直接展示。
+    return { has_identity: true, account_id: "acct_mock" };
+  }
+
   async myServerSshCredentials(serverId: string) {
     return this.myServers.sshCredentials(serverId);
   }

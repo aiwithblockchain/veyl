@@ -19,7 +19,9 @@
 	"vars": {
 		"ENVIRONMENT": "production",
 		// 写进 cloud-init 的回传地址；必须与部署后的实际地址一致。
-		"ENROLL_BASE_URL": "https://veyl-control-plane.ribencong.workers.dev"
+		"ENROLL_BASE_URL": "https://veyl.dessage.xyz",
+		// 生产使用独立的凭据签名密钥（dev 是 cp-2026-11），公钥内置在客户端。
+		"CREDENTIAL_KEY_ID": "cp-2026-12"
 	},
 	// Secrets（通过 wrangler secret put 设置，不写在此文件）：
 	// - DO_API_TOKEN（DigitalOcean；缺省时 /v1/catalog 返回 503）
@@ -30,7 +32,8 @@
 			"name": "veyl-control-plane-dev",
 			"vars": {
 				"ENVIRONMENT": "dev",
-				"ENROLL_BASE_URL": "https://veyl-control-plane-dev.ribencong.workers.dev"
+				"ENROLL_BASE_URL": "https://cp-dev.veyl.dessage.xyz",
+				"CREDENTIAL_KEY_ID": "cp-2026-11"
 			},
 			// 代码里统一用 env.DB；生产环境后面单独建库再加一条顶层配置。
 			"d1_databases": [
@@ -41,5 +44,12 @@
 				}
 			]
 		}
-	}
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "veyl-control-plane",
+			"database_id": "736d423d-47bb-435c-8d74-dfe9244c5833"
+		}
+	]
 }

@@ -3,7 +3,7 @@
 
 import { buildCloudInit } from "./cloud_init";
 import { randomId, sha256B64u } from "./lib/crypto";
-import { createDroplet } from "./providers/digitalocean";
+import { createDroplet, deleteDroplet } from "./providers/digitalocean";
 
 export interface ProvisionEnv {
   DB: D1Database;
@@ -34,8 +34,8 @@ async function fail(
 ): Promise<ProvisionResult> {
   const now = Date.now();
   await env.DB.batch([
-    env.DB.prepare("UPDATE servers SET state = 'error', updated_at = ? WHERE id = ?")
-      .bind(now, server.id),
+    env.DB.prepare("UPDATE servers SET state = 'error', failure_code = ?, updated_at = ? WHERE id = ?")
+      .bind(reason, now, server.id),
     env.DB.prepare(
       "UPDATE orders SET state = 'failed', failure_code = ?, failure_stage = 'creating' WHERE id = ?",
     ).bind(reason, server.order_id),
@@ -60,38 +60,54 @@ export async function provisionServer(
   const userData = buildCloudInit({ port: server.node_port, enrollUrl });
 
   const created = await createDroplet(env.DO_API_TOKEN, {
-    name: `veyl-${server.id.replace(/^srv_/, "").slice(0, 12)}`,
+    // DO 要求 name 匹配 ^[a-zA-Z0-9]?[a-z0-9A-Z.\-]*[a-z0-9A-Z]$：
+    // 随机 id 是 base64url，可能含 `_`，必须先替换掉，且末位要是字母或数字。
+    name: `veyl-${server.id.replace(/^srv_/, "").slice(0, 12)}`
+      .replace(/[^A-Za-z0-9.-]/g, "-")
+      .replace(/[.-]$/, "0"),
     region: server.region,
     size: server.plan,
     image: "ubuntu-24-04-x64",
     userData,
-    tags: [`veyl:srv=${server.id}`, `veyl:acct=${server.account_id.slice(0, 9)}`, `veyl:env=${env.ENVIRONMENT}`],
+    // tag 名只允许字母数字、下划线、连字符、冒号（^[a-zA-Z0-9_\-:]+$），不能有 `=`。
+    // acct 用完整 account_id：这是「从云上机器反查用户」的唯一线索，不能截断。
+    tags: [
+      `veyl:srv:${server.id}`,
+      `veyl:acct:${server.account_id}`,
+      `veyl:env:${env.ENVIRONMENT}`,
+    ],
   });
 
   if (!created.ok) return fail(env, server, created.reason);
 
   const now = Date.now();
-  await env.DB.batch([
-    env.DB.prepare(
-      "UPDATE servers SET provider_id = ?, ip = ?, state = 'booting', enrollment_hash = ?, " +
-        "enrollment_expires_at = ?, updated_at = ? WHERE id = ?",
-    ).bind(
-      created.value.providerId,
-      created.value.ipv4,
-      enrollHash,
-      now + ENROLL_TTL_MS,
-      now,
-      server.id,
-    ),
-    env.DB.prepare(
-      "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.created', ?)",
-    ).bind(
-      now,
-      server.account_id,
-      server.id,
-      JSON.stringify({ provider_id: created.value.providerId, region: server.region }),
-    ),
-  ]);
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE servers SET provider_id = ?, ip = ?, state = 'booting', enrollment_hash = ?, " +
+          "enrollment_expires_at = ?, updated_at = ? WHERE id = ?",
+      ).bind(
+        created.value.providerId,
+        created.value.ipv4,
+        enrollHash,
+        now + ENROLL_TTL_MS,
+        now,
+        server.id,
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.created', ?)",
+      ).bind(
+        now,
+        server.account_id,
+        server.id,
+        JSON.stringify({ provider_id: created.value.providerId, region: server.region }),
+      ),
+    ]);
+  } catch (error) {
+    // 机器已经建出来了但没记进库：立刻删掉，否则它会成为一台没有记录、无人管理的计费实例。
+    await deleteDroplet(env.DO_API_TOKEN, created.value.providerId);
+    return fail(env, server, "db_write_failed");
+  }
 
   return { ok: true, providerId: created.value.providerId, ip: created.value.ipv4 };
 }

@@ -1245,7 +1245,8 @@ mod prompt_tests {
         // 节点来源一问是产品硬规则：不许默认用我们提供的服务器。
         assert!(text.contains("节点从哪来"), "节点来源一问没渲染进提示词");
         assert!(text.contains("Veyl 免费节点（仅供试用）"));
-        assert!(text.contains("用我自己的节点"));
+        // 节点来源选项的文案以 2026-11-15 收敛后的说法为准。
+        assert!(text.contains("其它节点"));
         assert!(
             !text.contains("{{"),
             "还有没替换的占位符：{}",

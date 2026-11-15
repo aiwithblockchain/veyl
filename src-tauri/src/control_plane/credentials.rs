@@ -5,11 +5,10 @@
 
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::error::CpError;
-use crate::secrets::SecretsStore;
 use crate::store::configs::upsert_node;
 use crate::store::NewNode;
 
@@ -18,10 +17,16 @@ use crate::store::NewNode;
 /// 私钥只在 Cloudflare Worker secret 里，不在仓库。轮换时新增一条
 /// `("cp-20xx-xx", "...")`，客户端按响应里的 `key_id` 选择。
 /// debug 构建可用 `VEYL_CREDENTIAL_PUBLIC_KEY` 临时注入，release 不读这个变量。
-const CREDENTIAL_KEYS: &[(&str, &str)] = &[(
-    "cp-2026-11",
-    "KmTHenls8NqjIg9Ax2aT-Zks1EcutjrHiM20JK1BFu8",
-)];
+const CREDENTIAL_KEYS: &[(&str, &str)] = &[
+    (
+        "cp-2026-11",
+        "KmTHenls8NqjIg9Ax2aT-Zks1EcutjrHiM20JK1BFu8",
+    ),
+    (
+        "cp-2026-12",
+        "riyn69Uz-9j4L5LRfShKsFIQtZ7pSdrwfvg40KpmEaI",
+    ),
+];
 
 fn decode_any(value: &str) -> Option<Vec<u8>> {
     let trimmed = value.trim();
@@ -177,25 +182,64 @@ pub fn verify_with(
     Ok(payload)
 }
 
-/// 写入本地凭据与节点行。拆分出来是为了让测试用临时 `SecretsStore` 断言「不落库」。
+/// 凭据落库后界面能用的本地节点；不含密码（密码只在 `secrets.enc`）。
+///
+/// `node_id` 是本地 `nodes.id` 而不是响应里的 `node_id`：两者首次签发时相同，
+/// 控制面换发后本地仍沿用旧行，界面必须拿本地 id 才能建配置。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OwnedNode {
+    pub server_id: String,
+    pub node_id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub method: String,
+}
+
+/// 控制面凭据响应的三个字段。缺任何一个都视为不可信响应，不落库。
+#[derive(Debug, Clone, Copy)]
+pub struct CredentialResponse<'a> {
+    pub payload: &'a str,
+    pub signature: &'a str,
+    pub key_id: &'a str,
+}
+
+/// 写入本地凭据与节点行，并回填 `my_servers.node_id`。
+///
+/// 幂等键是 `(source='owned', source_key=server_id)`：同一台服务器重新取凭据时复用
+/// 已有节点行（即使控制面换发了新 `node_id`），不会撞 `nodes` 的来源唯一索引。
+/// `save_secret` 让测试用临时凭据库，生产走全局 `secrets.enc`。
 pub fn persist_with(
-    secrets: &SecretsStore,
     conn: &rusqlite::Connection,
     server_name: Option<&str>,
     payload: &CredentialPayload,
-) -> Result<(), CpError> {
-    let secret_ref = format!("node:{}", payload.node_id);
-    secrets
-        .set(&secret_ref, &payload.password)
-        .map_err(|_| CpError::internal("保存节点密码失败"))?;
+    save_secret: impl Fn(&str, &str) -> Result<(), ()>,
+) -> Result<OwnedNode, CpError> {
+    let existing = crate::store::configs::find_node_by_source_key(
+        conn,
+        crate::store::configs::SOURCE_OWNED,
+        &payload.server_id,
+    )
+    .map_err(|error| CpError::internal(format!("读取本地节点失败：{error}")))?;
+    let created = existing.is_none();
+    let node_id = existing
+        .as_ref()
+        .map(|node| node.id.clone())
+        .unwrap_or_else(|| payload.node_id.clone());
+    let secret_ref = existing
+        .as_ref()
+        .map(|node| node.password_ref.clone())
+        .unwrap_or_else(|| format!("node:{node_id}"));
 
     let name = server_name
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(&payload.server_id);
-    upsert_node(
+    // 先写节点再写密码：反过来一旦节点写失败，`secrets.enc` 会留下没有任何
+    // 行引用的孤儿密钥。新节点密码写失败时回删刚建的节点行；已有节点保留旧密码。
+    let node = upsert_node(
         conn,
         &NewNode {
-            id: &payload.node_id,
+            id: &node_id,
             name,
             server: &payload.host,
             port: payload.port,
@@ -207,46 +251,78 @@ pub fn persist_with(
     )
     .map_err(|error| CpError::internal(format!("保存节点失败：{error}")))?;
 
-    let _ = crate::store::servers::set_node(conn, &payload.server_id, &payload.node_id);
-    Ok(())
+    if save_secret(&secret_ref, &payload.password).is_err() {
+        if created {
+            let _ = crate::store::configs::delete_node(conn, &node.id);
+        }
+        return Err(CpError::internal("保存节点密码失败"));
+    }
+
+    crate::store::servers::set_node(conn, &payload.server_id, &node.id)
+        .map_err(|error| CpError::internal(format!("回填服务器节点失败：{error}")))?;
+
+    Ok(OwnedNode {
+        server_id: payload.server_id.clone(),
+        node_id: node.id,
+        name: node.name,
+        host: node.server,
+        port: node.port,
+        method: node.method,
+    })
 }
 
-/// 生产入口：内置公钥验签 + 全局凭据库/数据库落库。
+/// 验签 → 落库：验不过就返回错误，调用方拿不到任何可持久化的东西。
+///
+/// 生产入口与单测走同一条路径，避免「测试只测了验签、生产落库另写一遍」。
+pub fn materialize_with(
+    conn: &rusqlite::Connection,
+    server_name: Option<&str>,
+    requested_server_id: &str,
+    response: &CredentialResponse<'_>,
+    public_key: &[u8],
+    expected_key_id: &str,
+    save_secret: impl Fn(&str, &str) -> Result<(), ()>,
+) -> Result<OwnedNode, CpError> {
+    let verified = verify_with(
+        public_key,
+        expected_key_id,
+        requested_server_id,
+        response.payload,
+        response.signature,
+        response.key_id,
+    )?;
+    persist_with(conn, server_name, &verified, save_secret)
+}
+
+/// 生产入口：内置公钥验签 + 全局凭据库/数据库落库，返回本地节点。
 pub fn verify_and_store(
     requested_server_id: &str,
     payload: &str,
     signature: &str,
     key_id: &str,
-) -> Result<(), CpError> {
+) -> Result<OwnedNode, CpError> {
     let key = public_key(key_id)?;
-    let verified = verify_with(&key, key_id, requested_server_id, payload, signature, key_id)?;
 
-    let store = crate::store::global()
-        .ok_or_else(|| CpError::internal("本地数据库不可用"))?;
+    let store = crate::store::global().ok_or_else(|| CpError::internal("本地数据库不可用"))?;
     let conn = store.conn();
     let name = crate::store::servers::get(&conn, requested_server_id)
         .ok()
         .flatten()
         .map(|row| row.name);
-    crate::secrets::set_secret(&format!("node:{}", verified.node_id), &verified.password)
-        .map_err(|_| CpError::internal("保存节点密码失败"))?;
-    let name = name.as_deref().unwrap_or(&verified.server_id);
-    upsert_node(
+    let response = CredentialResponse {
+        payload,
+        signature,
+        key_id,
+    };
+    materialize_with(
         &conn,
-        &NewNode {
-            id: &verified.node_id,
-            name,
-            server: &verified.host,
-            port: verified.port,
-            method: &verified.method,
-            password_ref: &format!("node:{}", verified.node_id),
-            source: crate::store::configs::SOURCE_OWNED,
-            source_key: &verified.server_id,
-        },
+        name.as_deref(),
+        requested_server_id,
+        &response,
+        &key,
+        key_id,
+        |key, value| crate::secrets::set_secret(key, value).map_err(|_| ()),
     )
-    .map_err(|error| CpError::internal(format!("保存节点失败：{error}")))?;
-    let _ = crate::store::servers::set_node(&conn, &verified.server_id, &verified.node_id);
-    Ok(())
 }
 
 /// 测试辅助：把一段载荷签成合法响应。
@@ -258,6 +334,8 @@ fn sign(key_pair: &ring::signature::Ed25519KeyPair, payload: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::SecretsStore;
+    use crate::store::servers::NewMyServer;
     use crate::store::Store;
     use ring::signature::KeyPair;
 
@@ -267,6 +345,37 @@ mod tests {
         let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
         let public = pair.public_key().as_ref().to_vec();
         (pair, public)
+    }
+
+    fn secrets_store() -> (SecretsStore, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("veyl-cp-secret-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let secrets =
+            SecretsStore::with_machine_id(dir.join("secrets.enc"), "test-machine").unwrap();
+        (secrets, dir)
+    }
+
+    fn save_into(secrets: &SecretsStore) -> impl Fn(&str, &str) -> Result<(), ()> + '_ {
+        move |key, value| secrets.set(key, value).map_err(|_| ())
+    }
+
+    fn local_server(conn: &rusqlite::Connection) {
+        crate::store::servers::upsert(
+            conn,
+            &NewMyServer {
+                id: "srv_1",
+                provider: "digitalocean",
+                name: "Tokyo",
+                region: "tyo",
+                plan: "s-1vcpu-1gb",
+                state: "active",
+                node_id: None,
+                hourly_usd: 0.009,
+                monthly_usd: 6.0,
+                created_at: 1_700_000_000_000,
+            },
+        )
+        .unwrap();
     }
 
     fn payload(server_id: &str) -> String {
@@ -296,19 +405,83 @@ mod tests {
 
         let store = Store::open_in_memory().unwrap();
         let conn = store.conn();
-        let dir = std::env::temp_dir().join(format!("veyl-cp-secret-{:016x}", rand::random::<u64>()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let secrets =
-            SecretsStore::with_machine_id(dir.join("secrets.enc"), "test-machine").unwrap();
-        persist_with(&secrets, &conn, Some("Tokyo"), &verified).unwrap();
+        local_server(&conn);
+        let (secrets, dir) = secrets_store();
+        let node = persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets)).unwrap();
 
+        assert_eq!(node.server_id, "srv_1");
+        assert_eq!(node.node_id, "nd_1");
+        assert_eq!(node.host, "203.0.113.10");
+        assert_eq!(node.method, "aes-256-gcm");
         assert_eq!(
             secrets.get("node:nd_1").unwrap().as_deref(),
             Some("s3cret-password")
         );
-        let node = crate::store::configs::get_node(&conn, "nd_1").unwrap().unwrap();
-        assert_eq!(node.source, "owned");
-        assert_eq!(node.password_ref, "node:nd_1");
+        let stored = crate::store::configs::get_node(&conn, "nd_1").unwrap().unwrap();
+        assert_eq!(stored.source, "owned");
+        assert_eq!(stored.source_key, "srv_1");
+        assert_eq!(stored.password_ref, "node:nd_1");
+        // 服务器 ↔ 本地节点建立关联：界面后续用这个 id 建配置。
+        assert_eq!(
+            crate::store::servers::get(&conn, "srv_1")
+                .unwrap()
+                .unwrap()
+                .node_id
+                .as_deref(),
+            Some("nd_1")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reissued_credential_reuses_the_same_local_node() {
+        let (pair, public) = keypair();
+        let body = payload("srv_1");
+        let signature = sign(&pair, &body);
+        let verified =
+            verify_with(&public, "cp-test", "srv_1", &body, &signature, "cp-test").unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        local_server(&conn);
+        let (secrets, dir) = secrets_store();
+        let first = persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets)).unwrap();
+        assert_eq!(first.node_id, "nd_1");
+
+        // 控制面重新签发，node_id 和端口都变了；本地仍以 server_id 为键复用同一行。
+        let mut value: serde_json::Value =
+            serde_json::from_str(&payload("srv_1")).unwrap();
+        value["node_id"] = json!("nd_2");
+        value["port"] = json!(20443);
+        let body = value.to_string();
+        let signature = sign(&pair, &body);
+        let verified =
+            verify_with(&public, "cp-test", "srv_1", &body, &signature, "cp-test").unwrap();
+        let second = persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets)).unwrap();
+
+        assert_eq!(second.node_id, "nd_1");
+        assert_eq!(second.server_id, "srv_1");
+        assert_eq!(second.port, 20443);
+        // 服务器关联也要保持本地 id：换发后不能改成控制面的新 `nd_2`。
+        assert_eq!(
+            crate::store::servers::get(&conn, "srv_1")
+                .unwrap()
+                .unwrap()
+                .node_id
+                .as_deref(),
+            Some("nd_1")
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM nodes WHERE source = 'owned'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            secrets.get("node:nd_1").unwrap().as_deref(),
+            Some("s3cret-password")
+        );
+        assert!(secrets.get("node:nd_2").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -318,19 +491,166 @@ mod tests {
         let (_, other_public) = keypair();
         let body = payload("srv_1");
         let signature = sign(&pair, &body);
-        let error =
-            verify_with(&other_public, "cp-test", "srv_1", &body, &signature, "cp-test").unwrap_err();
-        assert_eq!(error.reason(), Some("credential_signature_invalid"));
 
-        // 验签失败时调用方拿不到载荷，持久化根本不会发生。
         let store = Store::open_in_memory().unwrap();
         let conn = store.conn();
-        let dir = std::env::temp_dir().join(format!("veyl-cp-secret-{:016x}", rand::random::<u64>()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let secrets =
-            SecretsStore::with_machine_id(dir.join("secrets.enc"), "test-machine").unwrap();
+        local_server(&conn);
+        let (secrets, dir) = secrets_store();
+        let response = CredentialResponse {
+            payload: &body,
+            signature: &signature,
+            key_id: "cp-test",
+        };
+        let error = materialize_with(
+            &conn,
+            Some("Tokyo"),
+            "srv_1",
+            &response,
+            &other_public,
+            "cp-test",
+            save_into(&secrets),
+        )
+        .unwrap_err();
+        assert_eq!(error.reason(), Some("credential_signature_invalid"));
+
+        // 验签在落库之前：错误路径上节点行、密码、服务器关联都不该出现。
+        assert!(crate::store::configs::get_node(&conn, "nd_1")
+            .unwrap()
+            .is_none());
         assert!(secrets.get("node:nd_1").unwrap().is_none());
-        assert!(crate::store::configs::get_node(&conn, "nd_1").unwrap().is_none());
+        assert_eq!(
+            crate::store::servers::get(&conn, "srv_1")
+                .unwrap()
+                .unwrap()
+                .node_id,
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_payload_missing_required_fields_is_rejected_and_nothing_is_stored() {
+        let (pair, public) = keypair();
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        local_server(&conn);
+        let (secrets, dir) = secrets_store();
+
+        let missing: [(&str, serde_json::Value); 4] = [
+            ("password", json!("")),
+            ("host", json!("")),
+            ("port", json!(0)),
+            ("node_id", json!("")),
+        ];
+        for (field, value) in missing {
+            let mut body: serde_json::Value = serde_json::from_str(&payload("srv_1")).unwrap();
+            body[field] = value;
+            let body = body.to_string();
+            let signature = sign(&pair, &body);
+            let response = CredentialResponse {
+                payload: &body,
+                signature: &signature,
+                key_id: "cp-test",
+            };
+            let error = materialize_with(
+                &conn,
+                Some("Tokyo"),
+                "srv_1",
+                &response,
+                &public,
+                "cp-test",
+                save_into(&secrets),
+            )
+            .unwrap_err();
+            assert_eq!(error.reason(), Some("invalid_response"), "{field}");
+            assert_eq!(error.code, "UPSTREAM_ERROR", "{field}");
+        }
+
+        assert!(crate::store::configs::get_node(&conn, "nd_1")
+            .unwrap()
+            .is_none());
+        assert!(secrets.get("node:nd_1").unwrap().is_none());
+        assert_eq!(
+            crate::store::servers::get(&conn, "srv_1")
+                .unwrap()
+                .unwrap()
+                .node_id,
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_secret_write_removes_the_new_node() {
+        let (pair, public) = keypair();
+        let body = payload("srv_1");
+        let signature = sign(&pair, &body);
+        let verified =
+            verify_with(&public, "cp-test", "srv_1", &body, &signature, "cp-test").unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        local_server(&conn);
+        let error = persist_with(&conn, Some("Tokyo"), &verified, |_, _| Err(())).unwrap_err();
+        assert_eq!(error.reason(), Some("internal"));
+
+        // 新节点还没写进密码，不能留在节点池里；服务器也不该关联它。
+        assert!(crate::store::configs::get_node(&conn, "nd_1")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            crate::store::servers::get(&conn, "srv_1")
+                .unwrap()
+                .unwrap()
+                .node_id,
+            None
+        );
+    }
+
+    #[test]
+    fn a_failed_secret_write_keeps_an_existing_node_and_its_password() {
+        let (pair, public) = keypair();
+        let body = payload("srv_1");
+        let signature = sign(&pair, &body);
+        let verified =
+            verify_with(&public, "cp-test", "srv_1", &body, &signature, "cp-test").unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        local_server(&conn);
+        let (secrets, dir) = secrets_store();
+        persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets)).unwrap();
+
+        // 控制面换发：新 node_id、新密码；覆盖写密码失败时旧密码与旧节点必须保留。
+        let mut value: serde_json::Value = serde_json::from_str(&payload("srv_1")).unwrap();
+        value["node_id"] = json!("nd_2");
+        value["password"] = json!("rotated-password");
+        let body = value.to_string();
+        let signature = sign(&pair, &body);
+        let verified =
+            verify_with(&public, "cp-test", "srv_1", &body, &signature, "cp-test").unwrap();
+        let error = persist_with(&conn, Some("Tokyo"), &verified, |_, _| Err(())).unwrap_err();
+        assert_eq!(error.reason(), Some("internal"));
+
+        assert!(crate::store::configs::get_node(&conn, "nd_2")
+            .unwrap()
+            .is_none());
+        let stored = crate::store::configs::get_node(&conn, "nd_1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.password_ref, "node:nd_1");
+        assert_eq!(
+            secrets.get("node:nd_1").unwrap().as_deref(),
+            Some("s3cret-password")
+        );
+        assert_eq!(
+            crate::store::servers::get(&conn, "srv_1")
+                .unwrap()
+                .unwrap()
+                .node_id
+                .as_deref(),
+            Some("nd_1")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

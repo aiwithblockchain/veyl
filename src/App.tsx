@@ -120,6 +120,27 @@ function readInitialPanelOpen(): boolean {
   return readPanelOpen(localStorage, typeof window === "undefined" ? 1440 : window.innerWidth);
 }
 
+/** 取凭据失败的三段式：发生了什么 / 没改动什么 / 现在做什么。 */
+function credentialErrorText(error: unknown): string {
+  const problem = toBridgeError(error);
+  const reason =
+    typeof problem.details?.reason === "string" ? problem.details.reason : "";
+  if (reason === "server_gone") {
+    return "这台服务器已不存在。没有改动任何配置；重新建一台再试。";
+  }
+  if (reason === "auth_required" || reason === "device_identity_lost") {
+    return "这台设备的身份需要重新确认。没有改动任何配置；到左栏底部重新登录后再试。";
+  }
+  if (!problem.retryable) {
+    return "这台服务器现在取不了凭据。没有改动任何配置；换一台服务器，或重新建一台。";
+  }
+  const base =
+    problem.message && problem.message !== "操作失败"
+      ? problem.message
+      : "没拿到这台服务器的节点。";
+  return `${base}没有改动任何配置；稍后再试。`;
+}
+
 export default function App() {
   const bridge = useMemo(() => getAgentBridge(), []);
   const [state, dispatch] = useReducer(chatReducer, undefined, createInitialState);
@@ -163,6 +184,8 @@ export default function App() {
     active: destination === "servers",
     rootSignal: serversRootSignal,
   });
+  const selectedServerIdRef = useRef<string | null>(null);
+  selectedServerIdRef.current = myServers.selected?.server_id ?? null;
   /** 从组详情「从我的服务器添加」进来时的目标组。 */
   const [serverJoinTarget, setServerJoinTarget] = useState<{
     groupId: string;
@@ -177,6 +200,13 @@ export default function App() {
     nodeIds: string[];
     label: string;
   } | null>(null);
+  /** 从「我的服务器 → 用来建配置」打开弹窗前所在的 destination；取消时恢复。 */
+  const [ownedReturnDestination, setOwnedReturnDestination] =
+    useState<Destination | null>(null);
+  /** 取凭据在途：防止连点，并在 resolve 后核对页面与服务器没变。 */
+  const useServerInFlightRef = useRef(false);
+  const destinationRef = useRef(destination);
+  destinationRef.current = destination;
   /** 正在为问题报告开会话并发送开场：期间禁用三处入口。 */
   const [reportOpening, setReportOpening] = useState(false);
   const reportOpeningRef = useRef(false);
@@ -289,13 +319,34 @@ export default function App() {
     if (serverEntry) setNewConfigOpen(true);
   };
 
-  // 从服务器带一个节点回新建流程：客户端 + 审视页。
-  const handleUseServer = (nodeId: string, serverName: string) => {
-    setServerJoinTarget(null);
-    setServerEntry(null);
-    setOwnedNodes({ nodeIds: [nodeId], label: serverName });
-    changeDestination("client");
-    setNewConfigOpen(true);
+  // 从服务器带一个节点回新建流程：先让 Host 验签落库，拿到本地 node_id 再开弹窗。
+  const handleUseServer = async (server: MyServer) => {
+    if (useServerInFlightRef.current) return;
+    useServerInFlightRef.current = true;
+    const startedDestination = destinationRef.current;
+    const startedServerId = server.server_id;
+    try {
+      const node = await bridge.myServerCredentials(startedServerId);
+      // 期间用户切走页面或换了服务器：只结束在途，不跳转、不动原状态。
+      if (
+        destinationRef.current !== startedDestination ||
+        selectedServerIdRef.current !== startedServerId
+      ) {
+        return;
+      }
+      setServerJoinTarget(null);
+      setServerEntry(null);
+      setOwnedReturnDestination(startedDestination);
+      setOwnedNodes({ nodeIds: [node.node_id], label: server.name });
+      changeDestination("client");
+      setNewConfigOpen(true);
+    } catch (error) {
+      if (destinationRef.current === startedDestination) {
+        setAppNotice({ level: "error", text: credentialErrorText(error) });
+      }
+    } finally {
+      useServerInFlightRef.current = false;
+    }
   };
 
   // 组详情「添加节点 → 从我的服务器添加」：去服务器模块挑一台，带回目标组。
@@ -1634,10 +1685,17 @@ export default function App() {
           servers={myServers.servers}
           selectedId={myServers.selectedId}
           loading={myServers.loading}
-          disabled={myServers.view === "wizard" || myServers.identityLost}
+          identityMissing={myServers.identityMissing}
+          identityPresent={myServers.identityPresent}
+          error={myServers.error}
+          retrying={myServers.retrying}
+          retryNotice={myServers.retryNotice}
+          disabled={myServers.identityLost}
           compact={shell.mode === "drawer"}
           onSelect={myServers.select}
           onNew={myServers.openWizard}
+          onRetry={() => void myServers.retry()}
+          onIdentityAction={() => void myServers.identityAction()}
           onOpenSettings={() => openSettings()}
         />
       ) : destination === "groups" ? (
@@ -1682,24 +1740,19 @@ export default function App() {
         <MyServersPage
           bridge={bridge}
           catalog={myServers.catalog}
-          servers={myServers.servers}
-          loading={myServers.loading}
-          error={myServers.error}
-          detailError={myServers.detailError}
           selected={myServers.selected}
           view={myServers.view}
-          confirmLeave={myServers.confirmLeave}
-          identityLost={myServers.identityLost}
-          identityMessage={myServers.identityMessage}
+          detailError={myServers.detailError}
+          detailRetrying={myServers.detailRetrying}
+          readOnly={myServers.identityLost}
           joinGroupName={serverJoinTarget?.name ?? null}
           onNew={myServers.openWizard}
+          onEnsureIdentity={myServers.ensureIdentity}
           onUseServer={handleUseServer}
           onJoinServer={handleJoinServer}
           onChanged={() => void myServers.refresh()}
-          onLeaveWizard={myServers.leaveWizard}
-          onKeepWizard={myServers.keepWizard}
           onOrdered={myServers.ordered}
-          onReRegister={() => void myServers.reRegister()}
+          onRetryDetail={myServers.retryDetail}
         />
       ) : destination === "groups" ? (
         groupsApi.selected ? (
@@ -1828,12 +1881,17 @@ export default function App() {
             setNewConfigOpen(false);
             setOwnedNodes(null);
             setServerEntry(null);
+            if (ownedReturnDestination) {
+              changeDestination(ownedReturnDestination);
+              setOwnedReturnDestination(null);
+            }
           }}
           onCreate={handleCreateConfig}
           onCreated={(connect) => {
             setNewConfigOpen(false);
             setOwnedNodes(null);
             setServerEntry(null);
+            setOwnedReturnDestination(null);
             if (connect) connectAfterCreateRef.current = true;
           }}
         />

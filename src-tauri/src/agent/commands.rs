@@ -318,6 +318,19 @@ pub async fn my_server_register_device() -> Result<Value, Value> {
     }
 }
 
+/// 本机是否已有设备身份（只读本地，仅 UI）：不联网、不注册、不刷新令牌。
+///
+/// 界面打开「我的服务器」时先只拉公开目录；`has_identity` 为真才拉列表，
+/// 点「创建服务器」时才做身份初始化。
+#[tauri::command]
+pub async fn my_server_identity() -> Result<Value, Value> {
+    let identity = crate::control_plane::auth::local_identity();
+    Ok(json!({
+        "has_identity": identity.has_identity,
+        "account_id": identity.account_id,
+    }))
+}
+
 /// 服务层错误已经是结构化的 `ServiceError`；还原成契约里的 AivpnError 形状。
 fn error_value(error: anyhow::Error) -> Value {
     if let Some(service) = error.downcast_ref::<crate::tools::services::ServiceError>() {

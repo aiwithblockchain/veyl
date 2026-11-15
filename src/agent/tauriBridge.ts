@@ -22,9 +22,10 @@ import type {
   MyServer,
   MyServerCatalog,
   MyServerCreateInput,
-  MyServerCredentials,
+  MyServerCredentialNode,
   MyServerDeviceIdentity,
   MyServerFailure,
+  MyServerIdentity,
   MyServerOrder,
   MyServerOrderState,
   MyServerPlan,
@@ -1093,15 +1094,34 @@ export class TauriAgentBridge implements AgentBridge {
     return server;
   }
 
-  async myServerCredentials(serverId: string): Promise<MyServerCredentials> {
-    const raw = await call<{ payload?: unknown; signature?: unknown }>(
-      "my_server_credentials",
-      { serverId },
-    );
-    if (typeof raw?.payload !== "string" || typeof raw?.signature !== "string") {
+  async myServerCredentials(serverId: string): Promise<MyServerCredentialNode> {
+    const raw = await call<{
+      server_id?: unknown;
+      node_id?: unknown;
+      name?: unknown;
+      host?: unknown;
+      port?: unknown;
+      method?: unknown;
+    }>("my_server_credentials", { serverId });
+    if (
+      typeof raw?.server_id !== "string" ||
+      typeof raw?.node_id !== "string" ||
+      raw.node_id.length === 0 ||
+      typeof raw?.name !== "string" ||
+      typeof raw?.host !== "string" ||
+      typeof raw?.port !== "number" ||
+      typeof raw?.method !== "string"
+    ) {
       serverDataError();
     }
-    return { payload: raw.payload, signature: raw.signature };
+    return {
+      server_id: raw.server_id,
+      node_id: raw.node_id,
+      name: raw.name,
+      host: raw.host,
+      port: raw.port,
+      method: raw.method,
+    };
   }
 
   async myServerRegisterDevice(): Promise<MyServerDeviceIdentity> {
@@ -1112,6 +1132,18 @@ export class TauriAgentBridge implements AgentBridge {
       serverDataError();
     }
     return { account_id: raw.account_id, device_id: raw.device_id };
+  }
+
+  async myServerIdentity(): Promise<MyServerIdentity> {
+    const raw = await call<{ has_identity?: unknown; account_id?: unknown }>(
+      "my_server_identity",
+    );
+    if (typeof raw?.has_identity !== "boolean") serverDataError();
+    const accountId =
+      typeof raw.account_id === "string" && raw.account_id.length > 0
+        ? raw.account_id
+        : null;
+    return { has_identity: raw.has_identity, account_id: accountId };
   }
 
   async myServerSshCredentials(

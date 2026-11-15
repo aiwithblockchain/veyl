@@ -1959,12 +1959,12 @@ type CoreUpgradeData = {
 
 ```
 用 Veyl 免费节点：ConfigCreate(source = "seed") → VpnConnect
-用我自己的节点：NodeImportUrl / NodeCreate → ConfigCreate(node_ids) → VpnConnect
+其它节点：      NodeImportUrl / NodeCreate → ConfigCreate(node_ids) → VpnConnect
 换节点：        NodeSwitch
 换一套方案：    ConfigCreate → ConfigActivate（UI）/ VpnConnect({ config_id })
 ```
 
-`VpnConnect` **不隐式安装或下载运行时**：静默下载会让用户不知道自己的机器上多了一个二进制。也不隐式创建配置——没有配置时报 `no_config`，由 AI 走 `source_choice` 询问。
+`VpnConnect` **不隐式安装或下载运行时**：静默下载会让用户不知道自己的机器上多了一个二进制。也不隐式创建配置——没有配置时报 `no_config`，由 AI 新建流程的第二问询问节点来源（首启两问见 `resources/prompts/zh/first-run.md`）。
 
 ### 5.2 幂等矩阵
 

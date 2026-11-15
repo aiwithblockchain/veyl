@@ -612,6 +612,86 @@ check("my_server_catalog：契约返回字段与 bridge.ts 的 MyServerCatalog �
   return problems;
 });
 
+check("my_server_credentials：契约返回字段与 bridge.ts 的 MyServerCredentialNode 一致", () => {
+  const expected = payloadFields("docs/contracts/commands.md", "MyServerCredentialNode");
+  if (!expected) {
+    return ["commands.md 未找到 MyServerCredentialNode（2.26.0 起凭据只回本地节点）"];
+  }
+  const actual = tsInterfaceFields("MyServerCredentialNode");
+  if (!actual) {
+    return ["src/agent/bridge.ts 缺少 MyServerCredentialNode 接口"];
+  }
+  if (!sameFieldSet(expected, actual)) {
+    return [
+      `MyServerCredentialNode 字段不一致：契约 [${expected.join(", ")}] / bridge [${actual.join(", ")}]`,
+    ];
+  }
+  return [];
+});
+
+// 控制面返回的状态字符串是运行时校验的，枚举漂移不会在编译期报错。
+// 只报告，不阻断：控制面可能先上线新状态，契约与前端随后跟上。
+
+function contractStateUnion(typeName) {
+  const md = read("docs/contracts/commands.md");
+  const m = md.match(new RegExp(`type ${typeName} =\\s*([\\s\\S]*?);`));
+  return m ? [...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]) : null;
+}
+
+function bridgeStateUnion(typeName) {
+  const ts = read("src/agent/bridge.ts");
+  const m = ts.match(new RegExp(`export type ${typeName} =\\s*([\\s\\S]*?);`));
+  return m ? [...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]) : null;
+}
+
+function contractOrderStates() {
+  const block = tsTypeBlock("docs/contracts/commands.md", "MyServerOrder");
+  if (!block) return null;
+  const line = block.match(/^\s*state\s*:\s*([^;]+);/m);
+  return line ? [...line[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]) : null;
+}
+
+function rustStateList(constName) {
+  const rs = read("src-tauri/src/control_plane/servers.rs");
+  const m = rs.match(new RegExp(`pub const ${constName}[^=]*=\\s*\\[([\\s\\S]*?)\\];`));
+  return m ? [...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]) : null;
+}
+
+check(
+  "我的服务器：服务器 / 订单状态枚举在契约、bridge、Rust 三处一致（advisory）",
+  () => {
+    const problems = [];
+    const pairs = [
+      [
+        "服务器状态",
+        contractStateUnion("MyServerState"),
+        bridgeStateUnion("MyServerState"),
+        rustStateList("SERVER_STATES"),
+      ],
+      [
+        "订单状态",
+        contractOrderStates(),
+        bridgeStateUnion("MyServerOrderState"),
+        rustStateList("ORDER_STATES"),
+      ],
+    ];
+    for (const [label, doc, bridge, rust] of pairs) {
+      if (!doc) problems.push(`commands.md 取不到${label}枚举`);
+      if (!bridge) problems.push(`src/agent/bridge.ts 取不到${label}枚举`);
+      if (!rust) problems.push(`servers.rs 取不到${label}枚举`);
+      if (!doc || !bridge || !rust) continue;
+      if (!sameFieldSet(doc, bridge)) {
+        problems.push(`${label}：契约 [${doc.join(", ")}] / bridge [${bridge.join(", ")}]`);
+      }
+      if (!sameFieldSet(doc, rust)) {
+        problems.push(`${label}：契约 [${doc.join(", ")}] / Rust [${rust.join(", ")}]`);
+      }
+    }
+    return problems;
+  },
+  { advisory: true }
+);
+
 check("my_server_register_device：契约、实现、双列表注册、前端调用一致", () => {
   const doc = contractCommands();
   const impl = rustCommands();
@@ -634,6 +714,50 @@ check("my_server_register_device：契约、实现、双列表注册、前端调
     }
   });
   return problems;
+});
+
+check("my_server_identity：契约、实现、双列表注册、前端调用一致", () => {
+  const doc = contractCommands();
+  const impl = rustCommands();
+  const ui = new Set(uiCalls().map((c) => c.name));
+  const problems = [];
+  if (!doc.has("my_server_identity")) {
+    problems.push("commands.md §2 缺少 my_server_identity");
+  }
+  if (!impl.has("my_server_identity")) {
+    problems.push("agent/commands.rs 缺少 #[tauri::command] my_server_identity");
+  } else if (impl.get("my_server_identity").length > 0) {
+    problems.push("my_server_identity 不应有入参");
+  }
+  if (!ui.has("my_server_identity")) {
+    problems.push("tauriBridge.ts 没有调用 my_server_identity");
+  }
+  registeredCommandLists().forEach((names, index) => {
+    if (!names.has("my_server_identity")) {
+      problems.push(`第 ${index + 1} 份 generate_handler 未注册 my_server_identity`);
+    }
+  });
+  return problems;
+});
+
+function myServerIdentityContractFields() {
+  const md = read("docs/contracts/commands.md");
+  const block = md.match(/type MyServerIdentity = \{([\s\S]*?)\};/);
+  if (!block) return null;
+  return [...block[1].matchAll(/([a-z_][a-z0-9_]*)\s*:/g)].map((m) => m[1]);
+}
+
+check("my_server_identity：契约返回字段与 bridge.ts 的 MyServerIdentity 一致", () => {
+  const contract = myServerIdentityContractFields();
+  if (!contract) return ["commands.md §7.17 未找到 MyServerIdentity 类型"];
+  const actual = tsInterfaceFields("MyServerIdentity");
+  if (!actual) return ["src/agent/bridge.ts 缺少 MyServerIdentity"];
+  if (!sameFieldSet(contract, actual)) {
+    return [
+      `MyServerIdentity 字段不一致：契约 [${contract.join(", ")}] / bridge [${actual.join(", ")}]`,
+    ];
+  }
+  return [];
 });
 
 check(

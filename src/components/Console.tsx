@@ -49,7 +49,7 @@ interface Props {
   onNewConfig: () => void;
   /** 中间块「用 Veyl 免费节点」：用户已定来源，直接开手动表单，不再让 AI 问一遍。 */
   onUseSeedNodes?: () => void;
-  /** 「用我自己的节点」：去设置页导入节点文件。 */
+  /** 「其它节点」：去设置页导入节点文件。 */
   onImportNodes?: () => void;
   /** 种子包有新版本：决定 update_hint 是否有内容可渲染。 */
   seedUpdate?: boolean;

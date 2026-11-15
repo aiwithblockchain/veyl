@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AgentBridge, MyServer } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { ServerProgress } from "./ServerProgress";
@@ -12,16 +12,24 @@ import {
 interface Props {
   bridge: AgentBridge;
   server: MyServer;
+  /** 地区显示名（来自目录）；目录读不到时退回 slug。 */
+  regionLabel: string;
   /** 身份不可用：只读，不提供任何改动机器的操作。 */
   readOnly?: boolean;
   /** 从节点组进来：主按钮换成「加入「X」」。 */
   joinLabel?: string | null;
   onJoin?: () => void;
-  onUseServer: (nodeId: string, serverName: string) => void;
+  /** 回到创建页再建一台。 */
+  onCreateAnother: () => void;
+  /** 可用时去取凭据（Host 验签落库后返回本地节点）。 */
+  onUseServer: (server: MyServer) => void | Promise<void>;
   onChanged: () => void;
   /** 销毁或重建后收起详情。 */
   onGone: () => void;
 }
+
+/** 服务端允许对 destroying 再发一次销毁；界面等这么久才放开重试入口。 */
+export const DESTROY_RETRY_MS = 60_000;
 
 function errorText(error: unknown): string {
   const problem = toBridgeError(error);
@@ -34,9 +42,11 @@ function errorText(error: unknown): string {
 export function MyServerDetail({
   bridge,
   server,
+  regionLabel,
   readOnly = false,
   joinLabel = null,
   onJoin,
+  onCreateAnother,
   onUseServer,
   onChanged,
   onGone,
@@ -44,6 +54,9 @@ export function MyServerDetail({
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [destroyRetryAllowed, setDestroyRetryAllowed] = useState(false);
+  const [useBusy, setUseBusy] = useState(false);
+  const useBusyRef = useRef(false);
 
   const rebuild = async () => {
     if (busy) return;
@@ -71,10 +84,35 @@ export function MyServerDetail({
     }
   };
 
-  const ready =
-    Boolean(server.node_id) && (server.state === "healthy" || server.state === "active");
+  const ready = server.state === "healthy" || server.state === "active";
   const destroying = server.state === "destroying";
-  const locked = readOnly || busy || destroying;
+
+  useEffect(() => {
+    if (!destroying) {
+      setDestroyRetryAllowed(false);
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setDestroyRetryAllowed(true),
+      DESTROY_RETRY_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [destroying, server.server_id]);
+
+  const locked = readOnly || busy || (destroying && !destroyRetryAllowed);
+
+  /** 主按钮在途时只允许一次；取凭据失败也由 App 播报。 */
+  const useServerNow = async () => {
+    if (useBusyRef.current || readOnly) return;
+    useBusyRef.current = true;
+    setUseBusy(true);
+    try {
+      await onUseServer(server);
+    } finally {
+      useBusyRef.current = false;
+      setUseBusy(false);
+    }
+  };
 
   return (
     <div className="myservers__detail">
@@ -83,6 +121,14 @@ export function MyServerDetail({
           <span className={`led is-${stateTone(server.state)}`} aria-hidden />
           {MY_SERVER_STATE_LABEL[server.state]}
         </span>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          disabled={locked}
+          onClick={onCreateAnother}
+        >
+          再建一台
+        </button>
       </div>
 
       {isProvisioning(server.state) ? <ServerProgress server={server} /> : null}
@@ -90,7 +136,7 @@ export function MyServerDetail({
       <dl className="myservers__facts">
         <div>
           <dt>地区</dt>
-          <dd>{server.name.split(" · ")[0]}</dd>
+          <dd>{regionLabel}</dd>
         </div>
         <div>
           <dt>节点</dt>
@@ -129,10 +175,10 @@ export function MyServerDetail({
           <button
             type="button"
             className="btn btn--primary"
-            disabled={locked}
+            disabled={locked || useBusy}
             onClick={() => {
               if (joinLabel && onJoin) onJoin();
-              else if (server.node_id) onUseServer(server.node_id, server.name);
+              else void useServerNow();
             }}
           >
             {joinLabel ?? "用来建配置"}
@@ -141,7 +187,7 @@ export function MyServerDetail({
       </div>
 
       <div className="myservers__danger">
-        {destroying ? (
+        {destroying && !destroyRetryAllowed ? (
           <p className="myservers__hint" role="status">
             正在销毁…
           </p>
@@ -178,7 +224,7 @@ export function MyServerDetail({
             disabled={locked}
             onClick={() => setConfirming(true)}
           >
-            销毁
+            {destroying ? "重试销毁" : "销毁"}
           </button>
         )}
       </div>

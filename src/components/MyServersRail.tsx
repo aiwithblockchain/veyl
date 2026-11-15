@@ -7,11 +7,22 @@ interface Props {
   servers: MyServer[];
   selectedId: string | null;
   loading: boolean;
+  /** 还没有设备身份：列表区只给登录提示。 */
+  identityMissing?: boolean;
+  /** 设备身份是否就绪：左下角状态按钮文案。 */
+  identityPresent?: boolean;
+  /** 列表读取失败说明；只在左栏就地显示。 */
+  error?: string | null;
+  retrying?: boolean;
+  /** 重试成功后的播报文本（视觉隐藏）。 */
+  retryNotice?: string | null;
   /** 向导打开或身份不可用：行与「新建」都不可点。 */
   disabled?: boolean;
   compact?: boolean;
   onSelect: (serverId: string) => void;
   onNew: () => void;
+  onRetry?: () => void;
+  onIdentityAction?: () => void;
   onOpenSettings: () => void;
 }
 
@@ -50,17 +61,54 @@ export function MyServersRail({
   servers,
   selectedId,
   loading,
+  identityMissing = false,
+  identityPresent = false,
+  error = null,
+  retrying = false,
+  retryNotice = null,
   disabled = false,
   compact = false,
   onSelect,
   onNew,
+  onRetry,
+  onIdentityAction,
   onOpenSettings,
 }: Props) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const identityLabel = identityPresent ? "已登录 · 设备" : "未登录";
 
   const list = (
     <>
-      {loading ? (
+      {identityMissing ? (
+        <p className="rail__empty-text myservers__rail-hint">
+          登录后查看你的服务器
+        </p>
+      ) : error ? (
+        <>
+          <div className="rail__placeholders" aria-hidden>
+            {[0, 1, 2].map((row) => (
+              <div key={row} className="rail__placeholder">
+                <span className="rail__placeholder-line" />
+                <span className="rail__placeholder-line is-short" />
+              </div>
+            ))}
+          </div>
+          <div className="rail__error">
+            <p className="rail__empty-text myservers__rail-hint" role="alert">
+              连不上服务器，稍后再试
+            </p>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={retrying}
+              aria-busy={retrying || undefined}
+              onClick={onRetry}
+            >
+              {retrying ? "正在重试…" : "重试"}
+            </button>
+          </div>
+        </>
+      ) : loading ? (
         <div className="rail__loading" role="status" aria-busy="true" aria-label="正在读取服务器">
           {[0, 1, 2].map((row) => (
             <div className="skeleton-row" key={row} aria-hidden>
@@ -144,7 +192,25 @@ export function MyServersRail({
         </>
       )}
 
+      {retryNotice ? (
+        <p className="sr-only" role="status" aria-live="polite">
+          {retryNotice}
+        </p>
+      ) : null}
+
       <footer className="rail__foot">
+        <button
+          type="button"
+          className="rail__identity"
+          aria-label={identityLabel}
+          onClick={onIdentityAction}
+        >
+          <span
+            className={`led ${identityPresent ? "is-ok" : "is-warn"}`}
+            aria-hidden
+          />
+          <span className="rail__identity-text">{identityLabel}</span>
+        </button>
         <button
           type="button"
           className="rail__settings"

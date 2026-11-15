@@ -1,4 +1,5 @@
 import { handleAuth } from "./auth";
+import { buildCloudInit } from "./cloud_init";
 import { handleOrders } from "./orders";
 import { handleServers } from "./servers";
 
@@ -9,6 +10,7 @@ export interface Env {
   DB?: D1Database;
   TOKEN_SIGNING_JWK?: string;
   CREDENTIAL_ENC_KEY?: string;
+  CREDENTIAL_KEY_ID?: string;
   ENROLL_BASE_URL?: string;
 }
 
@@ -316,6 +318,56 @@ export async function route(request: Request, env: Env): Promise<Response> {
     } catch (error) {
       return json({ ok: false, status: 0, error: `network: ${String(error)}` }, 502);
     }
+  }
+
+  // 仅 dev：按 provider_id 查一台 droplet 的真实状态与 IP（排查卡在 booting 的机器）。
+  if (url.pathname === "/v1/debug/droplet") {
+    if (env.ENVIRONMENT !== "dev") return json({ ok: false, error: "not_found" }, 404);
+    if (!env.DO_API_TOKEN) return json({ ok: false, error: "missing_secret" }, 500);
+    const id = url.searchParams.get("id");
+    if (!id) return json({ ok: false, error: "missing_id" }, 400);
+    const res = await fetch(
+      `https://api.digitalocean.com/v2/droplets/${encodeURIComponent(id)}`,
+      {
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${env.DO_API_TOKEN}`,
+          "User-Agent": USER_AGENT,
+        },
+      },
+    );
+    const text = await res.text();
+    if (!res.ok) return json({ ok: false, status: res.status, body: text.slice(0, 200) }, 502);
+    const body = JSON.parse(text) as {
+      droplet?: {
+        status?: string;
+        created_at?: string;
+        networks?: { v4?: Array<{ ip_address: string; type: string }> };
+      };
+    };
+    return json({
+      ok: true,
+      status: body.droplet?.status ?? null,
+      created_at: body.droplet?.created_at ?? null,
+      ips: (body.droplet?.networks?.v4 ?? []).map((n) => ({ ip: n.ip_address, type: n.type })),
+    });
+  }
+
+  // 仅 dev：输出当前版本的 cloud-init 脚本，供手动建机调试（lab=1 时不关 SSH、不回传）。
+  if (url.pathname === "/v1/debug/cloud-init") {
+    if (env.ENVIRONMENT !== "dev") return json({ ok: false, error: "not_found" }, 404);
+    const port = Number(url.searchParams.get("port") ?? "0");
+    const enroll = url.searchParams.get("enroll") ?? "";
+    if (!port || !enroll) return json({ ok: false, error: "missing_params" }, 400);
+    let script = buildCloudInit({ port, enrollUrl: enroll });
+    if (url.searchParams.get("lab") === "1") {
+      script = script
+        .replace(/^systemctl (stop|disable) ssh.*$/gm, "# (lab) 保留 SSH")
+        .replace("report() {", "report() { return 0; # lab：不回传");
+    }
+    return new Response(script, {
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
   }
 
   // 仅 dev：用完整浏览器请求头访问 Vultr 公共接口，验证是否只是 WAF 的机器人评分问题。

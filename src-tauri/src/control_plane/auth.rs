@@ -168,6 +168,7 @@ fn endpoint(base_url: &str, path: &str) -> String {
 async fn send_json(
     http: &reqwest::Client,
     url: &str,
+    path: &str,
     body: &serde_json::Value,
 ) -> Result<(u16, String), CpError> {
     let response = http
@@ -176,10 +177,25 @@ async fn send_json(
         .json(body)
         .send()
         .await
-        .map_err(|error| CpError::network(error.is_timeout()))?;
+        .map_err(|error| {
+            super::client::warn_transport("auth", "POST", path, &error);
+            CpError::network(error.is_timeout())
+        })?;
     let status = response.status().as_u16();
     let text = response.text().await.unwrap_or_default();
     Ok((status, text))
+}
+
+fn log_status_failure(path: &str, status: u16, error: &CpError) {
+    super::client::warn_failure(
+        "auth",
+        "POST",
+        path,
+        "status",
+        Some(status),
+        error.retryable,
+        error.reason().unwrap_or("-"),
+    );
 }
 
 async fn register(
@@ -187,10 +203,13 @@ async fn register(
     http: &reqwest::Client,
     device: &StoredDevice,
 ) -> Result<TokenSet, CpError> {
+    let path = "/v1/auth/device";
     let (status, body) =
-        send_json(http, &endpoint(base_url, "/v1/auth/device"), &registration_body(device)).await?;
+        send_json(http, &endpoint(base_url, path), path, &registration_body(device)).await?;
     if !(200..=299).contains(&status) {
-        return Err(error::from_response(status, &body));
+        let error = error::from_response(status, &body);
+        log_status_failure(path, status, &error);
+        return Err(error);
     }
     let tokens: TokenSet = serde_json::from_str(&body)
         .map_err(|_| CpError::invalid_response("设备注册响应格式不正确"))?;
@@ -206,11 +225,13 @@ async fn refresh(
     http: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<TokenSet, CpError> {
+    let path = "/v1/auth/refresh";
     let body = json!({ "refresh_token": refresh_token });
-    let (status, text) =
-        send_json(http, &endpoint(base_url, "/v1/auth/refresh"), &body).await?;
+    let (status, text) = send_json(http, &endpoint(base_url, path), path, &body).await?;
     if !(200..=299).contains(&status) {
-        return Err(error::from_response(status, &text));
+        let error = error::from_response(status, &text);
+        log_status_failure(path, status, &error);
+        return Err(error);
     }
     let tokens: TokenSet = serde_json::from_str(&text)
         .map_err(|_| CpError::invalid_response("令牌刷新响应格式不正确"))?;
@@ -239,10 +260,7 @@ pub fn classify_refresh_failure(status: u16, body: &str) -> RefreshAction {
 /// 旧服务器的本地记录保留为只读；新账户从空列表开始。
 pub async fn register_device() -> Result<Value, CpError> {
     let base_url = crate::control_plane::env::current().base_url;
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| CpError::internal(format!("创建控制面客户端失败：{error}")))?;
+    let http = super::client::http_client(Duration::from_secs(10))?;
 
     // 与自动刷新/注册共用一把锁：重新注册期间不允许并发请求拿着旧令牌发出去。
     let _guard = REFRESH_LOCK.lock().await;
@@ -256,6 +274,48 @@ pub async fn register_device() -> Result<Value, CpError> {
         "account_id": tokens.account_id,
         "device_id": tokens.device_id,
     }))
+}
+
+/// 本机设备身份状态（只读本地）。`account_id` 只在有身份时给出。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalIdentity {
+    pub has_identity: bool,
+    pub account_id: Option<String>,
+}
+
+fn identity_from(device: Option<&str>, account_marker: Option<&str>) -> LocalIdentity {
+    let Some(device) =
+        device.and_then(|raw| serde_json::from_str::<StoredDevice>(raw).ok())
+    else {
+        return LocalIdentity {
+            has_identity: false,
+            account_id: None,
+        };
+    };
+    if device.device_id.trim().is_empty() || device.device_secret.trim().is_empty() {
+        return LocalIdentity {
+            has_identity: false,
+            account_id: None,
+        };
+    }
+    let account_id = Some(device.account_id)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| account_marker.map(str::to_string))
+        .filter(|value| !value.trim().is_empty());
+    LocalIdentity {
+        has_identity: true,
+        account_id,
+    }
+}
+
+/// 只读本地：不联网、不注册、不刷新令牌、不写任何状态。
+///
+/// 有账户标记但设备秘密丢失（身份丢失）时返回 `false`，**不自动重建**——
+/// 恢复只能走 [`register_device`]，由用户点按钮触发。
+pub fn local_identity() -> LocalIdentity {
+    let raw = crate::secrets::get_secret(DEVICE_KEY).ok().flatten();
+    let marker = stored_account_marker();
+    identity_from(raw.as_deref(), marker.as_deref())
 }
 
 /// 取一个可用的 access token；`stale` 是刚被 401 拒掉的那个（并发刷新在锁内复核用）。
@@ -338,6 +398,59 @@ mod tests {
         assert_eq!(body["secret_hash"], secret_hash("super-secret"));
         assert!(body.get("device_secret").is_none());
         assert!(body.get("secret").is_none());
+    }
+
+    #[test]
+    fn local_identity_is_false_without_a_device_secret() {
+        let status = identity_from(None, None);
+        assert!(!status.has_identity);
+        assert_eq!(status.account_id, None);
+    }
+
+    #[test]
+    fn local_identity_reports_the_account_for_a_complete_device() {
+        let device = StoredDevice {
+            device_id: "dev_1".into(),
+            device_secret: "secret".into(),
+            account_id: "acct_1".into(),
+        };
+        let raw = serde_json::to_string(&device).unwrap();
+        let status = identity_from(Some(&raw), None);
+        assert!(status.has_identity);
+        assert_eq!(status.account_id.as_deref(), Some("acct_1"));
+
+        // 设备行里没有账户 id 时退回 SQLite 的账户标记。
+        let device = StoredDevice {
+            account_id: String::new(),
+            ..device
+        };
+        let raw = serde_json::to_string(&device).unwrap();
+        assert_eq!(
+            identity_from(Some(&raw), Some("acct_2"))
+                .account_id
+                .as_deref(),
+            Some("acct_2")
+        );
+    }
+
+    #[test]
+    fn a_lost_identity_is_false_and_is_not_rebuilt() {
+        // 有账户标记但没有设备秘密：返回 false / null，这个函数不写入任何东西；
+        // 重建只能走 register_device()，由用户显式触发。
+        let status = identity_from(None, Some("acct_1"));
+        assert!(!status.has_identity);
+        assert_eq!(status.account_id, None);
+
+        // 秘密字段为空同样不算有身份。
+        let empty = StoredDevice {
+            device_id: "dev_1".into(),
+            device_secret: String::new(),
+            account_id: "acct_1".into(),
+        };
+        let raw = serde_json::to_string(&empty).unwrap();
+        let status = identity_from(Some(&raw), Some("acct_1"));
+        assert!(!status.has_identity);
+        assert_eq!(status.account_id, None);
     }
 
     #[test]

@@ -545,15 +545,26 @@ export interface MyServerRebuildResult {
   state: MyServerState;
 }
 
-export interface MyServerCredentials {
-  payload: string;
-  signature: string;
+/** `my_server_credentials` 的返回：Host 验签落库后的**本地**节点（2.26.0，无密码）。 */
+export interface MyServerCredentialNode {
+  server_id: string;
+  node_id: string;
+  name: string;
+  host: string;
+  port: number;
+  method: string;
 }
 
 /** 显式重新注册设备后的新身份（§19.2.4）；旧服务器的本地记录保留为只读。 */
 export interface MyServerDeviceIdentity {
   account_id: string;
   device_id: string;
+}
+
+/** 本机设备身份状态；只读本地，不含任何凭据。 */
+export interface MyServerIdentity {
+  has_identity: boolean;
+  account_id: string | null;
 }
 
 export interface MyServerSshCredentials {
@@ -657,11 +668,13 @@ export interface AgentBridge {
   ): Promise<MyServerRebuildResult>;
   myServerDestroy(serverId: string, confirm: boolean): Promise<MyServer>;
   /** 取凭据；客户端验签后落库，界面不展示。 */
-  myServerCredentials(serverId: string): Promise<MyServerCredentials>;
+  myServerCredentials(serverId: string): Promise<MyServerCredentialNode>;
   /** 取 SSH 登录信息；仅 UI 通道。 */
   myServerSshCredentials(serverId: string): Promise<MyServerSshCredentials>;
   /** 身份丢失后的显式重新注册；丢弃旧身份，旧服务器记录保留为只读。 */
   myServerRegisterDevice(): Promise<MyServerDeviceIdentity>;
+  /** 只读本地：是否已有设备身份；不联网、不注册、不刷新令牌。 */
+  myServerIdentity(): Promise<MyServerIdentity>;
   /** 恢复网络：撤代理 → 停运行时 → 清明文配置（不依赖 AI）。 */
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
   /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */
