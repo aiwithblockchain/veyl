@@ -258,13 +258,14 @@ pub async fn list() -> Result<Vec<MyServer>, CpError> {
         validate_server(&server)?;
         servers.push(server);
     }
-    for server in &mut servers {
-        cache_server(server);
-    }
-    // 响应是一次成功请求的完整集合：云端已经不存在的行要收敛，否则本机会
-    // 永远停在旧状态（Worker 不再返回 destroyed 行）。失败只告警，不影响列表。
+    // 读路径也会顺带维护缓存，这是有意的：一次成功的列表响应是唯一能判断
+    // 「云端已无这台服务器」的完整快照；落库与收敛必须共用同一个连接，
+    // 否则并发 list 的旧快照可能删掉新快照刚建的行。
     if let Some(store) = crate::store::global() {
         let conn = store.conn();
+        for server in &servers {
+            cache_server(&conn, server);
+        }
         let ids: Vec<&str> = servers
             .iter()
             .map(|server| server.server_id.as_str())
@@ -283,10 +284,13 @@ pub async fn get(server_id: &str) -> Result<MyServer, CpError> {
 
 async fn get_with(client: &ControlPlane, server_id: &str) -> Result<MyServer, CpError> {
     let raw = client.get(&format!("/v1/servers/{server_id}")).await?;
-    let mut server: MyServer = serde_json::from_value(raw)
+    let server: MyServer = serde_json::from_value(raw)
         .map_err(|_| CpError::invalid_response("服务器详情格式不正确"))?;
     validate_server(&server)?;
-    cache_server(&mut server);
+    if let Some(store) = crate::store::global() {
+        let conn = store.conn();
+        cache_server(&conn, &server);
+    }
     Ok(server)
 }
 
@@ -367,10 +371,10 @@ pub async fn destroy(server_id: &str, confirm: bool) -> Result<MyServer, CpError
         )
     })?;
     server.state = "destroying".into();
-    cache_server(&server);
     // 销毁即销毁凭据（§19.8）；节点记录保留并能在界面标「服务器已销毁」。
     if let Some(store) = crate::store::global() {
         let conn = store.conn();
+        cache_server(&conn, &server);
         forget_credentials(&conn, server_id, server.node_id.as_deref(), |key| {
             let _ = crate::secrets::delete_secret(key);
         });
@@ -436,7 +440,7 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
     validate_state(state, &SERVER_STATES, "新服务器")?;
 
     if let Some(old) = old {
-        let mut created = MyServer {
+        let created = MyServer {
             server_id: new_id.to_string(),
             name: old.name,
             region: old.region,
@@ -450,7 +454,10 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
             monthly_usd: old.monthly_usd,
             failure: None,
         };
-        cache_server(&mut created);
+        if let Some(store) = crate::store::global() {
+            let conn = store.conn();
+            cache_server(&conn, &created);
+        }
     }
 
     Ok(json!({ "newServerId": new_id, "state": state }))
@@ -535,19 +542,15 @@ fn linked_node_id(
         .map(str::to_string)
 }
 
-fn cache_server(server: &MyServer) {
-    let Some(store) = crate::store::global() else {
-        return;
-    };
-    let conn = store.conn();
-    let before = crate::store::servers::get(&conn, &server.server_id)
+fn cache_server(conn: &rusqlite::Connection, server: &MyServer) {
+    let before = crate::store::servers::get(conn, &server.server_id)
         .ok()
         .flatten();
     let created_at = parse_iso_ms(&server.created_at).unwrap_or_else(crate::store::now_ms);
     // `my_servers.node_id` 有外键；远端可能比本地先给出 node_id（凭据还没取），
     // 此时先留空，等 `my_server_credentials` 建好节点行再回填。
     // 关联以本地节点行为准：换发凭据后远端 id 可能已经变了。
-    let node_id = linked_node_id(&conn, &server.server_id, server.node_id.as_deref());
+    let node_id = linked_node_id(conn, &server.server_id, server.node_id.as_deref());
     let new = crate::store::NewMyServer {
         id: &server.server_id,
         provider: "digitalocean",
@@ -560,7 +563,7 @@ fn cache_server(server: &MyServer) {
         monthly_usd: server.monthly_usd,
         created_at,
     };
-    if let Err(error) = crate::store::servers::upsert(&conn, &new) {
+    if let Err(error) = crate::store::servers::upsert(conn, &new) {
         log::warn!("缓存我的服务器失败：{error}");
         return;
     }
