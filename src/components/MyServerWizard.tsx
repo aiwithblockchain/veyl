@@ -9,9 +9,9 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { toBridgeError } from "../agent/errors";
 import {
   CONTINENT_LABELS,
-  formatUsd,
+  formatDailyPrice,
+  formatMonthlyFromDaily,
   formatUsdCents,
-  formatUsdHourly,
 } from "../myservers/labels";
 
 interface Props {
@@ -357,8 +357,12 @@ export function MyServerWizard({
               >
                 {tier ? <span className="wizard-plan__tier">{tier}</span> : null}
                 <span className="wizard-plan__spec">{plan.label}</span>
-                <span className="wizard-plan__price">
-                  <span className="num">{formatUsd(plan.monthly_usd)}</span>/月
+                <span className="wizard-plan__sub">
+                  每天{" "}
+                  <span className="num">{formatDailyPrice(plan.daily_price_cents)}</span>
+                  {plan.transfer_gib > 0
+                    ? ` · 每月 ${plan.transfer_gib} GB 流量`
+                    : null}
                 </span>
               </button>
             );
@@ -406,12 +410,15 @@ export function MyServerWizard({
           <p className="wizard-foot__price">
             {currentPlan ? (
               <>
-                约 <span className="num">{formatUsd(currentPlan.monthly_usd)}</span>/月 ·{" "}
-                <span className="num">{formatUsdHourly(currentPlan.hourly_usd)}</span>/小时
+                每天{" "}
+                <span className="num">
+                  {formatDailyPrice(currentPlan.daily_price_cents)}
+                </span>{" "}
+                · 约 {formatMonthlyFromDaily(currentPlan.daily_price_cents)}/月
               </>
             ) : null}
           </p>
-          <p className="myservers__demo">从余额扣一个月；余额不足会提示充值。</p>
+          <p className="myservers__demo">从余额扣一天；之后每天续扣，余额不足会提示充值。</p>
         </div>
         <button
           type="button"

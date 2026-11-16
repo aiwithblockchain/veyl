@@ -130,13 +130,15 @@ export function MyServersAccount({
       {open ? (
         <div id="rail-account-panel" className="rail__account__panel">
           <p className="rail__account__balance">
-            余额{" "}
-            <span className="num">
-              {wallet
-                ? formatUsdCents(wallet.balance_cents)
-                : walletLoading
-                  ? "读取中"
-                  : "—"}
+            <span>
+              余额{" "}
+              <span className="num">
+                {wallet
+                  ? formatUsdCents(wallet.balance_cents)
+                  : walletLoading
+                    ? "读取中"
+                    : "—"}
+              </span>
             </span>
           </p>
           {walletError ? (

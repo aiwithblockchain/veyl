@@ -567,6 +567,8 @@ function normalizeMyServerCatalog(raw: {
           const plan = value as Record<string, unknown>;
           const hourly = Number(plan.hourly_usd);
           const monthly = Number(plan.monthly_usd);
+          const daily = plan.daily_price_cents;
+          const transfer = plan.transfer_gib;
           if (
             typeof plan.id !== "string" ||
             plan.id.trim() === "" ||
@@ -574,7 +576,11 @@ function normalizeMyServerCatalog(raw: {
             !Number.isFinite(hourly) ||
             !Number.isFinite(monthly) ||
             hourly < 0 ||
-            monthly < 0
+            monthly < 0 ||
+            !Number.isInteger(daily as number) ||
+            (daily as number) < 0 ||
+            !Number.isInteger(transfer as number) ||
+            (transfer as number) < 0
           ) {
             return null;
           }
@@ -583,6 +589,8 @@ function normalizeMyServerCatalog(raw: {
             label: plan.label,
             hourly_usd: hourly,
             monthly_usd: monthly,
+            daily_price_cents: daily as number,
+            transfer_gib: transfer as number,
           };
         })
         .filter((plan): plan is MyServerPlan => plan !== null)
@@ -649,7 +657,29 @@ function normalizeMyServer(raw: unknown): MyServer | null {
     typeof value.state === "string" && MY_SERVER_STATES.has(value.state as MyServerState)
       ? (value.state as MyServerState)
       : null;
-  if (!serverId || !state) return null;
+  const daily = value.daily_price_cents;
+  const paidUntil = typeof value.paid_until === "string" ? value.paid_until : "";
+  const billingState =
+    value.billing_state === "active" ||
+    value.billing_state === "past_due" ||
+    value.billing_state === "expired"
+      ? value.billing_state
+      : null;
+  const grace = value.grace_ends_at;
+  const transfer = value.transfer_gib;
+  if (
+    !serverId ||
+    !state ||
+    !Number.isInteger(daily as number) ||
+    (daily as number) < 0 ||
+    paidUntil === "" ||
+    !billingState ||
+    !(grace === null || typeof grace === "string") ||
+    !Number.isInteger(transfer as number) ||
+    (transfer as number) < 0
+  ) {
+    return null;
+  }
 
   return {
     server_id: serverId,
@@ -669,6 +699,11 @@ function normalizeMyServer(raw: unknown): MyServer | null {
       typeof value.monthly_usd === "number" && Number.isFinite(value.monthly_usd)
         ? value.monthly_usd
         : 0,
+    daily_price_cents: daily as number,
+    paid_until: paidUntil,
+    billing_state: billingState,
+    grace_ends_at: grace as string | null,
+    transfer_gib: transfer as number,
     failure: normalizeMyServerFailure(value.failure),
   };
 }

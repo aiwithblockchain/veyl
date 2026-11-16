@@ -19,6 +19,13 @@ pub struct MyServerRow {
     pub node_id: Option<String>,
     pub hourly_usd: f64,
     pub monthly_usd: f64,
+    /// 售价快照（USD 分 / 天）。
+    pub daily_price_cents: i64,
+    /// 每月公网出口额度快照（GiB）；0 = 未知。
+    pub transfer_gib: i64,
+    /// 已付到的时刻（Unix 毫秒）。
+    pub paid_until: i64,
+    pub billing_state: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_synced_at: i64,
@@ -34,6 +41,11 @@ pub struct NewMyServer<'a> {
     pub node_id: Option<&'a str>,
     pub hourly_usd: f64,
     pub monthly_usd: f64,
+    pub daily_price_cents: i64,
+    pub transfer_gib: i64,
+    /// 已付到的时刻（Unix 毫秒）；建行时即写入，不接受空值。
+    pub paid_until: i64,
+    pub billing_state: &'a str,
     /// 控制面给的创建时刻（Unix 毫秒）。
     pub created_at: i64,
 }
@@ -46,8 +58,9 @@ pub fn upsert(conn: &Connection, new: &NewMyServer<'_>) -> StoreResult<MyServerR
     conn.execute(
         "INSERT INTO my_servers
             (id, provider, name, region, plan, state, node_id,
-             hourly_usd, monthly_usd, created_at, updated_at, last_synced_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+             hourly_usd, monthly_usd, daily_price_cents, transfer_gib, paid_until, billing_state,
+             created_at, updated_at, last_synced_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
          ON CONFLICT(id) DO UPDATE SET
              provider = excluded.provider,
              name = excluded.name,
@@ -57,6 +70,10 @@ pub fn upsert(conn: &Connection, new: &NewMyServer<'_>) -> StoreResult<MyServerR
              node_id = COALESCE(excluded.node_id, my_servers.node_id),
              hourly_usd = excluded.hourly_usd,
              monthly_usd = excluded.monthly_usd,
+             daily_price_cents = excluded.daily_price_cents,
+             transfer_gib = excluded.transfer_gib,
+             paid_until = excluded.paid_until,
+             billing_state = excluded.billing_state,
              created_at = excluded.created_at,
              updated_at = excluded.updated_at,
              last_synced_at = excluded.last_synced_at",
@@ -70,6 +87,10 @@ pub fn upsert(conn: &Connection, new: &NewMyServer<'_>) -> StoreResult<MyServerR
             new.node_id,
             new.hourly_usd,
             new.monthly_usd,
+            new.daily_price_cents,
+            new.transfer_gib,
+            new.paid_until,
+            new.billing_state,
             new.created_at,
             now
         ],
@@ -81,7 +102,8 @@ pub fn upsert(conn: &Connection, new: &NewMyServer<'_>) -> StoreResult<MyServerR
 pub fn list(conn: &Connection) -> StoreResult<Vec<MyServerRow>> {
     let mut statement = conn.prepare(
         "SELECT id, provider, name, region, plan, state, node_id,
-                hourly_usd, monthly_usd, created_at, updated_at, last_synced_at
+                hourly_usd, monthly_usd, daily_price_cents, transfer_gib, paid_until, billing_state,
+                created_at, updated_at, last_synced_at
            FROM my_servers
           WHERE state != 'destroyed'
           ORDER BY created_at DESC",
@@ -93,7 +115,8 @@ pub fn list(conn: &Connection) -> StoreResult<Vec<MyServerRow>> {
 pub fn get(conn: &Connection, id: &str) -> StoreResult<Option<MyServerRow>> {
     conn.query_row(
         "SELECT id, provider, name, region, plan, state, node_id,
-                hourly_usd, monthly_usd, created_at, updated_at, last_synced_at
+                hourly_usd, monthly_usd, daily_price_cents, transfer_gib, paid_until, billing_state,
+                created_at, updated_at, last_synced_at
            FROM my_servers WHERE id = ?1",
         params![id],
         row_to_server,
@@ -145,9 +168,13 @@ fn row_to_server(row: &rusqlite::Row<'_>) -> rusqlite::Result<MyServerRow> {
         node_id: row.get(6)?,
         hourly_usd: row.get(7)?,
         monthly_usd: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
-        last_synced_at: row.get(11)?,
+        daily_price_cents: row.get(9)?,
+        transfer_gib: row.get(10)?,
+        paid_until: row.get(11)?,
+        billing_state: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+        last_synced_at: row.get(15)?,
     })
 }
 
@@ -167,6 +194,10 @@ mod tests {
             node_id: None,
             hourly_usd: 0.009,
             monthly_usd: 6.0,
+            daily_price_cents: 20,
+            transfer_gib: 1000,
+            paid_until: 1_700_086_400_000,
+            billing_state: "active",
             created_at: 1_700_000_000_000,
         }
     }

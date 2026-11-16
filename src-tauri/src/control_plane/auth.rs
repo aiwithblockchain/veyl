@@ -236,6 +236,7 @@ fn log_status_failure(path: &str, status: u16, error: &CpError) {
         Some(status),
         error.retryable,
         error.reason().unwrap_or("-"),
+        "-",
     );
 }
 
@@ -429,16 +430,35 @@ pub async fn login_verify(email: &str, code: &str) -> Result<AccountState, CpErr
 /// 服务端登出（`POST /v1/auth/logout`）：作废 refresh 并把设备解绑到匿名账户。
 ///
 /// 只在服务端成功后才写本地令牌；离线失败原样上报，不允许本地假装已退出（§2.4）。
+/// 例外：服务端明确说令牌已无效（dev 库重建、设备被删、401）时，本地令牌必须清掉
+/// 并回到未登录态——否则用户会被永久卡在「已登录」却退不出去。
 pub async fn logout() -> Result<AccountState, CpError> {
     let client = super::client::ControlPlane::new()?;
-    let raw = client.post("/v1/auth/logout", None, None).await?;
-    let tokens: TokenSet = serde_json::from_value(raw)
-        .map_err(|_| CpError::invalid_response("登出响应格式不正确"))?;
-    store_tokens(&tokens)?;
-    if let Some(mut device) = existing_device() {
-        device.account_id = tokens.account_id.clone();
-        let _ = store_device(&device);
+    match client.post("/v1/auth/logout", None, None).await {
+        Ok(raw) => {
+            let tokens: TokenSet = serde_json::from_value(raw)
+                .map_err(|_| CpError::invalid_response("登出响应格式不正确"))?;
+            store_tokens(&tokens)?;
+            if let Some(mut device) = existing_device() {
+                device.account_id = tokens.account_id.clone();
+                let _ = store_device(&device);
+            }
+            Ok(account_state())
+        }
+        Err(error) => logout_failure(error),
     }
+}
+
+/// 服务端拒绝旧令牌时清本地态；网络、5xx、403 等其它失败仍原样上报。
+fn logout_failure(error: CpError) -> Result<AccountState, CpError> {
+    let rejected = matches!(
+        error.reason(),
+        Some("token_invalid") | Some("auth_required")
+    ) || error.details.get("status").and_then(Value::as_u64) == Some(401);
+    if !rejected {
+        return Err(error);
+    }
+    clear_tokens();
     Ok(account_state())
 }
 
@@ -484,6 +504,16 @@ pub fn local_identity() -> LocalIdentity {
     identity_from(raw.as_deref(), marker.as_deref())
 }
 
+/// 日志里的账户标识：只用 `account_id`，绝不打印邮箱或令牌。
+fn account_label(tokens: &TokenSet) -> &str {
+    let id = tokens.account_id.trim();
+    if id.is_empty() {
+        "-"
+    } else {
+        id
+    }
+}
+
 /// 取一个可用的 access token；`stale` 是刚被 401 拒掉的那个（并发刷新在锁内复核用）。
 pub async fn ensure_access(
     base_url: &str,
@@ -495,7 +525,15 @@ pub async fn ensure_access(
     if let Some(tokens) = load_tokens() {
         let fresh = access_valid(&tokens, now_ms());
         let superseded = stale.map(|value| value != tokens.access_token).unwrap_or(false);
+        log::debug!(
+            "鉴权：本地令牌 fresh={fresh} superseded={superseded} account={}",
+            account_label(&tokens)
+        );
         if fresh && (stale.is_none() || superseded) {
+            log::debug!(
+                "鉴权：复用本地 access 令牌 account={}",
+                account_label(&tokens)
+            );
             return Ok(tokens.access_token);
         }
     }
@@ -505,8 +543,20 @@ pub async fn ensure_access(
     let tokens = match load_tokens() {
         Some(tokens) => {
             let was_email = tokens.account_kind == "email";
+            log::debug!(
+                "鉴权：access 已过期，开始刷新 account={} account_kind={}",
+                account_label(&tokens),
+                tokens.account_kind
+            );
             match refresh(base_url, http, &tokens.refresh_token).await {
-                Ok(tokens) => tokens,
+                Ok(tokens) => {
+                    log::debug!(
+                        "鉴权：刷新成功 account={} account_kind={}",
+                        account_label(&tokens),
+                        tokens.account_kind
+                    );
+                    tokens
+                }
                 Err(error)
                     if error.reason() == Some("auth_required")
                         || error.reason() == Some("token_invalid") =>
@@ -515,6 +565,10 @@ pub async fn ensure_access(
                     if was_email {
                         // 邮箱账户的 refresh 失效不重新注册设备：设备行还绑着账户，
                         // 重新注册会换出匿名账户。按 §3.3 回到未登录态，让用户重新登录。
+                        log::debug!(
+                            "鉴权：刷新被拒（401），邮箱账户需要重新登录 account={}",
+                            account_label(&tokens)
+                        );
                         return Err(CpError::new(
                             "UNAUTHENTICATED",
                             "登录已过期，请重新登录",
@@ -523,12 +577,32 @@ pub async fn ensure_access(
                         ));
                     }
                     // 匿名设备：用长期秘密重新注册（§19.2.4）。
-                    register(base_url, http, &device).await?
+                    log::debug!(
+                        "鉴权：刷新被拒（401），用设备身份重新注册 device={}",
+                        device.device_id
+                    );
+                    let tokens = register(base_url, http, &device).await?;
+                    log::debug!(
+                        "鉴权：重新注册成功 account={} device={}",
+                        account_label(&tokens),
+                        tokens.device_id
+                    );
+                    tokens
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    log::debug!(
+                        "鉴权：刷新失败（致命） reason={} retryable={}",
+                        error.reason().unwrap_or("-"),
+                        error.retryable
+                    );
+                    return Err(error);
+                }
             }
         }
-        None => register(base_url, http, &device).await?,
+        None => {
+            log::debug!("鉴权：没有本地令牌，注册设备 device={}", device.device_id);
+            register(base_url, http, &device).await?
+        }
     };
 
     Ok(tokens.access_token)
@@ -695,8 +769,42 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_identity_is_false_and_is_not_rebuilt() {
-        // 有账户标记但没有设备秘密：返回 false / null，这个函数不写入任何东西；
+    fn a_rejected_logout_token_clears_local_state_but_a_network_error_does_not() {
+        crate::test_support::install_test_secrets();
+        clear_tokens();
+        store_tokens(&tokens("2026-11-14T08:00:31Z")).unwrap();
+
+        // 网络失败：原样上报，不能假装已退出。
+        let error = logout_failure(CpError::network(false)).unwrap_err();
+        assert_eq!(error.code, "UPSTREAM_ERROR");
+        assert!(load_tokens().is_some(), "网络失败必须保留本地令牌");
+
+        // 403（账户被停用）同样不清本地态。
+        let blocked = error::from_response(403, "{}");
+        assert!(logout_failure(blocked).is_err());
+        assert!(load_tokens().is_some(), "403 必须保留本地令牌");
+
+        // 服务端 401 token_invalid：本地令牌清掉，回到未登录态。
+        let rejected = error::from_response(
+            401,
+            r#"{"code":"UNAUTHENTICATED","message":"需要重新登录","retryable":true,"details":{"reason":"token_invalid"},"request_id":"r1"}"#,
+        );
+        let state = logout_failure(rejected).unwrap();
+        assert!(!state.logged_in);
+        assert_eq!(state.account_kind, None);
+        assert!(load_tokens().is_none(), "令牌被服务端拒绝后必须清掉");
+
+        // 401 但响应体不可解析：按状态码兜底，同样清本地态。
+        store_tokens(&tokens("2026-11-14T08:00:31Z")).unwrap();
+        let state = logout_failure(error::from_response(401, "")).unwrap();
+        assert!(!state.logged_in);
+        assert!(load_tokens().is_none());
+
+        clear_tokens();
+    }
+
+    #[test]
+    fn a_lost_identity_is_false_and_is_not_rebuilt() {        // 有账户标记但没有设备秘密：返回 false / null，这个函数不写入任何东西；
         // 重建只能走 register_device()，由用户显式触发。
         let status = identity_from(None, Some("acct_1"));
         assert!(!status.has_identity);

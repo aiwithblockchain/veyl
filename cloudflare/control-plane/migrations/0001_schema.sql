@@ -49,8 +49,8 @@ CREATE TABLE orders (
   account_id           TEXT NOT NULL,
   region               TEXT NOT NULL,
   plan                 TEXT NOT NULL,
-  amount_usd           REAL NOT NULL,
-  amount_cents         INTEGER NOT NULL,    -- 下单时的售价快照
+  amount_usd           REAL NOT NULL,        -- 日价（美元快照）
+  amount_cents         INTEGER NOT NULL,     -- 日价（USD 分），下单快照；结账只扣 1 天
   hourly_usd           REAL NOT NULL,
   state                TEXT NOT NULL,       -- pending_payment | paid | provisioning | ready | cancelled | failed
   idempotency_key      TEXT NOT NULL,
@@ -78,7 +78,9 @@ CREATE TABLE servers (
   plan                  TEXT NOT NULL,
   hourly_usd            REAL NOT NULL,
   monthly_usd           REAL NOT NULL,
-  plan_price_cents      INTEGER NOT NULL DEFAULT 0, -- 购机时的月价快照，续费按它扣
+  daily_price_cents     INTEGER NOT NULL,            -- 购机时的日价快照，按天扣费按它扣
+  billing_anchor_at     INTEGER NOT NULL,            -- 计费锚点（建机时刻），日桶从这里起算
+  transfer_gib          INTEGER NOT NULL DEFAULT 0,  -- 购机时的每月公网出口额度快照（GiB），0 = 未知
   state                 TEXT NOT NULL,
   billing_state         TEXT NOT NULL DEFAULT 'active', -- active | past_due | expired
   node_port             INTEGER NOT NULL,
@@ -112,16 +114,18 @@ CREATE TABLE credentials (
 CREATE TABLE wallet_ledger (
   id                  TEXT PRIMARY KEY,
   account_id          TEXT NOT NULL,
-  kind                TEXT NOT NULL,       -- topup | charge | adjustment
-  amount_cents        INTEGER NOT NULL,    -- 正入负出
+  kind                TEXT NOT NULL,       -- topup | charge | adjustment | snapshot
+  amount_cents        INTEGER NOT NULL,    -- 正入负出；snapshot 固定 0
   balance_after_cents INTEGER NOT NULL,
-  ref_type            TEXT NOT NULL,       -- dodo_payment | order | server_period | manual
+  ref_type            TEXT NOT NULL,       -- dodo_payment | order | server_day | server_refund | snapshot | manual
   ref_id              TEXT NOT NULL,
   note                TEXT,
   created_at          INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX wallet_ledger_ref ON wallet_ledger(ref_type, ref_id);
 CREATE INDEX wallet_ledger_account ON wallet_ledger(account_id, created_at);
+-- 只服务 §4.12 的账本裁剪，不当常规查询索引用。
+CREATE INDEX wallet_ledger_prune ON wallet_ledger(created_at) WHERE ref_type = 'server_day';
 
 CREATE TABLE topups (
   id                  TEXT PRIMARY KEY,
@@ -214,4 +218,10 @@ CREATE TABLE rate_limits (
   key          TEXT PRIMARY KEY,
   window_start INTEGER NOT NULL,
   count        INTEGER NOT NULL
+);
+
+-- 计费轮询游标：每天从上次停下的服务器继续，避免只扣到前 N 台。
+CREATE TABLE billing_cursor (
+  id    TEXT PRIMARY KEY,               -- 'servers'
+  value TEXT NOT NULL                   -- 上次处理到的 server id；空串表示从头开始
 );

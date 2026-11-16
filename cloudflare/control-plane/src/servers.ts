@@ -5,7 +5,6 @@ import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
 import { randomId, sealSecret, sha256B64u, signDetached, openSecret } from "./lib/crypto";
 import { apiError, json } from "./lib/http";
 import { createFirewall, deleteDroplet, getDroplet } from "./providers/digitalocean";
-import { recordLedgerEntry } from "./wallet";
 
 // 每个环境用自己的签名密钥：dev 与 prod 的公钥都内置在客户端，靠 key_id 区分。
 const DEFAULT_CREDENTIAL_KEY_ID = "cp-2026-11";
@@ -42,9 +41,18 @@ interface ServerRow {
   updated_at: number;
   destroyed_at: number | null;
   failure_code?: string | null;
+  daily_price_cents: number;
+  billing_anchor_at: number;
+  transfer_gib?: number;
+  paid_until: number;
+  billing_state: string;
 }
 
+const GRACE_MS = 7 * 24 * 3600 * 1000;
+
 function serverView(row: ServerRow) {
+  const paidUntil = Number(row.paid_until ?? 0);
+  const pastDue = row.billing_state === "past_due" || row.billing_state === "expired";
   return {
     server_id: row.id,
     name: row.name,
@@ -57,6 +65,11 @@ function serverView(row: ServerRow) {
     node_id: row.node_id,
     hourly_usd: row.hourly_usd,
     monthly_usd: row.monthly_usd,
+    daily_price_cents: Number(row.daily_price_cents ?? 0),
+    transfer_gib: Number(row.transfer_gib ?? 0),
+    paid_until: new Date(paidUntil).toISOString(),
+    billing_state: row.billing_state ?? "active",
+    grace_ends_at: pastDue ? new Date(paidUntil + GRACE_MS).toISOString() : null,
     failure: row.failure_code
       ? { stage: row.state, code: row.failure_code, message: "这台服务器没有创建成功", retryable: false }
       : null,
@@ -106,53 +119,91 @@ async function destroyInstance(
   }
 
   const now = Date.now();
-  await env.DB.prepare("UPDATE servers SET state = 'destroyed', destroyed_at = ?, updated_at = ? WHERE id = ?")
-    .bind(now, now, row.id)
-    .run();
-  await env.DB.prepare("UPDATE credentials SET destroyed_at = ? WHERE server_id = ?")
-    .bind(now, row.id)
-    .run();
-  await env.DB.prepare(
-    "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'server.destroy', ?)",
-  )
-    .bind(now, row.account_id, row.id, JSON.stringify({ reason }))
-    .run();
+  const refund = await refundPlan(env, row, reason, now);
+  const ledgerId = refund ? randomId("led_") : "";
+
+  // 「标记销毁 + 关单 + 退款」必须在同一个 batch（D1 batch 是事务）：
+  // 分开做会出现「机器没了、钱没退」，而销毁后的重试会直接返回成功，永远补不回来。
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(
+      "UPDATE servers SET state = 'destroyed', destroyed_at = ?, updated_at = ?, failure_code = ? WHERE id = ?",
+    ).bind(now, now, reason === "user" ? null : reason, row.id),
+    env.DB.prepare("UPDATE credentials SET destroyed_at = ? WHERE server_id = ?").bind(now, row.id),
+    env.DB.prepare(
+      "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'server.destroy', ?)",
+    ).bind(now, row.account_id, row.id, JSON.stringify({ reason })),
+  ];
 
   // 非用户主动销毁（装机失败、enroll 被拒、超时）要连带关单，
-  // 否则订单会永远停在 provisioning；同时把原因留在服务器行上，界面才说得出为什么。
-  if (reason !== "user") {
-    await env.DB.prepare("UPDATE servers SET failure_code = ? WHERE id = ?")
-      .bind(reason, row.id)
-      .run();
-  }
+  // 否则订单会永远停在 provisioning。
   if (reason !== "user" && row.order_id) {
-    await env.DB.prepare(
-      "UPDATE orders SET state = 'failed', failure_code = ?, failure_stage = ? WHERE id = ? AND state != 'failed'",
-    )
-      .bind(reason, row.state, row.order_id)
-      .run();
-
-    // 不是用户主动销毁：机器没交付却已经扣过钱，必须退回余额（同一订单只退一次）。
-    const order = await env.DB.prepare(
-      "SELECT id, amount_cents, paid_via FROM orders WHERE id = ?",
-    )
-      .bind(row.order_id)
-      .first<{ id: string; amount_cents: number; paid_via: string | null }>();
-    if (order && order.paid_via === "wallet" && Number(order.amount_cents) > 0) {
-      await recordLedgerEntry(
-        { DB: env.DB },
-        {
-          accountId: row.account_id,
-          kind: "adjustment",
-          amountCents: Number(order.amount_cents),
-          refType: "manual",
-          refId: `refund:${order.id}`,
-          note: `建机失败退款：${reason}`,
-        },
-      );
-    }
+    statements.push(
+      env.DB.prepare(
+        "UPDATE orders SET state = 'failed', failure_code = ?, failure_stage = ? WHERE id = ? AND state != 'failed'",
+      ).bind(reason, row.state, row.order_id),
+    );
   }
+
+  if (refund) {
+    statements.push(
+      env.DB.prepare(
+        "INSERT INTO wallet_ledger (id, account_id, kind, amount_cents, balance_after_cents, ref_type, ref_id, note, created_at) " +
+          "SELECT ?, a.id, 'adjustment', ?, a.balance_cents + ?, 'server_refund', ?, ?, ? FROM accounts a " +
+          "WHERE a.id = ? AND NOT EXISTS (SELECT 1 FROM wallet_ledger w WHERE w.ref_type = 'server_refund' AND w.ref_id = ?)",
+      ).bind(ledgerId, refund.amount, refund.amount, row.id, refund.note, now, row.account_id, row.id),
+      env.DB.prepare(
+        "UPDATE accounts SET balance_cents = balance_cents + ? WHERE id = ? AND EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
+      ).bind(refund.amount, row.account_id, ledgerId),
+    );
+  }
+
+  await env.DB.batch(statements);
   return { ok: true };
+}
+
+const DAY_MS = 24 * 3600 * 1000;
+
+/**
+ * 销毁退款（§4.6）：用户主动销毁退「未开始的整天」；非用户原因（装机失败、enroll 超时）
+ * 退这台机器已付的全部天数。同一台服务器只退一次，重试撞 `(server_refund, server_id)` 唯一键。
+ */
+async function refundPlan(
+  env: ServersEnv,
+  row: ServerRow,
+  reason: string,
+  now: number,
+): Promise<{ amount: number; note: string } | null> {
+  if (!row.order_id) return null;
+  const order = await env.DB!.prepare(
+    "SELECT id, amount_cents, paid_via FROM orders WHERE id = ?",
+  )
+    .bind(row.order_id)
+    .first<{ id: string; amount_cents: number; paid_via: string | null }>();
+  if (!order || order.paid_via !== "wallet") return null;
+
+  const daily = Number(row.daily_price_cents ?? 0);
+  const anchor = Number(row.billing_anchor_at ?? 0);
+  const paidUntil = Number(row.paid_until ?? 0);
+  let amount = 0;
+
+  if (daily > 0 && anchor > 0) {
+    const nPaid = Math.floor((paidUntil - anchor) / DAY_MS);
+    if (reason === "user") {
+      // 当天已经用掉，不退；只退还没开始的整天。
+      const nNow = Math.floor((now - anchor) / DAY_MS);
+      amount = Math.max(0, daily * (nPaid - nNow - 1));
+    } else {
+      amount = Math.max(0, daily * Math.max(0, nPaid));
+    }
+  } else if (reason !== "user") {
+    amount = Number(order.amount_cents ?? 0);
+  }
+
+  if (amount <= 0) return null;
+  return {
+    amount,
+    note: reason === "user" ? "销毁退还未使用天数" : `建机失败退款：${reason}`,
+  };
 }
 
 /** POST /v1/enroll/{token}：实例回传端口与密码。token 自身就是幂等键，只能消费一次。 */

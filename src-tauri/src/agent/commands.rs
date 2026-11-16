@@ -234,8 +234,20 @@ pub async fn my_server_catalog() -> Result<Value, Value> {
 #[tauri::command]
 pub async fn my_server_list() -> Result<Value, Value> {
     match crate::control_plane::servers::list().await {
-        Ok(servers) => Ok(json!({ "servers": servers })),
-        Err(error) => Err(error.envelope()),
+        Ok(servers) => {
+            log::debug!("我的服务器：列表成功 count={}", servers.len());
+            Ok(json!({ "servers": servers }))
+        }
+        Err(error) => {
+            log::warn!(
+                "我的服务器：列表失败 code={} reason={} retryable={} message={}",
+                error.code,
+                error.reason().unwrap_or("-"),
+                error.retryable,
+                error.message
+            );
+            Err(error.envelope())
+        }
     }
 }
 
@@ -266,9 +278,27 @@ pub async fn my_server_create(
 #[tauri::command]
 pub async fn my_server_checkout(order_id: String) -> Result<Value, Value> {
     match crate::control_plane::servers::checkout(&order_id).await {
-        Ok(charge) => serde_json::to_value(&charge)
-            .map_err(|error| command_error("INTERNAL", error, Value::Null)),
-        Err(error) => Err(error.envelope()),
+        Ok(charge) => {
+            log::info!(
+                "我的服务器：扣费成功 order={} state={} charged_cents={} balance_after_cents={}",
+                charge.order_id,
+                charge.state,
+                charge.charged_cents,
+                charge.balance_after_cents
+            );
+            serde_json::to_value(&charge)
+                .map_err(|error| command_error("INTERNAL", error, Value::Null))
+        }
+        Err(error) => {
+            log::warn!(
+                "我的服务器：扣费失败 order={} code={} reason={} retryable={}",
+                order_id,
+                error.code,
+                error.reason().unwrap_or("-"),
+                error.retryable
+            );
+            Err(error.envelope())
+        }
     }
 }
 
@@ -291,12 +321,29 @@ pub async fn my_server_topup(
     let channel = channel.unwrap_or_else(|| "dodo".to_string());
     match crate::control_plane::servers::topup(denomination, &channel).await {
         Ok(topup) => {
+            log::info!(
+                "我的服务器：充值会话创建 denomination_cents={} channel={} topup={} checkout_url={}",
+                topup.denomination_cents,
+                channel,
+                topup.topup_id,
+                if topup.checkout_url.is_some() { "有" } else { "无" }
+            );
             if let Some(url) = topup.checkout_url.as_deref() {
                 open_checkout_url(&app, url);
             }
             Ok(json!(topup))
         }
-        Err(error) => Err(error.envelope()),
+        Err(error) => {
+            log::warn!(
+                "我的服务器：充值失败 denomination_cents={} channel={} code={} reason={} retryable={}",
+                denomination,
+                channel,
+                error.code,
+                error.reason().unwrap_or("-"),
+                error.retryable
+            );
+            Err(error.envelope())
+        }
     }
 }
 
@@ -326,8 +373,33 @@ pub async fn my_server_order_get(order_id: String) -> Result<Value, Value> {
 #[tauri::command]
 pub async fn my_server_login_start(email: String) -> Result<Value, Value> {
     match crate::control_plane::auth::login_start(&email).await {
-        Ok(ticket) => Ok(json!(ticket)),
-        Err(error) => Err(error.envelope()),
+        Ok(ticket) => {
+            log::info!(
+                "登录：验证码请求结果 sent={} cooldown_seconds={} retry_after_seconds={}",
+                ticket.sent,
+                ticket.cooldown_seconds,
+                ticket
+                    .retry_after_seconds
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".into())
+            );
+            Ok(json!(ticket))
+        }
+        Err(error) => {
+            log::warn!(
+                "登录：验证码请求失败 code={} reason={} retryable={} cooldown_seconds={}",
+                error.code,
+                error.reason().unwrap_or("-"),
+                error.retryable,
+                error
+                    .details
+                    .get("retry_after_seconds")
+                    .and_then(Value::as_u64)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".into())
+            );
+            Err(error.envelope())
+        }
     }
 }
 
@@ -335,8 +407,30 @@ pub async fn my_server_login_start(email: String) -> Result<Value, Value> {
 #[tauri::command]
 pub async fn my_server_login_verify(email: String, code: String) -> Result<Value, Value> {
     match crate::control_plane::auth::login_verify(&email, &code).await {
-        Ok(account) => Ok(json!(account)),
-        Err(error) => Err(error.envelope()),
+        Ok(account) => {
+            log::info!(
+                "登录：验证码校验成功 logged_in={} account_kind={} account={}",
+                account.logged_in,
+                account.account_kind.as_deref().unwrap_or("-"),
+                account.account_id.as_deref().unwrap_or("-")
+            );
+            Ok(json!(account))
+        }
+        Err(error) => {
+            log::warn!(
+                "登录：验证码校验失败 code={} reason={} retryable={} attempts_remaining={}",
+                error.code,
+                error.reason().unwrap_or("-"),
+                error.retryable,
+                error
+                    .details
+                    .get("attempts_remaining")
+                    .and_then(Value::as_u64)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".into())
+            );
+            Err(error.envelope())
+        }
     }
 }
 

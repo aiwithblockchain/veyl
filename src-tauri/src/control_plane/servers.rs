@@ -31,6 +31,12 @@ pub const ORDER_STATES: [&str; 6] = [
     "failed",
 ];
 
+/// 计费状态（控制面 Cron 每日推进）。
+pub const BILLING_STATES: [&str; 3] = ["active", "past_due", "expired"];
+
+/// 宽限期：`grace_ends_at` 的派生口径（§4.6），控制面不给时由 Host 计算。
+const GRACE_DAYS: i64 = 7;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MyServerFailure {
     pub stage: String,
@@ -55,6 +61,16 @@ pub struct MyServer {
     pub node_id: Option<String>,
     pub hourly_usd: f64,
     pub monthly_usd: f64,
+    /// 售价快照（USD 分 / 天），即每天实际扣多少。
+    pub daily_price_cents: i64,
+    /// 每月公网出口额度快照（GiB）；0 = 未知，不参与任何扣费。
+    pub transfer_gib: i64,
+    /// 已付到哪个时刻（ISO 8601）；建行时即写入，永不为 null。
+    pub paid_until: String,
+    pub billing_state: String,
+    /// 派生值：`paid_until + 7d`，不落库；仅 past_due / expired 非空。
+    #[serde(default)]
+    pub grace_ends_at: Option<String>,
     #[serde(default)]
     pub failure: Option<MyServerFailure>,
 }
@@ -196,7 +212,7 @@ fn validate_state(state: &str, allowed: &[&str], what: &str) -> Result<(), CpErr
     }
 }
 
-fn validate_server(server: &MyServer) -> Result<(), CpError> {
+fn validate_server(server: &mut MyServer) -> Result<(), CpError> {
     if server.server_id.trim().is_empty() {
         return Err(CpError::invalid_response("服务器缺少 server_id"));
     }
@@ -210,7 +226,37 @@ fn validate_server(server: &MyServer) -> Result<(), CpError> {
     if server.hourly_usd < 0.0 || server.monthly_usd < 0.0 {
         return Err(CpError::invalid_response("服务器价格不能为负"));
     }
+    if server.daily_price_cents < 0 {
+        return Err(CpError::invalid_response("服务器日价不能为负"));
+    }
+    if server.transfer_gib < 0 {
+        return Err(CpError::invalid_response("服务器流量额度不能为负"));
+    }
+    let paid_until = parse_iso_ms(&server.paid_until)
+        .ok_or_else(|| CpError::invalid_response("服务器 paid_until 不是 ISO 8601"))?;
+    validate_state(&server.billing_state, &BILLING_STATES, "计费")?;
+    normalize_grace(server, paid_until);
     Ok(())
+}
+
+/// `grace_ends_at` 是派生值，不落库（commands.md 2.30.0）。
+///
+/// 控制面给了就校验后透传；没给时按 `paid_until + 7d` 算。`active` 永远为 null，
+/// 否则界面会显示「还在宽限」而实际已在正常计费。
+fn normalize_grace(server: &mut MyServer, paid_until_ms: i64) {
+    if server.billing_state == "active" {
+        server.grace_ends_at = None;
+        return;
+    }
+    let valid = server
+        .grace_ends_at
+        .as_deref()
+        .and_then(parse_iso_ms)
+        .is_some();
+    if !valid {
+        let grace = paid_until_ms.saturating_add(GRACE_DAYS * 24 * 3600 * 1000);
+        server.grace_ends_at = Some(crate::store::iso_from_ms(grace));
+    }
 }
 
 fn remember_order(order: &MyServerOrder) {
@@ -294,9 +340,9 @@ pub async fn list() -> Result<Vec<MyServer>, CpError> {
         .ok_or_else(|| CpError::invalid_response("服务器列表响应缺少 servers"))?;
     let mut servers = Vec::with_capacity(values.len());
     for value in values {
-        let server: MyServer = serde_json::from_value(value.clone())
+        let mut server: MyServer = serde_json::from_value(value.clone())
             .map_err(|_| CpError::invalid_response("服务器列表条目格式不正确"))?;
-        validate_server(&server)?;
+        validate_server(&mut server)?;
         servers.push(server);
     }
     // 读路径也会顺带维护缓存，这是有意的：一次成功的列表响应是唯一能判断
@@ -325,9 +371,9 @@ pub async fn get(server_id: &str) -> Result<MyServer, CpError> {
 
 async fn get_with(client: &ControlPlane, server_id: &str) -> Result<MyServer, CpError> {
     let raw = client.get(&format!("/v1/servers/{server_id}")).await?;
-    let server: MyServer = serde_json::from_value(raw)
+    let mut server: MyServer = serde_json::from_value(raw)
         .map_err(|_| CpError::invalid_response("服务器详情格式不正确"))?;
-    validate_server(&server)?;
+    validate_server(&mut server)?;
     if let Some(store) = crate::store::global() {
         let conn = store.conn();
         cache_server(&conn, &server);
@@ -461,7 +507,7 @@ pub async fn topup(denomination_cents: i64, channel: &str) -> Result<MyServerTop
         "denomination_cents": denomination_cents,
         "channel": channel,
     });
-    let raw = client.post("/v1/topups", Some(&body), None).await?;
+    let raw = client.post("/v1/topups", Some(&body), Some(&new_idempotency_key())).await?;
     parse_topup(raw, denomination_cents)
 }
 
@@ -632,6 +678,13 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
             node_id: None,
             hourly_usd: old.hourly_usd,
             monthly_usd: old.monthly_usd,
+            daily_price_cents: old.daily_price_cents,
+            transfer_gib: old.transfer_gib,
+            // rebuild 是新的计费生命周期：第 0 天已扣，先按 1 天估算，
+            // 下一次列表/详情以控制面为准。
+            paid_until: crate::store::iso_from_ms(crate::store::now_ms() + 24 * 3600 * 1000),
+            billing_state: "active".into(),
+            grace_ends_at: None,
             failure: None,
         };
         if let Some(store) = crate::store::global() {
@@ -727,6 +780,13 @@ fn cache_server(conn: &rusqlite::Connection, server: &MyServer) {
         .ok()
         .flatten();
     let created_at = parse_iso_ms(&server.created_at).unwrap_or_else(crate::store::now_ms);
+    let paid_until = match parse_iso_ms(&server.paid_until) {
+        Some(value) => value,
+        None => {
+            log::warn!("缓存我的服务器失败：paid_until 不是 ISO 8601");
+            return;
+        }
+    };
     // `my_servers.node_id` 有外键；远端可能比本地先给出 node_id（凭据还没取），
     // 此时先留空，等 `my_server_credentials` 建好节点行再回填。
     // 关联以本地节点行为准：换发凭据后远端 id 可能已经变了。
@@ -741,6 +801,10 @@ fn cache_server(conn: &rusqlite::Connection, server: &MyServer) {
         node_id: node_id.as_deref(),
         hourly_usd: server.hourly_usd,
         monthly_usd: server.monthly_usd,
+        daily_price_cents: server.daily_price_cents,
+        transfer_gib: server.transfer_gib,
+        paid_until,
+        billing_state: &server.billing_state,
         created_at,
     };
     if let Err(error) = crate::store::servers::upsert(conn, &new) {
@@ -776,6 +840,17 @@ fn local_server(server_id: &str) -> Option<MyServer> {
         node_id: linked_node_id(&conn, server_id, row.node_id.as_deref()),
         hourly_usd: row.hourly_usd,
         monthly_usd: row.monthly_usd,
+        daily_price_cents: row.daily_price_cents,
+        transfer_gib: row.transfer_gib,
+        paid_until: crate::store::iso_from_ms(row.paid_until),
+        billing_state: row.billing_state.clone(),
+        grace_ends_at: if row.billing_state == "active" {
+            None
+        } else {
+            Some(crate::store::iso_from_ms(
+                row.paid_until + GRACE_DAYS * 24 * 3600 * 1000,
+            ))
+        },
         failure: None,
     })
 }
@@ -813,18 +888,102 @@ mod tests {
             node_id: None,
             hourly_usd: 0.009,
             monthly_usd: 6.0,
+            daily_price_cents: 20,
+            transfer_gib: 1000,
+            paid_until: "2026-11-15T08:00:00Z".into(),
+            billing_state: "active".into(),
+            grace_ends_at: None,
             failure: None,
         };
-        assert!(validate_server(&server).is_ok());
+        assert!(validate_server(&mut server).is_ok());
 
         server.state = "unknown-state".into();
         assert_eq!(
-            validate_server(&server).unwrap_err().reason(),
+            validate_server(&mut server).unwrap_err().reason(),
             Some("invalid_response")
         );
         server.state = "healthy".into();
         server.created_at = "yesterday".into();
-        assert!(validate_server(&server).is_err());
+        assert!(validate_server(&mut server).is_err());
+    }
+
+    fn a_server_json() -> Value {
+        json!({
+            "server_id": "srv_1",
+            "name": "Tokyo",
+            "region": "tyo",
+            "plan": "s-1vcpu-1gb",
+            "state": "healthy",
+            "created_at": "2026-11-14T08:00:00Z",
+            "hourly_usd": 0.009,
+            "monthly_usd": 6.0,
+            "daily_price_cents": 20,
+            "transfer_gib": 1000,
+            "paid_until": "2026-11-15T08:00:00Z",
+            "billing_state": "active",
+        })
+    }
+
+    #[test]
+    fn billing_fields_are_required_and_paid_until_is_never_null() {
+        let mut server: MyServer = serde_json::from_value(a_server_json()).unwrap();
+        assert!(validate_server(&mut server).is_ok());
+        assert_eq!(server.daily_price_cents, 20);
+        assert_eq!(server.transfer_gib, 1000);
+        assert_eq!(server.paid_until, "2026-11-15T08:00:00Z");
+        assert_eq!(server.billing_state, "active");
+        // active 没有宽限期：即使上游误发也要清掉。
+        server.grace_ends_at = Some("2026-11-22T08:00:00Z".into());
+        assert!(validate_server(&mut server).is_ok());
+        assert!(server.grace_ends_at.is_none());
+
+        for field in ["daily_price_cents", "transfer_gib", "paid_until", "billing_state"] {
+            let mut value = a_server_json();
+            value.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<MyServer>(value).is_err(),
+                "{field} 缺失必须解析失败"
+            );
+        }
+
+        // 契约 2.30.0：paid_until 收紧为非空，null 不能被当成没付过费。
+        let mut value = a_server_json();
+        value["paid_until"] = Value::Null;
+        assert!(serde_json::from_value::<MyServer>(value).is_err());
+    }
+
+    #[test]
+    fn grace_ends_at_is_derived_for_past_due_and_expired_servers() {
+        let mut server: MyServer = serde_json::from_value(a_server_json()).unwrap();
+        server.billing_state = "past_due".into();
+        validate_server(&mut server).unwrap();
+        // 控制面不给 grace_ends_at：Host 按 paid_until + 7d 算。
+        assert_eq!(
+            server.grace_ends_at.as_deref(),
+            Some("2026-11-22T08:00:00Z")
+        );
+
+        // 控制面给了合法值就透传。
+        server.grace_ends_at = Some("2026-11-30T08:00:00Z".into());
+        validate_server(&mut server).unwrap();
+        assert_eq!(
+            server.grace_ends_at.as_deref(),
+            Some("2026-11-30T08:00:00Z")
+        );
+
+        // 非法值按缺失处理，仍按契约重算，不把垃圾字符串交给界面。
+        server.grace_ends_at = Some("soon".into());
+        validate_server(&mut server).unwrap();
+        assert_eq!(
+            server.grace_ends_at.as_deref(),
+            Some("2026-11-22T08:00:00Z")
+        );
+
+        server.billing_state = "weird".into();
+        assert_eq!(
+            validate_server(&mut server).unwrap_err().reason(),
+            Some("invalid_response")
+        );
     }
 
     #[test]

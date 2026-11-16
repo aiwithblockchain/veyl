@@ -29,8 +29,8 @@
 		"CREDENTIAL_KEY_ID": "cp-2026-12",
 		// Dodo Live 充值产品；键是美分面额。dev 用 Test 产品，两套不混用。
 		"DODO_TOPUP_PRODUCT_IDS": "{\"1000\":\"pdt_0Ns2WjoaqgohcfZ9r254A\",\"2000\":\"pdt_0Ns2Wjd7xrFjmLr2oZvnL\",\"5000\":\"pdt_0Ns2Wj265kTDA5UA0JmkG\",\"10000\":\"pdt_0Ns2WicUqf6BC786Vv0xG\"}",
-		// 售价 = DigitalOcean 成本 × 1.5，必须与目录展示一致（login-and-payment.md §4.4）。
-		"PLAN_PRICES_USD": "{\"s-1vcpu-512mb-10gb\":6,\"s-1vcpu-1gb\":9,\"s-1vcpu-2gb\":18}",
+		// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
+		"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":20,\"s-1vcpu-1gb\":30,\"s-1vcpu-2gb\":60}",
 		"APP_PAYMENT_RETURN_URL": "https://veyl.dessage.xyz/payment/return"
 	},
 	// Secrets（通过 wrangler secret put 设置，不写在此文件）：
@@ -48,16 +48,16 @@
 				"CREDENTIAL_KEY_ID": "cp-2026-11",
 				// Dodo Test Mode 充值产品（Veyl 自己建，不沿用 TweetPilot）；键是美分面额，prod 等验收后再填 Live 产品。
 				"DODO_TOPUP_PRODUCT_IDS": "{\"1000\":\"pdt_0Ns2VqGyVh6DSR7wkyWJo\",\"2000\":\"pdt_0Ns2WKHrFEQIAnDX6lews\",\"5000\":\"pdt_0Ns2WRb8m4NSiW4EqhDIP\",\"10000\":\"pdt_0Ns2WXZbLtBhh0YytV5ud\"}",
-				// 售价 = DigitalOcean 成本 × 1.5，必须与 Dodo 产品价逐分一致（login-and-payment.md §4.4）。
-				"PLAN_PRICES_USD": "{\"s-1vcpu-512mb-10gb\":6,\"s-1vcpu-1gb\":9,\"s-1vcpu-2gb\":18}",
+				// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
+				"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":20,\"s-1vcpu-1gb\":30,\"s-1vcpu-2gb\":60}",
 				"APP_PAYMENT_RETURN_URL": "https://cp-dev.veyl.dessage.xyz/payment/return"
 			},
 			// 代码里统一用 env.DB；生产环境后面单独建库再加一条顶层配置。
 			"d1_databases": [
 				{
 					"binding": "DB",
-					"database_name": "veyl-control-plane-dev-2",
-					"database_id": "b14173d7-f46f-42a8-8ec5-a8a712686c6e"
+					"database_name": "veyl-control-plane-dev-4",
+					"database_id": "a5755c55-b1d3-41fa-a2e1-e6a6a6627824"
 				}
 			]
 		}

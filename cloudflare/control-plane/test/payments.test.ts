@@ -56,7 +56,7 @@ async function makeEnv(db: FakeD1, environment = "dev") {
     ENVIRONMENT: environment,
     DODO_API_KEY: "dodo-key",
     DODO_WEBHOOK_SECRET: WEBHOOK_SECRET,
-    PLAN_PRICES_USD: JSON.stringify({ "s-1vcpu-1gb": 9 }),
+    PLAN_DAILY_PRICE_CENTS: JSON.stringify({ "s-1vcpu-1gb": 30 }),
     DODO_TOPUP_PRODUCT_IDS: JSON.stringify({ "1000": "pdt_top10", "2000": "pdt_top20" }),
     APP_PAYMENT_RETURN_URL: "https://control.example.com/payment/return",
     token,
@@ -344,7 +344,7 @@ describe("买机扣余额", () => {
       details: { reason: string; shortfall_cents: number };
     };
     expect(body.details.reason).toBe("insufficient_balance");
-    expect(body.details.shortfall_cents).toBe(900);
+    expect(body.details.shortfall_cents).toBe(30);
     // 契约要求充值后可重试；retryable=false 会让 Host 当终态处理。
     expect(body.retryable).toBe(true);
     expect(db.rows("servers")).toHaveLength(0);
@@ -372,14 +372,14 @@ describe("买机扣余额", () => {
       charged_cents: number;
       balance_after_cents: number;
     };
-    expect(body.charged_cents).toBe(900);
-    expect(body.balance_after_cents).toBe(1100);
+    expect(body.charged_cents).toBe(30);
+    expect(body.balance_after_cents).toBe(1970);
     // Host 按 order_id + state 解析；少任何一个都会在扣款成功后报错、用户重试再扣一次。
     expect(body.order_id).toBe(orderId);
     expect(body.state).toBe("provisioning");
 
     const server = db.rows("servers")[0];
-    expect(server.plan_price_cents).toBe(900);
+    expect(server.daily_price_cents).toBe(30);
     // 不写 paid_until 会让续费扫描永远扫不到（永久免单）。
     expect(Number(server.paid_until)).toBeGreaterThan(Date.now());
   });

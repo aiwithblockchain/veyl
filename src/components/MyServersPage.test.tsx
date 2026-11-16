@@ -28,19 +28,25 @@ const CATALOG: MyServerCatalog = {
       id: "s-1vcpu-512mb-10gb",
       label: "1 核 · 512 MB",
       hourly_usd: 0.00595,
-      monthly_usd: 4,
+      monthly_usd: 6,
+      daily_price_cents: 20,
+      transfer_gib: 500,
     },
     {
       id: "s-1vcpu-1gb",
       label: "1 核 · 1 GB",
       hourly_usd: 0.00893,
-      monthly_usd: 6,
+      monthly_usd: 9,
+      daily_price_cents: 30,
+      transfer_gib: 1000,
     },
     {
       id: "s-1vcpu-2gb",
       label: "1 核 · 2 GB",
       hourly_usd: 0.01786,
-      monthly_usd: 12,
+      monthly_usd: 18,
+      daily_price_cents: 60,
+      transfer_gib: 2000,
     },
   ],
   currency: "USD",
@@ -60,6 +66,11 @@ function server(over: Partial<MyServer> = {}): MyServer {
     node_id: "node_srv_1",
     hourly_usd: 0.007,
     monthly_usd: 5,
+    daily_price_cents: 30,
+    paid_until: new Date(86_400_000).toISOString(),
+    billing_state: "active",
+    grace_ends_at: null,
+    transfer_gib: 1000,
     failure: null,
     ...over,
   };
@@ -164,8 +175,8 @@ function makeBridge(servers: MyServer[] = SERVERS) {
     myServerCheckout: vi.fn(async () => ({
       order_id: "ord_1",
       state: "provisioning" as const,
-      charged_cents: 600,
-      balance_after_cents: 200,
+      charged_cents: 30,
+      balance_after_cents: 770,
     })),
     myServerCancelOrder: vi.fn(),
     myServerRebuild: vi.fn(async () => ({ newServerId: "srv_new", state: "creating" as const })),
@@ -229,6 +240,7 @@ function Harness({
         detailError={state.detailError}
         detailRetrying={state.detailRetrying}
         readOnly={state.identityLost}
+        sharedTransfer={state.sharedTransfer}
         joinGroupName={joinGroupName}
         onNew={state.openWizard}
         onEnsureIdentity={state.ensureIdentity}
@@ -310,7 +322,7 @@ describe("我的服务器 destination", () => {
     expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
     expect(await screen.findByRole("radiogroup", { name: "服务器类型" })).toBeTruthy();
     expect(document.querySelector(".wizard-foot__price")?.textContent).toContain(
-      "$0.00893/小时",
+      "每天 $0.30 · 约 $9/月",
     );
     expect(document.querySelectorAll(".myservers .btn--primary")).toHaveLength(1);
   });
@@ -670,12 +682,15 @@ describe("我的服务器 destination", () => {
     expect(
       screen.getByRole("radio", { name: /1 GB/ }).getAttribute("aria-checked"),
     ).toBe("true");
+    expect(
+      screen.getByRole("radio", { name: /每月 1000 GB 流量/ }),
+    ).toBeTruthy();
     expect(screen.getByText("入门")).toBeTruthy();
     expect(screen.getByText("标准")).toBeTruthy();
     expect(screen.getByText("进阶")).toBeTruthy();
 
     expect(document.querySelector(".wizard-foot__price")?.textContent).toContain(
-      "约 $6/月 · $0.00893/小时",
+      "每天 $0.30 · 约 $9/月",
     );
     expect(document.querySelectorAll(".myservers .btn--primary")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "创建服务器" })).toBeTruthy();
@@ -700,7 +715,7 @@ describe("我的服务器 destination", () => {
       within(group).getByRole("radio", { name: /2 GB/ }).getAttribute("aria-checked"),
     ).toBe("true");
     expect(document.querySelector(".wizard-foot__price")?.textContent).toContain(
-      "约 $12/月 · $0.01786/小时",
+      "每天 $0.60 · 约 $18/月",
     );
 
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: "ArrowUp" });
@@ -753,7 +768,7 @@ describe("我的服务器 destination", () => {
     renderHarness(bridge);
 
     fireEvent.click(await screen.findByRole("button", { name: "创建服务器" }));
-    expect(await screen.findByText("已扣 $6.00，余额 $2.00。")).toBeTruthy();
+    expect(await screen.findByText("已扣 $0.30，余额 $7.70。")).toBeTruthy();
   });
 
   it("账号块：展开看余额；登出失败不假装退出", async () => {

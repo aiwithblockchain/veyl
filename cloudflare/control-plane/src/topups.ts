@@ -2,6 +2,7 @@
 // 余额是账本的结果，这里只负责把「要充多少」变成一笔待支付的 topup。
 
 import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
+import { recoverExpiredServers } from "./billing";
 import { randomId } from "./lib/crypto";
 import { apiError, json } from "./lib/http";
 import { paymentReturnUrl, topupDenominations, topupProductId } from "./lib/config";
@@ -68,6 +69,9 @@ export async function startTopupSession(
       .bind(credited.ok ? "paid" : "failed", now, topupId)
       .run();
     if (!credited.ok) return { ok: false, reason: "unavailable" };
+    // 充值后立刻尝试把停机中的机器拉回来（§4.6：expired 只由充值恢复）。
+    await recoverExpiredServers(env as never, input.accountId);
+    console.log(`[topup] credited account=${input.accountId} cents=${input.cents} mode=fake`);
     return {
       ok: true,
       topupId,
@@ -102,6 +106,7 @@ export async function startTopupSession(
     .bind(session.sessionId, session.checkoutUrl, topupId)
     .run();
 
+  console.log(`[topup] session account=${input.accountId} cents=${input.cents} session=${session.sessionId}`);
   return { ok: true, topupId, checkoutUrl: session.checkoutUrl, denominationCents: input.cents };
 }
 

@@ -4,8 +4,9 @@ import { toBridgeError } from "../agent/errors";
 import { ServerProgress } from "./ServerProgress";
 import {
   MY_SERVER_STATE_LABEL,
-  formatUsd,
+  billingNoticeText,
   isProvisioning,
+  serverBillingText,
   stateTone,
 } from "../myservers/labels";
 
@@ -21,6 +22,8 @@ interface Props {
   onJoin?: () => void;
   /** 回到创建页再建一台。 */
   onCreateAnother: () => void;
+  /** 同账户未销毁机器 > 1：流量额度是共享池。 */
+  sharedTransfer?: boolean;
   /** 可用时去取凭据（Host 验签落库后返回本地节点）。 */
   onUseServer: (server: MyServer) => void | Promise<void>;
   onChanged: () => void;
@@ -49,6 +52,7 @@ export function MyServerDetail({
   joinLabel = null,
   onJoin,
   onCreateAnother,
+  sharedTransfer = false,
   onUseServer,
   onChanged,
   onRebuilt,
@@ -152,9 +156,28 @@ export function MyServerDetail({
         </div>
         <div>
           <dt>费用</dt>
-          <dd className="num">约 {formatUsd(server.monthly_usd)}/月</dd>
+          <dd className="num">{serverBillingText(server)}</dd>
         </div>
+        {server.transfer_gib > 0 ? (
+          <div>
+            <dt>流量</dt>
+            <dd>{`每月 ${server.transfer_gib} GB（出站）${
+              sharedTransfer ? "（同账户多台共用额度）" : ""
+            }`}</dd>
+          </div>
+        ) : null}
       </dl>
+
+      {server.billing_state === "past_due" || server.billing_state === "expired" ? (
+        <p
+          className={`myservers__billing ${
+            server.billing_state === "expired" ? "is-expired" : ""
+          }`}
+          role="status"
+        >
+          {billingNoticeText(server)}
+        </p>
+      ) : null}
 
       {server.failure ? (
         <div className="myservers__failure" role="alert">

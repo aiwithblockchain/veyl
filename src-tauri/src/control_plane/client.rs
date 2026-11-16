@@ -2,7 +2,7 @@
 //!
 //! 业务层（`servers` / `credentials`）只关心路径与 JSON，不重复处理令牌。
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::Method;
 use serde_json::Value;
@@ -83,7 +83,8 @@ pub(crate) fn transport_kind(error: &reqwest::Error) -> &'static str {
     "other"
 }
 
-/// 控制面请求失败：只打一行 warn，成功不打。
+/// 控制面请求失败：只打一行 warn，成功不打。`reason` 是 `details.reason`，
+/// 传输失败用 `network` / `timeout`，便于和 Worker 侧访问日志对上。
 pub(crate) fn warn_failure(
     operation: &str,
     method: &str,
@@ -91,13 +92,14 @@ pub(crate) fn warn_failure(
     kind: &str,
     status: Option<u16>,
     retryable: bool,
+    reason: &str,
     detail: &str,
 ) {
     let status = status
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".into());
     log::warn!(
-        "控制面请求失败 op={operation} method={method} path={} kind={kind} status={status} retryable={retryable} detail={detail}",
+        "控制面请求失败 op={operation} method={method} path={} kind={kind} status={status} reason={reason} retryable={retryable} detail={detail}",
         log_path(path)
     );
 }
@@ -111,6 +113,7 @@ pub(crate) fn warn_transport(operation: &str, method: &str, path: &str, error: &
         transport_kind(error),
         None,
         true,
+        if error.is_timeout() { "timeout" } else { "network" },
         &source_chain(error),
     );
 }
@@ -137,6 +140,7 @@ impl ControlPlane {
         idempotency_key: Option<&str>,
     ) -> Result<Value, CpError> {
         let method_label = method.as_str().to_string();
+        log::debug!("控制面请求开始 method={method_label} path={}", log_path(path));
         let token = auth::ensure_access(&self.base_url, &self.http, None).await?;
         let (status, text) = self
             .send(method.clone(), path, body, idempotency_key, &token)
@@ -146,6 +150,10 @@ impl ControlPlane {
         }
 
         // access 过期：刷新（或重新注册）后只重试一次。幂等键原样复用。
+        log::debug!(
+            "控制面请求收到 401，刷新令牌后重试一次 method={method_label} path={}",
+            log_path(path)
+        );
         let refreshed = auth::ensure_access(&self.base_url, &self.http, Some(&token)).await?;
         let (status, text) = self
             .send(method, path, body, idempotency_key, &refreshed)
@@ -176,6 +184,7 @@ impl ControlPlane {
     ) -> Result<(u16, String), CpError> {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         let method_label = method.as_str().to_string();
+        let started = Instant::now();
         let mut request = self
             .http
             .request(method, url)
@@ -201,6 +210,11 @@ impl ControlPlane {
             }
         }
         let status = response.status().as_u16();
+        log::debug!(
+            "控制面响应 method={method_label} path={} status={status} elapsed_ms={}",
+            log_path(path),
+            started.elapsed().as_millis()
+        );
         let bytes = response
             .bytes()
             .await
@@ -244,6 +258,7 @@ fn decode_logged(method: &str, path: &str, status: u16, text: &str) -> Result<Va
                 Some(status),
                 error.retryable,
                 error.reason().unwrap_or("-"),
+                "-",
             );
             Err(error)
         }

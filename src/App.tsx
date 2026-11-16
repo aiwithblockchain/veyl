@@ -1754,6 +1754,7 @@ export default function App() {
           detailError={myServers.detailError}
           detailRetrying={myServers.detailRetrying}
           readOnly={myServers.identityLost}
+          sharedTransfer={myServers.sharedTransfer}
           joinGroupName={serverJoinTarget?.name ?? null}
           onNew={myServers.openWizard}
           onEnsureIdentity={myServers.ensureIdentity}

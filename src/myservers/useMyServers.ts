@@ -286,6 +286,8 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   }, [bridge, refresh]);
 
   const provisioning = servers.some((server) => isProvisioning(server.state));
+  const sharedTransfer =
+    servers.filter((server) => server.state !== "destroyed").length > 1;
   const triesRef = useRef(0);
   useEffect(() => {
     // 事件只是加速；只要还有机器在开通中就必须轮询——事件可能漏（例如建机失败被自动销毁）。
@@ -576,6 +578,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     account,
     accountLoaded,
     loggedIn,
+    sharedTransfer,
     wallet,
     walletLoading,
     walletError,

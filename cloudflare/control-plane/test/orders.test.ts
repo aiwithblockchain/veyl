@@ -31,7 +31,7 @@ async function envWith(db: FakeD1, jwk: string) {
     DO_API_TOKEN: "do-token",
     ENROLL_BASE_URL: "https://control.example.com",
     ENVIRONMENT: "test",
-    PLAN_PRICES_USD: JSON.stringify({ "s-1vcpu-512mb-10gb": 8, "s-1vcpu-1gb": 9, "s-1vcpu-2gb": 18 }),
+    PLAN_DAILY_PRICE_CENTS: JSON.stringify({ "s-1vcpu-512mb-10gb": 20, "s-1vcpu-1gb": 30, "s-1vcpu-2gb": 60 }),
     token,
   };
 }
@@ -58,8 +58,8 @@ function stubCatalog() {
       return new Response(
         JSON.stringify({
           sizes: [
-            { slug: "s-1vcpu-512mb-10gb", memory: 512, vcpus: 1, price_hourly: 0.00595, price_monthly: 4 },
-            { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6 },
+            { slug: "s-1vcpu-512mb-10gb", memory: 512, vcpus: 1, price_hourly: 0.00595, price_monthly: 4, transfer: 0.5 },
+            { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6, transfer: 1 },
           ],
         }),
         { status: 200 },
@@ -90,11 +90,11 @@ describe("orders", () => {
     expect(res?.status).toBe(200);
     const body = (await res!.json()) as { order_id: string; amount_usd: number; state: string; region: string };
     expect(body.state).toBe("pending_payment");
-    expect(body.amount_usd).toBe(9);
+    expect(body.amount_usd).toBe(0.3);
     expect(body.region).toBe("sgp1");
     expect(body.order_id.startsWith("ord_")).toBe(true);
     // amount_cents 是 NOT NULL：下单必须落这一列，否则线上建单会撞约束。
-    expect((db.rows("orders")[0] as { amount_cents?: number }).amount_cents).toBe(900);
+    expect((db.rows("orders")[0] as { amount_cents?: number }).amount_cents).toBe(30);
   });
 
   it("在途的幂等占位会拒绝重复请求，超时未完成的会被接管", async () => {
@@ -166,7 +166,7 @@ describe("orders", () => {
 
     const res = await handleOrders(
       orderRequest(env.token, "idem-key-price", { region: "sgp1", plan: "s-1vcpu-512mb-10gb" }),
-      { ...env, PLAN_PRICES_USD: JSON.stringify({ "s-1vcpu-1gb": 9 }) } as never,
+      { ...env, PLAN_DAILY_PRICE_CENTS: JSON.stringify({ "s-1vcpu-1gb": 30 }) } as never,
     );
     expect(res?.status).toBe(409);
     const body = (await res!.json()) as { details: { reason: string } };
@@ -208,8 +208,8 @@ describe("orders", () => {
     expect(checkout?.status).toBe(200);
     const paid = (await checkout!.json()) as { charged_cents: number; balance_after_cents: number };
     // 契约 2.28.0：结账直接从余额扣一个月，返回扣了多少、扣完还剩多少。
-    expect(paid.charged_cents).toBe(900);
-    expect(paid.balance_after_cents).toBe(1100);
+    expect(paid.charged_cents).toBe(30);
+    expect(paid.balance_after_cents).toBe(1970);
     expect(db.rows("servers")).toHaveLength(1);
 
     const server = db.rows("servers")[0];
@@ -218,6 +218,8 @@ describe("orders", () => {
     expect(server.state).toBe("booting");
     expect(server.provider_id).toBe("424242");
     expect(typeof server.enrollment_hash).toBe("string");
+    // 建机快照：目录 transfer(TB) × 1000 落进 servers 行，供详情展示。
+    expect(server.transfer_gib).toBe(1000);
   });
 
   it("未支付订单可以取消；已支付不行", async () => {

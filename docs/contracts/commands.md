@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.31.0`
+> 契约版本：`2.32.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -216,7 +216,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 87 | `my_server_account` | `{}` | `MyServerAccount`（`{ logged_in, email, account_id, device_id, account_kind }`） | **2.27.0 新增（仅 UI）；只读本地登录态，不联网；2.27.1 增 `account_kind`** |
 | 88 | `my_server_logout` | `{}` | `MyServerAccount` | **2.27.0 新增（仅 UI）；服务端解绑设备并清本地令牌** |
 | 89 | `my_server_order_get` | `{ orderId }` | `MyServerOrder` | **2.27.0 新增（仅 UI）；支付与开通轮询** |
-| 90 | `my_server_wallet` | `{}` | `MyServerWallet`（`{ balance_cents, currency, denominations_cents, runway_days, updated_at }`） | **2.28.0 新增（仅 UI）；读余额与充值档位（USD 分）；2.28.1 增 `denominations_cents`；2.29.0 增 `runway_days`（派生估算）** |
+| 90 | `my_server_wallet` | `{}` | `MyServerWallet`（`{ balance_cents, currency, denominations_cents, updated_at }`） | **2.28.0 新增（仅 UI）；读余额与充值档位（USD 分）；2.28.1 增 `denominations_cents`** |
 | 91 | `my_server_topup` | `{ denomination, channel? }` | `MyServerTopup`（`{ topup_id, checkout_url, denomination_cents }`） | **2.28.0 新增（仅 UI）；创建充值收银台会话** |
 | 92 | `ai_relay_status` | `{}` | `AiRelayStatus` | **2.31.0 新增（仅 UI）**；中转可用性、余额、试用额度、今日用量 |
 | 93 | `ai_usage_summary` | `{ days? }` | `AiUsageSummary` | **2.31.0 新增（仅 UI）**；最近 N 天按天聚合，不给逐笔 |
@@ -1401,6 +1401,7 @@ type MyServerCatalogData = {
     hourly_usd: number;            // DO 成本口径，仅内部核对，界面不渲染
     monthly_usd: number;           // 月估，展示用
     daily_price_cents: number;     // 售价（USD 分 / 天）＝ 月价 ÷ 30；界面用它，不用 hourly_usd
+    transfer_gib: number;          // 每月公网出口流量额度（GiB），= /sizes 的 transfer(TB) × 1000 取整；0 = 未知
   }>;
 };
 ```
@@ -1414,6 +1415,7 @@ type MyServerCatalogData = {
   - 其余非 2xx → `UPSTREAM_ERROR`（`reason = "upstream_status"`，`retryable = false`）；
   - 响应格式 / 缺字段 / 非法值 → `UPSTREAM_ERROR`（`reason = "invalid_response"`，`retryable = false`）。
 - **不做本地缓存、不返回假数据**：生产 Worker 未部署时如实返回 503。
+- **`transfer_gib` 来自 `/v2/sizes` 的 `transfer`**：DO 该字段是 **float、单位 TB**，只计公网出口；折算乘 **1000**（DO 计费文档把 1 TB 档写作「1,000 GiB」），四舍五入到整 GiB。**不新增任何 DO 调用、不需要额外 scope**——`/sizes` 本来就在取。取不到或非正数时填 `0`，界面整行不显示，**不写「不限量」**。
 - 不注册为 AI 工具；不改任何本地状态；不发事件。
 
 ### 7.15 「我的服务器」8 条命令（仅 UI，2.23.0）
@@ -1438,6 +1440,7 @@ type MyServer = {
   hourly_usd: number;              // DO 成本口径，仅内部核对，不渲染
   monthly_usd: number;             // 月估，展示用
   daily_price_cents: number;       // 售价快照（USD 分 / 天），即每天实际扣多少
+  transfer_gib: number;            // 每月公网出口流量额度（GiB）快照；建机时从目录写入
   paid_until: string;              // 已付到哪个时刻（ISO 8601）；建行时即写入，永不为 null
   billing_state: "active" | "past_due" | "expired";
   grace_ends_at: string | null;    // 派生值：paid_until + 7d，**不落库**；仅 past_due/expired 时非空
@@ -1546,7 +1549,6 @@ type MyServerWallet = {
   balance_cents: number;          // USD 分，整数
   currency: "USD";
   denominations_cents: number[];  // 可充值档位（USD 分，升序），来自控制面产品表
-  runway_days: number | null;     // 派生估算：余额 ÷ 所有未销毁服务器的日价合计，向下取整；无机器时 null。由 Worker 计算
   updated_at: string;             // Host 本地取的时间；控制面不提供
 };
 
@@ -1571,14 +1573,16 @@ type MyServerCharge = {
 | `my_server_account {}` | **只读本地**：不联网、不刷新令牌。`logged_in` 依据本地令牌与 `account_kind = email` |
 | `my_server_logout {}` | 调控制面 `POST /v1/auth/logout`：作废 refresh、把设备解绑到新的匿名账户；成功后清本地令牌。**离线失败不假装已退出** |
 | `my_server_order_get { orderId }` | `GET /v1/orders/{id}`；建机期间轮询，事件不可用时同样用它兜底 |
-| `my_server_wallet {}` | `GET /v1/wallet`；返回余额、可充值档位（`denominations_cents`，USD 分、升序，来自产品表键）与 `runway_days`（余额还能撑多少天，派生值）。`updated_at` 由 Host 本地取时间，控制面不提供。余额与扣费都由 Host 计算，前端不做金额运算 |
+| `my_server_wallet {}` | `GET /v1/wallet`；返回余额与可充值档位（`denominations_cents`，USD 分、升序，来自产品表键）。`updated_at` 由 Host 本地取时间，控制面不提供。余额与扣费都由 Host 计算，前端不做金额运算 |
 | `my_server_topup { denomination, channel? }` | `POST /v1/topups` 创建 Dodo 充值会话，返回 `checkout_url` 由系统浏览器打开；`channel` 省略等于 `dodo`，非生产可 `fake`（直接入账） |
 | `my_server_checkout { orderId }` | **从余额扣 1 天**（`charged_cents` = 第 0 天的日价）：成功返回 `MyServerCharge` 并开始建机；之后每天由控制面 Cron 扣一天。余额不足 → `insufficient_balance`（带 `details.shortfall_cents`），不扣钱、不建机、订单保持 `pending_payment` |
 
 - **计费单位是「天」**（2026-11-16 拍板）：买机那次 `checkout` 只扣 1 天，之后控制面每天扣一天，直到余额不足进 7 天宽限。契约里没有「月」的概念，`monthly_usd` 只是展示用的乘法。
 - **`MyServerCharge.charged_cents` 就是日价**：$6 档 = 20、$9 档 = 30、$18 档 = 60（USD 分）。前端不要用它乘 30 去「还原月价」，那是 `daily_price_cents × 30`。
-- **`runway_days` 是派生估算，由 Worker 计算后下发**：分子是余额，分母是**该账户所有未销毁服务器**（`destroyed_at IS NULL`，不看 `billing_state`）的日价合计，向下取整；没有机器时为 `null`。Host 不自己算、前端更不自己除。它随余额和机器数变化，**不是到期日**，界面不能拿它替代 `MyServer.paid_until`。
-- **`MyServer` 的计费事实在 §7.15**：`paid_until`（已付到哪一刻）、`daily_price_cents`、`billing_state`、`grace_ends_at`；界面渲染「每天 $X · 已付至 …」与宽限剩余天数只用这四个字段。
+- **账户块只显示余额，不显示「约可运行 N 天」**：多台机器时「余额 ÷ 各机器日价合计」把不同套餐的消耗混成一个数，用户据此判断不到任何一台的到期时间；核对到期靠机器详情的 `每天 $X · 本期有效至 …`（`MyServer.paid_until`）。派生值不下发、也不在 Worker、Host、前端各自算一份——2026-11-16 用户拍板撤掉。
+- **`MyServer` 的计费事实在 §7.15**：`paid_until`（已付到哪一刻）、`daily_price_cents`、`billing_state`、`grace_ends_at`；界面渲染「每天 $X · 本期有效至 …」与宽限剩余天数只用这四个字段。
+- **「本期有效至」的文案规则（2026-11-16 定）**：`billing_state = 'active'` 且 `paid_until > now` → `每天 $X · 本期有效至 <时间>`；`billing_state` 仍是 `active` 但 `paid_until ≤ now`（当天 Cron 还没扣上，最长 24h）→ `每天 $X · 本期已到期，下一轮扣费顺延`，**不显示那个已过去的时间点**，也不用异常色。`past_due` / `expired` 的欠费文案单独定义（`login-and-payment.md` §4.11）。不用「已付至」（过去时口吻，读起来像「到点就停」），也不用「下次扣费：<具体时间>」（Cron 是批量任务，报具体时刻是不准的承诺）。
+- **`MyServer.transfer_gib` 是建机快照，且只有额度、没有已用**：DO 后续改档不回溯影响已建机器，所以随行存一份。**不新增 `transfer_used_gib`**——官方没有可信的「本月已用字节数」接口（只有 Mbps 速率采样，保留期未公布，且 DO 账单是团队级共享池，无法归属到单台），所以这个字段永远只能是估算，不放一个恒为 `null` 的隐藏字段进契约。界面只显示「每月 X GB（出站）」；同账户多台时加后缀「（同账户多台共用额度）」。依据见 `docs/design/my-servers.md` §8.4、§13.1。
 - 销毁时未用完的整天退回余额（一条 `adjustment`），由控制面完成，**不新增命令**。
 - **登录门禁**：`my_server_list` / `get` / `create` / `checkout` / `cancel_order` / `destroy` / `rebuild` / `credentials` 在未登录时返回 `UNAUTHENTICATED / auth_required`；UI 先弹登录弹窗，登录后回到原处。
 - **不门禁**：`my_server_catalog`、`my_server_identity`、`my_server_account`、本地节点与配置的连接 / 切换 / 测速 / 导入。
@@ -1659,7 +1663,7 @@ type AiUsageSummary = {
 | `llm_provider_list` | 第一项固定是 `veyl-relay`，`is_builtin: true`，排序稳定 |
 | `llm_provider_save` | 只接受 `name`；`protocol` / `baseUrl` / `model` / `apiKey` 忽略并原样返回旧值，**不报错**（避免整张表单失败） |
 | `llm_provider_delete` | `PRECONDITION_FAILED / builtin_not_deletable` |
-| `llm_provider_activate` | 允许；切到中转时 Host 先确保 relay key 有效，无效则 `UNAUTHENTICATED / relay_key_invalid` |
+| `llm_provider_activate` | 允许；切到中转时 Host 先确保 relay key 有效，无效则 `UNAUTHENTICATED / token_invalid` |
 | `llm_provider_test` | 允许；对中转只发一次极小的探测请求，正常计费 |
 
 **错误码**（HTTP 层与 Host 层同一套表，`ai-relay.md` §6）
@@ -1673,9 +1677,9 @@ type AiUsageSummary = {
 | 上游内容审核拒绝 | `PRECONDITION_FAILED` | `content_rejected` | 否 |
 | 上游超时 | `TIMEOUT` | `upstream_timeout` | 是 |
 | 上游不可达 / 5xx | `UPSTREAM_ERROR` | `upstream_unreachable` | 是 |
-| 上游未配置或定价缺失 | `UNAVAILABLE` | `relay_not_configured` | 否 |
+| 上游未配置或定价缺失 | `UPSTREAM_ERROR` | `relay_not_configured` | 否 |
 | 模型不在白名单 | `PRECONDITION_FAILED` | `model_not_allowed` | 否 |
-| relay key 失效 | `UNAUTHENTICATED` | `relay_key_invalid` | 是（重新登录签发） |
+| relay key 失效 | `UNAUTHENTICATED` | `token_invalid` | 是（Host 自动重签后重试） |
 | 删除内置 provider | `PRECONDITION_FAILED` | `builtin_not_deletable` | 否 |
 
 ---
@@ -2330,7 +2334,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.31.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、`MyServerWallet` 增 `runway_days`、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、`runway_days` 定义收紧、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.12.0 / `events.md` 2.13.0 矩阵同步 |
+| `contracts/commands.md` | **2.32.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.12.0 / `events.md` 2.13.0 矩阵同步 |
 | `contracts/events.md` | **2.13.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
 | `contracts/tools.md` | **3.12.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** |
@@ -2349,13 +2353,24 @@ type RulesStatus = {
 
 ## 16. 变更记录
 
+### 2.32.0（2026-11-16，每月流量额度）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.32.0`；`my_server_catalog.plans[]` 增 `transfer_gib: number`（每月公网出口额度，GiB；`/sizes` 的 `transfer`×1000，取不到为 0） | 数据结构 | `docs/design/my-servers.md` §8.4、§13.1；额度是套餐规格，向导要能比较 |
+| 2 | `MyServer` 增 `transfer_gib: number`（建机时从目录快照，DO 改档不回溯影响已建机器） | 数据结构 | 详情页展示「流量 每月 X GB（出站）」 |
+| 3 | **不新增 `transfer_used_gib`**：没有可信的「本月已用字节数」接口（只有 Mbps 速率采样、保留期未公布；DO 账单是团队级共享池，无法按机器归属），恒为 `null` 的字段不进契约 | 说明 | 用户 2026-11-16 要求评估；结论是只展示额度 |
+| 4 | 不对超额计费、不做限速/停机；超额成本按 $0.01/GiB 计并纳入毛利风险（`my-servers.md` §8.4.3） | 说明 | 同上；归属与计量都不成立 |
+| 5 | `tools.md` / `events.md` / `runtime.md` / `data-model.md` 不变 | 元数据 | 额度是目录静态字段，不涉及工具与事件 |
+| 6 | **已知红项**：`check-contracts.mjs` 的「`MyServerPlan` 字段一致」会不通过，直到实现侧补上 `transfer_gib`——`src/agent/bridge.ts` 的 `MyServerPlan`、`src-tauri/src/control_plane/servers.rs` 的 `Plan`、`src-tauri/src/tools/services.rs` 的目录 DTO、控制面 `/v1/catalog` 的 JSON 与 `applySalePrices`。属「文档先于实现」的预期状态，不是回归 | 说明 | 与 2.29.0 的 `daily_price_cents` 同一套路；实现补齐后转绿 |
+
 ### 2.31.0（2026-11-16，AI 中转）
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
 | 1 | 本文件版本升到 `2.31.0`；新增 `ai_relay_status` / `ai_usage_summary` 两条命令（仅 UI，均不注册为 AI 工具） | 新增命令 | `docs/design/ai-relay.md` §6、§9 |
 | 2 | 内置 provider `veyl-relay`：`llm_provider_list` 首项固定、`save` 只接受 `name`、`delete` 报 `builtin_not_deletable` | 语义收紧 | 中转与自带 Key 并列，但内置项不可删 |
-| 3 | 新增 11 个 `details.reason`：`insufficient_balance` / `daily_quota_exceeded` / `rate_limited` / `upstream_rate_limited` / `content_rejected` / `upstream_timeout` / `upstream_unreachable` / `relay_not_configured` / `model_not_allowed` / `relay_key_invalid` / `builtin_not_deletable` | 错误码 | 中转错误必须能区分「没钱」「上游忙」「被拒」「配置坏」 |
+| 3 | 新增 10 个 `details.reason`：`insufficient_balance` / `daily_quota_exceeded` / `rate_limited` / `upstream_rate_limited` / `content_rejected` / `upstream_timeout` / `upstream_unreachable` / `relay_not_configured` / `model_not_allowed` / `builtin_not_deletable` | 错误码 | 中转错误必须能区分「没钱」「上游忙」「被拒」「配置坏」 |
 | 4 | `events.md` / `tools.md` / `runtime.md` / `data-model.md` 不变 | 元数据 | 中转不改事件与工具；`ai-request-end` 已带 `usage` 与结构化 `error` |
 
 ### 2.30.0（2026-11-16，计费字段收紧 + 目录日价）
@@ -2364,21 +2379,18 @@ type RulesStatus = {
 |---|---|---|---|
 | 1 | 本文件版本升到 `2.30.0`；`MyServer.paid_until` 从 `string \| null` **收紧为 `string`**：服务器行建立时即写入，不存在「已建机但未付过费」 | 字段收紧 | 补建锚点改成 `order.paid_at`（`login-and-payment.md` §4.6 B 段），建行必有值 |
 | 2 | `MyServer.grace_ends_at` 明确为**派生值**（`paid_until + 7d`），**不落库**；仅 `past_due` / `expired` 时非空 | 说明 | 多存一列会让「冻结账面」与「宽限终点」两处状态可能不一致 |
-| 3 | `MyServerWallet.runway_days` 定义收紧：分母是**该账户所有未销毁服务器**（`destroyed_at IS NULL`，不看 `billing_state`）的日价合计；**由 Worker 计算**并下发，Host 与前端都不算 | 语义收紧 | 停机中的机器仍会吃余额（恢复时要补扣），不算进去会高估可运行天数 |
-| 4 | `my_server_catalog.plans[]` 的 `daily_price_cents` 现在由 `PLAN_DAILY_PRICE_CENTS` 直出，是**唯一真源**；`monthly_usd` 退化为 `daily × 30 / 100` 的展示值 | 语义变更 | `login-and-payment.md` §5.2；月价除以 30 的取整问题从源头消除 |
-| 5 | `tools.md` / `events.md` / `runtime.md` / `data-model.md` 不变 | 元数据 | 计费不涉及 AI 工具与事件 |
+| 3 | `my_server_catalog.plans[]` 的 `daily_price_cents` 现在由 `PLAN_DAILY_PRICE_CENTS` 直出，是**唯一真源**；`monthly_usd` 退化为 `daily × 30 / 100` 的展示值 | 语义变更 | `login-and-payment.md` §5.2；月价除以 30 的取整问题从源头消除 |
+| 4 | `tools.md` / `events.md` / `runtime.md` / `data-model.md` 不变 | 元数据 | 计费不涉及 AI 工具与事件 |
 
 ### 2.29.0（2026-11-16，按天计费）
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
 | 1 | 本文件版本升到 `2.29.0`；`my_server_checkout` 语义从「扣一个月」改为**扣 1 天**（`charged_cents` = 日价），后续由控制面每日 Cron 逐日续扣 | 语义变更 | `docs/design/login-and-payment.md` §4.1、§4.4、§4.6；用户 2026-11-16 拍板选按天 |
-| 2 | `MyServerWallet` 增 `runway_days: number \| null`：余额 ÷ 在用机器日价合计、向下取整；无在用机器时 `null`。**派生估算，不是到期日** | 数据结构 | 账户块要显示「余额 $X · 约可运行 N 天」，前端不做除法 |
-| 3 | `MyServer` 增四个计费字段：`daily_price_cents`、`paid_until`、`billing_state`、`grace_ends_at` | 数据结构 | 机器详情要显示「每天 $X · 已付至 …」与宽限剩余天数，不自己拿 `monthly_usd` 推算 |
-| 4 | `my_server_catalog.plans[]` 增 `daily_price_cents: number`（USD 分 / 天）；`hourly_usd` 降级为内部成本口径，界面不渲染 | 数据结构 | 按天计费后用户能核对的口径是日价；时价是 DO 对我们的成本 |
-| 4a | **已知红项**：`check-contracts.mjs` 的「`MyServerPlan` 字段一致」会一直不通过，直到实现侧补上 `daily_price_cents`——`src/agent/bridge.ts` 的 `MyServerPlan`、`src-tauri/src/control_plane/servers.rs` 的 `Plan`、`src-tauri/src/tools/services.rs` 的目录 DTO、控制面 `/v1/catalog` 的 JSON。这是「文档先于实现」的预期状态，不是回归 | 说明 | 先设计后实现；UI 重构与本字段同批落地 |
-| 5 | 销毁时未用完的整天退回余额（控制面写一条 `adjustment`，`ref = server_refund:<server_id>`），**不新增命令** | 说明 | 同批；`login-and-payment.md` §4.6 |
-| 6 | `tools.md` / `events.md` / `runtime.md` / `data-model.md` 不变 | 元数据 | 计费不涉及 AI 工具与事件 |
+| 2 | `MyServer` 增四个计费字段：`daily_price_cents`、`paid_until`、`billing_state`、`grace_ends_at` | 数据结构 | 机器详情要显示「每天 $X · 本期有效至 …」与宽限剩余天数，不自己拿 `monthly_usd` 推算 |
+| 3 | `my_server_catalog.plans[]` 增 `daily_price_cents: number`（USD 分 / 天）；`hourly_usd` 降级为内部成本口径，界面不渲染 | 数据结构 | 按天计费后用户能核对的口径是日价；时价是 DO 对我们的成本 |
+| 4 | 销毁时未用完的整天退回余额（控制面写一条 `adjustment`，`ref = server_refund:<server_id>`），**不新增命令** | 说明 | 同批；`login-and-payment.md` §4.6 |
+| 5 | `tools.md` / `events.md` / `runtime.md` / `data-model.md` 不变 | 元数据 | 计费不涉及 AI 工具与事件 |
 
 ### 2.28.1（2026-11-16，钱包档位）
 

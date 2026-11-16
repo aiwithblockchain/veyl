@@ -221,6 +221,11 @@ describe("节点组 destination", () => {
         node_id: "node_srv_1",
         hourly_usd: 0.007,
         monthly_usd: 5,
+        daily_price_cents: 30,
+        paid_until: new Date(86_400_000).toISOString(),
+        billing_state: "active" as const,
+        grace_ends_at: null,
+        transfer_gib: 1000,
         failure: null,
       },
       {
@@ -235,6 +240,11 @@ describe("节点组 destination", () => {
         node_id: null,
         hourly_usd: 0.007,
         monthly_usd: 5,
+        daily_price_cents: 30,
+        paid_until: new Date(86_400_000).toISOString(),
+        billing_state: "active" as const,
+        grace_ends_at: null,
+        transfer_gib: 1000,
         failure: null,
       },
     ];

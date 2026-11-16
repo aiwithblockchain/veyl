@@ -19,6 +19,12 @@ interface LoginError {
   cooldown?: number;
   /** 回到第一步重新发码。 */
   backToEmail?: boolean;
+  /** 码已经发过且仍有效：直接进入验证码步骤。 */
+  toCode?: boolean;
+  /** 中性提示，不用红色错误样式。 */
+  tone?: "error" | "notice";
+  /** 清空已输入的验证码。 */
+  clearCode?: boolean;
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -35,10 +41,13 @@ function startError(error: unknown): LoginError {
   }
   if (reason === "email_cooldown") {
     const wait = readNumber(problem.details?.retry_after_seconds) ?? 60;
+    // 码已经发过且仍有效：不是失败，直接让用户输码。
     return {
-      message: "刚发过验证码。",
-      hint: `还差 ${wait} 秒才能再发。`,
+      message: "验证码已发送，请查收邮箱。",
+      hint: `没收到的话，${wait} 秒后可以重发。`,
       cooldown: wait,
+      toCode: true,
+      tone: "notice",
     };
   }
   if (reason === "email_rate_limited") {
@@ -68,9 +77,9 @@ function verifyError(error: unknown): LoginError {
   }
   if (reason === "code_expired") {
     return {
-      message: "验证码过期了。",
-      hint: "重新发一次验证码。",
-      backToEmail: true,
+      message: "验证码已过期，重新发送。",
+      hint: "点下面的「重发验证码」。",
+      clearCode: true,
     };
   }
   if (reason === "too_many_attempts") {
@@ -148,6 +157,10 @@ export function MyServerLogin({ onStart, onVerify, onCancel, mockHint = false }:
       const mapped = startError(err);
       setError(mapped);
       if (mapped.cooldown !== undefined) setCooldown(mapped.cooldown);
+      if (mapped.toCode) {
+        setStep("code");
+        setCode("");
+      }
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -176,6 +189,7 @@ export function MyServerLogin({ onStart, onVerify, onCancel, mockHint = false }:
     } catch (err) {
       const mapped = verifyError(err);
       setError(mapped);
+      if (mapped.clearCode) setCode("");
       if (mapped.backToEmail) {
         setStep("email");
         setCode("");
@@ -251,7 +265,14 @@ export function MyServerLogin({ onStart, onVerify, onCancel, mockHint = false }:
           </form>
         ) : (
           <form className="myservers__login-form myservers-login__body" onSubmit={signIn}>
-            <p className="myservers__hint">验证码已发到 {email.trim()}。</p>
+            {error?.tone === "notice" ? (
+              <p className="myservers__notice" role="status">
+                {error.message}
+                {error.hint ? ` ${error.hint}` : ""}
+              </p>
+            ) : (
+              <p className="myservers__hint">验证码已发到 {email.trim()}。</p>
+            )}
             {mockHint ? (
               <p className="myservers__hint">演示环境：验证码固定 123456。</p>
             ) : null}
@@ -266,7 +287,7 @@ export function MyServerLogin({ onStart, onVerify, onCancel, mockHint = false }:
                 onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))}
               />
             </label>
-            {error ? (
+            {error && error.tone !== "notice" ? (
               <>
                 <p className="myservers__error" role="alert">
                   {error.message}

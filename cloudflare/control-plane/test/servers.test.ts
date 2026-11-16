@@ -82,8 +82,7 @@ describe("DO 资源命名", () => {
   });
 });
 
-describe("建机失败退款", () => {
-  it("enroll 超时自动销毁时，扣过的月费退回余额", async () => {
+describe("建机失败退款", () => {  it("enroll 超时自动销毁时，扣过的月费退回余额", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());
     const token = "enr_abandoned000000";
@@ -123,8 +122,51 @@ describe("建机失败退款", () => {
     expect(db.rows("orders")[0].state).toBe("failed");
     const refund = db.rows("wallet_ledger")[0];
     expect(refund?.amount_cents).toBe(600);
-    expect(refund?.ref_id).toBe("refund:ord_test");
+    expect(refund?.ref_id).toBe("srv_test0000000000000000");
     expect(db.rows("accounts")[0].balance_cents).toBe(600);
+  });
+});
+
+describe("用户销毁退款", () => {
+  it("退还未开始的整天，与标记销毁同一批写入", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    const DAY = 24 * 3600 * 1000;
+    const anchor = Date.now() - 5 * DAY;
+    Object.assign(db.rows("servers")[0], {
+      daily_price_cents: 20,
+      billing_anchor_at: anchor,
+      paid_until: anchor + 8 * DAY,
+    });
+    db.rows("accounts")[0].balance_cents = 100;
+    db.rows("orders").push({
+      id: "ord_test",
+      account_id: ACCOUNT,
+      amount_cents: 20,
+      paid_via: "wallet",
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 0.2,
+      hourly_usd: 0,
+      state: "ready",
+      idempotency_key: "idem-refund-user",
+      created_at: Date.now(),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+
+    const res = await handleServers(destroyRequest(env.token), env as never);
+
+    expect(res?.status).toBe(204);
+    // 已付 8 天、现在是第 5 天：当天不退，退第 6、7 两天 = 40 分。
+    const refund = db.rows("wallet_ledger").find((row) => row.ref_type === "server_refund");
+    expect(refund?.amount_cents).toBe(40);
+    expect(refund?.ref_id).toBe(SERVER);
+    expect(db.rows("accounts")[0].balance_cents).toBe(140);
+    expect(db.rows("servers")[0].state).toBe("destroyed");
   });
 });
 

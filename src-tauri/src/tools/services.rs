@@ -3774,6 +3774,8 @@ impl VpnToolServices for WiredServices {
                     "state": server.state,
                     "node_ready": server.node_id.is_some(),
                     "monthly_usd": server.monthly_usd,
+                    "daily_price_cents": server.daily_price_cents,
+                    "transfer_gib": server.transfer_gib,
                     "failure": server.failure.map(|failure| json!({
                         "code": failure.code,
                         "message": failure.message,

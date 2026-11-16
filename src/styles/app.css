@@ -2978,6 +2978,24 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
+.myservers__notice {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.myservers__billing {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--amber);
+}
+
+.myservers__billing.is-expired {
+  color: var(--red);
+}
+
 .myservers__error {
   margin: 0;
   font-size: 13px;
@@ -3202,10 +3220,10 @@ body[data-resizing] {
   color: var(--ink);
 }
 
-.wizard-plan__price {
-  font-size: 15px;
-  font-weight: 500;
-  color: var(--ink);
+.wizard-plan__sub {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-3);
 }
 
 .wizard-system {

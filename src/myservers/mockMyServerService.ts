@@ -50,19 +50,25 @@ const PLANS: MyServerPlan[] = [
     id: "s-1vcpu-512mb-10gb",
     label: "1 核 · 512 MB",
     hourly_usd: 0.00595,
-    monthly_usd: 4,
+    monthly_usd: 6,
+    daily_price_cents: 20,
+    transfer_gib: 500,
   },
   {
     id: "s-1vcpu-1gb",
     label: "1 核 · 1 GB",
     hourly_usd: 0.00893,
-    monthly_usd: 6,
+    monthly_usd: 9,
+    daily_price_cents: 30,
+    transfer_gib: 1000,
   },
   {
     id: "s-1vcpu-2gb",
     label: "1 核 · 2 GB",
     hourly_usd: 0.01786,
-    monthly_usd: 12,
+    monthly_usd: 18,
+    daily_price_cents: 60,
+    transfer_gib: 2000,
   },
 ];
 
@@ -226,6 +232,11 @@ function seedStore(): Store {
         state === "healthy" || state === "active" ? `node_${id}` : null,
       hourly_usd: DEFAULT_PLAN.hourly_usd,
       monthly_usd: DEFAULT_PLAN.monthly_usd,
+      daily_price_cents: DEFAULT_PLAN.daily_price_cents,
+      transfer_gib: DEFAULT_PLAN.transfer_gib,
+      paid_until: new Date(Date.now() + 86_400_000).toISOString(),
+      billing_state: "active",
+      grace_ends_at: null,
       failure:
         state === "error"
           ? {
@@ -450,7 +461,7 @@ export class MockMyServerService {
     }
     const region = REGIONS.find((item) => item.id === order.region) ?? REGIONS[0];
     const plan = PLANS.find((item) => item.id === order.plan) ?? DEFAULT_PLAN;
-    const priceCents = Math.round(plan.monthly_usd * 100);
+    const priceCents = plan.daily_price_cents;
     if (store.balance_cents < priceCents) {
       throw {
         code: "PRECONDITION_FAILED",
@@ -476,6 +487,11 @@ export class MockMyServerService {
       node_id: null,
       hourly_usd: plan.hourly_usd,
       monthly_usd: plan.monthly_usd,
+      daily_price_cents: plan.daily_price_cents,
+      transfer_gib: plan.transfer_gib,
+      paid_until: new Date(Date.now() + 86_400_000).toISOString(),
+      billing_state: "active",
+      grace_ends_at: null,
       failure: null,
       started_at: Date.now(),
     };
@@ -607,6 +623,9 @@ export class MockMyServerService {
       ip: `45.76.${50 + store.next_id}.${90 + store.next_id}`,
       port: null,
       node_id: null,
+      paid_until: new Date(Date.now() + 86_400_000).toISOString(),
+      billing_state: "active",
+      grace_ends_at: null,
       failure: null,
       started_at: Date.now(),
     });

@@ -7,7 +7,7 @@
 
 import { randomId } from "./lib/crypto";
 
-export type LedgerKind = "topup" | "charge" | "adjustment";
+export type LedgerKind = "topup" | "charge" | "adjustment" | "snapshot";
 
 export interface WalletEnv {
   DB?: D1Database;
@@ -18,7 +18,7 @@ export interface LedgerInput {
   kind: LedgerKind;
   /** 正数入账（充值）、负数扣费（扣月费）。 */
   amountCents: number;
-  refType: "dodo_payment" | "order" | "server_period" | "manual";
+  refType: "dodo_payment" | "order" | "server_day" | "server_refund" | "snapshot" | "manual";
   refId: string;
   note?: string;
   /** 需要和记账同批完成的后续语句（续期、订单置 paid），必须用同一个 ledgerId 守卫。 */
@@ -143,23 +143,28 @@ export async function balanceCents(env: WalletEnv, accountId: string): Promise<n
 }
 
 /** 对账：余额必须等于账本合计。返回不一致的账户，正常应永远为空。 */
+/**
+ * 对账（I1，§4.7/§4.12）：余额必须等于该账户最新一条流水的 balance_after。
+ * 明细会被按月裁剪，全表 SUM 不再是有效断言；最新一行永远没被删。
+ */
 export async function reconciliationDrift(
   env: WalletEnv,
-): Promise<Array<{ accountId: string; balance: number; ledgerSum: number }>> {
+): Promise<Array<{ accountId: string; balance: number; latest: number }>> {
   const db = env.DB;
   if (!db) return [];
   const rows = await db
     .prepare(
       "SELECT a.id AS account_id, a.balance_cents AS balance, " +
-        "COALESCE((SELECT SUM(w.amount_cents) FROM wallet_ledger w WHERE w.account_id = a.id), 0) AS ledger_sum " +
+        "COALESCE((SELECT w.balance_after_cents FROM wallet_ledger w WHERE w.account_id = a.id " +
+        "ORDER BY w.created_at DESC, w.rowid DESC LIMIT 1), 0) AS latest " +
         "FROM accounts a",
     )
-    .all<{ account_id: string; balance: number; ledger_sum: number }>();
+    .all<{ account_id: string; balance: number; latest: number }>();
   return (rows.results ?? [])
-    .filter((row) => Number(row.balance) !== Number(row.ledger_sum))
+    .filter((row) => Number(row.balance) !== Number(row.latest))
     .map((row) => ({
       accountId: row.account_id,
       balance: Number(row.balance),
-      ledgerSum: Number(row.ledger_sum),
+      latest: Number(row.latest),
     }));
 }

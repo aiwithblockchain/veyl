@@ -372,6 +372,10 @@ mod tests {
                 node_id: None,
                 hourly_usd: 0.009,
                 monthly_usd: 6.0,
+                daily_price_cents: 20,
+                transfer_gib: 1000,
+                paid_until: 1_700_086_400_000,
+                billing_state: "active",
                 created_at: 1_700_000_000_000,
             },
         )

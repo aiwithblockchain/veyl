@@ -4,17 +4,25 @@
 import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
 import { randomId, sha256B64u } from "./lib/crypto";
 import { apiError, json } from "./lib/http";
-import { planHourlyUsd, planPriceUsd } from "./lib/config";
+import { monthlyUsdFromDaily, planDailyPriceCents } from "./lib/config";
 import { idempotencyKey, withIdempotency, type StoredResponse } from "./lib/idempotency";
 import { fetchCatalogData, type CatalogData } from "./index";
 import { provisionServer } from "./provision";
 import { balanceCents, recordLedgerEntry } from "./wallet";
 
 const ORDER_TTL_MS = 10 * 60 * 1000;
-/** 一个计费周期：扣费后 paid_until 顺延这么久。 */
-const PERIOD_MS = 30 * 24 * 3600 * 1000;
+/** 一天的毫秒数：按天计费的基本单位。 */
+const DAY_MS = 24 * 3600 * 1000;
 /** 扣费接口能回的状态；其它状态说明订单已经结束，不能再按「已付款」回放。 */
 const CHARGE_STATES = ["paid", "provisioning", "ready"] as const;
+
+/** 建机时把目录里的每月出口额度快照进 `servers` 行（GiB，0 = 未知）。 */
+function transferGibFor(catalog: CatalogData | null, planId: string): number {
+  const plan = catalog?.plans.find((candidate) => candidate.id === planId);
+  return plan && Number.isInteger(plan.transfer_gib) && plan.transfer_gib > 0
+    ? plan.transfer_gib
+    : 0;
+}
 
 export interface OrdersEnv extends MaybeAuthEnv {
   DO_API_TOKEN?: string;
@@ -24,7 +32,7 @@ export interface OrdersEnv extends MaybeAuthEnv {
   RESEND_FROM_EMAIL?: string;
   DODO_API_KEY?: string;
   DODO_WEBHOOK_SECRET?: string;
-  PLAN_PRICES_USD?: string;
+  PLAN_DAILY_PRICE_CENTS?: string;
   DODO_PRODUCT_IDS?: string;
   APP_PAYMENT_RETURN_URL?: string;
 }
@@ -111,6 +119,9 @@ async function chargeResult(
       reason: "order_not_payable",
     });
   }
+  console.log(
+    `[checkout] order=${orderId} state=${state} charged=${chargedCents} balance=${balanceAfterCents}`,
+  );
   return {
     status: 200,
     body: {
@@ -121,7 +132,6 @@ async function chargeResult(
     },
   };
 }
-
 async function loadOrder(db: D1Database, accountId: string, orderId: string) {
   return db.prepare("SELECT * FROM orders WHERE id = ? AND account_id = ?")
     .bind(orderId, accountId)
@@ -171,12 +181,14 @@ async function createOrder(request: Request, env: OrdersEnv): Promise<Response> 
     });
   }
 
-  // 售价只认配置：没配就不卖，绝不拿 DigitalOcean 成本价兜底（那等于按成本价卖出去）。
-  const salePrice = planPriceUsd(env, plan);
-  if (salePrice === null) {
+  // 日价只认配置：没配就不卖，绝不拿 DigitalOcean 成本价兜底（那等于按成本价卖出去）。
+  const dailyCents = planDailyPriceCents(env, plan);
+  if (dailyCents === null) {
     return apiError("PRECONDITION_FAILED", "这个套餐暂时不可售", { reason: "invalid_plan" });
   }
-  const saleHourly = planHourlyUsd(salePrice);
+  const salePrice = dailyCents / 100;
+  // 时价只作为内部成本口径留档，不参与售价。
+  const costHourly = chosen.hourly_usd;
 
   const db = env.DB;
   const requestHash = await sha256B64u(JSON.stringify({ region, plan }));
@@ -195,8 +207,8 @@ async function createOrder(request: Request, env: OrdersEnv): Promise<Response> 
         region,
         plan,
         salePrice,
-        Math.round(salePrice * 100),
-        saleHourly,
+        dailyCents,
+        costHourly,
         key,
         now,
         now + ORDER_TTL_MS,
@@ -252,9 +264,9 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
         return storedError(409, "PRECONDITION_FAILED", "这笔订单已过期，请重新下单", { reason: "order_expired" });
       }
 
-      // 下单时的金额快照要和当前售价一致：中途调价让用户重新确认，不按旧价扣。
-      const price = planPriceUsd(env, row.plan);
-      if (price === null || Math.round(price * 100) !== row.amount_cents) {
+      // 下单时的金额快照要和当前日价一致：中途调价让用户重新确认，不按旧价扣。
+      const price = planDailyPriceCents(env, row.plan);
+      if (price === null || price !== row.amount_cents) {
         return storedError(409, "PRECONDITION_FAILED", "价格已经变了，请重新下单", { reason: "price_mismatch" });
       }
 
@@ -274,6 +286,9 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
 
       const serverId = randomId("srv_");
       const port = await pickPort(db, identity.accountId);
+      // 额度是套餐属性、不参与扣费；这里只做一次快照，取不到记 0。
+      const catalog = env.DO_API_TOKEN ? await fetchCatalogData(env.DO_API_TOKEN) : null;
+      const transferGib = transferGibFor(catalog, row.plan);
       const charged = await recordLedgerEntry(env, {
         accountId: identity.accountId,
         kind: "charge",
@@ -289,8 +304,8 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
             .bind(now, serverId, row.id, ledgerId),
           db
             .prepare(
-              "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, plan_price_cents) " +
-                "SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, 'active', ? WHERE EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
+              "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, daily_price_cents, billing_anchor_at, transfer_gib) " +
+                "SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, 'active', ?, ?, ? WHERE EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
             )
             .bind(
               serverId,
@@ -300,12 +315,14 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
               row.region,
               row.plan,
               row.hourly_usd,
-              row.amount_usd,
+              monthlyUsdFromDaily(row.amount_cents),
               port,
               now,
               now,
-              now + PERIOD_MS,
+              now + DAY_MS,
               row.amount_cents,
+              now,
+              transferGib,
               ledgerId,
             ),
         ],
@@ -397,12 +414,20 @@ export async function provisionPaidOrder(
 
   if (!server) {
     const now = Date.now();
+    // 补建的锚点必须取「已扣过的那一天」，不能取 now：否则日桶整体漂移，用户白拿一天。
+    const anchor = Number(order.paid_at ?? order.created_at);
+    // 机器没建出来的空档不补扣：paid_until 直接对齐到锚点网格上的今天，
+    // 只保留已经扣过的第 0 天，空档写审计豁免。
+    const nNow = Math.floor((now - anchor) / DAY_MS);
+    const paidUntil = Math.max(anchor + DAY_MS, anchor + (nNow + 1) * DAY_MS);
     const serverId = randomId("srv_");
     const port = await pickPort(db, order.account_id);
+    const catalog = env.DO_API_TOKEN ? await fetchCatalogData(env.DO_API_TOKEN) : null;
+    const transferGib = transferGibFor(catalog, order.plan);
     await db
       .prepare(
-        "INSERT OR IGNORE INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, plan_price_cents) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, 'active', ?)",
+        "INSERT OR IGNORE INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, daily_price_cents, billing_anchor_at, transfer_gib) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, 'active', ?, ?, ?)",
       )
       .bind(
         serverId,
@@ -412,14 +437,22 @@ export async function provisionPaidOrder(
         order.region,
         order.plan,
         order.hourly_usd,
-        order.amount_usd,
+        monthlyUsdFromDaily(order.amount_cents),
         port,
         now,
         now,
-        now + PERIOD_MS,
+        paidUntil,
         order.amount_cents,
+        anchor,
+        transferGib,
       )
       .run();
+    if (paidUntil > anchor + DAY_MS) {
+      await db
+        .prepare("INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'billing.gap_waived', ?)")
+        .bind(now, order.account_id, serverId, JSON.stringify({ days: nNow }))
+        .run();
+    }
     server = await db
       .prepare("SELECT id, account_id, order_id, region, plan, node_port FROM servers WHERE order_id = ?")
       .bind(order.id)
@@ -453,23 +486,6 @@ export async function provisionPaidOrder(
   }
   const result = await job;
   return { ok: result.ok, serverId: server.id, reason: result.ok ? undefined : result.reason };
-}
-
-/** Cron 兜底：收了钱却一直没建机的订单（webhook 明确成功但 waitUntil 被打断等）。 */
-export async function reconcilePaidOrders(env: OrdersEnv): Promise<number> {
-  const db = env.DB;
-  if (!db) return 0;
-  const cutoff = Date.now() - 5 * 60 * 1000;
-  const rows = await db
-    .prepare("SELECT id FROM orders WHERE state = 'paid' AND created_at < ? LIMIT 5")
-    .bind(cutoff)
-    .all<{ id: string }>();
-  let count = 0;
-  for (const row of rows.results ?? []) {
-    const result = await provisionPaidOrder(env, row.id);
-    if (result.ok) count += 1;
-  }
-  return count;
 }
 
 async function cancelOrder(request: Request, env: OrdersEnv, orderId: string): Promise<Response> {

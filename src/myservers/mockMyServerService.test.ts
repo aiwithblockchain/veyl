@@ -38,19 +38,25 @@ describe("mock 目录套餐", () => {
         id: "s-1vcpu-512mb-10gb",
         label: "1 核 · 512 MB",
         hourly_usd: 0.00595,
-        monthly_usd: 4,
+        monthly_usd: 6,
+        daily_price_cents: 20,
+        transfer_gib: 500,
       },
       {
         id: "s-1vcpu-1gb",
         label: "1 核 · 1 GB",
         hourly_usd: 0.00893,
-        monthly_usd: 6,
+        monthly_usd: 9,
+        daily_price_cents: 30,
+        transfer_gib: 1000,
       },
       {
         id: "s-1vcpu-2gb",
         label: "1 核 · 2 GB",
         hourly_usd: 0.01786,
-        monthly_usd: 12,
+        monthly_usd: 18,
+        daily_price_cents: 60,
+        transfer_gib: 2000,
       },
     ]);
   });

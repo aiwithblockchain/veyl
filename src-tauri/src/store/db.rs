@@ -245,9 +245,15 @@ mod tests {
     #[test]
     fn migrations_run_once_and_record_the_version() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), migrations::MIGRATIONS.len() as i64);
+        assert_eq!(
+            store.schema_version().unwrap(),
+            migrations::SCHEMA_VERSION
+        );
         migrations::migrate(&store.conn()).unwrap();
-        assert_eq!(store.schema_version().unwrap(), migrations::MIGRATIONS.len() as i64);
+        assert_eq!(
+            store.schema_version().unwrap(),
+            migrations::SCHEMA_VERSION
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { handleAuth } from "./auth";
 import { handleEmailAuth } from "./auth_email";
 import { buildCloudInit } from "./cloud_init";
-import { planHourlyUsd, planPriceUsd } from "./lib/config";
+import { monthlyUsdFromDaily, planDailyPriceCents } from "./lib/config";
 import { runBilling } from "./billing";
 import { handleOrders } from "./orders";
 import { handleTopups, startTopupSession } from "./topups";
@@ -22,8 +22,8 @@ export interface Env {
   RESEND_FROM_EMAIL?: string;
   DODO_API_KEY?: string;
   DODO_WEBHOOK_SECRET?: string;
-  /** 售价表（USD）：{"s-1vcpu-1gb":"9"}；必须与 Dodo 产品价一致。 */
-  PLAN_PRICES_USD?: string;
+  /** 日价表（USD 分/天）：{"s-1vcpu-1gb":"30"}；唯一售价真源，月价由它派生。 */
+  PLAN_DAILY_PRICE_CENTS?: string;
   /** 套餐 → Dodo 产品 ID：{"s-1vcpu-1gb":"pdt_…"}，test / live 各一套。 */
   DODO_PRODUCT_IDS?: string;
   /** 充值面额（美分）→ 一次性产品 ID。 */
@@ -176,7 +176,16 @@ export interface CatalogData {
   currency: string;
   updated_at: string;
   regions: Array<{ id: string; name: string; continent: string }>;
-  plans: Array<{ id: string; label: string; hourly_usd: number; monthly_usd: number }>;
+  plans: Array<{
+    id: string;
+    label: string;
+    hourly_usd: number;
+    monthly_usd: number;
+    /** 售价（USD 分/天），applySalePrices 填；下单与展示都以它为准。 */
+    daily_price_cents?: number;
+    /** 每月公网出口额度（GiB）；来自 /sizes 的 transfer(TB) × 1000，取不到为 0。 */
+    transfer_gib: number;
+  }>;
 }
 
 /** 目录的唯一取数入口：目录接口与下单校验共用，避免两处各取一次。 */
@@ -202,6 +211,8 @@ export async function fetchCatalogData(token: string): Promise<CatalogData | nul
         vcpus: number;
         price_hourly: number;
         price_monthly: number;
+        /** TB、float、只计公网出口；DO 计费文档把 1 TB 档写作 1,000 GiB。 */
+        transfer?: number;
       }>;
     })?.sizes ?? [];
 
@@ -219,6 +230,13 @@ export async function fetchCatalogData(token: string): Promise<CatalogData | nul
   const validPrice = (value: unknown) =>
     typeof value === "number" && Number.isFinite(value) && value >= 0;
 
+  // /sizes 的 transfer 是 TB 的浮点数；乘 1000（不是 1024）折算成 GiB。
+  // 缺失 / 非有限 / ≤0 一律记 0（界面按「未知」整行不显示），不写死档位。
+  const transferGib = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) && value > 0
+      ? Math.round(value * 1000)
+      : 0;
+
   const plans = PLAN_SLUGS.flatMap((slug) => {
     const size = rawSizes.find((s) => s.slug === slug);
     if (!size || !validPrice(size.price_hourly) || !validPrice(size.price_monthly)) return [];
@@ -229,6 +247,7 @@ export async function fetchCatalogData(token: string): Promise<CatalogData | nul
         label: `${size.vcpus} 核 · ${memory}`,
         hourly_usd: size.price_hourly,
         monthly_usd: size.price_monthly,
+        transfer_gib: transferGib(size.transfer),
       },
     ];
   });
@@ -699,36 +718,76 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
   return json({ ok: false, error: "not_found" }, 404);
 }
 
-/** 目录里展示的必须是售价：没配售价的套餐不出现，成本价对内不下发。 */
+/** 目录里展示的必须是售价：没配日价的套餐不出现，成本价对内不下发。 */
 export function applySalePrices(data: CatalogData, env: Env): CatalogData {
   const plans = data.plans.flatMap((plan) => {
-    const price = planPriceUsd(env, plan.id);
-    if (price === null) return [];
-    return [{ ...plan, monthly_usd: price, hourly_usd: planHourlyUsd(price) }];
+    const dailyCents = planDailyPriceCents(env, plan.id);
+    if (dailyCents === null) return [];
+    const monthly = monthlyUsdFromDaily(dailyCents);
+    return [
+      {
+        ...plan,
+        daily_price_cents: dailyCents,
+        monthly_usd: monthly,
+        // 时价不再是售价口径；保留字段给旧客户端，按售价折算，避免暴露成本。
+        hourly_usd: Math.round((monthly / 730) * 10000) / 10000,
+      },
+    ];
   });
   return { ...data, plans };
 }
 
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const startedAt = Date.now();
+    const path = new URL(request.url).pathname;
+    const logAccess = (status: number) => {
+      // 每条请求一行结构化日志：排障时先看状态码与耗时，再进业务日志。
+      const entry = {
+        level: status >= 500 ? "error" : status >= 400 ? "warn" : "info",
+        kind: "request",
+        method: request.method,
+        path,
+        status,
+        ms: Date.now() - startedAt,
+        env: env.ENVIRONMENT ?? "unknown",
+      };
+      if (status >= 500) console.error(JSON.stringify(entry));
+      else console.log(JSON.stringify(entry));
+    };
     // 任何未处理的异常都要回 JSON 信封：Host 只认信封，拿到 HTML 500 只能报“格式不正确”。
-    return route(request, env, ctx).catch((error: unknown) => {
-      const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-      console.error(`[control-plane] unhandled ${request.method} ${new URL(request.url).pathname} ${detail}`);
-      return json(
-        {
-          code: "INTERNAL",
-          message: "服务器服务内部错误",
-          retryable: false,
-          details: { reason: "internal" },
-          request_id: "",
-        },
+    return route(request, env, ctx)
+      .then((response) => {
+        logAccess(response.status);
+        return response;
+      })
+      .catch((error: unknown) => {
+        const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        console.error(`[control-plane] unhandled ${request.method} ${path} ${detail}`);
+        logAccess(500);
+        return json(
+          {
+            code: "INTERNAL",
+            message: "服务器服务内部错误",
+            retryable: false,
+            details: { reason: "internal" },
+            request_id: "",
+          },
         500,
       );
     });
   },
-  /** 每天：续期扣费、补建「已付没机器」、对账（login-and-payment.md §4.6）。 */
+  /** 每天：续期扣费、补建「已付没机器」、对账、账本归档（login-and-payment.md §4.6）。 */
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runBilling(env));
+    ctx.waitUntil(
+      runBilling(env)
+        .then((report) => {
+          console.log(`[billing] done ${JSON.stringify(report)}`);
+        })
+        .catch((error: unknown) => {
+          // 任何一处瞬时失败都不能让整轮静默消失：至少留一条可检索的日志。
+          console.error(`[control-plane] billing_failed ${error instanceof Error ? error.message : String(error)}`);
+        }),
+    );
   },
 };

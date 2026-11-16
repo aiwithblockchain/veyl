@@ -30,9 +30,10 @@ use log::{LevelFilter, Log, Metadata, Record};
 /// 文件里只放 INFO 及以上：磁盘要省，留给真正需要事后追溯的事件。
 const FILE_LEVEL: LevelFilter = LevelFilter::Info;
 
-/// 终端（仅 debug 构建）放 DEBUG 及以上：不写盘，详细也不占空间。
+/// 终端（仅 debug 构建）默认也只放 INFO：不设 `RUST_LOG` 时不刷屏。
+/// 需要链路细节时用 `RUST_LOG=debug` 显式打开，文件与终端会一起变详细。
 #[cfg(debug_assertions)]
-const CONSOLE_LEVEL: LevelFilter = LevelFilter::Debug;
+const CONSOLE_LEVEL: LevelFilter = LevelFilter::Info;
 #[cfg(not(debug_assertions))]
 const CONSOLE_LEVEL: LevelFilter = LevelFilter::Off;
 

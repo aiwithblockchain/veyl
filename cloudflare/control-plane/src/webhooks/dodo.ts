@@ -3,7 +3,8 @@
 
 import { sha256B64u } from "../lib/crypto";
 import { json } from "../lib/http";
-import { provisionPaidOrder, type OrdersEnv } from "../orders";
+import { recoverExpiredServers } from "../billing";
+import type { OrdersEnv } from "../orders";
 import { verifyDodoSignature } from "../payments/dodo";
 import { recordLedgerEntry } from "../wallet";
 
@@ -320,6 +321,8 @@ export async function handleDodoWebhook(
             .prepare("UPDATE topups SET status = 'paid', paid_at = ? WHERE id = ? AND status != 'paid'")
             .bind(Date.now(), topup.id)
             .run();
+          // 充值成功后立刻尝试恢复停机中的机器（§4.6：expired 只由充值拉回）。
+          await recoverExpiredServers(env as never, topup.account_id);
           await markEvent(env, eventId, "processed", null, paymentId || null);
           return json({ ok: true });
         }
@@ -399,41 +402,23 @@ export async function handleDodoWebhook(
         )
         .run();
     }
-    if (amount > 0 && Math.abs(amount - order.amount_usd) >= 0.01) {
-      // 钱已经收了，差额人工处理；不因为金额不符就不交付。
-      console.warn(
-        `[dodo-webhook] amount_mismatch order=${order.id} paid=${amount} expected=${order.amount_usd}`,
-      );
-    }
-
-    if (kind === "payment.failed") {
-      await db
-        .prepare("UPDATE orders SET state = 'payment_failed' WHERE id = ? AND state = 'awaiting_payment'")
-        .bind(order.id)
-        .run();
-      await markEvent(env, eventId, "processed", order.id, paymentId || null);
-      return json({ ok: true });
-    }
-
-    // 已过期、已取消的订单也照常认：没有退款能力，收了钱必须交付。
+    // M1 起订单只从余额扣款，不再经过 Dodo。收到「订单支付」一律当遗留事件留证，
+    // 不标记 paid、不建机——否则会生成一台没扣过第 0 天、却被 Cron 逐日扣费的机器。
+    const email = typeof data.customer?.email === "string" ? data.customer.email.toLowerCase() : "";
     await db
       .prepare(
-        "UPDATE orders SET state = 'paid', paid_at = COALESCE(paid_at, ?), paid_via = 'dodo' " +
-          "WHERE id = ? AND state IN ('pending_payment', 'awaiting_payment', 'payment_failed', 'expired', 'cancelled')",
+        "INSERT OR IGNORE INTO unmatched_payments (payment_id, email_hash, amount_usd, currency, reason, payload_hash, received_at) " +
+          "VALUES (?, ?, ?, ?, 'legacy_order_payment', ?, ?)",
       )
-      .bind(Date.now(), order.id)
+      .bind(
+        paymentId || eventId,
+        email ? await sha256B64u(email) : null,
+        amountUsd(data),
+        typeof data.currency === "string" ? data.currency : "USD",
+        await sha256B64u(raw),
+        Date.now(),
+      )
       .run();
-
-    // 建机失败不要 5xx：订单已经是 paid，由订单 / 服务器状态机与 Cron 兜底。
-    const provisioned = await provisionPaidOrder(env, order.id, ctx?.waitUntil?.bind(ctx));
-    // 首期付款同时带上订阅信息：记下本期到期时间，界面与门禁都看它。
-    const subscriptionId = typeof data.subscription_id === "string" ? data.subscription_id : "";
-    if (subscriptionId) {
-      await recordSubscription(env, subscriptionId, order.id, "active", data, provisioned.serverId ?? null, {
-        id: eventId,
-        at: sentAt,
-      });
-    }
     await markEvent(env, eventId, "processed", order.id, paymentId || null);
     return json({ ok: true });
   } catch (error) {

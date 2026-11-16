@@ -74,6 +74,7 @@ async function start(request: Request, env: EmailAuthEnv): Promise<Response> {
     .first<{ created_at: number }>();
   if (existing && now - existing.created_at < COOLDOWN_MS) {
     const retryAfter = Math.ceil((COOLDOWN_MS - (now - existing.created_at)) / 1000);
+    console.log(`[auth-email] start result=cooldown retry_after=${retryAfter}`);
     return apiError("RATE_LIMITED", `等一下再发，${retryAfter} 秒后可以重发`, {
       retryable: true,
       reason: "email_cooldown",
@@ -100,6 +101,7 @@ async function start(request: Request, env: EmailAuthEnv): Promise<Response> {
     console.warn(`[auth-email] send_failed reason=${(error as Error).message}`);
   }
 
+  console.log("[auth-email] start result=sent");
   return json({ sent: true, cooldown_seconds: COOLDOWN_MS / 1000 });
 }
 
@@ -258,7 +260,9 @@ async function verify(request: Request, env: EmailAuthEnv): Promise<Response> {
   await db.batch(statements);
 
   try {
-    return json(await issueTokens({ DB: db, TOKEN_SIGNING_JWK: env.TOKEN_SIGNING_JWK }, deviceId, emailAccountId, "email"));
+    const tokens = await issueTokens({ DB: db, TOKEN_SIGNING_JWK: env.TOKEN_SIGNING_JWK }, deviceId, emailAccountId, "email");
+    console.log(`[auth-email] verify ok account=${emailAccountId} merged=${merged}`);
+    return json(tokens);
   } catch {
     return apiError("INTERNAL", "签发令牌失败", { reason: "signing_unavailable" });
   }

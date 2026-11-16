@@ -490,6 +490,15 @@ export interface MyServer {
   node_id: string | null;
   hourly_usd: number;
   monthly_usd: number;
+  /** 售价快照（USD 分 / 天），即每天实际扣多少。 */
+  daily_price_cents: number;
+  /** 已付到哪个时刻（ISO 8601）；建行时即写入，永不为 null。 */
+  paid_until: string;
+  billing_state: "active" | "past_due" | "expired";
+  /** 派生值：paid_until + 7d；仅 past_due / expired 时非空。 */
+  grace_ends_at: string | null;
+  /** 每月公网出口流量额度（GiB）快照；0 = 未知。 */
+  transfer_gib: number;
   failure: MyServerFailure | null;
 }
 
@@ -525,6 +534,10 @@ export interface MyServerPlan {
   label: string;
   hourly_usd: number;
   monthly_usd: number;
+  /** 售价（USD 分 / 天）；界面用它，月价 = 日价 × 30 仅供展示。 */
+  daily_price_cents: number;
+  /** 每月公网出口流量额度（GiB）；0 = 未知，界面不显示。 */
+  transfer_gib: number;
 }
 
 export interface MyServerCatalog {

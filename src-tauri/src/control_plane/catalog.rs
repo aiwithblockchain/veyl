@@ -33,8 +33,13 @@ pub struct Region {
 pub struct Plan {
     pub id: String,
     pub label: String,
+    /// DO 成本口径，仅内部核对；界面不渲染。
     pub hourly_usd: f64,
     pub monthly_usd: f64,
+    /// 售价（USD 分 / 天），按天计费的唯一真源；界面用它。
+    pub daily_price_cents: i64,
+    /// 每月公网出口额度（GiB）；0 = 未知，界面整行不显示。
+    pub transfer_gib: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -155,6 +160,18 @@ fn validate(catalog: Catalog) -> Result<Catalog, CatalogError> {
                 plan.id
             )));
         }
+        if plan.daily_price_cents < 0 {
+            return Err(CatalogError::invalid(format!(
+                "套餐 {} 的 daily_price_cents 不合法",
+                plan.id
+            )));
+        }
+        if plan.transfer_gib < 0 {
+            return Err(CatalogError::invalid(format!(
+                "套餐 {} 的 transfer_gib 不合法",
+                plan.id
+            )));
+        }
         if !plan_ids.insert(plan.id.as_str()) {
             return Err(CatalogError::invalid(format!("套餐 id 重复：{}", plan.id)));
         }
@@ -231,6 +248,7 @@ pub async fn fetch_catalog(base_url: &str) -> Result<Catalog, CatalogError> {
                 .get("reason")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("-"),
+            "-",
         );
         return Err(error);
     }
@@ -270,7 +288,7 @@ mod tests {
                 { "id": "fra", "name": "Frankfurt", "continent": "europe" }
             ],
             "plans": [
-                { "id": "vc2-1c-1gb", "label": "1 vCPU · 1 GB", "hourly_usd": 0.007, "monthly_usd": 5.0 }
+                { "id": "vc2-1c-1gb", "label": "1 vCPU · 1 GB", "hourly_usd": 0.007, "monthly_usd": 5.0, "daily_price_cents": 17, "transfer_gib": 1000 }
             ]
         })
         .to_string()
@@ -285,6 +303,8 @@ mod tests {
         assert_eq!(catalog.regions[0].continent, "asia");
         assert_eq!(catalog.plans.len(), 1);
         assert_eq!(catalog.plans[0].monthly_usd, 5.0);
+        assert_eq!(catalog.plans[0].daily_price_cents, 17);
+        assert_eq!(catalog.plans[0].transfer_gib, 1000);
     }
 
     #[test]
@@ -325,8 +345,8 @@ mod tests {
 
         let mut value: serde_json::Value = serde_json::from_str(&valid_body()).unwrap();
         value["plans"] = serde_json::json!([
-            { "id": "p", "label": "a", "hourly_usd": 0.1, "monthly_usd": 1.0 },
-            { "id": "p", "label": "b", "hourly_usd": 0.2, "monthly_usd": 2.0 }
+            { "id": "p", "label": "a", "hourly_usd": 0.1, "monthly_usd": 1.0, "daily_price_cents": 3, "transfer_gib": 500 },
+            { "id": "p", "label": "b", "hourly_usd": 0.2, "monthly_usd": 2.0, "daily_price_cents": 7, "transfer_gib": 0 }
         ]);
         assert_eq!(
             parse_catalog(&value.to_string()).unwrap_err().details["reason"],
@@ -342,6 +362,34 @@ mod tests {
             parse_catalog(&value.to_string()).unwrap_err().details["reason"],
             "invalid_response"
         );
+
+        // 日价是扣费唯一真源：缺失或为负都不能当成 0 兜底。
+        let mut value: serde_json::Value = serde_json::from_str(&valid_body()).unwrap();
+        value["plans"][0]["daily_price_cents"] = serde_json::json!(-1);
+        assert_eq!(
+            parse_catalog(&value.to_string()).unwrap_err().details["reason"],
+            "invalid_response"
+        );
+
+        let mut value: serde_json::Value = serde_json::from_str(&valid_body()).unwrap();
+        value["plans"][0].as_object_mut().unwrap().remove("daily_price_cents");
+        assert!(parse_catalog(&value.to_string()).is_err());
+
+        // 流量额度同理：必填、不能为负；0 是合法值（表示未知）。
+        let mut value: serde_json::Value = serde_json::from_str(&valid_body()).unwrap();
+        value["plans"][0]["transfer_gib"] = serde_json::json!(-1);
+        assert_eq!(
+            parse_catalog(&value.to_string()).unwrap_err().details["reason"],
+            "invalid_response"
+        );
+
+        let mut value: serde_json::Value = serde_json::from_str(&valid_body()).unwrap();
+        value["plans"][0].as_object_mut().unwrap().remove("transfer_gib");
+        assert!(parse_catalog(&value.to_string()).is_err());
+
+        let mut value: serde_json::Value = serde_json::from_str(&valid_body()).unwrap();
+        value["plans"][0]["transfer_gib"] = serde_json::json!(0);
+        assert_eq!(parse_catalog(&value.to_string()).unwrap().plans[0].transfer_gib, 0);
     }
 
     #[test]

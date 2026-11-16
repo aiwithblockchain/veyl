@@ -82,6 +82,12 @@ CREATE TABLE IF NOT EXISTS my_servers (
     node_id        TEXT REFERENCES nodes (id) ON DELETE SET NULL,
     hourly_usd     REAL NOT NULL,
     monthly_usd    REAL NOT NULL,
+    -- 按天计费（commands.md 2.29.0 / 2.30.0）：日价快照、已付到的时刻、计费状态。
+    -- `grace_ends_at` 是派生值，不入库。
+    daily_price_cents INTEGER NOT NULL DEFAULT 0,
+    transfer_gib   INTEGER NOT NULL DEFAULT 0,
+    paid_until     INTEGER NOT NULL DEFAULT 0,
+    billing_state  TEXT NOT NULL DEFAULT 'active',
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL,
     last_synced_at INTEGER NOT NULL

@@ -206,6 +206,7 @@ describe("public catalog", () => {
               vcpus: 1,
               price_hourly: 0.00595,
               price_monthly: 4,
+              transfer: 0.5,
             },
             {
               slug: "s-1vcpu-1gb",
@@ -213,6 +214,7 @@ describe("public catalog", () => {
               vcpus: 1,
               price_hourly: 0.00893,
               price_monthly: 6,
+              transfer: 1,
             },
             {
               slug: "s-1vcpu-2gb",
@@ -220,6 +222,7 @@ describe("public catalog", () => {
               vcpus: 1,
               price_hourly: 0.01786,
               price_monthly: 12,
+              transfer: 2,
             },
           ],
         }),
@@ -232,28 +235,64 @@ describe("public catalog", () => {
     const res = await route(new Request("https://example.com/v1/catalog"), {
       ENVIRONMENT: "production",
       DO_API_TOKEN: "t",
-      PLAN_PRICES_USD: JSON.stringify({
-        "s-1vcpu-512mb-10gb": 6,
-        "s-1vcpu-1gb": 9,
-        "s-1vcpu-2gb": 18,
+      PLAN_DAILY_PRICE_CENTS: JSON.stringify({
+        "s-1vcpu-512mb-10gb": 20,
+        "s-1vcpu-1gb": 30,
+        "s-1vcpu-2gb": 60,
       }),
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       currency: string;
       regions: Array<{ id: string; name: string; continent: string }>;
-      plans: Array<{ id: string; monthly_usd: number; label: string }>;
+      plans: Array<{ id: string; monthly_usd: number; daily_price_cents: number; label: string; transfer_gib: number }>;
     };
     expect(body.currency).toBe("USD");
     expect(body.regions.map((r) => r.id)).toEqual(["sgp1", "nyc3"]);
     expect(body.regions[0].continent).toBe("asia");
     expect(body.regions.map((r) => r.name)).toEqual(["新加坡 1", "纽约 3"]);
     // 目录展示售价（成本 ×1.5），不是 DO 成本价；hourly = monthly / 730。
+    // transfer_gib = /sizes 的 transfer(TB) × 1000（GiB）。
     expect(body.plans).toEqual([
-      { id: "s-1vcpu-512mb-10gb", label: "1 核 · 512 MB", hourly_usd: 0.0082, monthly_usd: 6 },
-      { id: "s-1vcpu-1gb", label: "1 核 · 1 GB", hourly_usd: 0.0123, monthly_usd: 9 },
-      { id: "s-1vcpu-2gb", label: "1 核 · 2 GB", hourly_usd: 0.0247, monthly_usd: 18 },
+      { id: "s-1vcpu-512mb-10gb", label: "1 核 · 512 MB", hourly_usd: 0.0082, monthly_usd: 6, daily_price_cents: 20, transfer_gib: 500 },
+      { id: "s-1vcpu-1gb", label: "1 核 · 1 GB", hourly_usd: 0.0123, monthly_usd: 9, daily_price_cents: 30, transfer_gib: 1000 },
+      { id: "s-1vcpu-2gb", label: "1 核 · 2 GB", hourly_usd: 0.0247, monthly_usd: 18, daily_price_cents: 60, transfer_gib: 2000 },
     ]);
+  });
+
+  it("transfer 缺失或非正数时记 0，不写死档位", async () => {
+    const doMock = vi.fn(async (input: string | URL | Request) => {
+      const href = String(input);
+      if (href.includes("/regions")) {
+        return new Response(
+          JSON.stringify({ regions: [{ slug: "sgp1", name: "Singapore 1", available: true }] }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          sizes: [
+            { slug: "s-1vcpu-512mb-10gb", memory: 512, vcpus: 1, price_hourly: 0.00595, price_monthly: 4 },
+            { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6, transfer: 0 },
+            { slug: "s-1vcpu-2gb", memory: 2048, vcpus: 1, price_hourly: 0.01786, price_monthly: 12, transfer: -1 },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", doMock);
+    const res = await route(new Request("https://example.com/v1/catalog"), {
+      ENVIRONMENT: "production",
+      DO_API_TOKEN: "t",
+      PLAN_DAILY_PRICE_CENTS: JSON.stringify({
+        "s-1vcpu-512mb-10gb": 20,
+        "s-1vcpu-1gb": 30,
+        "s-1vcpu-2gb": 60,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { plans: Array<{ transfer_gib: number }> };
+    expect(body.plans.map((plan) => plan.transfer_gib)).toEqual([0, 0, 0]);
   });
 
   it("上游失败时返回 503 且可重试", async () => {

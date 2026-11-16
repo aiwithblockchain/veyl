@@ -31,6 +31,7 @@ export class FakeD1 {
     subscriptions: [] as Row[],
     wallet_ledger: [] as Row[],
     topups: [] as Row[],
+    billing_cursor: [] as Row[],
   };
   private rateLimits = new Map<string, { window_start: number; count: number }>();
 
@@ -48,6 +49,16 @@ export class FakeD1 {
     const a = statement.args;
     if (/^(insert|update|delete)\b/.test(sql)) assertSqlMatchesSchema(sql, a);
 
+    if (sql.startsWith("select value from billing_cursor")) {
+      const row = this.tables.billing_cursor.find((entry) => entry.id === a[0]);
+      return row ? { value: row.value } : null;
+    }
+    if (sql.startsWith("insert or replace into billing_cursor")) {
+      const row = this.tables.billing_cursor.find((entry) => entry.id === a[0]);
+      if (row) row.value = a[1];
+      else this.tables.billing_cursor.push({ id: a[0], value: a[1] });
+      return null;
+    }
     if (sql.startsWith("select window_start, count from rate_limits")) {
       const row = this.rateLimits.get(String(a[0]));
       return row ? { ...row } : null;
@@ -405,6 +416,12 @@ export class FakeD1 {
       return null;
     }
 
+    if (sql.startsWith("select coalesce(sum(daily_price_cents), 0) as total from servers")) {
+      const total = this.tables.servers
+        .filter((server) => server.account_id === a[0] && server.destroyed_at == null)
+        .reduce((sum, server) => sum + Number(server.daily_price_cents ?? 0), 0);
+      return { total };
+    }
     if (sql.startsWith("select * from servers where enrollment_hash")) {
       return this.tables.servers.find((s) => s.enrollment_hash === a[0]) ?? null;
     }
@@ -446,7 +463,9 @@ export class FakeD1 {
         updated_at: a[10],
         paid_until: a[11] ?? 0,
         billing_state: "active",
-        plan_price_cents: a[12] ?? 0,
+        daily_price_cents: a[12] ?? 0,
+        billing_anchor_at: a[13] ?? a[9] ?? 0,
+        transfer_gib: a[14] ?? 0,
         destroyed_at: null,
       });
       return null;
@@ -475,7 +494,9 @@ export class FakeD1 {
         updated_at: a[10],
         paid_until: a[11] ?? 0,
         billing_state: "active",
-        plan_price_cents: a[12] ?? 0,
+        daily_price_cents: a[12] ?? 0,
+        billing_anchor_at: a[13] ?? a[9] ?? 0,
+        transfer_gib: a[14] ?? 0,
         destroyed_at: null,
       });
       return null;
@@ -519,11 +540,12 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("update servers set state = 'destroyed'")) {
-      const server = this.tables.servers.find((s) => s.id === a[2]);
+      const server = this.tables.servers.find((s) => s.id === a[3]);
       if (server) {
         server.state = "destroyed";
         server.destroyed_at = a[0];
         server.updated_at = a[1];
+        server.failure_code = a[2] ?? null;
       }
       return null;
     }
@@ -657,6 +679,72 @@ export class FakeD1 {
     }
 
 
+    if (sql.startsWith("insert or ignore into wallet_ledger")) {
+      const [id, accountId, balanceAfter, refId, createdAt] = a;
+      if (this.tables.wallet_ledger.some((w) => w.ref_type === "snapshot" && w.ref_id === refId)) {
+        return null;
+      }
+      this.tables.wallet_ledger.push({
+        id,
+        account_id: accountId,
+        kind: "snapshot",
+        amount_cents: 0,
+        balance_after_cents: Number(balanceAfter),
+        ref_type: "snapshot",
+        ref_id: refId,
+        note: null,
+        created_at: Number(createdAt),
+      });
+      return null;
+    }
+    if (sql.startsWith("select balance_after_cents from wallet_ledger where account_id")) {
+      const rows = this.tables.wallet_ledger
+        .filter((w) => w.account_id === a[0] && Number(w.created_at) <= Number(a[1]))
+        .sort((x, y) => Number(x.created_at) - Number(y.created_at));
+      const latest = rows.at(-1);
+      return latest ? { balance_after_cents: latest.balance_after_cents } : null;
+    }
+    if (sql.startsWith("select id from wallet_ledger where ref_type = 'snapshot'")) {
+      const row = this.tables.wallet_ledger.find(
+        (w) => w.ref_type === "snapshot" && w.ref_id === a[0],
+      );
+      return row ? { id: row.id } : null;
+    }
+    if (sql.startsWith("delete from wallet_ledger where id in")) {
+      const [accountId, cutoff, limit] = a;
+      const victims = this.tables.wallet_ledger
+        .filter(
+          (w) =>
+            w.account_id === accountId &&
+            w.ref_type === "server_day" &&
+            Number(w.created_at) <= Number(cutoff),
+        )
+        .slice(0, Number(limit));
+      const ids = new Set(victims.map((w) => w.id));
+      this.tables.wallet_ledger = this.tables.wallet_ledger.filter((w) => !ids.has(w.id));
+      return null;
+    }
+    if (sql.startsWith("insert into wallet_ledger") && sql.includes("'server_refund'")) {
+      const [ledgerId, amount, , refId, note, now, accountId] = a;
+      if (this.tables.wallet_ledger.some((w) => w.ref_type === "server_refund" && w.ref_id === refId)) {
+        return null;
+      }
+      const account = this.tables.accounts.find((row) => row.id === accountId);
+      if (!account) return null;
+      const balance = Number(account.balance_cents ?? 0);
+      this.tables.wallet_ledger.push({
+        id: ledgerId,
+        account_id: accountId,
+        kind: "adjustment",
+        amount_cents: Number(amount),
+        balance_after_cents: balance + Number(amount),
+        ref_type: "server_refund",
+        ref_id: refId,
+        note,
+        created_at: now,
+      });
+      return null;
+    }
     if (sql.startsWith("insert into wallet_ledger")) {
       const isDebit = sql.includes("a.balance_cents >= ?");
       const [ledgerId, kind, amount, magnitude, refType, refId, note, now, accountId] = a;
@@ -753,20 +841,28 @@ export class FakeD1 {
       }
       return null;
     }
-    if (sql.startsWith("update servers set paid_until = ?, billing_state")) {
+    if (sql.startsWith("update servers set paid_until = ?, updated_at") && sql.includes("billing_state = 'expired'")) {
       const row = this.tables.servers.find((server) => server.id === a[2]);
-      if (row && this.tables.wallet_ledger.some((w) => w.id === a[3])) {
+      if (row && row.billing_state === "expired") row.paid_until = a[0];
+      return null;
+    }
+    if (sql.startsWith("update servers set paid_until = ?, updated_at")) {
+      const row = this.tables.servers.find((server) => server.id === a[2]);
+      if (
+        row &&
+        Number(row.paid_until ?? 0) === Number(a[3]) &&
+        this.tables.wallet_ledger.some((w) => w.id === a[4])
+      ) {
         row.paid_until = a[0];
-        row.billing_state = "active";
         row.updated_at = a[1];
       }
       return null;
     }
     if (sql.startsWith("update servers set paid_until = max")) {
-      const row = this.tables.servers.find((server) => server.id === a[1]);
-      if (row) {
+      const row = this.tables.servers.find((server) => server.id === a[2]);
+      if (row && Number(row.paid_until ?? 0) === Number(a[3])) {
         row.paid_until = Math.max(Number(row.paid_until ?? 0), Number(a[0]));
-        row.billing_state = "active";
+        row.updated_at = a[1];
       }
       return null;
     }
@@ -785,6 +881,17 @@ export class FakeD1 {
   execAll(statement: Stmt): Row[] {
     const sql = normalise(statement.sql);
     const a = statement.args;
+    if (sql.startsWith("select distinct account_id from wallet_ledger")) {
+      const cutoff = Number(a[0]);
+      const ids = [
+        ...new Set(
+          this.tables.wallet_ledger
+            .filter((w) => w.ref_type === "server_day" && Number(w.created_at) <= cutoff)
+            .map((w) => String(w.account_id)),
+        ),
+      ];
+      return ids.slice(0, 200).map((id) => ({ account_id: id }));
+    }
     if (sql.startsWith("select o.id from orders o left join servers s")) {
       return this.tables.orders
         .filter((order) => {
@@ -798,64 +905,115 @@ export class FakeD1 {
         .slice(0, 5)
         .map((order) => ({ id: order.id }));
     }
-    if (sql.startsWith("select id, account_id, plan_price_cents, paid_until, billing_state from servers")) {
+    if (
+      sql.startsWith(
+        "select id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state from servers where account_id",
+      )
+    ) {
+      return this.tables.servers
+        .filter(
+          (row) =>
+            row.account_id === a[0] &&
+            row.billing_state === "expired" &&
+            row.destroyed_at == null &&
+            row.provider_id != null,
+        )
+        .slice(0, 20)
+        .map((row) => ({
+          id: row.id,
+          account_id: row.account_id,
+          daily_price_cents: row.daily_price_cents ?? 0,
+          billing_anchor_at: row.billing_anchor_at ?? 0,
+          paid_until: row.paid_until ?? 0,
+          billing_state: row.billing_state ?? "expired",
+        }));
+    }
+    if (sql.startsWith("select id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state from servers")) {
       return this.tables.servers
         .filter((row) => {
           if (row.destroyed_at != null) return false;
           if (row.provider_id == null) return false;
+          if (Number(row.paid_until ?? 0) <= 0) return false;
+          if (row.billing_state === "expired") return false;
           if (!["booting", "installing", "verifying", "healthy", "active"].includes(String(row.state))) {
             return false;
           }
+          if (String(row.id) <= String(a[1])) return false;
           return Number(row.paid_until ?? 0) <= Number(a[0]);
         })
+        .sort((x, y) => String(x.id).localeCompare(String(y.id)))
+        .slice(0, Number(a[2]))
         .map((row) => ({
           id: row.id,
           account_id: row.account_id,
-          plan_price_cents: row.plan_price_cents ?? 0,
+          daily_price_cents: row.daily_price_cents ?? 0,
+          billing_anchor_at: row.billing_anchor_at ?? 0,
           paid_until: row.paid_until ?? 0,
           billing_state: row.billing_state ?? "active",
         }));
     }
     if (sql.startsWith("select a.id as account_id")) {
-      return this.tables.accounts.map((account) => ({
-        account_id: account.id,
-        balance: Number(account.balance_cents ?? 0),
-        ledger_sum: this.tables.wallet_ledger
-          .filter((w) => w.account_id === account.id)
-          .reduce((sum, w) => sum + Number(w.amount_cents), 0),
-      }));
+      return this.tables.accounts.map((account) => {
+        const rows = this.tables.wallet_ledger
+          .map((row, index) => ({ row, index }))
+          .filter((entry) => entry.row.account_id === account.id)
+          .sort(
+            (a, b) =>
+              Number(a.row.created_at ?? 0) - Number(b.row.created_at ?? 0) || a.index - b.index,
+          );
+        const latest = rows.at(-1)?.row;
+        return {
+          account_id: account.id,
+          balance: Number(account.balance_cents ?? 0),
+          latest: Number(latest?.balance_after_cents ?? 0),
+        };
+      });
     }
     if (sql.startsWith("select node_port from servers")) {
       return this.tables.servers
         .filter((s) => s.account_id === a[0] && s.destroyed_at === null)
         .map((s) => ({ node_port: s.node_port }));
     }
-    if (sql.startsWith("select id, account_id, plan_price_cents, paid_until, billing_state from servers")) {
+    if (sql.startsWith("select id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state from servers")) {
       return this.tables.servers
         .filter((row) => {
           if (row.destroyed_at != null) return false;
           if (row.provider_id == null) return false;
+          if (Number(row.paid_until ?? 0) <= 0) return false;
+          if (row.billing_state === "expired") return false;
           if (!["booting", "installing", "verifying", "healthy", "active"].includes(String(row.state))) {
             return false;
           }
+          if (String(row.id) <= String(a[1])) return false;
           return Number(row.paid_until ?? 0) <= Number(a[0]);
         })
+        .sort((x, y) => String(x.id).localeCompare(String(y.id)))
+        .slice(0, Number(a[2]))
         .map((row) => ({
           id: row.id,
           account_id: row.account_id,
-          plan_price_cents: row.plan_price_cents ?? 0,
+          daily_price_cents: row.daily_price_cents ?? 0,
+          billing_anchor_at: row.billing_anchor_at ?? 0,
           paid_until: row.paid_until ?? 0,
           billing_state: row.billing_state ?? "active",
         }));
     }
     if (sql.startsWith("select a.id as account_id")) {
-      return this.tables.accounts.map((account) => ({
-        account_id: account.id,
-        balance: Number(account.balance_cents ?? 0),
-        ledger_sum: this.tables.wallet_ledger
-          .filter((w) => w.account_id === account.id)
-          .reduce((sum, w) => sum + Number(w.amount_cents), 0),
-      }));
+      return this.tables.accounts.map((account) => {
+        const rows = this.tables.wallet_ledger
+          .map((row, index) => ({ row, index }))
+          .filter((entry) => entry.row.account_id === account.id)
+          .sort(
+            (a, b) =>
+              Number(a.row.created_at ?? 0) - Number(b.row.created_at ?? 0) || a.index - b.index,
+          );
+        const latest = rows.at(-1)?.row;
+        return {
+          account_id: account.id,
+          balance: Number(account.balance_cents ?? 0),
+          latest: Number(latest?.balance_after_cents ?? 0),
+        };
+      });
     }
     if (sql.startsWith("select id from orders where state = 'paid'")) {
       return this.tables.orders
@@ -934,6 +1092,19 @@ export class FakeStatement {
       this.db.exec(this.statement);
       const after = counted.reduce((sum, table) => sum + this.db.rows(table).length, 0);
       return { success: true, meta: { changes: after - before } };
+    } else if (sql.startsWith("delete from wallet_ledger where id in")) {
+      const [accountId, cutoff, limit] = this.statement.args;
+      const count = this.db
+        .rows("wallet_ledger")
+        .filter(
+          (w) =>
+            w.account_id === accountId &&
+            w.ref_type === "server_day" &&
+            Number(w.created_at) <= Number(cutoff),
+        )
+        .slice(0, Number(limit)).length;
+      this.db.exec(this.statement);
+      return { success: true, meta: { changes: count } };
     } else if (sql.startsWith("update idempotency_keys set created_at")) {
       const [now, accountId, endpoint, key, createdAt] = this.statement.args;
       const row = this.db

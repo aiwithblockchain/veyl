@@ -3,7 +3,8 @@
 
 export interface PaymentConfigEnv {
   ENVIRONMENT?: string;
-  PLAN_PRICES_USD?: string;
+  /** 日价（USD 分/天）：{"s-1vcpu-1gb":30}。唯一真源，月价由它派生。 */
+  PLAN_DAILY_PRICE_CENTS?: string;
   DODO_PRODUCT_IDS?: string;
   /** 充值面额 → Dodo 一次性产品 ID：{"1000":"pdt_…"}，键是美分。 */
   DODO_TOPUP_PRODUCT_IDS?: string;
@@ -25,18 +26,18 @@ function parseMap(raw: string | undefined): Record<string, string> {
   }
 }
 
-/** 售价（USD）；没配置这个套餐就返回 null，调用方必须当成「不可售」。 */
-export function planPriceUsd(env: PaymentConfigEnv, plan: string): number | null {
-  const raw = parseMap(env.PLAN_PRICES_USD)[plan];
+/** 日价（USD 分/天）；没配置或不是正整数就返回 null，调用方必须当成「不可售」。 */
+export function planDailyPriceCents(env: PaymentConfigEnv, plan: string): number | null {
+  const raw = parseMap(env.PLAN_DAILY_PRICE_CENTS)[plan];
   if (raw === undefined) return null;
   const value = Number(raw);
-  if (!Number.isFinite(value) || value <= 0) return null;
-  return Math.round(value * 100) / 100;
+  if (!Number.isInteger(value) || value <= 0) return null;
+  return value;
 }
 
-/** 恰好两位小数的小时价，只用于展示。 */
-export function planHourlyUsd(monthly: number): number {
-  return Math.round((monthly / 730) * 10000) / 10000;
+/** 月价只用于展示：日价 × 30 天。 */
+export function monthlyUsdFromDaily(dailyCents: number): number {
+  return (dailyCents * 30) / 100;
 }
 
 export function dodoProductId(env: PaymentConfigEnv, plan: string): string | null {

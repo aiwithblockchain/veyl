@@ -21,9 +21,14 @@
 # 本脚本不会去 kill helper 或 bootout daemon。
 #
 # 环境变量：
+#   VEYL_RUST_LOG     应用日志级别，默认 debug（只影响调试版）
 #   VEYL_DEV_ID_APP   指定签名身份（留空则自动挑：先 Developer ID，再 Apple Development，
 #                     都要求 Team 与 VEYL_TEAM_ID 一致）
 #   VEYL_TEAM_ID      期望的 Team ID，默认 2XYK8RBB6M（与 build.rs 的默认值一致）
+#
+# 日志位置：
+#   logs/app-<日期>.log          应用结构化日志（debug 构建写仓库根的 logs/）
+#   build/logs/tun-dev-*.log     本次前台/后台运行的标准输出
 #
 # 前置：macOS、node/npm、cargo、Xcode Command Line Tools、
 #       src-tauri/resources/runtime/sing-box、src-tauri/resources/rules/veyl-rules-*.tar.zst
@@ -33,6 +38,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALL_DIR="${VEYL_INSTALL_DIR:-/Applications}"
 TEAM="${VEYL_TEAM_ID:-2XYK8RBB6M}"
+# 调试版默认开 debug 日志（应用日志写 $ROOT/logs/app-<日期>.log，标准输出另存 build/logs）。
+export RUST_LOG="${VEYL_RUST_LOG:-debug}"
 NO_OPEN=0
 DETACH=0
 KILL_EXISTING=0
@@ -412,7 +419,7 @@ run_foreground() {
   mkdir -p "$log_dir" || die "无法创建日志目录：$log_dir"
   LOG_FILE="$log_dir/tun-dev-$(date +%Y%m%d-%H%M%S).log"
 
-  printf '\n前台启动：%s\n日志：%s\n按 Ctrl-C 结束。\n\n' "$bin" "$LOG_FILE"
+  printf '\n前台启动：%s\n日志：%s\n应用日志：%s/logs/\n按 Ctrl-C 结束。\n\n' "$bin" "$LOG_FILE" "$ROOT"
 
   local started
   started="$(date +%s)"
@@ -454,8 +461,16 @@ case "$LAUNCH_MODE" in
   none)
     ;;
   detach)
-    open "$APP_DEST"
-    printf '\n已在后台启动：%s\n' "$APP_DEST"
+    bin="$APP_DEST/Contents/MacOS/$EXECUTABLE"
+    [ -x "$bin" ] || die "找不到可执行文件：$bin"
+    log_dir="$ROOT/build/logs"
+    mkdir -p "$log_dir" || die "无法创建日志目录：$log_dir"
+    LOG_FILE="$log_dir/tun-dev-$(date +%Y%m%d-%H%M%S).log"
+    # 直接执行包内二进制而不是 `open`：`open` 不继承 RUST_LOG，日志会掉到 info。
+    nohup "$bin" >> "$LOG_FILE" 2>&1 &
+    APP_PID=$!
+    printf '\n已在后台启动：%s（PID %s）\n日志：%s\n应用日志：%s/logs/\n' \
+      "$APP_DEST" "$APP_PID" "$LOG_FILE" "$ROOT"
     ;;
   foreground)
     trap on_exit EXIT

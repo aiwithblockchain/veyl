@@ -14,6 +14,8 @@ interface Props {
   readOnly: boolean;
   /** 从节点组「从我的服务器添加」进来：目标组名，用于顶部说明。 */
   joinGroupName: string | null;
+  /** 同账户未销毁机器 > 1：流量额度是共享池。 */
+  sharedTransfer: boolean;
   onNew: () => void;
   onEnsureIdentity: () => Promise<boolean>;
   onTopUp: () => void;
@@ -36,6 +38,7 @@ export function MyServersPage({
   detailRetrying,
   readOnly,
   joinGroupName,
+  sharedTransfer,
   onNew,
   onEnsureIdentity,
   onTopUp,
@@ -79,6 +82,7 @@ export function MyServersPage({
               selected.region
             }
             readOnly={readOnly}
+            sharedTransfer={sharedTransfer}
             joinLabel={joinGroupName ? `加入「${joinGroupName}」` : null}
             onJoin={joinGroupName ? () => onJoinServer(selected) : undefined}
             onCreateAnother={onNew}

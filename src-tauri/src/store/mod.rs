@@ -1,7 +1,8 @@
 //! 本地持久化：SQLite（rusqlite，bundled）。
 //!
-//! schema 版本由 `PRAGMA user_version` 管理。产品尚未发布，数据库整体重建：
-//! 只有一份 `001_init.sql`，旧库在打开时被清空重建。
+//! schema 版本由 `PRAGMA user_version` 管理，基准是 [`migrations::SCHEMA_VERSION`]。
+//! 发布前只保留当前基线：不做历史迁移，版本不符或结构漂移时旧库清空重建。
+//! 改 `001_init.sql` 时必须同时 bump `SCHEMA_VERSION`。
 //! 凭据不进库：节点的 `password_ref` 只是 `secrets.enc` 的键。
 
 pub mod catalog_cache;

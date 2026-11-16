@@ -17,6 +17,11 @@ function server(over: Partial<MyServer> = {}): MyServer {
     node_id: "nd_control_1",
     hourly_usd: 0.00893,
     monthly_usd: 6,
+    daily_price_cents: 20,
+    paid_until: new Date(86_400_000).toISOString(),
+    billing_state: "active",
+    grace_ends_at: null,
+    transfer_gib: 1000,
     failure: null,
     ...over,
   };
@@ -26,6 +31,7 @@ function renderDetail(
   over: Partial<MyServer> = {},
   onGone = vi.fn(),
   onUseServer: (server: MyServer) => void | Promise<void> = vi.fn(),
+  sharedTransfer = false,
 ) {
   const destroy = vi.fn(async (id: string) =>
     server({ server_id: id, state: "destroyed" }),
@@ -36,6 +42,7 @@ function renderDetail(
       bridge={{ myServerDestroy: destroy } as unknown as AgentBridge}
       server={server(over)}
       regionLabel="新加坡 1"
+      sharedTransfer={sharedTransfer}
       onCreateAnother={onCreateAnother}
       onUseServer={onUseServer}
       onChanged={() => {}}
@@ -52,6 +59,75 @@ afterEach(() => {
 });
 
 describe("服务器详情", () => {
+  it("费用按日价与本期有效期展示，不出现时价", () => {
+    renderDetail({
+      daily_price_cents: 20,
+      paid_until: new Date(2026, 10, 17, 12, 0, 0).toISOString(),
+    });
+
+    const detail = document.querySelector(".myservers__detail");
+    expect(detail?.textContent).toContain("每天 $0.20 · 本期有效至 2026-11-17");
+    expect(detail?.textContent).not.toContain("/小时");
+  });
+
+  it("active 但 paid_until 已过去：提示下一轮扣费顺延", () => {
+    renderDetail({
+      daily_price_cents: 20,
+      paid_until: new Date(Date.now() - 86_400_000).toISOString(),
+      billing_state: "active",
+      grace_ends_at: null,
+    });
+
+    expect(document.querySelector(".myservers__facts")?.textContent).toContain(
+      "每天 $0.20 · 本期已到期，下一轮扣费顺延",
+    );
+  });
+
+  it("past_due 显示宽限剩余天数", () => {
+    renderDetail({
+      billing_state: "past_due",
+      grace_ends_at: new Date(Date.now() + 2.5 * 86_400_000).toISOString(),
+    });
+
+    expect(document.querySelector(".myservers__billing")?.textContent).toContain(
+      "宽限还剩 3 天",
+    );
+  });
+
+  it("expired 说明停机不再产生费用，不再显示宽限天数", () => {
+    renderDetail({
+      billing_state: "expired",
+      grace_ends_at: new Date(Date.now() - 86_400_000).toISOString(),
+    });
+
+    const copy = document.querySelector(".myservers__billing")?.textContent ?? "";
+    expect(copy).toContain("服务已停用");
+    expect(copy).toContain("停机期间不再产生费用");
+    expect(copy).toContain("充值后自动补扣");
+    expect(copy).not.toContain("宽限还剩");
+  });
+
+  it("流量额度为 0 时整行不显示", () => {
+    renderDetail({ transfer_gib: 0 }, vi.fn(), vi.fn(), true);
+
+    expect(screen.queryByText("流量")).toBeNull();
+    expect(document.querySelector(".myservers__detail")?.textContent).not.toContain(
+      "不限量",
+    );
+  });
+
+  it("两台机器时流量行带共用后缀，只剩一台时后缀消失", () => {
+    const shared = renderDetail({ transfer_gib: 1000 }, vi.fn(), vi.fn(), true);
+    expect(
+      screen.getByText("每月 1000 GB（出站）（同账户多台共用额度）"),
+    ).toBeTruthy();
+    shared.unmount();
+
+    renderDetail({ transfer_gib: 1000 }, vi.fn(), vi.fn(), false);
+    expect(screen.getByText("每月 1000 GB（出站）")).toBeTruthy();
+    expect(screen.queryByText(/共用额度/)).toBeNull();
+  });
+
   it("可用时主按钮不要求控制面 node_id，点击交回服务器", () => {
     const { onUseServer } = renderDetail({ node_id: null, state: "healthy" });
 
