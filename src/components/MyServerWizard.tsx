@@ -7,7 +7,12 @@ import type {
 } from "../agent/bridge";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { toBridgeError } from "../agent/errors";
-import { CONTINENT_LABELS, formatUsd, formatUsdHourly } from "../myservers/labels";
+import {
+  CONTINENT_LABELS,
+  formatUsd,
+  formatUsdCents,
+  formatUsdHourly,
+} from "../myservers/labels";
 
 interface Props {
   bridge: AgentBridge;
@@ -15,6 +20,15 @@ interface Props {
   onOrdered: (serverId: string | null) => void;
   /** 下单前确认设备身份；没有身份时由 Host 懒注册。 */
   onEnsureIdentity: () => Promise<boolean>;
+  /** 余额不足时的唯一去处。 */
+  onTopUp: () => void;
+}
+
+interface WizardError {
+  message: string;
+  retryable: boolean;
+  /** 余额不足还差多少（USD 分）；有值时给「去充值」。 */
+  shortfallCents?: number;
 }
 
 const CONTINENT_ORDER: MyServerRegion["continent"][] = [
@@ -62,6 +76,11 @@ function shouldKeepIdempotencyKey(error: unknown): boolean {
     reason === "instance_create_failed" ||
     reason === "region_unavailable" ||
     reason === "idempotency_conflict" ||
+    reason === "order_not_payable" ||
+    reason === "order_expired" ||
+    reason === "price_mismatch" ||
+    reason === "invalid_region" ||
+    reason === "invalid_plan" ||
     reason === "account_blocked" ||
     reason === "device_revoked"
   ) {
@@ -72,7 +91,9 @@ function shouldKeepIdempotencyKey(error: unknown): boolean {
     reason === "idempotency_in_flight" ||
     reason === "provider_unavailable" ||
     reason === "rate_limited" ||
-    reason === "auth_required"
+    reason === "auth_required" ||
+    // 余额不足时订单还在 pending；充值后复用同一单，避免留一堆过期订单。
+    reason === "insufficient_balance"
   ) {
     return true;
   }
@@ -110,6 +131,7 @@ export function MyServerWizard({
   catalog,
   onOrdered,
   onEnsureIdentity,
+  onTopUp,
 }: Props) {
   const [fetched, setFetched] = useState<MyServerCatalog | null>(null);
   const [fetchState, setFetchState] = useState<"loading" | "ready" | "failed">(
@@ -119,9 +141,14 @@ export function MyServerWizard({
   const [planId, setPlanId] = useState<string | null>(null);
   const [phase, setPhase] = useState<"identity" | "creating" | null>(null);
   const busy = phase !== null;
-  const [error, setError] = useState<{ message: string; retryable: boolean } | null>(null);
-  // 同一组重试复用键：超时/网络失败时结果未知，换键会建第二台。
-  const idempotencyKey = useRef("");
+  const [error, setError] = useState<WizardError | null>(null);
+  const [charged, setCharged] = useState<{
+    chargedCents: number;
+    balanceAfterCents: number;
+  } | null>(null);
+  // 同一组选择重试复用键：超时/网络失败时结果未知，换键会建第二台。
+  // 键和地区+套餐绑定，换了选择必须换键，否则控制面按「同键不同请求」拒绝。
+  const idempotencyKey = useRef({ key: "", region: "", plan: "" });
 
   const loadCatalog = useCallback(async () => {
     setFetchState("loading");
@@ -167,28 +194,60 @@ export function MyServerWizard({
   const placeOrder = async () => {
     if (!currentPlan || !currentRegion || busy) return;
     setError(null);
+    setCharged(null);
     setPhase("identity");
     try {
       const ready = await onEnsureIdentity();
       if (!ready) {
         setError({
-          message: "没能确认设备身份。没有产生服务器；稍后再点「创建服务器」。",
+          message: "先登录，才能买服务器。",
           retryable: true,
         });
         return;
       }
       setPhase("creating");
-      if (!idempotencyKey.current) idempotencyKey.current = makeIdempotencyKey();
+      const chosen = { region: currentRegion.id, plan: currentPlan.id };
+      if (
+        !idempotencyKey.current.key ||
+        idempotencyKey.current.region !== chosen.region ||
+        idempotencyKey.current.plan !== chosen.plan
+      ) {
+        idempotencyKey.current = { key: makeIdempotencyKey(), ...chosen };
+      }
       const created = await bridge.myServerCreate({
-        region: currentRegion.id,
-        plan: currentPlan.id,
-        idempotencyKey: idempotencyKey.current,
+        region: chosen.region,
+        plan: chosen.plan,
+        idempotencyKey: idempotencyKey.current.key,
       });
-      const order = await bridge.myServerCheckout(created.order_id);
-      onOrdered(order.server_id ?? null);
+      const charge = await bridge.myServerCheckout(created.order_id);
+      setCharged({
+        chargedCents: charge.charged_cents,
+        balanceAfterCents: charge.balance_after_cents,
+      });
+      // 留在创建页显示扣费结果；新服务器在左栏以「建机器中」出现。
+      onOrdered(null);
     } catch (err) {
-      setError(errorText(err));
-      if (!shouldKeepIdempotencyKey(err)) idempotencyKey.current = "";
+      const problem = toBridgeError(err);
+      const reason =
+        typeof problem.details?.reason === "string" ? problem.details.reason : "";
+      const shortfallRaw = problem.details?.shortfall_cents;
+      const shortfall =
+        typeof shortfallRaw === "number" && Number.isFinite(shortfallRaw)
+          ? Math.max(0, Math.trunc(shortfallRaw))
+          : 0;
+      if (reason === "insufficient_balance") {
+        setError({
+          message:
+            shortfall > 0
+              ? `余额不足，还差 ${formatUsdCents(shortfall)}。`
+              : "余额不足。",
+          retryable: true,
+          shortfallCents: shortfall,
+        });
+      } else {
+        setError(errorText(err));
+      }
+      if (!shouldKeepIdempotencyKey(err)) idempotencyKey.current = { key: "", region: "", plan: "" };
     } finally {
       setPhase(null);
     }
@@ -312,16 +371,33 @@ export function MyServerWizard({
         <p className="wizard-system">Ubuntu 24.04 LTS</p>
       </section>
 
+      {charged ? (
+        <p className="myservers__success" role="status">
+          {charged.chargedCents > 0
+            ? `已扣 ${formatUsdCents(charged.chargedCents)}，余额 ${formatUsdCents(charged.balanceAfterCents)}。`
+            : `这台服务器已经开通过，没有重复扣费。余额 ${formatUsdCents(charged.balanceAfterCents)}。`}
+        </p>
+      ) : null}
+
       {error ? (
         <>
           <p className="myservers__error" role="alert">
             {error.message}
           </p>
           <p className="myservers__hint">
-            {error.retryable
-              ? "可以点「创建服务器」再试一次。"
-              : "换一个地区或档位，再点「创建服务器」。"}
+            {error.shortfallCents !== undefined
+              ? "充值后回到这里，再点「创建服务器」。"
+              : error.retryable
+                ? "可以点「创建服务器」再试一次。"
+                : "换一个地区或档位，再点「创建服务器」。"}
           </p>
+          {error.shortfallCents !== undefined ? (
+            <div className="myservers__actions">
+              <button type="button" className="btn btn--ghost" onClick={onTopUp}>
+                去充值
+              </button>
+            </div>
+          ) : null}
         </>
       ) : null}
 
@@ -335,7 +411,7 @@ export function MyServerWizard({
               </>
             ) : null}
           </p>
-          <p className="myservers__demo">体验流程，不会真实扣费。</p>
+          <p className="myservers__demo">从余额扣一个月；余额不足会提示充值。</p>
         </div>
         <button
           type="button"

@@ -5,6 +5,8 @@ export interface PaymentConfigEnv {
   ENVIRONMENT?: string;
   PLAN_PRICES_USD?: string;
   DODO_PRODUCT_IDS?: string;
+  /** 充值面额 → Dodo 一次性产品 ID：{"1000":"pdt_…"}，键是美分。 */
+  DODO_TOPUP_PRODUCT_IDS?: string;
   APP_PAYMENT_RETURN_URL?: string;
 }
 
@@ -40,6 +42,20 @@ export function planHourlyUsd(monthly: number): number {
 export function dodoProductId(env: PaymentConfigEnv, plan: string): string | null {
   const id = parseMap(env.DODO_PRODUCT_IDS)[plan];
   return id && id.startsWith("pdt_") ? id : null;
+}
+
+export function topupProductId(env: PaymentConfigEnv, cents: number): string | null {
+  const id = parseMap(env.DODO_TOPUP_PRODUCT_IDS)[String(cents)];
+  return id && id.startsWith("pdt_") ? id : null;
+}
+
+/** 可充值面额（美分），只返回配了产品 ID 的档位。 */
+export function topupDenominations(env: PaymentConfigEnv): number[] {
+  const map = parseMap(env.DODO_TOPUP_PRODUCT_IDS);
+  return Object.keys(map)
+    .map((key) => Number(key))
+    .filter((cents) => Number.isInteger(cents) && cents > 0 && topupProductId(env, cents) !== null)
+    .sort((a, b) => a - b);
 }
 
 export function dodoApiBase(env: PaymentConfigEnv): string {

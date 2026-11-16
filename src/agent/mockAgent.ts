@@ -505,6 +505,30 @@ export class MockAgentBridge implements AgentBridge {
     return this.myServers.checkout(orderId);
   }
 
+  async myServerAccount() {
+    return this.myServers.account();
+  }
+
+  async myServerLoginStart(email: string) {
+    return this.myServers.loginStart(email);
+  }
+
+  async myServerLoginVerify(email: string, code: string) {
+    return this.myServers.loginVerify(email, code);
+  }
+
+  async myServerLogout() {
+    return this.myServers.logout();
+  }
+
+  async myServerWallet() {
+    return this.myServers.wallet();
+  }
+
+  async myServerTopup(denomination: number) {
+    return this.myServers.topup(denomination);
+  }
+
   async myServerCancelOrder(orderId: string) {
     return this.myServers.cancelOrder(orderId);
   }

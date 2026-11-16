@@ -567,6 +567,45 @@ export interface MyServerIdentity {
   account_id: string | null;
 }
 
+/** 登录态摘要（2.27.0）：界面只展示 `logged_in` 与 `email`。 */
+export interface MyServerAccount {
+  logged_in: boolean;
+  email: string | null;
+  account_id: string | null;
+  device_id: string | null;
+  account_kind: "device" | "email" | null;
+}
+
+/** 发验证码的结果（2.27.0）。 */
+export interface MyServerLoginTicket {
+  sent: boolean;
+  cooldown_seconds: number;
+  retry_after_seconds?: number;
+}
+
+/** 余额与可充值档位（2.28.1）；金额一律 USD 分。 */
+export interface MyServerWallet {
+  balance_cents: number;
+  currency: string;
+  denominations_cents: number[];
+  updated_at: string;
+}
+
+/** 充值收银台会话（2.27.0）；非生产 fake 通道没有 URL。 */
+export interface MyServerTopup {
+  topup_id: string;
+  checkout_url: string | null;
+  denomination_cents: number;
+}
+
+/** 结账扣费结果（2.28.0）。 */
+export interface MyServerCharge {
+  order_id: string;
+  state: "paid" | "provisioning" | "ready";
+  charged_cents: number;
+  balance_after_cents: number;
+}
+
 export interface MyServerSshCredentials {
   host: string;
   port: number;
@@ -657,8 +696,8 @@ export interface AgentBridge {
   myServerGet(serverId: string): Promise<MyServer>;
   /** 下单；本期是假支付，只产生一张订单。 */
   myServerCreate(input: MyServerCreateInput): Promise<MyServerOrder>;
-  /** 假支付：立即 paid 并开始编排。 */
-  myServerCheckout(orderId: string): Promise<MyServerOrder>;
+  /** 从余额扣一个月并开始建机（2.28.0）；余额不足原样透出 shortfall。 */
+  myServerCheckout(orderId: string): Promise<MyServerCharge>;
   /** 取消未完成订单（已建实例会先销毁）。 */
   myServerCancelOrder(orderId: string): Promise<MyServerOrder>;
   /** 销毁旧机并用同地区同套餐新建。 */
@@ -675,6 +714,18 @@ export interface AgentBridge {
   myServerRegisterDevice(): Promise<MyServerDeviceIdentity>;
   /** 只读本地：是否已有设备身份；不联网、不注册、不刷新令牌。 */
   myServerIdentity(): Promise<MyServerIdentity>;
+  /** 发邮箱验证码（2.27.0）；60 秒冷却由控制面决定。 */
+  myServerLoginStart(email: string): Promise<MyServerLoginTicket>;
+  /** 校验验证码并登录；Host 自动带设备证明。 */
+  myServerLoginVerify(email: string, code: string): Promise<MyServerAccount>;
+  /** 只读本地登录态：不联网、不刷新令牌。 */
+  myServerAccount(): Promise<MyServerAccount>;
+  /** 服务端登出；失败原样上报，界面不假装已退出。 */
+  myServerLogout(): Promise<MyServerAccount>;
+  /** 余额与充值档位（2.28.1）；前端不做金额运算。 */
+  myServerWallet(): Promise<MyServerWallet>;
+  /** 创建充值收银台会话；Host 负责用系统浏览器打开。 */
+  myServerTopup(denominationCents: number): Promise<MyServerTopup>;
   /** 恢复网络：撤代理 → 停运行时 → 清明文配置（不依赖 AI）。 */
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
   /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */

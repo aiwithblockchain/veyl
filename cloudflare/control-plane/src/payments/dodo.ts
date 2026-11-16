@@ -1,7 +1,7 @@
 // Dodo Payments：建收银台会话 + webhook 验签（Standard Webhooks）。
 // 参考实现：TweetPilot cloudflare/license-worker/src/routes/dodo-*.ts。
 
-import { dodoApiBase, dodoProductId, type PaymentConfigEnv } from "../lib/config";
+import { dodoApiBase, type PaymentConfigEnv } from "../lib/config";
 
 export interface DodoEnv extends PaymentConfigEnv {
   DODO_API_KEY?: string;
@@ -10,18 +10,24 @@ export interface DodoEnv extends PaymentConfigEnv {
 
 export type CheckoutResult =
   | { ok: true; sessionId: string; checkoutUrl: string }
-  | { ok: false; reason: "not_configured" | "upstream" };
+  | { ok: false; reason: "not_configured" | "upstream"; status?: number; detail?: string };
 
 export async function createCheckoutSession(
   env: DodoEnv,
-  input: { orderId: string; email: string; plan: string; returnUrl: string },
+  input: {
+    productId: string;
+    email: string;
+    returnUrl: string;
+    metadata?: Record<string, string>;
+  },
 ): Promise<CheckoutResult> {
-  const productId = dodoProductId(env, input.plan);
+  const productId = input.productId;
   if (!env.DODO_API_KEY || !productId) return { ok: false, reason: "not_configured" };
 
   let response: Response;
+  const url = `${dodoApiBase(env)}/checkouts`;
   try {
-    response = await fetch(`${dodoApiBase(env)}/checkouts`, {
+    response = await fetch(url, {
       method: "POST",
       headers: {
         authorization: `Bearer ${env.DODO_API_KEY}`,
@@ -32,24 +38,33 @@ export async function createCheckoutSession(
         customer: { email: input.email },
         return_url: input.returnUrl,
         // 能否原样回传待核（设计 §9.1）；回不来就靠 checkout_session_id 匹配订单。
-        metadata: { order_id: input.orderId, plan: input.plan },
+        metadata: input.metadata ?? {},
       }),
     });
-  } catch {
-    return { ok: false, reason: "upstream" };
+  } catch (error) {
+    const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    console.warn(`[dodo] checkout_request_failed ${detail}`);
+    return { ok: false, reason: "upstream", detail };
   }
 
   if (!response.ok) {
-    console.warn(`[dodo] checkout_failed status=${response.status}`);
-    return { ok: false, reason: "upstream" };
+    const text = (await response.text().catch(() => "")).slice(0, 300);
+    console.warn(`[dodo] checkout_failed status=${response.status} body=${text}`);
+    return { ok: false, reason: "upstream", status: response.status, detail: text };
   }
 
   const body = (await response.json().catch(() => null)) as
-    | { id?: unknown; checkout_url?: unknown }
+    | { id?: unknown; session_id?: unknown; checkout_url?: unknown }
     | null;
-  const sessionId = typeof body?.id === "string" ? body.id : "";
+  // Dodo 实际返回 session_id；旧文档/参考实现里写的是 id，两个都认。
+  const rawId = typeof body?.session_id === "string" ? body.session_id : body?.id;
+  const sessionId = typeof rawId === "string" ? rawId : "";
   const checkoutUrl = typeof body?.checkout_url === "string" ? body.checkout_url : "";
-  if (!sessionId || !checkoutUrl.startsWith("https://")) return { ok: false, reason: "upstream" };
+  if (!sessionId || !checkoutUrl.startsWith("https://")) {
+    const keys = body && typeof body === "object" ? Object.keys(body).join(",") : "non_object";
+    console.warn(`[dodo] checkout_unexpected_body keys=${keys}`);
+    return { ok: false, reason: "upstream", detail: `unexpected_body:${keys}` };
+  }
   return { ok: true, sessionId, checkoutUrl };
 }
 

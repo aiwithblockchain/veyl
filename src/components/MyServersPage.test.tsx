@@ -4,8 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AgentBridge,
   MyServer,
+  MyServerAccount,
   MyServerCatalog,
   MyServerCreateInput,
+  MyServerWallet,
 } from "../agent/bridge";
 import type { AgentEvent } from "../agent/protocol";
 import { AGENT_EVENTS } from "../agent/protocol";
@@ -13,6 +15,8 @@ import { saveAccount } from "../myservers/account";
 import { useMyServers } from "../myservers/useMyServers";
 import { MyServersPage } from "./MyServersPage";
 import { MyServersRail } from "./MyServersRail";
+import { MyServerLogin } from "./MyServerLogin";
+import { MyServerTopUp } from "./MyServerTopUp";
 
 const CATALOG: MyServerCatalog = {
   regions: [
@@ -78,9 +82,52 @@ const SERVERS: MyServer[] = [
   }),
 ];
 
+const ACCOUNT: MyServerAccount = {
+  logged_in: true,
+  email: "me@example.com",
+  account_id: "acct_1",
+  device_id: "dev_1",
+  account_kind: "email",
+};
+
+const LOGGED_OUT: MyServerAccount = {
+  logged_in: false,
+  email: null,
+  account_id: null,
+  device_id: "dev_1",
+  account_kind: "device",
+};
+
+const WALLET: MyServerWallet = {
+  balance_cents: 800,
+  currency: "USD",
+  denominations_cents: [1000, 2000, 5000, 10_000],
+  updated_at: new Date(0).toISOString(),
+};
+
 function makeBridge(servers: MyServer[] = SERVERS) {
   const listeners = new Set<(event: AgentEvent) => void>();
+  const state = { account: { ...ACCOUNT } };
   return {
+    myServerAccount: vi.fn(async () => ({ ...state.account })),
+    setAccount: (next: MyServerAccount) => {
+      state.account = { ...next };
+    },
+    myServerLoginStart: vi.fn(async () => ({ sent: true, cooldown_seconds: 60 })),
+    myServerLoginVerify: vi.fn(async (email: string) => {
+      state.account = { ...ACCOUNT, email };
+      return { ...state.account };
+    }),
+    myServerLogout: vi.fn(async () => {
+      state.account = { ...LOGGED_OUT };
+      return { ...state.account };
+    }),
+    myServerWallet: vi.fn(async () => ({ ...WALLET })),
+    myServerTopup: vi.fn(async (denomination: number) => ({
+      topup_id: "topup_1",
+      checkout_url: null,
+      denomination_cents: denomination,
+    })),
     myServerCatalog: vi.fn(async () => CATALOG),
     myServerIdentity: vi.fn(
       async (): Promise<{ has_identity: boolean; account_id: string | null }> => ({
@@ -117,13 +164,8 @@ function makeBridge(servers: MyServer[] = SERVERS) {
     myServerCheckout: vi.fn(async () => ({
       order_id: "ord_1",
       state: "provisioning" as const,
-      region: "nyc1",
-      plan: "vc2-1c-1gb",
-      amount_usd: 5,
-      created_at: new Date(0).toISOString(),
-      expires_at: null,
-      server_id: "srv_new",
-      failure: null,
+      charged_cents: 600,
+      balance_after_cents: 200,
     })),
     myServerCancelOrder: vi.fn(),
     myServerRebuild: vi.fn(async () => ({ newServerId: "srv_new", state: "creating" as const })),
@@ -161,7 +203,11 @@ function Harness({
         selectedId={state.selectedId}
         loading={state.loading}
         identityMissing={state.identityMissing}
-        identityPresent={state.identityPresent}
+        account={state.account}
+        accountLoaded={state.accountLoaded}
+        wallet={state.wallet}
+        walletLoading={state.walletLoading}
+        walletError={state.walletError}
         error={state.error}
         retrying={state.retrying}
         retryNotice={state.retryNotice}
@@ -169,7 +215,10 @@ function Harness({
         onSelect={state.select}
         onNew={state.openWizard}
         onRetry={() => void state.retry()}
-        onIdentityAction={() => void state.identityAction()}
+        onLogin={state.openLogin}
+        onLogout={state.logout}
+        onTopUp={state.openTopUp}
+        onRefreshWallet={() => void state.refreshWallet()}
         onOpenSettings={() => {}}
       />
       <MyServersPage
@@ -183,12 +232,32 @@ function Harness({
         joinGroupName={joinGroupName}
         onNew={state.openWizard}
         onEnsureIdentity={state.ensureIdentity}
+        onTopUp={state.openTopUp}
         onJoinServer={onJoinServer}
         onUseServer={onUseServer}
         onChanged={() => void state.refresh()}
         onOrdered={state.ordered}
+        onRebuilt={state.rebuilt}
         onRetryDetail={state.retryDetail}
       />
+      {state.loginOpen ? (
+        <MyServerLogin
+          onStart={state.loginStart}
+          onVerify={state.loginVerify}
+          onCancel={state.closeLogin}
+          mockHint
+        />
+      ) : null}
+      {state.topupOpen ? (
+        <MyServerTopUp
+          wallet={state.wallet}
+          loading={state.walletLoading}
+          error={state.walletError}
+          onRetry={() => void state.refreshWallet()}
+          onTopUp={state.topup}
+          onClose={state.closeTopUp}
+        />
+      ) : null}
     </>
   );
 }
@@ -213,29 +282,25 @@ afterEach(() => {
 });
 
 describe("我的服务器 destination", () => {
-  it("身份失效：左栏状态显示未登录，点它重新注册", async () => {
+  it("列表要求登录：左栏显示登录，点开登录弹窗", async () => {
     const bridge = makeBridge();
     bridge.myServerList.mockRejectedValue({
-      code: "PRECONDITION_FAILED",
-      message: "身份需要重新注册",
+      code: "UNAUTHENTICATED",
+      message: "需要先登录。",
       details: { reason: "auth_required" },
       retryable: true,
     });
     renderHarness(bridge);
 
-    const status = await screen.findByRole("button", { name: "未登录" });
-    expect(screen.queryByText(/身份已丢失/)).toBeNull();
+    const status = await screen.findByRole("button", { name: "登录" });
+    expect(await screen.findByText("登录后查看你的服务器")).toBeTruthy();
     expect(
       await screen.findByRole("heading", { name: "新建服务器" }),
     ).toBeTruthy();
 
-    bridge.myServerList.mockClear();
-    bridge.myServerList.mockResolvedValue({ servers: SERVERS });
     fireEvent.click(status);
-
-    await waitFor(() => expect(bridge.myServerList).toHaveBeenCalled());
     expect(
-      await screen.findByRole("button", { name: "已登录 · 设备" }),
+      await screen.findByRole("dialog", { name: "登录我的服务器" }),
     ).toBeTruthy();
   });
 
@@ -274,30 +339,40 @@ describe("我的服务器 destination", () => {
     expect(screen.getByRole("heading", { name: "新建服务器" })).toBeTruthy();
   });
 
-  it("没有身份：打开时不请求列表，左栏提示、状态未登录", async () => {
+  it("未登录：打开时不请求列表，登录成功后回到列表", async () => {
     const bridge = makeBridge();
-    bridge.myServerIdentity.mockResolvedValue({
-      has_identity: false,
-      account_id: null,
-    });
+    bridge.setAccount(LOGGED_OUT);
     renderHarness(bridge);
 
     expect(await screen.findByText("登录后查看你的服务器")).toBeTruthy();
-    expect(await screen.findByRole("button", { name: "未登录" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "登录" })).toBeTruthy();
     expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
     expect(
       await screen.findByRole("radiogroup", { name: "服务器类型" }),
     ).toBeTruthy();
     expect(bridge.myServerList).not.toHaveBeenCalled();
 
-    bridge.myServerList.mockResolvedValue({ servers: SERVERS });
-    fireEvent.click(screen.getByRole("button", { name: "未登录" }));
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+    const dialog = await screen.findByRole("dialog", { name: "登录我的服务器" });
+    fireEvent.change(within(dialog).getByLabelText("邮箱"), {
+      target: { value: "me@example.com" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "发送验证码" }));
+    expect(
+      await within(dialog).findByText("验证码已发到 me@example.com。"),
+    ).toBeTruthy();
+    fireEvent.change(within(dialog).getByLabelText("验证码"), {
+      target: { value: "123456" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "登录" }));
+
     expect(
       await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
     ).toBeTruthy();
     expect(
-      await screen.findByRole("button", { name: "已登录 · 设备" }),
+      await screen.findByRole("button", { name: /me@example.com/ }),
     ).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "登录我的服务器" })).toBeNull();
   });
 
   it("点创建时先初始化身份，再下单", async () => {
@@ -464,6 +539,30 @@ describe("我的服务器 destination", () => {
     expect(keys[3]).not.toBe(keys[2]);
   });
 
+  it("换了地区或套餐再下单，必须换新幂等键", async () => {
+    const bridge = makeBridge();
+    const keys: string[] = [];
+    bridge.myServerCreate.mockImplementation(async (input) => {
+      keys.push(input.idempotencyKey);
+      throw {
+        code: "TIMEOUT",
+        message: "请求超时。",
+        details: { reason: "timeout" },
+        retryable: true,
+      };
+    });
+    renderHarness(bridge);
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建服务器" }));
+    await screen.findByText("可以点「创建服务器」再试一次。");
+
+    // 超时后换了地区：同一个键配不同请求体，控制面会直接拒绝。
+    fireEvent.click(screen.getByRole("radio", { name: "纽约 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "创建服务器" }));
+    await waitFor(() => expect(keys).toHaveLength(2));
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
   it("安装中：只有进度和销毁", async () => {
     saveAccount("me@example.com");
     renderHarness(makeBridge());
@@ -474,16 +573,26 @@ describe("我的服务器 destination", () => {
     expect(screen.getByRole("button", { name: "销毁" })).toBeTruthy();
   });
 
-  it("出错：重新建一台 + 销毁", async () => {
+  it("出错：重新建一台后选中新机器并显示进度", async () => {
     saveAccount("me@example.com");
     const bridge = makeBridge();
+    bridge.myServerGet.mockImplementation(async (serverId: string) =>
+      serverId === "srv_new"
+        ? server({ server_id: "srv_new", state: "creating", node_id: null })
+        : (SERVERS.find((item) => item.server_id === serverId) ?? SERVERS[0]),
+    );
     renderHarness(bridge);
 
     fireEvent.click(await screen.findByRole("button", { name: /法兰克福 1 · DigitalOcean/ }));
     expect(await screen.findByText(/服务端没装好/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "重新建一台" }));
     await waitFor(() => expect(bridge.myServerRebuild).toHaveBeenCalledWith("srv_3", true));
+
+    expect(
+      await screen.findByRole("progressbar", { name: "正在建机器" }),
+    ).toBeTruthy();
     expect(screen.getByRole("button", { name: "销毁" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "新建服务器" })).toBeNull();
   });
 
   it("创建中销毁：确认文案说明会中断安装", async () => {
@@ -518,7 +627,9 @@ describe("我的服务器 destination", () => {
     renderHarness(makeBridge([]));
 
     expect(await screen.findByText("还没有服务器")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "已登录 · 设备" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /me@example.com/ }),
+    ).toBeTruthy();
     expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "创建服务器" })).toBeTruthy();
     expect(document.querySelectorAll(".myservers .btn--primary")).toHaveLength(1);
@@ -616,6 +727,81 @@ describe("我的服务器 destination", () => {
       }),
     );
     expect(bridge.myServerCheckout).toHaveBeenCalledWith("ord_1");
+  });
+
+  it("余额不足：显示还差多少，点「去充值」打开充值档位", async () => {
+    const bridge = makeBridge();
+    bridge.myServerCheckout.mockRejectedValueOnce({
+      code: "PRECONDITION_FAILED",
+      message: "余额不够扣这个月的费用。",
+      details: { reason: "insufficient_balance", shortfall_cents: 520 },
+      retryable: true,
+    });
+    renderHarness(bridge);
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建服务器" }));
+    expect(await screen.findByText("余额不足，还差 $5.20。")).toBeTruthy();
+    expect(screen.getByText("充值后回到这里，再点「创建服务器」。")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "去充值" }));
+    expect(await screen.findByRole("dialog", { name: "充值" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "$10.00" })).toBeTruthy();
+  });
+
+  it("扣费成功：显示扣了多少、还剩多少", async () => {
+    const bridge = makeBridge();
+    renderHarness(bridge);
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建服务器" }));
+    expect(await screen.findByText("已扣 $6.00，余额 $2.00。")).toBeTruthy();
+  });
+
+  it("账号块：展开看余额；登出失败不假装退出", async () => {
+    const bridge = makeBridge();
+    bridge.myServerLogout.mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "连不上服务器。",
+      retryable: true,
+    });
+    renderHarness(bridge);
+
+    fireEvent.click(await screen.findByRole("button", { name: /me@example.com/ }));
+    expect(await screen.findByText("$8.00")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "登出" }));
+    expect(
+      screen.getByText("退出后这台设备不再属于该账户；已有配置和节点不受影响。"),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "确认退出" }));
+
+    expect(await screen.findByText(/没退出登录/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /me@example.com/ })).toBeTruthy();
+  });
+
+  it("验证码错误：提示还能试几次", async () => {
+    const bridge = makeBridge();
+    bridge.setAccount(LOGGED_OUT);
+    bridge.myServerLoginVerify.mockRejectedValueOnce({
+      code: "PRECONDITION_FAILED",
+      message: "验证码不对。",
+      details: { reason: "code_invalid", attempts_remaining: 2 },
+      retryable: true,
+    });
+    renderHarness(bridge);
+
+    fireEvent.click(await screen.findByRole("button", { name: "登录" }));
+    const dialog = await screen.findByRole("dialog", { name: "登录我的服务器" });
+    fireEvent.change(within(dialog).getByLabelText("邮箱"), {
+      target: { value: "me@example.com" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "发送验证码" }));
+    fireEvent.change(await within(dialog).findByLabelText("验证码"), {
+      target: { value: "000000" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "登录" }));
+
+    expect(await within(dialog).findByText("还可以试 2 次。")).toBeTruthy();
+    expect(bridge.myServerLoginVerify).toHaveBeenCalledWith("me@example.com", "000000");
   });
 
   it("创建失败按可重试与否给不同下一步", async () => {

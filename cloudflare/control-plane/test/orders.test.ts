@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { handleOrders } from "../src/orders";
-import { signAccessToken } from "../src/lib/crypto";
+import { signAccessToken, sha256B64u } from "../src/lib/crypto";
 import { FakeD1 } from "./helpers/fakeD1";
 
 const ACCOUNT = "acct_test0000000000000000";
@@ -31,6 +31,7 @@ async function envWith(db: FakeD1, jwk: string) {
     DO_API_TOKEN: "do-token",
     ENROLL_BASE_URL: "https://control.example.com",
     ENVIRONMENT: "test",
+    PLAN_PRICES_USD: JSON.stringify({ "s-1vcpu-512mb-10gb": 8, "s-1vcpu-1gb": 9, "s-1vcpu-2gb": 18 }),
     token,
   };
 }
@@ -89,13 +90,48 @@ describe("orders", () => {
     expect(res?.status).toBe(200);
     const body = (await res!.json()) as { order_id: string; amount_usd: number; state: string; region: string };
     expect(body.state).toBe("pending_payment");
-    expect(body.amount_usd).toBe(6);
+    expect(body.amount_usd).toBe(9);
     expect(body.region).toBe("sgp1");
     expect(body.order_id.startsWith("ord_")).toBe(true);
+    // amount_cents 是 NOT NULL：下单必须落这一列，否则线上建单会撞约束。
+    expect((db.rows("orders")[0] as { amount_cents?: number }).amount_cents).toBe(900);
   });
 
-  it("同一幂等键重复下单只产生一笔订单", async () => {
+  it("在途的幂等占位会拒绝重复请求，超时未完成的会被接管", async () => {
     const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+    const requestHash = await sha256B64u(
+      JSON.stringify({ region: "sgp1", plan: "s-1vcpu-1gb" }),
+    );
+    const seedClaim = (createdAt: number) => {
+      db.rows("idempotency_keys").length = 0;
+      db.rows("idempotency_keys").push({
+        account_id: ACCOUNT,
+        endpoint: "orders.create",
+        key: "idem-key-inflight",
+        request_hash: requestHash,
+        status: 0,
+        response: null,
+        created_at: createdAt,
+      });
+    };
+
+    seedClaim(Date.now() - 1000);
+    const blocked = await handleOrders(orderRequest(env.token, "idem-key-inflight"), env as never);
+    expect(blocked?.status).toBe(409);
+    expect(((await blocked!.json()) as { details: { reason: string } }).details.reason).toBe(
+      "idempotency_in_flight",
+    );
+
+    // 占位超过 2 分钟没写完：视为进程已死，允许接管并正常下单。
+    seedClaim(Date.now() - 10 * 60 * 1000);
+    const taken = await handleOrders(orderRequest(env.token, "idem-key-inflight"), env as never);
+    expect(taken?.status).toBe(200);
+    expect(db.rows("orders")).toHaveLength(1);
+  });
+
+  it("同一幂等键重复下单只产生一笔订单", async () => {    const db = new FakeD1();
     const env = await envWith(db, await signingJwk());
     stubCatalog();
 
@@ -123,6 +159,21 @@ describe("orders", () => {
     expect(body.details.reason).toBe("idempotency_conflict");
   });
 
+  it("没配售价的套餐不卖，不拿 DigitalOcean 成本价兜底", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+
+    const res = await handleOrders(
+      orderRequest(env.token, "idem-key-price", { region: "sgp1", plan: "s-1vcpu-512mb-10gb" }),
+      { ...env, PLAN_PRICES_USD: JSON.stringify({ "s-1vcpu-1gb": 9 }) } as never,
+    );
+    expect(res?.status).toBe(409);
+    const body = (await res!.json()) as { details: { reason: string } };
+    expect(body.details.reason).toBe("invalid_plan");
+    expect(db.rows("orders")).toHaveLength(0);
+  });
+
   it("不可售的套餐被拒绝", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());
@@ -137,7 +188,7 @@ describe("orders", () => {
     expect(body.details.reason).toBe("invalid_plan");
   });
 
-  it("假支付创建服务器并选定端口", async () => {
+  it("余额扣费创建服务器并选定端口", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());
     stubCatalog();
@@ -145,20 +196,20 @@ describe("orders", () => {
     const created = (await (
       await handleOrders(orderRequest(env.token, "idem-key-0005"), env as never)
     )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 2000;
 
     const checkout = await handleOrders(
       new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
         method: "POST",
         headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-1" },
-        body: JSON.stringify({ channel: "fake" }),
       }),
       env as never,
     );
     expect(checkout?.status).toBe(200);
-    const paid = (await checkout!.json()) as { state: string; checkout_url: string | null };
-    expect(paid.state).toBe("provisioning");
-    // 结账只回会话信息（契约 2.27.0）；服务器在库里，且只有一台。
-    expect(paid.checkout_url).toBeNull();
+    const paid = (await checkout!.json()) as { charged_cents: number; balance_after_cents: number };
+    // 契约 2.28.0：结账直接从余额扣一个月，返回扣了多少、扣完还剩多少。
+    expect(paid.charged_cents).toBe(900);
+    expect(paid.balance_after_cents).toBe(1100);
     expect(db.rows("servers")).toHaveLength(1);
 
     const server = db.rows("servers")[0];
@@ -193,11 +244,11 @@ describe("orders", () => {
     const paidOrder = (await (
       await handleOrders(orderRequest(env.token, "idem-key-0007"), env as never)
     )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 2000;
     await handleOrders(
       new Request(`https://example.com/v1/orders/${paidOrder.order_id}/checkout`, {
         method: "POST",
         headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-2" },
-        body: JSON.stringify({ channel: "fake" }),
       }),
       env as never,
     );
@@ -221,13 +272,13 @@ describe("orders", () => {
     const order = (await (
       await handleOrders(orderRequest(env.token, "idem-key-0011"), env as never)
     )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 2000;
 
     const checkout = (key: string) =>
       handleOrders(
         new Request(`https://example.com/v1/orders/${order.order_id}/checkout`, {
           method: "POST",
           headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": key },
-          body: JSON.stringify({ channel: "fake" }),
         }),
         env as never,
       );
@@ -277,11 +328,11 @@ describe("orders", () => {
     const order = (await (
       await handleOrders(orderRequest(env.token, "idem-key-0009"), env as never)
     )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 2000;
     await handleOrders(
       new Request(`https://example.com/v1/orders/${order.order_id}/checkout`, {
         method: "POST",
         headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-9" },
-        body: JSON.stringify({ channel: "fake" }),
       }),
       env as never,
     );

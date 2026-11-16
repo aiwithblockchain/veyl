@@ -22,14 +22,11 @@ pub const SERVER_STATES: [&str; 10] = [
     "gone",
 ];
 
-pub const ORDER_STATES: [&str; 9] = [
+pub const ORDER_STATES: [&str; 6] = [
     "pending_payment",
-    "awaiting_payment",
     "paid",
     "provisioning",
     "ready",
-    "payment_failed",
-    "expired",
     "cancelled",
     "failed",
 ];
@@ -83,28 +80,50 @@ pub struct MyServerOrder {
     pub expires_at: Option<String>,
     #[serde(default)]
     pub server_id: Option<String>,
-    /// 未支付 / 支付失败时给「继续支付」用（2.27.0）。
-    #[serde(default)]
-    pub checkout_url: Option<String>,
     #[serde(default)]
     pub failure: Option<MyServerOrderFailure>,
 }
 
 /// `my_server_checkout` 的返回：收银台会话（2.27.0）。
+/// `my_server_checkout` 的返回：从余额扣一个月（2.28.0）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MyServerCheckout {
+pub struct MyServerCharge {
     #[serde(default)]
     pub order_id: String,
     pub state: String,
-    #[serde(default)]
-    pub checkout_url: Option<String>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub expires_at: Option<String>,
+    /// 实际扣费（美分）。已付过的订单重复调用为 0。
+    pub charged_cents: i64,
+    pub balance_after_cents: i64,
 }
 
-const CHECKOUT_STATES: [&str; 3] = ["awaiting_payment", "paid", "provisioning"];
+const CHARGE_STATES: [&str; 3] = ["paid", "provisioning", "ready"];
+
+/// `my_server_wallet` 的返回：余额（USD 分）与可选充值面额（整数分，升序）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MyServerWallet {
+    pub balance_cents: i64,
+    #[serde(default = "default_currency")]
+    pub currency: String,
+    /// 充值档位，直接来自控制面，Host 不排序、不换算。
+    #[serde(default)]
+    pub denominations_cents: Vec<i64>,
+    /// 控制面不给时间，由 Host 补本地时间。
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+fn default_currency() -> String {
+    "USD".into()
+}
+
+/// `my_server_topup` 的返回：充值收银台会话；非生产 fake 通道没有 URL。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MyServerTopup {
+    pub topup_id: String,
+    #[serde(default)]
+    pub checkout_url: Option<String>,
+    pub denomination_cents: i64,
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct RawOrder {
@@ -124,8 +143,6 @@ struct RawOrder {
     expires_at: Option<String>,
     #[serde(default)]
     server_id: Option<String>,
-    #[serde(default)]
-    checkout_url: Option<String>,
     #[serde(default)]
     failure: Option<MyServerOrderFailure>,
 }
@@ -256,9 +273,6 @@ fn merge_order(
         server_id: raw
             .server_id
             .or_else(|| fallback.and_then(|order| order.server_id.clone())),
-        checkout_url: raw
-            .checkout_url
-            .or_else(|| fallback.and_then(|order| order.checkout_url.clone())),
         failure: raw
             .failure
             .or_else(|| fallback.and_then(|order| order.failure.clone())),
@@ -339,24 +353,35 @@ pub async fn create(
     merge_order(raw, &order_id, None, Some(region), Some(plan))
 }
 
-/// 创建收银台会话（§4.1）：返回 `checkout_url`，**不再同步建机**。
+/// 从余额扣一个月并开始建机（2.28.0）。
 ///
-/// `channel` 省略等于 `dodo`；`fake` 只在非生产环境可用（本地开发与 E2E 的后门）。
-pub async fn checkout(order_id: &str, channel: &str) -> Result<MyServerCheckout, CpError> {
-    let channel = resolve_channel(channel, crate::control_plane::env::current().env)?;
+/// 余额不足由控制面返回 `PRECONDITION_FAILED / insufficient_balance`，并带
+/// `details.shortfall_cents`；Host 原样透出，不做浮点换算。已付过的订单重复
+/// 调用返回 200 且 `charged_cents = 0`，不是二次扣费。
+pub async fn checkout(order_id: &str) -> Result<MyServerCharge, CpError> {
     let client = ControlPlane::new()?;
-    let body = json!({ "channel": channel });
     let raw = client
         .post(
             &format!("/v1/orders/{order_id}/checkout"),
-            Some(&body),
+            None,
             Some(&new_idempotency_key()),
         )
         .await?;
-    parse_checkout(raw, order_id)
+    let charge = parse_charge(raw, order_id)?;
+    // 扣费成功即已付款：把订单缓存与既有事件跟上。
+    let fallback = remembered_order(&charge.order_id);
+    let update = RawOrder {
+        order_id: Some(charge.order_id.clone()),
+        state: Some(charge.state.clone()),
+        ..Default::default()
+    };
+    if let Ok(order) = merge_order(update, &charge.order_id, fallback.as_ref(), None, None) {
+        super::events::emit_order_changed(&order);
+    }
+    Ok(charge)
 }
 
-/// 支付通道：省略 = `dodo`；`fake` 只在非生产可用。
+/// 支付通道：省略 = `dodo`；`fake` 只在非生产可用（本地开发与 E2E 的后门）。
 fn resolve_channel<'a>(
     channel: &'a str,
     env: crate::control_plane::env::ControlPlaneEnv,
@@ -376,7 +401,7 @@ fn resolve_channel<'a>(
     if channel == "fake" && env == crate::control_plane::env::ControlPlaneEnv::Prod {
         return Err(CpError::new(
             "PRECONDITION_FAILED",
-            "生产环境不支持假支付",
+            "生产环境不支持假充值",
             false,
             json!({ "reason": "channel_not_allowed" }),
         ));
@@ -384,14 +409,88 @@ fn resolve_channel<'a>(
     Ok(channel)
 }
 
-fn parse_checkout(raw: Value, order_id: &str) -> Result<MyServerCheckout, CpError> {
-    let mut checkout: MyServerCheckout = serde_json::from_value(raw)
-        .map_err(|_| CpError::invalid_response("结账响应格式不正确"))?;
-    validate_state(&checkout.state, &CHECKOUT_STATES, "结账")?;
-    if checkout.order_id.trim().is_empty() {
-        checkout.order_id = order_id.to_string();
+fn parse_charge(raw: Value, order_id: &str) -> Result<MyServerCharge, CpError> {
+    let mut charge: MyServerCharge = serde_json::from_value(raw)
+        .map_err(|_| CpError::invalid_response("扣费响应格式不正确"))?;
+    validate_state(&charge.state, &CHARGE_STATES, "扣费")?;
+    if charge.order_id.trim().is_empty() {
+        charge.order_id = order_id.to_string();
     }
-    Ok(checkout)
+    if charge.charged_cents < 0 || charge.balance_after_cents < 0 {
+        return Err(CpError::invalid_response("扣费金额不能为负"));
+    }
+    Ok(charge)
+}
+
+/// 读余额（`GET /v1/wallet`，USD 分）。`updated_at` 由 Host 补本地时间。
+pub async fn wallet() -> Result<MyServerWallet, CpError> {
+    let client = ControlPlane::new()?;
+    let raw = client.get("/v1/wallet").await?;
+    parse_wallet(raw)
+}
+
+fn parse_wallet(raw: Value) -> Result<MyServerWallet, CpError> {
+    let mut wallet: MyServerWallet = serde_json::from_value(raw)
+        .map_err(|_| CpError::invalid_response("钱包响应格式不正确"))?;
+    if wallet.balance_cents < 0 {
+        return Err(CpError::invalid_response("钱包余额不能为负"));
+    }
+    if wallet.denominations_cents.iter().any(|cents| *cents <= 0) {
+        return Err(CpError::invalid_response("充值面额必须是正整数分"));
+    }
+    if wallet.currency.trim().is_empty() {
+        wallet.currency = default_currency();
+    }
+    wallet.updated_at = now_iso();
+    Ok(wallet)
+}
+
+/// 创建充值会话（`POST /v1/topups`）。面额是整数美分；非生产 `fake` 直接入账。
+pub async fn topup(denomination_cents: i64, channel: &str) -> Result<MyServerTopup, CpError> {
+    if denomination_cents <= 0 {
+        return Err(CpError::new(
+            "PRECONDITION_FAILED",
+            "充值面额不合法",
+            false,
+            json!({ "reason": "invalid_denomination" }),
+        ));
+    }
+    let channel = resolve_channel(channel, crate::control_plane::env::current().env)?;
+    let client = ControlPlane::new()?;
+    let body = json!({
+        "denomination_cents": denomination_cents,
+        "channel": channel,
+    });
+    let raw = client.post("/v1/topups", Some(&body), None).await?;
+    parse_topup(raw, denomination_cents)
+}
+
+fn parse_topup(raw: Value, requested_cents: i64) -> Result<MyServerTopup, CpError> {
+    #[derive(Deserialize)]
+    struct RawTopup {
+        #[serde(default)]
+        topup_id: Option<String>,
+        #[serde(default)]
+        checkout_url: Option<String>,
+        #[serde(default)]
+        denomination_cents: Option<i64>,
+    }
+
+    let raw: RawTopup = serde_json::from_value(raw)
+        .map_err(|_| CpError::invalid_response("充值响应格式不正确"))?;
+    let topup_id = raw
+        .topup_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| CpError::invalid_response("充值响应缺少 topup_id"))?;
+    let denomination_cents = raw.denomination_cents.unwrap_or(requested_cents);
+    if denomination_cents <= 0 {
+        return Err(CpError::invalid_response("充值面额不合法"));
+    }
+    Ok(MyServerTopup {
+        topup_id,
+        checkout_url: raw.checkout_url.filter(|value| !value.trim().is_empty()),
+        denomination_cents,
+    })
 }
 
 /// 支付与开通轮询（`GET /v1/orders/{id}`）。状态变化时发既有订单事件。
@@ -739,7 +838,6 @@ mod tests {
             created_at: "2026-11-14T08:00:00Z".into(),
             expires_at: Some("2026-11-14T08:10:00Z".into()),
             server_id: None,
-            checkout_url: None,
             failure: None,
         };
         let raw = parse_order(json!({ "state": "paid", "server_id": "srv_1" })).unwrap();
@@ -758,53 +856,98 @@ mod tests {
     }
 
     #[test]
-    fn the_payment_states_are_accepted_and_carry_the_checkout_url() {
+    fn the_removed_checkout_states_are_rejected() {
         for state in ["awaiting_payment", "payment_failed", "expired"] {
-            let raw = parse_order(json!({
-                "state": state,
-                "checkout_url": "https://pay.example/x",
-            }))
-            .unwrap();
-            let order = merge_order(raw, "ord_1", None, None, None).unwrap();
-            assert_eq!(order.state, state);
-            assert_eq!(order.checkout_url.as_deref(), Some("https://pay.example/x"));
+            let raw = parse_order(json!({ "state": state })).unwrap();
+            let error = merge_order(raw, "ord_1", None, None, None).unwrap_err();
+            assert_eq!(error.reason(), Some("invalid_response"), "{state}");
         }
-
-        let order =
-            merge_order(parse_order(json!({ "state": "paid" })).unwrap(), "ord_1", None, None, None)
-                .unwrap();
-        assert!(order.checkout_url.is_none());
     }
 
     #[test]
-    fn a_checkout_response_carries_the_session_fields() {
-        let checkout = parse_checkout(
+    fn a_charge_response_carries_cents_and_supports_repeat_calls() {
+        let charge = parse_charge(
             json!({
                 "order_id": "ord_1",
-                "state": "awaiting_payment",
-                "checkout_url": "https://pay.example/x",
-                "session_id": "cs_1",
-                "expires_at": "2026-11-15T08:30:00Z",
+                "state": "paid",
+                "charged_cents": 900,
+                "balance_after_cents": 1100,
             }),
             "ord_fallback",
         )
         .unwrap();
-        assert_eq!(checkout.order_id, "ord_1");
-        assert_eq!(checkout.state, "awaiting_payment");
-        assert_eq!(checkout.session_id.as_deref(), Some("cs_1"));
-        assert_eq!(
-            checkout.expires_at.as_deref(),
-            Some("2026-11-15T08:30:00Z")
-        );
+        assert_eq!(charge.order_id, "ord_1");
+        assert_eq!(charge.state, "paid");
+        assert_eq!(charge.charged_cents, 900);
+        assert_eq!(charge.balance_after_cents, 1100);
 
-        // 缺 order_id 时用请求参数补；fake 通道没有 URL。
-        let checkout = parse_checkout(json!({ "state": "paid" }), "ord_2").unwrap();
-        assert_eq!(checkout.order_id, "ord_2");
-        assert!(checkout.checkout_url.is_none());
+        // 已付过的订单重复调用：charged_cents = 0，不是二次扣费。
+        let charge =
+            parse_charge(json!({ "state": "ready", "charged_cents": 0, "balance_after_cents": 1100 }), "ord_2")
+                .unwrap();
+        assert_eq!(charge.order_id, "ord_2");
+        assert_eq!(charge.charged_cents, 0);
 
-        // 未知状态按 invalid_response 处理，不 panic。
-        let error = parse_checkout(json!({ "state": "weird" }), "ord_3").unwrap_err();
+        // 旧收银台状态与负金额都按 invalid_response 处理，不 panic。
+        let error = parse_charge(
+            json!({ "state": "awaiting_payment", "charged_cents": 1, "balance_after_cents": 1 }),
+            "ord_3",
+        )
+        .unwrap_err();
         assert_eq!(error.reason(), Some("invalid_response"));
+        assert!(parse_charge(
+            json!({ "state": "paid", "charged_cents": -1, "balance_after_cents": 1 }),
+            "ord_4",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_wallet_response_defaults_currency_and_stamps_local_time() {
+        let wallet = parse_wallet(json!({
+            "balance_cents": 2000,
+            "denominations_cents": [1000, 2000, 5000, 10000],
+        }))
+        .unwrap();
+        assert_eq!(wallet.balance_cents, 2000);
+        assert_eq!(wallet.currency, "USD");
+        assert_eq!(
+            wallet.denominations_cents,
+            vec![1000, 2000, 5000, 10000]
+        );
+        assert!(chrono::DateTime::parse_from_rfc3339(&wallet.updated_at).is_ok());
+
+        // 缺面额字段按空数组容错；非法面额拒绝。
+        assert!(parse_wallet(json!({ "balance_cents": 0 }))
+            .unwrap()
+            .denominations_cents
+            .is_empty());
+        assert!(parse_wallet(json!({ "balance_cents": 0, "denominations_cents": [0] })).is_err());
+        assert!(parse_wallet(json!({ "balance_cents": -1 })).is_err());
+    }
+
+    #[test]
+    fn a_topup_response_fills_the_requested_denomination() {
+        let topup = parse_topup(
+            json!({ "topup_id": "tp_1", "checkout_url": "https://pay.example/t" }),
+            2000,
+        )
+        .unwrap();
+        assert_eq!(topup.topup_id, "tp_1");
+        assert_eq!(topup.denomination_cents, 2000);
+        assert_eq!(topup.checkout_url.as_deref(), Some("https://pay.example/t"));
+
+        // fake 通道直接入账：没有 URL；响应自带面额时以响应为准。
+        let topup = parse_topup(
+            json!({ "topup_id": "tp_2", "checkout_url": null, "denomination_cents": 1000 }),
+            2000,
+        )
+        .unwrap();
+        assert_eq!(topup.denomination_cents, 1000);
+        assert!(topup.checkout_url.is_none());
+
+        // 缺 topup_id 不可信。
+        assert!(parse_topup(json!({ "denomination_cents": 1000 }), 2000).is_err());
     }
 
     #[test]

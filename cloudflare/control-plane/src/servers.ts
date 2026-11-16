@@ -5,6 +5,7 @@ import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
 import { randomId, sealSecret, sha256B64u, signDetached, openSecret } from "./lib/crypto";
 import { apiError, json } from "./lib/http";
 import { createFirewall, deleteDroplet, getDroplet } from "./providers/digitalocean";
+import { recordLedgerEntry } from "./wallet";
 
 // 每个环境用自己的签名密钥：dev 与 prod 的公钥都内置在客户端，靠 key_id 区分。
 const DEFAULT_CREDENTIAL_KEY_ID = "cp-2026-11";
@@ -130,6 +131,26 @@ async function destroyInstance(
     )
       .bind(reason, row.state, row.order_id)
       .run();
+
+    // 不是用户主动销毁：机器没交付却已经扣过钱，必须退回余额（同一订单只退一次）。
+    const order = await env.DB.prepare(
+      "SELECT id, amount_cents, paid_via FROM orders WHERE id = ?",
+    )
+      .bind(row.order_id)
+      .first<{ id: string; amount_cents: number; paid_via: string | null }>();
+    if (order && order.paid_via === "wallet" && Number(order.amount_cents) > 0) {
+      await recordLedgerEntry(
+        { DB: env.DB },
+        {
+          accountId: row.account_id,
+          kind: "adjustment",
+          amountCents: Number(order.amount_cents),
+          refType: "manual",
+          refId: `refund:${order.id}`,
+          note: `建机失败退款：${reason}`,
+        },
+      );
+    }
   }
   return { ok: true };
 }

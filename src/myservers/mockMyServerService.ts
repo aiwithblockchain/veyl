@@ -1,15 +1,20 @@
 import type {
   MyServer,
+  MyServerAccount,
   MyServerCatalog,
+  MyServerCharge,
   MyServerCreateInput,
   MyServerCredentialNode,
   MyServerFailure,
+  MyServerLoginTicket,
   MyServerOrder,
   MyServerPlan,
   MyServerRebuildResult,
   MyServerRegion,
   MyServerSshCredentials,
   MyServerState,
+  MyServerTopup,
+  MyServerWallet,
 } from "../agent/bridge";
 
 /** 编排的四个阶段；界面按这个顺序画进度。 */
@@ -69,6 +74,12 @@ const STORE_KEY = "veyl.mock.myServers";
 const FAIL_KEY = "veyl.mock.myServers.fail";
 const SEED_KEY = "veyl.mock.myServers.seed";
 const DOWN_KEY = "veyl.mock.myServers.providerDown";
+const ACCOUNT_KEY = "veyl.mock.account";
+
+/** 演示环境没有真邮件；登录弹窗在 mock 下提示这一组。 */
+export const MOCK_LOGIN_CODE = "123456";
+const DEFAULT_EMAIL = "demo@veyl.app";
+const TOPUP_CENTS = [1000, 2000, 5000, 10_000];
 
 const PHASE_MS: Record<string, number> = {
   creating: 700,
@@ -86,6 +97,8 @@ interface Store {
   servers: StoredServer[];
   orders: MyServerOrder[];
   next_id: number;
+  /** 演示余额（USD 分）；默认 0，走一遍充值再买机。 */
+  balance_cents: number;
 }
 
 function readFlag(key: string): string | null {
@@ -94,6 +107,59 @@ function readFlag(key: string): string | null {
   } catch {
     return null;
   }
+}
+
+interface StoredAccount {
+  logged_in: boolean;
+  email: string | null;
+}
+
+/** 演示默认已登录，方便直接看服务器；点「登出」就能走一遍验证码登录。 */
+function readAccount(): StoredAccount {
+  try {
+    const raw = readFlag(ACCOUNT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<StoredAccount>;
+      if (typeof parsed.logged_in === "boolean") {
+        return {
+          logged_in: parsed.logged_in,
+          email: typeof parsed.email === "string" ? parsed.email : null,
+        };
+      }
+    }
+  } catch {
+    // 坏数据按默认已登录处理。
+  }
+  return { logged_in: true, email: DEFAULT_EMAIL };
+}
+
+function writeAccount(account: StoredAccount): void {
+  try {
+    localStorage.setItem(ACCOUNT_KEY, JSON.stringify(account));
+  } catch {
+    // 存不了就只活在这次会话里。
+  }
+}
+
+function accountView(): MyServerAccount {
+  const account = readAccount();
+  return {
+    logged_in: account.logged_in,
+    email: account.logged_in ? (account.email ?? DEFAULT_EMAIL) : null,
+    account_id: "acct_mock",
+    device_id: "dev_mock",
+    account_kind: account.logged_in ? "email" : "device",
+  };
+}
+
+function loginError(
+  code: string,
+  message: string,
+  reason: string,
+  retryable: boolean,
+  extra: Record<string, unknown> = {},
+): never {
+  throw { code, message, details: { reason, ...extra }, retryable };
 }
 
 function readStore(): Store {
@@ -106,6 +172,10 @@ function readStore(): Store {
           servers: parsed.servers as StoredServer[],
           orders: parsed.orders as MyServerOrder[],
           next_id: typeof parsed.next_id === "number" ? parsed.next_id : 1,
+          balance_cents:
+            typeof parsed.balance_cents === "number" && parsed.balance_cents >= 0
+              ? parsed.balance_cents
+              : 0,
         };
       }
     }
@@ -128,7 +198,7 @@ const DEMO_HOLD_MS = 30_000;
 
 /** 没有存档时按 `veyl.mock.myServers.seed` 造一批任意状态的服务器。 */
 function seedStore(): Store {
-  const store: Store = { servers: [], orders: [], next_id: 1 };
+  const store: Store = { servers: [], orders: [], next_id: 1, balance_cents: 0 };
   const seed = readFlag(SEED_KEY);
   const isDefault = seed === null;
   const states: MyServerState[] = isDefault
@@ -357,16 +427,42 @@ export class MockMyServerService {
     return { ...order };
   }
 
-  checkout(orderId: string): MyServerOrder {
+  checkout(orderId: string): MyServerCharge {
     if (readFlag(DOWN_KEY) === "1") providerDown();
     const store = readStore();
     const order = store.orders.find((item) => item.order_id === orderId);
     if (!order) {
       throw { code: "NOT_FOUND", message: "这笔订单不存在了，重新下一单。" };
     }
-    if (order.state !== "pending_payment") return { ...order };
+    if (order.state !== "pending_payment") {
+      // 已付过的订单重复结账：不再扣钱。
+      return {
+        order_id: order.order_id,
+        state:
+          order.state === "ready"
+            ? "ready"
+            : order.state === "paid"
+              ? "paid"
+              : "provisioning",
+        charged_cents: 0,
+        balance_after_cents: store.balance_cents,
+      };
+    }
     const region = REGIONS.find((item) => item.id === order.region) ?? REGIONS[0];
     const plan = PLANS.find((item) => item.id === order.plan) ?? DEFAULT_PLAN;
+    const priceCents = Math.round(plan.monthly_usd * 100);
+    if (store.balance_cents < priceCents) {
+      throw {
+        code: "PRECONDITION_FAILED",
+        message: "余额不够扣这个月的费用。",
+        details: {
+          reason: "insufficient_balance",
+          shortfall_cents: priceCents - store.balance_cents,
+        },
+        retryable: true,
+      };
+    }
+    store.balance_cents -= priceCents;
     const id = `srv_${store.next_id++}`;
     const server: StoredServer = {
       server_id: id,
@@ -387,7 +483,83 @@ export class MockMyServerService {
     order.state = "provisioning";
     order.server_id = id;
     writeStore(store);
-    return { ...order };
+    return {
+      order_id: order.order_id,
+      state: "provisioning",
+      charged_cents: priceCents,
+      balance_after_cents: store.balance_cents,
+    };
+  }
+
+  account(): MyServerAccount {
+    return accountView();
+  }
+
+  loginStart(email: string): MyServerLoginTicket {
+    if (readFlag(DOWN_KEY) === "1") providerDown();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      loginError("PRECONDITION_FAILED", "邮箱格式不对。", "email_invalid", false);
+    }
+    return { sent: true, cooldown_seconds: 60 };
+  }
+
+  loginVerify(email: string, code: string): MyServerAccount {
+    if (readFlag(DOWN_KEY) === "1") providerDown();
+    if (code.trim() !== MOCK_LOGIN_CODE) {
+      loginError(
+        "PRECONDITION_FAILED",
+        "验证码不对。",
+        "code_invalid",
+        true,
+        { attempts_remaining: 2 },
+      );
+    }
+    writeAccount({ logged_in: true, email: email.trim() });
+    return accountView();
+  }
+
+  logout(): MyServerAccount {
+    if (readFlag(DOWN_KEY) === "1") providerDown();
+    writeAccount({ logged_in: false, email: null });
+    return accountView();
+  }
+
+  wallet(): MyServerWallet {
+    if (readFlag(DOWN_KEY) === "1") providerDown();
+    if (!readAccount().logged_in) {
+      loginError("UNAUTHENTICATED", "需要先登录。", "auth_required", true);
+    }
+    const store = readStore();
+    return {
+      balance_cents: store.balance_cents,
+      currency: "USD",
+      denominations_cents: [...TOPUP_CENTS],
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  topup(denominationCents: number): MyServerTopup {
+    if (readFlag(DOWN_KEY) === "1") providerDown();
+    if (!readAccount().logged_in) {
+      loginError("UNAUTHENTICATED", "需要先登录。", "auth_required", true);
+    }
+    if (!TOPUP_CENTS.includes(denominationCents)) {
+      loginError(
+        "PRECONDITION_FAILED",
+        "这个充值档位不存在。",
+        "invalid_denomination",
+        false,
+      );
+    }
+    const store = readStore();
+    store.balance_cents += denominationCents;
+    writeStore(store);
+    // 演示通道直接入账，没有收银台。
+    return {
+      topup_id: `topup_${Date.now()}`,
+      checkout_url: null,
+      denomination_cents: denominationCents,
+    };
   }
 
   cancelOrder(orderId: string): MyServerOrder {

@@ -1,16 +1,22 @@
 import { useState } from "react";
-import type { MyServer } from "../agent/bridge";
+import type { MyServer, MyServerAccount, MyServerWallet } from "../agent/bridge";
+import type { LogoutResult } from "../myservers/useMyServers";
 import { serverRailState, stateTone } from "../myservers/labels";
+import { MyServersAccount } from "./MyServersAccount";
 import { IconClose } from "./icons";
 
 interface Props {
   servers: MyServer[];
   selectedId: string | null;
   loading: boolean;
-  /** 还没有设备身份：列表区只给登录提示。 */
+  /** 还没有登录：列表区只给登录提示。 */
   identityMissing?: boolean;
-  /** 设备身份是否就绪：左下角状态按钮文案。 */
-  identityPresent?: boolean;
+  /** 登录态；账号块的数据源。 */
+  account?: MyServerAccount | null;
+  accountLoaded?: boolean;
+  wallet?: MyServerWallet | null;
+  walletLoading?: boolean;
+  walletError?: string | null;
   /** 列表读取失败说明；只在左栏就地显示。 */
   error?: string | null;
   retrying?: boolean;
@@ -22,7 +28,10 @@ interface Props {
   onSelect: (serverId: string) => void;
   onNew: () => void;
   onRetry?: () => void;
-  onIdentityAction?: () => void;
+  onLogin?: () => void;
+  onLogout?: () => Promise<LogoutResult>;
+  onTopUp?: () => void;
+  onRefreshWallet?: () => void;
   onOpenSettings: () => void;
 }
 
@@ -62,7 +71,11 @@ export function MyServersRail({
   selectedId,
   loading,
   identityMissing = false,
-  identityPresent = false,
+  account = null,
+  accountLoaded = false,
+  wallet = null,
+  walletLoading = false,
+  walletError = null,
   error = null,
   retrying = false,
   retryNotice = null,
@@ -71,11 +84,13 @@ export function MyServersRail({
   onSelect,
   onNew,
   onRetry,
-  onIdentityAction,
+  onLogin,
+  onLogout,
+  onTopUp,
+  onRefreshWallet,
   onOpenSettings,
 }: Props) {
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const identityLabel = identityPresent ? "已登录 · 设备" : "未登录";
 
   const list = (
     <>
@@ -199,18 +214,21 @@ export function MyServersRail({
       ) : null}
 
       <footer className="rail__foot">
-        <button
-          type="button"
-          className="rail__identity"
-          aria-label={identityLabel}
-          onClick={onIdentityAction}
-        >
-          <span
-            className={`led ${identityPresent ? "is-ok" : "is-warn"}`}
-            aria-hidden
-          />
-          <span className="rail__identity-text">{identityLabel}</span>
-        </button>
+        <MyServersAccount
+          account={account}
+          loaded={accountLoaded}
+          wallet={wallet}
+          walletLoading={walletLoading}
+          walletError={walletError}
+          disabled={disabled}
+          compact={compact}
+          onLogin={() => onLogin?.()}
+          onLogout={
+            onLogout ?? (async () => ({ ok: false, message: "这个版本还不支持退出登录。" }))
+          }
+          onTopUp={() => onTopUp?.()}
+          onRefreshWallet={() => onRefreshWallet?.()}
+        />
         <button
           type="button"
           className="rail__settings"

@@ -133,6 +133,11 @@ pub fn from_response(status: u16, body: &str) -> CpError {
         .and_then(|value| value.get("details"))
         .and_then(|details| details.get("attempts_remaining"))
         .and_then(Value::as_u64);
+    let shortfall_cents = parsed
+        .as_ref()
+        .and_then(|value| value.get("details"))
+        .and_then(|details| details.get("shortfall_cents"))
+        .and_then(Value::as_i64);
 
     let mapped = match code {
         // 登录门禁的两种 reason 用 `UNAUTHENTICATED`（commands.md §7.18）；
@@ -210,6 +215,9 @@ pub fn from_response(status: u16, body: &str) -> CpError {
         }
         if let Some(value) = attempts_remaining {
             details.insert("attempts_remaining".into(), json!(value));
+        }
+        if let Some(value) = shortfall_cents {
+            details.insert("shortfall_cents".into(), json!(value));
         }
     }
 
@@ -290,6 +298,16 @@ mod tests {
         assert_eq!(error.code, "PRECONDITION_FAILED");
         assert_eq!(error.reason(), Some("code_invalid"));
         assert_eq!(error.details["attempts_remaining"], 2);
+
+        // 余额不足的差额必须原样透出，界面据此显示「还差 $N」。
+        let error = from_response(
+            402,
+            r#"{"code":"PRECONDITION_FAILED","message":"余额不足","retryable":true,"details":{"reason":"insufficient_balance","shortfall_cents":350}}"#,
+        );
+        assert_eq!(error.code, "PRECONDITION_FAILED");
+        assert_eq!(error.reason(), Some("insufficient_balance"));
+        assert_eq!(error.details["shortfall_cents"], 350);
+        assert!(error.retryable);
     }
 
     #[test]

@@ -124,6 +124,15 @@ export async function deleteDroplet(
 }
 
 /** 防火墙在建机之后创建：把 droplet id 直接写进 `droplet_ids`，因此不需要 firewall:update。 */
+/** DO 只接受字母、数字、点和连字符：机器 ID 是 base64url，可能带 `_`。 */
+export function firewallName(raw: string): string {
+  const cleaned = raw
+    .replace(/[^A-Za-z0-9.-]/g, "-")
+    .replace(/^[.\-]+/, "")
+    .replace(/[.\-]+$/, "");
+  return (cleaned || "veyl-firewall").slice(0, 255);
+}
+
 export async function createFirewall(
   token: string,
   input: { name: string; port: number; providerId: string },
@@ -137,7 +146,7 @@ export async function createFirewall(
   const result = await call<{ firewall: { id: string } }>(token, "/firewalls", {
     method: "POST",
     body: JSON.stringify({
-      name: input.name,
+      name: firewallName(input.name),
       inbound_rules: [rule("tcp"), rule("udp")],
       outbound_rules: [
         { protocol: "tcp", ports: "all", destinations: { addresses: ["0.0.0.0/0", "::/0"] } },

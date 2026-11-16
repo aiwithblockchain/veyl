@@ -3037,6 +3037,35 @@ body[data-resizing] {
   gap: 8px;
 }
 
+.myservers-login__body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 20px;
+}
+
+.myservers-topup {
+  width: min(420px, calc(100vw - 48px));
+}
+
+.myservers-topup__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.myservers-topup__option {
+  min-height: 44px;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.myservers__success {
+  margin: 0;
+  font-size: 13px;
+  color: var(--green);
+}
+
 .myservers__detail {
   display: flex;
   flex-direction: column;
@@ -4317,6 +4346,138 @@ body[data-resizing] {
 .rail__identity:hover {
   background: var(--bg-hover);
   color: var(--ink-2);
+}
+
+.rail__account {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 2px;
+}
+
+.rail__account--row {
+  flex-direction: row;
+  align-items: center;
+}
+
+.rail__account > .rail__identity {
+  width: 100%;
+  min-width: 0;
+}
+
+.rail__account--row > .rail__identity {
+  flex: 1;
+  width: auto;
+}
+
+.rail__identity--static {
+  cursor: default;
+}
+
+.rail__identity--static:hover {
+  background: transparent;
+  color: var(--ink-3);
+}
+
+.rail__account__login {
+  flex: none;
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.rail__account .rail__identity-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.rail__account__email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail__account__sub {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.rail__account__chevron {
+  margin-left: auto;
+  padding-left: 6px;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.rail__account__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 2px 2px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-card);
+}
+
+.rail__account__balance {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.rail__account__balance .num {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.rail__account__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.rail__account__actions .btn {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.rail__account__note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+
+.rail__account__error {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--red);
+}
+
+.rail__account__link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--cobalt);
+  font-size: 11px;
+  text-decoration: underline;
+}
+
+.rail__account__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .rail__error {

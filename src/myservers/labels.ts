@@ -71,6 +71,11 @@ export function formatUsdHourly(value: number): string {
   return `$${value.toFixed(5)}`;
 }
 
+/** 钱包金额：USD 分，固定两位小数。 */
+export function formatUsdCents(cents: number): string {
+  return `$${(Math.max(0, cents) / 100).toFixed(2)}`;
+}
+
 export function formatServerTime(iso: string): string {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return iso;

@@ -232,6 +232,11 @@ describe("public catalog", () => {
     const res = await route(new Request("https://example.com/v1/catalog"), {
       ENVIRONMENT: "production",
       DO_API_TOKEN: "t",
+      PLAN_PRICES_USD: JSON.stringify({
+        "s-1vcpu-512mb-10gb": 6,
+        "s-1vcpu-1gb": 9,
+        "s-1vcpu-2gb": 18,
+      }),
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -243,10 +248,11 @@ describe("public catalog", () => {
     expect(body.regions.map((r) => r.id)).toEqual(["sgp1", "nyc3"]);
     expect(body.regions[0].continent).toBe("asia");
     expect(body.regions.map((r) => r.name)).toEqual(["新加坡 1", "纽约 3"]);
+    // 目录展示售价（成本 ×1.5），不是 DO 成本价；hourly = monthly / 730。
     expect(body.plans).toEqual([
-      { id: "s-1vcpu-512mb-10gb", label: "1 核 · 512 MB", hourly_usd: 0.00595, monthly_usd: 4 },
-      { id: "s-1vcpu-1gb", label: "1 核 · 1 GB", hourly_usd: 0.00893, monthly_usd: 6 },
-      { id: "s-1vcpu-2gb", label: "1 核 · 2 GB", hourly_usd: 0.01786, monthly_usd: 12 },
+      { id: "s-1vcpu-512mb-10gb", label: "1 核 · 512 MB", hourly_usd: 0.0082, monthly_usd: 6 },
+      { id: "s-1vcpu-1gb", label: "1 核 · 1 GB", hourly_usd: 0.0123, monthly_usd: 9 },
+      { id: "s-1vcpu-2gb", label: "1 核 · 2 GB", hourly_usd: 0.0247, monthly_usd: 18 },
     ]);
   });
 

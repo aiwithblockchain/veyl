@@ -20,12 +20,15 @@ import type {
   LlmProviderInput,
   LlmProviderTestResult,
   MyServer,
+  MyServerAccount,
   MyServerCatalog,
+  MyServerCharge,
   MyServerCreateInput,
   MyServerCredentialNode,
   MyServerDeviceIdentity,
   MyServerFailure,
   MyServerIdentity,
+  MyServerLoginTicket,
   MyServerOrder,
   MyServerOrderState,
   MyServerPlan,
@@ -33,6 +36,8 @@ import type {
   MyServerRegion,
   MyServerSshCredentials,
   MyServerState,
+  MyServerTopup,
+  MyServerWallet,
   NetRepairAction,
   NetRepairResult,
   NetworkForceResetResult,
@@ -706,6 +711,100 @@ function normalizeMyServerOrder(raw: unknown): MyServerOrder | null {
   };
 }
 
+function readCents(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.trunc(value);
+}
+
+function normalizeMyServerAccount(raw: unknown): MyServerAccount | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.logged_in !== "boolean") return null;
+  const kind =
+    value.account_kind === "device" || value.account_kind === "email"
+      ? value.account_kind
+      : null;
+  return {
+    logged_in: value.logged_in,
+    email: typeof value.email === "string" ? value.email : null,
+    account_id: typeof value.account_id === "string" ? value.account_id : null,
+    device_id: typeof value.device_id === "string" ? value.device_id : null,
+    account_kind: kind,
+  };
+}
+
+function normalizeMyServerLoginTicket(raw: unknown): MyServerLoginTicket | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.sent !== "boolean") return null;
+  const cooldown =
+    typeof value.cooldown_seconds === "number" && Number.isFinite(value.cooldown_seconds)
+      ? Math.trunc(value.cooldown_seconds)
+      : 60;
+  const retry =
+    typeof value.retry_after_seconds === "number" &&
+    Number.isFinite(value.retry_after_seconds)
+      ? Math.trunc(value.retry_after_seconds)
+      : undefined;
+  return {
+    sent: value.sent,
+    cooldown_seconds: Math.max(0, cooldown),
+    ...(retry === undefined ? {} : { retry_after_seconds: Math.max(0, retry) }),
+  };
+}
+
+function normalizeMyServerWallet(raw: unknown): MyServerWallet | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  const balance = readCents(value.balance_cents);
+  if (balance === null || !Array.isArray(value.denominations_cents)) return null;
+  const denominations = value.denominations_cents
+    .map((item) => readCents(item))
+    .filter((item): item is number => item !== null && item > 0)
+    .sort((a, b) => a - b);
+  return {
+    balance_cents: balance,
+    currency: typeof value.currency === "string" ? value.currency : "USD",
+    denominations_cents: denominations,
+    updated_at: typeof value.updated_at === "string" ? value.updated_at : "",
+  };
+}
+
+function normalizeMyServerTopup(raw: unknown): MyServerTopup | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  const cents = readCents(value.denomination_cents);
+  if (typeof value.topup_id !== "string" || cents === null) return null;
+  return {
+    topup_id: value.topup_id,
+    checkout_url:
+      typeof value.checkout_url === "string" && value.checkout_url.length > 0
+        ? value.checkout_url
+        : null,
+    denomination_cents: cents,
+  };
+}
+
+function normalizeMyServerCharge(raw: unknown): MyServerCharge | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  const charged = readCents(value.charged_cents);
+  const balance = readCents(value.balance_after_cents);
+  const state =
+    value.state === "paid" || value.state === "provisioning" || value.state === "ready"
+      ? value.state
+      : null;
+  if (typeof value.order_id !== "string" || charged === null || balance === null || !state) {
+    return null;
+  }
+  return {
+    order_id: value.order_id,
+    state,
+    charged_cents: charged,
+    balance_after_cents: balance,
+  };
+}
+
 /** 统一的 invoke 包装：失败一律抛 `BridgeError`，调用方只需要看 code / message。 */
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -1051,12 +1150,12 @@ export class TauriAgentBridge implements AgentBridge {
     return order;
   }
 
-  async myServerCheckout(orderId: string): Promise<MyServerOrder> {
-    const order = normalizeMyServerOrder(
+  async myServerCheckout(orderId: string): Promise<MyServerCharge> {
+    const charge = normalizeMyServerCharge(
       await call<unknown>("my_server_checkout", { orderId }),
     );
-    if (!order) serverDataError();
-    return order;
+    if (!charge) serverDataError();
+    return charge;
   }
 
   async myServerCancelOrder(orderId: string): Promise<MyServerOrder> {
@@ -1144,6 +1243,54 @@ export class TauriAgentBridge implements AgentBridge {
         ? raw.account_id
         : null;
     return { has_identity: raw.has_identity, account_id: accountId };
+  }
+
+  async myServerLoginStart(email: string): Promise<MyServerLoginTicket> {
+    const ticket = normalizeMyServerLoginTicket(
+      await call<unknown>("my_server_login_start", { email }),
+    );
+    if (!ticket) serverDataError();
+    return ticket;
+  }
+
+  async myServerLoginVerify(email: string, code: string): Promise<MyServerAccount> {
+    const account = normalizeMyServerAccount(
+      await call<unknown>("my_server_login_verify", { email, code }),
+    );
+    if (!account) serverDataError();
+    return account;
+  }
+
+  async myServerAccount(): Promise<MyServerAccount> {
+    const account = normalizeMyServerAccount(
+      await call<unknown>("my_server_account"),
+    );
+    if (!account) serverDataError();
+    return account;
+  }
+
+  async myServerLogout(): Promise<MyServerAccount> {
+    const account = normalizeMyServerAccount(
+      await call<unknown>("my_server_logout"),
+    );
+    if (!account) serverDataError();
+    return account;
+  }
+
+  async myServerWallet(): Promise<MyServerWallet> {
+    const wallet = normalizeMyServerWallet(
+      await call<unknown>("my_server_wallet"),
+    );
+    if (!wallet) serverDataError();
+    return wallet;
+  }
+
+  async myServerTopup(denominationCents: number): Promise<MyServerTopup> {
+    const topup = normalizeMyServerTopup(
+      await call<unknown>("my_server_topup", { denomination: denominationCents }),
+    );
+    if (!topup) serverDataError();
+    return topup;
   }
 
   async myServerSshCredentials(

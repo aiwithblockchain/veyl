@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { signAccessToken } from "../src/lib/crypto";
+import { signAccessToken, sha256B64u } from "../src/lib/crypto";
+import { firewallName } from "../src/providers/digitalocean";
 import { handleServers } from "../src/servers";
 import { FakeD1 } from "./helpers/fakeD1";
 
@@ -73,8 +74,61 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("销毁服务器", () => {
-  it("DO 删除成功后回落本地状态", async () => {
+describe("DO 资源命名", () => {
+  it("防火墙名把 base64url 里的下划线换成连字符", () => {
+    expect(firewallName("veyl-a5_MhEgJWJ3")).toBe("veyl-a5-MhEgJWJ3");
+    expect(firewallName("veyl-.-x-")).toBe("veyl-.-x");
+    expect(firewallName("___")).toBe("veyl-firewall");
+  });
+});
+
+describe("建机失败退款", () => {
+  it("enroll 超时自动销毁时，扣过的月费退回余额", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    const token = "enr_abandoned000000";
+    seedServer(db, "booting");
+    Object.assign(db.rows("servers")[0], {
+      enrollment_hash: await sha256B64u(token),
+      enrollment_expires_at: Date.now() - 1000,
+    });
+    db.rows("orders").push({
+      id: "ord_test",
+      account_id: ACCOUNT,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 6,
+      amount_cents: 600,
+      hourly_usd: 0.00893,
+      state: "provisioning",
+      idempotency_key: "idem-refund-1",
+      created_at: Date.now(),
+      paid_via: "wallet",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+
+    const res = await handleServers(
+      new Request(`https://example.com/v1/enroll/${token}`, {
+        method: "POST",
+        body: JSON.stringify({ port: 20443, password: "x", active: true, version: "1" }),
+      }),
+      env as never,
+    );
+
+    expect(res?.status).toBe(410);
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+    expect(db.rows("orders")[0].state).toBe("failed");
+    const refund = db.rows("wallet_ledger")[0];
+    expect(refund?.amount_cents).toBe(600);
+    expect(refund?.ref_id).toBe("refund:ord_test");
+    expect(db.rows("accounts")[0].balance_cents).toBe(600);
+  });
+});
+
+describe("销毁服务器", () => {  it("DO 删除成功后回落本地状态", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());
     seedServer(db, "active");

@@ -2,7 +2,10 @@ import { handleAuth } from "./auth";
 import { handleEmailAuth } from "./auth_email";
 import { buildCloudInit } from "./cloud_init";
 import { planHourlyUsd, planPriceUsd } from "./lib/config";
-import { handleOrders, reconcilePaidOrders } from "./orders";
+import { runBilling } from "./billing";
+import { handleOrders } from "./orders";
+import { handleTopups, startTopupSession } from "./topups";
+import { balanceCents } from "./wallet";
 import { handleServers } from "./servers";
 import { handleDodoWebhook } from "./webhooks/dodo";
 
@@ -23,6 +26,8 @@ export interface Env {
   PLAN_PRICES_USD?: string;
   /** 套餐 → Dodo 产品 ID：{"s-1vcpu-1gb":"pdt_…"}，test / live 各一套。 */
   DODO_PRODUCT_IDS?: string;
+  /** 充值面额（美分）→ 一次性产品 ID。 */
+  DODO_TOPUP_PRODUCT_IDS?: string;
   APP_PAYMENT_RETURN_URL?: string;
 }
 
@@ -253,6 +258,19 @@ export async function route(request: Request, env: Env, ctx?: ExecutionContext):
     });
   }
 
+  // 支付回跳页：Dodo 支付完成后跳回来，这里只给一句「回到应用」，不做任何写操作。
+  if (url.pathname === "/payment/return") {
+    const html = `<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Veyl</title>
+<style>body{margin:0;background:#FAFAF9;color:#1B1B1A;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
+main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weight:600;margin:0 0 12px}p{font-size:14px;line-height:1.65;color:#5C5C58;margin:0}</style>
+</head><body><main>
+<h1>支付已完成</h1>
+<p>回到 Veyl 应用即可看到余额变化。这个页面可以直接关闭。</p>
+</main></body></html>`;
+    return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+  }
+
   // 设备令牌：静默注册与刷新（§19.2）。目录之后实现，未配置 D1 时返回 503。
   const authResponse = await handleAuth(request, env);
   if (authResponse) return authResponse;
@@ -261,9 +279,13 @@ export async function route(request: Request, env: Env, ctx?: ExecutionContext):
   const emailAuthResponse = await handleEmailAuth(request, env);
   if (emailAuthResponse) return emailAuthResponse;
 
-  // Dodo 回调：公开端点，只认签名（login-and-payment.md §4.3）。
+  // Dodo 回调：公开端点，只认签名（login-and-payment.md §4.5）。
   const webhookResponse = await handleDodoWebhook(request, env, ctx);
   if (webhookResponse) return webhookResponse;
+
+  // 钱包与充值（login-and-payment.md §4.2–§4.3）。
+  const topupResponse = await handleTopups(request, env);
+  if (topupResponse) return topupResponse;
 
   // 订单：下单与假支付（§19.5）。实例开通在建机链路里跟进。
   const orderResponse = await handleOrders(request, env);
@@ -580,6 +602,70 @@ export async function route(request: Request, env: Env, ctx?: ExecutionContext):
     );
   }
 
+  // 仅 dev：清库前把在跑的实验机销毁，避免留下无人计费的实例。
+  if (url.pathname === "/v1/debug/destroy") {
+    if (env.ENVIRONMENT !== "dev") return json({ ok: false, error: "not_found" }, 404);
+    if (!env.DB || !env.DO_API_TOKEN) return json({ ok: false, error: "not_configured" }, 503);
+    const serverId = url.searchParams.get("server") ?? "";
+    const row = await env.DB.prepare("SELECT id, provider_id FROM servers WHERE id = ?")
+      .bind(serverId)
+      .first<{ id: string; provider_id: string | null }>();
+    if (!row) return json({ ok: false, error: "server_missing" }, 404);
+    if (!row.provider_id) return json({ ok: true, deleted: false, reason: "no_provider_id" });
+    const { deleteDroplet } = await import("./providers/digitalocean");
+    const result = await deleteDroplet(env.DO_API_TOKEN, row.provider_id);
+    await env.DB.prepare("UPDATE servers SET state = 'destroyed', destroyed_at = ?, updated_at = ? WHERE id = ?")
+      .bind(Date.now(), Date.now(), row.id)
+      .run();
+    return json({ ok: result.ok, provider_id: row.provider_id, reason: result.ok ? undefined : result.reason });
+  }
+
+  // 仅 dev：没有界面时手动造一个邮箱账户，配合下面的充值调试入口联调支付。
+  if (url.pathname === "/v1/debug/account") {
+    if (env.ENVIRONMENT !== "dev") return json({ ok: false, error: "not_found" }, 404);
+    if (!env.DB) return json({ ok: false, error: "db_unavailable" }, 503);
+    const email = (url.searchParams.get("email") ?? "").trim().toLowerCase();
+    if (!email || !email.includes("@")) return json({ ok: false, error: "email_required" }, 400);
+    const existing = await env.DB.prepare("SELECT id, email, balance_cents FROM accounts WHERE email = ?")
+      .bind(email)
+      .first<{ id: string; email: string; balance_cents: number }>();
+    if (existing) return json({ ok: true, created: false, ...existing });
+    const accountId = `acct_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    await env.DB.prepare("INSERT INTO accounts (id, kind, email, status, created_at, balance_cents) VALUES (?, 'email', ?, 'active', ?, 0)")
+      .bind(accountId, email, Date.now())
+      .run();
+    return json({ ok: true, created: true, id: accountId, email, balance_cents: 0 });
+  }
+
+  // 仅 dev：没有界面时手动开一笔充值 / 查余额，用真实收银台联调。
+  if (url.pathname === "/v1/debug/topup" || url.pathname === "/v1/debug/wallet") {
+    if (env.ENVIRONMENT !== "dev") return json({ ok: false, error: "not_found" }, 404);
+    if (!env.DB) return json({ ok: false, error: "db_unavailable" }, 503);
+    const email = (url.searchParams.get("email") ?? "").trim().toLowerCase();
+    if (!email) return json({ ok: false, error: "email_required" }, 400);
+    const account = await env.DB.prepare("SELECT id, email FROM accounts WHERE email = ?")
+      .bind(email)
+      .first<{ id: string; email: string }>();
+    if (!account) return json({ ok: false, error: "account_missing" }, 404);
+
+    if (url.pathname === "/v1/debug/wallet") {
+      return json({ ok: true, account_id: account.id, balance_cents: await balanceCents(env, account.id) });
+    }
+    const cents = Number(url.searchParams.get("cents"));
+    if (!Number.isInteger(cents)) return json({ ok: false, error: "cents_required" }, 400);
+    // 默认走真实 Dodo test 收银台；加 ?fake=1 直接入账，用于没有收银台时的快速联调。
+    const mode = url.searchParams.get("fake") === "1" ? "fake" : "dodo";
+    const started = await startTopupSession(env, { accountId: account.id, email: account.email, cents, mode });
+    return json(started);
+  }
+
+  // 仅 dev：手动跑一次每日任务（续费/补建/对账），不必等 Cron。
+  if (url.pathname === "/v1/debug/billing") {
+    if (env.ENVIRONMENT !== "dev") return json({ ok: false, error: "not_found" }, 404);
+    if (!env.DB) return json({ ok: false, error: "db_unavailable" }, 503);
+    return json({ ok: true, report: await runBilling(env) });
+  }
+
   // 仅 dev：逐个探测 token 的读权限边界（能读 / 被拒），确认最小权限刚好够用。
   if (url.pathname === "/v1/debug/do-scopes") {
     if (env.ENVIRONMENT !== "dev") return json({ ok: false, error: "not_found" }, 404);
@@ -613,24 +699,36 @@ export async function route(request: Request, env: Env, ctx?: ExecutionContext):
   return json({ ok: false, error: "not_found" }, 404);
 }
 
-/** 目录里展示的必须是售价：成本价只留在控制面内部，不下发。 */
+/** 目录里展示的必须是售价：没配售价的套餐不出现，成本价对内不下发。 */
 export function applySalePrices(data: CatalogData, env: Env): CatalogData {
-  return {
-    ...data,
-    plans: data.plans.map((plan) => {
-      const price = planPriceUsd(env, plan.id);
-      if (price === null) return plan;
-      return { ...plan, monthly_usd: price, hourly_usd: planHourlyUsd(price) };
-    }),
-  };
+  const plans = data.plans.flatMap((plan) => {
+    const price = planPriceUsd(env, plan.id);
+    if (price === null) return [];
+    return [{ ...plan, monthly_usd: price, hourly_usd: planHourlyUsd(price) }];
+  });
+  return { ...data, plans };
 }
 
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    return route(request, env, ctx);
+    // 任何未处理的异常都要回 JSON 信封：Host 只认信封，拿到 HTML 500 只能报“格式不正确”。
+    return route(request, env, ctx).catch((error: unknown) => {
+      const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      console.error(`[control-plane] unhandled ${request.method} ${new URL(request.url).pathname} ${detail}`);
+      return json(
+        {
+          code: "INTERNAL",
+          message: "服务器服务内部错误",
+          retryable: false,
+          details: { reason: "internal" },
+          request_id: "",
+        },
+        500,
+      );
+    });
   },
-  /** 收了钱却没建出机器的订单，每 5 分钟补一次（login-and-payment.md §4.5）。 */
+  /** 每天：续期扣费、补建「已付没机器」、对账（login-and-payment.md §4.6）。 */
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(reconcilePaidOrders(env));
+    ctx.waitUntil(runBilling(env));
   },
 };

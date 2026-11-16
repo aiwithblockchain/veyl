@@ -1,4 +1,4 @@
-import type { AgentBridge, MyServer, MyServerCatalog } from "../agent/bridge";
+import type { AgentBridge, MyServer, MyServerCatalog, MyServerState } from "../agent/bridge";
 import type { ServersView } from "../myservers/useMyServers";
 import { MyServerDetail } from "./MyServerDetail";
 import { MyServerWizard } from "./MyServerWizard";
@@ -16,10 +16,13 @@ interface Props {
   joinGroupName: string | null;
   onNew: () => void;
   onEnsureIdentity: () => Promise<boolean>;
+  onTopUp: () => void;
   onUseServer: (server: MyServer) => void;
   onJoinServer: (server: MyServer) => void;
   onChanged: () => void;
   onOrdered: (serverId: string | null) => void;
+  /** 重建成功：选中新机器并显示安装进度。 */
+  onRebuilt: (serverId: string, state: MyServerState) => void;
   onRetryDetail: () => void;
 }
 
@@ -35,10 +38,12 @@ export function MyServersPage({
   joinGroupName,
   onNew,
   onEnsureIdentity,
+  onTopUp,
   onUseServer,
   onJoinServer,
   onChanged,
   onOrdered,
+  onRebuilt,
   onRetryDetail,
 }: Props) {
   const banner = joinGroupName ? (
@@ -79,6 +84,7 @@ export function MyServersPage({
             onCreateAnother={onNew}
             onUseServer={onUseServer}
             onChanged={onChanged}
+            onRebuilt={onRebuilt}
             onGone={() => onOrdered(null)}
           />
         )}
@@ -94,6 +100,7 @@ export function MyServersPage({
         catalog={catalog}
         onOrdered={onOrdered}
         onEnsureIdentity={onEnsureIdentity}
+        onTopUp={onTopUp}
       />
     </div>
   );

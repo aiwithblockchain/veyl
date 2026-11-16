@@ -39,6 +39,7 @@ function renderDetail(
       onCreateAnother={onCreateAnother}
       onUseServer={onUseServer}
       onChanged={() => {}}
+      onRebuilt={() => {}}
       onGone={onGone}
     />,
   );

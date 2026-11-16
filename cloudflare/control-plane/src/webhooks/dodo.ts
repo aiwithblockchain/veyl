@@ -5,6 +5,7 @@ import { sha256B64u } from "../lib/crypto";
 import { json } from "../lib/http";
 import { provisionPaidOrder, type OrdersEnv } from "../orders";
 import { verifyDodoSignature } from "../payments/dodo";
+import { recordLedgerEntry } from "../wallet";
 
 interface PaymentData {
   id?: unknown;
@@ -192,6 +193,39 @@ async function recordSubscription(
   }
 }
 
+interface TopupRow {
+  id: string;
+  account_id: string;
+  denomination_cents: number;
+}
+
+/** 充值单匹配：先看 metadata.topup_id，其次用收银台会话 id。 */
+async function findTopup(env: OrdersEnv, data: PaymentData): Promise<TopupRow | null> {
+  const db = env.DB!;
+  const metaTopup = data.metadata?.topup_id;
+  if (typeof metaTopup === "string" && metaTopup.startsWith("top_")) {
+    const row = await db
+      .prepare("SELECT id, account_id, denomination_cents FROM topups WHERE id = ?")
+      .bind(metaTopup)
+      .first<TopupRow>();
+    if (row) return row;
+  }
+  const sessionId =
+    typeof data.checkout_session_id === "string"
+      ? data.checkout_session_id
+      : typeof data.session_id === "string"
+        ? data.session_id
+        : "";
+  if (sessionId) {
+    const row = await db
+      .prepare("SELECT id, account_id, denomination_cents FROM topups WHERE checkout_session_id = ?")
+      .bind(sessionId)
+      .first<TopupRow>();
+    if (row) return row;
+  }
+  return null;
+}
+
 export async function handleDodoWebhook(
   request: Request,
   env: OrdersEnv,
@@ -254,6 +288,72 @@ export async function handleDodoWebhook(
   }
 
   try {
+    // 充值入账：只认 topup，入账金额来自我们自己的面额，不看 webhook 里的金额（微信可能是 CNY）。
+    if (kind === "payment.succeeded") {
+      const topup = await findTopup(env, data);
+      if (topup) {
+        const paymentIdForTopup = paymentId || eventId;
+        await db
+          .prepare(
+            "INSERT OR IGNORE INTO payments (id, order_id, subscription_id, account_id, amount_usd, currency, status, period_end, raw_digest, received_at) " +
+              "VALUES (?, NULL, NULL, ?, ?, ?, 'succeeded', NULL, ?, ?)",
+          )
+          .bind(
+            paymentIdForTopup,
+            topup.account_id,
+            topup.denomination_cents / 100,
+            typeof data.currency === "string" ? data.currency : "USD",
+            await sha256B64u(raw),
+            Date.now(),
+          )
+          .run();
+        const credited = await recordLedgerEntry(env, {
+          accountId: topup.account_id,
+          kind: "topup",
+          amountCents: topup.denomination_cents,
+          refType: "dodo_payment",
+          refId: paymentIdForTopup,
+        });
+        // duplicate = 这笔支付已经入过账（重投），同样把 topup 标成 paid。
+        if (credited.ok || credited.reason === "duplicate") {
+          await db
+            .prepare("UPDATE topups SET status = 'paid', paid_at = ? WHERE id = ? AND status != 'paid'")
+            .bind(Date.now(), topup.id)
+            .run();
+          await markEvent(env, eventId, "processed", null, paymentId || null);
+          return json({ ok: true });
+        }
+        if (credited.reason === "missing_account") {
+          // 账户被删/不存在：留证据等人工补账，不要 5xx 让 Dodo 无限重投。
+          await db
+            .prepare(
+              "INSERT OR IGNORE INTO unmatched_payments (payment_id, email_hash, amount_usd, currency, reason, payload_hash, received_at) " +
+                "VALUES (?, NULL, ?, ?, 'missing_account', ?, ?)",
+            )
+            .bind(paymentIdForTopup, topup.denomination_cents / 100, typeof data.currency === "string" ? data.currency : "USD", await sha256B64u(raw), Date.now())
+            .run();
+          await markEvent(env, eventId, "processed", null, paymentId || null);
+          return json({ ok: true });
+        }
+        console.error(`[dodo-webhook] topup_credit_failed topup=${topup.id} reason=${credited.reason}`);
+        await markEvent(env, eventId, "failed", null, paymentId || null);
+        return json({ error: "credit_failed" }, 500);
+      }
+    }
+
+    // 充值失败：把 pending 的充值单标成 failed，别让它永远停在 pending 又进 unmatched。
+    if (kind === "payment.failed") {
+      const failedTopup = await findTopup(env, data);
+      if (failedTopup) {
+        await db
+          .prepare("UPDATE topups SET status = 'failed' WHERE id = ? AND status = 'pending'")
+          .bind(failedTopup.id)
+          .run();
+        await markEvent(env, eventId, "processed", null, paymentId || null);
+        return json({ ok: true });
+      }
+    }
+
     const order = await findOrder(env, data);
     if (!order) {
       // 匹配不上不要 5xx：Dodo 会无限重投。留证据等人工重放（设计 §4.3）。

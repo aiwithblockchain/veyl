@@ -29,6 +29,8 @@ import { HelperPermissionDialog } from "./components/HelperPermissionDialog";
 import { NewConfigDialog } from "./components/NewConfigDialog";
 import { MyServersPage } from "./components/MyServersPage";
 import { MyServersRail } from "./components/MyServersRail";
+import { MyServerLogin } from "./components/MyServerLogin";
+import { MyServerTopUp } from "./components/MyServerTopUp";
 import { NodeGroupDetail } from "./components/NodeGroupDetail";
 import { NodeGroupsRail } from "./components/NodeGroupsRail";
 import { useMyServers } from "./myservers/useMyServers";
@@ -1686,7 +1688,11 @@ export default function App() {
           selectedId={myServers.selectedId}
           loading={myServers.loading}
           identityMissing={myServers.identityMissing}
-          identityPresent={myServers.identityPresent}
+          account={myServers.account}
+          accountLoaded={myServers.accountLoaded}
+          wallet={myServers.wallet}
+          walletLoading={myServers.walletLoading}
+          walletError={myServers.walletError}
           error={myServers.error}
           retrying={myServers.retrying}
           retryNotice={myServers.retryNotice}
@@ -1695,7 +1701,10 @@ export default function App() {
           onSelect={myServers.select}
           onNew={myServers.openWizard}
           onRetry={() => void myServers.retry()}
-          onIdentityAction={() => void myServers.identityAction()}
+          onLogin={myServers.openLogin}
+          onLogout={myServers.logout}
+          onTopUp={myServers.openTopUp}
+          onRefreshWallet={() => void myServers.refreshWallet()}
           onOpenSettings={() => openSettings()}
         />
       ) : destination === "groups" ? (
@@ -1752,11 +1761,12 @@ export default function App() {
           onJoinServer={handleJoinServer}
           onChanged={() => void myServers.refresh()}
           onOrdered={myServers.ordered}
+          onRebuilt={myServers.rebuilt}
           onRetryDetail={myServers.retryDetail}
+          onTopUp={myServers.openTopUp}
         />
       ) : destination === "groups" ? (
-        groupsApi.selected ? (
-          <NodeGroupDetail
+        groupsApi.selected ? (          <NodeGroupDetail
             group={groupsApi.selected}
             active={groupsApi.selected.group_id === groupsApi.activeGroupId}
             activeConfigName={vpn.activeConfig?.name ?? null}
@@ -1850,6 +1860,26 @@ export default function App() {
           max={panes.assistantMax}
           dragging={panes.draggingPane === "assistant"}
           {...panes.assistantHandlers}
+        />
+      ) : null}
+
+      {destination === "servers" && myServers.loginOpen ? (
+        <MyServerLogin
+          onStart={myServers.loginStart}
+          onVerify={myServers.loginVerify}
+          onCancel={myServers.closeLogin}
+          mockHint={bridge.mode === "mock"}
+        />
+      ) : null}
+
+      {destination === "servers" && myServers.topupOpen ? (
+        <MyServerTopUp
+          wallet={myServers.wallet}
+          loading={myServers.walletLoading}
+          error={myServers.walletError}
+          onRetry={() => void myServers.refreshWallet()}
+          onTopUp={myServers.topup}
+          onClose={myServers.closeTopUp}
         />
       ) : null}
 

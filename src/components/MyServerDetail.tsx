@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { AgentBridge, MyServer } from "../agent/bridge";
+import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { ServerProgress } from "./ServerProgress";
 import {
@@ -24,7 +24,9 @@ interface Props {
   /** 可用时去取凭据（Host 验签落库后返回本地节点）。 */
   onUseServer: (server: MyServer) => void | Promise<void>;
   onChanged: () => void;
-  /** 销毁或重建后收起详情。 */
+  /** 重建成功：选中 newServerId，详情继续显示安装进度。 */
+  onRebuilt: (serverId: string, state: MyServerState) => void;
+  /** 销毁后收起详情。 */
   onGone: () => void;
 }
 
@@ -49,6 +51,7 @@ export function MyServerDetail({
   onCreateAnother,
   onUseServer,
   onChanged,
+  onRebuilt,
   onGone,
 }: Props) {
   const [confirming, setConfirming] = useState(false);
@@ -62,9 +65,8 @@ export function MyServerDetail({
     if (busy) return;
     setBusy(true);
     try {
-      await bridge.myServerRebuild(server.server_id, true);
-      onChanged();
-      onGone();
+      const result = await bridge.myServerRebuild(server.server_id, true);
+      onRebuilt(result.newServerId, result.state);
     } catch (err) {
       setError(errorText(err));
       setBusy(false);
@@ -86,6 +88,12 @@ export function MyServerDetail({
 
   const ready = server.state === "healthy" || server.state === "active";
   const destroying = server.state === "destroying";
+
+  useEffect(() => {
+    setBusy(false);
+    setConfirming(false);
+    setError(null);
+  }, [server.server_id]);
 
   useEffect(() => {
     if (!destroying) {

@@ -4,14 +4,17 @@
 import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
 import { randomId, sha256B64u } from "./lib/crypto";
 import { apiError, json } from "./lib/http";
-import { paymentReturnUrl, planHourlyUsd, planPriceUsd } from "./lib/config";
-import { createCheckoutSession } from "./payments/dodo";
+import { planHourlyUsd, planPriceUsd } from "./lib/config";
+import { idempotencyKey, withIdempotency, type StoredResponse } from "./lib/idempotency";
 import { fetchCatalogData, type CatalogData } from "./index";
 import { provisionServer } from "./provision";
+import { balanceCents, recordLedgerEntry } from "./wallet";
 
 const ORDER_TTL_MS = 10 * 60 * 1000;
-/** 收银台会话有效期：跳转、3DS 都要时间。 */
-const CHECKOUT_TTL_MS = 30 * 60 * 1000;
+/** 一个计费周期：扣费后 paid_until 顺延这么久。 */
+const PERIOD_MS = 30 * 24 * 3600 * 1000;
+/** 扣费接口能回的状态；其它状态说明订单已经结束，不能再按「已付款」回放。 */
+const CHARGE_STATES = ["paid", "provisioning", "ready"] as const;
 
 export interface OrdersEnv extends MaybeAuthEnv {
   DO_API_TOKEN?: string;
@@ -32,6 +35,7 @@ interface OrderRow {
   region: string;
   plan: string;
   amount_usd: number;
+  amount_cents: number;
   hourly_usd: number;
   state: string;
   idempotency_key: string;
@@ -55,22 +59,6 @@ interface ServerRow {
   node_port: number;
 }
 
-interface StoredResponse {
-  status: number;
-  body: unknown;
-}
-
-/** 支付未完成时也带上链接，界面据此给「继续支付」。 */
-function checkoutView(row: OrderRow) {
-  return {
-    order_id: row.id,
-    state: row.state,
-    checkout_url: row.checkout_url,
-    session_id: row.checkout_session_id,
-    expires_at: row.expires_at ? new Date(row.expires_at).toISOString() : null,
-  };
-}
-
 function orderView(row: OrderRow) {
   return {
     order_id: row.id,
@@ -81,7 +69,6 @@ function orderView(row: OrderRow) {
     created_at: new Date(row.created_at).toISOString(),
     expires_at: row.expires_at ? new Date(row.expires_at).toISOString() : null,
     server_id: row.server_id,
-    checkout_url: row.checkout_url ?? null,
     // 客户端要求 code / message / retryable 三个字段齐全才认这条失败（契约见 commands.md）。
     failure: row.failure_code
       ? {
@@ -104,67 +91,35 @@ function storedError(
   return { status, body: { code, message, retryable, details, request_id: "" } };
 }
 
-function idempotencyKey(request: Request): string | null {
-  const key = request.headers.get("idempotency-key")?.trim() ?? "";
-  return key.length >= 8 && key.length <= 128 ? key : null;
-}
-
 /**
- * 幂等包装：占位 → 执行 → 写回放。并发重复请求拿到 409 in_flight，
- * 客户端 1 秒后重试（§19.5 幂等键语义）。
+ * 扣费成功的统一回包：Host 按 `order_id + state` 决定轮询与界面状态。
+ * 只回金额会让客户端解析失败，用户再点一次就会新建订单、再扣一次钱。
  */
-async function withIdempotency(
+async function chargeResult(
   db: D1Database,
-  accountId: string,
-  endpoint: string,
-  key: string,
-  requestHash: string,
-  run: () => Promise<StoredResponse>,
-): Promise<Response> {
-  const existing = await db.prepare(
-    "SELECT request_hash, status, response FROM idempotency_keys WHERE account_id = ? AND endpoint = ? AND key = ?",
-  )
-    .bind(accountId, endpoint, key)
-    .first<{ request_hash: string; status: number; response: string | null }>();
-
-  if (existing) {
-    if (existing.request_hash !== requestHash) {
-      return apiError("PRECONDITION_FAILED", "同一个幂等键被用在了不同的请求上", {
-        reason: "idempotency_conflict",
-      });
-    }
-    if (existing.status === 0) {
-      return apiError("PRECONDITION_FAILED", "这个请求正在处理中", {
-        retryable: true,
-        reason: "idempotency_in_flight",
-      });
-    }
-    const stored = JSON.parse(existing.response ?? "{}") as StoredResponse;
-    return json(stored.body, stored.status);
+  orderId: string,
+  chargedCents: number,
+  balanceAfterCents: number,
+): Promise<StoredResponse> {
+  const row = await db
+    .prepare("SELECT state FROM orders WHERE id = ?")
+    .bind(orderId)
+    .first<{ state: string }>();
+  const state = row?.state ?? "";
+  if (!(CHARGE_STATES as readonly string[]).includes(state)) {
+    return storedError(409, "PRECONDITION_FAILED", "这笔订单已经结束，请重新下单", {
+      reason: "order_not_payable",
+    });
   }
-
-  await db.prepare(
-    "INSERT INTO idempotency_keys (account_id, endpoint, key, request_hash, status, created_at) VALUES (?, ?, ?, ?, 0, ?)",
-  )
-    .bind(accountId, endpoint, key, requestHash, Date.now())
-    .run();
-
-  try {
-    const stored = await run();
-    await db.prepare(
-      "UPDATE idempotency_keys SET status = ?, response = ? WHERE account_id = ? AND endpoint = ? AND key = ?",
-    )
-      .bind(stored.status, JSON.stringify(stored), accountId, endpoint, key)
-      .run();
-    return json(stored.body, stored.status);
-  } catch (error) {
-    await db.prepare(
-      "DELETE FROM idempotency_keys WHERE account_id = ? AND endpoint = ? AND key = ?",
-    )
-      .bind(accountId, endpoint, key)
-      .run();
-    throw error;
-  }
+  return {
+    status: 200,
+    body: {
+      order_id: orderId,
+      state,
+      charged_cents: chargedCents,
+      balance_after_cents: balanceAfterCents,
+    },
+  };
 }
 
 async function loadOrder(db: D1Database, accountId: string, orderId: string) {
@@ -216,9 +171,12 @@ async function createOrder(request: Request, env: OrdersEnv): Promise<Response> 
     });
   }
 
-  // 订单金额是售价快照。没配售价时退回目录价（只有开发环境会缺配置）。
-  const salePrice = planPriceUsd(env, plan) ?? chosen.monthly_usd;
-  const saleHourly = planPriceUsd(env, plan) !== null ? planHourlyUsd(salePrice) : chosen.hourly_usd;
+  // 售价只认配置：没配就不卖，绝不拿 DigitalOcean 成本价兜底（那等于按成本价卖出去）。
+  const salePrice = planPriceUsd(env, plan);
+  if (salePrice === null) {
+    return apiError("PRECONDITION_FAILED", "这个套餐暂时不可售", { reason: "invalid_plan" });
+  }
+  const saleHourly = planHourlyUsd(salePrice);
 
   const db = env.DB;
   const requestHash = await sha256B64u(JSON.stringify({ region, plan }));
@@ -228,8 +186,8 @@ async function createOrder(request: Request, env: OrdersEnv): Promise<Response> 
     const orderId = randomId("ord_");
     await db
       .prepare(
-        "INSERT INTO orders (id, account_id, region, plan, amount_usd, hourly_usd, state, idempotency_key, created_at, expires_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, 'pending_payment', ?, ?, ?)",
+        "INSERT INTO orders (id, account_id, region, plan, amount_usd, amount_cents, hourly_usd, state, idempotency_key, created_at, expires_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_payment', ?, ?, ?)",
       )
       .bind(
         orderId,
@@ -237,6 +195,7 @@ async function createOrder(request: Request, env: OrdersEnv): Promise<Response> 
         region,
         plan,
         salePrice,
+        Math.round(salePrice * 100),
         saleHourly,
         key,
         now,
@@ -270,177 +229,133 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
 
   const key = idempotencyKey(request);
   if (!key) return apiError("PRECONDITION_FAILED", "缺少 Idempotency-Key");
-
-  let channel = "dodo";
-  try {
-    const body = (await request.json()) as { channel?: unknown };
-    if (typeof body?.channel === "string" && body.channel.trim()) channel = body.channel.trim();
-  } catch {
-    // 没有请求体就按默认渠道走。
-  }
-
   const db = env.DB;
+
   return withIdempotency(
     db,
     identity.accountId,
     `orders.checkout:${orderId}`,
     key,
-    await sha256B64u(JSON.stringify({ orderId, channel })),
+    await sha256B64u(JSON.stringify({ orderId })),
     async () => {
       const row = await loadOrder(db, identity.accountId, orderId);
       if (!row) return { status: 404, body: { code: "NOT_FOUND", message: "没有这个订单" } };
-      if (channel === "fake") return checkoutFake(env, row);
-      return checkoutDodo(env, identity.accountId, row);
+
+      // 已经扣过款：幂等返回当前余额，绝不重复扣。
+      if (row.state !== "pending_payment") {
+        return chargeResult(db, row.id, 0, await balanceCents(env, identity.accountId));
+      }
+
+      const now = Date.now();
+      if (row.expires_at && row.expires_at < now) {
+        await db.prepare("UPDATE orders SET state = 'cancelled' WHERE id = ?").bind(row.id).run();
+        return storedError(409, "PRECONDITION_FAILED", "这笔订单已过期，请重新下单", { reason: "order_expired" });
+      }
+
+      // 下单时的金额快照要和当前售价一致：中途调价让用户重新确认，不按旧价扣。
+      const price = planPriceUsd(env, row.plan);
+      if (price === null || Math.round(price * 100) !== row.amount_cents) {
+        return storedError(409, "PRECONDITION_FAILED", "价格已经变了，请重新下单", { reason: "price_mismatch" });
+      }
+
+      const available = await balanceCents(env, identity.accountId);
+      if (available < row.amount_cents) {
+        return storedError(
+          409,
+          "PRECONDITION_FAILED",
+          "余额不足，先充值",
+          {
+            reason: "insufficient_balance",
+            shortfall_cents: row.amount_cents - available,
+          },
+          true,
+        );
+      }
+
+      const serverId = randomId("srv_");
+      const port = await pickPort(db, identity.accountId);
+      const charged = await recordLedgerEntry(env, {
+        accountId: identity.accountId,
+        kind: "charge",
+        amountCents: -row.amount_cents,
+        refType: "order",
+        refId: row.id,
+        followUps: (ledgerId) => [
+          db
+            .prepare(
+              "UPDATE orders SET state = 'provisioning', paid_at = ?, server_id = ?, paid_via = 'wallet' " +
+                "WHERE id = ? AND state = 'pending_payment' AND EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
+            )
+            .bind(now, serverId, row.id, ledgerId),
+          db
+            .prepare(
+              "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, plan_price_cents) " +
+                "SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, 'active', ? WHERE EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
+            )
+            .bind(
+              serverId,
+              identity.accountId,
+              row.id,
+              `我的服务器${serverId.slice(-4)}`,
+              row.region,
+              row.plan,
+              row.hourly_usd,
+              row.amount_usd,
+              port,
+              now,
+              now,
+              now + PERIOD_MS,
+              row.amount_cents,
+              ledgerId,
+            ),
+        ],
+      });
+
+      if (!charged.ok) {
+        if (charged.reason === "duplicate") {
+          return chargeResult(db, row.id, 0, await balanceCents(env, identity.accountId));
+        }
+        if (charged.reason === "insufficient") {
+          const current = await balanceCents(env, identity.accountId);
+          return storedError(
+            409,
+            "PRECONDITION_FAILED",
+            "余额不足，先充值",
+            {
+              reason: "insufficient_balance",
+              shortfall_cents: row.amount_cents - current,
+            },
+            true,
+          );
+        }
+        return storedError(503, "INTERNAL", "记账暂时不可用，请稍后重试", { reason: "wallet_unavailable" }, true);
+      }
+
+      const provisioned = await provisionServer(
+        {
+          DB: db,
+          DO_API_TOKEN: env.DO_API_TOKEN,
+          ENROLL_BASE_URL: env.ENROLL_BASE_URL,
+          ENVIRONMENT: env.ENVIRONMENT ?? "dev",
+        },
+        {
+          id: serverId,
+          account_id: identity.accountId,
+          order_id: row.id,
+          region: row.region,
+          plan: row.plan,
+          node_port: port,
+        },
+      );
+
+      if (!provisioned.ok) {
+        // 钱已经扣了：provision 的失败分支已把订单退回 paid，Cron 会继续补建。
+        return storedError(502, "UPSTREAM_ERROR", "服务器还在创建，稍后自动重试", { reason: provisioned.reason }, true);
+      }
+
+      return chargeResult(db, row.id, row.amount_cents, charged.balanceAfterCents);
     },
   );
-}
-
-/** 假支付：直接 paid + 建机。只在非生产可用，是本地开发与 E2E 的唯一后门。 */
-async function checkoutFake(env: OrdersEnv, row: OrderRow): Promise<StoredResponse> {
-  if (env.ENVIRONMENT === "production") {
-    return storedError(409, "PRECONDITION_FAILED", "这个支付方式不可用", { reason: "channel_not_allowed" });
-  }
-  const db = env.DB!;
-  if (row.state !== "pending_payment") {
-    const current = await loadOrder(db, row.account_id, row.id);
-    return { status: 200, body: checkoutView(current as OrderRow) };
-  }
-  if (row.expires_at && row.expires_at < Date.now()) {
-    await db.prepare("UPDATE orders SET state = 'cancelled' WHERE id = ?").bind(row.id).run();
-    return storedError(409, "PRECONDITION_FAILED", "这笔订单已过期，请重新下单", { reason: "order_expired" });
-  }
-
-  const now = Date.now();
-  const serverId = randomId("srv_");
-  const port = await pickPort(db, row.account_id);
-  // 认领订单必须带状态守卫：双击、重放、两个窗口同时结账时只有一个能把
-  // pending_payment 推进到 provisioning，否则同一订单会建出两台机器。
-  const claim = await db
-    .prepare(
-      "UPDATE orders SET state = 'provisioning', paid_at = ?, server_id = ?, paid_via = 'fake' " +
-        "WHERE id = ? AND state = 'pending_payment'",
-    )
-    .bind(now, serverId, row.id)
-    .run();
-  const claimed = (claim as { meta?: { changes?: number } }).meta?.changes ?? 0;
-  if (claimed === 0) {
-    const current = await loadOrder(db, row.account_id, row.id);
-    return { status: 200, body: checkoutView(current as OrderRow) };
-  }
-
-  await db.batch([
-    db
-      .prepare(
-        "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?)",
-      )
-      .bind(
-        serverId,
-        row.account_id,
-        row.id,
-        `我的服务器${serverId.slice(-4)}`,
-        row.region,
-        row.plan,
-        row.hourly_usd,
-        row.amount_usd,
-        port,
-        now,
-        now,
-      ),
-    db
-      .prepare("INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'checkout.fake_paid', ?)")
-      .bind(now, row.account_id, serverId, JSON.stringify({ order_id: row.id })),
-  ]);
-
-  const provisioned = await provisionServer(
-    {
-      DB: db,
-      DO_API_TOKEN: env.DO_API_TOKEN,
-      ENROLL_BASE_URL: env.ENROLL_BASE_URL,
-      ENVIRONMENT: env.ENVIRONMENT ?? "dev",
-    },
-    {
-      id: serverId,
-      account_id: row.account_id,
-      order_id: row.id,
-      region: row.region,
-      plan: row.plan,
-      node_port: port,
-    },
-  );
-
-  if (!provisioned.ok) {
-    return storedError(
-      502,
-      "UPSTREAM_ERROR",
-      "服务器没建成，这笔订单已结束，没有产生服务器",
-      { reason: provisioned.reason },
-      true,
-    );
-  }
-
-  const updated = await loadOrder(db, row.account_id, row.id);
-  return { status: 200, body: checkoutView(updated as OrderRow) };
-}
-
-/** 真支付：只创建收银台会话，建机等 webhook 确认收款后再做。 */
-async function checkoutDodo(
-  env: OrdersEnv,
-  accountId: string,
-  row: OrderRow,
-): Promise<StoredResponse> {
-  const db = env.DB!;
-
-  if (row.state === "cancelled") {
-    return storedError(409, "PRECONDITION_FAILED", "这笔订单已取消，重新下单", { reason: "order_cancelled" });
-  }
-  const paidStates = ["paid", "provisioning", "ready", "failed"];
-  if (paidStates.includes(row.state) || (row.state === "awaiting_payment" && row.checkout_url)) {
-    return { status: 200, body: checkoutView(row) };
-  }
-
-  // 售价必须与产品价一致：显示一个价、收另一个价，两边都是错。
-  const price = planPriceUsd(env, row.plan);
-  if (price === null || Math.round(price * 100) !== Math.round(row.amount_usd * 100)) {
-    return storedError(409, "PRECONDITION_FAILED", "价格配置不一致，暂时不能下单", {
-      reason: "price_mismatch",
-    });
-  }
-
-  const returnUrl = paymentReturnUrl(env);
-  if (!returnUrl) {
-    return storedError(502, "UPSTREAM_ERROR", "支付暂时不可用", { reason: "checkout_unavailable" }, true);
-  }
-
-  const account = await db
-    .prepare("SELECT email FROM accounts WHERE id = ?")
-    .bind(accountId)
-    .first<{ email: string | null }>();
-  if (!account?.email) {
-    return storedError(401, "UNAUTHENTICATED", "登录后才能支付", { reason: "auth_required" }, true);
-  }
-
-  const session = await createCheckoutSession(env, {
-    orderId: row.id,
-    email: account.email,
-    plan: row.plan,
-    returnUrl,
-  });
-  if (!session.ok) {
-    return storedError(502, "UPSTREAM_ERROR", "支付暂时不可用", { reason: "checkout_unavailable" }, true);
-  }
-
-  const now = Date.now();
-  await db
-    .prepare(
-      "UPDATE orders SET state = 'awaiting_payment', checkout_session_id = ?, checkout_url = ?, " +
-        "paid_via = 'dodo', expires_at = ? WHERE id = ? AND state IN ('pending_payment', 'payment_failed', 'expired')",
-    )
-    .bind(session.sessionId, session.checkoutUrl, now + CHECKOUT_TTL_MS, row.id)
-    .run();
-
-  const updated = await loadOrder(db, accountId, row.id);
-  return { status: 200, body: checkoutView(updated as OrderRow) };
 }
 
 /** 端口由控制面选定（§19.6.1）：防火墙必须在建机后立刻带端口创建。 */
@@ -486,8 +401,8 @@ export async function provisionPaidOrder(
     const port = await pickPort(db, order.account_id);
     await db
       .prepare(
-        "INSERT OR IGNORE INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?)",
+        "INSERT OR IGNORE INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, plan_price_cents) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, 'active', ?)",
       )
       .bind(
         serverId,
@@ -501,6 +416,8 @@ export async function provisionPaidOrder(
         port,
         now,
         now,
+        now + PERIOD_MS,
+        order.amount_cents,
       )
       .run();
     server = await db

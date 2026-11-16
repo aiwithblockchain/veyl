@@ -1,13 +1,14 @@
-// 登录门禁与支付（login-and-payment.md §4）：收银台会话、webhook 验签与幂等。
+// 预付费钱包（login-and-payment.md §4）：充值入账、webhook 幂等、余额不足。
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { handleOrders } from "../src/orders";
+import { handleTopups } from "../src/topups";
 import { handleDodoWebhook } from "../src/webhooks/dodo";
 import { signAccessToken } from "../src/lib/crypto";
 import { FakeD1 } from "./helpers/fakeD1";
 
-const ACCOUNT = "acct_email000000000000000";
-const DEVICE = "dev_emailtest00000000000";
+const ACCOUNT = "acct_wallet00000000000000";
+const DEVICE = "dev_wallettest00000000000";
 const WEBHOOK_SECRET = "test-webhook-secret";
 
 async function signingJwk(): Promise<string> {
@@ -18,22 +19,16 @@ async function signingJwk(): Promise<string> {
   return JSON.stringify(await crypto.subtle.exportKey("jwk", pair.privateKey));
 }
 
-interface EnvOptions {
-  kind?: "email" | "device";
-  environment?: string;
-  prices?: string;
-}
-
-async function makeEnv(db: FakeD1, options: EnvOptions = {}) {
-  const kind = options.kind ?? "email";
+async function makeEnv(db: FakeD1, environment = "dev") {
   const jwk = await signingJwk();
   db.rows("accounts").push({
     id: ACCOUNT,
-    kind,
-    email: kind === "email" ? "buyer@example.com" : null,
+    kind: "email",
+    email: "buyer@example.com",
     status: "active",
     merged_into: null,
     created_at: 0,
+    balance_cents: 0,
   });
   db.rows("devices").push({
     id: DEVICE,
@@ -51,18 +46,18 @@ async function makeEnv(db: FakeD1, options: EnvOptions = {}) {
     did: DEVICE,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 600,
-    jti: "jti_pay",
+    jti: "jti_wallet",
   });
   return {
     DB: db as unknown as D1Database,
     TOKEN_SIGNING_JWK: jwk,
     DO_API_TOKEN: "do-token",
     ENROLL_BASE_URL: "https://control.example.com",
-    ENVIRONMENT: options.environment ?? "dev",
+    ENVIRONMENT: environment,
     DODO_API_KEY: "dodo-key",
     DODO_WEBHOOK_SECRET: WEBHOOK_SECRET,
-    PLAN_PRICES_USD: options.prices ?? JSON.stringify({ "s-1vcpu-1gb": 9 }),
-    DODO_PRODUCT_IDS: JSON.stringify({ "s-1vcpu-1gb": "pdt_test0001" }),
+    PLAN_PRICES_USD: JSON.stringify({ "s-1vcpu-1gb": 9 }),
+    DODO_TOPUP_PRODUCT_IDS: JSON.stringify({ "1000": "pdt_top10", "2000": "pdt_top20" }),
     APP_PAYMENT_RETURN_URL: "https://control.example.com/payment/return",
     token,
   };
@@ -70,7 +65,7 @@ async function makeEnv(db: FakeD1, options: EnvOptions = {}) {
 
 type TestEnv = Awaited<ReturnType<typeof makeEnv>>;
 
-function stubUpstream(sessionUrl = "https://checkout.dodopayments.test/cs_1") {
+function stubUpstream() {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -92,11 +87,13 @@ function stubUpstream(sessionUrl = "https://checkout.dodopayments.test/cs_1") {
         );
       }
       if (href.endsWith("/checkouts") && init?.method === "POST") {
-        return new Response(JSON.stringify({ id: "cs_1", checkout_url: sessionUrl }), { status: 201 });
+        return new Response(JSON.stringify({ id: "cs_wallet", checkout_url: "https://checkout.test/cs_wallet" }), {
+          status: 201,
+        });
       }
       if (href.endsWith("/droplets") && init?.method === "POST") {
         return new Response(
-          JSON.stringify({ droplet: { id: 777001, status: "new", networks: { v4: [] } } }),
+          JSON.stringify({ droplet: { id: 888001, status: "new", networks: { v4: [] } } }),
           { status: 202 },
         );
       }
@@ -105,27 +102,20 @@ function stubUpstream(sessionUrl = "https://checkout.dodopayments.test/cs_1") {
   );
 }
 
-function orderRequest(token: string, key: string) {
-  return new Request("https://example.com/v1/orders", {
+function authed(token: string) {
+  return { authorization: `Bearer ${token}` };
+}
+
+function topupRequest(env: TestEnv, cents: number, channel?: string) {
+  return new Request("https://example.com/v1/topups", {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "Idempotency-Key": key },
-    body: JSON.stringify({ region: "sgp1", plan: "s-1vcpu-1gb" }),
+    headers: authed(env.token),
+    body: JSON.stringify(channel ? { denomination_cents: cents, channel } : { denomination_cents: cents }),
   });
 }
 
-function checkoutRequest(token: string, orderId: string, key: string, channel?: string) {
-  return new Request(`https://example.com/v1/orders/${orderId}/checkout`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}`, "Idempotency-Key": key },
-    body: JSON.stringify(channel ? { channel } : {}),
-  });
-}
-
-async function createOrder(env: TestEnv, key: string): Promise<string> {
-  const res = await handleOrders(orderRequest(env.token, key), env as never);
-  expect(res?.status).toBe(200);
-  const body = (await res!.json()) as { order_id: string };
-  return body.order_id;
+function walletRequest(env: TestEnv) {
+  return new Request("https://example.com/v1/wallet", { headers: authed(env.token) });
 }
 
 async function signWebhook(body: string, id: string, timestamp: string): Promise<string> {
@@ -136,11 +126,7 @@ async function signWebhook(body: string, id: string, timestamp: string): Promise
     false,
     ["sign"],
   );
-  const mac = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(`${id}.${timestamp}.${body}`),
-  );
+  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${id}.${timestamp}.${body}`));
   return `v1,${btoa(String.fromCharCode(...new Uint8Array(mac)))}`;
 }
 
@@ -151,7 +137,6 @@ async function webhookRequest(
   options: { id?: string; timestamp?: string; signature?: string } = {},
 ): Promise<Request> {
   const body = JSON.stringify(payload);
-  // 默认每次都是新事件：真实 Dodo 每次投递有自己的 webhook-id。
   const id = options.id ?? `wh_${(webhookSeq += 1)}`;
   const timestamp = options.timestamp ?? String(Math.floor(Date.now() / 1000));
   const signature = options.signature ?? (await signWebhook(body, id, timestamp));
@@ -167,33 +152,14 @@ async function webhookRequest(
   });
 }
 
-function paidEvent(orderId: string, paymentId = "pay_1") {
+function topupPaidEvent(topupId: string, paymentId = "pay_top_1") {
   return {
     type: "payment.succeeded",
     data: {
       id: paymentId,
-      customer: { email: "buyer@example.com" },
-      metadata: { order_id: orderId },
-      settlement_amount: 900,
+      metadata: { topup_id: topupId },
+      settlement_amount: 1000,
       currency: "USD",
-    },
-  };
-}
-
-function subscriptionEvent(
-  kind: string,
-  subscriptionId: string,
-  orderId: string,
-  endsAt: string,
-  cancelAtPeriodEnd = false,
-) {
-  return {
-    type: kind,
-    data: {
-      id: subscriptionId,
-      metadata: { order_id: orderId },
-      next_billing_date: endsAt,
-      cancel_at_period_end: cancelAtPeriodEnd,
     },
   };
 }
@@ -202,196 +168,219 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("真支付结账", () => {
-  it("结账只建收银台会话，不建机", async () => {
+describe("充值", () => {
+  it("fake 通道直接入账，余额与账本同步", async () => {
     const db = new FakeD1();
     const env = await makeEnv(db);
     stubUpstream();
 
-    const orderId = await createOrder(env, "idem-pay-0001");
-    const res = await handleOrders(checkoutRequest(env.token, orderId, "idem-checkout-0001"), env as never);
+    const res = await handleTopups(topupRequest(env, 2000, "fake"), env as never);
     expect(res?.status).toBe(200);
-    const body = (await res!.json()) as { state: string; checkout_url: string; session_id: string };
-    expect(body.state).toBe("awaiting_payment");
-    expect(body.checkout_url).toBe("https://checkout.dodopayments.test/cs_1");
-    expect(body.session_id).toBe("cs_1");
-    expect(db.rows("servers")).toHaveLength(0);
-    expect(db.rows("orders")[0].checkout_session_id).toBe("cs_1");
+    const body = (await res!.json()) as { topup_id: string; denomination_cents: number; balance_cents: number };
+    expect(body.denomination_cents).toBe(2000);
+    expect(body.balance_cents).toBe(2000);
+    expect(db.rows("wallet_ledger")).toHaveLength(1);
+
+    const wallet = await handleTopups(walletRequest(env), env as never);
+    const view = (await wallet!.json()) as { balance_cents: number; denominations_cents: number[] };
+    expect(view.balance_cents).toBe(2000);
+    expect(view.denominations_cents).toEqual([1000, 2000]);
   });
 
-  it("订单金额与售价不一致时拒绝建会话", async () => {
+  it("同一幂等键连点只产生一个充值单", async () => {
     const db = new FakeD1();
-    const env = await makeEnv(db, { prices: JSON.stringify({ "s-1vcpu-1gb": 7.5 }) });
+    const env = await makeEnv(db);
     stubUpstream();
 
-    const orderId = await createOrder(env, "idem-pay-0002");
-    // 下单时用的就是 PLAN_PRICES_USD，所以先把订单改成旧价模拟配置漂移。
-    db.rows("orders")[0].amount_usd = 6;
-    const res = await handleOrders(checkoutRequest(env.token, orderId, "idem-checkout-0002"), env as never);
+    const withKey = () =>
+      new Request("https://example.com/v1/topups", {
+        method: "POST",
+        headers: { ...authed(env.token), "Idempotency-Key": "idem-topup-0001" },
+        body: JSON.stringify({ denomination_cents: 1000, channel: "fake" }),
+      });
+
+    const first = (await (await handleTopups(withKey(), env as never))!.json()) as { topup_id: string };
+    const second = (await (await handleTopups(withKey(), env as never))!.json()) as { topup_id: string };
+    expect(second.topup_id).toBe(first.topup_id);
+    expect(db.rows("topups")).toHaveLength(1);
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+  });
+
+  it("默认走真实收银台，返回 checkout_url", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    stubUpstream();
+
+    const res = await handleTopups(topupRequest(env, 2000), env as never);
+    expect(res?.status).toBe(200);
+    const body = (await res!.json()) as { checkout_url: string | null; topup_id: string };
+    expect(body.checkout_url).toBe("https://checkout.test/cs_wallet");
+    expect(db.rows("topups")[0].status).toBe("pending");
+    expect(db.rows("accounts")[0].balance_cents).toBe(0);
+  });
+
+  it("生产环境拒绝 fake 通道", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db, "production");
+    stubUpstream();
+    const res = await handleTopups(topupRequest(env, 1000, "fake"), env as never);
     expect(res?.status).toBe(409);
     const body = (await res!.json()) as { details: { reason: string } };
-    expect(body.details.reason).toBe("price_mismatch");
+    expect(body.details.reason).toBe("channel_not_allowed");
   });
 
-  it("生产环境不接受假支付，匿名设备账户也不能下单", async () => {
+  it("没配产品的面额被拒绝", async () => {
     const db = new FakeD1();
-    const env = await makeEnv(db, { kind: "device", environment: "production" });
+    const env = await makeEnv(db);
     stubUpstream();
-
-    const rejected = await handleOrders(orderRequest(env.token, "idem-pay-0003"), env as never);
-    expect(rejected?.status).toBe(401);
-    const body = (await rejected!.json()) as { details: { reason: string } };
-    expect(body.details.reason).toBe("auth_required");
+    const res = await handleTopups(topupRequest(env, 5000), env as never);
+    expect(res?.status).toBe(409);
+    const body = (await res!.json()) as { details: { reason: string } };
+    expect(body.details.reason).toBe("invalid_denomination");
   });
 });
 
-describe("Dodo webhook", () => {
-  it("验签通过后把订单标记为已付并只建一台服务器", async () => {
+describe("Dodo 回调入账", () => {
+  it("支付成功入账一次，重复投递不重复加钱", async () => {
     const db = new FakeD1();
     const env = await makeEnv(db);
     stubUpstream();
-    const orderId = await createOrder(env, "idem-pay-0010");
-    await handleOrders(checkoutRequest(env.token, orderId, "idem-checkout-0010"), env as never);
+    db.rows("topups").push({
+      id: "top_1",
+      account_id: ACCOUNT,
+      denomination_cents: 1000,
+      product_id: "pdt_top10",
+      checkout_session_id: "cs_1",
+      checkout_url: "https://checkout.test/cs_1",
+      status: "pending",
+      created_at: 0,
+      paid_at: null,
+    });
 
-    const res = await handleDodoWebhook(await webhookRequest(paidEvent(orderId)), env as never);
-    expect(res?.status).toBe(200);
-    expect(db.rows("orders")[0].state).toBe("provisioning");
-    expect(db.rows("servers")).toHaveLength(1);
-    expect(db.rows("payments")).toHaveLength(1);
+    const first = await handleDodoWebhook(await webhookRequest(topupPaidEvent("top_1")), env as never);
+    expect(first?.status).toBe(200);
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+    expect(db.rows("topups")[0].status).toBe("paid");
 
-    // 同一事件重投：不再处理，也不会建第二台。
-    const again = await handleDodoWebhook(await webhookRequest(paidEvent(orderId)), env as never);
+    // 同一 webhook-id 重投。
+    const again = await handleDodoWebhook(
+      await webhookRequest(topupPaidEvent("top_1"), { id: "wh_replay" }),
+      env as never,
+    );
     expect(again?.status).toBe(200);
-    expect(db.rows("servers")).toHaveLength(1);
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+    expect(db.rows("wallet_ledger")).toHaveLength(1);
     expect(db.rows("payments")).toHaveLength(1);
   });
 
-  it("坏签名一律 401，订单不变", async () => {
+  it("坏签名一律 401，不入账", async () => {
     const db = new FakeD1();
     const env = await makeEnv(db);
     stubUpstream();
-    const orderId = await createOrder(env, "idem-pay-0011");
-    await handleOrders(checkoutRequest(env.token, orderId, "idem-checkout-0011"), env as never);
+    db.rows("topups").push({
+      id: "top_2",
+      account_id: ACCOUNT,
+      denomination_cents: 1000,
+      product_id: "pdt_top10",
+      checkout_session_id: "cs_2",
+      checkout_url: "https://checkout.test/cs_2",
+      status: "pending",
+      created_at: 0,
+      paid_at: null,
+    });
 
     const res = await handleDodoWebhook(
-      await webhookRequest(paidEvent(orderId), { signature: "v1,deadbeef" }),
+      await webhookRequest(topupPaidEvent("top_2"), { signature: "v1,deadbeef" }),
       env as never,
     );
     expect(res?.status).toBe(401);
-    expect(db.rows("orders")[0].state).toBe("awaiting_payment");
-    expect(db.rows("servers")).toHaveLength(0);
+    expect(db.rows("accounts")[0].balance_cents).toBe(0);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
   });
 
   it("时间戳超出窗口按重放拒绝", async () => {
     const db = new FakeD1();
     const env = await makeEnv(db);
     stubUpstream();
-    const orderId = await createOrder(env, "idem-pay-0012");
-
     const stale = String(Math.floor(Date.now() / 1000) - 3600);
     const res = await handleDodoWebhook(
-      await webhookRequest(paidEvent(orderId), { timestamp: stale }),
+      await webhookRequest(topupPaidEvent("top_3"), { timestamp: stale }),
       env as never,
     );
     expect(res?.status).toBe(401);
   });
+});
 
-  it("匹配不到订单时留证据并回 200", async () => {
-    const db = new FakeD1();
-    const env = await makeEnv(db);
-    stubUpstream();
-
-    const res = await handleDodoWebhook(await webhookRequest(paidEvent("ord_unknown")), env as never);
-    expect(res?.status).toBe(200);
-    expect(db.rows("unmatched_payments")).toHaveLength(1);
-    expect(db.rows("unmatched_payments")[0].reason).toBe("unknown_order");
-  });
-
-  it("订阅只挂在服务器上：首期付款记下本期到期时间", async () => {
-    const db = new FakeD1();
-    const env = await makeEnv(db);
-    stubUpstream();
-    const orderId = await createOrder(env, "idem-sub-0001");
-    await handleOrders(checkoutRequest(env.token, orderId, "idem-checkout-sub-0001"), env as never);
-
-    const endsAt = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
-    const event = paidEvent(orderId, "pay_sub_1");
-    (event.data as Record<string, unknown>).subscription_id = "sub_1";
-    (event.data as Record<string, unknown>).service_periods = [{ ends_at: endsAt }];
-    const res = await handleDodoWebhook(await webhookRequest(event), env as never);
-    expect(res?.status).toBe(200);
-
-    expect(db.rows("subscriptions")).toHaveLength(1);
-    const subscription = db.rows("subscriptions")[0];
-    expect(subscription.id).toBe("sub_1");
-    expect(subscription.status).toBe("active");
-    expect(subscription.order_id).toBe(orderId);
-    // 订阅跟着服务器走：到期时间落在 servers.paid_until 上。
-    expect(db.rows("servers")[0].paid_until).toBe(Date.parse(endsAt));
-  });
-
-  it("续费顺延到期时间，取消只改状态不删机", async () => {
-    const db = new FakeD1();
-    const env = await makeEnv(db);
-    stubUpstream();
-    const orderId = await createOrder(env, "idem-sub-0002");
-    await handleOrders(checkoutRequest(env.token, orderId, "idem-checkout-sub-0002"), env as never);
-
-    const first = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
-    const event = paidEvent(orderId, "pay_sub_2");
-    (event.data as Record<string, unknown>).subscription_id = "sub_2";
-    (event.data as Record<string, unknown>).service_periods = [{ ends_at: first }];
-    await handleDodoWebhook(await webhookRequest(event), env as never);
-
-    const renewed = new Date(Date.now() + 60 * 24 * 3600 * 1000).toISOString();
-    await handleDodoWebhook(
-      await webhookRequest(subscriptionEvent("subscription.renewed", "sub_2", orderId, renewed)),
-      env as never,
-    );
-    expect(db.rows("servers")[0].paid_until).toBe(Date.parse(renewed));
-
-    await handleDodoWebhook(
-      await webhookRequest(subscriptionEvent("subscription.cancelled", "sub_2", orderId, renewed, true)),
-      env as never,
-    );
-    expect(db.rows("subscriptions")[0].status).toBe("cancelled");
-    expect(db.rows("servers")[0].state).not.toBe("destroyed");
-  });
-
-  it("迟到的旧事件不会把订阅状态和有效期改回去", async () => {
-    const db = new FakeD1();
-    const env = await makeEnv(db);
-    stubUpstream();
-    const orderId = await createOrder(env, "idem-sub-0003");
-    await handleOrders(checkoutRequest(env.token, orderId, "idem-checkout-sub-0003"), env as never);
-
-    const now = Math.floor(Date.now() / 1000);
-    const later = new Date(Date.now() + 60 * 24 * 3600 * 1000).toISOString();
-    const sooner = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
-
-    // 先有一期付款，机器才存在；到期时间从这一期开始。
-    const first = paidEvent(orderId, "pay_sub_3");
-    (first.data as Record<string, unknown>).subscription_id = "sub_3";
-    (first.data as Record<string, unknown>).service_periods = [{ ends_at: sooner }];
-    await handleDodoWebhook(await webhookRequest(first, { id: "wh_first" }), env as never);
-
-    await handleDodoWebhook(
-      await webhookRequest(subscriptionEvent("subscription.renewed", "sub_3", orderId, later), {
-        id: "wh_new",
-        timestamp: String(now),
+describe("买机扣余额", () => {
+  async function createOrder(env: TestEnv): Promise<string> {
+    const res = await handleOrders(
+      new Request("https://example.com/v1/orders", {
+        method: "POST",
+        headers: { ...authed(env.token), "Idempotency-Key": "idem-wallet-order-1" },
+        body: JSON.stringify({ region: "sgp1", plan: "s-1vcpu-1gb" }),
       }),
       env as never,
     );
-    // 旧事件晚到：时间戳更早，必须被丢弃。
-    await handleDodoWebhook(
-      await webhookRequest(subscriptionEvent("subscription.cancelled", "sub_3", orderId, sooner), {
-        id: "wh_old",
-        timestamp: String(now - 30),
+    expect(res?.status).toBe(200);
+    return ((await res!.json()) as { order_id: string }).order_id;
+  }
+
+  it("余额不足时不扣钱不建机", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    stubUpstream();
+    const orderId = await createOrder(env);
+
+    const res = await handleOrders(
+      new Request(`https://example.com/v1/orders/${orderId}/checkout`, {
+        method: "POST",
+        headers: { ...authed(env.token), "Idempotency-Key": "idem-wallet-checkout-1" },
       }),
       env as never,
     );
+    expect(res?.status).toBe(409);
+    const body = (await res!.json()) as {
+      retryable: boolean;
+      details: { reason: string; shortfall_cents: number };
+    };
+    expect(body.details.reason).toBe("insufficient_balance");
+    expect(body.details.shortfall_cents).toBe(900);
+    // 契约要求充值后可重试；retryable=false 会让 Host 当终态处理。
+    expect(body.retryable).toBe(true);
+    expect(db.rows("servers")).toHaveLength(0);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+  });
 
-    expect(db.rows("subscriptions")[0].status).toBe("active");
-    expect(db.rows("servers")[0].paid_until).toBe(Date.parse(later));
+  it("扣完余额建机，服务器带上本期到期时间", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    stubUpstream();
+    db.rows("accounts")[0].balance_cents = 2000;
+    const orderId = await createOrder(env);
+
+    const res = await handleOrders(
+      new Request(`https://example.com/v1/orders/${orderId}/checkout`, {
+        method: "POST",
+        headers: { ...authed(env.token), "Idempotency-Key": "idem-wallet-checkout-2" },
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(200);
+    const body = (await res!.json()) as {
+      order_id: string;
+      state: string;
+      charged_cents: number;
+      balance_after_cents: number;
+    };
+    expect(body.charged_cents).toBe(900);
+    expect(body.balance_after_cents).toBe(1100);
+    // Host 按 order_id + state 解析；少任何一个都会在扣款成功后报错、用户重试再扣一次。
+    expect(body.order_id).toBe(orderId);
+    expect(body.state).toBe("provisioning");
+
+    const server = db.rows("servers")[0];
+    expect(server.plan_price_cents).toBe(900);
+    // 不写 paid_until 会让续费扫描永远扫不到（永久免单）。
+    expect(Number(server.paid_until)).toBeGreaterThan(Date.now());
   });
 });

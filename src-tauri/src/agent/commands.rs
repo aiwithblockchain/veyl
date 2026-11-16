@@ -262,27 +262,45 @@ pub async fn my_server_create(
     }
 }
 
-/// 创建收银台会话并在系统浏览器打开（2.27.0，仅 UI）。
+/// 从余额扣一个月并开始建机（2.28.0，仅 UI）；余额不足原样透出 shortfall。
 #[tauri::command]
-pub async fn my_server_checkout(
+pub async fn my_server_checkout(order_id: String) -> Result<Value, Value> {
+    match crate::control_plane::servers::checkout(&order_id).await {
+        Ok(charge) => serde_json::to_value(&charge)
+            .map_err(|error| command_error("INTERNAL", error, Value::Null)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+/// 读钱包余额（仅 UI）。
+#[tauri::command]
+pub async fn my_server_wallet() -> Result<Value, Value> {
+    match crate::control_plane::servers::wallet().await {
+        Ok(wallet) => Ok(json!(wallet)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+/// 创建充值会话并在系统浏览器打开（仅 UI）。
+#[tauri::command]
+pub async fn my_server_topup(
     app: tauri::AppHandle,
-    order_id: String,
+    denomination: i64,
     channel: Option<String>,
 ) -> Result<Value, Value> {
     let channel = channel.unwrap_or_else(|| "dodo".to_string());
-    match crate::control_plane::servers::checkout(&order_id, &channel).await {
-        Ok(checkout) => {
-            if let Some(url) = checkout.checkout_url.as_deref() {
+    match crate::control_plane::servers::topup(denomination, &channel).await {
+        Ok(topup) => {
+            if let Some(url) = topup.checkout_url.as_deref() {
                 open_checkout_url(&app, url);
             }
-            serde_json::to_value(&checkout)
-                .map_err(|error| command_error("INTERNAL", error, Value::Null))
+            Ok(json!(topup))
         }
         Err(error) => Err(error.envelope()),
     }
 }
 
-/// 系统默认浏览器打开收银台；失败只告警——会话已创建，界面可用「继续支付」重试。
+/// 系统默认浏览器打开充值收银台；失败只告警——会话已创建，界面可重试。
 fn open_checkout_url(app: &tauri::AppHandle, url: &str) {
     use tauri_plugin_opener::OpenerExt;
 

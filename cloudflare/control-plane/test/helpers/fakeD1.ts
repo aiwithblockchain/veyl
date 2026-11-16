@@ -1,6 +1,8 @@
 // 测试用的最小 D1 替身：只实现 auth/orders/servers/payments 涉及的语句形态。
 // 不是 SQL 引擎——遇到没覆盖的语句会抛错，避免测试悄悄走错分支。
 
+import { assertSqlMatchesSchema } from "./schemaGuard";
+
 type Row = Record<string, unknown>;
 
 interface Stmt {
@@ -27,6 +29,8 @@ export class FakeD1 {
     webhook_events: [] as Row[],
     unmatched_payments: [] as Row[],
     subscriptions: [] as Row[],
+    wallet_ledger: [] as Row[],
+    topups: [] as Row[],
   };
   private rateLimits = new Map<string, { window_start: number; count: number }>();
 
@@ -42,6 +46,7 @@ export class FakeD1 {
   exec(statement: Stmt): Row | null {
     const sql = normalise(statement.sql);
     const a = statement.args;
+    if (/^(insert|update|delete)\b/.test(sql)) assertSqlMatchesSchema(sql, a);
 
     if (sql.startsWith("select window_start, count from rate_limits")) {
       const row = this.rateLimits.get(String(a[0]));
@@ -82,6 +87,7 @@ export class FakeD1 {
         status: "active",
         merged_into: null,
         created_at: a[2],
+        balance_cents: 0,
       });
       return null;
     }
@@ -94,6 +100,7 @@ export class FakeD1 {
         status: "active",
         merged_into: null,
         created_at: withEmail ? a[2] : a[1],
+        balance_cents: 0,
       });
       return null;
     }
@@ -212,11 +219,40 @@ export class FakeD1 {
       return null;
     }
 
-    if (sql.startsWith("select request_hash, status, response from idempotency_keys")) {
+    if (sql.startsWith("select request_hash, status, response")) {
       const row = this.tables.idempotency_keys.find(
         (r) => r.account_id === a[0] && r.endpoint === a[1] && r.key === a[2],
       );
       return row ? { ...row } : null;
+    }
+    if (sql.startsWith("insert or ignore into idempotency_keys")) {
+      const exists = this.tables.idempotency_keys.some(
+        (r) => r.account_id === a[0] && r.endpoint === a[1] && r.key === a[2],
+      );
+      if (!exists) {
+        this.tables.idempotency_keys.push({
+          account_id: a[0],
+          endpoint: a[1],
+          key: a[2],
+          request_hash: a[3],
+          status: 0,
+          response: null,
+          created_at: a[4],
+        });
+      }
+      return null;
+    }
+    if (sql.startsWith("update idempotency_keys set created_at")) {
+      const row = this.tables.idempotency_keys.find(
+        (r) =>
+          r.account_id === a[1] &&
+          r.endpoint === a[2] &&
+          r.key === a[3] &&
+          r.status === 0 &&
+          r.created_at === a[4],
+      );
+      if (row) row.created_at = a[0];
+      return null;
     }
     if (sql.startsWith("insert into idempotency_keys")) {
       this.tables.idempotency_keys.push({
@@ -250,8 +286,18 @@ export class FakeD1 {
     if (sql.startsWith("select * from orders where id = ? and account_id")) {
       return this.tables.orders.find((o) => o.id === a[0] && o.account_id === a[1]) ?? null;
     }
+    if (sql.startsWith("select state from orders where id")) {
+      const row = this.tables.orders.find((o) => o.id === a[0]);
+      return row ? { state: row.state } : null;
+    }
     if (sql.startsWith("select * from orders where id")) {
       return this.tables.orders.find((o) => o.id === a[0]) ?? null;
+    }
+    if (sql.startsWith("select id, amount_cents, paid_via from orders")) {
+      const row = this.tables.orders.find((o) => o.id === a[0]);
+      return row
+        ? { id: row.id, amount_cents: row.amount_cents, paid_via: row.paid_via ?? null }
+        : null;
     }
     if (sql.startsWith("select id, account_id, amount_usd from orders")) {
       const row = this.tables.orders.find((o) =>
@@ -269,11 +315,12 @@ export class FakeD1 {
         region: a[2],
         plan: a[3],
         amount_usd: a[4],
-        hourly_usd: a[5],
+        amount_cents: a[5],
+        hourly_usd: a[6],
         state: "pending_payment",
-        idempotency_key: a[6],
-        created_at: a[7],
-        expires_at: a[8],
+        idempotency_key: a[7],
+        created_at: a[8],
+        expires_at: a[9],
         paid_at: null,
         server_id: null,
         failure_code: null,
@@ -323,6 +370,16 @@ export class FakeD1 {
       }
       return null;
     }
+    if (sql.startsWith("update orders set state = 'paid', failure_code")) {
+      // 建机失败回退：已收款的订单退回 paid，等 Cron 重试。
+      const row = this.tables.orders.find((o) => o.id === a[1]);
+      if (row && (row.state === "paid" || row.state === "provisioning")) {
+        row.state = "paid";
+        row.failure_code = a[0];
+        row.failure_stage = "creating";
+      }
+      return null;
+    }
     if (sql.startsWith("update orders set state = 'paid'")) {
       const row = this.tables.orders.find((o) => o.id === a[1]);
       const allowed = ["pending_payment", "awaiting_payment", "payment_failed", "expired", "cancelled"];
@@ -348,6 +405,9 @@ export class FakeD1 {
       return null;
     }
 
+    if (sql.startsWith("select * from servers where enrollment_hash")) {
+      return this.tables.servers.find((s) => s.enrollment_hash === a[0]) ?? null;
+    }
     if (sql.startsWith("select id, account_id, order_id, region, plan, node_port from servers")) {
       const row = this.tables.servers.find((s) => s.order_id === a[0]);
       return row
@@ -384,6 +444,9 @@ export class FakeD1 {
         firewall_id: null,
         created_at: a[9],
         updated_at: a[10],
+        paid_until: a[11] ?? 0,
+        billing_state: "active",
+        plan_price_cents: a[12] ?? 0,
         destroyed_at: null,
       });
       return null;
@@ -410,6 +473,9 @@ export class FakeD1 {
         firewall_id: null,
         created_at: a[9],
         updated_at: a[10],
+        paid_until: a[11] ?? 0,
+        billing_state: "active",
+        plan_price_cents: a[12] ?? 0,
         destroyed_at: null,
       });
       return null;
@@ -580,12 +646,135 @@ export class FakeD1 {
       if (row && row.subscription_id == null) row.subscription_id = a[0];
       return null;
     }
-    if (sql.startsWith("update servers set paid_until")) {
+    if (sql.startsWith("update servers set paid_until") && sql.includes("where order_id")) {
       for (const server of this.tables.servers) {
         if (server.order_id === a[1]) {
           const current = Number(server.paid_until ?? 0);
           server.paid_until = Math.max(current, Number(a[0]));
         }
+      }
+      return null;
+    }
+
+
+    if (sql.startsWith("insert into wallet_ledger")) {
+      const isDebit = sql.includes("a.balance_cents >= ?");
+      const [ledgerId, kind, amount, magnitude, refType, refId, note, now, accountId] = a;
+      const account = this.tables.accounts.find((row) => row.id === accountId);
+      if (!account) return null;
+      const balance = Number(account.balance_cents ?? 0);
+      if (isDebit && balance < Number(magnitude)) return null;
+      if (this.tables.wallet_ledger.some((w) => w.ref_type === refType && w.ref_id === refId)) return null;
+      this.tables.wallet_ledger.push({
+        id: ledgerId,
+        account_id: accountId,
+        kind,
+        amount_cents: Number(amount),
+        balance_after_cents: isDebit ? balance - Number(magnitude) : balance + Number(magnitude),
+        ref_type: refType,
+        ref_id: refId,
+        note,
+        created_at: now,
+      });
+      return null;
+    }
+    if (sql.startsWith("update accounts set balance_cents = balance_cents + ?")) {
+      const account = this.tables.accounts.find((row) => row.id === a[1]);
+      if (account && this.tables.wallet_ledger.some((w) => w.id === a[2])) {
+        account.balance_cents = Number(account.balance_cents ?? 0) + Number(a[0]);
+      }
+      return null;
+    }
+    if (sql.startsWith("select balance_after_cents from wallet_ledger")) {
+      const row = this.tables.wallet_ledger.find((w) => w.id === a[0]);
+      return row ? { balance_after_cents: row.balance_after_cents } : null;
+    }
+    if (sql.startsWith("select id from wallet_ledger where ref_type")) {
+      const row = this.tables.wallet_ledger.find((w) => w.ref_type === a[0] && w.ref_id === a[1]);
+      return row ? { id: row.id } : null;
+    }
+    if (sql.startsWith("select id from accounts where id")) {
+      const row = this.tables.accounts.find((account) => account.id === a[0]);
+      return row ? { id: row.id } : null;
+    }
+    if (sql.startsWith("select balance_cents from accounts")) {
+      const row = this.tables.accounts.find((x) => x.id === a[0]);
+      return row ? { balance_cents: row.balance_cents } : null;
+    }
+    if (sql.startsWith("insert into topups")) {
+      // 建单只带面额与 product_id，收银台会话随后 UPDATE 补上。
+      this.tables.topups.push({
+        id: a[0],
+        account_id: a[1],
+        denomination_cents: a[2],
+        product_id: a[3],
+        checkout_session_id: null,
+        checkout_url: null,
+        status: "pending",
+        created_at: a[4],
+        paid_at: null,
+      });
+      return null;
+    }
+    if (sql.startsWith("update topups set checkout_session_id")) {
+      const row = this.tables.topups.find((t) => t.id === a[2]);
+      if (row) {
+        row.checkout_session_id = a[0];
+        row.checkout_url = a[1];
+      }
+      return null;
+    }
+    if (sql.startsWith("update topups set status = ?")) {
+      const row = this.tables.topups.find((t) => t.id === a[2]);
+      if (row) {
+        row.status = a[0];
+        row.paid_at = a[1];
+      }
+      return null;
+    }
+    if (sql.startsWith("update topups set status = 'failed'")) {
+      const row = this.tables.topups.find((t) => t.id === a[0] && t.status === "pending");
+      if (row) row.status = "failed";
+      return null;
+    }
+    if (sql.startsWith("select id, account_id, denomination_cents from topups")) {
+      const row = sql.includes("checkout_session_id")
+        ? this.tables.topups.find((t) => t.checkout_session_id === a[0])
+        : this.tables.topups.find((t) => t.id === a[0]);
+      return row
+        ? { id: row.id, account_id: row.account_id, denomination_cents: row.denomination_cents }
+        : null;
+    }
+    if (sql.startsWith("update topups set status")) {
+      const row = this.tables.topups.find((t) => t.id === a[1]);
+      if (row && row.status !== "paid") {
+        row.status = "paid";
+        row.paid_at = a[0];
+      }
+      return null;
+    }
+    if (sql.startsWith("update servers set paid_until = ?, billing_state")) {
+      const row = this.tables.servers.find((server) => server.id === a[2]);
+      if (row && this.tables.wallet_ledger.some((w) => w.id === a[3])) {
+        row.paid_until = a[0];
+        row.billing_state = "active";
+        row.updated_at = a[1];
+      }
+      return null;
+    }
+    if (sql.startsWith("update servers set paid_until = max")) {
+      const row = this.tables.servers.find((server) => server.id === a[1]);
+      if (row) {
+        row.paid_until = Math.max(Number(row.paid_until ?? 0), Number(a[0]));
+        row.billing_state = "active";
+      }
+      return null;
+    }
+    if (sql.startsWith("update servers set billing_state")) {
+      const row = this.tables.servers.find((server) => server.id === a[2]);
+      if (row) {
+        row.billing_state = a[0];
+        row.updated_at = a[1];
       }
       return null;
     }
@@ -596,10 +785,77 @@ export class FakeD1 {
   execAll(statement: Stmt): Row[] {
     const sql = normalise(statement.sql);
     const a = statement.args;
+    if (sql.startsWith("select o.id from orders o left join servers s")) {
+      return this.tables.orders
+        .filter((order) => {
+          if (!["paid", "provisioning"].includes(String(order.state))) return false;
+          if (Number(order.created_at) >= Number(a[0])) return false;
+          const server = this.tables.servers.find(
+            (row) => row.order_id === order.id && row.destroyed_at == null,
+          );
+          return !server || server.provider_id == null || server.state === "error";
+        })
+        .slice(0, 5)
+        .map((order) => ({ id: order.id }));
+    }
+    if (sql.startsWith("select id, account_id, plan_price_cents, paid_until, billing_state from servers")) {
+      return this.tables.servers
+        .filter((row) => {
+          if (row.destroyed_at != null) return false;
+          if (row.provider_id == null) return false;
+          if (!["booting", "installing", "verifying", "healthy", "active"].includes(String(row.state))) {
+            return false;
+          }
+          return Number(row.paid_until ?? 0) <= Number(a[0]);
+        })
+        .map((row) => ({
+          id: row.id,
+          account_id: row.account_id,
+          plan_price_cents: row.plan_price_cents ?? 0,
+          paid_until: row.paid_until ?? 0,
+          billing_state: row.billing_state ?? "active",
+        }));
+    }
+    if (sql.startsWith("select a.id as account_id")) {
+      return this.tables.accounts.map((account) => ({
+        account_id: account.id,
+        balance: Number(account.balance_cents ?? 0),
+        ledger_sum: this.tables.wallet_ledger
+          .filter((w) => w.account_id === account.id)
+          .reduce((sum, w) => sum + Number(w.amount_cents), 0),
+      }));
+    }
     if (sql.startsWith("select node_port from servers")) {
       return this.tables.servers
         .filter((s) => s.account_id === a[0] && s.destroyed_at === null)
         .map((s) => ({ node_port: s.node_port }));
+    }
+    if (sql.startsWith("select id, account_id, plan_price_cents, paid_until, billing_state from servers")) {
+      return this.tables.servers
+        .filter((row) => {
+          if (row.destroyed_at != null) return false;
+          if (row.provider_id == null) return false;
+          if (!["booting", "installing", "verifying", "healthy", "active"].includes(String(row.state))) {
+            return false;
+          }
+          return Number(row.paid_until ?? 0) <= Number(a[0]);
+        })
+        .map((row) => ({
+          id: row.id,
+          account_id: row.account_id,
+          plan_price_cents: row.plan_price_cents ?? 0,
+          paid_until: row.paid_until ?? 0,
+          billing_state: row.billing_state ?? "active",
+        }));
+    }
+    if (sql.startsWith("select a.id as account_id")) {
+      return this.tables.accounts.map((account) => ({
+        account_id: account.id,
+        balance: Number(account.balance_cents ?? 0),
+        ledger_sum: this.tables.wallet_ledger
+          .filter((w) => w.account_id === account.id)
+          .reduce((sum, w) => sum + Number(w.amount_cents), 0),
+      }));
     }
     if (sql.startsWith("select id from orders where state = 'paid'")) {
       return this.tables.orders
@@ -623,7 +879,9 @@ export class FakeD1 {
       | "payments"
       | "webhook_events"
       | "unmatched_payments"
-      | "subscriptions",
+      | "subscriptions"
+      | "wallet_ledger"
+      | "topups",
   ): Row[] {
     return this.tables[table];
   }
@@ -654,6 +912,9 @@ export class FakeStatement {
       const row = this.db.rows("orders").find((order) => order.id === id);
       const expected = hasPendingGuard ? "pending_payment" : "paid";
       changes = row && row.state === expected ? 1 : 0;
+    } else if (sql.startsWith("update orders set state = 'paid', failure_code")) {
+      const row = this.db.rows("orders").find((order) => order.id === this.statement.args[1]);
+      changes = row && (row.state === "paid" || row.state === "provisioning") ? 1 : 0;
     } else if (sql.startsWith("update orders set state = 'paid'")) {
       const id = this.statement.args[1];
       const row = this.db.rows("orders").find((order) => order.id === id);
@@ -661,16 +922,32 @@ export class FakeStatement {
       changes = row && allowed.includes(String(row.state)) ? 1 : 0;
     } else if (sql.startsWith("insert or ignore into")) {
       // 唯一键冲突时 SQLite 报 0 行；这里按插入前后行数判断。
-      const before = (["payments", "webhook_events", "unmatched_payments"] as const).reduce(
-        (sum, table) => sum + this.db.rows(table).length,
-        0,
-      );
+      const counted = [
+        "payments",
+        "webhook_events",
+        "unmatched_payments",
+        "servers",
+        "accounts",
+        "idempotency_keys",
+      ] as const;
+      const before = counted.reduce((sum, table) => sum + this.db.rows(table).length, 0);
       this.db.exec(this.statement);
-      const after = (["payments", "webhook_events", "unmatched_payments"] as const).reduce(
-        (sum, table) => sum + this.db.rows(table).length,
-        0,
-      );
+      const after = counted.reduce((sum, table) => sum + this.db.rows(table).length, 0);
       return { success: true, meta: { changes: after - before } };
+    } else if (sql.startsWith("update idempotency_keys set created_at")) {
+      const [now, accountId, endpoint, key, createdAt] = this.statement.args;
+      const row = this.db
+        .rows("idempotency_keys")
+        .find(
+          (r) =>
+            r.account_id === accountId &&
+            r.endpoint === endpoint &&
+            r.key === key &&
+            r.status === 0 &&
+            r.created_at === createdAt,
+        );
+      if (row) row.created_at = now;
+      return { success: true, meta: { changes: row ? 1 : 0 } };
     }
     this.db.exec(this.statement);
     return { success: true, meta: { changes } };

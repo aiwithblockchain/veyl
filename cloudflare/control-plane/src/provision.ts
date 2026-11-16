@@ -1,5 +1,6 @@
 // 建机：先建 droplet，把一次性 enrollment 令牌写进 cloud-init（§19.6）。
-// 失败一律把服务器与订单标为失败，不留下“创建中”的僵尸行。
+// 失败只把服务器标成 error：订单必须退回 paid，交给每日 Cron 重试——
+// 钱已经收了，订单不能停在终态，否则就是「扣了钱、没机器、也没人再试」。
 
 import { buildCloudInit } from "./cloud_init";
 import { randomId, sha256B64u } from "./lib/crypto";
@@ -37,7 +38,8 @@ async function fail(
     env.DB.prepare("UPDATE servers SET state = 'error', failure_code = ?, updated_at = ? WHERE id = ?")
       .bind(reason, now, server.id),
     env.DB.prepare(
-      "UPDATE orders SET state = 'failed', failure_code = ?, failure_stage = 'creating' WHERE id = ?",
+      "UPDATE orders SET state = 'paid', failure_code = ?, failure_stage = 'creating' " +
+        "WHERE id = ? AND state IN ('paid', 'provisioning')",
     ).bind(reason, server.order_id),
     env.DB.prepare(
       "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.failed', ?)",
