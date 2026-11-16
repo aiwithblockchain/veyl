@@ -144,6 +144,12 @@ pub trait VpnToolServices: Send + Sync {
         Err(anyhow::anyhow!("我的服务器未接入"))
     }
 
+    /// 只读：某台服务器这次创建失败的详情（`tools.md` §4.51）。
+    /// 只读本地镜像与内存里的订单事件，不访问云厂商 API。
+    async fn my_server_failure(&self, _server_id: &str) -> anyhow::Result<Value> {
+        not_wired("服务器失败详情")
+    }
+
     async fn config_list(&self) -> anyhow::Result<Value>;
     async fn config_detail(&self, config_id: &str) -> anyhow::Result<Value>;
     async fn config_create(&self, input: ConfigCreateInput) -> anyhow::Result<Value>;
@@ -3947,6 +3953,53 @@ impl VpnToolServices for WiredServices {
             })
             .collect();
         Ok(json!({ "servers": summaries }))
+    }
+
+    async fn my_server_failure(&self, server_id: &str) -> anyhow::Result<Value> {
+        let row = {
+            let conn = self.store.conn();
+            crate::store::servers::get(&conn, server_id)
+                .map_err(|error| svc_error(error.code(), error))?
+        };
+        let Some(row) = row else {
+            return Err(svc_error_with_details(
+                "NOT_FOUND",
+                "找不到这台服务器",
+                json!({ "reason": "server_not_found" }),
+            ));
+        };
+
+        // 只读 Host 已有的内存镜像：不重新拉控制面，也不访问云厂商 API。
+        let failure = crate::control_plane::servers::server_failure(server_id);
+        let order = crate::control_plane::servers::latest_order_for_server(server_id);
+        let (order_json, recent_events) = match &order {
+            Some(order) => (
+                json!({
+                    "order_id": order.order_id,
+                    "state": order.state,
+                    "failure": order.failure.as_ref().map(|failure| json!({
+                        "code": failure.code,
+                        "message": failure.message,
+                        "retryable": failure.retryable,
+                    })),
+                }),
+                crate::control_plane::servers::recent_order_events(&order.order_id, 20),
+            ),
+            None => (Value::Null, Vec::new()),
+        };
+
+        Ok(json!({
+            "server_id": row.id,
+            "name": row.name,
+            "region": row.region,
+            "plan": row.plan,
+            "state": row.state,
+            "failure": failure,
+            "order": order_json,
+            "recent_events": recent_events,
+            // 控制面不保存建机原始日志；模型不得声称读过。
+            "log_available": false,
+        }))
     }
 
     async fn config_list(&self) -> anyhow::Result<Value> {
@@ -11190,6 +11243,116 @@ mod main_flow_tests {
             )
             .unwrap();
         assert_eq!(seed_links, 0, "种子关联仍要清掉");
+    }
+
+    fn insert_server_row(store: &crate::store::Store, id: &str, state: &str) {
+        let conn = store.conn();
+        let now = crate::store::now_ms();
+        crate::store::servers::upsert(
+            &conn,
+            &crate::store::NewMyServer {
+                id,
+                provider: "digitalocean",
+                name: "东京",
+                region: "ap-northeast-1",
+                plan: "starter",
+                state,
+                node_id: None,
+                hourly_usd: 0.01,
+                monthly_usd: 7.0,
+                daily_price_cents: 20,
+                transfer_gib: 500,
+                paid_until: now + 86_400_000,
+                billing_state: "active",
+                created_at: now,
+            },
+        )
+        .unwrap();
+    }
+
+    /// 失败详情只读本地镜像与内存订单事件，且 `log_available` 恒为 false。
+    #[tokio::test]
+    async fn my_server_failure_reads_mirror_and_order_events() {
+        let h = harness();
+        let server_id = format!("srv_fail_{:016x}", rand::random::<u64>());
+        let order_id = format!("ord_fail_{:016x}", rand::random::<u64>());
+        insert_server_row(&h.services.store, &server_id, "error");
+        crate::control_plane::servers::remember_failure_for_test(
+            &server_id,
+            crate::control_plane::servers::MyServerFailure {
+                stage: "installing".into(),
+                code: "install_failed".into(),
+                message: "装环境失败".into(),
+                retryable: true,
+            },
+        );
+
+        let base = crate::control_plane::servers::MyServerOrder {
+            order_id: order_id.clone(),
+            state: "provisioning".into(),
+            region: "ap-northeast-1".into(),
+            plan: "starter".into(),
+            amount_usd: 7.0,
+            created_at: "2026-11-16T00:00:00Z".into(),
+            expires_at: None,
+            server_id: Some(server_id.clone()),
+            failure: None,
+        };
+        crate::control_plane::servers::remember_order_for_test(base.clone());
+        crate::control_plane::servers::remember_order_for_test(
+            crate::control_plane::servers::MyServerOrder {
+                state: "failed".into(),
+                failure: Some(crate::control_plane::servers::MyServerOrderFailure {
+                    code: "install_failed".into(),
+                    message: "装环境失败".into(),
+                    retryable: true,
+                }),
+                ..base
+            },
+        );
+
+        let data = h.services.my_server_failure(&server_id).await.unwrap();
+        assert_eq!(data["server_id"], server_id);
+        assert_eq!(data["state"], "error");
+        assert_eq!(data["failure"]["stage"], "installing");
+        assert_eq!(data["failure"]["code"], "install_failed");
+        assert_eq!(data["failure"]["retryable"], true);
+        assert_eq!(data["order"]["order_id"], order_id);
+        assert_eq!(data["order"]["state"], "failed");
+        assert_eq!(data["order"]["failure"]["code"], "install_failed");
+        assert_eq!(data["log_available"], false);
+        let events = data["recent_events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["state"], "failed", "新的在前");
+        assert_eq!(events[1]["state"], "provisioning");
+    }
+
+    /// 健康服务器没有失败记录：failure/order 为 null、事件为空也是合法结果。
+    #[tokio::test]
+    async fn my_server_failure_returns_null_for_a_healthy_server() {
+        let h = harness();
+        let server_id = format!("srv_ok_{:016x}", rand::random::<u64>());
+        insert_server_row(&h.services.store, &server_id, "healthy");
+
+        let data = h.services.my_server_failure(&server_id).await.unwrap();
+        assert!(data["failure"].is_null());
+        assert!(data["order"].is_null());
+        assert!(data["recent_events"].as_array().unwrap().is_empty());
+        assert_eq!(data["log_available"], false);
+    }
+
+    /// 本地镜像里没有这台服务器：NOT_FOUND / server_not_found。
+    #[tokio::test]
+    async fn my_server_failure_reports_not_found_for_unknown_servers() {
+        let h = harness();
+        let error = h
+            .services
+            .my_server_failure("srv_missing")
+            .await
+            .expect_err("不存在的服务器必须报错");
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "NOT_FOUND");
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "server_not_found");
     }
 }
 

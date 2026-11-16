@@ -3,6 +3,8 @@
 //! 控制面是唯一事实源；本地 `my_servers` 只用于离线展示与节点关联。
 //! 命令层只负责参数搬运，所有业务在这里。
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -166,6 +168,34 @@ struct RawOrder {
 static ORDERS: parking_lot::Mutex<Vec<MyServerOrder>> = parking_lot::Mutex::new(Vec::new());
 const REMEMBERED_ORDERS: usize = 20;
 
+/// 一次订单状态变化。`MyServerFailure` 只用内存里的最近若干条，
+/// 契约不要求跨进程持久化（`tools.md` §4.51）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MyServerOrderEvent {
+    pub at: String,
+    pub state: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RememberedOrderEvent {
+    order_id: String,
+    event: MyServerOrderEvent,
+}
+
+static ORDER_EVENTS: parking_lot::Mutex<Vec<RememberedOrderEvent>> =
+    parking_lot::Mutex::new(Vec::new());
+const REMEMBERED_ORDER_EVENTS: usize = 200;
+
+/// 最近一次从控制面看到的服务器失败（`failure` 不在本地镜像表里）。
+static SERVER_FAILURES: parking_lot::Mutex<Option<HashMap<String, MyServerFailure>>> =
+    parking_lot::Mutex::new(None);
+
+fn server_failures() -> parking_lot::MutexGuard<'static, Option<HashMap<String, MyServerFailure>>> {
+    SERVER_FAILURES.lock()
+}
+
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -276,6 +306,86 @@ fn remembered_order(order_id: &str) -> Option<MyServerOrder> {
         .cloned()
 }
 
+/// 只在状态真的变化时记一条；新订单的首个状态也算一条。
+fn record_order_event(order: &MyServerOrder, previous_state: Option<&str>) {
+    if previous_state == Some(order.state.as_str()) {
+        return;
+    }
+    let mut events = ORDER_EVENTS.lock();
+    events.push(RememberedOrderEvent {
+        order_id: order.order_id.clone(),
+        event: MyServerOrderEvent {
+            at: now_iso(),
+            state: order.state.clone(),
+            detail: order.failure.as_ref().map(|failure| failure.message.clone()),
+        },
+    });
+    if events.len() > REMEMBERED_ORDER_EVENTS {
+        let drop = events.len() - REMEMBERED_ORDER_EVENTS;
+        events.drain(0..drop);
+    }
+}
+
+/// 这台服务器最近一次创建/开通订单（内存镜像）。
+pub fn latest_order_for_server(server_id: &str) -> Option<MyServerOrder> {
+    ORDERS
+        .lock()
+        .iter()
+        .rev()
+        .find(|order| order.server_id.as_deref() == Some(server_id))
+        .cloned()
+}
+
+/// 某订单最近的事件，**新的在前**，最多 `limit` 条。
+pub fn recent_order_events(order_id: &str, limit: usize) -> Vec<MyServerOrderEvent> {
+    ORDER_EVENTS
+        .lock()
+        .iter()
+        .rev()
+        .filter(|event| event.order_id == order_id)
+        .take(limit)
+        .map(|event| event.event.clone())
+        .collect()
+}
+
+fn remember_server_failure(server: &MyServer) {
+    let mut failures = server_failures();
+    let map = failures.get_or_insert_with(HashMap::new);
+    match &server.failure {
+        Some(failure) => {
+            map.insert(server.server_id.clone(), failure.clone());
+        }
+        // 最新一次观察到是健康的：旧失败不再代表现状。
+        None => {
+            map.remove(&server.server_id);
+        }
+    }
+}
+
+/// 最近一次从控制面看到的失败；没失败过或已恢复时为 None。
+pub fn server_failure(server_id: &str) -> Option<MyServerFailure> {
+    server_failures()
+        .as_ref()
+        .and_then(|failures| failures.get(server_id))
+        .cloned()
+}
+
+#[cfg(test)]
+pub(crate) fn remember_failure_for_test(server_id: &str, failure: MyServerFailure) {
+    let mut failures = server_failures();
+    failures
+        .get_or_insert_with(HashMap::new)
+        .insert(server_id.to_string(), failure);
+}
+
+/// 测试用：走和真实响应相同的记录路径（含事件）。
+#[cfg(test)]
+pub(crate) fn remember_order_for_test(order: MyServerOrder) {
+    let previous = remembered_order(&order.order_id).map(|order| order.state);
+    remember_order(&order);
+    record_order_event(&order, previous.as_deref());
+}
+
 #[allow(clippy::too_many_arguments)]
 fn merge_order(
     raw: RawOrder,
@@ -323,7 +433,9 @@ fn merge_order(
             .failure
             .or_else(|| fallback.and_then(|order| order.failure.clone())),
     };
+    let previous_state = remembered_order(&order.order_id).map(|order| order.state);
     remember_order(&order);
+    record_order_event(&order, previous_state.as_deref());
     Ok(order)
 }
 
@@ -343,6 +455,7 @@ pub async fn list() -> Result<Vec<MyServer>, CpError> {
         let mut server: MyServer = serde_json::from_value(value.clone())
             .map_err(|_| CpError::invalid_response("服务器列表条目格式不正确"))?;
         validate_server(&mut server)?;
+        remember_server_failure(&server);
         servers.push(server);
     }
     // 读路径也会顺带维护缓存，这是有意的：一次成功的列表响应是唯一能判断
@@ -374,6 +487,7 @@ async fn get_with(client: &ControlPlane, server_id: &str) -> Result<MyServer, Cp
     let mut server: MyServer = serde_json::from_value(raw)
         .map_err(|_| CpError::invalid_response("服务器详情格式不正确"))?;
     validate_server(&mut server)?;
+    remember_server_failure(&server);
     if let Some(store) = crate::store::global() {
         let conn = store.conn();
         cache_server(&conn, &server);

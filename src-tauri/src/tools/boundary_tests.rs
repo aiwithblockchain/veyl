@@ -122,6 +122,11 @@ impl VpnToolServices for FakeServices {
         self.rec.record(format!("runtime_logs({lines},{level:?})"));
         Ok(self.data.clone())
     }
+
+    async fn my_server_failure(&self, server_id: &str) -> anyhow::Result<Value> {
+        self.rec.record(format!("my_server_failure({server_id})"));
+        Ok(self.data.clone())
+    }
     async fn core_list_versions(&self) -> anyhow::Result<Value> {
         self.rec.record("core_list_versions");
         Ok(self.data.clone())
@@ -789,6 +794,7 @@ fn base_input(name: &str) -> Option<Value> {
         "IssueReport" => json!({}),
         "CoreUpgrade" => json!({}),
         "ConfigSetMode" => json!({ "mode": "tun" }),
+        "OpenSettings" => json!({ "section": "connection" }),
         "RouteSetMode" => json!({ "mode": "proxy_all" }),
         "NodeImportUrl" => json!({ "url": "https://example.com/sub" }),
         "NodeImportText" => json!({ "text": "ss://aes-256-gcm:pw@203.0.113.10:8388#A" }),
@@ -1416,5 +1422,126 @@ async fn service_failure_becomes_a_structured_error_with_next_actions() {
             env["next_actions"].is_array(),
             "{name} 的 next_actions 必须是数组"
         );
+    }
+}
+
+/// `MyServerFailure`：结构化失败给卡片事实，`log_available` 原样透出 false。
+#[tokio::test]
+async fn my_server_failure_returns_failure_facts_without_logs() {
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "server_id": "srv_1",
+        "name": "东京",
+        "region": "东京",
+        "plan": "入门",
+        "state": "error",
+        "failure": {
+            "stage": "installing",
+            "code": "install_failed",
+            "message": "装环境失败",
+            "retryable": true
+        },
+        "order": {
+            "order_id": "ord_1",
+            "state": "failed",
+            "failure": { "code": "install_failed", "message": "装环境失败", "retryable": true }
+        },
+        "recent_events": [
+            { "at": "2026-11-16T00:00:02Z", "state": "failed", "detail": "装环境失败" },
+            { "at": "2026-11-16T00:00:01Z", "state": "provisioning", "detail": null }
+        ],
+        "log_available": false
+    }));
+    let all = tools(svc);
+    const SESSION: &str = "boundary-failure-ok";
+    let (is_error, env) =
+        run_in_session(tool(&all, "MyServerFailure"), json!({ "serverId": "srv_1" }), SESSION).await;
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["log_available"], false);
+    assert_eq!(env["data"]["failure"]["stage"], "installing");
+
+    let outcome = crate::tools::envelope::take_outcome(SESSION, "MyServerFailure")
+        .expect("工具结果必须登记到进程内注册表");
+    assert_eq!(outcome.display.text, "读到了这次失败的记录");
+    assert!(outcome.display.facts.iter().any(|fact| fact == "阶段：装环境"));
+    assert!(outcome
+        .display
+        .facts
+        .iter()
+        .any(|fact| fact == "原因：装环境失败"));
+    assert!(outcome
+        .display
+        .facts
+        .iter()
+        .any(|fact| fact == "能不能重试：可以重试"));
+}
+
+/// 健康服务器没有失败记录：`failure`/`order` 为 null 也是合法成功。
+#[tokio::test]
+async fn my_server_failure_accepts_a_healthy_server_without_records() {
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "server_id": "srv_2",
+        "name": "新加坡",
+        "region": "新加坡",
+        "plan": "入门",
+        "state": "healthy",
+        "failure": Value::Null,
+        "order": Value::Null,
+        "recent_events": [],
+        "log_available": false
+    }));
+    let all = tools(svc);
+    const SESSION: &str = "boundary-failure-none";
+    let (is_error, env) =
+        run_in_session(tool(&all, "MyServerFailure"), json!({ "serverId": "srv_2" }), SESSION).await;
+    assert!(!is_error, "{env}");
+    assert!(env["data"]["failure"].is_null());
+    assert!(env["data"]["order"].is_null());
+    assert!(env["data"]["recent_events"].as_array().unwrap().is_empty());
+    assert_eq!(env["data"]["log_available"], false);
+}
+
+/// `state = error` 但 `failure = null`：只能说记录不完整，不能说「没有失败」。
+#[tokio::test]
+async fn my_server_failure_says_records_are_incomplete_for_an_error_without_failure() {
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "server_id": "srv_3",
+        "name": "东京",
+        "region": "东京",
+        "plan": "入门",
+        "state": "error",
+        "failure": Value::Null,
+        "order": Value::Null,
+        "recent_events": [],
+        "log_available": false
+    }));
+    let all = tools(svc);
+    const SESSION: &str = "boundary-failure-incomplete";
+    let (is_error, env) =
+        run_in_session(tool(&all, "MyServerFailure"), json!({ "serverId": "srv_3" }), SESSION).await;
+    assert!(!is_error, "{env}");
+    let summary = env["summary"].as_str().unwrap_or_default();
+    assert!(
+        summary.contains("记录不完整，建议重建或联系支持"),
+        "error + null 必须说记录不完整：{summary}"
+    );
+    assert!(
+        !summary.contains("没有失败"),
+        "不能把 failure=null 说成「没有失败」：{summary}"
+    );
+}
+
+/// 工具层的参数边界：缺 serverId、空字符串、多传字段都必须结构化拒绝。
+#[tokio::test]
+async fn my_server_failure_rejects_bad_input() {
+    let (svc, _rec) = FakeServices::new();
+    let all = tools(svc);
+    let tool = tool(&all, "MyServerFailure");
+    for input in [
+        json!({}),
+        json!({ "serverId": "" }),
+        json!({ "serverId": "srv_1", "orderId": "ord_1" }),
+    ] {
+        let env = expect_rejected(tool, input, "MyServerFailure 只能接受非空 serverId").await;
+        assert_eq!(env["error"]["code"], "INVALID_ARGUMENT");
     }
 }

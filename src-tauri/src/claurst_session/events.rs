@@ -29,6 +29,7 @@ pub const EV_MY_SERVER_ORDER_CHANGED: &str = "my-server-order-changed";
 pub const EV_QUIT_REQUESTED: &str = "quit-requested";
 pub const EV_QUIT_DISMISSED: &str = "quit-dismissed";
 pub const EV_TRIAL_EXPIRED: &str = "trial-expired";
+pub const EV_SETTINGS_POINT: &str = "settings-point";
 
 const RESULT_LIMIT: usize = 8 * 1024;
 

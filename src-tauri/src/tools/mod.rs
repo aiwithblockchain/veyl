@@ -22,6 +22,7 @@ pub mod region;
 pub mod routing;
 pub mod runtime;
 pub mod services;
+pub mod settings;
 pub mod vpn;
 
 /// 输入边界测试：`input` 是模型生成的不可信 JSON，见该文件头注释。
@@ -188,6 +189,8 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(net::DefaultProfileStatusTool::new(Arc::clone(&services))),
         Box::new(region::SetUserRegionTool::new(Arc::clone(&services))),
         Box::new(my_servers::MyServersTool::new(Arc::clone(&services))),
+        Box::new(my_servers::MyServerFailureTool::new(Arc::clone(&services))),
+        Box::new(settings::OpenSettingsTool::new()),
         Box::new(AskUserQuestionGuard::new()),
     ]
 }

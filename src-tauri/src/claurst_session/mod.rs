@@ -13,6 +13,9 @@ pub mod provider;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+
+/// 每次用户请求分配一个唯一轮次，供工具层做「一轮最多一次」护栏。
+static QUERY_TURN: AtomicUsize = AtomicUsize::new(1);
 use std::time::Instant;
 
 use claurst_api::AnthropicClient;
@@ -269,7 +272,9 @@ impl AivpnSession {
             cost_tracker: Arc::clone(&cost_tracker),
             session_id: session_id.clone(),
             file_history: Arc::new(parking_lot::Mutex::new(FileHistory::new())),
-            current_turn: Arc::new(AtomicUsize::new(0)),
+            current_turn: Arc::new(AtomicUsize::new(
+                QUERY_TURN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            )),
             non_interactive: false,
             mcp_manager: None,
             config: core_config,
