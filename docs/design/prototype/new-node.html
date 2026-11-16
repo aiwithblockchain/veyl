@@ -1,0 +1,1017 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Veyl · 新建节点</title>
+<style>
+  :root {
+    --canvas: #FAFAF8;
+    --ink: #14161C;
+    --ink-2: #5B5850;
+    --ink-3: #6E6A62;
+    --hair: rgba(20, 22, 28, 0.10);
+    --accent: #F6537B;
+    --accent-ink: #C2185B;
+    --focus: #E03A66;
+    --green: #1B7A4E;
+    --red: #A8382D;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  button, input { font-family: inherit; }
+
+  .shell {
+    height: 100vh;
+    display: grid;
+    grid-template-columns: 56px 1fr 380px;
+  }
+
+  /* 最左导航竖条 */
+  .nav {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 14px 0 16px;
+  }
+
+  .nav__item {
+    position: relative;
+    width: 56px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  .nav__item:hover { color: var(--ink); }
+
+  .nav__item:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: -6px;
+  }
+
+  .nav__item.is-active { color: var(--ink); }
+
+  .nav__item.is-active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 10px;
+    width: 2px;
+    height: 20px;
+    border-radius: 1px;
+    background: var(--focus);
+  }
+
+  .nav__foot {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .nav__account {
+    width: 24px;
+    height: 24px;
+    margin-bottom: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid var(--hair);
+    border-radius: 50%;
+    background: #FFFFFF;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  .nav__account:hover { color: var(--ink); }
+
+  .nav__account:focus-visible,
+  .nav__item:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  /* 中间舞台 */
+  .stage {
+    position: relative;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 24px;
+  }
+
+  .col {
+    width: 560px;
+    max-width: 100%;
+    animation: enter 160ms ease-out both;
+  }
+
+  @keyframes enter {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .title {
+    margin: 0;
+    font-size: 24px;
+    line-height: 1.45;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+
+  .sub {
+    margin: 8px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  .group { margin-top: 28px; }
+
+  .group__label {
+    display: block;
+    margin-bottom: 10px;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--ink-3);
+  }
+
+  /* 地区：四个横排 */
+  .regions {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+  }
+
+  .region {
+    height: 56px;
+    padding: 0 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 2px;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .region:hover { border-color: rgba(20, 22, 28, 0.22); }
+
+  .region:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  .region.is-selected {
+    border: 2px solid var(--focus);
+    background: #FFFFFF;
+    padding: 0 11px;
+  }
+
+  .region__name {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 15px;
+    line-height: 1.35;
+    font-weight: 500;
+  }
+
+  .region__ms {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.3;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-3);
+  }
+
+  .tag {
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(246, 83, 123, 0.12);
+    color: var(--accent-ink);
+    font-size: 10.5px;
+    line-height: 1.3;
+    font-weight: 500;
+  }
+
+  /* 服务器类型：两列 */
+  .plans {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+
+  .plan {
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .plan:hover { border-color: rgba(20, 22, 28, 0.22); }
+
+  .plan:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  .plan.is-selected {
+    border: 2px solid var(--focus);
+    background: #FFFFFF;
+    padding: 13px 15px;
+  }
+
+  .plan__name {
+    font-size: 15px;
+    line-height: 1.35;
+    font-weight: 500;
+  }
+
+  .plan__spec {
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--ink-2);
+  }
+
+  .plan__price {
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--ink-3);
+  }
+
+  /* 主按钮 / 次要按钮 / 链接 */
+  .primary {
+    width: 100%;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 10px;
+    background: var(--ink);
+    color: var(--canvas);
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+  }
+
+  .primary:hover:not(:disabled) { background: #24262E; }
+
+  .primary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .primary:focus-visible,
+  .ghost:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 3px;
+  }
+
+  .ghost {
+    height: 48px;
+    padding: 0 20px;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--ink);
+    font-size: 15px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .ghost:hover { border-color: rgba(20, 22, 28, 0.22); }
+
+  .link {
+    display: block;
+    margin: 14px auto 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--accent-ink);
+    font-size: 13px;
+    line-height: 1.6;
+    cursor: pointer;
+  }
+
+  .link:hover { color: #9C1249; }
+
+  .link:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 3px;
+  }
+
+  #view-form .primary { margin-top: 28px; }
+
+  /* 确认卡 */
+  .confirm {
+    padding: 24px;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: #FFFFFF;
+  }
+
+  .confirm__title {
+    margin: 0;
+    font-size: 17px;
+    line-height: 1.35;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .confirm__line {
+    margin: 6px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  .confirm__actions {
+    margin-top: 20px;
+    display: flex;
+    gap: 12px;
+  }
+
+  .confirm__actions .primary { flex: 1 1 auto; }
+
+  /* 创建进度 */
+  .steps {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: #FFFFFF;
+  }
+
+  .step {
+    height: 48px;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-top: 1px solid var(--hair);
+    font-size: 15px;
+    line-height: 1.35;
+    color: var(--ink-3);
+  }
+
+  .step:first-child { border-top: 0; }
+
+  .step__mark {
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--hair);
+    border-radius: 50%;
+    font-size: 10px;
+    line-height: 1;
+  }
+
+  .step.is-active { color: var(--ink); }
+
+  .step.is-active .step__mark {
+    border-color: var(--focus);
+    background: var(--focus);
+  }
+
+  .step.is-done { color: var(--ink); }
+
+  .step.is-done .step__mark {
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  .step.is-done .step__mark::after { content: "✓"; }
+
+  /* 完成态节点卡 */
+  .node-card {
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: #FFFFFF;
+    overflow: hidden;
+  }
+
+  .node {
+    width: 100%;
+    height: 48px;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    font-size: 15px;
+    line-height: 1.35;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .node:hover { background: rgba(20, 22, 28, 0.03); }
+
+  .node:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: -2px;
+  }
+
+  .node__ms {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-3);
+  }
+
+  #view-done .primary { margin-top: 12px; }
+
+  /* 重来 */
+  .reset {
+    position: absolute;
+    right: 24px;
+    bottom: 20px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ink-3);
+    font-size: 12px;
+    line-height: 1.4;
+    opacity: 0.75;
+    cursor: pointer;
+  }
+
+  .reset:hover { opacity: 1; color: var(--ink-2); }
+
+  .reset:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 3px;
+  }
+
+  /* 右侧对话面板 */
+  .chat {
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid #E7E3DA;
+  }
+
+  .chat__head {
+    flex: 0 0 auto;
+    height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px 0 20px;
+  }
+
+  .chat__label {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--ink-2);
+  }
+
+  .chat__collapse {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  .chat__collapse:hover { color: var(--ink); background: rgba(20, 22, 28, 0.05); }
+
+  .chat__collapse:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  .chat__body {
+    flex: 1 1 auto;
+    padding: 4px 20px;
+    overflow: auto;
+  }
+
+  .chat__msg {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--ink);
+  }
+
+  .chat__composer { flex: 0 0 auto; padding: 12px 20px 20px; }
+
+  .chat__field {
+    height: 44px;
+    padding: 0 14px;
+    display: flex;
+    align-items: center;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: #FFFFFF;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  /* 登录 sheet */
+  .sheet {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    align-items: flex-end;
+  }
+
+  .sheet__backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(20, 22, 28, 0.16);
+  }
+
+  .sheet__panel {
+    position: relative;
+    width: 100%;
+    padding: 24px 0 28px;
+    border-top: 1px solid var(--hair);
+    border-radius: 14px 14px 0 0;
+    background: var(--canvas);
+    animation: sheet-in 160ms ease-out both;
+  }
+
+  @keyframes sheet-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .sheet__inner {
+    width: 400px;
+    max-width: calc(100% - 48px);
+    margin: 0 auto;
+  }
+
+  .sheet__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+
+  .sheet__title {
+    margin: 0;
+    font-size: 17px;
+    line-height: 1.35;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .sheet__close {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-3);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .sheet__close:hover { color: var(--ink); background: rgba(20, 22, 28, 0.05); }
+
+  .field-label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--ink-2);
+  }
+
+  .row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .row input { flex: 1 1 auto; }
+
+  input[type="email"],
+  input[type="text"] {
+    width: 100%;
+    height: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: #FFFFFF;
+    color: var(--ink);
+    font-size: 14px;
+    outline: none;
+  }
+
+  input[type="text"] {
+    margin-bottom: 16px;
+    font-family: var(--mono);
+    letter-spacing: 0.14em;
+  }
+
+  input::placeholder { color: var(--ink-3); }
+
+  input:focus {
+    border-color: var(--focus);
+    box-shadow: 0 0 0 1px var(--focus);
+  }
+
+  .send {
+    flex: 0 0 auto;
+    height: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: #FFFFFF;
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .send:hover { border-color: rgba(20, 22, 28, 0.22); }
+
+  .send:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  [hidden] { display: none !important; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation: none !important;
+      transition-duration: 0.01ms !important;
+      transition-delay: 0ms !important;
+    }
+
+    .col { opacity: 1; transform: none; }
+  }
+</style>
+</head>
+<body>
+
+  <div class="shell">
+    <nav class="nav" aria-label="主导航">
+      <button class="nav__item" type="button" aria-label="连接" title="连接">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M8.2 11.8a3 3 0 0 0 4.24 0l2.4-2.4a3 3 0 0 0-4.24-4.24l-1 1"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          <path d="M11.8 8.2a3 3 0 0 0-4.24 0l-2.4 2.4a3 3 0 0 0 4.24 4.24l1-1"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+        </svg>
+      </button>
+      <button class="nav__item is-active" type="button" aria-label="我的服务器" aria-current="page" title="我的服务器">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <rect x="3.5" y="3.5" width="13" height="5.2" rx="1.4"
+            stroke="currentColor" stroke-width="1.4" />
+          <rect x="3.5" y="11.3" width="13" height="5.2" rx="1.4"
+            stroke="currentColor" stroke-width="1.4" />
+          <circle cx="6.4" cy="6.1" r="0.9" fill="currentColor" />
+          <circle cx="6.4" cy="13.9" r="0.9" fill="currentColor" />
+        </svg>
+      </button>
+
+      <div class="nav__foot">
+        <button class="nav__account" type="button" aria-label="账户">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="8" cy="5.6" r="2.4" stroke="currentColor" stroke-width="1.4" />
+            <path d="M3.6 13.2a4.6 4.6 0 0 1 8.8 0"
+              stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+        </button>
+        <button class="nav__item nav__settings" type="button" aria-label="设置" title="设置">
+          <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="10" cy="10" r="2.4" stroke="currentColor" stroke-width="1.4" />
+            <path d="M10 3.2v1.7M10 15.1v1.7M3.2 10h1.7M15.1 10h1.7M5.2 5.2l1.2 1.2M13.6 13.6l1.2 1.2M14.8 5.2l-1.2 1.2M6.4 13.6l-1.2 1.2"
+              stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
+    </nav>
+
+    <main class="stage">
+      <div class="col">
+        <section id="view-form" aria-label="新建节点">
+          <h1 class="title">新建节点</h1>
+          <p class="sub">选一个地区和规格，今天就能用上。</p>
+
+          <div class="group">
+            <span class="group__label" id="region-label">地区</span>
+            <div class="regions" role="radiogroup" aria-labelledby="region-label">
+              <button class="region is-selected" type="button" role="radio" aria-checked="true"
+                data-region="东京" data-ms="42">
+                <span class="region__name">东京<span class="tag">推荐</span></span>
+                <span class="region__ms">42ms</span>
+              </button>
+              <button class="region" type="button" role="radio" aria-checked="false"
+                data-region="新加坡" data-ms="78">
+                <span class="region__name">新加坡</span>
+                <span class="region__ms">78ms</span>
+              </button>
+              <button class="region" type="button" role="radio" aria-checked="false"
+                data-region="法兰克福" data-ms="190">
+                <span class="region__name">法兰克福</span>
+                <span class="region__ms">190ms</span>
+              </button>
+              <button class="region" type="button" role="radio" aria-checked="false"
+                data-region="纽约" data-ms="160">
+                <span class="region__name">纽约</span>
+                <span class="region__ms">160ms</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="group">
+            <span class="group__label" id="plan-label">服务器类型</span>
+            <div class="plans" role="radiogroup" aria-labelledby="plan-label">
+              <button class="plan is-selected" type="button" role="radio" aria-checked="true"
+                data-plan="入门" data-price="0.20">
+                <span class="plan__name">入门</span>
+                <span class="plan__spec">1 核 · 512 MB</span>
+                <span class="plan__price">每天 $0.20 · 每月 500 GB</span>
+              </button>
+              <button class="plan" type="button" role="radio" aria-checked="false"
+                data-plan="标准" data-price="0.30">
+                <span class="plan__name">标准</span>
+                <span class="plan__spec">1 核 · 1 GB</span>
+                <span class="plan__price">每天 $0.30 · 每月 1000 GB</span>
+              </button>
+              <button class="plan" type="button" role="radio" aria-checked="false"
+                data-plan="进阶" data-price="0.60">
+                <span class="plan__name">进阶</span>
+                <span class="plan__spec">1 核 · 2 GB</span>
+                <span class="plan__price">每天 $0.60 · 每月 2000 GB</span>
+              </button>
+            </div>
+          </div>
+
+          <button class="primary" id="create" type="button">创建</button>
+          <button class="link" id="ask-ai" type="button">让 AI 帮我选</button>
+        </section>
+
+        <section id="view-confirm" aria-label="确认创建" hidden>
+          <div class="confirm">
+            <h1 class="confirm__title" id="confirm-title">东京 · 入门 · 每天 $0.20</h1>
+            <p class="confirm__line" id="confirm-line">今天扣 $0.20</p>
+            <div class="confirm__actions">
+              <button class="ghost" id="back" type="button">返回</button>
+              <button class="primary" id="open" type="button">开一台</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-progress" aria-label="正在创建节点" hidden>
+          <ol class="steps">
+            <li class="step" data-step="0"><span class="step__mark" aria-hidden="true"></span>开机</li>
+            <li class="step" data-step="1"><span class="step__mark" aria-hidden="true"></span>装环境</li>
+            <li class="step" data-step="2"><span class="step__mark" aria-hidden="true"></span>生成节点</li>
+            <li class="step" data-step="3"><span class="step__mark" aria-hidden="true"></span>测速</li>
+          </ol>
+        </section>
+
+        <section id="view-done" aria-label="节点已创建" hidden>
+          <div class="node-card">
+            <button class="node" type="button">
+              <span id="done-name">东京 01</span>
+              <span class="node__ms" id="done-ms">42ms</span>
+            </button>
+          </div>
+          <button class="primary" type="button">连接</button>
+        </section>
+      </div>
+
+      <button class="reset" id="reset" type="button">重来</button>
+    </main>
+
+    <aside class="chat" aria-label="助手">
+      <header class="chat__head">
+        <span class="chat__label">助手</span>
+        <button class="chat__collapse" type="button" aria-label="收起助手">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M5.5 3.5 9 7l-3.5 3.5" stroke="currentColor" stroke-width="1.4"
+              stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+      </header>
+      <div class="chat__body">
+        <p class="chat__msg">建自己的节点更稳定。按天计费、先扣后用，今天销毁不退；换地区重建会再扣一天。要我帮你挑吗？</p>
+      </div>
+      <div class="chat__composer">
+        <div class="chat__field" role="textbox" aria-disabled="true" tabindex="-1">
+          告诉 Veyl 你要什么…
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="sheet" id="sheet" hidden>
+    <div class="sheet__backdrop" id="sheet-backdrop"></div>
+    <div class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+      <div class="sheet__inner">
+        <div class="sheet__head">
+          <h2 class="sheet__title" id="sheet-title">登录</h2>
+          <button class="sheet__close" id="sheet-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <label class="field-label" for="email">邮箱</label>
+        <div class="row">
+          <input type="email" id="email" placeholder="you@example.com" autocomplete="email" />
+          <button class="send" id="send-code" type="button">获取验证码</button>
+        </div>
+        <label class="field-label" for="code">验证码</label>
+        <input type="text" id="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"
+          placeholder="6 位数字" />
+        <button class="primary" id="login" type="button" disabled>登录并继续</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+  // simulated：本原型不发起真实请求。延迟数值是示意（sample），登录与建机全部本地模拟。
+  const views = {
+    form: document.getElementById("view-form"),
+    confirm: document.getElementById("view-confirm"),
+    progress: document.getElementById("view-progress"),
+    done: document.getElementById("view-done"),
+  };
+  const regions = Array.from(document.querySelectorAll(".region"));
+  const plans = Array.from(document.querySelectorAll(".plan"));
+  const steps = Array.from(document.querySelectorAll(".step"));
+  const sheet = document.getElementById("sheet");
+  const email = document.getElementById("email");
+  const code = document.getElementById("code");
+  const login = document.getElementById("login");
+
+  let region = { name: "东京", ms: "42" };
+  let plan = { name: "入门", price: "0.20" };
+  let timers = [];
+
+  function show(view) {
+    Object.entries(views).forEach(([key, node]) => {
+      node.hidden = key !== view;
+    });
+  }
+
+  function pick(list, selected, onPick) {
+    list.forEach((item) => {
+      const on = item === selected;
+      item.classList.toggle("is-selected", on);
+      item.setAttribute("aria-checked", on ? "true" : "false");
+    });
+    onPick(selected);
+  }
+
+  regions.forEach((item) => {
+    item.addEventListener("click", () => {
+      pick(regions, item, (el) => {
+        region = { name: el.dataset.region, ms: el.dataset.ms };
+      });
+    });
+  });
+
+  plans.forEach((item) => {
+    item.addEventListener("click", () => {
+      pick(plans, item, (el) => {
+        plan = { name: el.dataset.plan, price: el.dataset.price };
+      });
+    });
+  });
+
+  document.getElementById("create").addEventListener("click", () => {
+    document.getElementById("confirm-title").textContent =
+      region.name + " · " + plan.name + " · 每天 $" + plan.price;
+    document.getElementById("confirm-line").textContent = "今天扣 $" + plan.price;
+    show("confirm");
+  });
+
+  document.getElementById("back").addEventListener("click", () => show("form"));
+
+  function openSheet() {
+    sheet.hidden = false;
+    email.focus();
+  }
+
+  function closeSheet() {
+    sheet.hidden = true;
+  }
+
+  document.getElementById("open").addEventListener("click", openSheet);
+  document.getElementById("sheet-close").addEventListener("click", closeSheet);
+  document.getElementById("sheet-backdrop").addEventListener("click", closeSheet);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !sheet.hidden) closeSheet();
+  });
+
+  // simulated：不校验真实验证码，任意 6 位数字都算通过。
+  code.addEventListener("input", () => {
+    login.disabled = !/^\d{6}$/.test(code.value.trim());
+  });
+
+  document.getElementById("send-code").addEventListener("click", () => {
+    document.getElementById("send-code").textContent = "已发送";
+  });
+
+  login.addEventListener("click", () => {
+    if (login.disabled) return;
+    closeSheet();
+    startProgress();
+  });
+
+  function startProgress() {
+    timers.forEach((t) => window.clearTimeout(t));
+    timers = [];
+    steps.forEach((step) => step.classList.remove("is-active", "is-done"));
+    show("progress");
+
+    steps.forEach((step, index) => {
+      timers.push(window.setTimeout(() => {
+        step.classList.add("is-active");
+      }, index * 1000 + 150));
+
+      timers.push(window.setTimeout(() => {
+        step.classList.remove("is-active");
+        step.classList.add("is-done");
+        if (index === steps.length - 1) {
+          document.getElementById("done-name").textContent = region.name + " 01";
+          document.getElementById("done-ms").textContent = region.ms + "ms";
+          show("done");
+        }
+      }, (index + 1) * 1000 + 150));
+    });
+  }
+
+  document.getElementById("reset").addEventListener("click", () => {
+    timers.forEach((t) => window.clearTimeout(t));
+    timers = [];
+    closeSheet();
+    email.value = "";
+    code.value = "";
+    login.disabled = true;
+    document.getElementById("send-code").textContent = "获取验证码";
+    steps.forEach((step) => step.classList.remove("is-active", "is-done"));
+    region = { name: "东京", ms: "42" };
+    plan = { name: "入门", price: "0.20" };
+    pick(regions, regions[0], () => {});
+    pick(plans, plans[0], () => {});
+    show("form");
+  });
+</script>
+</body>
+</html>
