@@ -47,7 +47,6 @@
   body.is-collapsed .app { grid-template-columns: 56px 1fr 56px; }
   body.is-collapsed .chat { display: none; }
   body:not(.is-collapsed) .ai-tab { display: none; }
-  body.is-collapsed .overlay { right: 56px; }
 
   /* 最左导航竖条 */
   .nav {
@@ -304,16 +303,24 @@
   .chat__composer { flex: 0 0 auto; padding: 12px 20px 20px; }
 
   .chat__field {
+    width: 100%;
     height: 44px;
     padding: 0 14px;
-    display: flex;
-    align-items: center;
     border: 1px solid var(--hair);
     border-radius: 10px;
     background: #FFFFFF;
+    color: var(--ink);
+    font-family: inherit;
     font-size: 14px;
     line-height: 1.5;
-    color: var(--ink-3);
+    outline: none;
+  }
+
+  .chat__field::placeholder { color: var(--ink-3); }
+
+  .chat__field:focus {
+    border-color: var(--focus);
+    box-shadow: 0 0 0 1px var(--focus);
   }
 
   .ai-tab {
@@ -355,7 +362,7 @@
   /* 遮罩与弹层 */
   .overlay {
     position: fixed;
-    inset: 0 380px 0 0;
+    inset: 0;
     z-index: 20;
     padding: 24px;
     display: flex;
@@ -785,12 +792,11 @@
         </button>
       </header>
       <div class="chat__body">
-        <p class="chat__msg" id="chat-msg" hidden>设置里每一项我都能解释：它改变什么、什么时候该改、改错会怎样。</p>
+        <p class="chat__msg" id="chat-msg" hidden>你想了解哪个设置？告诉我，我解释它改变什么、什么时候该改。</p>
       </div>
       <div class="chat__composer">
-        <div class="chat__field" role="textbox" aria-disabled="true" tabindex="-1">
-          告诉 Veyl 你要什么…
-        </div>
+        <input class="chat__field" id="chat-input" type="text" autocomplete="off"
+          placeholder="告诉 Veyl 你要什么…" />
       </div>
     </aside>
 
@@ -810,7 +816,7 @@
       <header class="modal__head">
         <h1 class="modal__title" id="settings-title">设置</h1>
         <div class="modal__actions">
-          <button class="text" id="ask-ai" type="button">问 AI</button>
+          <button class="text" id="ask-ai" type="button">咨询 AI</button>
           <button class="modal__close" id="close" type="button" aria-label="关闭">×</button>
         </div>
       </header>
@@ -973,8 +979,11 @@
   document.getElementById("chat-expand").addEventListener("click", expandChat);
 
   document.getElementById("ask-ai").addEventListener("click", () => {
+    // 咨询 AI：收起设置，转到助手并聚焦输入框。
+    closeSettings();
     expandChat();
     chatMsg.hidden = false;
+    document.getElementById("chat-input").focus();
   });
 
   // 接管方式
