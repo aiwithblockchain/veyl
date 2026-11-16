@@ -323,7 +323,8 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
     if (!token) return json({ ok: false, error: "catalog_unavailable", retryable: true }, 503);
 
     const cache = typeof caches !== "undefined" ? caches.default : null;
-    const cacheKey = new Request("https://catalog.veyl.internal/v1");
+    // 版本号进 cache key：目录结构变化时改这里，部署即绕过旧副本（缓存最长 24h）。
+    const cacheKey = new Request("https://catalog.veyl.internal/v2-transfer");
     let stale: Response | null = null;
 
     if (cache) {

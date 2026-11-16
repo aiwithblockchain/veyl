@@ -816,6 +816,126 @@ DO 超额 **$0.01/GiB**。按我们的加价 50% 反推，**超额多少就把�
 
 记账口径（将来用，现在不实现）：`kind = 'charge'`、`ref_type = 'transfer_overage'`、`ref_id = '<server_id>:<YYYY-MM>'`，金额是**负的整数分**（1 GiB = 1 分，恰好是整数，不需要小数）。一个月一台机器最多一行，与 `server_day` 的日租并存、互不覆盖；欠费统一走 `login-and-payment.md` §4.11 的 7 天宽限，不因超额单独停机。
 
+### 8.5 自计量：能不能看到「本月已用 / 剩余」（2026-11-16 评估）
+
+**结论三句话**：
+
+1. **「每台剩余可用流量」这个概念不成立**——DO 的额度是账户级共享池，超额也按账户总出站算（§13.1 第 3、6 条）。能算的只有「这台用了多少」和「账户还剩多少」。
+2. **技术上做得到**：节点是我们的，读内核接口计数器按天上报即可，不需要 DO 的任何新接口。
+3. **但不建议 M1 做**，理由见 §8.5.7；如果要做，按 §8.5.3–8.5.6 的口径，且**只能用于「提醒」，不能用于收费或停机**。
+
+#### 8.5.1 为什么「每台剩余」是误导
+
+两台机器各 1000 GiB，额度池 = 2000 GiB。A 这个月用了 1500 GiB、B 用了 100 GiB：
+
+| 算法 | A | B | 真相 |
+|---|---|---|---|
+| 按「每台剩余」 | 1000 − 1500 = **−500（超额）** | 1000 − 100 = 900 | 账户共 1600 / 2000，**完全没超额** |
+| 按账户池 | — | — | 剩 400 GiB |
+
+两个单台数字都是错的。**一台「超额」不代表要付超额费**，另一台的闲置额度可以垫上。所以在界面上写「本台剩余 900 GB」会让用户做错决定（以为还能用 900，实际上池子只剩 400）。
+
+**由此定死**：界面只允许出现两种数——**「这台本月已用 X」**（可归属）与**「账户本月已用 X / 额度 Y」**（与 DO 口径一致）。**不出现「每台剩余」「每台百分比」**。
+
+#### 8.5.2 数据源对比（都查过官方文档或源码）
+
+| 源 | 是什么 | 累计口径 | 重启后 | 覆盖范围 | 结论 |
+|---|---|---|---|---|---|
+| **`experimental.v2ray_api` stats** | gRPC StatsService，指标名 `outbound>>>tag>>>traffic>>>uplink/downlink`（源码 `experimental/v2rayapi/stats.go`） | 进程内 `atomic.Int64`；`GetStats(reset=true)` 可**读后清零** | **清零** | 只计走 sing-box 的流量 | 准确但依赖 gRPC + 官方文档写明该模块『not included by default』，构建需确认；多引入一个组件 |
+| **`experimental.clash_api`** | HTTP；`/traffic` 是 WebSocket 速率流（基于 `trafficManager.Total()`），`/connections` 是当前连接列表 | 同样是进程内计数 | **清零** | 只计走 sing-box 的流量 | 好接，但没有「某天用了多少」的持久记录，仍需自己攒 |
+| **`/proc/net/dev`** | 内核接口计数器（每个接口 rx/tx bytes） | 自开机累计 | **清零**（连 rebooting 计数） | **该接口上的全部流量** | 最接近 DO 的计费口径（DO 也按公网接口出口计），无依赖、无新配置 ← **推荐** |
+| nftables 计数规则 | 自己加 `counter` 规则 | 规则加载后累计 | 重载清零 | 只计规则命中的流量 | 多一层配置，且我们的防火墙在 DO 云端不在这台机上，不选 |
+
+**选 `/proc/net/dev` 的理由**：DO 计的是「公网接口发出的字节」，不是「sing-box 处理的字节」。系统更新、agent 自己的请求也算在 DO 的账上；用 sing-box 的统计会漏掉这部分，反而和账单对不上。找接口的办法：`ip -j addr` 里持有公网 IPv4 的那个（DO 通常 `eth0` 公网、`eth1` VPC）。
+
+#### 8.5.3 节点上报设计（若做）
+
+- **频率**：systemd timer，**每 6 小时一次 + 开机时一次**。一天一次不够——硬重启会丢掉「上次上报到现在」的全部计数，6 小时把最坏损失压到 6 小时。
+- **上报内容**：`{ boot_id, counter_bytes, sampled_at }`。**报累计值，不报增量**：增量算在服务端，节点不需要记「上次报了多少」。
+- **鉴权**：enrollment 时随凭据一起下发一个**长期 `node_token`**（32 字节随机，D1 存 sha256），与用户令牌、节点密码都隔离。上报只认它，用户拿不到。
+- **幂等**：服务端以 `(server_id, boot_id, sampled_at 截断到小时)` 去重；同一小时重复上报只记第一次。
+- **重启判定**：`boot_id` 变了，或 `counter_bytes` 比上次小 → 视为重启，增量取**当前值**（即从 0 涨到现在的部分），并记 `audit` 级别日志。
+- **网络失败**：本地最多重试 3 次后放弃，等下一个周期；**不排队补报**——补报的采样时间已经不准了，宁可少算。
+
+#### 8.5.4 控制面存储
+
+```sql
+CREATE TABLE server_traffic_daily (
+  server_id   TEXT NOT NULL,
+  day         TEXT NOT NULL,     -- 'YYYY-MM-DD'，UTC
+  egress_bytes INTEGER NOT NULL,
+  reported_at TEXT NOT NULL,
+  PRIMARY KEY (server_id, day)
+) WITHOUT ROWID;
+
+-- servers 行追加三个用于算增量的列
+-- last_counter_bytes INTEGER NOT NULL DEFAULT 0
+-- last_counter_boot  TEXT
+-- last_traffic_at    TEXT
+```
+
+- **月份不需要定时翻转**：按月求和就是 `WHERE day LIKE 'YYYY-MM-%'`，月键由查询时的 `datetime('now')` 决定。没有「月初要把累计清零」这种状态，也就没有翻转失败的可能。
+- **剩余**：`Σ(未销毁且未停用机器的 transfer_gib) − Σ(本月 egress_bytes)`，除成 GiB 后向下取整。
+- **完整性**：只有「本月每个未销毁且开机过的机器都有至少一条上报」时，剩余才标为**完整**；否则显示 `≥ X GB`（已用量是下界，剩余是上界），**不给精确数**。这一条是关键——缺一台的上报，剩余就会被高估。
+
+#### 8.5.5 契约（届时再升版本，现在不加）
+
+```ts
+// 若做，形状大致是：
+type MyServerTraffic = {
+  used_gib: number;          // 本月已用（估算，含未上报机器的下界）
+  quota_gib: number;         // 账户额度合计
+  complete: boolean;         // false = 有机器没上报，used 只是下界
+  measured_at: string;
+};
+// MyServer 增 transfer_used_gib: number | null（null = 本月无上报）
+```
+
+**现在不加**——理由与撤 `runway_days`、不加 `transfer_used_gib` 一致：没有数据来源的字段不进契约，恒为 `null` 的占位字段只会让人以为「快有了」。等 §8.5.7 的触发条件成立再一次性加。
+
+#### 8.5.6 边界与风险
+
+| 情况 | 处理 |
+|---|---|
+| 节点被拿下 / 用户拿到 root | 可以谎报任意数字。**所以这个数只用于提醒**，永远不做收费、停机、限速的依据 |
+| 机器离线 / 关机 | 本月无上报 → `transfer_used_gib = null`，剩余标「不完整」；关机期间不产生流量，不影响正确性 |
+| 硬重启 | 丢掉上次上报后的一段计数，**低估已用**、**高估剩余**；6 小时周期把最坏情况压到 6 小时 |
+| 跨月 | `day` 键天然分月，无需状态；上月行保留（每月每台 ≤ 31 行，可忽略） |
+| 销毁 / 重建 | 按 `server_id` 分开记；重建是新 id，额度重新计，旧行保留供对账 |
+| 公网与 VPC 共用接口 | 读数会偏高（把 VPC 流量也算进去了）。DO 通常分离，**实现前在真机上确认一次接口布局** |
+| 与 DO 账单的偏差 | 我们采到的是接口计数，DO 会扣掉「被防火墙丢弃的出站」；所以我们的数**通常略高于** DO 的计费量。对「提醒」是安全方向（早提醒≠漏提醒） |
+
+#### 8.5.7 值不值得做
+
+**M1 不做。** 三个理由：
+
+1. **成本不低**：节点侧要新增一个常驻组件（timer + 上报脚本）、控制面要新端点 + 新表 + 新鉴权 + 迁移，UI 要新聚合块与「不完整」状态。这不是「加个字段」的量级。
+2. **用途有限**：它只能用来提醒，不能收费、不能停机——真正的付费决策仍然要等「可信计量 + 归属依据」两件事都成立（§8.4.4）。
+3. **现在的风险可控**：超额的前期信号用 DO 控制台的账单告警就够（§8.4.3），不需要我们自己造一套计量。
+
+**触发条件**（出现任一条再做）：
+
+- DO 那边真的出现了超额账单；
+- 或用户量上来、单台超额的概率变高（比如开始卖高带宽档）。
+
+**若做，分三步，每步都可单独上线**：
+
+| 步 | 内容 | 上线后用户看到什么 |
+|---|---|---|
+| 1 | 节点上报 + `server_traffic_daily` + 服务端增量计算 | 什么都看不到（纯数据积累） |
+| 2 | 账户级「本月已用 X / 额度 Y（估算）」+ 不完整标记 | 一个能行动的数字 |
+| 3 | 详情页「这台上月/本月已用 Z」 | 单台明细，标「估算」 |
+
+**永远不做**：每台剩余、每台百分比、按流量自动停机。
+
+#### 8.5.8 验收（若做）
+
+| # | 用例 | 关键断言 |
+|---|---|---|
+| N21 | 上报与增量 | 节点连续两次上报 `counter=1000`、`counter=1600` → 当天行累计 **600 字节**；同一小时重复上报只记一次；`boot_id` 变化后 `counter=200` → 增量按 **200** 记，不出现负数 |
+| N22 | 剩余与完整性 | 两台机器都上报 → 账户剩余 = 额度合计 − 已用；一台停报 → `complete = false`，界面显示 `≥ X GB` 而不是精确值 |
+| N23 | 边界 | 销毁一台后额度合计随之减少、旧行保留；跨月后本月从 0 起算，上月数据不被改动 |
+
 ---
 
 ## 9. 安全与隐私
@@ -1115,7 +1235,7 @@ CREATE TABLE my_servers (
 | 3 | 额度 **团队级共享池**：「pooled cumulatively across all Droplets at the team level, not individually per Droplet」；每台按存在秒数往池里累积 `1/2,419,200` 的额度（≈ 28 天摊完） | billing/bandwidth | 单台的「1000 GB」是贡献量，不是单台上限 → §8.4.2 的多台后缀 |
 | 4 | 只有**公网出口**计入：「Any data transfer sent by a Droplet using a public network interface counts」；「Inbound transfer to Droplets is free」；VPC 走私有接口不计费；**IPv6 全走公网** | billing/bandwidth | 界面写「出站」；我们开了 `ipv6: true`，IPv6 流量照样算 |
 | 5 | 不计费的特例：DO 判定被**防火墙规则丢弃**的出站流量不计 | billing/bandwidth | 我们采到的会比账单多 → 估算不能直接当账单 |
-| 6 | 超额 **$0.01/GiB**；**额度不跨月结转**：「Accrued transfer does not roll over between months」 | billing/bandwidth | 超额成本可精确折算成整数分（1 GiB = 1 分） |
+| 6 | 超额 **$0.01/GiB**；**额度不跨月结转**：「Accrued transfer does not roll over between months」 | billing/bandwidth | 超额成本可精确折算成整数分（1 GiB = 1 分）。**超额是按团队池的总出站结算的，不是按单台**——所以「每台超额了没有」不是账单上的概念 |
 | 7 | **没有「本月已用字节数」接口**。Droplet 侧只有 `GET /v2/monitoring/metrics/droplet/bandwidth`，返回 **Mbps 速率**采样（`resultType: "matrix"`，实测点间隔约 120 秒），必填 `interface`(public/private) × `direction`(inbound/outbound) × `start` × `end` | monitoring.yml | 只能积分估算，且必须按天攒 |
 | 8 | 该接口需要 **`monitoring:read`** scope（OpenAPI `security` 段） | monitoring_get_dropletBandwidthMetrics.yml | 现有 token 没有这个 scope（§13 实测的 scope 清单里没有），做用量前必须先加 |
 | 9 | 文档**没有给出**指标的保留期，也没给 `start`/`end` 的最大跨度 | monitoring 文档与 spec | 不能靠「月底回查一个月」，只能每天取前一天 |
