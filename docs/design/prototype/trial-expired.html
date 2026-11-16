@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Veyl · 试用已到期</title>
+<style>
+  :root {
+    --canvas: #FAFAF8;
+    --ink: #14161C;
+    --ink-2: #5B5850;
+    --ink-3: #6E6A62;
+    --hair: rgba(20, 22, 28, 0.10);
+    --accent: #F6537B;
+    --accent-ink: #C2185B;
+    --focus: #E03A66;
+    --green: #1B7A4E;
+    --red: #A8382D;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  button { font-family: inherit; }
+
+  .shell {
+    height: 100vh;
+    display: grid;
+    grid-template-columns: 56px 1fr 380px;
+  }
+
+  /* 最左导航竖条 */
+  .nav {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 14px 0 16px;
+  }
+
+  .nav__item {
+    position: relative;
+    width: 56px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  .nav__item:hover { color: var(--ink); }
+
+  .nav__item:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: -6px;
+  }
+
+  .nav__item.is-active { color: var(--ink); }
+
+  .nav__item.is-active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 10px;
+    width: 2px;
+    height: 20px;
+    border-radius: 1px;
+    background: var(--focus);
+  }
+
+  .nav__foot {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .nav__account {
+    width: 24px;
+    height: 24px;
+    margin-bottom: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid var(--hair);
+    border-radius: 50%;
+    background: #FFFFFF;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  .nav__account:hover { color: var(--ink); }
+
+  .nav__account:focus-visible,
+  .nav__item:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  /* 中间舞台 */
+  .stage {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 24px;
+  }
+
+  .col {
+    width: 400px;
+    max-width: 100%;
+    animation: enter 160ms ease-out both;
+  }
+
+  @keyframes enter {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  /* 顶部状态带 */
+  .band {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 44px;
+    border-bottom: 1px solid var(--hair);
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--ink-2);
+  }
+
+  .band__dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 2px;
+    background: var(--ink-3);
+  }
+
+  .content { margin-top: 20px; }
+
+  .content__title {
+    margin: 0;
+    font-size: 24px;
+    line-height: 1.45;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+
+  .content__note {
+    margin: 8px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  .primary {
+    width: 100%;
+    height: 48px;
+    margin-top: 24px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--ink);
+    color: var(--canvas);
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+  }
+
+  .primary:hover { background: #24262E; }
+
+  .primary:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 3px;
+  }
+
+  /* 右侧对话面板 */
+  .chat {
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid #E7E3DA;
+  }
+
+  .chat__head {
+    flex: 0 0 auto;
+    height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px 0 20px;
+  }
+
+  .chat__label {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--ink-2);
+  }
+
+  .chat__collapse {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  .chat__collapse:hover { color: var(--ink); background: rgba(20, 22, 28, 0.05); }
+
+  .chat__collapse:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  .chat__body {
+    flex: 1 1 auto;
+    padding: 4px 20px;
+    overflow: auto;
+  }
+
+  .chat__msg {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--ink);
+  }
+
+  .chat__composer { flex: 0 0 auto; padding: 12px 20px 20px; }
+
+  .chat__field {
+    height: 44px;
+    padding: 0 14px;
+    display: flex;
+    align-items: center;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: #FFFFFF;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation: none !important;
+      transition-duration: 0.01ms !important;
+      transition-delay: 0ms !important;
+    }
+
+    .col { opacity: 1; transform: none; }
+  }
+</style>
+</head>
+<body>
+
+  <div class="shell">
+    <nav class="nav" aria-label="主导航">
+      <button class="nav__item is-active" type="button" aria-label="连接" aria-current="page" title="连接">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M8.2 11.8a3 3 0 0 0 4.24 0l2.4-2.4a3 3 0 0 0-4.24-4.24l-1 1"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          <path d="M11.8 8.2a3 3 0 0 0-4.24 0l-2.4 2.4a3 3 0 0 0 4.24 4.24l1-1"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+        </svg>
+      </button>
+      <button class="nav__item" type="button" aria-label="节点组" title="节点组">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M10 3.2 16.6 6.6 10 10 3.4 6.6 10 3.2Z"
+            stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+          <path d="M3.4 10 10 13.4 16.6 10"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M3.4 13.4 10 16.8 16.6 13.4"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
+      <button class="nav__item" type="button" aria-label="我的服务器" title="我的服务器">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <rect x="3.5" y="3.5" width="13" height="5.2" rx="1.4"
+            stroke="currentColor" stroke-width="1.4" />
+          <rect x="3.5" y="11.3" width="13" height="5.2" rx="1.4"
+            stroke="currentColor" stroke-width="1.4" />
+          <circle cx="6.4" cy="6.1" r="0.9" fill="currentColor" />
+          <circle cx="6.4" cy="13.9" r="0.9" fill="currentColor" />
+        </svg>
+      </button>
+
+      <div class="nav__foot">
+        <button class="nav__account" type="button" aria-label="账户">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="8" cy="5.6" r="2.4" stroke="currentColor" stroke-width="1.4" />
+            <path d="M3.6 13.2a4.6 4.6 0 0 1 8.8 0"
+              stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+        </button>
+        <button class="nav__item nav__settings" type="button" aria-label="设置" title="设置">
+          <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="10" cy="10" r="2.4" stroke="currentColor" stroke-width="1.4" />
+            <path d="M10 3.2v1.7M10 15.1v1.7M3.2 10h1.7M15.1 10h1.7M5.2 5.2l1.2 1.2M13.6 13.6l1.2 1.2M14.8 5.2l-1.2 1.2M6.4 13.6l-1.2 1.2"
+              stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
+    </nav>
+
+    <main class="stage">
+      <section class="col" aria-label="试用已到期">
+        <div class="band">
+          <span class="band__dot" aria-hidden="true"></span>
+          <span>未连接</span>
+        </div>
+
+        <div class="content">
+          <h1 class="content__title">试用已到期</h1>
+          <p class="content__note">免费节点已从节点池移除。</p>
+          <button class="primary" type="button">新建节点</button>
+        </div>
+      </section>
+    </main>
+
+    <aside class="chat" aria-label="助手">
+      <header class="chat__head">
+        <span class="chat__label">助手</span>
+        <button class="chat__collapse" type="button" aria-label="收起助手">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M5.5 3.5 9 7l-3.5 3.5" stroke="currentColor" stroke-width="1.4"
+              stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+      </header>
+      <div class="chat__body">
+        <p class="chat__msg">试用已到期，免费节点已经移除。要建一台自己的服务器吗？</p>
+      </div>
+      <div class="chat__composer">
+        <div class="chat__field" role="textbox" aria-disabled="true" tabindex="-1">
+          告诉 Veyl 你要什么…
+        </div>
+      </div>
+    </aside>
+  </div>
+
+</body>
+</html>

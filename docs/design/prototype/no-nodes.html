@@ -167,13 +167,18 @@
 
   .pick--primary .pick__sub { color: rgba(250, 250, 248, 0.72); }
 
-  /* 已选：主选项变成「连接」 */
-  .pick--primary.is-chosen {
+  /* 已选：免费节点变成「连接」 */
+  .pick.is-chosen {
     align-items: center;
     gap: 0;
+    border-color: var(--ink);
+    background: var(--ink);
+    color: var(--canvas);
   }
 
-  .pick--primary.is-chosen .pick__title { font-weight: 500; }
+  .pick.is-chosen:hover { background: #24262E; border-color: #24262E; }
+
+  .pick.is-chosen .pick__title { font-weight: 500; }
 
   .pick--secondary {
     border: 1px solid var(--hair);
@@ -288,16 +293,16 @@
       <main class="stage">
         <section class="start" aria-label="还没有节点">
           <h1 class="start__title">从哪里开始？</h1>
-          <p class="start__note">免费节点不保证稳定，也不限时。</p>
+          <p class="start__note">免费节点不保证稳定，试用 7 天。</p>
 
           <div class="picks">
-            <button class="pick pick--primary" id="pick-free" type="button">
-              <span class="pick__title">使用免费节点</span>
-              <span class="pick__sub">2 个节点，可能不稳定</span>
-            </button>
-            <button class="pick pick--secondary" id="pick-own" type="button">
-              <span class="pick__title">新建自己的节点</span>
+            <button class="pick pick--primary" id="pick-own" type="button">
+              <span class="pick__title">新建节点</span>
               <span class="pick__sub">用自己的服务器，更稳定</span>
+            </button>
+            <button class="pick pick--secondary" id="pick-trial" type="button">
+              <span class="pick__title">先试用免费节点</span>
+              <span class="pick__sub">2 个节点，7 天试用</span>
             </button>
           </div>
 
@@ -327,21 +332,21 @@
 
 <script>
   // simulated：原型只演示选择态，不连接、不建服务器。
-  const free = document.getElementById("pick-free");
   const own = document.getElementById("pick-own");
+  const trial = document.getElementById("pick-trial");
   const next = document.getElementById("next");
   let chosen = false;
 
-  free.addEventListener("click", () => {
-    if (chosen) return;
-    chosen = true;
-    free.classList.add("is-chosen");
-    free.innerHTML = '<span class="pick__title">连接</span>';
-    free.setAttribute("aria-label", "连接");
-  });
-
   own.addEventListener("click", () => {
     next.hidden = false;
+  });
+
+  trial.addEventListener("click", () => {
+    if (chosen) return;
+    chosen = true;
+    trial.classList.add("is-chosen");
+    trial.innerHTML = '<span class="pick__title">连接</span>';
+    trial.setAttribute("aria-label", "连接");
   });
 </script>
 </body>
