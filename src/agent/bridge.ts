@@ -18,7 +18,10 @@ import type {
   RouteSetModeData,
   RouteState,
   SystemRegion,
+  TrialStatusData,
 } from "./protocol";
+
+export type { TrialStatusData } from "./protocol";
 
 export type BridgeMode = "tauri" | "mock";
 
@@ -725,6 +728,8 @@ export interface AgentBridge {
   runtimeStop(): Promise<void>;
   /** 回传退出确认的选择；Host 收到后按 background / quit 继续退出流程。 */
   quitDecision(action: QuitDecisionAction): Promise<void>;
+  /** 免费节点试用状态；只读本地，不触发到期清理。 */
+  trialStatus(): Promise<TrialStatusData>;
   /** 左栏配置列表。只读本地库，不联网。 */
   configList(): Promise<ConfigListData>;
   /** 中间底部节点详情的数据源。 */

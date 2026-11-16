@@ -735,6 +735,22 @@ export interface MyServerOrderChangedPayload {
 }
 
 /* ------------------------------------------------------------------ */
+/* trial_status（commands.md §7.19）                                    */
+/* ------------------------------------------------------------------ */
+
+/** 免费节点 7 天试用：available 未开始 / active 生效中 / expired 已到期。 */
+export type TrialState = "available" | "active" | "expired";
+
+export interface TrialStatusData {
+  state: TrialState;
+  started_at: string | null;
+  expires_at: string | null;
+  /** Host 算好的剩余毫秒；available 为 null，expired 恒为 0。 */
+  remaining_ms: number | null;
+  seed_node_count: number;
+}
+
+/* ------------------------------------------------------------------ */
 /* 事件联合类型                                                        */
 /* ------------------------------------------------------------------ */
 

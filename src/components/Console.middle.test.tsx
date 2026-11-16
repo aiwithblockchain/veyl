@@ -128,10 +128,6 @@ function renderConsole(
       nodeProbes={emptyProbes}
       nodeProbeAvailable={false}
       aiReady={aiReady}
-      justOnboarded={false}
-      zeroConfigSettled
-      hasConfigs
-      onAskAi={noop}
       onNewConfig={extra.onNewConfig ?? noop}
       onUseSeedNodes={extra.onUseSeedNodes}
       onImportNodes={extra.onImportNodes}

@@ -5,9 +5,10 @@ import { AGENT_EVENTS } from "../agent/protocol";
 import type {
   ConfigDetail,
   ConfigSummary,
+  NodeSummary,
   RuntimeSnapshot,
 } from "../agent/protocol";
-import { createMockConfig, MOCK_CONFIG_STORAGE_KEY, summarizeConfig } from "./model";
+import { createMockConfig, MOCK_CONFIG_STORAGE_KEY, rememberMockNode, summarizeConfig } from "./model";
 import { createRuntimeAuthority, runtimePhase } from "./runtimeAuthority";
 import type { RuntimeAuthority } from "./runtimeAuthority";
 import { deleteConfigWithDisconnect, shouldDisconnectOnDelete, withoutConfig } from "./deleteConfig";
@@ -68,6 +69,30 @@ interface MockStore {
   configs: ConfigDetail[];
   activeId: string | null;
 }
+
+// demo：浏览器里没有种子包，config_create(source=seed) 用这两个节点顶替。
+const MOCK_FREE_NODES: NodeSummary[] = [
+  {
+    node_id: "mock_free_tokyo_01",
+    name: "东京 01",
+    server: "203.0.113.10",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "seed",
+    created_at: 0,
+  },
+  {
+    node_id: "mock_free_singapore_01",
+    name: "新加坡 01",
+    server: "203.0.113.11",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "seed",
+    created_at: 0,
+  },
+];
 
 const MOCK_STORAGE_KEY = MOCK_CONFIG_STORAGE_KEY;
 
@@ -398,9 +423,17 @@ export function useVpnSession(
 
   const createConfig = async (input: ConfigCreateInput): Promise<ActionResult> => {
     if (mock) {
+      // demo：浏览器里没有种子包，source=seed 用两个固定的免费节点顶替。
+      const nodeIds =
+        input.source === "seed" && !input.nodeIds?.length
+          ? [MOCK_FREE_NODES[0], MOCK_FREE_NODES[1]].map((node) => {
+              rememberMockNode(node);
+              return node.node_id;
+            })
+          : input.nodeIds;
       const detail = createMockConfig(input.name, input.connectMode, {
         routingMode: input.routingMode,
-        nodeIds: input.nodeIds,
+        nodeIds,
       });
       const store = mockStore.current;
       const connected = connection === "connected" || connection === "starting";

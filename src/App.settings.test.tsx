@@ -242,7 +242,7 @@ describe("设置 → 添加节点", () => {
 });
 
 describe("设置 → 新建配置", () => {
-  it("AI 已就绪时关掉设置页进 AI 对话，不发静态表单", async () => {
+  it("关掉设置页并打开 AI 对话，不弹静态表单也不代发消息", async () => {
     // 先收起右栏，才能证明是入口把它打开的。
     localStorage.setItem("veyl.ui.panelOpen", "0");
     localStorage.setItem("veyl.ui.panelVersion", PANEL_VERSION);
@@ -255,14 +255,10 @@ describe("设置 → 新建配置", () => {
     fireEvent.click(await screen.findByRole("tab", { name: "连接" }));
     fireEvent.click(await screen.findByRole("button", { name: "新建一套配置" }));
 
-    await waitFor(() => expect(bridge.sendMessage).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull());
     expect(container.querySelector(".assistant-slot")).toBeTruthy();
     expect(container.querySelector(".modal.new-config")).toBeNull();
-
-    const call = (bridge.sendMessage as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(call[1]).toBe("帮我新建一套配置。");
-    expect((call[2] as { hidden?: boolean }).hidden).toBeFalsy();
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
   }, 15_000);
 });
 

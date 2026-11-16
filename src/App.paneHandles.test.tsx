@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import App from "./App";
 import { getAgentBridge } from "./agent";
@@ -64,8 +64,8 @@ afterEach(() => {
   setWidth(1024);
 });
 
-describe("App 的三栏手柄", () => {
-  it("窄屏助手是浮层时不渲染助手手柄，配置栏手柄仍在", async () => {
+describe("App 的栏宽手柄", () => {
+  it("连接 destination 没有列表手柄；切到我的服务器后才出现", async () => {
     setWidth(1100);
     const { container } = render(<App />);
 
@@ -75,7 +75,12 @@ describe("App 的三栏手柄", () => {
     );
 
     expect(container.querySelector(".pane-handle--assistant")).toBeNull();
-    expect(container.querySelector(".pane-handle--rail")).not.toBeNull();
+    expect(container.querySelector(".pane-handle--rail")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "我的服务器" }));
+    await waitFor(() =>
+      expect(container.querySelector(".pane-handle--rail")).not.toBeNull(),
+    );
   });
 
   it("宽屏助手停靠时才出现助手手柄", async () => {
@@ -83,6 +88,7 @@ describe("App 的三栏手柄", () => {
     const { container } = render(<App />);
     await waitFor(() => expect(container.querySelector(".app")).not.toBeNull());
 
+    fireEvent.click(screen.getByRole("button", { name: "我的服务器" }));
     setWidth(1568);
     window.dispatchEvent(new Event("resize"));
 

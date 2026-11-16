@@ -6,11 +6,6 @@ import type { ProbeResult } from "../config/useVpnSession";
 import type { NodeProbesController } from "../config/useNodeProbes";
 import { copyText } from "../ui/clipboard";
 import { modeSummary } from "../ui/configLabels";
-import {
-  runZeroConfigPrimaryAction,
-  zeroConfigContent,
-  zeroConfigMode,
-} from "../ui/consoleActions";
 import { formatCheckedAgo, formatClock, formatTraffic } from "../ui/format";
 import { dataPlaneDown } from "../ui/dataPlane";
 import {
@@ -42,10 +37,6 @@ interface Props {
   nodeProbes: NodeProbesController;
   nodeProbeAvailable: boolean;
   aiReady: boolean;
-  justOnboarded: boolean;
-  zeroConfigSettled: boolean;
-  hasConfigs: boolean;
-  onAskAi: () => void;
   onNewConfig: () => void;
   /** 中间块「用 Veyl 免费节点」：用户已定来源，直接开手动表单，不再让 AI 问一遍。 */
   onUseSeedNodes?: () => void;
@@ -133,10 +124,6 @@ export function Console({
   nodeProbes,
   nodeProbeAvailable,
   aiReady,
-  justOnboarded,
-  zeroConfigSettled,
-  hasConfigs,
-  onAskAi,
   onNewConfig,
   onUseSeedNodes,
   onImportNodes,
@@ -392,9 +379,6 @@ export function Console({
     setSheetOpen(false);
   };
 
-  const zeroMode = zeroConfigMode(aiReady, justOnboarded, zeroConfigSettled);
-  const zeroContent = zeroConfigContent(zeroMode);
-
   const showLedger = Boolean(config && hasNodes && !transitioning && level !== "failed");
   const showStrip = Boolean(connected && config && !isProxy(config));
   // 只有 running 且探测新鲜失败才算；degraded 仍走「连接不稳定」。
@@ -577,47 +561,7 @@ export function Console({
 
   return (
     <main className="console">
-      {!loading && !hasConfigs ? (
-        <div className="console__body console__body--welcome">
-          <p className="sr-only" role="status" aria-live="polite">
-            {srStatus}
-          </p>
-          <section className="hero">
-            <div className="hero__main">
-              <h1 className="state-word">
-                <span>{zeroContent.title}</span>
-              </h1>
-              {zeroContent.body ? (
-                <p className="hero__caption">{zeroContent.body}</p>
-              ) : null}
-            </div>
-            {zeroContent.primaryLabel ? (
-              <button
-                type="button"
-                className="btn btn--primary"
-                onClick={() =>
-                  runZeroConfigPrimaryAction(zeroMode, { onAskAi, onNewConfig })
-                }
-              >
-                {zeroContent.primaryLabel}
-              </button>
-            ) : null}
-          </section>
-          {zeroContent.steps ? (
-            <ol className="steps">
-              {zeroContent.steps.map((step, index) => (
-                <li key={step.title}>
-                  <span className="steps__num">{String(index + 1).padStart(2, "0")}</span>
-                  <span>
-                    <strong>{step.title}</strong>
-                    <small>{step.detail}</small>
-                  </span>
-                </li>
-              ))}
-            </ol>
-          ) : null}
-        </div>
-      ) : loading ? (
+      {loading ? (
         <div className="console__body" aria-busy="true" aria-label="正在读取配置">
           <span className="skeleton skeleton--hero" aria-hidden />
           <span className="skeleton skeleton--ledger" aria-hidden />
@@ -629,7 +573,7 @@ export function Console({
             未连接
           </p>
           <div className="one-thing">
-            <p className="note note--idle">在左侧选一套配置。</p>
+            <p className="note note--idle">配置还没读出来，稍等一下。</p>
           </div>
         </div>
       ) : (

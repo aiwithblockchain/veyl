@@ -33,6 +33,7 @@ import type {
   ReportActionData,
   RuntimeStartResult,
   QuitDecisionAction,
+  TrialStatusData,
   TunHelperInfo,
   TunHelperRestartResult,
   TunHelperState,
@@ -412,6 +413,42 @@ export class MockAgentBridge implements AgentBridge {
     this.lastQuitDecision = action;
   }
 
+  async trialStatus(): Promise<TrialStatusData> {
+    // demo：localStorage 里设 veyl.mock.trial=expired / active 可切换状态。
+    const flag = mockFlag("veyl.mock.trial");
+    const seedCount = this.readMockConfigs().reduce(
+      (sum, config) => sum + config.nodes.filter((node) => node.source === "seed").length,
+      0,
+    );
+    if (flag === "expired") {
+      const started = new Date(Date.now() - 8 * 86_400_000).toISOString();
+      return {
+        state: "expired",
+        started_at: started,
+        expires_at: new Date(Date.parse(started) + 7 * 86_400_000).toISOString(),
+        remaining_ms: 0,
+        seed_node_count: 0,
+      };
+    }
+    if (flag === "active") {
+      const started = new Date(Date.now() - 86_400_000).toISOString();
+      return {
+        state: "active",
+        started_at: started,
+        expires_at: new Date(Date.parse(started) + 7 * 86_400_000).toISOString(),
+        remaining_ms: 6 * 86_400_000,
+        seed_node_count: seedCount,
+      };
+    }
+    return {
+      state: "available",
+      started_at: null,
+      expires_at: null,
+      remaining_ms: null,
+      seed_node_count: seedCount,
+    };
+  }
+
   /** demo：模拟 Host 拦截到退出请求；浏览器里也可派发 window 事件触发。 */
   requestQuitDemo(): void {
     this.emit({
@@ -425,6 +462,25 @@ export class MockAgentBridge implements AgentBridge {
     this.emit({
       name: AGENT_EVENTS.quitDismissed,
       payload: { contract_version: CONTRACT_VERSION, emitted_at: now() },
+    });
+  }
+
+  /** demo：模拟免费节点到期（先把 mock 的试用状态切成 expired，再发事件）。 */
+  expireTrialDemo(removedNodeCount = 2): void {
+    try {
+      localStorage.setItem("veyl.mock.trial", "expired");
+    } catch {
+      // 存不了也照样发事件。
+    }
+    this.emit({
+      name: AGENT_EVENTS.trialExpired,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        ended_at: now(),
+        removed_node_count: removedNodeCount,
+        disconnected: false,
+        emitted_at: now(),
+      },
     });
   }
 

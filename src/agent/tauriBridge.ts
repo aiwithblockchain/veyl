@@ -13,6 +13,7 @@ import type {
   ConfigSetModeData,
   ConfigSetModeInput,
   QuitDecisionAction,
+  TrialStatusData,
   CoreCheckUpdatesResult,
   CoreInfo,
   DeepSeekKeyState,
@@ -946,6 +947,10 @@ export class TauriAgentBridge implements AgentBridge {
 
   async quitDecision(action: QuitDecisionAction): Promise<void> {
     await call("quit_decision", { action });
+  }
+
+  async trialStatus(): Promise<TrialStatusData> {
+    return call<TrialStatusData>("trial_status");
   }
 
   async configList(): Promise<ConfigListData> {

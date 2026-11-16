@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  isAiReady,
-  shouldKickOffFirstRun,
-  shouldOpenPanelForEmptyConfigs,
-  shouldShowOnboarding,
-} from "./onboarding";
+import { isAiReady, shouldShowOnboarding } from "./onboarding";
 
 const key = { masked: "sk-****abcd" };
 const noKey = { masked: null };
@@ -115,87 +110,5 @@ describe("shouldShowOnboarding", () => {
         ]),
       }),
     ).toBe(false);
-  });
-});
-
-describe("shouldOpenPanelForEmptyConfigs", () => {
-  const base = {
-    aiReady: true,
-    loading: false,
-    configCount: 0,
-    closedThisRun: false,
-  };
-
-  it("零配置且本次未手动关闭时展开右栏", () => {
-    expect(shouldOpenPanelForEmptyConfigs(base)).toBe(true);
-  });
-
-  it("零配置但本次手动关过右栏时不展开", () => {
-    expect(
-      shouldOpenPanelForEmptyConfigs({ ...base, closedThisRun: true }),
-    ).toBe(false);
-  });
-
-  it("有配置时不展开", () => {
-    expect(shouldOpenPanelForEmptyConfigs({ ...base, configCount: 1 })).toBe(
-      false,
-    );
-  });
-
-  it("配置还在加载时不展开", () => {
-    expect(shouldOpenPanelForEmptyConfigs({ ...base, loading: true })).toBe(
-      false,
-    );
-  });
-
-  it("没有可用 AI 时不展开", () => {
-    expect(shouldOpenPanelForEmptyConfigs({ ...base, aiReady: false })).toBe(
-      false,
-    );
-  });
-});
-
-describe("shouldKickOffFirstRun", () => {
-  const base = {
-    aiReady: true,
-    historyReady: true,
-    sessionHistoryLoaded: true,
-    configCount: 0,
-    messageCount: 0,
-  };
-
-  it("所有条件满足时触发", () => {
-    expect(shouldKickOffFirstRun(base)).toBe(true);
-  });
-
-  it("启动历史还没加载完不触发", () => {
-    expect(shouldKickOffFirstRun({ ...base, historyReady: false })).toBe(false);
-  });
-
-  it("当前会话历史还没加载完不触发", () => {
-    expect(
-      shouldKickOffFirstRun({ ...base, sessionHistoryLoaded: false }),
-    ).toBe(false);
-  });
-
-  it("连接过但配置删光、会话为空，仍然触发", () => {
-    // hasEverConnected 不参与判断：老用户删光配置后同样需要 AI 帮他重建。
-    const returningUser = {
-      ...base,
-      hasEverConnected: true,
-    };
-    expect(shouldKickOffFirstRun(returningUser)).toBe(true);
-  });
-
-  it("没有可用 AI 不触发", () => {
-    expect(shouldKickOffFirstRun({ ...base, aiReady: false })).toBe(false);
-  });
-
-  it("已有配置不触发", () => {
-    expect(shouldKickOffFirstRun({ ...base, configCount: 1 })).toBe(false);
-  });
-
-  it("当前会话已有消息不触发", () => {
-    expect(shouldKickOffFirstRun({ ...base, messageCount: 1 })).toBe(false);
   });
 });

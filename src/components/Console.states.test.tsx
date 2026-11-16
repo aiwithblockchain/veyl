@@ -115,10 +115,6 @@ function consoleElement(config: ConfigDetail | null, opts: RenderOptions) {
       nodeProbes={emptyProbes}
       nodeProbeAvailable={false}
       aiReady={opts.aiReady ?? true}
-      justOnboarded={false}
-      zeroConfigSettled
-      hasConfigs={Boolean(config)}
-      onAskAi={noop}
       onNewConfig={noop}
       loading={opts.loading}
       runtime={opts.runtime ?? makeRuntime()}

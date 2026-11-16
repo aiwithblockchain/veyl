@@ -3,16 +3,15 @@ import type { CSSProperties } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type {
   AgentEvent,
-  ConfigConnectMode,
   ConfigRouteMode,
   NextAction,
   RuntimeView,
+  TrialStatusData,
 } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
 import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, shouldRefreshSnapshotOnHealth, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
 import type {
-  ConfigCreateInput,
   DefaultProfileStatus,
   MyServer,
   PendingQuestion,
@@ -23,19 +22,14 @@ import { AiPanel, type RenameResult } from "./components/AiPanel";
 import { AskQuestionDialog } from "./components/AskQuestionDialog";
 import { AssistantOverlay } from "./components/AssistantOverlay";
 import { AssistantTab } from "./components/AssistantTab";
-import { ConfigRail } from "./components/ConfigRail";
 import { Console } from "./components/Console";
 import { ConnectionOverlay } from "./components/ConnectionOverlay";
 import { HelperPermissionDialog } from "./components/HelperPermissionDialog";
-import { NewConfigDialog } from "./components/NewConfigDialog";
 import { MyServersPage } from "./components/MyServersPage";
 import { MyServersRail } from "./components/MyServersRail";
 import { MyServerLogin } from "./components/MyServerLogin";
 import { MyServerTopUp } from "./components/MyServerTopUp";
-import { NodeGroupDetail } from "./components/NodeGroupDetail";
-import { NodeGroupsRail } from "./components/NodeGroupsRail";
 import { useMyServers } from "./myservers/useMyServers";
-import { useNodeGroups } from "./groups/useNodeGroups";
 import { isProvisioning } from "./myservers/labels";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
@@ -44,10 +38,7 @@ import { Settings, describeImportError } from "./components/Settings";
 import type { DisplayActionOutcome } from "./components/ToolCallCard";
 import type { ToolDisplayAction } from "./components/toolDisplay";
 import {
-  FIRST_RUN_KICKOFF,
   isAiReady,
-  shouldKickOffFirstRun,
-  shouldOpenPanelForEmptyConfigs,
   shouldShowOnboarding,
 } from "./config/onboarding";
 import { useVpnSession, isHelperPermissionReason } from "./config/useVpnSession";
@@ -62,16 +53,9 @@ import { ISSUE_REPORT_OPENING } from "./ui/issueReport";
 import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
 import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
 import { readDestination, writeDestination, type Destination } from "./ui/destination";
-import { IconConsole, IconGroups, IconServer } from "./components/icons";
+import { IconConsole, IconServer, IconSliders } from "./components/icons";
 import { usePaneLayout } from "./ui/usePaneLayout";
 import { pushRateSample, shouldPushRateSample, type RateSample } from "./ui/rateSeries";
-import {
-  isZeroConfigAskSuppressed,
-  lastAssistantTextOf,
-  shouldResetJustOnboarded,
-  shouldSendZeroConfigAsk,
-  shouldSettleZeroConfig,
-} from "./ui/consoleActions";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import "./styles/app.css";
 
@@ -87,11 +71,66 @@ const AI_EVENTS = new Set<AgentEvent["name"]>([
 
 type SettingsSection = "ai" | "network" | "advanced" | "about";
 
+/** 免费节点试用到期：节点已被清走，只留「新建节点」。 */
+function TrialExpired({ onNewNode }: { onNewNode: () => void }) {
+  return (
+    <main className="start-choice" aria-label="试用已到期">
+      <section className="start-choice__col">
+        <h1 className="start-choice__title">试用已到期</h1>
+        <p className="start-choice__note">免费节点已从节点池移除。</p>
+        <button type="button" className="trial-expired__action" onClick={onNewNode}>
+          新建节点
+        </button>
+      </section>
+    </main>
+  );
+}
+
+/** 还没有任何节点时的两选一：新建节点为主，免费节点试用为次。 */
+function StartChoice({
+  busy,
+  onUseFree,
+  onNewNode,
+}: {
+  busy: boolean;
+  onUseFree: () => void;
+  onNewNode: () => void;
+}) {
+  return (
+    <main className="start-choice">
+      <section className="start-choice__col" aria-label="还没有节点">
+        <h1 className="start-choice__title">从哪里开始？</h1>
+        <p className="start-choice__note">免费节点不保证稳定，试用 7 天。</p>
+
+        <div className="start-choice__picks">
+          <button
+            type="button"
+            className="start-choice__pick start-choice__pick--primary"
+            onClick={onNewNode}
+          >
+            <span className="start-choice__pick-title">新建节点</span>
+            <span className="start-choice__pick-sub">用自己的服务器，更稳定</span>
+          </button>
+          <button
+            type="button"
+            className="start-choice__pick start-choice__pick--secondary"
+            onClick={onUseFree}
+            disabled={busy}
+          >
+            <span className="start-choice__pick-title">
+              {busy ? "正在加入免费节点" : "先试用免费节点"}
+            </span>
+            <span className="start-choice__pick-sub">2 个节点，7 天试用</span>
+          </button>
+        </div>
+      </section>
+    </main>
+  );
+}
+
 const EVER_CONNECTED_KEY = "veyl.hasEverConnected";
 const PANEL_CLOSED_BY_USER_KEY = "veyl.ui.panelClosedByUser";
 const PANEL_AUTO_OPENED_KEY = "veyl.ui.panelAutoOpened";
-/** 新建配置走 AI 协助时的开场消息：必须是用户可见的一条。 */
-const NEW_CONFIG_AI_ASK = "帮我新建一套配置。";
 
 function readFlag(key: string): boolean {
   try {
@@ -132,7 +171,7 @@ function credentialErrorText(error: unknown): string {
     return "这台服务器已不存在。没有改动任何配置；重新建一台再试。";
   }
   if (reason === "auth_required" || reason === "device_identity_lost") {
-    return "这台设备的身份需要重新确认。没有改动任何配置；到左栏底部重新登录后再试。";
+    return "这台设备的身份需要重新确认。没有改动任何配置；到左下角的账户里重新登录后再试。";
   }
   if (!problem.retryable) {
     return "这台服务器现在取不了凭据。没有改动任何配置；换一台服务器，或重新建一台。";
@@ -167,7 +206,6 @@ export default function App() {
   const [aiProviderName, setAiProviderName] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingLoaded, setOnboardingLoaded] = useState(false);
-  const [historyReady, setHistoryReady] = useState(false);
   const [hasEverConnected, setHasEverConnected] = useState(readEverConnected);
   const [panelOpen, setPanelOpen] = useState(readInitialPanelOpen);
   // destination 决定左栏与中间区：客户端是配置列表 + 控制台，服务器是服务器列表 + 选中那台。
@@ -178,38 +216,19 @@ export default function App() {
     setDestination(next);
     writeDestination(localStorage, next);
   };
-  // 再点一次已激活的「节点组」图标：递增让节点组回到根（组列表 → 当前组详情）。
-  const [groupsRootSignal, setGroupsRootSignal] = useState(0);
   // 再点一次已激活的「我的服务器」图标：回到列表根（默认第一台）。
   const [serversRootSignal, setServersRootSignal] = useState(0);
-  const groupsApi = useNodeGroups();
   const myServers = useMyServers(bridge, {
     active: destination === "servers",
     rootSignal: serversRootSignal,
   });
-  const selectedServerIdRef = useRef<string | null>(null);
-  selectedServerIdRef.current = myServers.selected?.server_id ?? null;
-  /** 从新建流程切到服务器时保留接管方式；回客户端时恢复新建流程。 */
-  const [serverEntry, setServerEntry] = useState<{
-    connectMode: ConfigConnectMode;
-  } | null>(null);
-  /** 从服务器「用来建配置」带回来的节点；dialog 挂在 review。 */
-  const [ownedNodes, setOwnedNodes] = useState<{
-    nodeIds: string[];
-    label: string;
-  } | null>(null);
-  /** 从「我的服务器 → 用来建配置」打开弹窗前所在的 destination；取消时恢复。 */
-  const [ownedReturnDestination, setOwnedReturnDestination] =
-    useState<Destination | null>(null);
-  /** 取凭据在途：防止连点，并在 resolve 后核对页面与服务器没变。 */
+  /** 取凭据建配置在途：防止连点。 */
   const useServerInFlightRef = useRef(false);
   const destinationRef = useRef(destination);
   destinationRef.current = destination;
   /** 正在为问题报告开会话并发送开场：期间禁用三处入口。 */
   const [reportOpening, setReportOpening] = useState(false);
   const reportOpeningRef = useRef(false);
-  // 新建配置成功后要自动连接：等 activeConfig 刷新到新配置再启动。
-  const connectAfterCreateRef = useRef(false);
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === "undefined" ? 1440 : window.innerWidth,
   );
@@ -220,7 +239,16 @@ export default function App() {
   const [proxyPort, setProxyPort] = useState(DEFAULT_PROXY_PORT);
   const [repairing, setRepairing] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
-  const [newConfigOpen, setNewConfigOpen] = useState(false);
+  /** 试用免费节点：先建配置，等状态刷新后在 effect 里发起连接。 */
+  const [trialBusy, setTrialBusy] = useState(false);
+  const trialBusyRef = useRef(false);
+  const [trialPendingStart, setTrialPendingStart] = useState(false);
+  /** 免费节点试用状态；过期后只留「新建节点」。 */
+  const [trial, setTrial] = useState<TrialStatusData | null>(null);
+  const [trialLoaded, setTrialLoaded] = useState(false);
+  const [trialNonce, setTrialNonce] = useState(0);
+  /** 首屏等配置与试用状态都读回来再决定渲染，避免闪一下两选一。 */
+  const [stageReady, setStageReady] = useState(false);
   const [quitOpen, setQuitOpen] = useState(false);
   const [quitBusy, setQuitBusy] = useState(false);
   const [quitError, setQuitError] = useState<string | null>(null);
@@ -233,7 +261,6 @@ export default function App() {
     configId: string;
     mode: ConfigRouteMode;
   } | null>(null);
-  const [justOnboarded, setJustOnboarded] = useState(false);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   // 运行时状态的唯一权威：App 与 useVpnSession 共用同一份，避免两个实例的时钟分叉。
   const runtimeAuthorityRef = useRef(createRuntimeAuthority());
@@ -275,13 +302,6 @@ export default function App() {
   const panelClosedByUserRef = useRef(readFlag(PANEL_CLOSED_BY_USER_KEY));
   const panelAutoOpenedRef = useRef(readFlag(PANEL_AUTO_OPENED_KEY));
   const aiConfiguredRef = useRef(false);
-  const kickoffStartedRef = useRef(false);
-  const kickoffSessionCreatedRef = useRef(false);
-  const zeroConfigAskedRef = useRef(false);
-  const askedMessageCountRef = useRef(0);
-  // 新建配置的 AI 流程：记下开场消息发给哪个会话，防止连点再开一条。
-  const newConfigFlowRef = useRef<string | null>(null);
-
   const markQuestionSettled = (questionId: string) => {
     const settled = settledQuestionIds.current;
     settled.add(questionId);
@@ -291,54 +311,36 @@ export default function App() {
     }
   };
 
-  // 请求结束 / 失败 / 取消后流程才算完；失败时把人送回手动表单，AI 不可用也能建配置。
-  const endNewConfigFlow = (sessionId: string, fallbackToForm = true) => {
-    if (newConfigFlowRef.current !== sessionId) return;
-    newConfigFlowRef.current = null;
-    if (!fallbackToForm) return;
-    setAppNotice({ level: "error", text: "AI 没接上，先用表单建一套。" });
-    openNewConfig();
-  };
-
-  const openNewConfig = () => {
-    setOwnedNodes(null);
-    setServerEntry(null);
-    setNewConfigOpen(true);
-  };
-
-  // 第 2 问选「其它节点」：切到「我的服务器」，关掉表单并记住接管方式。
-  const handleChooseServers = (connectMode: ConfigConnectMode) => {
-    setServerEntry({ connectMode });
-    setNewConfigOpen(false);
-    changeDestination("servers");
-  };
-
-  // 回客户端只能点最左侧「客户端」图标：从新建流程来的顺带恢复表单。
-  const handleServersBack = () => {
-    changeDestination("client");
-    if (serverEntry) setNewConfigOpen(true);
-  };
-
-  // 从服务器带一个节点回新建流程：先让 Host 验签落库，拿到本地 node_id 再开弹窗。
+  // 我的服务器 → 用这台建配置：Host 验签落库后，直接把节点放进唯一配置。
+  // 「新建节点」的完整流程（地区/规格/计费）下一阶段才接。
   const handleUseServer = async (server: MyServer) => {
     if (useServerInFlightRef.current) return;
+    if (vpn.configs.some((config) => config.node_count > 0)) {
+      setAppNotice({
+        level: "info",
+        text: "节点池里已经有节点了，换节点等下一版接入。",
+      });
+      return;
+    }
     useServerInFlightRef.current = true;
     const startedDestination = destinationRef.current;
-    const startedServerId = server.server_id;
     try {
-      const node = await bridge.myServerCredentials(startedServerId);
-      // 期间用户切走页面或换了服务器：只结束在途，不跳转、不动原状态。
-      if (
-        destinationRef.current !== startedDestination ||
-        selectedServerIdRef.current !== startedServerId
-      ) {
+      const node = await bridge.myServerCredentials(server.server_id);
+      if (destinationRef.current !== startedDestination) return;
+      const created = await vpn.createConfig({
+        name: server.name,
+        connectMode: "tun",
+        routingMode: "direct",
+        nodeIds: [node.node_id],
+      });
+      if (!created.ok) {
+        setAppNotice({
+          level: "error",
+          text: created.message ?? "没拿到这台服务器的节点。",
+        });
         return;
       }
-      setServerEntry(null);
-      setOwnedReturnDestination(startedDestination);
-      setOwnedNodes({ nodeIds: [node.node_id], label: server.name });
       changeDestination("client");
-      setNewConfigOpen(true);
     } catch (error) {
       if (destinationRef.current === startedDestination) {
         setAppNotice({ level: "error", text: credentialErrorText(error) });
@@ -347,23 +349,6 @@ export default function App() {
       useServerInFlightRef.current = false;
     }
   };
-
-  // 控制台底部「组 · X」：跳到这个组的详情。
-  const handleOpenActiveGroup = () => {
-    if (!groupsApi.activeGroup) return;
-    groupsApi.select(groupsApi.activeGroup.group_id);
-    changeDestination("groups");
-  };
-
-  // 再点一次「节点组」图标：回根（当前节点组）。
-  const lastGroupsRootSignal = useRef(0);
-  useEffect(() => {
-    if (groupsRootSignal === lastGroupsRootSignal.current) return;
-    lastGroupsRootSignal.current = groupsRootSignal;
-    groupsApi.resetToRoot();
-    // groupsApi 每次渲染都是新对象，只跟着信号走。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupsRootSignal]);
 
   // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
   const healthVersion = useRef(0);
@@ -387,10 +372,11 @@ export default function App() {
     vpn.activeConfig && routingOverride?.configId === vpn.activeConfig.config_id
       ? routingOverride.mode
       : vpn.activeConfig?.routing_mode ?? null;
-  const connectedNow =
-    vpn.connection === "connected" ||
-    runtime.state === "running" ||
-    runtime.state === "degraded";
+  // 全局只有一个节点池：有节点才显示节点卡，没有就停在两选一。
+  const hasNodes = Boolean(
+    (vpn.activeConfig && vpn.activeConfig.nodes.length > 0) ||
+      vpn.configs.some((config) => config.node_count > 0),
+  );
   // 已连接用本次连接快照，未连接用实时推断，和中间区口径同源。
   const scopeRegion =
     runtime.state === "running" || runtime.state === "degraded"
@@ -644,6 +630,17 @@ export default function App() {
         setQuitError(null);
         setQuitOpen(false);
       }
+      if (event.name === AGENT_EVENTS.trialExpired) {
+        // 到期清理已经提交：节点池、试用状态都要重读，不能只看这个事件。
+        setTrial({
+          state: "expired",
+          started_at: null,
+          expires_at: event.payload.ended_at,
+          remaining_ms: 0,
+          seed_node_count: 0,
+        });
+        setTrialNonce((value) => value + 1);
+      }
       if (event.name === AGENT_EVENTS.askUserQuestion) {
         const payload = event.payload;
         if (settledQuestionIds.current.has(payload.question_id)) return;
@@ -671,7 +668,6 @@ export default function App() {
           requestSessionRef.current.delete(requestId);
           sendBusyRef.current.delete(sessionId);
           pendingStopRef.current.delete(sessionId);
-          endNewConfigFlow(sessionId, event.payload.result === "error");
         }
         setPendingQuestions((current) => {
           for (const item of current) {
@@ -723,10 +719,7 @@ export default function App() {
       .then((history) => {
         if (!cancelled) dispatch({ type: "hydrate_history", history });
       })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!cancelled) setHistoryReady(true);
-      });
+      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
@@ -746,6 +739,34 @@ export default function App() {
       cancelled = true;
     };
   }, [refreshDefaultProfile, refreshAiStatus]);
+
+  // 试用状态：启动时读一次；收到 trial-expired 或连接成功后重读。
+  useEffect(() => {
+    if (!onboardingLoaded || showOnboarding) return;
+    let cancelled = false;
+    if (trialNonce > 0) vpn.reload();
+    void bridge
+      .trialStatus()
+      .then((status) => {
+        if (!cancelled) setTrial(status);
+      })
+      .catch(() => {
+        // 旧后端没有这条命令：按未开始处理，不挡界面。
+        if (!cancelled) setTrial(null);
+      })
+      .finally(() => {
+        if (!cancelled) setTrialLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge, onboardingLoaded, showOnboarding, trialNonce, vpn.reload]);
+
+  // 首屏只等一次：之后的 reload 不把已经显示的舞台藏起来。
+  useEffect(() => {
+    if (stageReady) return;
+    if (!vpn.loading && trialLoaded) setStageReady(true);
+  }, [stageReady, vpn.loading, trialLoaded]);
 
   // 切换 / 恢复会话时，把该会话未回答的问题拉回来。
   useEffect(() => {
@@ -790,98 +811,6 @@ export default function App() {
     if (vpn.error) setAppNotice({ level: "error", text: vpn.error });
   }, [vpn.error]);
 
-  // 本次运行内建出过配置后，A 的「刚引导完」文案就不再适用。
-  useEffect(() => {
-    if (!shouldResetJustOnboarded(justOnboarded, vpn.configs.length)) return;
-    setJustOnboarded(false);
-  }, [justOnboarded, vpn.configs.length]);
-
-  // 零配置时右栏必须可见；kickoff 只管「AI 开不开口」，不管「用户看不看得到」。
-  useEffect(() => {
-    if (!onboardingLoaded || showOnboarding) return;
-    if (
-      !shouldOpenPanelForEmptyConfigs({
-        aiReady,
-        loading: vpn.loading,
-        configCount: vpn.configs.length,
-        closedThisRun: panelClosedThisRunRef.current,
-      })
-    ) {
-      return;
-    }
-    panelOpenRef.current = true;
-    setPanelOpen(true);
-    setAiUnread(false);
-  }, [onboardingLoaded, showOnboarding, aiReady, vpn.loading, vpn.configs.length]);
-
-  // 首启自动发起第一轮；hidden 消息不显示成用户气泡，会话里只出现 AI 的回复。
-  useEffect(() => {
-    if (!onboardingLoaded || showOnboarding || !aiReady) return;
-    if (!historyReady) return;
-    if (vpn.loading || vpn.configs.length > 0) return;
-
-    if (!session) {
-      if (kickoffSessionCreatedRef.current) return;
-      kickoffSessionCreatedRef.current = true;
-      dispatch({ type: "add_session", session: createSession() });
-      return;
-    }
-
-    if (!session.historyLoaded) return;
-    if (kickoffStartedRef.current) return;
-    if (
-      !shouldKickOffFirstRun({
-        aiReady,
-        historyReady,
-        sessionHistoryLoaded: session.historyLoaded,
-        configCount: vpn.configs.length,
-        messageCount: session.messages.length,
-      })
-    ) {
-      return;
-    }
-
-    kickoffStartedRef.current = true;
-    // 先标记 requestId 未知的 pending，删除保护与历史覆盖判断才会认为「有请求在跑」。
-    dispatch({ type: "request_pending", sessionId: session.id });
-    void bridge
-      .sendMessage(session.id, FIRST_RUN_KICKOFF, { hidden: true })
-      .then(({ requestId }) => {
-        requestSessionRef.current.set(requestId, session.id);
-        dispatch({ type: "request_started", sessionId: session.id, requestId });
-        if (pendingStopRef.current.delete(session.id)) {
-          void bridge
-            .cancel(requestId)
-            .then((cancelled) => {
-              if (cancelled) return;
-              requestSessionRef.current.delete(requestId);
-              dispatch({
-                type: "request_cancelled_locally",
-                sessionId: session.id,
-                requestId,
-              });
-            })
-            .catch(() => {});
-        }
-      })
-      .catch((error: unknown) => {
-        pendingStopRef.current.delete(session.id);
-        const message =
-          toBridgeError(error).message || "AI 没能开始第一轮对话，请稍后重试。";
-        dispatch({ type: "request_failed", sessionId: session.id, message });
-        setAppNotice({ level: "error", text: message });
-      });
-  }, [
-    onboardingLoaded,
-    showOnboarding,
-    aiReady,
-    historyReady,
-    vpn.loading,
-    vpn.configs.length,
-    session,
-    bridge,
-  ]);
-
   const completeOnboarding = async () => {
     setShowOnboarding(false);
     setOnboardingLoaded(true);
@@ -889,12 +818,6 @@ export default function App() {
   };
 
   const finishOnboarding = () => {
-    // 只在本次运行内有效：刷新后回到「已配 AI、但不是刚引导完」的入口。
-    setJustOnboarded(true);
-    // 首启成功无条件打开右栏，不受「只自动开一次」或「用户关过」影响。
-    panelOpenRef.current = true;
-    setPanelOpen(true);
-    setAiUnread(false);
     void completeOnboarding();
   };
 
@@ -1079,7 +1002,6 @@ export default function App() {
         requestSessionRef.current.delete(requestId);
         pendingStopRef.current.delete(sessionId);
         dispatch({ type: "request_cancelled_locally", sessionId, requestId });
-        endNewConfigFlow(sessionId, false);
       })
       .catch(() => {});
   };
@@ -1147,8 +1069,6 @@ export default function App() {
         sessionId,
         message: bridgeError.message || "这条没有发出去，再试一次。",
       });
-      // 新建配置的开场没送出去（Key 失效、断网）：回退到手动表单。
-      endNewConfigFlow(sessionId, true);
       return true;
     }
   };
@@ -1225,7 +1145,6 @@ export default function App() {
 
   const handleStop = () => {
     if (!session) return;
-    endNewConfigFlow(session.id, false);
     const requestId = session.activeRequestId;
     dispatch({ type: "cancel_request" });
     if (requestId) {
@@ -1334,20 +1253,6 @@ export default function App() {
     }
   };
 
-  const handleCreateConfig = async (
-    input: ConfigCreateInput,
-  ): Promise<{ ok: boolean; message?: string; reason?: string }> => {
-    const result = await vpn.createConfig(input);
-    // 失败只在表单里说一次：贴着字段，用户能直接改。
-    if (!result.ok) {
-      return { ok: false, message: result.message, reason: result.reason };
-    }
-    if (!result.activated) {
-      setAppNotice({ level: "info", text: "已创建，从左侧切换过去。" });
-    }
-    return { ok: true };
-  };
-
   const handleSetRoutingMode = async (
     mode: "direct" | "proxy_all",
   ): Promise<{ ok: boolean; message?: string }> => {
@@ -1363,50 +1268,6 @@ export default function App() {
       // 行内说一次，不弹 toast；控件保持原值。
       return { ok: false, message: "没切成功，还是原来的范围。" };
     }
-  };
-
-  // 点其它配置只切换「当前用哪套」：不断开、不重连，也不弹确认。
-  const handleSelectConfig = (configId: string) => {
-    if (configId === vpn.activeConfigId) return;
-    const targetName =
-      vpn.configs.find((config) => config.config_id === configId)?.name ?? "这套配置";
-    // 连接/正在连接的那套在切换前取：切换只改 active，不会改这两个 id。
-    // starting 必须用真正的启动配置，不能拿 active 代替（切几次之后 active 已经不是它了）。
-    const connection = vpn.connection;
-    const launchId =
-      connection === "connected"
-        ? vpn.connectedConfigId
-        : connection === "starting"
-          ? vpn.startingConfigId
-          : null;
-    const launchName = launchId
-      ? (vpn.configs.find((config) => config.config_id === launchId)?.name ?? null)
-      : null;
-    const sameAsTarget = launchId !== null && launchId === configId;
-
-    void vpn.selectConfig(configId).then((result) => {
-      if (!result.ok) {
-        showActionResult(result, "切换配置失败");
-        return;
-      }
-      // 切回正在连着/正在连的那套：没有变化，不用提示。
-      if (sameAsTarget) return;
-      if (connection === "connected") {
-        setAppNotice({
-          level: "info",
-          text: launchName
-            ? `已切到「${targetName}」，当前仍连着「${launchName}」。点连接会先断开再连。`
-            : `已切到「${targetName}」，当前仍有一条连接。点连接会先断开再连。`,
-        });
-      } else if (connection === "starting") {
-        setAppNotice({
-          level: "info",
-          text: launchName
-            ? `已切到「${targetName}」，正在连接的是「${launchName}」。`
-            : `已切到「${targetName}」，还有一条连接正在建立。`,
-        });
-      }
-    });
   };
 
   const handleVpnStart = () => {
@@ -1428,21 +1289,45 @@ export default function App() {
     });
   };
 
-  // 「创建并连接」：配置列表刷新到新配置后再启动，避免用到旧的 activeConfig。
+  // 「创建并连接」：配置列表刷新到新配置后再启动；失败不留空配置。
   useEffect(() => {
-    if (!connectAfterCreateRef.current) return;
+    if (!trialPendingStart) return;
     if (vpn.loading) return;
-    if (!vpn.activeConfig) {
-      connectAfterCreateRef.current = false;
+    const config = vpn.activeConfig;
+    if (!config || config.nodes.length === 0) {
+      trialBusyRef.current = false;
+      setTrialPendingStart(false);
+      setTrialBusy(false);
+      const emptyId = config && config.nodes.length === 0 ? config.config_id : null;
+      if (emptyId) void vpn.deleteConfig(emptyId);
       setAppNotice({
         level: "error",
-        text: vpn.error ?? "新建的配置没读出来，请在左侧重新选择。",
+        text: vpn.error ?? "免费节点没加进来，再试一次。",
       });
       return;
     }
-    connectAfterCreateRef.current = false;
-    handleVpnStart();
-  }, [vpn.loading, vpn.activeConfig, vpn.start, vpn.error]);
+    trialBusyRef.current = false;
+    setTrialPendingStart(false);
+    setTrialBusy(false);
+    void vpn.start().then((result) => {
+      if (!result.ok) {
+        setAppNotice({
+          level: "error",
+          text: result.message ?? "免费节点加进来了，但没能连上，可以再点一次连接。",
+        });
+        return;
+      }
+      // 种子节点连上才写试用起算点，这里重读一次状态。
+      setTrialNonce((value) => value + 1);
+    });
+  }, [
+    trialPendingStart,
+    vpn.loading,
+    vpn.activeConfig,
+    vpn.start,
+    vpn.deleteConfig,
+    vpn.error,
+  ]);
 
   const handleVpnStop = (): Promise<boolean> => {
     // 记下点断开这一刻是不是已连接：断开失败时只有原本在线才恢复在线。
@@ -1486,78 +1371,39 @@ export default function App() {
     });
   };
 
-  // 新建配置走 AI 对话：关掉兜底表单 → 新会话 → 打开右栏 → 发一条用户可见的开场。
-  const startNewConfigAiFlow = () => {
-    setNewConfigOpen(false);
-    if (newConfigFlowRef.current) {
-      // 同一流程里再点入口：只把右栏亮出来并给焦点，不重复开会话和发消息。
-      kickoffStartedRef.current = true;
-      kickoffSessionCreatedRef.current = true;
-      panelOpenRef.current = true;
-      setPanelOpen(true);
-      setAiUnread(false);
-      setComposerFocusSignal((value) => value + 1);
-      return;
-    }
-    // 用户已经显式点名要 AI 配，零配置的自动 kickoff 不再另外发一条。
-    kickoffStartedRef.current = true;
-    kickoffSessionCreatedRef.current = true;
-    const fresh = createSession();
-    dispatch({ type: "add_session", session: fresh });
-    newConfigFlowRef.current = fresh.id;
-    panelOpenRef.current = true;
-    setPanelOpen(true);
-    setAiUnread(false);
-    setComposerFocusSignal((value) => value + 1);
-    void sendToSession(fresh.id, NEW_CONFIG_AI_ASK)
-      .then((ok) => {
-        if (!ok) endNewConfigFlow(fresh.id, true);
-      })
-      .catch(() => endNewConfigFlow(fresh.id, true));
-  };
-
-  // 用户主动点「让 AI 帮我配」：打开右栏、给焦点；会话空闲时直接发一条可见的用户消息。
+  // 「新建节点」暂由 AI 接手：打开右栏并给输入框焦点，后续流程下一阶段接。
   const handleAskAiFromConsole = () => {
-    // 用户已经显式点名要 AI 配，自动 kickoff 不再另外发一条。
-    kickoffStartedRef.current = true;
-    kickoffSessionCreatedRef.current = true;
     panelOpenRef.current = true;
     setPanelOpen(true);
     setAiUnread(false);
     setComposerFocusSignal((value) => value + 1);
-
-    const hasPendingQuestion = session
-      ? pendingQuestions.some((item) => item.sessionId === session.id)
-      : false;
-    const messageCount = session?.messages.length ?? 0;
-    const shouldSend = shouldSendZeroConfigAsk({
-      requesting: session?.requesting ?? false,
-      hasActiveRequest: Boolean(session?.activeRequestId),
-      hasPendingQuestion,
-      alreadyAsked: isZeroConfigAskSuppressed({
-        asked: zeroConfigAskedRef.current,
-        askedAtCount: askedMessageCountRef.current,
-        messageCount,
-      }),
-    });
-    if (shouldSend) {
-      zeroConfigAskedRef.current = true;
-      askedMessageCountRef.current = messageCount;
-      handleEmptySend("帮我配一下网络");
-    }
   };
 
   const handleSwitchNode = (nodeId: string) => vpn.switchNode(nodeId);
 
-  const zeroConfigSettled = shouldSettleZeroConfig({
-    requesting: session?.requesting ?? false,
-    hasActiveRequest: Boolean(session?.activeRequestId),
-    hasPendingQuestion: session
-      ? pendingQuestions.some((item) => item.sessionId === session.id)
-      : false,
-    messageCount: session?.messages.length ?? 0,
-    lastAssistantText: lastAssistantTextOf(session?.messages ?? []),
-  });
+  // 先试用免费节点：建唯一配置（seed 节点、Tun、智能分流），有节点后再自动连接。
+  const handleUseFreeNodes = async () => {
+    if (trialBusyRef.current || hasNodes) return;
+    trialBusyRef.current = true;
+    setTrialBusy(true);
+    setAppNotice(null);
+    const created = await vpn.createConfig({
+      name: "免费节点",
+      connectMode: "tun",
+      routingMode: "direct",
+      source: "seed",
+    });
+    if (!created.ok) {
+      trialBusyRef.current = false;
+      setTrialBusy(false);
+      setAppNotice({
+        level: "error",
+        text: created.message ?? "没能加入免费节点，再试一次。",
+      });
+      return;
+    }
+    setTrialPendingStart(true);
+  };
 
   const shell = shellLayout(viewportWidth);
   dockedRef.current = shell.docked;
@@ -1615,31 +1461,23 @@ export default function App() {
     );
   }
 
+  // 配置与试用状态都读回来后再渲染，避免首屏闪一下「从哪里开始？」。
+  if (!stageReady) {
+    return <div className="app-boot" aria-hidden />;
+  }
+
   return (
-    <div style={appStyle} className="app">
+    <div style={appStyle} className={`app ${destination === "servers" ? "" : "app--solo"}`.trim()}>
       <nav className="activity" aria-label="切换主区">
         <button
           type="button"
           className={`activity__item ${destination === "client" ? "is-active" : ""}`}
           aria-pressed={destination === "client"}
-          aria-label="客户端"
-          title="客户端"
-          onClick={handleServersBack}
+          aria-label="连接"
+          title="连接"
+          onClick={() => changeDestination("client")}
         >
           <IconConsole size={18} />
-        </button>
-        <button
-          type="button"
-          className={`activity__item ${destination === "groups" ? "is-active" : ""}`}
-          aria-pressed={destination === "groups"}
-          aria-label="节点组"
-          title="节点组"
-          onClick={() => {
-            if (destination === "groups") setGroupsRootSignal((value) => value + 1);
-            else changeDestination("groups");
-          }}
-        >
-          <IconGroups size={18} />
         </button>
         <button
           type="button"
@@ -1663,6 +1501,43 @@ export default function App() {
             <span className="activity__dot" aria-hidden />
           ) : null}
         </button>
+
+        <div className="activity__foot">
+          <button
+            type="button"
+            className="activity__item"
+            aria-label="设置"
+            title="设置"
+            onClick={() => openSettings()}
+          >
+            <IconSliders size={18} />
+          </button>
+          <button
+            type="button"
+            className="activity__item"
+            aria-label="账户"
+            title="账户"
+            onClick={() => changeDestination("servers")}
+          >
+            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
+              <circle
+                cx="10"
+                cy="7.2"
+                r="2.6"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.35"
+              />
+              <path
+                d="M4.6 16.2a5.4 5.4 0 0 1 10.8 0"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.35"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        </div>
       </nav>
       {destination === "servers" ? (
         <MyServersRail
@@ -1689,35 +1564,11 @@ export default function App() {
           onRefreshWallet={() => void myServers.refreshWallet()}
           onOpenSettings={() => openSettings()}
         />
-      ) : destination === "groups" ? (
-        <NodeGroupsRail
-          groups={groupsApi.groups}
-          selectedId={groupsApi.selected?.group_id ?? null}
-          activeGroupId={groupsApi.activeGroupId}
-          compact={shell.mode === "drawer"}
-          onSelect={groupsApi.select}
-          onOpenSettings={() => openSettings()}
-        />
-      ) : (
-        <ConfigRail
-          configs={vpn.configs}
-          activeConfigId={vpn.activeConfigId}
-          connectedConfigId={vpn.connectedConfigId}
-          loading={vpn.loading}
-          error={vpn.error}
-          onSelect={handleSelectConfig}
-          onNewConfig={aiReady ? startNewConfigAiFlow : openNewConfig}
-          onRetry={vpn.reload}
-          onDelete={vpn.deleteConfig}
-          onRename={vpn.renameConfig}
-          onOpenSettings={() => openSettings()}
-          compact={shell.mode === "drawer"}
-        />
-      )}
-      {panes.canDragRail ? (
+      ) : null}
+      {destination === "servers" && panes.canDragRail ? (
         <PaneHandle
           side="rail"
-          label="调整配置列表宽度"
+          label="调整列表宽度"
           controls="config-rail"
           value={panes.rail}
           min={RAIL_MIN}
@@ -1745,19 +1596,12 @@ export default function App() {
           onRetryDetail={myServers.retryDetail}
           onTopUp={myServers.openTopUp}
         />
-      ) : destination === "groups" ? (
-        groupsApi.selected ? (
-          <NodeGroupDetail
-            group={groupsApi.selected}
-            active={groupsApi.selected.group_id === groupsApi.activeGroupId}
-          />
-        ) : null
-      ) : (
+      ) : trial?.state === "expired" ? (
+        <TrialExpired onNewNode={handleAskAiFromConsole} />
+      ) : hasNodes ? (
       <Console
         config={vpn.activeConfig}
         connectedConfigId={vpn.connectedConfigId}
-        groupName={groupsApi.activeGroup?.name ?? null}
-        onOpenGroup={handleOpenActiveGroup}
         connectedConfigName={
           (runtime.config_id ?? vpn.connectedConfigId)
             ? (vpn.configs.find(
@@ -1784,12 +1628,7 @@ export default function App() {
         onOpenDiagnostics={() => openSettings("advanced")}
         nodeProbeAvailable={vpn.nodeProbeAvailable}
         aiReady={aiReady}
-        justOnboarded={justOnboarded}
-        zeroConfigSettled={zeroConfigSettled}
-        hasConfigs={vpn.configs.length > 0}
-        onAskAi={handleAskAiFromConsole}
-        onNewConfig={aiReady ? startNewConfigAiFlow : openNewConfig}
-        onUseSeedNodes={openNewConfig}
+        onNewConfig={handleAskAiFromConsole}
         onImportNodes={() => openSettings("network")}
         seedUpdate={Boolean(defaultProfile?.newVersionAvailable)}
         proxyPort={proxyPort}
@@ -1804,6 +1643,12 @@ export default function App() {
         helperPreparing={vpn.preparingHelper}
         rateSamples={rateSamples}
       />
+      ) : (
+        <StartChoice
+          busy={trialBusy}
+          onUseFree={() => void handleUseFreeNodes()}
+          onNewNode={handleAskAiFromConsole}
+        />
       )}
       {panelOpen && shell.docked ? (
         <div className="assistant-slot">{aiPanel}</div>
@@ -1862,36 +1707,6 @@ export default function App() {
         </div>
       ) : null}
 
-      {newConfigOpen ? (
-        <NewConfigDialog
-          bridge={bridge}
-          configs={vpn.configs}
-          region={systemRegion}
-          defaultNodeCount={defaultProfile?.nodeCount ?? null}
-          connected={connectedNow}
-          initialConnectMode={serverEntry?.connectMode}
-          ownedNodes={ownedNodes}
-          onChooseServers={handleChooseServers}
-          onClose={() => {
-            setNewConfigOpen(false);
-            setOwnedNodes(null);
-            setServerEntry(null);
-            if (ownedReturnDestination) {
-              changeDestination(ownedReturnDestination);
-              setOwnedReturnDestination(null);
-            }
-          }}
-          onCreate={handleCreateConfig}
-          onCreated={(connect) => {
-            setNewConfigOpen(false);
-            setOwnedNodes(null);
-            setServerEntry(null);
-            setOwnedReturnDestination(null);
-            if (connect) connectAfterCreateRef.current = true;
-          }}
-        />
-      ) : null}
-
       <AskQuestionDialog
         question={currentQuestion}
         onAnswer={handleAnswerQuestion}
@@ -1915,10 +1730,8 @@ export default function App() {
         connectMode={vpn.activeConfig?.connect_mode ?? null}
         configId={vpn.activeConfig?.config_id ?? null}
         onNewConfig={() => {
-          // 先关设置页，再走 AI 流程：后者会打开右栏，不能被设置页盖住。
           setSettingsOpen(false);
-          if (aiReady) startNewConfigAiFlow();
-          else openNewConfig();
+          handleAskAiFromConsole();
         }}
         onClose={closeSettings}
         onNotice={setAppNotice}
