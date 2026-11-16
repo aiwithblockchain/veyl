@@ -221,6 +221,20 @@
 - `Esc`、`×`、点遮罩都等于**取消退出**，回到应用。
 - 两个动作都不带感叹号，也不写「确定要退出吗」这类套话。
 
+## 相关原型（可交互）
+
+本地静态服务：`python3 -m http.server 4174 --directory docs/design/prototype`，地址为 `http://localhost:4174/<文件>`。
+
+| 场景 | 文件 |
+|---|---|
+| 首启接入 AI | `first-run-ai.html` |
+| 无节点时的二选一 | `no-nodes.html` |
+| 选中免费节点后的连接舞台 | `free-nodes-ready.html` |
+| 试用到期 | `trial-expired.html` |
+| 新建节点 | `new-node.html` |
+| 设置弹层 | `settings.html` |
+| 我的服务器 | `servers.html` |
+
 ## 界面要求
 
 - **炫酷但清新**地展示 AI 处理的过程。
