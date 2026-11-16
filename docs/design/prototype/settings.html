@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Veyl · 设置</title>
+<style>
+  :root {
+    --canvas: #FAFAF8;
+    --ink: #14161C;
+    --ink-2: #5B5850;
+    --ink-3: #6E6A62;
+    --hair: rgba(20, 22, 28, 0.10);
+    --accent: #F6537B;
+    --accent-ink: #C2185B;
+    --focus: #E03A66;
+    --green: #1B7A4E;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  button { font-family: inherit; }
+
+  .app {
+    height: 100vh;
+    display: grid;
+    grid-template-columns: 56px 200px 1fr 56px;
+  }
+
+  /* 最左导航竖条 */
+  .nav {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 14px 0 16px;
+  }
+
+  .nav__item {
+    position: relative;
+    width: 56px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  .nav__item:hover { color: var(--ink); }
+
+  .nav__item:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: -6px;
+  }
+
+  .nav__item.is-active { color: var(--ink); }
+
+  .nav__item.is-active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 10px;
+    width: 2px;
+    height: 20px;
+    border-radius: 1px;
+    background: var(--focus);
+  }
+
+  .nav__foot {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .nav__account {
+    width: 24px;
+    height: 24px;
+    margin-bottom: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid var(--hair);
+    border-radius: 50%;
+    background: #FFFFFF;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  .nav__account:hover { color: var(--ink); }
+
+  .nav__account:focus-visible,
+  .nav__item:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  /* 二级导航 */
+  .subnav {
+    padding: 24px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .subnav__item {
+    height: 36px;
+    padding: 0 10px;
+    display: flex;
+    align-items: center;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ink-2);
+    font-size: 14px;
+    line-height: 1.4;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .subnav__item:hover { color: var(--ink); background: rgba(20, 22, 28, 0.04); }
+
+  .subnav__item:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: -1px;
+  }
+
+  .subnav__item.is-active {
+    background: rgba(20, 22, 28, 0.06);
+    color: var(--ink);
+    font-weight: 500;
+  }
+
+  /* 内容区 */
+  .content {
+    min-width: 0;
+    padding: 40px;
+    overflow-y: auto;
+  }
+
+  .content__inner {
+    max-width: 560px;
+    margin: 0 auto;
+    animation: enter 160ms ease-out both;
+  }
+
+  @keyframes enter {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .setting {
+    padding: 20px 0;
+    border-bottom: 1px solid var(--hair);
+  }
+
+  .setting:first-child { padding-top: 0; }
+
+  .setting:last-child { border-bottom: 0; }
+
+  .setting__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+  }
+
+  .setting__label {
+    font-size: 15px;
+    line-height: 1.5;
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  .setting__value {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  .setting__desc {
+    margin: 8px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  .mono {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .note {
+    margin: 20px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  /* 文字按钮 */
+  .text {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--accent-ink);
+    font-size: 13px;
+    line-height: 1.6;
+    cursor: pointer;
+  }
+
+  .text:hover { color: #9C1249; }
+
+  .text:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 3px;
+  }
+
+  .text--quiet {
+    color: var(--ink-3);
+    font-size: 12px;
+  }
+
+  .text--quiet:hover { color: var(--ink-2); }
+
+  /* 分段控件 */
+  .segmented {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 8px;
+    background: #F1EFEA;
+    flex: 0 0 auto;
+  }
+
+  .segmented button {
+    height: 32px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-2);
+    font-size: 13px;
+    line-height: 1.4;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .segmented button:hover { color: var(--ink); }
+
+  .segmented button.is-selected {
+    background: #FFFFFF;
+    color: var(--ink);
+    box-shadow: 0 1px 2px rgba(20, 22, 28, 0.08);
+  }
+
+  .segmented button:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 1px;
+  }
+
+  /* 就地确认条 */
+  .confirm-bar {
+    margin-top: 12px;
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: #FFFFFF;
+  }
+
+  .confirm-bar__text {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+
+  .confirm-bar__actions {
+    display: flex;
+    gap: 8px;
+    flex: 0 0 auto;
+  }
+
+  .btn-sm {
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.4;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .btn-sm--primary {
+    border: 0;
+    background: var(--ink);
+    color: var(--canvas);
+  }
+
+  .btn-sm--primary:hover { background: #24262E; }
+
+  .btn-sm--ghost {
+    border: 1px solid var(--hair);
+    background: #FFFFFF;
+    color: var(--ink);
+  }
+
+  .btn-sm--ghost:hover { border-color: rgba(20, 22, 28, 0.22); }
+
+  .btn-sm:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  /* 端口行 */
+  .port {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .port__addr {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-2);
+  }
+
+  /* 账户 */
+  .account__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+  }
+
+  .account__row + .account__row { margin-top: 12px; }
+
+  .account__email {
+    font-size: 15px;
+    line-height: 1.5;
+    color: var(--ink);
+  }
+
+  .account__balance {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  .account__actions {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  /* 右边缘助手 tab */
+  .ai-tab {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-left: 1px solid var(--hair);
+  }
+
+  .ai-tab__btn {
+    height: 100%;
+    width: 56px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  .ai-tab__btn:hover { color: var(--ink); }
+
+  .ai-tab__btn:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: -6px;
+  }
+
+  .ai-tab__text {
+    writing-mode: vertical-rl;
+    font-size: 12px;
+    line-height: 1;
+    letter-spacing: 0.14em;
+  }
+
+  [hidden] { display: none !important; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation: none !important;
+      transition-duration: 0.01ms !important;
+      transition-delay: 0ms !important;
+    }
+
+    .content__inner { opacity: 1; transform: none; }
+  }
+</style>
+</head>
+<body>
+
+  <div class="app">
+    <nav class="nav" aria-label="主导航">
+      <button class="nav__item" type="button" aria-label="连接" title="连接">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M8.2 11.8a3 3 0 0 0 4.24 0l2.4-2.4a3 3 0 0 0-4.24-4.24l-1 1"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          <path d="M11.8 8.2a3 3 0 0 0-4.24 0l-2.4 2.4a3 3 0 0 0 4.24 4.24l1-1"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+        </svg>
+      </button>
+      <button class="nav__item" type="button" aria-label="节点组" title="节点组">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M10 3.2 16.6 6.6 10 10 3.4 6.6 10 3.2Z"
+            stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+          <path d="M3.4 10 10 13.4 16.6 10"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M3.4 13.4 10 16.8 16.6 13.4"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
+      <button class="nav__item" type="button" aria-label="我的服务器" title="我的服务器">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <rect x="3.5" y="3.5" width="13" height="5.2" rx="1.4"
+            stroke="currentColor" stroke-width="1.4" />
+          <rect x="3.5" y="11.3" width="13" height="5.2" rx="1.4"
+            stroke="currentColor" stroke-width="1.4" />
+          <circle cx="6.4" cy="6.1" r="0.9" fill="currentColor" />
+          <circle cx="6.4" cy="13.9" r="0.9" fill="currentColor" />
+        </svg>
+      </button>
+
+      <div class="nav__foot">
+        <button class="nav__account" type="button" aria-label="账户">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="8" cy="5.6" r="2.4" stroke="currentColor" stroke-width="1.4" />
+            <path d="M3.6 13.2a4.6 4.6 0 0 1 8.8 0"
+              stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+        </button>
+        <button class="nav__item is-active" type="button" aria-label="设置" aria-current="page" title="设置">
+          <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="10" cy="10" r="2.4" stroke="currentColor" stroke-width="1.4" />
+            <path d="M10 3.2v1.7M10 15.1v1.7M3.2 10h1.7M15.1 10h1.7M5.2 5.2l1.2 1.2M13.6 13.6l1.2 1.2M14.8 5.2l-1.2 1.2M6.4 13.6l-1.2 1.2"
+              stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
+    </nav>
+
+    <nav class="subnav" aria-label="设置分区">
+      <button class="subnav__item" type="button" data-panel="ai">AI</button>
+      <button class="subnav__item is-active" type="button" data-panel="connection">连接</button>
+      <button class="subnav__item" type="button" data-panel="account">账户</button>
+    </nav>
+
+    <main class="content">
+      <div class="content__inner">
+        <section id="panel-ai" aria-label="AI 设置" hidden>
+          <div class="setting">
+            <div class="setting__head">
+              <span class="setting__label">默认 AI</span>
+              <span class="setting__value">
+                DeepSeek · 已配置 · <span class="mono">sk-…abcd</span>
+                <button class="text" type="button">更换</button>
+              </span>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting__head">
+              <span class="setting__label">其他 AI 服务</span>
+              <span class="setting__value">
+                <button class="text" type="button">管理</button>
+              </span>
+            </div>
+          </div>
+
+          <p class="note">Key 只保存在本机。</p>
+        </section>
+
+        <section id="panel-connection" aria-label="连接设置">
+          <div class="setting">
+            <div class="setting__head">
+              <span class="setting__label">接管方式</span>
+              <div class="segmented" id="mode-seg" role="group" aria-label="接管方式">
+                <button type="button" class="is-selected" data-mode="tun" aria-pressed="true">全部软件</button>
+                <button type="button" data-mode="system_proxy" aria-pressed="false">本机代理</button>
+              </div>
+            </div>
+            <p class="setting__desc">全部软件会接管所有流量；本机代理只给需要代理的软件用。切换会短暂断开当前连接。</p>
+            <div class="confirm-bar" id="mode-confirm" hidden>
+              <p class="confirm-bar__text">切换会短暂断开当前连接。</p>
+              <div class="confirm-bar__actions">
+                <button class="btn-sm btn-sm--ghost" id="mode-cancel" type="button">取消</button>
+                <button class="btn-sm btn-sm--primary" id="mode-switch" type="button">切换</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting__head">
+              <span class="setting__label">流量范围</span>
+              <div class="segmented" id="scope-seg" role="group" aria-label="流量范围">
+                <button type="button" class="is-selected" data-scope="smart" aria-pressed="true">智能</button>
+                <button type="button" data-scope="global" aria-pressed="false">全局</button>
+              </div>
+            </div>
+            <p class="setting__desc">智能只让需要的流量走节点，全局让所有流量都走。</p>
+          </div>
+
+          <div class="setting" id="port-row" hidden>
+            <div class="setting__head">
+              <span class="setting__label">本地代理端口</span>
+              <span class="setting__value">
+                <span class="port__addr">127.0.0.1:7890</span>
+                <button class="text" id="copy-port" type="button">复制</button>
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <section id="panel-account" aria-label="账户设置" hidden>
+          <div class="setting" id="account-guest">
+            <div class="setting__head">
+              <span class="setting__label">未登录</span>
+              <button class="btn-sm btn-sm--ghost" id="login" type="button">登录</button>
+            </div>
+          </div>
+
+          <div class="setting" id="account-user" hidden>
+            <div class="account__row">
+              <span class="account__email">demo@veyl.app</span>
+              <button class="text text--quiet" id="logout" type="button">退出登录</button>
+            </div>
+            <div class="account__row">
+              <span class="account__balance">余额 $12.40</span>
+              <span class="account__actions">
+                <button class="btn-sm btn-sm--ghost" type="button">充值</button>
+                <button class="text" type="button">查看账单</button>
+              </span>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <aside class="ai-tab">
+      <button class="ai-tab__btn" type="button" aria-label="展开助手">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M4 5.6A1.6 1.6 0 0 1 5.6 4h8.8A1.6 1.6 0 0 1 16 5.6v6.8a1.6 1.6 0 0 1-1.6 1.6H9l-3.4 2.4v-2.4H5.6A1.6 1.6 0 0 1 4 12.4V5.6Z"
+            stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+        </svg>
+        <span class="ai-tab__text">助手</span>
+      </button>
+    </aside>
+  </div>
+
+<script>
+  // simulated：只做界面，不接真实命令。接线后由后端返回实际状态。
+  const subnavItems = Array.from(document.querySelectorAll(".subnav__item"));
+  const panels = {
+    ai: document.getElementById("panel-ai"),
+    connection: document.getElementById("panel-connection"),
+    account: document.getElementById("panel-account"),
+  };
+
+  function showPanel(key) {
+    Object.entries(panels).forEach(([name, node]) => {
+      node.hidden = name !== key;
+    });
+    subnavItems.forEach((item) => {
+      item.classList.toggle("is-active", item.dataset.panel === key);
+    });
+  }
+
+  subnavItems.forEach((item) => {
+    item.addEventListener("click", () => showPanel(item.dataset.panel));
+  });
+
+  // 接管方式
+  const modeSeg = document.getElementById("mode-seg");
+  const modeButtons = Array.from(modeSeg.querySelectorAll("button"));
+  const modeConfirm = document.getElementById("mode-confirm");
+  const portRow = document.getElementById("port-row");
+  // simulated：原型默认处于已连接状态，用来演示切换确认条。
+  let connected = true;
+  let mode = "tun";
+
+  function selectSegment(group, selected) {
+    Array.from(group.querySelectorAll("button")).forEach((button) => {
+      const on = button === selected;
+      button.classList.toggle("is-selected", on);
+      button.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  }
+
+  function applyMode(next) {
+    mode = next;
+    selectSegment(modeSeg, modeButtons.find((button) => button.dataset.mode === next));
+    modeConfirm.hidden = true;
+    portRow.hidden = next !== "system_proxy";
+  }
+
+  modeButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const next = button.dataset.mode;
+      if (next === mode) return;
+      if (next === "system_proxy" && connected) {
+        modeConfirm.hidden = false;
+        return;
+      }
+      applyMode(next);
+    });
+  });
+
+  document.getElementById("mode-cancel").addEventListener("click", () => {
+    modeConfirm.hidden = true;
+  });
+
+  document.getElementById("mode-switch").addEventListener("click", () => {
+    // simulated：这里代表先断开、写库、再重连，原型里不等待。
+    connected = true;
+    applyMode("system_proxy");
+  });
+
+  // 流量范围
+  const scopeSeg = document.getElementById("scope-seg");
+  scopeSeg.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("click", () => selectSegment(scopeSeg, button));
+  });
+
+  // 端口复制
+  const copyPort = document.getElementById("copy-port");
+  copyPort.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText("127.0.0.1:7890");
+    } catch {
+      // simulated：剪贴板不可用时不给反馈，原型不关心。
+    }
+    copyPort.textContent = "已复制";
+    window.setTimeout(() => { copyPort.textContent = "复制"; }, 1200);
+  });
+
+  // 账户：原型里可来回切换
+  document.getElementById("login").addEventListener("click", () => {
+    document.getElementById("account-guest").hidden = true;
+    document.getElementById("account-user").hidden = false;
+  });
+
+  document.getElementById("logout").addEventListener("click", () => {
+    document.getElementById("account-user").hidden = true;
+    document.getElementById("account-guest").hidden = false;
+  });
+</script>
+</body>
+</html>
