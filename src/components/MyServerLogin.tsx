@@ -8,8 +8,6 @@ interface Props {
   onStart: (email: string) => Promise<MyServerLoginTicket>;
   onVerify: (email: string, code: string) => Promise<unknown>;
   onCancel: () => void;
-  /** mock 通道不发真邮件，提示演示验证码。 */
-  mockHint?: boolean;
 }
 
 interface LoginError {
@@ -112,7 +110,7 @@ function verifyError(error: unknown): LoginError {
 }
 
 /** 唯一的登录模态：邮箱 → 验证码；登录成功由父组件关闭并刷新列表。 */
-export function MyServerLogin({ onStart, onVerify, onCancel, mockHint = false }: Props) {
+export function MyServerLogin({ onStart, onVerify, onCancel }: Props) {
   const [step, setStep] = useState<"email" | "code">("email");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
@@ -273,9 +271,6 @@ export function MyServerLogin({ onStart, onVerify, onCancel, mockHint = false }:
             ) : (
               <p className="myservers__hint">验证码已发到 {email.trim()}。</p>
             )}
-            {mockHint ? (
-              <p className="myservers__hint">演示环境：验证码固定 123456。</p>
-            ) : null}
             <label className="myservers__field">
               <span>验证码</span>
               <input

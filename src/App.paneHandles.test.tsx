@@ -1,7 +1,8 @@
 /** @vitest-environment jsdom */
 import { cleanup, render, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import App from "./App";
+import { getAgentBridge } from "./agent";
 
 function setWidth(width: number) {
   Object.defineProperty(window, "innerWidth", {
@@ -40,13 +41,19 @@ const CONFIG = {
   layout: null,
 };
 
+beforeAll(async () => {
+  // AI 是必需路径：先备好 Key，测试才能停在主界面。
+  await getAgentBridge().saveDeepSeekKey(
+    "sk-" + "abcdefghijklmnopqrstuvwxyz0123",
+  );
+});
+
 beforeEach(() => {
   localStorage.clear();
   localStorage.setItem(
     "veyl.configs.mock.v1",
     JSON.stringify({ configs: [CONFIG], activeId: "cfg-home" }),
   );
-  localStorage.setItem("veyl.onboarding.skipped", "1");
   localStorage.setItem("veyl.ui.panelOpen", "1");
   localStorage.setItem("veyl.ui.panelVersion", "redesign-1");
 });

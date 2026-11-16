@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { emptyRuntimeView, getAgentBridge } from "./agent";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./agent/protocol";
@@ -150,6 +150,11 @@ const bridge = getAgentBridge();
 const modeDescriptor = Object.getOwnPropertyDescriptor(bridge, "mode");
 const widthDescriptor = Object.getOwnPropertyDescriptor(window, "innerWidth");
 
+beforeAll(async () => {
+  // AI 是必需路径：先备好 Key，测试才能停在主界面。
+  await bridge.saveDeepSeekKey("sk-" + "abcdefghijklmnopqrstuvwxyz0123");
+});
+
 afterEach(() => {
   cleanup();
   localStorage.clear();
@@ -164,7 +169,6 @@ afterEach(() => {
 
 function renderStartWithFailure(error: unknown) {
   Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
-  localStorage.setItem("veyl.onboarding.skipped", "1");
 
   vi.spyOn(bridge, "configList").mockResolvedValue({
     configs: [SUMMARY],
@@ -187,8 +191,7 @@ function renderStartWithFailure(error: unknown) {
 describe("切换配置只改 active", () => {
   function setupTwoConfigs() {
     Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
-    localStorage.setItem("veyl.onboarding.skipped", "1");
-
+  
     const base = {
       ...SUMMARY,
       connect_mode: "system_proxy" as const,
@@ -465,8 +468,7 @@ describe("TUN 启动成功后的界面状态", () => {
   it("runtimeStart 挂起时来了 failed 事件，成功后仍显示已连接", async () => {
     // 用真实分支（非 mock）跑 App；桥本身仍是 mock 实现。
     Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
-    localStorage.setItem("veyl.onboarding.skipped", "1");
-
+  
     const gate = deferred<unknown>();
     vi.spyOn(bridge, "configList").mockResolvedValue({
       configs: [SUMMARY],
@@ -513,8 +515,7 @@ describe("TUN 启动成功后的界面状态", () => {
 
   it("连接态的健康事件最多每 5 秒补拉一次快照", async () => {
     Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
-    localStorage.setItem("veyl.onboarding.skipped", "1");
-
+  
     vi.spyOn(bridge, "configList").mockResolvedValue({
       configs: [SUMMARY],
       active_config_id: CONFIG_ID,
@@ -641,7 +642,6 @@ describe("TUN 启动成功后的界面状态", () => {
 function setupAi(ready: boolean) {
   Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
   Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true });
-  localStorage.setItem("veyl.onboarding.skipped", "1");
   vi.spyOn(bridge, "configList").mockResolvedValue({
     configs: [SUMMARY],
     active_config_id: CONFIG_ID,
@@ -772,15 +772,14 @@ describe("新建配置入口", () => {
     15_000,
   );
 
-  it("没有 AI 时仍弹两问表单", async () => {
+  it("没有 AI 时只显示首启页，进不了主界面", async () => {
     setupAi(false);
     const { container } = render(<App />);
     await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
-    await act(async () => {});
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建配置" }));
-
-    expect(container.querySelector(".modal.new-config")).toBeTruthy();
-    expect(screen.getByText("怎么接管")).toBeTruthy();
+    expect(await screen.findByLabelText("DeepSeek API Key")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "连接" })).toBeTruthy();
+    expect(container.querySelector(".app")).toBeNull();
+    expect(screen.queryByRole("button", { name: "新建配置" })).toBeNull();
   }, 15_000);
 });

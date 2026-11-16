@@ -1,22 +1,22 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   AgentBridge,
-  DeepSeekKeyState,
   LlmProtocol,
   LlmProviderInput,
 } from "../agent/bridge";
 import { isHttpUrl, isLocalEndpoint } from "../agent/bridge";
+import { providerUsable } from "../config/onboarding";
 import { describeKeyError, describeProviderError } from "./Settings";
 import { isComposingEvent } from "../ui/ime";
-import { IconKey } from "./icons";
 import { PRODUCT_NAME } from "../brand";
+import logoUrl from "../assets/logo.png";
 
 const PLATFORM_URL = "https://platform.deepseek.com/";
 
 interface Props {
   bridge: AgentBridge;
-  /** skipped 表示用户明确选择不用 AI；其余情况表示刚保存了 Key / 服务商。 */
-  onDone: (skipped: boolean) => void;
+  /** 首启成功：App 负责打开右栏并刷新 AI 状态。 */
+  onDone: () => void;
 }
 
 interface CustomForm {
@@ -33,6 +33,29 @@ const EMPTY_CUSTOM: CustomForm = {
   apiKey: "",
 };
 
+function VerifyingDots() {
+  return (
+    <>
+      <span className="sr-only">校验中</span>
+      <span className="first-run__dots" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </span>
+    </>
+  );
+}
+
+function prefersReducedMotion(): boolean {
+  if (
+    typeof window === "undefined" ||
+    typeof window.matchMedia !== "function"
+  ) {
+    return true;
+  }
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 export function Onboarding({ bridge, onDone }: Props) {
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState<"key" | "provider" | null>(null);
@@ -40,33 +63,21 @@ export function Onboarding({ bridge, onDone }: Props) {
   const [customOpen, setCustomOpen] = useState(false);
   const [custom, setCustom] = useState<CustomForm>(EMPTY_CUSTOM);
   const [customError, setCustomError] = useState<string | null>(null);
-  const [deepseek, setDeepseek] = useState<DeepSeekKeyState | null>(null);
-  const [deepseekFailed, setDeepseekFailed] = useState(false);
+  const [fading, setFading] = useState(false);
+  const keyInputRef = useRef<HTMLInputElement>(null);
+  const focusKeyOnReturn = useRef(false);
 
   useEffect(() => {
-    let alive = true;
-    bridge
-      .getDeepSeekKey()
-      .then((state) => {
-        if (alive) setDeepseek(state);
-      })
-      .catch(() => {
-        if (alive) setDeepseekFailed(true);
-      });
-    return () => {
-      alive = false;
-    };
+    // 读一次已保存的 Key 状态；Host 版本不支持时静默，不阻塞首屏。
+    void bridge.getDeepSeekKey().catch(() => {});
   }, [bridge]);
 
-  const deepseekState = value.trim()
-    ? "已填写，未保存"
-    : deepseekFailed
-      ? "状态读不到"
-      : deepseek
-        ? deepseek.masked
-          ? `已配置 · ${deepseek.masked}`
-          : "未配置"
-        : "正在读取…";
+  useEffect(() => {
+    if (!customOpen && focusKeyOnReturn.current) {
+      focusKeyOnReturn.current = false;
+      keyInputRef.current?.focus();
+    }
+  }, [customOpen]);
 
   const saveKey = async () => {
     const key = value.trim();
@@ -81,7 +92,7 @@ export function Onboarding({ bridge, onDone }: Props) {
     try {
       await bridge.saveDeepSeekKey(key);
       setValue("");
-      onDone(false);
+      onDone();
     } catch (saveError) {
       setError(describeKeyError(saveError));
     } finally {
@@ -91,18 +102,38 @@ export function Onboarding({ bridge, onDone }: Props) {
 
   const openPlatform = async () => {
     setError(null);
+    setCustomError(null);
     try {
       await bridge.openExternal(PLATFORM_URL);
     } catch {
-      setError(`当前版本还不能直接打开浏览器，请手动访问 ${PLATFORM_URL}`);
+      const message = `当前版本还不能直接打开浏览器，请手动访问 ${PLATFORM_URL}`;
+      if (customOpen) setCustomError(message);
+      else setError(message);
     }
   };
 
-  const toggleCustom = () => {
-    setCustomOpen((open) => !open);
+  const switchMode = (next: boolean) => {
+    if (next === customOpen || fading) return;
     setCustomError(null);
     setError(null);
+    if (!next) focusKeyOnReturn.current = true;
+    if (prefersReducedMotion()) {
+      setCustomOpen(next);
+      setFading(false);
+      return;
+    }
+    setFading(true);
+    window.setTimeout(() => {
+      setCustomOpen(next);
+      // 不用 requestAnimationFrame：窗口被遮挡时它会停，界面会卡在透明态。
+      window.setTimeout(() => setFading(false), 20);
+    }, 160);
   };
+
+  const customReady =
+    custom.baseUrl.trim() !== "" &&
+    custom.model.trim() !== "" &&
+    (custom.apiKey.trim() !== "" || isLocalEndpoint(custom.baseUrl));
 
   const buildProviderInput = (): LlmProviderInput | string => {
     const model = custom.model.trim();
@@ -148,9 +179,27 @@ export function Onboarding({ bridge, onDone }: Props) {
       try {
         await bridge.llmProviderActivate(saved.providerId);
       } catch {
-        // 没有其他当前服务时，保存时已经设为当前。
+        // activate 不一定成功；保存后还要用列表复核当前 AI。
       }
-      onDone(false);
+
+      let activeId: string | null = null;
+      let savedUsable = false;
+      try {
+        const list = await bridge.llmProviderList();
+        activeId = list.activeProviderId;
+        const listed = list.providers.find(
+          (provider) => provider.providerId === saved.providerId,
+        );
+        savedUsable = listed ? providerUsable(listed) : false;
+      } catch {
+        // 读不到列表就按「没能确认当前 AI」处理，停在首屏。
+      }
+
+      if (activeId !== saved.providerId || !savedUsable) {
+        setCustomError("已保存，但没能设为当前 AI。请重试。");
+        return;
+      }
+      onDone();
     } catch (saveError) {
       setCustomError(describeProviderError(saveError));
     } finally {
@@ -159,206 +208,241 @@ export function Onboarding({ bridge, onDone }: Props) {
   };
 
   return (
-    <div className="onboarding">
-      <div className="onboarding__shell">
-        <div className="onboarding__brand">{PRODUCT_NAME}</div>
-        <h1 className="onboarding__title">配置 AI 后，我来帮你连上网络。</h1>
-        <p className="onboarding__text">
-          Key 只保存在本机。配好之后，我来找节点、建立连接。
-        </p>
+    <div className="first-run">
+      <div className="first-run__shell">
+        <div className="first-run__brand">
+          <img src={logoUrl} alt="" width={48} height={48} />
+          <span>{PRODUCT_NAME}</span>
+        </div>
+        <h1 className="first-run__title">
+          Under the veil, it keeps your line open.
+        </h1>
 
-        {customOpen ? (
-          <div className="onboarding__summary">
-            <span className="onboarding__summary-text">
-              DeepSeek Key：{deepseekState}
-            </span>
-            <button
-              type="button"
-              className="onboarding__link"
-              onClick={() => setCustomOpen(false)}
+        <div className={`first-run__switcher ${fading ? "is-fading" : ""}`}>
+          {customOpen ? (
+            <form
+              className="first-run__custom"
+              aria-busy={saving === "provider"}
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveProvider();
+              }}
+              onKeyDown={(event) => {
+                if (isComposingEvent(event)) event.preventDefault();
+              }}
             >
-              改回默认 AI
-            </button>
-          </div>
-        ) : (
-          <form
-            className="onboarding__form"
-            aria-busy={saving === "key"}
-            onSubmit={(event) => {
-              event.preventDefault();
-              void saveKey();
-            }}
-            onKeyDown={(event) => {
-              // 组合期间不让表单隐式提交（WebKit 会把组合态回车当提交）。
-              if (isComposingEvent(event)) event.preventDefault();
-            }}
-          >
-            <div className="onboarding__field">
-              <label className="onboarding__field-label" htmlFor="onboarding-deepseek-key">
-                DeepSeek API Key
-              </label>
-              <div className="onboarding__keybox">
-                <IconKey size={16} />
+              <button
+                type="button"
+                className="first-run__back"
+                onClick={() => switchMode(false)}
+              >
+                ← 使用 DeepSeek Key
+              </button>
+
+              <div className="first-run__custom-head">
+                <h2 className="first-run__custom-title">其他 AI 服务</h2>
+                <p className="first-run__custom-sub">
+                  OpenAI 或 Anthropic 兼容端点。
+                </p>
+              </div>
+
+              <div className="first-run__field">
+                <span className="first-run__label" id="first-run-protocol-label">
+                  接口类型
+                </span>
+                <div
+                  className="first-run__segmented"
+                  role="group"
+                  aria-labelledby="first-run-protocol-label"
+                >
+                  <button
+                    type="button"
+                    className={custom.protocol === "openai" ? "is-selected" : ""}
+                    aria-pressed={custom.protocol === "openai"}
+                    onClick={() =>
+                      setCustom((form) => ({ ...form, protocol: "openai" }))
+                    }
+                  >
+                    OpenAI 兼容
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      custom.protocol === "anthropic" ? "is-selected" : ""
+                    }
+                    aria-pressed={custom.protocol === "anthropic"}
+                    onClick={() =>
+                      setCustom((form) => ({ ...form, protocol: "anthropic" }))
+                    }
+                  >
+                    Anthropic 兼容
+                  </button>
+                </div>
+              </div>
+
+              <div className="first-run__field">
+                <label className="first-run__label" htmlFor="first-run-base-url">
+                  Base URL
+                </label>
                 <input
-                  id="onboarding-deepseek-key"
-                  className="onboarding__input"
-                  type="password"
-                  value={value}
-                  placeholder="粘贴 sk- 开头的 Key"
+                  id="first-run-base-url"
+                  className="first-run__input"
+                  type="text"
+                  inputMode="url"
+                  value={custom.baseUrl}
+                  placeholder="https://api.example.com"
                   autoComplete="off"
                   spellCheck={false}
-                  autoFocus
-                  onChange={(event) => setValue(event.target.value)}
+                  onChange={(event) =>
+                    setCustom((form) => ({
+                      ...form,
+                      baseUrl: event.target.value,
+                    }))
+                  }
                 />
+                <p className="first-run__hint">http 只允许本机地址。</p>
               </div>
-            </div>
-            <button
-              type="submit"
-              className="btn btn--primary onboarding__submit"
-              disabled={saving !== null || value.trim().length === 0}
-            >
-              {saving === "key" ? "验证中…" : "保存并验证"}
-            </button>
-          </form>
-        )}
 
-        {error ? <p className="onboarding__error">{error}</p> : null}
+              <div className="first-run__field">
+                <label className="first-run__label" htmlFor="first-run-model">
+                  模型
+                </label>
+                <input
+                  id="first-run-model"
+                  className="first-run__input"
+                  type="text"
+                  value={custom.model}
+                  placeholder="如 gpt-4.1-mini"
+                  autoComplete="off"
+                  spellCheck={false}
+                  onChange={(event) =>
+                    setCustom((form) => ({ ...form, model: event.target.value }))
+                  }
+                />
+                <p className="first-run__hint">填服务商文档里的模型 id。</p>
+              </div>
 
-        <div className="onboarding__links">
-          <button type="button" className="onboarding__link" onClick={() => void openPlatform()}>
-            获取 DeepSeek API Key <span aria-hidden>↗</span>
-          </button>
-          <button
-            type="button"
-            className={`onboarding__toggle ${customOpen ? "is-open" : ""}`}
-            aria-expanded={customOpen}
-            onClick={toggleCustom}
-          >
-            {customOpen ? "收起其他 AI 服务" : "使用其他 AI 服务"}{" "}
-            <span className="onboarding__arrow" aria-hidden>
-              →
-            </span>
-          </button>
-        </div>
+              <div className="first-run__field">
+                <label
+                  className="first-run__label"
+                  htmlFor="first-run-provider-key"
+                >
+                  API Key
+                </label>
+                <input
+                  id="first-run-provider-key"
+                  className="first-run__input"
+                  type="password"
+                  value={custom.apiKey}
+                  placeholder="sk-…"
+                  autoComplete="off"
+                  spellCheck={false}
+                  onChange={(event) =>
+                    setCustom((form) => ({
+                      ...form,
+                      apiKey: event.target.value,
+                    }))
+                  }
+                />
+                <p className="first-run__hint">
+                  只保存在本机；本机端点可以不填。
+                </p>
+              </div>
 
-        {customOpen ? (
-          <form
-            className="onboarding__custom"
-            aria-busy={saving === "provider"}
-            onSubmit={(event) => {
-              event.preventDefault();
-              void saveProvider();
-            }}
-            onKeyDown={(event) => {
-              // 组合期间不让表单隐式提交（WebKit 会把组合态回车当提交）。
-              if (isComposingEvent(event)) event.preventDefault();
-            }}
-          >
-            <div className="onboarding__field">
-              <span className="onboarding__field-label" id="onboarding-protocol-label">
-                API 类型
-              </span>
-              <div
-                className="onboarding__segmented"
-                role="group"
-                aria-labelledby="onboarding-protocol-label"
+              {customError ? (
+                <p className="first-run__error" role="alert">
+                  {customError}
+                </p>
+              ) : null}
+
+              <button
+                type="submit"
+                className={`first-run__submit ${
+                  saving === "provider" ? "is-verifying" : ""
+                }`}
+                disabled={saving !== null || !customReady}
               >
+                {saving === "provider" ? <VerifyingDots /> : "连接"}
+              </button>
+            </form>
+          ) : (
+            <>
+              <form
+                className="first-run__form"
+                aria-busy={saving === "key"}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveKey();
+                }}
+                onKeyDown={(event) => {
+                  // 组合期间不让表单隐式提交（WebKit 会把组合态回车当提交）。
+                  if (isComposingEvent(event)) event.preventDefault();
+                }}
+              >
+                <div className="first-run__field">
+                  <label
+                    className="first-run__label"
+                    htmlFor="first-run-deepseek-key"
+                  >
+                    DeepSeek API Key
+                  </label>
+                  <input
+                    id="first-run-deepseek-key"
+                    ref={keyInputRef}
+                    className="first-run__input"
+                    type="password"
+                    value={value}
+                    placeholder="sk-…"
+                    autoComplete="off"
+                    spellCheck={false}
+                    autoFocus
+                    aria-invalid={error ? true : undefined}
+                    aria-describedby={error ? "first-run-key-error" : undefined}
+                    onChange={(event) => {
+                      setValue(event.target.value);
+                      if (error) setError(null);
+                    }}
+                  />
+                </div>
+                {error ? (
+                  <p
+                    id="first-run-key-error"
+                    className="first-run__error"
+                    role="alert"
+                  >
+                    {error}
+                  </p>
+                ) : null}
+                <button
+                  type="submit"
+                  className={`first-run__submit ${
+                    saving === "key" ? "is-verifying" : ""
+                  }`}
+                  disabled={saving !== null || value.trim().length === 0}
+                >
+                  {saving === "key" ? <VerifyingDots /> : "连接"}
+                </button>
+              </form>
+
+              <div className="first-run__links">
                 <button
                   type="button"
-                  className={custom.protocol === "openai" ? "is-selected" : ""}
-                  aria-pressed={custom.protocol === "openai"}
-                  onClick={() => setCustom((form) => ({ ...form, protocol: "openai" }))}
+                  className="first-run__link"
+                  onClick={() => void openPlatform()}
                 >
-                  OpenAI 兼容
+                  获取 Key <span aria-hidden>↗</span>
                 </button>
                 <button
                   type="button"
-                  className={custom.protocol === "anthropic" ? "is-selected" : ""}
-                  aria-pressed={custom.protocol === "anthropic"}
-                  onClick={() => setCustom((form) => ({ ...form, protocol: "anthropic" }))}
+                  className="first-run__link"
+                  onClick={() => switchMode(true)}
                 >
-                  Anthropic 兼容
+                  使用其他 AI 服务
                 </button>
               </div>
-            </div>
-
-            <div className="onboarding__field">
-              <label className="onboarding__field-label" htmlFor="onboarding-base-url">
-                Base URL
-              </label>
-              <input
-                id="onboarding-base-url"
-                className="onboarding__input"
-                type="text"
-                inputMode="url"
-                value={custom.baseUrl}
-                placeholder="https://api.example.com"
-                autoComplete="off"
-                spellCheck={false}
-                onChange={(event) =>
-                  setCustom((form) => ({ ...form, baseUrl: event.target.value }))
-                }
-              />
-            </div>
-
-            <div className="onboarding__field">
-              <label className="onboarding__field-label" htmlFor="onboarding-model">
-                模型
-              </label>
-              <input
-                id="onboarding-model"
-                className="onboarding__input"
-                type="text"
-                value={custom.model}
-                placeholder="如 deepseek-flash"
-                autoComplete="off"
-                spellCheck={false}
-                onChange={(event) =>
-                  setCustom((form) => ({ ...form, model: event.target.value }))
-                }
-              />
-            </div>
-
-            <div className="onboarding__field">
-              <label className="onboarding__field-label" htmlFor="onboarding-provider-key">
-                API Key
-              </label>
-              <input
-                id="onboarding-provider-key"
-                className="onboarding__input"
-                type="password"
-                value={custom.apiKey}
-                placeholder="sk-..."
-                autoComplete="off"
-                spellCheck={false}
-                onChange={(event) =>
-                  setCustom((form) => ({ ...form, apiKey: event.target.value }))
-                }
-              />
-            </div>
-
-            {customError ? <p className="onboarding__error">{customError}</p> : null}
-
-            <button
-              type="submit"
-              className="btn btn--primary onboarding__submit"
-              disabled={saving !== null}
-            >
-              {saving === "provider" ? "验证中…" : "保存并验证"}
-            </button>
-          </form>
-        ) : null}
-
-        <div className="onboarding__divider" aria-hidden />
-
-        <button
-          type="button"
-          className="onboarding__manual"
-          disabled={saving !== null}
-          onClick={() => onDone(true)}
-        >
-          我懂网络，不用 AI
-        </button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

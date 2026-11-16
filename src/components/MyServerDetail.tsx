@@ -17,9 +17,6 @@ interface Props {
   regionLabel: string;
   /** 身份不可用：只读，不提供任何改动机器的操作。 */
   readOnly?: boolean;
-  /** 从节点组进来：主按钮换成「加入「X」」。 */
-  joinLabel?: string | null;
-  onJoin?: () => void;
   /** 回到创建页再建一台。 */
   onCreateAnother: () => void;
   /** 同账户未销毁机器 > 1：流量额度是共享池。 */
@@ -49,8 +46,6 @@ export function MyServerDetail({
   server,
   regionLabel,
   readOnly = false,
-  joinLabel = null,
-  onJoin,
   onCreateAnother,
   sharedTransfer = false,
   onUseServer,
@@ -207,12 +202,9 @@ export function MyServerDetail({
             type="button"
             className="btn btn--primary"
             disabled={locked || useBusy}
-            onClick={() => {
-              if (joinLabel && onJoin) onJoin();
-              else void useServerNow();
-            }}
+            onClick={() => void useServerNow()}
           >
-            {joinLabel ?? "用来建配置"}
+            用来建配置
           </button>
         ) : null}
       </div>

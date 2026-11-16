@@ -22,7 +22,7 @@ describe("mock 种子刷新状态", () => {
       source: "network",
       changed: true,
       reason: null,
-      added: 1,
+      added: 0,
       removed: 0,
     });
     expect(result.checkedAt).toBeTruthy();

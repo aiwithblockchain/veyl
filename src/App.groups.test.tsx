@@ -1,11 +1,11 @@
 /** @vitest-environment jsdom */
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { saveAccount } from "./myservers/account";
 import { getAgentBridge } from "./agent";
-import { AGENT_EVENTS, CONTRACT_VERSION } from "./agent/protocol";
-import type { AgentEvent, ConfigSummary, RuntimeSnapshot, RuntimeState } from "./agent/protocol";
+import type { ConfigSummary } from "./agent/protocol";
+import { persistGroups } from "./groups/mockGroups";
+import type { NodeGroup } from "./groups/mockGroups";
 
 const CONFIG_ID = "cfg_1";
 
@@ -26,35 +26,36 @@ const SUMMARY: ConfigSummary = {
 const bridge = getAgentBridge();
 const modeDescriptor = Object.getOwnPropertyDescriptor(bridge, "mode");
 
-let clock = Date.now() - 60_000;
-
-function stateEvent(to: RuntimeState): AgentEvent {
-  clock += 1000;
-  const at = new Date(clock).toISOString();
-  return {
-    name: AGENT_EVENTS.runtimeStateChanged,
-    payload: {
-      contract_version: CONTRACT_VERSION,
-      from: "idle",
-      to,
-      event: to === "running" ? "process_ready" : "stopped",
-      pid: null,
-      upstream_version: null,
-      reason: null,
-      error: null,
-      snapshot: {
-        state: to,
-        config_id: to === "running" ? CONFIG_ID : null,
-        last_transition_at: at,
-      } as RuntimeSnapshot,
-      emitted_at: at,
+const MINE: NodeGroup = {
+  group_id: "grp_mine",
+  name: "我的节点",
+  read_only: false,
+  nodes: [
+    {
+      node_id: "n1",
+      name: "东京 01",
+      server: "45.76.20.100",
+      port: 8388,
+      protocol: "ss",
+      latency_ms: 63,
     },
-  };
-}
+  ],
+};
+
+const FREE: NodeGroup = {
+  group_id: "grp_free",
+  name: "Veyl 免费节点",
+  read_only: true,
+  nodes: [],
+};
 
 function prepare() {
   Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
-  localStorage.setItem("veyl.onboarding.skipped", "1");
+  vi.spyOn(bridge, "getDeepSeekKey").mockResolvedValue({
+    masked: "sk-****abcd",
+    verified: true,
+    validation: "ok",
+  });
   vi.spyOn(bridge, "configList").mockResolvedValue({
     configs: [SUMMARY],
     active_config_id: CONFIG_ID,
@@ -113,81 +114,23 @@ afterEach(() => {
 });
 
 describe("节点组 destination", () => {
-  it("客户端底部节点卡显示当前节点组", async () => {
-    prepare();
-    render(<App />);
-
-    expect(
-      await waitFor(() => {
-        const line = document.querySelector(".node-card__group");
-        expect(line?.textContent).toBe("组·Veyl 免费节点");
-        return line;
-      }),
-    ).toBeTruthy();
-  });
-
-  it("免费组只读；新建组可加节点、移除并激活", async () => {
+  it("没有节点组时是诚实空态：不显示组，也没有新建入口", async () => {
     prepare();
     render(<App />);
     await screen.findByRole("button", { name: "启动 VPN" });
 
-    fireEvent.click(screen.getByRole("button", { name: "节点组" }));
-    expect(await screen.findByRole("heading", { name: "Veyl 免费节点" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "添加节点" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "设为当前节点组" })).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "新建组" }));
-    expect(await screen.findByRole("heading", { name: "新组 1" })).toBeTruthy();
-    expect(screen.getByText("这个组还没有节点")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
-    fireEvent.click(screen.getByRole("button", { name: /手动填写/ }));
-    expect(await screen.findByText("手动节点 01")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "移除" }));
-    expect(screen.queryByText("手动节点 01")).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
-    fireEvent.click(screen.getByRole("button", { name: /粘贴或订阅/ }));
-    expect(await screen.findByText("粘贴节点 01")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "设为当前节点组" }));
-    expect(await screen.findByText("已设为当前节点组。")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "客户端" }));
-    await waitFor(() =>
-      expect(document.querySelector(".node-card__group")?.textContent).toBe(
-        "组·新组 1",
-      ),
-    );
-  });
-
-  it("已连接时激活只提示，不断开也不重连", async () => {
-    prepare();
-    const runtimeStart = vi.spyOn(bridge, "runtimeStart");
-    render(<App />);
-    await screen.findByRole("button", { name: "启动 VPN" });
-
-    act(() => {
-      (bridge as unknown as { emit(event: AgentEvent): void }).emit(stateEvent("running"));
-    });
-    await waitFor(() =>
-      expect(document.querySelector(".state-line__label")?.textContent).toContain("已连接"),
-    );
+    expect(document.querySelector(".node-card__group")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "节点组" }));
-    fireEvent.click(await screen.findByRole("button", { name: /我的节点/ }));
-
-    fireEvent.click(await screen.findByRole("button", { name: "设为当前节点组" }));
+    expect(await screen.findByText("节点组尚未接入")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "新建组" })).toBeNull();
     expect(
-      await screen.findByText(
-        "已切到「我的节点」，当前仍连着「Veyl 免费节点」，下次连接生效。",
-      ),
+      screen.getByRole("complementary", { name: "节点组列表" }),
     ).toBeTruthy();
-    expect(runtimeStart).not.toHaveBeenCalled();
   });
 
-  it("控制台「组 · X」可跳到该组详情", async () => {
+  it("已有节点组只读展示：控制台「组 · X」可跳到详情，没有写入口", async () => {
+    persistGroups([MINE], MINE.group_id);
     prepare();
     render(<App />);
     await screen.findByRole("button", { name: "启动 VPN" });
@@ -197,87 +140,27 @@ describe("节点组 destination", () => {
       expect(el).not.toBeNull();
       return el as HTMLElement;
     });
+    expect(link.textContent).toBe("组·我的节点");
     fireEvent.click(link);
 
-    expect(await screen.findByRole("heading", { name: "Veyl 免费节点" })).toBeTruthy();
-    expect(
-      screen.getByRole("complementary", { name: "节点组列表" }),
-    ).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "我的节点" })).toBeTruthy();
+    expect(screen.getByText("45.76.20.100:8388")).toBeTruthy();
+    expect(screen.getByText("节点组尚未接入，暂时只能查看。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "添加节点" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "删除组" })).toBeNull();
   });
 
-  it("组详情 → 从我的服务器添加 → 加入目标组并回到组详情", async () => {
+  it("左栏列出已有的免费组与自建组，点子项切换详情", async () => {
+    persistGroups([FREE, MINE], FREE.group_id);
     prepare();
-    saveAccount("me@example.com");
-    const servers = [
-      {
-        server_id: "srv_1",
-        name: "新加坡 1 · DigitalOcean",
-        region: "gru",
-        plan: "vc2-1c-1gb",
-        state: "healthy" as const,
-        created_at: new Date(0).toISOString(),
-        ip: "45.76.23.103",
-        port: 8388,
-        node_id: "node_srv_1",
-        hourly_usd: 0.007,
-        monthly_usd: 5,
-        daily_price_cents: 30,
-        paid_until: new Date(86_400_000).toISOString(),
-        billing_state: "active" as const,
-        grace_ends_at: null,
-        transfer_gib: 1000,
-        failure: null,
-      },
-      {
-        server_id: "srv_2",
-        name: "纽约 1 · DigitalOcean",
-        region: "lax",
-        plan: "vc2-1c-1gb",
-        state: "installing" as const,
-        created_at: new Date(0).toISOString(),
-        ip: "45.76.21.101",
-        port: null,
-        node_id: null,
-        hourly_usd: 0.007,
-        monthly_usd: 5,
-        daily_price_cents: 30,
-        paid_until: new Date(86_400_000).toISOString(),
-        billing_state: "active" as const,
-        grace_ends_at: null,
-        transfer_gib: 1000,
-        failure: null,
-      },
-    ];
-    vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers });
-    vi.spyOn(bridge, "myServerGet").mockImplementation(async (serverId: string) => {
-      const found = servers.find((server) => server.server_id === serverId);
-      if (!found) throw { code: "NOT_FOUND", message: "这台服务器已不存在。" };
-      return found;
-    });
     render(<App />);
     await screen.findByRole("button", { name: "启动 VPN" });
 
     fireEvent.click(screen.getByRole("button", { name: "节点组" }));
+    expect(await screen.findByRole("heading", { name: "Veyl 免费节点" })).toBeTruthy();
+    expect(document.querySelector(".rail__count")?.textContent).toBe("2");
+
     fireEvent.click(await screen.findByRole("button", { name: /我的节点/ }));
-    fireEvent.click(await screen.findByRole("button", { name: "添加节点" }));
-    fireEvent.click(screen.getByRole("button", { name: /从我的服务器添加/ }));
-
-    expect(
-      await screen.findByText("选择一台服务器，把节点加入「我的节点」"),
-    ).toBeTruthy();
-    expect(
-      screen.getByRole("complementary", { name: "服务器列表" }),
-    ).toBeTruthy();
-
-    // 安装中的那台不给加入动作。
-    fireEvent.click(screen.getByRole("button", { name: /纽约 1 · DigitalOcean/ }));
-    expect(screen.queryByRole("button", { name: "加入「我的节点」" })).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: /新加坡 1 · DigitalOcean/ }));
-    fireEvent.click(await screen.findByRole("button", { name: "加入「我的节点」" }));
-
     expect(await screen.findByRole("heading", { name: "我的节点" })).toBeTruthy();
-    expect(await screen.findByText("新加坡 1 01")).toBeTruthy();
-    expect(screen.queryByText(/选择一台服务器/)).toBeNull();
   });
 });

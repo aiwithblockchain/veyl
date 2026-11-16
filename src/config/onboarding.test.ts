@@ -11,9 +11,15 @@ const noKey = { masked: null };
 
 function providers(
   activeProviderId: string | null,
-  list: Array<{ providerId: string; hasKey: boolean }>,
+  list: Array<{ providerId: string; hasKey: boolean; baseUrl?: string }>,
 ) {
-  return { providers: list, activeProviderId };
+  return {
+    providers: list.map((provider) => ({
+      baseUrl: "https://api.example.com",
+      ...provider,
+    })),
+    activeProviderId,
+  };
 }
 
 describe("isAiReady", () => {
@@ -39,6 +45,21 @@ describe("isAiReady", () => {
     ).toBe(false);
   });
 
+  it("本机端点没有 Key 也算就绪", () => {
+    expect(
+      isAiReady({
+        key: noKey,
+        providers: providers("local", [
+          {
+            providerId: "local",
+            hasKey: false,
+            baseUrl: "http://127.0.0.1:11434",
+          },
+        ]),
+      }),
+    ).toBe(true);
+  });
+
   it("有 Key 的服务商不是当前项，不算就绪", () => {
     expect(
       isAiReady({
@@ -58,9 +79,7 @@ describe("isAiReady", () => {
 
 describe("shouldShowOnboarding", () => {
   it("有 Key 不显示", () => {
-    expect(
-      shouldShowOnboarding({ key, providers: null, skipped: false }),
-    ).toBe(false);
+    expect(shouldShowOnboarding({ key, providers: null })).toBe(false);
   });
 
   it("无 Key 但有服务商 Key 不显示", () => {
@@ -68,7 +87,6 @@ describe("shouldShowOnboarding", () => {
       shouldShowOnboarding({
         key: noKey,
         providers: providers("custom", [{ providerId: "custom", hasKey: true }]),
-        skipped: false,
       }),
     ).toBe(false);
   });
@@ -80,26 +98,22 @@ describe("shouldShowOnboarding", () => {
         providers: providers("deepseek", [
           { providerId: "deepseek", hasKey: false },
         ]),
-        skipped: false,
       }),
     ).toBe(true);
   });
 
-  it("用户明确选择过不用 AI 就不显示", () => {
+  it("本机端点无 Key 时不显示", () => {
     expect(
       shouldShowOnboarding({
         key: noKey,
-        providers: providers("deepseek", [
-          { providerId: "deepseek", hasKey: false },
+        providers: providers("local", [
+          {
+            providerId: "local",
+            hasKey: false,
+            baseUrl: "http://localhost:11434",
+          },
         ]),
-        skipped: true,
       }),
-    ).toBe(false);
-  });
-
-  it("跳过过但后来配好了 AI，也不显示", () => {
-    expect(
-      shouldShowOnboarding({ key, providers: null, skipped: true }),
     ).toBe(false);
   });
 });

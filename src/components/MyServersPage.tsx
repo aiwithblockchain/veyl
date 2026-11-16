@@ -12,15 +12,12 @@ interface Props {
   detailRetrying: boolean;
   /** 身份不可用：详情只读。 */
   readOnly: boolean;
-  /** 从节点组「从我的服务器添加」进来：目标组名，用于顶部说明。 */
-  joinGroupName: string | null;
   /** 同账户未销毁机器 > 1：流量额度是共享池。 */
   sharedTransfer: boolean;
   onNew: () => void;
   onEnsureIdentity: () => Promise<boolean>;
   onTopUp: () => void;
   onUseServer: (server: MyServer) => void;
-  onJoinServer: (server: MyServer) => void;
   onChanged: () => void;
   onOrdered: (serverId: string | null) => void;
   /** 重建成功：选中新机器并显示安装进度。 */
@@ -37,28 +34,19 @@ export function MyServersPage({
   detailError,
   detailRetrying,
   readOnly,
-  joinGroupName,
   sharedTransfer,
   onNew,
   onEnsureIdentity,
   onTopUp,
   onUseServer,
-  onJoinServer,
   onChanged,
   onOrdered,
   onRebuilt,
   onRetryDetail,
 }: Props) {
-  const banner = joinGroupName ? (
-    <p className="servers-banner" role="status">
-      选择一台服务器，把节点加入「{joinGroupName}」
-    </p>
-  ) : null;
-
   if (view === "detail" && selected) {
     return (
       <div className="myservers">
-        {banner}
         {detailError ? (
           <section className="myservers__detail-card" role="alert">
             <p className="myservers__detail-title">连不上服务器。</p>
@@ -83,8 +71,6 @@ export function MyServersPage({
             }
             readOnly={readOnly}
             sharedTransfer={sharedTransfer}
-            joinLabel={joinGroupName ? `加入「${joinGroupName}」` : null}
-            onJoin={joinGroupName ? () => onJoinServer(selected) : undefined}
             onCreateAnother={onNew}
             onUseServer={onUseServer}
             onChanged={onChanged}
@@ -98,7 +84,6 @@ export function MyServersPage({
 
   return (
     <div className="myservers">
-      {banner}
       <MyServerWizard
         bridge={bridge}
         catalog={catalog}

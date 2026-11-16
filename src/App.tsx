@@ -88,7 +88,6 @@ type SettingsSection = "ai" | "network" | "advanced" | "about";
 const EVER_CONNECTED_KEY = "veyl.hasEverConnected";
 const PANEL_CLOSED_BY_USER_KEY = "veyl.ui.panelClosedByUser";
 const PANEL_AUTO_OPENED_KEY = "veyl.ui.panelAutoOpened";
-const ONBOARDING_SKIPPED_KEY = "veyl.onboarding.skipped";
 /** 新建配置走 AI 协助时的开场消息：必须是用户可见的一条。 */
 const NEW_CONFIG_AI_ASK = "帮我新建一套配置。";
 
@@ -188,11 +187,6 @@ export default function App() {
   });
   const selectedServerIdRef = useRef<string | null>(null);
   selectedServerIdRef.current = myServers.selected?.server_id ?? null;
-  /** 从组详情「从我的服务器添加」进来时的目标组。 */
-  const [serverJoinTarget, setServerJoinTarget] = useState<{
-    groupId: string;
-    name: string;
-  } | null>(null);
   /** 从新建流程切到服务器时保留接管方式；回客户端时恢复新建流程。 */
   const [serverEntry, setServerEntry] = useState<{
     connectMode: ConfigConnectMode;
@@ -275,7 +269,6 @@ export default function App() {
   const panelClosedByUserRef = useRef(readFlag(PANEL_CLOSED_BY_USER_KEY));
   const panelAutoOpenedRef = useRef(readFlag(PANEL_AUTO_OPENED_KEY));
   const aiConfiguredRef = useRef(false);
-  const onboardingSkippedRef = useRef(readFlag(ONBOARDING_SKIPPED_KEY));
   const kickoffStartedRef = useRef(false);
   const kickoffSessionCreatedRef = useRef(false);
   const zeroConfigAskedRef = useRef(false);
@@ -316,7 +309,6 @@ export default function App() {
 
   // 回客户端只能点最左侧「客户端」图标：从新建流程来的顺带恢复表单。
   const handleServersBack = () => {
-    setServerJoinTarget(null);
     changeDestination("client");
     if (serverEntry) setNewConfigOpen(true);
   };
@@ -336,7 +328,6 @@ export default function App() {
       ) {
         return;
       }
-      setServerJoinTarget(null);
       setServerEntry(null);
       setOwnedReturnDestination(startedDestination);
       setOwnedNodes({ nodeIds: [node.node_id], label: server.name });
@@ -349,30 +340,6 @@ export default function App() {
     } finally {
       useServerInFlightRef.current = false;
     }
-  };
-
-  // 组详情「添加节点 → 从我的服务器添加」：去服务器模块挑一台，带回目标组。
-  const handlePickServersForGroup = (groupId: string) => {
-    const target = groupsApi.groups.find((group) => group.group_id === groupId);
-    if (!target) return;
-    setServerJoinTarget({ groupId, name: target.name });
-    myServers.resetToRoot();
-    changeDestination("servers");
-  };
-
-  // 服务器详情里点「加入「X」」：变成组内节点并回到该组。
-  const handleJoinServer = (server: MyServer) => {
-    const target = serverJoinTarget;
-    if (!target) return;
-    groupsApi.addServerNode(target.groupId, {
-      serverName: server.name,
-      host: server.ip,
-      port: server.port,
-    });
-    groupsApi.select(target.groupId);
-    setServerJoinTarget(null);
-    setAppNotice({ level: "info", text: `已加入「${target.name}」。` });
-    changeDestination("groups");
   };
 
   // 控制台底部「组 · X」：跳到这个组的详情。
@@ -392,23 +359,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupsRootSignal]);
 
-  // 激活组只登记、不重连：正在跑的那次连接不受影响，下次连接生效。
-  const handleActivateGroup = (groupId: string) => {
-    const target = groupsApi.groups.find((group) => group.group_id === groupId);
-    const previous = groupsApi.activeGroup;
-    groupsApi.activate(groupId);
-    if (!target) return;
-    if (vpn.connection === "connected") {
-      setAppNotice({
-        level: "info",
-        text: `已切到「${target.name}」，当前仍连着「${
-          previous?.name ?? "原来的节点"
-        }」，下次连接生效。`,
-      });
-      return;
-    }
-    setAppNotice({ level: "info", text: "已设为当前节点组。" });
-  };
   // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
   const healthVersion = useRef(0);
   // 同一个 traffic 会被健康事件重复推送（出口探测、节点延迟都会触发 emit_health）；
@@ -559,11 +509,7 @@ export default function App() {
       if (!initial && !wasReady && ready) maybeAutoOpenPanel();
       return {
         ready,
-        showOnboarding: shouldShowOnboarding({
-          key,
-          providers,
-          skipped: onboardingSkippedRef.current,
-        }),
+        showOnboarding: shouldShowOnboarding({ key, providers }),
       };
     },
     [bridge, maybeAutoOpenPanel],
@@ -923,18 +869,13 @@ export default function App() {
     await Promise.all([refreshDefaultProfile(), refreshAiStatus()]);
   };
 
-  const finishOnboarding = (skipped: boolean) => {
+  const finishOnboarding = () => {
     // 只在本次运行内有效：刷新后回到「已配 AI、但不是刚引导完」的入口。
-    setJustOnboarded(!skipped);
-    if (skipped) {
-      onboardingSkippedRef.current = true;
-      writeFlag(ONBOARDING_SKIPPED_KEY);
-    } else {
-      // 首启成功无条件打开右栏，不受「只自动开一次」或「用户关过」影响。
-      panelOpenRef.current = true;
-      setPanelOpen(true);
-      setAiUnread(false);
-    }
+    setJustOnboarded(true);
+    // 首启成功无条件打开右栏，不受「只自动开一次」或「用户关过」影响。
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
     void completeOnboarding();
   };
 
@@ -1651,7 +1592,6 @@ export default function App() {
           aria-label="节点组"
           title="节点组"
           onClick={() => {
-            setServerJoinTarget(null);
             if (destination === "groups") setGroupsRootSignal((value) => value + 1);
             else changeDestination("groups");
           }}
@@ -1671,7 +1611,6 @@ export default function App() {
           onClick={() => {
             if (destination === "servers") setServersRootSignal((value) => value + 1);
             else {
-              setServerJoinTarget(null);
               changeDestination("servers");
             }
           }}
@@ -1714,7 +1653,6 @@ export default function App() {
           activeGroupId={groupsApi.activeGroupId}
           compact={shell.mode === "drawer"}
           onSelect={groupsApi.select}
-          onCreate={groupsApi.createGroup}
           onOpenSettings={() => openSettings()}
         />
       ) : (
@@ -1755,11 +1693,9 @@ export default function App() {
           detailRetrying={myServers.detailRetrying}
           readOnly={myServers.identityLost}
           sharedTransfer={myServers.sharedTransfer}
-          joinGroupName={serverJoinTarget?.name ?? null}
           onNew={myServers.openWizard}
           onEnsureIdentity={myServers.ensureIdentity}
           onUseServer={handleUseServer}
-          onJoinServer={handleJoinServer}
           onChanged={() => void myServers.refresh()}
           onOrdered={myServers.ordered}
           onRebuilt={myServers.rebuilt}
@@ -1767,24 +1703,10 @@ export default function App() {
           onTopUp={myServers.openTopUp}
         />
       ) : destination === "groups" ? (
-        groupsApi.selected ? (          <NodeGroupDetail
+        groupsApi.selected ? (
+          <NodeGroupDetail
             group={groupsApi.selected}
             active={groupsApi.selected.group_id === groupsApi.activeGroupId}
-            activeConfigName={vpn.activeConfig?.name ?? null}
-            connection={vpn.connection}
-            onActivate={() => handleActivateGroup(groupsApi.selected!.group_id)}
-            onAddNode={(source) =>
-              groupsApi.addNode(groupsApi.selected!.group_id, source)
-            }
-            onCopy={() => groupsApi.copyGroup(groupsApi.selected!.group_id)}
-            onOpenServers={() =>
-              handlePickServersForGroup(groupsApi.selected!.group_id)
-            }
-            onRemoveNode={(nodeId) =>
-              groupsApi.removeNode(groupsApi.selected!.group_id, nodeId)
-            }
-            onRename={(name) => groupsApi.renameGroup(groupsApi.selected!.group_id, name)}
-            onDelete={() => groupsApi.deleteGroup(groupsApi.selected!.group_id)}
           />
         ) : null
       ) : (
@@ -1869,7 +1791,6 @@ export default function App() {
           onStart={myServers.loginStart}
           onVerify={myServers.loginVerify}
           onCancel={myServers.closeLogin}
-          mockHint={bridge.mode === "mock"}
         />
       ) : null}
 

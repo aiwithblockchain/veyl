@@ -8,7 +8,6 @@ interface Props {
   activeGroupId: string | null;
   compact?: boolean;
   onSelect: (groupId: string) => void;
-  onCreate: () => void;
   onOpenSettings: () => void;
 }
 
@@ -47,7 +46,6 @@ export function NodeGroupsRail({
   activeGroupId,
   compact = false,
   onSelect,
-  onCreate,
   onOpenSettings,
 }: Props) {
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -83,10 +81,8 @@ export function NodeGroupsRail({
       <p className="rail__group-label">我的组</p>
       {mine.length === 0 ? (
         <div className="rail__empty">
-          <p className="rail__empty-text">还没有自己的组</p>
-          <button type="button" className="btn btn--ghost rail__empty-action" onClick={onCreate}>
-            新建组
-          </button>
+          <p className="rail__empty-title">节点组尚未接入</p>
+          <p className="rail__empty-text">接入后这里会列出你的节点组。</p>
         </div>
       ) : (
         rows(mine)
@@ -124,23 +120,6 @@ export function NodeGroupsRail({
           <div className="rail__section">
             <span className="rail__label">节点组</span>
             <span className="rail__count">{groups.length}</span>
-            <button
-              type="button"
-              className="icon-btn rail__add"
-              aria-label="新建组"
-              title="新建组"
-              onClick={onCreate}
-            >
-              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
-                <path
-                  d="M8 3.5v9M3.5 8h9"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.4"
-                  strokeLinecap="round"
-                />
-              </svg>
-            </button>
           </div>
           <div className="rail__groups">{sections}</div>
         </>
@@ -188,9 +167,6 @@ export function NodeGroupsRail({
                 <IconClose size={14} />
               </button>
             </div>
-            <button type="button" className="btn btn--ghost rail-drawer__new" onClick={onCreate}>
-              新建组
-            </button>
             {sections}
           </div>
         </div>

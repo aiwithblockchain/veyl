@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Veyl · 首次启动</title>
+<style>
+  :root {
+    --canvas: #FAFAF8;
+    --ink: #14161C;
+    --ink-2: #5B5850;
+    --ink-3: #6E6A62;
+    --hair: rgba(20, 22, 28, 0.10);
+    --accent: #F6537B;
+    --accent-ink: #C2185B;
+    --focus: #E03A66;
+    --red: #A8382D;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  button { font-family: inherit; }
+
+  .stage-a {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 24px;
+  }
+
+  .intro {
+    width: 360px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+
+  .lockup {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .lockup img {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    display: block;
+  }
+
+  .wordmark {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+
+  .title {
+    width: max-content;
+    max-width: 640px;
+    margin: 40px 0 36px;
+    font-size: 24px;
+    line-height: 1.45;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+
+  .form { width: 100%; }
+
+  .field { position: relative; }
+
+  .field-label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--ink-2);
+    text-align: left;
+  }
+
+  .field input {
+    width: 100%;
+    height: 48px;
+    padding: 0 16px;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: #FFFFFF;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 14px;
+    outline: none;
+  }
+
+  .field input::placeholder { color: var(--ink-3); }
+
+  .field input:focus {
+    border-color: var(--focus);
+    box-shadow: 0 0 0 1px var(--focus);
+  }
+
+  .field-error {
+    margin: 8px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--red);
+    text-align: left;
+  }
+
+  /* 连接线：1px 粉色，从输入框左侧向右生长（simulated） */
+  .connector {
+    position: absolute;
+    left: 0;
+    right: auto;
+    bottom: -1px;
+    width: 0;
+    height: 1px;
+    background: var(--accent);
+    pointer-events: none;
+    transition: width 900ms linear;
+  }
+
+  .connector.is-growing { width: 100%; }
+
+  .connector.is-resetting { transition: none; }
+
+  .primary {
+    width: 100%;
+    height: 48px;
+    margin-top: 16px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--ink);
+    color: var(--canvas);
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+  }
+
+  .primary:hover:not(:disabled) { background: #24262E; }
+
+  .primary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .primary.is-verifying {
+    opacity: 1;
+    cursor: default;
+  }
+
+  /* 校验中：三个 4px 圆点，高亮每 300ms 向右移一格 */
+  .dots {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+  }
+
+  .dots i {
+    display: block;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--ink-3);
+    animation: dot-wave 900ms linear infinite;
+  }
+
+  .dots i:nth-child(1) { animation-delay: 0ms; }
+  .dots i:nth-child(2) { animation-delay: 300ms; }
+  .dots i:nth-child(3) { animation-delay: 600ms; }
+
+  @keyframes dot-wave {
+    0%, 33.333% {
+      transform: scale(1.5);
+      background-color: var(--accent);
+    }
+    33.334%, 100% {
+      transform: scale(1);
+      background-color: var(--ink-3);
+    }
+  }
+
+  .links {
+    margin-top: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    font-size: 13px;
+  }
+
+  .link {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--accent-ink);
+    font-size: 13px;
+    line-height: 1.6;
+    cursor: pointer;
+  }
+
+  .link:hover { color: #9C1249; }
+
+  .link:focus-visible,
+  .primary:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 3px;
+  }
+
+  [hidden] { display: none !important; }
+
+  @media (max-width: 480px) {
+    .intro { width: 100%; max-width: 360px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation: none !important;
+      transition-duration: 0.01ms !important;
+      transition-delay: 0ms !important;
+    }
+
+    /* 静止时中间点保持粉色高亮 */
+    .dots i:nth-child(2) {
+      width: 6px;
+      height: 6px;
+      background: var(--accent);
+    }
+  }
+</style>
+</head>
+<body>
+
+  <section class="stage-a" aria-label="接入 AI">
+    <div class="intro">
+      <div class="lockup">
+        <img src="logo.png" alt="" width="48" height="48" />
+        <span class="wordmark">Veyl</span>
+      </div>
+
+      <h1 class="title">Under the veil, it keeps your line open.</h1>
+
+      <form class="form" id="connect-form" novalidate>
+        <div class="field">
+          <label class="field-label" for="key-input">DeepSeek API Key</label>
+          <input
+            id="key-input"
+            type="password"
+            inputmode="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="sk-…"
+            aria-label="DeepSeek API Key"
+            aria-describedby="key-error"
+            autofocus
+          />
+          <span class="connector" id="connector" aria-hidden="true"></span>
+        </div>
+        <p class="field-error" id="key-error" role="alert" hidden></p>
+        <button class="primary" id="connect-button" type="submit" disabled>
+          连接
+        </button>
+        <div class="links">
+          <button class="link" type="button">获取 Key ↗</button>
+          <button class="link" type="button">使用其他 AI 服务</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+<script>
+  // simulated：原型内只演示本屏反馈，不发起真实请求，也不切换页面。
+  const form = document.getElementById("connect-form");
+  const input = document.getElementById("key-input");
+  const button = document.getElementById("connect-button");
+  const connector = document.getElementById("connector");
+  const error = document.getElementById("key-error");
+
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let verifying = false;
+
+  function syncButton() {
+    button.disabled = verifying || input.value.trim() === "";
+  }
+
+  function setError(message) {
+    error.textContent = message;
+    error.hidden = message === "";
+    input.setAttribute("aria-invalid", message ? "true" : "false");
+  }
+
+  function setVerifying(on) {
+    verifying = on;
+    button.classList.toggle("is-verifying", on);
+    button.disabled = on;
+    if (on) {
+      button.innerHTML =
+        '<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>';
+      button.setAttribute("aria-label", "校验中");
+      button.setAttribute("aria-busy", "true");
+    } else {
+      button.textContent = "连接";
+      button.removeAttribute("aria-label");
+      button.removeAttribute("aria-busy");
+    }
+  }
+
+  function looksLikeKey(value) {
+    return /^sk-\S{6,}$/.test(value.trim());
+  }
+
+  function resetConnector() {
+    connector.classList.add("is-resetting");
+    connector.classList.remove("is-growing");
+    void connector.offsetWidth;
+    connector.classList.remove("is-resetting");
+  }
+
+  function connect() {
+    if (verifying || button.disabled) return;
+    // simulated：Key 格式不对时就地报错，保留用户输入。
+    if (!looksLikeKey(input.value)) {
+      setError("Key 看起来不对。它通常以 sk- 开头；检查一下再试。");
+      input.focus();
+      return;
+    }
+
+    setError("");
+    setVerifying(true);
+
+    if (!reduceMotion) connector.classList.add("is-growing");
+
+    // simulated：约 1.2 秒后回到原状。
+    window.setTimeout(() => {
+      setVerifying(false);
+      if (!reduceMotion) resetConnector();
+      syncButton();
+    }, 1200);
+  }
+
+  input.addEventListener("input", () => {
+    syncButton();
+    if (!error.hidden) setError("");
+  });
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    connect();
+  });
+
+  syncButton();
+</script>
+</body>
+</html>

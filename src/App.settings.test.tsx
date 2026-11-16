@@ -109,7 +109,6 @@ beforeEach(() => {
   Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
   // 宽屏才默认展开右栏，服务名才在 DOM 里。
   Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true });
-  localStorage.setItem("veyl.onboarding.skipped", "1");
   providers = providerList();
   vi.spyOn(bridge, "configList").mockResolvedValue({
     configs: [SUMMARY],

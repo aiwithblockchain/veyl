@@ -3,6 +3,7 @@ import type {
   ConfigDetail,
   ConfigRouteMode,
   ConfigSummary,
+  NodeSummary,
 } from "../agent/protocol";
 
 /** 与协议里的 `connect_mode` 同义，界面层用它表示用户的选择。 */
@@ -12,6 +13,13 @@ export type ConnectMode = ConfigConnectMode;
 export const MOCK_CONFIG_STORAGE_KEY = "veyl.configs.mock.v1";
 
 const MOCK_PROXY_PORT = 7890;
+
+/** mock 通道创建/导入过的节点；`config_create` 按 nodeIds 绑定时从这里取真实形状。 */
+const mockNodeRegistry = new Map<string, NodeSummary>();
+
+export function rememberMockNode(node: NodeSummary): void {
+  mockNodeRegistry.set(node.node_id, { ...node });
+}
 
 /** 新建配置的默认名：「配置 N」，N 取当前未被占用的最小整数。 */
 export function nextConfigName(
@@ -43,12 +51,6 @@ export function summarizeConfig(
   };
 }
 
-const MOCK_NODE_SEEDS = [
-  { name: "东京 01", server: "203.0.113.21", port: 20343, method: "aes-256-gcm" },
-  { name: "东京 02", server: "203.0.113.22", port: 20412, method: "aes-256-gcm" },
-  { name: "新加坡 01", server: "203.0.113.41", port: 20888, method: "chacha20-ietf-poly1305" },
-];
-
 /** VITE_MOCK=1 时的离线数据；真实模式下由 `config_create` 返回。 */
 export function createMockConfig(
   name: string,
@@ -60,27 +62,23 @@ export function createMockConfig(
 ): ConfigDetail {
   const configId = `config_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const now = Date.now();
-  const nodes = options.nodeIds?.length
-    ? options.nodeIds.map((nodeId, index) => ({
-        node_id: nodeId,
-        name: `节点 ${index + 1}`,
-        server: "203.0.113.50",
-        port: 8388,
-        method: "aes-256-gcm",
-        protocol: "shadowsocks" as const,
-        source: "manual" as const,
-        created_at: now,
-      }))
-    : MOCK_NODE_SEEDS.map((node, index) => ({
-        node_id: `${configId}_node_${index + 1}`,
-        name: node.name,
-        server: node.server,
-        port: node.port,
-        method: node.method,
-        protocol: "shadowsocks" as const,
-        source: "seed" as const,
-        created_at: now,
-      }));
+  // 契约：nodeIds 顺序即节点顺序；未知 id 不编造公网地址。
+  const nodes: NodeSummary[] = options.nodeIds?.length
+    ? options.nodeIds.map((nodeId, index) => {
+        const known = mockNodeRegistry.get(nodeId);
+        if (known) return { ...known };
+        return {
+          node_id: nodeId,
+          name: `节点 ${index + 1}`,
+          server: "",
+          port: 8388,
+          method: "aes-256-gcm",
+          protocol: "shadowsocks",
+          source: "manual",
+          created_at: now,
+        };
+      })
+    : [];
   return {
     config_id: configId,
     name,

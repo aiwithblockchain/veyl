@@ -78,13 +78,11 @@ const PROVIDER = "DigitalOcean";
 
 const STORE_KEY = "veyl.mock.myServers";
 const FAIL_KEY = "veyl.mock.myServers.fail";
-const SEED_KEY = "veyl.mock.myServers.seed";
 const DOWN_KEY = "veyl.mock.myServers.providerDown";
 const ACCOUNT_KEY = "veyl.mock.account";
 
-/** 演示环境没有真邮件；登录弹窗在 mock 下提示这一组。 */
-export const MOCK_LOGIN_CODE = "123456";
-const DEFAULT_EMAIL = "demo@veyl.app";
+/** 内部固定值；mock 不发邮件，也不在任何界面上提示这个验证码。 */
+const MOCK_LOGIN_CODE = "123456";
 const TOPUP_CENTS = [1000, 2000, 5000, 10_000];
 
 const PHASE_MS: Record<string, number> = {
@@ -103,7 +101,7 @@ interface Store {
   servers: StoredServer[];
   orders: MyServerOrder[];
   next_id: number;
-  /** 演示余额（USD 分）；默认 0，走一遍充值再买机。 */
+  /** mock 余额（USD 分）；默认 0，走一遍充值再买机。 */
   balance_cents: number;
 }
 
@@ -120,7 +118,7 @@ interface StoredAccount {
   email: string | null;
 }
 
-/** 演示默认已登录，方便直接看服务器；点「登出」就能走一遍验证码登录。 */
+/** mock 账户默认未登录；登录后才请求列表与钱包。 */
 function readAccount(): StoredAccount {
   try {
     const raw = readFlag(ACCOUNT_KEY);
@@ -134,9 +132,9 @@ function readAccount(): StoredAccount {
       }
     }
   } catch {
-    // 坏数据按默认已登录处理。
+    // 坏数据按未登录处理。
   }
-  return { logged_in: true, email: DEFAULT_EMAIL };
+  return { logged_in: false, email: null };
 }
 
 function writeAccount(account: StoredAccount): void {
@@ -151,7 +149,7 @@ function accountView(): MyServerAccount {
   const account = readAccount();
   return {
     logged_in: account.logged_in,
-    email: account.logged_in ? (account.email ?? DEFAULT_EMAIL) : null,
+    email: account.logged_in ? account.email : null,
     account_id: "acct_mock",
     device_id: "dev_mock",
     account_kind: account.logged_in ? "email" : "device",
@@ -186,73 +184,9 @@ function readStore(): Store {
       }
     }
   } catch {
-    // 坏数据按空库处理，不阻塞演示。
+    // 坏数据按空库处理。
   }
-  return seedStore();
-}
-
-/** 没配 seed 时的默认四台：可用、安装中、出错、可用，方便直接看效果。 */
-const DEFAULT_SERVERS: Array<{ region: string; state: MyServerState }> = [
-  { region: "sgp1", state: "healthy" },
-  { region: "nyc1", state: "installing" },
-  { region: "fra1", state: "error" },
-  { region: "tor1", state: "healthy" },
-];
-
-/** 默认演示数据里正在建的那台先停 30 秒，方便看清进度；之后照常推进。 */
-const DEMO_HOLD_MS = 30_000;
-
-/** 没有存档时按 `veyl.mock.myServers.seed` 造一批任意状态的服务器。 */
-function seedStore(): Store {
-  const store: Store = { servers: [], orders: [], next_id: 1, balance_cents: 0 };
-  const seed = readFlag(SEED_KEY);
-  const isDefault = seed === null;
-  const states: MyServerState[] = isDefault
-    ? DEFAULT_SERVERS.map((item) => item.state)
-    : (seed
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean) as MyServerState[]);
-  const regionIds = isDefault ? DEFAULT_SERVERS.map((item) => item.region) : null;
-  states.forEach((state, index) => {
-    const region = regionIds
-      ? (REGIONS.find((item) => item.id === regionIds[index]) ?? REGIONS[0])
-      : REGIONS[index % REGIONS.length];
-    const id = `srv_seed_${index + 1}`;
-    store.servers.push({
-      server_id: id,
-      name: `${region.name} · ${PROVIDER}`,
-      region: region.id,
-      plan: DEFAULT_PLAN.id,
-      state,
-      created_at: new Date(Date.now() - 60_000 * (index + 1)).toISOString(),
-      ip: `45.76.${20 + index}.${100 + index}`,
-      port: state === "creating" || state === "booting" ? null : 8388,
-      node_id:
-        state === "healthy" || state === "active" ? `node_${id}` : null,
-      hourly_usd: DEFAULT_PLAN.hourly_usd,
-      monthly_usd: DEFAULT_PLAN.monthly_usd,
-      daily_price_cents: DEFAULT_PLAN.daily_price_cents,
-      transfer_gib: DEFAULT_PLAN.transfer_gib,
-      paid_until: new Date(Date.now() + 86_400_000).toISOString(),
-      billing_state: "active",
-      grace_ends_at: null,
-      failure:
-        state === "error"
-          ? {
-              stage: "installing",
-              code: "install_failed",
-              message: failureFor("installing").message,
-              retryable: true,
-            }
-          : null,
-      // 正在建的从当前阶段起算，打开界面时能看到进度；可用的没有起始时刻。
-      started_at: MY_SERVER_PHASES.includes(state)
-        ? Date.now() + (isDefault ? DEMO_HOLD_MS : 0)
-        : Date.now() - 60_000,
-    });
-  });
-  return store;
+  return { servers: [], orders: [], next_id: 1, balance_cents: 0 };
 }
 
 function writeStore(store: Store): void {
@@ -570,7 +504,7 @@ export class MockMyServerService {
     const store = readStore();
     store.balance_cents += denominationCents;
     writeStore(store);
-    // 演示通道直接入账，没有收银台。
+    // mock 通道直接入账，没有收银台。
     return {
       topup_id: `topup_${Date.now()}`,
       checkout_url: null,

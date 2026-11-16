@@ -22,7 +22,11 @@ function recovery(over: Partial<ProxyRecovery> = {}): ProxyRecovery {
 
 function prepare(report: { recovery: ProxyRecovery | null } | null) {
   Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
-  localStorage.setItem("veyl.onboarding.skipped", "1");
+  vi.spyOn(bridge, "getDeepSeekKey").mockResolvedValue({
+    masked: "sk-****abcd",
+    verified: true,
+    validation: "ok",
+  });
   vi.spyOn(bridge, "configList").mockResolvedValue({
     configs: [],
     active_config_id: null,

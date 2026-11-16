@@ -140,7 +140,11 @@ afterEach(() => {
 
 function prepareBridge() {
   Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
-  localStorage.setItem("veyl.onboarding.skipped", "1");
+  vi.spyOn(bridge, "getDeepSeekKey").mockResolvedValue({
+    masked: "sk-****abcd",
+    verified: true,
+    validation: "ok",
+  });
   vi.spyOn(bridge, "configList").mockResolvedValue({
     configs: [SUMMARY],
     active_config_id: CONFIG_ID,

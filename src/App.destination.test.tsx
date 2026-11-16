@@ -6,7 +6,6 @@ import { getAgentBridge } from "./agent";
 import type { MyServer, MyServerCredentialNode } from "./agent/bridge";
 import type { ConfigSummary } from "./agent/protocol";
 import { DESTINATION_KEY, DESTINATION_VERSION, DESTINATION_VERSION_KEY } from "./ui/destination";
-import { saveAccount } from "./myservers/account";
 
 const CONFIG_ID = "cfg_1";
 
@@ -49,8 +48,11 @@ const modeDescriptor = Object.getOwnPropertyDescriptor(bridge, "mode");
 
 function prepare(servers: MyServer[] = []) {
   Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
-  localStorage.setItem("veyl.onboarding.skipped", "1");
-  saveAccount("me@example.com");
+  vi.spyOn(bridge, "getDeepSeekKey").mockResolvedValue({
+    masked: "sk-****abcd",
+    verified: true,
+    validation: "ok",
+  });
   vi.spyOn(bridge, "configList").mockResolvedValue({
     configs: [SUMMARY],
     active_config_id: CONFIG_ID,
@@ -123,6 +125,19 @@ function prepare(servers: MyServer[] = []) {
     currency: "USD",
     updated_at: new Date(0).toISOString(),
   });
+  vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
+    logged_in: true,
+    email: "me@example.com",
+    account_id: "acct_1",
+    device_id: "dev_1",
+    account_kind: "email",
+  });
+  vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
+    balance_cents: 1000,
+    currency: "USD",
+    denominations_cents: [1000],
+    updated_at: new Date(0).toISOString(),
+  });
   vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers });
   vi.spyOn(bridge, "myServerGet").mockResolvedValue(SERVER);
   vi.spyOn(bridge, "myServerCredentials").mockResolvedValue({
@@ -155,7 +170,7 @@ describe("destination 切换", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "节点组" }));
     expect(await screen.findByRole("complementary", { name: "节点组列表" })).toBeTruthy();
-    expect(await screen.findByRole("heading", { name: "Veyl 免费节点" })).toBeTruthy();
+    expect(await screen.findByText("节点组尚未接入")).toBeTruthy();
     expect(container.querySelector(".console")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "我的服务器" }));
@@ -212,6 +227,11 @@ describe("destination 切换", () => {
 
   it("新建流程选其它节点 → 我的服务器；点客户端图标恢复接管方式；用来建配置回审视页", async () => {
     prepare([SERVER]);
+    // AI 已就绪时「新建配置」会走对话；让开场失败以回到手动表单。
+    vi.spyOn(bridge, "sendMessage").mockRejectedValue({
+      code: "INTERNAL",
+      message: "AI 服务连不上",
+    });
     const { container } = render(<App />);
     await screen.findByRole("button", { name: "启动 VPN" });
 

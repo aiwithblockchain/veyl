@@ -77,7 +77,6 @@ function providers(): LlmProvider[] {
 beforeEach(() => {
   Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
   Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true });
-  localStorage.setItem("veyl.onboarding.skipped", "1");
   aiConfigured = true;
   vi.spyOn(bridge, "configList").mockResolvedValue({
     configs: [SUMMARY],
@@ -132,18 +131,14 @@ describe("问题报告入口", () => {
     );
   }, 15_000);
 
-  it("AI 未配置时控制台按钮与设置行都不出现", async () => {
+  it("AI 未配置时只显示首启页，报告入口不可达", async () => {
     aiConfigured = false;
     render(<App />);
     await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
-    await act(async () => {});
 
+    expect(await screen.findByLabelText("DeepSeek API Key")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "报告问题" })).toBeNull();
     expect(screen.queryByRole("button", { name: "报告这个问题" })).toBeNull();
-
-    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "遇到问题" }));
-    await screen.findByText("这里的东西平时不用改。连不上网、打不开网页时再看。");
-    expect(screen.queryByText("生成问题报告")).toBeNull();
+    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
   }, 15_000);
 });

@@ -179,7 +179,7 @@ function nextPaint(): Promise<void> {
 
 /**
  * 配置与连接状态。默认走真实命令；`mock` 只在 VITE_MOCK=1（或浏览器里的
- * mock 通道）时启用，供离线演示与测试用。
+ * mock 通道）时启用，供离线 mock 与测试用。
  */
 export function useVpnSession(
   bridge: AgentBridge,

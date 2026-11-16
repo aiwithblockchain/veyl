@@ -37,7 +37,7 @@ import type {
 } from "./bridge";
 import { DEFAULT_PROXY_PORT, isLocalEndpoint, maskKey } from "./bridge";
 import { MockMyServerService } from "../myservers/mockMyServerService";
-import { MOCK_CONFIG_STORAGE_KEY } from "../config/model";
+import { MOCK_CONFIG_STORAGE_KEY, rememberMockNode } from "../config/model";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
   AgentEvent,
@@ -166,25 +166,8 @@ export class MockAgentBridge implements AgentBridge {
   private trafficUp = 0;
   private trafficDown = 0;
   private trafficTick = 0;
-  /** mock 的节点目录：让控制台与面板的节点切换可以离线演示。 */
-  private profiles: MockNodeEntry[] = [
-    {
-      id: "prf_1",
-      name: "东京 01",
-      protocol: "shadowsocks",
-      region: "日本",
-      createdAt: "2026-11-01T08:00:00.000Z",
-      nodeId: null,
-    },
-    {
-      id: "prf_2",
-      name: "新加坡 02",
-      protocol: "shadowsocks",
-      region: "新加坡",
-      createdAt: "2026-11-01T09:00:00.000Z",
-      nodeId: "seed-sg-02",
-    },
-  ];
+  /** mock 的节点目录：默认为空，连接由配置库驱动，不预置演示节点。 */
+  private profiles: MockNodeEntry[] = [];
   private coreBundledVersion = "1.14.4";
   private coreActiveVersion = "1.14.4";
   private coreActiveSource: "bundled" | "installed" = "bundled";
@@ -272,25 +255,20 @@ export class MockAgentBridge implements AgentBridge {
     // 契约：用户中途启动 VPN，正在跑的测速取消，reason = connected。
     this.cancelProbeForConnect();
     const stored = this.readMockConfigs();
-    const profile =
-      this.profiles.find((item) => item.id === configId) ??
-      this.profiles.find((item) => item.id === this.runtime.config_id) ??
-      this.profiles[0];
-    if (!profile) {
-      throw { code: "PRECONDITION_FAILED", message: "还没有可用的节点" };
+    const target =
+      stored.find((config) => config.config_id === configId) ??
+      stored.find((config) => config.config_id === this.runtime.config_id) ??
+      stored[0] ??
+      null;
+    if (!target || target.nodes.length === 0) {
+      throw { code: "PRECONDITION_FAILED", message: "这套配置还没有节点。" };
     }
-    // 界面建出来的配置（cfg_*）与演示节点（prf_*）是两套 id：连接身份以配置库为准，
-    // 否则切换配置后 hero 会把两套 id 当成「连接的是另一套」。
-    const targetId =
-      configId ??
-      stored.find((config) => config.config_id === this.runtime.config_id)?.config_id ??
-      stored[0]?.config_id ??
-      profile.id;
-    const target = stored.find((config) => config.config_id === targetId) ?? null;
-    const targetName = target?.name ?? profile.name;
-    const startNodeId = target?.current_node_id ?? profile.id;
+    const targetId = target.config_id;
+    const targetName = target.name;
+    const startNodeId = target.current_node_id ?? target.nodes[0].node_id;
     const startNodeName =
-      target?.nodes.find((node) => node.node_id === startNodeId)?.name ?? profile.name;
+      target.nodes.find((node) => node.node_id === startNodeId)?.name ??
+      target.nodes[0].name;
 
     const sameTarget = this.runtime.config_id === targetId;
     if (
@@ -385,8 +363,8 @@ export class MockAgentBridge implements AgentBridge {
               reason: fallbackReason,
             },
       connected_since: now(),
-      latency_ms: profile.id === "prf_2" ? 68 : 42,
-      node_latency_ms: profile.id === "prf_2" ? 68 : 42,
+      latency_ms: 42,
+      node_latency_ms: 42,
       direct_ip: MOCK_DIRECT_IP,
       system_proxy_enabled: true,
       connections: 2,
@@ -542,7 +520,18 @@ export class MockAgentBridge implements AgentBridge {
   }
 
   async myServerCredentials(serverId: string) {
-    return this.myServers.credentials(serverId);
+    const node = this.myServers.credentials(serverId);
+    rememberMockNode({
+      node_id: node.node_id,
+      name: node.name,
+      server: node.host,
+      port: node.port,
+      method: node.method,
+      protocol: "shadowsocks",
+      source: "manual",
+      created_at: Date.now(),
+    });
+    return node;
   }
 
   async myServerRegisterDevice() {
@@ -631,7 +620,7 @@ export class MockAgentBridge implements AgentBridge {
       source: "network",
       changed,
       reason: null,
-      added: changed ? 1 : 0,
+      added: 0,
       removed: 0,
     };
     this.defaultProfile = next;
@@ -1369,9 +1358,9 @@ export class MockAgentBridge implements AgentBridge {
     this.transition("running", "process_ready", {
       pid: 48213,
       uptime_seconds: 1,
-      config_id: "prf_1",
+      config_id: "config_mock",
       config_name: "东京 01",
-      node_id: "prf_1",
+      node_id: "node_mock",
       node_name: "东京 01",
       mixed_port: 2080,
       connected_since: now(),
@@ -1752,7 +1741,7 @@ export class MockAgentBridge implements AgentBridge {
     if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535) {
       throw { code: "INVALID_ARGUMENT", message: "端口要填 1–65535 之间的整数" };
     }
-    return {
+    const node: NodeSummary = {
       node_id: mockNodeId(),
       name,
       server,
@@ -1762,6 +1751,8 @@ export class MockAgentBridge implements AgentBridge {
       source: "manual",
       created_at: Date.now(),
     };
+    rememberMockNode(node);
+    return node;
   }
 
   async nodeImportUrl(url: string): Promise<NodeImportResult> {
@@ -1781,12 +1772,14 @@ export class MockAgentBridge implements AgentBridge {
       };
     }
     const nodes = [mockNode("订阅节点 01"), mockNode("订阅节点 02")];
+    nodes.forEach(rememberMockNode);
     return { imported: nodes.length, skipped: [], nodes };
   }
 
   async nodeImportFile(_path: string): Promise<NodeImportResult> {
     await sleep(250);
     const nodes = [mockNode("文件节点 01")];
+    nodes.forEach(rememberMockNode);
     return { imported: nodes.length, skipped: [], nodes };
   }
 
@@ -1826,6 +1819,7 @@ export class MockAgentBridge implements AgentBridge {
         details: { reason: "not_node_text" },
       };
     }
+    nodes.forEach(rememberMockNode);
     return { imported: nodes.length, skipped, nodes };
   }
 
@@ -1873,7 +1867,7 @@ export class MockAgentBridge implements AgentBridge {
       stored.find((config) => config.config_id === this.runtime.config_id)?.config_id ??
       stored[0]?.config_id ??
       this.runtime.config_id ??
-      "config_demo";
+      "config_mock";
     const storedMode = stored.find((config) => config.config_id === id)?.routing_mode;
     return { configId: id, mode: this.routeModes.get(id) ?? storedMode ?? "direct" };
   }

@@ -67,28 +67,14 @@ describe("mock 默认数据", () => {
     localStorage.clear();
   });
 
-  it("没有存档时默认种四台：可用、安装中、出错、可用", () => {
+  it("没有存档时是空库，不预置演示服务器", () => {
     const { servers } = new MockMyServerService().list();
-    expect(servers.map((server) => server.name)).toEqual([
-      "新加坡 1 · DigitalOcean",
-      "纽约 1 · DigitalOcean",
-      "法兰克福 1 · DigitalOcean",
-      "多伦多 1 · DigitalOcean",
-    ]);
-    expect(servers.map((server) => server.state)).toEqual([
-      "healthy",
-      "installing",
-      "error",
-      "healthy",
-    ]);
+    expect(servers).toEqual([]);
   });
 
-  it("seed 覆盖默认；空 seed 是显式空库", () => {
-    localStorage.setItem("veyl.mock.myServers.seed", "verifying,healthy");
-    expect(new MockMyServerService().list().servers).toHaveLength(2);
-
-    localStorage.removeItem("veyl.mock.myServers");
-    localStorage.setItem("veyl.mock.myServers.seed", "");
-    expect(new MockMyServerService().list().servers).toHaveLength(0);
+  it("账号默认未登录，钱包要求先登录", () => {
+    const service = new MockMyServerService();
+    expect(service.account()).toMatchObject({ logged_in: false, email: null });
+    expect(() => service.wallet()).toThrow();
   });
 });

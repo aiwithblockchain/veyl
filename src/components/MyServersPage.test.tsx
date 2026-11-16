@@ -11,7 +11,6 @@ import type {
 } from "../agent/bridge";
 import type { AgentEvent } from "../agent/protocol";
 import { AGENT_EVENTS } from "../agent/protocol";
-import { saveAccount } from "../myservers/account";
 import { useMyServers } from "../myservers/useMyServers";
 import { MyServersPage } from "./MyServersPage";
 import { MyServersRail } from "./MyServersRail";
@@ -193,14 +192,10 @@ type StubBridge = ReturnType<typeof makeBridge>;
 function Harness({
   bridge,
   rootSignal = 0,
-  joinGroupName = null,
-  onJoinServer = vi.fn(),
   onUseServer = vi.fn(),
 }: {
   bridge: StubBridge;
   rootSignal?: number;
-  joinGroupName?: string | null;
-  onJoinServer?: (server: MyServer) => void;
   onUseServer?: (server: MyServer) => void;
 }) {
   const state = useMyServers(bridge as unknown as AgentBridge, {
@@ -241,11 +236,9 @@ function Harness({
         detailRetrying={state.detailRetrying}
         readOnly={state.identityLost}
         sharedTransfer={state.sharedTransfer}
-        joinGroupName={joinGroupName}
         onNew={state.openWizard}
         onEnsureIdentity={state.ensureIdentity}
         onTopUp={state.openTopUp}
-        onJoinServer={onJoinServer}
         onUseServer={onUseServer}
         onChanged={() => void state.refresh()}
         onOrdered={state.ordered}
@@ -257,7 +250,6 @@ function Harness({
           onStart={state.loginStart}
           onVerify={state.loginVerify}
           onCancel={state.closeLogin}
-          mockHint
         />
       ) : null}
       {state.topupOpen ? (
@@ -274,13 +266,11 @@ function Harness({
   );
 }
 
-function renderHarness(bridge: StubBridge, joinGroupName: string | null = null) {
-  const view = render(<Harness bridge={bridge} joinGroupName={joinGroupName} />);
+function renderHarness(bridge: StubBridge) {
+  const view = render(<Harness bridge={bridge} />);
   return {
     rerenderWithSignal: (signal: number) =>
-      view.rerender(
-        <Harness bridge={bridge} joinGroupName={joinGroupName} rootSignal={signal} />,
-      ),
+      view.rerender(<Harness bridge={bridge} rootSignal={signal} />),
   };
 }
 
@@ -417,7 +407,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("左栏列出服务器与状态，默认选中第一台", async () => {
-    saveAccount("me@example.com");
     renderHarness(makeBridge());
 
     expect(await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ })).toBeTruthy();
@@ -576,7 +565,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("安装中：只有进度和销毁", async () => {
-    saveAccount("me@example.com");
     renderHarness(makeBridge());
 
     fireEvent.click(await screen.findByRole("button", { name: /纽约 1 · DigitalOcean/ }));
@@ -586,7 +574,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("出错：重新建一台后选中新机器并显示进度", async () => {
-    saveAccount("me@example.com");
     const bridge = makeBridge();
     bridge.myServerGet.mockImplementation(async (serverId: string) =>
       serverId === "srv_new"
@@ -608,7 +595,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("创建中销毁：确认文案说明会中断安装", async () => {
-    saveAccount("me@example.com");
     renderHarness(makeBridge());
 
     fireEvent.click(await screen.findByRole("button", { name: /纽约 1 · DigitalOcean/ }));
@@ -620,7 +606,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("可用时销毁：二次确认后调用 myServerDestroy", async () => {
-    saveAccount("me@example.com");
     const bridge = makeBridge();
     renderHarness(bridge);
 
@@ -635,7 +620,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("零台：中间仍是创建页，左栏提示、状态已登录", async () => {
-    saveAccount("me@example.com");
     renderHarness(makeBridge([]));
 
     expect(await screen.findByText("还没有服务器")).toBeTruthy();
@@ -648,7 +632,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("Esc 从详情回创建页；再点图标同理", async () => {
-    saveAccount("me@example.com");
     const { rerenderWithSignal } = renderHarness(makeBridge());
 
     fireEvent.click(await screen.findByRole("button", { name: /法兰克福 1 · DigitalOcean/ }));
@@ -662,7 +645,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("创建页默认就在：三区块、默认中档、底部汇总与唯一主按钮", async () => {
-    saveAccount("me@example.com");
     renderHarness(makeBridge());
 
     expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
@@ -700,7 +682,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("服务器类型卡 ↑↓ 切换选中，汇总跟着变", async () => {
-    saveAccount("me@example.com");
     renderHarness(makeBridge());
 
     fireEvent.click(await screen.findByRole("button", { name: "新建服务器" }));
@@ -725,7 +706,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("创建服务器按所选地区与档位下单", async () => {
-    saveAccount("me@example.com");
     const bridge = makeBridge();
     renderHarness(bridge);
 
@@ -848,7 +828,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("读不到目录：一句提示 + 重试，重试成功后进入向导", async () => {
-    saveAccount("me@example.com");
     const bridge = makeBridge();
     bridge.myServerCatalog.mockRejectedValue(new Error("catalog down"));
     renderHarness(bridge);
@@ -863,7 +842,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("创建页 Esc 不弹确认、不丢选择", async () => {
-    saveAccount("me@example.com");
     renderHarness(makeBridge());
 
     expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
@@ -873,7 +851,6 @@ describe("我的服务器 destination", () => {
   });
 
   it("用来建配置把 node_id 交回新建流程", async () => {
-    saveAccount("me@example.com");
     const onUseServer = vi.fn();
     render(<Harness bridge={makeBridge()} onUseServer={onUseServer} />);
 
@@ -883,23 +860,5 @@ describe("我的服务器 destination", () => {
     expect(onUseServer).toHaveBeenCalledWith(
       expect.objectContaining({ server_id: "srv_1" }),
     );
-  });
-
-  it("带着目标组进来：顶部横幅，可用那台给加入动作，安装中不给", async () => {
-    saveAccount("me@example.com");
-    const onJoinServer = vi.fn();
-    render(<Harness bridge={makeBridge()} joinGroupName="上海 1 号" onJoinServer={onJoinServer} />);
-
-    expect(
-      await screen.findByText("选择一台服务器，把节点加入「上海 1 号」"),
-    ).toBeTruthy();
-
-    fireEvent.click(await screen.findByRole("button", { name: /纽约 1 · DigitalOcean/ }));
-    expect(await screen.findByText("正在安装 65%")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "加入「上海 1 号」" })).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: /新加坡 1 · DigitalOcean/ }));
-    fireEvent.click(await screen.findByRole("button", { name: "加入「上海 1 号」" }));
-    expect(onJoinServer).toHaveBeenCalled();
   });
 });

@@ -58,7 +58,6 @@ function prepareApp() {
     "veyl.configs.mock.v1",
     JSON.stringify({ configs: [CONFIG], activeId: "cfg-home" }),
   );
-  localStorage.setItem("veyl.onboarding.skipped", "1");
   localStorage.setItem("veyl.ui.panelOpen", "1");
   localStorage.setItem("veyl.ui.panelVersion", "redesign-1");
 }
