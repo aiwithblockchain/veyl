@@ -105,6 +105,15 @@ pub trait VpnToolServices: Send + Sync {
     async fn runtime_restart(&self, reason: Option<String>) -> anyhow::Result<Value>;
     async fn runtime_logs(&self, lines: u32, level: Option<String>) -> anyhow::Result<Value>;
 
+    /// 免费节点 7 天试用状态。只读，不触发到期清理。
+    async fn trial_status(&self) -> anyhow::Result<Value> {
+        not_wired("试用状态")
+    }
+    /// 到期检查由 Host 在启动 / 连接成功 / 每 5 分钟调用；不是工具。
+    async fn check_trial_expiry(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn core_list_versions(&self) -> anyhow::Result<Value>;
     // 运行库的安装不再由 AI 触发：CoreInstall 已从工具集移除。
     // 下面这一组只服务于「高级设置 → 运行库」里用户主动发起的操作。
@@ -3347,6 +3356,22 @@ impl VpnToolServices for WiredServices {
         self.connect(&config).await
     }
 
+    async fn trial_status(&self) -> anyhow::Result<Value> {
+        let conn = self.store.conn();
+        crate::trial::status_json(&conn).map_err(|error| svc_error(error.code(), error))
+    }
+
+    /// 到期清理：数据库事务先提交，之后才断连；断连失败不回滚。
+    ///
+    /// 返回 `Some` 只会在第一次写入 `ended_at` 时发生，所以 `trial-expired`
+    /// 每台机器最多发一次。
+    async fn check_trial_expiry(&self) -> anyhow::Result<()> {
+        if let Some(expired) = self.expire_trial_store()? {
+            self.finish_trial_expiry(expired).await;
+        }
+        Ok(())
+    }
+
     async fn runtime_stop(&self, _force: bool) -> anyhow::Result<Value> {
         let started = std::time::Instant::now();
         let connected = self.connected_config_id().await;
@@ -6331,6 +6356,89 @@ impl WiredServices {
         }
     }
 
+    /// 只跑到期事务，不做断连。启动路径先同步调用它，保证 UI 首次读
+    /// `trial_status` 时节点已经移除；断连随后在后台任务里完成。
+    pub(crate) fn expire_trial_store(&self) -> anyhow::Result<Option<crate::trial::Expired>> {
+        let conn = self.store.conn();
+        crate::trial::expire_if_needed(&conn, crate::store::now_ms())
+            .map_err(|error| svc_error(error.code(), error))
+    }
+
+    /// 事务提交后的断连与事件。到期瞬间连接还在启动时，等启动结束再判断，
+    /// 最多等 30 秒；停止失败不回滚数据库。
+    pub(crate) async fn finish_trial_expiry(&self, expired: crate::trial::Expired) {
+        let mut disconnected = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let status = self.connection_status().await;
+            let uses_removed = status
+                .node_id
+                .as_ref()
+                .is_some_and(|id| expired.removed_node_ids.contains(id));
+            if uses_removed {
+                match self.runtime_stop(false).await {
+                    Ok(_) => disconnected = true,
+                    Err(error) => {
+                        log::warn!("试用到期后断开连接失败（数据库不回滚）：{error}")
+                    }
+                }
+                break;
+            }
+
+            let launching = self.tun.is_launching()
+                || matches!(
+                    self.manager.status().await.state,
+                    crate::runtime::RuntimeState::Starting
+                        | crate::runtime::RuntimeState::Restarting
+                );
+            if !launching || std::time::Instant::now() >= deadline {
+                break;
+            }
+            // 到期瞬间还在启动：节点 id 要等启动落地才知道，等它落定再判一次。
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        crate::agent::app_handle::emit(
+            crate::claurst_session::events::EV_TRIAL_EXPIRED,
+            json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "ended_at": crate::store::iso_from_ms(expired.ended_at_ms),
+                "removed_node_count": expired.removed_node_count(),
+                "disconnected": disconnected,
+                "emitted_at": crate::claurst_session::events::now(),
+            }),
+        );
+    }
+
+    /// 连接成功后的试用钩子：本次连的是种子节点才起算，只写一次。
+    async fn note_trial_connection(&self, snapshot: &Value) {
+        if !matches!(
+            snapshot.get("state").and_then(Value::as_str),
+            Some("running") | Some("degraded")
+        ) {
+            return;
+        }
+        let Some(node_id) = snapshot.get("node_id").and_then(Value::as_str) else {
+            return;
+        };
+        let is_seed = {
+            let conn = self.store.conn();
+            configs::get_node(&conn, node_id)
+                .ok()
+                .flatten()
+                .is_some_and(|node| node.source == configs::SOURCE_SEED)
+        };
+        if is_seed {
+            let conn = self.store.conn();
+            if let Err(error) = crate::trial::mark_started(&conn, crate::store::now_ms()) {
+                log::warn!("写入试用开始时间失败：{error}");
+            }
+        }
+        if let Err(error) = self.check_trial_expiry().await {
+            log::warn!("连接后检查试用到期失败：{error}");
+        }
+    }
+
     /// 连接一套配置。分流与节点准备两种模式共用，只有「怎么起」不同。
     /// debug 构建：一次连接的结果与耗时集中成一行，失败时带上「卡在哪一步」。
     async fn connect(&self, config: &configs::Config) -> anyhow::Result<Value> {
@@ -6357,6 +6465,10 @@ impl WiredServices {
                     );
                 }
             }
+        }
+        if let Ok(snapshot) = &result {
+            // 首连种子节点才起算试用；同时执行「连接成功后」的到期检查。
+            self.note_trial_connection(snapshot).await;
         }
         result.map_err(|error| {
             let changed = connect_changed_state(&error);
@@ -10132,6 +10244,71 @@ mod main_flow_tests {
         config_id
     }
 
+    /// 一套配置 + 一个种子来源的节点，用来验证试用起算与到期清理。
+    async fn create_config_with_seed_node(
+        services: &WiredServices,
+        name: &str,
+        password: &str,
+    ) -> (String, String) {
+        let created = services.config_create(auto_port_input(name)).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node_id = format!("node_seed_{:016x}", rand::random::<u64>());
+        let password_ref = format!("node:{node_id}");
+        crate::secrets::set_secret(&password_ref, password).unwrap();
+        {
+            let conn = services.store.conn();
+            configs::upsert_node(
+                &conn,
+                &configs::NewNode {
+                    id: &node_id,
+                    name: "免费节点",
+                    server: "198.51.100.60",
+                    port: 8388,
+                    method: "aes-256-gcm",
+                    password_ref: &password_ref, // secret-scan:allow 测试夹具口令
+                    source: configs::SOURCE_SEED,
+                    source_key: &format!("seed-key-{node_id}"),
+                },
+            )
+            .unwrap();
+            configs::attach_node(&conn, &config_id, &node_id).unwrap();
+            configs::update(
+                &conn,
+                &config_id,
+                &configs::ConfigPatch {
+                    current_node_id: Some(Some(node_id.clone())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        (config_id, node_id)
+    }
+
+    /// 往已有配置挂一个种子来源的节点（不改变当前节点）。
+    fn attach_seed_node(services: &WiredServices, config_id: &str, hint: &str) -> String {
+        let node_id = format!("node_seed_{:016x}", rand::random::<u64>());
+        let password_ref = format!("node:{node_id}");
+        crate::secrets::set_secret(&password_ref, "pw-attached-seed").unwrap(); // secret-scan:allow
+        let conn = services.store.conn();
+        configs::upsert_node(
+            &conn,
+            &configs::NewNode {
+                id: &node_id,
+                name: "免费节点",
+                server: "198.51.100.61",
+                port: 8388,
+                method: "aes-256-gcm",
+                password_ref: &password_ref,
+                source: configs::SOURCE_SEED,
+                source_key: &format!("seed-key-{hint}-{node_id}"),
+            },
+        )
+        .unwrap();
+        configs::attach_node(&conn, config_id, &node_id).unwrap();
+        node_id
+    }
+
     /// 手动停掉运行时，绕开 `runtime_stop` 的 TUN XPC（同主流程测试的降级说明）。
     async fn stop_runtime(h: &Harness) {
         let _ = h.services.restore_system_proxy();
@@ -10869,6 +11046,151 @@ mod main_flow_tests {
         watcher.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// 首连种子节点起算试用；幂等重连不重复写。
+    #[tokio::test]
+    async fn a_seed_connection_starts_the_trial_only_once() {
+        let h = harness();
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let (config_id, _) = create_config_with_seed_node(&h.services, "试用起算", "pw-trial").await;
+
+        let connected = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
+        assert_eq!(connected["state"], "running", "{connected}");
+        let first = {
+            let conn = h.services.store.conn();
+            crate::trial::status(&conn).unwrap()
+        };
+        assert_eq!(first.phase, crate::trial::Phase::Active);
+        let started_at = first.started_at_ms.expect("首次连上种子节点必须起算");
+
+        let again = h.services.runtime_start(Some(config_id)).await.unwrap();
+        assert_eq!(again["already_running"], true);
+        let after = {
+            let conn = h.services.store.conn();
+            crate::trial::status(&conn).unwrap()
+        };
+        assert_eq!(after.started_at_ms, Some(started_at), "只写一次");
+
+        stop_runtime(&h).await;
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 连自建节点不起算试用。
+    #[tokio::test]
+    async fn a_manual_node_connection_does_not_start_the_trial() {
+        let h = harness();
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let config_id = create_config_with_node(&h.services, "自建节点", "pw-manual").await;
+
+        let connected = h.services.runtime_start(Some(config_id)).await.unwrap();
+        assert_eq!(connected["state"], "running", "{connected}");
+        let status = {
+            let conn = h.services.store.conn();
+            crate::trial::status(&conn).unwrap()
+        };
+        assert_eq!(status.phase, crate::trial::Phase::Available);
+        assert_eq!(status.started_at_ms, None);
+
+        stop_runtime(&h).await;
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 到期清理先提交；断连失败不回滚数据库，也不会再次发清理结果。
+    #[tokio::test]
+    async fn trial_expiry_commits_even_when_disconnect_fails() {
+        let mut h = harness();
+        let (config_id, node_id) =
+            create_config_with_seed_node(&h.services, "到期清理", "pw-expire").await;
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::failing()));
+        h.services
+            .tun
+            .force_running_for_test(4242, Some(&config_id));
+        h.services.tun.set_current_node(&node_id, "免费节点");
+        {
+            let conn = h.services.store.conn();
+            let at = crate::store::now_ms() - crate::trial::TRIAL_DURATION_MS - 1;
+            assert!(crate::trial::mark_started(&conn, at).unwrap());
+        }
+
+        h.services
+            .check_trial_expiry()
+            .await
+            .expect("断连失败不能让清理报错");
+
+        {
+            let conn = h.services.store.conn();
+            let status = crate::trial::status(&conn).unwrap();
+            assert_eq!(status.phase, crate::trial::Phase::Expired);
+            assert_eq!(status.remaining_ms, Some(0));
+            let seed_links: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM config_nodes cn
+                       JOIN nodes n ON n.id = cn.node_id
+                      WHERE n.source = ?1",
+                    rusqlite::params![configs::SOURCE_SEED],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(seed_links, 0, "数据库必须已经清理，不能因断连失败回滚");
+            // 第二次检查不再返回清理结果：事件只发一次。
+            assert!(crate::trial::expire_if_needed(&conn, crate::store::now_ms())
+                .unwrap()
+                .is_none());
+        }
+        assert!(
+            matches!(
+                h.services.tun.status(),
+                crate::tun::session::TunState::Running { .. }
+            ),
+            "停止失败时连接应保持原状"
+        );
+    }
+
+    /// 到期时连的是自建节点：只能清种子关联，不能断开当前连接。
+    #[tokio::test]
+    async fn trial_expiry_keeps_a_manual_connection_alive() {
+        let mut h = harness();
+        let config_id = create_config_with_node(&h.services, "自建在线", "pw-manual-expire").await;
+        let manual_node_id = {
+            let conn = h.services.store.conn();
+            configs::get(&conn, &config_id)
+                .unwrap()
+                .unwrap()
+                .current_node_id
+                .expect("新建节点应成为当前节点")
+        };
+        attach_seed_node(&h.services, &config_id, "manual-case");
+
+        let backend = Arc::new(SilentTun::default());
+        inject_silent_tun(&mut h.services, Arc::clone(&backend));
+        h.services
+            .tun
+            .force_running_for_test(4242, Some(&config_id));
+        h.services.tun.set_current_node(&manual_node_id, "自建");
+        {
+            let conn = h.services.store.conn();
+            let at = crate::store::now_ms() - crate::trial::TRIAL_DURATION_MS - 1;
+            assert!(crate::trial::mark_started(&conn, at).unwrap());
+        }
+
+        h.services.check_trial_expiry().await.unwrap();
+
+        assert_eq!(backend.stops(), 0, "自建节点不能因为试用到期被断开");
+        assert!(matches!(
+            h.services.tun.status(),
+            crate::tun::session::TunState::Running { .. }
+        ));
+        let conn = h.services.store.conn();
+        let seed_links: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM config_nodes cn
+                   JOIN nodes n ON n.id = cn.node_id
+                  WHERE n.source = ?1",
+                rusqlite::params![configs::SOURCE_SEED],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(seed_links, 0, "种子关联仍要清掉");
+    }
 }
 
 #[cfg(test)]

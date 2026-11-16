@@ -24,6 +24,7 @@ pub mod secrets;
 pub mod seed;
 pub mod store;
 pub mod tools;
+pub mod trial;
 pub mod tun;
 
 #[cfg(test)]
@@ -126,6 +127,8 @@ pub fn run() {
     ));
     // 后台检查 helper 是否还是包里的那份；不阻塞启动、不弹窗。
     wired.spawn_helper_updater();
+    // 启动清理只跑事务；断连放到后台任务，不能拖住启动。
+    let trial_wired = Arc::clone(&wired);
 
     // 退出与托盘共用的句柄。运行时、代理与配置目录都从这里取。
     // TUN 的 sing-box 由 helper 持有，退出时必须单独停（见 lifecycle）。
@@ -277,6 +280,32 @@ pub fn run() {
                 }
             });
 
+            // 免费节点试用：启动只同步跑到期事务，保证 UI 首次读 trial_status 时
+            // `expired` 已经是「节点已移除之后」的状态；断连与事件交给后台，
+            // 不阻塞主线程等 `runtime_stop`（commands.md §7.19）。
+            let expired = match trial_wired.expire_trial_store() {
+                Ok(expired) => expired,
+                Err(error) => {
+                    log::warn!("启动时检查试用到期失败：{error}");
+                    None
+                }
+            };
+            if let Some(expired) = expired {
+                tauri::async_runtime::spawn(async move {
+                    trial_wired.finish_trial_expiry(expired).await;
+                });
+            }
+            // 第三个触发时机：每 5 分钟一次（另外两处是启动与连接成功）。
+            let trial_periodic = Arc::clone(&setup_state.services);
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+                    if let Err(error) = trial_periodic.check_trial_expiry().await {
+                        log::warn!("定时检查试用到期失败：{error}");
+                    }
+                }
+            });
+
             // 规则数据：随包归档 → app_data/rules/<version>/。失败不阻塞启动，
             // 生成分流配置时再报 RULES_NOT_READY。
             let resource_dir = app.path().resource_dir().ok();
@@ -351,6 +380,7 @@ pub fn run() {
                 agent::commands::ai_cancel,
                 agent::commands::runtime_status,
                 agent::commands::quit_decision,
+                agent::commands::trial_status,
                 agent::commands::proxy_port_get,
                 agent::commands::proxy_port_set,
                 agent::commands::proxy_recovery_report,
@@ -436,6 +466,7 @@ pub fn run() {
                 agent::commands::ai_cancel,
                 agent::commands::runtime_status,
                 agent::commands::quit_decision,
+                agent::commands::trial_status,
                 agent::commands::proxy_port_get,
                 agent::commands::proxy_port_set,
                 agent::commands::proxy_recovery_report,

@@ -164,6 +164,15 @@ CREATE TABLE IF NOT EXISTS seed_node_exclusions (
     created_at INTEGER NOT NULL
 );
 
+-- 免费节点 7 天试用（data-model.md §3.12）。单行；行不存在 = 从未开始。
+-- started_at 在第一次用种子节点连上时写入，只写一次；ended_at 在到期清理时写入。
+CREATE TABLE IF NOT EXISTS trial_state (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    started_at  INTEGER,
+    ended_at    INTEGER,
+    CHECK (ended_at IS NULL OR started_at IS NOT NULL)
+);
+
 -- 当前生效的规则数据版本（单行）。规则文件本身在 app_data/rules/<version>/。
 CREATE TABLE IF NOT EXISTS rules_state (
     id              INTEGER PRIMARY KEY CHECK (id = 1),

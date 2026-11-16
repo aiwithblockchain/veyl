@@ -411,7 +411,7 @@ CREATE TABLE trial_state (
 - **行可以不存在**：从未连过免费节点时没有这一行，读取一律按 `state = "available"`（`commands.md` §7.19）。
 - `started_at` 只写一次：只在「连接成功且本次连接的节点 `source = 'seed'`」时写；连自建节点不起算。
 - `expires_at` 是派生值（`started_at + 7d`），**不落库**——落库会与「改系统时间」产生两份互相矛盾的事实。
-- `ended_at` 写入即表示试用结束。到期清理同一个事务里还要：把当前配置里的种子节点写进 `seed_node_exclusions`（防止下次 `default_profile_refresh` 把它们加回来）、删除这些节点的 `config_nodes` 关联、必要时把 `configs.current_node_id` 改到剩余节点或置 `null`。
+- `ended_at` 写入即表示试用结束。到期清理同一个事务里还要：把**全库的**种子节点写进 `seed_node_exclusions`（防止下次 `default_profile_refresh` 把它们加回来）、删除这些节点在**所有配置**里的 `config_nodes` 关联、必要时把各配置的 `configs.current_node_id` 改到剩余节点或置 `null`。
 - **节点行本身不删**：`nodes(source = 'seed')` 保留，池子里看不见它们只是因为 `config_nodes` 关联没了；凭证仍在 `secrets.enc`，供离线诊断。
 - 删除该行等于重置试用。**没有任何命令或工具能删它**；重装应用会连同数据库一起重建，这是唯一的重置途径，接受。
 

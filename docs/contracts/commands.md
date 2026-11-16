@@ -1686,23 +1686,24 @@ type TrialStatusData = {
   started_at: string | null;      // ISO 8601 UTC；available 时 null
   expires_at: string | null;      // started_at + 7d（Host 计算）；available 时 null
   remaining_ms: number | null;    // expired 恒为 0；available 为 null；active 为剩余毫秒（不小于 0）
-  seed_node_count: number;        // 当前配置节点集里 source = 'seed' 的节点数
+  seed_node_count: number;        // 全库去重的 source = 'seed' 节点数（所有配置并集）
 };
 ```
 
 | `state` | 条件 | `seed_node_count` |
 |---|---|---|
-| `available` | `trial_state` 无行，或 `started_at` 为 `null` | 0（还没开始，池里不应有种子节点） |
-| `active` | `started_at` 非空、`ended_at` 为空、`now < started_at + 7d` | 正常为 1–2 |
+| `available` | `trial_state` 无行，或 `started_at` 为 `null` | 全库实际种子节点数（可能 1–2：已建种子配置但还没连） |
+| `active` | `started_at` 非空、`ended_at` 为空、`now < started_at + 7d` | 全库去重，正常为 1–2 |
 | `expired` | `ended_at` 非空，或 `now >= started_at + 7d` | 清理完成后恒为 0 |
 
 - **起算点**：只有「连接成功且本次连接的节点 `source = 'seed'`」才写 `started_at`，由 Host 在 `runtime_start` 成功后写入，**没有对应的写命令**。连自建节点不起算。
-- **到期清理不属于本命令**。清理由 Host 在三个时机自行执行：应用启动、`runtime_start` 成功之后、每 5 分钟定时。UI 在启动时读 `trial_status`，此时启动清理已经跑过——`state = "expired"` 就一定是「节点已移除」之后的状态，不需要 UI 再判断一次。
+- **到期清理不属于本命令**。清理由 Host 在三个时机自行执行：应用启动、`runtime_start` 成功之后、每 5 分钟定时。启动时只跑数据库事务，断连放到后台任务，不阻塞启动。UI 在启动时读 `trial_status`，此时事务已经提交——`state = "expired"` 就一定是「节点已移除」之后的状态，不需要 UI 再判断一次。
+- **清理范围是全库**：所有配置里的种子节点关联都移除，不区分当前激活配置。
 - **清理步骤（一次数据库事务 + 一次运行时动作）**：
-  1. 把当前配置里的种子节点写进 `seed_node_exclusions`（防止下次 `default_profile_refresh` 加回来）；
-  2. 删除这些节点的 `config_nodes` 关联；`configs.current_node_id` 若指向被移除的节点，改到剩余第一个，没有剩余则置 `null`；
+  1. 把全库的种子节点写进 `seed_node_exclusions`（防止下次 `default_profile_refresh` 加回来）；
+  2. 删除这些节点的所有 `config_nodes` 关联；`configs.current_node_id` 若指向被移除的节点，改到剩余第一个，没有剩余则置 `null`；
   3. 写 `trial_state.ended_at`；
-  4. 事务提交后：若 `RuntimeSnapshot.node_id` 属于被移除的节点 → `runtime_stop`；
+  4. 事务提交后：若 `RuntimeSnapshot.node_id` 属于被移除的节点 → `runtime_stop`。到期瞬间该连接还在启动（launching）时，等启动结束再重试，最多 30 秒，不能只试一次就放弃；
   5. 发 `trial-expired`（`events.md` §4.24），载荷带 `disconnected` 真实结果。
   **先提交再断连**：断连失败不回滚数据库——节点已经不该存在，回滚只会让用户连着一台试用已结束的服务器。
 - `remaining_ms` 由 Host 算，界面不自己做减法。
@@ -2442,6 +2443,7 @@ type RulesStatus = {
 | 4 | `text` 可省略，仅当 `hidden = true` 且 `context.last_action` 非空；文本由 Host 按固定模板生成，前端不得自己拼 | 语义 | 同一句话只有一处出处 |
 | 5 | 全局单配置口径（§3.1）：界面不再有配置列表 / 新建 / 切换；`config_list` 仅供内部与 AI 工具；老库多行不删、不迁移、不可见；`ConfigCreate` / `ConfigDelete` 的去留不在本版决定 | 口径收紧 | `ai-first-product.md` §全局配置与设置 |
 | 6 | §12.2 块表增 `action_card`：模型给的按钮只上报 `action_id`，**不直接执行命令** | 说明 | 模型写的按钮不能变成写入入口 |
+| 7 | 试用清理口径定为**全库**：§7.19 步骤 1/2 覆盖所有配置的种子节点关联，`trial_status.seed_node_count` 与 `removed_node_count` 都按全库去重计数；`available` 不再恒报 0；启动清理只跑事务、断连放后台；到期瞬间连接正在启动时等启动结束再重试 `runtime_stop`，最多 30 秒 | 语义收紧 | P1 复核裁定 |
 
 ### 2.35.0（2026-11-16，应用内退出确认）
 

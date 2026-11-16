@@ -1110,13 +1110,15 @@ type MyServerOrderChangedPayload = {
 type TrialExpiredPayload = {
   contract_version: "2.15.0";
   ended_at: string;              // 试用结束时刻（ISO 8601 UTC），与 trial_state.ended_at 同值
-  removed_node_count: number;    // 从当前配置里移除的种子节点数；可能为 0（池里本来就没有）
+  removed_node_count: number;    // 全库去重后移除的种子节点数；可能为 0（池里本来就没有）
   disconnected: boolean;         // 本次是否真的断开了连接
   emitted_at: string;
 };
 ```
 
 - **发在数据库事务提交之后**，不是之前。发出时节点一定已经不在池里；`disconnected` 只是运行时的真实结果。
+- **清理范围是全库**：所有配置里的种子节点关联都移除；`removed_node_count` 按全库去重计数。
+- **到期瞬间正在启动的连接**：事务先提交，Host 等该次启动结束再尝试 `runtime_stop`，最多 30 秒；`disconnected` 仍按最终的真实结果填。
 - **每台机器最多发一次**：`trial_state.ended_at` 写入后，后续扫描直接跳过。没有「再次到期」。
 - `disconnected = false` 有两种情况——到期时本来就没连，或者 `runtime_stop` 失败。**UI 收到后必须重读 `runtime_status`**，不得只凭这个布尔值改连接状态：把它当「已断开」会在停止失败时显示一个假的成功。
 - UI 按 `state = "expired"` 渲染到期屏（只有一个「新建节点」按钮），并在 `removed_node_count > 0` 时把节点卡里的行去掉；不弹 toast。
@@ -1262,6 +1264,7 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 | 4 | §4.13 布局词汇从 5 块扩到 6 块，新增 `action_card`：props schema、id 字符集、1–3 个按钮、**点击只上报不执行命令**、禁止出现价格 / IP / 端口 / 版本号 / 地区名 | 语义扩展 | UI 与 AI 共用操作面 |
 | 5 | `tools.md` 3.14.0 增 `OpenSettings` / `MyServerFailure`；`data-model.md` 7 增 `trial_state`；`commands.md` 2.36.0 | 矩阵同步 | 同批 |
 | 6 | 事件总表新增 #31 `quit-dismissed`，§4.7.5 写明：超时 / 回落原生 / panic 时发，前端收到后收起弹窗；正常决策与重复决策不发 | 新增事件 | 退出确认 P1 复核 |
+| 7 | §4.24 清理口径改为**全库**：`removed_node_count` 是全库去重的种子节点数；补「到期瞬间连接正在启动时等启动结束再重试 `runtime_stop`，最多 30 秒」 | 语义收紧 | P1 复核裁定 |
 
 ### 2.14.0（2026-11-16，应用内退出确认）
 

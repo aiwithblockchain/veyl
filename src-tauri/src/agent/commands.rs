@@ -148,6 +148,12 @@ pub async fn quit_decision(action: String) -> Result<Value, Value> {
     }
 }
 
+/// 免费节点 7 天试用状态。只读本地，不触发到期清理。
+#[tauri::command]
+pub async fn trial_status(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    state.services.trial_status().await.map_err(error_value)
+}
+
 fn command_error(code: &str, message: impl std::fmt::Display, details: Value) -> Value {
     json!({
         "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
