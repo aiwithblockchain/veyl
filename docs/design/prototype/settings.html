@@ -371,6 +371,64 @@
     background: rgba(0, 0, 0, 0.18);
   }
 
+  .overlay__inner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    max-height: 100%;
+  }
+
+  /* 咨询 AI：弹层收窄左移，右侧并排助手面板 */
+  .overlay.is-consulting {
+    padding-left: 48px;
+    justify-content: flex-start;
+  }
+
+  .overlay.is-consulting .overlay__inner { justify-content: flex-start; }
+
+  .overlay.is-consulting .modal { width: 560px; }
+
+  .consult {
+    width: 380px;
+    height: 560px;
+    display: flex;
+    flex-direction: column;
+    border-radius: 14px;
+    background: #FFFFFF;
+    box-shadow: 0 12px 32px rgba(20, 22, 28, 0.14);
+    overflow: hidden;
+  }
+
+  .consult__head {
+    flex: 0 0 auto;
+    height: 52px;
+    padding: 0 20px;
+    display: flex;
+    align-items: center;
+  }
+
+  .consult__label {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--ink-2);
+  }
+
+  .consult__body {
+    flex: 1 1 auto;
+    padding: 4px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow: auto;
+  }
+
+  .consult__composer {
+    flex: 0 0 auto;
+    padding: 12px 20px 20px;
+  }
+
   .modal {
     width: 640px;
     height: 560px;
@@ -381,6 +439,7 @@
     background: #FFFFFF;
     box-shadow: 0 12px 32px rgba(20, 22, 28, 0.14);
     overflow: hidden;
+    transition: width 200ms ease;
     animation: modal-in 160ms ease-out both;
   }
 
@@ -489,6 +548,29 @@
   .setting:first-child { padding-top: 0; }
 
   .setting:last-child { border-bottom: 0; }
+
+  /* AI 指到某一行：1px 描边 + 极浅底，2 秒后淡出 */
+  .setting.is-pointed { position: relative; }
+
+  .setting.is-pointed::after {
+    content: "";
+    position: absolute;
+    inset: 4px -12px;
+    z-index: 0;
+    border: 1px solid var(--focus);
+    border-radius: 8px;
+    background: #FFF5F7;
+    opacity: 1;
+    transition: opacity 500ms ease;
+    pointer-events: none;
+  }
+
+  .setting.is-pointed > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  .setting.is-pointed.is-fading::after { opacity: 0; }
 
   .setting__head {
     display: flex;
@@ -791,9 +873,7 @@
           </svg>
         </button>
       </header>
-      <div class="chat__body">
-        <p class="chat__msg" id="chat-msg" hidden>你想了解哪个设置？告诉我，我解释它改变什么、什么时候该改。</p>
-      </div>
+      <div class="chat__body"></div>
       <div class="chat__composer">
         <input class="chat__field" id="chat-input" type="text" autocomplete="off"
           placeholder="告诉 Veyl 你要什么…" />
@@ -812,7 +892,8 @@
   </div>
 
   <div class="overlay" id="overlay">
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="overlay__inner">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <header class="modal__head">
         <h1 class="modal__title" id="settings-title">设置</h1>
         <div class="modal__actions">
@@ -853,7 +934,7 @@
           </section>
 
           <section id="panel-connection" aria-label="连接设置">
-            <div class="setting">
+            <div class="setting" id="mode-setting">
               <div class="setting__head">
                 <span class="setting__label">接管方式</span>
                 <div class="segmented" id="mode-seg" role="group" aria-label="接管方式">
@@ -918,6 +999,21 @@
         </div>
       </div>
     </div>
+
+      <aside class="consult" id="consult" aria-label="助手" hidden>
+        <header class="consult__head">
+          <span class="consult__label">助手</span>
+        </header>
+        <div class="consult__body">
+          <p class="chat__msg">你想了解哪个设置？</p>
+          <p class="chat__msg">接管方式决定哪些流量进隧道：Tun 接管全部，Proxy 只给设了代理的软件。</p>
+        </div>
+        <div class="consult__composer">
+          <input class="chat__field" type="text" autocomplete="off"
+            placeholder="告诉 Veyl 你要什么…" aria-label="告诉 Veyl 你要什么" />
+        </div>
+      </aside>
+    </div>
   </div>
 
 <script>
@@ -939,6 +1035,7 @@
   function closeSettings() {
     overlay.hidden = true;
     settingsNav.classList.remove("is-active");
+    stopConsulting();
   }
 
   settingsNav.addEventListener("click", openSettings);
@@ -964,9 +1061,7 @@
     tab.addEventListener("click", () => showPanel(tab.dataset.panel));
   });
 
-  // 助手面板：可收起为右边缘 tab；问 AI 时确保展开并给出示例消息
-  const chatMsg = document.getElementById("chat-msg");
-
+  // 应用内助手面板：仍可收起为右边缘 tab
   function expandChat() {
     document.body.classList.remove("is-collapsed");
   }
@@ -978,12 +1073,44 @@
   document.getElementById("chat-collapse").addEventListener("click", collapseChat);
   document.getElementById("chat-expand").addEventListener("click", expandChat);
 
+  // 咨询 AI：弹层收窄左移，右侧并排展开助手面板，并短暂指到「接管方式」这一行
+  const consult = document.getElementById("consult");
+  const modeSetting = document.getElementById("mode-setting");
+  let consulting = false;
+  let highlightTimer = null;
+  let fadeTimer = null;
+
+  function clearHighlight() {
+    window.clearTimeout(highlightTimer);
+    window.clearTimeout(fadeTimer);
+    modeSetting.classList.remove("is-pointed", "is-fading");
+  }
+
+  function stopConsulting() {
+    consulting = false;
+    overlay.classList.remove("is-consulting");
+    consult.hidden = true;
+    clearHighlight();
+  }
+
   document.getElementById("ask-ai").addEventListener("click", () => {
-    // 咨询 AI：收起设置，转到助手并聚焦输入框。
-    closeSettings();
-    expandChat();
-    chatMsg.hidden = false;
-    document.getElementById("chat-input").focus();
+    if (consulting) {
+      stopConsulting();
+      return;
+    }
+    consulting = true;
+    overlay.classList.add("is-consulting");
+    consult.hidden = false;
+    // AI 指的是「接管方式」这一行，先把连接页切出来。
+    showPanel("connection");
+
+    // simulated：高亮约 2 秒后淡出，演示「AI 指到哪一行」。
+    clearHighlight();
+    modeSetting.classList.add("is-pointed");
+    highlightTimer = window.setTimeout(() => {
+      modeSetting.classList.add("is-fading");
+      fadeTimer = window.setTimeout(clearHighlight, 500);
+    }, 2000);
   });
 
   // 接管方式
