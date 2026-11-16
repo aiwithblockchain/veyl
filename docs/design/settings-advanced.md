@@ -43,7 +43,7 @@
 ```
 AI 助手
 ├─ 用哪个 AI 服务
-│   DeepSeek · deepseek-chat        当前
+│   DeepSeek · deepseek-flash        当前
 │   [ 测试 ] [ 编辑 ]
 │   OpenAI · gpt-4o-mini
 │   [ 设为当前 ] [ 测试 ] [ 编辑 ] [ 删除 ]
@@ -97,7 +97,7 @@ AI 助手
 AI 助手用这里的服务回答你；换服务或换模型都在这里。
 
 ┌──────────────────────────────────────────────┐
-│ DeepSeek · deepseek-chat            当前     │
+│ DeepSeek · deepseek-flash            当前     │
 │ https://api.deepseek.com      [测试] [编辑]  │
 ├──────────────────────────────────────────────┤
 │ OpenAI · gpt-4o-mini                         │

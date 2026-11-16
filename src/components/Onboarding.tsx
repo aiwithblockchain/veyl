@@ -310,7 +310,7 @@ export function Onboarding({ bridge, onDone }: Props) {
                 className="onboarding__input"
                 type="text"
                 value={custom.model}
-                placeholder="如 deepseek-chat"
+                placeholder="如 deepseek-flash"
                 autoComplete="off"
                 spellCheck={false}
                 onChange={(event) =>

@@ -55,10 +55,10 @@
 |---|---|
 | API 类型 | OpenAI 兼容 / Anthropic 兼容 |
 | Base URL | 自定义地址 |
-| 模型 | 如 `deepseek-chat`、`claude-sonnet-4-6` |
+| 模型 | 如 `deepseek-flash`、`claude-sonnet-4-6` |
 | API Key | 该端点所需的 Key |
 
-DeepSeek 主路径只是这个表单的预设：OpenAI 兼容 + `https://api.deepseek.com` + `deepseek-chat`。两条路共用同一套保存与验证逻辑。
+DeepSeek 主路径只是这个表单的预设：OpenAI 兼容 + `https://api.deepseek.com` + `deepseek-flash`。两条路共用同一套保存与验证逻辑。
 
 - 验证成功 → **自动进入第二页**，与主路径行为一致。
 - 验证失败 → 留在原页，不清空输入，旁边给出可读原因。

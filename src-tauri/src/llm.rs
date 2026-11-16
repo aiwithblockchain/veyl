@@ -13,7 +13,7 @@ use crate::store::{self, Store};
 
 pub const PROVIDER_DEEPSEEK: &str = "deepseek";
 pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
-pub const DEEPSEEK_MODEL: &str = "deepseek-chat";
+pub const DEEPSEEK_MODEL: &str = "deepseek-flash";
 pub const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com";
 pub const ANTHROPIC_DEFAULT_BASE: &str = "https://api.anthropic.com";
 
@@ -96,11 +96,54 @@ pub fn ensure_migrated(store: &Store) {
 
 pub fn records(store: &Store) -> Vec<ProviderRecord> {
     let conn = store.conn();
-    store::settings::get(&conn, SETTING_PROVIDERS)
+    let mut list = store::settings::get(&conn, SETTING_PROVIDERS)
         .ok()
         .flatten()
         .and_then(|value| serde_json::from_str::<Vec<ProviderRecord>>(&value).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for record in &mut list {
+        normalize_builtin(record);
+    }
+    list
+}
+
+/// 已下线的内置 DeepSeek 模型；读取时替换成当前默认。
+const RETIRED_DEEPSEEK_MODEL: &str = "deepseek-chat";
+
+/// 官方 DeepSeek 端点；只有指向它的内置记录才替换已下线模型。
+const DEEPSEEK_API_HOST: &str = "api.deepseek.com";
+
+/// 发布前不做数据迁移：老安装里的内置 DeepSeek 记录可能还留着已下线的模型。
+/// 读取时只补正真正过期的字段，其它值（用户自己改过的模型/base/协议）保持不动。
+/// 归一只发生在读取时；任何一次保存/删除都会把归一后的整表写回
+/// （那是用户动作，不是迁移）。
+fn normalize_builtin(record: &mut ProviderRecord) {
+    if !record.is_builtin || record.provider_id != PROVIDER_DEEPSEEK {
+        return;
+    }
+    let base = record.base_url.as_deref().map(str::trim).unwrap_or("");
+    // 空 base 会被补成官方默认；指向自建/代理的记录可能仍提供旧模型，不改。
+    let official_base = base.is_empty() || is_official_deepseek_base(base);
+    let retired_model = record
+        .model
+        .trim()
+        .eq_ignore_ascii_case(RETIRED_DEEPSEEK_MODEL);
+    if official_base && retired_model {
+        record.model = DEEPSEEK_MODEL.to_string();
+    }
+    if base.is_empty() {
+        record.base_url = Some(DEEPSEEK_BASE_URL.to_string());
+    }
+    if record.protocol.trim().is_empty() {
+        record.protocol = "openai".to_string();
+    }
+}
+
+fn is_official_deepseek_base(base: &str) -> bool {
+    reqwest::Url::parse(base)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| host.eq_ignore_ascii_case(DEEPSEEK_API_HOST))
 }
 
 pub fn active_id(store: &Store) -> Option<String> {
@@ -608,6 +651,17 @@ mod tests {
         }
     }
 
+    fn builtin_record(model: &str, base: Option<&str>) -> ProviderRecord {
+        ProviderRecord {
+            provider_id: PROVIDER_DEEPSEEK.to_string(),
+            name: "DeepSeek".to_string(),
+            protocol: "openai".to_string(),
+            base_url: base.map(str::to_string),
+            model: model.to_string(),
+            is_builtin: true,
+        }
+    }
+
     #[test]
     fn migration_is_idempotent_and_never_duplicates() {
         let store = store();
@@ -618,6 +672,172 @@ mod tests {
         assert_eq!(list[0].provider_id, PROVIDER_DEEPSEEK);
         assert!(list[0].is_builtin);
         assert_eq!(active_id(&store).as_deref(), Some(PROVIDER_DEEPSEEK));
+    }
+
+    #[test]
+    fn an_old_builtin_deepseek_record_reads_as_the_current_model() {
+        let store = store();
+        save_records(
+            &store,
+            &[builtin_record("deepseek-chat", Some(DEEPSEEK_BASE_URL))],
+        )
+        .unwrap();
+
+        let list = records(&store);
+        assert_eq!(list[0].model, DEEPSEEK_MODEL);
+        assert_eq!(list[0].base_url.as_deref(), Some(DEEPSEEK_BASE_URL));
+        assert_eq!(list[0].protocol, "openai");
+
+        // 归一只发生在读取时：库里的旧值保持不动，不是数据迁移。
+        let raw = {
+            let conn = store.conn();
+            store::settings::get(&conn, SETTING_PROVIDERS)
+                .unwrap()
+                .unwrap()
+        };
+        assert!(raw.contains("deepseek-chat"), "读取归一刻意不写库：{raw}");
+    }
+
+    #[test]
+    fn the_retired_model_match_ignores_ascii_case() {
+        for model in ["DeepSeek-Chat", "DEEPSEEK-CHAT", " deepseek-chat "] {
+            let store = store();
+            save_records(&store, &[builtin_record(model, Some(DEEPSEEK_BASE_URL))]).unwrap();
+            assert_eq!(records(&store)[0].model, DEEPSEEK_MODEL, "{model}");
+        }
+
+        // 非内置记录不受影响。
+        let store = store();
+        save_records(
+            &store,
+            &[ProviderRecord {
+                provider_id: "provider-0000beef".to_string(),
+                name: "自建 DeepSeek".to_string(),
+                protocol: "openai".to_string(),
+                base_url: Some("https://proxy.example.com".to_string()),
+                model: "DeepSeek-Chat".to_string(),
+                is_builtin: false,
+            }],
+        )
+        .unwrap();
+        assert_eq!(records(&store)[0].model, "DeepSeek-Chat");
+    }
+
+    #[test]
+    fn a_builtin_record_on_a_custom_base_keeps_the_retired_model() {
+        // 自建/代理仍可能提供 deepseek-chat，不能替用户改模型。
+        let store = store();
+        save_records(
+            &store,
+            &[builtin_record(
+                "deepseek-chat",
+                Some("https://llm-proxy.example.com/v1"),
+            )],
+        )
+        .unwrap();
+
+        let list = records(&store);
+        assert_eq!(list[0].model, "deepseek-chat");
+        assert_eq!(
+            list[0].base_url.as_deref(),
+            Some("https://llm-proxy.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn an_empty_base_counts_as_the_official_endpoint() {
+        let store = store();
+        save_records(&store, &[builtin_record("deepseek-chat", None)]).unwrap();
+
+        let list = records(&store);
+        assert_eq!(list[0].model, DEEPSEEK_MODEL);
+        assert_eq!(list[0].base_url.as_deref(), Some(DEEPSEEK_BASE_URL));
+    }
+
+    #[test]
+    fn a_builtin_record_keeps_a_deliberately_chosen_model() {
+        // 设置页允许编辑内置项；用户主动选的模型不能被读回旧值。
+        let store = store();
+        save_records(
+            &store,
+            &[builtin_record("deepseek-v4-pro", Some(DEEPSEEK_BASE_URL))],
+        )
+        .unwrap();
+
+        let list = records(&store);
+        assert_eq!(list[0].model, "deepseek-v4-pro");
+        assert_eq!(list[0].base_url.as_deref(), Some(DEEPSEEK_BASE_URL));
+        assert_eq!(list[0].protocol, "openai");
+    }
+
+    #[test]
+    fn a_builtin_record_fills_only_missing_base_and_protocol() {
+        for base in [None, Some(""), Some("   ")] {
+            let store = store();
+            save_records(
+                &store,
+                &[ProviderRecord {
+                    provider_id: PROVIDER_DEEPSEEK.to_string(),
+                    name: "DeepSeek".to_string(),
+                    protocol: String::new(),
+                    base_url: base.map(str::to_string),
+                    model: "deepseek-v4-pro".to_string(),
+                    is_builtin: true,
+                }],
+            )
+            .unwrap();
+
+            let list = records(&store);
+            assert_eq!(
+                list[0].base_url.as_deref(),
+                Some(DEEPSEEK_BASE_URL),
+                "base 为 {base:?} 时要补默认值"
+            );
+            assert_eq!(list[0].protocol, "openai", "空协议要补 openai");
+            assert_eq!(list[0].model, "deepseek-v4-pro", "补默认值不能动模型");
+        }
+    }
+
+    #[test]
+    fn credentials_see_the_normalized_builtin_model() {
+        ensure_secrets();
+        let store = store();
+        save_records(
+            &store,
+            &[builtin_record("deepseek-chat", Some(DEEPSEEK_BASE_URL))],
+        )
+        .unwrap();
+        crate::secrets::set_secret(&secret_key(PROVIDER_DEEPSEEK), "sk-test").unwrap();
+        set_active_id(&store, Some(PROVIDER_DEEPSEEK)).unwrap();
+
+        let credentials = credentials(&store).expect("内置 DeepSeek 有 Key 就必须可用");
+        assert_eq!(credentials.model, DEEPSEEK_MODEL);
+        assert_eq!(credentials.base_url, DEEPSEEK_BASE_URL);
+        assert_eq!(credentials.provider_id, PROVIDER_DEEPSEEK);
+    }
+
+    #[test]
+    fn a_user_owned_deepseek_record_is_left_alone() {
+        let store = store();
+        save_records(
+            &store,
+            &[ProviderRecord {
+                provider_id: "provider-0000dead".to_string(),
+                name: "自建 DeepSeek".to_string(),
+                protocol: "openai".to_string(),
+                base_url: Some("https://proxy.example.com".to_string()),
+                model: "deepseek-chat".to_string(),
+                is_builtin: false,
+            }],
+        )
+        .unwrap();
+
+        let list = records(&store);
+        assert_eq!(list[0].model, "deepseek-chat");
+        assert_eq!(
+            list[0].base_url.as_deref(),
+            Some("https://proxy.example.com")
+        );
     }
 
     #[test]

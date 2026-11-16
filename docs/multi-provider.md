@@ -109,7 +109,7 @@ type AiSettings = {
 
 | id | name | protocol | base_url | model |
 |---|---|---|---|---|
-| `deepseek` | DeepSeek | `openai` | `https://api.deepseek.com` | `deepseek-chat` |
+| `deepseek` | DeepSeek | `openai` | `https://api.deepseek.com` | `deepseek-flash` |
 
 内置项可以在设置页改 model，但 id 不可改。用户可新增任意数量的自定义项。
 

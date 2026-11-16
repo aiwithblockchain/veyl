@@ -2227,7 +2227,7 @@ export class MockAgentBridge implements AgentBridge {
         name: "DeepSeek",
         protocol: "openai",
         baseUrl: "https://api.deepseek.com",
-        model: "deepseek-chat",
+        model: "deepseek-flash",
         hasKey: this.keyMasked !== null,
         isActive: true,
         isBuiltin: true,

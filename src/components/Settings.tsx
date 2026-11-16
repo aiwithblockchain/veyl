@@ -498,7 +498,7 @@ const PRESETS: Array<{
     name: "DeepSeek",
     protocol: "openai",
     baseUrl: "https://api.deepseek.com",
-    model: "deepseek-chat",
+    model: "deepseek-flash",
   },
   {
     id: "openai",
@@ -1714,7 +1714,7 @@ export function Settings({
                         onChange={(event) =>
                           setProviderForm({ ...providerForm, model: event.target.value })
                         }
-                        placeholder="deepseek-chat"
+                        placeholder="deepseek-flash"
                       />
                     </div>
 

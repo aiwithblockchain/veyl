@@ -68,7 +68,7 @@ ls -t "$DATA/logs/" | head -3
   - 对话正常返回
 - **通过标准**：
   1. 只有 DeepSeek Key 一个输入项
-  2. 保存后生成的内置 provider 为：`openai` 兼容、`https://api.deepseek.com`、`deepseek-chat`
+  2. 保存后生成的内置 provider 为：`openai` 兼容、`https://api.deepseek.com`、`deepseek-flash`
   3. 不进入高级设置也能完成一次对话
   4. `secrets.enc` 里出现 `provider:deepseek`，且 `provider:` 开头的键**恰好一个**
 - **失败时抓证据**：
