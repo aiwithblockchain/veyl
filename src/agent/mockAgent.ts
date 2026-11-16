@@ -939,8 +939,12 @@ export class MockAgentBridge implements AgentBridge {
     };
   }
 
-  async openExternal(_url: string): Promise<void> {
-    // 浏览器通道没有系统浏览器调用能力；mock 里视为成功。
+  async openExternal(url: string): Promise<void> {
+    // 浏览器 mock 用新窗口模拟系统浏览器；被拦截时抛错，让调用方走手动兜底。
+    const opened = window.open(url, "_blank", "noopener,noreferrer");
+    if (opened === null) {
+      throw { code: "INTERNAL", message: "浏览器拦截了新窗口。" };
+    }
   }
 
   private emit(event: AgentEvent) {
