@@ -702,9 +702,11 @@ export interface ConfigSetModeData {
   confirmation: "accepted" | "not_needed";
 }
 
+/** 退出确认的两个结果：留后台继续跑，或断开并退出。 */
+export type QuitDecisionAction = "background" | "quit";
+
 export interface AgentBridge {
-  readonly mode: BridgeMode;
-  /** 订阅全部事件（AI 会话 + 应用事件）；返回取消订阅函数。 */
+  readonly mode: BridgeMode;  /** 订阅全部事件（AI 会话 + 应用事件）；返回取消订阅函数。 */
   subscribe(listener: (event: AgentEvent) => void): () => void;
   sendMessage(
     sessionId: string,
@@ -721,6 +723,8 @@ export interface AgentBridge {
   runtimeStart(configId?: string): Promise<RuntimeStartResult>;
   /** UI 直连：断开连接并恢复系统代理。 */
   runtimeStop(): Promise<void>;
+  /** 回传退出确认的选择；Host 收到后按 background / quit 继续退出流程。 */
+  quitDecision(action: QuitDecisionAction): Promise<void>;
   /** 左栏配置列表。只读本地库，不联网。 */
   configList(): Promise<ConfigListData>;
   /** 中间底部节点详情的数据源。 */

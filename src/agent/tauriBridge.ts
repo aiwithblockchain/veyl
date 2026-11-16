@@ -12,6 +12,7 @@ import type {
   ConfigListData,
   ConfigSetModeData,
   ConfigSetModeInput,
+  QuitDecisionAction,
   CoreCheckUpdatesResult,
   CoreInfo,
   DeepSeekKeyState,
@@ -941,6 +942,10 @@ export class TauriAgentBridge implements AgentBridge {
 
   async runtimeStop(): Promise<void> {
     await call("runtime_stop");
+  }
+
+  async quitDecision(action: QuitDecisionAction): Promise<void> {
+    await call("quit_decision", { action });
   }
 
   async configList(): Promise<ConfigListData> {

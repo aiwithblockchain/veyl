@@ -1160,6 +1160,92 @@ body[data-resizing] {
   padding-bottom: 18px;
 }
 
+/* ---------- 退出确认 ---------- */
+
+/* 退出请求是系统级拦截：压在所有弹窗与过渡遮罩之上。 */
+.quit-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.18);
+  animation: overlay-in 160ms ease-out;
+}
+
+.quit-dialog {
+  width: min(420px, calc(100vw - 48px));
+  padding: 20px 20px 18px;
+  border-radius: var(--r-lg);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-floating);
+  animation: modal-in 160ms ease-out;
+}
+
+.quit-dialog__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.quit-dialog__title {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.35;
+  font-weight: 600;
+}
+
+.quit-dialog__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin: -2px -4px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.quit-dialog__close:hover {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.quit-dialog__body {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.quit-dialog__body p { margin: 0; }
+
+.quit-dialog__error {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--err-text);
+}
+
+.quit-dialog__close:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.quit-dialog__actions {
+  margin-top: 20px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .modal__head {
   position: sticky;
   top: 0;

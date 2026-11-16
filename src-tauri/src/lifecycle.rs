@@ -5,17 +5,21 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use futures::FutureExt;
+use serde_json::json;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
+use tokio::sync::oneshot;
 
+use crate::claurst_session::events::{EV_QUIT_DISMISSED, EV_QUIT_REQUESTED};
 use crate::proxy::ProxyController;
 use crate::runtime::health::DataPlaneProbe;
 use crate::runtime::{
@@ -29,6 +33,153 @@ const MAIN_WINDOW: &str = "main";
 
 static QUITTING: AtomicBool = AtomicBool::new(false);
 static EXIT_PROMPT_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// 前端至少调过一次命令，说明页面与事件监听已经跑起来。
+static FRONTEND_ALIVE: AtomicBool = AtomicBool::new(false);
+
+/// 应用内退出确认的等待上限。
+const QUIT_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 用户在退出确认里的选择。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitDecision {
+    Background,
+    Quit,
+}
+
+impl QuitDecision {
+    pub fn parse(action: &str) -> Option<Self> {
+        match action {
+            "background" => Some(Self::Background),
+            "quit" => Some(Self::Quit),
+            _ => None,
+        }
+    }
+}
+
+/// 一次应用内确认的等待结果。
+#[derive(Debug, PartialEq, Eq)]
+pub enum PromptResult {
+    Decision(QuitDecision),
+    TimedOut,
+    Closed,
+}
+
+/// 一次只允许有一个退出确认在等；第二次决策、重复打开都按忽略处理。
+#[derive(Default)]
+pub struct QuitPrompt {
+    sender: std::sync::Mutex<Option<oneshot::Sender<QuitDecision>>>,
+}
+
+impl QuitPrompt {
+    pub fn open(&self) -> Option<oneshot::Receiver<QuitDecision>> {
+        let (sender, receiver) = oneshot::channel();
+        let mut slot = self
+            .sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_some() {
+            return None;
+        }
+        *slot = Some(sender);
+        Some(receiver)
+    }
+
+    /// 只有第一次决策生效；没有等待、已超时或已被回退路径取走时返回 false。
+    pub fn decide(&self, decision: QuitDecision) -> bool {
+        let sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        match sender {
+            Some(sender) => sender.send(decision).is_ok(),
+            None => false,
+        }
+    }
+
+    /// 放弃这次等待（回落到原生弹窗时用），迟到的决策一并作废。
+    pub fn close(&self) {
+        self.sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+}
+
+static QUIT_PROMPT: OnceLock<QuitPrompt> = OnceLock::new();
+
+fn quit_prompt() -> &'static QuitPrompt {
+    QUIT_PROMPT.get_or_init(QuitPrompt::default)
+}
+
+/// 前端命令分发处调用：页面已经能收发事件。
+pub fn note_frontend_alive() {
+    FRONTEND_ALIVE.store(true, Ordering::Relaxed);
+}
+
+fn frontend_ready() -> bool {
+    FRONTEND_ALIVE.load(Ordering::Relaxed)
+}
+
+/// 应用内确认需要页面已经能收发事件，且主窗口还在。
+fn can_use_in_app_prompt(frontend_alive: bool, has_main_window: bool) -> bool {
+    frontend_alive && has_main_window
+}
+
+/// 处理 `quit_decision`：返回是否被接受；第二次调用与非法取值都不改状态。
+pub fn resolve_quit_decision(action: &str) -> Option<bool> {
+    let decision = QuitDecision::parse(action)?;
+    Some(quit_prompt().decide(decision))
+}
+
+/// 有连接（含正在建立）才需要问；断开中不再打断退出。
+fn needs_quit_prompt(manager: RuntimeState, tun_connected: bool) -> bool {
+    tun_connected
+        || matches!(
+            manager,
+            RuntimeState::Starting
+                | RuntimeState::Running
+                | RuntimeState::Degraded
+                | RuntimeState::Restarting
+        )
+}
+
+async fn wait_decision(
+    receiver: oneshot::Receiver<QuitDecision>,
+    timeout: Duration,
+) -> PromptResult {
+    match tokio::time::timeout(timeout, receiver).await {
+        Err(_) => PromptResult::TimedOut,
+        Ok(Ok(decision)) => PromptResult::Decision(decision),
+        // 发送端被回退路径取走：那次回退会接管后续动作。
+        Ok(Err(_)) => PromptResult::Closed,
+    }
+}
+
+/// 等待结果里哪些路径需要通知前端收起弹窗：只有超时。
+/// 回落原生与 panic 在各自调用点直接发；正常决策与回落已发的 `Closed` 不重复发。
+fn should_emit_quit_dismissed(result: &PromptResult) -> bool {
+    matches!(result, PromptResult::TimedOut)
+}
+
+/// 本次应用内确认没有经过用户决策就结束了（超时、回落原生、panic）。
+fn emit_quit_dismissed<R: Runtime>(app: &AppHandle<R>) {
+    let payload = json!({
+        "contract_version": EVENT_CONTRACT_VERSION,
+        "emitted_at": crate::claurst_session::events::now(),
+    });
+    if let Err(error) = app.emit(EV_QUIT_DISMISSED, payload) {
+        log::warn!("quit-dismissed 发送失败：{error}");
+    }
+}
 
 /// 信号处理器的 self-pipe 写端；`-1` = 未安装。
 #[cfg(unix)]
@@ -391,35 +542,114 @@ pub fn on_exit_requested<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
 
 /// 托盘「退出」传 `confirm = false`，直接走退出流程。
 ///
-/// 注意：对话框一律用异步 `show_with_result`，**不要改回 `blocking_show`**。
-/// 主线程一旦被阻塞，`run_on_main_thread` 永远回不来，是标准死锁形态。
+/// `confirm = true` 时：没有连接直接退出；有连接先发 `quit-requested` 等前端弹窗，
+/// 30 秒没有决策按后台运行处理。前端不在或事件发不出去时回落到原生确认框。
+/// 状态检查放在异步任务里，不阻塞主线程；对话框继续用异步 `show_with_result`，
+/// **不要改回 `blocking_show`**——主线程一旦被阻塞，`run_on_main_thread` 永远回不来。
 pub fn request_quit<R: Runtime>(app: &AppHandle<R>, parts: Parts, confirm: bool) {
     if QUITTING.load(Ordering::SeqCst) || EXIT_PROMPT_OPEN.swap(true, Ordering::SeqCst) {
         return;
     }
     log::info!("开始退出流程 confirm={confirm}");
+    if !confirm {
+        start_shutdown(app.clone(), parts, None);
+        return;
+    }
+
     let app = app.clone();
     let recovery_app = app.clone();
-    let scheduled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        if confirm {
-            let dialog_app = app.clone();
-            ask_exit(&dialog_app, move |choice| match choice {
-                ExitChoice::Background => {
-                    EXIT_PROMPT_OPEN.store(false, Ordering::SeqCst);
-                    hide_main_window(&app);
-                }
-                ExitChoice::Quit => start_shutdown(app, parts, None),
-            });
-        } else {
-            start_shutdown(app, parts, None);
+    tauri::async_runtime::spawn(async move {
+        let flow = std::panic::AssertUnwindSafe(async move {
+            let manager_state = parts.manager.status().await.state;
+            let tun_connected = tun_running(&parts.tun) || parts.tun.is_launching();
+            if !needs_quit_prompt(manager_state, tun_connected) {
+                log::info!("退出时没有连接，直接退出");
+                start_shutdown(app, parts, None);
+                return;
+            }
+            show_main_window(&app);
+            ask_exit_in_app(app, parts).await;
+        });
+        if flow.catch_unwind().await.is_err() {
+            // 弹窗都失败时不能把进程留在「QUITTING 但没退出」的状态。
+            log::error!("退出确认流程 panic，保持后台运行");
+            QUITTING.store(false, Ordering::SeqCst);
+            EXIT_PROMPT_OPEN.store(false, Ordering::SeqCst);
+            quit_prompt().close();
+            emit_quit_dismissed(&recovery_app);
+            hide_main_window(&recovery_app);
         }
-    }));
-    if scheduled.is_err() {
-        // 弹窗都失败时不能把进程留在「QUITTING 但没退出」的状态。
-        log::error!("退出确认流程 panic，保持后台运行");
-        QUITTING.store(false, Ordering::SeqCst);
-        EXIT_PROMPT_OPEN.store(false, Ordering::SeqCst);
-        hide_main_window(&recovery_app);
+    });
+}
+
+/// 已连接时的退出确认：优先应用内弹窗，前端不可用时回落原生弹窗。
+async fn ask_exit_in_app<R: Runtime>(app: AppHandle<R>, parts: Parts) {
+    let receiver = match quit_prompt().open() {
+        Some(receiver) => receiver,
+        // 已有一次确认在等：保留那一次，不重复发事件。
+        None => return,
+    };
+
+    if !can_use_in_app_prompt(
+        frontend_ready(),
+        app.get_webview_window(MAIN_WINDOW).is_some(),
+    ) {
+        log::warn!("前端未就绪或没有主窗口，回落到原生退出确认");
+        quit_prompt().close();
+        emit_quit_dismissed(&app);
+        fall_back_to_native(app, parts);
+        return;
+    }
+
+    let payload = json!({
+        "contract_version": EVENT_CONTRACT_VERSION,
+        "emitted_at": crate::claurst_session::events::now(),
+    });
+    if let Err(error) = app.emit(EV_QUIT_REQUESTED, payload) {
+        log::warn!("quit-requested 发送失败，回落到原生退出确认：{error}");
+        quit_prompt().close();
+        emit_quit_dismissed(&app);
+        fall_back_to_native(app, parts);
+        return;
+    }
+
+    let result = wait_decision(receiver, QUIT_DECISION_TIMEOUT).await;
+    if should_emit_quit_dismissed(&result) {
+        emit_quit_dismissed(&app);
+    }
+    match result {
+        PromptResult::Decision(decision) => apply_quit_decision(app, parts, decision),
+        PromptResult::TimedOut => {
+            log::info!(
+                "退出确认 {} 秒没有决策，按后台运行处理",
+                QUIT_DECISION_TIMEOUT.as_secs()
+            );
+            // 清掉已无人接收的等待，否则下一次 Cmd+Q 会打不开新的确认。
+            quit_prompt().close();
+            apply_quit_decision(app, parts, QuitDecision::Background);
+        }
+        PromptResult::Closed => {}
+    }
+}
+
+fn fall_back_to_native<R: Runtime>(app: AppHandle<R>, parts: Parts) {
+    let dialog_app = app.clone();
+    ask_exit(&dialog_app, move |choice| {
+        let decision = match choice {
+            ExitChoice::Background => QuitDecision::Background,
+            ExitChoice::Quit => QuitDecision::Quit,
+        };
+        apply_quit_decision(app, parts, decision);
+    });
+}
+
+fn apply_quit_decision<R: Runtime>(app: AppHandle<R>, parts: Parts, decision: QuitDecision) {
+    match decision {
+        QuitDecision::Background => {
+            EXIT_PROMPT_OPEN.store(false, Ordering::SeqCst);
+            hide_main_window(&app);
+        }
+        QuitDecision::Quit => start_shutdown(app, parts, None),
     }
 }
 
@@ -628,6 +858,123 @@ fn force_cleanup(parts: &Parts) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 没有连接（或正在断开）时不该再弹窗；启动窗口算「有连接」。
+    #[test]
+    fn quit_prompt_is_needed_only_while_connected_or_connecting() {
+        for state in [
+            RuntimeState::Starting,
+            RuntimeState::Running,
+            RuntimeState::Degraded,
+            RuntimeState::Restarting,
+        ] {
+            assert!(needs_quit_prompt(state, false), "{state:?}");
+        }
+        for state in [
+            RuntimeState::Idle,
+            RuntimeState::Stopping,
+            RuntimeState::Failed,
+        ] {
+            assert!(!needs_quit_prompt(state, false), "{state:?}");
+        }
+        // TUN 连着时 manager 仍是 Idle，必须单独算上。
+        assert!(needs_quit_prompt(RuntimeState::Idle, true));
+    }
+
+    /// 前端没调过命令或主窗口不在时，不能用应用内弹窗；这条路径回落原生并补发 `quit-dismissed`。
+    #[test]
+    fn in_app_prompt_requires_a_live_frontend_and_main_window() {
+        assert!(!can_use_in_app_prompt(false, true));
+        assert!(!can_use_in_app_prompt(true, false));
+        assert!(can_use_in_app_prompt(true, true));
+    }
+
+    /// 只有超时会在等待路径上发 `quit-dismissed`；正常决策不发。
+    /// 回落原生与 panic 在各自分支直接发，`Closed` 已由回落路径发过，不重复。
+    #[test]
+    fn quit_dismissed_is_sent_only_when_no_decision_arrives() {
+        assert!(should_emit_quit_dismissed(&PromptResult::TimedOut));
+        assert!(!should_emit_quit_dismissed(&PromptResult::Decision(
+            QuitDecision::Background
+        )));
+        assert!(!should_emit_quit_dismissed(&PromptResult::Decision(
+            QuitDecision::Quit
+        )));
+        assert!(!should_emit_quit_dismissed(&PromptResult::Closed));
+    }
+
+    #[test]
+    fn quit_decision_parses_only_the_two_actions() {
+        assert_eq!(
+            QuitDecision::parse("background"),
+            Some(QuitDecision::Background)
+        );
+        assert_eq!(QuitDecision::parse("quit"), Some(QuitDecision::Quit));
+        assert_eq!(QuitDecision::parse("cancel"), None);
+    }
+
+    #[tokio::test]
+    async fn quit_prompt_forwards_background_and_ignores_a_second_decision() {
+        let prompt = QuitPrompt::default();
+        let receiver = prompt.open().expect("第一次 open 必须成功");
+        assert!(prompt.decide(QuitDecision::Background));
+        assert!(
+            !prompt.decide(QuitDecision::Quit),
+            "第二次 quit_decision 必须被忽略"
+        );
+        assert_eq!(
+            wait_decision(receiver, Duration::from_secs(1)).await,
+            PromptResult::Decision(QuitDecision::Background)
+        );
+        assert!(!prompt.is_open());
+    }
+
+    #[tokio::test]
+    async fn quit_prompt_forwards_quit() {
+        let prompt = QuitPrompt::default();
+        let receiver = prompt.open().expect("第一次 open 必须成功");
+        assert!(prompt.decide(QuitDecision::Quit));
+        assert_eq!(
+            wait_decision(receiver, Duration::from_secs(1)).await,
+            PromptResult::Decision(QuitDecision::Quit)
+        );
+    }
+
+    #[tokio::test]
+    async fn quit_prompt_times_out_and_drops_late_decisions() {
+        let prompt = QuitPrompt::default();
+        let receiver = prompt.open().expect("第一次 open 必须成功");
+        assert_eq!(
+            wait_decision(receiver, Duration::from_millis(10)).await,
+            PromptResult::TimedOut
+        );
+        // 生产路径在超时后必须 close，否则残留的发送端会让下一次确认打不开。
+        prompt.close();
+        assert!(!prompt.is_open());
+        assert!(!prompt.decide(QuitDecision::Quit), "超时后的决策不能再生效");
+    }
+
+    /// 回落到原生弹窗时关掉应用内等待，之后到达的决策一律作废。
+    #[tokio::test]
+    async fn closing_the_prompt_falls_back_and_rejects_late_decisions() {
+        let prompt = QuitPrompt::default();
+        let receiver = prompt.open().expect("第一次 open 必须成功");
+        prompt.close();
+        assert_eq!(
+            wait_decision(receiver, Duration::from_secs(1)).await,
+            PromptResult::Closed
+        );
+        assert!(!prompt.decide(QuitDecision::Background));
+    }
+
+    #[test]
+    fn quit_prompt_never_opens_twice() {
+        let prompt = QuitPrompt::default();
+        assert!(prompt.open().is_some());
+        assert!(prompt.open().is_none(), "已有确认在等时不能重复弹");
+        prompt.close();
+        assert!(prompt.open().is_some(), "上一次结束后可以重新打开");
+    }
 
     #[test]
     fn exit_interception_never_trusts_the_code() {

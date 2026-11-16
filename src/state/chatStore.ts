@@ -721,6 +721,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         case AGENT_EVENTS.runtimeHealthChanged:
         case AGENT_EVENTS.jobProgress:
         case AGENT_EVENTS.appLifecycleChanged:
+        // 退出确认由 App 的弹窗消费，不进对话流。
+        case AGENT_EVENTS.quitRequested:
+        case AGENT_EVENTS.quitDismissed:
         case AGENT_EVENTS.defaultProfileUpdated:
         case AGENT_EVENTS.askUserQuestion:
         // 配置 / 节点 / 问题 / 布局事件由各自的视图消费，不进对话流。
@@ -741,6 +744,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         // 建机状态由「我的服务器」destination 直接订阅，不进对话流。
         case AGENT_EVENTS.myServerChanged:
         case AGENT_EVENTS.myServerOrderChanged:
+        // 试用到期与 AI 指路由 App 消费，不进对话流。
+        case AGENT_EVENTS.trialExpired:
+        case AGENT_EVENTS.settingsPoint:
           return state;
 
         default:

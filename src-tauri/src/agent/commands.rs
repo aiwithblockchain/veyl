@@ -135,6 +135,19 @@ pub async fn runtime_status(state: State<'_, Arc<AppState>>) -> Result<Value, St
         .map_err(|error| error.to_string())
 }
 
+/// 应用内退出确认的决策。第二次决策与未知取值都不改状态。
+#[tauri::command]
+pub async fn quit_decision(action: String) -> Result<Value, Value> {
+    match crate::lifecycle::resolve_quit_decision(&action) {
+        Some(accepted) => Ok(json!({ "accepted": accepted })),
+        None => Err(command_error(
+            "INVALID_ARGUMENT",
+            "action 只能是 background 或 quit",
+            json!({ "reason": "invalid_action" }),
+        )),
+    }
+}
+
 fn command_error(code: &str, message: impl std::fmt::Display, details: Value) -> Value {
     json!({
         "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,

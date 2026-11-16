@@ -20,11 +20,13 @@ function contractToolNames(): string[] {
 }
 
 describe("工具名映射集合", () => {
-  it("与 tools.md §3 的 49 个工具名完全相等", () => {
+  it("与 tools.md §3 的工具名完全相等，且包含新增工具", () => {
     const names = contractToolNames();
-    expect(names).toHaveLength(49);
     expect(new Set(names)).toEqual(new Set(TOOL_NAMES));
-    expect(TOOL_NAMES).toHaveLength(49);
+    // 新工具必须有文案，避免整表对上了却漏掉刚加的两条。
+    expect(TOOL_NAMES).toEqual(
+      expect.arrayContaining(["OpenSettings", "MyServerFailure"]),
+    );
   });
 
   it("每个工具都有进行中、完成、失败与建议文案", () => {

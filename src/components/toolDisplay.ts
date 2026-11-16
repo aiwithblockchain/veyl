@@ -393,6 +393,20 @@ export const TOOL_COPY: Record<string, ToolCopy> = {
     advice: "可以稍后再试一次；已有节点不受影响。",
     readOnly: true,
   },
+  MyServerFailure: {
+    running: "正在看这次创建卡在哪",
+    done: "已查看创建失败详情",
+    failed: "失败详情读不到",
+    advice: "可以重试创建，或稍后再试一次。",
+    readOnly: true,
+  },
+  OpenSettings: {
+    running: "正在打开设置",
+    done: "已打开设置",
+    failed: "没能打开设置",
+    advice: "可以从左下角的设置图标自己进去。",
+    readOnly: true,
+  },
 };
 
 export const TOOL_NAMES = Object.keys(TOOL_COPY);

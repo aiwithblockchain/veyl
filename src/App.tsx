@@ -16,6 +16,7 @@ import type {
   DefaultProfileStatus,
   MyServer,
   PendingQuestion,
+  QuitDecisionAction,
 } from "./agent/bridge";
 import { BridgeError, toBridgeError } from "./agent/errors";
 import { AiPanel, type RenameResult } from "./components/AiPanel";
@@ -38,6 +39,7 @@ import { useNodeGroups } from "./groups/useNodeGroups";
 import { isProvisioning } from "./myservers/labels";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
+import { QuitDialog } from "./components/QuitDialog";
 import { Settings, describeImportError } from "./components/Settings";
 import type { DisplayActionOutcome } from "./components/ToolCallCard";
 import type { ToolDisplayAction } from "./components/toolDisplay";
@@ -219,6 +221,10 @@ export default function App() {
   const [repairing, setRepairing] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const [newConfigOpen, setNewConfigOpen] = useState(false);
+  const [quitOpen, setQuitOpen] = useState(false);
+  const [quitBusy, setQuitBusy] = useState(false);
+  const [quitError, setQuitError] = useState<string | null>(null);
+  const quitBusyRef = useRef(false);
   const [systemRegion, setSystemRegion] = useState<string | null>(null);
   /** AI 改地区时如果正连着：说明行要追加「地区已改，下次连接生效」。 */
   const [regionChangedWhileConnected, setRegionChangedWhileConnected] = useState(false);
@@ -626,6 +632,18 @@ export default function App() {
       if (AI_EVENTS.has(event.name)) {
         dispatch({ type: "agent_event", event });
       }
+      if (event.name === AGENT_EVENTS.quitRequested) {
+        quitBusyRef.current = false;
+        setQuitBusy(false);
+        setQuitError(null);
+        setQuitOpen(true);
+      }
+      if (event.name === AGENT_EVENTS.quitDismissed) {
+        quitBusyRef.current = false;
+        setQuitBusy(false);
+        setQuitError(null);
+        setQuitOpen(false);
+      }
       if (event.name === AGENT_EVENTS.askUserQuestion) {
         const payload = event.payload;
         if (settledQuestionIds.current.has(payload.question_id)) return;
@@ -884,6 +902,30 @@ export default function App() {
     setSettingsOpen(false);
     void refreshAiStatus();
   };
+
+  // 退出确认：命令没回执前保持弹窗（后端会一直等这次决定），失败就留在原地重试。
+  const decideQuit = useCallback(
+    (action: QuitDecisionAction) => {
+      if (quitBusyRef.current) return;
+      quitBusyRef.current = true;
+      setQuitBusy(true);
+      setQuitError(null);
+      void bridge
+        .quitDecision(action)
+        .then(() => {
+          quitBusyRef.current = false;
+          setQuitBusy(false);
+          setQuitOpen(false);
+        })
+        .catch((failure) => {
+          const error = toBridgeError(failure);
+          quitBusyRef.current = false;
+          setQuitBusy(false);
+          setQuitError(error.message || "没能把选择交给后台，请再试一次。");
+        });
+    },
+    [bridge],
+  );
 
   const togglePanel = () => {
     const next = !panelOpen;
@@ -1906,6 +1948,14 @@ export default function App() {
         runtime={runtime}
         connectMode={vpn.activeConfig?.connect_mode ?? null}
       />
+
+      {quitOpen ? (
+        <QuitDialog
+          busy={quitBusy}
+          error={quitError}
+          onDecision={decideQuit}
+        />
+      ) : null}
     </div>
   );
 }

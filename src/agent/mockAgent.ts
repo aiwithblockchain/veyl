@@ -32,6 +32,7 @@ import type {
   RenamedSession,
   ReportActionData,
   RuntimeStartResult,
+  QuitDecisionAction,
   TunHelperInfo,
   TunHelperRestartResult,
   TunHelperState,
@@ -153,9 +154,17 @@ export class MockAgentBridge implements AgentBridge {
       this.coreActiveVersion = installed;
       this.coreRestartRequired = false;
     }
+
+    // demo：浏览器里没有 Host 的菜单退出，用窗口事件模拟 quit-requested。
+    // 验收：控制台执行 window.dispatchEvent(new Event("veyl:quit-requested"))。
+    if (typeof window !== "undefined") {
+      window.addEventListener("veyl:quit-requested", () => this.requestQuitDemo());
+    }
   }
 
   private listeners = new Set<(event: AgentEvent) => void>();
+  /** 最近一次退出选择，仅供 mock 验收。 */
+  lastQuitDecision: QuitDecisionAction | null = null;
   private cancelled = new Set<string>();
   /** 等用户回答的「问题报告」会话：下一条用户消息走收集 + 写入。 */
   private reportSessions = new Set<string>();
@@ -395,6 +404,27 @@ export class MockAgentBridge implements AgentBridge {
       system_dns: null,
       connections: null,
       route_region: null,
+    });
+  }
+
+  async quitDecision(action: QuitDecisionAction): Promise<void> {
+    // mock 不做真实退出：只留下选择，方便验收脚本断言。
+    this.lastQuitDecision = action;
+  }
+
+  /** demo：模拟 Host 拦截到退出请求；浏览器里也可派发 window 事件触发。 */
+  requestQuitDemo(): void {
+    this.emit({
+      name: AGENT_EVENTS.quitRequested,
+      payload: { contract_version: CONTRACT_VERSION, emitted_at: now() },
+    });
+  }
+
+  /** demo：模拟 Host 超时或回落原生弹窗，通知前端收起。 */
+  dismissQuitDemo(): void {
+    this.emit({
+      name: AGENT_EVENTS.quitDismissed,
+      payload: { contract_version: CONTRACT_VERSION, emitted_at: now() },
     });
   }
 

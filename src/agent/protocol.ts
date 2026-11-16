@@ -6,7 +6,7 @@
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.13.0" as const;
+export const CONTRACT_VERSION = "2.15.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -20,6 +20,8 @@ export const AGENT_EVENTS = {
   runtimeHealthChanged: "runtime-health-changed",
   jobProgress: "job-progress",
   appLifecycleChanged: "app-lifecycle-changed",
+  quitRequested: "quit-requested",
+  quitDismissed: "quit-dismissed",
   defaultProfileUpdated: "default-profile-updated",
   askUserQuestion: "ask-user-question",
   configChanged: "config-changed",
@@ -36,6 +38,8 @@ export const AGENT_EVENTS = {
   nodeProbeFinished: "node-probe-finished",
   myServerChanged: "my-server-changed",
   myServerOrderChanged: "my-server-order-changed",
+  trialExpired: "trial-expired",
+  settingsPoint: "settings-point",
 } as const;
 
 export type AgentEventName = (typeof AGENT_EVENTS)[keyof typeof AGENT_EVENTS];
@@ -56,6 +60,8 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.runtimeHealthChanged,
   AGENT_EVENTS.jobProgress,
   AGENT_EVENTS.appLifecycleChanged,
+  AGENT_EVENTS.quitRequested,
+  AGENT_EVENTS.quitDismissed,
   AGENT_EVENTS.defaultProfileUpdated,
   AGENT_EVENTS.askUserQuestion,
   AGENT_EVENTS.configChanged,
@@ -72,6 +78,8 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.nodeProbeFinished,
   AGENT_EVENTS.myServerChanged,
   AGENT_EVENTS.myServerOrderChanged,
+  AGENT_EVENTS.trialExpired,
+  AGENT_EVENTS.settingsPoint,
 ] as const;
 
 /* ------------------------------------------------------------------ */
@@ -395,6 +403,35 @@ export interface AppLifecycleChangedPayload {
   emitted_at: string;
 }
 
+/** Host 拦截到退出请求，等 UI 回 quit_decision。 */
+export interface QuitRequestedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  emitted_at: string;
+}
+
+/** 超时或回落到原生弹窗时，Host 让 UI 收起自己那份。 */
+export interface QuitDismissedPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  emitted_at: string;
+}
+
+/** 免费节点试用到期，种子节点已从节点池移除（events.md §4.24）。 */
+export interface TrialExpiredPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  ended_at: string;
+  removed_node_count: number;
+  disconnected: boolean;
+  emitted_at: string;
+}
+
+/** AI 指路：打开设置并高亮某一段的某一行（events.md §4.25）。 */
+export interface SettingsPointPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  section: "ai" | "connection" | "account" | "advanced";
+  row: string | null;
+  emitted_at: string;
+}
+
 export interface DefaultProfileUpdatedPayload {
   contract_version: typeof CONTRACT_VERSION;
   seed_id: "veyl_seed";
@@ -713,6 +750,8 @@ export interface AgentEventMap {
   [AGENT_EVENTS.runtimeHealthChanged]: RuntimeHealthChangedPayload;
   [AGENT_EVENTS.jobProgress]: JobProgressPayload;
   [AGENT_EVENTS.appLifecycleChanged]: AppLifecycleChangedPayload;
+  [AGENT_EVENTS.quitRequested]: QuitRequestedPayload;
+  [AGENT_EVENTS.quitDismissed]: QuitDismissedPayload;
   [AGENT_EVENTS.defaultProfileUpdated]: DefaultProfileUpdatedPayload;
   [AGENT_EVENTS.askUserQuestion]: AskUserQuestionPayload;
   [AGENT_EVENTS.configChanged]: ConfigChangedPayload;
@@ -729,6 +768,8 @@ export interface AgentEventMap {
   [AGENT_EVENTS.nodeProbeFinished]: NodeProbeFinishedPayload;
   [AGENT_EVENTS.myServerChanged]: MyServerChangedPayload;
   [AGENT_EVENTS.myServerOrderChanged]: MyServerOrderChangedPayload;
+  [AGENT_EVENTS.trialExpired]: TrialExpiredPayload;
+  [AGENT_EVENTS.settingsPoint]: SettingsPointPayload;
 }
 
 export type AgentEvent = {

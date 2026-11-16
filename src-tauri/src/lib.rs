@@ -350,6 +350,7 @@ pub fn run() {
                 agent::commands::ai_send_message,
                 agent::commands::ai_cancel,
                 agent::commands::runtime_status,
+                agent::commands::quit_decision,
                 agent::commands::proxy_port_get,
                 agent::commands::proxy_port_set,
                 agent::commands::proxy_recovery_report,
@@ -434,6 +435,7 @@ pub fn run() {
                 agent::commands::ai_send_message,
                 agent::commands::ai_cancel,
                 agent::commands::runtime_status,
+                agent::commands::quit_decision,
                 agent::commands::proxy_port_get,
                 agent::commands::proxy_port_set,
                 agent::commands::proxy_recovery_report,
@@ -513,6 +515,8 @@ pub fn run() {
                 agent::commands::rename_session,
             ];
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                // 界面调过任意命令，说明前端已经能收事件；退出确认据此选择应用内弹窗。
+                crate::lifecycle::note_frontend_alive();
                 let command = invoke.message.command().to_string();
                 let args = describe_invoke_args(invoke.message.payload());
                 let started = std::time::Instant::now();
