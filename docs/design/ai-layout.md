@@ -288,7 +288,7 @@ Host 就不该再用形状去二次猜测。否则模型写坏一个逗号，用
 
 校验在 Host，写库之前，**一次性、原子**。
 
-### 4.1 块白名单：AI 能写 5 块
+### 4.1 块白名单：AI 能写 6 块
 
 `center-panel.md` §2.5 列了 7 块，但 `dns_note` 与 `issue_card` 是**叠加渲染**、不进布局
 （`data-model.md` §3.4、`events.md` §4.12）。所以：
@@ -298,12 +298,13 @@ Host 就不该再用形状去二次猜测。否则模型写坏一个逗号，用
 | `empty_hint` | ✅ | |
 | `proxy_card` | ✅ | |
 | `source_choice` | ✅ | |
-| `reachability` | ✅ | 唯一带 props 的块 |
+| `reachability` | ✅ | 带 `targets` |
 | `update_hint` | ✅ | |
+| `action_card` | ✅ | 3.14.0 新增；唯一带按钮的块，点击**只上报 action id**，不执行命令 |
 | `dns_note` | ❌ | 系统叠加，由 `system_dns` 状态决定；出现即整份非法 |
 | `issue_card` | ❌ | 系统叠加。写进布局会导致故障卡渲染两次，出现即整份非法 |
 
-`BLOCK_CATALOG` 与提示词里的「六种块」同步改成五种，并注明故障卡不可写。
+`BLOCK_CATALOG` 与提示词里的「六种块」以本表为准，并注明故障卡不可写。
 
 ### 4.2 每块 props schema
 
@@ -317,6 +318,7 @@ Host 就不该再用形状去二次猜测。否则模型写坏一个逗号，用
 | `source_choice` | 无 | 同上 |
 | `update_hint` | 无 | 同上 |
 | `reachability` | `{ "targets": string[] }` | 1–6 项；每项 trim 后 1–24 字符；去重；见 §4.3 字符规则 |
+| `action_card` | `{ "id": string, "title": string, "detail"?: string, "actions": [{ "id": string, "label": string, "kind": "primary" \| "secondary" }] }` | `id`/按钮 `id`：1–32 字符 `[a-z0-9_-]`、卡内唯一；`title` 1–40、`detail` 0–120、`label` 1–12，纯文本；`actions` 1–3 项；**禁止价格 / IP / 端口 / 版本号 / 地区名**——事实在渲染时由后端数据填 |
 
 其他约束：
 
@@ -334,7 +336,7 @@ Host 就不该再用形状去二次猜测。否则模型写坏一个逗号，用
 |---|---|---|
 | `proxy_card` | `connect_mode = "system_proxy"` | 整份丢弃 |
 | `source_choice` | `nodes` 为空 | 整份丢弃 |
-| 其余三块 | 无 | — |
+| 其余四块 | 无 | — |
 
 只有两条，因为每多一条语义规则，就多一个「把好布局扔掉」的理由。这两条属于**明确不可能成立**：
 TUN 模式下没有本机代理端口，`proxy_card` 只能渲染出一张地址为空的卡，等于告诉用户一个假的事实；
@@ -503,7 +505,7 @@ layout-updated:
 跳过只发生在渲染时，不改库、不发事件、不消耗 revision——否则切换一次接管方式，
 用户的布局就被系统"修正"了一次，他并没有让 AI 改任何东西。
 
-这条同时解决了眼下的过渡：**5 个块的渲染器都还没实现**，管线先上，
+这条同时解决了眼下的过渡：**6 个块的渲染器都还没实现**，管线先上，
 中间区按旧规则继续工作，不会变空也不会报错；渲染器落地后自然接管。
 
 ### 6.4 故障卡永远是叠加层

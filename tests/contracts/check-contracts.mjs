@@ -1010,6 +1010,27 @@ function registeredToolTypes() {
   return names;
 }
 
+check("tools.md §3 工具总表与 §3.1 注册清单逐名一致（契约）", () => {
+  const md = read("docs/contracts/tools.md");
+  const table = contractTools();
+  const regStart = md.indexOf("### 3.1 注册清单（照抄）");
+  const regEnd = md.indexOf("### 3.2", regStart);
+  const regBlock = regStart < 0 ? "" : md.slice(regStart, regEnd < 0 ? undefined : regEnd);
+  const names = [...regBlock.matchAll(/Box::new\((?:[\w]+::)?(\w+?)(?:Tool|Guard)::new/g)].map(
+    (m) => m[1],
+  );
+  const problems = [];
+  if (names.length === 0) {
+    problems.push("§3.1 注册清单一个工具名都没解析出来");
+    return problems;
+  }
+  const missing = [...table.keys()].filter((n) => !names.includes(n));
+  const extra = names.filter((n) => !table.has(n));
+  if (missing.length) problems.push(`§3.1 缺少（总表有、清单没有）：${missing.join(", ")}`);
+  if (extra.length) problems.push(`§3.1 多出（清单有、总表没有）：${extra.join(", ")}`);
+  return problems;
+});
+
 check("AI 工具集不再包含已移除的工具（契约）", () => {
   const tools = contractTools();
   const problems = [];
@@ -1070,6 +1091,27 @@ check(
       const n = pascalCase(cmd);
       if (registered.has(n)) {
         problems.push(`src-tauri/src/tools/mod.rs 注册了 ${n}Tool，但 ${cmd} 是 UI 专用命令`);
+      }
+    }
+
+    // 不只比数量：逐个名字比，缺哪个、多哪个都列出来。
+    const md = read("docs/contracts/tools.md");
+    const regStart = md.indexOf("### 3.1 注册清单（照抄）");
+    const regEnd = md.indexOf("### 3.2", regStart);
+    const regBlock = regStart < 0 ? "" : md.slice(regStart, regEnd < 0 ? undefined : regEnd);
+    const declared = [
+      ...regBlock.matchAll(/Box::new\((?:[\w]+::)?(\w+?)(?:Tool|Guard)::new/g),
+    ].map((m) => m[1]);
+    if (declared.length === 0) {
+      problems.push("tools.md §3.1 的注册清单一个工具都没解析出来");
+    } else {
+      const missing = declared.filter((n) => !registered.has(n));
+      const extra = [...registered].filter((n) => !declared.includes(n));
+      if (missing.length) {
+        problems.push(`tools.md §3.1 已登记、Rust 未注册（${missing.length}）：${missing.join(", ")}`);
+      }
+      if (extra.length) {
+        problems.push(`Rust 已注册、tools.md §3.1 没有（${extra.length}）：${extra.join(", ")}`);
       }
     }
     return problems;
@@ -1369,7 +1411,7 @@ function frontendToolDisplayNames() {
   return new Set();
 }
 
-check("前端映射表工具名集合与 tools.md §3 的 47 个相等", () => {
+check("前端映射表工具名集合与 tools.md §3 的工具表相等", () => {
   const names = frontendToolDisplayNames();
   if (names === null) return []; // 未实现时由下一条 advisory 报，不在这里制造红
   const tools = contractTools();
@@ -1928,7 +1970,7 @@ check("OfflineReason 的取值与契约一致（实现）", () => {
 
 // --- 16：中间区布局：非法整份丢弃、可写块数量、配置详情带布局版本 ---
 
-check("布局非法块整份丢弃，AI 可写块为 5 个（契约）", () => {
+check("布局非法块整份丢弃，AI 可写块为 6 个（契约）", () => {
   const md = read("docs/contracts/events.md");
   const start = md.indexOf("### 4.13");
   const end = md.indexOf("### 4.14");
@@ -1965,6 +2007,7 @@ check("布局非法块整份丢弃，AI 可写块为 5 个（契约）", () => {
     "语义校验只在写入时做",
     "不整份丢弃",
     "跳过不适用的块",
+    "只有 6 个",
   ]) {
     if (!s.includes(phrase)) problems.push(`§4.13 缺少「${phrase}」`);
   }
@@ -1979,12 +2022,33 @@ check("布局非法块整份丢弃，AI 可写块为 5 个（契约）", () => {
     if (s.includes(stale)) problems.push(`§4.13 仍保留旧策略「${stale}」`);
   }
 
-  for (const block of ["empty_hint", "proxy_card", "source_choice", "reachability", "update_hint"]) {
+  for (const block of [
+    "empty_hint",
+    "proxy_card",
+    "source_choice",
+    "reachability",
+    "update_hint",
+    "action_card",
+  ]) {
     if (!s.includes(`\`${block}\``)) problems.push(`§4.13 的可写块清单缺少 ${block}`);
   }
   if (!/issue_card[^。]*叠加|叠加[^。]*issue_card/.test(s)) {
     problems.push("§4.13 没有写清 issue_card 是叠加层、不写进布局");
   }
+
+  const declared = s.match(/块只有 6 个\*\*：([^。]+)/);
+  if (!declared) {
+    problems.push("§4.13 没有写明可写块只有 6 个");
+  } else {
+    const names = [...declared[1].matchAll(/`([a-z_]+)`/g)].map((m) => m[1]);
+    if (names.length !== 6) {
+      problems.push(`§4.13 列出的可写块应为 6 个，实际 ${names.length} 个：${names.join(", ")}`);
+    }
+  }
+
+  const s122 = mdSection(read("docs/contracts/commands.md"), "### 12.2", "\n### ");
+  if (!s122) problems.push("commands.md 找不到 §12.2 块表");
+  else if (!s122.includes("`action_card`")) problems.push("commands.md §12.2 块表缺少 action_card");
 
   const fields = payloadFields("docs/contracts/events.md", "LayoutUpdatedPayload");
   if (!fields) problems.push("events.md 找不到 LayoutUpdatedPayload");
@@ -2008,7 +2072,7 @@ check("ConfigDetail 带 layout_revision（契约）", () => {
 });
 
 check(
-  "系统提示的块词汇表为 5 个、不含 issue_card（实现）",
+  "系统提示的块词汇表为 6 个、不含 issue_card（实现）",
   () => {
     const rs = read("src-tauri/src/claurst_session/mod.rs");
     const m = rs.match(/const BLOCK_CATALOG: &str = "\\\n([\s\S]*?)";/);
@@ -2018,7 +2082,14 @@ check(
       problems.push("BLOCK_CATALOG 仍包含 issue_card（叠加层不进布局，写进去故障卡会渲染两次）");
     }
     const rows = [...m[1].matchAll(/^\|\s*`([a-z_]+)`\s*\|/gm)].map((x) => x[1]);
-    const expected = ["empty_hint", "proxy_card", "source_choice", "reachability", "update_hint"];
+    const expected = [
+      "empty_hint",
+      "proxy_card",
+      "source_choice",
+      "reachability",
+      "update_hint",
+      "action_card",
+    ];
     if (rows.join(",") !== expected.join(",")) {
       problems.push(`BLOCK_CATALOG 应为 ${expected.join(" / ")}，实际是 ${rows.join(" / ")}`);
     }

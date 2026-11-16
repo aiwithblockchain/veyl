@@ -7,6 +7,8 @@
 > `simplified-config-create.md` 重构为「两问 + 审视页」，本文只引用其结论，不再描述旧表单。
 > 前置文档：`settings-advanced.md`（四个 tab 的来源）、`settings-connection.md`（连接屏与端口交互，仍然有效）、`port-stability.md`（端口设置与顺延）、`network-force-reset.md`（重置八步与结果）
 
+> **2026-11-16 产品负责人覆盖（优先于本文 §0.1 与 §1 的 tab 结论）**：设置改为 **4 个 tab：AI / 连接 / 账户 / 高级**（`advanced` 排在 `账户` 之后，放运行核心、helper、日志、重置网络）。主路径是前三段；「关于」并入「高级」底部。旧口径「不新增 tab」「按任务分区、不设杂物箱」在本轮作废。逐行去留与行 id 见 `ai-first-product.md` §全局配置与设置、`tools.md` §4.50。
+
 ---
 
 ## 0. 结论（一页）

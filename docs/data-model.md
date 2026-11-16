@@ -1,7 +1,7 @@
 # 数据模型
 
-> 版本：`6`（对应契约 `commands.md` 2.23.0 / `events.md` 2.13.0 / `tools.md` 3.12.0 / `runtime.md` 2.8.0）
-> 日期：2026-11-14
+> 版本：`7`（对应契约 `commands.md` 2.36.0 / `events.md` 2.15.0 / `tools.md` 3.14.0 / `runtime.md` 2.8.0）
+> 日期：2026-11-16
 > 范围：配置、节点、问题、布局，以及它们与 `secrets.enc`、种子缓存的关系
 > 依据：`docs/configs-and-nav.md` §3、§8，`docs/config-execution.md` §6–§10，`docs/issue-management.md` §3、`docs/center-panel.md` §3
 > 状态：待 PM 审核（批 0）
@@ -395,6 +395,26 @@ CREATE INDEX idx_my_servers_created ON my_servers (created_at DESC);
 - `node_id` 在凭据验签落库后写入；`ON DELETE SET NULL` 保证删节点不会连带删服务器记录。
 - 本表是**破坏性 schema 变更**（版本 5 → 6），按项目惯例整体重建：只有一份 `001_init.sql`，旧库打开时清空重建。
 
+### 3.12 `trial_state` — 免费节点试用（单行，7 新增）
+
+免费节点 7 天试用的时间锚点。**只在本地，不做服务端防刷**（`ai-first-product.md` §第一次进入主界面）。
+
+```sql
+CREATE TABLE trial_state (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    started_at  INTEGER,                 -- Unix 毫秒；第一次用免费节点连上时写入，之后不再改
+    ended_at    INTEGER,                 -- Unix 毫秒；到期清理事务提交时写入，之后不再改
+    CHECK (ended_at IS NULL OR started_at IS NOT NULL)
+);
+```
+
+- **行可以不存在**：从未连过免费节点时没有这一行，读取一律按 `state = "available"`（`commands.md` §7.19）。
+- `started_at` 只写一次：只在「连接成功且本次连接的节点 `source = 'seed'`」时写；连自建节点不起算。
+- `expires_at` 是派生值（`started_at + 7d`），**不落库**——落库会与「改系统时间」产生两份互相矛盾的事实。
+- `ended_at` 写入即表示试用结束。到期清理同一个事务里还要：把当前配置里的种子节点写进 `seed_node_exclusions`（防止下次 `default_profile_refresh` 把它们加回来）、删除这些节点的 `config_nodes` 关联、必要时把 `configs.current_node_id` 改到剩余节点或置 `null`。
+- **节点行本身不删**：`nodes(source = 'seed')` 保留，池子里看不见它们只是因为 `config_nodes` 关联没了；凭证仍在 `secrets.enc`，供离线诊断。
+- 删除该行等于重置试用。**没有任何命令或工具能删它**；重装应用会连同数据库一起重建，这是唯一的重置途径，接受。
+
 ---
 
 ## 4. 索引与约束汇总
@@ -589,6 +609,15 @@ CREATE INDEX idx_my_servers_created ON my_servers (created_at DESC);
 ---
 
 ## 11. 变更记录
+
+### 7（2026-11-16，免费节点试用）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | 版本 `6 → 7`；头部同步 `commands.md` 2.36.0 / `events.md` 2.15.0 / `tools.md` 3.14.0 | 元数据 |
+| 2 | 新增 §3.12 `trial_state`（单行）：`started_at` 首连种子节点时写一次、`ended_at` 到期清理时写一次；`expires_at` 派生不落库 | 表新增 |
+| 3 | 到期清理复用 `seed_node_exclusions`，不新增排除机制；`nodes` 行与 `secrets.enc` 条目保留 | 说明 |
+| 4 | 补记版本 6：§3.11 `my_servers` 随契约 2.23.0 加入，本条此前漏记 | 补记 |
 
 ### 5（2026-11-12，AI 决定地区）
 

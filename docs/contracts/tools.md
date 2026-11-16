@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.13.0`
+> 契约版本：`3.14.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.13.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.14.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.13.0";
+  contract_version: "3.14.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -247,16 +247,16 @@ type CallSource = "ui" | "agent";
 
 ```ts
 // src/components/toolDisplay.ts（设计文档里也称 TOOL_DISPLAY）
-export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 49 个工具名完全相等
+export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 51 个工具名完全相等
 ```
 
-进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 49 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
+进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 51 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
 
 **提示词只降低出错概率，最终闸门在渲染层**：UI 永远不渲染工具名、JSON、错误码；不做输出正则改写（静默替换模型正文比漏一句更难排查）。
 
 边界与落点：
 
-- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「49 个名字必须都有」与「`AskUserQuestion` 不占行」。
+- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「51 个名字必须都有」与「`AskUserQuestion` 不占行」。
 - **running 状态文案**同样来自映射表（`events.md` §3.5）：不得拼工具名，未知工具固定「正在处理…」。
 - **工具 description**：通用表达约束放 `\n` 之后的末尾。`capability_catalog` 只取第一行进系统提示清单，所以第一行**不得**出现「对用户说…」这类句子，否则会污染每次请求的能力清单。
 - **「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归**：删任一条即红。
@@ -319,12 +319,14 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 47 | `SetUserRegion` | `SetUserRegionTool` | 记录用户所在地区（AI 唯一写入路径） | `Write` | 低（只写本地设置） |
 | 48 | `MyServers` | `MyServersTool` | 我的服务器列表与状态（只读） | `ReadOnly` | 只读 |
 | 49 | `ConfigSetMode` | `ConfigSetModeTool` | 在线切换接管方式（全部软件 ↔ 本机代理，**会断开重连**） | `Execute` | 高 |
+| 50 | `OpenSettings` | `OpenSettingsTool` | 打开设置并指向某段/某行（**不改值**） | `ReadOnly` | 只读 |
+| 51 | `MyServerFailure` | `MyServerFailureTool` | 某台服务器创建失败的详情与订单事件 | `ReadOnly` | 只读 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
 **破坏性工具（destructive）**：`CoreUpgrade`（下载并安装运行时，**有确认点**，见 §4.45）、`ConfigSetMode`（**有确认点**，会断开重连，见 §4.49）、`ConfigDelete`、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。除 `CoreUpgrade` / `ConfigSetMode` 外均无确认点，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0 从工具集移除，见 §4.7。
 
-**UI 专用命令不注册工具**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`（`commands.md` §7.10）与 `tun_helper_info` / `tun_helper_restart`（§7.8.1–§7.8.2）。**`core_upgrade` 是例外**：模型只能经 `CoreUpgrade` 工具调用，且必须由用户逐字确认（§4.45）；确认卡由 Host 生成，模型无法伪造。
+**UI 专用命令不注册工具**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`（`commands.md` §7.10）与 `tun_helper_info` / `tun_helper_restart`（§7.8.1–§7.8.2）、`trial_status`（§7.19）。**`core_upgrade` 是例外**：模型只能经 `CoreUpgrade` 工具调用，且必须由用户逐字确认（§4.45）；确认卡由 Host 生成，模型无法伪造。
 
 ### 3.1 注册清单（照抄）
 
@@ -384,6 +386,11 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(SetUserRegionTool::new(store.clone())),
     // 我的服务器（只读）
     Box::new(MyServersTool::new(services.clone())),
+    Box::new(MyServerFailureTool::new(services.clone())),
+    // 在线切换接管方式（有确认点）
+    Box::new(ConfigSetModeTool::new(store.clone(), rt.clone())),
+    // 设置指路（只读）
+    Box::new(OpenSettingsTool::new()),
 ];
 ```
 
@@ -870,7 +877,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.13.0";
+  contract_version: "3.14.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1033,7 +1040,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.13.0";
+  contract_version: "3.14.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -2028,6 +2035,98 @@ type ConfigSetModeData = {
 
 ---
 
+### 4.50 `OpenSettings`（打开设置并指路，3.14.0 新增）
+
+把用户带到设置里正确的位置，**不改任何值**。事件见 `events.md` §4.25。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "section": { "enum": ["ai", "connection", "account", "advanced"] },
+    "row": { "type": "string", "minLength": 1, "maxLength": 40 }
+  },
+  "required": ["section"],
+  "additionalProperties": false
+}
+```
+
+```ts
+type OpenSettingsData = {
+  opened: true;
+  section: "ai" | "connection" | "account" | "advanced";
+  row: string | null;        // 实际高亮的行；没匹配上为 null
+  row_matched: boolean;
+};
+```
+
+- `PermissionLevel::ReadOnly`；不写库、不发命令、不打开系统窗口。
+- **触发约束**：只在用户问「这个设置在哪里 / 怎么改」，或模型要边指边解释某个设置项时调用。**一轮对话最多一次**，不得为了「展示能力」连续调用，也不得在用户没问设置时顺手打开。
+- **行 id 登记表**（唯一来源；与 `commands.md` §9.1.1 的 `controls` 同源）：
+
+| `row` | 对应行 |
+|---|---|
+| `connection.mode` | 接管方式 |
+| `connection.scope` | 流量范围 |
+| `connection.port` | 本地代理端口（仅代理配置出现） |
+| `ai.provider` | 默认 AI |
+| `ai.other` | 其他 AI 服务 |
+| `account.login` | 登录 / 退出登录 |
+| `account.balance` | 余额与充值 |
+| `advanced.core` | 运行时核心版本 |
+| `advanced.helper` | 系统助手（helper） |
+| `advanced.logs` | 日志目录 |
+| `advanced.reset` | 重置网络 |
+
+- **未知 `row` 不是错误**：降级为 `row: null`、`row_matched: false`，仍然打开 `section`。工具的目的是把用户带到地方，不是校验模型拼的字符串。
+- 成功后 Host 发 `settings-point`；UI 负责打开、滚动、高亮 2 秒。
+- **`display`**：成功「已打开设置 · 连接」（段名用中文：AI / 连接 / 账户 / 高级）；`row_matched: false` 时同一句，不提行名。
+- 无确认点、不 destructive。它与 `ConfigSetMode` 的区别：只指路，什么都不改。
+
+---
+
+### 4.51 `MyServerFailure`（创建失败详情，3.14.0 新增）
+
+某台服务器这次创建/开通为什么失败。给舞台上的 **`AI 定位`** 按钮用。
+
+```json
+{
+  "type": "object",
+  "properties": { "serverId": { "type": "string", "minLength": 1 } },
+  "required": ["serverId"],
+  "additionalProperties": false
+}
+```
+
+```ts
+type MyServerFailureData = {
+  server_id: string;
+  name: string;
+  region: string;
+  plan: string;
+  state: string;                       // MyServerState，见 commands.md §7.15
+  failure: {
+    stage: string;                     // 失败发生在哪一步，取值同 MyServerState
+    code: string;
+    message: string;                   // 控制面给的用户可读文本，不是堆栈
+    retryable: boolean;
+  } | null;
+  order: { order_id: string; state: string; failure: { code: string; message: string; retryable: boolean } | null } | null;
+  recent_events: Array<{ at: string; state: string; detail: string | null }>;  // 最多 20 条，新的在前
+  log_available: false;                // 恒为 false，见下
+};
+```
+
+- `PermissionLevel::ReadOnly`；只读 Host 已有的本地镜像与订单事件，不访问云厂商 API。
+- **触发约束**：只在用户点了 `AI 定位`，或明确问「这次为什么失败」时调用。不得轮询、不得在状态未失败时调用（健康服务器返回 `failure: null` 也是合法结果，但问了才知道）。
+- **没有建机原始日志**：控制面不保存构建日志（Worker / 实例侧日志已过期且不落库），`log_available` **恒为 `false`**。模型**不得声称读过日志**，不得让用户「上传日志」；能说的只有 `failure.stage` / `code` / `message` / `retryable` 与事件序列。
+- `message` 是控制面生成的中文短句，**不要改写事实**；模型可以解释，不许编造更具体的原因（如「端口被封」）。
+- 不返回 IP、端口、节点 id、密码、令牌。
+- 服务器不存在 → `NOT_FOUND / server_not_found`。
+- **`display`**：成功「读到了这次失败的记录」+ `facts` 放「阶段 · 原因 · 能不能重试」；失败「没读到失败详情，稍后再试」。
+
+---
+
 ## 5. 工具间协作约定
 
 ### 5.1 标准连接链路
@@ -2128,6 +2227,16 @@ type ConfigSetModeData = {
 ---
 
 ## 8. 变更记录
+
+### 3.14.0（2026-11-16，设置指路与创建失败详情）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.14.0`；新增 §4.50 `OpenSettings`（`ReadOnly`）：打开设置并指向某段/某行，不改任何值；一轮最多一次；未知 `row` 降级为 `null` 不报错；成功后发 `settings-point` | 新增工具 | `ai-first-product.md` §全局配置与设置 |
+| 2 | 新增 §4.51 `MyServerFailure`（`ReadOnly`）：返回某台服务器的结构化失败、订单失败与最近 20 条订单事件；`log_available` 恒为 `false`，模型不得声称读过日志 | 新增工具 | `ai-first-product.md` §新建节点 的 `AI 定位` |
+| 3 | 布局词汇扩一种 `action_card`（`events.md` §4.13）：点击只上报 `action_id`，不执行命令 | 语义扩展 | UI 与 AI 共用操作面 |
+| 4 | 工具总数 49 → **51**；§3.1 注册清单补上此前漏掉的 `ConfigSetModeTool`，并加入两个新工具；`TOOL_COPY` 键集合同步 51 | 元数据 | 同批 |
+| 5 | `trial_status` 列入「UI 专用命令不注册工具」 | 说明 | `commands.md` §7.19 |
 
 ### 3.13.0（2026-11-16，在线切换接管方式）
 

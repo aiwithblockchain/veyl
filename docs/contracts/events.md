@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.13.0`
+> 契约版本：`2.15.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，版本以该文件头为准）
@@ -22,7 +22,7 @@
 - **落库实体字段的时间戳**（`created_at` / `first_seen` / `last_seen` / `checked_at` 等）：**Unix 毫秒整数**，与 `data-model.md` 的列类型一致。见 §2.3。
 - 错误码 **大写下划线**。
 - 所有 payload 带 `contract_version`。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.13.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.15.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
 
 > **命名决策**：事件名沿用 TweetPilot 的真实名称（`message-chunk`、`thinking-chunk`、`tool-call-start`、`tool-call-end`、`ai-status`、`ai-compact`、`ai-request-end`），**不**加 `ai-` 前缀。`docs/phase-1-technical-design.md` §4.2 写的 `agent://delta` / `agent://tool` 是笔误，以本契约为准。
 
@@ -59,8 +59,12 @@
 | 25 | `region-changed` | Host → UI | `RegionChangedPayload` | **2.12 新增**：地区生效值变化（AI 写入） |
 | 26 | `my-server-changed` | Host → UI | `MyServerChangedPayload` | **2.13.0 新增**：我的服务器状态变化 |
 | 27 | `my-server-order-changed` | Host → UI | `MyServerOrderChangedPayload` | **2.13.0 新增**：下单 / 开通进度 |
+| 28 | `quit-requested` | Host → UI | `QuitRequestedPayload` | **2.14.0 新增**：有连接时请求前端弹退出确认 |
+| 29 | `trial-expired` | Host → UI | `TrialExpiredPayload` | **2.15.0 新增**：免费节点试用到期，种子节点已移除 |
+| 30 | `settings-point` | Host → UI | `SettingsPointPayload` | **2.15.0 新增**：AI 指路，打开设置并高亮某段/某行 |
+| 31 | `quit-dismissed` | Host → UI | `QuitDismissedPayload` | **2.15.0 新增**：退出确认未经决策就结束，前端收起弹窗 |
 
-1–8 是 AI 会话事件，9–25 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
+1–8 是 AI 会话事件，9–31 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
 
 > **事件与命令成对**：每个改变持久状态的命令都必须有一条对应事件。没有事件的变更只允许发生在「只读命令」上。例外是 `probe_run`——它不改状态，但探测失败的副作用（登记问题）由 `issue-changed` 表达。
 
@@ -107,7 +111,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -129,7 +133,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -147,7 +151,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -201,7 +205,7 @@ type DisplayAction =
   | { kind: "compose_report_mail"; report_id: string };
 
 type ToolCallEndPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -264,7 +268,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -309,7 +313,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -337,7 +341,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -375,7 +379,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -399,7 +403,7 @@ type RuntimeStateChangedPayload = {
 
 - `snapshot.state === to`。不一致说明有人绕过了单写者，属于实现缺陷。
 - `snapshot.mixed_port` 是 `to = "running" | "degraded"` 时 `proxy_card` 的唯一端口来源（`proxy_params` 的 `runtime` 来源）。
-- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.13.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
+- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.15.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
 - payload ≤ 64 KB；`RuntimeSnapshot` 本身远小于上限，不需要截断。
 
 UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断入口；用 `snapshot.mixed_port` 重渲染代理卡。
@@ -410,7 +414,7 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   health: HealthSnapshot;
   // 2.2 新增：本次运行累计流量与速率。
   // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
@@ -446,7 +450,7 @@ UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；面板上给用�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag" | "rules_update";
   origin: "ui" | "agent";       // 必填；第一帧也带，旧记录按 "ui"
@@ -480,7 +484,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -497,7 +501,7 @@ type AppLifecycleChangedPayload = {
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   seed_id: "veyl_seed";
   content_sha256: string;           // 2.0：变化判定依据
   version: string | null;           // 文件里的 version，仅展示
@@ -533,9 +537,11 @@ type DefaultProfileUpdatedPayload = {
 | 事件 | 窗口 | 进程 | 连接 | 是否提示 | 发出的事件 |
 |---|---|---|---|---|---|
 | 点窗口关闭按钮 / Cmd+W | 隐藏 | 存活 | 保持 | 否 | `app-lifecycle-changed{state:"background"}` |
-| Cmd+Q / 菜单「退出 Veyl」 | 不变 | 等用户选择 | 保持 | **是，阻塞对话框** | 无（UI 状态不变） |
-| 对话框选「后台运行」 | 隐藏 | 存活 | 保持 | — | `app-lifecycle-changed{state:"background"}` |
-| 对话框选「退出」 | 关闭 | 结束 | 断开 | 仅断开失败时 | 无（进程即将结束） |
+| Cmd+Q / 菜单「退出 Veyl」（有连接） | 显示并聚焦 | 等用户选择 | 保持 | **是，应用内弹窗** | `quit-requested` |
+| 退出确认 30 秒无决策 | 隐藏 | 存活 | 保持 | — | `app-lifecycle-changed{state:"background"}` |
+| 确认选「后台运行」 | 隐藏 | 存活 | 保持 | — | `app-lifecycle-changed{state:"background"}` |
+| 确认选「退出」 | 关闭 | 结束 | 断开 | 仅断开失败时 | 无（进程即将结束） |
+| Cmd+Q / 菜单「退出 Veyl」（没有连接） | 不变 | 结束 | — | 否 | 无 |
 | 托盘「显示 Veyl」 | 显示并聚焦 | 存活 | 保持 | — | `app-lifecycle-changed{state:"foreground"}` |
 | 托盘「退出」 | 关闭 | 结束 | 断开 | 仅断开失败时 | 无 |
 | 再次启动（单实例唤起） | 显示并聚焦 | 存活 | 保持 | — | `app-lifecycle-changed{state:"foreground"}` |
@@ -546,13 +552,54 @@ type DefaultProfileUpdatedPayload = {
 - **`quitting` 期间拒绝新的连接请求**：`runtime_start` 返回 `PRECONDITION_FAILED`，`details.reason = "quitting"`。
 - **`foreground` / `background` 只在值变化时发**，重复设置不重复发。
 
+#### 4.7.4 `quit-requested`（2.14.0 新增）
+
+有连接时（`starting` / `running` / `degraded` / `restarting`，或 TUN 正在运行 / 启动中），Host 拦截 Cmd+Q / 菜单「退出 Veyl」后先显示主窗口，再发本事件请求前端弹出应用内确认框。**没有连接时不发**，直接走退出流程。
+
+```ts
+type QuitRequestedPayload = {
+  contract_version: "2.15.0";
+  emitted_at: string;
+};
+```
+
+UI 收到后弹确认框，用户选择后调用 `quit_decision { action }`（`commands.md` §7.8.4）：
+
+- 「后台运行」→ `background`：隐藏窗口，连接保持。
+- 「退出」→ `quit`：断开连接并退出。
+- 30 秒没有决策，Host 按 `background` 处理并补发 `quit-dismissed`；重复决策被忽略。
+- UI 未就绪、主窗口不存在或事件发送失败时，Host 回落到原生确认框，并补发 `quit-dismissed`，不能卡住退出。
+
+本事件是**一次性控制消息**，不是状态广播：UI 不得用它更新连接状态，也不要求补发。
+
+#### 4.7.5 `quit-dismissed`（2.15.0 新增）
+
+应用内退出确认**没有经过用户决策就结束**时发出，UI 收到后必须清掉 `quit-requested` 弹出的确认框。载荷只有信封：
+
+```ts
+type QuitDismissedPayload = {
+  contract_version: "2.15.0";
+  emitted_at: string;
+};
+```
+
+发出时机（三处，缺一不可）：
+
+- 30 秒超时，Host 按 `background` 处理之前。
+- 回落到原生确认框时（前端未就绪 / 主窗口不存在 / `quit-requested` 发送失败）。
+- 确认流程 panic 等异常结束路径。
+
+**正常决策（`background` / `quit`）不发**：用户已经通过 `quit_decision` 表达了选择，弹窗由 UI 自己收起。`quit_decision` 返回 `accepted: false` 的重复决策也不发——那次确认已经结束，重复调用不产生新状态。
+
+本事件同样是**一次性控制消息**，不落库、不补发。
+
 ### 4.8 `ask-user-question`（1.2.0 新增）
 
 模型通过 `AskUserQuestion` 工具（`tools.md` §4.22）向用户提问时发出。**发出后该工具阻塞等待回答**，直到用户作答、超时或请求结束。
 
 ```ts
 type AskUserQuestionPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   session_id: string;
   request_id: string;
   question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
@@ -637,7 +684,7 @@ tool-call-end    (同一 request_id)
 
 ```ts
 type ConfigChangedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   change: "created" | "updated" | "deleted" | "activated";
   config_id: string;
   config: ConfigSummary | null;      // deleted 时为 null；类型见 commands.md §3.0
@@ -673,7 +720,7 @@ type NodeListChangedReason =
   | "bindings_changed";       // config_update 整体替换了节点集
 
 type NodeListChangedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   reason: NodeListChangedReason;
   config_id: string | null;        // 只有 bindings_changed 时非空
   node_count_total: number;        // 节点池总数
@@ -695,7 +742,7 @@ type NodeListChangedPayload = {
 
 ```ts
 type NodeSwitchedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   config_id: string;
   from_node_id: string | null;
   to_node_id: string;
@@ -723,7 +770,7 @@ type NodeSwitchedPayload = {
 
 ```ts
 type IssueChangedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
   issue: IssueSummary;                  // 变更后的状态
   blocking_issue_id: string | null;     // 当前应插卡的那一条；null = 中间不插卡
@@ -761,7 +808,7 @@ type IssueChangedPayload = {
 
 ```ts
 type LayoutUpdatedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   config_id: string;
   revision: number;            // 每配置单调递增，从 1 开始
   layout: Layout;              // 见 commands.md §3.0
@@ -775,7 +822,12 @@ type LayoutUpdatedPayload = {
 
 - **`revision` 单调递增**。UI 收到 `revision <= 已渲染的 revision` 时丢弃——网络/线程调度可能导致旧布局后到，覆盖新布局会让中间区域闪回上一个版本。
 - **`config_detail` 必须返回 `layout_revision`**（`commands.md` §3.0），与 `layout` 配套。UI 用它初始化「已渲染的 revision」；缺了它，同一配置内迟到的事件无法判断先后，中间区会闪回上一版。
-- **AI 能写进布局的块只有 5 个**：`empty_hint` / `proxy_card` / `source_choice` / `reachability` / `update_hint`。`issue_card` 是本地规则的**叠加渲染**（§4.12），**不在布局词汇表内**——写进布局即整份非法，否则故障卡会渲染两次。
+- **AI 能写进布局的块只有 6 个**：`empty_hint` / `proxy_card` / `source_choice` / `reachability` / `update_hint` / `action_card`。`issue_card` 是本地规则的**叠加渲染**（§4.12），**不在布局词汇表内**——写进布局即整份非法，否则故障卡会渲染两次。
+- **`action_card` 只上报，不执行**：`props = { id, title, detail?, actions: [{ id, label, kind }] }`，`kind` 只有 `primary` / `secondary`；1–3 个按钮。点击只把 `action.id` 通过 `ai_send_message.context.last_action` 送回（`commands.md` §9.1.1），**UI 不得因点击直接调用任何命令**——模型写的按钮写成 `destroy` 也只是文字。
+  - `id` / `actions[].id`：1–32 字符，`[a-z0-9_-]`，同一张卡内唯一；
+  - `title` 1–40 字符、`detail` 0–120 字符、`label` 1–12 字符，纯文本；
+  - **不许出现价格、IP、端口、版本号、地区名**：这些在渲染时由后端数据填充，不来自模型（原因同「块参数里没有数值」）；
+  - 不合法（缺字段、超长、重复 id、非法字符）→ 整份丢弃，原因码 `bad_props`。
 - **非法布局整份丢弃，不逐块过滤。** 出现未知块、`issue_card`、重复块类型、`props` 越界或字符串不合规，都按整份非法处理：不写库、不发本事件、保留上一版布局、记 `warn` 日志（只记原因码，不记内容）。首次就非法时 `layout` 仍是 `null`，走本地兜底。
   逐块过滤会让中间区呈现「模型没打算要的构成」：例如把 `issue_card` 滤掉，用户就少了自救入口，而界面上没有任何提示说明少了什么。整份丢弃则保留上一版布局，行为可预期。
 - **长得像布局的东西永远不进正文。** 判定分两路：`layout` 围栏是模型明确表态「这是布局」，不必再靠形状猜；`json` / 无标记围栏 / 行首裸 JSON 可能是用户在讨论代码或模型在举例，靠形状兜底。
@@ -809,7 +861,7 @@ type LayoutUpdatedPayload = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   config_id: string;
   routing_mode: "direct" | "proxy_all" | "proxy_selected";
   applied_mode: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -835,7 +887,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
@@ -868,7 +920,7 @@ Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 
 ```ts
 type CoreUpgradeProgressPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   job_id: string;
   origin: "ui" | "agent";         // 必填
   phase: "downloading" | "verifying" | "unpacking" | "installing" | "activating";
@@ -891,7 +943,7 @@ type CoreUpgradeProgressPayload = {
 
 ```ts
 type CoreUpgradeFinishedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   job_id: string;
   origin: "ui" | "agent";   // 必填
   ok: boolean;
@@ -913,7 +965,7 @@ type CoreUpgradeFinishedPayload = {
 
 ```ts
 type NodeProbeProgressPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   run_id: string;
   config_id: string;
   phase: "preparing" | "probing";
@@ -942,7 +994,7 @@ type NodeProbeProgressPayload = {
 
 ```ts
 type NodeProbeFinishedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   run_id: string;
   config_id: string;
   total: number;
@@ -978,7 +1030,7 @@ type NodeProbeFinishedPayload = {
 
 ```ts
 type RegionChangedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   region: string | null;          // 生效地区的小写 ISO 3166-1 alpha-2；判不出为 null
   source: "system" | "ai";        // 当前生效值的来源
   emitted_at: string;
@@ -1004,7 +1056,7 @@ type RegionChangedPayload = {
 
 ```ts
 type MyServerChangedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   server_id: string;
   state: string;                   // MyServerState，见 commands.md §10.1
   failure?: {
@@ -1031,7 +1083,7 @@ type MyServerChangedPayload = {
 
 ```ts
 type MyServerOrderChangedPayload = {
-  contract_version: "2.13.0";
+  contract_version: "2.15.0";
   order_id: string;
   state: string;                   // MyServerOrderState，见 commands.md §10.1
   failure?: {
@@ -1047,6 +1099,47 @@ type MyServerOrderChangedPayload = {
 
 - 与 `my-server-changed` 同一触发方式：命令观察到新状态才发。
 - `state` 到达 `ready` / `failed` / `cancelled` 后不再变化；`server_id` 非空表示已开始建机。
+
+---
+
+### 4.24 `trial-expired`（2.15.0 新增）
+
+免费节点 7 天试用到期，种子节点已从节点池移除。清理逻辑见 `commands.md` §7.19。
+
+```ts
+type TrialExpiredPayload = {
+  contract_version: "2.15.0";
+  ended_at: string;              // 试用结束时刻（ISO 8601 UTC），与 trial_state.ended_at 同值
+  removed_node_count: number;    // 从当前配置里移除的种子节点数；可能为 0（池里本来就没有）
+  disconnected: boolean;         // 本次是否真的断开了连接
+  emitted_at: string;
+};
+```
+
+- **发在数据库事务提交之后**，不是之前。发出时节点一定已经不在池里；`disconnected` 只是运行时的真实结果。
+- **每台机器最多发一次**：`trial_state.ended_at` 写入后，后续扫描直接跳过。没有「再次到期」。
+- `disconnected = false` 有两种情况——到期时本来就没连，或者 `runtime_stop` 失败。**UI 收到后必须重读 `runtime_status`**，不得只凭这个布尔值改连接状态：把它当「已断开」会在停止失败时显示一个假的成功。
+- UI 按 `state = "expired"` 渲染到期屏（只有一个「新建节点」按钮），并在 `removed_node_count > 0` 时把节点卡里的行去掉；不弹 toast。
+- 不带 IP、端口、节点名、账号信息。
+
+### 4.25 `settings-point`（2.15.0 新增）
+
+AI 指路：打开设置并高亮某一段的某一行。由只读工具 `OpenSettings` 触发（`tools.md` §4.50），**不改变任何设置值**。
+
+```ts
+type SettingsPointPayload = {
+  contract_version: "2.15.0";
+  section: "ai" | "connection" | "account" | "advanced";
+  row: string | null;            // 行 id；只定位到段时为 null
+  emitted_at: string;
+};
+```
+
+- Host 在工具执行成功时发；`row` 不在登记表里时**降级为 `row: null`**，不发错误——工具的目的是把用户带到地方，不是校验模型拼的字符串。
+- UI 行为：设置未打开 → 打开并切到 `section`；已打开 → 只切段。`row` 非空时滚动到可见、描边高亮 **2 秒**后淡出。
+- **不抢键盘焦点、不改值、不展开折叠项以外的内容**；高亮只是描边，不是选中态。
+- 设置弹层当前不可用（首启阶段尚未挂载）→ UI 忽略本事件，**不排队重放**；对话里仍有工具卡上的「已打开设置 · 连接」作为记录。
+- 与 `row` 对应的行 id 登记表与 `commands.md` §9.1.1 的 `controls` 同源，不另立一份。
 
 ---
 
@@ -1158,6 +1251,25 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.15.0（2026-11-16，免费试用到期与 AI 指路）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.15.0`；全文 `contract_version` 字面量替换为 `2.15.0`（实现侧常量 `EVENT_CONTRACT_VERSION`） | 元数据 | `commands.md` 2.36.0 |
+| 2 | 事件总表新增 #29 `trial-expired`，§4.24 写明：发在事务提交之后、每台机器最多一次、`disconnected` 不是连接状态的真相（UI 必须重读 `runtime_status`） | 新增事件 | 免费节点 7 天试用 |
+| 3 | 事件总表新增 #30 `settings-point`，§4.25 写明：`row` 未知时降级为 `null` 不报错、高亮 2 秒、不抢焦点、不改值、不可用时不排队 | 新增事件 | `OpenSettings` 指路 |
+| 4 | §4.13 布局词汇从 5 块扩到 6 块，新增 `action_card`：props schema、id 字符集、1–3 个按钮、**点击只上报不执行命令**、禁止出现价格 / IP / 端口 / 版本号 / 地区名 | 语义扩展 | UI 与 AI 共用操作面 |
+| 5 | `tools.md` 3.14.0 增 `OpenSettings` / `MyServerFailure`；`data-model.md` 7 增 `trial_state`；`commands.md` 2.36.0 | 矩阵同步 | 同批 |
+| 6 | 事件总表新增 #31 `quit-dismissed`，§4.7.5 写明：超时 / 回落原生 / panic 时发，前端收到后收起弹窗；正常决策与重复决策不发 | 新增事件 | 退出确认 P1 复核 |
+
+### 2.14.0（2026-11-16，应用内退出确认）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.14.0`；全文 `contract_version` 字面量替换为 `2.14.0`（实现侧常量 `EVENT_CONTRACT_VERSION`） | 元数据 | 退出确认改为应用内弹窗 |
+| 2 | 事件总表新增 #28 `quit-requested`（无业务字段，仅信封），§4.7.4 写明只在有连接时发、30 秒无决策按后台、前端不可用时回落原生弹窗 | 新增事件 | `commands.md` §7.8.4 |
+| 3 | `commands.md` 2.35.0 增 `quit_decision`；`tools.md` / `runtime.md` / `data-model.md` 不变 | 元数据 | 退出是用户动作，不给 AI |
 
 ### 2.13.0（2026-11-14，我的服务器事件）
 
