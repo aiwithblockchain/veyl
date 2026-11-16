@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Veyl · 还没有节点</title>
+<style>
+  :root {
+    --canvas: #FAFAF8;
+    --ink: #14161C;
+    --ink-2: #5B5850;
+    --ink-3: #6E6A62;
+    --hair: rgba(20, 22, 28, 0.10);
+    --accent: #F6537B;
+    --accent-ink: #C2185B;
+    --focus: #E03A66;
+    --red: #A8382D;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  button { font-family: inherit; }
+
+  .app {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .app__body {
+    flex: 1 1 auto;
+    display: flex;
+    min-height: 0;
+  }
+
+  /* 顶部状态带 */
+  .statusbar {
+    flex: 0 0 auto;
+    height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    border-bottom: 1px solid var(--hair);
+  }
+
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--ink-2);
+  }
+
+  .status i {
+    display: block;
+    width: 6px;
+    height: 6px;
+    border-radius: 2px;
+    background: var(--ink-3);
+  }
+
+  .account {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--ink-3);
+    opacity: 0.7;
+  }
+
+  /* 中间一列 */
+  .stage {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 24px;
+  }
+
+  .start {
+    width: 400px;
+    max-width: 100%;
+    animation: enter 160ms ease-out both;
+  }
+
+  @keyframes enter {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .start__title {
+    margin: 0;
+    font-size: 24px;
+    line-height: 1.45;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+
+  .start__note {
+    margin: 10px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  .picks {
+    margin-top: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .pick {
+    width: 100%;
+    height: 56px;
+    padding: 0 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 2px;
+    text-align: left;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+
+  .pick:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 3px;
+  }
+
+  .pick__title {
+    font-size: 15px;
+    line-height: 1.35;
+    font-weight: 500;
+  }
+
+  .pick__sub {
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .pick--primary {
+    border: 1px solid var(--ink);
+    background: var(--ink);
+    color: var(--canvas);
+  }
+
+  .pick--primary:hover { background: #24262E; border-color: #24262E; }
+
+  .pick--primary .pick__sub { color: rgba(250, 250, 248, 0.72); }
+
+  /* 已选：主选项变成「连接」 */
+  .pick--primary.is-chosen {
+    align-items: center;
+    gap: 0;
+  }
+
+  .pick--primary.is-chosen .pick__title { font-weight: 500; }
+
+  .pick--secondary {
+    border: 1px solid var(--hair);
+    background: transparent;
+    color: var(--ink);
+  }
+
+  .pick--secondary:hover { border-color: rgba(20, 22, 28, 0.22); }
+
+  .pick--secondary .pick__sub { color: var(--ink-3); }
+
+  .next {
+    margin: 12px 0 0;
+    padding: 12px 16px;
+    border-radius: 10px;
+    background: rgba(20, 22, 28, 0.04);
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-2);
+    animation: enter 160ms ease-out both;
+  }
+
+  /* 右侧对话面板 */
+  .chat {
+    flex: 0 0 380px;
+    width: 380px;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid #E7E3DA;
+  }
+
+  .chat__head {
+    flex: 0 0 auto;
+    height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px 0 20px;
+  }
+
+  .chat__label {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--ink-2);
+  }
+
+  .chat__collapse {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  .chat__collapse:hover { color: var(--ink); background: rgba(20, 22, 28, 0.05); }
+
+  .chat__collapse:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  .chat__blank { flex: 1 1 auto; }
+
+  .chat__composer { flex: 0 0 auto; padding: 0 20px 20px; }
+
+  .chat__field {
+    height: 44px;
+    padding: 0 14px;
+    display: flex;
+    align-items: center;
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    background: #FFFFFF;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  [hidden] { display: none !important; }
+
+  @media (max-width: 480px) {
+    .start { width: 100%; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation: none !important;
+      transition-duration: 0.01ms !important;
+      transition-delay: 0ms !important;
+    }
+
+    .start { opacity: 1; transform: none; }
+  }
+</style>
+</head>
+<body>
+
+  <div class="app">
+    <header class="statusbar">
+      <span class="status"><i aria-hidden="true"></i>未连接</span>
+      <span class="account">账户 · 余额 —</span>
+    </header>
+
+    <div class="app__body">
+      <main class="stage">
+        <section class="start" aria-label="还没有节点">
+          <h1 class="start__title">从哪里开始？</h1>
+          <p class="start__note">免费节点不保证稳定，也不限时。</p>
+
+          <div class="picks">
+            <button class="pick pick--primary" id="pick-free" type="button">
+              <span class="pick__title">使用免费节点</span>
+              <span class="pick__sub">2 个节点，可能不稳定</span>
+            </button>
+            <button class="pick pick--secondary" id="pick-own" type="button">
+              <span class="pick__title">新建自己的节点</span>
+              <span class="pick__sub">用自己的服务器，更稳定</span>
+            </button>
+          </div>
+
+          <p class="next" id="next" hidden>下一步由 AI 帮你建服务器</p>
+        </section>
+      </main>
+
+      <aside class="chat" aria-label="助手">
+        <header class="chat__head">
+          <span class="chat__label">助手</span>
+          <button class="chat__collapse" type="button" aria-label="收起助手">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path d="M5.5 3.5 9 7l-3.5 3.5" stroke="currentColor" stroke-width="1.4"
+                stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+        </header>
+        <div class="chat__blank" aria-hidden="true"></div>
+        <div class="chat__composer">
+          <div class="chat__field" role="textbox" aria-disabled="true" tabindex="-1">
+            告诉 Veyl 你要什么…
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+<script>
+  // simulated：原型只演示选择态，不连接、不建服务器。
+  const free = document.getElementById("pick-free");
+  const own = document.getElementById("pick-own");
+  const next = document.getElementById("next");
+  let chosen = false;
+
+  free.addEventListener("click", () => {
+    if (chosen) return;
+    chosen = true;
+    free.classList.add("is-chosen");
+    free.innerHTML = '<span class="pick__title">连接</span>';
+    free.setAttribute("aria-label", "连接");
+  });
+
+  own.addEventListener("click", () => {
+    next.hidden = false;
+  });
+</script>
+</body>
+</html>
