@@ -1157,7 +1157,161 @@ body[data-resizing] {
 }
 
 .modal--settings {
-  width: min(760px, calc(100vw - 48px));
+  width: min(640px, calc(100vw - 48px));
+  height: 560px;
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 咨询 AI：设置缩左、助手并排，两边都在遮罩之上。 */
+.settings-backdrop.is-consulting {
+  justify-content: flex-start;
+  padding-left: 48px;
+  gap: 24px;
+}
+
+.settings-backdrop.is-consulting .modal--settings {
+  width: min(560px, calc(100vw - 48px));
+}
+
+.settings-assistant {
+  width: 380px;
+  height: 560px;
+  max-height: calc(100vh - 48px);
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-floating);
+}
+
+.settings-assistant > .ai-panel {
+  width: 100%;
+  min-width: 0;
+  border-left: 0;
+}
+
+.settings-head {
+  flex: 0 0 auto;
+  padding: 0 20px 0 24px;
+  height: 64px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-head .modal__title {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.settings-head__actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.settings-consult {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--signal);
+  font-size: 13px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.settings-consult:hover { text-decoration: underline; }
+
+.settings-consult:focus-visible {
+  outline: 2px solid var(--cobalt);
+  outline-offset: 3px;
+}
+
+.settings-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+}
+
+.settings-pane {
+  min-width: 0;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+/* AI 指路：描边 + 浅底，2 秒后由 React 移除；不抢焦点、不改值。 */
+[data-point][data-pointed="true"] {
+  position: relative;
+  border-radius: var(--r-sm);
+  background: var(--signal-dim);
+  outline: 1px solid var(--signal);
+  outline-offset: 2px;
+  transition: background 200ms ease, outline-color 200ms ease;
+}
+
+/* 分段控件（接管方式 / 流量范围） */
+.settings-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg-hover);
+  flex: 0 0 auto;
+}
+
+.settings-seg button {
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.settings-seg button:hover:not(:disabled) { color: var(--ink); }
+
+.settings-seg button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.settings-seg button.is-selected {
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: var(--shadow-card);
+}
+
+.settings-seg button:focus-visible {
+  outline: 2px solid var(--cobalt);
+  outline-offset: 1px;
+}
+
+.settings-confirm {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--card);
+}
+
+.settings-confirm__text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.settings-confirm__actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .modal--confirm {
@@ -1297,28 +1451,35 @@ body[data-resizing] {
 
 .settings-nav {
   display: flex;
-  gap: 4px;
-  padding: 12px 20px 0;
-  border-bottom: 1px solid var(--line);
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 12px;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
 }
 
 .settings-nav button {
+  display: flex;
+  align-items: center;
   height: 36px;
-  padding: 0 12px;
+  padding: 0 10px;
   border: 0;
-  border-bottom: 2px solid transparent;
+  border-radius: 8px;
   background: transparent;
-  color: var(--ink-3);
+  color: var(--ink-2);
   font-size: 14px;
+  text-align: left;
 }
 
 .settings-nav button:hover {
-  color: var(--ink-2);
+  color: var(--ink);
+  background: var(--bg-hover);
 }
 
 .settings-nav button.is-active {
   color: var(--ink);
-  border-bottom-color: var(--signal);
+  background: var(--bg-hover);
+  font-weight: 500;
 }
 
 .settings-section {

@@ -264,7 +264,7 @@ describe("端口行编辑态", () => {
     beginEdit();
     fireEvent.change(input(), { target: { value: "8081" } });
 
-    fireEvent.click(screen.getByRole("tab", { name: "关于" }));
+    fireEvent.click(screen.getByRole("tab", { name: "高级" }));
     fireEvent.click(screen.getByRole("tab", { name: "连接" }));
 
     expect(screen.queryByLabelText("本地代理端口")).toBeNull();

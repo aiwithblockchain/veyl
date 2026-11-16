@@ -275,7 +275,7 @@ describe("设置页免费节点行", () => {
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
     expect(await screen.findByText("已更新 6 个节点，共 18 个。")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("tab", { name: "遇到问题" }));
+    fireEvent.click(screen.getByRole("tab", { name: "高级" }));
     fireEvent.click(screen.getByRole("tab", { name: "连接" }));
 
     expect(

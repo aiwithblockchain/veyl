@@ -69,7 +69,7 @@ const AI_EVENTS = new Set<AgentEvent["name"]>([
   AGENT_EVENTS.requestEnd,
 ]);
 
-type SettingsSection = "ai" | "network" | "advanced" | "about";
+type SettingsSection = "ai" | "network" | "account" | "advanced";
 
 /** 免费节点试用到期：节点已被清走，只留「新建节点」。 */
 function TrialExpired({ onNewNode }: { onNewNode: () => void }) {
@@ -187,6 +187,14 @@ export default function App() {
   const bridge = useMemo(() => getAgentBridge(), []);
   const [state, dispatch] = useReducer(chatReducer, undefined, createInitialState);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 设置在咨询 AI：右栏助手搬进弹层并排显示，原来的右栏不再渲染。 */
+  const [settingsConsulting, setSettingsConsulting] = useState(false);
+  /** AI 指路：打开对应段，并把 row 滚到可见、高亮 2 秒。 */
+  const [settingsPoint, setSettingsPoint] = useState<{
+    section: SettingsSection;
+    row: string | null;
+    nonce: number;
+  } | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("ai");
   const [runtime, setRuntime] = useState<RuntimeView>(() => emptyRuntimeView());
   // 失败快照里 connected_since 已被后端清空，只能记住这次失败是不是从已连接态掉下来的。
@@ -386,6 +394,7 @@ export default function App() {
   // 不带分区时沿用上次记住的 tab（问 AI 返回靠它）；诊断、导入、AI 未配置会显式指定。
   const openSettings = (section?: SettingsSection) => {
     if (section) setSettingsSection(section);
+    setSettingsConsulting(false);
     setSettingsOpen(true);
   };
 
@@ -641,6 +650,15 @@ export default function App() {
         });
         setTrialNonce((value) => value + 1);
       }
+      if (event.name === AGENT_EVENTS.settingsPoint) {
+        const { section, row } = event.payload;
+        // 契约里叫 connection，界面内部叫 network。
+        const target: SettingsSection = section === "connection" ? "network" : section;
+        setSettingsSection(target);
+        setSettingsConsulting(false);
+        setSettingsPoint({ section: target, row: row ?? null, nonce: Date.now() });
+        setSettingsOpen(true);
+      }
       if (event.name === AGENT_EVENTS.askUserQuestion) {
         const payload = event.payload;
         if (settledQuestionIds.current.has(payload.question_id)) return;
@@ -823,6 +841,7 @@ export default function App() {
 
   const closeSettings = () => {
     setSettingsOpen(false);
+    setSettingsConsulting(false);
     void refreshAiStatus();
   };
 
@@ -1650,7 +1669,7 @@ export default function App() {
           onNewNode={handleAskAiFromConsole}
         />
       )}
-      {panelOpen && shell.docked ? (
+      {settingsOpen && settingsConsulting ? null : panelOpen && shell.docked ? (
         <div className="assistant-slot">{aiPanel}</div>
       ) : panelOpen ? (
         <AssistantOverlay onClose={togglePanel}>{aiPanel}</AssistantOverlay>
@@ -1674,7 +1693,7 @@ export default function App() {
         />
       ) : null}
 
-      {destination === "servers" && myServers.loginOpen ? (
+      {myServers.loginOpen ? (
         <MyServerLogin
           onStart={myServers.loginStart}
           onVerify={myServers.loginVerify}
@@ -1682,7 +1701,7 @@ export default function App() {
         />
       ) : null}
 
-      {destination === "servers" && myServers.topupOpen ? (
+      {myServers.topupOpen ? (
         <MyServerTopUp
           wallet={myServers.wallet}
           loading={myServers.walletLoading}
@@ -1752,6 +1771,29 @@ export default function App() {
           closeSettings();
           handleAskAi(text);
         }}
+        routingMode={activeRoutingMode}
+        onSetRoutingMode={handleSetRoutingMode}
+        onConnectModeChanged={() => vpn.reload()}
+        assistant={aiPanel}
+        onConsultingChange={setSettingsConsulting}
+        onSectionChange={setSettingsSection}
+        point={settingsPoint}
+        account={myServers.account}
+        wallet={myServers.wallet}
+        onLogin={() => {
+          closeSettings();
+          myServers.openLogin();
+        }}
+        onTopUp={() => {
+          closeSettings();
+          myServers.openTopUp();
+        }}
+        onViewBills={() =>
+          setAppNotice({
+            level: "info",
+            text: "账单明细下一版接入，当前余额可在充值里查看。",
+          })
+        }
       />
 
       <ConnectionOverlay

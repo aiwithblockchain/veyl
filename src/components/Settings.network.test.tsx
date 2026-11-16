@@ -1,5 +1,6 @@
 /** @vitest-environment jsdom */
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, LlmProvider } from "../agent/bridge";
 import { emptyRuntimeView } from "../agent/bridge";
@@ -80,10 +81,18 @@ function renderSettings(
     onAskAi,
     onNotice,
     onReportProblem,
+    routingMode,
+    onSetRoutingMode,
+    onConnectModeChanged,
+    assistant,
   }: {
     connectMode?: "tun" | "system_proxy" | null;
+    assistant?: ReactNode;
     configId?: string | null;
-    section?: "ai" | "network" | "advanced" | "about";
+    routingMode?: "direct" | "proxy_all" | null;
+    onSetRoutingMode?: (mode: "direct" | "proxy_all") => Promise<{ ok: boolean; message?: string }>;
+    onConnectModeChanged?: (mode: "tun" | "system_proxy") => void;
+    section?: "ai" | "network" | "account" | "advanced";
     runtimeView?: RuntimeView;
     proxyPort?: number;
     onNewConfig?: () => void;
@@ -109,6 +118,10 @@ function renderSettings(
       onRestoreNetwork={() => {}}
       onAskAi={onAskAi ?? (() => {})}
       onReportProblem={onReportProblem}
+      routingMode={routingMode}
+      onSetRoutingMode={onSetRoutingMode}
+      onConnectModeChanged={onConnectModeChanged}
+      assistant={assistant}
       initialSection={section}
     />,
   );
@@ -120,115 +133,83 @@ async function openAddDialog() {
 }
 
 describe("连接 tab", () => {
-  it("两种连接方式各用一句行为描述，只看 connect_mode", async () => {
+  it("接管方式用 Tun / Proxy 分段，按 connect_mode 选中", async () => {
     renderSettings(makeBridge(), { connectMode: "tun" });
-    expect(await screen.findByText("全部软件走 VPN")).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Tun 模式" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Tun 模式" }).getAttribute("aria-pressed"),
+    ).toBe("true");
     cleanup();
 
     renderSettings(makeBridge(), { connectMode: "system_proxy" });
-    expect(await screen.findByText("部分软件走 VPN")).toBeTruthy();
+    expect(
+      (await screen.findByRole("button", { name: "Proxy 模式" })).getAttribute("aria-pressed"),
+    ).toBe("true");
   });
 
-  it("全部软件配置显示换方式的入口", async () => {
-    const onNewConfig = vi.fn();
-    renderSettings(makeBridge(), { connectMode: "tun", onNewConfig });
-    expect(await screen.findByText("现在怎么连")).toBeTruthy();
-    expect(screen.getByText(/要换方式/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "新建一套配置" }));
-    expect(onNewConfig).toHaveBeenCalledTimes(1);
+  it("未连接时直接切换 Proxy 并回写", async () => {
+    const bridge = makeBridge();
+    const setMode = vi.fn(async () => ({ changed: true }));
+    (bridge as unknown as { configSetMode: unknown }).configSetMode = setMode;
+    const onConnectModeChanged = vi.fn();
+    renderSettings(bridge, { connectMode: "tun", onConnectModeChanged });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Proxy 模式" }));
+    await waitFor(() =>
+      expect(setMode).toHaveBeenCalledWith({ configId: "cfg_1", mode: "system_proxy" }),
+    );
+    expect(onConnectModeChanged).toHaveBeenCalledWith("system_proxy");
   });
 
-  it("没有配置时只留一句指路和新建链接，不显示端口、免费节点与添加节点", async () => {
+  it("已连接时先就地确认，取消不发命令", async () => {
+    const bridge = makeBridge();
+    const setMode = vi.fn(async () => ({ changed: true }));
+    (bridge as unknown as { configSetMode: unknown }).configSetMode = setMode;
+    const onConnectModeChanged = vi.fn();
+    renderSettings(bridge, {
+      connectMode: "tun",
+      runtimeView: runtime({ state: "running" }),
+      onConnectModeChanged,
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Proxy 模式" }));
+    expect(await screen.findByText("切换会短暂断开当前连接。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(setMode).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Proxy 模式" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
+    await waitFor(() => expect(setMode).toHaveBeenCalledTimes(1));
+  });
+
+  it("流量范围默认智能，点全局回写", async () => {
+    const onSetRoutingMode = vi.fn(async () => ({ ok: true }));
+    renderSettings(makeBridge(), { connectMode: "tun", onSetRoutingMode });
+
+    fireEvent.click(await screen.findByRole("button", { name: "全局" }));
+    await waitFor(() => expect(onSetRoutingMode).toHaveBeenCalledWith("proxy_all"));
+  });
+
+  it("没有配置时只留指路和新建链接，不显示端口", async () => {
     const onNewConfig = vi.fn();
-    renderSettings(makeBridge(), { connectMode: null, onNewConfig });
-    expect(await screen.findByText("还没有配置")).toBeTruthy();
-    expect(screen.getByText(/先在左侧新建一套/)).toBeTruthy();
+    renderSettings(makeBridge(), { connectMode: null, configId: null, onNewConfig });
+    expect(await screen.findByText(/还没有配置/)).toBeTruthy();
     expect(screen.queryByText("本地代理端口")).toBeNull();
     expect(document.querySelector(".seed-refresh")).toBeNull();
-    expect(screen.queryByText("添加节点")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "新建一套配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建节点" }));
     expect(onNewConfig).toHaveBeenCalledTimes(1);
   });
 
-  it("用哪个节点整行已删除，节点切换只在主界面底部", async () => {
+  it("节点切换不在设置里", async () => {
     renderSettings(makeBridge(), { connectMode: "tun" });
-    await screen.findByText("现在怎么连");
+    expect(await screen.findByText("接管方式")).toBeTruthy();
     expect(screen.queryByText("用哪个节点")).toBeNull();
-  });
-
-  it("已连接代理时显示实际端口与系统已设好的说明", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { writeText },
-    });
-
-    renderSettings(makeBridge(), {
-      connectMode: "system_proxy",
-      runtimeView: runtime({ state: "running", mixed_port: 2080, system_proxy_enabled: true }),
-    });
-
-    expect(await screen.findByText("127.0.0.1:2080")).toBeTruthy();
-    expect(
-      screen.getByText("浏览器已经设好了；其它软件填这个地址。"),
-    ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "复制" }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith("127.0.0.1:2080"));
-  });
-
-  it("端口顺延时只出现一条说明，用 port_fallback 的两个数字", async () => {
-    renderSettings(makeBridge(), {
-      connectMode: "system_proxy",
-      runtimeView: runtime({
-        state: "running",
-        mixed_port: 8080,
-        system_proxy_enabled: true,
-        port_fallback: { requested: 7890, actual: 8080, reason: "occupied" },
-      }),
-    });
-
-    expect(
-      await screen.findByText("保存的是 7890；现在用的是 8080，被别的软件占用了。"),
-    ).toBeTruthy();
-    expect(screen.queryByText(/下次连接生效/)).toBeNull();
-    expect(screen.queryByText("浏览器已经设好了；其它软件填这个地址。")).toBeNull();
-  });
-
-  it("权限原因用另一句，不冒充被占用", async () => {
-    renderSettings(makeBridge(), {
-      connectMode: "system_proxy",
-      proxyPort: 80,
-      runtimeView: runtime({
-        state: "running",
-        mixed_port: 7890,
-        port_fallback: { requested: 80, actual: 7890, reason: "unavailable" },
-      }),
-    });
-
-    expect(
-      await screen.findByText("保存的是 80；现在用的是 7890，这个端口需要管理员权限。"),
-    ).toBeTruthy();
-    expect(screen.queryByText(/被别的软件占用了/)).toBeNull();
-  });
-
-  it("端口行标签旁有「问 AI」，并把当前 tab 一起带出去", async () => {
-    const onAskAi = vi.fn();
-    renderSettings(makeBridge(), {
-      connectMode: "system_proxy",
-      onAskAi,
-    });
-
-    fireEvent.click(await screen.findByRole("button", { name: "问 AI" }));
-    expect(onAskAi).toHaveBeenCalledWith(
-      expect.stringContaining("127.0.0.1:7890"),
-      "network",
-    );
   });
 
   it("网络页不出现修复动作", async () => {
     renderSettings(makeBridge(), { connectMode: "system_proxy" });
-    await screen.findByText("现在怎么连");
+    await screen.findByText("接管方式");
     expect(screen.queryByText("清除残留代理")).toBeNull();
     expect(screen.queryByText("重置网络")).toBeNull();
   });
@@ -400,17 +381,17 @@ describe("添加节点", () => {
 });
 
 describe("tab 语义与键盘", () => {
-  it("第一个 tab 改名 AI 服务，四个 tab 有 tab 角色", async () => {
+  it("四个 tab 有 tab 角色", async () => {
     renderSettings(makeBridge(), { section: "ai" });
     await screen.findByText("用哪个 AI 服务");
     expect(
       screen.getAllByRole("tab").map((tab) => tab.textContent),
-    ).toEqual(["AI 服务", "连接", "遇到问题", "关于"]);
+    ).toEqual(["AI", "连接", "账户", "高级"]);
     expect(document.querySelector(".settings-section__title")).toBeNull();
   });
 
   it("四个 tab 都有对应的 tabpanel", async () => {
-    for (const section of ["ai", "network", "advanced", "about"] as const) {
+    for (const section of ["ai", "network", "account", "advanced"] as const) {
       renderSettings(makeBridge(), { section, connectMode: "system_proxy" });
       await screen.findByRole("tabpanel");
       const panel = screen.getByRole("tabpanel");
@@ -422,17 +403,17 @@ describe("tab 语义与键盘", () => {
 
   it("方向键切换 tab 并移动焦点", async () => {
     renderSettings(makeBridge(), { section: "network" });
-    await screen.findByText("现在怎么连");
+    await screen.findByText("接管方式");
     const tabs = screen.getAllByRole("tab");
 
     fireEvent.keyDown(tabs[1], { key: "ArrowRight" });
-    expect(screen.getByRole("tab", { name: "遇到问题" }).getAttribute("aria-selected")).toBe(
+    expect(screen.getByRole("tab", { name: "账户" }).getAttribute("aria-selected")).toBe(
       "true",
     );
-    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "遇到问题" }));
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "账户" }));
 
-    fireEvent.keyDown(screen.getByRole("tab", { name: "遇到问题" }), { key: "End" });
-    expect(screen.getByRole("tab", { name: "关于" }).getAttribute("aria-selected")).toBe(
+    fireEvent.keyDown(screen.getByRole("tab", { name: "账户" }), { key: "End" });
+    expect(screen.getByRole("tab", { name: "高级" }).getAttribute("aria-selected")).toBe(
       "true",
     );
   });
@@ -444,8 +425,9 @@ describe("AI 服务 tab", () => {
     expect(await screen.findByText("用哪个 AI 服务")).toBeTruthy();
     expect(screen.getByText("DeepSeek")).toBeTruthy();
     expect(screen.getByText("添加 AI 服务")).toBeTruthy();
-    expect(screen.queryByRole("tab", { name: "基础" })).toBeNull();
-    expect(screen.queryByRole("tab", { name: "高级" })).toBeNull();
+    const pane = screen.getByRole("tabpanel");
+    expect(within(pane).queryByRole("tab", { name: "基础" })).toBeNull();
+    expect(within(pane).queryByRole("tab", { name: "高级" })).toBeNull();
     expect(screen.queryByLabelText("DeepSeek API Key")).toBeNull();
     expect(screen.queryByRole("button", { name: "刷新" })).toBeNull();
   });
@@ -514,9 +496,9 @@ describe("遇到问题 tab", () => {
   });
 });
 
-describe("关于 tab", () => {
+describe("关于信息（在高级里）", () => {
   it("版本与数据去向；没有仓库地址时不摆空链接", async () => {
-    renderSettings(makeBridge(), { section: "about" });
+    renderSettings(makeBridge(), { section: "advanced" });
     expect(await screen.findByText("版本")).toBeTruthy();
     expect(await screen.findByText("v0.1.0")).toBeTruthy();
     expect(
@@ -530,11 +512,11 @@ describe("关于 tab", () => {
 
 describe("文案扫描", () => {
   it("可见文本没有禁用词与英文跳过原因", async () => {
-    for (const section of ["ai", "network", "advanced", "about"] as const) {
+    for (const section of ["ai", "network", "account", "advanced"] as const) {
       renderSettings(makeBridge(), { section, connectMode: "system_proxy" });
-      await screen.findByRole("tab", { name: "AI 服务" });
+      await screen.findByRole("tab", { name: "AI" });
       const text = document.querySelector(".modal--settings")?.textContent ?? "";
-      expect(text).not.toMatch(/proxy|TUN|分流|规则集/i);
+      expect(text.replace(/Tun 模式|Proxy 模式/g, "")).not.toMatch(/proxy|TUN|分流|规则集/i);
       expect(text).not.toMatch(/duplicate|malformed|unsupported/);
       cleanup();
     }
@@ -587,5 +569,28 @@ describe("原生表单与输入法", () => {
 
     expect(fireEvent.keyDown(name, { key: "Enter", keyCode: 229 })).toBe(false);
     expect(fireEvent.keyDown(name, { key: "Enter" })).toBe(true);
+  });
+});
+
+describe("咨询 AI 的焦点", () => {
+  it("咨询时 aria-modal 去掉，Tab 在设置与助手之间循环", async () => {
+    renderSettings(makeBridge(), {
+      connectMode: "tun",
+      assistant: <input aria-label="助手输入" />,
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "咨询 AI" }));
+
+    const input = await screen.findByLabelText("助手输入");
+    expect(
+      document.querySelector(".modal--settings")?.getAttribute("aria-modal"),
+    ).toBeNull();
+
+    // 助手输入是 backdrop 里最后一个可聚焦元素：Tab 应回到设置卡的第一个。
+    input.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "咨询 AI" }),
+    );
   });
 });

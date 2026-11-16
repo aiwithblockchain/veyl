@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import type {
   AgentBridge,
   DefaultProfileStatus,
@@ -7,12 +7,15 @@ import type {
   LlmProtocol,
   LlmProvider,
   LlmProviderInput,
+  MyServerAccount,
+  MyServerWallet,
   NetworkForceResetResult,
   NetworkForceResetStep,
 } from "../agent/bridge";
 import { DEFAULT_PROXY_PORT, isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import type {
   ConfigConnectMode,
+  ConfigRouteMode,
   NodeImportResult,
   NodeImportSkipped,
   RuntimeView,
@@ -26,8 +29,6 @@ import { IconClose } from "./icons";
 import { RuntimeUpgradeRow, useRuntimeUpgrade } from "./RuntimeUpgrade";
 import { TunDiagnosticsRow } from "./TunDiagnostics";
 import { TunHelperRow, useTunHelper } from "./TunHelper";
-
-const OPEN_SOURCE_URL: string | null = null;
 
 interface Props {
   open: boolean;
@@ -56,9 +57,29 @@ interface Props {
   onAskAi: (text: string, section: SectionId) => void;
   /** 从导入入口进来时直接落到「网络」；默认「账号与 AI」。 */
   initialSection?: SectionId;
+  /** 当前配置的流量范围；null = 未知，开关按智能显示。 */
+  routingMode?: ConfigRouteMode | null;
+  /** 切换流量范围；热切换不断流。 */
+  onSetRoutingMode?: (
+    mode: "direct" | "proxy_all",
+  ) => Promise<{ ok: boolean; message?: string }>;
+  /** 接管方式切换成功后让 App 重读配置。 */
+  onConnectModeChanged?: (mode: ConfigConnectMode) => void;
+  /** 咨询 AI：设置缩左、右侧并排助手；App 据此隐藏原来的右栏。 */
+  assistant?: ReactNode;
+  onConsultingChange?: (consulting: boolean) => void;
+  /** 切 tab 时通知 App，重新打开设置能落回原处。 */
+  onSectionChange?: (section: SectionId) => void;
+  /** AI 指路：section 内的 row 高亮 2 秒；row=null 只切段。 */
+  point?: { section: SectionId; row: string | null; nonce: number } | null;
+  account?: MyServerAccount | null;
+  wallet?: MyServerWallet | null;
+  onLogin?: () => void;
+  onTopUp?: () => void;
+  onViewBills?: () => void;
 }
 
-type SectionId = "ai" | "network" | "advanced" | "about";
+type SectionId = "ai" | "network" | "account" | "advanced";
 
 interface ProviderForm {
   providerId?: string;
@@ -478,10 +499,10 @@ function SeedRefreshRow({
 }
 
 const SECTIONS: Array<{ id: SectionId; label: string }> = [
-  { id: "ai", label: "AI 服务" },
+  { id: "ai", label: "AI" },
   { id: "network", label: "连接" },
-  { id: "advanced", label: "遇到问题" },
-  { id: "about", label: "关于" },
+  { id: "account", label: "账户" },
+  { id: "advanced", label: "高级" },
 ];
 
 const PRESETS: Array<{
@@ -539,12 +560,6 @@ function protocolLabel(protocol: LlmProtocol): string {
 }
 
 /** 连接方式与左栏、主界面用同一套词；设置里只读，只看 connect_mode。 */
-function connectModeText(mode: ConfigConnectMode | null): string {
-  if (mode === "tun") return "全部软件走 VPN";
-  if (mode === "system_proxy") return "部分软件走 VPN";
-  return "还没有配置";
-}
-
 const IMPORT_SKIP_REASONS: Record<NodeImportSkipped["reason"], string> = {
   duplicate: "已有同名节点",
   unsupported_scheme: "不是 ss:// 链接",
@@ -625,6 +640,18 @@ export function Settings({
   reportBusy = false,
   onAskAi,
   initialSection = "ai",
+  routingMode = null,
+  onSetRoutingMode,
+  onConnectModeChanged,
+  assistant,
+  onConsultingChange,
+  onSectionChange,
+  point = null,
+  account = null,
+  wallet = null,
+  onLogin,
+  onTopUp,
+  onViewBills,
 }: Props) {
   const connected = runtime.state === "running" || runtime.state === "degraded";
   const runtimeActive =
@@ -636,6 +663,16 @@ export function Settings({
   const showCleanupProxy =
     !runtimeActive && (connectMode === "system_proxy" || runtime.system_proxy_enabled);
   const [section, setSection] = useState<SectionId>("ai");
+  /** 咨询 AI：设置缩左、助手并排。 */
+  const [consulting, setConsulting] = useState(false);
+  /** AI 指路高亮的行 id；2 秒后自动清掉。 */
+  const [pointedRow, setPointedRow] = useState<string | null>(null);
+  const pointTimerRef = useRef<number | null>(null);
+  /** 已连接时切换接管方式：等就地确认。 */
+  const [pendingMode, setPendingMode] = useState<ConfigConnectMode | null>(null);
+  const [modeBusy, setModeBusy] = useState(false);
+  const [modeError, setModeError] = useState<string | null>(null);
+  const [scopeError, setScopeError] = useState<string | null>(null);
   const [seedInfo, setSeedInfo] = useState<SeedRefreshInfo | null>(defaultProfile);
   const coreUpgrade = useRuntimeUpgrade({
     bridge,
@@ -695,6 +732,7 @@ export function Settings({
   const [importResult, setImportResult] = useState<NodeImportResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const backdropRef = useRef<HTMLDivElement>(null);
   const importDialogRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const resetDialogRef = useRef<HTMLDivElement>(null);
@@ -703,7 +741,9 @@ export function Settings({
   const resetCloseRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef(false);
   const copyTimerRef = useRef<number | null>(null);
-  useFocusTrap(open && resetPhase === "idle" && !importOpen, dialogRef);
+  useFocusTrap(open && !consulting && resetPhase === "idle" && !importOpen, dialogRef);
+  // 咨询 AI 时助手是设置卡的兄弟节点：焦点陷阱改挂遮罩，Tab 能进助手。
+  useFocusTrap(open && consulting && resetPhase === "idle" && !importOpen, backdropRef);
   useFocusTrap(resetPhase !== "idle", resetDialogRef);
   useFocusTrap(importOpen, importDialogRef);
 
@@ -871,6 +911,105 @@ export function Settings({
     setRouteCopy("idle");
   }, [resetPhase]);
 
+  const closeSettings = useCallback(() => {
+    setConsulting(false);
+    setPendingMode(null);
+    onConsultingChange?.(false);
+    onClose();
+  }, [onClose, onConsultingChange]);
+
+  const selectSection = (next: SectionId) => {
+    setSection(next);
+    onSectionChange?.(next);
+  };
+
+  // 契约 row id ↔ 界面行的唯一挂点；AI 指路靠它滚动与高亮。
+  const pointAttrs = (row: string) => ({
+    "data-point": row,
+    "data-pointed": pointedRow === row ? "true" : undefined,
+  });
+
+  const toggleConsulting = () => {
+    const next = !consulting;
+    setConsulting(next);
+    onConsultingChange?.(next);
+  };
+
+  const commitConnectMode = useCallback(
+    async (next: ConfigConnectMode) => {
+      if (!configId) return;
+      setModeBusy(true);
+      setModeError(null);
+      setPendingMode(null);
+      try {
+        await bridge.configSetMode({ configId, mode: next });
+        onConnectModeChanged?.(next);
+      } catch (error) {
+        setModeError(
+          toBridgeError(error).message || "没能切换接管方式，稍后再试。",
+        );
+      } finally {
+        setModeBusy(false);
+      }
+    },
+    [bridge, configId, onConnectModeChanged],
+  );
+
+  const requestConnectMode = (next: ConfigConnectMode) => {
+    if (!configId || modeBusy || next === connectMode) return;
+    setModeError(null);
+    // 已连接：就地确认，切换会短暂断开。
+    if (connected) {
+      setPendingMode(next);
+      return;
+    }
+    void commitConnectMode(next);
+  };
+
+  const changeScope = async (mode: "direct" | "proxy_all") => {
+    if (!onSetRoutingMode) return;
+    setScopeError(null);
+    const result = await onSetRoutingMode(mode);
+    if (!result.ok) {
+      setScopeError(result.message ?? "没切成功，还是原来的范围。");
+    }
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    setConsulting(false);
+    onConsultingChange?.(false);
+    setPendingMode(null);
+    setModeError(null);
+    setScopeError(null);
+  }, [open, onConsultingChange]);
+
+  // AI 指路：切到目标段后把 row 滚到可见并高亮 2 秒；row=null 只切段。
+  useEffect(() => {
+    if (!open || !point?.row || section !== point.section) return;
+    const row = point.row;
+    const target =
+      dialogRef.current?.querySelector<HTMLElement>(`[data-point="${row}"]`) ?? null;
+    if (!target) return;
+    // 高级里的行可能在收起的折叠块里：先展开再滚。
+    const fold = target.closest("details");
+    if (fold && !fold.open) fold.open = true;
+    target.scrollIntoView?.({ block: "center" });
+    setPointedRow(row);
+    if (pointTimerRef.current) window.clearTimeout(pointTimerRef.current);
+    pointTimerRef.current = window.setTimeout(() => {
+      pointTimerRef.current = null;
+      setPointedRow(null);
+    }, 2000);
+  }, [open, section, point?.nonce, point?.row, point?.section]);
+
+  useEffect(
+    () => () => {
+      if (pointTimerRef.current) window.clearTimeout(pointTimerRef.current);
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -892,12 +1031,11 @@ export function Settings({
         cancelProxyPortEdit();
         return;
       }
-      onClose();
+      closeSettings();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose, resetPhase, closeReset, importOpen, portEditing, cancelProxyPortEdit]);
-
+  }, [open, closeSettings, resetPhase, closeReset, importOpen, portEditing, cancelProxyPortEdit]);
   useEffect(() => {
     if (resetPhase === "confirm") resetCancelRef.current?.focus();
     if (resetPhase === "result") resetCloseRef.current?.focus();
@@ -1191,7 +1329,7 @@ export function Settings({
     }
     if (next === null) return;
     event.preventDefault();
-    setSection(SECTIONS[next].id);
+    selectSection(SECTIONS[next].id);
     tabRefs.current[next]?.focus();
   };
 
@@ -1414,26 +1552,46 @@ export function Settings({
 
   return (
     <>
-      <div className="modal-backdrop" onMouseDown={onClose}>
+      <div
+        ref={backdropRef}
+        className={`modal-backdrop settings-backdrop ${consulting ? "is-consulting" : ""}`}
+        onMouseDown={closeSettings}
+      >
         <div
           ref={dialogRef}
           className="modal modal--settings"
           role="dialog"
-          aria-modal="true"
+          aria-modal={consulting ? undefined : true}
           aria-labelledby="settings-title"
           aria-hidden={resetPhase !== "idle" ? true : undefined}
           inert={resetPhase !== "idle"}
           onMouseDown={(event) => event.stopPropagation()}
         >
-        <header className="modal__head">
+        <header className="modal__head settings-head">
           <h2 id="settings-title" className="modal__title">
             设置
           </h2>
-          <button type="button" className="modal__close" onClick={onClose} aria-label="关闭设置">
-            <IconClose size={14} />
-          </button>
+          <div className="settings-head__actions">
+            <button
+              type="button"
+              className="settings-consult"
+              aria-pressed={consulting}
+              onClick={toggleConsulting}
+            >
+              咨询 AI
+            </button>
+            <button
+              type="button"
+              className="modal__close"
+              onClick={closeSettings}
+              aria-label="关闭设置"
+            >
+              <IconClose size={14} />
+            </button>
+          </div>
         </header>
 
+        <div className="settings-body">
         <div className="settings-nav" role="tablist" aria-label="设置分区">
           {SECTIONS.map((item, index) => {
             const selected = section === item.id;
@@ -1450,7 +1608,7 @@ export function Settings({
                 aria-controls={`settings-panel-${item.id}`}
                 tabIndex={selected ? 0 : -1}
                 className={selected ? "is-active" : ""}
-                onClick={() => setSection(item.id)}
+                onClick={() => selectSection(item.id)}
                 onKeyDown={(event) => onTabKeyDown(event, index)}
               >
                 {item.label}
@@ -1459,6 +1617,7 @@ export function Settings({
           })}
         </div>
 
+        <div className="settings-pane">
         {section === "ai" ? (
           <section
             className="settings-section"
@@ -1467,7 +1626,7 @@ export function Settings({
             aria-labelledby="settings-tab-ai"
           >
             <div className="settings-providers">
-              <div className="settings-row">
+              <div className="settings-row" {...pointAttrs("ai.provider")}>
                 <div>
                   <div className="settings-row__label">用哪个 AI 服务</div>
                   <div className="settings-row__value">
@@ -1594,7 +1753,7 @@ export function Settings({
                   </ul>
                 )}
 
-                <div className="settings-actions">
+                <div className="settings-actions" {...pointAttrs("ai.other")}>
                   <button type="button" className="btn btn--ghost" onClick={openNewProvider}>
                     添加 AI 服务
                   </button>
@@ -1789,39 +1948,110 @@ export function Settings({
             id="settings-panel-network"
             aria-labelledby="settings-tab-network"
           >
-            <div className="settings-row">
-              <div>
-                <div className="settings-row__label">现在怎么连</div>
-                <div className="settings-row__value">
-                  {connectModeText(connectMode)}
-                </div>
-                {connectMode ? (
-                  <p className="settings-note">
-                    要换方式：
-                    {onNewConfig ? (
-                      <button type="button" className="settings-link" onClick={onNewConfig}>
-                        新建一套配置
-                      </button>
-                    ) : (
-                      "新建一套配置"
-                    )}
+            <div className="settings-row settings-row--stack" {...pointAttrs("connection.mode")}>
+              <div className="settings-row__main">
+                <div className="settings-row__label">接管方式</div>
+                <p className="settings-note">
+                  Tun 模式接管全部流量；Proxy 模式只给设了代理的软件用。切换会短暂断开当前连接。
+                </p>
+                {modeError ? (
+                  <p className="settings-feedback settings-feedback--error" role="alert">
+                    {modeError}
                   </p>
-                ) : (
-                  <p className="settings-note">
-                    还没有配置。先在左侧新建一套。
-                    {onNewConfig ? (
-                      <button type="button" className="settings-link" onClick={onNewConfig}>
-                        新建一套配置
-                      </button>
-                    ) : null}
-                  </p>
-                )}
+                ) : null}
+              </div>
+              <div className="settings-seg" role="group" aria-label="接管方式">
+                <button
+                  type="button"
+                  className={connectMode === "tun" ? "is-selected" : ""}
+                  aria-pressed={connectMode === "tun"}
+                  disabled={!configId || modeBusy}
+                  onClick={() => requestConnectMode("tun")}
+                >
+                  Tun 模式
+                </button>
+                <button
+                  type="button"
+                  className={connectMode === "system_proxy" ? "is-selected" : ""}
+                  aria-pressed={connectMode === "system_proxy"}
+                  disabled={!configId || modeBusy}
+                  onClick={() => requestConnectMode("system_proxy")}
+                >
+                  Proxy 模式
+                </button>
               </div>
             </div>
 
+            {pendingMode ? (
+              <div className="settings-confirm">
+                <p className="settings-confirm__text">切换会短暂断开当前连接。</p>
+                <div className="settings-confirm__actions">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => setPendingMode(null)}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--primary"
+                    onClick={() => void commitConnectMode(pendingMode)}
+                  >
+                    切换
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="settings-row settings-row--stack" {...pointAttrs("connection.scope")}>
+              <div className="settings-row__main">
+                <div className="settings-row__label">流量范围</div>
+                <p className="settings-note">
+                  智能只让需要的流量走节点，全局让所有流量都走。
+                </p>
+                {scopeError ? (
+                  <p className="settings-feedback settings-feedback--error" role="alert">
+                    {scopeError}
+                  </p>
+                ) : null}
+              </div>
+              <div className="settings-seg" role="group" aria-label="流量范围">
+                <button
+                  type="button"
+                  className={routingMode === "proxy_all" ? "" : "is-selected"}
+                  aria-pressed={routingMode !== "proxy_all"}
+                  disabled={!onSetRoutingMode}
+                  onClick={() => void changeScope("direct")}
+                >
+                  智能
+                </button>
+                <button
+                  type="button"
+                  className={routingMode === "proxy_all" ? "is-selected" : ""}
+                  aria-pressed={routingMode === "proxy_all"}
+                  disabled={!onSetRoutingMode}
+                  onClick={() => void changeScope("proxy_all")}
+                >
+                  全局
+                </button>
+              </div>
+            </div>
+
+            {!configId ? (
+              <p className="settings-note">
+                还没有配置。先在连接屏加一个节点。
+                {onNewConfig ? (
+                  <button type="button" className="settings-link" onClick={onNewConfig}>
+                    新建节点
+                  </button>
+                ) : null}
+              </p>
+            ) : null}
+
             {connectMode === "system_proxy" ? (
               portEditing ? (
-              <div className="settings-row">
+              <div className="settings-row" {...pointAttrs("connection.port")}>
                 <div>
                   <label
                     className="settings-row__label"
@@ -1895,7 +2125,7 @@ export function Settings({
                 </div>
               </div>
             ) : (
-              <div className="settings-row">
+              <div className="settings-row" {...pointAttrs("connection.port")}>
                 <div>
                   <div className="settings-row__label">
                     本地代理端口{" "}
@@ -2215,7 +2445,7 @@ export function Settings({
               </>
             ) : null}
 
-            <div className="danger-zone">
+            <div className="danger-zone" {...pointAttrs("advanced.reset")}>
               <div className="danger-zone__body">
                 <div className="danger-zone__title">重置网络</div>
                 <p className="settings-row__value">
@@ -2247,10 +2477,14 @@ export function Settings({
             <details className="settings-fold">
               <summary className="settings-fold__summary">更新与诊断</summary>
               <div className="settings-fold__body">
-                <RuntimeUpgradeRow controller={coreUpgrade} />
-                <TunHelperRow controller={tunHelper} activeConnection={connected} />
+                <div {...pointAttrs("advanced.core")}>
+                  <RuntimeUpgradeRow controller={coreUpgrade} />
+                </div>
+                <div {...pointAttrs("advanced.helper")}>
+                  <TunHelperRow controller={tunHelper} activeConnection={connected} />
+                </div>
 
-                <div className="settings-row">
+                <div className="settings-row" {...pointAttrs("advanced.logs")}>
                   <div>
                     <div className="settings-row__label">打开日志</div>
                     <div className="settings-row__value">
@@ -2305,46 +2539,90 @@ export function Settings({
                 ) : null}
               </div>
             </details>
-          </section>
-        ) : null}
 
-        {section === "about" ? (
-          <section
-            className="settings-section"
-            role="tabpanel"
-            id="settings-panel-about"
-            aria-labelledby="settings-tab-about"
-          >
             <div className="settings-row">
               <div>
                 <div className="settings-row__label">版本</div>
-                <div className="settings-row__value num">
-                  v{appVersion ?? "—"}
-                </div>
+                <div className="settings-row__value num">v{appVersion ?? "—"}</div>
               </div>
             </div>
-
-            {OPEN_SOURCE_URL ? (
-              <div className="settings-row">
-                <div>
-                  <div className="settings-row__label">开源与反馈</div>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => void bridge.openExternal(OPEN_SOURCE_URL)}
-                >
-                  打开仓库
-                </button>
-              </div>
-            ) : null}
 
             <p className="settings-note">
               AI 对话会发给你选的服务；配置、节点和日志都留在本机。
             </p>
           </section>
         ) : null}
+
+        {section === "account" ? (
+          <section
+            className="settings-section"
+            role="tabpanel"
+            id="settings-panel-account"
+            aria-labelledby="settings-tab-account"
+          >
+            {account?.logged_in ? (
+              <>
+                <div className="settings-row" {...pointAttrs("account.login")}>
+                  <div>
+                    <div className="settings-row__label">邮箱</div>
+                    <div className="settings-row__value">{account.email ?? "已登录"}</div>
+                  </div>
+                </div>
+                <div className="settings-row" {...pointAttrs("account.balance")}>
+                  <div>
+                    <div className="settings-row__label">余额</div>
+                    <div className="settings-row__value num">{balanceText(wallet)}</div>
+                  </div>
+                  <div className="settings-row__aside">
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={onTopUp}
+                      disabled={!onTopUp}
+                    >
+                      充值
+                    </button>
+                    <button
+                      type="button"
+                      className="settings-link"
+                      onClick={onViewBills}
+                      disabled={!onViewBills}
+                    >
+                      查看账单
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="settings-row" {...pointAttrs("account.login")}>
+                <div>
+                  <div className="settings-row__label">未登录</div>
+                  <p className="settings-note">登录后才能充值、购买自己的服务器。</p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={onLogin}
+                  disabled={!onLogin}
+                >
+                  登录
+                </button>
+              </div>
+            )}
+          </section>
+        ) : null}
+        </div>
+        </div>
       </div>
+
+      {consulting && assistant ? (
+        <div
+          className="settings-assistant"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          {assistant}
+        </div>
+      ) : null}
       </div>
 
       {resetPhase !== "idle" ? (
@@ -2526,6 +2804,13 @@ export function Settings({
       ) : null}
     </>
   );
+}
+
+/** 账户段余额：金额来自 wallet，货币沿用后端返回。 */
+function balanceText(wallet: MyServerWallet | null): string {
+  if (!wallet) return "—";
+  const amount = (wallet.balance_cents / 100).toFixed(2);
+  return wallet.currency === "USD" ? `$${amount}` : `${amount} ${wallet.currency}`;
 }
 
 function ResetStepIcon({ status }: { status: "ok" | "failed" | "skipped" }) {

@@ -465,6 +465,19 @@ export class MockAgentBridge implements AgentBridge {
     });
   }
 
+  /** demo：模拟 AI 指路（OpenSettings 成功后 Host 发 settings-point）。 */
+  pointSettingsDemo(section: "ai" | "connection" | "account" | "advanced", row: string | null): void {
+    this.emit({
+      name: AGENT_EVENTS.settingsPoint,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        section,
+        row,
+        emitted_at: now(),
+      },
+    });
+  }
+
   /** demo：模拟免费节点到期（先把 mock 的试用状态切成 expired，再发事件）。 */
   expireTrialDemo(removedNodeCount = 2): void {
     try {
