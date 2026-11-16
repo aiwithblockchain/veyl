@@ -122,14 +122,14 @@
     position: relative;
     min-width: 0;
     display: flex;
-    align-items: center;
-    justify-content: center;
+    overflow-y: auto;
     padding: 48px 24px;
   }
 
   .col {
     width: 560px;
     max-width: 100%;
+    margin: auto;
     animation: enter 160ms ease-out both;
   }
 
@@ -165,57 +165,54 @@
     color: var(--ink-3);
   }
 
-  /* 地区：四个横排 */
-  .regions {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 10px;
+  /* 地区：按大洲分组，chips 换行。示意数据，真实实现来自 my_server_catalog。 */
+  .region-group { margin-top: 16px; }
+
+  .region-group:first-of-type { margin-top: 0; }
+
+  .region-group__label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--ink-3);
   }
 
-  .region {
-    height: 56px;
-    padding: 0 12px;
+  .chips {
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: center;
-    gap: 2px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .chip {
+    height: 44px;
+    padding: 0 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     border: 1px solid var(--hair);
-    border-radius: 10px;
+    border-radius: 8px;
     background: transparent;
     color: var(--ink);
+    font-size: 14px;
+    line-height: 1.35;
+    font-weight: 500;
     text-align: left;
     cursor: pointer;
   }
 
-  .region:hover { border-color: rgba(20, 22, 28, 0.22); }
+  .chip:hover { border-color: rgba(20, 22, 28, 0.22); }
 
-  .region:focus-visible {
+  .chip:focus-visible {
     outline: 1px solid var(--focus);
     outline-offset: 2px;
   }
 
-  .region.is-selected {
+  .chip.is-selected {
     border: 2px solid var(--focus);
     background: #FFFFFF;
     padding: 0 11px;
-  }
-
-  .region__name {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 15px;
-    line-height: 1.35;
-    font-weight: 500;
-  }
-
-  .region__ms {
-    font-family: var(--mono);
-    font-size: 12px;
-    line-height: 1.3;
-    font-variant-numeric: tabular-nums;
-    color: var(--ink-3);
   }
 
   .tag {
@@ -361,13 +358,6 @@
     color: var(--ink);
   }
 
-  .confirm__line {
-    margin: 6px 0 0;
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--ink-3);
-  }
-
   .confirm__actions {
     margin-top: 20px;
     display: flex;
@@ -470,8 +460,8 @@
 
   /* 重来 */
   .reset {
-    position: absolute;
-    right: 24px;
+    position: fixed;
+    right: 404px;
     bottom: 20px;
     padding: 0;
     border: 0;
@@ -755,27 +745,62 @@
 
           <div class="group">
             <span class="group__label" id="region-label">地区</span>
-            <div class="regions" role="radiogroup" aria-labelledby="region-label">
-              <button class="region is-selected" type="button" role="radio" aria-checked="true"
-                data-region="东京" data-ms="42">
-                <span class="region__name">东京<span class="tag">推荐</span></span>
-                <span class="region__ms">42ms</span>
-              </button>
-              <button class="region" type="button" role="radio" aria-checked="false"
-                data-region="新加坡" data-ms="78">
-                <span class="region__name">新加坡</span>
-                <span class="region__ms">78ms</span>
-              </button>
-              <button class="region" type="button" role="radio" aria-checked="false"
-                data-region="法兰克福" data-ms="190">
-                <span class="region__name">法兰克福</span>
-                <span class="region__ms">190ms</span>
-              </button>
-              <button class="region" type="button" role="radio" aria-checked="false"
-                data-region="纽约" data-ms="160">
-                <span class="region__name">纽约</span>
-                <span class="region__ms">160ms</span>
-              </button>
+            <div role="radiogroup" aria-labelledby="region-label">
+              <div class="region-group">
+                <span class="region-group__label">亚洲</span>
+                <div class="chips">
+                  <button class="chip is-selected" type="button" role="radio" aria-checked="true"
+                    data-region="新加坡 1">新加坡 1<span class="tag">推荐</span></button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="班加罗尔 1">班加罗尔 1</button>
+                </div>
+              </div>
+
+              <div class="region-group">
+                <span class="region-group__label">北美洲</span>
+                <div class="chips">
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="纽约 1">纽约 1</button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="纽约 2">纽约 2</button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="纽约 3">纽约 3</button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="多伦多 1">多伦多 1</button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="旧金山 2">旧金山 2</button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="旧金山 3">旧金山 3</button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="亚特兰大 1">亚特兰大 1</button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="里士满 1">里士满 1</button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="堪萨斯城 1">堪萨斯城 1</button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="孟菲斯 1">孟菲斯 1</button>
+                </div>
+              </div>
+
+              <div class="region-group">
+                <span class="region-group__label">欧洲</span>
+                <div class="chips">
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="伦敦 1">伦敦 1</button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="阿姆斯特丹 3">阿姆斯特丹 3</button>
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="法兰克福 1">法兰克福 1</button>
+                </div>
+              </div>
+
+              <div class="region-group">
+                <span class="region-group__label">大洋洲</span>
+                <div class="chips">
+                  <button class="chip" type="button" role="radio" aria-checked="false"
+                    data-region="悉尼 1">悉尼 1</button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -809,8 +834,7 @@
 
         <section id="view-confirm" aria-label="确认创建" hidden>
           <div class="confirm">
-            <h1 class="confirm__title" id="confirm-title">东京 · 入门 · 每天 $0.20</h1>
-            <p class="confirm__line" id="confirm-line">今天扣 $0.20</p>
+            <h1 class="confirm__title" id="confirm-title">新加坡 1 · 入门 · 每天 $0.20</h1>
             <div class="confirm__actions">
               <button class="ghost" id="back" type="button">返回</button>
               <button class="primary" id="open" type="button">开一台</button>
@@ -830,7 +854,7 @@
         <section id="view-done" aria-label="节点已创建" hidden>
           <div class="node-card">
             <button class="node" type="button">
-              <span id="done-name">东京 01</span>
+              <span id="done-name">新加坡 01</span>
               <span class="node__ms" id="done-ms">42ms</span>
             </button>
           </div>
@@ -884,14 +908,15 @@
   </div>
 
 <script>
-  // simulated：本原型不发起真实请求。延迟数值是示意（sample），登录与建机全部本地模拟。
+  // simulated：本原型不发起真实请求。地区为示意数据（真实实现来自 my_server_catalog），
+  // 延迟数值与登录、建机流程都是本地模拟（sample）。
   const views = {
     form: document.getElementById("view-form"),
     confirm: document.getElementById("view-confirm"),
     progress: document.getElementById("view-progress"),
     done: document.getElementById("view-done"),
   };
-  const regions = Array.from(document.querySelectorAll(".region"));
+  const regions = Array.from(document.querySelectorAll(".chip"));
   const plans = Array.from(document.querySelectorAll(".plan"));
   const steps = Array.from(document.querySelectorAll(".step"));
   const sheet = document.getElementById("sheet");
@@ -899,9 +924,15 @@
   const code = document.getElementById("code");
   const login = document.getElementById("login");
 
-  let region = { name: "东京", ms: "42" };
+  let region = { name: "新加坡 1" };
   let plan = { name: "入门", price: "0.20" };
   let timers = [];
+
+  // 「新加坡 1」→「新加坡 01」
+  function nodeName(label) {
+    const parts = label.match(/^(.*\D)\s*(\d+)$/);
+    return parts ? parts[1].trim() + " " + String(parts[2]).padStart(2, "0") : label;
+  }
 
   function show(view) {
     Object.entries(views).forEach(([key, node]) => {
@@ -921,7 +952,7 @@
   regions.forEach((item) => {
     item.addEventListener("click", () => {
       pick(regions, item, (el) => {
-        region = { name: el.dataset.region, ms: el.dataset.ms };
+        region = { name: el.dataset.region };
       });
     });
   });
@@ -937,7 +968,6 @@
   document.getElementById("create").addEventListener("click", () => {
     document.getElementById("confirm-title").textContent =
       region.name + " · " + plan.name + " · 每天 $" + plan.price;
-    document.getElementById("confirm-line").textContent = "今天扣 $" + plan.price;
     show("confirm");
   });
 
@@ -989,8 +1019,8 @@
         step.classList.remove("is-active");
         step.classList.add("is-done");
         if (index === steps.length - 1) {
-          document.getElementById("done-name").textContent = region.name + " 01";
-          document.getElementById("done-ms").textContent = region.ms + "ms";
+          document.getElementById("done-name").textContent = nodeName(region.name);
+          document.getElementById("done-ms").textContent = "42ms";
           show("done");
         }
       }, (index + 1) * 1000 + 150));
@@ -1006,7 +1036,7 @@
     login.disabled = true;
     document.getElementById("send-code").textContent = "获取验证码";
     steps.forEach((step) => step.classList.remove("is-active", "is-done"));
-    region = { name: "东京", ms: "42" };
+    region = { name: "新加坡 1" };
     plan = { name: "入门", price: "0.20" };
     pick(regions, regions[0], () => {});
     pick(plans, plans[0], () => {});
