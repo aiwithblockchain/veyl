@@ -4,6 +4,7 @@
 //! 结果信封、权限级别、错误码见 `docs/contracts/tools.md`。
 
 pub mod catalog;
+pub mod config_mode;
 pub mod configs;
 pub mod core;
 pub mod core_upgrade;
@@ -163,6 +164,7 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(configs::ConfigCreateTool::new(Arc::clone(&services))),
         Box::new(configs::ConfigUpdateTool::new(Arc::clone(&services))),
         Box::new(configs::ConfigDeleteTool::new(Arc::clone(&services))),
+        Box::new(config_mode::ConfigSetModeTool::new(Arc::clone(&services))),
         Box::new(configs::NodeImportUrlTool::new(Arc::clone(&services))),
         Box::new(configs::NodeImportTextTool::new(Arc::clone(&services))),
         Box::new(configs::NodeCreateTool::new(Arc::clone(&services))),

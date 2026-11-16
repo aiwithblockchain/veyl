@@ -10,6 +10,8 @@ import type {
   ConfigUpdateInput,
   ConfigDeleteData,
   ConfigListData,
+  ConfigSetModeData,
+  ConfigSetModeInput,
   CoreCheckUpdatesResult,
   CoreInfo,
   DeepSeekKeyState,
@@ -191,6 +193,28 @@ function normalizeConfigDetail(raw: ConfigDetail & { layout_revision?: unknown }
       typeof raw.layout_revision === "number" && Number.isFinite(raw.layout_revision)
         ? raw.layout_revision
         : null,
+  };
+}
+
+function normalizeConfigSetMode(
+  raw: Record<string, unknown>,
+  input: ConfigSetModeInput,
+): ConfigSetModeData {
+  const mode =
+    raw.mode === "tun" || raw.mode === "system_proxy" ? raw.mode : input.mode;
+  const previous =
+    raw.previous_mode === "tun" || raw.previous_mode === "system_proxy"
+      ? raw.previous_mode
+      : mode;
+  return {
+    config_id:
+      typeof raw.config_id === "string" ? raw.config_id : input.configId ?? "",
+    mode,
+    previous_mode: previous,
+    changed: raw.changed === true,
+    connected: raw.connected === true,
+    restored: raw.restored === true,
+    confirmation: raw.confirmation === "accepted" ? "accepted" : "not_needed",
   };
 }
 
@@ -959,6 +983,14 @@ export class TauriAgentBridge implements AgentBridge {
     return call<ConfigActivateResult>("config_activate", { configId });
   }
 
+  async configSetMode(input: ConfigSetModeInput): Promise<ConfigSetModeData> {
+    const raw = await call<Record<string, unknown>>("config_set_mode", {
+      ...(input.configId ? { configId: input.configId } : {}),
+      mode: input.mode,
+    });
+    return normalizeConfigSetMode(raw ?? {}, input);
+  }
+
   async nodeSwitch(configId: string, nodeId: string): Promise<NodeSwitchResult> {
     return call<NodeSwitchResult>("node_switch", { configId, nodeId });
   }
@@ -1591,6 +1623,7 @@ export class TauriAgentBridge implements AgentBridge {
           expiresAt: item.expires_at ?? item.created_at ?? 0,
           kind: detail.kind,
           upgradeConfirm: detail.upgradeConfirm,
+          configSetModeConfirm: detail.configSetModeConfirm,
         };
       })
       .filter((item) => item.questionId.length > 0);

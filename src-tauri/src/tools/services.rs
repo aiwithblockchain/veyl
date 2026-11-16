@@ -194,6 +194,19 @@ pub trait VpnToolServices: Send + Sync {
         mode: &str,
         confirm_reconnect: bool,
     ) -> anyhow::Result<Value>;
+    /// 在线切换接管方式（`system_proxy` ↔ `tun`），会断开重连。
+    ///
+    /// `confirmed` 是 Host 内部的确认门禁：正在连这套配置时，只有过了确认卡
+    /// （或 UI 用户直接点开关）才传 true。门禁与「停不停连接」的判断在这一处，
+    /// 调用方不能靠先查一次状态来绕开启动窗口。
+    async fn config_set_mode(
+        &self,
+        _config_id: Option<String>,
+        _mode: &str,
+        _confirmed: bool,
+    ) -> anyhow::Result<Value> {
+        not_wired("切换接管方式")
+    }
     async fn route_targets_set(
         &self,
         config_id: &str,
@@ -582,6 +595,46 @@ fn svc_error_with_details(
         retryable: false,
         details: Some(details),
     })
+}
+
+/// `retryable: true` 的错误（并发切换：等前一个结束后由用户重来）。
+fn svc_error_retryable(
+    code: impl std::fmt::Display,
+    message: impl std::fmt::Display,
+    details: Value,
+) -> anyhow::Error {
+    anyhow::Error::new(ServiceError {
+        code: code.to_string(),
+        message: message.to_string(),
+        retryable: true,
+        details: Some(details),
+    })
+}
+
+/// 给切换接管方式的失败补上 `mode` / `previous_mode` 与回滚结果。
+///
+/// 保留**首次失败**的错误码：回滚是否成功只由 `details.restored` 表达。
+fn with_mode_context(error: anyhow::Error, context: Value) -> anyhow::Error {
+    match error.downcast_ref::<ServiceError>() {
+        Some(service) => {
+            let mut details = match service.details.clone() {
+                Some(Value::Object(map)) => Value::Object(map),
+                _ => json!({}),
+            };
+            if let (Some(target), Some(extra)) = (details.as_object_mut(), context.as_object()) {
+                for (key, value) in extra {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+            anyhow::Error::new(ServiceError {
+                code: service.code.clone(),
+                message: service.message.clone(),
+                retryable: service.retryable,
+                details: Some(details),
+            })
+        }
+        None => svc_error_with_details("INTERNAL", error.to_string(), context),
+    }
 }
 
 /// `region-changed` 的载荷（`events.md` 2.12.0）：生效值 + 来源 + 时间。
@@ -2090,9 +2143,48 @@ pub struct WiredServices {
     tun: Arc<crate::tun::session::TunSession>,
     helper: Arc<crate::tun::helper_update::HelperUpdater>,
     probes: Arc<crate::tools::probe_batch::ProbeBatchState>,
+    /// 按配置串行：同配置的第二个切换请求直接 `CONFLICT / switch_in_progress`。
+    mode_switches: ModeSwitches,
     /// 最近一次 TUN 状态事件的目标状态：事件链的 `from` 用它，
     /// 不能硬编码 idle（失败后再连应当是 failed → starting）。
     tun_event_state: std::sync::Mutex<crate::runtime::RuntimeState>,
+}
+
+/// 切换接管方式的在途闸门。持有 guard 期间同配置的第二次调用会被拒绝。
+#[derive(Default)]
+struct ModeSwitches {
+    busy: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+struct ModeSwitchGuard<'a> {
+    switches: &'a ModeSwitches,
+    config_id: String,
+}
+
+impl ModeSwitches {
+    fn try_begin(&self, config_id: &str) -> Option<ModeSwitchGuard<'_>> {
+        let mut busy = self
+            .busy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !busy.insert(config_id.to_string()) {
+            return None;
+        }
+        Some(ModeSwitchGuard {
+            switches: self,
+            config_id: config_id.to_string(),
+        })
+    }
+}
+
+impl Drop for ModeSwitchGuard<'_> {
+    fn drop(&mut self) {
+        self.switches
+            .busy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.config_id);
+    }
 }
 
 impl WiredServices {
@@ -2120,6 +2212,7 @@ impl WiredServices {
             tun,
             helper,
             probes: Arc::new(crate::tools::probe_batch::ProbeBatchState::default()),
+            mode_switches: ModeSwitches::default(),
             tun_event_state: std::sync::Mutex::new(crate::runtime::RuntimeState::Idle),
         }
     }
@@ -2342,6 +2435,19 @@ impl WiredServices {
                 },
             )
             .map_err(|error| svc_error(error.code(), error))?;
+        }
+        self.require_config(config_id)
+    }
+
+    fn update_connection_mode(
+        &self,
+        config_id: &str,
+        mode: &str,
+    ) -> anyhow::Result<configs::Config> {
+        {
+            let conn = self.store.conn();
+            configs::set_connection_mode(&conn, config_id, mode)
+                .map_err(|error| svc_error(error.code(), error))?;
         }
         self.require_config(config_id)
     }
@@ -2957,6 +3063,37 @@ impl WiredServices {
             .await
             .and_then(|plan| plan.config_id)
     }
+}
+
+/// `ConfigSetModeData`（`commands.md` §3.7）。
+fn mode_data(
+    config_id: &str,
+    mode: &str,
+    previous_mode: &str,
+    changed: bool,
+    connected: bool,
+    restored: bool,
+    confirmation: &str,
+) -> Value {
+    json!({
+        "config_id": config_id,
+        "mode": mode,
+        "previous_mode": previous_mode,
+        "changed": changed,
+        "connected": connected,
+        "restored": restored,
+        "confirmation": confirmation,
+    })
+}
+
+/// 错误里的 `details.reason`，回滚失败时带给工具做说明；没有就是 null。
+fn service_reason(error: &anyhow::Error) -> Value {
+    error
+        .downcast_ref::<ServiceError>()
+        .and_then(|service| service.details.as_ref())
+        .and_then(|details| details.get("reason"))
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 /// 节点 JSON（`commands.md` §3.0 的 `NodeSummary`）。不含密码。
@@ -5234,6 +5371,189 @@ impl VpnToolServices for WiredServices {
                 data["runtime_state"] = json!(status.state.as_str());
                 data["connect_changed"] = json!(changed);
                 Ok(data)
+            }
+        }
+    }
+
+    /// 在线切换接管方式。断线只发生在这一条命令里，其它字段仍按「只写库」。
+    async fn config_set_mode(
+        &self,
+        config_id: Option<String>,
+        mode: &str,
+        confirmed: bool,
+    ) -> anyhow::Result<Value> {
+        validate_connect_mode(mode)?;
+        if crate::lifecycle::is_quitting() {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "应用正在退出，不能切换接管方式",
+                json!({ "reason": "quitting" }),
+            ));
+        }
+        let config = self.resolve_config(config_id)?;
+        let previous_mode = config.connection_mode.clone();
+
+        // 同配置串行：第二个请求直接拒绝，不排队、不各停各起。
+        let _switch = self.mode_switches.try_begin(&config.id).ok_or_else(|| {
+            svc_error_retryable(
+                "CONFLICT",
+                "这套配置正在切换接管方式，等它结束再试",
+                json!({ "reason": "switch_in_progress" }),
+            )
+        })?;
+
+        let connection = self.connection_state().await;
+        // 代理运行时在启动窗口里 `connected` 还是 false，但它同样「正在用这套配置」；
+        // 只写库会把旧方式的连接留在后台。
+        let proxy_starting = matches!(
+            self.manager.status().await.state,
+            crate::runtime::RuntimeState::Starting | crate::runtime::RuntimeState::Restarting
+        );
+        // 接管连接在跑但读不到属于哪套（接手旧 TUN）：不写库、不停起、不重试。
+        if (connection.connected && connection.config_id.is_none())
+            || (connection.launching && connection.launching_config.is_none())
+            || (proxy_starting && connection.config_id.is_none())
+        {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "有一个接管连接在运行，但读不到它用的是哪套配置；先重连再切换接管方式",
+                json!({ "reason": "config_unknown" }),
+            ));
+        }
+        let running = (connection.connected
+            && connection.config_id.as_deref() == Some(config.id.as_str()))
+            || (connection.launching
+                && connection.launching_config.as_deref() == Some(config.id.as_str()))
+            || (proxy_starting && connection.config_id.as_deref() == Some(config.id.as_str()));
+
+        if previous_mode == mode {
+            return Ok(mode_data(
+                &config.id,
+                mode,
+                &previous_mode,
+                false,
+                running,
+                true,
+                "not_needed",
+            ));
+        }
+
+        // 正在连这套配置（含启动窗口）：没有确认就不许停它。
+        // 门禁必须在这里，调用方先查一次 runtime_status 会漏掉 launching / starting。
+        if running && !confirmed {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "切换接管方式会短暂断开当前连接，需要用户确认",
+                json!({
+                    "reason": "confirmation_required",
+                    "config_id": config.id.clone(),
+                    "mode": mode,
+                    "previous_mode": previous_mode,
+                    "will_disconnect": true,
+                }),
+            ));
+        }
+
+        if !running {
+            let updated = self.update_connection_mode(&config.id, mode)?;
+            self.emit_config_changed("updated", Some(&updated));
+            return Ok(mode_data(
+                &config.id,
+                mode,
+                &previous_mode,
+                true,
+                false,
+                true,
+                "not_needed",
+            ));
+        }
+
+        // 这套正在跑：停 → 写 → 用新模式起。停不掉就什么都不改。
+        if let Err(error) = self.runtime_stop(false).await {
+            let live = {
+                let state = self.connection_state().await;
+                state.connected || state.launching
+            };
+            return Err(with_mode_context(
+                error,
+                json!({
+                    "config_id": config.id.clone(),
+                    "mode": mode,
+                    "previous_mode": previous_mode,
+                    "target_mode": mode,
+                    "changed": false,
+                    "connected": live,
+                }),
+            ));
+        }
+        let updated = self.update_connection_mode(&config.id, mode)?;
+
+        match self.runtime_start(Some(updated.id.clone())).await {
+            Ok(_) => {
+                self.emit_config_changed("updated", Some(&updated));
+                Ok(mode_data(
+                    &config.id,
+                    mode,
+                    &previous_mode,
+                    true,
+                    true,
+                    true,
+                    "accepted",
+                ))
+            }
+            Err(first) => {
+                // 回滚：写回旧值，再用旧模式重启。错误码始终用首次失败那个。
+                match self.update_connection_mode(&config.id, &previous_mode) {
+                    Ok(restored_config) => match self
+                        .runtime_start(Some(restored_config.id.clone()))
+                        .await
+                    {
+                        Ok(_) => Err(with_mode_context(
+                            first,
+                            json!({
+                                "config_id": config.id.clone(),
+                                "mode": mode,
+                                "previous_mode": previous_mode,
+                                "target_mode": mode,
+                                "changed": false,
+                                "connected": true,
+                                "restored": true,
+                            }),
+                        )),
+                        Err(second) => Err(with_mode_context(
+                            first,
+                            json!({
+                                "config_id": config.id.clone(),
+                                "mode": mode,
+                                "previous_mode": previous_mode,
+                                "target_mode": mode,
+                                "changed": false,
+                                "connected": false,
+                                "restored": false,
+                                "rollback_reason": service_reason(&second),
+                            }),
+                        )),
+                    },
+                    Err(rollback_error) => {
+                        // 库里已是新方式、连接停在断开态：界面必须能看见这个事实。
+                        if let Ok(current) = self.require_config(&config.id) {
+                            self.emit_config_changed("updated", Some(&current));
+                        }
+                        Err(with_mode_context(
+                            first,
+                            json!({
+                                "config_id": config.id.clone(),
+                                "mode": mode,
+                                "previous_mode": previous_mode,
+                                "target_mode": mode,
+                                "changed": true,
+                                "connected": false,
+                                "restored": false,
+                                "rollback_reason": service_reason(&rollback_error),
+                            }),
+                        ))
+                    }
+                }
             }
         }
     }
@@ -8020,6 +8340,135 @@ mod config_service_tests {
     }
 
     #[tokio::test]
+    async fn config_set_mode_without_a_connection_only_writes_the_store() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("A")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        let data = services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_TUN, false)
+            .await
+            .unwrap();
+        assert_eq!(data["mode"], configs::CONNECTION_TUN);
+        assert_eq!(data["previous_mode"], configs::CONNECTION_SYSTEM_PROXY);
+        assert_eq!(data["changed"], true);
+        assert_eq!(data["connected"], false);
+        assert_eq!(data["restored"], true);
+        assert_eq!(data["confirmation"], "not_needed");
+
+        let detail = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(detail["connect_mode"], configs::CONNECTION_TUN);
+        assert!(detail["listen_port"].is_null(), "全部软件不能留代理端口");
+
+        // 同值幂等：不改库、不刷新 updated_at。
+        let before = detail["updated_at"].clone();
+        let again = services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_TUN, false)
+            .await
+            .unwrap();
+        assert_eq!(again["changed"], false);
+        assert_eq!(again["connected"], false);
+        assert_eq!(again["confirmation"], "not_needed");
+        assert_eq!(
+            services.config_detail(&config_id).await.unwrap()["updated_at"],
+            before
+        );
+
+        let error = services
+            .config_set_mode(Some(config_id), "vpn", false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.downcast_ref::<ServiceError>().unwrap().code, "INVALID_ARGUMENT");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同配置并发：第二个请求直接 CONFLICT，不排队、不改库。
+    #[tokio::test]
+    async fn config_set_mode_rejects_a_concurrent_switch() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("并发")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let _held = services.mode_switches.try_begin(&config_id).unwrap();
+
+        let error = services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_TUN, false)
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "CONFLICT");
+        assert!(service.retryable, "并发冲突允许用户稍后重来");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "switch_in_progress"
+        );
+        assert_eq!(
+            services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            configs::CONNECTION_SYSTEM_PROXY,
+            "被拒绝的请求不能写库"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 接手旧 TUN、读不到属于哪套：不写库、不停起。
+    #[tokio::test]
+    async fn config_set_mode_reports_config_unknown_for_a_legacy_connection() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("老 TUN")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        services.tun.force_running_for_test(4343, None);
+
+        let error = services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_TUN, false)
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "config_unknown"
+        );
+        assert_eq!(
+            services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            configs::CONNECTION_SYSTEM_PROXY
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 启动窗口也必须先确认：`runtime_status` 在这种状态下读不到「正在连」。
+    #[tokio::test]
+    async fn config_set_mode_requires_confirmation_while_the_connection_is_launching() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("启动窗口")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        services.tun.force_launching_for_test(&config_id);
+
+        let error = services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_TUN, false)
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        let details = service.details.as_ref().unwrap();
+        assert_eq!(details["reason"], "confirmation_required");
+        assert_eq!(details["will_disconnect"], true);
+        assert_eq!(details["config_id"], config_id);
+        assert_eq!(
+            services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            configs::CONNECTION_SYSTEM_PROXY,
+            "未确认不能写库"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn route_set_mode_without_connection_persists() {
         let dir = temp_dir();
         let services = services(&dir);
@@ -9344,6 +9793,74 @@ mod main_flow_tests {
         })
     }
 
+    /// 会持续跟随新配置文件的端口监听器：停掉再起（重连/回滚）时，新端口也有人应答。
+    ///
+    /// 返回停止标志；用例结束时置 false。守护线程本身退出即可，已起的监听线程
+    /// 随测试进程结束，与上面的单次监听器一致。
+    fn spawn_reusable_port_watcher(
+        data_dir: PathBuf,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let flag = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let config_dir = data_dir.join("config");
+            let mut served: std::collections::HashSet<(u16, u16)> = Default::default();
+            while flag.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Ok(entries) = std::fs::read_dir(&config_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if !name.starts_with("profile-") || !name.ends_with(".json") {
+                            continue;
+                        }
+                        let Ok(text) = std::fs::read_to_string(&path) else {
+                            continue;
+                        };
+                        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                            continue;
+                        };
+                        let Some(mixed) = value
+                            .pointer("/inbounds/0/listen_port")
+                            .and_then(Value::as_u64)
+                        else {
+                            continue;
+                        };
+                        let Some(clash_port) = value
+                            .pointer("/experimental/clash_api/external_controller")
+                            .and_then(Value::as_str)
+                            .and_then(|addr| addr.rsplit(':').next())
+                            .and_then(|port| port.parse::<u16>().ok())
+                        else {
+                            continue;
+                        };
+                        let mixed = mixed as u16;
+                        if !served.insert((mixed, clash_port)) {
+                            continue;
+                        }
+                        let Ok(clash_listener) =
+                            std::net::TcpListener::bind(("127.0.0.1", clash_port))
+                        else {
+                            served.remove(&(mixed, clash_port));
+                            continue;
+                        };
+                        if let Ok(mixed_listener) =
+                            std::net::TcpListener::bind(("127.0.0.1", mixed))
+                        {
+                            std::thread::spawn(move || {
+                                for socket in mixed_listener.incoming() {
+                                    drop(socket);
+                                }
+                            });
+                        }
+                        std::thread::spawn(move || serve_clash(clash_listener));
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        stop
+    }
+
     /// 只回 `/version` 的假 Clash API，让 manager 认为运行时已就绪。
     fn serve_clash(listener: std::net::TcpListener) {
         use std::io::{Read, Write};
@@ -10109,6 +10626,249 @@ mod main_flow_tests {
             Some(config_id.as_str())
         );
     }
+
+    /// 切换别的配置只写库：正在连的那套不受影响。
+    #[tokio::test]
+    async fn config_set_mode_only_writes_a_config_that_is_not_connected() {
+        let h = harness();
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let running_id = create_config_with_node(&h.services, "正在跑", "pw-running").await;
+        let connected = h.services.runtime_start(Some(running_id.clone())).await.unwrap();
+        assert_eq!(connected["state"], "running", "{connected}");
+
+        let other = h.services.config_create(auto_port_input("另一套")).await.unwrap();
+        let other_id = other["config_id"].as_str().unwrap().to_string();
+        let data = h
+            .services
+            .config_set_mode(Some(other_id.clone()), configs::CONNECTION_TUN, false)
+            .await
+            .unwrap();
+        assert_eq!(data["changed"], true);
+        assert_eq!(data["connected"], false, "返回的是这套配置在不在跑");
+        assert_eq!(data["confirmation"], "not_needed");
+
+        let status = h.services.manager.status().await;
+        assert_eq!(status.state, RuntimeState::Running, "不能停掉另一套连接");
+        assert_eq!(status.config_id.as_deref(), Some(running_id.as_str()));
+        assert_eq!(
+            h.services.config_detail(&other_id).await.unwrap()["connect_mode"],
+            configs::CONNECTION_TUN
+        );
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 同值时不停连接、不重启。
+    #[tokio::test]
+    async fn config_set_mode_is_a_no_op_for_the_running_mode() {
+        let h = harness();
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let config_id = create_config_with_node(&h.services, "本机代理", "pw-same").await;
+        let _ = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
+        let before = h.services.config_detail(&config_id).await.unwrap()["updated_at"].clone();
+
+        let data = h
+            .services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_SYSTEM_PROXY, false)
+            .await
+            .unwrap();
+        assert_eq!(data["changed"], false);
+        assert_eq!(data["connected"], true);
+        assert_eq!(data["confirmation"], "not_needed");
+        assert_eq!(
+            h.proxy_calls.lock().unwrap().restored,
+            0,
+            "同值不能断开连接"
+        );
+        assert_eq!(h.services.manager.status().await.state, RuntimeState::Running);
+        assert_eq!(
+            h.services.config_detail(&config_id).await.unwrap()["updated_at"],
+            before
+        );
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 在线把正在跑的 TUN 切回本机代理：停 → 写 → 起，成功。
+    #[tokio::test]
+    async fn config_set_mode_switches_a_running_tun_back_to_proxy() {
+        let mut h = harness();
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let config_id = create_config_with_node(&h.services, "TUN 在线切换", "pw-tun-switch").await;
+        h.services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_TUN, false)
+            .await
+            .unwrap();
+
+        let backend = Arc::new(SilentTun::default());
+        inject_silent_tun(&mut h.services, Arc::clone(&backend));
+        h.services
+            .tun
+            .force_running_for_test(4242, Some(&config_id));
+
+        let data = h
+            .services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_SYSTEM_PROXY, true)
+            .await
+            .unwrap();
+        assert_eq!(data["mode"], configs::CONNECTION_SYSTEM_PROXY);
+        assert_eq!(data["changed"], true);
+        assert_eq!(data["connected"], true);
+        assert_eq!(data["restored"], true);
+        assert_eq!(data["confirmation"], "accepted");
+        assert_eq!(backend.stops(), 1, "旧的 TUN 必须被停掉");
+        assert_eq!(
+            h.services.tun.status(),
+            crate::tun::session::TunState::Stopped
+        );
+        let status = h.services.manager.status().await;
+        assert_eq!(status.state, RuntimeState::Running);
+        assert_eq!(status.config_id.as_deref(), Some(config_id.as_str()));
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 正在连这套配置时，不带确认的调用只能被挡下：不能写库、不能停连接。
+    #[tokio::test]
+    async fn config_set_mode_requires_confirmation_for_a_running_connection() {
+        let h = harness();
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let config_id = create_config_with_node(&h.services, "需要确认", "pw-confirm").await;
+        let _ = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
+
+        let error = h
+            .services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_TUN, false)
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        let details = service.details.as_ref().unwrap();
+        assert_eq!(details["reason"], "confirmation_required");
+        assert_eq!(details["will_disconnect"], true);
+        assert_eq!(
+            h.services.manager.status().await.state,
+            RuntimeState::Running,
+            "未确认不能停掉连接"
+        );
+        assert_eq!(
+            h.services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            configs::CONNECTION_SYSTEM_PROXY,
+            "未确认不能写库"
+        );
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 停旧连接失败：details 必须带连接是否还在，UI 不能只看到「失败」。
+    #[tokio::test]
+    async fn config_set_mode_reports_connection_state_when_stopping_fails() {
+        let mut h = harness();
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let config_id = create_config_with_node(&h.services, "停不掉", "pw-stop-fail").await;
+        let _ = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::failing()));
+
+        let error = h
+            .services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_TUN, true)
+            .await
+            .expect_err("停旧连接失败必须报错");
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        let details = service.details.as_ref().unwrap();
+        assert_eq!(details["changed"], false, "库没有被改");
+        assert!(
+            details["connected"].is_boolean(),
+            "必须告诉 UI 连接还在不在：{details}"
+        );
+        assert_eq!(
+            h.services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            configs::CONNECTION_SYSTEM_PROXY
+        );
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 新模式起不来：写回旧模式并用旧模式重启，错误码仍用首次失败那个。
+    #[tokio::test]
+    async fn config_set_mode_rolls_back_when_the_new_mode_fails() {
+        let mut h = harness();
+        // 真实 TUN 后端在测试进程里要走 XPC，`runtime_stop` 会先问一次；用假后端隔离。
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let config_id = create_config_with_node(&h.services, "回滚成功", "pw-rollback").await;
+        let _ = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
+
+        let error = h
+            .services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_TUN, true)
+            .await
+            .expect_err("测试进程不是打包后的 .app，TUN 必然连不上");
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED", "{}", service.message);
+        let details = service.details.as_ref().unwrap();
+        assert_eq!(details["reason"], "dev_unbundled", "错误码用首次失败那个");
+        assert_eq!(details["restored"], true);
+        assert_eq!(details["changed"], false);
+        assert_eq!(details["mode"], configs::CONNECTION_TUN, "失败的是新模式");
+        assert_eq!(details["previous_mode"], configs::CONNECTION_SYSTEM_PROXY);
+
+        assert_eq!(
+            h.services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            configs::CONNECTION_SYSTEM_PROXY,
+            "库必须写回旧方式"
+        );
+        assert_eq!(
+            h.services.manager.status().await.state,
+            RuntimeState::Running,
+            "旧方式必须重新连上"
+        );
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 写回旧值也失败：库留着新方式、连接停在断开态，`restored:false`。
+    #[tokio::test]
+    async fn config_set_mode_reports_restored_false_when_the_rollback_write_fails() {
+        let mut h = harness();
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let config_id = create_config_with_node(&h.services, "回滚失败", "pw-stuck").await;
+        let _ = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
+        {
+            let conn = h.services.store.conn();
+            conn.execute_batch(
+                "CREATE TRIGGER block_mode_rollback BEFORE UPDATE OF connection_mode ON configs
+                 WHEN NEW.connection_mode = 'system_proxy'
+                 BEGIN SELECT RAISE(ABORT, 'rollback blocked'); END;",
+            )
+            .unwrap();
+        }
+
+        let error = h
+            .services
+            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_TUN, true)
+            .await
+            .expect_err("TUN 起不来，写回旧方式也被挡住");
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED", "仍是首次失败的错误码");
+        let details = service.details.as_ref().unwrap();
+        assert_eq!(details["reason"], "dev_unbundled");
+        assert_eq!(details["restored"], false);
+        assert_eq!(details["changed"], true);
+        assert_eq!(details["mode"], configs::CONNECTION_TUN, "库里是新方式");
+        assert_eq!(details["previous_mode"], configs::CONNECTION_SYSTEM_PROXY);
+
+        assert_eq!(
+            h.services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            configs::CONNECTION_TUN
+        );
+        assert_eq!(
+            h.services.manager.status().await.state,
+            RuntimeState::Idle,
+            "连接停在断开态"
+        );
+        {
+            let conn = h.services.store.conn();
+            conn.execute_batch("DROP TRIGGER block_mode_rollback").unwrap();
+        }
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
 }
 
 #[cfg(test)]

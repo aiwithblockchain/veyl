@@ -253,6 +253,31 @@ pub fn mark_used(conn: &Connection, id: &str) -> StoreResult<()> {
     Ok(())
 }
 
+/// 改接管方式。同值幂等（不写 `updated_at`）；切到 tun 时清空代理端口。
+///
+/// `tun` 与「有代理端口」在库里是互斥的（见 `validate_listen_port`），
+/// 所以切到全部软件必须把端口置空；切回本机代理保持自动分配，
+/// 旧端口不恢复——没有单独的列可以暂存它。
+pub fn set_connection_mode(conn: &Connection, id: &str, mode: &str) -> StoreResult<Config> {
+    validate_connection_mode(mode)?;
+    let current = get(conn, id)?.ok_or_else(|| StoreError::NotFound(id.to_string()))?;
+    if current.connection_mode == mode {
+        return Ok(current);
+    }
+    let listen_port = if mode == CONNECTION_TUN {
+        None
+    } else {
+        current.listen_port
+    };
+    conn.execute(
+        "UPDATE configs
+            SET connection_mode = ?2, listen_port = ?3, updated_at = ?4
+          WHERE id = ?1",
+        params![id, mode, listen_port, now_ms()],
+    )?;
+    get(conn, id)?.ok_or_else(|| StoreError::NotFound(id.to_string()))
+}
+
 /// 整体替换「指定服务」的分类集合；每次变更把 `route_revision` +1。
 pub fn set_route_targets(conn: &Connection, id: &str, targets: &Value) -> StoreResult<Config> {
     conn.execute(
@@ -781,6 +806,58 @@ mod tests {
         assert!(get(&conn, "cfg_1").unwrap().unwrap().last_used_at.is_none());
         mark_used(&conn, "cfg_1").unwrap();
         assert!(get(&conn, "cfg_1").unwrap().unwrap().last_used_at.is_some());
+    }
+
+    #[test]
+    fn setting_the_same_connection_mode_is_a_no_op() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let created = create(&conn, &config("cfg_1", "A")).unwrap();
+
+        let same = set_connection_mode(&conn, "cfg_1", CONNECTION_SYSTEM_PROXY).unwrap();
+        assert_eq!(same.connection_mode, CONNECTION_SYSTEM_PROXY);
+        assert_eq!(same.listen_port, Some(7890));
+        assert_eq!(
+            same.updated_at, created.updated_at,
+            "同值不能刷新 updated_at"
+        );
+    }
+
+    #[test]
+    fn switching_to_tun_clears_the_proxy_port() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        create(&conn, &config("cfg_1", "A")).unwrap();
+
+        let tun = set_connection_mode(&conn, "cfg_1", CONNECTION_TUN).unwrap();
+        assert_eq!(tun.connection_mode, CONNECTION_TUN);
+        assert_eq!(tun.listen_port, None, "全部软件不能留着代理端口");
+
+        // 切回去保持自动分配：没有单独的列暂存旧端口。
+        let proxy = set_connection_mode(&conn, "cfg_1", CONNECTION_SYSTEM_PROXY).unwrap();
+        assert_eq!(proxy.connection_mode, CONNECTION_SYSTEM_PROXY);
+        assert_eq!(proxy.listen_port, None);
+    }
+
+    #[test]
+    fn switching_an_unknown_config_is_not_found() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let error = set_connection_mode(&conn, "cfg_missing", CONNECTION_TUN).unwrap_err();
+        assert!(matches!(error, StoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn an_unsupported_connection_mode_is_rejected() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        create(&conn, &config("cfg_1", "A")).unwrap();
+        let error = set_connection_mode(&conn, "cfg_1", "vpn").unwrap_err();
+        assert!(matches!(error, StoreError::Invalid(_)));
+        assert_eq!(
+            get(&conn, "cfg_1").unwrap().unwrap().connection_mode,
+            CONNECTION_SYSTEM_PROXY
+        );
     }
 
     #[test]

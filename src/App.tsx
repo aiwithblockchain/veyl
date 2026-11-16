@@ -642,6 +642,7 @@ export default function App() {
             expiresAt: payload.expires_at,
             kind: detail.kind,
             upgradeConfirm: detail.upgradeConfirm,
+            configSetModeConfirm: detail.configSetModeConfirm,
           },
         ]);
       }

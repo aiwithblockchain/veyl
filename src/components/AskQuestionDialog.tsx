@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CoreUpgradeConfirmData, PendingQuestion } from "../agent/bridge";
+import type {
+  ConfigSetModeConfirmData,
+  CoreUpgradeConfirmData,
+  PendingQuestion,
+} from "../agent/bridge";
+import { isConfirmQuestionKind } from "../agent/bridge";
+import type { ConfigConnectMode } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
 import { formatByteSize, upgradeEffectText } from "../format";
 import { useFocusTrap } from "../ui/focus";
@@ -11,6 +17,19 @@ const UNKNOWN_CONFIRM: CoreUpgradeConfirmData = {
   size: null,
   restartRequired: false,
 };
+
+const UNKNOWN_SET_MODE: ConfigSetModeConfirmData = {
+  configId: null,
+  mode: null,
+  previousMode: null,
+  willDisconnect: false,
+};
+
+function connectModeLabel(mode: ConfigConnectMode | null): string {
+  if (mode === "tun") return "全部软件";
+  if (mode === "system_proxy") return "本机代理";
+  return "所选方式";
+}
 
 interface Props {
   question: PendingQuestion | null;
@@ -33,12 +52,18 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
   const submittingRef = useRef(false);
   const expireRef = useRef(onExpire);
   expireRef.current = onExpire;
-  useFocusTrap(Boolean(question && question.kind === "core_upgrade_confirm"), dialogRef);
+  useFocusTrap(Boolean(question && isConfirmQuestionKind(question.kind)), dialogRef);
 
-  const confirm =
-    question?.kind === "core_upgrade_confirm"
-      ? question.upgradeConfirm ?? UNKNOWN_CONFIRM
-      : null;
+  const isUpgrade = question?.kind === "core_upgrade_confirm";
+  const isSetMode = question?.kind === "config_set_mode_confirm";
+  const blocking = isUpgrade || isSetMode;
+
+  const confirm = isUpgrade
+    ? question?.upgradeConfirm ?? UNKNOWN_CONFIRM
+    : null;
+  const setMode = isSetMode
+    ? question?.configSetModeConfirm ?? UNKNOWN_SET_MODE
+    : null;
   const options = question?.options ?? [];
   // 界面文案固定；回传值仍用 Host 给的选项原文，避免后端按字面量匹配失败。
   const upgradeAnswer =
@@ -47,13 +72,17 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
     ) ??
     options.find((option) => /升级|更新/.test(option)) ??
     "升级";
+  const switchAnswer =
+    options.find((option) => option === "切换") ??
+    options.find((option) => /切换/.test(option)) ??
+    "切换";
   const cancelAnswer =
     options.find((option) => /取消|暂不|稍后|不升|不更新|不用|以后/.test(option)) ?? "取消";
 
   // 后端 15 分钟后静默回空串；倒计时只读后端给的 expires_at。
   // 回答或 request end 会把 question 置空，cleanup 会清掉这个定时器。
   useEffect(() => {
-    if (!question || question.kind !== "core_upgrade_confirm") return;
+    if (!question || !blocking) return;
     const remaining = question.expiresAt - Date.now();
     if (remaining <= 0) {
       expireRef.current();
@@ -64,7 +93,7 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
   }, [question?.questionId, question?.expiresAt, question?.kind]);
 
   useEffect(() => {
-    if (!question || question.kind !== "core_upgrade_confirm") return;
+    if (!question || !blocking) return;
     submittingRef.current = false;
     setSubmitting(false);
     setError(null);
@@ -94,7 +123,7 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
   }, [answer, cancelAnswer]);
 
   useEffect(() => {
-    if (!question || question.kind !== "core_upgrade_confirm") return;
+    if (!question || !blocking) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") skip();
     };
@@ -102,7 +131,7 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [question?.questionId, question?.kind, skip]);
 
-  if (!question || question.kind !== "core_upgrade_confirm") return null;
+  if (!question || !blocking) return null;
 
   return (
     <div
@@ -121,7 +150,7 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
       >
         <header className="ask-question__head">
           <h2 id="ask-question-title" className="ask-question__title">
-            更新后台运行库
+            {isUpgrade ? "更新后台运行库" : "切换接管方式"}
           </h2>
           <button
             type="button"
@@ -134,36 +163,49 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
           </button>
         </header>
 
-        <dl className="core-confirm">
-          <div className="core-confirm__row">
-            <dt>版本</dt>
-            <dd>
-              当前 {confirm?.currentVersion ?? "未知"} → 目标{" "}
-              {confirm?.targetVersion ?? "未知"}
-            </dd>
-          </div>
-          <div className="core-confirm__row">
-            <dt>下载大小</dt>
-            <dd>{formatByteSize(confirm?.size ?? null) ?? "大小未知"}</dd>
-          </div>
-          <div className="core-confirm__row">
-            <dt>来源</dt>
-            <dd>官方更新</dd>
-          </div>
-          <div className="core-confirm__row">
-            <dt>生效</dt>
-            <dd>{upgradeEffectText(confirm?.restartRequired ?? false, connected)}</dd>
-          </div>
-        </dl>
+        {isUpgrade ? (
+          <dl className="core-confirm">
+            <div className="core-confirm__row">
+              <dt>版本</dt>
+              <dd>
+                当前 {confirm?.currentVersion ?? "未知"} → 目标{" "}
+                {confirm?.targetVersion ?? "未知"}
+              </dd>
+            </div>
+            <div className="core-confirm__row">
+              <dt>下载大小</dt>
+              <dd>{formatByteSize(confirm?.size ?? null) ?? "大小未知"}</dd>
+            </div>
+            <div className="core-confirm__row">
+              <dt>来源</dt>
+              <dd>官方更新</dd>
+            </div>
+            <div className="core-confirm__row">
+              <dt>生效</dt>
+              <dd>{upgradeEffectText(confirm?.restartRequired ?? false, connected)}</dd>
+            </div>
+          </dl>
+        ) : (
+          <dl className="core-confirm">
+            <div className="core-confirm__row">
+              <dt>目标方式</dt>
+              <dd>{connectModeLabel(setMode?.mode ?? null)}</dd>
+            </div>
+            <div className="core-confirm__row">
+              <dt>影响</dt>
+              <dd>会短暂断开当前连接。</dd>
+            </div>
+          </dl>
+        )}
 
         <div className="core-confirm__actions">
           <button
             type="button"
             className="btn btn--ghost"
             disabled={submitting}
-            onClick={() => void answer(upgradeAnswer)}
+            onClick={() => void answer(isUpgrade ? upgradeAnswer : switchAnswer)}
           >
-            升级
+            {isUpgrade ? "升级" : "切换"}
           </button>
           <button
             ref={cancelRef}

@@ -174,6 +174,8 @@ export interface PendingQuestion {
   kind?: string | null;
   /** kind = "core_upgrade_confirm" 时的升级明细。 */
   upgradeConfirm?: CoreUpgradeConfirmData | null;
+  /** kind = "config_set_mode_confirm" 时的接管方式明细。 */
+  configSetModeConfirm?: ConfigSetModeConfirmData | null;
 }
 
 export interface CoreUpgradeConfirmData {
@@ -182,6 +184,19 @@ export interface CoreUpgradeConfirmData {
   /** 安装包字节数；后端没给时为 null。 */
   size: number | null;
   restartRequired: boolean;
+}
+
+/** kind = "config_set_mode_confirm" 时的接管方式明细。 */
+export interface ConfigSetModeConfirmData {
+  configId: string | null;
+  mode: ConfigConnectMode | null;
+  previousMode: ConfigConnectMode | null;
+  willDisconnect: boolean;
+}
+
+/** 阻塞确认卡的 kind：这两种走 AskQuestionDialog，其余提问走消息流内联。 */
+export function isConfirmQuestionKind(kind: string | null | undefined): boolean {
+  return kind === "core_upgrade_confirm" || kind === "config_set_mode_confirm";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -211,26 +226,61 @@ function readSize(...values: unknown[]): number | null {
 export function readQuestionDetail(raw: Record<string, unknown>): {
   kind: string | null;
   upgradeConfirm: CoreUpgradeConfirmData | null;
+  configSetModeConfirm: ConfigSetModeConfirmData | null;
 } {
   const kind = readString(raw.kind);
-  if (kind !== "core_upgrade_confirm") return { kind, upgradeConfirm: null };
-  const merged = {
-    ...(asRecord(raw.upgrade) ?? {}),
-    ...(asRecord(raw.confirm) ?? {}),
-    ...(asRecord(raw.data) ?? {}),
-    ...(asRecord(raw.details) ?? {}),
-    ...raw,
-  };
-  return {
-    kind,
-    upgradeConfirm: {
-      currentVersion: readString(merged.current_version, merged.currentVersion),
-      targetVersion: readString(merged.target_version, merged.targetVersion),
-      size: readSize(merged.size, merged.download_size, merged.bytes),
-      restartRequired:
-        merged.restart_required === true || merged.restartRequired === true,
-    },
-  };
+  if (kind === "core_upgrade_confirm") {
+    const merged = {
+      ...(asRecord(raw.upgrade) ?? {}),
+      ...(asRecord(raw.confirm) ?? {}),
+      ...(asRecord(raw.data) ?? {}),
+      ...(asRecord(raw.details) ?? {}),
+      ...raw,
+    };
+    return {
+      kind,
+      upgradeConfirm: {
+        currentVersion: readString(merged.current_version, merged.currentVersion),
+        targetVersion: readString(merged.target_version, merged.targetVersion),
+        size: readSize(merged.size, merged.download_size, merged.bytes),
+        restartRequired:
+          merged.restart_required === true || merged.restartRequired === true,
+      },
+      configSetModeConfirm: null,
+    };
+  }
+
+  if (kind === "config_set_mode_confirm") {
+    const merged = {
+      ...(asRecord(raw.confirm) ?? {}),
+      ...(asRecord(raw.data) ?? {}),
+      ...(asRecord(raw.details) ?? {}),
+      ...raw,
+    };
+    return {
+      kind,
+      upgradeConfirm: null,
+      configSetModeConfirm: {
+        configId: readString(merged.config_id, merged.configId),
+        mode: readConnectMode(merged.mode),
+        previousMode: readConnectMode(
+          merged.previous_mode,
+          merged.previousMode,
+        ),
+        willDisconnect:
+          merged.will_disconnect === true || merged.willDisconnect === true,
+      },
+    };
+  }
+
+  return { kind, upgradeConfirm: null, configSetModeConfirm: null };
+}
+
+function readConnectMode(...values: unknown[]): ConfigConnectMode | null {
+  for (const value of values) {
+    if (value === "tun" || value === "system_proxy") return value;
+  }
+  return null;
 }
 
 /** UI 发起的连接/断开正在进行中；按钮据此禁用，防止重复提交。 */
@@ -635,6 +685,23 @@ export interface RuntimeStartResult extends RuntimeSnapshot {
   already_running?: boolean;
 }
 
+/** 在线切换接管方式（config_set_mode，2.34.0）。 */
+export interface ConfigSetModeInput {
+  configId?: string;
+  mode: ConfigConnectMode;
+}
+
+export interface ConfigSetModeData {
+  config_id: string;
+  mode: ConfigConnectMode;
+  previous_mode: ConfigConnectMode;
+  changed: boolean;
+  connected: boolean;
+  /** false = 回滚失败，当前是断开状态。 */
+  restored: boolean;
+  confirmation: "accepted" | "not_needed";
+}
+
 export interface AgentBridge {
   readonly mode: BridgeMode;
   /** 订阅全部事件（AI 会话 + 应用事件）；返回取消订阅函数。 */
@@ -665,6 +732,8 @@ export interface AgentBridge {
   configDelete(configId: string): Promise<ConfigDeleteData>;
   /** 只改「当前用哪套」，不碰运行时：断开只发生在启动新连接时。 */
   configActivate(configId: string): Promise<ConfigActivateResult>;
+  /** 在线切换接管方式；已连接时会断开重连，UI 与 AI 都要先确认。 */
+  configSetMode(input: ConfigSetModeInput): Promise<ConfigSetModeData>;
   /** 切换某套配置的当前节点；已连接时由 Host 热切换，不断流。 */
   nodeSwitch(configId: string, nodeId: string): Promise<NodeSwitchResult>;
   /** 测试单个节点连通性。不可达是正常结果，不抛错。 */

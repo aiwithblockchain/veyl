@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { NextAction } from "../agent/protocol";
 import type { PendingQuestion } from "../agent/bridge";
+import { isConfirmQuestionKind } from "../agent/bridge";
 import type { Session } from "../state/chatStore";
 import { AskQuestionCard } from "./AskQuestionCard";
 import { Composer } from "./Composer";
@@ -43,7 +44,7 @@ export function ChatView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
   const inlineQuestion =
-    question && question.kind !== "core_upgrade_confirm" ? question : null;
+    question && !isConfirmQuestionKind(question.kind) ? question : null;
 
   useEffect(() => {
     const node = scrollRef.current;

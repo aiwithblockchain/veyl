@@ -20,11 +20,11 @@ function contractToolNames(): string[] {
 }
 
 describe("工具名映射集合", () => {
-  it("与 tools.md §3 的 48 个工具名完全相等", () => {
+  it("与 tools.md §3 的 49 个工具名完全相等", () => {
     const names = contractToolNames();
-    expect(names).toHaveLength(48);
+    expect(names).toHaveLength(49);
     expect(new Set(names)).toEqual(new Set(TOOL_NAMES));
-    expect(TOOL_NAMES).toHaveLength(48);
+    expect(TOOL_NAMES).toHaveLength(49);
   });
 
   it("每个工具都有进行中、完成、失败与建议文案", () => {

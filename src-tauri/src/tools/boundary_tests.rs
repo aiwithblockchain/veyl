@@ -286,6 +286,42 @@ impl VpnToolServices for FakeServices {
         ));
         Ok(self.data.clone())
     }
+    async fn config_set_mode(
+        &self,
+        config_id: Option<String>,
+        mode: &str,
+        confirmed: bool,
+    ) -> anyhow::Result<Value> {
+        self.rec
+            .record(format!("config_set_mode({config_id:?},{mode},{confirmed})"));
+        // 模拟服务层门禁：正在连（含启动窗口）且没确认时，先要求确认。
+        let live = matches!(
+            self.data.get("state").and_then(Value::as_str),
+            Some("running" | "degraded" | "starting" | "restarting")
+        );
+        if live && !confirmed {
+            let id = config_id.unwrap_or_default();
+            return Err(anyhow::Error::new(
+                crate::tools::services::ServiceError {
+                    code: "PRECONDITION_FAILED".into(),
+                    message: "切换接管方式会短暂断开当前连接，需要用户确认".into(),
+                    retryable: false,
+                    details: Some(json!({
+                        "reason": "confirmation_required",
+                        "config_id": id,
+                        "mode": mode,
+                        "previous_mode": self
+                            .data
+                            .get("connect_mode")
+                            .and_then(Value::as_str)
+                            .unwrap_or("system_proxy"),
+                        "will_disconnect": true,
+                    })),
+                },
+            ));
+        }
+        Ok(self.data.clone())
+    }
     async fn route_targets_set(
         &self,
         config_id: &str,
@@ -752,6 +788,7 @@ fn base_input(name: &str) -> Option<Value> {
         "VpnConnect" | "RouteGet" | "RuntimeLogs" | "CatalogSearch" | "CategoryList" => json!({}),
         "IssueReport" => json!({}),
         "CoreUpgrade" => json!({}),
+        "ConfigSetMode" => json!({ "mode": "tun" }),
         "RouteSetMode" => json!({ "mode": "proxy_all" }),
         "NodeImportUrl" => json!({ "url": "https://example.com/sub" }),
         "NodeImportText" => json!({ "text": "ss://aes-256-gcm:pw@203.0.113.10:8388#A" }),
@@ -863,6 +900,150 @@ async fn config_create_requires_a_node_source() {
         );
         assert!(rec.take().is_empty(), "缺来源不能落到服务层：{env}");
     }
+}
+
+/// 等到工具弹出确认卡再回答。用于验证「确认前不产生任何副作用」。
+async fn answer_when_asked(session: &str, answer: &str) {
+    for _ in 0..500 {
+        let pending = crate::agent::questions::list_pending(session);
+        if let Some(id) = pending["questions"]
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(|question| question["question_id"].as_str())
+        {
+            crate::agent::questions::reply(session, id, answer).unwrap();
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    panic!("没有等到确认卡");
+}
+
+fn mode_service_data() -> Value {
+    json!({
+        "active_config_id": "cfg_1",
+        "state": "running",
+        "config_id": "cfg_1",
+        "connect_mode": "system_proxy",
+        "mode": "tun",
+        "previous_mode": "system_proxy",
+        "changed": true,
+        "connected": true,
+        "restored": true,
+        "confirmation": "accepted",
+    })
+}
+
+/// 已连接时用户取消：不执行、不改库（服务层一次都不能被调用）。
+#[tokio::test]
+async fn config_set_mode_cancelled_never_reaches_the_service() {
+    let (svc, rec) = FakeServices::with_data(mode_service_data());
+    let all = tools(svc);
+    const SESSION: &str = "boundary-mode-cancel";
+    const REQUEST: &str = "req_mode_cancel";
+    crate::tools::policy::set_current_request(SESSION, REQUEST);
+
+    let mut ctx = context();
+    ctx.session_id = SESSION.to_string();
+    let (result, ()) = tokio::join!(
+        tool(&all, "ConfigSetMode").execute(json!({ "config_id": "cfg_1", "mode": "tun" }), &ctx),
+        answer_when_asked(SESSION, "取消"),
+    );
+    let env = envelope(&result);
+    assert!(result.is_error, "{env}");
+    assert_eq!(env["error"]["code"], "CANCELLED", "{env}");
+    let calls = rec.take();
+    assert!(
+        calls.iter().all(|call| !call.ends_with(",true)")),
+        "取消后不能带着确认再调一次：{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("config_set_mode") && call.ends_with(",false)")),
+        "取消前应当先经过服务层的确认门禁：{calls:?}"
+    );
+
+    crate::tools::policy::clear_current_request(SESSION);
+    crate::agent::questions::cleanup_request(SESSION, REQUEST);
+}
+
+/// 已连接时用户点「切换」：才把参数交给服务层。
+#[tokio::test]
+async fn config_set_mode_confirmed_reaches_the_service() {
+    let (svc, rec) = FakeServices::with_data(mode_service_data());
+    let all = tools(svc);
+    const SESSION: &str = "boundary-mode-accept";
+    const REQUEST: &str = "req_mode_accept";
+    crate::tools::policy::set_current_request(SESSION, REQUEST);
+
+    let mut ctx = context();
+    ctx.session_id = SESSION.to_string();
+    let (result, ()) = tokio::join!(
+        tool(&all, "ConfigSetMode").execute(json!({ "config_id": "cfg_1", "mode": "tun" }), &ctx),
+        answer_when_asked(SESSION, "切换"),
+    );
+    let env = envelope(&result);
+    assert!(!result.is_error, "{env}");
+    assert_eq!(
+        rec.take().last().map(String::as_str),
+        Some("config_set_mode(Some(\"cfg_1\"),tun,true)"),
+        "{env}"
+    );
+
+    crate::tools::policy::clear_current_request(SESSION);
+    crate::agent::questions::cleanup_request(SESSION, REQUEST);
+}
+
+/// 启动窗口（launching / starting）也必须先弹卡：不能无卡停掉正在起来的连接。
+#[tokio::test]
+async fn config_set_mode_asks_while_the_connection_is_starting() {
+    let mut data = mode_service_data();
+    data["state"] = json!("starting");
+    let (svc, rec) = FakeServices::with_data(data);
+    let all = tools(svc);
+    const SESSION: &str = "boundary-mode-starting";
+    const REQUEST: &str = "req_mode_starting";
+    crate::tools::policy::set_current_request(SESSION, REQUEST);
+
+    let mut ctx = context();
+    ctx.session_id = SESSION.to_string();
+    let (result, ()) = tokio::join!(
+        tool(&all, "ConfigSetMode").execute(json!({ "config_id": "cfg_1", "mode": "tun" }), &ctx),
+        answer_when_asked(SESSION, "取消"),
+    );
+    let env = envelope(&result);
+    assert!(result.is_error, "{env}");
+    assert_eq!(env["error"]["code"], "CANCELLED", "{env}");
+    let calls = rec.take();
+    assert!(
+        calls.iter().all(|call| !call.ends_with(",true)")),
+        "取消后不能带着确认再调一次：{calls:?}"
+    );
+
+    crate::tools::policy::clear_current_request(SESSION);
+    crate::agent::questions::cleanup_request(SESSION, REQUEST);
+}
+
+/// 未连接时不弹卡：直接写库，确认卡不能拦着用户。
+#[tokio::test]
+async fn config_set_mode_does_not_ask_when_disconnected() {
+    let mut data = mode_service_data();
+    data["state"] = json!("idle");
+    let (svc, rec) = FakeServices::with_data(data);
+    let all = tools(svc);
+
+    let (is_error, env) = run(
+        tool(&all, "ConfigSetMode"),
+        json!({ "config_id": "cfg_1", "mode": "system_proxy" }),
+    )
+    .await;
+    assert!(!is_error, "{env}");
+    assert_eq!(
+        rec.take().last().map(String::as_str),
+        Some("config_set_mode(Some(\"cfg_1\"),system_proxy,false)"),
+        "{env}"
+    );
 }
 
 /// 用户点过「解释这个设置的含义」后，模型不能把解释当确认去建配置。

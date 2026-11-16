@@ -120,3 +120,65 @@ describe("AskQuestionDialog：升级确认卡", () => {
     expect(screen.queryByText("你主要用它做什么？")).toBeNull();
   });
 });
+
+function setModeQuestion(overrides: Partial<PendingQuestion> = {}): PendingQuestion {
+  return {
+    ...confirmQuestion(),
+    kind: "config_set_mode_confirm",
+    upgradeConfirm: null,
+    configSetModeConfirm: {
+      configId: "cfg_1",
+      mode: "tun",
+      previousMode: "system_proxy",
+      willDisconnect: true,
+    },
+    options: ["切换", "取消"],
+    ...overrides,
+  };
+}
+
+describe("AskQuestionDialog：接管方式确认卡", () => {
+  it("写目标方式与断开提示，不出现实现词", async () => {
+    renderQuestion(setModeQuestion());
+
+    expect(await screen.findByText("切换接管方式")).toBeTruthy();
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("全部软件");
+    expect(dialog.textContent).toContain("会短暂断开当前连接");
+    expect(dialog.textContent).not.toContain("tun");
+    expect(dialog.textContent).not.toContain("system_proxy");
+    expect(screen.getByRole("button", { name: "切换" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "取消" })).toBeTruthy();
+  });
+
+  it("本机代理用左栏词汇", async () => {
+    renderQuestion(
+      setModeQuestion({
+        configSetModeConfirm: {
+          configId: "cfg_1",
+          mode: "system_proxy",
+          previousMode: "tun",
+          willDisconnect: true,
+        },
+      }),
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("本机代理");
+  });
+
+  it("默认焦点在取消，Esc 回传取消", async () => {
+    const { onAnswer } = renderQuestion(setModeQuestion());
+    const cancel = await screen.findByRole("button", { name: "取消" });
+    expect(document.activeElement).toBe(cancel);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith("取消"));
+  });
+
+  it("点切换回传切换", async () => {
+    const { onAnswer } = renderQuestion(setModeQuestion());
+    fireEvent.click(await screen.findByRole("button", { name: "切换" }));
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith("切换"));
+  });
+});

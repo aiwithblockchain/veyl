@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.33.0`
+> 契约版本：`2.34.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -218,6 +218,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 89 | `my_server_order_get` | `{ orderId }` | `MyServerOrder` | **2.27.0 新增（仅 UI）；支付与开通轮询** |
 | 90 | `my_server_wallet` | `{}` | `MyServerWallet`（`{ balance_cents, currency, denominations_cents, updated_at }`） | **2.28.0 新增（仅 UI）；读余额与充值档位（USD 分）；2.28.1 增 `denominations_cents`** |
 | 91 | `my_server_topup` | `{ denomination, channel? }` | `MyServerTopup`（`{ topup_id, checkout_url, denomination_cents }`） | **2.28.0 新增（仅 UI）；创建充值收银台会话** |
+| 92 | `config_set_mode` | `{ configId, mode }` | `ConfigSetModeData`（`{ config_id, mode, previous_mode, changed, connected, restored, confirmation }`） | **2.34.0 新增**；在线切换接管方式（会断开重连）；AI 侧经 `ConfigSetMode` 工具且必须确认 |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -353,11 +354,11 @@ type ConfigListData = {
 | `dns` | ✅ | 整体替换；`custom` 的校验同 §3.2 |
 | `tunExcludes` | ✅ | 仅 `tun` 配置 |
 | `nodeIds` | ✅ | **整体替换**节点集，顺序即新顺序；`current_node_id` 不在新集合里时落到第一个 |
-| `connectMode` | ❌ | **没有这个参数**。带上它 → `INVALID_ARGUMENT`，`details.reason = "connect_mode_immutable"` |
+| `connectMode` | ❌ | **没有这个参数**。带上它 → `INVALID_ARGUMENT`，`details.reason = "use_config_set_mode"`。改接管方式走 §3.7 `config_set_mode`（会断开重连，是另一条命令） |
 
 **`listenPort` 已移除**：`config_update` 不再接受它，端口只在设置里改（§7.11）。
 
-- **改连接方式必须新建一套配置**（`docs/configs-and-nav.md` §4）：system_proxy 与 tun 是两种完全不同的接管方式，就地改会让「我刚才明明配好了」变成「它自己变了」。
+- **改连接方式用 §3.7 `config_set_mode`，不再要求新建一套配置**（2026-11-16 产品改口；`docs/configs-and-nav.md` §4 的旧口径作废）。它单独一条命令，正是因为它会断线——不能混进「不打断连接」的 `config_update`。
 - ~~`routingMode = "proxy_selected"` 时 `targets` 必须非空~~：写入路径已不接受 `proxy_selected`，这条随模式一起下线。
 - 修改**不打断当前连接**：新值只写库；下一次连接或下一次切换节点时生效。UI 需要提示「下次连接生效」时，用返回值与当前 `RuntimeSnapshot` 自行比较，Host 不额外发信号。
 - 改的是 active 配置且当前已连接 → `runtime_status.config_hash` 与新配置不一致，但**不自动重连**。
@@ -424,6 +425,45 @@ type ConfigActivateData = {
 - `layout_revision` 用于**丢弃迟到的 `layout-updated`**：UI 收到 `revision <= layout_revision` 的事件直接忽略。没有这个字段，同配置内「先发的事件后到」会让中间区闪回上一版——`config_id` 只能挡住跨配置的迟到事件。
 - 不存在 → `NOT_FOUND`。
 - 只读，不联网，不发事件。
+
+### 3.7 `config_set_mode { configId, mode }` → `ConfigSetModeData`
+
+改一套配置的**接管方式**（`system_proxy` ↔ `tun`）。这是**唯一**会因「改配置」而主动断开重连的命令；其它字段仍按 §3.3「只写库、不打断连接」。
+
+```ts
+type ConfigSetModeData = {
+  config_id: string;
+  mode: "system_proxy" | "tun";          // 生效后的库值
+  previous_mode: "system_proxy" | "tun";
+  changed: boolean;                       // mode !== previous_mode
+  connected: boolean;                     // 返回时这套配置是否在跑
+  restored: boolean;                      // false = 回滚失败，当前是断开状态
+  confirmation: "accepted" | "not_needed";
+};
+```
+
+| 情况 | 行为 |
+|---|---|
+| `mode` 与库值相同 | **不停连接、不重启**；`changed: false`、`confirmation: "not_needed"`，直接返回当前状态 |
+| 目标配置**不是**正在连接的那套 | **只写库**，不停起、不断线；`connected: false`（指这套配置没在跑），`changed` 按实际 |
+| 这套**正在连接** | 停旧 → 写库 → 用新模式启动；成功 `connected: true`、`restored: true` |
+| 新模式启动失败 | 把库写回 `previous_mode` → 用旧模式重启；成功则 `restored: true`、`changed: false`，**错误码用首次失败那个** |
+| **写回旧值也失败** | `restored: false`：库里已是新 `mode`、连接停在断开态。**不能只回第一次的错误码**，`details` 里同时带 `mode` 与 `previous_mode` |
+| 未连接 | 只写库；**不弹确认卡**，`confirmation: "not_needed"` |
+| 连接在跑但读不到属于哪套（接手 TUN） | 按 `route_set_mode` 先例：`PRECONDITION_FAILED / config_unknown`，**不写库、不停起、不重试** |
+| 并发 | Host 按 `config_id` 串行；同配置第二个请求未等到前一个结束 → `CONFLICT / switch_in_progress`（`retryable: true`），**不允许各停各起** |
+
+- **已知副作用**：切换会重新生成 plan 并重启，因此会**顺带应用该配置其它待生效的改动**（DNS、分流、节点集）。这不是 bug，但界面与 AI 的文案不能承诺「只改了接管方式」。切到 `tun` 还会清空已废弃的 `listen_port`（`tun` 与代理端口互斥）；切回来按自动分配，不恢复旧端口。
+- **确认**：UI 与 AI 共用同一份 Host 实现。AI 侧必须经确认卡（`tools.md` §4.49），**未连接时两侧都不弹卡**。
+  - 卡走既有 `AskUserQuestion` 阻塞通道，Host 填 `kind: "config_set_mode_confirm"` 与 `details { config_id, mode, previous_mode, will_disconnect: true }`。
+  - 卡片正文必须含两点：目标方式的人类可读名（用左栏词汇 **「全部软件」/「本机代理」**，不出现 `tun` / `system_proxy`），以及**「会短暂断开当前连接」**。选项逐字为 `切换` / `取消`。
+  - **默认焦点在「取消」**；`Esc`、超时（15 分钟）、空回答一律等同**取消**。
+  - 同意一次性绑定 `(session_id, request_id, config_id, mode)`；换方式或重试要重新确认。
+  - 用户取消 → `CANCELLED`，`details { config_id, mode, previous_mode }`，**不执行、不改库、不断线**。
+- **失败不回退到别的配置或节点**：与 `runtime_start` 同一条不变量。
+- 成功后发 `config-changed`（`change = "updated"`）；连接状态变化走既有 `runtime-state-changed` 的完整 `stopping → idle → starting → running` 序列，**不新增事件**。
+
+错误：`INVALID_ARGUMENT`（`invalid_connect_mode`）、`NOT_FOUND`、`CONFLICT`（`switch_in_progress`）、`PRECONDITION_FAILED`（`confirmation_required` / `tun_denied` / `helper_missing` / `helper_admin_cancelled` / `dev_unbundled` / `config_unknown` / `quitting`）、`TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`INTERNAL`。
 
 ---
 
@@ -2184,7 +2224,7 @@ type RulesStatus = {
 | `rules_update` | `RulesUpdate`（2.1 新增） | **必须** |
 | `net_repair` | `NetRepair` | **必须** |
 | `core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback` | **无**（UI 专用，见 §7.10） | — |
-| `core_upgrade` | `CoreUpgrade`（**唯一有确认点的工具**，见 `tools.md` §4.45） | **必须共用**，且必须用户逐字确认 |
+| `core_upgrade` | `CoreUpgrade`（**有确认点的工具**，见 `tools.md` §4.45） | **必须共用**，且必须用户逐字确认 |
 | `tun_helper_info` / `tun_helper_restart` | **无**（UI 专用，见 §7.8.1–§7.8.2） | — |
 | `proxy_port_get` / `proxy_port_set` | **无**（UI 专用，见 §7.11；端口是用户自己的设置） | — |
 | `proxy_recovery_report` | **无**（UI 专用，见 §7.13；异常退出的恢复结果只用于首屏提示） | — |
@@ -2264,10 +2304,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.33.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.12.0 / `events.md` 2.13.0 矩阵同步 |
+| `contracts/commands.md` | **2.34.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.13.0 / `events.md` 2.13.0 矩阵同步 |
 | `contracts/events.md` | **2.13.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.12.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** |
+| `contracts/tools.md` | **3.13.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** |
 | `data-model.md` | **4** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -2282,6 +2322,17 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.34.0（2026-11-16，在线切换接管方式）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.34.0`；新增 `config_set_mode { configId, mode }` → `ConfigSetModeData`（§3.7）：改配置的接管方式，**会断开重连** | 新增命令 | 产品要求主界面一个开关即可在 `system_proxy` ↔ `tun` 之间切换 |
+| 2 | `config_update` 的 `connectMode` 仍不接受，`details.reason` 由 `connect_mode_immutable` 改为 **`use_config_set_mode`**；「改连接方式必须新建一套配置」的旧口径作废 | 语义变更 | 断开重连不能混进「不打断连接」的 `config_update`；`runtime_start` 对同配置幂等，UI 无法自行完成切换 |
+| 3 | 边界写死：目标配置非当前连接 → 只写库；同值 → 不停连接；回滚失败 → `restored: false` 且库里已是新值；并发 → `CONFLICT / switch_in_progress`；读不到连接归属 → `PRECONDITION_FAILED / config_unknown` | 约束 | 审阅员复核补充 |
+| 4 | 确认卡 `kind = "config_set_mode_confirm"`，默认焦点「取消」，`Esc`/超时=取消；未连接不弹卡 | 约束 | 模型不得代答；断线必须由用户确认 |
+| 5 | 已知副作用：切换会顺带应用该配置其它待生效改动（DNS / 分流 / 节点集），文案不得承诺「只改接管方式」 | 说明 | 切换等于重新生成 plan 并重启 |
+| 6 | `tools.md` → 3.13.0（新增 `ConfigSetMode`）；`events.md` / `runtime.md` / `data-model.md` 不变 | 元数据 | 沿用既有 `runtime-state-changed`，不新增事件 |
 
 ### 2.33.0（2026-11-16，撤回 AI 中转）
 

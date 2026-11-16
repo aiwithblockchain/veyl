@@ -309,6 +309,13 @@ export const TOOL_COPY: Record<string, ToolCopy> = {
     advice: "可以稍后再试一次。",
     readOnly: true,
   },
+  ConfigSetMode: {
+    running: "正在切换接管方式",
+    done: "已切换接管方式",
+    failed: "没能切换接管方式",
+    advice: "连接可能短暂中断，可以再试一次。",
+    readOnly: false,
+  },
   RouteSetMode: {
     running: "正在切换走法",
     done: "已切换走法",

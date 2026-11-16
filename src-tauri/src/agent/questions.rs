@@ -185,6 +185,47 @@ pub fn consume_upgrade_consent(
         ))
 }
 
+/// 升级确认与接管方式确认的卡片类型：只认 options 里的原文，不接受自由文本。
+const CONFIRM_CARD_KINDS: [&str; 2] = ["core_upgrade_confirm", "config_set_mode_confirm"];
+const SWITCH_OPTION: &str = "切换";
+
+/// 接管方式确认的一次性同意：`(session_id, request_id, config_id, mode)`。
+/// 换配置或换方式必须重新确认。
+fn mode_consents() -> &'static Mutex<HashSet<(String, String, String, String)>> {
+    static CONSENTS: OnceLock<Mutex<HashSet<(String, String, String, String)>>> = OnceLock::new();
+    CONSENTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn record_mode_consent(session_id: &str, request_id: &str, config_id: &str, mode: &str) {
+    mode_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert((
+            session_id.to_string(),
+            request_id.to_string(),
+            config_id.to_string(),
+            mode.to_string(),
+        ));
+}
+
+/// 取走并删除一次性同意：同一次同意不能用在第二次切换上。
+pub fn consume_mode_consent(
+    session_id: &str,
+    request_id: &str,
+    config_id: &str,
+    mode: &str,
+) -> bool {
+    mode_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&(
+            session_id.to_string(),
+            request_id.to_string(),
+            config_id.to_string(),
+            mode.to_string(),
+        ))
+}
+
 /// 收到 Claurst 的提问：登记 pending、发事件、启动超时。
 pub fn register(session_id: &str, request_id: &str, event: UserQuestionEvent) {
     register_with(session_id, request_id, event, None);
@@ -321,8 +362,10 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
     let Some((options, request_id, kind, target_version, artifact_sha256)) = matched else {
         return Err(not_pending());
     };
-    // 装包授权不能靠打字确认：卡片上的选项才是唯一的「同意」。
-    let confirm_card = kind.as_deref() == Some("core_upgrade_confirm");
+    // 装包授权 / 断线切换不能靠打字确认：卡片上的选项才是唯一的「同意」。
+    let confirm_card = kind
+        .as_deref()
+        .is_some_and(|kind| CONFIRM_CARD_KINDS.contains(&kind));
     let skipping = answer.trim().is_empty();
     if confirm_card && !skipping && !options.iter().any(|option| option == answer) {
         return Err((
@@ -361,6 +404,17 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
         confirm_card && answer == "升级" && target_version.is_some() && artifact_sha256.is_some();
     if let (true, Some(target), Some(sha)) = (upgrade_granted, &target_version, &artifact_sha256) {
         record_upgrade_consent(session_id, &request_id, target, sha);
+    }
+    // 接管方式确认只认逐字「切换」，绑定本次的配置与目标方式。
+    if kind.as_deref() == Some("config_set_mode_confirm") && answer == SWITCH_OPTION {
+        if let Some(details) = question.details.as_ref() {
+            if let (Some(config_id), Some(mode)) = (
+                details.get("config_id").and_then(Value::as_str),
+                details.get("mode").and_then(Value::as_str),
+            ) {
+                record_mode_consent(session_id, &request_id, config_id, mode);
+            }
+        }
     }
     if let Some(tx) = question.reply.take() {
         let _ = tx.send(answer.clone());
@@ -454,6 +508,12 @@ pub fn cleanup_request(session_id: &str, request_id: &str) {
         .retain(|(session, request, _, _)| {
             !(session.as_str() == session_id && request.as_str() == request_id)
         });
+    mode_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(session, request, _, _)| {
+            !(session.as_str() == session_id && request.as_str() == request_id)
+        });
     explain_pendings()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -482,6 +542,10 @@ pub fn cleanup_session(session_id: &str) {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .retain(|(session, _)| session.as_str() != session_id);
     upgrade_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(session, _, _, _)| session.as_str() != session_id);
+    mode_consents()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .retain(|(session, _, _, _)| session.as_str() != session_id);
@@ -886,6 +950,54 @@ mod memory_tests {
             !explain_pending("ses_explain_cleanup", "req_explain_cleanup"),
             "请求结束后必须清掉，不能跨请求泄漏"
         );
+    }
+
+    /// 接管方式确认卡：自由文本不算同意；同意只绑定本次的配置与方式，且只能用一次。
+    #[tokio::test]
+    async fn the_mode_card_binds_consent_to_config_and_mode() {
+        let extras = || QuestionExtras {
+            kind: "config_set_mode_confirm",
+            details: json!({
+                "config_id": "cfg_1",
+                "mode": "tun",
+                "previous_mode": "system_proxy",
+                "will_disconnect": true,
+            }),
+            default_index: 1,
+            target_version: None,
+            artifact_sha256: None,
+        };
+        let (event, rx) = event("是否切换？", &["切换", "取消"]);
+        register_with("ses_mode", "req_mode", event, Some(extras()));
+        let listed = list_pending("ses_mode");
+        assert_eq!(listed["questions"][0]["kind"], "config_set_mode_confirm");
+        assert_eq!(listed["questions"][0]["default_index"], 1);
+        let id = listed["questions"][0]["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let error = reply("ses_mode", &id, "那就切吧").unwrap_err();
+        assert_eq!(error.0, "answer_not_in_options");
+        assert!(
+            !consume_mode_consent("ses_mode", "req_mode", "cfg_1", "tun"),
+            "被拒绝的回答不能记成同意"
+        );
+
+        reply("ses_mode", &id, "切换").unwrap();
+        assert_eq!(rx.await.unwrap(), "切换");
+        assert!(consume_mode_consent("ses_mode", "req_mode", "cfg_1", "tun"));
+        assert!(
+            !consume_mode_consent("ses_mode", "req_mode", "cfg_1", "tun"),
+            "一次性同意不能复用"
+        );
+        assert!(!consume_mode_consent(
+            "ses_mode",
+            "req_mode",
+            "cfg_1",
+            "system_proxy"
+        ));
+        cleanup_request("ses_mode", "req_mode");
     }
 
     /// 升级同意只绑定本次的目标版本与产物哈希，且只认逐字「升级」。

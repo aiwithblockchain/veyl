@@ -6,6 +6,8 @@ import type {
   ConfigUpdateInput,
   ConfigDeleteData,
   ConfigListData,
+  ConfigSetModeData,
+  ConfigSetModeInput,
   CoreCheckUpdatesResult,
   CoreInfo,
   DeepSeekKeyState,
@@ -1726,6 +1728,111 @@ export class MockAgentBridge implements AgentBridge {
 
   async configActivate(_configId: string): Promise<ConfigActivateResult> {
     throw this.unsupportedConfigCommand("config_activate");
+  }
+
+  async configSetMode(input: ConfigSetModeInput): Promise<ConfigSetModeData> {
+    const stored = this.readMockConfigs();
+    const targetId =
+      input.configId ??
+      this.runtime.config_id ??
+      this.readMockActiveConfigId() ??
+      stored[0]?.config_id ??
+      null;
+    const target = stored.find((config) => config.config_id === targetId) ?? null;
+    if (!target) {
+      throw {
+        code: "PRECONDITION_FAILED",
+        message: "读不到当前配置。",
+        details: { reason: "config_unknown" },
+      };
+    }
+
+    const previous = target.connect_mode;
+    const wasConnected =
+      (this.runtime.state === "running" || this.runtime.state === "degraded") &&
+      this.runtime.config_id === target.config_id;
+
+    if (previous === input.mode) {
+      return {
+        config_id: target.config_id,
+        mode: input.mode,
+        previous_mode: previous,
+        changed: false,
+        connected: wasConnected,
+        restored: true,
+        confirmation: "not_needed",
+      };
+    }
+
+    this.patchMockConfigMode(target.config_id, input.mode);
+    if (!wasConnected) {
+      return {
+        config_id: target.config_id,
+        mode: input.mode,
+        previous_mode: previous,
+        changed: true,
+        connected: false,
+        restored: true,
+        confirmation: "not_needed",
+      };
+    }
+
+    try {
+      await this.runtimeStop();
+      await this.runtimeStart(target.config_id);
+      return {
+        config_id: target.config_id,
+        mode: input.mode,
+        previous_mode: previous,
+        changed: true,
+        connected: true,
+        restored: true,
+        confirmation: "accepted",
+      };
+    } catch (error) {
+      // 模拟回滚：写回旧方式并尝试恢复连接，再抛出首次失败。
+      this.patchMockConfigMode(target.config_id, previous);
+      try {
+        await this.runtimeStart(target.config_id);
+      } catch {
+        // mock 下回滚也失败时没有更多可做的。
+      }
+      throw error;
+    }
+  }
+
+  private readMockActiveConfigId(): string | null {
+    try {
+      const raw = localStorage.getItem(MOCK_CONFIG_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { activeId?: unknown };
+      return typeof parsed.activeId === "string" ? parsed.activeId : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private patchMockConfigMode(
+    configId: string,
+    mode: ConfigSetModeInput["mode"],
+  ): void {
+    try {
+      const raw = localStorage.getItem(MOCK_CONFIG_STORAGE_KEY);
+      if (!raw) return;
+      const store = JSON.parse(raw) as {
+        configs?: ConfigDetail[];
+        activeId?: string | null;
+      };
+      if (!Array.isArray(store.configs)) return;
+      store.configs = store.configs.map((config) =>
+        config.config_id === configId
+          ? { ...config, connect_mode: mode, updated_at: Date.now() }
+          : config,
+      );
+      localStorage.setItem(MOCK_CONFIG_STORAGE_KEY, JSON.stringify(store));
+    } catch {
+      // 存不了就只改内存里的这次返回。
+    }
   }
 
   async nodeSwitch(_configId: string, _nodeId: string): Promise<NodeSwitchResult> {

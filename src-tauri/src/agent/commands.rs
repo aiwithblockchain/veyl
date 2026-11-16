@@ -817,6 +817,22 @@ pub async fn config_activate(
         .map_err(error_value)
 }
 
+/// 在线切换接管方式（`system_proxy` ↔ `tun`）：唯一会因改配置而断开重连的命令。
+///
+/// UI 直接调用（用户点了开关就是确认）；AI 侧走 `ConfigSetMode` 工具并先弹确认卡。
+#[tauri::command]
+pub async fn config_set_mode(
+    state: State<'_, Arc<AppState>>,
+    config_id: String,
+    mode: String,
+) -> Result<Value, Value> {
+    state
+        .services
+        .config_set_mode(Some(config_id), &mode, true)
+        .await
+        .map_err(error_value)
+}
+
 /// URL 模式：拉取 base64 多节点订阅并解析，只解析、不连接。
 #[tauri::command]
 pub async fn node_import_url(

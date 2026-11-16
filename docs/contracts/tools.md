@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.12.0`
+> 契约版本：`3.13.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.12.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.13.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.12.0";
+  contract_version: "3.13.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -247,16 +247,16 @@ type CallSource = "ui" | "agent";
 
 ```ts
 // src/components/toolDisplay.ts（设计文档里也称 TOOL_DISPLAY）
-export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 47 个工具名完全相等
+export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 49 个工具名完全相等
 ```
 
-进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 47 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
+进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 49 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
 
 **提示词只降低出错概率，最终闸门在渲染层**：UI 永远不渲染工具名、JSON、错误码；不做输出正则改写（静默替换模型正文比漏一句更难排查）。
 
 边界与落点：
 
-- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「46 个名字必须都有」与「`AskUserQuestion` 不占行」。
+- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「49 个名字必须都有」与「`AskUserQuestion` 不占行」。
 - **running 状态文案**同样来自映射表（`events.md` §3.5）：不得拼工具名，未知工具固定「正在处理…」。
 - **工具 description**：通用表达约束放 `\n` 之后的末尾。`capability_catalog` 只取第一行进系统提示清单，所以第一行**不得**出现「对用户说…」这类句子，否则会污染每次请求的能力清单。
 - **「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归**：删任一条即红。
@@ -276,7 +276,7 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 4 | `RuntimeRestart` | `RuntimeRestartTool` | 重启运行时进程 | `Write` | 中 |
 | 5 | `RuntimeLogs` | `RuntimeLogsTool` | 拉取脱敏日志 | `ReadOnly` | 只读 |
 | 6 | `CoreListVersions` | `CoreListVersionsTool` | 已安装/可安装版本 | `ReadOnly` | 只读 |
-| 7 | `CoreUpgrade` | `CoreUpgradeTool` | 检查并安装运行时更新（唯一有确认点的工具） | `Execute` | 高 |
+| 7 | `CoreUpgrade` | `CoreUpgradeTool` | 检查并安装运行时更新（有确认点） | `Execute` | 高 |
 | 8 | `CatalogSearch` | `CatalogSearchTool` | 查询**远端**节点目录（不含本地导入） | `ReadOnly` | 只读 |
 | 9 | `ConfigList` | `ConfigListTool` | 列**本地**全部配置 | `ReadOnly` | 只读 |
 | 10 | `ConfigDetail` | `ConfigDetailTool` | 一套配置的节点集、DNS、布局 | `ReadOnly` | 只读 |
@@ -318,10 +318,11 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 46 | `IssueReport` | `IssueReportTool` | 生成问题报告文件夹（两阶段，仅写固定目录） | `Write` | 低（只写桌面报告目录） |
 | 47 | `SetUserRegion` | `SetUserRegionTool` | 记录用户所在地区（AI 唯一写入路径） | `Write` | 低（只写本地设置） |
 | 48 | `MyServers` | `MyServersTool` | 我的服务器列表与状态（只读） | `ReadOnly` | 只读 |
+| 49 | `ConfigSetMode` | `ConfigSetModeTool` | 在线切换接管方式（全部软件 ↔ 本机代理，**会断开重连**） | `Execute` | 高 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
-**破坏性工具（destructive）**：`CoreUpgrade`（下载并安装运行时，**唯一有确认点**，见 §4.45）、`ConfigDelete`、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。除 `CoreUpgrade` 外均无确认点，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0 从工具集移除，见 §4.7。
+**破坏性工具（destructive）**：`CoreUpgrade`（下载并安装运行时，**有确认点**，见 §4.45）、`ConfigSetMode`（**有确认点**，会断开重连，见 §4.49）、`ConfigDelete`、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。除 `CoreUpgrade` / `ConfigSetMode` 外均无确认点，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0 从工具集移除，见 §4.7。
 
 **UI 专用命令不注册工具**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`（`commands.md` §7.10）与 `tun_helper_info` / `tun_helper_restart`（§7.8.1–§7.8.2）。**`core_upgrade` 是例外**：模型只能经 `CoreUpgrade` 工具调用，且必须由用户逐字确认（§4.45）；确认卡由 Host 生成，模型无法伪造。
 
@@ -394,7 +395,7 @@ P1 移除审批后，`VpnConnect` 直接执行：它会修改系统代理，不�
 
 > `CoreInstall` 自 3.4.0 起**不在工具集里**：下载并替换特权二进制改为 UI 显式触发（`commands.md` §7.10），模型既不能安装、也不能升级或回滚。
 
-> **`CoreUpgrade` 是唯一的例外，也是唯一有确认点的工具**（3.5.0 新增，§4.45）。它不恢复旧审批框架：`ApprovalPolicy` / `ApprovalScope` / `approval_id` 仍然全部删除；确认走的是既有的 `AskUserQuestion` 阻塞通道，由 Host 填 `kind: "core_upgrade_confirm"`。模型能发起「问用户要不要升级」，但不能自己回答，也不能跳过。
+> **`CoreUpgrade` 是 UI 专用命令注册成工具的唯一例外，也是最早有确认点的工具**（3.5.0 新增，§4.45）。它不恢复旧审批框架：`ApprovalPolicy` / `ApprovalScope` / `approval_id` 仍然全部删除；确认走的是既有的 `AskUserQuestion` 阻塞通道，由 Host 填 `kind: "core_upgrade_confirm"`。模型能发起「问用户要不要升级」，但不能自己回答，也不能跳过。
 
 ---
 
@@ -869,7 +870,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.12.0";
+  contract_version: "3.13.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1032,7 +1033,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.12.0";
+  contract_version: "3.13.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1838,7 +1839,7 @@ type CoreUpgradeData = {
 
 错误：`NETWORK_UNREACHABLE`、`SOURCE_UNAVAILABLE`、`SIGNATURE_INVALID`、`HASH_MISMATCH`、`DISK_FULL`、`BUSY`、`NOT_FOUND`、`CANCELLED`、`INTERNAL`。
 
-> 这是**唯一有确认点的工具**。它不恢复旧审批框架：`ApprovalPolicy` / `ApprovalScope` / `approval_id` 仍然全部删除；确认只是借用 `AskUserQuestion` 的阻塞通道，Host 提供结构化 `kind` / `details`，模型只能发起、不能代答。
+> 这是**有确认点的工具之一**（另一个是 §4.49 `ConfigSetMode`）。它不恢复旧审批框架：`ApprovalPolicy` / `ApprovalScope` / `approval_id` 仍然全部删除；确认只是借用 `AskUserQuestion` 的阻塞通道，Host 提供结构化 `kind` / `details`，模型只能发起、不能代答。
 
 ### 4.46 `IssueReport`（问题报告，3.9.0 新增）
 
@@ -1953,6 +1954,80 @@ type CoreUpgradeData = {
 
 ---
 
+### 4.49 `ConfigSetMode`（在线切换接管方式，3.13.0 新增）
+
+把一套配置的接管方式在 **`system_proxy` ↔ `tun`** 之间切换。命令实现见 `commands.md` §3.7 `config_set_mode`。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "config_id": { "type": "string" },
+    "mode": { "type": "string", "enum": ["system_proxy", "tun"] }
+  },
+  "required": ["mode"],
+  "additionalProperties": false
+}
+```
+
+- **没有 `confirm` 参数**：确认由 Host 生成的卡片完成（§下），模型既不能传、也不能代答。多传任何键 → `INVALID_ARGUMENT / unknown_argument`。
+- `config_id` 省略 = 当前 active 配置；**读不到连接属于哪套时按 `RouteSetMode` 的先例拒绝**（`PRECONDITION_FAILED / config_unknown`），不写库、不停起、不换参数绕过。
+- **调用前提（写进工具描述，模型必须遵守）**：**只在用户明确要求更换接管方式时调用**（例如「让所有软件都走 VPN」「改回只让设了代理的软件走」）。**不得为了"优化"网络、不得在排障时顺手切换、不得在用户没提这件事时主动建议后自行执行**。
+
+`data`：
+
+```ts
+type ConfigSetModeData = {
+  config_id: string;
+  mode: "system_proxy" | "tun";
+  previous_mode: "system_proxy" | "tun";
+  changed: boolean;      // mode !== previous_mode
+  connected: boolean;    // 返回时这套配置是否在跑
+  restored: boolean;     // false = 回滚失败，当前是断开状态
+  confirmation: "accepted" | "not_needed";
+};
+```
+
+**确认卡（必须）**
+
+- 走既有 `AskUserQuestion` 阻塞通道，Host 填 `kind: "config_set_mode_confirm"` 与 `details { config_id, mode, previous_mode, will_disconnect: true }`；**模型无法伪造、无法代答**。
+- 正文必须含：目标方式的人类可读名（左栏词汇 **「全部软件」/「本机代理」**）+ **「会短暂断开当前连接」**。选项逐字 `切换` / `取消`。
+- **默认焦点「取消」**；`Esc`、15 分钟超时、空回答一律等同取消。
+- 同意一次性绑定 `(session_id, request_id, config_id, mode)`。
+- **未连接时不弹卡**（`confirmation: "not_needed"`），直接执行。
+- 用户取消 → `CANCELLED`，`details { config_id, mode, previous_mode }`，**不执行、不改库、不断线**。
+- **两段式调用**：工具先用 `confirmed = false` 调命令；命令在「已连接或处于启动窗口」时返回 `PRECONDITION_FAILED / confirmation_required`（不写库、不停连接），Host 据此弹卡；用户同意后再带 `confirmed = true` 重试。取消 / 超时不发第二次调用。
+
+**边界（必须实现）**
+
+| 情况 | 结果 |
+|---|---|
+| 目标配置**不是**正在连接的那套 | **只写库**，不停起、不断线；`connected: false`，`changed` 按实际 |
+| `mode` 与库值相同 | **不停连接**，`changed: false`、`confirmation: "not_needed"`，直接返回 |
+| 回滚也失败（`restored: false`） | 库里已是新 `mode`、连接停在断开态；**必须如实说**，不能只回第一次的错误码，也不能写「已恢复」 |
+| 并发（同 `config_id` 已有切换在跑） | `CONFLICT / switch_in_progress`，`retryable: true`；**不得重试到成功为止** |
+
+**`display`**
+
+| 情况 | `text` | `changed` |
+|---|---|---|
+| 切换成功并连上 | 「已切换到「全部软件」，连接已恢复。」 | `true` |
+| 本来就是该方式 | 「已经是「全部软件」，没有改动。」 | `false` |
+| 启动失败、**回滚成功** | 「没能切到「全部软件」，已回到原来的「本机代理」。」+ 首次失败原因 | `false` |
+| **回滚失败** | 「没能切换，也没能恢复原来的方式，**现在是断开状态、方式已改为「全部软件」但未连上**。」+ `[重新连接]` | `true` |
+| 取消 | 「已取消，没有改动。」 | `false` |
+
+- **`restored: false` 时禁止出现「已恢复」「连接正常」字样**，也不许把 `changed` 写成 `false`。
+
+**错误与重试**
+
+- 错误码是**首次失败**那个（`tun_denied` / `helper_missing` / `helper_admin_cancelled` / `dev_unbundled` / `TIMEOUT` …），回滚结果只体现在 `restored`。
+- 可重试**一次**：`TIMEOUT`、`helper_busy`。
+- **不可重试**：`tun_denied`（要用户先去系统设置批准，再由用户发起）、`helper_admin_cancelled`（用户取消了授权框）、`restored: false`、`switch_in_progress`（等前一个结束后由用户重来）、`CANCELLED`。
+- 已知副作用要写进失败/成功文案的判断里：切换会重新生成 plan，**顺带应用该配置其它待生效改动**（DNS / 分流 / 节点集），不能承诺「只改了接管方式」。
+
+---
+
 ## 5. 工具间协作约定
 
 ### 5.1 标准连接链路
@@ -2053,6 +2128,16 @@ type CoreUpgradeData = {
 ---
 
 ## 8. 变更记录
+
+### 3.13.0（2026-11-16，在线切换接管方式）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.13.0`；新增 §4.49 `ConfigSetMode`（`Execute`、高风险、**有确认点**）：把配置的接管方式在 `system_proxy` ↔ `tun` 之间在线切换，会断开重连 | 新增工具 | `commands.md` §3.7、产品要求主界面一个开关 |
+| 2 | 确认卡复用 `AskUserQuestion` 阻塞通道，`kind = "config_set_mode_confirm"`；默认焦点「取消」，`Esc`/超时=取消；未连接不弹卡；模型不能代答 | 约束 | 断线必须由用户明确同意 |
+| 3 | 工具描述写死触发约束：**只在用户明确要求更换接管方式时调用**，不得为了「优化」或在排障时顺手切换 | 约束 | 模型不得自行改网络模式 |
+| 4 | 边界：目标配置非当前连接 → 只写库；同值 → 不停连接；回滚失败 → `restored: false` 且 `display` 必须说「现在是断开状态」；并发 → `CONFLICT / switch_in_progress` | 约束 | 审阅员复核补充 |
+| 5 | 工具总数 48 → **49**；`TOOL_COPY` 键集合与 §3 表同步；`tools/envelope.rs::CONTRACT_VERSION` 同步 3.13.0 | 元数据 | 同批 |
 
 ### 3.12.0（2026-11-14，我的服务器只读工具）
 

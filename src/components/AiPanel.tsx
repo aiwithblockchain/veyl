@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { PendingQuestion } from "../agent/bridge";
+import { isConfirmQuestionKind } from "../agent/bridge";
 import type { NextAction } from "../agent/protocol";
 import type { Session } from "../state/chatStore";
 import type { DisplayActionOutcome } from "./ToolCallCard";
@@ -175,7 +176,7 @@ export function AiPanel({
   const hasMessages = Boolean(session && session.messages.length > 0);
   const needsFirstConfig = aiReady && !hasConfigs;
   const inlineQuestion =
-    question && question.kind !== "core_upgrade_confirm" ? question : null;
+    question && !isConfirmQuestionKind(question.kind) ? question : null;
 
   return (
     <aside id="ai-panel" className="ai-panel" aria-label="AI 对话">

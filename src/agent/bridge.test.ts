@@ -250,6 +250,7 @@ describe("readQuestionDetail", () => {
         size: 12 * 1024 * 1024,
         restartRequired: true,
       },
+      configSetModeConfirm: null,
     });
   });
 
@@ -269,6 +270,30 @@ describe("readQuestionDetail", () => {
         size: null,
         restartRequired: false,
       },
+      configSetModeConfirm: null,
+    });
+  });
+
+  it("读取接管方式确认卡的明细", () => {
+    expect(
+      readQuestionDetail({
+        kind: "config_set_mode_confirm",
+        details: {
+          config_id: "cfg_1",
+          mode: "tun",
+          previous_mode: "system_proxy",
+          will_disconnect: true,
+        },
+      }),
+    ).toEqual({
+      kind: "config_set_mode_confirm",
+      upgradeConfirm: null,
+      configSetModeConfirm: {
+        configId: "cfg_1",
+        mode: "tun",
+        previousMode: "system_proxy",
+        willDisconnect: true,
+      },
     });
   });
 
@@ -276,10 +301,12 @@ describe("readQuestionDetail", () => {
     expect(readQuestionDetail({ kind: null })).toEqual({
       kind: null,
       upgradeConfirm: null,
+      configSetModeConfirm: null,
     });
     expect(readQuestionDetail({ question: "要升级吗？" })).toEqual({
       kind: null,
       upgradeConfirm: null,
+      configSetModeConfirm: null,
     });
   });
 });
