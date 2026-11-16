@@ -33,7 +33,12 @@
 			"vars": {
 				"ENVIRONMENT": "dev",
 				"ENROLL_BASE_URL": "https://cp-dev.veyl.dessage.xyz",
-				"CREDENTIAL_KEY_ID": "cp-2026-11"
+				"CREDENTIAL_KEY_ID": "cp-2026-11",
+				// Dodo Test Mode 产品（Veyl 自己建，不沿用 TweetPilot）；prod 等验收后再填 Live 产品。
+				"DODO_PRODUCT_IDS": "{}",
+				// 售价 = DigitalOcean 成本 × 1.5，必须与 Dodo 产品价逐分一致（login-and-payment.md §4.4）。
+				"PLAN_PRICES_USD": "{\"s-1vcpu-512mb-10gb\":6,\"s-1vcpu-1gb\":9,\"s-1vcpu-2gb\":18}",
+				"APP_PAYMENT_RETURN_URL": "https://cp-dev.veyl.dessage.xyz/payment/return"
 			},
 			// 代码里统一用 env.DB；生产环境后面单独建库再加一条顶层配置。
 			"d1_databases": [

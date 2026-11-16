@@ -22,11 +22,14 @@ pub const SERVER_STATES: [&str; 10] = [
     "gone",
 ];
 
-pub const ORDER_STATES: [&str; 6] = [
+pub const ORDER_STATES: [&str; 9] = [
     "pending_payment",
+    "awaiting_payment",
     "paid",
     "provisioning",
     "ready",
+    "payment_failed",
+    "expired",
     "cancelled",
     "failed",
 ];
@@ -80,9 +83,28 @@ pub struct MyServerOrder {
     pub expires_at: Option<String>,
     #[serde(default)]
     pub server_id: Option<String>,
+    /// 未支付 / 支付失败时给「继续支付」用（2.27.0）。
+    #[serde(default)]
+    pub checkout_url: Option<String>,
     #[serde(default)]
     pub failure: Option<MyServerOrderFailure>,
 }
+
+/// `my_server_checkout` 的返回：收银台会话（2.27.0）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MyServerCheckout {
+    #[serde(default)]
+    pub order_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub checkout_url: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+const CHECKOUT_STATES: [&str; 3] = ["awaiting_payment", "paid", "provisioning"];
 
 #[derive(Debug, Default, Deserialize)]
 struct RawOrder {
@@ -102,6 +124,8 @@ struct RawOrder {
     expires_at: Option<String>,
     #[serde(default)]
     server_id: Option<String>,
+    #[serde(default)]
+    checkout_url: Option<String>,
     #[serde(default)]
     failure: Option<MyServerOrderFailure>,
 }
@@ -232,6 +256,9 @@ fn merge_order(
         server_id: raw
             .server_id
             .or_else(|| fallback.and_then(|order| order.server_id.clone())),
+        checkout_url: raw
+            .checkout_url
+            .or_else(|| fallback.and_then(|order| order.checkout_url.clone())),
         failure: raw
             .failure
             .or_else(|| fallback.and_then(|order| order.failure.clone())),
@@ -312,9 +339,13 @@ pub async fn create(
     merge_order(raw, &order_id, None, Some(region), Some(plan))
 }
 
-pub async fn checkout(order_id: &str) -> Result<MyServerOrder, CpError> {
+/// 创建收银台会话（§4.1）：返回 `checkout_url`，**不再同步建机**。
+///
+/// `channel` 省略等于 `dodo`；`fake` 只在非生产环境可用（本地开发与 E2E 的后门）。
+pub async fn checkout(order_id: &str, channel: &str) -> Result<MyServerCheckout, CpError> {
+    let channel = resolve_channel(channel, crate::control_plane::env::current().env)?;
     let client = ControlPlane::new()?;
-    let body = json!({ "channel": "fake" });
+    let body = json!({ "channel": channel });
     let raw = client
         .post(
             &format!("/v1/orders/{order_id}/checkout"),
@@ -322,8 +353,58 @@ pub async fn checkout(order_id: &str) -> Result<MyServerOrder, CpError> {
             Some(&new_idempotency_key()),
         )
         .await?;
+    parse_checkout(raw, order_id)
+}
+
+/// 支付通道：省略 = `dodo`；`fake` 只在非生产可用。
+fn resolve_channel<'a>(
+    channel: &'a str,
+    env: crate::control_plane::env::ControlPlaneEnv,
+) -> Result<&'a str, CpError> {
+    let channel = match channel.trim() {
+        "" => "dodo",
+        other => other,
+    };
+    if !matches!(channel, "dodo" | "fake") {
+        return Err(CpError::new(
+            "INVALID_ARGUMENT",
+            "不支持的支付通道",
+            false,
+            json!({ "reason": "channel_invalid" }),
+        ));
+    }
+    if channel == "fake" && env == crate::control_plane::env::ControlPlaneEnv::Prod {
+        return Err(CpError::new(
+            "PRECONDITION_FAILED",
+            "生产环境不支持假支付",
+            false,
+            json!({ "reason": "channel_not_allowed" }),
+        ));
+    }
+    Ok(channel)
+}
+
+fn parse_checkout(raw: Value, order_id: &str) -> Result<MyServerCheckout, CpError> {
+    let mut checkout: MyServerCheckout = serde_json::from_value(raw)
+        .map_err(|_| CpError::invalid_response("结账响应格式不正确"))?;
+    validate_state(&checkout.state, &CHECKOUT_STATES, "结账")?;
+    if checkout.order_id.trim().is_empty() {
+        checkout.order_id = order_id.to_string();
+    }
+    Ok(checkout)
+}
+
+/// 支付与开通轮询（`GET /v1/orders/{id}`）。状态变化时发既有订单事件。
+pub async fn get_order(order_id: &str) -> Result<MyServerOrder, CpError> {
+    let client = ControlPlane::new()?;
+    let raw = client.get(&format!("/v1/orders/{order_id}")).await?;
     let fallback = remembered_order(order_id);
-    merge_order(parse_order(raw)?, order_id, fallback.as_ref(), None, None)
+    let previous = fallback.as_ref().map(|order| order.state.clone());
+    let order = merge_order(parse_order(raw)?, order_id, fallback.as_ref(), None, None)?;
+    if previous.as_deref() != Some(order.state.as_str()) {
+        super::events::emit_order_changed(&order);
+    }
+    Ok(order)
 }
 
 pub async fn cancel_order(order_id: &str) -> Result<MyServerOrder, CpError> {
@@ -658,6 +739,7 @@ mod tests {
             created_at: "2026-11-14T08:00:00Z".into(),
             expires_at: Some("2026-11-14T08:10:00Z".into()),
             server_id: None,
+            checkout_url: None,
             failure: None,
         };
         let raw = parse_order(json!({ "state": "paid", "server_id": "srv_1" })).unwrap();
@@ -673,6 +755,71 @@ mod tests {
     fn an_unknown_order_state_is_rejected() {
         let raw = parse_order(json!({ "state": "weird" })).unwrap();
         assert!(merge_order(raw, "ord_1", None, None, None).is_err());
+    }
+
+    #[test]
+    fn the_payment_states_are_accepted_and_carry_the_checkout_url() {
+        for state in ["awaiting_payment", "payment_failed", "expired"] {
+            let raw = parse_order(json!({
+                "state": state,
+                "checkout_url": "https://pay.example/x",
+            }))
+            .unwrap();
+            let order = merge_order(raw, "ord_1", None, None, None).unwrap();
+            assert_eq!(order.state, state);
+            assert_eq!(order.checkout_url.as_deref(), Some("https://pay.example/x"));
+        }
+
+        let order =
+            merge_order(parse_order(json!({ "state": "paid" })).unwrap(), "ord_1", None, None, None)
+                .unwrap();
+        assert!(order.checkout_url.is_none());
+    }
+
+    #[test]
+    fn a_checkout_response_carries_the_session_fields() {
+        let checkout = parse_checkout(
+            json!({
+                "order_id": "ord_1",
+                "state": "awaiting_payment",
+                "checkout_url": "https://pay.example/x",
+                "session_id": "cs_1",
+                "expires_at": "2026-11-15T08:30:00Z",
+            }),
+            "ord_fallback",
+        )
+        .unwrap();
+        assert_eq!(checkout.order_id, "ord_1");
+        assert_eq!(checkout.state, "awaiting_payment");
+        assert_eq!(checkout.session_id.as_deref(), Some("cs_1"));
+        assert_eq!(
+            checkout.expires_at.as_deref(),
+            Some("2026-11-15T08:30:00Z")
+        );
+
+        // 缺 order_id 时用请求参数补；fake 通道没有 URL。
+        let checkout = parse_checkout(json!({ "state": "paid" }), "ord_2").unwrap();
+        assert_eq!(checkout.order_id, "ord_2");
+        assert!(checkout.checkout_url.is_none());
+
+        // 未知状态按 invalid_response 处理，不 panic。
+        let error = parse_checkout(json!({ "state": "weird" }), "ord_3").unwrap_err();
+        assert_eq!(error.reason(), Some("invalid_response"));
+    }
+
+    #[test]
+    fn the_channel_rules_separate_production_from_local_testing() {
+        use crate::control_plane::env::ControlPlaneEnv;
+
+        assert_eq!(resolve_channel("", ControlPlaneEnv::Prod).unwrap(), "dodo");
+        assert_eq!(resolve_channel("fake", ControlPlaneEnv::Dev).unwrap(), "fake");
+
+        let error = resolve_channel("fake", ControlPlaneEnv::Prod).unwrap_err();
+        assert_eq!(error.code, "PRECONDITION_FAILED");
+        assert_eq!(error.reason(), Some("channel_not_allowed"));
+
+        let error = resolve_channel("paypal", ControlPlaneEnv::Dev).unwrap_err();
+        assert_eq!(error.code, "INVALID_ARGUMENT");
     }
 
     #[test]

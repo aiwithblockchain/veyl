@@ -1,7 +1,10 @@
 import { handleAuth } from "./auth";
+import { handleEmailAuth } from "./auth_email";
 import { buildCloudInit } from "./cloud_init";
-import { handleOrders } from "./orders";
+import { planHourlyUsd, planPriceUsd } from "./lib/config";
+import { handleOrders, reconcilePaidOrders } from "./orders";
 import { handleServers } from "./servers";
+import { handleDodoWebhook } from "./webhooks/dodo";
 
 export interface Env {
   ENVIRONMENT: string;
@@ -12,6 +15,15 @@ export interface Env {
   CREDENTIAL_ENC_KEY?: string;
   CREDENTIAL_KEY_ID?: string;
   ENROLL_BASE_URL?: string;
+  RESEND_API_KEY?: string;
+  RESEND_FROM_EMAIL?: string;
+  DODO_API_KEY?: string;
+  DODO_WEBHOOK_SECRET?: string;
+  /** 售价表（USD）：{"s-1vcpu-1gb":"9"}；必须与 Dodo 产品价一致。 */
+  PLAN_PRICES_USD?: string;
+  /** 套餐 → Dodo 产品 ID：{"s-1vcpu-1gb":"pdt_…"}，test / live 各一套。 */
+  DODO_PRODUCT_IDS?: string;
+  APP_PAYMENT_RETURN_URL?: string;
 }
 
 const SERVICE = "veyl-control-plane";const VERSION = "0.0.0";
@@ -228,7 +240,7 @@ export async function fetchCatalogData(token: string): Promise<CatalogData | nul
   };
 }
 
-export async function route(request: Request, env: Env): Promise<Response> {
+export async function route(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
 
   if (url.pathname === "/" || url.pathname === "/health") {
@@ -244,6 +256,14 @@ export async function route(request: Request, env: Env): Promise<Response> {
   // 设备令牌：静默注册与刷新（§19.2）。目录之后实现，未配置 D1 时返回 503。
   const authResponse = await handleAuth(request, env);
   if (authResponse) return authResponse;
+
+  // 邮箱登录：发码 / 校验 / 登出（login-and-payment.md §2）。
+  const emailAuthResponse = await handleEmailAuth(request, env);
+  if (emailAuthResponse) return emailAuthResponse;
+
+  // Dodo 回调：公开端点，只认签名（login-and-payment.md §4.3）。
+  const webhookResponse = await handleDodoWebhook(request, env, ctx);
+  if (webhookResponse) return webhookResponse;
 
   // 订单：下单与假支付（§19.5）。实例开通在建机链路里跟进。
   const orderResponse = await handleOrders(request, env);
@@ -275,17 +295,19 @@ export async function route(request: Request, env: Env): Promise<Response> {
     }
 
     const data = await fetchCatalogData(token);
-    const response = data
-      ? json(data)
+    // 目录里展示的必须是售价：成本价只留在控制面内部，不下发。
+    const priced = data ? applySalePrices(data, env) : null;
+    const response = priced
+      ? json(priced)
       : json({ ok: false, error: "catalog_unavailable", retryable: true }, 503);
-    if (data && cache) {
+    if (priced && cache) {
       const toCache = new Response(response.clone().body, response);
       toCache.headers.set("cache-control", "public, max-age=86400");
       await cache.put(cacheKey, toCache);
     }
     // 上游抖动时宁可给旧目录，也不要让用户看到「读不到可选地区」。
     // 旧副本整体反序列化后返回，避免把内部标记暴露成字段。
-    if (!data && stale) {
+    if (!priced && stale) {
       const fallback = new Response(stale.body, stale);
       fallback.headers.set("x-catalog-stale", "true");
       return fallback;
@@ -591,8 +613,24 @@ export async function route(request: Request, env: Env): Promise<Response> {
   return json({ ok: false, error: "not_found" }, 404);
 }
 
+/** 目录里展示的必须是售价：成本价只留在控制面内部，不下发。 */
+export function applySalePrices(data: CatalogData, env: Env): CatalogData {
+  return {
+    ...data,
+    plans: data.plans.map((plan) => {
+      const price = planPriceUsd(env, plan.id);
+      if (price === null) return plan;
+      return { ...plan, monthly_usd: price, hourly_usd: planHourlyUsd(price) };
+    }),
+  };
+}
+
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return route(request, env);
+  fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    return route(request, env, ctx);
+  },
+  /** 收了钱却没建出机器的订单，每 5 分钟补一次（login-and-payment.md §4.5）。 */
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(reconcilePaidOrders(env));
   },
 };

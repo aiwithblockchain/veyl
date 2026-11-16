@@ -155,9 +155,11 @@ describe("orders", () => {
       env as never,
     );
     expect(checkout?.status).toBe(200);
-    const paid = (await checkout!.json()) as { state: string; server_id: string };
+    const paid = (await checkout!.json()) as { state: string; checkout_url: string | null };
     expect(paid.state).toBe("provisioning");
-    expect(paid.server_id.startsWith("srv_")).toBe(true);
+    // 结账只回会话信息（契约 2.27.0）；服务器在库里，且只有一台。
+    expect(paid.checkout_url).toBeNull();
+    expect(db.rows("servers")).toHaveLength(1);
 
     const server = db.rows("servers")[0];
     expect(server.node_port).toBeGreaterThanOrEqual(10000);

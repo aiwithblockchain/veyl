@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.26.0`
+> 契约版本：`2.27.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -204,13 +204,18 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 75 | `my_server_list` | `{}` | `{ servers: MyServer[] }` | **2.23.0 新增（仅 UI）；我的服务器列表** |
 | 76 | `my_server_get` | `{ serverId }` | `MyServer` | **2.23.0 新增（仅 UI）；详情，含 `node_id`** |
 | 77 | `my_server_create` | `{ region, plan, idempotencyKey }` | `MyServerOrder` | **2.23.0 新增（仅 UI）；下单（假支付）** |
-| 78 | `my_server_checkout` | `{ orderId }` | `MyServerOrder` | **2.23.0 新增（仅 UI）；假支付并开始开通** |
+| 78 | `my_server_checkout` | `{ orderId, channel? }` | `MyServerCheckout` | **2.23.0 新增（仅 UI）；2.27.0 起创建收银台会话并返回 `checkout_url`，不再同步建机** |
 | 79 | `my_server_cancel_order` | `{ orderId }` | `MyServerOrder` | **2.23.0 新增（仅 UI）；取消订单** |
 | 80 | `my_server_destroy` | `{ serverId, confirm }` | `MyServer`（`state: "destroying"`） | **2.23.0 新增（仅 UI）；销毁** |
 | 81 | `my_server_rebuild` | `{ serverId, confirm }` | `MyServerRebuildResult`（`{ newServerId, state }`） | **2.23.0 新增（仅 UI）；销毁旧机并同地区同套餐重建** |
 | 82 | `my_server_credentials` | `{ serverId }` | `MyServerCredentialNode`（`{ server_id, node_id, name, host, port, method }`） | **2.23.0 新增（仅 UI）；2.26.0 起验签后直接返回本地节点，不再返回含密码的 `payload`** |
 | 83 | `my_server_register_device` | `{}` | `MyServerDeviceIdentity`（`{ account_id, device_id }`） | **2.24.0 新增（仅 UI）；丢弃当前设备身份并静默重新注册** |
 | 84 | `my_server_identity` | `{}` | `MyServerIdentity`（`{ has_identity, account_id }`） | **2.25.0 新增（仅 UI）；只读本地身份状态，不联网、不注册、不刷新令牌** |
+| 85 | `my_server_login_start` | `{ email }` | `MyServerLoginTicket`（`{ sent, cooldown_seconds, retry_after_seconds? }`） | **2.27.0 新增（仅 UI）；发邮箱验证码** |
+| 86 | `my_server_login_verify` | `{ email, code }` | `MyServerAccount` | **2.27.0 新增（仅 UI）；校验验证码并登录** |
+| 87 | `my_server_account` | `{}` | `MyServerAccount`（`{ logged_in, email, account_id, device_id, account_kind }`） | **2.27.0 新增（仅 UI）；只读本地登录态，不联网；2.27.1 增 `account_kind`** |
+| 88 | `my_server_logout` | `{}` | `MyServerAccount` | **2.27.0 新增（仅 UI）；服务端解绑设备并清本地令牌** |
+| 89 | `my_server_order_get` | `{ orderId }` | `MyServerOrder` | **2.27.0 新增（仅 UI）；支付与开通轮询** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -1432,13 +1437,16 @@ type MyServer = {
 
 type MyServerOrder = {
   order_id: string;
-  state: "pending_payment" | "paid" | "provisioning" | "ready" | "cancelled" | "failed";
+  state:
+    | "pending_payment" | "awaiting_payment" | "paid" | "provisioning" | "ready"
+    | "payment_failed" | "expired" | "cancelled" | "failed";
   region: string;
   plan: string;
   amount_usd: number;
   created_at: string;
   expires_at: string | null;
   server_id: string | null;
+  checkout_url: string | null;     // 2.27.0：awaiting_payment / payment_failed 时给出，「继续支付」用
   failure: { code: string; message: string; retryable: boolean } | null;
 };
 
@@ -1506,6 +1514,68 @@ type MyServerIdentity = { has_identity: boolean; account_id: string | null };
 - 有账户标记但设备秘密丢失（身份丢失）时返回 `false`；**不自动重建**，恢复只能走 §7.16 的 `my_server_register_device`，由用户点按钮触发。
 - `account_id` 只在 `has_identity` 为真时给出；否则为 `null`。
 - 本地读取失败一律按 `false` 返回，不抛错、不发事件、不产生任何写入。
+
+### 7.18 登录与支付命令（仅 UI，2.27.0；2.27.1 增 `account_kind`）
+
+设计见 `docs/design/login-and-payment.md`。设备身份仍由 Host 静默维护；登录把设备并入邮箱账户，**建机、服务器管理、支付都要求已登录**。令牌与设备秘密仍只在 Host 的 `secrets.enc`，前端拿不到。
+
+```ts
+type MyServerLoginTicket = {
+  sent: boolean;
+  cooldown_seconds: number;          // 固定 60；下一次可重发的等待秒数
+  retry_after_seconds?: number;      // 仅 429 冷却时给出
+};
+
+type MyServerAccount = {
+  logged_in: boolean;
+  email: string | null;
+  account_id: string | null;
+  device_id: string | null;
+  account_kind: "device" | "email" | null;  // null = 还没有设备身份
+};
+
+type MyServerCheckout = {
+  order_id: string;
+  state: "awaiting_payment" | "paid" | "provisioning";   // 非生产的 fake 通道直接 paid
+  checkout_url: string | null;                            // fake 时为 null
+  session_id: string | null;
+  expires_at: string | null;         // 收银台会话 30 分钟
+};
+```
+
+| 命令 | 行为 |
+|---|---|
+| `my_server_login_start { email }` | 控制面 `POST /v1/auth/email/start`；60 秒冷却与同 IP 限频由服务端决定。**不区分邮箱是否已注册**，成功一律 `sent: true` |
+| `my_server_login_verify { email, code }` | Host 自动带上 `device_id` + `secret_hash`；成功后保存新令牌，返回 `MyServerAccount`。设备已绑定另一个邮箱 → `account_conflict` |
+| `my_server_account {}` | **只读本地**：不联网、不刷新令牌。`logged_in` 依据本地令牌与 `account_kind = email` |
+| `my_server_logout {}` | 调控制面 `POST /v1/auth/logout`：作废 refresh、把设备解绑到新的匿名账户；成功后清本地令牌。**离线失败不假装已退出** |
+| `my_server_order_get { orderId }` | `GET /v1/orders/{id}`；支付等待期间 2 秒轮询，事件不可用时同样用它兜底 |
+| `my_server_checkout { orderId, channel? }` | 创建 Dodo 收银台会话并返回 `checkout_url`；`channel` 省略等于 `dodo`。非生产环境可传 `fake`（直接 paid + 建机）；生产传 `fake` → `channel_not_allowed` |
+
+- **登录门禁**：`my_server_list` / `get` / `create` / `checkout` / `cancel_order` / `destroy` / `rebuild` / `credentials` 在未登录时返回 `UNAUTHENTICATED / auth_required`；UI 先弹登录弹窗，登录后回到原处。
+- **不门禁**：`my_server_catalog`、`my_server_identity`、`my_server_account`、本地节点与配置的连接 / 切换 / 测速 / 导入。
+- **`my_server_login_verify` 与 `my_server_account` 返回同一个 `MyServerAccount`**：登录那一次响应就够渲染账号块，不再打第二次接口。`account_kind` 由 Host 用于门禁与账号块状态判断；界面只展示 `logged_in` 与 `email`，`account_id` / `device_id` 不进界面。
+- **登出不删本地节点与节点密码**：已有配置登出后仍可连接。
+- 错误码只用通用码 + `details.reason`：
+
+| 场景 | code | `details.reason` | retryable |
+|---|---|---|---|
+| 邮箱格式不对 | `PRECONDITION_FAILED` | `email_invalid` | 否 |
+| 60 秒内重复发码 | `RATE_LIMITED` | `email_cooldown`（带 `details.retry_after_seconds`） | 是 |
+| 同 IP 发码过多 | `RATE_LIMITED` | `email_rate_limited` | 是 |
+| 验证码错误 | `PRECONDITION_FAILED` | `code_invalid`（带 `details.attempts_remaining`） | 是 |
+| 验证码过期 / 不存在 | `PRECONDITION_FAILED` | `code_expired` | 否 |
+| 同码错 3 次 | `PRECONDITION_FAILED` | `too_many_attempts` | 否 |
+| 设备已绑定另一个邮箱 | `PRECONDITION_FAILED` | `account_conflict` | 否 |
+| 需要登录 | `UNAUTHENTICATED` | `auth_required` | 是 |
+| 登录过期 | `UNAUTHENTICATED` | `token_invalid` | 是（自动刷新后重试） |
+| 生产环境用假支付 | `PRECONDITION_FAILED` | `channel_not_allowed` | 否 |
+| 目录价与 Dodo 产品价不一致 | `PRECONDITION_FAILED` | `price_mismatch` | 否 |
+| Dodo 建会话失败 | `UPSTREAM_ERROR` | `checkout_unavailable` | 是 |
+| 订单已过期 | `PRECONDITION_FAILED` | `order_expired` | 否 |
+| 支付尚未到账 | `PRECONDITION_FAILED` | `payment_pending` | 是（继续轮询） |
+
+- 不注册任何 AI 工具（登录、支付、下单都不交给模型）；不发新事件，登录态由命令返回。
 
 ---
 
@@ -2089,7 +2159,7 @@ type RulesStatus = {
 | `my_server_register_device` | **无**（UI 专用，见 §7.16；身份恢复只能由用户触发） | — |
 | `my_server_identity` | **无**（UI 专用，见 §7.17；只读本地身份状态） | — |
 
-> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials`、`my_server_register_device`、`my_server_identity`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
+> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials`、`my_server_register_device`、`my_server_identity`、`my_server_login_start` / `my_server_login_verify` / `my_server_account` / `my_server_logout` / `my_server_order_get`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
@@ -2159,7 +2229,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.26.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.12.0 / `events.md` 2.13.0 矩阵同步 |
+| `contracts/commands.md` | **2.27.1** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.12.0 / `events.md` 2.13.0 矩阵同步 |
 | `contracts/events.md` | **2.13.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
 | `contracts/tools.md` | **3.12.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** |
@@ -2177,6 +2247,26 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.27.1（2026-11-15，账号摘要）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.27.1`；`MyServerAccount` 增加 `account_kind: "device" \| "email" \| null`，`my_server_login_verify` 与 `my_server_account` 返回同一形状 | 数据结构 | 登录响应直接带账号摘要，账号块不再二次请求 |
+| 2 | 明确 `logged_in === (account_kind === "email")`；`account_id` / `device_id` 仅供 Host 使用，界面不展示 | 语义 | 账号块只显示邮箱与登录状态 |
+| 3 | 订阅 / 到期字段**本轮不定义**，等支付口径（订阅 vs 一次性）定稿后再加；契约不预先编字段 | 说明 | 支付章节暂不改 |
+| 4 | 其它契约文件不变 | 元数据 | 同批 |
+
+### 2.27.0（2026-11-15，登录门禁与支付）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.27.0`；新增 §7.18 的 5 条命令：`my_server_login_start` / `login_verify` / `account` / `logout` / `order_get`（仅 UI） | 新增命令 | `docs/design/login-and-payment.md` |
+| 2 | `my_server_checkout` 增加可选 `channel`，返回 `MyServerCheckout`（含 `checkout_url` / `session_id` / `expires_at`），**不再同步建机**；生产只允许 `dodo`，非生产可 `fake` | 语义变更 | 收银台跳转 + webhook 确认后才建机 |
+| 3 | `MyServerOrder.state` 增加 `awaiting_payment` / `payment_failed` / `expired`，并增加 `checkout_url` | 数据结构 | 订单状态机补齐支付阶段 |
+| 4 | 新增错误 `details.reason`：`email_invalid` / `email_cooldown` / `email_rate_limited` / `code_invalid` / `code_expired` / `too_many_attempts` / `account_conflict` / `channel_not_allowed` / `price_mismatch` / `checkout_unavailable` / `order_expired` / `payment_pending`；不新造错误码 | 错误语义 | 沿用 `runtime.md` §6.1 通用码 |
+| 5 | 登录门禁：列表 / 详情 / 下单 / 结账 / 销毁 / 重建 / 取凭据在未登录时返回 `UNAUTHENTICATED / auth_required`；目录、身份查询、本地节点与配置不受影响 | 语义 | 产品：登录与支付同批 |
+| 6 | `events.md` / `tools.md` / `data-model.md` / `runtime.md` 不变；登录态由命令返回，不新增事件、不给模型登录或支付能力 | 元数据 | 同批 |
 
 ### 2.26.0（2026-11-15，凭据落成本地节点）
 

@@ -122,10 +122,35 @@ pub fn from_response(status: u16, body: &str) -> CpError {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // 这两个字段驱动界面文案（冷却倒计时、剩余尝试次数），不能在映射时丢掉。
+    let retry_after_seconds = parsed
+        .as_ref()
+        .and_then(|value| value.get("details"))
+        .and_then(|details| details.get("retry_after_seconds"))
+        .and_then(Value::as_u64);
+    let attempts_remaining = parsed
+        .as_ref()
+        .and_then(|value| value.get("details"))
+        .and_then(|details| details.get("attempts_remaining"))
+        .and_then(Value::as_u64);
 
     let mapped = match code {
+        // 登录门禁的两种 reason 用 `UNAUTHENTICATED`（commands.md §7.18）；
+        // 设备刷新失败仍按原语义归到 `PRECONDITION_FAILED / auth_required`。
         "UNAUTHENTICATED" => {
-            CpError::auth_required(message.unwrap_or_else(|| "需要重新验证设备".into()))
+            let login_reason =
+                matches!(reason.as_deref(), Some("auth_required") | Some("token_invalid"));
+            let text = message.unwrap_or_else(|| "需要登录后使用".into());
+            if login_reason {
+                CpError::new(
+                    "UNAUTHENTICATED",
+                    text,
+                    true,
+                    json!({ "reason": reason.unwrap_or_default() }),
+                )
+            } else {
+                CpError::auth_required(text)
+            }
         }
         "FORBIDDEN" => CpError::new(
             "PERMISSION_DENIED",
@@ -149,7 +174,7 @@ pub fn from_response(status: u16, body: &str) -> CpError {
             "RATE_LIMITED",
             message.unwrap_or_else(|| "操作太频繁，稍后再试".into()),
             true,
-            json!({ "reason": "rate_limited" }),
+            json!({ "reason": reason.unwrap_or_else(|| "rate_limited".into()) }),
         ),
         "TIMEOUT" => CpError::new(
             "TIMEOUT",
@@ -177,6 +202,16 @@ pub fn from_response(status: u16, body: &str) -> CpError {
             json!({ "reason": "unexpected_code", "upstream_code": other }),
         ),
     };
+
+    let mut mapped = mapped;
+    if let Some(details) = mapped.details.as_object_mut() {
+        if let Some(value) = retry_after_seconds {
+            details.insert("retry_after_seconds".into(), json!(value));
+        }
+        if let Some(value) = attempts_remaining {
+            details.insert("attempts_remaining".into(), json!(value));
+        }
+    }
 
     CpError {
         request_id,
@@ -229,6 +264,33 @@ fn status_fallback(status: u16, message: Option<String>) -> CpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_reasons_keep_their_code_and_limits() {
+        let error = from_response(
+            429,
+            r#"{"code":"RATE_LIMITED","message":"稍后再试","retryable":true,"details":{"reason":"email_cooldown","retry_after_seconds":42}}"#,
+        );
+        assert_eq!(error.code, "RATE_LIMITED");
+        assert_eq!(error.reason(), Some("email_cooldown"));
+        assert_eq!(error.details["retry_after_seconds"], 42);
+
+        let error = from_response(
+            401,
+            r#"{"code":"UNAUTHENTICATED","message":"需要登录","details":{"reason":"auth_required"}}"#,
+        );
+        assert_eq!(error.code, "UNAUTHENTICATED");
+        assert_eq!(error.reason(), Some("auth_required"));
+        assert!(error.retryable);
+
+        let error = from_response(
+            400,
+            r#"{"code":"PRECONDITION_FAILED","message":"验证码错误","retryable":true,"details":{"reason":"code_invalid","attempts_remaining":2}}"#,
+        );
+        assert_eq!(error.code, "PRECONDITION_FAILED");
+        assert_eq!(error.reason(), Some("code_invalid"));
+        assert_eq!(error.details["attempts_remaining"], 2);
+    }
 
     #[test]
     fn a_worker_envelope_is_mapped_to_general_codes() {

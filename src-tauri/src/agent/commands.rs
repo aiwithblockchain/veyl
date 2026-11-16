@@ -262,13 +262,77 @@ pub async fn my_server_create(
     }
 }
 
+/// 创建收银台会话并在系统浏览器打开（2.27.0，仅 UI）。
 #[tauri::command]
-pub async fn my_server_checkout(order_id: String) -> Result<Value, Value> {
-    match crate::control_plane::servers::checkout(&order_id).await {
-        Ok(order) => {
-            crate::control_plane::events::emit_order_changed(&order);
-            Ok(json!(order))
+pub async fn my_server_checkout(
+    app: tauri::AppHandle,
+    order_id: String,
+    channel: Option<String>,
+) -> Result<Value, Value> {
+    let channel = channel.unwrap_or_else(|| "dodo".to_string());
+    match crate::control_plane::servers::checkout(&order_id, &channel).await {
+        Ok(checkout) => {
+            if let Some(url) = checkout.checkout_url.as_deref() {
+                open_checkout_url(&app, url);
+            }
+            serde_json::to_value(&checkout)
+                .map_err(|error| command_error("INTERNAL", error, Value::Null))
         }
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+/// 系统默认浏览器打开收银台；失败只告警——会话已创建，界面可用「继续支付」重试。
+fn open_checkout_url(app: &tauri::AppHandle, url: &str) {
+    use tauri_plugin_opener::OpenerExt;
+
+    if !url.starts_with("https://") {
+        log::warn!("收银台地址不是 https，拒绝打开：{url}");
+        return;
+    }
+    if let Err(error) = app.opener().open_url(url, None::<&str>) {
+        log::warn!("打开收银台失败：{error}");
+    }
+}
+
+/// 支付与开通轮询（仅 UI）。
+#[tauri::command]
+pub async fn my_server_order_get(order_id: String) -> Result<Value, Value> {
+    match crate::control_plane::servers::get_order(&order_id).await {
+        Ok(order) => Ok(json!(order)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+/// 发邮箱验证码（仅 UI）；60 秒冷却与同 IP 限频由控制面决定。
+#[tauri::command]
+pub async fn my_server_login_start(email: String) -> Result<Value, Value> {
+    match crate::control_plane::auth::login_start(&email).await {
+        Ok(ticket) => Ok(json!(ticket)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+/// 校验验证码并登录（仅 UI）；设备证明由 Host 自动带。
+#[tauri::command]
+pub async fn my_server_login_verify(email: String, code: String) -> Result<Value, Value> {
+    match crate::control_plane::auth::login_verify(&email, &code).await {
+        Ok(account) => Ok(json!(account)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+/// 只读本地登录态（仅 UI）：不联网、不刷新令牌。
+#[tauri::command]
+pub async fn my_server_account() -> Result<Value, Value> {
+    Ok(json!(crate::control_plane::auth::account_state()))
+}
+
+/// 服务端登出（仅 UI）：失败原样上报，不假装已退出。
+#[tauri::command]
+pub async fn my_server_logout() -> Result<Value, Value> {
+    match crate::control_plane::auth::logout().await {
+        Ok(account) => Ok(json!(account)),
         Err(error) => Err(error.envelope()),
     }
 }

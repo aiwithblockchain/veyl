@@ -36,13 +36,16 @@ interface TokenBundle {
   access_expires_at: string;
   refresh_token: string;
   refresh_expires_at: string;
+  /** 登录态：device = 匿名设备账户，email = 邮箱账户。 */
+  account_kind: string;
+  email: string | null;
 }
 
 function isBase64Url(value: unknown, min = 20, max = 128): value is string {
   return typeof value === "string" && value.length >= min && value.length <= max && /^[A-Za-z0-9_-]+$/.test(value);
 }
 
-async function bumpRateLimit(db: D1Database, key: string, limit: number, windowMs: number): Promise<boolean> {
+export async function bumpRateLimit(db: D1Database, key: string, limit: number, windowMs: number): Promise<boolean> {
   const now = Date.now();
   const row = await db
     .prepare("SELECT window_start, count FROM rate_limits WHERE key = ?")
@@ -68,8 +71,19 @@ async function bumpRateLimit(db: D1Database, key: string, limit: number, windowM
   return true;
 }
 
-async function issueTokens(env: AuthEnv, deviceId: string, accountId: string): Promise<TokenBundle> {
+/** 签发一整套令牌。`amr` 记的是「这次是怎么验的」，与账户本身是哪种无关。 */
+export async function issueTokens(
+  env: AuthEnv,
+  deviceId: string,
+  accountId: string,
+  amr: "device" | "email" = "device",
+): Promise<TokenBundle> {
   if (!env.TOKEN_SIGNING_JWK) throw new Error("missing TOKEN_SIGNING_JWK");
+
+  const account = await env.DB.prepare("SELECT kind, email FROM accounts WHERE id = ?")
+    .bind(accountId)
+    .first<{ kind: string; email: string | null }>();
+  const accountKind = account?.kind ?? "device";
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   const accessExpires = nowSeconds + ACCESS_TTL_SECONDS;
@@ -79,6 +93,8 @@ async function issueTokens(env: AuthEnv, deviceId: string, accountId: string): P
     iat: nowSeconds,
     exp: accessExpires,
     jti: randomId("jti_", 12),
+    kind: accountKind,
+    amr,
   });
 
   const refreshToken = b64u(randomBytes(32));
@@ -97,6 +113,8 @@ async function issueTokens(env: AuthEnv, deviceId: string, accountId: string): P
     access_expires_at: new Date(accessExpires * 1000).toISOString(),
     refresh_token: refreshToken,
     refresh_expires_at: new Date(refreshExpires).toISOString(),
+    account_kind: accountKind,
+    email: account?.email ?? null,
   };
 }
 
@@ -221,7 +239,7 @@ async function refresh(request: Request, env: AuthEnv): Promise<Response> {
 export async function authenticate(
   request: Request,
   maybeEnv: MaybeAuthEnv,
-): Promise<{ accountId: string; deviceId: string } | Response> {
+): Promise<{ accountId: string; deviceId: string; kind: string } | Response> {
   if (!maybeEnv.DB) return apiError("INTERNAL", "服务还没准备好", { retryable: true, status: 503 });
   const env: AuthEnv = { DB: maybeEnv.DB, TOKEN_SIGNING_JWK: maybeEnv.TOKEN_SIGNING_JWK };
   const header = request.headers.get("authorization") ?? "";
@@ -239,15 +257,17 @@ export async function authenticate(
   if (!device || device.revoked_at || device.account_id !== claims.sub) {
     return apiError("FORBIDDEN", "这台设备已被停用", { reason: "device_revoked" });
   }
-  const account = await env.DB.prepare("SELECT status FROM accounts WHERE id = ?")
+  const account = await env.DB.prepare("SELECT status, kind, merged_into FROM accounts WHERE id = ?")
     .bind(claims.sub)
-    .first<{ status: string }>();
+    .first<{ status: string; kind: string; merged_into: string | null }>();
   if (!account) return apiError("UNAUTHENTICATED", "账户不存在", { reason: "account_missing" });
+  // 已并入邮箱账户的旧匿名账户：留下的令牌最多再活 15 分钟，但不该续命。
+  if (account.merged_into) return apiError("UNAUTHENTICATED", "账户已合并", { reason: "account_merged" });
   if (account.status !== "active") {
     return apiError("FORBIDDEN", "账户已被停用", { reason: "account_blocked" });
   }
 
-  return { accountId: claims.sub, deviceId: claims.did };
+  return { accountId: claims.sub, deviceId: claims.did, kind: account.kind };
 }
 
 export function isResponse(value: unknown): value is Response {

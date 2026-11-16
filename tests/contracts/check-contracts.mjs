@@ -2475,6 +2475,65 @@ check("SetUserRegion 已在 Rust 工具集注册（契约）", () => {
   return ["src-tauri/src/tools/mod.rs 的 vpn_tools() 缺少 SetUserRegionTool；契约已定稿，必须注册"];
 });
 
+// --- 21：通用错误码必须在 runtime.md §6.1 登记 ---
+//
+// 控制面与 Host 都按字符串发错误码，漏登记不会在编译期报错，只会在界面上
+// 出现一句没人认识的码。只扫「成型」的来源：控制面的 apiError(...) 与
+// control_plane/error.rs 的映射表/构造器；测试模块里的样例码不算。
+
+check("代码里的通用错误码都在 runtime.md §6.1 登记（契约）", () => {
+  const md = read("docs/contracts/runtime.md");
+  const table = mdSection(md, "### 6.1", "\n### ");
+  if (!table) return ["runtime.md 找不到 §6.1 通用错误码表"];
+  const registered = new Set(
+    [...table.matchAll(/^\|\s*`([A-Z][A-Z0-9_]*)`/gm)].map((m) => m[1]),
+  );
+
+  const found = new Map(); // 码 -> 首次出现的来源
+  const note = (code, from) => {
+    if (!found.has(code)) found.set(code, from);
+  };
+
+  const errorRs = read("src-tauri/src/control_plane/error.rs");
+  const testAt = errorRs.indexOf("#[cfg(test)]");
+  const codeRs = testAt < 0 ? errorRs : errorRs.slice(0, testAt);
+  for (const m of codeRs.matchAll(/(?:CpError|Self)::new\(\s*"([A-Z][A-Z0-9_]+)"/g)) {
+    note(m[1], "src-tauri/src/control_plane/error.rs");
+  }
+  for (const m of codeRs.matchAll(/"code"\s*:\s*"([A-Z][A-Z0-9_]+)"/g)) {
+    note(m[1], "src-tauri/src/control_plane/error.rs");
+  }
+  for (const m of codeRs.matchAll(/^\s*"([A-Z][A-Z0-9_]+)"\s*(?:\||=>)/gm)) {
+    note(m[1], "src-tauri/src/control_plane/error.rs");
+  }
+
+  const srcDir = join(ROOT, "cloudflare/control-plane/src");
+  if (existsSync(srcDir)) {
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(path);
+        } else if (entry.name.endsWith(".ts")) {
+          const text = readFileSync(path, "utf8");
+          for (const m of text.matchAll(/apiError\(\s*"([A-Z][A-Z0-9_]+)"/g)) {
+            note(m[1], path.slice(ROOT.length + 1));
+          }
+        }
+      }
+    };
+    walk(srcDir);
+  }
+
+  const problems = [];
+  for (const [code, from] of found) {
+    if (!registered.has(code)) {
+      problems.push(`${from} 用了 ${code}，但 runtime.md §6.1 没有登记`);
+    }
+  }
+  return problems;
+});
+
 // --- 输出 ---
 
 const strict = process.env.AIVPN_CONTRACT_STRICT === "1";

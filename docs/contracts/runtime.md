@@ -546,7 +546,15 @@ type ClashConnections = {
 | `CANCELLED` | 用户取消 | 否 |
 | `UPSTREAM_ERROR` | 上游错误 | 视情况 |
 | `RATE_LIMITED` | 限流 | 是 |
+| `UNAUTHENTICATED` | 未登录或登录态失效（HTTP 401）。`details.reason`：`auth_required`（没有登录态）/ `token_invalid`（登录态失效） | 视情况：`auth_required` 是（用户登录后重试）；`token_invalid` 是（Host 自动刷新令牌后重试） |
+| `FORBIDDEN` | 已登录但没有权限（HTTP 403）：设备被停用、账号被封等。这是控制面的线码，Host 对外统一映射成 `PERMISSION_DENIED` | 否 |
 | `INTERNAL` | 未预期错误 | 视情况 |
+
+**`UNAUTHENTICATED` 与 `FORBIDDEN` 的分工**（两者不可互换）：
+
+- **没登录 / 登录态失效 → `UNAUTHENTICATED`**，界面弹登录框。
+- **登录了但没权限 → `FORBIDDEN`**（Host 对外报 `PERMISSION_DENIED`），界面说明原因，**不弹登录框**——用户已经登录了，重登修不好。
+- 表里同时登记控制面线码（`UNAUTHENTICATED` / `FORBIDDEN`）与 Host 对外码（`PERMISSION_DENIED`）：`tests/contracts/check-contracts.mjs` 要求代码里出现的通用码都能在这张表里找到，避免同一件事出现表外说法。
 
 ### 6.2 Runtime 专属
 
@@ -575,6 +583,7 @@ type ClashConnections = {
 
 - `RUNTIME_*` 前缀只用于 Runtime Manager 直接产出的错误。
 - 工具层不得重新发明错误码；只能透传或映射到通用码。
+- 控制面的线码（如 `UNAUTHENTICATED` / `FORBIDDEN`）只允许出现在 `control_plane/error.rs` 的映射表里；对 UI 与模型一律报 §6.1 的码，其中 `FORBIDDEN` 映射为 `PERMISSION_DENIED`。
 
 ---
 

@@ -34,7 +34,7 @@ struct StoredDevice {
     account_id: String,
 }
 
-/// 与 `POST /v1/auth/device` / `POST /v1/auth/refresh` 的成功响应一一对应。
+/// 与 `POST /v1/auth/device` / `POST /v1/auth/refresh` / 登录接口的成功响应一一对应。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TokenSet {
     pub account_id: String,
@@ -43,6 +43,47 @@ pub struct TokenSet {
     pub access_expires_at: String,
     pub refresh_token: String,
     pub refresh_expires_at: String,
+    /// `device` | `email`（2.27.0 登录后才有）。旧令牌没有这个字段，按未登录处理。
+    #[serde(default)]
+    pub account_kind: String,
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
+/// 登录态（返回给界面，不含令牌）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AccountState {
+    pub logged_in: bool,
+    pub email: Option<String>,
+    pub account_id: Option<String>,
+    pub device_id: Option<String>,
+    /// `device` | `email`；`null` = 还没有设备身份（或旧令牌没有这个字段）。
+    pub account_kind: Option<String>,
+}
+
+/// `my_server_login_start` 的返回。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LoginTicket {
+    pub sent: bool,
+    pub cooldown_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginStartResponse {
+    #[serde(default = "default_sent")]
+    sent: bool,
+    #[serde(default = "default_cooldown")]
+    cooldown_seconds: u64,
+}
+
+fn default_sent() -> bool {
+    true
+}
+
+fn default_cooldown() -> u64 {
+    60
 }
 
 pub fn now_ms() -> i64 {
@@ -235,6 +276,14 @@ async fn refresh(
     }
     let tokens: TokenSet = serde_json::from_str(&text)
         .map_err(|_| CpError::invalid_response("令牌刷新响应格式不正确"))?;
+    let mut tokens = tokens;
+    // 刷新响应若省略登录字段，不能把本地登录态冲掉（§3.3）。
+    if tokens.account_kind.is_empty() {
+        if let Some(previous) = load_tokens() {
+            tokens.account_kind = previous.account_kind;
+            tokens.email = tokens.email.or(previous.email);
+        }
+    }
     store_tokens(&tokens)?;
     Ok(tokens)
 }
@@ -274,6 +323,123 @@ pub async fn register_device() -> Result<Value, CpError> {
         "account_id": tokens.account_id,
         "device_id": tokens.device_id,
     }))
+}
+
+/// 只读本地设备身份：不生成、不重建（`my_server_account` 用）。
+fn existing_device() -> Option<StoredDevice> {
+    crate::secrets::get_secret(DEVICE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+/// 登录前拿设备身份：身份丢失时换发新的（§3.5：登录优先于重新注册设备）。
+fn device_for_login() -> Result<StoredDevice, CpError> {
+    match load_device() {
+        Ok(device) => Ok(device),
+        Err(error) if error.reason() == Some("device_identity_lost") => {
+            let device = new_device();
+            store_device(&device)?;
+            Ok(device)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn account_state_from(tokens: Option<TokenSet>, device_id: Option<String>) -> AccountState {
+    // 没有设备身份、或还没有令牌 → 不给 kind（旧令牌没有该字段同样落空）。
+    let account_kind = match (
+        device_id.as_deref(),
+        tokens.as_ref().map(|tokens| tokens.account_kind.as_str()),
+    ) {
+        (Some(_), Some("email")) => Some("email".to_string()),
+        (Some(_), Some("device")) => Some("device".to_string()),
+        _ => None,
+    };
+    let logged_in = account_kind.as_deref() == Some("email");
+    let (account_id, email) = match tokens {
+        Some(tokens) if logged_in => (Some(tokens.account_id), tokens.email),
+        _ => (None, None),
+    };
+    AccountState {
+        logged_in,
+        email,
+        account_id,
+        device_id,
+        account_kind,
+    }
+}
+
+/// 只读本地登录态：不联网、不刷新、不生成设备身份。
+pub fn account_state() -> AccountState {
+    account_state_from(
+        load_tokens(),
+        existing_device().map(|device| device.device_id),
+    )
+}
+
+/// 发邮箱验证码（`POST /v1/auth/email/start`）。是否注册过同一返回，防枚举。
+pub async fn login_start(email: &str) -> Result<LoginTicket, CpError> {
+    let base_url = crate::control_plane::env::current().base_url;
+    let http = super::client::http_client(Duration::from_secs(10))?;
+    let path = "/v1/auth/email/start";
+    let body = json!({ "email": email });
+    let (status, text) = send_json(&http, &endpoint(&base_url, path), path, &body).await?;
+    if !(200..=299).contains(&status) {
+        let error = error::from_response(status, &text);
+        log_status_failure(path, status, &error);
+        return Err(error);
+    }
+    let response: LoginStartResponse = serde_json::from_str(&text)
+        .map_err(|_| CpError::invalid_response("发码响应格式不正确"))?;
+    Ok(LoginTicket {
+        sent: response.sent,
+        cooldown_seconds: response.cooldown_seconds,
+        retry_after_seconds: None,
+    })
+}
+
+/// 校验验证码并登录（`POST /v1/auth/email/verify`）：Host 自动带设备证明。
+pub async fn login_verify(email: &str, code: &str) -> Result<AccountState, CpError> {
+    let device = device_for_login()?;
+    let base_url = crate::control_plane::env::current().base_url;
+    let http = super::client::http_client(Duration::from_secs(10))?;
+    let path = "/v1/auth/email/verify";
+    let body = json!({
+        "email": email,
+        "code": code,
+        "device_id": device.device_id,
+        "secret_hash": secret_hash(&device.device_secret),
+    });
+    let (status, text) = send_json(&http, &endpoint(&base_url, path), path, &body).await?;
+    if !(200..=299).contains(&status) {
+        let error = error::from_response(status, &text);
+        log_status_failure(path, status, &error);
+        return Err(error);
+    }
+    let tokens: TokenSet = serde_json::from_str(&text)
+        .map_err(|_| CpError::invalid_response("登录响应格式不正确"))?;
+    store_tokens(&tokens)?;
+    let mut updated = device;
+    updated.account_id = tokens.account_id.clone();
+    let _ = store_device(&updated);
+    Ok(account_state())
+}
+
+/// 服务端登出（`POST /v1/auth/logout`）：作废 refresh 并把设备解绑到匿名账户。
+///
+/// 只在服务端成功后才写本地令牌；离线失败原样上报，不允许本地假装已退出（§2.4）。
+pub async fn logout() -> Result<AccountState, CpError> {
+    let client = super::client::ControlPlane::new()?;
+    let raw = client.post("/v1/auth/logout", None, None).await?;
+    let tokens: TokenSet = serde_json::from_value(raw)
+        .map_err(|_| CpError::invalid_response("登出响应格式不正确"))?;
+    store_tokens(&tokens)?;
+    if let Some(mut device) = existing_device() {
+        device.account_id = tokens.account_id.clone();
+        let _ = store_device(&device);
+    }
+    Ok(account_state())
 }
 
 /// 本机设备身份状态（只读本地）。`account_id` 只在有身份时给出。
@@ -337,15 +503,31 @@ pub async fn ensure_access(
     let device = load_device()?;
 
     let tokens = match load_tokens() {
-        Some(tokens) => match refresh(base_url, http, &tokens.refresh_token).await {
-            Ok(tokens) => tokens,
-            Err(error) if error.reason() == Some("auth_required") => {
-                // 刷新令牌无效 / 过期 / 被重放：用长期秘密重新注册（§19.2.4）。
-                clear_tokens();
-                register(base_url, http, &device).await?
+        Some(tokens) => {
+            let was_email = tokens.account_kind == "email";
+            match refresh(base_url, http, &tokens.refresh_token).await {
+                Ok(tokens) => tokens,
+                Err(error)
+                    if error.reason() == Some("auth_required")
+                        || error.reason() == Some("token_invalid") =>
+                {
+                    clear_tokens();
+                    if was_email {
+                        // 邮箱账户的 refresh 失效不重新注册设备：设备行还绑着账户，
+                        // 重新注册会换出匿名账户。按 §3.3 回到未登录态，让用户重新登录。
+                        return Err(CpError::new(
+                            "UNAUTHENTICATED",
+                            "登录已过期，请重新登录",
+                            true,
+                            json!({ "reason": "token_invalid" }),
+                        ));
+                    }
+                    // 匿名设备：用长期秘密重新注册（§19.2.4）。
+                    register(base_url, http, &device).await?
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
-        },
+        }
         None => register(base_url, http, &device).await?,
     };
 
@@ -364,6 +546,8 @@ mod tests {
             access_expires_at: access_expires_at.into(),
             refresh_token: "refresh".into(),
             refresh_expires_at: "2027-01-01T00:00:00Z".into(),
+            account_kind: "device".into(),
+            email: None,
         }
     }
 
@@ -375,6 +559,83 @@ mod tests {
         assert!(access_valid(&tokens("2026-11-14T08:00:31Z"), now));
         assert!(!access_valid(&tokens("2026-11-14T08:00:20Z"), now));
         assert!(!access_valid(&tokens("not-a-time"), now));
+    }
+
+    #[test]
+    fn account_state_requires_an_email_account() {
+        let mut email_tokens = tokens("2026-11-14T08:00:31Z");
+        email_tokens.account_kind = "email".into();
+        email_tokens.email = Some("a@example.com".into());
+        let state = account_state_from(Some(email_tokens), Some("dev_1".into()));
+        assert!(state.logged_in);
+        assert_eq!(state.account_kind.as_deref(), Some("email"));
+        assert_eq!(state.account_id.as_deref(), Some("acct_1"));
+        assert_eq!(state.email.as_deref(), Some("a@example.com"));
+        assert_eq!(state.device_id.as_deref(), Some("dev_1"));
+
+        // 匿名设备账户不是登录态，但 device_id 仍要返回。
+        let state =
+            account_state_from(Some(tokens("2026-11-14T08:00:31Z")), Some("dev_1".into()));
+        assert!(!state.logged_in);
+        assert_eq!(state.account_kind.as_deref(), Some("device"));
+        assert_eq!(state.account_id, None);
+        assert_eq!(state.email, None);
+        assert_eq!(state.device_id.as_deref(), Some("dev_1"));
+    }
+
+    #[test]
+    fn account_kind_is_null_without_tokens_or_a_device() {
+        // 没有令牌（即使设备身份在）→ null。
+        let state = account_state_from(None, Some("dev_1".into()));
+        assert_eq!(state.account_kind, None);
+        assert!(!state.logged_in);
+        assert_eq!(state.device_id.as_deref(), Some("dev_1"));
+
+        // 没有设备身份 → null。
+        let state = account_state_from(None, None);
+        assert_eq!(state.account_kind, None);
+        assert!(!state.logged_in);
+        assert_eq!(state.device_id, None);
+
+        // 旧令牌没有 account_kind 字段 → null，不能当成 device。
+        let mut legacy = tokens("2026-11-14T08:00:31Z");
+        legacy.account_kind = String::new();
+        let state = account_state_from(Some(legacy), Some("dev_1".into()));
+        assert_eq!(state.account_kind, None);
+        assert!(!state.logged_in);
+    }
+
+    #[test]
+    fn account_state_serializes_the_contract_shape() {
+        let mut email_tokens = tokens("2026-11-14T08:00:31Z");
+        email_tokens.account_kind = "email".into();
+        email_tokens.email = Some("a@example.com".into());
+        let value = serde_json::to_value(account_state_from(
+            Some(email_tokens),
+            Some("dev_1".into()),
+        ))
+        .unwrap();
+        assert_eq!(value["logged_in"], true);
+        assert_eq!(value["account_kind"], "email");
+        assert_eq!(value["email"], "a@example.com");
+        assert_eq!(value["device_id"], "dev_1");
+        assert!(value.get("access_token").is_none());
+
+        let value = serde_json::to_value(account_state_from(None, None)).unwrap();
+        assert_eq!(value["account_kind"], serde_json::Value::Null);
+        assert_eq!(value["logged_in"], false);
+    }
+
+    #[test]
+    fn old_token_bundles_deserialize_as_device_accounts() {
+        let raw = r#"{"account_id":"acct_1","device_id":"dev_1","access_token":"a","access_expires_at":"2026-11-14T08:00:31Z","refresh_token":"r","refresh_expires_at":"2027-01-01T00:00:00Z"}"#;
+        let parsed: TokenSet = serde_json::from_str(raw).unwrap();
+        assert!(parsed.account_kind.is_empty());
+        assert_eq!(parsed.email, None);
+        // 旧令牌没有 kind：账号态按 null 处理，不能凭空当成 device。
+        let state = account_state_from(Some(parsed), Some("dev_1".into()));
+        assert_eq!(state.account_kind, None);
+        assert!(!state.logged_in);
     }
 
     #[test]

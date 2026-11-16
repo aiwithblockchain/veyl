@@ -38,6 +38,10 @@ export interface AccessClaims {
   iat: number;
   exp: number;
   jti: string;
+  /** 账户类型：device（匿名）| email（邮箱登录）。 */
+  kind?: string;
+  /** 这次是怎么验的：device | email。 */
+  amr?: string;
 }
 
 const encoder = new TextEncoder();
