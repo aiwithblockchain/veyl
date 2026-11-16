@@ -7858,6 +7858,144 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 删配置只动本地数据，不碰云端服务器。
+    ///
+    /// `my_servers` 是控制面服务器的本地镜像；配置与节点都只是本地的引用关系，
+    /// 删哪一边都不该让那台服务器在云端消失（销毁只有 `my_server_destroy` 一条路）。
+    #[tokio::test]
+    async fn deleting_a_config_never_destroys_the_cloud_server() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("A")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "东京".into(),
+                server: "198.51.100.8".into(),
+                port: 8388,
+                password: "pw".into(),
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+
+        let node_id = {
+            let conn = services.store.conn();
+            configs::list_nodes(&conn, &config_id).unwrap()[0].id.clone()
+        };
+        let server_id = "srv_keep_config";
+        {
+            let conn = services.store.conn();
+            crate::store::servers::upsert(
+                &conn,
+                &crate::store::servers::NewMyServer {
+                    id: server_id,
+                    provider: "digitalocean",
+                    name: "东京",
+                    region: "tyo1",
+                    plan: "s-1vcpu-1gb",
+                    state: "active",
+                    node_id: Some(&node_id),
+                    hourly_usd: 0.01,
+                    monthly_usd: 6.0,
+                    daily_price_cents: 20,
+                    transfer_gib: 0,
+                    paid_until: 0,
+                    billing_state: "active",
+                    created_at: 1_700_000_000_000,
+                },
+            )
+            .unwrap();
+        }
+
+        services.config_delete(&config_id).await.unwrap();
+
+        {
+            let conn = services.store.conn();
+            assert!(configs::get(&conn, &config_id).unwrap().is_none(), "配置应已删除");
+            assert!(
+                configs::get_node(&conn, &node_id).unwrap().is_some(),
+                "节点是共享池，删配置不能删节点"
+            );
+            let server = crate::store::servers::get(&conn, server_id)
+                .unwrap()
+                .expect("服务器本地镜像行必须保留");
+            assert_eq!(
+                server.node_id.as_deref(),
+                Some(node_id.as_str()),
+                "删配置不应改写 my_servers.node_id"
+            );
+        }
+        assert!(
+            crate::secrets::get_secret(&crate::nodes::password_ref(&node_id))
+                .unwrap()
+                .is_some(),
+            "删配置不能删节点密码"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 删节点只把 `my_servers.node_id` 置空，服务器镜像行保留。
+    #[tokio::test]
+    async fn deleting_a_node_keeps_the_cloud_server_row_and_clears_the_link() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("A")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "大阪".into(),
+                server: "198.51.100.9".into(),
+                port: 8388,
+                password: "pw".into(),
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+
+        let node_id = {
+            let conn = services.store.conn();
+            configs::list_nodes(&conn, &config_id).unwrap()[0].id.clone()
+        };
+        let server_id = "srv_keep_node";
+        {
+            let conn = services.store.conn();
+            crate::store::servers::upsert(
+                &conn,
+                &crate::store::servers::NewMyServer {
+                    id: server_id,
+                    provider: "digitalocean",
+                    name: "大阪",
+                    region: "osa1",
+                    plan: "s-1vcpu-1gb",
+                    state: "active",
+                    node_id: Some(&node_id),
+                    hourly_usd: 0.01,
+                    monthly_usd: 6.0,
+                    daily_price_cents: 20,
+                    transfer_gib: 0,
+                    paid_until: 0,
+                    billing_state: "active",
+                    created_at: 1_700_000_000_000,
+                },
+            )
+            .unwrap();
+            assert!(configs::delete_node(&conn, &node_id).unwrap());
+            assert!(configs::get_node(&conn, &node_id).unwrap().is_none());
+            let server = crate::store::servers::get(&conn, server_id)
+                .unwrap()
+                .expect("删节点不能删服务器镜像行");
+            assert_eq!(server.node_id, None, "外键 ON DELETE SET NULL 应把 node_id 置空");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn listen_port_can_go_back_to_auto() {
         let dir = temp_dir();
