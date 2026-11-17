@@ -23,16 +23,14 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024;
 /// 裸候选上限。正常布局不到 1 KiB，8 KiB 足够宽松。
 pub const MAX_BARE_BYTES: usize = 8 * 1024;
 pub const MAX_BLOCKS: usize = 8;
-pub const MAX_TARGETS: usize = 6;
-pub const MAX_TARGET_CHARS: usize = 24;
 pub const MAX_ACTION_CARD_ACTIONS: usize = 3;
 
 /// AI 能写的块。`issue_card` 是系统叠加层，写进布局会渲染两张故障卡。
-pub const BLOCK_TYPES: [&str; 6] = [
+/// `reachability` 已在 `events.md` 2.16.0 移除，再写按未知块整份丢弃。
+pub const BLOCK_TYPES: [&str; 5] = [
     "empty_hint",
     "proxy_card",
     "source_choice",
-    "reachability",
     "update_hint",
     "action_card",
 ];
@@ -157,63 +155,11 @@ fn normalize_props(block_type: &str, props: Option<&Value>) -> Result<Option<Val
     if block_type == "action_card" {
         return normalize_action_card(props);
     }
-    if block_type != "reachability" {
-        return match props {
-            None => Ok(None),
-            Some(Value::Object(map)) if map.is_empty() => Ok(None),
-            Some(_) => Err(Reason::BadProps),
-        };
+    match props {
+        None => Ok(None),
+        Some(Value::Object(map)) if map.is_empty() => Ok(None),
+        Some(_) => Err(Reason::BadProps),
     }
-
-    let map = props.and_then(Value::as_object).ok_or(Reason::BadProps)?;
-    if map.len() != 1 {
-        return Err(Reason::BadProps);
-    }
-    let targets = map
-        .get("targets")
-        .and_then(Value::as_array)
-        .ok_or(Reason::BadProps)?;
-    if targets.is_empty() || targets.len() > MAX_TARGETS {
-        return Err(Reason::BadProps);
-    }
-
-    let mut normalized: Vec<String> = Vec::new();
-    for target in targets {
-        let text = target.as_str().ok_or(Reason::BadProps)?;
-        let text = text.trim();
-        let length = text.chars().count();
-        if length == 0 || length > MAX_TARGET_CHARS {
-            return Err(Reason::BadProps);
-        }
-        if unsafe_target(text) {
-            return Err(Reason::UnsafeString);
-        }
-        if !normalized.iter().any(|kept| kept == text) {
-            normalized.push(text.to_string());
-        }
-    }
-    if normalized.is_empty() {
-        return Err(Reason::BadProps);
-    }
-    Ok(Some(json!({ "targets": normalized })))
-}
-
-/// `targets` 是唯一原样进界面的模型字符串，限制成「一个短名字」。
-fn unsafe_target(text: &str) -> bool {
-    if text.chars().any(char::is_control) {
-        return true;
-    }
-    if text
-        .chars()
-        .any(|c| matches!(c, '<' | '>' | '&' | '"' | '\''))
-    {
-        return true;
-    }
-    if text.contains("://") || text.contains('/') || text.contains(':') {
-        return true;
-    }
-    let lower = text.to_ascii_lowercase();
-    lower.starts_with("javascript:") || lower.starts_with("data:")
 }
 
 // ---------- action_card ----------
@@ -1215,13 +1161,9 @@ mod tests {
     #[test]
     fn braced_strings_inside_a_bare_object_pair_correctly() {
         // 简单的数括号会在这里提前闭合；按 JSON 字符串规则配对才正确。
-        let text =
-            "{\"version\":1,\"blocks\":[{\"type\":\"reachability\",\"props\":{\"targets\":[\"a}b\"]}}]}\n";
+        let text = "{\"version\":1,\"blocks\":[{\"type\":\"action_card\",\"props\":{\"id\":\"card_1\",\"title\":\"a}b\",\"actions\":[{\"id\":\"retry\",\"label\":\"再试\",\"kind\":\"secondary\"}]}}]}\n";
         assert_eq!(strip_text(text), "\n");
-        assert_eq!(
-            layout_of(text)["blocks"][0]["props"]["targets"],
-            json!(["a}b"])
-        );
+        assert_eq!(layout_of(text)["blocks"][0]["props"]["title"], json!("a}b"));
 
         let non_shape = "{\"a\":\"}\"}\n";
         assert_eq!(strip_text(non_shape), non_shape);
@@ -1357,47 +1299,24 @@ mod tests {
             r#"{"version":1,"blocks":[{"type":"empty_hint","props":{"a":1}}]}"#
         )
         .is_err());
-        assert!(parse_and_validate(r#"{"version":1,"blocks":[{"type":"reachability"}]}"#).is_err());
-        assert!(parse_and_validate(
-            r#"{"version":1,"blocks":[{"type":"reachability","props":{"targets":[]}}]}"#
-        )
-        .is_err());
-        assert!(parse_and_validate(
-            r#"{"version":1,"blocks":[{"type":"reachability","props":{"targets":["a","b","c","d","e","f","g"]}}]}"#
-        )
-        .is_err());
-
-        let value = parse_and_validate(
-            r#"{"version":1,"blocks":[{"type":"reachability","props":{"targets":[" 视频网站 ","视频网站","新闻"]}}]}"#,
-        )
-        .unwrap();
         assert_eq!(
-            value["blocks"][0]["props"]["targets"],
-            json!(["视频网站", "新闻"])
+            parse_and_validate(r#"{"version":1,"blocks":[{"type":"reachability"}]}"#),
+            Err(Reason::UnknownBlock),
+            "reachability 已在 events.md 2.16.0 移除"
         );
     }
 
     #[test]
-    fn unsafe_targets_are_rejected() {
-        for target in [
-            "<script>",
-            "a&b",
-            "javascript:alert(1)",
-            "https://example.com",
-            "a/b",
-            "a:b",
-            "a\"b",
-            "a'b",
-            "a\nb",
-            "很长的服务名字超过了二十四个字符的硬性上限所以必须拒绝掉",
+    fn an_unknown_block_drops_the_whole_layout() {
+        for body in [
+            r#"{"version":1,"blocks":[{"type":"reachability"}]}"#,
+            r#"{"version":1,"blocks":[{"type":"reachability","props":{"targets":["视频"]}}]}"#,
+            r#"{"version":1,"blocks":[{"type":"future_block"}]}"#,
         ] {
-            let body = json!({
-                "version": 1,
-                "blocks": [{ "type": "reachability", "props": { "targets": [target] } }]
-            });
-            assert!(
-                parse_and_validate(&body.to_string()).is_err(),
-                "应当拒绝 {target:?}"
+            assert_eq!(
+                parse_and_validate(body),
+                Err(Reason::UnknownBlock),
+                "{body}"
             );
         }
     }
@@ -1517,7 +1436,7 @@ mod tests {
         let samples = [
             SAMPLE.to_string(),
             "开头\n```json\n{\"version\":1,\"blocks\":[]}\n```\n结尾\n".to_string(),
-            "```js\nlet a = 1;\n```\n正文\n```layout\n{\"version\":1,\"blocks\":[{\"type\":\"reachability\",\"props\":{\"targets\":[\"视频\"]}}]}\n```\n完\n".to_string(),
+            "```js\nlet a = 1;\n```\n正文\n```layout\n{\"version\":1,\"blocks\":[{\"type\":\"future_block\",\"props\":{\"targets\":[\"视频\"]}}]}\n```\n完\n".to_string(),
             "一行里有 ``` 反引号。\n````\n{\"version\":1,\"blocks\":[]}\n````\n".to_string(),
             "```layout\n{\"version\":1,\"blocks\":[{\"type\":\"proxy_card\"}]}".to_string(),
             "结尾两个反引号 ``".to_string(),
@@ -1588,8 +1507,8 @@ mod tests {
     }
 
     #[test]
-    fn action_card_is_the_sixth_block_and_keeps_valid_buttons() {
-        assert_eq!(BLOCK_TYPES.len(), 6);
+    fn action_card_is_the_fifth_block_and_keeps_valid_buttons() {
+        assert_eq!(BLOCK_TYPES.len(), 5);
         assert!(BLOCK_TYPES.contains(&"action_card"));
 
         let valid = card(json!({

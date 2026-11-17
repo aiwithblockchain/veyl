@@ -87,6 +87,59 @@ describe("每日计费", () => {
     expect(db.rows("accounts")[0].balance_cents).toBe(1000 - DAILY);
   });
 
+  it("collectDue 之后被销毁的服务器不再扣费", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, { paid_until: Date.now() - 60_000 });
+    // 竞态：到期行已经取到，用户在结算前销毁了这台（销毁已按当时 paid_until 退款）。
+    db.onBillingCursor = () => {
+      db.rows("servers")[0].destroyed_at = Date.now();
+    };
+
+    const report = await runBilling(env as never);
+
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+    expect(report.renewed).toBe(0);
+    expect(report.pastDue).toBe(0);
+  });
+
+  it("collectDue 之后进入 destroying 的服务器不再扣费", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, { paid_until: Date.now() - 60_000 });
+    // destroy 在处理开头就写 destroying，destroyed_at 要等 DO 删除完才落。
+    db.onBillingCursor = () => {
+      db.rows("servers")[0].state = "destroying";
+    };
+
+    const report = await runBilling(env as never);
+
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+    expect(report.renewed).toBe(0);
+    expect(report.pastDue).toBe(0);
+  });
+
+  it("复查之后、记账之前被销毁：账本守卫拒绝这一天", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, { paid_until: Date.now() - 60_000 });
+    db.beforeWalletInsert = () => {
+      db.rows("servers")[0].state = "destroying";
+    };
+
+    const report = await runBilling(env as never);
+
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+    expect(report.pastDue).toBe(0);
+    expect(db.rows("servers")[0].billing_state).toBe("active");
+  });
+
   it("一次补齐欠的天数，但不超过 30 天", async () => {
     const db = new FakeD1();
     const env = envWith(db);

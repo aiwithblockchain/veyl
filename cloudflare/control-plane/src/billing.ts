@@ -60,6 +60,8 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   for (const server of due) {
     try {
       const result = await settleServer(env, server, now);
+      // 收集之后才被销毁：销毁已按当时 paid_until 退款，这里不能再扣。
+      if (result.state === "destroyed") continue;
       if (result.state === "active") report.renewed += 1;
       else if (result.state === "expired") report.expired += 1;
       else report.pastDue += 1;
@@ -150,6 +152,24 @@ async function collectDue(env: BillingEnv, now: number): Promise<BillingRow[]> {
   return rows;
 }
 
+/** 当前是否还能扣费；行不存在、已销毁、正在销毁都不能。 */
+async function liveServerState(
+  db: D1Database,
+  server: BillingRow,
+): Promise<{ live: boolean; state: string | null; paidUntil: number }> {
+  const row = await db
+    .prepare("SELECT * FROM servers WHERE id = ? AND account_id = ?")
+    .bind(server.id, server.account_id)
+    .first<{ state?: string; destroyed_at?: number | null; paid_until?: number }>();
+  if (!row) return { live: false, state: null, paidUntil: Number(server.paid_until) };
+  const state = row.destroyed_at != null ? "destroyed" : (row.state ?? null);
+  return {
+    live: state !== "destroying" && state !== "destroyed",
+    state,
+    paidUntil: Number(row.paid_until ?? server.paid_until),
+  };
+}
+
 /** 把一台服务器的账补到 now 之后；返回最终状态。 */
 async function settleServer(
   env: BillingEnv,
@@ -163,7 +183,16 @@ async function settleServer(
     return { state: server.billing_state, days: 0, paidUntil: Number(server.paid_until) };
   }
 
-  let paidUntil = Number(server.paid_until);
+  // collectDue 取到行之后、结算之前，用户可能已经开始销毁（destroying）或已销毁。
+  // 销毁会退款并停止计费；不在结算前复查，销毁之后仍会扣一天，而退款覆盖不到。
+  // 复查后到记账之间仍有缝，真正的拦截在账本 INSERT 的守卫里。
+  // 复查同时带回最新的 paid_until：循环用它起算，不拿循环外的旧值。
+  const live = await liveServerState(db, server);
+  if (!live.live) {
+    return { state: "destroyed", days: 0, paidUntil: live.paidUntil };
+  }
+
+  let paidUntil = live.paidUntil;
   let days = 0;
 
   while (paidUntil <= now && days < MAX_CATCH_UP_DAYS) {
@@ -176,6 +205,12 @@ async function settleServer(
       amountCents: -amount,
       refType: "server_day",
       refId: `${server.id}:${bucket}`,
+      // 守卫和记账在同一条 INSERT 里：服务器一旦进入 destroyed / destroying，
+      // 这一格就不写账，避免销毁之后继续扣。
+      guard: {
+        sql: "SELECT 1 FROM servers WHERE id = ? AND destroyed_at IS NULL AND state NOT IN ('destroying', 'destroyed')",
+        args: [server.id],
+      },
       followUps: (ledgerId) => [
         db
           .prepare(
@@ -204,6 +239,10 @@ async function settleServer(
         .run();
       continue;
     }
+
+    // 守卫不成立会落到 insufficient：以库里的状态为准，别把正在销毁的机器标成欠费。
+    const current = await liveServerState(db, server);
+    if (!current.live) return { state: "destroyed", days, paidUntil };
 
     break;
   }

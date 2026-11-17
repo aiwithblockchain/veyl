@@ -41,7 +41,7 @@ use self::provider::LlmCredentials;
 /// 运行时不依赖任何外部文件，离线也能用。
 const FIRST_RUN_PROMPT: &str = include_str!("../../../resources/prompts/zh/first-run.md");
 
-/// 中间区域 AI 能写的六种块。与 `docs/design/ai-layout.md` §4.1 同源。
+/// 中间区域 AI 能写的五种块。与 `docs/contracts/events.md` §4.13 同源。
 /// `issue_card` 是系统叠加层，**不可写**：写进布局会渲染两张故障卡。
 const BLOCK_CATALOG: &str = "\
 | 块 | 用途 |
@@ -49,7 +49,6 @@ const BLOCK_CATALOG: &str = "\
 | `empty_hint` | 未配置或未连接时的一句提示 |
 | `proxy_card` | 代理地址 + 端口 + 复制 |
 | `source_choice` | 让用户在「Veyl 免费节点 / 自己提供」之间选 |
-| `reachability` | 对用户提过的目标逐个确认能不能打开 |
 | `update_hint` | 资源有新版本 |
 | `action_card` | 一张带 1–3 个按钮的卡片，点击只把按钮 id 上报给 AI，不执行命令 |
 

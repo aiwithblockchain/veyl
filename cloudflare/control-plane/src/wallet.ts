@@ -23,6 +23,11 @@ export interface LedgerInput {
   note?: string;
   /** 需要和记账同批完成的后续语句（续期、订单置 paid），必须用同一个 ledgerId 守卫。 */
   followUps?: (ledgerId: string) => D1PreparedStatement[];
+  /**
+   * 额外守卫：条件不成立时这笔账不写（用于「服务器已进入销毁」这类并发）。
+   * 守卫不成立与余额不足都返回 `ok: false`，调用方需按业务状态自行区分。
+   */
+  guard?: { sql: string; args: unknown[] };
 }
 
 export type LedgerResult =
@@ -48,13 +53,16 @@ export async function recordLedgerEntry(
   if (!Number.isFinite(amount) || amount === 0) return { ok: false, reason: "insufficient" };
   const magnitude = Math.abs(amount);
   const isCredit = amount > 0;
+  const guardClause = input.guard ? ` AND EXISTS (${input.guard.sql})` : "";
+  const guardArgs = input.guard ? input.guard.args : [];
 
   const insert = isCredit
     ? db
         .prepare(
           "INSERT INTO wallet_ledger (id, account_id, kind, amount_cents, balance_after_cents, ref_type, ref_id, note, created_at) " +
             "SELECT ?, a.id, ?, ?, a.balance_cents + ?, ?, ?, ?, ? FROM accounts a " +
-            "WHERE a.id = ? AND NOT EXISTS (SELECT 1 FROM wallet_ledger w WHERE w.ref_type = ? AND w.ref_id = ?)",
+            "WHERE a.id = ? AND NOT EXISTS (SELECT 1 FROM wallet_ledger w WHERE w.ref_type = ? AND w.ref_id = ?)" +
+            guardClause,
         )
         .bind(
           ledgerId,
@@ -68,13 +76,15 @@ export async function recordLedgerEntry(
           input.accountId,
           input.refType,
           input.refId,
+          ...guardArgs,
         )
     : db
         .prepare(
           "INSERT INTO wallet_ledger (id, account_id, kind, amount_cents, balance_after_cents, ref_type, ref_id, note, created_at) " +
             "SELECT ?, a.id, ?, ?, a.balance_cents - ?, ?, ?, ?, ? FROM accounts a " +
             "WHERE a.id = ? AND a.balance_cents >= ? " +
-            "AND NOT EXISTS (SELECT 1 FROM wallet_ledger w WHERE w.ref_type = ? AND w.ref_id = ?)",
+            "AND NOT EXISTS (SELECT 1 FROM wallet_ledger w WHERE w.ref_type = ? AND w.ref_id = ?)" +
+            guardClause,
         )
         .bind(
           ledgerId,
@@ -89,6 +99,7 @@ export async function recordLedgerEntry(
           magnitude,
           input.refType,
           input.refId,
+          ...guardArgs,
         );
 
   const applyBalance = db

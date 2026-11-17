@@ -19,9 +19,11 @@ use claurst_tools::{Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
 use crate::agent::permission_handler::AivpnPermissionHandler;
+use crate::control_plane::catalog::{Catalog, CatalogError, Plan, Region};
 use crate::tools::permission_level_of;
 use crate::tools::services::{
-    CatalogQuery, ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, VpnToolServices,
+    CatalogQuery, ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, ServerCatalogSource,
+    VpnToolServices,
 };
 
 // ---------- 测试上下文 ----------
@@ -50,6 +52,32 @@ fn context() -> ToolContext {
 }
 
 // ---------- 记录调用的假服务 ----------
+
+/// 建机目录替身：固定一份可预测的目录，工具层测试不联网。
+struct FakeServerCatalog;
+
+#[async_trait]
+impl ServerCatalogSource for FakeServerCatalog {
+    async fn fetch(&self) -> Result<Catalog, CatalogError> {
+        Ok(Catalog {
+            currency: "USD".into(),
+            updated_at: "2026-11-17T00:00:00Z".into(),
+            regions: vec![Region {
+                id: "tyo".into(),
+                name: "Tokyo".into(),
+                continent: "asia".into(),
+            }],
+            plans: vec![Plan {
+                id: "vc2-1c-1gb".into(),
+                label: "1 vCPU · 1 GB".into(),
+                hourly_usd: 0.007,
+                monthly_usd: 5.0,
+                daily_price_cents: 17,
+                transfer_gib: 1000,
+            }],
+        })
+    }
+}
 
 #[derive(Default)]
 struct Recorder {
@@ -175,6 +203,10 @@ impl VpnToolServices for FakeServices {
             query.region, query.limit
         ));
         Ok(self.data.clone())
+    }
+
+    fn server_catalog(&self) -> Arc<dyn ServerCatalogSource> {
+        Arc::new(FakeServerCatalog)
     }
     async fn config_list(&self) -> anyhow::Result<Value> {
         self.rec.record("config_list");
@@ -507,7 +539,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.12.0",
+                env["contract_version"], "3.17.1",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -795,6 +827,7 @@ fn base_input(name: &str) -> Option<Value> {
         "CoreUpgrade" => json!({}),
         "ConfigSetMode" => json!({ "mode": "tun" }),
         "OpenSettings" => json!({ "section": "connection" }),
+        "StageSelect" => json!({ "region": "tyo" }),
         "RouteSetMode" => json!({ "mode": "proxy_all" }),
         "NodeImportUrl" => json!({ "url": "https://example.com/sub" }),
         "NodeImportText" => json!({ "text": "ss://aes-256-gcm:pw@203.0.113.10:8388#A" }),

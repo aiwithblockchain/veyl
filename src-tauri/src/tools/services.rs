@@ -7,6 +7,26 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::control_plane::catalog::{fetch_catalog, Catalog, CatalogError};
+
+/// 建机目录的取数入口：**每次现取，不做本地缓存**（`tools.md` §3.1、`commands.md` §7.14）。
+/// Worker 侧已有 5 分钟缓存；Host 缓存陈旧目录会让用户看到已下架的地区或旧价格。
+#[async_trait]
+pub trait ServerCatalogSource: Send + Sync {
+    async fn fetch(&self) -> Result<Catalog, CatalogError>;
+}
+
+/// 生产实现：base_url 由 `control_plane::env` 决定，release 只认 prod。
+pub struct LiveServerCatalog;
+
+#[async_trait]
+impl ServerCatalogSource for LiveServerCatalog {
+    async fn fetch(&self) -> Result<Catalog, CatalogError> {
+        let base_url = crate::control_plane::env::current().base_url;
+        fetch_catalog(&base_url).await
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CatalogQuery {
     pub region: Option<String>,
@@ -138,6 +158,12 @@ pub trait VpnToolServices: Send + Sync {
     async fn tun_probe(&self) -> anyhow::Result<Value>;
 
     async fn catalog_search(&self, query: CatalogQuery) -> anyhow::Result<Value>;
+
+    /// 建机目录（地区 + 套餐）的取数入口。每次现取，不做本地缓存；
+    /// `CatalogOptions`、`StageSelect` 与 `my_server_catalog` 共用。
+    fn server_catalog(&self) -> Arc<dyn ServerCatalogSource> {
+        Arc::new(LiveServerCatalog)
+    }
 
     /// 只读：「我的服务器」列表。默认未接入；结果不含地址、端口、密码。
     async fn my_servers(&self) -> anyhow::Result<Value> {

@@ -23,6 +23,8 @@ pub mod routing;
 pub mod runtime;
 pub mod services;
 pub mod settings;
+pub mod stage_select;
+pub mod turn_guard;
 pub mod vpn;
 
 /// 输入边界测试：`input` 是模型生成的不可信 JSON，见该文件头注释。
@@ -149,6 +151,8 @@ fn value_kind(value: &Value) -> &'static str {
 }
 
 pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
+    // server_catalog 是「建机目录」（地区 + 套餐）；与上面的 catalog（共享节点目录客户端）不是一个东西。
+    let server_catalog = services.server_catalog();
     vec![
         Box::new(runtime::RuntimeStatusTool::new(Arc::clone(&services))),
         Box::new(runtime::RuntimeStartTool::new(Arc::clone(&services))),
@@ -191,6 +195,8 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(my_servers::MyServersTool::new(Arc::clone(&services))),
         Box::new(my_servers::MyServerFailureTool::new(Arc::clone(&services))),
         Box::new(settings::OpenSettingsTool::new()),
+        Box::new(stage_select::StageSelectTool::new(server_catalog.clone())),
+        Box::new(stage_select::CatalogOptionsTool::new(server_catalog.clone())),
         Box::new(AskUserQuestionGuard::new()),
     ]
 }

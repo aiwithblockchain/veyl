@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::agent::app_handle;
 use crate::tools::{AivpnError, Display, NextAction};
 
-pub const CONTRACT_VERSION: &str = "2.15.0";
+pub const CONTRACT_VERSION: &str = "2.16.2";
 
 pub const EV_MESSAGE_CHUNK: &str = "message-chunk";
 pub const EV_THINKING_CHUNK: &str = "thinking-chunk";
@@ -30,6 +30,7 @@ pub const EV_QUIT_REQUESTED: &str = "quit-requested";
 pub const EV_QUIT_DISMISSED: &str = "quit-dismissed";
 pub const EV_TRIAL_EXPIRED: &str = "trial-expired";
 pub const EV_SETTINGS_POINT: &str = "settings-point";
+pub const EV_STAGE_SELECT: &str = "stage-select";
 
 const RESULT_LIMIT: usize = 8 * 1024;
 

@@ -282,9 +282,10 @@ pub async fn proxy_recovery_report(state: State<'_, Arc<AppState>>) -> Result<Va
 ///
 /// base_url 由 `control_plane::env` 决定，release 只认 prod；这里不写死域名。
 #[tauri::command]
-pub async fn my_server_catalog() -> Result<Value, Value> {
-    let base_url = crate::control_plane::env::current().base_url;
-    match crate::control_plane::catalog::fetch_catalog(&base_url).await {
+pub async fn my_server_catalog(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
+    // 与 StageSelect / CatalogOptions 共用 `VpnToolServices::server_catalog()`：
+    // 每次现取、不做本地缓存（commands.md §7.14）。
+    match state.services.server_catalog().fetch().await {
         Ok(catalog) => serde_json::to_value(catalog)
             .map_err(|error| command_error("INTERNAL", error, Value::Null)),
         Err(error) => Err(json!({
@@ -400,10 +401,18 @@ pub async fn my_server_topup(
                 topup.topup_id,
                 if topup.checkout_url.is_some() { "有" } else { "无" }
             );
-            if let Some(url) = topup.checkout_url.as_deref() {
-                open_checkout_url(&app, url);
+            let opened = match topup.checkout_url.as_deref() {
+                Some(url) => open_checkout_url(&app, url),
+                None => Ok(()),
+            };
+            if let Err(error) = &opened {
+                log::warn!(
+                    "我的服务器：收银台打开失败 topup={} error={}",
+                    topup.topup_id,
+                    error
+                );
             }
-            Ok(json!(topup))
+            finish_topup(topup, opened)
         }
         Err(error) => {
             log::warn!(
@@ -419,16 +428,39 @@ pub async fn my_server_topup(
     }
 }
 
-/// 系统默认浏览器打开充值收银台；失败只告警——会话已创建，界面可重试。
-fn open_checkout_url(app: &tauri::AppHandle, url: &str) {
+/// 系统默认浏览器打开充值收银台；失败把原因交给命令层，由它带着链接报错。
+fn open_checkout_url(app: &tauri::AppHandle, url: &str) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
 
     if !url.starts_with("https://") {
         log::warn!("收银台地址不是 https，拒绝打开：{url}");
-        return;
+        return Err("checkout_url_not_https".into());
     }
-    if let Err(error) = app.opener().open_url(url, None::<&str>) {
-        log::warn!("打开收银台失败：{error}");
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+/// 收银台打开结果落到命令返回值：成功返回会话，失败返回错误并带上可重开/可复制的链接。
+fn finish_topup(
+    topup: crate::control_plane::servers::MyServerTopup,
+    opened: Result<(), String>,
+) -> Result<Value, Value> {
+    match opened {
+        Ok(()) => Ok(json!(topup)),
+        Err(detail) => Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "INTERNAL",
+            "message": "收银台没能在浏览器里打开，可以复制链接自己打开",
+            "retryable": false,
+            "details": {
+                "reason": "checkout_open_failed",
+                "topup_id": topup.topup_id,
+                "checkout_url": topup.checkout_url,
+                "open_error": detail,
+            },
+            "request_id": "",
+        })),
     }
 }
 
@@ -2375,5 +2407,43 @@ mod proxy_port_command_tests {
         let current = proxy_port_get().await.unwrap();
         assert_eq!(current["port"], json!(free), "非法值不能改库");
         assert_eq!(current["default_port"], json!(7890));
+    }
+}
+
+#[cfg(test)]
+mod checkout_command_tests {
+    use super::*;
+    use crate::control_plane::servers::MyServerTopup;
+
+    fn topup() -> MyServerTopup {
+        MyServerTopup {
+            topup_id: "topup_1".into(),
+            checkout_url: Some("https://checkout.example/session".into()),
+            denomination_cents: 1500,
+        }
+    }
+
+    #[test]
+    fn a_failed_browser_open_returns_an_error_not_a_success() {
+        let error = finish_topup(topup(), Err("no browser".into())).unwrap_err();
+        assert_eq!(error["code"], "INTERNAL");
+        assert_eq!(error["details"]["reason"], "checkout_open_failed");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["details"]["topup_id"], "topup_1");
+        assert_eq!(
+            error["details"]["checkout_url"],
+            "https://checkout.example/session",
+            "失败必须把链接带回去，界面才能重开或复制"
+        );
+        assert!(error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("复制链接")));
+    }
+
+    #[test]
+    fn an_opened_checkout_returns_the_topup() {
+        let value = finish_topup(topup(), Ok(())).unwrap();
+        assert_eq!(value["topup_id"], "topup_1");
+        assert_eq!(value["checkout_url"], "https://checkout.example/session");
     }
 }

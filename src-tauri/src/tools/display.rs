@@ -105,6 +105,8 @@ fn table(tool: &str) -> (&'static str, &'static str, bool) {
         "CatalogRefresh" => ("Veyl 免费节点已更新", "没能更新 Veyl 免费节点", false),
         "DefaultProfileStatus" => ("已读取 Veyl 免费节点状态", "没能读取 Veyl 免费节点状态", true),
         "OpenSettings" => ("已打开设置", "没能打开设置", true),
+        "StageSelect" => ("已把选择发给新建节点舞台", "没能把选择发过去", false),
+        "CatalogOptions" => ("读到了可选地区与规格", "没读到可选地区，稍后再试", true),
         "MyServerFailure" => ("读到了这次失败的记录", "没读到失败详情，稍后再试", true),
         // 未登记的工具（含 Claurst 内置工具）只给通用文案，不猜语义。
         _ => ("已完成", "没有完成", false),
@@ -183,6 +185,8 @@ mod tests {
             "DefaultProfileStatus",
             "SetUserRegion",
             "OpenSettings",
+            "StageSelect",
+            "CatalogOptions",
             "MyServerFailure",
         ];
         for tool in tools {

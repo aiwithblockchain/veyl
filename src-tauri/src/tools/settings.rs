@@ -2,9 +2,7 @@
 //!
 //! 只指路，不改任何值；未知 `row` 降级为 null，不报错。一轮对话最多一次。
 
-use std::collections::HashSet;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
@@ -12,6 +10,7 @@ use serde_json::{json, Value};
 
 use super::display::Changed;
 use super::envelope::{self, AivpnError, ToolOutcome};
+use super::turn_guard;
 use crate::claurst_session::events::{self, EV_SETTINGS_POINT};
 
 /// 行 id 白名单（`tools.md` §4.50；与 `commands.md` §9.1.1 的 controls 同源）。
@@ -92,23 +91,6 @@ fn parse_input(input: &Value) -> Result<Request, AivpnError> {
     })
 }
 
-/// `(session_id, 本轮序号)`；一轮只允许成功一次。
-fn opened_turns() -> &'static Mutex<HashSet<(String, usize)>> {
-    static OPENED: OnceLock<Mutex<HashSet<(String, usize)>>> = OnceLock::new();
-    OPENED.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-fn claim_turn(ctx: &ToolContext) -> bool {
-    let turn = ctx.current_turn.load(Ordering::Relaxed);
-    let key = (ctx.session_id.clone(), turn);
-    let mut opened = opened_turns()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // 只保留本会话当前这一轮的记录，避免集合无限增长。
-    opened.retain(|(session, seen)| session != &key.0 || *seen == turn);
-    opened.insert(key)
-}
-
 type Emitter = Arc<dyn Fn(Value) + Send + Sync>;
 
 pub struct OpenSettingsTool {
@@ -162,7 +144,7 @@ impl Tool for OpenSettingsTool {
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match parse_input(&input) {
             Ok(request) => {
-                if !claim_turn(ctx) {
+                if !turn_guard::claim("OpenSettings", ctx) {
                     ToolOutcome::fail(
                         AivpnError::new("PRECONDITION_FAILED", "这一轮已经打开过设置了")
                             .with_details(json!({ "reason": "already_opened" })),
@@ -217,6 +199,7 @@ mod tests {
     use claurst_core::file_history::FileHistory;
     use claurst_core::{CostTracker, PermissionMode};
     use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
 
     fn context(session: &str, turn: usize) -> ToolContext {
         let dir = std::env::temp_dir();

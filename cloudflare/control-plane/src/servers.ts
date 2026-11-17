@@ -101,14 +101,34 @@ async function destroyInstance(
   reason: string,
 ): Promise<DestroyOutcome> {
   if (!env.DB) return { ok: false, status: 503, reason: "db_unavailable", retryable: true };
+  const db = env.DB;
+
+  // 从这一刻起计费的记账守卫拒绝再扣：DO 删除可能几秒，不能让它边删边扣。
+  // 所有失败分支都恢复原状态；成功后由下面的 batch 落 destroyed。
+  const previousState = row.state === "destroying" ? "active" : row.state;
+  await db
+    .prepare(
+      "UPDATE servers SET state = 'destroying', updated_at = ? WHERE id = ? AND state != 'destroyed'",
+    )
+    .bind(Date.now(), row.id)
+    .run();
+  const restore = async () => {
+    await db
+      .prepare("UPDATE servers SET state = ?, updated_at = ? WHERE id = ?")
+      .bind(previousState, Date.now(), row.id)
+      .run()
+      .catch(() => {});
+  };
 
   if (row.provider_id) {
     if (!env.DO_API_TOKEN) {
+      await restore();
       return { ok: false, status: 0, reason: "credential_missing", retryable: false };
     }
     const deleted = await deleteDroplet(env.DO_API_TOKEN, row.provider_id);
     // 404 说明机器已经不在了，按成功处理，重试保持幂等。
     if (!deleted.ok && deleted.status !== 404) {
+      await restore();
       return {
         ok: false,
         status: deleted.status,
@@ -181,9 +201,14 @@ async function refundPlan(
     .first<{ id: string; amount_cents: number; paid_via: string | null }>();
   if (!order || order.paid_via !== "wallet") return null;
 
-  const daily = Number(row.daily_price_cents ?? 0);
-  const anchor = Number(row.billing_anchor_at ?? 0);
-  const paidUntil = Number(row.paid_until ?? 0);
+  // 从查询到现在可能已被每日 Cron 顺延一天：退款按最新 paid_until 算，
+  // 否则会少退一天——用户为没用到的那天付了钱。
+  const fresh = await env.DB!.prepare("SELECT * FROM servers WHERE id = ? AND account_id = ?")
+    .bind(row.id, row.account_id)
+    .first<ServerRow>();
+  const daily = Number(fresh?.daily_price_cents ?? row.daily_price_cents ?? 0);
+  const anchor = Number(fresh?.billing_anchor_at ?? row.billing_anchor_at ?? 0);
+  const paidUntil = Number(fresh?.paid_until ?? row.paid_until ?? 0);
   let amount = 0;
 
   if (daily > 0 && anchor > 0) {

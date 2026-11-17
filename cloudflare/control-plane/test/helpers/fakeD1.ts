@@ -34,6 +34,10 @@ export class FakeD1 {
     billing_cursor: [] as Row[],
   };
   private rateLimits = new Map<string, { window_start: number; count: number }>();
+  /** 测试钩子：collectDue 结束（写计费游标）时触发，用来模拟「取到行之后被销毁」。 */
+  onBillingCursor?: () => void;
+  /** 测试钩子：写账本前触发，用来模拟「复查之后、记账之前进入销毁」。 */
+  beforeWalletInsert?: () => void;
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, { sql, args: [] });
@@ -57,6 +61,7 @@ export class FakeD1 {
       const row = this.tables.billing_cursor.find((entry) => entry.id === a[0]);
       if (row) row.value = a[1];
       else this.tables.billing_cursor.push({ id: a[0], value: a[1] });
+      this.onBillingCursor?.();
       return null;
     }
     if (sql.startsWith("select window_start, count from rate_limits")) {
@@ -746,6 +751,21 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("insert into wallet_ledger")) {
+      this.beforeWalletInsert?.();
+      if (
+        sql.includes("from servers where id = ? and destroyed_at is null and state not in") &&
+        sql.includes("'destroying', 'destroyed'")
+      ) {
+        const server = this.tables.servers.find((row) => row.id === a[a.length - 1]);
+        if (
+          !server ||
+          server.destroyed_at != null ||
+          server.state === "destroying" ||
+          server.state === "destroyed"
+        ) {
+          return null;
+        }
+      }
       const isDebit = sql.includes("a.balance_cents >= ?");
       const [ledgerId, kind, amount, magnitude, refType, refId, note, now, accountId] = a;
       const account = this.tables.accounts.find((row) => row.id === accountId);

@@ -168,6 +168,52 @@ describe("用户销毁退款", () => {
     expect(db.rows("accounts")[0].balance_cents).toBe(140);
     expect(db.rows("servers")[0].state).toBe("destroyed");
   });
+
+  it("退款按最新 paid_until 计算：加载后又被扣一天", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    const DAY = 24 * 3600 * 1000;
+    const anchor = Date.now() - 5 * DAY;
+    Object.assign(db.rows("servers")[0], {
+      daily_price_cents: 20,
+      billing_anchor_at: anchor,
+      paid_until: anchor + 8 * DAY,
+    });
+    db.rows("accounts")[0].balance_cents = 100;
+    db.rows("orders").push({
+      id: "ord_test",
+      account_id: ACCOUNT,
+      amount_cents: 20,
+      paid_via: "wallet",
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 0.2,
+      hourly_usd: 0,
+      state: "ready",
+      idempotency_key: "idem-refund-reread",
+      created_at: Date.now(),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        // 处理开头加载的是 8 天；DO 删除这几秒里 Cron 又扣了一天。
+        // 必须整行替换：FakeD1 的 first() 返回同一行对象，原地改会连
+        // destroyInstance 手里的 row 一起改掉，用例就变成假绿。
+        db.rows("servers")[0] = {
+          ...db.rows("servers")[0],
+          paid_until: anchor + 9 * DAY,
+        };
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const res = await handleServers(destroyRequest(env.token), env as never);
+
+    expect(res?.status).toBe(204);
+    const refund = db.rows("wallet_ledger").find((row) => row.ref_type === "server_refund");
+    expect(refund?.amount_cents).toBe(60);
+  });
 });
 
 describe("销毁服务器", () => {  it("DO 删除成功后回落本地状态", async () => {
