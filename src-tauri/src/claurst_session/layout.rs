@@ -25,14 +25,16 @@ pub const MAX_BARE_BYTES: usize = 8 * 1024;
 pub const MAX_BLOCKS: usize = 8;
 pub const MAX_TARGETS: usize = 6;
 pub const MAX_TARGET_CHARS: usize = 24;
+pub const MAX_ACTION_CARD_ACTIONS: usize = 3;
 
 /// AI 能写的块。`issue_card` 是系统叠加层，写进布局会渲染两张故障卡。
-pub const BLOCK_TYPES: [&str; 5] = [
+pub const BLOCK_TYPES: [&str; 6] = [
     "empty_hint",
     "proxy_card",
     "source_choice",
     "reachability",
     "update_hint",
+    "action_card",
 ];
 
 /// 非法布局的原因码。只进日志，不出现在界面。
@@ -89,7 +91,9 @@ pub fn validate_for(config: &ConfigContext<'_>, value: &Value) -> Result<Value, 
     let layout = validate(value)?;
     for block in layout["blocks"].as_array().into_iter().flatten() {
         match block["type"].as_str().unwrap_or_default() {
-            "proxy_card" if config.connect_mode != crate::store::configs::CONNECTION_SYSTEM_PROXY => {
+            "proxy_card"
+                if config.connect_mode != crate::store::configs::CONNECTION_SYSTEM_PROXY =>
+            {
                 return Err(Reason::BlockNotApplicable);
             }
             "source_choice" if config.node_count > 0 => {
@@ -150,6 +154,9 @@ pub fn validate(value: &Value) -> Result<Value, Reason> {
 }
 
 fn normalize_props(block_type: &str, props: Option<&Value>) -> Result<Option<Value>, Reason> {
+    if block_type == "action_card" {
+        return normalize_action_card(props);
+    }
     if block_type != "reachability" {
         return match props {
             None => Ok(None),
@@ -207,6 +214,197 @@ fn unsafe_target(text: &str) -> bool {
     }
     let lower = text.to_ascii_lowercase();
     lower.starts_with("javascript:") || lower.starts_with("data:")
+}
+
+// ---------- action_card ----------
+
+/// `props = { id, title, detail?, actions: [{ id, label, kind }] }`。
+/// 按钮点击只上报，不执行命令；字符串里不允许出现价格 / IP / 端口 / 版本号 / 地区名。
+fn normalize_action_card(props: Option<&Value>) -> Result<Option<Value>, Reason> {
+    let map = props.and_then(Value::as_object).ok_or(Reason::BadProps)?;
+    if map
+        .keys()
+        .any(|key| !matches!(key.as_str(), "id" | "title" | "detail" | "actions"))
+    {
+        return Err(Reason::BadProps);
+    }
+
+    let id = action_card_id(map.get("id"))?;
+    let title = action_card_text(map.get("title"), 1, 40)?;
+    let detail = match map.get("detail") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => {
+            let text = action_card_text_value(text, 0, 120)?;
+            (!text.is_empty()).then_some(text)
+        }
+        Some(_) => return Err(Reason::BadProps),
+    };
+    let actions = map
+        .get("actions")
+        .and_then(Value::as_array)
+        .ok_or(Reason::BadProps)?;
+    if actions.is_empty() || actions.len() > MAX_ACTION_CARD_ACTIONS {
+        return Err(Reason::BadProps);
+    }
+
+    let mut seen: Vec<String> = vec![id.clone()];
+    let mut canonical = Vec::with_capacity(actions.len());
+    for action in actions {
+        let action = action.as_object().ok_or(Reason::BadProps)?;
+        if action
+            .keys()
+            .any(|key| !matches!(key.as_str(), "id" | "label" | "kind"))
+        {
+            return Err(Reason::BadProps);
+        }
+        let action_id = action_card_id(action.get("id"))?;
+        if seen.contains(&action_id) {
+            return Err(Reason::BadProps);
+        }
+        seen.push(action_id.clone());
+        let label = action_card_text(action.get("label"), 1, 12)?;
+        let kind = action
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or(Reason::BadProps)?;
+        if !matches!(kind, "primary" | "secondary") {
+            return Err(Reason::BadProps);
+        }
+        canonical.push(json!({ "id": action_id, "label": label, "kind": kind }));
+    }
+
+    let mut out = Map::new();
+    out.insert("id".into(), Value::String(id));
+    out.insert("title".into(), Value::String(title));
+    if let Some(detail) = detail {
+        out.insert("detail".into(), Value::String(detail));
+    }
+    out.insert("actions".into(), Value::Array(canonical));
+    Ok(Some(Value::Object(out)))
+}
+
+fn action_card_id(value: Option<&Value>) -> Result<String, Reason> {
+    let text = value.and_then(Value::as_str).ok_or(Reason::BadProps)?;
+    let length = text.chars().count();
+    if length == 0 || length > 32 {
+        return Err(Reason::BadProps);
+    }
+    if !text
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return Err(Reason::BadProps);
+    }
+    Ok(text.to_string())
+}
+
+fn action_card_text(value: Option<&Value>, min: usize, max: usize) -> Result<String, Reason> {
+    let text = value.and_then(Value::as_str).ok_or(Reason::BadProps)?;
+    action_card_text_value(text, min, max)
+}
+
+fn action_card_text_value(text: &str, min: usize, max: usize) -> Result<String, Reason> {
+    let text = text.trim();
+    let length = text.chars().count();
+    if length < min || length > max {
+        return Err(Reason::BadProps);
+    }
+    // 纯文本：控制字符与 HTML 边界字符会让卡片渲染出别的东西。
+    if text.chars().any(char::is_control)
+        || text
+            .chars()
+            .any(|c| matches!(c, '<' | '>' | '&' | '"' | '\''))
+    {
+        return Err(Reason::BadProps);
+    }
+    if action_card_text_has_forbidden(text) {
+        return Err(Reason::BadProps);
+    }
+    Ok(text.to_string())
+}
+
+/// 价格 / IP / 端口 / 版本号 / 地区名由后端数据填充，模型不能写进卡片。
+fn action_card_text_has_forbidden(text: &str) -> bool {
+    const WORDS: [&str; 33] = [
+        "价格",
+        "元",
+        "美元",
+        "人民币",
+        "月费",
+        "日费",
+        "每天",
+        "收费",
+        "免费",
+        "余额",
+        "充值",
+        "端口",
+        "东京",
+        "洛杉矶",
+        "新加坡",
+        "香港",
+        "台湾",
+        "日本",
+        "美国",
+        "韩国",
+        "首尔",
+        "伦敦",
+        "法兰克福",
+        "悉尼",
+        "欧洲",
+        "亚洲",
+        "北美洲",
+        "大洋洲",
+        "¥",
+        "￥",
+        "$",
+        "€",
+        "usd",
+    ];
+    let lower = text.to_lowercase();
+    WORDS.iter().any(|word| lower.contains(word))
+        || lower.contains("ip")
+        || lower.contains("port")
+        || lower.contains("version")
+        || looks_like_ip(text)
+        || looks_like_version(text)
+        || looks_like_port(text)
+}
+
+fn looks_like_ip(text: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .filter(|part| part.contains('.'))
+        .any(|part| {
+            let octets: Vec<&str> = part.split('.').collect();
+            octets.len() == 4
+                && octets.iter().all(|octet| {
+                    !octet.is_empty()
+                        && octet.len() <= 3
+                        && octet.parse::<u16>().is_ok_and(|value| value <= 255)
+                })
+        })
+}
+
+fn looks_like_version(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes
+        .windows(3)
+        .any(|window| window[0].is_ascii_digit() && window[1] == b'.' && window[2].is_ascii_digit())
+    {
+        return true;
+    }
+    text.split(|c: char| c.is_whitespace() || matches!(c, '，' | '。' | ',' | ';' | '；'))
+        .any(|word| {
+            let mut chars = word.chars();
+            matches!(chars.next(), Some('v' | 'V'))
+                && chars.clone().count() > 0
+                && chars.all(|c| c.is_ascii_digit())
+        })
+}
+
+fn looks_like_port(text: &str) -> bool {
+    text.as_bytes()
+        .windows(2)
+        .any(|window| window[0] == b':' && window[1].is_ascii_digit())
 }
 
 /// 计数只用于评估提示词有没有收住，不决定行为。
@@ -1383,5 +1581,105 @@ mod tests {
             assert_eq!(out, expected_text, "三段切分：{text:?}");
             assert_eq!(filter.layout(), expected_layout.as_ref());
         }
+    }
+
+    fn card(props: Value) -> Value {
+        json!({ "version": 1, "blocks": [{ "type": "action_card", "props": props }] })
+    }
+
+    #[test]
+    fn action_card_is_the_sixth_block_and_keeps_valid_buttons() {
+        assert_eq!(BLOCK_TYPES.len(), 6);
+        assert!(BLOCK_TYPES.contains(&"action_card"));
+
+        let valid = card(json!({
+            "id": "recover",
+            "title": "网络没恢复",
+            "detail": "可以再试一次",
+            "actions": [
+                { "id": "retry", "label": "重试", "kind": "primary" },
+                { "id": "support", "label": "联系支持", "kind": "secondary" }
+            ]
+        }));
+        let out = validate(&valid).unwrap();
+        let props = &out["blocks"][0]["props"];
+        assert_eq!(props["id"], "recover");
+        assert_eq!(props["title"], "网络没恢复");
+        assert_eq!(props["actions"].as_array().unwrap().len(), 2);
+        assert_eq!(props["actions"][0]["id"], "retry");
+        assert_eq!(props["actions"][1]["kind"], "secondary");
+    }
+
+    #[test]
+    fn action_card_rejects_bad_props_as_a_whole() {
+        let four_actions = json!({
+            "id": "x",
+            "title": "标题",
+            "actions": [
+                { "id": "a", "label": "A", "kind": "primary" },
+                { "id": "b", "label": "B", "kind": "secondary" },
+                { "id": "c", "label": "C", "kind": "primary" },
+                { "id": "d", "label": "D", "kind": "secondary" }
+            ]
+        });
+        let duplicate_ids = json!({
+            "id": "x",
+            "title": "标题",
+            "actions": [
+                { "id": "a", "label": "A", "kind": "primary" },
+                { "id": "a", "label": "B", "kind": "secondary" }
+            ]
+        });
+        let uppercase_id = json!({ "id": "Recover", "title": "标题", "actions": [{ "id": "a", "label": "A", "kind": "primary" }] });
+        let dotted_id = json!({ "id": "a.b", "title": "标题", "actions": [{ "id": "a", "label": "A", "kind": "primary" }] });
+        let long_card_id = json!({ "id": "a".repeat(33), "title": "标题", "actions": [{ "id": "a", "label": "A", "kind": "primary" }] });
+        let action_equals_card_id = json!({ "id": "a", "title": "标题", "actions": [{ "id": "a", "label": "A", "kind": "primary" }] });
+        let region_title = json!({ "id": "x", "title": "东京节点", "actions": [{ "id": "a", "label": "A", "kind": "primary" }] });
+        let price_label = json!({ "id": "x", "title": "标题", "actions": [{ "id": "a", "label": "每月 $5", "kind": "primary" }] });
+        let ip_detail = json!({ "id": "x", "title": "标题", "detail": "192.168.1.1", "actions": [{ "id": "a", "label": "A", "kind": "primary" }] });
+        let version_label = json!({ "id": "x", "title": "标题", "actions": [{ "id": "a", "label": "v1.2", "kind": "primary" }] });
+        let port_title = json!({ "id": "x", "title": "端口 8388", "actions": [{ "id": "a", "label": "A", "kind": "primary" }] });
+        let unknown_key = json!({ "id": "x", "title": "标题", "extra": 1, "actions": [{ "id": "a", "label": "A", "kind": "primary" }] });
+        let missing_actions = json!({ "id": "x", "title": "标题" });
+        let long_label = json!({ "id": "x", "title": "标题", "actions": [{ "id": "a", "label": "这是一个很长很长很长的按钮", "kind": "primary" }] });
+        let bad_kind = json!({ "id": "x", "title": "标题", "actions": [{ "id": "a", "label": "A", "kind": "danger" }] });
+        let long_detail = json!({ "id": "x", "title": "标题", "detail": "x".repeat(121), "actions": [{ "id": "a", "label": "A", "kind": "primary" }] });
+
+        for props in [
+            four_actions,
+            duplicate_ids,
+            uppercase_id,
+            dotted_id,
+            long_card_id,
+            action_equals_card_id,
+            region_title,
+            price_label,
+            ip_detail,
+            version_label,
+            port_title,
+            unknown_key,
+            missing_actions,
+            long_label,
+            bad_kind,
+            long_detail,
+        ] {
+            assert_eq!(
+                validate(&card(props.clone())).unwrap_err(),
+                Reason::BadProps,
+                "非法 props 必须整份丢弃：{props}"
+            );
+        }
+    }
+
+    #[test]
+    fn action_card_is_rejected_for_a_second_time_as_a_duplicate_block() {
+        let value = json!({
+            "version": 1,
+            "blocks": [
+                { "type": "action_card", "props": { "id": "a", "title": "标题", "actions": [{ "id": "x", "label": "X", "kind": "primary" }] } },
+                { "type": "action_card", "props": { "id": "b", "title": "标题", "actions": [{ "id": "y", "label": "Y", "kind": "primary" }] } }
+            ]
+        });
+        assert_eq!(validate(&value).unwrap_err(), Reason::DuplicateBlock);
     }
 }

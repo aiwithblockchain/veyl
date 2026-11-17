@@ -4,6 +4,7 @@ pub mod app_handle;
 pub mod commands;
 pub mod permission_handler;
 pub mod questions;
+pub mod ui_context;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

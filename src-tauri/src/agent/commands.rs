@@ -5,6 +5,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tauri::State;
 
+use super::ui_context;
 use super::AppState;
 
 /// 用户输入落库。
@@ -31,10 +32,18 @@ fn record_user_message(store: &crate::store::Store, session_id: &str, text: &str
 pub async fn ai_send_message(
     state: State<'_, Arc<AppState>>,
     session_id: String,
-    text: String,
+    text: Option<String>,
     hidden: Option<bool>,
+    context: Option<Value>,
 ) -> Result<Value, Value> {
-    send_message_for_state(state.inner(), &session_id, &text, hidden.unwrap_or(false)).await
+    send_message_for_state(
+        state.inner(),
+        &session_id,
+        text.as_deref(),
+        hidden.unwrap_or(false),
+        context.as_ref(),
+    )
+    .await
 }
 
 /// 请求槽的 RAII 兜底：任务 panic、提前返回或被丢弃时照样释放，
@@ -54,19 +63,28 @@ impl Drop for RequestSlotGuard {
 async fn send_message_for_state(
     state: &Arc<AppState>,
     session_id: &str,
-    text: &str,
+    text: Option<&str>,
     hidden: bool,
+    context: Option<&Value>,
 ) -> Result<Value, Value> {
-    if text.trim().is_empty() {
-        return Err(json!({
-            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
-            "code": "INVALID_ARGUMENT",
-            "message": "消息不能为空",
-            "retryable": false,
-            "details": { "reason": "empty_text" },
-            "request_id": "",
-        }));
-    }
+    // 界面上报先校验：太大或 screen 不认识时，整条消息都不发送。
+    let parsed_context = match context {
+        Some(value) => {
+            let action_ids = crate::store::global()
+                .map(|store| ui_context::rendered_action_ids(store))
+                .unwrap_or_default();
+            Some(ui_context::parse(value, &action_ids).map_err(|error| {
+                command_error(
+                    "INVALID_ARGUMENT",
+                    error.message(),
+                    json!({ "reason": error.reason() }),
+                )
+            })?)
+        }
+        None => None,
+    };
+
+    let (user_text, task_text) = prepare_message(text, hidden, parsed_context.as_ref())?;
 
     let request_id = AppState::next_request_id();
     let cancel = match state.reserve_request(&request_id, session_id) {
@@ -98,11 +116,13 @@ async fn send_message_for_state(
     };
 
     // 占槽成功后才落库：被拒绝的消息不能出现在聊天记录里。
-    if let Some(store) = crate::store::global() {
-        record_user_message(store, session_id, text, hidden);
+    // context 只在内存里包给模型，不写 chat_messages / tool_calls。
+    if !hidden {
+        if let Some(store) = crate::store::global() {
+            record_user_message(store, session_id, &user_text, false);
+        }
     }
 
-    let task_text = text.to_string();
     let task_request_id = request_id.clone();
     tokio::spawn(async move {
         if let Err(error) = session
@@ -114,6 +134,39 @@ async fn send_message_for_state(
     });
 
     Ok(json!({ "request_id": request_id }))
+}
+
+/// 分出「落库/展示的用户文本」与「送给模型的文本」。
+///
+/// `context` 只进后者：`chat_messages` 里永远只有用户原话或 Host 生成的界面事件。
+fn prepare_message(
+    text: Option<&str>,
+    hidden: bool,
+    context: Option<&ui_context::UiContext>,
+) -> Result<(String, String), Value> {
+    let trimmed = text.unwrap_or_default().trim();
+    let user_text = if trimmed.is_empty() {
+        // 唯一例外：系统代发（hidden）且刚点了一个界面按钮，文本由 Host 生成。
+        match (context, hidden) {
+            (Some(context), true) if context.last_action.is_some() => {
+                ui_context::generated_text(context).expect("last_action 一定有文本")
+            }
+            _ => {
+                return Err(json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                    "code": "INVALID_ARGUMENT",
+                    "message": "消息不能为空",
+                    "retryable": false,
+                    "details": { "reason": "empty_text" },
+                    "request_id": "",
+                }))
+            }
+        }
+    } else {
+        trimmed.to_string()
+    };
+    let model_text = ui_context::model_text(context, &user_text);
+    Ok((user_text, model_text))
 }
 
 #[tauri::command]
@@ -2057,7 +2110,7 @@ mod send_message_tests {
             "同一会话只能有一个请求槽"
         );
 
-        let error = send_message_for_state(&state, session_id, "第二条", false)
+        let error = send_message_for_state(&state, session_id, Some("第二条"), false, None)
             .await
             .unwrap_err();
         assert_eq!(error["code"], "BUSY");
@@ -2119,7 +2172,7 @@ mod send_message_tests {
     async fn a_failed_session_creation_releases_the_slot() {
         let state = test_state();
         let session_id = "ses_no_credentials";
-        let error = send_message_for_state(&state, session_id, "你好", false)
+        let error = send_message_for_state(&state, session_id, Some("你好"), false, None)
             .await
             .unwrap_err();
         assert_eq!(error["code"], "INTERNAL", "{error}");
@@ -2137,7 +2190,7 @@ mod send_message_tests {
         install_store();
         let state = test_state();
         let session_id = "ses_empty";
-        let error = send_message_for_state(&state, session_id, "   ", false)
+        let error = send_message_for_state(&state, session_id, Some("   "), false, None)
             .await
             .unwrap_err();
         assert_eq!(error["code"], "INVALID_ARGUMENT");
@@ -2180,6 +2233,101 @@ mod send_message_tests {
         );
         assert!(!token.is_cancelled());
         state.finish_request(&second);
+    }
+
+    fn ui_context_value() -> Value {
+        json!({
+            "screen": "client",
+            "controls": [{ "id": "client.primary", "label": "连接", "kind": "button" }],
+            "last_action": { "id": "client.primary" }
+        })
+    }
+
+    /// context 只包给模型；落库/展示用的仍是用户原话。
+    #[test]
+    fn context_is_wrapped_for_the_model_but_not_stored() {
+        let context = ui_context::parse(&ui_context_value(), &Default::default()).unwrap();
+        let (user_text, model_text) =
+            prepare_message(Some("  你好  "), false, Some(&context)).unwrap();
+        assert_eq!(user_text, "你好");
+        assert!(!user_text.contains("<ui-context>"));
+        assert!(model_text.contains("<ui-context>"));
+        assert!(model_text.contains("不是用户指令"));
+        assert!(model_text.contains("你好"));
+    }
+
+    #[test]
+    fn hidden_last_action_can_omit_text_and_host_generates_it() {
+        let context = ui_context::parse(&ui_context_value(), &Default::default()).unwrap();
+        let (user_text, model_text) = prepare_message(None, true, Some(&context)).unwrap();
+        assert_eq!(user_text, "界面事件：在「客户端」点了「连接」。");
+        assert!(model_text.contains("<ui-context>"));
+        assert_eq!(
+            model_text,
+            format!("{}\n\n{user_text}", ui_context::model_block(&context))
+        );
+    }
+
+    #[test]
+    fn omitting_text_without_hidden_or_action_is_rejected() {
+        let context =
+            ui_context::parse(&ui_context_value(), &Default::default()).unwrap();
+        assert_eq!(
+            prepare_message(None, false, Some(&context)).unwrap_err()["details"]["reason"],
+            "empty_text"
+        );
+        assert_eq!(
+            prepare_message(None, true, None).unwrap_err()["details"]["reason"],
+            "empty_text"
+        );
+        let no_action =
+            ui_context::parse(&json!({ "screen": "client", "controls": [] }), &Default::default())
+                .unwrap();
+        assert_eq!(
+            prepare_message(None, true, Some(&no_action)).unwrap_err()["details"]["reason"],
+            "empty_text"
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_context_is_rejected_before_reserving() {
+        install_store();
+        let state = test_state();
+        let session_id = "ses_context_bad";
+
+        let big = json!({
+            "screen": "client",
+            "controls": [],
+            "padding": "x".repeat(5000)
+        });
+        let error = send_message_for_state(&state, session_id, Some("你好"), false, Some(&big))
+            .await
+            .unwrap_err();
+        assert_eq!(error["code"], "INVALID_ARGUMENT");
+        assert_eq!(error["details"]["reason"], "context_too_large");
+
+        let error = send_message_for_state(
+            &state,
+            session_id,
+            Some("你好"),
+            false,
+            Some(&json!({ "screen": "nope" })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error["details"]["reason"], "invalid_context");
+
+        assert!(
+            state
+                .reserve_request(&AppState::next_request_id(), session_id)
+                .is_ok(),
+            "被拒绝的 context 不能占槽"
+        );
+        let store = crate::store::global().expect("全局库已安装");
+        let conn = store.conn();
+        assert!(crate::store::chat::messages(&conn, session_id)
+            .unwrap()
+            .is_empty());
     }
 }
 

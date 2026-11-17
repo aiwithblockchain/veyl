@@ -151,7 +151,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 22 | `default_profile_status` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
 | 23 | `default_profile_refresh` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
 | 24 | `import_seed_file` | `{ path }` | `SeedImportResult` | 保留；**目标状态：UI 不再使用**。设置页的粘贴 / 订阅 / 文件入口已改走 `node_import_text` / `node_import_url` / `node_import_file`。**当前唯一 UI 调用方：窗口级拖放**（只收种子 `.json`）；拖放**不随批 B 迁移**，等种子分发退场再定（§4.1.2、§8.3） |
-| 25 | `ai_send_message` | `{ sessionId, text, hidden? }` | `{ request_id }` | 保留（2.3 增 `hidden`，删 `attachments`） |
+| 25 | `ai_send_message` | `{ sessionId, text?, hidden?, context? }` | `{ request_id }` | 保留（2.3 增 `hidden`，删 `attachments`；2.36.0 增 `context`、`text` 可省略） |
 | 26 | `ai_cancel` | `{ requestId }` | `{ cancelled: boolean }` | 保留 |
 | 27 | `chat_history` | `{ sessionId? }` | `ChatHistory` | 保留 |
 | 28 | `chat_delete` | `{ sessionId }` | `{ ok: true }` | 保留 |
