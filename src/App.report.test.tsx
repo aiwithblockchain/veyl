@@ -121,7 +121,7 @@ describe("问题报告入口", () => {
     await waitFor(() => expect(bridge.sendMessage).toHaveBeenCalledTimes(1));
     const call = (bridge.sendMessage as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(call[1]).toContain("请帮我整理一份问题报告");
-    expect(call[2]).toEqual({ hidden: true });
+    expect(call[2]).toMatchObject({ hidden: true });
 
     await act(async () => {});
     expect(bridge.sendMessage).toHaveBeenCalledTimes(1);

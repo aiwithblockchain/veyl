@@ -191,7 +191,7 @@ describe("TUN 启动成功后的界面状态", () => {
     vi.spyOn(bridge, "runtimeStop").mockResolvedValue(undefined);
 
     const { container } = render(<App />);
-    const start = await screen.findByRole("button", { name: "启动 VPN" });
+    const start = await screen.findByRole("button", { name: "连接节点" });
     fireEvent.click(start);
 
     await waitFor(() => expect(bridge.runtimeStart).toHaveBeenCalledTimes(1));
@@ -236,7 +236,7 @@ describe("TUN 启动成功后的界面状态", () => {
     vi.spyOn(bridge, "runtimeStart").mockResolvedValue(startResult());
 
     const { container } = render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+    fireEvent.click(await screen.findByRole("button", { name: "连接节点" }));
     await waitFor(() =>
       expect(container.querySelector(".state-line__label")?.textContent).toContain("已连接"),
     );
@@ -265,7 +265,7 @@ describe("TUN 启动成功后的界面状态", () => {
         "当前是未打包的调试进程，系统不认这个后台助手；请用 bash scripts/dev/tun-dev.sh 启动打包后的 Veyl.app。代理模式与直连仍可用。",
       details: { reason: "dev_unbundled" },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+    fireEvent.click(await screen.findByRole("button", { name: "连接节点" }));
 
     await waitFor(() =>
       expect(container.querySelector(".app-toast")?.textContent).toContain("tun-dev.sh"),
@@ -279,7 +279,7 @@ describe("TUN 启动成功后的界面状态", () => {
       message: "安装后台助手失败",
       details: { reason: "helper_missing" },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+    fireEvent.click(await screen.findByRole("button", { name: "连接节点" }));
 
     await waitFor(() =>
       expect(container.querySelector(".app-toast")?.textContent).toContain("安装后台助手失败"),
@@ -293,7 +293,7 @@ describe("TUN 启动成功后的界面状态", () => {
       message: "需要你在「系统设置 › 登录项与扩展」里允许 Veyl 的后台助手",
       details: { reason: "tun_denied" },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+    fireEvent.click(await screen.findByRole("button", { name: "连接节点" }));
 
     expect(await screen.findByRole("dialog", { name: "需要允许后台助手" })).toBeTruthy();
     expect(container.querySelector(".app-toast")).toBeNull();
@@ -306,7 +306,7 @@ describe("TUN 启动成功后的界面状态", () => {
       message: "后台组件正在准备，请稍后再试",
       details: { reason: "helper_busy" },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+    fireEvent.click(await screen.findByRole("button", { name: "连接节点" }));
 
     await waitFor(() =>
       expect(container.querySelector(".app-toast")?.textContent).toContain("后台组件正在准备"),
@@ -320,7 +320,7 @@ describe("TUN 启动成功后的界面状态", () => {
       message: "后台组件文件不可用（验签未通过），请重新安装 Veyl。代理模式与直连仍可用。",
       details: { reason: "helper_file_invalid" },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+    fireEvent.click(await screen.findByRole("button", { name: "连接节点" }));
 
     await waitFor(() =>
       expect(container.querySelector(".app-toast")?.textContent).toContain("重新安装"),
@@ -334,7 +334,7 @@ describe("TUN 启动成功后的界面状态", () => {
       message: "无法建立后台组件会话租约，暂时不能接管全部流量。",
       details: { reason: "helper_lease_unavailable" },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "启动 VPN" }));
+    fireEvent.click(await screen.findByRole("button", { name: "连接节点" }));
 
     await waitFor(() =>
       expect(container.querySelector(".app-toast")?.textContent).toContain("租约"),

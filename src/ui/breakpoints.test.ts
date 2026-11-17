@@ -11,7 +11,7 @@ describe("shellLayout 断点", () => {
     expect(shellLayout(1568)).toEqual({
       mode: "wide",
       rail: 280,
-      assistant: 420,
+      assistant: 380,
       docked: true,
     });
   });
@@ -49,8 +49,8 @@ describe("shellLayout 断点", () => {
 });
 
 describe("assistantColumnWidth", () => {
-  it("宽屏打开是 420，收起缩到 56", () => {
-    expect(assistantColumnWidth(shellLayout(1568), true)).toBe(420);
+  it("宽屏打开是 380，收起缩到 56", () => {
+    expect(assistantColumnWidth(shellLayout(1568), true)).toBe(380);
     expect(assistantColumnWidth(shellLayout(1568), false)).toBe(56);
   });
 

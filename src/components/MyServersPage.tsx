@@ -23,6 +23,10 @@ interface Props {
   /** 重建成功：选中新机器并显示安装进度。 */
   onRebuilt: (serverId: string, state: MyServerState) => void;
   onRetryDetail: () => void;
+  /** 失败时交给 AI 定位（结构化失败在右侧会话里解释）。 */
+  onAiLocate?: (serverId: string) => void;
+  /** Host 回 auth_required 时拉起登录框。 */
+  onAuthRequired?: () => void;
 }
 
 /** 「我的服务器」中间区：默认创建页；选中某台时才切到详情。 */
@@ -43,6 +47,8 @@ export function MyServersPage({
   onOrdered,
   onRebuilt,
   onRetryDetail,
+  onAiLocate,
+  onAuthRequired,
 }: Props) {
   if (view === "detail" && selected) {
     return (
@@ -69,6 +75,11 @@ export function MyServersPage({
               catalog?.regions.find((region) => region.id === selected.region)?.name ??
               selected.region
             }
+            planLabel={
+              catalog?.plans.find((plan) => plan.id === selected.plan)?.label ??
+              selected.plan
+            }
+            onAiLocate={onAiLocate}
             readOnly={readOnly}
             sharedTransfer={sharedTransfer}
             onCreateAnother={onNew}
@@ -90,6 +101,7 @@ export function MyServersPage({
         onOrdered={onOrdered}
         onEnsureIdentity={onEnsureIdentity}
         onTopUp={onTopUp}
+        onAuthRequired={onAuthRequired}
       />
     </div>
   );

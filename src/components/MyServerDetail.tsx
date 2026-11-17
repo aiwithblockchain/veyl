@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { copyText } from "../ui/clipboard";
 import { ServerProgress } from "./ServerProgress";
 import {
   MY_SERVER_STATE_LABEL,
@@ -17,6 +18,10 @@ interface Props {
   regionLabel: string;
   /** 身份不可用：只读，不提供任何改动机器的操作。 */
   readOnly?: boolean;
+  /** 计划显示名（来自目录）；目录读不到时退回 slug。 */
+  planLabel: string;
+  /** 失败时把结构化失败交给 AI。 */
+  onAiLocate?: (serverId: string) => void;
   /** 回到创建页再建一台。 */
   onCreateAnother: () => void;
   /** 同账户未销毁机器 > 1：流量额度是共享池。 */
@@ -46,6 +51,8 @@ export function MyServerDetail({
   server,
   regionLabel,
   readOnly = false,
+  planLabel,
+  onAiLocate,
   onCreateAnother,
   sharedTransfer = false,
   onUseServer,
@@ -58,6 +65,7 @@ export function MyServerDetail({
   const [error, setError] = useState<string | null>(null);
   const [destroyRetryAllowed, setDestroyRetryAllowed] = useState(false);
   const [useBusy, setUseBusy] = useState(false);
+  const [ipCopy, setIpCopy] = useState<"idle" | "ok" | "failed">("idle");
   const useBusyRef = useRef(false);
 
   const rebuild = async () => {
@@ -146,6 +154,29 @@ export function MyServerDetail({
           <dd>{regionLabel}</dd>
         </div>
         <div>
+          <dt>规格</dt>
+          <dd>{planLabel}</dd>
+        </div>
+        <div>
+          <dt>IP</dt>
+          <dd className="num myservers__ip">
+            {server.ip ?? "—"}
+            {server.ip ? (
+              <button
+                type="button"
+                className="copy-btn"
+                onClick={() => {
+                  void copyText(server.ip ?? "").then((ok) =>
+                    setIpCopy(ok ? "ok" : "failed"),
+                  );
+                }}
+              >
+                {ipCopy === "ok" ? "已复制" : ipCopy === "failed" ? "复制失败" : "复制"}
+              </button>
+            ) : null}
+          </dd>
+        </div>
+        <div>
           <dt>节点</dt>
           <dd>{server.node_id ? "已就绪" : "未就绪"}</dd>
         </div>
@@ -177,6 +208,15 @@ export function MyServerDetail({
       {server.failure ? (
         <div className="myservers__failure" role="alert">
           <p>{server.failure.message}</p>
+          {onAiLocate ? (
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={() => onAiLocate(server.server_id)}
+            >
+              AI 定位
+            </button>
+          ) : null}
         </div>
       ) : null}
 
@@ -187,16 +227,17 @@ export function MyServerDetail({
       ) : null}
 
       <div className="myservers__actions">
-        {server.state === "error" ? (
+        {server.state === "error" && !server.failure && onAiLocate ? (
           <button
             type="button"
             className="btn btn--ghost"
-            disabled={locked}
-            onClick={() => void rebuild()}
+            onClick={() => onAiLocate(server.server_id)}
           >
-            重新建一台
+            AI 定位
           </button>
         ) : null}
+        {/* 重建端点当前不可用（rebuild_not_supported）：入口先隐藏，保留实现等后端。 */}
+        {void rebuild}
         {ready ? (
           <button
             type="button"
@@ -219,7 +260,7 @@ export function MyServerDetail({
             <p>
               {isProvisioning(server.state)
                 ? "取消创建并销毁这台服务器？正在进行的安装会中断。"
-                : "销毁后这台服务器和它的节点都不能再用。"}
+                : "销毁后不再产生新费用。未用完的整天退回余额，当天已扣不退。配置里会少一个节点。"}
             </p>
             <div className="myservers__actions">
               <button

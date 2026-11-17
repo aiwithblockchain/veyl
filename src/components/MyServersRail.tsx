@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { MyServer, MyServerAccount, MyServerWallet } from "../agent/bridge";
 import type { LogoutResult } from "../myservers/useMyServers";
-import { serverRailState, stateTone } from "../myservers/labels";
+import { formatDailyPrice, serverRailState, stateTone } from "../myservers/labels";
 import { MyServersAccount } from "./MyServersAccount";
 import { IconClose } from "./icons";
 
@@ -49,16 +49,21 @@ function ServerRow({
   return (
     <button
       type="button"
-      className={`config ${selected ? "is-active" : ""}`}
+      className={`rail-server ${selected ? "is-active" : ""}`}
       aria-current={selected ? "true" : undefined}
       aria-disabled={disabled || undefined}
       disabled={disabled}
       onClick={() => onSelect(server.server_id)}
     >
-      <span className="config__name" title={server.name}>
-        <span className="config__name-text">{server.name}</span>
+      <span className="rail-server__head">
+        <span className="rail-server__name" title={server.name}>
+          {server.name}
+        </span>
+        <span className="rail-server__price num">
+          每天 {formatDailyPrice(server.daily_price_cents)}
+        </span>
       </span>
-      <span className="config__meta myservers__rail-state">
+      <span className="rail-server__state myservers__rail-state">
         <span className={`led is-${stateTone(server.state)}`} aria-hidden />
         {serverRailState(server.state)}
       </span>
@@ -135,9 +140,9 @@ export function MyServersRail({
       ) : servers.length === 0 ? (
         <p className="rail__empty-text myservers__rail-hint">还没有服务器</p>
       ) : (
-        <ul className="configs">
+        <ul className="rail-servers">
           {servers.map((server) => (
-            <li key={server.server_id} className="configs__row">
+            <li key={server.server_id} className="rail-servers__item">
               <ServerRow
                 server={server}
                 selected={server.server_id === selectedId}
@@ -187,8 +192,8 @@ export function MyServersRail({
             <button
               type="button"
               className="icon-btn rail__add"
-              aria-label="新建服务器"
-              title="新建服务器"
+              aria-label="新建节点"
+              title="新建节点"
               disabled={disabled}
               onClick={onNew}
             >
@@ -279,7 +284,7 @@ export function MyServersRail({
                 onNew();
               }}
             >
-              新建服务器
+              新建节点
             </button>
             {list}
           </div>

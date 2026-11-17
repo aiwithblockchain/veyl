@@ -244,6 +244,7 @@ function Harness({
         onOrdered={state.ordered}
         onRebuilt={state.rebuilt}
         onRetryDetail={state.retryDetail}
+        onAuthRequired={state.openLogin}
       />
       {state.loginOpen ? (
         <MyServerLogin
@@ -297,7 +298,7 @@ describe("我的服务器 destination", () => {
     const status = await screen.findByRole("button", { name: "登录" });
     expect(await screen.findByText("登录后查看你的服务器")).toBeTruthy();
     expect(
-      await screen.findByRole("heading", { name: "新建服务器" }),
+      await screen.findByRole("heading", { name: "新建节点" }),
     ).toBeTruthy();
 
     fireEvent.click(status);
@@ -309,7 +310,7 @@ describe("我的服务器 destination", () => {
   it("中间默认是创建页，展示目录价格", async () => {
     renderHarness(makeBridge([]));
 
-    expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "新建节点" })).toBeTruthy();
     expect(await screen.findByRole("radiogroup", { name: "服务器类型" })).toBeTruthy();
     expect(document.querySelector(".wizard-foot__price")?.textContent).toContain(
       "每天 $0.30 · 约 $9/月",
@@ -326,7 +327,7 @@ describe("我的服务器 destination", () => {
       "连不上服务器，稍后再试",
     );
     expect(document.querySelectorAll(".rail__placeholder")).toHaveLength(3);
-    expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "新建节点" })).toBeTruthy();
     const retry = screen.getByRole("button", { name: "重试" });
 
     bridge.myServerList.mockResolvedValueOnce({ servers: SERVERS });
@@ -338,7 +339,7 @@ describe("我的服务器 destination", () => {
     expect(screen.getByText("已重新读取服务器列表。")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(screen.getByRole("heading", { name: "新建服务器" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "新建节点" })).toBeTruthy();
   });
 
   it("未登录：打开时不请求列表，登录成功后回到列表", async () => {
@@ -348,7 +349,7 @@ describe("我的服务器 destination", () => {
 
     expect(await screen.findByText("登录后查看你的服务器")).toBeTruthy();
     expect(await screen.findByRole("button", { name: "登录" })).toBeTruthy();
-    expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "新建节点" })).toBeTruthy();
     expect(
       await screen.findByRole("radiogroup", { name: "服务器类型" }),
     ).toBeTruthy();
@@ -392,7 +393,7 @@ describe("我的服务器 destination", () => {
     );
     renderHarness(bridge);
 
-    fireEvent.click(await screen.findByRole("button", { name: "创建服务器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
     expect(await screen.findByRole("button", { name: "正在登录…" })).toBeTruthy();
     expect(bridge.myServerCreate).not.toHaveBeenCalled();
 
@@ -419,7 +420,7 @@ describe("我的服务器 destination", () => {
     expect(
       screen.getByRole("button", { name: /新加坡 1 · DigitalOcean/ }).getAttribute("aria-current"),
     ).toBeNull();
-    expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "新建节点" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /新加坡 1 · DigitalOcean/ }));
     expect(await screen.findByText("已就绪")).toBeTruthy();
@@ -507,9 +508,9 @@ describe("我的服务器 destination", () => {
     });
     renderHarness(bridge);
 
-    fireEvent.click(await screen.findByRole("button", { name: "创建服务器" }));
-    await screen.findByText("可以点「创建服务器」再试一次。");
-    fireEvent.click(screen.getByRole("button", { name: "创建服务器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
+    await screen.findByText("可以点「创建」再试一次。");
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
     await waitFor(() => expect(keys).toHaveLength(2));
     expect(keys[0]).toBe(keys[1]);
 
@@ -522,7 +523,7 @@ describe("我的服务器 destination", () => {
         retryable: false,
       };
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建服务器" }));
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
     await waitFor(() => expect(keys).toHaveLength(3));
     expect(keys[2]).toBe(keys[1]);
 
@@ -535,7 +536,7 @@ describe("我的服务器 destination", () => {
         retryable: true,
       };
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建服务器" }));
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
     await waitFor(() => expect(keys).toHaveLength(4));
     expect(keys[3]).not.toBe(keys[2]);
   });
@@ -554,12 +555,12 @@ describe("我的服务器 destination", () => {
     });
     renderHarness(bridge);
 
-    fireEvent.click(await screen.findByRole("button", { name: "创建服务器" }));
-    await screen.findByText("可以点「创建服务器」再试一次。");
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
+    await screen.findByText("可以点「创建」再试一次。");
 
     // 超时后换了地区：同一个键配不同请求体，控制面会直接拒绝。
     fireEvent.click(screen.getByRole("radio", { name: "纽约 1" }));
-    fireEvent.click(screen.getByRole("button", { name: "创建服务器" }));
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
     await waitFor(() => expect(keys).toHaveLength(2));
     expect(keys[1]).not.toBe(keys[0]);
   });
@@ -573,25 +574,11 @@ describe("我的服务器 destination", () => {
     expect(screen.getByRole("button", { name: "销毁" })).toBeTruthy();
   });
 
-  it("出错：重新建一台后选中新机器并显示进度", async () => {
-    const bridge = makeBridge();
-    bridge.myServerGet.mockImplementation(async (serverId: string) =>
-      serverId === "srv_new"
-        ? server({ server_id: "srv_new", state: "creating", node_id: null })
-        : (SERVERS.find((item) => item.server_id === serverId) ?? SERVERS[0]),
-    );
-    renderHarness(bridge);
-
+  it("出错时不显示重建入口（端点未支持）", async () => {
+    renderHarness(makeBridge());
     fireEvent.click(await screen.findByRole("button", { name: /法兰克福 1 · DigitalOcean/ }));
     expect(await screen.findByText(/服务端没装好/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "重新建一台" }));
-    await waitFor(() => expect(bridge.myServerRebuild).toHaveBeenCalledWith("srv_3", true));
-
-    expect(
-      await screen.findByRole("progressbar", { name: "正在建机器" }),
-    ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "销毁" })).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "新建服务器" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "重新建一台" })).toBeNull();
   });
 
   it("创建中销毁：确认文案说明会中断安装", async () => {
@@ -612,7 +599,7 @@ describe("我的服务器 destination", () => {
     fireEvent.click(await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }));
     await screen.findByText("已就绪");
     fireEvent.click(screen.getByRole("button", { name: "销毁" }));
-    expect(screen.getByText("销毁后这台服务器和它的节点都不能再用。")).toBeTruthy();
+    expect(screen.getByText(/销毁后不再产生新费用。未用完的整天退回余额/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "确认销毁" }));
     await waitFor(() =>
       expect(bridge.myServerDestroy).toHaveBeenCalledWith("srv_1", true),
@@ -626,8 +613,8 @@ describe("我的服务器 destination", () => {
     expect(
       screen.getByRole("button", { name: /me@example.com/ }),
     ).toBeTruthy();
-    expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "创建服务器" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "新建节点" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "创建" })).toBeTruthy();
     expect(document.querySelectorAll(".myservers .btn--primary")).toHaveLength(1);
   });
 
@@ -637,17 +624,17 @@ describe("我的服务器 destination", () => {
     fireEvent.click(await screen.findByRole("button", { name: /法兰克福 1 · DigitalOcean/ }));
     expect(await screen.findByText(/服务端没装好/)).toBeTruthy();
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "新建节点" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /法兰克福 1 · DigitalOcean/ }));
     rerenderWithSignal(1);
-    expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "新建节点" })).toBeTruthy();
   });
 
   it("创建页默认就在：三区块、默认中档、底部汇总与唯一主按钮", async () => {
     renderHarness(makeBridge());
 
-    expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "新建节点" })).toBeTruthy();
 
     expect(screen.getByRole("radiogroup", { name: "地区" })).toBeTruthy();
     expect(screen.getByText("亚洲")).toBeTruthy();
@@ -675,7 +662,7 @@ describe("我的服务器 destination", () => {
       "每天 $0.30 · 约 $9/月",
     );
     expect(document.querySelectorAll(".myservers .btn--primary")).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "创建服务器" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "创建" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "下一步" })).toBeNull();
     expect(screen.queryByText("确认订单")).toBeNull();
     expect(screen.queryByRole("button", { name: "返回" })).toBeNull();
@@ -684,7 +671,7 @@ describe("我的服务器 destination", () => {
   it("服务器类型卡 ↑↓ 切换选中，汇总跟着变", async () => {
     renderHarness(makeBridge());
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建服务器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "新建节点" }));
     const group = await screen.findByRole("radiogroup", { name: "服务器类型" });
     const oneGb = within(group).getByRole("radio", {
       name: /1 GB/,
@@ -705,14 +692,14 @@ describe("我的服务器 destination", () => {
     ).toBe("true");
   });
 
-  it("创建服务器按所选地区与档位下单", async () => {
+  it("创建按所选地区与档位下单", async () => {
     const bridge = makeBridge();
     renderHarness(bridge);
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建服务器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "新建节点" }));
     fireEvent.click(await screen.findByRole("radio", { name: "纽约 1" }));
     fireEvent.click(await screen.findByRole("radio", { name: /2 GB/ }));
-    fireEvent.click(screen.getByRole("button", { name: "创建服务器" }));
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
 
     await waitFor(() =>
       expect(bridge.myServerCreate).toHaveBeenCalledWith({
@@ -722,6 +709,21 @@ describe("我的服务器 destination", () => {
       }),
     );
     expect(bridge.myServerCheckout).toHaveBeenCalledWith("ord_1");
+  });
+
+  it("Host 回 auth_required 时拉起登录框，不当作普通错误", async () => {
+    const bridge = makeBridge();
+    bridge.myServerCreate.mockRejectedValueOnce({
+      code: "PRECONDITION_FAILED",
+      message: "需要先登录。",
+      details: { reason: "auth_required" },
+      retryable: true,
+    });
+    renderHarness(bridge);
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
+    expect(await screen.findByRole("dialog", { name: "登录我的服务器" })).toBeTruthy();
+    expect(await screen.findByText("登录已过期。重新登录后再试。")).toBeTruthy();
   });
 
   it("余额不足：显示还差多少，点「去充值」打开充值档位", async () => {
@@ -734,20 +736,30 @@ describe("我的服务器 destination", () => {
     });
     renderHarness(bridge);
 
-    fireEvent.click(await screen.findByRole("button", { name: "创建服务器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
     expect(await screen.findByText("余额不足，还差 $5.20。")).toBeTruthy();
-    expect(screen.getByText("充值后回到这里，再点「创建服务器」。")).toBeTruthy();
+    expect(screen.getByText("充值后回到这里，再点「创建」。")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "去充值" }));
     expect(await screen.findByRole("dialog", { name: "充值" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "$10.00" })).toBeTruthy();
   });
 
+  it("创建前先查余额：不够就不下单", async () => {
+    const bridge = makeBridge();
+    bridge.myServerWallet.mockResolvedValue({ ...WALLET, balance_cents: 10 });
+    renderHarness(bridge);
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
+    expect(await screen.findByText(/余额不足，还差/)).toBeTruthy();
+    expect(bridge.myServerCreate).not.toHaveBeenCalled();
+  });
+
   it("扣费成功：显示扣了多少、还剩多少", async () => {
     const bridge = makeBridge();
     renderHarness(bridge);
 
-    fireEvent.click(await screen.findByRole("button", { name: "创建服务器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
     expect(await screen.findByText("已扣 $0.30，余额 $7.70。")).toBeTruthy();
   });
 
@@ -809,10 +821,10 @@ describe("我的服务器 destination", () => {
     });
     renderHarness(bridge);
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建服务器" }));
-    fireEvent.click(await screen.findByRole("button", { name: "创建服务器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "新建节点" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
     expect(
-      await screen.findByText("可以点「创建服务器」再试一次。"),
+      await screen.findByText("可以点「创建」再试一次。"),
     ).toBeTruthy();
 
     bridge.myServerCreate.mockRejectedValueOnce({
@@ -821,9 +833,9 @@ describe("我的服务器 destination", () => {
       details: { reason: "region_unavailable" },
       retryable: false,
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建服务器" }));
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
     expect(
-      await screen.findByText("换一个地区或档位，再点「创建服务器」。"),
+      await screen.findByText("换一个地区或档位，再点「创建」。"),
     ).toBeTruthy();
   });
 
@@ -844,10 +856,10 @@ describe("我的服务器 destination", () => {
   it("创建页 Esc 不弹确认、不丢选择", async () => {
     renderHarness(makeBridge());
 
-    expect(await screen.findByRole("heading", { name: "新建服务器" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "新建节点" })).toBeTruthy();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByText(/还没下单/)).toBeNull();
-    expect(screen.getByRole("heading", { name: "新建服务器" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "新建节点" })).toBeTruthy();
   });
 
   it("用来建配置把 node_id 交回新建流程", async () => {

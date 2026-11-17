@@ -22,6 +22,28 @@ interface Props {
   onEnsureIdentity: () => Promise<boolean>;
   /** 余额不足时的唯一去处。 */
   onTopUp: () => void;
+  /** 次级入口：让 AI 帮我选。 */
+  onAskAi?: () => void;
+  /** 创建失败后带服务器 id 让 AI 定位。 */
+  onAiLocate?: (serverId: string) => void;
+  /** Host 回 auth_required 时拉起登录框（不能只看本地 account）。 */
+  onAuthRequired?: () => void;
+  /** 地区和档位选择变化：用于上报 last_action。 */
+  onSelect?: (kind: "region" | "plan", id: string) => void;
+  /** AI 代选后同步给 Host 保存；不算用户动作。 */
+  onSelectionApplied?: (selection: { region: string; plan: string }) => void;
+  /** 从新建节点舞台返回；身份/创建过程中锁住。 */
+  onBack?: () => void;
+  /** 返回后再进来时恢复上次选择。 */
+  initialSelection?: { region?: string | null; plan?: string | null } | null;
+  /** 创建中由 Host 忽略 stage-select；舞台把 busy 报上去。 */
+  onBusyChange?: (busy: boolean) => void;
+  /** AI 选好的地区/规格（events.md §4.26）；null = 这次没请求，不覆盖。 */
+  aiSelection?: {
+    region: string | null;
+    plan: string | null;
+    nonce: number;
+  } | null;
 }
 
 interface WizardError {
@@ -132,16 +154,33 @@ export function MyServerWizard({
   onOrdered,
   onEnsureIdentity,
   onTopUp,
+  onAskAi,
+  onAiLocate,
+  onSelect,
+  onSelectionApplied,
+  onBusyChange,
+  onBack,
+  initialSelection = null,
+  aiSelection = null,
+  onAuthRequired,
 }: Props) {
   const [fetched, setFetched] = useState<MyServerCatalog | null>(null);
   const [fetchState, setFetchState] = useState<"loading" | "ready" | "failed">(
     catalog ? "ready" : "loading",
   );
-  const [regionId, setRegionId] = useState<string | null>(null);
-  const [planId, setPlanId] = useState<string | null>(null);
+  const [regionId, setRegionId] = useState<string | null>(
+    initialSelection?.region ?? null,
+  );
+  const [planId, setPlanId] = useState<string | null>(
+    initialSelection?.plan ?? null,
+  );
   const [phase, setPhase] = useState<"identity" | "creating" | null>(null);
-  const busy = phase !== null;
+  /** 点下「创建」就锁住返回，不等身份校验开始。 */
+  const [submitting, setSubmitting] = useState(false);
+  const busy = phase !== null || submitting;
   const [error, setError] = useState<WizardError | null>(null);
+  /** 订单已经建出来但后续失败时记下服务器 id，AI 定位要用。 */
+  const [failedServerId, setFailedServerId] = useState<string | null>(null);
   const [charged, setCharged] = useState<{
     chargedCents: number;
     balanceAfterCents: number;
@@ -149,6 +188,9 @@ export function MyServerWizard({
   // 同一组选择重试复用键：超时/网络失败时结果未知，换键会建第二台。
   // 键和地区+套餐绑定，换了选择必须换键，否则控制面按「同键不同请求」拒绝。
   const idempotencyKey = useRef({ key: "", region: "", plan: "" });
+  const rootRef = useRef<HTMLDivElement>(null);
+  const highlightTimer = useRef<number | null>(null);
+  const [pointed, setPointed] = useState(false);
 
   const loadCatalog = useCallback(async () => {
     setFetchState("loading");
@@ -184,6 +226,18 @@ export function MyServerWizard({
     [regions],
   );
 
+  // 舞台开着时把 busy 报给 Host：创建中收到 stage-select 要整条忽略。
+  useEffect(() => {
+    onBusyChange?.(busy);
+  }, [busy, onBusyChange]);
+
+  useEffect(
+    () => () => {
+      if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
+    },
+    [],
+  );
+
   const currentRegion =
     regions.find((region) => region.id === regionId) ??
     groups[0]?.regions[0] ??
@@ -191,10 +245,67 @@ export function MyServerWizard({
   const currentPlan =
     plans.find((plan) => plan.id === planId) ?? defaultPlan(plans);
 
+  const consumedAiNonce = useRef<number | null>(null);
+  // AI 选好地区/规格：null 不覆盖；同值不高亮；正在创建时整条忽略。
+  useEffect(() => {
+    if (!aiSelection) return;
+    if (consumedAiNonce.current === aiSelection.nonce) return;
+    consumedAiNonce.current = aiSelection.nonce;
+    if (busy) return;
+    const nextRegion =
+      aiSelection.region !== null &&
+      regions.some((region) => region.id === aiSelection.region)
+        ? aiSelection.region
+        : null;
+    const nextPlan =
+      aiSelection.plan !== null &&
+      plans.some((plan) => plan.id === aiSelection.plan)
+        ? aiSelection.plan
+        : null;
+    if (nextRegion === null && nextPlan === null) return;
+    const mergedRegion = nextRegion ?? currentRegion?.id ?? null;
+    const mergedPlan = nextPlan ?? currentPlan?.id ?? null;
+    const changed =
+      (nextRegion !== null && nextRegion !== currentRegion?.id) ||
+      (nextPlan !== null && nextPlan !== currentPlan?.id);
+    if (nextRegion !== null) setRegionId(nextRegion);
+    if (nextPlan !== null) setPlanId(nextPlan);
+    if (mergedRegion && mergedPlan) {
+      onSelectionApplied?.({ region: mergedRegion, plan: mergedPlan });
+    }
+    // 成功不等于一定高亮：只有选择真的变了才滚过去。
+    if (!changed) return;
+    setPointed(true);
+    rootRef.current?.scrollIntoView?.({ block: "center" });
+    if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
+    highlightTimer.current = window.setTimeout(() => {
+      highlightTimer.current = null;
+      setPointed(false);
+    }, 1500);
+  }, [aiSelection?.nonce, busy, regions, plans, regionId, planId]);
+
   const placeOrder = async () => {
     if (!currentPlan || !currentRegion || busy) return;
+    setSubmitting(true);
     setError(null);
     setCharged(null);
+    setFailedServerId(null);
+    // 创建前先看余额：不够就不下单，直接在原地提示。
+    try {
+      const wallet = await bridge.myServerWallet();
+      const shortfall = currentPlan.daily_price_cents - wallet.balance_cents;
+      if (shortfall > 0) {
+        setError({
+          message: `余额不足，还差 ${formatUsdCents(shortfall)}。`,
+          retryable: true,
+          shortfallCents: shortfall,
+        });
+        setSubmitting(false);
+        return;
+      }
+    } catch {
+      // 读不到余额不拦，下单会再校验一次。
+    }
     setPhase("identity");
     try {
       const ready = await onEnsureIdentity();
@@ -203,6 +314,7 @@ export function MyServerWizard({
           message: "先登录，才能买服务器。",
           retryable: true,
         });
+        onAuthRequired?.();
         return;
       }
       setPhase("creating");
@@ -219,7 +331,9 @@ export function MyServerWizard({
         plan: chosen.plan,
         idempotencyKey: idempotencyKey.current.key,
       });
+      setFailedServerId(created.server_id);
       const charge = await bridge.myServerCheckout(created.order_id);
+      setFailedServerId(null);
       setCharged({
         chargedCents: charge.charged_cents,
         balanceAfterCents: charge.balance_after_cents,
@@ -235,7 +349,16 @@ export function MyServerWizard({
         typeof shortfallRaw === "number" && Number.isFinite(shortfallRaw)
           ? Math.max(0, Math.trunc(shortfallRaw))
           : 0;
-      if (reason === "insufficient_balance") {
+      if (
+        reason === "auth_required" ||
+        reason === "token_invalid" ||
+        reason === "device_identity_lost" ||
+        reason === "device_missing" ||
+        reason === "device_mismatch"
+      ) {
+        setError({ message: "登录已过期。重新登录后再试。", retryable: true });
+        onAuthRequired?.();
+      } else if (reason === "insufficient_balance") {
         setError({
           message:
             shortfall > 0
@@ -250,14 +373,27 @@ export function MyServerWizard({
       if (!shouldKeepIdempotencyKey(err)) idempotencyKey.current = { key: "", region: "", plan: "" };
     } finally {
       setPhase(null);
+      setSubmitting(false);
     }
   };
 
   if (unreadable) {
     const pending = fetchState === "loading";
     return (
-      <div className="myservers__wizard">
-        <h4 className="myservers__wizard-title">新建服务器</h4>
+      <div ref={rootRef} className={`myservers__wizard ${pointed ? "is-pointed" : ""}`}>
+        <div className="myservers__wizard-head">
+          {onBack ? (
+            <button
+              type="button"
+              className="myservers__wizard-back"
+              onClick={onBack}
+              disabled={busy}
+            >
+              返回
+            </button>
+          ) : null}
+          <h4 className="myservers__wizard-title">新建节点</h4>
+        </div>
         {pending ? (
           <p className="myservers__hint" role="status">
             正在读取可选的地区…
@@ -283,8 +419,20 @@ export function MyServerWizard({
   }
 
   return (
-    <div className="myservers__wizard">
-      <h4 className="myservers__wizard-title">新建服务器</h4>
+    <div ref={rootRef} className={`myservers__wizard ${pointed ? "is-pointed" : ""}`}>
+      <div className="myservers__wizard-head">
+        {onBack ? (
+          <button
+            type="button"
+            className="myservers__wizard-back"
+            onClick={onBack}
+            disabled={busy}
+          >
+            返回
+          </button>
+        ) : null}
+        <h4 className="myservers__wizard-title">新建节点</h4>
+      </div>
 
       <section className="wizard-block">
         <p className="wizard-block__title">地区</p>
@@ -309,11 +457,15 @@ export function MyServerWizard({
                       tabIndex={selected ? 0 : -1}
                       className={`myservers__region ${selected ? "is-selected" : ""}`}
                       disabled={busy}
-                      onClick={() => setRegionId(region.id)}
+                      onClick={() => {
+                        setRegionId(region.id);
+                        onSelect?.("region", region.id);
+                      }}
                       onKeyDown={(event) => {
                         if (event.key === " " || event.key === "Enter") {
                           event.preventDefault();
                           setRegionId(region.id);
+                          onSelect?.("region", region.id);
                         }
                       }}
                     >
@@ -347,11 +499,15 @@ export function MyServerWizard({
                 tabIndex={selected ? 0 : -1}
                 className={`wizard-plan ${selected ? "is-selected" : ""}`}
                 disabled={busy}
-                onClick={() => setPlanId(plan.id)}
+                onClick={() => {
+                  setPlanId(plan.id);
+                  onSelect?.("plan", plan.id);
+                }}
                 onKeyDown={(event) => {
                   if (event.key === " " || event.key === "Enter") {
                     event.preventDefault();
                     setPlanId(plan.id);
+                    onSelect?.("plan", plan.id);
                   }
                 }}
               >
@@ -390,15 +546,26 @@ export function MyServerWizard({
           </p>
           <p className="myservers__hint">
             {error.shortfallCents !== undefined
-              ? "充值后回到这里，再点「创建服务器」。"
+              ? "充值后回到这里，再点「创建」。"
               : error.retryable
-                ? "可以点「创建服务器」再试一次。"
-                : "换一个地区或档位，再点「创建服务器」。"}
+                ? "可以点「创建」再试一次。"
+                : "换一个地区或档位，再点「创建」。"}
           </p>
           {error.shortfallCents !== undefined ? (
             <div className="myservers__actions">
               <button type="button" className="btn btn--ghost" onClick={onTopUp}>
                 去充值
+              </button>
+            </div>
+          ) : null}
+          {failedServerId && onAiLocate ? (
+            <div className="myservers__actions">
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => onAiLocate(failedServerId)}
+              >
+                AI 定位
               </button>
             </div>
           ) : null}
@@ -431,8 +598,15 @@ export function MyServerWizard({
             ? "正在登录…"
             : phase === "creating"
               ? "正在创建…"
-              : "创建服务器"}
-        </button>      </div>
+              : "创建"}
+        </button>
+      </div>
+
+      {onAskAi ? (
+        <button type="button" className="settings-link wizard-ask-ai" onClick={onAskAi}>
+          让 AI 帮我选
+        </button>
+      ) : null}
     </div>
   );
 }

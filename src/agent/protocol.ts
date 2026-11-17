@@ -6,7 +6,7 @@
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.15.0" as const;
+export const CONTRACT_VERSION = "2.16.2" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -40,6 +40,7 @@ export const AGENT_EVENTS = {
   myServerOrderChanged: "my-server-order-changed",
   trialExpired: "trial-expired",
   settingsPoint: "settings-point",
+  stageSelect: "stage-select",
 } as const;
 
 export type AgentEventName = (typeof AGENT_EVENTS)[keyof typeof AGENT_EVENTS];
@@ -80,6 +81,7 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.myServerOrderChanged,
   AGENT_EVENTS.trialExpired,
   AGENT_EVENTS.settingsPoint,
+  AGENT_EVENTS.stageSelect,
 ] as const;
 
 /* ------------------------------------------------------------------ */
@@ -424,6 +426,16 @@ export interface TrialExpiredPayload {
   emitted_at: string;
 }
 
+/** AI 把地区 / 规格选进新建节点舞台（events.md §4.26）；只改选择。 */
+export interface StageSelectPayload {
+  contract_version: typeof CONTRACT_VERSION;
+  screen: "new_node";
+  /** null = 这次没请求，不是清空；合并时只覆盖非 null 字段。 */
+  region: string | null;
+  plan: string | null;
+  emitted_at: string;
+}
+
 /** AI 指路：打开设置并高亮某一段的某一行（events.md §4.25）。 */
 export interface SettingsPointPayload {
   contract_version: typeof CONTRACT_VERSION;
@@ -618,13 +630,13 @@ export interface IssueChangedPayload {
   emitted_at: string;
 }
 
+/** AI 能写进布局的块（events.md §4.13）：issue_card 是本地叠加层，不在词汇表里。 */
 export type BlockType =
   | "empty_hint"
   | "proxy_card"
   | "source_choice"
-  | "reachability"
-  | "issue_card"
-  | "update_hint";
+  | "update_hint"
+  | "action_card";
 
 export interface Layout {
   version: 1;
@@ -786,6 +798,7 @@ export interface AgentEventMap {
   [AGENT_EVENTS.myServerOrderChanged]: MyServerOrderChangedPayload;
   [AGENT_EVENTS.trialExpired]: TrialExpiredPayload;
   [AGENT_EVENTS.settingsPoint]: SettingsPointPayload;
+  [AGENT_EVENTS.stageSelect]: StageSelectPayload;
 }
 
 export type AgentEvent = {

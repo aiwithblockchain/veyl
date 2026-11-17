@@ -166,7 +166,7 @@ function emit(event: AgentEvent) {
 }
 
 async function connect(container: HTMLElement) {
-  const start = await screen.findByRole("button", { name: "启动 VPN" });
+  const start = await screen.findByRole("button", { name: "连接节点" });
   fireEvent.click(start);
   await waitFor(() =>
     expect(container.querySelector(".state-line__label")?.textContent).toContain("已连接"),
@@ -181,7 +181,7 @@ describe("断开成功后的界面状态", () => {
     const { container } = render(<App />);
     await connect(container);
 
-    fireEvent.click(screen.getByRole("button", { name: "断开 VPN" }));
+    fireEvent.click(screen.getByRole("button", { name: "断开连接" }));
 
     await waitFor(() =>
       expect(container.querySelector(".state-word")?.textContent).toContain("未连接"),
@@ -198,7 +198,7 @@ describe("断开成功后的界面状态", () => {
 
     // 后端收尾滞后：断开后的快照仍是 running。
     vi.mocked(bridge.getRuntimeSnapshot).mockResolvedValue(makeSnapshot("running"));
-    fireEvent.click(screen.getByRole("button", { name: "断开 VPN" }));
+    fireEvent.click(screen.getByRole("button", { name: "断开连接" }));
 
     await waitFor(() =>
       expect(container.querySelector(".state-word")?.textContent).toContain("未连接"),
@@ -217,7 +217,7 @@ describe("断开成功后的界面状态", () => {
     const { container } = render(<App />);
     await connect(container);
 
-    fireEvent.click(screen.getByRole("button", { name: "断开 VPN" }));
+    fireEvent.click(screen.getByRole("button", { name: "断开连接" }));
     await waitFor(() =>
       expect(container.querySelector(".connection-overlay")?.textContent).toContain(
         "正在断开连接",
@@ -260,7 +260,7 @@ describe("断开成功后的界面状态", () => {
     const { container } = render(<App />);
     await connect(container);
 
-    fireEvent.click(screen.getByRole("button", { name: "断开 VPN" }));
+    fireEvent.click(screen.getByRole("button", { name: "断开连接" }));
 
     await waitFor(() =>
       expect(container.querySelector(".app-toast")?.textContent).toContain("断开失败"),

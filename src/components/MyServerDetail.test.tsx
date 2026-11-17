@@ -32,6 +32,7 @@ function renderDetail(
   onGone = vi.fn(),
   onUseServer: (server: MyServer) => void | Promise<void> = vi.fn(),
   sharedTransfer = false,
+  onAiLocate?: (serverId: string) => void,
 ) {
   const destroy = vi.fn(async (id: string) =>
     server({ server_id: id, state: "destroyed" }),
@@ -42,6 +43,8 @@ function renderDetail(
       bridge={{ myServerDestroy: destroy } as unknown as AgentBridge}
       server={server(over)}
       regionLabel="新加坡 1"
+      planLabel="1 核 · 1 GB"
+      onAiLocate={onAiLocate}
       sharedTransfer={sharedTransfer}
       onCreateAnother={onCreateAnother}
       onUseServer={onUseServer}
@@ -185,5 +188,29 @@ describe("服务器详情", () => {
       fireEvent.click(screen.getByRole("button", { name: "确认销毁" }));
     });
     expect(destroy).toHaveBeenCalledWith("srv_1", true);
+  });
+
+  it("失败态给 AI 定位；事实行有规格与可复制 IP；销毁文案对齐", async () => {
+    const onAiLocate = vi.fn();
+    renderDetail(
+      {
+        state: "error",
+        failure: { stage: "installing", code: "install_failed", message: "装环境失败。", retryable: true },
+      },
+      vi.fn(),
+      vi.fn(),
+      false,
+      onAiLocate,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "AI 定位" }));
+    expect(onAiLocate).toHaveBeenCalledWith("srv_1");
+    expect(screen.getByText("1 核 · 1 GB")).toBeTruthy();
+    expect(screen.getByText("45.76.20.100")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "销毁" }));
+    expect(
+      screen.getByText(/销毁后不再产生新费用。未用完的整天退回余额/),
+    ).toBeTruthy();
   });
 });

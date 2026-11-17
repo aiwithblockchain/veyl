@@ -19,7 +19,7 @@ export const DRAWER_RAIL_WIDTH = 72;
 
 export function shellLayout(width: number): ShellLayout {
   if (width >= 1440) {
-    return { mode: "wide", rail: 280, assistant: 420, docked: true };
+    return { mode: "wide", rail: 280, assistant: 380, docked: true };
   }
   if (width >= 1200) {
     return { mode: "compact", rail: 260, assistant: 380, docked: true };

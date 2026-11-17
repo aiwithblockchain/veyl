@@ -39,7 +39,7 @@ describe("usePaneLayout", () => {
   it("默认宽度来自断点，键盘第一次调整后写成用户偏好", () => {
     const { result } = setup();
     expect(result.current.rail).toBe(280);
-    expect(result.current.assistant).toBe(420);
+    expect(result.current.assistant).toBe(380);
 
     act(() => result.current.railHandlers.onKeyDown(key("ArrowRight")));
     expect(result.current.rail).toBe(296);
@@ -74,10 +74,10 @@ describe("usePaneLayout", () => {
   it("助手向左拖（ArrowLeft）变宽", () => {
     const { result } = setup();
     act(() => result.current.assistantHandlers.onKeyDown(key("ArrowLeft")));
-    expect(result.current.assistant).toBe(436);
+    expect(result.current.assistant).toBe(396);
     act(() => result.current.assistantHandlers.onKeyDown(key("ArrowLeft", true)));
-    expect(result.current.assistant).toBe(500);
-    expect(localStorage.getItem(ASSISTANT_WIDTH_KEY)).toBe("500");
+    expect(result.current.assistant).toBe(460);
+    expect(localStorage.getItem(ASSISTANT_WIDTH_KEY)).toBe("460");
   });
 
   it("关闭再打开，助手回到上次宽度", () => {

@@ -1,10 +1,39 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, DeepSeekKeyState } from "../agent/bridge";
 import { Onboarding } from "./Onboarding";
 
 afterEach(cleanup);
+
+function stubMatchMedia(matches: boolean): () => void {
+  const original = window.matchMedia;
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: vi.fn((query: string) => ({
+      matches,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+  return () => {
+    if (original) {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        writable: true,
+        value: original,
+      });
+    } else {
+      delete (window as unknown as Record<string, unknown>).matchMedia;
+    }
+  };
+}
 
 function makeBridge(): AgentBridge {
   return {
@@ -41,6 +70,92 @@ describe("Onboarding 原生表单与输入法", () => {
 
     expect(fireEvent.keyDown(input, { key: "Enter", keyCode: 229 })).toBe(false);
     expect(fireEvent.keyDown(input, { key: "Enter" })).toBe(true);
+  });
+
+  it("连接中的三点由真实请求决定，不会按固定时长自行结束", async () => {
+    vi.useFakeTimers();
+    let release: (state: DeepSeekKeyState) => void = () => {};
+    const bridge = makeBridge();
+    bridge.saveDeepSeekKey = vi.fn(
+      () =>
+        new Promise<DeepSeekKeyState>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const onDone = vi.fn();
+    render(<Onboarding bridge={bridge} onDone={onDone} />);
+
+    fireEvent.change(screen.getByLabelText("DeepSeek API Key"), {
+      target: { value: "sk-abcdefghijklmnopqrstuvwxyz" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+
+    const dots = () => document.querySelectorAll(".first-run__dots span");
+    expect(dots()).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "校验中" })).toBeTruthy();
+
+    // 时钟推进不会让等待态结束：它绑定的是请求，不是装饰循环。
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(dots()).toHaveLength(3);
+    expect(onDone).not.toHaveBeenCalled();
+
+    await act(async () => {
+      release({ masked: "sk-****wxyz", verified: true, validation: "ok" });
+    });
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(dots()).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
+  it("偏好减少动态：切换表单立即生效，不进入淡出态", () => {
+    const restore = stubMatchMedia(true);
+    try {
+      render(<Onboarding bridge={makeBridge()} onDone={() => {}} />);
+      fireEvent.click(screen.getByRole("button", { name: "使用其他 AI 服务" }));
+      expect(
+        screen.getByRole("button", { name: "← 使用 DeepSeek Key" }),
+      ).toBeTruthy();
+      expect(
+        document
+          .querySelector(".first-run__switcher")
+          ?.classList.contains("is-fading"),
+      ).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it("未减少动态：切换先淡出 160ms，再换表单并清掉淡出态", () => {
+    vi.useFakeTimers();
+    const restore = stubMatchMedia(false);
+    try {
+      render(<Onboarding bridge={makeBridge()} onDone={() => {}} />);
+      const switcher = () => document.querySelector(".first-run__switcher");
+
+      fireEvent.click(screen.getByRole("button", { name: "使用其他 AI 服务" }));
+      expect(switcher()?.classList.contains("is-fading")).toBe(true);
+      expect(
+        screen.queryByRole("button", { name: "← 使用 DeepSeek Key" }),
+      ).toBeNull();
+
+      act(() => {
+        vi.advanceTimersByTime(160);
+      });
+      expect(
+        screen.getByRole("button", { name: "← 使用 DeepSeek Key" }),
+      ).toBeTruthy();
+      expect(switcher()?.classList.contains("is-fading")).toBe(true);
+
+      act(() => {
+        vi.advanceTimersByTime(20);
+      });
+      expect(switcher()?.classList.contains("is-fading")).toBe(false);
+    } finally {
+      restore();
+      vi.useRealTimers();
+    }
   });
 
   it("展开其他 AI 服务：Key 输入框收起，只留一个连接按钮", () => {

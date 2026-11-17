@@ -705,6 +705,39 @@ export interface ConfigSetModeData {
   confirmation: "accepted" | "not_needed";
 }
 
+/** 界面上报（commands.md §9.1.1）；只是状态，不是用户说过的话。 */
+export type UiScreen =
+  | "onboarding"
+  | "client"
+  | "no_nodes"
+  | "new_node"
+  | "servers"
+  | "settings"
+  | "trial_expired";
+
+export interface UiControl {
+  id: string;
+  label: string;
+  kind: "button" | "choice" | "row";
+}
+
+export interface UiLastAction {
+  id: string;
+  value?: string;
+}
+
+export interface UiContext {
+  screen: UiScreen;
+  controls: UiControl[];
+  last_action: UiLastAction | null;
+}
+
+/** 界面上下文随消息带给 Host；不落库、不赋权。 */
+export interface SendMessageOptions {
+  hidden?: boolean;
+  context?: UiContext;
+}
+
 /** 退出确认的两个结果：留后台继续跑，或断开并退出。 */
 export type QuitDecisionAction = "background" | "quit";
 
@@ -713,8 +746,8 @@ export interface AgentBridge {
   subscribe(listener: (event: AgentEvent) => void): () => void;
   sendMessage(
     sessionId: string,
-    text: string,
-    options?: { hidden?: boolean },
+    text: string | undefined,
+    options?: SendMessageOptions,
   ): Promise<{ requestId: string }>;
   /** 取消一条请求；返回 false = 后端确认这条请求已经不在跑了。 */
   cancel(requestId: string): Promise<boolean>;

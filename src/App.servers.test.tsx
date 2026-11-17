@@ -186,7 +186,7 @@ describe("destination 与我的服务器", () => {
     localStorage.setItem(DESTINATION_KEY, "servers");
     localStorage.setItem(DESTINATION_VERSION_KEY, "old-version");
     const second = render(<App />);
-    expect(await screen.findByRole("button", { name: "启动 VPN" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "连接节点" })).toBeTruthy();
     expect(runtimeStart).not.toHaveBeenCalled();
     second.unmount();
   });
@@ -203,7 +203,7 @@ describe("destination 与我的服务器", () => {
       },
     ]);
     const { container } = render(<App />);
-    await screen.findByRole("button", { name: "启动 VPN" });
+    await screen.findByRole("button", { name: "连接节点" });
 
     await waitFor(() =>
       expect(
@@ -217,7 +217,7 @@ describe("destination 与我的服务器", () => {
       await screen.findByRole("complementary", { name: "服务器列表" }),
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "连接" }));
-    expect(await screen.findByRole("button", { name: "启动 VPN" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "连接节点" })).toBeTruthy();
     expect(runtimeStart).not.toHaveBeenCalled();
   });
 

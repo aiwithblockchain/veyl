@@ -1324,8 +1324,8 @@ export class MockAgentBridge implements AgentBridge {
 
   async sendMessage(
     sessionId: string,
-    text: string,
-    _options?: { hidden?: boolean },
+    text: string | undefined,
+    _options?: { hidden?: boolean; context?: unknown },
   ): Promise<{ requestId: string }> {
     // 同一会话同一时刻只跑一条：与 Host 的单飞约束保持一致。
     const active = this.activeBySession.get(sessionId);
@@ -1344,7 +1344,7 @@ export class MockAgentBridge implements AgentBridge {
     this.activeBySession.set(sessionId, requestId);
     this.sessionByRequest.set(requestId, sessionId);
 
-    void this.run(sessionId, requestId, assistantId, text);
+    void this.run(sessionId, requestId, assistantId, text ?? "");
     return { requestId };
   }
 

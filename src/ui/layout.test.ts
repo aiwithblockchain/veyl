@@ -45,8 +45,8 @@ function memoryStorage(initial: Record<string, string> = {}): StorageLike & {
 }
 
 describe("resolvePaneWidths 默认值", () => {
-  it("没拖过时跟随断点：1568 是 280/420，1300 是 260/380", () => {
-    expect(resolve(1568)).toMatchObject({ rail: 280, assistant: 420 });
+  it("没拖过时跟随断点：1568 是 280/380，1300 是 260/380", () => {
+    expect(resolve(1568)).toMatchObject({ rail: 280, assistant: 380 });
     expect(resolve(1300)).toMatchObject({ rail: 260, assistant: 380 });
   });
 

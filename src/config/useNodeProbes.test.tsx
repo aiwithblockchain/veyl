@@ -262,7 +262,7 @@ describe("useNodeProbes", () => {
     });
   });
 
-  it("启动 VPN 导致取消时说明原因", async () => {
+  it("连接导致取消时说明原因", async () => {
     const { result, emit } = harness();
     await act(async () => {
       await result.current.start("cfg-1", IDS);
@@ -272,7 +272,7 @@ describe("useNodeProbes", () => {
     expect(result.current.finished).toMatchObject({ reason: "connected" });
     expect(result.current.notice).toEqual({
       configId: "cfg-1",
-      text: "启动 VPN 后测速已停止",
+      text: "连接后测速已停止",
     });
   });
 

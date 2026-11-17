@@ -13,6 +13,7 @@ import type {
   ConfigSetModeData,
   ConfigSetModeInput,
   QuitDecisionAction,
+  SendMessageOptions,
   TrialStatusData,
   CoreCheckUpdatesResult,
   CoreInfo,
@@ -1514,13 +1515,14 @@ export class TauriAgentBridge implements AgentBridge {
 
   async sendMessage(
     sessionId: string,
-    text: string,
-    options?: { hidden?: boolean },
+    text: string | undefined,
+    options?: SendMessageOptions,
   ): Promise<{ requestId: string }> {
     const response = await call<{ request_id: string }>("ai_send_message", {
       sessionId,
-      text,
+      ...(text === undefined ? {} : { text }),
       ...(options?.hidden ? { hidden: true } : {}),
+      ...(options?.context ? { context: options.context } : {}),
     });
     return { requestId: response.request_id };
   }

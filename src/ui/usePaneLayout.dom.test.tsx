@@ -86,13 +86,13 @@ describe("PaneHandle 事件接线", () => {
   it("拖助手：向左变宽，松手持久化", () => {
     render(<Harness />);
     const handle = assistantHandle();
-    expect(screen.getByTestId("assistant-width").textContent).toBe("420");
+    expect(screen.getByTestId("assistant-width").textContent).toBe("380");
 
     fireEvent.pointerDown(handle, { button: 0, pointerId: 2, clientX: 1200 });
     fireEvent.pointerMove(handle, { pointerId: 2, clientX: 1100 });
-    expect(screen.getByTestId("assistant-width").textContent).toBe("520");
+    expect(screen.getByTestId("assistant-width").textContent).toBe("480");
     fireEvent.pointerUp(handle, { pointerId: 2, clientX: 1100 });
-    expect(localStorage.getItem(ASSISTANT_WIDTH_KEY)).toBe("520");
+    expect(localStorage.getItem(ASSISTANT_WIDTH_KEY)).toBe("480");
   });
 
   it("拖到边界外按最小/最大钳制", () => {

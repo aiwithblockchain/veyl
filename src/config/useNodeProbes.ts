@@ -246,7 +246,7 @@ export function useNodeProbes({
         showNotice(
           payload.config_id,
           payload.reason === "connected"
-            ? "启动 VPN 后测速已停止"
+            ? "连接后测速已停止"
             : `已停止 · 已测 ${payload.ok + payload.failed}/${payload.total}`,
         );
       }

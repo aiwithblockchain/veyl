@@ -3,6 +3,8 @@ import type { MyServerTopup, MyServerWallet } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { formatUsdCents } from "../myservers/labels";
 import { IconClose } from "./icons";
+import { useFocusTrap } from "../ui/focus";
+import { copyText } from "../ui/clipboard";
 
 interface Props {
   wallet: MyServerWallet | null;
@@ -47,8 +49,15 @@ export function MyServerTopUp({
 }: Props) {
   const [busyCents, setBusyCents] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
+  const [failure, setFailure] = useState<{
+    message: string;
+    url: string | null;
+    cents: number;
+  } | null>(null);
   const busyRef = useRef(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const [copied, setCopied] = useState(false);
+  useFocusTrap(true, dialogRef);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -72,7 +81,14 @@ export function MyServerTopUp({
           : `已充值 ${formatUsdCents(result.denomination_cents)}。`,
       );
     } catch (err) {
-      setFailure(topupError(err));
+      const details = toBridgeError(err).details;
+      const raw = details?.checkout_url;
+      const url = typeof raw === "string" && raw.startsWith("https://") ? raw : null;
+      setFailure({
+        message: topupError(err),
+        url,
+        cents,
+      });
     } finally {
       busyRef.current = false;
       setBusyCents(null);
@@ -85,6 +101,7 @@ export function MyServerTopUp({
   return (
     <div className="modal-backdrop" onMouseDown={() => !busy && onClose()}>
       <div
+        ref={dialogRef}
         className="modal myservers-topup"
         role="dialog"
         aria-modal="true"
@@ -165,9 +182,47 @@ export function MyServerTopUp({
             </p>
           ) : null}
           {failure ? (
-            <p className="myservers__error" role="alert">
-              {failure}
-            </p>
+            <>
+              <p className="myservers__error" role="alert">
+                {failure.message}
+              </p>
+              {failure.url ? (
+                <>
+                  <code className="myservers-topup__link">{failure.url}</code>
+                  <div className="myservers__login-actions">
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => void start(failure.cents)}
+                    >
+                      重新打开支付页面
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => {
+                        void copyText(failure.url ?? "").then((ok) => {
+                          setCopied(ok);
+                          window.setTimeout(() => setCopied(false), 1500);
+                        });
+                      }}
+                    >
+                      {copied ? "已复制" : "复制链接"}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="myservers__login-actions">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => void start(failure.cents)}
+                  >
+                    重试
+                  </button>
+                </div>
+              )}
+            </>
           ) : null}
           {notice ? (
             <p className="myservers__hint" role="status">

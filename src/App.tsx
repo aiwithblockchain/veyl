@@ -16,13 +16,16 @@ import type {
   MyServer,
   PendingQuestion,
   QuitDecisionAction,
+  UiControl,
+  UiLastAction,
+  UiScreen,
 } from "./agent/bridge";
 import { BridgeError, toBridgeError } from "./agent/errors";
 import { AiPanel, type RenameResult } from "./components/AiPanel";
 import { AskQuestionDialog } from "./components/AskQuestionDialog";
 import { AssistantOverlay } from "./components/AssistantOverlay";
 import { AssistantTab } from "./components/AssistantTab";
-import { Console } from "./components/Console";
+import { ConnectionStage } from "./components/ConnectionStage";
 import { ConnectionOverlay } from "./components/ConnectionOverlay";
 import { HelperPermissionDialog } from "./components/HelperPermissionDialog";
 import { MyServersPage } from "./components/MyServersPage";
@@ -33,6 +36,7 @@ import { useMyServers } from "./myservers/useMyServers";
 import { isProvisioning } from "./myservers/labels";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
+import { MyServerWizard } from "./components/MyServerWizard";
 import { QuitDialog } from "./components/QuitDialog";
 import { Settings, describeImportError } from "./components/Settings";
 import type { DisplayActionOutcome } from "./components/ToolCallCard";
@@ -43,6 +47,9 @@ import {
 } from "./config/onboarding";
 import { useVpnSession, isHelperPermissionReason } from "./config/useVpnSession";
 import { createRuntimeAuthority } from "./config/runtimeAuthority";
+import { actionCardControls, readActionCards } from "./ui/actionCard";
+import { buildUiContext } from "./ui/controlIds";
+import { CONNECT_DIAG_ASK, SERVER_FAILURE_ASK } from "./ui/assistantPrompts";
 import { useNodeProbes } from "./config/useNodeProbes";
 import {
   assistantColumnWidth,
@@ -55,7 +62,6 @@ import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
 import { readDestination, writeDestination, type Destination } from "./ui/destination";
 import { IconConsole, IconServer, IconSliders } from "./components/icons";
 import { usePaneLayout } from "./ui/usePaneLayout";
-import { pushRateSample, shouldPushRateSample, type RateSample } from "./ui/rateSeries";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import "./styles/app.css";
 
@@ -86,16 +92,122 @@ function TrialExpired({ onNewNode }: { onNewNode: () => void }) {
   );
 }
 
+type TrialStepStatus = "pending" | "running" | "done" | "failed";
+
+interface TrialStep {
+  status: TrialStepStatus;
+  /** 真实耗时（毫秒）；没跑完为 null。 */
+  ms: number | null;
+}
+
+/** 免费节点试用的三步；步骤推进全部挂在真实 bridge 调用上。 */
+interface TrialFlow {
+  phase: "fetch" | "join" | "probe" | "done" | "failed";
+  fetch: TrialStep;
+  join: TrialStep;
+  probe: TrialStep;
+  failedStep: "fetch" | "join" | "probe" | null;
+  error: string | null;
+  summary: { count: number; fastestMs: number | null } | null;
+}
+
+const TRIAL_STEPS: Array<{ key: "fetch" | "join" | "probe"; title: string }> = [
+  { key: "fetch", title: "拉取预置配置" },
+  { key: "join", title: "加入免费节点" },
+  { key: "probe", title: "逐个测速" },
+];
+
+function TrialDots() {
+  return (
+    <span className="stage-step__dots" aria-hidden="true">
+      <span />
+      <span />
+      <span />
+    </span>
+  );
+}
+
+function TrialFlowPanel({
+  flow,
+  onRetry,
+  onSkipProbe,
+}: {
+  flow: TrialFlow;
+  onRetry: () => void;
+  onSkipProbe: () => void;
+}) {
+  return (
+    <div className="stage-steps" aria-label="加入免费节点">
+      <ol className="stage-steps__list">
+        {TRIAL_STEPS.map(({ key, title }) => {
+          const step = flow[key];
+          return (
+            <li key={key} className={`stage-step is-${step.status}`}>
+              <span className="stage-step__title">{title}</span>
+              <span className="stage-step__state">
+                {step.status === "running" ? <TrialDots /> : null}
+                {step.status === "done" && step.ms !== null
+                  ? `${(step.ms / 1000).toFixed(1)} 秒`
+                  : null}
+                {step.status === "failed" ? "没完成" : null}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+      {flow.error ? (
+        <p className="stage-steps__error" role="alert">
+          {flow.error}
+        </p>
+      ) : null}
+      {flow.phase === "failed" ? (
+        <div className="stage-steps__actions">
+          <button type="button" className="stage-primary" onClick={onRetry}>
+            重试
+          </button>
+          {flow.failedStep === "probe" ? (
+            <button type="button" className="stage-secondary" onClick={onSkipProbe}>
+              先连接，不测速
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** 还没有任何节点时的两选一：新建节点为主，免费节点试用为次。 */
 function StartChoice({
   busy,
   onUseFree,
   onNewNode,
+  trial,
+  onRetryTrial,
+  onSkipProbe,
 }: {
   busy: boolean;
   onUseFree: () => void;
   onNewNode: () => void;
+  trial: TrialFlow | null;
+  onRetryTrial: () => void;
+  onSkipProbe: () => void;
 }) {
+  if (trial && trial.phase !== "done") {
+    return (
+      <main className="start-choice">
+        <section className="start-choice__col" aria-label="正在加入免费节点">
+          <h1 className="start-choice__title">
+            {trial.phase === "failed" ? "免费节点没加完" : "正在加入免费节点"}
+          </h1>
+          <TrialFlowPanel
+            flow={trial}
+            onRetry={onRetryTrial}
+            onSkipProbe={onSkipProbe}
+          />
+        </section>
+      </main>
+    );
+  }
   return (
     <main className="start-choice">
       <section className="start-choice__col" aria-label="还没有节点">
@@ -230,8 +342,29 @@ export default function App() {
     active: destination === "servers",
     rootSignal: serversRootSignal,
   });
+  // 查看账单拉起的登录成功了：回到账户页，账单入口保持可见。
+  useEffect(() => {
+    const pending = pendingBillsRef.current;
+    if (!pending) return;
+    if (myServers.loginOpen) {
+      pendingBillsRef.current = "seen";
+      return;
+    }
+    if (pending !== "seen") return;
+    pendingBillsRef.current = null;
+    if (!myServers.loggedIn) return; // 登录框关了但没登录：用户取消
+    openSettings("account");
+    setAppNotice({
+      level: "info",
+      text: "账单明细下一版接入，当前余额可在充值里查看。",
+    });
+  }, [myServers.loggedIn, myServers.loginOpen]);
   /** 取凭据建配置在途：防止连点。 */
   const useServerInFlightRef = useRef(false);
+  /** 最近一次用户操作，随下一条消息的 context 上报。 */
+  const lastActionRef = useRef<UiLastAction | null>(null);
+  /** 从「查看账单」拉起的登录：成功后回到账户页。 */
+  const pendingBillsRef = useRef<"waiting" | "seen" | null>(null);
   const destinationRef = useRef(destination);
   destinationRef.current = destination;
   /** 正在为问题报告开会话并发送开场：期间禁用三处入口。 */
@@ -240,7 +373,6 @@ export default function App() {
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === "undefined" ? 1440 : window.innerWidth,
   );
-  const [rateSamples, setRateSamples] = useState<RateSample[]>([]);
   const [aiUnread, setAiUnread] = useState(false);
   const [defaultProfile, setDefaultProfile] = useState<DefaultProfileStatus | null>(null);
   // 本地代理端口是应用级设置：设置页写，控制台与设置行都读这一份。
@@ -251,9 +383,38 @@ export default function App() {
   const [trialBusy, setTrialBusy] = useState(false);
   const trialBusyRef = useRef(false);
   const [trialPendingStart, setTrialPendingStart] = useState(false);
+  /** 免费节点步骤流：拉取 → 加入 → 测速，全部挂在真实调用上。 */
+  const [trialFlow, setTrialFlow] = useState<TrialFlow | null>(null);
+  const trialFlowRef = useRef<TrialFlow | null>(null);
+  const trialProbeStartedRef = useRef(false);
   /** 免费节点试用状态；过期后只留「新建节点」。 */
   const [trial, setTrial] = useState<TrialStatusData | null>(null);
   const [trialLoaded, setTrialLoaded] = useState(false);
+  /** 从两选一 / 到期屏进入「新建节点」舞台。 */
+  const [newNodeOpen, setNewNodeOpen] = useState(false);
+  /** 新建节点舞台上次选的地区/规格；返回后再进来要恢复。 */
+  const [newNodeSelection, setNewNodeSelection] = useState<{
+    region: string | null;
+    plan: string | null;
+  }>({ region: null, plan: null });
+  /** AI 选好的地区 / 规格；交给新建节点舞台应用。 */
+  /** 已销毁服务器留下的节点：卡片标「已销毁」，不再发命令。 */
+  const [destroyedNodeIds, setDestroyedNodeIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [stageSelect, setStageSelect] = useState<{
+    region: string | null;
+    plan: string | null;
+    nonce: number;
+  } | null>(null);
+  const stageSelectNonceRef = useRef(0);
+  /** 舞台是否打开 / 是否在创建中：事件处理走 ref，避免订阅闭包读到旧值。 */
+  const newNodeOpenRef = useRef(false);
+  const newNodeBusyRef = useRef(false);
+  newNodeOpenRef.current = newNodeOpen;
+  useEffect(() => {
+    if (!newNodeOpen) newNodeBusyRef.current = false;
+  }, [newNodeOpen]);
   const [trialNonce, setTrialNonce] = useState(0);
   /** 首屏等配置与试用状态都读回来再决定渲染，避免闪一下两选一。 */
   const [stageReady, setStageReady] = useState(false);
@@ -261,9 +422,7 @@ export default function App() {
   const [quitBusy, setQuitBusy] = useState(false);
   const [quitError, setQuitError] = useState<string | null>(null);
   const quitBusyRef = useRef(false);
-  const [systemRegion, setSystemRegion] = useState<string | null>(null);
   /** AI 改地区时如果正连着：说明行要追加「地区已改，下次连接生效」。 */
-  const [regionChangedWhileConnected, setRegionChangedWhileConnected] = useState(false);
   // route_set_mode / routing-changed 的权威值；只在活动配置上覆盖详情里的旧值。
   const [routingOverride, setRoutingOverride] = useState<{
     configId: string;
@@ -278,6 +437,25 @@ export default function App() {
     runtimeAuthorityRef.current,
   );
   const nodeProbes = useNodeProbes({ bridge });
+  // 进入连接屏先读缓存，再对非当前节点测一次速；每个配置只自动跑一次。
+  const probedConfigsRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (destination !== "client" || !stageReady) return;
+    // 免费节点步骤流自己测速：别在它结束前再起一批。
+    if (trialFlowRef.current && trialFlowRef.current.phase !== "done") return;
+    const config = vpn.activeConfig;
+    if (!config || config.nodes.length === 0) return;
+    if (probedConfigsRef.current.has(config.config_id)) return;
+    if (!vpn.nodeProbeAvailable) return;
+    probedConfigsRef.current.add(config.config_id);
+    const nodeIds = config.nodes.map((node) => node.node_id);
+    void nodeProbes.loadSnapshot(config.config_id, nodeIds).then(() => {
+      const others = nodeIds.filter((id) => id !== config.current_node_id);
+      if (others.length > 0) void nodeProbes.start(config.config_id, others);
+    });
+    // nodeProbes 每次渲染都是新对象，只跟着配置与可用性走。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [destination, stageReady, vpn.activeConfig, vpn.nodeProbeAvailable]);
   // 断点只看窗口宽度：三栏宽度、助手停靠/浮层都由它决定。
   const dockedRef = useRef(true);
   useEffect(() => {
@@ -362,7 +540,6 @@ export default function App() {
   const healthVersion = useRef(0);
   // 同一个 traffic 会被健康事件重复推送（出口探测、节点延迟都会触发 emit_health）；
   // 只按 sampled_at 推进时的第一条算一个速率样本。
-  const lastSampleAtRef = useRef<string | null>(null);
   // 快照请求的单调序号：只接受最新一次请求，避免旧快照晚到覆盖新状态。
   const snapshotSeq = useRef(0);
   // 断开命令返回前，迟到的 online 事件/快照不能把界面推回已连接。
@@ -385,12 +562,56 @@ export default function App() {
     (vpn.activeConfig && vpn.activeConfig.nodes.length > 0) ||
       vpn.configs.some((config) => config.node_count > 0),
   );
-  // 已连接用本次连接快照，未连接用实时推断，和中间区口径同源。
-  const scopeRegion =
-    runtime.state === "running" || runtime.state === "degraded"
-      ? runtime.route_region
-      : systemRegion;
 
+  /** 当前屏幕：随每条消息带给 Host，是 UI 状态不是用户指令。 */
+  const uiScreen: UiScreen = showOnboarding
+    ? "onboarding"
+    : settingsOpen
+      ? "settings"
+      : newNodeOpen
+        ? "new_node"
+        : !stageReady
+        ? "client"
+        : trial?.state === "expired"
+          ? "trial_expired"
+          : !hasNodes
+            ? "no_nodes"
+            : destination === "servers"
+              ? "servers"
+              : "client";
+
+  const actionCards = useMemo(
+    () => readActionCards(vpn.activeConfig?.layout ?? null),
+    [vpn.activeConfig?.layout],
+  );
+  const actionControls: UiControl[] = useMemo(
+    () => actionCardControls(actionCards),
+    [actionCards],
+  );
+
+  const uiLabels: Record<string, string> = {};
+  if (uiScreen === "client") {
+    const online = runtime.state === "running" || runtime.state === "degraded";
+    const starting =
+      vpn.connection === "starting" || runtime.state === "starting";
+    uiLabels["client.primary"] = starting
+      ? "连接中"
+      : online
+        ? "断开"
+        : runtime.state === "failed"
+          ? "重新连接"
+          : "连接";
+    const currentNode = vpn.activeConfig?.nodes.find(
+      (node) => node.node_id === vpn.activeConfig?.current_node_id,
+    );
+    if (currentNode) uiLabels["client.node_pick"] = currentNode.name;
+  }
+  if (uiScreen === "new_node") {
+    uiLabels["new_node.create"] = "创建";
+  }
+  if (uiScreen === "servers" && myServers.selected) {
+    uiLabels["servers.item"] = myServers.selected.name;
+  }
   // 不带分区时沿用上次记住的 tab（问 AI 返回靠它）；诊断、导入、AI 未配置会显式指定。
   const openSettings = (section?: SettingsSection) => {
     if (section) setSettingsSection(section);
@@ -461,20 +682,6 @@ export default function App() {
             text: "网络设置没能自动恢复。打开「设置 → 遇到问题 → 强制重置网络」。",
           });
         }
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [bridge]);
-
-  // 地区只决定新建配置的默认流量范围；读不到按未知处理。
-  useEffect(() => {
-    let alive = true;
-    bridge
-      .systemRegion()
-      .then((result) => {
-        if (alive) setSystemRegion(result.region);
       })
       .catch(() => {});
     return () => {
@@ -595,17 +802,6 @@ export default function App() {
       }
       if (event.name === AGENT_EVENTS.runtimeHealthChanged) {
         healthVersion.current += 1;
-        const traffic = event.payload.traffic;
-        const sampledAt = traffic?.sampled_at ?? "";
-        if (
-          traffic &&
-          shouldPushRateSample(lastSampleAtRef.current, sampledAt)
-        ) {
-          lastSampleAtRef.current = sampledAt;
-          setRateSamples((samples) =>
-            pushRateSample(samples, { up: traffic.up_rate, down: traffic.down_rate }),
-          );
-        }
         // TUN 的系统 DNS 复核结果只在 runtime_status 里，连接态下节流补拉。
         if (
           shouldRefreshSnapshotOnHealth(
@@ -649,6 +845,37 @@ export default function App() {
           seed_node_count: 0,
         });
         setTrialNonce((value) => value + 1);
+      }
+      if (event.name === AGENT_EVENTS.myServerChanged) {
+        const payload = event.payload as { state?: unknown; node_id?: unknown };
+        if (payload.state === "destroyed" && typeof payload.node_id === "string" && payload.node_id) {
+          const nodeId = payload.node_id;
+          setDestroyedNodeIds((current) => {
+            if (current.has(nodeId)) return current;
+            const next = new Set(current);
+            next.add(nodeId);
+            return next;
+          });
+        }
+      }
+      if (event.name === AGENT_EVENTS.stageSelect) {
+        // 只改舞台选择；舞台没开或正在创建时忽略（契约允许的已知残余）。
+        if (
+          !newNodeOpenRef.current ||
+          newNodeBusyRef.current ||
+          destinationRef.current !== "client"
+        ) {
+          return;
+        }
+        const { region, plan } = event.payload;
+        // null = 这次没请求，不是清空；两个都为 null 就没什么可做的。
+        if (region === null && plan === null) return;
+        stageSelectNonceRef.current += 1;
+        setStageSelect({
+          region,
+          plan,
+          nonce: stageSelectNonceRef.current,
+        });
       }
       if (event.name === AGENT_EVENTS.settingsPoint) {
         const { section, row } = event.payload;
@@ -699,12 +926,6 @@ export default function App() {
           finish();
         }
       }
-      if (event.name === AGENT_EVENTS.regionChanged) {
-        setSystemRegion(event.payload.region);
-        const online =
-          runtimeStateRef.current === "running" || runtimeStateRef.current === "degraded";
-        setRegionChangedWhileConnected(online);
-      }
       if (event.name === AGENT_EVENTS.routingChanged) {
         // AI 通过 RouteSetMode 改了分流：事件里的值就是权威值，不保留本地旧值。
         const payload = event.payload;
@@ -714,13 +935,6 @@ export default function App() {
         setFailedAfterConnected(
           isDisconnectFailure(event.payload.from, event.payload.to),
         );
-        const online =
-          event.payload.to === "running" || event.payload.to === "degraded";
-        if (!online) {
-          lastSampleAtRef.current = null;
-          setRateSamples([]);
-          setRegionChangedWhileConnected(false);
-        }
         refreshSnapshot();
       }
     });
@@ -1038,8 +1252,8 @@ export default function App() {
 
   const sendToSession = async (
     sessionId: string,
-    text: string,
-    options: { hidden?: boolean } = {},
+    text: string | undefined,
+    options: { hidden?: boolean; lastAction?: UiLastAction } = {},
   ): Promise<boolean> => {
     if (!aiReady) {
       setAppNotice({ level: "error", text: "还没有配置 AI，先配置后再对话。" });
@@ -1061,12 +1275,21 @@ export default function App() {
     dispatch(
       options.hidden
         ? { type: "start_hidden_request", sessionId, localRequestId }
-        : { type: "send_user_message", sessionId, text, localRequestId },
+        : { type: "send_user_message", sessionId, text: text ?? "", localRequestId },
     );
 
     try {
+      const context = buildUiContext({
+        screen: uiScreen,
+        labels: uiLabels,
+        actionControls,
+        lastAction: options.lastAction ?? lastActionRef.current,
+      });
+      // 上报一次就消费掉：下一条消息不重复说「用户刚刚点了」。
+      lastActionRef.current = null;
       const { requestId } = await bridge.sendMessage(sessionId, text, {
         hidden: options.hidden,
+        context,
       });
       requestSessionRef.current.set(requestId, sessionId);
       dispatch({ type: "request_started", sessionId, requestId, localRequestId });
@@ -1290,6 +1513,7 @@ export default function App() {
   };
 
   const handleVpnStart = () => {
+    lastActionRef.current = { id: "client.primary" };
     stoppingRef.current = false;
     void vpn.start().then((result) => {
       if (!result.ok && isHelperPermissionReason(result.reason)) {
@@ -1312,6 +1536,8 @@ export default function App() {
   useEffect(() => {
     if (!trialPendingStart) return;
     if (vpn.loading) return;
+    // 步骤流还没跑完（例如测速中）：先等它结束，再连接。
+    if (trialFlow && trialFlow.phase !== "done") return;
     const config = vpn.activeConfig;
     if (!config || config.nodes.length === 0) {
       trialBusyRef.current = false;
@@ -1341,6 +1567,7 @@ export default function App() {
     });
   }, [
     trialPendingStart,
+    trialFlow,
     vpn.loading,
     vpn.activeConfig,
     vpn.start,
@@ -1349,6 +1576,7 @@ export default function App() {
   ]);
 
   const handleVpnStop = (): Promise<boolean> => {
+    lastActionRef.current = { id: "client.primary" };
     // 记下点断开这一刻是不是已连接：断开失败时只有原本在线才恢复在线。
     const wasConnected = runtime.state === "running" || runtime.state === "degraded";
     stoppingRef.current = true;
@@ -1385,6 +1613,7 @@ export default function App() {
 
   // 已连接但不通：先停稳再起；不先等 stop 回来，stop 命令可能落在新连接上把它关掉。
   const handleVpnReconnect = () => {
+    lastActionRef.current = { id: "client.primary" };
     void handleVpnStop().then((stopped) => {
       if (stopped) handleVpnStart();
     });
@@ -1398,14 +1627,132 @@ export default function App() {
     setComposerFocusSignal((value) => value + 1);
   };
 
-  const handleSwitchNode = (nodeId: string) => vpn.switchNode(nodeId);
+  const handleSwitchNode = (nodeId: string) => {
+    lastActionRef.current = { id: "client.node_pick", value: nodeId };
+    return vpn.switchNode(nodeId);
+  };
 
-  // 先试用免费节点：建唯一配置（seed 节点、Tun、智能分流），有节点后再自动连接。
+  // action_card 的按钮只上报：hidden 消息 + context.last_action，不直接调命令。
+  const handleActionCardAction = (action: { id: string }) => {
+    lastActionRef.current = { id: action.id };
+    let target = session;
+    if (!target) {
+      target = createSession();
+      dispatch({ type: "add_session", session: target });
+    }
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
+    void sendToSession(target.id, undefined, {
+      hidden: true,
+      lastAction: { id: action.id },
+    });
+  };
+
+  // 「AI 定位」：只上报这个动作并带上固定前缀，不直接调 MyServerFailure。
+  const handleAiLocate = (serverId: string) => {
+    lastActionRef.current = { id: "servers.ai_locate", value: serverId };
+    let target = session;
+    if (!target) {
+      target = createSession();
+      dispatch({ type: "add_session", session: target });
+    }
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
+    void sendToSession(target.id, SERVER_FAILURE_ASK, {
+      hidden: true,
+      lastAction: { id: "servers.ai_locate", value: serverId },
+    });
+  };
+
+  const handleDiagnose = () => {
+    handleAskAi(CONNECT_DIAG_ASK);
+  };
+
+  // 查看账单：先确认登录；没登录就拉起登录，成功后回到账户页。
+  const handleViewBills = async () => {
+    pendingBillsRef.current = "waiting";
+    const allowed = await myServers.requestBills();
+    if (!allowed) {
+      closeSettings();
+      return;
+    }
+    pendingBillsRef.current = null;
+    setAppNotice({
+      level: "info",
+      text: "账单明细下一版接入，当前余额可在充值里查看。",
+    });
+  };
+
+  const commitTrialFlow = (next: TrialFlow) => {
+    trialFlowRef.current = next;
+    setTrialFlow(next);
+  };
+
+  const failTrial = (
+    current: TrialFlow,
+    step: "fetch" | "join" | "probe",
+    message: string,
+    ms: number | null = null,
+  ) => {
+    commitTrialFlow({
+      ...current,
+      phase: "failed",
+      failedStep: step,
+      error: message,
+      [step]: { status: "failed", ms },
+    });
+    trialBusyRef.current = false;
+    setTrialBusy(false);
+  };
+
+  // 先试用免费节点：拉取预置配置 → 建唯一配置（seed 节点、Tun、智能分流）→ 逐个测速。
   const handleUseFreeNodes = async () => {
     if (trialBusyRef.current || hasNodes) return;
+    lastActionRef.current = { id: "no_nodes.trial" };
     trialBusyRef.current = true;
     setTrialBusy(true);
     setAppNotice(null);
+    trialProbeStartedRef.current = false;
+
+    const start: TrialFlow = {
+      phase: "fetch",
+      fetch: { status: "running", ms: null },
+      join: { status: "pending", ms: null },
+      probe: { status: "pending", ms: null },
+      failedStep: null,
+      error: null,
+      summary: null,
+    };
+    commitTrialFlow(start);
+
+    const fetchStartedAt = Date.now();
+    try {
+      // 本地已有预置节点就不动；没有才联网拉取。
+      const status = await bridge.defaultProfileStatus();
+      if (status.nodeCount === 0) await bridge.defaultProfileRefresh();
+    } catch (error) {
+      const message = toBridgeError(error).message;
+      failTrial(
+        trialFlowRef.current ?? start,
+        "fetch",
+        message && message !== "操作失败"
+          ? `没拉到预置配置。${message}`
+          : "没拉到预置配置，再试一次。",
+      );
+      return;
+    }
+
+    const afterFetch: TrialFlow = {
+      ...(trialFlowRef.current ?? start),
+      phase: "join",
+      fetch: { status: "done", ms: Date.now() - fetchStartedAt },
+      join: { status: "running", ms: null },
+    };
+    commitTrialFlow(afterFetch);
+
+    const joinStartedAt = Date.now();
     const created = await vpn.createConfig({
       name: "免费节点",
       connectMode: "tun",
@@ -1413,15 +1760,113 @@ export default function App() {
       source: "seed",
     });
     if (!created.ok) {
+      failTrial(
+        trialFlowRef.current ?? afterFetch,
+        "join",
+        created.message ?? "没能加入免费节点，再试一次。",
+        Date.now() - joinStartedAt,
+      );
+      return;
+    }
+
+    const afterJoin: TrialFlow = {
+      ...(trialFlowRef.current ?? afterFetch),
+      phase: "probe",
+      join: { status: "done", ms: Date.now() - joinStartedAt },
+      probe: { status: "running", ms: null },
+    };
+    commitTrialFlow(afterJoin);
+    setTrialPendingStart(true);
+  };
+
+  // 测速步骤：逐个调用真实测速命令，全部返回后才算完成。
+  useEffect(() => {
+    if (!trialFlow || trialFlow.phase !== "probe") return;
+    if (trialProbeStartedRef.current) return;
+    if (vpn.loading) return;
+    const config = vpn.activeConfig;
+    if (!config || config.nodes.length === 0) return;
+    trialProbeStartedRef.current = true;
+    // 这一步自己测，别让连接屏的自动测速再跑一批。
+    probedConfigsRef.current.add(config.config_id);
+    const startedAt = Date.now();
+    const nodeIds = config.nodes.map((node) => node.node_id);
+    void (async () => {
+      const latencies: number[] = [];
+      for (const nodeId of nodeIds) {
+        try {
+          const result = await bridge.nodeProbe(nodeId);
+          if (result.reachable && result.latency_ms !== null) {
+            latencies.push(result.latency_ms);
+          }
+        } catch {
+          // 单个节点失败不影响其余节点；全部失败才算这一步失败。
+        }
+      }
+      // 结果推进测速状态，节点卡直接显示延迟。
+      await nodeProbes
+        .loadSnapshot(config.config_id, nodeIds)
+        .catch(() => undefined);
+      const current = trialFlowRef.current;
+      if (!current || current.phase !== "probe") return;
+      const elapsed = Date.now() - startedAt;
+      if (latencies.length === 0) {
+        failTrial(
+          current,
+          "probe",
+          "两个节点都没测速成功，可以重试，或先连接。",
+          elapsed,
+        );
+        return;
+      }
+      commitTrialFlow({
+        ...current,
+        phase: "done",
+        probe: { status: "done", ms: elapsed },
+        summary: {
+          count: nodeIds.length,
+          fastestMs: Math.min(...latencies),
+        },
+      });
       trialBusyRef.current = false;
       setTrialBusy(false);
-      setAppNotice({
-        level: "error",
-        text: created.message ?? "没能加入免费节点，再试一次。",
+    })();
+  }, [trialFlow, vpn.loading, vpn.activeConfig, bridge, nodeProbes]);
+
+  const handleRetryTrial = () => {
+    const current = trialFlowRef.current;
+    if (!current) return;
+    // 节点已经加进来了：只重跑测速，不重建配置。
+    if (current.failedStep === "probe" && hasNodes) {
+      trialBusyRef.current = true;
+      setTrialBusy(true);
+      trialProbeStartedRef.current = false;
+      commitTrialFlow({
+        ...current,
+        phase: "probe",
+        failedStep: null,
+        error: null,
+        probe: { status: "running", ms: null },
       });
       return;
     }
-    setTrialPendingStart(true);
+    void handleUseFreeNodes();
+  };
+
+  // 测速失败时不再挡路：带着已加入的节点进入连接屏。
+  const handleSkipTrialProbe = () => {
+    const current = trialFlowRef.current;
+    if (!current) return;
+    commitTrialFlow({
+      ...current,
+      phase: "done",
+      failedStep: null,
+      error: null,
+      probe: { status: "failed", ms: current.probe.ms },
+      summary: null,
+    });
+    trialBusyRef.current = false;
+    setTrialBusy(false);
   };
 
   const shell = shellLayout(viewportWidth);
@@ -1596,7 +2041,42 @@ export default function App() {
           {...panes.railHandlers}
         />
       ) : null}
-      {destination === "servers" ? (
+      {destination === "client" && newNodeOpen ? (
+        <main className="connection-stage" aria-label="新建节点">
+          <div className="connection-stage__col">
+            <MyServerWizard
+              bridge={bridge}
+              catalog={myServers.catalog}
+              onOrdered={() => {
+                setNewNodeOpen(false);
+                changeDestination("servers");
+                void myServers.refresh();
+              }}
+              onEnsureIdentity={myServers.ensureIdentity}
+              onTopUp={myServers.openTopUp}
+              onAuthRequired={myServers.openLogin}
+              onAskAi={() => {
+                lastActionRef.current = { id: "new_node.ask_ai" };
+                handleAskAi("帮我选一个地区和规格。");
+              }}
+              onAiLocate={handleAiLocate}
+              aiSelection={stageSelect}
+              initialSelection={newNodeSelection}
+              onBusyChange={(busy) => {
+                newNodeBusyRef.current = busy;
+              }}
+              onBack={() => setNewNodeOpen(false)}
+              onSelectionApplied={(pick) =>
+                setNewNodeSelection({ region: pick.region, plan: pick.plan })
+              }
+              onSelect={(kind, id) => {
+                lastActionRef.current = { id: `new_node.${kind}`, value: id };
+                setNewNodeSelection((current) => ({ ...current, [kind]: id }));
+              }}
+            />
+          </div>
+        </main>
+      ) : destination === "servers" ? (
         <MyServersPage
           bridge={bridge}
           catalog={myServers.catalog}
@@ -1614,59 +2094,47 @@ export default function App() {
           onRebuilt={myServers.rebuilt}
           onRetryDetail={myServers.retryDetail}
           onTopUp={myServers.openTopUp}
+          onAiLocate={handleAiLocate}
+          onAuthRequired={myServers.openLogin}
         />
       ) : trial?.state === "expired" ? (
-        <TrialExpired onNewNode={handleAskAiFromConsole} />
-      ) : hasNodes ? (
-      <Console
-        config={vpn.activeConfig}
-        connectedConfigId={vpn.connectedConfigId}
-        connectedConfigName={
-          (runtime.config_id ?? vpn.connectedConfigId)
-            ? (vpn.configs.find(
-                (config) =>
-                  config.config_id === (runtime.config_id ?? vpn.connectedConfigId),
-              )?.name ?? runtime.config_name)
-            : runtime.config_name
-        }
-        startingConfigId={vpn.startingConfigId}
-        startingConfigName={
-          vpn.startingConfigId
-            ? (vpn.configs.find((config) => config.config_id === vpn.startingConfigId)
-                ?.name ?? null)
-            : null
-        }
-        onStart={handleVpnStart}
-        onStop={handleVpnStop}
-        onReconnect={handleVpnReconnect}
-        onReportProblem={aiReady ? handleReportProblem : undefined}
-        reportBusy={reportOpening}
-        onSwitchNode={handleSwitchNode}
-        onProbe={vpn.probe}
-        nodeProbes={nodeProbes}
-        onOpenDiagnostics={() => openSettings("advanced")}
-        nodeProbeAvailable={vpn.nodeProbeAvailable}
-        aiReady={aiReady}
-        onNewConfig={handleAskAiFromConsole}
-        onImportNodes={() => openSettings("network")}
-        seedUpdate={Boolean(defaultProfile?.newVersionAvailable)}
-        proxyPort={proxyPort}
-        region={systemRegion}
-        scopeRegion={scopeRegion}
-        regionChanged={regionChangedWhileConnected}
-        routingMode={activeRoutingMode}
-        onSetRoutingMode={handleSetRoutingMode}
-        loading={vpn.loading}
-        runtime={runtime}
-        failedAfterConnected={failedAfterConnected}
-        helperPreparing={vpn.preparingHelper}
-        rateSamples={rateSamples}
-      />
+        <TrialExpired
+          onNewNode={() => {
+            lastActionRef.current = { id: "trial_expired.new_node" };
+            setNewNodeOpen(true);
+          }}
+        />
+      ) : hasNodes && !(trialFlow && trialFlow.phase !== "done") ? (
+        <ConnectionStage
+          config={vpn.activeConfig}
+          connection={vpn.connection}
+          runtime={runtime}
+          onStart={handleVpnStart}
+          onStop={() => void handleVpnStop()}
+          onReconnect={handleVpnReconnect}
+          onSwitchNode={handleSwitchNode}
+          nodeProbes={nodeProbes}
+          failedAfterConnected={failedAfterConnected}
+          helperPreparing={vpn.preparingHelper}
+          onReportProblem={aiReady ? handleReportProblem : undefined}
+          reportBusy={reportOpening}
+          actionCards={actionCards}
+          destroyedNodeIds={destroyedNodeIds}
+          onActionCardAction={handleActionCardAction}
+          onDiagnose={handleDiagnose}
+          trialSummary={trialFlow?.summary ?? null}
+        />
       ) : (
         <StartChoice
           busy={trialBusy}
           onUseFree={() => void handleUseFreeNodes()}
-          onNewNode={handleAskAiFromConsole}
+          onNewNode={() => {
+            lastActionRef.current = { id: "no_nodes.new_node" };
+            setNewNodeOpen(true);
+          }}
+          trial={trialFlow}
+          onRetryTrial={handleRetryTrial}
+          onSkipProbe={handleSkipTrialProbe}
         />
       )}
       {settingsOpen && settingsConsulting ? null : panelOpen && shell.docked ? (
@@ -1776,7 +2244,14 @@ export default function App() {
         onConnectModeChanged={() => vpn.reload()}
         assistant={aiPanel}
         onConsultingChange={setSettingsConsulting}
-        onSectionChange={setSettingsSection}
+        onSectionChange={(section) => {
+          setSettingsSection(section);
+          lastActionRef.current = {
+            id: `settings.${
+              section === "network" ? "connection" : section
+            }`,
+          };
+        }}
         point={settingsPoint}
         account={myServers.account}
         wallet={myServers.wallet}
@@ -1788,12 +2263,7 @@ export default function App() {
           closeSettings();
           myServers.openTopUp();
         }}
-        onViewBills={() =>
-          setAppNotice({
-            level: "info",
-            text: "账单明细下一版接入，当前余额可在充值里查看。",
-          })
-        }
+        onViewBills={() => void handleViewBills()}
       />
 
       <ConnectionOverlay

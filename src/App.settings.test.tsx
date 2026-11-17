@@ -248,7 +248,11 @@ describe("设置 → 添加节点", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
     fireEvent.click(screen.getByRole("button", { name: "关闭设置" }));
 
-    await waitFor(() => expect(screen.getByText("2 个节点")).toBeTruthy());
+    await waitFor(() =>
+      expect(document.querySelector(".stage-card__sub")?.textContent).toContain(
+        "2 个节点",
+      ),
+    );
   }, 15_000);
 });
 
