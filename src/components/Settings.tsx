@@ -21,6 +21,7 @@ import type {
   RuntimeView,
 } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
+import { formatUsdCents } from "../myservers/labels";
 import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
 import { useFocusTrap } from "../ui/focus";
 import { isComposingEvent } from "../ui/ime";
@@ -73,7 +74,12 @@ interface Props {
   /** AI 指路：section 内的 row 高亮 2 秒；row=null 只切段。 */
   point?: { section: SectionId; row: string | null; nonce: number } | null;
   account?: MyServerAccount | null;
+  /** 余额与账号菜单共用同一份 wallet 状态；未接线时按「—」显示。 */
   wallet?: MyServerWallet | null;
+  walletLoading?: boolean;
+  walletError?: string | null;
+  /** 余额读取失败时的重试；与账号菜单的「重试」是同一个动作。 */
+  onRefreshWallet?: () => void;
   onLogin?: () => void;
   onTopUp?: () => void;
   onViewBills?: () => void;
@@ -649,9 +655,11 @@ export function Settings({
   point = null,
   account = null,
   wallet = null,
+  walletLoading = false,
+  walletError = null,
+  onRefreshWallet,
   onLogin,
   onTopUp,
-  onViewBills,
 }: Props) {
   const connected = runtime.state === "running" || runtime.state === "degraded";
   const runtimeActive =
@@ -2563,15 +2571,43 @@ export function Settings({
             {account?.logged_in ? (
               <>
                 <div className="settings-row" {...pointAttrs("account.login")}>
-                  <div>
+                  <div className="settings-account__identity">
                     <div className="settings-row__label">邮箱</div>
-                    <div className="settings-row__value">{account.email ?? "已登录"}</div>
+                    <div
+                      className="settings-account__email"
+                      title={account.email ?? undefined}
+                    >
+                      {account.email ?? "已登录"}
+                    </div>
                   </div>
                 </div>
                 <div className="settings-row" {...pointAttrs("account.balance")}>
                   <div>
                     <div className="settings-row__label">余额</div>
-                    <div className="settings-row__value num">{balanceText(wallet)}</div>
+                    {walletError ? (
+                      <p className="settings-account__error">
+                        余额暂时读不到。
+                        <button
+                          type="button"
+                          className="settings-link"
+                          onClick={onRefreshWallet}
+                          disabled={!onRefreshWallet}
+                        >
+                          重试
+                        </button>
+                      </p>
+                    ) : (
+                      <div className="settings-account__amount num">
+                        {walletLoading
+                          ? "读取中"
+                          : wallet
+                            ? formatUsdCents(wallet.balance_cents)
+                            : "—"}
+                      </div>
+                    )}
+                    <p className="settings-note">
+                      余额按天扣费，每台服务器单独计费。
+                    </p>
                   </div>
                   <div className="settings-row__aside">
                     <button
@@ -2581,14 +2617,6 @@ export function Settings({
                       disabled={!onTopUp}
                     >
                       充值
-                    </button>
-                    <button
-                      type="button"
-                      className="settings-link"
-                      onClick={onViewBills}
-                      disabled={!onViewBills}
-                    >
-                      查看账单
                     </button>
                   </div>
                 </div>
@@ -2804,13 +2832,6 @@ export function Settings({
       ) : null}
     </>
   );
-}
-
-/** 账户段余额：金额来自 wallet，货币沿用后端返回。 */
-function balanceText(wallet: MyServerWallet | null): string {
-  if (!wallet) return "—";
-  const amount = (wallet.balance_cents / 100).toFixed(2);
-  return wallet.currency === "USD" ? `$${amount}` : `${amount} ${wallet.currency}`;
 }
 
 function ResetStepIcon({ status }: { status: "ok" | "failed" | "skipped" }) {

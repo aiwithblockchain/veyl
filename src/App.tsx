@@ -2207,7 +2207,7 @@ export default function App() {
           </button>
           {accountMenu === "nav" && myServers.loggedIn ? (
             <AccountMenu
-              variant="nav"
+              email={myServers.account?.email ?? null}
               wallet={myServers.wallet}
               walletError={myServers.walletError}
               onTopUp={() => myServers.openTopUp()}
@@ -2486,6 +2486,9 @@ export default function App() {
         point={settingsPoint}
         account={myServers.account}
         wallet={myServers.wallet}
+        walletLoading={myServers.walletLoading}
+        walletError={myServers.walletError}
+        onRefreshWallet={() => void myServers.refreshWallet()}
         onLogin={() => {
           closeSettings();
           myServers.openLogin();

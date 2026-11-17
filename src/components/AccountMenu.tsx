@@ -5,8 +5,8 @@ import { useFocusTrap } from "../ui/focus";
 import { formatUsdCents } from "../myservers/labels";
 
 interface Props {
-  /** 锚在左栏账号行（向上展开）还是导航头像（右侧浮层）。 */
-  variant: "rail" | "nav";
+  /** 账号邮箱；菜单头部只显示这一行，不重复头像。 */
+  email?: string | null;
   wallet: MyServerWallet | null;
   walletError: string | null;
   disabled?: boolean;
@@ -18,9 +18,9 @@ interface Props {
 
 const LOGOUT_FAILED = "没能退出登录，稍后再试。";
 
-/** 账号菜单：余额 / 充值 / 退出登录；不做二次确认，失败才给结果。 */
+/** 账号菜单：邮箱 / 余额 / 充值 / 退出登录；不做二次确认，失败才给结果。 */
 export function AccountMenu({
-  variant,
+  email,
   wallet,
   walletError,
   disabled = false,
@@ -64,11 +64,19 @@ export function AccountMenu({
       />
       <div
         ref={panelRef}
-        id={variant === "rail" ? "rail-account-menu" : undefined}
-        className={`account-menu account-menu--${variant}`}
+        className="account-menu"
         role="dialog"
         aria-label="账户菜单"
       >
+        {email ? (
+          <>
+            <div className="account-menu__email" title={email}>
+              {email}
+            </div>
+            <div className="account-menu__divider" />
+          </>
+        ) : null}
+
         <div className="account-menu__balance">
           <div className="account-menu__balance-main">
             <span className="account-menu__label">余额</span>

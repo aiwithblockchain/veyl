@@ -614,57 +614,6 @@ describe("三区外壳与连接舞台", () => {
     expect(create).not.toHaveBeenCalled();
   }, 15_000);
 
-  it("查看账单先拉起登录，登录后回到账户页", async () => {
-    localStorage.setItem(
-      "veyl.mock.account",
-      JSON.stringify({ logged_in: true, email: "buyer@example.com" }),
-    );
-    // 挂载时读一次余额正常；点「查看账单」时的校验返回登录过期。
-    let walletCalls = 0;
-    vi.spyOn(bridge, "myServerWallet").mockImplementation(async () => {
-      walletCalls += 1;
-      if (walletCalls === 2) {
-        throw {
-          code: "AUTH",
-          message: "登录已过期。",
-          retryable: false,
-          details: { reason: "auth_required" },
-        };
-      }
-      return {
-        balance_cents: 1230,
-        currency: "USD",
-        denominations_cents: [1000],
-        updated_at: new Date(0).toISOString(),
-      };
-    });
-
-    await renderApp();
-    fireEvent.click(screen.getByRole("button", { name: "设置" }));
-    await screen.findByRole("dialog", { name: "设置" });
-    fireEvent.click(screen.getByRole("tab", { name: "账户" }));
-    fireEvent.click(await screen.findByRole("button", { name: "查看账单" }));
-
-    expect(
-      await screen.findByRole("dialog", { name: "登录我的服务器" }),
-    ).toBeTruthy();
-    expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull();
-
-    fireEvent.change(screen.getByPlaceholderText("you@example.com"), {
-      target: { value: "buyer@example.com" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
-    fireEvent.change(await screen.findByLabelText("验证码"), {
-      target: { value: "123456" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "登录" }));
-
-    await waitFor(() =>
-      expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy(),
-    );
-    expect(await screen.findByText(/账单明细下一版接入/)).toBeTruthy();
-  }, 15_000);
-
   it("让 AI 帮我选只发消息，不建机", async () => {
     await renderApp();
     const send = vi.spyOn(bridge, "sendMessage").mockResolvedValue({

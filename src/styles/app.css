@@ -1702,6 +1702,47 @@ body[data-resizing] {
   word-break: break-all;
 }
 
+/* 设置 › 账户：邮箱整行省略，金额与账号菜单同一格式。 */
+.settings-account__identity {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-account__email {
+  margin-top: 2px;
+  font-size: 15px;
+  color: var(--ink);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.settings-account__amount {
+  margin: 2px 0 0;
+  font-size: 20px;
+  line-height: 1.2;
+  letter-spacing: 0;
+  color: var(--ink);
+}
+
+.settings-account__amount + .settings-note {
+  margin-top: 4px;
+}
+
+.settings-account__error {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--amber);
+}
+
+.settings-account__error + .settings-note {
+  margin-top: 4px;
+}
+
 .settings-row__aside {
   display: flex;
   align-items: center;
@@ -4358,128 +4399,7 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
-.rail-account {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 2px;
-}
-
-.rail-account--loading {
-  height: 44px;
-}
-
-.rail-account__loading-text {
-  font-size: 13px;
-  color: var(--ink-3);
-}
-
-.rail-account__text {
-  font-size: 13px;
-  color: var(--ink-2);
-}
-
-.rail-account__login {
-  margin-left: auto;
-  min-height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--hair-strong);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.rail-account__retry {
-  margin-left: auto;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--link);
-  font-size: 13px;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.rail-account--signed-in {
-  display: block;
-}
-
-.rail-account__row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  height: 52px;
-  padding: 0 2px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  text-align: left;
-}
-
-.rail-account__row:hover {
-  background: var(--bg-hover);
-}
-
-.rail-account__meta {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-}
-
-.rail-account__email {
-  overflow: hidden;
-  font-size: 13px;
-  line-height: 1.4;
-  font-weight: 500;
-  color: var(--ink);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rail-account__balance {
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--ink-3);
-}
-
-.rail-account__balance.is-error {
-  color: var(--amber);
-}
-
-.rail-account__chevron {
-  flex: none;
-  width: 12px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.rail-account--compact {
-  justify-content: center;
-}
-
-.rail-account__avatar-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-}
-
-.rail-account__avatar-btn:hover {
-  background: var(--bg-hover);
-}
-
-/* 账号菜单：左栏向上展开，导航头像向右浮出。 */
+/* 账号菜单：透明遮罩，点空白处关闭。 */
 .account-menu__backdrop {
   position: fixed;
   inset: 0;
@@ -4487,10 +4407,13 @@ body[data-resizing] {
   background: transparent;
 }
 
+/* 账号菜单：锚在导航头像右侧（全仓只有这一种布局）。 */
 .account-menu {
   position: absolute;
+  left: calc(100% + 12px);
+  bottom: -8px;
   z-index: 61;
-  width: 248px;
+  width: 280px;
   padding: 8px;
   border: 1px solid var(--hair-strong);
   border-radius: 10px;
@@ -4500,16 +4423,17 @@ body[data-resizing] {
     0 1px 2px rgba(23, 22, 20, 0.06);
 }
 
-.account-menu--rail {
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 6px);
-}
-
-.account-menu--nav {
-  left: calc(100% + 12px);
-  bottom: -8px;
-  width: 280px;
+/* 头部只留邮箱：头像就是锚点，菜单里不再重复。 */
+.account-menu__email {
+  height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 36px;
+  color: var(--ink-2);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .account-menu__balance {
@@ -4536,6 +4460,7 @@ body[data-resizing] {
   font-family: var(--mono);
   font-size: 20px;
   line-height: 1.1;
+  letter-spacing: 0;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
@@ -4591,6 +4516,7 @@ body[data-resizing] {
   background: transparent;
   color: var(--red);
   font-size: 13px;
+  font-weight: 500;
   text-align: left;
 }
 
