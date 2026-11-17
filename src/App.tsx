@@ -61,7 +61,6 @@ import { displayNodeNames } from "./ui/nodeList";
 import { ISSUE_REPORT_OPENING } from "./ui/issueReport";
 import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
 import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
-import { readDestination, writeDestination, type Destination } from "./ui/destination";
 import { IconConsole, IconServer, IconSliders } from "./components/icons";
 import { AccountAvatar } from "./components/AccountAvatar";
 import { AccountMenu } from "./components/AccountMenu";
@@ -80,6 +79,9 @@ const AI_EVENTS = new Set<AgentEvent["name"]>([
 ]);
 
 type SettingsSection = "ai" | "network" | "account" | "advanced";
+
+/** 外壳只有两个 destination：连接（舞台）与我的服务器（列表 + 详情）。 */
+type Destination = "client" | "servers";
 
 /** 免费节点试用到期：节点已被清走，只留「新建节点」。 */
 function TrialExpired({ onNewNode }: { onNewNode: () => void }) {
@@ -344,12 +346,10 @@ export default function App() {
   const [hasEverConnected, setHasEverConnected] = useState(readEverConnected);
   const [panelOpen, setPanelOpen] = useState(readInitialPanelOpen);
   // destination 决定左栏与中间区：客户端是配置列表 + 控制台，服务器是服务器列表 + 选中那台。
-  const [destination, setDestination] = useState<Destination>(() =>
-    readDestination(localStorage),
-  );
+  // 冷启动一律落在连接页：不恢复上次停留，避免服务器页在未登录/零台时变成死胡同。
+  const [destination, setDestination] = useState<Destination>("client");
   const changeDestination = (next: Destination) => {
     setDestination(next);
-    writeDestination(localStorage, next);
   };
   /** 新建节点只有一个宿主：client 舞台；从服务器页进入时记住来源，返回回去。 */
   const [newNodeOrigin, setNewNodeOrigin] = useState<

@@ -5,7 +5,6 @@ import App from "./App";
 import { getAgentBridge } from "./agent";
 import type { MyServer, MyServerCredentialNode } from "./agent/bridge";
 import type { ConfigSummary } from "./agent/protocol";
-import { DESTINATION_KEY, DESTINATION_VERSION, DESTINATION_VERSION_KEY } from "./ui/destination";
 
 const CONFIG_ID = "cfg_1";
 
@@ -185,23 +184,18 @@ afterEach(() => {
 });
 
 describe("destination 与我的服务器", () => {
-  it("记住上次停留的 destination；版本不符回连接屏", async () => {
-    const { runtimeStart } = prepare();
-    localStorage.setItem(DESTINATION_KEY, "servers");
-    localStorage.setItem(DESTINATION_VERSION_KEY, DESTINATION_VERSION);
+  it("冷启动一律落在连接页，不恢复上次的 destination", async () => {
+    prepare();
+    // 旧实现会按这两个键恢复到服务器页；现在它们不再被读取。
+    localStorage.setItem("veyl.ui.destination", "servers");
+    localStorage.setItem("veyl.ui.destinationVersion", "destinations-4");
 
-    const first = render(<App />);
-    expect(
-      await screen.findByRole("complementary", { name: "服务器列表" }),
-    ).toBeTruthy();
-    first.unmount();
+    render(<App />);
 
-    localStorage.setItem(DESTINATION_KEY, "servers");
-    localStorage.setItem(DESTINATION_VERSION_KEY, "old-version");
-    const second = render(<App />);
     expect(await screen.findByRole("button", { name: "连接节点" })).toBeTruthy();
-    expect(runtimeStart).not.toHaveBeenCalled();
-    second.unmount();
+    expect(
+      screen.queryByRole("complementary", { name: "服务器列表" }),
+    ).toBeNull();
   });
 
   it("切换 destination 不发运行时命令；安装中的服务器图标带圆点", async () => {
