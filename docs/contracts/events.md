@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.16.2`
+> 契约版本：`2.17.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，版本以该文件头为准）
@@ -22,7 +22,7 @@
 - **落库实体字段的时间戳**（`created_at` / `first_seen` / `last_seen` / `checked_at` 等）：**Unix 毫秒整数**，与 `data-model.md` 的列类型一致。见 §2.3。
 - 错误码 **大写下划线**。
 - 所有 payload 带 `contract_version`。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.16.2`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.17.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
 
 > **命名决策**：事件名沿用 TweetPilot 的真实名称（`message-chunk`、`thinking-chunk`、`tool-call-start`、`tool-call-end`、`ai-status`、`ai-compact`、`ai-request-end`），**不**加 `ai-` 前缀。`docs/phase-1-technical-design.md` §4.2 写的 `agent://delta` / `agent://tool` 是笔误，以本契约为准。
 
@@ -59,7 +59,7 @@
 | 25 | `region-changed` | Host → UI | `RegionChangedPayload` | **2.12 新增**：地区生效值变化（AI 写入） |
 | 26 | `my-server-changed` | Host → UI | `MyServerChangedPayload` | **2.13.0 新增**：我的服务器状态变化 |
 | 27 | `my-server-order-changed` | Host → UI | `MyServerOrderChangedPayload` | **2.13.0 新增**：下单 / 开通进度 |
-| 28 | `quit-requested` | Host → UI | `QuitRequestedPayload` | **2.14.0 新增**：有连接时请求前端弹退出确认 |
+| 28 | `quit-requested` | Host → UI | `QuitRequestedPayload` | **2.14.0 新增**：请求前端弹退出确认；**2.17.0 起与是否已连接无关** |
 | 29 | `trial-expired` | Host → UI | `TrialExpiredPayload` | **2.15.0 新增**：免费节点试用到期，种子节点已移除 |
 | 30 | `settings-point` | Host → UI | `SettingsPointPayload` | **2.15.0 新增**：AI 指路，打开设置并高亮某段/某行 |
 | 31 | `quit-dismissed` | Host → UI | `QuitDismissedPayload` | **2.15.0 新增**：退出确认未经决策就结束，前端收起弹窗 |
@@ -112,7 +112,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -134,7 +134,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -152,7 +152,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -206,7 +206,7 @@ type DisplayAction =
   | { kind: "compose_report_mail"; report_id: string };
 
 type ToolCallEndPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -269,7 +269,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -314,7 +314,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -342,7 +342,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -380,7 +380,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -404,7 +404,7 @@ type RuntimeStateChangedPayload = {
 
 - `snapshot.state === to`。不一致说明有人绕过了单写者，属于实现缺陷。
 - `snapshot.mixed_port` 是 `to = "running" | "degraded"` 时 `proxy_card` 的唯一端口来源（`proxy_params` 的 `runtime` 来源）。
-- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.16.2`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
+- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.17.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
 - payload ≤ 64 KB；`RuntimeSnapshot` 本身远小于上限，不需要截断。
 
 UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断入口；用 `snapshot.mixed_port` 重渲染代理卡。
@@ -415,7 +415,7 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   health: HealthSnapshot;
   // 2.2 新增：本次运行累计流量与速率。
   // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
@@ -451,7 +451,7 @@ UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；面板上给用�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag" | "rules_update";
   origin: "ui" | "agent";       // 必填；第一帧也带，旧记录按 "ui"
@@ -485,7 +485,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -502,7 +502,7 @@ type AppLifecycleChangedPayload = {
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   seed_id: "veyl_seed";
   content_sha256: string;           // 2.0：变化判定依据
   version: string | null;           // 文件里的 version，仅展示
@@ -538,13 +538,13 @@ type DefaultProfileUpdatedPayload = {
 | 事件 | 窗口 | 进程 | 连接 | 是否提示 | 发出的事件 |
 |---|---|---|---|---|---|
 | 点窗口关闭按钮 / Cmd+W | 隐藏 | 存活 | 保持 | 否 | `app-lifecycle-changed{state:"background"}` |
-| Cmd+Q / 菜单「退出 Veyl」（有连接） | 显示并聚焦 | 等用户选择 | 保持 | **是，应用内弹窗** | `quit-requested` |
+| Cmd+Q / 菜单「退出 Veyl」（`QuitRoute::Menu`） | 显示并聚焦 | 等用户选择 | 保持 | **是，应用内弹窗** | `quit-requested` |
 | 退出确认 30 秒无决策 | 隐藏 | 存活 | 保持 | — | `app-lifecycle-changed{state:"background"}` |
 | 确认选「后台运行」 | 隐藏 | 存活 | 保持 | — | `app-lifecycle-changed{state:"background"}` |
-| 确认选「退出」 | 关闭 | 结束 | 断开 | 仅断开失败时 | 无（进程即将结束） |
-| Cmd+Q / 菜单「退出 Veyl」（没有连接） | 不变 | 结束 | — | 否 | 无 |
+| 确认选「退出」 | 关闭 | 结束 | 有连接时断开 | 仅断开失败时 | 无（进程即将结束） |
 | 托盘「显示 Veyl」 | 显示并聚焦 | 存活 | 保持 | — | `app-lifecycle-changed{state:"foreground"}` |
-| 托盘「退出」 | 关闭 | 结束 | 断开 | 仅断开失败时 | 无 |
+| 托盘「退出」（`QuitRoute::Tray`） | 关闭 | 结束 | 有连接时断开 | 仅断开失败时 | 无 |
+| 系统注销 / 关机（`QuitRoute::System`） | 关闭 | 结束 | 有连接时断开 | 否 | 无 |
 | 再次启动（单实例唤起） | 显示并聚焦 | 存活 | 保持 | — | `app-lifecycle-changed{state:"foreground"}` |
 
 #### 4.7.3 不变量
@@ -553,13 +553,28 @@ type DefaultProfileUpdatedPayload = {
 - **`quitting` 期间拒绝新的连接请求**：`runtime_start` 返回 `PRECONDITION_FAILED`，`details.reason = "quitting"`。
 - **`foreground` / `background` 只在值变化时发**，重复设置不重复发。
 
-#### 4.7.4 `quit-requested`（2.14.0 新增）
+#### 4.7.4 `quit-requested`（2.14.0 新增；2.17.0 起按退出路由决定）
 
-有连接时（`starting` / `running` / `degraded` / `restarting`，或 TUN 正在运行 / 启动中），Host 拦截 Cmd+Q / 菜单「退出 Veyl」后先显示主窗口，再发本事件请求前端弹出应用内确认框。**没有连接时不发**，直接走退出流程。
+是否发本事件由**退出路由**决定（实现 `QuitRoute`，`src-tauri/src/lifecycle.rs`），与连接状态无关：
+
+| 路由 | 触发 | 发 `quit-requested` |
+|---|---|---|
+| `QuitRoute::Menu` | Cmd+Q / 菜单「退出 Veyl」 | **恒发**（任何时候，不论是否已连接） |
+| `QuitRoute::System` | 系统注销 / 关机触发的 `ExitRequested` | 不发，直接退出 |
+| `QuitRoute::Tray` | 托盘菜单「退出」 | 不发，直接退出 |
+
+`Menu` 路由先显示主窗口，再发本事件请求前端弹出应用内确认框。未连接时同样发：选「后台运行」还是结束进程，与有没有连接无关（2.17.0 之前只在有连接时拦截，已废止）。
+
+`System` / `Tray` 不发的原因不同，但结论一样——用户已经用更明确的方式说了「退出」：
+
+- `System`：系统正在收尾，弹窗只会卡住注销 / 关机；此时也没有「保持连接」这个选项。
+- `Tray`：从托盘小菜单里逐级点出来的「退出」，意图比 Cmd+Q 更明确，再问一次就是二次确认套二次确认。
+
+UI 用自身的连接状态选择弹窗文案（`docs/design/quit-dialog.md` §6：已连接 `保持连接` / `断开连接并恢复网络设置`，未连接 `留在菜单栏` / `关闭 Veyl`）。事件载荷不带连接状态，也不新增字段。
 
 ```ts
 type QuitRequestedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   emitted_at: string;
 };
 ```
@@ -579,7 +594,7 @@ UI 收到后弹确认框，用户选择后调用 `quit_decision { action }`（`c
 
 ```ts
 type QuitDismissedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   emitted_at: string;
 };
 ```
@@ -600,7 +615,7 @@ type QuitDismissedPayload = {
 
 ```ts
 type AskUserQuestionPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   session_id: string;
   request_id: string;
   question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
@@ -685,7 +700,7 @@ tool-call-end    (同一 request_id)
 
 ```ts
 type ConfigChangedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   change: "created" | "updated" | "deleted" | "activated";
   config_id: string;
   config: ConfigSummary | null;      // deleted 时为 null；类型见 commands.md §3.0
@@ -721,7 +736,7 @@ type NodeListChangedReason =
   | "bindings_changed";       // config_update 整体替换了节点集
 
 type NodeListChangedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   reason: NodeListChangedReason;
   config_id: string | null;        // 只有 bindings_changed 时非空
   node_count_total: number;        // 节点池总数
@@ -743,7 +758,7 @@ type NodeListChangedPayload = {
 
 ```ts
 type NodeSwitchedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   config_id: string;
   from_node_id: string | null;
   to_node_id: string;
@@ -771,7 +786,7 @@ type NodeSwitchedPayload = {
 
 ```ts
 type IssueChangedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
   issue: IssueSummary;                  // 变更后的状态
   blocking_issue_id: string | null;     // 当前应插卡的那一条；null = 中间不插卡
@@ -809,7 +824,7 @@ type IssueChangedPayload = {
 
 ```ts
 type LayoutUpdatedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   config_id: string;
   revision: number;            // 每配置单调递增，从 1 开始
   layout: Layout;              // 见 commands.md §3.0
@@ -863,7 +878,7 @@ type LayoutUpdatedPayload = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   config_id: string;
   routing_mode: "direct" | "proxy_all" | "proxy_selected";
   applied_mode: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -889,7 +904,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
@@ -922,7 +937,7 @@ Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 
 ```ts
 type CoreUpgradeProgressPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   job_id: string;
   origin: "ui" | "agent";         // 必填
   phase: "downloading" | "verifying" | "unpacking" | "installing" | "activating";
@@ -945,7 +960,7 @@ type CoreUpgradeProgressPayload = {
 
 ```ts
 type CoreUpgradeFinishedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   job_id: string;
   origin: "ui" | "agent";   // 必填
   ok: boolean;
@@ -967,7 +982,7 @@ type CoreUpgradeFinishedPayload = {
 
 ```ts
 type NodeProbeProgressPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   run_id: string;
   config_id: string;
   phase: "preparing" | "probing";
@@ -996,7 +1011,7 @@ type NodeProbeProgressPayload = {
 
 ```ts
 type NodeProbeFinishedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   run_id: string;
   config_id: string;
   total: number;
@@ -1032,7 +1047,7 @@ type NodeProbeFinishedPayload = {
 
 ```ts
 type RegionChangedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   region: string | null;          // 生效地区的小写 ISO 3166-1 alpha-2；判不出为 null
   source: "system" | "ai";        // 当前生效值的来源
   emitted_at: string;
@@ -1058,7 +1073,7 @@ type RegionChangedPayload = {
 
 ```ts
 type MyServerChangedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   server_id: string;
   state: string;                   // MyServerState，见 commands.md §10.1
   failure?: {
@@ -1085,7 +1100,7 @@ type MyServerChangedPayload = {
 
 ```ts
 type MyServerOrderChangedPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   order_id: string;
   state: string;                   // MyServerOrderState，见 commands.md §10.1
   failure?: {
@@ -1110,7 +1125,7 @@ type MyServerOrderChangedPayload = {
 
 ```ts
 type TrialExpiredPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   ended_at: string;              // 试用结束时刻（ISO 8601 UTC），与 trial_state.ended_at 同值
   removed_node_count: number;    // 全库去重后移除的种子节点数；可能为 0（池里本来就没有）
   disconnected: boolean;         // 本次是否真的断开了连接
@@ -1132,7 +1147,7 @@ AI 指路：打开设置并高亮某一段的某一行。由只读工具 `OpenSe
 
 ```ts
 type SettingsPointPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   section: "ai" | "connection" | "account" | "advanced";
   row: string | null;            // 行 id；只定位到段时为 null
   emitted_at: string;
@@ -1153,7 +1168,7 @@ AI 把地区 / 规格选进「新建节点」舞台。由工具 `StageSelect` �
 
 ```ts
 type StageSelectPayload = {
-  contract_version: "2.16.2";
+  contract_version: "2.17.0";
   screen: "new_node";
   region: string | null;         // 目录里的地区 id；本次没请求就是 null
   plan: string | null;           // 目录里的套餐 id；同上
@@ -1281,6 +1296,14 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.17.0（2026-11-17，Cmd+Q 任何时候都弹退出确认）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.17.0`；全文 `contract_version` 字面量替换为 `2.17.0`（实现侧常量 `EVENT_CONTRACT_VERSION`） | 元数据 | 产品决定 |
+| 2 | §4.7.2 删去「没有连接时不拦截」一行；Cmd+Q / 菜单「退出 Veyl」（`QuitRoute::Menu`）不再区分连接状态，一律弹应用内确认；新增系统注销 / 关机（`QuitRoute::System`）一行；「确认选退出」与托盘「退出」的断开列改为「有连接时断开」 | 行为变更 | 产品决定：常驻菜单栏的应用，退出选择始终归用户 |
+| 3 | §4.7.4 改为按退出路由表说明：`Menu` 恒发 `quit-requested`；`System` / `Tray` 不发、直接退出。未连接时也发本事件，UI 按自身连接状态取文案（`quit-dialog.md` §6），载荷不加字段 | 语义澄清 | 同上；实现 `QuitRoute` |
 
 ### 2.16.2（2026-11-17，高亮是条件行为）
 

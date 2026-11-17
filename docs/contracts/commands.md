@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.36.9`
+> 契约版本：`2.36.11`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -1187,13 +1187,14 @@ type TunHelperInfoData = {
 
 应用内退出确认的决策回执。`action` 只接受 `"background"` 或 `"quit"`，其它取值返回 `INVALID_ARGUMENT / invalid_action`。
 
-有连接时（`starting` / `running` / `degraded` / `restarting`，或 TUN 正在运行 / 启动中），Host 先发 `quit-requested`（`events.md` §4.7.4），然后等本命令：
+**只有 `QuitRoute::Menu`（Cmd+Q / 菜单「退出 Veyl」）会先发 `quit-requested`**（`events.md` §4.7.4），这一步**与是否已连接无关**（2.36.11 起；此前只在有连接时拦截）。Host 先显示主窗口，然后等本命令：
 
 - `"background"`：隐藏主窗口，连接保持。
-- `"quit"`：走 §7.8.3 的退出流程。
+- `"quit"`：走 §7.8.3 的退出流程；有连接时先断开。
 - 等待上限 **30 秒**；超时按 `"background"` 处理，不阻塞退出。
 - **只有第一次决策生效**；重复调用返回 `accepted: false`，不改状态。超时或已回落后到达的决策同样被忽略。
-- 没有连接时**不发** `quit-requested`，直接走退出流程。
+- **`QuitRoute::System`（系统注销 / 关机）与 `QuitRoute::Tray`（托盘「退出」）不发 `quit-requested`**，直接走退出流程；这两种情况下本命令不会被调用。
+- 未连接时同样会收到 `quit-requested`：界面用自身连接状态选择文案（`docs/design/quit-dialog.md` §6），载荷不变。
 - 前端未就绪（还没调过任何命令）、主窗口不存在或事件发送失败时，Host 回落到原生确认框，保证退出流程不会卡住。
 - **不给 AI 工具**：退出是用户自己的动作，模型不能触发。
 
@@ -1883,7 +1884,7 @@ type UiContext = {
 | `screen` | `controls[].id` | `kind` |
 |---|---|---|
 | `onboarding` | `onboarding.connect` / `onboarding.other_provider` / `onboarding.get_key` | button |
-| `client` | `client.primary`（启动 / 断开 / 重新连接同一个 id） / `client.node_pick` / `client.ask_ai` | button / choice / button |
+| `client` | `client.primary`（启动 / 断开 / 重新连接同一个 id） / `client.node_pick` / `client.ask_ai` / `client.probe`（节点卡副行的「测速」文字入口） | button / choice / button / button |
 | `no_nodes` | `no_nodes.trial` / `no_nodes.new_node` | button |
 | `new_node` | `new_node.region` / `new_node.plan` / `new_node.create` / `new_node.ask_ai` | choice / choice / button / button |
 | `servers` | `servers.item` / `servers.connect` / `servers.rebuild`（端点未接入前不出现） / `servers.destroy` / `servers.ai_locate` | row / button / button / button / button |
@@ -1903,6 +1904,7 @@ screen: {screen}
 
 - 模板写在 Host，**前端不拼**；`text` 省略时 Host 生成的文本框同样来自固定模板：`界面事件：在「{screen 中文名}」点了「{label}」。`
 - `context` **不赋予任何额外权限**：模型据此发起的写操作，仍须满足工具各自的触发约束与确认点。`context` 里出现 `servers.destroy` 不等于用户同意销毁。
+- `client.probe` **只上报、不触发任何命令**：点「测速」由界面自己跑一轮节点测速（`node_probe_*` 是 UI 命令，不经模型）；`last_action` 只让模型知道用户刚做过什么，模型不得据此声称「我帮你测了」。
 - 未知 `screen` → `INVALID_ARGUMENT / invalid_context`，整条拒绝；未知控件 id 只剔除该条（UI 改版与 Host 版本不一致时，宁少一条也不要整轮失败）。
 - **反向的一条通道**：AI 通过 `StageSelect` 工具（`tools.md` §4.52）写「新建节点」舞台的地区与规格选择，Host 发 `stage-select` 事件（`events.md` §4.26）。事件只带本次请求的字段，`null` 表示不改；UI 合并后高亮。`context` 是 UI → AI 的上报，`stage-select` 是 AI → UI 的唯一写通道，两者互不替代。模型要拿真实 id 先调 `CatalogOptions`（`tools.md` §4.53）。
 
@@ -2427,8 +2429,8 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.36.9** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** |
-| `contracts/events.md` | **2.16.2** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2） |
+| `contracts/commands.md` | **2.36.11** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** |
+| `contracts/events.md` | **2.17.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
 | `contracts/tools.md` | **3.17.4** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** |
 | `data-model.md` | **9** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` + `current_node_id` 允许为 `NULL`（seed 预选不写库） |
@@ -2445,6 +2447,19 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.36.11（2026-11-17，Cmd+Q 任何时候都弹退出确认）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.36.11`；§7.8.4 去掉「有连接时才发 `quit-requested`」：按退出路由说明——`QuitRoute::Menu`（Cmd+Q / 菜单「退出 Veyl」）任何连接状态都先弹确认；`QuitRoute::System`（注销 / 关机）与 `QuitRoute::Tray`（托盘「退出」）不发、直接退出；`quit` 有连接时先断开 | 行为变更 | 产品决定（常驻菜单栏，退出选择归用户）；`events.md` 2.17.0；实现 `QuitRoute` |
+| 2 | §15 矩阵 `events.md` 同步到 2.17.0 | 元数据 | 同上 |
+
+### 2.36.10（2026-11-17，连接舞台的「测速」入口）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.36.10`；§9.1.1 静态登记表新增 `client.probe`（`screen = client`、`kind = button`，label「测速」），并写明它**只随 `last_action` 上报、不触发任何命令**——测速由界面自己跑 `node_probe_*`，不经模型 | 控件登记 | `docs/design/connection-stage-probe.md` |
 
 ### 2.36.9（2026-11-17，种子失败细分增「来源过期」）
 
