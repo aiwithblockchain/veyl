@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { getAgentBridge } from "./agent";
 import type { LlmProvider } from "./agent/bridge";
+import { AGENT_EVENTS, CONTRACT_VERSION } from "./agent/protocol";
 import type { ConfigDetail, ConfigSummary } from "./agent/protocol";
 
 const CONFIG_ID = "cfg_report";
@@ -110,9 +111,39 @@ afterEach(() => {
 
 describe("问题报告入口", () => {
   it("连点只开一次会话、发一条 hidden 开场，不产生用户气泡", async () => {
+    // 报告入口只在失败态：先让连接报失败，再点。
+    const gate = { resolve: (_value: unknown) => {} };
+    vi.spyOn(bridge, "runtimeStart").mockImplementation(
+      () => new Promise((resolve) => (gate.resolve = resolve)) as never,
+    );
     render(<App />);
     await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
     await act(async () => {});
+    fireEvent.click(await screen.findByRole("button", { name: "连接节点" }));
+    await waitFor(() => expect(bridge.runtimeStart).toHaveBeenCalled());
+    act(() => {
+      (
+        bridge as unknown as { emit: (event: unknown) => void }
+      ).emit({
+        name: AGENT_EVENTS.runtimeStateChanged,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          from: "starting",
+          to: "failed",
+          event: "failed",
+          pid: null,
+          upstream_version: null,
+          reason: null,
+          error: null,
+          snapshot: {
+            state: "failed",
+            config_id: null,
+            last_transition_at: new Date(Date.now() + 1000).toISOString(),
+          },
+          emitted_at: new Date(Date.now() + 1000).toISOString(),
+        },
+      });
+    });
 
     const button = await screen.findByRole("button", { name: "报告问题" });
     fireEvent.click(button);

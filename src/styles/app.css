@@ -5578,6 +5578,8 @@ details[open] > .settings-fold__summary::before {
 }
 
 .stage-quick__value {
+  flex: 0 0 auto;
+  white-space: nowrap;
   padding: 12px 6px;
   margin: -12px -6px;
   border: 0;

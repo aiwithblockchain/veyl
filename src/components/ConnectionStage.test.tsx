@@ -148,6 +148,8 @@ interface StageOverrides {
   onSetRoutingMode?: (
     mode: "direct" | "proxy_all",
   ) => Promise<{ ok: boolean; message?: string }>;
+  onReportProblem?: () => void;
+  reportBusy?: boolean;
 }
 
 function stageElement(over: StageOverrides = {}) {
@@ -171,6 +173,8 @@ function stageElement(over: StageOverrides = {}) {
       routingMode={over.routingMode ?? null}
       onSetConnectMode={over.onSetConnectMode}
       onSetRoutingMode={over.onSetRoutingMode}
+      onReportProblem={over.onReportProblem}
+      reportBusy={over.reportBusy}
     />
   );
 }
@@ -994,5 +998,51 @@ describe("舞台快捷切换", () => {
       screen.queryByRole("button", { name: /切换流量范围/ }),
     ).toBeNull();
     expect(screen.queryByText("智能")).toBeNull();
+  });
+});
+
+describe("报告问题入口", () => {
+  it("正常状态不出现；failed 与 noTraffic 出现", async () => {
+    const onReport = vi.fn();
+    renderStage({ onReportProblem: onReport });
+    expect(screen.queryByRole("button", { name: "报告问题" })).toBeNull();
+    cleanup();
+
+    renderStage({
+      runtime: runtime({
+        state: "failed",
+        last_error: {
+          contract_version: "2.15.0",
+          code: "INTERNAL",
+          message: "装环境超时。",
+          retryable: true,
+          details: null,
+          request_id: "req_1",
+        },
+      }),
+      onReportProblem: onReport,
+    });
+    expect(
+      await screen.findByRole("button", { name: "报告问题" }),
+    ).toBeTruthy();
+    cleanup();
+
+    // 连上了但没流量：同样是需要报告的失败态。
+    renderStage({
+      connection: "connected",
+      runtime: runtime({
+        state: "running",
+        connected_since: new Date(Date.now() - 5000).toISOString(),
+        health: {
+          ...emptyRuntimeView().health,
+          data_plane: false,
+          checked_at: new Date().toISOString(),
+        },
+      }),
+      onReportProblem: onReport,
+    });
+    expect(
+      await screen.findByRole("button", { name: "报告问题" }),
+    ).toBeTruthy();
   });
 });

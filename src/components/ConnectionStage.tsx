@@ -544,8 +544,20 @@ export function ConnectionStage({
             ) : null}
           </p>
         ) : noTraffic ? (
-          <p className="stage-note">{NO_TRAFFIC_ACTION}</p>
-        ) : switchError || summary || onReportProblem ? (
+          <p className="stage-note">
+            {NO_TRAFFIC_ACTION}
+            {onReportProblem ? (
+              <button
+                type="button"
+                className="stage-note__link"
+                onClick={onReportProblem}
+                disabled={reportBusy}
+              >
+                报告问题
+              </button>
+            ) : null}
+          </p>
+        ) : switchError || summary ? (
           <p
             className={`stage-note${switchError ? " stage-note--error" : ""}${
               !switchError && summary ? " stage-note--summary" : ""
@@ -562,16 +574,6 @@ export function ConnectionStage({
                         : ""
                   }`
                 : null)}
-            {!switchError && onReportProblem ? (
-              <button
-                type="button"
-                className="stage-note__link"
-                onClick={onReportProblem}
-                disabled={reportBusy}
-              >
-                报告问题
-              </button>
-            ) : null}
           </p>
         ) : null}
       </div>
