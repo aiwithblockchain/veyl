@@ -1952,7 +1952,7 @@ export function Settings({
               <div className="settings-row__main">
                 <div className="settings-row__label">接管方式</div>
                 <p className="settings-note">
-                  Tun 模式接管全部流量；Proxy 模式只给设了代理的软件用。切换会短暂断开当前连接。
+                  Proxy 模式只给设了代理的软件用；Tun 模式接管全部流量。切换会短暂断开当前连接。
                 </p>
                 {modeError ? (
                   <p className="settings-feedback settings-feedback--error" role="alert">
@@ -1963,21 +1963,21 @@ export function Settings({
               <div className="settings-seg" role="group" aria-label="接管方式">
                 <button
                   type="button"
-                  className={connectMode === "tun" ? "is-selected" : ""}
-                  aria-pressed={connectMode === "tun"}
-                  disabled={!configId || modeBusy}
-                  onClick={() => requestConnectMode("tun")}
-                >
-                  Tun 模式
-                </button>
-                <button
-                  type="button"
                   className={connectMode === "system_proxy" ? "is-selected" : ""}
                   aria-pressed={connectMode === "system_proxy"}
                   disabled={!configId || modeBusy}
                   onClick={() => requestConnectMode("system_proxy")}
                 >
                   Proxy 模式
+                </button>
+                <button
+                  type="button"
+                  className={connectMode === "tun" ? "is-selected" : ""}
+                  aria-pressed={connectMode === "tun"}
+                  disabled={!configId || modeBusy}
+                  onClick={() => requestConnectMode("tun")}
+                >
+                  Tun 模式
                 </button>
               </div>
             </div>

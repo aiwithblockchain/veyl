@@ -211,8 +211,8 @@ function Harness({
         identityMissing={state.identityMissing}
         account={state.account}
         accountLoaded={state.accountLoaded}
+        accountError={state.accountError}
         wallet={state.wallet}
-        walletLoading={state.walletLoading}
         walletError={state.walletError}
         error={state.error}
         retrying={state.retrying}
@@ -225,7 +225,8 @@ function Harness({
         onLogout={state.logout}
         onTopUp={state.openTopUp}
         onRefreshWallet={() => void state.refreshWallet()}
-        onOpenSettings={() => {}}
+        onRefreshAccount={() => void state.refreshAccount()}
+        onToggleAccount={() => {}}
       />
       <MyServersPage
         bridge={bridge as unknown as AgentBridge}
@@ -763,26 +764,21 @@ describe("我的服务器 destination", () => {
     expect(await screen.findByText("已扣 $0.30，余额 $7.70。")).toBeTruthy();
   });
 
-  it("账号块：展开看余额；登出失败不假装退出", async () => {
+  it("左栏底部不再有设置，设置只留活动栏", async () => {
     const bridge = makeBridge();
-    bridge.myServerLogout.mockRejectedValueOnce({
-      code: "NETWORK",
-      message: "连不上服务器。",
-      retryable: true,
-    });
+    renderHarness(bridge);
+    await screen.findByRole("button", { name: /me@example.com/ });
+    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
+  });
+
+  it("账号块：行内显示邮箱与余额摘要", async () => {
+    const bridge = makeBridge();
     renderHarness(bridge);
 
-    fireEvent.click(await screen.findByRole("button", { name: /me@example.com/ }));
     expect(await screen.findByText("$8.00")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "登出" }));
     expect(
-      screen.getByText("退出后这台设备不再属于该账户；已有配置和节点不受影响。"),
+      screen.getByRole("button", { name: /me@example.com/ }),
     ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "确认退出" }));
-
-    expect(await screen.findByText(/没退出登录/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: /me@example.com/ })).toBeTruthy();
   });
 
   it("验证码错误：提示还能试几次", async () => {

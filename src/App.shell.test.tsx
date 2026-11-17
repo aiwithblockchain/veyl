@@ -101,13 +101,14 @@ describe("三区外壳与连接舞台", () => {
     expect(screen.getByRole("button", { name: "我的服务器" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "节点组" })).toBeNull();
     expect(screen.getByRole("button", { name: "设置" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "账户" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /账户/ })).toBeTruthy();
   });
 
-  it("先试用免费节点：三步按顺序落地，结束收成一句摘要", async () => {
+  it("先试用免费节点：三步按顺序落地，结束停在未连接，行内延迟与摘要一致", async () => {
     await renderApp();
     const probe = vi.spyOn(bridge, "nodeProbe");
     const batchProbe = vi.spyOn(bridge, "nodeProbeAll");
+    const start = vi.spyOn(bridge, "runtimeStart");
 
     fireEvent.click(screen.getByRole("button", { name: /先试用免费节点/ }));
 
@@ -118,7 +119,7 @@ describe("三区外壳与连接舞台", () => {
     expect(screen.getByText("加入免费节点")).toBeTruthy();
     expect(screen.getByText("逐个测速")).toBeTruthy();
 
-    // 先落配置：唯一一条、tun + 智能、两个免费节点。
+    // 先落配置：唯一一条、Proxy + 智能、两个免费节点。
     await waitFor(() => {
       const stored = JSON.parse(
         localStorage.getItem("veyl.configs.mock.v1") ?? "{}",
@@ -131,7 +132,7 @@ describe("三区外壳与连接舞台", () => {
         }>;
       };
       expect(stored.configs).toHaveLength(1);
-      expect(stored.configs[0].connect_mode).toBe("tun");
+      expect(stored.configs[0].connect_mode).toBe("system_proxy");
       expect(stored.configs[0].routing_mode).toBe("direct");
       expect(stored.configs[0].nodes.map((node) => node.name)).toEqual([
         "东京 01",
@@ -149,17 +150,128 @@ describe("三区外壳与连接舞台", () => {
     ]);
     expect(batchProbe).not.toHaveBeenCalled();
 
+    // 步骤流结束停在未连接：不自动 start，等用户自己点连接。
+    await waitFor(
+      () => expect(screen.getByText("已加入 2 个免费节点，最快 42ms")).toBeTruthy(),
+      { timeout: 5000 },
+    );
+    expect(start).not.toHaveBeenCalled();
+    expect(screen.queryAllByText(/已连接/)).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "连接节点" })).toBeTruthy();
+
+    // 节点行与摘要用同一份测速结果，数字一致。
+    const values = [...document.querySelectorAll(".stage-node__ms")].map(
+      (node) => node.textContent,
+    );
+    expect(values).toEqual(["42 毫秒", "42 毫秒"]);
+
+    // 步骤流完成时一次性预选最快；并列取列表靠前的东京。
+    await waitFor(() => {
+      const rows = screen.getAllByRole("option");
+      expect(rows[0].getAttribute("aria-selected")).toBe("true");
+      expect(rows[0].querySelector(".stage-node__fastest")).not.toBeNull();
+    });
+    const stageRows = screen.getAllByRole("option");
+    expect(stageRows[1].querySelector(".stage-node__fastest")).toBeNull();
+  }, 15_000);
+
+  it("试用预选切 destination 往返后不二次应用", async () => {
+    await renderApp();
+    vi.spyOn(bridge, "nodeProbe").mockImplementation(async (nodeId: string) => ({
+      node_id: nodeId,
+      reachable: true,
+      latency_ms: nodeId.includes("singapore") ? 42 : 90,
+      probe_method: "tcp",
+      checked_at: Date.now(),
+      error: null,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: /先试用免费节点/ }));
+    await waitFor(
+      () => expect(screen.getByText("已加入 2 个免费节点，最快 42ms")).toBeTruthy(),
+      { timeout: 5000 },
+    );
+    // 完成时预选最快的新加坡。
+    await waitFor(() => {
+      const rows = screen.getAllByRole("option");
+      expect(rows[1].getAttribute("aria-selected")).toBe("true");
+      expect(rows[1].querySelector(".stage-node__fastest")).not.toBeNull();
+    });
+
+    // 切走再回来：本地预选已消费，不再盖到新舞台；当前节点是东京。
+    fireEvent.click(screen.getByRole("button", { name: "我的服务器" }));
+    expect(
+      await screen.findByRole("complementary", { name: "服务器列表" }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await waitFor(() =>
+      expect(screen.getAllByRole("option").length).toBe(2),
+    );
+    const rowsAfter = screen.getAllByRole("option");
+    // 生产契约：seed 新建 current_node_id 留空，返回后没有选中。
+    expect(rowsAfter.every((row) => row.getAttribute("aria-selected") === "false")).toBe(
+      true,
+    );
+    expect(document.querySelectorAll(".stage-node__fastest").length).toBe(0);
+
+    // 点连接先切到目标节点（第一个）再连接。
+    const runtimeStart = vi.spyOn(bridge, "runtimeStart");
+    fireEvent.click(screen.getByRole("button", { name: "连接节点" }));
+    await waitFor(() => {
+      const stored = JSON.parse(
+        localStorage.getItem("veyl.configs.mock.v1") ?? "{}",
+      ) as {
+        configs: Array<{
+          current_node_id: string | null;
+          nodes: Array<{ node_id: string }>;
+        }>;
+      };
+      expect(stored.configs[0].current_node_id).toBe(
+        stored.configs[0].nodes[0].node_id,
+      );
+    });
+    await waitFor(() => expect(runtimeStart).toHaveBeenCalled());
+    // 等连接真正落地再结束，避免把在途启动留给下一条用例。
     await waitFor(
       () => expect(screen.getAllByText(/已连接/).length).toBeGreaterThan(0),
       { timeout: 5000 },
     );
-    expect(
-      screen.getByText("已加入 2 个免费节点，最快 42ms"),
-    ).toBeTruthy();
   }, 15_000);
 
-  it("测速全部失败：停在测速那步给原因，可以先连接", async () => {
+  it("重启后没有本会话步骤流：不显示收尾句", async () => {
+    seedCardConfig();
+    vi.spyOn(bridge, "nodeProbeSnapshot").mockResolvedValue({
+      configId: "cfg_stage",
+      results: [
+        {
+          node_id: "n1",
+          reachable: true,
+          latency_ms: 42,
+          probe_method: "tcp",
+          checked_at: Date.now(),
+          error: null,
+        },
+        {
+          node_id: "n2",
+          reachable: true,
+          latency_ms: 90,
+          probe_method: "tcp",
+          checked_at: Date.now(),
+          error: null,
+        },
+      ],
+      run: null,
+    } as never);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("先做这一步")).toBeTruthy());
+    expect(await screen.findByText("42 毫秒")).toBeTruthy();
+    expect(screen.queryByText(/已加入/)).toBeNull();
+  }, 15_000);
+
+  it("测速全部失败：停在测速那步给原因，跳过测速后停在未连接", async () => {
     await renderApp();
+    const start = vi.spyOn(bridge, "runtimeStart");
     vi.spyOn(bridge, "nodeProbe").mockRejectedValue({
       code: "NETWORK",
       message: "测速没完成。",
@@ -175,15 +287,15 @@ describe("三区外壳与连接舞台", () => {
     const probeRow = screen.getByText("逐个测速").closest(".stage-step");
     expect(probeRow?.className).toContain("is-failed");
     expect(
-      screen.getByText("两个节点都没测速成功，可以重试，或先连接。"),
+      screen.getByText("两个节点都没测速成功，可以重试，或跳过测速后自己点连接。"),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "先连接，不测速" }));
-    await waitFor(
-      () => expect(screen.getAllByText(/已连接/).length).toBeGreaterThan(0),
-      { timeout: 5000 },
+    fireEvent.click(screen.getByRole("button", { name: "跳过测速" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "连接节点" })).toBeTruthy(),
     );
+    expect(start).not.toHaveBeenCalled();
   }, 15_000);
 
   it("拉取免费节点失败：停在失败的步骤并说明原因，不落配置", async () => {
@@ -259,7 +371,7 @@ describe("三区外壳与连接舞台", () => {
     fireEvent.click(button);
 
     await waitFor(
-      () => expect(screen.getAllByText(/已连接/).length).toBeGreaterThan(0),
+      () => expect(screen.getByText("已加入 2 个免费节点，最快 42ms")).toBeTruthy(),
       { timeout: 5000 },
     );
     const stored = JSON.parse(
@@ -283,6 +395,12 @@ describe("三区外壳与连接舞台", () => {
   it("切换 destination 不重置连接", async () => {
     const container = await renderApp();
     fireEvent.click(screen.getByRole("button", { name: /先试用免费节点/ }));
+    await waitFor(
+      () => expect(screen.getByText("已加入 2 个免费节点，最快 42ms")).toBeTruthy(),
+      { timeout: 5000 },
+    );
+    // 步骤流结束不自动连接：用户自己点。
+    fireEvent.click(screen.getByRole("button", { name: "连接节点" }));
     await waitFor(
       () => expect(screen.getAllByText(/已连接/).length).toBeGreaterThan(0),
       { timeout: 5000 },
@@ -501,11 +619,24 @@ describe("三区外壳与连接舞台", () => {
       "veyl.mock.account",
       JSON.stringify({ logged_in: true, email: "buyer@example.com" }),
     );
-    vi.spyOn(bridge, "myServerWallet").mockRejectedValue({
-      code: "AUTH",
-      message: "登录已过期。",
-      retryable: false,
-      details: { reason: "auth_required" },
+    // 挂载时读一次余额正常；点「查看账单」时的校验返回登录过期。
+    let walletCalls = 0;
+    vi.spyOn(bridge, "myServerWallet").mockImplementation(async () => {
+      walletCalls += 1;
+      if (walletCalls === 2) {
+        throw {
+          code: "AUTH",
+          message: "登录已过期。",
+          retryable: false,
+          details: { reason: "auth_required" },
+        };
+      }
+      return {
+        balance_cents: 1230,
+        currency: "USD",
+        denominations_cents: [1000],
+        updated_at: new Date(0).toISOString(),
+      };
     });
 
     await renderApp();
@@ -553,6 +684,136 @@ describe("三区外壳与连接舞台", () => {
     ).toMatchObject({ screen: "new_node", last_action: { id: "new_node.ask_ai" } });
     expect(create).not.toHaveBeenCalled();
     expect(localStorage.getItem("veyl.configs.mock.v1")).toBeNull();
+  }, 15_000);
+
+  it("控件文案与舞台一致：node_pick 用国家 + 序号", async () => {
+    const config = seedCardConfig();
+    config.nodes[0].name = "meshflux69 [美国]";
+    localStorage.setItem(
+      "veyl.configs.mock.v1",
+      JSON.stringify({ configs: [config], activeId: config.config_id }),
+    );
+    const send = vi.spyOn(bridge, "sendMessage").mockResolvedValue({
+      requestId: "req_label",
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("先做这一步")).toBeTruthy());
+    expect(screen.getByText("美国 01")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const controls = (
+      send.mock.calls[0][2] as {
+        context: { controls: Array<{ id: string; label: string }> };
+      }
+    ).context.controls;
+    expect(controls.find((item) => item.id === "client.node_pick")?.label).toBe(
+      "美国 01",
+    );
+  });
+
+  it("空态预制问题：点击按普通消息发送并带 context，发送后消失", async () => {
+    await renderApp();
+    fireEvent.click(screen.getByRole("button", { name: "展开助手" }));
+    const send = vi.spyOn(bridge, "sendMessage").mockResolvedValue({
+      requestId: "req_preset",
+    });
+    const group = await screen.findByRole("group", { name: "可以这样问" });
+    expect(
+      [...group.querySelectorAll("button")].map((button) => button.textContent),
+    ).toEqual([
+      "连上了，但网页打不开",
+      "怎么换成更快的节点",
+      "为什么有的软件没走 VPN",
+      "为什么个别网站还是打不开",
+      "终端里的命令也想走 VPN",
+    ]);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "连上了，但网页打不开" }),
+    );
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const call = send.mock.calls[0];
+    expect(call[1]).toBe("连上了，但网页打不开");
+    expect(
+      (call[2] as { context: { screen: string } }).context.screen,
+    ).toBe("no_nodes");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("group", { name: "可以这样问" }),
+      ).toBeNull(),
+    );
+  }, 15_000);
+
+  it("导航账户图标打开账号菜单，不跳转我的服务器", async () => {
+    localStorage.setItem(
+      "veyl.mock.account",
+      JSON.stringify({ logged_in: true, email: "buyer@example.com" }),
+    );
+    vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
+      logged_in: true,
+      email: "buyer@example.com",
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "email",
+    });
+    vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
+      balance_cents: 1230,
+      currency: "USD",
+      denominations_cents: [1000],
+      updated_at: new Date(0).toISOString(),
+    });
+    vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers: [] });
+
+    await renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /账户/ }));
+    expect(
+      await screen.findByRole("dialog", { name: "账户菜单" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "充值" })).toBeTruthy();
+    expect(screen.getByText("$12.30")).toBeTruthy();
+    // 账户是浮层，不切 destination。
+    expect(
+      screen.queryByRole("complementary", { name: "服务器列表" }),
+    ).toBeNull();
+    expect(screen.getByText("从哪里开始？")).toBeTruthy();
+  }, 15_000);
+
+  it("主动退出只提示已退出登录，不误报登录过期", async () => {
+    localStorage.setItem(
+      "veyl.mock.account",
+      JSON.stringify({ logged_in: true, email: "buyer@example.com" }),
+    );
+    vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
+      logged_in: true,
+      email: "buyer@example.com",
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "email",
+    });
+    vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
+      balance_cents: 1230,
+      currency: "USD",
+      denominations_cents: [1000],
+      updated_at: new Date(0).toISOString(),
+    });
+    vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers: [] });
+    vi.spyOn(bridge, "myServerLogout").mockResolvedValue({
+      logged_in: false,
+      email: null,
+      account_id: null,
+      device_id: "dev_1",
+      account_kind: "device",
+    });
+
+    await renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /账户/ }));
+    await screen.findByRole("dialog", { name: "账户菜单" });
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+
+    expect(await screen.findByText("已退出登录")).toBeTruthy();
+    expect(screen.queryByText("登录已过期，请重新登录。")).toBeNull();
   }, 15_000);
 
   it("stage-select：舞台没开忽略；开了只覆盖非 null 字段并压过手动选择", async () => {

@@ -54,4 +54,22 @@ describe("createMockConfig 的 nodeIds", () => {
     expect(detail.node_count).toBe(2);
     expect(detail.current_node_id).toBe("n1");
   });
+
+  it("seed 新建留空当前节点，与生产契约一致", () => {
+    rememberMockNode({
+      node_id: "seed_1",
+      name: "meshflux69 [美国]",
+      server: "10.0.0.2",
+      port: 8388,
+      method: "aes-256-gcm",
+      protocol: "shadowsocks",
+      source: "seed",
+      created_at: 0,
+    });
+    const detail = createMockConfig("免费节点", "system_proxy", {
+      nodeIds: ["seed_1"],
+      source: "seed",
+    });
+    expect(detail.current_node_id).toBeNull();
+  });
 });

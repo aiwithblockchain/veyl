@@ -14,6 +14,7 @@ import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, shouldRefreshSnapshotO
 import type {
   DefaultProfileStatus,
   MyServer,
+  NodeProbeResult,
   PendingQuestion,
   QuitDecisionAction,
   UiControl,
@@ -56,11 +57,14 @@ import {
   shellLayout,
 } from "./ui/breakpoints";
 import { isDisconnectFailure } from "./ui/middleArea";
+import { displayNodeNames } from "./ui/nodeList";
 import { ISSUE_REPORT_OPENING } from "./ui/issueReport";
 import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
 import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
 import { readDestination, writeDestination, type Destination } from "./ui/destination";
 import { IconConsole, IconServer, IconSliders } from "./components/icons";
+import { AccountAvatar } from "./components/AccountAvatar";
+import { AccountMenu } from "./components/AccountMenu";
 import { usePaneLayout } from "./ui/usePaneLayout";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import "./styles/app.css";
@@ -108,7 +112,7 @@ interface TrialFlow {
   probe: TrialStep;
   failedStep: "fetch" | "join" | "probe" | null;
   error: string | null;
-  summary: { count: number; fastestMs: number | null } | null;
+  summary: { configId: string; count: number; fastestMs: number | null } | null;
 }
 
 const TRIAL_STEPS: Array<{ key: "fetch" | "join" | "probe"; title: string }> = [
@@ -167,7 +171,7 @@ function TrialFlowPanel({
           </button>
           {flow.failedStep === "probe" ? (
             <button type="button" className="stage-secondary" onClick={onSkipProbe}>
-              先连接，不测速
+              跳过测速
             </button>
           ) : null}
         </div>
@@ -342,6 +346,10 @@ export default function App() {
     active: destination === "servers",
     rootSignal: serversRootSignal,
   });
+  /** 账号菜单同一时刻只开一个：导航头像或左栏账号行。 */
+  const [accountMenu, setAccountMenu] = useState<"nav" | "rail" | null>(null);
+  const userLogoutRef = useRef(false);
+  const wasLoggedInRef = useRef(false);
   // 查看账单拉起的登录成功了：回到账户页，账单入口保持可见。
   useEffect(() => {
     const pending = pendingBillsRef.current;
@@ -359,6 +367,26 @@ export default function App() {
       text: "账单明细下一版接入，当前余额可在充值里查看。",
     });
   }, [myServers.loggedIn, myServers.loginOpen]);
+
+  // 账号菜单：登出、离开服务器页时收起。
+  useEffect(() => {
+    if (!myServers.loggedIn) setAccountMenu(null);
+  }, [myServers.loggedIn]);
+  useEffect(() => {
+    if (destination !== "servers" && accountMenu === "rail") setAccountMenu(null);
+  }, [destination, accountMenu]);
+  // 登录过期：用户主动退出时不提示，其余掉线给一次 toast。
+  useEffect(() => {
+    const was = wasLoggedInRef.current;
+    wasLoggedInRef.current = myServers.loggedIn;
+    if (!was || myServers.loggedIn) return;
+    if (userLogoutRef.current) {
+      // 主动退出：操作方负责「已退出登录」；这里消费标志，不再报过期。
+      userLogoutRef.current = false;
+      return;
+    }
+    setAppNotice({ level: "info", text: "登录已过期，请重新登录。" });
+  }, [myServers.loggedIn]);
   /** 取凭据建配置在途：防止连点。 */
   const useServerInFlightRef = useRef(false);
   /** 最近一次用户操作，随下一条消息的 context 上报。 */
@@ -379,14 +407,20 @@ export default function App() {
   const [proxyPort, setProxyPort] = useState(DEFAULT_PROXY_PORT);
   const [repairing, setRepairing] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
-  /** 试用免费节点：先建配置，等状态刷新后在 effect 里发起连接。 */
+  /** 免费节点步骤流进行中：挡住重复点击。 */
   const [trialBusy, setTrialBusy] = useState(false);
   const trialBusyRef = useRef(false);
-  const [trialPendingStart, setTrialPendingStart] = useState(false);
   /** 免费节点步骤流：拉取 → 加入 → 测速，全部挂在真实调用上。 */
   const [trialFlow, setTrialFlow] = useState<TrialFlow | null>(null);
   const trialFlowRef = useRef<TrialFlow | null>(null);
   const trialProbeStartedRef = useRef(false);
+  /** 试用步骤流完成时的一次性预选：只在那一刻算最快，之后任何测速都不再推导。 */
+  const [trialPreselect, setTrialPreselect] = useState<{
+    configId: string;
+    nodeId: string;
+    nonce: number;
+  } | null>(null);
+  const trialPreselectNonceRef = useRef(0);
   /** 免费节点试用状态；过期后只留「新建节点」。 */
   const [trial, setTrial] = useState<TrialStatusData | null>(null);
   const [trialLoaded, setTrialLoaded] = useState(false);
@@ -515,7 +549,7 @@ export default function App() {
       if (destinationRef.current !== startedDestination) return;
       const created = await vpn.createConfig({
         name: server.name,
-        connectMode: "tun",
+        connectMode: "system_proxy",
         routingMode: "direct",
         nodeIds: [node.node_id],
       });
@@ -601,10 +635,14 @@ export default function App() {
         : runtime.state === "failed"
           ? "重新连接"
           : "连接";
-    const currentNode = vpn.activeConfig?.nodes.find(
+    const nodes = vpn.activeConfig?.nodes ?? [];
+    const currentNodeIndex = nodes.findIndex(
       (node) => node.node_id === vpn.activeConfig?.current_node_id,
     );
-    if (currentNode) uiLabels["client.node_pick"] = currentNode.name;
+    if (currentNodeIndex >= 0) {
+      // 模型看到的控件文案要和舞台一致：同样走「国家 + 序号」。
+      uiLabels["client.node_pick"] = displayNodeNames(nodes)[currentNodeIndex];
+    }
   }
   if (uiScreen === "new_node") {
     uiLabels["new_node.create"] = "创建";
@@ -1529,51 +1567,10 @@ export default function App() {
       runtimeAuthorityRef.current.markLocal("running");
       setRuntime((view) => viewAfterConnected(view));
       refreshSnapshot();
-    });
-  };
-
-  // 「创建并连接」：配置列表刷新到新配置后再启动；失败不留空配置。
-  useEffect(() => {
-    if (!trialPendingStart) return;
-    if (vpn.loading) return;
-    // 步骤流还没跑完（例如测速中）：先等它结束，再连接。
-    if (trialFlow && trialFlow.phase !== "done") return;
-    const config = vpn.activeConfig;
-    if (!config || config.nodes.length === 0) {
-      trialBusyRef.current = false;
-      setTrialPendingStart(false);
-      setTrialBusy(false);
-      const emptyId = config && config.nodes.length === 0 ? config.config_id : null;
-      if (emptyId) void vpn.deleteConfig(emptyId);
-      setAppNotice({
-        level: "error",
-        text: vpn.error ?? "免费节点没加进来，再试一次。",
-      });
-      return;
-    }
-    trialBusyRef.current = false;
-    setTrialPendingStart(false);
-    setTrialBusy(false);
-    void vpn.start().then((result) => {
-      if (!result.ok) {
-        setAppNotice({
-          level: "error",
-          text: result.message ?? "免费节点加进来了，但没能连上，可以再点一次连接。",
-        });
-        return;
-      }
-      // 种子节点连上才写试用起算点，这里重读一次状态。
+      // 试用从第一次连上开始算：连接成功后重读一次状态。
       setTrialNonce((value) => value + 1);
     });
-  }, [
-    trialPendingStart,
-    trialFlow,
-    vpn.loading,
-    vpn.activeConfig,
-    vpn.start,
-    vpn.deleteConfig,
-    vpn.error,
-  ]);
+  };
 
   const handleVpnStop = (): Promise<boolean> => {
     lastActionRef.current = { id: "client.primary" };
@@ -1685,6 +1682,23 @@ export default function App() {
     });
   };
 
+  // 账号菜单里的退出登录：不二次确认，成功后给一次 toast。
+  const handleAccountLogout = async () => {
+    const wasLoggedIn = myServers.loggedIn;
+    userLogoutRef.current = true;
+    const result = await myServers.logout();
+    if (result.ok) {
+      setAccountMenu(null);
+      setAppNotice({ level: "info", text: "已退出登录" });
+      // 原本就没登录时不会触发过期 effect，这里自己把标志清掉。
+      if (!wasLoggedIn) userLogoutRef.current = false;
+    } else {
+      // 退出失败仍在登录态：清掉标志，别影响之后真正的过期提示。
+      userLogoutRef.current = false;
+    }
+    return result;
+  };
+
   const commitTrialFlow = (next: TrialFlow) => {
     trialFlowRef.current = next;
     setTrialFlow(next);
@@ -1715,6 +1729,7 @@ export default function App() {
     setTrialBusy(true);
     setAppNotice(null);
     trialProbeStartedRef.current = false;
+    setTrialPreselect(null);
 
     const start: TrialFlow = {
       phase: "fetch",
@@ -1755,7 +1770,7 @@ export default function App() {
     const joinStartedAt = Date.now();
     const created = await vpn.createConfig({
       name: "免费节点",
-      connectMode: "tun",
+      connectMode: "system_proxy",
       routingMode: "direct",
       source: "seed",
     });
@@ -1776,7 +1791,6 @@ export default function App() {
       probe: { status: "running", ms: null },
     };
     commitTrialFlow(afterJoin);
-    setTrialPendingStart(true);
   };
 
   // 测速步骤：逐个调用真实测速命令，全部返回后才算完成。
@@ -1785,53 +1799,80 @@ export default function App() {
     if (trialProbeStartedRef.current) return;
     if (vpn.loading) return;
     const config = vpn.activeConfig;
-    if (!config || config.nodes.length === 0) return;
+    if (!config) return;
+    if (config.nodes.length === 0) {
+      trialProbeStartedRef.current = true;
+      void vpn.deleteConfig(config.config_id);
+      failTrial(
+        trialFlow,
+        "probe",
+        vpn.error ?? "免费节点没加进来，再试一次。",
+      );
+      return;
+    }
     trialProbeStartedRef.current = true;
     // 这一步自己测，别让连接屏的自动测速再跑一批。
     probedConfigsRef.current.add(config.config_id);
     const startedAt = Date.now();
     const nodeIds = config.nodes.map((node) => node.node_id);
     void (async () => {
-      const latencies: number[] = [];
+      const results: NodeProbeResult[] = [];
       for (const nodeId of nodeIds) {
         try {
-          const result = await bridge.nodeProbe(nodeId);
-          if (result.reachable && result.latency_ms !== null) {
-            latencies.push(result.latency_ms);
-          }
+          results.push(await bridge.nodeProbe(nodeId));
         } catch {
           // 单个节点失败不影响其余节点；全部失败才算这一步失败。
         }
       }
-      // 结果推进测速状态，节点卡直接显示延迟。
+      // 单节点测速不写批次缓存，先读快照补运行态，再把结果并给控制器；
+      // 节点行与收尾摘要都用这一份，数字才会一致。
       await nodeProbes
         .loadSnapshot(config.config_id, nodeIds)
         .catch(() => undefined);
+      nodeProbes.recordResults(results);
       const current = trialFlowRef.current;
       if (!current || current.phase !== "probe") return;
       const elapsed = Date.now() - startedAt;
-      if (latencies.length === 0) {
+      // 按节点顺序取最快：并列时保留列表靠前的那一个。
+      let fastestNodeId: string | null = null;
+      let fastestMs: number | null = null;
+      for (const node of config.nodes) {
+        const result = results.find((item) => item.node_id === node.node_id);
+        if (!result || !result.reachable || result.latency_ms === null) continue;
+        if (fastestMs === null || result.latency_ms < fastestMs) {
+          fastestMs = result.latency_ms;
+          fastestNodeId = node.node_id;
+        }
+      }
+      if (fastestMs === null || fastestNodeId === null) {
         failTrial(
           current,
           "probe",
-          "两个节点都没测速成功，可以重试，或先连接。",
+          "两个节点都没测速成功，可以重试，或跳过测速后自己点连接。",
           elapsed,
         );
         return;
       }
+      trialPreselectNonceRef.current += 1;
+      setTrialPreselect({
+        configId: config.config_id,
+        nodeId: fastestNodeId,
+        nonce: trialPreselectNonceRef.current,
+      });
       commitTrialFlow({
         ...current,
         phase: "done",
         probe: { status: "done", ms: elapsed },
         summary: {
+          configId: config.config_id,
           count: nodeIds.length,
-          fastestMs: Math.min(...latencies),
+          fastestMs,
         },
       });
       trialBusyRef.current = false;
       setTrialBusy(false);
     })();
-  }, [trialFlow, vpn.loading, vpn.activeConfig, bridge, nodeProbes]);
+  }, [trialFlow, vpn.loading, vpn.activeConfig, bridge, nodeProbes, vpn.deleteConfig, vpn.error]);
 
   const handleRetryTrial = () => {
     const current = trialFlowRef.current;
@@ -1978,29 +2019,56 @@ export default function App() {
           </button>
           <button
             type="button"
-            className="activity__item"
-            aria-label="账户"
-            title="账户"
-            onClick={() => changeDestination("servers")}
+            className="activity__item activity__account"
+            aria-label={
+              myServers.accountError && !myServers.account
+                ? "账户暂时读不到，点一下重试"
+                : myServers.loggedIn
+                  ? `账户，${myServers.account?.email ?? ""}`
+                  : "账户，未登录"
+            }
+            title={
+              myServers.accountError && !myServers.account
+                ? "账户暂时读不到，点一下重试"
+                : "账户"
+            }
+            aria-expanded={accountMenu === "nav"}
+            onClick={() => {
+              if (
+                myServers.accountError &&
+                !myServers.account
+              ) {
+                void myServers.refreshAccount();
+                return;
+              }
+              if (!myServers.accountLoaded) return;
+              if (!myServers.loggedIn) {
+                myServers.openLogin();
+                return;
+              }
+              setAccountMenu((current) => (current === "nav" ? null : "nav"));
+            }}
           >
-            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
-              <circle
-                cx="10"
-                cy="7.2"
-                r="2.6"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.35"
-              />
-              <path
-                d="M4.6 16.2a5.4 5.4 0 0 1 10.8 0"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.35"
-                strokeLinecap="round"
-              />
-            </svg>
+            <AccountAvatar
+              email={myServers.account?.email ?? null}
+              loading={!myServers.accountLoaded && !myServers.accountError}
+              size="nav"
+            />
+            {myServers.accountError && !myServers.account ? (
+              <span className="activity__dot" aria-hidden="true" />
+            ) : null}
           </button>
+          {accountMenu === "nav" && myServers.loggedIn ? (
+            <AccountMenu
+              variant="nav"
+              wallet={myServers.wallet}
+              walletError={myServers.walletError}
+              onTopUp={() => myServers.openTopUp()}
+              onRefreshWallet={() => void myServers.refreshWallet()}
+              onLogout={handleAccountLogout}
+              onClose={() => setAccountMenu(null)}
+            />
+          ) : null}
         </div>
       </nav>
       {destination === "servers" ? (
@@ -2011,9 +2079,10 @@ export default function App() {
           identityMissing={myServers.identityMissing}
           account={myServers.account}
           accountLoaded={myServers.accountLoaded}
+          accountError={myServers.accountError}
           wallet={myServers.wallet}
-          walletLoading={myServers.walletLoading}
           walletError={myServers.walletError}
+          accountOpen={accountMenu === "rail"}
           error={myServers.error}
           retrying={myServers.retrying}
           retryNotice={myServers.retryNotice}
@@ -2023,10 +2092,14 @@ export default function App() {
           onNew={myServers.openWizard}
           onRetry={() => void myServers.retry()}
           onLogin={myServers.openLogin}
-          onLogout={myServers.logout}
+          onLogout={handleAccountLogout}
           onTopUp={myServers.openTopUp}
           onRefreshWallet={() => void myServers.refreshWallet()}
-          onOpenSettings={() => openSettings()}
+          onRefreshAccount={() => void myServers.refreshAccount()}
+          onToggleAccount={() => {
+            if (!myServers.loggedIn) return;
+            setAccountMenu((current) => (current === "rail" ? null : "rail"));
+          }}
         />
       ) : null}
       {destination === "servers" && panes.canDragRail ? (
@@ -2123,6 +2196,12 @@ export default function App() {
           onActionCardAction={handleActionCardAction}
           onDiagnose={handleDiagnose}
           trialSummary={trialFlow?.summary ?? null}
+          preselect={trialPreselect}
+          onPreselectApplied={(nonce) =>
+            setTrialPreselect((current) =>
+              current && current.nonce === nonce ? null : current,
+            )
+          }
         />
       ) : (
         <StartChoice

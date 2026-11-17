@@ -58,6 +58,8 @@ export function createMockConfig(
   options: {
     routingMode?: ConfigRouteMode;
     nodeIds?: string[];
+    /** 生产契约：seed 新建不自动设为当前节点。 */
+    source?: "seed" | "empty";
   } = {},
 ): ConfigDetail {
   const configId = `config_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -87,7 +89,9 @@ export function createMockConfig(
     node_count: nodes.length,
     listen_port: mode === "system_proxy" ? MOCK_PROXY_PORT : null,
     is_active: false,
-    current_node_id: nodes[0]?.node_id ?? null,
+    // seed 新建与生产一致：留空，等用户连接时再 NodeSwitch。
+    current_node_id:
+      options.source === "seed" ? null : (nodes[0]?.node_id ?? null),
     created_at: now,
     updated_at: now,
     last_used_at: null,

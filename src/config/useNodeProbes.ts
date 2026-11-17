@@ -41,6 +41,8 @@ export interface NodeProbesController {
   available: boolean;
   /** 打开面板时先渲染缓存与运行态，不发网络请求。 */
   loadSnapshot: (configId: string, nodeIds: string[]) => Promise<void>;
+  /** 单节点测速不会写批次缓存；调用方把结果并进来，行内才能显示延迟。 */
+  recordResults: (entries: NodeProbeData[]) => void;
   /** nodeIds 省略 = 全部；提供时只测过滤后的子集。 */
   start: (
     configId: string,
@@ -322,6 +324,17 @@ export function useNodeProbes({
     [applyProbing, applyRun, bridge, seedProbing],
   );
 
+  /** 单节点测速不会写批次缓存；调用方把结果并进来，行内才能显示延迟。 */
+  const recordResults = useCallback((entries: NodeProbeData[]) => {
+    if (entries.length === 0) return;
+    setResults((prev) => {
+      const next = { ...prev };
+      for (const entry of entries) next[entry.node_id] = entry;
+      return next;
+    });
+    setAvailable(true);
+  }, []);
+
   const start = useCallback(
     async (configId: string, nodeIds?: string[]) => {
       if (nodeIds && nodeIds.length === 0) {
@@ -410,6 +423,7 @@ export function useNodeProbes({
       notice,
       available,
       loadSnapshot,
+      recordResults,
       start,
       cancel,
       clearNotice,
@@ -422,6 +436,7 @@ export function useNodeProbes({
       notice,
       available,
       loadSnapshot,
+      recordResults,
       start,
       cancel,
       clearNotice,

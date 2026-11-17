@@ -1,218 +1,169 @@
-import { useEffect, useState } from "react";
 import type { MyServerAccount, MyServerWallet } from "../agent/bridge";
 import type { LogoutResult } from "../myservers/useMyServers";
 import { formatUsdCents } from "../myservers/labels";
+import { AccountAvatar } from "./AccountAvatar";
+import { AccountMenu } from "./AccountMenu";
 
 interface Props {
   account: MyServerAccount | null;
   loaded: boolean;
+  /** 账户命令失败：显示「账户暂时读不到」，不冒充未登录。 */
+  accountError: boolean;
   wallet: MyServerWallet | null;
-  walletLoading: boolean;
   walletError: string | null;
+  /** 账号菜单是否展开（由 Host 统一管理，保证同时只有一个）。 */
+  open: boolean;
   disabled?: boolean;
   compact?: boolean;
+  onToggle: () => void;
   onLogin: () => void;
   onLogout: () => Promise<LogoutResult>;
   onTopUp: () => void;
   onRefreshWallet: () => void;
+  onRefreshAccount: () => void;
 }
 
-/** 「我的服务器」左栏底部账号块：未登录只有登录，登录后展开余额 / 充值 / 登出。 */
+/** 左栏底部账号行：头像 + 身份 + 余额摘要；菜单里放充值 / 退出登录。 */
 export function MyServersAccount({
   account,
   loaded,
+  accountError,
   wallet,
-  walletLoading,
   walletError,
+  open,
   disabled = false,
   compact = false,
+  onToggle,
   onLogin,
   onLogout,
   onTopUp,
   onRefreshWallet,
+  onRefreshAccount,
 }: Props) {
-  const [open, setOpen] = useState(false);
-  const [confirmLogout, setConfirmLogout] = useState(false);
-  const [loggingOut, setLoggingOut] = useState(false);
-  const [logoutError, setLogoutError] = useState<string | null>(null);
   const loggedIn = account?.logged_in === true;
-  const email = account?.email ?? "";
+  const email = account?.email ?? null;
+  const loading = !loaded && !accountError;
 
-  useEffect(() => {
-    if (!loggedIn) {
-      setOpen(false);
-      setConfirmLogout(false);
-      setLogoutError(null);
-    }
-  }, [loggedIn]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setConfirmLogout(false);
-      setOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open]);
+  const menu = open && loggedIn ? (
+    <AccountMenu
+      variant={compact ? "nav" : "rail"}
+      wallet={wallet}
+      walletError={walletError}
+      disabled={disabled}
+      onTopUp={onTopUp}
+      onRefreshWallet={onRefreshWallet}
+      onLogout={onLogout}
+      onClose={onToggle}
+    />
+  ) : null;
 
   if (compact) {
     return (
-      <button
-        type="button"
-        className="rail__identity"
-        aria-label={loggedIn ? `账号 ${email}` : "登录"}
-        title={loggedIn ? email : "登录"}
-        onClick={loggedIn ? onTopUp : onLogin}
-      >
-        <span className={`led ${loggedIn ? "is-ok" : "is-warn"}`} aria-hidden />
-        <span className="rail__identity-text">{loggedIn ? email : "未登录"}</span>
-      </button>
+      <div className="rail-account rail-account--compact">
+        <button
+          type="button"
+          className="rail-account__avatar-btn"
+          aria-label={loggedIn ? `账户，${email ?? ""}` : "账户，未登录"}
+          aria-expanded={loggedIn ? open : undefined}
+          disabled={disabled || loading || Boolean(accountError && !account)}
+          onClick={() => {
+            if (loading) return;
+            if (!loggedIn) {
+              onLogin();
+              return;
+            }
+            onToggle();
+          }}
+        >
+          <AccountAvatar
+            email={email}
+            loading={loading}
+            size="nav"
+          />
+        </button>
+        {menu}
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="rail-account rail-account--loading">
+        <AccountAvatar email={null} loading size="row" />
+        <span className="rail-account__loading-text">正在读取账户…</span>
+      </div>
+    );
+  }
+
+  if (accountError && !account) {
+    return (
+      <div className="rail-account">
+        <AccountAvatar email={null} size="row" />
+        <span className="rail-account__text">账户暂时读不到</span>
+        <button
+          type="button"
+          className="rail-account__retry"
+          onClick={onRefreshAccount}
+        >
+          重试
+        </button>
+      </div>
     );
   }
 
   if (!loggedIn) {
     return (
-      <div className="rail__account rail__account--row">
-        <span className="rail__identity rail__identity--static">
-          <span className="led is-warn" aria-hidden />
-          <span className="rail__identity-text" title={loaded ? "未登录" : undefined}>
-            {loaded ? "未登录" : "正在读取…"}
-          </span>
-        </span>
-        {loaded ? (
-          <button
-            type="button"
-            className="btn btn--ghost rail__account__login"
-            onClick={onLogin}
-          >
-            登录
-          </button>
-        ) : null}
+      <div className="rail-account">
+        <AccountAvatar email={null} size="row" />
+        <span className="rail-account__text">未登录</span>
+        <button
+          type="button"
+          className="rail-account__login"
+          disabled={disabled}
+          onClick={onLogin}
+        >
+          登录
+        </button>
       </div>
     );
   }
 
-  const confirm = async () => {
-    if (loggingOut) return;
-    setLoggingOut(true);
-    setLogoutError(null);
-    const result = await onLogout();
-    setLoggingOut(false);
-    if (result.ok) {
-      setConfirmLogout(false);
-      setOpen(false);
-      return;
-    }
-    setLogoutError(result.message ?? "没退出登录。服务器没有变化，可以再试一次。");
-  };
+  const balanceText = walletError
+    ? "余额读不到"
+    : wallet
+      ? null
+      : "余额读取中…";
 
   return (
-    <div className="rail__account">
+    <div className="rail-account rail-account--signed-in">
       <button
         type="button"
-        className="rail__identity rail__account__row"
+        className="rail-account__row"
         aria-expanded={open}
-        aria-controls="rail-account-panel"
-        onClick={() => setOpen((value) => !value)}
+        aria-controls="rail-account-menu"
+        disabled={disabled}
+        onClick={onToggle}
       >
-        <span className="led is-ok" aria-hidden />
-        <span className="rail__identity-text" title={email}>
-          <span className="rail__account__email">{email}</span>
-          <span className="rail__account__sub">已登录 · 这台设备</span>
+        <AccountAvatar email={email} size="row" />
+        <span className="rail-account__meta">
+          <span className="rail-account__email" title={email ?? ""}>
+            {email}
+          </span>
+          <span
+            className={`rail-account__balance${walletError ? " is-error" : ""}`}
+          >
+            {balanceText ?? (
+              <>
+                余额 <span className="num">{formatUsdCents(wallet!.balance_cents)}</span>
+              </>
+            )}
+          </span>
         </span>
-        <span className="rail__account__chevron" aria-hidden>
+        <span className="rail-account__chevron" aria-hidden="true">
           {open ? "⌃" : "⌄"}
         </span>
       </button>
-
-      {open ? (
-        <div id="rail-account-panel" className="rail__account__panel">
-          <p className="rail__account__balance">
-            <span>
-              余额{" "}
-              <span className="num">
-                {wallet
-                  ? formatUsdCents(wallet.balance_cents)
-                  : walletLoading
-                    ? "读取中"
-                    : "—"}
-              </span>
-            </span>
-          </p>
-          {walletError ? (
-            <p className="rail__account__error" role="alert">
-              {walletError}
-              <button
-                type="button"
-                className="rail__account__link"
-                onClick={onRefreshWallet}
-              >
-                重试
-              </button>
-            </p>
-          ) : null}
-
-          <div className="rail__account__actions">
-            <button
-              type="button"
-              className="btn btn--ghost"
-              disabled={disabled}
-              onClick={onTopUp}
-            >
-              充值
-            </button>
-            {confirmLogout ? null : (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                disabled={disabled}
-                onClick={() => {
-                  setLogoutError(null);
-                  setConfirmLogout(true);
-                }}
-              >
-                登出
-              </button>
-            )}
-          </div>
-
-          {confirmLogout ? (
-            <div className="rail__account__confirm">
-              <p className="rail__account__note">
-                退出后这台设备不再属于该账户；已有配置和节点不受影响。
-              </p>
-              {logoutError ? (
-                <p className="rail__account__error" role="alert">
-                  {logoutError}
-                </p>
-              ) : null}
-              <div className="rail__account__actions">
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  disabled={loggingOut}
-                  onClick={() => setConfirmLogout(false)}
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  className="btn btn--danger-ghost"
-                  disabled={loggingOut}
-                  aria-busy={loggingOut || undefined}
-                  onClick={() => void confirm()}
-                >
-                  {loggingOut ? "正在退出…" : "确认退出"}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <p className="rail__account__note">已有配置和节点不受影响。</p>
-          )}
-        </div>
-      ) : null}
+      {menu}
     </div>
   );
 }

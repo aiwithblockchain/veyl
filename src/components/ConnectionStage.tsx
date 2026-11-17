@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ConfigDetail, RuntimeView } from "../agent/protocol";
 import type { VpnConnectionState } from "../config/useVpnSession";
 import type { NodeProbesController } from "../config/useNodeProbes";
 import { dataPlaneDown } from "../ui/dataPlane";
 import { formatClock } from "../ui/format";
 import { failureHeadline } from "../ui/middleArea";
-import { formatLatency } from "../ui/nodeList";
+import { displayNodeNames, formatLatency } from "../ui/nodeList";
 import type { ActionCard } from "../ui/actionCard";
 
 interface Props {
@@ -31,7 +31,11 @@ interface Props {
   /** 服务器已销毁但节点记录还在：只标记，不再发命令。 */
   destroyedNodeIds?: ReadonlySet<string>;
   /** 免费节点步骤流完成后的收敛句：已加入 N 个免费节点，最快 Xms。 */
-  trialSummary?: { count: number; fastestMs: number | null } | null;
+  trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
+  /** 试用步骤流完成时的一次性预选；之后任何测速都不重新推导。 */
+  preselect?: { configId: string; nodeId: string; nonce: number } | null;
+  /** 预选应用后通知 Host 消费掉，避免切走再回来二次应用。 */
+  onPreselectApplied?: (nonce: number) => void;
 }
 
 const NO_TRAFFIC_ACTION =
@@ -59,6 +63,8 @@ export function ConnectionStage({
   onDiagnose,
   destroyedNodeIds = new Set<string>(),
   trialSummary = null,
+  preselect = null,
+  onPreselectApplied,
 }: Props) {
   const [now, setNow] = useState(() => Date.now());
   const [switchError, setSwitchError] = useState<string | null>(null);
@@ -88,7 +94,14 @@ export function ConnectionStage({
   const showTimer = connected && !noTraffic && seconds !== null;
 
   const nodes = config?.nodes ?? [];
-  const selectedId = config?.current_node_id ?? null;
+  const displayNames = displayNodeNames(nodes);
+  /** 本地预选：只在试用步骤流完成时写入一次，点「连接」时才真正切换。 */
+  const [pickedId, setPickedId] = useState<string | null>(null);
+  const [fastestMarkId, setFastestMarkId] = useState<string | null>(null);
+  const appliedPreselect = useRef<number | null>(null);
+  /** 自己发起的切换目标：用于区分 current_node_id 的外部变化。 */
+  const ownTargetRef = useRef<string | null>(null);
+  const lastCurrentRef = useRef<string | null>(config?.current_node_id ?? null);
   const latencyOf = (nodeId: string, nodeLatency: number | null): number | null => {
     const probe = nodeProbes.results[nodeId];
     if (probe?.reachable && probe.latency_ms !== null) return probe.latency_ms;
@@ -96,16 +109,68 @@ export function ConnectionStage({
     return null;
   };
   const latencies = nodes.map((node) => latencyOf(node.node_id, runtime.node_latency_ms));
-  const known = latencies.filter((value): value is number => value !== null);
-  const fastest = known.length > 0 ? Math.min(...known) : null;
+  // 收尾句只属于本次会话的试用步骤流；重启后没有这个状态就不显示。
+  const summary =
+    trialSummary && trialSummary.configId === config?.config_id
+      ? trialSummary
+      : null;
+
+  // 一次性预选：只认试用步骤流传来的那一次，自动测速与其他测速都不重新推导。
+  // 应用后通知 Host 消费掉，切 destination 往返/重新挂载不会二次应用。
+  useEffect(() => {
+    if (!preselect || preselect.nonce === appliedPreselect.current) return;
+    if (preselect.configId !== config?.config_id) return;
+    if (!nodes.some((node) => node.node_id === preselect.nodeId)) return;
+    appliedPreselect.current = preselect.nonce;
+    setPickedId(preselect.nodeId);
+    setFastestMarkId(preselect.nodeId);
+    onPreselectApplied?.(preselect.nonce);
+  }, [preselect, config?.config_id, nodes, onPreselectApplied]);
+
+  // current_node_id 被外部（例如 AI 的 NodeSwitch）改动时，丢掉本地预选让界面跟随；
+  // 自己点连接/切换引起的变化不算外部。
+  useEffect(() => {
+    const current = config?.current_node_id ?? null;
+    const previous = lastCurrentRef.current;
+    lastCurrentRef.current = current;
+    if (current === previous) return;
+    const own = ownTargetRef.current;
+    ownTargetRef.current = null;
+    if (current !== null && current === own) return;
+    setPickedId(null);
+  }, [config?.current_node_id]);
+
+  const localPick =
+    pickedId !== null && nodes.some((node) => node.node_id === pickedId)
+      ? pickedId
+      : null;
+  // 已连接一律以实际当前节点为准；未连接本地预选优先，否则跟随当前节点。
+  const selectedId = connected
+    ? (config?.current_node_id ?? null)
+    : (localPick ?? config?.current_node_id ?? null);
+  const connectTargetId =
+    selectedId ?? config?.current_node_id ?? nodes[0]?.node_id ?? null;
 
   const switchTo = async (nodeId: string) => {
-    if (nodeId === selectedId || switching) return;
+    if (switching) return;
+    if (!connected) {
+      // 未连接：只做本地选择，等点「连接」再发命令。
+      setSwitchError(null);
+      setPickedId(nodeId);
+      return;
+    }
+    if (nodeId === selectedId) return;
     setSwitchError(null);
+    // 已连接时选中态只看 current_node_id；失败不留本地选择，保证还能再点重试。
+    setPickedId(null);
+    ownTargetRef.current = nodeId;
     setSwitching(nodeId);
     const result = await onSwitchNode(nodeId);
     setSwitching(null);
-    if (!result.ok) setSwitchError(result.message ?? "没能切换节点，再试一次。");
+    if (!result.ok) {
+      ownTargetRef.current = null;
+      setSwitchError(result.message ?? "没能切换节点，再试一次。");
+    }
   };
 
   const primaryLabel = helperPreparing
@@ -121,9 +186,10 @@ export function ConnectionStage({
             : failed || noTraffic
               ? "重新连接"
               : "连接";
-  const primaryDisabled = starting || stopping || helperPreparing;
+  const primaryDisabled =
+    starting || stopping || helperPreparing || switching !== null;
 
-  const onPrimary = () => {
+  const onPrimary = async () => {
     if (primaryDisabled) return;
     if (connected && !noTraffic) {
       onStop();
@@ -136,6 +202,22 @@ export function ConnectionStage({
     if (noTraffic) {
       onReconnect();
       return;
+    }
+    // 连接前先把界面选中的节点切过去；切换失败就停下，不假装在连接。
+    if (connectTargetId && connectTargetId !== config?.current_node_id) {
+      setSwitchError(null);
+      ownTargetRef.current = connectTargetId;
+      setSwitching(connectTargetId);
+      const result = await onSwitchNode(connectTargetId);
+      setSwitching(null);
+      if (!result.ok) {
+        ownTargetRef.current = null;
+        setSwitchError(
+          `切换节点失败：${result.message ?? "没能切换，再试一次。"}这次没有发起连接。`,
+        );
+        return;
+      }
+      setPickedId(connectTargetId);
     }
     onStart();
   };
@@ -239,8 +321,13 @@ export function ConnectionStage({
                   }}
                   disabled={switching !== null || destroyed}
                 >
-                  <span className="stage-node__name">
-                    {node.name}
+                  <span className="stage-node__name" title={node.name}>
+                    <span className="stage-node__name-text">
+                      {displayNames[index] ?? node.name}
+                    </span>
+                    {fastestMarkId === node.node_id ? (
+                      <span className="stage-node__fastest">最快</span>
+                    ) : null}
                     {destroyed ? (
                       <span className="stage-node__badge">已销毁</span>
                     ) : null}
@@ -299,19 +386,20 @@ export function ConnectionStage({
           </p>
         ) : noTraffic ? (
           <p className="stage-note">{NO_TRAFFIC_ACTION}</p>
-        ) : (
-          <p className="stage-note">
-            {trialSummary
-              ? `已加入 ${trialSummary.count} 个免费节点${
-                  trialSummary.fastestMs !== null
-                    ? `，最快 ${Math.round(trialSummary.fastestMs)}ms`
-                    : ""
-                }`
-              : `${nodes.length > 0 ? `已加入 ${nodes.length} 个节点` : "还没有节点"}${
-                  fastest !== null ? `，最快 ${formatLatency(fastest)}` : ""
-                }`}
-            {switchError ? ` · ${switchError}` : ""}
-            {onReportProblem ? (
+        ) : switchError || summary || onReportProblem ? (
+          <p
+            className={`stage-note${switchError ? " stage-note--error" : ""}`}
+            role={switchError ? "alert" : undefined}
+          >
+            {switchError ??
+              (summary
+                ? `已加入 ${summary.count} 个免费节点${
+                    summary.fastestMs !== null
+                      ? `，最快 ${Math.round(summary.fastestMs)}ms`
+                      : ""
+                  }`
+                : null)}
+            {!switchError && onReportProblem ? (
               <button
                 type="button"
                 className="stage-note__link"
@@ -322,7 +410,7 @@ export function ConnectionStage({
               </button>
             ) : null}
           </p>
-        )}
+        ) : null}
       </div>
     </main>
   );

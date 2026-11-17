@@ -105,6 +105,8 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const [eventsLive, setEventsLive] = useState(false);
   const [account, setAccount] = useState<MyServerAccount | null>(null);
   const [accountLoaded, setAccountLoaded] = useState(false);
+  /** 账户命令失败：界面显示「账户暂时读不到」，不冒充未登录。 */
+  const [accountError, setAccountError] = useState(false);
   const [wallet, setWallet] = useState<MyServerWallet | null>(null);
   const [walletLoading, setWalletLoading] = useState(false);
   const [walletError, setWalletError] = useState<string | null>(null);
@@ -112,25 +114,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const [topupOpen, setTopupOpen] = useState(false);
 
   const loggedIn = account?.logged_in === true;
-
-  const refreshWallet = useCallback(async () => {
-    const source = (bridge as AccountCapable).myServerWallet;
-    if (!source) return;
-    setWalletLoading(true);
-    setWalletError(null);
-    try {
-      setWallet(await source.call(bridge));
-    } catch (error) {
-      const reason = errorReason(error);
-      setWalletError(
-        AUTH_REASONS.has(reason)
-          ? "登录已过期。重新登录后才能看余额。"
-          : WALLET_ERROR,
-      );
-    } finally {
-      setWalletLoading(false);
-    }
-  }, [bridge]);
 
   const markLoggedOut = useCallback(() => {
     setAccount((current) =>
@@ -148,6 +131,26 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setError(null);
     setLoading(false);
   }, []);
+
+  const refreshWallet = useCallback(async () => {
+    const source = (bridge as AccountCapable).myServerWallet;
+    if (!source) return;
+    setWalletLoading(true);
+    setWalletError(null);
+    try {
+      setWallet(await source.call(bridge));
+    } catch (error) {
+      const reason = errorReason(error);
+      if (AUTH_REASONS.has(reason)) {
+        // 登录过期：切回未登录，别让旧邮箱和余额继续显示。
+        markLoggedOut();
+      } else {
+        setWalletError(WALLET_ERROR);
+      }
+    } finally {
+      setWalletLoading(false);
+    }
+  }, [bridge, markLoggedOut]);
 
   const refresh = useCallback(async (): Promise<boolean> => {
     try {
@@ -173,6 +176,32 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       setLoading(false);
     }
   }, [bridge, markLoggedOut]);
+
+  /** 账户读取失败后重试：只重读身份，不重登。 */
+  const refreshAccount = useCallback(async () => {
+    const source = (bridge as AccountCapable).myServerAccount;
+    if (!source) return;
+    setAccountLoaded(false);
+    setAccountError(false);
+    try {
+      const info = await source.call(bridge);
+      setAccount(info);
+      setAccountLoaded(true);
+      if (info.logged_in) {
+        setIdentityMissing(false);
+        setIdentityPresent(true);
+        void refresh();
+        void refreshWallet();
+      } else {
+        setIdentityMissing(true);
+        setIdentityPresent(false);
+        setLoading(false);
+      }
+    } catch {
+      setAccountLoaded(true);
+      setAccountError(true);
+    }
+  }, [bridge, refresh, refreshWallet]);
 
   /** 列表失败后的手动重试；成功就地恢复列表，不跳页。 */
   const retry = useCallback(async () => {
@@ -251,6 +280,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       .catch(() => {
         if (!alive) return;
         setAccountLoaded(true);
+        setAccountError(true);
         fallbackToIdentity();
       });
 
@@ -601,6 +631,8 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     identityPresent,
     account,
     accountLoaded,
+    accountError,
+    refreshAccount,
     loggedIn,
     sharedTransfer,
     wallet,

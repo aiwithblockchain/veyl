@@ -434,6 +434,7 @@ export function useVpnSession(
       const detail = createMockConfig(input.name, input.connectMode, {
         routingMode: input.routingMode,
         nodeIds,
+        source: input.source,
       });
       const store = mockStore.current;
       const connected = connection === "connected" || connection === "starting";

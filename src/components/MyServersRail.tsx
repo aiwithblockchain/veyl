@@ -14,9 +14,11 @@ interface Props {
   /** 登录态；账号块的数据源。 */
   account?: MyServerAccount | null;
   accountLoaded?: boolean;
+  accountError?: boolean;
   wallet?: MyServerWallet | null;
-  walletLoading?: boolean;
   walletError?: string | null;
+  /** 账号菜单展开状态由 Host 统一管理。 */
+  accountOpen?: boolean;
   /** 列表读取失败说明；只在左栏就地显示。 */
   error?: string | null;
   retrying?: boolean;
@@ -32,7 +34,8 @@ interface Props {
   onLogout?: () => Promise<LogoutResult>;
   onTopUp?: () => void;
   onRefreshWallet?: () => void;
-  onOpenSettings: () => void;
+  onRefreshAccount?: () => void;
+  onToggleAccount?: () => void;
 }
 
 function ServerRow({
@@ -78,9 +81,10 @@ export function MyServersRail({
   identityMissing = false,
   account = null,
   accountLoaded = false,
+  accountError = false,
   wallet = null,
-  walletLoading = false,
   walletError = null,
+  accountOpen = false,
   error = null,
   retrying = false,
   retryNotice = null,
@@ -93,7 +97,8 @@ export function MyServersRail({
   onLogout,
   onTopUp,
   onRefreshWallet,
-  onOpenSettings,
+  onRefreshAccount,
+  onToggleAccount,
 }: Props) {
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -222,37 +227,21 @@ export function MyServersRail({
         <MyServersAccount
           account={account}
           loaded={accountLoaded}
+          accountError={accountError}
           wallet={wallet}
-          walletLoading={walletLoading}
           walletError={walletError}
+          open={accountOpen}
           disabled={disabled}
           compact={compact}
+          onToggle={() => onToggleAccount?.()}
           onLogin={() => onLogin?.()}
           onLogout={
             onLogout ?? (async () => ({ ok: false, message: "这个版本还不支持退出登录。" }))
           }
           onTopUp={() => onTopUp?.()}
           onRefreshWallet={() => onRefreshWallet?.()}
+          onRefreshAccount={() => onRefreshAccount?.()}
         />
-        <button
-          type="button"
-          className="rail__settings"
-          aria-label="设置"
-          onClick={onOpenSettings}
-        >
-          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>
-            <path
-              d="M2.5 5h11M2.5 11h11"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.3"
-              strokeLinecap="round"
-            />
-            <circle cx="6" cy="5" r="1.7" fill="none" stroke="currentColor" strokeWidth="1.3" />
-            <circle cx="10" cy="11" r="1.7" fill="none" stroke="currentColor" strokeWidth="1.3" />
-          </svg>
-          {!compact ? <span>设置</span> : null}
-        </button>
       </footer>
 
       {compact && drawerOpen ? (

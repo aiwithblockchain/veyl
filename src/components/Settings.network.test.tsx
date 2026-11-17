@@ -133,12 +133,17 @@ async function openAddDialog() {
 }
 
 describe("连接 tab", () => {
-  it("接管方式用 Tun / Proxy 分段，按 connect_mode 选中", async () => {
+  it("接管方式用 Proxy / Tun 分段，按 connect_mode 选中", async () => {
     renderSettings(makeBridge(), { connectMode: "tun" });
     expect(await screen.findByRole("button", { name: "Tun 模式" })).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Tun 模式" }).getAttribute("aria-pressed"),
     ).toBe("true");
+    expect(
+      [...screen.getByRole("group", { name: "接管方式" }).querySelectorAll("button")].map(
+        (button) => button.textContent,
+      ),
+    ).toEqual(["Proxy 模式", "Tun 模式"]);
     cleanup();
 
     renderSettings(makeBridge(), { connectMode: "system_proxy" });

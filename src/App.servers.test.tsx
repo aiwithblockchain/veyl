@@ -265,6 +265,52 @@ describe("destination 与我的服务器", () => {
     expect(configCreate).not.toHaveBeenCalled();
   });
 
+  it("用自己的服务器建配置：默认 Proxy 接管", async () => {
+    const { configCreate } = prepare([SERVER]);
+    vi.mocked(bridge.configCreate).mockResolvedValue({
+      config_id: CONFIG_ID,
+      is_active: true,
+    } as never);
+    vi.mocked(bridge.configList).mockResolvedValue({
+      configs: [{ ...SUMMARY, node_count: 0, current_node_id: null }],
+      active_config_id: CONFIG_ID,
+    });
+    vi.mocked(bridge.configDetail).mockResolvedValue({
+      config_id: CONFIG_ID,
+      name: SUMMARY.name,
+      connect_mode: "tun",
+      routing_mode: "proxy_all",
+      node_count: 0,
+      listen_port: null,
+      is_active: true,
+      current_node_id: null,
+      created_at: 0,
+      updated_at: 0,
+      last_used_at: null,
+      nodes: [],
+      dns: { mode: "auto", local: [], remote: [] },
+      tun_excludes: [],
+      layout: null,
+      layout_revision: null,
+    });
+    render(<App />);
+    await screen.findByText("从哪里开始？");
+
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "用来建配置" }));
+
+    await waitFor(() => expect(configCreate).toHaveBeenCalled());
+    expect(configCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectMode: "system_proxy",
+        nodeIds: ["local_node_srv_1"],
+      }),
+    );
+  });
+
   it("取凭据期间切走：resolve 后不建配置、不跳回连接屏", async () => {
     const { configCreate } = prepare([SERVER]);
     vi.mocked(bridge.configList).mockResolvedValue({

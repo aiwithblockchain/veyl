@@ -234,6 +234,11 @@ pre {
   padding: 24px 16px 8px;
 }
 
+/* 只作为「点预制问题后焦点进入消息流」的落点，不是可交互控件。 */
+.chat__scroll:focus {
+  outline: none;
+}
+
 .chat__list {
   display: flex;
   flex-direction: column;
@@ -3715,6 +3720,7 @@ body[data-resizing] {
 }
 
 .activity__foot {
+  position: relative;
   margin-top: auto;
   display: flex;
   flex-direction: column;
@@ -4053,175 +4059,288 @@ body[data-resizing] {
 }
 
 .rail__foot {
+  position: relative;
   flex: none;
   margin-top: auto;
-  padding: 14px 8px 2px;
+  padding: 10px 8px 6px;
   border-top: 1px solid var(--hair);
 }
 
-.rail__settings {
+.account-avatar {
+  position: relative;
+  flex: none;
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  height: 32px;
-  padding: 0 8px 0 6px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--ink-2);
-  font-size: 13px;
+  justify-content: center;
+  border-radius: 50%;
+  font-weight: 600;
+  line-height: 1;
 }
 
-.rail__identity {
+.account-avatar--row {
+  width: 28px;
+  height: 28px;
+  font-size: 12px;
+}
+
+.account-avatar--nav {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+}
+
+.account-avatar.has-initial {
+  background: #5b5850;
+  color: #ffffff;
+}
+
+.account-avatar.is-loading {
+  background: var(--hair);
+}
+
+.account-avatar:not(.has-initial):not(.is-loading) {
+  border: 1px solid var(--hair-strong);
+  color: var(--ink-3);
+}
+
+.rail-account {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px;
+}
+
+.rail-account--loading {
+  height: 44px;
+}
+
+.rail-account__loading-text {
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.rail-account__text {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.rail-account__login {
+  margin-left: auto;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--hair-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.rail-account__retry {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link);
+  font-size: 13px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.rail-account--signed-in {
+  display: block;
+}
+
+.rail-account__row {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  height: 28px;
-  padding: 0 8px 0 6px;
+  height: 52px;
+  padding: 0 2px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
-  color: var(--ink-3);
-  font-size: 12px;
   text-align: left;
 }
 
-.rail__identity:hover {
+.rail-account__row:hover {
   background: var(--bg-hover);
-  color: var(--ink-2);
 }
 
-.rail__account {
+.rail-account__meta {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 0 2px;
-}
-
-.rail__account--row {
-  flex-direction: row;
-  align-items: center;
-}
-
-.rail__account > .rail__identity {
-  width: 100%;
-  min-width: 0;
-}
-
-.rail__account--row > .rail__identity {
   flex: 1;
-  width: auto;
-}
-
-.rail__identity--static {
-  cursor: default;
-}
-
-.rail__identity--static:hover {
-  background: transparent;
-  color: var(--ink-3);
-}
-
-.rail__account__login {
-  flex: none;
-  min-height: 26px;
-  padding: 0 8px;
-  font-size: 12px;
-}
-
-.rail__account .rail__identity-text {
-  display: flex;
-  flex-direction: column;
   min-width: 0;
-  line-height: 1.3;
 }
 
-.rail__account__email {
+.rail-account__email {
   overflow: hidden;
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 500;
+  color: var(--ink);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.rail__account__sub {
-  font-size: 11px;
+.rail-account__balance {
+  font-size: 12px;
+  line-height: 1.4;
   color: var(--ink-3);
 }
 
-.rail__account__chevron {
-  margin-left: auto;
-  padding-left: 6px;
-  font-size: 11px;
-  color: var(--ink-3);
+.rail-account__balance.is-error {
+  color: var(--amber);
 }
 
-.rail__account__panel {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 4px 2px 2px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  background: var(--bg-card);
-}
-
-.rail__account__balance {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin: 0;
+.rail-account__chevron {
+  flex: none;
+  width: 12px;
+  text-align: center;
   font-size: 12px;
   color: var(--ink-3);
 }
 
-.rail__account__balance .num {
-  font-size: 13px;
-  color: var(--ink);
+.rail-account--compact {
+  justify-content: center;
 }
 
-.rail__account__actions {
+.rail-account__avatar-btn {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
 }
 
-.rail__account__actions .btn {
+.rail-account__avatar-btn:hover {
+  background: var(--bg-hover);
+}
+
+/* 账号菜单：左栏向上展开，导航头像向右浮出。 */
+.account-menu__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: transparent;
+}
+
+.account-menu {
+  position: absolute;
+  z-index: 61;
+  width: 248px;
+  padding: 8px;
+  border: 1px solid var(--hair-strong);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow:
+    0 8px 24px rgba(23, 22, 20, 0.12),
+    0 1px 2px rgba(23, 22, 20, 0.06);
+}
+
+.account-menu--rail {
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+}
+
+.account-menu--nav {
+  left: calc(100% + 12px);
+  bottom: -8px;
+  width: 280px;
+}
+
+.account-menu__balance {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+}
+
+.account-menu__balance-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.account-menu__label {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.account-menu__amount {
+  font-family: var(--mono);
+  font-size: 20px;
+  line-height: 1.1;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.account-menu__balance-error {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--amber);
+}
+
+.account-menu__topup {
+  flex: none;
   min-height: 28px;
   padding: 0 10px;
   font-size: 12px;
 }
 
-.rail__account__note {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--ink-3);
+.account-menu__divider {
+  height: 1px;
+  margin: 8px 0;
+  background: var(--hair);
 }
 
-.rail__account__error {
+.account-menu__error {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
   align-items: baseline;
-  margin: 0;
-  font-size: 11px;
+  gap: 6px;
+  margin: 0 0 4px;
+  font-size: 12px;
   line-height: 1.45;
   color: var(--red);
 }
 
-.rail__account__link {
+.account-menu__link {
   padding: 0;
   border: 0;
   background: transparent;
   color: var(--link);
-  font-size: 11px;
+  font-size: 12px;
   text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
-.rail__account__confirm {
+.account-menu__logout {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  width: 100%;
+  height: 36px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--red);
+  font-size: 13px;
+  text-align: left;
+}
+
+.account-menu__logout:hover {
+  background: var(--bg-hover);
 }
 
 .rail__error {
@@ -4268,11 +4387,6 @@ body[data-resizing] {
   font-size: 12px;
 }
 
-.rail__settings:hover {
-  background: var(--bg-hover);
-  color: var(--ink);
-}
-
 /* <1024：72px 图标栏 + 抽屉 */
 .rail--compact {
   align-items: center;
@@ -4284,22 +4398,6 @@ body[data-resizing] {
   display: flex;
   justify-content: center;
   padding: 14px 0 2px;
-}
-
-.rail--compact .rail__settings {
-  justify-content: center;
-  width: 34px;
-  padding: 0;
-}
-
-.rail--compact .rail__identity {
-  justify-content: center;
-  width: 34px;
-  padding: 0;
-}
-
-.rail--compact .rail__identity-text {
-  display: none;
 }
 
 .rail__drawer-btn {
@@ -4383,8 +4481,9 @@ body[data-resizing] {
 .state-line {
   margin: 0;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 16px;
 }
 
 .state-line__label {
@@ -4398,7 +4497,7 @@ body[data-resizing] {
 }
 
 .state-line .timecode {
-  margin-top: 8px;
+  margin-top: 0;
 }
 
 .timecode {
@@ -4609,28 +4708,25 @@ body[data-resizing] {
 .ai-empty__suggest {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.ai-empty__suggest-label {
-  font-size: var(--fs-label);
-  color: var(--ink-3);
+  margin-top: 16px;
 }
 
 .ai-empty__suggest button {
-  height: 34px;
-  padding: 0 12px;
-  border: 1px solid var(--hair-strong);
-  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
   background: transparent;
-  color: var(--ink);
+  color: var(--ink-2);
   font-size: 13px;
+  line-height: 1.5;
   text-align: left;
 }
 
 .ai-empty__suggest button:hover {
-  background: var(--card);
+  color: var(--ink);
 }
 
 /* 历史会话 */
@@ -5112,6 +5208,13 @@ details[open] > .settings-fold__summary::before {
 }
 
 .stage-node__name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.stage-node__name-text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5308,11 +5411,21 @@ details[open] > .settings-fold__summary::before {
 }
 
 .stage-node__badge {
-  margin-left: 8px;
+  flex: none;
   padding: 1px 5px;
   border-radius: 4px;
   background: var(--bg-hover);
   color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.stage-node__fastest {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid var(--hair-strong);
+  border-radius: 4px;
+  color: var(--ink-2);
   font-size: 10.5px;
   font-weight: 500;
 }

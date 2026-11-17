@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { NodeProbeData, NodeSummary } from "../agent/protocol";
 import {
   ageLabel,
+  displayNodeNames,
   filterNodes,
   formatLatency,
   hasMixedProbeMethods,
@@ -238,5 +239,30 @@ describe("汇总", () => {
         NOW,
       ),
     ).toBe("共 3 个 · 都没测通");
+  });
+});
+
+describe("节点显示名", () => {
+  it("免费节点按国家 + 序号显示，自建节点保持原名", () => {
+    expect(
+      displayNodeNames([
+        node("a", "meshflux69 [美国]"),
+        node("b", "meshflux10 [美国2]"),
+        { ...node("c", "新加坡 01"), source: "manual" },
+      ]),
+    ).toEqual(["美国 01", "美国 02", "新加坡 01"]);
+  });
+
+  it("没有括号的免费节点不动；不同国家各自编号", () => {
+    expect(displayNodeNames([node("a", "meshflux69")])).toEqual([
+      "meshflux69",
+    ]);
+    expect(
+      displayNodeNames([
+        node("a", "meshflux69 [美国]"),
+        node("b", "meshflux10 [日本]"),
+        node("c", "meshflux1 [美国2]"),
+      ]),
+    ).toEqual(["美国 01", "日本 01", "美国 02"]);
   });
 });

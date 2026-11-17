@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConfigDetail, RuntimeView } from "../agent/protocol";
 import { emptyRuntimeView } from "../agent/bridge";
@@ -56,6 +56,7 @@ function probes(over: Partial<NodeProbesController> = {}): NodeProbesController 
     finished: null,
     notice: null,
     available: true,
+    recordResults: () => {},
     loadSnapshot: async () => {},
     start: async () => ({ ok: true }),
     cancel: async () => {},
@@ -64,7 +65,19 @@ function probes(over: Partial<NodeProbesController> = {}): NodeProbesController 
   };
 }
 
-function renderStage(over: {
+function probeResult(nodeId: string, latency: number) {
+  return {
+    node_id: nodeId,
+    reachable: true,
+    latency_ms: latency,
+    probe_method: "tcp" as const,
+    checked_at: Date.now(),
+    error: null,
+  };
+}
+
+interface StageOverrides {
+  config?: ConfigDetail;
   runtime?: RuntimeView;
   connection?: "idle" | "starting" | "connected" | "stopping";
   nodeProbes?: NodeProbesController;
@@ -72,27 +85,32 @@ function renderStage(over: {
   onStop?: () => void;
   onReconnect?: () => void;
   failedAfterConnected?: boolean;
-} = {}) {
-  const handlers = {
-    onStart: over.onStart ?? vi.fn(),
-    onStop: over.onStop ?? vi.fn(),
-    onReconnect: over.onReconnect ?? vi.fn(),
-  };
-  render(
+  onSwitchNode?: (nodeId: string) => Promise<{ ok: boolean; message?: string }>;
+  preselect?: { configId: string; nodeId: string; nonce: number } | null;
+  trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
+}
+
+function stageElement(over: StageOverrides = {}) {
+  return (
     <ConnectionStage
-      config={CONFIG}
+      config={over.config ?? CONFIG}
       connection={over.connection ?? "idle"}
       runtime={over.runtime ?? emptyRuntimeView()}
-      onStart={handlers.onStart}
-      onStop={handlers.onStop}
-      onReconnect={handlers.onReconnect}
-      onSwitchNode={async () => ({ ok: true })}
+      onStart={over.onStart ?? vi.fn()}
+      onStop={over.onStop ?? vi.fn()}
+      onReconnect={over.onReconnect ?? vi.fn()}
+      onSwitchNode={over.onSwitchNode ?? (async () => ({ ok: true }))}
       nodeProbes={over.nodeProbes ?? probes()}
       failedAfterConnected={over.failedAfterConnected ?? false}
       helperPreparing={false}
-    />,
+      preselect={over.preselect ?? null}
+      trialSummary={over.trialSummary ?? null}
+    />
   );
-  return handlers;
+}
+
+function renderStage(over: StageOverrides = {}) {
+  return render(stageElement(over));
 }
 
 function runtime(over: Partial<RuntimeView> = {}): RuntimeView {
@@ -253,5 +271,311 @@ describe("连接舞台", () => {
     expect(await screen.findByText("42 毫秒")).toBeTruthy();
     // n1 没有结果
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+  });
+
+  it("免费节点按国家 + 序号显示，原名只进 title", () => {
+    renderStage({
+      config: {
+        ...CONFIG,
+        current_node_id: "n1",
+        nodes: [
+          { ...CONFIG.nodes[0], name: "meshflux69 [美国]" },
+          { ...CONFIG.nodes[1], name: "meshflux10 [美国2]" },
+        ],
+      },
+    });
+
+    const us1 = screen.getByRole("option", { name: /美国 01/ });
+    const us2 = screen.getByRole("option", { name: /美国 02/ });
+    expect(us1.querySelector(".stage-node__name")?.getAttribute("title")).toBe(
+      "meshflux69 [美国]",
+    );
+    expect(us2.querySelector(".stage-node__name")?.getAttribute("title")).toBe(
+      "meshflux10 [美国2]",
+    );
+    expect(screen.queryByText(/meshflux69/)).toBeNull();
+  });
+
+  it("已连接时状态标签与计时器是同一行的前后两个子节点", async () => {
+    renderStage({
+      connection: "connected",
+      runtime: runtime({
+        state: "running",
+        connected_since: new Date(Date.now() - 5000).toISOString(),
+        health: {
+          ...emptyRuntimeView().health,
+          data_plane: true,
+          checked_at: new Date().toISOString(),
+        },
+      }),
+    });
+
+    await screen.findAllByText("已连接");
+    const line = document.querySelector(".state-line");
+    expect(line).not.toBeNull();
+    const children = [...(line?.children ?? [])];
+    expect(children[0].className).toContain("state-line__label");
+    expect(children[1].className).toContain("timecode");
+    // jsdom 不计算 flex 布局：这里只锁结构顺序与类名，
+    // 真正的一行排列由 `app.css` 的 `.state-line { flex-direction: row }` 保证。
+  });
+
+  it("自动测速结果不产生预选，也不标最快", () => {
+    const onSwitch = vi.fn(async () => ({ ok: true }));
+    renderStage({
+      config: { ...CONFIG, current_node_id: null },
+      nodeProbes: probes({
+        results: { n1: probeResult("n1", 90), n2: probeResult("n2", 42) },
+      }),
+      onSwitchNode: onSwitch,
+    });
+
+    const rows = screen.getAllByRole("option");
+    expect(rows[0].getAttribute("aria-selected")).toBe("false");
+    expect(rows[1].getAttribute("aria-selected")).toBe("false");
+    expect(document.querySelectorAll(".stage-node__fastest").length).toBe(0);
+    expect(onSwitch).not.toHaveBeenCalled();
+  });
+
+  it("试用完成只预选一次，之后测速不重新推导", () => {
+    const preselect = { configId: "cfg_1", nodeId: "n2", nonce: 1 };
+    const view = renderStage({
+      config: { ...CONFIG, current_node_id: null },
+      nodeProbes: probes({
+        results: { n1: probeResult("n1", 90), n2: probeResult("n2", 42) },
+      }),
+      preselect,
+    });
+    let rows = screen.getAllByRole("option");
+    expect(rows[1].getAttribute("aria-selected")).toBe("true");
+    expect(rows[1].querySelector(".stage-node__fastest")?.textContent).toBe("最快");
+
+    // 后续自动测速把 n1 变成最快：预选不重算，标记也不挪。
+    view.rerender(
+      stageElement({
+        config: { ...CONFIG, current_node_id: null },
+        nodeProbes: probes({
+          results: { n1: probeResult("n1", 30), n2: probeResult("n2", 42) },
+        }),
+        preselect,
+      }),
+    );
+    rows = screen.getAllByRole("option");
+    expect(rows[1].getAttribute("aria-selected")).toBe("true");
+    expect(rows[1].querySelector(".stage-node__fastest")).not.toBeNull();
+    expect(rows[0].querySelector(".stage-node__fastest")).toBeNull();
+  });
+
+  it("本地预选不写任何本地存储", () => {
+    localStorage.clear();
+    sessionStorage.clear();
+    renderStage({
+      config: { ...CONFIG, current_node_id: null },
+      nodeProbes: probes({
+        results: { n1: probeResult("n1", 90), n2: probeResult("n2", 42) },
+      }),
+      preselect: { configId: "cfg_1", nodeId: "n2", nonce: 1 },
+    });
+    expect(document.querySelectorAll(".stage-node__fastest").length).toBe(1);
+    expect(localStorage.length).toBe(0);
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  it("点连接先切到本地预选的节点，再发起连接", async () => {
+    const onSwitch = vi.fn(async () => ({ ok: true }));
+    const onStart = vi.fn();
+    renderStage({
+      config: { ...CONFIG, current_node_id: null },
+      nodeProbes: probes({
+        results: { n1: probeResult("n1", 90), n2: probeResult("n2", 42) },
+      }),
+      preselect: { configId: "cfg_1", nodeId: "n2", nonce: 1 },
+      onSwitchNode: onSwitch,
+      onStart,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "连接节点" }));
+    await waitFor(() => expect(onStart).toHaveBeenCalledTimes(1));
+    expect(onSwitch).toHaveBeenCalledWith("n2");
+    expect(onSwitch.mock.invocationCallOrder[0]).toBeLessThan(
+      onStart.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("切换失败就停下，并说明是切换失败", async () => {
+    const onSwitch = vi.fn(async () => ({
+      ok: false,
+      message: "节点不存在。",
+    }));
+    const onStart = vi.fn();
+    renderStage({
+      config: { ...CONFIG, current_node_id: null },
+      nodeProbes: probes({
+        results: { n1: probeResult("n1", 90), n2: probeResult("n2", 42) },
+      }),
+      preselect: { configId: "cfg_1", nodeId: "n2", nonce: 1 },
+      onSwitchNode: onSwitch,
+      onStart,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "连接节点" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("切换节点失败");
+    expect(alert.textContent).toContain("节点不存在。");
+    expect(onStart).not.toHaveBeenCalled();
+  });
+
+  it("已连接时点行不改选中，以当前节点为准", async () => {
+    const onSwitch = vi.fn(async () => ({ ok: true }));
+    renderStage({
+      config: { ...CONFIG, current_node_id: "n1" },
+      connection: "connected",
+      runtime: runtime({
+        state: "running",
+        connected_since: new Date(Date.now() - 5000).toISOString(),
+        health: {
+          ...emptyRuntimeView().health,
+          data_plane: true,
+          checked_at: new Date().toISOString(),
+        },
+      }),
+      nodeProbes: probes({
+        results: { n1: probeResult("n1", 90), n2: probeResult("n2", 42) },
+      }),
+      // 即使有旧的本地预选，已连接也不采用。
+      preselect: { configId: "cfg_1", nodeId: "n2", nonce: 1 },
+      onSwitchNode: onSwitch,
+    });
+
+    fireEvent.click(screen.getByRole("option", { name: /新加坡 01/ }));
+    await waitFor(() => expect(onSwitch).toHaveBeenCalledWith("n2"));
+    const rows = screen.getAllByRole("option");
+    expect(rows[0].getAttribute("aria-selected")).toBe("true");
+    expect(rows[1].getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("已连接切换失败后仍可再点重试", async () => {
+    const onSwitch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, message: "节点不存在。" })
+      .mockResolvedValueOnce({ ok: true });
+    renderStage({
+      config: { ...CONFIG, current_node_id: "n1" },
+      connection: "connected",
+      runtime: runtime({
+        state: "running",
+        connected_since: new Date(Date.now() - 5000).toISOString(),
+        health: {
+          ...emptyRuntimeView().health,
+          data_plane: true,
+          checked_at: new Date().toISOString(),
+        },
+      }),
+      nodeProbes: probes({
+        results: { n1: probeResult("n1", 90), n2: probeResult("n2", 42) },
+      }),
+      onSwitchNode: onSwitch,
+    });
+
+    const row = screen.getByRole("option", { name: /新加坡 01/ });
+    fireEvent.click(row);
+    await waitFor(() => expect(onSwitch).toHaveBeenCalledTimes(1));
+    expect((await screen.findByRole("alert")).textContent).toContain("节点不存在。");
+    // 失败后选中仍是当前节点，点同一行还能再发一次切换。
+    expect(
+      screen.getAllByRole("option")[0].getAttribute("aria-selected"),
+    ).toBe("true");
+    fireEvent.click(row);
+    await waitFor(() => expect(onSwitch).toHaveBeenCalledTimes(2));
+  });
+
+  it("未连接时跟随外部 current_node_id 变化，不被旧预选拉回", async () => {
+    const nodes = [
+      CONFIG.nodes[0],
+      CONFIG.nodes[1],
+      { ...CONFIG.nodes[0], node_id: "n3", name: "纽约 01" },
+    ];
+    const onSwitch = vi.fn(async () => ({ ok: true }));
+    const onStart = vi.fn();
+    const view = renderStage({
+      config: { ...CONFIG, nodes, current_node_id: "n1" },
+      nodeProbes: probes({ results: {} }),
+      onSwitchNode: onSwitch,
+      onStart,
+    });
+
+    // 用户本地选了新加坡（不发命令）。
+    fireEvent.click(screen.getByRole("option", { name: /新加坡 01/ }));
+    expect(
+      screen.getAllByRole("option")[1].getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(onSwitch).not.toHaveBeenCalled();
+
+    // AI 在未连接时把当前节点改成纽约：界面跟随，不被本地预选拉回。
+    view.rerender(
+      stageElement({
+        config: { ...CONFIG, nodes, current_node_id: "n3" },
+        nodeProbes: probes({ results: {} }),
+        onSwitchNode: onSwitch,
+        onStart,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("option")[2].getAttribute("aria-selected"),
+      ).toBe("true"),
+    );
+    expect(
+      screen.getAllByRole("option")[1].getAttribute("aria-selected"),
+    ).toBe("false");
+
+    // 点连接连的是新的当前节点，不需要再切换。
+    fireEvent.click(screen.getByRole("button", { name: "连接节点" }));
+    await waitFor(() => expect(onStart).toHaveBeenCalledTimes(1));
+    expect(onSwitch).not.toHaveBeenCalled();
+  });
+
+  it("没有测速结果时不预选，按钮仍可用并连当前 / 第一个", async () => {
+    const onSwitch = vi.fn(async () => ({ ok: true }));
+    const onStart = vi.fn();
+    renderStage({
+      config: { ...CONFIG, current_node_id: null },
+      nodeProbes: probes({ results: {} }),
+      onSwitchNode: onSwitch,
+      onStart,
+    });
+
+    const rows = screen.getAllByRole("option");
+    expect(rows[0].getAttribute("aria-selected")).toBe("false");
+    expect(rows[1].getAttribute("aria-selected")).toBe("false");
+    const primary = screen.getByRole("button", { name: "连接节点" });
+    expect((primary as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(primary);
+    await waitFor(() => expect(onStart).toHaveBeenCalledTimes(1));
+    expect(onSwitch).toHaveBeenCalledWith("n1");
+  });
+
+  it("没有本会话步骤流时不显示收尾句", () => {
+    renderStage({
+      config: { ...CONFIG, current_node_id: null },
+      nodeProbes: probes({
+        results: { n1: probeResult("n1", 42), n2: probeResult("n2", 90) },
+      }),
+    });
+    expect(screen.queryByText(/已加入/)).toBeNull();
+  });
+
+  it("收尾句只显示在试用步骤流对应的配置上", () => {
+    renderStage({
+      trialSummary: { configId: "cfg_other", count: 2, fastestMs: 42 },
+    });
+    expect(screen.queryByText(/已加入/)).toBeNull();
+    cleanup();
+
+    renderStage({
+      trialSummary: { configId: "cfg_1", count: 2, fastestMs: 42 },
+    });
+    expect(screen.getByText(/已加入 2 个免费节点，最快 42ms/)).toBeTruthy();
   });
 });

@@ -25,6 +25,8 @@ interface Props {
   onConfigureKey: () => void;
   /** 递增这个值会把焦点移到输入框。 */
   focusSignal?: number;
+  /** 递增这个值会把焦点移到消息流（空态点预制问题后）。 */
+  focusMessagesSignal?: number;
 }
 
 export function ChatView({
@@ -40,9 +42,15 @@ export function ChatView({
   hasKey,
   onConfigureKey,
   focusSignal = 0,
+  focusMessagesSignal = 0,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
+
+  useEffect(() => {
+    if (!focusMessagesSignal) return;
+    scrollRef.current?.focus({ preventScroll: true });
+  }, [focusMessagesSignal]);
   const inlineQuestion =
     question && !isConfirmQuestionKind(question.kind) ? question : null;
 
@@ -65,6 +73,7 @@ export function ChatView({
       <div
         className="chat__scroll"
         ref={scrollRef}
+        tabIndex={-1}
         onScroll={(event) => {
           const node = event.currentTarget;
           pinnedRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120;

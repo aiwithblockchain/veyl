@@ -60,7 +60,14 @@ interface Props {
   onCollapse: () => void;
 }
 
-const SUGGESTIONS = ["为什么我打不开某个网站？", "检查我的网络配置"];
+/** 对话空态的预制问题（assistant-empty-state.md §2）；它们是按钮文案，句末不加问号。 */
+const PRESET_QUESTIONS = [
+  "连上了，但网页打不开",
+  "怎么换成更快的节点",
+  "为什么有的软件没走 VPN",
+  "为什么个别网站还是打不开",
+  "终端里的命令也想走 VPN",
+];
 
 function relativeTime(at: number): string {
   const diff = Date.now() - at;
@@ -101,6 +108,7 @@ export function AiPanel({
   const [view, setView] = useState<View>("chat");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [messagesFocusSignal, setMessagesFocusSignal] = useState(0);
   const [editError, setEditError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState<Session | null>(null);
@@ -347,6 +355,7 @@ export function AiPanel({
             hasKey={aiReady}
             onConfigureKey={onConfigureKey}
             focusSignal={focusSignal}
+            focusMessagesSignal={messagesFocusSignal}
           />
         ) : (
           <>
@@ -361,20 +370,22 @@ export function AiPanel({
               {!hasEverConnected && !needsFirstConfig ? (
                 <p className="ai-empty__text">连接在中间；需要我帮你配好，就在下面说。</p>
               ) : null}
-              {!hasEverConnected && aiReady ? (
-                <div className="ai-empty__suggest">
-                  <span className="ai-empty__suggest-label">或者问我：</span>
-                  {SUGGESTIONS.map((suggestion) => (
+              {aiReady && !question ? (
+                <div
+                  className="ai-empty__suggest"
+                  role="group"
+                  aria-label="可以这样问"
+                >
+                  {PRESET_QUESTIONS.map((preset) => (
                     <button
-                      key={suggestion}
+                      key={preset}
                       type="button"
-                      onClick={() =>
-                        inlineQuestion && onAnswerFromComposer
-                          ? void onAnswerFromComposer(suggestion)
-                          : onEmptySend(suggestion)
-                      }
+                      onClick={() => {
+                        void onEmptySend(preset);
+                        setMessagesFocusSignal((value) => value + 1);
+                      }}
                     >
-                      · {suggestion}
+                      {preset}
                     </button>
                   ))}
                 </div>
