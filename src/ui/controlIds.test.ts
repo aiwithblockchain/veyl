@@ -11,6 +11,7 @@ describe("静态控件登记表", () => {
     expect(staticControlsFor("client").map((item) => item.id)).toEqual([
       "client.primary",
       "client.node_pick",
+      "client.probe",
       "client.ask_ai",
     ]);
     expect(staticControlsFor("settings").map((item) => item.id)).toEqual([
@@ -30,6 +31,16 @@ describe("静态控件登记表", () => {
     });
     expect(controls[0].label).toBe("重新连接");
     expect(controls[1].label.length).toBe(24);
+  });
+
+  it("暂时不可点的控件整条剔除，对应的 last_action 也不上报", () => {
+    const context = buildUiContext({
+      screen: "client",
+      omitControls: ["client.probe"],
+      lastAction: { id: "client.probe" },
+    });
+    expect(context.controls.some((item) => item.id === "client.probe")).toBe(false);
+    expect(context.last_action).toBeNull();
   });
 });
 

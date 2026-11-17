@@ -37,6 +37,7 @@ function makeSession(over: Partial<Session> = {}): Session {
 function renderPanel(over: {
   session?: Session | null;
   aiReady?: boolean;
+  presetsVisible?: boolean;
   question?: PendingQuestion | null;
   onEmptySend?: (text: string) => void;
   onAnswerFromComposer?: (text: string) => void;
@@ -48,6 +49,7 @@ function renderPanel(over: {
       sessions={session ? [session] : []}
       activeSessionId={session?.id ?? ""}
       aiReady={over.aiReady ?? true}
+      presetsVisible={over.presetsVisible ?? true}
       aiProviderName="DeepSeek"
       hasEverConnected
       hasConfigs
@@ -109,6 +111,11 @@ describe("对话空态的预制问题", () => {
         messages: [{ id: "m1", role: "user", text: "你好", at: 1 }],
       }),
     });
+    expect(shownPresets()).toEqual([]);
+  });
+
+  it("不在 client / no_nodes 屏时不显示", () => {
+    renderPanel({ presetsVisible: false });
     expect(shownPresets()).toEqual([]);
   });
 

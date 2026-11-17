@@ -18,6 +18,8 @@ export type VpnConnectionState = "idle" | "starting" | "connected" | "stopping";
 export interface ActionResult {
   ok: boolean;
   activated?: boolean;
+  /** 新建配置的 id（createConfig 成功时给）：已连接场景要先切过去再启动。 */
+  configId?: string;
   message?: string;
   /** 这次 start 真的把运行时连上了（不是重入、取消或被作废的空返回）。 */
   connected?: boolean;
@@ -443,13 +445,13 @@ export function useVpnSession(
         configs: [...store.configs, detail],
         activeId: activate ? detail.config_id : store.activeId,
       });
-      return { ok: true, activated: activate };
+      return { ok: true, activated: activate, configId: detail.config_id };
     }
 
     try {
       const created = await bridge.configCreate(input);
       await refreshReal();
-      return { ok: true, activated: created.is_active };
+      return { ok: true, activated: created.is_active, configId: created.config_id };
     } catch (err) {
       // 全新安装时种子里还没有节点：先刷新一次种子再重试，避免「新建配置」直接撞墙。
       if (toBridgeError(err).details?.reason === "seed_unavailable") {
@@ -457,7 +459,7 @@ export function useVpnSession(
           await bridge.defaultProfileRefresh();
           const created = await bridge.configCreate(input);
           await refreshReal();
-          return { ok: true, activated: created.is_active };
+          return { ok: true, activated: created.is_active, configId: created.config_id };
         } catch (retryErr) {
           return {
             ok: false,

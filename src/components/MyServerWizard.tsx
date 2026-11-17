@@ -244,6 +244,10 @@ export function MyServerWizard({
     null;
   const currentPlan =
     plans.find((plan) => plan.id === planId) ?? defaultPlan(plans);
+  const currentTier =
+    currentPlan && plans.length === 3
+      ? (TIERS[plans.findIndex((plan) => plan.id === currentPlan.id)] ?? null)
+      : null;
 
   const consumedAiNonce = useRef<number | null>(null);
   // AI 选好地区/规格：null 不覆盖；同值不高亮；正在创建时整条忽略。
@@ -514,11 +518,17 @@ export function MyServerWizard({
                 {tier ? <span className="wizard-plan__tier">{tier}</span> : null}
                 <span className="wizard-plan__spec">{plan.label}</span>
                 <span className="wizard-plan__sub">
-                  每天{" "}
-                  <span className="num">{formatDailyPrice(plan.daily_price_cents)}</span>
-                  {plan.transfer_gib > 0
-                    ? ` · 每月 ${plan.transfer_gib} GB 流量`
-                    : null}
+                  <span className="wizard-plan__price">
+                    每天{" "}
+                    <span className="num">
+                      {formatDailyPrice(plan.daily_price_cents)}
+                    </span>
+                  </span>
+                  {plan.transfer_gib > 0 ? (
+                    <span className="wizard-plan__transfer">
+                      每月 {plan.transfer_gib} GB
+                    </span>
+                  ) : null}
                 </span>
               </button>
             );
@@ -575,15 +585,9 @@ export function MyServerWizard({
       <div className="wizard-foot">
         <div className="wizard-foot__meta">
           <p className="wizard-foot__price">
-            {currentPlan ? (
-              <>
-                每天{" "}
-                <span className="num">
-                  {formatDailyPrice(currentPlan.daily_price_cents)}
-                </span>{" "}
-                · 约 {formatMonthlyFromDaily(currentPlan.daily_price_cents)}/月
-              </>
-            ) : null}
+            {currentPlan
+              ? `${currentTier ? `${currentTier} · ` : ""}约 ${formatMonthlyFromDaily(currentPlan.daily_price_cents)}/月`
+              : null}
           </p>
           <p className="myservers__demo">从余额扣一天；之后每天续扣，余额不足会提示充值。</p>
         </div>

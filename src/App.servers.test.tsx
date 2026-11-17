@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { getAgentBridge } from "./agent";
@@ -45,6 +45,19 @@ const SERVER: MyServer = {
 
 const bridge = getAgentBridge();
 const modeDescriptor = Object.getOwnPropertyDescriptor(bridge, "mode");
+
+
+function detailConnect() {
+  const detail = document.querySelector(".myservers__detail");
+  if (!(detail instanceof HTMLElement)) throw new Error("详情不在");
+  fireEvent.click(within(detail).getByRole("button", { name: "连接" }));
+}
+
+function navConnect() {
+  const nav = screen.getByRole("navigation", { name: "切换主区" });
+  fireEvent.click(within(nav).getByRole("button", { name: "连接" }));
+}
+
 
 function prepare(servers: MyServer[] = []) {
   Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
@@ -216,9 +229,29 @@ describe("destination 与我的服务器", () => {
     expect(
       await screen.findByRole("complementary", { name: "服务器列表" }),
     ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    navConnect();
     expect(await screen.findByRole("button", { name: "连接节点" })).toBeTruthy();
     expect(runtimeStart).not.toHaveBeenCalled();
+  });
+
+  it("服务器页 ＋ 打开 client 新建节点，返回回到服务器列表", async () => {
+    prepare([SERVER]);
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    const rail = await screen.findByRole("complementary", { name: "服务器列表" });
+    fireEvent.click(within(rail).getByRole("button", { name: "新建节点" }));
+
+    await waitFor(() =>
+      expect(document.querySelector('main[aria-label="新建节点"]')).not.toBeNull(),
+    );
+    expect(screen.queryByRole("complementary", { name: "服务器列表" })).toBeNull();
+
+    const stage = document.querySelector('main[aria-label="新建节点"]') as HTMLElement;
+    fireEvent.click(within(stage).getByRole("button", { name: "返回" }));
+    await waitFor(() =>
+      expect(screen.getByRole("complementary", { name: "服务器列表" })).toBeTruthy(),
+    );
   });
 
   it("取凭据失败：不建配置，给出三段式提示", async () => {
@@ -259,7 +292,7 @@ describe("destination 与我的服务器", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
     );
-    fireEvent.click(await screen.findByRole("button", { name: "用来建配置" }));
+    detailConnect();
 
     expect(await screen.findByText(/没有改动任何配置/)).toBeTruthy();
     expect(configCreate).not.toHaveBeenCalled();
@@ -300,7 +333,7 @@ describe("destination 与我的服务器", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
     );
-    fireEvent.click(await screen.findByRole("button", { name: "用来建配置" }));
+    detailConnect();
 
     await waitFor(() => expect(configCreate).toHaveBeenCalled());
     expect(configCreate).toHaveBeenCalledWith(
@@ -349,8 +382,8 @@ describe("destination 与我的服务器", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
     );
-    fireEvent.click(await screen.findByRole("button", { name: "用来建配置" }));
-    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    detailConnect();
+    navConnect();
 
     await act(async () => {
       release({
@@ -365,5 +398,170 @@ describe("destination 与我的服务器", () => {
 
     expect(configCreate).not.toHaveBeenCalled();
     expect(await screen.findByText("从哪里开始？")).toBeTruthy();
+  });
+});
+
+describe("已连接时改用服务器节点", () => {
+  const NEW_CONFIG_ID = "cfg_srv_1";
+
+  /** 旧配置已连着；新建的服务器配置 is_active=false，必须先切过去才能连对。 */
+  function prepareConnected() {
+    const spies = prepare([SERVER]);
+    const state = {
+      activeId: CONFIG_ID as string,
+      created: false,
+      runtimeConfigId: CONFIG_ID as string | null,
+      at: Date.now() - 60_000,
+    };
+    const summaryFor = (configId: string, active: boolean) => ({
+      ...SUMMARY,
+      config_id: configId,
+      name: configId === NEW_CONFIG_ID ? SERVER.name : SUMMARY.name,
+      is_active: active,
+      current_node_id:
+        configId === NEW_CONFIG_ID ? "local_node_srv_1" : "node_1",
+    });
+    vi.mocked(bridge.configList).mockImplementation(async () => ({
+      configs: [
+        summaryFor(CONFIG_ID, state.activeId === CONFIG_ID),
+        ...(state.created
+          ? [summaryFor(NEW_CONFIG_ID, state.activeId === NEW_CONFIG_ID)]
+          : []),
+      ],
+      active_config_id: state.activeId,
+    }));
+    const detailFor = (configId: string) => ({
+      config_id: configId,
+      name: configId === NEW_CONFIG_ID ? SERVER.name : SUMMARY.name,
+      connect_mode: "system_proxy",
+      routing_mode: "direct",
+      node_count: 1,
+      listen_port: null,
+      is_active: state.activeId === configId,
+      current_node_id:
+        configId === NEW_CONFIG_ID ? "local_node_srv_1" : "node_1",
+      created_at: 0,
+      updated_at: 0,
+      last_used_at: null,
+      nodes: [
+        configId === NEW_CONFIG_ID
+          ? {
+              node_id: "local_node_srv_1",
+              name: "新加坡 1 01",
+              server: "45.76.20.100",
+              port: 8388,
+              method: "aes-256-gcm",
+              protocol: "shadowsocks",
+              source: "server",
+              created_at: 0,
+            }
+          : {
+              node_id: "node_1",
+              name: "东京 01",
+              server: "203.0.113.1",
+              port: 8388,
+              method: "aes-128-gcm",
+              protocol: "shadowsocks",
+              source: "seed",
+              created_at: 0,
+            },
+      ],
+      dns: { mode: "auto", local: [], remote: [] },
+      tun_excludes: [],
+      layout: null,
+      layout_revision: null,
+    });
+    vi.mocked(bridge.configDetail).mockImplementation(
+      async (configId: string) => detailFor(configId) as never,
+    );
+    const running = (configId: string) => {
+      state.at += 1000;
+      return {
+        state: "running",
+        config_id: configId,
+        config_name: configId === NEW_CONFIG_ID ? SERVER.name : SUMMARY.name,
+        node_id: configId === NEW_CONFIG_ID ? "local_node_srv_1" : "node_1",
+        node_name: configId === NEW_CONFIG_ID ? "新加坡 1 01" : "东京 01",
+        connected_since: new Date(state.at).toISOString(),
+        last_transition_at: new Date(state.at).toISOString(),
+        system_proxy_enabled: true,
+      } as never;
+    };
+    vi.mocked(bridge.getRuntimeSnapshot).mockImplementation(async () =>
+      state.runtimeConfigId ? running(state.runtimeConfigId) : null,
+    );
+    const activate = vi
+      .spyOn(bridge, "configActivate")
+      .mockImplementation(async (configId: string) => {
+        state.activeId = configId;
+        return {
+          active_config_id: configId,
+          runtime: running(state.runtimeConfigId ?? CONFIG_ID),
+        } as never;
+      });
+    const stop = vi.spyOn(bridge, "runtimeStop");
+    return { ...spies, activate, stop, state, running };
+  }
+
+  async function openServerDetail() {
+    render(<App />);
+    await waitFor(() =>
+      expect(
+        document.querySelector(".state-line__label")?.textContent,
+      ).toContain("已连接"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
+    );
+  }
+
+  it("先切到新配置再启动，旧连接交给 runtime_start 停", async () => {
+    const { runtimeStart, activate, stop, state, running } =
+      prepareConnected();
+    vi.mocked(bridge.configCreate).mockImplementation(async () => {
+      state.created = true;
+      return { config_id: NEW_CONFIG_ID, is_active: false } as never;
+    });
+    vi.mocked(bridge.runtimeStart).mockImplementation(
+      async (configId?: string) => {
+        state.runtimeConfigId = configId ?? null;
+        return running(configId ?? NEW_CONFIG_ID);
+      },
+    );
+
+    await openServerDetail();
+    detailConnect();
+
+    await waitFor(() => expect(runtimeStart).toHaveBeenCalledTimes(1));
+    expect(activate).toHaveBeenCalledWith(NEW_CONFIG_ID);
+    expect(runtimeStart).toHaveBeenCalledWith(NEW_CONFIG_ID);
+    expect(runtimeStart).not.toHaveBeenCalledWith(CONFIG_ID);
+    // 激活必须发生在启动之前，否则启动的还是旧配置。
+    expect(activate.mock.invocationCallOrder[0]).toBeLessThan(
+      runtimeStart.mock.invocationCallOrder[0],
+    );
+    // 停旧连接由 runtime_start 自己完成（commands.md §7.1），界面不再额外 stop。
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("建配置失败时旧连接不受影响", async () => {
+    const { runtimeStart, activate, stop, state } = prepareConnected();
+    vi.mocked(bridge.configCreate).mockRejectedValue({
+      code: "TIMEOUT",
+      message: "请求超时。",
+      retryable: true,
+      details: { reason: "timeout" },
+    });
+
+    await openServerDetail();
+    detailConnect();
+
+    expect(await screen.findByText(/请求超时/)).toBeTruthy();
+    expect(activate).not.toHaveBeenCalled();
+    expect(runtimeStart).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+    expect(state.activeId).toBe(CONFIG_ID);
+    expect(state.runtimeConfigId).toBe(CONFIG_ID);
   });
 });

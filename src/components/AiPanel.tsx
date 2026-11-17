@@ -37,6 +37,8 @@ interface Props {
   aiProviderName: string | null;
   hasEverConnected: boolean;
   hasConfigs: boolean;
+  /** 只有 client / no_nodes 屏展示预制问题；其它屏不显示。 */
+  presetsVisible?: boolean;
   /** 递增这个值会把焦点移到输入框，并切回对话页。 */
   focusSignal: number;
   /** 当前会话待回答的提问；普通提问渲染在消息流末尾。 */
@@ -87,6 +89,7 @@ export function AiPanel({
   aiProviderName,
   hasEverConnected,
   hasConfigs,
+  presetsVisible = true,
   focusSignal,
   question = null,
   onAnswerQuestion,
@@ -370,7 +373,7 @@ export function AiPanel({
               {!hasEverConnected && !needsFirstConfig ? (
                 <p className="ai-empty__text">连接在中间；需要我帮你配好，就在下面说。</p>
               ) : null}
-              {aiReady && !question ? (
+              {aiReady && !question && presetsVisible ? (
                 <div
                   className="ai-empty__suggest"
                   role="group"

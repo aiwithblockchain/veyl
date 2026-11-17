@@ -23,6 +23,7 @@ const STATIC_CONTROLS: StaticControl[] = [
 
   { id: "client.primary", screen: "client", kind: "button", label: "连接" },
   { id: "client.node_pick", screen: "client", kind: "choice", label: "选择节点" },
+  { id: "client.probe", screen: "client", kind: "button", label: "测速" },
   { id: "client.ask_ai", screen: "client", kind: "button", label: "助手" },
 
   { id: "no_nodes.trial", screen: "no_nodes", kind: "button", label: "先试用免费节点" },
@@ -85,14 +86,17 @@ export function buildUiContext(input: {
   labels?: Record<string, string>;
   actionControls?: UiControl[];
   lastAction?: UiLastAction | null;
+  /** 当前屏幕里暂时不可点/不渲染的静态控件（例如测速中）。 */
+  omitControls?: readonly string[];
 }): UiContext {
+  const omitted = new Set(input.omitControls ?? []);
   const seen = new Set<string>();
   const controls: UiControl[] = [];
   for (const control of [
     ...staticControlsFor(input.screen, input.labels),
     ...(input.actionControls ?? []),
   ]) {
-    if (seen.has(control.id)) continue;
+    if (seen.has(control.id) || omitted.has(control.id)) continue;
     const label = normalizeLabel(control.label);
     if (!label) continue;
     seen.add(control.id);

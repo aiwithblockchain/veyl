@@ -310,3 +310,73 @@ describe("新建节点舞台的 AI 选择", () => {
     ).toBe("false");
   });
 });
+
+describe("新建节点的幂等键", () => {
+  function bridgeWith(create: ReturnType<typeof vi.fn>) {
+    return {
+      myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
+      myServerCreate: create,
+      myServerCheckout: vi.fn(async () => ({
+        charged_cents: 30,
+        balance_after_cents: 970,
+      })),
+    } as unknown as AgentBridge;
+  }
+
+  it("超时重试复用同一把幂等键", async () => {
+    const create = vi
+      .fn()
+      .mockRejectedValueOnce({
+        code: "TIMEOUT",
+        message: "请求超时。",
+        retryable: true,
+        details: { reason: "timeout" },
+      })
+      .mockResolvedValue({ server_id: "srv_1", order_id: "ord_1" });
+    render(
+      <MyServerWizard
+        bridge={bridgeWith(create)}
+        catalog={CATALOG}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    expect(create.mock.calls[0][0].idempotencyKey).toBe(
+      create.mock.calls[1][0].idempotencyKey,
+    );
+  });
+
+  it("换了套餐再下单换新键", async () => {
+    const create = vi.fn(
+      async (_input: { idempotencyKey: string }) => ({
+        server_id: "srv_1",
+        order_id: "ord_1",
+      }),
+    );
+    render(
+      <MyServerWizard
+        bridge={bridgeWith(create)}
+        catalog={CATALOG}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("radio", { name: /1 核 · 512 MB/ }));
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    expect(create.mock.calls[0][0].idempotencyKey).not.toBe(
+      create.mock.calls[1][0].idempotencyKey,
+    );
+  });
+});

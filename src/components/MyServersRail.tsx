@@ -1,52 +1,39 @@
 import { useState } from "react";
-import type { MyServer, MyServerAccount, MyServerWallet } from "../agent/bridge";
-import type { LogoutResult } from "../myservers/useMyServers";
+import type { MyServer, MyServerCatalog } from "../agent/bridge";
 import { formatDailyPrice, serverRailState, stateTone } from "../myservers/labels";
-import { MyServersAccount } from "./MyServersAccount";
 import { IconClose } from "./icons";
 
 interface Props {
   servers: MyServer[];
   selectedId: string | null;
   loading: boolean;
-  /** 还没有登录：列表区只给登录提示。 */
+  /** 还没有登录：列表区只给登录捷径。 */
   identityMissing?: boolean;
-  /** 登录态；账号块的数据源。 */
-  account?: MyServerAccount | null;
-  accountLoaded?: boolean;
-  accountError?: boolean;
-  wallet?: MyServerWallet | null;
-  walletError?: string | null;
-  /** 账号菜单展开状态由 Host 统一管理。 */
-  accountOpen?: boolean;
+  /** 目录用于把地区 slug 显示成名字。 */
+  catalog?: MyServerCatalog | null;
   /** 列表读取失败说明；只在左栏就地显示。 */
   error?: string | null;
-  retrying?: boolean;
   /** 重试成功后的播报文本（视觉隐藏）。 */
   retryNotice?: string | null;
-  /** 向导打开或身份不可用：行与「新建」都不可点。 */
+  /** 身份不可用：行与「新建」都不可点。 */
   disabled?: boolean;
   compact?: boolean;
   onSelect: (serverId: string) => void;
   onNew: () => void;
-  onRetry?: () => void;
   onLogin?: () => void;
-  onLogout?: () => Promise<LogoutResult>;
-  onTopUp?: () => void;
-  onRefreshWallet?: () => void;
-  onRefreshAccount?: () => void;
-  onToggleAccount?: () => void;
 }
 
 function ServerRow({
   server,
   selected,
   disabled,
+  regionLabel,
   onSelect,
 }: {
   server: MyServer;
   selected: boolean;
   disabled: boolean;
+  regionLabel: string;
   onSelect: (serverId: string) => void;
 }) {
   return (
@@ -58,17 +45,18 @@ function ServerRow({
       disabled={disabled}
       onClick={() => onSelect(server.server_id)}
     >
-      <span className="rail-server__head">
+      <span className="rail-server__line1">
         <span className="rail-server__name" title={server.name}>
           {server.name}
         </span>
-        <span className="rail-server__price num">
-          每天 {formatDailyPrice(server.daily_price_cents)}
-        </span>
+        <span
+          className={`led is-${stateTone(server.state)}`}
+          aria-hidden
+        />
       </span>
-      <span className="rail-server__state myservers__rail-state">
-        <span className={`led is-${stateTone(server.state)}`} aria-hidden />
-        {serverRailState(server.state)}
+      <span className="rail-server__meta">
+        {serverRailState(server.state)} · {regionLabel} ·{" "}
+        {formatDailyPrice(server.daily_price_cents)}/天
       </span>
     </button>
   );
@@ -79,35 +67,30 @@ export function MyServersRail({
   selectedId,
   loading,
   identityMissing = false,
-  account = null,
-  accountLoaded = false,
-  accountError = false,
-  wallet = null,
-  walletError = null,
-  accountOpen = false,
+  catalog = null,
   error = null,
-  retrying = false,
   retryNotice = null,
   disabled = false,
   compact = false,
   onSelect,
   onNew,
-  onRetry,
   onLogin,
-  onLogout,
-  onTopUp,
-  onRefreshWallet,
-  onRefreshAccount,
-  onToggleAccount,
 }: Props) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const regionName = (regionId: string) =>
+    catalog?.regions.find((region) => region.id === regionId)?.name ?? regionId;
 
   const list = (
     <>
       {identityMissing ? (
-        <p className="rail__empty-text myservers__rail-hint">
+        <button
+          type="button"
+          className="rail__login-link"
+          disabled={disabled}
+          onClick={() => onLogin?.()}
+        >
           登录后查看你的服务器
-        </p>
+        </button>
       ) : error ? (
         <>
           <div className="rail__placeholders" aria-hidden>
@@ -118,20 +101,9 @@ export function MyServersRail({
               </div>
             ))}
           </div>
-          <div className="rail__error">
-            <p className="rail__empty-text myservers__rail-hint" role="alert">
-              连不上服务器，稍后再试
-            </p>
-            <button
-              type="button"
-              className="btn btn--ghost"
-              disabled={retrying}
-              aria-busy={retrying || undefined}
-              onClick={onRetry}
-            >
-              {retrying ? "正在重试…" : "重试"}
-            </button>
-          </div>
+          <p className="rail__empty-text myservers__rail-hint">
+            连不上服务器，稍后再试
+          </p>
         </>
       ) : loading ? (
         <div className="rail__loading" role="status" aria-busy="true" aria-label="正在读取服务器">
@@ -152,6 +124,7 @@ export function MyServersRail({
                 server={server}
                 selected={server.server_id === selectedId}
                 disabled={disabled}
+                regionLabel={regionName(server.region)}
                 onSelect={(serverId) => {
                   onSelect(serverId);
                   setDrawerOpen(false);
@@ -170,15 +143,6 @@ export function MyServersRail({
       className={`rail ${compact ? "rail--compact" : ""}`}
       aria-label="服务器列表"
     >
-      {!compact ? (
-        <header className="rail__brand">
-          <span className="wordmark">Veyl</span>
-          <span className="rail__sub">网络控制台</span>
-        </header>
-      ) : (
-        <span className="wordmark wordmark--mark">V</span>
-      )}
-
       {compact ? (
         <button
           type="button"
@@ -222,27 +186,6 @@ export function MyServersRail({
           {retryNotice}
         </p>
       ) : null}
-
-      <footer className="rail__foot">
-        <MyServersAccount
-          account={account}
-          loaded={accountLoaded}
-          accountError={accountError}
-          wallet={wallet}
-          walletError={walletError}
-          open={accountOpen}
-          disabled={disabled}
-          compact={compact}
-          onToggle={() => onToggleAccount?.()}
-          onLogin={() => onLogin?.()}
-          onLogout={
-            onLogout ?? (async () => ({ ok: false, message: "这个版本还不支持退出登录。" }))
-          }
-          onTopUp={() => onTopUp?.()}
-          onRefreshWallet={() => onRefreshWallet?.()}
-          onRefreshAccount={() => onRefreshAccount?.()}
-        />
-      </footer>
 
       {compact && drawerOpen ? (
         <div className="rail-drawer-backdrop" onMouseDown={() => setDrawerOpen(false)}>

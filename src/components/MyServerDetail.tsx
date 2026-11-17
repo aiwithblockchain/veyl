@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
-import { copyText } from "../ui/clipboard";
 import { ServerProgress } from "./ServerProgress";
 import {
   MY_SERVER_STATE_LABEL,
@@ -18,16 +17,18 @@ interface Props {
   regionLabel: string;
   /** 身份不可用：只读，不提供任何改动机器的操作。 */
   readOnly?: boolean;
-  /** 计划显示名（来自目录）；目录读不到时退回 slug。 */
-  planLabel: string;
+  /** 当前连接的就是这台。 */
+  connectedHere?: boolean;
   /** 失败时把结构化失败交给 AI。 */
   onAiLocate?: (serverId: string) => void;
-  /** 回到创建页再建一台。 */
+  /** 再建一台：打开 client 舞台的新建节点。 */
   onCreateAnother: () => void;
   /** 同账户未销毁机器 > 1：流量额度是共享池。 */
   sharedTransfer?: boolean;
-  /** 可用时去取凭据（Host 验签落库后返回本地节点）。 */
+  /** 可用时去取凭据并连接这台（Host 验签后把节点设为当前）。 */
   onUseServer: (server: MyServer) => void | Promise<void>;
+  /** 连接的就是这台时，主按钮执行断开。 */
+  onDisconnect?: () => void;
   onChanged: () => void;
   /** 重建成功：选中 newServerId，详情继续显示安装进度。 */
   onRebuilt: (serverId: string, state: MyServerState) => void;
@@ -45,17 +46,18 @@ function errorText(error: unknown): string {
   return message ? `${message}${tail}` : `这次操作没完成。${tail}`;
 }
 
-/** 服务器子视图里的就地详情：SSH 与地址类事实已撤掉。 */
+/** 服务器详情：事实 + 底部操作行（销毁在左，主按钮在右）。 */
 export function MyServerDetail({
   bridge,
   server,
   regionLabel,
   readOnly = false,
-  planLabel,
+  connectedHere = false,
   onAiLocate,
   onCreateAnother,
   sharedTransfer = false,
   onUseServer,
+  onDisconnect,
   onChanged,
   onRebuilt,
   onGone,
@@ -65,7 +67,6 @@ export function MyServerDetail({
   const [error, setError] = useState<string | null>(null);
   const [destroyRetryAllowed, setDestroyRetryAllowed] = useState(false);
   const [useBusy, setUseBusy] = useState(false);
-  const [ipCopy, setIpCopy] = useState<"idle" | "ok" | "failed">("idle");
   const useBusyRef = useRef(false);
 
   const rebuild = async () => {
@@ -129,21 +130,34 @@ export function MyServerDetail({
     }
   };
 
+  const primary = isProvisioning(server.state)
+    ? null
+    : server.state === "error"
+      ? { label: "重新建一台", disabled: locked, onClick: onCreateAnother }
+      : server.state === "gone"
+        ? { label: "重新购买", disabled: locked, onClick: onCreateAnother }
+        : ready
+          ? connectedHere
+            ? {
+                label: "断开",
+                disabled: locked || !onDisconnect,
+                onClick: () => onDisconnect?.(),
+              }
+            : {
+                label: "连接",
+                disabled: locked || useBusy,
+                onClick: () => void useServerNow(),
+              }
+          : null;
+
   return (
     <div className="myservers__detail">
       <div className="myservers__detail-head">
+        <h2 className="myservers__detail-name">{server.name}</h2>
         <span className={`myservers__state is-${stateTone(server.state)}`}>
           <span className={`led is-${stateTone(server.state)}`} aria-hidden />
           {MY_SERVER_STATE_LABEL[server.state]}
         </span>
-        <button
-          type="button"
-          className="btn btn--ghost"
-          disabled={locked}
-          onClick={onCreateAnother}
-        >
-          再建一台
-        </button>
       </div>
 
       {isProvisioning(server.state) ? <ServerProgress server={server} /> : null}
@@ -152,29 +166,6 @@ export function MyServerDetail({
         <div>
           <dt>地区</dt>
           <dd>{regionLabel}</dd>
-        </div>
-        <div>
-          <dt>规格</dt>
-          <dd>{planLabel}</dd>
-        </div>
-        <div>
-          <dt>IP</dt>
-          <dd className="num myservers__ip">
-            {server.ip ?? "—"}
-            {server.ip ? (
-              <button
-                type="button"
-                className="copy-btn"
-                onClick={() => {
-                  void copyText(server.ip ?? "").then((ok) =>
-                    setIpCopy(ok ? "ok" : "failed"),
-                  );
-                }}
-              >
-                {ipCopy === "ok" ? "已复制" : ipCopy === "failed" ? "复制失败" : "复制"}
-              </button>
-            ) : null}
-          </dd>
         </div>
         <div>
           <dt>节点</dt>
@@ -226,71 +217,62 @@ export function MyServerDetail({
         </p>
       ) : null}
 
-      <div className="myservers__actions">
-        {server.state === "error" && !server.failure && onAiLocate ? (
-          <button
-            type="button"
-            className="btn btn--ghost"
-            onClick={() => onAiLocate(server.server_id)}
-          >
-            AI 定位
-          </button>
-        ) : null}
-        {/* 重建端点当前不可用（rebuild_not_supported）：入口先隐藏，保留实现等后端。 */}
-        {void rebuild}
-        {ready ? (
-          <button
-            type="button"
-            className="btn btn--primary"
-            disabled={locked || useBusy}
-            onClick={() => void useServerNow()}
-          >
-            用来建配置
-          </button>
-        ) : null}
-      </div>
+      {/* 重建端点当前不可用（rebuild_not_supported）：入口先隐藏，保留实现等后端。 */}
+      {void rebuild}
 
-      <div className="myservers__danger">
-        {destroying && !destroyRetryAllowed ? (
-          <p className="myservers__hint" role="status">
-            正在销毁…
-          </p>
-        ) : confirming ? (
-          <div className="myservers__confirm" role="alert">
-            <p>
-              {isProvisioning(server.state)
-                ? "取消创建并销毁这台服务器？正在进行的安装会中断。"
-                : "销毁后不再产生新费用。未用完的整天退回余额，当天已扣不退。配置里会少一个节点。"}
+      <div className="myservers__footer">
+        <div className="myservers__danger">
+          {destroying && !destroyRetryAllowed ? (
+            <p className="myservers__hint" role="status">
+              正在销毁…
             </p>
-            <div className="myservers__actions">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                disabled={busy}
-                onClick={() => setConfirming(false)}
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                className="btn btn--danger-ghost"
-                disabled={busy}
-                onClick={() => void destroy()}
-              >
-                {busy ? "正在销毁…" : "确认销毁"}
-              </button>
+          ) : confirming ? (
+            <div className="myservers__confirm" role="alert">
+              <p>
+                {isProvisioning(server.state)
+                  ? "取消创建并销毁这台服务器？正在进行的安装会中断。"
+                  : "销毁后不再产生新费用。未用完的整天退回余额，当天已扣不退。配置里会少一个节点。"}
+              </p>
+              <div className="myservers__actions">
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  disabled={busy}
+                  onClick={() => setConfirming(false)}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--danger-ghost"
+                  disabled={busy}
+                  onClick={() => void destroy()}
+                >
+                  {busy ? "正在销毁…" : "确认销毁"}
+                </button>
+              </div>
             </div>
-          </div>
-        ) : (
+          ) : (
+            <button
+              type="button"
+              className="btn btn--danger-ghost"
+              disabled={locked}
+              onClick={() => setConfirming(true)}
+            >
+              {destroying ? "重试销毁" : "销毁"}
+            </button>
+          )}
+        </div>
+        {primary ? (
           <button
             type="button"
-            className="btn btn--danger-ghost"
-            disabled={locked}
-            onClick={() => setConfirming(true)}
+            className="btn btn--primary myservers__primary"
+            disabled={primary.disabled}
+            onClick={primary.onClick}
           >
-            {destroying ? "重试销毁" : "销毁"}
+            {primary.label}
           </button>
-        )}
+        ) : null}
       </div>
     </div>
   );

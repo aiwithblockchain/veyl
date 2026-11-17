@@ -340,6 +340,19 @@ export default function App() {
     setDestination(next);
     writeDestination(localStorage, next);
   };
+  /** 新建节点只有一个宿主：client 舞台；从服务器页进入时记住来源，返回回去。 */
+  const [newNodeOrigin, setNewNodeOrigin] = useState<
+    "client" | "servers" | "trial_expired"
+  >("client");
+  const openNewNode = (origin: "client" | "servers" | "trial_expired") => {
+    setNewNodeOrigin(origin);
+    setNewNodeOpen(true);
+    if (destinationRef.current !== "client") changeDestination("client");
+  };
+  const closeNewNode = () => {
+    setNewNodeOpen(false);
+    if (newNodeOrigin === "servers") changeDestination("servers");
+  };
   // 再点一次已激活的「我的服务器」图标：回到列表根（默认第一台）。
   const [serversRootSignal, setServersRootSignal] = useState(0);
   const myServers = useMyServers(bridge, {
@@ -347,7 +360,7 @@ export default function App() {
     rootSignal: serversRootSignal,
   });
   /** 账号菜单同一时刻只开一个：导航头像或左栏账号行。 */
-  const [accountMenu, setAccountMenu] = useState<"nav" | "rail" | null>(null);
+  const [accountMenu, setAccountMenu] = useState<"nav" | null>(null);
   const userLogoutRef = useRef(false);
   const wasLoggedInRef = useRef(false);
   // 查看账单拉起的登录成功了：回到账户页，账单入口保持可见。
@@ -368,13 +381,10 @@ export default function App() {
     });
   }, [myServers.loggedIn, myServers.loginOpen]);
 
-  // 账号菜单：登出、离开服务器页时收起。
+  // 账号菜单：登出后收起。
   useEffect(() => {
     if (!myServers.loggedIn) setAccountMenu(null);
   }, [myServers.loggedIn]);
-  useEffect(() => {
-    if (destination !== "servers" && accountMenu === "rail") setAccountMenu(null);
-  }, [destination, accountMenu]);
   // 登录过期：用户主动退出时不提示，其余掉线给一次 toast。
   useEffect(() => {
     const was = wasLoggedInRef.current;
@@ -389,6 +399,8 @@ export default function App() {
   }, [myServers.loggedIn]);
   /** 取凭据建配置在途：防止连点。 */
   const useServerInFlightRef = useRef(false);
+  /** 从服务器详情点「连接」：先切到新建的这套配置，就绪后再发起连接。 */
+  const pendingServerConnectRef = useRef<string | null>(null);
   /** 最近一次用户操作，随下一条消息的 context 上报。 */
   const lastActionRef = useRef<UiLastAction | null>(null);
   /** 从「查看账单」拉起的登录：成功后回到账户页。 */
@@ -421,6 +433,12 @@ export default function App() {
     nonce: number;
   } | null>(null);
   const trialPreselectNonceRef = useRef(0);
+  /** 本次会话手动测过速的配置：收尾句去掉数字。 */
+  const [manualProbedConfigs, setManualProbedConfigs] = useState<Set<string>>(
+    () => new Set(),
+  );
+  /** 舞台的测速入口当前是否可点：不可点时从 context 里剔除。 */
+  const probeControlHiddenRef = useRef(false);
   /** 免费节点试用状态；过期后只留「新建节点」。 */
   const [trial, setTrial] = useState<TrialStatusData | null>(null);
   const [trialLoaded, setTrialLoaded] = useState(false);
@@ -531,17 +549,9 @@ export default function App() {
     }
   };
 
-  // 我的服务器 → 用这台建配置：Host 验签落库后，直接把节点放进唯一配置。
-  // 「新建节点」的完整流程（地区/规格/计费）下一阶段才接。
+  // 服务器详情「连接」：Host 验签落库后把节点放进配置，配置就绪再连接。
   const handleUseServer = async (server: MyServer) => {
     if (useServerInFlightRef.current) return;
-    if (vpn.configs.some((config) => config.node_count > 0)) {
-      setAppNotice({
-        level: "info",
-        text: "节点池里已经有节点了，换节点等下一版接入。",
-      });
-      return;
-    }
     useServerInFlightRef.current = true;
     const startedDestination = destinationRef.current;
     try {
@@ -560,6 +570,21 @@ export default function App() {
         });
         return;
       }
+      const targetConfigId = created.configId ?? null;
+      // 已连着别的配置时，新建不会变成当前配置：先切过去，否则 start 连的还是旧节点。
+      if (!created.activated) {
+        const selected = targetConfigId
+          ? await vpn.selectConfig(targetConfigId)
+          : { ok: false };
+        if (!selected.ok) {
+          setAppNotice({
+            level: "error",
+            text: selected.message ?? "服务器节点已加入，但没能切过去，可以再点一次连接。",
+          });
+          return;
+        }
+      }
+      pendingServerConnectRef.current = targetConfigId;
       changeDestination("client");
     } catch (error) {
       if (destinationRef.current === startedDestination) {
@@ -569,6 +594,30 @@ export default function App() {
       useServerInFlightRef.current = false;
     }
   };
+
+  // 服务器节点进入配置后再连接；失败只说「没连上」，不丢掉已加进来的节点。
+  useEffect(() => {
+    const targetConfigId = pendingServerConnectRef.current;
+    if (!targetConfigId) return;
+    const config = vpn.activeConfig;
+    if (
+      !config ||
+      config.config_id !== targetConfigId ||
+      config.nodes.length === 0 ||
+      vpn.loading
+    )
+      return;
+    pendingServerConnectRef.current = null;
+    void vpn.start().then((result) => {
+      if (!result.ok) {
+        setAppNotice({
+          level: "error",
+          text:
+            result.message ?? "服务器节点已加入，但没能连上，可以再点一次连接。",
+        });
+      }
+    });
+  }, [vpn.activeConfig, vpn.loading, vpn.start]);
 
   // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
   const healthVersion = useRef(0);
@@ -1322,6 +1371,7 @@ export default function App() {
         labels: uiLabels,
         actionControls,
         lastAction: options.lastAction ?? lastActionRef.current,
+        omitControls: probeControlHiddenRef.current ? ["client.probe"] : undefined,
       });
       // 上报一次就消费掉：下一条消息不重复说「用户刚刚点了」。
       lastActionRef.current = null;
@@ -1627,6 +1677,23 @@ export default function App() {
   const handleSwitchNode = (nodeId: string) => {
     lastActionRef.current = { id: "client.node_pick", value: nodeId };
     return vpn.switchNode(nodeId);
+  };
+
+  // 手动测速：只更新延迟，不改选中/不连接；点击动作随下一条消息上报。
+  const handleProbe = () => {
+    lastActionRef.current = { id: "client.probe" };
+    const config = vpn.activeConfig;
+    if (!config || config.nodes.length === 0 || nodeProbes.run) return;
+    setManualProbedConfigs((current) => {
+      if (current.has(config.config_id)) return current;
+      const next = new Set(current);
+      next.add(config.config_id);
+      return next;
+    });
+    void nodeProbes.start(
+      config.config_id,
+      config.nodes.map((node) => node.node_id),
+    );
   };
 
   // action_card 的按钮只上报：hidden 消息 + context.last_action，不直接调命令。
@@ -1936,6 +2003,7 @@ export default function App() {
       aiProviderName={aiProviderName}
       hasEverConnected={hasEverConnected}
       hasConfigs={vpn.configs.length > 0}
+      presetsVisible={uiScreen === "client" || uiScreen === "no_nodes"}
       focusSignal={composerFocusSignal}
       onSelectSession={handleSelectSession}
       onNewSession={() => dispatch({ type: "new_session" })}
@@ -2077,29 +2145,14 @@ export default function App() {
           selectedId={myServers.selectedId}
           loading={myServers.loading}
           identityMissing={myServers.identityMissing}
-          account={myServers.account}
-          accountLoaded={myServers.accountLoaded}
-          accountError={myServers.accountError}
-          wallet={myServers.wallet}
-          walletError={myServers.walletError}
-          accountOpen={accountMenu === "rail"}
+          catalog={myServers.catalog}
           error={myServers.error}
-          retrying={myServers.retrying}
           retryNotice={myServers.retryNotice}
           disabled={myServers.identityLost}
           compact={shell.mode === "drawer"}
           onSelect={myServers.select}
-          onNew={myServers.openWizard}
-          onRetry={() => void myServers.retry()}
+          onNew={() => openNewNode("servers")}
           onLogin={myServers.openLogin}
-          onLogout={handleAccountLogout}
-          onTopUp={myServers.openTopUp}
-          onRefreshWallet={() => void myServers.refreshWallet()}
-          onRefreshAccount={() => void myServers.refreshAccount()}
-          onToggleAccount={() => {
-            if (!myServers.loggedIn) return;
-            setAccountMenu((current) => (current === "rail" ? null : "rail"));
-          }}
         />
       ) : null}
       {destination === "servers" && panes.canDragRail ? (
@@ -2115,14 +2168,16 @@ export default function App() {
         />
       ) : null}
       {destination === "client" && newNodeOpen ? (
-        <main className="connection-stage" aria-label="新建节点">
+        <main
+          className="connection-stage connection-stage--new-node"
+          aria-label="新建节点"
+        >
           <div className="connection-stage__col">
             <MyServerWizard
               bridge={bridge}
               catalog={myServers.catalog}
               onOrdered={() => {
                 setNewNodeOpen(false);
-                changeDestination("servers");
                 void myServers.refresh();
               }}
               onEnsureIdentity={myServers.ensureIdentity}
@@ -2138,7 +2193,7 @@ export default function App() {
               onBusyChange={(busy) => {
                 newNodeBusyRef.current = busy;
               }}
-              onBack={() => setNewNodeOpen(false)}
+              onBack={closeNewNode}
               onSelectionApplied={(pick) =>
                 setNewNodeSelection({ region: pick.region, plan: pick.plan })
               }
@@ -2154,27 +2209,38 @@ export default function App() {
           bridge={bridge}
           catalog={myServers.catalog}
           selected={myServers.selected}
-          view={myServers.view}
+          account={myServers.account}
+          accountLoaded={myServers.accountLoaded}
+          accountError={myServers.accountError}
+          loading={myServers.loading}
+          error={myServers.error}
+          retrying={myServers.retrying}
           detailError={myServers.detailError}
           detailRetrying={myServers.detailRetrying}
           readOnly={myServers.identityLost}
           sharedTransfer={myServers.sharedTransfer}
-          onNew={myServers.openWizard}
-          onEnsureIdentity={myServers.ensureIdentity}
+          connectedHere={
+            (runtime.state === "running" || runtime.state === "degraded") &&
+            Boolean(myServers.selected?.node_id) &&
+            runtime.node_id === myServers.selected?.node_id
+          }
+          onNew={() => openNewNode("servers")}
+          onLogin={myServers.openLogin}
+          onRefreshAccount={() => void myServers.refreshAccount()}
+          onRetry={() => void myServers.retry()}
           onUseServer={handleUseServer}
+          onDisconnect={() => void handleVpnStop()}
           onChanged={() => void myServers.refresh()}
-          onOrdered={myServers.ordered}
+          onGone={() => myServers.ordered(null)}
           onRebuilt={myServers.rebuilt}
           onRetryDetail={myServers.retryDetail}
-          onTopUp={myServers.openTopUp}
           onAiLocate={handleAiLocate}
-          onAuthRequired={myServers.openLogin}
         />
       ) : trial?.state === "expired" ? (
         <TrialExpired
           onNewNode={() => {
             lastActionRef.current = { id: "trial_expired.new_node" };
-            setNewNodeOpen(true);
+            openNewNode("trial_expired");
           }}
         />
       ) : hasNodes && !(trialFlow && trialFlow.phase !== "done") ? (
@@ -2202,6 +2268,15 @@ export default function App() {
               current && current.nonce === nonce ? null : current,
             )
           }
+          onProbe={handleProbe}
+          manualProbed={
+            vpn.activeConfig
+              ? manualProbedConfigs.has(vpn.activeConfig.config_id)
+              : false
+          }
+          onProbeAvailabilityChange={(available) => {
+            probeControlHiddenRef.current = !available;
+          }}
         />
       ) : (
         <StartChoice
@@ -2209,7 +2284,7 @@ export default function App() {
           onUseFree={() => void handleUseFreeNodes()}
           onNewNode={() => {
             lastActionRef.current = { id: "no_nodes.new_node" };
-            setNewNodeOpen(true);
+            openNewNode("client");
           }}
           trial={trialFlow}
           onRetryTrial={handleRetryTrial}
@@ -2357,6 +2432,9 @@ export default function App() {
         <QuitDialog
           busy={quitBusy}
           error={quitError}
+          connected={
+            vpn.connection === "connected" || vpn.connection === "starting"
+          }
           onDecision={decideQuit}
         />
       ) : null}

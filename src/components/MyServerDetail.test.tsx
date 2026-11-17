@@ -33,6 +33,8 @@ function renderDetail(
   onUseServer: (server: MyServer) => void | Promise<void> = vi.fn(),
   sharedTransfer = false,
   onAiLocate?: (serverId: string) => void,
+  connectedHere = false,
+  onDisconnect?: () => void,
 ) {
   const destroy = vi.fn(async (id: string) =>
     server({ server_id: id, state: "destroyed" }),
@@ -43,8 +45,9 @@ function renderDetail(
       bridge={{ myServerDestroy: destroy } as unknown as AgentBridge}
       server={server(over)}
       regionLabel="新加坡 1"
-      planLabel="1 核 · 1 GB"
+      connectedHere={connectedHere}
       onAiLocate={onAiLocate}
+      onDisconnect={onDisconnect}
       sharedTransfer={sharedTransfer}
       onCreateAnother={onCreateAnother}
       onUseServer={onUseServer}
@@ -63,13 +66,15 @@ afterEach(() => {
 
 describe("服务器详情", () => {
   it("费用按日价与本期有效期展示，不出现时价", () => {
+    // 固定「现在」，paid_until 用相对它算出的未来日期，避免写死的日期过期变红。
+    vi.useFakeTimers({ now: new Date(2026, 10, 17, 9, 0, 0) });
     renderDetail({
       daily_price_cents: 20,
-      paid_until: new Date(2026, 10, 17, 12, 0, 0).toISOString(),
+      paid_until: new Date(2026, 11, 15, 12, 0, 0).toISOString(),
     });
 
     const detail = document.querySelector(".myservers__detail");
-    expect(detail?.textContent).toContain("每天 $0.20 · 本期有效至 2026-11-17");
+    expect(detail?.textContent).toContain("每天 $0.20 · 本期有效至 2026-12-15");
     expect(detail?.textContent).not.toContain("/小时");
   });
 
@@ -134,10 +139,17 @@ describe("服务器详情", () => {
   it("可用时主按钮不要求控制面 node_id，点击交回服务器", () => {
     const { onUseServer } = renderDetail({ node_id: null, state: "healthy" });
 
-    fireEvent.click(screen.getByRole("button", { name: "用来建配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
     expect(onUseServer).toHaveBeenCalledWith(
       expect.objectContaining({ server_id: "srv_1" }),
     );
+  });
+
+  it("连接的就是这台时主按钮是断开", () => {
+    const onDisconnect = vi.fn();
+    renderDetail({}, vi.fn(), vi.fn(), false, undefined, true, onDisconnect);
+    fireEvent.click(screen.getByRole("button", { name: "断开" }));
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
   });
 
   it("取凭据在途时按钮禁用，连点只发一次", async () => {
@@ -149,7 +161,7 @@ describe("服务器详情", () => {
         }),
     );
     renderDetail({}, vi.fn(), onUseServer);
-    const button = screen.getByRole("button", { name: "用来建配置" });
+    const button = screen.getByRole("button", { name: "连接" });
 
     fireEvent.click(button);
     fireEvent.click(button);
@@ -205,8 +217,10 @@ describe("服务器详情", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "AI 定位" }));
     expect(onAiLocate).toHaveBeenCalledWith("srv_1");
-    expect(screen.getByText("1 核 · 1 GB")).toBeTruthy();
-    expect(screen.getByText("45.76.20.100")).toBeTruthy();
+    // 设计：详情不显示规格与 IP。
+    expect(screen.queryByText("1 核 · 1 GB")).toBeNull();
+    expect(screen.queryByText("45.76.20.100")).toBeNull();
+    expect(screen.getByRole("button", { name: "重新建一台" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "销毁" }));
     expect(

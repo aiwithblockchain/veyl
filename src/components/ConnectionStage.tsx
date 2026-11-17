@@ -36,6 +36,12 @@ interface Props {
   preselect?: { configId: string; nodeId: string; nonce: number } | null;
   /** 预选应用后通知 Host 消费掉，避免切走再回来二次应用。 */
   onPreselectApplied?: (nonce: number) => void;
+  /** 手动测速：只更新延迟，不改选中、不连接。 */
+  onProbe?: () => void;
+  /** 本会话已手动测过速：收尾句去掉数字。 */
+  manualProbed?: boolean;
+  /** 测速入口是否可点；Host 据此决定 context 里是否列 client.probe。 */
+  onProbeAvailabilityChange?: (available: boolean) => void;
 }
 
 const NO_TRAFFIC_ACTION =
@@ -65,6 +71,9 @@ export function ConnectionStage({
   trialSummary = null,
   preselect = null,
   onPreselectApplied,
+  onProbe,
+  manualProbed = false,
+  onProbeAvailabilityChange,
 }: Props) {
   const [now, setNow] = useState(() => Date.now());
   const [switchError, setSwitchError] = useState<string | null>(null);
@@ -104,7 +113,12 @@ export function ConnectionStage({
   const lastCurrentRef = useRef<string | null>(config?.current_node_id ?? null);
   const latencyOf = (nodeId: string, nodeLatency: number | null): number | null => {
     const probe = nodeProbes.results[nodeId];
-    if (probe?.reachable && probe.latency_ms !== null) return probe.latency_ms;
+    if (probe) {
+      // 测过但没通就显示「—」，不要回落到运行时旧延迟。
+      return probe.reachable && probe.latency_ms !== null
+        ? probe.latency_ms
+        : null;
+    }
     if (runtime.node_id === nodeId && nodeLatency !== null) return nodeLatency;
     return null;
   };
@@ -140,11 +154,79 @@ export function ConnectionStage({
     setPickedId(null);
   }, [config?.current_node_id]);
 
+  const probeRunning = nodeProbes.run !== null;
+  const canProbe =
+    Boolean(onProbe) &&
+    nodes.length > 0 &&
+    !probeRunning &&
+    switching === null &&
+    !starting &&
+    !stopping &&
+    !helperPreparing;
+  useEffect(() => {
+    onProbeAvailabilityChange?.(canProbe);
+  }, [canProbe, onProbeAvailabilityChange]);
+
+  const manualProbeRef = useRef(false);
+  const prevRunIdRef = useRef<string | null>(null);
+  const lastFinishRef = useRef<NodeProbesController["finished"]>(null);
+  const [probeAllFailed, setProbeAllFailed] = useState(false);
+
+  // 新一批开始：手动测速等结果再重算标记；后台/自动测速只清标记，不移动。
+  useEffect(() => {
+    const runId = nodeProbes.run?.runId ?? null;
+    if (runId && !prevRunIdRef.current) {
+      setProbeAllFailed(false);
+      if (!manualProbeRef.current) setFastestMarkId(null);
+    }
+    prevRunIdRef.current = runId;
+  }, [nodeProbes.run?.runId]);
+
+  // 一批结束：手动测速把「最快」移到本次最低的那台；并列保留原来那台。
+  useEffect(() => {
+    if (probeRunning) return;
+    const finished = nodeProbes.finished;
+    if (!finished || finished === lastFinishRef.current) return;
+    lastFinishRef.current = finished;
+    if (finished.configId !== config?.config_id) return;
+    setProbeAllFailed(
+      finished.total > 0 && finished.ok === 0 && !finished.cancelled,
+    );
+    if (!manualProbeRef.current) return;
+    manualProbeRef.current = false;
+    if (finished.cancelled || finished.ok === 0) {
+      setFastestMarkId(null);
+      return;
+    }
+    let best = Number.POSITIVE_INFINITY;
+    let candidates: string[] = [];
+    for (const node of nodes) {
+      const result = nodeProbes.results[node.node_id];
+      if (!result?.reachable || result.latency_ms === null) continue;
+      if (result.latency_ms < best) {
+        best = result.latency_ms;
+        candidates = [node.node_id];
+      } else if (result.latency_ms === best) {
+        candidates.push(node.node_id);
+      }
+    }
+    setFastestMarkId((current) => {
+      if (candidates.length === 0) return null;
+      if (current && candidates.includes(current)) return current;
+      return candidates[0];
+    });
+  }, [
+    probeRunning,
+    nodeProbes.finished,
+    nodeProbes.results,
+    config?.config_id,
+    nodes,
+  ]);
+
   const localPick =
     pickedId !== null && nodes.some((node) => node.node_id === pickedId)
       ? pickedId
-      : null;
-  // 已连接一律以实际当前节点为准；未连接本地预选优先，否则跟随当前节点。
+      : null;  // 已连接一律以实际当前节点为准；未连接本地预选优先，否则跟随当前节点。
   const selectedId = connected
     ? (config?.current_node_id ?? null)
     : (localPick ?? config?.current_node_id ?? null);
@@ -153,6 +235,8 @@ export function ConnectionStage({
 
   const switchTo = async (nodeId: string) => {
     if (switching) return;
+    // 用户换节点：旧的「最快」标记不再成立。
+    setFastestMarkId(null);
     if (!connected) {
       // 未连接：只做本地选择，等点「连接」再发命令。
       setSwitchError(null);
@@ -188,6 +272,11 @@ export function ConnectionStage({
               : "连接";
   const primaryDisabled =
     starting || stopping || helperPreparing || switching !== null;
+  const probeTitle = probeRunning
+    ? "测速中"
+    : switching !== null || starting || stopping || helperPreparing
+      ? "正在切换，稍后再试"
+      : undefined;
 
   const onPrimary = async () => {
     if (primaryDisabled) return;
@@ -296,17 +385,52 @@ export function ConnectionStage({
         <section className="stage-card" aria-label={config?.name ?? "节点"}>
           <header className="stage-card__head">
             <h2 className="stage-card__title">{config?.name ?? "节点"}</h2>
-            <p className="stage-card__sub">
-              {`${nodes.length} 个节点${
-                nodes.some((node) => node.source === "seed") ? " · 7 天试用" : ""
-              }`}
-            </p>
+            <div className="stage-card__subrow">
+              <p className="stage-card__sub">
+                {`${nodes.length} 个节点${
+                  nodes.some((node) => node.source === "seed") ? " · 7 天试用" : ""
+                }`}
+              </p>
+              {onProbe && nodes.length > 0 ? (
+                <button
+                  type="button"
+                  className="stage-probe"
+                  disabled={!canProbe}
+                  title={probeTitle}
+                  onClick={() => {
+                    if (!canProbe) return;
+                    manualProbeRef.current = true;
+                    onProbe();
+                  }}
+                >
+                  {probeRunning ? (
+                    <>
+                      <span className="stage-step__dots" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                      </span>
+                      测速中
+                    </>
+                  ) : probeAllFailed ? (
+                    "再试一次"
+                  ) : (
+                    "测速"
+                  )}
+                </button>
+              ) : null}
+            </div>
+            {probeAllFailed && !probeRunning ? (
+              <p className="stage-card__probe-note">这次都没测通。</p>
+            ) : null}
           </header>
           <div className="stage-card__nodes" role="listbox" aria-label="节点">
             {nodes.map((node, index) => {
               const latency = latencies[index];
               const active = node.node_id === selectedId;
               const destroyed = destroyedNodeIds.has(node.node_id);
+              const probeFailed =
+                nodeProbes.results[node.node_id]?.reachable === false;
               return (
                 <button
                   key={node.node_id}
@@ -332,7 +456,10 @@ export function ConnectionStage({
                       <span className="stage-node__badge">已销毁</span>
                     ) : null}
                   </span>
-                  <span className="stage-node__ms">
+                  <span
+                    className="stage-node__ms"
+                    aria-label={probeFailed ? "这次没测通" : undefined}
+                  >
                     {switching === node.node_id
                       ? "切换中"
                       : nodeProbes.probing.has(node.node_id)
@@ -388,15 +515,19 @@ export function ConnectionStage({
           <p className="stage-note">{NO_TRAFFIC_ACTION}</p>
         ) : switchError || summary || onReportProblem ? (
           <p
-            className={`stage-note${switchError ? " stage-note--error" : ""}`}
+            className={`stage-note${switchError ? " stage-note--error" : ""}${
+              !switchError && summary ? " stage-note--summary" : ""
+            }`}
             role={switchError ? "alert" : undefined}
           >
             {switchError ??
               (summary
                 ? `已加入 ${summary.count} 个免费节点${
-                    summary.fastestMs !== null
-                      ? `，最快 ${Math.round(summary.fastestMs)}ms`
-                      : ""
+                    manualProbed
+                      ? ""
+                      : summary.fastestMs !== null
+                        ? `，最快 ${Math.round(summary.fastestMs)}ms`
+                        : ""
                   }`
                 : null)}
             {!switchError && onReportProblem ? (

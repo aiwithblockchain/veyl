@@ -713,6 +713,57 @@ describe("三区外壳与连接舞台", () => {
     );
   });
 
+  it("手动测速进 context：client.probe 在 controls 且 last_action 上报", async () => {
+    seedCardConfig();
+    const send = vi.spyOn(bridge, "sendMessage").mockResolvedValue({
+      requestId: "req_probe",
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("先做这一步")).toBeTruthy());
+    // 进入连接屏的自动测速先跑完（每个配置只自动跑一次），再手动测。
+    await waitFor(
+      () => {
+        const values = [...document.querySelectorAll(".stage-node__ms")].map(
+          (node) => node.textContent,
+        );
+        expect(values.some((value) => value?.includes("毫秒"))).toBe(true);
+      },
+      { timeout: 5000 },
+    );
+    await waitFor(() => {
+      const probe = document.querySelector(".stage-probe");
+      expect(probe).not.toBeNull();
+      expect((probe as HTMLButtonElement).disabled).toBe(false);
+    });
+    fireEvent.click(document.querySelector(".stage-probe") as HTMLElement);
+    // 等这一轮结束、入口恢复为「测速」且可点，再发消息。
+    await waitFor(
+      () => {
+        const probe = document.querySelector(".stage-probe") as HTMLButtonElement | null;
+        expect(probe?.disabled).toBe(false);
+        expect(probe?.textContent).toBe("测速");
+      },
+      { timeout: 5000 },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "展开助手" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "连上了，但网页打不开" }),
+    );
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const context = (
+      send.mock.calls[0][2] as {
+        context: {
+          controls: Array<{ id: string }>;
+          last_action: { id: string } | null;
+        };
+      }
+    ).context;
+    expect(context.controls.some((item) => item.id === "client.probe")).toBe(true);
+    expect(context.last_action).toEqual({ id: "client.probe" });
+  }, 15_000);
+
   it("空态预制问题：点击按普通消息发送并带 context，发送后消失", async () => {
     await renderApp();
     fireEvent.click(screen.getByRole("button", { name: "展开助手" }));

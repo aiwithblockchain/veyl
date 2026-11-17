@@ -590,22 +590,15 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     return () => window.removeEventListener("focus", onFocus);
   }, [active, loggedIn, refreshWallet]);
 
-  const viewRef = useRef(view);
-  viewRef.current = view;
+  // 有服务器就没有「未选中」：进入或刷新后默认选第一台；消失时选下一台。
   useEffect(() => {
     if (!active) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      // 登录 / 充值弹窗自己处理 Esc，别顺带把详情退回创建页。
-      if (loginOpen || topupOpen) return;
-      if (viewRef.current === "detail") {
-        setSelectedId(null);
-        setView("wizard");
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [active, loginOpen, topupOpen]);
+    if (servers.length === 0) return;
+    if (selectedId && servers.some((server) => server.server_id === selectedId)) {
+      return;
+    }
+    setSelectedId(servers[0].server_id);
+  }, [active, servers, selectedId]);
 
   const lastRootSignalRef = useRef(rootSignal);
   useEffect(() => {

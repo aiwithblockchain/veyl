@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { Fragment, useEffect, useRef } from "react";
 import type { QuitDecisionAction } from "../agent/bridge";
 import { useFocusTrap } from "../ui/focus";
 import { IconClose } from "./icons";
@@ -8,16 +8,31 @@ interface Props {
   busy: boolean;
   /** 回传失败时的提示；有值时留在弹窗里让用户重试。 */
   error: string | null;
+  /** 只有已连接时「退出」才真的断开网络；未连接时两行说的是另一件事。 */
+  connected: boolean;
   onDecision: (action: QuitDecisionAction) => void;
 }
+
+/** 两行「按钮名 + 结果」按连接状态取词，不在 JSX 里拼字符串。 */
+const ROWS = {
+  connected: [
+    { label: "后台运行", value: "保持连接" },
+    { label: "退出", value: "断开连接并恢复网络设置" },
+  ],
+  disconnected: [
+    { label: "后台运行", value: "留在菜单栏" },
+    { label: "退出", value: "关闭 Veyl" },
+  ],
+} as const;
 
 /**
  * Host 拦截到退出请求（`quit-requested`）时的确认弹窗。
  * 取消类操作一律回 `background`：用户没说退出，就别替他退出。
  */
-export function QuitDialog({ busy, error, onDecision }: Props) {
+export function QuitDialog({ busy, error, connected, onDecision }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
+  const rows = connected ? ROWS.connected : ROWS.disconnected;
 
   useFocusTrap(true, dialogRef);
 
@@ -48,10 +63,11 @@ export function QuitDialog({ busy, error, onDecision }: Props) {
       <div
         ref={dialogRef}
         className="quit-dialog"
-        role="dialog"
+        role="alertdialog"
         aria-modal="true"
         aria-busy={busy || undefined}
         aria-labelledby="quit-dialog-title"
+        aria-describedby="quit-dialog-desc"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="quit-dialog__head">
@@ -62,6 +78,7 @@ export function QuitDialog({ busy, error, onDecision }: Props) {
             type="button"
             className="quit-dialog__close"
             aria-label="关闭"
+            title="关闭"
             disabled={busy}
             onClick={() => decide("background")}
           >
@@ -69,10 +86,14 @@ export function QuitDialog({ busy, error, onDecision }: Props) {
           </button>
         </header>
 
-        <div className="quit-dialog__body">
-          <p>后台运行会保持连接。</p>
-          <p>退出会断开连接并恢复网络设置。</p>
-        </div>
+        <dl id="quit-dialog-desc" className="quit-dialog__body">
+          {rows.map((row) => (
+            <Fragment key={row.label}>
+              <dt className="quit-dialog__label">{row.label}</dt>
+              <dd className="quit-dialog__value">{row.value}</dd>
+            </Fragment>
+          ))}
+        </dl>
 
         {error ? (
           <p className="quit-dialog__error" role="alert">
@@ -83,7 +104,7 @@ export function QuitDialog({ busy, error, onDecision }: Props) {
         <div className="quit-dialog__actions">
           <button
             type="button"
-            className="btn btn--ghost"
+            className={`btn quit-dialog__btn ${connected ? "btn--danger-ghost" : "btn--ghost"}`}
             disabled={busy}
             onClick={() => decide("quit")}
           >
@@ -92,7 +113,7 @@ export function QuitDialog({ busy, error, onDecision }: Props) {
           <button
             ref={primaryRef}
             type="button"
-            className="btn btn--primary"
+            className="btn btn--primary quit-dialog__btn"
             disabled={busy}
             onClick={() => decide("background")}
           >

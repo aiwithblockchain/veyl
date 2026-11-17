@@ -76,6 +76,46 @@ function probeResult(nodeId: string, latency: number) {
   };
 }
 
+function failedProbe(nodeId: string) {
+  return {
+    node_id: nodeId,
+    reachable: false,
+    latency_ms: null,
+    probe_method: "tcp" as const,
+    checked_at: Date.now(),
+    error: { code: "PROBE_TIMEOUT", message: "" },
+  };
+}
+
+function probeRun(runId: string): NonNullable<NodeProbesController["run"]> {
+  return {
+    runId,
+    configId: "cfg_1",
+    done: 0,
+    total: 2,
+    startedAt: Date.now(),
+    phase: "probing",
+    method: "tcp",
+    ignored: 0,
+  };
+}
+
+function probeFinished(
+  over: Partial<NonNullable<NodeProbesController["finished"]>> = {},
+): NonNullable<NodeProbesController["finished"]> {
+  return {
+    configId: "cfg_1",
+    total: 2,
+    ok: 2,
+    failed: 0,
+    method: "tcp",
+    cancelled: false,
+    reason: null,
+    network: "ok",
+    ...over,
+  };
+}
+
 interface StageOverrides {
   config?: ConfigDetail;
   runtime?: RuntimeView;
@@ -88,6 +128,9 @@ interface StageOverrides {
   onSwitchNode?: (nodeId: string) => Promise<{ ok: boolean; message?: string }>;
   preselect?: { configId: string; nodeId: string; nonce: number } | null;
   trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
+  onProbe?: () => void;
+  manualProbed?: boolean;
+  onProbeAvailabilityChange?: (available: boolean) => void;
 }
 
 function stageElement(over: StageOverrides = {}) {
@@ -105,6 +148,9 @@ function stageElement(over: StageOverrides = {}) {
       helperPreparing={false}
       preselect={over.preselect ?? null}
       trialSummary={over.trialSummary ?? null}
+      onProbe={over.onProbe}
+      manualProbed={over.manualProbed ?? false}
+      onProbeAvailabilityChange={over.onProbeAvailabilityChange}
     />
   );
 }
@@ -577,5 +623,146 @@ describe("连接舞台", () => {
       trialSummary: { configId: "cfg_1", count: 2, fastestMs: 42 },
     });
     expect(screen.getByText(/已加入 2 个免费节点，最快 42ms/)).toBeTruthy();
+  });
+
+  it("手动测速只更新延迟，不改选中、不连接", () => {
+    const onProbe = vi.fn();
+    const onSwitch = vi.fn(async () => ({ ok: true }));
+    const onStart = vi.fn();
+    renderStage({
+      config: { ...CONFIG, current_node_id: "n1" },
+      onProbe,
+      onSwitchNode: onSwitch,
+      onStart,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "测速" }));
+    expect(onProbe).toHaveBeenCalledTimes(1);
+    expect(onSwitch).not.toHaveBeenCalled();
+    expect(onStart).not.toHaveBeenCalled();
+    expect(
+      screen.getAllByRole("option")[0].getAttribute("aria-selected"),
+    ).toBe("true");
+  });
+
+  it("测速中入口禁用并显示三点，点击不重复触发", () => {
+    const onProbe = vi.fn();
+    renderStage({ nodeProbes: probes({ run: probeRun("r1") }), onProbe });
+
+    const button = screen.getByRole("button", { name: /测速中/ });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(button.querySelectorAll(".stage-step__dots span").length).toBe(3);
+    fireEvent.click(button);
+    expect(onProbe).not.toHaveBeenCalled();
+  });
+
+  it("主动测速后最快标记跟随本次结果移动", () => {
+    const onProbe = vi.fn();
+    const base: StageOverrides = {
+      nodeProbes: probes({
+        results: { n1: probeResult("n1", 238), n2: probeResult("n2", 300) },
+      }),
+      preselect: { configId: "cfg_1", nodeId: "n1", nonce: 1 },
+      onProbe,
+    };
+    const view = renderStage(base);
+    expect(
+      screen.getAllByRole("option")[0].querySelector(".stage-node__fastest"),
+    ).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "测速" }));
+    // 一批开始：手动测速不立刻清标记。
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({
+          run: probeRun("r_manual"),
+          results: { n1: probeResult("n1", 238), n2: probeResult("n2", 300) },
+        }),
+      }),
+    );
+    // 结束：n2 更低，标记移过去。
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({
+          finished: probeFinished(),
+          results: { n1: probeResult("n1", 238), n2: probeResult("n2", 180) },
+        }),
+      }),
+    );
+    const rows = screen.getAllByRole("option");
+    expect(rows[1].querySelector(".stage-node__fastest")).not.toBeNull();
+    expect(rows[0].querySelector(".stage-node__fastest")).toBeNull();
+  });
+
+  it("自动测速只清掉标记，不移动", () => {
+    const base: StageOverrides = {
+      nodeProbes: probes({
+        results: { n1: probeResult("n1", 238), n2: probeResult("n2", 300) },
+      }),
+      preselect: { configId: "cfg_1", nodeId: "n1", nonce: 1 },
+    };
+    const view = renderStage(base);
+    expect(
+      screen.getAllByRole("option")[0].querySelector(".stage-node__fastest"),
+    ).not.toBeNull();
+
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({
+          run: probeRun("r_auto"),
+          results: { n1: probeResult("n1", 238), n2: probeResult("n2", 300) },
+        }),
+      }),
+    );
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({
+          finished: probeFinished(),
+          results: { n1: probeResult("n1", 238), n2: probeResult("n2", 180) },
+        }),
+      }),
+    );
+    expect(document.querySelectorAll(".stage-node__fastest").length).toBe(0);
+  });
+
+  it("全部失败：失败行显示破折号与无障碍名，卡内给再试一次", async () => {
+    renderStage({
+      runtime: runtime({ node_id: "n1", node_latency_ms: 40 }),
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 0, failed: 2 }),
+        results: { n1: failedProbe("n1"), n2: failedProbe("n2") },
+      }),
+      onProbe: () => {},
+    });
+
+    expect(await screen.findByText("这次都没测通。")).toBeTruthy();
+    expect(
+      await screen.findByRole("button", { name: "再试一次" }),
+    ).toBeTruthy();
+    const values = [...document.querySelectorAll(".stage-node__ms")].map(
+      (node) => node.textContent,
+    );
+    // 即使运行时对 n1 有旧延迟，测速失败仍显示破折号。
+    expect(values).toEqual(["—", "—"]);
+    expect(screen.getAllByLabelText("这次没测通").length).toBe(2);
+  });
+
+  it("手动测速后收尾句去掉数字", () => {
+    renderStage({
+      trialSummary: { configId: "cfg_1", count: 2, fastestMs: 238 },
+    });
+    expect(screen.getByText(/已加入 2 个免费节点，最快 238ms/)).toBeTruthy();
+    cleanup();
+
+    renderStage({
+      trialSummary: { configId: "cfg_1", count: 2, fastestMs: 238 },
+      manualProbed: true,
+    });
+    expect(screen.getByText("已加入 2 个免费节点")).toBeTruthy();
+    expect(screen.queryByText(/最快 238ms/)).toBeNull();
   });
 });

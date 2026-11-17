@@ -956,35 +956,47 @@ body[data-resizing] {
   background: var(--panel);
 }
 
-/* 助手收起后的右边缘 56px tab */
+/* 助手收起后的右边缘 56px tab：整块是一个按钮 */
 .assistant-tab {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 14px;
+  align-items: stretch;
   min-height: 0;
-  padding-top: 20px;
   border-left: 1px solid var(--hair);
   background: var(--panel);
 }
 
 .assistant-tab__open {
-  display: inline-flex;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border: 1px solid var(--hair-strong);
-  border-radius: var(--r-sm);
-  background: var(--card);
-  color: var(--ink);
+  gap: 10px;
+  width: 100%;
+  padding: 18px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
 }
 
 .assistant-tab__open:hover {
   background: var(--paper);
 }
 
+.assistant-tab__open:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.assistant-tab__icon {
+  position: relative;
+  display: inline-flex;
+}
+
 .assistant-tab__dot {
+  position: absolute;
+  top: -2px;
+  right: -3px;
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -994,6 +1006,7 @@ body[data-resizing] {
 .assistant-tab__label {
   writing-mode: vertical-rl;
   font-size: 11px;
+  line-height: 1;
   letter-spacing: 0;
   color: var(--ink-3);
 }
@@ -1346,16 +1359,16 @@ body[data-resizing] {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(0, 0, 0, 0.18);
+  background: rgba(23, 22, 20, 0.22);
   animation: overlay-in 160ms ease-out;
 }
 
 .quit-dialog {
   width: min(420px, calc(100vw - 48px));
-  padding: 20px 20px 18px;
+  padding: 24px;
   border-radius: var(--r-lg);
-  background: var(--bg-card);
-  box-shadow: var(--shadow-floating);
+  background: var(--card);
+  box-shadow: 0 24px 48px rgba(23, 22, 20, 0.16), 0 2px 8px rgba(23, 22, 20, 0.06);
   animation: modal-in 160ms ease-out;
 }
 
@@ -1377,9 +1390,9 @@ body[data-resizing] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  margin: -2px -4px 0 0;
+  width: 32px;
+  height: 32px;
+  margin: -4px -8px 0 0;
   padding: 0;
   border: 0;
   border-radius: var(--r-sm);
@@ -1393,18 +1406,30 @@ body[data-resizing] {
   color: var(--ink);
 }
 
+/* 两行「按钮名 + 结果」：标签固定列宽，两句后果与两个按钮一一对上。 */
 .quit-dialog__body {
-  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  column-gap: 12px;
+  row-gap: 10px;
+  margin: 16px 0 0;
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.5;
+}
+
+.quit-dialog__label {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.quit-dialog__value {
+  margin: 0;
   color: var(--ink-2);
 }
 
-.quit-dialog__body p { margin: 0; }
-
 .quit-dialog__error {
   margin: 12px 0 0;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--err-text);
 }
@@ -1415,10 +1440,34 @@ body[data-resizing] {
 }
 
 .quit-dialog__actions {
-  margin-top: 20px;
+  margin-top: 24px;
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.quit-dialog__btn {
+  height: 40px;
+  min-width: 96px;
+  padding: 0 18px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* 错误行离按钮 12，比正常态更紧，让提示贴着操作。 */
+.quit-dialog__error + .quit-dialog__actions {
+  margin-top: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .quit-backdrop {
+    background: rgba(0, 0, 0, 0.55);
+  }
+
+  .quit-dialog {
+    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
+  }
 }
 
 .modal__head {
@@ -3207,25 +3256,54 @@ body[data-resizing] {
 }
 
 .wizard-plan__sub {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: auto;
   font-size: 12px;
   line-height: 1.45;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.wizard-plan__price {
+  font-size: 15px;
+  line-height: 1.3;
+  color: var(--ink);
+}
+
+.wizard-plan__transfer {
+  font-size: 12px;
   color: var(--ink-3);
 }
 
 .wizard-system {
   margin: 0;
-  font-size: 14px;
-  color: var(--ink);
+  font-size: 13px;
+  color: var(--ink-2);
 }
 
 .wizard-foot {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   margin-top: 4px;
-  padding-top: 16px;
+  padding: 12px 0 16px;
   border-top: 1px solid var(--hair);
+  background: var(--canvas);
+}
+
+/* 创建是这一页唯一的主操作：与连接舞台同重量。 */
+.wizard-foot .btn--primary {
+  min-width: 96px;
+  height: 44px;
+  padding: 0 20px;
+  font-size: 15px;
+  font-weight: 500;
 }
 
 .wizard-foot__meta {
@@ -3293,9 +3371,76 @@ body[data-resizing] {
 
 .myservers__detail-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
   gap: 12px;
+}
+
+.myservers__detail-name {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.3;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.myservers__footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hair);
+}
+
+.myservers__primary {
+  min-height: 44px;
+  padding: 0 20px;
+}
+
+.myservers__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 400px;
+  margin: 0 auto;
+  padding: 48px 24px;
+}
+
+.myservers__empty-title {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.myservers__empty-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+
+.myservers__empty .btn {
+  min-height: 44px;
+  margin-top: 8px;
+  padding: 0 20px;
+}
+
+.skeleton--title {
+  width: 40%;
+  height: 22px;
+}
+
+.skeleton--line {
+  width: 100%;
+  height: 12px;
+}
+
+.skeleton--line.is-short {
+  width: 60%;
 }
 
 .myservers__danger {
@@ -4000,6 +4145,13 @@ body[data-resizing] {
   align-items: center;
   gap: 8px;
   padding: 0 8px 10px;
+}
+
+/* 新建入口命中区 44×44，视觉仍是小图标。 */
+.rail__add {
+  width: 44px;
+  height: 44px;
+  margin: -8px 0;
 }
 
 .rail__label {
@@ -4727,6 +4879,14 @@ body[data-resizing] {
 
 .ai-empty__suggest button:hover {
   color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ai-empty__suggest button:focus-visible {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 /* 历史会话 */
@@ -5081,9 +5241,23 @@ details[open] > .settings-fold__summary::before {
 .connection-stage {
   min-width: 0;
   display: flex;
-  align-items: center;
+  align-items: safe center;
   justify-content: center;
   padding: 24px;
+  overflow-y: auto;
+}
+
+/* 新建节点：内容超过一屏时从顶部开始滚动；
+   只加 overflow 不改对齐，居中溢出会把顶部裁掉。 */
+.connection-stage--new-node {
+  align-items: flex-start;
+}
+
+/* 新建节点：向导自己的 sticky 底栏要有滚动容器，版心 640。 */
+.connection-stage--new-node .connection-stage__col {
+  width: min(640px, 100%);
+  max-width: 640px;
+  flex: none;
 }
 
 .connection-stage__col {
@@ -5165,6 +5339,70 @@ details[open] > .settings-fold__summary::before {
   font-size: 13px;
   line-height: 1.45;
   color: var(--ink-3);
+}
+
+.stage-card__subrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.stage-card__subrow .stage-card__sub {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 手动测速：文字链接，不是第二个实心按钮。 */
+.stage-probe {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+/* 视觉不增高，点击区约 46px 高。 */
+.stage-probe::after {
+  content: "";
+  position: absolute;
+  inset: -14px -8px;
+}
+
+.stage-probe:hover:not(:disabled),
+.stage-probe:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.stage-probe:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.stage-probe:disabled {
+  color: var(--ink-3);
+  cursor: default;
+}
+
+.stage-card__probe-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--warn-text);
 }
 
 .stage-card__nodes { display: flex; flex-direction: column; }
@@ -5256,8 +5494,11 @@ details[open] > .settings-fold__summary::before {
 
 .stage-note--error { color: var(--err-text); }
 
+/* 收尾回执不是读数：比正文小一档。 */
+.stage-note--summary { font-size: 12px; }
+
 .stage-note__link {
-  margin-left: 8px;
+  margin-left: 12px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -5370,6 +5611,41 @@ details[open] > .settings-fold__summary::before {
   gap: 6px;
   font-size: 12px;
   color: var(--ink-3);
+}
+
+.rail-server__line1 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rail-server__meta {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 未登录时左栏的就地捷径：44 高文字链。 */
+.rail__login-link {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  margin: 4px 12px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link);
+  font-size: 13px;
+  text-align: left;
+}
+
+.rail__login-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .wizard-ask-ai {
