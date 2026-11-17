@@ -380,3 +380,54 @@ describe("新建节点的幂等键", () => {
     );
   });
 });
+
+describe("返回控件", () => {
+  it("返回在标题上方独立一行、带箭头；创建在途时禁用", async () => {
+    let release: (value: { server_id: string; order_id: string }) => void =
+      () => {};
+    const created = new Promise<{ server_id: string; order_id: string }>(
+      (resolve) => {
+        release = resolve;
+      },
+    );
+    const bridge = {
+      myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
+      myServerCreate: vi.fn(() => created),
+      myServerCheckout: vi.fn(async () => ({
+        charged_cents: 30,
+        balance_after_cents: 970,
+      })),
+    } as unknown as AgentBridge;
+    render(
+      <MyServerWizard
+        bridge={bridge}
+        catalog={CATALOG}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+        onBack={() => {}}
+      />,
+    );
+
+    const head = document.querySelector(".myservers__wizard-head");
+    const back = screen.getByRole("button", { name: "返回" });
+    // 两行结构：返回是标题的上一行，标题因此回到内容列左边缘。
+    expect(head?.firstElementChild).toBe(back);
+    expect(back.nextElementSibling?.tagName).toBe("H4");
+    expect(back.querySelector("svg")).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "新建节点" })).toBeTruthy();
+    expect((back as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+    await waitFor(() => expect(bridge.myServerCreate).toHaveBeenCalled());
+    expect((back as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      release({ server_id: "srv_1", order_id: "ord_1" });
+      await created;
+    });
+    await waitFor(() =>
+      expect((back as HTMLButtonElement).disabled).toBe(false),
+    );
+  });
+});

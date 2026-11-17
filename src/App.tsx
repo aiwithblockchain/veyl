@@ -10,7 +10,7 @@ import type {
 } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
-import { DEFAULT_PROXY_PORT, isTauri, readQuestionDetail, shouldRefreshSnapshotOnHealth, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
+import { DEFAULT_PROXY_PORT, isConfirmQuestionKind, isTauri, readQuestionDetail, shouldRefreshSnapshotOnHealth, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
 import type {
   DefaultProfileStatus,
   MyServer,
@@ -248,6 +248,17 @@ const EVER_CONNECTED_KEY = "veyl.hasEverConnected";
 const PANEL_CLOSED_BY_USER_KEY = "veyl.ui.panelClosedByUser";
 const PANEL_AUTO_OPENED_KEY = "veyl.ui.panelAutoOpened";
 
+/** 折叠行里的页面名：与发起提问的屏幕一一对应。 */
+const QUESTION_SCREEN_LABEL: Record<UiScreen, string> = {
+  onboarding: "开始页",
+  client: "连接页",
+  no_nodes: "连接页",
+  trial_expired: "连接页",
+  new_node: "新建节点页",
+  servers: "服务器页",
+  settings: "设置页",
+};
+
 function readFlag(key: string): boolean {
   try {
     return localStorage.getItem(key) === "1";
@@ -419,6 +430,12 @@ export default function App() {
   const [proxyPort, setProxyPort] = useState(DEFAULT_PROXY_PORT);
   const [repairing, setRepairing] = useState(false);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
+  /** 提问与发起它的屏幕绑定：离开那一屏只折叠，不在别处提交答案。 */
+  const [questionOrigins, setQuestionOrigins] = useState<Record<string, UiScreen>>({});
+  /** 内联提问已过期：卡片留在原位显示「这个问题已过期。」，选项禁用。 */
+  const [expiredQuestions, setExpiredQuestions] = useState<Set<string>>(
+    () => new Set(),
+  );
   /** 免费节点步骤流进行中：挡住重复点击。 */
   const [trialBusy, setTrialBusy] = useState(false);
   const trialBusyRef = useRef(false);
@@ -1518,6 +1535,39 @@ export default function App() {
     ? pendingQuestions.find((item) => item.sessionId === session.id) ?? null
     : null;
 
+  // 第一次看到这个问题时记下屏幕；之后切走再回来不重记。
+  useEffect(() => {
+    const questionId = currentQuestion?.questionId;
+    if (!questionId) return;
+    setQuestionOrigins((current) =>
+      current[questionId] ? current : { ...current, [questionId]: uiScreen },
+    );
+  }, [currentQuestion?.questionId, uiScreen]);
+
+  const questionOrigin = currentQuestion
+    ? questionOrigins[currentQuestion.questionId] ?? uiScreen
+    : null;
+  // 离开发起提问的屏幕：卡片折叠成一行只读提示，那里不能提交答案。
+  const questionAway = Boolean(questionOrigin && questionOrigin !== uiScreen);
+  const questionExpired = currentQuestion
+    ? expiredQuestions.has(currentQuestion.questionId)
+    : false;
+
+  const returnToQuestion = () => {
+    if (!questionOrigin) return;
+    if (questionOrigin === "settings") {
+      setSettingsOpen(true);
+      return;
+    }
+    setSettingsOpen(false);
+    if (questionOrigin === "new_node") {
+      openNewNode("client");
+      return;
+    }
+    setNewNodeOpen(false);
+    changeDestination(questionOrigin === "servers" ? "servers" : "client");
+  };
+
   const handleQuestionExpired = () => {
     if (!currentQuestion) return;
     const { sessionId, questionId } = currentQuestion;
@@ -1530,8 +1580,30 @@ export default function App() {
     void bridge.replyUserQuestion(sessionId, questionId, "").catch(() => undefined);
   };
 
+  // 内联卡片到期：卡片留在原位显示已过期，不再可答；后端照旧回空串解开。
+  const handleInlineQuestionExpired = () => {
+    if (!currentQuestion) return;
+    const { sessionId, questionId } = currentQuestion;
+    markQuestionSettled(questionId);
+    setExpiredQuestions((current) => {
+      if (current.has(questionId)) return current;
+      const next = new Set(current);
+      next.add(questionId);
+      return next;
+    });
+    void bridge.replyUserQuestion(sessionId, questionId, "").catch(() => undefined);
+  };
+
   const handleAnswerQuestion = async (answer: string): Promise<boolean> => {
+    // 离屏或已过期时界面不提供答案入口；这里再挡一次，避免答案带上错的 screen。
+    // 确认弹窗是模态：切屏不该让它卡在提交中，放宽离屏/过期拦截。
     if (!currentQuestion) return false;
+    if (
+      !isConfirmQuestionKind(currentQuestion.kind) &&
+      (questionAway || questionExpired)
+    ) {
+      return false;
+    }
     const { sessionId, questionId } = currentQuestion;
     try {
       await bridge.replyUserQuestion(sessionId, questionId, answer);
@@ -2012,9 +2084,16 @@ export default function App() {
       onSend={handleSend}
       onEmptySend={handleEmptySend}
       question={currentQuestion}
+      questionAwayText={
+        questionAway && questionOrigin
+          ? `有一个问题在${QUESTION_SCREEN_LABEL[questionOrigin]}等你回答`
+          : null
+      }
+      questionExpired={questionExpired}
+      onReturnToQuestion={returnToQuestion}
       onAnswerQuestion={handleAnswerQuestion}
       onAnswerFromComposer={answerQuestionFromComposer}
-      onQuestionExpired={handleQuestionExpired}
+      onQuestionExpired={handleInlineQuestionExpired}
       onStop={handleStop}
       onNextAction={handleNextAction}
       onDisplayAction={handleDisplayAction}
@@ -2144,7 +2223,6 @@ export default function App() {
           servers={myServers.servers}
           selectedId={myServers.selectedId}
           loading={myServers.loading}
-          identityMissing={myServers.identityMissing}
           catalog={myServers.catalog}
           error={myServers.error}
           retryNotice={myServers.retryNotice}
@@ -2152,7 +2230,6 @@ export default function App() {
           compact={shell.mode === "drawer"}
           onSelect={myServers.select}
           onNew={() => openNewNode("servers")}
-          onLogin={myServers.openLogin}
         />
       ) : null}
       {destination === "servers" && panes.canDragRail ? (

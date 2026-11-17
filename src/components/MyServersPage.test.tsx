@@ -208,14 +208,12 @@ function Harness({
         servers={state.servers}
         selectedId={state.selectedId}
         loading={state.loading}
-        identityMissing={state.identityMissing}
         catalog={state.catalog}
         error={state.error}
         retryNotice={state.retryNotice}
         disabled={state.identityLost}
         onSelect={state.select}
         onNew={state.openWizard}
-        onLogin={state.openLogin}
       />
       <MyServersPage
         bridge={bridge as unknown as AgentBridge}
@@ -297,18 +295,24 @@ describe("我的服务器 destination", () => {
     expect(screen.queryByRole("heading", { name: "新建节点" })).toBeNull();
   });
 
-  it("未登录：左栏登录捷径 + 中间先登录，登录后加载列表并选中第一台", async () => {
+  it("未登录：左栏只留标题行，中间先登录，登录后加载列表并选中第一台", async () => {
     const bridge = makeBridge();
     bridge.setAccount(LOGGED_OUT);
     renderHarness(bridge);
 
-    const loginLink = await screen.findByRole("button", {
-      name: "登录后查看你的服务器",
-    });
-    expect(loginLink).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "先登录" })).toBeTruthy();
+    // 空态在舞台可用高度内垂直居中：容器带 --empty 修饰类。
+    expect(document.querySelector(".myservers--empty")).not.toBeNull();
+    const rail = await screen.findByRole("complementary", { name: "服务器列表" });
+    expect(within(rail).getByText("我的服务器")).toBeTruthy();
+    expect(within(rail).getByText("0")).toBeTruthy();
+    // 空态与 CTA 只在中间，左栏不再给同义入口。
+    expect(within(rail).queryByText("登录后查看你的服务器")).toBeNull();
+    expect(
+      within(rail).queryByRole("button", { name: "登录" }),
+    ).toBeNull();
     expect(bridge.myServerList).not.toHaveBeenCalled();
 
-    expect(screen.getByRole("heading", { name: "先登录" })).toBeTruthy();
     expect(
       screen.getByText("登录后可以买服务器；服务器装好后，节点会出现在节点池里。"),
     ).toBeTruthy();
@@ -329,11 +333,17 @@ describe("我的服务器 destination", () => {
     expect(bridge.myServerList).toHaveBeenCalled();
   });
 
-  it("已登录零台：左栏提示 + 中间空态与新建入口", async () => {
+  it("已登录零台：左栏只留标题行，中间空态与新建入口", async () => {
     const bridge = makeBridge([]);
     renderHarness(bridge);
 
-    expect((await screen.findAllByText("还没有服务器")).length).toBe(2);
+    expect((await screen.findAllByText("还没有服务器")).length).toBe(1);
+    expect(document.querySelector(".myservers--empty")).not.toBeNull();
+    const rail = screen.getByRole("complementary", { name: "服务器列表" });
+    expect(within(rail).getByText("我的服务器")).toBeTruthy();
+    expect(within(rail).getByText("0")).toBeTruthy();
+    expect(within(rail).queryByText("还没有服务器")).toBeNull();
+    expect(within(rail).getByRole("button", { name: "新建节点" })).toBeTruthy();
     expect(
       screen.getAllByRole("button", { name: "新建节点" }).length,
     ).toBeGreaterThanOrEqual(2);

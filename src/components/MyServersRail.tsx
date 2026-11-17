@@ -7,8 +7,6 @@ interface Props {
   servers: MyServer[];
   selectedId: string | null;
   loading: boolean;
-  /** 还没有登录：列表区只给登录捷径。 */
-  identityMissing?: boolean;
   /** 目录用于把地区 slug 显示成名字。 */
   catalog?: MyServerCatalog | null;
   /** 列表读取失败说明；只在左栏就地显示。 */
@@ -20,7 +18,6 @@ interface Props {
   compact?: boolean;
   onSelect: (serverId: string) => void;
   onNew: () => void;
-  onLogin?: () => void;
 }
 
 function ServerRow({
@@ -66,7 +63,6 @@ export function MyServersRail({
   servers,
   selectedId,
   loading,
-  identityMissing = false,
   catalog = null,
   error = null,
   retryNotice = null,
@@ -74,7 +70,6 @@ export function MyServersRail({
   compact = false,
   onSelect,
   onNew,
-  onLogin,
 }: Props) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const regionName = (regionId: string) =>
@@ -82,16 +77,7 @@ export function MyServersRail({
 
   const list = (
     <>
-      {identityMissing ? (
-        <button
-          type="button"
-          className="rail__login-link"
-          disabled={disabled}
-          onClick={() => onLogin?.()}
-        >
-          登录后查看你的服务器
-        </button>
-      ) : error ? (
+      {error ? (
         <>
           <div className="rail__placeholders" aria-hidden>
             {[0, 1, 2].map((row) => (
@@ -114,9 +100,7 @@ export function MyServersRail({
             </div>
           ))}
         </div>
-      ) : servers.length === 0 ? (
-        <p className="rail__empty-text myservers__rail-hint">还没有服务器</p>
-      ) : (
+      ) : servers.length === 0 ? null : (
         <ul className="rail-servers">
           {servers.map((server) => (
             <li key={server.server_id} className="rail-servers__item">

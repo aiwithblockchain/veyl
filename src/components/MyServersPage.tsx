@@ -76,7 +76,7 @@ export function MyServersPage({
 }: Props) {
   if (accountError && !account) {
     return (
-      <div className="myservers">
+      <div className="myservers myservers--empty">
         <section className="myservers__empty" role="alert">
           <h1 className="myservers__empty-title">账户暂时读不到</h1>
           <p className="myservers__empty-text">检查网络后再试。</p>
@@ -131,7 +131,7 @@ export function MyServersPage({
 
   if (!accountLoaded) {
     return (
-      <div className="myservers">
+      <div className="myservers myservers--empty">
         <section className="myservers__empty" role="status" aria-busy="true">
           <span className="skeleton skeleton--title" aria-hidden />
           <span className="skeleton skeleton--line" aria-hidden />
@@ -143,7 +143,7 @@ export function MyServersPage({
 
   if (account?.logged_in !== true) {
     return (
-      <div className="myservers">
+      <div className="myservers myservers--empty">
         <section className="myservers__empty">
           <h1 className="myservers__empty-title">先登录</h1>
           <p className="myservers__empty-text">
@@ -159,7 +159,7 @@ export function MyServersPage({
 
   if (loading) {
     return (
-      <div className="myservers">
+      <div className="myservers myservers--empty">
         <section className="myservers__empty" role="status" aria-busy="true">
           <span className="skeleton skeleton--title" aria-hidden />
           <span className="skeleton skeleton--line" aria-hidden />
@@ -171,7 +171,7 @@ export function MyServersPage({
 
   if (error) {
     return (
-      <div className="myservers">
+      <div className="myservers myservers--empty">
         <section className="myservers__empty" role="alert">
           <h1 className="myservers__empty-title">连不上服务器，稍后再试</h1>
           <p className="myservers__empty-text">已有服务器和节点不受影响。</p>
@@ -190,7 +190,7 @@ export function MyServersPage({
   }
 
   return (
-    <div className="myservers">
+    <div className="myservers myservers--empty">
       <section className="myservers__empty">
         <h1 className="myservers__empty-title">还没有服务器</h1>
         <p className="myservers__empty-text">

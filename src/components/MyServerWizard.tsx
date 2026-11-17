@@ -13,6 +13,7 @@ import {
   formatMonthlyFromDaily,
   formatUsdCents,
 } from "../myservers/labels";
+import { IconChevronLeft } from "./icons";
 
 interface Props {
   bridge: AgentBridge;
@@ -393,6 +394,7 @@ export function MyServerWizard({
               onClick={onBack}
               disabled={busy}
             >
+              <IconChevronLeft size={14} />
               返回
             </button>
           ) : null}
@@ -432,6 +434,7 @@ export function MyServerWizard({
             onClick={onBack}
             disabled={busy}
           >
+            <IconChevronLeft size={14} />
             返回
           </button>
         ) : null}

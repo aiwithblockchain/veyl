@@ -3,7 +3,7 @@ import type { NextAction } from "../agent/protocol";
 import type { PendingQuestion } from "../agent/bridge";
 import { isConfirmQuestionKind } from "../agent/bridge";
 import type { Session } from "../state/chatStore";
-import { AskQuestionCard } from "./AskQuestionCard";
+import { AskQuestionCard, QuestionAwayLine } from "./AskQuestionCard";
 import { Composer } from "./Composer";
 import { MessageItem } from "./MessageItem";
 import type { DisplayActionOutcome } from "./ToolCallCard";
@@ -17,6 +17,11 @@ interface Props {
   onAnswerQuestion?: (answer: string) => void | boolean | Promise<void | boolean>;
   onQuestionExpired?: () => void;
   question?: PendingQuestion | null;
+  /** 提问不属于当前屏幕：折叠成一行只读提示。 */
+  questionAway?: { text: string; expiresAt: number } | null;
+  /** 提问已过期：选项禁用，不再接受回答。 */
+  questionExpired?: boolean;
+  onReturnToQuestion?: () => void;
   onStop: () => void;
   onNextAction: (action: NextAction) => void;
   /** 工具卡里的报告动作：直接调命令，不发消息。 */
@@ -36,6 +41,9 @@ export function ChatView({
   onAnswerQuestion,
   onQuestionExpired,
   question = null,
+  questionAway = null,
+  questionExpired = false,
+  onReturnToQuestion,
   onStop,
   onNextAction,
   onDisplayAction,
@@ -53,6 +61,7 @@ export function ChatView({
   }, [focusMessagesSignal]);
   const inlineQuestion =
     question && !isConfirmQuestionKind(question.kind) ? question : null;
+  const canAnswer = Boolean(inlineQuestion) && !questionExpired;
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -92,18 +101,21 @@ export function ChatView({
           {inlineQuestion ? (
             <AskQuestionCard
               question={inlineQuestion}
+              expired={questionExpired}
               onAnswer={onAnswerQuestion ?? (async () => undefined)}
               onExpire={onQuestionExpired ?? (() => undefined)}
             />
+          ) : questionAway ? (
+            <QuestionAwayLine away={questionAway} onReturn={onReturnToQuestion} />
           ) : null}
         </div>
       </div>
 
       <Composer
         streaming={streaming}
-        questionPending={Boolean(inlineQuestion)}
-        statusText={inlineQuestion ? null : session.status?.text ?? null}
-        onSend={inlineQuestion ? answerFromComposer : onSend}
+        questionPending={canAnswer}
+        statusText={canAnswer ? null : session.status?.text ?? null}
+        onSend={canAnswer ? answerFromComposer : onSend}
         onStop={onStop}
         disabled={!hasKey}
         onConfigure={onConfigureKey}

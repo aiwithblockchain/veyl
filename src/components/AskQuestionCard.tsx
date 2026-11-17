@@ -8,6 +8,8 @@ interface Props {
   onAnswer: (answer: string) => unknown;
   /** 后端 15 分钟超时后已自动作废：前端直接收起，不再调用回答命令。 */
   onExpire: () => void;
+  /** 已过期：卡片留在原位显示「这个问题已过期。」，选项禁用。 */
+  expired?: boolean;
 }
 
 const CANCEL_LABEL =
@@ -26,7 +28,7 @@ function formatCountdown(ms: number): string {
 }
 
 /** 普通提问的内联卡片：挂在消息流末尾，不挡输入框，也不加焦点陷阱。 */
-export function AskQuestionCard({ question, onAnswer, onExpire }: Props) {
+export function AskQuestionCard({ question, onAnswer, onExpire, expired = false }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [remaining, setRemaining] = useState(() =>
@@ -61,7 +63,7 @@ export function AskQuestionCard({ question, onAnswer, onExpire }: Props) {
 
   const answer = useCallback(
     async (value: string) => {
-      if (submittingRef.current) return;
+      if (submittingRef.current || expired || remaining <= 0) return;
       submittingRef.current = true;
       setSubmitting(true);
       setError(null);
@@ -74,7 +76,7 @@ export function AskQuestionCard({ question, onAnswer, onExpire }: Props) {
         setSubmitting(false);
       }
     },
-    [onAnswer],
+    [onAnswer, expired, remaining],
   );
 
   const skip = useCallback(() => {
@@ -84,18 +86,22 @@ export function AskQuestionCard({ question, onAnswer, onExpire }: Props) {
   // 模型可能把解释文案写进选项：界面固定行只留一个，尾随空格的变体也算。
   const options = question.options.filter((option) => option.trim() !== EXPLAIN_ANSWER);
   const hasOptions = options.length > 0;
-  const showExplain = hasOptions && !isConfirmCard(options);
+  // 墙钟到点先按下状态渲染，等 Host 把 expired 传回来时两者一致。
+  const isExpired = expired || remaining <= 0;
+  const showExplain = hasOptions && !isConfirmCard(options) && !isExpired;
 
   return (
     <section className="ask-card" aria-label="需要你的回答">
       <div className="ask-card__head">
         <p className="ask-card__question">{question.question}</p>
-        <span
-          className="ask-card__countdown"
-          aria-label={`还剩 ${formatCountdown(remaining)}`}
-        >
-          剩 {formatCountdown(remaining)}
-        </span>
+        {isExpired ? null : (
+          <span
+            className="ask-card__countdown"
+            aria-label={`还剩 ${formatCountdown(remaining)}`}
+          >
+            剩 {formatCountdown(remaining)}
+          </span>
+        )}
       </div>
 
       {hasOptions ? (
@@ -105,14 +111,14 @@ export function AskQuestionCard({ question, onAnswer, onExpire }: Props) {
               key={index}
               type="button"
               className="ask-card__option"
-              disabled={submitting}
+              disabled={submitting || isExpired}
               onClick={() => void answer(option)}
             >
               {option}
             </button>
           ))}
         </div>
-      ) : (
+      ) : isExpired ? null : (
         <p className="ask-card__hint">直接在下面说你的想法。</p>
       )}
 
@@ -127,16 +133,46 @@ export function AskQuestionCard({ question, onAnswer, onExpire }: Props) {
         </button>
       ) : null}
 
-      <button
-        type="button"
-        className="ask-card__skip"
-        disabled={submitting}
-        onClick={skip}
-      >
-        跳过
-      </button>
+      {isExpired ? (
+        <p className="ask-card__expired">这个问题已过期。</p>
+      ) : (
+        <button
+          type="button"
+          className="ask-card__skip"
+          disabled={submitting}
+          onClick={skip}
+        >
+          跳过
+        </button>
+      )}
 
       {error ? <p className="ask-card__error">{error}</p> : null}
     </section>
+  );
+}
+
+/**
+ * 问题属于另一屏时的折叠行：整行可点，回到发起提问的屏幕；
+ * 倒计时照走，过期后只留一句只读提示，不再提供返回。
+ */
+export function QuestionAwayLine({
+  away,
+  onReturn,
+}: {
+  away: { text: string; expiresAt: number };
+  onReturn?: () => void;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  if (away.expiresAt <= now) {
+    return <p className="ask-card-away is-expired">这个问题已过期。</p>;
+  }
+  return (
+    <button type="button" className="ask-card-away" onClick={onReturn}>
+      {away.text}
+    </button>
   );
 }

@@ -7,7 +7,7 @@ import type { DisplayActionOutcome } from "./ToolCallCard";
 import type { ToolDisplayAction } from "./toolDisplay";
 import { useFocusTrap } from "../ui/focus";
 import { isComposingEvent } from "../ui/ime";
-import { AskQuestionCard } from "./AskQuestionCard";
+import { AskQuestionCard, QuestionAwayLine } from "./AskQuestionCard";
 import { ChatView } from "./ChatView";
 import { Composer } from "./Composer";
 import {
@@ -43,6 +43,12 @@ interface Props {
   focusSignal: number;
   /** 当前会话待回答的提问；普通提问渲染在消息流末尾。 */
   question?: PendingQuestion | null;
+  /** 非空 = 提问不属于当前屏幕：卡片折叠成这一行只读提示。 */
+  questionAwayText?: string | null;
+  /** 提问已过期：显示「这个问题已过期。」，选项禁用。 */
+  questionExpired?: boolean;
+  /** 点折叠行回到发起提问的屏幕。 */
+  onReturnToQuestion?: () => void;
   onAnswerQuestion?: (answer: string) => void | boolean | Promise<void | boolean>;
   /** 输入框发送时走的回答路径；失败返回 false，让文字留在输入框。 */
   onAnswerFromComposer?: (text: string) => void | boolean | Promise<void | boolean>;
@@ -92,6 +98,9 @@ export function AiPanel({
   presetsVisible = true,
   focusSignal,
   question = null,
+  questionAwayText = null,
+  questionExpired = false,
+  onReturnToQuestion,
   onAnswerQuestion,
   onAnswerFromComposer,
   onQuestionExpired,
@@ -186,8 +195,19 @@ export function AiPanel({
 
   const hasMessages = Boolean(session && session.messages.length > 0);
   const needsFirstConfig = aiReady && !hasConfigs;
+  const confirmKindOnly = Boolean(
+    question && isConfirmQuestionKind(question.kind),
+  );
+  // 离屏：折叠成一行只读提示，这一屏不渲染可点选项，也不接输入框的回答。
+  const awayQuestion =
+    question && !confirmKindOnly && questionAwayText
+      ? { text: questionAwayText, expiresAt: question.expiresAt }
+      : null;
   const inlineQuestion =
-    question && !isConfirmQuestionKind(question.kind) ? question : null;
+    question && !confirmKindOnly && !awayQuestion ? question : null;
+  const canAnswer = Boolean(inlineQuestion) && !questionExpired;
+  const answerFromComposer =
+    canAnswer && onAnswerFromComposer ? onAnswerFromComposer : undefined;
 
   return (
     <aside id="ai-panel" className="ai-panel" aria-label="AI 对话">
@@ -348,9 +368,12 @@ export function AiPanel({
           <ChatView
             session={session}
             onSend={onSend}
-            question={question}
+            question={awayQuestion ? null : question}
+            questionAway={awayQuestion}
+            questionExpired={questionExpired}
+            onReturnToQuestion={onReturnToQuestion}
             onAnswerQuestion={onAnswerQuestion}
-            onAnswerFromComposer={onAnswerFromComposer}
+            onAnswerFromComposer={answerFromComposer}
             onQuestionExpired={onQuestionExpired}
             onStop={onStop}
             onNextAction={onNextAction}
@@ -394,10 +417,18 @@ export function AiPanel({
                 </div>
               ) : null}
             </div>
-            {inlineQuestion ? (
+            {awayQuestion ? (
+              <div className="ask-question-slot">
+                <QuestionAwayLine
+                  away={awayQuestion}
+                  onReturn={onReturnToQuestion}
+                />
+              </div>
+            ) : inlineQuestion ? (
               <div className="ask-question-slot">
                 <AskQuestionCard
                   question={inlineQuestion}
+                  expired={questionExpired}
                   onAnswer={onAnswerQuestion ?? (async () => undefined)}
                   onExpire={onQuestionExpired ?? (() => undefined)}
                 />
@@ -405,10 +436,12 @@ export function AiPanel({
             ) : null}
             <Composer
               streaming={false}
-              questionPending={Boolean(inlineQuestion)}
+              questionPending={canAnswer}
               statusText={null}
               onSend={
-                inlineQuestion && onAnswerFromComposer ? onAnswerFromComposer : onEmptySend
+                canAnswer && onAnswerFromComposer
+                  ? onAnswerFromComposer
+                  : onEmptySend
               }
               onStop={onStop}
               disabled={!aiReady}

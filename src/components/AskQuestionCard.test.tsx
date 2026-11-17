@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PendingQuestion } from "../agent/bridge";
-import { AskQuestionCard } from "./AskQuestionCard";
+import { AskQuestionCard, QuestionAwayLine } from "./AskQuestionCard";
 
 afterEach(() => {
   cleanup();
@@ -68,6 +68,12 @@ describe("AskQuestionCard", () => {
       vi.advanceTimersByTime(5_000);
     });
     expect(onExpire).toHaveBeenCalledTimes(1);
+    // 到点后卡片原地转为「已过期」，选项禁用。
+    expect(screen.getByText("这个问题已过期。")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "浏览网页" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
   });
 
   it("回答失败时在卡片里说明，选项仍可再点", async () => {
@@ -275,5 +281,69 @@ describe("AskQuestionCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "跳过" }));
 
     await waitFor(() => expect(onAnswer).toHaveBeenCalledWith(""));
+  });
+
+  it("过期后卡片留在原位：显示已过期，选项禁用，不能再答", () => {
+    const onAnswer = vi.fn(async () => {});
+    render(
+      <AskQuestionCard
+        question={question({ expiresAt: Date.now() - 1 })}
+        expired
+        onAnswer={onAnswer}
+        onExpire={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("这个问题已过期。")).toBeTruthy();
+    const option = screen.getByRole("button", { name: "浏览网页" });
+    expect((option as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "跳过" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "解释这个设置的含义" })).toBeNull();
+    fireEvent.click(option);
+    expect(onAnswer).not.toHaveBeenCalled();
+  });
+});
+
+describe("离屏折叠行", () => {
+  it("未过期：整行可点，点它回到发起页", () => {
+    const onReturn = vi.fn();
+    render(
+      <QuestionAwayLine
+        away={{
+          text: "有一个问题在连接页等你回答",
+          expiresAt: Date.now() + 60_000,
+        }}
+        onReturn={onReturn}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "有一个问题在连接页等你回答" }),
+    );
+    expect(onReturn).toHaveBeenCalledTimes(1);
+  });
+
+  it("到期后只剩只读一句，不再提供返回", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-07T00:00:00Z"));
+    render(
+      <QuestionAwayLine
+        away={{
+          text: "有一个问题在连接页等你回答",
+          expiresAt: Date.now() + 2_000,
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "有一个问题在连接页等你回答" }),
+    ).toBeTruthy();
+    act(() => {
+      vi.advanceTimersByTime(3_000);
+    });
+    expect(
+      screen.queryByRole("button", { name: "有一个问题在连接页等你回答" }),
+    ).toBeNull();
+    expect(screen.getByText("这个问题已过期。")).toBeTruthy();
   });
 });

@@ -908,3 +908,134 @@ describe("三区外壳与连接舞台", () => {
     await waitFor(() => expect(checked("新加坡 1")).toBe("true"));
   }, 15_000);
 });
+
+describe("提问与发起屏幕绑定", () => {
+  it("离开连接页折叠成一行，回来恢复；别处不能提交答案", async () => {
+    seedCardConfig();
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: "展开助手" }));
+    const send = vi.spyOn(bridge, "sendMessage").mockResolvedValue({
+      requestId: "req_q",
+    });
+    const reply = vi
+      .spyOn(bridge, "replyUserQuestion")
+      .mockResolvedValue(undefined);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "连上了，但网页打不开" }),
+    );
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const sessionId = send.mock.calls[0][0] as string;
+
+    act(() => {
+      (
+        bridge as unknown as { emit: (event: unknown) => void }
+      ).emit({
+        name: AGENT_EVENTS.askUserQuestion,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          session_id: sessionId,
+          request_id: "req_q",
+          question_id: "q_away",
+          question: "你主要用它做什么？",
+          options: ["浏览网页", "桌面软件"],
+          created_at: Date.now(),
+          expires_at: Date.now() + 900_000,
+          emitted_at: new Date().toISOString(),
+        },
+      });
+    });
+
+    expect(await screen.findByRole("button", { name: "浏览网页" })).toBeTruthy();
+
+    // 切到服务器页：卡片折叠成一行只读提示，选项不再渲染。
+    fireEvent.click(screen.getByRole("button", { name: "我的服务器" }));
+    expect(
+      await screen.findByRole("button", {
+        name: "有一个问题在连接页等你回答",
+      }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "浏览网页" })).toBeNull();
+
+    // 这一屏输入/回车不会变成答案。
+    const textarea = document.querySelector(
+      ".composer textarea",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "在服务器页输入" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    await act(async () => {});
+    expect(reply).not.toHaveBeenCalled();
+
+    // 点折叠行回到连接页，卡片恢复。
+    fireEvent.click(
+      screen.getByRole("button", { name: "有一个问题在连接页等你回答" }),
+    );
+    const option = await screen.findByRole("button", { name: "浏览网页" });
+    expect(
+      screen.queryByRole("button", { name: "有一个问题在连接页等你回答" }),
+    ).toBeNull();
+
+    fireEvent.click(option);
+    await waitFor(() =>
+      expect(reply).toHaveBeenCalledWith(sessionId, "q_away", "浏览网页"),
+    );
+  }, 15_000);
+
+  it("确认弹窗开着时切屏，仍能作答并收起", async () => {
+    seedCardConfig();
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: "展开助手" }));
+    const send = vi.spyOn(bridge, "sendMessage").mockResolvedValue({
+      requestId: "req_confirm",
+    });
+    const reply = vi
+      .spyOn(bridge, "replyUserQuestion")
+      .mockResolvedValue(undefined);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "连上了，但网页打不开" }),
+    );
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const sessionId = send.mock.calls[0][0] as string;
+
+    act(() => {
+      (
+        bridge as unknown as { emit: (event: unknown) => void }
+      ).emit({
+        name: AGENT_EVENTS.askUserQuestion,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          session_id: sessionId,
+          request_id: "req_confirm",
+          question_id: "q_confirm",
+          question: "要更新后台运行库吗？",
+          options: ["升级", "取消"],
+          kind: "core_upgrade_confirm",
+          details: {
+            current_version: "1.0.0",
+            target_version: "1.1.0",
+            size: 1024,
+            restart_required: false,
+          },
+          created_at: Date.now(),
+          expires_at: Date.now() + 900_000,
+          emitted_at: new Date().toISOString(),
+        },
+      });
+    });
+
+    await screen.findByRole("dialog", { name: "更新后台运行库" });
+    // 模态打开期间切到服务器页：确认卡不参与屏幕绑定，不能被卡在提交中。
+    fireEvent.click(screen.getByRole("button", { name: "我的服务器" }));
+    fireEvent.click(screen.getByRole("button", { name: "升级" }));
+
+    await waitFor(() =>
+      expect(reply).toHaveBeenCalledWith(sessionId, "q_confirm", "升级"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "更新后台运行库" })).toBeNull(),
+    );
+  }, 15_000);
+});

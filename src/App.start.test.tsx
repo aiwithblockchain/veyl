@@ -219,7 +219,13 @@ describe("TUN 启动成功后的界面状态", () => {
 
   it("连接态的健康事件最多每 5 秒补拉一次快照", async () => {
     Object.defineProperty(bridge, "mode", { value: "tauri", configurable: true });
-  
+
+    // 渲染前就把时钟钉在 BASE：应用记录「上次拉快照」的时刻也落在这个点上。
+    // 若以「连接完成后的 Date.now()」为基准，整套并发时连接流程与基准之间的真实
+    // 耗时会把 BASE+4s 推过 5s 节流窗，用例随机器负载偶发红。
+    const BASE = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(BASE);
+
     vi.spyOn(bridge, "configList").mockResolvedValue({
       configs: [SUMMARY],
       active_config_id: CONFIG_ID,
@@ -241,16 +247,15 @@ describe("TUN 启动成功后的界面状态", () => {
       expect(container.querySelector(".state-line__label")?.textContent).toContain("已连接"),
     );
 
-    const base = Date.now();
     const before = snapshots.mock.calls.length;
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(base + 4_000);
+    nowSpy.mockReturnValue(BASE + 4_000);
     act(() => {
       (bridge as unknown as { emit(event: AgentEvent): void }).emit(healthEvent());
     });
     await act(async () => {});
     expect(snapshots.mock.calls.length).toBe(before);
 
-    nowSpy.mockReturnValue(base + 6_000);
+    nowSpy.mockReturnValue(BASE + 6_000);
     act(() => {
       (bridge as unknown as { emit(event: AgentEvent): void }).emit(healthEvent());
     });

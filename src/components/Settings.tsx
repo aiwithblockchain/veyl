@@ -1703,7 +1703,7 @@ export function Settings({
                             </button>
                             <button
                               type="button"
-                              className="btn btn--danger-ghost provider-item__btn"
+                              className="btn provider-item__btn provider-item__btn--danger"
                               onClick={() => setPendingDelete(provider)}
                               disabled={provider.isBuiltin}
                               title={provider.isBuiltin ? "内置服务不可删除" : undefined}
@@ -2408,7 +2408,7 @@ export function Settings({
                   </div>
                   <button
                     type="button"
-                    className="btn btn--ghost"
+                    className="btn btn--ghost settings-row__btn--wide"
                     disabled={reportBusy}
                     onClick={onReportProblem}
                   >
