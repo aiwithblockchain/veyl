@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.17.1`
+> 契约版本：`3.17.4`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.17.1`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.17.4`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.17.1";
+  contract_version: "3.17.4";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -865,7 +865,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.17.1";
+  contract_version: "3.17.4";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1028,7 +1028,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.17.1";
+  contract_version: "3.17.4";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1283,6 +1283,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 `data`：`ConfigDetail`（`commands.md` §3.0），含 `nodes` / `dns` / `tun_excludes` / `layout`。
 
 - 节点按配置内顺序返回，**不重排**。
+- **`current_node_id` 可能为 `null`**：`source = "seed"` 的新建配置在用户点「连接」之前、或节点全部被删之后。这不等于「没有节点」——`nodes` 照实返回，`node_count` 照样准确；**不要把它说成「还没有节点」**，也不要替用户补一次 `NodeSwitch`。
 - **不含密码**；要判断连通性用 `NodeProbe`，不要试图从详情里推断。
 - 配置不存在 → `NOT_FOUND`。
 
@@ -1320,6 +1321,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
   其它未知值 → `INVALID_ARGUMENT / invalid_routing_mode`（两种原因不能混）。
 - `targets` **已废弃**：写入路径不再接受 `proxy_selected`，本参数不产生任何效果。
 - **不接受 `listen_port`**：本地代理端口是用户设置（`commands.md` §7.11），不在配置里；带上该字段会被 schema 拒绝（`additionalProperties: false`）。
+- **`source = "seed"` 的新建不设当前节点**：`current_node_id` 留空（`commands.md` §3.2），最快的那台由界面预选、**预选不写库**；连接时由界面先 `NodeSwitch` 再 `RuntimeStart`。模型不得在 `ConfigCreate` 之后自己补一次 `NodeSwitch` 或 `VpnConnect`。
 - **连接方式不给默认值**：`system_proxy` 与 `tun` 是两种接管方式，模型必须显式选。
 - **解释门禁**：本请求里用户刚点过或打过 `解释这个设置的含义`、还没有做任何真实选择时，
   `ConfigCreate` → `PRECONDITION_FAILED`，`details.reason = "explanation_pending"`。
@@ -2046,6 +2048,8 @@ type CatalogOptionsData = {
 换一套方案：    ConfigCreate → ConfigActivate（UI）/ VpnConnect({ config_id })
 ```
 
+> **「链路」不等于「自动执行」**：免费节点首次加入（`ConfigCreate(source = "seed")`）之后，**UI 与模型都不得自动 `VpnConnect` 或 `NodeSwitch`**——测速完停在 `未连接`，由用户自己点「连接」（`ai-first-product.md` §选中免费节点之后）；**「设为当前节点」只能发生在用户点「连接」的那一刻**。模型也不得把这条链路当成一次性脚本从头跑到尾；每一步都要对应用户当轮的明确意图。
+
 `VpnConnect` **不隐式安装或下载运行时**：静默下载会让用户不知道自己的机器上多了一个二进制。也不隐式创建配置——没有配置时报 `no_config`，由 AI 新建流程的第二问询问节点来源（首启两问见 `resources/prompts/zh/first-run.md`）。
 
 ### 5.2 幂等矩阵
@@ -2129,6 +2133,25 @@ type CatalogOptionsData = {
 ---
 
 ## 8. 变更记录
+
+### 3.17.4（2026-11-17，当前节点为空的读取口径）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.17.4`；§4.23 `ConfigDetail` 写明 `current_node_id` 可能为 `null`（seed 新建、节点全删），不代表没有节点；`nodes` / `node_count` 照实返回，模型不得说「还没有节点」，也不得自行补 `NodeSwitch` | 语义补全 | 评审：空值读取方要有一致表现 |
+
+### 3.17.3（2026-11-17，预选不写库）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.17.3`；§5.1 的禁止扩到 **UI 与模型都不得自动 `VpnConnect` 或 `NodeSwitch`**，「设为当前」只能发生在用户点「连接」那一刻（原来只挡了 `VpnConnect`，且只约束模型） | 约束收紧 | 评审 ① |
+| 2 | §4.24 `ConfigCreate` 补一条：`source = "seed"` 的新建 `current_node_id` 留空，最快的那台由界面预选、**预选不写库**；连接时先 `NodeSwitch` 再 `RuntimeStart`，模型不得自行补步骤 | 语义补全 | 评审 ②：与 `commands.md` §3.2「取第一个」冲突 |
+
+### 3.17.2（2026-11-17，免费节点不自动连接）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.17.2`；§5.1 加一条「链路不等于自动执行」：`ConfigCreate(source = "seed")` 之后不得自动 `VpnConnect`，测速完停在未连接，由用户点「连接」 | 约束新增 | 产品负责人真机测试：免费服务器质量不保证，自动连上层会直接影响用户网络 |
 
 ### 3.17.1（2026-11-17，目录来源与名额口径收口）
 

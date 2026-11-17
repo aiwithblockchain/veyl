@@ -928,11 +928,11 @@
               <div class="setting__head">
                 <span class="setting__label">接管方式</span>
                 <div class="segmented" id="mode-seg" role="group" aria-label="接管方式">
-                  <button type="button" class="is-selected" data-mode="tun" aria-pressed="true">Tun 模式</button>
-                  <button type="button" data-mode="system_proxy" aria-pressed="false">Proxy 模式</button>
+                  <button type="button" class="is-selected" data-mode="system_proxy" aria-pressed="true">Proxy 模式</button>
+                  <button type="button" data-mode="tun" aria-pressed="false">Tun 模式</button>
                 </div>
               </div>
-              <p class="setting__desc">Tun 模式接管全部流量；Proxy 模式只给设了代理的软件用。切换会短暂断开当前连接。</p>
+              <p class="setting__desc">Proxy 模式只给设了代理的软件用；Tun 模式接管全部流量（首次选择时需要一次系统授权）。切换会短暂断开当前连接。</p>
               <div class="confirm-bar" id="mode-confirm" hidden>
                 <p class="confirm-bar__text">切换会短暂断开当前连接。</p>
                 <div class="confirm-bar__actions">
@@ -1110,7 +1110,8 @@
   const portRow = document.getElementById("port-row");
   // simulated：原型默认处于已连接状态，用来演示切换确认条。
   let connected = true;
-  let mode = "tun";
+  let mode = "system_proxy";
+  let pendingMode = null;
 
   function selectSegment(group, selected) {
     Array.from(group.querySelectorAll("button")).forEach((button) => {
@@ -1127,11 +1128,14 @@
     portRow.hidden = next !== "system_proxy";
   }
 
+  applyMode(mode);
+
   modeButtons.forEach((button) => {
     button.addEventListener("click", () => {
       const next = button.dataset.mode;
       if (next === mode) return;
-      if (next === "system_proxy" && connected) {
+      if (connected) {
+        pendingMode = next;
         modeConfirm.hidden = false;
         return;
       }
@@ -1141,12 +1145,14 @@
 
   document.getElementById("mode-cancel").addEventListener("click", () => {
     modeConfirm.hidden = true;
+    pendingMode = null;
   });
 
   document.getElementById("mode-switch").addEventListener("click", () => {
     // simulated：这里代表先断开、写库、再重连，原型里不等待。
     connected = true;
-    applyMode("system_proxy");
+    applyMode(pendingMode ?? mode);
+    pendingMode = null;
   });
 
   // 流量范围

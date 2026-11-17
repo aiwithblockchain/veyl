@@ -6,7 +6,7 @@
 > `src-tauri/src/tools/envelope.rs`、`src-tauri/src/claurst_session/mod.rs`、
 > `docs/contracts/events.md` §3.3–3.4、`resources/prompts/zh/first-run.md`
 >
-> **2026-11-17 同步 `tools.md` 3.17.1**：工具集合为 42 个；已移除工具的条目从正文删掉，并补齐了 `MyServers` / `MyServerFailure` / `ConfigSetMode` / `OpenSettings` / `StageSelect` / `CatalogOptions` / `SetUserRegion`。
+> **2026-11-17 同步 `tools.md` 3.17.4**：工具集合为 42 个；已移除工具的条目从正文删掉，并补齐了 `MyServers` / `MyServerFailure` / `ConfigSetMode` / `OpenSettings` / `StageSelect` / `CatalogOptions` / `SetUserRegion`。
 >
 > **这份文档解决什么**：真机截图里用户看到的是「RuntimeStatus 调用 RuntimeStatus 0ms 完成」
 > 「ConfigList 调用 ConfigList 0ms 完成」。这不是文案不好，是**数据层把不该给用户看的东西

@@ -240,6 +240,23 @@
     color: var(--ink-3);
   }
 
+  .node__name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* 「最快」只是排序说明，不是状态色：不加底色、不加状态色 */
+  .node__tag {
+    padding: 1px 6px;
+    border: 1px solid var(--hair);
+    border-radius: 6px;
+    font-size: 11px;
+    line-height: 1.3;
+    font-weight: 500;
+    color: var(--ink-3);
+  }
+
   /* 主按钮 */
   .primary {
     width: 100%;
@@ -458,11 +475,11 @@
           </header>
           <div role="listbox" aria-label="免费节点">
             <button class="node is-selected" type="button" role="option" aria-selected="true">
-              东京 01
+              <span class="node__name">东京 01<span class="node__tag">最快</span></span>
               <span class="node__ms">42ms</span>
             </button>
             <button class="node" type="button" role="option" aria-selected="false">
-              新加坡 01
+              <span class="node__name">新加坡 01</span>
               <span class="node__ms">78ms</span>
             </button>
           </div>

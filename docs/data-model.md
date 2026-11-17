@@ -1,6 +1,6 @@
 # 数据模型
 
-> 版本：`7`（对应契约 `commands.md` 2.36.5 / `events.md` 2.16.2 / `tools.md` 3.17.1 / `runtime.md` 2.8.0）
+> 版本：`9`（对应契约 `commands.md` 2.36.9 / `events.md` 2.16.2 / `tools.md` 3.17.4 / `runtime.md` 2.8.0）
 > 日期：2026-11-16
 > 范围：配置、节点、问题、布局，以及它们与 `secrets.enc`、种子缓存的关系
 > 依据：`docs/configs-and-nav.md` §3、§8，`docs/config-execution.md` §6–§10，`docs/issue-management.md` §3、`docs/center-panel.md` §3
@@ -105,7 +105,7 @@ CREATE INDEX idx_configs_last_used ON configs (last_used_at DESC);
 | `tun_excludes_json` | 只存**用户补充**的网段；`10.0.0.0/8` 等固定排除表写死在生成器，避免每行配置重复一份 |
 | `route_targets_json` | 分类 id 数组，仅 `routing_mode = 'proxy_selected'` 使用；空数组表示还没选目标 |
 | `route_revision` | 单调递增；改 `targets` 或增删自定义规则时 +1。不是版本历史，只是「当前连接是否已应用」的比较基准 |
-| `current_node_id` | 必须是该配置节点集里的成员（应用层保证；数据库无法表达「在同一配置的 config_nodes 里」） |
+| `current_node_id` | **不是 `NULL` 时**必须是该配置节点集里的成员（应用层保证；数据库无法表达「在同一配置的 config_nodes 里」）。`NULL` 是合法状态：节点全部被删、或 `source = "seed"` 的新建配置在用户点「连接」之前（预选只在界面，`commands.md` §3.2） |
 | `is_active` | 部分唯一索引保证至多一个 |
 
 **为什么 DNS 与内网排除用 JSON 列而不是子表**
@@ -262,6 +262,7 @@ CREATE TABLE seed_cache (
     id                INTEGER PRIMARY KEY CHECK (id = 1),  -- 单行
     content_sha256    TEXT NOT NULL,     -- 变化判定的唯一依据
     etag              TEXT,              -- 条件请求用，可为空
+    etag_source       TEXT,              -- etag 来自哪个源；跨源不复用
     source_version    TEXT,              -- 文件里的 version，仅展示
     source_updated_at TEXT,              -- 文件里的 updated_at，仅展示
     node_count        INTEGER NOT NULL,
@@ -271,6 +272,7 @@ CREATE TABLE seed_cache (
 ```
 
 - 种子原文**不进本表**：含全部节点密码，整包加密存 `secrets.enc` 的 `seed:<content_sha256>`。
+- 更新判据是内容哈希；`etag` 只在同一来源内使用（`etag_source` 记来源），主源失败走兜底时不带主源 ETag。
 - 种子里的节点**不会自动进入 `nodes`**。只有当用户创建 `source = "seed"` 的配置时，才解密种子并把节点物化进节点池（`source = 'seed'`），避免从未使用的种子在节点列表里出现。
 - 刷新时按 `source_key` upsert；新种子里不存在的 seed 节点被删除，其在配置里的关系随之级联。
 
@@ -609,6 +611,20 @@ CREATE TABLE trial_state (
 ---
 
 ## 11. 变更记录
+
+### 9（2026-11-17，`seed_cache.etag_source`）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | 版本 `8 → 9`；`seed_cache` 增 `etag_source TEXT`（etag 来自哪个源，跨源不复用）——新列属于 schema 变更，按版本号推进 | 表结构 |
+| 2 | 本次变更按既有策略**整体重建**（`SCHEMA_VERSION` 4→5，旧库清空重建）。与「首次发布前不做数据迁移」不冲突：§0 已定「产品还没有用户，整体重建是刻意选择」，重建正是文档规定的做法 | 说明 |
+
+### 8（2026-11-17，`current_node_id` 允许为空）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | 版本 `7 → 8`；头部同步 `commands.md` 2.36.8 / `events.md` 2.16.2 / `tools.md` 3.17.4 | 元数据 |
+| 2 | `configs.current_node_id` 的约束放宽：`NULL` 是合法状态——节点全部被删，或 `source = "seed"` 的新建配置在用户点「连接」之前（预选只在界面，`commands.md` §3.2） | 约束澄清 |
 
 ### 7（2026-11-16，免费节点试用）
 

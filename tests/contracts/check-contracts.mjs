@@ -1835,7 +1835,7 @@ check("DefaultProfileResult 的刷新字段（契约）", () => {
     problems.push("DefaultProfileResult 缺少 reason");
   } else {
     const vals = [...reasonM[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]).sort();
-    const expected = ["invalid_content", "local_write", "offline"];
+    const expected = ["invalid_content", "local_write", "offline", "stale_source"];
     if (vals.join(",") !== expected.join(",")) {
       problems.push(`reason 取值必须是 ${expected.join(" | ")} | null，实际是 ${vals.join(" | ")}`);
     }
@@ -1846,7 +1846,7 @@ check("DefaultProfileResult 的刷新字段（契约）", () => {
   if (!/changed\s*:\s*boolean/.test(block)) problems.push("changed 必须是 boolean");
 
   const md = read("docs/contracts/commands.md");
-  for (const phrase of ["离线且有缓存仍返回 `Ok`", "分不出「离线」「内容异常」「本地写入失败」", "不得合并", "原来的 X 已下架，已切换到 Y"]) {
+  for (const phrase of ["离线且有缓存仍返回 `Ok`", "分不出「离线」「内容异常」「来源过期」「本地写入失败」", "不得合并", "原来的 X 已下架，已切换到 Y"]) {
     if (!md.includes(phrase)) problems.push(`commands.md 缺少说明：${phrase}`);
   }
   for (const bad of ["previous_node_name", "new_node_name"]) {
@@ -1959,7 +1959,7 @@ check("OfflineReason 的取值与契约一致（实现）", () => {
   const m = rs.match(/impl OfflineReason \{[\s\S]*?fn as_str\(self\)[\s\S]*?match self \{([\s\S]*?)\n        \}/);
   if (!m) return ["seed.rs 找不到 OfflineReason::as_str"];
   const values = [...m[1].matchAll(/=> "([a-z_]+)"/g)].map((x) => x[1]);
-  const expected = ["offline", "invalid_content", "local_write"];
+  const expected = ["offline", "invalid_content", "stale_source", "local_write"];
   const missing = expected.filter((v) => !values.includes(v));
   const extra = values.filter((v) => !expected.includes(v));
   const problems = [];
@@ -2271,6 +2271,148 @@ check("CatalogOptions 在 §4.53 完整登记且不泄露内部成本口径（�
         problems.push(`CatalogOptionsData 不得包含 ${bad}（内部成本口径不出现在返回结构里）`);
       }
     }
+  }
+  return problems;
+});
+
+// --- 16.2：免费节点不自动连接 / seed 新建留空 current_node_id ---
+
+check("§5.1 禁止自动连接的范围含 UI 与模型（契约）", () => {
+  const md = read("docs/contracts/tools.md");
+  const s = mdSection(md, "### 5.1", "\n### ");
+  if (!s) return ["tools.md 找不到 §5.1 标准连接链路"];
+  const problems = [];
+  for (const phrase of [
+    "UI 与模型都不得",
+    "`VpnConnect`",
+    "`NodeSwitch`",
+    "只能发生在用户点「连接」的那一刻",
+  ]) {
+    if (!s.includes(phrase)) problems.push(`§5.1 缺少「${phrase}」`);
+  }
+  return problems;
+});
+
+check("seed 新建的 current_node_id 留空、预选不写库（契约）", () => {
+  const commands = read("docs/contracts/commands.md");
+  const tools = read("docs/contracts/tools.md");
+  const problems = [];
+
+  const s32 = mdSection(commands, "### 3.2", "\n### ");
+  if (!s32) problems.push("commands.md 找不到 §3.2 config_create");
+  else {
+    if (!s32.includes('`source = "seed"` 的新建留空')) {
+      problems.push('commands.md §3.2 缺少「`source = "seed"` 的新建留空」');
+    }
+    if (!s32.includes("预选不写库")) {
+      problems.push("commands.md §3.2 缺少「预选不写库」");
+    }
+  }
+
+  const s424 = mdSection(tools, "### 4.24", "\n### ");
+  if (!s424) problems.push("tools.md 找不到 §4.24 ConfigCreate");
+  else if (!s424.includes("`current_node_id` 留空")) {
+    problems.push("tools.md §4.24 缺少「`current_node_id` 留空」");
+  }
+  return problems;
+});
+
+check("空 current_node_id 的读取口径一致（契约）", () => {
+  const commands = read("docs/contracts/commands.md");
+  const tools = read("docs/contracts/tools.md");
+  const problems = [];
+
+  const s32 = mdSection(commands, "### 3.2", "\n### ");
+  if (!s32) problems.push("commands.md 找不到 §3.2 config_create");
+  else {
+    for (const phrase of ["`current_node_id = null` 不是异常", "仍按节点集第一个连接"]) {
+      if (!s32.includes(phrase)) problems.push(`commands.md §3.2 缺少「${phrase}」`);
+    }
+    if (!/(不存在|没有)「没有当前节点」这个错误码/.test(s32)) {
+      problems.push("commands.md §3.2 没有写明「没有当前节点」不是一个错误码");
+    }
+  }
+
+  const s423 = mdSection(tools, "### 4.23", "\n### ");
+  if (!s423) problems.push("tools.md 找不到 §4.23 ConfigDetail");
+  else {
+    for (const phrase of ["`current_node_id` 可能为 `null`", "说成「还没有节点」"]) {
+      if (!s423.includes(phrase)) problems.push(`tools.md §4.23 缺少「${phrase}」`);
+    }
+  }
+  return problems;
+});
+
+check("data-model 的 current_node_id 允许 NULL 且版本为 9（契约）", () => {
+  const dm = read("docs/data-model.md");
+  const problems = [];
+
+  if (!/> 版本：`9`/.test(dm)) problems.push("data-model.md 头部版本不是 9");
+
+  const s31 = mdSection(dm, "### 3.1", "\n### ");
+  if (!s31) problems.push("data-model.md 找不到 §3.1 configs");
+  else {
+    const row = s31.match(/^\|\s*`current_node_id`\s*\|[^\n]*$/m);
+    if (!row) problems.push("data-model.md §3 的 configs 表没有 current_node_id 行");
+    else {
+      if (!row[0].includes("不是 `NULL` 时")) {
+        problems.push("current_node_id 行没有写明「不是 `NULL` 时」必须是节点集成员");
+      }
+      if (!row[0].includes("`NULL` 是合法状态")) {
+        problems.push("current_node_id 行没有写明「`NULL` 是合法状态」");
+      }
+    }
+  }
+
+  const s155 = mdSection(read("docs/contracts/commands.md"), "### 15.5", "\n### 15.6");
+  if (!s155) problems.push("commands.md 找不到 §15.5 版本矩阵");
+  else if (!/\|\s*`data-model\.md`\s*\|\s*\*\*9\*\*\s*\|/.test(s155)) {
+    problems.push("commands.md §15.5 矩阵的 data-model.md 版本不是 9");
+  }
+  return problems;
+});
+
+check("§0.2 保持批 0 快照原值并注明以 §15 为准（契约）", () => {
+  const md = read("docs/contracts/commands.md");
+  const s = mdSection(md, "### 0.2", "\n### ");
+  if (!s) return ["commands.md 找不到 §0.2"];
+  const problems = [];
+  const plain = s.replace(/\*/g, ""); // 强调符不算措辞差异
+
+  if (!plain.includes("批 0 当时的一致性快照")) {
+    problems.push("§0.2 缺少「批 0 当时的一致性快照」注记");
+  }
+  if (!plain.includes("当前版本以 §15")) {
+    problems.push("§0.2 缺少「当前版本以 §15」指引");
+  }
+  // 四行都锁回批 0 原值：只锁一行会让人以为这张表可以随手更新。catalog.md 是 `1.x`，不锁。
+  for (const [file, value] of [
+    ["events.md", "2.0.0"],
+    ["runtime.md", "2.0.0"],
+    ["tools.md", "3.0.0"],
+    ["data-model.md", "1"],
+  ]) {
+    const row = new RegExp(
+      `\\|\\s*\`${file.replace(/\./g, "\\.")}\`\\s*\\|\\s*\\*\\*${value.replace(/\./g, "\\.")}\\*\\*\\s*\\|`,
+    );
+    if (!row.test(s)) {
+      problems.push(`§0.2 快照表 ${file} 不是批 0 值 ${value}（历史快照不随版本推进更新）`);
+    }
+  }
+  return problems;
+});
+
+check("data-model §3.6 登记 seed_cache.etag_source（契约）", () => {
+  const dm = read("docs/data-model.md");
+  const s36 = mdSection(dm, "### 3.6", "\n### ");
+  if (!s36) return ["data-model.md 找不到 §3.6 seed_cache"];
+
+  const problems = [];
+  if (!/etag_source\s+TEXT/.test(s36)) {
+    problems.push("seed_cache 的 DDL 没有 etag_source 列");
+  }
+  if (!s36.includes("跨源不复用")) {
+    problems.push("§3.6 没有写明 etag 跨源不复用（etag_source 记录来源）");
   }
   return problems;
 });

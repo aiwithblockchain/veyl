@@ -92,7 +92,7 @@ ditto "src-tauri/target/universal-apple-darwin/release/bundle/macos/Veyl.app" "/
 
 ### 2.4 首次连接的流程（会看到什么）
 
-1. 新建配置时选 TUN（`src/components/NewConfigDialog.tsx:15`，默认就是 TUN），点连接；
+1. 新建配置时把接管方式切到 TUN（`src/components/NewConfigDialog.tsx:15`；2026-11-17 起默认是 Proxy 模式），点连接；
 2. 第一次会**失败**并返回 `tun_denied`，同时自动打开「系统设置 › 登录项与扩展」。
    调用链：`ensure_registered()` → `status() == NotRegistered` → `registerAndReturnError()` → 仍是 `RequiresApproval` → `open_login_items()` + 报错（`smappservice.rs:52-74`）；
 3. 用户在系统设置里把 Veyl 的后台助手打开；
@@ -226,7 +226,7 @@ ditto "src-tauri/target/universal-apple-darwin/release/bundle/macos/Veyl.app" "/
 
 ### 步骤 3 · 首次连接与授权
 
-1. 启动 `/Applications/Veyl.app`，新建一套 TUN 配置（对话框默认就是 TUN），连上节点；
+1. 启动 `/Applications/Veyl.app`，新建一套 TUN 配置（对话框里要手动切到 TUN；默认已是 Proxy 模式），连上节点；
 2. 点「连接」→ 预期**失败**并弹出/打开「系统设置 › 登录项与扩展」；
 3. 打开 Veyl 的后台助手开关；
 4. 回到 App 再点一次「连接」。

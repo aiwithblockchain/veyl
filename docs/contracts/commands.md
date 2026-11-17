@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.36.5`
+> 契约版本：`2.36.9`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -44,6 +44,8 @@
 | `tools.md` | **3.0.0** | 工具改名与新增，AI 侧与 UI 侧同源 |
 | `data-model.md` | **1** | 6 张表 DDL、索引、`secrets.enc` 关系 |
 | `catalog.md` | 1.x | 不动（与服务端协商的独立版本） |
+
+> 上表是**批 0 当时**的一致性快照，数字不随版本推进更新；**当前版本以 §15 的契约版本矩阵为准**。
 
 **四份的应用侧契约现在是同一套词汇：`config` / `node` / `issue` / `layout`。** 任何一份出现 `profile` 都视为错误（历史变更记录除外）。
 
@@ -292,7 +294,7 @@ type ConfigDetail = ConfigSummary & {
 
 1. 同一时刻最多一个 `is_active = true` 的配置（数据库层用部分唯一索引兜底）。
 2. `node_count` 是 `config_nodes` 的实时计数，不是缓存列。
-3. `current_node_id` 必须是该配置节点集里的一个；节点被删时置 `null`。
+3. `current_node_id` **不是 `NULL` 时**必须是该配置节点集里的一个。`NULL` 是合法状态：节点全部被删，或 `source = "seed"` 的新建配置在用户点「连接」之前（预选只在界面，§3.2）。
 4. `connect_mode = "tun"` 时 `listen_port` 恒为 `null`。**`listen_port` 已废弃**：列与返回值保留只为旧数据/回滚，连接不再读它；本地代理端口只有一个来源——全局设置 `proxy_port`（`proxy_port_get` §7.11）。`tun_excludes` 只在 `tun` 下允许非空。
 
 ### 3.1 `config_list {}` → `ConfigListData`
@@ -337,7 +339,13 @@ type ConfigListData = {
 - **`source` 与非空 `nodeIds` 必须给一个**：`source = "seed"`，或至少一个有效节点 id。
   两者都缺、显式 `source = "empty"`、或 `nodeIds = []` → `INVALID_ARGUMENT`，`details.reason = "source_required"`。
   **界面与 AI 都不再允许创建空配置**：新建流程的两问里必有一个节点来源；AI 工具同样拒绝（`tools.md` §4.24）。
-- `current_node_id` 取节点集里的第一个。
+- `current_node_id` 取节点集里的第一个；**但 `source = "seed"` 的新建留空（`null`）**：免费节点刚测速完，最快的那台由界面预选，**预选不写库**；用户点「连接」时界面先 `node_switch` 再 `runtime_start`（`runtime_start` 没有 `nodeId` 参数，不先落库就只会连到第一个）。
+- **`current_node_id = null` 不是异常**，只表示「这套配置还没有选定当前节点」；**节点池才是事实来源**。各读取方的表现：
+  - `config_detail` / `ConfigList`：原样返回 `null`，`node_count` / `nodes` 照实返回——不能据此显示「还没有节点」。
+  - `config_activate` / `node_switch`：正常接受；`node_switch` 把当前节点写上即可。
+  - `runtime_start` / `vpn_connect`：节点池非空时**仍按节点集第一个连接**（既有兜底，不改）。所以**种子流程必须由界面先 `node_switch` 再启动**，不能依赖这个兜底去「碰巧连对」。
+  - `node_probe` / `diag_run` / 我的服务器详情：不读 `current_node_id`，不受影响。
+  - 报错只有一种：节点池为空 → `no_nodes`。**没有「没有当前节点」这个错误码**。
 - 新建后是否自动激活：
 
   | 当前状态 | 行为 |
@@ -1732,7 +1740,7 @@ type DefaultProfileResult = {
   new_version_available: boolean;  // 只有 refresh 之后才可能为 true
   source: "network" | "cache";     // network = 本次拿到远端；cache = 用本地缓存
   changed: boolean;                // 本次是否真的换了内容
-  reason: "offline" | "invalid_content" | "local_write" | null;  // 失败细分；成功时 null
+  reason: "offline" | "invalid_content" | "stale_source" | "local_write" | null;  // 失败细分；成功时 null
   added: number | null;            // 新增节点数；拿不到时为 null
   removed: number | null;          // 移除节点数；拿不到时为 null
   removed_node_name: string | null;      // 原来在用、但已被新种子下架的节点名
@@ -1741,11 +1749,12 @@ type DefaultProfileResult = {
 ```
 
 - `source` / `changed` / `reason` / `added` / `removed` 是给 UI 出文案的，**不能从别的字段推**。
-- `reason` 只在没换成远端内容时出现；三种取值必须分开，**不得合并**：
+- `reason` 只在没换成远端内容时出现；四种取值必须分开，**不得合并**：
   - `offline`：拉不到（断网 / 超时）；
   - `invalid_content`：内容拉到了但解析 / 校验不过，是**我们的内容**有问题；
+  - `stale_source`：内容合法，但兜底源比缓存旧，**拒绝回退**（来源过期，不是内容损坏）；
   - `local_write`：内容拉到了、解析成功，但**写入本机失败**（钥匙串 / 磁盘 / DB），是**用户环境**问题，可重试且缓存未变。
-  没有它就分不出「离线」「内容异常」「本地写入失败」。
+  没有它就分不出「离线」「内容异常」「来源过期」「本地写入失败」。
 - `added` / `removed` 来自 `sync_seed_nodes` 的变更集；拿不到时返回 `null`，文案退回「已更新，共 M 个节点」。
 - `removed_node_name` / `replacement_node_name` 只在种子刷新后当前节点消失时出现：后端把 `current_node_id` 改到剩余第一个节点，同时给出这两个名字，UI 据此显示「原来的 X 已下架，已切换到 Y」。
   - **剩余列表为空时**：`current_node_id` 置空，`removed_node_name` **仍返回被下架的那个节点名**，`replacement_node_name = null`。UI 显示「原来的 X 已下架，现在没有可用节点」——没有旧名字，这句话说不完整，用户不知道自己丢的是哪个。
@@ -2225,7 +2234,7 @@ type RulesStatus = {
 
 > **只作废 invoke 命令，不作废 AI 工具。** 聊天通道里的工具（`VpnConnect` 等）继续存在，见 `tools.md`。两条通道最终落到同一份 Host 实现，差别只在「谁发起」。
 >
-> `tools.md` 已升到 3.17.1，工具名与本表一一对应。
+> `tools.md` 已升到 3.17.4，工具名与本表一一对应。
 
 ---
 
@@ -2352,7 +2361,7 @@ type RulesStatus = {
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
-`tools.md` 已升到 3.17.1，上表的工具名与它一一对应（§0.2）。
+`tools.md` 已升到 3.17.4，上表的工具名与它一一对应（§0.2）。
 
 ---
 
@@ -2418,11 +2427,11 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.36.5** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** |
+| `contracts/commands.md` | **2.36.9** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** |
 | `contracts/events.md` | **2.16.2** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.17.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** |
-| `data-model.md` | **7** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` |
+| `contracts/tools.md` | **3.17.4** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** |
+| `data-model.md` | **9** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` + `current_node_id` 允许为 `NULL`（seed 预选不写库） |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
 | `contracts/catalog.md` | 1.x（与服务端协商） | 不动 |
@@ -2436,6 +2445,30 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.36.9（2026-11-17，种子失败细分增「来源过期」）
+
+| # | 变更 | 类型 | 理由 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.36.9`；`DefaultProfileResult.reason` 增 `stale_source`：内容合法但兜底源比缓存旧、拒绝回退；与 `invalid_content`（内容损坏）分开 | 字段扩展 | 评审 P2：拒绝回退不是「内容坏了」，诊断文案不能误导 |
+
+### 2.36.8（2026-11-17，不变量 #3 与新口径对齐）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.36.8`；§3「不变量」#3 改为「**不是 `NULL` 时**必须是该配置节点集里的一个；`NULL` 合法（节点全部被删、`source = "seed"` 新建在用户点「连接」之前）」，与 §3.2 和 `data-model.md` 一致 | 语义修正 | 评审：原句与 seed 留空直接冲突 |
+
+### 2.36.7（2026-11-17，空当前节点的读取口径）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.36.7`；§3.2 补「`current_node_id = null` 不是异常」：节点池才是事实来源；`config_detail` / `ConfigList` 原样返回、`runtime_start` 仍退第一个（所以种子流程必须先 `node_switch`）、探测与诊断不读它；**没有「没有当前节点」这个错误码**，唯一相关错误是节点池为空 `no_nodes` | 语义补全 | 评审：避免读取方把 `null` 当异常 |
+
+### 2.36.6（2026-11-17，预选不写库）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.36.6`；§3.2 `config_create` 的 `current_node_id` 规则加例外：**`source = "seed"` 的新建留空（`null`）**，最快的那台由界面预选、预选不写库；用户点「连接」时先 `node_switch` 再 `runtime_start`（`runtime_start` 没有 `nodeId` 参数） | 语义补全 | 评审：与「最快预选」「不自动设为当前」三者不能同时成立 |
 
 ### 2.36.5（2026-11-17，目录共用一个取数入口）
 
