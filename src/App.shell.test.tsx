@@ -858,6 +858,56 @@ describe("三区外壳与连接舞台", () => {
   }, 15_000);
 });
 
+describe("无节点时连接屏的登录提示", () => {
+  it("未登录：说明行补一句建自己的服务器要先登录", async () => {
+    await renderApp();
+
+    expect(
+      await screen.findByText(
+        "免费节点不保证稳定，试用 7 天；建自己的服务器要先登录。",
+      ),
+    ).toBeTruthy();
+  }, 15_000);
+
+  it("已登录：说明行只留免费节点那句", async () => {
+    localStorage.setItem(
+      "veyl.mock.account",
+      JSON.stringify({ logged_in: true, email: "buyer@example.com" }),
+    );
+    vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
+      logged_in: true,
+      email: "buyer@example.com",
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "email",
+    });
+
+    await renderApp();
+
+    expect(
+      await screen.findByText("免费节点不保证稳定，试用 7 天。"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/建自己的服务器要先登录/)).toBeNull();
+  }, 15_000);
+
+  it("账户读取失败：不回落到「要先登录」那句", async () => {
+    vi.spyOn(bridge, "myServerAccount").mockRejectedValue({
+      code: "NETWORK",
+      message: "连不上。",
+      retryable: true,
+    });
+
+    const container = await renderApp();
+    // 账户错误已经落到界面（账户入口的红点），说明读取结束了。
+    await waitFor(() =>
+      expect(container.querySelector(".activity__dot")).not.toBeNull(),
+    );
+
+    expect(screen.getByText("免费节点不保证稳定，试用 7 天。")).toBeTruthy();
+    expect(screen.queryByText(/建自己的服务器要先登录/)).toBeNull();
+  }, 15_000);
+});
+
 describe("提问与发起屏幕绑定", () => {
   it("离开连接页折叠成一行，回来恢复；别处不能提交答案", async () => {
     seedCardConfig();

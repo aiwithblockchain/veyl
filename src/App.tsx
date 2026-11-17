@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type {
   AgentEvent,
+  ConfigConnectMode,
   ConfigRouteMode,
   NextAction,
   RuntimeView,
@@ -190,6 +191,9 @@ function StartChoice({
   trial,
   onRetryTrial,
   onSkipProbe,
+  accountLoaded,
+  loggedIn,
+  accountError,
 }: {
   busy: boolean;
   onUseFree: () => void;
@@ -197,6 +201,11 @@ function StartChoice({
   trial: TrialFlow | null;
   onRetryTrial: () => void;
   onSkipProbe: () => void;
+  /** 账户还没读到时按已登录的短句显示：不给已登录用户闪一下「要先登录」。 */
+  accountLoaded: boolean;
+  loggedIn: boolean;
+  /** 账户读失败时也同样用短句：离线用户可能本来是登录的。 */
+  accountError: boolean;
 }) {
   if (trial && trial.phase !== "done") {
     return (
@@ -218,7 +227,11 @@ function StartChoice({
     <main className="start-choice">
       <section className="start-choice__col" aria-label="还没有节点">
         <h1 className="start-choice__title">从哪里开始？</h1>
-        <p className="start-choice__note">免费节点不保证稳定，试用 7 天。</p>
+        <p className="start-choice__note">
+          {accountLoaded && !loggedIn && !accountError
+            ? "免费节点不保证稳定，试用 7 天；建自己的服务器要先登录。"
+            : "免费节点不保证稳定，试用 7 天。"}
+        </p>
 
         <div className="start-choice__picks">
           <button
@@ -1672,6 +1685,50 @@ export default function App() {
     }
   };
 
+  const handleSetConnectMode = async (
+    mode: ConfigConnectMode,
+    options?: { onRestoring?: () => void },
+  ): Promise<{
+    ok: boolean;
+    restored: boolean | null;
+    actualMode: ConfigConnectMode | null;
+    message?: string;
+  }> => {
+    const config = vpn.activeConfig;
+    if (!config) {
+      return {
+        ok: false,
+        restored: null,
+        actualMode: null,
+        message: "先建一套配置。",
+      };
+    }
+    try {
+      await bridge.configSetMode({ configId: config.config_id, mode });
+      vpn.reload();
+      return { ok: true, restored: true, actualMode: mode };
+    } catch (error) {
+      const bridgeError = toBridgeError(error);
+      const restoredRaw = bridgeError.details?.restored;
+      const restored = typeof restoredRaw === "boolean" ? restoredRaw : null;
+      // 只有可能已回滚时才显示「正在恢复…」；回滚失败没有恢复过程。
+      if (restored !== false) options?.onRestoring?.();
+      let actualMode: ConfigConnectMode | null = null;
+      try {
+        actualMode = (await bridge.configDetail(config.config_id)).connect_mode;
+      } catch {
+        // 读不到就保持旧值；下一次 reload 会再对齐。
+      }
+      vpn.reload();
+      return {
+        ok: false,
+        restored,
+        actualMode,
+        message: bridgeError.message || "没能切换接管方式，稍后再试。",
+      };
+    }
+  };
+
   const handleVpnStart = () => {
     lastActionRef.current = { id: "client.primary" };
     stoppingRef.current = false;
@@ -2354,6 +2411,9 @@ export default function App() {
           onProbeAvailabilityChange={(available) => {
             probeControlHiddenRef.current = !available;
           }}
+          routingMode={activeRoutingMode}
+          onSetConnectMode={handleSetConnectMode}
+          onSetRoutingMode={handleSetRoutingMode}
         />
       ) : (
         <StartChoice
@@ -2366,6 +2426,9 @@ export default function App() {
           trial={trialFlow}
           onRetryTrial={handleRetryTrial}
           onSkipProbe={handleSkipTrialProbe}
+          accountLoaded={myServers.accountLoaded}
+          loggedIn={myServers.loggedIn}
+          accountError={myServers.accountError}
         />
       )}
       {settingsOpen && settingsConsulting ? null : panelOpen && shell.docked ? (
@@ -2447,6 +2510,7 @@ export default function App() {
         onProxyPortSaved={setProxyPort}
         connectMode={vpn.activeConfig?.connect_mode ?? null}
         configId={vpn.activeConfig?.config_id ?? null}
+        onSetConnectMode={handleSetConnectMode}
         onNewConfig={() => {
           setSettingsOpen(false);
           handleAskAiFromConsole();

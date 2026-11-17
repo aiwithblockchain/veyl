@@ -66,6 +66,10 @@ interface Props {
   ) => Promise<{ ok: boolean; message?: string }>;
   /** 接管方式切换成功后让 App 重读配置。 */
   onConnectModeChanged?: (mode: ConfigConnectMode) => void;
+  /** 接管方式切换：与舞台快捷切换共用同一个处理函数与命令。 */
+  onSetConnectMode?: (
+    mode: ConfigConnectMode,
+  ) => Promise<{ ok: boolean; message?: string }>;
   /** 咨询 AI：设置缩左、右侧并排助手；App 据此隐藏原来的右栏。 */
   assistant?: ReactNode;
   onConsultingChange?: (consulting: boolean) => void;
@@ -649,6 +653,7 @@ export function Settings({
   routingMode = null,
   onSetRoutingMode,
   onConnectModeChanged,
+  onSetConnectMode,
   assistant,
   onConsultingChange,
   onSectionChange,
@@ -950,8 +955,19 @@ export function Settings({
       setModeError(null);
       setPendingMode(null);
       try {
-        await bridge.configSetMode({ configId, mode: next });
-        onConnectModeChanged?.(next);
+        if (onSetConnectMode) {
+          // 共享处理函数自己会重读配置，成功后再通知会多 reload 一次。
+          const result = await onSetConnectMode(next);
+          if (!result.ok) {
+            setModeError(
+              result.message || "没能切换接管方式，稍后再试。",
+            );
+            return;
+          }
+        } else {
+          await bridge.configSetMode({ configId, mode: next });
+          onConnectModeChanged?.(next);
+        }
       } catch (error) {
         setModeError(
           toBridgeError(error).message || "没能切换接管方式，稍后再试。",
@@ -960,7 +976,7 @@ export function Settings({
         setModeBusy(false);
       }
     },
-    [bridge, configId, onConnectModeChanged],
+    [bridge, configId, onConnectModeChanged, onSetConnectMode],
   );
 
   const requestConnectMode = (next: ConfigConnectMode) => {

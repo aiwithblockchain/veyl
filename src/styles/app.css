@@ -3535,9 +3535,15 @@ body[data-resizing] {
 }
 
 .myservers__empty .btn {
-  min-height: 44px;
   margin-top: 20px;
+}
+
+/* 空态主按钮：44 高、15/500（§6.2）；只作用于登录 / 新建节点两个主动作。 */
+.myservers__empty-cta {
+  height: 44px;
   padding: 0 20px;
+  font-size: 15px;
+  font-weight: 500;
 }
 
 .skeleton--title {
@@ -5555,6 +5561,128 @@ details[open] > .settings-fold__summary::before {
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* 主按钮下方的读数行：接管方式 · 流量范围。纯文字，不做控件。 */
+.stage-quick {
+  margin-top: 12px;
+}
+
+.stage-quick__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+.stage-quick__value {
+  padding: 12px 6px;
+  margin: -12px -6px;
+  border: 0;
+  background: none;
+  font: inherit;
+  line-height: 20px;
+  color: inherit;
+  cursor: pointer;
+}
+
+.stage-quick__value:hover:not(:disabled) {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.stage-quick__value:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.stage-quick__value:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.stage-quick__sep {
+  color: var(--ink-3);
+}
+
+.stage-quick__busy {
+  margin: 0;
+  padding: 12px 0;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--ink-3);
+}
+
+.stage-quick__notice {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+.stage-quick__notice.is-error {
+  color: var(--err-text);
+}
+
+/* 就地确认条：不是弹窗、无遮罩，主按钮仍可用。 */
+.stage-quick-confirm {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--hair-strong);
+  border-radius: var(--r-md);
+  background: var(--card);
+}
+
+.stage-quick-confirm__text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.stage-quick-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.stage-quick-confirm__cancel,
+.stage-quick-confirm__go {
+  width: auto;
+  height: auto;
+  padding: 10px 8px;
+  margin: -10px -8px;
+  border: 0;
+  background: none;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.stage-quick-confirm__cancel {
+  color: var(--ink-3);
+}
+
+.stage-quick-confirm__cancel:hover {
+  color: var(--ink-2);
+}
+
+.stage-quick-confirm__go {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.stage-quick-confirm__cancel:focus-visible,
+.stage-quick-confirm__go:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 
 /* action_card：AI 编排的操作卡，按钮只上报不执行。 */
 .action-card {

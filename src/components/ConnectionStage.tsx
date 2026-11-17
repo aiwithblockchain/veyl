@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import type { ConfigDetail, RuntimeView } from "../agent/protocol";
+import type {
+  ConfigConnectMode,
+  ConfigDetail,
+  ConfigRouteMode,
+  RuntimeView,
+} from "../agent/protocol";
 import type { VpnConnectionState } from "../config/useVpnSession";
 import type { NodeProbesController } from "../config/useNodeProbes";
 import { dataPlaneDown } from "../ui/dataPlane";
@@ -7,6 +12,7 @@ import { formatClock } from "../ui/format";
 import { failureHeadline } from "../ui/middleArea";
 import { displayNodeNames, formatLatency } from "../ui/nodeList";
 import type { ActionCard } from "../ui/actionCard";
+import { StageQuickToggles, type ModeSwitchResult } from "./StageQuickToggles";
 
 interface Props {
   config: ConfigDetail | null;
@@ -42,6 +48,15 @@ interface Props {
   manualProbed?: boolean;
   /** 测速入口是否可点；Host 据此决定 context 里是否列 client.probe。 */
   onProbeAvailabilityChange?: (available: boolean) => void;
+  /** 舞台快捷切换：与设置页共用同一份状态与同一条命令。 */
+  routingMode?: ConfigRouteMode | null;
+  onSetConnectMode?: (
+    mode: ConfigConnectMode,
+    options?: { onRestoring?: () => void },
+  ) => Promise<ModeSwitchResult>;
+  onSetRoutingMode?: (
+    mode: "direct" | "proxy_all",
+  ) => Promise<{ ok: boolean; message?: string }>;
 }
 
 const NO_TRAFFIC_ACTION =
@@ -74,6 +89,9 @@ export function ConnectionStage({
   onProbe,
   manualProbed = false,
   onProbeAvailabilityChange,
+  routingMode = null,
+  onSetConnectMode,
+  onSetRoutingMode,
 }: Props) {
   const [now, setNow] = useState(() => Date.now());
   const [switchError, setSwitchError] = useState<string | null>(null);
@@ -494,6 +512,20 @@ export function ConnectionStage({
           <button type="button" className="stage-secondary" onClick={onStart}>
             重新连接
           </button>
+        ) : null}
+
+        {config && nodes.length > 0 && onSetConnectMode && onSetRoutingMode ? (
+          <StageQuickToggles
+            connectMode={config.connect_mode}
+            routingMode={routingMode}
+            connected={connected}
+            modeLocked={starting || stopping}
+            helperPreparing={helperPreparing}
+            onSetConnectMode={onSetConnectMode}
+            onSetRoutingMode={onSetRoutingMode}
+            onReportProblem={onReportProblem}
+            reportBusy={reportBusy}
+          />
         ) : null}
 
         {failed ? (

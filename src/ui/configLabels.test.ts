@@ -10,7 +10,7 @@ const selected = {
 
 describe("左栏接管方式标签", () => {
   it("只由 connect_mode 决定", () => {
-    expect(levelLabel({ connect_mode: "tun" })).toBe("TUN 模式");
+    expect(levelLabel({ connect_mode: "tun" })).toBe("Tun 模式");
     expect(levelLabel({ connect_mode: "system_proxy" })).toBe("Proxy 模式");
     // routing_mode 不再参与：切换流量范围不会让标签变来变去。
     expect(levelLabel(proxyAll)).toBe("Proxy 模式");
@@ -20,7 +20,7 @@ describe("左栏接管方式标签", () => {
   it("方式读数也只描述接管范围", () => {
     expect(modeSummary(base)).toEqual({ value: "Proxy 模式", sub: "需要手动填地址" });
     expect(modeSummary({ ...base, connect_mode: "tun" })).toEqual({
-      value: "TUN 模式",
+      value: "Tun 模式",
       sub: "所有软件都走节点",
     });
   });

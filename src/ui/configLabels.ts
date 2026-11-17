@@ -4,7 +4,7 @@ import type { ConfigSummary } from "../agent/protocol";
 export function levelLabel(
   config: Pick<ConfigSummary, "connect_mode">,
 ): string {
-  return config.connect_mode === "tun" ? "TUN 模式" : "Proxy 模式";
+  return config.connect_mode === "tun" ? "Tun 模式" : "Proxy 模式";
 }
 
 /** 未连接时读数行的「方式」；流量范围只住在 hero 的开关里。 */
@@ -12,7 +12,7 @@ export function modeSummary(
   config: Pick<ConfigSummary, "connect_mode">,
 ): { value: string; sub: string } {
   if (config.connect_mode === "tun") {
-    return { value: "TUN 模式", sub: "所有软件都走节点" };
+    return { value: "Tun 模式", sub: "所有软件都走节点" };
   }
   return { value: "Proxy 模式", sub: "需要手动填地址" };
 }

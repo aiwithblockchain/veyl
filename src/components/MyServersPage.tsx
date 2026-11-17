@@ -147,9 +147,13 @@ export function MyServersPage({
         <section className="myservers__empty">
           <h1 className="myservers__empty-title">先登录</h1>
           <p className="myservers__empty-text">
-            登录后可以买服务器；服务器装好后，节点会出现在节点池里。
+            登录后可以买服务器；装好后节点会出现在这里，也能直接用来连接。
           </p>
-          <button type="button" className="btn btn--primary" onClick={onLogin}>
+          <button
+            type="button"
+            className="btn btn--primary myservers__empty-cta"
+            onClick={onLogin}
+          >
             登录
           </button>
         </section>
@@ -196,7 +200,11 @@ export function MyServersPage({
         <p className="myservers__empty-text">
           买一台装好后，节点会出现在这里，也能直接用来连接。
         </p>
-        <button type="button" className="btn btn--primary" onClick={onNew}>
+        <button
+          type="button"
+          className="btn btn--primary myservers__empty-cta"
+          onClick={onNew}
+        >
           新建节点
         </button>
       </section>

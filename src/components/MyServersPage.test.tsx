@@ -314,7 +314,9 @@ describe("我的服务器 destination", () => {
     expect(bridge.myServerList).not.toHaveBeenCalled();
 
     expect(
-      screen.getByText("登录后可以买服务器；服务器装好后，节点会出现在节点池里。"),
+      screen.getByText(
+        "登录后可以买服务器；装好后节点会出现在这里，也能直接用来连接。",
+      ),
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
     const dialog = await screen.findByRole("dialog", { name: "登录我的服务器" });
