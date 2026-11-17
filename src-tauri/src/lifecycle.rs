@@ -140,16 +140,23 @@ pub fn resolve_quit_decision(action: &str) -> Option<bool> {
     Some(quit_prompt().decide(decision))
 }
 
-/// 有连接（含正在建立）才需要问；断开中不再打断退出。
-fn needs_quit_prompt(manager: RuntimeState, tun_connected: bool) -> bool {
-    tun_connected
-        || matches!(
-            manager,
-            RuntimeState::Starting
-                | RuntimeState::Running
-                | RuntimeState::Degraded
-                | RuntimeState::Restarting
-        )
+/// 退出请求的来源，决定是否需要先问一次（`docs/design/quit-dialog.md` §0）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitRoute {
+    /// 应用菜单「退出 Veyl」/ Cmd+Q：用户主动要离开窗口，任何时候都问一次。
+    Menu,
+    /// 系统注销 / 关机触发的 `ExitRequested`：系统已在收尾，问只会卡住关机。
+    System,
+    /// 托盘菜单「退出」：意图明确，直接退出。
+    Tray,
+}
+
+impl QuitRoute {
+    /// 只有菜单 / Cmd+Q 需要确认。**与连接状态无关**：系统注销与托盘都视为
+    /// 用户已经明确说了「退出」。
+    fn asks_before_quitting(self) -> bool {
+        matches!(self, QuitRoute::Menu)
+    }
 }
 
 async fn wait_decision(
@@ -340,7 +347,7 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>, parts: Parts) -> tauri::Result
         .show_menu_on_left_click(true)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "tray-show" => show_main_window(app),
-            "tray-quit" => request_quit(app, quit_parts.clone(), false),
+            "tray-quit" => request_quit(app, quit_parts.clone(), QuitRoute::Tray),
             _ => {}
         })
         .build(app)?;
@@ -531,27 +538,32 @@ fn set_tray_icon<R: Runtime>(app: &AppHandle<R>, state: TrayState) {
     }
 }
 
-/// Cmd+Q / 应用菜单「退出 Veyl」被拦截后调用。
+/// 应用菜单「退出 Veyl」/ Cmd+Q：用户主动退出，**无论是否已连接**都弹一次。
+pub fn on_menu_quit<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
+    request_quit(app, parts, QuitRoute::Menu);
+}
+
+/// 系统注销 / 关机触发的 `RunEvent::ExitRequested`：有连接才问，没连接直接退出。
 pub fn on_exit_requested<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
     log::info!(
         "ExitRequested 收到，quitting={}",
         QUITTING.load(Ordering::SeqCst)
     );
-    request_quit(app, parts, true);
+    request_quit(app, parts, QuitRoute::System);
 }
 
-/// 托盘「退出」传 `confirm = false`，直接走退出流程。
+/// 只有菜单 / Cmd+Q 会先弹确认；系统注销与托盘「退出」直接走退出流程。
 ///
-/// `confirm = true` 时：没有连接直接退出；有连接先发 `quit-requested` 等前端弹窗，
-/// 30 秒没有决策按后台运行处理。前端不在或事件发不出去时回落到原生确认框。
-/// 状态检查放在异步任务里，不阻塞主线程；对话框继续用异步 `show_with_result`，
+/// `Menu` 一律发 `quit-requested` 等前端弹窗，30 秒没有决策按后台运行处理；
+/// 前端不在或事件发不出去时回落到原生确认框。确认不依赖连接状态，也就不在
+/// 异步任务里读 manager 快照。对话框继续用异步 `show_with_result`，
 /// **不要改回 `blocking_show`**——主线程一旦被阻塞，`run_on_main_thread` 永远回不来。
-pub fn request_quit<R: Runtime>(app: &AppHandle<R>, parts: Parts, confirm: bool) {
+pub fn request_quit<R: Runtime>(app: &AppHandle<R>, parts: Parts, route: QuitRoute) {
     if QUITTING.load(Ordering::SeqCst) || EXIT_PROMPT_OPEN.swap(true, Ordering::SeqCst) {
         return;
     }
-    log::info!("开始退出流程 confirm={confirm}");
-    if !confirm {
+    log::info!("开始退出流程 route={route:?}");
+    if !route.asks_before_quitting() {
         start_shutdown(app.clone(), parts, None);
         return;
     }
@@ -560,13 +572,6 @@ pub fn request_quit<R: Runtime>(app: &AppHandle<R>, parts: Parts, confirm: bool)
     let recovery_app = app.clone();
     tauri::async_runtime::spawn(async move {
         let flow = std::panic::AssertUnwindSafe(async move {
-            let manager_state = parts.manager.status().await.state;
-            let tun_connected = tun_running(&parts.tun) || parts.tun.is_launching();
-            if !needs_quit_prompt(manager_state, tun_connected) {
-                log::info!("退出时没有连接，直接退出");
-                start_shutdown(app, parts, None);
-                return;
-            }
             show_main_window(&app);
             ask_exit_in_app(app, parts).await;
         });
@@ -582,7 +587,7 @@ pub fn request_quit<R: Runtime>(app: &AppHandle<R>, parts: Parts, confirm: bool)
     });
 }
 
-/// 已连接时的退出确认：优先应用内弹窗，前端不可用时回落原生弹窗。
+/// 菜单退出的确认：优先应用内弹窗，前端不可用时回落原生弹窗。
 async fn ask_exit_in_app<R: Runtime>(app: AppHandle<R>, parts: Parts) {
     let receiver = match quit_prompt().open() {
         Some(receiver) => receiver,
@@ -859,26 +864,23 @@ fn force_cleanup(parts: &Parts) {
 mod tests {
     use super::*;
 
-    /// 没有连接（或正在断开）时不该再弹窗；启动窗口算「有连接」。
+    /// 菜单「退出 Veyl」/ Cmd+Q 是用户主动离开窗口，任何时候都弹窗
+    /// （2026-11-17 产品决定，`docs/design/quit-dialog.md` §0）。
     #[test]
-    fn quit_prompt_is_needed_only_while_connected_or_connecting() {
-        for state in [
-            RuntimeState::Starting,
-            RuntimeState::Running,
-            RuntimeState::Degraded,
-            RuntimeState::Restarting,
-        ] {
-            assert!(needs_quit_prompt(state, false), "{state:?}");
-        }
-        for state in [
-            RuntimeState::Idle,
-            RuntimeState::Stopping,
-            RuntimeState::Failed,
-        ] {
-            assert!(!needs_quit_prompt(state, false), "{state:?}");
-        }
-        // TUN 连着时 manager 仍是 Idle，必须单独算上。
-        assert!(needs_quit_prompt(RuntimeState::Idle, true));
+    fn menu_quit_always_asks() {
+        assert!(QuitRoute::Menu.asks_before_quitting());
+    }
+
+    /// 系统注销 / 关机不弹：系统有收尾超时，弹窗只会卡住关机，即便正在连接。
+    #[test]
+    fn system_exit_goes_straight_through_even_while_running() {
+        assert!(!QuitRoute::System.asks_before_quitting());
+    }
+
+    /// 托盘「退出」意图明确，直接退出。
+    #[test]
+    fn tray_quit_goes_straight_through() {
+        assert!(!QuitRoute::Tray.asks_before_quitting());
     }
 
     /// 前端没调过命令或主窗口不在时，不能用应用内弹窗；这条路径回落原生并补发 `quit-dismissed`。

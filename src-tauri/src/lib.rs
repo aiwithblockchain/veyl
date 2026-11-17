@@ -221,7 +221,7 @@ pub fn run() {
             app.on_menu_event(move |app, event| {
                 if event.id().as_ref() == "app-quit" {
                     log::info!("菜单退出被拦截");
-                    lifecycle::on_exit_requested(app, menu_parts.clone());
+                    lifecycle::on_menu_quit(app, menu_parts.clone());
                 }
             });
 
