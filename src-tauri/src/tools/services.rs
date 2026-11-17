@@ -2855,12 +2855,15 @@ impl WiredServices {
     }
 
     /// 写节点：先凭据后行；`skip_duplicates` 用于 URL 导入（同来源同身份算重复）。
+    /// `select_first` 决定配置还没有当前节点时是否自动选中第一个；种子新建必须传
+    /// `false`（`tools.md` §4.24），由界面在用户点「连接」时再 `NodeSwitch`。
     fn add_parsed_nodes(
         &self,
         config_id: Option<&str>,
         parsed: &[crate::nodes::ParsedNode],
         source: &str,
         skip_duplicates: bool,
+        select_first: bool,
     ) -> anyhow::Result<(Vec<configs::Node>, Vec<crate::nodes::SkippedNode>)> {
         let mut added = Vec::new();
         let mut skipped = Vec::new();
@@ -2929,7 +2932,7 @@ impl WiredServices {
                 let config = configs::get(&conn, config_id)
                     .map_err(|error| svc_error(error.code(), error))?
                     .ok_or_else(|| svc_error("NOT_FOUND", "配置不存在"))?;
-                if config.current_node_id.is_none() {
+                if select_first && config.current_node_id.is_none() {
                     let _ = configs::update(
                         &conn,
                         config_id,
@@ -2973,7 +2976,7 @@ impl WiredServices {
             })
             .collect();
         let (added, _) =
-            self.add_parsed_nodes(Some(config_id), &parsed, configs::SOURCE_SEED, false)?;
+            self.add_parsed_nodes(Some(config_id), &parsed, configs::SOURCE_SEED, false, false)?;
         Ok(added.len())
     }
 
@@ -4478,6 +4481,7 @@ impl VpnToolServices for WiredServices {
             &subscription.nodes,
             configs::SOURCE_URL,
             true,
+            true,
         )?;
 
         let mut skipped = subscription
@@ -4543,6 +4547,7 @@ impl VpnToolServices for WiredServices {
             config_id.as_deref(),
             &subscription.nodes,
             configs::SOURCE_MANUAL,
+            true,
             true,
         )?;
 
@@ -4611,6 +4616,7 @@ impl VpnToolServices for WiredServices {
             &[parsed],
             configs::SOURCE_MANUAL,
             false,
+            true,
         )?;
         let node = added
             .first()
@@ -5078,6 +5084,7 @@ impl VpnToolServices for WiredServices {
             } => {
                 let code = match reason {
                     crate::seed::OfflineReason::InvalidContent => "INVALID_ARGUMENT",
+                    crate::seed::OfflineReason::StaleSource => "UPSTREAM_ERROR",
                     crate::seed::OfflineReason::LocalWrite => "INTERNAL",
                     crate::seed::OfflineReason::Offline => "UPSTREAM_ERROR",
                 };
@@ -10299,6 +10306,109 @@ mod main_flow_tests {
             "断开后运行时进程 {pid} 仍然活着"
         );
 
+        drop(watcher);
+    }
+
+    /// 直接写种子缓存（内容 + 元数据），让 `source = "seed"` 的新建不用联网。
+    fn install_seed_cache(services: &WiredServices, body: &str) {
+        let hash = crate::seed::content_sha256(body.as_bytes());
+        crate::secrets::set_secret(&format!("seed:{hash}"), body).unwrap();
+        let conn = services.store.conn();
+        crate::store::seed_cache::save(
+            &conn,
+            &crate::store::seed_cache::SeedCacheRow {
+                content_sha256: hash,
+                etag: None,
+                etag_source: None,
+                source_version: Some("1".into()),
+                source_updated_at: None,
+                node_count: 2,
+                fetched_at: 0,
+                checked_at: 0,
+            },
+        )
+        .unwrap();
+    }
+
+    /// 架构师裁决：`source = "seed"` 的新建不设当前节点；界面在用户点「连接」时
+    /// 先 `NodeSwitch` 再 `VpnConnect`。这里把整条链路钉住：空当前节点 → 切换 → 连接。
+    #[tokio::test]
+    async fn a_seed_config_has_no_current_node_until_the_user_switches() {
+        let h = harness();
+        install_seed_cache(
+            &h.services,
+            r#"{
+              "version": 1,
+              "updated_at": "2026-11-17T00:00:00Z",
+              "nodes": [
+                { "name": "免费 A", "server": "203.0.113.10", "port": 8388,
+                  "method": "aes-256-gcm", "password": "pw-a" },
+                { "name": "免费 B", "server": "203.0.113.11", "port": 8388,
+                  "method": "aes-256-gcm", "password": "pw-b" }
+              ]
+            }"#,
+        );
+        let configured = crate::config::any_free_port().unwrap();
+        {
+            let conn = h.services.store.conn();
+            crate::store::settings::set_proxy_port(&conn, configured).unwrap();
+        }
+        let watcher = spawn_port_watcher(h.dir.clone());
+
+        let created = h
+            .services
+            .config_create(ConfigCreateInput {
+                name: "免费节点".into(),
+                connect_mode: configs::CONNECTION_SYSTEM_PROXY.into(),
+                routing_mode: configs::ROUTING_PROXY_ALL.into(),
+                source: Some("seed".into()),
+                node_ids: None,
+                targets: None,
+                listen_port: None,
+                dns: None,
+                tun_excludes: None,
+            })
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        assert!(
+            created["current_node_id"].is_null(),
+            "seed 新建不能自动选第一个：{created}"
+        );
+
+        // 详情必须能正常返回：空当前节点不是错误，节点集照实给出。
+        let detail = h.services.config_detail(&config_id).await.unwrap();
+        assert!(detail["current_node_id"].is_null());
+        assert_eq!(detail["node_count"], 2);
+        let nodes = detail["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        let node_id = nodes[1]["node_id"].as_str().unwrap().to_string();
+
+        // 用户点「连接」前先落库当前节点：previous 为 null 也要成功。
+        let switched = h
+            .services
+            .node_switch(&config_id, &node_id)
+            .await
+            .unwrap();
+        assert!(switched["previous_node_id"].is_null());
+        assert_eq!(switched["node_id"], node_id.as_str());
+
+        let connected = h
+            .services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(connected["state"], "running", "{connected}");
+
+        let status = serde_json::to_value(h.services.manager.status().await).unwrap();
+        assert_eq!(
+            status["node_id"], node_id.as_str(),
+            "连接的必须是切过去的那台"
+        );
+
+        h.services.restore_system_proxy().unwrap();
+        h.services.manager.set_system_proxy_enabled(false).await;
+        let _ = h.services.manager.stop().await;
         drop(watcher);
     }
 

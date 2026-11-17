@@ -7,6 +7,7 @@ import { handleOrders } from "./orders";
 import { handleTopups, startTopupSession } from "./topups";
 import { balanceCents } from "./wallet";
 import { handleServers } from "./servers";
+import { handleSeed } from "./seed";
 import { handleDodoWebhook } from "./webhooks/dodo";
 
 export interface Env {
@@ -289,6 +290,10 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
 </main></body></html>`;
     return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
   }
+
+  // 免费节点种子：匿名只读，随 Worker 部署（seed-publishing.md §4）。
+  const seedResponse = await handleSeed(request);
+  if (seedResponse) return seedResponse;
 
   // 设备令牌：静默注册与刷新（§19.2）。目录之后实现，未配置 D1 时返回 503。
   const authResponse = await handleAuth(request, env);

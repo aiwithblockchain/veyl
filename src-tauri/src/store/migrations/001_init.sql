@@ -150,6 +150,7 @@ CREATE TABLE IF NOT EXISTS seed_cache (
     id                    INTEGER PRIMARY KEY CHECK (id = 1),
     content_sha256        TEXT NOT NULL,
     etag                  TEXT,
+    etag_source           TEXT,
     source_version        TEXT,
     source_updated_at     TEXT,
     node_count            INTEGER NOT NULL,

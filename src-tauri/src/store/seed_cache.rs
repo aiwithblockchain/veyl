@@ -8,6 +8,8 @@ use super::error::{StoreError, StoreResult};
 pub struct SeedCacheRow {
     pub content_sha256: String,
     pub etag: Option<String>,
+    /// `etag` 来自哪个源。跨源不复用 ETag，否则可能拿到不该有的 304。
+    pub etag_source: Option<String>,
     pub source_version: Option<String>,
     pub source_updated_at: Option<String>,
     pub node_count: i64,
@@ -17,7 +19,7 @@ pub struct SeedCacheRow {
 
 pub fn load(conn: &Connection) -> StoreResult<Option<SeedCacheRow>> {
     conn.query_row(
-        "SELECT content_sha256, etag, source_version, source_updated_at, node_count,
+        "SELECT content_sha256, etag, etag_source, source_version, source_updated_at, node_count,
                 fetched_at, checked_at
            FROM seed_cache WHERE id = 1",
         [],
@@ -25,11 +27,12 @@ pub fn load(conn: &Connection) -> StoreResult<Option<SeedCacheRow>> {
             Ok(SeedCacheRow {
                 content_sha256: row.get(0)?,
                 etag: row.get(1)?,
-                source_version: row.get(2)?,
-                source_updated_at: row.get(3)?,
-                node_count: row.get(4)?,
-                fetched_at: row.get(5)?,
-                checked_at: row.get(6)?,
+                etag_source: row.get(2)?,
+                source_version: row.get(3)?,
+                source_updated_at: row.get(4)?,
+                node_count: row.get(5)?,
+                fetched_at: row.get(6)?,
+                checked_at: row.get(7)?,
             })
         },
     )
@@ -40,12 +43,13 @@ pub fn load(conn: &Connection) -> StoreResult<Option<SeedCacheRow>> {
 pub fn save(conn: &Connection, row: &SeedCacheRow) -> StoreResult<()> {
     conn.execute(
         "INSERT INTO seed_cache
-            (id, content_sha256, etag, source_version, source_updated_at,
+            (id, content_sha256, etag, etag_source, source_version, source_updated_at,
              node_count, fetched_at, checked_at)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
             content_sha256 = excluded.content_sha256,
             etag = excluded.etag,
+            etag_source = excluded.etag_source,
             source_version = excluded.source_version,
             source_updated_at = excluded.source_updated_at,
             node_count = excluded.node_count,
@@ -54,6 +58,7 @@ pub fn save(conn: &Connection, row: &SeedCacheRow) -> StoreResult<()> {
         params![
             row.content_sha256,
             row.etag,
+            row.etag_source,
             row.source_version,
             row.source_updated_at,
             row.node_count,
@@ -64,14 +69,20 @@ pub fn save(conn: &Connection, row: &SeedCacheRow) -> StoreResult<()> {
     Ok(())
 }
 
-/// 304 或内容没变：只更新最近检查时间与 etag。
-pub fn touch(conn: &Connection, checked_at: i64, etag: Option<&str>) -> StoreResult<()> {
+/// 304 或内容没变：只更新最近检查时间与来源对应的 etag。
+pub fn touch(
+    conn: &Connection,
+    checked_at: i64,
+    etag: Option<&str>,
+    etag_source: Option<&str>,
+) -> StoreResult<()> {
     conn.execute(
         "UPDATE seed_cache
             SET checked_at = ?1,
-                etag = COALESCE(?2, etag)
+                etag = COALESCE(?2, etag),
+                etag_source = COALESCE(?3, etag_source)
           WHERE id = 1",
-        params![checked_at, etag],
+        params![checked_at, etag, etag_source],
     )?;
     Ok(())
 }
@@ -85,6 +96,7 @@ mod tests {
         SeedCacheRow {
             content_sha256: "abc".into(),
             etag: Some("\"v1\"".into()),
+            etag_source: Some("https://veyl.dessage.xyz/v1/seed".into()),
             source_version: Some("1".into()),
             source_updated_at: Some("2026-11-03T13:53:52Z".into()),
             node_count: 2,
@@ -115,7 +127,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let conn = store.conn();
         save(&conn, &row()).unwrap();
-        touch(&conn, 99, Some("\"v2\"")).unwrap();
+        touch(&conn, 99, Some("\"v2\""), Some("https://example.com/seed")).unwrap();
         let loaded = load(&conn).unwrap().unwrap();
         assert_eq!(loaded.checked_at, 99);
         assert_eq!(loaded.etag.as_deref(), Some("\"v2\""));

@@ -198,6 +198,7 @@ mod tests {
             &seed_cache::SeedCacheRow {
                 content_sha256: "x".into(),
                 etag: None,
+                etag_source: None,
                 source_version: None,
                 source_updated_at: None,
                 node_count: 1,

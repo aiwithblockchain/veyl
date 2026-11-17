@@ -10,7 +10,7 @@ pub const MIGRATIONS: &[&str] = &[include_str!("migrations/001_init.sql")];
 /// 改 `001_init.sql`（加列、改约束）时必须 +1；否则已有库的 `user_version`
 /// 仍等于旧值，`migrate()` 会以为结构没变而跳过重建，运行时才报
 /// `table … has no column named …`。
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// `my_servers` 的计费/额度列。列探测是版本号之外的兜底：
 /// 即使有人改了基线忘了 bump 版本，这里也会发现漂移并触发重建。
