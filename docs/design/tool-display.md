@@ -6,6 +6,8 @@
 > `src-tauri/src/tools/envelope.rs`、`src-tauri/src/claurst_session/mod.rs`、
 > `docs/contracts/events.md` §3.3–3.4、`resources/prompts/zh/first-run.md`
 >
+> **2026-11-17 同步 `tools.md` 3.17.1**：工具集合为 42 个；已移除工具的条目从正文删掉，并补齐了 `MyServers` / `MyServerFailure` / `ConfigSetMode` / `OpenSettings` / `StageSelect` / `CatalogOptions` / `SetUserRegion`。
+>
 > **这份文档解决什么**：真机截图里用户看到的是「RuntimeStatus 调用 RuntimeStatus 0ms 完成」
 > 「ConfigList 调用 ConfigList 0ms 完成」。这不是文案不好，是**数据层把不该给用户看的东西
 > 直接画出来了**。本文定义三层：工具结果里的用户文案、UI 的展示规则、模型自己的表达规则。
@@ -213,12 +215,12 @@ type ToolCallEndPayload = {
 
 | 工具族 | 失败时典型值 | 说明 |
 |---|---|---|
-| 只读 / `None` 级（`RuntimeStatus`、`RuntimeLogs`、`CoreListVersions`、`CatalogSearch`、`ConfigList`、`ConfigDetail`、`NodeProbe`、`ProxyParams`、`IssueList`、`IssueGet`、`DiagRun`、`DeepseekSetupKey`、`JobGet`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`RuleCustomList`、`CategoryList`、`RulesStatus`、`AskUserQuestion`） | `none` | 可不填，Host 按 `none` 处理 |
+| 只读 / `None` 级（`RuntimeStatus`、`RuntimeLogs`、`CoreListVersions`、`CatalogSearch`、`ConfigList`、`ConfigDetail`、`NodeProbe`、`DiagRun`、`DeepseekSetupKey`、`JobGet`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`CategoryList`、`RulesStatus`、`OpenSettings`、`MyServers`、`MyServerFailure`、`CatalogOptions`、`AskUserQuestion`） | `none` | 可不填，Host 按 `none` 处理 |
 | `VpnConnect` | `restored` 或 `none` | 启动前失败 = `none`；已改系统设置后失败 = `restored`（工具负责恢复再返回） |
 | `VpnDisconnect` | `restored` 或 `none` | 断开失败时网络可能仍被接管 → 不允许填 `none` 除非确认未改 |
 | `RuntimeStart` / `RuntimeStop` / `RuntimeRestart` | `none` 或 `unknown` | 进程未起来 = `none`；重启中途失败 = `unknown` |
 | `ConfigCreate` / `ConfigUpdate` / `ConfigDelete` / `NodeCreate` / `NodeImportUrl` / `NodeSwitch` | `none` 或 `restored` | 校验失败 = `none`；部分写入后回滚 = `restored` |
-| `RouteSetMode` / `RouteTargetsSet` / `RuleCustomAdd` / `RuleCustomDelete` / `CatalogRefresh` / `RulesUpdate` | `none` 或 `restored` | 同上 |
+| `RouteSetMode` / `RouteTargetsSet` / `CatalogRefresh` | `none` 或 `restored` | 同上 |
 | `NetRepair` | `restored` 或 `unknown` | 尽力恢复；恢复不了必须 `unknown`，界面给诊断入口 |
 | `CoreUpgrade` | `none` | 未安装即未改动；临时文件由启动清理，不算改动 |
 | `DeepseekSaveKey` | `none` 或 `unknown` | 写入失败但无法确认落盘 = `unknown` |
@@ -257,13 +259,13 @@ type ToolCallEndPayload = {
 
 ### 6.2 集合相等断言
 
-`docs/contracts/tools.md` §3 的 46 个模型可见名，与前端 `toolDisplay.ts` 的映射表做
+`docs/contracts/tools.md` §3 的 42 个模型可见名，与前端 `toolDisplay.ts` 的映射表做
 **集合相等**断言（双向：映射表不能多、不能少），缺一个测试就红。
 
 这是唯一能保证「下次新增工具不再冒出 `FooBar 调用`」的机制。只靠兜底文案会退化成
 「已完成」，用户不知道发生了什么；只有集合断言会逼着新增工具的人补一行。
 
-建议测试形态：从 Rust 侧导出一份 46 个名字的列表（或直接在 TS 里抄一份并加注释指向 tools.md），
+建议测试形态：从 Rust 侧导出一份 42 个名字的列表（或直接在 TS 里抄一份并加注释指向 tools.md），
 断言 `new Set(names)` 与 `new Set(Object.keys(TOOL_DISPLAY))` 相等。
 
 ---
@@ -339,10 +341,8 @@ UI 卡片是最后一层。模型正文、`ai-status` 文案、工具 descriptio
 | `NodeSwitch` | 说节点名称，不说节点 ID。 |
 | `ConfigList` / `ConfigDetail` / `ConfigCreate` / `ConfigUpdate` / `ConfigDelete` | 配置 ID 只用于你自己匹配，不要念给用户；用户用名称指代配置。 |
 | `NodeProbe` | 说「能连上 / 连不上」和毫秒数，不说 TCP/TLS/握手。 |
-| `DiagRun` / `ProbeRun` / `NetConfigGet` / `NetRepair` | 说检查结果；不出现 DNS 地址列表、路由表、字段名。`NetRepair` 失败必须说明是否已恢复。 |
+| `DiagRun` / `NetConfigGet` / `NetRepair` | 说检查结果；不出现 DNS 地址列表、路由表、字段名。`NetRepair` 失败必须说明是否已恢复。 |
 | `RouteGet` / `RouteSetMode` / `RouteTargetsSet` | 说「哪些软件走 VPN」「直连」，不出现分流、规则集、rule、category id。 |
-| `RuleCustomList` / `RuleCustomAdd` / `RuleCustomDelete` / `CategoryList` / `RulesStatus` / `RulesUpdate` | 用「直连名单」「分类」；不出现 rule id、分类 id、数据版本号。 |
-| `IssueList` / `IssueGet` / `IssueHandoff` / `IssueResolve` / `IssueIgnore` | 说「问题」；不出现 issue id、状态机字段。 |
 | `JobGet` | 说「进度」和阶段白话名；不出现 job id、stage 字段名。 |
 | `DeepseekSaveKey` | 不复述密钥，不说保存路径。 |
 | `AskUserQuestion` | 问题与选项是给人看的，不写工具名、字段名、配置 ID。 |
@@ -390,33 +390,29 @@ UI 卡片是最后一层。模型正文、`ai-status` 文案、工具 descriptio
 | 17 | `NodeProbe` | 正在测试这个节点 | 能连上（38 毫秒） | 连不上：超时或被拒绝 | `none` |
 | 18 | `VpnConnect` | 正在连接 | 已连接 | 没连上（+ 有没有改动） | `none` / `restored` |
 | 19 | `VpnDisconnect` | 正在断开 | 已断开，已恢复直连 | 没断开，仍在连接 | `none` / `restored` |
-| 20 | `ProxyParams` | 正在读本机代理设置 | 本机代理 127.0.0.1:7890 | 读不到，不影响连接 | `none` |
-| 21 | `ProbeRun` | 正在检查连接质量 | 四项都通过 / 有 2 项没通过，已记录 | 检查没跑完，已记录 | `none` |
-| 22 | `IssueList` | 正在看问题记录 | 有 2 个还没解决的问题 | 记录读不到 | `none` |
-| 23 | `IssueGet` | 正在看这条问题 | 已拿到这条问题的信息 | 这条问题找不到 | `none` |
-| 24 | `IssueHandoff` | 正在接手这个问题 | 已接过来，我们继续 | 没接上，可以再试一次 | `none` |
-| 25 | `IssueResolve` | 正在复查 | 复查通过，已标记解决 | 复查没通过，先不标记 | `none` |
-| 26 | `IssueIgnore` | 正在忽略这条问题 | 已忽略，以后可以恢复 | 没改成功 | `none` |
-| 27 | `DiagRun` | 正在做诊断 | 诊断完成：3 项正常，1 项要处理 | 诊断没跑完 | `none` |
-| 28 | `DeepseekSetupKey` | 正在准备开通步骤 | 开通步骤已给出 | — | `none` |
-| 29 | `DeepseekSaveKey` | 正在保存密钥 | 密钥已保存（只在本机） | 没保存：密钥无效或写入失败 | `none` / `unknown` |
-| 30 | `JobGet` | 正在查任务进度 | 任务 60%（正在下载）/ 任务已完成 | 任务找不到 | `none` |
-| 31 | `AskUserQuestion` | 不显示工具行 | — | — | `none` |
-| 32 | `NetConfigGet` | 正在检查系统网络设置 | 设置正常 / 发现 2 处异常 | 读不到系统设置 | `none` |
-| 33 | `NetRepair` | 正在恢复网络 | 网络已恢复 | 没恢复，可以再试一次（+ 有没有改动） | `restored` / `unknown` |
-| 34 | `CatalogRefresh` | 正在更新默认节点包 | 已更新，新增 30 个节点 | 没更新成功，原来的还在 | `none` / `restored` |
-| 35 | `DefaultProfileStatus` | 正在看内置配置状态 | 内置配置是最新的 | 状态读不到 | `none` |
-| 36 | `RouteGet` | 正在看哪些软件走 VPN | 全部软件自动走 VPN / 部分网站直连 | 读不到 | `none` |
-| 37 | `RouteSetMode` | 正在切换走法 | 已切换：全部软件自动走 VPN（已生效） | 没切成，还是原来的走法 | `none` / `restored` |
-| 38 | `RouteTargetsSet` | 正在调整直连范围 | 已更新：3 个服务直连 | 没改成功 | `none` / `restored` |
-| 39 | `RuleCustomList` | 正在看自定义直连 | 有 3 条自定义直连 | 读不到 | `none` |
-| 40 | `RuleCustomAdd` | 正在添加一条直连 | 已添加：example.com 直连 | 没添上：已存在或格式不对 | `none` / `restored` |
-| 41 | `RuleCustomDelete` | 正在删除一条直连 | 已删除：example.com | 没删掉：这条不存在 | `none` / `restored` |
-| 42 | `CategoryList` | 正在看服务分类 | 拿到 18 个分类 | 分类读不到 | `none` |
-| 43 | `RulesStatus` | 正在检查直连数据 | 直连数据是 3 天前的，可以更新 | 状态读不到 | `none` |
-| 44 | `RulesUpdate` | 正在更新直连数据 | 已更新，下次连接生效 / 已排队，连接后自动更新 | 没更新成功，旧数据继续用 | `none` / `restored` |
-| 45 | `NodeImportText` | 正在导入节点 | 已导入 3 个节点（跳过 1 个） | 链接格式不对，一个都没导入 | `none` / `restored` |
-| 46 | `IssueReport` | 正在整理问题报告 | 问题报告已生成，放在桌面上 | 没写成，检查桌面权限 | `none` |
+| 20 | `DiagRun` | 正在做诊断 | 诊断完成：3 项正常，1 项要处理 | 诊断没跑完 | `none` |
+| 21 | `DeepseekSetupKey` | 正在准备开通步骤 | 开通步骤已给出 | — | `none` |
+| 22 | `DeepseekSaveKey` | 正在保存密钥 | 密钥已保存（只在本机） | 没保存：密钥无效或写入失败 | `none` / `unknown` |
+| 23 | `JobGet` | 正在查任务进度 | 任务 60%（正在下载）/ 任务已完成 | 任务找不到 | `none` |
+| 24 | `AskUserQuestion` | 不显示工具行 | — | — | `none` |
+| 25 | `NetConfigGet` | 正在检查系统网络设置 | 设置正常 / 发现 2 处异常 | 读不到系统设置 | `none` |
+| 26 | `NetRepair` | 正在恢复网络 | 网络已恢复 | 没恢复，可以再试一次（+ 有没有改动） | `restored` / `unknown` |
+| 27 | `CatalogRefresh` | 正在更新默认节点包 | 已更新，新增 30 个节点 | 没更新成功，原来的还在 | `none` / `restored` |
+| 28 | `DefaultProfileStatus` | 正在看内置配置状态 | 内置配置是最新的 | 状态读不到 | `none` |
+| 29 | `RouteGet` | 正在看哪些软件走 VPN | 全部软件自动走 VPN / 部分网站直连 | 读不到 | `none` |
+| 30 | `RouteSetMode` | 正在切换走法 | 已切换：全部软件自动走 VPN（已生效） | 没切成，还是原来的走法 | `none` / `restored` |
+| 31 | `RouteTargetsSet` | 正在调整直连范围 | 已更新：3 个服务直连 | 没改成功 | `none` / `restored` |
+| 32 | `CategoryList` | 正在看服务分类 | 拿到 18 个分类 | 分类读不到 | `none` |
+| 33 | `RulesStatus` | 正在检查直连数据 | 直连数据是 3 天前的，可以更新 | 状态读不到 | `none` |
+| 34 | `NodeImportText` | 正在导入节点 | 已导入 3 个节点（跳过 1 个） | 链接格式不对，一个都没导入 | `none` / `restored` |
+| 35 | `IssueReport` | 正在整理问题报告 | 问题报告已生成，放在桌面上 | 没写成，检查桌面权限 | `none` |
+| 36 | `MyServers` | 正在看服务器列表 | 已查看服务器列表 | 服务器列表读不到 | `none` |
+| 37 | `ConfigSetMode` | 正在切换接管方式 | 已切换接管方式 | 没能切换接管方式 | `none` / `restored` |
+| 38 | `OpenSettings` | 正在打开设置 | 已打开设置 | 没能打开设置 | `none` |
+| 39 | `MyServerFailure` | 正在看这次创建卡在哪 | 已查看创建失败详情 | 失败详情读不到 | `none` |
+| 40 | `StageSelect` | 正在选地区和规格 | 已选好地区和规格 | 没能选好地区和规格 | `none` |
+| 41 | `SetUserRegion` | 正在记下地区 | 地区已记下 | 没能记下地区 | `none` |
+| 42 | `CatalogOptions` | 正在读可选地区与规格 | 读到了可选地区与规格 | 可选地区读不到 | `none` |
 
 > `changed` 列给的是**失败路径的典型值**；同一工具可能因失败阶段不同取不同值（例如 `VpnConnect`
 > 在校验阶段失败是 `none`，改过系统设置后又撤回是 `restored`）。工具必须按实际执行到哪一步声明。
@@ -440,7 +436,7 @@ UI 卡片是最后一层。模型正文、`ai-status` 文案、工具 descriptio
 | 3 | `src-tauri/src/claurst_session/mod.rs` | `tool-call-end` 投影增 `display`（取值处已持有 `ToolOutcome`）；`ai-status` 的 running 文案改为映射表 |
 | 4 | `docs/contracts/events.md` §3.4 | `ToolCallEndPayload` 增 `display`，写明「缺失不报错」 |
 | 5 | `src/state/chatStore.ts` | `ToolCall` 增 `display?`；`toolCallEnd` 分支赋值；`status.text` 不再拼工具名 |
-| 6 | `src/components/toolDisplay.ts`（新） | 44 条静态表 + 兜底 + 导出名字集合用于断言 |
+| 6 | `src/components/toolDisplay.ts`（新） | 42 条静态表 + 兜底 + 导出名字集合用于断言 |
 | 7 | `src/components/ToolCallCard.tsx` | 重写为一行式；合并、用时阈值、展开详情、技术细节入口、失败三段式 |
 | 8 | `resources/prompts/zh/first-run.md` | 新增「怎么说话」一节（§8.2） |
 | 9 | `src-tauri/src/claurst_session/mod.rs` | `SAFETY_RULES` 追加第 8、9 条（§8.3） |
@@ -461,7 +457,7 @@ UI 卡片是最后一层。模型正文、`ai-status` 文案、工具 descriptio
 | # | 场景 | 期望 |
 |---|---|---|
 | 1 | 未映射的工具 | 显示「正在处理… / 已完成 / 没成功」，**不出现原始工具名** |
-| 2 | 集合断言 | 46 个工具名与 `TOOL_DISPLAY` 键集合双向相等 |
+| 2 | 集合断言 | 42 个工具名与 `TOOL_DISPLAY` 键集合双向相等 |
 | 3 | 连续 3 次成功 | 合并为「完成 3 步」，展开可见逐条 |
 | 4 | 连续 2 次成功 | 不合并 |
 | 5 | 中间夹一次失败 | 失败单独一行，前后成功段各自合并 |

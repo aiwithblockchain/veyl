@@ -3,6 +3,8 @@
 > 版本：`0.2.0`
 > 状态：**结构稿，待 PM 与产品负责人过措辞**（2026-11-04）。本文只定义提示词的组成、边界与同源机制，不写提示词全文。
 > 依据：`docs/user-flows.md` §1–§2、`docs/center-panel.md` §2.5/§3、`docs/capabilities.md`、`docs/config-execution.md`、`docs/issue-management.md`、`docs/contracts/tools.md` 3.2.0、`docs/upgrade.md` §3
+>
+> **2026-11-17 覆盖（`tools.md` 3.15.0 / 3.16.0）**：本文引用过的那批工具已从 AI 工具集移除，正文里的对应段落已一并清理。诊断改走 `DiagRun`，读本机代理改走 `NetConfigGet`，建机失败改走 `MyServerFailure`，规则数据随包预置。
 > 交付物：`resources/prompts/zh/system.md`（提示词正文）+ 构建期生成的 `capabilities.json` / `blocks.json`
 > 当前进度：**首次配置段已定稿**（v1.0.0），见 `resources/prompts/zh/first-run.md`；其余段落（回访、失败、分流追问）待写。
 
@@ -94,9 +96,9 @@ A2 断开连接 · 工具 RuntimeStop
 | 块 | 何时出现 | props | 数据从哪来 |
 |---|---|---|---|
 | `empty_hint` | 已配置、未连接、没别的话 | 无 | 纯文本 |
-| `proxy_card` | 三级、本机代理、已连接 | 无 | `ProxyParams` |
+| `proxy_card` | 三级、本机代理、已连接 | 无 | `NetConfigGet` |
 | `source_choice` | 没有任何节点 | 无 | 两个选项是固定的 |
-| `reachability` | 已连接 | `targets[]` | `CategoryList` + `ProbeRun` |
+| `action_card` | 需要用户在 1–3 个动作里挑一个 | 标题 / 说明 / 按钮文案 | AI 自己写；点击只上报 action id |
 | `update_hint` | 规则/种子有新版本 | 无 | `RulesStatus` / `DefaultProfileStatus` |
 
 规则：
@@ -138,11 +140,11 @@ A2 断开连接 · 工具 RuntimeStop
 
 | 写 | 不写 |
 |---|---|
-| 失败先看问题管理模块：`IssueList` / `IssueGet` 拿已登记的问题与证据 | 让模型自己猜原因（「可能是 DNS 问题」） |
-| 需要探测才调 `ProbeRun`；它会把失败登记成问题 | 让模型反复重连、换节点、换配置来「试试看」 |
-| 用户点「让 AI 定位」才 `IssueHandoff`，一次性投喂证据 | 主动把整包日志贴进对话 |
+| 失败先调 `DiagRun`，按清单逐项说 | 让模型自己猜原因（「可能是 DNS 问题」） |
+| 建机失败看 `MyServerFailure` 的结构化失败；没有日志就明说没有 | 声称读过日志、要求用户上传日志 |
+| 用户点「AI 定位」才去取证据，一次说完 | 主动把整包日志贴进对话 |
 | 权限类问题（`tun_denied` / `helper_missing`）只有「重试」一个动作 | 给出「切换模式」等第二条路 |
-| 修复后必须 `IssueResolve` 复测通过才算解决 | 模型说「修好了」就当解决 |
+| 修好由用户确认；模型不自己宣布「已解决」 | 模型说「修好了」就当解决 |
 
 **一条硬规则：连接失败不得静默换节点或换配置。** 必须如实说「这台没连上」，把选择权交回用户。
 
@@ -297,8 +299,8 @@ system.md 第 3 段 + 前端渲染器 + 本地规则
 
 - 每一步失败都要说清卡在哪一步；不让用户看到「配置失败」四个字。
 - **失败不自动重试、不自动换节点/换配置。** 需要重试由用户点，或按问题管理模块的建议给一个「重试」。
-- 探测结果（DNS / 出口 / 直连对比 / 目标可达）由 `ProbeRun` 返回，模型只翻译。
-- 一级/二级的首次配置完成后，中间出现 `empty_hint` 或 `reachability`；三级出现 `proxy_card`。
+- 诊断结果（DNS / 出口 / 直连对比）由 `DiagRun` 返回，模型只翻译；新设计不做逐目标可达性检查。
+- 一级/二级的首次配置完成后，中间出现 `empty_hint` 或 `action_card`；三级出现 `proxy_card`。
 
 ---
 
@@ -313,7 +315,7 @@ Host 在每次请求前拼一段结构化状态（不是让模型调工具去查
 | `configs` | 配置摘要列表、active、当前节点 | `ConfigList` / `ConfigDetail` |
 | `runtime` | 状态、模式、`applied_route_revision` | `RuntimeSnapshot` |
 | `routing` | 当前模式、目标分类、`route_revision` | `RouteGet` |
-| `issues` | P0/P1 摘要（最多 3 条）+ `blocking_issue_id` | `IssueList` |
+| `issues` | P0/P1 摘要（最多 3 条）+ `blocking_issue_id` | Host（无 AI 工具；故障只以 `issue_card` 叠加） |
 | `session` | 首次/回访、`intro_shown`、用户类型（若已判定） | Host |
 
 规则：

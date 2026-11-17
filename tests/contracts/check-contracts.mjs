@@ -1970,7 +1970,7 @@ check("OfflineReason 的取值与契约一致（实现）", () => {
 
 // --- 16：中间区布局：非法整份丢弃、可写块数量、配置详情带布局版本 ---
 
-check("布局非法块整份丢弃，AI 可写块为 6 个（契约）", () => {
+check("布局非法块整份丢弃，AI 可写块为 5 个（契约）", () => {
   const md = read("docs/contracts/events.md");
   const start = md.indexOf("### 4.13");
   const end = md.indexOf("### 4.14");
@@ -1983,9 +1983,8 @@ check("布局非法块整份丢弃，AI 可写块为 6 个（契约）", () => {
     "不逐块过滤",
     "同一条消息出现多份布局时只认最后一份",
     "请求被取消或出错时不写入",
-    "1–6 项",
-    "24 字符",
-    "`://`",
+    "1–32 字符",
+    "1–40 字符",
     "layout_revision",
     "请求开始时已有活动配置",
     "请求结束时",
@@ -2007,9 +2006,14 @@ check("布局非法块整份丢弃，AI 可写块为 6 个（契约）", () => {
     "语义校验只在写入时做",
     "不整份丢弃",
     "跳过不适用的块",
-    "只有 6 个",
+    "只有 5 个",
   ]) {
     if (!s.includes(phrase)) problems.push(`§4.13 缺少「${phrase}」`);
+  }
+
+  // reachability 已在 2.16.0 移除：既不能回到可写块清单，也不能借着字符串规则回来。
+  if (/`reachability`[^。\n]*`empty_hint`|可写块[^。\n]*`reachability`/.test(s)) {
+    problems.push("§4.13 的可写块清单又出现了 reachability（2.16.0 已移除）");
   }
 
   // 旧策略的话术不得残留：逐块过滤会让中间区出现模型没打算要的构成。
@@ -2026,7 +2030,6 @@ check("布局非法块整份丢弃，AI 可写块为 6 个（契约）", () => {
     "empty_hint",
     "proxy_card",
     "source_choice",
-    "reachability",
     "update_hint",
     "action_card",
   ]) {
@@ -2036,19 +2039,27 @@ check("布局非法块整份丢弃，AI 可写块为 6 个（契约）", () => {
     problems.push("§4.13 没有写清 issue_card 是叠加层、不写进布局");
   }
 
-  const declared = s.match(/块只有 6 个\*\*：([^。]+)/);
+  const declared = s.match(/块只有 5 个\*\*：([^。]+)/);
   if (!declared) {
-    problems.push("§4.13 没有写明可写块只有 6 个");
+    problems.push("§4.13 没有写明可写块只有 5 个");
   } else {
     const names = [...declared[1].matchAll(/`([a-z_]+)`/g)].map((m) => m[1]);
-    if (names.length !== 6) {
-      problems.push(`§4.13 列出的可写块应为 6 个，实际 ${names.length} 个：${names.join(", ")}`);
+    if (names.length !== 5) {
+      problems.push(`§4.13 列出的可写块应为 5 个，实际 ${names.length} 个：${names.join(", ")}`);
     }
+    const expectedBlocks = ["empty_hint", "proxy_card", "source_choice", "update_hint", "action_card"];
+    const missing = expectedBlocks.filter((n) => !names.includes(n));
+    const extra = names.filter((n) => !expectedBlocks.includes(n));
+    if (missing.length) problems.push(`§4.13 可写块清单缺少：${missing.join(", ")}`);
+    if (extra.length) problems.push(`§4.13 可写块清单多出：${extra.join(", ")}`);
   }
 
   const s122 = mdSection(read("docs/contracts/commands.md"), "### 12.2", "\n### ");
   if (!s122) problems.push("commands.md 找不到 §12.2 块表");
-  else if (!s122.includes("`action_card`")) problems.push("commands.md §12.2 块表缺少 action_card");
+  else {
+    if (!s122.includes("`action_card`")) problems.push("commands.md §12.2 块表缺少 action_card");
+    if (s122.includes("`reachability`")) problems.push("commands.md §12.2 块表仍有 reachability（2.16.0 已移除）");
+  }
 
   const fields = payloadFields("docs/contracts/events.md", "LayoutUpdatedPayload");
   if (!fields) problems.push("events.md 找不到 LayoutUpdatedPayload");
@@ -2072,7 +2083,7 @@ check("ConfigDetail 带 layout_revision（契约）", () => {
 });
 
 check(
-  "系统提示的块词汇表为 6 个、不含 issue_card（实现）",
+  "系统提示的块词汇表为 5 个、不含 issue_card（实现）",
   () => {
     const rs = read("src-tauri/src/claurst_session/mod.rs");
     const m = rs.match(/const BLOCK_CATALOG: &str = "\\\n([\s\S]*?)";/);
@@ -2081,17 +2092,206 @@ check(
     if (m[1].includes("`issue_card`")) {
       problems.push("BLOCK_CATALOG 仍包含 issue_card（叠加层不进布局，写进去故障卡会渲染两次）");
     }
+    if (m[1].includes("`reachability`")) {
+      problems.push("BLOCK_CATALOG 仍包含 reachability（2.16.0 已从布局词汇表移除）");
+    }
     const rows = [...m[1].matchAll(/^\|\s*`([a-z_]+)`\s*\|/gm)].map((x) => x[1]);
     const expected = [
       "empty_hint",
       "proxy_card",
       "source_choice",
-      "reachability",
       "update_hint",
       "action_card",
     ];
     if (rows.join(",") !== expected.join(",")) {
       problems.push(`BLOCK_CATALOG 应为 ${expected.join(" / ")}，实际是 ${rows.join(" / ")}`);
+    }
+    return problems;
+  },
+  { advisory: true },
+);
+
+// --- 16.1：stage-select 事件与 StageSelect 工具：契约三处 + 实现 ---
+
+check("stage-select 事件在事件总表与 §4.26 完整登记（契约）", () => {
+  const md = read("docs/contracts/events.md");
+  const problems = [];
+
+  const row = md.match(/^\|\s*32\s*\|\s*`stage-select`\s*\|([^\n]*)$/m);
+  if (!row) {
+    problems.push("events.md 事件总表没有 #32 stage-select");
+  } else if (!row[1].includes("StageSelectPayload")) {
+    problems.push("事件总表的 stage-select 没有绑定 StageSelectPayload");
+  }
+
+  const s = mdSection(md, "### 4.26", "\n### ");
+  if (!s) {
+    problems.push("events.md 找不到 §4.26 stage-select");
+    return problems;
+  }
+  for (const phrase of [
+    "`StageSelect`",
+    "`tools.md` §4.52",
+    "只改界面选择",
+    "不建机、不扣费",
+    "`screen` 目前只有 `new_node` 一个值",
+    "1.5 秒",
+  ]) {
+    if (!s.includes(phrase)) problems.push(`§4.26 缺少「${phrase}」`);
+  }
+
+  const block = tsTypeBlock("docs/contracts/events.md", "StageSelectPayload") ?? "";
+  if (!block) problems.push("events.md 找不到 StageSelectPayload");
+  else {
+    for (const f of ["screen", "region", "plan", "emitted_at"]) {
+      if (!new RegExp(`^\\s*${f}\\s*:`, "m").test(block)) problems.push(`StageSelectPayload 缺少 ${f}`);
+    }
+    if (!/screen\s*:\s*"new_node"/.test(block)) {
+      problems.push('StageSelectPayload.screen 必须写死 "new_node"');
+    }
+    for (const f of ["region", "plan"]) {
+      if (!new RegExp(`^\\s*${f}\\s*:\\s*string\\s*\\|\\s*null`, "m").test(block)) {
+        problems.push(`StageSelectPayload.${f} 必须是 string | null（没请求的字段为 null，不是清空）`);
+      }
+    }
+  }
+  if (!s.includes("不要把它们读成「清空」")) {
+    problems.push("§4.26 没有写明 null ≠ 清空");
+  }
+  return problems;
+});
+
+check("StageSelect 在工具总表、§3.1、§4.52 三处一致（契约）", () => {
+  const md = read("docs/contracts/tools.md");
+  const table = contractTools();
+  const problems = [];
+
+  const row = table.get("StageSelect");
+  if (!row) problems.push("tools.md §3 工具总表缺少 StageSelect");
+  else if (!row.includes("`Write`")) problems.push("StageSelect 的 PermissionLevel 不是 Write");
+
+  const regStart = md.indexOf("### 3.1 注册清单（照抄）");
+  const regEnd = md.indexOf("### 3.2", regStart);
+  const regBlock = regStart < 0 ? "" : md.slice(regStart, regEnd < 0 ? undefined : regEnd);
+  if (!/Box::new\(StageSelectTool::new\(server_catalog\.clone\(\)\)\)/.test(regBlock)) {
+    problems.push("tools.md §3.1 注册清单缺少 Box::new(StageSelectTool::new(server_catalog.clone()))");
+  }
+  if (!/Box::new\(CatalogOptionsTool::new\(server_catalog\.clone\(\)\)\)/.test(regBlock)) {
+    problems.push("tools.md §3.1 注册清单缺少 Box::new(CatalogOptionsTool::new(server_catalog.clone()))");
+  }
+  // 两个目录两个变量：`catalog` 是共享节点目录客户端，建机目录必须走 `server_catalog`。
+  if (!/let server_catalog = services\.server_catalog\(\);/.test(regBlock)) {
+    problems.push("tools.md §3.1 缺少 let server_catalog = services.server_catalog();（两条注册行引用的变量没有声明）");
+  }
+  if (/let\s+catalog\s*=/.test(regBlock)) {
+    problems.push("tools.md §3.1 出现了 let catalog =（建机目录必须叫 server_catalog，别和共享节点目录客户端同名）");
+  }
+
+  const declared = md.match(/§3 的 (\d+) 个工具名/);
+  if (!declared) problems.push('tools.md 没有写明「§3 的 N 个工具名」');
+  else if (Number(declared[1]) !== table.size) {
+    problems.push(`tools.md 写 §3 有 ${declared[1]} 个工具，实际表里有 ${table.size} 个`);
+  }
+
+  const s = mdSection(md, "### 4.52", "\n### ");
+  if (!s) problems.push("tools.md 找不到 §4.52 StageSelect");
+  else {
+    for (const phrase of [
+      "`region`",
+      "`plan`",
+      '"additionalProperties": false',
+      "只改界面选择",
+      "不写业务表、不建机、不扣费",
+      "`stage-select`",
+      "1.5 秒",
+    ]) {
+      if (!s.includes(phrase)) problems.push(`§4.52 缺少「${phrase}」`);
+    }
+    const block = tsTypeBlock("docs/contracts/tools.md", "StageSelectData") ?? "";
+    if (!/screen\s*:\s*"new_node"/.test(block)) {
+      problems.push('StageSelectData.screen 必须写死 "new_node"');
+    }
+    for (const f of ["region", "plan"]) {
+      if (!new RegExp(`^\\s*${f}\\s*:\\s*string\\s*\\|\\s*null`, "m").test(block)) {
+        problems.push(`StageSelectData.${f} 必须是 string | null`);
+      }
+    }
+    if (/\bchanged\s*:/.test(block)) {
+      problems.push("StageSelectData 不得包含 changed：Host 没有舞台镜像，算不出是否变化");
+    }
+
+    // 一轮一次的名额语义最容易回退：锁键、错误码与「先校验后占名额」。
+    for (const phrase of [
+      "already_called_this_turn",
+      "(工具名, session_id, current_turn)",
+      "先校验、后占名额",
+      "不占用本轮名额",
+      "舞台可见且不在创建中",
+      "成功不等于「一定高亮」",
+    ]) {
+      if (!s.includes(phrase)) problems.push(`§4.52 缺少「${phrase}」`);
+    }
+    if (s.includes("already_selected")) {
+      problems.push("§4.52 仍出现已废弃的 already_selected（应为 already_called_this_turn）");
+    }
+  }
+  return problems;
+});
+
+check("CatalogOptions 在 §4.53 完整登记且不泄露内部成本口径（契约）", () => {
+  const md = read("docs/contracts/tools.md");
+  const problems = [];
+
+  const s = mdSection(md, "### 4.53", "\n### ");
+  if (!s) return ["tools.md 找不到 §4.53 CatalogOptions"];
+
+  for (const phrase of [
+    "CatalogOptionsData",
+    "regions",
+    "plans",
+    "daily_price_cents",
+    "transfer_gib",
+    "hourly_usd",
+    "不做本地缓存",
+  ]) {
+    if (!s.includes(phrase)) problems.push(`§4.53 缺少「${phrase}」`);
+  }
+  if (!/内部成本口径[^。]*不返回|不返回[^。]*内部成本/.test(s)) {
+    problems.push("§4.53 没有写明 hourly_usd / monthly_usd 是内部成本口径、不返回");
+  }
+
+  const block = tsTypeBlock("docs/contracts/tools.md", "CatalogOptionsData") ?? "";
+  if (!block) problems.push("tools.md 找不到 CatalogOptionsData");
+  else {
+    for (const f of ["regions", "plans"]) {
+      if (!new RegExp(`^\\s*${f}\\s*:`, "m").test(block)) problems.push(`CatalogOptionsData 缺少 ${f}`);
+    }
+    for (const bad of ["hourly_usd", "monthly_usd"]) {
+      if (new RegExp(`\\b${bad}\\b`).test(block)) {
+        problems.push(`CatalogOptionsData 不得包含 ${bad}（内部成本口径不出现在返回结构里）`);
+      }
+    }
+  }
+  return problems;
+});
+
+check(
+  "stage-select 事件名与 StageSelect 工具已在实现侧落地（advisory）",
+  () => {
+    const problems = [];
+
+    const eventsRs = read("src-tauri/src/claurst_session/events.rs");
+    if (!/EV_STAGE_SELECT[\s\S]{0,40}"stage-select"/.test(eventsRs)) {
+      problems.push('src-tauri/src/claurst_session/events.rs 缺少 EV_STAGE_SELECT = "stage-select"');
+    }
+
+    if (!registeredToolTypes().has("StageSelect")) {
+      problems.push("src-tauri/src/tools/mod.rs 的 vpn_tools() 尚未注册 StageSelectTool");
+    }
+
+    const names = frontendToolDisplayNames();
+    if (names !== null && !names.has("StageSelect")) {
+      problems.push("src/components/toolDisplay.ts 的 TOOL_COPY 缺少 StageSelect");
     }
     return problems;
   },

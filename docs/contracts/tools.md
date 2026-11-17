@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.14.0`
+> 契约版本：`3.17.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.14.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.17.1`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.14.0";
+  contract_version: "3.17.1";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -123,7 +123,7 @@ type NextAction = {
 | `ConfigDelete` | 直接删除一套配置（含其节点关系与问题记录） | 无拦截点 |
 | `RouteSetMode` | 跨家族切换会断开并重连（需显式确认） | 会短暂断网 |
 
-**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigList`、`ConfigDetail`、`NodeProbe`、`ProxyParams`、`IssueList`、`IssueGet`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`RuleCustomList`、`CategoryList`、`RulesStatus`）在 `PermissionMode::Default` 下直接允许；其余工具由 Host 的 `PermissionHandler` 一律返回 `Allow`。
+**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigList`、`ConfigDetail`、`NodeProbe`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`CategoryList`、`RulesStatus`、`OpenSettings`、`MyServers`、`MyServerFailure`、`CatalogOptions`）在 `PermissionMode::Default` 下直接允许；其余工具由 Host 的 `PermissionHandler` 一律返回 `Allow`。
 
 不再存在的东西：
 
@@ -247,16 +247,16 @@ type CallSource = "ui" | "agent";
 
 ```ts
 // src/components/toolDisplay.ts（设计文档里也称 TOOL_DISPLAY）
-export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 51 个工具名完全相等
+export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 42 个工具名完全相等
 ```
 
-进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 51 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
+进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 42 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
 
 **提示词只降低出错概率，最终闸门在渲染层**：UI 永远不渲染工具名、JSON、错误码；不做输出正则改写（静默替换模型正文比漏一句更难排查）。
 
 边界与落点：
 
-- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「51 个名字必须都有」与「`AskUserQuestion` 不占行」。
+- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「42 个名字必须都有」与「`AskUserQuestion` 不占行」。
 - **running 状态文案**同样来自映射表（`events.md` §3.5）：不得拼工具名，未知工具固定「正在处理…」。
 - **工具 description**：通用表达约束放 `\n` 之后的末尾。`capability_catalog` 只取第一行进系统提示清单，所以第一行**不得**出现「对用户说…」这类句子，否则会污染每次请求的能力清单。
 - **「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归**：删任一条即红。
@@ -290,37 +290,28 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 18 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `ReadOnly` | 只读 |
 | 19 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 / TUN | `Execute` | 高 |
 | 20 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
-| 21 | `ProxyParams` | `ProxyParamsTool` | 本机代理地址与端口（A5） | `ReadOnly` | 只读 |
-| 22 | `ProbeRun` | `ProbeRunTool` | 连接后四项探测，失败登记问题 | `Write` | 低 |
-| 23 | `IssueList` | `IssueListTool` | 列出问题记录 | `ReadOnly` | 只读 |
-| 24 | `IssueGet` | `IssueGetTool` | 单条问题的诊断包 | `ReadOnly` | 只读 |
-| 25 | `IssueHandoff` | `IssueHandoffTool` | 把问题转交 AI 会话 | `Write` | 低 |
-| 26 | `IssueResolve` | `IssueResolveTool` | 复测通过后标记已解决 | `Write` | 低 |
-| 27 | `IssueIgnore` | `IssueIgnoreTool` | 忽略 / 恢复问题 | `Write` | 低 |
-| 28 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
-| 29 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
-| 30 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
-| 31 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
-| 32 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
-| 33 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口 | `ReadOnly` | 只读 |
-| 34 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
-| 35 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
-| 36 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
-| 37 | `RouteGet` | `RouteGetTool` | 分流模式、目标、自定义规则、生效状态 | `ReadOnly` | 只读 |
-| 38 | `RouteSetMode` | `RouteSetModeTool` | 切换分流模式（A↔B 热切） | `Execute` | 中 |
-| 39 | `RouteTargetsSet` | `RouteTargetsSetTool` | 设置「指定服务」分类集合 | `Write` | 中 |
-| 40 | `RuleCustomList` | `RuleCustomListTool` | 列自定义分流规则 | `ReadOnly` | 只读 |
-| 41 | `RuleCustomAdd` | `RuleCustomAddTool` | 追加一条自定义规则 | `Write` | 中 |
-| 42 | `RuleCustomDelete` | `RuleCustomDeleteTool` | 删除一条自定义规则 | `Write` | 中 |
-| 43 | `CategoryList` | `CategoryListTool` | 分类目录（I1） | `ReadOnly` | 只读 |
-| 44 | `RulesStatus` | `RulesStatusTool` | 规则数据版本与新鲜度 | `ReadOnly` | 只读 |
-| 45 | `RulesUpdate` | `RulesUpdateTool` | 更新规则数据（未连接时排队） | `Write` | 中 |
-| 46 | `IssueReport` | `IssueReportTool` | 生成问题报告文件夹（两阶段，仅写固定目录） | `Write` | 低（只写桌面报告目录） |
-| 47 | `SetUserRegion` | `SetUserRegionTool` | 记录用户所在地区（AI 唯一写入路径） | `Write` | 低（只写本地设置） |
-| 48 | `MyServers` | `MyServersTool` | 我的服务器列表与状态（只读） | `ReadOnly` | 只读 |
-| 49 | `ConfigSetMode` | `ConfigSetModeTool` | 在线切换接管方式（全部软件 ↔ 本机代理，**会断开重连**） | `Execute` | 高 |
-| 50 | `OpenSettings` | `OpenSettingsTool` | 打开设置并指向某段/某行（**不改值**） | `ReadOnly` | 只读 |
-| 51 | `MyServerFailure` | `MyServerFailureTool` | 某台服务器创建失败的详情与订单事件 | `ReadOnly` | 只读 |
+| 21 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
+| 22 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
+| 23 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
+| 24 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
+| 25 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
+| 26 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口 | `ReadOnly` | 只读 |
+| 27 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
+| 28 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
+| 29 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
+| 30 | `RouteGet` | `RouteGetTool` | 分流模式、目标、自定义规则、生效状态 | `ReadOnly` | 只读 |
+| 31 | `RouteSetMode` | `RouteSetModeTool` | 切换分流模式（A↔B 热切） | `Execute` | 中 |
+| 32 | `RouteTargetsSet` | `RouteTargetsSetTool` | 设置「指定服务」分类集合 | `Write` | 中 |
+| 33 | `CategoryList` | `CategoryListTool` | 分类目录（I1） | `ReadOnly` | 只读 |
+| 34 | `RulesStatus` | `RulesStatusTool` | 规则数据版本与新鲜度 | `ReadOnly` | 只读 |
+| 35 | `IssueReport` | `IssueReportTool` | 生成问题报告文件夹（两阶段，仅写固定目录） | `Write` | 低（只写桌面报告目录） |
+| 36 | `SetUserRegion` | `SetUserRegionTool` | 记录用户所在地区（AI 唯一写入路径） | `Write` | 低（只写本地设置） |
+| 37 | `MyServers` | `MyServersTool` | 我的服务器列表与状态（只读） | `ReadOnly` | 只读 |
+| 38 | `ConfigSetMode` | `ConfigSetModeTool` | 在线切换接管方式（全部软件 ↔ 本机代理，**会断开重连**） | `Execute` | 高 |
+| 39 | `OpenSettings` | `OpenSettingsTool` | 打开设置并指向某段/某行（**不改值**） | `ReadOnly` | 只读 |
+| 40 | `MyServerFailure` | `MyServerFailureTool` | 某台服务器创建失败的详情与订单事件 | `ReadOnly` | 只读 |
+| 41 | `StageSelect` | `StageSelectTool` | 把地区/规格选进新建节点舞台（**只改界面选择**） | `Write` | 低（不建机、不扣费） |
+| 42 | `CatalogOptions` | `CatalogOptionsTool` | 建机目录：地区与套餐的 id / 名称 / 日价（只读） | `ReadOnly` | 只读 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
@@ -331,6 +322,8 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 ### 3.1 注册清单（照抄）
 
 ```rust
+// server_catalog 是「建机目录」（地区 + 套餐）；与上面的 catalog（共享节点目录客户端）不是一个东西。
+let server_catalog = services.server_catalog();
 let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(RuntimeStatusTool::new(rt.clone())),
     Box::new(RuntimeStartTool::new(rt.clone(), proxy.clone())),
@@ -353,14 +346,6 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(NodeProbeTool::new(rt.clone(), store.clone())),
     Box::new(VpnConnectTool::new(rt.clone(), store.clone(), proxy.clone())),
     Box::new(VpnDisconnectTool::new(rt.clone(), proxy.clone())),
-    Box::new(ProxyParamsTool::new(rt.clone(), store.clone())),
-    Box::new(ProbeRunTool::new(rt.clone(), store.clone())),
-    // 2.0：问题管理
-    Box::new(IssueListTool::new(store.clone())),
-    Box::new(IssueGetTool::new(store.clone())),
-    Box::new(IssueHandoffTool::new(store.clone(), agent.clone())),
-    Box::new(IssueResolveTool::new(store.clone(), rt.clone())),
-    Box::new(IssueIgnoreTool::new(store.clone())),
     // 诊断与其它
     Box::new(DiagRunTool::new(rt.clone(), proxy.clone(), store.clone())),
     Box::new(IssueReportTool::new(rt.clone(), store.clone(), reports.clone())),
@@ -376,12 +361,8 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(RouteGetTool::new(store.clone(), rt.clone())),
     Box::new(RouteSetModeTool::new(store.clone(), rt.clone())),
     Box::new(RouteTargetsSetTool::new(store.clone())),
-    Box::new(RuleCustomListTool::new(store.clone())),
-    Box::new(RuleCustomAddTool::new(store.clone())),
-    Box::new(RuleCustomDeleteTool::new(store.clone())),
     Box::new(CategoryListTool::new(rules.clone())),
     Box::new(RulesStatusTool::new(rules.clone())),
-    Box::new(RulesUpdateTool::new(rules.clone(), rt.clone())),
     // 地区
     Box::new(SetUserRegionTool::new(store.clone())),
     // 我的服务器（只读）
@@ -391,7 +372,14 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(ConfigSetModeTool::new(store.clone(), rt.clone())),
     // 设置指路（只读）
     Box::new(OpenSettingsTool::new()),
+    Box::new(StageSelectTool::new(server_catalog.clone())),
+    Box::new(CatalogOptionsTool::new(server_catalog.clone())),
 ];
+```
+
+> **两个目录，两个变量，别复用。** `catalog`（`CatalogSearchTool` 用）是**共享节点目录客户端** `crate::catalog::CatalogClient`；`server_catalog` 才是建机目录（地区 + 套餐）。把后者写成 `catalog` 会把节点列表工具换成错的目录源。
+>
+> `server_catalog` 与 `my_server_catalog`（`commands.md` §7.14）是**同一个取数入口**：`VpnToolServices::server_catalog()` → `control_plane::catalog::fetch_catalog`，`StageSelect` 的校验与 `CatalogOptions` 的读取都走它，不各自拼 URL。**不做本地缓存**（§7.14 明确「不做本地缓存、不返回假数据」）——Worker 侧已有 5 分钟服务端缓存，Host 每次现取，代价只是几十条 JSON；陈旧目录会让用户看到已下架的地区或旧价格，比多打一次请求更糟。目录只在 `commands.rs:285` 现取的写法**作废**：命令层与工具层都调 `VpnToolServices` 这一个方法。
 ```
 
 ### 3.2 `VpnConnect` 没有确认点
@@ -877,7 +865,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.14.0";
+  contract_version: "3.17.1";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1040,7 +1028,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.14.0";
+  contract_version: "3.17.1";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1339,7 +1327,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
   用户做出任何其它回答即离开解释状态。
 - 未连接时新建的配置会自动成为 active；已连接时不自动切换（与 `commands.md` §3.2 一致）。
 
-`next_actions`：创建成功后给出 `VpnConnect`（一级/二级）或 `ProxyParams`（三级）。
+`next_actions`：创建成功后给出 `VpnConnect`（一级/二级）或 `NetConfigGet`（三级，读本机代理端口）。
 
 错误：`INVALID_ARGUMENT`（`source_required` / `routing_mode_not_supported` / `invalid_routing_mode`）、`CONFLICT`（`duplicate_name`）、`NOT_FOUND`、`PRECONDITION_FAILED`（`seed_unavailable` / `explanation_pending`）、`UNSUPPORTED`。
 
@@ -1465,161 +1453,45 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 
 ---
 
-### 4.29 `ProxyParams`（A5）
+### 4.29 `ProxyParams`（已移除，3.15.0）
 
-```json
-{ "type": "object", "properties": {}, "additionalProperties": false }
-```
-
-`data`：`ProxyParams`（`commands.md` §4.5）。
-
-- 三级用户问「填什么地址」时用它；`host` 恒为 `127.0.0.1`，`protocols` 恒为 HTTP + SOCKS5 同端口。
-- `port_source = "runtime"` 时是实际监听端口；`configured` 时是用户设置值（`proxy_port_get`）；`pending` 已废弃，不要编一个端口给用户。
-- `reason = "tun_mode"` 时说明当前配置不需要代理地址，不要引导用户去填。
-
-权限：`ReadOnly`。
+> **3.15.0 从 AI 工具集移除**：本机代理地址与端口只在「设置 → 连接」出现；AI 需要读本机代理 / 监听端口时用 `NetConfigGet`。命令 `proxy_params` 保留给界面（`commands.md` §4.5）。
 
 ---
 
-### 4.30 `ProbeRun`
+### 4.30 `ProbeRun`（已移除，3.15.0）
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "config_id": { "type": "string" },
-    "targets": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "label": { "type": "string" },
-          "url": { "type": "string" }
-        },
-        "required": ["label", "url"],
-        "additionalProperties": false
-      }
-    }
-  },
-  "additionalProperties": false
-}
-```
-
-`data`：`ProbeReport`（`commands.md` §5.1）。
-
-- 固定顺序：DNS → 出口 IP → 出口与直连不同 → 各 target 可达。
-- `targets` 的服务名到 URL 的翻译由模型用分类目录（I1）完成，Host 不猜。
-- 失败会登记/合并问题；`issue_ids` 给出对应记录，模型可以用 `IssueGet` 取证据。
-- 未连接 → `PRECONDITION_FAILED / not_running`。这不是诊断工具，是连接后的验证。
+> **3.15.0 从 AI 工具集移除**：连接后的四项探测由运行时内部完成，失败项由 `DiagRun` 读出并渲染成卡片；不再让模型主动发起探测。命令 `probe_run` 保留（`commands.md` §5.1）。
 
 ---
 
-### 4.31 `IssueList`（J2）
+### 4.31 `IssueList`（已移除，3.15.0）
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "state": { "type": "string", "enum": ["open", "handed_off", "resolved", "ignored"] },
-    "severity": { "type": "string", "enum": ["P0", "P1", "P2"] },
-    "config_id": { "type": "string" },
-    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
-    "offset": { "type": "integer", "minimum": 0, "default": 0 }
-  },
-  "additionalProperties": false
-}
-```
-
-`data`：`{ issues: IssueSummary[], total }`。
-
-- 排序 `severity ASC`（P0 在前）→ `last_seen` 降序。
-- 不返回证据；要证据用 `IssueGet`。
-- 问题列表的展示**不依赖 AI**，模型只是读取者。
-
-权限：`ReadOnly`。
+> **3.15.0 从 AI 工具集移除**：新设计没有 issue 列表界面：故障只以 `issue_card` 叠加显示，诊断走 `DiagRun`。命令 `issue_list` 保留但不再有 AI 入口。
 
 ---
 
-### 4.32 `IssueGet`（J2）
+### 4.32 `IssueGet`（已移除，3.15.0）
 
-```json
-{
-  "type": "object",
-  "properties": { "issue_id": { "type": "string" } },
-  "required": ["issue_id"],
-  "additionalProperties": false
-}
-```
-
-`data`：`IssueDetail`（`commands.md` §6.0），含脱敏后的 `evidence` 与 `actions`。
-
-- 不存在 → `NOT_FOUND`。
-- `evidence` 是采集时保存的，不是现在现采——它反映问题发生时的状态。
-
-权限：`ReadOnly`。
+> **3.15.0 从 AI 工具集移除**：同上：没有 issue 详情页，证据不单独开工具。命令 `issue_get` 保留。
 
 ---
 
-### 4.33 `IssueHandoff`（J3）
+### 4.33 `IssueHandoff`（已移除，3.15.0）
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "issue_id": { "type": "string" },
-    "session_id": { "type": "string" }
-  },
-  "required": ["issue_id"],
-  "additionalProperties": false
-}
-```
-
-`data`：`IssueHandoffData`（`commands.md` §6.3）。
-
-- 一次性投喂诊断包，不做多轮追问。
-- 没有可用 provider → `PRECONDITION_FAILED / no_provider`。
-- 已有转交会话时复用；`session_id` 可显式指定。
-- **投喂的不是凭据**：内容与 `IssueGet.evidence` 完全一致。
+> **3.15.0 从 AI 工具集移除**：「让 AI 定位」改为把结构化失败（`MyServerFailure`）或诊断结果（`DiagRun`）直接给模型，不再有「把问题转交会话」这一步。命令 `issue_handoff` 保留但不再有 AI 入口。
 
 ---
 
-### 4.34 `IssueResolve`（J4）
+### 4.34 `IssueResolve`（已移除，3.15.0）
 
-```json
-{
-  "type": "object",
-  "properties": { "issue_id": { "type": "string" } },
-  "required": ["issue_id"],
-  "additionalProperties": false
-}
-```
-
-`data`：`IssueResolveData`（`commands.md` §6.4）。
-
-- **模型说「修好了」不算数**：Host 自己复测，通过才 `resolved`。
-- 复测失败返回 `ok: true` + `verified: false`，不是错误。
-- 不可复测的权限类问题只校验前置条件。
+> **3.15.0 从 AI 工具集移除**：没有 issue 界面后就没有「标记已解决」这个用户动作。命令 `issue_resolve` 保留。
 
 ---
 
-### 4.35 `IssueIgnore`（J4）
+### 4.35 `IssueIgnore`（已移除，3.15.0）
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "issue_id": { "type": "string" },
-    "ignored": { "type": "boolean", "default": true }
-  },
-  "required": ["issue_id"],
-  "additionalProperties": false
-}
-```
-
-`data`：`IssueIgnoreData`（`commands.md` §6.5）。
-
-- `ignored = false` 表示恢复为 `open`，不是删除。
-- 幂等。
+> **3.15.0 从 AI 工具集移除**：同上，没有忽略 / 恢复问题的入口。命令 `issue_ignore` 保留。
 
 ---
 
@@ -1691,55 +1563,21 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 
 ---
 
-### 4.39 `RuleCustomList`（G4）
+### 4.39 `RuleCustomList`（已移除，3.15.0）
 
-```json
-{ "type": "object", "properties": { "config_id": { "type": "string" } }, "required": ["config_id"], "additionalProperties": false }
-```
-
-`data`：`{ rules: CustomRule[] }`（`commands.md` §10.0）。
-
-权限：`ReadOnly`。
+> **3.15.0 从 AI 工具集移除**：新设计只有「智能 / 全局」两档流量范围，没有自定义直连规则。命令 `rule_custom_list` 保留但不再有 AI 入口。
 
 ---
 
-### 4.40 `RuleCustomAdd`（G4）
+### 4.40 `RuleCustomAdd`（已移除，3.15.0）
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "config_id": { "type": "string" },
-    "action": { "type": "string", "enum": ["proxy", "direct"] },
-    "match_type": { "type": "string", "enum": ["domain", "domain_suffix", "domain_keyword", "ip_cidr", "category"] },
-    "value": { "type": "string" },
-    "note": { "type": "string" }
-  },
-  "required": ["config_id", "action", "match_type", "value"],
-  "additionalProperties": false
-}
-```
-
-`data`：`CustomRule`。
-
-- 用户说「让某个站直连 / 走 VPN」时用它；**域名可能被用户写错，先复述再写**。
-- `match_type = "category"` 时 `value` 是分类 id，仍然先 `CategoryList` 解析。
-- 写入后 `effective = "next_connection"`；已连接时告诉用户「下次连接生效」。
+> **3.15.0 从 AI 工具集移除**：同上，没有自定义规则的添加入口。命令 `rule_custom_add` 保留。
 
 ---
 
-### 4.41 `RuleCustomDelete`（G4）
+### 4.41 `RuleCustomDelete`（已移除，3.15.0）
 
-```json
-{
-  "type": "object",
-  "properties": { "config_id": { "type": "string" }, "rule_id": { "type": "string" } },
-  "required": ["config_id", "rule_id"],
-  "additionalProperties": false
-}
-```
-
-`data`：`{ rule_id, deleted, already_absent }`。幂等。
+> **3.15.0 从 AI 工具集移除**：同上，没有自定义规则的删除入口。命令 `rule_custom_delete` 保留。
 
 ---
 
@@ -1779,17 +1617,9 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 
 ---
 
-### 4.44 `RulesUpdate`
+### 4.44 `RulesUpdate`（已移除，3.15.0）
 
-```json
-{ "type": "object", "properties": {}, "additionalProperties": false }
-```
-
-`data`：`{ queued: boolean, job_id: string | null }`。
-
-- **先尝试直连**（每次重新解析 DNS）：直连成功 → 异步，返回 `job_id`；直连失败且已连接 → job 内改走代理重试；直连失败且未连接 → 排队，`queued: true`。
-- 未连接且直连失败时，**不要告诉用户「更新失败」**，说「连上之后会自动更新」——直连时通时不通，排队不是错误。
-- 已有任务 → `CONFLICT`，不要重复调用。
+> **3.15.0 从 AI 工具集移除**：规则数据随包预置，设置里没有「更新规则数据」入口；数据更新由运行时与随包资源负责，不交给模型。命令 `rules_update` 保留。
 
 ---
 
@@ -2127,6 +1957,84 @@ type MyServerFailureData = {
 
 ---
 
+### 4.52 `StageSelect`（新建节点舞台选择，3.17.0 修订）
+
+把地区 / 规格选进「新建节点」舞台。这是**唯一**一个「AI 写界面状态」的工具，只改选择，不建机。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "region": { "type": "string", "minLength": 1, "maxLength": 40 },
+    "plan": { "type": "string", "minLength": 1, "maxLength": 40 }
+  },
+  "anyOf": [{ "required": ["region"] }, { "required": ["plan"] }],
+  "additionalProperties": false
+}
+```
+
+```ts
+type StageSelectData = {
+  screen: "new_node";
+  region: string | null;   // 本次请求给了才回，否则 null
+  plan: string | null;     // 同上
+};
+```
+
+- `PermissionLevel::Write`；**只改界面选择**：不写业务表、不建机、不扣费、不调用任何命令。
+  **注意**：参数会落进 `tool_calls.args_json`（`001_init.sql:241`），这是审计记录，不是业务状态——不要说「什么都不落库」。
+- **Host 没有舞台当前选择的镜像**：选择只存在于界面，`context.last_action.value` 只在用户当轮点过才有、请求结束即丢。所以：
+  - 工具**只处理请求里出现的字段**，没出现的字段不读、不回；`data` 里对应位置是 `null`；
+  - **没有 `changed` 字段**——Host 算不出来。是否变化由 UI 合并时自己判断，只用于决定是否高亮。
+- **触发约束（两层）**：
+  - **Host 强制**：同一会话同一轮最多成功一次，按 **`(工具名, session_id, current_turn)`** 去重；第二次 → `PRECONDITION_FAILED / already_called_this_turn`。
+    - **键里必须带工具名**：`OpenSettings` 的 `claim_turn`（`settings.rs:101-108`）用的是 `(session_id, turn)`，且集合是 `settings.rs` 内部的私有静态量。直接共用会让「一轮内先 `OpenSettings` 再 `StageSelect`」互相顶掉。实现应把它提取成 Host 公共的一轮一次闸门（存放在 `tools` 模块，key 含工具名），两个工具各自调用；**不要**让 `StageSelect` 去借用 `settings.rs` 的那个集合。
+    - **先校验、后占名额**：目录校验不通过（`unknown_region` / `unknown_plan`）**不占用本轮名额**，模型可以用正确 id 在同一轮重试。反之若先 claim 再校验，模型把「东京」当 id 试错一次就再也改不了。
+  - **仅 advisory（模型自守，Host 不校验）**：用户没有表达选择意图时不得预选；只在用户说「帮我选 / 换成东京 / 用标准档」，或点了 `action_card` 对应按钮之后调用。Host 无从判断「意图」，不要假装它在强制。
+- **校验在 Host（唯一可信处）**：请求里出现的 `region` / `plan` 必须在目录里；目录没有「可用」字段，**不在目录即拒绝**，不要写「地区不可用」。
+  - 未知值 → `INVALID_ARGUMENT / unknown_region` / `unknown_plan`，整次拒绝、不发事件；
+  - 目录取不到 → **与 `CatalogOptions` 用同一组码**（`commands.md` §7.14：`TIMEOUT`、`UPSTREAM_ERROR / network|upstream_status|invalid_response`、`RATE_LIMITED`），不新造 `catalog_unavailable`。
+- **调之前先拿 id**：必须先调 `CatalogOptions`（§4.53）拿到真实 id，禁止凭印象拼。模型嘴上说「东京」不算数，`region` 必须是目录里的 id。
+- 成功后 Host 发 `stage-select`（`events.md` §4.26），`region` / `plan` 里未请求的字段为 `null`。**舞台可见且不在创建中时**，UI 按字段合并、缺省保持当前值，合并后高亮 1.5 秒——**成功不等于「一定高亮」**：Host 没有屏幕状态，事件完全可能在用户停在连接屏时到达并被 UI 丢掉，这是正常结果，不是失败。
+- **舞台没打开 / 正在创建**：UI 忽略事件，不排队重放，对话里仍留工具卡——与 `settings-point`（`events.md` §4.25）同一口径。此时 `display` 不承诺「屏幕上已经变了」。
+- **越权边界**：schema 里没有 `screen`、没有 config、没有命令字段——它只能改「新建节点」这一处选择。设置、接管方式、连接、服务器、布局都碰不到。要扩到别的舞台必须升版本并单独评审。
+- **并发**：用户在事件到达前手动改了同一个字段 → 事件覆盖（用户让 AI 选，就不该再弹确认）；只改另一个字段时两边互不影响（UI 按字段合并）。
+- **`display`**：成功「已把「东京」发给新建节点舞台」+ `facts` 放本次请求的字段；只给一个字段时只说那一个。**不要写「点「创建」就开」**——舞台可能没打开（上一行已说明），点了没得点；创建永远是用户自己的动作，工具不替它招手。
+
+---
+
+### 4.53 `CatalogOptions`（可选地区与规格，3.17.0 新增）
+
+只读的建机目录：给模型真实 id，让它能把 `StageSelect` 说对。
+
+```json
+{ "type": "object", "properties": {}, "additionalProperties": false }
+```
+
+```ts
+type CatalogOptionsData = {
+  regions: Array<{ id: string; name: string; continent: string }>;   // 目录里的全部地区
+  plans: Array<{ id: string; label: string; daily_price_cents: number; transfer_gib: number }>;
+};
+```
+
+- `PermissionLevel::ReadOnly`；8s 超时；与 `my_server_catalog`（`commands.md` §7.14）**共用同一个取数入口**（`VpnToolServices::server_catalog()`），**不做本地缓存**——每次现取，Worker 侧已有 5 分钟缓存兜住重复请求。
+- **失败码与 §7.14 同一组，不许自编**：
+  - 网络失败 → `UPSTREAM_ERROR`（`details.reason = "network"`，`retryable = true`）
+  - 超时 → `TIMEOUT`（`reason = "timeout"`，`retryable = true`）
+  - 5xx → `UPSTREAM_ERROR`（`reason = "upstream_status"`，`retryable = true`）
+  - 429 → `RATE_LIMITED`（`reason = "rate_limited"`，`retryable = true`）
+  - 其余非 2xx → `UPSTREAM_ERROR`（`reason = "upstream_status"`，`retryable = false`）
+  - 响应缺字段 / 非法值 → `UPSTREAM_ERROR`（`reason = "invalid_response"`，`retryable = false`）
+  
+  失败时**不要**给出地区名或价格——没读到就是没读到，不许拿印象补一份。
+- **只回 id、名称、大洲与套餐的展示字段**：`hourly_usd` / `monthly_usd` 是内部成本口径，不返回；IP、端口、凭据永不出现在这里。
+- 目录里没有「可用 / 售罄」字段：返回的就是全部可选项，别自己判断可用性。
+- 触发：用户问「有哪些地区 / 多少钱」，或准备调 `StageSelect` 之前。不做「一轮最多一次」限制（只读）。
+- `display`：成功「读到了可选地区与规格」+ `facts` 放地区数 / 套餐数；失败「没读到可选地区，稍后再试」。
+
+---
+
 ## 5. 工具间协作约定
 
 ### 5.1 标准连接链路
@@ -2144,7 +2052,7 @@ type MyServerFailureData = {
 
 | 工具 | 重复调用行为 |
 |---|---|
-| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ConfigList` / `ConfigDetail` / `NodeProbe` / `ProxyParams` / `IssueList` / `IssueGet` / `JobGet` | 纯读取，天然幂等 |
+| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ConfigList` / `ConfigDetail` / `NodeProbe` / `JobGet` / `OpenSettings` / `MyServers` / `MyServerFailure` | 纯读取，天然幂等 |
 | `RuntimeStart` | 已 `running` 且目标一致 → `ok: true`，`already_running: true` |
 | `RuntimeStop` / `VpnDisconnect` | 已 `idle` → `ok: true` |
 | `ConfigCreate` | **不幂等**：同名 → `CONFLICT / duplicate_name` |
@@ -2153,16 +2061,11 @@ type MyServerFailureData = {
 | `RouteSetMode` | 目标模式与当前一致 → `ok: true`，不发事件 |
 | `SetUserRegion` | 地区与当前 `user_region` 一致 → `ok: true`，不发事件 |
 | `RouteTargetsSet` | 集合与现状一致 → `ok: true`，`route_revision` 不变 |
-| `RuleCustomAdd` | 同一 `(action, match_type, value)` 已存在 → `CONFLICT / duplicate_rule` |
-| `RuleCustomDelete` | 已不存在 → `ok: true`，`deleted: false`，`already_absent: true` |
-| `RulesUpdate` | 已有任务 → `CONFLICT`，`details.job_id` |
 | `NodeImportUrl` / `NodeCreate` | 同 `(source, source_key)` → 不新建，计入 `skipped`（`duplicate`）；`data` 仍返回已有节点 |
 | `NodeSwitch` | 目标就是当前节点 → `ok: true`，不发事件 |
 | `CoreUpgrade` | 同目标版本已有任务 → `BUSY`，`details.job_id`；无新版本 → 成功且 `changed: false`，不建任务 |
 | `VpnConnect` | 已连同一配置同一节点 → `ok: true`，不重复设置代理 |
-| `ProbeRun` | 每次都是真实探测，不缓存；会刷新 `last_seen` |
-| `IssueHandoff` | 重复转交 → 复用会话，`last_handoff_at` 刷新，计数不变 |
-| `IssueResolve` / `IssueIgnore` | 状态已是目标值 → `ok: true`，不发事件 |
+| `StageSelect` | 同一会话同一轮第二次 → `PRECONDITION_FAILED / already_called_this_turn`（键含工具名，且校验失败不占名额）；同值与否由界面判断，Host 不比较 |
 
 ### 5.3 超时预算
 
@@ -2171,13 +2074,12 @@ type MyServerFailureData = {
 | 只读工具 | 3s |
 | `NodeProbe` | 5s（TCP 3s + 余量） |
 | `NodeImportUrl` | 15s（抓取 10s + 解析） |
+| `CatalogOptions` | 8s（走缓存，必要时取一次目录） |
 | `RuntimeStart` | 15s（含 10s 启动） |
 | `VpnConnect` | 30s |
-| `ProbeRun` | 30s（四项顺序执行） |
-| `RouteGet` / `RuleCustomList` / `CategoryList` / `RulesStatus` | 3s（本地读） |
+| `RouteGet` / `CategoryList` / `RulesStatus` | 3s（本地读） |
 | `RouteSetMode` | 15s（热切 5s；跨家族含断开重连） |
-| `RouteTargetsSet` / `RuleCustomAdd` / `RuleCustomDelete` | 3s |
-| `RulesUpdate` | 立即返回 `job_id` 或 `queued` |
+| `RouteTargetsSet` | 3s |
 | `RuntimeStop` / `VpnDisconnect` | 10s |
 | `CoreUpgrade` | 网络检查 + 返回 `job_id`，≤10s |
 
@@ -2227,6 +2129,47 @@ type MyServerFailureData = {
 ---
 
 ## 8. 变更记录
+
+### 3.17.1（2026-11-17，目录来源与名额口径收口）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.17.1`；§3.1 注册清单的目录变量改名 `server_catalog`，与共享节点目录的 `catalog`（`CatalogClient`）区分；删除「5 分钟 TTL 本地缓存实例」的说法，改为与 `my_server_catalog` 共用取数入口、不做本地缓存（与 `commands.md` §7.14 一致） | 约束修正 | 复审 P1 |
+| 2 | §4.52 一轮一次的名额：键改为 `(工具名, session_id, current_turn)`，不得直接复用 `settings.rs` 里只带 session+turn 的集合；错误码 `already_selected` → `already_called_this_turn`；**先校验、后占名额**，校验失败不占名额 | 语义修正 | 复审 P2 |
+| 3 | §4.53 补失败语义：与 `commands.md` §7.14 同一组码，不新造 `catalog_unavailable`；失败时不得凭印象补地区或价格 | 语义补全 | 复审 P2 |
+| 4 | §4.52 `display` 去掉「点「创建」就开」 | 措辞修正 | 复审 P2 |
+| 5 | §4.52 高亮改为条件行为：只有**舞台可见且不在创建中**时才合并并高亮 1.5 秒；成功不等于一定高亮（Host 没有屏幕状态，事件可能在用户停在连接屏时到达并被忽略），与 `events.md` §4.26（2.16.2）同一口径 | 语义澄清 | 复审 |
+
+### 3.17.0（2026-11-17，让模型能说对地区与套餐）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 新增 §4.53 `CatalogOptions`（`ReadOnly`）：只回地区与套餐的 id / 名称 / 日价，与 `my_server_catalog` 共用目录来源；总数 41 → **42** | 新增工具 | 评审 P1-2：模型不知道目录里有哪些 id |
+| 2 | §4.52 `StageSelect` 修订：输入与返回改为部分字段（未请求的为 `null`），**删除 `changed`**——Host 没有舞台当前选择的镜像，算不出来 | 语义修正 | 评审 P1-1 |
+| 3 | 注册行写死依赖：`StageSelectTool::new(...)` / `CatalogOptionsTool::new(...)`，目录由 `VpnToolServices` 提供 | 约束 | 评审 P1-3 |
+| 4 | 「一轮最多一次」改为 Host 强制，第二次 → `PRECONDITION_FAILED`（码名与名额口径在 3.17.1 修正）；「用户没表达意图不得预选」明确为 advisory，Host 不校验 | 约束澄清 | 评审附带项 |
+| 5 | 目录没有「可用」字段：改写为「不在目录即拒绝」；「不落库」改写为「不写业务表」，参数会进 `tool_calls.args_json` | 措辞修正 | 同上 |
+
+### 3.16.0（2026-11-17，AI 替用户选好地区与规格）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.16.0`；新增 §4.52 `StageSelect`（`Write`、低风险）：把地区 / 规格选进新建节点舞台，只改界面选择，不建机、不扣费、不落库 | 新增工具 | 设计文档要求「让 AI 帮我选」 |
+| 2 | 校验在 Host：地区与套餐必须来自 `my_server_catalog` 且可用；未知值整次拒绝、一个字段都不改；同值幂等、不发事件 | 约束 | 模型不能凭空指定地区 |
+| 3 | 越权边界：schema 没有 `screen` / config / 命令字段，只能改「新建节点」这一处选择；扩别的舞台要升版本单独评审 | 约束 | 唯一一条 AI→UI 写通道 |
+| 4 | 成功后发 `stage-select`（`events.md` §4.26）；工具总数 40 → **41**，`TOOL_COPY` 同步 | 元数据 | 同批 |
+
+### 3.15.0（2026-11-17，裁掉 11 个从未实现的工具）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.15.0`；工具总数 51 → **40**，`TOOL_COPY` 集合同步 | 元数据 | 设计对齐审计 |
+| 2 | 移除 `ProxyParams`：代理地址只在设置里出现，AI 读本机代理用 `NetConfigGet` | 删除工具 | 新 IA 无第二处地址 |
+| 3 | 移除 `ProbeRun`：连接后探测由运行时内部完成，失败项由 `DiagRun` 读出 | 删除工具 | 不让模型主动发起探测 |
+| 4 | 移除 `IssueList` / `IssueGet` / `IssueHandoff` / `IssueResolve` / `IssueIgnore`：新设计没有 issue 列表界面，故障只以 `issue_card` 叠加，诊断走 `DiagRun` | 删除工具 | 无界面承载 |
+| 5 | 移除 `RuleCustomList` / `RuleCustomAdd` / `RuleCustomDelete`：新设计只有「智能 / 全局」两档，没有自定义直连规则 | 删除工具 | 无界面承载 |
+| 6 | 移除 `RulesUpdate`：规则数据随包预置，设置里没有更新入口，更新不交给模型 | 删除工具 | 离线预置 |
+| 7 | 11 个命令全部保留（`proxy_params` / `probe_run` / `issue_*` / `rule_custom_*` / `rules_update`），只是不再有 AI 入口 | 说明 | 与 `commands.md` 不冲突 |
 
 ### 3.14.0（2026-11-16，设置指路与创建失败详情）
 
@@ -2420,7 +2363,7 @@ type MyServerFailureData = {
 | 9 | 工具总数 22 → 35 | 计数 | — |
 | 10 | 注册清单同步更新；破坏性工具改为 `CoreInstall` / `ConfigDelete` / `VpnConnect` / `NetRepair` | 清单 | §3.1 |
 
-> 只读工具的判定以 §2.1 的列表为准；`NodeProbe` 与 `ProxyParams` 是只读，即使它们会发起网络请求。
+> 只读工具的判定以 §2.1 的列表为准；`NodeProbe` 是只读，即使它会发起网络请求。
 
 ### 1.2.0（2026-11-03，AskUserQuestion 接通）
 

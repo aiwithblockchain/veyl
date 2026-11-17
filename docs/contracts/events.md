@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.15.0`
+> 契约版本：`2.16.2`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，版本以该文件头为准）
@@ -22,7 +22,7 @@
 - **落库实体字段的时间戳**（`created_at` / `first_seen` / `last_seen` / `checked_at` 等）：**Unix 毫秒整数**，与 `data-model.md` 的列类型一致。见 §2.3。
 - 错误码 **大写下划线**。
 - 所有 payload 带 `contract_version`。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.15.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.16.2`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
 
 > **命名决策**：事件名沿用 TweetPilot 的真实名称（`message-chunk`、`thinking-chunk`、`tool-call-start`、`tool-call-end`、`ai-status`、`ai-compact`、`ai-request-end`），**不**加 `ai-` 前缀。`docs/phase-1-technical-design.md` §4.2 写的 `agent://delta` / `agent://tool` 是笔误，以本契约为准。
 
@@ -63,8 +63,9 @@
 | 29 | `trial-expired` | Host → UI | `TrialExpiredPayload` | **2.15.0 新增**：免费节点试用到期，种子节点已移除 |
 | 30 | `settings-point` | Host → UI | `SettingsPointPayload` | **2.15.0 新增**：AI 指路，打开设置并高亮某段/某行 |
 | 31 | `quit-dismissed` | Host → UI | `QuitDismissedPayload` | **2.15.0 新增**：退出确认未经决策就结束，前端收起弹窗 |
+| 32 | `stage-select` | Host → UI | `StageSelectPayload` | **2.16.0 新增**：AI 把地区/规格选进新建节点舞台 |
 
-1–8 是 AI 会话事件，9–31 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
+1–8 是 AI 会话事件，9–32 是应用事件。UI 必须同时订阅两组，否则会出现「AI 说已连接，状态面板还是未连接」。
 
 > **事件与命令成对**：每个改变持久状态的命令都必须有一条对应事件。没有事件的变更只允许发生在「只读命令」上。例外是 `probe_run`——它不改状态，但探测失败的副作用（登记问题）由 `issue-changed` 表达。
 
@@ -111,7 +112,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -133,7 +134,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -151,7 +152,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -205,7 +206,7 @@ type DisplayAction =
   | { kind: "compose_report_mail"; report_id: string };
 
 type ToolCallEndPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -268,7 +269,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -313,7 +314,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -341,7 +342,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -379,7 +380,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -403,7 +404,7 @@ type RuntimeStateChangedPayload = {
 
 - `snapshot.state === to`。不一致说明有人绕过了单写者，属于实现缺陷。
 - `snapshot.mixed_port` 是 `to = "running" | "degraded"` 时 `proxy_card` 的唯一端口来源（`proxy_params` 的 `runtime` 来源）。
-- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.15.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
+- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.16.2`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
 - payload ≤ 64 KB；`RuntimeSnapshot` 本身远小于上限，不需要截断。
 
 UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断入口；用 `snapshot.mixed_port` 重渲染代理卡。
@@ -414,7 +415,7 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   health: HealthSnapshot;
   // 2.2 新增：本次运行累计流量与速率。
   // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
@@ -450,7 +451,7 @@ UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；面板上给用�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag" | "rules_update";
   origin: "ui" | "agent";       // 必填；第一帧也带，旧记录按 "ui"
@@ -484,7 +485,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -501,7 +502,7 @@ type AppLifecycleChangedPayload = {
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   seed_id: "veyl_seed";
   content_sha256: string;           // 2.0：变化判定依据
   version: string | null;           // 文件里的 version，仅展示
@@ -558,7 +559,7 @@ type DefaultProfileUpdatedPayload = {
 
 ```ts
 type QuitRequestedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   emitted_at: string;
 };
 ```
@@ -578,7 +579,7 @@ UI 收到后弹确认框，用户选择后调用 `quit_decision { action }`（`c
 
 ```ts
 type QuitDismissedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   emitted_at: string;
 };
 ```
@@ -599,7 +600,7 @@ type QuitDismissedPayload = {
 
 ```ts
 type AskUserQuestionPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   session_id: string;
   request_id: string;
   question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
@@ -684,7 +685,7 @@ tool-call-end    (同一 request_id)
 
 ```ts
 type ConfigChangedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   change: "created" | "updated" | "deleted" | "activated";
   config_id: string;
   config: ConfigSummary | null;      // deleted 时为 null；类型见 commands.md §3.0
@@ -720,7 +721,7 @@ type NodeListChangedReason =
   | "bindings_changed";       // config_update 整体替换了节点集
 
 type NodeListChangedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   reason: NodeListChangedReason;
   config_id: string | null;        // 只有 bindings_changed 时非空
   node_count_total: number;        // 节点池总数
@@ -742,7 +743,7 @@ type NodeListChangedPayload = {
 
 ```ts
 type NodeSwitchedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   config_id: string;
   from_node_id: string | null;
   to_node_id: string;
@@ -770,7 +771,7 @@ type NodeSwitchedPayload = {
 
 ```ts
 type IssueChangedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
   issue: IssueSummary;                  // 变更后的状态
   blocking_issue_id: string | null;     // 当前应插卡的那一条；null = 中间不插卡
@@ -808,7 +809,7 @@ type IssueChangedPayload = {
 
 ```ts
 type LayoutUpdatedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   config_id: string;
   revision: number;            // 每配置单调递增，从 1 开始
   layout: Layout;              // 见 commands.md §3.0
@@ -822,7 +823,8 @@ type LayoutUpdatedPayload = {
 
 - **`revision` 单调递增**。UI 收到 `revision <= 已渲染的 revision` 时丢弃——网络/线程调度可能导致旧布局后到，覆盖新布局会让中间区域闪回上一个版本。
 - **`config_detail` 必须返回 `layout_revision`**（`commands.md` §3.0），与 `layout` 配套。UI 用它初始化「已渲染的 revision」；缺了它，同一配置内迟到的事件无法判断先后，中间区会闪回上一版。
-- **AI 能写进布局的块只有 6 个**：`empty_hint` / `proxy_card` / `source_choice` / `reachability` / `update_hint` / `action_card`。`issue_card` 是本地规则的**叠加渲染**（§4.12），**不在布局词汇表内**——写进布局即整份非法，否则故障卡会渲染两次。
+- **AI 能写进布局的块只有 5 个**：`empty_hint` / `proxy_card` / `source_choice` / `update_hint` / `action_card`。`issue_card` 是本地规则的**叠加渲染**（§4.12），**不在布局词汇表内**——写进布局即整份非法，否则故障卡会渲染两次。
+  - **`reachability` 已在 2.16.0 移除**：新设计不做逐目标可达性检查（连接失败由 `DiagRun` 的诊断卡承担），块没有调用方也没有渲染需求。
 - **`action_card` 只上报，不执行**：`props = { id, title, detail?, actions: [{ id, label, kind }] }`，`kind` 只有 `primary` / `secondary`；1–3 个按钮。点击只把 `action.id` 通过 `ai_send_message.context.last_action` 送回（`commands.md` §9.1.1），**UI 不得因点击直接调用任何命令**——模型写的按钮写成 `destroy` 也只是文字。
   - `id` / `actions[].id`：1–32 字符，`[a-z0-9_-]`，同一张卡内唯一；
   - `title` 1–40 字符、`detail` 0–120 字符、`label` 1–12 字符，纯文本；
@@ -843,7 +845,7 @@ type LayoutUpdatedPayload = {
   - `json` / 无标记围栏不再「校验不过就原样显示」：只要形状像布局就吞掉。
 - **原因码**（只进日志，不进界面、不进事件载荷）：`bad_json`、`bad_version`、`unknown_block`、`duplicate_block`、`bad_props`、`too_many_blocks`、`unsafe_string`、`block_not_applicable`；识别阶段另有 `bare_invalid`（形状像布局但校验不过）与 `bare_too_large`（超限放行）。
 - **语义校验只在写入时做。** `proxy_card` 只能用于 `connect_mode = "system_proxy"` 的配置，`source_choice` 只能用于节点集为空的配置；写入时违反任一条 → **整份丢弃**并记 `block_not_applicable`。已落库的布局在配置之后变化（如用户从本机代理切到 TUN）时**不做回溯校验、不整份丢弃**：渲染层只跳过不适用的块，不改库、不发事件、不消耗 revision。两处若都做整份丢弃，用户只是换了个接管方式，中间区就整体消失了。
-- **块参数里没有数值。** 端口、地址、版本号、问题文案一律在渲染时从运行时 / 后端读，模型不能写进 `props`。模型只能给块类型，外加 `reachability` 的 `targets`：1–6 项、每项 trim 后 1–24 字符、去重；禁控制字符与 `://`，禁 `<` `>` `&` `"` `'`，禁以 `javascript:` / `data:` 开头，禁含 `/` 或 `:`。模型写错一个端口比不写更糟。
+- **块参数里没有数值。** 端口、地址、版本号、问题文案一律在渲染时从运行时 / 后端读，模型不能写进 `props`。模型只能给块类型；带 `props` 的只剩 `action_card`（纯文字标题 / 说明 / 按钮文案，规则见上）。模型写错一个端口比不写更糟。
 - **同一条消息出现多份布局时只认最后一份**，前面几份不写库、不发事件。**请求被取消或出错时不写入**任何一份——没有成功收尾的请求不改变中间区布局。
 - **`config_id` 的归属：开始时优先，中途有激活则跟随请求结束。**
   - 请求开始时已有活动配置，且请求过程中没有配置被激活 → 归属开始时的那个。
@@ -861,7 +863,7 @@ type LayoutUpdatedPayload = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   config_id: string;
   routing_mode: "direct" | "proxy_all" | "proxy_selected";
   applied_mode: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -887,7 +889,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
@@ -920,7 +922,7 @@ Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 
 ```ts
 type CoreUpgradeProgressPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   job_id: string;
   origin: "ui" | "agent";         // 必填
   phase: "downloading" | "verifying" | "unpacking" | "installing" | "activating";
@@ -943,7 +945,7 @@ type CoreUpgradeProgressPayload = {
 
 ```ts
 type CoreUpgradeFinishedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   job_id: string;
   origin: "ui" | "agent";   // 必填
   ok: boolean;
@@ -965,7 +967,7 @@ type CoreUpgradeFinishedPayload = {
 
 ```ts
 type NodeProbeProgressPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   run_id: string;
   config_id: string;
   phase: "preparing" | "probing";
@@ -994,7 +996,7 @@ type NodeProbeProgressPayload = {
 
 ```ts
 type NodeProbeFinishedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   run_id: string;
   config_id: string;
   total: number;
@@ -1030,7 +1032,7 @@ type NodeProbeFinishedPayload = {
 
 ```ts
 type RegionChangedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   region: string | null;          // 生效地区的小写 ISO 3166-1 alpha-2；判不出为 null
   source: "system" | "ai";        // 当前生效值的来源
   emitted_at: string;
@@ -1056,7 +1058,7 @@ type RegionChangedPayload = {
 
 ```ts
 type MyServerChangedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   server_id: string;
   state: string;                   // MyServerState，见 commands.md §10.1
   failure?: {
@@ -1083,7 +1085,7 @@ type MyServerChangedPayload = {
 
 ```ts
 type MyServerOrderChangedPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   order_id: string;
   state: string;                   // MyServerOrderState，见 commands.md §10.1
   failure?: {
@@ -1108,7 +1110,7 @@ type MyServerOrderChangedPayload = {
 
 ```ts
 type TrialExpiredPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   ended_at: string;              // 试用结束时刻（ISO 8601 UTC），与 trial_state.ended_at 同值
   removed_node_count: number;    // 全库去重后移除的种子节点数；可能为 0（池里本来就没有）
   disconnected: boolean;         // 本次是否真的断开了连接
@@ -1130,7 +1132,7 @@ AI 指路：打开设置并高亮某一段的某一行。由只读工具 `OpenSe
 
 ```ts
 type SettingsPointPayload = {
-  contract_version: "2.15.0";
+  contract_version: "2.16.2";
   section: "ai" | "connection" | "account" | "advanced";
   row: string | null;            // 行 id；只定位到段时为 null
   emitted_at: string;
@@ -1142,6 +1144,32 @@ type SettingsPointPayload = {
 - **不抢键盘焦点、不改值、不展开折叠项以外的内容**；高亮只是描边，不是选中态。
 - 设置弹层当前不可用（首启阶段尚未挂载）→ UI 忽略本事件，**不排队重放**；对话里仍有工具卡上的「已打开设置 · 连接」作为记录。
 - 与 `row` 对应的行 id 登记表与 `commands.md` §9.1.1 的 `controls` 同源，不另立一份。
+
+---
+
+### 4.26 `stage-select`（2.16.0 新增；2.16.1 改为部分字段）
+
+AI 把地区 / 规格选进「新建节点」舞台。由工具 `StageSelect` 触发（`tools.md` §4.52），**只改界面选择，不建机、不扣费、不写业务表**。
+
+```ts
+type StageSelectPayload = {
+  contract_version: "2.16.2";
+  screen: "new_node";
+  region: string | null;         // 目录里的地区 id；本次没请求就是 null
+  plan: string | null;           // 目录里的套餐 id；同上
+  emitted_at: string;
+};
+```
+
+- **Host 没有舞台当前选择的镜像**：选择只存在于界面，`context.last_action.value` 只在用户当轮点过才有、请求结束即丢。所以事件只带**本次请求的字段**，没请求的字段是 `null`；**不要把它们读成「清空」**。
+- **UI 按字段合并**：`region` 非空才改地区，`plan` 非空才改套餐；两个都 `null` 的事件不会出现（工具要求至少一个）。**舞台可见且不在创建中时**，合并后把整个选择区滚动到可见、描边高亮 **1.5 秒**；其余时候按下一行忽略。**收到事件不等于一定会高亮**——这是正常结果。
+- `screen` 目前只有 `new_node` 一个值，**写死**。以后要扩到别的舞台必须升版本并单独评审——这个字段就是防越权的边界。
+- Host 在工具校验通过（请求里出现的字段都在目录里）之后发；目录没有「可用」字段，不在目录即拒绝，**没有「地区不可用」这种错误**。
+- **不开始创建、不扣费、不调用任何命令**；`创建` 仍由用户点（`ai-first-product.md` §新建节点）。
+- **舞台没打开 / 正在创建**：UI 忽略事件，不排队重放，对话里仍留工具卡——与 `settings-point`（§4.25）同一口径。此时工具卡上的「已把…发给舞台」不承诺屏幕已经变了。
+- **覆盖规则**：同一字段上，事件覆盖手动选择（用户让 AI 选，就不该再弹一次确认）；只改另一个字段时互不影响。想改回来再点一次即可。
+- 同一轮里最多成功一次（Host 用一轮一次闸门强制，键含工具名；校验失败的调用不占名额，`tools.md` §4.52）；没有 revision，因为舞台选择不写业务表、也不参与任何判定。
+- 不抢键盘焦点。
 
 ---
 
@@ -1253,6 +1281,30 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.16.2（2026-11-17，高亮是条件行为）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.16.2`；§4.26 明确「合并后高亮 1.5 秒」只发生在**舞台可见且不在创建中**时，收到事件不等于一定会高亮（Host 没有屏幕状态，事件可能在用户停在连接屏时到达并被忽略）；一轮一次改成「最多成功一次、键含工具名、校验失败不占名额」 | 语义澄清 | 复审 |
+
+### 2.16.1（2026-11-17，`stage-select` 改为部分字段）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.16.1`；全文 `contract_version` 字面量替换为 `2.16.1`（实现侧常量 `EVENT_CONTRACT_VERSION`） | 元数据 | `tools.md` 3.17.0 |
+| 2 | §4.26 的 `region` / `plan` 改为 `string \| null`：Host 没有舞台当前选择的镜像，事件只带本次请求的字段，UI 按字段合并；`null` 不等于「清空」 | 语义修正 | 评审 P1-1 |
+| 3 | 舞台没打开 / 正在创建时 UI 忽略事件、不排队、工具卡保留——与 `settings-point` §4.25 同一口径；工具卡文案不承诺屏幕已变 | 说明 | 评审附带项 |
+| 4 | 修 2.16.0 变更记录里写错的版本引用（`commands.md` 2.36.2 → 2.36.3） | 笔误 | 评审附带项 |
+
+### 2.16.0（2026-11-17，舞台选择与可达性块下线）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.16.0`；全文 `contract_version` 字面量替换为 `2.16.0`（实现侧常量 `EVENT_CONTRACT_VERSION`） | 元数据 | `tools.md` 3.16.0 |
+| 2 | 事件总表新增 #32 `stage-select`，§4.26 写明：`screen` 写死 `new_node`、只改界面选择、不建机不扣费、创建中忽略、覆盖规则与残余风险 | 新增事件 | 设计文档要求 AI 能替用户选好地区与规格 |
+| 3 | `reachability` 从布局可写块中移除（6 → 5）：新设计不做逐目标可达性检查，块没有调用方也没有渲染需求；`targets` 的字符规则一并删除 | 删除块 | 设计对齐评审 P1-1 |
+| 4 | `tools.md` 3.16.0 增 `StageSelect`；`commands.md` 2.36.3 同步 §12.2 与 `probe_run` 说明 | 矩阵同步 | 同批 |
 
 ### 2.15.0（2026-11-16，免费试用到期与 AI 指路）
 

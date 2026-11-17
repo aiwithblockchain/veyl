@@ -1,6 +1,6 @@
 # 数据模型
 
-> 版本：`7`（对应契约 `commands.md` 2.36.0 / `events.md` 2.15.0 / `tools.md` 3.14.0 / `runtime.md` 2.8.0）
+> 版本：`7`（对应契约 `commands.md` 2.36.5 / `events.md` 2.16.2 / `tools.md` 3.17.1 / `runtime.md` 2.8.0）
 > 日期：2026-11-16
 > 范围：配置、节点、问题、布局，以及它们与 `secrets.enc`、种子缓存的关系
 > 依据：`docs/configs-and-nav.md` §3、§8，`docs/config-execution.md` §6–§10，`docs/issue-management.md` §3、`docs/center-panel.md` §3
