@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.17.4`
+> 契约版本：`3.17.5`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.17.4`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.17.5`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.17.4";
+  contract_version: "3.17.5";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -865,7 +865,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.17.4";
+  contract_version: "3.17.5";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1028,7 +1028,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.17.4";
+  contract_version: "3.17.5";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1830,7 +1830,7 @@ type ConfigSetModeData = {
 **确认卡（必须）**
 
 - 走既有 `AskUserQuestion` 阻塞通道，Host 填 `kind: "config_set_mode_confirm"` 与 `details { config_id, mode, previous_mode, will_disconnect: true }`；**模型无法伪造、无法代答**。
-- 正文必须含：目标方式的人类可读名（左栏词汇 **「全部软件」/「本机代理」**）+ **「会短暂断开当前连接」**。选项逐字 `切换` / `取消`。
+- 正文必须含：目标方式的人类可读名（**`Tun 模式` / `Proxy 模式`**，与界面同一套用词；不出现 `tun` / `system_proxy`，也不另造「全部软件 / 本机代理」这类别名）+ **「会短暂断开当前连接」**。选项逐字 `切换` / `取消`。
 - **默认焦点「取消」**；`Esc`、15 分钟超时、空回答一律等同取消。
 - 同意一次性绑定 `(session_id, request_id, config_id, mode)`。
 - **未连接时不弹卡**（`confirmation: "not_needed"`），直接执行。
@@ -1850,10 +1850,10 @@ type ConfigSetModeData = {
 
 | 情况 | `text` | `changed` |
 |---|---|---|
-| 切换成功并连上 | 「已切换到「全部软件」，连接已恢复。」 | `true` |
-| 本来就是该方式 | 「已经是「全部软件」，没有改动。」 | `false` |
-| 启动失败、**回滚成功** | 「没能切到「全部软件」，已回到原来的「本机代理」。」+ 首次失败原因 | `false` |
-| **回滚失败** | 「没能切换，也没能恢复原来的方式，**现在是断开状态、方式已改为「全部软件」但未连上**。」+ `[重新连接]` | `true` |
+| 切换成功并连上 | 「已切换到「Tun 模式」，连接已恢复。」 | `true` |
+| 本来就是该方式 | 「已经是「Tun 模式」，没有改动。」 | `false` |
+| 启动失败、**回滚成功** | 「没能切到「Tun 模式」，已回到原来的「Proxy 模式」。」+ 首次失败原因 | `false` |
+| **回滚失败** | 「没能切换，也没能恢复原来的方式，**现在是断开状态、方式已改为「Tun 模式」但未连上**。」+ `[重新连接]` | `true` |
 | 取消 | 「已取消，没有改动。」 | `false` |
 
 - **`restored: false` 时禁止出现「已恢复」「连接正常」字样**，也不许把 `changed` 写成 `false`。
@@ -2133,6 +2133,12 @@ type CatalogOptionsData = {
 ---
 
 ## 8. 变更记录
+
+### 3.17.5（2026-11-17，接管方式用词统一）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.17.5`；§4.49 `ConfigSetMode` 的确认卡正文与 `display` 文案统一改成 **`Tun 模式` / `Proxy 模式`**，不再用「全部软件 / 本机代理」；理由是产品负责人同日定稿：界面与 AI 对同一个值只能有一个名字（`stage-quick-toggles.md` §3.1） | 文案统一 | 产品决定 |
 
 ### 3.17.4（2026-11-17，当前节点为空的读取口径）
 
