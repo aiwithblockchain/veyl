@@ -351,6 +351,54 @@ describe("三区外壳与连接舞台", () => {
     expect(screen.queryByRole("button", { name: /先试用免费节点/ })).toBeNull();
   });
 
+  it("试用到期但已有自建节点：照常进连接舞台，不看到期屏", async () => {
+    localStorage.setItem("veyl.mock.trial", "expired");
+    localStorage.setItem(
+      "veyl.configs.mock.v1",
+      JSON.stringify({
+        configs: [
+          {
+            config_id: "cfg_own",
+            name: "我的节点",
+            connect_mode: "tun",
+            routing_mode: "direct",
+            node_count: 1,
+            listen_port: null,
+            is_active: true,
+            current_node_id: "n_own",
+            created_at: 0,
+            updated_at: 0,
+            last_used_at: null,
+            nodes: [
+              {
+                node_id: "n_own",
+                name: "家里 01",
+                server: "203.0.113.9",
+                port: 8388,
+                method: "aes-256-gcm",
+                protocol: "shadowsocks",
+                source: "manual",
+                created_at: 0,
+              },
+            ],
+            dns: { mode: "auto", local: [], remote: [] },
+            tun_excludes: [],
+            layout: null,
+            layout_revision: null,
+          },
+        ],
+        activeId: "cfg_own",
+      }),
+    );
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("button", { name: "连接节点" }),
+    ).toBeTruthy();
+    expect(screen.queryByText("试用已到期")).toBeNull();
+  });
+
   it("收到 trial-expired 后切到到期屏", async () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("从哪里开始？")).toBeTruthy());

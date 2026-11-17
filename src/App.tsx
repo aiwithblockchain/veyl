@@ -685,7 +685,7 @@ export default function App() {
         ? "new_node"
         : !stageReady
         ? "client"
-        : trial?.state === "expired"
+        : trial?.state === "expired" && !hasNodes
           ? "trial_expired"
           : !hasNodes
             ? "no_nodes"
@@ -2370,7 +2370,7 @@ export default function App() {
           onRetryDetail={myServers.retryDetail}
           onAiLocate={handleAiLocate}
         />
-      ) : trial?.state === "expired" ? (
+      ) : trial?.state === "expired" && !hasNodes ? (
         <TrialExpired
           onNewNode={() => {
             lastActionRef.current = { id: "trial_expired.new_node" };
