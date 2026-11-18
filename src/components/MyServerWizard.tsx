@@ -78,6 +78,25 @@ function defaultPlan(plans: MyServerPlan[]): MyServerPlan | null {
   );
 }
 
+/** 结账后订单才带上 server_id；列表项若带 order_id 也能对上。都对不上就返回 null。 */
+async function resolveOrderedServer(
+  bridge: AgentBridge,
+  orderId: string,
+): Promise<string | null> {
+  try {
+    const order = await bridge.myServerOrderGet(orderId);
+    if (order.server_id) return order.server_id;
+  } catch {
+    // 命令不存在或读不到：看列表。
+  }
+  try {
+    const { servers } = await bridge.myServerList();
+    return servers.find((server) => server.order_id === orderId)?.server_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function errorText(error: unknown): { message: string; retryable: boolean } {
   const problem = toBridgeError(error);
   const message =
@@ -218,6 +237,21 @@ export function MyServerWizard({
   const plans = active?.plans ?? [];
   const unreadable = !active || regions.length === 0 || plans.length === 0;
 
+  /** 旧控制面不返回 plan.regions：不拦截，但留一条 warn 便于发现没升级。 */
+  const plansMissingRegions = plans.some((plan) => plan.regions === undefined);
+  useEffect(() => {
+    if (!plansMissingRegions) return;
+    console.warn(
+      "my_server_catalog 缺少 plan.regions：按「所有档位在所有地区可用」处理，控制面需要升级。",
+    );
+  }, [plansMissingRegions]);
+
+  /** 没有 regions 字段视为不限制；有字段时以字段为准。 */
+  const planSupportsRegion = (
+    plan: MyServerPlan,
+    region: MyServerRegion | null,
+  ) => region === null || plan.regions === undefined || plan.regions.includes(region.id);
+
   const groups = useMemo(
     () =>
       CONTINENT_ORDER.map((continent) => ({
@@ -240,12 +274,29 @@ export function MyServerWizard({
     [],
   );
 
+  /** 该地区至少有一个档位可用；一个都没有就是这里买不到服务器。 */
+  const regionHasPlan = (region: MyServerRegion) =>
+    plans.some((plan) => planSupportsRegion(plan, region));
+
   const currentRegion =
     regions.find((region) => region.id === regionId) ??
+    regions.find(regionHasPlan) ??
     groups[0]?.regions[0] ??
     null;
+  // 默认档位只在当前地区可用的档位里挑；用户已经选的档位不静默换掉。
+  const availablePlans = plans.filter((plan) =>
+    planSupportsRegion(plan, currentRegion),
+  );
   const currentPlan =
-    plans.find((plan) => plan.id === planId) ?? defaultPlan(plans);
+    plans.find((plan) => plan.id === planId) ??
+    defaultPlan(availablePlans.length > 0 ? availablePlans : plans);
+  // 选中的组合在当前地区不可用：不自动换档，只禁用创建并说明。
+  const combinationUnavailable =
+    currentPlan !== null &&
+    currentRegion !== null &&
+    !planSupportsRegion(currentPlan, currentRegion);
+  // 所有地区都没有档位：不再摆一屏灰卡片，只给一句结论。
+  const noUsableRegion = regions.length > 0 && !regions.some(regionHasPlan);
   const currentTier =
     currentPlan && plans.length === 3
       ? (TIERS[plans.findIndex((plan) => plan.id === currentPlan.id)] ?? null)
@@ -291,7 +342,7 @@ export function MyServerWizard({
   }, [aiSelection?.nonce, busy, regions, plans, regionId, planId]);
 
   const placeOrder = async () => {
-    if (!currentPlan || !currentRegion || busy) return;
+    if (!currentPlan || !currentRegion || busy || combinationUnavailable) return;
     setSubmitting(true);
     setError(null);
     setCharged(null);
@@ -346,8 +397,9 @@ export function MyServerWizard({
         chargedCents: charge.charged_cents,
         balanceAfterCents: charge.balance_after_cents,
       });
-      // 留在创建页显示扣费结果；新服务器在左栏以「建机器中」出现。
-      onOrdered(null);
+      // 回到详情：左栏该行显示紧凑状态，中间直接给四段进度。
+      // create 只返回订单；server_id 是 checkout 写回订单的，按订单或列表解析。
+      onOrdered(await resolveOrderedServer(bridge, created.order_id));
     } catch (err) {
       const problem = toBridgeError(err);
       const reason =
@@ -446,6 +498,14 @@ export function MyServerWizard({
         <h4 className="myservers__wizard-title">新建节点</h4>
       </div>
 
+      {noUsableRegion ? (
+        <p className="myservers__hint wizard-no-region" role="status">
+          暂时没有可用的地区
+        </p>
+      ) : null}
+
+      {!noUsableRegion ? (
+        <>
       <section className="wizard-block">
         <p className="wizard-block__title">地区</p>
         <div
@@ -460,6 +520,11 @@ export function MyServerWizard({
               <div className="myservers__region-grid">
                 {group.regions.map((region) => {
                   const selected = currentRegion?.id === region.id;
+                  const regionEmpty = !regionHasPlan(region);
+                  const blockedByPlan =
+                    currentPlan !== null &&
+                    !planSupportsRegion(currentPlan, region);
+                  const unsupported = regionEmpty || blockedByPlan;
                   return (
                     <button
                       key={region.id}
@@ -468,7 +533,14 @@ export function MyServerWizard({
                       aria-checked={selected}
                       tabIndex={selected ? 0 : -1}
                       className={`myservers__region ${selected ? "is-selected" : ""}`}
-                      disabled={busy}
+                      disabled={busy || unsupported}
+                      title={
+                        regionEmpty
+                          ? "该地区暂不提供服务器"
+                          : blockedByPlan
+                            ? "当前档位在该地区不提供"
+                            : undefined
+                      }
                       onClick={() => {
                         setRegionId(region.id);
                         onSelect?.("region", region.id);
@@ -482,6 +554,13 @@ export function MyServerWizard({
                       }}
                     >
                       {region.name}
+                      {regionEmpty ? (
+                        <span className="myservers__region-note">
+                          该地区暂不提供服务器
+                        </span>
+                      ) : blockedByPlan ? (
+                        <span className="myservers__region-note">不提供</span>
+                      ) : null}
                     </button>
                   );
                 })}
@@ -502,6 +581,9 @@ export function MyServerWizard({
           {plans.map((plan, index) => {
             const selected = currentPlan?.id === plan.id;
             const tier = plans.length === 3 ? TIERS[index] : null;
+            const unsupported =
+              currentRegion !== null &&
+              !planSupportsRegion(plan, currentRegion);
             return (
               <button
                 key={plan.id}
@@ -510,7 +592,8 @@ export function MyServerWizard({
                 aria-checked={selected}
                 tabIndex={selected ? 0 : -1}
                 className={`wizard-plan ${selected ? "is-selected" : ""}`}
-                disabled={busy}
+                disabled={busy || unsupported}
+                title={unsupported ? "该地区不提供这个档位" : undefined}
                 onClick={() => {
                   setPlanId(plan.id);
                   onSelect?.("plan", plan.id);
@@ -538,11 +621,16 @@ export function MyServerWizard({
                     </span>
                   ) : null}
                 </span>
+                {unsupported ? (
+                  <span className="wizard-plan__unavailable">该地区不提供</span>
+                ) : null}
               </button>
             );
           })}
         </div>
       </section>
+        </>
+      ) : null}
 
       <section className="wizard-block">
         <p className="wizard-block__title">系统</p>
@@ -590,6 +678,12 @@ export function MyServerWizard({
         </>
       ) : null}
 
+      {combinationUnavailable && !noUsableRegion ? (
+        <p className="myservers__hint wizard-foot__blocked">
+          这个地区不提供该档位，换一个档位或地区。
+        </p>
+      ) : null}
+
       <div className="wizard-foot">
         <div className="wizard-foot__meta">
           <p className="wizard-foot__price">
@@ -602,7 +696,13 @@ export function MyServerWizard({
         <button
           type="button"
           className="btn btn--primary"
-          disabled={busy || !currentPlan || !currentRegion}
+          disabled={
+            busy ||
+            !currentPlan ||
+            !currentRegion ||
+            combinationUnavailable ||
+            noUsableRegion
+          }
           aria-busy={busy || undefined}
           onClick={() => void placeOrder()}
         >

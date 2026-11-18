@@ -38,6 +38,10 @@ export class FakeD1 {
   onBillingCursor?: () => void;
   /** 测试钩子：写账本前触发，用来模拟「复查之后、记账之前进入销毁」。 */
   beforeWalletInsert?: () => void;
+  /** 测试钩子：refresh 的条件更新前触发，用来模拟「读到未使用、更新时已被并发请求抢走」。 */
+  beforeRefreshUse?: () => void;
+  /** 测试钩子：激活语句执行前触发，用来模拟 sweep 在这段窗口里把机器销毁。 */
+  beforeServerActivate?: () => void;
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, { sql, args: [] });
@@ -74,9 +78,25 @@ export class FakeD1 {
       this.rateLimits.set(String(a[0]), { window_start: Number(a[1]), count: 1 });
       return null;
     }
+    if (sql.startsWith("insert or ignore into rate_limits")) {
+      if (!this.rateLimits.has(String(a[0]))) {
+        this.rateLimits.set(String(a[0]), { window_start: Number(a[1]), count: 1 });
+      }
+      return null;
+    }
     if (sql.startsWith("update rate_limits set count = count + 1")) {
+      // 守卫：窗口内且没到上限才 +1。
       const row = this.rateLimits.get(String(a[0]));
-      if (row) row.count += 1;
+      if (row && row.window_start > Number(a[1]) && row.count < Number(a[2])) row.count += 1;
+      return null;
+    }
+    if (sql.startsWith("update rate_limits set window_start")) {
+      // 守卫：窗口已过期才重置。
+      const row = this.rateLimits.get(String(a[1]));
+      if (row && row.window_start <= Number(a[2])) {
+        row.window_start = Number(a[0]);
+        row.count = 1;
+      }
       return null;
     }
 
@@ -165,8 +185,12 @@ export class FakeD1 {
       return this.tables.refresh_tokens.find((r) => r.hash === a[0]) ?? null;
     }
     if (sql.startsWith("update refresh_tokens set used_at")) {
+      // 行为跟着 SQL 里的守卫走：没有 `used_at IS NULL` 的老写法就是无条件覆盖。
+      const guarded = sql.includes("used_at is null");
       const row = this.tables.refresh_tokens.find((r) => r.hash === a[1]);
-      if (row) row.used_at = a[0];
+      if (row && (!guarded || (row.used_at == null && row.revoked_at == null))) {
+        row.used_at = a[0];
+      }
       return null;
     }
     if (sql.startsWith("update refresh_tokens set revoked_at")) {
@@ -228,12 +252,33 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("update email_codes set attempts")) {
+      // 带守卫的计数：只加到上限为止；老写法（无守卫）仍然兼容。
       const row = this.tables.email_codes.find((x) => x.email === a[0]);
-      if (row) row.attempts = Number(row.attempts) + 1;
+      if (row) {
+        if (a.length === 1) row.attempts = Number(row.attempts) + 1;
+        else if (Number(row.attempts) < Number(a[1]) && Number(row.expires_at) > Number(a[2])) {
+          row.attempts = Number(row.attempts) + 1;
+        }
+      }
       return null;
     }
+    if (sql.startsWith("select attempts from email_codes")) {
+      const row = this.tables.email_codes.find((x) => x.email === a[0]);
+      return row ? { attempts: row.attempts } : null;
+    }
     if (sql.startsWith("delete from email_codes")) {
-      this.tables.email_codes = this.tables.email_codes.filter((x) => x.email !== a[0]);
+      const [email, hash, expiresAt, attempts] = a;
+      // 带 code_hash 守卫的 DELETE 才是「消费验证码」；否则按邮箱全清。
+      const guarded = sql.includes("code_hash = ?");
+      this.tables.email_codes = this.tables.email_codes.filter((row) => {
+        if (row.email !== email) return true;
+        if (!guarded) return false;
+        const matches =
+          row.code_hash === hash &&
+          Number(row.expires_at) > Number(expiresAt) &&
+          Number(row.attempts) < Number(attempts);
+        return !matches;
+      });
       return null;
     }
 
@@ -420,6 +465,11 @@ export class FakeD1 {
       if (row && row.server_id == null) row.server_id = a[0];
       return null;
     }
+    if (sql.startsWith("update orders set state = 'ready'")) {
+      const row = this.tables.orders.find((o) => o.id === a[0] && o.state === "provisioning");
+      if (row) row.state = "ready";
+      return null;
+    }
     if (sql.startsWith("update orders set state = 'failed'")) {
       const row = this.tables.orders.find((o) => o.id === a[2]);
       if (row) {
@@ -549,6 +599,44 @@ export class FakeD1 {
     }
     if (sql.startsWith("select * from servers where id")) {
       return this.tables.servers.find((s) => s.id === a[0] && s.account_id === a[1]) ?? null;
+    }
+    if (sql.startsWith("update servers set enrollment_used_at")) {
+      // 原子消费：只有哈希对得上、还没用过的那一次能成功。
+      const server = this.tables.servers.find((s) => s.id === a[2]);
+      if (server && server.enrollment_hash === a[3] && server.enrollment_used_at == null) {
+        server.enrollment_used_at = a[0];
+        server.enrollment_hash = null;
+        server.updated_at = a[1];
+      }
+      return null;
+    }
+    if (sql.startsWith("insert into credentials")) {
+      const serverId = a[0];
+      const existing = this.tables.credentials.find((c) => c.server_id === serverId);
+      const record = {
+        server_id: serverId,
+        key_version: a[1],
+        iv: a[2],
+        ciphertext: a[3],
+        created_at: a[4],
+        destroyed_at: null,
+      };
+      if (existing) Object.assign(existing, record);
+      else this.tables.credentials.push(record);
+      return null;
+    }
+    if (sql.startsWith("update servers set state = 'active'")) {
+      // 行为跟着 SQL 里的守卫走：没有 `state = 'booting'` 的写法就是无条件覆盖。
+      const guarded = sql.includes("state = 'booting'");
+      const server = this.tables.servers.find((s) => s.id === a[4]);
+      if (server && (!guarded || (server.state === "booting" && server.destroyed_at == null))) {
+        server.state = "active";
+        server.node_id = a[0];
+        server.firewall_id = a[1];
+        server.singbox_version = a[2];
+        server.updated_at = a[3];
+      }
+      return null;
     }
     if (sql.startsWith("update servers set state = 'destroying'")) {
       const server = this.tables.servers.find((s) => s.id === a[1]);
@@ -958,6 +1046,28 @@ export class FakeD1 {
         .sort((left, right) => Number(left.created_at) - Number(right.created_at))
         .slice(0, 50);
     }
+    if (sql.startsWith("select * from servers where state = 'booting'")) {
+      // 过期仍停在 booting：按 (enrollment_expires_at, id) 游标升序分页。
+      // 不看 enrollment_used_at：已回传但在 activate 前停住的同样要清。
+      const [now, cursorExpires, , cursorId, limit] = a;
+      return this.tables.servers
+        .filter(
+          (row) =>
+            row.state === "booting" &&
+            row.enrollment_expires_at != null &&
+            Number(row.enrollment_expires_at) < Number(now) &&
+            row.destroyed_at == null &&
+            (Number(row.enrollment_expires_at) > Number(cursorExpires) ||
+              (Number(row.enrollment_expires_at) === Number(cursorExpires) &&
+                String(row.id) > String(cursorId))),
+        )
+        .sort(
+          (x, y) =>
+            Number(x.enrollment_expires_at) - Number(y.enrollment_expires_at) ||
+            String(x.id).localeCompare(String(y.id)),
+        )
+        .slice(0, Number(limit));
+    }
     if (
       sql.startsWith("select * from servers where account_id") &&
       sql.includes("state != 'destroyed'")
@@ -1147,6 +1257,11 @@ export class FakeD1 {
   ): Row[] {
     return this.tables[table];
   }
+
+  /** 限流窗口的只读快照，给 run() 算 `meta.changes` 用。 */
+  rateLimit(key: string): { window_start: number; count: number } | undefined {
+    return this.rateLimits.get(key);
+  }
 }
 
 export class FakeStatement {
@@ -1182,6 +1297,68 @@ export class FakeStatement {
       const row = this.db.rows("orders").find((order) => order.id === id);
       const allowed = ["pending_payment", "awaiting_payment", "payment_failed", "expired", "cancelled"];
       changes = row && allowed.includes(String(row.state)) ? 1 : 0;
+    } else if (sql.startsWith("update servers set enrollment_used_at")) {
+      const row = this.db
+        .rows("servers")
+        .find((s) => s.id === this.statement.args[2]);
+      changes =
+        row &&
+        row.enrollment_hash === this.statement.args[3] &&
+        row.enrollment_used_at == null
+          ? 1
+          : 0;
+    } else if (sql.startsWith("update servers set state = 'active'")) {
+      // 模拟 sweep 在消费 token 之后、激活之前把机器销毁。
+      this.db.beforeServerActivate?.();
+      const guarded = sql.includes("state = 'booting'");
+      const server = this.db
+        .rows("servers")
+        .find((s) => s.id === this.statement.args[4]);
+      changes =
+        server && (!guarded || (server.state === "booting" && server.destroyed_at == null))
+          ? 1
+          : 0;
+    } else if (sql.startsWith("update orders set state = 'ready'")) {
+      const row = this.db
+        .rows("orders")
+        .find((o) => o.id === this.statement.args[0] && o.state === "provisioning");
+      changes = row ? 1 : 0;
+    } else if (sql.startsWith("insert or ignore into rate_limits")) {
+      const existed = this.db.rateLimit(String(this.statement.args[0])) !== undefined;
+      this.db.exec(this.statement);
+      return { success: true, meta: { changes: existed ? 0 : 1 } };
+    } else if (sql.startsWith("update rate_limits set count = count + 1")) {
+      const [key, cutoff, limit] = this.statement.args;
+      const row = this.db.rateLimit(String(key));
+      changes = row && row.window_start > Number(cutoff) && row.count < Number(limit) ? 1 : 0;
+    } else if (sql.startsWith("update rate_limits set window_start")) {
+      const [, key, cutoff] = this.statement.args;
+      const row = this.db.rateLimit(String(key));
+      changes = row && row.window_start <= Number(cutoff) ? 1 : 0;
+    } else if (sql.startsWith("update refresh_tokens set used_at")) {
+      // 模拟并发：读行之后、条件更新之前，另一个请求已经把这一行用掉。
+      this.db.beforeRefreshUse?.();
+      const guarded = sql.includes("used_at is null");
+      const row = this.db
+        .rows("refresh_tokens")
+        .find((r) => r.hash === this.statement.args[1]);
+      changes = row && (!guarded || (row.used_at == null && row.revoked_at == null)) ? 1 : 0;
+    } else if (sql.startsWith("delete from email_codes")) {
+      const before = this.db.rows("email_codes").length;
+      this.db.exec(this.statement);
+      return {
+        success: true,
+        meta: { changes: before - this.db.rows("email_codes").length },
+      };
+    } else if (sql.startsWith("update email_codes set attempts")) {
+      const [email, max, expiresAt] = this.statement.args;
+      const row = this.db.rows("email_codes").find((x) => x.email === email);
+      changes = !row
+        ? 0
+        : this.statement.args.length === 1 ||
+            (Number(row.attempts) < Number(max) && Number(row.expires_at) > Number(expiresAt))
+          ? 1
+          : 0;
     } else if (sql.startsWith("insert or ignore into")) {
       // 唯一键冲突时 SQLite 报 0 行；这里按插入前后行数判断。
       const counted = [

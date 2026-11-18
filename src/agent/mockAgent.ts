@@ -586,6 +586,10 @@ export class MockAgentBridge implements AgentBridge {
     return this.myServers.checkout(orderId);
   }
 
+  async myServerOrderGet(orderId: string) {
+    return this.myServers.orderGet(orderId);
+  }
+
   async myServerAccount() {
     return this.myServers.account();
   }

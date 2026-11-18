@@ -47,28 +47,34 @@ function isBase64Url(value: unknown, min = 20, max = 128): value is string {
 
 export async function bumpRateLimit(db: D1Database, key: string, limit: number, windowMs: number): Promise<boolean> {
   const now = Date.now();
-  const row = await db
-    .prepare("SELECT window_start, count FROM rate_limits WHERE key = ?")
-    .bind(key)
-    .first<{ window_start: number; count: number }>();
+  const changed = (result: unknown) =>
+    Number((result as { meta?: { changes?: number } })?.meta?.changes ?? 0);
 
-  if (!row || now - row.window_start >= windowMs) {
-    await db
-      .prepare(
-        "INSERT INTO rate_limits (key, window_start, count) VALUES (?, ?, 1) " +
-          "ON CONFLICT(key) DO UPDATE SET window_start = excluded.window_start, count = 1",
-      )
-      .bind(key, now)
-      .run();
-    return true;
-  }
-
-  if (row.count >= limit) return false;
-  await db
-    .prepare("UPDATE rate_limits SET count = count + 1 WHERE key = ?")
-    .bind(key)
+  // 三条单语句守卫，不做「读行 → 判断 → 写」：并发请求不会各自读到同一份旧计数。
+  // 1) 窗口内且还有额度：原子 +1。
+  const fresh = await db
+    .prepare(
+      "UPDATE rate_limits SET count = count + 1 WHERE key = ? AND window_start > ? AND count < ?",
+    )
+    .bind(key, now - windowMs, limit)
     .run();
-  return true;
+  if (changed(fresh) === 1) return true;
+
+  // 2) 窗口已过期：原子重置。
+  const rolled = await db
+    .prepare(
+      "UPDATE rate_limits SET window_start = ?, count = 1 WHERE key = ? AND window_start <= ?",
+    )
+    .bind(now, key, now - windowMs)
+    .run();
+  if (changed(rolled) === 1) return true;
+
+  // 3) 首次出现：唯一键冲突说明窗口内已到上限，拒绝。
+  const created = await db
+    .prepare("INSERT OR IGNORE INTO rate_limits (key, window_start, count) VALUES (?, ?, 1)")
+    .bind(key, now)
+    .run();
+  return changed(created) === 1;
 }
 
 /** 签发一整套令牌。`amr` 记的是「这次是怎么验的」，与账户本身是哪种无关。 */
@@ -224,9 +230,22 @@ async function refresh(request: Request, env: AuthEnv): Promise<Response> {
     return apiError("UNAUTHENTICATED", "刷新令牌已过期", { reason: "refresh_expired" });
   }
 
-  await env.DB.prepare("UPDATE refresh_tokens SET used_at = ? WHERE hash = ?")
-    .bind(Date.now(), hash)
+  const usedAt = Date.now();
+  // 条件更新就是这次轮换的锁：两个并发请求只有一个能把 used_at 从 NULL 改掉，
+  // 另一个拿到 0 行、按重放处理。先读后无条件写会让并发两路各签发一套新令牌。
+  const claimed = await env.DB.prepare(
+    "UPDATE refresh_tokens SET used_at = ? WHERE hash = ? AND used_at IS NULL AND revoked_at IS NULL",
+  )
+    .bind(usedAt, hash)
     .run();
+  if (Number((claimed as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
+    await env.DB.prepare("UPDATE refresh_tokens SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL")
+      .bind(usedAt, row.device_id)
+      .run();
+    return apiError("UNAUTHENTICATED", "刷新令牌已失效，请重新验证设备", {
+      reason: "refresh_reused",
+    });
+  }
 
   try {
     return json(await issueTokens(env, device.id, device.account_id));

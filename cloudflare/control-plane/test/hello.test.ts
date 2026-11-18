@@ -207,6 +207,7 @@ describe("public catalog", () => {
               price_hourly: 0.00595,
               price_monthly: 4,
               transfer: 0.5,
+              regions: ["sgp1", "nyc3", "fra1", "xyz9"],
             },
             {
               slug: "s-1vcpu-1gb",
@@ -215,6 +216,7 @@ describe("public catalog", () => {
               price_hourly: 0.00893,
               price_monthly: 6,
               transfer: 1,
+              regions: ["sgp1", "nyc3", "fra1"],
             },
             {
               slug: "s-1vcpu-2gb",
@@ -223,6 +225,7 @@ describe("public catalog", () => {
               price_hourly: 0.01786,
               price_monthly: 12,
               transfer: 2,
+              regions: ["nyc3"],
             },
           ],
         }),
@@ -254,9 +257,9 @@ describe("public catalog", () => {
     // 目录展示售价（成本 ×1.5），不是 DO 成本价；hourly = monthly / 730。
     // transfer_gib = /sizes 的 transfer(TB) × 1000（GiB）。
     expect(body.plans).toEqual([
-      { id: "s-1vcpu-512mb-10gb", label: "1 核 · 512 MB", hourly_usd: 0.0082, monthly_usd: 6, daily_price_cents: 20, transfer_gib: 500 },
-      { id: "s-1vcpu-1gb", label: "1 核 · 1 GB", hourly_usd: 0.0123, monthly_usd: 9, daily_price_cents: 30, transfer_gib: 1000 },
-      { id: "s-1vcpu-2gb", label: "1 核 · 2 GB", hourly_usd: 0.0247, monthly_usd: 18, daily_price_cents: 60, transfer_gib: 2000 },
+      { id: "s-1vcpu-512mb-10gb", label: "1 核 · 512 MB", hourly_usd: 0.0082, monthly_usd: 6, daily_price_cents: 20, transfer_gib: 500, regions: ["sgp1", "nyc3"] },
+      { id: "s-1vcpu-1gb", label: "1 核 · 1 GB", hourly_usd: 0.0123, monthly_usd: 9, daily_price_cents: 30, transfer_gib: 1000, regions: ["sgp1", "nyc3"] },
+      { id: "s-1vcpu-2gb", label: "1 核 · 2 GB", hourly_usd: 0.0247, monthly_usd: 18, daily_price_cents: 60, transfer_gib: 2000, regions: ["nyc3"] },
     ]);
   });
 
@@ -272,9 +275,9 @@ describe("public catalog", () => {
       return new Response(
         JSON.stringify({
           sizes: [
-            { slug: "s-1vcpu-512mb-10gb", memory: 512, vcpus: 1, price_hourly: 0.00595, price_monthly: 4 },
-            { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6, transfer: 0 },
-            { slug: "s-1vcpu-2gb", memory: 2048, vcpus: 1, price_hourly: 0.01786, price_monthly: 12, transfer: -1 },
+            { slug: "s-1vcpu-512mb-10gb", memory: 512, vcpus: 1, price_hourly: 0.00595, price_monthly: 4, regions: ["sgp1"] },
+            { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6, transfer: 0, regions: ["sgp1"] },
+            { slug: "s-1vcpu-2gb", memory: 2048, vcpus: 1, price_hourly: 0.01786, price_monthly: 12, transfer: -1, regions: ["sgp1"] },
           ],
         }),
         { status: 200 },

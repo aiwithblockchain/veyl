@@ -4,6 +4,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { getAgentBridge } from "./agent";
 import type { MyServer, MyServerCredentialNode } from "./agent/bridge";
+import { AGENT_EVENTS } from "./agent/protocol";
 import type { ConfigSummary } from "./agent/protocol";
 
 const CONFIG_ID = "cfg_1";
@@ -660,4 +661,330 @@ describe("已连接时改用服务器节点", () => {
     const list = await bridge.configList();
     expect(list.configs).toHaveLength(1);
   });
+});
+
+describe("下单成功后回到详情", () => {
+  const NEW_SERVER: MyServer = {
+    ...SERVER,
+    server_id: "srv_new",
+    name: "新加坡 1 · 新建",
+    state: "creating",
+    node_id: null,
+    failure: null,
+  };
+
+  /** 模拟真实链路：create 只给订单（server_id 为 null），checkout 之后 server_id 才写回订单。 */
+  function stubOrderFlow() {
+    const order = {
+      order_id: "ord_1",
+      state: "provisioning" as const,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 5,
+      created_at: new Date(0).toISOString(),
+      expires_at: null,
+      server_id: null as string | null,
+      failure: null,
+    };
+    vi.spyOn(bridge, "myServerGet").mockImplementation(async (id: string) =>
+      id === NEW_SERVER.server_id ? NEW_SERVER : SERVER,
+    );
+    vi.spyOn(bridge, "myServerIdentity").mockResolvedValue({
+      has_identity: true,
+      account_id: "acct_1",
+    });
+    vi.spyOn(bridge, "myServerCreate").mockResolvedValue({ ...order } as never);
+    const checkout = vi.spyOn(bridge, "myServerCheckout").mockResolvedValue({
+      order_id: order.order_id,
+      state: "provisioning",
+      charged_cents: 30,
+      balance_after_cents: 970,
+    } as never);
+    vi.spyOn(bridge, "myServerOrderGet").mockResolvedValue({
+      ...order,
+      server_id: NEW_SERVER.server_id,
+    } as never);
+    return { order, checkout };
+  }
+
+  async function openWizardAndCreate() {
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    const rail = await screen.findByRole("complementary", { name: "服务器列表" });
+    fireEvent.click(within(rail).getByRole("button", { name: "新建节点" }));
+    await screen.findByRole("heading", { name: "新建节点" });
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+  }
+
+  it("create 不返回 server_id：按订单详情解析出服务器，打开四段进度", async () => {
+    prepare([]);
+    const { checkout } = stubOrderFlow();
+    await openWizardAndCreate();
+
+    expect(
+      await screen.findByRole("heading", { name: "新加坡 1 · 新建" }),
+    ).toBeTruthy();
+    expect(checkout).toHaveBeenCalledWith("ord_1");
+    const bar = screen.getByRole("progressbar");
+    expect(bar.getAttribute("aria-valuenow")).toBe("15");
+    expect(screen.getByText("正在建机器 15%")).toBeTruthy();
+    const steps = [...document.querySelectorAll(".myservers__steps li")].map(
+      (node) => node.textContent,
+    );
+    expect(steps).toEqual(["正在建机器", "等待开机", "安装服务端", "检查是否可用"]);
+    expect(screen.queryByRole("heading", { name: "新建节点" })).toBeNull();
+  }, 15_000);
+
+  it("列表还没刷新时，显式选中的新机器不被默认选择覆盖", async () => {
+    prepare([SERVER]); // 列表里只有旧机器，新机器还没进来。
+    stubOrderFlow();
+    await openWizardAndCreate();
+
+    expect(
+      await screen.findByRole("heading", { name: "新加坡 1 · 新建" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("heading", { name: "新加坡 1 · DigitalOcean" }),
+    ).toBeNull();
+  }, 15_000);
+
+  it("订单详情也没有 server_id：不选中任何一台旧机器，只给一行提示", async () => {
+    const OTHER: MyServer = {
+      ...SERVER,
+      server_id: "srv_other",
+      name: "纽约 1 · DigitalOcean",
+    };
+    prepare([SERVER, OTHER]);
+    const { order } = stubOrderFlow();
+    vi.spyOn(bridge, "myServerOrderGet").mockResolvedValue({
+      ...order,
+      server_id: null,
+    } as never);
+    await openWizardAndCreate();
+
+    expect(
+      await screen.findByText("服务器已下单，正在创建，稍后会自动出现。"),
+    ).toBeTruthy();
+    // 两台旧机器一台都不能被当成「刚下单的那台」打开。
+    expect(
+      screen.queryByRole("heading", { name: "新加坡 1 · DigitalOcean" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("heading", { name: "纽约 1 · DigitalOcean" }),
+    ).toBeNull();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+  }, 15_000);
+});
+
+describe("设备身份丢失后的恢复入口", () => {
+  it("账号菜单给「重新注册设备」，点击后重新注册并回到正常态", async () => {
+    prepare([]);
+    let recovered = false;
+    vi.spyOn(bridge, "myServerList").mockImplementation(async () => {
+      if (!recovered) {
+        throw {
+          code: "UNAUTHENTICATED",
+          message: "这台设备的身份丢了。",
+          details: { reason: "device_identity_lost" },
+          retryable: false,
+        };
+      }
+      return { servers: [] };
+    });
+    const register = vi
+      .spyOn(bridge, "myServerRegisterDevice")
+      .mockImplementation(async () => {
+        recovered = true;
+        return { device_id: "dev_new", account_id: null } as never;
+      });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "账户，me@example.com" }),
+    );
+    const entry = await screen.findByRole("button", { name: "重新注册设备" });
+    expect(
+      screen.getByText("这台设备的身份丢了，需要重新注册设备；账户和服务器都在。"),
+    ).toBeTruthy();
+
+    fireEvent.click(entry);
+
+    await waitFor(() => expect(register).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "重新注册设备" })).toBeNull(),
+    );
+  }, 15_000);
+});
+
+describe("设备 / 账户被停用的出路", () => {
+  function jeBlockList(code: string, reason: string) {
+    let recovered = false;
+    vi.spyOn(bridge, "myServerList").mockImplementation(async () => {
+      if (!recovered) {
+        throw { code, message: "被停用", details: { reason }, retryable: false };
+      }
+      return { servers: [] };
+    });
+    return {
+      recover: () => {
+        recovered = true;
+      },
+    };
+  }
+
+  it("设备被停用：菜单给「重新登录」，点击后重新注册并打开登录框", async () => {
+    prepare([]);
+    const gate = jeBlockList("PERMISSION_DENIED", "device_revoked");
+    const register = vi
+      .spyOn(bridge, "myServerRegisterDevice")
+      .mockImplementation(async () => {
+        gate.recover();
+        return { device_id: "dev_new", account_id: null } as never;
+      });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "账户，me@example.com" }),
+    );
+
+    expect(
+      await screen.findByText("这台设备已被停用。重新登录会把这台设备重新注册。"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/稍后再试/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新登录" }));
+
+    await waitFor(() => expect(register).toHaveBeenCalledTimes(1));
+    expect(
+      await screen.findByRole("dialog", { name: "登录我的服务器" }),
+    ).toBeTruthy();
+  }, 15_000);
+
+  it("账户停用：不假装能退出，动作是「换一台设备登录」", async () => {
+    prepare([]);
+    const gate = jeBlockList("PERMISSION_DENIED", "account_blocked");
+    const register = vi
+      .spyOn(bridge, "myServerRegisterDevice")
+      .mockImplementation(async () => {
+        gate.recover();
+        return { device_id: "dev_new", account_id: null } as never;
+      });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "账户，me@example.com" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "账户已停用，这个账户不能再使用。换一台设备身份后，可以登录其他账户。",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "退出登录" })).toBeNull();
+    expect(screen.queryByText(/稍后再试/)).toBeNull();
+    // 停用态整页只读：rail 的新建入口不可点，避免点下去才 403。
+    const rail = screen.getByRole("complementary", { name: "服务器列表" });
+    expect(
+      (within(rail).getByRole("button", { name: "新建节点" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    for (const button of screen.getAllByRole("button", { name: "新建节点" })) {
+      expect((button as HTMLButtonElement).disabled).toBe(true);
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "换一台设备登录" }));
+
+    await waitFor(() => expect(register).toHaveBeenCalledTimes(1));
+    expect(
+      await screen.findByRole("dialog", { name: "登录我的服务器" }),
+    ).toBeTruthy();
+  }, 15_000);
+
+  it("account_blocked 优先于身份丢失", async () => {
+    prepare([]);
+    let call = 0;
+    vi.spyOn(bridge, "myServerList").mockImplementation(async () => {
+      call += 1;
+      throw {
+        code: call === 1 ? "PERMISSION_DENIED" : "UNAUTHENTICATED",
+        message: "不可用",
+        details: {
+          reason: call === 1 ? "account_blocked" : "device_identity_lost",
+        },
+        retryable: false,
+      };
+    });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+
+    // 第一次：账户停用；再触发一次刷新，这次报身份丢失。账户停用必须仍然优先。
+    act(() => {
+      (
+        bridge as unknown as { emit(event: unknown): void }
+      ).emit({
+        name: AGENT_EVENTS.myServerChanged,
+        payload: { server_id: "srv_x", state: "creating", node_id: null, failure: null },
+      });
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "账户，me@example.com" }),
+    );
+    expect(
+      await screen.findByText(
+        "账户已停用，这个账户不能再使用。换一台设备身份后，可以登录其他账户。",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/这台设备的身份丢了/)).toBeNull();
+  }, 15_000);
+});
+
+describe("销毁服务器后的选中", () => {
+  it("不出现「已下单」提示，剩下的机器被自动选中", async () => {
+    const second: MyServer = {
+      ...SERVER,
+      server_id: "srv_2",
+      name: "纽约 1 · DigitalOcean",
+    };
+    prepare([SERVER, second]);
+    let list = [SERVER, second];
+    vi.spyOn(bridge, "myServerList").mockImplementation(async () => ({ servers: list }));
+    vi.spyOn(bridge, "myServerGet").mockImplementation(async (id: string) =>
+      id === second.server_id ? second : SERVER,
+    );
+    const destroy = vi
+      .spyOn(bridge, "myServerDestroy")
+      .mockImplementation(async (id: string) => {
+        list = list.filter((server) => server.server_id !== id);
+        return { ...SERVER, server_id: id, state: "destroyed" } as never;
+      });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    expect(
+      await screen.findByRole("heading", { name: /新加坡 1 · DigitalOcean/ }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "销毁" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认销毁" }));
+    await waitFor(() => expect(destroy).toHaveBeenCalled());
+
+    expect(
+      await screen.findByRole("heading", { name: /纽约 1 · DigitalOcean/ }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("服务器已下单，正在创建，稍后会自动出现。"),
+    ).toBeNull();
+  }, 15_000);
 });

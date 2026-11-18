@@ -4,7 +4,7 @@
 import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
 import { randomId, sealSecret, sha256B64u, signDetached, openSecret } from "./lib/crypto";
 import { apiError, json } from "./lib/http";
-import { createFirewall, deleteDroplet, getDroplet } from "./providers/digitalocean";
+import { createFirewall, deleteDroplet, deleteFirewall, getDroplet } from "./providers/digitalocean";
 
 // 每个环境用自己的签名密钥：dev 与 prod 的公钥都内置在客户端，靠 key_id 区分。
 const DEFAULT_CREDENTIAL_KEY_ID = "cp-2026-11";
@@ -131,6 +131,7 @@ async function destroyInstance(
   env: ServersEnv,
   row: ServerRow,
   reason: string,
+  options: { firewallId?: string | null } = {},
 ): Promise<DestroyOutcome> {
   if (!env.DB) return { ok: false, status: 503, reason: "db_unavailable", retryable: true };
   const db = env.DB;
@@ -145,8 +146,11 @@ async function destroyInstance(
     .bind(Date.now(), row.id)
     .run();
   const restore = async () => {
+    // 只回滚自己刚写下的 destroying：并发销毁已经把行标成 destroyed 时不能改回 booting。
     await db
-      .prepare("UPDATE servers SET state = ?, updated_at = ? WHERE id = ?")
+      .prepare(
+        "UPDATE servers SET state = ?, updated_at = ? WHERE id = ? AND state = 'destroying' AND destroyed_at IS NULL",
+      )
       .bind(previousState, Date.now(), row.id)
       .run()
       .catch(() => {});
@@ -167,6 +171,17 @@ async function destroyInstance(
         reason: deleted.reason,
         retryable: deleted.retryable,
       };
+    }
+  }
+
+  // droplet 已经删掉（或本就不在）之后再删防火墙：先删防火墙会让还活着的机器直接裸奔。
+  // 激活前就失败时防火墙 id 还没写进库，由调用方通过 options 传进来。
+  // 防火墙删除失败不影响销毁与退款——留着它只是多一条规则，不会继续计费。
+  const firewallId = options.firewallId ?? row.firewall_id ?? null;
+  if (firewallId && env.DO_API_TOKEN) {
+    const removed = await deleteFirewall(env.DO_API_TOKEN, firewallId);
+    if (!removed.ok && removed.status !== 404) {
+      console.warn(`[servers] firewall_delete_failed id=${firewallId} reason=${removed.reason}`);
     }
   }
 
@@ -389,15 +404,89 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
     }
 
     const nodeId = randomId("nd_", 12);
-    await db.batch([
+    // 激活必须带状态守卫：sweep / refreshBooting 可能在这段窗口里已经把机器销毁并退了钱，
+    // 晚到的激活不能把一台 DO 上已删除的机器改回 active（幽灵机器）。
+    const activation = await db.batch([
       db.prepare(
-        "UPDATE servers SET state = 'active', node_id = ?, firewall_id = ?, singbox_version = ?, updated_at = ? WHERE id = ?",
+        "UPDATE servers SET state = 'active', node_id = ?, firewall_id = ?, singbox_version = ?, updated_at = ? " +
+          "WHERE id = ? AND state = 'booting' AND destroyed_at IS NULL",
       ).bind(nodeId, firewallId, version, Date.now(), row.id),
-      db.prepare("UPDATE orders SET state = 'ready' WHERE id = ?").bind(row.order_id),
       db.prepare(
-        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'enroll.ok', ?)",
-      ).bind(Date.now(), row.account_id, row.id, JSON.stringify({ version })),
+        "UPDATE orders SET state = 'ready' WHERE id = ? AND state = 'provisioning'",
+      ).bind(row.order_id),
     ]);
+    const activated = Number(
+      (activation[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
+    );
+    const orderReady = Number(
+      (activation[1] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
+    );
+    if (activated !== 1) {
+      // 激活被守卫拦下：本次刚插的凭据与刚建的防火墙都要收尾。
+      // destroyInstance 幂等：DO 删除 404 按成功；退款撞 `(server_refund, server_id)` 唯一键，
+      // 不会因为并发销毁已经退过而退第二次。
+      const cleanup = await destroyInstance(env, row, "activation_lost", { firewallId });
+      if (!cleanup.ok) {
+        console.warn(
+          `[servers] activation_lost_cleanup_failed server=${row.id} reason=${cleanup.reason}`,
+        );
+      }
+      await db
+        .prepare(
+          "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'enroll.activation_lost', ?)",
+        )
+        .bind(
+          Date.now(),
+          row.account_id,
+          row.id,
+          JSON.stringify({
+            node_id: nodeId,
+            changes: activated,
+            firewall_id: firewallId,
+            cleaned: cleanup.ok,
+          }),
+        )
+        .run()
+        .catch((error) =>
+          console.warn(
+            `[servers] audit_failed action=enroll.activation_lost server=${row.id} error=${String(error)}`,
+          ),
+        );
+      return json({ ok: false, reason: "server_destroyed" }, 410);
+    }
+
+    if (orderReady !== 1) {
+      // 服务器已经 active，订单却没能置 ready：先留证，别让将来出现的半成功无声无息。
+      await db
+        .prepare(
+          "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'enroll.order_ready_lost', ?)",
+        )
+        .bind(
+          Date.now(),
+          row.account_id,
+          row.id,
+          JSON.stringify({ order_id: row.order_id, changes: orderReady }),
+        )
+        .run()
+        .catch((error) =>
+          console.warn(
+            `[servers] audit_failed action=enroll.order_ready_lost server=${row.id} error=${String(error)}`,
+          ),
+        );
+    }
+
+    await db
+      .prepare(
+        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'enroll.ok', ?)",
+      )
+      .bind(Date.now(), row.account_id, row.id, JSON.stringify({ version }))
+      .run()
+      // 机器已经 active、订单已经 ready：审计写不进去不能反过来把它判死。
+      .catch((error) =>
+        console.warn(
+          `[servers] audit_failed action=enroll.ok server=${row.id} error=${String(error)}`,
+        ),
+      );
 
     return json({ ok: true, node_id: nodeId });
   } catch (error) {
@@ -438,6 +527,98 @@ async function refreshBooting(env: ServersEnv, rows: ServerRow[]): Promise<void>
       .bind(row.ip, Date.now(), row.id)
       .run();
   }
+}
+
+/** 单页扫描条数、单轮销毁上限与最多扫几页：最老的先修，失败的行不会把后面的挡住。 */
+const ENROLL_REAP_SCAN = 50;
+const ENROLL_REAP_BATCH = 10;
+const ENROLL_REAP_PAGES = 10;
+
+/**
+ * 计费 Cron 的兜底（2026-11-18）：enrollment 过期仍停在 booting 的机器，用户可能已经
+ * 关掉 App，list/get 永远不会再触发 `refreshBooting`——它们会一直计费，DO 那边也一直计费。
+ * 这里按「没建成」销毁：关单 + 退已扣的钱（destroyInstance 负责）。
+ *
+ * 不看 `enrollment_used_at`：已回传 enroll 但在 activate 前进程死掉的机器同样永远 booting，
+ * 而且正是 consume token 之后最容易出的形态。`used_at` 只用来区分失败原因——
+ * 从没回传过是 `enrollment_timeout`，回传过但没激活是 `activate_stalled`。
+ *
+ * 按 `(enrollment_expires_at, id)` 游标分页扫：销毁失败的行不占销毁名额，
+ * 也不会像「单次 LIMIT 50」那样把后面的行挡在窗口外。
+ */
+export async function sweepExpiredEnrollments(env: ServersEnv): Promise<number> {
+  if (!env.DB) return 0;
+  const db = env.DB;
+  const now = Date.now();
+
+  let destroyed = 0;
+  let cursorExpires = -1;
+  let cursorId = "";
+  for (let page = 0; page < ENROLL_REAP_PAGES && destroyed < ENROLL_REAP_BATCH; page += 1) {
+    const rows = await db
+      .prepare(
+        "SELECT * FROM servers WHERE state = 'booting' " +
+          "AND enrollment_expires_at IS NOT NULL AND enrollment_expires_at < ? " +
+          "AND destroyed_at IS NULL " +
+          "AND (enrollment_expires_at > ? OR (enrollment_expires_at = ? AND id > ?)) " +
+          "ORDER BY enrollment_expires_at ASC, id ASC LIMIT ?",
+      )
+      .bind(now, cursorExpires, cursorExpires, cursorId, ENROLL_REAP_SCAN)
+      .all<ServerRow>();
+    const pageRows = rows.results ?? [];
+    if (pageRows.length === 0) break;
+
+    for (const row of pageRows) {
+      if (destroyed >= ENROLL_REAP_BATCH) break;
+      // 扫描到处理之间可能已被别处销毁或刚回传：以库里的最新行为准。
+      const fresh = await db
+        .prepare("SELECT * FROM servers WHERE id = ? AND account_id = ?")
+        .bind(row.id, row.account_id)
+        .first<ServerRow>();
+      if (
+        !fresh ||
+        fresh.state !== "booting" ||
+        fresh.destroyed_at != null ||
+        fresh.enrollment_expires_at == null ||
+        Number(fresh.enrollment_expires_at) >= now
+      ) {
+        continue;
+      }
+
+      const reason =
+        fresh.enrollment_used_at === null ? "enrollment_timeout" : "activate_stalled";
+      const outcome = await destroyInstance(env, fresh, reason);
+      if (!outcome.ok) {
+        console.error(
+          `[billing] enroll_reap_failed server=${fresh.id} reason=${outcome.reason}`,
+        );
+        continue;
+      }
+      destroyed += 1;
+      await db
+        .prepare(
+          `INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.${reason}', ?)`,
+        )
+        .bind(
+          now,
+          fresh.account_id,
+          fresh.id,
+          JSON.stringify({
+            enrollment_expires_at: fresh.enrollment_expires_at,
+            enrollment_used_at: fresh.enrollment_used_at,
+          }),
+        )
+        .run()
+        // 机器已销毁、钱已退：审计写不进去不能反过来让本轮失败。
+        .catch(() => {});
+    }
+
+    const last = pageRows[pageRows.length - 1];
+    cursorExpires = Number(last.enrollment_expires_at ?? 0);
+    cursorId = last.id;
+    if (pageRows.length < ENROLL_REAP_SCAN) break;
+  }
+  return destroyed;
 }
 
 async function listServers(request: Request, env: ServersEnv): Promise<Response> {

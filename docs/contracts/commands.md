@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.37.2`
+> 契约版本：`2.39.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -206,7 +206,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 75 | `my_server_list` | `{}` | `{ servers: MyServer[] }` | **2.23.0 新增（仅 UI）；我的服务器列表** |
 | 76 | `my_server_get` | `{ serverId }` | `MyServer` | **2.23.0 新增（仅 UI）；详情，含 `node_id`** |
 | 77 | `my_server_create` | `{ region, plan, idempotencyKey }` | `MyServerOrder` | **2.23.0 新增（仅 UI）；下单（假支付）** |
-| 78 | `my_server_checkout` | `{ orderId }` | `MyServerCharge` | **2.23.0 新增（仅 UI）；2.28.0 起从余额扣费并开通，参数去掉 `channel`；2.29.0 起只扣 1 天（日价），余额由每日 Cron 逐日续扣；2.37.1 起创建门槛为余额 ≥ 日价 × 7（仍只扣 1 天）** |
+| 78 | `my_server_checkout` | `{ orderId }` | `MyServerCharge`（现行）；目标 2.39.0（未实现）改 `MyServerOrder` | **2.23.0 新增（仅 UI）；2.28.0 起从余额扣费并开通，参数去掉 `channel`；2.29.0 起只扣 1 天（日价），余额由每日 Cron 逐日续扣；2.37.1 起创建门槛为余额 ≥ 日价 × 7（仍只扣 1 天）；目标 2.39.0（未实现）：确认下单不扣费、就绪后结算** |
 | 79 | `my_server_cancel_order` | `{ orderId }` | `MyServerOrder` | **2.23.0 新增（仅 UI）；取消订单** |
 | 80 | `my_server_destroy` | `{ serverId, confirm }` | `MyServer`（`state: "destroying"`） | **2.23.0 新增（仅 UI）；销毁** |
 | 81 | `my_server_rebuild` | `{ serverId, confirm }` | `MyServerRebuildResult`（`{ newServerId, state }`） | **2.23.0 新增（仅 UI）；销毁旧机并同地区同套餐重建；2.36.1 起未接入：控制面恒返回 `rebuild_not_supported`，界面暂不展示入口** |
@@ -1513,6 +1513,7 @@ type MyServerCatalogData = {
     monthly_usd: number;           // 月估，展示用
     daily_price_cents: number;     // 售价（USD 分 / 天）＝ 月价 ÷ 30；界面用它，不用 hourly_usd
     transfer_gib: number;          // 每月公网出口流量额度（GiB），= /sizes 的 transfer(TB) × 1000 取整；0 = 未知
+    regions: string[];             // 这个档位真实可用的地区 id；空数组 = 暂时哪都开不了
   }>;
 };
 ```
@@ -1527,6 +1528,7 @@ type MyServerCatalogData = {
   - 响应格式 / 缺字段 / 非法值 → `UPSTREAM_ERROR`（`reason = "invalid_response"`，`retryable = false`）。
 - **不做本地缓存、不返回假数据**：生产 Worker 未部署时如实返回 503。
 - **`transfer_gib` 来自 `/v2/sizes` 的 `transfer`**：DO 该字段是 **float、单位 TB**，只计公网出口；折算乘 **1000**（DO 计费文档把 1 TB 档写作「1,000 GiB」），四舍五入到整 GiB。**不新增任何 DO 调用、不需要额外 scope**——`/sizes` 本来就在取。取不到或非正数时填 `0`，界面整行不显示，**不写「不限量」**。
+- **`regions` 来自 `/v2/sizes` 每条规格自己的 `regions`（2.38.0）**：DO 按地区给可用性，**不存在「每个地区都能开每一档」**——2026-11-18 的建机 422 就是因为拿 sgp1 去开 `s-1vcpu-1gb`，而该档位在 sgp1 并不存在。`regions` 里的 id 一定是本目录 `regions[]` 的子集；缺这个字段或不是数组的套餐**整条丢弃**，不补空数组去猜。界面只能展示 `region ∈ plan.regions` 的组合；Worker 的下单 / `checkout` 在开始建机前按同一份数据校验，不满足返回 `plan_unavailable_in_region`（见 §7.15），**不先扣后退**。
 - 不注册为 AI 工具；不改任何本地状态；不发事件。**AI 读目录走只读工具 `CatalogOptions`（`tools.md` §4.53），两者共用同一个取数入口 `VpnToolServices::server_catalog()`，同样不做本地缓存**——目录本身仍不是工具。上面那组错误码就是 `CatalogOptions` 与 `StageSelect` 的错误码，工具侧不另造。
 
 ### 7.15 「我的服务器」8 条命令（仅 UI，2.23.0）
@@ -1554,8 +1556,8 @@ type MyServer = {
   transfer_gib: number;            // 每月公网出口流量额度（GiB）快照；建机时从目录写入
   charged_cents: number;           // 这台服务器实际扣过的钱（USD 分）：wallet_ledger 里 ref_type='order' 且 ref_id=该订单、kind='charge' 的行（只统计扣费行）的绝对值合计；没扣过 = 0
   refunded_cents: number;          // 已退回的钱（USD 分）：ref_type='server_refund' 且 ref_id=该服务器的合计；没退过 = 0
-  paid_until: string;              // 已付到哪个时刻（ISO 8601）；建行时即写入，永不为 null
-  billing_state: "active" | "past_due" | "expired";
+  paid_until: string;              // 现行：已付到哪个时刻（ISO 8601），建行时即写入，永不为 null。目标（2.39.0，未实现）：结算前为 null
+  billing_state: "active" | "past_due" | "expired";  // 现行三态。目标（2.39.0，未实现）：增 "pending" = 已建机、还没扣第 0 天
   grace_ends_at: string | null;    // 派生值：paid_until + 7d，**不落库**；仅 past_due/expired 时非空
   failure: { stage: MyServerState; code: string; message: string; retryable: boolean } | null;
 };
@@ -1593,23 +1595,36 @@ type MyServerCredentialNode = {
 - 销毁成功后按本地节点行的 `password_ref`（`node:<本地 nodes.id>`）删除密码，**不是**控制面换发后的 `node_id`；节点记录保留并标「服务器已销毁」（§6.5）。
 - **`my_server_rebuild` 未接入（2.36.1）**：控制面 `/v1/servers/{id}/rebuild` 目前恒返回 `PRECONDITION_FAILED / rebuild_not_supported`（`cloudflare/control-plane/src/servers.ts` 的路由分支直接回这个错）。命令、类型与控制面路由都保留，**界面暂不展示「重建」入口**；端点实现后直接放开即可，契约形状不变。不要在前端把失败文案说成「服务器状态异常」，那是另一种谎。
 - 身份丢失（钥匙串/本地凭据不可解密）：不自动重新注册；命令报 `PRECONDITION_FAILED / auth_required`，界面按 §19.2.4 处理。
-- 错误码只用 `runtime.md` §6.1 通用码 + `details.reason`：
+- 错误码只用 `runtime.md` §6.1 通用码 + `details.reason`。**下表同时规定界面动作**（2.38.1 补全）：界面按 `reason` 决定给哪个动作，不要按 `message` 猜——「设备被停用显示成稍后再试」就是这么来的。
 
-| 场景 | code | `details.reason` | retryable |
-|---|---|---|---|
-| 提供商不可用 / 网络失败 | `UPSTREAM_ERROR` | `provider_unavailable` | 是 |
-| 请求超时 | `TIMEOUT` | `timeout` | 是 |
-| 需要重新验证设备 | `PRECONDITION_FAILED` | `auth_required` | 是 |
-| 本地设备身份丢失（不自动重注册） | `PRECONDITION_FAILED` | `device_identity_lost` | 否 |
-| 地区售罄 | `PRECONDITION_FAILED` | `region_unavailable` | 是 |
-| 操作太频繁 | `RATE_LIMITED` | `rate_limited` | 是 |
-| 幂等键内容冲突 | `PRECONDITION_FAILED` | `idempotency_conflict` | 否 |
-| 同键请求处理中 | `PRECONDITION_FAILED` | `idempotency_in_flight` | 是（1s 后重试） |
-| 实例已不存在 | `NOT_FOUND` | `server_gone` | 否 |
-| 凭据验签 / 载荷不合法 | `UPSTREAM_ERROR` | `credential_signature_invalid` / `credential_server_mismatch` / `invalid_response` | 否 |
-| 凭据过期 | `PRECONDITION_FAILED` | `credential_expired` | 是 |
-| 设备被停用 | `PERMISSION_DENIED` | `device_revoked` / `account_blocked` | 否 |
-| 重建端点未接入（仅 `my_server_rebuild`） | `PRECONDITION_FAILED` | `rebuild_not_supported` | 否 |
+| 场景 | code | `details.reason` | retryable | 界面动作 |
+|---|---|---|---|---|
+| 提供商不可用 / 网络失败 | `UPSTREAM_ERROR` | `provider_unavailable` | 是 | 稍后重试；不改任何本地状态 |
+| 请求超时 | `TIMEOUT` | `timeout` | 是 | 同一动作重试一次；仍失败给「稍后再试」 |
+| 需要重新验证设备 | `PRECONDITION_FAILED` | `auth_required` | 是 | 拉起统一登录弹窗，成功后回到原处 |
+| 本地设备身份丢失（不自动重注册） | `PRECONDITION_FAILED` | `device_identity_lost` | 否 | 提示「这台设备的身份丢了」，给「重新注册设备」（§7.16）；旧服务器不可见要说明 |
+| 设备标识 / 设备密钥格式不合法 | `PRECONDITION_FAILED` | `device_invalid` | 否 | 同 `device_identity_lost`：重新注册设备；**不要重试原请求** |
+| 设备凭据与记录不一致 | `PRECONDITION_FAILED` | `device_mismatch` | 否 | 提示「设备身份对不上」，给「重新注册设备」；不显示成网络错误 |
+| 令牌签发失败（控制面密钥不可用时） | `INTERNAL` | `signing_unavailable` | 否 | 不自动重试；显示「登录暂时不可用，稍后再试」，保留已填邮箱 |
+| 目录读不到 / 不是合法目录 | `UPSTREAM_ERROR` | `catalog_unavailable` | 是 | 「读不到可售地区」+「重试」；不回退旧目录、不编地区 |
+| 地区不在目录里 | `PRECONDITION_FAILED` | `invalid_region` | 否 | 让用户换地区；同时重读目录 |
+| 套餐不在目录里 / 未配置售价 | `PRECONDITION_FAILED` | `invalid_plan` | 否 | 让用户换规格；同时重读目录 |
+| 目录里这个地区没有该档位 | `PRECONDITION_FAILED` | `plan_unavailable_in_region`；`details` 带 `region`、`plan` | 否 | 换地区或换档位；`创建` 置灰直到组合有效 |
+| 记账暂时不可用 | `INTERNAL` | `wallet_unavailable` | 是 | 「余额暂时记不上，稍后重试」；不建机、不扣钱 |
+| 订单已开始创建，不能取消 | `PRECONDITION_FAILED` | `cancel_after_paid` | 否 | 文案改为「已开始创建，请到服务器详情销毁」；**不给「取消订单」** |
+| 内置凭据公钥格式不对 | `INTERNAL` | `credential_key_invalid` | 否 | 只进诊断：密钥配置错误，不引导用户重试 |
+| 控制面用了未知的凭据签名密钥 | `UPSTREAM_ERROR` | `credential_key_unknown` | 否 | 提示「版本不匹配或服务端密钥未更新」，引导更新应用；不重试 |
+| 内置凭据公钥尚未配置 | `UPSTREAM_ERROR` | `credential_key_missing` | 否 | 同上，属配置问题；不显示成「服务器坏了」 |
+| 地区售罄 | `PRECONDITION_FAILED` | `region_unavailable` | 是 | 换地区，或稍后重试 |
+| 操作太频繁 | `RATE_LIMITED` | `rate_limited` | 是 | 稍后重试；按钮显示倒计时 |
+| 幂等键内容冲突 | `PRECONDITION_FAILED` | `idempotency_conflict` | 否 | 「这次操作已作废，请重来一次」 |
+| 同键请求处理中 | `PRECONDITION_FAILED` | `idempotency_in_flight` | 是（1s 后重试） | 按钮保持 loading，自动重试一次 |
+| 实例已不存在 | `NOT_FOUND` | `server_gone` | 否 | 「这台服务器已不存在」；刷新列表 |
+| 凭据验签 / 载荷不合法 | `UPSTREAM_ERROR` | `credential_signature_invalid` / `credential_server_mismatch` / `invalid_response` | 否 | 不写入节点；提示「控制面返回的凭据不可用」，给「重新获取」 |
+| 凭据过期 | `PRECONDITION_FAILED` | `credential_expired` | 是 | 自动重新获取一次凭据，再失败才报错 |
+| 设备被停用 | `PERMISSION_DENIED` | `device_revoked` / `account_blocked` | 否 | 提示「这台设备已被停用」；给「重新注册设备」与客服入口，**不要显示成稍后再试** |
+| 重建端点未接入（仅 `my_server_rebuild`） | `PRECONDITION_FAILED` | `rebuild_not_supported` | 否 | 不展示「重建」入口；若已触发，如实说「暂不支持重建」 |
+| 支付通道不合法（仅 `my_server_topup`） | `INVALID_ARGUMENT` | `channel_invalid` | 否 | 界面只允许 `dodo`（非生产可 `fake`）；正常路径不会出现 |
 
 - 发 `my-server-changed` / `my-server-order-changed`（`events.md` §4.22 / §4.23）；不新增其它事件。
 - 不注册写操作 AI 工具；`MyServers` 只读工具只能看列表与状态（`tools.md` §4.x）。
@@ -1641,7 +1656,9 @@ type MyServerIdentity = { has_identity: boolean; account_id: string | null };
 - `account_id` 只在 `has_identity` 为真时给出；否则为 `null`。
 - 本地读取失败一律按 `false` 返回，不抛错、不发事件、不产生任何写入。
 
-### 7.18 登录与支付命令（仅 UI，2.27.0；2.27.1 增 `account_kind`；2.28.0 改预付费余额；2.29.0 改按天扣费；2.37.1 建机门槛 7 天余额）
+### 7.18 登录与支付命令（仅 UI，2.27.0；2.27.1 增 `account_kind`；2.28.0 改预付费余额；2.29.0 改按天扣费；2.37.1 建机门槛 7 天余额；**2.39.0 就绪后扣款：目标状态·未实现**）
+
+> ⚠️ **2.39.0「就绪后扣款」是目标契约，代码尚未实现。** 实现落地前，本节一律以 **2.38.x 现行行为**为准：`my_server_checkout` 仍从余额扣 1 天并返回 `MyServerCharge`；`paid_until` 非空；`billing_state` 没有 `pending`；没有 `charge_mode`；没有 `settle_insufficient`；建机失败仍是「先扣后退」。凡标「目标（2.39.0，未实现）」的段落只作实现依据，不描述现状。
 
 设计见 `docs/design/login-and-payment.md`。设备身份仍由 Host 静默维护；登录把设备并入邮箱账户，**建机、服务器管理、支付都要求已登录**。令牌与设备秘密仍只在 Host 的 `secrets.enc`，前端拿不到。
 
@@ -1673,6 +1690,7 @@ type MyServerTopup = {
   denomination_cents: number;     // 1000 / 2000 / 5000 / 10000
 };
 
+/** 现行（2.38.x）：`my_server_checkout` 返回它。目标（2.39.0，未实现）：改返回 `MyServerOrder`，本类型退役。 */
 type MyServerCharge = {
   order_id: string;
   state: "paid" | "provisioning" | "ready";
@@ -1690,12 +1708,21 @@ type MyServerCharge = {
 | `my_server_order_get { orderId }` | `GET /v1/orders/{id}`；建机期间轮询，事件不可用时同样用它兜底 |
 | `my_server_wallet {}` | `GET /v1/wallet`；返回余额与可充值档位（`denominations_cents`，USD 分、升序，来自产品表键）。`updated_at` 由 Host 本地取时间，控制面不提供。余额与扣费都由 Host 计算，前端不做金额运算 |
 | `my_server_topup { denomination, channel? }` | `POST /v1/topups` 创建 Dodo 充值会话，返回 `checkout_url` 由系统浏览器打开；`channel` 省略等于 `dodo`，非生产可 `fake`（直接入账）。**收银台在浏览器里打不开时不能报成功**：返回 `INTERNAL / checkout_open_failed`，`details` 带 `topup_id`、`checkout_url` 与 `open_error`，界面据此给「重新打开」和可复制的链接 |
-| `my_server_checkout { orderId }` | **余额 ≥ 日价 × 7 才放行，实际只扣 1 天**（`charged_cents` = 第 0 天的日价）：成功返回 `MyServerCharge` 并开始建机；之后每天由控制面 Cron 扣一天。余额不足 → `insufficient_balance`（带 `required_cents` / `shortfall_cents` / `min_days`），不扣钱、不建机、订单保持 `pending_payment` |
+| `my_server_checkout { orderId }` | **现行（2.38.x）：余额 ≥ 日价 × 7 才放行，实际只扣 1 天**（`charged_cents` = 第 0 天的日价），成功返回 `MyServerCharge` 并开始建机；之后每天由控制面 Cron 扣一天。余额不足 → `insufficient_balance`（带 `required_cents` / `shortfall_cents` / `min_days`），不扣钱、不建机、订单保持 `pending_payment`；该档位的 `regions` 不含订单地区 → `plan_unavailable_in_region`。**目标（2.39.0，未实现）：改为确认下单、不扣费，返回 `MyServerOrder`，就绪后结算**，见下方目标段 |
 
 - **计费单位是「天」**（2026-11-16 拍板）：买机那次 `checkout` 只扣 1 天，之后控制面每天扣一天，直到余额不足进 7 天宽限。契约里没有「月」的概念，`monthly_usd` 只是展示用的乘法。
-- **建机门槛是 7 天费用，不是预扣**（2.37.1，2026-11-18 产品拍板）：`checkout` 要求 `balance_cents ≥ 日价快照 × 7`（日价快照 = 订单 `amount_cents`；$6 档 = 140 分、$9 档 = 210 分、$18 档 = 420 分），实际仍只扣 1 天。**门槛只是准入校验**：`paid_until` 仍是 `created_at + 1d`，不预扣 7 天、不改变逐日 Cron 续费与 7 天宽限的既有口径；销毁仍只退「已扣但未用完的整天」（§7.15、`login-and-payment.md` §4.6）。`my_server_rebuild` 走新订单，同一门槛。
-- **门槛与扣费必须由同一条账本语句保证**：`recordLedgerEntry` 的守卫条件用 7× 日价（`guard`），`amountCents` 仍是 −1× 日价。只做扣费前的余额查询不够——预检与扣款之间进来的并发扣费能把余额打到 1 天门槛以内，导致「门槛形同虚设」。
-- **`MyServerCharge.charged_cents` 就是日价**：$6 档 = 20、$9 档 = 30、$18 档 = 60（USD 分）。前端不要用它乘 30 去「还原月价」，那是 `daily_price_cents × 30`。
+
+**目标（2.39.0，未实现）：就绪后扣款。** 以下九条只作实现依据，落地前不要按它们改代码。
+
+- **目标 · 扣款时机是「就绪后」**（2026-11-18 产品拍板）：`checkout` 不扣钱；服务器建好、并且 enroll 回调确认 sing-box 起成功后，才在同一个 D1 batch 里扣第 0 天并写 `orders.state = "ready"`。**`ready` 的定义就是「已就绪且已扣首日」**，不设 `ready_unpaid` 中间态。
+- **目标 · 结算批的守卫写法**：`recordLedgerEntry` 守卫 `balance ≥ 1× 日价`；`orders.ready` / `paid_at` / `paid_via`、`servers.state = "active"` + 计费三列这几条 followUp **全部带 `EXISTS(ledger id)`**。守卫失败返回 `ok:false`，调用方显式处理——调 DO 销毁 → `servers.state = "error"`、`failure_code = "settle_insufficient"`（**不写 `destroyed`**，列表保留错误行）、`orders.state = "failed"`、写 `settle_insufficient` 审计；另由 Cron 兜底清扫「`used_at` 非空 + 无 charge 流水 + 超时」的同款残留。
+- **目标 · 门槛与结算分开**：7 天门槛只在 `checkout` 预检（门槛 ≠ 预扣、≠ 最低消费）；**结算只卡 1 天**——余额够 1 天就该成功，不足 1 天才销毁。并发下先到先得，**不做预留**；用 `settle_insufficient` 审计量真实频率再决定是否加冻结。
+- **目标 · 结算前不写计费三列**：`checkout` 建服务器行时 `billing_anchor_at = 0`、`paid_until = NULL`、`billing_state = "pending"`；结算成功时写 `billing_anchor_at = settle_at`、`paid_until = settle_at + 1d`、`daily_price_cents`。Cron 只扫 `paid_until > 0`、`billing_state <> 'pending'`、且 `charge_mode = 'upfront'` 的行。
+- **目标 · 新旧口径用列区分，不用 `paid_at` 猜**：`orders` 增 `charge_mode TEXT NOT NULL DEFAULT 'upfront'`（`upfront` | `at_ready`；新订单写 `at_ready`，走新编号迁移）。Cron 的补建与退款扫描只处理 `upfront`；`paid_via` 只在结算 batch 里写。
+- **目标 · 退款先确认扣过**：`refundPlan` / `failPermanently` 退款前必须查该订单存在 `kind='charge'` 的流水；没有就跳过并记 `refund_skipped_no_charge`。建机失败的「先扣后退」只服务部署前的存量订单，清完即删；销毁退未用整天不变。
+- **目标 · 前端读什么**：`my_server_checkout` 返回 `MyServerOrder`；「实际扣了多少」看 `MyServer.charged_cents`（结算前恒为 0），结算结果通过 `my-server-order-changed` / `my-server-changed` 到达；结算失败时 `MyServerOrder.failure.code = "settle_insufficient"`，界面文案「没开通，本次没有扣费」+ 去充值 / 重新下单。
+- **目标 · `pending` 的计费文案**：`billing_state = "pending"`（`paid_until = null`）时不得渲染「本期有效至」或任何 1970 日期；显示「创建中，开通后开始计费」。`paid_until` 为 null 时 `grace_ends_at` 也是 null。
+- **目标 · 返回类型**：`my_server_checkout` 返回 `MyServerOrder`（`state = "provisioning"`），`MyServerCharge` 退役。
 - **账户块只显示余额，不显示「约可运行 N 天」**：多台机器时「余额 ÷ 各机器日价合计」把不同套餐的消耗混成一个数，用户据此判断不到任何一台的到期时间；核对到期靠机器详情的 `每天 $X · 本期有效至 …`（`MyServer.paid_until`）。派生值不下发、也不在 Worker、Host、前端各自算一份——2026-11-16 用户拍板撤掉。
 - **`MyServer` 的计费事实在 §7.15**：`paid_until`（已付到哪一刻）、`daily_price_cents`、`billing_state`、`grace_ends_at`；界面渲染「每天 $X · 本期有效至 …」与宽限剩余天数只用这四个字段。
 - **「本期有效至」的文案规则（2026-11-16 定）**：`billing_state = 'active'` 且 `paid_until > now` → `每天 $X · 本期有效至 <时间>`；`billing_state` 仍是 `active` 但 `paid_until ≤ now`（当天 Cron 还没扣上，最长 24h）→ `每天 $X · 本期已到期，下一轮扣费顺延`，**不显示那个已过去的时间点**，也不用异常色。`past_due` / `expired` 的欠费文案单独定义（`login-and-payment.md` §4.11）。不用「已付至」（过去时口吻，读起来像「到点就停」），也不用「下次扣费：<具体时间>」（Cron 是批量任务，报具体时刻是不准的承诺）。
@@ -1715,12 +1742,14 @@ type MyServerCharge = {
 | 同 IP 发码过多 | `RATE_LIMITED` | `email_rate_limited` | 是 |
 | 验证码错误 | `PRECONDITION_FAILED` | `code_invalid`（带 `details.attempts_remaining`） | 是 |
 | 验证码过期 / 不存在 | `PRECONDITION_FAILED` | `code_expired` | 否 |
+| 验证码已经用过（行被消费） | `PRECONDITION_FAILED` | `code_used` | 否 |
 | 同码错 3 次 | `PRECONDITION_FAILED` | `too_many_attempts` | 否 |
 | 设备已绑定另一个邮箱 | `PRECONDITION_FAILED` | `account_conflict` | 否 |
 | 需要登录 | `UNAUTHENTICATED` | `auth_required` | 是 |
 | 登录过期 | `UNAUTHENTICATED` | `token_invalid` | 是（自动刷新后重试） |
 | 生产环境用假充值 | `PRECONDITION_FAILED` | `channel_not_allowed` | 否 |
 | 目录价与配置价不一致 | `PRECONDITION_FAILED` | `price_mismatch` | 否 |
+| 目录里这个地区没有该档位 | `PRECONDITION_FAILED` | `plan_unavailable_in_region`；`details` 带 `region`、`plan` | 否（换地区或换档位） |
 | Dodo 充值会话失败 | `UPSTREAM_ERROR` | `checkout_unavailable` | 是 |
 | 订单已过期 | `PRECONDITION_FAILED` | `order_expired` | 否 |
 | 订单已结束（已取消/失败），不能再扣费 | `PRECONDITION_FAILED` | `order_not_payable` | 否 |
@@ -1729,6 +1758,7 @@ type MyServerCharge = {
 | **余额不足（不足 7 天费用）** | `PRECONDITION_FAILED` | `insufficient_balance`；`details`：`required_cents`（日价 × 7）、`shortfall_cents`（`required_cents − 余额`，恒 > 0）、`min_days: 7` | 是（充值后重试） |
 | 充值面额不合法 | `PRECONDITION_FAILED` | `invalid_denomination` | 否 |
 
+- **`code_used` 与 `code_expired` 必须分开**：`code_used` = 这串码已经被成功用过（行被消费），界面提示「这个验证码已经用过了，重新获取一个」并给「重新发送」；**不得显示成「已过期」**，也不归因到用户输错。两者都不可重试——同一串码再提交仍然失败。
 - **余额不足的 `details` 只认三个字段**：`required_cents`、`shortfall_cents`、`min_days`。`shortfall_cents` 是唯一短差字段（前端 `MyServerWizard.tsx` 读的就是它）；早期文档里的 `shortfall` 只是简写，**没有这个字段**，不要另发一份。Host 映射层（`src-tauri/src/control_plane/error.rs`）逐字段透出 `required_cents`（i64）/ `shortfall_cents`（i64）/ `min_days`（u64），**任一缺失不影响其它字段**；前端按字段存在与否分别使用，不要求三个齐全。
 - **用户看到的文案由前端拼**：`余额不足，还差 $X。`（`X = shortfall_cents`，按美元分格式化）；不把 Worker 的 `message` 直接贴到界面。
 
@@ -2476,10 +2506,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.37.2** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** |
+| `contracts/commands.md` | **2.39.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0，目标状态·未实现）** |
 | `contracts/events.md` | **2.17.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.18.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** |
+| `contracts/tools.md` | **3.19.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** |
 | `data-model.md` | **9** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` + `current_node_id` 允许为 `NULL`（seed 预选不写库） |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -2494,6 +2524,32 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.39.0（2026-11-18，就绪后扣款：**目标状态·未实现**）
+
+> 本版是**目标契约**，代码尚未实现；落地前以 `2.38.x` 现行行为为准（checkout 仍扣 1 天、仍返回 `MyServerCharge`、`paid_until` 非空、无 `pending` / `charge_mode` / `settle_insufficient`）。
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.39.0`；目标：`my_server_checkout` 语义改为「确认下单并开始建机，**不扣费**」，返回 `MyServerOrder`（`state = "provisioning"`）；`MyServerCharge` 退役 | 语义变更（未实现） | 产品负责人 2026-11-18 拍板；`login-and-payment.md` §4.4 / §4.14 |
+| 2 | 目标：结算在 enroll 回调的同一 D1 batch：扣第 0 天、`orders.ready`、`servers.active` + 计费三列，全部带 `EXISTS(ledger id)` 守卫；守卫失败显式销毁并留下 `error / settle_insufficient` 行，另由 Cron 兜底清扫 | 行为 / 实现约束（未实现） | 评审 6 点 |
+| 3 | 目标：`MyServer.paid_until` 改为 `string \| null`，`billing_state` 增 `"pending"`；结算前不写计费三列；Cron 跳过 pending（类型块当前仍按现行写） | 数据结构（未实现） | 界面不能把未开通渲染成 1970 |
+| 4 | 目标：`orders` 增 `charge_mode`（`upfront` / `at_ready`，默认 `upfront`），Cron 与补建只处理 `upfront`；`paid_via` 只在结算 batch 写 | 实现约束（未实现） | 评审第 4 点：不靠 `paid_at` 猜口径 |
+| 5 | 目标：`refundPlan` / `failPermanently` 退款前必须确认该订单存在 `kind='charge'` 流水；建机失败自动退款只服务部署前的存量订单，清完即删；销毁退未用整天不变 | 实现约束（未实现） | 评审第 5 点：不能退没扣过的钱 |
+
+### 2.38.1（2026-11-18，§7.15 错误码补全与界面动作）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.38.1`；§7.15 错误表补 `device_invalid` / `device_mismatch` / `signing_unavailable` / `catalog_unavailable` / `invalid_region` / `invalid_plan` / `wallet_unavailable` / `cancel_after_paid` / `credential_key_invalid` / `credential_key_unknown` / `credential_key_missing` / `channel_invalid`，并新增「界面动作」列；§7.18 登录表补 `code_used`（与 `code_expired` 分开，界面不得显示成已过期） | 错误语义 | 实现已有、契约没写，界面只能猜 |
+| 2 | 明确 `device_revoked` / `account_blocked` 的界面动作是「重新注册设备 + 客服」，不得显示成「稍后再试」；`credential_key_*` 属配置/版本问题，不引导用户重试 | 文案约束 | 同上 |
+
+### 2.38.0（2026-11-18，目录按真实数据给出地区 × 档位）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.38.0`；`my_server_catalog.plans[]` 增 `regions: string[]`：该档位真实可用的地区 id，来自 DO `/v2/sizes` 每条规格的 `regions`，并只保留目录 `regions[]` 里真实下发的 id。缺这个字段或不是数组的套餐整条丢弃，不补空数组 | 数据结构 | 2026-11-18 建机 422：我们假设 DO 偏好处处一样，从没拿真实响应核过。真实数据里 sgp1 就没有 `s-1vcpu-1gb` |
+| 2 | 下单与 `my_server_checkout` 在扣费前校验 `region ∈ plan.regions`；不满足返回 `PRECONDITION_FAILED / plan_unavailable_in_region`（`details` 带 `region`、`plan`），不扣钱、不建机、不先扣后退。目录读不到时结账返回 `UPSTREAM_ERROR / catalog_unavailable`（可重试），不跳过校验 | 错误语义 | 同上；`tools.md` 3.19.0 同步 Host 侧校验 |
 
 ### 2.37.2（2026-11-18，服务器详情补「钱去哪了」）
 

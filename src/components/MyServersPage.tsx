@@ -51,6 +51,8 @@ interface Props {
   } | null;
   /** 空态里的「去连接」：切到连接目的地。 */
   onGoConnect: () => void;
+  /** 已下单但还认不出新机器：不选中任何一台，只给一行提示。 */
+  pendingServer?: boolean;
 }
 
 /**
@@ -85,6 +87,7 @@ export function MyServersPage({
   onAiLocate,
   trial = null,
   onGoConnect,
+  pendingServer = false,
 }: Props) {
   const trialHint = (() => {
     if (!trial || trial.seedNodeCount <= 0) return null;
@@ -233,6 +236,19 @@ export function MyServersPage({
     );
   }
 
+  // 下单成功但还认不出是哪台：先不选中，避免打开别人的机器详情。
+  if (pendingServer) {
+    return (
+      <div className="myservers myservers--empty">
+        <section className="myservers__empty" role="status">
+          <p className="myservers__empty-text">
+            服务器已下单，正在创建，稍后会自动出现。
+          </p>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="myservers myservers--empty">
       <section className="myservers__empty">
@@ -244,6 +260,7 @@ export function MyServersPage({
         <button
           type="button"
           className="btn btn--primary myservers__empty-cta"
+          disabled={readOnly}
           onClick={onNew}
         >
           新建节点

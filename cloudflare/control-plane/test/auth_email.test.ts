@@ -165,6 +165,45 @@ describe("校验验证码", () => {
     expect(body.details.reason).toBe("too_many_attempts");
   });
 
+  it("同一个验证码连续校验两次：第二次必须失败，且不再签发令牌", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    const mail = stubEmail();
+    db.rows("accounts").push({
+      id: "acct_anon",
+      kind: "device",
+      email: null,
+      status: "active",
+      merged_into: null,
+      created_at: 0,
+    });
+    db.rows("devices").push({
+      id: DEVICE,
+      account_id: "acct_anon",
+      secret_hash: DEVICE_HASH,
+      platform: "macos",
+      app_version: "1.0.0",
+      refresh_family: "rf",
+      created_at: 0,
+      last_seen_at: 0,
+      revoked_at: null,
+    });
+
+    await handleEmailAuth(startRequest(env), env as never);
+    const code = mail.code();
+    const first = await handleEmailAuth(verifyRequest(env, code), env as never);
+    expect(first?.status).toBe(200);
+    const tokensAfterFirst = db.rows("refresh_tokens").length;
+
+    // 消费验证码是一条带守卫的 DELETE：第二次拿不到行，不能签发第二套令牌。
+    // 语义是「已经用过」，不是「过期」。
+    const second = await handleEmailAuth(verifyRequest(env, code), env as never);
+    expect(second?.status).toBe(409);
+    const body = (await second!.json()) as { details: { reason: string } };
+    expect(body.details.reason).toBe("code_used");
+    expect(db.rows("refresh_tokens")).toHaveLength(tokensAfterFirst);
+  });
+
   it("同一邮箱第二次登录复用同一个账户，不会建出第二个", async () => {
     const db = new FakeD1();
     const env = await makeEnv(db);

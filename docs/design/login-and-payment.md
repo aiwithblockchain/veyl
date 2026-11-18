@@ -17,7 +17,7 @@
 | 3 | 令牌 | 复用现有 `TOKEN_SIGNING_JWK`（Ed25519），只加 `kind` / `amr` claim；access 15 分钟、refresh 30 天滑动 |
 | 4 | 收费 | **M1 只做预付费余额**（USD 分记整数）；Dodo 一次性充值产品，微信可付；订阅不上线（M2） |
 | 4b | 商户 | 与 TweetPilot **同一个 Dodo 商户账号**；充值产品、webhook、回跳页、API key 都按 Veyl 自己的建（§4.8） |
-| 5 | 建机时机 | 下单 → **余额 ≥ 日价 × 7 且扣 1 天成功才建机**；余额不足返回 `insufficient_balance`（带 7 天门槛与短差），不扣钱、不建机；之后每天由 Cron 扣一天（§4.4、§4.6） |
+| 5 | 建机时机 | 现行（2.38.x）：下单 → **余额 ≥ 日价 × 7 且扣 1 天成功才建机**，余额不足返回 `insufficient_balance`，不扣钱、不建机。目标（2.39.0，未实现）：预检后不扣费，就绪时扣第 0 天（§4.14）；之后每天由 Cron 扣一天 |
 | 6 | 幂等 | 充值 webhook 用 `webhook-id` + `payment_id` + 账本 ref 唯一；扣费用账本唯一键 + 原子守卫；同一订单 / 同一期只扣一次 |
 | 7 | 价格 | 目录与扣费都用**售价**（成本 × 1.5），存 USD 分；Dodo 只负责把充值换成 USD 入账 |
 | 8 | 到期 | 每日 Cron 扣费续期；扣不动进 **7 天宽限**，结束标 `expired`；不删机器、不删凭据，继续计费（§4.6、§4.11、§8） |
@@ -323,7 +323,7 @@ type MyServerAccount = {
 **计费单位：天**（2026-11-16 拍板，三案中选 C）。
 
 - **日价是配置里的唯一真源**：`PLAN_DAILY_PRICE_CENTS` 直接给「分/天」（`$6 档 → 20`）。**月价不是配置，是派生值**：`monthlyCents = dailyPriceCents × 30`，仅供界面展示。这样「月价必须被 30 整除」的约束在数据源头就不存在了（§5.2）。
-- 余额按天扣，买机时只扣 1 天，之后每天扣一天；连扣 30 天合计**正好等于展示的月价**（§4.6）。
+- 余额按天扣，买机时只扣 1 天，之后每天扣一天；连扣 30 天合计**正好等于展示的月价**（§4.6）。目标（2.39.0，未实现）：改为就绪时扣第 0 天，见 §4.14。
 - **建机看 7 天余额，扣费仍按天**（2026-11-18 产品拍板）：三条口径要一起读——
   1. **按天扣费**：建机只扣第 0 天，之后每天扣一天；连续扣满 30 天正好等于展示的月价。
   2. **创建门槛**：`checkout` 要求余额 ≥ 日价 × 7（$6 档 `$1.40`、$9 档 `$2.10`、$18 档 `$4.20`），不够就 `insufficient_balance`，不扣钱、不建机。
@@ -383,30 +383,30 @@ POST /v1/topups { denomination_cents: 2000 }
 - `payment.failed`：`topups.status = failed`，不入账；用户重新发起一笔（新 topup）。
 - 非生产可用 `channel: "fake"` 直接入账，方便本地跑通；生产拒绝。
 
-### 4.4 买服务器（余额扣费）
+### 4.4 买服务器（现行：余额扣 1 天；目标 2.39.0：确认下单、就绪后结算，**未实现**）
 
 - 下单 `POST /orders`：`orders.amount_cents` 写**下单日的日价**快照（不是月价）；`orders.amount_usd` 是**同一个数的美元表示**（`20 分 → 0.20`）。两个字段永远是同一个量，差 100 倍就是 bug——历史上最容易在这里把月价写进去，导致 30 倍扣费。
-- 结账 `POST /orders/{id}/checkout`：**直接从余额扣 1 天，不创建 Dodo 会话**。
+- 结账 `POST /orders/{id}/checkout`：**现行（2.38.x）直接从余额扣 1 天，不创建 Dodo 会话**。**目标（2.39.0，未实现）改为确认下单、不扣钱，就绪后结算（§4.14）**——实现落地前以现行口径为准。
+
+**现行（2.38.x）**：checkout 在原子扣费里扣 1 天 → `orders = provisioning` → 建服务器行并写 `billing_anchor_at = created_at`、`paid_until = created_at + 1d`、`billing_state = 'active'` → 建机；建机失败走「先扣后退」。
+
+**目标（2.39.0，未实现）**：
 
 ```
 checkout
   ├─ 订单必须是 pending_payment
   ├─ 订单已过期（expires_at < now）
   │    └─ 转 cancelled → 409 / order_expired（不留永远结不了账的死状态）
-  ├─ 原子扣费（§4.7 原语）：balance >= 第 0 天的日价 × 7（建机门槛；实际只扣 1 天）
-  │    ├─ 成功 → ledger(-day0, ref = order:<order_id>) → orders = paid
-  │    │         → 建服务器行：billing_anchor_at = created_at、
-  │    │           paid_until = created_at + 1d、daily_price_cents = 日价快照、
-  │    │           billing_state = 'active' → 建机
-  │    └─ 失败 → 409 PRECONDITION_FAILED / insufficient_balance
-  │               （details: required_cents / shortfall_cents / min_days: 7；
-  │                不扣钱、不建机、订单保持 pending_payment，可充值后重试）
-  └─ 幂等键 + ledger ref 唯一：双击 / 重试只扣一次
+  ├─ 预检余额 ≥ 日价 × 7（建机门槛；不扣钱）
+  ├─ 校验目录里的地区 × 档位（region ∈ plan.regions）
+  │    └─ 不满足 → 409 PRECONDITION_FAILED / plan_unavailable_in_region
+  ├─ 成功 → orders = provisioning（charge_mode = 'at_ready'）
+  │         建服务器行：billing_state = 'pending'、billing_anchor_at = 0、
+  │         paid_until = NULL → 建机
+  └─ 幂等键 + 订单唯一：双击 / 重试只建一台
 ```
 
-- **首次只扣 1 天，不是一整月**。买机押一个月的做法会让「只想试三天」的用户直接放弃；按天扣则由 Cron 一天一天往前推。
-- **建服务器行时必须同时写 `billing_anchor_at`、`paid_until`、`daily_price_cents`**：不写 `paid_until` 会让 Cron 的 `paid_until <= now` 永不成立，等于永久免单；不写锚点则日序 `n` 算不出来（日价是随 `n` 变化的，见 §4.6）；不写日价快照则续费扣减没有依据（且违反 `NOT NULL`）。
-- **`billing_anchor_at` 取 `created_at`**，一写定终身，不随后续扣费漂移。不取「首次扣费时间」：那和建机是同一刻，但一旦扣费失败重试、或补建（§4.6 B 段）插进来，锚点就会和用户理解的「从什么时候开始用」错位。
+- **目标：第 0 天的扣款在「就绪后」发生**（§4.14）：服务器建好、enroll 确认 sing-box 起成功后，才在同一个 D1 batch 里扣第 0 天并写 `orders.ready`。`paid_until` / `billing_anchor_at` / `daily_price_cents` 都在结算 batch 写，不在建行时写。
 - **余额不足是明确原因，不是异常**：界面显示「余额不足，还差 $X。」+ 去充值入口；不建机、不扣钱。门槛是 **7 天费用**（2026-11-18 由「够一天」提高）：`X = 日价 × 7 − 余额`。例：余额 `$0`、$9 档（`$0.30/天`）→「余额不足，还差 $2.10。」；余额 `$1.00` →「余额不足，还差 $1.10。」
 - **前端预检同一公式**：建机向导在 `placeOrder` 前用目录的 `daily_price_cents × 7` 与钱包余额比较，不足就不下单、原地给同一句提示与「去充值」；Host / Worker 仍是最终裁判，前端预检只省掉一次注定失败的请求。金额取值按字段独立兜底：**优先 `details.shortfall_cents`**；缺它才用 `required_cents − 本地余额` 补算；两个都没有才退纯文案「余额不足。」（Host 把 `required_cents` / `shortfall_cents` / `min_days` 逐字段独立透出，不保证同时存在）。
 - 充值后可以重新点结账（同一订单，新 `Idempotency-Key`），订单在 10 分钟内有效；过期后订单转 `cancelled`，用户重新下单。
@@ -414,7 +414,7 @@ checkout
 - 订单状态不再有 `awaiting_payment` / `payment_failed` / `expired`：没有外部收银台可等，失败就是余额不足或订单过期。
 - **日价就是配置里的那个数，没有第二种算法**：`PLAN_DAILY_PRICE_CENTS` 直接给分/天（§5.2）；若仍沿用 `PLAN_PRICES_USD`（月价），则必须满足 `月价分 % 30 == 0`，否则该档不可售（`invalid_plan`）。**不允许取整兜底**——那会让「连扣 30 天 == 月价」变成谎言。
 - **`servers.monthly_usd` 只是展示月估**：`= daily_price_cents × 30 / 100`，不参与任何扣费计算。`servers.hourly_usd` 同理只用于与 DO 成本核对。
-- **rebuild 是一次新的计费生命周期**：新建订单、新的 `order:<new_order_id>` 第 0 天扣费、`billing_anchor_at` 重置为新机创建时刻、`paid_until = anchor + 1d`、`daily_price_cents` 按当时价格重写。**不复用旧的 `order:<id>`**——否则唯一键会挡住第二次首日扣费，等于重建免费。
+- **rebuild 是一次新的计费生命周期**：新建订单、新的 `order:<new_order_id>` 第 0 天在就绪后结算、`billing_anchor_at` 重置为新机结算时刻、`paid_until = anchor + 1d`、`daily_price_cents` 按当时价格重写。**不复用旧的 `order:<id>`**——否则唯一键会挡住第二次首日扣费，等于重建免费。
 
 ### 4.5 Webhook（只处理充值）
 
@@ -428,7 +428,7 @@ checkout
 | 消费事件 | 只处理 `payment.succeeded` / `payment.failed`；**M1 不订阅任何 subscription 事件** |
 | 匹配 | 优先 `metadata.topup_id`；缺失时用 `data.checkout_session_id` 查 `topups`；都匹配不上 → `unmatched_payments`、返回 200、告警 |
 | 处理失败 | `500` 让 Dodo 重投；处理必须幂等 |
-| 建机 | webhook **不建机**；M1 建机只发生在余额扣费成功的 checkout 里 |
+| 建机 | webhook **不建机**；建机只发生在 `my_server_checkout` 之后的建机流程里，第 0 天由 enroll 回调结算（§4.14） |
 
 ### 4.6 续费、宽限与到期
 
@@ -437,7 +437,7 @@ checkout
 **计费锚点与日序**
 
 ```
-anchor = servers.billing_anchor_at      # 建机时写死 = created_at；rebuild 时重置
+anchor = servers.billing_anchor_at      # 现行 = created_at；目标（2.39.0，未实现）= settle_at；rebuild 时重置
 day_ms = 86_400_000
 n      = (paid_until - anchor) / day_ms # 已扣满的天数，从 0 开始
 day    = servers.daily_price_cents      # 日价快照，建机时写死，整段生命周期不变
@@ -746,14 +746,14 @@ ALTER TABLE accounts ADD COLUMN balance_cents INTEGER NOT NULL DEFAULT 0;
 -- 没有真实用户：orders / servers 直接重建，新列一律 NOT NULL，避免 NULL 被当 0 免费建机
 -- orders.amount_cents        INTEGER NOT NULL   -- 下单日的日价快照（USD 分），迁移时从 amount_usd 回填
 -- orders.charge_ledger_id    TEXT               -- 扣费流水
--- servers.billing_anchor_at  INTEGER NOT NULL   -- 计费锚点（ms），= created_at，一写定终身
+-- servers.billing_anchor_at  INTEGER NOT NULL   -- 计费锚点（ms）：现行 = created_at；目标（2.39.0，未实现）= settle_at，一写定终身
 -- servers.paid_until         INTEGER NOT NULL   -- 已付到哪个时刻（ms）；建行时写 created_at + 1d
 -- servers.daily_price_cents  INTEGER NOT NULL   -- 下单时**日价**快照（USD 分/天，来自 PLAN_DAILY_PRICE_CENTS），Cron 每天扣它
 -- servers.billing_state      TEXT NOT NULL      -- active | past_due | expired
 CREATE UNIQUE INDEX servers_order ON servers(order_id);
 ```
 
-- **`plan_price_cents`（月价快照）改名为 `daily_price_cents`（日价快照）**，并新增 `billing_anchor_at`。三列都在建机那一句同时写入，缺任何一列都会让 §4.6 的日序算错或永久免单。
+- **`plan_price_cents`（月价快照）改名为 `daily_price_cents`（日价快照）**，并新增 `billing_anchor_at`。现行三列在**建机那一句**同时写入；目标（2.39.0，未实现）改为在**结算那一句**写（结算前写 0 / NULL）。缺任何一列都会让 §4.6 的日序算错或永久免单。
 - `wallet_ledger.ref_type` 取值扩成 `dodo_payment | order | server_day | server_refund | manual`；列注释同步。
 - `accounts.balance_cents` 的非负性靠应用层守卫（`balance_cents >= ?`）+ 每日对账；SQLite 的 `ALTER TABLE` 加不了 `CHECK`。
 - `orders.amount_usd` 退役：新代码只用 `amount_cents`，且该列 **NOT NULL**；迁移时从 `amount_usd × 100` 回填（没有真实用户时直接重建为空表也可以）。
@@ -909,11 +909,11 @@ WHERE id IN (
 
 ### 4.13 建机门槛 7 天余额：落地清单（2026-11-18 拍板）
 
-口径见 §4.1 / §4.4：余额 ≥ 日价 × 7 才允许建机，实际仍只扣 1 天；销毁退未用整天。命令契约见 `commands.md` §7.18（2.37.1）。
+口径见 §4.1 / §4.4：余额 ≥ 日价 × 7 才允许建机。**目标（2.39.0，未实现）：checkout 不扣费、结算在建机就绪后（§4.14）**；下表描述的是现行「先扣后退」实现，切换时按 §4.14 改。命令契约见 `commands.md` §7.18（2.39.0，目标状态·未实现）。
 
 | 侧 | 改哪里 | 做什么 |
 |---|---|---|
-| 控制面 | `src/orders.ts` 的 `checkout` | 余额判断从 `available < row.amount_cents` 改为 `available < row.amount_cents * 7`；两个返回点（预检、账本守卫失败）的 `details` 都带 `required_cents: row.amount_cents * 7`、`shortfall_cents: required − available`、`min_days: 7`；扣费守卫同批改成 7×（`recordLedgerEntry` 的 `guard`），`amountCents` 仍是 `-row.amount_cents` |
+| 控制面 | `src/orders.ts` 的 `checkout` | **仅 2.38.x**：余额判断从 `available < row.amount_cents` 改为 `available < row.amount_cents * 7`；两个返回点（预检、账本守卫失败）的 `details` 都带 `required_cents: row.amount_cents * 7`、`shortfall_cents: required − available`、`min_days: 7`；扣费守卫同批改成 7×。**目标（2.39.0，未实现）：checkout 不扣费**，门槛留在预检，结算守卫改为 1×（§4.14） |
 | 控制面 | `src/billing.ts` | 不改：逐日 Cron 仍只扣 1 天，门槛只在建机时生效 |
 | Rust Host | `src-tauri/src/control_plane/error.rs` | 从上游 `details` 额外透传 `required_cents`（i64）与 `min_days`（u64），与 `shortfall_cents` 同批；不吞不改 |
 | React UI | `src/components/MyServerWizard.tsx` 的 `placeOrder` | 预检从 `daily_price_cents − balance > 0` 改为 `daily_price_cents * 7 − balance > 0`；提示文案不变，`shortfallCents` 继续驱动既有的「去充值」按钮；**错误回读按字段独立兜底**：优先 `details.shortfall_cents`，缺它才用 `required_cents − 本地余额` 补算，两个都没有才退纯文案「余额不足。」 |
@@ -928,6 +928,61 @@ WHERE id IN (
 | `$5.00` | $6 档（`$0.20/天`） | 允许建机；扣 1 天后余额 `$4.80` |
 
 **不做**：不把门槛写成「预扣 7 天」；不在界面显示「余额可运行 N 天」（§4.11 已撤）；不给逐日 Cron 加门槛。
+
+### 4.14 就绪后扣款（2026-11-18 拍板；契约 2.39.0，**目标状态·未实现**）
+
+> **目标状态·未实现**：代码仍是「先扣后退」（2.38.x）。本节只作实现依据；落地前以 §4.4 的「现行」段为准。
+
+**规则：服务器建好、并且 enroll 确认 sing-box 起成功之后，才扣第一天。失败不再「先扣后退」。**
+
+**状态机**
+
+```
+pending_payment ──checkout──▶ provisioning ──enroll + 结算──▶ ready
+                                   │
+                                   └─ 结算失败 → failed（服务器行 error / settle_insufficient）
+```
+
+- `ready` 只由结算 batch 写；它的定义是「已就绪且已扣首日」，**不新增 `ready_unpaid`**。
+- `provisioning` 期间界面只显示建机进度；计费行显示「创建中，开通后开始计费」。
+
+**结算批（enroll 回调）**
+
+1. `recordLedgerEntry`：`kind = 'charge'`、`amountCents = -日价`、`refType = 'order'`、`refId = <order_id>`，守卫 `balance_cents >= 1× 日价`。
+2. followUps **全部带 `EXISTS(ledger id)`**：
+   - `UPDATE orders SET state = 'ready', paid_at = ?, paid_via = 'wallet' WHERE id = ? AND EXISTS (...)`
+   - `UPDATE servers SET state = 'active', billing_state = 'active', daily_price_cents = ?, billing_anchor_at = ?, paid_until = ? WHERE id = ? AND EXISTS (...)`
+   - 审计 `settle.ok`。
+3. 结算前 `servers` 行：`billing_state = 'pending'`、`billing_anchor_at = 0`、`paid_until = NULL`。
+
+**结算失败（就绪时余额不足）**
+
+- 守卫失败返回 `ok:false`，**不是「batch 写 0 行」**；调用方显式 catch：
+  - 调 DO 销毁实例；
+  - `servers.state = 'error'`、`failure_code = 'settle_insufficient'`，**不写 `destroyed_at`**（列表保留错误行，用户能看到为什么）；
+  - `orders.state = 'failed'`；
+  - 审计 `settle_insufficient`，用来量真实频率。
+- 文案：「没开通，本次没有扣费」+ 去充值 / 重新下单；不自动重开。
+- Cron 兜底：`provisioning` + `enrollment_used_at` 非空 + 无 charge 流水 + 超过 N 分钟 → 同一处置，防 Worker 中途死掉留下永久 booting。
+
+**门槛与预留**
+
+- 7 天门槛只在 `checkout` 预检；**结算只卡 1 天**。
+- 不预留。并发下先到先得；先看 `settle_insufficient` 审计的真实频率，再决定是否加冻结。
+
+**新旧口径**
+
+- `orders.charge_mode = 'upfront' | 'at_ready'`（新编号迁移，默认 `upfront`）。Cron 的补建与退款扫描只处理 `upfront`；`paid_via` 只在结算 batch 写。**不要用 `paid_at` 判断口径。**
+- 建机失败自动退款只服务部署前的存量 `upfront` 订单；退款前必须确认存在 `kind = 'charge'` 流水，否则跳过并记 `refund_skipped_no_charge`。销毁退未用整天保留。
+
+**计费锚点**
+
+- `billing_anchor_at = settle_at`、`paid_until = settle_at + 1d`；逐日 Cron 从结算时刻起算。存量行不变。
+- `billing_state = 'pending'` 或 `paid_until = null` 不得渲染成「本期有效至」或 1970 日期。
+
+**契约**
+
+`commands.md` 2.39.0（目标状态·未实现）：`my_server_checkout` 返回 `MyServerOrder`（不扣费）；`MyServerCharge` 不再由命令返回；`MyServer.paid_until` 目标类型为 `string | null`；`billing_state` 目标增 `"pending"`；结算失败经 `MyServerOrder.failure.code = "settle_insufficient"` 告知；events 不变。
 
 
 ---
@@ -1018,7 +1073,7 @@ if (!PLAN_DAILY_PRICE_CENTS[plan.id]) {
 | `my_server_logout` | `{}` | `MyServerAccount` | 服务端解绑设备，清本地令牌 |
 | `my_server_wallet` | `{}` | `MyServerWallet` `{ balance_cents, currency, denominations_cents, updated_at }` | 读余额与可充值档位 |
 | `my_server_topup` | `{ denomination, channel? }` | `MyServerTopup` `{ topup_id, checkout_url, denomination_cents }` | 创建充值会话 |
-| `my_server_checkout`（改） | `{ orderId }` | `MyServerCharge` `{ order_id, state, charged_cents, balance_after_cents }` | **余额 ≥ 日价 × 7 才放行，实际只扣 1 天**（`charged_cents` = 日价）；不足 → `insufficient_balance` 带 `required_cents` / `shortfall_cents` / `min_days: 7`；不再返回收银台；`channel` 已删除 |
+| `my_server_checkout`（改） | `{ orderId }` | `MyServerCharge`（现行）；目标 2.39.0（未实现）改 `MyServerOrder` | **现行（2.38.x）：余额 ≥ 日价 × 7 才放行，实际扣 1 天**（`charged_cents` = 日价）；不足 → `insufficient_balance` 带 `required_cents` / `shortfall_cents` / `min_days: 7`；不再返回收银台。**目标（2.39.0，未实现）：确认下单不扣费、就绪后结算**（§4.14） |
 | `my_server_order_get` | `{ orderId }` | `MyServerOrder` | 订单状态 |
 
 ```ts
@@ -1060,7 +1115,7 @@ type MyServerCharge = {
 | POST | `/v1/auth/logout` | Bearer | 解绑设备、作废 refresh |
 | GET | `/v1/wallet` | Bearer | 余额（USD 分）+ `denominations_cents`（由产品键推导） |
 | POST | `/v1/topups` | Bearer（`kind=email`） | 创建 Dodo 充值会话 |
-| POST | `/v1/orders/{id}/checkout` | Bearer（`kind=email`） | **余额扣费并开通** |
+| POST | `/v1/orders/{id}/checkout` | Bearer（`kind=email`） | **余额扣费并开通**（现行）；目标 2.39.0（未实现）：确认下单、就绪后结算 |
 | POST | `/v1/webhooks/dodo` | 签名 | 充值支付结果 |
 
 ### 6.3 错误码（沿用通用码 + `details.reason`）
@@ -1109,7 +1164,8 @@ type MyServerCharge = {
 | A4 | 登录后 `account_kind = email`；同一设备换第二个邮箱登录被拒绝 `account_conflict`；登出后设备回到匿名账户，原邮箱账户的服务器不再出现在列表 |
 | **W1** | **充值入账**：`my_server_topup` 返回 `checkout_url`；测试支付成功 → webhook 200 → `accounts.balance_cents` 增加面额、`wallet_ledger` 新增一行（`kind=topup`、`ref=dodo_payment:<id>`）、`topups.status=paid`。CNY 结算时账本仍记 USD 面额 |
 | **W2** | **重复 webhook 不加钱**：同一 `webhook-id` / 同一 `payment_id` 重投 10 次，余额只加一次，`wallet_ledger` 与 `payments` 各只有一行 |
-| **W3** | **买机扣费**：余额 ≥ 第 0 天日价 × 7 → checkout 只扣 **1 天**（`$6` 档 = 20 分）、`wallet_ledger`（`ref=order:<order_id>`）、订单 `paid`、**服务器行同时带 `billing_anchor_at = created_at`、`paid_until = created_at + 1d`、`daily_price_cents`**；余额不足（包括够 1 天但不足 7 天）→ `insufficient_balance`，`details` 带 `required_cents`（= 日价 × 7）/ `shortfall_cents` / `min_days = 7`，**余额不变、无服务器**，订单仍 `pending_payment`；订单已过期 → 转 `cancelled` 并返回 `order_expired` |
+| **W3** | **买机扣费（现行 2.38.x，验收按本条判）**：余额 ≥ 第 0 天日价 × 7 → checkout 只扣 **1 天**（`$6` 档 = 20 分）、`wallet_ledger`（`ref=order:<order_id>`）、订单 `paid`、**服务器行同时带 `billing_anchor_at = created_at`、`paid_until = created_at + 1d`、`daily_price_cents`**；余额不足（包括够 1 天但不足 7 天）→ `insufficient_balance`，`details` 带 `required_cents`（= 日价 × 7）/ `shortfall_cents` / `min_days = 7`，**余额不变、无服务器**，订单仍 `pending_payment`；订单已过期 → 转 `cancelled` 并返回 `order_expired` |
+| **W3-b** | **目标（2.39.0，未实现；实现落地后再启用）就绪后结算**：checkout 不写账本、返回 `provisioning`、服务器行 `billing_state='pending'`、`paid_until=NULL`；enroll 确认成功后同一 batch 写 `wallet_ledger`（`ref=order:<order_id>`、`-20`）、`orders.state='ready'` / `paid_at` / `paid_via='wallet'`、`servers.state='active'` 且 `billing_state='active'`、`billing_anchor_at = paid_at`、`paid_until = paid_at + 1d`、`daily_price_cents`；守卫失败（余额 < 1 天）→ 不写账本、订单 `failed`、服务器 `error / settle_insufficient`（不写 `destroyed_at`）、DO 实例销毁、审计 `settle_insufficient` |
 | **W4** | **逐日续费与 Cron 幂等**：到期服务器被 Cron 扣当天、`paid_until` 顺延 1 天、账本 `ref=server_day:<id>:<bucket>`；**同一 Cron 重跑 3 次 / 并发执行，只扣一次**；重跑时「扣余额 0、续期 1」按已扣恢复；同一台机器连扣 30 天，账本合计**正好等于月价**（`600 / 900 / 1800` 分） |
 | **W5** | **余额不足进宽限**：续费扣不动 → 不扣费、`billing_state=past_due`、`grace_end = paid_until + 7d`（用当前 paid_until，补齐过则用补齐后的值）、机器与凭据不动 |
 | **W6** | **宽限内恢复**：宽限期内充值 → 下次 Cron（或即时重试）补扣成功 → `paid_until` 顺延、`billing_state=active`、停用标记清除 |
@@ -1117,7 +1173,7 @@ type MyServerCharge = {
 | **W8** | **对账断言**：任意时刻逐账户 `balance_cents == 最新一条 ledger.balance_after_cents`（I1）；快照之后逐行链式成立（I3）；并发两笔扣费只有一笔成功、另一笔余额不足 |
 | **W13** | **账本保留期**：构造一台机器跨两个自然月、共 90 天的 `server_day` 明细 → 每日任务跑完后：只剩 `cutoff` 之后的明细；新增一条 `snapshot`（`amount_cents = 0`、`created_at = cutoff`、`balance_after` = cutoff 时刻余额）；**I1 / I2 / I3 全部成立**；`dodo_payment` / `order` / `server_refund` **一行不少**；**同一任务重跑不重复写快照、不再删行**；快照写失败时该轮一行不删 |
 | **W9** | **欠费补齐**：`paid_until = anchor+1.5d`、`now = anchor+4.5d`（落后 3 个整日）、余额足够 → Cron 一次补 **4 天**到 `paid_until = anchor+5.5d > now`，账本 4 行独立 `bucket`。**是 4 不是 3**：扫描条件是 `paid_until <= now`（含等号），补到第 3 天时 `paid_until = now` 仍满足条件，必须再补 `now` 所在那一格。余额只够 2 天 → 补 2 天后 `past_due`，`grace_end` 用补齐后的 paid_until；超过 30 天仍未补到 now → `expired` 并告警 |
-| **W10** | **订单 paid 但无服务器**：构造 checkout 扣费后中断，Cron 5 分钟内补建恰好一台；重跑不产生第二台（`unique(servers.order_id)`） |
+| **W10** | **订单 provisioning 但无服务器**：确认下单后中断（未完成建机），Cron 5 分钟内补建恰好一台；重跑不产生第二台（`unique(servers.order_id)`） |
 | **W11** | **负向调整**：人工 `adjustment` 为负且余额不足 → 账本不写、余额不变；`ref_id` 用 uuid，重复 uuid 被唯一键挡住 |
 | **W12** | **销毁退款**：`n_paid = 5`（`paid_until = anchor+5d`）、`now` 落在 `n_now = 3` 中间 → `refundTotal = (5 − (3+1)) × 日价 = 1 天`（`$6` 档 = **20 分**）→ 销毁只退**第 4 天**（`n = 4`）的日价、写一条 `adjustment`（`ref=server_refund:<server_id>:20`）、余额增加；**同一 ref 重放不再加钱**；`n_now = 3` 这一天已经用掉、**不退**；**标记 `destroyed` 与退款在同一个 batch 里** |
 | **W12-b** | **销毁不补扣**：`paid_until` 落后 2 天（Cron 还没跑）→ 直接销毁 → **不补扣那 2 天、不产生 `server_day`**、也不因欠费阻塞销毁；`refundTotal` 按 0 计（`n_paid <= n_now+1`），**不写退款行** |
@@ -1180,7 +1236,7 @@ type MyServerCharge = {
 
 | 侧 | 改动 |
 |---|---|
-| **控制面** | `src/auth_email.ts`（发码 / 校验 / 合并 / 登出）、`src/wallet.ts`（账本、原子扣费、对账自检、月末快照）、`src/topups.ts`（充值会话 + webhook 入账）、`src/billing.ts`（每日按天扣费 + 宽限状态机 + 销毁退款 + `server_day` 裁剪）、`src/webhooks/dodo.ts`（支付事件 + 三层幂等）、`src/orders.ts`（checkout 扣 1 天；**2.37.1 起余额门槛改为日价 × 7**，见 §4.13）、`src/index.ts`（路由）、迁移 `0003_wallet.sql`（`email_codes` / `topups` / `wallet_ledger`（含 `snapshot` 与 `wallet_ledger_prune`）/ `payments` / `webhook_events` / `unmatched_payments` / `accounts.balance_cents` / `orders.amount_cents` / `servers.billing_anchor_at|paid_until|daily_price_cents|billing_state` / `unique(servers.order_id)`） |
-| **Rust Host** | `control_plane/auth.rs`（登录 / 登出 / account_kind）、`control_plane/wallet.rs`（余额 / 充值）、`my_server_login_*` / `account` / `logout` / `wallet` / `topup` / `order_get` 命令、`my_server_checkout` 返回扣费结果并触发建机；**2.37.1 起 `control_plane/error.rs` 透传 `required_cents` / `min_days`**（§4.13）；充值由 Host 打开系统浏览器（界面未上线前不依赖前端）；余额与宽限文案在 UI 重构时接入 |
+| **控制面** | `src/auth_email.ts`（发码 / 校验 / 合并 / 登出）、`src/wallet.ts`（账本、原子扣费、对账自检、月末快照）、`src/topups.ts`（充值会话 + webhook 入账）、`src/billing.ts`（每日按天扣费 + 宽限状态机 + 销毁退款 + `server_day` 裁剪）、`src/webhooks/dodo.ts`（支付事件 + 三层幂等）、`src/orders.ts`（**现行：checkout 扣 1 天**；2.37.1 门槛日价 × 7；目标 2.39.0（未实现）：不扣费、就绪后结算，见 §4.13 / §4.14）、`src/servers.ts`（目标 2.39.0：enroll 回调里结算第 0 天）、`src/index.ts`（路由）、迁移 `0003_wallet.sql`（`email_codes` / `topups` / `wallet_ledger`（含 `snapshot` 与 `wallet_ledger_prune`）/ `payments` / `webhook_events` / `unmatched_payments` / `accounts.balance_cents` / `orders.amount_cents` / `servers.billing_anchor_at|paid_until|daily_price_cents|billing_state` / `unique(servers.order_id)`） |
+| **Rust Host** | `control_plane/auth.rs`（登录 / 登出 / account_kind）、`control_plane/wallet.rs`（余额 / 充值）、`my_server_login_*` / `account` / `logout` / `wallet` / `topup` / `order_get` 命令、`my_server_checkout` 确认下单并触发建机（现行返回扣费结果；目标 2.39.0，未实现：不再返回）；**2.37.1 起 `control_plane/error.rs` 透传 `required_cents` / `min_days`**（§4.13）；充值由 Host 打开系统浏览器（界面未上线前不依赖前端）；余额与宽限文案在 UI 重构时接入 |
 | **React UI** | **本轮不做，等整体 UI 重构**：统一登录弹窗、左栏底部账号块（§3.6）、`我的服务器` 未登录空态、余额与充值入口、`insufficient_balance` 与到期提示条。**建机向导的 7 天门槛预检见 §4.13** |
 | **契约** | `commands.md` **2.30.0**（`MyServer` 增 `paid_until`（非空）/ `daily_price_cents` / `billing_state` / `grace_ends_at`（派生）；`my_server_catalog.plans` 增 `daily_price_cents`；`checkout` 语义改成扣 1 天；`MyServerWallet` 保持余额 + 档位，不含可运行天数）；**2.37.1 起 `checkout` 门槛改为日价 × 7、`insufficient_balance` 增 `required_cents` / `min_days`**。`check-contracts.mjs` 已全绿（76 项通过、2 项 advisory），`MyServerPlan.daily_price_cents` 的实现侧补齐后红项消失 |

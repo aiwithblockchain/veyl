@@ -58,8 +58,44 @@ function stubCatalog() {
       return new Response(
         JSON.stringify({
           sizes: [
-            { slug: "s-1vcpu-512mb-10gb", memory: 512, vcpus: 1, price_hourly: 0.00595, price_monthly: 4, transfer: 0.5 },
-            { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6, transfer: 1 },
+            { slug: "s-1vcpu-512mb-10gb", memory: 512, vcpus: 1, price_hourly: 0.00595, price_monthly: 4, transfer: 0.5, regions: ["sgp1"] },
+            { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6, transfer: 1, regions: ["sgp1"] },
+          ],
+        }),
+        { status: 200 },
+      );
+    }),
+  );
+}
+
+/** 目录里 s-1vcpu-1gb 只支持 nyc3：验证地区 × 档位只看目录，不靠推断。 */
+function stubCatalogRegionMismatch() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string | URL | Request) => {
+      const href = String(input);
+      if (href.includes("/regions")) {
+        return new Response(
+          JSON.stringify({
+            regions: [
+              { slug: "sgp1", name: "Singapore 1", available: true },
+              { slug: "nyc3", name: "New York 3", available: true },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          sizes: [
+            {
+              slug: "s-1vcpu-1gb",
+              memory: 1024,
+              vcpus: 1,
+              price_hourly: 0.00893,
+              price_monthly: 6,
+              regions: ["nyc3"],
+            },
           ],
         }),
         { status: 200 },
@@ -388,6 +424,72 @@ describe("orders", () => {
     ).toHaveLength(1);
   });
 
+  it("目录里这个地区没有该规格时拒绝下单，details 带 region / plan", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalogRegionMismatch();
+
+    const res = await handleOrders(orderRequest(env.token, "idem-key-mismatch"), env as never);
+    expect(res?.status).toBe(409);
+    const body = (await res!.json()) as {
+      code: string;
+      details: { reason: string; region: string; plan: string };
+    };
+    expect(body.code).toBe("PRECONDITION_FAILED");
+    expect(body.details).toEqual({
+      reason: "plan_unavailable_in_region",
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+    });
+    expect(db.rows("orders")).toHaveLength(0);
+  });
+
+  it("结账前发现地区没有该规格：不扣费、不建机", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalogRegionMismatch();
+    // 下单时还允许（例如目录刚变化），结账前必须重新按当前目录校验。
+    db.rows("orders").push({
+      id: "ord_mismatch0000000000",
+      account_id: ACCOUNT,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 0.3,
+      amount_cents: 30,
+      hourly_usd: 0.00893,
+      state: "pending_payment",
+      idempotency_key: "idem-order-mismatch",
+      created_at: Date.now(),
+      paid_at: null,
+      expires_at: Date.now() + 10 * 60 * 1000,
+      server_id: null,
+      failure_code: null,
+      failure_stage: null,
+      checkout_session_id: null,
+      checkout_url: null,
+      paid_via: null,
+    });
+    db.rows("accounts")[0].balance_cents = 2000;
+
+    const res = await handleOrders(
+      new Request("https://example.com/v1/orders/ord_mismatch0000000000/checkout", {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-mismatch" },
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(409);
+    const body = (await res!.json()) as {
+      details: { reason: string; region: string; plan: string };
+    };
+    expect(body.details.reason).toBe("plan_unavailable_in_region");
+    expect(body.details.region).toBe("sgp1");
+    expect(body.details.plan).toBe("s-1vcpu-1gb");
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("servers")).toHaveLength(0);
+    expect(db.rows("accounts")[0].balance_cents).toBe(2000);
+  });
+
   it("未支付订单可以取消；已支付不行", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());
@@ -476,7 +578,7 @@ describe("orders", () => {
           return new Response(
             JSON.stringify({
               sizes: [
-                { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6 },
+                { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6, regions: ["sgp1"] },
               ],
             }),
             { status: 200 },

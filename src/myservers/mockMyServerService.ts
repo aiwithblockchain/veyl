@@ -372,8 +372,16 @@ export class MockMyServerService {
     return { ...order };
   }
 
-  checkout(orderId: string): MyServerCharge {
-    if (readFlag(DOWN_KEY) === "1") providerDown();
+  orderGet(orderId: string): MyServerOrder {
+    const store = readStore();
+    const order = store.orders.find((item) => item.order_id === orderId);
+    if (!order) {
+      throw { code: "NOT_FOUND", message: "这笔订单不存在了，重新下一单。" };
+    }
+    return { ...order };
+  }
+
+  checkout(orderId: string): MyServerCharge {    if (readFlag(DOWN_KEY) === "1") providerDown();
     const store = readStore();
     const order = store.orders.find((item) => item.order_id === orderId);
     if (!order) {

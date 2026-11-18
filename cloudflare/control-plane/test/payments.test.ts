@@ -81,7 +81,7 @@ function stubUpstream(options: { droplet?: { status: number; body: string } } = 
         return new Response(
           JSON.stringify({
             sizes: [
-              { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6 },
+              { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6, regions: ["sgp1"] },
             ],
           }),
           { status: 200 },

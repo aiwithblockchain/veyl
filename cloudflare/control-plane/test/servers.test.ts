@@ -127,6 +127,176 @@ describe("建机失败退款", () => {  it("enroll 超时自动销毁时，扣�
   });
 });
 
+describe("enroll 激活守卫", () => {
+  const TOKEN = "enr_activation000000";
+  const ENC_KEY = "A".repeat(43);
+
+  async function seedBootingForActivation(db: FakeD1) {
+    seedServer(db, "booting");
+    Object.assign(db.rows("servers")[0], {
+      // 跳过防火墙与 DO 查询：这里只验证激活这一步。
+      provider_id: null,
+      enrollment_hash: await sha256B64u(TOKEN),
+      enrollment_expires_at: Date.now() + 60_000,
+    });
+    db.rows("orders").push({
+      id: "ord_test",
+      account_id: ACCOUNT,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 6,
+      amount_cents: 600,
+      hourly_usd: 0.00893,
+      state: "provisioning",
+      idempotency_key: "idem-activation-1",
+      created_at: Date.now(),
+      paid_via: "wallet",
+    });
+  }
+
+  function enrollRequest() {
+    return new Request(`https://example.com/v1/enroll/${TOKEN}`, {
+      method: "POST",
+      body: JSON.stringify({
+        port: 20443,
+        password: "secret-password",
+        active: true,
+        version: "1.14.0",
+      }),
+    });
+  }
+
+  it("激活成功：机器 active、订单 ready、审计 enroll.ok", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedBootingForActivation(db);
+
+    const res = await handleServers(enrollRequest(), env as never);
+
+    expect(res?.status).toBe(200);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("active");
+    expect(server.node_id).toBeTruthy();
+    expect(db.rows("orders")[0].state).toBe("ready");
+    expect(db.rows("audit_log").some((row) => row.action === "enroll.ok")).toBe(true);
+  });
+
+  it("激活丢失要收尾：凭据标记销毁、防火墙删除、不会多退款", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedBootingForActivation(db);
+    // 这次是真的有 droplet 与防火墙的路径。
+    Object.assign(db.rows("servers")[0], {
+      provider_id: PROVIDER_ID,
+      firewall_id: null,
+    });
+    // 并发销毁已经退过一次款：本次收尾不能再退。
+    db.rows("accounts")[0].balance_cents = 600;
+    db.rows("wallet_ledger").push({
+      id: "led_prior_refund",
+      account_id: ACCOUNT,
+      kind: "adjustment",
+      amount_cents: 600,
+      balance_after_cents: 600,
+      ref_type: "server_refund",
+      ref_id: SERVER,
+      note: "并发销毁已退",
+      created_at: Date.now() - 1000,
+    });
+
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const href = String(input);
+        if (href.includes("/firewalls") && init?.method === "POST") {
+          return new Response(JSON.stringify({ firewall: { id: "fw_1" } }), { status: 201 });
+        }
+        if (init?.method === "DELETE") {
+          calls.push(href);
+          // droplet 已被并发销毁删掉；防火墙正常删除。
+          return new Response(null, { status: href.includes("/firewalls/fw_1") ? 204 : 404 });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      }),
+    );
+
+    db.beforeServerActivate = () => {
+      db.beforeServerActivate = undefined;
+      const server = db.rows("servers")[0];
+      server.state = "destroyed";
+      server.destroyed_at = Date.now();
+      db.rows("orders")[0].state = "failed";
+    };
+
+    const res = await handleServers(enrollRequest(), env as never);
+
+    expect(res?.status).toBe(410);
+    // 本次插入的凭据要跟着销毁，不能留着一条指向已删机器的密文。
+    expect(db.rows("credentials")).toHaveLength(1);
+    expect(db.rows("credentials")[0].destroyed_at).not.toBeNull();
+    // 机器仍是 destroyed，退款只有并发那次的一条。
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+    expect(
+      db.rows("wallet_ledger").filter(
+        (row) => row.ref_type === "server_refund" && row.ref_id === SERVER,
+      ),
+    ).toHaveLength(1);
+    expect(db.rows("accounts")[0].balance_cents).toBe(600);
+    // 刚建的防火墙被删掉，不留孤儿。
+    expect(calls.some((href) => href.includes("/firewalls/fw_1"))).toBe(true);
+    const lost = db.rows("audit_log").find((row) => row.action === "enroll.activation_lost");
+    expect(lost).toBeTruthy();
+    expect(String(lost?.detail)).toContain('"cleaned":true');
+  });
+
+  it("激活成功但订单没能置 ready：记 order_ready_lost，不静默半成功", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedBootingForActivation(db);
+    // 订单不在 provisioning（例如并发路径已改过状态）：ready 那条会 0 行。
+    db.rows("orders")[0].state = "paid";
+
+    const res = await handleServers(enrollRequest(), env as never);
+
+    expect(res?.status).toBe(200);
+    expect(db.rows("servers")[0].state).toBe("active");
+    const lost = db.rows("audit_log").find((row) => row.action === "enroll.order_ready_lost");
+    expect(lost).toBeTruthy();
+    expect(String(lost?.detail)).toContain("ord_test");
+    expect(db.rows("orders")[0].state).toBe("paid");
+  });
+
+  it("消费 token 后机器被并发销毁：激活不生效，订单不 ready，记 activation_lost", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedBootingForActivation(db);
+
+    // 模拟 sweep / refreshBooting 在「消费 token 之后、写 active 之前」完成销毁（含退款与关单）。
+    db.beforeServerActivate = () => {
+      db.beforeServerActivate = undefined;
+      const server = db.rows("servers")[0];
+      server.state = "destroyed";
+      server.destroyed_at = Date.now();
+      db.rows("orders")[0].state = "failed";
+    };
+
+    const res = await handleServers(enrollRequest(), env as never);
+
+    expect(res?.status).toBe(410);
+    expect(((await res!.json()) as { reason: string }).reason).toBe("server_destroyed");
+    const server = db.rows("servers")[0];
+    // 已销毁的机器不能被改回 active，也不该拿到 node_id。
+    expect(server.state).toBe("destroyed");
+    expect(server.destroyed_at).not.toBeNull();
+    expect(server.node_id ?? null).toBeNull();
+    expect(db.rows("orders")[0].state).toBe("failed");
+    const lost = db.rows("audit_log").find((row) => row.action === "enroll.activation_lost");
+    expect(lost).toBeTruthy();
+    expect(db.rows("audit_log").some((row) => row.action === "enroll.ok")).toBe(false);
+  });
+});
+
 describe("用户销毁退款", () => {
   it("退还未开始的整天，与标记销毁同一批写入", async () => {
     const db = new FakeD1();

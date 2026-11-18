@@ -174,6 +174,13 @@ async function createOrder(request: Request, env: OrdersEnv): Promise<Response> 
   if (!chosen) {
     return apiError("PRECONDITION_FAILED", "这个套餐不可售", { reason: "invalid_plan" });
   }
+  // 地区 × 档位只看目录：DO 的 `/sizes` 按地区给可用性，不能假设到处都能开。
+  if (!chosen.regions.includes(region)) {
+    return apiError("PRECONDITION_FAILED", "这个地区没有这个规格", {
+      reason: "plan_unavailable_in_region",
+      details: { region, plan },
+    });
+  }
 
   // 生产环境必须登录后下单；开发环境保留匿名建机，方便没有登录界面时继续测链路。
   if (env.ENVIRONMENT === "production" && identity.kind !== "email") {
@@ -344,6 +351,25 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
         return storedError(409, "PRECONDITION_FAILED", "价格已经变了，请重新下单", { reason: "price_mismatch" });
       }
 
+      // 地区 × 档位在扣费前校验：目录读不到就不扣，宁可让用户稍后重试，也不先扣后退。
+      const catalog = env.DO_API_TOKEN ? await fetchCatalogData(env.DO_API_TOKEN) : null;
+      if (!catalog) {
+        return storedError(503, "UPSTREAM_ERROR", "暂时读不到可售目录，稍后重试", {
+          reason: "catalog_unavailable",
+        }, true);
+      }
+      const chosen = catalog.plans.find((p) => p.id === row.plan);
+      if (!chosen) {
+        return storedError(409, "PRECONDITION_FAILED", "这个套餐不可售", { reason: "invalid_plan" });
+      }
+      if (!chosen.regions.includes(row.region)) {
+        return storedError(409, "PRECONDITION_FAILED", "这个地区没有这个规格", {
+          reason: "plan_unavailable_in_region",
+          region: row.region,
+          plan: row.plan,
+        });
+      }
+
       const available = await balanceCents(env, identity.accountId);
       const required = row.amount_cents * MIN_BALANCE_DAYS;
       if (available < required) {
@@ -363,8 +389,7 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
 
       const serverId = randomId("srv_");
       const port = await pickPort(db, identity.accountId);
-      // 额度是套餐属性、不参与扣费；这里只做一次快照，取不到记 0。
-      const catalog = env.DO_API_TOKEN ? await fetchCatalogData(env.DO_API_TOKEN) : null;
+      // 额度是套餐属性、不参与扣费；目录已在扣费前取过，这里直接用同一次结果。
       const transferGib = transferGibFor(catalog, row.plan);
       const charged = await chargeOrder(env, {
         accountId: identity.accountId,

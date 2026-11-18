@@ -1,0 +1,21 @@
+{
+  "_note": "2026-11-18 从 GET https://api.digitalocean.com/v2/regions?per_page=200 的真实响应摘录：slug 与 count 原样（16 个 available 地区），name 为 DO 原名。",
+  "regions": [
+    { "slug": "nyc1", "name": "New York 1", "available": true },
+    { "slug": "nyc2", "name": "New York 2", "available": true },
+    { "slug": "sgp1", "name": "Singapore 1", "available": true },
+    { "slug": "lon1", "name": "London 1", "available": true },
+    { "slug": "nyc3", "name": "New York 3", "available": true },
+    { "slug": "ams3", "name": "Amsterdam 3", "available": true },
+    { "slug": "fra1", "name": "Frankfurt 1", "available": true },
+    { "slug": "tor1", "name": "Toronto 1", "available": true },
+    { "slug": "sfo2", "name": "San Francisco 2", "available": true },
+    { "slug": "blr1", "name": "Bangalore 1", "available": true },
+    { "slug": "sfo3", "name": "San Francisco 3", "available": true },
+    { "slug": "syd1", "name": "Sydney 1", "available": true },
+    { "slug": "atl1", "name": "Atlanta 1", "available": true },
+    { "slug": "ric1", "name": "Richmond 1", "available": true },
+    { "slug": "mkc1", "name": "Kansas City 1", "available": true },
+    { "slug": "mem1", "name": "Memphis 1", "available": true }
+  ]
+}

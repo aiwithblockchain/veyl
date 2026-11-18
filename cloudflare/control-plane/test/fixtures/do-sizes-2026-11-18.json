@@ -1,0 +1,32 @@
+{
+  "_note": "2026-11-18 从 GET https://api.digitalocean.com/v2/sizes?per_page=200 的真实响应摘录：只保留在售三档，字段值与 regions 列表原样（响应的其余字段与其余规格未收录）。不含任何账户信息。",
+  "sizes": [
+    {
+      "slug": "s-1vcpu-512mb-10gb",
+      "memory": 512,
+      "vcpus": 1,
+      "price_hourly": 0.00595,
+      "price_monthly": 4,
+      "transfer": 0.5,
+      "regions": ["ams3", "blr1", "fra1", "lon1", "sfo2", "sfo3", "tor1"]
+    },
+    {
+      "slug": "s-1vcpu-1gb",
+      "memory": 1024,
+      "vcpus": 1,
+      "price_hourly": 0.00893,
+      "price_monthly": 6,
+      "transfer": 1,
+      "regions": ["ams3", "blr1", "fra1", "lon1", "sfo2", "sfo3", "tor1"]
+    },
+    {
+      "slug": "s-1vcpu-2gb",
+      "memory": 2048,
+      "vcpus": 1,
+      "price_hourly": 0.01786,
+      "price_monthly": 12,
+      "transfer": 2,
+      "regions": ["ams3", "blr1", "fra1", "lon1", "sfo2", "sfo3", "tor1"]
+    }
+  ]
+}

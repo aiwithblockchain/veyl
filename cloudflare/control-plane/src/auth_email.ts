@@ -36,15 +36,47 @@ function generateCode(): string {
 }
 
 /** 定长十六进制/Base64 URL 摘要的等值比较，不提前返回。 */
-function digestEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
 function isBase64Url(value: unknown, min = 20, max = 128): value is string {
   return typeof value === "string" && value.length >= min && value.length <= max && /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+/**
+ * 验证码没被消费掉：区分「码不对」「已用过 / 过期」「错满」。
+ * 计数只走一条带守卫的 UPDATE（`attempts < 上限`），并发下不会越过 3 次。
+ */
+async function rejectCode(db: D1Database, email: string, now: number): Promise<Response> {
+  const row = await db
+    .prepare("SELECT code_hash, expires_at, attempts FROM email_codes WHERE email = ?")
+    .bind(email)
+    .first<{ code_hash: string; expires_at: number; attempts: number }>();
+  if (!row) {
+    // 行不在不一定是过期：最常见的是一次成功的校验已经把这一行消费掉了。
+    return apiError("PRECONDITION_FAILED", "验证码已经用过了，重新发一次", { reason: "code_used" });
+  }
+  if (Number(row.expires_at) <= now) {
+    await db.prepare("DELETE FROM email_codes WHERE email = ?").bind(email).run();
+    return apiError("PRECONDITION_FAILED", "验证码已过期，重新发一次", { reason: "code_expired" });
+  }
+  if (Number(row.attempts) >= MAX_ATTEMPTS) {
+    await db.prepare("DELETE FROM email_codes WHERE email = ?").bind(email).run();
+    return apiError("PRECONDITION_FAILED", "验证码已作废，重新发一次", { reason: "too_many_attempts" });
+  }
+
+  await db
+    .prepare("UPDATE email_codes SET attempts = attempts + 1 WHERE email = ? AND attempts < ? AND expires_at > ?")
+    .bind(email, MAX_ATTEMPTS, now)
+    .run();
+  // 计数以写后的值为准：并发下别人可能同时记了一笔。
+  const after = await db
+    .prepare("SELECT attempts FROM email_codes WHERE email = ?")
+    .bind(email)
+    .first<{ attempts: number }>();
+  const remaining = Math.max(0, MAX_ATTEMPTS - Number(after?.attempts ?? Number(row.attempts) + 1));
+  return apiError("PRECONDITION_FAILED", remaining > 0 ? "验证码不对" : "验证码已作废，重新发一次", {
+    retryable: remaining > 0,
+    reason: remaining > 0 ? "code_invalid" : "too_many_attempts",
+    details: { attempts_remaining: remaining },
+  });
 }
 
 async function start(request: Request, env: EmailAuthEnv): Promise<Response> {
@@ -152,31 +184,18 @@ async function verify(request: Request, env: EmailAuthEnv): Promise<Response> {
   }
 
   const now = Date.now();
-  const codeRow = await db
-    .prepare("SELECT code_hash, expires_at, attempts FROM email_codes WHERE email = ?")
-    .bind(email)
-    .first<{ code_hash: string; expires_at: number; attempts: number }>();
-  if (!codeRow || codeRow.expires_at <= now) {
-    await db.prepare("DELETE FROM email_codes WHERE email = ?").bind(email).run();
-    return apiError("PRECONDITION_FAILED", "验证码已过期，重新发一次", { reason: "code_expired" });
-  }
-  if (codeRow.attempts >= MAX_ATTEMPTS) {
-    await db.prepare("DELETE FROM email_codes WHERE email = ?").bind(email).run();
-    return apiError("PRECONDITION_FAILED", "验证码已作废，重新发一次", { reason: "too_many_attempts" });
-  }
-
   const submitted = await sha256B64u(`${code}:${email}`);
-  if (!digestEqual(submitted, codeRow.code_hash)) {
-    await db.prepare("UPDATE email_codes SET attempts = attempts + 1 WHERE email = ?").bind(email).run();
-    const remaining = MAX_ATTEMPTS - (codeRow.attempts + 1);
-    return apiError("PRECONDITION_FAILED", remaining > 0 ? "验证码不对" : "验证码已作废，重新发一次", {
-      retryable: remaining > 0,
-      reason: remaining > 0 ? "code_invalid" : "too_many_attempts",
-      details: { attempts_remaining: remaining },
-    });
+  // 消费验证码是一条带全部守卫的 DELETE：并发请求里只有一个能删掉这一行，
+  // 「先读 → 比对 → 再删」会让同一个码被用两次、也绕过 3 次上限。
+  const consumed = await db
+    .prepare(
+      "DELETE FROM email_codes WHERE email = ? AND code_hash = ? AND expires_at > ? AND attempts < ?",
+    )
+    .bind(email, submitted, now, MAX_ATTEMPTS)
+    .run();
+  if (Number((consumed as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
+    return rejectCode(db, email, now);
   }
-
-  await db.prepare("DELETE FROM email_codes WHERE email = ?").bind(email).run();
 
   // ── 设备证明 ────────────────────────────────────────────────────────────
   const device = await db.prepare("SELECT * FROM devices WHERE id = ?").bind(deviceId).first<DeviceRow & Record<string, unknown>>();

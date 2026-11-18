@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MyServerLoginTicket } from "../agent/bridge";
 import { MyServerLogin } from "./MyServerLogin";
@@ -64,5 +64,117 @@ describe("登录弹窗", () => {
     expect(within(dialog).getByLabelText("验证码")).toBeTruthy();
     expect(within(dialog).queryByLabelText("邮箱")).toBeNull();
     expect(within(dialog).getByRole("button", { name: /后可重发/ })).toBeTruthy();
+  });
+});
+
+describe("设备身份对不上", () => {
+  it("诚实说明需要重新注册，并提供入口；成功后提示再点一次登录", async () => {
+    const onStart = vi.fn<StartFn>().mockResolvedValue({ sent: true, cooldown_seconds: 60 });
+    const onVerify = vi.fn<VerifyFn>().mockRejectedValue({
+      code: "PRECONDITION_FAILED",
+      message: "设备对不上。",
+      details: { reason: "device_mismatch" },
+      retryable: false,
+    });
+    const onReRegister = vi.fn(async () => true);
+    render(
+      <MyServerLogin
+        onStart={onStart}
+        onVerify={onVerify}
+        onReRegister={onReRegister}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("邮箱"), {
+      target: { value: "me@example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
+    fireEvent.change(await screen.findByLabelText("验证码"), {
+      target: { value: "123456" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(await screen.findByText("这台设备的身份对不上。")).toBeTruthy();
+    expect(
+      screen.getByText("需要重新注册设备；账户和服务器都还在。"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/稍后再点「登录」/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新注册设备" }));
+    await waitFor(() => expect(onReRegister).toHaveBeenCalledTimes(1));
+    expect(
+      await screen.findByText(/设备已重新注册，再点一次「登录」/),
+    ).toBeTruthy();
+  });
+
+  it("重新注册失败时如实回报，不说成功", async () => {
+    const onStart = vi.fn<StartFn>().mockResolvedValue({ sent: true, cooldown_seconds: 60 });
+    const onVerify = vi.fn<VerifyFn>().mockRejectedValue({
+      code: "PRECONDITION_FAILED",
+      message: "设备对不上。",
+      details: { reason: "device_mismatch" },
+      retryable: false,
+    });
+    const onReRegister = vi.fn(async () => false);
+    render(
+      <MyServerLogin
+        onStart={onStart}
+        onVerify={onVerify}
+        onReRegister={onReRegister}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("邮箱"), {
+      target: { value: "me@example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
+    fireEvent.change(await screen.findByLabelText("验证码"), {
+      target: { value: "123456" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+    await screen.findByText("这台设备的身份对不上。");
+
+    fireEvent.click(screen.getByRole("button", { name: "重新注册设备" }));
+    expect(await screen.findByText("没能重新注册设备。")).toBeTruthy();
+    expect(screen.queryByText(/设备已重新注册/)).toBeNull();
+  });
+});
+
+describe("设备被停用", () => {
+  it("说明重新登录会重新注册，并给「重新注册设备」入口", async () => {
+    const onStart = vi.fn<StartFn>().mockResolvedValue({ sent: true, cooldown_seconds: 60 });
+    const onVerify = vi.fn<VerifyFn>().mockRejectedValue({
+      code: "PERMISSION_DENIED",
+      message: "这台设备已被停用",
+      details: { reason: "device_revoked" },
+      retryable: false,
+    });
+    const onReRegister = vi.fn(async () => true);
+    render(
+      <MyServerLogin
+        onStart={onStart}
+        onVerify={onVerify}
+        onReRegister={onReRegister}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("邮箱"), {
+      target: { value: "me@example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
+    fireEvent.change(await screen.findByLabelText("验证码"), {
+      target: { value: "123456" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(
+      await screen.findByText("这台设备已被停用。重新登录会把这台设备重新注册。"),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重新注册设备" })).toBeTruthy();
+    expect(screen.queryByText(/稍后再试/)).toBeNull();
+    expect(screen.queryByText(/换一台设备/)).toBeNull();
   });
 });

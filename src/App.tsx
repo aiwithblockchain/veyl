@@ -1889,6 +1889,16 @@ export default function App() {
     return result;
   };
 
+  // 设备被停用：重新注册设备后再打开登录，重登会把新设备绑上账户。
+  const handleReloginDevice = async () => {
+    const ok = await myServers.reRegister();
+    if (ok) {
+      myServers.openLogin();
+      setAccountMenu(null);
+    }
+    return ok;
+  };
+
   const commitTrialFlow = (next: TrialFlow) => {
     trialFlowRef.current = next;
     setTrialFlow(next);
@@ -2256,8 +2266,11 @@ export default function App() {
               email={myServers.account?.email ?? null}
               wallet={myServers.wallet}
               walletError={myServers.walletError}
+              identityProblem={myServers.identityProblem}
               onTopUp={() => myServers.openTopUp()}
               onRefreshWallet={() => void myServers.refreshWallet()}
+              onReRegister={() => myServers.identityAction()}
+              onRelogin={handleReloginDevice}
               onLogout={handleAccountLogout}
               onClose={() => setAccountMenu(null)}
             />
@@ -2272,7 +2285,7 @@ export default function App() {
           catalog={myServers.catalog}
           error={myServers.error}
           retryNotice={myServers.retryNotice}
-          disabled={myServers.identityLost}
+          disabled={myServers.identityProblem !== null}
           compact={shell.mode === "drawer"}
           onSelect={myServers.select}
           onNew={() => openNewNode("servers")}
@@ -2299,9 +2312,11 @@ export default function App() {
             <MyServerWizard
               bridge={bridge}
               catalog={myServers.catalog}
-              onOrdered={() => {
+              onOrdered={(serverId) => {
                 setNewNodeOpen(false);
-                void myServers.refresh();
+                // 认不出新机器时 ordered(null) 会让列表不选中任何一台并给一行提示。
+                myServers.ordered(serverId);
+                changeDestination("servers");
               }}
               onEnsureIdentity={myServers.ensureIdentity}
               onTopUp={myServers.openTopUp}
@@ -2340,7 +2355,7 @@ export default function App() {
           retrying={myServers.retrying}
           detailError={myServers.detailError}
           detailRetrying={myServers.detailRetrying}
-          readOnly={myServers.identityLost}
+          readOnly={myServers.identityProblem !== null}
           sharedTransfer={myServers.sharedTransfer}
           connectedHere={
             (runtime.state === "running" || runtime.state === "degraded") &&
@@ -2354,7 +2369,7 @@ export default function App() {
           onUseServer={handleUseServer}
           onDisconnect={() => void handleVpnStop()}
           onChanged={() => void myServers.refresh()}
-          onGone={() => myServers.ordered(null)}
+          onGone={() => myServers.clearSelection()}
           onRebuilt={myServers.rebuilt}
           onRetryDetail={myServers.retryDetail}
           onAiLocate={handleAiLocate}
@@ -2368,6 +2383,7 @@ export default function App() {
               : null
           }
           onGoConnect={() => changeDestination("client")}
+          pendingServer={myServers.pendingServer}
         />
       ) : trial?.state === "expired" && !hasNodes ? (
         <TrialExpired
@@ -2459,6 +2475,7 @@ export default function App() {
         <MyServerLogin
           onStart={myServers.loginStart}
           onVerify={myServers.loginVerify}
+          onReRegister={myServers.reRegister}
           onCancel={myServers.closeLogin}
         />
       ) : null}

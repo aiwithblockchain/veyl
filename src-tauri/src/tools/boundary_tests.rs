@@ -74,6 +74,7 @@ impl ServerCatalogSource for FakeServerCatalog {
                 monthly_usd: 5.0,
                 daily_price_cents: 17,
                 transfer_gib: 1000,
+                regions: vec!["tyo".into()],
             }],
         })
     }

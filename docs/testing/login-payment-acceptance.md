@@ -1,21 +1,44 @@
 # 登录 · 充值 · 购买：主流程验收
 
-> 日期：2026-11-16
+> 日期：2026-11-16（2026-11-18 按账号菜单与「就绪后扣款」修订）
 > 范围：只验主流程（登录态是否成立、余额决定能否买机、按天扣费是否发生）。
 > 说明：全面 UI 重构在即，本轮不覆盖异常、边界与门禁细节；那些等重构后按设计文档补齐。
-> 原则：**全部在应用内点击完成**，数据只用于核对结果。
+> 原则：**全部在应用内点击完成**，数据只用于核对结果（M1 例外，需要在 dev 库改一行）。
+> **2.39.0「就绪后扣款」尚未实现**：本轮验收一律按现行（2.38.x）口径判；新口径的断言在实现落地后才启用。
+
+## 条目可执行性（2026-11-18 复核）
+
+| 条目 | 结论 | 改法 |
+|---|---|---|
+| L2 | 能力已实现，条目里的 UI 位置过时（左栏账号块已删） | 改成导航头像 + 账号菜单 |
+| B1 | 条目与实现不符：余额预检发生在建单之前，不会留下 `pending_payment` 订单 | 改成「没有 `orders` 行」 |
+| B2 | 操作路径过时（账号块 → 账号菜单），且没写 Dodo Test 模式 | 改入口 + 明确 Test 模式 |
+| M1 | 依赖手工改库与 dev 调试端点，条目没写入口 | 写死命令与端点，标注仅 dev |
+| B3 | 新旧两套口径并存，容易两边打架 | 明确「当前按旧口径判通过；新口径 2.39.0 未实现，落地后重跑」 |
 
 ## 用例
 
 | 编号 | 前置 | 操作 | 预期界面 | 我核对的数据 |
 |---|---|---|---|---|
-| L1 | 未登录 | 打开「我的服务器」→ 点登录 → 输入邮箱 → 收码 → 输入 6 位码 | 左栏底部显示邮箱与「已登录」；服务器列表出现 | 新建 `accounts(kind=email)`；`devices.account_id` 指向它 |
-| L2 | L1 完成 | 完全退出应用，重新启动 | **仍然显示已登录**，不需要重新输验证码 | 刷新令牌轮换成功；旧的已作废 |
-| B1 | 已登录，余额 $0 | 选地区与套餐 → 创建 | 提示余额不足，不开始创建 | `orders` 一行 `pending_payment`；无 `servers`；无扣费流水 |
-| B2 | B1 之后 | 账号块 → 充值 → 选 $10 → 浏览器支付 → 回到应用 | 余额显示 **$10.00** | `topups.status=paid`；`payments` 一条 succeeded；`wallet_ledger` 一条 +1000 |
-| B3 | 余额 $10 | 同样的地区与套餐 → 创建 | 显示扣了 **$0.20**（当天日价）、剩余 $9.80，并开始开通 | `wallet_ledger` 一条 `-20`；`orders.state=provisioning`；`servers` 一行，`daily_price_cents=20`、`billing_anchor_at≈created_at`、`paid_until≈created_at+1天` |
-| M1 | 有一台已扣过费的服务器 | 我把它的 `paid_until` 改到昨天，触发每日任务 | 界面上服务器照常可用（不中断） | 新增一条 `server_day` 扣费（`ref=server_day:<id>:<bucket>`）；`paid_until` 顺延 **1 天**；余额相应减少 |
+| L1 | 未登录 | 打开「我的服务器」→ 点登录 → 输入邮箱 → 收码 → 输入 6 位码 | 导航底部头像变为邮箱首字母；账号菜单显示邮箱与「已登录」；服务器列表出现 | 新建 `accounts(kind=email)`；`devices.account_id` 指向它 |
+| L2 | L1 完成 | 完全退出应用，重新启动 | 导航头像仍是邮箱首字母，点开账号菜单是同一邮箱，**不弹登录** | 启动后若发生刷新：`refresh_tokens` 新增一条，旧行 `revoked_at` 非空（旧的已作废） |
+| B1 | 已登录，余额 $0 | 选地区与套餐 → 点 `创建` | 提示「余额不足，还差 $2.10。」（按日价 × 7），**不开始创建** | **没有** `orders` 行、没有 `servers` 行、没有 `wallet_ledger` 行（预检在建单之前拦下） |
+| B2 | B1 之后 | 导航头像 → 账号菜单 → 充值 → 选 $10 → 浏览器用 **Dodo Test 模式**支付 → 回到应用 | 账号菜单里余额显示 **$10.00**（webhook 到账通常数秒；未到账时点「刷新余额」） | `topups.status=paid`；`payments` 一条 succeeded；`wallet_ledger` 一条 +1000 |
+| B3 | 余额 $10 | 同样的地区与套餐 → 创建 | **当前按旧口径（2.38.x）判通过**：显示扣了 **$0.20**（当天日价）、剩余 $9.80，并开始开通。**新口径（2.39.0，未实现）在实现落地后才启用**：先显示「创建中」，开通后才显示扣费；届时本条重跑 | `wallet_ledger` 一条 `-20`；`orders.state=provisioning`；`servers` 一行，`daily_price_cents=20`、`billing_anchor_at≈created_at`、`paid_until≈created_at+1天`。**新口径启用后改判为**：checkout 后无 ledger、`billing_state='pending'`、`paid_until=NULL`；`servers.state='active'` 后才出现 `-20` 与 `paid_until` |
+| M1 | 有一台已扣过费、`state='active'` 的服务器（仅 dev） | 把 `paid_until` 改到昨天，再手动跑一次每日任务（命令见下方） | 服务器照常可用（不中断） | 新增一条 `server_day` 扣费（`ref=server_day:<id>:<bucket>`）；`paid_until` 顺延 **1 天**；余额相应减少 |
 | M2 | 一台已扣过两三天的服务器 | 销毁它 | 确认后消失；余额比销毁前多 | `wallet_ledger` 一条正向 `adjustment`（`ref=server_refund:<id>`），金额 = 未开始的整天数 × 日价；同一服务器不会出现第二条 |
+
+**M1 的具体做法（仅 dev）**
+
+```bash
+wrangler d1 execute veyl-control-plane-dev-4 --remote --command "UPDATE servers SET paid_until = strftime('%s','now','-1 day') * 1000 WHERE id = '<server_id>'"
+```
+
+```bash
+curl -s https://cp-dev.veyl.dessage.xyz/v1/debug/billing
+```
+
+第二条返回 `{ "ok": true, "report": … }`；prod 上该端点恒 404，M1 不适用。
 
 ## 执行顺序
 

@@ -534,6 +534,8 @@ export interface MyServerFailure {
 
 export interface MyServer {
   server_id: string;
+  /** 建这台机器的订单；列表接口带上时用来把订单对到服务器。 */
+  order_id?: string;
   name: string;
   region: string;
   plan: string;
@@ -597,6 +599,8 @@ export interface MyServerPlan {
   daily_price_cents: number;
   /** 每月公网出口流量额度（GiB）；0 = 未知，界面不显示。 */
   transfer_gib: number;
+  /** 这个档位可用的地区 id；旧控制面不返回（undefined = 不限制）。 */
+  regions?: string[];
 }
 
 export interface MyServerCatalog {
@@ -865,6 +869,8 @@ export interface AgentBridge {
   myServerCreate(input: MyServerCreateInput): Promise<MyServerOrder>;
   /** 从余额扣 1 天并开始建机（2.28.0）；余额不足回 `insufficient_balance`，details 带 7 天门槛。 */
   myServerCheckout(orderId: string): Promise<MyServerCharge>;
+  /** 订单详情：结账后 `server_id` 才会落在这张订单上（Host 2.40.0）。 */
+  myServerOrderGet(orderId: string): Promise<MyServerOrder>;
   /** 取消未完成订单（已建实例会先销毁）。 */
   myServerCancelOrder(orderId: string): Promise<MyServerOrder>;
   /** 销毁旧机并用同地区同套餐新建。 */

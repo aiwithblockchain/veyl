@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { recoverExpiredServers, runBilling } from "../src/billing";
 import { provisionPaidOrder } from "../src/orders";
 import { FakeD1 } from "./helpers/fakeD1";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 const ACCOUNT = "acct_billing00000000000";
 const DAY = 24 * 3600 * 1000;
@@ -289,6 +293,239 @@ describe("每日计费", () => {
     expect(snapshot?.balance_after_cents).toBe(800);
     expect(db.rows("wallet_ledger").some((row) => row.id === "led_old")).toBe(false);
     expect(report.archived).toBe(1);
+  });
+});
+
+describe("过期未 enroll 的 booting 机器", () => {
+  function seedExpiredBooting(
+    db: FakeD1,
+    expiresAt: number,
+    usedAt: number | null = null,
+  ) {
+    const orderId = "ord_boot00000000000000";
+    const serverId = "srv_boot0000000000000";
+    db.rows("orders").push({
+      id: orderId,
+      account_id: ACCOUNT,
+      region: "fra1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: DAILY / 100,
+      amount_cents: DAILY,
+      hourly_usd: 0.0125,
+      state: "provisioning",
+      idempotency_key: "idem-boot",
+      created_at: expiresAt,
+      paid_at: expiresAt,
+      expires_at: null,
+      server_id: serverId,
+      failure_code: null,
+      failure_stage: null,
+      checkout_session_id: null,
+      checkout_url: null,
+      paid_via: "wallet",
+    });
+    db.rows("servers").push({
+      id: serverId,
+      account_id: ACCOUNT,
+      order_id: orderId,
+      name: "我的服务器0002",
+      region: "fra1",
+      plan: "s-1vcpu-1gb",
+      hourly_usd: 0.0125,
+      monthly_usd: 6,
+      daily_price_cents: DAILY,
+      billing_anchor_at: expiresAt,
+      state: "booting",
+      billing_state: "active",
+      node_port: 12346,
+      provider_id: "4242",
+      enrollment_hash: usedAt === null ? "hash" : null,
+      enrollment_used_at: usedAt,
+      enrollment_expires_at: expiresAt,
+      paid_until: expiresAt + DAY,
+      created_at: expiresAt,
+      updated_at: expiresAt,
+      destroyed_at: null,
+      failure_code: null,
+    });
+    db.rows("wallet_ledger").push({
+      id: "led_boot_order",
+      account_id: ACCOUNT,
+      kind: "charge",
+      amount_cents: -DAILY,
+      balance_after_cents: 0,
+      ref_type: "order",
+      ref_id: orderId,
+      note: null,
+      created_at: expiresAt,
+    });
+    return { orderId, serverId };
+  }
+
+  function stubDeletes() {
+    const deleted: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const href = String(input);
+        if (init?.method === "DELETE" && href.includes("/droplets/")) {
+          deleted.push(href);
+          return new Response(null, { status: 204 });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      }),
+    );
+    return deleted;
+  }
+
+  it("计费 Cron 销毁并退回已扣的钱，之后不再扣费", async () => {
+    const db = new FakeD1();
+    const env = { ...envWith(db), DO_API_TOKEN: "do-token" };
+    const deleted = stubDeletes();
+    const { orderId, serverId } = seedExpiredBooting(db, Date.now() - 60_000);
+
+    const report = await runBilling(env as never);
+
+    expect(report.reaped).toBe(1);
+    expect(deleted).toHaveLength(1);
+    expect(deleted[0]).toContain("/droplets/4242");
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("destroyed");
+    expect(server.destroyed_at).not.toBeNull();
+    expect(db.rows("orders")[0].state).toBe("failed");
+    // 机器没建成：已扣的那一天原样退回。
+    const refund = db.rows("wallet_ledger").find((row) => row.ref_type === "server_refund");
+    expect(refund?.ref_id).toBe(serverId);
+    expect(refund?.amount_cents).toBe(DAILY);
+    expect(db.rows("accounts")[0].balance_cents).toBe(DAILY);
+    const audit = db.rows("audit_log").find(
+      (row) => row.action === "provision.enrollment_timeout",
+    );
+    expect(audit).toBeTruthy();
+    expect(String(audit?.detail)).toContain("enrollment_expires_at");
+    expect(db.rows("orders")[0].id).toBe(orderId);
+
+    // 再跑一轮：没有可清的机器，也不会重复退款或扣费。
+    const again = await runBilling(env as never);
+    expect(again.reaped).toBe(0);
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(1);
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_day")).toHaveLength(0);
+    expect(db.rows("accounts")[0].balance_cents).toBe(DAILY);
+  });
+
+  it("还在 enrollment 有效期内的 booting 机器不动", async () => {
+    const db = new FakeD1();
+    const env = { ...envWith(db), DO_API_TOKEN: "do-token" };
+    const deleted = stubDeletes();
+    seedExpiredBooting(db, Date.now() + 60_000);
+
+    const report = await runBilling(env as never);
+
+    expect(report.reaped).toBe(0);
+    expect(deleted).toHaveLength(0);
+    expect(db.rows("servers")[0].state).toBe("booting");
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
+  });
+
+  it("已回传 enroll 但在 activate 前停住：过期后同样销毁退款，原因记为 activate_stalled", async () => {
+    const db = new FakeD1();
+    const env = { ...envWith(db), DO_API_TOKEN: "do-token" };
+    const deleted = stubDeletes();
+    const expiresAt = Date.now() - 60_000;
+    const { serverId } = seedExpiredBooting(db, expiresAt, expiresAt - 30_000);
+
+    const report = await runBilling(env as never);
+
+    expect(report.reaped).toBe(1);
+    expect(deleted).toHaveLength(1);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("destroyed");
+    expect(server.failure_code).toBe("activate_stalled");
+    expect(db.rows("orders")[0].state).toBe("failed");
+    expect(db.rows("orders")[0].failure_code).toBe("activate_stalled");
+    const refunds = db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund");
+    expect(refunds).toHaveLength(1);
+    expect(refunds[0].ref_id).toBe(serverId);
+    expect(refunds[0].amount_cents).toBe(DAILY);
+    const audit = db.rows("audit_log").find(
+      (row) => row.action === "provision.activate_stalled",
+    );
+    expect(audit).toBeTruthy();
+    expect(String(audit?.detail)).toContain("enrollment_used_at");
+
+    // 再跑一轮：已销毁，不会退第二次。
+    const again = await runBilling(env as never);
+    expect(again.reaped).toBe(0);
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(1);
+  });
+
+  it("已回传但 enrollment 还没过期：不动，给 activate 留时间", async () => {
+    const db = new FakeD1();
+    const env = { ...envWith(db), DO_API_TOKEN: "do-token" };
+    const deleted = stubDeletes();
+    seedExpiredBooting(db, Date.now() + 60_000, Date.now() - 60_000);
+
+    const report = await runBilling(env as never);
+
+    expect(report.reaped).toBe(0);
+    expect(deleted).toHaveLength(0);
+    expect(db.rows("servers")[0].state).toBe("booting");
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
+  });
+
+  it("前 50 台销毁都失败时，后面的过期机器仍能扫到并销毁", async () => {
+    const db = new FakeD1();
+    const env = { ...envWith(db), DO_API_TOKEN: "do-token" };
+    const base = Date.now() - 10 * 60 * 1000;
+    for (let index = 1; index <= 55; index += 1) {
+      db.rows("servers").push({
+        id: `srv_${String(index).padStart(3, "0")}`,
+        account_id: ACCOUNT,
+        order_id: `ord_page_${index}`,
+        name: "我的服务器",
+        region: "fra1",
+        plan: "s-1vcpu-1gb",
+        hourly_usd: 0.0125,
+        monthly_usd: 6,
+        daily_price_cents: DAILY,
+        billing_anchor_at: base,
+        state: "booting",
+        billing_state: "active",
+        node_port: 20000 + index,
+        provider_id: String(index),
+        enrollment_hash: "hash",
+        enrollment_used_at: null,
+        // 前 50 台更早过期：单次 LIMIT 50 的写法会把 51–55 挡在窗口外。
+        enrollment_expires_at: base + index,
+        paid_until: base + index + DAY,
+        created_at: base,
+        updated_at: base,
+        destroyed_at: null,
+        failure_code: null,
+      });
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === "DELETE") {
+          const id = Number(String(input).split("/droplets/")[1]?.split("?")[0] ?? "0");
+          // 前 50 台的 DO 删除一直失败；它们不占销毁名额，也不该挡住后面的行。
+          return new Response(null, { status: id <= 50 ? 500 : 204 });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      }),
+    );
+
+    const report = await runBilling(env as never);
+
+    expect(report.reaped).toBe(5);
+    const destroyed = db
+      .rows("servers")
+      .filter((row) => row.state === "destroyed")
+      .map((row) => row.id)
+      .sort();
+    expect(destroyed).toEqual(["srv_051", "srv_052", "srv_053", "srv_054", "srv_055"]);
+    expect(db.rows("servers").filter((row) => row.state === "booting")).toHaveLength(50);
   });
 });
 

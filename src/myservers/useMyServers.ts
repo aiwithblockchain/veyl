@@ -23,6 +23,8 @@ interface Options {
 }
 
 const LIST_ERROR = "读不到你的服务器。已有服务器和节点不受影响；稍后再试。";
+/** 设备身份丢了：不是网络问题，重试同一个请求不会变好，只能重新注册。 */
+const REGISTER_ERROR = "没能重新注册设备。账户和服务器都还在，检查网络后再试一次。";
 const DETAIL_ERROR = "读不到这台服务器。已有服务器和节点不受影响；稍后再试。";
 const WALLET_ERROR = "读不到余额。稍后再试。";
 const LOGOUT_OFFLINE = "没退出登录。需要联网才能退出；服务器没有变化。";
@@ -89,12 +91,22 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [identityLostState, setIdentityLostState] = useState(false);
+  /** 设备 / 账户被停用：永久状态，重试同一个请求不会变好，界面要给明确出路。 */
+  const [blockedState, setBlockedState] = useState<
+    "device_revoked" | "account_blocked" | null
+  >(null);
   /** 还没有设备身份：列表区只给登录提示，不请求 /v1/servers。 */
   const [identityMissing, setIdentityMissing] = useState(false);
   const [identityPresent, setIdentityPresent] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [retryNotice, setRetryNotice] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** 显式选中的新机器：列表刷新前不允许默认选择 effect 覆盖它。 */
+  const pinnedSelectionRef = useRef<string | null>(null);
+  /** 已下单但还认不出是哪台：不自动选，等列表出现新行再认。 */
+  const [pendingServer, setPendingServer] = useState(false);
+  /** 下单前的服务器 id 集合：刷新时用它认出哪一行是新机器。 */
+  const pendingBaselineRef = useRef<Set<string> | null>(null);
   const [detail, setDetail] = useState<MyServer | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailRetrying, setDetailRetrying] = useState(false);
@@ -123,6 +135,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     );
     setIdentityMissing(true);
     setIdentityPresent(false);
+    setBlockedState(null);
     setServers([]);
     setSelectedId(null);
     setDetail(null);
@@ -144,6 +157,9 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       if (AUTH_REASONS.has(reason)) {
         // 登录过期：切回未登录，别让旧邮箱和余额继续显示。
         markLoggedOut();
+      } else if (reason === "device_revoked" || reason === "account_blocked") {
+        setBlockedState(reason);
+        setWalletError(null);
       } else {
         setWalletError(WALLET_ERROR);
       }
@@ -156,14 +172,35 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     try {
       const result = await bridge.myServerList();
       setServers(result.servers);
+      // 认出新机器就解除「已下单」占位并选中它；还没出现就继续等，别乱选一台旧的。
+      const baseline = pendingBaselineRef.current;
+      if (baseline) {
+        const appeared = result.servers.find(
+          (server) => !baseline.has(server.server_id),
+        );
+        if (appeared) {
+          pendingBaselineRef.current = null;
+          setPendingServer(false);
+          pinnedSelectionRef.current = appeared.server_id;
+          setSelectedId(appeared.server_id);
+        }
+      }
       setError(null);
       setIdentityLostState(false);
+      setBlockedState(null);
       setIdentityPresent(true);
       setRevision((value) => value + 1);
       return true;
     } catch (err) {
-      if (AUTH_REASONS.has(errorReason(err))) {
+      const reason = errorReason(err);
+      if (AUTH_REASONS.has(reason)) {
         markLoggedOut();
+      } else if (reason === "device_revoked" || reason === "account_blocked") {
+        // 永久状态：不当成网络故障，也不显示「稍后再试」。
+        setBlockedState(reason);
+        setIdentityLostState(false);
+        setIdentityPresent(false);
+        setError(null);
       } else if (identityLost(err)) {
         setIdentityLostState(true);
         setIdentityPresent(false);
@@ -391,11 +428,14 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   };
 
   const select = (serverId: string) => {
+    setPendingServer(false);
     setSelectedId(serverId);
     setView("detail");
   };
 
   const resetToRoot = () => {
+    pendingBaselineRef.current = null;
+    setPendingServer(false);
     setSelectedId(null);
     setView("wizard");
   };
@@ -404,15 +444,20 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setView("wizard");
   };
 
-  const reRegister = async () => {
+  const reRegister = async (): Promise<boolean> => {
     const register = (bridge as RegisterCapable).myServerRegisterDevice;
     try {
       if (register) await register.call(bridge);
       setIdentityLostState(false);
+      setBlockedState(null);
       const ok = await refresh();
       if (ok) setIdentityMissing(false);
+      // 设备换了：账户态也要重读，别继续显示被停用账户的邮箱。
+      void refreshAccount();
+      return ok;
     } catch {
-      setError(LIST_ERROR);
+      setError(REGISTER_ERROR);
+      return false;
     }
   };
 
@@ -442,13 +487,13 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   }, [account, bridge, refresh]);
 
   /** 左栏底部的登录状态按钮：按身份状态做一次身份动作。 */
-  const identityAction = async () => {
-    if (identityLostState) {
-      await reRegister();
-      return;
+  const identityAction = async (): Promise<boolean> => {
+    if (identityLostState || blockedState) {
+      return reRegister();
     }
     const ok = await ensureIdentity();
     if (ok) setIdentityMissing(false);
+    return ok;
   };
 
   const loginStart = async (email: string): Promise<MyServerLoginTicket> => {
@@ -551,6 +596,10 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const closeTopUp = () => setTopupOpen(false);
 
   const ordered = (serverId: string | null) => {
+    pinnedSelectionRef.current = serverId;
+    pendingBaselineRef.current =
+      serverId === null ? new Set(servers.map((server) => server.server_id)) : null;
+    setPendingServer(serverId === null);
     setView(serverId ? "detail" : "wizard");
     setSelectedId(serverId);
     setIdentityMissing(false);
@@ -559,8 +608,21 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     void refreshWallet();
   };
 
+  /** 销毁一台服务器之后：没有选中，让默认选择落到剩下的第一台。 */
+  const clearSelection = () => {
+    pinnedSelectionRef.current = null;
+    pendingBaselineRef.current = null;
+    setPendingServer(false);
+    setSelectedId(null);
+    setView("wizard");
+    void refresh();
+    void refreshWallet();
+  };
+
   /** 重建成功：立刻选中新机器，详情先按旧数据 + 新状态占位，随后由列表/详情刷新收敛。 */
   const rebuilt = (serverId: string, state: MyServerState) => {
+    pinnedSelectionRef.current = serverId;
+    setPendingServer(false);
     setView("detail");
     setSelectedId(serverId);
     setDetail((current) =>
@@ -591,14 +653,24 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   }, [active, loggedIn, refreshWallet]);
 
   // 有服务器就没有「未选中」：进入或刷新后默认选第一台；消失时选下一台。
+  // 下单/重建显式选中的新机器在列表刷新前要保住，不能被默认选择盖掉。
   useEffect(() => {
     if (!active) return;
+    // 已下单但还认不出是哪台：别把用户扔进任意一台别人的机器。
+    if (pendingServer) return;
+    const pinned = pinnedSelectionRef.current;
+    if (pinned) {
+      if (pinned === selectedId) {
+        if (!servers.some((server) => server.server_id === pinned)) return;
+      }
+      pinnedSelectionRef.current = null;
+    }
     if (servers.length === 0) return;
     if (selectedId && servers.some((server) => server.server_id === selectedId)) {
       return;
     }
     setSelectedId(servers[0].server_id);
-  }, [active, servers, selectedId]);
+  }, [active, servers, selectedId, pendingServer]);
 
   const lastRootSignalRef = useRef(rootSignal);
   useEffect(() => {
@@ -608,6 +680,9 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setView("wizard");
   }, [rootSignal]);
 
+  const identityProblem: "lost" | "device_revoked" | "account_blocked" | null =
+    blockedState ?? (identityLostState ? "lost" : null);
+
   return {
     servers,
     catalog,
@@ -616,10 +691,12 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     refresh,
     selected,
     selectedId: selected?.server_id ?? null,
+    pendingServer,
     detailError,
     detailRetrying,
     retryDetail,
     identityLost: identityLostState,
+    identityProblem,
     identityMissing,
     identityPresent,
     account,
@@ -649,9 +726,11 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     view,
     select,
     resetToRoot,
+    clearSelection,
     openWizard,
     ensureIdentity,
     identityAction,
+    reRegister,
     ordered,
     rebuilt,
   };

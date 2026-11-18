@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.18.0`
+> 契约版本：`3.19.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.18.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.19.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.18.0";
+  contract_version: "3.19.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -851,7 +851,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.18.0";
+  contract_version: "3.19.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1014,7 +1014,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.18.0";
+  contract_version: "3.19.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1947,8 +1947,9 @@ type StageSelectData = {
     - **键里必须带工具名**：`OpenSettings` 的 `claim_turn`（`settings.rs:101-108`）用的是 `(session_id, turn)`，且集合是 `settings.rs` 内部的私有静态量。直接共用会让「一轮内先 `OpenSettings` 再 `StageSelect`」互相顶掉。实现应把它提取成 Host 公共的一轮一次闸门（存放在 `tools` 模块，key 含工具名），两个工具各自调用；**不要**让 `StageSelect` 去借用 `settings.rs` 的那个集合。
     - **先校验、后占名额**：目录校验不通过（`unknown_region` / `unknown_plan`）**不占用本轮名额**，模型可以用正确 id 在同一轮重试。反之若先 claim 再校验，模型把「东京」当 id 试错一次就再也改不了。
   - **仅 advisory（模型自守，Host 不校验）**：用户没有表达选择意图时不得预选；只在用户说「帮我选 / 换成东京 / 用标准档」，或点了 `action_card` 对应按钮之后调用。Host 无从判断「意图」，不要假装它在强制。
-- **校验在 Host（唯一可信处）**：请求里出现的 `region` / `plan` 必须在目录里；目录没有「可用」字段，**不在目录即拒绝**，不要写「地区不可用」。
+- **校验在 Host（唯一可信处）**：请求里出现的 `region` / `plan` 必须在目录里；不在目录即拒绝。
   - 未知值 → `INVALID_ARGUMENT / unknown_region` / `unknown_plan`，整次拒绝、不发事件；
+  - **地区与规格同时出现时，还必须是目录里的真实组合**（`plan.regions` 含该地区，2.38.0）：不满足 → `INVALID_ARGUMENT / plan_unavailable_in_region`，`details` 带 `region`、`plan`，整次拒绝、不发事件。**不假设「每个地区都能开每一档」**——真实数据里 sgp1 就没有 `s-1vcpu-1gb`；
   - 目录取不到 → **与 `CatalogOptions` 用同一组码**（`commands.md` §7.14：`TIMEOUT`、`UPSTREAM_ERROR / network|upstream_status|invalid_response`、`RATE_LIMITED`），不新造 `catalog_unavailable`。
 - **调之前先拿 id**：必须先调 `CatalogOptions`（§4.53）拿到真实 id，禁止凭印象拼。模型嘴上说「东京」不算数，`region` 必须是目录里的 id。
 - 成功后 Host 发 `stage-select`（`events.md` §4.26），`region` / `plan` 里未请求的字段为 `null`。**舞台可见且不在创建中时**，UI 按字段合并、缺省保持当前值，合并后高亮 1.5 秒——**成功不等于「一定高亮」**：Host 没有屏幕状态，事件完全可能在用户停在连接屏时到达并被 UI 丢掉，这是正常结果，不是失败。
@@ -1970,7 +1971,7 @@ type StageSelectData = {
 ```ts
 type CatalogOptionsData = {
   regions: Array<{ id: string; name: string; continent: string }>;   // 目录里的全部地区
-  plans: Array<{ id: string; label: string; daily_price_cents: number; transfer_gib: number }>;
+  plans: Array<{ id: string; label: string; daily_price_cents: number; transfer_gib: number; regions: string[] }>;
 };
 ```
 
@@ -1985,7 +1986,7 @@ type CatalogOptionsData = {
   
   失败时**不要**给出地区名或价格——没读到就是没读到，不许拿印象补一份。
 - **只回 id、名称、大洲与套餐的展示字段**：`hourly_usd` / `monthly_usd` 是内部成本口径，不返回；IP、端口、凭据永不出现在这里。
-- 目录里没有「可用 / 售罄」字段：返回的就是全部可选项，别自己判断可用性。
+- **可用性只由 `plans[].regions` 表达（2.38.0）**：每个档位带它真实可用的地区 id（`commands.md` §7.14），严格按这份数据说话；没列出的组合就是不能开，不要推断「应该都行」，也不要自己补一份可用性表。
 - 触发：用户问「有哪些地区 / 多少钱」，或准备调 `StageSelect` 之前。不做「一轮最多一次」限制（只读）。
 - `display`：成功「读到了可选地区与规格」+ `facts` 放地区数 / 套餐数；失败「没读到可选地区，稍后再试」。
 
@@ -2086,6 +2087,13 @@ type CatalogOptionsData = {
 ---
 
 ## 8. 变更记录
+
+### 3.19.0（2026-11-18，地区 × 档位按目录真实数据）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.19.0`；`CatalogOptionsData.plans[]` 增 `regions: string[]`（该档位真实可用的地区 id，`commands.md` §7.14 同步）；删掉「目录没有可用性字段」的旧说法 | 数据结构 | 2026-11-18 建机 422：不能假设 DO 偏好处处一样 |
+| 2 | §4.52 `StageSelect`：地区与规格同时出现时按 `plan.regions` 校验组合，不满足 → `INVALID_ARGUMENT / plan_unavailable_in_region`（`details` 带 `region`、`plan`），不占本轮名额 | 校验收紧 | 同上；与 Worker 的扣费前校验同一口径 |
 
 ### 3.18.0（2026-11-17，配置类工具退出 AI 工具集）
 

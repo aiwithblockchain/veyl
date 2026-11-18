@@ -4,6 +4,7 @@
 import { randomId } from "./lib/crypto";
 import { provisionPaidOrder, type OrdersEnv } from "./orders";
 import { refundProvision } from "./provision";
+import { sweepExpiredEnrollments } from "./servers";
 import { reconciliationDrift, recordLedgerEntry } from "./wallet";
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -30,6 +31,7 @@ export interface BillingReport {
   expired: number;
   rebuilt: number;
   refunded: number;
+  reaped: number;
   archived: number;
   drift: number;
 }
@@ -52,11 +54,14 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, archived: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, archived: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
   const now = Date.now();
+  // 先清掉 enrollment 过期还没回传的机器：它们已经不可能建成，
+  // 这一步放在计费之前，免得同一轮又把没人认领的机器扣一天。
+  report.reaped = await sweepExpiredEnrollments(env);
   const due = await collectDue(env, now);
 
   for (const server of due) {

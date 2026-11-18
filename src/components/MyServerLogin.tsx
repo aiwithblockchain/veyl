@@ -7,6 +7,8 @@ import { IconClose } from "./icons";
 interface Props {
   onStart: (email: string) => Promise<MyServerLoginTicket>;
   onVerify: (email: string, code: string) => Promise<unknown>;
+  /** 设备身份丢了：重新注册设备；返回是否恢复成功。 */
+  onReRegister?: () => Promise<boolean>;
   onCancel: () => void;
 }
 
@@ -23,6 +25,8 @@ interface LoginError {
   tone?: "error" | "notice";
   /** 清空已输入的验证码。 */
   clearCode?: boolean;
+  /** 设备身份对不上：给「重新注册设备」入口。 */
+  reRegister?: boolean;
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -94,8 +98,29 @@ function verifyError(error: unknown): LoginError {
       backToEmail: true,
     };
   }
+  if (
+    reason === "device_mismatch" ||
+    reason === "device_identity_lost" ||
+    reason === "device_missing"
+  ) {
+    return {
+      message: "这台设备的身份对不上。",
+      hint: "需要重新注册设备；账户和服务器都还在。",
+      reRegister: true,
+    };
+  }
   if (reason === "device_revoked") {
-    return { message: "这台设备已被停用。", hint: "换一台设备再登录。" };
+    return {
+      message: "这台设备已被停用。重新登录会把这台设备重新注册。",
+      hint: "点下面的「重新注册设备」，再点一次「登录」。",
+      reRegister: true,
+    };
+  }
+  if (reason === "account_blocked") {
+    return {
+      message: "账户已停用。",
+      hint: "先在账号菜单里换一台设备身份，再登录其他账户。",
+    };
   }
   if (problem.code === "UNSUPPORTED") {
     return { message: problem.message, hint: "换一个版本再试。" };
@@ -110,12 +135,13 @@ function verifyError(error: unknown): LoginError {
 }
 
 /** 唯一的登录模态：邮箱 → 验证码；登录成功由父组件关闭并刷新列表。 */
-export function MyServerLogin({ onStart, onVerify, onCancel }: Props) {
+export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Props) {
   const [step, setStep] = useState<"email" | "code">("email");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [error, setError] = useState<LoginError | null>(null);
   const [busy, setBusy] = useState(false);
+  const [reRegistering, setReRegistering] = useState(false);
   const [cooldown, setCooldown] = useState(0);
   const busyRef = useRef(false);
 
@@ -196,6 +222,29 @@ export function MyServerLogin({ onStart, onVerify, onCancel }: Props) {
     } finally {
       busyRef.current = false;
       setBusy(false);
+    }
+  };
+
+  const reRegisterDevice = async () => {
+    if (reRegistering || !onReRegister) return;
+    setReRegistering(true);
+    try {
+      const ok = await onReRegister();
+      setError(
+        ok
+          ? { message: "设备已重新注册，再点一次「登录」。", tone: "notice" }
+          : {
+              message: "没能重新注册设备。",
+              hint: "账户和服务器都还在，检查网络后再试。",
+            },
+      );
+    } catch {
+      setError({
+        message: "没能重新注册设备。",
+        hint: "账户和服务器都还在，检查网络后再试。",
+      });
+    } finally {
+      setReRegistering(false);
     }
   };
 
@@ -289,6 +338,19 @@ export function MyServerLogin({ onStart, onVerify, onCancel }: Props) {
                 </p>
                 {error.hint ? <p className="myservers__hint">{error.hint}</p> : null}
               </>
+            ) : null}
+            {error?.reRegister ? (
+              <div className="myservers__login-actions">
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  disabled={busy || reRegistering}
+                  aria-busy={reRegistering || undefined}
+                  onClick={() => void reRegisterDevice()}
+                >
+                  {reRegistering ? "正在重新注册…" : "重新注册设备"}
+                </button>
+              </div>
             ) : null}
             <div className="myservers__login-actions">
               <button

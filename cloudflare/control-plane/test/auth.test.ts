@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { handleAuth } from "../src/auth";
+import { bumpRateLimit, handleAuth } from "../src/auth";
 import { sha256B64u } from "../src/lib/crypto";
 import { FakeD1 } from "./helpers/fakeD1";
 
@@ -110,6 +110,54 @@ describe("device auth", () => {
 
     const family = db.rows("refresh_tokens");
     expect(family.every((row) => row.used_at !== null || row.revoked_at !== null)).toBe(true);
+  });
+
+  it("读到未使用、更新时已被并发请求抢走：按重放处理，不签发第二套令牌", async () => {
+    const db = new FakeD1();
+    const env = envWith(db, await signingJwk());
+    const first = (await (await handleAuth(registerRequest(await registerBody()), env))!.json()) as {
+      refresh_token: string;
+    };
+    const refresh = (token: string) =>
+      handleAuth(
+        new Request("https://example.com/v1/auth/refresh", {
+          method: "POST",
+          body: JSON.stringify({ refresh_token: token }),
+        }),
+        env,
+      );
+
+    // 模拟并发：本请求读到的行还没用过，但条件更新执行前已被另一个请求用掉。
+    // 没有守卫时这里会再签发一套新令牌，重放检测就失效了。
+    db.beforeRefreshUse = () => {
+      db.beforeRefreshUse = undefined;
+      db.rows("refresh_tokens")[0].used_at = Date.now();
+    };
+
+    const res = await refresh(first.refresh_token);
+    expect(res?.status).toBe(401);
+    expect(((await res!.json()) as { details: { reason: string } }).details.reason).toBe(
+      "refresh_reused",
+    );
+    // 只有注册时那一行（没签发第二套），而且整族被作废。
+    expect(db.rows("refresh_tokens")).toHaveLength(1);
+    expect(db.rows("refresh_tokens")[0].revoked_at).not.toBeNull();
+  });
+
+  it("限流计数用单语句守卫：到上限即拒，窗口过期后重新放行", async () => {
+    const db = new FakeD1();
+    const key = "test:limit";
+    const d1 = db as unknown as D1Database;
+
+    expect(await bumpRateLimit(d1, key, 2, 3_600_000)).toBe(true);
+    expect(await bumpRateLimit(d1, key, 2, 3_600_000)).toBe(true);
+    expect(await bumpRateLimit(d1, key, 2, 3_600_000)).toBe(false);
+
+    // 窗口过期：下一个请求放行，并把这一窗口的计数重置为 1。
+    const window = db.rateLimit(key)!;
+    window.window_start = Date.now() - 2 * 3_600_000;
+    expect(await bumpRateLimit(d1, key, 2, 3_600_000)).toBe(true);
+    expect(db.rateLimit(key)?.count).toBe(1);
   });
 
   it("没有 D1 绑定时返回 503 而不是崩溃", async () => {

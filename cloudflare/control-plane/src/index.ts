@@ -186,6 +186,8 @@ export interface CatalogData {
     daily_price_cents?: number;
     /** 每月公网出口额度（GiB）；来自 /sizes 的 transfer(TB) × 1000，取不到为 0。 */
     transfer_gib: number;
+    /** 这个规格真实可用的地区 id（`/sizes` 的 `regions`，已对齐 `regions[]`）。 */
+    regions: string[];
   }>;
 }
 
@@ -214,6 +216,8 @@ export async function fetchCatalogData(token: string): Promise<CatalogData | nul
         price_monthly: number;
         /** TB、float、只计公网出口；DO 计费文档把 1 TB 档写作 1,000 GiB。 */
         transfer?: number;
+        /** 这个规格真实可用的地区 slug 列表；DO 按地区给，不是全地区通用。 */
+        regions?: unknown;
       }>;
     })?.sizes ?? [];
 
@@ -241,6 +245,17 @@ export async function fetchCatalogData(token: string): Promise<CatalogData | nul
   const plans = PLAN_SLUGS.flatMap((slug) => {
     const size = rawSizes.find((s) => s.slug === slug);
     if (!size || !validPrice(size.price_hourly) || !validPrice(size.price_monthly)) return [];
+    // `/sizes` 的 `regions` 是这个规格真实可用的地区：缺字段或不是数组就整条丢弃——
+    // 空数组不是「到处都能开」，不许拿它猜。只保留目录里真实下发的地区 id。
+    if (!Array.isArray(size.regions)) return [];
+    const knownRegions = new Set(regions.map((region) => region.id));
+    const planRegions = Array.from(
+      new Set(
+        size.regions.filter(
+          (id): id is string => typeof id === "string" && knownRegions.has(id),
+        ),
+      ),
+    );
     const memory = size.memory >= 1024 ? `${Math.round(size.memory / 1024)} GB` : `${size.memory} MB`;
     return [
       {
@@ -249,6 +264,7 @@ export async function fetchCatalogData(token: string): Promise<CatalogData | nul
         hourly_usd: size.price_hourly,
         monthly_usd: size.price_monthly,
         transfer_gib: transferGib(size.transfer),
+        regions: planRegions,
       },
     ];
   });
@@ -329,7 +345,8 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
 
     const cache = typeof caches !== "undefined" ? caches.default : null;
     // 版本号进 cache key：目录结构变化时改这里，部署即绕过旧副本（缓存最长 24h）。
-    const cacheKey = new Request("https://catalog.veyl.internal/v2-transfer");
+    // v3：plans[] 增 regions（地区 × 档位），旧副本会让 Host 按缺字段拒绝。
+    const cacheKey = new Request("https://catalog.veyl.internal/v3-regions");
     let stale: Response | null = null;
 
     if (cache) {
@@ -585,7 +602,9 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
           slug: string;
           memory: number;
           vcpus: number;
+          price_hourly: number;
           price_monthly: number;
+          transfer?: number;
           regions: string[];
         }>;
       })?.sizes ?? [];
@@ -606,6 +625,21 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
           images: { status: images.status, ok: images.ok, error: images.error },
         },
         regions: { count: available.length, slugs: available },
+        // 每个在售套餐的真实可用地区：联调/验收直接看这里，不看推断。
+        plans: PLAN_SLUGS.map((slug) => {
+          const size = sizeList.find((s) => s.slug === slug);
+          return size
+            ? {
+                slug,
+                regions: size.regions ?? null,
+                memory: size.memory,
+                vcpus: size.vcpus,
+                price_hourly: size.price_hourly,
+                price_monthly: size.price_monthly,
+                transfer: size.transfer ?? null,
+              }
+            : null;
+        }),
         sizes: {
           count: sizeList.length,
           cheapest: sizeList

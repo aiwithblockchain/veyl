@@ -172,8 +172,11 @@ export async function createFirewall(
   return { ok: true, value: { id: String(result.value.firewall.id) } };
 }
 
-/** 按 tag 反查本环境的 droplet，供 Cron 对账（§19.6.5）。 */
-export async function listDropletsByTag(
+export async function deleteFirewall(token: string, firewallId: string): Promise<ProviderResult<void>> {
+  return call<void>(token, `/firewalls/${encodeURIComponent(firewallId)}`, { method: "DELETE" });
+}
+
+/** 按 tag 反查本环境的 droplet，供 Cron 对账（§19.6.5）。 */export async function listDropletsByTag(
   token: string,
   tag: string,
 ): Promise<ProviderResult<DropletSummary[]>> {

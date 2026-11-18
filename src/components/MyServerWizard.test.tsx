@@ -582,3 +582,196 @@ describe("余额不足错误的不同 details 形状", () => {
     expect(screen.getByRole("button", { name: "去充值" })).toBeTruthy();
   });
 });
+
+describe("档位按地区过滤", () => {
+  const LIMITED: MyServerCatalog = {
+    regions: [
+      { id: "sgp1", name: "新加坡 1", continent: "asia" },
+      { id: "fra1", name: "法兰克福 1", continent: "europe" },
+    ],
+    plans: [
+      {
+        id: "s-1vcpu-512mb-10gb",
+        label: "1 核 · 512 MB",
+        hourly_usd: 0.00595,
+        monthly_usd: 6,
+        daily_price_cents: 20,
+        transfer_gib: 500,
+        regions: ["sgp1", "fra1"],
+      },
+      {
+        id: "s-1vcpu-1gb",
+        label: "1 核 · 1 GB",
+        hourly_usd: 0.00893,
+        monthly_usd: 9,
+        daily_price_cents: 30,
+        transfer_gib: 1000,
+        regions: ["fra1"],
+      },
+      {
+        id: "s-1vcpu-2gb",
+        label: "1 核 · 2 GB",
+        hourly_usd: 0.01786,
+        monthly_usd: 18,
+        daily_price_cents: 60,
+        transfer_gib: 2000,
+        regions: ["sgp1", "fra1"],
+      },
+    ],
+    currency: "USD",
+    updated_at: new Date(0).toISOString(),
+  };
+
+  function renderWizard(
+    initialSelection: { region: string; plan: string },
+    catalog: MyServerCatalog = LIMITED,
+  ) {
+    return render(
+      <MyServerWizard
+        bridge={makeBridge()}
+        catalog={catalog}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+        initialSelection={initialSelection}
+      />,
+    );
+  }
+
+  const planCard = (label: RegExp) =>
+    screen.getByRole("radio", { name: label }) as HTMLButtonElement;
+  const createButton = () =>
+    screen.getByRole("button", { name: "创建" }) as HTMLButtonElement;
+
+  it("新加坡不提供 1 GB：该档位禁用并注明，创建按钮禁用并就地说明", () => {
+    renderWizard({ region: "sgp1", plan: "s-1vcpu-1gb" });
+
+    const oneGb = planCard(/1 核 · 1 GB/);
+    expect(oneGb.disabled).toBe(true);
+    expect(oneGb.textContent).toContain("该地区不提供");
+    expect(planCard(/1 核 · 512 MB/).disabled).toBe(false);
+    expect(planCard(/1 核 · 2 GB/).disabled).toBe(false);
+
+    expect(createButton().disabled).toBe(true);
+    expect(
+      screen.getByText("这个地区不提供该档位，换一个档位或地区。"),
+    ).toBeTruthy();
+  });
+
+  it("切到法兰克福后同一档位恢复，说明消失", () => {
+    renderWizard({ region: "sgp1", plan: "s-1vcpu-1gb" });
+    expect(createButton().disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("radio", { name: /法兰克福 1/ }));
+
+    expect(planCard(/1 核 · 1 GB/).disabled).toBe(false);
+    expect(planCard(/1 核 · 1 GB/).textContent).not.toContain("该地区不提供");
+    expect(
+      screen.queryByText("这个地区不提供该档位，换一个档位或地区。"),
+    ).toBeNull();
+    expect(createButton().disabled).toBe(false);
+  });
+
+  it("先选档位再选地区：不支持该档位的地区禁用并注明", () => {
+    renderWizard({ region: "fra1", plan: "s-1vcpu-1gb" });
+
+    const sgp = screen.getByRole("radio", { name: /新加坡 1/ }) as HTMLButtonElement;
+    expect(sgp.disabled).toBe(true);
+    expect(sgp.textContent).toContain("不提供");
+    expect(
+      (screen.getByRole("radio", { name: /法兰克福 1/ }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+    expect(createButton().disabled).toBe(false);
+  });
+
+  it("旧控制面没有 plan.regions：不拦截，只留 warn", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    renderWizard({ region: "sgp1", plan: "s-1vcpu-1gb" }, CATALOG);
+
+    expect(planCard(/1 核 · 1 GB/).disabled).toBe(false);
+    expect(screen.queryByText("该地区不提供")).toBeNull();
+    expect(createButton().disabled).toBe(false);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("plan.regions"));
+  });
+});
+
+describe("地区没有任何可用档位", () => {
+  const AMS = { id: "ams3", name: "阿姆斯特丹 3", continent: "europe" as const };
+  const PLAN_512 = {
+    id: "s-1vcpu-512mb-10gb",
+    label: "1 核 · 512 MB",
+    hourly_usd: 0.00595,
+    monthly_usd: 6,
+    daily_price_cents: 20,
+    transfer_gib: 500,
+  };
+  const PLAN_2GB = {
+    id: "s-1vcpu-2gb",
+    label: "1 核 · 2 GB",
+    hourly_usd: 0.01786,
+    monthly_usd: 18,
+    daily_price_cents: 60,
+    transfer_gib: 2000,
+  };
+
+  function renderWith(catalog: MyServerCatalog, region: string, plan: string) {
+    return render(
+      <MyServerWizard
+        bridge={makeBridge()}
+        catalog={catalog}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+        initialSelection={{ region, plan }}
+      />,
+    );
+  }
+
+  it("该地区一个档位都没有：地区禁用并注明暂不提供", () => {
+    const catalog: MyServerCatalog = {
+      regions: [...CATALOG.regions, AMS],
+      plans: [
+        { ...PLAN_512, regions: ["sgp1", "fra1"] },
+        { ...PLAN_2GB, regions: ["sgp1", "fra1"] },
+      ],
+      currency: "USD",
+      updated_at: new Date(0).toISOString(),
+    };
+    renderWith(catalog, "sgp1", "s-1vcpu-512mb-10gb");
+
+    const ams = screen.getByRole("radio", {
+      name: /阿姆斯特丹 3/,
+    }) as HTMLButtonElement;
+    expect(ams.disabled).toBe(true);
+    expect(ams.textContent).toContain("该地区暂不提供服务器");
+    expect(
+      (screen.getByRole("radio", { name: /新加坡 1/ }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(
+      (screen.getByRole("button", { name: "创建" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("所有地区都不可用：顶部一句话，不摆灰卡片，创建禁用", () => {
+    const catalog: MyServerCatalog = {
+      regions: CATALOG.regions,
+      plans: [
+        { ...PLAN_512, regions: ["tyo"] },
+        { ...PLAN_2GB, regions: ["tyo"] },
+      ],
+      currency: "USD",
+      updated_at: new Date(0).toISOString(),
+    };
+    renderWith(catalog, "sgp1", "s-1vcpu-512mb-10gb");
+
+    expect(screen.getByText("暂时没有可用的地区")).toBeTruthy();
+    expect(screen.queryAllByRole("radio")).toHaveLength(0);
+    expect(screen.queryByText("该地区暂不提供服务器")).toBeNull();
+    expect(
+      (screen.getByRole("button", { name: "创建" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    // 系统行不参与地区/档位过滤，仍然显示。
+    expect(screen.getByText("Ubuntu 24.04 LTS")).toBeTruthy();
+  });
+});

@@ -40,6 +40,9 @@ pub struct Plan {
     pub daily_price_cents: i64,
     /// 每月公网出口额度（GiB）；0 = 未知，界面整行不显示。
     pub transfer_gib: i64,
+    /// 这个规格真实可用的地区 id（目录 `regions[]` 的子集）；空数组 = 暂时哪儿都开不了。
+    /// 不假设「某地区可选某档位」——这里没有的地区就是不能选。
+    pub regions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,6 +175,14 @@ fn validate(catalog: Catalog) -> Result<Catalog, CatalogError> {
                 plan.id
             )));
         }
+        for region_id in &plan.regions {
+            if region_id.trim().is_empty() || !region_ids.contains(region_id.as_str()) {
+                return Err(CatalogError::invalid(format!(
+                    "套餐 {} 的地区 {} 不在目录里",
+                    plan.id, region_id
+                )));
+            }
+        }
         if !plan_ids.insert(plan.id.as_str()) {
             return Err(CatalogError::invalid(format!("套餐 id 重复：{}", plan.id)));
         }
@@ -288,7 +299,7 @@ mod tests {
                 { "id": "fra", "name": "Frankfurt", "continent": "europe" }
             ],
             "plans": [
-                { "id": "vc2-1c-1gb", "label": "1 vCPU · 1 GB", "hourly_usd": 0.007, "monthly_usd": 5.0, "daily_price_cents": 17, "transfer_gib": 1000 }
+                { "id": "vc2-1c-1gb", "label": "1 vCPU · 1 GB", "hourly_usd": 0.007, "monthly_usd": 5.0, "daily_price_cents": 17, "transfer_gib": 1000, "regions": ["tyo", "fra"] }
             ]
         })
         .to_string()
@@ -305,6 +316,22 @@ mod tests {
         assert_eq!(catalog.plans[0].monthly_usd, 5.0);
         assert_eq!(catalog.plans[0].daily_price_cents, 17);
         assert_eq!(catalog.plans[0].transfer_gib, 1000);
+        assert_eq!(catalog.plans[0].regions, vec!["tyo", "fra"]);
+    }
+
+    #[test]
+    fn a_plan_region_outside_the_catalog_is_rejected() {
+        // 地区 × 档位只能引用目录里真实下发的地区：多出来的 id 会让界面给出不存在的选项。
+        let mut value: serde_json::Value = serde_json::from_str(&valid_body()).unwrap();
+        value["plans"][0]["regions"] = serde_json::json!(["tyo", "sgp1"]);
+        let error = parse_catalog(&value.to_string()).unwrap_err();
+        assert_eq!(error.details["reason"], "invalid_response");
+        assert!(error.message.contains("sgp1"));
+
+        // 缺字段同样是硬错误：不补空数组去猜。
+        let mut value: serde_json::Value = serde_json::from_str(&valid_body()).unwrap();
+        value["plans"][0].as_object_mut().unwrap().remove("regions");
+        assert!(parse_catalog(&value.to_string()).is_err());
     }
 
     #[test]
@@ -345,8 +372,8 @@ mod tests {
 
         let mut value: serde_json::Value = serde_json::from_str(&valid_body()).unwrap();
         value["plans"] = serde_json::json!([
-            { "id": "p", "label": "a", "hourly_usd": 0.1, "monthly_usd": 1.0, "daily_price_cents": 3, "transfer_gib": 500 },
-            { "id": "p", "label": "b", "hourly_usd": 0.2, "monthly_usd": 2.0, "daily_price_cents": 7, "transfer_gib": 0 }
+            { "id": "p", "label": "a", "hourly_usd": 0.1, "monthly_usd": 1.0, "daily_price_cents": 3, "transfer_gib": 500, "regions": ["tyo"] },
+            { "id": "p", "label": "b", "hourly_usd": 0.2, "monthly_usd": 2.0, "daily_price_cents": 7, "transfer_gib": 0, "regions": ["tyo"] }
         ]);
         assert_eq!(
             parse_catalog(&value.to_string()).unwrap_err().details["reason"],

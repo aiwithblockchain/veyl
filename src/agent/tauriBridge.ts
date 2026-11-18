@@ -637,6 +637,9 @@ function normalizeMyServerCatalog(raw: {
             monthly_usd: monthly,
             daily_price_cents: daily as number,
             transfer_gib: transfer as number,
+            regions: Array.isArray(plan.regions)
+              ? plan.regions.filter((id): id is string => typeof id === "string")
+              : undefined,
           };
         })
         .filter((plan): plan is MyServerPlan => plan !== null)
@@ -729,6 +732,7 @@ function normalizeMyServer(raw: unknown): MyServer | null {
 
   return {
     server_id: serverId,
+    order_id: typeof value.order_id === "string" ? value.order_id : undefined,
     name: typeof value.name === "string" ? value.name : "",
     region: typeof value.region === "string" ? value.region : "",
     plan: typeof value.plan === "string" ? value.plan : "",
@@ -1270,6 +1274,14 @@ export class TauriAgentBridge implements AgentBridge {
   async myServerCancelOrder(orderId: string): Promise<MyServerOrder> {
     const order = normalizeMyServerOrder(
       await call<unknown>("my_server_cancel_order", { orderId }),
+    );
+    if (!order) serverDataError();
+    return order;
+  }
+
+  async myServerOrderGet(orderId: string): Promise<MyServerOrder> {
+    const order = normalizeMyServerOrder(
+      await call<unknown>("my_server_order_get", { orderId }),
     );
     if (!order) serverDataError();
     return order;

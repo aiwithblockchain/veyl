@@ -22,6 +22,12 @@ fn invalid(reason: &str, message: &str) -> AivpnError {
     AivpnError::new("INVALID_ARGUMENT", message).with_details(json!({ "reason": reason }))
 }
 
+fn unavailable(region: &str, plan: &str) -> AivpnError {
+    AivpnError::new("INVALID_ARGUMENT", "这个地区没有这个规格").with_details(
+        json!({ "reason": "plan_unavailable_in_region", "region": region, "plan": plan }),
+    )
+}
+
 fn catalog_failure(error: CatalogError) -> AivpnError {
     let retryable = error.retryable;
     let failure = AivpnError::new(error.code, error.message).with_details(error.details);
@@ -99,11 +105,20 @@ fn resolve(
                 .iter()
                 .find(|plan| &plan.id == id)
                 .ok_or_else(|| invalid("unknown_plan", "目录里没有这个规格"))?;
-            Some((found.id.clone(), found.label.clone()))
+            Some((found.id.clone(), found.label.clone(), found.regions.clone()))
         }
         None => None,
     };
-    Ok((region, plan))
+    // 地区和规格同时出现时，必须是目录里真实存在的组合：不能假设每个地区都能开每一档。
+    if let (Some((region_id, _)), Some((plan_id, _, plan_regions))) = (&region, &plan) {
+        if !plan_regions.iter().any(|id| id == region_id) {
+            return Err(unavailable(region_id, plan_id));
+        }
+    }
+    Ok((
+        region.map(|(id, name)| (id, name)),
+        plan.map(|(id, label, _)| (id, label)),
+    ))
 }
 
 type Emitter = Arc<dyn Fn(Value) + Send + Sync>;
@@ -305,6 +320,7 @@ impl Tool for CatalogOptionsTool {
                                 "label": plan.label,
                                 "daily_price_cents": plan.daily_price_cents,
                                 "transfer_gib": plan.transfer_gib,
+                                "regions": plan.regions,
                             })
                         })
                         .collect();
@@ -367,6 +383,7 @@ mod tests {
                 monthly_usd: 5.0,
                 daily_price_cents: 17,
                 transfer_gib: 1000,
+                regions: vec!["tyo".into()],
             }],
         }
     }
@@ -440,6 +457,34 @@ mod tests {
         assert!(events.lock().unwrap().is_empty());
 
         // 校验失败不占名额：同一轮用正确 id 仍然能成功。
+        let good = tool.execute(json!({ "region": "tyo" }), &ctx).await;
+        assert!(!good.is_error, "{}", good.content);
+        assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_region_without_the_plan_is_rejected_without_consuming_the_turn() {
+        let mut catalog = catalog();
+        catalog.plans[0].regions = vec!["fra".into()];
+        let (emit, events) = recorder();
+        let tool = StageSelectTool::with_emitter(source(Ok(catalog)), emit);
+        let ctx = context(&session("pair"), 1);
+
+        let result = tool
+            .execute(json!({ "region": "tyo", "plan": "vc2-1c-1gb" }), &ctx)
+            .await;
+        assert!(result.is_error);
+        let meta = result.metadata.unwrap();
+        assert_eq!(meta["aivpn"]["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            meta["aivpn"]["error"]["details"]["reason"],
+            "plan_unavailable_in_region"
+        );
+        assert_eq!(meta["aivpn"]["error"]["details"]["region"], "tyo");
+        assert_eq!(meta["aivpn"]["error"]["details"]["plan"], "vc2-1c-1gb");
+        assert!(events.lock().unwrap().is_empty());
+
+        // 校验失败不占名额：同一轮换成目录支持的组合仍然能成功。
         let good = tool.execute(json!({ "region": "tyo" }), &ctx).await;
         assert!(!good.is_error, "{}", good.content);
         assert_eq!(events.lock().unwrap().len(), 1);
@@ -539,6 +584,7 @@ mod tests {
         assert_eq!(data["regions"][0]["id"], "tyo");
         assert_eq!(data["plans"][0]["daily_price_cents"], 17);
         assert_eq!(data["plans"][0]["transfer_gib"], 1000);
+        assert_eq!(data["plans"][0]["regions"][0], "tyo");
         assert!(
             data["plans"][0].get("hourly_usd").is_none(),
             "成本口径不能返回"

@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 // @ts-expect-error 测试跑在 Node 里；项目 tsconfig 只带浏览器类型（vite/client），没有 @types/node。
 import { readFileSync } from "node:fs";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MyServerWallet } from "../agent/bridge";
 import { AccountMenu } from "./AccountMenu";
@@ -25,18 +25,22 @@ const WALLET: MyServerWallet = {
 };
 
 function renderMenu(over: Partial<Parameters<typeof AccountMenu>[0]> = {}) {
-  return render(
-    <AccountMenu
-      email="buyer@example.com"
-      wallet={WALLET}
-      walletError={null}
-      onTopUp={() => {}}
-      onRefreshWallet={() => {}}
-      onLogout={async () => ({ ok: true })}
-      onClose={() => {}}
-      {...over}
-    />,
-  );
+  const props = {
+    email: "buyer@example.com",
+    wallet: WALLET,
+    walletError: null,
+    onTopUp: () => {},
+    onRefreshWallet: () => {},
+    onLogout: async () => ({ ok: true }),
+    onClose: () => {},
+    ...over,
+  };
+  const view = render(<AccountMenu {...props} />);
+  return {
+    ...view,
+    rerenderMenu: (next: Partial<Parameters<typeof AccountMenu>[0]>) =>
+      view.rerender(<AccountMenu {...props} {...next} />),
+  };
 }
 
 describe("账号菜单", () => {
@@ -114,5 +118,100 @@ describe("账号菜单", () => {
     expect(screen.getByText(/余额暂时读不到。/)).toBeTruthy();
     screen.getByRole("button", { name: "重试" }).click();
     expect(retry).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("设备身份丢了", () => {
+  it("说明是身份丢失而非网络问题，并提供「重新注册设备」入口", () => {
+    renderMenu({ identityProblem: "lost", onReRegister: async () => true });
+
+    expect(
+      screen.getByText("这台设备的身份丢了，需要重新注册设备；账户和服务器都在。"),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "重新注册设备" }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/稍后再试/)).toBeNull();
+  });
+
+  it("点击调用恢复动作；恢复后入口消失", async () => {
+    const onReRegister = vi.fn(async () => true);
+    const menu = renderMenu({ identityProblem: "lost", onReRegister });
+
+    fireEvent.click(screen.getByRole("button", { name: "重新注册设备" }));
+    await waitFor(() => expect(onReRegister).toHaveBeenCalledTimes(1));
+
+    menu.rerenderMenu({ identityProblem: null });
+    expect(screen.queryByRole("button", { name: "重新注册设备" })).toBeNull();
+    expect(screen.queryByText(/这台设备的身份丢了/)).toBeNull();
+  });
+
+  it("恢复失败时给出诚实结果，入口保留可再试", async () => {
+    const onReRegister = vi.fn(async () => false);
+    renderMenu({ identityProblem: "lost", onReRegister });
+
+    fireEvent.click(screen.getByRole("button", { name: "重新注册设备" }));
+
+    expect(
+      await screen.findByText("这一步没完成。检查网络后再试一次；账户和服务器都还在。"),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重新注册设备" })).toBeTruthy();
+  });
+
+  it("没有身份问题时不出现在菜单里", () => {
+    renderMenu();
+    expect(screen.queryByRole("button", { name: "重新注册设备" })).toBeNull();
+  });
+});
+
+describe("设备 / 账户被停用", () => {
+  it("设备停用：诚实话术 + 「重新登录」，不再给「退出登录」", () => {
+    renderMenu({
+      identityProblem: "device_revoked",
+      onRelogin: async () => true,
+    });
+
+    expect(
+      screen.getByText("这台设备已被停用。重新登录会把这台设备重新注册。"),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重新登录" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "退出登录" })).toBeNull();
+    expect(screen.queryByText("余额")).toBeNull();
+    expect(screen.queryByText("充值")).toBeNull();
+    expect(screen.queryByText(/稍后再试/)).toBeNull();
+  });
+
+  it("设备停用：点「重新登录」调用重登动作", async () => {
+    const onRelogin = vi.fn(async () => true);
+    renderMenu({ identityProblem: "device_revoked", onRelogin });
+
+    fireEvent.click(screen.getByRole("button", { name: "重新登录" }));
+    await waitFor(() => expect(onRelogin).toHaveBeenCalledTimes(1));
+  });
+
+  it("账户停用：不假装能退出，动作是「换一台设备登录」", async () => {
+    const onRelogin = vi.fn(async () => true);
+    const menu = renderMenu({
+      identityProblem: "account_blocked",
+      onRelogin,
+    });
+
+    expect(
+      screen.getByText(
+        "账户已停用，这个账户不能再使用。换一台设备身份后，可以登录其他账户。",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "退出登录" })).toBeNull();
+    expect(screen.queryByText("余额")).toBeNull();
+    expect(screen.queryByText("充值")).toBeNull();
+    expect(screen.queryByText(/稍后再试/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "换一台设备登录" }));
+    await waitFor(() => expect(onRelogin).toHaveBeenCalledTimes(1));
+
+    menu.rerenderMenu({ identityProblem: null });
+    expect(
+      screen.queryByRole("button", { name: "换一台设备登录" }),
+    ).toBeNull();
   });
 });
