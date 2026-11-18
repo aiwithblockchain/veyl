@@ -27,6 +27,8 @@ interface Props {
   readOnly: boolean;
   /** 当前连接的就是这台。 */
   connectedHere?: boolean;
+  /** 打开充值：就绪后扣费失败时详情给「去充值」。 */
+  onTopUp?: () => void;
   onNew: () => void;
   onLogin: () => void;
   onRefreshAccount: () => void;
@@ -73,6 +75,7 @@ export function MyServersPage({
   detailRetrying,
   readOnly,
   connectedHere = false,
+  onTopUp,
   onNew,
   onLogin,
   onRefreshAccount,
@@ -151,6 +154,7 @@ export function MyServersPage({
               selected.region
             }
             connectedHere={connectedHere}
+            onTopUp={onTopUp}
             onDisconnect={onDisconnect}
             onAiLocate={onAiLocate}
             readOnly={readOnly}

@@ -148,6 +148,8 @@ export function formatBuildDuration(
 /** 计费截止措辞的唯一出处；定稿后只改这里。 */
 export const PAID_THROUGH_WORDING = "本期有效至";
 export const PAID_EXPIRED_WORDING = "本期已到期，下一轮扣费顺延";
+/** 建机成功、还没开通扣费时的费用行文案。 */
+export const PENDING_BILLING_WORDING = "创建中，开通后开始计费";
 
 /** 计费日期：本地日期 YYYY-MM-DD。 */
 export function formatPaidUntil(iso: string): string {
@@ -162,7 +164,9 @@ export function serverBillingText(
   server: Pick<MyServer, "daily_price_cents" | "paid_until" | "billing_state">,
   now = Date.now(),
 ): string {
+  if (server.billing_state === "pending") return PENDING_BILLING_WORDING;
   const price = formatDailyPrice(server.daily_price_cents);
+  if (!server.paid_until) return `每天 ${price}`;
   const ends = new Date(server.paid_until).getTime();
   // active 但已过 paid_until：还在等当天 Cron 补扣，不当作已停用。
   if (

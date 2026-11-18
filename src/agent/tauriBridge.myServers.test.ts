@@ -76,6 +76,22 @@ describe("按天计费的归一化", () => {
     expect(list.servers[0].billing_state).toBe("active");
   });
 
+  it("待开通（pending）允许 paid_until 为空；其它状态仍要求有值", async () => {
+    const pending = {
+      ...SERVER,
+      state: "installing",
+      billing_state: "pending",
+      paid_until: null,
+    };
+    const broken = { ...SERVER, paid_until: null };
+    invoke.mockResolvedValueOnce({ servers: [pending, broken] });
+
+    const list = await new TauriAgentBridge().myServerList();
+    expect(list.servers).toHaveLength(1);
+    expect(list.servers[0].billing_state).toBe("pending");
+    expect(list.servers[0].paid_until).toBeNull();
+  });
+
   it("钱包不要求 runway_days，也不补该字段", async () => {
     invoke.mockResolvedValueOnce({
       balance_cents: 1000,
@@ -87,6 +103,33 @@ describe("按天计费的归一化", () => {
     const wallet = await new TauriAgentBridge().myServerWallet();
     expect(wallet.balance_cents).toBe(1000);
     expect("runway_days" in wallet).toBe(false);
+  });
+});
+
+describe("结账返回订单（2.39.0）", () => {
+  it("按订单归一化：保留 server_id，不读 charged_cents", async () => {
+    invoke.mockResolvedValueOnce({
+      order_id: "ord_1",
+      state: "provisioning",
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 9,
+      created_at: new Date(0).toISOString(),
+      expires_at: null,
+      server_id: "srv_1",
+      failure: null,
+      charged_cents: 30,
+      balance_after_cents: 970,
+    });
+
+    const order = await new TauriAgentBridge().myServerCheckout("ord_1");
+    expect(order).toMatchObject({
+      order_id: "ord_1",
+      state: "provisioning",
+      server_id: "srv_1",
+    });
+    expect("charged_cents" in order).toBe(false);
+    expect("balance_after_cents" in order).toBe(false);
   });
 });
 

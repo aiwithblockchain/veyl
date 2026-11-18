@@ -556,9 +556,10 @@ export interface MyServer {
   verifying_at?: string | null;
   /** 正在安装的 sing-box 版本；没有就不显示。 */
   singbox_version?: string | null;
-  /** 已付到哪个时刻（ISO 8601）；建行时即写入，永不为 null。 */
-  paid_until: string;
-  billing_state: "active" | "past_due" | "expired";
+  /** 已付到哪个时刻（ISO 8601）；开通成功扣费后才写入，待开通时为 null。 */
+  paid_until: string | null;
+  /** pending = 已建机、还没开通扣费；开通成功后才变 active。 */
+  billing_state: "pending" | "active" | "past_due" | "expired";
   /** 派生值：paid_until + 7d；仅 past_due / expired 时非空。 */
   grace_ends_at: string | null;
   /** 每月公网出口流量额度（GiB）快照；0 = 未知。 */
@@ -679,14 +680,6 @@ export interface MyServerTopup {
   topup_id: string;
   checkout_url: string | null;
   denomination_cents: number;
-}
-
-/** 结账扣费结果（2.28.0）。 */
-export interface MyServerCharge {
-  order_id: string;
-  state: "paid" | "provisioning" | "ready";
-  charged_cents: number;
-  balance_after_cents: number;
 }
 
 /**
@@ -877,8 +870,8 @@ export interface AgentBridge {
   myServerRename(serverId: string, name: string): Promise<MyServer>;
   /** 下单；本期是假支付，只产生一张订单。 */
   myServerCreate(input: MyServerCreateInput): Promise<MyServerOrder>;
-  /** 从余额扣 1 天并开始建机（2.28.0）；余额不足回 `insufficient_balance`，details 带 7 天门槛。 */
-  myServerCheckout(orderId: string): Promise<MyServerCharge>;
+  /** 结账并开始建机（2.39.0 起返回订单）；余额不足回 `insufficient_balance`，details 带 7 天门槛。 */
+  myServerCheckout(orderId: string): Promise<MyServerOrder>;
   /** 订单详情：结账后 `server_id` 才会落在这张订单上（Host 2.40.0）。 */
   myServerOrderGet(orderId: string): Promise<MyServerOrder>;
   /** 取消未完成订单（已建实例会先销毁）。 */

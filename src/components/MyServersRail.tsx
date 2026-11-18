@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { MyServer, MyServerCatalog } from "../agent/bridge";
-import { formatDailyPrice, serverRailState, stateTone } from "../myservers/labels";
+import { formatDailyPrice, isProvisioning, serverRailState, stateTone } from "../myservers/labels";
 import { IconClose } from "./icons";
 
 interface Props {
@@ -33,6 +33,13 @@ function ServerRow({
   regionLabel: string;
   onSelect: (serverId: string) => void;
 }) {
+  // 失败机器的计费字段可能是 0：副行不写日价，避免读成「免费 / 计费坏了」。
+  const billingPart =
+    server.state === "error"
+      ? null
+      : server.billing_state === "pending" && isProvisioning(server.state)
+        ? "开通中"
+        : `${formatDailyPrice(server.daily_price_cents)}/天`;
   return (
     <button
       type="button"
@@ -52,8 +59,8 @@ function ServerRow({
         />
       </span>
       <span className="rail-server__meta">
-        {serverRailState(server.state)} · {regionLabel} ·{" "}
-        {formatDailyPrice(server.daily_price_cents)}/天
+        {serverRailState(server.state)} · {regionLabel}
+        {billingPart ? ` · ${billingPart}` : null}
       </span>
     </button>
   );

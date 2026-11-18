@@ -22,6 +22,8 @@ interface Props {
   readOnly?: boolean;
   /** 当前连接的就是这台。 */
   connectedHere?: boolean;
+  /** 打开充值：就绪后扣费失败（余额不够）时给「去充值」。 */
+  onTopUp?: () => void;
   /** 失败时把结构化失败交给 AI。 */
   onAiLocate?: (serverId: string) => void;
   /** 再建一台：打开 client 舞台的新建节点。 */
@@ -56,6 +58,7 @@ export function MyServerDetail({
   regionLabel,
   readOnly = false,
   connectedHere = false,
+  onTopUp,
   onAiLocate,
   onCreateAnother,
   onUseServer,
@@ -236,8 +239,12 @@ export function MyServerDetail({
   );
   const chargedCents = server.charged_cents;
   const refundedCents = server.refunded_cents;
-  const failedBilling =
-    chargedCents === undefined || refundedCents === undefined
+  /** 就绪后扣费时余额不够：机器没开通，这笔根本没扣。 */
+  const settleFailed =
+    server.state === "error" && server.failure?.code === "settle_insufficient";
+  const failedBilling = settleFailed
+    ? "本次没有扣费"
+    : chargedCents === undefined || refundedCents === undefined
       ? "费用信息暂时读不到"
       : refundedCents > 0
         ? `已退回 ${formatUsdCents(refundedCents)}`
@@ -351,7 +358,16 @@ export function MyServerDetail({
 
       {server.failure ? (
         <div className="myservers__failure" role="alert">
-          <p>{server.failure.message}</p>
+          <p>
+            {settleFailed
+              ? "服务器没开通，本次没有扣费。"
+              : server.failure.message}
+          </p>
+          {settleFailed && onTopUp && !readOnly ? (
+            <button type="button" className="btn btn--ghost" onClick={onTopUp}>
+              去充值
+            </button>
+          ) : null}
           {onAiLocate ? (
             <button
               type="button"

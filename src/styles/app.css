@@ -3209,12 +3209,6 @@ body[data-resizing] {
   font-variant-numeric: tabular-nums;
 }
 
-.myservers__success {
-  margin: 0;
-  font-size: 13px;
-  color: var(--green);
-}
-
 .myservers__detail {
   display: flex;
   flex-direction: column;

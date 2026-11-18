@@ -27,7 +27,6 @@ import type {
   MyServer,
   MyServerAccount,
   MyServerCatalog,
-  MyServerCharge,
   MyServerCreateInput,
   MyServerCredentialNode,
   MyServerDeviceIdentity,
@@ -707,8 +706,12 @@ function normalizeMyServer(raw: unknown): MyServer | null {
       ? (value.state as MyServerState)
       : null;
   const daily = value.daily_price_cents;
-  const paidUntil = typeof value.paid_until === "string" ? value.paid_until : "";
+  const paidUntil =
+    typeof value.paid_until === "string" && value.paid_until !== ""
+      ? value.paid_until
+      : null;
   const billingState =
+    value.billing_state === "pending" ||
     value.billing_state === "active" ||
     value.billing_state === "past_due" ||
     value.billing_state === "expired"
@@ -721,7 +724,8 @@ function normalizeMyServer(raw: unknown): MyServer | null {
     !state ||
     !Number.isInteger(daily as number) ||
     (daily as number) < 0 ||
-    paidUntil === "" ||
+    // 待开通时还没扣费，paid_until 为空；其余状态必须有值。
+    (billingState !== "pending" && paidUntil === null) ||
     !billingState ||
     !(grace === null || typeof grace === "string") ||
     !Number.isInteger(transfer as number) ||
@@ -876,26 +880,6 @@ function normalizeMyServerTopup(raw: unknown): MyServerTopup | null {
         ? value.checkout_url
         : null,
     denomination_cents: cents,
-  };
-}
-
-function normalizeMyServerCharge(raw: unknown): MyServerCharge | null {
-  if (!raw || typeof raw !== "object") return null;
-  const value = raw as Record<string, unknown>;
-  const charged = readCents(value.charged_cents);
-  const balance = readCents(value.balance_after_cents);
-  const state =
-    value.state === "paid" || value.state === "provisioning" || value.state === "ready"
-      ? value.state
-      : null;
-  if (typeof value.order_id !== "string" || charged === null || balance === null || !state) {
-    return null;
-  }
-  return {
-    order_id: value.order_id,
-    state,
-    charged_cents: charged,
-    balance_after_cents: balance,
   };
 }
 
@@ -1278,12 +1262,13 @@ export class TauriAgentBridge implements AgentBridge {
     return order;
   }
 
-  async myServerCheckout(orderId: string): Promise<MyServerCharge> {
-    const charge = normalizeMyServerCharge(
+  async myServerCheckout(orderId: string): Promise<MyServerOrder> {
+    // 2.39.0 起返回订单：server_id 写在订单上，不再有 charged_cents。
+    const order = normalizeMyServerOrder(
       await call<unknown>("my_server_checkout", { orderId }),
     );
-    if (!charge) serverDataError();
-    return charge;
+    if (!order) serverDataError();
+    return order;
   }
 
   async myServerCancelOrder(orderId: string): Promise<MyServerOrder> {

@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentBridge, MyServerCatalog } from "../agent/bridge";
+import type { AgentBridge, MyServerCatalog, MyServerOrder } from "../agent/bridge";
 import { MyServerWizard } from "./MyServerWizard";
 
 const CATALOG: MyServerCatalog = {
@@ -36,6 +36,22 @@ function makeBridge(): AgentBridge {
     myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
     myServerCatalog: vi.fn(async () => CATALOG),
   } as unknown as AgentBridge;
+}
+
+/** 结账从 2.39.0 起返回订单：server_id 写在订单上，没有扣费字段。 */
+function order(over: Partial<MyServerOrder> = {}): MyServerOrder {
+  return {
+    order_id: "ord_1",
+    state: "provisioning",
+    region: "sgp1",
+    plan: "s-1vcpu-1gb",
+    amount_usd: 9,
+    created_at: new Date(0).toISOString(),
+    expires_at: null,
+    server_id: "srv_1",
+    failure: null,
+    ...over,
+  };
 }
 
 afterEach(() => {
@@ -112,10 +128,7 @@ describe("新建节点舞台的 AI 选择", () => {
     const bridge = {
       myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
       myServerCreate: vi.fn(() => created),
-      myServerCheckout: vi.fn(async () => ({
-        charged_cents: 30,
-        balance_after_cents: 970,
-      })),
+      myServerCheckout: vi.fn(async () => order()),
       myServerCatalog: vi.fn(async () => CATALOG),
     } as unknown as AgentBridge;
     const onBack = vi.fn();
@@ -269,10 +282,7 @@ describe("新建节点舞台的 AI 选择", () => {
     const bridge = {
       myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
       myServerCreate: vi.fn(() => created),
-      myServerCheckout: vi.fn(async () => ({
-        charged_cents: 30,
-        balance_after_cents: 970,
-      })),
+      myServerCheckout: vi.fn(async () => order()),
       myServerCatalog: vi.fn(async () => CATALOG),
     } as unknown as AgentBridge;
     const base = {
@@ -319,10 +329,7 @@ describe("新建节点的幂等键", () => {
     return {
       myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
       myServerCreate: create,
-      myServerCheckout: vi.fn(async () => ({
-        charged_cents: 30,
-        balance_after_cents: 970,
-      })),
+      myServerCheckout: vi.fn(async () => order()),
       myServerCatalog: vi.fn(async () => CATALOG),
     } as unknown as AgentBridge;
   }
@@ -397,10 +404,7 @@ describe("返回控件", () => {
     const bridge = {
       myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
       myServerCreate: vi.fn(() => created),
-      myServerCheckout: vi.fn(async () => ({
-        charged_cents: 30,
-        balance_after_cents: 970,
-      })),
+      myServerCheckout: vi.fn(async () => order()),
       myServerCatalog: vi.fn(async () => CATALOG),
     } as unknown as AgentBridge;
     render(
@@ -440,12 +444,7 @@ describe("返回控件", () => {
 describe("建机余额门槛（余额 ≥ 日价 × 7）", () => {
   function wizardBridge(
     balanceCents: number,
-    checkout: ReturnType<typeof vi.fn> = vi.fn(async () => ({
-      order_id: "ord_1",
-      state: "paid" as const,
-      charged_cents: 30,
-      balance_after_cents: balanceCents - 30,
-    })),
+    checkout: ReturnType<typeof vi.fn> = vi.fn(async () => order()),
   ) {
     return {
       myServerWallet: vi.fn(async () => ({ balance_cents: balanceCents })),
@@ -857,5 +856,88 @@ describe("打开向导时回源目录", () => {
     ).toBe(true);
     expect(fetchCatalog).toHaveBeenCalledTimes(1);
     expect(fetchCatalog).toHaveBeenCalledWith(true);
+  });
+});
+
+describe("向导底部计费说明", () => {
+  it("写明开通后才开始计费，不是下单即扣", async () => {
+    render(
+      <MyServerWizard
+        bridge={makeBridge()}
+        catalog={CATALOG}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+
+    expect(
+      await screen.findByText("开通后开始计费，每天续扣；余额不足会提示充值。"),
+    ).toBeTruthy();
+  });
+});
+
+describe("结账返回订单（2.39.0）", () => {
+  it("只按订单形状也能完成下单，界面不再展示扣费金额", async () => {
+    const onOrdered = vi.fn();
+    const bridge = {
+      myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
+      myServerCreate: vi.fn(async () => ({
+        order_id: "ord_1",
+        server_id: null,
+      })),
+      myServerCheckout: vi.fn(async () => order({ state: "provisioning" })),
+      myServerCatalog: vi.fn(async () => CATALOG),
+    } as unknown as AgentBridge;
+
+    render(
+      <MyServerWizard
+        bridge={bridge}
+        catalog={CATALOG}
+        onOrdered={onOrdered}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
+    await waitFor(() => expect(onOrdered).toHaveBeenCalledWith("srv_1"));
+    // 旧的「已扣 $X，余额 $Y」不再出现。
+    expect(screen.queryByText(/已扣|余额 \$/)).toBeNull();
+  });
+
+  it("结账失败：按原有错误提示停下，不当作已下单", async () => {
+    const onOrdered = vi.fn();
+    const bridge = {
+      myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
+      myServerCreate: vi.fn(async () => ({
+        order_id: "ord_1",
+        server_id: null,
+      })),
+      myServerCheckout: vi.fn(async () => {
+        throw {
+          code: "UPSTREAM_ERROR",
+          message: "服务器没建起来。",
+          retryable: true,
+        };
+      }),
+      myServerCatalog: vi.fn(async () => CATALOG),
+    } as unknown as AgentBridge;
+
+    render(
+      <MyServerWizard
+        bridge={bridge}
+        catalog={CATALOG}
+        onOrdered={onOrdered}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
+    expect(
+      await screen.findByText(/服务器没建起来/),
+    ).toBeTruthy();
+    expect(onOrdered).not.toHaveBeenCalled();
   });
 });

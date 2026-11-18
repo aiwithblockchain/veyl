@@ -2,7 +2,6 @@ import type {
   MyServer,
   MyServerAccount,
   MyServerCatalog,
-  MyServerCharge,
   MyServerCreateInput,
   MyServerCredentialNode,
   MyServerFailure,
@@ -251,6 +250,12 @@ function advance(store: Store): void {
         server.failure = null;
         server.node_id = `node_${server.server_id}`;
         server.port = server.port ?? 8388;
+        // 就绪后才扣第一天：mock 在这里把待开通转成已开通。
+        if (server.billing_state === "pending") {
+          server.billing_state = "active";
+          server.paid_until = new Date(now + 86_400_000).toISOString();
+        }
+        server.ready_at ??= new Date(now).toISOString();
         break;
       }
       server.state = MY_SERVER_PHASES[index];
@@ -396,7 +401,9 @@ export class MockMyServerService {
     return { ...order };
   }
 
-  checkout(orderId: string): MyServerCharge {    if (readFlag(DOWN_KEY) === "1") providerDown();
+  /** 结账返回订单（2.39.0）：server_id 写在订单上，不再返回 charged_cents。 */
+  checkout(orderId: string): MyServerOrder {
+    if (readFlag(DOWN_KEY) === "1") providerDown();
     const store = readStore();
     const order = store.orders.find((item) => item.order_id === orderId);
     if (!order) {
@@ -404,17 +411,7 @@ export class MockMyServerService {
     }
     if (order.state !== "pending_payment") {
       // 已付过的订单重复结账：不再扣钱。
-      return {
-        order_id: order.order_id,
-        state:
-          order.state === "ready"
-            ? "ready"
-            : order.state === "paid"
-              ? "paid"
-              : "provisioning",
-        charged_cents: 0,
-        balance_after_cents: store.balance_cents,
-      };
+      return { ...order };
     }
     const region = REGIONS.find((item) => item.id === order.region) ?? REGIONS[0];
     const plan = PLANS.find((item) => item.id === order.plan) ?? DEFAULT_PLAN;
@@ -450,8 +447,8 @@ export class MockMyServerService {
       monthly_usd: plan.monthly_usd,
       daily_price_cents: plan.daily_price_cents,
       transfer_gib: plan.transfer_gib,
-      paid_until: new Date(Date.now() + 86_400_000).toISOString(),
-      billing_state: "active",
+      paid_until: null,
+      billing_state: "pending",
       grace_ends_at: null,
       failure: null,
       started_at: Date.now(),
@@ -460,12 +457,7 @@ export class MockMyServerService {
     order.state = "provisioning";
     order.server_id = id;
     writeStore(store);
-    return {
-      order_id: order.order_id,
-      state: "provisioning",
-      charged_cents: priceCents,
-      balance_after_cents: store.balance_cents,
-    };
+    return { ...order };
   }
 
   account(): MyServerAccount {
@@ -584,8 +576,8 @@ export class MockMyServerService {
       ip: `45.76.${50 + store.next_id}.${90 + store.next_id}`,
       port: null,
       node_id: null,
-      paid_until: new Date(Date.now() + 86_400_000).toISOString(),
-      billing_state: "active",
+      paid_until: null,
+      billing_state: "pending",
       grace_ends_at: null,
       failure: null,
       started_at: Date.now(),

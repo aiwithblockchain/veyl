@@ -768,11 +768,11 @@ describe("下单成功后回到详情", () => {
       account_id: "acct_1",
     });
     vi.spyOn(bridge, "myServerCreate").mockResolvedValue({ ...order } as never);
+    // 结账回订单形状；paid 路径上 server_id 还没写回，按订单详情解析。
     const checkout = vi.spyOn(bridge, "myServerCheckout").mockResolvedValue({
-      order_id: order.order_id,
+      ...order,
       state: "provisioning",
-      charged_cents: 30,
-      balance_after_cents: 970,
+      server_id: null,
     } as never);
     vi.spyOn(bridge, "myServerOrderGet").mockResolvedValue({
       ...order,
@@ -1260,8 +1260,13 @@ describe("新建节点：导航与 Esc", () => {
     vi.spyOn(bridge, "myServerCheckout").mockResolvedValue({
       order_id: "ord_1",
       state: "provisioning",
-      charged_cents: 30,
-      balance_after_cents: 970,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 5,
+      created_at: new Date(0).toISOString(),
+      expires_at: null,
+      server_id: "srv_new",
+      failure: null,
     } as never);
 
     render(<App />);

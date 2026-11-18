@@ -174,8 +174,13 @@ function makeBridge(servers: MyServer[] = SERVERS) {
     myServerCheckout: vi.fn(async () => ({
       order_id: "ord_1",
       state: "provisioning" as const,
-      charged_cents: 30,
-      balance_after_cents: 770,
+      region: "nyc1",
+      plan: "vc2-1c-1gb",
+      amount_usd: 5,
+      created_at: new Date(0).toISOString(),
+      expires_at: null,
+      server_id: "srv_new",
+      failure: null,
     })),
     myServerCancelOrder: vi.fn(),
     myServerRebuild: vi.fn(async () => ({ newServerId: "srv_new", state: "creating" as const })),
@@ -603,5 +608,67 @@ describe("空态里的免费节点说明", () => {
     await screen.findByRole("heading", { name: "还没有服务器" });
     expect(hint()).toBeNull();
     expect(screen.queryByRole("button", { name: "去连接" })).toBeNull();
+  });
+});
+
+describe("服务器列表行的开通状态", () => {
+  it("billing_state=pending 时显示开通中，不显示日价", () => {
+    render(
+      <MyServersRail
+        servers={[
+          server({
+            name: "新加坡 1 · 新建",
+            state: "installing",
+            node_id: null,
+            billing_state: "pending",
+            paid_until: null,
+          }),
+        ]}
+        selectedId={null}
+        loading={false}
+        catalog={CATALOG}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    const meta = document.querySelector(".rail-server__meta");
+    expect(meta?.textContent).toContain("开通中");
+    expect(meta?.textContent).not.toContain("/天");
+  });
+});
+
+describe("待开通机器失败后的列表行", () => {
+  it("settle_insufficient 后立刻显示出错，不再停在开通中", () => {
+    render(
+      <MyServersRail
+        servers={[
+          server({
+            name: "新加坡 1 · 新建",
+            state: "error",
+            node_id: null,
+            billing_state: "pending",
+            paid_until: null,
+            failure: {
+              stage: "verifying",
+              code: "settle_insufficient",
+              message: "余额不足。",
+              retryable: true,
+            },
+          }),
+        ]}
+        selectedId={null}
+        loading={false}
+        catalog={CATALOG}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    const meta = document.querySelector(".rail-server__meta");
+    expect(meta?.textContent).toContain("出错了");
+    expect(meta?.textContent).not.toContain("开通中");
+    // 计费字段可能全是 0：不能渲染成「$0.00/天」。
+    expect(meta?.textContent).not.toContain("/天");
   });
 });

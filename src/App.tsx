@@ -2380,6 +2380,7 @@ export default function App() {
             Boolean(myServers.selected?.node_id) &&
             runtime.node_id === myServers.selected?.node_id
           }
+          onTopUp={myServers.openTopUp}
           onNew={() => openNewNode("servers")}
           onLogin={myServers.openLogin}
           onRefreshAccount={() => void myServers.refreshAccount()}

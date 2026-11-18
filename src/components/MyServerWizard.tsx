@@ -202,10 +202,6 @@ export function MyServerWizard({
   const [error, setError] = useState<WizardError | null>(null);
   /** 订单已经建出来但后续失败时记下服务器 id，AI 定位要用。 */
   const [failedServerId, setFailedServerId] = useState<string | null>(null);
-  const [charged, setCharged] = useState<{
-    chargedCents: number;
-    balanceAfterCents: number;
-  } | null>(null);
   // 同一组选择重试复用键：超时/网络失败时结果未知，换键会建第二台。
   // 键和地区+套餐绑定，换了选择必须换键，否则控制面按「同键不同请求」拒绝。
   const idempotencyKey = useRef({ key: "", region: "", plan: "" });
@@ -341,7 +337,6 @@ export function MyServerWizard({
     if (!currentPlan || !currentRegion || busy || combinationUnavailable) return;
     setSubmitting(true);
     setError(null);
-    setCharged(null);
     setFailedServerId(null);
     // 创建前先看余额：建机门槛是日价 × 7（实际只扣 1 天），不够就不下单。
     let balanceCents: number | null = null;
@@ -387,15 +382,12 @@ export function MyServerWizard({
         idempotencyKey: idempotencyKey.current.key,
       });
       setFailedServerId(created.server_id);
-      const charge = await bridge.myServerCheckout(created.order_id);
+      const order = await bridge.myServerCheckout(created.order_id);
       setFailedServerId(null);
-      setCharged({
-        chargedCents: charge.charged_cents,
-        balanceAfterCents: charge.balance_after_cents,
-      });
-      // 回到详情：左栏该行显示紧凑状态，中间直接给四段进度。
-      // create 只返回订单；server_id 是 checkout 写回订单的，按订单或列表解析。
-      onOrdered(await resolveOrderedServer(bridge, created.order_id));
+      // 结账只回订单：server_id 通常已写回订单，paid 路径下再按订单详情/列表解析。
+      onOrdered(
+        order.server_id ?? (await resolveOrderedServer(bridge, created.order_id)),
+      );
     } catch (err) {
       const problem = toBridgeError(err);
       const reason =
@@ -618,14 +610,6 @@ export function MyServerWizard({
         <p className="wizard-system">Ubuntu 24.04 LTS</p>
       </section>
 
-      {charged ? (
-        <p className="myservers__success" role="status">
-          {charged.chargedCents > 0
-            ? `已扣 ${formatUsdCents(charged.chargedCents)}，余额 ${formatUsdCents(charged.balanceAfterCents)}。`
-            : `这台服务器已经开通过，没有重复扣费。余额 ${formatUsdCents(charged.balanceAfterCents)}。`}
-        </p>
-      ) : null}
-
       {error ? (
         <>
           <p className="myservers__error" role="alert">
@@ -672,7 +656,7 @@ export function MyServerWizard({
               ? `${currentTier ? `${currentTier} · ` : ""}约 ${formatMonthlyFromDaily(currentPlan.daily_price_cents)}/月`
               : null}
           </p>
-          <p className="myservers__demo">从余额扣一天；之后每天续扣，余额不足会提示充值。</p>
+          <p className="myservers__demo">开通后开始计费，每天续扣；余额不足会提示充值。</p>
         </div>
         <button
           type="button"

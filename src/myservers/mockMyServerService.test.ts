@@ -144,8 +144,13 @@ describe("建机余额门槛（日价 × 7）", () => {
     const created = order(service, "k2");
     setBalance(210);
 
-    const charge = service.checkout(created.order_id);
-    expect(charge.charged_cents).toBe(30);
-    expect(charge.balance_after_cents).toBe(180);
+    const paid = service.checkout(created.order_id);
+    // 2.39.0 起返回订单：server_id 写在订单上，没有扣费字段。
+    expect(paid.order_id).toBe(created.order_id);
+    expect(paid.state).toBe("provisioning");
+    expect(paid.server_id).toBeTruthy();
+    expect("charged_cents" in paid).toBe(false);
+    // 余额仍只扣 1 天。
+    expect(service.wallet().balance_cents).toBe(180);
   });
 });

@@ -35,6 +35,7 @@ function renderDetail(
   onAiLocate?: (serverId: string) => void,
   connectedHere = false,
   onDisconnect?: () => void,
+  onTopUp?: () => void,
 ) {
   const destroy = vi.fn(async (id: string) =>
     server({ server_id: id, state: "destroyed" }),
@@ -48,6 +49,7 @@ function renderDetail(
       connectedHere={connectedHere}
       onAiLocate={onAiLocate}
       onDisconnect={onDisconnect}
+      onTopUp={onTopUp}
       onCreateAnother={onCreateAnother}
       onUseServer={onUseServer}
       onChanged={() => {}}
@@ -178,6 +180,76 @@ describe("服务器详情", () => {
     const facts = document.querySelector(".myservers__facts");
     expect(facts?.textContent).toContain("本期有效至");
     expect(screen.getByText("流量")).toBeTruthy();
+  });
+
+  it("待开通（billing_state=pending）：费用行写开通后开始计费，流量照常", () => {
+    renderDetail({
+      state: "verifying",
+      billing_state: "pending",
+      paid_until: null,
+      transfer_gib: 1000,
+    });
+
+    const facts = document.querySelector(".myservers__facts");
+    expect(facts?.textContent).toContain("创建中，开通后开始计费");
+    expect(facts?.textContent).not.toContain("本期有效至");
+    expect(screen.getByText("流量")).toBeTruthy();
+  });
+
+  it("就绪后扣费余额不够：写明没开通没扣费，给去充值与重新建一台", () => {
+    const onTopUp = vi.fn();
+    renderDetail(
+      {
+        state: "error",
+        billing_state: "pending",
+        paid_until: null,
+        // 即使 Host 给了数字，这笔也没扣，不能写退款处理中。
+        charged_cents: 30,
+        refunded_cents: 0,
+        failure: {
+          stage: "verifying",
+          code: "settle_insufficient",
+          message: "余额不足。",
+          retryable: true,
+        },
+      },
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      false,
+      undefined,
+      onTopUp,
+    );
+
+    expect(
+      screen.getByText("服务器没开通，本次没有扣费。"),
+    ).toBeTruthy();
+    const facts = document.querySelector(".myservers__facts");
+    expect(facts?.textContent).toContain("本次没有扣费");
+    expect(facts?.textContent).not.toContain("退款处理中");
+    fireEvent.click(screen.getByRole("button", { name: "去充值" }));
+    expect(onTopUp).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "重新建一台" })).toBeTruthy();
+  });
+
+  it("其它建机失败仍走退款文案，不给去充值", () => {
+    renderDetail({
+      state: "error",
+      charged_cents: 30,
+      refunded_cents: 0,
+      failure: {
+        stage: "installing",
+        code: "install_failed",
+        message: "装环境失败。",
+        retryable: true,
+      },
+    });
+
+    expect(
+      document.querySelector(".myservers__facts")?.textContent,
+    ).toContain("已扣 $0.30，退款处理中");
+    expect(screen.getByText("装环境失败。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "去充值" })).toBeNull();
   });
 
   it("流量额度为 0 时整行不显示", () => {
