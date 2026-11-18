@@ -221,8 +221,15 @@ mod tests {
     #[test]
     fn excluding_picks_a_different_port() {
         let excluded = 49152;
-        let port = pick_free_port_excluding(&[excluded]).unwrap();
-        assert_ne!(port, excluded);
-        assert!(is_port_free(port));
+        // 并行用例可能在「挑端口」与「复查」之间抢走同一个端口，所以复查失败就重试；
+        // 「不能等于 excluded」这条每次都必须成立。
+        for _ in 0..20 {
+            let port = pick_free_port_excluding(&[excluded]).unwrap();
+            assert_ne!(port, excluded);
+            if is_port_free(port) {
+                return;
+            }
+        }
+        panic!("连续 20 次挑到的端口在复查时都已被占，端口空间异常");
     }
 }

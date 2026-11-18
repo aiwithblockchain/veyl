@@ -964,6 +964,18 @@ fn connect_changed_base(error: &anyhow::Error) -> &'static str {
     let detail_reason = detail
         .and_then(|value| value.get("reason"))
         .and_then(Value::as_str);
+    // 被取代的启动：停干净了就是「改过又收回」，停不掉/不确定才是 unknown。
+    if details
+        .and_then(|value| value.get("superseded_start"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        let stop_failed = details
+            .and_then(|value| value.get("superseded_stop_failed"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        return if stop_failed { "unknown" } else { "restored" };
+    }
 
     // 想过恢复但没成功：不能再声称「没有改动」。
     if reason == Some("proxy_restore_failed") {
@@ -1057,6 +1069,83 @@ fn mark_old_connection_stopped(error: anyhow::Error, stopped: bool) -> anyhow::E
     let mut details = service.details.clone().unwrap_or_else(|| json!({}));
     details["old_connection_stopped"] = json!(stopped);
     svc_error_with_details(service.code.clone(), service.message.clone(), details)
+}
+
+/// 启动决策段的结果：幂等分支直接带回快照，其余带回记好的代数。
+enum ConnectionDecision {
+    Idempotent(Value),
+    Start { epoch: u64, old_stopped: bool },
+}
+
+/// 拉起阶段要带进 `connect_body` 的启动上下文。
+#[derive(Clone, Copy)]
+struct StartContext {
+    /// 决策段记下的运行期代数；重建回滚没有决策段，为 `None`（不做取代检查）。
+    epoch: Option<u64>,
+    /// 调用方是否已持有运行期操作锁（重建回滚在锁内调 `connect_body`）。
+    lock_held: bool,
+}
+
+const SUPERSEDED_START_MESSAGE: &str = "本次连接已被更新的操作取代，已取消。";
+const STOP_UNKNOWN_MESSAGE: &str = "连接结果无法确认，请查看诊断日志后重试。";
+/// 重建被用户断开取代时的固定文案（契约 §4.0.1）。
+const USER_DISCONNECTED_REBUILD_MESSAGE: &str = "已按你的操作断开；新增节点会在下次连接时生效。";
+
+/// 重建被用户断开取代：不回滚、不重连；节点已进池，下次连接生效。
+fn user_disconnected_rebuild() -> Value {
+    json!({
+        "status": "failed",
+        "reason": "user_disconnected",
+        "restored": false,
+        "new_nodes_available_next_connect": true,
+        "message": USER_DISCONNECTED_REBUILD_MESSAGE,
+    })
+}
+
+/// 重建后的连接状态无法确认（拿不到运行期锁）：**不能冒充用户断开**，
+/// 也不能声称已恢复。节点已进池，下次连接生效。
+fn rebuild_unknown() -> Value {
+    json!({
+        "status": "failed",
+        "restored": false,
+        "new_nodes_available_next_connect": true,
+        "message": "没能确认当前连接状态；新节点已进池，下次连接生效。",
+    })
+}
+
+/// 重建期间运行时被**另一次启动或重启**接手（连接还在）：不是用户断开，
+/// 不能说「已按你的操作断开」。
+fn rebuild_replaced_by_new_connection() -> Value {
+    json!({
+        "status": "failed",
+        "restored": false,
+        "new_nodes_available_next_connect": true,
+        "message": "新节点这次没能应用；当前连接已由新的操作接管，重新连接后就能用它。",
+    })
+}
+
+/// 拉起返回后复查到的连接状态。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AfterStart {
+    Connected,
+    Disconnected,
+    /// 无法确认（拿不到运行期锁）：既不是连着，也不是用户断开。
+    Unknown,
+}
+
+/// 被取代的启动收尾（契约 §7.1）：停干净了就是 `cancelled`（请求作废，不是故障）；
+/// 停不掉或无法确认就是 `INTERNAL` + `connect_changed: "unknown"`。
+fn superseded_error(message: &str, stop_failed: bool) -> anyhow::Error {
+    let mut details = json!({ "reason": "cancelled", "superseded_start": true });
+    if stop_failed {
+        details["superseded_stop_failed"] = json!(true);
+    }
+    let code = if stop_failed {
+        "INTERNAL"
+    } else {
+        "PRECONDITION_FAILED"
+    };
+    svc_error_with_details(code, message, details)
 }
 
 /// 把错误映射成「卡在哪一步」，只用于 debug 日志。
@@ -1827,11 +1916,9 @@ const RUNTIME_LOG_TAIL_LINES: usize = 20;
 
 /// 用户侧运行期操作（start / stop / restart）的排队上限。
 ///
-/// 这是 epoch 重设计前的过渡值：D6 把长启动移出锁之前，重建在这把锁里要跑完整的
-/// stop → start，失败还要回滚再起一次；单轮 TUN 启动等助手回包的上限就是 90s
-/// （`tun/backend.rs`），所以 60s **覆盖不了最坏情况**——排队中的断开仍可能先吃到
-/// `runtime_busy`。等长启动移出锁后，这个值再收回 20s。
-const RUNTIME_OP_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// 锁只护决策段（读状态 → 幂等判断 → 停旧 → 记代），拉起在锁外，所以排队时间
+/// 与 TUN 冷启动（90s）无关；剩下最长的一段是重建决策段里的停旧（TUN stop ≤10s）。
+const RUNTIME_OP_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// 重建自己取锁的上限：拿不到就降级成「下次连接可用」，不让 attach 等太久。
 const RUNTIME_REBUILD_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -2275,6 +2362,27 @@ pub struct WiredServices {
     tun_event_state: std::sync::Mutex<crate::runtime::RuntimeState>,
     /// 运行期操作锁：重建运行配置与启动/断开互斥；后到的断开排队，重建结束后执行。
     runtime_ops: tokio::sync::Mutex<()>,
+    /// 运行期代数：每次真正改变运行时（停掉在跑的东西、重启）都 +1。
+    /// 排队中的启动靠它判断「我等的这段时间里运行时是否已被别人取代」。
+    ///
+    /// 递增入口（全部在 `runtime_ops` 锁内）：
+    /// 1. `runtime_start` 的决策段（停旧之后记代；幂等分支不递增）
+    /// 2. `runtime_stop` → `runtime_stop_inner`（**每次用户断开都记**，含已 idle：
+    ///    重建的「停旧 → 拉起」窗口里连接已不在，只有意图能记下这次断开）
+    /// 3. 重建的决策段（复查 → 停旧之后记代）
+    /// 4. 重建回滚前（比过代数、确认没被取代之后）
+    /// 5. `connect_inner` 换配置前停旧连接（经 `runtime_stop_inner`）
+    /// 6. `stop_for_rebuild` 的 TUN 分支（经 `runtime_stop_inner`）
+    /// 7. `stop_for_rebuild` 的代理分支（`manager.stop()` 前）
+    /// 8. `runtime_restart`（`manager.restart()` 前）
+    /// 9. `route_set_mode` 接管未确认后的回滚（只包 `tun.stop()` 那一次）
+    /// 10. `repair_restore_direct`（关代理 → 停运行时 → 删明文配置整段）
+    /// 11. `force_reset_network` 的停 TUN + 停运行时两步（经 `reset_stop_everything`）
+    ///
+    /// **不参与代数**：`lifecycle` 退出清理（进程要没了，没有并发启动可误导）、
+    /// 以及本次启动自己的回滚（`rollback_proxy_after_enable_failure` /
+    /// `stop_for_failed_launch`）——它们收的是自己的实例，递增会把并发启动误判成被取代。
+    runtime_epoch: std::sync::atomic::AtomicU64,
     /// 测试用：让接下来 N 次「重建运行配置」的首轮启动失败，验证回滚路径。
     #[cfg(test)]
     rebuild_failures: std::sync::atomic::AtomicUsize,
@@ -2287,6 +2395,12 @@ pub struct WiredServices {
     /// 测试用：重建真正拿到运行期锁的次数。
     #[cfg(test)]
     rebuild_lock_acquired: std::sync::atomic::AtomicUsize,
+    /// 测试用：用户启动的拉起阶段确实没占着运行期操作锁（`try_lock` 当场成功）。
+    #[cfg(test)]
+    start_body_without_lock: std::sync::atomic::AtomicBool,
+    /// 测试用：重建首轮拉起成功后暂停一次，让用例在「已连上、还没复查」之间插进断开。
+    #[cfg(test)]
+    rebuild_pause_after_start: std::sync::atomic::AtomicBool,
 }
 
 /// 切换接管方式的在途闸门。持有 guard 期间同配置的第二次调用会被拒绝。
@@ -2355,6 +2469,7 @@ impl WiredServices {
             mode_switches: ModeSwitches::default(),
             tun_event_state: std::sync::Mutex::new(crate::runtime::RuntimeState::Idle),
             runtime_ops: tokio::sync::Mutex::new(()),
+            runtime_epoch: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             rebuild_failures: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -2363,6 +2478,10 @@ impl WiredServices {
             rebuild_lock_attempts: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             rebuild_lock_acquired: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            start_body_without_lock: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            rebuild_pause_after_start: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -2371,6 +2490,13 @@ impl WiredServices {
     pub fn fail_next_rebuild_for_test(&self, times: usize) {
         self.rebuild_failures
             .store(times, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 测试用：下一次重建的首轮拉起成功后暂停 500ms（期间用例插入断开）。
+    #[cfg(test)]
+    pub fn pause_after_first_rebuild_start_for_test(&self) {
+        self.rebuild_pause_after_start
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 启动后台的 helper 构建检查（不阻塞 UI、不弹窗）。
@@ -2697,6 +2823,48 @@ impl WiredServices {
         let status = self.manager.status().await;
         let connected = self.is_connected(&status);
         // 与旧的 `connected_config_id` 一致：状态里没有就回落到 plan。
+        let mut config_id = status.config_id.clone();
+        if config_id.is_none() {
+            config_id = self
+                .manager
+                .current_plan()
+                .await
+                .and_then(|plan| plan.config_id);
+        }
+        ConnectionState {
+            connected,
+            launching: self.tun.is_launching(),
+            launching_config: self.tun.launching_config_id(),
+            config_id,
+            applied_route_revision: status.applied_route_revision,
+            route_region: status.route_region,
+            tun: false,
+        }
+    }
+
+    /// **决策段专用**：TUN 侧只读缓存，不做后端探测。
+    ///
+    /// `connection_state()` 里的 `tun.status()` 在缓存过期时会 recheck 后端（最长 10s），
+    /// 而决策段在 `runtime_ops` 锁内、后面还接着 `stop_for_rebuild` 的 ≤10s，
+    /// 两者叠加会把 20s 的用户侧等待顶穿。对外状态仍必须用 `connection_state()`。
+    async fn connection_state_cached(&self) -> ConnectionState {
+        if matches!(
+            self.tun.status_cached(),
+            crate::tun::session::TunState::Running { .. }
+        ) {
+            let meta = self.tun.running_cached().map(|(_, meta)| meta);
+            return ConnectionState {
+                connected: true,
+                launching: false,
+                launching_config: None,
+                config_id: meta.as_ref().map(|meta| meta.config_id.clone()),
+                applied_route_revision: meta.as_ref().and_then(|meta| meta.applied_route_revision),
+                route_region: meta.as_ref().and_then(|meta| meta.route_region.clone()),
+                tun: true,
+            };
+        }
+        let status = self.manager.status().await;
+        let connected = self.is_connected(&status);
         let mut config_id = status.config_id.clone();
         if config_id.is_none() {
             config_id = self
@@ -3612,6 +3780,36 @@ impl WiredServices {
         }
     }
 
+    /// 运行期代数 +1，返回新值。
+    ///
+    /// **只允许在持有 `runtime_ops` 时调用**：递增点本身也在锁内，
+    /// 读代数与改变运行时必须在同一个临界区里比较，否则连点两次会互相看漏。
+    fn bump_runtime_epoch(&self) -> u64 {
+        self.runtime_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
+    /// 当前运行期代数。**只允许在持有 `runtime_ops` 时调用**（理由同上）。
+    /// 例外：拉起前的取代检查（`ensure_start_is_current`）在锁外读一次，
+    /// 那里只用来「提前放弃」，最终结论仍以收尾段锁内比对为准。
+    fn current_runtime_epoch(&self) -> u64 {
+        self.runtime_epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 拉起前的最后一道取代检查：决策段记下的代数已经不是当前值，说明期间有
+    /// 新的启动 / 断开 / 重建跑过，再拉起只会变成「显示已连接、实际被接管」。
+    fn ensure_start_is_current(&self, epoch: Option<u64>) -> anyhow::Result<()> {
+        let Some(epoch) = epoch else {
+            return Ok(());
+        };
+        if self.current_runtime_epoch() == epoch {
+            return Ok(());
+        }
+        log::warn!("启动已被新的运行期操作取代（epoch={epoch}），不再拉起");
+        Err(cancelled_connection_error())
+    }
+
     async fn runtime_start_inner(
         &self,
         config_id: Option<String>,
@@ -3661,6 +3859,11 @@ impl WiredServices {
         // 启动窗口里 stop 也必须算数：此时还没 pid，但确实有一次连接在途。
         let tun_launching = self.tun.is_launching();
         let tun_live = tun_running || tun_launching;
+        // 每一次用户断开都记一笔意图——**即使当前没有东西在跑**。
+        // 重建的「停旧 → 拉起」窗口里按下的断开，连接此刻已经不在了，
+        // 只有意图能把它记录下来，否则回滚会把用户刚断开的连接接回来
+        // （契约 §4.0.1 `user_disconnected`）。
+        self.bump_runtime_epoch();
         // 停止失败时要如实报出「哪套配置没停掉」：`stop` 内部会清掉在途登记。
         let stop_config = if tun_launching {
             self.tun.launching_config_id()
@@ -3989,11 +4192,10 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn runtime_start(&self, config_id: Option<String>) -> anyhow::Result<Value> {
-        // 运行期操作串行：重建运行配置期间，用户的启动/断开排队执行，不会与重建交错。
-        let result = {
-            let _ops = self.lock_runtime_ops().await?;
-            self.runtime_start_inner(config_id).await
-        };
+        // 锁只护决策段（幂等判断、停旧、记代）；拉起与 TUN start 在锁外，
+        // 见 `connect_inner`。这里不再整段持锁：一次冷启动最长 90 秒，
+        // 占着锁会让期间的断开排队到超时。
+        let result = self.runtime_start_inner(config_id).await;
         // 试用钩子必须在锁外：它可能触发到期断开（`runtime_stop` 要再取这把锁）。
         if let Ok(snapshot) = &result {
             self.note_trial_connection(snapshot).await;
@@ -4019,7 +4221,8 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn runtime_stop(&self, force: bool) -> anyhow::Result<Value> {
-        // 与重建互斥：重建期间按下的断开排到重建结束后执行，最终一定是断开。
+        // 与重建的决策段互斥：重建已经在锁外拉起时，这次断开不再排队，
+        // 而是记一笔意图把那次重建取代（契约 §4.0.1 `user_disconnected`）。
         let _ops = self.lock_runtime_ops().await?;
         self.runtime_stop_inner(force).await
     }
@@ -4027,6 +4230,7 @@ impl VpnToolServices for WiredServices {
 
     async fn runtime_restart(&self, _reason: Option<String>) -> anyhow::Result<Value> {
         let _ops = self.lock_runtime_ops().await?;
+        self.bump_runtime_epoch();
         let status = self
             .manager
             .restart()
@@ -6142,7 +6346,23 @@ impl VpnToolServices for WiredServices {
                 if takeover == TunTakeover::Unconfirmed {
                     log::warn!("分流切换后 TUN 已启动，但没确认接管");
                     // 自己起的运行时收尾：停成功才算回到调用前；停不掉就只能是 unknown。
-                    let stop_error = self.tun.stop().err();
+                    // 停 TUN 也是改运行时：进锁并在停之前递增。取不到锁就不在锁外停
+                    // （会和启动/重建交错），如实按停不掉处理。
+                    let stop_error = match self.lock_runtime_ops().await {
+                        Ok(_ops) => {
+                            self.bump_runtime_epoch();
+                            self.tun.stop().err()
+                        }
+                        Err(error) => {
+                            log::error!(
+                                "接管未确认后要停 TUN，但运行期操作锁排队超时；不在锁外停：{error}"
+                            );
+                            Some(crate::tun::backend::TunError::new(
+                                crate::tun::backend::TunErrorCode::Timeout,
+                                "等运行期操作锁超时，没有停 TUN",
+                            ))
+                        }
+                    };
                     if let Some(error) = &stop_error {
                         log::warn!("接管未确认后停止 TUN 失败：{error}");
                     }
@@ -7152,11 +7372,45 @@ impl WiredServices {
         Ok(())
     }
 
-    async fn rollback_proxy_after_enable_failure(&self) {
+    /// 代理设置失败后的回滚（架构裁决 A1）：撤代理 → 取锁 → 按实例身份判定 → 停。
+    ///
+    /// 只停**本次**拉起的进程：`RuntimeStatus.pid` 与本次 `started.pid` 相等才停；
+    /// 不相等说明期间已有新连接接手，停下去等于把它一起杀掉。
+    ///
+    /// **不递增代数**：这是本次启动自己的收尾，不是新的意图。在这里递增会让
+    /// 并发另一次启动的「记代」提前过期，导致它误判被取代并收掉自己的新连接。
+    async fn rollback_proxy_after_enable_failure(
+        &self,
+        ours: Option<u32>,
+        context: StartContext,
+    ) {
         if let Err(error) = self.proxy.disable() {
             log::warn!("回滚系统代理失败：{error}");
         }
-        let _ = self.manager.stop().await;
+        // 重建的回滚本来就在锁内；用户的启动在锁外，这里自己取。
+        let _ops = if context.lock_held {
+            None
+        } else {
+            match self.lock_runtime_ops().await {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    // 取不到锁就不在锁外停：会和启动 / 重建交错，把新连接一起杀掉。
+                    log::error!("代理回滚等运行期操作锁超时，不在锁外停：{error}");
+                    return;
+                }
+            }
+        };
+        // 比较与停在同一把 manager 内部锁内完成；pid 只认本次 `start()` 返回的那个。
+        let Some(pid) = ours else {
+            // 没有启动回执里的 pid，就无法认领实例：按「不是我的」处理，不动。
+            log::warn!("代理回滚：本次启动没有拿到 pid，跳过停止");
+            return;
+        };
+        match self.manager.stop_if_pid(pid).await {
+            Ok(Some(_)) => {}
+            Ok(None) => log::warn!("代理回滚：pid={pid} 已不是当前实例，跳过停止"),
+            Err(error) => log::warn!("代理回滚：停运行时失败：{error}"),
+        }
     }
 
     fn drop_previous_rendered_config(&self, target_config_id: &str) {
@@ -7284,11 +7538,40 @@ impl WiredServices {
     }
 
     /// 连接一套配置：先把上一套（或还在启动的那一套）收干净，再交给 `connect_body`。
+    ///
+    /// 锁边界（契约 §7.1「被取代的启动」）：**决策段**持锁——读连接状态、幂等判断、
+    /// 停旧连接、记代数；拉起因配置渲染与 TUN `start` 最长 90 秒，放在锁外；
+    /// 拉起返回后重新取锁比对代数，被取代时只收掉**本次**拉起的实例。
     async fn connect_inner(&self, config: &configs::Config) -> anyhow::Result<Value> {
-        let connection = self.connection_state().await;
+        let (epoch, old_stopped) = {
+            let _ops = self.lock_runtime_ops().await?;
+            match self.decide_connection(config).await? {
+                ConnectionDecision::Idempotent(value) => return Ok(value),
+                ConnectionDecision::Start {
+                    epoch,
+                    old_stopped,
+                } => (epoch, old_stopped),
+            }
+        };
+
+        let context = StartContext {
+            epoch: Some(epoch),
+            lock_held: false,
+        };
+        let result = self.connect_body(config, &[], context).await;
+        self.finish_connection_start(epoch, old_stopped, result).await
+    }
+
+    /// 决策段：只在持锁时调用。幂等判断 → 停旧 → 记代数，三件事必须在同一临界区，
+    /// 否则连点两次会互相看漏。
+    async fn decide_connection(
+        &self,
+        config: &configs::Config,
+    ) -> anyhow::Result<ConnectionDecision> {
+        let connection = self.connection_state_cached().await;
         let same_config = |id: Option<&str>| id == Some(config.id.as_str());
 
-        // 已连接同一套：幂等返回当前快照。
+        // 已连接同一套：幂等返回当前快照。**幂等分支不递增代数、不作废在途启动。**
         if connection.connected
             && !connection.launching
             && same_config(connection.config_id.as_deref())
@@ -7296,7 +7579,7 @@ impl WiredServices {
             log::info!("同一套配置已连接，幂等返回：{}", config.id);
             let mut snapshot = self.runtime_status().await?;
             snapshot["already_running"] = json!(true);
-            return Ok(snapshot);
+            return Ok(ConnectionDecision::Idempotent(snapshot));
         }
         // 同一套还在启动：也幂等——别为了一个重复请求把正在起来的连接重启一遍。
         // 契约 §7.1：幂等只有这一种例外，返回的是 `starting` 快照。
@@ -7312,7 +7595,7 @@ impl WiredServices {
             );
             let mut value = serde_json::to_value(snapshot).map_err(|e| svc_error("INTERNAL", e))?;
             value["already_running"] = json!(true);
-            return Ok(value);
+            return Ok(ConnectionDecision::Idempotent(value));
         }
 
         let mut old_stopped = false;
@@ -7331,19 +7614,96 @@ impl WiredServices {
             }
             old_stopped = true;
         }
+        // 这一次启动本身也是一次会改运行时的意图：记在停旧之后，
+        // 并发启动按取锁顺序各记一代，后者的收尾据此判断前者是否已过期。
+        let epoch = self.bump_runtime_epoch();
+        Ok(ConnectionDecision::Start {
+            epoch,
+            old_stopped,
+        })
+    }
 
-        let result = self.connect_body(config, &[]).await;
-        match result {
-            Ok(mut value) => {
-                value["already_running"] = json!(false);
-                Ok(value)
+    /// 拉起返回后的收尾：仍在锁内比对代数，被取代时只停本次拉起的实例。
+    async fn finish_connection_start(
+        &self,
+        epoch: u64,
+        old_stopped: bool,
+        result: anyhow::Result<Value>,
+    ) -> anyhow::Result<Value> {
+        let _ops = match self.lock_runtime_ops().await {
+            Ok(guard) => guard,
+            Err(error) => {
+                // 收尾没拿到锁就无法证明自己是否被取代，也不能在锁外停任何东西：
+                // 如实按「不确定」收尾，残留由下一次 start/stop 正常回收。
+                log::error!("启动收尾等运行期操作锁超时，结果不确定：{error}");
+                return match result {
+                    Ok(_) => Err(superseded_error(STOP_UNKNOWN_MESSAGE, true)),
+                    Err(error) => Err(mark_old_connection_stopped(error, old_stopped)),
+                };
             }
-            // 旧连接已经被停掉：之后的失败不能让工具说「没有改动」。
-            Err(error) if old_stopped => Err(mark_old_connection_stopped(error, true)),
-            Err(error) => Err(error),
+        };
+
+        if self.current_runtime_epoch() == epoch {
+            return match result {
+                Ok(mut value) => {
+                    value["already_running"] = json!(false);
+                    Ok(value)
+                }
+                // 旧连接已经被停掉：之后的失败不能让工具说「没有改动」。
+                Err(error) if old_stopped => Err(mark_old_connection_stopped(error, true)),
+                Err(error) => Err(error),
+            };
+        }
+
+        // 被取代：拉起本身失败/被取消时，内部回滚已经按身份处理过，这里不重复停。
+        let snapshot = match result {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return Err(if old_stopped {
+                    mark_old_connection_stopped(error, true)
+                } else {
+                    error
+                });
+            }
+        };
+        log::warn!("启动已被新的运行期操作取代（epoch={epoch}），收尾本次拉起的实例");
+        match self.stop_superseded_instance(&snapshot).await {
+            Ok(()) => Err(superseded_error(SUPERSEDED_START_MESSAGE, false)),
+            Err(error) => {
+                log::error!("被取代的启动收尾失败：{error}");
+                Err(superseded_error(
+                    &format!("{SUPERSEDED_START_MESSAGE}但停止时失败：{error}"),
+                    true,
+                ))
+            }
         }
     }
 
+    /// 只停**本次**启动拉起的那个实例：按运行实例的 pid 相等判定，不相等就说明
+    /// 已经是取代它的新连接，停下去等于把新连接一起杀掉。
+    async fn stop_superseded_instance(&self, snapshot: &Value) -> Result<(), anyhow::Error> {
+        let Some(ours) = snapshot
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok())
+        else {
+            // 没拿到 pid：没有可归属的实例，不猜、不停。
+            return Ok(());
+        };
+        if snapshot.get("mode").and_then(Value::as_str) == Some("tun") {
+            // `stop_for_failed_launch` 本来就按「无登记 + Running pid 是本次」判身份，
+            // 有更新的启动登记时不会动手。
+            return self.tun.stop_for_failed_launch(ours).map_err(|error| {
+                svc_error("INTERNAL", format!("停 TUN 失败：{}", error.message))
+            });
+        }
+        // 比较与停在同一把 manager 内部锁内完成：不在外面读一次 pid 再进去停。
+        self.manager
+            .stop_if_pid(ours)
+            .await
+            .map_err(|error| svc_error(error.code(), error))?;
+        Ok(())
+    }
     /// `exclude_node_ids` 只给「重建运行配置失败后的回滚」用：用不含新节点的
     /// 那份节点集合再起一次，把用户接回原来的连接。
     /// 连接中新增节点：重建运行配置，让新节点立刻进 selector。
@@ -7363,45 +7723,57 @@ impl WiredServices {
         if added.is_empty() {
             return json!({ "status": "skipped", "reason": "no_new_nodes" });
         }
-        // 先拿锁再复查：等锁期间用户可能已经断开，不能拿旧结论把连接接回来。
+        // 锁只护决策段：复查 → 重读配置 → 停旧 → 记代。拉起（最长 90s）在锁外，
+        // 否则重建期间用户按断开会排在后面等满 20s 再吃 `runtime_busy`，
+        // 界面报「断开失败」而连接其实没断。
+        //
         // 计数给用例证明「确实停在取锁这一步」，而不只是任意 Pending。
         #[cfg(test)]
         self.rebuild_lock_attempts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let _ops = match self.lock_runtime_ops_skipped("重建运行配置").await {
-            Ok(guard) => {
-                #[cfg(test)]
-                self.rebuild_lock_acquired
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                guard
+        let (latest, epoch) = {
+            let _ops = match self.lock_runtime_ops_skipped("重建运行配置").await {
+                Ok(guard) => {
+                    #[cfg(test)]
+                    self.rebuild_lock_acquired
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    guard
+                }
+                Err(reason) => return reason,
+            };
+            let connection = self.connection_state_cached().await;
+            if connection.launching {
+                return json!({ "status": "skipped", "reason": "connection_launching" });
             }
-            Err(reason) => return reason,
-        };
-        let connection = self.connection_state().await;
-        if connection.launching {
-            return json!({ "status": "skipped", "reason": "connection_launching" });
-        }
-        if !connection.connected {
-            return json!({ "status": "skipped", "reason": "not_connected" });
-        }
-        if connection.config_id.as_deref() != Some(config.id.as_str()) {
-            return json!({ "status": "skipped", "reason": "config_not_running" });
-        }
+            if !connection.connected {
+                return json!({ "status": "skipped", "reason": "not_connected" });
+            }
+            if connection.config_id.as_deref() != Some(config.id.as_str()) {
+                return json!({ "status": "skipped", "reason": "config_not_running" });
+            }
+            // 重读放在停旧**之前**：读不到就什么都不停，`skipped` 才真的是「跳过」。
+            let latest = match self.require_config(&config.id) {
+                Ok(latest) => latest,
+                Err(_) => return json!({ "status": "skipped", "reason": "config_missing" }),
+            };
 
-        log::info!(
-            "连接中新增 {} 个节点，重建运行配置 config={}",
-            added.len(),
-            config.id
-        );
-        if let Err(error) = self.stop_for_rebuild(connection.tun).await {
-            log::warn!("重建运行配置：停旧连接失败：{error}");
-            return json!({
-                "status": "failed",
-                "restored": false,
-                "new_nodes_available_next_connect": true,
-                "message": "新节点这次没能应用，当前连接也没停掉；重新连接后就能用它。",
-            });
-        }
+            log::info!(
+                "连接中新增 {} 个节点，重建运行配置 config={}",
+                added.len(),
+                config.id
+            );
+            if let Err(error) = self.stop_for_rebuild(connection.tun).await {
+                log::warn!("重建运行配置：停旧连接失败：{error}");
+                return json!({
+                    "status": "failed",
+                    "restored": false,
+                    "new_nodes_available_next_connect": true,
+                    "message": "新节点这次没能应用，当前连接也没停掉；重新连接后就能用它。",
+                });
+            }
+            // 重建自己也是一次意图变更：锁内记代，锁外拉起后据此判断是否被取代。
+            (latest, self.bump_runtime_epoch())
+        };
         // 测试注入：跳过真正启动，直接走「首轮失败」的回滚分支。
         #[cfg(test)]
         let injected = {
@@ -7421,53 +7793,165 @@ impl WiredServices {
         let injected: Option<anyhow::Error> = None;
 
         // 重建用的是进重建前的快照；启动前重读一次，期间改过的选择以库里为准。
-        let latest = match self.require_config(&config.id) {
-            Ok(latest) => latest,
-            Err(_) => return json!({ "status": "skipped", "reason": "config_missing" }),
-        };
         let applied = match injected {
             Some(error) => Err(error),
-            None => self.connect_body(&latest, &[]).await,
+            // 拉起在锁外（R2 起带 epoch，收尾再比对）；这里已经不在临界区里。
+            None => {
+                self.connect_body(
+                    &latest,
+                    &[],
+                    StartContext {
+                        epoch: Some(epoch),
+                        lock_held: false,
+                    },
+                )
+                .await
+            }
         };
-        match applied {
-            Ok(_) => {
-                log::info!("重建运行配置完成 config={}", config.id);
-                json!({ "status": "applied", "new_nodes": self.nodes_in_running_config(config, added) })
+        // 用例用：首轮已经连上、还没复查之前停一下，让「期间被断开」这条真实落地。
+        #[cfg(test)]
+        if self
+            .rebuild_pause_after_start
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            use std::sync::atomic::Ordering;
+            self.rebuild_test_waiting.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            self.rebuild_test_waiting.fetch_sub(1, Ordering::SeqCst);
+        }
+
+        // 锁外拉起返回后持锁复查：判据不是「谁改了代数」，而是「现在实际连没连」
+        // （契约 §4.0.1）。途中被断开就只收掉本次拉起的实例，不把连接接回来。
+        let still_connected = self.still_connected_after_start(&config.id, &applied).await;
+
+        if applied.is_ok() {
+            match still_connected {
+                AfterStart::Connected => {
+                    log::info!("重建运行配置完成 config={}", config.id);
+                    return json!({
+                        "status": "applied",
+                        "new_nodes": self.nodes_in_running_config(config, added),
+                    });
+                }
+                // 起来了但已被断开取代：节点已进池，不再接回连接。
+                AfterStart::Disconnected => return user_disconnected_rebuild(),
+                AfterStart::Unknown => return rebuild_unknown(),
+            }
+        }
+
+        let error = match applied {
+            Ok(_) => unreachable!("成功的情形上面已返回"),
+            Err(error) => error,
+        };
+        log::warn!("重建运行配置失败，回滚到原节点集合：{error}");
+
+        // 回滚前重新取锁比代数：期间发生过启动 / 断开 / 重启就不再回滚——
+        // 那会把用户刚断开的连接接回来。拿不到锁同样不接回（不确定就不动）。
+        let rollback_epoch = match self.lock_runtime_ops_skipped("重建回滚").await {
+            Ok(_ops) => {
+                if self.current_runtime_epoch() == epoch {
+                    self.bump_runtime_epoch()
+                } else {
+                    // 代数变了不等于「用户断开」：也可能是重启或另一次启动。
+                    // **在锁内重新读实际状态**，不能拿检查前的快照下结论。
+                    return if self.connection_state_cached().await.connected {
+                        rebuild_replaced_by_new_connection()
+                    } else {
+                        user_disconnected_rebuild()
+                    };
+                }
+            }
+            Err(_) => return rebuild_unknown(),
+        };
+
+        #[cfg(test)]
+        let rollback_injected = {
+            use std::sync::atomic::Ordering;
+            if self.rebuild_failures.load(Ordering::SeqCst) > 0 {
+                self.rebuild_failures.fetch_sub(1, Ordering::SeqCst);
+                Some(anyhow::anyhow!("测试注入：回滚启动失败"))
+            } else {
+                None
+            }
+        };
+        #[cfg(not(test))]
+        let rollback_injected: Option<anyhow::Error> = None;
+        let (restored, disconnected) = match rollback_injected {
+            Some(error) => {
+                log::warn!("重建回滚启动失败（测试注入）：{error}");
+                (false, false)
+            }
+            None => {
+                let rolled = self
+                    .connect_body(
+                        &latest,
+                        added,
+                        StartContext {
+                            epoch: Some(rollback_epoch),
+                            lock_held: false,
+                        },
+                    )
+                    .await;
+                if rolled.is_ok() {
+                    // 回滚也可能在半路被用户断开取代：同样只收本次实例，不接回来。
+                    match self.still_connected_after_start(&latest.id, &rolled).await {
+                        AfterStart::Connected => (true, false),
+                        AfterStart::Disconnected => (false, true),
+                        AfterStart::Unknown => return rebuild_unknown(),
+                    }
+                } else {
+                    (
+                        false,
+                        rolled.as_ref().err().is_some_and(|error| is_cancelled_error(error)),
+                    )
+                }
+            }
+        };
+        if restored {
+            log::info!("重建运行配置已回滚到原节点集合 config={}", config.id);
+        }
+        if disconnected {
+            return user_disconnected_rebuild();
+        }
+        json!({
+            "status": "failed",
+            "restored": restored,
+            "new_nodes_available_next_connect": true,
+            "message": if restored {
+                "新节点这次没能应用，已回到原来的连接；重新连接后就能用它。"
+            } else {
+                "新节点这次没能应用，连接也没能恢复；重新连接会带上它。"
+            },
+        })
+    }
+
+    /// 锁外拉起返回后持锁复查「现在实际连没连」；没连着就只收掉本次拉起的实例。
+    /// 认的是**这套配置**的连接：别的配置在跑不算这里的「仍连着」。
+    /// 拿不到锁时既不能说连着、也不能说用户断开——那是「不知道」，单独成一态。
+    async fn still_connected_after_start(
+        &self,
+        config_id: &str,
+        applied: &anyhow::Result<Value>,
+    ) -> AfterStart {
+        match self.lock_runtime_ops().await {
+            Ok(_ops) => {
+                let state = self.connection_state_cached().await;
+                let connected = state.connected && state.config_id.as_deref() == Some(config_id);
+                if !connected {
+                    if let Ok(snapshot) = applied {
+                        if let Err(error) = self.stop_superseded_instance(snapshot).await {
+                            log::error!("拉起的连接已被取代，收尾失败：{error}");
+                        }
+                    }
+                    AfterStart::Disconnected
+                } else {
+                    AfterStart::Connected
+                }
             }
             Err(error) => {
-                log::warn!("重建运行配置失败，回滚到原节点集合：{error}");
-                #[cfg(test)]
-                let rollback_injected = {
-                    use std::sync::atomic::Ordering;
-                    if self.rebuild_failures.load(Ordering::SeqCst) > 0 {
-                        self.rebuild_failures.fetch_sub(1, Ordering::SeqCst);
-                        Some(anyhow::anyhow!("测试注入：回滚启动失败"))
-                    } else {
-                        None
-                    }
-                };
-                #[cfg(not(test))]
-                let rollback_injected: Option<anyhow::Error> = None;
-                let restored = match rollback_injected {
-                    Some(error) => {
-                        log::warn!("重建回滚启动失败（测试注入）：{error}");
-                        false
-                    }
-                    None => self.connect_body(&latest, added).await.is_ok(),
-                };
-                if restored {
-                    log::info!("重建运行配置已回滚到原节点集合 config={}", config.id);
-                }
-                json!({
-                    "status": "failed",
-                    "restored": restored,
-                    "new_nodes_available_next_connect": true,
-                    "message": if restored {
-                        "新节点这次没能应用，已回到原来的连接；重新连接后就能用它。"
-                    } else {
-                        "新节点这次没能应用，连接也没能恢复；重新连接会带上它。"
-                    },
-                })
+                // 用户没按断开、我们也证明不了连没连：不能冒充 `user_disconnected`。
+                log::error!("拉起后等运行期操作锁超时，连接状态无法确认：{error}");
+                AfterStart::Unknown
             }
         }
     }
@@ -7504,6 +7988,8 @@ impl WiredServices {
         let connected = self.connected_config_id().await;
         self.restore_system_proxy()?;
         self.manager.set_system_proxy_enabled(false).await;
+        // 代数的递增点只在这里和 `runtime_stop_inner` 各一处：TUN 分支已经走 stop_inner。
+        self.bump_runtime_epoch();
         self.manager
             .stop()
             .await
@@ -7518,6 +8004,7 @@ impl WiredServices {
         &self,
         config: &configs::Config,
         exclude_node_ids: &[String],
+        context: StartContext,
     ) -> anyhow::Result<Value> {
         log::info!(
             "连接开始 config={} mode={} routing={}",
@@ -7525,6 +8012,16 @@ impl WiredServices {
             config.connection_mode,
             config.routing_mode
         );
+
+        // 用例用：用户启动的拉起阶段不该占着运行期操作锁（重建回滚例外，它在锁内）。
+        #[cfg(test)]
+        if context.epoch.is_some() {
+            if let Ok(guard) = self.runtime_ops.try_lock() {
+                drop(guard);
+                self.start_body_without_lock
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
 
         let installed_rules =
             crate::rules::load_active(&self.store, &self.data_dir).ok_or_else(|| {
@@ -7651,6 +8148,7 @@ impl WiredServices {
                 clash_port,
                 clash_secret,
                 route_region.clone(),
+                context,
             )
             .await
         } else {
@@ -7720,6 +8218,7 @@ impl WiredServices {
                         Some(configured_port),
                         fallback_reason,
                         &value,
+                        context,
                     )
                     .await
                 {
@@ -7844,7 +8343,10 @@ impl WiredServices {
         clash_port: u16,
         clash_secret: String,
         route_region: Option<String>,
+        context: StartContext,
     ) -> anyhow::Result<Value> {
+        // 决策段之后已经过了渲染与准备：真的动 helper 之前再确认一次没被取代。
+        self.ensure_start_is_current(context.epoch)?;
         // 从这一步起就算「正在连」：下面要建配置、等 helper 检查、再让 helper 拉
         // sing-box，真机要十几秒。这期间切配置 / 断开必须看得见这次连接在途。
         let launch = self.tun.begin_launch(&config.id);
@@ -8027,7 +8529,7 @@ impl WiredServices {
                 crate::tun::wait_until_device_up(std::time::Duration::from_secs(5)).await;
             let Some(name) = tun_device else {
                 log::error!("TUN 已启动 pid={pid}，5s 内没看到 TUN 设备，判定启动失败并回滚");
-                let stop_error = self.tun.stop().err();
+                let stop_error = self.tun.stop_for_failed_launch(pid).err();
                 let dns_error = self.tun.flush_dns().err().map(|error| error.message);
                 return Err(takeover_incomplete_error(
                     &[],
@@ -8042,7 +8544,7 @@ impl WiredServices {
                 wait_for_takeover(&name, &excludes, std::time::Duration::from_secs(5)).await;
             if !missing.is_empty() {
                 log::error!("TUN 接管不完整 tun={name} missing={missing:?}，停止实例并回滚");
-                let stop_error = self.tun.stop().err();
+                let stop_error = self.tun.stop_for_failed_launch(pid).err();
                 let residual = stop_error.is_none()
                     && !wait_until_routes_gone(&name, std::time::Duration::from_secs(2)).await;
                 // 只停进程不够：hijack 期间的坏解析结果还留在 mDNSResponder 里。
@@ -8095,6 +8597,7 @@ impl WiredServices {
         requested_port: Option<u16>,
         fallback_reason: Option<crate::runtime::PortFallbackReason>,
         value: &Value,
+        context: StartContext,
     ) -> anyhow::Result<Value> {
         let guard = RenderedConfigGuard::new(self.config_dir(), config_key.to_string());
 
@@ -8152,6 +8655,10 @@ impl WiredServices {
             self.manager.set_system_proxy_enabled(false).await;
         }
 
+        // 真正起进程之前再确认一次没被取代：否则这一次会把新连接替换掉，
+        // 而收尾按代数属于它、状态却归我们。
+        self.ensure_start_is_current(context.epoch)?;
+
         let started = match self.manager.start(plan).await {
             Ok(status) => status,
             Err(error) => {
@@ -8181,7 +8688,8 @@ impl WiredServices {
 
         if let Err(error) = self.proxy.enable(mixed_port) {
             log::error!("连接 设置系统代理失败 port={mixed_port}：{error}");
-            self.rollback_proxy_after_enable_failure().await;
+            self.rollback_proxy_after_enable_failure(started.pid, context)
+                .await;
             return Err(svc_error("INTERNAL", format!("设置系统代理失败：{error}")));
         }
         log::info!("连接 系统代理已设置 127.0.0.1:{mixed_port}");
@@ -8206,19 +8714,24 @@ impl WiredServices {
             return Err(svc_error("INVALID_ARGUMENT", "restore_direct 不接受 port"));
         }
         let applied = self.proxy.applied_endpoint().ok().flatten();
-        let mut verified = self.proxy.disable().is_ok();
-        if let Some(endpoint) = applied {
-            verified = verified
-                && self
-                    .proxy
-                    .endpoint_in_use(&endpoint)
-                    .map(|in_use| in_use.is_empty())
-                    .unwrap_or(false);
-        }
-        let _ = self.manager.stop().await;
-        crate::config::remove_all_profile_configs(&self.config_dir());
-        verified =
-            verified && self.manager.status().await.state == crate::runtime::RuntimeState::Idle;
+        // 关代理、停运行时、删明文配置是一整段会改运行时的操作：进锁并推进代数。
+        let verified = {
+            let _ops = self.lock_runtime_ops().await?;
+            self.bump_runtime_epoch();
+            let mut verified = self.proxy.disable().is_ok();
+            if let Some(endpoint) = applied {
+                verified = verified
+                    && self
+                        .proxy
+                        .endpoint_in_use(&endpoint)
+                        .map(|in_use| in_use.is_empty())
+                        .unwrap_or(false);
+            }
+            let _ = self.manager.stop().await;
+            crate::config::remove_all_profile_configs(&self.config_dir());
+            verified
+                && self.manager.status().await.state == crate::runtime::RuntimeState::Idle
+        };
 
         let exit_ip =
             match crate::runtime::DirectIpProbe::new(crate::runtime::DEFAULT_DIRECT_IP_PROBE) {
@@ -8291,6 +8804,8 @@ impl WiredServices {
     }
 
     /// 强制重置网络：八步固定、顺序固定，每步独立记录，失败不中断后续。
+    /// 实际顺序：停 TUN → 停运行时（同一锁段，只推进一代代数）→ 系统 DNS 兜底还原
+    /// （锁外执行，不是上报步骤）→ 代理还原 → 清进程 → 清路由 → 刷 DNS → 清明文 → 复检。
     /// 顶层 `ok` 要求八步全过；`verified` 只反映最后一步的复检——
     /// 「跑完了」不等于「恢复好了」，两者不能混。
     async fn force_reset_network(&self) -> anyhow::Result<Value> {
@@ -8303,7 +8818,12 @@ impl WiredServices {
         let applied = self.proxy.applied_endpoint().ok().flatten();
 
         let mut steps = Vec::with_capacity(8);
-        steps.push(self.reset_stop_tun().await);
+        // 停 TUN + 停运行时都真实改运行时：同一把锁内完成、只推进一代。
+        // 两步相邻上报；DNS 兜底还原不是上报步骤，排在两步之后、锁外执行，
+        // 不让一次 XPC 卡住整条连接路径。
+        let (stop_tun, stop_runtime) = self.reset_stop_everything().await;
+        steps.push(stop_tun);
+        steps.push(stop_runtime);
         // 兜底：连接期系统 DNS 指向了隧道；helper 崩溃重启后原始快照会丢，
         // 这里让它再清一次（幂等，没改过就是空操作，也不会动用户自己的 DNS）。
         // 放 spawn_blocking：XPC 调用可能等到超时，不能占住 async 线程。
@@ -8315,7 +8835,6 @@ impl WiredServices {
                 Err(error) => log::warn!("强制重置：系统 DNS 还原任务失败：{error}"),
             }
         }
-        steps.push(self.reset_stop_runtime().await);
         steps.push(self.reset_restore_proxy(applied.as_ref(), plan_port));
         steps.push(self.reset_sweep_processes().await);
         steps.push(self.reset_clear_routes());
@@ -8346,6 +8865,26 @@ impl WiredServices {
             "exit_ip": exit_ip,
             "steps": steps,
         }))
+    }
+
+    /// 强制重置的前两步：停 TUN + 停运行时。两者都真实改运行时，
+    /// 必须在 `runtime_ops` 内、在停之前推进代数。
+    /// 取不到锁就不在锁外停（会和启动/重建交错）：两步如实记失败，其余步骤照跑。
+    async fn reset_stop_everything(&self) -> (Value, Value) {
+        match self.lock_runtime_ops().await {
+            Ok(_ops) => {
+                self.bump_runtime_epoch();
+                (self.reset_stop_tun().await, self.reset_stop_runtime().await)
+            }
+            Err(error) => {
+                log::error!("强制重置：等运行期操作锁超时，未在锁外停 TUN / 运行时：{error}");
+                let message = "等运行期操作锁超时，没有在锁外停；稍后重试".to_string();
+                (
+                    reset_step("stop_tun", false, message.clone()),
+                    reset_step("stop_runtime", false, message),
+                )
+            }
+        }
     }
 
     async fn reset_stop_tun(&self) -> Value {
@@ -10279,7 +10818,7 @@ mod config_service_tests {
         );
     }
 
-    /// 排队上限是真的经锁生效的：用户侧 60s 到点前一直排队，到点才 TIMEOUT / runtime_busy；
+    /// 排队上限是真的经锁生效的：用户侧 20s 到点前一直排队，到点才 TIMEOUT / runtime_busy；
     /// 重建侧 20s 到点降级成 skipped / runtime_busy。用冻结时钟手动 poll，不依赖调度顺序。
     #[tokio::test]
     async fn runtime_lock_waits_time_out_on_their_own_boundaries() {
@@ -10302,18 +10841,18 @@ mod config_service_tests {
                 std::future::Future::poll(user.as_mut(), &mut cx),
                 std::task::Poll::Pending
             ));
-            tokio::time::advance(std::time::Duration::from_secs(59)).await;
+            tokio::time::advance(std::time::Duration::from_secs(19)).await;
             assert!(
                 matches!(
                     std::future::Future::poll(user.as_mut(), &mut cx),
                     std::task::Poll::Pending
                 ),
-                "59s 不该超时"
+                "19s 不该超时"
             );
             tokio::time::advance(std::time::Duration::from_secs(2)).await;
             match std::future::Future::poll(user.as_mut(), &mut cx) {
                 std::task::Poll::Ready(Err(error)) => error,
-                _ => panic!("60s 到点必须超时"),
+                _ => panic!("20s 到点必须超时"),
             }
         };
         let service = error.downcast_ref::<ServiceError>().unwrap();
@@ -10349,6 +10888,69 @@ mod config_service_tests {
 
         drop(hold);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 拿不到运行期锁时只能报「不知道」——用户没按断开，不能冒充 `user_disconnected`。
+    #[tokio::test]
+    async fn the_post_start_check_reports_unknown_instead_of_disconnected() {
+        tokio::time::pause();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let hold = services.runtime_ops.lock().await;
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let waker = std::task::Waker::from(std::sync::Arc::new(NoopWaker));
+        let mut cx = std::task::Context::from_waker(&waker);
+
+        let applied: anyhow::Result<Value> = Ok(json!({}));
+        let state = {
+            let mut check =
+                std::pin::pin!(services.still_connected_after_start("cfg_test", &applied));
+            assert!(matches!(
+                std::future::Future::poll(check.as_mut(), &mut cx),
+                std::task::Poll::Pending
+            ));
+            tokio::time::advance(std::time::Duration::from_secs(21)).await;
+            match std::future::Future::poll(check.as_mut(), &mut cx) {
+                std::task::Poll::Ready(state) => state,
+                _ => panic!("20s 到点必须放弃等待"),
+            }
+        };
+        assert_eq!(state, AfterStart::Unknown, "拿不到锁只能报「不知道」");
+
+        let value = rebuild_unknown();
+        assert!(
+            value.get("reason").is_none(),
+            "不能带 user_disconnected：{value}"
+        );
+        assert!(
+            !value["message"].as_str().unwrap().contains("断开"),
+            "文案不能说「已按你的操作断开」：{value}"
+        );
+
+        drop(hold);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 「被新的操作接管」不能被写成「已按你的操作断开」。
+    #[test]
+    fn the_replaced_rebuild_message_does_not_claim_a_user_disconnect() {
+        let replaced = rebuild_replaced_by_new_connection();
+        assert!(replaced.get("reason").is_none(), "{replaced}");
+        assert_eq!(replaced["status"], "failed");
+        assert_eq!(replaced["restored"], false);
+        assert_eq!(replaced["new_nodes_available_next_connect"], true);
+        assert!(
+            !replaced["message"].as_str().unwrap().contains("断开"),
+            "接管不是断开：{replaced}"
+        );
+
+        let disconnected = user_disconnected_rebuild();
+        assert_eq!(disconnected["reason"], "user_disconnected");
+        assert!(disconnected["message"].as_str().unwrap().contains("断开"));
     }
 
     #[tokio::test]
@@ -12377,6 +12979,82 @@ mod main_flow_tests {
         );
     }
 
+    /// 每次用户断开都记一笔意图（含已 idle 的断开）：重建的「停旧 → 拉起」窗口里
+    /// 连接已经不在，只有意图能记录下这次断开，回滚才不会把它接回来。
+    #[tokio::test]
+    async fn every_user_stop_records_intent_even_when_idle() {
+        let mut h = harness();
+        async fn epoch(services: &WiredServices) -> u64 {
+            let _ops = services.runtime_ops.lock().await;
+            services.current_runtime_epoch()
+        }
+
+        h.services.runtime_stop(false).await.unwrap();
+        h.services.runtime_stop(false).await.unwrap();
+        assert_eq!(
+            epoch(&h.services).await,
+            2,
+            "已 idle 的断开也要记意图，否则重建窗口里的断开会被忽略"
+        );
+
+        let created = h
+            .services
+            .config_create(auto_port_input("运行期代数"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
+        h.services
+            .tun
+            .force_running_for_test(4242, Some(&config_id));
+
+        h.services.runtime_stop(false).await.unwrap();
+        assert_eq!(
+            epoch(&h.services).await,
+            3,
+            "停掉在跑的连接再推进一代"
+        );
+        h.services.runtime_stop(false).await.unwrap();
+        assert_eq!(
+            epoch(&h.services).await,
+            4,
+            "停完再停一次：没有东西可停，但意图照样记"
+        );
+    }
+
+    /// 强制重置的「停 TUN + 停运行时」这一段：只在锁内停，且只推进一代。
+    #[tokio::test]
+    async fn force_reset_stops_the_runtime_inside_the_lock_and_bumps_the_epoch() {
+        let mut h = harness();
+        let created = h
+            .services
+            .config_create(auto_port_input("强制重置"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
+        h.services
+            .tun
+            .force_running_for_test(4242, Some(&config_id));
+
+        let (stop_tun, stop_runtime) = h.services.reset_stop_everything().await;
+        assert_eq!(stop_tun["ok"], true, "{stop_tun}");
+        assert_eq!(stop_runtime["ok"], true, "{stop_runtime}");
+
+        let epoch = {
+            let _ops = h.services.runtime_ops.lock().await;
+            h.services.current_runtime_epoch()
+        };
+        assert_eq!(epoch, 1, "停 TUN + 停运行时只推进一代");
+        assert!(
+            matches!(
+                h.services.tun.status(),
+                crate::tun::session::TunState::Stopped
+            ),
+            "TUN 必须已经停掉"
+        );
+    }
+
     /// 连接成功事件的快照必须就是当时的连接状态（TUN 合成的那一份）。
     #[tokio::test]
     async fn a_tun_running_event_carries_the_live_snapshot() {
@@ -12653,6 +13331,27 @@ mod main_flow_tests {
             crate::trial::status(&conn).unwrap()
         };
         assert_eq!(after.started_at_ms, Some(started_at), "只写一次");
+
+        stop_runtime(&h).await;
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 契约 §7.1「被取代的启动」：拉起阶段在锁外，排队中的断开 / 重建不会被
+    /// 一次最长 90 秒的冷启动堵住。
+    #[tokio::test]
+    async fn a_user_start_does_not_hold_the_runtime_lock_while_launching() {
+        let h = harness();
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let (config_id, _) = create_config_with_seed_node(&h.services, "锁边界", "pw-lock").await;
+
+        let connected = h.services.runtime_start(Some(config_id)).await.unwrap();
+        assert_eq!(connected["state"], "running", "{connected}");
+        assert!(
+            h.services
+                .start_body_without_lock
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "拉起阶段必须没有占着运行期操作锁"
+        );
 
         stop_runtime(&h).await;
         watcher.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -13127,7 +13826,8 @@ mod main_flow_tests {
         panic!("重建没有进入注入窗口");
     }
 
-    /// 重建期间用户/AI 断开：断开排队到重建结束后执行，最终一定是断开。
+    /// 重建期间用户断开：决策段之后重建已在锁外拉起，断开不再排队，
+    /// 而是直接记一笔意图把它取代——不回滚、也不把连接接回来。
     #[tokio::test]
     async fn a_disconnect_during_a_rebuild_wins_in_the_end() {
         let _serial = REBUILD_TEST_LOCK
@@ -13137,6 +13837,50 @@ mod main_flow_tests {
             connected_with_spare_node("断开打断重建", "198.51.100.71").await;
 
         h.services.fail_next_rebuild_for_test(1);
+        let (attached, (stopped, stop_waited)) = tokio::join!(
+            h.services
+                .node_attach(None, Some(vec![spare.clone()]), Some(config_id.clone())),
+            async {
+                wait_for_rebuild_window(&h.services).await;
+                let started = std::time::Instant::now();
+                let result = h.services.runtime_stop(false).await;
+                (result, started.elapsed())
+            }
+        );
+        stopped.unwrap();
+        let attached = attached.unwrap();
+        // 断开不该等重建的拉起段（那是 P1 的原始症状）：它只取决策段那把锁。
+        assert!(
+            stop_waited < std::time::Duration::from_secs(5),
+            "断开被重建的锁外拉起挡住了：等了 {stop_waited:?}"
+        );
+        // 首轮启动被注入失败，回滚前代数已变（用户断开）→ 不回滚，按断开收场。
+        let rebuild = &attached["runtime_rebuild"];
+        assert_eq!(rebuild["status"], "failed", "{rebuild}");
+        assert_eq!(rebuild["reason"], "user_disconnected", "{rebuild}");
+        assert_eq!(rebuild["restored"], false, "{rebuild}");
+        assert_eq!(
+            rebuild["message"], "已按你的操作断开；新增节点会在下次连接时生效。",
+            "{rebuild}"
+        );
+
+        let status = h.services.runtime_status().await.unwrap();
+        assert_eq!(status["state"], "idle", "用户断开后不应再被接回来");
+        assert_eq!(status["system_proxy_enabled"], false);
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 首轮启动期间被断开：首轮其实连上了，但复查时已经不在了——
+    /// 结果必须是 `failed / user_disconnected`，且**不进回滚**。
+    #[tokio::test]
+    async fn a_disconnect_during_the_first_rebuild_start_is_user_disconnected() {
+        let _serial = REBUILD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (h, config_id, _a_id, spare, watcher) =
+            connected_with_spare_node("首轮被断开", "198.51.100.73").await;
+
+        h.services.pause_after_first_rebuild_start_for_test();
         let (attached, stopped) = tokio::join!(
             h.services
                 .node_attach(None, Some(vec![spare.clone()]), Some(config_id.clone())),
@@ -13147,15 +13891,13 @@ mod main_flow_tests {
         );
         stopped.unwrap();
         let attached = attached.unwrap();
-        // 断开在排队：重建自身照常走完（这条注入了首轮失败，所以是回滚成功），
-        // 随后断开执行；最终一定是断开，不会被重建接回来。
         let rebuild = &attached["runtime_rebuild"];
         assert_eq!(rebuild["status"], "failed", "{rebuild}");
-        assert_eq!(rebuild["restored"], true);
+        assert_eq!(rebuild["reason"], "user_disconnected", "{rebuild}");
+        assert_eq!(rebuild["restored"], false, "{rebuild}");
 
         let status = h.services.runtime_status().await.unwrap();
-        assert_eq!(status["state"], "idle", "用户断开后不应再被接回来");
-        assert_eq!(status["system_proxy_enabled"], false);
+        assert_eq!(status["state"], "idle", "断开后不能被重建接回来");
         watcher.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 

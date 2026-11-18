@@ -1,7 +1,7 @@
 # 契约：TUN 特权后端
 
 > 契约版本：`1.7.0`
-> 状态：**已定稿，待实现**（2026-11-05）
+> 状态：**已定稿，实现已落地**（2026-11-05 定稿；macOS 已上线，Windows 后端已接入）
 > 定位：`TunBackend` 抽象、请求/回复信封、错误码、快照形状、四条不变式。**只定契约，不含实现。**
 > 上游：[`../tun-privilege-implementation-plan.md`](../tun-privilege-implementation-plan.md)（双平台计划）、[`../tun-privilege.md`](../tun-privilege.md)（macOS 信任模型）、[`../windows-tun.md`](../windows-tun.md)（Windows 设计）、[`../tun-mode.md`](../tun-mode.md)（连接语义与失败处理）
 > 实现方：Rust `src-tauri/src/tun/`（平台无关）+ `MacXpcBackend`（macOS）+ `WinPipeBackend`（Windows）

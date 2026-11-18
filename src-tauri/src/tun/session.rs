@@ -122,6 +122,11 @@ pub struct TunSession {
     start_attempted: AtomicBool,
     /// 在途启动登记：`(代次, 配置 id)`。启动窗口里判断「有没有连接在途」只靠它。
     launching: Mutex<Option<Launching>>,
+    /// 回滚补停进行中。`mark_start_sent` 看到它就等它结束：
+    /// 新 start 才是当前意图，不能因为一次旧实例的补停就放弃发出去。
+    stop_in_flight: Mutex<bool>,
+    /// 与 `stop_in_flight` 配对：补停结束后唤醒等着的 `mark_start_sent`。
+    stop_done: std::sync::Condvar,
     /// 启动代次发生器。stop / 切配置会作废旧代次，迟到的 start 不得再写状态。
     launch_seq: AtomicU64,
     /// 数据面探测结果。只由健康循环写，`runtime_status` 读；
@@ -199,6 +204,8 @@ impl TunSession {
             probed: AtomicBool::new(false),
             start_attempted: AtomicBool::new(false),
             launching: Mutex::new(None),
+            stop_in_flight: Mutex::new(false),
+            stop_done: std::sync::Condvar::new(),
             launch_seq: AtomicU64::new(0),
             data_plane: Mutex::new(DataPlaneSnapshot::fresh(now_iso())),
         }
@@ -328,11 +335,31 @@ impl TunSession {
     }
 
     fn mark_start_sent(&self, seq: u64) {
+        // 回滚补停进行中：等它清掉再发 start。直接放弃等于作废这次的当前意图；
+        // 最多等一次控制面 stop 的上限，超时也照发并告警。
+        // 调用点本来就在阻塞 XPC 路径上，10 秒同步等待与后端 stop 上限同量级。
+        let guard = self.stop_in_flight.lock().unwrap();
+        let guard = if *guard {
+            let (guard, wait) = self
+                .stop_done
+                .wait_timeout_while(guard, TUN_REPLY_DEADLINE_CONTROL, |flag| *flag)
+                .unwrap();
+            if wait.timed_out() {
+                log::warn!("等回滚补停超过 {:?}，仍按当前意图发出 start", TUN_REPLY_DEADLINE_CONTROL);
+            }
+            guard
+        } else {
+            guard
+        };
+        // 置位必须仍在 `stop_in_flight` 守卫内：放到释放之后，判定侧会插进那段窗口
+        // 看到 `start_sent=false` 而误选「只停后端」。
+        // 锁序与判定侧一致：`stop_in_flight → launching`，不会 ABBA。
         if let Some(launch) = self.launching.lock().unwrap().as_mut() {
             if launch.seq == seq {
                 launch.start_sent = true;
             }
         }
+        drop(guard);
     }
 
     /// 有没有更晚的一次启动已经把 `start` 发给 helper。
@@ -357,6 +384,97 @@ impl TunSession {
                 self.clear_state();
             }
             Err(error) => log::warn!("取消后补停失败：{}", error.message),
+        }
+    }
+
+    /// 启动后回滚时按当前登记决定怎么停。`pid` 是本次失败启动拉起的实例；
+    /// 没有登记时靠它区分「自己的已 commit」与「更新的连接已 commit」。
+    ///
+    /// - 有登记且 `start_sent`：更晚的 start 已经发给 helper，替换语义会收掉
+    ///   本次实例，这里再全局 stop 会把新连接一起杀掉——什么都不做；
+    /// - 有登记且 `!start_sent`：只停后端、**保留登记**，让这次启动随后正常发 start；
+    /// - 没有登记：缓存的 Running pid 就是本次这个 → 停后端并清状态；
+    ///   pid 不同或缓存里没有 pid → 什么都不做。
+    ///
+    /// 判定与 `mark_start_sent` 互斥，但 backend stop（最长 10 秒）不在
+    /// `launching` 锁里跑：`is_launching()` 抢的是同一把锁，卡住会连带拖死
+    /// `runtime_status`。判定**不问后端**：慢探测只留给 `runtime_status` 的复核，
+    /// 否则探测的 10 秒里新连接可能已 commit 并被我们误判成「自己的」。
+    ///
+    /// 前置：缓存 pid 只可能来自一次已 commit 的启动（或接手老连接的 `adopt`）。
+    /// 所以「无登记 + 缓存 pid 等于本次」就是「本次启动已 commit 且没被谁替换」。
+    /// 代价（已接受）：缓存过期、且实例被 `adopt` 这类非 commit 路径换掉时，
+    /// 这里会按旧 pid 判 Full 并停掉别人的实例；回滚只在本次启动刚失败的窗口里
+    /// 调用，且宁可多重一次探测式的风险，也不在停路径上加 10 秒等待。
+    pub fn stop_for_failed_launch(&self, pid: u32) -> Result<(), TunError> {
+        enum Rollback {
+            Full,
+            Skip,
+            BackendOnly,
+        }
+
+        let mut in_flight = self.stop_in_flight.lock().unwrap();
+        *in_flight = true;
+        // 同一把 `launching` 锁内一次读「登记 + 缓存 pid」。`commit_launch` 确实
+        // 在持这把锁时写 pid，所以对 commit 路径两者是同一瞬间；`adopt()` 会在
+        // 锁外补写 pid，那是接手老连接的路径，不是这里要认的身份。
+        // 锁序 `stop_in_flight → launching → pid`。
+        let (registered_sent, cached_pid) = {
+            let launching = self.launching.lock().unwrap();
+            let sent = launching.as_ref().map(|launch| launch.start_sent);
+            (sent, *self.pid.lock().unwrap())
+        };
+        let rollback = match registered_sent {
+            Some(true) => Rollback::Skip,
+            Some(false) => Rollback::BackendOnly,
+            // `cached_pid == None` 也走 Skip：没有 pid 说明本次启动没 commit 成功，
+            // 后端侧也不会留下可辨认的实例（真留下了由 helper 的替换语义收）。
+            None if cached_pid == Some(pid) => Rollback::Full,
+            None => Rollback::Skip,
+        };
+        let result = match rollback {
+            // 不能走 `stop()`：它的第一步 `cancel_launch()` 会把判定之后
+            // 才登记进来的更新一次启动顺手作废。
+            Rollback::Full => self.stop_backend_full(),
+            Rollback::Skip => Ok(()),
+            Rollback::BackendOnly => {
+                self.stop_backend_only();
+                Ok(())
+            }
+        };
+        *in_flight = false;
+        self.stop_done.notify_all();
+        result
+    }
+
+    /// `Full` 用的停后端：与 `stop()` 的 Ok/Err 两支一致，只是**不动在途登记**。
+    ///
+    /// `HelperMissing` **不能无条件当「已停」**：它来自 `XpcError::Unavailable`
+    /// （服务没起来 / 连接被拒这类调用竞态），不证明 root 进程已死。
+    /// 只有事后 `availability()` 明确报「未就绪」时才算确实没有实例；
+    /// 确认不了一律返回 Err，交给调用方的「停止未成功、请强制重置网络」路径。
+    /// 反过来把活着的 sing-box 从缓存里抹掉，`probe_once` 的 `probed` 闩会让它
+    /// 直到重启都不可见。
+    fn stop_backend_full(&self) -> Result<(), TunError> {
+        match self.backend.stop_with_deadline(TUN_REPLY_DEADLINE_CONTROL) {
+            Ok(()) => {
+                self.start_attempted.store(false, Ordering::SeqCst);
+                self.clear_state();
+                Ok(())
+            }
+            Err(error) if matches!(error.code, TunErrorCode::HelperMissing) => {
+                match self.backend.availability() {
+                    // helper 确实不在：没有进程可留，按已停收口。
+                    Ok(status) if !status.is_ready() => {
+                        self.start_attempted.store(false, Ordering::SeqCst);
+                        self.clear_state();
+                        Ok(())
+                    }
+                    // 确认不了（helper 报就绪，或连状态都问不到）：如实报错。
+                    _ => Err(error),
+                }
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -624,6 +742,33 @@ impl TunSession {
         self.probe_once()
     }
 
+    /// 只读本地缓存的 `status()` 等价物：**绝不 recheck、不碰后端**。
+    ///
+    /// 语义与 `status()` 的缓存命中分支一致（有 pid 即 `Running`，否则 `Stopped`；
+    /// 启动窗口照旧用 `is_launching()` 单独判）；
+    /// 可能比后端真值旧（如 helper 已停而缓存仍是 Running）。只给 `runtime_ops`
+    /// 锁内的决策段做粗判，**不能用于对外状态**——对外一律走 `status()`。
+    /// 存在的理由：`status()` 在缓存过期时会做一次最长 10 秒的后端探测，
+    /// 决策段在锁内叠加 `stop_for_rebuild` 的等待会把 20 秒的用户侧上限顶穿。
+    pub fn status_cached(&self) -> TunState {
+        match *self.pid.lock().unwrap() {
+            Some(pid) => TunState::Running { pid },
+            None => TunState::Stopped,
+        }
+    }
+
+    /// 决策段专用：一次读完「是否在跑 + 连接上下文」，**不探测后端**。
+    ///
+    /// 与 `status_cached()` 同一口径：只信缓存，可能比后端真值旧；
+    /// 只给 `runtime_ops` 锁内的决策段用，**不能用于对外状态**。
+    /// 缓存里有 pid 但没有 meta（接手到身份未知的老连接）时返回 `None`：
+    /// 没有上下文就不是可用于决策的连接。
+    pub fn running_cached(&self) -> Option<(u32, TunLaunchMeta)> {
+        let pid = (*self.pid.lock().unwrap())?;
+        let meta = self.meta.lock().unwrap().clone()?;
+        Some((pid, meta))
+    }
+
     /// 没有缓存时的一次性接手：先判就绪，再问后端。
     fn probe_once(&self) -> TunState {
         // **先判就绪，再决定要不要探测。**
@@ -739,12 +884,17 @@ mod tests {
     struct FakeBackend {
         starts: AtomicUsize,
         stops: AtomicUsize,
+        statuses: AtomicUsize,
         flushes: AtomicUsize,
         running: Mutex<Option<u32>>,
         clash: Mutex<Option<ClashApi>>,
         since: Mutex<Option<String>>,
         start_error: Mutex<Option<TunErrorCode>>,
         stop_error: Mutex<Option<TunErrorCode>>,
+        /// 测试用：`availability()` 报的 helper 状态。
+        helper_status: Mutex<HelperStatus>,
+        /// 测试用：让 `stop` 卡住，直到收到放行信号。
+        stop_gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     }
 
     impl FakeBackend {
@@ -752,19 +902,22 @@ mod tests {
             Self {
                 starts: AtomicUsize::new(0),
                 stops: AtomicUsize::new(0),
+                statuses: AtomicUsize::new(0),
                 flushes: AtomicUsize::new(0),
                 running: Mutex::new(None),
                 clash: Mutex::new(None),
                 since: Mutex::new(None),
                 start_error: Mutex::new(None),
                 stop_error: Mutex::new(None),
+                helper_status: Mutex::new(HelperStatus::Enabled),
+                stop_gate: Mutex::new(None),
             }
         }
     }
 
     impl TunBackend for FakeBackend {
         fn availability(&self) -> Result<HelperStatus, TunError> {
-            Ok(HelperStatus::Enabled)
+            Ok(*self.helper_status.lock().unwrap())
         }
         fn ensure_available(&self) -> Result<HelperStatus, TunError> {
             Ok(HelperStatus::Enabled)
@@ -792,6 +945,10 @@ mod tests {
         }
         fn stop(&self) -> Result<(), TunError> {
             self.stops.fetch_add(1, Ordering::SeqCst);
+            if let Some((entered, release)) = self.stop_gate.lock().unwrap().as_ref() {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
             if let Some(code) = *self.stop_error.lock().unwrap() {
                 return Err(TunError::new(code, "fake stop error"));
             }
@@ -801,6 +958,7 @@ mod tests {
             Ok(())
         }
         fn status(&self) -> Result<TunSnapshot, TunError> {
+            self.statuses.fetch_add(1, Ordering::SeqCst);
             let pid = *self.running.lock().unwrap();
             Ok(TunSnapshot {
                 running: pid.is_some(),
@@ -913,6 +1071,291 @@ mod tests {
 
         let session = TunSession::with_backend(backend, "fake");
         assert!(session.stop().is_ok());
+    }
+
+    /// 回滚时没有登记，且缓存 Running 就是本次启动的 pid：必须停掉后端并清状态。
+    /// 守的是 `Full` 正路；旧实现（无登记即 Full）同样绿，这条不是防回退用例。
+    #[test]
+    fn a_failed_launch_without_a_registration_does_a_full_stop() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        // 本次启动已 commit（登记撤掉、pid 落在缓存里），随后接管校验失败要回滚。
+        let started = session.launch("{}", &meta()).unwrap();
+        assert_eq!(started.pid, 4242);
+
+        session.stop_for_failed_launch(4242).unwrap();
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(session.status(), TunState::Stopped);
+    }
+
+    /// 没有登记，但当前 Running 是另一条（更新的连接已 commit）：
+    /// 回滚停下去就是杀掉新连接，必须什么都不做。
+    #[test]
+    fn a_rollback_does_not_stop_a_newer_committed_connection() {
+        let backend = Arc::new(FakeBackend::new());
+        *backend.running.lock().unwrap() = Some(9001);
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        assert_eq!(session.status(), TunState::Running { pid: 9001 });
+
+        session.stop_for_failed_launch(4242).unwrap();
+        assert_eq!(
+            backend.stops.load(Ordering::SeqCst),
+            0,
+            "更新的连接不能被回滚停掉"
+        );
+        assert_eq!(session.status(), TunState::Running { pid: 9001 });
+    }
+
+    /// `Full` 分支只停后端：判定做完之后才登记进来的更新一次启动不能被作废。
+    /// 把 `Full` 改回 `stop()` 会让 `cancel_launch()` 清掉新登记，这条必红。
+    #[test]
+    fn a_full_rollback_leaves_a_launch_registered_meanwhile_intact() {
+        let backend = Arc::new(FakeBackend::new());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *backend.stop_gate.lock().unwrap() = Some((entered_tx, release_rx));
+        *backend.running.lock().unwrap() = Some(4242);
+
+        let session = Arc::new(TunSession::with_backend(backend.clone(), "fake"));
+        assert_eq!(session.status(), TunState::Running { pid: 4242 });
+
+        let stopper = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || session.stop_for_failed_launch(4242))
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Full 分支必须真的进后端");
+
+        // 判定已经做完、后端还在停：此刻登记的启动属于更新的那次连接。
+        let newer = session.begin_launch("cfg_new");
+        release_tx.send(()).unwrap();
+        stopper.join().unwrap().unwrap();
+
+        assert!(session.is_launching(), "Full 分支不能顺带作废新登记");
+        assert_eq!(session.launching_config_id().as_deref(), Some("cfg_new"));
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+        drop(newer);
+    }
+
+    /// 缓存过期且与后端真值不一致时，身份判定只信缓存：后端真值虽然是本次的 pid，
+    /// 也不能据此整段停——缓存里的 pid 属于更晚的连接。
+    /// 抓的是「判定退回成 `status()` 探测」的回退：探测会 adopt 4242 → Full → 停一次。
+    #[test]
+    fn an_expired_cache_does_not_select_the_full_rollback() {
+        let backend = Arc::new(FakeBackend::new());
+        *backend.running.lock().unwrap() = Some(4242);
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        // 缓存里是另一条连接的 pid，且已经过了复核间隔。
+        *session.pid.lock().unwrap() = Some(9001);
+        *session.last_check.lock().unwrap() = Some(Instant::now() - Duration::from_secs(10));
+
+        session.stop_for_failed_launch(4242).unwrap();
+        assert_eq!(
+            backend.stops.load(Ordering::SeqCst),
+            0,
+            "缓存 pid 不是本次的，不能整段停"
+        );
+    }
+
+    /// 缓存过期时 `status_cached` 只读缓存：不 recheck、不产生后端查询。
+    #[test]
+    fn status_cached_never_probes_the_backend() {
+        let backend = Arc::new(FakeBackend::new());
+        *backend.running.lock().unwrap() = Some(4242);
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        *session.pid.lock().unwrap() = Some(9001);
+        *session.last_check.lock().unwrap() = Some(Instant::now() - Duration::from_secs(10));
+
+        assert_eq!(session.status_cached(), TunState::Running { pid: 9001 });
+        assert_eq!(
+            backend.statuses.load(Ordering::SeqCst),
+            0,
+            "status_cached 不能问后端"
+        );
+    }
+
+    /// 缓存过期时 `status()` 仍会 recheck 到后端真值：两者的差别只在探测。
+    #[test]
+    fn status_still_rechecks_an_expired_cache() {
+        let backend = Arc::new(FakeBackend::new());
+        *backend.running.lock().unwrap() = Some(4242);
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        *session.pid.lock().unwrap() = Some(9001);
+        *session.last_check.lock().unwrap() = Some(Instant::now() - Duration::from_secs(10));
+
+        assert_eq!(session.status(), TunState::Running { pid: 4242 });
+        assert_eq!(
+            backend.statuses.load(Ordering::SeqCst),
+            1,
+            "过期缓存必须复核一次"
+        );
+    }
+
+    /// 决策段一次读完 pid + 上下文：缓存过期、后端真值不同也不探测。
+    #[test]
+    fn running_cached_reads_pid_and_meta_without_probing() {
+        let backend = Arc::new(FakeBackend::new());
+        *backend.running.lock().unwrap() = Some(4242);
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        *session.pid.lock().unwrap() = Some(9001);
+        *session.meta.lock().unwrap() = Some(TunLaunchMeta {
+            config_id: "cfg_cached".into(),
+            config_name: Some("缓存里的配置".into()),
+            node_id: None,
+            node_name: None,
+            applied_route_revision: Some(7),
+            route_region: None,
+        });
+        *session.last_check.lock().unwrap() = Some(Instant::now() - Duration::from_secs(10));
+
+        let (pid, meta) = session.running_cached().expect("缓存里有连接");
+        assert_eq!(pid, 9001);
+        assert_eq!(meta.config_id, "cfg_cached");
+        assert_eq!(meta.applied_route_revision, Some(7));
+        assert_eq!(
+            backend.statuses.load(Ordering::SeqCst),
+            0,
+            "running_cached 不能问后端"
+        );
+    }
+
+    /// 没有缓存 pid 就没有可决策的连接。
+    #[test]
+    fn running_cached_is_none_without_a_cached_pid() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend, "fake");
+        assert!(session.running_cached().is_none());
+    }
+
+    /// helper 这一瞬不可达（调用竞态），**不证明** root 实例已死：
+    /// 必须如实报错、保留缓存与 `start_attempted`，交给「强制重置网络」。
+    #[test]
+    fn a_full_rollback_reports_an_unconfirmed_missing_helper() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        let started = session.launch("{}", &meta()).unwrap();
+        assert_eq!(started.pid, 4242);
+        *backend.stop_error.lock().unwrap() = Some(TunErrorCode::HelperMissing);
+        // availability 仍报 Enabled：能问到时它说 helper 在，不是「确实不在」。
+
+        let error = session.stop_for_failed_launch(4242).unwrap_err();
+        assert_eq!(error.code, TunErrorCode::HelperMissing);
+        assert_eq!(
+            session.status(),
+            TunState::Running { pid: 4242 },
+            "没确认停掉就不能把缓存抹成未连接"
+        );
+        assert!(
+            session.start_attempted.load(Ordering::SeqCst),
+            "没确认停掉就不能清 start_attempted"
+        );
+    }
+
+    /// `availability()` 明确报 helper 未就绪：确实没有实例可留，按已停收口。
+    #[test]
+    fn a_full_rollback_treats_a_confirmed_absent_helper_as_stopped() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        let started = session.launch("{}", &meta()).unwrap();
+        assert_eq!(started.pid, 4242);
+        *backend.running.lock().unwrap() = None;
+        *backend.stop_error.lock().unwrap() = Some(TunErrorCode::HelperMissing);
+        *backend.helper_status.lock().unwrap() = HelperStatus::NotRegistered;
+
+        session.stop_for_failed_launch(4242).unwrap();
+        assert_eq!(session.status(), TunState::Stopped);
+        assert!(!session.start_attempted.load(Ordering::SeqCst));
+    }
+
+    /// 有登记且更晚的 start 已发出：替换语义会收掉旧实例，
+    /// 这里再全局 stop 会把新连接一起杀掉。
+    #[test]
+    fn a_failed_launch_whose_start_was_sent_stays_untouched() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        let slot = session.begin_launch("cfg_new");
+        session.mark_start_sent(slot.seq);
+
+        session.stop_for_failed_launch(4242).unwrap();
+        assert_eq!(
+            backend.stops.load(Ordering::SeqCst),
+            0,
+            "新 start 已发出，不能再停"
+        );
+        assert!(session.is_launching());
+    }
+
+    /// 有登记但还没发 start：只停后端、保留登记，随后那次启动照常发 start。
+    #[test]
+    fn a_failed_launch_that_has_not_sent_start_stops_the_backend_only() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        let _slot = session.begin_launch("cfg_new");
+
+        session.stop_for_failed_launch(4242).unwrap();
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+        assert!(
+            session.is_launching(),
+            "登记必须保留，让这次启动随后正常发 start"
+        );
+        assert_eq!(session.launching_config_id().as_deref(), Some("cfg_new"));
+    }
+
+    /// 补停进行中：新 start 的 `mark_start_sent` 要等它结束（而不是放弃），
+    /// 同时 `is_launching()` 不能被 backend stop 拖住。
+    #[test]
+    fn a_start_waits_for_an_in_flight_rollback_stop() {
+        let backend = Arc::new(FakeBackend::new());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *backend.stop_gate.lock().unwrap() = Some((entered_tx, release_rx));
+
+        let session = Arc::new(TunSession::with_backend(backend.clone(), "fake"));
+        let old = session.begin_launch("cfg_old");
+        let stopper = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || session.stop_for_failed_launch(4242))
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("回滚补停必须真的进后端");
+
+        // backend stop 还在进行：读登记不能被它拖住。
+        assert!(
+            session.is_launching(),
+            "backend stop 期间 is_launching 必须能返回"
+        );
+
+        let newer = session.begin_launch("cfg_new");
+        let seq = newer.seq;
+        let marker = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || session.mark_start_sent(seq))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!marker.is_finished(), "补停没结束前不能把 start 发出去");
+        assert!(
+            !session.newer_launch_sent_start(),
+            "置位必须和判定在同一临界区：补停结束前 start_sent 仍为 false"
+        );
+
+        release_tx.send(()).unwrap();
+        marker.join().unwrap();
+        stopper.join().unwrap().unwrap();
+        assert!(
+            session.newer_launch_sent_start(),
+            "补停结束后新的 start 要照常标记已发"
+        );
+        // 置位已完成：之后任何判定都必须看到它，不能再选「只停后端」。
+        session.stop_for_failed_launch(4242).unwrap();
+        assert_eq!(
+            backend.stops.load(Ordering::SeqCst),
+            1,
+            "已标记 start 的登记只该被跳过"
+        );
+        drop(old);
+        drop(newer);
     }
 
     /// 后端报 running 时，首次 status 能接手（App 崩溃重启场景），

@@ -1023,15 +1023,45 @@ impl RuntimeManager {
                 inner.plan = None;
                 return Ok(inner.snapshot());
             }
-            let from = inner.state;
-            inner.generation += 1;
-            inner.desired_stop = true;
-            inner.state = RuntimeState::Stopping;
-            inner.last_transition_at = now_iso();
-            let snapshot = inner.snapshot();
-            (inner.child.take(), from, snapshot)
+            Self::take_for_stop(&mut inner)
         };
+        self.finish_stop(child, from, snapshot).await
+    }
 
+    /// 只停 pid 对得上的那一代（2026-11-18 架构裁决：按 pid 认领实例）。
+    ///
+    /// 比较与停在同一把 `inner` 锁内完成——不先读 `status()` 再回来停，
+    /// 那样中间会被新连接插进来。`pid` 必须出自**同一次 `start()` 的返回**：
+    /// 现读来的 pid 可能已经是别人的。pid 为空或已换成别的实例时返回 `None`，
+    /// 调用方按「不是我的，不碰」处理。
+    pub async fn stop_if_pid(&self, pid: u32) -> RuntimeResult<Option<RuntimeStatus>> {
+        let (child, from, snapshot) = {
+            let mut inner = self.inner.lock().await;
+            if inner.pid != Some(pid) {
+                return Ok(None);
+            }
+            Self::take_for_stop(&mut inner)
+        };
+        Ok(Some(self.finish_stop(child, from, snapshot).await?))
+    }
+
+    /// 停运行时的前半段：已在 `inner` 锁内，置 Stopping 并取出 child。
+    fn take_for_stop(inner: &mut Inner) -> (Option<Child>, RuntimeState, RuntimeStatus) {
+        let from = inner.state;
+        inner.generation += 1;
+        inner.desired_stop = true;
+        inner.state = RuntimeState::Stopping;
+        inner.last_transition_at = now_iso();
+        let snapshot = inner.snapshot();
+        (inner.child.take(), from, snapshot)
+    }
+
+    async fn finish_stop(
+        &self,
+        child: Option<Child>,
+        from: RuntimeState,
+        snapshot: RuntimeStatus,
+    ) -> RuntimeResult<RuntimeStatus> {
         self.wake.notify_waiters();
         self.emit(RuntimeEvent::StateChanged(RuntimeStateChangedPayload {
             contract_version: EVENT_CONTRACT_VERSION,
@@ -2583,6 +2613,39 @@ mod tests {
             matches!(err, RuntimeError::InvalidState { .. }),
             "配置已删，重启必须是 InvalidState：{err}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 陈旧 pid 不命中：不是本次启动起的实例，一个字段都不能动
+    /// （改回「无条件 stop」这条必红）。
+    #[tokio::test]
+    async fn stop_if_pid_leaves_another_instance_alone() {
+        let dir = temp_dir("stop-if-pid");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manager = RuntimeManager::new(RuntimeConfig::new(&dir));
+
+        let generation_before = {
+            let mut inner = manager.inner.lock().await;
+            inner.state = RuntimeState::Running;
+            inner.pid = Some(9001);
+            inner.plan = Some(plan(PathBuf::from("/usr/bin/tail"), &dir));
+            inner.generation
+        };
+
+        assert!(
+            manager.stop_if_pid(4242).await.unwrap().is_none(),
+            "pid 不匹配必须什么都不做"
+        );
+        {
+            let inner = manager.inner.lock().await;
+            assert_eq!(inner.state, RuntimeState::Running, "别人的实例不能被停");
+            assert_eq!(
+                inner.generation, generation_before,
+                "pid 不匹配不得推进 generation"
+            );
+            assert!(!inner.desired_stop, "pid 不匹配不得置 desired_stop");
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

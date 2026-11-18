@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.43.0`
+> 契约版本：`2.43.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -529,14 +529,14 @@ type NodeAttachData = {
 
 错误：`INVALID_ARGUMENT`（`source_required` / `source_and_node_ids_conflict` / `invalid_source`）、`NOT_FOUND`（`node_not_found`，`details.node_ids` 一次列全）、`PRECONDITION_FAILED`（`seed_unavailable`）、`CONFLICT`（`not_global_config` / `switch_in_progress`）、`INTERNAL`。
 
-### 4.0.1 `runtime_rebuild`：连接中新增节点时重建运行配置（2.42.0；2.42.1 曾增 `cancelled`，2.42.3 撤回）
+### 4.0.1 `runtime_rebuild`：连接中新增节点时重建运行配置（2.42.0；2.42.1 曾增 `cancelled`，2.42.3 撤回；2.43.1 增 `failed / user_disconnected`）
 
 `node_attach` 与 `node_create`（§4.2）在**连接中**新增节点后，会让新节点立刻可用。运行中的 sing-box 不能热加 outbound（TUN 的配置还在特权助手侧），所以这是一次完整 **stop → start**：中间有一小段断流，`current_node_id` 不变，界面看到的是既有的 `stopping → starting → running` 序列（**不新增事件**，`events.md` 与 `runtime.md` 不变）。
 
 ```ts
 type RuntimeRebuild = {
   status: "applied" | "failed" | "skipped";
-  reason?: string;                          // 仅 skipped
+  reason?: string;                          // skipped 的取值见下表；failed 只可能是 "user_disconnected"
   restored?: boolean;                       // 仅 failed：旧配置是否已恢复
   new_nodes?: string[];                     // 仅 applied：凭据齐全且真进了运行配置的节点 id
   new_nodes_available_next_connect?: boolean; // 仅 failed：恒为 true
@@ -547,10 +547,26 @@ type RuntimeRebuild = {
 | status | 出现的字段 | 含义 |
 |---|---|---|
 | `applied` | `new_nodes` | 新配置已起，节点已在 selector 里。`new_nodes` 只含**凭据齐全、且确实是该配置成员**的节点（进重建后、启动前改过选择时以库里最新状态为准），因此可能少于本次新增数 |
-| `failed` | `restored`、`new_nodes_available_next_connect`（恒 `true`）、`message` | 新配置没起来。`restored = true` 表示已用**不含新节点**的旧集合重新连上，用户回到原连接；`false` 表示旧配置也没能重新起（含「停旧连接这一步就失败」）。两种情况节点都已进池，下次连接一定带上 |
+| `failed` | `restored`、`new_nodes_available_next_connect`（恒 `true`）、`message`、`reason`（仅 `user_disconnected`） | 新配置没起来，或重建的收尾被别的操作 / 未知状态打断。`restored = true` 表示已用**不含新节点**的旧集合重新连上；`false` = **没有把旧配置重新连上**（含「停旧连接这一步就失败」），**不是「回滚尝试失败」**，界面与模型**不得据 `restored` 推断原因**——具体是哪种由 `reason` 与 `message` 区分（见下表）：`user_disconnected` = 确认用户断开；无 `reason` 的两种中性文案分别是「被新的操作接管」与「无法确认」。所有情况节点都已进池，下次连接一定带上 |
 | `skipped` | `reason` | 没有重建。节点照样已进池，下次连接生效 |
 
-**重建期间用户断开或再次连接：排队，不取消。** 从停旧连接那一刻起，重建持有运行期操作锁，期间的连/断排在它后面执行：重建会跑完并如实返回结果，随后才执行用户那一次操作。**不存在「重建被用户取消」这个结局**——所以没有 `cancelled` 状态（2.42.1 曾登记过，2.42.3 撤回，见 §16）。
+**重建遇到用户断开或再次连接：决策段排队，拉起段可被取代。** 重建只在**决策段**（复查连接状态 → 重读配置 → 停旧连接 → 记代）持有运行期操作锁，这期间落下的连/断排在它后面执行；**首轮启动与回滚都在锁外**（含最长 90 秒的 TUN 冷启动）。锁外返回后一律**持锁重读实际状态**（缓存态，不探测后端）判定，判据不是「谁推进了代数」，而是「现在实际连没连、连的是不是这套配置」：
+
+- **首轮拉起返回**：持锁读实际状态——连着且是这套配置 → `applied`，`new_nodes` 取 `nodes_in_running_config`（新连接用的是重建开始前已写库的最新节点集，所以诚实）；没连着 → `failed / user_disconnected`，不进回滚；**拿不到锁** → `failed`、无 `reason`、「无法确认」文案（状态未知，不得冒充用户断开）。
+- **回滚前**：持锁比代数，代数变了就不回滚，**并重读一次实际状态**：没连着 → `failed / user_disconnected`；仍连着（被另一次启动 / 重启接手）→ `failed`、无 `reason`、「被新的操作接管」文案。
+- **回滚拉起返回**：同首轮。
+
+**没有 `cancelled` 状态**（2.42.1 曾登记过，2.42.3 撤回，见 §16）。被取代这条的任何文案都**不得**出现「连接也没能恢复」——那是回滚失败的措辞；同时**不得说「已按你的操作断开」**，除非确实是 `user_disconnected`。
+
+`failed` 的语义（`reason` 只在**确认是用户断开**时出现；`unknown` 不是原因，不新增 reason）：
+
+| 情形 | `reason` | 出现条件 | `restored` | 界面动作 |
+|---|---|---|---|---|
+| 回滚成功 | 无（不出现） | 首轮失败后，用不含新节点的旧集合回滚并连上；`message`「新节点这次没能应用，已回到原来的连接；重新连接后就能用它。」 | `true` | 按 `message`；不要另写文案 |
+| 回滚失败（含停旧失败） | 无（不出现） | 回滚也没能重新起（`message`「…连接也没能恢复；重新连接会带上它。」），或停旧连接这一步就失败（`message`「…当前连接也没停掉；重新连接后就能用它。」） | `false` | 按 `message`；文案明确说连接没恢复时给「重新连接」入口 |
+| 确认用户断开 | `"user_disconnected"` | 锁内重读实际状态为未连接（首轮 / 回滚拉起返回后，或回滚前代数已变且已断开）；`message` 固定「已按你的操作断开；新增节点会在下次连接时生效。」 | `false` | 按 `message` 提示已断开；**不得**读成「回滚失败」；不回滚、不重连；节点已进池，下次连接生效 |
+| 被新的操作接管 | 无（不出现） | 回滚前代数已变，但重读实际状态**仍连着**——重建期间运行时被另一次启动 / 重启接手，连接其实还在；`message` 固定「新节点这次没能应用；当前连接已由新的操作接管，重新连接后就能用它。」 | `false` | 按 `message`；**不得说「已按你的操作断开」**、不得显示「已断开」；不重连 |
+| 无法确认 | 无（不出现） | 拿不到运行期锁（强制重置 / 重启可能持锁数十秒），状态未知；`message` 固定「没能确认当前连接状态；新节点已进池，下次连接生效。」 | `false` | 按 `message`；不得说「已断开」、**不得据 `restored` 推断原因**；提示稍后可查连接状态 |
 
 `skipped` 的 `reason`（全部取值，按判定顺序）：
 
@@ -560,7 +576,7 @@ type RuntimeRebuild = {
 | `connection_launching` | 有连接正在启动（还没起来） | 不提；等连上后用户再操作 |
 | `not_connected` | 当前没有任何连接 | 不提 |
 | `config_not_running` | 已连接，但跑的是**另一套配置** | 不提；不在别人的连接上重建 |
-| `config_missing` | 启动前重读配置时读不到（`node_attach` / `node_create` 都可能，异常路径） | 记日志；节点已进池 |
+| `config_missing` | 启动前重读配置时读不到（`node_attach` / `node_create` 都可能，异常路径） | 记日志；节点已进池。返回该分支时**不会停掉当前连接**（重读在停旧之前） |
 | `switch_in_progress` | 同一配置正有 `config_set_mode`、`node_switch` 或**另一次重建**在跑，不排队 | 不提；节点已进池 |
 | `runtime_busy` | 运行期操作锁等了 20 秒还没轮到（另一次重建或运行期操作占着） | 不提；节点已进池，下次连接自然生效 |
 
@@ -568,9 +584,9 @@ type RuntimeRebuild = {
 
 **新建节点何时生效**：`applied` 立即生效；`failed` 与所有 `skipped`（含 `runtime_busy`）都不丢节点——节点已写库进池，**下次连接一定带上**，界面不需要为没排上队自动重试或重连。
 
-- **`failed` 不是错误**：命令本身成功返回，节点已写入；`message` 是给界面直接用的一句话（已恢复 / 未恢复两种文案由 Host 给出），界面不要自己另写。
-- **重建期间的断开请求会等一下**：用户侧的 `runtime_stop` 会阻塞到重建结束再执行；锁最多等 60 秒，超时才返回 `TIMEOUT / runtime_busy`（§7.1），不是被吞掉、也不是立即失败。界面保持「正在断开」；超时后按可重试处理，不要自动重连。
-- **`restored = false` 且连接确实没恢复**：界面按 `message` 提示，并给「重新连接」入口；不要当成节点创建失败。
+- **`failed` 不是错误**：命令本身成功返回，节点已写入；`message` 是给界面直接用的一句话（回滚成功 / 回滚失败 / 用户断开 / 被接管 / 无法确认，文案均由 Host 给出），界面不要自己另写。
+- **重建期间的断开请求**：重建还在决策段（含停旧）时，`runtime_stop` 排队等锁，等待上限见 §7.1（实现常量），超时才 `TIMEOUT / runtime_busy`，不是被吞掉、也不是立即失败；一旦重建进入锁外拉起，断开不再排队，而是推进代数把它取代——结果见上面的 `user_disconnected`。界面保持「正在断开」；超时后按可重试处理，不要自动重连。
+- **`restored = false` 有三种读法，一律以 `message` 为准**：①`user_disconnected`——用户确实断开，提示「已按你的操作断开」；②被新的操作接管——连接其实还在，**不得说已断开**；③无法确认——状态未知。**不得据 `restored` 推断原因**；只有文案明确说连接没恢复时才给「重新连接」入口，且不要当成节点创建失败。
 - **`node_attach` 的空返回**：`attached_node_ids` 为空数组时 `runtime_rebuild` 为 `null`（不是 `{status:"skipped"}`），前端需容忍 `null`。
 - 同一配置的切换接管方式与重建互斥（同一把闸门）：`node_attach` 撞上会以 `CONFLICT / switch_in_progress` 直接失败（早于重建），`node_create` 则是 `skipped / switch_in_progress`。
 
@@ -1096,9 +1112,26 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 错误码：`RUNTIME_NOT_INSTALLED`、`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `tun_denied` / `helper_missing`）、`NOT_FOUND`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`TIMEOUT`、`UPSTREAM_ERROR`、`INTERNAL`。
 
-**`TIMEOUT` 的可重试子类 `runtime_busy`**：用户侧的 `runtime_start` / `runtime_stop` / `runtime_restart` 共用一把运行期操作锁，等待上限 **60 秒**，超时返回 `TIMEOUT`，`details.reason = "runtime_busy"`；`RuntimeRebuild` 的 skipped 分支走另一个上限（20 秒，§4.0.1）。重建运行配置或另一次运行期操作正在跑、这次没排到时就是这种情况——这**不代表操作失败**，也不是「连接失败」，前一个操作结束后由用户原样重试即可（界面按可重试处理，不要自动轮询重试）。`tools.md` §4.2–4.4 的 `RuntimeStart` / `RuntimeStop` / `RuntimeRestart` 是同一实现，取值相同。
+**被取代的启动**：`runtime_start` 只在**决策段**持运行期操作锁（读连接状态 → 幂等判断 → 停旧连接 → 记代数），进程拉起与 TUN `start` 在锁外执行；拉起返回后重新取锁比对代数（实现用运行期代数 `runtime_epoch`，契约只约束结果）。若这期间代数已被新的 `runtime_start` / `runtime_stop` / `runtime_restart` 或重建的停旧推进，**本次启动即被取代**：它刚拉起的连接不是当前连接，必须收尾停掉——收尾只针对本次启动拉起的那个实例，**不得停掉取代它的新连接**。
 
-**两个等待上限（60 秒 / 20 秒）是实现常量，不是契约承诺。** 运行期锁的方案仍可能调整（例如把长启动移出锁、取消等待），调整只改数值、不改「超时即 `runtime_busy`、可重试」的语义。界面不要按秒数自己做超时判断或倒计时。
+- 收尾成功：本次命令以 `PRECONDITION_FAILED`、`details.reason = "cancelled"` 结束——请求作废，不是故障，也不是「连接失败」（与 `tools.md` §4.2 的 `cancelled` 同一含义）。**不返回启动成功的快照**：此刻运行时可能已是 `idle`（取代者是断开），也可能已在跑新一代连接（取代者是另一次启动），那份快照属于取代它的操作，不归本次调用；要读状态用 `runtime_status` 或等事件。`details.connect_changed` **固定为 `"restored"`**：本次启动拉起的那个连接已经停掉，本次请求没有留下任何接管（取代它的操作若已在跑，其状态归那次操作，不写进本次返回值）；这条路径不会出现 `"none"`（本次确实改过网络又收了回来），`"unknown"` 只属于收尾失败。它与「启动失败」的区别只在 `reason`：`cancelled` = 被取代（请求作废，不重试、不弹错误），其它 reason = 真失败（按各自表格处理）。
+- **收尾失败**：`runtime_status` 报**真实状态**（残留还在跑就是 `running` / `degraded`，**不得写成 `idle`**）；本次命令返回 `INTERNAL`，`details.connect_changed = "unknown"`——`"restored"` = 网络设置已按本次命令恢复原样，`"none"` = 本次命令没有改动过，`"unknown"` = 不确定。残留的归属是已知的（哪套配置、哪种接管方式），**下一次 `runtime_start` 或 `runtime_stop` 必须能把它回收**：按普通在跑连接先停干净，不得跳过、不得与新连接并行。
+- 界面在 `"unknown"` 时按「不确定，诊断日志里有记录」提示并可重试（`tools.md` §2.4 失败三段式），**不要显示「已断开」**，也不要自动重连。
+
+**代数的递增点只记「意图变更」，不记「失败自收尾」。** 代数只用来判断「我这次启动是否已被新的意图取代」。参与递增：`runtime_start` / `runtime_stop` / `runtime_restart` / 重建运行配置的停旧、`config_set_mode`、`route_set_mode` 接管未确认后的回滚、`repair_restore_direct`、`force_reset` 的停 TUN + 停运行时两步。`runtime_start` 的幂等分支（同一套已连接 / 正在启动）**不递增**，也不作废在途启动。
+
+**`runtime_stop` 作为命令入口，每次调用都递增**——不论当前是 `idle`、有连接，还是正处于某次启动窗口。判据是**意图**（「这个调用代表用户要处于未连接状态」），不是「这次真的停了东西」：重建的「停旧 → 拉起」窗口里连接本来就不在，只有代数能记住用户按过断开，否则回滚会把它接回来、`user_disconnected` 没有产生路径。**不要写成「只有用户触发的才递增」**——调用来源在代码里无法强制，可执行的口径是「**命令入口递增 + 失败自收尾不借道**」：
+
+- **失败自收尾不得借道 `runtime_stop` / `runtime_stop_inner` 停自己那份实例**：那会顺带递增，把并发那次启动的记录提前作废、误判成「被取代」。内部收尾走各自不递增的路径（pid / launch slot 判定）。
+
+两类入口**不参与**，理由不同，不要当成一回事：
+
+- **进程退出清理**（`lifecycle.rs`）：进程就要退出了，没有别的操作会再读代数判断先后，递增没有意义。
+- **失败后的自收尾**（`rollback_proxy_after_enable_failure` / `stop_for_failed_launch`）：它们用 pid 判定、只停**自己那次启动**拉起的实例；递增会把并发的那次启动误判成「已被取代」，让它的收尾停掉或提前作废。
+
+**`TIMEOUT` 的可重试子类 `runtime_busy`**：用户侧的 `runtime_start` / `runtime_stop` / `runtime_restart` 共用一把运行期操作锁，等待上限 **20 秒**，超时返回 `TIMEOUT`，`details.reason = "runtime_busy"`；`RuntimeRebuild` 的 skipped 分支走另一个上限（20 秒，§4.0.1）。重建运行配置或另一次运行期操作正在跑、这次没排到时就是这种情况——这**不代表操作失败**，也不是「连接失败」，前一个操作结束后由用户原样重试即可（界面按可重试处理，不要自动轮询重试）。`tools.md` §4.2–4.4 的 `RuntimeStart` / `RuntimeStop` / `RuntimeRestart` 是同一实现，取值相同。
+
+**两个等待上限（20 秒 / 20 秒）是实现常量，不是契约承诺。** 运行期锁的方案仍可能调整（例如把长启动移出锁、取消等待），调整只改数值、不改「超时即 `runtime_busy`、可重试」的语义。界面不要按秒数自己做超时判断或倒计时。
 
 **`tun` 连接在换新后台组件这一步失败时的 `details.reason`**（错误码均为 `PRECONDITION_FAILED`，`message` 已是可直接展示的中文）：
 
@@ -1121,7 +1154,7 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 | 顺序 | **先撤系统代理，再停运行时**。顺序不可交换 |
 | 代理撤销失败 | **中止断开**，运行时保持运行，返回 `PRECONDITION_FAILED`，`details.reason = "proxy_restore_failed"`。不可以在代理没撤掉的情况下停掉 sing-box——那等于把用户直接断网 |
 | 已经断开 | 幂等：返回当前快照（`state = "idle"`），不报错 |
-| TUN 正在启动（还没起来） | **同样算断开目标**：`runtime_stop` 等运行期操作锁（若启动仍持锁，最多 60 秒）后停 TUN；此刻 TUN 若仍在途，`tun.stop()` 会作废在途启动。成功返回后不得有迟到的 TUN 进程接管流量。不取消的话，界面会显示已断开、流量却仍被接管 |
+| TUN 正在启动（还没起来） | **同样算断开目标**：`runtime_stop` 先取运行期操作锁（**等锁**最多 20 秒，超时 `TIMEOUT / runtime_busy`、可重试），启动不持这把锁、无需等它结束，随后停 TUN；此刻 TUN 若仍在途，`tun.stop()` 会作废在途启动。**「无需等」只指运行期操作锁**：`tun.stop()` 自身有 10 秒 deadline（实现常量），helper 侧的 stop 可能排在在途 start 之后，**等 helper** 超时同样返回 `TIMEOUT`（`runtime_busy` 或 TUN 侧错误），界面**必须保持「正在断开」**并继续观察，**不得显示已断开**——否则界面说断了、流量还在走。成功返回后不得有迟到的 TUN 进程接管流量。不取消的话，界面会显示已断开、流量却仍被接管 |
 | 成功后 | `state = "idle"`，`mixed_port` / `config_id` / `node_id` / `connected_since` / `exit_ip` / `latency_ms` / `node_latency_ms` 全为 `null`，渲染配置已删除 |
 
 错误：`PRECONDITION_FAILED`（`proxy_restore_failed`）、`TIMEOUT`（`details.reason = "runtime_busy"`：运行期操作锁等待超时，不是断开失败，可重试；见 §7.1）。等待上限是实现常量，后续只改数值、不改本语义。
@@ -1349,6 +1382,8 @@ type NetworkForceResetData = {
 - `detail` 是**诊断文本**，可能含系统信息。界面不得把它当作主文案直接展示（避免把内部路径、命令行甩给用户），只把它放进「复制诊断信息」；界面主文案按 `id` 用固定中文。
 - **单步失败不算命令失败**：整体返回 `ok: false` 与逐项结果，由 UI 呈现下一步。只有命令本身起不来（内部错误、版本不支持）才 `Err`。
 - **不给 AI 工具**：`tools/net.rs` 不注册对应工具，模型不能自行触发这条破坏性路径。这条命令只属于 UI（设置 › 高级 › 诊断 ›「强制重置网络」）。
+- **与连接并发时结果不确定**：「停 TUN」「停运行时」两步与连接操作串行（同一把运行期操作锁），不会与启动 / 断开交错；**其后的**代理还原、清理残留、恢复路由、DNS、复检都在锁外执行，仍可能与一次**新**连接交错——新连接刚设好的系统代理或路由可能被随后的重置步骤改回去。重置进行中的连接请求会得到可重试的 `runtime_busy`（`TIMEOUT`，见 §7.1），界面应提示重置进行中，**不得报告为连接失败**。结论：**重置应在没有连接启动 / 切换时使用**；与连接并发时结果不作保证，界面不得据此判定连接失败。
+- **`restore_dns` 不是第九步**：`steps` 恒八项、顺序不变（`stop_tun` → `stop_runtime` → `restore_proxy` → …）。连接期系统 DNS 的兜底还原是内部动作，在两步停止之后、锁外执行，不出现在 `steps` 里，也不改变八项顺序。
 - 与卸载清理共用同一段代码（`capabilities.md` §3.1）。
 
 ### 7.10 运行时核心版本管理（`core_*`，默认仅 UI，`core_upgrade` 例外）
@@ -2586,10 +2621,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.43.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** |
+| `contracts/commands.md` | **2.43.1** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** |
 | `contracts/events.md` | **2.20.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.20.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** |
+| `contracts/tools.md` | **3.20.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** |
 | `data-model.md` | **9** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` + `current_node_id` 允许为 `NULL`（seed 预选不写库） |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -2604,6 +2639,18 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.43.1（2026-11-18，启动移出锁：被取代启动的收尾与重建被断开取代）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.43.1`；§7.1 补「被取代的启动」：`runtime_start` 只在决策段持锁，拉起（含 TUN 冷启动）在锁外，返回后比对运行期代数。被取代时收尾只停本次拉起的实例；收尾成功 → `PRECONDITION_FAILED / cancelled`（不返回快照，`connect_changed` 固定为 `restored`），收尾失败 → `INTERNAL` + `details.connect_changed = "unknown"`，`runtime_status` 报真实状态（不得写 `idle`），残留由下一次 `runtime_start` / `runtime_stop` 回收 | 错误语义 | D6 长启动移出锁后，「启动被新的连/断取代」是新增结局，界面不能把它当成普通失败或「已断开」 |
+| 2 | §4.0.1 `RuntimeRebuild.failed` 明确 `restored:false` 的三种**收尾**语义：①`reason: "user_disconnected"`（锁内重读实际状态为未连接）②无 `reason`「被新的操作接管」（连接还在）③无 `reason`「无法确认」（拿不到运行期锁）；三种 `restored` 均为 `false` = 没有把旧配置重新连上，**不是「回滚尝试失败」**，一律以固定 `message` 为准；同时保留「回滚成功 / 回滚失败」两行的既有语义；`reason` 只在确认用户断开时出现，不新增 `unknown`；**不得**用 `cancelled` 作状态 | 枚举 + 语义澄清 | be-review 点名 :550；`restored:false` 被误读成「回滚也失败」 |
+| 3 | §4.0.1 改写「重建期间断开排队」：锁只护决策段（复查 → 重读配置 → 停旧 → 记代），首轮启动与回滚都在锁外；锁外返回后**持锁重读实际状态**（缓存态，不探测后端）判定（连着且是本套 → `applied`；未连接 → `user_disconnected`；拿不到锁 → 无法确认）；回滚前重新取锁比代数并重读状态（变了但仍连着 = 被接管）；配置重读在停旧之前，`config_missing` 不再停连接；删掉「不存在重建被取消」的绝对说法 | 语义变更 | 与 1、2 同一改动；D6 后重建不再整段持锁，原文前提不成立 |
+| 4 | §15 矩阵同步 `tools.md` 3.20.1 | 元数据 | — |
+| 5 | §7.9 补并发说明：两停（`stop_tun` / `stop_runtime`）与连接串行（同一把运行期操作锁），其后的代理 / 路由 / DNS 还原与复检在锁外，仍可能与新连接交错；重置中的连接请求得到可重试的 `runtime_busy`；`restore_dns` 是内部动作、不是第九步。既有覆盖窗口，本批不修，只登记 | 语义澄清 | 架构师裁定；文档不能假装没有 |
+| 6 | §7.1 / §7.2 的用户侧等待上限由 60 秒改为 **20 秒**（重建 skipped 仍是 20 秒）：锁只护决策段，拉起已在锁外，不再按 TUN 冷启动 90 秒留余量；语义不变（超时即 `TIMEOUT / runtime_busy`、可重试）。§7.2 同条区分「等锁」与「等 helper」（`tun.stop()` 自身 10 秒 deadline） | 数值同步（实现常量） | T2 落地；不另升版 |
+| 7 | §7.1 补运行期代数的递增点边界：只记「意图变更」（start / stop / restart / 重建停旧 / `config_set_mode` / `route_set_mode` 回滚 / `repair_restore_direct` / `force_reset` 停步骤），不记「失败自收尾」；退出清理与失败自收尾两类**理由分开写**（前者没人再读代数，后者按 pid 只停自己那次、递增会误伤并发启动） | 语义澄清 | 架构师裁定；避免后来者把两类不递增当成一类；`runtime_stop` 命令入口**每次调用都递增**（判据是意图，不是真的停了东西）；失败自收尾不得借道 `runtime_stop` / `runtime_stop_inner` |
 
 ### 2.43.0（2026-11-18，探测口径：只认 Clash 真实延迟）
 

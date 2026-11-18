@@ -406,7 +406,7 @@ type RuntimeStateChangedPayload = {
 
 - `snapshot.state === to`。不一致说明有人绕过了单写者，属于实现缺陷。
 - `snapshot.mixed_port` 是 `to = "running" | "degraded"` 时 `proxy_card` 的唯一端口来源（`proxy_params` 的 `runtime` 来源）。
-- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.17.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
+- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.20.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
 - payload ≤ 64 KB；`RuntimeSnapshot` 本身远小于上限，不需要截断。
 
 UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断入口；用 `snapshot.mixed_port` 重渲染代理卡。
@@ -1030,15 +1030,17 @@ type NodeProbeFinishedPayload = {
 
 触发：批次结束（跑完或取消）。每个 `run_id` **恰好一条**，且是该批次最后一条事件。
 
-五种终态（UI 据此给汇总文案）：
+五种终态（UI 必须按终态区分提示）：
 
 | 终态 | 判据 | 界面 |
 |---|---|---|
-| 正常结束 | `cancelled = false`，`ok > 0` | `method = "clash"`：「18 个可用 · 5 个超时」；若有 `untested`，另列「N 个没测成」 |
+| 正常结束 | `cancelled = false`，`ok > 0` | `method = "clash"`；若有 `untested`，另列「N 个没测成」 |
 | 全部不可达、本机有网 | `cancelled = false`，`ok = 0`，`untested = 0`，`network = "ok"` | 「都没测通」+「这些节点可能都不可用」 |
 | 全部不可达、本机离线 | `cancelled = false`，`ok = 0`，`untested = 0`，`network = "offline"` | 顶部提示「现在没有网络，测速结果不代表节点状态」 |
 | **全部未测** | `cancelled = false`，`ok = 0`，`failed = 0`，`untested > 0` | 「这次没测成」+ 逐条原因；**不得写成「都连不通」**；`method = "none"` |
 | 取消 | `cancelled = true` | 回到「上次测速：N 分钟前」，不加错误；`reason = "connected"` 时说明「启动 VPN 后测速已停止」 |
+
+本事件只提供计数（`ok` / `failed` / `untested`），不规定界面是否展示总汇总行；界面以逐条结果与终态提示为准。
 
 - **`untested` 是独立终态，不能并进 `failed`**：没测成与连不通是两件事，并进去会让用户以为节点坏了。
 - 不取消时 `ok + failed + untested = total`；取消时三者之和是**已测完**的数量，可能小于 `total`。
@@ -1346,7 +1348,7 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 |---|---|---|---|
 | 1 | `contract_version` 升到 `2.20.0`；§4.19 / §4.20 的 `method` 由 `"tcp" \| "clash"` 改为 `"clash" \| "none"`（历史命名差异保留：`NodeProbeData.probe_method` 仍是 `"clash_delay" \| "none"`） | 枚举变更 | 探测只认 Clash 真实延迟，不再有 TCP 降级 |
 | 2 | §4.19 `result` 随 `NodeProbeData` 变为三态（`ok` / `unreachable` / `untested`），`untested` 的 `reachable` 是 `null` | 字段语义 | 没测成与连不通必须分开 |
-| 3 | §4.20 新增 `untested: number`，终态从四个变五个：整批全部未测是独立终态，**不能并进 `failed`**；不提取消时 `ok + failed + untested = total` | 字段扩展 + 语义变更 | 整批运行时起不来时，界面不能写成「都连不通」 |
+| 3 | §4.20 新增 `untested: number`，终态从四个变五个：整批全部未测是独立终态，**不能并进 `failed`**；不提取消时 `ok + failed + untested = total`；汇总行不作要求，事件只给计数 | 字段扩展 + 语义变更 | 整批运行时起不来时，界面不能写成「都连不通」 |
 | 4 | 全文 `contract_version` 字面量替换为 `2.20.0` | 元数据 | 同上 |
 
 ### 2.19.0（2026-11-18，服务器改名事件）
