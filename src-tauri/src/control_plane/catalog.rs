@@ -191,8 +191,17 @@ fn validate(catalog: Catalog) -> Result<Catalog, CatalogError> {
     Ok(catalog)
 }
 
+/// 目录请求地址：`fresh` 时带 `?fresh=1`，让控制面绕过 5 分钟缓存直接回源。
+fn catalog_url(base: &str, fresh: bool) -> String {
+    if fresh {
+        format!("{base}{CATALOG_PATH}?fresh=1")
+    } else {
+        format!("{base}{CATALOG_PATH}")
+    }
+}
+
 /// GET `${base_url}/v1/catalog`，8 秒超时。
-pub async fn fetch_catalog(base_url: &str) -> Result<Catalog, CatalogError> {
+pub async fn fetch_catalog(base_url: &str, fresh: bool) -> Result<Catalog, CatalogError> {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         return Err(CatalogError::new(
@@ -202,7 +211,7 @@ pub async fn fetch_catalog(base_url: &str) -> Result<Catalog, CatalogError> {
             serde_json::json!({ "reason": "invalid_config" }),
         ));
     }
-    let url = format!("{base}{CATALOG_PATH}");
+    let url = catalog_url(base, fresh);
 
     let client = super::client::builder()
         .timeout(REQUEST_TIMEOUT)
@@ -332,6 +341,18 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_str(&valid_body()).unwrap();
         value["plans"][0].as_object_mut().unwrap().remove("regions");
         assert!(parse_catalog(&value.to_string()).is_err());
+    }
+
+    #[test]
+    fn the_fresh_flag_reaches_the_request_url() {
+        assert_eq!(
+            catalog_url("https://cp.example.com", false),
+            "https://cp.example.com/v1/catalog"
+        );
+        assert_eq!(
+            catalog_url("https://cp.example.com", true),
+            "https://cp.example.com/v1/catalog?fresh=1"
+        );
     }
 
     #[test]

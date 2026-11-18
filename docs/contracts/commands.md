@@ -202,7 +202,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 71 | `issue_report_mail` | `{ reportId }` | `ReportActionData`（含 `body`，仅 `copy_only` 时非 null） | **2.17.0 新增（仅 UI）；调起系统邮件客户端，不发送** |
 | 72 | `issue_report_preference` | `{ includeDomains? }` | `{ includeDomains }` | **2.17.0 新增（仅 UI）；省略参数为读取；脱敏开关的唯一写入路径** |
 | 73 | `proxy_recovery_report` | `{}` | `ProxyRecoveryReportData`（`{ recovery }`，无恢复时为 `null`） | **2.21.0 新增（仅 UI）；异常退出后系统代理自动还原的结果，只读** |
-| 74 | `my_server_catalog` | `{}` | `MyServerCatalogData`（`{ currency, updated_at, regions, plans }`） | **2.22.0 新增（仅 UI）；控制面公开目录，只读** |
+| 74 | `my_server_catalog` | `{ fresh? }` | `MyServerCatalogData`（`{ currency, updated_at, regions, plans }`） | **2.22.0 新增（仅 UI）；控制面公开目录，只读**；`fresh: true` 时控制面回源（打开新建向导），缺省走 5 分钟全局年龄判断 |
 | 75 | `my_server_list` | `{}` | `{ servers: MyServer[] }` | **2.23.0 新增（仅 UI）；我的服务器列表** |
 | 76 | `my_server_get` | `{ serverId }` | `MyServer` | **2.23.0 新增（仅 UI）；详情，含 `node_id`** |
 | 77 | `my_server_create` | `{ region, plan, idempotencyKey }` | `MyServerOrder` | **2.23.0 新增（仅 UI）；下单（假支付）** |
@@ -1527,6 +1527,7 @@ type MyServerCatalogData = {
   - 其余非 2xx → `UPSTREAM_ERROR`（`reason = "upstream_status"`，`retryable = false`）；
   - 响应格式 / 缺字段 / 非法值 → `UPSTREAM_ERROR`（`reason = "invalid_response"`，`retryable = false`）。
 - **不做本地缓存、不返回假数据**：生产 Worker 未部署时如实返回 503。
+- **打开新建向导时拿最新目录**：前端以 `my_server_catalog { fresh: true }` 调 Host，Host 请求控制面 `GET /v1/catalog?fresh=1`，跳过年龄判断直接回源（10 秒内重复打开不重复回源）；**不带 `fresh` 的页面加载走控制面的 5 分钟全局年龄判断**。控制面用 D1 存一份全局目录，所有边缘共享同一份数据。回源失败一律 `503 catalog_unavailable`（`retryable: true`），**不回退旧数据**——过期的可用性会把用户引到建不成的组合上；旧行留在库里等下次成功后覆盖。
 - **`transfer_gib` 来自 `/v2/sizes` 的 `transfer`**：DO 该字段是 **float、单位 TB**，只计公网出口；折算乘 **1000**（DO 计费文档把 1 TB 档写作「1,000 GiB」），四舍五入到整 GiB。**不新增任何 DO 调用、不需要额外 scope**——`/sizes` 本来就在取。取不到或非正数时填 `0`，界面整行不显示，**不写「不限量」**。
 - **`regions` 来自 `/v2/sizes` 每条规格自己的 `regions`（2.38.0）**：DO 按地区给可用性，**不存在「每个地区都能开每一档」**——2026-11-18 的建机 422 就是因为拿 sgp1 去开 `s-1vcpu-1gb`，而该档位在 sgp1 并不存在。`regions` 里的 id 一定是本目录 `regions[]` 的子集；缺这个字段或不是数组的套餐**整条丢弃**，不补空数组去猜。界面只能展示 `region ∈ plan.regions` 的组合；Worker 的下单 / `checkout` 在开始建机前按同一份数据校验，不满足返回 `plan_unavailable_in_region`（见 §7.15），**不先扣后退**。
 - 不注册为 AI 工具；不改任何本地状态；不发事件。**AI 读目录走只读工具 `CatalogOptions`（`tools.md` §4.53），两者共用同一个取数入口 `VpnToolServices::server_catalog()`，同样不做本地缓存**——目录本身仍不是工具。上面那组错误码就是 `CatalogOptions` 与 `StageSelect` 的错误码，工具侧不另造。

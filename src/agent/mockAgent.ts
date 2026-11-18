@@ -566,7 +566,7 @@ export class MockAgentBridge implements AgentBridge {
 
   private myServers = new MockMyServerService();
 
-  async myServerCatalog() {
+  async myServerCatalog(_fresh?: boolean) {
     return this.myServers.catalog();
   }
 

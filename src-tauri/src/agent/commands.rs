@@ -282,10 +282,20 @@ pub async fn proxy_recovery_report(state: State<'_, Arc<AppState>>) -> Result<Va
 ///
 /// base_url 由 `control_plane::env` 决定，release 只认 prod；这里不写死域名。
 #[tauri::command]
-pub async fn my_server_catalog(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
-    // 与 StageSelect / CatalogOptions 共用 `VpnToolServices::server_catalog()`：
-    // 每次现取、不做本地缓存（commands.md §7.14）。
-    match state.services.server_catalog().fetch().await {
+pub async fn my_server_catalog(
+    state: State<'_, Arc<AppState>>,
+    fresh: Option<bool>,
+) -> Result<Value, Value> {
+    // 与 StageSelect / CatalogOptions 共用 `VpnToolServices::server_catalog()`。
+    // 只有打开新建向导时才要求回源（`fresh = true`）；页面加载等不带参数的路径
+    // 走控制面的全局年龄判断，避免每次进页面都打 DO（commands.md §7.14）。
+    let source = state.services.server_catalog();
+    let result = if fresh.unwrap_or(false) {
+        source.fetch_fresh().await
+    } else {
+        source.fetch().await
+    };
+    match result {
         Ok(catalog) => serde_json::to_value(catalog)
             .map_err(|error| command_error("INTERNAL", error, Value::Null)),
         Err(error) => Err(json!({

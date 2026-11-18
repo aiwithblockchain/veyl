@@ -1223,14 +1223,14 @@ export class TauriAgentBridge implements AgentBridge {
     return call<ProxyRecoveryReportData | null>("proxy_recovery_report");
   }
 
-  async myServerCatalog(): Promise<MyServerCatalog> {
+  async myServerCatalog(fresh = false): Promise<MyServerCatalog> {
     return normalizeMyServerCatalog(
       await call<{
         currency?: unknown;
         updated_at?: unknown;
         regions?: unknown;
         plans?: unknown;
-      }>("my_server_catalog"),
+      }>("my_server_catalog", fresh ? { fresh: true } : undefined),
     );
   }
 

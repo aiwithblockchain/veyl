@@ -862,7 +862,8 @@ export interface AgentBridge {
   /** 异常退出后的系统代理恢复结果；仅用于首屏提示一次，没有恢复动作时为 null。 */
   proxyRecoveryReport(): Promise<ProxyRecoveryReportData | null>;
   /** 「我的服务器」：可售地区 / 套餐 / 价格（本期只读展示）。 */
-  myServerCatalog(): Promise<MyServerCatalog>;
+  /** `fresh` = 回源取 DigitalOcean 当下可用性；只给新建向导用，别处保持缓存。 */
+  myServerCatalog(fresh?: boolean): Promise<MyServerCatalog>;
   myServerList(): Promise<{ servers: MyServer[] }>;
   myServerGet(serverId: string): Promise<MyServer>;
   /** 下单；本期是假支付，只产生一张订单。 */

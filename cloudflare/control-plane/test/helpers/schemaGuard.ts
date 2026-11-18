@@ -2,6 +2,9 @@
 // 没有这层，替身手写的列映射会掩盖「线上撞 NOT NULL / 写错列 / 绑定数不符」这类错。
 
 import schemaSql from "../../migrations/0001_schema.sql?raw";
+import catalogCacheSql from "../../migrations/0002_catalog_cache.sql?raw";
+
+const allSchemaSql = `${schemaSql}\n${catalogCacheSql}`;
 
 interface TableShape {
   columns: Set<string>;
@@ -13,7 +16,7 @@ let cache: Map<string, TableShape> | null = null;
 function schema(): Map<string, TableShape> {
   if (cache) return cache;
   const tables = new Map<string, TableShape>();
-  for (const match of schemaSql.matchAll(/CREATE TABLE (\w+) \(([\s\S]*?)\n\);/g)) {
+  for (const match of allSchemaSql.matchAll(/CREATE TABLE (\w+) \(([\s\S]*?)\n\);/g)) {
     const [, name, body] = match;
     const columns = new Set<string>();
     const required = new Set<string>();

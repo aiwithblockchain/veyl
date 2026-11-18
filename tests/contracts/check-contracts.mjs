@@ -568,8 +568,13 @@ check("my_server_catalog：契约、实现、前端调用一致", () => {
   }
   if (!impl.has("my_server_catalog")) {
     problems.push("agent/commands.rs 缺少 #[tauri::command] my_server_catalog");
-  } else if (impl.get("my_server_catalog").length > 0) {
-    problems.push("my_server_catalog 不应有入参");
+  } else {
+    // 只允许一个可选入参 `fresh`：不带参数 = 走控制面的缓存年龄判断；
+    // 打开新建向导时传 true 才回源（commands.md §7.14）。
+    const args = impl.get("my_server_catalog");
+    if (!(args.length === 0 || (args.length === 1 && args[0] === "fresh"))) {
+      problems.push(`my_server_catalog 只接受可选 fresh，实际 [${args.join(", ")}]`);
+    }
   }
   if (!ui.has("my_server_catalog")) {
     problems.push("tauriBridge.ts 没有调用 my_server_catalog");

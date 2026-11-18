@@ -34,6 +34,7 @@ const CATALOG: MyServerCatalog = {
 function makeBridge(): AgentBridge {
   return {
     myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
+    myServerCatalog: vi.fn(async () => CATALOG),
   } as unknown as AgentBridge;
 }
 
@@ -115,6 +116,7 @@ describe("新建节点舞台的 AI 选择", () => {
         charged_cents: 30,
         balance_after_cents: 970,
       })),
+      myServerCatalog: vi.fn(async () => CATALOG),
     } as unknown as AgentBridge;
     const onBack = vi.fn();
     render(
@@ -271,6 +273,7 @@ describe("新建节点舞台的 AI 选择", () => {
         charged_cents: 30,
         balance_after_cents: 970,
       })),
+      myServerCatalog: vi.fn(async () => CATALOG),
     } as unknown as AgentBridge;
     const base = {
       bridge,
@@ -320,6 +323,7 @@ describe("新建节点的幂等键", () => {
         charged_cents: 30,
         balance_after_cents: 970,
       })),
+      myServerCatalog: vi.fn(async () => CATALOG),
     } as unknown as AgentBridge;
   }
 
@@ -397,6 +401,7 @@ describe("返回控件", () => {
         charged_cents: 30,
         balance_after_cents: 970,
       })),
+      myServerCatalog: vi.fn(async () => CATALOG),
     } as unknown as AgentBridge;
     render(
       <MyServerWizard
@@ -449,6 +454,7 @@ describe("建机余额门槛（余额 ≥ 日价 × 7）", () => {
         order_id: "ord_1",
       })),
       myServerCheckout: checkout,
+      myServerCatalog: vi.fn(async () => CATALOG),
     } as unknown as AgentBridge;
   }
 
@@ -546,6 +552,7 @@ describe("余额不足错误的不同 details 形状", () => {
         order_id: "ord_1",
       })),
       myServerCheckout: checkout,
+      myServerCatalog: vi.fn(async () => CATALOG),
     } as unknown as AgentBridge;
     render(
       <MyServerWizard
@@ -648,9 +655,15 @@ describe("档位按地区过滤", () => {
 
     const oneGb = planCard(/1 核 · 1 GB/);
     expect(oneGb.disabled).toBe(true);
-    expect(oneGb.textContent).toContain("该地区不提供");
+    expect(oneGb.textContent).toContain("不可用");
+    expect(oneGb.getAttribute("aria-label")).toBe(
+      "1 核 · 1 GB：该地区不提供这个档位",
+    );
     expect(planCard(/1 核 · 512 MB/).disabled).toBe(false);
     expect(planCard(/1 核 · 2 GB/).disabled).toBe(false);
+    // 统一说明每块只出现一次，不跟着每张灰卡重复。
+    expect(screen.getAllByText(/灰掉的档位，这个地区不提供/)).toHaveLength(1);
+    expect(screen.getAllByText(/灰掉的地区，DigitalOcean/)).toHaveLength(1);
 
     expect(createButton().disabled).toBe(true);
     expect(
@@ -665,7 +678,8 @@ describe("档位按地区过滤", () => {
     fireEvent.click(screen.getByRole("radio", { name: /法兰克福 1/ }));
 
     expect(planCard(/1 核 · 1 GB/).disabled).toBe(false);
-    expect(planCard(/1 核 · 1 GB/).textContent).not.toContain("该地区不提供");
+    expect(planCard(/1 核 · 1 GB/).textContent).not.toContain("不可用");
+    expect(screen.queryByText(/灰掉的档位/)).toBeNull();
     expect(
       screen.queryByText("这个地区不提供该档位，换一个档位或地区。"),
     ).toBeNull();
@@ -677,7 +691,10 @@ describe("档位按地区过滤", () => {
 
     const sgp = screen.getByRole("radio", { name: /新加坡 1/ }) as HTMLButtonElement;
     expect(sgp.disabled).toBe(true);
-    expect(sgp.textContent).toContain("不提供");
+    expect(sgp.textContent).toContain("暂不可用");
+    expect(sgp.getAttribute("aria-label")).toBe(
+      "新加坡 1：当前档位在该地区不提供",
+    );
     expect(
       (screen.getByRole("radio", { name: /法兰克福 1/ }) as HTMLButtonElement)
         .disabled,
@@ -690,7 +707,8 @@ describe("档位按地区过滤", () => {
     renderWizard({ region: "sgp1", plan: "s-1vcpu-1gb" }, CATALOG);
 
     expect(planCard(/1 核 · 1 GB/).disabled).toBe(false);
-    expect(screen.queryByText("该地区不提供")).toBeNull();
+    expect(screen.queryByText("不可用")).toBeNull();
+    expect(screen.queryByText(/灰掉的/)).toBeNull();
     expect(createButton().disabled).toBe(false);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("plan.regions"));
   });
@@ -744,7 +762,12 @@ describe("地区没有任何可用档位", () => {
       name: /阿姆斯特丹 3/,
     }) as HTMLButtonElement;
     expect(ams.disabled).toBe(true);
-    expect(ams.textContent).toContain("该地区暂不提供服务器");
+    expect(ams.textContent).toContain("暂不可用");
+    expect(ams.getAttribute("aria-label")).toBe(
+      "阿姆斯特丹 3：该地区暂不提供服务器",
+    );
+    // 一整句说明只出现一次，挂在地区标题下面。
+    expect(screen.getAllByText(/灰掉的地区，DigitalOcean/)).toHaveLength(1);
     expect(
       (screen.getByRole("radio", { name: /新加坡 1/ }) as HTMLButtonElement).disabled,
     ).toBe(false);
@@ -767,11 +790,64 @@ describe("地区没有任何可用档位", () => {
 
     expect(screen.getByText("暂时没有可用的地区")).toBeTruthy();
     expect(screen.queryAllByRole("radio")).toHaveLength(0);
-    expect(screen.queryByText("该地区暂不提供服务器")).toBeNull();
+    expect(screen.queryByText(/灰掉的/)).toBeNull();
     expect(
       (screen.getByRole("button", { name: "创建" }) as HTMLButtonElement).disabled,
     ).toBe(true);
     // 系统行不参与地区/档位过滤，仍然显示。
     expect(screen.getByText("Ubuntu 24.04 LTS")).toBeTruthy();
+  });
+});
+
+describe("打开向导时回源目录", () => {
+  function renderWithBridge(bridge: AgentBridge) {
+    return render(
+      <MyServerWizard
+        bridge={bridge}
+        catalog={CATALOG}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+  }
+
+  it("打开时用 fresh 取一次目录，不靠 5 分钟缓存", async () => {
+    const fetchCatalog = vi.fn(async () => CATALOG);
+    const bridge = {
+      ...makeBridge(),
+      myServerCatalog: fetchCatalog,
+    } as unknown as AgentBridge;
+
+    renderWithBridge(bridge);
+
+    await waitFor(() => expect(fetchCatalog).toHaveBeenCalledTimes(1));
+    expect(fetchCatalog).toHaveBeenCalledWith(true);
+  });
+
+  it("目录请求失败：空态提示刷新页面，创建禁用，不渲染旧地区", async () => {
+    const fetchCatalog = vi.fn(async () => {
+      throw { code: "UPSTREAM_ERROR", message: "目录读不到。", retryable: true };
+    });
+    const bridge = {
+      ...makeBridge(),
+      myServerCatalog: fetchCatalog,
+    } as unknown as AgentBridge;
+
+    renderWithBridge(bridge);
+
+    expect(
+      await screen.findByText("暂时读不到可用地区和档位。关掉这个向导再打开，重试一次。"),
+    ).toBeTruthy();
+    // 不给页内重试按钮。
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+    // 旧缓存里的地区一个都不能露出来。
+    expect(screen.queryAllByRole("radio")).toHaveLength(0);
+    expect(screen.queryByText("新加坡 1")).toBeNull();
+    expect(
+      (screen.getByRole("button", { name: "创建" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(fetchCatalog).toHaveBeenCalledTimes(1);
+    expect(fetchCatalog).toHaveBeenCalledWith(true);
   });
 });

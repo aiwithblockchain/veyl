@@ -14,6 +14,11 @@ use crate::control_plane::catalog::{fetch_catalog, Catalog, CatalogError};
 #[async_trait]
 pub trait ServerCatalogSource: Send + Sync {
     async fn fetch(&self) -> Result<Catalog, CatalogError>;
+    /// 打开新建向导时用：要求控制面绕过 5 分钟缓存回源（`?fresh=1`）。
+    /// 默认退回普通取数，测试替身不用各写一遍。
+    async fn fetch_fresh(&self) -> Result<Catalog, CatalogError> {
+        self.fetch().await
+    }
 }
 
 /// 生产实现：base_url 由 `control_plane::env` 决定，release 只认 prod。
@@ -23,7 +28,12 @@ pub struct LiveServerCatalog;
 impl ServerCatalogSource for LiveServerCatalog {
     async fn fetch(&self) -> Result<Catalog, CatalogError> {
         let base_url = crate::control_plane::env::current().base_url;
-        fetch_catalog(&base_url).await
+        fetch_catalog(&base_url, false).await
+    }
+
+    async fn fetch_fresh(&self) -> Result<Catalog, CatalogError> {
+        let base_url = crate::control_plane::env::current().base_url;
+        fetch_catalog(&base_url, true).await
     }
 }
 

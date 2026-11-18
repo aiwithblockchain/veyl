@@ -32,6 +32,7 @@ export class FakeD1 {
     wallet_ledger: [] as Row[],
     topups: [] as Row[],
     billing_cursor: [] as Row[],
+    catalog_cache: [] as Row[],
   };
   private rateLimits = new Map<string, { window_start: number; count: number }>();
   /** 测试钩子：collectDue 结束（写计费游标）时触发，用来模拟「取到行之后被销毁」。 */
@@ -42,6 +43,8 @@ export class FakeD1 {
   beforeRefreshUse?: () => void;
   /** 测试钩子：激活语句执行前触发，用来模拟 sweep 在这段窗口里把机器销毁。 */
   beforeServerActivate?: () => void;
+  /** 测试钩子：目录条件写回前触发，用来模拟「读到的版本已被别人覆盖」。 */
+  beforeCatalogWrite?: () => void;
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, { sql, args: [] });
@@ -59,6 +62,46 @@ export class FakeD1 {
     const a = statement.args;
     if (/^(insert|update|delete)\b/.test(sql)) assertSqlMatchesSchema(sql, a);
 
+    if (sql.startsWith("select payload, updated_at from catalog_cache")) {
+      const row = this.tables.catalog_cache.find((entry) => entry.key === a[0]);
+      return row ? { payload: row.payload, updated_at: row.updated_at } : null;
+    }
+    if (sql.startsWith("insert into catalog_cache")) {
+      const existing = this.tables.catalog_cache.find((row) => row.key === a[0]);
+      // 回源租约：只有旧租约过期（或没有）才能拿到。
+      if (sql.includes("do update set updated_at = excluded.updated_at")) {
+        if (!existing) {
+          this.tables.catalog_cache.push({ key: a[0], payload: "", updated_at: Number(a[1]) });
+        } else if (Number(existing.updated_at) <= Number(a[2])) {
+          existing.updated_at = Number(a[1]);
+        }
+        return null;
+      }
+      if (existing) {
+        existing.payload = a[1];
+        existing.updated_at = Number(a[2]);
+      } else {
+        this.tables.catalog_cache.push({ key: a[0], payload: a[1], updated_at: Number(a[2]) });
+      }
+      return null;
+    }
+    if (sql.startsWith("delete from catalog_cache")) {
+      this.tables.catalog_cache = this.tables.catalog_cache.filter(
+        (row) => row.key !== a[0],
+      );
+      return null;
+    }
+    if (sql.startsWith("update catalog_cache set payload")) {
+      // 条件更新：只有读到的版本还没被覆盖时才写。
+      const row = this.tables.catalog_cache.find(
+        (entry) => entry.key === a[2] && Number(entry.updated_at) === Number(a[3]),
+      );
+      if (row) {
+        row.payload = a[0];
+        row.updated_at = Number(a[1]);
+      }
+      return null;
+    }
     if (sql.startsWith("select value from billing_cursor")) {
       const row = this.tables.billing_cursor.find((entry) => entry.id === a[0]);
       return row ? { value: row.value } : null;
@@ -1253,7 +1296,8 @@ export class FakeD1 {
       | "unmatched_payments"
       | "subscriptions"
       | "wallet_ledger"
-      | "topups",
+      | "topups"
+      | "catalog_cache",
   ): Row[] {
     return this.tables[table];
   }
@@ -1323,6 +1367,25 @@ export class FakeStatement {
         .rows("orders")
         .find((o) => o.id === this.statement.args[0] && o.state === "provisioning");
       changes = row ? 1 : 0;
+    } else if (sql.startsWith("insert into catalog_cache") && sql.includes("do update set updated_at = excluded.updated_at")) {
+      const row = this.db
+        .rows("catalog_cache")
+        .find((entry) => entry.key === this.statement.args[0]);
+      changes = !row || Number(row.updated_at) <= Number(this.statement.args[2]) ? 1 : 0;
+    } else if (sql.startsWith("delete from catalog_cache")) {
+      const before = this.db.rows("catalog_cache").length;
+      this.db.exec(this.statement);
+      return {
+        success: true,
+        meta: { changes: before - this.db.rows("catalog_cache").length },
+      };
+    } else if (sql.startsWith("update catalog_cache set payload")) {
+      this.db.beforeCatalogWrite?.();
+      const row = this.db
+        .rows("catalog_cache")
+        .find((entry) => entry.key === this.statement.args[2]);
+      changes =
+        row && Number(row.updated_at) === Number(this.statement.args[3]) ? 1 : 0;
     } else if (sql.startsWith("insert or ignore into rate_limits")) {
       const existed = this.db.rateLimit(String(this.statement.args[0])) !== undefined;
       this.db.exec(this.statement);

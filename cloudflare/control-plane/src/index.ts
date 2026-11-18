@@ -35,6 +35,115 @@ export interface Env {
 const SERVICE = "veyl-control-plane";const VERSION = "0.0.0";
 const USER_AGENT = "veyl-control-plane/0.0.0";
 const DO_API = "https://api.digitalocean.com/v2";
+/** 回源超时必须短于目录租约（15 秒），否则租约过期前请求还在挂。 */
+const DO_TIMEOUT_MS = 10_000;
+
+/** 目录缓存的 D1 行：`v1` 是目录本身，`v1:refresh` 是回源租约。 */
+const CATALOG_ROW_KEY = "v1";
+const CATALOG_LEASE_KEY = "v1:refresh";
+/** `?fresh=1` 的防抖：10 秒内重复打开向导不再回源。 */
+const CATALOG_FRESH_DEBOUNCE_MS = 10_000;
+/** 回源租约：拿到租约的请求负责回源，其它并发请求不会重复打 DO。 */
+const CATALOG_REFRESH_LEASE_MS = 15_000;
+
+interface CatalogCacheRow {
+  payload: string;
+  updated_at: number;
+}
+
+function catalogCacheResponse(payload: string): Response {
+  return new Response(payload, {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+
+async function readCatalogRow(db: D1Database): Promise<CatalogCacheRow | null> {
+  return db
+    .prepare("SELECT payload, updated_at FROM catalog_cache WHERE key = ?")
+    .bind(CATALOG_ROW_KEY)
+    .first<CatalogCacheRow>();
+}
+
+/**
+ * 回源一次并写回 D1。失败返回 null——调用方一律 503，**绝不拿旧数据冒充最新**；
+ * 旧行留在库里等下次回源成功后覆盖。只有拿到租约的请求才会打 DO，其余并发请求
+ * 不会变成第二、第三次回源。
+ */
+async function refreshCatalog(
+  env: Env,
+  db: D1Database,
+  token: string,
+  row: CatalogCacheRow | null,
+): Promise<string | null> {
+  const now = Date.now();
+  const lease = await db
+    .prepare(
+      "INSERT INTO catalog_cache (key, payload, updated_at) VALUES (?, '', ?) " +
+        "ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at " +
+        "WHERE catalog_cache.updated_at <= ?",
+    )
+    .bind(CATALOG_LEASE_KEY, now, now - CATALOG_REFRESH_LEASE_MS)
+    .run();
+  if (Number((lease as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
+    console.warn("[catalog] refresh_skipped reason=another_request_in_flight");
+    return null;
+  }
+
+  const data = await fetchCatalogData(token);
+  // 目录里展示的必须是售价：成本价只留在控制面内部，不下发。
+  const priced = data ? applySalePrices(data, env) : null;
+  if (!priced) {
+    console.error("[catalog] refresh_failed stage=digitalocean");
+    // 失败立刻释放租约：DO 恢复后下一个 fresh 能马上重试，而不是干等 15 秒。
+    // 15 秒只留给「进程崩了没机会释放」的情况。
+    await db
+      .prepare("DELETE FROM catalog_cache WHERE key = ?")
+      .bind(CATALOG_LEASE_KEY)
+      .run()
+      .catch(() => {});
+    await db
+      .prepare(
+        "INSERT INTO audit_log (at, account_id, action, detail) VALUES (?, NULL, 'catalog.refresh_failed', ?)",
+      )
+      .bind(now, JSON.stringify({ stage: "digitalocean" }))
+      .run()
+      // 审计写不进去不能把 503 变成 500：回源失败本身就是结果。
+      .catch(() => {});
+    return null;
+  }
+
+  const payload = JSON.stringify(priced);
+  if (row) {
+    // 条件更新：只有读到的版本还没被别人覆盖时才写，旧结果盖不掉新结果。
+    const written = await db
+      .prepare(
+        "UPDATE catalog_cache SET payload = ?, updated_at = ? WHERE key = ? AND updated_at = ?",
+      )
+      .bind(payload, now, CATALOG_ROW_KEY, Number(row.updated_at))
+      .run();
+    if (Number((written as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
+      // 写回被更新的版本超越了：本次仍把新数据返回给调用方，但要留痕，别静默丢掉。
+      console.warn("[catalog] write_skipped reason=stale_version");
+      await db
+        .prepare(
+          "INSERT INTO audit_log (at, account_id, action, detail) VALUES (?, NULL, 'catalog.write_skipped', ?)",
+        )
+        .bind(now, JSON.stringify({ expected_updated_at: Number(row.updated_at) }))
+        .run()
+        .catch(() => {});
+    }
+  } else {
+    await db
+      .prepare(
+        "INSERT INTO catalog_cache (key, payload, updated_at) VALUES (?, ?, ?) " +
+          "ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
+      )
+      .bind(CATALOG_ROW_KEY, payload, now)
+      .run();
+  }
+  return payload;
+}
 
 /** M1 卖三档套餐，价格从 /v2/sizes 实时取，不写死。中间一档是默认推荐。 */
 const PLAN_SLUGS = ["s-1vcpu-512mb-10gb", "s-1vcpu-1gb", "s-1vcpu-2gb"];
@@ -92,6 +201,8 @@ async function doGet(path: string, token: string): Promise<DoResult> {
         Authorization: `Bearer ${token}`,
         "User-Agent": USER_AGENT,
       },
+      // 回源耗时必须短于 15 秒租约：超时按失败处理，租约会立刻释放。
+      signal: AbortSignal.timeout(DO_TIMEOUT_MS),
     });
     const text = await res.text();
     if (!res.ok) return { ok: false, status: res.status, error: text.slice(0, 300) };
@@ -158,18 +269,6 @@ async function vultrAccount(key: string): Promise<{
     };
   } catch {
     return { ok: false, status: res.status, error: "invalid json" };
-  }
-}
-
-/** 缓存副本的新鲜度：用响应体里的 `updated_at` 判断，不依赖边缘节点的 Age 头。 */
-async function catalogAgeMs(response: Response): Promise<number | null> {
-  try {
-    const body = (await response.clone().json()) as { updated_at?: string };
-    const builtAt = Date.parse(body.updated_at ?? "");
-    if (!Number.isFinite(builtAt)) return null;
-    return Date.now() - builtAt;
-  } catch {
-    return null;
   }
 }
 
@@ -335,7 +434,9 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
   const serverResponse = await handleServers(request, env);
   if (serverResponse) return serverResponse;
 
-  // 公开只读目录：不校验登录，缓存 5 分钟（设计：my-servers.md §3.2）。
+  // 公开只读目录：不校验登录。目录与年龄判断都存在 D1 里，所有边缘共享同一份数据；
+  // `?fresh=1`：打开新建向导时绕过年龄判断直接回源（10 秒内重复打开不重复回源）。
+  // 回源失败一律 503，**不回退旧数据**——过期的可用性会把用户引到建不成的组合上。
   if (url.pathname === "/v1/catalog") {
     if (request.method !== "GET") {
       return json({ ok: false, error: "method_not_allowed" }, 405);
@@ -343,40 +444,32 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
     const token = env.DO_API_TOKEN;
     if (!token) return json({ ok: false, error: "catalog_unavailable", retryable: true }, 503);
 
-    const cache = typeof caches !== "undefined" ? caches.default : null;
-    // 版本号进 cache key：目录结构变化时改这里，部署即绕过旧副本（缓存最长 24h）。
-    // v3：plans[] 增 regions（地区 × 档位），旧副本会让 Host 按缺字段拒绝。
-    const cacheKey = new Request("https://catalog.veyl.internal/v3-regions");
-    let stale: Response | null = null;
-
-    if (cache) {
-      const hit = await cache.match(cacheKey);
-      if (hit) {
-        const age = await catalogAgeMs(hit);
-        if (age !== null && age < CATALOG_TTL_SECONDS * 1000) return hit;
-        stale = hit;
-      }
+    const fresh = url.searchParams.get("fresh") === "1";
+    const db = env.DB;
+    if (!db) {
+      // 没有 D1（本地/测试环境）：直接回源，不做缓存。
+      const data = await fetchCatalogData(token);
+      const priced = data ? applySalePrices(data, env) : null;
+      return priced
+        ? catalogCacheResponse(JSON.stringify(priced))
+        : json({ ok: false, error: "catalog_unavailable", retryable: true }, 503);
     }
 
-    const data = await fetchCatalogData(token);
-    // 目录里展示的必须是售价：成本价只留在控制面内部，不下发。
-    const priced = data ? applySalePrices(data, env) : null;
-    const response = priced
-      ? json(priced)
-      : json({ ok: false, error: "catalog_unavailable", retryable: true }, 503);
-    if (priced && cache) {
-      const toCache = new Response(response.clone().body, response);
-      toCache.headers.set("cache-control", "public, max-age=86400");
-      await cache.put(cacheKey, toCache);
+    const row = await readCatalogRow(db);
+    const age = row ? Date.now() - Number(row.updated_at) : Number.POSITIVE_INFINITY;
+    const freshEnough = fresh
+      ? age < CATALOG_FRESH_DEBOUNCE_MS
+      : age < CATALOG_TTL_SECONDS * 1000;
+    if (row && freshEnough) return catalogCacheResponse(row.payload);
+
+    const payload = await refreshCatalog(env, db, token, row);
+    if (payload) return catalogCacheResponse(payload);
+    // 没抢到租约时，别人可能刚好刷新完：读一次新行，只有确实变新了才返回。
+    const latest = await readCatalogRow(db);
+    if (latest && (!row || Number(latest.updated_at) > Number(row.updated_at))) {
+      return catalogCacheResponse(latest.payload);
     }
-    // 上游抖动时宁可给旧目录，也不要让用户看到「读不到可选地区」。
-    // 旧副本整体反序列化后返回，避免把内部标记暴露成字段。
-    if (!priced && stale) {
-      const fallback = new Response(stale.body, stale);
-      fallback.headers.set("x-catalog-stale", "true");
-      return fallback;
-    }
-    return response;
+    return json({ ok: false, error: "catalog_unavailable", retryable: true }, 503);
   }
 
   // 仅 dev：确认 Cloudflare secret 里的 Vultr key 可用。生产环境不存在这个路由。

@@ -216,7 +216,8 @@ export function MyServerWizard({
   const loadCatalog = useCallback(async () => {
     setFetchState("loading");
     try {
-      const value = await bridge.myServerCatalog();
+      // 向导打开时回源一次：地区/档位可用性会随 DigitalOcean 变化，别用最多 5 分钟的缓存。
+      const value = await bridge.myServerCatalog(true);
       setFetched(value);
       setFetchState("ready");
     } catch {
@@ -225,14 +226,12 @@ export function MyServerWizard({
   }, [bridge]);
 
   useEffect(() => {
-    if (catalog) {
-      setFetchState("ready");
-      return;
-    }
+    // 缓存先顶上，fresh 结果回来再替换；只在打开向导时跑一次。
     void loadCatalog();
-  }, [catalog, loadCatalog]);
+  }, [loadCatalog]);
 
-  const active = fetched ?? catalog;
+  // 回源失败（后端 503，不再回落旧缓存）：当没有目录，别让用户操作旧列表。
+  const active = fetchState === "failed" ? null : (fetched ?? catalog);
   const regions = active?.regions ?? [];
   const plans = active?.plans ?? [];
   const unreadable = !active || regions.length === 0 || plans.length === 0;
@@ -297,6 +296,15 @@ export function MyServerWizard({
     !planSupportsRegion(currentPlan, currentRegion);
   // 所有地区都没有档位：不再摆一屏灰卡片，只给一句结论。
   const noUsableRegion = regions.length > 0 && !regions.some(regionHasPlan);
+  /** 灰卡片的统一说明：只写一次，真正有灰卡片时才出现。 */
+  const hasUnavailableRegion = regions.some(
+    (region) =>
+      !regionHasPlan(region) ||
+      (currentPlan !== null && !planSupportsRegion(currentPlan, region)),
+  );
+  const hasUnavailablePlan =
+    currentRegion !== null &&
+    plans.some((plan) => !planSupportsRegion(plan, currentRegion));
   const currentTier =
     currentPlan && plans.length === 3
       ? (TIERS[plans.findIndex((plan) => plan.id === currentPlan.id)] ?? null)
@@ -463,16 +471,12 @@ export function MyServerWizard({
           </p>
         ) : (
           <>
-            <p className="myservers__hint" role="status">
-              读不到可选地区
+            <p className="myservers__hint" role="alert">
+              暂时读不到可用地区和档位。关掉这个向导再打开，重试一次。
             </p>
             <div className="myservers__actions">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => void loadCatalog()}
-              >
-                重试
+              <button type="button" className="btn btn--primary" disabled>
+                创建
               </button>
             </div>
           </>
@@ -508,6 +512,12 @@ export function MyServerWizard({
         <>
       <section className="wizard-block">
         <p className="wizard-block__title">地区</p>
+        {hasUnavailableRegion ? (
+          <p className="wizard-block__note">
+            灰掉的地区，DigitalOcean 当前不提供这三档规格；列表由
+            DigitalOcean 实时提供，可能变化。
+          </p>
+        ) : null}
         <div
           className="myservers__regions"
           role="radiogroup"
@@ -525,22 +535,24 @@ export function MyServerWizard({
                     currentPlan !== null &&
                     !planSupportsRegion(currentPlan, region);
                   const unsupported = regionEmpty || blockedByPlan;
+                  const unavailableReason = regionEmpty
+                    ? "该地区暂不提供服务器"
+                    : "当前档位在该地区不提供";
                   return (
                     <button
                       key={region.id}
                       type="button"
                       role="radio"
                       aria-checked={selected}
+                      aria-label={
+                        unsupported
+                          ? `${region.name}：${unavailableReason}`
+                          : undefined
+                      }
                       tabIndex={selected ? 0 : -1}
                       className={`myservers__region ${selected ? "is-selected" : ""}`}
                       disabled={busy || unsupported}
-                      title={
-                        regionEmpty
-                          ? "该地区暂不提供服务器"
-                          : blockedByPlan
-                            ? "当前档位在该地区不提供"
-                            : undefined
-                      }
+                      title={unsupported ? unavailableReason : undefined}
                       onClick={() => {
                         setRegionId(region.id);
                         onSelect?.("region", region.id);
@@ -554,12 +566,8 @@ export function MyServerWizard({
                       }}
                     >
                       {region.name}
-                      {regionEmpty ? (
-                        <span className="myservers__region-note">
-                          该地区暂不提供服务器
-                        </span>
-                      ) : blockedByPlan ? (
-                        <span className="myservers__region-note">不提供</span>
+                      {unsupported ? (
+                        <span className="myservers__region-note">暂不可用</span>
                       ) : null}
                     </button>
                   );
@@ -572,6 +580,11 @@ export function MyServerWizard({
 
       <section className="wizard-block">
         <p className="wizard-block__title">服务器类型</p>
+        {hasUnavailablePlan ? (
+          <p className="wizard-block__note">
+            灰掉的档位，这个地区不提供；列表由 DigitalOcean 实时提供，可能变化。
+          </p>
+        ) : null}
         <div
           className="wizard-plan-cards"
           role="radiogroup"
@@ -593,6 +606,11 @@ export function MyServerWizard({
                 tabIndex={selected ? 0 : -1}
                 className={`wizard-plan ${selected ? "is-selected" : ""}`}
                 disabled={busy || unsupported}
+                aria-label={
+                  unsupported
+                    ? `${plan.label}：该地区不提供这个档位`
+                    : undefined
+                }
                 title={unsupported ? "该地区不提供这个档位" : undefined}
                 onClick={() => {
                   setPlanId(plan.id);
@@ -622,7 +640,7 @@ export function MyServerWizard({
                   ) : null}
                 </span>
                 {unsupported ? (
-                  <span className="wizard-plan__unavailable">该地区不提供</span>
+                  <span className="wizard-plan__unavailable">不可用</span>
                 ) : null}
               </button>
             );

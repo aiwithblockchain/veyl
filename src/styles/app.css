@@ -3255,6 +3255,13 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
+.wizard-block__note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
 .myservers__regions {
   display: flex;
   flex-direction: column;

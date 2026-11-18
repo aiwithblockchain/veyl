@@ -71,6 +71,15 @@ async function mount(listRef: { current: MyServer[] }) {
 }
 
 describe("「已下单但认不出新机器」的生命周期", () => {
+  it("普通刷新读目录不带 fresh（fresh 只留给新建向导）", async () => {
+    const list = { current: [] as MyServer[] };
+    const { bridge } = await mount(list);
+
+    const catalog = vi.mocked(bridge.myServerCatalog);
+    expect(catalog).toHaveBeenCalled();
+    expect(catalog.mock.calls[0]).toEqual([]);
+  });
+
   it("新行出现在列表后自动解除占位并选中它", async () => {
     const list = { current: [] as MyServer[] };
     const { result } = await mount(list);
