@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatTrialExpiry } from "./labels";
+import { formatTrialExpiry, stateTone } from "./labels";
 
 const NOW = Date.parse("2026-11-18T12:00:00.000Z");
 const HOUR = 3_600_000;
@@ -30,5 +30,25 @@ describe("formatTrialExpiry", () => {
   it("没有时间或解析失败返回 null", () => {
     expect(formatTrialExpiry(null, NOW)).toBeNull();
     expect(formatTrialExpiry("not-a-date", NOW)).toBeNull();
+  });
+});
+
+describe("stateTone", () => {
+  it("进行中的四个状态是中性色，不是警告", () => {
+    for (const state of ["creating", "booting", "installing", "verifying"] as const) {
+      expect(stateTone(state)).toBe("idle");
+    }
+  });
+
+  it("出错与已失效仍是红色", () => {
+    expect(stateTone("error")).toBe("err");
+    expect(stateTone("gone")).toBe("err");
+  });
+
+  it("可用 / 使用中仍是绿色，销毁类是中性色", () => {
+    expect(stateTone("healthy")).toBe("ok");
+    expect(stateTone("active")).toBe("ok");
+    expect(stateTone("destroying")).toBe("idle");
+    expect(stateTone("destroyed")).toBe("idle");
   });
 });

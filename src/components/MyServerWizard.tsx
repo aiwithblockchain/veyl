@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AgentBridge,
   MyServerCatalog,
@@ -251,15 +251,16 @@ export function MyServerWizard({
     region: MyServerRegion | null,
   ) => region === null || plan.regions === undefined || plan.regions.includes(region.id);
 
-  const groups = useMemo(
-    () =>
-      CONTINENT_ORDER.map((continent) => ({
-        continent,
-        label: CONTINENT_LABELS[continent],
-        regions: regions.filter((region) => region.continent === continent),
-      })).filter((group) => group.regions.length > 0),
-    [regions],
-  );
+  /** 该地区至少有一个档位可用；一个都没有就不出现在列表里。 */
+  const regionHasPlan = (region: MyServerRegion) =>
+    plans.some((plan) => planSupportsRegion(plan, region));
+  const usableRegions = regions.filter(regionHasPlan);
+
+  const groups = CONTINENT_ORDER.map((continent) => ({
+    continent,
+    label: CONTINENT_LABELS[continent],
+    regions: usableRegions.filter((region) => region.continent === continent),
+  })).filter((group) => group.regions.length > 0);
 
   // 舞台开着时把 busy 报给 Host：创建中收到 stage-select 要整条忽略。
   useEffect(() => {
@@ -273,14 +274,10 @@ export function MyServerWizard({
     [],
   );
 
-  /** 该地区至少有一个档位可用；一个都没有就是这里买不到服务器。 */
-  const regionHasPlan = (region: MyServerRegion) =>
-    plans.some((plan) => planSupportsRegion(plan, region));
-
   const currentRegion =
+    usableRegions.find((region) => region.id === regionId) ??
+    usableRegions[0] ??
     regions.find((region) => region.id === regionId) ??
-    regions.find(regionHasPlan) ??
-    groups[0]?.regions[0] ??
     null;
   // 默认档位只在当前地区可用的档位里挑；用户已经选的档位不静默换掉。
   const availablePlans = plans.filter((plan) =>
@@ -296,12 +293,6 @@ export function MyServerWizard({
     !planSupportsRegion(currentPlan, currentRegion);
   // 所有地区都没有档位：不再摆一屏灰卡片，只给一句结论。
   const noUsableRegion = regions.length > 0 && !regions.some(regionHasPlan);
-  /** 灰卡片的统一说明：只写一次，真正有灰卡片时才出现。 */
-  const hasUnavailableRegion = regions.some(
-    (region) =>
-      !regionHasPlan(region) ||
-      (currentPlan !== null && !planSupportsRegion(currentPlan, region)),
-  );
   const hasUnavailablePlan =
     currentRegion !== null &&
     plans.some((plan) => !planSupportsRegion(plan, currentRegion));
@@ -319,7 +310,7 @@ export function MyServerWizard({
     if (busy) return;
     const nextRegion =
       aiSelection.region !== null &&
-      regions.some((region) => region.id === aiSelection.region)
+      usableRegions.some((region) => region.id === aiSelection.region)
         ? aiSelection.region
         : null;
     const nextPlan =
@@ -512,12 +503,6 @@ export function MyServerWizard({
         <>
       <section className="wizard-block">
         <p className="wizard-block__title">地区</p>
-        {hasUnavailableRegion ? (
-          <p className="wizard-block__note">
-            灰掉的地区，DigitalOcean 当前不提供这三档规格；列表由
-            DigitalOcean 实时提供，可能变化。
-          </p>
-        ) : null}
         <div
           className="myservers__regions"
           role="radiogroup"
@@ -530,29 +515,15 @@ export function MyServerWizard({
               <div className="myservers__region-grid">
                 {group.regions.map((region) => {
                   const selected = currentRegion?.id === region.id;
-                  const regionEmpty = !regionHasPlan(region);
-                  const blockedByPlan =
-                    currentPlan !== null &&
-                    !planSupportsRegion(currentPlan, region);
-                  const unsupported = regionEmpty || blockedByPlan;
-                  const unavailableReason = regionEmpty
-                    ? "该地区暂不提供服务器"
-                    : "当前档位在该地区不提供";
                   return (
                     <button
                       key={region.id}
                       type="button"
                       role="radio"
                       aria-checked={selected}
-                      aria-label={
-                        unsupported
-                          ? `${region.name}：${unavailableReason}`
-                          : undefined
-                      }
                       tabIndex={selected ? 0 : -1}
                       className={`myservers__region ${selected ? "is-selected" : ""}`}
-                      disabled={busy || unsupported}
-                      title={unsupported ? unavailableReason : undefined}
+                      disabled={busy}
                       onClick={() => {
                         setRegionId(region.id);
                         onSelect?.("region", region.id);
@@ -566,9 +537,6 @@ export function MyServerWizard({
                       }}
                     >
                       {region.name}
-                      {unsupported ? (
-                        <span className="myservers__region-note">暂不可用</span>
-                      ) : null}
                     </button>
                   );
                 })}
@@ -635,7 +603,7 @@ export function MyServerWizard({
                   </span>
                   {plan.transfer_gib > 0 ? (
                     <span className="wizard-plan__transfer">
-                      带宽每月 {plan.transfer_gib} GB
+                      每月 {plan.transfer_gib} GB 出站
                     </span>
                   ) : null}
                 </span>

@@ -129,3 +129,57 @@ describe("「已下单但认不出新机器」的生命周期", () => {
     expect(result.current.pendingServer).toBe(false);
   });
 });
+
+describe("开通中的轮询", () => {
+  it("最长 5 秒一次，详情跟着刷新，就绪后停止", async () => {
+    vi.useFakeTimers();
+    const list: { current: MyServer[] } = {
+      current: [{ ...SERVER_A, state: "creating" }],
+    };
+    const bridge = makeBridge(list);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const listMock = vi.mocked(bridge.myServerList);
+    const getMock = vi.mocked(bridge.myServerGet);
+    const listBase = listMock.mock.calls.length;
+    const getBase = getMock.mock.calls.length;
+
+    // 第一拍 2 秒。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(listMock.mock.calls.length).toBe(listBase + 1);
+
+    // 第二拍起封顶 5 秒：2.4 秒不刷新，再 2.6 秒才刷新。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2400);
+    });
+    expect(listMock.mock.calls.length).toBe(listBase + 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2600);
+    });
+    expect(listMock.mock.calls.length).toBe(listBase + 2);
+
+    // 详情也随每次列表刷新重取，而不是只在选中时拉一次。
+    expect(getMock.mock.calls.length).toBeGreaterThan(getBase + 1);
+
+    // 状态就绪：下一拍刷新看到 healthy，之后不再轮询。
+    list.current = [{ ...SERVER_A, state: "healthy" as const }];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    const stopped = listMock.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(listMock.mock.calls.length).toBe(stopped);
+    view.unmount();
+    vi.useRealTimers();
+  });
+});

@@ -2979,6 +2979,13 @@ body[data-resizing] {
   color: var(--ink-2);
 }
 
+.myservers__progress-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
 .myservers__bar {
   height: 4px;
   border-radius: 2px;
@@ -3309,12 +3316,6 @@ body[data-resizing] {
 .myservers__region:disabled {
   cursor: default;
   opacity: 0.55;
-}
-
-.myservers__region-note {
-  margin-left: 6px;
-  font-size: 11px;
-  color: var(--ink-3);
 }
 
 .wizard-plan-cards {

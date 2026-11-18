@@ -2356,7 +2356,6 @@ export default function App() {
           detailError={myServers.detailError}
           detailRetrying={myServers.detailRetrying}
           readOnly={myServers.identityProblem !== null}
-          sharedTransfer={myServers.sharedTransfer}
           connectedHere={
             (runtime.state === "running" || runtime.state === "degraded") &&
             Boolean(myServers.selected?.node_id) &&

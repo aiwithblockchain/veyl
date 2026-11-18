@@ -53,7 +53,7 @@ function identityLost(error: unknown): boolean {
 }
 
 /** 事件不可用时的兜底节奏（§19.9.2）：2s → 5s → 10s。 */
-const FALLBACK_DELAYS = [2000, 5000, 10_000];
+const FALLBACK_DELAYS = [2000, 5000];
 
 type RegisterCapable = AgentBridge & {
   myServerRegisterDevice?: () => Promise<unknown>;
@@ -363,8 +363,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   }, [bridge, refresh, markLoggedOut]);
 
   const provisioning = servers.some((server) => isProvisioning(server.state));
-  const sharedTransfer =
-    servers.filter((server) => server.state !== "destroyed").length > 1;
   const triesRef = useRef(0);
   useEffect(() => {
     // 事件只是加速；只要还有机器在开通中就必须轮询——事件可能漏（例如建机失败被自动销毁）。
@@ -717,7 +715,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     accountError,
     refreshAccount,
     loggedIn,
-    sharedTransfer,
     wallet,
     walletLoading,
     walletError,

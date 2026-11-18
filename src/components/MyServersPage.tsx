@@ -25,8 +25,6 @@ interface Props {
   detailRetrying: boolean;
   /** 身份不可用：详情只读。 */
   readOnly: boolean;
-  /** 同账户未销毁机器 > 1：流量额度是共享池。 */
-  sharedTransfer: boolean;
   /** 当前连接的就是这台。 */
   connectedHere?: boolean;
   onNew: () => void;
@@ -72,7 +70,6 @@ export function MyServersPage({
   detailError,
   detailRetrying,
   readOnly,
-  sharedTransfer,
   connectedHere = false,
   onNew,
   onLogin,
@@ -159,7 +156,6 @@ export function MyServersPage({
             onDisconnect={onDisconnect}
             onAiLocate={onAiLocate}
             readOnly={readOnly}
-            sharedTransfer={sharedTransfer}
             onCreateAnother={onNew}
             onUseServer={onUseServer}
             onChanged={onChanged}

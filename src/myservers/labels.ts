@@ -159,10 +159,9 @@ export function formatServerTime(iso: string): string {
   )}:${pad(at.getMinutes())}`;
 }
 
-/** 状态点颜色：复用现有 `.led` 的三种 tone。 */
-export function stateTone(state: MyServerState): "ok" | "warn" | "err" | "idle" {
+/** 状态点颜色：正常是 ok，失败是 err，其余（进行中/已销毁）都是中性色。 */
+export function stateTone(state: MyServerState): "ok" | "err" | "idle" {
   if (state === "healthy" || state === "active") return "ok";
   if (state === "error" || state === "gone") return "err";
-  if (state === "destroying" || state === "destroyed") return "idle";
-  return "warn";
+  return "idle";
 }

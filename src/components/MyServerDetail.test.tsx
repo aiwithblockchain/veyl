@@ -31,7 +31,6 @@ function renderDetail(
   over: Partial<MyServer> = {},
   onGone = vi.fn(),
   onUseServer: (server: MyServer) => void | Promise<void> = vi.fn(),
-  sharedTransfer = false,
   onAiLocate?: (serverId: string) => void,
   connectedHere = false,
   onDisconnect?: () => void,
@@ -48,7 +47,6 @@ function renderDetail(
       connectedHere={connectedHere}
       onAiLocate={onAiLocate}
       onDisconnect={onDisconnect}
-      sharedTransfer={sharedTransfer}
       onCreateAnother={onCreateAnother}
       onUseServer={onUseServer}
       onChanged={() => {}}
@@ -182,7 +180,7 @@ describe("服务器详情", () => {
   });
 
   it("流量额度为 0 时整行不显示", () => {
-    renderDetail({ transfer_gib: 0 }, vi.fn(), vi.fn(), true);
+    renderDetail({ transfer_gib: 0 });
 
     expect(screen.queryByText("流量")).toBeNull();
     expect(document.querySelector(".myservers__detail")?.textContent).not.toContain(
@@ -190,16 +188,46 @@ describe("服务器详情", () => {
     );
   });
 
-  it("两台机器时流量行带共用后缀，只剩一台时后缀消失", () => {
-    const shared = renderDetail({ transfer_gib: 1000 }, vi.fn(), vi.fn(), true);
-    expect(
-      screen.getByText("每月 1000 GB（出站）（同账户多台共用额度）"),
-    ).toBeTruthy();
-    shared.unmount();
+  it("建机进度显示已等待，状态推进不重置，就绪后消失", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
+    const props = {
+      bridge: {} as AgentBridge,
+      regionLabel: "新加坡 1",
+      onCreateAnother: vi.fn(),
+      onUseServer: vi.fn(),
+      onChanged: () => {},
+      onRebuilt: () => {},
+      onGone: vi.fn(),
+    };
+    const view = render(
+      <MyServerDetail {...props} server={server({ state: "creating" })} />,
+    );
+    expect(screen.getByText("已等待 0 秒")).toBeTruthy();
 
-    renderDetail({ transfer_gib: 1000 }, vi.fn(), vi.fn(), false);
-    expect(screen.getByText("每月 1000 GB（出站）")).toBeTruthy();
-    expect(screen.queryByText(/共用额度/)).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(80_000);
+    });
+    expect(screen.getByText("已等待 1 分 20 秒")).toBeTruthy();
+
+    // 状态推进（同一台机器）不重置计时。
+    view.rerender(
+      <MyServerDetail {...props} server={server({ state: "booting" })} />,
+    );
+    expect(screen.getByText("已等待 1 分 20 秒")).toBeTruthy();
+
+    // 就绪后进度区整个消失。
+    view.rerender(
+      <MyServerDetail {...props} server={server({ state: "healthy" })} />,
+    );
+    expect(screen.queryByText(/已等待/)).toBeNull();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+
+  it("流量行只留额度一个事实，不带括号补充", () => {
+    renderDetail({ transfer_gib: 1000 });
+
+    expect(screen.getByText("每月 1000 GB 出站")).toBeTruthy();
+    expect(screen.queryByText(/共用额度|同账户/)).toBeNull();
   });
 
   it("可用时主按钮不要求控制面 node_id，点击交回服务器", () => {
@@ -213,7 +241,7 @@ describe("服务器详情", () => {
 
   it("连接的就是这台时主按钮是断开", () => {
     const onDisconnect = vi.fn();
-    renderDetail({}, vi.fn(), vi.fn(), false, undefined, true, onDisconnect);
+    renderDetail({}, vi.fn(), vi.fn(), undefined, true, onDisconnect);
     fireEvent.click(screen.getByRole("button", { name: "断开" }));
     expect(onDisconnect).toHaveBeenCalledTimes(1);
   });
@@ -277,7 +305,6 @@ describe("服务器详情", () => {
       },
       vi.fn(),
       vi.fn(),
-      false,
       onAiLocate,
     );
 

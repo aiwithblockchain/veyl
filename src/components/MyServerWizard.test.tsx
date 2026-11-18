@@ -663,7 +663,9 @@ describe("档位按地区过滤", () => {
     expect(planCard(/1 核 · 2 GB/).disabled).toBe(false);
     // 统一说明每块只出现一次，不跟着每张灰卡重复。
     expect(screen.getAllByText(/灰掉的档位，这个地区不提供/)).toHaveLength(1);
-    expect(screen.getAllByText(/灰掉的地区，DigitalOcean/)).toHaveLength(1);
+    // 地区没有灰卡片，也不会出现解释那句。
+    expect(screen.queryByText(/灰掉的地区/)).toBeNull();
+    expect(screen.queryByText("暂不可用")).toBeNull();
 
     expect(createButton().disabled).toBe(true);
     expect(
@@ -686,20 +688,28 @@ describe("档位按地区过滤", () => {
     expect(createButton().disabled).toBe(false);
   });
 
-  it("先选档位再选地区：不支持该档位的地区禁用并注明", () => {
-    renderWizard({ region: "fra1", plan: "s-1vcpu-1gb" });
+  it("只渲染有可用档位的地区；整组没有就整组不渲染", () => {
+    const catalog: MyServerCatalog = {
+      regions: [
+        { id: "sgp1", name: "新加坡 1", continent: "asia" },
+        { id: "fra1", name: "法兰克福 1", continent: "europe" },
+        { id: "ams3", name: "阿姆斯特丹 3", continent: "europe" },
+        { id: "jnb1", name: "约翰内斯堡 1", continent: "africa" },
+      ],
+      plans: LIMITED.plans,
+      currency: "USD",
+      updated_at: new Date(0).toISOString(),
+    };
+    renderWizard({ region: "sgp1", plan: "s-1vcpu-512mb-10gb" }, catalog);
 
-    const sgp = screen.getByRole("radio", { name: /新加坡 1/ }) as HTMLButtonElement;
-    expect(sgp.disabled).toBe(true);
-    expect(sgp.textContent).toContain("暂不可用");
-    expect(sgp.getAttribute("aria-label")).toBe(
-      "新加坡 1：当前档位在该地区不提供",
-    );
-    expect(
-      (screen.getByRole("radio", { name: /法兰克福 1/ }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(false);
-    expect(createButton().disabled).toBe(false);
+    // 没有档位的地区根本不渲染，而不是渲染成禁用。
+    expect(screen.queryByRole("radio", { name: /阿姆斯特丹 3/ })).toBeNull();
+    expect(screen.queryByRole("radio", { name: /约翰内斯堡 1/ })).toBeNull();
+    // 一个可用地区都没有的大洲，整组标题也不渲染。
+    expect(screen.queryByText("非洲")).toBeNull();
+    expect(screen.getByText("欧洲")).toBeTruthy();
+    expect(screen.getByText("亚洲")).toBeTruthy();
+    expect(screen.queryByText("暂不可用")).toBeNull();
   });
 
   it("旧控制面没有 plan.regions：不拦截，只留 warn", () => {
@@ -746,9 +756,10 @@ describe("地区没有任何可用档位", () => {
     );
   }
 
-  it("该地区一个档位都没有：地区禁用并注明暂不提供", () => {
+  it("没有任何可用档位的地区不渲染，默认选中落到可用地区", () => {
     const catalog: MyServerCatalog = {
-      regions: [...CATALOG.regions, AMS],
+      // 不可用的地区排在最前面，默认选中也不能落在它身上。
+      regions: [AMS, ...CATALOG.regions],
       plans: [
         { ...PLAN_512, regions: ["sgp1", "fra1"] },
         { ...PLAN_2GB, regions: ["sgp1", "fra1"] },
@@ -756,21 +767,15 @@ describe("地区没有任何可用档位", () => {
       currency: "USD",
       updated_at: new Date(0).toISOString(),
     };
-    renderWith(catalog, "sgp1", "s-1vcpu-512mb-10gb");
+    renderWith(catalog, "ams3", "s-1vcpu-512mb-10gb");
 
-    const ams = screen.getByRole("radio", {
-      name: /阿姆斯特丹 3/,
+    expect(screen.queryByRole("radio", { name: /阿姆斯特丹 3/ })).toBeNull();
+    expect(screen.queryByText("暂不可用")).toBeNull();
+    expect(screen.queryByText(/灰掉的地区/)).toBeNull();
+    const sgp = screen.getByRole("radio", {
+      name: /新加坡 1/,
     }) as HTMLButtonElement;
-    expect(ams.disabled).toBe(true);
-    expect(ams.textContent).toContain("暂不可用");
-    expect(ams.getAttribute("aria-label")).toBe(
-      "阿姆斯特丹 3：该地区暂不提供服务器",
-    );
-    // 一整句说明只出现一次，挂在地区标题下面。
-    expect(screen.getAllByText(/灰掉的地区，DigitalOcean/)).toHaveLength(1);
-    expect(
-      (screen.getByRole("radio", { name: /新加坡 1/ }) as HTMLButtonElement).disabled,
-    ).toBe(false);
+    expect(sgp.getAttribute("aria-checked")).toBe("true");
     expect(
       (screen.getByRole("button", { name: "创建" }) as HTMLButtonElement).disabled,
     ).toBe(false);

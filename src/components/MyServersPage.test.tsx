@@ -236,7 +236,6 @@ function Harness({
         detailError={state.detailError}
         detailRetrying={state.detailRetrying}
         readOnly={state.identityLost}
-        sharedTransfer={state.sharedTransfer}
         onNew={state.openWizard}
         onLogin={state.openLogin}
         onRefreshAccount={() => void state.refreshAccount()}

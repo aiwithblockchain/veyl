@@ -24,8 +24,6 @@ interface Props {
   onAiLocate?: (serverId: string) => void;
   /** 再建一台：打开 client 舞台的新建节点。 */
   onCreateAnother: () => void;
-  /** 同账户未销毁机器 > 1：流量额度是共享池。 */
-  sharedTransfer?: boolean;
   /** 可用时去取凭据并连接这台（Host 验签后把节点设为当前）。 */
   onUseServer: (server: MyServer) => void | Promise<void>;
   /** 连接的就是这台时，主按钮执行断开。 */
@@ -56,7 +54,6 @@ export function MyServerDetail({
   connectedHere = false,
   onAiLocate,
   onCreateAnother,
-  sharedTransfer = false,
   onUseServer,
   onDisconnect,
   onChanged,
@@ -192,9 +189,7 @@ export function MyServerDetail({
         {!failed && server.transfer_gib > 0 ? (
           <div>
             <dt>流量</dt>
-            <dd>{`每月 ${server.transfer_gib} GB（出站）${
-              sharedTransfer ? "（同账户多台共用额度）" : ""
-            }`}</dd>
+            <dd>{`每月 ${server.transfer_gib} GB 出站`}</dd>
           </div>
         ) : null}
       </dl>
