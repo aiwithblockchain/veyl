@@ -8,13 +8,15 @@ import { monthlyUsdFromDaily, planDailyPriceCents } from "./lib/config";
 import { idempotencyKey, withIdempotency, type StoredResponse } from "./lib/idempotency";
 import { fetchCatalogData, type CatalogData } from "./index";
 import { provisionServer } from "./provision";
-import { balanceCents, recordLedgerEntry, type LedgerInput } from "./wallet";
+import { balanceCents, recordLedgerEntry, type LedgerInput, type LedgerResult } from "./wallet";
 
 const ORDER_TTL_MS = 10 * 60 * 1000;
 /** 一天的毫秒数：按天计费的基本单位。 */
 const DAY_MS = 24 * 3600 * 1000;
 /** 建机门槛：余额至少覆盖 7 天日价（§4.13）；实际仍只扣第 1 天。 */
 const MIN_BALANCE_DAYS = 7;
+/** 端口唯一冲突时的重试次数：并发建机撞到已占用的端口后立刻换一个。 */
+const PORT_ATTEMPTS = 3;
 /** 扣费接口能回的状态；其它状态说明订单已经结束，不能再按「已付款」回放。 */
 const CHARGE_STATES = ["paid", "provisioning", "ready"] as const;
 
@@ -388,22 +390,42 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
       }
 
       const serverId = randomId("srv_");
-      const port = await pickPort(db, identity.accountId);
       // 额度是套餐属性、不参与扣费；目录已在扣费前取过，这里直接用同一次结果。
       const transferGib = transferGibFor(catalog, row.plan);
-      const charged = await chargeOrder(env, {
-        accountId: identity.accountId,
-        amountCents: row.amount_cents,
-        requiredCents: required,
-        orderId: row.id,
-        serverId,
-        port,
-        region: row.region,
-        plan: row.plan,
-        hourlyUsd: row.hourly_usd,
-        transferGib,
-        now,
-      });
+      let port = 0;
+      let charged: LedgerResult | null = null;
+      for (let attempt = 0; attempt < PORT_ATTEMPTS; attempt += 1) {
+        port = await pickPort(db, identity.accountId);
+        try {
+          charged = await chargeOrder(env, {
+            accountId: identity.accountId,
+            amountCents: row.amount_cents,
+            requiredCents: required,
+            orderId: row.id,
+            serverId,
+            port,
+            region: row.region,
+            plan: row.plan,
+            hourlyUsd: row.hourly_usd,
+            transferGib,
+            now,
+          });
+          break;
+        } catch (error) {
+          // 端口唯一冲突：整批已回滚（账本与服务器行都没写），换个端口重试即可。
+          if (!isPortConflict(error)) throw error;
+        }
+      }
+      if (!charged) {
+        // 连续几次都撞端口：订单仍停在 pending_payment，用户可以原样重试。
+        return storedError(
+          503,
+          "UPSTREAM_ERROR",
+          "端口分配冲突，请重试",
+          { reason: "port_conflict" },
+          true,
+        );
+      }
 
       if (!charged.ok) {
         if (charged.reason === "duplicate") {
@@ -411,6 +433,13 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
         }
         if (charged.reason === "insufficient") {
           const current = await balanceCents(env, identity.accountId);
+          // 重试后余额已经够了：说明刚才只是并发抖动，账本仍拒绝说明是暂时性故障。
+          // 不能编一个差额（`max(1, …)` 会谎报「还差 $0.01」），按可重试的通用错误返回。
+          if (current >= required) {
+            return storedError(503, "INTERNAL", "记账暂时不可用，请稍后重试", {
+              reason: "wallet_unavailable",
+            }, true);
+          }
           return storedError(
             409,
             "PRECONDITION_FAILED",
@@ -418,9 +447,7 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
             {
               reason: "insufficient_balance",
               required_cents: required,
-              // 契约要求 shortfall_cents 恒 > 0：重试后仍不足时归一到至少 1 分，
-              // 并发抖动下界面显示「还差 $0.01」，不会是 $0.00。
-              shortfall_cents: Math.max(1, required - current),
+              shortfall_cents: required - current,
               min_days: MIN_BALANCE_DAYS,
             },
             true,
@@ -464,6 +491,12 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
       return chargeResult(db, row.id, row.amount_cents, charged.balanceAfterCents);
     },
   );
+}
+
+/** D1/SQLite 唯一约束错误的文本（部分索引会报列名）：只认端口这一条。 */
+function isPortConflict(error: unknown): boolean {
+  const text = String((error as Error)?.message ?? error).toLowerCase();
+  return text.includes("unique constraint failed") && text.includes("node_port");
 }
 
 /** 端口由控制面选定（§19.6.1）：防火墙必须在建机后立刻带端口创建。 */
@@ -512,43 +545,48 @@ export async function provisionPaidOrder(
     const nNow = Math.floor((now - anchor) / DAY_MS);
     const paidUntil = Math.max(anchor + DAY_MS, anchor + (nNow + 1) * DAY_MS);
     const serverId = randomId("srv_");
-    const port = await pickPort(db, order.account_id);
     const catalog = env.DO_API_TOKEN ? await fetchCatalogData(env.DO_API_TOKEN) : null;
     const transferGib = transferGibFor(catalog, order.plan);
-    await db
-      .prepare(
-        "INSERT OR IGNORE INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, daily_price_cents, billing_anchor_at, transfer_gib) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, 'active', ?, ?, ?)",
-      )
-      .bind(
-        serverId,
-        order.account_id,
-        order.id,
-        `我的服务器${serverId.slice(-4)}`,
-        order.region,
-        order.plan,
-        order.hourly_usd,
-        monthlyUsdFromDaily(order.amount_cents),
-        port,
-        now,
-        now,
-        paidUntil,
-        order.amount_cents,
-        anchor,
-        transferGib,
-      )
-      .run();
+    // INSERT OR IGNORE 撞到「同账户端口已被活着的机器占用」时会静默跳过；
+    // 换一个端口重试，别把可以补建的单报成 server_row_failed。
+    for (let attempt = 0; attempt < PORT_ATTEMPTS; attempt += 1) {
+      const port = await pickPort(db, order.account_id);
+      await db
+        .prepare(
+          "INSERT OR IGNORE INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, daily_price_cents, billing_anchor_at, transfer_gib) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, 'active', ?, ?, ?)",
+        )
+        .bind(
+          serverId,
+          order.account_id,
+          order.id,
+          `我的服务器${serverId.slice(-4)}`,
+          order.region,
+          order.plan,
+          order.hourly_usd,
+          monthlyUsdFromDaily(order.amount_cents),
+          port,
+          now,
+          now,
+          paidUntil,
+          order.amount_cents,
+          anchor,
+          transferGib,
+        )
+        .run();
+      server = await db
+        .prepare("SELECT id, account_id, order_id, region, plan, node_port FROM servers WHERE order_id = ?")
+        .bind(order.id)
+        .first<ServerRow>();
+      if (server) break;
+    }
+    if (!server) return { ok: false, reason: "server_row_failed" };
     if (paidUntil > anchor + DAY_MS) {
       await db
         .prepare("INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'billing.gap_waived', ?)")
         .bind(now, order.account_id, serverId, JSON.stringify({ days: nNow }))
         .run();
     }
-    server = await db
-      .prepare("SELECT id, account_id, order_id, region, plan, node_port FROM servers WHERE order_id = ?")
-      .bind(order.id)
-      .first<ServerRow>();
-    if (!server) return { ok: false, reason: "server_row_failed" };
   }
 
   await db.prepare("UPDATE orders SET server_id = ? WHERE id = ? AND server_id IS NULL").bind(server.id, order.id).run();

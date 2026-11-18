@@ -5,8 +5,10 @@ import schemaSql from "../../migrations/0001_schema.sql?raw";
 import catalogCacheSql from "../../migrations/0002_catalog_cache.sql?raw";
 import readyAtSql from "../../migrations/0003_ready_at.sql?raw";
 import progressStagesSql from "../../migrations/0004_progress_stages.sql?raw";
+import serverPortSql from "../../migrations/0005_server_port_unique.sql?raw";
+import webhookSamplesSql from "../../migrations/0006_webhook_samples.sql?raw";
 
-const allSchemaSql = `${schemaSql}\n${catalogCacheSql}\n${readyAtSql}\n${progressStagesSql}`;
+const allSchemaSql = `${schemaSql}\n${catalogCacheSql}\n${readyAtSql}\n${progressStagesSql}\n${serverPortSql}\n${webhookSamplesSql}`;
 
 interface TableShape {
   columns: Set<string>;

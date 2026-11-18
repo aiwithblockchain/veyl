@@ -3,6 +3,7 @@
 
 import { sha256B64u } from "../lib/crypto";
 import { json } from "../lib/http";
+import { captureWebhookSample } from "../lib/webhook_sample";
 import { recoverExpiredServers } from "../billing";
 import type { OrdersEnv } from "../orders";
 import { verifyDodoSignature } from "../payments/dodo";
@@ -201,7 +202,7 @@ interface TopupRow {
 }
 
 /** 充值单匹配：先看 metadata.topup_id，其次用收银台会话 id。 */
-async function findTopup(env: OrdersEnv, data: PaymentData): Promise<TopupRow | null> {
+export async function findTopup(env: OrdersEnv, data: PaymentData): Promise<TopupRow | null> {
   const db = env.DB!;
   const metaTopup = data.metadata?.topup_id;
   if (typeof metaTopup === "string" && metaTopup.startsWith("top_")) {
@@ -247,6 +248,14 @@ export async function handleDodoWebhook(
   const kind = typeof payload.type === "string" ? payload.type : "";
   const data = (payload.data ?? {}) as PaymentData;
   const paymentId = typeof data.id === "string" ? data.id : "";
+
+  // dev 才留样本（生产直接 no-op）；内部吞掉一切失败，不影响下面的回调处理。
+  await captureWebhookSample(env, {
+    raw,
+    headers: request.headers,
+    eventId,
+    kind,
+  });
 
   const existing = await db
     .prepare("SELECT status FROM webhook_events WHERE id = ?")

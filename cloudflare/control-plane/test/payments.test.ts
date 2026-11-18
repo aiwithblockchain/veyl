@@ -244,6 +244,169 @@ describe("充值", () => {
   });
 });
 
+describe("Dodo 回调样本（dev）", () => {
+  function seedTopup(db: FakeD1) {
+    db.rows("topups").push({
+      id: "top_1",
+      account_id: ACCOUNT,
+      denomination_cents: 1000,
+      product_id: "pdt_top10",
+      checkout_session_id: "cs_1",
+      checkout_url: "https://checkout.test/cs_1",
+      status: "pending",
+      created_at: 0,
+      paid_at: null,
+    });
+  }
+
+  it("dev 捕获脱敏样本：签名、支付 id、邮箱、金额、topup id 都换成占位值", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    stubUpstream();
+    seedTopup(db);
+
+    const event = topupPaidEvent("top_1", "pay_live_secret");
+    (event.data as Record<string, unknown>).customer = { email: "real.buyer@example.net" };
+    const res = await handleDodoWebhook(await webhookRequest(event), env as never);
+    expect(res?.status).toBe(200);
+
+    expect(db.rows("webhook_samples")).toHaveLength(1);
+    const sample = db.rows("webhook_samples")[0];
+    const headers = JSON.parse(String(sample.headers)) as Record<string, string>;
+    expect(headers["webhook-signature"]).toBe("***");
+    expect(headers["webhook-id"]).toBeTruthy();
+
+    const body = JSON.parse(String(sample.body)) as {
+      data: { id: string; customer: { email: string }; metadata: { topup_id: string }; settlement_amount: number };
+    };
+    expect(body.data.id).toBe("pay_sample0000000000000");
+    expect(body.data.metadata.topup_id).toBe("top_sample00000000000000");
+    expect(body.data.customer.email).toBe("buyer@example.com");
+    expect(body.data.settlement_amount).toBe(1000);
+    expect(String(sample.body)).not.toContain("pay_live_secret");
+    expect(String(sample.body)).not.toContain("real.buyer@example.net");
+    // 捕获不影响正常入账。
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+  });
+
+  it("对象型 PII、payment_method 与未知字段都按 allowlist 占位", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    stubUpstream();
+    seedTopup(db);
+
+    const event = topupPaidEvent("top_1", "pay_live_secret");
+    (event.data as Record<string, unknown>).customer = {
+      email: "real.buyer@example.net",
+      phone_number: "+65 9123 4567",
+      // 对象型地址：整棵子树必须占位，不能递归带出 line1 / postal_code。
+      billing_address: { line1: "1 Secret Road", line2: "#02-01", postal_code: "123456", country: "SG" },
+    };
+    (event.data as Record<string, unknown>).payment_method = {
+      type: "card",
+      last4: "4242",
+      brand: "visa",
+      expiry: "12/29",
+    };
+    (event.data as Record<string, unknown>).metadata = {
+      topup_id: "top_1",
+      uid: 12345,
+      plan: "s-1vcpu-1gb",
+    };
+    Object.assign(event.data as Record<string, unknown>, {
+      payment_method_id: "pm_live_abcdef",
+      ip: "198.51.100.9",
+      zip_code: 123456,
+      checkout_url: "https://checkout.dodopayments.com/session/cks_live_secret",
+    });
+
+    const base = await webhookRequest(event);
+    const bodyText = await base.text();
+    const headers = new Headers(base.headers);
+    headers.set("user-agent", "Dodo/1.0");
+    headers.set("x-real-ip", "198.51.100.9");
+    headers.set("x-custom", "should-not-be-stored");
+    const request = new Request(base.url, {
+      method: "POST",
+      headers,
+      body: bodyText,
+    });
+
+    const res = await handleDodoWebhook(request, env as never);
+    expect(res?.status).toBe(200);
+
+    const sample = db.rows("webhook_samples")[0];
+    const storedHeaders = JSON.parse(String(sample.headers)) as Record<string, string>;
+    // 请求头 allowlist：只有 id / 时间戳 / 签名 / content-type / user-agent。
+    expect(Object.keys(storedHeaders).sort()).toEqual([
+      "content-type",
+      "user-agent",
+      "webhook-id",
+      "webhook-signature",
+      "webhook-timestamp",
+    ]);
+    expect(storedHeaders["webhook-signature"]).toBe("***");
+
+    const body = JSON.parse(String(sample.body)) as {
+      data: {
+        customer: { email: string; phone_number: string; billing_address: string };
+        payment_method: { type: string; last4: string; brand: string; expiry: string };
+        metadata: { topup_id: string; uid: number; plan: string };
+        payment_method_id: string;
+        ip: string;
+        zip_code: string;
+        checkout_url: string;
+      };
+    };
+    expect(body.data.customer.email).toBe("buyer@example.com");
+    expect(body.data.customer.phone_number).toBe("***");
+    expect(body.data.customer.billing_address).toBe("***");
+    expect(body.data.payment_method).toEqual({
+      type: "***",
+      last4: "***",
+      brand: "***",
+      expiry: "***",
+    });
+    // 未知数值归零；档位是业务键，原样保留（会落进 subscriptions.product_id）。
+    expect(body.data.metadata.uid).toBe(0);
+    expect(body.data.metadata.plan).toBe("s-1vcpu-1gb");
+    expect(body.data.metadata.topup_id).toBe("top_sample00000000000000");
+    expect(body.data.payment_method_id).toBe("pm_sample00000000000000");
+    expect(body.data.ip).toBe("***");
+    expect(body.data.zip_code).toBe("***");
+    expect(body.data.checkout_url).toBe("https://checkout.example.com/sample");
+    expect(String(sample.body)).not.toContain("Secret Road");
+    expect(String(sample.body)).not.toContain("cks_live_secret");
+    expect(String(sample.headers)).not.toContain("198.51.100.9");
+  });
+
+  it("生产环境绝不捕获", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db, "production");
+    stubUpstream();
+    seedTopup(db);
+
+    const res = await handleDodoWebhook(await webhookRequest(topupPaidEvent("top_1")), env as never);
+    expect(res?.status).toBe(200);
+    expect(db.rows("webhook_samples")).toHaveLength(0);
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+  });
+
+  it("捕获失败不影响回调处理", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    stubUpstream();
+    seedTopup(db);
+    db.beforeWebhookSample = () => {
+      throw new Error("d1 down");
+    };
+
+    const res = await handleDodoWebhook(await webhookRequest(topupPaidEvent("top_1")), env as never);
+    expect(res?.status).toBe(200);
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+  });
+});
+
 describe("Dodo 回调入账", () => {
   it("支付成功入账一次，重复投递不重复加钱", async () => {
     const db = new FakeD1();

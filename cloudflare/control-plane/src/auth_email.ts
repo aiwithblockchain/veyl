@@ -184,6 +184,18 @@ async function verify(request: Request, env: EmailAuthEnv): Promise<Response> {
   }
 
   const now = Date.now();
+
+  // ── 设备证明（必须在消费验证码之前）────────────────────────────────────
+  // 设备被停用或用错凭据时，如果先消费验证码，用户会被白烧一个码并卡 60 秒重发。
+  // 校验失败不消费、不计数。
+  const device = await db.prepare("SELECT * FROM devices WHERE id = ?").bind(deviceId).first<DeviceRow & Record<string, unknown>>();
+  if (device?.revoked_at) {
+    return apiError("FORBIDDEN", "这台设备已被停用", { reason: "device_revoked" });
+  }
+  if (device && device.secret_hash !== secretHash) {
+    return apiError("PRECONDITION_FAILED", "设备凭据与原记录不一致", { reason: "device_mismatch" });
+  }
+
   const submitted = await sha256B64u(`${code}:${email}`);
   // 消费验证码是一条带全部守卫的 DELETE：并发请求里只有一个能删掉这一行，
   // 「先读 → 比对 → 再删」会让同一个码被用两次、也绕过 3 次上限。
@@ -195,15 +207,6 @@ async function verify(request: Request, env: EmailAuthEnv): Promise<Response> {
     .run();
   if (Number((consumed as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
     return rejectCode(db, email, now);
-  }
-
-  // ── 设备证明 ────────────────────────────────────────────────────────────
-  const device = await db.prepare("SELECT * FROM devices WHERE id = ?").bind(deviceId).first<DeviceRow & Record<string, unknown>>();
-  if (device?.revoked_at) {
-    return apiError("PERMISSION_DENIED", "这台设备已被停用", { reason: "device_revoked" });
-  }
-  if (device && device.secret_hash !== secretHash) {
-    return apiError("PRECONDITION_FAILED", "设备凭据与原记录不一致", { reason: "device_mismatch" });
   }
 
   // ── 邮箱账户 ────────────────────────────────────────────────────────────

@@ -33,6 +33,7 @@ export class FakeD1 {
     topups: [] as Row[],
     billing_cursor: [] as Row[],
     catalog_cache: [] as Row[],
+    webhook_samples: [] as Row[],
   };
   private rateLimits = new Map<string, { window_start: number; count: number }>();
   /** 测试钩子：collectDue 结束（写计费游标）时触发，用来模拟「取到行之后被销毁」。 */
@@ -45,16 +46,55 @@ export class FakeD1 {
   beforeServerActivate?: () => void;
   /** 测试钩子：目录条件写回前触发，用来模拟「读到的版本已被别人覆盖」。 */
   beforeCatalogWrite?: () => void;
+  /** 测试钩子：写 dev 回调样本前触发，用来模拟捕获失败。 */
+  beforeWebhookSample?: () => void;
+  /** 测试钩子：建机批次的 servers 插入前触发，用来模拟端口在最后一步才冲突。 */
+  beforeServerInsert?: () => void;
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, { sql, args: [] });
   }
 
   async batch(statements: FakeStatement[]): Promise<unknown[]> {
-    // 真实 D1 的 batch 是原子的：整批语句之间不会被别的请求插进来。
-    // 逐条 await 会让出微任务，反而把「并发 checkout」测成假并发，所以这里同步跑完。
-    const results = statements.map((statement) => statement.run());
-    return Promise.all(results);
+    // 真实 D1 的 batch 是原子的：整批语句之间不会被别的请求插进来，且任一条失败整批回滚。
+    // 逐条 await 会让出微任务，反而把「并发 checkout」测成假并发，所以这里同步跑完；
+    // 失败时恢复快照，否则「账本写进去了、服务器行因为端口冲突没写进去」会变成测试里的假状态。
+    const tables = structuredClone(this.tables);
+    const limits = structuredClone(this.rateLimits);
+    try {
+      const results = statements.map((statement) => statement.run());
+      return await Promise.all(results);
+    } catch (error) {
+      this.tables = tables;
+      this.rateLimits = limits;
+      throw error;
+    }
+  }
+
+  /** 部分唯一索引 servers_account_port 的替身语义：活着的服务器不能共用端口。 */
+  private portTaken(accountId: unknown, port: unknown, except?: unknown): boolean {
+    return this.tables.servers.some(
+      (row) =>
+        row.id !== except &&
+        row.account_id === accountId &&
+        Number(row.node_port) === Number(port) &&
+        row.destroyed_at == null,
+    );
+  }
+
+  /** 孤儿匿名账户：登出留下的旧 device 账户，没人引用、没钱、够老。 */
+  orphanAccounts(cutoff: unknown): Row[] {
+    return this.tables.accounts.filter((account) => {
+      if (account.kind !== "device" || account.merged_into != null) return false;
+      if (Number(account.created_at) >= Number(cutoff)) return false;
+      if (Number(account.balance_cents ?? 0) !== 0) return false;
+      if (this.tables.devices.some((device) => device.account_id === account.id)) return false;
+      if (this.tables.orders.some((order) => order.account_id === account.id)) return false;
+      if (this.tables.servers.some((server) => server.account_id === account.id)) return false;
+      if (this.tables.topups.some((topup) => topup.account_id === account.id)) return false;
+      if (this.tables.payments.some((payment) => payment.account_id === account.id)) return false;
+      return true;
+    });
   }
 
   exec(statement: Stmt): Row | null {
@@ -62,6 +102,20 @@ export class FakeD1 {
     const a = statement.args;
     if (/^(insert|update|delete)\b/.test(sql)) assertSqlMatchesSchema(sql, a);
 
+    if (sql.startsWith("insert or replace into webhook_samples")) {
+      this.beforeWebhookSample?.();
+      const record = {
+        id: a[0],
+        kind: a[1],
+        received_at: a[2],
+        headers: a[3],
+        body: a[4],
+      };
+      const index = this.tables.webhook_samples.findIndex((row) => row.id === a[0]);
+      if (index >= 0) this.tables.webhook_samples[index] = record;
+      else this.tables.webhook_samples.push(record);
+      return null;
+    }
     if (sql.startsWith("select payload, updated_at from catalog_cache")) {
       const row = this.tables.catalog_cache.find((entry) => entry.key === a[0]);
       return row ? { payload: row.payload, updated_at: row.updated_at } : null;
@@ -227,6 +281,24 @@ export class FakeD1 {
     if (sql.startsWith("select * from refresh_tokens where hash")) {
       return this.tables.refresh_tokens.find((r) => r.hash === a[0]) ?? null;
     }
+    if (sql.startsWith("delete from refresh_tokens")) {
+      const [cutoff, now, limit] = a;
+      const victims = this.tables.refresh_tokens
+        .filter((row) => {
+          // 已用过/已作废：按最后一次生命周期事件算保留期，不看签发时间。
+          const lifespan = row.revoked_at ?? row.used_at;
+          if (lifespan != null && Number(lifespan) < Number(cutoff)) return true;
+          // 从没用过但已过期：不可能再换出新令牌。
+          return (
+            row.used_at == null && row.revoked_at == null && Number(row.expires_at) < Number(now)
+          );
+        })
+        .slice(0, Number(limit));
+      this.tables.refresh_tokens = this.tables.refresh_tokens.filter(
+        (row) => !victims.includes(row),
+      );
+      return null;
+    }
     if (sql.startsWith("update refresh_tokens set used_at")) {
       // 行为跟着 SQL 里的守卫走：没有 `used_at IS NULL` 的老写法就是无条件覆盖。
       const guarded = sql.includes("used_at is null");
@@ -243,6 +315,15 @@ export class FakeD1 {
       return null;
     }
 
+    if (sql.startsWith("delete from accounts where id in")) {
+      // 孤儿匿名账户：无设备/订单/服务器/余额，且创建超过一天。
+      const [cutoff, limit] = a;
+      const victims = this.orphanAccounts(cutoff).slice(0, Number(limit));
+      this.tables.accounts = this.tables.accounts.filter(
+        (account) => !victims.includes(account),
+      );
+      return null;
+    }
     if (sql.startsWith("select status, kind, merged_into from accounts")) {
       const account = this.tables.accounts.find((x) => x.id === a[0]);
       return account ? { status: account.status, kind: account.kind, merged_into: account.merged_into } : null;
@@ -370,6 +451,25 @@ export class FakeD1 {
         response: null,
         created_at: a[4],
       });
+      return null;
+    }
+    if (sql.startsWith("update idempotency_keys set status = 0, response = null")) {
+      // 过期 5xx 重新占位：只有状态与创建时间都没被别人改过的那一次能接管。
+      const [requestHash, now, accountId, endpoint, key, status, createdAt] = a;
+      const row = this.tables.idempotency_keys.find(
+        (r) =>
+          r.account_id === accountId &&
+          r.endpoint === endpoint &&
+          r.key === key &&
+          Number(r.status) === Number(status) &&
+          Number(r.created_at) === Number(createdAt),
+      );
+      if (row) {
+        row.status = 0;
+        row.response = null;
+        row.request_hash = requestHash;
+        row.created_at = Number(now);
+      }
       return null;
     }
     if (sql.startsWith("update idempotency_keys set status")) {
@@ -547,6 +647,8 @@ export class FakeD1 {
     }
     if (sql.startsWith("insert or ignore into servers")) {
       if (this.tables.servers.some((s) => s.order_id === a[2])) return null;
+      // 端口唯一（活着的行）：冲突时 OR IGNORE 静默跳过，调用方要换端口重试。
+      if (this.portTaken(a[1], a[8])) return null;
       this.tables.servers.push({
         id: a[0],
         account_id: a[1],
@@ -582,6 +684,13 @@ export class FakeD1 {
       if (sql.includes("where exists (select 1 from wallet_ledger where id = ?)")) {
         const ledgerId = a[a.length - 1];
         if (!this.tables.wallet_ledger.some((entry) => entry.id === ledgerId)) return null;
+      }
+      // 真实冲突点：账本与余额已经在本批写过，端口这里才撞唯一索引。
+      this.beforeServerInsert?.();
+      if (this.portTaken(a[1], a[8])) {
+        throw new Error(
+          "UNIQUE constraint failed: servers.account_id, servers.node_port",
+        );
       }
       this.tables.servers.push({
         id: a[0],
@@ -1347,7 +1456,8 @@ export class FakeD1 {
       | "subscriptions"
       | "wallet_ledger"
       | "topups"
-      | "catalog_cache",
+      | "catalog_cache"
+      | "webhook_samples",
   ): Row[] {
     return this.tables[table];
   }
@@ -1499,6 +1609,11 @@ export class FakeStatement {
             (Number(row.attempts) < Number(max) && Number(row.expires_at) > Number(expiresAt))
           ? 1
           : 0;
+    } else if (sql.startsWith("delete from refresh_tokens") || sql.startsWith("delete from accounts where id in")) {
+      const table = sql.includes("refresh_tokens") ? "refresh_tokens" : "accounts";
+      const before = this.db.rows(table).length;
+      this.db.exec(this.statement);
+      return { success: true, meta: { changes: before - this.db.rows(table).length } };
     } else if (sql.startsWith("insert or ignore into")) {
       // 唯一键冲突时 SQLite 报 0 行；这里按插入前后行数判断。
       const counted = [
@@ -1526,6 +1641,26 @@ export class FakeStatement {
         .slice(0, Number(limit)).length;
       this.db.exec(this.statement);
       return { success: true, meta: { changes: count } };
+    } else if (sql.startsWith("update idempotency_keys set status = 0, response = null")) {
+      const [requestHash, now, accountId, endpoint, key, status, createdAt] =
+        this.statement.args;
+      const row = this.db
+        .rows("idempotency_keys")
+        .find(
+          (r) =>
+            r.account_id === accountId &&
+            r.endpoint === endpoint &&
+            r.key === key &&
+            Number(r.status) === Number(status) &&
+            Number(r.created_at) === Number(createdAt),
+        );
+      if (row) {
+        row.status = 0;
+        row.response = null;
+        row.request_hash = requestHash;
+        row.created_at = Number(now);
+      }
+      return { success: true, meta: { changes: row ? 1 : 0 } };
     } else if (sql.startsWith("update idempotency_keys set created_at")) {
       const [now, accountId, endpoint, key, createdAt] = this.statement.args;
       const row = this.db

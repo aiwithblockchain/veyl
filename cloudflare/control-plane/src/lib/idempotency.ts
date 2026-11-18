@@ -11,6 +11,11 @@ export interface StoredResponse {
 
 /** 占位超过这个时间还没写完，视为上一个请求已经死掉，允许接管。 */
 const STALE_MS = 120 * 1000;
+/**
+ * 5xx 回放的保质期：2xx 永久回放（重复点只会拿到同一结果），
+ * 但上游故障是暂时的，永久回放会让重试在同一 key 下永远拿到旧错误。
+ */
+const FAILED_REPLAY_MS = 60 * 1000;
 
 export function idempotencyKey(request: Request): string | null {
   const key = request.headers.get("idempotency-key")?.trim() ?? "";
@@ -43,30 +48,53 @@ export async function withIdempotency(
         reason: "idempotency_conflict",
       });
     }
-    if (existing.status !== 0) {
+    const failedExpired =
+      existing.status >= 500 && Number(existing.created_at) <= now - FAILED_REPLAY_MS;
+    if (existing.status !== 0 && !failedExpired) {
       const stored = JSON.parse(existing.response ?? "{}") as StoredResponse;
       return json(stored.body, stored.status);
     }
-    if (Number(existing.created_at) > now - STALE_MS) {
-      return apiError("PRECONDITION_FAILED", "这个请求正在处理中", {
-        retryable: true,
-        reason: "idempotency_in_flight",
-      });
+    if (failedExpired) {
+      // 过期的失败结果：条件更新回占位，只有一个请求能接管；并发其余按「处理中」拒绝。
+      const reclaimed = await db
+        .prepare(
+          "UPDATE idempotency_keys SET status = 0, response = NULL, request_hash = ?, created_at = ? " +
+            "WHERE account_id = ? AND endpoint = ? AND key = ? AND status = ? AND created_at = ?",
+        )
+        .bind(requestHash, now, accountId, endpoint, key, existing.status, existing.created_at)
+        .run();
+      if (!reclaimed.meta.changes) {
+        return apiError("PRECONDITION_FAILED", "这个请求正在处理中", {
+          retryable: true,
+          reason: "idempotency_in_flight",
+        });
+      }
+      claimed = true;
     }
-    // 超时未完成视为进程已死，接管这一行；条件更新保证只有一个请求真正接管。
-    const takeover = await db
-      .prepare(
-        "UPDATE idempotency_keys SET created_at = ? WHERE account_id = ? AND endpoint = ? AND key = ? AND status = 0 AND created_at = ?",
-      )
-      .bind(now, accountId, endpoint, key, existing.created_at)
-      .run();
-    if (!takeover.meta.changes) {
-      return apiError("PRECONDITION_FAILED", "这个请求正在处理中", {
-        retryable: true,
-        reason: "idempotency_in_flight",
-      });
+    if (claimed) {
+      // 已接管，跳过下面的占位逻辑。
+    } else {
+      if (Number(existing.created_at) > now - STALE_MS) {
+        return apiError("PRECONDITION_FAILED", "这个请求正在处理中", {
+          retryable: true,
+          reason: "idempotency_in_flight",
+        });
+      }
+      // 超时未完成视为进程已死，接管这一行；条件更新保证只有一个请求真正接管。
+      const takeover = await db
+        .prepare(
+          "UPDATE idempotency_keys SET created_at = ? WHERE account_id = ? AND endpoint = ? AND key = ? AND status = 0 AND created_at = ?",
+        )
+        .bind(now, accountId, endpoint, key, existing.created_at)
+        .run();
+      if (!takeover.meta.changes) {
+        return apiError("PRECONDITION_FAILED", "这个请求正在处理中", {
+          retryable: true,
+          reason: "idempotency_in_flight",
+        });
+      }
+      claimed = true;
     }
-    claimed = true;
   }
 
   if (!claimed) {

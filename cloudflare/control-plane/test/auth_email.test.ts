@@ -143,6 +143,56 @@ describe("校验验证码", () => {
     expect(db.rows("accounts").find((row) => row.id === "acct_anon")!.merged_into).toBe(emailAccount.id);
   });
 
+  it("设备校验失败不消费验证码：换对凭据后同一个码还能用", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    const mail = stubEmail();
+    db.rows("accounts").push({
+      id: "acct_anon",
+      kind: "device",
+      email: null,
+      status: "active",
+      merged_into: null,
+      created_at: 0,
+    });
+    db.rows("devices").push({
+      id: DEVICE,
+      account_id: "acct_anon",
+      secret_hash: DEVICE_HASH,
+      platform: "macos",
+      app_version: "1.0.0",
+      refresh_family: "rf",
+      created_at: 0,
+      last_seen_at: 0,
+      revoked_at: null,
+    });
+
+    await handleEmailAuth(startRequest(env), env as never);
+    const code = mail.code();
+
+    // 凭据不对：不消费码、不计数，用户还能用同一个码重试。
+    const mismatch = await handleEmailAuth(
+      verifyRequest(env, code, { secret_hash: "b".repeat(43) }),
+      env as never,
+    );
+    expect(mismatch?.status).toBe(409);
+    expect(((await mismatch!.json()) as { details: { reason: string } }).details.reason).toBe(
+      "device_mismatch",
+    );
+    expect(db.rows("email_codes")).toHaveLength(1);
+    expect(db.rows("email_codes")[0].attempts).toBe(0);
+
+    // 设备被停用同理：码还在。
+    db.rows("devices")[0].revoked_at = Date.now();
+    const revoked = await handleEmailAuth(verifyRequest(env, code), env as never);
+    expect(revoked?.status).toBe(403);
+    expect(db.rows("email_codes")).toHaveLength(1);
+
+    db.rows("devices")[0].revoked_at = null;
+    const ok = await handleEmailAuth(verifyRequest(env, code), env as never);
+    expect(ok?.status).toBe(200);
+  });
+
   it("验证码错误返回剩余次数，错满三次作废", async () => {
     const db = new FakeD1();
     const env = await makeEnv(db);

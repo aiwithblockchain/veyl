@@ -13,21 +13,26 @@ use super::error::{self, CpError};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
-/// 控制面 HTTP 客户端的唯一构造入口：**一律直连**。
+/// 控制面 HTTP 客户端的唯一构造入口：代理只能由调用方显式传入。
 ///
-/// 不读系统代理（macOS 网络设置 / Windows WinINET），也不读
+/// 控制面自己（[`http_client`]）永远传 `None`：一律直连，不读系统代理
+/// （macOS 网络设置 / Windows WinINET），也不读
 /// `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`：用户连着系统代理或 TUN 时，
 /// 代理可能正好指向一个不可用的 VPN 节点，而「管理我自己的服务器」这件事
-/// 本来就不该依赖 VPN 本身通畅。
+/// 本来就不该依赖 VPN 本身通畅。先 `no_proxy()` 再按参数追加，保证任何
+/// 情况下都不会顺带捡起环境变量或系统代理。
 ///
 /// **边界**：只有控制面直连。用户订阅导入、节点探测、运行时下载等仍然走
 /// 用户当前网络策略（`public_http.rs` 等），不要复用这个 builder。
-pub fn builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().no_proxy()
+pub fn builder(proxy: Option<reqwest::Proxy>) -> reqwest::ClientBuilder {
+    match proxy {
+        None => reqwest::Client::builder().no_proxy(),
+        Some(proxy) => reqwest::Client::builder().no_proxy().proxy(proxy),
+    }
 }
 
 pub fn http_client(timeout: Duration) -> Result<reqwest::Client, CpError> {
-    builder()
+    builder(None)
         .timeout(timeout)
         .build()
         .map_err(|error| CpError::internal(format!("创建控制面客户端失败：{error}")))
@@ -289,135 +294,183 @@ mod tests {
         assert_eq!(log_path("/v1/servers"), "/v1/servers");
     }
 
-    /// 用真实请求验证 `builder()` 的 `no_proxy()`：构建前把代理环境变量指向
-    /// 一个只会返回 502 的假代理，请求如果走了代理就必然失败。
-    ///
-    /// 两个注意点：
-    /// - 进程环境变量是全局共享状态，改它必须拿 `ENV_LOCK`（规则文件那边用同一把）。
-    /// - 本地监听线程必须活到断言结束。早先用「固定 3 秒窗口」，全量并行下线程被饿过
-    ///   3 秒后监听已关闭、连接被拒（`UnexpectedMessage`）——那才是这条 flaky 的根因。
-    #[test]
-    fn the_control_plane_client_never_uses_a_proxy() {
-        use std::io::{Read, Write};
-        use std::net::{SocketAddr, TcpListener};
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::sync::Arc;
+    /// 只在测试期间运行的本地 HTTP 桩：读到请求头结束再回响应。
+    struct Stub {
+        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+        addr: std::net::SocketAddr,
+    }
 
-        let _env_guard = crate::test_support::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+    impl Stub {
+        fn spawn(body: &'static [u8]) -> Self {
+            use std::io::{Read, Write};
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+            use std::sync::Arc;
 
-        /// 只在测试期间运行的本地 HTTP 桩：读到请求头结束再回响应。
-        struct Server {
-            hits: Arc<AtomicUsize>,
-            stop: Arc<AtomicBool>,
-            handle: Option<std::thread::JoinHandle<()>>,
-        }
-
-        impl Server {
-            fn spawn(listener: TcpListener, body: &'static [u8]) -> Self {
-                listener.set_nonblocking(true).unwrap();
-                let hits = Arc::new(AtomicUsize::new(0));
-                let stop = Arc::new(AtomicBool::new(false));
-                let hits_thread = Arc::clone(&hits);
-                let stop_thread = Arc::clone(&stop);
-                let handle = std::thread::spawn(move || {
-                    while !stop_thread.load(Ordering::SeqCst) {
-                        match listener.accept() {
-                            Ok((mut stream, _)) => {
-                                hits_thread.fetch_add(1, Ordering::SeqCst);
-                                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                                let mut buffer = Vec::new();
-                                let mut chunk = [0u8; 1024];
-                                loop {
-                                    match stream.read(&mut chunk) {
-                                        Ok(0) => break,
-                                        Ok(n) => {
-                                            buffer.extend_from_slice(&chunk[..n]);
-                                            if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
-                                                break;
-                                            }
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let hits_thread = Arc::clone(&hits);
+            let stop_thread = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                while !stop_thread.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            hits_thread.fetch_add(1, Ordering::SeqCst);
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                            let mut buffer = Vec::new();
+                            let mut chunk = [0u8; 1024];
+                            loop {
+                                match stream.read(&mut chunk) {
+                                    Ok(0) => break,
+                                    Ok(n) => {
+                                        buffer.extend_from_slice(&chunk[..n]);
+                                        if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                                            break;
                                         }
-                                        Err(_) => break,
                                     }
+                                    Err(_) => break,
                                 }
-                                let _ = stream.write_all(body);
-                                let _ = stream.flush();
                             }
-                            Err(ref error)
-                                if error.kind() == std::io::ErrorKind::WouldBlock =>
-                            {
-                                std::thread::sleep(Duration::from_millis(5));
-                            }
-                            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                            let _ = stream.write_all(body);
+                            let _ = stream.flush();
                         }
+                        Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
                     }
-                });
-                Self {
-                    hits,
-                    stop,
-                    handle: Some(handle),
                 }
+            });
+            Self {
+                hits,
+                stop,
+                handle: Some(handle),
+                addr,
             }
         }
 
-        impl Drop for Server {
-            fn drop(&mut self) {
-                self.stop.store(true, Ordering::SeqCst);
-                // 线程每轮最多睡 10ms，join 不会卡住。
-                if let Some(handle) = self.handle.take() {
-                    let _ = handle.join();
-                }
+        fn hits(&self) -> usize {
+            self.hits.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for Stub {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            // 线程每轮最多睡 10ms，join 不会卡住。
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
             }
         }
+    }
 
-        let bind = |addr: &str| -> (TcpListener, SocketAddr) {
-            let listener = TcpListener::bind(addr).unwrap();
-            let address = listener.local_addr().unwrap();
-            (listener, address)
-        };
-        let (poison_listener, poison_addr) = bind("127.0.0.1:0");
-        let poison = Server::spawn(
-            poison_listener,
-            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        );
-        let (target_listener, target_addr) = bind("127.0.0.1:0");
-        let target = Server::spawn(
-            target_listener,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-        );
+    /// 会回 502 的假代理与回 200 的目标站。
+    const POISON: &[u8] =
+        b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const TARGET: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
 
-        let keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
-        let saved: Vec<(&str, Option<String>)> =
-            keys.iter().map(|key| (*key, std::env::var(key).ok())).collect();
-        for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
-            std::env::set_var(key, format!("http://{poison_addr}"));
-        }
-        std::env::remove_var("NO_PROXY");
-        let client = builder().timeout(Duration::from_secs(2)).build().unwrap();
-        for (key, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-
-        let url = format!("http://{target_addr}/v1/health");
+    fn runtime() -> tokio::runtime::Runtime {
         // 独占运行时：不与别的测试共用全局运行时，免得连接被别处的收尾取消。
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
+            .unwrap()
+    }
+
+    /// 代理是构造参数，不是环境变量：显式传 `Some(proxy)` 的客户端会走代理，
+    /// 控制面自己的 `http_client` 不传，直连目标。
+    ///
+    /// 这里不碰进程环境变量——`set_var` 与其它测试的 `getenv` 并发是未定义
+    /// 行为，`ENV_LOCK` 也挡不住不上锁的读者。环境变量那一层见下一个测试。
+    #[test]
+    fn the_control_plane_client_never_uses_a_proxy() {
+        let poison = Stub::spawn(POISON);
+        let target = Stub::spawn(TARGET);
+        let runtime = runtime();
+
+        // 注入代理：请求确实落到代理上，证明这条注入路径真的生效，
+        // 也证明「打没打到代理」这件事本身测得出来。
+        let proxied = builder(Some(
+            reqwest::Proxy::all(format!("http://{}", poison.addr)).unwrap(),
+        ))
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
         let response = runtime
-            .block_on(async { client.get(&url).send().await })
+            .block_on(async {
+                proxied
+                    .get(format!("http://{}/v1/health", target.addr))
+                    .send()
+                    .await
+            })
+            .expect("注入代理的客户端应该连上代理");
+        assert_eq!(response.status().as_u16(), 502);
+        assert_eq!(poison.hits(), 1);
+        assert_eq!(target.hits(), 0, "请求没有经过代理");
+
+        // 控制面的真实构造函数：不传代理，直连目标。
+        let direct = http_client(Duration::from_secs(2)).unwrap();
+        let response = runtime
+            .block_on(async {
+                direct
+                    .get(format!("http://{}/v1/health", target.addr))
+                    .send()
+                    .await
+            })
             .expect("控制面客户端应该直连目标");
         assert_eq!(response.status().as_u16(), 200);
-        assert_eq!(target.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(target.hits(), 1);
         std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(
-            poison.hits.load(Ordering::SeqCst),
-            0,
-            "控制面请求走了系统/环境代理"
-        );
+        assert_eq!(poison.hits(), 1, "控制面请求走了代理");
+    }
+
+    /// 环境变量这一层单独验证：用户 shell / 系统里设了代理时控制面仍然直连。
+    ///
+    /// 代理变量只给子进程，测试进程自己的环境一点不动：进程内 `set_var` 与
+    /// 其它测试的 `getenv` 并发是未定义行为，这正是原来那条偶发失败的根因。
+    #[test]
+    fn the_control_plane_client_ignores_proxy_environment() {
+        let poison = Stub::spawn(POISON);
+        let target = Stub::spawn(TARGET);
+        let exe = std::env::current_exe().unwrap();
+        let status = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "control_plane::client::tests::proxy_environment_probe",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("VEYL_TEST_PROXY_TARGET", format!("http://{}/v1/health", target.addr))
+            .env("HTTP_PROXY", format!("http://{}", poison.addr))
+            .env("http_proxy", format!("http://{}", poison.addr))
+            .env("HTTPS_PROXY", format!("http://{}", poison.addr))
+            .env("https_proxy", format!("http://{}", poison.addr))
+            .env("ALL_PROXY", format!("http://{}", poison.addr))
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .status()
+            .expect("启动子进程失败");
+        assert!(status.success(), "子进程里的控制面客户端没有直连");
+        assert_eq!(target.hits(), 1);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(poison.hits(), 0, "控制面请求走了环境代理");
+    }
+
+    /// 只由上面的测试以子进程方式运行；手动 `--ignored` 跑不到目标时直接跳过。
+    #[test]
+    #[ignore = "由 the_control_plane_client_ignores_proxy_environment 起子进程运行"]
+    fn proxy_environment_probe() {
+        let Ok(url) = std::env::var("VEYL_TEST_PROXY_TARGET") else {
+            return;
+        };
+        let client = http_client(Duration::from_secs(2)).unwrap();
+        let response = runtime()
+            .block_on(async { client.get(&url).send().await })
+            .expect("设了代理环境变量的子进程里，控制面客户端应该直连目标");
+        assert_eq!(response.status().as_u16(), 200);
     }
 }

@@ -885,7 +885,7 @@ mod tests {
 
     #[test]
     fn installs_verifies_and_records_state() {
-        // 环境变量是进程级共享状态：与其它改环境的测试（控制面代理变量）共用一把锁。
+        // 环境变量是进程级共享状态：与其它改环境的测试共用一把锁。
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());

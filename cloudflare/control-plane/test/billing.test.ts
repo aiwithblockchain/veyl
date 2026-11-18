@@ -294,6 +294,92 @@ describe("每日计费", () => {
     expect(db.rows("wallet_ledger").some((row) => row.id === "led_old")).toBe(false);
     expect(report.archived).toBe(1);
   });
+
+  it("清理旧刷新令牌：按最后一次使用/作废时间算，已过期未使用的也清", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    const now = Date.now();
+    const token = (overrides: Record<string, unknown>) => ({
+      hash: "h",
+      device_id: "dev_x",
+      expires_at: now + DAY,
+      used_at: null,
+      revoked_at: null,
+      created_at: now,
+      ...overrides,
+    });
+    db.rows("refresh_tokens").push(
+      token({ hash: "old_used", used_at: now - 40 * DAY, created_at: now - 40 * DAY }),
+      token({ hash: "old_revoked", revoked_at: now - 40 * DAY, created_at: now - 40 * DAY }),
+      // 签发很久但最近还在轮换：活凭据，不能按 created_at 删。
+      token({ hash: "recently_used_old", used_at: now - DAY, created_at: now - 40 * DAY }),
+      // 从没用过但已过期：不可能再换出新令牌。
+      token({ hash: "expired_unused", expires_at: now - DAY, created_at: now - 40 * DAY }),
+      // 未使用且未过期的是活凭据：即使很老也不能删。
+      token({ hash: "old_live", created_at: now - 40 * DAY }),
+      token({ hash: "new_used", used_at: now - DAY, created_at: now - DAY }),
+    );
+
+    const report = await runBilling(env as never);
+
+    expect(report.tokensPruned).toBe(3);
+    expect(db.rows("refresh_tokens").map((row) => row.hash).sort()).toEqual([
+      "new_used",
+      "old_live",
+      "recently_used_old",
+    ]);
+  });
+
+  it("删除孤儿匿名账户：有充值单或支付流水也必须保留", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    const now = Date.now();
+    const account = (id: string, overrides: Record<string, unknown> = {}) => ({
+      id,
+      kind: "device",
+      email: null,
+      status: "active",
+      merged_into: null,
+      balance_cents: 0,
+      created_at: now - 2 * DAY,
+      ...overrides,
+    });
+    db.rows("accounts").push(
+      account("acct_orphan"),
+      account("acct_young", { created_at: now - 60_000 }),
+      account("acct_rich", { balance_cents: 1 }),
+      account("acct_has_device"),
+      account("acct_has_order"),
+      account("acct_has_server"),
+      account("acct_has_topup"),
+      account("acct_has_payment"),
+      account("acct_merged", { merged_into: "acct_email" }),
+    );
+    db.rows("devices").push({ id: "dev_live", account_id: "acct_has_device" });
+    db.rows("orders").push({ id: "ord_x", account_id: "acct_has_order" });
+    db.rows("servers").push({ id: "srv_x", account_id: "acct_has_server" });
+    db.rows("topups").push({ id: "top_x", account_id: "acct_has_topup" });
+    db.rows("payments").push({ id: "pay_x", account_id: "acct_has_payment" });
+
+    const report = await runBilling(env as never);
+
+    expect(report.accountsPruned).toBe(1);
+    const ids = db.rows("accounts").map((row) => row.id);
+    expect(ids).not.toContain("acct_orphan");
+    for (const kept of [
+      "acct_young",
+      "acct_rich",
+      "acct_has_device",
+      "acct_has_order",
+      "acct_has_server",
+      "acct_has_topup",
+      "acct_has_payment",
+      "acct_merged",
+      ACCOUNT,
+    ]) {
+      expect(ids).toContain(kept);
+    }
+  });
 });
 
 describe("过期未 enroll 的 booting 机器", () => {

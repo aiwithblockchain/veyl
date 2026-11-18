@@ -13,6 +13,12 @@ const MAX_CATCH_UP_DAYS = 30;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 5;
 const PRUNE_BATCH = 5000;
+/** 刷新令牌保留 30 天：已用过/已作废的历史只需覆盖轮换重放窗口。 */
+const TOKEN_RETENTION_MS = 30 * DAY_MS;
+const TOKEN_PRUNE_BATCH = 1000;
+/** 登出留下的匿名账户：过一天、确认没人引用才删。 */
+const ORPHAN_ACCOUNT_MIN_AGE_MS = DAY_MS;
+const ORPHAN_ACCOUNT_BATCH = 200;
 
 export interface BillingEnv extends OrdersEnv {}
 
@@ -33,6 +39,8 @@ export interface BillingReport {
   refunded: number;
   reaped: number;
   archived: number;
+  tokensPruned: number;
+  accountsPruned: number;
   drift: number;
 }
 
@@ -54,7 +62,7 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, archived: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, archived: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
@@ -118,6 +126,8 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   }
 
   report.archived = await archiveLedger(env, now);
+  report.tokensPruned = await pruneRefreshTokens(env, now);
+  report.accountsPruned = await pruneOrphanAccounts(env, now);
   return report;
 }
 
@@ -398,6 +408,63 @@ export async function recoverExpiredServers(env: BillingEnv, accountId: string):
     }
   }
   return recovered;
+}
+
+/**
+ * 刷新令牌清理：每次刷新插一行，活跃设备一天约 96 行。
+ * 不能按 `created_at` 删：30 天前签发、最近还在轮换的令牌是活凭据。
+ * - 已用过/已作废：按「最后一次生命周期事件」（COALESCE(revoked_at, used_at)）满 30 天才删；
+ * - 从没用过但已过期的行：已经不可能再换出新令牌，直接清掉。
+ * 分页靠 LIMIT 每轮最多删一批；单轮失败只记日志，不影响计费。
+ */
+async function pruneRefreshTokens(env: BillingEnv, now: number): Promise<number> {
+  const db = env.DB!;
+  try {
+    const deleted = await db
+      .prepare(
+        "DELETE FROM refresh_tokens WHERE hash IN (" +
+          "SELECT hash FROM refresh_tokens " +
+          "WHERE COALESCE(revoked_at, used_at) < ? " +
+          "OR (used_at IS NULL AND revoked_at IS NULL AND expires_at < ?) LIMIT ?)",
+      )
+      .bind(now - TOKEN_RETENTION_MS, now, TOKEN_PRUNE_BATCH)
+      .run();
+    return Number((deleted as { meta?: { changes?: number } }).meta?.changes ?? 0);
+  } catch (error) {
+    console.error(`[billing] token_prune_failed error=${String(error)}`);
+    return 0;
+  }
+}
+
+/**
+ * 孤儿匿名账户：登出把设备挪到新匿名账户，旧的留在库里。
+ * 没有任何设备/订单/服务器/充值单/支付流水/余额且超过一天才删；
+ * 有余额或任何业务记录都保留——否则未结算的充值会失去账户，入账变 missing_account。
+ * 已并入邮箱账户的行（merged_into）不删：那是合并审计的一部分。
+ */
+async function pruneOrphanAccounts(env: BillingEnv, now: number): Promise<number> {
+  const db = env.DB!;
+  try {
+    const deleted = await db
+      .prepare(
+        "DELETE FROM accounts WHERE id IN (" +
+          "SELECT a.id FROM accounts a " +
+          "WHERE a.kind = 'device' AND a.merged_into IS NULL AND a.created_at < ? " +
+          "AND a.balance_cents = 0 " +
+          "AND NOT EXISTS (SELECT 1 FROM devices d WHERE d.account_id = a.id) " +
+          "AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.account_id = a.id) " +
+          "AND NOT EXISTS (SELECT 1 FROM servers s WHERE s.account_id = a.id) " +
+          "AND NOT EXISTS (SELECT 1 FROM topups t WHERE t.account_id = a.id) " +
+          "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.account_id = a.id) " +
+          "LIMIT ?)",
+      )
+      .bind(now - ORPHAN_ACCOUNT_MIN_AGE_MS, ORPHAN_ACCOUNT_BATCH)
+      .run();
+    return Number((deleted as { meta?: { changes?: number } }).meta?.changes ?? 0);
+  } catch (error) {
+    console.error(`[billing] account_prune_failed error=${String(error)}`);
+    return 0;
+  }
 }
 
 /**

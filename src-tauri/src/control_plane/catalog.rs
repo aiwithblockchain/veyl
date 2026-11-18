@@ -213,7 +213,7 @@ pub async fn fetch_catalog(base_url: &str, fresh: bool) -> Result<Catalog, Catal
     }
     let url = catalog_url(base, fresh);
 
-    let client = super::client::builder()
+    let client = super::client::builder(None)
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|error| {

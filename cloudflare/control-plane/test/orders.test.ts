@@ -382,6 +382,112 @@ describe("orders", () => {
     ).toHaveLength(1);
   });
 
+  it("守卫失败后余额已够但仍记账失败：返回可重试的通用错误，不编差额", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+
+    const created = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-ghost"), env as never)
+    )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 210;
+    // 两次记账都被守卫挡住；重试之后、回包之前充值到账，余额已经够门槛。
+    // 这时差额应为 0（界面会显示「还差 $0.00」），所以只能回通用可重试错误。
+    let calls = 0;
+    db.beforeWalletInsert = () => {
+      calls += 1;
+      db.rows("accounts")[0].balance_cents = 179;
+      // 每次守卫失败后充值立刻到账：重读余额会认为「已经够了」，于是重试一次。
+      queueMicrotask(() => {
+        db.rows("accounts")[0].balance_cents = 210;
+      });
+    };
+
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-ghost" },
+      }),
+      env as never,
+    );
+    expect(checkout?.status).toBe(503);
+    const body = (await checkout!.json()) as {
+      code: string;
+      details: { reason: string; shortfall_cents?: number };
+    };
+    expect(body.code).toBe("INTERNAL");
+    expect(body.details.reason).toBe("wallet_unavailable");
+    expect(body.details.shortfall_cents).toBeUndefined();
+    expect(db.rows("servers")).toHaveLength(0);
+  });
+
+  it("端口唯一冲突时换端口重试，不会把可建的订单判死", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+
+    const created = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-port"), env as never)
+    )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 210;
+    // 另一个并发建机先占了这次随机出来的端口：整批回滚后必须换端口重试。
+    db.beforeWalletInsert = () => {
+      db.beforeWalletInsert = undefined;
+      throw new Error("UNIQUE constraint failed: servers.account_id, servers.node_port");
+    };
+
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-port" },
+      }),
+      env as never,
+    );
+    expect(checkout?.status).toBe(200);
+    expect(db.rows("servers")).toHaveLength(1);
+    expect(db.rows("accounts")[0].balance_cents).toBe(180);
+    expect(
+      db.rows("wallet_ledger").filter((row) => row.ref_type === "order"),
+    ).toHaveLength(1);
+  });
+
+  it("端口在最后一步冲突：整批回滚，重试用尽后返回可重试的 port_conflict", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+
+    const created = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-port-late"), env as never)
+    )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 210;
+    // 真实的冲突点：账本、余额、订单状态都已在本批写过，只有 servers 插入撞唯一索引。
+    db.beforeServerInsert = () => {
+      throw new Error("UNIQUE constraint failed: servers.account_id, servers.node_port");
+    };
+
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-port-late" },
+      }),
+      env as never,
+    );
+    expect(checkout?.status).toBe(503);
+    const body = (await checkout!.json()) as {
+      code: string;
+      retryable: boolean;
+      details: { reason: string };
+    };
+    expect(body.code).toBe("UPSTREAM_ERROR");
+    expect(body.retryable).toBe(true);
+    expect(body.details.reason).toBe("port_conflict");
+    // 整批回滚：没有扣费、没有服务器，订单还能原样重试。
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("accounts")[0].balance_cents).toBe(210);
+    expect(db.rows("servers")).toHaveLength(0);
+    expect(db.rows("orders")[0].state).toBe("pending_payment");
+  });
+
   it("两笔 checkout 并发时门槛只放行一笔", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());
