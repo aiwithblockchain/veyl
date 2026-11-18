@@ -8,6 +8,7 @@
     "deploy": "wrangler deploy",
     "deploy:dev": "wrangler deploy --env dev",
     "typecheck": "tsc --noEmit",
+    "schema:check": "node scripts/schema-check.mjs",
     "test": "vitest run"
   },
   "devDependencies": {

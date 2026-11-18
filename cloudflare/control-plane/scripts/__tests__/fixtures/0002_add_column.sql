@@ -1,0 +1,3 @@
+-- 增量迁移：列只能通过 ALTER TABLE ... ADD COLUMN 追加。
+ALTER TABLE servers ADD COLUMN transfer_gib INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE accounts ADD note TEXT;
