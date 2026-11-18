@@ -642,6 +642,182 @@ describe("过期未 enroll 的 booting 机器", () => {
   });
 });
 
+describe("结算兜底（at_ready）", () => {
+  it("enroll 已消费 token 但没写出 charge：Cron 按结算失败收尾并删除实例", async () => {
+    const db = new FakeD1();
+    const env = { ...envWith(db), DO_API_TOKEN: "do-token" };
+    const now = Date.now();
+    db.rows("servers").push({
+      id: "srv_settle00000000000",
+      account_id: ACCOUNT,
+      order_id: "ord_settle",
+      provider: "digitalocean",
+      provider_id: "4242",
+      name: "我的服务器0002",
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      hourly_usd: 0.00893,
+      monthly_usd: 6,
+      daily_price_cents: 0,
+      billing_anchor_at: 0,
+      state: "verifying",
+      billing_state: "pending",
+      node_port: 20444,
+      paid_until: null,
+      created_at: now - 20 * 60 * 1000,
+      updated_at: now - 20 * 60 * 1000,
+      destroyed_at: null,
+      enrollment_expires_at: now + 10 * 60 * 1000,
+      enrollment_used_at: now - 11 * 60 * 1000,
+    });
+    db.rows("orders").push({
+      id: "ord_settle",
+      account_id: ACCOUNT,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 0.3,
+      amount_cents: 30,
+      hourly_usd: 0.00893,
+      state: "provisioning",
+      idempotency_key: "idem-settle-cron",
+      charge_mode: "at_ready",
+      created_at: now - 20 * 60 * 1000,
+    });
+    const calls: Array<{ url: string; method?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(input), method: init?.method });
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const report = await runBilling(env as never);
+
+    expect(report.settleReaped).toBe(1);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("error");
+    expect(server.failure_code).toBe("settle_insufficient");
+    expect(server.destroyed_at).toBeNull();
+    expect(db.rows("orders")[0].state).toBe("failed");
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("audit_log").some((row) => row.action === "settle_insufficient")).toBe(true);
+    expect(calls.some((call) => call.method === "DELETE" && call.url.includes("/droplets/4242"))).toBe(true);
+  });
+
+  it("并发结算已把订单置 ready：兜底不重复删机器、不计入 reaped", async () => {
+    const db = new FakeD1();
+    const env = { ...envWith(db), DO_API_TOKEN: "do-token" };
+    const now = Date.now();
+    db.rows("servers").push({
+      id: "srv_settle_race00000",
+      account_id: ACCOUNT,
+      order_id: "ord_race",
+      provider: "digitalocean",
+      provider_id: "4242",
+      name: "我的服务器0004",
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      hourly_usd: 0.00893,
+      monthly_usd: 6,
+      daily_price_cents: 0,
+      billing_anchor_at: 0,
+      state: "verifying",
+      billing_state: "pending",
+      node_port: 20446,
+      paid_until: null,
+      created_at: now - 20 * 60 * 1000,
+      updated_at: now - 20 * 60 * 1000,
+      destroyed_at: null,
+      enrollment_expires_at: now + 10 * 60 * 1000,
+      enrollment_used_at: now - 11 * 60 * 1000,
+    });
+    db.rows("orders").push({
+      id: "ord_race",
+      account_id: ACCOUNT,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 0.3,
+      amount_cents: 30,
+      hourly_usd: 0.00893,
+      state: "provisioning",
+      idempotency_key: "idem-settle-race",
+      charge_mode: "at_ready",
+      created_at: now - 20 * 60 * 1000,
+    });
+    // 扫描到处理后、认领之前，另一路结算成功：订单 ready、服务器 active、钱已扣。
+    db.beforeSettleClaim = () => {
+      db.rows("orders")[0].state = "ready";
+      db.rows("servers")[0].state = "active";
+    };
+    const calls: Array<{ url: string; method?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(input), method: init?.method });
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const report = await runBilling(env as never);
+
+    // 认领不到就不删：多删一次就是删掉用户刚付过钱的机器。
+    expect(report.settleReaped).toBe(0);
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(db.rows("servers")[0].state).toBe("active");
+    expect(db.rows("orders")[0].state).toBe("ready");
+    expect(db.rows("audit_log").some((row) => row.action === "settle_insufficient")).toBe(false);
+  });
+
+  it("还没到兜底时间的不动", async () => {
+    const db = new FakeD1();
+    const env = { ...envWith(db), DO_API_TOKEN: "do-token" };
+    const now = Date.now();
+    db.rows("servers").push({
+      id: "srv_settle_fresh00000",
+      account_id: ACCOUNT,
+      order_id: "ord_fresh",
+      provider: "digitalocean",
+      provider_id: "4242",
+      name: "我的服务器0003",
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      hourly_usd: 0.00893,
+      monthly_usd: 6,
+      daily_price_cents: 0,
+      billing_anchor_at: 0,
+      state: "verifying",
+      billing_state: "pending",
+      node_port: 20445,
+      paid_until: null,
+      created_at: now,
+      updated_at: now,
+      destroyed_at: null,
+      enrollment_expires_at: now + 30 * 60 * 1000,
+      enrollment_used_at: now - 60 * 1000,
+    });
+    db.rows("orders").push({
+      id: "ord_fresh",
+      account_id: ACCOUNT,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 0.3,
+      amount_cents: 30,
+      hourly_usd: 0.00893,
+      state: "provisioning",
+      idempotency_key: "idem-settle-fresh",
+      charge_mode: "at_ready",
+      created_at: now,
+    });
+
+    const report = await runBilling(env as never);
+
+    expect(report.settleReaped).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("verifying");
+    expect(db.rows("orders")[0].state).toBe("provisioning");
+  });
+});
+
 describe("已收款订单的补建", () => {
   it("建机失败把订单退回 paid，钱和单都不丢", async () => {
     const db = new FakeD1();

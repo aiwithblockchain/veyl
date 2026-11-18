@@ -43,6 +43,15 @@ async function fail(
 
   if (!retryable) return failPermanently(env, server, reason, detail, now);
 
+  // at_ready 订单还没扣过钱，Cron 的补建只服务存量 upfront 单：
+  // 重试性失败也直接关单，让用户重新下单，避免订单停在无人处理的 paid。
+  const mode = await env.DB.prepare("SELECT charge_mode FROM orders WHERE id = ?")
+    .bind(server.order_id)
+    .first<{ charge_mode: string | null }>();
+  if (mode?.charge_mode === "at_ready") {
+    return failPermanently(env, server, reason, detail, now);
+  }
+
   await env.DB.batch([
     env.DB.prepare("UPDATE servers SET state = 'error', failure_code = ?, updated_at = ? WHERE id = ?")
       .bind(reason, now, server.id),
@@ -86,7 +95,21 @@ async function failPermanently(
   ]);
 
   const refundCents = Number(order?.amount_cents ?? 0);
-  if (order?.paid_via !== "wallet" || refundCents <= 0) {
+  // 没扣过钱就不能退：at_ready 在结算前失败属于这一类；存量 upfront 才有 charge 流水。
+  const charged = await env.DB.prepare(
+    "SELECT id FROM wallet_ledger WHERE ref_type = 'order' AND ref_id = ? AND kind = 'charge'",
+  )
+    .bind(server.order_id)
+    .first<{ id: string }>();
+  if (order?.paid_via !== "wallet" || refundCents <= 0 || !charged) {
+    if (!charged) {
+      await env.DB.prepare(
+        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'refund_skipped_no_charge', ?)",
+      )
+        .bind(now, server.account_id, server.id, JSON.stringify({ order_id: server.order_id, reason }))
+        .run()
+        .catch(() => {});
+    }
     return { ok: false, reason, retryable: false, refunded: false };
   }
   const refund = await refundProvision(env, {

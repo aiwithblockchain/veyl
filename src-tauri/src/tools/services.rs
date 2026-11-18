@@ -11919,6 +11919,7 @@ mod main_flow_tests {
             expires_at: None,
             server_id: Some(server_id.clone()),
             failure: None,
+            charge_mode: "upfront".into(),
         };
         crate::control_plane::servers::remember_order_for_test(base.clone());
         crate::control_plane::servers::remember_order_for_test(

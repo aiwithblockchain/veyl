@@ -234,6 +234,14 @@ export function parseMigrations(files) {
       const statement = raw.trim();
       if (!statement) continue;
 
+      // 表重建（去掉 NOT NULL、改列顺序）是合法的迁移写法：
+      // CREATE 新表 → INSERT ... SELECT → DROP 旧表 → RENAME。
+      const drop = /^drop\s+table\s+(?:if\s+exists\s+)?([^\s;]+)/i.exec(statement);
+      if (drop) {
+        tables.delete(unquote(drop[1]).toLowerCase());
+        continue;
+      }
+
       const create = /^create\s+table\s+(?:if\s+not\s+exists\s+)?([^\s(]+)\s*\(/i.exec(statement);
       if (create) {
         const table = unquote(create[1]).toLowerCase();
@@ -254,6 +262,19 @@ export function parseMigrations(files) {
           columns.add(name.toLowerCase());
         }
         tables.set(table, columns);
+        continue;
+      }
+
+      const rename = /^alter\s+table\s+([^\s]+)\s+rename\s+to\s+([^\s;]+)/i.exec(statement);
+      if (rename) {
+        const from = unquote(rename[1]).toLowerCase();
+        const to = unquote(rename[2]).toLowerCase();
+        const moved = tables.get(from);
+        if (!moved) {
+          throw new MigrationError(`${file.name}：ALTER TABLE ${from} RENAME 指向不存在的表`);
+        }
+        tables.delete(from);
+        tables.set(to, moved);
         continue;
       }
 

@@ -18,6 +18,21 @@ async function signingJwk(): Promise<string> {
   return JSON.stringify(await crypto.subtle.exportKey("jwk", pair.privateKey));
 }
 
+/** 存量 upfront 订单在 checkout 时写过一笔 charge；退款必须能查到它。 */
+function seedCharge(db: FakeD1, cents: number) {
+  db.rows("wallet_ledger").push({
+    id: `led_charge_${cents}`,
+    account_id: ACCOUNT,
+    kind: "charge",
+    amount_cents: -cents,
+    balance_after_cents: 0,
+    ref_type: "order",
+    ref_id: "ord_test",
+    note: null,
+    created_at: Date.now() - 1000,
+  });
+}
+
 function seedServer(db: FakeD1, state: string) {
   db.rows("servers").push({
     id: SERVER,
@@ -104,6 +119,7 @@ describe("建机失败退款", () => {  it("enroll 超时自动销毁时，扣�
       created_at: Date.now(),
       paid_via: "wallet",
     });
+    seedCharge(db, 600);
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response(null, { status: 204 })),
@@ -120,10 +136,262 @@ describe("建机失败退款", () => {  it("enroll 超时自动销毁时，扣�
     expect(res?.status).toBe(410);
     expect(db.rows("servers")[0].state).toBe("destroyed");
     expect(db.rows("orders")[0].state).toBe("failed");
-    const refund = db.rows("wallet_ledger")[0];
+    const refund = db.rows("wallet_ledger").find((row) => row.ref_type === "server_refund");
     expect(refund?.amount_cents).toBe(600);
     expect(refund?.ref_id).toBe("srv_test0000000000000000");
     expect(db.rows("accounts")[0].balance_cents).toBe(600);
+  });
+});
+
+describe("就绪后结算（2.39.0）", () => {
+  const TOKEN = "enr_settle00000000000";
+  const ENC_KEY = "A".repeat(43);
+  const DAILY = 30;
+  const DAY = 24 * 3600 * 1000;
+
+  async function seedAtReady(
+    db: FakeD1,
+    options: { balance?: number; expiresInMs?: number; usedAt?: number | null; providerId?: string | null } = {},
+  ) {
+    seedServer(db, "verifying");
+    Object.assign(db.rows("servers")[0], {
+      provider_id: options.providerId === undefined ? null : options.providerId,
+      firewall_id: null,
+      daily_price_cents: 0,
+      billing_anchor_at: 0,
+      paid_until: null,
+      billing_state: "pending",
+      enrollment_hash: await sha256B64u(TOKEN),
+      enrollment_expires_at: Date.now() + (options.expiresInMs ?? 60_000),
+      enrollment_used_at: options.usedAt ?? null,
+    });
+    db.rows("accounts")[0].balance_cents = options.balance ?? 100;
+    db.rows("orders").push({
+      id: "ord_test",
+      account_id: ACCOUNT,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 0.3,
+      amount_cents: DAILY,
+      hourly_usd: 0.00893,
+      state: "provisioning",
+      idempotency_key: "idem-settle-1",
+      created_at: Date.now() - 60_000,
+      paid_at: null,
+      paid_via: null,
+      charge_mode: "at_ready",
+    });
+  }
+
+  function enrollRequest(password = "secret-password") {
+    return new Request(`https://example.com/v1/enroll/${TOKEN}`, {
+      method: "POST",
+      body: JSON.stringify({ port: 20443, password, active: true, version: "1.14.0" }),
+    });
+  }
+
+  it("就绪时扣第 0 天：订单 ready、服务器 active、计费三列与账本同批写入", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedAtReady(db);
+
+    const res = await handleServers(enrollRequest(), env as never);
+
+    expect(res?.status).toBe(200);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("active");
+    expect(server.billing_state).toBe("active");
+    expect(Number(server.daily_price_cents)).toBe(DAILY);
+    expect(Number(server.billing_anchor_at)).toBe(Number(server.ready_at));
+    expect(Number(server.paid_until)).toBe(Number(server.ready_at) + DAY);
+    expect(db.rows("accounts")[0].balance_cents).toBe(100 - DAILY);
+
+    const charge = db.rows("wallet_ledger").find(
+      (row) => row.ref_type === "order" && row.kind === "charge",
+    );
+    expect(charge?.amount_cents).toBe(-DAILY);
+    expect(charge?.ref_id).toBe("ord_test");
+
+    const order = db.rows("orders")[0];
+    expect(order.state).toBe("ready");
+    expect(order.paid_via).toBe("wallet");
+    expect(order.paid_at).toBeTruthy();
+    expect(db.rows("audit_log").some((row) => row.action === "settle.ok")).toBe(true);
+
+    const detail = await handleServers(
+      new Request(`https://example.com/v1/servers/${SERVER}`, {
+        headers: { authorization: `Bearer ${env.token}` },
+      }),
+      env as never,
+    );
+    const body = (await detail!.json()) as {
+      paid_until: string | null;
+      billing_state: string;
+      charge_mode: string;
+    };
+    expect(body.billing_state).toBe("active");
+    expect(body.paid_until).toBe(new Date(Number(server.paid_until)).toISOString());
+    // 口径来自订单行（LEFT JOIN），服务器表本身不存。
+    expect(body.charge_mode).toBe("at_ready");
+  });
+
+  it("就绪时余额不足：销毁实例、服务器 error / settle_insufficient、订单 failed、不写 destroyed", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedAtReady(db, { balance: 29, providerId: PROVIDER_ID });
+    const calls: Array<{ url: string; method?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        calls.push({ url, method: init?.method });
+        if (url.endsWith("/firewalls") && init?.method === "POST") {
+          return new Response(JSON.stringify({ firewall: { id: "fw_test" } }), { status: 202 });
+        }
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const res = await handleServers(enrollRequest(), env as never);
+
+    expect(res?.status).toBe(409);
+    expect(((await res!.json()) as { reason: string }).reason).toBe("settle_insufficient");
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("error");
+    expect(server.failure_code).toBe("settle_insufficient");
+    expect(server.failure_stage).toBe("active");
+    // 防火墙 id 建好就落库：结算失败/进程中途死掉时，Cron 兜底只认库里的 id。
+    expect(server.firewall_id).toBe("fw_test");
+    // 不写 destroyed：列表保留错误行，用户能看到原因。
+    expect(server.destroyed_at).toBeNull();
+    const order = db.rows("orders")[0];
+    expect(order.state).toBe("failed");
+    expect(order.failure_code).toBe("settle_insufficient");
+    // 没扣过钱，也没有退款。
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("accounts")[0].balance_cents).toBe(29);
+    expect(db.rows("audit_log").some((row) => row.action === "settle_insufficient")).toBe(true);
+    // 远端实例与防火墙都要删掉。
+    expect(calls.some((call) => call.method === "DELETE" && call.url.includes("/droplets/4242"))).toBe(true);
+    expect(calls.some((call) => call.method === "DELETE" && call.url.includes("/firewalls/fw_test"))).toBe(true);
+  });
+
+  it("防火墙 id 写库失败：catch 用内存 id 补删，不留孤儿规则", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedAtReady(db, { providerId: PROVIDER_ID });
+    db.beforeFirewallWrite = () => {
+      throw new Error("d1 write failed");
+    };
+    const calls: Array<{ url: string; method?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        calls.push({ url, method: init?.method });
+        if (url.endsWith("/firewalls") && init?.method === "POST") {
+          return new Response(JSON.stringify({ firewall: { id: "fw_test" } }), { status: 202 });
+        }
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const res = await handleServers(enrollRequest(), env as never);
+
+    expect(res?.status).toBe(500);
+    expect(((await res!.json()) as { reason: string }).reason).toBe("activate_failed");
+    // id 只在内存里：销毁路径读库拿不到，必须用 catch 里传进去的 id 把规则删掉。
+    expect(
+      calls.some((call) => call.method === "DELETE" && call.url.includes("/firewalls/fw_test")),
+    ).toBe(true);
+    expect(
+      calls.some((call) => call.method === "DELETE" && call.url.includes("/droplets/4242")),
+    ).toBe(true);
+    expect(db.rows("servers")[0].firewall_id ?? null).toBeNull();
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+  });
+
+  it("并发结算：token 只消费一次，只产生一笔 charge", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedAtReady(db);
+
+    const [first, second] = await Promise.all([
+      handleServers(enrollRequest(), env as never),
+      handleServers(enrollRequest(), env as never),
+    ]);
+
+    expect([first?.status, second?.status].sort()).toEqual([200, 409]);
+    const charges = db.rows("wallet_ledger").filter(
+      (row) => row.ref_type === "order" && row.kind === "charge",
+    );
+    expect(charges).toHaveLength(1);
+    expect(db.rows("accounts")[0].balance_cents).toBe(100 - DAILY);
+    expect(db.rows("audit_log").filter((row) => row.action === "settle.ok")).toHaveLength(1);
+    expect(db.rows("servers")[0].state).toBe("active");
+  });
+
+  it("旧单兼容：upfront 订单激活时不再扣费", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    seedServer(db, "booting");
+    Object.assign(db.rows("servers")[0], {
+      provider_id: null,
+      enrollment_hash: await sha256B64u(TOKEN),
+      enrollment_expires_at: Date.now() + 60_000,
+    });
+    db.rows("orders").push({
+      id: "ord_test",
+      account_id: ACCOUNT,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 6,
+      amount_cents: 600,
+      hourly_usd: 0.00893,
+      state: "provisioning",
+      idempotency_key: "idem-upfront-1",
+      created_at: Date.now() - 60_000,
+      paid_via: "wallet",
+      charge_mode: "upfront",
+    });
+    seedCharge(db, 600);
+
+    const res = await handleServers(enrollRequest(), env as never);
+
+    expect(res?.status).toBe(200);
+    expect(db.rows("servers")[0].state).toBe("active");
+    expect(db.rows("orders")[0].state).toBe("ready");
+    // 只有 checkout 那一笔，激活不再扣。
+    expect(db.rows("wallet_ledger")).toHaveLength(1);
+    expect(Number(db.rows("accounts")[0].balance_cents ?? 0)).toBe(0);
+  });
+
+  it("没扣过钱的服务器销毁：不退款，写 refund_skipped_no_charge", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    db.rows("orders").push({
+      id: "ord_test",
+      account_id: ACCOUNT,
+      amount_cents: 30,
+      paid_via: "wallet",
+      charge_mode: "at_ready",
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 0.3,
+      hourly_usd: 0,
+      state: "ready",
+      idempotency_key: "idem-no-charge",
+      created_at: Date.now(),
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+
+    const res = await handleServers(destroyRequest(env.token), env as never);
+
+    expect(res?.status).toBe(204);
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
+    expect(Number(db.rows("accounts")[0].balance_cents ?? 0)).toBe(0);
+    expect(db.rows("audit_log").some((row) => row.action === "refund_skipped_no_charge")).toBe(true);
   });
 });
 
@@ -195,8 +463,37 @@ describe("enroll 激活守卫", () => {
     expect(body.ready_at).toBe(new Date(Number(server.ready_at)).toISOString());
   });
 
-  it("未就绪 / 旧机器：ready_at 为 null，不拿 created_at 顶替", async () => {
+  it("结算前的服务器详情：paid_until 为 null、billing_state=pending、没有宽限期", async () => {
     const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "booting");
+    Object.assign(db.rows("servers")[0], {
+      billing_state: "pending",
+      paid_until: null,
+      daily_price_cents: 0,
+      billing_anchor_at: 0,
+    });
+
+    const detail = await handleServers(
+      new Request(`https://example.com/v1/servers/${SERVER}`, {
+        headers: { authorization: `Bearer ${env.token}` },
+      }),
+      env as never,
+    );
+
+    expect(detail?.status).toBe(200);
+    const body = (await detail!.json()) as {
+      paid_until: string | null;
+      billing_state: string;
+      grace_ends_at: string | null;
+    };
+    // 界面据此显示「创建中，开通后开始计费」，不能渲染 1970。
+    expect(body.paid_until).toBeNull();
+    expect(body.billing_state).toBe("pending");
+    expect(body.grace_ends_at).toBeNull();
+  });
+
+  it("未就绪 / 旧机器：ready_at 为 null，不拿 created_at 顶替", async () => {    const db = new FakeD1();
     const env = await envWith(db, await signingJwk());
     seedServer(db, "active");
 
@@ -463,6 +760,7 @@ describe("enroll 激活守卫", () => {
     const db = new FakeD1();
     const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
     await seedBootingForActivation(db);
+    seedCharge(db, 600);
     await handleServers(stageRequest({ stage: "installing" }), env as never);
     await handleServers(stageRequest({ stage: "verifying" }), env as never);
 
@@ -645,6 +943,7 @@ describe("用户销毁退款", () => {
       paid_until: anchor + 8 * DAY,
     });
     db.rows("accounts")[0].balance_cents = 100;
+    seedCharge(db, 20);
     db.rows("orders").push({
       id: "ord_test",
       account_id: ACCOUNT,
@@ -686,6 +985,7 @@ describe("用户销毁退款", () => {
       paid_until: anchor + 8 * DAY,
     });
     db.rows("accounts")[0].balance_cents = 100;
+    seedCharge(db, 20);
     db.rows("orders").push({
       id: "ord_test",
       account_id: ACCOUNT,

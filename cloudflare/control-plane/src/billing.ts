@@ -4,7 +4,7 @@
 import { randomId } from "./lib/crypto";
 import { provisionPaidOrder, type OrdersEnv } from "./orders";
 import { refundProvision } from "./provision";
-import { sweepExpiredEnrollments } from "./servers";
+import { sweepExpiredEnrollments, sweepUnsettledSettlements } from "./servers";
 import { reconciliationDrift, recordLedgerEntry } from "./wallet";
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -38,6 +38,7 @@ export interface BillingReport {
   rebuilt: number;
   refunded: number;
   reaped: number;
+  settleReaped: number;
   archived: number;
   tokensPruned: number;
   accountsPruned: number;
@@ -62,12 +63,15 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, archived: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, archived: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
   const now = Date.now();
-  // 先清掉 enrollment 过期还没回传的机器：它们已经不可能建成，
+  // 先处理「enroll 已消费但结算没写成」的 at_ready 残留：这一步要赶在
+  // enrollment 超时清理之前，订单才会留下 settle_insufficient 而不是普通建机超时。
+  report.settleReaped = await sweepUnsettledSettlements(env, now);
+  // 再清掉 enrollment 过期还没回传的机器：它们已经不可能建成，
   // 这一步放在计费之前，免得同一轮又把没人认领的机器扣一天。
   report.reaped = await sweepExpiredEnrollments(env);
   const due = await collectDue(env, now);
@@ -95,7 +99,7 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   const orphaned = await db
     .prepare(
       "SELECT o.id FROM orders o LEFT JOIN servers s ON s.order_id = o.id " +
-        "WHERE o.state IN ('paid', 'provisioning') AND o.created_at < ? " +
+        "WHERE o.state IN ('paid', 'provisioning') AND o.charge_mode = 'upfront' AND o.created_at < ? " +
         "AND (s.id IS NULL OR s.provider_id IS NULL OR s.state = 'error') LIMIT 5",
     )
     .bind(now - 5 * 60 * 1000)
@@ -153,7 +157,7 @@ async function retryStuckRefunds(env: BillingEnv, now: number): Promise<number> 
         "(SELECT COUNT(*) FROM audit_log a WHERE a.action = 'provision.refund_failed' AND a.server_id = s.id) AS failures, " +
         "(SELECT MAX(a.at) FROM audit_log a WHERE a.action = 'provision.refund_abandoned' AND a.server_id = s.id) AS abandoned_at " +
         "FROM orders o JOIN servers s ON s.order_id = o.id " +
-        "WHERE o.state = 'failed' AND o.paid_via = 'wallet' AND s.state = 'error' " +
+        "WHERE o.state = 'failed' AND o.paid_via = 'wallet' AND o.charge_mode = 'upfront' AND s.state = 'error' " +
         "AND EXISTS (SELECT 1 FROM wallet_ledger w WHERE w.ref_type = 'order' AND w.ref_id = o.id AND w.kind = 'charge') " +
         "AND NOT EXISTS (SELECT 1 FROM wallet_ledger w WHERE w.ref_type = 'server_refund' AND w.ref_id = s.id) " +
         "ORDER BY o.created_at ASC LIMIT 50",
@@ -232,7 +236,7 @@ async function collectDue(env: BillingEnv, now: number): Promise<BillingRow[]> {
       .prepare(
         "SELECT id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state FROM servers " +
           "WHERE destroyed_at IS NULL AND provider_id IS NOT NULL AND paid_until > 0 " +
-          "AND billing_state <> 'expired' " +
+          "AND billing_state <> 'expired' AND billing_state <> 'pending' " +
           "AND state IN ('booting', 'installing', 'verifying', 'healthy', 'active') " +
           "AND paid_until <= ? AND id > ? ORDER BY id LIMIT ?",
       )

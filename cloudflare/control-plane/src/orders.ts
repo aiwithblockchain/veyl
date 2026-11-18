@@ -8,17 +8,15 @@ import { monthlyUsdFromDaily, planDailyPriceCents } from "./lib/config";
 import { idempotencyKey, withIdempotency, type StoredResponse } from "./lib/idempotency";
 import { fetchCatalogData, type CatalogData } from "./index";
 import { provisionServer } from "./provision";
-import { balanceCents, recordLedgerEntry, type LedgerInput, type LedgerResult } from "./wallet";
+import { balanceCents } from "./wallet";
 
 const ORDER_TTL_MS = 10 * 60 * 1000;
 /** 一天的毫秒数：按天计费的基本单位。 */
 const DAY_MS = 24 * 3600 * 1000;
-/** 建机门槛：余额至少覆盖 7 天日价（§4.13）；实际仍只扣第 1 天。 */
+/** 建机门槛：余额至少覆盖 7 天日价（§4.13）；只是预检，结算只卡 1 天。 */
 const MIN_BALANCE_DAYS = 7;
 /** 端口唯一冲突时的重试次数：并发建机撞到已占用的端口后立刻换一个。 */
 const PORT_ATTEMPTS = 3;
-/** 扣费接口能回的状态；其它状态说明订单已经结束，不能再按「已付款」回放。 */
-const CHARGE_STATES = ["paid", "provisioning", "ready"] as const;
 
 /** 建机时把目录里的每月出口额度快照进 `servers` 行（GiB，0 = 未知）。 */
 function transferGibFor(catalog: CatalogData | null, planId: string): number {
@@ -60,6 +58,7 @@ interface OrderRow {
   checkout_session_id: string | null;
   checkout_url: string | null;
   paid_via: string | null;
+  charge_mode: string | null;
 }
 
 interface ServerRow {
@@ -78,6 +77,8 @@ function orderView(row: OrderRow) {
     region: row.region,
     plan: row.plan,
     amount_usd: row.amount_usd,
+    // 扣费口径（2.39.0）：存量订单列缺省按 upfront，新单是 at_ready。
+    charge_mode: row.charge_mode ?? "upfront",
     created_at: new Date(row.created_at).toISOString(),
     expires_at: row.expires_at ? new Date(row.expires_at).toISOString() : null,
     server_id: row.server_id,
@@ -103,39 +104,6 @@ function storedError(
   return { status, body: { code, message, retryable, details, request_id: "" } };
 }
 
-/**
- * 扣费成功的统一回包：Host 按 `order_id + state` 决定轮询与界面状态。
- * 只回金额会让客户端解析失败，用户再点一次就会新建订单、再扣一次钱。
- */
-async function chargeResult(
-  db: D1Database,
-  orderId: string,
-  chargedCents: number,
-  balanceAfterCents: number,
-): Promise<StoredResponse> {
-  const row = await db
-    .prepare("SELECT state FROM orders WHERE id = ?")
-    .bind(orderId)
-    .first<{ state: string }>();
-  const state = row?.state ?? "";
-  if (!(CHARGE_STATES as readonly string[]).includes(state)) {
-    return storedError(409, "PRECONDITION_FAILED", "这笔订单已经结束，请重新下单", {
-      reason: "order_not_payable",
-    });
-  }
-  console.log(
-    `[checkout] order=${orderId} state=${state} charged=${chargedCents} balance=${balanceAfterCents}`,
-  );
-  return {
-    status: 200,
-    body: {
-      order_id: orderId,
-      state,
-      charged_cents: chargedCents,
-      balance_after_cents: balanceAfterCents,
-    },
-  };
-}
 async function loadOrder(db: D1Database, accountId: string, orderId: string) {
   return db.prepare("SELECT * FROM orders WHERE id = ? AND account_id = ?")
     .bind(orderId, accountId)
@@ -209,8 +177,8 @@ async function createOrder(request: Request, env: OrdersEnv): Promise<Response> 
     const orderId = randomId("ord_");
     await db
       .prepare(
-        "INSERT INTO orders (id, account_id, region, plan, amount_usd, amount_cents, hourly_usd, state, idempotency_key, created_at, expires_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_payment', ?, ?, ?)",
+        "INSERT INTO orders (id, account_id, region, plan, amount_usd, amount_cents, hourly_usd, state, idempotency_key, charge_mode, created_at, expires_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_payment', ?, 'at_ready', ?, ?)",
       )
       .bind(
         orderId,
@@ -245,76 +213,74 @@ async function getOrder(request: Request, env: OrdersEnv, orderId: string): Prom
   return json(orderView(row));
 }
 
-interface ChargeOrderInput {
+interface ConfirmOrderInput {
   accountId: string;
-  amountCents: number;
-  requiredCents: number;
   orderId: string;
   serverId: string;
   port: number;
   region: string;
   plan: string;
+  amountCents: number;
   hourlyUsd: number;
   transferGib: number;
   now: number;
 }
 
 /**
- * 扣第 1 天并认领订单：门槛（日价 × 7）与扣减写在同一条 INSERT 的守卫里，
- * 预检之后余额被并发花掉时这笔账不写。
+ * 确认下单：认领订单（pending_payment → provisioning）并建服务器行，**不扣费**。
+ * 第 0 天在 enroll 确认就绪后由 `settleOrder` 结算；结算前不写计费三列：
+ * `daily_price_cents = 0`、`billing_anchor_at = 0`、`paid_until = NULL`、`billing_state = 'pending'`。
  *
- * 守卫失败后余额可能刚被充值补上——那是并发抖动而不是真的不足：重读余额后
- * 够门槛就重试一次，别把 `required − 余额 ≤ 0` 的负数差额交给界面。
+ * 两条语句在同一个 D1 batch：并发结账只有一个能认领；另一条 INSERT 带
+ * `server_id = 本请求` 的条件，不会建出第二台服务器。
+ * 端口唯一冲突会抛错并让整批回滚，调用方换端口重试。
  */
-async function chargeOrder(env: OrdersEnv, input: ChargeOrderInput) {
+async function confirmOrder(
+  env: OrdersEnv,
+  input: ConfirmOrderInput,
+): Promise<"claimed" | "already_confirmed" | "not_payable"> {
   const db = env.DB!;
-  const chargeInput: LedgerInput = {
-    accountId: input.accountId,
-    kind: "charge",
-    amountCents: -input.amountCents,
-    refType: "order",
-    refId: input.orderId,
-    guard: {
-      sql: "SELECT 1 FROM accounts WHERE id = ? AND balance_cents >= ?",
-      args: [input.accountId, input.requiredCents],
-    },
-    followUps: (ledgerId) => [
-      db
-        .prepare(
-          "UPDATE orders SET state = 'provisioning', paid_at = ?, server_id = ?, paid_via = 'wallet' " +
-            "WHERE id = ? AND state = 'pending_payment' AND EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
-        )
-        .bind(input.now, input.serverId, input.orderId, ledgerId),
-      db
-        .prepare(
-          "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, daily_price_cents, billing_anchor_at, transfer_gib) " +
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, 'active', ?, ?, ? WHERE EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
-        )
-        .bind(
-          input.serverId,
-          input.accountId,
-          input.orderId,
-          `我的服务器${input.serverId.slice(-4)}`,
-          input.region,
-          input.plan,
-          input.hourlyUsd,
-          monthlyUsdFromDaily(input.amountCents),
-          input.port,
-          input.now,
-          input.now,
-          input.now + DAY_MS,
-          input.amountCents,
-          input.now,
-          input.transferGib,
-          ledgerId,
-        ),
-    ],
-  };
+  const results = await db.batch([
+    db.prepare(
+      "UPDATE orders SET state = 'provisioning', server_id = ? " +
+        "WHERE id = ? AND account_id = ? AND state = 'pending_payment'",
+    ).bind(input.serverId, input.orderId, input.accountId),
+    db.prepare(
+      "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, daily_price_cents, billing_anchor_at, transfer_gib) " +
+        "SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, NULL, 'pending', 0, 0, ? " +
+        "WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND state = 'provisioning' AND server_id = ?)",
+    ).bind(
+      input.serverId,
+      input.accountId,
+      input.orderId,
+      `我的服务器${input.serverId.slice(-4)}`,
+      input.region,
+      input.plan,
+      input.hourlyUsd,
+      monthlyUsdFromDaily(input.amountCents),
+      input.port,
+      input.now,
+      input.now,
+      input.transferGib,
+      input.orderId,
+      input.serverId,
+    ),
+  ]);
+  const claimed = Number(
+    (results[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
+  );
+  if (claimed === 1) return "claimed";
 
-  const first = await recordLedgerEntry(env, chargeInput);
-  if (first.ok || first.reason !== "insufficient") return first;
-  if ((await balanceCents(env, input.accountId)) < input.requiredCents) return first;
-  return recordLedgerEntry(env, chargeInput);
+  // 没认领到：并发请求已经把它推进到 provisioning/ready，按已确认回放——
+  // 不能再建一次机（否则会在 DO 上多一台没人认领的实例）。
+  const existing = await db
+    .prepare("SELECT state FROM orders WHERE id = ? AND account_id = ?")
+    .bind(input.orderId, input.accountId)
+    .first<{ state: string }>();
+  if (existing?.state === "provisioning" || existing?.state === "ready") {
+    return "already_confirmed";
+  }
+  return "not_payable";
 }
 
 async function checkout(request: Request, env: OrdersEnv, orderId: string): Promise<Response> {
@@ -336,9 +302,14 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
       const row = await loadOrder(db, identity.accountId, orderId);
       if (!row) return { status: 404, body: { code: "NOT_FOUND", message: "没有这个订单" } };
 
-      // 已经扣过款：幂等返回当前余额，绝不重复扣。
+      // 已确认下单：幂等回放订单；只有 pending_payment 才继续建机。
       if (row.state !== "pending_payment") {
-        return chargeResult(db, row.id, 0, await balanceCents(env, identity.accountId));
+        if (row.state === "provisioning" || row.state === "ready") {
+          return { status: 200, body: orderView(row) };
+        }
+        return storedError(409, "PRECONDITION_FAILED", "这笔订单已经结束，请重新下单", {
+          reason: "order_not_payable",
+        });
       }
 
       const now = Date.now();
@@ -390,33 +361,32 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
       }
 
       const serverId = randomId("srv_");
-      // 额度是套餐属性、不参与扣费；目录已在扣费前取过，这里直接用同一次结果。
+      // 额度是套餐属性、不参与扣费；目录已在确认前取过，这里直接用同一次结果。
       const transferGib = transferGibFor(catalog, row.plan);
       let port = 0;
-      let charged: LedgerResult | null = null;
+      let confirmed: "claimed" | "already_confirmed" | "not_payable" | null = null;
       for (let attempt = 0; attempt < PORT_ATTEMPTS; attempt += 1) {
         port = await pickPort(db, identity.accountId);
         try {
-          charged = await chargeOrder(env, {
+          confirmed = await confirmOrder(env, {
             accountId: identity.accountId,
-            amountCents: row.amount_cents,
-            requiredCents: required,
             orderId: row.id,
             serverId,
             port,
             region: row.region,
             plan: row.plan,
+            amountCents: row.amount_cents,
             hourlyUsd: row.hourly_usd,
             transferGib,
             now,
           });
           break;
         } catch (error) {
-          // 端口唯一冲突：整批已回滚（账本与服务器行都没写），换个端口重试即可。
+          // 端口唯一冲突：整批已回滚（订单与服务器行都没写），换个端口重试即可。
           if (!isPortConflict(error)) throw error;
         }
       }
-      if (!charged) {
+      if (!confirmed) {
         // 连续几次都撞端口：订单仍停在 pending_payment，用户可以原样重试。
         return storedError(
           503,
@@ -426,34 +396,17 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
           true,
         );
       }
+      if (confirmed === "not_payable") {
+        return storedError(409, "PRECONDITION_FAILED", "这笔订单已经结束，请重新下单", {
+          reason: "order_not_payable",
+        });
+      }
 
-      if (!charged.ok) {
-        if (charged.reason === "duplicate") {
-          return chargeResult(db, row.id, 0, await balanceCents(env, identity.accountId));
-        }
-        if (charged.reason === "insufficient") {
-          const current = await balanceCents(env, identity.accountId);
-          // 重试后余额已经够了：说明刚才只是并发抖动，账本仍拒绝说明是暂时性故障。
-          // 不能编一个差额（`max(1, …)` 会谎报「还差 $0.01」），按可重试的通用错误返回。
-          if (current >= required) {
-            return storedError(503, "INTERNAL", "记账暂时不可用，请稍后重试", {
-              reason: "wallet_unavailable",
-            }, true);
-          }
-          return storedError(
-            409,
-            "PRECONDITION_FAILED",
-            "余额不足，先充值",
-            {
-              reason: "insufficient_balance",
-              required_cents: required,
-              shortfall_cents: required - current,
-              min_days: MIN_BALANCE_DAYS,
-            },
-            true,
-          );
-        }
-        return storedError(503, "INTERNAL", "记账暂时不可用，请稍后重试", { reason: "wallet_unavailable" }, true);
+      const confirmedRow = (await loadOrder(db, identity.accountId, row.id)) ?? row;
+      if (confirmed === "already_confirmed") {
+        // 另一个并发请求已经认领并开始建机：只回订单状态，不能再建一台。
+        console.log(`[checkout] order=${row.id} state=${confirmedRow.state} charged=0 replayed=1`);
+        return { status: 200, body: orderView(confirmedRow) };
       }
 
       const provisioned = await provisionServer(
@@ -464,7 +417,7 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
           ENVIRONMENT: env.ENVIRONMENT ?? "dev",
         },
         {
-          id: serverId,
+          id: confirmedRow.server_id ?? serverId,
           account_id: identity.accountId,
           order_id: row.id,
           region: row.region,
@@ -474,7 +427,7 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
       );
 
       if (!provisioned.ok) {
-        // 非可重试（4xx）：provision 已把订单置 failed 并退回当天费用，Cron 不会再补建。
+        // 非可重试（4xx）：provision 已把订单置 failed；at_ready 没有扣过费，不会退款。
         if (!provisioned.retryable) {
           return storedError(
             502,
@@ -484,11 +437,13 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
             false,
           );
         }
-        // 钱已经扣了：provision 的失败分支已把订单退回 paid，Cron 会继续补建。
+        // 存量 upfront 订单仍会退回 paid 等 Cron 补建；at_ready 在 provision 里按永久失败处理。
         return storedError(502, "UPSTREAM_ERROR", "服务器还在创建，稍后自动重试", { reason: provisioned.reason }, true);
       }
 
-      return chargeResult(db, row.id, row.amount_cents, charged.balanceAfterCents);
+      // 就绪后扣款：checkout 不返回扣费金额；charged_cents 看服务器详情。
+      console.log(`[checkout] order=${row.id} state=provisioning charged=0`);
+      return { status: 200, body: orderView(confirmedRow) };
     },
   );
 }
@@ -530,6 +485,11 @@ export async function provisionPaidOrder(
   if (!db) return { ok: false, reason: "db_unavailable" };
   const order = await db.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first<OrderRow>();
   if (!order) return { ok: false, reason: "order_missing" };
+  // 补建只服务存量「先扣后退」订单；at_ready 由 enroll 结算与 Cron 结算兜底负责。
+  // 旧订单没有该列（迁移默认 upfront），按 upfront 处理。
+  if ((order.charge_mode ?? "upfront") !== "upfront") {
+    return { ok: false, reason: "charge_mode_not_upfront" };
+  }
 
   let server = await db
     .prepare("SELECT id, account_id, order_id, region, plan, node_port FROM servers WHERE order_id = ?")

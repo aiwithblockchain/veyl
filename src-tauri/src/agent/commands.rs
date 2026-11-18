@@ -357,25 +357,23 @@ pub async fn my_server_create(
     }
 }
 
-/// 从余额扣 1 天并开始建机（2.28.0，仅 UI；2.37.1 起门槛是 7 天日价）；
-/// 余额不足原样透出 `required_cents` / `shortfall_cents` / `min_days`。
+/// 确认下单并开始建机（2.39.0，仅 UI）：不再扣费，返回 `MyServerOrder`；
+/// 余额门槛（日价 × 7）不足时原样透出 `required_cents` / `shortfall_cents` / `min_days`。
 #[tauri::command]
 pub async fn my_server_checkout(order_id: String) -> Result<Value, Value> {
     match crate::control_plane::servers::checkout(&order_id).await {
-        Ok(charge) => {
+        Ok(order) => {
             log::info!(
-                "我的服务器：扣费成功 order={} state={} charged_cents={} balance_after_cents={}",
-                charge.order_id,
-                charge.state,
-                charge.charged_cents,
-                charge.balance_after_cents
+                "我的服务器：确认下单 order={} state={}（就绪后结算）",
+                order.order_id,
+                order.state
             );
-            serde_json::to_value(&charge)
+            serde_json::to_value(&order)
                 .map_err(|error| command_error("INTERNAL", error, Value::Null))
         }
         Err(error) => {
             log::warn!(
-                "我的服务器：扣费失败 order={} code={} reason={} retryable={}",
+                "我的服务器：确认下单失败 order={} code={} reason={} retryable={}",
                 order_id,
                 error.code,
                 error.reason().unwrap_or("-"),

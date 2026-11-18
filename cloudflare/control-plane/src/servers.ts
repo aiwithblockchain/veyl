@@ -5,6 +5,7 @@ import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
 import { randomId, sealSecret, sha256B64u, signDetached, openSecret } from "./lib/crypto";
 import { apiError, json } from "./lib/http";
 import { createFirewall, deleteDroplet, deleteFirewall, getDroplet } from "./providers/digitalocean";
+import { recordLedgerEntry } from "./wallet";
 
 // 每个环境用自己的签名密钥：dev 与 prod 的公钥都内置在客户端，靠 key_id 区分。
 const DEFAULT_CREDENTIAL_KEY_ID = "cp-2026-11";
@@ -50,8 +51,10 @@ interface ServerRow {
   daily_price_cents: number;
   billing_anchor_at: number;
   transfer_gib?: number;
-  paid_until: number;
+  paid_until: number | null;
   billing_state: string;
+  /** 扣费口径来自订单行（`LEFT JOIN orders`），服务器表本身不存。 */
+  charge_mode?: string | null;
 }
 
 const GRACE_MS = 7 * 24 * 3600 * 1000;
@@ -86,7 +89,8 @@ function serverView(
   row: ServerRow,
   money?: { chargedCents: number; refundedCents: number },
 ) {
-  const paidUntil = Number(row.paid_until ?? 0);
+  // 结算前没有「已付到」的时刻（at_ready 的服务器在 pending 阶段 paid_until = NULL）。
+  const paidUntil = row.paid_until == null ? null : Number(row.paid_until);
   const pastDue = row.billing_state === "past_due" || row.billing_state === "expired";
   return {
     server_id: row.id,
@@ -111,9 +115,14 @@ function serverView(
     monthly_usd: row.monthly_usd,
     daily_price_cents: Number(row.daily_price_cents ?? 0),
     transfer_gib: Number(row.transfer_gib ?? 0),
-    paid_until: new Date(paidUntil).toISOString(),
+    paid_until: paidUntil == null ? null : new Date(paidUntil).toISOString(),
     billing_state: row.billing_state ?? "active",
-    grace_ends_at: pastDue ? new Date(paidUntil + GRACE_MS).toISOString() : null,
+    // 扣费口径（2.39.0）：存量服务器/订单行缺省按 upfront，新单是 at_ready。
+    charge_mode: row.charge_mode ?? "upfront",
+    grace_ends_at:
+      pastDue && paidUntil != null
+        ? new Date(paidUntil + GRACE_MS).toISOString()
+        : null,
     // 钱去哪了：失败机器也要能说清扣了多少、退了多少，不能让人误以为已付到明天。
     charged_cents: money?.chargedCents ?? 0,
     refunded_cents: money?.refundedCents ?? 0,
@@ -135,7 +144,10 @@ async function loadServer(
   serverId: string,
 ): Promise<ServerRow | null> {
   return db
-    .prepare("SELECT * FROM servers WHERE id = ? AND account_id = ?")
+    .prepare(
+      "SELECT s.*, o.charge_mode AS charge_mode FROM servers s LEFT JOIN orders o ON o.id = s.order_id " +
+        "WHERE s.id = ? AND s.account_id = ?",
+    )
     .bind(serverId, accountId)
     .first<ServerRow>();
 }
@@ -270,17 +282,38 @@ async function refundPlan(
     .first<{ id: string; amount_cents: number; paid_via: string | null }>();
   if (!order || order.paid_via !== "wallet") return null;
 
+  // 退款必须先确认真的扣过钱：at_ready 的服务器在结算前没有 charge 流水，
+  // 失败销毁不能凭空退一笔。存量 upfront 订单在 checkout 时写过一笔 charge。
+  const charge = await env.DB!.prepare(
+    "SELECT amount_cents FROM wallet_ledger WHERE ref_type = 'order' AND ref_id = ? AND kind = 'charge' " +
+      "ORDER BY created_at ASC LIMIT 1",
+  )
+    .bind(row.order_id)
+    .first<{ amount_cents: number }>();
+  const chargedCents = Math.abs(Number(charge?.amount_cents ?? 0));
+  if (!charge || chargedCents <= 0) {
+    await env.DB!.prepare(
+      "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'refund_skipped_no_charge', ?)",
+    )
+      .bind(now, row.account_id, row.id, JSON.stringify({ order_id: row.order_id, reason }))
+      .run()
+      .catch((error) =>
+        console.warn(`[servers] audit_failed action=refund_skipped_no_charge server=${row.id} error=${String(error)}`),
+      );
+    return null;
+  }
+
   // 从查询到现在可能已被每日 Cron 顺延一天：退款按最新 paid_until 算，
   // 否则会少退一天——用户为没用到的那天付了钱。
   const fresh = await env.DB!.prepare("SELECT * FROM servers WHERE id = ? AND account_id = ?")
     .bind(row.id, row.account_id)
     .first<ServerRow>();
-  const daily = Number(fresh?.daily_price_cents ?? row.daily_price_cents ?? 0);
+  const daily = chargedCents;
   const anchor = Number(fresh?.billing_anchor_at ?? row.billing_anchor_at ?? 0);
   const paidUntil = Number(fresh?.paid_until ?? row.paid_until ?? 0);
   let amount = 0;
 
-  if (daily > 0 && anchor > 0) {
+  if (daily > 0 && anchor > 0 && paidUntil > 0) {
     const nPaid = Math.floor((paidUntil - anchor) / DAY_MS);
     if (reason === "user") {
       // 当天已经用掉，不退；只退还没开始的整天。
@@ -290,7 +323,7 @@ async function refundPlan(
       amount = Math.max(0, daily * Math.max(0, nPaid));
     }
   } else if (reason !== "user") {
-    amount = Number(order.amount_cents ?? 0);
+    amount = chargedCents;
   }
 
   if (amount <= 0) return null;
@@ -298,6 +331,134 @@ async function refundPlan(
     amount,
     note: reason === "user" ? "销毁退还未使用天数" : `建机失败退款：${reason}`,
   };
+}
+
+/** 结算（就绪后扣款，§4.14）：扣第 0 天 + 订单 ready + 服务器 active，全部同一个 batch。 */
+async function settleOrder(
+  env: ServersEnv,
+  row: ServerRow,
+  dailyCents: number,
+  info: { nodeId: string; firewallId: string | null; version: string; readyAt: number },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!Number.isFinite(dailyCents) || dailyCents <= 0) {
+    return { ok: false, reason: "invalid_price" };
+  }
+  const db = env.DB!;
+  const paidUntil = info.readyAt + DAY_MS;
+  const result = await recordLedgerEntry(env, {
+    accountId: row.account_id,
+    kind: "charge",
+    amountCents: -dailyCents,
+    refType: "order",
+    refId: row.order_id,
+    // 结算只卡 1 天余额；服务器在这段窗口里被销毁/超时清理时不能再写账。
+    guard: {
+      sql:
+        "SELECT 1 FROM accounts a, servers s WHERE a.id = ? AND a.balance_cents >= ? " +
+        "AND s.id = ? AND s.destroyed_at IS NULL AND s.state IN ('booting', 'installing', 'verifying')",
+      args: [row.account_id, dailyCents, row.id],
+    },
+    followUps: (ledgerId) => [
+      db
+        .prepare(
+          "UPDATE orders SET state = 'ready', paid_at = ?, paid_via = 'wallet' " +
+            "WHERE id = ? AND state = 'provisioning' AND EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
+        )
+        .bind(info.readyAt, row.order_id, ledgerId),
+      db
+        .prepare(
+          "UPDATE servers SET state = 'active', node_id = ?, firewall_id = ?, singbox_version = ?, " +
+            "ready_at = ?, billing_state = 'active', daily_price_cents = ?, billing_anchor_at = ?, " +
+            "paid_until = ?, updated_at = ? " +
+            "WHERE id = ? AND destroyed_at IS NULL AND state IN ('booting', 'installing', 'verifying') " +
+            "AND EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
+        )
+        .bind(
+          info.nodeId,
+          info.firewallId,
+          info.version,
+          info.readyAt,
+          dailyCents,
+          info.readyAt,
+          paidUntil,
+          info.readyAt,
+          row.id,
+          ledgerId,
+        ),
+      db
+        .prepare(
+          "INSERT INTO audit_log (at, account_id, server_id, action, detail) " +
+            "SELECT ?, ?, ?, 'settle.ok', ? WHERE EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
+        )
+        .bind(
+          info.readyAt,
+          row.account_id,
+          row.id,
+          JSON.stringify({ order_id: row.order_id, amount_cents: dailyCents }),
+          ledgerId,
+        ),
+    ],
+  });
+  if (result.ok) return { ok: true };
+  // 已经是同一笔结算（崩溃后重放）：账本与状态都在原批里，按成功处理，不重复扣。
+  if (result.reason === "duplicate") return { ok: true };
+  return { ok: false, reason: result.reason };
+}
+
+/**
+ * 结算失败/N 分钟未结算：**先认领订单**（provisioning → failed），抢到的那一次才删远端实例；
+ * 抢不到说明别处已经处置（并发结算成功了就是订单 ready），这里绝不能再删——多删一次就是
+ * 删掉用户刚付过钱的机器。服务器标成 error 但**不写 destroyed**，列表保留错误行给用户看原因。
+ *
+ * 认领之后、删除之前进程死掉会留下仍在进度阶段的机器：`sweepExpiredEnrollments` 到
+ * enrollment 过期时会按 `destroyInstance` 收尾，而防火墙 id 在创建时就已落库，不会留孤儿规则。
+ */
+async function failSettlement(
+  env: ServersEnv,
+  row: ServerRow,
+  firewallId: string | null,
+  reason: string,
+): Promise<boolean> {
+  const db = env.DB!;
+  const now = Date.now();
+  const claimed = await db
+    .prepare(
+      "UPDATE orders SET state = 'failed', failure_code = ?, failure_stage = ? " +
+        "WHERE id = ? AND state = 'provisioning'",
+    )
+    .bind(reason, "active", row.order_id)
+    .run();
+  if (Number((claimed as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) return false;
+
+  const remoteFirewall = firewallId ?? row.firewall_id ?? null;
+  if (row.provider_id && env.DO_API_TOKEN) {
+    const deleted = await deleteDroplet(env.DO_API_TOKEN, row.provider_id);
+    if (!deleted.ok && deleted.status !== 404) {
+      console.warn(`[servers] settle_cleanup_failed server=${row.id} reason=${deleted.reason}`);
+    }
+  }
+  if (remoteFirewall && env.DO_API_TOKEN) {
+    const removed = await deleteFirewall(env.DO_API_TOKEN, remoteFirewall);
+    if (!removed.ok && removed.status !== 404) {
+      console.warn(`[servers] settle_firewall_delete_failed id=${remoteFirewall} reason=${removed.reason}`);
+    }
+  }
+
+  await db.batch([
+    db
+      .prepare(
+        "UPDATE servers SET state = 'error', failure_code = ?, failure_stage = 'active', updated_at = ? " +
+          "WHERE id = ? AND destroyed_at IS NULL",
+      )
+      .bind(reason, now, row.id),
+    db.prepare("UPDATE credentials SET destroyed_at = ? WHERE server_id = ?").bind(now, row.id),
+    db
+      .prepare(
+        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'settle_insufficient', ?)",
+      )
+      .bind(now, row.account_id, row.id, JSON.stringify({ order_id: row.order_id, reason })),
+  ]);
+  return true;
 }
 
 /** 阶段只许前进：installing 只能从 booting 来，verifying 只能从 installing 来。 */
@@ -475,6 +636,9 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
   if (changed === 0) return json({ ok: false, reason: "already_used" }, 409);
 
   // 从这里往后已经消费了 token：任何失败都必须销毁机器，不能留一台没人管的计费实例。
+  // `firewallId` 声明在 try 外：id 写库失败时会走 catch，销毁路径拿不到库里的值，
+  // 只能靠这个内存变量把刚建好的防火墙删掉。
+  let firewallId: string | null = null;
   try {
     await db
       .prepare(
@@ -484,7 +648,6 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
       .bind(row.id, sealed.iv, sealed.ciphertext, Date.now())
       .run();
 
-    let firewallId: string | null = null;
     if (env.DO_API_TOKEN && row.provider_id) {
       const firewall = await createFirewall(env.DO_API_TOKEN, {
         name: `veyl-${row.id.replace(/^srv_/, "").slice(0, 12)}`,
@@ -496,27 +659,56 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
         return json({ ok: false, reason: "firewall_failed" }, 502);
       }
       firewallId = firewall.value.id;
+      // 建好就落库：结算失败或进程在中途死掉时，Cron 兜底只能靠库里的 id 删防火墙。
+      await db
+        .prepare("UPDATE servers SET firewall_id = ?, updated_at = ? WHERE id = ?")
+        .bind(firewallId, Date.now(), row.id)
+        .run();
     }
 
     const nodeId = randomId("nd_", 12);
     const readyAt = Date.now();
-    // 激活必须带状态守卫：sweep / refreshBooting 可能在这段窗口里已经把机器销毁并退了钱，
-    // 晚到的激活不能把一台 DO 上已删除的机器改回 active（幽灵机器）。
-    const activation = await db.batch([
-      db.prepare(
-        "UPDATE servers SET state = 'active', node_id = ?, firewall_id = ?, singbox_version = ?, ready_at = ?, updated_at = ? " +
-          "WHERE id = ? AND state IN ('booting', 'installing', 'verifying') AND destroyed_at IS NULL",
-      ).bind(nodeId, firewallId, version, readyAt, readyAt, row.id),
-      db.prepare(
-        "UPDATE orders SET state = 'ready' WHERE id = ? AND state = 'provisioning'",
-      ).bind(row.order_id),
-    ]);
-    const activated = Number(
-      (activation[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
-    );
-    const orderReady = Number(
-      (activation[1] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
-    );
+    const orderRow = await db
+      .prepare("SELECT id, amount_cents, charge_mode FROM orders WHERE id = ?")
+      .bind(row.order_id)
+      .first<{ id: string; amount_cents: number; charge_mode: string | null }>();
+    // 存量 upfront 订单在 checkout 已扣过费，这里只做激活；
+    // at_ready 订单在就绪这一刻结算第 0 天（§4.14）。
+    let activated: number;
+    let orderReady: number;
+    if (orderRow?.charge_mode === "at_ready") {
+      const settled = await settleOrder(env, row, Number(orderRow.amount_cents ?? 0), {
+        nodeId,
+        firewallId,
+        version,
+        readyAt,
+      });
+      if (!settled.ok) {
+        // token 已消费、凭据已写：必须显式收尾，不能留一台没开通却在跑、也没人管的实例。
+        await failSettlement(env, row, firewallId, "settle_insufficient");
+        return json({ ok: false, reason: "settle_insufficient" }, 409);
+      }
+      activated = 1;
+      orderReady = 1;
+    } else {
+      // 激活必须带状态守卫：sweep / refreshBooting 可能在这段窗口里已经把机器销毁并退了钱，
+      // 晚到的激活不能把一台 DO 上已删除的机器改回 active（幽灵机器）。
+      const activation = await db.batch([
+        db.prepare(
+          "UPDATE servers SET state = 'active', node_id = ?, firewall_id = ?, singbox_version = ?, ready_at = ?, updated_at = ? " +
+            "WHERE id = ? AND state IN ('booting', 'installing', 'verifying') AND destroyed_at IS NULL",
+        ).bind(nodeId, firewallId, version, readyAt, readyAt, row.id),
+        db.prepare(
+          "UPDATE orders SET state = 'ready' WHERE id = ? AND state = 'provisioning'",
+        ).bind(row.order_id),
+      ]);
+      activated = Number(
+        (activation[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
+      );
+      orderReady = Number(
+        (activation[1] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
+      );
+    }
     if (activated !== 1) {
       // 激活被守卫拦下：本次刚插的凭据与刚建的防火墙都要收尾。
       // destroyInstance 幂等：DO 删除 404 按成功；退款撞 `(server_refund, server_id)` 唯一键，
@@ -586,7 +778,9 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
 
     return json({ ok: true, node_id: nodeId });
   } catch (error) {
-    await destroyInstance(env, row, "activate_failed");
+    // 失败点可能就是「防火墙 id 写库」：销毁路径读库拿不到它，把内存里的 id 传进去补删，
+    // 否则 DO 上会留下一条永远没人认领的防火墙规则。
+    await destroyInstance(env, row, "activate_failed", { firewallId });
     return json({ ok: false, reason: "activate_failed" }, 500);
   }
 }
@@ -614,6 +808,9 @@ async function refreshBooting(env: ServersEnv, rows: ServerRow[]): Promise<void>
       await destroyInstance(env, row, reason, { failureStage: stage });
       row.state = "destroyed";
       row.destroyed_at = Date.now();
+      // 行是查询快照、不会回读：失败码在这里补上，否则这一次响应只说「已销毁」不说原因。
+      row.failure_code = reason;
+      row.failure_stage = stage;
       continue;
     }
 
@@ -632,6 +829,56 @@ async function refreshBooting(env: ServersEnv, rows: ServerRow[]): Promise<void>
 const ENROLL_REAP_SCAN = 50;
 const ENROLL_REAP_BATCH = 10;
 const ENROLL_REAP_PAGES = 10;
+/** 结算兜底：enroll 已消费 token 之后仍未写 charge 流水，超过这个时间视为结算进程已死。 */
+const SETTLE_SWEEP_AFTER_MS = 10 * 60 * 1000;
+const SETTLE_SWEEP_BATCH = 10;
+
+/**
+ * 结算兜底（§4.14）：at_ready 订单已经消费 enrollment token，但没有 charge 流水，
+ * 服务器还停在 booting / installing / verifying。正常结算在同一请求里完成；
+ * 超过 10 分钟说明 Worker 中途死掉，按「结算失败」同一处置收尾，避免永久占着实例。
+ */
+export async function sweepUnsettledSettlements(
+  env: ServersEnv,
+  now = Date.now(),
+): Promise<number> {
+  if (!env.DB) return 0;
+  const db = env.DB;
+  const rows = await db
+    .prepare(
+      "SELECT s.* FROM servers s JOIN orders o ON o.id = s.order_id " +
+        "WHERE o.charge_mode = 'at_ready' AND o.state = 'provisioning' " +
+        "AND s.destroyed_at IS NULL AND s.state IN ('booting', 'installing', 'verifying') " +
+        "AND s.enrollment_used_at IS NOT NULL AND s.enrollment_used_at < ? " +
+        "AND NOT EXISTS (SELECT 1 FROM wallet_ledger w " +
+        "WHERE w.ref_type = 'order' AND w.ref_id = o.id AND w.kind = 'charge') " +
+        "ORDER BY s.enrollment_used_at ASC LIMIT ?",
+    )
+    .bind(now - SETTLE_SWEEP_AFTER_MS, SETTLE_SWEEP_BATCH)
+    .all<ServerRow>();
+
+  let reaped = 0;
+  for (const row of rows.results ?? []) {
+    // 扫描到处理之间可能已经结算或销毁：以库里的最新状态为准。
+    const fresh = await db
+      .prepare("SELECT * FROM servers WHERE id = ? AND account_id = ?")
+      .bind(row.id, row.account_id)
+      .first<ServerRow>();
+    if (!fresh || fresh.destroyed_at != null || !PROGRESS_STATES.includes(fresh.state)) {
+      continue;
+    }
+    const charged = await db
+      .prepare(
+        "SELECT id FROM wallet_ledger WHERE ref_type = 'order' AND ref_id = ? AND kind = 'charge'",
+      )
+      .bind(fresh.order_id)
+      .first<{ id: string }>();
+    if (charged) continue;
+    const claimed = await failSettlement(env, fresh, fresh.firewall_id, "settle_insufficient");
+    if (claimed) reaped += 1;
+  }
+  return reaped;
+}
 
 /**
  * 计费 Cron 的兜底（2026-11-18）：enrollment 过期仍停在 booting / installing / verifying 的机器，
@@ -727,7 +974,8 @@ async function listServers(request: Request, env: ServersEnv): Promise<Response>
   if (!env.DB) return apiError("INTERNAL", "服务还没准备好", { retryable: true, status: 503 });
 
   const result = await env.DB.prepare(
-    "SELECT * FROM servers WHERE account_id = ? AND state != 'destroyed' ORDER BY created_at DESC",
+    "SELECT s.*, o.charge_mode AS charge_mode FROM servers s LEFT JOIN orders o ON o.id = s.order_id " +
+      "WHERE s.account_id = ? AND s.state != 'destroyed' ORDER BY s.created_at DESC",
   )
     .bind(identity.accountId)
     .all<ServerRow>();

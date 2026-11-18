@@ -62,12 +62,25 @@ describe("parseMigrations", () => {
     ).toThrow(/CREATE TABLE t 有一列读不懂/);
   });
 
+  it("表重建（CREATE 新表 → DROP 旧表 → RENAME）按最终表名校验", () => {
+    const tables = schema([
+      {
+        name: "0001_x.sql",
+        sql:
+          "CREATE TABLE t (a TEXT); CREATE TABLE t_new (a TEXT, b TEXT); " +
+          "INSERT INTO t_new SELECT a, NULL FROM t; DROP TABLE t; ALTER TABLE t_new RENAME TO t;",
+      },
+    ]);
+    expect(tables.t).toEqual(["a", "b"]);
+    expect(tables.t_new).toBeUndefined();
+  });
+
   it("不支持的 ALTER 形式直接报错并说明是哪种", () => {
     expect(() =>
       parseMigrations([
-        { name: "0001_x.sql", sql: "CREATE TABLE t (a TEXT); ALTER TABLE t RENAME TO u;" },
+        { name: "0001_x.sql", sql: "CREATE TABLE t (a TEXT); ALTER TABLE t NOOP x;" },
       ]),
-    ).toThrow(/不支持的 ALTER TABLE 形式「RENAME」/);
+    ).toThrow(/不支持的 ALTER TABLE 形式「NOOP」/);
   });
 
   it("CREATE INDEX 放行，CREATE VIEW 这类解析不了的 CREATE 直接报错", () => {

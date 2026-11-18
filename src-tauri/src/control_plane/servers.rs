@@ -34,7 +34,23 @@ pub const ORDER_STATES: [&str; 6] = [
 ];
 
 /// 计费状态（控制面 Cron 每日推进）。
-pub const BILLING_STATES: [&str; 3] = ["active", "past_due", "expired"];
+pub const BILLING_STATES: [&str; 4] = ["active", "past_due", "expired", "pending"];
+
+/// 扣费口径（2.39.0）：`upfront` 下单即扣（存量），`at_ready` 就绪后结算。
+pub const CHARGE_MODES: [&str; 2] = ["upfront", "at_ready"];
+
+/// 旧响应没有 `charge_mode`：建行即扣是当时唯一的形态。
+fn default_charge_mode() -> String {
+    "upfront".into()
+}
+
+/// 缺字段用默认值；显式 null（旧订单列可空）也按 `upfront`，不让一条历史订单拖垮整个列表。
+fn deserialize_charge_mode<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_else(default_charge_mode))
+}
 
 /// 宽限期：`grace_ends_at` 的派生口径（§4.6），控制面不给时由 Host 计算。
 const GRACE_DAYS: i64 = 7;
@@ -88,9 +104,16 @@ pub struct MyServer {
     /// 已退回的钱（USD 分）；没退过 = 0。
     #[serde(default)]
     pub refunded_cents: i64,
-    /// 已付到哪个时刻（ISO 8601）；建行时即写入，永不为 null。
-    pub paid_until: String,
+    /// 已付到哪个时刻（ISO 8601）；结算前为 null（`billing_state = "pending"`）。
+    #[serde(default)]
+    pub paid_until: Option<String>,
     pub billing_state: String,
+    /// 扣费口径；缺字段或 null 按 `upfront`（旧控制面没有这个概念）。
+    #[serde(
+        default = "default_charge_mode",
+        deserialize_with = "deserialize_charge_mode"
+    )]
+    pub charge_mode: String,
     /// 派生值：`paid_until + 7d`，不落库；仅 past_due / expired 非空。
     #[serde(default)]
     pub grace_ends_at: Option<String>,
@@ -121,21 +144,13 @@ pub struct MyServerOrder {
     pub server_id: Option<String>,
     #[serde(default)]
     pub failure: Option<MyServerOrderFailure>,
+    /// 扣费口径；缺字段或 null 按 `upfront`。
+    #[serde(
+        default = "default_charge_mode",
+        deserialize_with = "deserialize_charge_mode"
+    )]
+    pub charge_mode: String,
 }
-
-/// `my_server_checkout` 的返回：收银台会话（2.27.0）。
-/// `my_server_checkout` 的返回：从余额扣一个月（2.28.0）。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MyServerCharge {
-    #[serde(default)]
-    pub order_id: String,
-    pub state: String,
-    /// 实际扣费（美分）。已付过的订单重复调用为 0。
-    pub charged_cents: i64,
-    pub balance_after_cents: i64,
-}
-
-const CHARGE_STATES: [&str; 3] = ["paid", "provisioning", "ready"];
 
 /// `my_server_wallet` 的返回：余额（USD 分）与可选充值面额（整数分，升序）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -184,6 +199,8 @@ struct RawOrder {
     server_id: Option<String>,
     #[serde(default)]
     failure: Option<MyServerOrderFailure>,
+    #[serde(default)]
+    charge_mode: Option<String>,
 }
 
 static ORDERS: parking_lot::Mutex<Vec<MyServerOrder>> = parking_lot::Mutex::new(Vec::new());
@@ -283,9 +300,21 @@ fn validate_server(server: &mut MyServer) -> Result<(), CpError> {
     if server.transfer_gib < 0 {
         return Err(CpError::invalid_response("服务器流量额度不能为负"));
     }
-    let paid_until = parse_iso_ms(&server.paid_until)
-        .ok_or_else(|| CpError::invalid_response("服务器 paid_until 不是 ISO 8601"))?;
+    // 2.39.0：结算前 paid_until 为 null，只有 pending 允许；其它状态必须是合法时刻。
+    let paid_until = match server.paid_until.as_deref() {
+        Some(value) => Some(
+            parse_iso_ms(value)
+                .ok_or_else(|| CpError::invalid_response("服务器 paid_until 不是 ISO 8601"))?,
+        ),
+        None => {
+            if server.billing_state != "pending" {
+                return Err(CpError::invalid_response("服务器 paid_until 为空但不在 pending"));
+            }
+            None
+        }
+    };
     validate_state(&server.billing_state, &BILLING_STATES, "计费")?;
+    validate_state(&server.charge_mode, &CHARGE_MODES, "扣费口径")?;
     normalize_grace(server, paid_until);
     Ok(())
 }
@@ -294,11 +323,16 @@ fn validate_server(server: &mut MyServer) -> Result<(), CpError> {
 ///
 /// 控制面给了就校验后透传；没给时按 `paid_until + 7d` 算。`active` 永远为 null，
 /// 否则界面会显示「还在宽限」而实际已在正常计费。
-fn normalize_grace(server: &mut MyServer, paid_until_ms: i64) {
+fn normalize_grace(server: &mut MyServer, paid_until_ms: Option<i64>) {
     if server.billing_state == "active" {
         server.grace_ends_at = None;
         return;
     }
+    let Some(paid_until_ms) = paid_until_ms else {
+        // pending（结算前）没有已付时刻，也就没有宽限期。
+        server.grace_ends_at = None;
+        return;
+    };
     let valid = server
         .grace_ends_at
         .as_deref()
@@ -458,7 +492,12 @@ fn merge_order(
         failure: raw
             .failure
             .or_else(|| fallback.and_then(|order| order.failure.clone())),
+        charge_mode: raw
+            .charge_mode
+            .or_else(|| fallback.map(|order| order.charge_mode.clone()))
+            .unwrap_or_else(default_charge_mode),
     };
+    validate_state(&order.charge_mode, &CHARGE_MODES, "扣费口径")?;
     let previous_state = remembered_order(&order.order_id).map(|order| order.state);
     remember_order(&order);
     record_order_event(&order, previous_state.as_deref());
@@ -559,12 +598,12 @@ pub async fn create(
     merge_order(raw, &order_id, None, Some(region), Some(plan))
 }
 
-/// 从余额扣 1 天并开始建机（2.28.0；2.37.1 起门槛是 7 天日价）。
+/// 确认下单（2.39.0）：控制面只建机、不扣费，就绪后由 enroll 结算第 0 天。
 ///
-/// 余额不足由控制面返回 `PRECONDITION_FAILED / insufficient_balance`，并带
-/// `details.required_cents` / `shortfall_cents` / `min_days`；Host 原样透出，
-/// 不做浮点换算。已付过的订单重复调用返回 200 且 `charged_cents = 0`，不是二次扣费。
-pub async fn checkout(order_id: &str) -> Result<MyServerCharge, CpError> {
+/// 余额门槛（日价 × 7）仍由控制面在预检时判定；不足时返回
+/// `PRECONDITION_FAILED / insufficient_balance`（带 `required_cents` /
+/// `shortfall_cents` / `min_days`），Host 原样透出。返回 `MyServerOrder`。
+pub async fn checkout(order_id: &str) -> Result<MyServerOrder, CpError> {
     let client = ControlPlane::new()?;
     let raw = client
         .post(
@@ -573,18 +612,9 @@ pub async fn checkout(order_id: &str) -> Result<MyServerCharge, CpError> {
             Some(&new_idempotency_key()),
         )
         .await?;
-    let charge = parse_charge(raw, order_id)?;
-    // 扣费成功即已付款：把订单缓存与既有事件跟上。
-    let fallback = remembered_order(&charge.order_id);
-    let update = RawOrder {
-        order_id: Some(charge.order_id.clone()),
-        state: Some(charge.state.clone()),
-        ..Default::default()
-    };
-    if let Ok(order) = merge_order(update, &charge.order_id, fallback.as_ref(), None, None) {
-        super::events::emit_order_changed(&order);
-    }
-    Ok(charge)
+    let order = merge_order(parse_order(raw)?, order_id, remembered_order(order_id).as_ref(), None, None)?;
+    super::events::emit_order_changed(&order);
+    Ok(order)
 }
 
 /// 支付通道：省略 = `dodo`；`fake` 只在非生产可用（本地开发与 E2E 的后门）。
@@ -613,19 +643,6 @@ fn resolve_channel<'a>(
         ));
     }
     Ok(channel)
-}
-
-fn parse_charge(raw: Value, order_id: &str) -> Result<MyServerCharge, CpError> {
-    let mut charge: MyServerCharge = serde_json::from_value(raw)
-        .map_err(|_| CpError::invalid_response("扣费响应格式不正确"))?;
-    validate_state(&charge.state, &CHARGE_STATES, "扣费")?;
-    if charge.order_id.trim().is_empty() {
-        charge.order_id = order_id.to_string();
-    }
-    if charge.charged_cents < 0 || charge.balance_after_cents < 0 {
-        return Err(CpError::invalid_response("扣费金额不能为负"));
-    }
-    Ok(charge)
 }
 
 /// 读余额（`GET /v1/wallet`，USD 分）。`updated_at` 由 Host 补本地时间。
@@ -848,8 +865,11 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
             refunded_cents: 0,
             // rebuild 是新的计费生命周期：第 0 天已扣，先按 1 天估算，
             // 下一次列表/详情以控制面为准。
-            paid_until: crate::store::iso_from_ms(crate::store::now_ms() + 24 * 3600 * 1000),
+            paid_until: Some(crate::store::iso_from_ms(
+                crate::store::now_ms() + 24 * 3600 * 1000,
+            )),
             billing_state: "active".into(),
+            charge_mode: default_charge_mode(),
             grace_ends_at: None,
             failure: None,
         };
@@ -946,12 +966,16 @@ fn cache_server(conn: &rusqlite::Connection, server: &MyServer) {
         .ok()
         .flatten();
     let created_at = parse_iso_ms(&server.created_at).unwrap_or_else(crate::store::now_ms);
-    let paid_until = match parse_iso_ms(&server.paid_until) {
-        Some(value) => value,
-        None => {
-            log::warn!("缓存我的服务器失败：paid_until 不是 ISO 8601");
-            return;
-        }
+    let paid_until = match server.paid_until.as_deref() {
+        Some(value) => match parse_iso_ms(value) {
+            Some(value) => value,
+            None => {
+                log::warn!("缓存我的服务器失败：paid_until 不是 ISO 8601");
+                return;
+            }
+        },
+        // 结算前没有已付时刻：本地镜像用 0 表示，读回时还原成 null。
+        None => 0,
     };
     // `my_servers.node_id` 有外键；远端可能比本地先给出 node_id（凭据还没取），
     // 此时先留空，等 `my_server_credentials` 建好节点行再回填。
@@ -1014,9 +1038,15 @@ fn local_server(server_id: &str) -> Option<MyServer> {
         // 本地缓存只存服务器状态，不存钱；拿不到远端时按「没扣过/没退过」展示。
         charged_cents: 0,
         refunded_cents: 0,
-        paid_until: crate::store::iso_from_ms(row.paid_until),
+        paid_until: if row.paid_until > 0 {
+            Some(crate::store::iso_from_ms(row.paid_until))
+        } else {
+            None
+        },
         billing_state: row.billing_state.clone(),
-        grace_ends_at: if row.billing_state == "active" {
+        // 本地镜像不存扣费口径；旧口径即下单即扣，与 serde 缺省一致。
+        charge_mode: default_charge_mode(),
+        grace_ends_at: if row.billing_state == "active" || row.paid_until <= 0 {
             None
         } else {
             Some(crate::store::iso_from_ms(
@@ -1125,8 +1155,9 @@ mod tests {
             transfer_gib: 1000,
             charged_cents: 0,
             refunded_cents: 0,
-            paid_until: "2026-11-15T08:00:00Z".into(),
+            paid_until: Some("2026-11-15T08:00:00Z".into()),
             billing_state: "active".into(),
+            charge_mode: default_charge_mode(),
             grace_ends_at: None,
             failure: None,
         };
@@ -1160,19 +1191,19 @@ mod tests {
     }
 
     #[test]
-    fn billing_fields_are_required_and_paid_until_is_never_null() {
+    fn billing_fields_are_required_and_paid_until_is_nullable_only_when_pending() {
         let mut server: MyServer = serde_json::from_value(a_server_json()).unwrap();
         assert!(validate_server(&mut server).is_ok());
         assert_eq!(server.daily_price_cents, 20);
         assert_eq!(server.transfer_gib, 1000);
-        assert_eq!(server.paid_until, "2026-11-15T08:00:00Z");
+        assert_eq!(server.paid_until.as_deref(), Some("2026-11-15T08:00:00Z"));
         assert_eq!(server.billing_state, "active");
         // active 没有宽限期：即使上游误发也要清掉。
         server.grace_ends_at = Some("2026-11-22T08:00:00Z".into());
         assert!(validate_server(&mut server).is_ok());
         assert!(server.grace_ends_at.is_none());
 
-        for field in ["daily_price_cents", "transfer_gib", "paid_until", "billing_state"] {
+        for field in ["daily_price_cents", "transfer_gib", "billing_state"] {
             let mut value = a_server_json();
             value.as_object_mut().unwrap().remove(field);
             assert!(
@@ -1181,10 +1212,72 @@ mod tests {
             );
         }
 
-        // 契约 2.30.0：paid_until 收紧为非空，null 不能被当成没付过费。
+        // 2.39.0：pending（结算前）允许 paid_until = null，且不派生宽限期。
         let mut value = a_server_json();
         value["paid_until"] = Value::Null;
-        assert!(serde_json::from_value::<MyServer>(value).is_err());
+        value["billing_state"] = json!("pending");
+        let mut pending: MyServer = serde_json::from_value(value).unwrap();
+        assert!(validate_server(&mut pending).is_ok());
+        assert!(pending.grace_ends_at.is_none());
+
+        // 其它状态没有已付时刻是契约违约，不能被当成没付过费。
+        let mut value = a_server_json();
+        value["paid_until"] = Value::Null;
+        let mut active: MyServer = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            validate_server(&mut active).unwrap_err().reason(),
+            Some("invalid_response")
+        );
+    }
+
+    #[test]
+    fn charge_mode_defaults_to_upfront_and_settle_failure_keeps_its_code() {
+        // 旧响应完全没有 charge_mode：按建行即扣解析，不能因此整条失败。
+        let mut server: MyServer = serde_json::from_value(a_server_json()).unwrap();
+        assert_eq!(server.charge_mode, "upfront");
+        assert!(validate_server(&mut server).is_ok());
+
+        // 列可空：显式 null 同样按 upfront。
+        let mut value = a_server_json();
+        value["charge_mode"] = Value::Null;
+        let mut server: MyServer = serde_json::from_value(value).unwrap();
+        assert_eq!(server.charge_mode, "upfront");
+        assert!(validate_server(&mut server).is_ok());
+
+        // 新控制面的就绪后结算：原样透出。
+        let mut value = a_server_json();
+        value["charge_mode"] = json!("at_ready");
+        let mut server: MyServer = serde_json::from_value(value).unwrap();
+        assert!(validate_server(&mut server).is_ok());
+        assert_eq!(server.charge_mode, "at_ready");
+
+        // 状态不认识就让这一条失败，而不是按错误口径展示。
+        let mut value = a_server_json();
+        value["charge_mode"] = json!("prepaid");
+        let mut server: MyServer = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            validate_server(&mut server).unwrap_err().reason(),
+            Some("invalid_response")
+        );
+
+        // 结算失败：服务器只有 pending 计费字段，failure.code 必须原样交给界面。
+        let mut value = a_server_json();
+        value["paid_until"] = Value::Null;
+        value["billing_state"] = json!("pending");
+        value["charge_mode"] = json!("at_ready");
+        value["failure"] = json!({
+            "stage": "active",
+            "code": "settle_insufficient",
+            "message": "这台服务器没有创建成功",
+            "retryable": false,
+        });
+        let mut server: MyServer = serde_json::from_value(value).unwrap();
+        assert!(validate_server(&mut server).is_ok());
+        assert!(server.grace_ends_at.is_none());
+        assert_eq!(
+            server.failure.as_ref().map(|failure| failure.code.as_str()),
+            Some("settle_insufficient")
+        );
     }
 
     #[test]
@@ -1233,6 +1326,7 @@ mod tests {
             expires_at: Some("2026-11-14T08:10:00Z".into()),
             server_id: None,
             failure: None,
+            charge_mode: default_charge_mode(),
         };
         let raw = parse_order(json!({ "state": "paid", "server_id": "srv_1" })).unwrap();
         let merged = merge_order(raw, "ord_1", Some(&fallback), None, None).unwrap();
@@ -1259,41 +1353,59 @@ mod tests {
     }
 
     #[test]
-    fn a_charge_response_carries_cents_and_supports_repeat_calls() {
-        let charge = parse_charge(
-            json!({
-                "order_id": "ord_1",
-                "state": "paid",
-                "charged_cents": 900,
-                "balance_after_cents": 1100,
-            }),
-            "ord_fallback",
-        )
+    fn a_checkout_response_is_an_order_not_a_charge() {
+        // 2.39.0：checkout 返回 MyServerOrder（state = provisioning），没有扣费金额。
+        let raw = parse_order(json!({
+            "order_id": "ord_1",
+            "state": "provisioning",
+            "region": "sgp1",
+            "plan": "s-1vcpu-1gb",
+            "amount_usd": 0.3,
+            "server_id": "srv_1"
+        }))
         .unwrap();
-        assert_eq!(charge.order_id, "ord_1");
-        assert_eq!(charge.state, "paid");
-        assert_eq!(charge.charged_cents, 900);
-        assert_eq!(charge.balance_after_cents, 1100);
+        let order = merge_order(raw, "ord_1", None, None, None).unwrap();
+        assert_eq!(order.state, "provisioning");
+        assert_eq!(order.server_id.as_deref(), Some("srv_1"));
 
-        // 已付过的订单重复调用：charged_cents = 0，不是二次扣费。
-        let charge =
-            parse_charge(json!({ "state": "ready", "charged_cents": 0, "balance_after_cents": 1100 }), "ord_2")
-                .unwrap();
-        assert_eq!(charge.order_id, "ord_2");
-        assert_eq!(charge.charged_cents, 0);
+        // 旧字段被忽略，不会让解析失败，也不会再造出扣费类型。
+        let raw = parse_order(json!({ "state": "provisioning", "charged_cents": 30 })).unwrap();
+        assert!(merge_order(raw, "ord_2", None, None, None).is_ok());
+    }
 
-        // 旧收银台状态与负金额都按 invalid_response 处理，不 panic。
-        let error = parse_charge(
-            json!({ "state": "awaiting_payment", "charged_cents": 1, "balance_after_cents": 1 }),
-            "ord_3",
-        )
-        .unwrap_err();
-        assert_eq!(error.reason(), Some("invalid_response"));
-        assert!(parse_charge(
-            json!({ "state": "paid", "charged_cents": -1, "balance_after_cents": 1 }),
-            "ord_4",
-        )
-        .is_err());
+    #[test]
+    fn an_order_carries_charge_mode_and_settle_failure() {
+        // 旧响应没有 charge_mode：按 upfront。
+        let raw = parse_order(json!({ "state": "provisioning" })).unwrap();
+        let order = merge_order(raw, "ord_old", None, None, None).unwrap();
+        assert_eq!(order.charge_mode, "upfront");
+
+        // 显式 null 也按 upfront（旧订单列可空）。
+        let raw = parse_order(json!({ "state": "provisioning", "charge_mode": null })).unwrap();
+        let order = merge_order(raw, "ord_null", None, None, None).unwrap();
+        assert_eq!(order.charge_mode, "upfront");
+
+        // 就绪后结算 + 结算失败：两个字段都要到界面。
+        let raw = parse_order(json!({
+            "order_id": "ord_settle",
+            "state": "failed",
+            "charge_mode": "at_ready",
+            "failure": {
+                "code": "settle_insufficient",
+                "message": "服务器没建成，这笔订单已结束，没有产生服务器",
+                "retryable": false
+            }
+        }))
+        .unwrap();
+        let order = merge_order(raw, "ord_settle", None, None, None).unwrap();
+        assert_eq!(order.charge_mode, "at_ready");
+        let failure = order.failure.expect("失败订单必须带 failure");
+        assert_eq!(failure.code, "settle_insufficient");
+        assert!(!failure.retryable);
+
+        // 不认识的口径不让订单静默按错误含义展示。
+        let raw = parse_order(json!({ "state": "provisioning", "charge_mode": "prepaid" })).unwrap();
+        assert!(merge_order(raw, "ord_weird", None, None, None).is_err());
     }
 
     #[test]

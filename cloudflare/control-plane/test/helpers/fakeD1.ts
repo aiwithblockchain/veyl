@@ -50,6 +50,10 @@ export class FakeD1 {
   beforeWebhookSample?: () => void;
   /** 测试钩子：建机批次的 servers 插入前触发，用来模拟端口在最后一步才冲突。 */
   beforeServerInsert?: () => void;
+  /** 测试钩子：结算失败认领订单前触发，用来模拟「并发结算已经把订单置 ready」。 */
+  beforeSettleClaim?: () => void;
+  /** 测试钩子：防火墙 id 写库前触发；抛错模拟写失败（防火墙已在 DO 上建好）。 */
+  beforeFirewallWrite?: () => void;
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, { sql, args: [] });
@@ -250,6 +254,20 @@ export class FakeD1 {
         created_at: a[6],
         last_seen_at: a[7],
         revoked_at: null,
+      });
+      return null;
+    }
+    if (sql.startsWith("insert into audit_log") && sql.includes("where exists (select 1 from wallet_ledger")) {
+      // 带账本守卫的审计（settle.ok）：账本没写成就不留痕。
+      const [at, accountId, serverId, detail, ledgerId] = a;
+      if (!this.tables.wallet_ledger.some((row) => row.id === ledgerId)) return null;
+      const literal = /'([a-z_.]+)'/.exec(sql)?.[1];
+      this.tables.audit_log.push({
+        at,
+        account_id: accountId,
+        server_id: serverId,
+        action: literal ?? "settle.ok",
+        detail,
       });
       return null;
     }
@@ -499,6 +517,16 @@ export class FakeD1 {
     if (sql.startsWith("select * from orders where id")) {
       return this.tables.orders.find((o) => o.id === a[0]) ?? null;
     }
+    if (sql.startsWith("select id, amount_cents, charge_mode from orders")) {
+      const row = this.tables.orders.find((o) => o.id === a[0]);
+      return row
+        ? { id: row.id, amount_cents: row.amount_cents, charge_mode: row.charge_mode ?? "upfront" }
+        : null;
+    }
+    if (sql.startsWith("select charge_mode from orders")) {
+      const row = this.tables.orders.find((o) => o.id === a[0]);
+      return row ? { charge_mode: row.charge_mode ?? "upfront" } : null;
+    }
     if (sql.startsWith("select id, amount_cents, paid_via from orders")) {
       const row = this.tables.orders.find((o) => o.id === a[0]);
       return row
@@ -534,6 +562,7 @@ export class FakeD1 {
         checkout_session_id: null,
         checkout_url: null,
         paid_via: null,
+        charge_mode: "at_ready",
       });
       return null;
     }
@@ -560,6 +589,20 @@ export class FakeD1 {
     if (sql.startsWith("update orders set state = 'payment_failed'")) {
       const row = this.tables.orders.find((o) => o.id === a[0]);
       if (row && row.state === "awaiting_payment") row.state = "payment_failed";
+      return null;
+    }
+    if (sql.startsWith("update orders set state = 'provisioning', server_id")) {
+      // 确认下单：只有 pending_payment 能认领。
+      const row = this.tables.orders.find(
+        (order) =>
+          order.id === a[1] &&
+          order.account_id === a[2] &&
+          order.state === "pending_payment",
+      );
+      if (row) {
+        row.state = "provisioning";
+        row.server_id = a[0];
+      }
       return null;
     }
     if (sql.startsWith("update orders set state = 'provisioning'")) {
@@ -608,6 +651,17 @@ export class FakeD1 {
       if (row && row.server_id == null) row.server_id = a[0];
       return null;
     }
+    if (sql.startsWith("update orders set state = 'ready'") && sql.includes("paid_via = 'wallet'")) {
+      // 结算批：只有账本行真的写成了才把订单置 ready。
+      const ledgerId = a[2];
+      const row = this.tables.orders.find((o) => o.id === a[1]);
+      if (row && row.state === "provisioning" && this.tables.wallet_ledger.some((w) => w.id === ledgerId)) {
+        row.state = "ready";
+        row.paid_at = a[0];
+        row.paid_via = "wallet";
+      }
+      return null;
+    }
     if (sql.startsWith("update orders set state = 'ready'")) {
       const row = this.tables.orders.find((o) => o.id === a[0] && o.state === "provisioning");
       if (row) row.state = "ready";
@@ -615,7 +669,9 @@ export class FakeD1 {
     }
     if (sql.startsWith("update orders set state = 'failed'")) {
       const row = this.tables.orders.find((o) => o.id === a[2]);
-      if (row) {
+      const guardOk =
+        !sql.includes("state = 'provisioning'") || row?.state === "provisioning";
+      if (row && guardOk) {
         row.state = "failed";
         row.failure_code = a[0];
         row.failure_stage = a[1];
@@ -628,6 +684,10 @@ export class FakeD1 {
         .filter((server) => server.account_id === a[0] && server.destroyed_at == null)
         .reduce((sum, server) => sum + Number(server.daily_price_cents ?? 0), 0);
       return { total };
+    }
+    if (sql.startsWith("select id from servers where order_id")) {
+      const row = this.tables.servers.find((s) => s.order_id === a[0]);
+      return row ? { id: row.id } : null;
     }
     if (sql.startsWith("select * from servers where enrollment_hash")) {
       return this.tables.servers.find((s) => s.enrollment_hash === a[0]) ?? null;
@@ -675,6 +735,50 @@ export class FakeD1 {
         daily_price_cents: a[12] ?? 0,
         billing_anchor_at: a[13] ?? a[9] ?? 0,
         transfer_gib: a[14] ?? 0,
+        destroyed_at: null,
+      });
+      return null;
+    }
+    if (sql.startsWith("insert into servers") && sql.includes("select ?, ?, ?, ?, ?, ?, ?, ?, 'creating'")) {
+      // 就绪后扣款：checkout 的确认语句，只有认领成功的订单才建行。
+      this.beforeServerInsert?.();
+      const [id, accountId, orderId, name, region, plan, hourly, monthly, port, now, nowAgain, transferGib, guardOrderId, guardServerId] = a;
+      const order = this.tables.orders.find(
+        (row) =>
+          row.id === guardOrderId &&
+          row.state === "provisioning" &&
+          row.server_id === guardServerId,
+      );
+      if (!order) return null;
+      if (this.portTaken(accountId, port)) {
+        throw new Error("UNIQUE constraint failed: servers.account_id, servers.node_port");
+      }
+      this.tables.servers.push({
+        id,
+        account_id: accountId,
+        order_id: orderId,
+        provider: "digitalocean",
+        provider_id: null,
+        name,
+        region,
+        plan,
+        hourly_usd: hourly,
+        monthly_usd: monthly,
+        state: "creating",
+        node_port: port,
+        ip: null,
+        node_id: null,
+        enrollment_hash: null,
+        enrollment_expires_at: null,
+        enrollment_used_at: null,
+        firewall_id: null,
+        created_at: now,
+        updated_at: nowAgain,
+        paid_until: null,
+        billing_state: "pending",
+        daily_price_cents: 0,
+        billing_anchor_at: 0,
+        transfer_gib: transferGib,
         destroyed_at: null,
       });
       return null;
@@ -735,12 +839,22 @@ export class FakeD1 {
       }
       return null;
     }
+    if (sql.startsWith("update servers set firewall_id = ?")) {
+      this.beforeFirewallWrite?.();
+      const server = this.tables.servers.find((s) => s.id === a[2]);
+      if (server) {
+        server.firewall_id = a[0];
+        server.updated_at = a[1];
+      }
+      return null;
+    }
     if (sql.startsWith("update servers set state = 'error'")) {
       // bind(reason, now, id)：失败原因现在也落到 servers 行上。
       const server = this.tables.servers.find((s) => s.id === a[2]);
       if (server) {
         server.state = "error";
         server.failure_code = a[0];
+        if (sql.includes("failure_stage = 'active'")) server.failure_stage = "active";
       }
       return null;
     }
@@ -748,6 +862,15 @@ export class FakeD1 {
       const server = this.tables.servers.find((s) => s.id === a[1]);
       if (server) server.failure_code = a[0];
       return null;
+    }
+    if (sql.startsWith("select s.*, o.charge_mode as charge_mode from servers s")) {
+      // 详情联订单行取扣费口径：服务器表本身不存 charge_mode。
+      const server = this.tables.servers.find(
+        (s) => s.id === a[0] && s.account_id === a[1],
+      );
+      if (!server) return null;
+      const order = this.tables.orders.find((o) => o.id === server.order_id);
+      return { ...server, charge_mode: order?.charge_mode ?? null };
     }
     if (sql.startsWith("select * from servers where id")) {
       return this.tables.servers.find((s) => s.id === a[0] && s.account_id === a[1]) ?? null;
@@ -810,6 +933,30 @@ export class FakeD1 {
     if (sql.startsWith("update servers set failure_stage")) {
       const server = this.tables.servers.find((s) => s.id === a[1]);
       if (server) server.failure_stage = a[0];
+      return null;
+    }
+    if (sql.startsWith("update servers set state = 'active'") && sql.includes("billing_state = 'active'")) {
+      // 结算批：服务器转 active 并写计费三列；账本行不存在时零行。
+      const [nodeId, firewallId, version, readyAt, daily, anchor, paidUntil, updatedAt, id, ledgerId] = a;
+      const server = this.tables.servers.find((s) => s.id === id);
+      const exists = this.tables.wallet_ledger.some((row) => row.id === ledgerId);
+      if (
+        server &&
+        exists &&
+        server.destroyed_at == null &&
+        ["booting", "installing", "verifying"].includes(String(server.state))
+      ) {
+        server.state = "active";
+        server.node_id = nodeId;
+        server.firewall_id = firewallId;
+        server.singbox_version = version;
+        server.ready_at = readyAt;
+        server.billing_state = "active";
+        server.daily_price_cents = daily;
+        server.billing_anchor_at = anchor;
+        server.paid_until = paidUntil;
+        server.updated_at = updatedAt;
+      }
       return null;
     }
     if (sql.startsWith("update servers set state = 'active'")) {
@@ -1101,6 +1248,18 @@ export class FakeD1 {
       const row = this.tables.wallet_ledger.find((w) => w.id === a[0]);
       return row ? { balance_after_cents: row.balance_after_cents } : null;
     }
+    if (sql.startsWith("select amount_cents from wallet_ledger where ref_type = 'order' and ref_id = ? and kind = 'charge'")) {
+      const row = this.tables.wallet_ledger
+        .filter((w) => w.ref_type === "order" && w.ref_id === a[0] && w.kind === "charge")
+        .sort((x, y) => Number(x.created_at) - Number(y.created_at))[0];
+      return row ? { amount_cents: row.amount_cents } : null;
+    }
+    if (sql.startsWith("select id from wallet_ledger where ref_type = 'order' and ref_id = ? and kind = 'charge'")) {
+      const row = this.tables.wallet_ledger.find(
+        (w) => w.ref_type === "order" && w.ref_id === a[0] && w.kind === "charge",
+      );
+      return row ? { id: row.id } : null;
+    }
     if (sql.startsWith("select id from wallet_ledger where ref_type")) {
       const row = this.tables.wallet_ledger.find((w) => w.ref_type === a[0] && w.ref_id === a[1]);
       return row ? { id: row.id } : null;
@@ -1207,7 +1366,7 @@ export class FakeD1 {
     const a = statement.args;
     if (sql.startsWith("select o.id as order_id, o.account_id, o.amount_cents, s.id as server_id")) {
       return this.tables.orders
-        .filter((order) => order.state === "failed" && order.paid_via === "wallet")
+        .filter((order) => order.state === "failed" && order.paid_via === "wallet" && (order.charge_mode ?? "upfront") === "upfront")
         .flatMap((order) => {
           const server = this.tables.servers.find((row) => row.order_id === order.id);
           // 只扫 error：已销毁的机器走销毁退款，口径不同。
@@ -1241,6 +1400,24 @@ export class FakeD1 {
         .sort((left, right) => Number(left.created_at) - Number(right.created_at))
         .slice(0, 50);
     }
+    if (sql.startsWith("select s.* from servers s join orders o")) {
+      // 结算兜底：at_ready + provisioning + 已消费 token + 无 charge 流水 + 超时。
+      const [cutoff, limit] = a;
+      return this.tables.servers
+        .filter((server) => {
+          const order = this.tables.orders.find((row) => row.id === server.order_id);
+          if (!order || (order.charge_mode ?? "upfront") !== "at_ready") return false;
+          if (order.state !== "provisioning") return false;
+          if (server.destroyed_at != null) return false;
+          if (!["booting", "installing", "verifying"].includes(String(server.state))) return false;
+          if (server.enrollment_used_at == null) return false;
+          if (Number(server.enrollment_used_at) >= Number(cutoff)) return false;
+          return !this.tables.wallet_ledger.some(
+            (w) => w.ref_type === "order" && w.ref_id === order.id && w.kind === "charge",
+          );
+        })
+        .slice(0, Number(limit));
+    }
     if (
       sql.startsWith("select * from servers where state ") &&
       sql.includes("enrollment_expires_at is not null")
@@ -1269,6 +1446,19 @@ export class FakeD1 {
             String(x.id).localeCompare(String(y.id)),
         )
         .slice(0, Number(limit));
+    }
+    if (
+      sql.startsWith("select s.*, o.charge_mode as charge_mode from servers s") &&
+      sql.includes("state != 'destroyed'")
+    ) {
+      // 列表联订单行取扣费口径：服务器表本身不存 charge_mode。
+      return this.tables.servers
+        .filter((row) => row.account_id === a[0] && row.state !== "destroyed")
+        .sort((left, right) => Number(right.created_at) - Number(left.created_at))
+        .map((server) => {
+          const order = this.tables.orders.find((o) => o.id === server.order_id);
+          return { ...server, charge_mode: order?.charge_mode ?? null };
+        });
     }
     if (
       sql.startsWith("select * from servers where account_id") &&
@@ -1312,6 +1502,7 @@ export class FakeD1 {
       return this.tables.orders
         .filter((order) => {
           if (!["paid", "provisioning"].includes(String(order.state))) return false;
+          if ((order.charge_mode ?? "upfront") !== "upfront") return false;
           if (Number(order.created_at) >= Number(a[0])) return false;
           const server = this.tables.servers.find(
             (row) => row.order_id === order.id && row.destroyed_at == null,
@@ -1351,6 +1542,7 @@ export class FakeD1 {
           if (row.provider_id == null) return false;
           if (Number(row.paid_until ?? 0) <= 0) return false;
           if (row.billing_state === "expired") return false;
+          if (row.billing_state === "pending") return false;
           if (!["booting", "installing", "verifying", "healthy", "active"].includes(String(row.state))) {
             return false;
           }
@@ -1397,6 +1589,7 @@ export class FakeD1 {
           if (row.provider_id == null) return false;
           if (Number(row.paid_until ?? 0) <= 0) return false;
           if (row.billing_state === "expired") return false;
+          if (row.billing_state === "pending") return false;
           if (!["booting", "installing", "verifying", "healthy", "active"].includes(String(row.state))) {
             return false;
           }
@@ -1487,7 +1680,24 @@ export class FakeStatement {
     // 真实 D1 靠 SQL 的 WHERE 判断，这里按同一语义给 changes。
     let changes = 1;
     const sql = this.statement.sql.replace(/\s+/g, " ").trim().toLowerCase();
-    if (sql.startsWith("update orders set state = 'provisioning'")) {
+    // 结算失败认领：在算 affected rows 之前触发，模拟并发结算抢先改了订单状态。
+    if (
+      sql.startsWith("update orders set state = 'failed'") &&
+      sql.includes("state = 'provisioning'")
+    ) {
+      this.db.beforeSettleClaim?.();
+    }
+    if (sql.startsWith("update orders set state = 'provisioning', server_id")) {
+      const row = this.db
+        .rows("orders")
+        .find(
+          (order) =>
+            order.id === this.statement.args[1] &&
+            order.account_id === this.statement.args[2] &&
+            order.state === "pending_payment",
+        );
+      changes = row ? 1 : 0;
+    } else if (sql.startsWith("update orders set state = 'provisioning'")) {
       const hasPendingGuard = sql.includes("and state = 'pending_payment'");
       const id = hasPendingGuard ? this.statement.args[2] : this.statement.args[0];
       const row = this.db.rows("orders").find((order) => order.id === id);
@@ -1554,6 +1764,11 @@ export class FakeStatement {
         .rows("orders")
         .find((o) => o.id === this.statement.args[0] && o.state === "provisioning");
       changes = row ? 1 : 0;
+    } else if (sql.startsWith("update orders set state = 'failed'")) {
+      // 结算失败认领带 provisioning 守卫：抢不到时 affected rows 为 0。
+      const row = this.db.rows("orders").find((o) => o.id === this.statement.args[2]);
+      const guarded = sql.includes("state = 'provisioning'");
+      changes = row && (!guarded || row.state === "provisioning") ? 1 : 0;
     } else if (sql.startsWith("insert into catalog_cache") && sql.includes("do update set updated_at = excluded.updated_at")) {
       const row = this.db
         .rows("catalog_cache")

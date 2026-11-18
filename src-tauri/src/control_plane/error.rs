@@ -115,7 +115,16 @@ pub fn from_response(status: u16, body: &str) -> CpError {
         .and_then(|value| value.get("details"))
         .and_then(|details| details.get("reason"))
         .and_then(Value::as_str)
-        .map(str::to_string);
+        .map(str::to_string)
+        // enroll 回调用的是 `{ ok: false, reason }`（不带 code / details）；
+        // 结算失败 `settle_insufficient` 就在这一层，不能因为形状不同被吞掉。
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(|value| value.get("reason"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
     let request_id = parsed
         .as_ref()
         .and_then(|value| value.get("request_id"))
@@ -228,7 +237,7 @@ pub fn from_response(status: u16, body: &str) -> CpError {
             false,
             json!({ "reason": reason.unwrap_or_else(|| "invalid_argument".into()) }),
         ),
-        "" => status_fallback(status, message),
+        "" => status_fallback(status, message, reason),
         other => CpError::new(
             "UPSTREAM_ERROR",
             message.unwrap_or_else(|| "服务器服务返回了未知错误".into()),
@@ -268,38 +277,51 @@ pub fn from_response(status: u16, body: &str) -> CpError {
     }
 }
 
-fn status_fallback(status: u16, message: Option<String>) -> CpError {
+fn status_fallback(status: u16, message: Option<String>, reason: Option<String>) -> CpError {
+    // 非标准信封里带的 reason 原样留住；只有确实没有时才按状态码兜底。
+    let keep = |fallback: &str| reason.clone().unwrap_or_else(|| fallback.to_string());
     match status {
         401 => CpError::auth_required(message.unwrap_or_else(|| "需要重新验证设备".into())),
         403 => CpError::new(
             "PERMISSION_DENIED",
             message.unwrap_or_else(|| "这台设备已被停用".into()),
             false,
-            json!({ "reason": "account_blocked" }),
+            json!({ "reason": keep("account_blocked") }),
         ),
         404 => CpError::new(
             "NOT_FOUND",
             message.unwrap_or_else(|| "找不到这台服务器".into()),
             false,
-            json!({ "reason": "server_gone" }),
+            json!({ "reason": keep("server_gone") }),
         ),
-        409 => CpError::new(
-            "PRECONDITION_FAILED",
-            message.unwrap_or_else(|| "当前状态不允许这个操作".into()),
-            false,
-            json!({ "reason": "conflict" }),
-        ),
+        409 => {
+            // 结算时余额不足：服务器已经销毁、没有开通，也不是「状态不允许」，
+            // 重试没用，要让界面按「没扣费，去充值」处理。
+            let settled_insufficient = reason.as_deref() == Some("settle_insufficient");
+            CpError::new(
+                "PRECONDITION_FAILED",
+                message.unwrap_or_else(|| {
+                    if settled_insufficient {
+                        "余额不足，服务器没有开通".into()
+                    } else {
+                        "当前状态不允许这个操作".into()
+                    }
+                }),
+                false,
+                json!({ "reason": keep("conflict") }),
+            )
+        }
         429 => CpError::new(
             "RATE_LIMITED",
             message.unwrap_or_else(|| "操作太频繁，稍后再试".into()),
             true,
-            json!({ "reason": "rate_limited" }),
+            json!({ "reason": keep("rate_limited") }),
         ),
         500..=599 => CpError::new(
             "UPSTREAM_ERROR",
             message.unwrap_or_else(|| "服务器服务暂时不可用".into()),
             true,
-            json!({ "reason": "provider_unavailable", "status": status }),
+            json!({ "reason": keep("provider_unavailable"), "status": status }),
         ),
         _ => CpError::new(
             "UPSTREAM_ERROR",
@@ -352,6 +374,25 @@ mod tests {
         assert_eq!(error.details["shortfall_cents"], 30);
         assert_eq!(error.details["min_days"], 7);
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn a_settle_failure_keeps_its_reason_and_is_not_retryable() {
+        // enroll 回调用的是 `{ ok: false, reason }`，没有 code / details；
+        // 结算失败不能被兜底成「conflict」，否则界面只能说「稍后再试」。
+        let error = from_response(409, r#"{"ok":false,"reason":"settle_insufficient"}"#);
+        assert_eq!(error.code, "PRECONDITION_FAILED");
+        assert_eq!(error.reason(), Some("settle_insufficient"));
+        assert!(!error.retryable);
+        assert_eq!(error.message, "余额不足，服务器没有开通");
+
+        // 标准信封形态同样原样透出 code。
+        let error = from_response(
+            409,
+            r#"{"code":"PRECONDITION_FAILED","message":"服务器没建成","retryable":false,"details":{"reason":"settle_insufficient"}}"#,
+        );
+        assert_eq!(error.reason(), Some("settle_insufficient"));
+        assert!(!error.retryable);
     }
 
     #[test]

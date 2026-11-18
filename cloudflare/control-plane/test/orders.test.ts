@@ -224,7 +224,7 @@ describe("orders", () => {
     expect(body.details.reason).toBe("invalid_plan");
   });
 
-  it("余额扣费创建服务器并选定端口", async () => {
+  it("确认下单：建服务器行并开始建机，但不扣费", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());
     stubCatalog();
@@ -242,10 +242,22 @@ describe("orders", () => {
       env as never,
     );
     expect(checkout?.status).toBe(200);
-    const paid = (await checkout!.json()) as { charged_cents: number; balance_after_cents: number };
-    // 2.37.1：余额只需覆盖 7 天日价（30 × 7 = 210），实际仍只扣第 1 天的 30。
-    expect(paid.charged_cents).toBe(30);
-    expect(paid.balance_after_cents).toBe(1970);
+    const body = (await checkout!.json()) as {
+      order_id: string;
+      state: string;
+      server_id: string;
+      charge_mode: string;
+      charged_cents?: number;
+    };
+    // 2.39.0：checkout 只确认下单，返回 MyServerOrder；扣费在就绪后由 enroll 结算。
+    expect(body.order_id).toBe(created.order_id);
+    expect(body.state).toBe("provisioning");
+    // 口径来自 DB 列，不是客户端自己猜的缺省值。
+    expect(body.charge_mode).toBe("at_ready");
+    expect(body.server_id).toBeTruthy();
+    expect(body.charged_cents).toBeUndefined();
+    expect(db.rows("accounts")[0].balance_cents).toBe(2000);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
     expect(db.rows("servers")).toHaveLength(1);
 
     const server = db.rows("servers")[0];
@@ -254,6 +266,11 @@ describe("orders", () => {
     expect(server.state).toBe("booting");
     expect(server.provider_id).toBe("424242");
     expect(typeof server.enrollment_hash).toBe("string");
+    // 结算前不写计费三列。
+    expect(server.billing_state).toBe("pending");
+    expect(server.paid_until).toBeNull();
+    expect(Number(server.daily_price_cents)).toBe(0);
+    expect(Number(server.billing_anchor_at)).toBe(0);
     // 建机快照：目录 transfer(TB) × 1000 落进 servers 行，供详情展示。
     expect(server.transfer_gib).toBe(1000);
   });
@@ -290,7 +307,7 @@ describe("orders", () => {
     expect(db.rows("orders")[0].state).toBe("pending_payment");
   });
 
-  it("余额正好 7 天日价时放行，只扣 1 天", async () => {
+  it("余额正好 7 天日价时放行，checkout 仍不扣费", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());
     stubCatalog();
@@ -308,117 +325,10 @@ describe("orders", () => {
       env as never,
     );
     expect(checkout?.status).toBe(200);
-    const paid = (await checkout!.json()) as { charged_cents: number; balance_after_cents: number };
-    expect(paid.charged_cents).toBe(30);
-    expect(paid.balance_after_cents).toBe(180);
+    // 7 天只是预检，不预扣；余额原样留到就绪结算那一刻。
+    expect(db.rows("accounts")[0].balance_cents).toBe(210);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
     expect(db.rows("servers")).toHaveLength(1);
-  });
-
-  it("预检之后余额被并发花掉，门槛在记账语句里再次拦住", async () => {
-    const db = new FakeD1();
-    const env = await envWith(db, await signingJwk());
-    stubCatalog();
-
-    const created = (await (
-      await handleOrders(orderRequest(env.token, "idem-key-race"), env as never)
-    )!.json()) as { order_id: string };
-    db.rows("accounts")[0].balance_cents = 210;
-    // 另一笔扣费在预检之后、记账之前落地：只靠快照会打穿，必须由 INSERT 的守卫挡住。
-    db.beforeWalletInsert = () => {
-      db.beforeWalletInsert = undefined;
-      db.rows("accounts")[0].balance_cents = 179;
-    };
-
-    const checkout = await handleOrders(
-      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-race" },
-      }),
-      env as never,
-    );
-    expect(checkout?.status).toBe(409);
-    const body = (await checkout!.json()) as {
-      details: { reason: string; required_cents: number; shortfall_cents: number; min_days: number };
-    };
-    expect(body.details.reason).toBe("insufficient_balance");
-    expect(body.details.required_cents).toBe(210);
-    expect(body.details.shortfall_cents).toBe(31);
-    expect(body.details.min_days).toBe(7);
-    expect(db.rows("servers")).toHaveLength(0);
-  });
-
-  it("守卫失败后余额被充值补上，重试一次完成扣费", async () => {
-    const db = new FakeD1();
-    const env = await envWith(db, await signingJwk());
-    stubCatalog();
-
-    const created = (await (
-      await handleOrders(orderRequest(env.token, "idem-key-retry"), env as never)
-    )!.json()) as { order_id: string };
-    db.rows("accounts")[0].balance_cents = 210;
-    // 第一笔记账被并发扣费挡在守卫外；充值在守卫之后、重试之前落地。
-    db.beforeWalletInsert = () => {
-      db.beforeWalletInsert = undefined;
-      db.rows("accounts")[0].balance_cents = 179;
-      queueMicrotask(() => {
-        db.rows("accounts")[0].balance_cents = 210;
-      });
-    };
-
-    const checkout = await handleOrders(
-      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-retry" },
-      }),
-      env as never,
-    );
-    expect(checkout?.status).toBe(200);
-    const paid = (await checkout!.json()) as { charged_cents: number; balance_after_cents: number };
-    expect(paid.charged_cents).toBe(30);
-    expect(paid.balance_after_cents).toBe(180);
-    expect(db.rows("servers")).toHaveLength(1);
-    expect(
-      db.rows("wallet_ledger").filter((row) => row.ref_type === "order"),
-    ).toHaveLength(1);
-  });
-
-  it("守卫失败后余额已够但仍记账失败：返回可重试的通用错误，不编差额", async () => {
-    const db = new FakeD1();
-    const env = await envWith(db, await signingJwk());
-    stubCatalog();
-
-    const created = (await (
-      await handleOrders(orderRequest(env.token, "idem-key-ghost"), env as never)
-    )!.json()) as { order_id: string };
-    db.rows("accounts")[0].balance_cents = 210;
-    // 两次记账都被守卫挡住；重试之后、回包之前充值到账，余额已经够门槛。
-    // 这时差额应为 0（界面会显示「还差 $0.00」），所以只能回通用可重试错误。
-    let calls = 0;
-    db.beforeWalletInsert = () => {
-      calls += 1;
-      db.rows("accounts")[0].balance_cents = 179;
-      // 每次守卫失败后充值立刻到账：重读余额会认为「已经够了」，于是重试一次。
-      queueMicrotask(() => {
-        db.rows("accounts")[0].balance_cents = 210;
-      });
-    };
-
-    const checkout = await handleOrders(
-      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-ghost" },
-      }),
-      env as never,
-    );
-    expect(checkout?.status).toBe(503);
-    const body = (await checkout!.json()) as {
-      code: string;
-      details: { reason: string; shortfall_cents?: number };
-    };
-    expect(body.code).toBe("INTERNAL");
-    expect(body.details.reason).toBe("wallet_unavailable");
-    expect(body.details.shortfall_cents).toBeUndefined();
-    expect(db.rows("servers")).toHaveLength(0);
   });
 
   it("端口唯一冲突时换端口重试，不会把可建的订单判死", async () => {
@@ -430,9 +340,9 @@ describe("orders", () => {
       await handleOrders(orderRequest(env.token, "idem-key-port"), env as never)
     )!.json()) as { order_id: string };
     db.rows("accounts")[0].balance_cents = 210;
-    // 另一个并发建机先占了这次随机出来的端口：整批回滚后必须换端口重试。
-    db.beforeWalletInsert = () => {
-      db.beforeWalletInsert = undefined;
+    // 另一个并发建机先占了这次随机出来的端口：整批回滚后换端口重试，第一次失败不影响结果。
+    db.beforeServerInsert = () => {
+      db.beforeServerInsert = undefined;
       throw new Error("UNIQUE constraint failed: servers.account_id, servers.node_port");
     };
 
@@ -445,10 +355,9 @@ describe("orders", () => {
     );
     expect(checkout?.status).toBe(200);
     expect(db.rows("servers")).toHaveLength(1);
-    expect(db.rows("accounts")[0].balance_cents).toBe(180);
-    expect(
-      db.rows("wallet_ledger").filter((row) => row.ref_type === "order"),
-    ).toHaveLength(1);
+    // checkout 不扣费：余额与账本都不受影响。
+    expect(db.rows("accounts")[0].balance_cents).toBe(210);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
   });
 
   it("端口在最后一步冲突：整批回滚，重试用尽后返回可重试的 port_conflict", async () => {
@@ -460,7 +369,7 @@ describe("orders", () => {
       await handleOrders(orderRequest(env.token, "idem-key-port-late"), env as never)
     )!.json()) as { order_id: string };
     db.rows("accounts")[0].balance_cents = 210;
-    // 真实的冲突点：账本、余额、订单状态都已在本批写过，只有 servers 插入撞唯一索引。
+    // 真实的冲突点：订单认领已在本批写过，只有 servers 插入撞唯一索引。
     db.beforeServerInsert = () => {
       throw new Error("UNIQUE constraint failed: servers.account_id, servers.node_port");
     };
@@ -486,48 +395,6 @@ describe("orders", () => {
     expect(db.rows("accounts")[0].balance_cents).toBe(210);
     expect(db.rows("servers")).toHaveLength(0);
     expect(db.rows("orders")[0].state).toBe("pending_payment");
-  });
-
-  it("两笔 checkout 并发时门槛只放行一笔", async () => {
-    const db = new FakeD1();
-    const env = await envWith(db, await signingJwk());
-    stubCatalog();
-
-    const create = async (key: string) => {
-      const res = await handleOrders(orderRequest(env.token, key), env as never);
-      return ((await res!.json()) as { order_id: string }).order_id;
-    };
-    const first = await create("idem-key-conc-1");
-    const second = await create("idem-key-conc-2");
-    // 只够一笔 7 天门槛：两笔同时结账，第二笔必须被挡住。
-    db.rows("accounts")[0].balance_cents = 210;
-
-    const checkout = (orderId: string, key: string) =>
-      handleOrders(
-        new Request(`https://example.com/v1/orders/${orderId}/checkout`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": key },
-        }),
-        env as never,
-      );
-
-    const results = await Promise.all([
-      checkout(first, "idem-conc-a"),
-      checkout(second, "idem-conc-b"),
-    ]);
-    expect(results.map((res) => res?.status).sort()).toEqual([200, 409]);
-    const refused = results.find((res) => res?.status === 409)!;
-    const body = (await refused.json()) as {
-      details: { reason: string; required_cents: number; min_days: number };
-    };
-    expect(body.details.reason).toBe("insufficient_balance");
-    expect(body.details.required_cents).toBe(210);
-    expect(body.details.min_days).toBe(7);
-    expect(db.rows("servers")).toHaveLength(1);
-    expect(db.rows("accounts")[0].balance_cents).toBe(180);
-    expect(
-      db.rows("wallet_ledger").filter((row) => row.ref_type === "order"),
-    ).toHaveLength(1);
   });
 
   it("目录里这个地区没有该规格时拒绝下单，details 带 region / plan", async () => {
