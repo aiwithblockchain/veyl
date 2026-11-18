@@ -1889,8 +1889,8 @@ export default function App() {
     return result;
   };
 
-  // 设备被停用：重新注册设备后再打开登录，重登会把新设备绑上账户。
-  const handleReloginDevice = async () => {
+  // 换一个账户：换新设备身份后再登录，避免旧设备绑在停用账户上重登失败。
+  const handleSwitchAccount = async () => {
     const ok = await myServers.reRegister();
     if (ok) {
       myServers.openLogin();
@@ -2270,7 +2270,7 @@ export default function App() {
               onTopUp={() => myServers.openTopUp()}
               onRefreshWallet={() => void myServers.refreshWallet()}
               onReRegister={() => myServers.identityAction()}
-              onRelogin={handleReloginDevice}
+              onSwitchAccount={handleSwitchAccount}
               onLogout={handleAccountLogout}
               onClose={() => setAccountMenu(null)}
             />

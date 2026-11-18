@@ -111,15 +111,15 @@ function verifyError(error: unknown): LoginError {
   }
   if (reason === "device_revoked") {
     return {
-      message: "这台设备已被停用。重新登录会把这台设备重新注册。",
-      hint: "点下面的「重新注册设备」，再点一次「登录」。",
+      message: "这台设备已被停用。",
+      hint: "点下面的「重新注册设备」，或先在账号菜单里退出这台设备。",
       reRegister: true,
     };
   }
   if (reason === "account_blocked") {
     return {
-      message: "账户已停用。",
-      hint: "先在账号菜单里换一台设备身份，再登录其他账户。",
+      message: "这个账户已停用。",
+      hint: "换一个账户需要重新注册这台设备；这台设备上的旧账户仍会保留。",
     };
   }
   if (problem.code === "UNSUPPORTED") {

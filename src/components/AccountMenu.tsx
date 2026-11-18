@@ -16,8 +16,8 @@ interface Props {
   onRefreshWallet: () => void;
   /** 重新注册设备；返回是否恢复成功。 */
   onReRegister?: () => Promise<boolean>;
-  /** 设备被停用：重新注册并打开登录。 */
-  onRelogin?: () => Promise<boolean>;
+  /** 账户停用：换一个账户（重新注册设备后再登录）。 */
+  onSwitchAccount?: () => Promise<boolean>;
   onLogout: () => Promise<LogoutResult>;
   onClose: () => void;
 }
@@ -35,7 +35,7 @@ export function AccountMenu({
   onTopUp,
   onRefreshWallet,
   onReRegister,
-  onRelogin,
+  onSwitchAccount,
   onLogout,
   onClose,
 }: Props) {
@@ -43,27 +43,28 @@ export function AccountMenu({
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [reRegistering, setReRegistering] = useState(false);
+  const [switching, setSwitching] = useState(false);
   const [reRegisterError, setReRegisterError] = useState<string | null>(null);
   useFocusTrap(true, panelRef);
 
   const recovery =
     identityProblem === "lost"
       ? {
+          kind: "register" as const,
           text: "这台设备的身份丢了，需要重新注册设备；账户和服务器都在。",
           label: "重新注册设备",
-          run: onReRegister,
         }
       : identityProblem === "device_revoked"
         ? {
-            text: "这台设备已被停用。重新登录会把这台设备重新注册。",
-            label: "重新登录",
-            run: onRelogin,
+            kind: "logout" as const,
+            text: "这台设备已被停用。退出这台设备后可以重新登录。",
+            label: "退出这台设备",
           }
         : identityProblem === "account_blocked"
           ? {
-              text: "账户已停用，这个账户不能再使用。换一台设备身份后，可以登录其他账户。",
-              label: "换一台设备登录",
-              run: onRelogin,
+              kind: "switch" as const,
+              text: "这个账户已停用。换一个账户需要重新注册这台设备；这台设备上的旧账户仍会保留。",
+              label: "换一个账户",
             }
           : null;
   const blocked =
@@ -92,14 +93,22 @@ export function AccountMenu({
   };
 
   const recover = async () => {
-    if (reRegistering || !recovery?.run) return;
-    setReRegistering(true);
+    if (!recovery || actionBusy) return;
+    if (recovery.kind === "logout") {
+      await logout();
+      return;
+    }
+    const run = recovery.kind === "switch" ? onSwitchAccount : onReRegister;
+    if (!run) return;
+    const setBusy = recovery.kind === "switch" ? setSwitching : setReRegistering;
+    setBusy(true);
     setReRegisterError(null);
-    const ok = await recovery.run();
-    setReRegistering(false);
+    const ok = await run();
+    setBusy(false);
     if (!ok) setReRegisterError(RECOVER_FAILED);
   };
-
+  // 换账户、重新注册、退出三件事互斥：任一件在途，另一件的按钮也不能点。
+  const actionBusy = loggingOut || switching || reRegistering;
   return (
     <>
       <div
@@ -167,12 +176,39 @@ export function AccountMenu({
             <button
               type="button"
               className="account-menu__recover"
-              disabled={disabled || reRegistering}
-              aria-busy={reRegistering || undefined}
+              disabled={disabled || actionBusy}
+              aria-busy={
+                (recovery.kind === "logout"
+                  ? loggingOut
+                  : recovery.kind === "switch"
+                    ? switching
+                    : reRegistering) || undefined
+              }
               onClick={() => void recover()}
             >
-              {reRegistering ? "正在处理…" : recovery.label}
+              {recovery.kind === "logout"
+                ? loggingOut
+                  ? "正在退出…"
+                  : recovery.label
+                : recovery.kind === "switch"
+                  ? switching
+                    ? "正在切换…"
+                    : recovery.label
+                  : reRegistering
+                    ? "正在处理…"
+                    : recovery.label}
             </button>
+            {recovery.kind === "switch" ? (
+              <button
+                type="button"
+                className="account-menu__recover account-menu__recover--secondary"
+                disabled={disabled || actionBusy}
+                aria-busy={loggingOut || undefined}
+                onClick={() => void logout()}
+              >
+                {loggingOut ? "正在退出…" : "退出这台设备"}
+              </button>
+            ) : null}
             <div className="account-menu__divider" />
           </>
         ) : null}

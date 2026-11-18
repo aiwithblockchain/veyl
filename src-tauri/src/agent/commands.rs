@@ -545,7 +545,8 @@ pub async fn my_server_account() -> Result<Value, Value> {
     Ok(json!(crate::control_plane::auth::account_state()))
 }
 
-/// 服务端登出（仅 UI）：失败原样上报，不假装已退出。
+/// 服务端登出（仅 UI）：网络/5xx 原样上报；服务端拒绝（401/403）时清本地令牌与账户标记，
+/// 返回未登录态——账户被停用时用户也必须能退出去。
 #[tauri::command]
 pub async fn my_server_logout() -> Result<Value, Value> {
     match crate::control_plane::auth::logout().await {

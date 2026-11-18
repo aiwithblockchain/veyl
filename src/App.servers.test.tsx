@@ -836,45 +836,16 @@ describe("设备 / 账户被停用的出路", () => {
     };
   }
 
-  it("设备被停用：菜单给「重新登录」，点击后重新注册并打开登录框", async () => {
+  it("账户停用：诚实说明 + 「退出这台设备」真的退出到未登录", async () => {
     prepare([]);
-    const gate = jeBlockList("PERMISSION_DENIED", "device_revoked");
-    const register = vi
-      .spyOn(bridge, "myServerRegisterDevice")
-      .mockImplementation(async () => {
-        gate.recover();
-        return { device_id: "dev_new", account_id: null } as never;
-      });
-
-    render(<App />);
-    await screen.findByRole("button", { name: "连接节点" });
-    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "账户，me@example.com" }),
-    );
-
-    expect(
-      await screen.findByText("这台设备已被停用。重新登录会把这台设备重新注册。"),
-    ).toBeTruthy();
-    expect(screen.queryByText(/稍后再试/)).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "重新登录" }));
-
-    await waitFor(() => expect(register).toHaveBeenCalledTimes(1));
-    expect(
-      await screen.findByRole("dialog", { name: "登录我的服务器" }),
-    ).toBeTruthy();
-  }, 15_000);
-
-  it("账户停用：不假装能退出，动作是「换一台设备登录」", async () => {
-    prepare([]);
-    const gate = jeBlockList("PERMISSION_DENIED", "account_blocked");
-    const register = vi
-      .spyOn(bridge, "myServerRegisterDevice")
-      .mockImplementation(async () => {
-        gate.recover();
-        return { device_id: "dev_new", account_id: null } as never;
-      });
+    jeBlockList("PERMISSION_DENIED", "account_blocked");
+    const logout = vi.spyOn(bridge, "myServerLogout").mockResolvedValue({
+      logged_in: false,
+      email: null,
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "device",
+    });
 
     render(<App />);
     await screen.findByRole("button", { name: "连接节点" });
@@ -885,11 +856,12 @@ describe("设备 / 账户被停用的出路", () => {
 
     expect(
       await screen.findByText(
-        "账户已停用，这个账户不能再使用。换一台设备身份后，可以登录其他账户。",
+        "这个账户已停用。换一个账户需要重新注册这台设备；这台设备上的旧账户仍会保留。",
       ),
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "退出登录" })).toBeNull();
     expect(screen.queryByText(/稍后再试/)).toBeNull();
+    expect(screen.queryByText(/换一台设备/)).toBeNull();
     // 停用态整页只读：rail 的新建入口不可点，避免点下去才 403。
     const rail = screen.getByRole("complementary", { name: "服务器列表" });
     expect(
@@ -900,12 +872,178 @@ describe("设备 / 账户被停用的出路", () => {
       expect((button as HTMLButtonElement).disabled).toBe(true);
     }
 
-    fireEvent.click(screen.getByRole("button", { name: "换一台设备登录" }));
+    fireEvent.click(screen.getByRole("button", { name: "退出这台设备" }));
+
+    await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
+    expect(
+      await screen.findByRole("button", { name: "账户，未登录" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "账户菜单" })).toBeNull();
+  }, 15_000);
+
+  it("账户停用：主行动「换一个账户」重新注册设备并打开登录", async () => {
+    prepare([]);
+    let recovered = false;
+    vi.spyOn(bridge, "myServerList").mockImplementation(async () => {
+      if (!recovered) {
+        throw {
+          code: "PERMISSION_DENIED",
+          message: "账户已被停用",
+          details: { reason: "account_blocked" },
+          retryable: false,
+        };
+      }
+      return { servers: [] };
+    });
+    const register = vi
+      .spyOn(bridge, "myServerRegisterDevice")
+      .mockImplementation(async () => {
+        recovered = true;
+        return { device_id: "dev_new", account_id: null } as never;
+      });
+    const logout = vi.spyOn(bridge, "myServerLogout");
+
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "账户，me@example.com" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "这个账户已停用。换一个账户需要重新注册这台设备；这台设备上的旧账户仍会保留。",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/稍后再试/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "换一个账户" }));
 
     await waitFor(() => expect(register).toHaveBeenCalledTimes(1));
+    expect(logout).not.toHaveBeenCalled();
     expect(
       await screen.findByRole("dialog", { name: "登录我的服务器" }),
     ).toBeTruthy();
+  }, 15_000);
+
+  it("设备停用：动作同样是真实退出", async () => {
+    prepare([]);
+    jeBlockList("PERMISSION_DENIED", "device_revoked");
+    const logout = vi.spyOn(bridge, "myServerLogout").mockResolvedValue({
+      logged_in: false,
+      email: null,
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "device",
+    });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "账户，me@example.com" }),
+    );
+
+    expect(
+      await screen.findByText("这台设备已被停用。退出这台设备后可以重新登录。"),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "退出这台设备" }));
+
+    await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
+    expect(
+      await screen.findByRole("button", { name: "账户，未登录" }),
+    ).toBeTruthy();
+  }, 15_000);
+
+  it("用同一个被停用邮箱登录后仍回到停用态，不是假承诺", async () => {
+    prepare([]);
+    vi.spyOn(bridge, "myServerList").mockRejectedValue({
+      code: "PERMISSION_DENIED",
+      message: "账户已被停用",
+      details: { reason: "account_blocked" },
+      retryable: false,
+    });
+    vi.spyOn(bridge, "myServerLogout").mockResolvedValue({
+      logged_in: false,
+      email: null,
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "device",
+    });
+    vi.spyOn(bridge, "myServerLoginStart").mockResolvedValue({
+      sent: true,
+      cooldown_seconds: 60,
+    });
+    vi.spyOn(bridge, "myServerLoginVerify").mockResolvedValue({
+      logged_in: true,
+      email: "me@example.com",
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "email",
+    });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "账户，me@example.com" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "退出这台设备" }));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "账户，未登录" }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "登录我的服务器" });
+    fireEvent.change(within(dialog).getByLabelText("邮箱"), {
+      target: { value: "me@example.com" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "发送验证码" }));
+    fireEvent.change(await within(dialog).findByLabelText("验证码"), {
+      target: { value: "123456" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "登录" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "登录我的服务器" })).toBeNull(),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "账户，me@example.com" }),
+    );
+    expect(
+      await screen.findByText(
+        "这个账户已停用。换一个账户需要重新注册这台设备；这台设备上的旧账户仍会保留。",
+      ),
+    ).toBeTruthy();
+  }, 15_000);
+
+  it("收到 my-server-account-cleared 后收起菜单并回到未登录", async () => {
+    prepare([]);
+
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "账户，me@example.com" }),
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "账户菜单" }),
+    ).toBeTruthy();
+
+    act(() => {
+      (
+        bridge as unknown as { emit(event: unknown): void }
+      ).emit({
+        name: AGENT_EVENTS.myServerAccountCleared,
+        payload: { reason: "account_blocked", emitted_at: "" },
+      });
+    });
+
+    expect(
+      await screen.findByRole("button", { name: "账户，未登录" }),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "账户菜单" })).toBeNull(),
+    );
   }, 15_000);
 
   it("account_blocked 优先于身份丢失", async () => {
@@ -942,7 +1080,7 @@ describe("设备 / 账户被停用的出路", () => {
     );
     expect(
       await screen.findByText(
-        "账户已停用，这个账户不能再使用。换一台设备身份后，可以登录其他账户。",
+        "这个账户已停用。换一个账户需要重新注册这台设备；这台设备上的旧账户仍会保留。",
       ),
     ).toBeTruthy();
     expect(screen.queryByText(/这台设备的身份丢了/)).toBeNull();

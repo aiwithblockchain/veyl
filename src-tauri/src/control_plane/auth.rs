@@ -193,6 +193,15 @@ fn clear_tokens() {
     let _ = crate::secrets::delete_secret(TOKENS_KEY);
 }
 
+/// 账户标记只是本机镜像，清令牌时必须一起清掉，否则界面还会拿它当「登录过」。
+fn forget_account() {
+    let Some(store) = crate::store::global() else {
+        return;
+    };
+    let conn = store.conn();
+    let _ = crate::store::settings::delete(&conn, ACCOUNT_MARKER);
+}
+
 fn registration_body(device: &StoredDevice) -> serde_json::Value {
     json!({
         "device_id": device.device_id,
@@ -449,16 +458,38 @@ pub async fn logout() -> Result<AccountState, CpError> {
     }
 }
 
-/// 服务端拒绝旧令牌时清本地态；网络、5xx、403 等其它失败仍原样上报。
+/// 服务端拒绝登出时清本地态；网络、5xx 等其它失败仍原样上报。
+///
+/// 403（`device_revoked` / `account_blocked`）必须和 401 一样处理：服务端不让登出时，
+/// 本地更不能被锁死——否则账户被停用后，用户在这台设备上永远退不出去。
+/// 注意 `from_response` 的 `details` 不带 HTTP 状态码，所以这里只看 reason 与映射后的 code。
 fn logout_failure(error: CpError) -> Result<AccountState, CpError> {
     let rejected = matches!(
         error.reason(),
         Some("token_invalid") | Some("auth_required")
-    ) || error.details.get("status").and_then(Value::as_u64) == Some(401);
+    ) || error.code == "PERMISSION_DENIED"
+        || matches!(
+            error.reason(),
+            Some("device_revoked") | Some("account_blocked")
+        );
     if !rejected {
         return Err(error);
     }
+    let reason = match error.reason() {
+        // 事件载荷只认这四个 reason（events.md §4.27）；未知原因归到 server_rejected。
+        Some(value @ ("token_invalid" | "auth_required" | "device_revoked" | "account_blocked")) => {
+            value
+        }
+        _ => "server_rejected",
+    };
     clear_tokens();
+    forget_account();
+    log::warn!(
+        "登出：服务端拒绝（code={} reason={}），已清本地令牌与账户标记",
+        error.code,
+        reason
+    );
+    super::events::emit_account_cleared(reason);
     Ok(account_state())
 }
 
@@ -611,6 +642,26 @@ pub async fn ensure_access(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 令牌与账户标记读写的是进程级共享的 secrets 文件与全局库：本模块里会写它们的
+    /// 测试必须串行，否则通过与失败取决于调度。
+    static AUTH_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 全进程的库（正式启动时由 `lib.rs` 装）；`install_global` 先到先得。
+    /// 账户标记读写的是 `store::global()`，测试里必须先装一个，否则永远读不到。
+    fn test_store() {
+        static STORE: std::sync::OnceLock<std::sync::Arc<crate::store::Store>> =
+            std::sync::OnceLock::new();
+        crate::store::install_global(
+            STORE
+                .get_or_init(|| {
+                    std::sync::Arc::new(
+                        crate::store::Store::open_in_memory().expect("内存库打不开"),
+                    )
+                })
+                .clone(),
+        );
+    }
 
     fn tokens(access_expires_at: &str) -> TokenSet {
         TokenSet {
@@ -769,22 +820,52 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_logout_token_clears_local_state_but_a_network_error_does_not() {
+    fn a_rejected_logout_clears_local_state_but_a_network_error_does_not() {
+        let _guard = AUTH_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         crate::test_support::install_test_secrets();
+        test_store();
         clear_tokens();
+        forget_account();
         store_tokens(&tokens("2026-11-14T08:00:31Z")).unwrap();
+        assert_eq!(stored_account_marker().as_deref(), Some("acct_1"));
 
         // 网络失败：原样上报，不能假装已退出。
         let error = logout_failure(CpError::network(false)).unwrap_err();
         assert_eq!(error.code, "UPSTREAM_ERROR");
         assert!(load_tokens().is_some(), "网络失败必须保留本地令牌");
 
-        // 403（账户被停用）同样不清本地态。
-        let blocked = error::from_response(403, "{}");
-        assert!(logout_failure(blocked).is_err());
-        assert!(load_tokens().is_some(), "403 必须保留本地令牌");
+        // 403 账户被停用：服务端不让登出，但本地必须能退出——令牌与账户标记一起清掉。
+        let blocked = error::from_response(
+            403,
+            r#"{"code":"FORBIDDEN","message":"账户已被停用","retryable":false,"details":{"reason":"account_blocked"},"request_id":"r1"}"#,
+        );
+        let state = logout_failure(blocked).unwrap();
+        assert!(!state.logged_in);
+        assert!(load_tokens().is_none(), "账户被停用也必须能退出");
+        assert_eq!(stored_account_marker(), None, "账户标记不能留下");
+
+        // 403 空响应体：按状态码兜底，同样清。
+        store_tokens(&tokens("2026-11-14T08:00:31Z")).unwrap();
+        let state = logout_failure(error::from_response(403, "")).unwrap();
+        assert!(!state.logged_in);
+        assert!(load_tokens().is_none());
+        assert_eq!(stored_account_marker(), None);
+
+        // 403 但 reason 是没见过的新值：仍按「服务端拒绝」退出（映射后的 code 是 PERMISSION_DENIED）。
+        store_tokens(&tokens("2026-11-14T08:00:31Z")).unwrap();
+        let odd = error::from_response(
+            403,
+            r#"{"code":"FORBIDDEN","message":"账户不可用","details":{"reason":"account_frozen"},"request_id":"r1"}"#,
+        );
+        let state = logout_failure(odd).unwrap();
+        assert!(!state.logged_in);
+        assert!(load_tokens().is_none());
+        assert_eq!(stored_account_marker(), None);
 
         // 服务端 401 token_invalid：本地令牌清掉，回到未登录态。
+        store_tokens(&tokens("2026-11-14T08:00:31Z")).unwrap();
         let rejected = error::from_response(
             401,
             r#"{"code":"UNAUTHENTICATED","message":"需要重新登录","retryable":true,"details":{"reason":"token_invalid"},"request_id":"r1"}"#,
@@ -801,6 +882,7 @@ mod tests {
         assert!(load_tokens().is_none());
 
         clear_tokens();
+        forget_account();
     }
 
     #[test]

@@ -298,6 +298,11 @@ mod tests {
         use std::sync::Arc;
         use std::time::Instant;
 
+        // set_var 与并行测试的 getenv 并发是未定义行为：与其它改环境的测试共用一把锁。
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
         fn serve(listener: TcpListener, body: &'static [u8], hits: Arc<AtomicUsize>) {
             listener.set_nonblocking(true).unwrap();
             std::thread::spawn(move || {

@@ -165,40 +165,74 @@ describe("设备身份丢了", () => {
 });
 
 describe("设备 / 账户被停用", () => {
-  it("设备停用：诚实话术 + 「重新登录」，不再给「退出登录」", () => {
+  it("设备停用：诚实说明 + 「退出这台设备」，不再给普通退出按钮", () => {
     renderMenu({
       identityProblem: "device_revoked",
-      onRelogin: async () => true,
+      onLogout: async () => ({ ok: true }),
     });
 
     expect(
-      screen.getByText("这台设备已被停用。重新登录会把这台设备重新注册。"),
+      screen.getByText("这台设备已被停用。退出这台设备后可以重新登录。"),
     ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "重新登录" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "退出这台设备" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "退出登录" })).toBeNull();
     expect(screen.queryByText("余额")).toBeNull();
     expect(screen.queryByText("充值")).toBeNull();
     expect(screen.queryByText(/稍后再试/)).toBeNull();
   });
 
-  it("设备停用：点「重新登录」调用重登动作", async () => {
-    const onRelogin = vi.fn(async () => true);
-    renderMenu({ identityProblem: "device_revoked", onRelogin });
+  it("设备停用：点「退出这台设备」调用登出并收起菜单", async () => {
+    const onLogout = vi.fn(async () => ({ ok: true as const }));
+    const onClose = vi.fn();
+    renderMenu({ identityProblem: "device_revoked", onLogout, onClose });
 
-    fireEvent.click(screen.getByRole("button", { name: "重新登录" }));
-    await waitFor(() => expect(onRelogin).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "退出这台设备" }));
+    await waitFor(() => expect(onLogout).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
-  it("账户停用：不假装能退出，动作是「换一台设备登录」", async () => {
-    const onRelogin = vi.fn(async () => true);
+  it("切换进行中，次按钮不可点（两个动作互斥）", async () => {
+    let finish: (value: boolean) => void = () => {};
+    const onSwitchAccount = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const onLogout = vi.fn(async () => ({ ok: true as const }));
+    renderMenu({ identityProblem: "account_blocked", onSwitchAccount, onLogout });
+
+    const secondary = screen.getByRole("button", {
+      name: "退出这台设备",
+    }) as HTMLButtonElement;
+    expect(secondary.disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "换一个账户" }));
+    await waitFor(() => expect(secondary.disabled).toBe(true));
+
+    const primary = screen.getByRole("button", {
+      name: "正在切换…",
+    }) as HTMLButtonElement;
+    expect(primary.disabled).toBe(true);
+
+    finish(true);
+    await waitFor(() => expect(secondary.disabled).toBe(false));
+  });
+
+  it("账户停用：主行动「换一个账户」，次行动「退出这台设备」", async () => {
+    const onSwitchAccount = vi.fn(async () => true);
+    const onLogout = vi.fn(async () => ({ ok: true as const }));
+    const onClose = vi.fn();
     const menu = renderMenu({
       identityProblem: "account_blocked",
-      onRelogin,
+      onSwitchAccount,
+      onLogout,
+      onClose,
     });
 
     expect(
       screen.getByText(
-        "账户已停用，这个账户不能再使用。换一台设备身份后，可以登录其他账户。",
+        "这个账户已停用。换一个账户需要重新注册这台设备；这台设备上的旧账户仍会保留。",
       ),
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "退出登录" })).toBeNull();
@@ -206,12 +240,17 @@ describe("设备 / 账户被停用", () => {
     expect(screen.queryByText("充值")).toBeNull();
     expect(screen.queryByText(/稍后再试/)).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "换一台设备登录" }));
-    await waitFor(() => expect(onRelogin).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "换一个账户" }));
+    await waitFor(() => expect(onSwitchAccount).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "退出这台设备" }));
+    await waitFor(() => expect(onLogout).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
 
     menu.rerenderMenu({ identityProblem: null });
+    expect(screen.queryByRole("button", { name: "换一个账户" })).toBeNull();
     expect(
-      screen.queryByRole("button", { name: "换一台设备登录" }),
+      screen.queryByRole("button", { name: "退出这台设备" }),
     ).toBeNull();
   });
 });

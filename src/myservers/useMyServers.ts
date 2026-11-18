@@ -107,6 +107,8 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const [pendingServer, setPendingServer] = useState(false);
   /** 下单前的服务器 id 集合：刷新时用它认出哪一行是新机器。 */
   const pendingBaselineRef = useRef<Set<string> | null>(null);
+  /** 自己触发的登出：随后到来的 account-cleared 事件不要重复处理。 */
+  const selfLogoutAtRef = useRef(0);
   const [detail, setDetail] = useState<MyServer | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailRetrying, setDetailRetrying] = useState(false);
@@ -348,9 +350,17 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         void refresh();
       } else if (event.name === AGENT_EVENTS.myServerOrderChanged) {
         void refresh();
+      } else if (event.name === AGENT_EVENTS.myServerAccountCleared) {
+        // Host 在登出被 403 拒绝后已清本地令牌；自己刚登出的话不再重复处理。
+        if (Date.now() - selfLogoutAtRef.current < 10_000) {
+          selfLogoutAtRef.current = 0;
+          return;
+        }
+        setTopupOpen(false);
+        markLoggedOut();
       }
     });
-  }, [bridge, refresh]);
+  }, [bridge, refresh, markLoggedOut]);
 
   const provisioning = servers.some((server) => isProvisioning(server.state));
   const sharedTransfer =
@@ -529,6 +539,8 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const logout = async (): Promise<LogoutResult> => {
     const source = (bridge as AccountCapable).myServerLogout;
     if (!source) return { ok: false, message: LOGIN_UNSUPPORTED };
+    // Host 可能先发 account-cleared 再返回；事件与这次调用是同一件事。
+    selfLogoutAtRef.current = Date.now();
     try {
       const next = await source.call(bridge);
       setAccount(next);
@@ -539,6 +551,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       setView("wizard");
       return { ok: true };
     } catch (error) {
+      selfLogoutAtRef.current = 0;
       const problem = toBridgeError(error);
       const reason = errorReason(error);
       const message = AUTH_REASONS.has(reason)

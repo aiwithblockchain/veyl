@@ -7,7 +7,8 @@ use serde_json::json;
 
 use super::servers::{MyServer, MyServerOrder};
 use crate::claurst_session::events::{
-    now, CONTRACT_VERSION, EV_MY_SERVER_CHANGED, EV_MY_SERVER_ORDER_CHANGED,
+    now, CONTRACT_VERSION, EV_MY_SERVER_ACCOUNT_CLEARED, EV_MY_SERVER_CHANGED,
+    EV_MY_SERVER_ORDER_CHANGED,
 };
 
 pub fn emit_server_changed(server: &MyServer) {
@@ -34,4 +35,15 @@ pub fn emit_order_changed(order: &MyServerOrder) {
         "emitted_at": now(),
     });
     crate::agent::app_handle::emit(EV_MY_SERVER_ORDER_CHANGED, payload);
+}
+
+/// 登出被服务端拒绝（设备被停用、账户被封、令牌失效）后本地已清理。
+/// 只让界面立刻回到未登录态；payload 不含令牌、账户 id 或邮箱。
+pub fn emit_account_cleared(reason: &str) {
+    let payload = json!({
+        "contract_version": CONTRACT_VERSION,
+        "reason": reason,
+        "emitted_at": now(),
+    });
+    crate::agent::app_handle::emit(EV_MY_SERVER_ACCOUNT_CLEARED, payload);
 }

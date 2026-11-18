@@ -885,6 +885,10 @@ mod tests {
 
     #[test]
     fn installs_verifies_and_records_state() {
+        // 环境变量是进程级共享状态：与其它改环境的测试（控制面代理变量）共用一把锁。
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let dir = std::env::temp_dir().join(format!("veyl-rules-{:016x}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         let archive = write_fake_archive(&dir, "2026-11-04.1");

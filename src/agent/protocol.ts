@@ -6,7 +6,7 @@
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.17.0" as const;
+export const CONTRACT_VERSION = "2.18.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -38,6 +38,7 @@ export const AGENT_EVENTS = {
   nodeProbeFinished: "node-probe-finished",
   myServerChanged: "my-server-changed",
   myServerOrderChanged: "my-server-order-changed",
+  myServerAccountCleared: "my-server-account-cleared",
   trialExpired: "trial-expired",
   settingsPoint: "settings-point",
   stageSelect: "stage-select",
@@ -79,6 +80,7 @@ export const APP_EVENT_NAMES = [
   AGENT_EVENTS.nodeProbeFinished,
   AGENT_EVENTS.myServerChanged,
   AGENT_EVENTS.myServerOrderChanged,
+  AGENT_EVENTS.myServerAccountCleared,
   AGENT_EVENTS.trialExpired,
   AGENT_EVENTS.settingsPoint,
   AGENT_EVENTS.stageSelect,
@@ -765,6 +767,18 @@ export interface MyServerOrderChangedPayload {
   emitted_at: string;
 }
 
+/** `my-server-account-cleared`（events.md 2.18.0）：登出被服务端拒绝后本地已清理。 */
+export interface MyServerAccountClearedPayload {
+  contract_version: string;
+  reason:
+    | "device_revoked"
+    | "account_blocked"
+    | "token_invalid"
+    | "auth_required"
+    | "server_rejected";
+  emitted_at: string;
+}
+
 /* ------------------------------------------------------------------ */
 /* trial_status（commands.md §7.19）                                    */
 /* ------------------------------------------------------------------ */
@@ -815,6 +829,7 @@ export interface AgentEventMap {
   [AGENT_EVENTS.nodeProbeFinished]: NodeProbeFinishedPayload;
   [AGENT_EVENTS.myServerChanged]: MyServerChangedPayload;
   [AGENT_EVENTS.myServerOrderChanged]: MyServerOrderChangedPayload;
+  [AGENT_EVENTS.myServerAccountCleared]: MyServerAccountClearedPayload;
   [AGENT_EVENTS.trialExpired]: TrialExpiredPayload;
   [AGENT_EVENTS.settingsPoint]: SettingsPointPayload;
   [AGENT_EVENTS.stageSelect]: StageSelectPayload;

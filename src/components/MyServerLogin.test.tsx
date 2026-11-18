@@ -171,7 +171,7 @@ describe("设备被停用", () => {
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
 
     expect(
-      await screen.findByText("这台设备已被停用。重新登录会把这台设备重新注册。"),
+      await screen.findByText("这台设备已被停用。"),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "重新注册设备" })).toBeTruthy();
     expect(screen.queryByText(/稍后再试/)).toBeNull();

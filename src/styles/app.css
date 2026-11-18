@@ -4593,6 +4593,11 @@ body[data-resizing] {
   background: var(--bg-hover);
 }
 
+.account-menu__recover--secondary {
+  color: var(--ink-2);
+  font-weight: 400;
+}
+
 .account-menu__logout {
   display: flex;
   align-items: center;
