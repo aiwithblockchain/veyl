@@ -2979,13 +2979,6 @@ body[data-resizing] {
   color: var(--ink-2);
 }
 
-.myservers__progress-meta {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-}
-
 .myservers__bar {
   height: 4px;
   border-radius: 2px;
@@ -2998,6 +2991,37 @@ body[data-resizing] {
   height: 100%;
   background: var(--accent);
   transition: width 300ms ease-out;
+}
+
+/* 阶段内「还在动」：一条 1.6 秒的流光；减少动态效果时关掉。 */
+.myservers__bar.is-active {
+  position: relative;
+}
+
+.myservers__bar.is-active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--bg), transparent);
+  opacity: 0.6;
+  animation: myservers-flow 1.6s linear infinite;
+}
+
+@keyframes myservers-flow {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .myservers__bar.is-active::after { animation: none; display: none; }
+  .myservers__bar span { transition: none; }
+}
+
+.myservers__progress-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
 }
 
 .myservers__steps {
@@ -3073,6 +3097,12 @@ body[data-resizing] {
   margin: 0;
   font-size: 13px;
   line-height: 1.6;
+  color: var(--ink-3);
+}
+
+.myservers__created-in {
+  margin: 10px 0 0;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -3267,6 +3297,12 @@ body[data-resizing] {
   font-size: 12px;
   line-height: 1.5;
   color: var(--ink-3);
+}
+
+.wizard-block__note--fact {
+  margin-top: -4px;
+  font-size: 11px;
+  color: var(--ink-2);
 }
 
 .myservers__regions {
@@ -3507,12 +3543,89 @@ body[data-resizing] {
   gap: 12px;
 }
 
+.myservers__detail-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
 .myservers__detail-name {
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 20px;
   line-height: 1.3;
   font-weight: 600;
   color: var(--ink);
+}
+
+.myservers__rename {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.myservers__rename:hover {
+  color: var(--ink);
+  background: var(--bg-hover);
+}
+
+.myservers__rename:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.myservers__rename-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.myservers__rename-input {
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--hair-strong);
+  border-radius: var(--r-sm);
+  background: var(--card);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 20px;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+.myservers__rename-input.is-saving {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.myservers__rename-input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.myservers__rename-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--err-text);
 }
 
 .myservers__footer {
@@ -3563,6 +3676,14 @@ body[data-resizing] {
 
 .myservers__empty .btn {
   margin-top: 20px;
+}
+
+/* 向导期间 / 身份不可用：左栏可见但禁用，45% 透明。 */
+.rail--locked .rail-server,
+.rail--locked .rail__add,
+.rail--locked .rail-drawer__new {
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 /* 空态旁注：池里还有免费节点时的一行只读说明；只有「去连接」可点。 */

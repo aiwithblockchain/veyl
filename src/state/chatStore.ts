@@ -746,6 +746,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         case AGENT_EVENTS.myServerOrderChanged:
         // 登出被拒后的本地清理同样由「我的服务器」消费，不进对话流。
         case AGENT_EVENTS.myServerAccountCleared:
+        // 改名由「我的服务器」就地更新，不进对话流。
+        case AGENT_EVENTS.myServerRenamed:
         // 试用到期、AI 指路与舞台选择由 App 消费，不进对话流。
         case AGENT_EVENTS.trialExpired:
         case AGENT_EVENTS.settingsPoint:

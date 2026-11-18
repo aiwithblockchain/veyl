@@ -578,6 +578,10 @@ export class MockAgentBridge implements AgentBridge {
     return this.myServers.get(serverId);
   }
 
+  async myServerRename(serverId: string, name: string) {
+    return this.myServers.rename(serverId, name);
+  }
+
   async myServerCreate(input: MyServerCreateInput) {
     return this.myServers.create(input);
   }

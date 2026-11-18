@@ -328,6 +328,21 @@ export class MockMyServerService {
     return copyServer(server);
   }
 
+  rename(serverId: string, name: string): MyServer {
+    const store = readStore();
+    const server = store.servers.find((item) => item.server_id === serverId);
+    if (!server) {
+      throw {
+        code: "NOT_FOUND",
+        message: "这台服务器已不存在。",
+        details: { reason: "server_gone" },
+      };
+    }
+    server.name = name.trim();
+    writeStore(store);
+    return copyServer(server);
+  }
+
   create(input: MyServerCreateInput): MyServerOrder {
     if (readFlag(DOWN_KEY) === "1") providerDown();
     const region = REGIONS.find((item) => item.id === input.region);

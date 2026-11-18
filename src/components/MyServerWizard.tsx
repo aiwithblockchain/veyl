@@ -293,9 +293,6 @@ export function MyServerWizard({
     !planSupportsRegion(currentPlan, currentRegion);
   // 所有地区都没有档位：不再摆一屏灰卡片，只给一句结论。
   const noUsableRegion = regions.length > 0 && !regions.some(regionHasPlan);
-  const hasUnavailablePlan =
-    currentRegion !== null &&
-    plans.some((plan) => !planSupportsRegion(plan, currentRegion));
   const currentTier =
     currentPlan && plans.length === 3
       ? (TIERS[plans.findIndex((plan) => plan.id === currentPlan.id)] ?? null)
@@ -503,6 +500,9 @@ export function MyServerWizard({
         <>
       <section className="wizard-block">
         <p className="wizard-block__title">地区</p>
+        <p className="wizard-block__note wizard-block__note--fact">
+          只显示当前可开通的地区，DigitalOcean 的可用性会随时变化。
+        </p>
         <div
           className="myservers__regions"
           role="radiogroup"
@@ -548,11 +548,6 @@ export function MyServerWizard({
 
       <section className="wizard-block">
         <p className="wizard-block__title">服务器类型</p>
-        {hasUnavailablePlan ? (
-          <p className="wizard-block__note">
-            灰掉的档位，这个地区不提供；列表由 DigitalOcean 实时提供，可能变化。
-          </p>
-        ) : null}
         <div
           className="wizard-plan-cards"
           role="radiogroup"

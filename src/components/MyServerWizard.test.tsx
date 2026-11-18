@@ -661,11 +661,14 @@ describe("档位按地区过滤", () => {
     );
     expect(planCard(/1 核 · 512 MB/).disabled).toBe(false);
     expect(planCard(/1 核 · 2 GB/).disabled).toBe(false);
-    // 统一说明每块只出现一次，不跟着每张灰卡重复。
-    expect(screen.getAllByText(/灰掉的档位，这个地区不提供/)).toHaveLength(1);
-    // 地区没有灰卡片，也不会出现解释那句。
+    // 只有地区这一条事实说明，档位区不再重复一句。
+    expect(
+      screen.getAllByText(
+        "只显示当前可开通的地区，DigitalOcean 的可用性会随时变化。",
+      ),
+    ).toHaveLength(1);
+    expect(screen.queryByText(/灰掉的档位/)).toBeNull();
     expect(screen.queryByText(/灰掉的地区/)).toBeNull();
-    expect(screen.queryByText("暂不可用")).toBeNull();
 
     expect(createButton().disabled).toBe(true);
     expect(

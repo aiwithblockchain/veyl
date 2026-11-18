@@ -47,6 +47,12 @@ const bridge = getAgentBridge();
 const modeDescriptor = Object.getOwnPropertyDescriptor(bridge, "mode");
 
 
+/** 左栏里的服务器行；详情标题的改名按钮也带服务器名，必须限定在 rail 里找。 */
+async function clickRailServer(name: RegExp) {
+  const rail = await screen.findByRole("complementary", { name: "服务器列表" });
+  fireEvent.click(await within(rail).findByRole("button", { name }));
+}
+
 function detailConnect() {
   const detail = document.querySelector(".myservers__detail");
   if (!(detail instanceof HTMLElement)) throw new Error("详情不在");
@@ -242,7 +248,7 @@ describe("destination 与我的服务器", () => {
     expect(runtimeStart).not.toHaveBeenCalled();
   });
 
-  it("服务器页 ＋ 打开 client 新建节点，返回回到服务器列表", async () => {
+  it("服务器页 ＋ 进入向导：留在 servers，左栏保留但禁用；返回回列表", async () => {
     prepare([SERVER]);
     render(<App />);
     await screen.findByRole("button", { name: /我的服务器/ });
@@ -253,12 +259,90 @@ describe("destination 与我的服务器", () => {
     await waitFor(() =>
       expect(document.querySelector('main[aria-label="新建节点"]')).not.toBeNull(),
     );
-    expect(screen.queryByRole("complementary", { name: "服务器列表" })).toBeNull();
+    // 导航高亮仍在「我的服务器」，左栏还在。
+    expect(
+      screen.getByRole("button", { name: /我的服务器/ }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    const lockedRail = screen.getByRole("complementary", { name: "服务器列表" });
+    expect(lockedRail.className).toContain("rail--locked");
+    expect(
+      (within(lockedRail).getByRole("button", { name: "新建节点" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
 
     const stage = document.querySelector('main[aria-label="新建节点"]') as HTMLElement;
     fireEvent.click(within(stage).getByRole("button", { name: "返回" }));
     await waitFor(() =>
-      expect(screen.getByRole("complementary", { name: "服务器列表" })).toBeTruthy(),
+      expect(document.querySelector('main[aria-label="新建节点"]')).toBeNull(),
+    );
+    expect(
+      screen.getByRole("button", { name: /我的服务器/ }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      screen.getByRole("complementary", { name: "服务器列表" }).className,
+    ).not.toContain("rail--locked");
+  });
+
+  it("服务器宿主里点导航切走：先关向导，切回不恢复半填表单与 AI 待选", async () => {
+    prepare([SERVER]);
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    const rail = await screen.findByRole("complementary", { name: "服务器列表" });
+    fireEvent.click(within(rail).getByRole("button", { name: "新建节点" }));
+
+    const stage = await screen.findByRole("main", { name: "新建节点" });
+    fireEvent.click(within(stage).getByRole("radio", { name: /1 核 · 512 MB/ }));
+    expect(
+      within(stage)
+        .getByRole("radio", { name: /1 核 · 512 MB/ })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+
+    navConnect();
+    await waitFor(() =>
+      expect(document.querySelector('main[aria-label="新建节点"]')).toBeNull(),
+    );
+    expect(await screen.findByRole("button", { name: "连接节点" })).toBeTruthy();
+
+    // 切回 servers 再打开：不恢复上一轮的地区/档位，也不应用上一条 AI 待选。
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    const railAgain = await screen.findByRole("complementary", {
+      name: "服务器列表",
+    });
+    fireEvent.click(within(railAgain).getByRole("button", { name: "新建节点" }));
+    const reopened = await screen.findByRole("main", { name: "新建节点" });
+    expect(
+      within(reopened)
+        .getByRole("radio", { name: /1 核 · 512 MB/ })
+        .getAttribute("aria-checked"),
+    ).not.toBe("true");
+  });
+
+  it("servers 宿主下 StageSelect 不被丢弃", async () => {
+    prepare([SERVER]);
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    const rail = await screen.findByRole("complementary", { name: "服务器列表" });
+    fireEvent.click(within(rail).getByRole("button", { name: "新建节点" }));
+    const stage = await screen.findByRole("main", { name: "新建节点" });
+
+    act(() => {
+      (
+        bridge as unknown as { emit(event: unknown): void }
+      ).emit({
+        name: AGENT_EVENTS.stageSelect,
+        payload: { region: "sgp1", plan: "s-1vcpu-512mb-10gb" },
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        within(stage)
+          .getByRole("radio", { name: /1 核 · 512 MB/ })
+          .getAttribute("aria-checked"),
+      ).toBe("true"),
     );
   });
 
@@ -297,9 +381,7 @@ describe("destination 与我的服务器", () => {
     await screen.findByText("从哪里开始？");
 
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
-    );
+    await clickRailServer(/新加坡 1 · DigitalOcean/);
     detailConnect();
 
     expect(await screen.findByText(/没有改动任何配置/)).toBeTruthy();
@@ -312,9 +394,7 @@ describe("destination 与我的服务器", () => {
     await screen.findByRole("button", { name: "连接节点" });
 
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
-    );
+    await clickRailServer(/新加坡 1 · DigitalOcean/);
     detailConnect();
 
     await waitFor(() =>
@@ -362,9 +442,7 @@ describe("destination 与我的服务器", () => {
     await screen.findByText("从哪里开始？");
 
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
-    );
+    await clickRailServer(/新加坡 1 · DigitalOcean/);
     detailConnect();
     navConnect();
 
@@ -522,9 +600,7 @@ describe("已连接时改用服务器节点", () => {
       ).toContain("已连接"),
     );
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
-    );
+    await clickRailServer(/新加坡 1 · DigitalOcean/);
   }
 
   it("attach → node_switch → 启动，旧连接交给 runtime_start 停", async () => {
@@ -638,16 +714,12 @@ describe("已连接时改用服务器节点", () => {
     await screen.findByRole("button", { name: "连接节点" });
 
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
-    );
+    await clickRailServer(/新加坡 1 · DigitalOcean/);
     detailConnect();
     await waitFor(() => expect(nodeAttach).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
-    );
+    await clickRailServer(/新加坡 1 · DigitalOcean/);
     detailConnect();
     await waitFor(() => expect(nodeAttach).toHaveBeenCalledTimes(2));
 
@@ -726,9 +798,15 @@ describe("下单成功后回到详情", () => {
       await screen.findByRole("heading", { name: "新加坡 1 · 新建" }),
     ).toBeTruthy();
     expect(checkout).toHaveBeenCalledWith("ord_1");
-    const bar = screen.getByRole("progressbar");
-    expect(bar.getAttribute("aria-valuenow")).toBe("15");
-    expect(screen.getByText("正在建机器 15%")).toBeTruthy();
+    // 没有真实百分比，也就不再有 progressbar 角色与 15% 这种假数字。
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.queryByText(/%/)).toBeNull();
+    expect(
+      document.querySelector(".myservers__progress-head")?.textContent,
+    ).toContain("正在建机器");
+    expect(
+      document.querySelector(".myservers__progress-head")?.textContent,
+    ).toContain("已等待 0 秒");
     const steps = [...document.querySelectorAll(".myservers__steps li")].map(
       (node) => node.textContent,
     );
@@ -1124,5 +1202,90 @@ describe("销毁服务器后的选中", () => {
     expect(
       screen.queryByText("服务器已下单，正在创建，稍后会自动出现。"),
     ).toBeNull();
+  }, 15_000);
+});
+
+describe("新建节点：导航与 Esc", () => {
+  function openServersWizard() {
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    const rail = screen.getByRole("complementary", { name: "服务器列表" });
+    fireEvent.click(within(rail).getByRole("button", { name: "新建节点" }));
+  }
+
+  it("登录弹窗开着时 Esc 只关弹窗，不关向导", async () => {
+    prepare([SERVER]);
+    vi.spyOn(bridge, "myServerCreate").mockRejectedValue({
+      code: "UNAUTHENTICATED",
+      message: "需要登录后使用",
+      details: { reason: "auth_required" },
+      retryable: true,
+    });
+
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    openServersWizard();
+    await screen.findByRole("main", { name: "新建节点" });
+
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+    await screen.findByRole("dialog", { name: "登录我的服务器" });
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "登录我的服务器" })).toBeNull(),
+    );
+    expect(document.querySelector('main[aria-label="新建节点"]')).not.toBeNull();
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+    await waitFor(() =>
+      expect(document.querySelector('main[aria-label="新建节点"]')).toBeNull(),
+    );
+  }, 15_000);
+
+  it("创建在途：导航禁用，Esc 与返回都不生效", async () => {
+    prepare([SERVER]);
+    let release: (value: { server_id: string; order_id: string }) => void =
+      () => {};
+    const pending = new Promise<{ server_id: string; order_id: string }>(
+      (resolve) => {
+        release = resolve;
+      },
+    );
+    vi.spyOn(bridge, "myServerCreate").mockImplementation(() => pending as never);
+    vi.spyOn(bridge, "myServerCheckout").mockResolvedValue({
+      order_id: "ord_1",
+      state: "provisioning",
+      charged_cents: 30,
+      balance_after_cents: 970,
+    } as never);
+
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    openServersWizard();
+    await screen.findByRole("main", { name: "新建节点" });
+
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+    await waitFor(() => expect(bridge.myServerCreate).toHaveBeenCalled());
+
+    expect(
+      (screen.getByRole("button", { name: "连接" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: /我的服务器/ }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+    expect(document.querySelector('main[aria-label="新建节点"]')).not.toBeNull();
+
+    await act(async () => {
+      release({ server_id: "srv_new", order_id: "ord_1" });
+      await pending;
+    });
   }, 15_000);
 });

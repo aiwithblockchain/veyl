@@ -1,5 +1,6 @@
 /** @vitest-environment jsdom */
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, MyServer } from "../agent/bridge";
 import { DESTROY_RETRY_MS, MyServerDetail } from "./MyServerDetail";
@@ -220,7 +221,89 @@ describe("服务器详情", () => {
       <MyServerDetail {...props} server={server({ state: "healthy" })} />,
     );
     expect(screen.queryByText(/已等待/)).toBeNull();
-    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(
+      screen.queryByRole("group", { name: "建机进度" }),
+    ).toBeNull();
+  });
+
+  it("就绪的机器显示创建用时；旧机器没有 ready_at 时写未知", () => {
+    const created = "2026-11-18T10:00:00.000Z";
+    const view = renderDetail({
+      state: "healthy",
+      created_at: created,
+      ready_at: "2026-11-18T10:02:55.000Z",
+    });
+    expect(screen.getByText("创建用时 2 分 55 秒")).toBeTruthy();
+    view.unmount();
+
+    renderDetail({ state: "healthy", created_at: created, ready_at: null });
+    expect(screen.getByText("创建用时未知")).toBeTruthy();
+  });
+
+  it("没建成的机器不显示创建用时", () => {
+    renderDetail({
+      state: "error",
+      created_at: "2026-11-18T10:00:00.000Z",
+      ready_at: "2026-11-18T10:02:55.000Z",
+    });
+    expect(screen.queryByText(/创建用时/)).toBeNull();
+  });
+
+  it("建机进度不显示百分比，秒数每秒更新，当前阶段用 aria-current", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
+    renderDetail({ state: "creating" });
+
+    expect(screen.queryByText(/%/)).toBeNull();
+    expect(
+      document.querySelector(".myservers__progress-head")?.textContent,
+    ).toContain("正在建机器");
+    expect(screen.getByText("已等待 0 秒")).toBeTruthy();
+    const steps = [...document.querySelectorAll(".myservers__steps li")];
+    expect(steps[0].getAttribute("aria-current")).toBe("step");
+    expect(steps[1].getAttribute("aria-current")).toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByText("已等待 1 秒")).toBeTruthy();
+  });
+
+  it("阶段超过 180 秒换成「还在继续」，没有阶段数据就不编", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 5, 0) });
+    const view = renderDetail({
+      state: "installing",
+      installing_at: new Date(2026, 10, 18, 10, 1, 59).toISOString(),
+    });
+    expect(screen.getByText("这一步已经 3 分钟，还在继续。")).toBeTruthy();
+    view.unmount();
+
+    // booting 没有阶段字段：等再久也不编「已经 X 分钟」。
+    const booting = renderDetail({
+      state: "booting",
+      created_at: new Date(2026, 10, 18, 9, 0, 0).toISOString(),
+    });
+    expect(screen.getByText("通常 2–4 分钟。")).toBeTruthy();
+    expect(screen.queryByText(/还在继续/)).toBeNull();
+    booting.unmount();
+
+    // installing 但 Host 还没给 installing_at：同样不显示阶段耗时、不编数。
+    renderDetail({
+      state: "installing",
+      created_at: new Date(2026, 10, 18, 9, 0, 0).toISOString(),
+      installing_at: null,
+    });
+    expect(screen.getByText("通常 2–4 分钟。")).toBeTruthy();
+    expect(screen.queryByText(/还在继续/)).toBeNull();
+    expect(screen.queryByText(/这一步已经/)).toBeNull();
+  });
+
+  it("安装中拿到 sing-box 版本就显示出来", () => {
+    renderDetail({
+      state: "installing",
+      installing_at: new Date(Date.now() - 10_000).toISOString(),
+      singbox_version: "1.14.4",
+    });
+    expect(screen.getByText("正在安装 sing-box 1.14.4")).toBeTruthy();
   });
 
   it("流量行只留额度一个事实，不带括号补充", () => {
@@ -319,5 +402,178 @@ describe("服务器详情", () => {
     expect(
       screen.getByText(/销毁后不再产生新费用。未用完的整天退回余额/),
     ).toBeTruthy();
+  });
+});
+
+describe("服务器重命名", () => {
+  function harness(
+    opts: {
+      initial?: Partial<MyServer>;
+      rename?: (id: string, name: string) => Promise<MyServer>;
+      onSaved?: (server: MyServer) => void;
+    } = {},
+  ) {
+    const rename = vi.fn(
+      opts.rename ??
+        (async (_id: string, name: string) => server({ name })),
+    );
+    const bridge = { myServerRename: rename } as unknown as AgentBridge;
+    function Harness() {
+      const [current, setCurrent] = useState(server(opts.initial ?? {}));
+      return (
+        <MyServerDetail
+          bridge={bridge}
+          server={current}
+          regionLabel="新加坡 1"
+          onCreateAnother={vi.fn()}
+          onUseServer={vi.fn()}
+          onChanged={() => {}}
+          onRebuilt={() => {}}
+          onGone={vi.fn()}
+          onRenamed={(next) => {
+            setCurrent(next);
+            opts.onSaved?.(next);
+          }}
+        />
+      );
+    }
+    render(<Harness />);
+    return { rename };
+  }
+
+  const openEditor = () => {
+    fireEvent.click(
+      screen.getByRole("button", { name: "重命名 新加坡 1 · DigitalOcean" }),
+    );
+    return screen.getByRole("textbox", {
+      name: "服务器名称",
+    }) as HTMLInputElement;
+  };
+
+  it("回车提交：调用命令、详情与按钮名一起更新，焦点回铅笔", async () => {
+    const { rename } = harness();
+    const input = openEditor();
+    // 进入编辑即全选。
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(input.value.length);
+
+    fireEvent.change(input, { target: { value: "  东京新机  " } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(rename).toHaveBeenCalledWith("srv_1", "东京新机"),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "东京新机" }),
+    ).toBeTruthy();
+    const pencil = screen.getByRole("button", { name: "重命名 东京新机" });
+    expect(document.activeElement).toBe(pencil);
+  });
+
+  it("Esc 取消：不调命令，焦点回铅笔", () => {
+    const { rename } = harness();
+    const input = openEditor();
+    fireEvent.change(input, { target: { value: "改一半" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+
+    expect(screen.queryByRole("textbox", { name: "服务器名称" })).toBeNull();
+    expect(rename).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "重命名 新加坡 1 · DigitalOcean" }),
+    );
+  });
+
+  it("输入法组字中的回车不提交", () => {
+    const { rename } = harness();
+    const input = openEditor();
+    fireEvent.change(input, { target: { value: "とうきょう" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+
+    expect(rename).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "服务器名称" })).toBeTruthy();
+  });
+
+  it("失焦既不提交也不退出编辑", () => {
+    const { rename } = harness();
+    const input = openEditor();
+    fireEvent.change(input, { target: { value: "新名字" } });
+    fireEvent.blur(input);
+
+    expect(rename).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "服务器名称" })).toBeTruthy();
+  });
+
+  it("校验：空、只有空格、超过 24 个字符", () => {
+    const { rename } = harness();
+    const input = openEditor();
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("alert").textContent).toContain("名字不能为空。");
+
+    fireEvent.change(input, { target: { value: "   " } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("alert").textContent).toContain(
+      "名字不能只有空格。",
+    );
+
+    fireEvent.change(input, { target: { value: "名".repeat(25) } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("alert").textContent).toContain(
+      "名字最多 24 个字符。",
+    );
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")).toBe("server-name-error");
+    expect(rename).not.toHaveBeenCalled();
+  });
+
+  it("销毁中与已失效时不显示改名入口", () => {
+    for (const state of ["destroying", "gone"] as const) {
+      const view = renderDetail({ state });
+      expect(screen.queryByRole("button", { name: /^重命名/ })).toBeNull();
+      view.unmount();
+    }
+  });
+
+  it("emoji 按一个字符计数：24 个 emoji 可以提交", async () => {
+    const { rename } = harness();
+    const input = openEditor();
+    const emoji = "😀".repeat(24);
+
+    fireEvent.change(input, { target: { value: emoji } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(rename).toHaveBeenCalledWith("srv_1", emoji));
+  });
+
+  it("保存中禁用并清空显示，失败保留输入与焦点", async () => {
+    let reject: (error: unknown) => void = () => {};
+    const gate = new Promise<MyServer>((_resolve, rej) => {
+      reject = rej;
+    });
+    harness({ rename: () => gate });
+    const input = openEditor();
+    fireEvent.change(input, { target: { value: "新名字" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    // 保存中不 disabled（真实浏览器会因此丢焦点），只读且保留原值。
+    await waitFor(() => {
+      const current = screen.getByRole("textbox", {
+        name: "服务器名称",
+      }) as HTMLInputElement;
+      expect(current.readOnly).toBe(true);
+      expect(current.disabled).toBe(false);
+      expect(current.value).toBe("新名字");
+    });
+
+    reject({ code: "NETWORK", message: "连不上。", retryable: true });
+
+    const after = (await screen.findByRole("textbox", {
+      name: "服务器名称",
+    })) as HTMLInputElement;
+    await waitFor(() => expect(after.readOnly).toBe(false));
+    expect(after.value).toBe("新名字");
+    expect(document.activeElement).toBe(after);
+    expect(screen.getByRole("alert").textContent).toContain("连不上");
   });
 });

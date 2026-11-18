@@ -348,6 +348,20 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         );
         setRevision((value) => value + 1);
         void refresh();
+      } else if (event.name === AGENT_EVENTS.myServerRenamed) {
+        // 改名走两条路：本次调用的返回值，和这条事件；按 server_id 写同一份 state。
+        setServers((current) =>
+          current.map((server) =>
+            server.server_id === event.payload.server_id
+              ? { ...server, name: event.payload.name }
+              : server,
+          ),
+        );
+        setDetail((current) =>
+          current && current.server_id === event.payload.server_id
+            ? { ...current, name: event.payload.name }
+            : current,
+        );
       } else if (event.name === AGENT_EVENTS.myServerOrderChanged) {
         void refresh();
       } else if (event.name === AGENT_EVENTS.myServerAccountCleared) {
@@ -433,6 +447,16 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const retryDetail = () => {
     setDetailRetrying(true);
     setRevision((value) => value + 1);
+  };
+
+  /** 改名成功：用返回的完整对象同时更新列表与详情，不二次拉取。 */
+  const renamed = (server: MyServer) => {
+    setServers((current) =>
+      current.map((item) => (item.server_id === server.server_id ? server : item)),
+    );
+    setDetail((current) =>
+      current && current.server_id === server.server_id ? server : current,
+    );
   };
 
   const select = (serverId: string) => {
@@ -737,6 +761,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     select,
     resetToRoot,
     clearSelection,
+    renamed,
     openWizard,
     ensureIdentity,
     identityAction,

@@ -362,20 +362,24 @@ export default function App() {
   // 冷启动一律落在连接页：不恢复上次停留，避免服务器页在未登录/零台时变成死胡同。
   const [destination, setDestination] = useState<Destination>("client");
   const changeDestination = (next: Destination) => {
+    // 向导打开时切到另一侧：创建在途不切；否则先关向导并丢弃未提交的选择。
+    if (next !== destinationRef.current && newNodeOpenRef.current) {
+      if (newNodeBusyRef.current) return;
+      setNewNodeOpen(false);
+      setStageSelect(null);
+      setNewNodeSelection({ region: null, plan: null });
+    }
     setDestination(next);
   };
-  /** 新建节点只有一个宿主：client 舞台；从服务器页进入时记住来源，返回回去。 */
-  const [newNodeOrigin, setNewNodeOrigin] = useState<
-    "client" | "servers" | "trial_expired"
-  >("client");
+  /** 新建节点沿用入口所在的宿主：servers 留在服务器页，其余留在连接侧。 */
   const openNewNode = (origin: "client" | "servers" | "trial_expired") => {
-    setNewNodeOrigin(origin);
     setNewNodeOpen(true);
-    if (destinationRef.current !== "client") changeDestination("client");
+    setDestination(origin === "servers" ? "servers" : "client");
   };
+  /** 关闭向导（返回 / Esc）：两个宿主都从未离开；清掉 AI 待选结果。 */
   const closeNewNode = () => {
     setNewNodeOpen(false);
-    if (newNodeOrigin === "servers") changeDestination("servers");
+    setStageSelect(null);
   };
   // 再点一次已激活的「我的服务器」图标：回到列表根（默认第一台）。
   const [serversRootSignal, setServersRootSignal] = useState(0);
@@ -474,6 +478,8 @@ export default function App() {
   const [trialLoaded, setTrialLoaded] = useState(false);
   /** 从两选一 / 到期屏进入「新建节点」舞台。 */
   const [newNodeOpen, setNewNodeOpen] = useState(false);
+  /** 创建在途：导航禁用、Esc 与返回都不可用。 */
+  const [newNodeBusy, setNewNodeBusy] = useState(false);
   /** 新建节点舞台上次选的地区/规格；返回后再进来要恢复。 */
   const [newNodeSelection, setNewNodeSelection] = useState<{
     region: string | null;
@@ -495,8 +501,21 @@ export default function App() {
   const newNodeBusyRef = useRef(false);
   newNodeOpenRef.current = newNodeOpen;
   useEffect(() => {
-    if (!newNodeOpen) newNodeBusyRef.current = false;
+    if (newNodeOpen) return;
+    newNodeBusyRef.current = false;
+    setNewNodeBusy(false);
   }, [newNodeOpen]);
+  useEffect(() => {
+    if (!newNodeOpen) return;
+    // Esc 与「返回」相同；登录弹窗在最上层时只关弹窗，一次按键只解一层。
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (myServers.loginOpen || newNodeBusyRef.current) return;
+      closeNewNode();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [newNodeOpen, myServers.loginOpen]);
   const [trialNonce, setTrialNonce] = useState(0);
   /** 首屏等配置与试用状态都读回来再决定渲染，避免闪一下两选一。 */
   const [stageReady, setStageReady] = useState(false);
@@ -971,11 +990,8 @@ export default function App() {
       }
       if (event.name === AGENT_EVENTS.stageSelect) {
         // 只改舞台选择；舞台没开或正在创建时忽略（契约允许的已知残余）。
-        if (
-          !newNodeOpenRef.current ||
-          newNodeBusyRef.current ||
-          destinationRef.current !== "client"
-        ) {
+        // 两个宿主的 screen 都是 new_node，不按 destination 区分。
+        if (!newNodeOpenRef.current || newNodeBusyRef.current) {
           return;
         }
         const { region, plan } = event.payload;
@@ -2183,6 +2199,7 @@ export default function App() {
           aria-pressed={destination === "client"}
           aria-label="连接"
           title="连接"
+          disabled={newNodeBusy}
           onClick={() => changeDestination("client")}
         >
           <IconConsole size={18} />
@@ -2197,6 +2214,7 @@ export default function App() {
               : "我的服务器"
           }
           title="我的服务器"
+          disabled={newNodeBusy}
           onClick={() => {
             if (destination === "servers") setServersRootSignal((value) => value + 1);
             else {
@@ -2285,7 +2303,7 @@ export default function App() {
           catalog={myServers.catalog}
           error={myServers.error}
           retryNotice={myServers.retryNotice}
-          disabled={myServers.identityProblem !== null}
+          disabled={myServers.identityProblem !== null || newNodeOpen}
           compact={shell.mode === "drawer"}
           onSelect={myServers.select}
           onNew={() => openNewNode("servers")}
@@ -2303,7 +2321,7 @@ export default function App() {
           {...panes.railHandlers}
         />
       ) : null}
-      {destination === "client" && newNodeOpen ? (
+      {newNodeOpen ? (
         <main
           className="connection-stage connection-stage--new-node"
           aria-label="新建节点"
@@ -2313,10 +2331,10 @@ export default function App() {
               bridge={bridge}
               catalog={myServers.catalog}
               onOrdered={(serverId) => {
-                setNewNodeOpen(false);
+                closeNewNode();
                 // 认不出新机器时 ordered(null) 会让列表不选中任何一台并给一行提示。
                 myServers.ordered(serverId);
-                changeDestination("servers");
+                setDestination("servers");
               }}
               onEnsureIdentity={myServers.ensureIdentity}
               onTopUp={myServers.openTopUp}
@@ -2330,6 +2348,7 @@ export default function App() {
               initialSelection={newNodeSelection}
               onBusyChange={(busy) => {
                 newNodeBusyRef.current = busy;
+                setNewNodeBusy(busy);
               }}
               onBack={closeNewNode}
               onSelectionApplied={(pick) =>
@@ -2383,6 +2402,7 @@ export default function App() {
           }
           onGoConnect={() => changeDestination("client")}
           pendingServer={myServers.pendingServer}
+          onRenamed={myServers.renamed}
         />
       ) : trial?.state === "expired" && !hasNodes ? (
         <TrialExpired

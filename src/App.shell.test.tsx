@@ -661,6 +661,23 @@ describe("三区外壳与连接舞台", () => {
     expect(screen.getByRole("button", { name: "让 AI 帮我选" })).toBeTruthy();
   }, 15_000);
 
+  it("client 宿主：导航高亮仍在连接，Esc 与返回相同", async () => {
+    await renderApp();
+    fireEvent.click(screen.getByRole("button", { name: /新建节点/ }));
+    await screen.findByRole("heading", { name: "新建节点" });
+
+    expect(
+      screen.getByRole("button", { name: "连接" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(document.querySelector(".rail")).toBeNull();
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+    await waitFor(() => expect(screen.getByText("从哪里开始？")).toBeTruthy());
+    expect(screen.queryByRole("heading", { name: "新建节点" })).toBeNull();
+  }, 15_000);
+
   it("试用到期屏也能进入新建节点舞台", async () => {
     localStorage.setItem("veyl.mock.trial", "expired");
     render(<App />);

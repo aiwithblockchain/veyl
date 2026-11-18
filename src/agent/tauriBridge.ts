@@ -750,6 +750,13 @@ function normalizeMyServer(raw: unknown): MyServer | null {
         ? value.monthly_usd
         : 0,
     daily_price_cents: daily as number,
+    ready_at: typeof value.ready_at === "string" ? value.ready_at : null,
+    installing_at:
+      typeof value.installing_at === "string" ? value.installing_at : null,
+    verifying_at:
+      typeof value.verifying_at === "string" ? value.verifying_at : null,
+    singbox_version:
+      typeof value.singbox_version === "string" ? value.singbox_version : null,
     paid_until: paidUntil,
     billing_state: billingState,
     grace_ends_at: grace as string | null,
@@ -1246,6 +1253,14 @@ export class TauriAgentBridge implements AgentBridge {
   async myServerGet(serverId: string): Promise<MyServer> {
     const server = normalizeMyServer(
       await call<unknown>("my_server_get", { serverId }),
+    );
+    if (!server) serverDataError();
+    return server;
+  }
+
+  async myServerRename(serverId: string, name: string): Promise<MyServer> {
+    const server = normalizeMyServer(
+      await call<unknown>("my_server_rename", { serverId, name }),
     );
     if (!server) serverDataError();
     return server;

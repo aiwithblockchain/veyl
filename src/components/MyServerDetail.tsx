@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { ServerProgress } from "./ServerProgress";
+import { IconPencil } from "./icons";
 import {
   MY_SERVER_STATE_LABEL,
   billingNoticeText,
+  formatBuildDuration,
   formatUsdCents,
   isProvisioning,
   serverBillingText,
@@ -33,6 +35,8 @@ interface Props {
   onRebuilt: (serverId: string, state: MyServerState) => void;
   /** 销毁后收起详情。 */
   onGone: () => void;
+  /** 改名成功：用返回的完整对象更新列表与详情，不二次拉取。 */
+  onRenamed?: (server: MyServer) => void;
 }
 
 /** 服务端允许对 destroying 再发一次销毁；界面等这么久才放开重试入口。 */
@@ -59,6 +63,7 @@ export function MyServerDetail({
   onChanged,
   onRebuilt,
   onGone,
+  onRenamed,
 }: Props) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -66,6 +71,75 @@ export function MyServerDetail({
   const [destroyRetryAllowed, setDestroyRetryAllowed] = useState(false);
   const [useBusy, setUseBusy] = useState(false);
   const useBusyRef = useRef(false);
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [savingName, setSavingName] = useState(false);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const renameButtonRef = useRef<HTMLButtonElement>(null);
+  const focusRenameAfterSave = useRef(false);
+
+  useEffect(() => {
+    if (renaming) {
+      nameInputRef.current?.focus();
+      nameInputRef.current?.select();
+      return;
+    }
+    if (focusRenameAfterSave.current) {
+      focusRenameAfterSave.current = false;
+      renameButtonRef.current?.focus();
+    }
+  }, [renaming]);
+
+  const validateName = (raw: string): string | null => {
+    if (raw.length === 0) return "名字不能为空。";
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return "名字不能只有空格。";
+    if (Array.from(trimmed).length > 24) return "名字最多 24 个字符。";
+    return null;
+  };
+
+  const startRename = () => {
+    setNameDraft(server.name);
+    setRenameError(null);
+    setRenaming(true);
+  };
+
+  const cancelRename = () => {
+    setRenaming(false);
+    setRenameError(null);
+    focusRenameAfterSave.current = true;
+  };
+
+  const submitRename = async () => {
+    if (savingName) return;
+    const problem = validateName(nameDraft);
+    if (problem) {
+      setRenameError(problem);
+      return;
+    }
+    const next = nameDraft.trim();
+    if (next === server.name) {
+      setRenaming(false);
+      focusRenameAfterSave.current = true;
+      return;
+    }
+    setSavingName(true);
+    setRenameError(null);
+    try {
+      const updated = await bridge.myServerRename(server.server_id, next);
+      onRenamed?.(updated);
+      focusRenameAfterSave.current = true;
+      setRenaming(false);
+    } catch (err) {
+      setRenameError(errorText(err));
+      // 保存中不 disabled（浏览器会把焦点踢走），失败后显式把焦点送回输入框。
+      nameInputRef.current?.focus();
+      nameInputRef.current?.select();
+    } finally {
+      setSavingName(false);
+    }
+  };
 
   const rebuild = async () => {
     if (busy) return;
@@ -99,6 +173,9 @@ export function MyServerDetail({
     setBusy(false);
     setConfirming(false);
     setError(null);
+    setRenaming(false);
+    setRenameError(null);
+    setNameDraft("");
   }, [server.server_id]);
 
   useEffect(() => {
@@ -150,6 +227,13 @@ export function MyServerDetail({
 
   /** 没建成的机器不存在「本期有效至」：费用行只说退款结论。 */
   const failed = server.state === "error";
+  // 只有真正建成的机器才说创建用时；失败与进行中都不显示。
+  const showBuildTime =
+    server.state === "healthy" || server.state === "active";
+  const buildDuration = formatBuildDuration(
+    server.created_at,
+    server.ready_at ?? null,
+  );
   const chargedCents = server.charged_cents;
   const refundedCents = server.refunded_cents;
   const failedBilling =
@@ -164,7 +248,61 @@ export function MyServerDetail({
   return (
     <div className="myservers__detail">
       <div className="myservers__detail-head">
-        <h2 className="myservers__detail-name">{server.name}</h2>
+        <div className="myservers__detail-heading">
+          {renaming ? (
+            <div className="myservers__rename-box">
+              <input
+                ref={nameInputRef}
+                className={`myservers__rename-input${
+                  savingName ? " is-saving" : ""
+                }`}
+                aria-label="服务器名称"
+                aria-invalid={renameError ? true : undefined}
+                aria-describedby={renameError ? "server-name-error" : undefined}
+                value={nameDraft}
+                readOnly={savingName}
+                aria-busy={savingName || undefined}
+                onChange={(event) => {
+                  setNameDraft(event.target.value);
+                  if (renameError) setRenameError(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    const native = event.nativeEvent as KeyboardEvent;
+                    if (native.isComposing || native.keyCode === 229) return;
+                    event.preventDefault();
+                    void submitRename();
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    cancelRename();
+                  }
+                }}
+              />
+              {renameError ? (
+                <p
+                  id="server-name-error"
+                  className="myservers__rename-error"
+                  role="alert"
+                >
+                  {renameError}
+                </p>
+              ) : null}
+            </div>
+          ) : (
+            <h2 className="myservers__detail-name">{server.name}</h2>
+          )}
+          {!renaming && !readOnly && !destroying && server.state !== "gone" ? (
+            <button
+              ref={renameButtonRef}
+              type="button"
+              className="myservers__rename"
+              aria-label={`重命名 ${server.name}`}
+              onClick={startRename}
+            >
+              <IconPencil size={14} />
+            </button>
+          ) : null}
+        </div>
         <span className={`myservers__state is-${stateTone(server.state)}`}>
           <span className={`led is-${stateTone(server.state)}`} aria-hidden />
           {MY_SERVER_STATE_LABEL[server.state]}
@@ -193,6 +331,12 @@ export function MyServerDetail({
           </div>
         ) : null}
       </dl>
+
+      {showBuildTime ? (
+        <p className="myservers__created-in">
+          {buildDuration ? `创建用时 ${buildDuration}` : "创建用时未知"}
+        </p>
+      ) : null}
 
       {server.billing_state === "past_due" || server.billing_state === "expired" ? (
         <p

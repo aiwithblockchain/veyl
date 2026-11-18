@@ -38,19 +38,7 @@ export const MY_SERVER_RAIL_PHASE: Partial<Record<MyServerState, string>> = {
 };
 
 export function serverRailState(state: MyServerState): string {
-  const phase = MY_SERVER_RAIL_PHASE[state];
-  return phase ? `${phase} ${serverProgress(state)}%` : MY_SERVER_STATE_LABEL[state];
-}
-
-const PHASE_PROGRESS: Record<string, number> = {
-  creating: 15,
-  booting: 40,
-  installing: 65,
-  verifying: 90,
-};
-
-export function serverProgress(state: MyServerState): number {
-  return PHASE_PROGRESS[state] ?? 100;
+  return MY_SERVER_RAIL_PHASE[state] ?? MY_SERVER_STATE_LABEL[state];
 }
 
 export function isProvisioning(state: MyServerState): boolean {
@@ -93,6 +81,21 @@ export function formatTrialExpiry(
   if (remaining <= 0) return null;
   if (remaining < 86_400_000) return "不到 1 天后到期";
   return `${Math.floor(remaining / 86_400_000)} 天后到期`;
+}
+
+/** 创建用时：ready_at − created_at；不到一分钟只报秒。旧机器没有 ready_at 时返回 null。 */
+export function formatBuildDuration(
+  createdAt: string,
+  readyAt: string | null,
+): string | null {
+  if (!readyAt) return null;
+  const start = Date.parse(createdAt);
+  const end = Date.parse(readyAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  const total = Math.max(0, Math.floor((end - start) / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes} 分 ${seconds} 秒` : `${seconds} 秒`;
 }
 
 /** 计费截止措辞的唯一出处；定稿后只改这里。 */

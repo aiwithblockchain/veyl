@@ -51,6 +51,8 @@ interface Props {
   onGoConnect: () => void;
   /** 已下单但还认不出新机器：不选中任何一台，只给一行提示。 */
   pendingServer?: boolean;
+  /** 改名成功：用返回的完整对象更新列表与详情。 */
+  onRenamed?: (server: MyServer) => void;
 }
 
 /**
@@ -85,6 +87,7 @@ export function MyServersPage({
   trial = null,
   onGoConnect,
   pendingServer = false,
+  onRenamed,
 }: Props) {
   const trialHint = (() => {
     if (!trial || trial.seedNodeCount <= 0) return null;
@@ -161,6 +164,7 @@ export function MyServersPage({
             onChanged={onChanged}
             onRebuilt={onRebuilt}
             onGone={onGone}
+            onRenamed={onRenamed}
           />
         )}
       </div>

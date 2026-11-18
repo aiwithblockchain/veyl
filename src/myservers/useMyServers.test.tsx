@@ -2,6 +2,8 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, MyServer } from "../agent/bridge";
+import { AGENT_EVENTS } from "../agent/protocol";
+import type { AgentEvent } from "../agent/protocol";
 import { useMyServers } from "./useMyServers";
 
 const SERVER_A: MyServer = {
@@ -181,5 +183,64 @@ describe("开通中的轮询", () => {
     expect(listMock.mock.calls.length).toBe(stopped);
     view.unmount();
     vi.useRealTimers();
+  });
+});
+
+describe("重命名同步", () => {
+  it("用返回的服务器更新列表与详情，不二次拉取", async () => {
+    const list = { current: [SERVER_A] };
+    const { bridge, result } = await mount(list);
+    await waitFor(() => expect(result.current.selected?.server_id).toBe("srv_a"));
+    const listCalls = vi.mocked(bridge.myServerList).mock.calls.length;
+    const getCalls = vi.mocked(bridge.myServerGet).mock.calls.length;
+
+    act(() => {
+      result.current.renamed({ ...SERVER_A, name: "新名" });
+    });
+
+    expect(result.current.servers[0].name).toBe("新名");
+    expect(result.current.selected?.name).toBe("新名");
+    expect(vi.mocked(bridge.myServerList).mock.calls.length).toBe(listCalls);
+    expect(vi.mocked(bridge.myServerGet).mock.calls.length).toBe(getCalls);
+  });
+
+  it("my-server-renamed 事件按 server_id 写同一份 state", async () => {
+    const list = { current: [SERVER_A] };
+    const bridge = makeBridge(list);
+    const listeners = new Set<(event: AgentEvent) => void>();
+    (
+      bridge as unknown as {
+        subscribe: (fn: (event: AgentEvent) => void) => () => void;
+      }
+    ).subscribe = (fn) => {
+      listeners.add(fn);
+      return () => {
+        listeners.delete(fn);
+      };
+    };
+
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() =>
+      expect(view.result.current.selected?.server_id).toBe("srv_a"),
+    );
+
+    act(() => {
+      for (const listener of listeners) {
+        listener({
+          name: AGENT_EVENTS.myServerRenamed,
+          payload: {
+            contract_version: "x",
+            server_id: "srv_a",
+            name: "事件新名",
+            emitted_at: "",
+          },
+        } as never);
+      }
+    });
+
+    expect(view.result.current.servers[0].name).toBe("事件新名");
+    expect(view.result.current.selected?.name).toBe("事件新名");
   });
 });

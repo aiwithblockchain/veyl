@@ -549,6 +549,13 @@ export interface MyServer {
   monthly_usd: number;
   /** 售价快照（USD 分 / 天），即每天实际扣多少。 */
   daily_price_cents: number;
+  /** 建成时刻（ISO 8601）；旧机器没有这个字段时为 null。 */
+  ready_at?: string | null;
+  /** 进入「安装服务端」「检查是否可用」的时刻；旧 Host 不返回。 */
+  installing_at?: string | null;
+  verifying_at?: string | null;
+  /** 正在安装的 sing-box 版本；没有就不显示。 */
+  singbox_version?: string | null;
   /** 已付到哪个时刻（ISO 8601）；建行时即写入，永不为 null。 */
   paid_until: string;
   billing_state: "active" | "past_due" | "expired";
@@ -866,6 +873,8 @@ export interface AgentBridge {
   myServerCatalog(fresh?: boolean): Promise<MyServerCatalog>;
   myServerList(): Promise<{ servers: MyServer[] }>;
   myServerGet(serverId: string): Promise<MyServer>;
+  /** 改服务器名：只能改自己的，允许重名；服务端按码点校验 1–24。 */
+  myServerRename(serverId: string, name: string): Promise<MyServer>;
   /** 下单；本期是假支付，只产生一张订单。 */
   myServerCreate(input: MyServerCreateInput): Promise<MyServerOrder>;
   /** 从余额扣 1 天并开始建机（2.28.0）；余额不足回 `insufficient_balance`，details 带 7 天门槛。 */

@@ -124,7 +124,7 @@ export function MyServersRail({
   return (
     <aside
       id="config-rail"
-      className={`rail ${compact ? "rail--compact" : ""}`}
+      className={`rail ${compact ? "rail--compact" : ""} ${disabled ? "rail--locked" : ""}`.trim()}
       aria-label="服务器列表"
     >
       {compact ? (
