@@ -164,11 +164,10 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         // 没有确认就不能下载。
         Box::new(core_upgrade::CoreUpgradeTool::new(Arc::clone(&services))),
         Box::new(catalog::CatalogSearchTool::new(Arc::clone(&services))),
-        Box::new(configs::ConfigListTool::new(Arc::clone(&services))),
+        // 全局单配置（tools.md 3.18.0）：ConfigList / ConfigCreate / ConfigDelete
+        // 已退出工具集，只保留命令层入口。
         Box::new(configs::ConfigDetailTool::new(Arc::clone(&services))),
-        Box::new(configs::ConfigCreateTool::new(Arc::clone(&services))),
         Box::new(configs::ConfigUpdateTool::new(Arc::clone(&services))),
-        Box::new(configs::ConfigDeleteTool::new(Arc::clone(&services))),
         Box::new(config_mode::ConfigSetModeTool::new(Arc::clone(&services))),
         Box::new(configs::NodeImportUrlTool::new(Arc::clone(&services))),
         Box::new(configs::NodeImportTextTool::new(Arc::clone(&services))),

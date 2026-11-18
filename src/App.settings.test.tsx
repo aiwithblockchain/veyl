@@ -204,9 +204,8 @@ describe("设置 → 添加节点", () => {
   it("导入落到当前配置，主界面节点数随之变化", async () => {
     let detail: ConfigDetail = DETAIL;
     vi.spyOn(bridge, "configDetail").mockImplementation(async () => detail);
-    vi.spyOn(bridge, "nodeImportText").mockImplementation(async (text, configId) => {
+    vi.spyOn(bridge, "nodeImportText").mockImplementation(async (text) => {
       expect(text).toBe("ss://new");
-      expect(configId).toBe(CONFIG_ID);
       detail = {
         ...detail,
         node_count: 2,
@@ -243,7 +242,7 @@ describe("设置 → 添加节点", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
 
     await waitFor(() =>
-      expect(bridge.nodeImportText).toHaveBeenCalledWith("ss://new", CONFIG_ID),
+      expect(bridge.nodeImportText).toHaveBeenCalledWith("ss://new"),
     );
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
     fireEvent.click(screen.getByRole("button", { name: "关闭设置" }));

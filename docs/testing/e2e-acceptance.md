@@ -154,9 +154,13 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 ---
 
-## 1. 首次启动与配置创建
+## 1. 首次启动与全局配置（单配置）
 
-本章验证：没有配置时用户被带到哪里、AI 按什么顺序问问题、节点从哪里来、配置什么时候落库、最后是否进入主控制台。
+本章验证：没有节点时用户被带到哪里、AI 按什么顺序问问题、节点从哪里来、节点什么时候进池，最后是否进入主控制台。
+
+> 口径按 `docs/design/global-config-merge.md`：`configs` **恒为 0 或 1 行**，这一行就是全局配置；`config_nodes` 是唯一节点池。界面没有配置列表、没有「新建配置」、没有「切换配置」——动作只有「添加节点」「删除节点」「把某个节点设为当前」。
+>
+> **❗待实现**：标注「❗待实现」的步骤依赖全局单配置落地（当前实现仍可能为节点来源另建一套配置），涉及 E1-08、E1-10、E1-29、E1-32。落地前这些步骤记为「未覆盖（待实现）」，不判实现有缺陷；未标注的步骤照常执行。
 
 > 首次启动要求干净的本机数据。由测试者备份并移走 `~/.veyl`（本文不提供删除命令，避免误删）；更稳妥的做法是使用一个从未运行过 Veyl 的 macOS 用户账户。
 
@@ -179,7 +183,7 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 - **可观察预期**
   - 没有可用 AI：整窗被 AI 配置页接管，标题「配置 AI 后，我来帮你连上网络。」，有「DeepSeek API Key」输入框、「保存并验证」、「使用其他 AI 服务」、「我懂网络，不用 AI」。此时主界面不可操作。
   - 点「使用其他 AI 服务」后：DeepSeek 表单收起为一行摘要（显示 Key 状态与「改回默认 AI」），整屏只有一个实心主按钮、且名为「保存并验证」的按钮恰好 1 个，DeepSeek API Key 输入框不可见；点「改回默认 AI」恢复原样，仍只有 1 个「保存并验证」。
-  - 有可用 AI 且配置数为 0：直接进入主界面，右侧助手栏自动展开，助手开始首启对话；日志里 `可用=true`、配置数为 0。
+  - 有可用 AI 且 `configs` 为 0 行：直接进入主界面，右侧助手栏自动展开，助手开始首启对话；日志里 `可用=true`、配置数为 0。
 - **判定**
   - [ ] 通过
   - [ ] 失败
@@ -227,15 +231,15 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
   - 问题文字是「节点从哪来？」，选项恰好两项：「Veyl 免费节点（仅供试用）」「其它节点」。
   - 不出现默认选中、不出现推荐标记。
   - 全程不显示「第一类 / 第二类 / 第三类」。
-  - 用户点选之前没有任何建配置动作。
+  - 用户点选之前没有任何写库动作：不新建配置、不新增节点。
 - **判定**
   - [ ] 通过
   - [ ] 失败
 - **失败时收集**：卡片截图、工具表 SQL 输出。
 
-### E1-04 节点来源：Veyl 免费节点 → 确认 → 落库 → 主控制台
+### E1-04 节点来源：Veyl 免费节点 → 确认 → 进池 → 主控制台
 
-- **目的**：验证没有明确选来源前不建配置；确认后才写库；写库后进入主控制台并连上。
+- **目的**：验证没有明确选来源前不写库；确认后节点进入唯一节点池；写库后进入主控制台并能连接。
 - **前置条件**：完成 E1-02 / E1-03；开发构建；TUN 路径可能需要管理员授权（见第 4 章）。
 - **步骤（人做）**
   1. 等第二问「节点从哪来？」。
@@ -245,26 +249,27 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
   5. 等连接结束（成功或失败都记录）。
 - **AI 取证**
   ```bash
-  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, connection_mode, routing_mode, is_active, created_at from configs order by created_at desc limit 3;"
+  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
+  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, connection_mode, routing_mode, is_active from configs order by created_at desc limit 3;"
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select source, count(*) from nodes group by source;"
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select config_id, count(*) from config_nodes group by config_id;"
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select role, substr(content,1,160), created_at from chat_messages order by created_at desc limit 6;"
   grep -E '连接开始|连接完成|连接失败 卡在' "$APP_LOG" | tail -5
   ```
-  看什么：配置只有一套且 `is_active=1`；`nodes` 的 `source` 有 `seed`；`config_nodes` 至少有 1 条；确认消息的时间早于 `configs.created_at`；日志里有对应的连接开始/完成。
+  看什么：`configs` **最多 1 行**且 `is_active=1`；`nodes` 的 `source` 有 `seed`；`config_nodes` 至少有 1 条；确认消息的时间早于节点与配置的写入时间；日志里有对应的连接开始/完成。
 - **可观察预期**
-  - 选来源之前，`configs` 数量仍是 0；没有「先建空配置再塞节点」。
+  - 选来源之前，`configs` 仍是 0 行、`nodes` 为 0 行；没有「先建空配置再塞节点」。
   - 确认页明确写出 `Veyl 免费节点` 与节点数量。
-  - 确认之后才有配置，节点来源为 `seed`，配置与节点已关联。
+  - 确认之后节点进入节点池，`config_nodes` 与节点数一致；**首次添加才产生唯一那行配置**。
   - 界面进入主控制台，不是停在聊天页或设置页；连接流程有明确的结束状态。
 - **判定**
   - [ ] 通过
   - [ ] 失败
 - **失败时收集**：确认页截图、全部 SQL 输出、`APP_LOG` 对应时间段、连接失败时的界面截图。
 
-### E1-05 节点来源：其它节点 → 落库 → 主控制台
+### E1-05 节点来源：其它节点 → 进池 → 主控制台
 
-- **目的**：验证「其它节点」两条路径（订阅 / 手动四项）都能落库，且不替用户编造字段。
+- **目的**：验证「其它节点」两条路径（订阅 / 手动四项）都能落库并进入同一节点池，且不替用户编造字段。
 - **前置条件**：完成 E1-02 / E1-03；准备一个可用的 Shadowsocks 订阅链接或四项参数（地址、端口、加密方式、密码）。
 - **步骤（人做）**
   1. 第二问选「其它节点」。
@@ -274,16 +279,18 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 - **AI 取证**
   ```bash
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select source, count(*) from nodes group by source;"
+  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, connection_mode, routing_mode, is_active from configs order by created_at desc limit 3;"
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select config_id, count(*) from config_nodes group by config_id;"
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args_json,1,200) from tool_calls order by created_at desc limit 10;"
   ```
-  看什么：`nodes.source` 是 `url` 还是 `manual`；节点数是否与确认页一致；缺字段时有没有产生半条节点或空配置。
+  看什么：`nodes.source` 是 `url` 还是 `manual`；节点数是否与确认页一致；`configs` 最多 1 行；缺字段时有没有产生半条节点或空配置。
 - **可观察预期**
   - 缺任意一项时 AI 追问，不写节点、不建配置。
   - 订阅路径的节点来源为 `url`，手动路径为 `manual`。
-  - 配置与节点已关联，界面进入主控制台。
+  - 节点进入同一节点池，`configs` 仍只有唯一一行。
   - 确认页写出「节点用你提供的 {节点名或地址}」。
+  - 界面进入主控制台。
 - **判定**
   - [ ] 通过
   - [ ] 失败
@@ -291,39 +298,40 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 ### E1-06 不用 AI 的手动路径仍然可用
 
-- **目的**：验证跳过 AI 后，两问 + 审视的新建流程、连接、断开都不依赖 AI；界面上没有「AI 协助」入口。
+- **目的**：验证跳过 AI 后，添加节点的两问 + 审视流程、连接、断开都不依赖 AI；界面上没有「AI 协助」入口。
 - **前置条件**：干净数据；在 AI 配置页选择「我懂网络，不用 AI」；网络可用（免费节点要能取到）。
 - **步骤（人做）**
   1. 在配置页点「我懂网络，不用 AI」。
-  2. 打开「新建配置」，确认只有两问、没有「AI 协助 / 我自己配置」卡。
+  2. 打开「添加节点」，确认只有两问、没有「AI 协助 / 我自己配置」卡。
   3. 不改默认值（Proxy 模式 + Veyl 免费节点），点「下一步」进入审视页。
-  4. 点「创建并连接」，等连接结束；随后在主控制台断开。
+  4. 点「添加并连接」，等连接结束；随后在主控制台断开。
 - **AI 取证**
   ```bash
   grep '启动 AI provider=' "$APP_LOG" | tail -1
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
+  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from nodes;"
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from chat_messages;"
   grep -E '连接开始|连接完成|连接失败 卡在' "$APP_LOG" | tail -4
   ```
-  看什么：`可用=false`（或 provider 为空）；配置数 ≥ 1；没有 AI 首启消息；连接日志存在。
+  看什么：`可用=false`（或 provider 为空）；`configs` 为 0 或 1 行、`nodes` ≥ 1；没有 AI 首启消息；连接日志存在。
 - **可观察预期**
   - 跳过 AI 后应用正常进入主界面；点右边缘的「助手」展开后，顶部显示「未连接 AI」和「还没有配置 AI，现在只能手动操作网络。」。
-  - 无 AI 兜底的新建配置弹窗只有两问（怎么接管 / 节点从哪来），**没有**「AI 协助」「我自己配置」两张卡。
-  - 默认值（Proxy 模式 + Veyl 免费节点）可以创建配置并连接；全程不依赖 AI。
+  - 无 AI 兜底的添加节点弹窗只有两问（怎么接管 / 节点从哪来），**没有**「AI 协助」「我自己配置」两张卡。
+  - 默认值（Proxy 模式 + Veyl 免费节点）可以添加节点并连接；全程不依赖 AI。
 - **判定**
   - [ ] 通过
   - [ ] 失败
-- **失败时收集**：主界面截图、配置创建结果、连接日志。
+- **失败时收集**：主界面截图、节点池与配置行数、连接日志。
 
-> E1-07…E1-33 覆盖简化新建流程，对应设计 `simplified-config-create.md` §16.2 的 N1–N27；E1-34 补保存中的关闭防护。默认值：接管方式 Proxy 模式、节点来源 Veyl 免费节点；两问之后才进审视页。
+> E1-07…E1-33 覆盖简化添加节点流程，对应设计 `simplified-config-create.md` §16.2 的 N1–N27；E1-34 补添加中的关闭防护。默认值：接管方式 Proxy 模式、节点来源 Veyl 免费节点；两问之后才进审视页。
 
-### E1-07 打开新建：只有两问
+### E1-07 打开添加节点：只有两问
 
-**前置**：M1；1440×900；清空 `veyl.*`；跳过首启 AI；有无配置均可。
+**前置**：M1；1440×900；清空 `veyl.*`；跳过首启 AI；有无节点均可（没有配置列表，入口是「添加节点」）。
 
 **步骤**：
 
-1. 点左栏「新建配置」，执行：
+1. 点「添加节点」，执行：
 
 ```js
 (() => {
@@ -362,13 +370,13 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 **不合格时记录什么**：上述 JSON、两问页截图、Esc 前后截图。
 
-### E1-08 默认值直接下一步：审视页与「创建并连接」
+### E1-08 默认值直接下一步：审视页与「添加并连接」
 
-**前置**：M1；免费池有节点（不要设 `veyl.mock.seed.empty`）；未连接；记下当前配置数。
+**前置**：M1；免费池有节点（不要设 `veyl.mock.seed.empty`）；未连接；记下当前节点数与 `configs` 行数。
 
 **步骤**：
 
-1. 打开「新建配置」，不改任何选择，点「下一步」。
+1. 打开「添加节点」，不改任何选择，点「下一步」。
 2. 执行：
 
 ```js
@@ -386,16 +394,16 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
   };
 })()
 ```
-3. 点主按钮，等 3 秒，读主界面状态与配置数。
+3. 点主按钮，等 3 秒，读主界面状态与节点数 / `configs` 行数。
 
 **预期**：
 
-1. 五行的 `label` 依次为 `名称`、`接管方式`、`节点来源`、`流量范围`、`地区`。
-2. 值分别为 `配置 1`（或下一个空号）、`TUN 模式（接管全部流量）`、`Veyl 免费节点`、`智能模式`、`中国大陆`（地区以本机为准）。
-3. `editable` 为 **0**：五项都是只读事实，没有输入框或选择器。
-4. `primary` 为 `创建并连接`、`primaryDisabled` 为 `false`；点击后配置数 +1、新配置成为当前配置，并自动进入连接（最终「已连接」或连接失败的明确结束态）。
+1. 四行的 `label` 依次为 `接管方式`、`节点来源`、`流量范围`、`地区`；**没有「名称」行**（单配置不暴露配置名）。❗待实现：当前审视页可能仍有名称行。
+2. 值分别为 `TUN 模式（接管全部流量）`、`Veyl 免费节点`、`智能模式`、`中国大陆`（地区以本机为准）。
+3. `editable` 为 **0**：四项都是只读事实，没有输入框或选择器。
+4. `primary` 为 `添加并连接`、`primaryDisabled` 为 `false`；点击后节点数 +N、**`configs` 仍为 1 行**（首次添加才从 0 变 1），节点全部进同一池，并自动进入连接（最终「已连接」或连接失败的明确结束态）。❗待实现：已有配置时再次添加节点不新建第二套。
 
-**不合格时记录什么**：JSON、审视页截图、创建前后的配置数与状态截图。
+**不合格时记录什么**：JSON、审视页截图、添加前后的节点数与 `configs` 行数、状态截图。
 
 ### E1-09 Proxy 模式 + 免费节点
 
@@ -403,43 +411,43 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 **步骤**：
 
-1. 打开新建，点「Proxy 模式（只给代理地址）」，点「下一步」。
-2. 读审视页文本与控件；创建。
-3. M2 创建后打开设置 › 连接，记录地址与端口。
+1. 打开「添加节点」，点「Proxy 模式（只给代理地址）」，点「下一步」。
+2. 读审视页文本与控件；添加。
+3. M2 添加后打开设置 › 连接，记录地址与端口。
 
 **预期**：
 
 1. 审视页「接管方式」为 `Proxy 模式（只给代理地址）`，第二行为「只让填了代理地址的软件走 VPN。」。
 2. **审视页不出现本机代理地址或端口**：文本里没有 `127.0.0.1`、没有端口数字、没有「本机代理地址」按钮或链接。
-3. M2 落库 `connection_mode='system_proxy'`；创建后设置 › 连接里能看到地址与端口，且「复制」可用。
+3. M2 落库 `connection_mode='system_proxy'`；添加后设置 › 连接里能看到地址与端口，且「复制」可用。
 
 **不合格时记录什么**：审视页 JSON/截图、设置页截图、`configs` 表行。
 
 ### E1-10 免费池为空但在线：按下一步才获取
 
-**前置**：M1；执行 `localStorage.setItem("veyl.mock.seed.empty","1")` 后打开新建。
+**前置**：M1；执行 `localStorage.setItem("veyl.mock.seed.empty","1")` 后打开「添加节点」。
 
 **步骤**：
 
 1. 读「Veyl 免费节点」卡的状态行。
 2. 执行 `localStorage.removeItem("veyl.mock.seed.empty")`。
-3. 点「下一步」，等进入审视页后创建。
+3. 点「下一步」，等进入审视页后添加。
 
 **预期**：
 
 1. 打开时状态行是 `还没有免费节点，下一步时会去获取。`；此时没有发起获取。
 2. 点「下一步」后才请求免费节点；成功后进入审视页，不出现失败文案。
-3. 创建成功，配置数 +1。
+3. 添加成功：节点数 +2，`configs` 仍为 1 行（首次添加才从 0 变 1），不产生第二套配置。❗待实现：已有配置时再次添加不新建第二套。
 
-**不合格时记录什么**：状态行原文、获取前后截图、配置数。
+**不合格时记录什么**：状态行原文、获取前后截图、节点数与 `configs` 行数。
 
 ### E1-11 首次启动离线（无缓存）：不建配置
 
-**前置**：M1；`veyl.mock.seed.empty=1` 且 `veyl.mock.seed.offline=1`；无配置。
+**前置**：M1；`veyl.mock.seed.empty=1` 且 `veyl.mock.seed.offline=1`；`configs` 0 行、`nodes` 0 行。
 
 **步骤**：
 
-1. 打开新建，先给刷新计数打点：
+1. 打开「添加节点」，先给刷新计数打点：
 
 ```js
 (async () => {
@@ -459,7 +467,7 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
   lines: [...document.querySelectorAll(".new-config__seed-error p")].map((p) => p.textContent.trim()),
   nextDisabled: [...document.querySelectorAll(".new-config__actions .btn--primary")][0]?.disabled ?? null,
   retry: [...document.querySelectorAll(".new-config__seed-error button")].map((b) => b.textContent.trim()),
-  configs: document.querySelectorAll(".configs__row").length,
+  nodes: document.querySelectorAll(".stage-card__nodes .stage-node").length,
 }))()
 ```
 3. 点「重试」一次，再看 `calls`；然后点「其它节点」，确认「下一步」可用；最后点「取消」。
@@ -470,9 +478,9 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 2. `lines` 恰好三段：`没能取到免费节点。` / `可能没联网，或免费节点服务暂时不可用。` / `点「重试」；还是不行，就改选「其它节点」。`，都在第二问行内。
 3. `nextDisabled` 为 `true`；`retry` 含 `重试`；没有自动重试、没有自动跳转。
 4. 点「重试」后 `calls` 变为 2（只由手动触发）；改选「其它节点」后「下一步」可用。
-5. 全程 `configs` 不变：没有创建任何配置。
+5. 全程节点卡不变（`nodes` 取自节点卡行数）：没有添加任何节点，也没有出现配置列表。
 
-**不合格时记录什么**：JSON、失败三段式截图、`calls` 的变化序列、配置数。
+**不合格时记录什么**：JSON、失败三段式截图、`calls` 的变化序列、节点数。
 
 ### E1-12 免费拉取失败（断网 / 超时 / 内容异常）
 
@@ -480,7 +488,7 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 **步骤**：
 
-1. 打开新建，点「下一步」，等失败文案出现。
+1. 打开「添加节点」，点「下一步」，等失败文案出现。
 2. 读文案，并确认没有内部原因外泄。
 
 **预期**：
@@ -495,7 +503,7 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 **前置**：M1；免费池有节点；按 E1-11 给 `defaultProfileRefresh` 打点。
 
-**步骤**：打开新建，点「下一步」进入审视页，读 `window.__refreshCalls`。
+**步骤**：打开「添加节点」，点「下一步」进入审视页，读 `window.__refreshCalls`。
 
 **预期**：`window.__refreshCalls` 为 **0**——池里有节点时直接进审视页，不产生全局换节点的副作用。
 
@@ -503,9 +511,9 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 ### E1-14 供应商广场（静态预览）
 
-> **已知缺口**：本版本供应商广场仅占位，此路径预期不生成配置（见设计 `simplified-config-create.md` §21）。
+> **已知缺口**：本版本供应商广场仅占位，此路径预期不添加节点（见设计 `simplified-config-create.md` §21）。
 
-**前置**：M1；清空 `veyl.*` 后打开新建。
+**前置**：M1；清空 `veyl.*` 后打开「添加节点」。
 
 **步骤**：
 
@@ -527,7 +535,7 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
   })),
   links: document.querySelectorAll(".vendor-page a[href]").length,
   footer: document.querySelector(".vendor-page__foot")?.textContent.trim() ?? null,
-  configs: document.querySelectorAll(".configs__row").length,
+  nodes: document.querySelectorAll(".stage-card__nodes .stage-node").length,
 }))()
 ```
 3. 按一次 `Esc`，再读焦点与来源选择：
@@ -542,25 +550,25 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 **预期**：
 
-1. `view` 为 `true`；`dialogTitle` 是 `新建配置`；**页内「供应商广场」只出现一次**（`pageTitles` 为 1）。
-2. 进入后焦点落在返回入口：`focus` 为 `← 返回新建配置`。
+1. `view` 为 `true`；`dialogTitle` 是 `添加节点`；**页内「供应商广场」只出现一次**（`pageTitles` 为 1）。
+2. 进入后焦点落在返回入口：`focus` 为 `← 返回添加节点`。
 3. 三条示例：`示例供应商 A/B/C`，线路分别是 `12 条线路 · VLESS`、`26 条线路 · Trojan`、`9 条线路 · Shadowsocks`；三个「即将支持」按钮 `soonDisabled` 都是 `true`。
 4. `links` 为 0：没有外链；页脚含 `更多供应商即将支持。`；页面没有购买入口。
 5. 按 `Esc` 回到两问页：`questions` 为 `true`；`checked` 仍含 `其它节点`；焦点回到「其它节点」卡（`focus` 是 `其它节点`）。
-6. `configs` 不变：广场不生成配置。
+6. 节点卡不变（`nodes` 取自节点卡行数）：广场不添加节点。
 
-**不合格时记录什么**：两次 JSON、广场与返回后的截图、配置数。
+**不合格时记录什么**：两次 JSON、广场与返回后的截图、节点数。
 
 ### E1-15 从供应商广场返回
 
-> **已知缺口**：本版本供应商广场仅占位，此路径预期不生成配置（见设计 `simplified-config-create.md` §21）。
+> **已知缺口**：本版本供应商广场仅占位，此路径预期不添加节点（见设计 `simplified-config-create.md` §21）。
 
 **前置**：接 E1-14。
 
 **步骤**：
 
 1. 先在两问页把接管方式改成 Proxy 模式，再选「其它节点」进入广场。
-2. 点「← 返回新建配置」，执行：
+2. 点「← 返回添加节点」，执行：
 
 ```js
 (() => ({
@@ -573,19 +581,19 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 **预期**：
 
 1. 返回后 `questions` 为 `true`；`checked` 仍是 `Proxy 模式（只给代理地址）` 与 `其它节点`。
-2. 可改选免费节点并进入审视页；没有丢选择、没有自动建配置。
+2. 可改选免费节点并进入审视页；没有丢选择、没有自动添加节点。
 
 **不合格时记录什么**：返回前后两组 `checked`、截图。
 
-### E1-16 创建时节点已被删（供应商页落地后）
+### E1-16 添加节点时节点已被删（供应商页落地后）
 
-> **已知缺口**：本版本供应商广场仅占位，此路径预期不生成配置（见设计 `simplified-config-create.md` §21）。
+> **已知缺口**：本版本供应商广场仅占位，此路径预期不添加节点（见设计 `simplified-config-create.md` §21）。
 
-**前置**：无——本批供应商广场只展示，拿不到节点 id，没有这条创建路径。
+**前置**：无——本批供应商广场只展示，拿不到节点 id，没有这条添加路径。
 
 **步骤**：不做操作。
 
-**预期**：记「不适用（本批无供应商创建路径）」，**不判失败**。等供应商页落地后按设计补测：回两问页并选中「其它节点」、提示重新选、不静默丢弃。
+**预期**：记「不适用（本批无供应商添加路径）」，**不判失败**。等供应商页落地后按设计补测：回两问页并选中「其它节点」、提示重新选、不静默丢弃。
 
 **不合格时记录什么**：无。
 
@@ -692,27 +700,29 @@ E4-03 | 2026-11-11 15:20 | v0.1.0 | 预期「scutil 里出现 223.5.5.5」未出
 
 **不合格时记录什么**：两次说明原文、截图、连接日志。
 
-### E1-21 新建落库的流量范围只有两值
+### E1-21 添加节点后唯一配置的流量范围只有两值
 
-**前置**：M2；记录创建前 `configs` 里 `proxy_selected` 的数量。
+**前置**：M2；记录添加前 `configs` 里 `proxy_selected` 的数量。
 
 **步骤**：
 
-1. 用默认值创建一套配置。
+1. 用默认值添加节点（首次会创建唯一那行配置）。
 2. 查询：
 
 ```bash
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
 sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, connection_mode, routing_mode from configs order by created_at desc limit 3;"
 sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs where routing_mode = 'proxy_selected';"
 ```
 
 **预期**：
 
-1. 新配置的 `routing_mode` 是 `direct` 或 `proxy_all`，不出现 `proxy_selected`。
-2. `proxy_selected` 计数与创建前一致（旧数据不新增、不迁移）。
-3. 界面与新建流程的文本里都没有 `proxy_selected` / 「指定服务」。
+1. `configs` 始终最多 1 行。
+2. 这一行的 `routing_mode` 是 `direct` 或 `proxy_all`，不出现 `proxy_selected`。
+3. `proxy_selected` 计数与添加前一致（旧数据不新增、不迁移）。
+4. 界面与添加流程的文本里都没有 `proxy_selected` / 「指定服务」。
 
-**不合格时记录什么**：两条 SQL 输出、创建前后计数、界面截图。
+**不合格时记录什么**：三条 SQL 输出、添加前后计数、界面截图。
 
 ### E1-22 AI 改分流后开关跟随
 
@@ -740,23 +750,31 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs where rout
 
 **不合格时记录什么**：切换前后开关 JSON、事件时间线、截图。
 
-### E1-23 默认名与只读
+### E1-23 唯一配置没有名称入口
 
 **前置**：M1；清空 `veyl.*`；免费池有节点。
 
 **步骤**：
 
-1. 打开新建，点「下一步」，读名称行。
-2. 创建后，再打开新建，点「下一步」，读名称行。
-3. 执行 E6-24 的第二个脚本，确认没有输入控件。
+1. 添加节点后回到主界面，扫描可见文本与控件。
+2. 打开设置，再扫一遍。
+
+```js
+(() => ({
+  configRows: document.querySelectorAll(".configs__row").length,
+  nameInputs: document.querySelectorAll("input[name*='配置'], input[name*='config']").length,
+  nameHits: (document.body.innerText.match(/配置\s*\d+/g) || []).length,
+  switchEntries: document.querySelectorAll("[data-config-id], .configs__row").length,
+}))()
+```
 
 **预期**：
 
-1. 第一套名称是 `配置 1`，第二套是 `配置 2`（中间有删除时取下一个空号）。
-2. 名称是只读文本：`dd` 里没有 `input` / `textarea` / `select` / `contenteditable`；不能聚焦编辑。
-3. 名称只出现在审视页与左栏；**创建流程里没有改名入口**（改名在建立后由左栏双击提供，见 E6-32）。
+1. `configRows` 为 0、`switchEntries` 为 0：界面没有配置列表，也没有切换配置的入口。
+2. `nameInputs` 为 0：没有配置名称的输入或改名入口；`nameHits` 为 0：界面上没有「配置 1 / 配置 2」这类名称。
+3. 全局配置对用户是不可见的载体；用户只看到节点池与连接状态。
 
-**不合格时记录什么**：两次名称与截图、可编辑控件计数。
+**不合格时记录什么**：两次扫描 JSON、主界面与设置截图。
 
 ### E1-24 AI 不追问地区（系统已能推断）
 
@@ -764,7 +782,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs where rout
 
 **步骤**：
 
-1. 新开一个会话，说「帮我建一套配置，随便什么节点都行」，**不提地区**。
+1. 新开一个会话，说「帮我加一批节点，随便什么节点都行」，**不提地区**。
 2. 观察 AI 的回复与提问卡；查工具调用。
 
 ```bash
@@ -775,7 +793,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, substr(args_json,1,30
 
 1. AI **不为地区单独发问**（没有只问「你在哪个国家/地区」的提问卡）。
 2. 若调用 `SetUserRegion`，参数是 `cn`；不调用也算通过（系统推断已足够）。
-3. 建出的配置地区为 `中国大陆`。
+3. 唯一配置（或节点池）的地区为 `中国大陆`。
 
 **不合格时记录什么**：对话截图、提问卡文本、`tool_calls` 输出。
 
@@ -785,14 +803,14 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, substr(args_json,1,30
 
 **步骤**：
 
-1. 在会话里说「我在中国，帮我建一套配置」。
+1. 在会话里说「我在中国，帮我加节点」。
 2. 查工具调用与设置：
 
 ```bash
 sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, substr(args_json,1,200) from tool_calls order by created_at desc limit 8;"
 sqlite3 -readonly "$HOME/.veyl/veyl.db" "select value from settings where key = 'user_region';"
 ```
-3. 打开新建配置，点「下一步」，读地区行。
+3. 打开「添加节点」，点「下一步」，读地区行。
 
 **预期**：
 
@@ -808,16 +826,16 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select value from settings where key = 
 
 **步骤**：
 
-1. 打开新建，点「下一步」，读审视页。
-2. 创建后读控制台开关。
+1. 打开「添加节点」，点「下一步」，读审视页。
+2. 添加后读控制台开关。
 
 **预期**：
 
 1. 审视页 `地区` 行是 `未知`；`流量范围` 行是 `全局模式`，说明为 `没识别出你在哪个地区，所以按全局模式创建；之后可以在控制台切换。`。
 2. 审视页**没有**地区确认控件（没有选择器、没有「对 / 不对」按钮）。
-3. 创建后控制台开关选中 `全局模式`；M2 可查到 `routing_mode = proxy_all`，构造不出未知地区时记「未覆盖」。
+3. 添加后控制台开关选中 `全局模式`；M2 可查到 `routing_mode = proxy_all`，构造不出未知地区时记「未覆盖」。
 
-**不合格时记录什么**：审视页 JSON/截图、创建后开关状态。
+**不合格时记录什么**：审视页 JSON/截图、添加后开关状态。
 
 ### E1-27 已连接时 AI 改地区：不自动重连
 
@@ -837,7 +855,7 @@ grep -E '连接开始|连接完成|region|地区' "$APP_LOG" | tail -20
 
 1. **不断开、不自动重连**：没有新的连接开始日志，状态保持 `已连接`。
 2. 开关说明追加 `地区已改，下次连接生效。`；当前连接仍按原来的 `applied_region`（hero 与中间区同口径）。
-3. 断开后重新连接，生效地区变为 `日本`；新建配置的审视页地区也是 `日本`。
+3. 断开后重新连接，生效地区变为 `日本`；「添加节点」的审视页地区也是 `日本`。
 
 **不合格时记录什么**：连接日志、开关说明、hero 截图、重新连接后的地区。
 
@@ -847,7 +865,7 @@ grep -E '连接开始|连接完成|region|地区' "$APP_LOG" | tail -20
 
 **步骤**：
 
-1. 在会话里说「帮我建一套配置」，不提地区。
+1. 在会话里说「帮我加节点」，不提地区。
 2. 查工具调用与设置。
 
 **预期**：
@@ -858,25 +876,28 @@ grep -E '连接开始|连接完成|region|地区' "$APP_LOG" | tail -20
 
 **不合格时记录什么**：对话截图、`tool_calls`、设置值、审视页截图。
 
-### E1-29 换左栏配置：开关跟随各自配置
+### E1-29 切换节点不改全局配置
 
-**前置**：M1；两套配置，一套智能模式、一套全局模式。
+**前置**：M1；节点池里至少两台节点（免费或自建均可）；未连接。
 
 **步骤**：
 
-1. 选中 A，读开关与说明。
+1. 在节点卡选中 A，读连接参数（接管方式、流量范围）与 `configs` 行数。
 2. 切到 B，再读；再切回 A。
+3. 连接后切到 B，观察是否只换节点。
 
 **预期**：
 
-1. 每次切换后，开关显示**当前配置**的 `routing_mode` 与对应说明。
-2. 不做跨配置记忆：A 是智能、B 是全局，来回切不会互相污染。
+1. 每次切换只改**当前节点**；接管方式、流量范围等全局设置不变，`configs` 始终 1 行。
+2. 界面没有「切到另一套配置」的动作，也没有第二个配置出现。
+3. 已连接时切换节点只重连到新节点，不改全局设置、不改出口之外的配置字段。
+4. **❗待实现**：已连接切换节点在单配置下复用 `node_switch`；落地前若出现第二套配置，记「未覆盖（待实现）」。
 
-**不合格时记录什么**：三次开关 JSON、截图。
+**不合格时记录什么**：三次读到的当前节点与全局设置、`configs` 行数、截图。
 
 ### E1-30 破坏性：`proxy_selected` 被拒；AI 不接受空来源
 
-**前置**：M2；能开 DevTools；已配置 AI；记下创建前的配置数。
+**前置**：M2；能开 DevTools；已配置 AI；记下添加前的 `configs` 行数（应 ≤1）。
 
 **步骤**：
 
@@ -892,7 +913,7 @@ grep -E '连接开始|连接完成|region|地区' "$APP_LOG" | tail -20
 })()
 ```
 2. 在会话里要求 AI 建一套**空来源**配置（不传 `source`、不传 `node_ids`），例如「调用 ConfigCreate 建一套名字叫空来源测试的配置，不要传 source 或 node_ids，也不要选节点」。
-3. 查工具结果与配置数：
+3. 查工具结果与 `configs` 行数：
 
 ```bash
 sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(result_json,1,400) from tool_calls order by created_at desc limit 6;"
@@ -903,10 +924,10 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
 
 1. `proxySelected.ok` 为 `false`，`e.code` 为 `INVALID_ARGUMENT`，`e.details.reason` 为 `routing_mode_not_supported`。
 2. AI 的 `ConfigCreate` 被拒：工具结果里 `details.reason` 为 `source_required`；AI 不能建空配置。
-3. 两次尝试后配置数不变。
+3. 两次尝试后 `configs` 行数不变（且仍 ≤1）。
 4. 模型没按第 2 步发出空参数时记「未覆盖」，不判失败；`proxy_selected` 那条仍必须成立。
 
-**不合格时记录什么**：两次返回对象、`tool_calls` 的 `result_json`、创建前后配置数；若误建了配置立即删除并附 `configs` 行。
+**不合格时记录什么**：两次返回对象、`tool_calls` 的 `result_json`、添加前后的 `configs` 行数；若误建了第二套配置立即删除并附 `configs` 行。
 
 ### E1-31 供应商广场边界
 
@@ -927,36 +948,37 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
 
 **预期**：
 
-1. `focusables` 只有返回入口（`← 返回新建配置`）；示例条目不可聚焦、不可点。
+1. `focusables` 只有返回入口（`← 返回添加节点`）；示例条目不可聚焦、不可点。
 2. `links` 为 0；资源计数与进入前一致（没有网络请求）；没有支付或购买入口。
 3. `Esc` 第一次回到两问页，第二次关闭弹窗（选择保留）。
 
 **不合格时记录什么**：JSON、进入前后的资源计数与 Network 面板、Tab 顺序截图。
 
-### E1-32 已连接时点创建：只创建，不切换
+### E1-32 已连接时添加节点：只添加，不切换
 
-**前置**：M1；已有一套配置并已连接。
+**前置**：M1；节点池已有节点并已连接。
 
 **步骤**：
 
-1. 打开新建，用默认值走到审视页，读主按钮文案。
-2. 点主按钮，等 2 秒，读提示、当前配置与连接状态。
+1. 打开「添加节点」，用默认值走到审视页，读主按钮文案。
+2. 点主按钮，等 2 秒，读提示、当前节点与连接状态。
 
 **预期**：
 
-1. 主按钮是 `创建配置`（不是「创建并连接」）。
-2. 创建后出现「已创建，从左侧切换过去。」；当前配置、连接状态与出口**都不变**，不自动切换、不重连。
-3. 配置数 +1。
+1. 主按钮是 `添加`（不是「添加并连接」）。
+2. 添加后节点数 +N；当前节点、连接状态与出口**都不变**，不自动切换、不重连。
+3. `configs` 仍为 1 行，没有出现第二套配置。
+4. **❗待实现**：已有配置时再次添加节点复用同一行配置；落地前若出现「创建并连接」或第二套配置，记「未覆盖（待实现）」。
 
-**不合格时记录什么**：按钮文案、提示与状态截图、创建前后配置数与出口。
+**不合格时记录什么**：按钮文案、提示与状态截图、添加前后的节点数与 `configs` 行数、出口。
 
-### E1-33 提交中连点：只产生一套
+### E1-33 提交中连点：只添加一次
 
-**前置**：M1 或 M2；免费池有节点；记下配置数。
+**前置**：M1 或 M2；免费池有节点；记下节点数与 `configs` 行数。
 
 **步骤**：
 
-1. 在审视页连续点两次 `创建并连接`（或 `创建配置`），尽快执行：
+1. 在审视页连续点两次 `添加并连接`（或 `添加`），尽快执行：
 
 ```js
 (() => {
@@ -964,49 +986,50 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
   return { text: b?.textContent.trim() ?? null, disabled: b?.disabled ?? null, width: b ? Math.round(b.getBoundingClientRect().width) : null };
 })()
 ```
-2. 等创建结束后再读配置数与同样的宽度。
+2. 等添加结束后再读节点数与同样的宽度。
 
 **预期**：
 
-1. 若捕捉到中间态：按钮文本为 `正在创建…`、`disabled` 为 `true`，宽度与结束态相差 ≤2。
-2. 配置数只 +1：连点不会建两套。
-3. 中间态太快没捕捉到时，记「未观察到中间态」并附说明；「只产生一套」仍必须成立。
+1. 若捕捉到中间态：按钮文本为 `正在添加…`、`disabled` 为 `true`，宽度与结束态相差 ≤2。
+2. 节点只增加一次（2 台免费节点）；`configs` 仍为 1 行：连点不会重复添加，也不会建第二套配置。
+3. 中间态太快没捕捉到时，记「未观察到中间态」并附说明；「只添加一次」仍必须成立。
 
-**不合格时记录什么**：两次宽度/文本、配置数、截图。
+**不合格时记录什么**：两次宽度/文本、节点数与 `configs` 行数、截图。
 
-### E1-34 保存中的关闭防护
+### E1-34 添加中的关闭防护
 
-**前置**：M2；免费池需要先获取（延长保存窗口）；记下当前连接状态。若保存窗口太短，重复几次直到能在「正在创建…」期间操作。
+**前置**：M2；免费池需要先获取（延长保存窗口）；记下当前连接状态。若窗口太短，重复几次直到能在「正在添加…」期间操作。
 
 **步骤**：
 
-1. 走到审视页，点主按钮，**在按钮变成「正在创建…」的同一时间**依次尝试四种关闭方式：
+1. 走到审视页，点主按钮，**在按钮变成「正在添加…」的同一时间**依次尝试四种关闭方式：
    - 按 `Esc`；
    - 在遮罩上按下鼠标；
    - 点右上角 `✕`；
    - 点 `← 返回`。
-2. 每次尝试后立刻记录弹窗是否还在、主按钮是否仍是禁用的「正在创建…」。
-3. 等保存结束，若弹窗被关掉，记录随后是否自动发起了连接：
+2. 每次尝试后立刻记录弹窗是否还在、主按钮是否仍是禁用的「正在添加…」。
+3. 等添加结束，若弹窗被关掉，记录随后是否自动发起了连接：
 
 ```bash
-sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, is_active from configs order by created_at desc limit 2;"
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from nodes;"
 grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 ```
 
 **预期**：
 
-1. 四种方式都**不能关闭**弹窗、也不能退回两问页；主按钮保持禁用的「正在创建…」。
-2. 保存结束后按正常路径关闭或自动连接；没有第二个弹窗叠出来。
-3. 若实现允许强行关闭，关闭后**不得自动连接**：日志里没有该次创建触发的「连接开始」，界面仍停在原状态。
-4. 未连接时最终只创建一套配置；已连接时原连接与出口不受影响。
+1. 四种方式都**不能关闭**弹窗、也不能退回两问页；主按钮保持禁用的「正在添加…」。
+2. 添加结束后按正常路径关闭或自动连接；没有第二个弹窗叠出来。
+3. 若实现允许强行关闭，关闭后**不得自动连接**：日志里没有该次添加触发的「连接开始」，界面仍停在原状态。
+4. 未连接时最终只添加一次节点、`configs` 仍为 1 行；已连接时原连接与出口不受影响。
 
-**不合格时记录什么**：四种尝试的弹窗与按钮状态截图、保存时长、连接日志、配置表行。
+**不合格时记录什么**：四种尝试的弹窗与按钮状态截图、添加耗时、连接日志、`configs` 与 `nodes` 行数。
 
-### E1-35 其它节点当前不生成配置（已知缺口，不判失败）
+### E1-35 其它节点当前不添加节点（已知缺口，不判失败）
 
 **目的**：把「其它节点」这条路径的现状钉死，避免测试同事把「选完什么也没生成」记成缺陷（设计 §21）。
 
-**前置**：M1；打开新建两问页。
+**前置**：M1；打开「添加节点」两问页。
 
 **步骤**：
 
@@ -1020,7 +1043,7 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
   checked: [...document.querySelectorAll('.new-config__answer[aria-checked="true"] .new-config__answer-title')].map((e) => e.textContent.trim()),
   selectable: document.querySelectorAll(".vendor-item a[href], .vendor-item button:not(:disabled)").length,
   review: !!document.querySelector(".new-config__review"),
-  configs: document.querySelectorAll(".configs__row").length,
+  nodes: document.querySelectorAll(".stage-card__nodes .stage-node").length,
 }))()
 ```
 
@@ -1030,10 +1053,10 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 
 1. 广场只有三条示例与禁用的 `即将支持`；`selectable` 为 `0`，拿不到节点 id。
 2. 返回后 `questions` 为 `true`、`checked` 仍含 `其它节点`；`review` 为 `false`，没有带着节点进入审视页。
-3. `configs` 与进入前相同——**没有生成配置**。这是已知缺口，不出现「创建失败」类提示，也不判失败。
-4. 改选「Veyl 免费节点」后能正常进入审视页并建出配置。
+3. 节点卡与进入前相同——**没有添加节点**。这是已知缺口，不出现「添加失败」类提示，也不判失败。
+4. 改选「Veyl 免费节点」后能正常进入审视页并添加节点。
 
-**不合格时记录什么**：上述 JSON、广场与两问页截图、配置数。若实现已能让「其它节点」生成配置，注明版本，改判为设计 §21 已落地并补测完整路径。
+**不合格时记录什么**：上述 JSON、广场与两问页截图、节点数。若实现已能让「其它节点」添加节点，注明版本，改判为设计 §21 已落地并补测完整路径。
 
 ### E1-36 地区已知但非中国：默认智能模式
 
@@ -1041,8 +1064,8 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 
 **步骤**：
 
-1. 打开新建，点「下一步」，读审视页的地区与流量范围。
-2. 创建后读控制台开关与说明。
+1. 打开「添加节点」，点「下一步」，读审视页的地区与流量范围。
+2. 添加后读控制台开关与说明。
 
 **预期**：
 
@@ -1097,10 +1120,10 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select config_id, count(*) from config_nodes group by config_id;"
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
   ```
-  看什么：新增节点数为 2；配置数**不变**；`config_nodes` 对应 2 条。
+  看什么：新增节点数为 2；`configs` 行数**不变**；`config_nodes` 对应 2 条。
 - **可观察预期**
   - 两条链接都导入，顺序与粘贴顺序一致。
-  - 不新建配置；节点挂到当前选中的配置上。
+  - 不新建配置；节点挂到全局节点池。
   - 粘错格式时停在字段旁报错，不建配置。
 - **判定**
   - [ ] 通过
@@ -1635,7 +1658,7 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 
 ### E5-05 AI 不可用时的降级
 
-- **目的**：验证没有 AI 时界面明确说明，手动连接、断开、新建配置仍然可用。
+- **目的**：验证没有 AI 时界面明确说明，手动连接、断开、添加节点仍然可用。
 - **前置条件**：跳过 AI 配置，或删除当前 AI 服务；已有一套配置。
 - **步骤（人做）**
   1. 打开右侧助手。
@@ -1657,50 +1680,42 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
   - [ ] 失败
 - **失败时收集**：右栏截图、失败卡截图、连接日志。
 
-### E5-06 问题报告的三处入口与 AI 门槛
+### E5-06 报告问题入口：只在失败与没流量时出现
 
-- **目的**：验证「报告问题」只在配置了 AI 之后出现，三处入口共用同一个动作；「已连接，不通」状态也有入口。
-- **前置条件**：M1 浏览器预览；1440×900；一套配置（用于中间底部与故障卡入口）；先不配置 AI。
+- **目的**：验证「报告问题」只在**连接失败**与**连上没流量**两种状态出现；正常已连接、未连接时底部没有入口。AI 未配置时应用停在首启页，入口不可达。
+- **前置条件**：M1 浏览器预览（正常态与没流量）；M2 原生应用（失败态——预览里连不上也会成功）。已配置 AI；至少一个节点。
 - **步骤（人做）**
-  1. 不配置 AI，刷新页面。打开设置 ›「遇到问题」，用下面的脚本记录三处入口是否存在。
-  2. 保存一个可用的 AI Key（或走 mock 的保存 Key 流程），刷新。
-  3. 再执行一次同样的脚本。
-  4. 连接后执行 `localStorage.setItem("veyl.mock.dataPlaneDown", "1")`，造出「已连接，不通」，确认故障卡位置的入口出现；取证后执行 `localStorage.removeItem("veyl.mock.dataPlaneDown")`。
+  1. M1：未连接态，执行下面的脚本。
+  2. M1：连接成功、状态带为 `已连接`，再执行一次。
+  3. M1：执行 `localStorage.setItem("veyl.mock.dataPlaneDown", "1")`，等一次健康心跳（≤2 秒），再执行；取证后 `localStorage.removeItem("veyl.mock.dataPlaneDown")`。
+  4. M2：用一个不可达节点（例如地址 `127.0.0.1`、端口 `1`）连接，等到状态变 `失败`，再执行。
+  5. 收拾：断开连接，确认入口消失。
 - **AI 取证**
   ```js
   (() => {
-    const reportBtn = document.querySelector(".console__report .btn");
-    const links = [...document.querySelectorAll(".issue-report-link")];
-    const label = [...document.querySelectorAll(".settings-row__label")].find(
-      (el) => el.textContent.trim() === "生成问题报告",
-    );
-    const settingsBtn = label?.closest(".settings-row")?.querySelector("button");
+    const report = [...document.querySelectorAll(".stage-note__link, .stage-quick__notice .stage-note__link")]
+      .filter((el) => el.textContent.trim() === "报告问题");
     return {
-      reportButton: reportBtn
-        ? { text: reportBtn.textContent.trim(), disabled: reportBtn.disabled }
-        : null,
-      issueLinks: links.map((b) => ({ text: b.textContent.trim(), disabled: b.disabled })),
-      settingsLabel: label?.textContent.trim() ?? null,
-      settingsButton: settingsBtn
-        ? { text: settingsBtn.textContent.trim(), disabled: settingsBtn.disabled }
-        : null,
+      reportButtons: report.map((b) => ({ text: b.textContent.trim(), disabled: b.disabled })),
+      notice: document.querySelector(".stage-note, .stage-quick__notice")?.textContent.trim() ?? null,
     };
   })()
   ```
 - **可观察预期**
-  - 未配置 AI：`reportButton`、`issueLinks`、`settingsLabel` / `settingsButton` 全为 `null` —— 三处都不在 DOM。
-  - 配置 AI 后：`reportButton.text` 为 `报告问题`；`settingsLabel` 为 `生成问题报告`，`settingsButton.text` 为 `生成问题报告`；两处 `disabled` 为 `false`。
-  - 故障卡场景（失败 / 降级 / 已连接不通）：`issueLinks` 至少一项，`text` 为 `报告这个问题`，`disabled` 为 `false`。
-  - 「已连接，不通」时没有故障卡，但同一位置仍有 `报告这个问题`（选择器 `.console__body .issue-report-link`）。
+  - 步骤 1（未连接）与步骤 2（已连接有流量）：`reportButtons` 为空数组——正常态不显示诊断入口。
+  - 步骤 3（连上没流量）：`reportButtons` 恰好 1 项，`text` 为 `报告问题`，`disabled` 为 `false`。
+  - 步骤 4（连接失败）：`reportButtons` 恰好 1 项，`text` 为 `报告问题`，`disabled` 为 `false`。
+  - 步骤 5：回到 `reportButtons` 为空数组。
+  - AI 未配置：应用停在首启页，没有连接舞台，入口不可达。
 - **判定**
   - [ ] 通过
   - [ ] 失败
-- **失败时收集**：三种状态下各一次脚本 JSON、三处入口截图、AI 配置前后的 `veyl.*` 关键项。
+- **失败时收集**：四种状态下各一次脚本 JSON、连接舞台截图、`veyl.mock.dataPlaneDown` 取值、失败态的 `last_error` 文案。
 
 ### E5-07 开场：右栏、披露条、会话与连点去重
 
 - **目的**：验证点入口后打开右栏、新建一条会话、界面渲染固定披露条、开场不产生用户气泡；连点两次只建一条会话、只发一条开场。
-- **前置条件**：M1；已配置 AI；右栏已收起或展开均可。
+- **前置条件**：M1；已配置 AI；右栏已收起或展开均可；**先造出「报告问题」入口**（M2 连接失败，或 M1 执行 `localStorage.setItem("veyl.mock.dataPlaneDown","1")` 制造没流量——正常态没有这个入口）。
 - **步骤（人做）**
   1. 记下当前会话数：点右栏的「历史会话」（`aria-label="历史会话"`），数 `.ai-history__item` 的数量，再点任一项回到对话。
   2. 在**普通会话**（非报告会话）里确认没有披露条：`document.querySelector(".chat__disclosure") === null`。还没有普通会话就先随便问一句，别从报告入口进。
@@ -1708,9 +1723,11 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 
 ```js
 (() => {
-  document.querySelector(".console__report .btn")?.click();
-  document.querySelector(".console__report .btn")?.click();
-  return { clicked: true };
+  const btn = [...document.querySelectorAll(".stage-note__link, .stage-quick__notice .stage-note__link")]
+    .find((el) => el.textContent.trim() === "报告问题");
+  btn?.click();
+  btn?.click();
+  return { clicked: !!btn };
 })()
 ```
 
@@ -1778,9 +1795,9 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 ### E5-08 生成产物：目录、权限、报告结构与空报告
 
 - **目的**：验证报告落盘的目录、权限、文件清单与 `报告.md` 的五节结构；「可疑点」的引用与磁盘行号对得上；空报告被拒且不落盘。
-- **前置条件**：M2 原生应用；已配置可用的 AI；一套可连接的配置；`~/Desktop` 存在；记下生成前的时间。若系统没有 `~/Desktop`（被重定向），报告会落到数据目录的 `reports/`，按 `先看我.txt` 里的实际位置取证，记「桌面兜底」，不判失败。
+- **前置条件**：M2 原生应用；已配置可用的 AI；一套可连接的配置；**先造出「报告问题」入口**（用一个不可达节点连接直到失败）；`~/Desktop` 存在；记下生成前的时间。若系统没有 `~/Desktop`（被重定向），报告会落到数据目录的 `reports/`，按 `先看我.txt` 里的实际位置取证，记「桌面兜底」，不判失败。
 - **步骤（人做）**
-  1. 点「报告问题」，等 AI 问两句。
+  1. 在失败态点「报告问题」，等 AI 问两句。
   2. 回答，例如：「连上之后网页打不开，其它软件也连不上」「刚连上就有」。回答里可以点名配置名（`报告脱敏测试配置`），方便 E5-09 验证配置名打码。
   3. 等 AI 调完两次 IssueReport（收集 + 写入），最多等 180 秒。
   4. 用下面的命令定位最新目录并核对。
@@ -2025,7 +2042,7 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 - **目的**：验证报告会话上方有界面渲染的固定披露条、`先看我.txt` 首段使用同一句已批准声明，并且任何位置都没有「不出本机」「完全本地」这类错误保证。
 - **前置条件**：M1（披露条与普通会话对比）；M2（`先看我.txt` 与落盘材料）。
 - **步骤（人做）**
-  1. 在 M1 点「报告问题」，读 `.chat__disclosure` 的文本；再打开任一普通会话，确认没有这个元素。
+  1. 在 M1 先执行 `localStorage.setItem("veyl.mock.dataPlaneDown","1")` 造出口（正常态没有「报告问题」），点「报告问题」，读 `.chat__disclosure` 的文本；再打开任一普通会话，确认没有这个元素。取证后 `localStorage.removeItem("veyl.mock.dataPlaneDown")`。
   2. 在 M2 生成一份报告，打开 `先看我.txt`。
   3. 在三份文件（`先看我.txt`、`报告.md`、`现场.json`）与日志副本里搜禁用词。
 - **AI 取证**
@@ -2064,6 +2081,7 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 ## 6. 界面
 
 > 本章按「同事驱动 AI 执行」写：E6-01…E6-06 是原场景的改写，E6-07…E6-14 是 P1 十一条里与界面直接相关的八条，E6-15…E6-22 是 P2 的八条，E6-23、E6-24 是打磨批的两条，E6-25…E6-31 是「已连接，不通」的一组。
+> **单配置口径**：本章标题带「已作废」的用例题的是旧左栏配置列表（新建/切换/改名/配置名展示），单配置落地后不再存在；界面验收以 `docs/acceptance-ui-refactor.md` 为准。
 > 执行通道：除 E6-02、E6-04 必须用原生应用外，其余优先用浏览器预览（M1）。DOM 断言的 JS 直接在 Console 执行，返回值保存为 JSON。
 
 | P1 项 | 用例 |
@@ -2105,11 +2123,11 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 
 ### E6-01 中间控制台各块的出现条件
 
-**前置**：M1；1440×900；浅色；清空 `veyl.*` 后新建两套配置——A「所有软件都走 VPN + 本地网站直连」，B「只让能填代理的软件走 + 全部走 VPN」。
+**前置**：M1；1440×900；浅色；清空 `veyl.*` 后添加节点（唯一配置先按 TUN 模式）；另记下切换到 Proxy 模式的方式（设置 › 连接，已连接时会先确认）。
 
 **步骤**：
 
-1. 选中配置 A，未连接。执行 DOM 取证：
+1. 当前配置为 TUN 模式、未连接。执行 DOM 取证：
 
 ```js
 (() => {
@@ -2126,14 +2144,14 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 
 2. 点「启动 VPN」，等状态变成「已连接」后重复上面的 JS。
 3. 点「断开 VPN」，等状态回到「未连接」。
-4. 选中配置 B，重复未连接 / 连接两次取证。
-5. 再连接一次配置 A，在点击后 200ms 内执行一次取证（此时应处于过渡态），1.5 秒后再执行一次。
+4. 断开后到设置 › 连接把接管方式切成 Proxy 模式（已连接时会先确认），再重复未连接 / 连接两次取证。
+5. 再切回 TUN 并连接一次，在点击后 200ms 内执行一次取证（此时应处于过渡态），1.5 秒后再执行一次。
 
 **预期**：
 
-1. 配置 A 未连接：`.console .note` 只有「点上面的「启动 VPN」，所有软件都会自动走节点。」；没有 `.card--proxy`；没有 `.card--err/--warn`。
-2. 配置 A 已连接：主提示「所有软件现在都能用了。」，另有 `.note__detail` 文本「国内网站直连，其他走 VPN」；没有 `.card--proxy`。
-3. 配置 B 已连接：主提示「浏览器现在能用了。」，且有 `.card--proxy`，地址为 `127.0.0.1:{端口}`。
+1. TUN 未连接：`.console .note` 只有「点上面的「启动 VPN」，所有软件都会自动走节点。」；没有 `.card--proxy`；没有 `.card--err/--warn`。
+2. TUN 已连接：主提示「所有软件现在都能用了。」，另有 `.note__detail` 文本「国内网站直连，其他走 VPN」；没有 `.card--proxy`。
+3. Proxy 已连接：主提示「浏览器现在能用了。」，且有 `.card--proxy`，地址为 `127.0.0.1:{端口}`。
 4. 过渡态：`.console .note`、`.card--proxy`、`.card--err/--warn` 的数量都是 0；状态词是「正在连接」。
 5. 全程不出现英文错误码、`proxy`、`TUN`、`分流`、`规则集`。
 
@@ -2165,7 +2183,7 @@ grep -E '连接失败|失败 code=|last_error' "$APP_LOG" | tail -8
 
 1. 首次连接失败标题是「没有连上节点。」；从已连接掉线是「连接断了。」。
 2. 失败原因用用户语言（例如「节点一直没有响应。」），不出现英文错误码、字段名。
-3. 失败卡最多三步：重新连接 → 换一个节点（多节点时）→ 让助手定位 / 新建一套配置。
+3. 失败卡最多三步：重新连接 → 换一个节点（多节点时）→ 让助手定位 / 去添加节点。
 4. 降级时标题「连接不稳定」，原因与「流量没有真正出去 / 最近的网络检查没有通过」对应；不是「连接失败」。
 5. 失败时不再显示代理卡；降级时按配置决定是否保留代理卡。
 
@@ -2281,7 +2299,7 @@ ps -Ao pid,comm,args | grep -E 'Veyl|veyl' | grep -v grep
 })()
 ```
 
-3. 依次打开设置、新建配置、右栏，记录三处背景与文字色。
+3. 依次打开设置、添加节点、右栏，记录三处背景与文字色。
 4. 切回浅色，重复一次。
 
 **预期**：
@@ -2295,27 +2313,31 @@ ps -Ao pid,comm,args | grep -E 'Veyl|veyl' | grep -v grep
 **不合格时记录什么**：
 
 - 浅色 / 深色两次取证的 JSON。
-- 控制台、设置、新建配置、右栏四张深色截图。
+- 控制台、设置、添加节点、右栏四张深色截图。
 - 出现纯白块的元素选择器与计算样式。
 
 ### E6-06 空态文案
 
-**前置**：M1；清空 `veyl.*`；跳过首启 AI（点「我懂网络，不用 AI」）；没有任何配置。
+**前置**：M1；清空 `veyl.*`；跳过首启 AI（点「我懂网络，不用 AI」）；还没有节点。
 
 **步骤**：
 
-1. 读取左栏空态：
+1. 读取无节点屏（连接页居中，不再有左栏配置列表）：
 
 ```js
-(() => ({
-  title: document.querySelector(".rail__empty-title")?.textContent.trim() ?? null,
-  text: document.querySelector(".rail__empty-text")?.textContent.trim() ?? null,
-  action: document.querySelector(".rail__empty-action")?.textContent.trim() ?? null,
-  actionClass: document.querySelector(".rail__empty-action")?.className ?? null,
-}))()
+(() => {
+  const text = document.body.innerText;
+  const buttons = [...document.querySelectorAll("button")].map((b) => b.textContent.trim());
+  return {
+    trial: buttons.find((t) => t.includes("先试用免费节点")) ?? null,
+    create: buttons.find((t) => t.includes("新建节点")) ?? null,
+    hasRail: Boolean(document.querySelector(".rail__empty-action")),
+    bodyHasOldCopy: text.includes("新建配置"),
+  };
+})()
 ```
 
-2. 新建一套配置后，把它的节点数组改成空，刷新，读取控制台空态：
+2. 添加节点后，把节点数组改成空，刷新，读取节点卡空态：
 
 ```js
 (() => {
@@ -2331,8 +2353,8 @@ ps -Ao pid,comm,args | grep -E 'Veyl|veyl' | grep -v grep
 
 **预期**：
 
-1. 左栏：「还没有配置」+「让助手配一条，或自己新建一套。」+ 一个 `btn btn--ghost rail__empty-action` 按钮「新建配置」。
-2. 没有节点时：控制台出现「这套配置还没有节点。」，不出现端口行。
+1. 无节点屏只有两个入口：`先试用免费节点`（次）与 `新建节点`（主）；`hasRail` 为 `false`、`bodyHasOldCopy` 为 `false`——没有左栏配置空态，也没有「新建配置」。
+2. 没有节点时：节点卡出现「这套配置还没有节点。」，不出现端口行。
 3. 历史会话空态：「还没有对话。新建一个，或者直接问我。」。
 4. 三处空态都不出现 `proxy`、`TUN`、`分流`、`规则集`。
 
@@ -2387,7 +2409,7 @@ ps -Ao pid,comm,args | grep -E 'Veyl|veyl' | grep -v grep
 
 ### E6-08 四个弹窗 + 设置页内联表单的壳
 
-**前置**：M1；1440×900；已有一套配置；能分别打开四个弹窗（新建配置、添加节点、重置网络、提问/授权）和设置页里的「添加 AI 服务」内联表单。设置弹窗本身是容器，不计入这四个。
+**前置**：M1；1440×900；已有节点池；能分别打开四个弹窗（添加节点、重置网络、提问/授权、添加 AI 服务内联表单所在设置页）和设置页里的「添加 AI 服务」内联表单。设置弹窗本身是容器，不计入这四个。
 
 **步骤**：
 
@@ -2396,7 +2418,7 @@ ps -Ao pid,comm,args | grep -E 'Veyl|veyl' | grep -v grep
 ```js
 (() => {
   const surfaces = [
-    ["新建配置", ".modal.new-config"],
+    ["添加节点", ".modal.new-config"],
     ["设置（容器）", ".modal.modal--settings"],
     ["添加节点", ".modal.modal--confirm:not(.reset-dialog)"],
     ["重置网络", ".modal.reset-dialog"],
@@ -2427,14 +2449,14 @@ ps -Ao pid,comm,args | grep -E 'Veyl|veyl' | grep -v grep
 })()
 ```
 
-2. 打开方式：新建配置点 `[aria-label="新建配置"]`；设置点左栏设置按钮；添加节点在设置 › 连接 ›「添加节点」行点「添加」；重置网络在设置 › 遇到问题点「重置网络」；提问/授权在右栏发「升级运行时」，等 `.ask-question` 出现；添加 AI 服务在设置 › AI 服务点「添加 AI 服务」。
+2. 打开方式：添加节点点「添加节点」入口（选择器 `.modal.new-config` 待单配置落地后同步）；设置点左栏设置按钮；添加节点在设置 › 连接 ›「添加节点」行点「添加」；重置网络在设置 › 遇到问题点「重置网络」；提问/授权在右栏发「升级运行时」，等 `.ask-question` 出现；添加 AI 服务在设置 › AI 服务点「添加 AI 服务」。
 3. 对每个面截全图，并记录关闭按钮距弹窗右边缘的距离。
-4. 把四个弹窗分成两档：**确认类**（添加节点、重置网络、提问/授权）与**复杂类**（新建配置）。
+4. 把四个弹窗分成两档：**确认类**（重置网络、提问/授权）与**复杂类**（添加节点表单）。
 
 **预期**：
 
 1. **确认类三个弹窗内部一致**：标题都是 15px / 600；header padding 都是 `14px 20px`；关闭按钮都是 28×28，位于 header 最右侧，右间距都是 20px。添加节点宽度 400（±1），重置网络 480（±1），提问/授权 400（±1）。
-2. **复杂类单独一档**：新建配置标题 17px / 600；header padding `16px 24px 14px`；关闭按钮 28×28，右间距 24px；宽度 480（±1）。
+2. **复杂类单独一档**：添加节点标题 17px / 600；header padding `16px 24px 14px`；关闭按钮 28×28，右间距 24px；宽度 480（±1）。
 3. **设置弹窗是容器**：`.modal.modal--settings` 宽度 760（±1），标题「设置」15px / 600，关闭按钮 28×28，右间距 20px。它不是四个弹窗之一，只用于确认内联表单的宿主宽度。
 4. **「添加 AI 服务」是内联表单**：`.provider-form`，不是 `role=dialog`，没有关闭按钮，不做宽度断言；标题 `.provider-form__title` 为 13px / 500。它只做「在 760 容器内展开」的断言。
 5. **宽度只允许 400 / 480 / 760 三档**；没有 440 / 560 / 420 等旧值。
@@ -2497,7 +2519,9 @@ ps -Ao pid,comm,args | grep -E 'Veyl|veyl' | grep -v grep
 - 溢出的元素选择器与 `scrollWidth/clientWidth`。
 - 是否仍存在 `.msg__bubble`。
 
-### E6-10 左栏空态与错误态的 ghost 按钮
+### E6-10 左栏空态与错误态的 ghost 按钮（已作废，单配置）
+
+> **已作废**：单配置的客户端 destination 没有左栏空态与「新建配置」ghost 按钮；入口是无节点屏的两个选择（E6-06）与「添加节点」。本条不再执行。
 
 **前置**：空态用 M1（清空 `veyl.*`，没有配置）；错误态用 M2 原生应用构造。测试者能恢复被改动的权限 / 文件。
 
@@ -2517,7 +2541,7 @@ ps -Ao pid,comm,args | grep -E 'Veyl|veyl' | grep -v grep
 })()
 ```
 
-2. 点「新建配置」，确认 `.modal.new-config` 出现。
+2. 点「添加节点」，确认 `.modal.new-config` 出现（选择器名沿用旧类名，单配置落地后同步）。
 3. 创建一套配置后，确认左栏空态消失、列表至少 1 行。
 4. 错误态构造（M2，由测试者执行；先退出应用）：
    - 方法 A：把配置目录改成不可读，再启动应用：
@@ -2671,7 +2695,7 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 
 **步骤**：
 
-1. 主界面 + 设置 + 新建配置 + 右栏 + 首启页都打开过一遍后，执行字号 / token 扫描：
+1. 主界面 + 设置 + 添加节点 + 右栏 + 首启页都打开过一遍后，执行字号 / token 扫描：
 
 ```js
 (() => {
@@ -2816,31 +2840,30 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 
 ### E6-17 节点名字号与超长省略
 
-**前置**：M1；1440×900；准备两套配置：A 两个节点、B 一个节点；节点名改成超过栏宽的长串。
+**前置**：M1；1440×900；唯一配置里放两个节点；节点名改成超过栏宽的长串。
 
 **步骤**：
 
-1. 用 localStorage 改两套配置的节点名并刷新：
+1. 用 localStorage 改节点名并刷新：
 
 ```js
 (() => {
   const store = JSON.parse(localStorage.getItem("veyl.configs.mock.v1"));
   const long = "这是一个非常非常长的节点名称用于测试省略号是否生效ABCDEFGHIJKLMN";
-  store.configs.forEach((c, i) => {
-    c.nodes = c.nodes.length ? c.nodes : [{
-      node_id: `n_${i}`, name: long, server: "203.0.113.9", port: 8388,
-      method: "aes-256-gcm", protocol: "shadowsocks", source: "manual", created_at: Date.now(),
-    }];
-    c.nodes[0].name = long;
-    if (i === 0) c.nodes = [c.nodes[0], { ...c.nodes[0], node_id: "n_extra", name: long + "2" }];
-  });
-  store.activeId = store.configs[0].config_id;
+  const c = store.configs[0];
+  c.nodes = c.nodes.length ? c.nodes : [{
+    node_id: "n_1", name: long, server: "203.0.113.9", port: 8388,
+    method: "aes-256-gcm", protocol: "shadowsocks", source: "manual", created_at: Date.now(),
+  }];
+  c.nodes[0].name = long;
+  c.nodes = [c.nodes[0], { ...c.nodes[0], node_id: "n_extra", name: long + "2" }];
+  store.activeId = c.config_id;
   localStorage.setItem("veyl.configs.mock.v1", JSON.stringify(store));
   location.reload();
 })()
 ```
 
-2. 选中配置 A（多节点），执行：
+2. 节点卡有两个节点，执行：
 
 ```js
 (() => {
@@ -2863,7 +2886,7 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 })()
 ```
 
-3. 切到配置 B（单节点），再执行一次。
+3. 删掉第二个节点（只剩一个），再执行一次。
 
 **预期**：
 
@@ -3044,7 +3067,7 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 
 > 打磨批把四处间距归到 4px 网格：`.config`、`.chat__scroll`、`.ledger__row`、`.app-toast`。这四处可以断言；其余容器仍有未归格的值，照旧只记录、不判失败。
 
-**前置**：M1；1440×900；主界面、设置、新建配置、右栏都打开过一遍；对话里至少一轮回复（渲染出 `.ledger__row`）；触发过一次提示条（`.app-toast` 在 DOM 中）。
+**前置**：M1；1440×900；主界面、设置、添加节点、右栏都打开过一遍；对话里至少一轮回复（渲染出 `.ledger__row`）；触发过一次提示条（`.app-toast` 在 DOM 中）。
 
 **步骤**：
 
@@ -3155,7 +3178,9 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 - 提示条与设置弹窗头部的截图（带矩形标注）。
 - `CSS.supports("selector(:has(*))")` 的结果与实际生效的 `top` 值。
 
-### E6-24 左栏配置名的渲染与只读来源
+### E6-24 左栏配置名的渲染与只读来源（已作废，单配置）
+
+> **已作废**：单配置落地后界面不再有左栏配置列表与自动生成的配置名，本条的步骤与断言不再执行；配置名相关结论由 E1-23「唯一配置没有名称入口」覆盖。新外壳验收见 `docs/acceptance-ui-refactor.md`。
 
 **前置**：M1；1440×900；左栏为默认宽度；至少一套配置。
 
@@ -3214,7 +3239,7 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 1. 左栏名称只有一行：`whiteSpace` 为 `"nowrap"`，`textOverflow` 为 `"ellipsis"`，`overflow` 为 `"hidden"`；`nameHeight` 约 19.5–20，与 `lineHeight` 一致。
 2. `rowHeight` 为 64（±1），与 E6-15 的骨架行同高；`titleEqualsText` 为 `true`（`title` 是完整名字）。
 3. `gapToDelete ≥ 0`、`deleteInsideRow` 为 `true`：删除按钮完整落在行内，没有被文字覆盖。
-4. 审视页名称是自动名（`配置 N`，与 E1-23 的只读断言一致）；`inputs` 为 **0**，`focusableName` 为 `false`——创建流程里名称没有输入框、不可聚焦编辑。改名入口在建立后的左栏（E6-32）。
+4. 审视页名称是自动名（`配置 N`；**单配置落地后本条作废**，界面不再有左栏配置列表与自动名，见 E1-23）；`inputs` 为 **0**，`focusableName` 为 `false`——创建流程里名称没有输入框、不可聚焦编辑。改名入口在建立后的左栏（E6-32，同一前提）。
 5. `truncated` 在当前自动名下通常为 `false`（名字短）；它只用于旧数据的长名，`false` 不算失败。
 
 **不合格时记录什么**：
@@ -3591,7 +3616,9 @@ plutil -p /Applications/Veyl.app/Contents/Info.plist 2>/dev/null | grep -E 'CFBu
 
 **做不到时**：无法制造真实数据面失败（探测目标不可达、或只有代理模式没有 TUN）就记「阻塞」，写明尝试过的构造与现象，不判产品不通过。本条标为可选，其余六条必做。
 
-### E6-32 左栏双击改名：保存 / 取消 / 空值 / 失败 / 组合态 / 已连接
+### E6-32 左栏双击改名：保存 / 取消 / 空值 / 失败 / 组合态 / 已连接（已作废，单配置）
+
+> **已作废**：单配置没有左栏配置列表，也没有改名入口（E1-23），本条不再执行。
 
 **前置**：M2 原生应用；至少两套配置（第二套叫 `配置 2`）；未连接（步骤 5 再连）。
 
@@ -3633,7 +3660,9 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, updated_at from configs or
 
 **不合格时记录什么**：每次的 `rows` JSON、`configs` 名称与 `updated_at`、失败提示截图、连接状态与计时器截图；组合态记录输入法名称与版本。
 
-### E6-33 左栏两种模式的标记与小字
+### E6-33 左栏两种模式的标记与小字（已作废，单配置）
+
+> **已作废**：旧左栏的每行配置标记随配置列表一起消失；接管方式在设置里查看，本条不再执行。
 
 **前置**：M1（浏览器预览）；已有一套 `TUN 模式` 配置和一套 `Proxy 模式` 配置（没有就先各建一套）；左栏 280px 宽；未连接。
 
@@ -3676,7 +3705,9 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, updated_at from configs or
 
 **不合格时记录什么**：两次 `rows` JSON（含 `ink3`）、三种状态（默认 / 选中 / 悬停）的截图、280px 与抽屉两种宽度各一张。
 
-### E6-34 切换配置不断开、不弹窗
+### E6-34 切换配置不断开、不弹窗（已作废，单配置）
+
+> **已作废**：没有第二套配置可切。等价的单配置行为（切换节点不断开全局设置）见 E1-29；本条不再执行。
 
 **前置**：M2；两套可用配置（A、B），当前连接 A 并已显示「已连接」与计时器。
 
@@ -3703,7 +3734,9 @@ grep -E 'runtime-state-changed|config-changed' "$APP_LOG" | tail -10
 
 **不合格时记录什么**：点击前后 hero 截图与状态文本、toast 文本、`configs` 表、事件日志、菜单栏截图。
 
-### E6-35 点「连接 VPN」时自动停旧连接
+### E6-35 点「连接 VPN」时自动停旧连接（已作废，单配置）
+
+> **已作废**：本条依赖 E6-34 的「两套配置切换」。单配置下切换节点由 `node_switch` 处理，验收见 E1-29；本条不再执行。
 
 **前置**：接 E6-34（active = B，实际连接仍是 A）。
 
@@ -3729,7 +3762,9 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, is_active from configs;"
 
 **不合格时记录什么**：状态序列、日志尾、进程列表、最终快照、两张截图。
 
-### E6-36 菜单栏与界面状态一致（切换后）
+### E6-36 菜单栏与界面状态一致（切换后）（已作废，单配置）
+
+> **已作废**：本条依赖多配置切换；单配置的连接状态一致性已由 E1-29 与连接舞台用例覆盖。
 
 **前置**：M2；已连接 A；可观察 macOS 菜单栏 / Windows 托盘图标。
 
@@ -3747,7 +3782,9 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, is_active from configs;"
 
 **不合格时记录什么**：每次切换的界面状态词、托盘截图、时间戳；连接快照 JSON。
 
-### E6-37 底部详情显示当前配置名
+### E6-37 底部详情显示当前配置名（已作废，单配置）
+
+> **已作废**：单配置不再暴露配置名。底部只显示当前节点与连接状态，相关验收入 E1-23 / E1-29；本条不再执行。
 
 **前置**：M2；两套配置 A、B，名字不同（例：`家里`、`公司`）。
 
@@ -3777,7 +3814,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, is_active from configs;"
 
 ### N1 三个 destination：客户端 / 节点组 / 我的服务器
 
-**前置**：M1；至少一套配置（确认切回后配置列表还在）；服务器分别测 0 台、1 台安装中、≥2 台可用。
+**前置**：M1；至少一个节点；服务器分别测 0 台、1 台安装中、≥2 台可用。
 
 **步骤**：
 
@@ -3796,7 +3833,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select name, is_active from configs;"
 2. 点「节点组」：左栏变成组列表（`免费` 段 → `我的组` 段），中间是选中组的详情（组名、`当前节点组` 徽标、节点列表、`测试全部` / `添加节点`）；右栏仍是 AI 对话；组列表底部**没有** `我的服务器` 行。
 3. 点「我的服务器」：左栏换成服务器列表（名称 · 地区 · 状态）；没有服务器时左栏只有 `还没有服务器`；中间**始终先显示创建页**（地区分组、三档机型、固定系统、实时价格、`创建服务器`），点左栏某台才切到详情；内容区**没有 `←` 或「返回」按钮**。
 4. 从组详情点 `从我的服务器添加`：切到「我的服务器」destination，页头显示 `从「<组名>」添加节点` + `取消`；可用服务器行的主按钮是 `加入「<组名>」`；点 `取消` 后页头恢复 `我的服务器`、按钮恢复 `用来建配置`。
-5. 点「客户端」：左栏恢复配置列表，中间回到网络控制台；这是回客户端的唯一方式。
+5. 点「客户端」：左栏收起（连接页没有列表列），中间回到连接舞台；这是回客户端的唯一方式。
 6. 重开 App 后回到上次停留的 destination 的根（客户端控制台 / 节点组组列表 / 我的服务器的创建页）；没有记录时落在客户端。
 7. 无身份冷启动点「我的服务器」：左栏显示 `登录后查看你的服务器`，中间仍是地区与价格的创建页；此时网络请求只有 `/v1/catalog`，**没有 `/v1/servers`**；点 `创建服务器` 后才出现 `/v1/servers`（或 `/v1/auth/device`）。
 8. 列表失败时：错误只在左栏，占位区保留列表原有高度（3 个虚线占位行，`getBoundingClientRect().height > 0`），下方是「连不上服务器，稍后再试」+ 可见的 `重试`；点 `重试` 期间按钮变 `正在重试…` 并禁用，成功后就地恢复列表，中间仍是创建页，错误文案与 `重试` 消失；页面不发生整块塌陷。
@@ -3832,7 +3869,9 @@ grep -E 'runtime-state-changed|stop|start' "$APP_LOG" | tail -10
 
 **不合格时记录什么**：切换前后 hero 截图与计时器读数、托盘截图、事件日志、`configs` 表。
 
-### N15 左栏列表随 destination 切换
+### N15 左栏列表随 destination 切换（已作废，单配置）
+
+> **已作废**：单配置的客户端 destination 没有配置列表，本条不再执行；三区外壳的收起规则见 `docs/acceptance-ui-refactor.md`。
 
 **前置**：M1；至少两套配置、至少一个自定义组、至少一台服务器。
 
@@ -4360,7 +4399,7 @@ grep -E 'runtime-state-changed|stop|start' "$APP_LOG" | tail -10
 ### E8-09 重置成功的结果呈现
 
 - **目的**：验证成功时只留一行结论，八步默认折叠，展开后能看到逐项结果。依据 IA §3.3 P9 / §6 验收 14。
-- **前置条件**：网络当前正常；已记录配置数与节点数；设置 › 遇到问题。
+- **前置条件**：网络当前正常；已记录 `configs` 行数与节点数；设置 › 遇到问题。
 - **步骤（人做）**
   1. 点「重置网络」，在确认弹层点「重置网络」。
   2. 等执行结束，记录结果区第一行与是否有「查看详情」。
@@ -4375,7 +4414,7 @@ grep -E 'runtime-state-changed|stop|start' "$APP_LOG" | tail -10
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from nodes;"
   ```
-  看什么：日志有重置相关行；系统代理/DNS/路由恢复；配置数与节点数不变。
+  看什么：日志有重置相关行；系统代理/DNS/路由恢复；`configs` 行数与节点数不变。
 - **可观察预期**
   - 成功结果只显示一行「网络已恢复。可以重新连接了。」和「▸ 查看详情」。
   - 八步默认收起；展开后能看到每一步的结果。
@@ -4424,13 +4463,13 @@ grep -E 'runtime-state-changed|stop|start' "$APP_LOG" | tail -10
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
   sqlite3 -readonly "$HOME/.veyl/veyl.db" "select value from settings where key = 'proxy_port';"
   ```
-  看什么：配置数为 0；端口保存值即使存在，也不应该让界面显示端口行。
+  看什么：`configs` 为 0 行；端口保存值即使存在，也不应该让界面显示端口行。
 - **可观察预期**
   - 只有「还没有配置」和新建入口（「新建一套配置」或「先在左侧新建一套配置」）。
   - 没有「本地代理端口」行。
   - 没有「Veyl 免费节点」「添加节点」行。
   - 没有连接方式、节点来源或空白占位。
-  - 点新建入口能回到新建配置流程，不跳到别处。
+  - 点添加节点入口能回到添加节点流程，不跳到别处。
 - **判定**
   - [ ] 通过
   - [ ] 失败
@@ -4808,7 +4847,7 @@ grep -E '连接完成|连接失败 卡在' "$APP_LOG" | tail -3
 
 ### E8-21 带选项的提问卡片有「解释这个设置的含义」这一行
 
-**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。点左侧「新建配置」（AI 就绪，应直接进对话），停在第一问卡片（2 个选项：TUN 模式 / Proxy 模式）。
+**前置**：M2（原生应用，走真实 AI）；已有节点池（单配置或 0 行配置均可）；若是干净环境，先按首启添加节点再进入本用例。点「添加节点」（AI 就绪，应直接进对话），停在第一问卡片（2 个选项：TUN 模式 / Proxy 模式）。
 
 **步骤**：
 
@@ -4845,7 +4884,7 @@ grep -E '连接完成|连接失败 卡在' "$APP_LOG" | tail -3
 
 ### E8-22 点「解释这个设置的含义」→ 三句解释 → 原问题原选项重问
 
-**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。点左侧「新建配置」（AI 就绪，应直接进对话），停在第一问卡片（2 个选项）。
+**前置**：M2（原生应用，走真实 AI）；已有节点池（单配置或 0 行配置均可）；若是干净环境，先按首启添加节点再进入本用例。点「添加节点」（AI 就绪，应直接进对话），停在第一问卡片（2 个选项）。
 
 **步骤**：
 
@@ -4868,7 +4907,7 @@ grep -E '连接完成|连接失败 卡在' "$APP_LOG" | tail -3
 })()
 ```
 
-3. 用数据库确认没有新建配置：
+3. 用数据库确认没有新增节点、也没有多出配置行：
 
 ```bash
 sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select role, substr(content,1,60) from chat_messages order by created_at desc limit 4;"
@@ -4882,54 +4921,54 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select ro
 4. 没有合并到下一问，也没有替用户选中任何选项（没有卡片处于选中态）。
 5. `configs` 数量与点击前相同；`chat_messages` 里这条内容仍是逐字的 `解释这个设置的含义`（渲染成动作行，不改原文）。
 
-**不合格时记录什么**：`tail`、新旧问题与选项、配置数前后、AI 回复全文。
+**不合格时记录什么**：`tail`、新旧问题与选项、`configs` 行数前后、AI 回复全文。
 
-### E8-23 解释不算作答：不推进、不建配置
+### E8-23 解释不算作答：不推进、不添加节点
 
-**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。点左侧「新建配置」（AI 就绪，应直接进对话），停在第一问卡片（2 个选项）；记录点击前的配置数与当前问题。
+**前置**：M2（原生应用，走真实 AI）；已有节点池（单配置或 0 行配置均可）；若是干净环境，先按首启添加节点再进入本用例。点「添加节点」（AI 就绪，应直接进对话），停在第一问卡片（2 个选项）；记录点击前的 `configs` 行数与当前问题。
 
 **步骤**：
 
 1. 连续点两次「解释这个设置的含义」（第二次在新卡片上）。
-2. 观察有没有出现确认语、第二问或「正在创建」。
-3. 再查配置数与最近消息。
+2. 观察有没有出现确认语、第二问或「正在添加」。
+3. 再查 `configs` 行数与最近消息。
 
 **预期**：
 
-1. 两次都只得到解释 + 同一问题重问；不出现确认复述、不出现第二问、不出现「正在创建 / 已创建」。
+1. 两次都只得到解释 + 同一问题重问；不出现确认复述、不出现第二问、不出现「正在添加 / 已添加」。
 2. 没有调用 `ConfigCreate`（`configs` 数量不变）；没有 `seed_source_not_confirmed` 之类的错误浮出到界面。
 3. 解释不写进聊天历史之外的任何地方：刷新窗口后，问题仍可正常回答（同一 `questionId` 只回传过一次，没有第二次作答）。
 
-**不合格时记录什么**：两次卡片文本、配置数、`chat_messages` 最近 6 条、是否出现确认语。
+**不合格时记录什么**：两次卡片文本、`configs` 行数、`chat_messages` 最近 6 条、是否出现确认语。
 
-### E8-24 节点来源这一问点解释后，再选 Veyl 免费节点仍能创建
+### E8-24 节点来源这一问点解释后，再选 Veyl 免费节点仍能添加
 
-**前置**：M2（原生应用，走真实后端）；已有一套可用配置；若是干净环境，先按首启建一套再进入本用例。点左侧「新建配置」（AI 就绪，应直接进对话），答完第一问，停在「节点从哪来」卡片（2 个选项）。
+**前置**：M2（原生应用，走真实后端）；已有节点池（单配置或 0 行配置均可）；若是干净环境，先按首启添加节点再进入本用例。点「添加节点」（AI 就绪，应直接进对话），答完第一问，停在「节点从哪来」卡片（2 个选项）。
 
 **步骤**：
 
 1. 在节点来源卡片点「解释这个设置的含义」。
 2. 等解释与原问题重问。
 3. 点 `Veyl 免费节点（仅供试用）` 选项（逐字）。
-4. 按 AI 的确认复述回答「创建」。
-5. 查配置与工具结果：
+4. 按 AI 的确认复述回答「添加」。
+5. 查节点池与工具结果：
 
 ```bash
-sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select role, substr(content,1,160) from chat_messages order by created_at desc limit 6;"
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select count(*) from nodes; select role, substr(content,1,160) from chat_messages order by created_at desc limit 6;"
 ```
 
 **预期**：
 
 1. 解释本身没有授予节点同意；点选项后才继续。
-2. 创建成功，`configs` 数量 +1；没有出现 `seed_source_not_confirmed` / `source_required`。
-3. 配置的节点来自 Veyl 免费节点（左栏节点数与免费节点池一致）。
-4. 解释那一步既没有被当成同意，也没有把同意吞掉——用户点了选项就能建。
+2. 添加成功：免费节点进入节点池；`configs` 最多 1 行（首次添加才从 0 变 1）；没有出现 `seed_source_not_confirmed` / `source_required`。❗待实现：已有配置时再次添加不新建第二套。
+3. 节点卡显示这 2 个免费节点，与节点池一致。
+4. 解释那一步既没有被当成同意，也没有把同意吞掉——用户点了选项就能添加。
 
-**不合格时记录什么**：`chat_messages` 最近 6 条、配置数、创建结果与错误码（如有）、每一步的卡片截图。
+**不合格时记录什么**：`chat_messages` 最近 6 条、`configs` 与 `nodes` 行数、添加结果与错误码（如有）、每一步的卡片截图。
 
 ### E8-25 确认卡上没有「解释这个设置的含义」
 
-**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；点左侧「新建配置」（AI 就绪，应直接进对话），答完两问，停在确认卡（`创建` / `取消`；确认卡判定词表以 `docs/design/tool-display.md` §3.5 为准）。
+**前置**：M2（原生应用，走真实 AI）；已有节点池（单配置或 0 行配置均可）；点「添加节点」（AI 就绪，应直接进对话），答完两问，停在确认卡（`添加` / `取消`；❗待实现：单配置落地前确认卡可能仍写 `创建`；判定词表以 `docs/design/tool-display.md` §3.5 为准）。
 
 **步骤**：
 
@@ -4951,15 +4990,15 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select ro
 
 **预期**：
 
-1. `options` 恰好是 `["创建","取消"]`；`explainCount` 为 `0`，`bodyHasExplain` 为 `false`。
+1. `options` 恰好是 `["添加","取消"]`（❗待实现：落地前可能仍是 `["创建","取消"]`）；`explainCount` 为 `0`，`bodyHasExplain` 为 `false`。
 2. 卡片内可聚焦元素只有两个选项与「跳过」，没有解释按钮、也没有同名文字按钮。
 3. 两张设置卡上仍各有一行解释（E8-21 已验），确认卡不继承。
 
 **不合格时记录什么**：上述 JSON、卡片截图、可聚焦元素列表。
 
-### E8-26 确认卡上手打「解释这个设置的含义」：只回一句、重问确认、不建配置
+### E8-26 确认卡上手打「解释这个设置的含义」：只回一句、重问确认、不添加节点
 
-**前置**：M2（原生应用，走真实后端）；已有一套可用配置；停在确认卡（`创建` / `取消`）；记录当前配置数。
+**前置**：M2（原生应用，走真实后端）；已有节点池（单配置或 0 行配置均可）；停在确认卡（`添加` / `取消`；❗待实现：落地前可能仍显示 `创建`）；记录当前 `configs` 行数。
 
 **步骤**：
 
@@ -4978,12 +5017,12 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select ro
     tail,
     question: card?.querySelector(".ask-card__question")?.textContent.trim() ?? null,
     options: [...document.querySelectorAll(".ask-card__option")].map((b) => b.textContent.trim()),
-    createdWord: document.body.innerText.includes("已创建"),
+    createdWord: document.body.innerText.includes("已创建") || document.body.innerText.includes("已添加"),
   };
 })()
 ```
 
-3. 查配置数与最近消息：
+3. 查 `configs` 行数与最近消息：
 
 ```bash
 sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select role, substr(content,1,160) from chat_messages order by created_at desc limit 6;"
@@ -4991,20 +5030,20 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select ro
 
 **预期**：
 
-1. 手打这串字同样渲染成动作行 `已请求解释`（不是用户气泡）；AI **只回一句**说清「创建会做什么、取消会怎样」，不套三句模板、不展开选项。
-2. 随后重问**同一个确认问题**，`options` 仍是 `["创建","取消"]`；没有推进到执行，也没有替用户选。
-3. `configs` 数量不变；`createdWord` 为 `false`，界面没有「已创建」。
+1. 手打这串字同样渲染成动作行 `已请求解释`（不是用户气泡）；AI **只回一句**说清「添加会发生什么、取消会怎样」，不套三句模板、不展开选项。
+2. 随后重问**同一个确认问题**，`options` 仍是 `["添加","取消"]`（❗待实现：落地前可能仍是 `["创建","取消"]`）；没有推进到执行，也没有替用户选。
+3. `configs` 数量不变；`createdWord` 为 `false`，界面没有「已创建 / 已添加」。
 4. 若模型违规调用 `ConfigCreate`：工具返回 `PRECONDITION_FAILED / explanation_pending`，界面仍无「已创建」，AI 按契约把确认问题重问；不得重试或换参数绕过。
 
-**不合格时记录什么**：`tail`、确认卡前后对比、配置数、`chat_messages` 最近 6 条、工具错误（如有）。
+**不合格时记录什么**：`tail`、确认卡前后对比、`configs` 行数、`chat_messages` 最近 6 条、工具错误（如有）。
 
-### E8-27 AI 就绪时点「新建配置」直接进对话
+### E8-27 AI 就绪时点「添加节点」直接进对话
 
-**前置**：M2（原生应用，走真实 AI）；AI 已配置且可用；已有一套可用配置；左栏标题行有 `+`。
+**前置**：M2（原生应用，走真实 AI）；AI 已配置且可用；已有节点池（单配置或 0 行配置均可）；主界面有「添加节点」入口（空态或「我的服务器」）。
 
 **步骤**：
 
-1. 点左栏 `+` 或空态的「新建配置」。
+1. 点「添加节点」。
 2. 等界面稳定后执行：
 
 ```js
@@ -5029,20 +5068,20 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select role, substr(content,1,80) from 
 
 **预期**：
 
-1. `modal` 为 `false`：没有新建配置弹窗。
-2. `panel` 为 `true`，右栏打开；`userMessages` 最后一条逐字是 `帮我新建一套配置。`，且它是**用户可见**消息（不是 hidden）。
+1. `modal` 为 `false`：没有添加节点弹窗。
+2. `panel` 为 `true`，右栏打开；`userMessages` 最后一条是添加节点的开场消息（当前实现逐字为 `帮我新建一套配置。`；❗待实现：单配置落地后应改为添加节点口径），且它是**用户可见**消息（不是 hidden）。
 3. 紧接着出现第一问卡片（`hasAskCard` 为 `true`），选项逐字是 `TUN 模式` / `Proxy 模式`，卡片前有一段把两者讲清楚的概念说明。
 4. `chat_messages` 里能查到这条用户消息；没有「AI 协助 / 我自己配置」两张卡。
 
 **不合格时记录什么**：上述 JSON、`chat_messages` 最近 4 条、点击前后的截图。
 
-### E8-28 无 AI 时点「新建配置」走两问表单兜底
+### E8-28 无 AI 时点「添加节点」走两问表单兜底
 
-**前置**：M2（原生应用）；干净安装、未配置 AI；首启页选「我懂网络，不用 AI」跳过引导，回到主界面（左栏无配置，空态有「新建配置」）。
+**前置**：M2（原生应用）；干净安装、未配置 AI；首启页选「我懂网络，不用 AI」跳过引导，回到主界面（还没有节点，空态有「添加节点」）。
 
 **步骤**：
 
-1. 点左栏 `+` 或「新建配置」。
+1. 点「添加节点」。
 2. 读弹窗与页面状态：
 
 ```js
@@ -5059,28 +5098,28 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select role, substr(content,1,80) from 
 ```
 
 3. 按默认值走完两问 → 审视页，点主按钮，等连接结束。
-4. 查配置与连接：
+4. 查节点池与连接：
 
 ```bash
-sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select count(*) from nodes;"
 ```
 
 **预期**：
 
 1. `modal` 为 `true`，弹窗里是两问（怎么接管 / 节点从哪来）；`newUserMessage` 为 `false`，`askCard` 为 `false`——表单不进对话、不产生会话消息。
-2. 审视页五项只读，主按钮是 `创建并连接`（未连接）。
-3. 创建成功并自动连接；`configs` 数量 +1；左栏出现新配置且成为当前配置。
+2. 审视页只读，主按钮是 `添加并连接`（未连接；❗待实现：落地前可能仍为 `创建并连接`）。
+3. 添加成功并自动连接；`configs` 最多 1 行（首次添加才从 0 变 1）；节点卡出现新节点，按添加流程处理当前节点。
 
-**不合格时记录什么**：上述 JSON、弹窗与审视页截图、配置数、连接结果。
+**不合格时记录什么**：上述 JSON、弹窗与审视页截图、`configs` 与 `nodes` 行数、连接结果。
 
 ### E8-29 AI 开场失败时自动落到手动表单
 
-**前置**：M2（原生应用）；AI 已配置过、但 Key 可改；已有一套可用配置；未连接。
+**前置**：M2（原生应用）；AI 已配置过、但 Key 可改；已有节点池；未连接。
 
 **步骤**：
 
 1. 设置 → AI 服务，把 API Key 改成一个明显错误的值并保存（允许保存后 `verified = false`）。
-2. 回主界面点 `+` 或「新建配置」。
+2. 回主界面点「添加节点」。
 3. 等几秒，读页面状态：
 
 ```js
@@ -5097,21 +5136,21 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
 })()
 ```
 
-4. 在自动打开的表单里按默认值走完两问 → 审视页，点主按钮创建。
-5. 查配置：
+4. 在自动打开的表单里按默认值走完两问 → 审视页，点主按钮添加。
+5. 查节点池：
 
 ```bash
-sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
+sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs; select count(*) from nodes;"
 ```
 
 **预期**：
 
 1. 会话里能看到开场失败的提示（`askError` 非空），不是无声无息。
 2. `modal` 为 `true`，且页面出现 `AI 没接上，先用表单建一套`。
-3. 表单两问可正常选择，审视页与主按钮正常；创建成功，`configs` 数量 +1。
-4. 断网时同样落到表单（可选复验）：表单能出现；若免费节点池为空，允许建不出配置，但必须停在表单内给出失败原因，不回到空会话。
+3. 表单两问可正常选择，审视页与主按钮正常；添加成功，节点进入节点池、`configs` 最多 1 行。
+4. 断网时同样落到表单（可选复验）：表单能出现；若免费节点池为空，允许添加不出节点，但必须停在表单内给出失败原因，不回到空会话。
 
-**不合格时记录什么**：上述 JSON、会话错误提示、弹窗截图、配置数。
+**不合格时记录什么**：上述 JSON、会话错误提示、弹窗截图、`configs` 与 `nodes` 行数。
 
 ### E8-30 中间区来源卡保持表单（唯一例外）
 
@@ -5135,13 +5174,13 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
 
 1. `modal` 为 `true`，直接出现两问表单；`askCard` 为 `false`，没有走 AI 提问。
 2. 最新用户消息不是 `帮我新建一套配置。`——用户已明确选了来源，不再让 AI 重问一遍。
-3. 表单里不会预先改动用户已选的来源；走完能正常创建。
+3. 表单里不会预先改动用户已选的来源；走完能正常添加。
 
-**不合格时记录什么**：上述 JSON、来源卡与表单截图、创建结果。
+**不合格时记录什么**：上述 JSON、来源卡与表单截图、添加结果。
 
-### E8-31 AI 路径：免费节点取不到时不建配置、只重试一次
+### E8-31 AI 路径：免费节点取不到时不添加节点、只重试一次
 
-**前置**：M2（原生应用）；AI 已配置且可用；已有一套可用配置；先清空免费节点缓存并断网，使 `ConfigCreate(source: "seed")` 回 `PRECONDITION_FAILED / seed_unavailable`：
+**前置**：M2（原生应用）；AI 已配置且可用；已有节点池；先清空免费节点缓存并断网，使 `ConfigCreate(source: "seed")` 回 `PRECONDITION_FAILED / seed_unavailable`：
 
 ```bash
 sqlite3 "$HOME/.veyl/veyl.db" "delete from seed_cache;"
@@ -5151,7 +5190,7 @@ sqlite3 "$HOME/.veyl/veyl.db" "delete from seed_cache;"
 
 **步骤**：
 
-1. 点「新建配置」，答「TUN 模式」→「Veyl 免费节点（仅供试用）」→ 在确认卡上点「创建」。
+1. 点「添加节点」，答「TUN 模式」→「Veyl 免费节点（仅供试用）」→ 在确认卡上点「添加」（❗待实现：落地前可能仍显示「创建」）。
 2. 观察 AI 消息与是否重试；查工具调用与配置：
 
 ```bash
@@ -5166,13 +5205,13 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(resu
 2. 本请求内 `CatalogRefresh` **最多 1 次**；仍失败后不再自动重试。
 3. 消息里**不出现**错误码（`seed_unavailable`）、种子地址或节点密码；`configs` 数量不变。
 4. 没有偷偷换来源：`tool_calls` 里没有 `NodeCreate` / `NodeImportText` / `NodeImportUrl`。
-5. 恢复网络后再走一遍，能正常建成配置。
+5. 恢复网络后再走一遍，能正常添加节点。
 
-**不合格时记录什么**：AI 回复全文、`tool_calls` 最近 8 条、配置数前后、重试次数；若池空是人为清空，记录清空方式。
+**不合格时记录什么**：AI 回复全文、`tool_calls` 最近 8 条、`configs` 行数前后、重试次数；若池空是人为清空，记录清空方式。
 
 ### E8-32 连续两次点解释：每次都必须先有解释文字，再出卡片
 
-**前置**：M2（原生应用，走真实 AI）；已有一套可用配置；点「新建配置」进对话，停在第一问卡片（`TUN 模式` / `Proxy 模式`）。
+**前置**：M2（原生应用，走真实 AI）；已有节点池（单配置或 0 行配置均可）；点「添加节点」进对话，停在第一问卡片（`TUN 模式` / `Proxy 模式`）。
 
 **步骤**：
 
@@ -5194,7 +5233,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(resu
 ```
 
 2. 在新出现的同一张卡片上**再点一次**「解释这个设置的含义」，等稳定后再执行上面同一段 JS。
-3. 对比两次的 `tail`，并查配置数：
+3. 对比两次的 `tail`，并查 `configs` 行数：
 
 ```bash
 sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
@@ -5207,7 +5246,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from configs;"
 3. 每次重问的 `card` 与 `options` 和点击前逐字相同、顺序不变。
 4. 全程不出现确认复述、不出现第二问；`configs` 数量与点击前相同。
 
-**不合格时记录什么**：两次 `tail` 全文、两次卡片与选项、配置数；若第二次只有卡片没有文字，附截图与请求时间线。
+**不合格时记录什么**：两次 `tail` 全文、两次卡片与选项、`configs` 行数；若第二次只有卡片没有文字，附截图与请求时间线。
 
 ---
 

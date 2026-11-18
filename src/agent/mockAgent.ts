@@ -51,6 +51,8 @@ import type {
   ConfigRouteMode,
   NextAction,
   NodeCreateInput,
+  NodeAttachInput,
+  NodeAttachResult,
   NodeImportResult,
   NodeProbeMethod,
   NodeProbePhase,
@@ -1963,6 +1965,11 @@ export class MockAgentBridge implements AgentBridge {
     };
     rememberMockNode(node);
     return node;
+  }
+
+  async nodeAttach(_input: NodeAttachInput): Promise<NodeAttachResult> {
+    // 浏览器通道的节点池由 useVpnSession 的 mock 分支维护；这里只满足接口。
+    throw this.unsupportedConfigCommand("node_attach");
   }
 
   async nodeImportUrl(url: string): Promise<NodeImportResult> {

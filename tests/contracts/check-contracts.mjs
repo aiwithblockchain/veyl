@@ -1488,7 +1488,6 @@ const DANGEROUS_EXPRESSION_TOOLS = [
   "VpnDisconnect",
   "NetRepair",
   "CoreUpgrade",
-  "ConfigDelete",
   "RouteSetMode",
 ];
 

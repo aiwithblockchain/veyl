@@ -272,6 +272,7 @@ describe("三区外壳与连接舞台", () => {
   it("测速全部失败：停在测速那步给原因，跳过测速后停在未连接", async () => {
     await renderApp();
     const start = vi.spyOn(bridge, "runtimeStart");
+    const configDelete = vi.spyOn(bridge, "configDelete");
     vi.spyOn(bridge, "nodeProbe").mockRejectedValue({
       code: "NETWORK",
       message: "测速没完成。",
@@ -296,6 +297,8 @@ describe("三区外壳与连接舞台", () => {
       expect(screen.getByRole("button", { name: "连接节点" })).toBeTruthy(),
     );
     expect(start).not.toHaveBeenCalled();
+    // 全局配置不能删：试用失败只报错，不动池子。
+    expect(configDelete).not.toHaveBeenCalled();
   }, 15_000);
 
   it("拉取免费节点失败：停在失败的步骤并说明原因，不落配置", async () => {
@@ -318,6 +321,7 @@ describe("三区外壳与连接舞台", () => {
         active_config_id: null,
       });
       vi.spyOn(bridge, "getRuntimeSnapshot").mockResolvedValue(null);
+      const configDelete = vi.spyOn(bridge, "configDelete");
       vi.spyOn(bridge, "defaultProfileStatus").mockRejectedValue({
         code: "NETWORK",
         message: "连不上节点源。",
@@ -336,6 +340,7 @@ describe("三区外壳与连接舞台", () => {
       expect(fetchRow?.className).toContain("is-failed");
       expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
       expect(localStorage.getItem("veyl.configs.mock.v1")).toBeNull();
+      expect(configDelete).not.toHaveBeenCalled();
     } finally {
       Object.defineProperty(bridge, "mode", { value: "mock", configurable: true });
     }

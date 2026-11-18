@@ -106,13 +106,6 @@ export const TOOL_COPY: Record<string, ToolCopy> = {
     advice: "可能是网络问题，可以再试一次。",
     readOnly: true,
   },
-  ConfigList: {
-    running: "正在看你的配置",
-    done: "已查看你的配置",
-    failed: "读不到你的配置",
-    advice: "可以稍后再试一次。",
-    readOnly: true,
-  },
   ConfigDetail: {
     running: "正在看这套配置",
     done: "已查看这套配置",
@@ -120,25 +113,11 @@ export const TOOL_COPY: Record<string, ToolCopy> = {
     advice: "可以换一套配置再试。",
     readOnly: true,
   },
-  ConfigCreate: {
-    running: "正在新建配置",
-    done: "已新建配置",
-    failed: "没建成配置",
-    advice: "可能是同名或信息不全，改一下再试。",
-    readOnly: false,
-  },
   ConfigUpdate: {
     running: "正在修改配置",
     done: "已更新配置",
     failed: "没改成配置",
     advice: "原设置不变，可以再试一次。",
-    readOnly: false,
-  },
-  ConfigDelete: {
-    running: "正在删除配置",
-    done: "已删除配置",
-    failed: "没删掉配置",
-    advice: "这套配置可能正在使用，先换一套再删。",
     readOnly: false,
   },
   NodeImportUrl: {

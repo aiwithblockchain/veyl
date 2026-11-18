@@ -77,11 +77,8 @@ fn table(tool: &str) -> (&'static str, &'static str, bool) {
         "CoreListVersions" => ("已查看运行库版本", "没能读取运行库版本", true),
         "CoreUpgrade" => ("已是最新版本", "没能升级，仍是旧版本", false),
         "CatalogSearch" => ("看到可用节点", "没找到可用节点", true),
-        "ConfigList" => ("已查看配置", "没能读取配置", true),
         "ConfigDetail" => ("已读取配置详情", "没能读取配置", true),
-        "ConfigCreate" => ("配置已创建", "没能创建配置", false),
         "ConfigUpdate" => ("配置已更新", "没能更新配置", false),
-        "ConfigDelete" => ("配置已删除", "没能删除配置", false),
         "ConfigSetMode" => ("已切换接管方式", "没能切换接管方式", false),
         "NodeImportUrl" => ("节点已导入", "没能导入节点", false),
         "NodeCreate" => ("节点已添加", "没能添加节点", false),
@@ -157,11 +154,8 @@ mod tests {
             "CoreListVersions",
             "CoreUpgrade",
             "CatalogSearch",
-            "ConfigList",
             "ConfigDetail",
-            "ConfigCreate",
             "ConfigUpdate",
-            "ConfigDelete",
             "ConfigSetMode",
             "NodeImportUrl",
             "NodeCreate",
@@ -219,7 +213,7 @@ mod tests {
     /// 成功时界面不显示「有没有改动」，工具固定填 none。
     #[test]
     fn success_never_reports_a_change() {
-        for tool in ["ConfigCreate", "VpnDisconnect", "VpnConnect", "NetRepair"] {
+        for tool in ["VpnDisconnect", "VpnConnect", "NetRepair"] {
             assert_eq!(fallback(tool, true).changed, Changed::None, "{tool}");
         }
     }
@@ -227,7 +221,7 @@ mod tests {
     /// 只读工具失败也不能声称改动过。
     #[test]
     fn read_only_tools_never_report_a_change() {
-        for tool in ["ConfigList", "DiagRun", "RuntimeStatus", "CategoryList"] {
+        for tool in ["DiagRun", "RuntimeStatus", "CategoryList"] {
             for ok in [true, false] {
                 assert_eq!(fallback(tool, ok).changed, Changed::None, "{tool}");
             }
@@ -237,7 +231,7 @@ mod tests {
     /// 写/执行工具失败时默认保守：可能改过，且无法确认是否恢复。
     #[test]
     fn mutating_tools_fail_conservatively() {
-        for tool in ["ConfigCreate", "VpnConnect", "NetRepair", "NodeSwitch"] {
+        for tool in ["VpnConnect", "NetRepair", "NodeSwitch"] {
             assert_eq!(
                 fallback(tool, false).changed,
                 Changed::Unknown,
@@ -255,9 +249,7 @@ mod tests {
             "RuntimeStop",
             "RuntimeRestart",
             "CoreUpgrade",
-            "ConfigCreate",
             "ConfigUpdate",
-            "ConfigDelete",
             "ConfigSetMode",
             "NodeImportUrl",
             "NodeCreate",

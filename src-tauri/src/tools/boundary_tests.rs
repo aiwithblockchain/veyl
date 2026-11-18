@@ -539,7 +539,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.17.4",
+                env["contract_version"], "3.18.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -561,7 +561,6 @@ async fn required_fields_must_be_present_and_strings() {
     let cases: &[(&str, &str, Value)] = &[
         ("ConfigDetail", "config_id", json!({})),
         ("ConfigUpdate", "config_id", json!({})),
-        ("ConfigDelete", "config_id", json!({})),
         ("NodeSwitch", "config_id", json!({ "node_id": "nod_1" })),
         ("NodeProbe", "node_id", json!({})),
         ("NodeImportUrl", "url", json!({})),
@@ -594,37 +593,6 @@ async fn required_fields_must_be_present_and_strings() {
                 wrong
             );
         }
-    }
-}
-
-#[tokio::test]
-async fn config_create_requires_three_strings() {
-    let (svc, rec) = FakeServices::new();
-    let all = tools(svc);
-
-    let valid = json!({ "name": "公司", "connect_mode": "system_proxy", "routing_mode": "proxy_all" });
-    for field in ["name", "connect_mode", "routing_mode"] {
-        let mut missing = valid.clone();
-        missing.as_object_mut().unwrap().remove(field);
-        rec.take();
-        expect_rejected(
-            tool(&all, "ConfigCreate"),
-            missing,
-            &format!("ConfigCreate 缺 {field}"),
-        )
-        .await;
-        assert!(rec.take().is_empty(), "缺 {field} 时不应调用服务层");
-
-        let mut wrong = valid.clone();
-        wrong[field] = json!(12345);
-        rec.take();
-        expect_rejected(
-            tool(&all, "ConfigCreate"),
-            wrong,
-            &format!("ConfigCreate 的 {field} 是数字"),
-        )
-        .await;
-        assert!(rec.take().is_empty(), "{field} 类型错时不应调用服务层");
     }
 }
 
@@ -691,10 +659,7 @@ async fn oversized_strings_do_not_break_the_envelope() {
 
     let cases: &[(&str, Value)] = &[
         ("ConfigDetail", json!({ "config_id": huge })),
-        (
-            "ConfigCreate",
-            json!({ "name": huge, "connect_mode": "system_proxy", "routing_mode": "proxy_all" }),
-        ),
+        ("ConfigUpdate", json!({ "config_id": huge })),
         ("NodeImportUrl", json!({ "url": huge })),
         ("JobGet", json!({ "job_id": huge })),
         ("CategoryList", json!({ "query": huge })),
@@ -728,16 +693,13 @@ async fn path_traversal_and_control_characters_do_not_panic() {
         "",
     ];
 
-    for name in ["ConfigCreate", "NodeCreate"] {
-        for value in nasty {
-            let input = if name == "ConfigCreate" {
-                json!({ "name": value, "connect_mode": "system_proxy", "routing_mode": "proxy_all" })
-            } else {
-                json!({
-                    "name": value, "server": "198.51.100.20", "port": 8388,
-                    "password": "pw", "method": "aes-256-gcm"
-                })
-            };
+    for value in nasty {
+        {
+            let input = json!({
+                "name": value, "server": "198.51.100.20", "port": 8388,
+                "password": "pw", "method": "aes-256-gcm"
+            });
+            let name = "NodeCreate";
             let result = tool(&all, name).execute(input, &context()).await;
             let env = envelope(&result);
             assert!(
@@ -831,9 +793,6 @@ fn base_input(name: &str) -> Option<Value> {
         "RouteSetMode" => json!({ "mode": "proxy_all" }),
         "NodeImportUrl" => json!({ "url": "https://example.com/sub" }),
         "NodeImportText" => json!({ "text": "ss://aes-256-gcm:pw@203.0.113.10:8388#A" }),
-        "ConfigCreate" => json!({
-            "name": "公司", "connect_mode": "tun", "routing_mode": "proxy_all"
-        }),
         "ConfigUpdate" => json!({ "config_id": "cfg_1" }),
         "NodeCreate" => json!({
             "name": "东京", "server": "198.51.100.20", "port": 8388,
@@ -854,7 +813,6 @@ async fn valid_input_reaches_the_service_and_succeeds() {
 
     let cases: &[(&str, Value, &str)] = &[
         ("ConfigDetail", json!({ "config_id": "cfg_1" }), "config_detail(cfg_1)"),
-        ("ConfigDelete", json!({ "config_id": "cfg_1" }), "config_delete(cfg_1)"),
         ("NodeSwitch", json!({ "config_id": "cfg_1", "node_id": "nod_1" }), "node_switch(cfg_1,nod_1)"),
         ("NodeProbe", json!({ "node_id": "nod_1" }), "node_probe(nod_1)"),
         ("NodeImportUrl", json!({ "url": "https://example.com/sub" }), "node_import_url(None,23chars)"),
@@ -910,35 +868,6 @@ async fn issue_report_shows_actions_while_collecting() {
     }
     let rendered = serde_json::to_string(&actions).unwrap();
     assert!(!rendered.contains('/'), "动作里不能带路径：{rendered}");
-}
-
-/// AI 不能建空配置：source 与 node_ids 必须给一个，显式 `source: "empty"` 也不行。
-#[tokio::test]
-async fn config_create_requires_a_node_source() {
-    let (svc, rec) = FakeServices::new();
-    let all = tools(svc);
-    for extra in [
-        json!({}),
-        json!({ "source": "empty" }),
-        json!({ "node_ids": [] }),
-    ] {
-        let mut input = json!({
-            "name": "公司",
-            "connect_mode": "tun",
-            "routing_mode": "proxy_all"
-        });
-        for (key, value) in extra.as_object().unwrap() {
-            input[key] = value.clone();
-        }
-        let (is_error, env) = run(tool(&all, "ConfigCreate"), input).await;
-        assert!(is_error, "{env}");
-        assert_eq!(env["error"]["code"], "INVALID_ARGUMENT", "{env}");
-        assert_eq!(
-            env["error"]["details"]["reason"], "source_required",
-            "{env}"
-        );
-        assert!(rec.take().is_empty(), "缺来源不能落到服务层：{env}");
-    }
 }
 
 /// 等到工具弹出确认卡再回答。用于验证「确认前不产生任何副作用」。
@@ -1085,67 +1014,12 @@ async fn config_set_mode_does_not_ask_when_disconnected() {
     );
 }
 
-/// 用户点过「解释这个设置的含义」后，模型不能把解释当确认去建配置。
-#[tokio::test]
-async fn config_create_refuses_while_an_explanation_is_pending() {
-    let (svc, rec) = FakeServices::new();
-    let all = tools(svc);
-    const SESSION: &str = "boundary-explain-pending";
-    const REQUEST: &str = "req_explain";
-
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    crate::agent::questions::register(
-        SESSION,
-        REQUEST,
-        claurst_tools::UserQuestionEvent {
-            question: "怎么接管？".into(),
-            options: Some(vec!["TUN 模式".into(), "Proxy 模式".into()]),
-            reply_tx: tx,
-        },
-    );
-    let question_id = crate::agent::questions::list_pending(SESSION)["questions"][0]
-        ["question_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    crate::agent::questions::reply(
-        SESSION,
-        &question_id,
-        crate::agent::questions::EXPLAIN_ANSWER,
-    )
-    .unwrap();
-    crate::tools::policy::set_current_request(SESSION, REQUEST);
-
-    let (is_error, env) = run_in_session(
-        tool(&all, "ConfigCreate"),
-        json!({
-            "name": "公司",
-            "connect_mode": "tun",
-            "routing_mode": "proxy_all",
-            "node_ids": ["nod_1"]
-        }),
-        SESSION,
-    )
-    .await;
-    assert!(is_error, "{env}");
-    assert_eq!(env["error"]["code"], "PRECONDITION_FAILED", "{env}");
-    assert_eq!(
-        env["error"]["details"]["reason"], "explanation_pending",
-        "{env}"
-    );
-    assert!(rec.take().is_empty(), "门禁命中时不能产生任何副作用：{env}");
-
-    crate::tools::policy::clear_current_request(SESSION);
-    crate::agent::questions::cleanup_request(SESSION, REQUEST);
-}
-
 /// 三个写入路径的 schema 只收两档；`proxy_selected` 已下线。
 #[test]
 fn routing_mode_schemas_only_allow_two_values() {
     let (svc, _rec) = FakeServices::new();
     let all = tools(svc);
     for (name, key) in [
-        ("ConfigCreate", "routing_mode"),
         ("ConfigUpdate", "routing_mode"),
         ("RouteSetMode", "mode"),
     ] {
@@ -1232,37 +1106,22 @@ async fn node_import_text_rejects_unusable_text() {
     assert_eq!(rec.take(), vec!["node_import_text(None,5chars)".to_string()]);
 }
 
-/// 写操作：与 `ConfigCreate` 同档，不能是只读。
+/// 写操作：与 `NodeCreate` 同档，不能是只读。
 #[test]
 fn node_import_text_is_a_write_tool() {
     let (svc, _) = FakeServices::new();
     let all = tools(svc);
     assert_eq!(
         permission_level_of(&all, "NodeImportText"),
-        permission_level_of(&all, "ConfigCreate")
+        permission_level_of(&all, "NodeCreate")
     );
     assert_eq!(permission_level_of(&all, "NodeImportText"), "write");
 }
 
 #[tokio::test]
-async fn config_create_and_node_create_pass_parsed_fields() {
+async fn node_create_passes_parsed_fields() {
     let (svc, rec) = FakeServices::new();
     let all = tools(svc);
-
-    rec.take();
-    let (is_error, env) = run(
-        tool(&all, "ConfigCreate"),
-        json!({
-            "name": "公司",
-            "connect_mode": "tun",
-            "routing_mode": "proxy_all",
-            "node_ids": ["nod_1"]
-        }),
-    )
-    .await;
-    assert!(!is_error, "{env}");
-    assert_eq!(rec.take(), vec!["config_create(name=公司,mode=tun,routing=proxy_all)"]);
-    assert_eq!(env["ok"], true);
 
     rec.take();
     let (is_error, env) = run(
@@ -1287,7 +1146,6 @@ async fn zero_argument_tools_work() {
     let all = tools(svc);
 
     for name in [
-        "ConfigList",
         "RuntimeStatus",
         "RuntimeStop",
         "VpnDisconnect",
@@ -1443,7 +1301,7 @@ async fn service_failure_becomes_a_structured_error_with_next_actions() {
     }
 
     let all = tools(Arc::new(Boom));
-    for name in ["VpnConnect", "ConfigList", "RuntimeStatus", "DiagRun"] {
+    for name in ["VpnConnect", "CatalogSearch", "RuntimeStatus", "DiagRun"] {
         let (is_error, env) = run(tool(&all, name), json!({})).await;
         assert!(is_error, "{name} 服务失败时必须是错误信封，实际 {env}");
         assert!(!env["error"]["code"].as_str().unwrap_or_default().is_empty());

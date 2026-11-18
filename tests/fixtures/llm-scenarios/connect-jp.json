@@ -1,16 +1,13 @@
 {
   "name": "connect-jp",
-  "description": "主流程：用默认节点建配置 → 连接 → 汇报",
+  "description": "主流程：读取全局配置 → 连接 → 汇报（单配置下 AI 不再建配置）",
   "turns": [
     {
       "tool_calls": [
         {
-          "name": "ConfigCreate",
+          "name": "ConfigDetail",
           "arguments": {
-            "name": "默认配置",
-            "connect_mode": "system_proxy",
-            "routing_mode": "proxy_all",
-            "source": "seed"
+            "config_id": "cfg_seed"
           }
         }
       ]

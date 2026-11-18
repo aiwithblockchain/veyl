@@ -1298,37 +1298,6 @@ mod prompt_tests {
         assert!(ai.contains("SetUserRegion"));
     }
 
-    /// 「再建一套配置」是 AI 协助入口的整条流程：跳过环境检测、两问、确认后落库。
-    #[test]
-    fn the_add_another_config_section_is_present() {
-        let text = system_prompt(&[], &crate::rules::Region::Cn, crate::rules::RegionSource::System, &crate::rules::Region::Cn);
-        assert!(text.contains("# 再建一套配置"), "缺少「再建一套配置」一节");
-        for needle in [
-            "不要重新做环境检测",
-            "两问",
-            "怎么接管",
-            "TUN 模式",
-            "Proxy 模式",
-            "节点从哪来",
-            "其它节点",
-            "用户确认之前不调用 `ConfigCreate`",
-            "确认本身用 `AskUserQuestion`",
-            "不要因为已经有一套配置就拒绝",
-            "不要复用旧配置的参数",
-            "Veyl 免费节点（仅供试用）",
-            "NodeImportText",
-            "不要自己解析链接",
-            // 失败路径：最多刷新一次，然后如实说。
-            "最多重试一次",
-            "CatalogRefresh",
-        ] {
-            assert!(text.contains(needle), "「再建一套配置」缺少：{needle}");
-        }
-        // 旧的两问文案已经下线，不能再被渲染出来。
-        assert!(!text.contains("这套配置主要用来做什么"), "旧问题不应再出现");
-        assert!(!text.contains("浏览器上网页"), "旧选项不应再出现");
-    }
-
     /// 布局示例必须是 `layout` 围栏；正文里不能再给裸 JSON 示例（模型会照抄）。
     #[test]
     fn the_layout_example_uses_a_layout_fence() {
@@ -1357,7 +1326,7 @@ mod prompt_tests {
         let tools = crate::tools::vpn_tools(std::sync::Arc::new(NotWiredServices));
         let catalog = capability_catalog(&tools);
         assert!(catalog.lines().count() >= 20, "工具清单太短：\n{catalog}");
-        for needle in ["ConfigCreate", "VpnConnect", "CatalogSearch"] {
+        for needle in ["ConfigUpdate", "VpnConnect", "CatalogSearch"] {
             assert!(catalog.contains(needle), "能力清单里缺少 {needle}");
         }
         // 「有名字没说明」这一类 bug 编译能过、单测能过，只有断言输出才抓得住。
@@ -1371,7 +1340,7 @@ mod prompt_tests {
             );
         }
         let rendered = system_prompt(&tools, &crate::rules::Region::Cn, crate::rules::RegionSource::System, &crate::rules::Region::Cn);
-        assert!(rendered.contains("ConfigCreate"), "占位符没被真实清单替换");
+        assert!(rendered.contains("ConfigUpdate"), "占位符没被真实清单替换");
         assert!(!rendered.contains("{{CAPABILITY_CATALOG}}"));
 
         // AI 代劳升级：能力清单里有工具，安全规则里写死「仅用户明确要求时」。
@@ -1448,11 +1417,8 @@ mod prompt_tests {
             "RuntimeRestart",
             "CoreUpgrade",
             "NodeSwitch",
-            "ConfigList",
             "ConfigDetail",
-            "ConfigCreate",
             "ConfigUpdate",
-            "ConfigDelete",
             "NodeProbe",
             "DiagRun",
             "NetConfigGet",

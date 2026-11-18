@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { ConfigConnectMode, ConfigRouteMode } from "../agent/protocol";
 
 export interface ModeSwitchResult {
@@ -28,6 +29,8 @@ interface Props {
   reportBusy?: boolean;
 }
 
+type Layer = "mode" | "scope";
+
 const ANNOUNCE_MS = 1500;
 
 function modeLabel(mode: ConfigConnectMode): string {
@@ -38,9 +41,26 @@ function scopeLabel(mode: ConfigRouteMode | null): string {
   return mode === "proxy_all" ? "全局" : "智能";
 }
 
+/** 10×10 的展开箭头；展开时瞬时换成 ⌃，不做旋转动画。 */
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <span className="stage-quick__arrow" aria-hidden="true">
+      <svg viewBox="0 0 10 10" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+        <path d={open ? "M2.5 6.5 5 4l2.5 2.5" : "M2.5 3.5 5 6l2.5-2.5"} />
+      </svg>
+    </span>
+  );
+}
+
+/** 菜单关闭且焦点不在助手面板时才响应 Esc。 */
+function escBelongsToAssistant(): boolean {
+  const active = document.activeElement as HTMLElement | null;
+  return Boolean(active?.closest(".ai-panel"));
+}
+
 /**
- * 主按钮下方一行：接管方式 · 流量范围。
- * 纯文字读数形态，点值切到另一个；接管方式会动到当前连接，按后果就地确认。
+ * 主按钮下方的两个入口：接管方式 / 流量范围。
+ * 两步交互：点 chip 只展开选择层，选定后才执行；接管方式的变更再插一道就地确认。
  */
 export function StageQuickToggles({
   connectMode,
@@ -53,6 +73,7 @@ export function StageQuickToggles({
   onReportProblem,
   reportBusy = false,
 }: Props) {
+  const [openLayer, setOpenLayer] = useState<Layer | null>(null);
   const [pending, setPending] = useState<ConfigConnectMode | null>(null);
   const [switching, setSwitching] = useState<ConfigConnectMode | null>(null);
   const [restoring, setRestoring] = useState(false);
@@ -60,6 +81,10 @@ export function StageQuickToggles({
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(
     null,
   );
+  const chipsRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const modeChipRef = useRef<HTMLButtonElement>(null);
+  const scopeChipRef = useRef<HTMLButtonElement>(null);
   const confirmRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const noticeTimer = useRef<number | null>(null);
@@ -77,8 +102,17 @@ export function StageQuickToggles({
     noticeTimer.current = window.setTimeout(() => setNotice(null), ANNOUNCE_MS);
   };
 
+  const closeLayer = (focusChip: boolean) => {
+    const layer = openLayer;
+    setOpenLayer(null);
+    if (!focusChip) return;
+    if (layer === "mode") modeChipRef.current?.focus();
+    else if (layer === "scope") scopeChipRef.current?.focus();
+  };
+
   const commitMode = async (target: ConfigConnectMode) => {
     setPending(null);
+    setOpenLayer(null);
     setNotice(null);
     setSwitching(target);
     setRestoring(false);
@@ -108,9 +142,13 @@ export function StageQuickToggles({
     setNotice({ kind: "error", text });
   };
 
-  const requestMode = (target: ConfigConnectMode) => {
-    if (modeLocked || switching !== null) return;
-    // 切到 Tun 一定会动到接管方式；已连接时切回 Proxy 同样会断线。
+  /** 选定接管方式：当前值只关层；其余先确认（未连接切回 Proxy 不动当前连接，直接切）。 */
+  const selectMode = (target: ConfigConnectMode) => {
+    setOpenLayer(null);
+    if (target === connectMode || modeLocked || switching !== null) {
+      modeChipRef.current?.focus();
+      return;
+    }
     if (target === "tun" || connected) {
       setPending(target);
       return;
@@ -120,6 +158,9 @@ export function StageQuickToggles({
 
   const changeScope = async (next: "direct" | "proxy_all") => {
     if (scopeBusy) return;
+    setOpenLayer(null);
+    // 关层后焦点所在的选项被卸载：把焦点还给 chip，不落到 body。
+    scopeChipRef.current?.focus();
     setNotice(null);
     setScopeBusy(true);
     const result = await onSetRoutingMode(next);
@@ -134,14 +175,50 @@ export function StageQuickToggles({
     }
   };
 
+  const selectScope = (target: "direct" | "proxy_all") => {
+    if (target === (routingMode === "proxy_all" ? "proxy_all" : "direct")) {
+      setOpenLayer(null);
+      scopeChipRef.current?.focus();
+      return;
+    }
+    void changeScope(target);
+  };
+
+  // 选择层：Esc 关闭并还焦点给 chip；点层外关闭；Tab 关闭让焦点继续走。
+  useEffect(() => {
+    if (!openLayer) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (escBelongsToAssistant()) return;
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        closeLayer(true);
+        return;
+      }
+      if (event.key === "Tab") setOpenLayer(null);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (chipsRef.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
+      setOpenLayer(null);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+    };
+    // closeLayer 只依赖 openLayer，随本 effect 一起重建。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openLayer]);
+
   // 确认条：焦点先落在取消；Esc 取消（助手面板内先归助手），点条外取消。
   useEffect(() => {
     if (!pending) return;
     cancelRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      const active = document.activeElement as HTMLElement | null;
-      if (active?.closest(".ai-panel")) return;
+      if (escBelongsToAssistant()) return;
       event.stopPropagation();
       setPending(null);
     };
@@ -157,6 +234,30 @@ export function StageQuickToggles({
     };
   }, [pending]);
 
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Enter" || event.key === " ") {
+      const focused = document.activeElement as HTMLButtonElement | null;
+      if (focused?.getAttribute("role") === "option") {
+        event.preventDefault();
+        focused.click();
+      }
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const rows = Array.from(
+      menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [],
+    );
+    const index = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === "ArrowDown" ? index + 1 : index - 1;
+    rows[Math.max(0, Math.min(rows.length - 1, next))]?.focus();
+  };
+
+  const toggleLayer = (layer: Layer) => {
+    setNotice(null);
+    setOpenLayer((current) => (current === layer ? null : layer));
+  };
+
   const busyText = restoring
     ? "正在恢复…"
     : helperPreparing
@@ -164,48 +265,122 @@ export function StageQuickToggles({
       : switching !== null
         ? `正在切换到 ${modeLabel(switching)}…`
         : null;
-  // 旧数据的 proxy_selected 没有智能/全局二选一（同 TrafficScopeSwitch）：不显示范围按钮。
+  // 旧数据的 proxy_selected 没有智能/全局二选一（同 TrafficScopeSwitch）：不显示范围入口。
   const scopeSwitchable = routingMode === "direct" || routingMode === "proxy_all";
+  const confirming = pending !== null;
+
+  const modeOptions: Array<{ value: ConfigConnectMode; label: string }> = [
+    { value: "system_proxy", label: "Proxy 模式" },
+    { value: "tun", label: "Tun 模式" },
+  ];
+  const scopeOptions: Array<{ value: "direct" | "proxy_all"; label: string }> = [
+    { value: "direct", label: "智能" },
+    { value: "proxy_all", label: "全局" },
+  ];
+  const currentScope: "direct" | "proxy_all" =
+    routingMode === "proxy_all" ? "proxy_all" : "direct";
 
   return (
     <div className="stage-quick">
       {busyText ? (
-        <p className="stage-quick__busy" role="status" aria-live="polite">
+        <p
+          className="stage-quick__busy"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+        >
           {busyText}
         </p>
       ) : (
-        <div className="stage-quick__row">
+        <div className="stage-quick__row" ref={chipsRef}>
           <button
+            ref={modeChipRef}
             type="button"
-            className="stage-quick__value"
-            aria-label={`切换接管方式，当前 ${modeLabel(connectMode)}`}
-            disabled={modeLocked}
-            onClick={() =>
-              requestMode(connectMode === "tun" ? "system_proxy" : "tun")
-            }
+            className={`stage-quick__chip${openLayer === "mode" ? " is-open" : ""}`}
+            aria-haspopup="listbox"
+            aria-expanded={openLayer === "mode"}
+            aria-label={`接管方式，当前 ${modeLabel(connectMode)}`}
+            disabled={modeLocked || confirming}
+            onClick={() => toggleLayer("mode")}
           >
             {modeLabel(connectMode)}
+            <Chevron open={openLayer === "mode"} />
           </button>
           {scopeSwitchable ? (
-            <>
-              <span className="stage-quick__sep" aria-hidden="true">
-                ·
-              </span>
-              <button
-                type="button"
-                className="stage-quick__value"
-                aria-label={`切换流量范围，当前 ${scopeLabel(routingMode)}`}
-                disabled={scopeBusy}
-                onClick={() =>
-                  void changeScope(routingMode === "proxy_all" ? "direct" : "proxy_all")
-                }
-              >
-                {scopeLabel(routingMode)}
-              </button>
-            </>
+            <button
+              ref={scopeChipRef}
+              type="button"
+              className={`stage-quick__chip${openLayer === "scope" ? " is-open" : ""}`}
+              aria-haspopup="listbox"
+              aria-expanded={openLayer === "scope"}
+              aria-label={`流量范围，当前 ${scopeLabel(routingMode)}`}
+              disabled={scopeBusy || confirming}
+              onClick={() => toggleLayer("scope")}
+            >
+              {scopeLabel(routingMode)}
+              <Chevron open={openLayer === "scope"} />
+            </button>
           ) : null}
         </div>
       )}
+
+      {openLayer === "mode" ? (
+        <div
+          className="stage-quick__menu"
+          role="listbox"
+          aria-label="接管方式"
+          ref={menuRef}
+          onKeyDown={onMenuKeyDown}
+        >
+          {modeOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="option"
+              aria-selected={option.value === connectMode}
+              className="stage-quick__option"
+              autoFocus={option.value === connectMode}
+              onClick={() => selectMode(option.value)}
+            >
+              {option.label}
+              {option.value === connectMode ? (
+                <span className="stage-quick__check" aria-hidden="true">
+                  ✓
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {openLayer === "scope" ? (
+        <div
+          className="stage-quick__menu"
+          role="listbox"
+          aria-label="流量范围"
+          ref={menuRef}
+          onKeyDown={onMenuKeyDown}
+        >
+          {scopeOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="option"
+              aria-selected={option.value === currentScope}
+              className="stage-quick__option"
+              autoFocus={option.value === currentScope}
+              onClick={() => selectScope(option.value)}
+            >
+              {option.label}
+              {option.value === currentScope ? (
+                <span className="stage-quick__check" aria-hidden="true">
+                  ✓
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       {pending ? (
         <div className="stage-quick-confirm" ref={confirmRef}>

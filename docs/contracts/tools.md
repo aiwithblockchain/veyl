@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.17.5`
+> 契约版本：`3.18.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.17.5`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.18.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.17.5";
+  contract_version: "3.18.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -120,10 +120,10 @@ type NextAction = {
 | 工具 | 行为 | 风险 |
 |---|---|---|
 | `VpnConnect` | 直接修改系统代理 / 路由 | 无拦截点 |
-| `ConfigDelete` | 直接删除一套配置（含其节点关系与问题记录） | 无拦截点 |
+| `ConfigDelete` | ~~直接删除一套配置~~ | **3.18.0 已移出工具集**，见 §4.17 |
 | `RouteSetMode` | 跨家族切换会断开并重连（需显式确认） | 会短暂断网 |
 
-**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigList`、`ConfigDetail`、`NodeProbe`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`CategoryList`、`RulesStatus`、`OpenSettings`、`MyServers`、`MyServerFailure`、`CatalogOptions`）在 `PermissionMode::Default` 下直接允许；其余工具由 Host 的 `PermissionHandler` 一律返回 `Allow`。
+**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigDetail`、`NodeProbe`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`CategoryList`、`RulesStatus`、`OpenSettings`、`MyServers`、`MyServerFailure`、`CatalogOptions`）在 `PermissionMode::Default` 下直接允许；其余工具由 Host 的 `PermissionHandler` 一律返回 `Allow`。
 
 不再存在的东西：
 
@@ -140,12 +140,12 @@ type NextAction = {
 去掉拦截点后，以下情况没有任何保护：
 
 1. **模型误判**：Agent 把「看看现在什么状态」理解成「连上节点」，`VpnConnect` 会直接改系统代理，用户来不及阻止。
-2. **参数误传**：模型构造的 `node_id` / `config_id` 有误时，`ConfigDelete` 会直接删掉一套配置，没有确认步骤。
+2. **参数误传**：模型构造的 `node_id` / `config_id` 有误时，动作可能落到错误的节点上。`ConfigDelete` 这条路径已在 3.18.0 随工具一起移除。
 3. **误触**：UI 上的删除按钮点错，立即生效，没有「确定要删除吗」。
 4. **下载执行**：`CoreInstall` 直接下载并运行一个来自网络的二进制。虽然有 SHA256 校验与签名清单，但那防的是「内容被篡改」，不防「Agent 决定装了一个用户没想要的版本」。
    - **3.4.0 已消解**：`CoreInstall` 移出工具集，下载/升级/回滚只能由用户在设置页显式触发（`commands.md` §7.10）。模型不再有这条路径。
 
-P1 的定位是「早期内测、使用者是开发者本人」，这些风险在可接受范围内。**对外发布前需要重新评估**——尤其是 `ConfigDelete`。
+P1 的定位是「早期内测、使用者是开发者本人」，这些风险在可接受范围内。**对外发布前需要重新评估**——`ConfigDelete` 已于 3.18.0 移除，剩下最重的是 `VpnConnect` 与 `NetRepair`。
 
 ### 2.2 调用来源校验
 
@@ -202,7 +202,6 @@ type CallSource = "ui" | "agent";
 | `NodeSwitch` | `{ "config_id": "cfg_1a2b", "node_id": "nod_3c4d" }` | `{ "config_id": "cfg_1a2b", "node_id": "nod_3c4d" }` |
 | `DeepseekSaveKey` | `{ "key": "sk-abc…" }` | **省略**（唯一字段被打码） |
 | `CatalogSearch` | `{ "region": "jp", "limit": 10 }` | `{ "region": "jp", "limit": 10 }` |
-| `ConfigDelete` | `{ "config_id": "cfg_1a2b" }` | `{ "config_id": "cfg_1a2b" }` |
 | `NodeCreate` | `{ "name": "洛杉矶", "server": "203.0.113.7", "port": 8388, "method": "aes-256-gcm", "password": "…" }` | 其余字段展示，`password` 显示为 `"***"` |
 
 其他要求：
@@ -247,7 +246,7 @@ type CallSource = "ui" | "agent";
 
 ```ts
 // src/components/toolDisplay.ts（设计文档里也称 TOOL_DISPLAY）
-export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 42 个工具名完全相等
+export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 39 个工具名完全相等
 ```
 
 进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 42 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
@@ -278,44 +277,41 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 6 | `CoreListVersions` | `CoreListVersionsTool` | 已安装/可安装版本 | `ReadOnly` | 只读 |
 | 7 | `CoreUpgrade` | `CoreUpgradeTool` | 检查并安装运行时更新（有确认点） | `Execute` | 高 |
 | 8 | `CatalogSearch` | `CatalogSearchTool` | 查询**远端**节点目录（不含本地导入） | `ReadOnly` | 只读 |
-| 9 | `ConfigList` | `ConfigListTool` | 列**本地**全部配置 | `ReadOnly` | 只读 |
-| 10 | `ConfigDetail` | `ConfigDetailTool` | 一套配置的节点集、DNS、布局 | `ReadOnly` | 只读 |
-| 11 | `ConfigCreate` | `ConfigCreateTool` | 新建一套配置（免费节点 / 指定节点，必须有来源） | `Write` | 中 |
-| 12 | `ConfigUpdate` | `ConfigUpdateTool` | 编辑配置（名称 / 分流 / DNS / 节点集） | `Write` | 中 |
-| 13 | `ConfigDelete` | `ConfigDeleteTool` | 删除一套配置 | `Write` | 中 |
-| 14 | `NodeImportUrl` | `NodeImportUrlTool` | 从订阅 URL 解析并导入节点 | `Write` | 中 |
-| 15 | `NodeImportText` | `NodeImportTextTool` | 解析用户粘贴的 `ss://`（不联网） | `Write` | 中 |
-| 16 | `NodeCreate` | `NodeCreateTool` | 手动创建一个节点 | `Write` | 中 |
-| 17 | `NodeSwitch` | `NodeSwitchTool` | 切换某套配置的当前节点 | `Execute` | 中 |
-| 18 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `ReadOnly` | 只读 |
-| 19 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 / TUN | `Execute` | 高 |
-| 20 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
-| 21 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
-| 22 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
-| 23 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
-| 24 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
-| 25 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
-| 26 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口 | `ReadOnly` | 只读 |
-| 27 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
-| 28 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
-| 29 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
-| 30 | `RouteGet` | `RouteGetTool` | 分流模式、目标、自定义规则、生效状态 | `ReadOnly` | 只读 |
-| 31 | `RouteSetMode` | `RouteSetModeTool` | 切换分流模式（A↔B 热切） | `Execute` | 中 |
-| 32 | `RouteTargetsSet` | `RouteTargetsSetTool` | 设置「指定服务」分类集合 | `Write` | 中 |
-| 33 | `CategoryList` | `CategoryListTool` | 分类目录（I1） | `ReadOnly` | 只读 |
-| 34 | `RulesStatus` | `RulesStatusTool` | 规则数据版本与新鲜度 | `ReadOnly` | 只读 |
-| 35 | `IssueReport` | `IssueReportTool` | 生成问题报告文件夹（两阶段，仅写固定目录） | `Write` | 低（只写桌面报告目录） |
-| 36 | `SetUserRegion` | `SetUserRegionTool` | 记录用户所在地区（AI 唯一写入路径） | `Write` | 低（只写本地设置） |
-| 37 | `MyServers` | `MyServersTool` | 我的服务器列表与状态（只读） | `ReadOnly` | 只读 |
-| 38 | `ConfigSetMode` | `ConfigSetModeTool` | 在线切换接管方式（全部软件 ↔ 本机代理，**会断开重连**） | `Execute` | 高 |
-| 39 | `OpenSettings` | `OpenSettingsTool` | 打开设置并指向某段/某行（**不改值**） | `ReadOnly` | 只读 |
-| 40 | `MyServerFailure` | `MyServerFailureTool` | 某台服务器创建失败的详情与订单事件 | `ReadOnly` | 只读 |
-| 41 | `StageSelect` | `StageSelectTool` | 把地区/规格选进新建节点舞台（**只改界面选择**） | `Write` | 低（不建机、不扣费） |
-| 42 | `CatalogOptions` | `CatalogOptionsTool` | 建机目录：地区与套餐的 id / 名称 / 日价（只读） | `ReadOnly` | 只读 |
+| 9 | `ConfigDetail` | `ConfigDetailTool` | 一套配置的节点集、DNS、布局 | `ReadOnly` | 只读 |
+| 10 | `ConfigUpdate` | `ConfigUpdateTool` | 编辑配置（名称 / 分流 / DNS / 节点集） | `Write` | 中 |
+| 11 | `NodeImportUrl` | `NodeImportUrlTool` | 从订阅 URL 解析并导入节点 | `Write` | 中 |
+| 12 | `NodeImportText` | `NodeImportTextTool` | 解析用户粘贴的 `ss://`（不联网） | `Write` | 中 |
+| 13 | `NodeCreate` | `NodeCreateTool` | 手动创建一个节点 | `Write` | 中 |
+| 14 | `NodeSwitch` | `NodeSwitchTool` | 切换某套配置的当前节点 | `Execute` | 中 |
+| 15 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `ReadOnly` | 只读 |
+| 16 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 / TUN | `Execute` | 高 |
+| 17 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
+| 18 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
+| 19 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
+| 20 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
+| 21 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
+| 22 | `AskUserQuestion` | （Claurst 内置） | 向用户提问 | `None` | 低 |
+| 23 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口 | `ReadOnly` | 只读 |
+| 24 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
+| 25 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
+| 26 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
+| 27 | `RouteGet` | `RouteGetTool` | 分流模式、目标、自定义规则、生效状态 | `ReadOnly` | 只读 |
+| 28 | `RouteSetMode` | `RouteSetModeTool` | 切换分流模式（A↔B 热切） | `Execute` | 中 |
+| 29 | `RouteTargetsSet` | `RouteTargetsSetTool` | 设置「指定服务」分类集合 | `Write` | 中 |
+| 30 | `CategoryList` | `CategoryListTool` | 分类目录（I1） | `ReadOnly` | 只读 |
+| 31 | `RulesStatus` | `RulesStatusTool` | 规则数据版本与新鲜度 | `ReadOnly` | 只读 |
+| 32 | `IssueReport` | `IssueReportTool` | 生成问题报告文件夹（两阶段，仅写固定目录） | `Write` | 低（只写桌面报告目录） |
+| 33 | `SetUserRegion` | `SetUserRegionTool` | 记录用户所在地区（AI 唯一写入路径） | `Write` | 低（只写本地设置） |
+| 34 | `MyServers` | `MyServersTool` | 我的服务器列表与状态（只读） | `ReadOnly` | 只读 |
+| 35 | `ConfigSetMode` | `ConfigSetModeTool` | 在线切换接管方式（全部软件 ↔ 本机代理，**会断开重连**） | `Execute` | 高 |
+| 36 | `OpenSettings` | `OpenSettingsTool` | 打开设置并指向某段/某行（**不改值**） | `ReadOnly` | 只读 |
+| 37 | `MyServerFailure` | `MyServerFailureTool` | 某台服务器创建失败的详情与订单事件 | `ReadOnly` | 只读 |
+| 38 | `StageSelect` | `StageSelectTool` | 把地区/规格选进新建节点舞台（**只改界面选择**） | `Write` | 低（不建机、不扣费） |
+| 39 | `CatalogOptions` | `CatalogOptionsTool` | 建机目录：地区与套餐的 id / 名称 / 日价（只读） | `ReadOnly` | 只读 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
-**破坏性工具（destructive）**：`CoreUpgrade`（下载并安装运行时，**有确认点**，见 §4.45）、`ConfigSetMode`（**有确认点**，会断开重连，见 §4.49）、`ConfigDelete`、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。除 `CoreUpgrade` / `ConfigSetMode` 外均无确认点，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0 从工具集移除，见 §4.7。
+**破坏性工具（destructive）**：`CoreUpgrade`（下载并安装运行时，**有确认点**，见 §4.45）、`ConfigSetMode`（**有确认点**，会断开重连，见 §4.49）、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。除 `CoreUpgrade` / `ConfigSetMode` 外均无确认点，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0、`ConfigDelete` 已在 3.18.0 从工具集移除，见 §4.7 / §4.17。
 
 **UI 专用命令不注册工具**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`（`commands.md` §7.10）与 `tun_helper_info` / `tun_helper_restart`（§7.8.1–§7.8.2）、`trial_status`（§7.19）。**`core_upgrade` 是例外**：模型只能经 `CoreUpgrade` 工具调用，且必须由用户逐字确认（§4.45）；确认卡由 Host 生成，模型无法伪造。
 
@@ -334,11 +330,8 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(CoreUpgradeTool::new(installer.clone())),
     Box::new(CatalogSearchTool::new(catalog.clone())),
     // 2.0：配置与节点
-    Box::new(ConfigListTool::new(store.clone())),
     Box::new(ConfigDetailTool::new(store.clone())),
-    Box::new(ConfigCreateTool::new(store.clone(), seed.clone())),
     Box::new(ConfigUpdateTool::new(store.clone())),
-    Box::new(ConfigDeleteTool::new(store.clone())),
     Box::new(NodeImportUrlTool::new(store.clone(), secrets.clone())),
     Box::new(NodeImportTextTool::new(store.clone(), secrets.clone())),
     Box::new(NodeCreateTool::new(store.clone(), secrets.clone())),
@@ -418,7 +411,7 @@ P1 移除审批后，`VpnConnect` 直接执行：它会修改系统代理，不�
 
 | 当前状态 | 建议动作 |
 |---|---|
-| `idle` | `VpnConnect`（若已有配置）/ `ConfigCreate` |
+| `idle` | `VpnConnect`（池里已有节点时）/ `NodeImportUrl` / `NodeCreate`（空池时） |
 | `running` | `VpnDisconnect` |
 | `failed` | `DiagRun` |
 | `starting` / `restarting` / `stopping` | 空 |
@@ -444,7 +437,7 @@ P1 移除审批后，`VpnConnect` 直接执行：它会修改系统代理，不�
 - **没有 `mode` 参数**：代理还是 TUN 由配置的 `connection_mode` 决定，不由调用方临时指定。
 - 与 `VpnConnect` 的区别：本工具只起进程，**不设置系统代理**。要用户可用请用 `VpnConnect`。
 - 已有连接在跑（已连接或正在启动）、指定另一套配置 → **先停旧连接再启动**（`runtime_start` 自动收口）；不再报 `other_config_running`，也不需要调用方先断开。
-- 切配置本身不改连接：`ConfigActivate` 只改 active，不重连（`commands.md` §3.5 2.20.0）。
+- 单配置下没有「切配置」：`ConfigActivate` 已无工具入口。
 
 `data`：
 
@@ -624,7 +617,7 @@ type CatalogSearchData = {
 
 **数据源：只有远端目录。** 本工具查的是服务端下发的 catalog，**不包含用户本地保存的节点与配置**。
 
-这条边界必须写进工具描述，因为它被实测踩过：模型只调 `CatalogSearch`，用户自己导入的节点因此完全不可见，模型回答「没有这个节点」。用户用名称指代「我自己导入的那个」时，应改用 `ConfigList` / `ConfigDetail` 在本地匹配。
+这条边界必须写进工具描述，因为它被实测踩过：模型只调 `CatalogSearch`，用户自己导入的节点因此完全不可见，模型回答「没有这个节点」。用户用名称指代「我自己导入的那个」时，应改用 `ConfigDetail` 在本地匹配（`ConfigList` 已于 3.18.0 退出工具集）。
 
 错误：`CATALOG_UNAVAILABLE`、`RATE_LIMITED`、`DEVICE_TOKEN_INVALID`。
 
@@ -632,20 +625,13 @@ type CatalogSearchData = {
 
 ---
 
-### 4.9 `ConfigList`
+### 4.9 `ConfigList`（已删除，3.18.0）
 
-```json
-{ "type": "object", "properties": {}, "additionalProperties": false }
-```
+`ConfigList` 从 AI 工具集移除，**不保留别名**。全局只有一套配置（`commands.md` §3.1），列配置没有意义。
 
-`data`：`ConfigListData`（`commands.md` §3.1）。
-
-- 数据源只有本地库，**不联网**；空列表是合法状态。
-- 排序为 `last_used_at DESC NULLS LAST` → `created_at ASC`，与 UI 左栏一致，模型不需要再排。
-- 用户用名称指代一套配置时，先 `ConfigList` 匹配名称拿到 `config_id`，再 `ConfigDetail` 或 `VpnConnect({ config_id })`；**不要凭名称猜 id**。
-- 不含节点明细与任何凭据；要节点走 `ConfigDetail`。
-
-`CatalogSearch` 与 `ConfigList` 数据源不同：前者只查远端目录，后者只列本地。用户说的「我的配置」永远在后者里。
+- 模型要读配置与节点池：用 `ConfigDetail`（需要 id 时从用户上下文或 `MyServers` 侧推断，不再有列表工具）。
+- UI 仍用命令 `config_list` 读回那一条（`commands.md` §3.1）。
+- 本节保留空壳章节，避免后续章节编号与旧引用错位。
 
 ---
 
@@ -697,7 +683,7 @@ type CatalogSearchData = {
 - 整段都解析不出节点 → `INVALID_ARGUMENT / not_node_text`，`content` 说明「粘贴的内容里没有可用的节点」。
 - `config_id` 省略时只进节点池；带 `config_id` 时按顺序追加并触发 `config-changed`。
 - 密码只进 `secrets.enc`；返回值与日志永不含密码，也不回显粘贴内容。
-- **写操作**：`PermissionLevel::Write`，与 `ConfigCreate` 同档，必须走工具调用与展示链路，不能静默建节点。
+- **写操作**：`PermissionLevel::Write`，与 `NodeCreate` 同档，必须走工具调用与展示链路，不能静默建节点。
 
 错误：`INVALID_ARGUMENT`（`not_node_text`）、`NOT_FOUND`、`SECRET_STORE`。
 
@@ -865,7 +851,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.17.5";
+  contract_version: "3.18.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1028,7 +1014,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.17.5";
+  contract_version: "3.18.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1047,32 +1033,12 @@ type Job = {
 
 ---
 
-### 4.17 `ConfigDelete`
+### 4.17 `ConfigDelete`（已删除，3.18.0）
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "config_id": { "type": "string" }
-  },
-  "required": ["config_id"],
-  "additionalProperties": false
-}
-```
+`ConfigDelete` 从 AI 工具集移除，**不保留别名**。全局配置是节点池与连接参数的唯一载体，不能删（命令层恒 `PRECONDITION_FAILED / only_config`）；不需要的节点用 `ConfigUpdate.nodeIds` 或界面从池里移除。
 
-`data`：`ConfigDeleteData`（`commands.md` §3.4）。
-
-- **幂等**：配置不存在 → `ok: true`，`deleted: false`，`already_absent: true`。
-- **正在连接的配置不能删**：`PRECONDITION_FAILED`，`details.reason = "connected"`。Host 不替用户断网；模型应先用 `VpnDisconnect`，或换一套配置。
-- **active 但未连接时可以删**：删除后 `active_config_id = null`，回到空态。这是「不设不可删除特例」的直接结果（`docs/configs-and-nav.md` §2.1）。
-- 级联删除该配置的节点关系、布局与**配置范围内的问题记录**；节点本身留在共享池里，不删。
-- 删除前**不做**任何磁盘清理之外的动作；错误码看 `error.code`，具体原因看 `error.details.reason`。
-
-> 2.0 之前这里叫 `ProfileDelete`，且不允许删除 active。那条规则属于单节点模型：active 就是唯一配置，删了就没有任何东西可用。新模型允许空态，空态本身有「新建配置」的出口。
-
-无确认点：`PermissionLevel = Write`，直接执行。见 §2.1.1 的风险记录。
-
-错误：`PRECONDITION_FAILED`（`connected`）、`INVALID_ARGUMENT`（`config_id` 为空）、`INTERNAL`。
+- 旧行为（多配置时代允许删配置）见 3.17.x 及更早的变更记录，仅供回滚对照。
+- 本节保留空壳章节，避免后续章节编号与旧引用错位。
 
 ---
 
@@ -1293,6 +1259,13 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 
 ### 4.24 `ConfigCreate`
 
+**已删除（3.18.0）。** `ConfigCreate` 从 AI 工具集移除，**不保留别名**。全局只有一套配置，由服务层懒创建（`commands.md` §3.1 / §4.0）；模型不再有新建配置的路径。
+
+- 加节点：`NodeCreate` / `NodeImportUrl` / `NodeImportText`，省略 `config_id` 即绑定全局配置（`commands.md` §4.0–§4.2）。
+- 改连接参数：`ConfigUpdate`；改接管方式：`ConfigSetMode`。
+- 旧规则随之移到命令层：`source = "seed"` 的新建 **`current_node_id` 留空**、界面预选不写库，连接时先 `NodeSwitch` 再 `RuntimeStart`（`commands.md` §3.2；`NodeAttach` 永不改当前节点）。
+- 历史 schema（仅供回滚对照，**模型不可见**）：
+
 ```json
 {
   "type": "object",
@@ -1312,26 +1285,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 }
 ```
 
-`data`：`ConfigDetail`。
-
-- **节点来源必填**：`source` 或非空 `node_ids` 必须给一个。都缺、`source = "empty"`、`node_ids = []` 一律
-  `INVALID_ARGUMENT / source_required`，不落到服务层。**AI 不允许创建空配置**；界面同样不再提供这条路径。
-- `source = "seed"` 绑定**当前免费节点的全部节点**；种子为空 → `PRECONDITION_FAILED / seed_unavailable`。与 `node_ids` 互斥。
-- `routing_mode` **只有 `direct` / `proxy_all` 两档**：`"proxy_selected"` → `INVALID_ARGUMENT / routing_mode_not_supported`；
-  其它未知值 → `INVALID_ARGUMENT / invalid_routing_mode`（两种原因不能混）。
-- `targets` **已废弃**：写入路径不再接受 `proxy_selected`，本参数不产生任何效果。
-- **不接受 `listen_port`**：本地代理端口是用户设置（`commands.md` §7.11），不在配置里；带上该字段会被 schema 拒绝（`additionalProperties: false`）。
-- **`source = "seed"` 的新建不设当前节点**：`current_node_id` 留空（`commands.md` §3.2），最快的那台由界面预选、**预选不写库**；连接时由界面先 `NodeSwitch` 再 `RuntimeStart`。模型不得在 `ConfigCreate` 之后自己补一次 `NodeSwitch` 或 `VpnConnect`。
-- **连接方式不给默认值**：`system_proxy` 与 `tun` 是两种接管方式，模型必须显式选。
-- **解释门禁**：本请求里用户刚点过或打过 `解释这个设置的含义`、还没有做任何真实选择时，
-  `ConfigCreate` → `PRECONDITION_FAILED`，`details.reason = "explanation_pending"`。
-  模型**不得重试或换参数绕过**：把原问题（或确认问题）逐字重问，等用户真正选完再建。
-  用户做出任何其它回答即离开解释状态。
-- 未连接时新建的配置会自动成为 active；已连接时不自动切换（与 `commands.md` §3.2 一致）。
-
-`next_actions`：创建成功后给出 `VpnConnect`（一级/二级）或 `NetConfigGet`（三级，读本机代理端口）。
-
-错误：`INVALID_ARGUMENT`（`source_required` / `routing_mode_not_supported` / `invalid_routing_mode`）、`CONFLICT`（`duplicate_name`）、`NOT_FOUND`、`PRECONDITION_FAILED`（`seed_unavailable` / `explanation_pending`）、`UNSUPPORTED`。
+- 本节保留空壳章节，避免后续章节编号与旧引用错位。
 
 ---
 
@@ -2042,26 +1996,25 @@ type CatalogOptionsData = {
 ### 5.1 标准连接链路
 
 ```
-用 Veyl 免费节点：ConfigCreate(source = "seed") → VpnConnect
-其它节点：      NodeImportUrl / NodeCreate → ConfigCreate(node_ids) → VpnConnect
+用 Veyl 免费节点：DefaultProfileStatus（空时 CatalogRefresh）→ NodeImportUrl / NodeCreate（省略 config_id，自动绑进全局配置）→ VpnConnect
+其它节点：      NodeImportUrl / NodeCreate（自动绑定）→ VpnConnect
 换节点：        NodeSwitch
-换一套方案：    ConfigCreate → ConfigActivate（UI）/ VpnConnect({ config_id })
 ```
 
-> **「链路」不等于「自动执行」**：免费节点首次加入（`ConfigCreate(source = "seed")`）之后，**UI 与模型都不得自动 `VpnConnect` 或 `NodeSwitch`**——测速完停在 `未连接`，由用户自己点「连接」（`ai-first-product.md` §选中免费节点之后）；**「设为当前节点」只能发生在用户点「连接」的那一刻**。模型也不得把这条链路当成一次性脚本从头跑到尾；每一步都要对应用户当轮的明确意图。
+> **「链路」不等于「自动执行」**：免费节点首次加入之后，**UI 与模型都不得自动 `VpnConnect` 或 `NodeSwitch`**——测速完停在 `未连接`，由用户自己点「连接」（`ai-first-product.md` §选中免费节点之后）；**「设为当前节点」只能发生在用户点「连接」的那一刻**。模型也不得把这条链路当成一次性脚本从头跑到尾；每一步都要对应用户当轮的明确意图。
 
-`VpnConnect` **不隐式安装或下载运行时**：静默下载会让用户不知道自己的机器上多了一个二进制。也不隐式创建配置——没有配置时报 `no_config`，由 AI 新建流程的第二问询问节点来源（首启两问见 `resources/prompts/zh/first-run.md`）。
+`VpnConnect` **不隐式安装或下载运行时**：静默下载会让用户不知道自己的机器上多了一个二进制。也不隐式建节点——池里没有节点时报 `no_nodes`，由模型引导用户加节点（`NodeImportUrl` / `NodeCreate`）或刷新免费节点。全局配置由服务层在第一次绑定节点时懒创建，模型不参与。
 
 ### 5.2 幂等矩阵
 
 | 工具 | 重复调用行为 |
 |---|---|
-| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ConfigList` / `ConfigDetail` / `NodeProbe` / `JobGet` / `OpenSettings` / `MyServers` / `MyServerFailure` | 纯读取，天然幂等 |
+| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ConfigDetail` / `NodeProbe` / `JobGet` / `OpenSettings` / `MyServers` / `MyServerFailure` | 纯读取，天然幂等 |
 | `RuntimeStart` | 已 `running` 且目标一致 → `ok: true`，`already_running: true` |
 | `RuntimeStop` / `VpnDisconnect` | 已 `idle` → `ok: true` |
-| `ConfigCreate` | **不幂等**：同名 → `CONFLICT / duplicate_name` |
+| ~~`ConfigCreate`~~ | **3.18.0 起无此工具**；全局配置由服务层懒创建（`commands.md` §3.1） |
 | `ConfigUpdate` | 参数与现状一致 → `ok: true`，不发事件 |
-| `ConfigDelete` | 已不存在 → `ok: true`，`deleted: false`，`already_absent: true`；**正在连接 → `PRECONDITION_FAILED`** |
+| ~~`ConfigDelete`~~ | **3.18.0 起无此工具**；全局配置不可删（命令层 `only_config`） |
 | `RouteSetMode` | 目标模式与当前一致 → `ok: true`，不发事件 |
 | `SetUserRegion` | 地区与当前 `user_region` 一致 → `ok: true`，不发事件 |
 | `RouteTargetsSet` | 集合与现状一致 → `ok: true`，`route_revision` 不变 |
@@ -2116,8 +2069,8 @@ type CatalogOptionsData = {
 | 结构化信封放哪 | `metadata.aivpn`；模型只读 `content` | §1 |
 | `CoreInstall` 是否需要审批 | ~~恒需审批~~ → **已移除审批，直接执行**（2026-11-02 用户决定）；**3.4.0 起该工具本身已移除**，改为 UI 专用 `core_*` 命令 | §2.1、§4.7 |
 | `VpnConnect` 入参 | 只有 `config_id`（省略用 active）；节点由 `NodeSwitch` 决定 | §4.11 |
-| 配置 / 节点 / 问题工具的保留 | 全部保留并新增；`ProfileList` → `ConfigList`，`ProfileImport` → `NodeImportUrl`，`ProfileDelete` → `ConfigDelete` | §3 表 |
-| `ConfigDelete` 是否允许删 active | **允许**（未连接时），删后回到空态；只拦「正在连接」 | §4.17 |
+| 配置 / 节点 / 问题工具的保留 | ~~全部保留~~ → **3.18.0 起配置类工具退出**：`ConfigList` / `ConfigCreate` / `ConfigDelete` 删除，`ConfigDetail` / `ConfigUpdate` / `ConfigSetMode` 保留；节点与问题工具不变 | §3 表 |
+| `ConfigDelete` 是否允许删 active | ~~允许~~ → **3.18.0 起全局配置不可删**（`commands.md` §3.4） | §4.17 |
 | `VpnConnect` 审批粒度 | ~~会话内首次~~ → **已移除审批，直接执行** | §2.1、§3.2 |
 | `DeepseekSaveKey` 的 `ok` 语义 | **存储成功即 `ok: true`**；Key 有效性用 `data.validation` 表达，且 **`validation` 只回答 Key 是否有效**——余额不足归 `validation = "ok"` + `validation_detail = "insufficient_balance"` | §4.15 |
 | `next_actions` 点击语义 | 等价于用户发一条消息给 Agent，**不由 UI 直接执行** | §1.3 |
@@ -2133,6 +2086,13 @@ type CatalogOptionsData = {
 ---
 
 ## 8. 变更记录
+
+### 3.18.0（2026-11-17，配置类工具退出 AI 工具集）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.18.0`；`ConfigList` / `ConfigCreate` / `ConfigDelete` 从 §3 工具总表与 §3.1 注册清单删除（`ConfigActivate` 本就无工具入口），工具总数 42 → 39；保留空壳章节 §4.9 / §4.17 / §4.24 避免编号错位 | 删除工具 | 全局单配置（`global-config-merge.md`）；PM 与后端对齐 |
+| 2 | 模型不再有「列配置 / 新建配置 / 删配置」的路径；加节点走 `NodeCreate` / `NodeImportUrl` / `NodeImportText`，绑定由服务层完成；读唯一配置用 `ConfigDetail` | 语义收紧 | 同上 |
 
 ### 3.17.5（2026-11-17，接管方式用词统一）
 

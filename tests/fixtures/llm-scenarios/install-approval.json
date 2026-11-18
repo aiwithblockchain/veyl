@@ -1,6 +1,6 @@
 {
   "name": "install-approval",
-  "description": "运行时随包可用（安装审批已取消，CoreInstall 已从工具集移除）：查询版本后完成连接",
+  "description": "运行时随包可用（安装审批已取消，CoreInstall 已从工具集移除）：查询版本、读取全局配置后完成连接",
   "turns": [
     {
       "tool_calls": [
@@ -13,12 +13,9 @@
     {
       "tool_calls": [
         {
-          "name": "ConfigCreate",
+          "name": "ConfigDetail",
           "arguments": {
-            "name": "默认配置",
-            "connect_mode": "system_proxy",
-            "routing_mode": "proxy_all",
-            "source": "seed"
+            "config_id": "cfg_seed"
           }
         }
       ]

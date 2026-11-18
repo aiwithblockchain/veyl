@@ -256,7 +256,7 @@ describe("添加节点", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
 
     await waitFor(() =>
-      expect(bridge.nodeImportText).toHaveBeenCalledWith("ss://abc\nss://def", "cfg_1"),
+      expect(bridge.nodeImportText).toHaveBeenCalledWith("ss://abc\nss://def"),
     );
     await waitFor(() =>
       expect(onNotice).toHaveBeenCalledWith({
@@ -282,7 +282,6 @@ describe("添加节点", () => {
     await waitFor(() =>
       expect(bridge.nodeImportUrl).toHaveBeenCalledWith(
         "https://sub.example/nodes",
-        "cfg_1",
       ),
     );
     await waitFor(() =>
@@ -310,7 +309,6 @@ describe("添加节点", () => {
     await waitFor(() =>
       expect(bridge.nodeImportFile).toHaveBeenCalledWith(
         "/Users/me/nodes.txt",
-        "cfg_1",
       ),
     );
     await waitFor(() =>
@@ -360,28 +358,32 @@ describe("添加节点", () => {
     expect(bridge.nodeImportUrl).not.toHaveBeenCalled();
   });
 
-  it("没有当前配置时禁用导入并说明先在左侧新建", async () => {
+  it("没有全局配置也能导入：省略 configId，交给 Host 懒创建", async () => {
     const bridge = makeBridge();
     renderSettings(bridge, { connectMode: "system_proxy", configId: null });
     const dialog = await openAddDialog();
     expect(
-      within(dialog).getByText("先在左侧新建一套配置，再添加节点。"),
-    ).toBeTruthy();
+      within(dialog).queryByText("先在左侧新建一套配置，再添加节点。"),
+    ).toBeNull();
 
     fireEvent.change(
       within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
       { target: { value: "ss://abc" } },
     );
-    expect(
-      (within(dialog).getByRole("button", { name: "添加" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
+    const add = within(dialog).getByRole("button", {
+      name: "添加",
+    }) as HTMLButtonElement;
+    expect(add.disabled).toBe(false);
     expect(
       (
         within(dialog).getByRole("button", { name: "从文件导入" }) as HTMLButtonElement
       ).disabled,
-    ).toBe(true);
-    expect(bridge.nodeImportText).not.toHaveBeenCalled();
+    ).toBe(false);
+
+    fireEvent.click(add);
+    await waitFor(() =>
+      expect(bridge.nodeImportText).toHaveBeenCalledWith("ss://abc"),
+    );
   });
 });
 

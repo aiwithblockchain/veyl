@@ -1180,3 +1180,46 @@ describe("过渡状态在请求结束时必须收敛", () => {
     expect(result.current.connection).toBe("idle");
   });
 });
+
+describe("全局节点池 attachNodes（mock）", () => {
+  it("池空时懒创建默认配置；重复附加种子是幂等的", async () => {
+    const bridge = makeStartBridge("system_proxy");
+    const { result } = renderHook(() => useVpnSession(bridge, true));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let first!: ActionResult;
+    await act(async () => {
+      first = await result.current.attachNodes({ source: "seed" });
+    });
+
+    expect(first.ok).toBe(true);
+    expect(first.configId).toBeTruthy();
+    expect(result.current.configs).toHaveLength(1);
+    expect(result.current.activeConfig?.name).toBe("默认配置");
+    expect(result.current.activeConfig?.node_count).toBe(2);
+    // attach 不改当前节点，等用户点连接或显式切节点。
+    expect(result.current.activeConfig?.current_node_id).toBeNull();
+
+    await act(async () => {
+      await result.current.attachNodes({ source: "seed" });
+    });
+
+    expect(result.current.configs).toHaveLength(1);
+    expect(result.current.activeConfig?.node_count).toBe(2);
+  });
+
+  it("既没 source 也没 nodeIds：说明缺来源，不改池子", async () => {
+    const bridge = makeStartBridge("system_proxy");
+    const { result } = renderHook(() => useVpnSession(bridge, true));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let res!: ActionResult;
+    await act(async () => {
+      res = await result.current.attachNodes({});
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("source_required");
+    expect(result.current.configs).toHaveLength(0);
+  });
+});

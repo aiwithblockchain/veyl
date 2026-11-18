@@ -7,6 +7,8 @@ import type {
   ConfigRouteMode,
   ConfigSummary,
   NodeCreateInput,
+  NodeAttachInput,
+  NodeAttachResult,
   NodeImportResult,
   NodeImportSkipped,
   NodeProbeData,
@@ -21,7 +23,7 @@ import type {
   TrialStatusData,
 } from "./protocol";
 
-export type { TrialStatusData } from "./protocol";
+export type { NodeAttachInput, NodeAttachResult, TrialStatusData } from "./protocol";
 
 export type BridgeMode = "tauri" | "mock";
 
@@ -788,6 +790,8 @@ export interface AgentBridge {
   nodeProbeSnapshot(configId?: string): Promise<NodeProbeSnapshotData>;
   /** 手动建一个 Shadowsocks 节点；不自动连接。 */
   nodeCreate(input: NodeCreateInput): Promise<NodeSummary>;
+  /** 把已存在的节点绑进全局配置；池子为空时由 Host 懒创建。 */
+  nodeAttach(input: NodeAttachInput): Promise<NodeAttachResult>;
   /** 从订阅地址导入节点；只接受 https，拉取失败整体失败。 */
   nodeImportUrl(url: string, configId?: string): Promise<NodeImportResult>;
   /** 导入用户粘贴的 ss:// 文本；不发网络请求。 */

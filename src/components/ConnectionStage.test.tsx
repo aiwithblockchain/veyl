@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ConfigConnectMode,
@@ -132,6 +132,7 @@ interface StageOverrides {
   onSwitchNode?: (nodeId: string) => Promise<{ ok: boolean; message?: string }>;
   preselect?: { configId: string; nodeId: string; nonce: number } | null;
   trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
+  trialExpiresAt?: string | null;
   onProbe?: () => void;
   manualProbed?: boolean;
   onProbeAvailabilityChange?: (available: boolean) => void;
@@ -167,6 +168,7 @@ function stageElement(over: StageOverrides = {}) {
       helperPreparing={false}
       preselect={over.preselect ?? null}
       trialSummary={over.trialSummary ?? null}
+      trialExpiresAt={over.trialExpiresAt ?? null}
       onProbe={over.onProbe}
       manualProbed={over.manualProbed ?? false}
       onProbeAvailabilityChange={over.onProbeAvailabilityChange}
@@ -794,33 +796,89 @@ describe("连接舞台", () => {
 describe("舞台快捷切换", () => {
   const proxyConfig: ConfigDetail = { ...CONFIG, connect_mode: "system_proxy" };
 
-  it("只在有节点时出现，当前值直接读配置", () => {
+  function openModeLayer() {
+    fireEvent.click(
+      screen.getByRole("button", { name: "接管方式，当前 Proxy 模式" }),
+    );
+  }
+
+  it("只在有节点时出现，初始不展开", () => {
     renderStage({
       routingMode: "direct",
       onSetConnectMode: async () => ({ ok: true }),
       onSetRoutingMode: async () => ({ ok: true }),
     });
     expect(
-      screen.getByRole("button", { name: "切换接管方式，当前 Tun 模式" }),
+      screen.getByRole("button", { name: "接管方式，当前 Tun 模式" }),
     ).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "切换流量范围，当前 智能" }),
+      screen.getByRole("button", { name: "流量范围，当前 智能" }),
     ).toBeTruthy();
+    expect(screen.queryByRole("listbox", { name: "接管方式" })).toBeNull();
     cleanup();
 
-    // 没节点时整行不出现。
     renderStage({
       config: { ...proxyConfig, nodes: [], node_count: 0 },
+      routingMode: "direct",
       onSetConnectMode: async () => ({ ok: true }),
       onSetRoutingMode: async () => ({ ok: true }),
     });
-    expect(screen.queryByText("Proxy 模式")).toBeNull();
-    expect(
-      screen.queryByRole("button", { name: /切换接管方式/ }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: /接管方式/ })).toBeNull();
   });
 
-  it("智能 / 全局互切直接生效并播报", async () => {
+  it("点 chip 只展开，不调用切换", () => {
+    const onSetConnectMode = vi.fn(async () => ({ ok: true }));
+    renderStage({
+      config: proxyConfig,
+      routingMode: "direct",
+      onSetConnectMode,
+      onSetRoutingMode: async () => ({ ok: true }),
+    });
+
+    openModeLayer();
+
+    expect(screen.getByRole("listbox", { name: "接管方式" })).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: "Proxy 模式" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Tun 模式" })).toBeTruthy();
+    expect(onSetConnectMode).not.toHaveBeenCalled();
+    // 再点同一个 chip 收起。
+    openModeLayer();
+    expect(screen.queryByRole("listbox", { name: "接管方式" })).toBeNull();
+  });
+
+  it("接管方式选定目标值：先确认，确认后才调用", async () => {
+    const onSetConnectMode = vi.fn(async () => ({ ok: true }));
+    renderStage({
+      config: proxyConfig,
+      routingMode: "direct",
+      onSetConnectMode,
+      onSetRoutingMode: async () => ({ ok: true }),
+    });
+
+    openModeLayer();
+    fireEvent.click(screen.getByRole("option", { name: "Tun 模式" }));
+
+    expect(
+      screen.getByText(
+        "切到 Tun 模式？接管全部软件；首次使用需要系统授权。",
+      ),
+    ).toBeTruthy();
+    expect(onSetConnectMode).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+
+    await waitFor(() =>
+      expect(onSetConnectMode).toHaveBeenCalledWith(
+        "tun",
+        expect.objectContaining({ onRestoring: expect.any(Function) }),
+      ),
+    );
+    expect(await screen.findByText("已切到 Tun 模式")).toBeTruthy();
+  });
+
+  it("流量范围选定后立即热切，不等确认", async () => {
     const onSetRoutingMode = vi.fn(async () => ({ ok: true }));
     renderStage({
       config: proxyConfig,
@@ -830,39 +888,74 @@ describe("舞台快捷切换", () => {
     });
 
     fireEvent.click(
-      screen.getByRole("button", { name: "切换流量范围，当前 智能" }),
+      screen.getByRole("button", { name: "流量范围，当前 智能" }),
     );
+    expect(screen.getByRole("listbox", { name: "流量范围" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("option", { name: "全局" }));
 
     await waitFor(() => expect(onSetRoutingMode).toHaveBeenCalledWith("proxy_all"));
     expect(await screen.findByText("已切到全局")).toBeTruthy();
-    // 没有任何确认条。
+    expect(screen.queryByRole("listbox", { name: "接管方式" })).toBeNull();
+    // 不弹确认条。
     expect(screen.queryByRole("button", { name: "继续" })).toBeNull();
   });
 
-  it("切到 Tun 先就地确认；Esc 取消且不发命令", async () => {
+  it("选中当前值：只关层，不发命令", () => {
     const onSetConnectMode = vi.fn(async () => ({ ok: true }));
+    const onSetRoutingMode = vi.fn(async () => ({ ok: true }));
     renderStage({
       config: proxyConfig,
+      routingMode: "direct",
       onSetConnectMode,
+      onSetRoutingMode,
+    });
+
+    openModeLayer();
+    fireEvent.click(screen.getByRole("option", { name: "Proxy 模式" }));
+
+    expect(screen.queryByRole("listbox", { name: "接管方式" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "继续" })).toBeNull();
+    expect(onSetConnectMode).not.toHaveBeenCalled();
+  });
+
+  it("Esc 与点层外都能关闭选择层", () => {
+    renderStage({
+      config: proxyConfig,
+      routingMode: "direct",
+      onSetConnectMode: async () => ({ ok: true }),
       onSetRoutingMode: async () => ({ ok: true }),
     });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "切换接管方式，当前 Proxy 模式" }),
+    openModeLayer();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "接管方式" })).toBeNull();
+    // 焦点回到打开它的 chip。
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "接管方式，当前 Proxy 模式" }),
     );
 
-    expect(
-      screen.getByText(
-        "切到 Tun 模式？接管全部软件；首次使用需要系统授权。",
-      ),
-    ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "取消" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "继续" })).toBeTruthy();
+    openModeLayer();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole("listbox", { name: "接管方式" })).toBeNull();
+  });
 
-    fireEvent.keyDown(window, { key: "Escape" });
+  it("同时只开一个选择层", () => {
+    renderStage({
+      config: proxyConfig,
+      routingMode: "direct",
+      onSetConnectMode: async () => ({ ok: true }),
+      onSetRoutingMode: async () => ({ ok: true }),
+    });
 
-    expect(screen.queryByRole("button", { name: "继续" })).toBeNull();
-    expect(onSetConnectMode).not.toHaveBeenCalled();
+    openModeLayer();
+    expect(screen.getByRole("listbox", { name: "接管方式" })).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "流量范围，当前 智能" }),
+    );
+
+    expect(screen.queryByRole("listbox", { name: "接管方式" })).toBeNull();
+    expect(screen.getByRole("listbox", { name: "流量范围" })).toBeTruthy();
   });
 
   it("确认后进入进行中态，成功后播报", async () => {
@@ -873,23 +966,18 @@ describe("舞台快捷切换", () => {
     const onSetConnectMode = vi.fn(() => pending);
     renderStage({
       config: proxyConfig,
+      routingMode: "direct",
       onSetConnectMode,
       onSetRoutingMode: async () => ({ ok: true }),
     });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "切换接管方式，当前 Proxy 模式" }),
-    );
+    openModeLayer();
+    fireEvent.click(screen.getByRole("option", { name: "Tun 模式" }));
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
 
-    expect(await screen.findByText("正在切换到 Tun 模式…")).toBeTruthy();
-    expect(onSetConnectMode).toHaveBeenCalledWith(
-      "tun",
-      expect.objectContaining({ onRestoring: expect.any(Function) }),
-    );
-    expect(
-      screen.queryByRole("button", { name: /切换接管方式/ }),
-    ).toBeNull();
+    const busy = await screen.findByText("正在切换到 Tun 模式…");
+    expect(busy.closest("[aria-busy=\"true\"]")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /接管方式/ })).toBeNull();
 
     release({ ok: true });
 
@@ -899,24 +987,65 @@ describe("舞台快捷切换", () => {
   it("失败回退后标签仍是 Proxy，并说明已回到 Proxy 模式", async () => {
     renderStage({
       config: proxyConfig,
+      routingMode: "direct",
       onSetConnectMode: async () => ({ ok: false, restored: true }),
       onSetRoutingMode: async () => ({ ok: true }),
     });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "切换接管方式，当前 Proxy 模式" }),
-    );
+    openModeLayer();
+    fireEvent.click(screen.getByRole("option", { name: "Tun 模式" }));
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
 
     expect(
       await screen.findByText("没能切换到 Tun 模式，已回到 Proxy 模式。"),
     ).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "切换接管方式，当前 Proxy 模式" }),
+      screen.getByRole("button", { name: "接管方式，当前 Proxy 模式" }),
     ).toBeTruthy();
   });
 
-  it("连接中接管方式禁用，流量范围仍可切", () => {
+  it("回滚失败：说明连接已断开，不写「已回到」", async () => {
+    renderStage({
+      config: proxyConfig,
+      routingMode: "direct",
+      onSetConnectMode: async () => ({ ok: false, restored: false }),
+      onSetRoutingMode: async () => ({ ok: true }),
+    });
+
+    openModeLayer();
+    fireEvent.click(screen.getByRole("option", { name: "Tun 模式" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+
+    expect(
+      await screen.findByText("没能切换到 Tun 模式，连接已断开。"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/已回到 Proxy 模式/)).toBeNull();
+  });
+
+  it("回滚结果与库值都未知：只说连接状态未知", async () => {
+    renderStage({
+      config: proxyConfig,
+      routingMode: "direct",
+      onSetConnectMode: async () => ({
+        ok: false,
+        restored: null,
+        actualMode: null,
+      }),
+      onSetRoutingMode: async () => ({ ok: true }),
+    });
+
+    openModeLayer();
+    fireEvent.click(screen.getByRole("option", { name: "Tun 模式" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+
+    expect(
+      await screen.findByText("没能切换到 Tun 模式，连接状态未知。"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/已回到/)).toBeNull();
+    expect(screen.queryByText(/连接已断开/)).toBeNull();
+  });
+
+  it("连接中接管方式禁用，流量范围仍可展开", () => {
     renderStage({
       config: proxyConfig,
       routingMode: "direct",
@@ -929,61 +1058,20 @@ describe("舞台快捷切换", () => {
     expect(
       (
         screen.getByRole("button", {
-          name: "切换接管方式，当前 Proxy 模式",
+          name: "接管方式，当前 Proxy 模式",
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(true);
     expect(
       (
         screen.getByRole("button", {
-          name: "切换流量范围，当前 智能",
+          name: "流量范围，当前 智能",
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(false);
   });
 
-  it("回滚失败：说明连接已断开，不写「已回到」", async () => {
-    renderStage({
-      config: proxyConfig,
-      onSetConnectMode: async () => ({ ok: false, restored: false }),
-      onSetRoutingMode: async () => ({ ok: true }),
-    });
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "切换接管方式，当前 Proxy 模式" }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "继续" }));
-
-    expect(
-      await screen.findByText("没能切换到 Tun 模式，连接已断开。"),
-    ).toBeTruthy();
-    expect(screen.queryByText(/已回到 Proxy 模式/)).toBeNull();
-  });
-
-  it("回滚结果与库值都未知：只说连接状态未知", async () => {
-    renderStage({
-      config: proxyConfig,
-      onSetConnectMode: async () => ({
-        ok: false,
-        restored: null,
-        actualMode: null,
-      }),
-      onSetRoutingMode: async () => ({ ok: true }),
-    });
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "切换接管方式，当前 Proxy 模式" }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "继续" }));
-
-    expect(
-      await screen.findByText("没能切换到 Tun 模式，连接状态未知。"),
-    ).toBeTruthy();
-    expect(screen.queryByText(/已回到/)).toBeNull();
-    expect(screen.queryByText(/连接已断开/)).toBeNull();
-  });
-
-  it("旧数据的 proxy_selected：不渲染流量范围按钮", () => {
+  it("旧数据的 proxy_selected：不渲染流量范围入口", () => {
     renderStage({
       config: proxyConfig,
       routingMode: "proxy_selected",
@@ -992,13 +1080,99 @@ describe("舞台快捷切换", () => {
     });
 
     expect(
-      screen.getByRole("button", { name: "切换接管方式，当前 Proxy 模式" }),
+      screen.getByRole("button", { name: "接管方式，当前 Proxy 模式" }),
     ).toBeTruthy();
-    expect(
-      screen.queryByRole("button", { name: /切换流量范围/ }),
-    ).toBeNull();
-    expect(screen.queryByText("智能")).toBeNull();
+    expect(screen.queryByRole("button", { name: /流量范围/ })).toBeNull();
   });
+
+  it("键盘：打开后焦点在当前值，↑↓ 移动，Enter 选定", () => {
+    const onSetConnectMode = vi.fn(async () => ({ ok: true }));
+    renderStage({
+      config: proxyConfig,
+      routingMode: "direct",
+      onSetConnectMode,
+      onSetRoutingMode: async () => ({ ok: true }),
+    });
+
+    openModeLayer();
+    const current = screen.getByRole("option", { name: "Proxy 模式" });
+    expect(document.activeElement).toBe(current);
+
+    fireEvent.keyDown(current, { key: "ArrowDown" });
+    const tun = screen.getByRole("option", { name: "Tun 模式" });
+    expect(document.activeElement).toBe(tun);
+
+    fireEvent.keyDown(tun, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(current);
+
+    fireEvent.keyDown(current, { key: "ArrowDown" });
+    fireEvent.keyDown(tun, { key: "Enter" });
+
+    // 选定 Tun 先出确认条，还没有发命令。
+    expect(
+      screen.getByText("切到 Tun 模式？接管全部软件；首次使用需要系统授权。"),
+    ).toBeTruthy();
+    expect(onSetConnectMode).not.toHaveBeenCalled();
+  });
+
+  it("Tab 关闭选择层", () => {
+    renderStage({
+      config: proxyConfig,
+      routingMode: "direct",
+      onSetConnectMode: async () => ({ ok: true }),
+      onSetRoutingMode: async () => ({ ok: true }),
+    });
+
+    openModeLayer();
+    expect(screen.getByRole("listbox", { name: "接管方式" })).toBeTruthy();
+    fireEvent.keyDown(document.activeElement ?? window, { key: "Tab" });
+    expect(
+      screen.queryByRole("listbox", { name: "接管方式" }),
+    ).toBeNull();
+  });
+
+  it("选中当前值：焦点回到各自的 chip", () => {
+    renderStage({
+      config: proxyConfig,
+      routingMode: "direct",
+      onSetConnectMode: async () => ({ ok: true }),
+      onSetRoutingMode: async () => ({ ok: true }),
+    });
+
+    openModeLayer();
+    fireEvent.click(screen.getByRole("option", { name: "Proxy 模式" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "接管方式，当前 Proxy 模式" }),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "流量范围，当前 智能" }),
+    );
+    fireEvent.click(screen.getByRole("option", { name: "智能" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "流量范围，当前 智能" }),
+    );
+  });
+
+  it("流量范围切换生效后焦点回到 chip", async () => {
+    renderStage({
+      config: proxyConfig,
+      routingMode: "direct",
+      onSetConnectMode: async () => ({ ok: true }),
+      onSetRoutingMode: async () => ({ ok: true }),
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "流量范围，当前 智能" }),
+    );
+    fireEvent.click(screen.getByRole("option", { name: "全局" }));
+
+    await screen.findByText("已切到全局");
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "流量范围，当前 智能" }),
+    );
+  });
+
 });
 
 describe("报告问题入口", () => {
@@ -1044,5 +1218,125 @@ describe("报告问题入口", () => {
     expect(
       await screen.findByRole("button", { name: "报告问题" }),
     ).toBeTruthy();
+  });
+});
+
+describe("混池节点卡：试用 + 自建", () => {
+  const OWNED: ConfigDetail["nodes"][number] = {
+    node_id: "o1",
+    name: "东京 1 号",
+    server: "198.51.100.1",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "owned",
+    created_at: 0,
+  };
+  const FREE: ConfigDetail["nodes"][number] = {
+    node_id: "f2",
+    name: "洛杉矶 02",
+    server: "203.0.113.9",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "seed",
+    created_at: 0,
+  };
+
+  function configWith(nodes: ConfigDetail["nodes"]): ConfigDetail {
+    return {
+      ...CONFIG,
+      name: "免费节点",
+      node_count: nodes.length,
+      current_node_id: nodes[0]?.node_id ?? null,
+      nodes,
+    };
+  }
+
+  it("卡片标题固定为节点，不再用配置名", () => {
+    renderStage({ config: configWith([OWNED, FREE]) });
+
+    const card = document.querySelector(".stage-card");
+    expect(card?.getAttribute("aria-label")).toBe("节点");
+    expect(screen.getByRole("heading", { name: "节点" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "免费节点" })).toBeNull();
+  });
+
+  it("两类同池：自建组在前、免费组在后，副行只写数量", () => {
+    renderStage({ config: configWith([FREE, OWNED]) });
+
+    const groups = screen.getAllByRole("group");
+    expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
+      "你的服务器",
+      "免费节点",
+    ]);
+    expect(within(groups[0]).getByText("东京 1 号")).toBeTruthy();
+    expect(within(groups[1]).getByText("洛杉矶 02")).toBeTruthy();
+    expect(within(groups[1]).getByText("试用中")).toBeTruthy();
+    expect(within(groups[0]).queryByText("试用中")).toBeNull();
+
+    expect(screen.getByText("2 个节点")).toBeTruthy();
+    expect(screen.queryByText(/7 天试用/)).toBeNull();
+  });
+
+  it("只有一类时不出现任何组标题", async () => {
+    const { rerender } = renderStage();
+    expect(screen.queryAllByRole("group")).toHaveLength(0);
+    expect(screen.getByText("2 个节点 · 7 天试用")).toBeTruthy();
+
+    rerender(stageElement({ config: configWith([OWNED]) }));
+    expect(screen.queryAllByRole("group")).toHaveLength(0);
+    expect(screen.queryByText("你的服务器")).toBeNull();
+    expect(screen.getByText("1 个节点")).toBeTruthy();
+  });
+
+  it("试用组到期消失后只剩自建：整组与组标题一起消失", () => {
+    const { rerender } = renderStage({ config: configWith([OWNED, FREE]) });
+    expect(screen.getAllByRole("group")).toHaveLength(2);
+
+    rerender(stageElement({ config: configWith([OWNED]) }));
+    expect(screen.queryAllByRole("group")).toHaveLength(0);
+    expect(screen.queryByText("免费节点")).toBeNull();
+    expect(screen.queryByText("试用中")).toBeNull();
+    expect(screen.getByText("东京 1 号")).toBeTruthy();
+    expect(screen.getByText("1 个节点")).toBeTruthy();
+  });
+
+  it("免费组标题按剩余天数写到期：≥1 天向上取整，不足一天写今天", () => {
+    const inDays = (days: number) =>
+      new Date(Date.now() + days * 86_400_000).toISOString();
+
+    const { rerender } = renderStage({
+      config: configWith([OWNED, FREE]),
+      trialExpiresAt: inDays(3.2),
+    });
+    expect(screen.getByText("4 天后到期")).toBeTruthy();
+
+    rerender(
+      stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: inDays(0.4) }),
+    );
+    expect(screen.getByText("今天到期")).toBeTruthy();
+
+    rerender(stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: null }));
+    expect(screen.getByText("试用中")).toBeTruthy();
+  });
+
+  it("最快标记仍在免费组的行内，不进组标题", () => {
+    renderStage({
+      config: configWith([OWNED, FREE]),
+      nodeProbes: probes({
+        results: { o1: probeResult("o1", 90), f2: probeResult("f2", 42) },
+      }),
+      preselect: { configId: "cfg_1", nodeId: "f2", nonce: 1 },
+    });
+
+    const groups = screen.getAllByRole("group");
+    const freeGroup = groups[1];
+    expect(freeGroup.querySelector(".stage-node-group__head .stage-node__fastest")).toBeNull();
+    expect(
+      within(freeGroup as HTMLElement)
+        .getAllByRole("option")[0]
+        .querySelector(".stage-node__fastest")?.textContent,
+    ).toBe("最快");
   });
 });

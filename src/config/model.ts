@@ -21,6 +21,25 @@ export function rememberMockNode(node: NodeSummary): void {
   mockNodeRegistry.set(node.node_id, { ...node });
 }
 
+/** 按 node_id 取已登记的 mock 节点；未知 id 用占位形状，不编造公网地址。 */
+export function resolveMockNodes(nodeIds: readonly string[]): NodeSummary[] {
+  const now = Date.now();
+  return nodeIds.map((nodeId, index) => {
+    const known = mockNodeRegistry.get(nodeId);
+    if (known) return { ...known };
+    return {
+      node_id: nodeId,
+      name: `节点 ${index + 1}`,
+      server: "",
+      port: 8388,
+      method: "aes-256-gcm",
+      protocol: "shadowsocks",
+      source: "manual",
+      created_at: now,
+    };
+  });
+}
+
 /** 新建配置的默认名：「配置 N」，N 取当前未被占用的最小整数。 */
 export function nextConfigName(
   configs: readonly Pick<ConfigSummary, "name">[],
@@ -66,20 +85,7 @@ export function createMockConfig(
   const now = Date.now();
   // 契约：nodeIds 顺序即节点顺序；未知 id 不编造公网地址。
   const nodes: NodeSummary[] = options.nodeIds?.length
-    ? options.nodeIds.map((nodeId, index) => {
-        const known = mockNodeRegistry.get(nodeId);
-        if (known) return { ...known };
-        return {
-          node_id: nodeId,
-          name: `节点 ${index + 1}`,
-          server: "",
-          port: 8388,
-          method: "aes-256-gcm",
-          protocol: "shadowsocks",
-          source: "manual",
-          created_at: now,
-        };
-      })
+    ? resolveMockNodes(options.nodeIds)
     : [];
   return {
     config_id: configId,

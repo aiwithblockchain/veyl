@@ -1,6 +1,6 @@
 {
   "name": "connect-fail-then-retry",
-  "description": "异常：首选节点不可达，自动换同地区节点（只允许重试 1 次）",
+  "description": "异常：首选节点不可达，自动换同地区节点（只允许重试 1 次；换节点走 NodeSwitch，VpnConnect 没有 node_id）",
   "turns": [
     {
       "tool_calls": [
@@ -15,9 +15,16 @@
     {
       "tool_calls": [
         {
+          "name": "NodeSwitch",
+          "arguments": {
+            "config_id": "cfg_seed",
+            "node_id": "seed-dead-01"
+          }
+        },
+        {
           "name": "VpnConnect",
           "arguments": {
-            "node_id": "seed-dead-01"
+            "config_id": "cfg_seed"
           }
         }
       ]
@@ -25,9 +32,16 @@
     {
       "tool_calls": [
         {
+          "name": "NodeSwitch",
+          "arguments": {
+            "config_id": "cfg_seed",
+            "node_id": "seed-jp-02"
+          }
+        },
+        {
           "name": "VpnConnect",
           "arguments": {
-            "node_id": "seed-jp-02"
+            "config_id": "cfg_seed"
           }
         }
       ]

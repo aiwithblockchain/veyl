@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentBridge, ConfigCreateInput } from "../agent/bridge";
+import type { AgentBridge, ConfigCreateInput, NodeAttachInput } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { AGENT_EVENTS } from "../agent/protocol";
 import type {
@@ -8,7 +8,7 @@ import type {
   NodeSummary,
   RuntimeSnapshot,
 } from "../agent/protocol";
-import { createMockConfig, MOCK_CONFIG_STORAGE_KEY, rememberMockNode, summarizeConfig } from "./model";
+import { createMockConfig, MOCK_CONFIG_STORAGE_KEY, rememberMockNode, resolveMockNodes, summarizeConfig } from "./model";
 import { createRuntimeAuthority, runtimePhase } from "./runtimeAuthority";
 import type { RuntimeAuthority } from "./runtimeAuthority";
 import { deleteConfigWithDisconnect, shouldDisconnectOnDelete, withoutConfig } from "./deleteConfig";
@@ -57,11 +57,15 @@ export interface VpnSession {
   /** 正在查后台组件状态（还没开始连接），遮罩据此说明当前阶段。 */
   checkingHelper: boolean;
   createConfig: (input: ConfigCreateInput) => Promise<ActionResult>;
+  /** 把已存在的节点绑进全局配置；池子为空时由 Host 懒创建。 */
+  attachNodes: (input: NodeAttachInput) => Promise<ActionResult>;
   /** 只改名字；成功后左栏就地更新，不整表重载。 */
   renameConfig: (configId: string, name: string) => Promise<ActionResult>;
+  /** @deprecated 全局单配置后 UI 不再删除配置；保留实现只为兼容旧测试。 */
   deleteConfig: (configId: string) => Promise<ActionResult>;
+  /** @deprecated 全局单配置后不再切换配置；保留实现只为兼容旧测试。 */
   selectConfig: (configId: string) => Promise<ActionResult>;
-  switchNode: (nodeId: string) => Promise<ActionResult>;
+  switchNode: (nodeId: string, configId?: string) => Promise<ActionResult>;
   start: () => Promise<ActionResult>;
   stop: () => Promise<ActionResult>;
   probe: (nodeId: string) => Promise<ProbeResult>;
@@ -129,6 +133,25 @@ function actionMessage(error: unknown, fallback: string): string {
 function actionReason(error: unknown): string | undefined {
   const reason = toBridgeError(error).details?.reason;
   return typeof reason === "string" ? reason : undefined;
+}
+
+/** 全局单配置相关错误码的人话；后端 message 优先。 */
+function attachMessage(error: unknown): string {
+  const bridgeError = toBridgeError(error);
+  const reason =
+    typeof bridgeError.details?.reason === "string"
+      ? bridgeError.details.reason
+      : null;
+  if (reason === "source_required") return "缺少节点来源，没能加入节点。";
+  if (reason === "source_and_node_ids_conflict") {
+    return "一次只能用一种节点来源。";
+  }
+  if (reason === "invalid_source") return "这个节点来源不能用。";
+  if (reason === "not_global_config") return "节点只能加进全局配置。";
+  if (reason === "switch_in_progress") {
+    return "接管方式正在切换，稍后再加入节点。";
+  }
+  return bridgeError.message || "没能加入节点，稍后再试。";
 }
 
 /** Tauri 对未注册命令的报错形如 `Command node_probe not found`。 */
@@ -476,6 +499,81 @@ export function useVpnSession(
     }
   };
 
+  const attachNodes = async (input: NodeAttachInput): Promise<ActionResult> => {
+    if (mock) {
+      const store = mockStore.current;
+      let configs = [...store.configs];
+      let activeId = store.activeId;
+      let target = activeId
+        ? configs.find((config) => config.config_id === activeId) ?? null
+        : null;
+      if (!target) target = configs[0] ?? null;
+      // 全局单配置：池子为空时按契约懒创建默认行。
+      if (!target) {
+        target = createMockConfig("默认配置", "system_proxy", {
+          routingMode: "direct",
+        });
+        configs = [...configs, target];
+        activeId = target.config_id;
+      }
+      let ids: string[];
+      if (input.source === "seed") {
+        MOCK_FREE_NODES.forEach(rememberMockNode);
+        ids = MOCK_FREE_NODES.map((node) => node.node_id);
+      } else if (input.nodeIds?.length) {
+        ids = input.nodeIds;
+      } else {
+        return {
+          ok: false,
+          message: "缺少节点来源，没能加入节点。",
+          reason: "source_required",
+        };
+      }
+      const existing = new Set(target.nodes.map((node) => node.node_id));
+      const added = resolveMockNodes(ids.filter((id) => !existing.has(id)));
+      const next: ConfigDetail = {
+        ...target,
+        nodes: [...target.nodes, ...added],
+        node_count: target.nodes.length + added.length,
+        // attach 不改当前节点，等用户连接或显式切节点。
+        current_node_id: target.current_node_id,
+        updated_at: Date.now(),
+      };
+      configs = configs.map((config) =>
+        config.config_id === next.config_id ? next : config,
+      );
+      commitMock({ configs, activeId });
+      return { ok: true, configId: next.config_id, activated: true };
+    }
+
+    try {
+      const attached = await bridge.nodeAttach(input);
+      await refreshReal();
+      return { ok: true, configId: attached.config_id, activated: true };
+    } catch (err) {
+      // 全新安装时种子里还没有节点：先刷新一次种子再重试。
+      if (actionReason(err) === "seed_unavailable") {
+        try {
+          await bridge.defaultProfileRefresh();
+          const retried = await bridge.nodeAttach(input);
+          await refreshReal();
+          return { ok: true, configId: retried.config_id, activated: true };
+        } catch (retryErr) {
+          return {
+            ok: false,
+            message: attachMessage(retryErr),
+            reason: actionReason(retryErr),
+          };
+        }
+      }
+      return {
+        ok: false,
+        message: attachMessage(err),
+        reason: actionReason(err),
+      };
+    }
+  };
+
   const selectConfig = async (configId: string): Promise<ActionResult> => {
     if (mock) {
       const store = mockStore.current;
@@ -497,14 +595,15 @@ export function useVpnSession(
     }
   };
 
-  const switchNode = async (nodeId: string): Promise<ActionResult> => {
+  const switchNode = async (nodeId: string, configId?: string): Promise<ActionResult> => {
     if (mock) {
       const store = mockStore.current;
-      if (!store.activeId) return { ok: false, message: "还没有配置。" };
+      const targetId = configId ?? store.activeId;
+      if (!targetId) return { ok: false, message: "还没有配置。" };
       commitMock({
         ...store,
         configs: store.configs.map((config) =>
-          config.config_id === store.activeId
+          config.config_id === targetId
             ? { ...config, current_node_id: nodeId }
             : config,
         ),
@@ -512,9 +611,10 @@ export function useVpnSession(
       return { ok: true };
     }
 
-    if (!activeConfigId) return { ok: false, message: "还没有配置。" };
+    const targetConfigId = configId ?? activeConfigId;
+    if (!targetConfigId) return { ok: false, message: "还没有配置。" };
     try {
-      await bridge.nodeSwitch(activeConfigId, nodeId);
+      await bridge.nodeSwitch(targetConfigId, nodeId);
       await refreshReal();
       return { ok: true };
     } catch (err) {
@@ -838,6 +938,7 @@ export function useVpnSession(
     preparingHelper,
     checkingHelper,
     createConfig,
+    attachNodes,
     renameConfig,
     deleteConfig,
     selectConfig,

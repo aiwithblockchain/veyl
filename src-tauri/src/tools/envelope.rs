@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use super::display::{self, Changed, Display};
 
-pub const CONTRACT_VERSION: &str = "3.17.4";
+pub const CONTRACT_VERSION: &str = "3.18.0";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AivpnError {
@@ -294,7 +294,7 @@ mod display_projection_tests {
     /// 失败文案只描述「没做到什么」，错误码与内部路径留在 error.details。
     #[test]
     fn failure_display_never_leaks_the_error_code_or_internal_paths() {
-        for tool in ["VpnConnect", "ConfigDelete", "NetRepair", "CoreUpgrade"] {
+        for tool in ["VpnConnect", "ConfigSetMode", "NetRepair", "CoreUpgrade"] {
             let outcome = failed(tool);
             let text = &outcome.display.text;
             for needle in ["INTERNAL", "/Users", "config.json"] {
@@ -308,8 +308,8 @@ mod display_projection_tests {
     #[test]
     fn missing_display_is_filled_from_the_tool_table() {
         let mut ok = ToolOutcome::ok("internal model text", json!({}));
-        normalize_display("ConfigCreate", &mut ok);
-        assert_eq!(ok.display.text, "配置已创建");
+        normalize_display("ConfigUpdate", &mut ok);
+        assert_eq!(ok.display.text, "配置已更新");
         // 成功时 changed 固定 none；restored 只用于「改过又恢复」。
         assert_eq!(ok.display.changed, Changed::None);
 

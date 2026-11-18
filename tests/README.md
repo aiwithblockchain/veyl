@@ -33,7 +33,7 @@ CI 入口在 `scripts/`：`bash scripts/ci.sh`（完整 5 步）、`bash scripts
 | `contracts/check-contracts.mjs` | 契约一致性检查（13 项）：事件名、chatStore 覆盖、订阅列表覆盖、快照字段、剧本工具名、contract_version（Rust + 前端）、命令四方对齐、命令入参、事件载荷字段（TS + Rust） |
 | `fixtures/nodes.json` | 节点数据（含不可达、凭证失效、注入载荷三种异常节点） |
 | `fixtures/llm-scenarios/*.json` | 剧本：用户说什么 → 依次返回什么工具调用 |
-| `fixtures/llm-scenarios/errors/*.json` | 18 个工具各一条错误路径剧本（见该目录 README） |
+| `fixtures/llm-scenarios/errors/*.json` | 15 个工具各一条错误路径剧本（见该目录 README） |
 | `fixtures/manifest-*.json` | 运行时清单：正常 / 坏 sha / 坏 URL / 路径穿越 / 假内核 |
 | `fixtures/make_archives.py` | 生成归档与清单（sha 自动计算，不手填） |
 
@@ -69,7 +69,7 @@ CI 入口在 `scripts/`：`bash scripts/ci.sh`（完整 5 步）、`bash scripts
 ## mock LLM 的剧本机制
 
 请求里最后一条 user 消息带 `[scenario:connect-jp]` 即选择该剧本；未带则用默认剧本（`connect-jp`）。
-剧本从 `fixtures/llm-scenarios/` 与 `fixtures/llm-scenarios/errors/` **递归加载**，当前共 24 条。
+剧本从 `fixtures/llm-scenarios/` 与 `fixtures/llm-scenarios/errors/` **递归加载**，当前共 21 条。
 轮次由「请求里已有多少条 assistant 消息」决定，服务端无状态，便于并发测试。
 
 剧本里的工具名使用契约规定的 **PascalCase 模型可见名**（`CatalogSearch` / `VpnConnect` / `CoreInstall` …，见 `docs/contracts/tools.md` §3）。

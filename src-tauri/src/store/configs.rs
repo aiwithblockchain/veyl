@@ -29,6 +29,9 @@ pub const SOURCE_OWNED: &str = "owned";
 pub const MAX_NAME_CHARS: usize = 40;
 pub const MAX_NODE_NAME_CHARS: usize = 64;
 
+/// 全局配置的唯一名字。懒创建时固定用它，`configs.name UNIQUE` 兼作并发兜底。
+pub const DEFAULT_CONFIG_NAME: &str = "默认配置";
+
 pub const DEFAULT_DNS_JSON: &str = r#"{"mode":"auto","local":[],"remote":[]}"#;
 
 #[derive(Debug, Clone, Serialize)]
@@ -232,6 +235,301 @@ pub fn delete(conn: &Connection, id: &str) -> StoreResult<bool> {
     let changed = conn.execute("DELETE FROM configs WHERE id = ?1", params![id])?;
     Ok(changed > 0)
 }
+
+/// 全局配置（`docs/design/global-config-merge.md` §2）：`configs` 恒 0–1 行。
+///
+/// 多行只可能出现在迁移之前，解析顺序必须与 `commands.md` §3.1 一致：
+/// 激活行优先 → `last_used_at` 最新 → `created_at` 最早。**不能复用 `list()`**，
+/// 那个顺序是给左栏展示用的，没有 `is_active` 这一档。
+pub fn global(conn: &Connection) -> StoreResult<Option<Config>> {
+    conn.query_row(
+        "SELECT id, name, connection_mode, routing_mode, route_targets_json, route_revision,
+                listen_port, dns_json, tun_excludes_json, current_node_id, is_active,
+                created_at, updated_at, last_used_at
+           FROM configs
+          ORDER BY is_active DESC, last_used_at IS NULL ASC, last_used_at DESC, created_at ASC
+          LIMIT 1",
+        [],
+        row_to_config,
+    )
+    .optional()
+    .map_err(StoreError::from)
+}
+
+/// 懒创建全局配置：没有配置时插入 `默认配置`，返回 `(全局配置, 本次是否新建)`。
+///
+/// 并发兜底靠 `configs.name UNIQUE`，**不要改成先 SELECT 再 INSERT**：两个请求
+/// 同时进来会双双判断「没有配置」，然后撞唯一约束。`is_active` 单独置位，
+/// 避免与 `idx_configs_one_active` 抢同一行。
+pub fn ensure_global(conn: &Connection) -> StoreResult<(Config, bool)> {
+    if let Some(config) = global(conn)? {
+        return Ok((config, false));
+    }
+    let id = format!("cfg_{:016x}", rand::random::<u64>());
+    let now = now_ms();
+    let created = conn.execute(
+        "INSERT INTO configs
+            (id, name, connection_mode, routing_mode, listen_port, dns_json,
+             tun_excludes_json, current_node_id, is_active, created_at, updated_at, last_used_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, '[]', NULL, 0, ?6, ?6, NULL)
+         ON CONFLICT(name) DO NOTHING",
+        params![
+            id,
+            DEFAULT_CONFIG_NAME,
+            CONNECTION_SYSTEM_PROXY,
+            ROUTING_DIRECT,
+            DEFAULT_DNS_JSON,
+            now
+        ],
+    )?;
+    let config = global(conn)?.ok_or_else(|| StoreError::NotFound(DEFAULT_CONFIG_NAME.into()))?;
+    if !config.is_active {
+        conn.execute(
+            "UPDATE configs SET is_active = 1
+              WHERE id = ?1
+                AND NOT EXISTS (SELECT 1 FROM configs WHERE is_active = 1 AND id <> ?1)",
+            params![config.id],
+        )?;
+    }
+    let config = get(conn, &config.id)?.ok_or_else(|| StoreError::NotFound(config.id))?;
+    Ok((config, created > 0))
+}
+
+/// 迁回全局配置的结果：删掉了哪些配置行、是否只是补了唯一一行的 `is_active`。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MergeReport {
+    pub deleted_config_ids: Vec<String>,
+    pub activated_single: bool,
+}
+
+impl MergeReport {
+    pub fn changed(&self) -> bool {
+        self.activated_single || !self.deleted_config_ids.is_empty()
+    }
+}
+
+/// 启动迁移：把多套配置合成一行（`global-config-merge.md` §3.6）。
+///
+/// 幂等：第二次调用时只剩一行且已激活，直接返回空报告。全过程一个事务，
+/// `issues` 必须逐条按 `merge_key` 处理——直接批量改 `config_id` 会中途撞
+/// `issues.merge_key UNIQUE`。
+pub fn merge_into_global(conn: &Connection) -> StoreResult<MergeReport> {
+    let rows: Vec<(String, i64)> = {
+        let mut statement = conn.prepare(
+            "SELECT id, is_active
+               FROM configs
+              ORDER BY is_active DESC,
+                       last_used_at DESC,
+                       updated_at DESC,
+                       created_at ASC",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if rows.is_empty() {
+        return Ok(MergeReport::default());
+    }
+    if rows.len() == 1 {
+        if rows[0].1 == 0 {
+            conn.execute("UPDATE configs SET is_active = 1 WHERE id = ?1", params![rows[0].0])?;
+            return Ok(MergeReport {
+                activated_single: true,
+                ..Default::default()
+            });
+        }
+        return Ok(MergeReport::default());
+    }
+
+    let keep = rows[0].0.clone();
+    let others: Vec<String> = rows[1..].iter().map(|row| row.0.clone()).collect();
+
+    let tx = conn.unchecked_transaction()?;
+
+    // 节点：保留行原顺序在前，其余配置按各自顺序追加，按 node_id 去重。
+    let mut merged: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for config_id in std::iter::once(&keep).chain(others.iter()) {
+        let mut statement = tx.prepare(
+            "SELECT node_id FROM config_nodes WHERE config_id = ?1 ORDER BY position ASC",
+        )?;
+        let ids = statement
+            .query_map(params![config_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        for node_id in ids {
+            if seen.insert(node_id.clone()) {
+                merged.push(node_id);
+            }
+        }
+    }
+    tx.execute(
+        "DELETE FROM config_nodes WHERE config_id = ?1",
+        params![keep],
+    )?;
+    for (position, node_id) in merged.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO config_nodes (config_id, node_id, position) VALUES (?1, ?2, ?3)
+             ON CONFLICT(config_id, node_id) DO NOTHING",
+            params![keep, node_id, position as i64],
+        )?;
+    }
+
+    // 问题：先按新 merge_key 合并再删来源行（§3.6 第 3 步）。
+    for config_id in &others {
+        let issues: Vec<(String, String, String, String, String, i64, i64, i64)> = {
+            let mut statement = tx.prepare(
+                "SELECT id, kind, target, severity, status, occurrences, first_seen_at, last_seen_at
+                   FROM issues WHERE config_id = ?1",
+            )?;
+            let issues = statement.query_map(params![config_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })?;
+            issues.collect::<Result<Vec<_>, _>>()?
+        };
+        for (issue_id, kind, target, severity, status, occurrences, first_seen, last_seen) in
+            issues
+        {
+            let new_key = format!("{keep}\x1f{kind}\x1f{target}");
+            let existing: Option<(String, String, String, String, i64, i64, i64)> = tx
+                .query_row(
+                    "SELECT id, severity, status, evidence_json, occurrences, first_seen_at, last_seen_at
+                       FROM issues WHERE merge_key = ?1",
+                    params![new_key],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            match existing {
+                Some((
+                    existing_id,
+                    existing_severity,
+                    existing_status,
+                    _existing_evidence,
+                    existing_occurrences,
+                    existing_first,
+                    existing_last,
+                )) => {
+                    let merged_status = if existing_status == "open" || status == "open" {
+                        "open"
+                    } else {
+                        existing_status.as_str()
+                    };
+                    tx.execute(
+                        "UPDATE issues
+                            SET occurrences = ?2,
+                                first_seen_at = ?3,
+                                last_seen_at = ?4,
+                                severity = ?5,
+                                status = ?6,
+                                resolved_at = CASE WHEN ?6 = 'open' THEN NULL ELSE resolved_at END
+                          WHERE id = ?1",
+                        params![
+                            existing_id,
+                            existing_occurrences + occurrences,
+                            existing_first.min(first_seen),
+                            existing_last.max(last_seen),
+                            higher_severity(&existing_severity, &severity),
+                            merged_status
+                        ],
+                    )?;
+                    tx.execute("DELETE FROM issues WHERE id = ?1", params![issue_id])?;
+                }
+                None => {
+                    tx.execute(
+                        "UPDATE issues SET config_id = ?2, merge_key = ?3 WHERE id = ?1",
+                        params![issue_id, keep, new_key],
+                    )?;
+                }
+            }
+        }
+    }
+
+    // 当前节点为空才落到第一个；有效就保持原值。
+    if let Some(first) = merged.first() {
+        tx.execute(
+            "UPDATE configs SET current_node_id = ?2
+              WHERE id = ?1 AND current_node_id IS NULL",
+            params![keep, first],
+        )?;
+    }
+
+    tx.execute("UPDATE configs SET is_active = 1 WHERE id = ?1", params![keep])?;
+    for config_id in &others {
+        // 级联（config_nodes / layout / issues）依赖 foreign_keys = ON，已在 configure 打开；
+        // 这里再显式清一次，避免旧库上 PRAGMA 被人关掉时留下孤儿行。
+        tx.execute("DELETE FROM config_nodes WHERE config_id = ?1", params![config_id])?;
+        tx.execute("DELETE FROM layout WHERE config_id = ?1", params![config_id])?;
+        tx.execute("DELETE FROM issues WHERE config_id = ?1", params![config_id])?;
+        tx.execute("DELETE FROM configs WHERE id = ?1", params![config_id])?;
+    }
+    tx.commit()?;
+    Ok(MergeReport {
+        deleted_config_ids: others,
+        activated_single: false,
+    })
+}
+
+fn higher_severity(left: &str, right: &str) -> String {
+    let rank = |value: &str| match value {
+        "P0" => 0,
+        "P1" => 1,
+        _ => 2,
+    };
+    if rank(left) <= rank(right) {
+        left.to_string()
+    } else {
+        right.to_string()
+    }
+}
+
+/// 把节点绑进配置：已绑定的跳过，返回 `(本次绑上的, 已存在的)`。
+/// **不改 `current_node_id`**——唯一写者是 `node_switch`。
+pub fn attach_nodes(
+    conn: &Connection,
+    config_id: &str,
+    node_ids: &[String],
+) -> StoreResult<(Vec<String>, Vec<String>)> {
+    let mut position: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM config_nodes WHERE config_id = ?1",
+        params![config_id],
+        |row| row.get(0),
+    )?;
+    let mut attached = Vec::new();
+    let mut skipped = Vec::new();
+    for node_id in node_ids {
+        let inserted = conn.execute(
+            "INSERT INTO config_nodes (config_id, node_id, position) VALUES (?1, ?2, ?3)
+             ON CONFLICT(config_id, node_id) DO NOTHING",
+            params![config_id, node_id, position],
+        )?;
+        if inserted > 0 {
+            attached.push(node_id.clone());
+            position += 1;
+        } else {
+            skipped.push(node_id.clone());
+        }
+    }
+    Ok((attached, skipped))
+}
+
 
 /// 只改 active，不改 `last_used_at`（那是「发起连接」的时刻）。
 pub fn activate(conn: &Connection, id: &str) -> StoreResult<()> {
@@ -993,5 +1291,199 @@ mod tests {
         attach_node(&conn, "cfg_2", "nod_manual").unwrap();
 
         assert_eq!(config_ids_with_seed_nodes(&conn).unwrap(), vec!["cfg_1"]);
+    }
+
+    #[test]
+    fn global_prefers_active_then_most_recently_used() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        create(&conn, &config("cfg_a", "A")).unwrap();
+        create(&conn, &config("cfg_b", "B")).unwrap();
+        // 固定创建时间，避免同一毫秒让排序失去确定性。
+        conn.execute("UPDATE configs SET created_at = 10 WHERE id = 'cfg_a'", [])
+            .unwrap();
+        conn.execute("UPDATE configs SET created_at = 20 WHERE id = 'cfg_b'", [])
+            .unwrap();
+        activate(&conn, "cfg_a").unwrap();
+        conn.execute(
+            "UPDATE configs SET last_used_at = 200 WHERE id = 'cfg_b'",
+            [],
+        )
+        .unwrap();
+
+        // 激活行优先：即使 B 最近用过。
+        assert_eq!(global(&conn).unwrap().unwrap().id, "cfg_a");
+
+        // 没有激活行：最近用过的优先。
+        conn.execute("UPDATE configs SET is_active = 0", []).unwrap();
+        assert_eq!(global(&conn).unwrap().unwrap().id, "cfg_b");
+
+        // 都没用过：最早创建的。
+        conn.execute("UPDATE configs SET last_used_at = NULL", []).unwrap();
+        assert_eq!(global(&conn).unwrap().unwrap().id, "cfg_a");
+    }
+
+    #[test]
+    fn merge_into_global_keeps_the_active_config_and_merges_nodes() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        create(&conn, &config("cfg_a", "A")).unwrap();
+        create(&conn, &config("cfg_b", "B")).unwrap();
+        activate(&conn, "cfg_b").unwrap();
+        for id in ["node_1", "node_2", "node_3"] {
+            upsert_node(&conn, &node(id, "203.0.113.10")).unwrap();
+        }
+        attach_node(&conn, "cfg_a", "node_1").unwrap();
+        attach_node(&conn, "cfg_a", "node_2").unwrap();
+        attach_node(&conn, "cfg_b", "node_2").unwrap();
+        attach_node(&conn, "cfg_b", "node_3").unwrap();
+        crate::store::layout::set(&conn, "cfg_a", &serde_json::json!({"version":1})).unwrap();
+        crate::store::layout::set(&conn, "cfg_b", &serde_json::json!({"version":1})).unwrap();
+
+        let report = merge_into_global(&conn).unwrap();
+        assert_eq!(report.deleted_config_ids, vec!["cfg_a"]);
+        let all = list(&conn).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "cfg_b", "激活的那套保留");
+        assert!(all[0].is_active);
+        let merged = list_nodes(&conn, "cfg_b")
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        assert_eq!(merged, vec!["node_2", "node_3", "node_1"], "保留行顺序在前");
+        let positions = {
+            let mut statement = conn
+                .prepare("SELECT position FROM config_nodes WHERE config_id='cfg_b' ORDER BY position")
+                .unwrap();
+            let rows = statement
+                .query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(positions, vec![0, 1, 2], "迁移重编号");
+        assert_eq!(
+            get(&conn, "cfg_b").unwrap().unwrap().current_node_id.as_deref(),
+            Some("node_2"),
+            "当前节点为空时落到第一个"
+        );
+        assert!(
+            crate::store::layout::get(&conn, "cfg_a").unwrap().is_none(),
+            "被删配置的布局随配置删除"
+        );
+        assert!(crate::store::layout::get(&conn, "cfg_b").unwrap().is_some());
+
+        // 幂等：第二次没有可合并的。
+        let again = merge_into_global(&conn).unwrap();
+        assert!(!again.changed());
+    }
+
+    #[test]
+    fn merge_combines_issues_by_their_new_merge_key() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        create(&conn, &config("cfg_a", "A")).unwrap();
+        create(&conn, &config("cfg_b", "B")).unwrap();
+        activate(&conn, "cfg_b").unwrap();
+        let record = |id: &str, config_id: &str, status: &str, severity: &str, at: i64| {
+            crate::store::issues::record(
+                &conn,
+                &crate::store::issues::NewIssue {
+                    id,
+                    config_id: Some(config_id),
+                    kind: "dns_timeout",
+                    target: "8.8.8.8",
+                    severity,
+                    mode: "system_proxy",
+                    title: "DNS 超时",
+                    evidence_json: "{}",
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE issues SET status = ?2, first_seen_at = ?3, last_seen_at = ?3 WHERE id = ?1",
+                rusqlite::params![id, status, at],
+            )
+            .unwrap();
+        };
+        record("iss_a", "cfg_a", "resolved", "P2", 10);
+        record("iss_b", "cfg_b", "open", "P1", 20);
+
+        let report = merge_into_global(&conn).unwrap();
+        assert_eq!(report.deleted_config_ids, vec!["cfg_a"]);
+        let issues = crate::store::issues::list_open(&conn).unwrap();
+        assert_eq!(issues.len(), 1, "同键合并成一条");
+        let issue = &issues[0];
+        assert_eq!(issue.config_id.as_deref(), Some("cfg_b"));
+        assert_eq!(issue.merge_key, "cfg_b\x1fdns_timeout\x1f8.8.8.8");
+        assert_eq!(issue.occurrences, 2);
+        assert_eq!(issue.status, "open", "任一 open 则 open");
+        assert_eq!(issue.severity, "P1", "取更高的严重级");
+        assert_eq!(issue.first_seen_at, 10);
+        assert_eq!(issue.last_seen_at, 20);
+        assert!(issue.resolved_at.is_none());
+    }
+
+    #[test]
+    fn a_single_inactive_config_is_activated() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        create(&conn, &config("cfg_1", "A")).unwrap();
+        assert!(!get(&conn, "cfg_1").unwrap().unwrap().is_active);
+
+        let report = merge_into_global(&conn).unwrap();
+        assert!(report.activated_single);
+        assert!(get(&conn, "cfg_1").unwrap().unwrap().is_active);
+        assert!(active(&conn).unwrap().is_some());
+    }
+
+    #[test]
+    fn ensure_global_creates_the_default_once() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+
+        let (config, created) = ensure_global(&conn).unwrap();
+        assert!(created);
+        assert_eq!(config.name, DEFAULT_CONFIG_NAME);
+        assert_eq!(config.connection_mode, CONNECTION_SYSTEM_PROXY);
+        assert_eq!(config.routing_mode, ROUTING_DIRECT);
+        assert_eq!(config.dns["mode"], "auto");
+        assert!(config.current_node_id.is_none());
+        assert!(config.is_active);
+
+        let (again, created) = ensure_global(&conn).unwrap();
+        assert!(!created);
+        assert_eq!(again.id, config.id);
+        assert_eq!(list(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn attach_nodes_is_idempotent_and_keeps_the_current_node() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        create(&conn, &config("cfg_1", "A")).unwrap();
+        for id in ["node_1", "node_2"] {
+            upsert_node(&conn, &node(id, "203.0.113.10")).unwrap();
+        }
+
+        let (attached, skipped) = attach_nodes(
+            &conn,
+            "cfg_1",
+            &["node_1".to_string(), "node_2".to_string()],
+        )
+        .unwrap();
+        assert_eq!(attached, vec!["node_1", "node_2"]);
+        assert!(skipped.is_empty());
+
+        let (attached, skipped) = attach_nodes(&conn, "cfg_1", &["node_2".to_string()]).unwrap();
+        assert!(attached.is_empty());
+        assert_eq!(skipped, vec!["node_2"]);
+        assert_eq!(list_nodes(&conn, "cfg_1").unwrap().len(), 2);
+        assert!(
+            get(&conn, "cfg_1").unwrap().unwrap().current_node_id.is_none(),
+            "attach 不改当前节点"
+        );
     }
 }

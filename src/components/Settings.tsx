@@ -1279,13 +1279,10 @@ export function Settings({
     };
 
     if (importFile) {
-      if (!configId) {
-        setImportError("先在左侧选一套配置，再添加节点。");
-        return;
-      }
       setImportBusy(true);
       try {
-        applyResult(await bridge.nodeImportFile(importFile, configId));
+        // 全局单配置：省略 configId，由 Host 绑定全局池（池空时懒创建）。
+        applyResult(await bridge.nodeImportFile(importFile));
       } catch (error) {
         setImportError(describeFileImportError(error));
       } finally {
@@ -1300,16 +1297,12 @@ export function Settings({
       setImportError("订阅地址要用 https，不能是 http。");
       return;
     }
-    if (!configId) {
-      setImportError("先在左侧选一套配置，再添加节点。");
-      return;
-    }
     setImportBusy(true);
     try {
       applyResult(
         importIsUrl
-          ? await bridge.nodeImportUrl(importFirstLine, configId)
-          : await bridge.nodeImportText(text, configId),
+          ? await bridge.nodeImportUrl(importFirstLine)
+          : await bridge.nodeImportText(text),
       );
     } catch (error) {
       const message = toBridgeError(error).message;
@@ -2271,10 +2264,6 @@ export function Settings({
                     支持多行 ss:// 链接或 https 订阅地址；文件里的节点密码不要外传。
                   </p>
 
-                  {!configId ? (
-                    <p className="settings-note">先在左侧新建一套配置，再添加节点。</p>
-                  ) : null}
-
                   {importFile ? (
                     <p className="settings-row__value">
                       将导入：<span className="num">{fileNameOf(importFile)}</span>
@@ -2353,7 +2342,7 @@ export function Settings({
                         type="button"
                         className="btn btn--ghost"
                         onClick={() => void chooseImportFile()}
-                        disabled={importBusy || !configId}
+                        disabled={importBusy}
                       >
                         从文件导入
                       </button>
@@ -2372,7 +2361,6 @@ export function Settings({
                       onClick={() => void submitImport()}
                       disabled={
                         importBusy ||
-                        !configId ||
                         (!importFile && importText.trim() === "")
                       }
                     >

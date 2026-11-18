@@ -196,6 +196,16 @@ pub trait VpnToolServices: Send + Sync {
         text: &str,
     ) -> anyhow::Result<Value>;
     async fn node_create(&self, input: NodeCreateInput) -> anyhow::Result<Value>;
+    /// UI 专用：把已存在的节点绑进全局配置（`commands.md` §4.x `node_attach`）。
+    /// 不联网、不改 `current_node_id`；`configs` 为空时先懒创建默认配置。
+    async fn node_attach(
+        &self,
+        _source: Option<String>,
+        _node_ids: Option<Vec<String>>,
+        _config_id: Option<String>,
+    ) -> anyhow::Result<Value> {
+        not_wired("绑定节点")
+    }
     async fn node_switch(&self, config_id: &str, node_id: &str) -> anyhow::Result<Value>;
     async fn node_probe(&self, node_id: &str) -> anyhow::Result<Value>;
 
@@ -2947,34 +2957,163 @@ impl WiredServices {
         Ok((added, skipped))
     }
 
-    /// 把种子缓存里的节点落到当前配置。种子只给节点，分流由配置自己决定。
-    fn materialize_seed_nodes(&self, config_id: &str) -> anyhow::Result<usize> {
-        let nodes = crate::seed::load_nodes(&self.store).ok_or_else(|| {
-            svc_error_with_details(
-                "PRECONDITION_FAILED",
-                "现在拿不到 Veyl 免费节点，先刷新 Veyl 免费节点或手动添加一个",
-                json!({ "reason": "seed_unavailable", "hint": "先刷新 Veyl 免费节点或手动添加节点" }),
-            )
-        })?;
+    /// 导入目标：显式 `configId` 只允许是全局配置；省略时懒创建全局配置。
+    ///
+    /// 全局单配置（`global-config-merge.md` §3.2）：不再有「只进池不绑定」的死状态。
+    fn import_target(&self, config_id: Option<&str>) -> anyhow::Result<configs::Config> {
+        match config_id {
+            Some(id) => {
+                let config = self.require_config(id)?;
+                let global = {
+                    let conn = self.store.conn();
+                    configs::global(&conn).map_err(|error| svc_error(error.code(), error))?
+                };
+                if global.as_ref().map(|global| global.id.as_str()) != Some(config.id.as_str()) {
+                    return Err(svc_error_with_details(
+                        "CONFLICT",
+                        "现在只有一套全局配置，节点只能加到它上面",
+                        json!({ "reason": "not_global_config" }),
+                    ));
+                }
+                Ok(config)
+            }
+            None => {
+                let conn = self.store.conn();
+                configs::ensure_global(&conn)
+                    .map(|(config, _)| config)
+                    .map_err(|error| svc_error(error.code(), error))
+            }
+        }
+    }
+
+    /// 种子缓存里的可用节点（已去掉用户排除项）。`None` = 现在没有种子可用。
+    fn seed_parsed_nodes(&self) -> anyhow::Result<Option<Vec<crate::nodes::ParsedNode>>> {
+        let Some(nodes) = crate::seed::load_nodes(&self.store) else {
+            return Ok(None);
+        };
         let exclusions = {
             let conn = self.store.conn();
             configs::seed_exclusions(&conn).map_err(|error| svc_error(error.code(), error))?
         };
-        let parsed: Vec<crate::nodes::ParsedNode> = nodes
-            .into_iter()
-            .filter(|node| {
+        Ok(Some(
+            nodes
+                .into_iter()
+                .filter(|node| {
+                    let key = crate::nodes::source_key(
+                        &node.name,
+                        &node.server,
+                        node.port,
+                        &node.method,
+                    );
+                    !exclusions.contains(&key)
+                })
+                .map(|node| crate::nodes::ParsedNode {
+                    name: node.name,
+                    server: node.server,
+                    port: node.port,
+                    method: node.method,
+                    password: node.password,
+                })
+                .collect(),
+        ))
+    }
+
+    /// 刷新成功后把种子节点并入全局配置：一个事务里落行 + 绑定，失败只记日志。
+    ///
+    /// 刷新本身仍算成功——网络已经更新，没能并入池子不该让用户看到「刷新失败」；
+    /// 下一次刷新会补上（幂等）。
+    fn merge_seed_into_global_quietly(&self) {
+        if let Err(error) = self.merge_seed_into_global() {
+            log::warn!("刷新后把种子节点并入全局配置失败（下次刷新会重试）：{error}");
+        }
+    }
+
+    fn merge_seed_into_global(&self) -> anyhow::Result<()> {
+        let parsed = self.seed_parsed_nodes()?.unwrap_or_default();
+        self.merge_seed_nodes(&parsed).map(|_| ())
+    }
+
+    /// 把 `parsed` 里的种子节点写进池子并并入全局配置；`parsed` 为空时只把池里
+    /// 现有的种子节点绑进去（窗口拖入文件已经自己写过节点行）。
+    ///
+    /// 一个事务覆盖「建行 + 绑节点」；凭据在 `secrets.enc`，不在 SQLite 事务里，
+    /// 所以先写。**不改 `current_node_id`**：attach 只追加关联。
+    fn merge_seed_nodes(
+        &self,
+        parsed: &[crate::nodes::ParsedNode],
+    ) -> anyhow::Result<(String, Vec<String>)> {
+        for node in parsed {
+            let key = crate::nodes::source_key(&node.name, &node.server, node.port, &node.method);
+            let id = crate::nodes::node_id(configs::SOURCE_SEED, &key);
+            crate::secrets::set_secret(&crate::nodes::password_ref(&id), &node.password)
+                .map_err(|error| svc_error("SECRET_STORE", error))?;
+        }
+
+        let (global_id, attached) = {
+            let conn = self.store.conn();
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|error| svc_error("INTERNAL", error))?;
+            let (global, _) = configs::ensure_global(&tx)
+                .map_err(|error| svc_error(error.code(), error))?;
+            for node in parsed {
                 let key =
                     crate::nodes::source_key(&node.name, &node.server, node.port, &node.method);
-                !exclusions.contains(&key)
-            })
-            .map(|node| crate::nodes::ParsedNode {
-                name: node.name,
-                server: node.server,
-                port: node.port,
-                method: node.method,
-                password: node.password,
-            })
-            .collect();
+                let id = crate::nodes::node_id(configs::SOURCE_SEED, &key);
+                configs::upsert_node(
+                    &tx,
+                    &configs::NewNode {
+                        id: &id,
+                        name: &node.name,
+                        server: &node.server,
+                        port: node.port,
+                        method: &node.method,
+                        password_ref: &crate::nodes::password_ref(&id),
+                        source: configs::SOURCE_SEED,
+                        source_key: &key,
+                    },
+                )
+                .map_err(|error| svc_error(error.code(), error))?;
+            }
+            let exclusions = configs::seed_exclusions(&tx)
+                .map_err(|error| svc_error(error.code(), error))?;
+            let ids = configs::list_nodes_by_source(&tx, configs::SOURCE_SEED)
+                .map_err(|error| svc_error(error.code(), error))?
+                .into_iter()
+                .filter(|node| !exclusions.contains(&node.source_key))
+                .map(|node| node.id)
+                .collect::<Vec<_>>();
+            let (attached, _) = configs::attach_nodes(&tx, &global.id, &ids)
+                .map_err(|error| svc_error(error.code(), error))?;
+            tx.commit().map_err(|error| svc_error("INTERNAL", error))?;
+            (global.id, attached)
+        };
+
+        if !attached.is_empty() {
+            crate::seed::emit_node_list_changed(
+                &self.store,
+                "bindings_changed",
+                Some(&global_id),
+                &attached,
+            );
+            if let Ok(config) = self.require_config(&global_id) {
+                self.emit_config_changed("updated", Some(&config));
+            }
+        }
+        Ok((global_id, attached))
+    }
+
+    fn seed_unavailable() -> anyhow::Error {
+        svc_error_with_details(
+            "PRECONDITION_FAILED",
+            "现在拿不到 Veyl 免费节点，先刷新 Veyl 免费节点或手动添加一个",
+            json!({ "reason": "seed_unavailable", "hint": "先刷新 Veyl 免费节点或手动添加节点" }),
+        )
+    }
+
+    /// 把种子缓存里的节点落到当前配置。种子只给节点，分流由配置自己决定。
+    fn materialize_seed_nodes(&self, config_id: &str) -> anyhow::Result<usize> {
+        let parsed = self.seed_parsed_nodes()?.ok_or_else(Self::seed_unavailable)?;
         let (added, _) =
             self.add_parsed_nodes(Some(config_id), &parsed, configs::SOURCE_SEED, false, false)?;
         Ok(added.len())
@@ -4137,6 +4276,21 @@ impl VpnToolServices for WiredServices {
             ));
         }
 
+        // 全局单配置：已有配置就拒绝，替代原来的 duplicate_name 路径。
+        // 放在参数校验之后：非法参数仍按 INVALID_ARGUMENT 报，不被 config_exists 盖掉。
+        {
+            let conn = self.store.conn();
+            let existing =
+                configs::global(&conn).map_err(|error| svc_error(error.code(), error))?;
+            if existing.is_some() {
+                return Err(svc_error_with_details(
+                    "CONFLICT",
+                    "现在只有一套全局配置，新节点用 node_attach 加进节点池",
+                    json!({ "reason": "config_exists" }),
+                ));
+            }
+        }
+
         let id = format!("cfg_{:016x}", rand::random::<u64>());
         let created = {
             let conn = self.store.conn();
@@ -4377,84 +4531,46 @@ impl VpnToolServices for WiredServices {
         self.config_detail_json(&updated)
     }
 
-    async fn config_delete(&self, config_id: &str) -> anyhow::Result<Value> {
-        if config_id.trim().is_empty() {
-            return Err(svc_error_with_details(
-                "INVALID_ARGUMENT",
-                "config_id 不能为空",
-                json!({ "reason": "invalid_config_id" }),
-            ));
-        }
-        if self.connected_config_id().await.as_deref() == Some(config_id) {
-            return Err(svc_error_with_details(
-                "PRECONDITION_FAILED",
-                "这套配置正在连接中，先断开再删除",
-                json!({ "reason": "connected" }),
-            ));
-        }
-        // App 重启后接手的 TUN 连接没有配置 id：不知道在跑的这套是不是要删的那套，
-        // 一律拒绝——放过去就是「数据库删了、sing-box 还在接管、界面停不掉」。
-        if matches!(
-            self.tun.status(),
-            crate::tun::session::TunState::Running { .. }
-        ) && self.tun.connected_config_id().is_none()
-        {
-            return Err(svc_error_with_details(
-                "PRECONDITION_FAILED",
-                "有一个接管连接在运行，但读不到它用的是哪套配置，先断开再删除",
-                json!({ "reason": "connected" }),
-            ));
-        }
-
-        let deleted = {
-            let conn = self.store.conn();
-            configs::delete(&conn, config_id).map_err(|error| svc_error(error.code(), error))?
-        };
-        vpn_config::remove_profile_config(&self.config_dir(), config_id);
-        self.emit_config_changed("deleted", None);
-
-        Ok(json!({
-            "config_id": config_id,
-            "deleted": deleted,
-            "already_absent": !deleted,
-            "active_config_id": self.active_config_id(),
-        }))
+    async fn config_delete(&self, _config_id: &str) -> anyhow::Result<Value> {
+        // 全局配置是节点池的唯一载体：删了它，节点与连接参数都没有落点。
+        Err(svc_error_with_details(
+            "PRECONDITION_FAILED",
+            "全局配置不能删除；不需要的节点从节点池里移除",
+            json!({ "reason": "only_config" }),
+        ))
     }
 
     async fn config_activate(&self, config_id: &str) -> anyhow::Result<Value> {
-        if crate::lifecycle::is_quitting() {
-            return Err(svc_error_with_details(
-                "PRECONDITION_FAILED",
-                "应用正在退出，不能再切换配置",
-                json!({ "reason": "quitting" }),
-            ));
-        }
-        // 只改 active：切换是导航，连接是动作。旧连接留到用户点「连接」时由
-        // `runtime_start` 先停再起（§7.1），这里不断开、不重连、不碰运行时。
-        let target = self.require_config(config_id)?;
-        // 已经是 active：幂等返回，不再发「切换」事件。
-        if self.active_config_id().as_deref() == Some(config_id) {
-            return Ok(json!({
-                "active_config_id": config_id,
-                "runtime": self.runtime_status().await?,
-            }));
-        }
-        {
+        // 全局单配置：只有一行，切配置这件事已经没有意义。
+        let global = {
             let conn = self.store.conn();
-            configs::activate(&conn, config_id).map_err(|error| svc_error(error.code(), error))?;
+            configs::global(&conn).map_err(|error| svc_error(error.code(), error))?
+        };
+        match global {
+            Some(global) if global.id == config_id => {
+                // 幂等成功：界面重新载入时仍会调一次。
+                if !global.is_active {
+                    let conn = self.store.conn();
+                    configs::activate(&conn, &global.id)
+                        .map_err(|error| svc_error(error.code(), error))?;
+                }
+                Ok(json!({
+                    "active_config_id": global.id,
+                    "changed": false,
+                    "runtime": self.runtime_status().await?,
+                }))
+            }
+            _ => Err(svc_error_with_details(
+                "CONFLICT",
+                "现在只有一套全局配置，没有可切换的配置",
+                json!({ "reason": "single_config" }),
+            )),
         }
-        self.emit_config_changed("activated", Some(&target));
-        Ok(json!({
-            "active_config_id": config_id,
-            // 当前连接快照；可能仍属于另一套配置，调用方不得据此推断「已断开」。
-            "runtime": self.runtime_status().await?,
-        }))
     }
 
     async fn node_import_url(&self, config_id: Option<String>, url: &str) -> anyhow::Result<Value> {
-        if let Some(config_id) = &config_id {
-            self.require_config(config_id)?;
-        }
+        // 省略 configId = 绑定全局配置；没有配置时懒创建。
+        let target = self.import_target(config_id.as_deref())?;
         let parsed_url = reqwest::Url::parse(url).map_err(|_| {
             svc_error_with_details(
                 "INVALID_ARGUMENT",
@@ -4477,11 +4593,11 @@ impl VpnToolServices for WiredServices {
                 svc_error_with_details(error.code(), message, json!({ "reason": error.reason() }))
             })?;
         let (added, duplicates) = self.add_parsed_nodes(
-            config_id.as_deref(),
+            Some(&target.id),
             &subscription.nodes,
             configs::SOURCE_URL,
             true,
-            true,
+            false,
         )?;
 
         let mut skipped = subscription
@@ -4506,15 +4622,13 @@ impl VpnToolServices for WiredServices {
             crate::seed::emit_node_list_changed(
                 &self.store,
                 "url_import",
-                config_id.as_deref(),
+                Some(&target.id),
                 &added_ids,
             );
         }
-        if let Some(config_id) = &config_id {
-            if !added.is_empty() {
-                if let Ok(config) = self.require_config(config_id) {
-                    self.emit_config_changed("updated", Some(&config));
-                }
+        if !added.is_empty() {
+            if let Ok(config) = self.require_config(&target.id) {
+                self.emit_config_changed("updated", Some(&config));
             }
         }
 
@@ -4531,9 +4645,8 @@ impl VpnToolServices for WiredServices {
         config_id: Option<String>,
         text: &str,
     ) -> anyhow::Result<Value> {
-        if let Some(config_id) = &config_id {
-            self.require_config(config_id)?;
-        }
+        // 省略 configId = 绑定全局配置；没有配置时懒创建。
+        let target = self.import_target(config_id.as_deref())?;
         let subscription = crate::nodes::parse_subscription(text).map_err(|error| {
             log::debug!("粘贴导入解析失败：{error}");
             svc_error_with_details(
@@ -4544,11 +4657,11 @@ impl VpnToolServices for WiredServices {
         })?;
         // 粘贴来的节点算「手动添加」：来源是用户自己，不是我们替他拉取。
         let (added, duplicates) = self.add_parsed_nodes(
-            config_id.as_deref(),
+            Some(&target.id),
             &subscription.nodes,
             configs::SOURCE_MANUAL,
             true,
-            true,
+            false,
         )?;
 
         let mut skipped = subscription
@@ -4573,15 +4686,13 @@ impl VpnToolServices for WiredServices {
             crate::seed::emit_node_list_changed(
                 &self.store,
                 "manual_create",
-                config_id.as_deref(),
+                Some(&target.id),
                 &added_ids,
             );
         }
-        if let Some(config_id) = &config_id {
-            if !added.is_empty() {
-                if let Ok(config) = self.require_config(config_id) {
-                    self.emit_config_changed("updated", Some(&config));
-                }
+        if !added.is_empty() {
+            if let Ok(config) = self.require_config(&target.id) {
+                self.emit_config_changed("updated", Some(&config));
             }
         }
 
@@ -4593,9 +4704,7 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn node_create(&self, input: NodeCreateInput) -> anyhow::Result<Value> {
-        if let Some(config_id) = &input.config_id {
-            self.require_config(config_id)?;
-        }
+        let target = self.import_target(input.config_id.as_deref())?;
         let parsed = crate::nodes::validate_manual(
             &input.name,
             &input.server,
@@ -4612,11 +4721,11 @@ impl VpnToolServices for WiredServices {
             svc_error_with_details("INVALID_ARGUMENT", message, json!({ "reason": reason }))
         })?;
         let (added, _) = self.add_parsed_nodes(
-            input.config_id.as_deref(),
+            Some(&target.id),
             &[parsed],
             configs::SOURCE_MANUAL,
             false,
-            true,
+            false,
         )?;
         let node = added
             .first()
@@ -4625,15 +4734,192 @@ impl VpnToolServices for WiredServices {
         crate::seed::emit_node_list_changed(
             &self.store,
             "manual_create",
-            input.config_id.as_deref(),
+            Some(&target.id),
             &added_ids,
         );
-        if let Some(config_id) = &input.config_id {
-            if let Ok(config) = self.require_config(config_id) {
+        if let Ok(config) = self.require_config(&target.id) {
+            self.emit_config_changed("updated", Some(&config));
+        }
+        Ok(node_json(node))
+    }
+
+    /// UI：把节点绑进全局配置（`global-config-merge.md` §3.3）。
+    ///
+    /// `source` 与 `nodeIds` 二选一；幂等；**永远不改 `current_node_id`**。
+    async fn node_attach(
+        &self,
+        source: Option<String>,
+        node_ids: Option<Vec<String>>,
+        config_id: Option<String>,
+    ) -> anyhow::Result<Value> {
+        let source = source
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        let node_ids = node_ids.filter(|ids| !ids.is_empty());
+        match (&source, &node_ids) {
+            (None, None) => {
+                return Err(svc_error_with_details(
+                    "INVALID_ARGUMENT",
+                    "必须指定节点来源：source=seed 或 nodeIds",
+                    json!({ "reason": "source_required" }),
+                ));
+            }
+            (Some(_), Some(_)) => {
+                return Err(svc_error_with_details(
+                    "INVALID_ARGUMENT",
+                    "source 与 nodeIds 不能同时使用",
+                    json!({ "reason": "source_and_node_ids_conflict" }),
+                ));
+            }
+            _ => {}
+        }
+        if let Some(source) = &source {
+            if source != "seed" {
+                return Err(svc_error_with_details(
+                    "INVALID_ARGUMENT",
+                    "source 只支持 seed",
+                    json!({ "reason": "invalid_source" }),
+                ));
+            }
+        }
+
+        // 种子先确认拿得到：拿不到就不该顺手建出一套空配置。
+        let seed_nodes = if source.is_some() {
+            Some(self.seed_parsed_nodes()?.ok_or_else(Self::seed_unavailable)?)
+        } else {
+            None
+        };
+
+        // 守卫先于懒创建：被拒的请求不能先在库里留下一套空配置。
+        // 运行时正在换连接（stopping / starting / restarting，或 TUN 在途）：
+        // 此时绑进来的节点不在已渲染的配置里，会让界面与隧道各看各的。
+        let runtime = self.manager.status().await;
+        if matches!(
+            runtime.state,
+            crate::runtime::RuntimeState::Starting
+                | crate::runtime::RuntimeState::Stopping
+                | crate::runtime::RuntimeState::Restarting
+        ) || self.tun.is_launching()
+        {
+            return Err(svc_error_retryable(
+                "CONFLICT",
+                "运行时正在切换连接，等它结束再绑定节点",
+                json!({ "reason": "switch_in_progress" }),
+            ));
+        }
+        // 同一套配置正在切换接管方式：两边一起改池子会让「界面看到的」与「正在起的」分叉。
+        // 已经有一套配置时先拿守卫；空库没有可冲突的切换，懒创建之后再补拿。
+        let existing_global = {
+            let conn = self.store.conn();
+            configs::global(&conn).map_err(|error| svc_error(error.code(), error))?
+        };
+        let held = match &existing_global {
+            Some(existing) => Some(self.mode_switches.try_begin(&existing.id).ok_or_else(|| {
+                svc_error_retryable(
+                    "CONFLICT",
+                    "这套配置正在切换接管方式，等它结束再试",
+                    json!({ "reason": "switch_in_progress" }),
+                )
+            })?),
+            None => None,
+        };
+
+        let (global, created_config) = {
+            let conn = self.store.conn();
+            configs::ensure_global(&conn).map_err(|error| svc_error(error.code(), error))?
+        };
+        if let Some(config_id) = config_id.as_deref() {
+            if config_id != global.id {
+                return Err(svc_error_with_details(
+                    "CONFLICT",
+                    "现在只有一套全局配置，节点只能绑到它上面",
+                    json!({ "reason": "not_global_config" }),
+                ));
+            }
+        }
+        let _attach = match held {
+            Some(guard) => guard,
+            None => self.mode_switches.try_begin(&global.id).ok_or_else(|| {
+                svc_error_retryable(
+                    "CONFLICT",
+                    "这套配置正在切换接管方式，等它结束再试",
+                    json!({ "reason": "switch_in_progress" }),
+                )
+            })?,
+        };
+
+        let candidates: Vec<String> = if let Some(parsed) = seed_nodes {
+            self.add_parsed_nodes(None, &parsed, configs::SOURCE_SEED, false, false)?;
+            let conn = self.store.conn();
+            let exclusions = configs::seed_exclusions(&conn)
+                .map_err(|error| svc_error(error.code(), error))?;
+            configs::list_nodes_by_source(&conn, configs::SOURCE_SEED)
+                .map_err(|error| svc_error(error.code(), error))?
+                .into_iter()
+                .filter(|node| !exclusions.contains(&node.source_key))
+                .map(|node| node.id)
+                .collect()
+        } else {
+            let ids = node_ids.unwrap_or_default();
+            let missing = {
+                let conn = self.store.conn();
+                configs::missing_nodes(&conn, &ids)
+                    .map_err(|error| svc_error(error.code(), error))?
+            };
+            if !missing.is_empty() {
+                return Err(svc_error_with_details(
+                    "NOT_FOUND",
+                    "有节点不存在",
+                    json!({ "reason": "node_not_found", "node_ids": missing }),
+                ));
+            }
+            ids
+        };
+
+        // 同一批里重复的 id 只算第一次：attach_nodes 会把第二次报成「已存在」。
+        let mut unique = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for id in candidates {
+            if seen.insert(id.clone()) {
+                unique.push(id);
+            }
+        }
+
+        let (attached, skipped) = {
+            let conn = self.store.conn();
+            configs::attach_nodes(&conn, &global.id, &unique)
+                .map_err(|error| svc_error(error.code(), error))?
+        };
+        let node_count = {
+            let conn = self.store.conn();
+            configs::node_count(&conn, &global.id)
+                .map_err(|error| svc_error(error.code(), error))?
+        };
+        let current_node_id = self
+            .require_config(&global.id)
+            .map(|config| config.current_node_id)
+            .unwrap_or(None);
+
+        if !attached.is_empty() {
+            crate::seed::emit_node_list_changed(
+                &self.store,
+                "bindings_changed",
+                Some(&global.id),
+                &attached,
+            );
+            if let Ok(config) = self.require_config(&global.id) {
                 self.emit_config_changed("updated", Some(&config));
             }
         }
-        Ok(node_json(node))
+
+        Ok(json!({
+            "config_id": global.id,
+            "created_config": created_config,
+            "attached_node_ids": attached,
+            "skipped_node_ids": skipped,
+            "node_count": node_count,
+            "current_node_id": current_node_id,
+        }))
     }
 
     async fn node_switch(&self, config_id: &str, node_id: &str) -> anyhow::Result<Value> {
@@ -5052,16 +5338,22 @@ impl VpnToolServices for WiredServices {
                 removed_node_name,
                 replacement_node_name,
                 ..
-            } => Ok(self.seed_status_json(
-                "network",
-                true,
-                None,
-                added,
-                removed,
-                removed_node_name,
-                replacement_node_name,
-            )),
+            } => {
+                // 刷新成功后把种子节点并进全局配置：模型没有 node_attach 可调，
+                // 这一步不做，整条免费节点链路在 AI 侧就是断的。
+                self.merge_seed_into_global_quietly();
+                Ok(self.seed_status_json(
+                    "network",
+                    true,
+                    None,
+                    added,
+                    removed,
+                    removed_node_name,
+                    replacement_node_name,
+                ))
+            }
             crate::seed::RefreshOutcome::Unchanged { .. } => {
+                self.merge_seed_into_global_quietly();
                 Ok(self.seed_status_json("network", false, None, Some(0), Some(0), None, None))
             }
             crate::seed::RefreshOutcome::Offline {
@@ -5146,6 +5438,12 @@ impl VpnToolServices for WiredServices {
                     json!({ "reason": "invalid_json", "detail": error }),
                 )
             })?;
+
+        // 窗口拖进来的种子节点也要进全局配置：节点行已由 merge_file_nodes 写好，
+        // 这里只补绑定（幂等、不改当前节点）。失败只记日志，文件本身已导入成功。
+        if let Err(error) = self.merge_seed_nodes(&[]) {
+            log::warn!("窗口拖入种子后并入全局配置失败（下次刷新会重试）：{error}");
+        }
 
         let nodes = {
             let conn = self.store.conn();
@@ -8304,9 +8602,15 @@ mod config_service_tests {
         let detail = services.config_detail(&config_id).await.unwrap();
         assert_eq!(detail["nodes"][0]["server"], "203.0.113.10");
         assert_eq!(detail["nodes"][0]["protocol"], "shadowsocks");
-        assert!(detail["current_node_id"].is_string());
+        // 导入不写当前节点：由用户点选或「连接」时再 `node_switch`。
+        assert_eq!(detail["current_node_id"], serde_json::json!(null));
         assert!(detail.get("layout").is_some(), "layout 键恒存在");
         assert!(!detail.to_string().contains("pw-secret"));
+
+        let node_id = detail["nodes"][0]["node_id"].as_str().unwrap().to_string();
+        services.node_switch(&config_id, &node_id).await.unwrap();
+        let detail = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(detail["current_node_id"], node_id);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -8337,8 +8641,11 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 全局配置不能删：它是节点池与连接参数的唯一载体（`global-config-merge.md` §3.3）。
+    ///
+    /// 拒绝之后本地节点、密码与 `my_servers` 镜像都不该有任何变化。
     #[tokio::test]
-    async fn deleting_a_config_keeps_shared_nodes_and_credentials() {
+    async fn deleting_the_global_config_is_retired() {
         crate::test_support::install_test_secrets();
         let dir = temp_dir();
         let services = services(&dir);
@@ -8365,93 +8672,17 @@ mod config_service_tests {
         let password_ref = crate::nodes::password_ref(&node_id);
         assert!(crate::secrets::get_secret(&password_ref).unwrap().is_some());
 
-        services.config_delete(&config_id).await.unwrap();
+        let error = services.config_delete(&config_id).await.unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "only_config");
 
-        // 节点是共享池：删配置只删关系，不删节点与密码。
+        // 一样都没动：配置、节点、密码、云端服务器镜像。
         let conn = services.store.conn();
+        assert!(configs::get(&conn, &config_id).unwrap().is_some());
         assert!(configs::get_node(&conn, &node_id).unwrap().is_some());
         drop(conn);
         assert!(crate::secrets::get_secret(&password_ref).unwrap().is_some());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 删配置只动本地数据，不碰云端服务器。
-    ///
-    /// `my_servers` 是控制面服务器的本地镜像；配置与节点都只是本地的引用关系，
-    /// 删哪一边都不该让那台服务器在云端消失（销毁只有 `my_server_destroy` 一条路）。
-    #[tokio::test]
-    async fn deleting_a_config_never_destroys_the_cloud_server() {
-        crate::test_support::install_test_secrets();
-        let dir = temp_dir();
-        let services = services(&dir);
-        let created = services.config_create(create_input("A")).await.unwrap();
-        let config_id = created["config_id"].as_str().unwrap().to_string();
-        services
-            .node_create(NodeCreateInput {
-                config_id: Some(config_id.clone()),
-                name: "东京".into(),
-                server: "198.51.100.8".into(),
-                port: 8388,
-                password: "pw".into(),
-                method: "aes-256-gcm".into(),
-            })
-            .await
-            .unwrap();
-
-        let node_id = {
-            let conn = services.store.conn();
-            configs::list_nodes(&conn, &config_id).unwrap()[0].id.clone()
-        };
-        let server_id = "srv_keep_config";
-        {
-            let conn = services.store.conn();
-            crate::store::servers::upsert(
-                &conn,
-                &crate::store::servers::NewMyServer {
-                    id: server_id,
-                    provider: "digitalocean",
-                    name: "东京",
-                    region: "tyo1",
-                    plan: "s-1vcpu-1gb",
-                    state: "active",
-                    node_id: Some(&node_id),
-                    hourly_usd: 0.01,
-                    monthly_usd: 6.0,
-                    daily_price_cents: 20,
-                    transfer_gib: 0,
-                    paid_until: 0,
-                    billing_state: "active",
-                    created_at: 1_700_000_000_000,
-                },
-            )
-            .unwrap();
-        }
-
-        services.config_delete(&config_id).await.unwrap();
-
-        {
-            let conn = services.store.conn();
-            assert!(configs::get(&conn, &config_id).unwrap().is_none(), "配置应已删除");
-            assert!(
-                configs::get_node(&conn, &node_id).unwrap().is_some(),
-                "节点是共享池，删配置不能删节点"
-            );
-            let server = crate::store::servers::get(&conn, server_id)
-                .unwrap()
-                .expect("服务器本地镜像行必须保留");
-            assert_eq!(
-                server.node_id.as_deref(),
-                Some(node_id.as_str()),
-                "删配置不应改写 my_servers.node_id"
-            );
-        }
-        assert!(
-            crate::secrets::get_secret(&crate::nodes::password_ref(&node_id))
-                .unwrap()
-                .is_some(),
-            "删配置不能删节点密码"
-        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -8755,72 +8986,35 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 已连接时切到另一套：只改 active，连接保持原样、不断开也不重连。
+    /// 全局单配置：切到全局配置本身是幂等成功，其它 id 一律 `single_config`。
     #[tokio::test]
-    async fn config_activate_only_switches_active_while_connected() {
+    async fn config_activate_is_idempotent_for_the_global_config() {
         let dir = temp_dir();
         let services = services(&dir);
-        let a = services
-            .config_create(create_input("TUN 激活 A"))
+        let created = services
+            .config_create(create_input("全局"))
             .await
             .unwrap();
-        let a_id = a["config_id"].as_str().unwrap().to_string();
-        let b = services
-            .config_create(create_input("TUN 激活 B"))
-            .await
-            .unwrap();
-        let b_id = b["config_id"].as_str().unwrap().to_string();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
 
-        // 先把 active 摆到 A（新建的 B 默认会变成 active），再在 A 已连接时切到 B。
-        services.config_activate(&a_id).await.unwrap();
-        services.tun.force_running_for_test(4242, Some(&a_id));
-        let result = services.config_activate(&b_id).await.unwrap();
-        assert_eq!(result["active_config_id"], b_id);
+        services.tun.force_running_for_test(4242, Some(&config_id));
+        let result = services.config_activate(&config_id).await.unwrap();
+        assert_eq!(result["active_config_id"], config_id);
+        assert_eq!(result["changed"], false);
         assert!(
             result.get("reconnect").is_none(),
             "reconnect 字段已从契约删除：{result}"
         );
-
-        // 连接没被动过：跑的还是原来那一套。
+        // 连接没被动过。
         assert_eq!(
             services.tun.status(),
             crate::tun::session::TunState::Running { pid: 4242 }
         );
-        assert_eq!(
-            services.tun.connected_config_id().as_deref(),
-            Some(a_id.as_str())
-        );
-        let list = services.config_list().await.unwrap();
-        assert_eq!(list["active_config_id"], b_id);
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 启动窗口里切配置：同样只改 active，不取消在途启动。
-    #[tokio::test]
-    async fn config_activate_does_not_touch_a_launch_in_flight() {
-        let dir = temp_dir();
-        let services = services(&dir);
-        let a = services
-            .config_create(create_input("启动窗口 A"))
-            .await
-            .unwrap();
-        let a_id = a["config_id"].as_str().unwrap().to_string();
-        let b = services
-            .config_create(create_input("启动窗口 B"))
-            .await
-            .unwrap();
-        let b_id = b["config_id"].as_str().unwrap().to_string();
-
-        // TUN 正在启动：还没有 pid，但这次连接已经算在途。
-        services.tun.force_launching_for_test(&b_id);
-        let result = services.config_activate(&a_id).await.unwrap();
-        assert_eq!(result["active_config_id"], a_id);
-        assert!(services.tun.is_launching(), "切换不能取消在途启动");
-        assert_eq!(
-            services.tun.launching_config_id().as_deref(),
-            Some(b_id.as_str())
-        );
+        let error = services.config_activate("cfg_missing").await.unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "CONFLICT");
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "single_config");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -8849,15 +9043,17 @@ mod config_service_tests {
                 .await
                 .unwrap();
         }
+        // 导入不写当前节点，先自己选一个，再在启动窗口里试切到另一个。
         let detail = services.config_detail(&config_id).await.unwrap();
-        let current = detail["current_node_id"].as_str().unwrap().to_string();
-        let other = detail["nodes"]
+        let ids = detail["nodes"]
             .as_array()
             .unwrap()
             .iter()
             .map(|node| node["node_id"].as_str().unwrap().to_string())
-            .find(|id| id != &current)
-            .unwrap();
+            .collect::<Vec<_>>();
+        services.node_switch(&config_id, &ids[0]).await.unwrap();
+        let current = ids[0].clone();
+        let other = ids[1].clone();
 
         services.tun.force_launching_for_test(&config_id);
         let error = services.node_switch(&config_id, &other).await.unwrap_err();
@@ -8875,79 +9071,43 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 别的配置正在启动时同样拒绝：这时热切会换到用旧节点构建的实例上。
+    /// 全局单配置：已有配置时再 `config_create` 一律 `CONFLICT / config_exists`。
     #[tokio::test]
-    async fn node_switch_is_rejected_while_another_config_is_starting() {
-        crate::test_support::install_test_secrets();
-        let dir = temp_dir();
-        let services = services(&dir);
-        let a = services.config_create(create_input("A")).await.unwrap();
-        let a_id = a["config_id"].as_str().unwrap().to_string();
-        for (name, port) in [("东京", 8388), ("大阪", 8389)] {
-            services
-                .node_create(NodeCreateInput {
-                    config_id: Some(a_id.clone()),
-                    name: name.into(),
-                    server: "203.0.113.10".into(),
-                    port,
-                    password: "pw".into(),
-                    method: "aes-256-gcm".into(),
-                })
-                .await
-                .unwrap();
-        }
-        let detail = services.config_detail(&a_id).await.unwrap();
-        let current = detail["current_node_id"].as_str().unwrap().to_string();
-        let other = detail["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|node| node["node_id"].as_str().unwrap().to_string())
-            .find(|id| id != &current)
-            .unwrap();
-
-        let b = services.config_create(create_input("B")).await.unwrap();
-        let b_id = b["config_id"].as_str().unwrap().to_string();
-        services.tun.force_launching_for_test(&b_id);
-
-        let error = services.node_switch(&a_id, &other).await.unwrap_err();
-        let service = error.downcast_ref::<ServiceError>().unwrap();
-        assert_eq!(service.code, "PRECONDITION_FAILED");
-        assert_eq!(
-            service.details.as_ref().unwrap()["reason"],
-            "config_launching"
-        );
-
-        let after = services.config_detail(&a_id).await.unwrap();
-        assert_eq!(after["current_node_id"], current);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 启动窗口里新建配置：不能抢占 active，正在起来的是旧配置。
-    #[tokio::test]
-    async fn config_create_does_not_activate_while_tun_is_starting() {
+    async fn a_second_config_create_is_rejected() {
         let dir = temp_dir();
         let services = services(&dir);
         let a = services
-            .config_create(create_input("启动窗口活动 A"))
+            .config_create(create_input("全局"))
             .await
             .unwrap();
         let a_id = a["config_id"].as_str().unwrap().to_string();
         assert_eq!(a["is_active"], true);
 
-        services.tun.force_launching_for_test(&a_id);
-        let b = services
-            .config_create(create_input("启动窗口活动 B"))
+        // 已连接、启动中都不给建第二套。
+        services.tun.force_running_for_test(4242, Some(&a_id));
+        let error = services
+            .config_create(create_input("第二套"))
             .await
-            .unwrap();
-        assert_eq!(b["is_active"], false);
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "CONFLICT");
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "config_exists");
+
+        services.tun.force_launching_for_test(&a_id);
+        let error = services
+            .config_create(create_input("第三套"))
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "config_exists");
 
         let list = services.config_list().await.unwrap();
+        assert_eq!(list["configs"].as_array().unwrap().len(), 1);
         assert_eq!(list["active_config_id"], a_id);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
 
     /// 启动窗口里按断开：取消在途启动并停掉后端，不能让迟到的 start 继续。
     #[tokio::test]
@@ -8975,31 +9135,6 @@ mod config_service_tests {
         assert_eq!(snapshot["state"], "idle");
         assert!(!services.tun.is_launching(), "断开必须取消在途启动");
         assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// TUN 已连接时新建配置不能自动成为活动配置，否则界面与运行时不一致。
-    #[tokio::test]
-    async fn config_create_does_not_activate_while_tun_is_connected() {
-        let dir = temp_dir();
-        let services = services(&dir);
-        let a = services
-            .config_create(create_input("TUN 活动 A"))
-            .await
-            .unwrap();
-        let a_id = a["config_id"].as_str().unwrap().to_string();
-        assert_eq!(a["is_active"], true);
-
-        services.tun.force_running_for_test(4242, Some(&a_id));
-        let b = services
-            .config_create(create_input("TUN 活动 B"))
-            .await
-            .unwrap();
-        assert_eq!(b["is_active"], false);
-
-        let list = services.config_list().await.unwrap();
-        assert_eq!(list["active_config_id"], a_id);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9145,7 +9280,8 @@ mod config_service_tests {
         let nodes = detail["nodes"].as_array().unwrap();
         assert_eq!(nodes[0]["name"], "A");
         assert_eq!(nodes[1]["name"], "B");
-        assert_eq!(detail["current_node_id"], nodes[0]["node_id"]);
+        // 导入只进池子，不写当前节点。
+        assert_eq!(detail["current_node_id"], serde_json::json!(null));
         assert_eq!(nodes[0]["source"], "manual");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -9620,39 +9756,24 @@ mod config_service_tests {
 
     /// TUN 在跑的时候删配置：数据库删了、helper 里的 sing-box 还在接管，界面停不掉。
     #[tokio::test]
-    async fn a_config_in_use_by_a_running_tun_connection_cannot_be_deleted() {
+    async fn deleting_the_global_config_is_retired_even_while_tun_is_running() {
         let dir = temp_dir();
         let services = services(&dir);
         let created = services.config_create(create_input("A")).await.unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
 
+        // 不管 TUN 是不是正用着这套、读不读得到配置 id，删除都只回 only_config。
         services.tun.force_running_for_test(4242, Some(&config_id));
         let error = services.config_delete(&config_id).await.unwrap_err();
         assert!(
-            error.to_string().contains("正在连接中"),
-            "TUN 正在用这套配置，必须拒绝删除：{error}"
+            error.to_string().contains("全局配置不能删除"),
+            "{error}"
         );
-
-        // 连的是别的配置时不影响：不能因为「TUN 在跑」就什么都删不了。
-        services.tun.force_running_for_test(4242, Some("cfg_other"));
-        assert!(
-            services.config_delete(&config_id).await.is_ok(),
-            "TUN 用的是另一套配置，这套可以删"
-        );
-    }
-
-    /// App 重启后接手的 TUN 连接没有配置 id：不知道是哪套，一律拒绝。
-    #[tokio::test]
-    async fn a_tun_connection_without_a_known_config_blocks_deletion() {
-        let dir = temp_dir();
-        let services = services(&dir);
-        let created = services.config_create(create_input("A")).await.unwrap();
-        let config_id = created["config_id"].as_str().unwrap().to_string();
 
         services.tun.force_running_for_test(4343, None);
         let error = services.config_delete(&config_id).await.unwrap_err();
         assert!(
-            error.to_string().contains("读不到它用的是哪套配置"),
+            error.to_string().contains("全局配置不能删除"),
             "{error}"
         );
     }
@@ -9802,6 +9923,431 @@ mod config_service_tests {
             "TUN 不读设置端口，也不存在降级"
         );
     }
+    /// 刷新成功后种子节点要并进全局配置：模型没有 `node_attach` 可调。
+    #[tokio::test]
+    async fn a_seed_refresh_merges_new_nodes_into_the_global_config() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        {
+            let body = r#"{
+              "version": 1,
+              "updated_at": "2026-11-17T00:00:00Z",
+              "nodes": [
+                { "name": "免费 A", "server": "203.0.113.10", "port": 8388,
+                  "method": "aes-256-gcm", "password": "pw-a" },
+                { "name": "免费 B", "server": "203.0.113.11", "port": 8388,
+                  "method": "aes-256-gcm", "password": "pw-b" }
+              ]
+            }"#;
+            let hash = crate::seed::content_sha256(body.as_bytes());
+            crate::secrets::set_secret(&format!("seed:{hash}"), body).unwrap();
+            let conn = services.store.conn();
+            crate::store::seed_cache::save(
+                &conn,
+                &crate::store::seed_cache::SeedCacheRow {
+                    content_sha256: hash,
+                    etag: None,
+                    etag_source: None,
+                    source_version: Some("1".into()),
+                    source_updated_at: None,
+                    node_count: 2,
+                    fetched_at: 0,
+                    checked_at: 0,
+                },
+            )
+            .unwrap();
+        }
+
+        // 空库：懒创建默认配置并绑定两个种子节点。
+        services.merge_seed_into_global().unwrap();
+        let list = services.config_list().await.unwrap();
+        let configs = list["configs"].as_array().unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0]["name"], configs::DEFAULT_CONFIG_NAME);
+        assert_eq!(configs[0]["node_count"], 2);
+        assert!(configs[0]["current_node_id"].is_null());
+
+        // 重复合并：不重复绑定、不重复建配置。
+        services.merge_seed_into_global().unwrap();
+        let detail = services
+            .config_detail(configs[0]["config_id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(detail["node_count"], 2);
+        assert!(detail["current_node_id"].is_null());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 合并种子不动当前节点：用户已经选了自建节点时，刷新不能把选择改回种子。
+    #[tokio::test]
+    async fn a_seed_refresh_does_not_change_the_current_node() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("全局")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "自建".into(),
+                server: "198.51.100.20".into(),
+                port: 8388,
+                password: "pw".into(),
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let owned_id = node["node_id"].as_str().unwrap().to_string();
+        services.node_switch(&config_id, &owned_id).await.unwrap();
+
+        {
+            let body = r#"{
+              "version": 1,
+              "updated_at": "2026-11-17T00:00:00Z",
+              "nodes": [
+                { "name": "免费 A", "server": "203.0.113.10", "port": 8388,
+                  "method": "aes-256-gcm", "password": "pw-a" }
+              ]
+            }"#;
+            let hash = crate::seed::content_sha256(body.as_bytes());
+            crate::secrets::set_secret(&format!("seed:{hash}"), body).unwrap();
+            let conn = services.store.conn();
+            crate::store::seed_cache::save(
+                &conn,
+                &crate::store::seed_cache::SeedCacheRow {
+                    content_sha256: hash,
+                    etag: None,
+                    etag_source: None,
+                    source_version: Some("1".into()),
+                    source_updated_at: None,
+                    node_count: 1,
+                    fetched_at: 0,
+                    checked_at: 0,
+                },
+            )
+            .unwrap();
+        }
+
+        services.merge_seed_into_global().unwrap();
+        let detail = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(detail["node_count"], 2, "种子节点要进池");
+        assert_eq!(detail["current_node_id"], owned_id, "不能改当前节点");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `node_attach`：空库时懒创建默认配置，把种子节点全部绑进去；第二次幂等。
+    #[tokio::test]
+    async fn node_attach_lazily_creates_the_global_config() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        {
+            let body = r#"{
+              "version": 1,
+              "updated_at": "2026-11-17T00:00:00Z",
+              "nodes": [
+                { "name": "免费 A", "server": "203.0.113.10", "port": 8388,
+                  "method": "aes-256-gcm", "password": "pw-a" },
+                { "name": "免费 B", "server": "203.0.113.11", "port": 8388,
+                  "method": "aes-256-gcm", "password": "pw-b" }
+              ]
+            }"#;
+            let hash = crate::seed::content_sha256(body.as_bytes());
+            crate::secrets::set_secret(&format!("seed:{hash}"), body).unwrap();
+            let conn = services.store.conn();
+            crate::store::seed_cache::save(
+                &conn,
+                &crate::store::seed_cache::SeedCacheRow {
+                    content_sha256: hash,
+                    etag: None,
+                    etag_source: None,
+                    source_version: Some("1".into()),
+                    source_updated_at: None,
+                    node_count: 2,
+                    fetched_at: 0,
+                    checked_at: 0,
+                },
+            )
+            .unwrap();
+        }
+
+        let first = services
+            .node_attach(Some("seed".into()), None, None)
+            .await
+            .unwrap();
+        assert_eq!(first["created_config"], true);
+        assert_eq!(first["node_count"], 2);
+        assert_eq!(first["attached_node_ids"].as_array().unwrap().len(), 2);
+        assert!(first["skipped_node_ids"].as_array().unwrap().is_empty());
+        assert!(
+            first["current_node_id"].is_null(),
+            "attach 永远不改当前节点：{first}"
+        );
+        let config_id = first["config_id"].as_str().unwrap().to_string();
+
+        let list = services.config_list().await.unwrap();
+        let configs = list["configs"].as_array().unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0]["name"], configs::DEFAULT_CONFIG_NAME);
+        assert_eq!(configs[0]["connect_mode"], configs::CONNECTION_SYSTEM_PROXY);
+        assert_eq!(configs[0]["routing_mode"], configs::ROUTING_DIRECT);
+        assert_eq!(list["active_config_id"], config_id);
+
+        // 幂等：第二次全部跳过，不新建、不改池子大小。
+        let again = services
+            .node_attach(Some("seed".into()), None, None)
+            .await
+            .unwrap();
+        assert_eq!(again["created_config"], false);
+        assert_eq!(again["attached_node_ids"].as_array().unwrap().len(), 0);
+        assert_eq!(again["skipped_node_ids"].as_array().unwrap().len(), 2);
+        assert_eq!(again["node_count"], 2);
+        assert_eq!(again["config_id"], config_id);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `node_attach { nodeIds }`：只绑指定节点，已绑定的跳过，不写当前节点。
+    #[tokio::test]
+    async fn node_attach_binds_the_given_nodes_without_switching() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("全局")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let mut ids = Vec::new();
+        for (name, port) in [("东京", 8388), ("大阪", 8389)] {
+            let node = services
+                .node_create(NodeCreateInput {
+                    config_id: Some(config_id.clone()),
+                    name: name.into(),
+                    server: "203.0.113.10".into(),
+                    port,
+                    password: "pw".into(),
+                    method: "aes-256-gcm".into(),
+                })
+                .await
+                .unwrap();
+            ids.push(node["node_id"].as_str().unwrap().to_string());
+        }
+
+        let first = services
+            .node_attach(None, Some(vec![ids[0].clone()]), None)
+            .await
+            .unwrap();
+        assert!(
+            first["attached_node_ids"].as_array().unwrap().is_empty(),
+            "node_create 已经绑过，attach 只补齐缺的：{first}"
+        );
+        assert_eq!(first["skipped_node_ids"], serde_json::json!([ids[0]]));
+        assert_eq!(first["node_count"], 2);
+        assert!(first["current_node_id"].is_null());
+
+        let second = services
+            .node_attach(None, Some(ids.clone()), Some(config_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(second["created_config"], false);
+        assert!(
+            second["attached_node_ids"].as_array().unwrap().is_empty(),
+            "都已在池里：{second}"
+        );
+        assert_eq!(second["skipped_node_ids"].as_array().unwrap().len(), 2);
+        assert!(second["current_node_id"].is_null());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `node_attach` 的错误码：来源缺省 / 冲突 / 非法 / 节点不存在 / 非全局配置。
+    #[tokio::test]
+    async fn node_attach_reports_the_documented_errors() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+
+        let reason = |error: anyhow::Error| {
+            error
+                .downcast_ref::<ServiceError>()
+                .unwrap()
+                .details
+                .as_ref()
+                .unwrap()["reason"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        let error = services.node_attach(None, None, None).await.unwrap_err();
+        assert_eq!(reason(error), "source_required");
+
+        let error = services
+            .node_attach(Some("seed".into()), Some(vec!["node_x".into()]), None)
+            .await
+            .unwrap_err();
+        assert_eq!(reason(error), "source_and_node_ids_conflict");
+
+        let error = services
+            .node_attach(Some("url".into()), None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(reason(error), "invalid_source");
+
+        let error = services
+            .node_attach(Some("seed".into()), None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(reason(error), "seed_unavailable", "没有种子缓存时不建空配置");
+
+        // 全局配置还不存在：先建一套，再验证「不存在节点」与「非全局 id」。
+        let created = services.config_create(create_input("全局")).await.unwrap();
+        let _config_id = created["config_id"].as_str().unwrap().to_string();
+        let error = services
+            .node_attach(None, Some(vec!["node_missing".into()]), None)
+            .await
+            .unwrap_err();
+        assert_eq!(reason(error), "node_not_found");
+
+        let error = services
+            .node_attach(None, Some(vec!["node_missing".into()]), Some("cfg_other".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(reason(error), "not_global_config");
+
+        // 同一套配置正在切接管方式：直接拒绝，不排队。
+        let held = services.mode_switches.try_begin(&_config_id).unwrap();
+        let error = services
+            .node_attach(None, Some(vec!["node_missing".into()]), None)
+            .await
+            .unwrap_err();
+        assert_eq!(reason(error), "switch_in_progress");
+        drop(held);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 运行时正在换连接（TUN 在途）时不允许改池子，与契约的 `switch_in_progress` 一致。
+    #[tokio::test]
+    async fn node_attach_is_rejected_while_the_connection_is_switching() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("全局")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        services.tun.force_launching_for_test(&config_id);
+        let error = services
+            .node_attach(None, Some(vec!["node_x".into()]), None)
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "CONFLICT");
+        assert!(service.retryable, "并发冲突允许用户稍后重来");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "switch_in_progress"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 窗口拖入 `.json` 种子文件：节点要进全局配置，否则单配置界面里看不见。
+    #[tokio::test]
+    async fn a_dropped_seed_file_merges_its_nodes_into_the_global_config() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let path = dir.join("veyl_seed.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "version": 1,
+              "updated_at": "2026-11-17T00:00:00Z",
+              "nodes": [
+                { "name": "免费 A", "server": "203.0.113.10", "port": 8388,
+                  "method": "aes-256-gcm", "password": "pw-a" },
+                { "name": "免费 B", "server": "203.0.113.11", "port": 8388,
+                  "method": "aes-256-gcm", "password": "pw-b" }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let data = services
+            .import_seed_file(path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(data["imported"], 2);
+
+        let list = services.config_list().await.unwrap();
+        let configs = list["configs"].as_array().unwrap();
+        assert_eq!(configs.len(), 1, "空库时导入种子会懒创建全局配置");
+        assert_eq!(configs[0]["node_count"], 2);
+        assert!(configs[0]["current_node_id"].is_null());
+
+        // 重复导入同一文件：节点与绑定都不重复。
+        services
+            .import_seed_file(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let detail = services
+            .config_detail(configs[0]["config_id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(detail["node_count"], 2);
+        assert!(detail["current_node_id"].is_null());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 守卫先于懒创建：被拒的 `node_attach` 不能先在空库里留下一套配置。
+    #[tokio::test]
+    async fn a_rejected_attach_does_not_create_an_empty_config() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        services.tun.force_launching_for_test("cfg_in_flight");
+
+        let error = services
+            .node_attach(None, Some(vec!["node_x".into()]), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("正在切换连接"), "{error}");
+
+        let list = services.config_list().await.unwrap();
+        assert!(
+            list["configs"].as_array().unwrap().is_empty(),
+            "被拒时不能建出空配置：{list}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 省略 `configId` 的导入绑定全局配置：没有配置时懒创建，且不写当前节点。
+    #[tokio::test]
+    async fn imports_without_a_config_id_bind_the_global_config() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+
+        let data = services
+            .node_import_text(None, "ss://aes-256-gcm:pw@203.0.113.10:8388#A")
+            .await
+            .unwrap();
+        assert_eq!(data["imported"], 1);
+
+        let list = services.config_list().await.unwrap();
+        let configs = list["configs"].as_array().unwrap();
+        assert_eq!(configs.len(), 1, "没有配置时导入会懒创建一套");
+        assert_eq!(configs[0]["node_count"], 1);
+        assert!(configs[0]["current_node_id"].is_null());
+
+        let config_id = configs[0]["config_id"].as_str().unwrap().to_string();
+        let detail = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(detail["nodes"][0]["source"], "manual");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// 主流程：新建配置（带一个节点）→ 激活 → 连接 → 查询状态 → 断开。
@@ -9817,6 +10363,7 @@ mod config_service_tests {
 /// 系统代理真的被调用（走假 backend）、端口真的被挑出来并被监听。
 /// 而「sing-box 会不会接受这份配置」「mixed 端口上是不是 sing-box 在服务」
 /// 这两件事**没有验证**——那需要真实二进制，属于 `tests/generated_config_check.rs` 的职责。
+
 #[cfg(test)]
 mod main_flow_tests {
     use super::*;
@@ -10187,6 +10734,12 @@ mod main_flow_tests {
             .unwrap();
         let node_id = node["node_id"].as_str().unwrap().to_string();
 
+        // 导入 / 新建节点只进池子；用户点选或连接时才写当前节点。
+        h.services
+            .node_switch(&config_id, &node_id)
+            .await
+            .unwrap();
+
         let list = h.services.config_list().await.unwrap();
         let configs = list["configs"].as_array().unwrap();
         assert_eq!(configs.len(), 1, "新建后列表里应当只有这一套");
@@ -10195,7 +10748,7 @@ mod main_flow_tests {
         assert_eq!(
             configs[0]["current_node_id"],
             node_id.as_str(),
-            "唯一节点应当自动成为当前节点"
+            "node_switch 之后唯一节点应当成为当前节点"
         );
         // 第一套配置会**自动激活**（还没有别的配置可比）。这里把这条行为钉住，
         // 后面的 `config_activate` 因此测的是「重新激活并重连」而不是「从无到有」。
@@ -10634,8 +11187,8 @@ mod main_flow_tests {
     #[tokio::test]
     async fn connecting_another_config_stops_the_running_tun_first() {
         let mut h = harness();
-        let old = h.services.config_create(auto_port_input("旧 TUN")).await.unwrap();
-        let old_id = old["config_id"].as_str().unwrap().to_string();
+        // 全局单配置下不会有第二套；这里用一个不在库里的旧配置 id 模拟升级后接手。
+        let old_id = "cfg_old_runtime".to_string();
         // 新配置没有节点：连到「取节点」这一步就会失败，正好证明旧的已经先停了。
         let new = h.services.config_create(auto_port_input("新代理")).await.unwrap();
         let new_id = new["config_id"].as_str().unwrap().to_string();
@@ -10664,62 +11217,15 @@ mod main_flow_tests {
         );
     }
 
-    /// 反向同样成立：连 TUN 配置前先把在跑的代理运行时停掉。
-    #[tokio::test]
-    async fn connecting_a_tun_config_stops_the_running_proxy_first() {
-        let mut h = harness();
-        // 假运行时不会自己监听端口；启动判定要看到端口才成立。
-        let watcher = spawn_port_watcher(h.dir.clone());
-        let proxy_id = create_config_with_node(&h.services, "旧代理", "pw-old").await;
-        let connected = h.services.runtime_start(Some(proxy_id)).await.unwrap();
-        assert_eq!(connected["state"], "running");
-
-        let mut tun_input = auto_port_input("新 TUN");
-        tun_input.connect_mode = configs::CONNECTION_TUN.into();
-        let tun = h.services.config_create(tun_input).await.unwrap();
-        let tun_id = tun["config_id"].as_str().unwrap().to_string();
-        // 给 TUN 配置一个节点：否则会先倒在 no_nodes，走不到组件检查。
-        h.services
-            .node_create(NodeCreateInput {
-                config_id: Some(tun_id.clone()),
-                name: "东京".into(),
-                server: "198.51.100.30".into(),
-                port: 8388,
-                password: "pw-tun".into(), // secret-scan:allow 测试夹具口令
-                method: "aes-256-gcm".into(),
-            })
-            .await
-            .unwrap();
-
-        let backend = Arc::new(SilentTun::default());
-        inject_silent_tun(&mut h.services, Arc::clone(&backend));
-        let error = h
-            .services
-            .runtime_start(Some(tun_id))
-            .await
-            .expect_err("测试进程不是打包后的 .app，TUN 必然连不上");
-        assert_eq!(backend.stops(), 1, "连 TUN 前必须停掉在跑的代理运行时");
-        assert_eq!(
-            h.services.manager.status().await.state,
-            RuntimeState::Idle,
-            "旧代理运行时必须停干净"
-        );
-        assert_eq!(h.proxy_calls.lock().unwrap().restored, 1, "系统代理要撤掉");
-        let service = error.downcast_ref::<ServiceError>().unwrap();
-        assert_eq!(
-            service.details.as_ref().unwrap()["reason"],
-            "dev_unbundled",
-            "旧连接停完后才走到 TUN 的组件检查"
-        );
-        drop(watcher);
-    }
-
+    /// 反向的「代理 → TUN」不再靠第二套配置：现在换模式走 `config_set_mode`
+    /// （见下方 `config_set_mode_*` 测试），`runtime_start` 只接管同一套配置。
+    ///
     /// 旧连接停不掉：必须报错，且不能继续启动第二条连接。
     #[tokio::test]
     async fn a_failing_stop_blocks_the_new_connection() {
         let mut h = harness();
-        let old = h.services.config_create(auto_port_input("旧 TUN")).await.unwrap();
-        let old_id = old["config_id"].as_str().unwrap().to_string();
+        // 用一个不在库里的旧配置 id 模拟升级后接手的连接。
+        let old_id = "cfg_old_runtime".to_string();
         let new = h.services.config_create(auto_port_input("新代理")).await.unwrap();
         let new_id = new["config_id"].as_str().unwrap().to_string();
 
@@ -10991,36 +11497,6 @@ mod main_flow_tests {
             seen[0].snapshot.config_id.as_deref(),
             Some(config_id.as_str())
         );
-    }
-
-    /// 切换别的配置只写库：正在连的那套不受影响。
-    #[tokio::test]
-    async fn config_set_mode_only_writes_a_config_that_is_not_connected() {
-        let h = harness();
-        let watcher = spawn_reusable_port_watcher(h.dir.clone());
-        let running_id = create_config_with_node(&h.services, "正在跑", "pw-running").await;
-        let connected = h.services.runtime_start(Some(running_id.clone())).await.unwrap();
-        assert_eq!(connected["state"], "running", "{connected}");
-
-        let other = h.services.config_create(auto_port_input("另一套")).await.unwrap();
-        let other_id = other["config_id"].as_str().unwrap().to_string();
-        let data = h
-            .services
-            .config_set_mode(Some(other_id.clone()), configs::CONNECTION_TUN, false)
-            .await
-            .unwrap();
-        assert_eq!(data["changed"], true);
-        assert_eq!(data["connected"], false, "返回的是这套配置在不在跑");
-        assert_eq!(data["confirmation"], "not_needed");
-
-        let status = h.services.manager.status().await;
-        assert_eq!(status.state, RuntimeState::Running, "不能停掉另一套连接");
-        assert_eq!(status.config_id.as_deref(), Some(running_id.as_str()));
-        assert_eq!(
-            h.services.config_detail(&other_id).await.unwrap()["connect_mode"],
-            configs::CONNECTION_TUN
-        );
-        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 同值时不停连接、不重启。
@@ -11341,12 +11817,12 @@ mod main_flow_tests {
         let config_id = create_config_with_node(&h.services, "自建在线", "pw-manual-expire").await;
         let manual_node_id = {
             let conn = h.services.store.conn();
-            configs::get(&conn, &config_id)
-                .unwrap()
-                .unwrap()
-                .current_node_id
-                .expect("新建节点应成为当前节点")
+            configs::list_nodes(&conn, &config_id).unwrap()[0].id.clone()
         };
+        h.services
+            .node_switch(&config_id, &manual_node_id)
+            .await
+            .unwrap();
         attach_seed_node(&h.services, &config_id, "manual-case");
 
         let backend = Arc::new(SilentTun::default());

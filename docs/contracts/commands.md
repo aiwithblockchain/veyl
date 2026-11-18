@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.36.12`
+> 契约版本：`2.37.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -223,6 +223,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 92 | `config_set_mode` | `{ configId, mode }` | `ConfigSetModeData`（`{ config_id, mode, previous_mode, changed, connected, restored, confirmation }`） | **2.34.0 新增**；在线切换接管方式（会断开重连）；AI 侧经 `ConfigSetMode` 工具且必须确认 |
 | 93 | `quit_decision` | `{ action }` | `{ accepted: boolean }` | **2.35.0 新增（仅 UI）**；应用内退出确认的决策回执，只有第一次生效 |
 | 94 | `trial_status` | `{}` | `TrialStatusData`（`{ state, started_at, expires_at, remaining_ms, seed_node_count }`） | **2.36.0 新增（仅 UI）**；免费节点 7 天试用状态，只读本地 |
+| 95 | `node_attach` | `{ source?, nodeIds?, configId? }` | `NodeAttachData`（`{ config_id, created_config, attached_node_ids, skipped_node_ids, node_count, current_node_id }`） | **2.37.0 新增（仅 UI）**；把已存在的节点绑进全局配置，空库时懒创建；幂等；永不改 `current_node_id` |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -270,7 +271,7 @@ type NodeSummary = {
   port: number;
   method: string;
   protocol: "shadowsocks";           // 本阶段唯一取值
-  source: "seed" | "url" | "manual";
+  source: "seed" | "url" | "manual" | "owned";  // owned = 我的服务器；节点卡靠它标「免费节点 / 你的服务器」
   created_at: number;                // Unix 毫秒
 };
 
@@ -311,11 +312,13 @@ type ConfigListData = {
 - 空列表是合法状态，返回 `configs: []`，**不报错**。空态由 UI 渲染（`docs/configs-and-nav.md` §2.1）。
 - 列表里**不返回节点明细**，避免左栏为 N 个配置各拉一遍；要节点看 `config_detail`。
 
-> **全局单配置（2.36.0 口径）。** 界面**不再有配置列表、新建配置、切换配置**：全局只有一套网络配置，`configs` 表保留作为它的载体（`ai-first-product.md` §全局配置与设置）。因此：
-> - `config_list` 保留给内部与 AI 工具 `ConfigList`；UI 不再调用。前端需要「唯一配置」时由**一处**解析（优先 `is_active = true`，否则 `last_used_at` 最新，再否则 `created_at` 最早），不允许各组件各查一遍。
-> - `config_create` / `config_activate` 的 **UI 路径退场**：只有首次安装建那一条内部配置时调用，之后不再由界面触发。
-> - 老库存在多行时：**不删、不迁移、界面不可见**；首个安装包之前没有真实用户，`data-model.md` §0 的「整体重建」口径不变。
-> - AI 工具侧 `ConfigCreate` / `ConfigDelete` 的去留不在本版决定，本版不改工具集；AI 往池子里加节点仍走 `ConfigUpdate`。
+> **全局单配置（2.37.0 定稿）。** 界面**不再有配置列表、新建配置、切换配置**：全局只有一套网络配置，`configs` 表保留作为它的载体（`ai-first-product.md` §全局配置与设置，收敛方案见 `docs/design/global-config-merge.md`）。因此：
+> - **解析唯一配置的顺序固定为**：优先 `is_active = 1`；没有 active 时取 `last_used_at` 最新；再否则 `created_at` 最早。所有命令（`config_list` / `config_detail` / `node_attach` / 导入 / `config_set_mode`）都必须用同一套解析，不允许各查各的。
+> - `config_list` 保留：UI 用它读回当前配置（0 或 1 条），AI 工具与内部也用它；返回 0 条是合法状态。
+> - `config_create` 的 **UI 路径退场**：界面不再调用；唯一建行路径是 `node_attach` / 导入命令在空库时的懒创建（§3.2 / §4.0）。已有配置时 `config_create` 一律 `CONFLICT / config_exists`。
+> - `config_activate` / `config_delete` **UI 退休**：前者只允许指向唯一配置（幂等成功），其它 id → `CONFLICT / single_config`；后者恒 `PRECONDITION_FAILED / only_config`。
+> - **老库多行**：启动时合并成一行（保留 active / 最近使用那套，其余节点按相对顺序并入，`issues` 按 `merge_key` 合并），详见 `global-config-merge.md` §3.6。2.36.0 的「不删、不迁移」口径作废。
+> - AI 工具侧：`ConfigCreate` / `ConfigActivate` / `ConfigDelete` / `ConfigList` 全部退出（`tools.md` 3.18.0）；AI 往池子里加节点走 `NodeCreate` / `NodeImportUrl` / `NodeImportText`，绑定由服务层完成。
 
 ### 3.2 `config_create { name, connectMode, routingMode, targets?, source?, nodeIds?, dns?, tunExcludes? }` → `ConfigDetail`
 
@@ -334,6 +337,7 @@ type ConfigListData = {
 
 规则：
 
+- **已有全局配置 → `CONFLICT / config_exists`**，不建新行（2.37.0）：界面与 AI 都不得再新建配置；加节点走 `node_attach`（§4.0）或导入命令。**参数校验先于本判断**——非法参数仍按各自的错误报，不会被 `config_exists` 盖掉。全局配置的唯一创建路径是懒创建（§3.1）。
 - `source = "seed"` 且种子为空 → `PRECONDITION_FAILED`，`details.reason = "seed_unavailable"`，`details.hint = "先刷新 Veyl 免费节点或手动添加节点"`。
 - `nodeIds` 里有不存在的 id → `NOT_FOUND`，`details.node_ids` 列出全部无效项（一次报全，不让用户试错）。
 - **`source` 与非空 `nodeIds` 必须给一个**：`source = "seed"`，或至少一个有效节点 id。
@@ -358,7 +362,7 @@ type ConfigListData = {
 
 - 成功后发 `config-changed`（`change = "created"`，若自动激活再发一条 `"activated"`），见 `events.md` §4.9。
 
-错误：`INVALID_ARGUMENT`、`CONFLICT`、`NOT_FOUND`、`PRECONDITION_FAILED`、`UNSUPPORTED`、`INTERNAL`。
+错误：`INVALID_ARGUMENT`、`CONFLICT`（`duplicate_name` / **`config_exists`**）、`NOT_FOUND`、`PRECONDITION_FAILED`、`UNSUPPORTED`、`INTERNAL`。
 
 ### 3.3 `config_update { configId, name?, routingMode?, targets?, dns?, tunExcludes?, nodeIds? }` → `ConfigDetail`
 
@@ -394,6 +398,8 @@ type ConfigDeleteData = {
 };
 ```
 
+**2.37.0 起本命令恒拒绝**：全局配置是节点池与连接参数的唯一载体，删了它们没有落点。无论是否连接、池子是否为空，一律 `PRECONDITION_FAILED / only_config`；UI 不再调用，也不需要「先断开再删」的流程。下表是 2.36.x 及更早的语义，保留供旧版本回滚对照。
+
 | 情况 | 结果 |
 |---|---|
 | 不存在 | 幂等：`deleted = false`、`already_absent = true`，不报错 |
@@ -403,9 +409,9 @@ type ConfigDeleteData = {
 
 - 级联删除：该配置的 `config_nodes`、`layouts`、**该配置范围内的问题记录**（`issues.config_id` 外键级联）。问题记录的删除是刻意的：配置都没了，挂在它上面的诊断没有意义，留着会在问题列表里出现指向不存在配置的卡片。
 - 成功后发 `config-changed`（`change = "deleted"`）。
-- **不设「默认配置不可删除」的特例**（`docs/configs-and-nav.md` §2.1）：删光之后回到空态，从空态能重新生成。
+- ~~不设「默认配置不可删除」的特例~~ → **2.37.0 反转为全局配置不可删除**：不需要的节点从节点池里移除（`config_update.nodeIds`），不是删配置。
 
-错误：`PRECONDITION_FAILED`（`connected`）、`INTERNAL`。
+错误：`PRECONDITION_FAILED`（**`only_config`**；旧版本还有 `connected`）、`INTERNAL`。
 
 ### 3.5 `config_activate { configId }` → `ConfigActivateData`
 
@@ -418,22 +424,21 @@ type ConfigActivateData = {
 };
 ```
 
-| 当前状态 | 行为 |
+**2.37.0 起只有两种结果**：
+
+| 情况 | 行为 |
 |---|---|
-| 未连接 | 直接切 active，发 `config-changed(change = "activated")` |
-| 已连接 / 正在启动、目标不是当前连接的那套 | **同样只切 active**；不断开、不重连、不报错。界面用一句轻提示说明“仍连着原来那套” |
-| 已连接 / 正在启动、目标就是当前 active | 幂等返回，不发事件 |
-| 目标配置节点集为空 | 允许激活；UI 在左栏标「无节点」，连接时按 `no_nodes` 处理 |
+| `configId` 就是唯一配置 | **幂等成功**：`active_config_id` = 它，`changed: false`，`runtime` 原样返回；本来没激活就顺手置活跃，不发 `config-changed` |
+| 其它 id（不存在或旧库里的其他行） | `CONFLICT / single_config`，不改任何状态 |
 
-- **删除 `confirmDisconnect` 参数**：切换不再有需要确认的破坏性动作。
-- **删除 `reconnect` 字段**（`not_running` / `already_connected` / `reconnected` / `reconnect_failed` / `skipped_no_nodes` 都不再产生）。
-- **删除 `PRECONDITION_FAILED / will_disconnect` 这个分支**。`will_disconnect` 仍用于 `route_set_mode` 的旧数据跨家族分流切换（§10.2），与本命令无关。
-- 断开只发生在用户点「连接 VPN」时：`runtime_start` 先停旧连接再启动（§7.1）。
-- 成功后发 `config-changed`（`change = "activated"`），`runtime` 原样返回当前快照，调用方不得据此推断“已断开”。
-
-错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`quitting`）、`INTERNAL`。
+旧的多配置语义见下表，保留供回滚对照：~~未连接 / 已连接只切 active / 目标为空节点集~~ —— 单配置下这些分支不再可达。
 
 > UI 路径已退场（§3.1 的全局单配置口径）：界面不再有「切换配置」。命令与事件保留，供旧数据回滚与内部使用。
+
+- 多配置时代的 `confirmDisconnect` / `reconnect` / `will_disconnect` 分支在 2.37.0 之后不可达，不再产生。
+- 成功后不再发 `config-changed`（单配置下没有「切到另一套」这个事实）。
+
+错误：`CONFLICT`（`single_config`）、`INTERNAL`。
 
 ### 3.6 `config_detail { configId }` → `ConfigDetail`
 
@@ -488,7 +493,39 @@ type ConfigSetModeData = {
 
 ## 4. 节点
 
-节点是**全局池**里的服务器，一套配置通过 `config_nodes` 引用若干节点。同一个节点可以被多套配置引用（`docs/configs-and-nav.md` §7）。
+节点是**全局池**里的服务器，一套配置通过 `config_nodes` 引用若干节点。**2.37.0 起只有一套全局配置，`config_nodes` 就是全局节点池**；旧文档里「多套配置共享节点」的说法只对旧数据成立。
+
+### 4.0 `node_attach { source?, nodeIds?, configId? }` → `NodeAttachData`（仅 UI，2.37.0）
+
+把**已存在的节点**绑进全局配置。不联网、不解析、不读密码——只做绑定。种子节点由 `default_profile_refresh` 落进 `nodes`，自建服务器节点由 `my_server_credentials` 落库，两者都经本命令进池。
+
+```ts
+type NodeAttachData = {
+  config_id: string;              // 全局配置 id（可能是本次懒创建出来的）
+  created_config: boolean;        // 本次是否新建了默认配置
+  attached_node_ids: string[];    // 本次真正绑上的，按入参顺序
+  skipped_node_ids: string[];     // 已在池里的
+  node_count: number;             // 绑定后的池大小
+  current_node_id: string | null; // 原样返回；本命令永不改它
+};
+```
+
+| 参数 | 规则 |
+|---|---|
+| `source` | 只能 `"seed"`：把当前种子里的全部节点落库并绑定。与 `nodeIds` **二选一** |
+| `nodeIds` | 已存在的节点 id 列表；顺序即绑入顺序。非空数组才算提供 |
+| `configId` | 省略即可；给了必须等于唯一配置 id，否则 `CONFLICT / not_global_config` |
+
+规则：
+
+- **二选一校验**：两个都没给 → `INVALID_ARGUMENT / source_required`；两个都给 → `INVALID_ARGUMENT / source_and_node_ids_conflict`；`source` 不是 `"seed"` → `INVALID_ARGUMENT / invalid_source`。
+- **懒创建**：库里没有配置时，用 `name = "默认配置"`、`connect_mode = "system_proxy"`、`routing_mode = "direct"`、`dns = auto`、`tun_excludes = []`、`current_node_id = null` 建唯一配置，`created_config = true`。并发靠 `configs.name UNIQUE`（`INSERT … ON CONFLICT DO NOTHING` 后回查），不得先查后插。
+- **幂等**：已绑定的节点进 `skipped_node_ids`，不重复插入、不报错；同一批里的重复 id 只算第一次。
+- **永不改 `current_node_id`**：当前节点为空也保持为空。要改当前节点只能调 `node_switch`（§4.3）；服务器「连接」流程是 `my_server_credentials` → `node_attach` → `node_switch` → `runtime_start`。
+- **与切换接管方式互斥**：同一配置正有 `config_set_mode` 在跑 → `CONFLICT / switch_in_progress`，`retryable: true`。
+- 成功且确有新增时发 `node-list-changed`（`reason = "bindings_changed"`，`config_id` = 全局配置）+ `config-changed(change = "updated")`；全部跳过时不发事件。
+
+错误：`INVALID_ARGUMENT`（`source_required` / `source_and_node_ids_conflict` / `invalid_source`）、`NOT_FOUND`（`node_not_found`，`details.node_ids` 一次列全）、`PRECONDITION_FAILED`（`seed_unavailable`）、`CONFLICT`（`not_global_config` / `switch_in_progress`）、`INTERNAL`。
 
 ### 4.1 `node_import_url { url, configId? }` → `NodeImportResult`
 
@@ -517,7 +554,7 @@ type ImportSkipReason =
 
 - 节点去重键：`server` + `port` + `method` + `name`。命中已有节点时计入 `skipped`（`reason = "duplicate"`），**不新建记录**。
 - 传了 `configId` → 新节点按解析顺序追加到该配置节点集末尾；配置已有 `current_node_id` 时不动它，没有时取第一个。发 `node-list-changed`（`reason = "url_import"`）+ `config-changed`（`change = "updated"`）。
-- 不传 `configId` → 只进节点池，不绑定任何配置。
+- 不传 `configId` → **绑定全局配置**（2.37.0 起；不再是「只进池不绑定」）：没有配置时先懒创建默认配置，语义同 `node_attach`（§4.0）。
 - 返回值与日志**永不含密码**，不回显订阅内容。
 - 本阶段**只做 Shadowsocks**，method 白名单由 Host 常量维护（`nodes::SUPPORTED_METHODS`，覆盖 sing-box 支持的 Shadowsocks 方法）；白名单变化不要求改表结构。
 
@@ -540,7 +577,7 @@ type ImportSkipReason =
 
 - 传了 `configId` → 新节点按解析顺序追加到该配置；配置已有 `current_node_id` 时不动它，没有时取第一个。发 `node-list-changed`（`reason = "manual_create"`，沿用现有枚举）+ `config-changed`（`change = "updated"`）。
 - 文本导入能出现的 `skipped.reason` 只有四种：`unsupported_scheme` / `unsupported_method` / `malformed` / `duplicate`。整段都解析不出时直接报 `not_node_text`，**不产生 `subscription_empty`**（那个值只属于 URL / 订阅路径）。
-- 不传 `configId` → 只进节点池。
+- 不传 `configId` → **绑定全局配置**（2.37.0 起，语义同 §4.0）：没有配置时先懒创建。
 - 返回值与日志**永不含密码**，也不回显粘贴内容。
 - 本阶段只做 Shadowsocks，方法白名单同 §4.1。
 
@@ -588,11 +625,11 @@ type ImportSkipReason =
 | 自动连接 | **不做** |
 
 - 返回原样复用 `NodeImportResult`（§4.1）：`imported`、`skipped[]`（`unsupported_scheme` / `unsupported_method` / `malformed` / `duplicate`）、`nodes[]`。**不返回 `path`，不回显文件内容**；日志同样不写路径与内容。
-- 传 `configId` → 按解析顺序追加，配置没有 `current_node_id` 时取第一个；发 `node-list-changed(reason = "manual_create")` + `config-changed(change = "updated")`。不传 → 只进节点池。
+- 传 `configId` → 按解析顺序追加，配置没有 `current_node_id` 时取第一个；发 `node-list-changed(reason = "manual_create")` + `config-changed(change = "updated")`。**不传 → 绑定全局配置**（2.37.0 起，没有配置时懒创建），语义同 §4.0。
 - 安全边界：**Host 无法验证路径是否真由用户选出**，保证来自四层约束——仅 UI 注册（不注册 AI 工具，模型不能传路径）+ 绝对路径 + 1 MiB 上限 + 不返回路径与内容。若需要密码学意义上的来源证明，要改成 Host 侧拉起文件对话框并直接导入（路径不经过前端），本轮不做。
 - 联动：`runtime.md` **不涉及**（只写节点池 / 配置节点集，不经过 Runtime Manager，不改变 `RuntimeSnapshot`，不重启连接）；`events.md` **不涉及**（复用 `manual_create`；该枚举注释目前只写了 `node_create`，等下次 events 升版再补文本，不为此单独升版）；`tools.md` **不涉及**（无 AI 工具）；`data-model.md` **不涉及**（节点表与 `source` 已存在）。
 
-**前端行为约定**：文件入口用**系统对话框**（`plugin-dialog open()`，复用现有 `dialog:allow-open`，不新增权限），不用应用内文件树，也**不接窗口拖放**。选完**不立刻导入**：先显示文件名并要一次「导入」确认，确认后调用本命令；**不把文件内容填进文本框**——那需要前端读文件（fs 权限）或命令返回全文，两者都会破坏「不回显内容」与最小权限。必须传当前配置的 `configId`；没有当前配置时不调用本命令，先让用户在左侧选或新建一套配置，避免节点只进池却在界面上看不见。
+**前端行为约定**：文件入口用**系统对话框**（`plugin-dialog open()`，复用现有 `dialog:allow-open`，不新增权限），不用应用内文件树，也**不接窗口拖放**。选完**不立刻导入**：先显示文件名并要一次「导入」确认，确认后调用本命令；**不把文件内容填进文本框**——那需要前端读文件（fs 权限）或命令返回全文，两者都会破坏「不回显内容」与最小权限。2.37.0 起**不需要传 `configId`**：全局只有一套配置，省略即绑定它，没配置时懒创建——不再有「先让用户选一套配置」这一步。
 
 | 错误码 | `details.reason` | 场景 |
 |---|---|---|
@@ -621,7 +658,7 @@ type ImportSkipReason =
 | `password` | 非空、≤ 256 字符。**只进 `secrets.enc`**，不落库、不进日志、不进错误信息 |
 
 - 写入顺序：先写 `secrets.enc` 的 `node:<新 id>`，再在事务里写 `nodes` + 可选 `config_nodes`。行写入失败 → 删除刚写的密钥，不留孤儿。
-- `configId` 指定时追加到该配置；语义与 §4.1 相同。
+- `configId` 指定时追加到该配置；**省略时绑定全局配置**（2.37.0 起，没有配置时懒创建）。语义与 §4.1 相同。
 - 成功后发 `node-list-changed`（`reason = "manual_create"`），有 `configId` 再发 `config-changed`（`change = "updated"`）。
 - **不自动连接**，不触发探测。
 
@@ -1700,7 +1737,7 @@ type TrialStatusData = {
   started_at: string | null;      // ISO 8601 UTC；available 时 null
   expires_at: string | null;      // started_at + 7d（Host 计算）；available 时 null
   remaining_ms: number | null;    // expired 恒为 0；available 为 null；active 为剩余毫秒（不小于 0）
-  seed_node_count: number;        // 全库去重的 source = 'seed' 节点数（所有配置并集）
+  seed_node_count: number;        // 去重的 source = 'seed' 节点数（全局配置内；旧库多行时按全库并集）
 };
 ```
 
@@ -1712,7 +1749,9 @@ type TrialStatusData = {
 
 - **起算点**：只有「连接成功且本次连接的节点 `source = 'seed'`」才写 `started_at`，由 Host 在 `runtime_start` 成功后写入，**没有对应的写命令**。连自建节点不起算。
 - **到期清理不属于本命令**。清理由 Host 在三个时机自行执行：应用启动、`runtime_start` 成功之后、每 5 分钟定时。启动时只跑数据库事务，断连放到后台任务，不阻塞启动。UI 在启动时读 `trial_status`，此时事务已经提交——`state = "expired"` 就一定是「节点已移除」之后的状态，不需要 UI 再判断一次。
-- **清理范围是全库**：所有配置里的种子节点关联都移除，不区分当前激活配置。
+- **清理范围是全局配置**（2.37.0 措辞；单配置后与旧「全库」等价）：唯一配置里的种子节点关联全部移除。旧库若还有未合并的多行，按全库执行——清理不依赖合并是否完成。
+- **只删关联、不重排 `position`**（`trial.rs:181`）：剩余节点的 `position` 原样保留，允许空号；渲染按 `position ASC`，所以自建节点的相对顺序与前移都不会发生。**禁止在清理后重编号**。
+- **`current_node_id` 写库回落**：指向被删种子节点时，事务内 UPDATE 成剩余节点里 `position` 最小的那个，没有剩余才置 `NULL`。界面不得自己算 fallback，收到 `trial-expired` 后重读 `config_detail`。
 - **清理步骤（一次数据库事务 + 一次运行时动作）**：
   1. 把全库的种子节点写进 `seed_node_exclusions`（防止下次 `default_profile_refresh` 加回来）；
   2. 删除这些节点的所有 `config_nodes` 关联；`configs.current_node_id` 若指向被移除的节点，改到剩余第一个，没有剩余则置 `null`；
@@ -2430,10 +2469,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.36.12** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** |
+| `contracts/commands.md` | **2.37.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** |
 | `contracts/events.md` | **2.17.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.17.5** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** |
+| `contracts/tools.md` | **3.18.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** |
 | `data-model.md` | **9** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` + `current_node_id` 允许为 `NULL`（seed 预选不写库） |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -2448,6 +2487,18 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.37.0（2026-11-17，全局单配置定稿）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.37.0`；新增 §4.0 `node_attach { source?, nodeIds?, configId? }`（仅 UI）：二选一校验、空库懒创建、幂等、**永不改 `current_node_id`**、与 `config_set_mode` 互斥（`switch_in_progress`） | 新增命令 | `global-config-merge.md`；产品负责人拍板 |
+| 2 | §3.1 重写：唯一配置的解析顺序固定为 `is_active` → `last_used_at` → `created_at`；`config_list` 保留（UI 也读）；老库多行启动时合并（2.36.0 的「不删不迁移」作废）；AI 侧配置工具全部退出 | 语义变更 | 同上 |
+| 3 | §3.2 `config_create` 已有全局配置 → `CONFLICT / config_exists`；§3.4 `config_delete` 恒 `PRECONDITION_FAILED / only_config`；§3.5 `config_activate` 同 id 幂等、其它 id `CONFLICT / single_config` | 行为变更 | 同上 |
+| 4 | §4.0 / §4.1 / §4.1.1 / §4.1.2 / §4.2：导入与手填命令**省略 `configId` = 绑定全局配置**（没有配置时懒创建），不再是「只进池不绑定」 | 语义变更 | 同上 |
+| 5 | `NodeSummary.source` 增 `"owned"`（我的服务器）；节点卡靠它标「免费节点 / 你的服务器」 | 字段补全 | 实现已发该值、契约漏记 |
+| 6 | §7.19 清理范围措辞由「全库」改为「全局配置」；补「只删关联、不重排 `position`」与「`current_node_id` 写库回落、界面不得自算」 | 语义澄清 | 四条验收口径（2026-11-17） |
+| 7 | §15 矩阵同步 `tools.md` 3.18.0 | 元数据 | 同批 |
 
 ### 2.36.12（2026-11-17，接管方式用词与失败回退口径）
 

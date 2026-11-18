@@ -579,7 +579,7 @@ export default function App() {
     }
   };
 
-  // 服务器详情「连接」：Host 验签落库后把节点放进配置，配置就绪再连接。
+  // 服务器详情「连接」：凭据落库后把节点绑进全局池，切到这台节点，再走既有连接流程。
   const handleUseServer = async (server: MyServer) => {
     if (useServerInFlightRef.current) return;
     useServerInFlightRef.current = true;
@@ -587,32 +587,27 @@ export default function App() {
     try {
       const node = await bridge.myServerCredentials(server.server_id);
       if (destinationRef.current !== startedDestination) return;
-      const created = await vpn.createConfig({
-        name: server.name,
-        connectMode: "system_proxy",
-        routingMode: "direct",
-        nodeIds: [node.node_id],
-      });
-      if (!created.ok) {
+      const attached = await vpn.attachNodes({ nodeIds: [node.node_id] });
+      if (!attached.ok) {
         setAppNotice({
           level: "error",
-          text: created.message ?? "没拿到这台服务器的节点。",
+          text: attached.message ?? "没拿到这台服务器的节点。",
         });
         return;
       }
-      const targetConfigId = created.configId ?? null;
-      // 已连着别的配置时，新建不会变成当前配置：先切过去，否则 start 连的还是旧节点。
-      if (!created.activated) {
-        const selected = targetConfigId
-          ? await vpn.selectConfig(targetConfigId)
-          : { ok: false };
-        if (!selected.ok) {
-          setAppNotice({
-            level: "error",
-            text: selected.message ?? "服务器节点已加入，但没能切过去，可以再点一次连接。",
-          });
-          return;
-        }
+      const targetConfigId = attached.configId ?? vpn.activeConfig?.config_id ?? null;
+      if (!targetConfigId) {
+        setAppNotice({ level: "error", text: "服务器节点已加入，但没找到全局配置。" });
+        return;
+      }
+      // attach 不改当前节点：显式切到这台，再让下面的启动流程连新节点。
+      const switched = await vpn.switchNode(node.node_id, targetConfigId);
+      if (!switched.ok) {
+        setAppNotice({
+          level: "error",
+          text: switched.message ?? "服务器节点已加入，但没能切过去，可以再点一次连接。",
+        });
+        return;
       }
       pendingServerConnectRef.current = targetConfigId;
       changeDestination("client");
@@ -670,10 +665,9 @@ export default function App() {
     vpn.activeConfig && routingOverride?.configId === vpn.activeConfig.config_id
       ? routingOverride.mode
       : vpn.activeConfig?.routing_mode ?? null;
-  // 全局只有一个节点池：有节点才显示节点卡，没有就停在两选一。
+  // 全局只有一个节点池：只认全局配置里的节点，不再看隐藏的其它配置。
   const hasNodes = Boolean(
-    (vpn.activeConfig && vpn.activeConfig.nodes.length > 0) ||
-      vpn.configs.some((config) => config.node_count > 0),
+    vpn.activeConfig && vpn.activeConfig.node_count > 0,
   );
 
   /** 当前屏幕：随每条消息带给 Host，是 UI 状态不是用户指令。 */
@@ -1964,17 +1958,12 @@ export default function App() {
     commitTrialFlow(afterFetch);
 
     const joinStartedAt = Date.now();
-    const created = await vpn.createConfig({
-      name: "免费节点",
-      connectMode: "system_proxy",
-      routingMode: "direct",
-      source: "seed",
-    });
-    if (!created.ok) {
+    const attached = await vpn.attachNodes({ source: "seed" });
+    if (!attached.ok) {
       failTrial(
         trialFlowRef.current ?? afterFetch,
         "join",
-        created.message ?? "没能加入免费节点，再试一次。",
+        attached.message ?? "没能加入免费节点，再试一次。",
         Date.now() - joinStartedAt,
       );
       return;
@@ -1998,7 +1987,7 @@ export default function App() {
     if (!config) return;
     if (config.nodes.length === 0) {
       trialProbeStartedRef.current = true;
-      void vpn.deleteConfig(config.config_id);
+      // 全局配置不能删：attach 失败时池子没变，直接报错重试即可。
       failTrial(
         trialFlow,
         "probe",
@@ -2068,7 +2057,7 @@ export default function App() {
       trialBusyRef.current = false;
       setTrialBusy(false);
     })();
-  }, [trialFlow, vpn.loading, vpn.activeConfig, bridge, nodeProbes, vpn.deleteConfig, vpn.error]);
+  }, [trialFlow, vpn.loading, vpn.activeConfig, bridge, nodeProbes, vpn.error]);
 
   const handleRetryTrial = () => {
     const current = trialFlowRef.current;
@@ -2396,6 +2385,7 @@ export default function App() {
           onActionCardAction={handleActionCardAction}
           onDiagnose={handleDiagnose}
           trialSummary={trialFlow?.summary ?? null}
+          trialExpiresAt={trial?.expires_at ?? null}
           preselect={trialPreselect}
           onPreselectApplied={(nonce) =>
             setTrialPreselect((current) =>

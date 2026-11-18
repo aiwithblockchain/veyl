@@ -38,6 +38,8 @@ interface Props {
   destroyedNodeIds?: ReadonlySet<string>;
   /** 免费节点步骤流完成后的收敛句：已加入 N 个免费节点，最快 Xms。 */
   trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
+  /** 试用截止时间（ISO）：免费组标题右侧按剩余天数写到期文案。 */
+  trialExpiresAt?: string | null;
   /** 试用步骤流完成时的一次性预选；之后任何测速都不重新推导。 */
   preselect?: { configId: string; nodeId: string; nonce: number } | null;
   /** 预选应用后通知 Host 消费掉，避免切走再回来二次应用。 */
@@ -84,6 +86,7 @@ export function ConnectionStage({
   onDiagnose,
   destroyedNodeIds = new Set<string>(),
   trialSummary = null,
+  trialExpiresAt = null,
   preselect = null,
   onPreselectApplied,
   onProbe,
@@ -346,6 +349,67 @@ export function ConnectionStage({
         ? "is-busy"
         : "is-ok";
 
+  const nodeEntries = nodes.map((node, index) => ({ node, index }));
+  const freeEntries = nodeEntries.filter(({ node }) => node.source === "seed");
+  const ownedEntries = nodeEntries.filter(({ node }) => node.source !== "seed");
+  /** 两类同池才分组；只有一类时与单来源的卡片完全一致。 */
+  const mixedSources = freeEntries.length > 0 && ownedEntries.length > 0;
+  const allSeed = nodes.length > 0 && freeEntries.length === nodes.length;
+
+  /** 免费组标题右侧：按剩余天数向上取整；拿不到截止时间才退回「试用中」。 */
+  const trialHint = (() => {
+    if (!trialExpiresAt) return "试用中";
+    const ends = Date.parse(trialExpiresAt);
+    if (!Number.isFinite(ends)) return "试用中";
+    const remaining = ends - now;
+    if (remaining < 86_400_000) return "今天到期";
+    return `${Math.ceil(remaining / 86_400_000)} 天后到期`;
+  })();
+
+  const renderNode = ({ node, index }: (typeof nodeEntries)[number]) => {
+    const latency = latencies[index];
+    const active = node.node_id === selectedId;
+    const destroyed = destroyedNodeIds.has(node.node_id);
+    const probeFailed = nodeProbes.results[node.node_id]?.reachable === false;
+    return (
+      <button
+        key={node.node_id}
+        type="button"
+        role="option"
+        aria-selected={active}
+        className={`stage-node ${active ? "is-selected" : ""} ${
+          destroyed ? "is-destroyed" : ""
+        }`}
+        onClick={() => {
+          if (!destroyed) void switchTo(node.node_id);
+        }}
+        disabled={switching !== null || destroyed}
+      >
+        <span className="stage-node__name" title={node.name}>
+          <span className="stage-node__name-text">
+            {displayNames[index] ?? node.name}
+          </span>
+          {fastestMarkId === node.node_id ? (
+            <span className="stage-node__fastest">最快</span>
+          ) : null}
+          {destroyed ? <span className="stage-node__badge">已销毁</span> : null}
+        </span>
+        <span
+          className="stage-node__ms"
+          aria-label={probeFailed ? "这次没测通" : undefined}
+        >
+          {switching === node.node_id
+            ? "切换中"
+            : nodeProbes.probing.has(node.node_id)
+              ? "测速中"
+              : latency !== null
+                ? formatLatency(latency)
+                : "—"}
+        </span>
+      </button>
+    );
+  };
+
   return (
     <main className="connection-stage" aria-label="连接">
       <div className="connection-stage__col">
@@ -400,14 +464,12 @@ export function ConnectionStage({
           </section>
         ))}
 
-        <section className="stage-card" aria-label={config?.name ?? "节点"}>
+        <section className="stage-card" aria-label="节点">
           <header className="stage-card__head">
-            <h2 className="stage-card__title">{config?.name ?? "节点"}</h2>
+            <h2 className="stage-card__title">节点</h2>
             <div className="stage-card__subrow">
               <p className="stage-card__sub">
-                {`${nodes.length} 个节点${
-                  nodes.some((node) => node.source === "seed") ? " · 7 天试用" : ""
-                }`}
+                {`${nodes.length} 个节点${allSeed ? " · 7 天试用" : ""}`}
               </p>
               {onProbe && nodes.length > 0 ? (
                 <button
@@ -443,52 +505,25 @@ export function ConnectionStage({
             ) : null}
           </header>
           <div className="stage-card__nodes" role="listbox" aria-label="节点">
-            {nodes.map((node, index) => {
-              const latency = latencies[index];
-              const active = node.node_id === selectedId;
-              const destroyed = destroyedNodeIds.has(node.node_id);
-              const probeFailed =
-                nodeProbes.results[node.node_id]?.reachable === false;
-              return (
-                <button
-                  key={node.node_id}
-                  type="button"
-                  role="option"
-                  aria-selected={active}
-                  className={`stage-node ${active ? "is-selected" : ""} ${
-                    destroyed ? "is-destroyed" : ""
-                  }`}
-                  onClick={() => {
-                    if (!destroyed) void switchTo(node.node_id);
-                  }}
-                  disabled={switching !== null || destroyed}
-                >
-                  <span className="stage-node__name" title={node.name}>
-                    <span className="stage-node__name-text">
-                      {displayNames[index] ?? node.name}
-                    </span>
-                    {fastestMarkId === node.node_id ? (
-                      <span className="stage-node__fastest">最快</span>
-                    ) : null}
-                    {destroyed ? (
-                      <span className="stage-node__badge">已销毁</span>
-                    ) : null}
-                  </span>
-                  <span
-                    className="stage-node__ms"
-                    aria-label={probeFailed ? "这次没测通" : undefined}
-                  >
-                    {switching === node.node_id
-                      ? "切换中"
-                      : nodeProbes.probing.has(node.node_id)
-                        ? "测速中"
-                        : latency !== null
-                          ? formatLatency(latency)
-                          : "—"}
-                  </span>
-                </button>
-              );
-            })}
+            {mixedSources ? (
+              <>
+                <div className="stage-node-group" role="group" aria-label="你的服务器">
+                  <div className="stage-node-group__head">
+                    <span>你的服务器</span>
+                  </div>
+                  {ownedEntries.map(renderNode)}
+                </div>
+                <div className="stage-node-group" role="group" aria-label="免费节点">
+                  <div className="stage-node-group__head">
+                    <span>免费节点</span>
+                    <span className="stage-node-group__hint">{trialHint}</span>
+                  </div>
+                  {freeEntries.map(renderNode)}
+                </div>
+              </>
+            ) : (
+              nodeEntries.map(renderNode)
+            )}
           </div>
         </section>
 

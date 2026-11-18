@@ -504,7 +504,7 @@ export interface NodeSummary {
   port: number;
   method: string;
   protocol: "shadowsocks";
-  source: "seed" | "url" | "manual";
+  source: "seed" | "url" | "manual" | "owned";
   created_at: number;
 }
 
@@ -533,6 +533,25 @@ export interface NodeCreateInput {
   method: string;
   password: string;
   configId?: string;
+}
+
+/** 把已存在的节点绑进全局配置（commands.md 2.37.0，仅 UI）。 */
+export interface NodeAttachInput {
+  /** 与 nodeIds 二选一：把种子节点全部绑进池子。 */
+  source?: "seed";
+  nodeIds?: string[];
+  configId?: string;
+}
+
+export interface NodeAttachResult {
+  /** 全局配置 id（可能是本次懒创建出来的）。 */
+  config_id: string;
+  created_config: boolean;
+  attached_node_ids: string[];
+  skipped_node_ids: string[];
+  node_count: number;
+  /** 原样返回；attach 不改当前节点。 */
+  current_node_id: string | null;
 }
 
 /** 服务分类（commands.md §10.7）。`proxy_selected` 的 targets 只能取这里的 id。 */

@@ -29,6 +29,10 @@ impl Store {
         let conn = Connection::open(&path)?;
         configure(&conn)?;
         migrations::migrate(&conn)?;
+        // 全局单配置收敛：多配置在 UI 读配置之前合掉（data-model.md 不变量）。
+        // **迁移先于界面挂载，故不发 `config-changed` / `node-list-changed`**：
+        // 此刻还没有订阅者；界面启动时自己会读一次 `config_list`。
+        super::configs::merge_into_global(&conn)?;
         let store = Self {
             conn: Mutex::new(conn),
             path,

@@ -221,7 +221,7 @@ mod display_projection_tests {
         let emitter = SessionEmitter::new("req_1", "msg_1");
         emitter.tool_end_payload(
             "tool_1",
-            "ConfigList",
+            "ConfigDetail",
             true,
             "给模型看的正文",
             None,

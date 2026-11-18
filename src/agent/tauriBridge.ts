@@ -77,6 +77,8 @@ import type {
   ConfigDetail,
   ConfigRouteMode,
   NodeCreateInput,
+  NodeAttachInput,
+  NodeAttachResult,
   NodeImportResult,
   NodeImportSkipped,
   NodeSummary,
@@ -363,6 +365,23 @@ const IMPORT_SKIP_REASONS = [
   "duplicate",
   "subscription_empty",
 ] as const;
+
+function normalizeNodeAttach(raw: unknown): NodeAttachResult {
+  const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const readIds = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string")
+      : [];
+  return {
+    config_id: typeof record.config_id === "string" ? record.config_id : "",
+    created_config: record.created_config === true,
+    attached_node_ids: readIds(record.attached_node_ids),
+    skipped_node_ids: readIds(record.skipped_node_ids),
+    node_count: typeof record.node_count === "number" ? record.node_count : 0,
+    current_node_id:
+      typeof record.current_node_id === "string" ? record.current_node_id : null,
+  };
+}
 
 function normalizeNodeImport(raw: {
   imported?: unknown;
@@ -1067,6 +1086,16 @@ export class TauriAgentBridge implements AgentBridge {
       throw { code: "INTERNAL", message: "后端返回的节点缺少标识", details: null };
     }
     return node;
+  }
+
+  async nodeAttach(input: NodeAttachInput): Promise<NodeAttachResult> {
+    return normalizeNodeAttach(
+      await call<unknown>("node_attach", {
+        ...(input.source ? { source: input.source } : {}),
+        ...(input.nodeIds ? { nodeIds: input.nodeIds } : {}),
+        ...(input.configId ? { configId: input.configId } : {}),
+      }),
+    );
   }
 
   async nodeImportUrl(url: string, configId?: string): Promise<NodeImportResult> {

@@ -246,6 +246,11 @@ describe("TUN 启动成功后的界面状态", () => {
     await waitFor(() =>
       expect(container.querySelector(".state-line__label")?.textContent).toContain("已连接"),
     );
+    // 启停链路里的 refreshReal 可能晚一拍才读快照：等异步收尾再取基准，
+    // 否则晚到的读会算进「4 秒内不该补拉」的计数里。
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
 
     const before = snapshots.mock.calls.length;
     nowSpy.mockReturnValue(BASE + 4_000);

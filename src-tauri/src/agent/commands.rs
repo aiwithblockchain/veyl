@@ -1173,6 +1173,21 @@ pub async fn node_create(
         .map_err(error_value)
 }
 
+/// 仅 UI：把节点绑进全局配置。`source` 与 `nodeIds` 二选一；幂等，不改当前节点。
+#[tauri::command]
+pub async fn node_attach(
+    state: State<'_, Arc<AppState>>,
+    source: Option<String>,
+    node_ids: Option<Vec<String>>,
+    config_id: Option<String>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .node_attach(source, node_ids, config_id)
+        .await
+        .map_err(error_value)
+}
+
 /// 切换一套配置的当前节点。已连接时走 selector 热切，不断流。
 #[tauri::command]
 pub async fn node_switch(
