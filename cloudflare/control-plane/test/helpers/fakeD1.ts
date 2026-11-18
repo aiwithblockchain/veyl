@@ -389,6 +389,8 @@ export class FakeD1 {
         if (hasPendingGuard) {
           row.paid_at = a[0];
           row.server_id = a[1];
+          // 钱包结账的认领语句带 paid_via = 'wallet'，退款链路靠它判断钱从哪来。
+          row.paid_via = "wallet";
         }
       }
       return null;

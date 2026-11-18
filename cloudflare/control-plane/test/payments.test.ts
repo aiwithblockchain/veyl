@@ -65,7 +65,7 @@ async function makeEnv(db: FakeD1, environment = "dev") {
 
 type TestEnv = Awaited<ReturnType<typeof makeEnv>>;
 
-function stubUpstream() {
+function stubUpstream(options: { droplet?: { status: number; body: string } } = {}) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -92,6 +92,9 @@ function stubUpstream() {
         });
       }
       if (href.endsWith("/droplets") && init?.method === "POST") {
+        if (options.droplet) {
+          return new Response(options.droplet.body, { status: options.droplet.status });
+        }
         return new Response(
           JSON.stringify({ droplet: { id: 888001, status: "new", networks: { v4: [] } } }),
           { status: 202 },
@@ -385,5 +388,73 @@ describe("买机扣余额", () => {
     expect(server.daily_price_cents).toBe(30);
     // 不写 paid_until 会让续费扫描永远扫不到（永久免单）。
     expect(Number(server.paid_until)).toBeGreaterThan(Date.now());
+  });
+
+  it("建机被 4xx 拒绝：退款、订单置 failed、服务器保留 error", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    stubUpstream({
+      droplet: {
+        status: 422,
+        body: JSON.stringify({ id: "unprocessable_entity", message: "You specified an invalid image" }),
+      },
+    });
+    db.rows("accounts")[0].balance_cents = 2000;
+    const orderId = await createOrder(env);
+
+    const res = await handleOrders(
+      new Request(`https://example.com/v1/orders/${orderId}/checkout`, {
+        method: "POST",
+        headers: { ...authed(env.token), "Idempotency-Key": "idem-wallet-checkout-422" },
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(502);
+    const body = (await res!.json()) as { retryable: boolean; details: { reason: string } };
+    expect(body.details.reason).toBe("upstream_422");
+    expect(body.retryable).toBe(false);
+
+    // 扣了 30 又退 30：用户不该为拿不到的机器付钱。
+    expect(db.rows("accounts")[0].balance_cents).toBe(2000);
+    const refunds = db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund");
+    expect(refunds).toHaveLength(1);
+    expect(refunds[0].amount_cents).toBe(30);
+
+    expect(db.rows("orders")[0].state).toBe("failed");
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("error");
+    expect(server.provider_id).toBeNull();
+
+    const audit = db.rows("audit_log");
+    const failed = audit.find((row) => row.action === "provision.failed");
+    expect(String(failed?.detail)).toContain("upstream");
+    expect(String(failed?.detail)).toContain("invalid image");
+    expect(audit.some((row) => row.action === "provision.refunded")).toBe(true);
+  });
+
+  it("建机被 5xx 拒绝：不退款，订单退回 paid 等补建", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    stubUpstream({ droplet: { status: 500, body: JSON.stringify({ id: "server_error" }) } });
+    db.rows("accounts")[0].balance_cents = 2000;
+    const orderId = await createOrder(env);
+
+    const res = await handleOrders(
+      new Request(`https://example.com/v1/orders/${orderId}/checkout`, {
+        method: "POST",
+        headers: { ...authed(env.token), "Idempotency-Key": "idem-wallet-checkout-500" },
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(502);
+    const body = (await res!.json()) as { retryable: boolean; details: { reason: string } };
+    expect(body.details.reason).toBe("upstream_500");
+    expect(body.retryable).toBe(true);
+
+    // 钱不退：Cron 会按 paid 订单继续补建。
+    expect(db.rows("accounts")[0].balance_cents).toBe(1970);
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
+    expect(db.rows("orders")[0].state).toBe("paid");
+    expect(db.rows("servers")[0].state).toBe("error");
   });
 });

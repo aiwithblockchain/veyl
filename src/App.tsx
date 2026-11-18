@@ -519,7 +519,7 @@ export default function App() {
     runtimeAuthorityRef.current,
   );
   const nodeProbes = useNodeProbes({ bridge });
-  // 进入连接屏先读缓存，再对非当前节点测一次速；每个配置只自动跑一次。
+  // 进入连接屏先读缓存，再把整池测一次速；每个配置只自动跑一次。
   const probedConfigsRef = useRef(new Set<string>());
   useEffect(() => {
     if (destination !== "client" || !stageReady) return;
@@ -532,8 +532,8 @@ export default function App() {
     probedConfigsRef.current.add(config.config_id);
     const nodeIds = config.nodes.map((node) => node.node_id);
     void nodeProbes.loadSnapshot(config.config_id, nodeIds).then(() => {
-      const others = nodeIds.filter((id) => id !== config.current_node_id);
-      if (others.length > 0) void nodeProbes.start(config.config_id, others);
+      // 当前节点也要测：未连接时没有运行时延迟，跳过它会让选中行一直显示「—」。
+      void nodeProbes.start(config.config_id, nodeIds);
     });
     // nodeProbes 每次渲染都是新对象，只跟着配置与可用性走。
     // eslint-disable-next-line react-hooks/exhaustive-deps

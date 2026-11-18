@@ -1,10 +1,11 @@
 // 建机：先建 droplet，把一次性 enrollment 令牌写进 cloud-init（§19.6）。
-// 失败只把服务器标成 error：订单必须退回 paid，交给每日 Cron 重试——
-// 钱已经收了，订单不能停在终态，否则就是「扣了钱、没机器、也没人再试」。
+// 可重试失败（429/5xx/超时）只把服务器标成 error、订单退回 paid，交给每日 Cron 重试——
+// 钱已经收了，订单不能停在终态。非可重试失败（其余 4xx）用户拿不到机器，直接退款关单。
 
 import { buildCloudInit } from "./cloud_init";
 import { randomId, sha256B64u } from "./lib/crypto";
 import { createDroplet, deleteDroplet } from "./providers/digitalocean";
+import { recordLedgerEntry } from "./wallet";
 
 export interface ProvisionEnv {
   DB: D1Database;
@@ -24,7 +25,7 @@ export interface ServerToProvision {
 
 export type ProvisionResult =
   | { ok: true; providerId: string; ip: string | null }
-  | { ok: false; reason: string; retryable: boolean };
+  | { ok: false; reason: string; retryable: boolean; refunded?: boolean };
 
 const ENROLL_TTL_MS = 45 * 60 * 1000;
 
@@ -32,8 +33,16 @@ async function fail(
   env: ProvisionEnv,
   server: ServerToProvision,
   reason: string,
+  options: { retryable?: boolean; upstream?: string } = {},
 ): Promise<ProvisionResult> {
+  const retryable = options.retryable ?? true;
   const now = Date.now();
+  const detail = JSON.stringify(
+    options.upstream ? { reason, upstream: options.upstream } : { reason },
+  );
+
+  if (!retryable) return failPermanently(env, server, reason, detail, now);
+
   await env.DB.batch([
     env.DB.prepare("UPDATE servers SET state = 'error', failure_code = ?, updated_at = ? WHERE id = ?")
       .bind(reason, now, server.id),
@@ -43,9 +52,66 @@ async function fail(
     ).bind(reason, server.order_id),
     env.DB.prepare(
       "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.failed', ?)",
-    ).bind(now, server.account_id, server.id, JSON.stringify({ reason })),
+    ).bind(now, server.account_id, server.id, detail),
   ]);
   return { ok: false, reason, retryable: true };
+}
+
+/**
+ * 非可重试失败：订单关掉（Cron 不再补建同一组参数），当天扣费原样退回。
+ * 退款以 `(server_refund, server_id)` 为幂等键，与销毁退款共用同一把锁——
+ * 服务器之后被销毁也不会退第二次。
+ */
+async function failPermanently(
+  env: ProvisionEnv,
+  server: ServerToProvision,
+  reason: string,
+  detail: string,
+  now: number,
+): Promise<ProvisionResult> {
+  const order = await env.DB.prepare("SELECT id, amount_cents, paid_via FROM orders WHERE id = ?")
+    .bind(server.order_id)
+    .first<{ id: string; amount_cents: number; paid_via: string | null }>();
+
+  await env.DB.batch([
+    env.DB.prepare("UPDATE servers SET state = 'error', failure_code = ?, updated_at = ? WHERE id = ?")
+      .bind(reason, now, server.id),
+    env.DB.prepare(
+      "UPDATE orders SET state = 'failed', failure_code = ?, failure_stage = ? " +
+        "WHERE id = ? AND state IN ('paid', 'provisioning')",
+    ).bind(reason, "creating", server.order_id),
+    env.DB.prepare(
+      "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.failed', ?)",
+    ).bind(now, server.account_id, server.id, detail),
+  ]);
+
+  const refundCents = Number(order?.amount_cents ?? 0);
+  if (order?.paid_via !== "wallet" || refundCents <= 0) {
+    return { ok: false, reason, retryable: false, refunded: false };
+  }
+  const refund = await recordLedgerEntry(env, {
+    accountId: server.account_id,
+    kind: "adjustment",
+    amountCents: refundCents,
+    refType: "server_refund",
+    refId: server.id,
+    note: `建机失败退款：${reason}`,
+  });
+  if (!refund.ok) {
+    console.warn(`[provision] 退款没有落账 order=${server.order_id} reason=${refund.reason}`);
+    return { ok: false, reason, retryable: false, refunded: false };
+  }
+  await env.DB.prepare(
+    "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.refunded', ?)",
+  )
+    .bind(
+      now,
+      server.account_id,
+      server.id,
+      JSON.stringify({ order_id: server.order_id, amount_cents: refundCents, reason }),
+    )
+    .run();
+  return { ok: false, reason, retryable: false, refunded: true };
 }
 
 export async function provisionServer(
@@ -80,7 +146,12 @@ export async function provisionServer(
     ],
   });
 
-  if (!created.ok) return fail(env, server, created.reason);
+  if (!created.ok) {
+    return fail(env, server, created.reason, {
+      retryable: created.retryable,
+      upstream: created.upstream,
+    });
+  }
 
   const now = Date.now();
   try {

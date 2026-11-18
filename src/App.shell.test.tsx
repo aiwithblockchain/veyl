@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import App from "./App";
 import { getAgentBridge } from "./agent";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "./agent/protocol";
+import type { AgentEvent } from "./agent/protocol";
 
 const bridge = getAgentBridge();
 
@@ -267,6 +268,70 @@ describe("三区外壳与连接舞台", () => {
     await waitFor(() => expect(screen.getByText("先做这一步")).toBeTruthy());
     expect(await screen.findByText("42 毫秒")).toBeTruthy();
     expect(screen.queryByText(/已加入/)).toBeNull();
+  }, 15_000);
+
+  it("自动测速包含当前选中节点：该行与其它行一样显示延迟", async () => {
+    seedCardConfig();
+    // 空缓存：结果只能来自本次自动批次，不靠快照兜底。
+    vi.spyOn(bridge, "nodeProbeSnapshot").mockResolvedValue({
+      configId: "cfg_stage",
+      results: [],
+      run: null,
+    } as never);
+    const runId = "run_autoprobe_sel";
+    const batchProbe = vi.spyOn(bridge, "nodeProbeAll").mockResolvedValue({
+      runId,
+      configId: "cfg_stage",
+      total: 2,
+      concurrency: 6,
+      ignoredNodeIds: [],
+    } as never);
+    const emit = (bridge as unknown as { emit(event: AgentEvent): void }).emit.bind(
+      bridge,
+    );
+    const progress = (nodeId: string, done: number, latency: number) =>
+      emit({
+        name: AGENT_EVENTS.nodeProbeProgress,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          run_id: runId,
+          config_id: "cfg_stage",
+          phase: "probing",
+          method: "tcp",
+          done,
+          total: 2,
+          result: {
+            node_id: nodeId,
+            reachable: true,
+            latency_ms: latency,
+            probe_method: "tcp",
+            checked_at: Date.now(),
+            error: null,
+          },
+          emitted_at: "",
+        },
+      } as never);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("先做这一步")).toBeTruthy());
+
+    await waitFor(() => expect(batchProbe).toHaveBeenCalled(), { timeout: 5000 });
+    expect(batchProbe.mock.calls[0][1]).toEqual(["n1", "n2"]);
+
+    const msOf = (row: Element | undefined) =>
+      row?.querySelector(".stage-node__ms")?.textContent;
+
+    act(() => progress("n1", 1, 42));
+    await waitFor(() =>
+      expect(msOf(screen.getAllByRole("option")[0])).toBe("42 毫秒"),
+    );
+    act(() => progress("n2", 2, 78));
+    await waitFor(() => {
+      const rows = screen.getAllByRole("option");
+      expect(rows[0].getAttribute("aria-selected")).toBe("true");
+      expect(msOf(rows[0])).toBe("42 毫秒");
+      expect(msOf(rows[1])).toBe("78 毫秒");
+    });
   }, 15_000);
 
   it("测速全部失败：停在测速那步给原因，跳过测速后停在未连接", async () => {

@@ -10,6 +10,8 @@ export interface ProviderError {
   status: number;
   reason: string;
   retryable: boolean;
+  /** 上游响应体（截断 300 字、去掉换行）：`upstream_422` 之类的码看不出原因，靠它诊断。 */
+  upstream?: string;
 }
 
 export type ProviderResult<T> = { ok: true; value: T } | ProviderError;
@@ -35,17 +37,27 @@ async function call<T>(
     });
     const text = await response.text();
     if (!response.ok) {
+      const upstream = text.replace(/\s+/g, " ").trim().slice(0, 300);
+      console.warn(
+        `[digitalocean] ${init.method ?? "GET"} ${path} → ${response.status} ${upstream}`,
+      );
       return {
         ok: false,
         status: response.status,
         reason: `upstream_${response.status}`,
         retryable: response.status === 429 || response.status >= 500,
+        upstream,
       };
     }
     if (text.trim() === "") return { ok: true, value: undefined as T };
     return { ok: true, value: JSON.parse(text) as T };
   } catch (error) {
     const aborted = error instanceof Error && error.name === "AbortError";
+    console.warn(
+      `[digitalocean] ${init.method ?? "GET"} ${path} → ${aborted ? "timeout" : "network"}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     return {
       ok: false,
       status: 0,

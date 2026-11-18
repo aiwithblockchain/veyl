@@ -422,6 +422,16 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
       );
 
       if (!provisioned.ok) {
+        // 非可重试（4xx）：provision 已把订单置 failed 并退回当天费用，Cron 不会再补建。
+        if (!provisioned.retryable) {
+          return storedError(
+            502,
+            "UPSTREAM_ERROR",
+            provisioned.refunded ? "服务器创建失败，本次扣费已退回" : "服务器创建失败",
+            { reason: provisioned.reason },
+            false,
+          );
+        }
         // 钱已经扣了：provision 的失败分支已把订单退回 paid，Cron 会继续补建。
         return storedError(502, "UPSTREAM_ERROR", "服务器还在创建，稍后自动重试", { reason: provisioned.reason }, true);
       }
