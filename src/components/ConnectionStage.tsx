@@ -11,7 +11,7 @@ import { dataPlaneDown } from "../ui/dataPlane";
 import { formatClock } from "../ui/format";
 import { failureHeadline } from "../ui/middleArea";
 import { displayNodeNames, formatLatency } from "../ui/nodeList";
-import { formatTrialExpiry } from "../myservers/labels";
+import { trialGroupHint, trialPhase } from "../myservers/labels";
 import type { ActionCard } from "../ui/actionCard";
 import { StageQuickToggles, type ModeSwitchResult } from "./StageQuickToggles";
 
@@ -355,16 +355,10 @@ export function ConnectionStage({
   const mixedSources = freeEntries.length > 0 && ownedEntries.length > 0;
   const allSeed = nodes.length > 0 && freeEntries.length === nodes.length;
 
-  const trialEndsAt = trialExpiresAt ? Date.parse(trialExpiresAt) : Number.NaN;
-  const trialHasEnd = Number.isFinite(trialEndsAt);
-  const trialEnded = trialHasEnd && trialEndsAt <= now;
+  const trialEnded = trialPhase(null, trialExpiresAt, now).kind === "ended";
 
   /** 免费组标题右侧：与「我的服务器」空态共用同一条取整规则；已过期与无时间分开说。 */
-  const trialHint = !trialHasEnd
-    ? "试用中"
-    : trialEnded
-      ? "已到期"
-      : (formatTrialExpiry(trialExpiresAt, now) ?? "试用中");
+  const trialHint = trialGroupHint(null, trialExpiresAt, now);
 
   /** 试用到期但 Host 还没清池（最多约 5 分钟）：免费行就地拒绝，避免先连上再被断开。 */
   const isExpiredSeed = (node: { source: string }) =>
@@ -580,6 +574,7 @@ export function ConnectionStage({
           </button>
         ) : null}
 
+        {/* 失败/无流量时下方已经有一个「报告问题」，这里不再重复。 */}
         {config && nodes.length > 0 && onSetConnectMode && onSetRoutingMode ? (
           <StageQuickToggles
             connectMode={config.connect_mode}
@@ -589,7 +584,7 @@ export function ConnectionStage({
             helperPreparing={helperPreparing}
             onSetConnectMode={onSetConnectMode}
             onSetRoutingMode={onSetRoutingMode}
-            onReportProblem={onReportProblem}
+            onReportProblem={failed || noTraffic ? undefined : onReportProblem}
             reportBusy={reportBusy}
           />
         ) : null}

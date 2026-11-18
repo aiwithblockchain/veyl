@@ -415,10 +415,13 @@ describe("三区外壳与连接舞台", () => {
     localStorage.setItem("veyl.mock.trial", "expired");
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText("试用已到期")).toBeTruthy());
+    await screen.findByRole("main", { name: "试用已到期" });
     expect(screen.getByText("免费节点已从节点池移除。")).toBeTruthy();
     expect(screen.getByRole("button", { name: "新建节点" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /先试用免费节点/ })).toBeNull();
+    // 到期屏没有节点可选、也没有连接动作。
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "连接节点" })).toBeNull();
   });
 
   it("试用到期但已有自建节点：照常进连接舞台，不看到期屏", async () => {
@@ -477,7 +480,9 @@ describe("三区外壳与连接舞台", () => {
       (bridge as unknown as { expireTrialDemo: () => void }).expireTrialDemo();
     });
 
-    await waitFor(() => expect(screen.getByText("试用已到期")).toBeTruthy());
+    await screen.findByRole("main", { name: "试用已到期" });
+    expect(screen.queryByText("从哪里开始？")).toBeNull();
+    expect(screen.getByRole("button", { name: "新建节点" })).toBeTruthy();
   });
 
   it("重复点试用不会多建配置", async () => {
@@ -681,11 +686,12 @@ describe("三区外壳与连接舞台", () => {
   it("试用到期屏也能进入新建节点舞台", async () => {
     localStorage.setItem("veyl.mock.trial", "expired");
     render(<App />);
-    await screen.findByText("试用已到期");
+    await screen.findByRole("main", { name: "试用已到期" });
     fireEvent.click(screen.getByRole("button", { name: "新建节点" }));
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: "新建节点" })).toBeTruthy(),
     );
+    expect(screen.queryByRole("main", { name: "试用已到期" })).toBeNull();
   }, 15_000);
 
   it("新建节点返回原处，再进来保留已选", async () => {
@@ -723,11 +729,12 @@ describe("三区外壳与连接舞台", () => {
   it("新建节点返回后，从到期屏进入也回到到期屏", async () => {
     localStorage.setItem("veyl.mock.trial", "expired");
     render(<App />);
-    await screen.findByText("试用已到期");
+    await screen.findByRole("main", { name: "试用已到期" });
     fireEvent.click(screen.getByRole("button", { name: "新建节点" }));
     await screen.findByRole("heading", { name: "新建节点" });
     fireEvent.click(screen.getByRole("button", { name: "返回" }));
-    await waitFor(() => expect(screen.getByText("试用已到期")).toBeTruthy());
+    await screen.findByRole("main", { name: "试用已到期" });
+    expect(screen.queryByRole("heading", { name: "新建节点" })).toBeNull();
   }, 15_000);
 
   it("创建前余额不足：就地给去充值，不发起下单", async () => {

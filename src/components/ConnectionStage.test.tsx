@@ -1221,6 +1221,24 @@ describe("报告问题入口", () => {
       await screen.findByRole("button", { name: "报告问题" }),
     ).toBeTruthy();
   });
+
+  it("失败态下切换接管方式失败：报告问题只留一处", async () => {
+    const onReport = vi.fn();
+    renderStage({
+      runtime: runtime({ state: "failed" }),
+      onReportProblem: onReport,
+      onSetConnectMode: async () => ({ ok: false, restored: true }),
+      onSetRoutingMode: async () => ({ ok: true }),
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "接管方式，当前 Tun 模式" }),
+    );
+    fireEvent.click(screen.getByRole("option", { name: "Proxy 模式" }));
+
+    await screen.findByText("没能切换到 Proxy 模式，已回到 Tun 模式。");
+    expect(screen.getAllByRole("button", { name: "报告问题" })).toHaveLength(1);
+  });
 });
 
 describe("混池节点卡：试用 + 自建", () => {
@@ -1292,7 +1310,7 @@ describe("混池节点卡：试用 + 自建", () => {
     expect(screen.getByText("1 个节点")).toBeTruthy();
   });
 
-  it("试用组到期消失后只剩自建：整组与组标题一起消失", () => {
+  it("免费组节点被清理后只剩自建：整组与组标题一起消失", () => {
     const { rerender } = renderStage({ config: configWith([OWNED, FREE]) });
     expect(screen.getAllByRole("group")).toHaveLength(2);
 
@@ -1304,35 +1322,43 @@ describe("混池节点卡：试用 + 自建", () => {
     expect(screen.getByText("1 个节点")).toBeTruthy();
   });
 
-  it("免费组标题按剩余天数写到期：向下取整，不足 24 小时写不到 1 天", () => {
+  it("免费组标题接线共用口径：倒计时 / 试用中 / 已到期三态互斥", () => {
     const inDays = (days: number) =>
       new Date(Date.now() + days * 86_400_000).toISOString();
+    const hintText = () =>
+      document.querySelector(".stage-node-group__hint")?.textContent;
 
+    // 取整与边界由 labels.test.ts 统一钉住，这里只验证组标题确实读那份口径。
     const { rerender } = renderStage({
       config: configWith([OWNED, FREE]),
       trialExpiresAt: inDays(3.2),
     });
-    expect(screen.getByText("3 天后到期")).toBeTruthy();
+    expect(hintText()).toBe("3 天后到期");
+    expect(hintText()).not.toBe("试用中");
+    expect(hintText()).not.toBe("已到期");
 
     rerender(
-      stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: inDays(6 + 23 / 24) }),
+      stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: null }),
     );
-    expect(screen.getByText("6 天后到期")).toBeTruthy();
+    expect(hintText()).toBe("试用中");
+    expect(hintText()).not.toContain("天后到期");
 
     rerender(
-      stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: inDays(23 / 24) }),
+      stageElement({
+        config: configWith([OWNED, FREE]),
+        trialExpiresAt: "not-a-date",
+      }),
     );
-    expect(screen.getByText("不到 1 天后到期")).toBeTruthy();
-
-    rerender(stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: null }));
-    expect(screen.getByText("试用中")).toBeTruthy();
+    expect(hintText()).toBe("试用中");
 
     rerender(
-      stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: inDays(-0.1) }),
+      stageElement({
+        config: configWith([OWNED, FREE]),
+        trialExpiresAt: inDays(-0.1),
+      }),
     );
-    expect(
-      document.querySelector(".stage-node-group__hint")?.textContent,
-    ).toBe("已到期");
+    expect(hintText()).toBe("已到期");
+    expect(hintText()).not.toContain("天后到期");
   });
 
   it("最快标记仍在免费组的行内，不进组标题", () => {

@@ -476,8 +476,10 @@ describe("我的服务器 destination", () => {
 describe("空态里的免费节点说明", () => {
   const daysFromNow = (days: number) =>
     new Date(Date.now() + days * 86_400_000).toISOString();
+  const hint = () =>
+    document.querySelector(".myservers__trial-hint") as HTMLElement | null;
 
-  it("已领试用未首次连接：写试用 7 天，左栏计数不含免费节点", async () => {
+  it("已领试用未首次连接：写试用 7 天，不写倒计时，左栏计数不含免费节点", async () => {
     renderHarness(makeBridge([]), {
       trial: { state: "available", seedNodeCount: 2, expiresAt: null },
     });
@@ -485,13 +487,14 @@ describe("空态里的免费节点说明", () => {
     expect(
       await screen.findByText("还有 2 个免费节点，试用 7 天。"),
     ).toBeTruthy();
+    expect(hint()?.textContent).not.toContain("天后到期");
     const rail = screen.getByRole("complementary", { name: "服务器列表" });
     expect(within(rail).getByText("0")).toBeTruthy();
     const empty = document.querySelector(".myservers__empty") as HTMLElement;
     expect(within(empty).getByRole("button", { name: "新建节点" })).toBeTruthy();
   });
 
-  it("进行中：向下取整写到期（6 天 23 小时算 6 天）", async () => {
+  it("进行中：向下取整写到期（6 天 23 小时算 6 天），且不写试用 7 天", async () => {
     renderHarness(makeBridge([]), {
       trial: {
         state: "active",
@@ -503,9 +506,11 @@ describe("空态里的免费节点说明", () => {
     expect(
       await screen.findByText("还有 2 个免费节点，6 天后到期。"),
     ).toBeTruthy();
+    expect(hint()?.textContent).not.toContain("试用 7 天");
+    expect(document.querySelectorAll(".myservers__trial-hint")).toHaveLength(1);
   });
 
-  it("剩余不足 24 小时写不到 1 天", async () => {
+  it("剩余不足 24 小时写不到 1 天，不写今天", async () => {
     renderHarness(makeBridge([]), {
       trial: { state: "active", seedNodeCount: 1, expiresAt: daysFromNow(23 / 24) },
     });
@@ -513,16 +518,43 @@ describe("空态里的免费节点说明", () => {
     expect(
       await screen.findByText("还有 1 个免费节点，不到 1 天后到期。"),
     ).toBeTruthy();
+    expect(hint()?.textContent).not.toContain("今天");
   });
 
-  it("已到期不显示", async () => {
+  it("时间已过：即使还有 2 个免费节点也整行不显示", async () => {
     renderHarness(makeBridge([]), {
-      trial: { state: "expired", seedNodeCount: 0, expiresAt: daysFromNow(-1) },
+      trial: { state: "active", seedNodeCount: 2, expiresAt: daysFromNow(-1) },
     });
 
     await screen.findByRole("heading", { name: "还没有服务器" });
+    expect(hint()).toBeNull();
     expect(screen.queryByText(/免费节点/)).toBeNull();
     expect(screen.queryByRole("button", { name: "去连接" })).toBeNull();
+  });
+
+  it("expired 状态不信未来时间：有节点也不显示", async () => {
+    renderHarness(makeBridge([]), {
+      trial: { state: "expired", seedNodeCount: 2, expiresAt: daysFromNow(1) },
+    });
+
+    await screen.findByRole("heading", { name: "还没有服务器" });
+    expect(hint()).toBeNull();
+    expect(screen.queryByRole("button", { name: "去连接" })).toBeNull();
+  });
+
+  it("没有到期时间或时间非法：不编造倒计时", async () => {
+    renderHarness(makeBridge([]), {
+      trial: { state: "active", seedNodeCount: 2, expiresAt: null },
+    });
+    await screen.findByRole("heading", { name: "还没有服务器" });
+    expect(hint()).toBeNull();
+
+    cleanup();
+    renderHarness(makeBridge([]), {
+      trial: { state: "active", seedNodeCount: 2, expiresAt: "not-a-date" },
+    });
+    await screen.findByRole("heading", { name: "还没有服务器" });
+    expect(hint()).toBeNull();
   });
 
   it("有自建服务器时不显示", async () => {
@@ -535,6 +567,7 @@ describe("空态里的免费节点说明", () => {
     });
 
     await screen.findByRole("heading", { name: /新加坡 1 · DigitalOcean/ });
+    expect(hint()).toBeNull();
     expect(screen.queryByText(/免费节点/)).toBeNull();
   });
 
@@ -568,7 +601,7 @@ describe("空态里的免费节点说明", () => {
     renderHarness(makeBridge([]), { trial: null });
 
     await screen.findByRole("heading", { name: "还没有服务器" });
-    expect(document.querySelector(".myservers__trial-hint")).toBeNull();
+    expect(hint()).toBeNull();
     expect(screen.queryByRole("button", { name: "去连接" })).toBeNull();
   });
 });

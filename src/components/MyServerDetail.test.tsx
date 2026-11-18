@@ -191,6 +191,7 @@ describe("服务器详情", () => {
 
   it("建机进度显示已等待，状态推进不重置，就绪后消失", () => {
     vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
+    const created_at = new Date(2026, 10, 18, 10, 0, 0).toISOString();
     const props = {
       bridge: {} as AgentBridge,
       regionLabel: "新加坡 1",
@@ -201,7 +202,10 @@ describe("服务器详情", () => {
       onGone: vi.fn(),
     };
     const view = render(
-      <MyServerDetail {...props} server={server({ state: "creating" })} />,
+      <MyServerDetail
+        {...props}
+        server={server({ state: "creating", created_at })}
+      />,
     );
     expect(screen.getByText("已等待 0 秒")).toBeTruthy();
 
@@ -212,18 +216,91 @@ describe("服务器详情", () => {
 
     // 状态推进（同一台机器）不重置计时。
     view.rerender(
-      <MyServerDetail {...props} server={server({ state: "booting" })} />,
+      <MyServerDetail
+        {...props}
+        server={server({ state: "booting", created_at })}
+      />,
     );
     expect(screen.getByText("已等待 1 分 20 秒")).toBeTruthy();
 
     // 就绪后进度区整个消失。
     view.rerender(
-      <MyServerDetail {...props} server={server({ state: "healthy" })} />,
+      <MyServerDetail
+        {...props}
+        server={server({ state: "healthy", created_at })}
+      />,
     );
     expect(screen.queryByText(/已等待/)).toBeNull();
     expect(
       screen.queryByRole("group", { name: "建机进度" }),
     ).toBeNull();
+  });
+
+  it("重进详情不从零算：以阶段进入时间为基准", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
+    renderDetail({
+      state: "installing",
+      created_at: new Date(2026, 10, 18, 9, 55, 0).toISOString(),
+      installing_at: new Date(2026, 10, 18, 9, 58, 0).toISOString(),
+    });
+
+    // 安装阶段已过去 2 分钟，不因为刚打开详情而从 0 开始。
+    expect(screen.getByText("已等待 2 分 0 秒")).toBeTruthy();
+  });
+
+  it("切换服务器后计时按新服务器的时间重算", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
+    const props = {
+      bridge: {} as AgentBridge,
+      regionLabel: "新加坡 1",
+      onCreateAnother: vi.fn(),
+      onUseServer: vi.fn(),
+      onChanged: () => {},
+      onRebuilt: () => {},
+      onGone: vi.fn(),
+    };
+    const view = render(
+      <MyServerDetail
+        {...props}
+        server={server({
+          state: "creating",
+          created_at: new Date(2026, 10, 18, 9, 59, 0).toISOString(),
+        })}
+      />,
+    );
+    expect(screen.getByText("已等待 1 分 0 秒")).toBeTruthy();
+
+    view.rerender(
+      <MyServerDetail
+        {...props}
+        server={server({
+          server_id: "srv_2",
+          state: "creating",
+          created_at: new Date(2026, 10, 18, 9, 59, 50).toISOString(),
+        })}
+      />,
+    );
+    expect(screen.getByText("已等待 10 秒")).toBeTruthy();
+  });
+
+  it("已等待满一小时按小时显示", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 12, 0, 0) });
+    renderDetail({
+      state: "installing",
+      created_at: new Date(2026, 10, 18, 10, 0, 0).toISOString(),
+      installing_at: new Date(2026, 10, 18, 10, 0, 0).toISOString(),
+    });
+
+    expect(screen.getByText("已等待 2 小时 0 分")).toBeTruthy();
+  });
+
+  it("卸载时清掉每秒计时器", () => {
+    vi.useFakeTimers();
+    const { unmount } = renderDetail({ state: "creating" });
+
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("就绪的机器显示创建用时；旧机器没有 ready_at 时写未知", () => {
@@ -236,8 +313,12 @@ describe("服务器详情", () => {
     expect(screen.getByText("创建用时 2 分 55 秒")).toBeTruthy();
     view.unmount();
 
-    renderDetail({ state: "healthy", created_at: created, ready_at: null });
-    expect(screen.getByText("创建用时未知")).toBeTruthy();
+    renderDetail({
+      state: "healthy",
+      created_at: created,
+      ready_at: null,
+    });
+    expect(screen.getByText("用时未记录")).toBeTruthy();
   });
 
   it("没建成的机器不显示创建用时", () => {
@@ -251,7 +332,10 @@ describe("服务器详情", () => {
 
   it("建机进度不显示百分比，秒数每秒更新，当前阶段用 aria-current", () => {
     vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
-    renderDetail({ state: "creating" });
+    renderDetail({
+      state: "creating",
+      created_at: new Date(2026, 10, 18, 10, 0, 0).toISOString(),
+    });
 
     expect(screen.queryByText(/%/)).toBeNull();
     expect(

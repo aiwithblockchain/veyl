@@ -6,7 +6,7 @@ import type {
   MyServerState,
 } from "../agent/bridge";
 import type { TrialState } from "../agent/protocol";
-import { formatTrialExpiry } from "../myservers/labels";
+import { trialEmptyHint } from "../myservers/labels";
 import { MyServerDetail } from "./MyServerDetail";
 
 interface Props {
@@ -89,19 +89,14 @@ export function MyServersPage({
   pendingServer = false,
   onRenamed,
 }: Props) {
-  const trialHint = (() => {
-    if (!trial || trial.seedNodeCount <= 0) return null;
-    if (trial.state === "available") {
-      return `还有 ${trial.seedNodeCount} 个免费节点，试用 7 天。`;
-    }
-    if (trial.state === "active") {
-      const expiry = formatTrialExpiry(trial.expiresAt, Date.now());
-      return expiry
-        ? `还有 ${trial.seedNodeCount} 个免费节点，${expiry}。`
-        : null;
-    }
-    return null;
-  })();
+  const trialHint = trial
+    ? trialEmptyHint(
+        trial.state,
+        trial.seedNodeCount,
+        trial.expiresAt,
+        Date.now(),
+      )
+    : null;
 
   /** 空态旁注：只在没有自建服务器时出现，唯一可点的是「去连接」。 */
   const trialNote = trialHint ? (

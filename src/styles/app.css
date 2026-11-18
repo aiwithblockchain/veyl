@@ -2955,10 +2955,6 @@ body[data-resizing] {
   color: var(--green);
 }
 
-.myservers__state.is-warn {
-  color: var(--amber);
-}
-
 .myservers__state.is-err {
   color: var(--red);
 }

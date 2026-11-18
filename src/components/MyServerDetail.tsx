@@ -334,7 +334,7 @@ export function MyServerDetail({
 
       {showBuildTime ? (
         <p className="myservers__created-in">
-          {buildDuration ? `创建用时 ${buildDuration}` : "创建用时未知"}
+          {buildDuration ? `创建用时 ${buildDuration}` : "用时未记录"}
         </p>
       ) : null}
 

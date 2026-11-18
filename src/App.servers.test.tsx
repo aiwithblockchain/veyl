@@ -741,6 +741,8 @@ describe("下单成功后回到详情", () => {
     server_id: "srv_new",
     name: "新加坡 1 · 新建",
     state: "creating",
+    // 刚下单：计时从此刻起，不是 created_at 的哨兵值。
+    created_at: new Date().toISOString(),
     node_id: null,
     failure: null,
   };
@@ -806,7 +808,7 @@ describe("下单成功后回到详情", () => {
     ).toContain("正在建机器");
     expect(
       document.querySelector(".myservers__progress-head")?.textContent,
-    ).toContain("已等待 0 秒");
+    ).toMatch(/已等待 \d+ 秒/);
     const steps = [...document.querySelectorAll(".myservers__steps li")].map(
       (node) => node.textContent,
     );

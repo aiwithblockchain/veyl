@@ -1,35 +1,116 @@
 import { describe, expect, it } from "vitest";
-import { formatBuildDuration, formatTrialExpiry, stateTone } from "./labels";
+import {
+  formatBuildDuration,
+  stateTone,
+  trialEmptyHint,
+  trialGroupHint,
+  trialPhase,
+} from "./labels";
 
 const NOW = Date.parse("2026-11-18T12:00:00.000Z");
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
 const at = (offsetMs: number) => new Date(NOW + offsetMs).toISOString();
 
-describe("formatTrialExpiry", () => {
-  it("剩余 23 小时 59 分仍写「不到 1 天后到期」", () => {
-    expect(formatTrialExpiry(at(23 * HOUR + 59 * 60_000), NOW)).toBe(
+/**
+ * 试用口径的唯一测试出处：节点卡组标题与「我的服务器」空态都读这里。
+ * 组件测试只验证接线，取整与三态互斥全部在这一份里定。
+ */
+describe("试用口径：五种输入", () => {
+  it("available：还没起算，空态写试用 7 天，组标题写试用中", () => {
+    expect(trialPhase("available", null, NOW)).toEqual({ kind: "available" });
+    expect(trialEmptyHint("available", 2, null, NOW)).toBe(
+      "还有 2 个免费节点，试用 7 天。",
+    );
+    expect(trialGroupHint(null, null, NOW)).toBe("试用中");
+  });
+
+  it("active：有效未来时间按剩余天数向下取整，两处数字相同", () => {
+    const expires = at(6 * DAY + 23 * HOUR);
+    expect(trialPhase("active", expires, NOW)).toEqual({
+      kind: "counting",
+      days: 6,
+    });
+    expect(trialEmptyHint("active", 2, expires, NOW)).toBe(
+      "还有 2 个免费节点，6 天后到期。",
+    );
+    expect(trialGroupHint(null, expires, NOW)).toBe("6 天后到期");
+  });
+
+  it("expired：过去时间归为 ended，空态不显示，组标题写已到期", () => {
+    expect(trialPhase("active", at(-1), NOW)).toEqual({ kind: "ended" });
+    expect(trialEmptyHint("active", 2, at(-1), NOW)).toBeNull();
+    expect(trialGroupHint(null, at(-1), NOW)).toBe("已到期");
+  });
+
+  it("无时间戳：空态不显示，组标题写试用中", () => {
+    expect(trialPhase("active", null, NOW)).toEqual({ kind: "unknown" });
+    expect(trialEmptyHint("active", 2, null, NOW)).toBeNull();
+    expect(trialGroupHint(null, null, NOW)).toBe("试用中");
+  });
+
+  it("非法时间：与无时间戳同口径，不编造天数", () => {
+    expect(trialPhase("active", "not-a-date", NOW)).toEqual({
+      kind: "unknown",
+    });
+    expect(trialEmptyHint("active", 2, "not-a-date", NOW)).toBeNull();
+    expect(trialGroupHint(null, "not-a-date", NOW)).toBe("试用中");
+  });
+
+  it("三种展示互斥：同一时刻只有一种能写出来", () => {
+    const empty = trialEmptyHint("active", 2, at(6 * DAY), NOW);
+    const group = trialGroupHint(null, at(6 * DAY), NOW);
+    expect(empty).toBe("还有 2 个免费节点，6 天后到期。");
+    expect(empty).not.toContain("试用 7 天");
+    expect(group).toBe("6 天后到期");
+    expect(group).not.toBe("试用中");
+    expect(group).not.toBe("已到期");
+
+    expect(trialEmptyHint("available", 2, null, NOW)).not.toContain("天后到期");
+    expect(trialGroupHint(null, null, NOW)).not.toContain("天后到期");
+    expect(trialGroupHint(null, at(-1), NOW)).not.toContain("天后到期");
+  });
+});
+
+describe("试用口径：边界", () => {
+  it("整 24 小时算 1 天，少 1 毫秒只写不到 1 天", () => {
+    expect(trialGroupHint(null, at(DAY), NOW)).toBe("1 天后到期");
+    expect(trialEmptyHint("active", 2, at(DAY), NOW)).toBe(
+      "还有 2 个免费节点，1 天后到期。",
+    );
+    expect(trialGroupHint(null, at(DAY - 1), NOW)).toBe("不到 1 天后到期");
+  });
+
+  it("到期时刻当下与之前都算 ended，不写 0 天后", () => {
+    expect(trialPhase("active", at(0), NOW)).toEqual({ kind: "ended" });
+    expect(trialGroupHint(null, at(0), NOW)).toBe("已到期");
+    expect(trialEmptyHint("active", 2, at(0), NOW)).toBeNull();
+  });
+
+  it("剩余不足 24 小时写不到 1 天，不写今天", () => {
+    expect(trialGroupHint(null, at(23 * HOUR + 59 * 60_000), NOW)).toBe(
       "不到 1 天后到期",
+    );
+    expect(trialEmptyHint("active", 1, at(HOUR), NOW)).toBe(
+      "还有 1 个免费节点，不到 1 天后到期。",
     );
   });
 
-  it("剩余 1 小时写「不到 1 天后到期」", () => {
-    expect(formatTrialExpiry(at(HOUR), NOW)).toBe("不到 1 天后到期");
+  it("空串时间戳按无时间处理", () => {
+    expect(trialPhase("active", "", NOW)).toEqual({ kind: "unknown" });
+    expect(trialEmptyHint("active", 2, "", NOW)).toBeNull();
   });
 
-  it("已过期（负毫秒差）返回 null，不说反话", () => {
-    expect(formatTrialExpiry(at(-1), NOW)).toBeNull();
-    expect(formatTrialExpiry(at(-DAY), NOW)).toBeNull();
+  it("数量为 0 或更少时整句不显示，状态与时间都不参与", () => {
+    expect(trialEmptyHint("available", 0, null, NOW)).toBeNull();
+    expect(trialEmptyHint("active", 0, at(6 * DAY), NOW)).toBeNull();
+    expect(trialEmptyHint("active", -1, at(6 * DAY), NOW)).toBeNull();
   });
 
-  it("向下取整：整 24 小时算 1 天，6 天 23 小时算 6 天", () => {
-    expect(formatTrialExpiry(at(DAY), NOW)).toBe("1 天后到期");
-    expect(formatTrialExpiry(at(6 * DAY + 23 * HOUR), NOW)).toBe("6 天后到期");
-  });
-
-  it("没有时间或解析失败返回 null", () => {
-    expect(formatTrialExpiry(null, NOW)).toBeNull();
-    expect(formatTrialExpiry("not-a-date", NOW)).toBeNull();
+  it("expired 状态不信未来时间：状态已过期就按 ended", () => {
+    expect(trialPhase("expired", at(6 * DAY), NOW)).toEqual({ kind: "ended" });
+    expect(trialEmptyHint("expired", 2, at(6 * DAY), NOW)).toBeNull();
+    expect(trialGroupHint("expired", at(6 * DAY), NOW)).toBe("已到期");
   });
 });
 
@@ -64,6 +145,15 @@ describe("formatBuildDuration", () => {
 
   it("不到一分钟只报秒", () => {
     expect(formatBuildDuration(created, "2026-11-18T10:00:40.000Z")).toBe("40 秒");
+  });
+
+  it("满一小时换算成小时与分钟，不再报 120 分", () => {
+    expect(formatBuildDuration(created, "2026-11-18T12:00:00.000Z")).toBe(
+      "2 小时 0 分",
+    );
+    expect(formatBuildDuration(created, "2026-11-18T11:03:05.000Z")).toBe(
+      "1 小时 3 分",
+    );
   });
 
   it("没有 ready_at 或时间解析失败返回 null", () => {

@@ -66,24 +66,74 @@ export function formatMonthlyFromDaily(cents: number): string {
   return Number.isInteger(dollars) ? `$${dollars}` : `$${dollars.toFixed(2)}`;
 }
 
+export type TrialPhase =
+  | { kind: "available" }
+  | { kind: "counting"; days: number }
+  | { kind: "ended" }
+  | { kind: "unknown" };
+
 /**
- * 试用剩余：「我的服务器」空态与节点卡组标题共用这一条口径。
- * 向下取整（少报安全）；不足 24 小时不写「今天」，写「不到 1 天后到期」；已过期返回 null。
+ * 试用状态归一：节点卡组标题与「我的服务器」空态共用这一份口径。
+ * available 还没起算；ended 已过到期时刻；unknown 拿不到可用时间；只有 counting 能写倒计时。
  */
-export function formatTrialExpiry(
+export function trialPhase(
+  state: "available" | "active" | "expired" | null,
+  expiresAt: string | null,
+  now: number,
+): TrialPhase {
+  if (state === "expired") return { kind: "ended" };
+  if (state === "available") return { kind: "available" };
+  if (!expiresAt) return { kind: "unknown" };
+  const ends = Date.parse(expiresAt);
+  if (!Number.isFinite(ends)) return { kind: "unknown" };
+  const remaining = ends - now;
+  if (remaining <= 0) return { kind: "ended" };
+  // 向下取整（少报安全）；不足 24 小时不写「今天」。
+  return { kind: "counting", days: Math.floor(remaining / 86_400_000) };
+}
+
+export function formatTrialCountdown(days: number): string {
+  return days < 1 ? "不到 1 天后到期" : `${days} 天后到期`;
+}
+
+/** 「我的服务器」空态那一行：available / counting 各一句，ended / unknown 不显示。 */
+export function trialEmptyHint(
+  state: "available" | "active" | "expired",
+  seedNodeCount: number,
   expiresAt: string | null,
   now: number,
 ): string | null {
-  if (!expiresAt) return null;
-  const ends = Date.parse(expiresAt);
-  if (!Number.isFinite(ends)) return null;
-  const remaining = ends - now;
-  if (remaining <= 0) return null;
-  if (remaining < 86_400_000) return "不到 1 天后到期";
-  return `${Math.floor(remaining / 86_400_000)} 天后到期`;
+  if (seedNodeCount <= 0) return null;
+  const phase = trialPhase(state, expiresAt, now);
+  if (phase.kind === "available") {
+    return `还有 ${seedNodeCount} 个免费节点，试用 7 天。`;
+  }
+  if (phase.kind !== "counting") return null;
+  return `还有 ${seedNodeCount} 个免费节点，${formatTrialCountdown(phase.days)}。`;
 }
 
-/** 创建用时：ready_at − created_at；不到一分钟只报秒。旧机器没有 ready_at 时返回 null。 */
+/** 节点卡免费组标题右侧：拿不到时间写「试用中」，过期写「已到期」。 */
+export function trialGroupHint(
+  state: "available" | "active" | "expired" | null,
+  expiresAt: string | null,
+  now: number,
+): string {
+  const phase = trialPhase(state, expiresAt, now);
+  if (phase.kind === "counting") return formatTrialCountdown(phase.days);
+  return phase.kind === "ended" ? "已到期" : "试用中";
+}
+
+/** 时长文案：满 1 小时报「2 小时 0 分」，满 1 分钟报「1 分 20 秒」，否则只报秒。 */
+export function formatDuration(totalSeconds: number): string {
+  const total = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) return `${hours} 小时 ${minutes} 分`;
+  return minutes > 0 ? `${minutes} 分 ${seconds} 秒` : `${seconds} 秒`;
+}
+
+/** 创建用时：ready_at − created_at。旧机器没有 ready_at 时返回 null。 */
 export function formatBuildDuration(
   createdAt: string,
   readyAt: string | null,
@@ -92,10 +142,7 @@ export function formatBuildDuration(
   const start = Date.parse(createdAt);
   const end = Date.parse(readyAt);
   if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  const total = Math.max(0, Math.floor((end - start) / 1000));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return minutes > 0 ? `${minutes} 分 ${seconds} 秒` : `${seconds} 秒`;
+  return formatDuration((end - start) / 1000);
 }
 
 /** 计费截止措辞的唯一出处；定稿后只改这里。 */
