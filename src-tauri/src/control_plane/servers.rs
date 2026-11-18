@@ -67,6 +67,12 @@ pub struct MyServer {
     pub daily_price_cents: i64,
     /// 每月公网出口额度快照（GiB）；0 = 未知，不参与任何扣费。
     pub transfer_gib: i64,
+    /// 这台服务器实际扣过的钱（USD 分）；没扣过 = 0。
+    #[serde(default)]
+    pub charged_cents: i64,
+    /// 已退回的钱（USD 分）；没退过 = 0。
+    #[serde(default)]
+    pub refunded_cents: i64,
     /// 已付到哪个时刻（ISO 8601）；建行时即写入，永不为 null。
     pub paid_until: String,
     pub billing_state: String,
@@ -794,6 +800,9 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
             monthly_usd: old.monthly_usd,
             daily_price_cents: old.daily_price_cents,
             transfer_gib: old.transfer_gib,
+            // 新订单的钱还没结算，等下一次列表/详情以控制面为准。
+            charged_cents: 0,
+            refunded_cents: 0,
             // rebuild 是新的计费生命周期：第 0 天已扣，先按 1 天估算，
             // 下一次列表/详情以控制面为准。
             paid_until: crate::store::iso_from_ms(crate::store::now_ms() + 24 * 3600 * 1000),
@@ -956,6 +965,9 @@ fn local_server(server_id: &str) -> Option<MyServer> {
         monthly_usd: row.monthly_usd,
         daily_price_cents: row.daily_price_cents,
         transfer_gib: row.transfer_gib,
+        // 本地缓存只存服务器状态，不存钱；拿不到远端时按「没扣过/没退过」展示。
+        charged_cents: 0,
+        refunded_cents: 0,
         paid_until: crate::store::iso_from_ms(row.paid_until),
         billing_state: row.billing_state.clone(),
         grace_ends_at: if row.billing_state == "active" {
@@ -1004,6 +1016,8 @@ mod tests {
             monthly_usd: 6.0,
             daily_price_cents: 20,
             transfer_gib: 1000,
+            charged_cents: 0,
+            refunded_cents: 0,
             paid_until: "2026-11-15T08:00:00Z".into(),
             billing_state: "active".into(),
             grace_ends_at: None,

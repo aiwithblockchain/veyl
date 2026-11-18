@@ -115,6 +115,72 @@ describe("服务器详情", () => {
     expect(copy).not.toContain("宽限还剩");
   });
 
+  it("没建成且已退款：费用行写已退回，不写本期有效至，也没有流量行", () => {
+    renderDetail({
+      state: "error",
+      paid_until: new Date(Date.now() + 86_400_000).toISOString(),
+      charged_cents: 30,
+      refunded_cents: 30,
+    });
+
+    const facts = document.querySelector(".myservers__facts");
+    expect(facts?.textContent).toContain("已退回 $0.30");
+    expect(facts?.textContent).not.toContain("本期有效至");
+    expect(screen.queryByText("流量")).toBeNull();
+  });
+
+  it("没建成但旧 Host 不返回扣费字段：写费用信息暂时读不到，不冒充没扣费", () => {
+    renderDetail({
+      state: "error",
+      charged_cents: undefined,
+      refunded_cents: undefined,
+    });
+
+    const facts = document.querySelector(".myservers__facts");
+    expect(facts?.textContent).toContain("费用信息暂时读不到");
+    expect(facts?.textContent).not.toContain("本次没有扣费");
+    expect(facts?.textContent).not.toContain("本期有效至");
+    expect(screen.queryByText("流量")).toBeNull();
+  });
+
+  it("没建成且一分没扣：费用行写本次没有扣费", () => {
+    renderDetail({
+      state: "error",
+      charged_cents: 0,
+      refunded_cents: 0,
+    });
+
+    const facts = document.querySelector(".myservers__facts");
+    expect(facts?.textContent).toContain("本次没有扣费");
+    expect(facts?.textContent).not.toContain("本期有效至");
+    expect(screen.queryByText("流量")).toBeNull();
+  });
+
+  it("没建成已扣费但还没退：费用行写退款处理中", () => {
+    renderDetail({
+      state: "error",
+      charged_cents: 30,
+      refunded_cents: 0,
+    });
+
+    const facts = document.querySelector(".myservers__facts");
+    expect(facts?.textContent).toContain("已扣 $0.30，退款处理中");
+    expect(facts?.textContent).not.toContain("本期有效至");
+    expect(screen.queryByText("流量")).toBeNull();
+  });
+
+  it("可用机器照旧显示本期有效至与流量", () => {
+    renderDetail({
+      state: "healthy",
+      paid_until: new Date(Date.now() + 86_400_000).toISOString(),
+      transfer_gib: 1000,
+    });
+
+    const facts = document.querySelector(".myservers__facts");
+    expect(facts?.textContent).toContain("本期有效至");
+    expect(screen.getByText("流量")).toBeTruthy();
+  });
+
   it("流量额度为 0 时整行不显示", () => {
     renderDetail({ transfer_gib: 0 }, vi.fn(), vi.fn(), true);
 

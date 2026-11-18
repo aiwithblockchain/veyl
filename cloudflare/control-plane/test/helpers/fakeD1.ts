@@ -922,6 +922,69 @@ export class FakeD1 {
   execAll(statement: Stmt): Row[] {
     const sql = normalise(statement.sql);
     const a = statement.args;
+    if (sql.startsWith("select o.id as order_id, o.account_id, o.amount_cents, s.id as server_id")) {
+      return this.tables.orders
+        .filter((order) => order.state === "failed" && order.paid_via === "wallet")
+        .flatMap((order) => {
+          const server = this.tables.servers.find((row) => row.order_id === order.id);
+          // 只扫 error：已销毁的机器走销毁退款，口径不同。
+          if (!server || server.state !== "error") return [];
+          const charged = this.tables.wallet_ledger.some(
+            (entry) =>
+              entry.ref_type === "order" && entry.ref_id === order.id && entry.kind === "charge",
+          );
+          const refunded = this.tables.wallet_ledger.some(
+            (entry) => entry.ref_type === "server_refund" && entry.ref_id === server.id,
+          );
+          if (!charged || refunded) return [];
+          const audits = this.tables.audit_log.filter((row) => row.server_id === server.id);
+          const failures = audits.filter((row) => row.action === "provision.refund_failed").length;
+          const abandonedAt = audits
+            .filter((row) => row.action === "provision.refund_abandoned")
+            .reduce((latest, row) => Math.max(latest, Number(row.at ?? 0)), 0);
+          return [
+            {
+              order_id: order.id,
+              account_id: order.account_id,
+              amount_cents: order.amount_cents,
+              server_id: server.id,
+              failure_code: server.failure_code ?? null,
+              created_at: Number(order.created_at ?? 0),
+              failures,
+              abandoned_at: abandonedAt > 0 ? abandonedAt : null,
+            },
+          ];
+        })
+        .sort((left, right) => Number(left.created_at) - Number(right.created_at))
+        .slice(0, 50);
+    }
+    if (
+      sql.startsWith("select * from servers where account_id") &&
+      sql.includes("state != 'destroyed'")
+    ) {
+      return this.tables.servers
+        .filter((row) => row.account_id === a[0] && row.state !== "destroyed")
+        .sort((left, right) => Number(right.created_at) - Number(left.created_at));
+    }
+    if (sql.startsWith("select s.id as server_id") && sql.includes("server_refund")) {
+      // 钱去哪了：按账号一次聚合，扣费看 order 账本，退款看 server_refund 账本。
+      return this.tables.servers
+        .filter((server) => server.account_id === a[0])
+        .map((server) => {
+          const charged = this.tables.wallet_ledger
+            .filter(
+              (entry) =>
+                entry.ref_type === "order" &&
+                entry.ref_id === server.order_id &&
+                entry.kind === "charge",
+            )
+            .reduce((sum, entry) => sum + Math.abs(Number(entry.amount_cents)), 0);
+          const refunded = this.tables.wallet_ledger
+            .filter((entry) => entry.ref_type === "server_refund" && entry.ref_id === server.id)
+            .reduce((sum, entry) => sum + Number(entry.amount_cents), 0);
+          return { server_id: server.id, charged_cents: charged, refunded_cents: refunded };
+        });
+    }
     if (sql.startsWith("select distinct account_id from wallet_ledger")) {
       const cutoff = Number(a[0]);
       const ids = [

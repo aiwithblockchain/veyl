@@ -50,7 +50,36 @@ interface ServerRow {
 
 const GRACE_MS = 7 * 24 * 3600 * 1000;
 
-function serverView(row: ServerRow) {
+/** 钱去哪了：按账号一次聚合每台服务器的扣费与退款，列表/详情共用，避免 N+1。 */
+async function serverMoney(
+  db: D1Database,
+  accountId: string,
+): Promise<Map<string, { chargedCents: number; refundedCents: number }>> {
+  const result = await db
+    .prepare(
+      "SELECT s.id AS server_id, " +
+        "COALESCE((SELECT SUM(ABS(w.amount_cents)) FROM wallet_ledger w " +
+        "WHERE w.ref_type = 'order' AND w.ref_id = s.order_id AND w.kind = 'charge'), 0) AS charged_cents, " +
+        "COALESCE((SELECT SUM(w.amount_cents) FROM wallet_ledger w " +
+        "WHERE w.ref_type = 'server_refund' AND w.ref_id = s.id), 0) AS refunded_cents " +
+        "FROM servers s WHERE s.account_id = ?",
+    )
+    .bind(accountId)
+    .all<{ server_id: string; charged_cents: number; refunded_cents: number }>();
+  const money = new Map<string, { chargedCents: number; refundedCents: number }>();
+  for (const row of result.results ?? []) {
+    money.set(String(row.server_id), {
+      chargedCents: Number(row.charged_cents ?? 0),
+      refundedCents: Number(row.refunded_cents ?? 0),
+    });
+  }
+  return money;
+}
+
+function serverView(
+  row: ServerRow,
+  money?: { chargedCents: number; refundedCents: number },
+) {
   const paidUntil = Number(row.paid_until ?? 0);
   const pastDue = row.billing_state === "past_due" || row.billing_state === "expired";
   return {
@@ -70,6 +99,9 @@ function serverView(row: ServerRow) {
     paid_until: new Date(paidUntil).toISOString(),
     billing_state: row.billing_state ?? "active",
     grace_ends_at: pastDue ? new Date(paidUntil + GRACE_MS).toISOString() : null,
+    // 钱去哪了：失败机器也要能说清扣了多少、退了多少，不能让人误以为已付到明天。
+    charged_cents: money?.chargedCents ?? 0,
+    refunded_cents: money?.refundedCents ?? 0,
     failure: row.failure_code
       ? { stage: row.state, code: row.failure_code, message: "这台服务器没有创建成功", retryable: false }
       : null,
@@ -420,7 +452,8 @@ async function listServers(request: Request, env: ServersEnv): Promise<Response>
     .all<ServerRow>();
   const rows = result.results ?? [];
   await refreshBooting(env, rows);
-  return json({ servers: rows.map(serverView) });
+  const money = await serverMoney(env.DB, identity.accountId);
+  return json({ servers: rows.map((row) => serverView(row, money.get(row.id))) });
 }
 
 async function getServer(request: Request, env: ServersEnv, serverId: string): Promise<Response> {
@@ -431,7 +464,8 @@ async function getServer(request: Request, env: ServersEnv, serverId: string): P
   const row = await loadServer(env.DB, identity.accountId, serverId);
   if (!row) return apiError("NOT_FOUND", "没有这台服务器");
   await refreshBooting(env, [row]);
-  return json(serverView(row));
+  const money = await serverMoney(env.DB, identity.accountId);
+  return json(serverView(row, money.get(row.id)));
 }
 
 async function destroy(request: Request, env: ServersEnv, serverId: string): Promise<Response> {

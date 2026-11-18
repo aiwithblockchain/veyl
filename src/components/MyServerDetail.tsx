@@ -5,6 +5,7 @@ import { ServerProgress } from "./ServerProgress";
 import {
   MY_SERVER_STATE_LABEL,
   billingNoticeText,
+  formatUsdCents,
   isProvisioning,
   serverBillingText,
   stateTone,
@@ -150,6 +151,19 @@ export function MyServerDetail({
               }
           : null;
 
+  /** 没建成的机器不存在「本期有效至」：费用行只说退款结论。 */
+  const failed = server.state === "error";
+  const chargedCents = server.charged_cents;
+  const refundedCents = server.refunded_cents;
+  const failedBilling =
+    chargedCents === undefined || refundedCents === undefined
+      ? "费用信息暂时读不到"
+      : refundedCents > 0
+        ? `已退回 ${formatUsdCents(refundedCents)}`
+        : chargedCents === 0
+          ? "本次没有扣费"
+          : `已扣 ${formatUsdCents(chargedCents)}，退款处理中`;
+
   return (
     <div className="myservers__detail">
       <div className="myservers__detail-head">
@@ -173,9 +187,9 @@ export function MyServerDetail({
         </div>
         <div>
           <dt>费用</dt>
-          <dd className="num">{serverBillingText(server)}</dd>
+          <dd className="num">{failed ? failedBilling : serverBillingText(server)}</dd>
         </div>
-        {server.transfer_gib > 0 ? (
+        {!failed && server.transfer_gib > 0 ? (
           <div>
             <dt>流量</dt>
             <dd>{`每月 ${server.transfer_gib} GB（出站）${

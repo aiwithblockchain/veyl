@@ -308,3 +308,103 @@ describe("已收款订单的补建", () => {
     expect(server.state).toBe("error");
   });
 });
+
+describe("失败退款的补退扫描", () => {
+  function seedStuckOrder(
+    db: FakeD1,
+    options: { orderId: string; serverId: string; createdAt: number; serverState?: string; failures?: number },
+  ) {
+    db.rows("orders").push({
+      id: options.orderId,
+      account_id: ACCOUNT,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 0.3,
+      amount_cents: 30,
+      hourly_usd: 0.0125,
+      state: "failed",
+      paid_via: "wallet",
+      idempotency_key: `idem-${options.orderId}`,
+      created_at: options.createdAt,
+      paid_at: options.createdAt,
+    });
+    db.rows("servers").push({
+      id: options.serverId,
+      account_id: ACCOUNT,
+      order_id: options.orderId,
+      name: "我的服务器",
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      hourly_usd: 0.0125,
+      monthly_usd: 6,
+      daily_price_cents: 30,
+      billing_anchor_at: options.createdAt,
+      state: options.serverState ?? "error",
+      billing_state: "active",
+      node_port: 12345,
+      provider_id: null,
+      paid_until: options.createdAt + DAY,
+      created_at: options.createdAt,
+      updated_at: options.createdAt,
+      destroyed_at: options.serverState === "destroyed" ? options.createdAt : null,
+      failure_code: "upstream_422",
+    });
+    db.rows("wallet_ledger").push({
+      account_id: ACCOUNT,
+      ref_type: "order",
+      ref_id: options.orderId,
+      kind: "charge",
+      amount_cents: -30,
+    });
+    for (let index = 0; index < (options.failures ?? 0); index += 1) {
+      db.rows("audit_log").push({
+        at: options.createdAt + index,
+        account_id: ACCOUNT,
+        server_id: options.serverId,
+        action: "provision.refund_failed",
+        detail: JSON.stringify({ error: "missing_account" }),
+      });
+    }
+  }
+
+  it("长期退不动的老单不会把后面的单饿死，且每天只告警一次", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    // 老单：退款连败 5 次，已到放弃线；新单正常可退。
+    seedStuckOrder(db, { orderId: "ord_old", serverId: "srv_old", createdAt: 1_000, failures: 5 });
+    seedStuckOrder(db, { orderId: "ord_new", serverId: "srv_new", createdAt: 2_000 });
+
+    const report = await runBilling(env as never);
+
+    expect(report.refunded).toBe(1);
+    const refunds = db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund");
+    expect(refunds).toHaveLength(1);
+    expect(refunds[0].ref_id).toBe("srv_new");
+    expect(
+      db.rows("audit_log").filter((row) => row.action === "provision.refund_abandoned"),
+    ).toHaveLength(1);
+
+    // 同一天再跑：新单已退，老单的告警不重复写。
+    await runBilling(env as never);
+    expect(
+      db.rows("audit_log").filter((row) => row.action === "provision.refund_abandoned"),
+    ).toHaveLength(1);
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(1);
+  });
+
+  it("已销毁的服务器不进补退扫描（毁机退款口径不同）", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedStuckOrder(db, {
+      orderId: "ord_dead",
+      serverId: "srv_dead",
+      createdAt: 1_000,
+      serverState: "destroyed",
+    });
+
+    const report = await runBilling(env as never);
+
+    expect(report.refunded).toBe(0);
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
+  });
+});

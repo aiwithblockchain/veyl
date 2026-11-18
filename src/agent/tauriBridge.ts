@@ -750,6 +750,8 @@ function normalizeMyServer(raw: unknown): MyServer | null {
     billing_state: billingState,
     grace_ends_at: grace as string | null,
     transfer_gib: transfer as number,
+    charged_cents: readCents(value.charged_cents) ?? undefined,
+    refunded_cents: readCents(value.refunded_cents) ?? undefined,
     failure: normalizeMyServerFailure(value.failure),
   };
 }

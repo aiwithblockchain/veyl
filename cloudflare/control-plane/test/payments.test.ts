@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { handleOrders } from "../src/orders";
+import { runBilling } from "../src/billing";
 import { handleTopups } from "../src/topups";
 import { handleDodoWebhook } from "../src/webhooks/dodo";
 import { signAccessToken } from "../src/lib/crypto";
@@ -456,5 +457,52 @@ describe("买机扣余额", () => {
     expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
     expect(db.rows("orders")[0].state).toBe("paid");
     expect(db.rows("servers")[0].state).toBe("error");
+  });
+
+  it("退款失败会留证，计费 Cron 下一轮补退且不重复退", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    stubUpstream({ droplet: { status: 422, body: JSON.stringify({ id: "unprocessable_entity" }) } });
+    db.rows("accounts")[0].balance_cents = 2000;
+    const orderId = await createOrder(env);
+
+    // 账户在退款落账那一刻不可用（模拟 D1 抖动 / 账户异常）：扣费照旧、退款写不进去。
+    const account = db.rows("accounts")[0];
+    let inserts = 0;
+    db.beforeWalletInsert = () => {
+      inserts += 1;
+      if (inserts === 2) {
+        db.beforeWalletInsert = undefined;
+        db.rows("accounts").splice(0);
+      }
+    };
+
+    const res = await handleOrders(
+      new Request(`https://example.com/v1/orders/${orderId}/checkout`, {
+        method: "POST",
+        headers: { ...authed(env.token), "Idempotency-Key": "idem-wallet-checkout-refund-fail" },
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(502);
+    expect(db.rows("orders")[0].state).toBe("failed");
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
+    const failed = db.rows("audit_log").find((row) => row.action === "provision.refund_failed");
+    expect(failed).toBeDefined();
+    expect(String(failed?.detail)).toContain("missing_account");
+
+    // 下一轮计费把这些「扣了没退」的单补退回来。
+    db.rows("accounts").push(account);
+    const report = await runBilling(env as never);
+    expect(report.refunded).toBe(1);
+    expect(db.rows("accounts")[0].balance_cents).toBe(2000);
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(1);
+    expect(db.rows("audit_log").some((row) => row.action === "provision.refunded")).toBe(true);
+
+    // 再跑一轮：钱已经退了，不能退第二次。
+    const again = await runBilling(env as never);
+    expect(again.refunded).toBe(0);
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(1);
+    expect(db.rows("accounts")[0].balance_cents).toBe(2000);
   });
 });

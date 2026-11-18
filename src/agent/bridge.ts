@@ -554,6 +554,10 @@ export interface MyServer {
   grace_ends_at: string | null;
   /** 每月公网出口流量额度（GiB）快照；0 = 未知。 */
   transfer_gib: number;
+  /** 建行失败时的扣费快照（USD 分）；后端未给按 0。 */
+  charged_cents?: number;
+  /** 建行失败时已退回的金额（USD 分）；后端未给按 0。 */
+  refunded_cents?: number;
   failure: MyServerFailure | null;
 }
 

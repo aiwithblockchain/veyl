@@ -89,29 +89,79 @@ async function failPermanently(
   if (order?.paid_via !== "wallet" || refundCents <= 0) {
     return { ok: false, reason, retryable: false, refunded: false };
   }
-  const refund = await recordLedgerEntry(env, {
+  const refund = await refundProvision(env, {
     accountId: server.account_id,
-    kind: "adjustment",
+    orderId: server.order_id,
+    serverId: server.id,
     amountCents: refundCents,
-    refType: "server_refund",
-    refId: server.id,
-    note: `建机失败退款：${reason}`,
+    reason,
+    now,
   });
-  if (!refund.ok) {
-    console.warn(`[provision] 退款没有落账 order=${server.order_id} reason=${refund.reason}`);
-    return { ok: false, reason, retryable: false, refunded: false };
-  }
+  if (refund.ok) return { ok: false, reason, retryable: false, refunded: true };
+
+  // 退款失败不能静默：留证，计费 Cron 会按「扣了没退」的记录每轮重试。
+  console.warn(`[provision] refund_failed order=${server.order_id} reason=${refund.reason}`);
   await env.DB.prepare(
-    "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.refunded', ?)",
+    "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.refund_failed', ?)",
   )
     .bind(
       now,
       server.account_id,
       server.id,
-      JSON.stringify({ order_id: server.order_id, amount_cents: refundCents, reason }),
+      JSON.stringify({ order_id: server.order_id, amount_cents: refundCents, error: refund.reason }),
     )
-    .run();
-  return { ok: false, reason, retryable: false, refunded: true };
+    .run()
+    .catch(() => {});
+  return { ok: false, reason, retryable: false, refunded: false };
+}
+
+export interface RefundEnv {
+  DB: D1Database;
+}
+
+/**
+ * 退回一台失败机器已扣的钱；同一 `(server_refund, server_id)` 只退一次。
+ * 建机失败与计费 Cron 的补退共用：`duplicate` 说明钱已经在账上，按成功处理。
+ */
+export async function refundProvision(
+  env: RefundEnv,
+  input: {
+    accountId: string;
+    orderId: string;
+    serverId: string;
+    amountCents: number;
+    reason: string;
+    now?: number;
+  },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const refund = await recordLedgerEntry(env, {
+    accountId: input.accountId,
+    kind: "adjustment",
+    amountCents: input.amountCents,
+    refType: "server_refund",
+    refId: input.serverId,
+    note: `建机失败退款：${input.reason}`,
+  });
+  if (!refund.ok) {
+    return refund.reason === "duplicate" ? { ok: true } : { ok: false, reason: refund.reason };
+  }
+  await env.DB.prepare(
+    "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.refunded', ?)",
+  )
+    .bind(
+      input.now ?? Date.now(),
+      input.accountId,
+      input.serverId,
+      JSON.stringify({
+        order_id: input.orderId,
+        amount_cents: input.amountCents,
+        reason: input.reason,
+      }),
+    )
+    .run()
+    // 钱已经退了，审计写不进去不能反过来把主流程带崩。
+    .catch(() => {});
+  return { ok: true };
 }
 
 export async function provisionServer(

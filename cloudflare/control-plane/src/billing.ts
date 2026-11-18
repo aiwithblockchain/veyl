@@ -3,6 +3,7 @@
 
 import { randomId } from "./lib/crypto";
 import { provisionPaidOrder, type OrdersEnv } from "./orders";
+import { refundProvision } from "./provision";
 import { reconciliationDrift, recordLedgerEntry } from "./wallet";
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -28,6 +29,7 @@ export interface BillingReport {
   pastDue: number;
   expired: number;
   rebuilt: number;
+  refunded: number;
   archived: number;
   drift: number;
 }
@@ -50,7 +52,7 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, pastDue: 0, expired: 0, rebuilt: 0, archived: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, archived: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
@@ -94,9 +96,11 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
     }
   }
 
+  // 扣了钱、机器没建成、退款又没写成的单：每轮补退一次，避免钱和状态都卡住。
+  report.refunded = await retryStuckRefunds(env, now);
+
   const drift = await reconciliationDrift(env);
-  report.drift = drift.length;
-  for (const item of drift) {
+  report.drift = drift.length;  for (const item of drift) {
     try {
       await db
         .prepare("INSERT INTO audit_log (at, account_id, action, detail) VALUES (?, ?, 'wallet.drift', ?)")
@@ -110,6 +114,89 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
 
   report.archived = await archiveLedger(env, now);
   return report;
+}
+
+/** 一条补退连续失败这么多次就放弃重试，只留每日告警，免得无限刷日志。 */
+const MAX_REFUND_FAILURES = 5;
+/** 每轮最多补退这么多单；按 `created_at ASC` 取，老单先处理。 */
+const REFUND_BATCH = 5;
+
+/**
+ * 残留的「扣了没退」：建机永久失败时退款可能没写成（账户被并、D1 抖动）。
+ * 每轮补退一次；成功了由 refundProvision 写 provision.refunded 审计。
+ *
+ * 只扫 `s.state = 'error'`：已销毁的机器走销毁退款，金额口径不同，不能被这里按 1 天退掉。
+ * 连续失败 `MAX_REFUND_FAILURES` 次的单跳过，每天写一次 `provision.refund_abandoned`，
+ * 否则它会在 `LIMIT` 里长期占位，把后面的单饿死。
+ */
+async function retryStuckRefunds(env: BillingEnv, now: number): Promise<number> {
+  const db = env.DB!;
+  const rows = await db
+    .prepare(
+      "SELECT o.id AS order_id, o.account_id, o.amount_cents, s.id AS server_id, s.failure_code, " +
+        "o.created_at AS created_at, " +
+        "(SELECT COUNT(*) FROM audit_log a WHERE a.action = 'provision.refund_failed' AND a.server_id = s.id) AS failures, " +
+        "(SELECT MAX(a.at) FROM audit_log a WHERE a.action = 'provision.refund_abandoned' AND a.server_id = s.id) AS abandoned_at " +
+        "FROM orders o JOIN servers s ON s.order_id = o.id " +
+        "WHERE o.state = 'failed' AND o.paid_via = 'wallet' AND s.state = 'error' " +
+        "AND EXISTS (SELECT 1 FROM wallet_ledger w WHERE w.ref_type = 'order' AND w.ref_id = o.id AND w.kind = 'charge') " +
+        "AND NOT EXISTS (SELECT 1 FROM wallet_ledger w WHERE w.ref_type = 'server_refund' AND w.ref_id = s.id) " +
+        "ORDER BY o.created_at ASC LIMIT 50",
+    )
+    .all<{
+      order_id: string;
+      account_id: string;
+      amount_cents: number;
+      server_id: string;
+      failure_code: string | null;
+      failures: number;
+      abandoned_at: number | null;
+    }>();
+
+  const dayStart = Math.floor(now / DAY_MS) * DAY_MS;
+  let refunded = 0;
+  let attempted = 0;
+  for (const row of rows.results ?? []) {
+    if (Number(row.failures ?? 0) >= MAX_REFUND_FAILURES) {
+      // 每天只告警一次：拿不到账户之类的错误重试也没用，等人处理。
+      if (Number(row.abandoned_at ?? 0) < dayStart) {
+        await db
+          .prepare(
+            "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.refund_abandoned', ?)",
+          )
+          .bind(
+            now,
+            row.account_id,
+            row.server_id,
+            JSON.stringify({
+              order_id: row.order_id,
+              amount_cents: Number(row.amount_cents ?? 0),
+              failures: Number(row.failures ?? 0),
+            }),
+          )
+          .run()
+          .catch(() => {});
+      }
+      continue;
+    }
+    if (attempted >= REFUND_BATCH) continue;
+    attempted += 1;
+    try {
+      const result = await refundProvision({ DB: db }, {
+        accountId: row.account_id,
+        orderId: row.order_id,
+        serverId: row.server_id,
+        amountCents: Number(row.amount_cents ?? 0),
+        reason: row.failure_code ?? "provision_failed",
+        now,
+      });
+      if (result.ok) refunded += 1;
+      else console.error(`[billing] refund_retry_failed order=${row.order_id} reason=${result.reason}`);
+    } catch (error) {
+      console.error(`[billing] refund_retry_failed order=${row.order_id} error=${String(error)}`);
+    }
+  }
+  return refunded;
 }
 
 /**

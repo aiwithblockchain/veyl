@@ -272,3 +272,77 @@ describe("销毁服务器", () => {  it("DO 删除成功后回落本地状态", 
     expect(db.rows("servers")[0].state).toBe("destroyed");
   });
 });
+
+describe("钱的去向（charged_cents / refunded_cents）", () => {
+  function detailRequest(token: string) {
+    return new Request(`https://example.com/v1/servers/${SERVER}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+  }
+
+  function seedFailedServer(db: FakeD1) {
+    seedServer(db, "error");
+    Object.assign(db.rows("servers")[0], {
+      failure_code: "upstream_422",
+      daily_price_cents: 30,
+      billing_anchor_at: Date.now(),
+      paid_until: Date.now() + 24 * 3600 * 1000,
+      billing_state: "active",
+      transfer_gib: 1000,
+    });
+    db.rows("orders").push({ id: "ord_test", account_id: ACCOUNT, state: "failed" });
+  }
+
+  it("扣了又退：两个字段都如实上报", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedFailedServer(db);
+    db.rows("wallet_ledger").push(
+      { ref_type: "order", ref_id: "ord_test", kind: "charge", amount_cents: -30 },
+      { ref_type: "server_refund", ref_id: SERVER, kind: "adjustment", amount_cents: 30 },
+      // 同一订单上的人工调整不算「扣过的钱」。
+      { ref_type: "order", ref_id: "ord_test", kind: "adjustment", amount_cents: -5 },
+    );
+
+    const res = await handleServers(detailRequest(env.token), env as never);
+    const body = (await res!.json()) as { charged_cents: number; refunded_cents: number };
+    expect(body.charged_cents).toBe(30);
+    expect(body.refunded_cents).toBe(30);
+  });
+
+  it("没扣过费：两个都是 0", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedFailedServer(db);
+
+    const res = await handleServers(detailRequest(env.token), env as never);
+    const body = (await res!.json()) as { charged_cents: number; refunded_cents: number };
+    expect(body.charged_cents).toBe(0);
+    expect(body.refunded_cents).toBe(0);
+  });
+
+  it("扣了没退（修复前的失败记录）：refunded 必须是 0，列表也一样", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedFailedServer(db);
+    db.rows("wallet_ledger").push({ ref_type: "order", ref_id: "ord_test", kind: "charge", amount_cents: -30 });
+
+    const res = await handleServers(detailRequest(env.token), env as never);
+    const body = (await res!.json()) as { charged_cents: number; refunded_cents: number };
+    expect(body.charged_cents).toBe(30);
+    expect(body.refunded_cents).toBe(0);
+
+    const list = await handleServers(
+      new Request("https://example.com/v1/servers", {
+        headers: { authorization: `Bearer ${env.token}` },
+      }),
+      env as never,
+    );
+    const { servers } = (await list!.json()) as {
+      servers: Array<{ charged_cents: number; refunded_cents: number; failure: unknown }>;
+    };
+    expect(servers[0].failure).not.toBeNull();
+    expect(servers[0].charged_cents).toBe(30);
+    expect(servers[0].refunded_cents).toBe(0);
+  });
+});
