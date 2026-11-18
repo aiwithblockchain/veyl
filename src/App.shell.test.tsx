@@ -303,6 +303,34 @@ describe("三区外壳与连接舞台", () => {
         timeout: 5000,
       }),
     ).toBeTruthy();
+    expect(screen.queryByText(/两个节点都没测通/)).toBeNull();
+    expect(screen.queryByText(/两个节点都没测成/)).toBeNull();
+  }, 15_000);
+
+  it("试用测速一个抛错一个连不上：按混合处理，不说「都没…」", async () => {
+    await renderApp();
+    vi.spyOn(bridge, "nodeProbe").mockImplementation(async (nodeId: string) => {
+      if (nodeId.includes("tokyo")) throw new Error("probe failed");
+      return {
+        node_id: nodeId,
+        status: "unreachable" as const,
+        reachable: false,
+        latency_ms: null,
+        probe_method: "clash_delay" as const,
+        checked_at: Date.now(),
+        error: { code: "PROBE_TIMEOUT", message: "" },
+      };
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /先试用免费节点/ }));
+
+    expect(
+      await screen.findByText(/两个节点都没测出可用结果/, undefined, {
+        timeout: 5000,
+      }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/两个节点都没测通/)).toBeNull();
+    expect(screen.queryByText(/两个节点都没测成/)).toBeNull();
   }, 15_000);
 
   it("试用预选切 destination 往返后不二次应用", async () => {

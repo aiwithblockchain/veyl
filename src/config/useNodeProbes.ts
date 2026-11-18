@@ -261,12 +261,17 @@ export function useNodeProbes({
       startingConfigRef.current = null;
       freshRun.current = null;
       runScope.current = [];
+      // 旧载荷可能没有 untested：非取消时按恒等式补齐，取消时剩下的就是没走到，
+      // 不把它们算成「没测成」。这里归一一次，界面与控制台都读同一个值。
+      const untested =
+        payload.untested ??
+        (payload.cancelled ? 0 : Math.max(0, payload.total - payload.ok - payload.failed));
       setFinished({
         configId: payload.config_id,
         total: payload.total,
         ok: payload.ok,
         failed: payload.failed,
-        untested: payload.untested,
+        untested,
         method: payload.method === "clash" ? "clash" : "none",
         cancelled: payload.cancelled,
         reason: payload.reason === "connected" ? "connected" : null,
@@ -278,7 +283,7 @@ export function useNodeProbes({
           payload.config_id,
           payload.reason === "connected"
             ? "连接后测速已停止"
-            : `已停止 · 已测 ${payload.ok + payload.failed + (payload.untested ?? 0)}/${payload.total}`,
+            : `已停止 · 已测 ${payload.ok + payload.failed + untested}/${payload.total}`,
         );
       }
     },

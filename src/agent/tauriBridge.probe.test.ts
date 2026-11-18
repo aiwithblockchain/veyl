@@ -1,16 +1,44 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+const { invoke, handlers } = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  handlers: new Map<string, Array<(event: { payload: unknown }) => void>>(),
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async () => () => {}),
+  listen: vi.fn(async (name: string, cb: (event: { payload: unknown }) => void) => {
+    const list = handlers.get(name) ?? [];
+    list.push(cb);
+    handlers.set(name, list);
+    return () => {};
+  }),
 }));
 
+import { AGENT_EVENTS } from "./protocol";
+import type { AgentEvent } from "./protocol";
 import { TauriAgentBridge } from "./tauriBridge";
+
+/** 每个桥实例都会注册一份监听；测试里对同名事件全部投递，等价于一次真实事件。 */
+function emitEvent(name: string, payload: unknown) {
+  for (const cb of handlers.get(name) ?? []) cb({ payload });
+}
+
+/** 等本实例的监听注册好：反复投递直到订阅者收到，不依赖微任务时序。 */
+async function emitUntilSeen(
+  name: string,
+  payload: unknown,
+  seen: AgentEvent[],
+): Promise<void> {
+  await vi.waitFor(() => {
+    emitEvent(name, payload);
+    expect(seen.length).toBeGreaterThan(0);
+  });
+}
 
 beforeEach(() => {
   invoke.mockReset();
+  handlers.clear();
 });
 
 describe("批量测速命令映射", () => {
@@ -188,8 +216,102 @@ describe("三态归一：status 优先于旧字段", () => {
     expect(entry).toMatchObject({ status: "untested", reachable: null });
   });
 
-  it("status 缺失时回退旧载荷：reachable null 仍是 untested", async () => {
+  it("status 缺失且 reachable 不可用：按 untested 处理", async () => {
     const entry = await normalizeOne({ node_id: "n1", reachable: null });
     expect(entry).toMatchObject({ status: "untested", reachable: null });
+  });
+
+  it("status 缺失 + reachable=true：按 ok 处理，不塌成 untested", async () => {
+    const entry = await normalizeOne({ node_id: "n1", reachable: true, latency_ms: 30 });
+    expect(entry).toMatchObject({ status: "ok", reachable: true, latency_ms: 30 });
+  });
+
+  it("status 缺失 + reachable=false：按 unreachable 处理，不塌成 untested", async () => {
+    const entry = await normalizeOne({ node_id: "n1", reachable: false });
+    expect(entry).toMatchObject({ status: "unreachable", reachable: false });
+  });
+
+  it("status 未知且缺 reachable：untested / reachable null / method none", async () => {
+    const entry = await normalizeOne({
+      node_id: "n1",
+      status: "weird",
+      probe_method: "tcp",
+      checked_at: 0,
+      error: null,
+    });
+    expect(entry).toMatchObject({
+      status: "untested",
+      reachable: null,
+      probe_method: "none",
+    });
+  });
+});
+
+describe("单节点与 progress 事件走同一套归一化", () => {
+  it("node_probe 返回矛盾字段时按 status 纠正 reachable", async () => {
+    invoke.mockResolvedValueOnce({
+      node_id: "n1",
+      status: "ok",
+      reachable: false,
+      latency_ms: 42,
+      probe_method: "clash_delay",
+      checked_at: 1700000000000,
+      error: null,
+    });
+    await expect(new TauriAgentBridge().nodeProbe("n1")).resolves.toMatchObject({
+      node_id: "n1",
+      status: "ok",
+      reachable: true,
+      latency_ms: 42,
+    });
+  });
+
+  it("node_probe 结果没有 node_id 时抛错，不伪造节点", async () => {
+    invoke.mockResolvedValueOnce({ status: "ok", reachable: true });
+    await expect(new TauriAgentBridge().nodeProbe("n1")).rejects.toMatchObject({
+      code: "PROBE_RESULT_INVALID",
+    });
+  });
+
+  it("progress 事件里的 result 同样被纠正", async () => {
+    const bridge = new TauriAgentBridge();
+    const seen: AgentEvent[] = [];
+    bridge.subscribe((event) => seen.push(event));
+
+    await emitUntilSeen(
+      AGENT_EVENTS.nodeProbeProgress,
+      {
+        run_id: "run-1",
+        config_id: "cfg-1",
+        done: 1,
+        total: 2,
+        result: { node_id: "n1", status: "untested", reachable: true },
+      },
+      seen,
+    );
+
+    const payload = seen[0].payload as unknown as { result: Record<string, unknown> };
+    expect(payload.result).toMatchObject({ status: "untested", reachable: null });
+  });
+
+  it("progress 的 result 归一失败时丢弃，按阶段事件处理", async () => {
+    const bridge = new TauriAgentBridge();
+    const seen: AgentEvent[] = [];
+    bridge.subscribe((event) => seen.push(event));
+
+    await emitUntilSeen(
+      AGENT_EVENTS.nodeProbeProgress,
+      {
+        run_id: "run-1",
+        config_id: "cfg-1",
+        done: 1,
+        total: 2,
+        result: { status: "ok", reachable: true },
+      },
+      seen,
+    );
+
+    const payload = seen[0].payload as unknown as { result: unknown };
+    expect(payload.result).toBeNull();
   });
 });

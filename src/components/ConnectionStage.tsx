@@ -205,16 +205,8 @@ export function ConnectionStage({
     probeFinishedForConfig.total > 0 &&
     probeFinishedForConfig.method !== "none" &&
     probeFinishedForConfig.failed === probeFinishedForConfig.total;
-  /** 混合批里没测成的条数；旧载荷没带 untested 时按恒等式补。 */
-  const probeUntestedCount = probeFinishedForConfig
-    ? probeFinishedForConfig.untested ??
-      Math.max(
-        0,
-        probeFinishedForConfig.total -
-          probeFinishedForConfig.ok -
-          probeFinishedForConfig.failed,
-      )
-    : 0;
+  /** 混合批里没测成的条数；控制层已归一，这里不再补算。 */
+  const probeUntestedCount = probeFinishedForConfig ? probeFinishedForConfig.untested : 0;
   /** 混合批或部分未测：单独列没测成的数量，不写「都连不通」。 */
   const probeMixedUntested =
     !probeRunning &&

@@ -492,4 +492,34 @@ describe("取消提示的已测数量", () => {
     });
     expect(result.current.notice?.text).not.toContain("NaN");
   });
+
+  it("非取消旧载荷缺 untested：按 total-ok-failed 补齐", async () => {
+    const { result, emit } = harness();
+    await act(async () => {
+      await result.current.start("cfg-1", IDS);
+    });
+    const event = finished("run-1", { ok: 2, failed: 1 });
+    const payload = {
+      ...(event as unknown as { payload: Record<string, unknown> }).payload,
+    };
+    delete payload.untested;
+    emit({ ...event, payload } as unknown as AgentEvent);
+
+    expect(result.current.finished).toMatchObject({ ok: 2, failed: 1, untested: 5 });
+  });
+
+  it("取消旧载荷缺 untested：没走完的不算没测成", async () => {
+    const { result, emit } = harness();
+    await act(async () => {
+      await result.current.start("cfg-1", IDS);
+    });
+    const event = finished("run-1", { ok: 1, failed: 1, cancelled: true });
+    const payload = {
+      ...(event as unknown as { payload: Record<string, unknown> }).payload,
+    };
+    delete payload.untested;
+    emit({ ...event, payload } as unknown as AgentEvent);
+
+    expect(result.current.finished).toMatchObject({ ok: 1, failed: 1, untested: 0 });
+  });
 });

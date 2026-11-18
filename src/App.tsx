@@ -2062,10 +2062,14 @@ export default function App() {
       }
       if (fastestMs === null || fastestNodeId === null) {
         // 三态区分：没测成 / 连不上 / 混合。不把未测说成失败。
+        // 只有每个节点都拿到结果，才配得上「全都…」；一抛错一正常按混合处理。
+        const covered = results.length === nodeIds.length;
         const allUntested =
+          covered &&
           results.length > 0 &&
           results.every((result) => result.status === "untested");
         const allUnreachable =
+          covered &&
           results.length > 0 &&
           results.every((result) => result.status === "unreachable");
         failTrial(

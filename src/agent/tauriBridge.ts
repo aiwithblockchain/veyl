@@ -67,7 +67,7 @@ import type {
   TunProbeData,
 } from "./bridge";
 import { DEFAULT_PROXY_PORT, readQuestionDetail } from "./bridge";
-import { toBridgeError } from "./errors";
+import { BridgeError, toBridgeError } from "./errors";
 import { createListenerManager } from "./listeners";
 import { AGENT_EVENTS, APP_EVENT_NAMES, AI_EVENT_NAMES } from "./protocol";
 import type {
@@ -354,6 +354,17 @@ function normalizeProbeResult(raw: unknown): NodeProbeResult | null {
     checked_at: typeof value.checked_at === "number" ? value.checked_at : 0,
     error,
   };
+}
+
+/**
+ * `node-probe-progress` 的阶段事件可能不带结果；带了就与快照走同一套归一化，
+ * 归一失败（没有有效 node_id）时按阶段事件处理，不伪造节点。
+ */
+function normalizeProbeProgressPayload(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+  const raw = payload as { result?: unknown };
+  if (raw.result === null || raw.result === undefined) return payload;
+  return { ...raw, result: normalizeProbeResult(raw.result) };
 }
 
 function normalizeNodeSummary(raw: unknown): NodeSummary | null {
@@ -932,7 +943,11 @@ export class TauriAgentBridge implements AgentBridge {
       await this.manager.listen(
         name,
         listen<unknown>(name, (event) => {
-          const payload = event.payload as AgentEvent["payload"];
+          const payload = (
+            name === AGENT_EVENTS.nodeProbeProgress
+              ? normalizeProbeProgressPayload(event.payload)
+              : event.payload
+          ) as AgentEvent["payload"];
           for (const listener of this.listeners) {
             listener({ name, payload } as AgentEvent);
           }
@@ -1040,7 +1055,12 @@ export class TauriAgentBridge implements AgentBridge {
   }
 
   async nodeProbe(nodeId: string): Promise<NodeProbeResult> {
-    return call<NodeProbeResult>("node_probe", { nodeId });
+    const raw = await call<unknown>("node_probe", { nodeId });
+    const result = normalizeProbeResult(raw);
+    if (!result) {
+      throw new BridgeError("PROBE_RESULT_INVALID", "节点探测返回的结果不完整。");
+    }
+    return result;
   }
 
   async nodeProbeAll(configId?: string, nodeIds?: string[]): Promise<NodeProbeAllData> {
