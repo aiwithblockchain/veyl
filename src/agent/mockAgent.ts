@@ -2191,9 +2191,10 @@ export class MockAgentBridge implements AgentBridge {
   async nodeProbe(nodeId: string): Promise<NodeProbeResult> {
     const result: NodeProbeResult = {
       node_id: nodeId,
+      status: "ok",
       reachable: true,
       latency_ms: 42,
-      probe_method: "tcp",
+      probe_method: "clash_delay",
       checked_at: Date.now(),
       error: null,
     };
@@ -2234,9 +2235,7 @@ export class MockAgentBridge implements AgentBridge {
       };
     }
 
-    const connected =
-      this.runtime.state === "running" || this.runtime.state === "degraded";
-    const method: NodeProbeMethod = connected ? "clash" : "tcp";
+    const method: NodeProbeMethod = "clash";
     const run = {
       runId: `probe_${Date.now().toString(36)}`,
       configId: target,
@@ -2276,9 +2275,10 @@ export class MockAgentBridge implements AgentBridge {
         const result: NodeProbeResult = unreachable
           ? {
               node_id: nodeId,
+              status: "unreachable",
               reachable: false,
               latency_ms: null,
-              probe_method: connected ? "clash_delay" : "tcp",
+              probe_method: "clash_delay",
               checked_at: Date.now(),
               error: {
                 code: failureCode,
@@ -2287,15 +2287,16 @@ export class MockAgentBridge implements AgentBridge {
             }
           : {
               node_id: nodeId,
+              status: "ok",
               reachable: true,
               latency_ms: 26 + ((index * 37) % 140),
-              probe_method: connected ? "clash_delay" : "tcp",
+              probe_method: "clash_delay",
               checked_at: Date.now(),
               error: null,
             };
         this.probeCache.set(nodeId, result);
         run.done += 1;
-        if (result.reachable) run.ok += 1;
+        if (result.status === "ok") run.ok += 1;
         else run.failed += 1;
         this.emit({
           name: AGENT_EVENTS.nodeProbeProgress,
@@ -2410,6 +2411,8 @@ export class MockAgentBridge implements AgentBridge {
         total: run.total,
         ok: run.ok,
         failed: run.failed,
+        // mock 只产出 ok / unreachable，没有 untested。
+        untested: 0,
         method: run.method,
         cancelled: run.cancelled,
         reason: run.reason,

@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.19.0`
+> 契约版本：`3.20.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.19.0";
+  contract_version: "3.20.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -450,7 +450,7 @@ type RuntimeStartData = RuntimeSnapshot & {
 - 幂等命中时 `state` 可能是 `running`（已连接）或 `starting`（同一套正在启动，不重启在途连接）；后者是 `state != "running"` 的唯一成功情形（`commands.md` §7.1.1）。模型把 `already_running = true` 当作「已经在连 / 正在连」，不要再催促用户重试。
 - `VpnConnect` 复用同一条连接路径，返回里也可能带 `already_running`；那是附加字段，按 `RuntimeStartData` 同样理解即可。
 
-错误：`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `tun_denied` / `helper_missing`）、`NOT_FOUND`、`RUNTIME_BUSY`、`RUNTIME_NOT_INSTALLED`、`RUNTIME_START_TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`。
+错误：`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `tun_denied` / `helper_missing`）、`NOT_FOUND`、`RUNTIME_BUSY`、`RUNTIME_NOT_INSTALLED`、`RUNTIME_START_TIMEOUT`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`TIMEOUT`（`details.reason = "runtime_busy"`：运行期操作锁等待超时，见 `commands.md` §7.1；不是连接失败，可重试）。
 
 `tun` 连接换新后台组件失败时，`PRECONDITION_FAILED` 的 `details.reason` 取值见 `commands.md` §7.1：`tun_denied` / `helper_admin_cancelled` / `helper_start_failed` / `helper_missing` / `dev_unbundled` / `helper_busy` / `helper_lease_unavailable` / `helper_file_invalid`；连接被切配置 / 断开取代时是 `cancelled`（请求作废，不是故障，不要重试）。模型只按 `message` 转述，不暴露 code；`dev_unbundled` 表示当前是未打包的调试进程，需要引导用户用 `bash scripts/dev/tun-dev.sh` 启动打包后的 App；`helper_admin_cancelled` 是用户取消了授权，可以让用户再试一次，不要说成「去系统设置允许」。2026-11-13 补记，字段不变，不升版本。
 
@@ -481,7 +481,7 @@ type RuntimeStopData = {
 - 已是 `idle` → `ok: true`，`system_proxy_restored` 反映实际恢复结果（幂等）。
 - `force: true` 时若 5s 内未退出则强杀，`details.forced = true`。
 
-错误：`RUNTIME_STOP_TIMEOUT`、`RUNTIME_EXITED`。
+错误：`RUNTIME_STOP_TIMEOUT`、`RUNTIME_EXITED`、`TIMEOUT`（`details.reason = "runtime_busy"`：运行期操作锁等待超时，不是断开失败，可重试；见 `commands.md` §7.2）。
 
 ---
 
@@ -509,6 +509,8 @@ type RuntimeRestartData = {
 
 - `idle` 时等价于 `RuntimeStart`。
 - `starting` / `restarting` 时返回 `RUNTIME_BUSY`。
+
+错误：`RUNTIME_BUSY`、`TIMEOUT`（`details.reason = "runtime_busy"`：运行期操作锁等待超时——重建或另一次运行期操作正在跑，这次没排到；不是重启失败，可重试）。
 
 ---
 
@@ -851,7 +853,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.19.0";
+  contract_version: "3.20.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1014,7 +1016,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.19.0";
+  contract_version: "3.20.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1399,9 +1401,10 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 
 `data`：`NodeProbeData`（`commands.md` §4.4）。
 
-- 已连接且测的是当前节点 → 走 Clash delay，测的是**真实可用性**（含密码与加密方式）。
-- 其余情况 → TCP 握手，只能说明端口活着。
-- **节点不可达不是工具错误**：返回 `ok: true` + `reachable: false` + `error`。只有 `node_id` 不存在才是 `Err`。
+- **唯一测得口径**：Clash `GET /proxies/node-<id>/delay`，经 sing-box 真实发一次 HTTP。已连接且测的是当前配置 → 复用运行中的 Clash API；完全空闲 → 先起临时探针运行时（8 秒启动上限，测完保留 60 秒复用）。不再有 TCP 握手。
+- `status` 三态：`ok` / `unreachable` / `untested`；`unreachable` 只在 Clash delay 真的失败时出现。
+- **`untested` 不是工具错误，也不是「连不通」**：工具返回 `ok: true`，`status = "untested"`、`reachable = null`、`error.code = "PROBE_UNAVAILABLE"` + `reason`。模型只能说「这次没测成」并转述原因，**不得说成节点不可达**。
+- **节点不可达也不是工具错误**：`ok: true` + `status = "unreachable"` + `reachable = false` + `error`。只有 `node_id` 不存在才是 `Err`；整次调用超过 15 秒（含探针运行时启动）返回 `TIMEOUT`，可重试。
 - 不登记问题（J1）：单节点手动测试失败不等于用户被阻断。
 - **一次只测一个**：批量测速是 UI 专用（`commands.md` §4.6–§4.8），没有对应工具；不要循环调用本工具模拟批量。
 
@@ -2030,7 +2033,7 @@ type CatalogOptionsData = {
 | 工具 | 同步超时 |
 |---|---|
 | 只读工具 | 3s |
-| `NodeProbe` | 5s（TCP 3s + 余量） |
+| `NodeProbe` | 15s（含 8s 探针运行时启动） |
 | `NodeImportUrl` | 15s（抓取 10s + 解析） |
 | `CatalogOptions` | 8s（走缓存，必要时取一次目录） |
 | `RuntimeStart` | 15s（含 10s 启动） |
@@ -2087,6 +2090,14 @@ type CatalogOptionsData = {
 ---
 
 ## 8. 变更记录
+
+### 3.20.0（2026-11-18，`NodeProbe` 唯一 Clash 口径）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `3.20.0`；§4.28 `NodeProbe` 删除「其余情况走 TCP 握手」，改为唯一 Clash `/proxies/node-<id>/delay`（空闲时先起 8 秒上限的临时探针运行时） | 语义变更 | 产品否掉裸 TCP：端口活着不等于经代理能通 |
+| 2 | §4.28 写明 `status` 三态：`untested` 时工具仍是 `ok: true`、`reachable = null`，模型不得说成不可达；`unreachable` 才是真的没通 | 语义澄清 | 没测成与连不通必须分开 |
+| 3 | §7 超时表 `NodeProbe` 由 5s（TCP 3s + 余量）改为 **15s（含 8s 探针运行时启动）** | 约束 | 覆盖临时运行时冷启动 |
 
 ### 3.19.0（2026-11-18，地区 × 档位按目录真实数据）
 

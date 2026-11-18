@@ -6,7 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,40 +19,53 @@ use crate::runtime::{InstalledRuntime, RuntimeManager, StartPlan};
 use crate::store::configs::Node;
 use crate::store::{configs, Store};
 
-use super::services::{clash_delay, probe_result, tcp_probe};
+use super::services::{clash_delay, probe_ok, probe_unreachable, probe_untested};
 
 pub const CONCURRENCY: usize = 6;
 
-/// 一批测速只选一种方式：已连接本配置走 Clash 延迟，其余走 TCP。
+/// 单节点测速留下的空闲运行时：60 秒内再点测直接复用，不冷启动。
+pub const IDLE_TTL: Duration = Duration::from_secs(60);
+
+/// 一批测速只选一种方式：已连接本配置走当前 Clash 延迟，其余需要临时运行时。
 #[derive(Clone)]
 pub struct ClashTarget {
     pub addr: String,
     pub secret: String,
 }
 
-/// 复用单节点测速的同一组探测函数；批次只决定用哪一种。
-pub async fn probe_node(node: &Node, target: Option<&ClashTarget>) -> Value {
-    if let Some(target) = target {
-        return match clash_delay(&target.addr, &target.secret, &format!("node-{}", node.id)).await {
-            Ok(latency) => probe_result(&node.id, true, Some(latency), "clash_delay", None),
-            Err(message) => probe_result(
-                &node.id,
-                false,
-                None,
-                "clash_delay",
-                Some(("CLASH_DELAY_FAILED", message.as_str())),
-            ),
-        };
+/// 临时探针运行时起不来的原因，映射成 `untested` 的 `reason`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeFailure {
+    Missing,
+    Failed,
+    Timeout,
+    Cancelled,
+}
+
+impl ProbeFailure {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Missing => "runtime_missing",
+            Self::Failed => "runtime_failed",
+            Self::Timeout => "runtime_timeout",
+            Self::Cancelled => "connection_busy",
+        }
     }
-    match tcp_probe(&node.server, node.port).await {
-        Ok(latency) => probe_result(&node.id, true, Some(latency), "tcp", None),
-        Err(message) => probe_result(
-            &node.id,
-            false,
-            None,
-            "tcp",
-            Some(("TCP_CONNECT_FAILED", message.as_str())),
-        ),
+}
+
+/// 唯一测得口径：Clash `/proxies/node-<id>/delay`，经 sing-box 真发一次请求。
+pub async fn probe_node(node: &Node, target: &ClashTarget) -> Value {
+    // 没有凭据的节点在渲染运行配置时就被跳过了，selector 里不会有它的 tag。
+    if crate::secrets::get_secret(&node.password_ref)
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return probe_untested(&node.id, "no_credentials");
+    }
+    match clash_delay(&target.addr, &target.secret, &format!("node-{}", node.id)).await {
+        Ok(latency) => probe_ok(&node.id, latency),
+        Err(message) => probe_unreachable(&node.id, &message),
     }
 }
 
@@ -90,11 +103,111 @@ impl BatchMeta {
 pub struct ProbeBatchState {
     current: Mutex<Option<Arc<BatchMeta>>>,
     cache: Mutex<HashMap<String, Value>>,
+    /// 单节点测速留下的空闲探针（仅同一配置可复用）。
+    idle: Mutex<Option<IdleProbe>>,
+    /// 正在启动的空闲探针：用户开始连接时要能取消它。
+    idle_cancel: Mutex<Option<CancellationToken>>,
+    /// 让过期的定时器不再误杀新一代探针。
+    generation: AtomicU64,
+}
+
+struct IdleProbe {
+    config_id: String,
+    addr: String,
+    secret: String,
+    generation: u64,
+    expires_at: std::time::Instant,
 }
 
 impl ProbeBatchState {
+    /// 开始一次空闲探针启动：清掉旧槽位并返回用于取消的令牌。
+    pub fn begin_idle_probe(&self) -> (u64, CancellationToken) {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.idle.lock() = None;
+        let token = CancellationToken::new();
+        *self.idle_cancel.lock() = Some(token.clone());
+        (generation, token)
+    }
+
+    /// 停掉空闲探针的复用资格；正在启动的那次也一并取消。
+    pub fn cancel_idle(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        *self.idle.lock() = None;
+        if let Some(token) = self.idle_cancel.lock().take() {
+            token.cancel();
+        }
+    }
+
+    /// 同一配置、未过期的空闲探针。
+    pub fn idle_target(&self, config_id: &str) -> Option<ClashTarget> {
+        let mut idle = self.idle.lock();
+        match idle.as_ref() {
+            Some(state) if state.config_id == config_id => {
+                if std::time::Instant::now() < state.expires_at {
+                    Some(ClashTarget {
+                        addr: state.addr.clone(),
+                        secret: state.secret.clone(),
+                    })
+                } else {
+                    *idle = None;
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// 记下一次可复用的空闲探针，返回新一代编号（定时器用它判断是否过期）。
+    ///
+    /// `expected` 是启动开始时拿到的编号：期间用户开始连接（`cancel_idle` 会
+    /// 递增编号）时不再记录，避免把已被连接抢走进程的探针留在槽里。
+    pub fn note_idle(
+        &self,
+        config_id: &str,
+        target: &ClashTarget,
+        expected: Option<u64>,
+    ) -> Option<u64> {
+        self.note_idle_with_ttl(config_id, target, expected, IDLE_TTL)
+    }
+
+    fn note_idle_with_ttl(
+        &self,
+        config_id: &str,
+        target: &ClashTarget,
+        expected: Option<u64>,
+        ttl: Duration,
+    ) -> Option<u64> {
+        let mut idle = self.idle.lock();
+        if let Some(expected) = expected {
+            if self.generation.load(Ordering::SeqCst) != expected {
+                return None;
+            }
+        }
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *idle = Some(IdleProbe {
+            config_id: config_id.to_string(),
+            addr: target.addr.clone(),
+            secret: target.secret.clone(),
+            generation,
+            expires_at: std::time::Instant::now() + ttl,
+        });
+        self.idle_cancel.lock().take();
+        Some(generation)
+    }
+
+    /// 定时器到点：只有槽里还是自己那一代时才允许停进程。
+    pub fn expire_idle(&self, generation: u64) -> bool {
+        let mut idle = self.idle.lock();
+        if idle.as_ref().map(|state| state.generation) == Some(generation) {
+            *idle = None;
+            true
+        } else {
+            false
+        }
+    }
+
     /// 启动一批。已有批次在跑时返回它的 `run_id`（调用方映射成 BUSY）。
-    /// `method` 是整批唯一使用的方式：`clash` 或 `tcp`。
+    /// `method` 是整批唯一使用的方式：`clash` 或 `none`。
     pub fn start(
         &self,
         config_id: &str,
@@ -140,12 +253,22 @@ impl ProbeBatchState {
     }
 
     /// 用户开始连接时停掉正在跑的批次，并在 finished 里说明原因。
+    /// 空闲的探针运行时同理：连接要独占运行时槽位，复用资格立即作废。
     pub fn cancel_for_connection(&self) {
+        self.cancel_idle();
         let current = self.current.lock();
         if let Some(meta) = current.as_ref() {
             *meta.reason.lock() = Some("connected");
             meta.cancel.cancel();
         }
+    }
+
+    /// 是否有批次正在跑（已取消的批次不算）。单节点测速不能与批次抢同一个运行时槽位。
+    pub fn has_running_batch(&self) -> bool {
+        self.current
+            .lock()
+            .as_ref()
+            .is_some_and(|meta| !meta.cancel.is_cancelled())
     }
 
     /// 返回该配置节点集里的缓存结果，以及「该配置是否有批次在跑」。
@@ -198,6 +321,8 @@ pub struct BatchOutcome {
     pub done: usize,
     pub ok: usize,
     pub failed: usize,
+    /// 没测成的节点数：`ok + failed + untested == done`。
+    pub untested: usize,
     pub cancelled: bool,
     pub network: &'static str,
     pub method: &'static str,
@@ -282,14 +407,19 @@ where
     drop(tx);
 
     let mut ok = 0usize;
+    // 测不通（真经隧道失败）与没测成分开计：界面不能把「没跑」说成「都不通」。
+    let mut failed = 0usize;
+    let mut untested = 0usize;
     loop {
         tokio::select! {
             _ = meta.cancel.cancelled() => break,
             item = rx.recv() => {
                 let Some(result) = item else { break };
                 let done = meta.done.fetch_add(1, Ordering::SeqCst) + 1;
-                if result.get("reachable").and_then(Value::as_bool).unwrap_or(false) {
-                    ok += 1;
+                match result.get("reachable").and_then(Value::as_bool) {
+                    Some(true) => ok += 1,
+                    Some(false) => failed += 1,
+                    None => untested += 1,
                 }
                 state.record(&result);
                 emit_progress(&meta, "probing", done, Some(&result));
@@ -303,20 +433,28 @@ where
 
     let cancelled = meta.cancel.is_cancelled();
     let done = meta.done.load(Ordering::SeqCst);
-    let failed = done.saturating_sub(ok);
+    debug_assert_eq!(ok + failed + untested, done);
     // 只有「全部失败」才多打一次本机连通性检查，避免把节点故障误报成本机断网。
-    let network = if !cancelled && ok == 0 && done == meta.total && done > 0 {
+    // 有 untested 就不是「全部失败」：没测的节点不能当失败证据。
+    let network = if !cancelled
+        && ok == 0
+        && failed > 0
+        && untested == 0
+        && done == meta.total
+        && done > 0
+    {
         local_network().await
     } else {
         "ok"
     };
-    emit_finished(&meta, ok, failed, cancelled, network);
+    emit_finished(&meta, ok, failed, untested, cancelled, network);
     let reason = *meta.reason.lock();
     state.finish(&meta.run_id);
     BatchOutcome {
         done,
         ok,
         failed,
+        untested,
         cancelled,
         network,
         method: *meta.method.lock(),
@@ -324,7 +462,7 @@ where
     }
 }
 
-/// 准备阶段结束后再确定最终方式（运行时起不来就降级 tcp）。
+/// 准备阶段结束后再确定最终方式（运行时起不来就是 `none`：整批标成未测）。
 pub fn set_method(meta: &BatchMeta, method: &'static str) {
     *meta.method.lock() = method;
 }
@@ -351,7 +489,15 @@ fn emit_progress(meta: &BatchMeta, phase: &str, done: usize, result: Option<&Val
     );
 }
 
-fn emit_finished(meta: &BatchMeta, ok: usize, failed: usize, cancelled: bool, network: &str) {
+/// `ok + failed + untested == done`；`failed` 只算真测过且不通的节点。
+fn emit_finished(
+    meta: &BatchMeta,
+    ok: usize,
+    failed: usize,
+    untested: usize,
+    cancelled: bool,
+    network: &str,
+) {
     crate::agent::app_handle::emit(
         "node-probe-finished",
         json!({
@@ -361,6 +507,7 @@ fn emit_finished(meta: &BatchMeta, ok: usize, failed: usize, cancelled: bool, ne
             "total": meta.total,
             "ok": ok,
             "failed": failed,
+            "untested": untested,
             "method": *meta.method.lock(),
             "cancelled": cancelled,
             "reason": *meta.reason.lock(),
@@ -426,7 +573,8 @@ pub fn select_nodes(all: &[Node], ids: Option<&[String]>) -> (Vec<Node>, Vec<Str
 /// 未连接时临时起一次运行时，只为跑 Clash 真实延迟。
 ///
 /// 不进连接状态机：不设系统代理、不启 TUN、用临时端口、日志单独一份。
-/// 8 秒内没就绪或启动失败 → 返回 None，调用方整批降级 tcp。
+/// 8 秒内没就绪或启动失败都按原因返回，调用方把结果标成 `untested`——
+/// **不再降级 TCP**：本地握手证明不了「经 sing-box 转发能通」。
 pub async fn start_probe_runtime(
     store: Arc<Store>,
     manager: Arc<RuntimeManager>,
@@ -434,11 +582,11 @@ pub async fn start_probe_runtime(
     config: &configs::Config,
     installed: &InstalledRuntime,
     cancel: &CancellationToken,
-) -> Option<ClashTarget> {
+) -> Result<ClashTarget, ProbeFailure> {
     if !installed.binary.is_file() {
-        return None;
+        return Err(ProbeFailure::Missing);
     }
-    let rules = crate::rules::load_active(&store, data_dir)?;
+    let rules = crate::rules::load_active(&store, data_dir).ok_or(ProbeFailure::Failed)?;
     let (region, _) = crate::rules::effective_region(&store);
     let route_plan = crate::rules::plan::build(&crate::rules::plan::RouteInput {
         mode: "proxy_all",
@@ -446,14 +594,14 @@ pub async fn start_probe_runtime(
         targets: &[],
         rules: &rules,
     })
-    .ok()?;
+    .map_err(|_| ProbeFailure::Failed)?;
 
     let nodes = {
         let conn = store.conn();
-        configs::list_nodes(&conn, &config.id).ok()?
+        configs::list_nodes(&conn, &config.id).map_err(|_| ProbeFailure::Failed)?
     };
     if nodes.is_empty() {
-        return None;
+        return Err(ProbeFailure::Failed);
     }
     let current = config
         .current_node_id
@@ -480,7 +628,11 @@ pub async fn start_probe_runtime(
             },
         });
     }
-    let current_descriptor = descriptors.iter().find(|node| node.id == current.id)?.clone();
+    let current_descriptor = descriptors
+        .iter()
+        .find(|node| node.id == current.id)
+        .cloned()
+        .ok_or(ProbeFailure::Failed)?;
 
     // 探针在独立槽里跑，必须避开用户设置的代理端口：否则批次中点「启动 VPN」
     // 会被我们自己占掉端口，白白制造一次降级（port-stability.md §7）。
@@ -488,10 +640,12 @@ pub async fn start_probe_runtime(
         let conn = store.conn();
         vec![crate::store::settings::proxy_port(&conn)]
     };
-    let mixed_port = vpn_config::pick_free_port_excluding(&excluded).ok()?;
-    let mut clash_port = vpn_config::pick_free_port_excluding(&excluded).ok()?;
+    let mixed_port = vpn_config::pick_free_port_excluding(&excluded).map_err(|_| ProbeFailure::Failed)?;
+    let mut clash_port =
+        vpn_config::pick_free_port_excluding(&excluded).map_err(|_| ProbeFailure::Failed)?;
     while clash_port == mixed_port {
-        clash_port = vpn_config::pick_free_port_excluding(&excluded).ok()?;
+        clash_port =
+            vpn_config::pick_free_port_excluding(&excluded).map_err(|_| ProbeFailure::Failed)?;
     }
     let secret = vpn_config::random_secret();
     let value = vpn_config::build_routed_multi(
@@ -505,10 +659,10 @@ pub async fn start_probe_runtime(
         &current.id,
         &route_plan,
     )
-    .ok()?;
+    .map_err(|_| ProbeFailure::Failed)?;
 
     let config_dir = data_dir.join("config");
-    std::fs::create_dir_all(&config_dir).ok()?;
+    std::fs::create_dir_all(&config_dir).map_err(|_| ProbeFailure::Failed)?;
     let config_key = format!("probe-{}", vpn_config::random_secret());
     let config_path = vpn_config::install_profile(
         &installed.binary,
@@ -518,7 +672,7 @@ pub async fn start_probe_runtime(
         None,
     )
     .await
-    .ok()?;
+    .map_err(|_| ProbeFailure::Failed)?;
 
     let start_plan = StartPlan {
         version: installed.version.clone(),
@@ -540,36 +694,36 @@ pub async fn start_probe_runtime(
     };
     if cancel.is_cancelled() {
         let _ = std::fs::remove_file(&config_path);
-        return None;
+        return Err(ProbeFailure::Cancelled);
     }
     if manager.start_probe(start_plan).await.is_err() {
         let _ = std::fs::remove_file(&config_path);
-        return None;
+        return Err(ProbeFailure::Failed);
     }
     // 启动与「用户点连接」可能交错：起来之后再看一眼，已被取消就立刻收掉。
     if cancel.is_cancelled() {
         manager.stop_probe().await;
-        return None;
+        return Err(ProbeFailure::Cancelled);
     }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     loop {
         if cancel.is_cancelled() {
             manager.stop_probe().await;
-            return None;
+            return Err(ProbeFailure::Cancelled);
         }
         if manager.probe_healthy().await {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
-            log::warn!("测速运行时 8 秒内未就绪，整批降级 tcp");
+            log::warn!("测速运行时 8 秒内未就绪，整批标成未测");
             manager.stop_probe().await;
-            return None;
+            return Err(ProbeFailure::Timeout);
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    Some(ClashTarget {
+    Ok(ClashTarget {
         addr: format!("127.0.0.1:{clash_port}"),
         secret,
     })
@@ -599,11 +753,12 @@ mod tests {
     fn result(id: &str, reachable: bool) -> Value {
         json!({
             "node_id": id,
+            "status": if reachable { "ok" } else { "unreachable" },
             "reachable": reachable,
             "latency_ms": if reachable { json!(12) } else { Value::Null },
-            "probe_method": "tcp",
+            "probe_method": "clash_delay",
             "checked_at": 0,
-            "error": if reachable { Value::Null } else { json!({"code": "TCP_CONNECT_FAILED", "message": "超时"}) },
+            "error": if reachable { Value::Null } else { json!({"code": "CLASH_DELAY_FAILED", "message": "超时"}) },
         })
     }
 
@@ -634,7 +789,7 @@ mod tests {
     #[tokio::test]
     async fn concurrency_never_exceeds_six() {
         let state = Arc::new(ProbeBatchState::default());
-        let started = state.start("cfg_1", 24, "tcp").unwrap();
+        let started = state.start("cfg_1", 24, "clash").unwrap();
         let in_flight = Arc::new(AtomicUsize::new(0));
         let max = Arc::new(AtomicUsize::new(0));
         let probe = {
@@ -663,7 +818,7 @@ mod tests {
     #[tokio::test]
     async fn one_failure_does_not_stop_the_batch() {
         let state = Arc::new(ProbeBatchState::default());
-        let started = state.start("cfg_1", 4, "tcp").unwrap();
+        let started = state.start("cfg_1", 4, "clash").unwrap();
         let nodes: Vec<Node> = (0..4).map(node).collect();
         let outcome = run_batch(Arc::clone(&state), started.meta, nodes, |node: &Node| {
             let id = node.id.clone();
@@ -675,6 +830,7 @@ mod tests {
         assert_eq!(outcome.done, 4);
         assert_eq!(outcome.ok, 3);
         assert_eq!(outcome.failed, 1);
+        assert_eq!(outcome.untested, 0);
         assert!(!outcome.cancelled);
         let ids: Vec<String> = (0..4).map(|i| format!("nod_{i}")).collect();
         let (results, run) = state.snapshot("cfg_1", &ids);
@@ -685,7 +841,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_stops_further_probes_and_keeps_finished_results() {
         let state = Arc::new(ProbeBatchState::default());
-        let started = state.start("cfg_1", 20, "tcp").unwrap();
+        let started = state.start("cfg_1", 20, "clash").unwrap();
         let probes = Arc::new(AtomicUsize::new(0));
         let nodes: Vec<Node> = (0..20).map(node).collect();
         let probe = {
@@ -724,15 +880,15 @@ mod tests {
     #[tokio::test]
     async fn a_second_batch_is_busy_with_the_running_run_id() {
         let state = ProbeBatchState::default();
-        let first = state.start("cfg_1", 3, "tcp").unwrap();
-        let err = match state.start("cfg_2", 5, "tcp") {
+        let first = state.start("cfg_1", 3, "clash").unwrap();
+        let err = match state.start("cfg_2", 5, "clash") {
             Ok(_) => panic!("第二个批次必须被拒绝"),
             Err(run_id) => run_id,
         };
         assert_eq!(err, first.run_id);
         assert!(state.cancel(&first.run_id));
         // 取消后允许新批次。
-        let second = state.start("cfg_2", 5, "tcp").unwrap();
+        let second = state.start("cfg_2", 5, "clash").unwrap();
         assert_ne!(second.run_id, first.run_id);
     }
 
@@ -793,7 +949,7 @@ mod tests {
     #[tokio::test]
     async fn starting_a_connection_cancels_with_reason_connected() {
         let state = Arc::new(ProbeBatchState::default());
-        let started = state.start("cfg_1", 5, "tcp").unwrap();
+        let started = state.start("cfg_1", 5, "clash").unwrap();
         state.cancel_for_connection();
         let nodes: Vec<Node> = (0..5).map(node).collect();
         let outcome = run_batch(Arc::clone(&state), started.meta, nodes, |node: &Node| {
@@ -804,6 +960,151 @@ mod tests {
         assert!(outcome.cancelled);
         assert_eq!(outcome.reason, Some("connected"));
         assert_eq!(outcome.done, 0, "取消先于启动，不应再发结果");
+    }
+
+    #[tokio::test]
+    async fn a_whole_untested_batch_still_finishes_with_every_result() {
+        let state = Arc::new(ProbeBatchState::default());
+        let started = state.start("cfg_1", 3, "none").unwrap();
+        let nodes: Vec<Node> = (0..3).map(node).collect();
+        // 起不了运行时：整批 untested，不再降级 TCP。
+        let outcome = run_batch(Arc::clone(&state), started.meta, nodes, |node: &Node| {
+            let id = node.id.clone();
+            async move { probe_untested(&id, "other_config") }
+        })
+        .await;
+
+        assert_eq!(outcome.done, 3);
+        assert_eq!(outcome.ok, 0, "没测成不算成功");
+        assert_eq!(outcome.failed, 0, "没测成不是测不通");
+        assert_eq!(outcome.untested, 3);
+        assert_eq!(outcome.ok + outcome.failed + outcome.untested, 3);
+        assert_eq!(outcome.method, "none");
+        assert_eq!(outcome.network, "ok", "整批没测不该去查本机网络");
+
+        let ids: Vec<String> = (0..3).map(|i| format!("nod_{i}")).collect();
+        let (results, run) = state.snapshot("cfg_1", &ids);
+        assert_eq!(results.len(), 3, "未测结果也要缓存");
+        for result in results {
+            assert_eq!(result["status"], "untested");
+            assert_eq!(result["reachable"], Value::Null);
+            assert_eq!(result["probe_method"], "none");
+            assert_eq!(result["error"]["reason"], "other_config");
+        }
+        assert!(run.is_none());
+    }
+
+    #[tokio::test]
+    async fn ok_failed_and_untested_add_up_to_done() {
+        let state = Arc::new(ProbeBatchState::default());
+        let started = state.start("cfg_1", 3, "clash").unwrap();
+        let nodes: Vec<Node> = (0..3).map(node).collect();
+        let outcome = run_batch(Arc::clone(&state), started.meta, nodes, |node: &Node| {
+            let id = node.id.clone();
+            async move {
+                match id.as_str() {
+                    "nod_0" => result(&id, true),
+                    "nod_1" => result(&id, false),
+                    _ => probe_untested(&id, "no_credentials"),
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(outcome.ok, 1);
+        assert_eq!(outcome.failed, 1);
+        assert_eq!(outcome.untested, 1);
+        assert_eq!(outcome.done, 3);
+        assert_eq!(
+            outcome.ok + outcome.failed + outcome.untested,
+            outcome.done,
+            "三类必须加得起来"
+        );
+        // 有 untested 就不是「全部失败」：不该去查本机网络。
+        assert_eq!(outcome.network, "ok");
+    }
+
+    #[test]
+    fn an_untested_result_is_not_a_failed_probe() {
+        let value = probe_untested("nod_1", "connection_busy");
+        assert_eq!(value["status"], "untested");
+        assert_eq!(value["reachable"], Value::Null, "null 不能写成 false");
+        assert_eq!(value["probe_method"], "none");
+        assert_eq!(value["error"]["code"], "PROBE_UNAVAILABLE");
+        assert_eq!(value["error"]["reason"], "connection_busy");
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("稍后再测"));
+    }
+
+    fn target(addr: &str) -> ClashTarget {
+        ClashTarget {
+            addr: addr.to_string(),
+            secret: "secret".into(),
+        }
+    }
+
+    #[test]
+    fn an_idle_probe_is_reused_only_for_the_same_config() {
+        let state = ProbeBatchState::default();
+        let target = target("127.0.0.1:9091");
+
+        let (generation, token) = state.begin_idle_probe();
+        assert!(!token.is_cancelled());
+        assert!(state.idle_target("cfg_1").is_none(), "刚清过槽位");
+
+        let generation = state
+            .note_idle("cfg_1", &target, Some(generation))
+            .expect("启动成功应当可复用");
+        assert_eq!(state.idle_target("cfg_1").unwrap().addr, target.addr);
+        assert!(
+            state.idle_target("cfg_2").is_none(),
+            "别的配置的运行时里没有这个节点的出站"
+        );
+
+        assert!(state.expire_idle(generation));
+        assert!(state.idle_target("cfg_1").is_none());
+        assert!(!state.expire_idle(generation), "过期只能成功一次");
+    }
+
+    #[test]
+    fn an_expired_idle_probe_is_not_reused() {
+        let state = ProbeBatchState::default();
+        let target = target("127.0.0.1:9092");
+        let (generation, _) = state.begin_idle_probe();
+        state
+            .note_idle_with_ttl("cfg_1", &target, Some(generation), Duration::from_millis(1))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(state.idle_target("cfg_1").is_none());
+    }
+
+    #[test]
+    fn a_connection_cancels_a_starting_idle_probe_and_blocks_recording() {
+        let state = ProbeBatchState::default();
+        let target = target("127.0.0.1:9093");
+        let (generation, token) = state.begin_idle_probe();
+        state.cancel_for_connection();
+        assert!(token.is_cancelled(), "启动中的探针要被连接取消");
+        assert!(
+            state.note_idle("cfg_1", &target, Some(generation)).is_none(),
+            "取消之后不能再记成可复用"
+        );
+        assert!(state.idle_target("cfg_1").is_none());
+    }
+
+    #[test]
+    fn refreshing_an_idle_probe_retires_the_old_timer() {
+        let state = ProbeBatchState::default();
+        let target = target("127.0.0.1:9094");
+        let (generation, _) = state.begin_idle_probe();
+        let first = state.note_idle("cfg_1", &target, Some(generation)).unwrap();
+        let second = state.note_idle("cfg_1", &target, None).expect("复用要刷新 60 秒窗口");
+        assert_ne!(first, second);
+        assert!(!state.expire_idle(first), "旧定时器不能杀新探针");
+        assert!(state.idle_target("cfg_1").is_some());
+        assert!(state.expire_idle(second));
     }
 
     fn ids_for(id: &str) -> Vec<String> {

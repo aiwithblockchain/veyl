@@ -83,6 +83,7 @@ describe("批量测速命令映射", () => {
       results: [
         {
           node_id: "n1",
+          status: "ok",
           reachable: true,
           latency_ms: 38,
           probe_method: "clash_delay",
@@ -90,6 +91,15 @@ describe("批量测速命令映射", () => {
           error: null,
         },
         { node_id: "n2", reachable: false, error: { code: "PROBE_TIMEOUT" } },
+        // 没测成：reachable 是 null，不能收口成 false。
+        {
+          node_id: "n3",
+          status: "untested",
+          reachable: null,
+          probe_method: "none",
+          checked_at: 0,
+          error: null,
+        },
         { node_id: "", reachable: true },
         null,
       ],
@@ -101,6 +111,7 @@ describe("批量测速命令映射", () => {
       results: [
         {
           node_id: "n1",
+          status: "ok",
           reachable: true,
           latency_ms: 38,
           probe_method: "clash_delay",
@@ -109,14 +120,24 @@ describe("批量测速命令映射", () => {
         },
         {
           node_id: "n2",
+          status: "unreachable",
           reachable: false,
           latency_ms: null,
-          probe_method: "tcp",
+          probe_method: "none",
           checked_at: 0,
           error: { code: "PROBE_TIMEOUT", message: "" },
         },
+        {
+          node_id: "n3",
+          status: "untested",
+          reachable: null,
+          latency_ms: null,
+          probe_method: "none",
+          checked_at: 0,
+          error: null,
+        },
       ],
-      run: { runId: "run-1", done: 12, total: 23, startedAt: 1700000000000, phase: "probing", method: "tcp" },
+      run: { runId: "run-1", done: 12, total: 23, startedAt: 1700000000000, phase: "probing", method: "none" },
     });
     expect(invoke).toHaveBeenCalledWith("node_probe_snapshot", { configId: "cfg-1" });
   });
@@ -128,5 +149,47 @@ describe("批量测速命令映射", () => {
 
     invoke.mockResolvedValueOnce({ config_id: "cfg-1", run: { done: 3 } });
     await expect(bridge.nodeProbeSnapshot("cfg-1")).resolves.toMatchObject({ run: null });
+  });
+});
+
+describe("三态归一：status 优先于旧字段", () => {
+  async function normalizeOne(result: Record<string, unknown>) {
+    invoke.mockResolvedValueOnce({
+      config_id: "cfg-1",
+      results: [result],
+      run: null,
+    });
+    const snapshot = await new TauriAgentBridge().nodeProbeSnapshot("cfg-1");
+    return snapshot.results[0];
+  }
+
+  it("status=ok + reachable=false：按 status 推导 reachable=true", async () => {
+    const entry = await normalizeOne({
+      node_id: "n1",
+      status: "ok",
+      reachable: false,
+      latency_ms: 38,
+      probe_method: "clash_delay",
+      checked_at: 1700000000000,
+      error: null,
+    });
+    expect(entry).toMatchObject({ status: "ok", reachable: true });
+  });
+
+  it("status=untested + reachable=false：reachable 归 null，不收口成 false", async () => {
+    const entry = await normalizeOne({
+      node_id: "n1",
+      status: "untested",
+      reachable: false,
+      probe_method: "none",
+      checked_at: 0,
+      error: null,
+    });
+    expect(entry).toMatchObject({ status: "untested", reachable: null });
+  });
+
+  it("status 缺失时回退旧载荷：reachable null 仍是 untested", async () => {
+    const entry = await normalizeOne({ node_id: "n1", reachable: null });
+    expect(entry).toMatchObject({ status: "untested", reachable: null });
   });
 });

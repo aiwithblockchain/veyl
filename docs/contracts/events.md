@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.19.0`
+> 契约版本：`2.20.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，版本以该文件头为准）
@@ -22,7 +22,7 @@
 - **落库实体字段的时间戳**（`created_at` / `first_seen` / `last_seen` / `checked_at` 等）：**Unix 毫秒整数**，与 `data-model.md` 的列类型一致。见 §2.3。
 - 错误码 **大写下划线**。
 - 所有 payload 带 `contract_version`。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.17.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.20.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
 
 > **命名决策**：事件名沿用 TweetPilot 的真实名称（`message-chunk`、`thinking-chunk`、`tool-call-start`、`tool-call-end`、`ai-status`、`ai-compact`、`ai-request-end`），**不**加 `ai-` 前缀。`docs/phase-1-technical-design.md` §4.2 写的 `agent://delta` / `agent://tool` 是笔误，以本契约为准。
 
@@ -114,7 +114,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -136,7 +136,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -154,7 +154,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -208,7 +208,7 @@ type DisplayAction =
   | { kind: "compose_report_mail"; report_id: string };
 
 type ToolCallEndPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -271,7 +271,7 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
@@ -316,7 +316,7 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
@@ -344,7 +344,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -382,7 +382,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -417,7 +417,7 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   health: HealthSnapshot;
   // 2.2 新增：本次运行累计流量与速率。
   // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
@@ -453,7 +453,7 @@ UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；面板上给用�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag" | "rules_update";
   origin: "ui" | "agent";       // 必填；第一帧也带，旧记录按 "ui"
@@ -487,7 +487,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -504,7 +504,7 @@ type AppLifecycleChangedPayload = {
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   seed_id: "veyl_seed";
   content_sha256: string;           // 2.0：变化判定依据
   version: string | null;           // 文件里的 version，仅展示
@@ -576,7 +576,7 @@ UI 用自身的连接状态选择弹窗文案（`docs/design/quit-dialog.md` §6
 
 ```ts
 type QuitRequestedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   emitted_at: string;
 };
 ```
@@ -596,7 +596,7 @@ UI 收到后弹确认框，用户选择后调用 `quit_decision { action }`（`c
 
 ```ts
 type QuitDismissedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   emitted_at: string;
 };
 ```
@@ -617,7 +617,7 @@ type QuitDismissedPayload = {
 
 ```ts
 type AskUserQuestionPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   session_id: string;
   request_id: string;
   question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
@@ -702,7 +702,7 @@ tool-call-end    (同一 request_id)
 
 ```ts
 type ConfigChangedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   change: "created" | "updated" | "deleted" | "activated";
   config_id: string;
   config: ConfigSummary | null;      // deleted 时为 null；类型见 commands.md §3.0
@@ -738,7 +738,7 @@ type NodeListChangedReason =
   | "bindings_changed";       // config_update 整体替换了节点集
 
 type NodeListChangedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   reason: NodeListChangedReason;
   config_id: string | null;        // 只有 bindings_changed 时非空
   node_count_total: number;        // 节点池总数
@@ -760,7 +760,7 @@ type NodeListChangedPayload = {
 
 ```ts
 type NodeSwitchedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   config_id: string;
   from_node_id: string | null;
   to_node_id: string;
@@ -788,7 +788,7 @@ type NodeSwitchedPayload = {
 
 ```ts
 type IssueChangedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
   issue: IssueSummary;                  // 变更后的状态
   blocking_issue_id: string | null;     // 当前应插卡的那一条；null = 中间不插卡
@@ -826,7 +826,7 @@ type IssueChangedPayload = {
 
 ```ts
 type LayoutUpdatedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   config_id: string;
   revision: number;            // 每配置单调递增，从 1 开始
   layout: Layout;              // 见 commands.md §3.0
@@ -880,7 +880,7 @@ type LayoutUpdatedPayload = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   config_id: string;
   routing_mode: "direct" | "proxy_all" | "proxy_selected";
   applied_mode: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -906,7 +906,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
@@ -939,7 +939,7 @@ Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 
 ```ts
 type CoreUpgradeProgressPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   job_id: string;
   origin: "ui" | "agent";         // 必填
   phase: "downloading" | "verifying" | "unpacking" | "installing" | "activating";
@@ -962,7 +962,7 @@ type CoreUpgradeProgressPayload = {
 
 ```ts
 type CoreUpgradeFinishedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   job_id: string;
   origin: "ui" | "agent";   // 必填
   ok: boolean;
@@ -978,17 +978,17 @@ type CoreUpgradeFinishedPayload = {
 - `ok = false` 时保留当前版本继续可用；`code` 用于区分网络 / 源 / 校验 / 磁盘 / 忙等失败。
 - 取消的任务同样发本事件，`ok = false`、`code = "CANCELLED"`。
 
-### 4.19 `node-probe-progress`（2.8.0 新增；2.9.0 增 `phase` / `method`）
+### 4.19 `node-probe-progress`（2.8.0 新增；2.9.0 增 `phase` / `method`；2.20.0 起 `method` 为 `clash` / `none`）
 
 批量测速的阶段与逐节点结果。
 
 ```ts
 type NodeProbeProgressPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   run_id: string;
   config_id: string;
   phase: "preparing" | "probing";
-  method: "tcp" | "clash";       // clash = 真实可用性（「可用」）；tcp = 仅可达（「可达」）
+  method: "clash" | "none";      // clash = 真实可用性（「可用」）；none = 整批没测成
   done: number;                  // 已完成节点数；preparing 阶段为 0
   total: number;
   result: NodeProbeData | null;  // preparing 阶段为 null；probing 的逐节点事件非空
@@ -999,27 +999,28 @@ type NodeProbeProgressPayload = {
 触发：`node_probe_all` 启动的批次。
 
 - **批次开始时先发一条 `phase = "preparing"`**（`done = 0`、`result = null`）：临时运行时尚未就绪。
-- 进入探测后发一条 `phase = "probing"`（`done = 0`、`result = null`）；它的 `method` 是**最终**方式——如果运行时启动失败/8 秒未就绪，这里就是降级后的 `"tcp"`。
-- 之后每测完一个节点发一条 `phase = "probing"`、`result` 非空的事件。
-- `method` 术语固定，不得混用：**`clash` = 真实可用性（界面写「可用」）；`tcp` = 仅可达（界面写「可达」）**。
+- 进入探测后发一条 `phase = "probing"`（`done = 0`、`result = null`）；它的 `method` 是**最终**方式——运行时启动失败/8 秒未就绪时，这里就是 `"none"`（整批未测），**不再有 `tcp` 降级**。
+- 之后每测完一个节点发一条 `phase = "probing"`、`result` 非空的事件；`result.status` 可能是 `ok` / `unreachable` / `untested`。
+- `method` 术语固定，不得混用：**`clash` = 真实可用性（界面写「可用」）；`none` = 没测成（界面不得写「可达」或「不可达」）**。
 - 只在批次运行时出现；关闭面板不影响，批次继续在后台跑完（用户没点取消）。
 - `done` 单调递增，按完成顺序发出，**不按节点顺序**。
 - UI 按 `run_id` 匹配：忽略不是当前批次的事件；按 `done` 去重（重开面板可能先收到一条早于 `snapshot.run.done` 的迟到事件）。
 - `config_id` 让 UI 能丢弃「已经切走的配置」的迟到事件。
-- 单节点失败也照常发：`result.reachable = false` 是正常结果，不是错误事件。
+- 单节点失败也照常发：`result.status = "unreachable"` 是正常结果，不是错误事件；`untested` 的 `reachable` 是 `null`，不能按 `false` 渲染。
 - **不改变任何持久状态**：本事件与 `node-probe-finished` 都不对应 `*-changed`，不得据此刷新节点列表或运行状态。
 
-### 4.20 `node-probe-finished`（2.8.0 新增；2.9.0 增 `method` / `reason`）
+### 4.20 `node-probe-finished`（2.8.0 新增；2.9.0 增 `method` / `reason`；2.20.0 增 `untested` 终态）
 
 ```ts
 type NodeProbeFinishedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   run_id: string;
   config_id: string;
   total: number;
-  ok: number;
-  failed: number;
-  method: "tcp" | "clash";       // 整批实际使用的方式；降级时为 "tcp"
+  ok: number;                    // status = ok 的数量
+  failed: number;                // status = unreachable 的数量（真的测了、没通）
+  untested: number;              // status = untested 的数量（没测成，第五种终态）
+  method: "clash" | "none";      // 整批实际使用的方式；整批未测时为 "none"
   cancelled: boolean;
   reason: "connected" | null;    // 用户中途启动 VPN 导致取消时为 "connected"
   network: "ok" | "offline";
@@ -1029,18 +1030,20 @@ type NodeProbeFinishedPayload = {
 
 触发：批次结束（跑完或取消）。每个 `run_id` **恰好一条**，且是该批次最后一条事件。
 
-四个终态（UI 据此给汇总文案）：
+五种终态（UI 据此给汇总文案）：
 
 | 终态 | 判据 | 界面 |
 |---|---|---|
-| 正常结束 | `cancelled = false`，`ok > 0` | `method = "clash"`：「18 个可用 · 5 个超时」；`method = "tcp"`：「18 个可达 · 5 个超时」+「没连上，只能确认服务器连得上，不验证密码和出口」 |
-| 全部失败、本机有网 | `cancelled = false`，`ok = 0`，`network = "ok"` | 「都没测通」+「这些节点可能都不可用」 |
-| 全部失败、本机离线 | `cancelled = false`，`ok = 0`，`network = "offline"` | 顶部提示「现在没有网络，测速结果不代表节点状态」 |
+| 正常结束 | `cancelled = false`，`ok > 0` | `method = "clash"`：「18 个可用 · 5 个超时」；若有 `untested`，另列「N 个没测成」 |
+| 全部不可达、本机有网 | `cancelled = false`，`ok = 0`，`untested = 0`，`network = "ok"` | 「都没测通」+「这些节点可能都不可用」 |
+| 全部不可达、本机离线 | `cancelled = false`，`ok = 0`，`untested = 0`，`network = "offline"` | 顶部提示「现在没有网络，测速结果不代表节点状态」 |
+| **全部未测** | `cancelled = false`，`ok = 0`，`failed = 0`，`untested > 0` | 「这次没测成」+ 逐条原因；**不得写成「都连不通」**；`method = "none"` |
 | 取消 | `cancelled = true` | 回到「上次测速：N 分钟前」，不加错误；`reason = "connected"` 时说明「启动 VPN 后测速已停止」 |
 
-- **降级必须看得出来**：`method = "tcp"` 时界面只能写「可达」，不得写「可用」；两词不得混用或简写。
-- 不取消时 `ok + failed = total`；取消时两者之和是**已测完**的数量，可能小于 `total`。
-- `network` 只在**全部节点都失败**时才检查本机连通性（直连 204，不走 Veyl 代理）；否则固定 `"ok"`。
+- **`untested` 是独立终态，不能并进 `failed`**：没测成与连不通是两件事，并进去会让用户以为节点坏了。
+- 不取消时 `ok + failed + untested = total`；取消时三者之和是**已测完**的数量，可能小于 `total`。
+- `method = "none"` 时界面只能写「没测成」，不得写「可达」或「可用」。`clash` = 真实可用性，两词不得混用或简写。
+- `network` 只在**确有一部分节点真的测出不可达且全部失败**时才检查本机连通性（直连 204，不走 Veyl 代理）；整批未测时固定 `"ok"`，不能把「没测」误报成本机断网。
 - 取消后不再有 `node-probe-progress`；已出的结果保留在内存缓存里（`node_probe_snapshot` 可见）。
 - 批次不跨进程：应用退出直接丢弃，**不补发本事件**、不等待、不落库。
 - 不发任何 `*-changed`；不登记问题。
@@ -1049,7 +1052,7 @@ type NodeProbeFinishedPayload = {
 
 ```ts
 type RegionChangedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   region: string | null;          // 生效地区的小写 ISO 3166-1 alpha-2；判不出为 null
   source: "system" | "ai";        // 当前生效值的来源
   emitted_at: string;
@@ -1075,7 +1078,7 @@ type RegionChangedPayload = {
 
 ```ts
 type MyServerChangedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   server_id: string;
   state: string;                   // MyServerState，见 commands.md §10.1
   failure?: {
@@ -1102,7 +1105,7 @@ type MyServerChangedPayload = {
 
 ```ts
 type MyServerOrderChangedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   order_id: string;
   state: string;                   // MyServerOrderState，见 commands.md §10.1
   failure?: {
@@ -1127,7 +1130,7 @@ type MyServerOrderChangedPayload = {
 
 ```ts
 type TrialExpiredPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   ended_at: string;              // 试用结束时刻（ISO 8601 UTC），与 trial_state.ended_at 同值
   removed_node_count: number;    // 全库去重后移除的种子节点数；可能为 0（池里本来就没有）
   disconnected: boolean;         // 本次是否真的断开了连接
@@ -1149,7 +1152,7 @@ AI 指路：打开设置并高亮某一段的某一行。由只读工具 `OpenSe
 
 ```ts
 type SettingsPointPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   section: "ai" | "connection" | "account" | "advanced";
   row: string | null;            // 行 id；只定位到段时为 null
   emitted_at: string;
@@ -1170,7 +1173,7 @@ AI 把地区 / 规格选进「新建节点」舞台。由工具 `StageSelect` �
 
 ```ts
 type StageSelectPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   screen: "new_node";
   region: string | null;         // 目录里的地区 id；本次没请求就是 null
   plan: string | null;           // 目录里的套餐 id；同上
@@ -1197,7 +1200,7 @@ type StageSelectPayload = {
 
 ```ts
 type MyServerAccountClearedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   reason: "device_revoked" | "account_blocked" | "token_invalid" | "auth_required" | "server_rejected";
   emitted_at: string;
 };
@@ -1216,7 +1219,7 @@ type MyServerAccountClearedPayload = {
 
 ```ts
 type MyServerRenamedPayload = {
-  contract_version: "2.19.0";
+  contract_version: "2.20.0";
   server_id: string;
   name: string;          // 服务端 trim 后落库的名字
   emitted_at: string;
@@ -1336,6 +1339,15 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.20.0（2026-11-18，测速三态与 `none` 方式）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.20.0`；§4.19 / §4.20 的 `method` 由 `"tcp" \| "clash"` 改为 `"clash" \| "none"`（历史命名差异保留：`NodeProbeData.probe_method` 仍是 `"clash_delay" \| "none"`） | 枚举变更 | 探测只认 Clash 真实延迟，不再有 TCP 降级 |
+| 2 | §4.19 `result` 随 `NodeProbeData` 变为三态（`ok` / `unreachable` / `untested`），`untested` 的 `reachable` 是 `null` | 字段语义 | 没测成与连不通必须分开 |
+| 3 | §4.20 新增 `untested: number`，终态从四个变五个：整批全部未测是独立终态，**不能并进 `failed`**；不提取消时 `ok + failed + untested = total` | 字段扩展 + 语义变更 | 整批运行时起不来时，界面不能写成「都连不通」 |
+| 4 | 全文 `contract_version` 字面量替换为 `2.20.0` | 元数据 | 同上 |
 
 ### 2.19.0（2026-11-18，服务器改名事件）
 

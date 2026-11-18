@@ -296,8 +296,8 @@ function normalizeProbeRun(raw: RawNodeProbeRun | null | undefined): NodeProbeRu
     total: typeof raw.total === "number" ? raw.total : 0,
     startedAt: typeof raw.started_at === "number" ? raw.started_at : 0,
     phase: raw.phase === "preparing" ? "preparing" : "probing",
-    // 未知方式按 tcp：只有在明确 clash 时才允许写「可用」。
-    method: raw.method === "clash" ? "clash" : "tcp",
+    // 只有 clash 是真实探测；其余（含旧版的 tcp）都按「没测成」处理。
+    method: raw.method === "clash" ? "clash" : "none",
   };
 }
 
@@ -305,6 +305,7 @@ function normalizeProbeResult(raw: unknown): NodeProbeResult | null {
   if (!raw || typeof raw !== "object") return null;
   const value = raw as {
     node_id?: unknown;
+    status?: unknown;
     reachable?: unknown;
     latency_ms?: unknown;
     probe_method?: unknown;
@@ -312,6 +313,21 @@ function normalizeProbeResult(raw: unknown): NodeProbeResult | null {
     error?: unknown;
   };
   if (typeof value.node_id !== "string" || value.node_id.length === 0) return null;
+  // status 是三态的权威字段：reachable 永远由它推导，避免 ok+false 这类矛盾。
+  // 旧载荷没有 status 时才回退到 reachable（null 仍是 untested）。
+  const hasStatus =
+    value.status === "ok" ||
+    value.status === "unreachable" ||
+    value.status === "untested";
+  const status = hasStatus
+    ? (value.status as "ok" | "unreachable" | "untested")
+    : value.reachable === true
+      ? "ok"
+      : value.reachable === false
+        ? "unreachable"
+        : "untested";
+  const reachable =
+    status === "ok" ? true : status === "unreachable" ? false : null;
   const error =
     value.error && typeof value.error === "object"
       ? {
@@ -327,13 +343,14 @@ function normalizeProbeResult(raw: unknown): NodeProbeResult | null {
       : null;
   return {
     node_id: value.node_id,
-    reachable: value.reachable === true,
+    status,
+    reachable,
     latency_ms:
       typeof value.latency_ms === "number" && Number.isFinite(value.latency_ms)
         ? value.latency_ms
         : null,
-    // 未知探测方式按 TCP 处理：界面只用来区分「真实可用性」，不展示方式。
-    probe_method: value.probe_method === "clash_delay" ? "clash_delay" : "tcp",
+    // 不再把未知方式补成 tcp：只有 clash_delay 是真实探测。
+    probe_method: value.probe_method === "clash_delay" ? "clash_delay" : "none",
     checked_at: typeof value.checked_at === "number" ? value.checked_at : 0,
     error,
   };

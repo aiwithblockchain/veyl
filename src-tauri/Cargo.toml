@@ -104,6 +104,11 @@ pbkdf2 = "0.12"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# 测试专用：`tokio::time::pause/advance`（锁超时边界用例）只在 test-util 下导出；
+# 只并入测试构建，不改上面 `[dependencies]` 里 tokio 的 features。
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 # TUN 提权：SMAppService 只在 macOS 13+ 存在，按需引入。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", default-features = false, features = ["std"] }

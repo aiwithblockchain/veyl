@@ -2053,17 +2053,29 @@ export default function App() {
       let fastestMs: number | null = null;
       for (const node of config.nodes) {
         const result = results.find((item) => item.node_id === node.node_id);
-        if (!result || !result.reachable || result.latency_ms === null) continue;
+        // 自动选最快只认真正测通的节点：untested 与 unreachable 都不能被选中。
+        if (!result || result.status !== "ok" || result.latency_ms === null) continue;
         if (fastestMs === null || result.latency_ms < fastestMs) {
           fastestMs = result.latency_ms;
           fastestNodeId = node.node_id;
         }
       }
       if (fastestMs === null || fastestNodeId === null) {
+        // 三态区分：没测成 / 连不上 / 混合。不把未测说成失败。
+        const allUntested =
+          results.length > 0 &&
+          results.every((result) => result.status === "untested");
+        const allUnreachable =
+          results.length > 0 &&
+          results.every((result) => result.status === "unreachable");
         failTrial(
           current,
           "probe",
-          "两个节点都没测速成功，可以重试，或跳过测速后自己点连接。",
+          allUntested
+            ? "两个节点都没测成，可以重试，或跳过测速后自己点连接。"
+            : allUnreachable
+              ? "两个节点都没测通，可以重试，或跳过测速后自己点连接。"
+              : "两个节点都没测出可用结果，可以重试，或跳过测速后自己点连接。",
           elapsed,
         );
         return;

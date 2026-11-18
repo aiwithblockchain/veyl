@@ -1708,8 +1708,8 @@ check("批量测速三命令的入参与返回（契约）", () => {
     if (!/phase\s*:\s*"preparing"\s*\|\s*"probing"/.test(snap)) {
       problems.push('snapshot.run.phase 必须是 "preparing" | "probing"');
     }
-    if (!/method\s*:\s*"tcp"\s*\|\s*"clash"/.test(snap)) {
-      problems.push('snapshot.run.method 必须是 "tcp" | "clash"');
+    if (!/method\s*:\s*"clash"\s*\|\s*"none"/.test(snap)) {
+      problems.push('snapshot.run.method 必须是 "clash" | "none"');
     }
   }
 
@@ -1729,7 +1729,7 @@ check("批量测速三命令的入参与返回（契约）", () => {
   return problems;
 });
 
-check("批量测速两事件与四个终态（契约）", () => {
+check("批量测速两事件与五个终态（契约）", () => {
   const names = contractEventNames();
   const problems = [];
 
@@ -1748,8 +1748,8 @@ check("批量测速两事件与四个终态（契约）", () => {
     if (!/phase\s*:\s*"preparing"\s*\|\s*"probing"/.test(block)) {
       problems.push('NodeProbeProgressPayload.phase 必须是 "preparing" | "probing"');
     }
-    if (!/method\s*:\s*"tcp"\s*\|\s*"clash"/.test(block)) {
-      problems.push('NodeProbeProgressPayload.method 必须是 "tcp" | "clash"');
+    if (!/method\s*:\s*"clash"\s*\|\s*"none"/.test(block)) {
+      problems.push('NodeProbeProgressPayload.method 必须是 "clash" | "none"');
     }
     if (!/result\s*:\s*NodeProbeData\s*\|\s*null/.test(block)) {
       problems.push("NodeProbeProgressPayload.result 必须允许 null（preparing 阶段为空）");
@@ -1759,12 +1759,12 @@ check("批量测速两事件与四个终态（契约）", () => {
   const finished = payloadFields("docs/contracts/events.md", "NodeProbeFinishedPayload");
   if (!finished) problems.push("events.md 找不到 NodeProbeFinishedPayload");
   else {
-    for (const f of ["run_id", "config_id", "total", "ok", "failed", "method", "cancelled", "reason", "network"]) {
+    for (const f of ["run_id", "config_id", "total", "ok", "failed", "untested", "method", "cancelled", "reason", "network"]) {
       if (!finished.includes(f)) problems.push(`NodeProbeFinishedPayload 缺少 ${f}`);
     }
     const block = tsTypeBlock("docs/contracts/events.md", "NodeProbeFinishedPayload") ?? "";
-    if (!/method\s*:\s*"tcp"\s*\|\s*"clash"/.test(block)) {
-      problems.push('NodeProbeFinishedPayload.method 必须是 "tcp" | "clash"');
+    if (!/method\s*:\s*"clash"\s*\|\s*"none"/.test(block)) {
+      problems.push('NodeProbeFinishedPayload.method 必须是 "clash" | "none"');
     }
     if (!/reason\s*:\s*"connected"\s*\|\s*null/.test(block)) {
       problems.push('NodeProbeFinishedPayload.reason 必须是 "connected" | null');
@@ -1775,16 +1775,72 @@ check("批量测速两事件与四个终态（契约）", () => {
   if (!/network\s*:\s*"ok"\s*\|\s*"offline"/.test(md)) {
     problems.push('NodeProbeFinishedPayload.network 必须是 "ok" | "offline"');
   }
-  for (const phrase of ["恰好一条", "正常结束", "全部失败、本机有网", "全部失败、本机离线", "取消"]) {
+  for (const phrase of ["恰好一条", "正常结束", "全部不可达、本机有网", "全部不可达、本机离线", "全部未测", "取消"]) {
     if (!md.includes(phrase)) problems.push(`events.md 缺少终态说明：${phrase}`);
   }
-  for (const phrase of ["`clash` = 真实可用性", "`tcp` = 仅可达"]) {
+  for (const phrase of ["`clash` = 真实可用性", "`none` = 没测成"]) {
     if (!md.includes(phrase)) problems.push(`events.md 缺少术语定义：${phrase}`);
   }
   if (names.some((n) => /probe.*-changed/.test(n))) {
     problems.push("事件总表出现了 probe 相关的 *-changed 事件（批次是只读的，不应发状态变更事件）");
   }
   if (!md.includes("不发任何 `*-changed`")) problems.push("events.md 没有写明批量测速不发 `*-changed`");
+  return problems;
+});
+
+// --- 18b：探测三态与 untested reason 集合 ---
+//
+// 探测只认 Clash 真实延迟：契约的状态机、reason 封闭集合必须与实现逐字一致。
+// 少一个 reason，前端就没有对应文案；多一个实现外的 reason，契约就是空话。
+check("探测三态与 untested reason 集合与实现一致（契约）", () => {
+  const md = read("docs/contracts/commands.md");
+  const problems = [];
+  const block = tsTypeBlock("docs/contracts/commands.md", "NodeProbeData") ?? "";
+  if (!/status\s*:\s*"ok"\s*\|\s*"unreachable"\s*\|\s*"untested"/.test(block)) {
+    problems.push('NodeProbeData.status 必须是 "ok" | "unreachable" | "untested"');
+  }
+  if (!/reachable\s*:\s*boolean\s*\|\s*null/.test(block)) {
+    problems.push("NodeProbeData.reachable 必须是 boolean | null（未测是 null，不是 false）");
+  }
+  if (!/probe_method\s*:\s*"clash_delay"\s*\|\s*"none"/.test(block)) {
+    problems.push('NodeProbeData.probe_method 必须是 "clash_delay" | "none"');
+  }
+
+  const s44 = mdSection(md, "### 4.4", "### 4.5") ?? "";
+  const reasonStart = s44.indexOf("`untested.reason` 是封闭集合");
+  const reasonBlock = reasonStart >= 0 ? s44.slice(reasonStart) : "";
+  if (reasonStart < 0) problems.push("commands.md §4.4 没有 untested reason 封闭集合说明");
+  const docReasons = new Set(
+    [...reasonBlock.matchAll(/^\| `([a-z_]+)` \| /gm)]
+      .map((m) => m[1])
+      .filter((r) => r !== "reason"),
+  );
+
+  const services = read("src-tauri/src/tools/services.rs");
+  const batch = read("src-tauri/src/tools/probe_batch.rs");
+  const codeReasons = new Set();
+  for (const m of services.matchAll(/probe_untested\([^,]+,\s*"([a-z_]+)"/g)) {
+    codeReasons.add(m[1]);
+  }
+  for (const m of batch.matchAll(/probe_untested\([^,]+,\s*"([a-z_]+)"/g)) {
+    codeReasons.add(m[1]);
+  }
+  const failureImpl = batch.match(/impl ProbeFailure \{[\s\S]*?\n\}/);
+  if (failureImpl) {
+    for (const m of failureImpl[0].matchAll(/=>\s*"([a-z_]+)"/g)) {
+      codeReasons.add(m[1]);
+    }
+  }
+
+  if (codeReasons.size === 0) {
+    problems.push("实现里一个 untested reason 都没解析出来（解析器失配）");
+  }
+  for (const r of codeReasons) {
+    if (!docReasons.has(r)) problems.push(`实现有、契约没有的 reason：${r}`);
+  }
+  for (const r of docReasons) {
+    if (!codeReasons.has(r)) problems.push(`契约有、实现没有的 reason：${r}`);
+  }
   return problems;
 });
 
@@ -1930,11 +1986,12 @@ check("§4.6 探测方式与 §6.5 定稿一致（契约）", () => {
   const problems = [];
   for (const phrase of [
     "完全未连接",
-    "临时起一次运行时",
+    "临时起一次探针运行时",
     "8 秒内未就绪",
     "已连接**别的配置**",
-    "整批降级 `tcp`",
-    "不启动运行时",
+    "整批 `untested`",
+    "不再降级 TCP",
+    "不再有 TCP 兜底",
   ]) {
     if (!md.includes(phrase)) problems.push(`commands.md §4.6 缺少探测方式：${phrase}`);
   }

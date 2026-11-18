@@ -1437,3 +1437,52 @@ async fn my_server_failure_rejects_bad_input() {
         assert_eq!(env["error"]["code"], "INVALID_ARGUMENT");
     }
 }
+
+/// 幂等切换（点的就是当前节点）：文案必须是「没变化」，不能声称未连接或下次生效。
+#[tokio::test]
+async fn node_switch_to_the_current_node_reads_as_unchanged() {
+    let (svc, rec) = FakeServices::with_data(json!({
+        "config_id": "cfg_1",
+        "node_id": "nod_1",
+        "previous_node_id": "nod_1",
+        "connected": false,
+    }));
+    let all = tools(svc);
+    const SESSION: &str = "boundary-node-switch-same";
+    let (is_error, env) = run_in_session(
+        tool(&all, "NodeSwitch"),
+        json!({ "config_id": "cfg_1", "node_id": "nod_1" }),
+        SESSION,
+    )
+    .await;
+    assert!(!is_error, "{env}");
+    assert_eq!(env["summary"], "当前节点没有变化。");
+    // display 不在给模型的信封里：从进程内结果登记表取（用本用例专属会话 id）。
+    let outcome = crate::tools::envelope::take_outcome(SESSION, "NodeSwitch")
+        .expect("工具结果应当已登记");
+    assert_eq!(outcome.display.text, "当前已是该节点");
+    assert_eq!(outcome.display.facts, vec!["连接：未改变"]);
+    assert_eq!(rec.take(), vec!["node_switch(cfg_1,nod_1)"]);
+
+    // 真切换（节点不同）保持原文案不变。
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "config_id": "cfg_1",
+        "node_id": "nod_2",
+        "previous_node_id": "nod_1",
+        "connected": false,
+    }));
+    let all = tools(svc);
+    const SESSION2: &str = "boundary-node-switch-diff";
+    let (is_error, env) = run_in_session(
+        tool(&all, "NodeSwitch"),
+        json!({ "config_id": "cfg_1", "node_id": "nod_2" }),
+        SESSION2,
+    )
+    .await;
+    assert!(!is_error, "{env}");
+    assert_eq!(env["summary"], "已切换当前节点（未连接，未启动 VPN）。");
+    let outcome = crate::tools::envelope::take_outcome(SESSION2, "NodeSwitch")
+        .expect("工具结果应当已登记");
+    assert_eq!(outcome.display.text, "已选择节点");
+    assert_eq!(outcome.display.facts, vec!["生效：下次连接"]);
+}

@@ -176,13 +176,143 @@ describe("三区外壳与连接舞台", () => {
     expect(stageRows[1].querySelector(".stage-node__fastest")).toBeNull();
   }, 15_000);
 
+  it("试用测速：untested 与 unreachable 都不参与最快选择", async () => {
+    await renderApp();
+    vi.spyOn(bridge, "nodeProbe").mockImplementation(async (nodeId: string) => {
+      if (nodeId.includes("tokyo")) {
+        return {
+          node_id: nodeId,
+          status: "ok" as const,
+          reachable: true,
+          latency_ms: 88,
+          probe_method: "clash_delay" as const,
+          checked_at: Date.now(),
+          error: null,
+        };
+      }
+      if (nodeId.includes("singapore")) {
+        return {
+          node_id: nodeId,
+          status: "untested" as const,
+          reachable: null,
+          latency_ms: null,
+          probe_method: "none" as const,
+          checked_at: Date.now(),
+          error: null,
+        };
+      }
+      return {
+        node_id: nodeId,
+        status: "unreachable" as const,
+        reachable: false,
+        latency_ms: null,
+        probe_method: "clash_delay" as const,
+        checked_at: Date.now(),
+        error: { code: "PROBE_TIMEOUT", message: "" },
+      };
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /先试用免费节点/ }));
+
+    await waitFor(
+      () => expect(screen.getByText("已加入 2 个免费节点，最快 88ms")).toBeTruthy(),
+      { timeout: 5000 },
+    );
+    // 只有 status=ok 的东京被选中并标「最快」；未测的新加坡不参与。
+    await waitFor(() => {
+      const rows = screen.getAllByRole("option");
+      expect(rows[0].getAttribute("aria-selected")).toBe("true");
+      expect(rows[0].querySelector(".stage-node__fastest")).not.toBeNull();
+      expect(rows[1].querySelector(".stage-node__fastest")).toBeNull();
+    });
+    const values = [...document.querySelectorAll(".stage-node__ms")].map(
+      (node) => node.textContent,
+    );
+    expect(values).toEqual(["88 毫秒", "未测"]);
+  }, 15_000);
+
+  it("试用测速全都没测成：文案说「没测成」，不暗示节点坏了", async () => {
+    await renderApp();
+    vi.spyOn(bridge, "nodeProbe").mockImplementation(async (nodeId: string) => ({
+      node_id: nodeId,
+      status: "untested" as const,
+      reachable: null,
+      latency_ms: null,
+      probe_method: "none" as const,
+      checked_at: Date.now(),
+      error: null,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: /先试用免费节点/ }));
+
+    expect(
+      await screen.findByText(/两个节点都没测成/, undefined, { timeout: 5000 }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/两个节点都没测通/)).toBeNull();
+  }, 15_000);
+
+  it("试用测速全都连不上：文案说「没测通」，不说没测成", async () => {
+    await renderApp();
+    vi.spyOn(bridge, "nodeProbe").mockImplementation(async (nodeId: string) => ({
+      node_id: nodeId,
+      status: "unreachable" as const,
+      reachable: false,
+      latency_ms: null,
+      probe_method: "clash_delay" as const,
+      checked_at: Date.now(),
+      error: { code: "PROBE_TIMEOUT", message: "" },
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: /先试用免费节点/ }));
+
+    expect(
+      await screen.findByText(/两个节点都没测通/, undefined, { timeout: 5000 }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/两个节点都没测成/)).toBeNull();
+  }, 15_000);
+
+  it("试用测速一条没测成一条连不上：文案写「没测出可用结果」", async () => {
+    await renderApp();
+    vi.spyOn(bridge, "nodeProbe").mockImplementation(async (nodeId: string) => {
+      if (nodeId.includes("tokyo")) {
+        return {
+          node_id: nodeId,
+          status: "untested" as const,
+          reachable: null,
+          latency_ms: null,
+          probe_method: "none" as const,
+          checked_at: Date.now(),
+          error: null,
+        };
+      }
+      return {
+        node_id: nodeId,
+        status: "unreachable" as const,
+        reachable: false,
+        latency_ms: null,
+        probe_method: "clash_delay" as const,
+        checked_at: Date.now(),
+        error: { code: "PROBE_TIMEOUT", message: "" },
+      };
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /先试用免费节点/ }));
+
+    expect(
+      await screen.findByText(/两个节点都没测出可用结果/, undefined, {
+        timeout: 5000,
+      }),
+    ).toBeTruthy();
+  }, 15_000);
+
   it("试用预选切 destination 往返后不二次应用", async () => {
     await renderApp();
     vi.spyOn(bridge, "nodeProbe").mockImplementation(async (nodeId: string) => ({
       node_id: nodeId,
+      status: "ok",
       reachable: true,
       latency_ms: nodeId.includes("singapore") ? 42 : 90,
-      probe_method: "tcp",
+      probe_method: "clash_delay",
       checked_at: Date.now(),
       error: null,
     }));
@@ -246,17 +376,19 @@ describe("三区外壳与连接舞台", () => {
       results: [
         {
           node_id: "n1",
+          status: "ok",
           reachable: true,
           latency_ms: 42,
-          probe_method: "tcp",
+          probe_method: "clash_delay",
           checked_at: Date.now(),
           error: null,
         },
         {
           node_id: "n2",
+          status: "ok",
           reachable: true,
           latency_ms: 90,
-          probe_method: "tcp",
+          probe_method: "clash_delay",
           checked_at: Date.now(),
           error: null,
         },
@@ -304,14 +436,15 @@ describe("三区外壳与连接舞台", () => {
           run_id: runId,
           config_id: "cfg_stage",
           phase: "probing",
-          method: "tcp",
+          method: "clash",
           done,
           total: 2,
           result: {
             node_id: nodeId,
+            status: "ok",
             reachable: true,
             latency_ms: latency,
-            probe_method: "tcp",
+            probe_method: "clash_delay",
             checked_at: Date.now(),
             error: null,
           },
@@ -360,7 +493,7 @@ describe("三区外壳与连接舞台", () => {
     const probeRow = screen.getByText("逐个测速").closest(".stage-step");
     expect(probeRow?.className).toContain("is-failed");
     expect(
-      screen.getByText("两个节点都没测速成功，可以重试，或跳过测速后自己点连接。"),
+      screen.getByText("两个节点都没测出可用结果，可以重试，或跳过测速后自己点连接。"),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
 

@@ -7,18 +7,33 @@ use crate::runtime::fsutil;
 
 /// 用目标二进制自带的 `check` 校验配置，避免我们自己猜字段名。
 pub async fn check(binary: &Path, config: &Path) -> RuntimeResult<()> {
-    let output = tokio::process::Command::new(binary)
+    // check 是连接/重建链路里唯一可能卡住的子进程（大配置、坏盘、被杀毒扫描）。
+    // 卡住会一直占着运行期操作锁，让排队中的断开永远等不到。
+    let mut command = tokio::process::Command::new(binary);
+    command
         .arg("check")
         .arg("-c")
         .arg(config)
-        .output()
-        .await
-        .map_err(|e| {
+        .kill_on_drop(true);
+    let output = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        command.output(),
+    )
+    .await
+    {
+        Ok(result) => result.map_err(|e| {
             RuntimeError::Process(format!(
                 "failed to run {} check: {e}",
                 binary.display()
             ))
-        })?;
+        })?,
+        Err(_) => {
+            return Err(RuntimeError::Process(format!(
+                "{} check 超时（10 秒）",
+                binary.display()
+            )))
+        }
+    };
 
     if output.status.success() {
         return Ok(());

@@ -136,8 +136,8 @@ export function ConnectionStage({
   const latencyOf = (nodeId: string, nodeLatency: number | null): number | null => {
     const probe = nodeProbes.results[nodeId];
     if (probe) {
-      // 测过但没通就显示「—」，不要回落到运行时旧延迟。
-      return probe.reachable && probe.latency_ms !== null
+      // 只有 status=ok 且真有数字才算可用；untested / unreachable 都不回落到旧延迟。
+      return probe.status === "ok" && probe.latency_ms !== null
         ? probe.latency_ms
         : null;
     }
@@ -177,6 +177,52 @@ export function ConnectionStage({
   }, [config?.current_node_id]);
 
   const probeRunning = nodeProbes.run !== null || nodeProbes.starting;
+  /** 这一批的终态；换配置或没有批次时为 null。 */
+  const probeFinishedForConfig =
+    nodeProbes.finished && nodeProbes.finished.configId === config?.config_id
+      ? nodeProbes.finished
+      : null;
+  /**
+   * 整批未测是独立终态（method = "none"）：只说「这次没测成」，
+   * 不得写成「都连不通」，也不把按钮换成「再试一次」。
+   */
+  const probeAllUntested =
+    !probeRunning &&
+    probeFinishedForConfig !== null &&
+    probeFinishedForConfig.method === "none" &&
+    probeFinishedForConfig.total > 0 &&
+    probeFinishedForConfig.ok === 0 &&
+    !probeFinishedForConfig.cancelled;
+  /**
+   * 只有真的测过且全失败才说「都没测通」。派生自本配置的终态，
+   * 切配置时不会把上一套的结论带过来。failed === total 已等价于
+   * 「ok = 0 且 untested = 0」。
+   */
+  const probeAllFailed =
+    !probeRunning &&
+    probeFinishedForConfig !== null &&
+    !probeFinishedForConfig.cancelled &&
+    probeFinishedForConfig.total > 0 &&
+    probeFinishedForConfig.method !== "none" &&
+    probeFinishedForConfig.failed === probeFinishedForConfig.total;
+  /** 混合批里没测成的条数；旧载荷没带 untested 时按恒等式补。 */
+  const probeUntestedCount = probeFinishedForConfig
+    ? probeFinishedForConfig.untested ??
+      Math.max(
+        0,
+        probeFinishedForConfig.total -
+          probeFinishedForConfig.ok -
+          probeFinishedForConfig.failed,
+      )
+    : 0;
+  /** 混合批或部分未测：单独列没测成的数量，不写「都连不通」。 */
+  const probeMixedUntested =
+    !probeRunning &&
+    probeFinishedForConfig !== null &&
+    !probeFinishedForConfig.cancelled &&
+    probeFinishedForConfig.method !== "none" &&
+    probeUntestedCount > 0 &&
+    !probeAllFailed;
   const canProbe =
     Boolean(onProbe) &&
     nodes.length > 0 &&
@@ -192,13 +238,11 @@ export function ConnectionStage({
   const manualProbeRef = useRef(false);
   const prevRunIdRef = useRef<string | null>(null);
   const lastFinishRef = useRef<NodeProbesController["finished"]>(null);
-  const [probeAllFailed, setProbeAllFailed] = useState(false);
 
   // 新一批开始：手动测速等结果再重算标记；后台/自动测速只清标记，不移动。
   useEffect(() => {
     const runId = nodeProbes.run?.runId ?? null;
     if (runId && !prevRunIdRef.current) {
-      setProbeAllFailed(false);
       if (!manualProbeRef.current) setFastestMarkId(null);
     }
     prevRunIdRef.current = runId;
@@ -211,9 +255,6 @@ export function ConnectionStage({
     if (!finished || finished === lastFinishRef.current) return;
     lastFinishRef.current = finished;
     if (finished.configId !== config?.config_id) return;
-    setProbeAllFailed(
-      finished.total > 0 && finished.ok === 0 && !finished.cancelled,
-    );
     if (!manualProbeRef.current) return;
     manualProbeRef.current = false;
     if (finished.cancelled || finished.ok === 0) {
@@ -224,7 +265,8 @@ export function ConnectionStage({
     let candidates: string[] = [];
     for (const node of nodes) {
       const result = nodeProbes.results[node.node_id];
-      if (!result?.reachable || result.latency_ms === null) continue;
+      // 只有 status=ok 的节点参与「最快」；untested / unreachable 都不算。
+      if (!result || result.status !== "ok" || result.latency_ms === null) continue;
       if (result.latency_ms < best) {
         best = result.latency_ms;
         candidates = [node.node_id];
@@ -383,11 +425,16 @@ export function ConnectionStage({
     const destroyed = destroyedNodeIds.has(node.node_id);
     const expired = isExpiredSeed(node);
     const probe = nodeProbes.results[node.node_id];
-    /** 契约上可达必有数值；真遇到「可达却没数值」按测不通处理，别冒称「未测」。 */
+    /** 契约上可达必有数值；真遇到「可达却没数值」按测不通处理，别冒称「未测」。
+        untested（reachable === null）保持「未测」，不能掉进失败态。 */
     const probeBad =
       probe !== undefined &&
-      (!probe.reachable || probe.latency_ms === null);
-    const probeError = probeBad ? probe?.error?.message ?? null : null;
+      (probe.reachable === false ||
+        (probe.reachable === true && probe.latency_ms === null));
+    // 没测成也可能带原因（例如临时运行时起不来）：有就放 title，没有不编。
+    const probeUntested = probe?.status === "untested";
+    const probeError =
+      probeBad || probeUntested ? probe?.error?.message ?? null : null;
     const msText =
       switching === node.node_id
         ? "切换中"
@@ -529,8 +576,14 @@ export function ConnectionStage({
                 </button>
               ) : null}
             </div>
-            {probeAllFailed && !probeRunning ? (
+            {probeAllFailed ? (
               <p className="stage-card__probe-note">这次都没测通。</p>
+            ) : probeAllUntested ? (
+              <p className="stage-card__probe-note">这次没测成。</p>
+            ) : probeMixedUntested ? (
+              <p className="stage-card__probe-note">
+                {probeUntestedCount} 个没测成。
+              </p>
             ) : null}
           </header>
           <div className="stage-card__nodes" role="listbox" aria-label="节点">

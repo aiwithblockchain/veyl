@@ -16,7 +16,7 @@ use super::health::{
 use super::process::{self, SpawnOptions};
 
 pub const CONTRACT_VERSION: &str = "2.8.0";
-pub const EVENT_CONTRACT_VERSION: &str = "2.19.0";
+pub const EVENT_CONTRACT_VERSION: &str = "2.20.0";
 
 /// 契约要求数据面检查默认开启（2026-11-02 拍板），置 `None` 可关闭。
 pub const DEFAULT_DATA_PLANE_PROBE: &str = "http://cp.cloudflare.com/generate_204";
@@ -1003,6 +1003,16 @@ impl RuntimeManager {
             }
         };
         ClashApi::new(&addr, &secret).healthy().await
+    }
+
+    /// 当前探针槽里的 secret：调用方用它确认「这个进程还是我起的那只」。
+    /// 别的操作（批次/新一次冷启动）会换掉槽位，secret 随之不同。
+    pub async fn probe_secret(&self) -> Option<String> {
+        self.probe
+            .lock()
+            .await
+            .as_ref()
+            .map(|probe| probe.plan.clash_secret.clone())
     }
 
     pub async fn stop(&self) -> RuntimeResult<RuntimeStatus> {

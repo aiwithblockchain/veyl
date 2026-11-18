@@ -351,12 +351,18 @@ export interface CoreUpgradeFinishedPayload {
   emitted_at?: string;
 }
 
+/** 单节点探测结论：ok 可用；unreachable 连不上；untested 没测成（不是失败）。 */
+export type NodeProbeStatus = "ok" | "unreachable" | "untested";
+
 /** `node_probe` / 批量测速共用的单节点结果（commands.md §4.4）。 */
 export interface NodeProbeData {
   node_id: string;
-  reachable: boolean;
+  status: NodeProbeStatus;
+  /** 与 status 同步：ok=true / unreachable=false / untested=null。 */
+  reachable: boolean | null;
   latency_ms: number | null;
-  probe_method: "clash_delay" | "tcp";
+  /** none = 没测成（untested），不是「端口可达」。 */
+  probe_method: "clash_delay" | "none";
   /** Unix 毫秒。 */
   checked_at: number;
   error: { code: string; message: string } | null;
@@ -365,8 +371,8 @@ export interface NodeProbeData {
 /** 批量测速的阶段：preparing 时临时运行时尚未就绪，没有任何结果。 */
 export type NodeProbePhase = "preparing" | "probing";
 
-/** 批量测速的方式；clash = 真实可用性（可用），tcp = 仅可达（可达）。 */
-export type NodeProbeMethod = "tcp" | "clash";
+/** 批量测速的方式；clash = 真实可用性；none = 这一批没能测（untested）。 */
+export type NodeProbeMethod = "clash" | "none";
 
 /** 批量测速单个节点完成；面板关闭后批次仍在后台跑（events.md §4.19）。 */
 export interface NodeProbeProgressPayload {
@@ -390,7 +396,9 @@ export interface NodeProbeFinishedPayload {
   total: number;
   ok: number;
   failed: number;
-  /** 整批实际使用的方式；降级时为 tcp（界面写「可达」）。 */
+  /** status=untested 的数量；不取消时 ok + failed + untested = total，不并进 failed。 */
+  untested: number;
+  /** 整批使用的方式：clash 是真实探测；none 表示这一批没测成。 */
   method: NodeProbeMethod;
   cancelled: boolean;
   /** 用户中途启动 VPN 导致取消时为 connected。 */

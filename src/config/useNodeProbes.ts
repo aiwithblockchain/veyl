@@ -5,6 +5,7 @@ import { AGENT_EVENTS } from "../agent/protocol";
 import type {
   NodeProbeData,
   NodeProbeFinishedPayload,
+  NodeProbeMethod,
   NodeProbeProgressPayload,
 } from "../agent/protocol";
 import { nextProbing } from "../ui/nodeList";
@@ -23,7 +24,9 @@ export interface ProbeFinishedInfo {
   total: number;
   ok: number;
   failed: number;
-  method: "tcp" | "clash";
+  /** 没测成的数量；后端按 per-node no_credentials 等情况单独计数。 */
+  untested: number;
+  method: NodeProbeMethod;
   cancelled: boolean;
   reason: "connected" | null;
   network: "ok" | "offline";
@@ -97,8 +100,6 @@ export function useNodeProbes({
   /** 本窗口内由面板发起的批次：从第一帧起就是「全部节点重测」。 */
   const freshRun = useRef<string | null>(null);
   const startingConfigRef = useRef<string | null>(null);
-  /** 每启动一批 +1：复测结果靠它判断自己是否已过期。 */
-  const epochRef = useRef(0);
   const noticeTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -178,7 +179,7 @@ export function useNodeProbes({
       if (payload.config_id !== current.configId) return;
 
       const phase = payload.phase === "preparing" ? "preparing" : "probing";
-      const method = payload.method === "clash" ? "clash" : "tcp";
+      const method = payload.method === "clash" ? "clash" : "none";
 
       // phase 事件没有结果：只更新阶段与方式，不按 done 去重（preparing/probing 都是 0）。
       if (!payload.result) {
@@ -255,7 +256,6 @@ export function useNodeProbes({
     (payload: NodeProbeFinishedPayload) => {
       const current = runRef.current;
       if (!current || current.runId !== payload.run_id) return;
-      const scope = runScope.current;
       applyRun(null);
       applyProbing(new Set(), []);
       startingConfigRef.current = null;
@@ -266,74 +266,23 @@ export function useNodeProbes({
         total: payload.total,
         ok: payload.ok,
         failed: payload.failed,
-        method: payload.method === "clash" ? "clash" : "tcp",
+        untested: payload.untested,
+        method: payload.method === "clash" ? "clash" : "none",
         cancelled: payload.cancelled,
         reason: payload.reason === "connected" ? "connected" : null,
         network: payload.network,
       });
       if (payload.cancelled) {
+        // 没测成的那部分也算「已测」：取消时 ok+failed+untested 才是走完的数量。
         showNotice(
           payload.config_id,
           payload.reason === "connected"
             ? "连接后测速已停止"
-            : `已停止 · 已测 ${payload.ok + payload.failed}/${payload.total}`,
+            : `已停止 · 已测 ${payload.ok + payload.failed + (payload.untested ?? 0)}/${payload.total}`,
         );
-        return;
       }
-      // 只有 Clash 批次才需要复测：TCP 批次本身就是直连，失败就是失败。
-      if (payload.method !== "clash") return;
-      const failedIds = scope.filter(
-        (id) => resultsRef.current[id]?.reachable === false,
-      );
-      if (failedIds.length === 0) return;
-      // epoch 在每次新批次启动时递增：复测属于这一批，任何更新的一批都让它作废
-      // （包括第二批已经跑完的情况，避免旧结果覆盖新数据、改错 finished 计数）。
-      const epoch = epochRef.current;
-      applyProbing(new Set(failedIds), []);
-      const queue = [...failedIds];
-      let recovered = 0;
-      const worker = async () => {
-        for (;;) {
-          if (epochRef.current !== epoch) return;
-          const id = queue.shift();
-          if (id === undefined) return;
-          try {
-            const entry = await bridge.nodeProbe(id);
-            if (epochRef.current !== epoch) return;
-            recordResults([entry]);
-            if (entry.reachable) recovered += 1;
-          } catch {
-            // 直连也没测通：保留原来的失败结果。
-          }
-          if (epochRef.current !== epoch) return;
-          const next = new Set(probingRef.current);
-          next.delete(id);
-          applyProbing(next, []);
-        }
-      };
-      void (async () => {
-        // 与主批次相同的 6 路限流，不一次打出 N 个 IPC。
-        await Promise.all(
-          Array.from(
-            { length: Math.min(CONCURRENCY, failedIds.length) },
-            () => worker(),
-          ),
-        );
-        if (epochRef.current !== epoch) return;
-        if (recovered > 0) {
-          setFinished((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  ok: prev.ok + recovered,
-                  failed: Math.max(0, prev.failed - recovered),
-                }
-              : prev,
-          );
-        }
-      })();
     },
-    [applyProbing, applyRun, bridge, recordResults, showNotice],
+    [applyProbing, applyRun, showNotice],
   );
 
   useEffect(() => {
@@ -415,8 +364,6 @@ export function useNodeProbes({
       const scope = nodeIds ?? knownNodeIds.current;
       if (scope.length === 0) return { ok: false, message: "这套配置还没有节点。" };
       clearNotice();
-      // 新批次开始：上一批的复测结果从此作废。
-      epochRef.current += 1;
       runScope.current = scope;
       startingConfigRef.current = configId;
       // 命令往返期间就把行内「测速中」点亮：用户点了要有反应。
@@ -450,7 +397,7 @@ export function useNodeProbes({
           startedAt: Date.now(),
           // 命令本身不带阶段；后端会立刻发 preparing / probing 事件来修正。
           phase: "preparing",
-          method: "tcp",
+          method: "none",
           ignored: ignoredIds.length,
         });
         startingConfigRef.current = null;

@@ -320,20 +320,37 @@ mod tests {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
                             hits_thread.fetch_add(1, Ordering::SeqCst);
-                            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                             let mut buffer = Vec::new();
                             let mut chunk = [0u8; 1024];
-                            loop {
+                            let mut complete = false;
+                            // 整机高负载时对端进程可能被冻结几秒，超时后继续等而不是
+                            // 提前关连接；提前回响应/关闭会让 hyper 报
+                            // `UnexpectedMessage` / `IncompleteMessage`。
+                            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                            let mut errors = 0u32;
+                            while std::time::Instant::now() < deadline {
                                 match stream.read(&mut chunk) {
                                     Ok(0) => break,
                                     Ok(n) => {
                                         buffer.extend_from_slice(&chunk[..n]);
                                         if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                                            complete = true;
                                             break;
                                         }
                                     }
-                                    Err(_) => break,
+                                    Err(_) => {
+                                        errors += 1;
+                                        // 连接被重置时 read 会立刻连续报错，别拿它空转到 30 秒预算。
+                                        if errors >= 8 {
+                                            break;
+                                        }
+                                        continue;
+                                    }
                                 }
+                            }
+                            if !complete {
+                                continue;
                             }
                             let _ = stream.write_all(body);
                             let _ = stream.flush();
@@ -397,7 +414,8 @@ mod tests {
         let proxied = builder(Some(
             reqwest::Proxy::all(format!("http://{}", poison.addr)).unwrap(),
         ))
-        .timeout(Duration::from_secs(2))
+        // 本机桩 + 整机高负载：和另外两处一样给 10 秒，避免进程被冻结时误判。
+        .timeout(Duration::from_secs(10))
         .build()
         .unwrap();
         let response = runtime
@@ -413,7 +431,8 @@ mod tests {
         assert_eq!(target.hits(), 0, "请求没有经过代理");
 
         // 控制面的真实构造函数：不传代理，直连目标。
-        let direct = http_client(Duration::from_secs(2)).unwrap();
+        // 本机桩 + 整机高负载：给 10 秒，避免进程被冻结时误判成超时。
+        let direct = http_client(Duration::from_secs(10)).unwrap();
         let response = runtime
             .block_on(async {
                 direct
@@ -467,7 +486,8 @@ mod tests {
         let Ok(url) = std::env::var("VEYL_TEST_PROXY_TARGET") else {
             return;
         };
-        let client = http_client(Duration::from_secs(2)).unwrap();
+        // 整机高负载时子进程可能被冻结几秒：给 10 秒，避免误判成超时。
+        let client = http_client(Duration::from_secs(10)).unwrap();
         let response = runtime()
             .block_on(async { client.get(&url).send().await })
             .expect("设了代理环境变量的子进程里，控制面客户端应该直连目标");

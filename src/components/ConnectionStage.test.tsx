@@ -74,9 +74,10 @@ function probes(over: Partial<NodeProbesController> = {}): NodeProbesController 
 function probeResult(nodeId: string, latency: number) {
   return {
     node_id: nodeId,
-    reachable: true,
+    status: "ok" as const,
+    reachable: true as const,
     latency_ms: latency,
-    probe_method: "tcp" as const,
+    probe_method: "clash_delay" as const,
     checked_at: Date.now(),
     error: null,
   };
@@ -85,11 +86,25 @@ function probeResult(nodeId: string, latency: number) {
 function failedProbe(nodeId: string) {
   return {
     node_id: nodeId,
-    reachable: false,
+    status: "unreachable" as const,
+    reachable: false as const,
     latency_ms: null,
-    probe_method: "tcp" as const,
+    probe_method: "clash_delay" as const,
     checked_at: Date.now(),
     error: { code: "PROBE_TIMEOUT", message: "" },
+  };
+}
+
+/** 没测成：reachable 为 null，既不是可用也不是连不上。 */
+function untestedProbe(nodeId: string) {
+  return {
+    node_id: nodeId,
+    status: "untested" as const,
+    reachable: null,
+    latency_ms: null,
+    probe_method: "none" as const,
+    checked_at: 0,
+    error: null,
   };
 }
 
@@ -101,7 +116,7 @@ function probeRun(runId: string): NonNullable<NodeProbesController["run"]> {
     total: 2,
     startedAt: Date.now(),
     phase: "probing",
-    method: "tcp",
+    method: "clash",
     ignored: 0,
   };
 }
@@ -114,7 +129,8 @@ function probeFinished(
     total: 2,
     ok: 2,
     failed: 0,
-    method: "tcp",
+    untested: 0,
+    method: "clash",
     cancelled: false,
     reason: null,
     network: "ok",
@@ -334,9 +350,10 @@ describe("连接舞台", () => {
         results: {
           n2: {
             node_id: "n2",
+            status: "ok",
             reachable: true,
             latency_ms: 42,
-            probe_method: "tcp",
+            probe_method: "clash_delay",
             checked_at: Date.now(),
             error: null,
           },
@@ -783,6 +800,157 @@ describe("连接舞台", () => {
     expect(screen.getAllByLabelText("这次没测通").length).toBe(2);
   });
 
+  it("整批没测成（method=none）：说「这次没测成」，不说连不通，按钮不变成再试一次", async () => {
+    renderStage({
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 0, failed: 0, method: "none" }),
+        results: { n1: untestedProbe("n1"), n2: untestedProbe("n2") },
+      }),
+      onProbe: () => {},
+    });
+
+    expect(await screen.findByText("这次没测成。")).toBeTruthy();
+    expect(screen.queryByText("这次都没测通。")).toBeNull();
+    expect(screen.queryByRole("button", { name: "再试一次" })).toBeNull();
+    expect(screen.getByRole("button", { name: "测速" })).toBeTruthy();
+    const values = [...document.querySelectorAll(".stage-node__ms")].map(
+      (node) => node.textContent,
+    );
+    expect(values).toEqual(["未测", "未测"]);
+  });
+
+  it("三态行：ok 写数值、unreachable 写「测不通」、untested 写「未测」并带原因", () => {
+    const config = {
+      ...CONFIG,
+      nodes: [
+        ...CONFIG.nodes,
+        { ...CONFIG.nodes[0], node_id: "n3", name: "洛杉矶 01" },
+      ],
+    };
+    renderStage({
+      config,
+      nodeProbes: probes({
+        results: {
+          n1: probeResult("n1", 238),
+          n2: failedProbe("n2"),
+          n3: {
+            ...untestedProbe("n3"),
+            error: { code: "RUNTIME_FAILED", message: "临时运行时没起来" },
+          },
+        },
+      }),
+    });
+
+    const values = [...document.querySelectorAll(".stage-node__ms")];
+    expect(values.map((node) => node.textContent)).toEqual([
+      "238 毫秒",
+      "测不通",
+      "未测",
+    ]);
+    expect(values[2].getAttribute("title")).toBe("临时运行时没起来");
+    expect(values[1].getAttribute("title")).toBeNull();
+  });
+
+  it("混合批：部分连不上、部分没测成，只列没测成的数量，不写都没测通", () => {
+    renderStage({
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 0, failed: 1, untested: 1 }),
+        results: { n1: failedProbe("n1"), n2: untestedProbe("n2") },
+      }),
+      onProbe: () => {},
+    });
+
+    expect(screen.queryByText("这次都没测通。")).toBeNull();
+    expect(screen.getByText("1 个没测成。")).toBeTruthy();
+    const values = [...document.querySelectorAll(".stage-node__ms")].map(
+      (node) => node.textContent,
+    );
+    expect(values).toEqual(["测不通", "未测"]);
+  });
+
+  it("有可用也有未测：照样列「N 个没测成」，不改成失败提示", () => {
+    renderStage({
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 2, failed: 0, untested: 1 }),
+        results: { n1: probeResult("n1", 38), n2: probeResult("n2", 52) },
+      }),
+      onProbe: () => {},
+    });
+
+    expect(screen.queryByText("这次都没测通。")).toBeNull();
+    expect(screen.getByText("1 个没测成。")).toBeTruthy();
+  });
+
+  it("切到没测过的配置：不带上一套的「都没测通」", () => {
+    const base: StageOverrides = {
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 0, failed: 2 }),
+        results: { n1: failedProbe("n1"), n2: failedProbe("n2") },
+      }),
+      onProbe: () => {},
+    };
+    const view = renderStage(base);
+    expect(screen.getByText("这次都没测通。")).toBeTruthy();
+
+    view.rerender(
+      stageElement({
+        ...base,
+        config: { ...CONFIG, config_id: "cfg_2" },
+        nodeProbes: probes({ results: {} }),
+      }),
+    );
+    expect(screen.queryByText("这次都没测通。")).toBeNull();
+    expect(screen.queryByText("这次没测成。")).toBeNull();
+  });
+
+  it("切到一套整批未测的配置：显示「这次没测成」，不串台成都没测通", () => {
+    const base: StageOverrides = {
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 0, failed: 2 }),
+        results: { n1: failedProbe("n1"), n2: failedProbe("n2") },
+      }),
+      onProbe: () => {},
+    };
+    const view = renderStage(base);
+    expect(screen.getByText("这次都没测通。")).toBeTruthy();
+
+    view.rerender(
+      stageElement({
+        ...base,
+        config: { ...CONFIG, config_id: "cfg_2" },
+        nodeProbes: probes({
+          finished: probeFinished({
+            configId: "cfg_2",
+            ok: 0,
+            failed: 0,
+            untested: 2,
+            method: "none",
+          }),
+          results: { n1: untestedProbe("n1"), n2: untestedProbe("n2") },
+        }),
+      }),
+    );
+    expect(screen.queryByText("这次都没测通。")).toBeNull();
+    expect(screen.getByText("这次没测成。")).toBeTruthy();
+  });
+
+  it("部分失败：只有失败行标「测不通」，不触发整批失败提示", () => {
+    renderStage({
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 1, failed: 1 }),
+        results: { n1: probeResult("n1", 238), n2: failedProbe("n2") },
+      }),
+      onProbe: () => {},
+    });
+
+    expect(screen.queryByText("这次都没测通。")).toBeNull();
+    expect(screen.getByRole("button", { name: "测速" })).toBeTruthy();
+    const values = [...document.querySelectorAll(".stage-node__ms")].map(
+      (node) => node.textContent,
+    );
+    expect(values).toEqual(["238 毫秒", "测不通"]);
+  });
+
   it("测速状态链：点击 → 立即进行中 → 数值或失败标记", () => {
     const onProbe = vi.fn();
     const base: StageOverrides = { onProbe };
@@ -865,6 +1033,19 @@ describe("连接舞台", () => {
     expect(
       [...document.querySelectorAll(".stage-node__ms")][1].textContent,
     ).toBe("测不通");
+
+    // 没测成（reachable === null）：保持「未测」，不掉进「测不通」。
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({
+          results: { n1: probeResult("n1", 238), n2: untestedProbe("n2") },
+        }),
+      }),
+    );
+    expect(
+      [...document.querySelectorAll(".stage-node__ms")][1].textContent,
+    ).toBe("未测");
   });
 
   it("手动测速后收尾句去掉数字", () => {

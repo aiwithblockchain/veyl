@@ -304,20 +304,31 @@ impl Tool for NodeSwitchTool {
         let outcome = match self.services.node_switch(config_id, node_id).await {
             Ok(data) => {
                 let connected = data.get("connected").and_then(Value::as_bool).unwrap_or(false);
-                let (text, facts) = if connected {
-                    ("已切换节点", vec!["连接：未中断".to_string()])
+                // 幂等：点的就是当前节点，什么都没变。重建窗口里这一刻可能恰好没有连接，
+                // 但那不是「改成了下次生效」——不要声称未连接，如实说没变化。
+                let node = data.get("node_id").and_then(Value::as_str);
+                let unchanged = node.is_some()
+                    && node == data.get("previous_node_id").and_then(Value::as_str);
+                let (summary, text, facts) = if unchanged {
+                    (
+                        "当前节点没有变化。",
+                        "当前已是该节点",
+                        vec!["连接：未改变".to_string()],
+                    )
+                } else if connected {
+                    (
+                        "已切换节点（热切，连接未中断）。",
+                        "已切换节点",
+                        vec!["连接：未中断".to_string()],
+                    )
                 } else {
-                    ("已选择节点", vec!["生效：下次连接".to_string()])
+                    (
+                        "已切换当前节点（未连接，未启动 VPN）。",
+                        "已选择节点",
+                        vec!["生效：下次连接".to_string()],
+                    )
                 };
-                ToolOutcome::ok(
-                    if connected {
-                        "已切换节点（热切，连接未中断）。"
-                    } else {
-                        "已切换当前节点（未连接，未启动 VPN）。"
-                    },
-                    data,
-                )
-                .with_display(text, facts, Changed::None)
+                ToolOutcome::ok(summary, data).with_display(text, facts, Changed::None)
             }
             Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
@@ -342,9 +353,10 @@ impl Tool for NodeProbeTool {
     }
 
     fn description(&self) -> &str {
-        "测试单个节点连通性。已连接且是当前节点时走 Clash API 延迟；\
-         其余情况对 server:port 做 3 秒 TCP 握手，不启动运行时。\
-         节点不可达是正常结果，不算工具错误。\n说「能连上 / 连不上」和毫秒数，不说 TCP/TLS/握手。"
+        "测试单个节点连通性：经运行时真实转发一次请求测延迟（已连接时用当前连接；\
+         未连接时临时起一个测速运行时）。结果是三态：能连上、连不上、没测成。\
+         节点不可达是正常结果，不算工具错误。\n\
+         说「能连上 / 连不上 / 没测成」和毫秒数；没测成时说原因，不要说成连不上。不说 TCP/TLS/握手。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -370,36 +382,55 @@ impl Tool for NodeProbeTool {
                 ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 node_id")),
             );
         };
-        let outcome = match self.services.node_probe(node_id).await {
-            Ok(data) => {
-                let reachable = data.get("reachable").and_then(Value::as_bool).unwrap_or(false);
-                let summary = if reachable {
-                    format!(
-                        "节点可达，延迟 {} ms。",
-                        data.get("latency_ms").and_then(Value::as_u64).unwrap_or(0)
-                    )
-                } else {
-                    data.get("error")
-                        .and_then(|error| error.get("message"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("节点不可达。")
-                        .to_string()
+        // 未连接时要先起临时运行时（8s 上限），再经 Clash 发一次真实请求。
+        let outcome = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.services.node_probe(node_id),
+        )
+        .await
+        {
+            Ok(Ok(data)) => {
+                let status = data
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("untested");
+                let message = data
+                    .get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str);
+                let (summary, text, facts) = match status {
+                    "ok" => {
+                        let latency = data
+                            .get("latency_ms")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        (
+                            format!("节点可达，延迟 {latency} ms。"),
+                            "能连上",
+                            vec![format!("延迟：{latency} ms")],
+                        )
+                    }
+                    "unreachable" => (
+                        message.unwrap_or("节点不可达。").to_string(),
+                        "连不上",
+                        vec!["结果：不可达".to_string()],
+                    ),
+                    // 没测成不是「连不通」：ok 仍为 true，只说原因。
+                    _ => (
+                        message.unwrap_or("暂时测不了，稍后再试。").to_string(),
+                        "没测成",
+                        vec![
+                            "结果：没测成".to_string(),
+                            message.unwrap_or("暂时测不了").to_string(),
+                        ],
+                    ),
                 };
-                let facts = if reachable {
-                    vec![format!(
-                        "延迟：{} ms",
-                        data.get("latency_ms").and_then(Value::as_u64).unwrap_or(0)
-                    )]
-                } else {
-                    vec!["结果：不可达".to_string()]
-                };
-                ToolOutcome::ok(summary, data).with_display(
-                    if reachable { "能连上" } else { "连不上" },
-                    facts,
-                    Changed::None,
-                )
+                ToolOutcome::ok(summary, data).with_display(text, facts, Changed::None)
             }
-            Err(error) => ToolOutcome::fail(failure(error)),
+            Ok(Err(error)) => ToolOutcome::fail(failure(error)),
+            Err(_) => ToolOutcome::fail(
+                AivpnError::new("TIMEOUT", "测速超过 15 秒，稍后再试").retryable(),
+            ),
         };
         envelope::finish(ctx, "NodeProbe", outcome)
     }

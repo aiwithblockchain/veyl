@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.41.0`
+> 契约版本：`2.43.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -136,9 +136,9 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 5 | `config_activate` | `{ configId }` | `ConfigActivateData` | **2.0 新增；2.20.0 起只改 active，不再断开/重连** |
 | 6 | `config_detail` | `{ configId }` | `ConfigDetail` | **2.0 新增** |
 | 7 | `node_import_url` | `{ url, configId? }` | `NodeImportResult` | **2.0 新增** |
-| 8 | `node_create` | `{ name, server, port, method, password, configId? }` | `NodeSummary` | **2.0 新增** |
-| 9 | `node_switch` | `{ configId, nodeId }` | `NodeSwitchData` | **2.0 新增** |
-| 10 | `node_probe` | `{ nodeId }` | `NodeProbeData` | **2.0 新增** |
+| 8 | `node_create` | `{ name, server, port, method, password, configId? }` | `NodeSummary & { runtime_rebuild }` | **2.0 新增**；**2.42.0 起返回 `runtime_rebuild`**（§4.0.1） |
+| 9 | `node_switch` | `{ configId, nodeId }` | `NodeSwitchData` | **2.0 新增**；**2.42.2 补 `CONFLICT / switch_in_progress` 与运行态闸门，并定幂等次序**（§4.3） |
+| 10 | `node_probe` | `{ nodeId }` | `NodeProbeData` | **2.0 新增**；**2.43.0 起三态 `status` / `reachable: boolean \| null` / `probe_method: "clash_delay" \| "none"`，删除裸 TCP**（§4.4） |
 | 11 | `proxy_params` | `{}` | `ProxyParams` | **2.0 新增** |
 | 12 | `probe_run` | `{ configId?, targets? }` | `ProbeReport` | **2.0 新增** |
 | 13 | `issue_list` | `{ state?, severity?, configId?, limit?, offset? }` | `{ issues, total }` | **2.0 新增** |
@@ -190,7 +190,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 59 | `tun_helper_info` | `{}` | `TunHelperInfoData` | **2.6.0 新增（仅 UI）** |
 | 60 | `tun_helper_restart` | `{}` | `{ ok, restarted, needs_admin_restart }` | **2.6.0 新增（仅 UI）** |
 | 61 | `tun_probe` | `{}` | `TunProbeData` | **仅 debug 构建注册；AI 不可调用** |
-| 62 | `node_probe_all` | `{ configId?, nodeIds? }` | `NodeProbeAllData` | **2.8.0 新增（仅 UI）；2.10.0 增节点子集** |
+| 62 | `node_probe_all` | `{ configId?, nodeIds? }` | `NodeProbeAllData` | **2.8.0 新增（仅 UI）；2.10.0 增节点子集；2.43.0 起 `method: "clash" \| "none"`，运行时起不来整批 `untested`、不再降级 TCP** |
 | 63 | `node_probe_cancel` | `{ runId }` | `{ cancelled: boolean }` | **2.8.0 新增（仅 UI）** |
 | 64 | `node_probe_snapshot` | `{ configId? }` | `NodeProbeSnapshotData` | **2.8.0 新增（仅 UI）** |
 | 65 | `proxy_port_get` | `{}` | `{ port, default_port }` | **2.12.0 新增（仅 UI）** |
@@ -223,7 +223,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 92 | `config_set_mode` | `{ configId, mode }` | `ConfigSetModeData`（`{ config_id, mode, previous_mode, changed, connected, restored, confirmation }`） | **2.34.0 新增**；在线切换接管方式（会断开重连）；AI 侧经 `ConfigSetMode` 工具且必须确认 |
 | 93 | `quit_decision` | `{ action }` | `{ accepted: boolean }` | **2.35.0 新增（仅 UI）**；应用内退出确认的决策回执，只有第一次生效 |
 | 94 | `trial_status` | `{}` | `TrialStatusData`（`{ state, started_at, expires_at, remaining_ms, seed_node_count }`） | **2.36.0 新增（仅 UI）**；免费节点 7 天试用状态，只读本地 |
-| 95 | `node_attach` | `{ source?, nodeIds?, configId? }` | `NodeAttachData`（`{ config_id, created_config, attached_node_ids, skipped_node_ids, node_count, current_node_id }`） | **2.37.0 新增（仅 UI）**；把已存在的节点绑进全局配置，空库时懒创建；幂等；永不改 `current_node_id` |
+| 95 | `node_attach` | `{ source?, nodeIds?, configId? }` | `NodeAttachData`（`{ config_id, created_config, attached_node_ids, skipped_node_ids, node_count, current_node_id, runtime_rebuild }`） | **2.37.0 新增（仅 UI）**；把已存在的节点绑进全局配置，空库时懒创建；幂等；永不改 `current_node_id`；**2.42.0 起返回 `runtime_rebuild`**（§4.0.1） |
 | 96 | `my_server_rename` | `{ serverId, name }` | `MyServer` | **2.40.0 新增（仅 UI）；只能改自己的、允许重名；名字 trim 后按 Unicode 码点校验 1–24** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
@@ -508,6 +508,7 @@ type NodeAttachData = {
   skipped_node_ids: string[];     // 已在池里的
   node_count: number;             // 绑定后的池大小
   current_node_id: string | null; // 原样返回；本命令永不改它
+  runtime_rebuild: RuntimeRebuild | null; // §4.0.1；没有新绑定的节点时为 null
 };
 ```
 
@@ -527,6 +528,51 @@ type NodeAttachData = {
 - 成功且确有新增时发 `node-list-changed`（`reason = "bindings_changed"`，`config_id` = 全局配置）+ `config-changed(change = "updated")`；全部跳过时不发事件。
 
 错误：`INVALID_ARGUMENT`（`source_required` / `source_and_node_ids_conflict` / `invalid_source`）、`NOT_FOUND`（`node_not_found`，`details.node_ids` 一次列全）、`PRECONDITION_FAILED`（`seed_unavailable`）、`CONFLICT`（`not_global_config` / `switch_in_progress`）、`INTERNAL`。
+
+### 4.0.1 `runtime_rebuild`：连接中新增节点时重建运行配置（2.42.0；2.42.1 曾增 `cancelled`，2.42.3 撤回）
+
+`node_attach` 与 `node_create`（§4.2）在**连接中**新增节点后，会让新节点立刻可用。运行中的 sing-box 不能热加 outbound（TUN 的配置还在特权助手侧），所以这是一次完整 **stop → start**：中间有一小段断流，`current_node_id` 不变，界面看到的是既有的 `stopping → starting → running` 序列（**不新增事件**，`events.md` 与 `runtime.md` 不变）。
+
+```ts
+type RuntimeRebuild = {
+  status: "applied" | "failed" | "skipped";
+  reason?: string;                          // 仅 skipped
+  restored?: boolean;                       // 仅 failed：旧配置是否已恢复
+  new_nodes?: string[];                     // 仅 applied：凭据齐全且真进了运行配置的节点 id
+  new_nodes_available_next_connect?: boolean; // 仅 failed：恒为 true
+  message?: string;                         // 仅 failed：可直接展示的一句话
+};
+```
+
+| status | 出现的字段 | 含义 |
+|---|---|---|
+| `applied` | `new_nodes` | 新配置已起，节点已在 selector 里。`new_nodes` 只含**凭据齐全、且确实是该配置成员**的节点（进重建后、启动前改过选择时以库里最新状态为准），因此可能少于本次新增数 |
+| `failed` | `restored`、`new_nodes_available_next_connect`（恒 `true`）、`message` | 新配置没起来。`restored = true` 表示已用**不含新节点**的旧集合重新连上，用户回到原连接；`false` 表示旧配置也没能重新起（含「停旧连接这一步就失败」）。两种情况节点都已进池，下次连接一定带上 |
+| `skipped` | `reason` | 没有重建。节点照样已进池，下次连接生效 |
+
+**重建期间用户断开或再次连接：排队，不取消。** 从停旧连接那一刻起，重建持有运行期操作锁，期间的连/断排在它后面执行：重建会跑完并如实返回结果，随后才执行用户那一次操作。**不存在「重建被用户取消」这个结局**——所以没有 `cancelled` 状态（2.42.1 曾登记过，2.42.3 撤回，见 §16）。
+
+`skipped` 的 `reason`（全部取值，按判定顺序）：
+
+| reason | 含义 | 界面动作 |
+|---|---|---|
+| `no_new_nodes` | 没有新增节点。防御性分支：`node_attach` 在调用前就返回 `null`、`node_create` 至少新增一个，两个命令都到不了 | 无 |
+| `connection_launching` | 有连接正在启动（还没起来） | 不提；等连上后用户再操作 |
+| `not_connected` | 当前没有任何连接 | 不提 |
+| `config_not_running` | 已连接，但跑的是**另一套配置** | 不提；不在别人的连接上重建 |
+| `config_missing` | 启动前重读配置时读不到（`node_attach` / `node_create` 都可能，异常路径） | 记日志；节点已进池 |
+| `switch_in_progress` | 同一配置正有 `config_set_mode`、`node_switch` 或**另一次重建**在跑，不排队 | 不提；节点已进池 |
+| `runtime_busy` | 运行期操作锁等了 20 秒还没轮到（另一次重建或运行期操作占着） | 不提；节点已进池，下次连接自然生效 |
+
+**`runtime_busy` 与其它四个的区别**：`no_new_nodes` / `connection_launching` / `not_connected` / `config_not_running` 是「这次**不该**重建」——没有新增、连接正在起、没连、连的是另一套，再等也不会变；`runtime_busy` 是「这次**没轮到**」——重建本身应当发生，只是锁被占着。两者都按 skipped 处理，都不丢节点。
+
+**新建节点何时生效**：`applied` 立即生效；`failed` 与所有 `skipped`（含 `runtime_busy`）都不丢节点——节点已写库进池，**下次连接一定带上**，界面不需要为没排上队自动重试或重连。
+
+- **`failed` 不是错误**：命令本身成功返回，节点已写入；`message` 是给界面直接用的一句话（已恢复 / 未恢复两种文案由 Host 给出），界面不要自己另写。
+- **重建期间的断开请求会等一下**：用户侧的 `runtime_stop` 会阻塞到重建结束再执行；锁最多等 60 秒，超时才返回 `TIMEOUT / runtime_busy`（§7.1），不是被吞掉、也不是立即失败。界面保持「正在断开」；超时后按可重试处理，不要自动重连。
+- **`restored = false` 且连接确实没恢复**：界面按 `message` 提示，并给「重新连接」入口；不要当成节点创建失败。
+- **`node_attach` 的空返回**：`attached_node_ids` 为空数组时 `runtime_rebuild` 为 `null`（不是 `{status:"skipped"}`），前端需容忍 `null`。
+- 同一配置的切换接管方式与重建互斥（同一把闸门）：`node_attach` 撞上会以 `CONFLICT / switch_in_progress` 直接失败（早于重建），`node_create` 则是 `skipped / switch_in_progress`。
 
 ### 4.1 `node_import_url { url, configId? }` → `NodeImportResult`
 
@@ -646,7 +692,7 @@ type ImportSkipReason =
 - **已知限制**：`not_node_text` 的 `details` 目前只有 `reason`——解析器在「全部失败」时不保留逐条跳过原因，所以界面只能说「这个文件里没有可用的节点」，无法区分「全是加密方式不支持」还是「全是格式错误」。若要区分，需要给 #67 / #69 的 `not_node_text` 增加 `details.skipped`（两条命令共用解析，必须一起改），本轮不做。
 - 本阶段只做 Shadowsocks，方法白名单同 §4.1。
 
-### 4.2 `node_create { name, server, port, method, password, configId? }` → `NodeSummary`
+### 4.2 `node_create { name, server, port, method, password, configId? }` → `NodeSummary & { runtime_rebuild: RuntimeRebuild }`
 
 手动编辑一个节点。只有五个字段，与 `docs/config-execution.md` §6 一致。
 
@@ -661,6 +707,7 @@ type ImportSkipReason =
 - 写入顺序：先写 `secrets.enc` 的 `node:<新 id>`，再在事务里写 `nodes` + 可选 `config_nodes`。行写入失败 → 删除刚写的密钥，不留孤儿。
 - `configId` 指定时追加到该配置；**省略时绑定全局配置**（2.37.0 起，没有配置时懒创建）。语义与 §4.1 相同。
 - 成功后发 `node-list-changed`（`reason = "manual_create"`），有 `configId` 再发 `config-changed`（`change = "updated"`）。
+- **连接中新增 → 重建运行配置**（2.42.0）：返回对象在 `NodeSummary` 之外多一个 `runtime_rebuild`（§4.0.1），语义与 `node_attach` 完全一致；同一个节点被 `config_set_mode` 占着时是 `skipped / switch_in_progress`。重建失败**不回滚节点**，也不改返回的命令结果。
 - **不自动连接**，不触发探测。
 
 错误：`INVALID_ARGUMENT`（`invalid_argument`、`unsupported_method`）、`NOT_FOUND`、`SECRET_STORE`、`INTERNAL`。
@@ -685,17 +732,21 @@ type NodeSwitchData = {
 | 当前状态 | 行为 |
 |---|---|
 | 未连接 | 只改 `configs.current_node_id` → `connected = false`、`runtime = null`。**不启动 VPN** |
+| **同一配置正在重建运行配置**（连接中新增节点，§4.0.1）**或正在切换接管方式**（`config_set_mode`） | `CONFLICT`，`details.reason = "switch_in_progress"`，`retryable: true`；`current_node_id` 不变。这两件事都在更换运行配置，此刻改选择会让「库里记的」和「正在起的」分叉。**幂等分支不取这道闸**（见下方次序说明） |
+| **运行态处于 Starting / Stopping / Restarting**（代理连接的换配置窗口：此时 `connected` 与 `launching` 都为 false） | `PRECONDITION_FAILED`，`details.reason = "config_launching"`；`current_node_id` 不变。运行配置正在换，只改库会让界面与隧道分叉 |
 | **有任何连接在启动**（还没起来，不论哪一套） | `PRECONDITION_FAILED`，`details.reason = "config_launching"`；`current_node_id` 不变。隧道正按启动那一刻捕获的节点起来，这时改库（或热切到用旧节点构建的实例）会让「记的节点」和「实际在跑的节点」分叉。等它连上或断开再切 |
 | 已连接、这套配置就是当前连接的配置 | 通过 selector 热切换（`runtime.md` §5.3 的 `PUT /configs?force=true` 或 Clash 选择器），不重启进程 → `connected = true` |
 | 已连接、但这套配置不是当前连接的配置 | `PRECONDITION_FAILED`，`details.reason = "config_not_running"`（**身份已知**：连接属于另一套）。先切配置还是先切节点，是两个动作，不合并 |
 | 已连接（接手上一次运行的 TUN）、但读不到连接属于哪套配置 | `PRECONDITION_FAILED`，`details.reason = "config_unknown"`。与 `config_not_running` 的区别是**身份未知**，不能当成「连的是另一套」；提示用户先断开再切换节点，不要自行重试 |
-| `nodeId` 不属于该配置 | `NOT_FOUND`，`details.reason = "node_not_in_config"` |
+| `nodeId` 不属于该配置 | `NOT_FOUND`，`details.reason = "node_not_in_config"`。**幂等分支除外**：`nodeId` 等于库里 `current_node_id` 时先返回成功，即便该节点已不在池里（悬空选择不报错） |
 
 - 热切换失败 → `PRECONDITION_FAILED` / `runtime_switch_failed`，**`current_node_id` 不变**：库里记的必须是实际在跑的那个节点，否则重启后用户会连到另一台而不知道为什么。
-- `nodeId` 就是当前节点 → 幂等返回，不发事件。
+- `nodeId` 就是当前节点 → 幂等返回，不发事件；**纯 no-op，永远成功**。
+  - **次序（D5 已落地）**：先 `require_config` 并读 `current_node_id`，相同即返回；**之后**才取 `switch_in_progress` 闸与运行态闸。
+  - 因此重建或切换接管方式期间点「当前节点」不会拿到假错误；该幂等分支也不校验节点是否仍在池里（悬空的 `current_node_id` 仍成功返回）。
 - 成功后发 `node-switched`（`events.md` §4.11）。
 
-错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`config_not_running` / `config_unknown` / `config_launching` / `runtime_switch_failed`）、`TIMEOUT`、`INTERNAL`。
+错误：`NOT_FOUND`、`PRECONDITION_FAILED`（`config_not_running` / `config_unknown` / `config_launching` / `runtime_switch_failed`）、`CONFLICT`（`switch_in_progress`，`retryable: true`）、`TIMEOUT`、`INTERNAL`。
 
 ### 4.4 `node_probe { nodeId }` → `NodeProbeData`
 
@@ -704,21 +755,38 @@ type NodeSwitchData = {
 ```ts
 type NodeProbeData = {
   node_id: string;
-  reachable: boolean;
-  latency_ms: number | null;
-  probe_method: "clash_delay" | "tcp";
+  status: "ok" | "unreachable" | "untested";
+  reachable: boolean | null;     // ok = true；unreachable = false；untested = null（不是 false）
+  latency_ms: number | null;     // 只有 ok 有值
+  probe_method: "clash_delay" | "none"; // none = 本次没测
   checked_at: number;            // Unix 毫秒
-  error: { code: string; message: string } | null;
+  error: { code: string; message: string; reason?: string } | null;
 };
 ```
 
-| 条件 | 方法 |
-|---|---|
-| 运行时在跑，且该节点属于当前连接的配置 | `clash_delay`：`GET /proxies/node-<id>/delay`，**真实可用性**（含密码与加密方式是否正确） |
-| 其余情况 | `tcp`：对 `server:port` 做 TCP 握手，3 s 超时。只能说明端口活着，**不能说明握手能过** |
+| status | `reachable` | `probe_method` | `error` | 含义 |
+|---|---|---|---|---|
+| `ok` | `true` | `clash_delay` | `null` | 经 sing-box 真发一次 HTTP，通了 |
+| `unreachable` | `false` | `clash_delay` | `CLASH_DELAY_FAILED` | 经 sing-box 真发过，没通 |
+| `untested` | `null` | `none` | `PROBE_UNAVAILABLE` + `reason` | 这次没测成，**不能**据此说节点不可用 |
 
-- **失败不是错误**：节点不可达返回 `reachable = false` + `error`，命令本身 `Ok`。与 `llm_provider_test` 同一条原则：测试失败是测试的正常输出，不该抛成异常让调用方分流。
-- 只有入参非法（`nodeId` 不存在）才返回 `Err(NOT_FOUND)`。
+- **唯一测得口径**：Clash `GET /proxies/node-<id>/delay`——它经 sing-box outbound 真实发一次 HTTP，同时证明本地 sing-box 起着、配置合法、远端接受握手。裸 `connect(server:port)` 已删除：只能证明端口有人听，不能证明经代理能通。
+- `unreachable` **只由 `CLASH_DELAY_FAILED` 产生**；除此之外一切测不了都是 `untested`，不是失败。
+- `untested.reason` 是封闭集合（按判定顺序）：
+
+| `reason` | 含义 |
+|---|---|
+| `connection_busy` | 正在连接或切换（启动 / 停止 / 重启在途），稍后再测 |
+| `other_config` | 已连接的是别的配置；不在别人的连接上测 |
+| `clash_unavailable` | 已连接本配置，但读不到它的 Clash 接口 |
+| `no_credentials` | 节点缺凭据，渲染运行配置时已被跳过 |
+| `runtime_missing` | 测速用的运行库不可用 |
+| `runtime_failed` | 临时探针运行时没能启动 |
+| `runtime_timeout` | 临时探针运行时 8 秒内没起来 |
+
+- **何时能测**：已连接**本配置** → 用当前 Clash API；**完全空闲** → 起独立探针运行时（同一 Clash 口径；启动上限 8 秒；单节点测完保留 60 秒复用，连接开始 / 批次开始 / 进程退出立即停）；已连接**别套配置** → `untested / other_config`；启动或切换在途 → `untested / connection_busy`。
+- **失败不是错误**：`ok` / `unreachable` / `untested` 都是命令成功返回；只有 `nodeId` 不存在才返回 `Err(NOT_FOUND)`。
+- **`untested` 不是「连不通」**：界面不得写「不可达」，模型不得说成节点坏了；`reachable` 是 `null`，任何地方都不能当 `false` 用。
 - **不登记问题**（J1）：单节点手动测试失败不等于用户被阻断；登记问题会把它变成中间区域的打扰。连接链路上的失败才登记（§5.2）。
 
 ### 4.5 `proxy_params {}` → `ProxyParams`
@@ -768,9 +836,10 @@ type NodeProbeAllData = {
 | `nodeIds = []` | `PRECONDITION_FAILED`，`details.reason = "no_nodes"`（与无节点一致） |
 | 节点集为空 | `PRECONDITION_FAILED`，`details.reason = "no_nodes"` |
 | 已有批次在跑 | `BUSY`，`details.run_id` 指向进行中的批次。**全局同时只允许一个批次**，跨配置也一样 |
-| 并发 | 固定 6；单个节点沿用 `node_probe` 的 3 秒超时，**不重试** |
+| 并发 | 固定 6；单个节点共用 Clash delay 的超时（不再有 TCP 3 秒口径），**不重试** |
 | 探测方法 | 见下方「探测方式」；单节点探测复用同一个函数，不复制逻辑 |
-| 单节点失败 | 不中断整批；失败也是一种结果（`reachable = false`），照常发进度 |
+| 单节点失败 | 不中断整批；失败也是一种结果（`unreachable`），照常发进度 |
+| 单节点未测 | 也不中断整批：`untested` 与 `reachable = null` 照常发进度（整批不可测时逐节点同一 `reason`） |
 | 结果顺序 | 按完成顺序发 `node-probe-progress`，**不按节点顺序** |
 | 生命周期 | 批次不跨进程、**不进 Job**、不落库；应用退出即结束，不发完成事件 |
 
@@ -785,14 +854,15 @@ type NodeProbeAllData = {
 
 | 情形 | 方式 |
 |---|---|
-| 已连接，且是当前配置 | `clash_delay`，直接复用运行中的 Clash API |
-| **完全未连接** | **临时起一次运行时**（探针槽：不写系统代理、不启 TUN、临时端口、只绑 `127.0.0.1`）→ `clash_delay`；启动失败或 **8 秒内未就绪 → 整批降级 `tcp`**，不报错、不中断 |
-| 已连接**别的配置** | 不起第二个运行时，**整批降级 `tcp`** |
+| 已连接，且是当前配置 | `clash`，直接复用运行中的 Clash API |
+| **完全未连接** | **临时起一次探针运行时**（探针槽：不写系统代理、不启 TUN、临时端口、只绑 `127.0.0.1`）→ `clash`；启动失败或 **8 秒内未就绪 → 整批 `untested`、`method = "none"`**，逐节点同一 `reason`，**不再降级 TCP**，不报错、不中断 |
+| 已连接**别的配置** | 不起第二个运行时，**整批 `untested / other_config`**、`method = "none"` |
+| 启动 / 切换在途 | **整批 `untested / connection_busy`**、`method = "none"` |
 
 - 临时运行时**不能污染连接状态**：`runtime_status` 与 `runtime-state-changed` 在探针期间仍报「未连接」，顶部按钮不能变成「断开」。
 - 批次结束或取消时停止**自己起的**运行时；期间用户点了「启动 VPN」→ 批次取消（`cancelled = true`、`reason = "connected"`），**先停探针运行时，再走正常连接流程**。
-- 单节点「测这个节点」**不启动运行时**：未连接时仍走 `tcp` 并标「可达」。
-- `method` 与文案口径不变：`clash` = 可用，`tcp` = 可达；降级时整批只能写「可达」。
+- 单节点「测这个节点」与批量同一路径：完全空闲时也会起临时探针运行时（8 秒上限、测完保留 60 秒复用）；**不再有 TCP 兜底**。
+- `method` 术语固定，不得混用：**`clash` = 真实可用性（界面写「可用」）；`none` = 没测成（界面不得写「可达」或「不可达」）**。
 
 ### 4.7 `node_probe_cancel { runId }` → `{ cancelled: boolean }`
 
@@ -816,7 +886,7 @@ type NodeProbeSnapshotData = {
     total: number;
     started_at: number;            // Unix 毫秒
     phase: "preparing" | "probing";
-    method: "tcp" | "clash";       // clash = 真实可用性（可用）；tcp = 仅可达（可达）
+    method: "clash" | "none";      // clash = 真实可用性（可用）；none = 整批没测成
   };
 };
 ```
@@ -825,7 +895,8 @@ type NodeProbeSnapshotData = {
 - **`run` 为空 ≠ 已测完；`results` 有内容也 ≠ 已测完。** 有缓存只说明以前测过，可能已经过期；判断是否在测只看 `run`。这条是契约，不是 UI 细节。
 - `run` 非空时，UI 显示进度条与「停止测速」，并从 `snapshot.run.done` 之后继续接收进度事件。重开面板可能先收到一条 `done` 更小的迟到事件：按 `run_id` 匹配、按 `done` 去重。
 - `run.phase` 让重开面板能恢复「正在准备」：`preparing` 时显示准备态、`done` 通常为 0；`probing` 时显示进度。`run.method` 让面板从第一帧就能标明测试方式，不必等结果事件。
-- 术语固定，不得混用：**`clash` = 真实可用性（界面写「可用」）；`tcp` = 仅可达（界面写「可达」）**。降级发生在探测开始之后时，`run.method` 以最新值为准。
+- 术语固定，不得混用：**`clash` = 真实可用性（界面写「可用」）；`none` = 整批没测成（界面不得写「可达」或「不可达」）**。探测进行中方法被确定或改变时，`run.method` 以最新值为准。
+- `results` 里的结果可能是 `ok` / `unreachable` / `untested` 三态；`untested` 的 `reachable` 是 `null`，不要按 `false` 渲染。
 - `results` 只含该配置节点集里有缓存的节点，没有缓存的节点不出现在数组里；缓存键是 `node_id`，跨配置共用（延迟是节点属性）。
 - `configId` 省略 → active 配置；没有任何配置 → `PRECONDITION_FAILED`，`details.reason = "no_config"`。节点集为空是合法状态：`results: []`、`run: null`。
 - 错误：`PRECONDITION_FAILED`（`no_config`）、`INTERNAL`。
@@ -1025,6 +1096,10 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 错误码：`RUNTIME_NOT_INSTALLED`、`PRECONDITION_FAILED`（`no_config` / `no_nodes` / `tun_denied` / `helper_missing`）、`NOT_FOUND`、`RUNTIME_CONFIG_INVALID`、`RUNTIME_PORT_UNAVAILABLE`、`TIMEOUT`、`UPSTREAM_ERROR`、`INTERNAL`。
 
+**`TIMEOUT` 的可重试子类 `runtime_busy`**：用户侧的 `runtime_start` / `runtime_stop` / `runtime_restart` 共用一把运行期操作锁，等待上限 **60 秒**，超时返回 `TIMEOUT`，`details.reason = "runtime_busy"`；`RuntimeRebuild` 的 skipped 分支走另一个上限（20 秒，§4.0.1）。重建运行配置或另一次运行期操作正在跑、这次没排到时就是这种情况——这**不代表操作失败**，也不是「连接失败」，前一个操作结束后由用户原样重试即可（界面按可重试处理，不要自动轮询重试）。`tools.md` §4.2–4.4 的 `RuntimeStart` / `RuntimeStop` / `RuntimeRestart` 是同一实现，取值相同。
+
+**两个等待上限（60 秒 / 20 秒）是实现常量，不是契约承诺。** 运行期锁的方案仍可能调整（例如把长启动移出锁、取消等待），调整只改数值、不改「超时即 `runtime_busy`、可重试」的语义。界面不要按秒数自己做超时判断或倒计时。
+
 **`tun` 连接在换新后台组件这一步失败时的 `details.reason`**（错误码均为 `PRECONDITION_FAILED`，`message` 已是可直接展示的中文）：
 
 | `details.reason` | 含义 | 界面 |
@@ -1046,8 +1121,10 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 | 顺序 | **先撤系统代理，再停运行时**。顺序不可交换 |
 | 代理撤销失败 | **中止断开**，运行时保持运行，返回 `PRECONDITION_FAILED`，`details.reason = "proxy_restore_failed"`。不可以在代理没撤掉的情况下停掉 sing-box——那等于把用户直接断网 |
 | 已经断开 | 幂等：返回当前快照（`state = "idle"`），不报错 |
-| TUN 正在启动（还没起来） | **同样算断开目标**：先作废在途启动，再停运行时；返回后不得有迟到的 TUN 进程接管流量。不取消的话，界面会显示已断开、流量却仍被接管 |
+| TUN 正在启动（还没起来） | **同样算断开目标**：`runtime_stop` 等运行期操作锁（若启动仍持锁，最多 60 秒）后停 TUN；此刻 TUN 若仍在途，`tun.stop()` 会作废在途启动。成功返回后不得有迟到的 TUN 进程接管流量。不取消的话，界面会显示已断开、流量却仍被接管 |
 | 成功后 | `state = "idle"`，`mixed_port` / `config_id` / `node_id` / `connected_since` / `exit_ip` / `latency_ms` / `node_latency_ms` 全为 `null`，渲染配置已删除 |
+
+错误：`PRECONDITION_FAILED`（`proxy_restore_failed`）、`TIMEOUT`（`details.reason = "runtime_busy"`：运行期操作锁等待超时，不是断开失败，可重试；见 §7.1）。等待上限是实现常量，后续只改数值、不改本语义。
 
 > 这条规则与退出流程一致：**宁可断开失败，也不能留下指向死端口的系统代理**。
 
@@ -2509,10 +2586,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.41.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** |
-| `contracts/events.md` | **2.19.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** |
+| `contracts/commands.md` | **2.43.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** |
+| `contracts/events.md` | **2.20.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.19.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** |
+| `contracts/tools.md` | **3.20.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** |
 | `data-model.md` | **9** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` + `current_node_id` 允许为 `NULL`（seed 预选不写库） |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -2527,6 +2604,50 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.43.0（2026-11-18，探测口径：只认 Clash 真实延迟）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.43.0`；§4.4 `NodeProbeData` 增 `status: "ok" \| "unreachable" \| "untested"`，`reachable` 改为 `boolean \| null`（`untested` 为 `null`，不是 `false`），`probe_method` 改为 `"clash_delay" \| "none"` | 字段扩展 + 破坏性形状变更 | 只有 Clash `/proxies/node-<id>/delay` 经 sing-box 真发 HTTP 才算「测得」；裸 `connect(server:port)` 只能证明端口有人听，删除 |
+| 2 | `unreachable` 只由 `CLASH_DELAY_FAILED` 产生；`untested` 用 `PROBE_UNAVAILABLE` + 封闭 `reason` 集合：`connection_busy` / `other_config` / `clash_unavailable` / `no_credentials` / `runtime_missing` / `runtime_failed` / `runtime_timeout` | 错误语义 | 没测成与连不通是两件事，不能都落成 `reachable = false` |
+| 3 | 写明何时能测：已连接本配置用当前 Clash API；完全空闲起独立探针运行时（8 秒启动上限、单节点测完保留 60 秒复用、连接/批次/退出即停）；已连接别套配置 `untested / other_config`；启动或切换在途 `untested / connection_busy` | 语义澄清 | 单节点与批量必须同一路径、同一口径 |
+| 4 | §4.6 批量：探针运行时起不来 → 整批 `untested`、`method = "none"`，逐节点同一 reason，**不再降级 TCP**；§4.8 `run.method` 同步为 `"clash" \| "none"` | 语义变更 | 降级 TCP 会把「端口活着」误报成可用性 |
+| 5 | §15 矩阵同步 `events.md` 2.20.0 / `tools.md` 3.20.0 | 元数据 | — |
+
+### 2.42.3（2026-11-18，撤回 `cancelled`；重建期间操作排队）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.42.3`；`RuntimeRebuild.status` **撤回** `cancelled` 与 `stopped`，枚举回到 `applied / failed / skipped` | 枚举撤回 | 重建改为持运行期操作锁：用户的断开/启动排队到重建之后执行，不再有「重建被取消」这个结局。该值从未发布、无消费方（2.42.x 同日未上线），留着只会让界面多一条永不触发的分支 |
+| 2 | 补「重建期间断开或再次连接：排队，不取消」：连/断阻塞到重建结束再执行，重建照常跑完并如实返回结果；界面保持「正在断开」，不要因慢报错或重试 | 语义澄清 | 与 1 同一改动 |
+| 3 | `node_switch` 幂等次序：先读 `current_node_id`，相同即返回，**再**取 `switch_in_progress` 闸与运行态闸；D5 已把幂等判断前移到闸之前（实现见 `services.rs` 的 `node_switch`），重建/切换期间点当前节点不再报假错误 | 语义澄清 | 评审指出；no-op 报冲突是假错误 |
+| 4 | 补登运行期操作锁超时的 `TIMEOUT / runtime_busy`：`runtime_start` / `runtime_stop` / `runtime_restart`（§7.1、§7.2）与 `RuntimeRebuild.skipped`（§4.0.1）都写清「不是失败、没排到、可重试 / 下次连接生效」；`tools.md` §4.2–4.4 同步 | 错误语义 | 实现已有、契约只缺 reason，界面没法据此给文案；只补 reason，字段与错误码不变，版本不另升 |
+
+### 2.42.2（2026-11-18，`node_switch` 闸门与幂等次序）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.42.2`；§4.3 状态表与错误列表补 `CONFLICT / switch_in_progress`（`retryable: true`）：重建运行配置与切换接管方式共用同一把闸门，期间不允许改选择 | 错误语义 | 实现已有、契约没写，界面只能当成未知失败 |
+| 2 | 补运行态闸门：代理连接处于 Starting / Stopping / Restarting 时（`connected` 与 `launching` 都为 false）返回 `PRECONDITION_FAILED / config_launching`，**不是** `CONFLICT / switch_in_progress` | 错误语义 | 按实现登记；与前一条是两个不同的闸、两个不同的码 |
+| 3 | 幂等次序写进契约：`nodeId` 等于当前节点是纯 no-op，**必须成功**，判断先于两道闸门；D5 已按此调整实现（读 `current_node_id` → 相同即返回，再取闸），2.43.0 复核通过 | 语义澄清 | 评审指出；no-op 报冲突是假错误 |
+
+### 2.42.1（2026-11-18，`runtime_rebuild` 增 `cancelled`；**已由 2.42.3 撤回**）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.42.1`；`RuntimeRebuild.status` 增 `"cancelled"`，带 `stopped`（恒 true）/ `new_nodes_available_next_connect`（恒 true）/ `message`；与 `failed` 的区别写进 §4.0.1：`failed` 是起不来且已尝试回滚，`cancelled` 是用户或 AI 主动断开、按用户操作停下，不回滚、不重开系统代理 | 枚举新增 | 用户在重建途中断开，旧实现会把连接和系统代理接回来；现在尊重断开 |
+| 2 | `applied.new_nodes` 语义收紧：只含**凭据齐全且确是配置成员**的节点（启动前重读配置），可能少于本次新增数 | 语义澄清 | 原描述「与新增 id 一致」在并发改选择时会撒谎 |
+| 3 | `skipped / config_missing` 的来源改为「启动前重读配置失败」，`node_attach` 与 `node_create` 都可能出现 | 语义澄清 | 重读发生在重建内部，不再只属于 `node_create` |
+
+### 2.42.0（2026-11-18，连接中新增节点重建运行配置）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.42.0`；新增 §4.0.1 `RuntimeRebuild`：`node_attach` 的 `NodeAttachData` 与 `node_create` 的返回各增一个 `runtime_rebuild` 字段 | 数据结构 | 连接中新增的节点要立刻可用，不能等到下次重连 |
+| 2 | 语义定死：这是一次 stop → start（TUN 的配置在特权助手侧，不能热加 outbound），`current_node_id` 不变，**不新增事件**（沿用既有 `stopping → starting → running`）；`runtime.md` / `events.md` 均不升版 | 实现约束 | 重建失败不能让节点白加，也不能假装连上了 |
+| 3 | 状态与字段按实际返回登记：`applied` 只带 `new_nodes`；`failed` 带 `restored` / `new_nodes_available_next_connect`（恒 true）/ `message`；`skipped` 带 `reason`（`no_new_nodes` / `connection_launching` / `not_connected` / `config_not_running` / `config_missing` / `switch_in_progress`） | 语义澄清 | 各状态的字段集不同，写成「全字段可选」会让前端按错的分支渲染 |
+| 4 | `node_attach` 没有新增节点时 `runtime_rebuild` 为 `null`（不是 `skipped`）；`failed` 不属于命令错误，节点已进池，下次连接一定带上 | 语义澄清 | 空绑定不该被读成「重建被跳过」 |
 
 ### 2.41.0（2026-11-18，真实阶段上报）
 

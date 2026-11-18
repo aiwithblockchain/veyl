@@ -1223,7 +1223,7 @@ pub async fn node_switch(
         .map_err(error_value)
 }
 
-/// 测试单个节点连通性。未连接退化为 TCP 探测，不启动运行时。
+/// 测试单个节点连通性。未连接时起临时运行时；测不了返回 `untested`，不退化成 TCP。
 #[tauri::command]
 pub async fn node_probe(state: State<'_, Arc<AppState>>, node_id: String) -> Result<Value, Value> {
     state

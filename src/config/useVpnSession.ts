@@ -899,10 +899,11 @@ export function useVpnSession(
     try {
       const result = await bridge.nodeProbe(nodeId);
       return {
-        ok: result.reachable,
+        ok: result.reachable === true,
         latencyMs: result.latency_ms,
         message: result.error?.message,
-        unreachable: !result.reachable,
+        // untested（null）两边都不算：既不是可用，也不是连不上。
+        unreachable: result.reachable === false,
       };
     } catch (err) {
       if (isMissingCommand(err)) {
