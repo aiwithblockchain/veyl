@@ -643,12 +643,21 @@ export class FakeD1 {
     if (sql.startsWith("select * from servers where id")) {
       return this.tables.servers.find((s) => s.id === a[0] && s.account_id === a[1]) ?? null;
     }
+    if (sql.startsWith("update servers set name")) {
+      const server = this.tables.servers.find(
+        (s) => s.id === a[2] && s.account_id === a[3],
+      );
+      if (server) {
+        server.name = a[0];
+        server.updated_at = a[1];
+      }
+      return null;
+    }
     if (sql.startsWith("update servers set enrollment_used_at")) {
       // 原子消费：只有哈希对得上、还没用过的那一次能成功。
       const server = this.tables.servers.find((s) => s.id === a[2]);
       if (server && server.enrollment_hash === a[3] && server.enrollment_used_at == null) {
         server.enrollment_used_at = a[0];
-        server.enrollment_hash = null;
         server.updated_at = a[1];
       }
       return null;
@@ -668,16 +677,41 @@ export class FakeD1 {
       else this.tables.credentials.push(record);
       return null;
     }
+    if (
+      sql.startsWith("update servers set state = ?, installing_at") ||
+      sql.startsWith("update servers set state = ?, verifying_at")
+    ) {
+      const column = sql.includes("verifying_at") ? "verifying_at" : "installing_at";
+      const [state, at, updatedAt, id, from] = a;
+      const server = this.tables.servers.find((s) => s.id === id);
+      if (server && server.destroyed_at == null && server.state === from) {
+        server.state = state;
+        if (server[column] == null) server[column] = at;
+        server.updated_at = updatedAt;
+      }
+      return null;
+    }
+    if (sql.startsWith("update servers set failure_stage")) {
+      const server = this.tables.servers.find((s) => s.id === a[1]);
+      if (server) server.failure_stage = a[0];
+      return null;
+    }
     if (sql.startsWith("update servers set state = 'active'")) {
-      // 行为跟着 SQL 里的守卫走：没有 `state = 'booting'` 的写法就是无条件覆盖。
-      const guarded = sql.includes("state = 'booting'");
-      const server = this.tables.servers.find((s) => s.id === a[4]);
-      if (server && (!guarded || (server.state === "booting" && server.destroyed_at == null))) {
+      // 行为跟着 SQL 里的守卫走：带 `state IN (...)` 时只允许从这些阶段前进到 active。
+      const guarded = sql.includes("state in ('booting', 'installing', 'verifying')");
+      const allowed = ["booting", "installing", "verifying"];
+      const server = this.tables.servers.find((s) => s.id === a[5]);
+      if (
+        server &&
+        (!guarded ||
+          (allowed.includes(String(server.state)) && server.destroyed_at == null))
+      ) {
         server.state = "active";
         server.node_id = a[0];
         server.firewall_id = a[1];
         server.singbox_version = a[2];
-        server.updated_at = a[3];
+        server.ready_at = a[3];
+        server.updated_at = a[4];
       }
       return null;
     }
@@ -1089,14 +1123,21 @@ export class FakeD1 {
         .sort((left, right) => Number(left.created_at) - Number(right.created_at))
         .slice(0, 50);
     }
-    if (sql.startsWith("select * from servers where state = 'booting'")) {
+    if (
+      sql.startsWith("select * from servers where state ") &&
+      sql.includes("enrollment_expires_at is not null")
+    ) {
       // 过期仍停在 booting：按 (enrollment_expires_at, id) 游标升序分页。
       // 不看 enrollment_used_at：已回传但在 activate 前停住的同样要清。
       const [now, cursorExpires, , cursorId, limit] = a;
+      // 行为跟着 SQL 走：只有查询里写了三态才扫 installing / verifying。
+      const states = sql.includes("state in ('booting', 'installing', 'verifying')")
+        ? ["booting", "installing", "verifying"]
+        : ["booting"];
       return this.tables.servers
         .filter(
           (row) =>
-            row.state === "booting" &&
+            states.includes(String(row.state)) &&
             row.enrollment_expires_at != null &&
             Number(row.enrollment_expires_at) < Number(now) &&
             row.destroyed_at == null &&
@@ -1351,15 +1392,25 @@ export class FakeStatement {
         row.enrollment_used_at == null
           ? 1
           : 0;
+    } else if (
+      sql.startsWith("update servers set state = ?, installing_at") ||
+      sql.startsWith("update servers set state = ?, verifying_at")
+    ) {
+      const [, , , id, from] = this.statement.args;
+      const server = this.db.rows("servers").find((s) => s.id === id);
+      changes =
+        server && server.destroyed_at == null && server.state === from ? 1 : 0;
     } else if (sql.startsWith("update servers set state = 'active'")) {
       // 模拟 sweep 在消费 token 之后、激活之前把机器销毁。
       this.db.beforeServerActivate?.();
-      const guarded = sql.includes("state = 'booting'");
+      const guarded = sql.includes("state in ('booting', 'installing', 'verifying')");
+      const allowed = ["booting", "installing", "verifying"];
       const server = this.db
         .rows("servers")
-        .find((s) => s.id === this.statement.args[4]);
+        .find((s) => s.id === this.statement.args[5]);
       changes =
-        server && (!guarded || (server.state === "booting" && server.destroyed_at == null))
+        server &&
+        (!guarded || (allowed.includes(String(server.state)) && server.destroyed_at == null))
           ? 1
           : 0;
     } else if (sql.startsWith("update orders set state = 'ready'")) {

@@ -8,7 +8,7 @@ use serde_json::json;
 use super::servers::{MyServer, MyServerOrder};
 use crate::claurst_session::events::{
     now, CONTRACT_VERSION, EV_MY_SERVER_ACCOUNT_CLEARED, EV_MY_SERVER_CHANGED,
-    EV_MY_SERVER_ORDER_CHANGED,
+    EV_MY_SERVER_ORDER_CHANGED, EV_MY_SERVER_RENAMED,
 };
 
 pub fn emit_server_changed(server: &MyServer) {
@@ -46,4 +46,15 @@ pub fn emit_account_cleared(reason: &str) {
         "emitted_at": now(),
     });
     crate::agent::app_handle::emit(EV_MY_SERVER_ACCOUNT_CLEARED, payload);
+}
+
+/// 服务器改名成功：只带服务器 id 与新名字，不带任何账号信息。
+pub fn emit_server_renamed(server: &MyServer) {
+    let payload = json!({
+        "contract_version": CONTRACT_VERSION,
+        "server_id": server.server_id,
+        "name": server.name,
+        "emitted_at": now(),
+    });
+    crate::agent::app_handle::emit(EV_MY_SERVER_RENAMED, payload);
 }

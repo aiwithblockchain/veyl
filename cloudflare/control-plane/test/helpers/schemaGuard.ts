@@ -3,8 +3,10 @@
 
 import schemaSql from "../../migrations/0001_schema.sql?raw";
 import catalogCacheSql from "../../migrations/0002_catalog_cache.sql?raw";
+import readyAtSql from "../../migrations/0003_ready_at.sql?raw";
+import progressStagesSql from "../../migrations/0004_progress_stages.sql?raw";
 
-const allSchemaSql = `${schemaSql}\n${catalogCacheSql}`;
+const allSchemaSql = `${schemaSql}\n${catalogCacheSql}\n${readyAtSql}\n${progressStagesSql}`;
 
 interface TableShape {
   columns: Set<string>;
@@ -32,6 +34,10 @@ function schema(): Map<string, TableShape> {
       if (notNull && !hasDefault && !isPrimaryKey) required.add(word);
     }
     tables.set(name, { columns, required });
+  }
+  // 新迁移里的纯新增列：ALTER TABLE … ADD COLUMN 补进基线，否则写这一列的语句会被判未知。
+  for (const match of allSchemaSql.matchAll(/ALTER TABLE (\w+) ADD COLUMN (\w+)/gi)) {
+    tables.get(match[1])?.columns.add(match[2]);
   }
   cache = tables;
   return tables;

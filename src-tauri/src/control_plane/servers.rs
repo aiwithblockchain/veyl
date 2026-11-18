@@ -41,10 +41,16 @@ const GRACE_DAYS: i64 = 7;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MyServerFailure {
+    /// 失败发生在哪个阶段；旧镜像没有这个字段时按 active 兼容。
+    #[serde(default = "default_failure_stage")]
     pub stage: String,
     pub code: String,
     pub message: String,
     pub retryable: bool,
+}
+
+fn default_failure_stage() -> String {
+    "active".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,6 +61,14 @@ pub struct MyServer {
     pub plan: String,
     pub state: String,
     pub created_at: String,
+    /// 激活成功的时刻（ISO 8601）；旧机器为 null = 用时未知，不要拿 created_at 顶替。
+    #[serde(default)]
+    pub ready_at: Option<String>,
+    /// 首次进入 installing / verifying 的时刻；没上报过就是 null。
+    #[serde(default)]
+    pub installing_at: Option<String>,
+    #[serde(default)]
+    pub verifying_at: Option<String>,
     #[serde(default)]
     pub ip: Option<String>,
     #[serde(default)]
@@ -501,6 +515,26 @@ async fn get_with(client: &ControlPlane, server_id: &str) -> Result<MyServer, Cp
     Ok(server)
 }
 
+/// 改服务器名（`PATCH /v1/servers/{id}`）：只能改自己的，允许重名。
+pub async fn rename(server_id: &str, name: &str) -> Result<MyServer, CpError> {
+    let client = ControlPlane::new()?;
+    let raw = client
+        .patch(
+            &format!("/v1/servers/{server_id}"),
+            Some(&json!({ "name": name })),
+        )
+        .await?;
+    let mut server: MyServer = serde_json::from_value(raw)
+        .map_err(|_| CpError::invalid_response("服务器重命名响应格式不正确"))?;
+    validate_server(&mut server)?;
+    remember_server_failure(&server);
+    if let Some(store) = crate::store::global() {
+        let conn = store.conn();
+        cache_server(&conn, &server);
+    }
+    Ok(server)
+}
+
 pub async fn create(
     region: &str,
     plan: &str,
@@ -793,6 +827,9 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
             plan: old.plan,
             state: state.to_string(),
             created_at: now_iso(),
+            ready_at: None,
+            installing_at: None,
+            verifying_at: None,
             ip: None,
             port: None,
             node_id: None,
@@ -958,6 +995,9 @@ fn local_server(server_id: &str) -> Option<MyServer> {
         plan: row.plan,
         state: row.state,
         created_at: crate::store::iso_from_ms(row.created_at),
+        ready_at: None,
+        installing_at: None,
+        verifying_at: None,
         ip: None,
         port: None,
         node_id: linked_node_id(&conn, server_id, row.node_id.as_deref()),
@@ -985,6 +1025,53 @@ fn local_server(server_id: &str) -> Option<MyServer> {
 mod tests {
     use super::*;
 
+    fn sample_server_json() -> serde_json::Value {
+        json!({
+            "server_id": "srv_1",
+            "name": "Tokyo",
+            "region": "tyo",
+            "plan": "s-1vcpu-1gb",
+            "state": "active",
+            "created_at": "2026-11-14T08:00:00Z",
+            "ip": null,
+            "port": null,
+            "node_id": null,
+            "hourly_usd": 0.0,
+            "monthly_usd": 6.0,
+            "daily_price_cents": 20,
+            "transfer_gib": 0,
+            "paid_until": "2026-11-15T08:00:00Z",
+            "billing_state": "active",
+            "grace_ends_at": null,
+            "failure": null
+        })
+    }
+
+    #[test]
+    fn a_failure_without_stage_is_treated_as_active() {
+        // 旧镜像没有 stage：按 active 兼容，不能整条解析失败。
+        let failure: MyServerFailure = serde_json::from_str(
+            r#"{"code":"service_inactive","message":"没起来","retryable":false}"#,
+        )
+        .unwrap();
+        assert_eq!(failure.stage, "active");
+    }
+
+    #[test]
+    fn stage_timestamps_are_optional_and_pass_through() {
+        let mut value = sample_server_json();
+        value["installing_at"] = json!("2026-11-18T07:00:00Z");
+        value["verifying_at"] = json!("2026-11-18T07:02:00Z");
+        let parsed: MyServer = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.installing_at.as_deref(), Some("2026-11-18T07:00:00Z"));
+        assert_eq!(parsed.verifying_at.as_deref(), Some("2026-11-18T07:02:00Z"));
+
+        // 缺字段（旧控制面）按 null。
+        let parsed: MyServer = serde_json::from_value(sample_server_json()).unwrap();
+        assert!(parsed.installing_at.is_none());
+        assert!(parsed.verifying_at.is_none());
+    }
+
     #[test]
     fn the_idempotency_key_is_a_uuid_v4() {
         let key = new_idempotency_key();
@@ -1009,6 +1096,9 @@ mod tests {
             plan: "s-1vcpu-1gb".into(),
             state: "healthy".into(),
             created_at: "2026-11-14T08:00:00Z".into(),
+            ready_at: None,
+            installing_at: None,
+            verifying_at: None,
             ip: None,
             port: None,
             node_id: None,

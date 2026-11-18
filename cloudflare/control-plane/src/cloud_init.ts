@@ -23,17 +23,38 @@ ARCH="amd64"
 PASSWORD=""
 ACTIVE=0
 FAILURE=""
+# 当前阶段：失败时原样回传，控制面据此写 failure_stage。
+CURRENT_STAGE="booting"
 
-report() {
-  local body safe active_json
+# 阶段进度：不消费 token，失败只重试两次——进度丢了不影响最终 active 上报。
+report_progress() {
+  local stage="\${1}"
+  local body="{\\"stage\\":\\"\${stage}\\"}"
+  local attempt
+  for attempt in 1 2; do
+    if curl -fsS -m 20 -X POST "\${ENROLL_URL}" -H 'content-type: application/json' --data "\${body}" >/dev/null; then
+      return 0
+    fi
+    sleep $((attempt * 5))
+  done
+  return 1
+}
+
+# 最终上报：成功是 active，失败是 failed + failed_stage；token 只在这一步被消费。
+report_final() {
+  local body safe active_json stage_json failed_json
   # error 进 JSON 前先去掉引号和反斜杠，否则回传体本身就坏了。
   safe=$(printf '%s' "\${FAILURE}" | tr -d '"\\\\')
-  # active 必须是 JSON 布尔值：发数字 1 会被控制面判成「不是 true」。
-  if [ "\${ACTIVE}" = "1" ]; then active_json=true; else active_json=false; fi
-  body="{\\"port\\":\${PORT},\\"password\\":\\"\${PASSWORD}\\",\\"version\\":\\"\${SING_BOX_VERSION}\\",\\"active\\":\${active_json},\\"error\\":\\"\${safe}\\"}"
+  if [ "\${ACTIVE}" = "1" ]; then
+    # active 必须是 JSON 布尔值：发数字 1 会被控制面判成「不是 true」。
+    active_json=true; stage_json='"active"'; failed_json='null'
+  else
+    active_json=false; stage_json='"failed"'; failed_json="\\"\${CURRENT_STAGE}\\""
+  fi
+  body="{\\"stage\\":\${stage_json},\\"failed_stage\\":\${failed_json},\\"port\\":\${PORT},\\"password\\":\\"\${PASSWORD}\\",\\"version\\":\\"\${SING_BOX_VERSION}\\",\\"active\\":\${active_json},\\"error\\":\\"\${safe}\\"}"
   local attempt
   for attempt in 1 2 3 4 5 6 7 8; do
-    if curl -fsS -X POST "\${ENROLL_URL}" -H 'content-type: application/json' --data "\${body}" >/dev/null; then
+    if curl -fsS -m 30 -X POST "\${ENROLL_URL}" -H 'content-type: application/json' --data "\${body}" >/dev/null; then
       return 0
     fi
     sleep $((attempt * 10))
@@ -45,7 +66,7 @@ report() {
 on_error() {
   FAILURE="script_failed_line_\${1}"
   ACTIVE=0
-  report || true
+  report_final || true
   exit 1
 }
 trap 'on_error \${LINENO}' ERR
@@ -66,6 +87,7 @@ echo "\${SING_BOX_SHA256}  sb.tar.gz" | sha256sum -c -
 tar -xzf sb.tar.gz
 install -m 0755 "sing-box-\${SING_BOX_VERSION}-linux-\${ARCH}/sing-box" /usr/local/bin/sing-box
 rm -rf sb.tar.gz "sing-box-\${SING_BOX_VERSION}-linux-\${ARCH}"
+CURRENT_STAGE="installing"
 
 # 4. 密码在这台机器上生成：od 只读 16 字节，下游 tr/cut 读满全部输入，不会 SIGPIPE。
 PASSWORD=$(od -An -tx1 -N 16 /dev/urandom | tr -d ' \\n' | cut -c1-16)
@@ -88,12 +110,16 @@ cat > /usr/local/etc/sing-box/config.json <<EOF
 }
 EOF
 chmod 600 /usr/local/etc/sing-box/config.json
+report_progress installing || true
 
 # 配置先自检：不合法就带着报错原文回传，而不是等 systemd 起不来再猜。
+CURRENT_STAGE="verifying"
 if ! sing-box check -c /usr/local/etc/sing-box/config.json >/tmp/sb-check.log 2>&1; then
   FAILURE="config_invalid:$(tr '\\n' ' ' </tmp/sb-check.log | cut -c1-180)"
   exit 1
 fi
+# 自检通过：verifying 阶段成立。
+report_progress verifying || true
 
 # 6. systemd
 cat > /etc/systemd/system/sing-box.service <<EOF
@@ -118,6 +144,7 @@ systemctl enable sing-box >/dev/null 2>&1
 systemctl restart sing-box
 
 # 7. 等它自己起来（起不来也照常回传，active=false）
+CURRENT_STAGE="active"
 for _ in $(seq 1 15); do
   if systemctl is-active --quiet sing-box; then break; fi
   sleep 2
@@ -130,7 +157,7 @@ else
   FAILURE="service_inactive:$(journalctl -u sing-box -n 2 --no-pager -o cat 2>/dev/null | tr '\\n' ' ' | cut -c1-160)"
 fi
 
-# 8. 上报
-report || true
+# 8. 上报（token 只在这里被消费）
+report_final || true
 `;
 }

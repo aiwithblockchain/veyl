@@ -149,6 +149,17 @@ pub fn from_response(status: u16, body: &str) -> CpError {
         .and_then(|value| value.get("details"))
         .and_then(|details| details.get("min_days"))
         .and_then(Value::as_u64);
+    // 输入长度约束（改名 invalid_name）：界面要就地提示「1–24 个字符」。
+    let min_length = parsed
+        .as_ref()
+        .and_then(|value| value.get("details"))
+        .and_then(|details| details.get("min_length"))
+        .and_then(Value::as_u64);
+    let max_length = parsed
+        .as_ref()
+        .and_then(|value| value.get("details"))
+        .and_then(|details| details.get("max_length"))
+        .and_then(Value::as_u64);
 
     let mapped = match code {
         // 登录门禁的两种 reason 用 `UNAUTHENTICATED`（commands.md §7.18）；
@@ -210,6 +221,13 @@ pub fn from_response(status: u16, body: &str) -> CpError {
             retryable,
             json!({ "reason": "internal" }),
         ),
+        // 参数不合法（改名 invalid_name 等）：保留 reason 与长度约束，不能被归成上游故障。
+        "INVALID_ARGUMENT" => CpError::new(
+            "INVALID_ARGUMENT",
+            message.unwrap_or_else(|| "参数不合法".into()),
+            false,
+            json!({ "reason": reason.unwrap_or_else(|| "invalid_argument".into()) }),
+        ),
         "" => status_fallback(status, message),
         other => CpError::new(
             "UPSTREAM_ERROR",
@@ -235,6 +253,12 @@ pub fn from_response(status: u16, body: &str) -> CpError {
         }
         if let Some(value) = min_days {
             details.insert("min_days".into(), json!(value));
+        }
+        if let Some(value) = min_length {
+            details.insert("min_length".into(), json!(value));
+        }
+        if let Some(value) = max_length {
+            details.insert("max_length".into(), json!(value));
         }
     }
 
@@ -348,6 +372,20 @@ mod tests {
         assert_eq!(error.code, "PERMISSION_DENIED");
         assert_eq!(error.reason(), Some("device_revoked"));
         assert_eq!(error.request_id, "r2");
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn an_invalid_argument_keeps_its_reason_and_bounds() {
+        // 改名 invalid_name（commands.md 2.40.0）：不能被归成 UPSTREAM_ERROR / unexpected_code。
+        let error = from_response(
+            400,
+            r#"{"code":"INVALID_ARGUMENT","message":"名字需要 1–24 个字符","retryable":false,"details":{"reason":"invalid_name","min_length":1,"max_length":24},"request_id":"r3"}"#,
+        );
+        assert_eq!(error.code, "INVALID_ARGUMENT");
+        assert_eq!(error.reason(), Some("invalid_name"));
+        assert_eq!(error.details["min_length"], 1);
+        assert_eq!(error.details["max_length"], 24);
         assert!(!error.retryable);
     }
 

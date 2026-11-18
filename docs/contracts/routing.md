@@ -532,7 +532,7 @@ type RulesStatus = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.18.0";
+  contract_version: "2.19.0";
   config_id: string;
   routing_mode: RoutingMode;
   applied_mode: RoutingMode | null;   // 热切后为实际生效值；仅写库时保持旧值
@@ -555,7 +555,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.18.0";
+  contract_version: "2.19.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;

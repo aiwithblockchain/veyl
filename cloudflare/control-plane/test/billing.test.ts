@@ -301,6 +301,7 @@ describe("过期未 enroll 的 booting 机器", () => {
     db: FakeD1,
     expiresAt: number,
     usedAt: number | null = null,
+    state = "booting",
   ) {
     const orderId = "ord_boot00000000000000";
     const serverId = "srv_boot0000000000000";
@@ -335,7 +336,7 @@ describe("过期未 enroll 的 booting 机器", () => {
       monthly_usd: 6,
       daily_price_cents: DAILY,
       billing_anchor_at: expiresAt,
-      state: "booting",
+      state,
       billing_state: "active",
       node_port: 12346,
       provider_id: "4242",
@@ -471,6 +472,32 @@ describe("过期未 enroll 的 booting 机器", () => {
     expect(deleted).toHaveLength(0);
     expect(db.rows("servers")[0].state).toBe("booting");
     expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
+  });
+
+  it("卡在 installing / verifying 过期：各自按 install_timeout / verify_timeout 销毁退款", async () => {
+    for (const [state, reason] of [
+      ["installing", "install_timeout"],
+      ["verifying", "verify_timeout"],
+    ] as const) {
+      const db = new FakeD1();
+      const env = { ...envWith(db), DO_API_TOKEN: "do-token" };
+      stubDeletes();
+      seedExpiredBooting(db, Date.now() - 60_000, null, state);
+
+      const report = await runBilling(env as never);
+
+      expect(report.reaped, state).toBe(1);
+      const server = db.rows("servers")[0];
+      expect(server.state).toBe("destroyed");
+      expect(server.failure_code).toBe(reason);
+      expect(server.failure_stage).toBe(state);
+      expect(
+        db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund"),
+      ).toHaveLength(1);
+      expect(
+        db.rows("audit_log").some((row) => row.action === `provision.${reason}`),
+      ).toBe(true);
+    }
   });
 
   it("前 50 台销毁都失败时，后面的过期机器仍能扫到并销毁", async () => {

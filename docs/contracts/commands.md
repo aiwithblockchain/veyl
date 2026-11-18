@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.39.0`
+> 契约版本：`2.41.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -224,6 +224,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 93 | `quit_decision` | `{ action }` | `{ accepted: boolean }` | **2.35.0 新增（仅 UI）**；应用内退出确认的决策回执，只有第一次生效 |
 | 94 | `trial_status` | `{}` | `TrialStatusData`（`{ state, started_at, expires_at, remaining_ms, seed_node_count }`） | **2.36.0 新增（仅 UI）**；免费节点 7 天试用状态，只读本地 |
 | 95 | `node_attach` | `{ source?, nodeIds?, configId? }` | `NodeAttachData`（`{ config_id, created_config, attached_node_ids, skipped_node_ids, node_count, current_node_id }`） | **2.37.0 新增（仅 UI）**；把已存在的节点绑进全局配置，空库时懒创建；幂等；永不改 `current_node_id` |
+| 96 | `my_server_rename` | `{ serverId, name }` | `MyServer` | **2.40.0 新增（仅 UI）；只能改自己的、允许重名；名字 trim 后按 Unicode 码点校验 1–24** |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -1548,6 +1549,9 @@ type MyServer = {
   plan: string;
   state: MyServerState;
   created_at: string;              // ISO 8601
+  ready_at: string | null;         // 激活成功的时刻（ISO 8601）；null = 用时未知（旧机器），不许拿 created_at 顶替
+  installing_at: string | null;    // 首次进入 installing（二进制与配置就位）的时刻；旧机器或进度丢失为 null
+  verifying_at: string | null;     // 首次进入 verifying（sing-box check 通过）的时刻；同上
   ip: string | null;
   port: number | null;
   node_id: string | null;          // 安装成功后才有
@@ -1592,6 +1596,8 @@ type MyServerCredentialNode = {
 - **重复调用幂等**：同一台服务器再次取凭据时按 `(source = 'owned', source_key = server_id)` 复用已有节点行，即使控制面换发了新的 `node_id` 也不新建、不改本地 `node_id`；密码覆盖写回同一个 `password_ref`。
 - **响应只回本地节点**：`2.26.0` 起 `MyServerCredentials` 删除 `payload` / `signature`（**不向后兼容**：前端绑定同步改读 `MyServerCredentialNode`）。密码只留在 Host 的 `secrets.enc`，不再进入界面进程。
 - **`node_id` 口径**：返回值和 `my_servers.node_id` 都是本地 `nodes.id`；`my_server_list` / `get` 里的 `node_id` 仍是控制面给出的值，界面建配置必须用本命令返回的 `node_id`。
+- **`ready_at` 是激活成功那一刻**（0003 迁移新增，与服务器 `active`、订单 `ready` 同一批写入）：旧机器为 `null`，界面按「用时未知」显示，**不拿 `created_at` 伪造**。
+- **真实阶段上报（2.41.0）**：cloud-init 依次回传 `installing`（二进制与配置就位）/ `verifying`（`sing-box check` 通过）/ `active`（服务 `is-active` 后带端口与密码）；token 只在最终 `active` 消费。`installing_at` / `verifying_at` 首次进入时写入一次；失败时 `failure.stage` 改从控制面的 `failure_stage` 取（`booting` / `installing` / `verifying` / `active`），旧镜像缺 `stage` 按 `active` 兼容。
 - 列表 / 详情 / 事件**永不返回密码**；凭据写入 `secrets.enc` 的 `node:<本地 nodes.id>`，节点行 `source = 'owned'`。
 - 销毁成功后按本地节点行的 `password_ref`（`node:<本地 nodes.id>`）删除密码，**不是**控制面换发后的 `node_id`；节点记录保留并标「服务器已销毁」（§6.5）。
 - **`my_server_rebuild` 未接入（2.36.1）**：控制面 `/v1/servers/{id}/rebuild` 目前恒返回 `PRECONDITION_FAILED / rebuild_not_supported`（`cloudflare/control-plane/src/servers.ts` 的路由分支直接回这个错）。命令、类型与控制面路由都保留，**界面暂不展示「重建」入口**；端点实现后直接放开即可，契约形状不变。不要在前端把失败文案说成「服务器状态异常」，那是另一种谎。
@@ -1621,6 +1627,7 @@ type MyServerCredentialNode = {
 | 幂等键内容冲突 | `PRECONDITION_FAILED` | `idempotency_conflict` | 否 | 「这次操作已作废，请重来一次」 |
 | 同键请求处理中 | `PRECONDITION_FAILED` | `idempotency_in_flight` | 是（1s 后重试） | 按钮保持 loading，自动重试一次 |
 | 实例已不存在 | `NOT_FOUND` | `server_gone` | 否 | 「这台服务器已不存在」；刷新列表 |
+| 名字为空 / 太长（仅 `my_server_rename`） | `INVALID_ARGUMENT` | `invalid_name`；`details`：`min_length: 1`、`max_length: 24` | 否 | 就地提示「名字需要 1–24 个字符」；不要把 trim 前的长度当有效 |
 | 凭据验签 / 载荷不合法 | `UPSTREAM_ERROR` | `credential_signature_invalid` / `credential_server_mismatch` / `invalid_response` | 否 | 不写入节点；提示「控制面返回的凭据不可用」，给「重新获取」 |
 | 凭据过期 | `PRECONDITION_FAILED` | `credential_expired` | 是 | 自动重新获取一次凭据，再失败才报错 |
 | 设备被停用 | `PERMISSION_DENIED` | `device_revoked` / `account_blocked` | 否 | 提示「这台设备已被停用」；给「重新注册设备」与客服入口，**不要显示成稍后再试** |
@@ -1628,6 +1635,7 @@ type MyServerCredentialNode = {
 | 支付通道不合法（仅 `my_server_topup`） | `INVALID_ARGUMENT` | `channel_invalid` | 否 | 界面只允许 `dodo`（非生产可 `fake`）；正常路径不会出现 |
 
 - 发 `my-server-changed` / `my-server-order-changed`（`events.md` §4.22 / §4.23）；不新增其它事件。
+- **`my_server_rename`（2.40.0）**：`PATCH /v1/servers/{id} { name }`，服务端按 `account_id` 过滤（别人的服务器与不存在一律 `NOT_FOUND`）；name 先 trim，再按 **Unicode 码点**计长 1–24（中文与单个 emoji 各算 1），非法返回 `INVALID_ARGUMENT / invalid_name`。允许重名，重复改成同一个名字幂等。成功返回完整 `MyServer` 并同时发 `my-server-renamed`（`events.md` §4.28，只带 server_id 与新名字）；**不暴露给 AI**。
 - 不注册写操作 AI 工具；`MyServers` 只读工具只能看列表与状态（`tools.md` §4.x）。
 
 ### 7.16 `my_server_register_device {}` → `MyServerDeviceIdentity`（仅 UI，2.24.0）
@@ -2433,11 +2441,11 @@ type RulesStatus = {
 | `proxy_recovery_report` | **无**（UI 专用，见 §7.13；异常退出的恢复结果只用于首屏提示） | — |
 | `my_server_catalog` | **无**（UI 专用，见 §7.14；控制面目录只读） | — |
 | `my_server_list` / `my_server_get` | `MyServers`（只读，仅列表；详情与凭据不进 AI 上下文） | — |
-| `my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` | **无**（§10.5：建机、销毁、凭据只能由用户点界面） | — |
+| `my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` / `my_server_rename` | **无**（§10.5：建机、销毁、凭据只能由用户点界面） | — |
 | `my_server_register_device` | **无**（UI 专用，见 §7.16；身份恢复只能由用户触发） | — |
 | `my_server_identity` | **无**（UI 专用，见 §7.17；只读本地身份状态） | — |
 
-> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials`、`my_server_register_device`、`my_server_identity`、`my_server_login_start` / `my_server_login_verify` / `my_server_account` / `my_server_logout` / `my_server_order_get`、`my_server_wallet` / `my_server_topup`、`trial_status`、`quit_decision`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
+> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` / `my_server_rename`、`my_server_register_device`、`my_server_identity`、`my_server_login_start` / `my_server_login_verify` / `my_server_account` / `my_server_logout` / `my_server_order_get`、`my_server_wallet` / `my_server_topup`、`trial_status`、`quit_decision`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
@@ -2507,8 +2515,8 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.39.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0，目标状态·未实现）** |
-| `contracts/events.md` | **2.18.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** |
+| `contracts/commands.md` | **2.41.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0，目标状态·未实现）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** |
+| `contracts/events.md` | **2.19.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
 | `contracts/tools.md` | **3.19.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** |
 | `data-model.md` | **9** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` + `current_node_id` 允许为 `NULL`（seed 预选不写库） |
@@ -2525,6 +2533,20 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.41.0（2026-11-18，真实阶段上报）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.41.0`；`MyServer` 增 `installing_at` / `verifying_at`（首次进入该阶段的 ISO 时刻，旧机器为 null）；`failure.stage` 改从控制面 `failure_stage` 取，旧镜像缺字段按 `active` 兼容 | 数据结构 | 建机进度要从「假四段」变成真实阶段 |
+| 2 | cloud-init 依次回传 `installing` / `verifying` / `active`，token 只在最终 `active` 消费；进度回传按 `enrollment_hash` 鉴权、不消费，消费后的进度回 200 ignored；失败回传带 `failed_stage` | 实现约束 | 同上；避免脚本重试风暴与「未激活就被判死」 |
+
+### 2.40.0（2026-11-18，服务器改名）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.40.0`；新增 `my_server_rename { serverId, name } → MyServer`（仅 UI）：只能改自己的，允许重名；服务端 trim 后按 Unicode 码点校验 1–24，非法 `INVALID_ARGUMENT / invalid_name`（`details` 带 `min_length` / `max_length`） | 新增命令 | 服务器名字由用户决定，控制面只做长度与归属校验 |
+| 2 | 新增事件 `my-server-renamed`（`events.md` 2.19.0 §4.28）：payload 只带 `server_id` 与新名字，不带账号信息；不暴露给 AI | 新增事件 | 持久变化必须成对发事件 |
 
 ### 2.39.0（2026-11-18，就绪后扣款：**目标状态·未实现**）
 

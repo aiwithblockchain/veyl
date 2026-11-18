@@ -40,7 +40,13 @@ interface ServerRow {
   created_at: number;
   updated_at: number;
   destroyed_at: number | null;
+  /** 激活成功的那一刻；旧机器为 null（用时未知）。 */
+  ready_at?: number | null;
+  /** 首次进入 installing / verifying 的时刻；进度上报只写一次。 */
+  installing_at?: number | null;
+  verifying_at?: number | null;
   failure_code?: string | null;
+  failure_stage?: string | null;
   daily_price_cents: number;
   billing_anchor_at: number;
   transfer_gib?: number;
@@ -89,6 +95,15 @@ function serverView(
     plan: row.plan,
     state: row.state,
     created_at: new Date(row.created_at).toISOString(),
+    // 激活成功那一刻；旧机器没有这一列的值 -> null，界面按「用时未知」显示。
+    ready_at: row.ready_at ? new Date(Number(row.ready_at)).toISOString() : null,
+    // 首次进入各阶段的时刻；没上报过就是 null（旧机器或脚本丢了进度）。
+    installing_at: row.installing_at
+      ? new Date(Number(row.installing_at)).toISOString()
+      : null,
+    verifying_at: row.verifying_at
+      ? new Date(Number(row.verifying_at)).toISOString()
+      : null,
     ip: row.ip,
     port: row.state === "destroyed" ? null : row.node_port,
     node_id: row.node_id,
@@ -103,7 +118,13 @@ function serverView(
     charged_cents: money?.chargedCents ?? 0,
     refunded_cents: money?.refundedCents ?? 0,
     failure: row.failure_code
-      ? { stage: row.state, code: row.failure_code, message: "这台服务器没有创建成功", retryable: false }
+      ? {
+          // 失败阶段以 failure_stage 为准；旧行没有该列时退回当时的状态。
+          stage: row.failure_stage ?? row.state,
+          code: row.failure_code,
+          message: "这台服务器没有创建成功",
+          retryable: false,
+        }
       : null,
   };
 }
@@ -278,6 +299,44 @@ async function refundPlan(
   };
 }
 
+/** 阶段只许前进：installing 只能从 booting 来，verifying 只能从 installing 来。 */
+async function advanceStage(
+  env: ServersEnv,
+  row: ServerRow,
+  stage: "installing" | "verifying",
+): Promise<Response> {
+  const now = Date.now();
+  const from = stage === "installing" ? "booting" : "installing";
+  const column = stage === "installing" ? "installing_at" : "verifying_at";
+  const updated = await env.DB!.prepare(
+    `UPDATE servers SET state = ?, ${column} = COALESCE(${column}, ?), updated_at = ? ` +
+      "WHERE id = ? AND destroyed_at IS NULL AND state = ?",
+  )
+    .bind(stage, now, now, row.id, from)
+    .run();
+  const changed = Number((updated as { meta?: { changes?: number } }).meta?.changes ?? 0);
+  if (changed === 1) return json({ ok: true, stage });
+  // 乱序 / 回退 / 已销毁：200 + ignored，脚本重试不该变成错误风暴。
+  return json({ ok: true, ignored: true });
+}
+
+/** 允许被超时清理的阶段：进度上报之后就卡住同样会一直计费。 */
+const PROGRESS_STATES = ["booting", "installing", "verifying"];
+
+/** 卡在某阶段超时的失败码：独立可查，不要都混成一个。 */
+function stageTimeoutReason(state: string, enrollmentUsedAt: number | null): string {
+  if (state === "installing") return "install_timeout";
+  if (state === "verifying") return "verify_timeout";
+  return enrollmentUsedAt === null ? "enrollment_timeout" : "activate_stalled";
+}
+
+/** 失败阶段 → 失败原因码；有明确阶段就用阶段专属码，否则沿用旧的 service_inactive。 */
+function failureReason(failedStage: string): string {
+  if (failedStage === "installing") return "install_failed";
+  if (failedStage === "verifying") return "verify_failed";
+  return "service_inactive";
+}
+
 /** POST /v1/enroll/{token}：实例回传端口与密码。token 自身就是幂等键，只能消费一次。 */
 async function enroll(request: Request, env: ServersEnv, token: string): Promise<Response> {
   if (!env.DB) return json({ ok: false, reason: "unavailable" }, 503);
@@ -289,6 +348,8 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
     version?: unknown;
     active?: unknown;
     error?: unknown;
+    stage?: unknown;
+    failed_stage?: unknown;
   };
   try {
     body = (await request.json()) as typeof body;
@@ -296,29 +357,62 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
     return json({ ok: false, reason: "invalid_json" }, 400);
   }
 
+  // 旧脚本没有 stage：它只发最终一报，按 active 处理（失败由 active=false 决定）。
+  const rawStage = typeof body.stage === "string" ? body.stage.trim() : "";
+  const stage =
+    rawStage === "installing" || rawStage === "verifying" || rawStage === "failed"
+      ? rawStage
+      : "active";
+
   const hash = await sha256B64u(token);
   const row = await db
     .prepare("SELECT * FROM servers WHERE enrollment_hash = ?")
     .bind(hash)
     .first<ServerRow>();
   if (!row) return json({ ok: false, reason: "unknown_token" }, 404);
-  if (row.enrollment_used_at !== null) return json({ ok: false, reason: "already_used" }, 409);
+  if (row.enrollment_used_at !== null) {
+    // token 只在最终 active 消费；消费之后的进度上报回 200 ignored，
+    // 不要 409——脚本的重试循环会把 409 变成风暴。
+    if (stage === "installing" || stage === "verifying") {
+      return json({ ok: true, ignored: true });
+    }
+    return json({ ok: false, reason: "already_used" }, 409);
+  }
   if (row.enrollment_expires_at !== null && row.enrollment_expires_at < Date.now()) {
     await destroyInstance(env, row, "enrollment_expired");
     return json({ ok: false, reason: "expired" }, 410);
   }
 
+  // 进度上报：不消费 token，只按阶段前进；乱序 / 回退 / 已销毁一律 ignored。
+  if (stage === "installing" || stage === "verifying") {
+    return advanceStage(env, row, stage);
+  }
+
   const port = Number(body.port);
   const password = typeof body.password === "string" ? body.password : "";
   const version = typeof body.version === "string" ? body.version : "";
-  if (port !== row.node_port) {
+  // 失败阶段由脚本回传；旧脚本没有这个字段时按当前状态记录。
+  const rawFailedStage =
+    typeof body.failed_stage === "string" ? body.failed_stage.trim() : "";
+  const failedStage = ["booting", "installing", "verifying", "active"].includes(
+    rawFailedStage,
+  )
+    ? rawFailedStage
+    : row.state;
+  // 脚本自己已经判定失败时端口没有意义（trap 里的 PORT 可能还没赋值）。
+  if (stage !== "failed" && port !== row.node_port) {
     await destroyInstance(env, row, "port_mismatch");
+    await db
+      .prepare("UPDATE servers SET failure_stage = ? WHERE id = ?")
+      .bind("active", row.id)
+      .run()
+      .catch(() => {});
     return json({ ok: false, reason: "port_mismatch" }, 409);
   }
   // active 只认 JSON 布尔；但已有机器可能发的是 1 / "true"，一并接受，别再自己把成功的机器判死。
   const active =
     body.active === true || body.active === 1 || body.active === "true";
-  if (!active || password.length < 8) {
+  if (stage === "failed" || !active || password.length < 8) {
     // 无论有没有 error，都记下回传的内容（不含密码），否则“服务没起来”这类失败查不到原因。
     await db
       .prepare(
@@ -329,17 +423,26 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
         row.account_id,
         row.id,
         JSON.stringify({
+          stage,
+          failed_stage: failedStage,
           active: body.active ?? null,
           password_length: password.length,
           error: typeof body.error === "string" ? body.error.slice(0, 200) : null,
         }),
       )
       .run();
-    await destroyInstance(env, row, "service_inactive");
+    const reason = failureReason(failedStage);
+    await destroyInstance(env, row, reason);
+    await db
+      .prepare("UPDATE servers SET failure_stage = ? WHERE id = ?")
+      .bind(failedStage, row.id)
+      .run()
+      .catch(() => {});
     return json(
       {
         ok: false,
-        reason: "service_inactive",
+        reason,
+        failed_stage: failedStage,
         error: typeof body.error === "string" ? body.error.slice(0, 200) : undefined,
       },
       409,
@@ -368,10 +471,11 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
     JSON.stringify({ host, port, password, method: "aes-256-gcm" }),
   );
 
-  // 原子消费：并发或重放只有一次能成功。
+  // 原子消费：并发或重放只有一次能成功。**保留 enrollment_hash**，
+  // 这样消费之后晚到的进度上报还能按 hash 找到行并回 ignored，而不是 404。
   const consumed = await db
     .prepare(
-      "UPDATE servers SET enrollment_used_at = ?, enrollment_hash = NULL, updated_at = ? " +
+      "UPDATE servers SET enrollment_used_at = ?, updated_at = ? " +
         "WHERE id = ? AND enrollment_hash = ? AND enrollment_used_at IS NULL",
     )
     .bind(Date.now(), Date.now(), row.id, hash)
@@ -404,13 +508,14 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
     }
 
     const nodeId = randomId("nd_", 12);
+    const readyAt = Date.now();
     // 激活必须带状态守卫：sweep / refreshBooting 可能在这段窗口里已经把机器销毁并退了钱，
     // 晚到的激活不能把一台 DO 上已删除的机器改回 active（幽灵机器）。
     const activation = await db.batch([
       db.prepare(
-        "UPDATE servers SET state = 'active', node_id = ?, firewall_id = ?, singbox_version = ?, updated_at = ? " +
-          "WHERE id = ? AND state = 'booting' AND destroyed_at IS NULL",
-      ).bind(nodeId, firewallId, version, Date.now(), row.id),
+        "UPDATE servers SET state = 'active', node_id = ?, firewall_id = ?, singbox_version = ?, ready_at = ?, updated_at = ? " +
+          "WHERE id = ? AND state IN ('booting', 'installing', 'verifying') AND destroyed_at IS NULL",
+      ).bind(nodeId, firewallId, version, readyAt, readyAt, row.id),
       db.prepare(
         "UPDATE orders SET state = 'ready' WHERE id = ? AND state = 'provisioning'",
       ).bind(row.order_id),
@@ -506,13 +611,22 @@ async function refreshBooting(env: ServersEnv, rows: ServerRow[]): Promise<void>
   for (const row of rows) {
     if (row.state === "destroyed" || row.state === "error") continue;
 
+    // booting / installing / verifying 都可能卡住：只要过了 enrollment 有效期就按超时清理。
     const expired =
-      row.state === "booting" &&
-      row.enrollment_used_at === null &&
+      PROGRESS_STATES.includes(row.state) &&
       row.enrollment_expires_at !== null &&
       row.enrollment_expires_at < Date.now();
     if (expired) {
-      await destroyInstance(env, row, "enrollment_timeout");
+      // 先记住阶段：销毁会改状态，不能拿改过的值写 failure_stage。
+      const stage = row.state;
+      const reason = stageTimeoutReason(stage, row.enrollment_used_at);
+      const outcome = await destroyInstance(env, row, reason);
+      if (outcome.ok) {
+        await env.DB.prepare("UPDATE servers SET failure_stage = ? WHERE id = ?")
+          .bind(stage, row.id)
+          .run()
+          .catch(() => {});
+      }
       row.state = "destroyed";
       row.destroyed_at = Date.now();
       continue;
@@ -557,7 +671,7 @@ export async function sweepExpiredEnrollments(env: ServersEnv): Promise<number> 
   for (let page = 0; page < ENROLL_REAP_PAGES && destroyed < ENROLL_REAP_BATCH; page += 1) {
     const rows = await db
       .prepare(
-        "SELECT * FROM servers WHERE state = 'booting' " +
+        "SELECT * FROM servers WHERE state IN ('booting', 'installing', 'verifying') " +
           "AND enrollment_expires_at IS NOT NULL AND enrollment_expires_at < ? " +
           "AND destroyed_at IS NULL " +
           "AND (enrollment_expires_at > ? OR (enrollment_expires_at = ? AND id > ?)) " +
@@ -577,7 +691,7 @@ export async function sweepExpiredEnrollments(env: ServersEnv): Promise<number> 
         .first<ServerRow>();
       if (
         !fresh ||
-        fresh.state !== "booting" ||
+        !PROGRESS_STATES.includes(fresh.state) ||
         fresh.destroyed_at != null ||
         fresh.enrollment_expires_at == null ||
         Number(fresh.enrollment_expires_at) >= now
@@ -585,8 +699,9 @@ export async function sweepExpiredEnrollments(env: ServersEnv): Promise<number> 
         continue;
       }
 
-      const reason =
-        fresh.enrollment_used_at === null ? "enrollment_timeout" : "activate_stalled";
+      // 先记住阶段：销毁会改状态，不能拿改过的值写 failure_stage。
+      const stage = fresh.state;
+      const reason = stageTimeoutReason(stage, fresh.enrollment_used_at);
       const outcome = await destroyInstance(env, fresh, reason);
       if (!outcome.ok) {
         console.error(
@@ -595,6 +710,11 @@ export async function sweepExpiredEnrollments(env: ServersEnv): Promise<number> 
         continue;
       }
       destroyed += 1;
+      await db
+        .prepare("UPDATE servers SET failure_stage = ? WHERE id = ?")
+        .bind(stage, fresh.id)
+        .run()
+        .catch(() => {});
       await db
         .prepare(
           `INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.${reason}', ?)`,
@@ -645,6 +765,49 @@ async function getServer(request: Request, env: ServersEnv, serverId: string): P
   const row = await loadServer(env.DB, identity.accountId, serverId);
   if (!row) return apiError("NOT_FOUND", "没有这台服务器");
   await refreshBooting(env, [row]);
+  const money = await serverMoney(env.DB, identity.accountId);
+  return json(serverView(row, money.get(row.id)));
+}
+
+/** 名字按 Unicode 码点计长：中文与单个 emoji 都算 1。 */
+const NAME_MIN_CODE_POINTS = 1;
+const NAME_MAX_CODE_POINTS = 24;
+
+/** PATCH /v1/servers/{id} { name }：只能改自己的，允许重名。 */
+async function rename(request: Request, env: ServersEnv, serverId: string): Promise<Response> {
+  const identity = await authenticate(request, env);
+  if (isResponse(identity)) return identity;
+  if (!env.DB) return apiError("INTERNAL", "服务还没准备好", { retryable: true, status: 503 });
+
+  let body: { name?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return apiError("PRECONDITION_FAILED", "请求体不是合法 JSON");
+  }
+  const raw = typeof body.name === "string" ? body.name.trim() : "";
+  const length = [...raw].length;
+  if (length < NAME_MIN_CODE_POINTS || length > NAME_MAX_CODE_POINTS) {
+    return apiError("INVALID_ARGUMENT", "名字需要 1–24 个字符", {
+      reason: "invalid_name",
+      details: {
+        min_length: NAME_MIN_CODE_POINTS,
+        max_length: NAME_MAX_CODE_POINTS,
+      },
+    });
+  }
+
+  // 按 account_id 过滤：别人的服务器与不存在一律 404，不泄露是否真的存在。
+  const row = await loadServer(env.DB, identity.accountId, serverId);
+  if (!row) return apiError("NOT_FOUND", "没有这台服务器");
+
+  await env.DB.prepare(
+    "UPDATE servers SET name = ?, updated_at = ? WHERE id = ? AND account_id = ?",
+  )
+    .bind(raw, Date.now(), serverId, identity.accountId)
+    .run();
+  row.name = raw;
+
   const money = await serverMoney(env.DB, identity.accountId);
   return json(serverView(row, money.get(row.id)));
 }
@@ -729,6 +892,7 @@ export async function handleServers(request: Request, env: ServersEnv): Promise<
 
   if (parts.length === 2 && request.method === "GET") return listServers(request, env);
   if (parts.length === 3 && request.method === "GET") return getServer(request, env, parts[2]);
+  if (parts.length === 3 && request.method === "PATCH") return rename(request, env, parts[2]);
   if (parts.length === 4 && post) {
     if (parts[3] === "destroy") return destroy(request, env, parts[2]);
     if (parts[3] === "credentials") return credentials(request, env, parts[2]);

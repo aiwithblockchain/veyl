@@ -174,6 +174,10 @@ impl ControlPlane {
         self.request(Method::POST, path, body, idempotency_key).await
     }
 
+    pub async fn patch(&self, path: &str, body: Option<&Value>) -> Result<Value, CpError> {
+        self.request(Method::PATCH, path, body, None).await
+    }
+
     async fn send(
         &self,
         method: Method,

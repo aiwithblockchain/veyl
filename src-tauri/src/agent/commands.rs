@@ -566,6 +566,17 @@ pub async fn my_server_logout() -> Result<Value, Value> {
 }
 
 #[tauri::command]
+pub async fn my_server_rename(server_id: String, name: String) -> Result<Value, Value> {
+    match crate::control_plane::servers::rename(&server_id, &name).await {
+        Ok(server) => {
+            crate::control_plane::events::emit_server_renamed(&server);
+            Ok(json!(server))
+        }
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+#[tauri::command]
 pub async fn my_server_cancel_order(order_id: String) -> Result<Value, Value> {
     match crate::control_plane::servers::cancel_order(&order_id).await {
         Ok(order) => {

@@ -41,6 +41,15 @@ describe("cloud-init", () => {
     expect(body).not.toContain('\\"active\\":${ACTIVE}');
   });
 
+  it("三段上报：installing / verifying / active，失败带 failed_stage", () => {
+    const body = script();
+    expect(body).toContain("report_progress installing");
+    expect(body).toContain("report_progress verifying");
+    expect(body).toContain("report_final || true");
+    expect(body).toContain("CURRENT_STAGE");
+    expect(body).toContain("failed_stage");
+  });
+
   it("端口与回传地址按参数写入", () => {
     const body = script();
     expect(body).toContain("PORT=20443");

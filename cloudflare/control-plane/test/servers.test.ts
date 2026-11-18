@@ -177,8 +177,39 @@ describe("enroll 激活守卫", () => {
     const server = db.rows("servers")[0];
     expect(server.state).toBe("active");
     expect(server.node_id).toBeTruthy();
+    // 激活成功那一刻写入 ready_at，同一批落库。
+    expect(typeof server.ready_at).toBe("number");
+    expect(Math.abs(Number(server.ready_at) - Date.now())).toBeLessThan(5_000);
     expect(db.rows("orders")[0].state).toBe("ready");
     expect(db.rows("audit_log").some((row) => row.action === "enroll.ok")).toBe(true);
+
+    // 详情响应带 ISO 的 ready_at。
+    const detail = await handleServers(
+      new Request(`https://example.com/v1/servers/${SERVER}`, {
+        headers: { authorization: `Bearer ${env.token}` },
+      }),
+      env as never,
+    );
+    expect(detail?.status).toBe(200);
+    const body = (await detail!.json()) as { ready_at: string | null };
+    expect(body.ready_at).toBe(new Date(Number(server.ready_at)).toISOString());
+  });
+
+  it("未就绪 / 旧机器：ready_at 为 null，不拿 created_at 顶替", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+
+    const detail = await handleServers(
+      new Request(`https://example.com/v1/servers/${SERVER}`, {
+        headers: { authorization: `Bearer ${env.token}` },
+      }),
+      env as never,
+    );
+
+    expect(detail?.status).toBe(200);
+    const body = (await detail!.json()) as { ready_at: string | null };
+    expect(body.ready_at).toBeNull();
   });
 
   it("激活丢失要收尾：凭据标记销毁、防火墙删除、不会多退款", async () => {
@@ -290,10 +321,239 @@ describe("enroll 激活守卫", () => {
     expect(server.state).toBe("destroyed");
     expect(server.destroyed_at).not.toBeNull();
     expect(server.node_id ?? null).toBeNull();
+    expect(server.ready_at ?? null).toBeNull();
     expect(db.rows("orders")[0].state).toBe("failed");
     const lost = db.rows("audit_log").find((row) => row.action === "enroll.activation_lost");
     expect(lost).toBeTruthy();
     expect(db.rows("audit_log").some((row) => row.action === "enroll.ok")).toBe(false);
+  });
+
+  function stageRequest(body: Record<string, unknown>) {
+    return new Request(`https://example.com/v1/enroll/${TOKEN}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("三段上报推进：installing → verifying → active，token 只在最终消费", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedBootingForActivation(db);
+
+    const installing = await handleServers(stageRequest({ stage: "installing" }), env as never);
+    expect(installing?.status).toBe(200);
+    expect(db.rows("servers")[0].state).toBe("installing");
+    expect(db.rows("servers")[0].installing_at).toBeTruthy();
+    expect(db.rows("servers")[0].enrollment_used_at).toBeNull();
+
+    const verifying = await handleServers(stageRequest({ stage: "verifying" }), env as never);
+    expect(verifying?.status).toBe(200);
+    expect(db.rows("servers")[0].state).toBe("verifying");
+    expect(db.rows("servers")[0].verifying_at).toBeTruthy();
+    expect(db.rows("servers")[0].enrollment_used_at).toBeNull();
+
+    const active = await handleServers(
+      stageRequest({
+        stage: "active",
+        port: 20443,
+        password: "secret-password",
+        active: true,
+        version: "1.14.0",
+      }),
+      env as never,
+    );
+    expect(active?.status).toBe(200);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("active");
+    expect(server.enrollment_used_at).toBeTruthy();
+    expect(server.ready_at).toBeTruthy();
+    // 消费后 hash 仍在：晚到的进度能按 hash 找到行并忽略，而不是 404。
+    expect(server.enrollment_hash).toBeTruthy();
+
+    const late = await handleServers(stageRequest({ stage: "verifying" }), env as never);
+    expect(late?.status).toBe(200);
+    expect(((await late!.json()) as { ignored: boolean }).ignored).toBe(true);
+    expect(db.rows("servers")[0].state).toBe("active");
+  });
+
+  it("乱序与回退被拒：只许前进，拒绝时回 200 ignored", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedBootingForActivation(db);
+
+    // 跳过 installing 直接 verifying：忽略。
+    const skipped = await handleServers(stageRequest({ stage: "verifying" }), env as never);
+    expect(skipped?.status).toBe(200);
+    expect(((await skipped!.json()) as { ignored: boolean }).ignored).toBe(true);
+    expect(db.rows("servers")[0].state).toBe("booting");
+
+    await handleServers(stageRequest({ stage: "installing" }), env as never);
+    await handleServers(stageRequest({ stage: "verifying" }), env as never);
+    expect(db.rows("servers")[0].state).toBe("verifying");
+
+    // 回退到 installing：忽略，状态不变。
+    const back = await handleServers(stageRequest({ stage: "installing" }), env as never);
+    expect(back?.status).toBe(200);
+    expect(((await back!.json()) as { ignored: boolean }).ignored).toBe(true);
+    expect(db.rows("servers")[0].state).toBe("verifying");
+  });
+
+  it("失败阶段落库：failed_stage=verifying → 销毁、verify_failed、退款", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedBootingForActivation(db);
+    await handleServers(stageRequest({ stage: "installing" }), env as never);
+    await handleServers(stageRequest({ stage: "verifying" }), env as never);
+
+    const res = await handleServers(
+      stageRequest({
+        stage: "failed",
+        failed_stage: "verifying",
+        error: "sing-box check failed",
+      }),
+      env as never,
+    );
+
+    expect(res?.status).toBe(409);
+    const body = (await res!.json()) as { reason: string; failed_stage: string };
+    expect(body.reason).toBe("verify_failed");
+    expect(body.failed_stage).toBe("verifying");
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("destroyed");
+    expect(server.failure_code).toBe("verify_failed");
+    expect(server.failure_stage).toBe("verifying");
+    expect(db.rows("orders")[0].state).toBe("failed");
+    expect(
+      db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund"),
+    ).toHaveLength(1);
+    const audit = db.rows("audit_log").find((row) => row.action === "enroll.rejected");
+    expect(String(audit?.detail)).toContain('"failed_stage":"verifying"');
+  });
+});
+
+describe("服务器重命名", () => {
+  function patchRequest(token: string, name: unknown, id = SERVER) {
+    return new Request(`https://example.com/v1/servers/${id}`, {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  it("改自己的服务器：成功并返回完整详情", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+
+    const res = await handleServers(patchRequest(env.token, "  我的东京机  "), env as never);
+
+    expect(res?.status).toBe(200);
+    const body = (await res!.json()) as { server_id: string; name: string };
+    expect(body.server_id).toBe(SERVER);
+    // 服务端 trim 后落库。
+    expect(body.name).toBe("我的东京机");
+    expect(db.rows("servers")[0].name).toBe("我的东京机");
+  });
+
+  it("改别人的服务器：一律 404，不泄露是否存在", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    db.rows("servers")[0].account_id = "acct_someone_else";
+
+    const res = await handleServers(patchRequest(env.token, "抢过来"), env as never);
+
+    expect(res?.status).toBe(404);
+    expect(db.rows("servers")[0].name).toBe("我的服务器0001");
+  });
+
+  it("空名 / 纯空格 / 25 个字符被拒，details 带长度约束", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+
+    for (const bad of ["", "   ", "a".repeat(25)]) {
+      const res = await handleServers(patchRequest(env.token, bad), env as never);
+      expect(res?.status).toBe(400);
+      const body = (await res!.json()) as {
+        code: string;
+        details: { reason: string; min_length: number; max_length: number };
+      };
+      expect(body.code).toBe("INVALID_ARGUMENT");
+      expect(body.details).toEqual({
+        reason: "invalid_name",
+        min_length: 1,
+        max_length: 24,
+      });
+    }
+    expect(db.rows("servers")[0].name).toBe("我的服务器0001");
+  });
+
+  it("按 Unicode 码点计长：中文与 emoji 各算 1，24 个通过、25 个被拒", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+
+    const ok = await handleServers(
+      patchRequest(env.token, "机".repeat(12) + "😀".repeat(12)),
+      env as never,
+    );
+    expect(ok?.status).toBe(200);
+    expect(db.rows("servers")[0].name).toBe("机".repeat(12) + "😀".repeat(12));
+
+    const tooLong = await handleServers(
+      patchRequest(env.token, "机".repeat(12) + "😀".repeat(13)),
+      env as never,
+    );
+    expect(tooLong?.status).toBe(400);
+    expect(
+      ((await tooLong!.json()) as { details: { reason: string } }).details.reason,
+    ).toBe("invalid_name");
+  });
+
+  it("重复改成同一个名字幂等", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+
+    const first = await handleServers(patchRequest(env.token, "名字"), env as never);
+    const second = await handleServers(patchRequest(env.token, "名字"), env as never);
+
+    expect(first?.status).toBe(200);
+    expect(second?.status).toBe(200);
+    expect(db.rows("servers")[0].name).toBe("名字");
+    expect(db.rows("servers")).toHaveLength(1);
+  });
+});
+
+describe("阶段超时清理（列表/详情入口）", () => {
+  it("卡在 verifying 过期：详情入口销毁并记 verify_timeout", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "verifying");
+    Object.assign(db.rows("servers")[0], {
+      enrollment_expires_at: Date.now() - 1000,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+
+    const res = await handleServers(
+      new Request(`https://example.com/v1/servers/${SERVER}`, {
+        headers: { authorization: `Bearer ${env.token}` },
+      }),
+      env as never,
+    );
+
+    expect(res?.status).toBe(200);
+    const body = (await res!.json()) as {
+      state: string;
+      failure: { stage: string; code: string } | null;
+    };
+    expect(body.state).toBe("destroyed");
+    expect(body.failure?.stage).toBe("verifying");
+    expect(body.failure?.code).toBe("verify_timeout");
   });
 });
 
