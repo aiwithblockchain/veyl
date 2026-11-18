@@ -204,6 +204,7 @@ export class MockAgentBridge implements AgentBridge {
     done: number;
     ok: number;
     failed: number;
+    untested: number;
     cancelled: boolean;
     reason: "connected" | null;
     phase: NodeProbePhase;
@@ -2235,7 +2236,11 @@ export class MockAgentBridge implements AgentBridge {
       };
     }
 
-    const method: NodeProbeMethod = "clash";
+    const slow = mockFlag("veyl.mock.probe.slow") === "1";
+    const allFail = mockFlag("veyl.mock.probe.allfail") === "1";
+    // 手工验收用：整批按「没测成」返回，复现运行时不可用的画面。
+    const allUntested = mockFlag("veyl.mock.probe.untested") === "1";
+    const method: NodeProbeMethod = allUntested ? "none" : "clash";
     const run = {
       runId: `probe_${Date.now().toString(36)}`,
       configId: target,
@@ -2243,6 +2248,7 @@ export class MockAgentBridge implements AgentBridge {
       done: 0,
       ok: 0,
       failed: 0,
+      untested: 0,
       cancelled: false,
       reason: null as "connected" | null,
       phase: "preparing" as NodeProbePhase,
@@ -2251,8 +2257,6 @@ export class MockAgentBridge implements AgentBridge {
       timers: [] as number[],
     };
     this.probeRun = run;
-    const slow = mockFlag("veyl.mock.probe.slow") === "1";
-    const allFail = mockFlag("veyl.mock.probe.allfail") === "1";
     const timeoutEvery = Math.max(2, Math.min(4, Math.floor(ids.length / 3) + 2));
 
     this.emitProbePhase(run);
@@ -2272,31 +2276,43 @@ export class MockAgentBridge implements AgentBridge {
         }
         const unreachable = allFail || index % timeoutEvery === timeoutEvery - 1;
         const failureCode = index % 2 === 0 ? "PROBE_TIMEOUT" : "CONNECT_FAILED";
-        const result: NodeProbeResult = unreachable
+        const result: NodeProbeResult = allUntested
           ? {
               node_id: nodeId,
-              status: "unreachable",
-              reachable: false,
+              status: "untested",
+              reachable: null,
               latency_ms: null,
-              probe_method: "clash_delay",
-              checked_at: Date.now(),
-              error: {
-                code: failureCode,
-                message: failureCode === "PROBE_TIMEOUT" ? "探测超时" : "连不上这个节点",
-              },
-            }
-          : {
-              node_id: nodeId,
-              status: "ok",
-              reachable: true,
-              latency_ms: 26 + ((index * 37) % 140),
-              probe_method: "clash_delay",
+              probe_method: "none",
               checked_at: Date.now(),
               error: null,
-            };
+            }
+          : unreachable
+            ? {
+                node_id: nodeId,
+                status: "unreachable",
+                reachable: false,
+                latency_ms: null,
+                probe_method: "clash_delay",
+                checked_at: Date.now(),
+                error: {
+                  code: failureCode,
+                  message:
+                    failureCode === "PROBE_TIMEOUT" ? "探测超时" : "连不上这个节点",
+                },
+              }
+            : {
+                node_id: nodeId,
+                status: "ok",
+                reachable: true,
+                latency_ms: 26 + ((index * 37) % 140),
+                probe_method: "clash_delay",
+                checked_at: Date.now(),
+                error: null,
+              };
         this.probeCache.set(nodeId, result);
         run.done += 1;
         if (result.status === "ok") run.ok += 1;
+        else if (result.status === "untested") run.untested += 1;
         else run.failed += 1;
         this.emit({
           name: AGENT_EVENTS.nodeProbeProgress,
@@ -2411,8 +2427,7 @@ export class MockAgentBridge implements AgentBridge {
         total: run.total,
         ok: run.ok,
         failed: run.failed,
-        // mock 只产出 ok / unreachable，没有 untested。
-        untested: 0,
+        untested: run.untested,
         method: run.method,
         cancelled: run.cancelled,
         reason: run.reason,

@@ -53,3 +53,45 @@ describe("mock 批量测速子集", () => {
     expect(run).toMatchObject({ total: 3, ignoredNodeIds: [] });
   });
 });
+
+describe("手工验收：整批没测成", () => {
+  it("veyl.mock.probe.untested=1 时整批 untested，method 为 none", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem("veyl.mock.probe.untested", "1");
+    const { bridge, events } = harness();
+    await bridge.nodeProbeAll("cfg-1");
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const progress = events.filter((event) => event.name === AGENT_EVENTS.nodeProbeProgress);
+    expect(
+      progress.every(
+        (event) => (event.payload as { method: string }).method === "none",
+      ),
+    ).toBe(true);
+    const results = progress
+      .map((event) => (event.payload as { result: unknown }).result)
+      .filter(
+        (item): item is { status: string; reachable: unknown; probe_method: string } =>
+          item !== null,
+      );
+    expect(results).toHaveLength(3);
+    expect(
+      results.every(
+        (item) =>
+          item.status === "untested" &&
+          item.reachable === null &&
+          item.probe_method === "none",
+      ),
+    ).toBe(true);
+
+    const finished = events.find((event) => event.name === AGENT_EVENTS.nodeProbeFinished);
+    expect(finished?.payload).toMatchObject({
+      total: 3,
+      ok: 0,
+      failed: 0,
+      untested: 3,
+      method: "none",
+      cancelled: false,
+    });
+  });
+});
