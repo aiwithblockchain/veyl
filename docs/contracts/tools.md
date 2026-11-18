@@ -246,16 +246,16 @@ type CallSource = "ui" | "agent";
 
 ```ts
 // src/components/toolDisplay.ts（设计文档里也称 TOOL_DISPLAY）
-export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 39 个工具名完全相等
+export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 40 个工具名完全相等
 ```
 
-进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 42 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
+进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 40 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
 
 **提示词只降低出错概率，最终闸门在渲染层**：UI 永远不渲染工具名、JSON、错误码；不做输出正则改写（静默替换模型正文比漏一句更难排查）。
 
 边界与落点：
 
-- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「42 个名字必须都有」与「`AskUserQuestion` 不占行」。
+- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「40 个名字必须都有」与「`AskUserQuestion` 不占行」。
 - **running 状态文案**同样来自映射表（`events.md` §3.5）：不得拼工具名，未知工具固定「正在处理…」。
 - **工具 description**：通用表达约束放 `\n` 之后的末尾。`capability_catalog` 只取第一行进系统提示清单，所以第一行**不得**出现「对用户说…」这类句子，否则会污染每次请求的能力清单。
 - **「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归**：删任一条即红。
@@ -308,6 +308,7 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 37 | `MyServerFailure` | `MyServerFailureTool` | 某台服务器创建失败的详情与订单事件 | `ReadOnly` | 只读 |
 | 38 | `StageSelect` | `StageSelectTool` | 把地区/规格选进新建节点舞台（**只改界面选择**） | `Write` | 低（不建机、不扣费） |
 | 39 | `CatalogOptions` | `CatalogOptionsTool` | 建机目录：地区与套餐的 id / 名称 / 日价（只读） | `ReadOnly` | 只读 |
+| 40 | `HttpCheck` | `HttpCheckTool` | 访问一个网页地址，只读状态码与 Cloudflare 挑战标记 | `ReadOnly` | 只读 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
@@ -367,6 +368,8 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(OpenSettingsTool::new()),
     Box::new(StageSelectTool::new(server_catalog.clone())),
     Box::new(CatalogOptionsTool::new(server_catalog.clone())),
+    // 只读网页可达性（AI 自查）
+    Box::new(HttpCheckTool::new()),
 ];
 ```
 
@@ -832,7 +835,8 @@ type DiagAction =
   | { kind: "restore_network" }
   | { kind: "switch_config" }
   | { kind: "flush_dns" }
-  | { kind: "open_seed" };
+  | { kind: "open_seed" }
+  | { kind: "switch_mode"; to: "tun" | "system_proxy" };
 
 type DiagCheck = {
   // 稳定标识：<group>.<check>，一旦发布不得改名
@@ -845,6 +849,7 @@ type DiagCheck = {
     // network
     | "network.exit_ip" | "network.reachable_default_source"
     | "network.reachable_github" | "network.reachable_deepseek"
+    | "network.coverage"
     // config
     | "config.current_config" | "config.seed" | "config.seed_stale";
   group: DiagGroup;
@@ -915,6 +920,20 @@ type DiagReport = {
 - 无动作可说时写 `null`，不要写「无」「N/A」这类占位。
 
 **`action` 与 `remediation` 的关系**：`action` 是 `remediation` 的可点击形式，两者要么都为空，要么同时有值且语义一致。UI 只渲染 `action`，模型读 `remediation`。
+
+**`network.coverage`（3.20.2 新增，`group = "network"`）**——当前接管方式覆盖哪些流量：
+
+| 实际状态 | `ok` | `detail` | `remediation` / `action` |
+|---|---|---|---|
+| 运行时 running 且接管方式为全部流量 | `true` | 「现在接管全部流量，TCP / UDP / QUIC 都经过 VPN」 | 无 |
+| 运行时 running 且为本机代理（只服务选择代理的软件） | `false` | 「现在只为本机软件提供代理，浏览器 HTTP/3 流量不经过代理」 | 「点「切到全部接管」再测一次」 / `{ kind: "switch_mode", to: "tun" }` |
+| 未连接（`idle`，或没有运行中的配置） | `true` | 「未连接，先连接再检查覆盖」 | 无 |
+| 读不到当前配置 / 接管方式 | `false` | 「读不到当前的接管方式」 | `/ { kind: "reconnect" }` |
+
+- **结论只用于「UDP / QUIC 应用不通」**：本机代理模式下浏览器 HTTP/3 不经过 VPN，这是覆盖范围问题。**不得把它当成反机器人挑战（Cloudflare 等）的解释**——四组对照实验已证伪，挑战与接管范围无关；遇到挑战应引导用户用 `HttpCheck` 看站点的 `cf_mitigated`，而不是断言「切到全部接管就能过」。
+- **`remediation` 用用户语言**，写「切到全部接管」，不出现 `tun` / `system_proxy` 这些内部词；内部值只出现在 `action.to` 里。
+- 不自动切换：`DiagRun` 仍是 `ReadOnly`；`action` 由 UI 渲染成按钮，点击后等价于用户发一条消息，由模型走 `ConfigSetMode`（有确认点）。
+- 覆盖项不通过时，`DiagRun` 的 `next_actions` 给 `[{ label: "切到全部接管", tool: "ConfigSetMode", args: { "mode": "tun" } }]`；`display.facts` 加一行「接管范围：不覆盖浏览器 HTTP/3」。
 
 ---
 
@@ -1997,6 +2016,48 @@ type CatalogOptionsData = {
 
 ---
 
+### 4.54 `HttpCheck`（只读网页可达性，3.20.2 新增）
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "url": { "type": "string" },
+    "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 15000, "default": 8000 }
+  },
+  "required": ["url"],
+  "additionalProperties": false
+}
+```
+
+```ts
+type HttpCheckData = {
+  url: string;
+  via: "tunnel" | "direct";     // 经当前连接（含 TUN 系统接管）/ 进程直连
+  status: number | null;        // 最终一跳的 HTTP 状态码；网络 / TLS 失败为 null
+  elapsed_ms: number;
+  redirects: number;            // 实际跟随的跳数（0–5）
+  server: string | null;        // `server` 响应头原样
+  cf_mitigated: string | null;  // `cf-mitigated` 响应头原样，如 "challenge"
+  tls_ok: boolean;
+  error: { code: string; message: string } | null;
+};
+```
+
+- `PermissionLevel::ReadOnly`；工具描述：「访问一个网页地址，只读状态码与 Cloudflare 挑战标记。仅用于验证某个站点当前能不能打开。」
+- **`via` 必须如实报告测量路径**：本机代理模式连接中 → 显式指向本地混合端口，报 `tunnel`；全部接管模式连接中 → 进程直连、但流量由系统层捕获，**同样报 `tunnel`**；未连接 → 直连，报 `direct`；**本机代理连接中但拿不到混合端口 → 退回直连并如实报 `direct`，不假装走了隧道**。模型**先看 `via` 再解释结果**：`direct` 下的 200 只代表本机能打开，不代表用户经 VPN 的体验，不能拿它反驳用户「打不开」的反馈。
+- **网络 / TLS / DNS 解析失败都是工具成功返回**：`status: null`、`error.code = "HTTP_CHECK_FAILED"`，`message` 可直接转述；`tls_ok` 说明握手是否成功。**DNS 解析失败（域名不存在、解析超时）属于这一类**；只有「解析成功但地址落在私网」才是 `INVALID_ARGUMENT / private_address`。
+- 参数非法、非 `https`、非 443、解析到私网 → `INVALID_ARGUMENT`（`details.reason` 取 `invalid_url` / `insecure_scheme` / `unsupported_port` / `private_address`）。
+- **SSRF 约束（必须实现）**：只允许 `https://` 且端口 443；解析全部 A/AAAA，任一落在 loopback / 私网 / 链路本地 / ULA / 组播 / unspecified 即拒绝；跟随重定向最多 5 次，**每一跳重新解析并重新校验**（代理路径同样拒绝首跳私网解析）；不发 Cookie / Authorization / 请求体，只发 `User-Agent: Veyl-Check/1.0`；**只读响应头，正文根本不读**（64 KiB 上限只用于响应头）；直连路径（未连接 / TUN）把已校验地址 pin 给连接层并显式 `no_proxy`，rebinding 无效。
+- **经本机代理（Proxy 连接中）时，目标最终由 sing-box 再解析，我们无法 pin**：该路径仍在每跳做静态解析校验，但存在 TOCTOU 窗口。窗口内最多造成**一次到私网 443 的连接尝试**——TLS 证书不可能匹配所请求的域名，握手即失败，读不到任何内容；本工具只读响应头、只允许 https/443。
+- **已知边界与重审触发条件**：一旦将来支持 `http` 或非 443 端口、读正文（哪怕一段）、或允许自定义请求头 / 方法，上述残余风险即不再成立，必须改为「探针专用入站 + 置顶规则 `{inbound:["probe-in"], ip_is_private, action:"reject"}`」。
+- 超时 `timeout_ms` 取 1000–15000（默认 8000）；超时按 `HTTP_CHECK_FAILED` 返回，不重试。
+- **`cf_mitigated` 只转述、不下结论**：值为 `challenge` 说明站点要求人机验证，**不能**据此说 VPN 没生效；它也与 `DiagRun.network.coverage` 无关——接管范围解释不了反机器人挑战（四组对照实验证伪）。
+- 不做 POST、自定义头、Cookie、认证、任意端口、返回正文；不做重试、不做批量、不做 UI。
+- `display`：成功「网页返回 200」+ `facts` 放状态码 / 耗时 / 跳转数 / `server`；有 `cf_mitigated` 时加一条「站点要求人机验证」；失败「没访问成功」+ `error.message`。
+
+---
+
 ## 5. 工具间协作约定
 
 ### 5.1 标准连接链路
@@ -2015,7 +2076,7 @@ type CatalogOptionsData = {
 
 | 工具 | 重复调用行为 |
 |---|---|
-| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ConfigDetail` / `NodeProbe` / `JobGet` / `OpenSettings` / `MyServers` / `MyServerFailure` | 纯读取，天然幂等 |
+| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ConfigDetail` / `NodeProbe` / `JobGet` / `OpenSettings` / `MyServers` / `MyServerFailure` / `HttpCheck` | 纯读取，天然幂等 |
 | `RuntimeStart` | 已 `running` 且目标一致 → `ok: true`，`already_running: true` |
 | `RuntimeStop` / `VpnDisconnect` | 已 `idle` → `ok: true` |
 | ~~`ConfigCreate`~~ | **3.18.0 起无此工具**；全局配置由服务层懒创建（`commands.md` §3.1） |
@@ -2038,6 +2099,7 @@ type CatalogOptionsData = {
 | `NodeProbe` | 15s（含 8s 探针运行时启动） |
 | `NodeImportUrl` | 15s（抓取 10s + 解析） |
 | `CatalogOptions` | 8s（走缓存，必要时取一次目录） |
+| `HttpCheck` | `timeout_ms`（默认 8s，最大 15s） |
 | `RuntimeStart` | 15s（含 10s 启动） |
 | `VpnConnect` | 30s |
 | `RouteGet` / `CategoryList` / `RulesStatus` | 3s（本地读） |
@@ -2092,6 +2154,14 @@ type CatalogOptionsData = {
 ---
 
 ## 8. 变更记录
+
+### 3.20.2（未发布：随 AI 自查第一批统一升版）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | §4.13 `DiagRun` 新增 `network.coverage` 检查，`DiagAction` 增 `{ kind: "switch_mode"; to: "tun" \| "system_proxy" }`：全部接管 + running → `ok`；本机代理 + running → 不通过并给 `switch_mode`；未连接 → `ok` +「先连接」；读不到模式 → `reconnect`。结论**只用于「UDP / QUIC 应用不通」**，不得用来解释反机器人挑战；`remediation` 用「切到全部接管」，内部值只出现在 `action.to` | 字段扩展 | AI 自查第一批 T2；四组对照实验证伪「切全部接管就能过挑战」 |
+| 2 | §3 工具总表 39 → 40、§3.1 注册清单加 `HttpCheckTool`、新增 §4.54 `HttpCheck`（原计划 §4.53，因被 `CatalogOptions` 占用改为 §4.54）：返回 `url / via / status / elapsed_ms / redirects / server / cf_mitigated / tls_ok / error`；`via` 如实报告走隧道还是直连（全部接管下进程直连也算 `tunnel`；本机代理但拿不到混合端口则退回直连并报 `direct`）；直连的 200 不代表用户经 VPN 的体验；DNS 解析失败归 `HTTP_CHECK_FAILED`，只有解析成功落私网才是 `private_address`；只允许 `https` + 443，解析全部 A/AAAA 并拒私网，重定向逐跳复核，**只读响应头、正文不读**，直连时 pin 已校验 IP 并 `no_proxy`；**已知边界：经本机代理时不做 pin，rebinding 有 TOCTOU 窗口，重审触发条件见 §4.54**，`ReadOnly` | 新增工具 | AI 自查第一批 T4；在错误的路径上得到正确的数字会得出相反结论 |
+| 3 | §5.2 / §5.3 同步：`HttpCheck` 计入纯读取幂等；超时按 `timeout_ms`（默认 8s，最大 15s） | 元数据 | 同 2 |
 
 ### 3.20.1（2026-11-18，`RuntimeStart` 补被取代启动的收尾）
 

@@ -323,6 +323,13 @@ export const TOOL_COPY: Record<string, ToolCopy> = {
     advice: "可以从左下角的设置图标自己进去。",
     readOnly: true,
   },
+  HttpCheck: {
+    running: "正在检查这个网站",
+    done: "已检查这个网站",
+    failed: "没能检查这个网站",
+    advice: "可以换一个地址再试。",
+    readOnly: true,
+  },
 };
 
 export const TOOL_NAMES = Object.keys(TOOL_COPY);

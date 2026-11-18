@@ -316,3 +316,71 @@ describe("ToolCallCard：display.actions", () => {
     );
   });
 });
+
+describe("ToolCallCard：诊断卡的接管范围", () => {
+  const coverageAction = {
+    label: "切到全部接管",
+    tool: "ConfigSetMode",
+    args: { mode: "tun" },
+  };
+
+  const diagCall = (overrides: Partial<ToolCall> = {}) =>
+    call({
+      tool: "DiagRun",
+      state: "ok",
+      display: {
+        text: "诊断完成，发现 1 个问题",
+        facts: [{ label: "接管范围", value: "不覆盖浏览器 HTTP/3" }],
+        changed: "none",
+      },
+      nextActions: [coverageAction],
+      ...overrides,
+    });
+
+  it("覆盖失败时展开可见事实行与「切到全部接管」", () => {
+    renderCard(diagCall());
+
+    expect(screen.queryByText("不覆盖浏览器 HTTP/3")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /诊断完成/ }));
+
+    expect(screen.getByText("接管范围")).toBeTruthy();
+    expect(screen.getByText("不覆盖浏览器 HTTP/3")).toBeTruthy();
+    const action = screen.getByRole("button", { name: "切到全部接管" });
+    expect(action.textContent).toBe("切到全部接管");
+    expect(action.textContent).not.toMatch(/tun|system_proxy|HTTP\/3/i);
+  });
+
+  it("点击「切到全部接管」把动作与参数原样交给调用方", () => {
+    const { onNextAction } = renderCard(diagCall());
+    fireEvent.click(screen.getByRole("button", { name: /诊断完成/ }));
+    fireEvent.click(screen.getByRole("button", { name: "切到全部接管" }));
+
+    expect(onNextAction).toHaveBeenCalledTimes(1);
+    const sent = onNextAction.mock.calls[0][0] as {
+      label: string;
+      tool: string;
+      args: Record<string, unknown>;
+    };
+    expect(sent).toEqual(coverageAction);
+    expect(sent.label).toBe("切到全部接管");
+    // 这条 JSON 会原样拼进用户消息，参数形状必须稳定。
+    expect(JSON.stringify(sent.args)).toBe('{"mode":"tun"}');
+  });
+
+  it("全部通过没有动作时只显示事实，不出现切换按钮", () => {
+    renderCard(
+      diagCall({
+        display: {
+          text: "诊断完成，没发现问题",
+          facts: [{ label: "接管范围", value: "接管全部流量" }],
+          changed: "none",
+        },
+        nextActions: [],
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /诊断完成/ }));
+    expect(screen.getByText("接管全部流量")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "切到全部接管" })).toBeNull();
+  });
+});

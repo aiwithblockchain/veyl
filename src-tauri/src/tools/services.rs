@@ -1127,7 +1127,12 @@ fn rebuild_replaced_by_new_connection() -> Value {
 /// 拉起返回后复查到的连接状态。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AfterStart {
+    /// 这套配置连接着。
     Connected,
+    /// 没连着这套配置，但**有人在接手**（别的配置在跑，或新的启动在途中）：
+    /// 这是「被新的操作接管」，不是用户断开。
+    Replaced,
+    /// 既没连着、也没有启动在途：用户确实断开了。
     Disconnected,
     /// 无法确认（拿不到运行期锁）：既不是连着，也不是用户断开。
     Unknown,
@@ -2401,6 +2406,15 @@ pub struct WiredServices {
     /// 测试用：重建首轮拉起成功后暂停一次，让用例在「已连上、还没复查」之间插进断开。
     #[cfg(test)]
     rebuild_pause_after_start: std::sync::atomic::AtomicBool,
+    /// 测试用：重建回滚拉起前暂停一次，让用例在回滚启动窗口里插进重启/另一次启动。
+    #[cfg(test)]
+    rebuild_pause_before_rollback: std::sync::atomic::AtomicBool,
+    /// 测试用：回滚前暂停正在进行中（与 `rebuild_test_waiting` 分开，避免两个窗口无缝相接）。
+    #[cfg(test)]
+    rebuild_rollback_paused: std::sync::atomic::AtomicBool,
+    /// 测试用：放行回滚前暂停。
+    #[cfg(test)]
+    rebuild_rollback_release: std::sync::atomic::AtomicBool,
 }
 
 /// 切换接管方式的在途闸门。持有 guard 期间同配置的第二次调用会被拒绝。
@@ -2482,6 +2496,12 @@ impl WiredServices {
             start_body_without_lock: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             rebuild_pause_after_start: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            rebuild_pause_before_rollback: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            rebuild_rollback_paused: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            rebuild_rollback_release: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -2496,6 +2516,20 @@ impl WiredServices {
     #[cfg(test)]
     pub fn pause_after_first_rebuild_start_for_test(&self) {
         self.rebuild_pause_after_start
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 测试用：放行「回滚拉起前」的暂停。
+    #[cfg(test)]
+    pub fn release_rebuild_rollback_for_test(&self) {
+        self.rebuild_rollback_release
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 测试用：下一次重建的回滚拉起前暂停，直到 `release_rebuild_rollback_for_test`。
+    #[cfg(test)]
+    pub fn pause_before_rebuild_rollback_for_test(&self) {
+        self.rebuild_pause_before_rollback
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -7835,6 +7869,7 @@ impl WiredServices {
                 }
                 // 起来了但已被断开取代：节点已进池，不再接回连接。
                 AfterStart::Disconnected => return user_disconnected_rebuild(),
+                AfterStart::Replaced => return rebuild_replaced_by_new_connection(),
                 AfterStart::Unknown => return rebuild_unknown(),
             }
         }
@@ -7882,6 +7917,23 @@ impl WiredServices {
                 (false, false)
             }
             None => {
+                // 用例用：回滚拉起前停一下，让「期间被重启/另一次启动打断」真实落地。
+                #[cfg(test)]
+                if self
+                    .rebuild_pause_before_rollback
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    use std::sync::atomic::Ordering;
+                    self.rebuild_rollback_paused.store(true, Ordering::SeqCst);
+                    // 等用例放行（最多 10s），不用固定睡眠去赌时序。
+                    for _ in 0..500 {
+                        if self.rebuild_rollback_release.swap(false, Ordering::SeqCst) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    self.rebuild_rollback_paused.store(false, Ordering::SeqCst);
+                }
                 let rolled = self
                     .connect_body(
                         &latest,
@@ -7897,13 +7949,21 @@ impl WiredServices {
                     match self.still_connected_after_start(&latest.id, &rolled).await {
                         AfterStart::Connected => (true, false),
                         AfterStart::Disconnected => (false, true),
+                        AfterStart::Replaced => return rebuild_replaced_by_new_connection(),
+                        AfterStart::Unknown => return rebuild_unknown(),
+                    }
+                } else if rolled.as_ref().err().is_some_and(|error| is_cancelled_error(error)) {
+                    // 回滚拉起被取消 ≠ 用户断开：可能是重启或另一次启动打断了它。
+                    // 与回滚守卫同型——重读实际状态再下结论。
+                    match self.actual_connection_state(&latest.id).await {
+                        AfterStart::Connected | AfterStart::Replaced => {
+                            return rebuild_replaced_by_new_connection();
+                        }
+                        AfterStart::Disconnected => (false, true),
                         AfterStart::Unknown => return rebuild_unknown(),
                     }
                 } else {
-                    (
-                        false,
-                        rolled.as_ref().err().is_some_and(|error| is_cancelled_error(error)),
-                    )
+                    (false, false)
                 }
             }
         };
@@ -7925,8 +7985,9 @@ impl WiredServices {
         })
     }
 
-    /// 锁外拉起返回后持锁复查「现在实际连没连」；没连着就只收掉本次拉起的实例。
-    /// 认的是**这套配置**的连接：别的配置在跑不算这里的「仍连着」。
+    /// 锁外拉起返回后持锁复查「现在实际连没连」；**只在确认没人接手时才收本次实例**
+    /// （`Disconnected`）。`Replaced` 不停：接管方要么已经停过、要么会用替换语义收掉
+    /// 我们的实例，这里再停一次就是把新连接一起杀掉——后来者不要以为漏停而加回一个 stop。
     /// 拿不到锁时既不能说连着、也不能说用户断开——那是「不知道」，单独成一态。
     async fn still_connected_after_start(
         &self,
@@ -7935,18 +7996,15 @@ impl WiredServices {
     ) -> AfterStart {
         match self.lock_runtime_ops().await {
             Ok(_ops) => {
-                let state = self.connection_state_cached().await;
-                let connected = state.connected && state.config_id.as_deref() == Some(config_id);
-                if !connected {
+                let state = self.after_start_state(config_id).await;
+                if state == AfterStart::Disconnected {
                     if let Ok(snapshot) = applied {
                         if let Err(error) = self.stop_superseded_instance(snapshot).await {
                             log::error!("拉起的连接已被取代，收尾失败：{error}");
                         }
                     }
-                    AfterStart::Disconnected
-                } else {
-                    AfterStart::Connected
                 }
+                state
             }
             Err(error) => {
                 // 用户没按断开、我们也证明不了连没连：不能冒充 `user_disconnected`。
@@ -7954,6 +8012,35 @@ impl WiredServices {
                 AfterStart::Unknown
             }
         }
+    }
+
+    /// 取锁读一次实际连接状态（不碰任何实例）。拿不到锁 = `Unknown`。
+    async fn actual_connection_state(&self, config_id: &str) -> AfterStart {
+        match self.lock_runtime_ops().await {
+            Ok(_ops) => self.after_start_state(config_id).await,
+            Err(error) => {
+                log::error!("复查连接状态时等运行期操作锁超时：{error}");
+                AfterStart::Unknown
+            }
+        }
+    }
+
+    /// 调用方必须已持 `runtime_ops`。判据是**重新读到的连接状态**：
+    /// 这套配置连着 → `Connected`；别人在跑或有启动在途 → `Replaced`；
+    /// 都没有 → `Disconnected`。
+    async fn after_start_state(&self, config_id: &str) -> AfterStart {
+        let state = self.connection_state_cached().await;
+        if state.connected {
+            return if state.config_id.as_deref() == Some(config_id) {
+                AfterStart::Connected
+            } else {
+                AfterStart::Replaced
+            };
+        }
+        if state.launching {
+            return AfterStart::Replaced;
+        }
+        AfterStart::Disconnected
     }
 
     /// `applied` 里只列真的进了运行配置的节点：缺凭据被 `connect_body` 跳过的
@@ -13826,6 +13913,20 @@ mod main_flow_tests {
         panic!("重建没有进入注入窗口");
     }
 
+    /// 等到重建进入「回滚拉起前」的暂停窗口。
+    async fn wait_for_rebuild_rollback_pause(services: &WiredServices) {
+        for _ in 0..1000 {
+            if services
+                .rebuild_rollback_paused
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("重建没有进入回滚前暂停窗口");
+    }
+
     /// 重建期间用户断开：决策段之后重建已在锁外拉起，断开不再排队，
     /// 而是直接记一笔意图把它取代——不回滚、也不把连接接回来。
     #[tokio::test]
@@ -13899,6 +14000,72 @@ mod main_flow_tests {
         let status = h.services.runtime_status().await.unwrap();
         assert_eq!(status["state"], "idle", "断开后不能被重建接回来");
         watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 回滚拉起被**重启/另一次启动**打断：不是用户断开，不能报「已按你的操作断开」。
+    #[tokio::test]
+    async fn a_rollback_interrupted_by_a_new_start_is_not_a_user_disconnect() {
+        let _serial = REBUILD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (h, config_id, _a_id, spare, watcher) =
+            connected_with_spare_node("回滚被打断", "198.51.100.74").await;
+
+        h.services.fail_next_rebuild_for_test(1);
+        h.services.pause_before_rebuild_rollback_for_test();
+        let (attached, restarted) = tokio::join!(
+            h.services
+                .node_attach(None, Some(vec![spare.clone()]), Some(config_id.clone())),
+            async {
+                // 第一段窗口是首轮失败注入，这次要等的是「回滚拉起前」那一段。
+                wait_for_rebuild_rollback_pause(&h.services).await;
+                let started = h.services.runtime_start(Some(config_id.clone())).await;
+                h.services.release_rebuild_rollback_for_test();
+                started
+            }
+        );
+        restarted.expect("重启应当成功");
+        let attached = attached.unwrap();
+        let rebuild = &attached["runtime_rebuild"];
+        assert!(
+            rebuild.get("reason").is_none(),
+            "回滚被新启动打断不是用户断开：{rebuild}"
+        );
+        assert_eq!(
+            rebuild["message"], "新节点这次没能应用；当前连接已由新的操作接管，重新连接后就能用它。",
+            "必须是「被接管」那条文案，不能是「无法确认」：{rebuild}"
+        );
+        assert_eq!(rebuild["status"], "failed", "{rebuild}");
+        let status = h.services.runtime_status().await.unwrap();
+        assert_eq!(status["state"], "running", "新的连接应当还在跑：{status}");
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// `Replaced` 的两个来源各一条：有启动在途、别的配置在跑。
+    #[tokio::test]
+    async fn a_launch_in_flight_counts_as_replaced_not_disconnected() {
+        let h = harness();
+        let slot = h.services.tun.begin_launch("cfg_target");
+        assert_eq!(
+            h.services.after_start_state("cfg_target").await,
+            AfterStart::Replaced,
+            "有启动在途时不能说「断开」"
+        );
+        drop(slot);
+    }
+
+    #[tokio::test]
+    async fn another_config_running_counts_as_replaced_not_disconnected() {
+        let mut h = harness();
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
+        h.services
+            .tun
+            .force_running_for_test(4242, Some("cfg_other"));
+        assert_eq!(
+            h.services.after_start_state("cfg_target").await,
+            AfterStart::Replaced,
+            "别的配置在跑不算这套配置断开"
+        );
     }
 
     /// 重建期间切节点：被闸门拒绝，最终仍是原节点。

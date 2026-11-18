@@ -12,6 +12,7 @@ pub mod deepseek;
 pub mod diag;
 pub mod display;
 pub mod envelope;
+pub mod http_check;
 pub mod issue_report;
 pub mod job;
 pub mod my_servers;
@@ -182,6 +183,7 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(vpn::VpnConnectTool::new(Arc::clone(&services))),
         Box::new(vpn::VpnDisconnectTool::new(Arc::clone(&services))),
         Box::new(diag::DiagRunTool::new(Arc::clone(&services))),
+        Box::new(http_check::HttpCheckTool::new(Arc::clone(&services))),
         Box::new(issue_report::IssueReportTool::new(Arc::clone(&services))),
         Box::new(deepseek::DeepseekSetupKeyTool),
         Box::new(deepseek::DeepseekSaveKeyTool::new(Arc::clone(&services))),
