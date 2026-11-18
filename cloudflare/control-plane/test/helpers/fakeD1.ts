@@ -644,10 +644,17 @@ export class FakeD1 {
       return this.tables.servers.find((s) => s.id === a[0] && s.account_id === a[1]) ?? null;
     }
     if (sql.startsWith("update servers set name")) {
+      const guarded = sql.includes("destroyed_at is null");
       const server = this.tables.servers.find(
         (s) => s.id === a[2] && s.account_id === a[3],
       );
-      if (server) {
+      if (
+        server &&
+        (!guarded ||
+          (server.destroyed_at == null &&
+            server.state !== "destroying" &&
+            server.state !== "destroyed"))
+      ) {
         server.name = a[0];
         server.updated_at = a[1];
       }
@@ -724,12 +731,14 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("update servers set state = 'destroyed'")) {
-      const server = this.tables.servers.find((s) => s.id === a[3]);
+      const server = this.tables.servers.find((s) => s.id === a[4]);
       if (server) {
         server.state = "destroyed";
         server.destroyed_at = a[0];
         server.updated_at = a[1];
         server.failure_code = a[2] ?? null;
+        // COALESCE(?, failure_stage)：没给阶段时保留原值。
+        if (a[3] != null) server.failure_stage = a[3];
       }
       return null;
     }
@@ -1390,6 +1399,23 @@ export class FakeStatement {
         row &&
         row.enrollment_hash === this.statement.args[3] &&
         row.enrollment_used_at == null
+          ? 1
+          : 0;
+    } else if (sql.startsWith("update servers set name")) {
+      const guarded = sql.includes("destroyed_at is null");
+      const server = this.db
+        .rows("servers")
+        .find(
+          (s) =>
+            s.id === this.statement.args[2] &&
+            s.account_id === this.statement.args[3],
+        );
+      changes =
+        server &&
+        (!guarded ||
+          (server.destroyed_at == null &&
+            server.state !== "destroying" &&
+            server.state !== "destroyed"))
           ? 1
           : 0;
     } else if (

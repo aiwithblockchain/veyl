@@ -152,7 +152,7 @@ async function destroyInstance(
   env: ServersEnv,
   row: ServerRow,
   reason: string,
-  options: { firewallId?: string | null } = {},
+  options: { firewallId?: string | null; failureStage?: string | null } = {},
 ): Promise<DestroyOutcome> {
   if (!env.DB) return { ok: false, status: 503, reason: "db_unavailable", retryable: true };
   const db = env.DB;
@@ -214,8 +214,9 @@ async function destroyInstance(
   // 分开做会出现「机器没了、钱没退」，而销毁后的重试会直接返回成功，永远补不回来。
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
-      "UPDATE servers SET state = 'destroyed', destroyed_at = ?, updated_at = ?, failure_code = ? WHERE id = ?",
-    ).bind(now, now, reason === "user" ? null : reason, row.id),
+      "UPDATE servers SET state = 'destroyed', destroyed_at = ?, updated_at = ?, failure_code = ?, " +
+        "failure_stage = COALESCE(?, failure_stage) WHERE id = ?",
+    ).bind(now, now, reason === "user" ? null : reason, options.failureStage ?? null, row.id),
     env.DB.prepare("UPDATE credentials SET destroyed_at = ? WHERE server_id = ?").bind(now, row.id),
     env.DB.prepare(
       "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'server.destroy', ?)",
@@ -401,12 +402,7 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
     : row.state;
   // 脚本自己已经判定失败时端口没有意义（trap 里的 PORT 可能还没赋值）。
   if (stage !== "failed" && port !== row.node_port) {
-    await destroyInstance(env, row, "port_mismatch");
-    await db
-      .prepare("UPDATE servers SET failure_stage = ? WHERE id = ?")
-      .bind("active", row.id)
-      .run()
-      .catch(() => {});
+    await destroyInstance(env, row, "port_mismatch", { failureStage: "active" });
     return json({ ok: false, reason: "port_mismatch" }, 409);
   }
   // active 只认 JSON 布尔；但已有机器可能发的是 1 / "true"，一并接受，别再自己把成功的机器判死。
@@ -432,12 +428,7 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
       )
       .run();
     const reason = failureReason(failedStage);
-    await destroyInstance(env, row, reason);
-    await db
-      .prepare("UPDATE servers SET failure_stage = ? WHERE id = ?")
-      .bind(failedStage, row.id)
-      .run()
-      .catch(() => {});
+    await destroyInstance(env, row, reason, { failureStage: failedStage });
     return json(
       {
         ok: false,
@@ -601,9 +592,9 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
 }
 
 /**
- * booting 状态下每次列表/详情顺手做两件事：
+ * 建机中的服务器（booting / installing / verifying）每次列表/详情顺手做两件事：
  * 1. 建机响应（202）里没有 IP —— DO 是异步分配，这里补上，否则凭据里的 host 一直是 null。
- * 2. 超过 enrollment 有效期还没回传的机器直接销毁。没有 Cron，这是唯一的兜底入口，
+ * 2. 超过 enrollment 有效期仍卡在这三个阶段的机器直接销毁。没有 Cron 时这是唯一的兜底入口，
  *    否则装失败的机器会一直计费、界面上还看不到原因。
  */
 async function refreshBooting(env: ServersEnv, rows: ServerRow[]): Promise<void> {
@@ -620,13 +611,7 @@ async function refreshBooting(env: ServersEnv, rows: ServerRow[]): Promise<void>
       // 先记住阶段：销毁会改状态，不能拿改过的值写 failure_stage。
       const stage = row.state;
       const reason = stageTimeoutReason(stage, row.enrollment_used_at);
-      const outcome = await destroyInstance(env, row, reason);
-      if (outcome.ok) {
-        await env.DB.prepare("UPDATE servers SET failure_stage = ? WHERE id = ?")
-          .bind(stage, row.id)
-          .run()
-          .catch(() => {});
-      }
+      await destroyInstance(env, row, reason, { failureStage: stage });
       row.state = "destroyed";
       row.destroyed_at = Date.now();
       continue;
@@ -649,8 +634,8 @@ const ENROLL_REAP_BATCH = 10;
 const ENROLL_REAP_PAGES = 10;
 
 /**
- * 计费 Cron 的兜底（2026-11-18）：enrollment 过期仍停在 booting 的机器，用户可能已经
- * 关掉 App，list/get 永远不会再触发 `refreshBooting`——它们会一直计费，DO 那边也一直计费。
+ * 计费 Cron 的兜底（2026-11-18）：enrollment 过期仍停在 booting / installing / verifying 的机器，
+ * 用户可能已经关掉 App，list/get 永远不会再触发 `refreshBooting`——它们会一直计费，DO 那边也一直计费。
  * 这里按「没建成」销毁：关单 + 退已扣的钱（destroyInstance 负责）。
  *
  * 不看 `enrollment_used_at`：已回传 enroll 但在 activate 前进程死掉的机器同样永远 booting，
@@ -702,7 +687,7 @@ export async function sweepExpiredEnrollments(env: ServersEnv): Promise<number> 
       // 先记住阶段：销毁会改状态，不能拿改过的值写 failure_stage。
       const stage = fresh.state;
       const reason = stageTimeoutReason(stage, fresh.enrollment_used_at);
-      const outcome = await destroyInstance(env, fresh, reason);
+      const outcome = await destroyInstance(env, fresh, reason, { failureStage: stage });
       if (!outcome.ok) {
         console.error(
           `[billing] enroll_reap_failed server=${fresh.id} reason=${outcome.reason}`,
@@ -710,11 +695,6 @@ export async function sweepExpiredEnrollments(env: ServersEnv): Promise<number> 
         continue;
       }
       destroyed += 1;
-      await db
-        .prepare("UPDATE servers SET failure_stage = ? WHERE id = ?")
-        .bind(stage, fresh.id)
-        .run()
-        .catch(() => {});
       await db
         .prepare(
           `INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.${reason}', ?)`,
@@ -801,11 +781,16 @@ async function rename(request: Request, env: ServersEnv, serverId: string): Prom
   const row = await loadServer(env.DB, identity.accountId, serverId);
   if (!row) return apiError("NOT_FOUND", "没有这台服务器");
 
-  await env.DB.prepare(
-    "UPDATE servers SET name = ?, updated_at = ? WHERE id = ? AND account_id = ?",
+  // 与销毁并发时要按最新状态判断：销毁中/已销毁的机器不能再改名（会发出误导的 renamed 事件）。
+  const updated = await env.DB.prepare(
+    "UPDATE servers SET name = ?, updated_at = ? WHERE id = ? AND account_id = ? " +
+      "AND destroyed_at IS NULL AND state NOT IN ('destroying', 'destroyed')",
   )
     .bind(raw, Date.now(), serverId, identity.accountId)
     .run();
+  if (Number((updated as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
+    return apiError("NOT_FOUND", "没有这台服务器");
+  }
   row.name = raw;
 
   const money = await serverMoney(env.DB, identity.accountId);

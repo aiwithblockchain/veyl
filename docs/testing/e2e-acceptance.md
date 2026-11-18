@@ -3893,6 +3893,52 @@ grep -E 'runtime-state-changed|stop|start' "$APP_LOG" | tail -10
 
 **不合格时记录什么**：三个 destination 的左栏截图（含宽度）、中间截图、切换前后的选中行。
 
+### N16 服务器重命名：成功 / 空名 / 越权 / 24 码点边界
+
+**前置**：M2；已登录；「我的服务器」里有一台可用的服务器（名字记为 A）；另有一个不属于本账户的 `server_id`（可从测试账户 B 的库里取，或用一个不存在的 id）。
+
+**步骤**：
+
+1. 打开 A 的详情，点 `[aria-label="重命名 A"]`，输入 `东京 01` 回车。
+2. 再进入编辑，清空后回车；再输入三个空格后回车。
+3. 再输入 25 个汉字（如「东」重复 25 次）回车；改成 24 个汉字回车。
+4. 用 DevTools 直接调命令改别人的 / 不存在的 id：
+   ```js
+   window.__TAURI_INTERNALS__.invoke("my_server_rename", { serverId: "<别人的id>", name: "偷改" })
+   ```
+5. 再输入与当前相同的名字回车；随后把名字改成与另一台服务器完全相同。
+
+**可判定预期**：
+
+1. 标题 `.myservers__detail-name` 变为 `东京 01`；`select name from servers where id=?` 同值；列表同步；事件 `my-server-renamed` 的 payload 只有 `server_id` / `name` / `contract_version` / `emitted_at`。
+2. 空值与纯空格：`#server-name-error` 可见且 `role="alert"`，**不发请求**（`servers.updated_at` 不变）。
+3. 25 个汉字：提示「名字最多 24 个字符。」，`updated_at` 不变；24 个汉字保存成功（码点计数，不是 UTF-16 长度）。
+4. 越权 / 不存在：返回 `NOT_FOUND`，界面标题不变、无错误弹窗。
+5. 同名：视为成功（界面短路，不发请求）；与另一台重名允许保存，不报 `duplicate_name`。
+
+**不合格时记录什么**：每步的标题文本、`#server-name-error` 原文、`servers.name` / `updated_at` 前后值、直接调用返回的错误码。
+
+### N17 建机三阶段进度、真实时刻与超时回收
+
+**前置**：M2；已登录；余额 ≥ 日价 × 7；能看 DevTools 与 D1 数据库。
+
+**步骤**：
+
+1. 新建一台服务器，观察详情里的进度区直到 `可用`。
+2. 记录阶段顺序、`aria-current="step"` 的落点、note 文本与「已等待」的变化；确认页面没有任何百分比数字。
+3. 查 `servers` 行的 `state, installing_at, verifying_at, ready_at`。
+4. 再造一台，停在 `installing`（或 `verifying`）时，把 `enrollment_expires_at` 改成过去，然后打开列表/详情（或等计费 Cron），观察结果。
+5. 找一台旧机器（三个时间列为 NULL），打开详情看用时文案。
+
+**可判定预期**：
+
+1. 阶段条 `.myservers__steps` 依次高亮 `创建中 → 启动中 → 安装中 → 验证中`，完成后变 `可用`；`aria-current="step"` 只落在当前阶段，已完成项带 `is-done`；进度区没有 `%` 文案。
+2. `installing_at` < `verifying_at` < `ready_at` 且都非空；「已等待」每秒递增；阶段超过 180 秒后 note 变为「这一步已经 N 分钟，还在继续。」
+3. 超时：该服务器被销毁或标失败，`failure_stage` 等于卡住的阶段，失败原因码为 `install_timeout` / `verify_timeout` / `enrollment_timeout`；界面显示失败阶段而不是编造的阶段；`wallet_ledger` 有对应退款。
+4. 旧机器三个时间为 NULL：界面显示「用时未知」，不拿 `created_at` 顶替。
+
+**不合格时记录什么**：阶段序列与时间戳、`aria-current` 落点、note 原文、`servers` 行、`wallet_ledger` 退款行。
+
 ---
 
 ## 7. 异常路径

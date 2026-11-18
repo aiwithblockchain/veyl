@@ -1597,7 +1597,7 @@ type MyServerCredentialNode = {
 - **响应只回本地节点**：`2.26.0` 起 `MyServerCredentials` 删除 `payload` / `signature`（**不向后兼容**：前端绑定同步改读 `MyServerCredentialNode`）。密码只留在 Host 的 `secrets.enc`，不再进入界面进程。
 - **`node_id` 口径**：返回值和 `my_servers.node_id` 都是本地 `nodes.id`；`my_server_list` / `get` 里的 `node_id` 仍是控制面给出的值，界面建配置必须用本命令返回的 `node_id`。
 - **`ready_at` 是激活成功那一刻**（0003 迁移新增，与服务器 `active`、订单 `ready` 同一批写入）：旧机器为 `null`，界面按「用时未知」显示，**不拿 `created_at` 伪造**。
-- **真实阶段上报（2.41.0）**：cloud-init 依次回传 `installing`（二进制与配置就位）/ `verifying`（`sing-box check` 通过）/ `active`（服务 `is-active` 后带端口与密码）；token 只在最终 `active` 消费。`installing_at` / `verifying_at` 首次进入时写入一次；失败时 `failure.stage` 改从控制面的 `failure_stage` 取（`booting` / `installing` / `verifying` / `active`），旧镜像缺 `stage` 按 `active` 兼容。
+- **真实阶段上报（2.41.0）**：cloud-init 依次回传 `installing`（二进制与配置就位）/ `verifying`（`sing-box check` 通过）/ `active`（服务 `is-active` 后带端口与密码）；token 只在最终 `active` 消费。`installing_at` / `verifying_at` 首次进入时写入一次；失败时 `failure.stage` 改从控制面的 `failure_stage` 取（`booting` / `installing` / `verifying` / `active`），旧镜像缺 `stage` 时用该服务器当前状态补齐（不写成 `active`）。
 - 列表 / 详情 / 事件**永不返回密码**；凭据写入 `secrets.enc` 的 `node:<本地 nodes.id>`，节点行 `source = 'owned'`。
 - 销毁成功后按本地节点行的 `password_ref`（`node:<本地 nodes.id>`）删除密码，**不是**控制面换发后的 `node_id`；节点记录保留并标「服务器已销毁」（§6.5）。
 - **`my_server_rebuild` 未接入（2.36.1）**：控制面 `/v1/servers/{id}/rebuild` 目前恒返回 `PRECONDITION_FAILED / rebuild_not_supported`（`cloudflare/control-plane/src/servers.ts` 的路由分支直接回这个错）。命令、类型与控制面路由都保留，**界面暂不展示「重建」入口**；端点实现后直接放开即可，契约形状不变。不要在前端把失败文案说成「服务器状态异常」，那是另一种谎。
@@ -1635,7 +1635,7 @@ type MyServerCredentialNode = {
 | 支付通道不合法（仅 `my_server_topup`） | `INVALID_ARGUMENT` | `channel_invalid` | 否 | 界面只允许 `dodo`（非生产可 `fake`）；正常路径不会出现 |
 
 - 发 `my-server-changed` / `my-server-order-changed`（`events.md` §4.22 / §4.23）；不新增其它事件。
-- **`my_server_rename`（2.40.0）**：`PATCH /v1/servers/{id} { name }`，服务端按 `account_id` 过滤（别人的服务器与不存在一律 `NOT_FOUND`）；name 先 trim，再按 **Unicode 码点**计长 1–24（中文与单个 emoji 各算 1），非法返回 `INVALID_ARGUMENT / invalid_name`。允许重名，重复改成同一个名字幂等。成功返回完整 `MyServer` 并同时发 `my-server-renamed`（`events.md` §4.28，只带 server_id 与新名字）；**不暴露给 AI**。
+- **`my_server_rename`（2.40.0）**：`PATCH /v1/servers/{id} { name }`，服务端按 `account_id` 过滤（别人的服务器与不存在一律 `NOT_FOUND`）；name 先 trim，再按 **Unicode 码点**计长 1–24（中文与单个 emoji 各算 1），非法返回 `INVALID_ARGUMENT / invalid_name`。允许重名。**同名请求按 HTTP 幂等处理：视为成功、状态不变；服务端仍会照常 UPDATE，Host 成功即发 `my-server-renamed`，因此不保证同名不发电事件**——界面提交前已短路（同名不发请求），事件消费按 `server_id` 覆盖，重复事件无副作用。成功返回完整 `MyServer` 并同时发 `my-server-renamed`（`events.md` §4.28，只带 server_id 与新名字）；**不暴露给 AI**。
 - 不注册写操作 AI 工具；`MyServers` 只读工具只能看列表与状态（`tools.md` §4.x）。
 
 ### 7.16 `my_server_register_device {}` → `MyServerDeviceIdentity`（仅 UI，2.24.0）
@@ -2538,7 +2538,7 @@ type RulesStatus = {
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
-| 1 | 本文件版本升到 `2.41.0`；`MyServer` 增 `installing_at` / `verifying_at`（首次进入该阶段的 ISO 时刻，旧机器为 null）；`failure.stage` 改从控制面 `failure_stage` 取，旧镜像缺字段按 `active` 兼容 | 数据结构 | 建机进度要从「假四段」变成真实阶段 |
+| 1 | 本文件版本升到 `2.41.0`；`MyServer` 增 `installing_at` / `verifying_at`（首次进入该阶段的 ISO 时刻，旧机器为 null）；`failure.stage` 改从控制面 `failure_stage` 取，旧镜像缺字段时用该服务器当前状态补齐 | 数据结构 | 建机进度要从「假四段」变成真实阶段 |
 | 2 | cloud-init 依次回传 `installing` / `verifying` / `active`，token 只在最终 `active` 消费；进度回传按 `enrollment_hash` 鉴权、不消费，消费后的进度回 200 ignored；失败回传带 `failed_stage` | 实现约束 | 同上；避免脚本重试风暴与「未激活就被判死」 |
 
 ### 2.40.0（2026-11-18，服务器改名）
@@ -2547,6 +2547,7 @@ type RulesStatus = {
 |---|---|---|---|
 | 1 | 本文件版本升到 `2.40.0`；新增 `my_server_rename { serverId, name } → MyServer`（仅 UI）：只能改自己的，允许重名；服务端 trim 后按 Unicode 码点校验 1–24，非法 `INVALID_ARGUMENT / invalid_name`（`details` 带 `min_length` / `max_length`） | 新增命令 | 服务器名字由用户决定，控制面只做长度与归属校验 |
 | 2 | 新增事件 `my-server-renamed`（`events.md` 2.19.0 §4.28）：payload 只带 `server_id` 与新名字，不带账号信息；不暴露给 AI | 新增事件 | 持久变化必须成对发事件 |
+| 3 | 同名改名的幂等口径写明：按 HTTP 语义视为成功、状态不变；**服务端仍 UPDATE、Host 成功即发事件，不保证同名不发电事件**；界面提交前短路，事件按 `server_id` 覆盖，重复无副作用 | 语义澄清 | 复核发现幂等只在前端短路，契约原文「幂等」容易被读成「不发事件」 |
 
 ### 2.39.0（2026-11-18，就绪后扣款：**目标状态·未实现**）
 

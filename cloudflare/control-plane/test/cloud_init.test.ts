@@ -41,6 +41,15 @@ describe("cloud-init", () => {
     expect(body).not.toContain('\\"active\\":${ACTIVE}');
   });
 
+  it("installing 在下载之前就置位：下载/sha 失败算安装阶段失败", () => {
+    const body = script();
+    const installing = body.indexOf('CURRENT_STAGE="installing"');
+    const download = body.indexOf("releases/download");
+    expect(installing).toBeGreaterThan(-1);
+    expect(download).toBeGreaterThan(-1);
+    expect(installing).toBeLessThan(download);
+  });
+
   it("三段上报：installing / verifying / active，失败带 failed_stage", () => {
     const body = script();
     expect(body).toContain("report_progress installing");

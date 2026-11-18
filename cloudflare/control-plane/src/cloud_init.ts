@@ -81,13 +81,14 @@ apt-get update -qq || true
 apt-get install -y -qq curl ca-certificates tar >/dev/null 2>&1
 
 # 3. 下载并校验 sing-box
+# 从这里开始任何失败都算「安装阶段失败」：下载、sha 校验、解包都包括在内。
+CURRENT_STAGE="installing"
 cd /tmp
 curl -fsSL --retry 5 --retry-delay 5 -o sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v\${SING_BOX_VERSION}/sing-box-\${SING_BOX_VERSION}-linux-\${ARCH}.tar.gz"
 echo "\${SING_BOX_SHA256}  sb.tar.gz" | sha256sum -c -
 tar -xzf sb.tar.gz
 install -m 0755 "sing-box-\${SING_BOX_VERSION}-linux-\${ARCH}/sing-box" /usr/local/bin/sing-box
 rm -rf sb.tar.gz "sing-box-\${SING_BOX_VERSION}-linux-\${ARCH}"
-CURRENT_STAGE="installing"
 
 # 4. 密码在这台机器上生成：od 只读 16 字节，下游 tr/cut 读满全部输入，不会 SIGPIPE。
 PASSWORD=$(od -An -tx1 -N 16 /dev/urandom | tr -d ' \\n' | cut -c1-16)

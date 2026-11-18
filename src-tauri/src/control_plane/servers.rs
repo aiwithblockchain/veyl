@@ -50,7 +50,8 @@ pub struct MyServerFailure {
 }
 
 fn default_failure_stage() -> String {
-    "active".to_string()
+    // 中性缺省：解析时留空，由 `remember_server_failure` 用该服务器当前状态补齐。
+    String::new()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -373,7 +374,12 @@ fn remember_server_failure(server: &MyServer) {
     let map = failures.get_or_insert_with(HashMap::new);
     match &server.failure {
         Some(failure) => {
-            map.insert(server.server_id.clone(), failure.clone());
+            let mut failure = failure.clone();
+            if failure.stage.trim().is_empty() {
+                // 旧镜像没有 stage：用这台服务器当前的状态补，不要凭空写成 active。
+                failure.stage = server.state.clone();
+            }
+            map.insert(server.server_id.clone(), failure);
         }
         // 最新一次观察到是健康的：旧失败不再代表现状。
         None => {
@@ -1048,13 +1054,24 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_without_stage_is_treated_as_active() {
-        // 旧镜像没有 stage：按 active 兼容，不能整条解析失败。
+    fn a_failure_without_stage_falls_back_to_the_server_state() {
+        // 旧镜像没有 stage：解析留空，记住时用服务器当前状态补齐，不能凭空写成 active。
         let failure: MyServerFailure = serde_json::from_str(
             r#"{"code":"service_inactive","message":"没起来","retryable":false}"#,
         )
         .unwrap();
-        assert_eq!(failure.stage, "active");
+        assert!(failure.stage.is_empty());
+
+        let mut value = sample_server_json();
+        value["failure"] = json!({
+            "stage": "",
+            "code": "service_inactive",
+            "message": "没起来",
+            "retryable": false
+        });
+        let server: MyServer = serde_json::from_value(value).unwrap();
+        remember_server_failure(&server);
+        assert_eq!(server_failure("srv_1").map(|f| f.stage), Some("active".into()));
     }
 
     #[test]

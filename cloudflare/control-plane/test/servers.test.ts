@@ -398,6 +398,67 @@ describe("enroll 激活守卫", () => {
     expect(db.rows("servers")[0].state).toBe("verifying");
   });
 
+  it("两个进度回调同时到达：都 200，状态只前进", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedBootingForActivation(db);
+
+    const [installing, verifying] = await Promise.all([
+      handleServers(stageRequest({ stage: "installing" }), env as never),
+      handleServers(stageRequest({ stage: "verifying" }), env as never),
+    ]);
+
+    expect(installing?.status).toBe(200);
+    expect(verifying?.status).toBe(200);
+    expect(["installing", "verifying"]).toContain(
+      String(db.rows("servers")[0].state),
+    );
+    expect(db.rows("servers")[0].enrollment_used_at).toBeNull();
+  });
+
+  it("进度与 active 同时到达：active 成功，进度不会把状态改回去", async () => {
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedBootingForActivation(db);
+
+    const [progress, active] = await Promise.all([
+      handleServers(stageRequest({ stage: "installing" }), env as never),
+      handleServers(
+        stageRequest({
+          stage: "active",
+          port: 20443,
+          password: "secret-password",
+          active: true,
+          version: "1.14.0",
+        }),
+        env as never,
+      ),
+    ]);
+
+    expect(progress?.status).toBe(200);
+    expect(active?.status).toBe(200);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("active");
+    expect(server.enrollment_used_at).toBeTruthy();
+    expect(server.ready_at).toBeTruthy();
+    // token 只被消费一次：激活审计只有一条，重放 active 必须 409。
+    expect(
+      db.rows("audit_log").filter((row) => row.action === "enroll.ok"),
+    ).toHaveLength(1);
+    const replay = await handleServers(
+      stageRequest({
+        stage: "active",
+        port: 20443,
+        password: "secret-password",
+        active: true,
+        version: "1.14.0",
+      }),
+      env as never,
+    );
+    expect(replay?.status).toBe(409);
+    expect(((await replay!.json()) as { reason: string }).reason).toBe("already_used");
+  });
+
   it("失败阶段落库：failed_stage=verifying → 销毁、verify_failed、退款", async () => {
     const db = new FakeD1();
     const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
@@ -509,6 +570,20 @@ describe("服务器重命名", () => {
     expect(
       ((await tooLong!.json()) as { details: { reason: string } }).details.reason,
     ).toBe("invalid_name");
+  });
+
+  it("销毁中 / 已销毁的服务器不能改名：404", async () => {
+    for (const state of ["destroying", "destroyed"]) {
+      const db = new FakeD1();
+      const env = await envWith(db, await signingJwk());
+      seedServer(db, state);
+      if (state === "destroyed") db.rows("servers")[0].destroyed_at = Date.now();
+
+      const res = await handleServers(patchRequest(env.token, "新名字"), env as never);
+
+      expect(res?.status, state).toBe(404);
+      expect(db.rows("servers")[0].name).toBe("我的服务器0001");
+    }
   });
 
   it("重复改成同一个名字幂等", async () => {

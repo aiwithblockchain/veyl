@@ -292,58 +292,99 @@ mod tests {
     /// 用真实请求验证 `builder()` 的 `no_proxy()`：构建前把代理环境变量指向
     /// 一个只会返回 502 的假代理，请求如果走了代理就必然失败。
     ///
-    /// reqwest 在 `build()` 时读取代理设置，所以环境变量只在 build 期间注入；
-    /// 之后即使没装 `no_proxy`，客户端也已经固化了代理配置。
+    /// 两个注意点：
+    /// - 进程环境变量是全局共享状态，改它必须拿 `ENV_LOCK`（规则文件那边用同一把）。
+    /// - 本地监听线程必须活到断言结束。早先用「固定 3 秒窗口」，全量并行下线程被饿过
+    ///   3 秒后监听已关闭、连接被拒（`UnexpectedMessage`）——那才是这条 flaky 的根因。
     #[test]
     fn the_control_plane_client_never_uses_a_proxy() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::net::{SocketAddr, TcpListener};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::Arc;
-        use std::time::Instant;
 
-        // set_var 与并行测试的 getenv 并发是未定义行为：与其它改环境的测试共用一把锁。
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
 
-        fn serve(listener: TcpListener, body: &'static [u8], hits: Arc<AtomicUsize>) {
-            listener.set_nonblocking(true).unwrap();
-            std::thread::spawn(move || {
-                let start = Instant::now();
-                while start.elapsed() < Duration::from_secs(3) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            hits.fetch_add(1, Ordering::SeqCst);
-                            let _ =
-                                stream.set_read_timeout(Some(Duration::from_millis(500)));
-                            let mut buffer = [0u8; 1024];
-                            let _ = stream.read(&mut buffer);
-                            let _ = stream.write_all(body);
-                            let _ = stream.flush();
-                        }
-                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
-                    }
-                }
-            });
+        /// 只在测试期间运行的本地 HTTP 桩：读到请求头结束再回响应。
+        struct Server {
+            hits: Arc<AtomicUsize>,
+            stop: Arc<AtomicBool>,
+            handle: Option<std::thread::JoinHandle<()>>,
         }
 
-        let poison = TcpListener::bind("127.0.0.1:0").unwrap();
-        let poison_addr = poison.local_addr().unwrap();
-        let poison_hits = Arc::new(AtomicUsize::new(0));
-        serve(
-            poison,
-            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n",
-            poison_hits.clone(),
-        );
+        impl Server {
+            fn spawn(listener: TcpListener, body: &'static [u8]) -> Self {
+                listener.set_nonblocking(true).unwrap();
+                let hits = Arc::new(AtomicUsize::new(0));
+                let stop = Arc::new(AtomicBool::new(false));
+                let hits_thread = Arc::clone(&hits);
+                let stop_thread = Arc::clone(&stop);
+                let handle = std::thread::spawn(move || {
+                    while !stop_thread.load(Ordering::SeqCst) {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                hits_thread.fetch_add(1, Ordering::SeqCst);
+                                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                                let mut buffer = Vec::new();
+                                let mut chunk = [0u8; 1024];
+                                loop {
+                                    match stream.read(&mut chunk) {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            buffer.extend_from_slice(&chunk[..n]);
+                                            if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                                let _ = stream.write_all(body);
+                                let _ = stream.flush();
+                            }
+                            Err(ref error)
+                                if error.kind() == std::io::ErrorKind::WouldBlock =>
+                            {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                        }
+                    }
+                });
+                Self {
+                    hits,
+                    stop,
+                    handle: Some(handle),
+                }
+            }
+        }
 
-        let target = TcpListener::bind("127.0.0.1:0").unwrap();
-        let target_addr = target.local_addr().unwrap();
-        let target_hits = Arc::new(AtomicUsize::new(0));
-        serve(
-            target,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
-            target_hits.clone(),
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::SeqCst);
+                // 线程每轮最多睡 10ms，join 不会卡住。
+                if let Some(handle) = self.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
+
+        let bind = |addr: &str| -> (TcpListener, SocketAddr) {
+            let listener = TcpListener::bind(addr).unwrap();
+            let address = listener.local_addr().unwrap();
+            (listener, address)
+        };
+        let (poison_listener, poison_addr) = bind("127.0.0.1:0");
+        let poison = Server::spawn(
+            poison_listener,
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let (target_listener, target_addr) = bind("127.0.0.1:0");
+        let target = Server::spawn(
+            target_listener,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
         );
 
         let keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
@@ -371,10 +412,10 @@ mod tests {
             .block_on(async { client.get(&url).send().await })
             .expect("控制面客户端应该直连目标");
         assert_eq!(response.status().as_u16(), 200);
-        assert_eq!(target_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(target.hits.load(Ordering::SeqCst), 1);
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(
-            poison_hits.load(Ordering::SeqCst),
+            poison.hits.load(Ordering::SeqCst),
             0,
             "控制面请求走了系统/环境代理"
         );
