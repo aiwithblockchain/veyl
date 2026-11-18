@@ -341,10 +341,13 @@ describe("买机扣余额", () => {
     expect(res?.status).toBe(409);
     const body = (await res!.json()) as {
       retryable: boolean;
-      details: { reason: string; shortfall_cents: number };
+      details: { reason: string; required_cents: number; shortfall_cents: number; min_days: number };
     };
     expect(body.details.reason).toBe("insufficient_balance");
-    expect(body.details.shortfall_cents).toBe(30);
+    // 2.37.1：门槛是 7 天日价（30 × 7 = 210），余额 0 时差额就是整笔门槛。
+    expect(body.details.required_cents).toBe(210);
+    expect(body.details.shortfall_cents).toBe(210);
+    expect(body.details.min_days).toBe(7);
     // 契约要求充值后可重试；retryable=false 会让 Host 当终态处理。
     expect(body.retryable).toBe(true);
     expect(db.rows("servers")).toHaveLength(0);

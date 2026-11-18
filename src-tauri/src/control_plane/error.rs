@@ -138,6 +138,17 @@ pub fn from_response(status: u16, body: &str) -> CpError {
         .and_then(|value| value.get("details"))
         .and_then(|details| details.get("shortfall_cents"))
         .and_then(Value::as_i64);
+    // 建机门槛（commands.md 2.37.1）：界面要显示「还差 X」，也要知道门槛是几天。
+    let required_cents = parsed
+        .as_ref()
+        .and_then(|value| value.get("details"))
+        .and_then(|details| details.get("required_cents"))
+        .and_then(Value::as_i64);
+    let min_days = parsed
+        .as_ref()
+        .and_then(|value| value.get("details"))
+        .and_then(|details| details.get("min_days"))
+        .and_then(Value::as_u64);
 
     let mapped = match code {
         // 登录门禁的两种 reason 用 `UNAUTHENTICATED`（commands.md §7.18）；
@@ -219,6 +230,12 @@ pub fn from_response(status: u16, body: &str) -> CpError {
         if let Some(value) = shortfall_cents {
             details.insert("shortfall_cents".into(), json!(value));
         }
+        if let Some(value) = required_cents {
+            details.insert("required_cents".into(), json!(value));
+        }
+        if let Some(value) = min_days {
+            details.insert("min_days".into(), json!(value));
+        }
     }
 
     CpError {
@@ -299,14 +316,17 @@ mod tests {
         assert_eq!(error.reason(), Some("code_invalid"));
         assert_eq!(error.details["attempts_remaining"], 2);
 
-        // 余额不足的差额必须原样透出，界面据此显示「还差 $N」。
+        // 余额不足的差额必须原样透出，界面据此显示「还差 $N」；
+        // 门槛值（2.37.1）与「几天」也要一起带出去，不能只留差额。
         let error = from_response(
             402,
-            r#"{"code":"PRECONDITION_FAILED","message":"余额不足","retryable":true,"details":{"reason":"insufficient_balance","shortfall_cents":350}}"#,
+            r#"{"code":"PRECONDITION_FAILED","message":"余额不足","retryable":true,"details":{"reason":"insufficient_balance","required_cents":210,"shortfall_cents":30,"min_days":7}}"#,
         );
         assert_eq!(error.code, "PRECONDITION_FAILED");
         assert_eq!(error.reason(), Some("insufficient_balance"));
-        assert_eq!(error.details["shortfall_cents"], 350);
+        assert_eq!(error.details["required_cents"], 210);
+        assert_eq!(error.details["shortfall_cents"], 30);
+        assert_eq!(error.details["min_days"], 7);
         assert!(error.retryable);
     }
 

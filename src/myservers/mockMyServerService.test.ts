@@ -78,3 +78,74 @@ describe("mock 默认数据", () => {
     expect(() => service.wallet()).toThrow();
   });
 });
+
+describe("建机余额门槛（日价 × 7）", () => {
+  const STORE_KEY = "veyl.mock.myServers";
+  const ACCOUNT_KEY = "veyl.mock.account";
+
+  function seed(balanceCents: number) {
+    localStorage.setItem(
+      ACCOUNT_KEY,
+      JSON.stringify({ logged_in: true, email: "a@b.co" }),
+    );
+    localStorage.setItem(
+      STORE_KEY,
+      JSON.stringify({
+        servers: [],
+        orders: [],
+        next_id: 1,
+        balance_cents: balanceCents,
+      }),
+    );
+  }
+
+  function setBalance(balanceCents: number) {
+    const store = JSON.parse(localStorage.getItem(STORE_KEY) as string);
+    store.balance_cents = balanceCents;
+    localStorage.setItem(STORE_KEY, JSON.stringify(store));
+  }
+
+  function order(service: MockMyServerService, key: string) {
+    return service.create({
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      idempotencyKey: key,
+    });
+  }
+
+  it("余额 6 天费用被拒：短差按 7 天门槛算", () => {
+    // $0.30/天 × 7 = 210 分；200 分只够 6 天。
+    seed(200);
+    const service = new MockMyServerService();
+    const created = order(service, "k1");
+
+    let thrown: unknown = null;
+    try {
+      service.checkout(created.order_id);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({
+      code: "PRECONDITION_FAILED",
+      details: {
+        reason: "insufficient_balance",
+        required_cents: 210,
+        shortfall_cents: 10,
+        min_days: 7,
+      },
+    });
+    // 拒绝时不扣钱。
+    expect(service.wallet().balance_cents).toBe(200);
+  });
+
+  it("余额正好 7 天放行：只扣 1 天", () => {
+    seed(200);
+    const service = new MockMyServerService();
+    const created = order(service, "k2");
+    setBalance(210);
+
+    const charge = service.checkout(created.order_id);
+    expect(charge.charged_cents).toBe(30);
+    expect(charge.balance_after_cents).toBe(180);
+  });
+});

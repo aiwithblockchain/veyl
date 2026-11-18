@@ -431,3 +431,154 @@ describe("返回控件", () => {
     );
   });
 });
+
+describe("建机余额门槛（余额 ≥ 日价 × 7）", () => {
+  function wizardBridge(
+    balanceCents: number,
+    checkout: ReturnType<typeof vi.fn> = vi.fn(async () => ({
+      order_id: "ord_1",
+      state: "paid" as const,
+      charged_cents: 30,
+      balance_after_cents: balanceCents - 30,
+    })),
+  ) {
+    return {
+      myServerWallet: vi.fn(async () => ({ balance_cents: balanceCents })),
+      myServerCreate: vi.fn(async () => ({
+        server_id: "srv_1",
+        order_id: "ord_1",
+      })),
+      myServerCheckout: checkout,
+    } as unknown as AgentBridge;
+  }
+
+  it("只有 6 天费用：不下单，原地提示还差多少并给去充值", async () => {
+    // 默认档位 $0.30/天 → 门槛 210 分；180 分只够 6 天。
+    const bridge = wizardBridge(180);
+    const onTopUp = vi.fn();
+    render(
+      <MyServerWizard
+        bridge={bridge}
+        catalog={CATALOG}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={onTopUp}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("余额不足，还差 $0.30。");
+    expect(bridge.myServerCreate).not.toHaveBeenCalled();
+    expect(bridge.myServerCheckout).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "去充值" }));
+    expect(onTopUp).toHaveBeenCalledTimes(1);
+  });
+
+  it("正好 7 天费用：允许下单并结账", async () => {
+    const bridge = wizardBridge(210);
+    render(
+      <MyServerWizard
+        bridge={bridge}
+        catalog={CATALOG}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+
+    await waitFor(() => expect(bridge.myServerCheckout).toHaveBeenCalledTimes(1));
+    expect(bridge.myServerCreate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("Host 回 insufficient_balance：用 details.shortfall_cents 拼文案并给去充值", async () => {
+    const checkout = vi.fn(async () => {
+      throw {
+        code: "PRECONDITION_FAILED",
+        message: "余额不足",
+        retryable: true,
+        details: {
+          reason: "insufficient_balance",
+          required_cents: 210,
+          shortfall_cents: 210,
+          min_days: 7,
+        },
+      };
+    });
+    const bridge = wizardBridge(1000, checkout);
+    render(
+      <MyServerWizard
+        bridge={bridge}
+        catalog={CATALOG}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("余额不足，还差 $2.10。");
+    expect(screen.getByRole("button", { name: "去充值" })).toBeTruthy();
+  });
+});
+
+describe("余额不足错误的不同 details 形状", () => {
+  function renderWithCheckout(details: Record<string, unknown>, balanceCents = 1000) {
+    const checkout = vi.fn(async () => {
+      throw {
+        code: "PRECONDITION_FAILED",
+        message: "余额不足",
+        retryable: true,
+        details,
+      };
+    });
+    const bridge = {
+      myServerWallet: vi.fn(async () => ({ balance_cents: balanceCents })),
+      myServerCreate: vi.fn(async () => ({
+        server_id: "srv_1",
+        order_id: "ord_1",
+      })),
+      myServerCheckout: checkout,
+    } as unknown as AgentBridge;
+    render(
+      <MyServerWizard
+        bridge={bridge}
+        catalog={CATALOG}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+    return checkout;
+  }
+
+  it("旧形状只回 shortfall_cents：仍显示还差多少", async () => {
+    await renderWithCheckout({
+      reason: "insufficient_balance",
+      shortfall_cents: 30,
+    });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("余额不足，还差 $0.30。");
+    expect(screen.getByRole("button", { name: "去充值" })).toBeTruthy();
+  });
+
+  it("只回 required_cents：用预检读到的余额补算短差", async () => {
+    // 预检（余额 1000 ≥ 210）会放行，这里故意让 Host 的 required 高于余额，
+    // 否则兜底分支永远走不到。
+    await renderWithCheckout(
+      { reason: "insufficient_balance", required_cents: 1030 },
+      1000,
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("余额不足，还差 $0.30。");
+    expect(screen.getByRole("button", { name: "去充值" })).toBeTruthy();
+  });
+});

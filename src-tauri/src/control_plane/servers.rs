@@ -513,11 +513,11 @@ pub async fn create(
     merge_order(raw, &order_id, None, Some(region), Some(plan))
 }
 
-/// 从余额扣一个月并开始建机（2.28.0）。
+/// 从余额扣 1 天并开始建机（2.28.0；2.37.1 起门槛是 7 天日价）。
 ///
 /// 余额不足由控制面返回 `PRECONDITION_FAILED / insufficient_balance`，并带
-/// `details.shortfall_cents`；Host 原样透出，不做浮点换算。已付过的订单重复
-/// 调用返回 200 且 `charged_cents = 0`，不是二次扣费。
+/// `details.required_cents` / `shortfall_cents` / `min_days`；Host 原样透出，
+/// 不做浮点换算。已付过的订单重复调用返回 200 且 `charged_cents = 0`，不是二次扣费。
 pub async fn checkout(order_id: &str) -> Result<MyServerCharge, CpError> {
     let client = ControlPlane::new()?;
     let raw = client

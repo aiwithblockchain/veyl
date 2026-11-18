@@ -207,7 +207,7 @@ describe("orders", () => {
     );
     expect(checkout?.status).toBe(200);
     const paid = (await checkout!.json()) as { charged_cents: number; balance_after_cents: number };
-    // 契约 2.28.0：结账直接从余额扣一个月，返回扣了多少、扣完还剩多少。
+    // 2.37.1：余额只需覆盖 7 天日价（30 × 7 = 210），实际仍只扣第 1 天的 30。
     expect(paid.charged_cents).toBe(30);
     expect(paid.balance_after_cents).toBe(1970);
     expect(db.rows("servers")).toHaveLength(1);
@@ -220,6 +220,172 @@ describe("orders", () => {
     expect(typeof server.enrollment_hash).toBe("string");
     // 建机快照：目录 transfer(TB) × 1000 落进 servers 行，供详情展示。
     expect(server.transfer_gib).toBe(1000);
+  });
+
+  it("余额不足 7 天日价时拒绝建机，details 带门槛值", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+
+    const created = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-6d"), env as never)
+    )!.json()) as { order_id: string };
+    // s-1vcpu-1gb 日价 30：余额只有 6 天（180），门槛是 210，差 30。
+    db.rows("accounts")[0].balance_cents = 180;
+
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-6d" },
+      }),
+      env as never,
+    );
+    expect(checkout?.status).toBe(409);
+    const body = (await checkout!.json()) as {
+      details: { reason: string; required_cents: number; shortfall_cents: number; min_days: number };
+    };
+    expect(body.details.reason).toBe("insufficient_balance");
+    expect(body.details.required_cents).toBe(210);
+    expect(body.details.shortfall_cents).toBe(30);
+    expect(body.details.min_days).toBe(7);
+    // 不扣钱、不建机、订单留在 pending_payment。
+    expect(db.rows("accounts")[0].balance_cents).toBe(180);
+    expect(db.rows("servers")).toHaveLength(0);
+    expect(db.rows("orders")[0].state).toBe("pending_payment");
+  });
+
+  it("余额正好 7 天日价时放行，只扣 1 天", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+
+    const created = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-7d"), env as never)
+    )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 210;
+
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-7d" },
+      }),
+      env as never,
+    );
+    expect(checkout?.status).toBe(200);
+    const paid = (await checkout!.json()) as { charged_cents: number; balance_after_cents: number };
+    expect(paid.charged_cents).toBe(30);
+    expect(paid.balance_after_cents).toBe(180);
+    expect(db.rows("servers")).toHaveLength(1);
+  });
+
+  it("预检之后余额被并发花掉，门槛在记账语句里再次拦住", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+
+    const created = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-race"), env as never)
+    )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 210;
+    // 另一笔扣费在预检之后、记账之前落地：只靠快照会打穿，必须由 INSERT 的守卫挡住。
+    db.beforeWalletInsert = () => {
+      db.beforeWalletInsert = undefined;
+      db.rows("accounts")[0].balance_cents = 179;
+    };
+
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-race" },
+      }),
+      env as never,
+    );
+    expect(checkout?.status).toBe(409);
+    const body = (await checkout!.json()) as {
+      details: { reason: string; required_cents: number; shortfall_cents: number; min_days: number };
+    };
+    expect(body.details.reason).toBe("insufficient_balance");
+    expect(body.details.required_cents).toBe(210);
+    expect(body.details.shortfall_cents).toBe(31);
+    expect(body.details.min_days).toBe(7);
+    expect(db.rows("servers")).toHaveLength(0);
+  });
+
+  it("守卫失败后余额被充值补上，重试一次完成扣费", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+
+    const created = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-retry"), env as never)
+    )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 210;
+    // 第一笔记账被并发扣费挡在守卫外；充值在守卫之后、重试之前落地。
+    db.beforeWalletInsert = () => {
+      db.beforeWalletInsert = undefined;
+      db.rows("accounts")[0].balance_cents = 179;
+      queueMicrotask(() => {
+        db.rows("accounts")[0].balance_cents = 210;
+      });
+    };
+
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-retry" },
+      }),
+      env as never,
+    );
+    expect(checkout?.status).toBe(200);
+    const paid = (await checkout!.json()) as { charged_cents: number; balance_after_cents: number };
+    expect(paid.charged_cents).toBe(30);
+    expect(paid.balance_after_cents).toBe(180);
+    expect(db.rows("servers")).toHaveLength(1);
+    expect(
+      db.rows("wallet_ledger").filter((row) => row.ref_type === "order"),
+    ).toHaveLength(1);
+  });
+
+  it("两笔 checkout 并发时门槛只放行一笔", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+
+    const create = async (key: string) => {
+      const res = await handleOrders(orderRequest(env.token, key), env as never);
+      return ((await res!.json()) as { order_id: string }).order_id;
+    };
+    const first = await create("idem-key-conc-1");
+    const second = await create("idem-key-conc-2");
+    // 只够一笔 7 天门槛：两笔同时结账，第二笔必须被挡住。
+    db.rows("accounts")[0].balance_cents = 210;
+
+    const checkout = (orderId: string, key: string) =>
+      handleOrders(
+        new Request(`https://example.com/v1/orders/${orderId}/checkout`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": key },
+        }),
+        env as never,
+      );
+
+    const results = await Promise.all([
+      checkout(first, "idem-conc-a"),
+      checkout(second, "idem-conc-b"),
+    ]);
+    expect(results.map((res) => res?.status).sort()).toEqual([200, 409]);
+    const refused = results.find((res) => res?.status === 409)!;
+    const body = (await refused.json()) as {
+      details: { reason: string; required_cents: number; min_days: number };
+    };
+    expect(body.details.reason).toBe("insufficient_balance");
+    expect(body.details.required_cents).toBe(210);
+    expect(body.details.min_days).toBe(7);
+    expect(db.rows("servers")).toHaveLength(1);
+    expect(db.rows("accounts")[0].balance_cents).toBe(180);
+    expect(
+      db.rows("wallet_ledger").filter((row) => row.ref_type === "order"),
+    ).toHaveLength(1);
   });
 
   it("未支付订单可以取消；已支付不行", async () => {

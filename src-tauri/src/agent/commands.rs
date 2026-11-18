@@ -347,7 +347,8 @@ pub async fn my_server_create(
     }
 }
 
-/// 从余额扣一个月并开始建机（2.28.0，仅 UI）；余额不足原样透出 shortfall。
+/// 从余额扣 1 天并开始建机（2.28.0，仅 UI；2.37.1 起门槛是 7 天日价）；
+/// 余额不足原样透出 `required_cents` / `shortfall_cents` / `min_days`。
 #[tauri::command]
 pub async fn my_server_checkout(order_id: String) -> Result<Value, Value> {
     match crate::control_plane::servers::checkout(&order_id).await {

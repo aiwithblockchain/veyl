@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.37.0`
+> 契约版本：`2.37.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -206,7 +206,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 75 | `my_server_list` | `{}` | `{ servers: MyServer[] }` | **2.23.0 新增（仅 UI）；我的服务器列表** |
 | 76 | `my_server_get` | `{ serverId }` | `MyServer` | **2.23.0 新增（仅 UI）；详情，含 `node_id`** |
 | 77 | `my_server_create` | `{ region, plan, idempotencyKey }` | `MyServerOrder` | **2.23.0 新增（仅 UI）；下单（假支付）** |
-| 78 | `my_server_checkout` | `{ orderId }` | `MyServerCharge` | **2.23.0 新增（仅 UI）；2.28.0 起从余额扣费并开通，参数去掉 `channel`；2.29.0 起只扣 1 天（日价），余额由每日 Cron 逐日续扣** |
+| 78 | `my_server_checkout` | `{ orderId }` | `MyServerCharge` | **2.23.0 新增（仅 UI）；2.28.0 起从余额扣费并开通，参数去掉 `channel`；2.29.0 起只扣 1 天（日价），余额由每日 Cron 逐日续扣；2.37.1 起创建门槛为余额 ≥ 日价 × 7（仍只扣 1 天）** |
 | 79 | `my_server_cancel_order` | `{ orderId }` | `MyServerOrder` | **2.23.0 新增（仅 UI）；取消订单** |
 | 80 | `my_server_destroy` | `{ serverId, confirm }` | `MyServer`（`state: "destroying"`） | **2.23.0 新增（仅 UI）；销毁** |
 | 81 | `my_server_rebuild` | `{ serverId, confirm }` | `MyServerRebuildResult`（`{ newServerId, state }`） | **2.23.0 新增（仅 UI）；销毁旧机并同地区同套餐重建；2.36.1 起未接入：控制面恒返回 `rebuild_not_supported`，界面暂不展示入口** |
@@ -1639,7 +1639,7 @@ type MyServerIdentity = { has_identity: boolean; account_id: string | null };
 - `account_id` 只在 `has_identity` 为真时给出；否则为 `null`。
 - 本地读取失败一律按 `false` 返回，不抛错、不发事件、不产生任何写入。
 
-### 7.18 登录与支付命令（仅 UI，2.27.0；2.27.1 增 `account_kind`；2.28.0 改预付费余额；2.29.0 改按天扣费）
+### 7.18 登录与支付命令（仅 UI，2.27.0；2.27.1 增 `account_kind`；2.28.0 改预付费余额；2.29.0 改按天扣费；2.37.1 建机门槛 7 天余额）
 
 设计见 `docs/design/login-and-payment.md`。设备身份仍由 Host 静默维护；登录把设备并入邮箱账户，**建机、服务器管理、支付都要求已登录**。令牌与设备秘密仍只在 Host 的 `secrets.enc`，前端拿不到。
 
@@ -1688,9 +1688,11 @@ type MyServerCharge = {
 | `my_server_order_get { orderId }` | `GET /v1/orders/{id}`；建机期间轮询，事件不可用时同样用它兜底 |
 | `my_server_wallet {}` | `GET /v1/wallet`；返回余额与可充值档位（`denominations_cents`，USD 分、升序，来自产品表键）。`updated_at` 由 Host 本地取时间，控制面不提供。余额与扣费都由 Host 计算，前端不做金额运算 |
 | `my_server_topup { denomination, channel? }` | `POST /v1/topups` 创建 Dodo 充值会话，返回 `checkout_url` 由系统浏览器打开；`channel` 省略等于 `dodo`，非生产可 `fake`（直接入账）。**收银台在浏览器里打不开时不能报成功**：返回 `INTERNAL / checkout_open_failed`，`details` 带 `topup_id`、`checkout_url` 与 `open_error`，界面据此给「重新打开」和可复制的链接 |
-| `my_server_checkout { orderId }` | **从余额扣 1 天**（`charged_cents` = 第 0 天的日价）：成功返回 `MyServerCharge` 并开始建机；之后每天由控制面 Cron 扣一天。余额不足 → `insufficient_balance`（带 `details.shortfall_cents`），不扣钱、不建机、订单保持 `pending_payment` |
+| `my_server_checkout { orderId }` | **余额 ≥ 日价 × 7 才放行，实际只扣 1 天**（`charged_cents` = 第 0 天的日价）：成功返回 `MyServerCharge` 并开始建机；之后每天由控制面 Cron 扣一天。余额不足 → `insufficient_balance`（带 `required_cents` / `shortfall_cents` / `min_days`），不扣钱、不建机、订单保持 `pending_payment` |
 
 - **计费单位是「天」**（2026-11-16 拍板）：买机那次 `checkout` 只扣 1 天，之后控制面每天扣一天，直到余额不足进 7 天宽限。契约里没有「月」的概念，`monthly_usd` 只是展示用的乘法。
+- **建机门槛是 7 天费用，不是预扣**（2.37.1，2026-11-18 产品拍板）：`checkout` 要求 `balance_cents ≥ 日价快照 × 7`（日价快照 = 订单 `amount_cents`；$6 档 = 140 分、$9 档 = 210 分、$18 档 = 420 分），实际仍只扣 1 天。**门槛只是准入校验**：`paid_until` 仍是 `created_at + 1d`，不预扣 7 天、不改变逐日 Cron 续费与 7 天宽限的既有口径；销毁仍只退「已扣但未用完的整天」（§7.15、`login-and-payment.md` §4.6）。`my_server_rebuild` 走新订单，同一门槛。
+- **门槛与扣费必须由同一条账本语句保证**：`recordLedgerEntry` 的守卫条件用 7× 日价（`guard`），`amountCents` 仍是 −1× 日价。只做扣费前的余额查询不够——预检与扣款之间进来的并发扣费能把余额打到 1 天门槛以内，导致「门槛形同虚设」。
 - **`MyServerCharge.charged_cents` 就是日价**：$6 档 = 20、$9 档 = 30、$18 档 = 60（USD 分）。前端不要用它乘 30 去「还原月价」，那是 `daily_price_cents × 30`。
 - **账户块只显示余额，不显示「约可运行 N 天」**：多台机器时「余额 ÷ 各机器日价合计」把不同套餐的消耗混成一个数，用户据此判断不到任何一台的到期时间；核对到期靠机器详情的 `每天 $X · 本期有效至 …`（`MyServer.paid_until`）。派生值不下发、也不在 Worker、Host、前端各自算一份——2026-11-16 用户拍板撤掉。
 - **`MyServer` 的计费事实在 §7.15**：`paid_until`（已付到哪一刻）、`daily_price_cents`、`billing_state`、`grace_ends_at`；界面渲染「每天 $X · 本期有效至 …」与宽限剩余天数只用这四个字段。
@@ -1722,8 +1724,11 @@ type MyServerCharge = {
 | 订单已结束（已取消/失败），不能再扣费 | `PRECONDITION_FAILED` | `order_not_payable` | 否 |
 | 同一幂等键仍在处理中 | `PRECONDITION_FAILED` | `idempotency_in_flight` | 是 |
 | 同一幂等键用于不同请求体 | `PRECONDITION_FAILED` | `idempotency_conflict` | 否 |
-| **余额不足** | `PRECONDITION_FAILED` | `insufficient_balance`（带 `details.shortfall_cents`） | 是（充值后重试） |
+| **余额不足（不足 7 天费用）** | `PRECONDITION_FAILED` | `insufficient_balance`；`details`：`required_cents`（日价 × 7）、`shortfall_cents`（`required_cents − 余额`，恒 > 0）、`min_days: 7` | 是（充值后重试） |
 | 充值面额不合法 | `PRECONDITION_FAILED` | `invalid_denomination` | 否 |
+
+- **余额不足的 `details` 只认三个字段**：`required_cents`、`shortfall_cents`、`min_days`。`shortfall_cents` 是唯一短差字段（前端 `MyServerWizard.tsx` 读的就是它）；早期文档里的 `shortfall` 只是简写，**没有这个字段**，不要另发一份。Host 映射层（`src-tauri/src/control_plane/error.rs`）逐字段透出 `required_cents`（i64）/ `shortfall_cents`（i64）/ `min_days`（u64），**任一缺失不影响其它字段**；前端按字段存在与否分别使用，不要求三个齐全。
+- **用户看到的文案由前端拼**：`余额不足，还差 $X。`（`X = shortfall_cents`，按美元分格式化）；不把 Worker 的 `message` 直接贴到界面。
 
 - 不注册任何 AI 工具（登录、支付、下单都不交给模型）；不发新事件，登录态由命令返回。
 
@@ -2469,7 +2474,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.37.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** |
+| `contracts/commands.md` | **2.37.1** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** |
 | `contracts/events.md` | **2.17.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0） |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
 | `contracts/tools.md` | **3.18.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** |
@@ -2487,6 +2492,14 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.37.1（2026-11-18，建机门槛改为 7 天余额）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.37.1`；`my_server_checkout` 的余额校验从「≥ 1 天日价」改为「≥ 日价 × 7」，**实际仍只扣 1 天**；门槛不是预扣，不改变 `paid_until`、逐日 Cron 与 7 天宽限 | 语义变更 | 产品负责人 2026-11-18 拍板；`login-and-payment.md` §4.4 / §4.11 |
+| 2 | `insufficient_balance` 的 `details` 明确为 `required_cents` / `shortfall_cents` / `min_days: 7`；`shortfall_cents` 是唯一短差字段且**不足时恒 > 0**，**不存在 `shortfall`** | 错误语义 | 前端 `MyServerWizard.tsx` 已读 `shortfall_cents` |
+| 3 | 门槛与扣费由账本守卫同批保证（`guard` 用 7×，扣减仍是 1×）；rebuild 走新订单、同一门槛 | 实现约束 | 防止预检与扣款之间的并发扣费打穿门槛 |
 
 ### 2.37.0（2026-11-17，全局单配置定稿）
 

@@ -89,3 +89,30 @@ describe("按天计费的归一化", () => {
     expect("runway_days" in wallet).toBe(false);
   });
 });
+
+describe("结账余额不足的错误细节（2.37.1）", () => {
+  it("required_cents / shortfall_cents / min_days 原样透传", async () => {
+    invoke.mockRejectedValueOnce({
+      code: "PRECONDITION_FAILED",
+      message: "余额不足",
+      retryable: true,
+      details: {
+        reason: "insufficient_balance",
+        required_cents: 210,
+        shortfall_cents: 210,
+        min_days: 7,
+      },
+    });
+
+    await expect(new TauriAgentBridge().myServerCheckout("ord_1")).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      retryable: true,
+      details: {
+        reason: "insufficient_balance",
+        required_cents: 210,
+        shortfall_cents: 210,
+        min_days: 7,
+      },
+    });
+  });
+});

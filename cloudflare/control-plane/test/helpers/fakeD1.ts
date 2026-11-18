@@ -44,8 +44,10 @@ export class FakeD1 {
   }
 
   async batch(statements: FakeStatement[]): Promise<unknown[]> {
-    for (const statement of statements) await statement.run();
-    return [];
+    // 真实 D1 的 batch 是原子的：整批语句之间不会被别的请求插进来。
+    // 逐条 await 会让出微任务，反而把「并发 checkout」测成假并发，所以这里同步跑完。
+    const results = statements.map((statement) => statement.run());
+    return Promise.all(results);
   }
 
   exec(statement: Stmt): Row | null {
@@ -373,6 +375,11 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("update orders set state = 'provisioning'")) {
+      // 认领语句带「账本行存在」守卫：扣费没写成时订单不能进入 provisioning。
+      if (sql.includes("exists (select 1 from wallet_ledger where id = ?)")) {
+        const ledgerId = a[a.length - 1];
+        if (!this.tables.wallet_ledger.some((entry) => entry.id === ledgerId)) return null;
+      }
       const hasPendingGuard = sql.includes("and state = 'pending_payment'");
       const row = hasPendingGuard
         ? this.tables.orders.find((o) => o.id === a[2])
@@ -476,6 +483,11 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("insert into servers")) {
+      // 建机语句带「账本行存在」守卫：扣费没写成时不该多出一台机器。
+      if (sql.includes("where exists (select 1 from wallet_ledger where id = ?)")) {
+        const ledgerId = a[a.length - 1];
+        if (!this.tables.wallet_ledger.some((entry) => entry.id === ledgerId)) return null;
+      }
       this.tables.servers.push({
         id: a[0],
         account_id: a[1],
@@ -767,6 +779,13 @@ export class FakeD1 {
         }
       }
       const isDebit = sql.includes("a.balance_cents >= ?");
+      // 建机门槛（§4.13）：门槛与扣减同一条 INSERT；守卫不成立时零行，和余额不足同路径。
+      if (sql.includes("exists (select 1 from accounts where id = ? and balance_cents >= ?)")) {
+        const guardAccountId = a[a.length - 2];
+        const guardFloor = a[a.length - 1];
+        const guarded = this.tables.accounts.find((row) => row.id === guardAccountId);
+        if (!guarded || Number(guarded.balance_cents ?? 0) < Number(guardFloor)) return null;
+      }
       const [ledgerId, kind, amount, magnitude, refType, refId, note, now, accountId] = a;
       const account = this.tables.accounts.find((row) => row.id === accountId);
       if (!account) return null;

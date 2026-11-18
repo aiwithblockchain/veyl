@@ -5,6 +5,7 @@ import type {
   MyServerPlan,
   MyServerRegion,
 } from "../agent/bridge";
+import { readInsufficientBalanceDetails } from "../agent/bridge";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { toBridgeError } from "../agent/errors";
 import {
@@ -295,10 +296,12 @@ export function MyServerWizard({
     setError(null);
     setCharged(null);
     setFailedServerId(null);
-    // 创建前先看余额：不够就不下单，直接在原地提示。
+    // 创建前先看余额：建机门槛是日价 × 7（实际只扣 1 天），不够就不下单。
+    let balanceCents: number | null = null;
     try {
       const wallet = await bridge.myServerWallet();
-      const shortfall = currentPlan.daily_price_cents - wallet.balance_cents;
+      balanceCents = wallet.balance_cents;
+      const shortfall = currentPlan.daily_price_cents * 7 - wallet.balance_cents;
       if (shortfall > 0) {
         setError({
           message: `余额不足，还差 ${formatUsdCents(shortfall)}。`,
@@ -349,11 +352,13 @@ export function MyServerWizard({
       const problem = toBridgeError(err);
       const reason =
         typeof problem.details?.reason === "string" ? problem.details.reason : "";
-      const shortfallRaw = problem.details?.shortfall_cents;
+      const balanceDetails = readInsufficientBalanceDetails(problem.details);
+      // 门槛由 Host 算：优先 details.shortfall_cents；缺了再用 required_cents − 预检余额。
       const shortfall =
-        typeof shortfallRaw === "number" && Number.isFinite(shortfallRaw)
-          ? Math.max(0, Math.trunc(shortfallRaw))
-          : 0;
+        balanceDetails?.shortfall_cents ??
+        (balanceDetails?.required_cents !== undefined && balanceCents !== null
+          ? Math.max(0, balanceDetails.required_cents - balanceCents)
+          : 0);
       if (
         reason === "auth_required" ||
         reason === "token_invalid" ||
@@ -529,7 +534,7 @@ export function MyServerWizard({
                   </span>
                   {plan.transfer_gib > 0 ? (
                     <span className="wizard-plan__transfer">
-                      每月 {plan.transfer_gib} GB
+                      带宽每月 {plan.transfer_gib} GB
                     </span>
                   ) : null}
                 </span>

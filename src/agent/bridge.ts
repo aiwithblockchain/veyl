@@ -674,6 +674,41 @@ export interface MyServerCharge {
   balance_after_cents: number;
 }
 
+/**
+ * `my_server_checkout` 余额不足的 details（2.37.1）：建机门槛是日价 × 7，
+ * 实际只扣 1 天。`shortfall_cents` 是唯一短差字段（不存在 `shortfall`）。
+ * 三个字段各自可选：新旧 Worker 只回其中一个时，不能把整段丢掉。
+ */
+export interface MyServerInsufficientBalanceDetails {
+  /** 日价 × 7（USD 分）。 */
+  required_cents?: number;
+  /** `required_cents − 余额`，恒 > 0（USD 分）。 */
+  shortfall_cents?: number;
+  min_days?: number;
+}
+
+function readCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.trunc(value))
+    : null;
+}
+
+/** 从错误 details 逐字段读 7 天门槛；一个都读不到才返回 null。 */
+export function readInsufficientBalanceDetails(
+  details: Record<string, unknown> | null | undefined,
+): MyServerInsufficientBalanceDetails | null {
+  if (!details) return null;
+  const required = readCount(details.required_cents);
+  const shortfall = readCount(details.shortfall_cents);
+  const minDays = readCount(details.min_days);
+  if (required === null && shortfall === null && minDays === null) return null;
+  return {
+    ...(required !== null ? { required_cents: required } : {}),
+    ...(shortfall !== null ? { shortfall_cents: shortfall } : {}),
+    ...(minDays !== null ? { min_days: minDays } : {}),
+  };
+}
+
 export interface MyServerSshCredentials {
   host: string;
   port: number;
@@ -824,7 +859,7 @@ export interface AgentBridge {
   myServerGet(serverId: string): Promise<MyServer>;
   /** 下单；本期是假支付，只产生一张订单。 */
   myServerCreate(input: MyServerCreateInput): Promise<MyServerOrder>;
-  /** 从余额扣一个月并开始建机（2.28.0）；余额不足原样透出 shortfall。 */
+  /** 从余额扣 1 天并开始建机（2.28.0）；余额不足回 `insufficient_balance`，details 带 7 天门槛。 */
   myServerCheckout(orderId: string): Promise<MyServerCharge>;
   /** 取消未完成订单（已建实例会先销毁）。 */
   myServerCancelOrder(orderId: string): Promise<MyServerOrder>;

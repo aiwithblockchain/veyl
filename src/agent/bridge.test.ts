@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HEALTH_SNAPSHOT_REFRESH_MS, applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, readQuestionDetail, shouldRefreshSnapshotOnHealth, snapshotToView, viewAfterConnected, viewAfterStopped } from "./bridge";
+import { HEALTH_SNAPSHOT_REFRESH_MS, applyRuntimeEvent, emptyRuntimeView, keepLiveHealth, readInsufficientBalanceDetails, readQuestionDetail, shouldRefreshSnapshotOnHealth, snapshotToView, viewAfterConnected, viewAfterStopped } from "./bridge";
 import {
   AGENT_EVENTS,
   CONTRACT_VERSION,
@@ -376,6 +376,39 @@ describe("stop 成功后的视图校正", () => {
       port_fallback: null,
       last_error: null,
     });
+  });
+});
+
+describe("建机余额门槛的错误 details", () => {
+  it("读出 required_cents / shortfall_cents / min_days", () => {
+    expect(
+      readInsufficientBalanceDetails({
+        reason: "insufficient_balance",
+        required_cents: 210,
+        shortfall_cents: 210,
+        min_days: 7,
+      }),
+    ).toEqual({ required_cents: 210, shortfall_cents: 210, min_days: 7 });
+  });
+
+  it("字段各自独立：旧形状只回 shortfall 也保留，不整段丢", () => {
+    expect(readInsufficientBalanceDetails({ shortfall_cents: 30 })).toEqual({
+      shortfall_cents: 30,
+    });
+    expect(readInsufficientBalanceDetails({ required_cents: 210 })).toEqual({
+      required_cents: 210,
+    });
+    expect(readInsufficientBalanceDetails({ min_days: 7 })).toEqual({ min_days: 7 });
+  });
+
+  it("一个字段都读不到才返回 null，不凭空补 0", () => {
+    expect(readInsufficientBalanceDetails(null)).toBeNull();
+    expect(
+      readInsufficientBalanceDetails({ reason: "insufficient_balance" }),
+    ).toBeNull();
+    expect(
+      readInsufficientBalanceDetails({ required_cents: 210, shortfall_cents: "210" }),
+    ).toEqual({ required_cents: 210 });
   });
 });
 

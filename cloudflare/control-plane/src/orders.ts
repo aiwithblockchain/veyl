@@ -8,11 +8,13 @@ import { monthlyUsdFromDaily, planDailyPriceCents } from "./lib/config";
 import { idempotencyKey, withIdempotency, type StoredResponse } from "./lib/idempotency";
 import { fetchCatalogData, type CatalogData } from "./index";
 import { provisionServer } from "./provision";
-import { balanceCents, recordLedgerEntry } from "./wallet";
+import { balanceCents, recordLedgerEntry, type LedgerInput } from "./wallet";
 
 const ORDER_TTL_MS = 10 * 60 * 1000;
 /** 一天的毫秒数：按天计费的基本单位。 */
 const DAY_MS = 24 * 3600 * 1000;
+/** 建机门槛：余额至少覆盖 7 天日价（§4.13）；实际仍只扣第 1 天。 */
+const MIN_BALANCE_DAYS = 7;
 /** 扣费接口能回的状态；其它状态说明订单已经结束，不能再按「已付款」回放。 */
 const CHARGE_STATES = ["paid", "provisioning", "ready"] as const;
 
@@ -234,6 +236,78 @@ async function getOrder(request: Request, env: OrdersEnv, orderId: string): Prom
   return json(orderView(row));
 }
 
+interface ChargeOrderInput {
+  accountId: string;
+  amountCents: number;
+  requiredCents: number;
+  orderId: string;
+  serverId: string;
+  port: number;
+  region: string;
+  plan: string;
+  hourlyUsd: number;
+  transferGib: number;
+  now: number;
+}
+
+/**
+ * 扣第 1 天并认领订单：门槛（日价 × 7）与扣减写在同一条 INSERT 的守卫里，
+ * 预检之后余额被并发花掉时这笔账不写。
+ *
+ * 守卫失败后余额可能刚被充值补上——那是并发抖动而不是真的不足：重读余额后
+ * 够门槛就重试一次，别把 `required − 余额 ≤ 0` 的负数差额交给界面。
+ */
+async function chargeOrder(env: OrdersEnv, input: ChargeOrderInput) {
+  const db = env.DB!;
+  const chargeInput: LedgerInput = {
+    accountId: input.accountId,
+    kind: "charge",
+    amountCents: -input.amountCents,
+    refType: "order",
+    refId: input.orderId,
+    guard: {
+      sql: "SELECT 1 FROM accounts WHERE id = ? AND balance_cents >= ?",
+      args: [input.accountId, input.requiredCents],
+    },
+    followUps: (ledgerId) => [
+      db
+        .prepare(
+          "UPDATE orders SET state = 'provisioning', paid_at = ?, server_id = ?, paid_via = 'wallet' " +
+            "WHERE id = ? AND state = 'pending_payment' AND EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
+        )
+        .bind(input.now, input.serverId, input.orderId, ledgerId),
+      db
+        .prepare(
+          "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, daily_price_cents, billing_anchor_at, transfer_gib) " +
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, 'active', ?, ?, ? WHERE EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
+        )
+        .bind(
+          input.serverId,
+          input.accountId,
+          input.orderId,
+          `我的服务器${input.serverId.slice(-4)}`,
+          input.region,
+          input.plan,
+          input.hourlyUsd,
+          monthlyUsdFromDaily(input.amountCents),
+          input.port,
+          input.now,
+          input.now,
+          input.now + DAY_MS,
+          input.amountCents,
+          input.now,
+          input.transferGib,
+          ledgerId,
+        ),
+    ],
+  };
+
+  const first = await recordLedgerEntry(env, chargeInput);
+  if (first.ok || first.reason !== "insufficient") return first;
+  if ((await balanceCents(env, input.accountId)) < input.requiredCents) return first;
+  return recordLedgerEntry(env, chargeInput);
+}
+
 async function checkout(request: Request, env: OrdersEnv, orderId: string): Promise<Response> {
   const identity = await authenticate(request, env);
   if (isResponse(identity)) return identity;
@@ -271,14 +345,17 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
       }
 
       const available = await balanceCents(env, identity.accountId);
-      if (available < row.amount_cents) {
+      const required = row.amount_cents * MIN_BALANCE_DAYS;
+      if (available < required) {
         return storedError(
           409,
           "PRECONDITION_FAILED",
           "余额不足，先充值",
           {
             reason: "insufficient_balance",
-            shortfall_cents: row.amount_cents - available,
+            required_cents: required,
+            shortfall_cents: required - available,
+            min_days: MIN_BALANCE_DAYS,
           },
           true,
         );
@@ -289,43 +366,18 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
       // 额度是套餐属性、不参与扣费；这里只做一次快照，取不到记 0。
       const catalog = env.DO_API_TOKEN ? await fetchCatalogData(env.DO_API_TOKEN) : null;
       const transferGib = transferGibFor(catalog, row.plan);
-      const charged = await recordLedgerEntry(env, {
+      const charged = await chargeOrder(env, {
         accountId: identity.accountId,
-        kind: "charge",
-        amountCents: -row.amount_cents,
-        refType: "order",
-        refId: row.id,
-        followUps: (ledgerId) => [
-          db
-            .prepare(
-              "UPDATE orders SET state = 'provisioning', paid_at = ?, server_id = ?, paid_via = 'wallet' " +
-                "WHERE id = ? AND state = 'pending_payment' AND EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
-            )
-            .bind(now, serverId, row.id, ledgerId),
-          db
-            .prepare(
-              "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, state, node_port, created_at, updated_at, paid_until, billing_state, daily_price_cents, billing_anchor_at, transfer_gib) " +
-                "SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, 'active', ?, ?, ? WHERE EXISTS (SELECT 1 FROM wallet_ledger WHERE id = ?)",
-            )
-            .bind(
-              serverId,
-              identity.accountId,
-              row.id,
-              `我的服务器${serverId.slice(-4)}`,
-              row.region,
-              row.plan,
-              row.hourly_usd,
-              monthlyUsdFromDaily(row.amount_cents),
-              port,
-              now,
-              now,
-              now + DAY_MS,
-              row.amount_cents,
-              now,
-              transferGib,
-              ledgerId,
-            ),
-        ],
+        amountCents: row.amount_cents,
+        requiredCents: required,
+        orderId: row.id,
+        serverId,
+        port,
+        region: row.region,
+        plan: row.plan,
+        hourlyUsd: row.hourly_usd,
+        transferGib,
+        now,
       });
 
       if (!charged.ok) {
@@ -340,7 +392,11 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
             "余额不足，先充值",
             {
               reason: "insufficient_balance",
-              shortfall_cents: row.amount_cents - current,
+              required_cents: required,
+              // 契约要求 shortfall_cents 恒 > 0：重试后仍不足时归一到至少 1 分，
+              // 并发抖动下界面显示「还差 $0.01」，不会是 $0.00。
+              shortfall_cents: Math.max(1, required - current),
+              min_days: MIN_BALANCE_DAYS,
             },
             true,
           );

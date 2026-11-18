@@ -396,13 +396,17 @@ export class MockMyServerService {
     const region = REGIONS.find((item) => item.id === order.region) ?? REGIONS[0];
     const plan = PLANS.find((item) => item.id === order.plan) ?? DEFAULT_PLAN;
     const priceCents = plan.daily_price_cents;
-    if (store.balance_cents < priceCents) {
+    // 建机门槛：余额 ≥ 日价 × 7；实际仍只扣 1 天（login-and-payment.md §4.1）。
+    const requiredCents = priceCents * 7;
+    if (store.balance_cents < requiredCents) {
       throw {
         code: "PRECONDITION_FAILED",
-        message: "余额不够扣这个月的费用。",
+        message: "余额不足以支付一周的费用。",
         details: {
           reason: "insufficient_balance",
-          shortfall_cents: priceCents - store.balance_cents,
+          required_cents: requiredCents,
+          shortfall_cents: requiredCents - store.balance_cents,
+          min_days: 7,
         },
         retryable: true,
       };
