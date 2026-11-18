@@ -39,6 +39,7 @@ function harness(overrides: Partial<Record<keyof AgentBridge, unknown>> = {}) {
       ignoredNodeIds: [],
     })),
     nodeProbeCancel: vi.fn(async () => ({ cancelled: true })),
+    nodeProbe: vi.fn(async (nodeId: string) => probe(nodeId, 40)),
     ...overrides,
   } as unknown as AgentBridge;
   const view = renderHook(() => useNodeProbes({ bridge }));
@@ -124,7 +125,8 @@ describe("useNodeProbes", () => {
       total: 8,
       phase: "preparing",
     });
-    expect(result.current.probing.size).toBe(0);
+    // 命令一发出就点亮行内「测速中」，命令返回后仍保持，不必等第一批事件。
+    expect(result.current.probing.size).toBe(6);
 
     emit(progress("run-1", 0, null, "cfg-1", "probing", "clash"));
     expect(result.current.run).toMatchObject({ phase: "probing", method: "clash" });
@@ -369,5 +371,154 @@ describe("useNodeProbes", () => {
     await waitFor(() => expect(bridge.subscribe).toHaveBeenCalled());
     unmount();
     expect(bridge.subscribe).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("点击后的即时反馈与失败复测", () => {
+  it("命令在途时 starting 为真，行内立刻进入测速中", async () => {
+    let release: (value: unknown) => void = () => {};
+    const pending = new Promise((resolve) => {
+      release = resolve;
+    });
+    const { result } = harness({ nodeProbeAll: vi.fn(() => pending) });
+
+    let started: Promise<unknown> = Promise.resolve();
+    act(() => {
+      started = result.current.start("cfg-1", IDS);
+    });
+    expect(result.current.starting).toBe(true);
+    expect(result.current.probing.size).toBe(6);
+
+    await act(async () => {
+      release({
+        runId: "run-1",
+        configId: "cfg-1",
+        total: IDS.length,
+        concurrency: 6,
+        ignoredNodeIds: [],
+      });
+      await started;
+    });
+    expect(result.current.starting).toBe(false);
+    expect(result.current.run?.runId).toBe("run-1");
+    // 命令返回后仍保持「测速中」，等探测事件推进。
+    expect(result.current.probing.size).toBe(6);
+  });
+
+  it("批量失败后逐节点直接复测，直连通的节点补上数字", async () => {
+    const nodeProbe = vi.fn(async (nodeId: string) =>
+      probe(nodeId, nodeId === "n1" ? 40 : null),
+    );
+    const { result, emit } = harness({ nodeProbe });
+    await act(async () => {
+      await result.current.start("cfg-1", ["n1", "n2"]);
+    });
+
+    emit(
+      progress("run-1", 1, {
+        ...probe("n1", null),
+        error: { code: "CLASH_DELAY_FAILED", message: "no such outbound" },
+      }),
+    );
+    emit(progress("run-1", 2, probe("n2", null)));
+    emit(finished("run-1", { ok: 0, failed: 2, method: "clash" }));
+
+    await waitFor(() => expect(nodeProbe).toHaveBeenCalledWith("n1"));
+    await waitFor(() =>
+      expect(result.current.results.n1).toMatchObject({
+        reachable: true,
+        latency_ms: 40,
+      }),
+    );
+    expect(result.current.results.n2).toMatchObject({ reachable: false });
+    expect(result.current.finished?.ok).toBe(1);
+    expect(result.current.finished?.failed).toBe(1);
+  });
+
+  it("复测期间点了新批次：上一批的兜底结果被丢弃", async () => {
+    let releaseRetry: (value: NodeProbeData) => void = () => {};
+    const retryGate = new Promise<NodeProbeData>((resolve) => {
+      releaseRetry = resolve;
+    });
+    const nodeProbe = vi.fn(() => retryGate);
+    const { result, emit } = harness({ nodeProbe });
+    await act(async () => {
+      await result.current.start("cfg-1", ["n1"]);
+    });
+    emit(progress("run-1", 1, probe("n1", null)));
+    emit(finished("run-1", { ok: 0, failed: 1, method: "clash" }));
+    await waitFor(() => expect(nodeProbe).toHaveBeenCalled());
+
+    await act(async () => {
+      await result.current.start("cfg-1", ["n1"]);
+    });
+    await act(async () => {
+      releaseRetry(probe("n1", 40));
+      await Promise.resolve();
+    });
+    // 新批次开始后，旧批的「40ms」不能盖到新一轮上。
+    expect(result.current.results.n1).toMatchObject({ reachable: false });
+  });
+});
+
+describe("复测的边界", () => {
+  it("TCP 批次的失败不再复测：直连已经试过了", async () => {
+    const nodeProbe = vi.fn(async (nodeId: string) => probe(nodeId, 40));
+    const { result, emit } = harness({ nodeProbe });
+    await act(async () => {
+      await result.current.start("cfg-1", ["n1"]);
+    });
+    emit(progress("run-1", 1, probe("n1", null)));
+    emit(finished("run-1", { ok: 0, failed: 1, method: "tcp" }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(nodeProbe).not.toHaveBeenCalled();
+    expect(result.current.results.n1).toMatchObject({ reachable: false });
+  });
+
+  it("复测沿用 6 路限流，不一次打出全部 IPC", async () => {
+    const resolvers = new Map<string, (value: NodeProbeData) => void>();
+    const nodeProbe = vi.fn(
+      (nodeId: string) =>
+        new Promise<NodeProbeData>((resolve) => {
+          resolvers.set(nodeId, resolve);
+        }),
+    );
+    const { result, emit } = harness({ nodeProbe });
+    await act(async () => {
+      await result.current.start("cfg-1", IDS);
+    });
+    IDS.forEach((id, index) => emit(progress("run-1", index + 1, probe(id, null))));
+    emit(finished("run-1", { ok: 0, failed: IDS.length, method: "clash" }));
+
+    await waitFor(() => expect(nodeProbe).toHaveBeenCalledTimes(6));
+    await act(async () => {
+      resolvers.get("n1")?.(probe("n1", 40));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(nodeProbe).toHaveBeenCalledTimes(7));
+
+    await act(async () => {
+      for (const id of IDS) {
+        resolvers.get(id)?.(probe(id, 40));
+        await Promise.resolve();
+      }
+    });
+    await waitFor(() => expect(result.current.finished?.ok).toBe(IDS.length));
+    expect(nodeProbe.mock.calls.length).toBeLessThanOrEqual(IDS.length);
+  });
+
+  it("外部逐节点探测可以点亮再清掉行内的测速中", () => {
+    const { result } = harness();
+    act(() => {
+      result.current.markProbing(["n1"]);
+    });
+    expect(result.current.probing.has("n1")).toBe(true);
+    act(() => {
+      result.current.markProbing([]);
+    });
+    expect(result.current.probing.size).toBe(0);
   });
 });

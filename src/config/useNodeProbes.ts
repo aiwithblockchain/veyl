@@ -32,6 +32,8 @@ export interface ProbeFinishedInfo {
 export interface NodeProbesController {
   results: Record<string, NodeProbeData>;
   run: ActiveProbeRun | null;
+  /** 命令已发出、批次还没回来：入口立刻显示「测速中」，避免看起来没反应。 */
+  starting: boolean;
   /** 正在被这一批探测的节点，最多 6 个；行内据此显示「测速中」。 */
   probing: ReadonlySet<string>;
   finished: ProbeFinishedInfo | null;
@@ -43,6 +45,8 @@ export interface NodeProbesController {
   loadSnapshot: (configId: string, nodeIds: string[]) => Promise<void>;
   /** 单节点测速不会写批次缓存；调用方把结果并进来，行内才能显示延迟。 */
   recordResults: (entries: NodeProbeData[]) => void;
+  /** 外部逐节点探测（试用步骤流）期间点亮这些行的「测速中」；传空数组清除。 */
+  markProbing: (nodeIds: string[]) => void;
   /** nodeIds 省略 = 全部；提供时只测过滤后的子集。 */
   start: (
     configId: string,
@@ -75,6 +79,7 @@ export function useNodeProbes({
 }): NodeProbesController {
   const [results, setResults] = useState<Record<string, NodeProbeData>>({});
   const [run, setRun] = useState<ActiveProbeRun | null>(null);
+  const [starting, setStarting] = useState(false);
   const [probing, setProbing] = useState<ReadonlySet<string>>(() => new Set());
   const [finished, setFinished] = useState<ProbeFinishedInfo | null>(null);
   const [notice, setNotice] = useState<{ configId: string; text: string } | null>(
@@ -92,6 +97,8 @@ export function useNodeProbes({
   /** 本窗口内由面板发起的批次：从第一帧起就是「全部节点重测」。 */
   const freshRun = useRef<string | null>(null);
   const startingConfigRef = useRef<string | null>(null);
+  /** 每启动一批 +1：复测结果靠它判断自己是否已过期。 */
+  const epochRef = useRef(0);
   const noticeTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -198,6 +205,7 @@ export function useNodeProbes({
       }
 
       const result = payload.result;
+      resultsRef.current = { ...resultsRef.current, [result.node_id]: result };
       setResults((prev) => ({ ...prev, [result.node_id]: result }));
       applyRun({
         ...current,
@@ -225,10 +233,29 @@ export function useNodeProbes({
     [applyProbing, applyRun, seedProbing],
   );
 
+  /** 单节点测速不会写批次缓存；调用方把结果并进来，行内才能显示延迟。 */
+  const recordResults = useCallback((entries: NodeProbeData[]) => {
+    if (entries.length === 0) return;
+    const merged = { ...resultsRef.current };
+    for (const entry of entries) merged[entry.node_id] = entry;
+    // 同步写 ref：finished 事件可能与最后一条结果在同一轮到达。
+    resultsRef.current = merged;
+    setResults(merged);
+    setAvailable(true);
+  }, []);
+
+  const markProbing = useCallback(
+    (nodeIds: string[]) => {
+      applyProbing(new Set(nodeIds), []);
+    },
+    [applyProbing],
+  );
+
   const onFinished = useCallback(
     (payload: NodeProbeFinishedPayload) => {
       const current = runRef.current;
       if (!current || current.runId !== payload.run_id) return;
+      const scope = runScope.current;
       applyRun(null);
       applyProbing(new Set(), []);
       startingConfigRef.current = null;
@@ -251,9 +278,62 @@ export function useNodeProbes({
             ? "连接后测速已停止"
             : `已停止 · 已测 ${payload.ok + payload.failed}/${payload.total}`,
         );
+        return;
       }
+      // 只有 Clash 批次才需要复测：TCP 批次本身就是直连，失败就是失败。
+      if (payload.method !== "clash") return;
+      const failedIds = scope.filter(
+        (id) => resultsRef.current[id]?.reachable === false,
+      );
+      if (failedIds.length === 0) return;
+      // epoch 在每次新批次启动时递增：复测属于这一批，任何更新的一批都让它作废
+      // （包括第二批已经跑完的情况，避免旧结果覆盖新数据、改错 finished 计数）。
+      const epoch = epochRef.current;
+      applyProbing(new Set(failedIds), []);
+      const queue = [...failedIds];
+      let recovered = 0;
+      const worker = async () => {
+        for (;;) {
+          if (epochRef.current !== epoch) return;
+          const id = queue.shift();
+          if (id === undefined) return;
+          try {
+            const entry = await bridge.nodeProbe(id);
+            if (epochRef.current !== epoch) return;
+            recordResults([entry]);
+            if (entry.reachable) recovered += 1;
+          } catch {
+            // 直连也没测通：保留原来的失败结果。
+          }
+          if (epochRef.current !== epoch) return;
+          const next = new Set(probingRef.current);
+          next.delete(id);
+          applyProbing(next, []);
+        }
+      };
+      void (async () => {
+        // 与主批次相同的 6 路限流，不一次打出 N 个 IPC。
+        await Promise.all(
+          Array.from(
+            { length: Math.min(CONCURRENCY, failedIds.length) },
+            () => worker(),
+          ),
+        );
+        if (epochRef.current !== epoch) return;
+        if (recovered > 0) {
+          setFinished((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  ok: prev.ok + recovered,
+                  failed: Math.max(0, prev.failed - recovered),
+                }
+              : prev,
+          );
+        }
+      })();
     },
-    [applyProbing, applyRun, showNotice],
+    [applyProbing, applyRun, bridge, recordResults, showNotice],
   );
 
   useEffect(() => {
@@ -275,6 +355,7 @@ export function useNodeProbes({
         setAvailable(true);
         const merged: Record<string, NodeProbeData> = {};
         for (const result of snapshot.results) merged[result.node_id] = result;
+        resultsRef.current = { ...resultsRef.current, ...merged };
         setResults((prev) => ({ ...prev, ...merged }));
 
         if (snapshot.run) {
@@ -324,17 +405,6 @@ export function useNodeProbes({
     [applyProbing, applyRun, bridge, seedProbing],
   );
 
-  /** 单节点测速不会写批次缓存；调用方把结果并进来，行内才能显示延迟。 */
-  const recordResults = useCallback((entries: NodeProbeData[]) => {
-    if (entries.length === 0) return;
-    setResults((prev) => {
-      const next = { ...prev };
-      for (const entry of entries) next[entry.node_id] = entry;
-      return next;
-    });
-    setAvailable(true);
-  }, []);
-
   const start = useCallback(
     async (configId: string, nodeIds?: string[]) => {
       if (nodeIds && nodeIds.length === 0) {
@@ -345,8 +415,13 @@ export function useNodeProbes({
       const scope = nodeIds ?? knownNodeIds.current;
       if (scope.length === 0) return { ok: false, message: "这套配置还没有节点。" };
       clearNotice();
+      // 新批次开始：上一批的复测结果从此作废。
+      epochRef.current += 1;
       runScope.current = scope;
       startingConfigRef.current = configId;
+      // 命令往返期间就把行内「测速中」点亮：用户点了要有反应。
+      setStarting(true);
+      seedProbing({});
       try {
         const data = await bridge.nodeProbeAll(configId, nodeIds);
         const ignoredIds = data.ignoredNodeIds ?? [];
@@ -366,7 +441,6 @@ export function useNodeProbes({
           startingConfigRef.current = null;
           return { ok: true };
         }
-        applyProbing(new Set(), []);
         freshRun.current = data.runId;
         applyRun({
           runId: data.runId,
@@ -392,6 +466,8 @@ export function useNodeProbes({
           return { ok: false, message: "这个版本还不能批量测速。" };
         }
         return { ok: false, message: messageOf(error, "没能开始测速，请稍后再试。") };
+      } finally {
+        setStarting(false);
       }
     },
     [applyProbing, applyRun, bridge, clearNotice, seedProbing],
@@ -418,12 +494,14 @@ export function useNodeProbes({
     () => ({
       results,
       run,
+      starting,
       probing,
       finished,
       notice,
       available,
       loadSnapshot,
       recordResults,
+      markProbing,
       start,
       cancel,
       clearNotice,
@@ -431,12 +509,14 @@ export function useNodeProbes({
     [
       results,
       run,
+      starting,
       probing,
       finished,
       notice,
       available,
       loadSnapshot,
       recordResults,
+      markProbing,
       start,
       cancel,
       clearNotice,

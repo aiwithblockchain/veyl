@@ -35,7 +35,7 @@ import { MyServersRail } from "./components/MyServersRail";
 import { MyServerLogin } from "./components/MyServerLogin";
 import { MyServerTopUp } from "./components/MyServerTopUp";
 import { useMyServers } from "./myservers/useMyServers";
-import { isProvisioning } from "./myservers/labels";
+import { isProvisioning, trialAvailableHint } from "./myservers/labels";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
 import { MyServerWizard } from "./components/MyServerWizard";
@@ -2029,10 +2029,14 @@ export default function App() {
     void (async () => {
       const results: NodeProbeResult[] = [];
       for (const nodeId of nodeIds) {
+        // 逐节点探测也要有行内反馈：正在测的那一行显示「测速中」。
+        nodeProbes.markProbing([nodeId]);
         try {
           results.push(await bridge.nodeProbe(nodeId));
         } catch {
           // 单个节点失败不影响其余节点；全部失败才算这一步失败。
+        } finally {
+          nodeProbes.markProbing([]);
         }
       }
       // 单节点测速不写批次缓存，先读快照补运行态，再把结果并给控制器；
@@ -2305,6 +2309,17 @@ export default function App() {
           retryNotice={myServers.retryNotice}
           disabled={myServers.identityProblem !== null || newNodeOpen}
           compact={shell.mode === "drawer"}
+          trialHint={
+            trial
+              ? trialAvailableHint(
+                  trial.state,
+                  trial.seed_node_count,
+                  trial.expires_at,
+                  Date.now(),
+                )
+              : null
+          }
+          onGoConnect={() => changeDestination("client")}
           onSelect={myServers.select}
           onNew={() => openNewNode("servers")}
         />

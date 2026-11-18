@@ -123,6 +123,25 @@ export function trialGroupHint(
   return phase.kind === "ended" ? "已到期" : "试用中";
 }
 
+/**
+ * 「我的服务器」左栏常驻提示：有自建服务器时也提醒还有免费节点可用。
+ * 空态里的那句另有措辞（trialEmptyHint），两处只为各自位置服务。
+ */
+export function trialAvailableHint(
+  state: "available" | "active" | "expired",
+  seedNodeCount: number,
+  expiresAt: string | null,
+  now: number,
+): string | null {
+  if (seedNodeCount <= 0) return null;
+  const phase = trialPhase(state, expiresAt, now);
+  if (phase.kind === "available") {
+    return `还有 ${seedNodeCount} 个免费节点可用，试用 7 天。`;
+  }
+  if (phase.kind !== "counting") return null;
+  return `还有 ${seedNodeCount} 个免费节点可用，${formatTrialCountdown(phase.days)}。`;
+}
+
 /** 时长文案：满 1 小时报「2 小时 0 分」，满 1 分钟报「1 分 20 秒」，否则只报秒。 */
 export function formatDuration(totalSeconds: number): string {
   const total = Math.max(0, Math.floor(totalSeconds));

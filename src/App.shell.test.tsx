@@ -264,6 +264,13 @@ describe("三区外壳与连接舞台", () => {
       run: null,
     } as never);
 
+    // 这条用例只看重启后的缓存与收尾句：把自动批次挡掉，
+    // 否则「测速中」会先把缓存值盖住（自动测速的渲染由下面的用例覆盖）。
+    vi.spyOn(bridge, "nodeProbeAll").mockRejectedValue({
+      code: "NOT_FOUND",
+      message: "unknown command node_probe_all",
+    });
+
     render(<App />);
     await waitFor(() => expect(screen.getByText("先做这一步")).toBeTruthy());
     expect(await screen.findByText("42 毫秒")).toBeTruthy();

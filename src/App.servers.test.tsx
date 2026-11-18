@@ -254,7 +254,8 @@ describe("destination 与我的服务器", () => {
     await screen.findByRole("button", { name: /我的服务器/ });
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
     const rail = await screen.findByRole("complementary", { name: "服务器列表" });
-    fireEvent.click(within(rail).getByRole("button", { name: "新建节点" }));
+    // 左上角 + 与列表底部常驻行同名，按类名定位这一处的按钮。
+    fireEvent.click(rail.querySelector(".rail__add") as HTMLButtonElement);
 
     await waitFor(() =>
       expect(document.querySelector('main[aria-label="新建节点"]')).not.toBeNull(),
@@ -266,8 +267,10 @@ describe("destination 与我的服务器", () => {
     const lockedRail = screen.getByRole("complementary", { name: "服务器列表" });
     expect(lockedRail.className).toContain("rail--locked");
     expect(
-      (within(lockedRail).getByRole("button", { name: "新建节点" }) as HTMLButtonElement)
-        .disabled,
+      (lockedRail.querySelector(".rail__add") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (lockedRail.querySelector(".rail__new-row") as HTMLButtonElement).disabled,
     ).toBe(true);
 
     const stage = document.querySelector('main[aria-label="新建节点"]') as HTMLElement;
@@ -289,7 +292,7 @@ describe("destination 与我的服务器", () => {
     await screen.findByRole("button", { name: /我的服务器/ });
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
     const rail = await screen.findByRole("complementary", { name: "服务器列表" });
-    fireEvent.click(within(rail).getByRole("button", { name: "新建节点" }));
+    fireEvent.click(rail.querySelector(".rail__add") as HTMLButtonElement);
 
     const stage = await screen.findByRole("main", { name: "新建节点" });
     fireEvent.click(within(stage).getByRole("radio", { name: /1 核 · 512 MB/ }));
@@ -310,7 +313,7 @@ describe("destination 与我的服务器", () => {
     const railAgain = await screen.findByRole("complementary", {
       name: "服务器列表",
     });
-    fireEvent.click(within(railAgain).getByRole("button", { name: "新建节点" }));
+    fireEvent.click(railAgain.querySelector(".rail__add") as HTMLButtonElement);
     const reopened = await screen.findByRole("main", { name: "新建节点" });
     expect(
       within(reopened)
@@ -325,7 +328,7 @@ describe("destination 与我的服务器", () => {
     await screen.findByRole("button", { name: /我的服务器/ });
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
     const rail = await screen.findByRole("complementary", { name: "服务器列表" });
-    fireEvent.click(within(rail).getByRole("button", { name: "新建节点" }));
+    fireEvent.click(rail.querySelector(".rail__add") as HTMLButtonElement);
     const stage = await screen.findByRole("main", { name: "新建节点" });
 
     act(() => {
@@ -786,7 +789,7 @@ describe("下单成功后回到详情", () => {
     await screen.findByRole("button", { name: "连接节点" });
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
     const rail = await screen.findByRole("complementary", { name: "服务器列表" });
-    fireEvent.click(within(rail).getByRole("button", { name: "新建节点" }));
+    fireEvent.click(rail.querySelector(".rail__add") as HTMLButtonElement);
     await screen.findByRole("heading", { name: "新建节点" });
     fireEvent.click(screen.getByRole("button", { name: "创建" }));
   }
@@ -945,8 +948,7 @@ describe("设备 / 账户被停用的出路", () => {
     // 停用态整页只读：rail 的新建入口不可点，避免点下去才 403。
     const rail = screen.getByRole("complementary", { name: "服务器列表" });
     expect(
-      (within(rail).getByRole("button", { name: "新建节点" }) as HTMLButtonElement)
-        .disabled,
+      (rail.querySelector(".rail__add") as HTMLButtonElement).disabled,
     ).toBe(true);
     for (const button of screen.getAllByRole("button", { name: "新建节点" })) {
       expect((button as HTMLButtonElement).disabled).toBe(true);
@@ -1211,7 +1213,7 @@ describe("新建节点：导航与 Esc", () => {
   function openServersWizard() {
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
     const rail = screen.getByRole("complementary", { name: "服务器列表" });
-    fireEvent.click(within(rail).getByRole("button", { name: "新建节点" }));
+    fireEvent.click(rail.querySelector(".rail__add") as HTMLButtonElement);
   }
 
   it("登录弹窗开着时 Esc 只关弹窗，不关向导", async () => {

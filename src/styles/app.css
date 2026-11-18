@@ -3671,6 +3671,8 @@ body[data-resizing] {
 /* 向导期间 / 身份不可用：左栏可见但禁用，45% 透明。 */
 .rail--locked .rail-server,
 .rail--locked .rail__add,
+.rail--locked .rail__new-row,
+.rail--locked .myservers__trial-link,
 .rail--locked .rail-drawer__new {
   opacity: 0.45;
   pointer-events: none;
@@ -3687,6 +3689,14 @@ body[data-resizing] {
 
 .myservers__trial-hint + .myservers__empty-cta {
   margin-top: 16px;
+}
+
+/* 左栏底部：宽度窄，允许折行，不抢列表的行高。 */
+.myservers__trial-hint--rail {
+  margin: 8px 0 0;
+  padding: 0 12px;
+  white-space: normal;
+  line-height: 1.5;
 }
 
 .myservers__trial-link {
@@ -5102,32 +5112,38 @@ body[data-resizing] {
   display: flex;
   flex-direction: column;
   margin-top: 16px;
+  border-top: 1px solid var(--hair);
 }
 
+/* 五行是「可点的行」，不是正文：借用节点行那一套——细分隔线 + 整行 hover 底。
+   静止时不加底，空态仍然安静；hover 的整行底才是「这里能点」的证据。 */
 .ai-empty__suggest button {
   display: flex;
   align-items: center;
   min-height: 44px;
-  padding: 0;
+  /* 左右各溢出 8px：hover 底不被文字长度截断，命中区也顺带变宽 */
+  margin: 0 -8px;
+  padding: 0 8px;
   border: 0;
+  border-bottom: 1px solid var(--hair);
   border-radius: 0;
   background: transparent;
   color: var(--ink-2);
   font-size: 13px;
   line-height: 1.5;
   text-align: left;
+  cursor: pointer;
 }
 
 .ai-empty__suggest button:hover {
+  background: var(--bg-hover);
   color: var(--ink);
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
 
 .ai-empty__suggest button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
   color: var(--ink);
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
 
 /* 历史会话 */
@@ -5521,7 +5537,9 @@ details[open] > .settings-fold__summary::before {
 }
 
 .connection-stage__col {
-  width: 400px;
+  /* 宽窗口下 400 只占可用宽的三分之一左右，卡片像一座孤岛；
+     按可用宽取 42%，仍以 400 为下限（窄窗口的阅读宽）、520 为上限（再宽行就散了）。 */
+  width: clamp(400px, 42%, 520px);
   max-width: 100%;
 }
 
@@ -5691,6 +5709,10 @@ details[open] > .settings-fold__summary::before {
   color: var(--ink-3);
 }
 
+/* 第一组紧接卡片头（那里已有 14px 内边距），不再叠 4px；
+   组间保留 4px —— 这样「标题到本组第一行」的距离两组一致。 */
+.stage-node-group:first-child .stage-node-group__head { margin-top: 0; }
+
 .stage-node {
   position: relative;
   width: 100%;
@@ -5714,9 +5736,18 @@ details[open] > .settings-fold__summary::before {
 
 .stage-node:disabled { cursor: default; opacity: 0.7; }
 
+/* 选中行不再用粉色：粉是链接（测速）和聚焦描边的颜色，同一张卡里两处粉会互相抢。
+   选中用中性底 + 墨色竖条 + 500 字重。底色取 12%：与 hover 的 5% 拉开 16 个色阶
+   （深色下约 10 个），8% 只差 5–7 个，悬停另一行时几乎与选中分不开。 */
 .stage-node.is-selected {
-  background: var(--signal-dim);
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
   font-weight: 500;
+}
+
+/* 悬停选中行时保持选中底：`.stage-node:hover:not(:disabled)` 特异性 0,3,0 高于
+   `.is-selected` 的 0,2,0，不写这条，悬停瞬间底色会掉回 hover 的 5%，看着像闪一下。 */
+.stage-node.is-selected:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
 }
 
 .stage-node.is-selected::before {
@@ -5726,7 +5757,7 @@ details[open] > .settings-fold__summary::before {
   top: 0;
   bottom: 0;
   width: 2px;
-  background: var(--focus);
+  background: var(--ink);
 }
 
 .stage-node__name {
@@ -5762,6 +5793,12 @@ details[open] > .settings-fold__summary::before {
   font-family: var(--mono);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+
+/* 「测不通 / 未测」是文字不是读数：比延迟小一档，右端仍对齐。 */
+.stage-node__ms.is-muted {
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -6033,6 +6070,50 @@ details[open] > .settings-fold__summary::before {
 
 /* ---------- 我的服务器：列表行与向导次级入口 ---------- */
 
+/* 列表自己滚动：机器多了不能把左栏撑破，「新建」行要始终看得见。
+   左右各 4px 内边距给滚动条留位，行本身仍是 8px 缩进。 */
+.rail__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+
+/* 列表底部的常驻新建入口：整行可点，次级（不加实心底）。
+   与上面的行对齐（左右 8px），顶部一条细线把它和滚动内容分开。 */
+.rail__new-row {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  margin: 8px 8px 0;
+  padding: 0 10px;
+  border: 0;
+  border-top: 1px solid var(--hair);
+  border-radius: 0 0 8px 8px;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rail__new-row:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.rail__new-row:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+  color: var(--ink);
+}
+
+.rail__new-row__icon { display: inline-flex; color: var(--ink-3); }
+
 .rail-servers {
   list-style: none;
   margin: 0;
@@ -6066,6 +6147,11 @@ details[open] > .settings-fold__summary::before {
 .rail-server.is-active {
   background: var(--card);
   box-shadow: inset 2px 0 0 var(--focus);
+}
+
+/* 选中的服务器名字更重一档（文档：14 / 600）。 */
+.rail-server.is-active .rail-server__name {
+  font-weight: 600;
 }
 
 .rail-server__head {

@@ -672,3 +672,214 @@ describe("待开通机器失败后的列表行", () => {
     expect(meta?.textContent).not.toContain("/天");
   });
 });
+
+describe("左栏的试用提示常驻", () => {
+  it("有服务器时在列表底部显示一行只读提示与去连接", () => {
+    const onGoConnect = vi.fn();
+    render(
+      <MyServersRail
+        servers={[server()]}
+        selectedId={null}
+        loading={false}
+        catalog={CATALOG}
+        trialHint="还有 2 个免费节点可用，6 天后到期。"
+        onGoConnect={onGoConnect}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    const hint = document.querySelector(".myservers__trial-hint--rail");
+    expect(hint?.textContent).toContain("还有 2 个免费节点可用，6 天后到期。");
+    fireEvent.click(screen.getByRole("button", { name: "去连接" }));
+    expect(onGoConnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("没有剩余免费节点时不显示", () => {
+    render(
+      <MyServersRail
+        servers={[server()]}
+        selectedId={null}
+        loading={false}
+        catalog={CATALOG}
+        trialHint={null}
+        onGoConnect={vi.fn()}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    expect(document.querySelector(".myservers__trial-hint--rail")).toBeNull();
+    expect(screen.queryByRole("button", { name: "去连接" })).toBeNull();
+  });
+});
+
+describe("左栏滚动容器与常驻新建行", () => {
+  function many(count: number): MyServer[] {
+    return Array.from({ length: count }, (_, index) =>
+      server({
+        server_id: `srv_${index}`,
+        name: `服务器 ${index}`,
+      }),
+    );
+  }
+
+  it("超过一屏时列表在自己滚动，新建行在滚动容器外始终可见", () => {
+    render(
+      <MyServersRail
+        servers={many(13)}
+        selectedId="srv_0"
+        loading={false}
+        catalog={CATALOG}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    const body = document.querySelector(".rail__body");
+    expect(body).not.toBeNull();
+    expect(body?.querySelectorAll(".rail-server").length).toBe(13);
+    // 新建行不在滚动容器里，列表滚到底也遮不住它。
+    expect(body?.querySelector(".rail__new-row")).toBeNull();
+    const row = document.querySelector(".rail__new-row");
+    expect(row?.textContent).toContain("新建节点");
+  });
+
+  it("空列表不显示新建行（空态由中间主按钮承担）", () => {
+    render(
+      <MyServersRail
+        servers={[]}
+        selectedId={null}
+        loading={false}
+        catalog={CATALOG}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    expect(document.querySelector(".rail__new-row")).toBeNull();
+  });
+
+  it("点常驻新建行调用 onNew；禁用时不可点", () => {
+    const onNew = vi.fn();
+    const view = render(
+      <MyServersRail
+        servers={many(1)}
+        selectedId={null}
+        loading={false}
+        catalog={CATALOG}
+        onSelect={() => {}}
+        onNew={onNew}
+      />,
+    );
+    fireEvent.click(document.querySelector(".rail__new-row") as HTMLButtonElement);
+    expect(onNew).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      <MyServersRail
+        servers={many(1)}
+        selectedId={null}
+        loading={false}
+        catalog={CATALOG}
+        disabled
+        onSelect={() => {}}
+        onNew={onNew}
+      />,
+    );
+    expect(
+      (document.querySelector(".rail__new-row") as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+});
+
+describe("左栏常驻区与抽屉滚动", () => {
+  function many(count: number): MyServer[] {
+    return Array.from({ length: count }, (_, index) =>
+      server({ server_id: `srv_${index}`, name: `服务器 ${index}` }),
+    );
+  }
+
+  it("长列表下免费节点提示不随列表滚走，紧挨在新建行上方", () => {
+    render(
+      <MyServersRail
+        servers={many(13)}
+        selectedId={null}
+        loading={false}
+        catalog={CATALOG}
+        trialHint="还有 2 个免费节点可用，6 天后到期。"
+        onGoConnect={() => {}}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    const hint = document.querySelector(".myservers__trial-hint--rail");
+    expect(hint).not.toBeNull();
+    // 不在滚动容器里：列表滚到底也还看得见。
+    expect(document.querySelector(".rail__body .myservers__trial-hint--rail")).toBeNull();
+    expect(hint?.nextElementSibling?.classList.contains("rail__new-row")).toBe(true);
+  });
+
+  it("抽屉里的长列表也有滚动容器", () => {
+    render(
+      <MyServersRail
+        servers={many(13)}
+        selectedId={null}
+        loading={false}
+        compact
+        catalog={CATALOG}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "服务器列表，13 台" }),
+    );
+    const body = document.querySelector(".rail-drawer .rail__body");
+    expect(body).not.toBeNull();
+    expect(body?.querySelectorAll(".rail-server").length).toBe(13);
+  });
+});
+
+describe("左栏试用旁注的边界", () => {
+  it("列表读取失败时不显示旁注（与新建行同条件）", () => {
+    render(
+      <MyServersRail
+        servers={[server()]}
+        selectedId={null}
+        loading={false}
+        error="连不上服务器，稍后再试"
+        catalog={CATALOG}
+        trialHint="还有 2 个免费节点可用，6 天后到期。"
+        onGoConnect={() => {}}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    expect(document.querySelector(".myservers__trial-hint--rail")).toBeNull();
+    expect(document.querySelector(".rail__new-row")).toBeNull();
+  });
+
+  it("锁定期间「去连接」也禁用", () => {
+    render(
+      <MyServersRail
+        servers={[server()]}
+        selectedId={null}
+        loading={false}
+        disabled
+        catalog={CATALOG}
+        trialHint="还有 2 个免费节点可用，6 天后到期。"
+        onGoConnect={() => {}}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    const link = document.querySelector(
+      ".myservers__trial-link",
+    ) as HTMLButtonElement;
+    expect(link.disabled).toBe(true);
+  });
+});

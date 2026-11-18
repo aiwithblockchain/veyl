@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatBuildDuration,
   stateTone,
+  trialAvailableHint,
   trialEmptyHint,
   trialGroupHint,
   trialPhase,
@@ -159,5 +160,26 @@ describe("formatBuildDuration", () => {
   it("没有 ready_at 或时间解析失败返回 null", () => {
     expect(formatBuildDuration(created, null)).toBeNull();
     expect(formatBuildDuration(created, "not-a-date")).toBeNull();
+  });
+});
+
+describe("左栏常驻试用提示", () => {
+  it("active：写还剩几个免费节点可用与几天到期", () => {
+    expect(trialAvailableHint("active", 2, at(6 * DAY), NOW)).toBe(
+      "还有 2 个免费节点可用，6 天后到期。",
+    );
+  });
+
+  it("available：还没起算时写试用 7 天", () => {
+    expect(trialAvailableHint("available", 2, null, NOW)).toBe(
+      "还有 2 个免费节点可用，试用 7 天。",
+    );
+  });
+
+  it("已过期、没有节点或拿不到时间：不显示", () => {
+    expect(trialAvailableHint("expired", 2, at(6 * DAY), NOW)).toBeNull();
+    expect(trialAvailableHint("active", 0, at(6 * DAY), NOW)).toBeNull();
+    expect(trialAvailableHint("active", 2, at(-1), NOW)).toBeNull();
+    expect(trialAvailableHint("active", 2, null, NOW)).toBeNull();
   });
 });

@@ -176,7 +176,7 @@ export function ConnectionStage({
     setPickedId(null);
   }, [config?.current_node_id]);
 
-  const probeRunning = nodeProbes.run !== null;
+  const probeRunning = nodeProbes.run !== null || nodeProbes.starting;
   const canProbe =
     Boolean(onProbe) &&
     nodes.length > 0 &&
@@ -382,7 +382,24 @@ export function ConnectionStage({
     const active = node.node_id === selectedId;
     const destroyed = destroyedNodeIds.has(node.node_id);
     const expired = isExpiredSeed(node);
-    const probeFailed = nodeProbes.results[node.node_id]?.reachable === false;
+    const probe = nodeProbes.results[node.node_id];
+    /** 契约上可达必有数值；真遇到「可达却没数值」按测不通处理，别冒称「未测」。 */
+    const probeBad =
+      probe !== undefined &&
+      (!probe.reachable || probe.latency_ms === null);
+    const probeError = probeBad ? probe?.error?.message ?? null : null;
+    const msText =
+      switching === node.node_id
+        ? "切换中"
+        : nodeProbes.probing.has(node.node_id)
+          ? "测速中"
+          : latency !== null
+            ? formatLatency(latency)
+            : probeBad
+              ? "测不通"
+              : "未测";
+    // 「测不通 / 未测」是文字不是读数：小一档，但右端仍对齐。
+    const msMuted = msText === "测不通" || msText === "未测";
     return (
       <button
         key={node.node_id}
@@ -412,16 +429,11 @@ export function ConnectionStage({
           {expired ? <span className="stage-node__sub">已到期</span> : null}
         </span>
         <span
-          className="stage-node__ms"
-          aria-label={probeFailed ? "这次没测通" : undefined}
+          className={`stage-node__ms${msMuted ? " is-muted" : ""}`}
+          aria-label={probeBad ? "这次没测通" : undefined}
+          title={probeError || undefined}
         >
-          {switching === node.node_id
-            ? "切换中"
-            : nodeProbes.probing.has(node.node_id)
-              ? "测速中"
-              : latency !== null
-                ? formatLatency(latency)
-                : "—"}
+          {msText}
         </span>
       </button>
     );

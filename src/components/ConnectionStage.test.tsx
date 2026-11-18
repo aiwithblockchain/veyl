@@ -56,11 +56,13 @@ function probes(over: Partial<NodeProbesController> = {}): NodeProbesController 
   return {
     results: {},
     run: null,
+    starting: false,
     probing: new Set(),
     finished: null,
     notice: null,
     available: true,
     recordResults: () => {},
+    markProbing: () => {},
     loadSnapshot: async () => {},
     start: async () => ({ ok: true }),
     cancel: async () => {},
@@ -326,7 +328,7 @@ describe("连接舞台", () => {
     expect(onSwitchNode).not.toHaveBeenCalled();
   });
 
-  it("节点行显示测速结果，未测到显示破折号", async () => {
+  it("节点行显示测速结果，未测到写「未测」", async () => {
     renderStage({
       nodeProbes: probes({
         results: {
@@ -344,7 +346,8 @@ describe("连接舞台", () => {
 
     expect(await screen.findByText("42 毫秒")).toBeTruthy();
     // n1 没有结果
-    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("未测").length).toBeGreaterThan(0);
+    expect(screen.queryByText("—")).toBeNull();
   });
 
   it("免费节点按国家 + 序号显示，原名只进 title", () => {
@@ -757,7 +760,7 @@ describe("连接舞台", () => {
     expect(document.querySelectorAll(".stage-node__fastest").length).toBe(0);
   });
 
-  it("全部失败：失败行显示破折号与无障碍名，卡内给再试一次", async () => {
+  it("全部失败：失败行写「测不通」并与无障碍名一致，卡内给再试一次", async () => {
     renderStage({
       runtime: runtime({ node_id: "n1", node_latency_ms: 40 }),
       nodeProbes: probes({
@@ -774,9 +777,94 @@ describe("连接舞台", () => {
     const values = [...document.querySelectorAll(".stage-node__ms")].map(
       (node) => node.textContent,
     );
-    // 即使运行时对 n1 有旧延迟，测速失败仍显示破折号。
-    expect(values).toEqual(["—", "—"]);
+    // 测过但没通：写「测不通」，不再和「还没测」的破折号混在一起。
+    expect(values).toEqual(["测不通", "测不通"]);
+    expect(document.querySelectorAll(".stage-node__ms.is-muted").length).toBe(2);
     expect(screen.getAllByLabelText("这次没测通").length).toBe(2);
+  });
+
+  it("测速状态链：点击 → 立即进行中 → 数值或失败标记", () => {
+    const onProbe = vi.fn();
+    const base: StageOverrides = { onProbe };
+    const view = renderStage({
+      ...base,
+      nodeProbes: probes({ results: {} }),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "测速" }));
+    expect(onProbe).toHaveBeenCalledTimes(1);
+
+    // 命令刚发出（starting）：入口立刻变成「测速中」且不可再点。
+    view.rerender(
+      stageElement({ ...base, nodeProbes: probes({ starting: true }) }),
+    );
+    const busy = screen.getByRole("button", { name: /测速中/ });
+    expect((busy as HTMLButtonElement).disabled).toBe(true);
+
+    // 行内也立刻有反馈。
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({ starting: true, probing: new Set(["n1"]) }),
+      }),
+    );
+    expect(
+      screen.getAllByRole("option")[0].querySelector(".stage-node__ms")
+        ?.textContent,
+    ).toBe("测速中");
+
+    // 只回了 n1：n2 还没测，写「未测」。
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({ results: { n1: probeResult("n1", 238) } }),
+      }),
+    );
+    expect(
+      [...document.querySelectorAll(".stage-node__ms")].map(
+        (node) => node.textContent,
+      ),
+    ).toEqual(["238 毫秒", "未测"]);
+
+    // 结果回来：clash 与直连都用同一个毫秒格式；失败写「测不通」。
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({
+          results: {
+            n1: { ...probeResult("n1", 238), probe_method: "clash_delay" },
+            n2: {
+              ...failedProbe("n2"),
+              error: { code: "CLASH_DELAY_FAILED", message: "no such outbound" },
+            },
+          },
+        }),
+      }),
+    );
+    const values = [...document.querySelectorAll(".stage-node__ms")];
+    expect(values[0].textContent).toBe("238 毫秒");
+    expect(values[1].textContent).toBe("测不通");
+    expect(values[1].textContent).not.toBe("未测");
+    expect(values[1].getAttribute("title")).toBe("no such outbound");
+    // 两种文字态都小一档；数值仍是 13px 读数。
+    expect(values[0].classList.contains("is-muted")).toBe(false);
+    expect(values[1].classList.contains("is-muted")).toBe(true);
+
+    // 可达却没有数值（契约异常）：按测不通处理，不冒称「未测」。
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({
+          results: {
+            n1: probeResult("n1", 238),
+            n2: { ...probeResult("n2", 1), latency_ms: null },
+          },
+        }),
+      }),
+    );
+    expect(
+      [...document.querySelectorAll(".stage-node__ms")][1].textContent,
+    ).toBe("测不通");
   });
 
   it("手动测速后收尾句去掉数字", () => {

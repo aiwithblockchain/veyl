@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { MyServer, MyServerCatalog } from "../agent/bridge";
 import { formatDailyPrice, isProvisioning, serverRailState, stateTone } from "../myservers/labels";
-import { IconClose } from "./icons";
+import { IconClose, IconPlus } from "./icons";
 
 interface Props {
   servers: MyServer[];
@@ -16,6 +16,10 @@ interface Props {
   /** 身份不可用：行与「新建」都不可点。 */
   disabled?: boolean;
   compact?: boolean;
+  /** 试用还有免费节点可用时的一行旁注；null/不给则不显示。 */
+  trialHint?: string | null;
+  /** 旁注里的「去连接」：切到连接页。 */
+  onGoConnect?: () => void;
   onSelect: (serverId: string) => void;
   onNew: () => void;
 }
@@ -75,6 +79,8 @@ export function MyServersRail({
   retryNotice = null,
   disabled = false,
   compact = false,
+  trialHint = null,
+  onGoConnect,
   onSelect,
   onNew,
 }: Props) {
@@ -82,7 +88,8 @@ export function MyServersRail({
   const regionName = (regionId: string) =>
     catalog?.regions.find((region) => region.id === regionId)?.name ?? regionId;
 
-  const list = (
+  /** 滚动区内容：错误 / 骨架 / 服务器行。 */
+  const content = (
     <>
       {error ? (
         <>
@@ -128,6 +135,24 @@ export function MyServersRail({
     </>
   );
 
+  /** 试用旁注：常驻在列表下方，不跟着列表滚走；读列表失败时不夹带旁注。 */
+  const trialNote =
+    servers.length > 0 && !loading && !error && trialHint ? (
+      <p className="myservers__trial-hint myservers__trial-hint--rail">
+        {trialHint}
+        {onGoConnect ? (
+          <button
+            type="button"
+            className="myservers__trial-link"
+            disabled={disabled}
+            onClick={onGoConnect}
+          >
+            去连接
+          </button>
+        ) : null}
+      </p>
+    ) : null;
+
   return (
     <aside
       id="config-rail"
@@ -168,7 +193,22 @@ export function MyServersRail({
               </svg>
             </button>
           </div>
-          {list}
+          {/* 列表自己滚：.rail 是 overflow:hidden，不套这层超出的行会被裁掉。 */}
+          <div className="rail__body">{content}</div>
+          {trialNote}
+          {servers.length > 0 && !loading && !error ? (
+            <button
+              type="button"
+              className="rail__new-row"
+              disabled={disabled}
+              onClick={onNew}
+            >
+              <span className="rail__new-row__icon">
+                <IconPlus size={14} />
+              </span>
+              <span>新建节点</span>
+            </button>
+          ) : null}
         </>
       )}
 
@@ -209,7 +249,11 @@ export function MyServersRail({
             >
               新建节点
             </button>
-            {list}
+            {/* 抽屉的「新建节点」沿用顶部动作位；试用旁注固定在底部。
+                两者相对位置与左栏不同，是有意保留抽屉既有结构。 */}
+            {/* 抽屉同样受限高滚动，长列表不会溢出视口。 */}
+            <div className="rail__body">{content}</div>
+            {trialNote}
           </div>
         </div>
       ) : null}
