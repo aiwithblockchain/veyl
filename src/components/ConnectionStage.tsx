@@ -11,6 +11,7 @@ import { dataPlaneDown } from "../ui/dataPlane";
 import { formatClock } from "../ui/format";
 import { failureHeadline } from "../ui/middleArea";
 import { displayNodeNames, formatLatency } from "../ui/nodeList";
+import { formatTrialExpiry } from "../myservers/labels";
 import type { ActionCard } from "../ui/actionCard";
 import { StageQuickToggles, type ModeSwitchResult } from "./StageQuickToggles";
 
@@ -291,8 +292,6 @@ export function ConnectionStage({
             : failed || noTraffic
               ? "重新连接"
               : "连接";
-  const primaryDisabled =
-    starting || stopping || helperPreparing || switching !== null;
   const probeTitle = probeRunning
     ? "测速中"
     : switching !== null || starting || stopping || helperPreparing
@@ -356,20 +355,39 @@ export function ConnectionStage({
   const mixedSources = freeEntries.length > 0 && ownedEntries.length > 0;
   const allSeed = nodes.length > 0 && freeEntries.length === nodes.length;
 
-  /** 免费组标题右侧：按剩余天数向上取整；拿不到截止时间才退回「试用中」。 */
-  const trialHint = (() => {
-    if (!trialExpiresAt) return "试用中";
-    const ends = Date.parse(trialExpiresAt);
-    if (!Number.isFinite(ends)) return "试用中";
-    const remaining = ends - now;
-    if (remaining < 86_400_000) return "今天到期";
-    return `${Math.ceil(remaining / 86_400_000)} 天后到期`;
-  })();
+  const trialEndsAt = trialExpiresAt ? Date.parse(trialExpiresAt) : Number.NaN;
+  const trialHasEnd = Number.isFinite(trialEndsAt);
+  const trialEnded = trialHasEnd && trialEndsAt <= now;
+
+  /** 免费组标题右侧：与「我的服务器」空态共用同一条取整规则；已过期与无时间分开说。 */
+  const trialHint = !trialHasEnd
+    ? "试用中"
+    : trialEnded
+      ? "已到期"
+      : (formatTrialExpiry(trialExpiresAt, now) ?? "试用中");
+
+  /** 试用到期但 Host 还没清池（最多约 5 分钟）：免费行就地拒绝，避免先连上再被断开。 */
+  const isExpiredSeed = (node: { source: string }) =>
+    trialEnded && node.source === "seed";
+
+  const connectTarget =
+    nodes.find((node) => node.node_id === connectTargetId) ?? null;
+  const connectBlocked =
+    (primaryLabel === "连接" || primaryLabel === "重新连接") &&
+    connectTarget !== null &&
+    isExpiredSeed(connectTarget);
+  /** 池里还有真正点得动的行才允许说「换一个节点」：过期的、已销毁的都不算。 */
+  const hasUsableNode = nodes.some(
+    (node) => !isExpiredSeed(node) && !destroyedNodeIds.has(node.node_id),
+  );
+  const primaryDisabled =
+    starting || stopping || helperPreparing || switching !== null || connectBlocked;
 
   const renderNode = ({ node, index }: (typeof nodeEntries)[number]) => {
     const latency = latencies[index];
     const active = node.node_id === selectedId;
     const destroyed = destroyedNodeIds.has(node.node_id);
+    const expired = isExpiredSeed(node);
     const probeFailed = nodeProbes.results[node.node_id]?.reachable === false;
     return (
       <button
@@ -377,15 +395,19 @@ export function ConnectionStage({
         type="button"
         role="option"
         aria-selected={active}
+        aria-disabled={expired || undefined}
         className={`stage-node ${active ? "is-selected" : ""} ${
           destroyed ? "is-destroyed" : ""
-        }`}
+        } ${expired ? "is-expired" : ""}`}
         onClick={() => {
-          if (!destroyed) void switchTo(node.node_id);
+          if (!destroyed && !expired) void switchTo(node.node_id);
         }}
-        disabled={switching !== null || destroyed}
+        disabled={switching !== null || destroyed || expired}
       >
-        <span className="stage-node__name" title={node.name}>
+        <span
+          className={`stage-node__name${expired ? " has-sub" : ""}`}
+          title={node.name}
+        >
           <span className="stage-node__name-text">
             {displayNames[index] ?? node.name}
           </span>
@@ -393,6 +415,7 @@ export function ConnectionStage({
             <span className="stage-node__fastest">最快</span>
           ) : null}
           {destroyed ? <span className="stage-node__badge">已销毁</span> : null}
+          {expired ? <span className="stage-node__sub">已到期</span> : null}
         </span>
         <span
           className="stage-node__ms"
@@ -542,6 +565,14 @@ export function ConnectionStage({
         >
           {primaryLabel}
         </button>
+
+        {connectBlocked ? (
+          <p className="stage-note">
+            {hasUsableNode
+              ? "当前节点已到期，换一个节点再连接。"
+              : "试用已到期，免费节点已不可用。"}
+          </p>
+        ) : null}
 
         {failed ? (
           <button type="button" className="stage-secondary" onClick={onStart}>

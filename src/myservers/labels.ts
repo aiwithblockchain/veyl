@@ -78,6 +78,23 @@ export function formatMonthlyFromDaily(cents: number): string {
   return Number.isInteger(dollars) ? `$${dollars}` : `$${dollars.toFixed(2)}`;
 }
 
+/**
+ * 试用剩余：「我的服务器」空态与节点卡组标题共用这一条口径。
+ * 向下取整（少报安全）；不足 24 小时不写「今天」，写「不到 1 天后到期」；已过期返回 null。
+ */
+export function formatTrialExpiry(
+  expiresAt: string | null,
+  now: number,
+): string | null {
+  if (!expiresAt) return null;
+  const ends = Date.parse(expiresAt);
+  if (!Number.isFinite(ends)) return null;
+  const remaining = ends - now;
+  if (remaining <= 0) return null;
+  if (remaining < 86_400_000) return "不到 1 天后到期";
+  return `${Math.floor(remaining / 86_400_000)} 天后到期`;
+}
+
 /** 计费截止措辞的唯一出处；定稿后只改这里。 */
 export const PAID_THROUGH_WORDING = "本期有效至";
 export const PAID_EXPIRED_WORDING = "本期已到期，下一轮扣费顺延";

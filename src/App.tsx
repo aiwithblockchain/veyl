@@ -2358,6 +2358,16 @@ export default function App() {
           onRebuilt={myServers.rebuilt}
           onRetryDetail={myServers.retryDetail}
           onAiLocate={handleAiLocate}
+          trial={
+            trial
+              ? {
+                  state: trial.state,
+                  seedNodeCount: trial.seed_node_count,
+                  expiresAt: trial.expires_at,
+                }
+              : null
+          }
+          onGoConnect={() => changeDestination("client")}
         />
       ) : trial?.state === "expired" && !hasNodes ? (
         <TrialExpired

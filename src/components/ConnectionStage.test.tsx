@@ -133,6 +133,7 @@ interface StageOverrides {
   preselect?: { configId: string; nodeId: string; nonce: number } | null;
   trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
   trialExpiresAt?: string | null;
+  destroyedNodeIds?: ReadonlySet<string>;
   onProbe?: () => void;
   manualProbed?: boolean;
   onProbeAvailabilityChange?: (available: boolean) => void;
@@ -169,6 +170,7 @@ function stageElement(over: StageOverrides = {}) {
       preselect={over.preselect ?? null}
       trialSummary={over.trialSummary ?? null}
       trialExpiresAt={over.trialExpiresAt ?? null}
+      destroyedNodeIds={over.destroyedNodeIds}
       onProbe={over.onProbe}
       manualProbed={over.manualProbed ?? false}
       onProbeAvailabilityChange={over.onProbeAvailabilityChange}
@@ -1302,7 +1304,7 @@ describe("混池节点卡：试用 + 自建", () => {
     expect(screen.getByText("1 个节点")).toBeTruthy();
   });
 
-  it("免费组标题按剩余天数写到期：≥1 天向上取整，不足一天写今天", () => {
+  it("免费组标题按剩余天数写到期：向下取整，不足 24 小时写不到 1 天", () => {
     const inDays = (days: number) =>
       new Date(Date.now() + days * 86_400_000).toISOString();
 
@@ -1310,15 +1312,27 @@ describe("混池节点卡：试用 + 自建", () => {
       config: configWith([OWNED, FREE]),
       trialExpiresAt: inDays(3.2),
     });
-    expect(screen.getByText("4 天后到期")).toBeTruthy();
+    expect(screen.getByText("3 天后到期")).toBeTruthy();
 
     rerender(
-      stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: inDays(0.4) }),
+      stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: inDays(6 + 23 / 24) }),
     );
-    expect(screen.getByText("今天到期")).toBeTruthy();
+    expect(screen.getByText("6 天后到期")).toBeTruthy();
+
+    rerender(
+      stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: inDays(23 / 24) }),
+    );
+    expect(screen.getByText("不到 1 天后到期")).toBeTruthy();
 
     rerender(stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: null }));
     expect(screen.getByText("试用中")).toBeTruthy();
+
+    rerender(
+      stageElement({ config: configWith([OWNED, FREE]), trialExpiresAt: inDays(-0.1) }),
+    );
+    expect(
+      document.querySelector(".stage-node-group__hint")?.textContent,
+    ).toBe("已到期");
   });
 
   it("最快标记仍在免费组的行内，不进组标题", () => {
@@ -1338,5 +1352,192 @@ describe("混池节点卡：试用 + 自建", () => {
         .getAllByRole("option")[0]
         .querySelector(".stage-node__fastest")?.textContent,
     ).toBe("最快");
+  });
+});
+
+describe("免费节点到期后就地拒绝", () => {
+  const OWNED: ConfigDetail["nodes"][number] = {
+    node_id: "o1",
+    name: "东京 1 号",
+    server: "198.51.100.1",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "owned",
+    created_at: 0,
+  };
+  const FREE: ConfigDetail["nodes"][number] = {
+    node_id: "f2",
+    name: "洛杉矶 02",
+    server: "203.0.113.9",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "seed",
+    created_at: 0,
+  };
+
+  function configWith(
+    nodes: ConfigDetail["nodes"],
+    current: string | null = nodes[0]?.node_id ?? null,
+  ): ConfigDetail {
+    return { ...CONFIG, node_count: nodes.length, current_node_id: current, nodes };
+  }
+
+  const inHours = (hours: number) =>
+    new Date(Date.now() + hours * 3_600_000).toISOString();
+
+  it("过期 seed 行禁用、副行写已到期，点了不发任何请求", () => {
+    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
+    const onStart = vi.fn();
+    renderStage({
+      config: configWith([OWNED, FREE], FREE.node_id),
+      trialExpiresAt: inHours(-1),
+      onSwitchNode,
+      onStart,
+    });
+
+    const freeRow = screen.getAllByRole("option")[1] as HTMLButtonElement;
+    expect(freeRow.disabled).toBe(true);
+    expect(freeRow.getAttribute("aria-disabled")).toBe("true");
+    expect(freeRow.classList.contains("is-expired")).toBe(true);
+    expect(freeRow.querySelector(".stage-node__sub")?.textContent).toBe("已到期");
+
+    fireEvent.click(freeRow);
+    expect(onSwitchNode).not.toHaveBeenCalled();
+    expect(onStart).not.toHaveBeenCalled();
+  });
+
+  it("当前选中是过期行：主按钮禁用并给说明，换成自建后恢复", () => {
+    renderStage({
+      config: configWith([OWNED, FREE], FREE.node_id),
+      trialExpiresAt: inHours(-1),
+    });
+
+    const blocked = screen.getByRole("button", {
+      name: "连接节点",
+    }) as HTMLButtonElement;
+    expect(blocked.disabled).toBe(true);
+    expect(
+      screen.getByText("当前节点已到期，换一个节点再连接。"),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getAllByRole("option")[0]);
+    expect(
+      screen.queryByText("当前节点已到期，换一个节点再连接。"),
+    ).toBeNull();
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "连接节点",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
+  });
+
+  it("已连接时自建节点照旧可切换，断开按钮不受影响", () => {
+    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
+    renderStage({
+      config: configWith([OWNED, FREE], OWNED.node_id),
+      connection: "connected",
+      runtime: runtime({
+        state: "running",
+        connected_since: new Date(Date.now() - 5000).toISOString(),
+        health: {
+          ...emptyRuntimeView().health,
+          data_plane: true,
+          checked_at: new Date().toISOString(),
+        },
+      }),
+      trialExpiresAt: inHours(-1),
+      onSwitchNode,
+    });
+
+    const [ownedRow, freeRow] = screen.getAllByRole("option") as HTMLButtonElement[];
+    expect(ownedRow.disabled).toBe(false);
+    expect(freeRow.disabled).toBe(true);
+    fireEvent.click(freeRow);
+    expect(onSwitchNode).not.toHaveBeenCalled();
+    expect(
+      (screen.getByRole("button", { name: "断开连接" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+  });
+
+  it("整池都过期：说明不指向不存在的替代节点", () => {
+    renderStage({
+      config: configWith([FREE], FREE.node_id),
+      trialExpiresAt: inHours(-1),
+    });
+
+    expect(
+      screen.getByText("试用已到期，免费节点已不可用。"),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("当前节点已到期，换一个节点再连接。"),
+    ).toBeNull();
+  });
+
+  it("已销毁的自建行不算替代节点", () => {
+    renderStage({
+      config: configWith([OWNED, FREE], FREE.node_id),
+      trialExpiresAt: inHours(-1),
+      destroyedNodeIds: new Set([OWNED.node_id]),
+    });
+
+    expect(
+      screen.getByText("试用已到期，免费节点已不可用。"),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("当前节点已到期，换一个节点再连接。"),
+    ).toBeNull();
+  });
+
+  it("已连接、当前正是过期 seed：主按钮仍是可点的断开", async () => {
+    const onStop = vi.fn();
+    renderStage({
+      config: configWith([OWNED, FREE], FREE.node_id),
+      connection: "connected",
+      runtime: runtime({
+        state: "running",
+        connected_since: new Date(Date.now() - 5000).toISOString(),
+        health: {
+          ...emptyRuntimeView().health,
+          data_plane: true,
+          checked_at: new Date().toISOString(),
+        },
+      }),
+      trialExpiresAt: inHours(-1),
+      onStop,
+    });
+
+    await screen.findAllByText("已连接");
+    const disconnect = screen.getByRole("button", {
+      name: "断开连接",
+    }) as HTMLButtonElement;
+    expect(disconnect.disabled).toBe(false);
+    fireEvent.click(disconnect);
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByText("当前节点已到期，换一个节点再连接。"),
+    ).toBeNull();
+  });
+
+  it("到期前 1 小时的种子节点仍可点", () => {
+    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
+    renderStage({
+      config: configWith([OWNED, FREE], OWNED.node_id),
+      trialExpiresAt: inHours(1),
+      onSwitchNode,
+    });
+
+    const freeRow = screen.getAllByRole("option")[1] as HTMLButtonElement;
+    expect(freeRow.disabled).toBe(false);
+    expect(freeRow.getAttribute("aria-disabled")).toBeNull();
+    expect(freeRow.classList.contains("is-expired")).toBe(false);
+    expect(freeRow.querySelector(".stage-node__sub")).toBeNull();
+
+    fireEvent.click(freeRow);
+    expect(freeRow.getAttribute("aria-selected")).toBe("true");
   });
 });

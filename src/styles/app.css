@@ -3538,6 +3538,43 @@ body[data-resizing] {
   margin-top: 20px;
 }
 
+/* 空态旁注：池里还有免费节点时的一行只读说明；只有「去连接」可点。 */
+.myservers__trial-hint {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.myservers__trial-hint + .myservers__empty-cta {
+  margin-top: 16px;
+}
+
+.myservers__trial-link {
+  position: relative;
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 500;
+  color: var(--link);
+  cursor: pointer;
+}
+
+.myservers__trial-link:hover,
+.myservers__trial-link:focus-visible {
+  text-decoration: underline;
+}
+
+/* 命中区约 44 高，不推动布局。 */
+.myservers__trial-link::after {
+  content: "";
+  position: absolute;
+  inset: -12px -6px;
+}
+
 /* 空态主按钮：44 高、15/500（§6.2）；只作用于登录 / 新建节点两个主动作。 */
 .myservers__empty-cta {
   height: 44px;
@@ -5537,6 +5574,20 @@ details[open] > .settings-fold__summary::before {
   white-space: nowrap;
 }
 
+/* 到期的免费行：副行独占一行，名字仍在一行里省略。 */
+.stage-node__name.has-sub {
+  flex-wrap: wrap;
+  row-gap: 1px;
+}
+
+.stage-node__sub {
+  flex-basis: 100%;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.3;
+  color: var(--ink-3);
+}
+
 .stage-node__ms {
   flex: 0 0 auto;
   font-family: var(--mono);
@@ -5956,6 +6007,11 @@ details[open] > .settings-fold__summary::before {
 .stage-node.is-destroyed .stage-node__name { color: var(--ink-3); }
 
 .stage-node.is-destroyed { opacity: 0.75; cursor: default; }
+
+/* 到期未清池的免费行：与已销毁同一套观感，不引新颜色。 */
+.stage-node.is-expired .stage-node__name { color: var(--ink-3); }
+
+.stage-node.is-expired { opacity: 0.75; cursor: default; }
 
 .myservers-topup__link {
   display: block;
