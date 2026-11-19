@@ -46,7 +46,7 @@
 | 来源 | 命令 | 新语义 |
 |---|---|---|
 | 种子（试用） | `default_profile_refresh`（种子层）+ `node_attach { source: "seed" }` | 刷新只写 `nodes`；attach 把全部种子节点并入全局配置，已绑定的跳过。**AI 侧没有 `node_attach` 工具**（仅 UI），所以 `CatalogRefresh`（工具）在单配置下必须顺带完成同样的绑定：刷新后把新种子节点并入全局配置（幂等、不改 `current_node_id`）。否则模型只有「刷新」一条路径，节点永远进不了池子（见 §6 第 1 条） |
-| 自建服务器 | `my_server_credentials`（写 `nodes(source='owned')`）+ `node_attach { nodeIds: [id] }` | 凭据命令不碰配置；attach 负责绑定。重复点「连接」是幂等的（`config_nodes` 主键去重），**不再撞 `duplicate_name`** |
+| 自建服务器 | `my_server_credentials`（写 `nodes(source='owned')`）+ `node_attach { nodeIds: [id] }` | 凭据命令不碰配置；attach 负责绑定。重复入池是幂等的（`config_nodes` 主键去重），**不再撞 `duplicate_name`** |
 | 订阅 | `node_import_url { configId? }` | 省略 `configId` 时绑定全局配置（新语义），不再有「只进池不绑定」的死状态 |
 | 粘贴 / 手填 / 文件 | `node_import_text` / `node_create` / `node_import_file` | 同上：省略 `configId` = 绑定全局配置 |
 
@@ -61,10 +61,10 @@
 | 流程 | 动作顺序 |
 |---|---|
 | 试用加入种子 | `node_attach({source:"seed"})` → 界面本地预选「最快」，**不写库** → 用户点「连接」时 `node_switch` 再 `runtime_start`（既有口径，`ai-first-product.md` §选中免费节点之后） |
-| 服务器页「去连接」 | 未连接时只 `my_server_credentials` → `node_attach({nodeIds:[id]})`，随后跳控制台并**预选**这台节点的节点卡（预选不写库）；**不调 `node_switch`、不调 `runtime_start`**。非 idle（已连接 / 连接中 / 断开中）一条命令都不发，只跳控制台。真正的连接只发生在控制台主按钮那一下（2026-11-19 起，`commands.md` §4.0） |
+| 服务器（静默入池） | 服务器页**没有连接入口，不发任何命令**。就绪（`healthy` / `active`）且本地还没有这台服务器的节点行时，界面静默调 `my_server_credentials`，成功后排队等 idle 再 `node_attach`；非 idle 挂起。连接只发生在控制台主按钮（2026-11-19 起，`commands.md` §4.0） |
 | 订阅 / 粘贴 / 手填 / 文件 | 只 attach；当前节点由用户点选或点「连接」时再定 |
 
-`node_switch`（写库；已连接时是 Clash selector 热切换）与 `runtime_start`（同配置幂等）只由**控制台主按钮**发起。所以「已经连着免费节点、去服务器页点『去连接』」不会切过去：只跳控制台并提示先断开；连接中连 `node_attach` 都不发——它会触发 `runtime_rebuild`（stop → start 断流，`commands.md` §4.0.1）。
+`node_switch`（写库；已连接时是 Clash selector 热切换）与 `runtime_start`（同配置幂等）只由**控制台主按钮**发起。服务器页既不取凭据也不 attach；静默入池只在 idle 时调 `node_attach`，所以不会触发 `runtime_rebuild`（stop → start 断流，`commands.md` §4.0.1）。
 
 ### 3.3 命令取舍
 
@@ -116,7 +116,7 @@ node_attach { source?: "seed"; nodeIds?: string[]; configId?: string }
 ### 3.5 重复导入
 
 - 同一节点（`source` + `source_key`）重复导入：`node_import_*` 按既有规则计入 `skipped(reason="duplicate")`；`node_attach` 幂等跳过。
-- 服务器页重复「去连接」：`my_server_credentials` 按 `server_id` 覆盖写同一节点；`node_attach` 不重复绑定；**当前节点不变**——连接只由控制台主按钮发起，attach 从不顺带改 `current_node_id`（§3.2、`commands.md` §4.0）。
+- 服务器重复入池：`my_server_credentials` 按 `server_id` 覆盖写同一节点、`node_attach` 不重复绑定；本地节点行已存在后静默入池不再触发；**当前节点不变**——连接只由控制台主按钮发起（§3.2、`commands.md` §4.0）。
 - 同一台服务器换了凭据（重建后 IP 变化）：`my_server_credentials` 覆盖 `nodes` 行，`config_nodes` 关联不变，无需再 attach。
 
 ### 3.6 迁移：已有多个配置
@@ -157,8 +157,8 @@ node_attach { source?: "seed"; nodeIds?: string[]; configId?: string }
 |---|---|
 | 试用流程 · 加入节点 | `config_create(source="seed")` → `node_attach({ source: "seed" })`（`App.tsx:1967`） |
 | 试用流程 · 失败清理 | **删掉 `vpn.deleteConfig(config.config_id)`**（`App.tsx:2001`）：全局配置不能删，attach 失败时池子没变，直接报错重试即可 |
-| 服务器页「连接」 · 入池 | `config_create(nodeIds)` → `my_server_credentials` + `node_attach({ nodeIds })`（`App.tsx:620-622`） |
-| 服务器页「连接」 · 切当前 | **服务器页不再发起连接**：未连接只入池 + 预选节点卡后跳控制台；非 idle 一条命令都不发，只跳控制台（同一台不提示，否则提示先断开）。`node_switch` / `runtime_start` 只由控制台主按钮发起（`App.tsx:601-643`，2026-11-19 起） |
+| 服务器 · 静默入池 | 就绪（`healthy` / `active`）且本地无节点行时自动 `my_server_credentials` + 排队 `node_attach({ nodeIds })`（`useServerNodePooling.ts`） |
+| 服务器页 | **没有连接入口**：详情页只剩「销毁」，页面不发任何命令；`node_switch` / `runtime_start` 只由控制台主按钮发起（2026-11-19 起） |
 | `hasNodes` | 只认 `activeConfig.node_count`（`App.tsx:661`） |
 | 到期屏 | 用户已有节点时不显示 `trial_expired`（PM 已另派最小修复；本设计确认口径：`expired && !hasNodes`） |
 | 节点导入入口 | 省略 `configId` 即绑定全局池；界面不再传配置 id |
@@ -183,10 +183,10 @@ node_attach { source?: "seed"; nodeIds?: string[]; configId?: string }
 
 1. **后端命令**：`node_attach`（含懒创建与错误码）；`config_create` 的 `config_exists` 拒绝；`config_activate` / `config_delete` 的退休返回；`node_import_*` / `node_create` 省略 `configId` 时的懒创建 + 绑定；**`default_profile_refresh` / `CatalogRefresh` 刷新后把新种子节点并入全局配置**（与 `node_attach{source:"seed"}` 同语义，幂等、不改 `current_node_id`）——没有这一步，AI 首次配置选免费节点时无法把节点放进池子。
 2. **后端迁移**（§3.6）：合并配置、按 `merge_key` 合并 issues、处理 `COUNT=1 AND is_active=0`、`layout` 随配置删除；事务内完成、幂等、在 UI 读配置之前。
-3. **前端入口**：`App.tsx:1967`（attach）、`App.tsx:2001`（删掉 `deleteConfig`）、`App.tsx:590`（credentials + attach）、`App.tsx:604-616`（删掉 `selectConfig`）、`App.tsx:661`（`hasNodes`）、到期屏守卫；`useVpnSession.selectConfig/deleteConfig` 标记待清理。**2026-11-19 起服务器页不再发起连接**：「去连接」未连接时只 credentials + attach 后跳控制台并预选，非 idle 一条命令都不发（`App.tsx:601-643`；`commands.md` §4.0）。
+3. **前端入口**：`App.tsx:1967`（attach）、`App.tsx:2001`（删掉 `deleteConfig`）、`App.tsx:590`（credentials + attach）、`App.tsx:604-616`（删掉 `selectConfig`）、`App.tsx:661`（`hasNodes`）、到期屏守卫；`useVpnSession.selectConfig/deleteConfig` 标记待清理。**2026-11-19 起服务器页没有连接入口**：详情页只剩「销毁」，页面不发任何命令；节点由静默入池（`useServerNodePooling.ts`）在就绪且本地无节点行时自动注册，idle 时 `node_attach`（`commands.md` §4.0）。
 4. **工具层**：`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出（`ConfigActivate` 无工具入口）；系统提示词同步（`tools.md` §5.1、`prompt-design.md:315`）；前端 `TOOL_COPY` 映射表与 mock 剧本里的旧工具名同批删掉。
 5. **实现侧版本常量同批升**：`src-tauri/src/tools/envelope.rs:13` 的 `CONTRACT_VERSION` 跟本批 `tools.md` 一起到 **3.18.0**（不是 3.17.5），断言它的 `boundary_tests.rs:542` 同步；`display.rs` 里没有版本常量（已核对），不涉及。另：`claurst_session/events.rs:11`、`runtime/manager.rs:19` 的 `2.16.2 → 2.17.0`（与 §5 `events.md` 2.17.0 一致）。这些不改，`check-contracts` 会一直挂 advisory。
-6. **验收**：C6「试用 + 自建节点并存」——试用中建机、连接后节点池含两类节点；到期后种子节点消失、自建节点与当前节点保留、界面进连接舞台而不是到期屏；重复点同一台服务器的「连接」不再报错；到期时选中项回落写库。
+6. **验收**：C6「试用 + 自建节点并存」——试用中建机、连接后节点池含两类节点；到期后种子节点消失、自建节点与当前节点保留、界面进连接舞台而不是到期屏；再次进入就绪态不重复注册 / 绑定；到期时选中项回落写库。
 
 ## 7. 风险
 
@@ -221,7 +221,7 @@ node_attach { source?: "seed"; nodeIds?: string[]; configId?: string }
 |---|---|---|
 | 1 | 全新安装 → 试用 | `configs` 只有 1 行，节点池 2 条 |
 | 2 | 试用中建机并连接 | 仍是同一行；节点池 3 条；当前节点为自建节点；免费节点仍可见可选 |
-| 3 | 再点同一台服务器的「连接」 | 不报错、不新增配置；当前节点切回该服务器 |
+| 3 | 再次进入同一台服务器的就绪态 | 静默入池不再触发：不新增节点行、不重复绑定、不改当前节点 |
 | 4 | 试用到期且已有自建节点 | 种子节点从池中消失；自建节点与当前节点保留、顺序不变；进连接舞台，不是到期屏 |
 | 5 | 到期时正连着自建节点 | 不断线；界面不切成到期屏 |
 | 6 | 到期时正连着种子节点 | 硬断开；不自动连到自建节点；节点卡只剩自建节点，当前项是池里第一个 |

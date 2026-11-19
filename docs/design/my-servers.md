@@ -359,19 +359,19 @@ pending_payment ──假支付成功──▶ paid ──▶ provisioning ─�
 ### 5.2 实例状态（控制面）
 
 ```
-creating → booting → installing → verifying → healthy → active
-   │          │           │           │           │
-   └──────────┴───────────┴───────────┴───────────┴──▶ error（记录阶段与原因）
-                                                         │
-                                                 销毁 ─▶ destroying → destroyed
+creating → booting → installing → verifying → active
+   │          │           │           │
+   └──────────┴───────────┴───────────┴──▶ error（记录阶段与原因）
+                                             │
+                                     销毁 ─▶ destroying → destroyed
 ```
 
 - `creating`：调用建机 API（成功即拿到 droplet id，但还没有 IP）。
 - `booting`：轮询 droplet，**只认四种状态 `new` / `active` / `off` / `archive`**；其它返回值按瞬时异常重试，连续 3 次未知即失败。`active` 后从 `networks.v4[]` 里取 `type = "public"` 的 `ip_address`；`off` / `archive` 直接失败（不救）。
 - `installing`：服务端脚本执行、准备上报。
-- `verifying`：控制面收到凭据后做**服务端健康检查**（端口可达、出口 IP 可用）；客户端同时做**本地健康检查**（`sing-box check` + TCP 连通 + 可选真实连接）。两边都过才进 `healthy`。
-- `healthy`：节点已写入节点池、`node_id` 已就绪。
-- `active`：节点已至少被一套配置引用（可选状态，界面展示为“已开通”）。
+- `verifying`：控制面收到凭据后做**服务端健康检查**（端口可达、出口 IP 可用）；客户端同时做**本地健康检查**（`sing-box check` + TCP 连通 + 可选真实连接）。两边都过才进 `active`。
+- `active`：开通完成。结算（就绪后扣款）、`node_id` 写入与 `state = 'active'` 是**同一条 UPDATE**（`cloudflare/control-plane/src/servers.ts:369-373`），界面展示为「可用 / 已开通」。节点有没有进本地节点池由客户端自己决定（静默入池，见 `commands.md` §4.0），控制面不区分。
+- `healthy`：**历史兼容值**（2026-11-19 确认）。控制面从结算那一刻直接写 `active`，任何代码都不再产生 `healthy`；它只出现在 mock 与早期数据里，客户端、凭据门禁、计费轮询继续接受它，避免旧行报错。
 
 ### 5.3 状态表：失败分支、可重试性、文案、实例处置
 
@@ -427,7 +427,7 @@ Cloudflare 没有长驻进程，编排必须拆成“短请求 + 持久工作流
 | 建机 | Workflow step `create_instance` | API 30s；失败重试 1 次 | D1 `servers = creating` |
 | 等待开机 | Workflow step `wait_boot` | 轮询 10s，总 10 分钟 | D1 `servers = booting` → `installing` |
 | 装服务端 | Workflow 等待 D1 / DO 收到 enrollment | 总 10 分钟；无回调即失败 | D1 `servers = installing`；DO 记录最后状态 |
-| 健康检查 | Workflow step + 客户端本地校验 | 服务端 2 分钟；客户端 30s | D1 `servers = verifying → healthy` |
+| 健康检查 | Workflow step + 客户端本地校验 | 服务端 2 分钟；客户端 30s | D1 `servers = verifying → active`（结算同一条 UPDATE） |
 | 失败回收 | Workflow 失败分支 → Queue `destroy` | Queue 重投 5 次（指数退避） | D1 `orders = failed`；`servers = destroying → destroyed` |
 | 销毁（用户） | Worker → DO → Queue | 同步改状态；删除任务重投 5 次 | D1 `servers = destroying → destroyed` |
 | 卡住巡检 | Cron 每 5 分钟 | — | 标记 `error` 并告警（见下） |
@@ -516,7 +516,7 @@ DigitalOcean 的 `POST /v2/droplets` 直接接受 `user_data`（cloud-init **明
   └─ cloud-init 带 enrollment_token（一次性、仅能上报、45 分钟过期）+ 控制面选定的端口
        └─ 脚本生成节点密码（不建任何登录账号）
             └─ POST /v1/enroll/{token}  （HTTPS）
-                 └─ 控制面：校验 token / 端口 → 存加密的节点凭据 → 标 installing→healthy
+                 └─ 控制面：校验 token / 端口 → 存加密的节点凭据 → 标 installing→active（结算）
                       └─ 客户端：GET /v1/servers/{id}/credentials → 验签 → 写 secrets.enc
 ```
 
@@ -714,7 +714,7 @@ DigitalOcean 的 `POST /v2/droplets` 直接接受 `user_data`（cloud-init **明
 
 ### 7.6 节点如何进池、如何建配置
 
-1. 控制面通知客户端 `my-server-changed(state = `healthy`)`。
+1. 控制面通知客户端 `my-server-changed(state = active)`。
 2. Host 取凭据 → 验签 → 写 `nodes`（`source = 'owned'`）+ `secrets.enc` → 发 `node-list-changed`。
 3. `my_server_get` 返回 `node_id`；客户端把节点加入 `我的节点`（或用户在组的添加流程里指定的组）；配置绑定组，调 `config_create(groupId)`，**不加新字段**。
 4. 已建配置里该服务器若被销毁：**节点记录保留并标「服务器已销毁」，不自动移出组、不改 `current_node_id`**；连接时给明确错误「这台服务器已销毁，换一个节点或重新购买」，用户可手动移除（移除后按组内第一个回落）。产品 2026-11-14 拍板，见 `remote-groups.md` §4.2 第 7 条。
@@ -1347,7 +1347,7 @@ CREATE TABLE my_servers (
 cloud-init 启动
   └─ 写入下发端口 / 生成节点密码
        └─ POST /v1/enroll/{token}（HTTPS；一次性；45 分钟过期）
-            └─ 控制面：校验 token 与端口 → AES-256-GCM 加密保存（node:<server_id>）→ 标 installing→healthy
+            └─ 控制面：校验 token 与端口 → AES-256-GCM 加密保存（node:<server_id>）→ 标 installing→active（结算）
                  └─ 客户端：GET /v1/servers/{id}/credentials → Ed25519 验签
                       └─ 写 secrets.enc（node:<node_id>）→ 内存丢弃
 ```
@@ -1441,7 +1441,7 @@ cloud-init 启动
 
 - **复用现有 `node_probe`**：服务器装好后节点已在节点池；已连接且属于当前配置时走 Clash 真实延迟，否则对 `server:port` 做 TCP 握手测延迟。不新造测速通道。
 - 入口放在服务器详情（`测试延迟`），列表行显示最近一次结果（`42 ms` / `连不上` / `未测试`）。
-- 节点从 `installing → healthy` 后自动测一次，用户可手动重测；结果带时间戳与 TTL。
+- 节点从 `installing → active` 后自动测一次，用户可手动重测；结果带时间戳与 TTL。
 - 文案不把「TCP 通」等同于「代理可用」；端口不通写「服务器没有响应」，延迟高只提示、不判死。
 - 安装中 / 安装失败的服务器没有节点，不显示测速入口。
 - 契约优先零新增（复用 `node_probe`）；确有需要再评估按 server 测的最小新增面。
@@ -1468,7 +1468,7 @@ cloud-init 启动
 | 凭据签名下发、客户端验签落库、销毁即删除 | 凭据轮换、凭据导出 |
 | 列表 / 详情 / 销毁 / 重建命令与事件 | 自动把新节点加入某个组（**单独标为下一批**，见 §19.11） |
 
-**完成定义**：一台真机在 25 分钟内跑完 `creating → healthy`，客户端拿到验签通过的凭据并**真实连上**；用户点销毁后 60 秒内云账号里查不到这台 droplet，列表也不再出现。判据见 §19.10。
+**完成定义**：一台真机在 25 分钟内跑完 `creating → active`，客户端拿到验签通过的凭据并**真实连上**；用户点销毁后 60 秒内云账号里查不到这台 droplet，列表也不再出现。判据见 §19.10。
 
 ### 19.2 身份：设备令牌（M1 无登录 UI）
 

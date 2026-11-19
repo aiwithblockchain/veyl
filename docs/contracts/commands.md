@@ -524,10 +524,13 @@ type NodeAttachData = {
 - **懒创建**：库里没有配置时，用 `name = "默认配置"`、`connect_mode = "system_proxy"`、`routing_mode = "direct"`、`dns = auto`、`tun_excludes = []`、`current_node_id = null` 建唯一配置，`created_config = true`。并发靠 `configs.name UNIQUE`（`INSERT … ON CONFLICT DO NOTHING` 后回查），不得先查后插。
 - **幂等**：已绑定的节点进 `skipped_node_ids`，不重复插入、不报错；同一批里的重复 id 只算第一次。
 - **永不改 `current_node_id`**：当前节点为空也保持为空。要改当前节点只能调 `node_switch`（§4.3）。
-- **服务器页不承载连接（2026-11-19 起）**：「去连接」只把节点并进池并把人带回控制台，真正的连接只发生在控制台主按钮那一下。
-  - 未连接时点「去连接」：只发 `my_server_credentials` → `node_attach`，随后跳到控制台并**预选**这台节点的节点卡（预选不写库，§3.2）；**不调 `node_switch`、不调 `runtime_start`**。
-  - 非 `idle`（已连接 / 连接中 / 断开中）：**一条命令都不发**，只跳控制台。连的就是这台 → 不提示；不是这台 → 给一句 info 提示（「当前正在使用另一台，要换成这台，先在控制台断开。」）。
-  - 原因：`node_attach` 在连接中会触发 `runtime_rebuild`（§4.0.1，stop → start，中间断流）；点一个「去看看」不该掐断正在用的连接。
+- **服务器页没有连接入口（2026-11-19 起）**：详情页就绪（`healthy` / `active`）时底部只有「销毁」，没有主按钮；服务器页**不发起任何连接动作**——不取凭据、不 `node_attach`、不 `node_switch`、不 `runtime_start`。连接只发生在控制台主按钮那一下。
+- **服务器节点静默入池（2026-11-19 起，替代原「去连接」）**：删掉连接按钮后本地节点行没人创建，改由界面自动完成。
+  - **触发**：服务器状态为 `healthy` 或 `active`、且**本地还没有这台服务器的节点行**时，静默调 `my_server_credentials` 注册本地节点。判定用 `MyServer.local_node_id`（本地 `nodes.id`，§7.15）：为空即本地还没有节点行；**不要用 `node_id`**——那是控制面 id（`nd_…`），结算时就已写入，拿它判断会永远认为「已注册」。`local_node_id` 非空但没绑过时直接进 attach 队列。
+  - **绑定**：注册成功后进待绑队列；`connection == idle` 时调 `node_attach({ nodeIds: [本地节点 id] })` 并进全局配置；**非 idle（已连接 / 连接中 / 断开中）时挂起**，等下一次回到 idle 再绑——连接中 attach 会触发 `runtime_rebuild`（§4.0.1，stop → start 断流）。
+  - **全程无提示**：不弹窗、不发通知、不写聊天；失败静默重试，**同一台 10 秒内不重试**（取凭据与 `node_attach` 各自冷却 10 秒）。
+  - **不改 `current_node_id`**：入池只进节点池，连哪台由用户在控制台选（§3.2 预选不写库）。
+  - 静默入池**不产生 `runtime_rebuild`**：attach 只在 idle 发起；若在排队期间用户连上，等下次 idle。
 - **与切换接管方式互斥**：同一配置正有 `config_set_mode` 在跑 → `CONFLICT / switch_in_progress`，`retryable: true`。
 - 成功且确有新增时发 `node-list-changed`（`reason = "bindings_changed"`，`config_id` = 全局配置）+ `config-changed(change = "updated")`；全部跳过时不发事件。
 
@@ -1672,7 +1675,8 @@ type MyServer = {
   verifying_at: string | null;     // 首次进入 verifying（sing-box check 通过）的时刻；同上
   ip: string | null;
   port: number | null;
-  node_id: string | null;          // 安装成功后才有
+  node_id: string | null;          // 控制面节点的 id（`nd_…`），结算时就写入；**不是**本地节点 id
+  local_node_id: string | null;    // 本地节点 id（`nodes.id`）；null = 本地还没有这台服务器的节点行（2.43.2）
   hourly_usd: number;              // DO 成本口径，仅内部核对，不渲染
   monthly_usd: number;             // 月估，展示用
   daily_price_cents: number;       // 售价快照（USD 分 / 天），即每天实际扣多少
@@ -1712,7 +1716,7 @@ type MyServerCredentialNode = {
 };
 ```
 
-- **`my_server_credentials` 完成整条落库链路**：Host 用内置 Ed25519 公钥验签、校验 `key_id` / 有效期 / `server_id` 后，写 `nodes(source = 'owned', source_key = server_id)` → 写 `secrets.enc` 的 `node:<本地 nodes.id>` → 回填 `my_servers.node_id` → 返回本地节点。验签或载荷不过直接报错，一行都不写。
+- **`my_server_credentials` 完成整条落库链路**：Host 用内置 Ed25519 公钥验签、校验 `key_id` / 有效期 / `server_id` 后，写 `nodes(source = 'owned', source_key = server_id)` → 写 `secrets.enc` 的 `node:<本地 nodes.id>` → 回填 `my_servers.node_id` → 返回本地节点。验签或载荷不过直接报错，一行都不写。**2026-11-19 起它的唯一调用方是「服务器节点静默入池」（§4.0），服务器页没有连接入口、也没有按钮会调它。**
 - **重复调用幂等**：同一台服务器再次取凭据时按 `(source = 'owned', source_key = server_id)` 复用已有节点行，即使控制面换发了新的 `node_id` 也不新建、不改本地 `node_id`；密码覆盖写回同一个 `password_ref`。
 - **响应只回本地节点**：`2.26.0` 起 `MyServerCredentials` 删除 `payload` / `signature`（**不向后兼容**：前端绑定同步改读 `MyServerCredentialNode`）。密码只留在 Host 的 `secrets.enc`，不再进入界面进程。
 - **`node_id` 口径**：返回值和 `my_servers.node_id` 都是本地 `nodes.id`；`my_server_list` / `get` 里的 `node_id` 仍是控制面给出的值，界面建配置必须用本命令返回的 `node_id`。
@@ -2662,11 +2666,13 @@ type RulesStatus = {
 |---|---|---|---|
 | 1 | §9.1.1 的 `<ui-context>` 模板补三行，**仅 `screen = client`**：当前接管方式、当前流量范围、改法提示（「要改的话，主按钮下面那行点一下。」）；取值来自活跃配置的 `connection_mode` / `routing_mode`，与界面 chip 同源，**不读运行时**（TUN 下会触发最长 10 秒的助手探测）。非 client 屏不出现；client 屏但读不到活跃配置时同样不出现。前端上报的 `context` 字段一个没动 | 模板补充 | 契约落后于实现（`ui_context.rs:266-275`、`commands.rs:146-161`）；模型此前看不到 chip 的当前值，容易把「已选智能 / 已选 Tun」说反 |
 
-### 2.43.2（未发布，2026-11-19：服务器页不再承载连接）
+### 2.43.2（未发布，2026-11-19：服务器页没有连接入口，节点静默入池）
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
-| 1 | §4.0 补「服务器页不承载连接（2026-11-19 起）」：未连接时「去连接」只发 `my_server_credentials` → `node_attach`，随后跳控制台并预选该节点的节点卡（不调 `node_switch` / `runtime_start`）；非 `idle`（已连接 / 连接中 / 断开中）一条命令都不发，只跳控制台，连的是同一台不提示、否则给一句 info 提示；连接只发生在控制台主按钮那一下 | 语义修正 | 原文把服务器「连接」写成 `my_server_credentials → node_attach → node_switch → runtime_start`，与实现不符（`src/App.tsx:601-643`）；`node_attach` 在连接中会触发 `runtime_rebuild`（§4.0.1，stop → start 断流），「去看看」不能掐断正在用的连接 |
+| 1 | §4.0 改写服务器页：**详情页没有连接入口**，就绪（`healthy` / `active`）时底部只有「销毁」；服务器页不取凭据、不 attach、不 switch、不 start，连接只发生在控制台主按钮。原「去连接」方案（跳控制台 + 预选）**已作废** | 语义修正 | 用户 2026-11-19 否掉「去连接」；原文写的 `my_server_credentials → node_attach → node_switch → runtime_start` 与实现不符 |
+| 2 | §4.0 新增「服务器节点静默入池」：`healthy` / `active` 且**本地还没有该服务器的节点行**时静默调 `my_server_credentials`；成功后排队，`idle` 时 `node_attach`，非 idle 挂起到下次 idle（避免 `runtime_rebuild` 断流）；全程无提示，失败同一台 10 秒内不重试；不改 `current_node_id`。判定以本地 `nodes(source='owned', source_key=server_id)` 行为准，**不用控制面返回的 `node_id`** | 新增行为 | 删掉按钮后本地节点行没人创建；`useServerNodePooling.ts` 为现状实现 |
+| 3 | §7.15 `MyServer` 新增 `local_node_id: string \| null`：本地节点 id（`nodes.id`），空 = 本地还没有这台服务器的节点行；来源是本地镜像的 `linked_node_id`（`control_plane/servers.rs:942`）。**`node_id` 语义不变**（控制面 `nd_…`，结算时写入）——客户端拿 `node_id` 判「有没有取过凭据」必错 | 字段扩展 | 两轮核对：`my_server_list` 返回的是控制面原始对象（`servers.rs:511-542`），`linked_node_id` 只作用于本地镜像与事件/降级路径；`local_node_id` 是让前端拿到本地口径的唯一出口 |
 
 ### 2.43.1（2026-11-18，启动移出锁：被取代启动的收尾与重建被断开取代）
 
