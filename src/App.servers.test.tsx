@@ -5,7 +5,7 @@ import App from "./App";
 import { getAgentBridge } from "./agent";
 import type { MyServer } from "./agent/bridge";
 import { AGENT_EVENTS } from "./agent/protocol";
-import type { ConfigSummary } from "./agent/protocol";
+import type { ConfigDetail, ConfigSummary } from "./agent/protocol";
 
 const CONFIG_ID = "cfg_1";
 
@@ -850,6 +850,106 @@ describe("销毁服务器后的选中", () => {
       screen.queryByText("服务器已下单，正在创建，稍后会自动出现。"),
     ).toBeNull();
   }, 15_000);
+});
+
+describe("停机删除的墓碑与空态", () => {
+  const TOMB_NODE = "local_node_srv_1";
+  const detailConfig = (nodes: ConfigDetail["nodes"]): ConfigDetail => ({
+    config_id: CONFIG_ID,
+    name: SUMMARY.name,
+    connect_mode: "tun",
+    routing_mode: "proxy_all",
+    node_count: nodes.length,
+    listen_port: null,
+    is_active: true,
+    current_node_id: nodes[0]?.node_id ?? null,
+    created_at: 0,
+    updated_at: 0,
+    last_used_at: null,
+    nodes,
+    dns: { mode: "auto", local: [], remote: [] },
+    tun_excludes: [],
+    layout: null,
+    layout_revision: null,
+  });
+  const configNode = (id: string): ConfigDetail["nodes"][number] => ({
+    node_id: id,
+    name: "东京 01",
+    server: "203.0.113.1",
+    port: 8388,
+    method: "aes-128-gcm",
+    protocol: "shadowsocks",
+    source: "seed",
+    created_at: 0,
+  });
+
+  it("删掉最后一台墓碑：服务器页回「还没有服务器」，连接页写「这条配置没有节点了」", async () => {
+    const tombstone: MyServer = {
+      ...SERVER,
+      state: "destroyed",
+      failure: {
+        stage: "active",
+        code: "billing_unpaid",
+        message: "余额不足，已停机删除",
+        retryable: false,
+      },
+    };
+    prepare([tombstone]);
+
+    let alive = true;
+    vi.mocked(bridge.myServerGet).mockImplementation(async () => tombstone);
+    vi.mocked(bridge.myServerList).mockImplementation(async () => ({
+      servers: alive ? [tombstone] : [],
+    }));
+    vi.mocked(bridge.configList).mockImplementation(async () => ({
+      configs: [
+        {
+          ...SUMMARY,
+          node_count: alive ? 1 : 0,
+          current_node_id: alive ? TOMB_NODE : null,
+        },
+      ],
+      active_config_id: CONFIG_ID,
+    }));
+    vi.mocked(bridge.configDetail).mockImplementation(async () =>
+      detailConfig(alive ? [configNode(TOMB_NODE)] : []),
+    );
+    vi.spyOn(bridge, "nodeForget").mockImplementation(async () => {
+      alive = false;
+      return { forgotten: true };
+    });
+
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+
+    const rail = await screen.findByRole("complementary", { name: "服务器列表" });
+    fireEvent.click(
+      await within(rail).findByRole("button", { name: /已停机删除/ }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+
+    // 服务器页：回到页面级空态。
+    expect(await screen.findByText("还没有服务器")).toBeTruthy();
+
+    // 连接页：这一条配置没有节点了。
+    navConnect();
+    expect(await screen.findByText("这条配置没有节点了")).toBeTruthy();
+  }, 15_000);
+
+  it("根本没有配置：不写「这条配置没有节点了」，两种空态不互相顶替", async () => {
+    prepare([]);
+    vi.mocked(bridge.configList).mockResolvedValue({
+      configs: [],
+      active_config_id: null,
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("从哪里开始？")).toBeTruthy();
+    expect(screen.queryByText("这条配置没有节点了")).toBeNull();
+  });
 });
 
 describe("新建节点：导航与 Esc", () => {

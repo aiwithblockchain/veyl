@@ -113,6 +113,8 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const pendingBaselineRef = useRef<Set<string> | null>(null);
   /** 自己触发的登出：随后到来的 account-cleared 事件不要重复处理。 */
   const selfLogoutAtRef = useRef(0);
+  /** 用户已删掉的停机删除墓碑：后端还在返回时也不再显示。 */
+  const forgottenRef = useRef<Set<string>>(new Set());
   const [detail, setDetail] = useState<MyServer | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailRetrying, setDetailRetrying] = useState(false);
@@ -177,11 +179,18 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const refresh = useCallback(async (): Promise<boolean> => {
     try {
       const result = await bridge.myServerList();
-      setServers(result.servers);
+      // 停机删除后本地节点已删、墓碑行不该再出现：等后端不再返回之前先自己滤掉。
+      const list =
+        forgottenRef.current.size === 0
+          ? result.servers
+          : result.servers.filter(
+              (server) => !forgottenRef.current.has(server.server_id),
+            );
+      setServers(list);
       // 认出新机器就解除「已下单」占位并选中它；还没出现就继续等，别乱选一台旧的。
       const baseline = pendingBaselineRef.current;
       if (baseline) {
-        const appeared = result.servers.find(
+        const appeared = list.find(
           (server) => !baseline.has(server.server_id),
         );
         if (appeared) {
@@ -710,6 +719,24 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     void refreshWallet();
   };
 
+  /**
+   * 停机删除的墓碑：删掉本地节点，这一行立刻收起，不等列表刷新。
+   * 节点删掉后 Host 会发 node-list-changed，连接页那边自己重拉配置。
+   */
+  const forgetServer = useCallback(
+    async (serverId: string, nodeId: string) => {
+      await bridge.nodeForget({ nodeId });
+      forgottenRef.current.add(serverId);
+      setServers((current) =>
+        current.filter((server) => server.server_id !== serverId),
+      );
+      setSelectedId((current) => (current === serverId ? null : current));
+      setDetail((current) => (current?.server_id === serverId ? null : current));
+      void refresh();
+    },
+    [bridge, refresh],
+  );
+
   /** 重建成功：立刻选中新机器，详情先按旧数据 + 新状态占位，随后由列表/详情刷新收敛。 */
   const rebuilt = (serverId: string, state: MyServerState) => {
     pinnedSelectionRef.current = serverId;
@@ -840,6 +867,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     select,
     resetToRoot,
     clearSelection,
+    forgetServer,
     renamed,
     openWizard,
     ensureIdentity,

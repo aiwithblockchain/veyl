@@ -156,6 +156,7 @@ interface StageOverrides {
   } | null;
   trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
   trialExpiresAt?: string | null;
+  danglingNodeIds?: ReadonlySet<string>;
   onProbe?: () => void;
   manualProbed?: boolean;
   onProbeAvailabilityChange?: (available: boolean) => void;
@@ -193,6 +194,7 @@ function stageElement(over: StageOverrides = {}) {
       preselect={over.preselect ?? null}
       trialSummary={over.trialSummary ?? null}
       trialExpiresAt={over.trialExpiresAt ?? null}
+      danglingNodeIds={over.danglingNodeIds}
       onProbe={over.onProbe}
       manualProbed={over.manualProbed ?? false}
       onProbeAvailabilityChange={over.onProbeAvailabilityChange}
@@ -1899,5 +1901,128 @@ describe("待接入的服务器节点", () => {
     expect(screen.getAllByText("重新连接后可用")).toHaveLength(1);
     // 2 个可用节点 + 1 个待接入行。
     expect(screen.getAllByRole("option")).toHaveLength(3);
+  });
+});
+
+describe("停机删除的悬挂节点", () => {
+  const DEAD: ConfigDetail["nodes"][number] = {
+    node_id: "local_9",
+    name: "东京 9 号",
+    server: "198.51.100.9",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "owned",
+    created_at: 0,
+  };
+  const ALIVE: ConfigDetail["nodes"][number] = {
+    ...DEAD,
+    node_id: "local_8",
+    name: "大阪 8 号",
+  };
+  const FREE: ConfigDetail["nodes"][number] = {
+    node_id: "f2",
+    name: "洛杉矶 02",
+    server: "203.0.113.9",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "seed",
+    created_at: 0,
+  };
+  const withNodes = (nodes: ConfigDetail["nodes"], current: string | null = nodes[0]?.node_id ?? null): ConfigDetail => ({
+    ...CONFIG,
+    node_count: nodes.length,
+    current_node_id: current,
+    nodes,
+  });
+
+  it("那一行写「停机删除」、不可点、不显示时延", () => {
+    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
+    renderStage({
+      config: withNodes([DEAD, ALIVE], DEAD.node_id),
+      danglingNodeIds: new Set([DEAD.node_id]),
+      onSwitchNode,
+    });
+
+    const deadRow = screen.getAllByRole("option")[0] as HTMLButtonElement;
+    expect(deadRow.disabled).toBe(true);
+    expect(deadRow.getAttribute("aria-disabled")).toBe("true");
+    expect(deadRow.classList.contains("is-dangling")).toBe(true);
+    expect(deadRow.querySelector(".stage-node__sub")?.textContent).toBe("停机删除");
+    // 不能测速：右侧时延位不出现。
+    expect(deadRow.querySelector(".stage-node__ms")).toBeNull();
+
+    fireEvent.click(deadRow);
+    expect(onSwitchNode).not.toHaveBeenCalled();
+    expect(deadRow.getAttribute("aria-selected")).toBe("true");
+
+    // 另一台正常节点照旧能选：点一下就顶掉当前那台。
+    const aliveRow = screen.getAllByRole("option")[1] as HTMLButtonElement;
+    expect(aliveRow.disabled).toBe(false);
+    fireEvent.click(aliveRow);
+    expect(aliveRow.getAttribute("aria-selected")).toBe("true");
+    expect(deadRow.getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("悬挂的自建行不算替代节点：只剩过期免费行时按「免费节点已不可用」说", () => {
+    renderStage({
+      config: withNodes([DEAD, FREE], FREE.node_id),
+      danglingNodeIds: new Set([DEAD.node_id]),
+      trialExpiresAt: new Date(Date.now() - 3_600_000).toISOString(),
+    });
+
+    expect(screen.getByText("试用已到期，免费节点已不可用。")).toBeTruthy();
+    expect(screen.queryByText("当前节点已到期，换一个节点再连接。")).toBeNull();
+  });
+
+  it("当前选中的就是悬挂节点：主按钮禁用，提示换一个", () => {
+    const onStart = vi.fn();
+    renderStage({
+      config: withNodes([DEAD, ALIVE], DEAD.node_id),
+      danglingNodeIds: new Set([DEAD.node_id]),
+      onStart,
+    });
+
+    const primary = screen.getByRole("button", { name: "连接节点" });
+    expect((primary as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      screen.getByText("当前节点已停机删除，换一个节点再连接。"),
+    ).toBeTruthy();
+    fireEvent.click(primary);
+    expect(onStart).not.toHaveBeenCalled();
+  });
+
+  it("池里只剩悬挂节点：引导去删或新建，主按钮同样禁用", () => {
+    renderStage({
+      config: withNodes([DEAD], DEAD.node_id),
+      danglingNodeIds: new Set([DEAD.node_id]),
+    });
+
+    expect(
+      screen.getByText("节点已停机删除，去我的服务器删除它，或新建一个节点。"),
+    ).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "连接节点" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("失败态下面那个「重新连接」也不拿悬挂节点当目标", () => {
+    const onStart = vi.fn();
+    renderStage({
+      config: withNodes([DEAD, ALIVE], DEAD.node_id),
+      danglingNodeIds: new Set([DEAD.node_id]),
+      runtime: runtime({ state: "failed" }),
+      onStart,
+    });
+
+    const again = document.querySelector(
+      "button.stage-secondary",
+    ) as HTMLButtonElement;
+    expect(again.textContent).toBe("重新连接");
+    expect(again.disabled).toBe(true);
+    fireEvent.click(again);
+    expect(onStart).not.toHaveBeenCalled();
   });
 });

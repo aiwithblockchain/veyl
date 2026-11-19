@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { MyServer, MyServerCatalog } from "../agent/bridge";
 import { formatDailyPrice, isProvisioning, serverRailState, serverTone } from "../myservers/labels";
+import { isTombstone } from "../myservers/tombstones";
 import { IconClose, IconPlus } from "./icons";
 
 interface Props {
@@ -38,8 +39,9 @@ function ServerRow({
   onSelect: (serverId: string) => void;
 }) {
   // 失败机器的计费字段可能是 0：副行不写日价，避免读成「免费 / 计费坏了」。
+  // 停机删除的墓碑也不再报价：机器已经没了，价格只会误导。
   const billingPart =
-    server.state === "error"
+    server.state === "error" || isTombstone(server)
       ? null
       : server.billing_state === "pending" && isProvisioning(server.state)
         ? "开通中"

@@ -50,6 +50,7 @@ function renderDetail(
       onChanged={() => {}}
       onRebuilt={() => {}}
       onGone={onGone}
+      onForget={async () => {}}
     />,
   );
   return { destroy, onCreateAnother, onGone, unmount: view.unmount };
@@ -287,6 +288,7 @@ describe("服务器详情", () => {
       onChanged: () => {},
       onRebuilt: () => {},
       onGone: vi.fn(),
+      onForget: vi.fn(async () => {}),
     };
     const view = render(
       <MyServerDetail
@@ -352,6 +354,7 @@ describe("服务器详情", () => {
       onChanged: () => {},
       onRebuilt: () => {},
       onGone: vi.fn(),
+      onForget: vi.fn(async () => {}),
     };
     const view = render(
       <MyServerDetail
@@ -616,6 +619,7 @@ describe("服务器重命名", () => {
           onChanged={() => {}}
           onRebuilt={() => {}}
           onGone={vi.fn()}
+          onForget={async () => {}}
           onRenamed={(next) => {
             setCurrent(next);
             opts.onSaved?.(next);
@@ -761,5 +765,76 @@ describe("服务器重命名", () => {
     expect(after.value).toBe("新名字");
     expect(document.activeElement).toBe(after);
     expect(screen.getByRole("alert").textContent).toContain("连不上");
+  });
+});
+
+describe("停机删除的墓碑", () => {
+  function renderTombstone(over: Partial<MyServer> = {}, onForget = vi.fn(async () => {})) {
+    render(
+      <MyServerDetail
+        bridge={{ myServerDestroy: vi.fn() } as unknown as AgentBridge}
+        server={server({ state: "destroyed", billing_state: "expired", ...over })}
+        regionLabel="新加坡 1"
+        onCreateAnother={vi.fn()}
+        onChanged={() => {}}
+        onRebuilt={() => {}}
+        onGone={vi.fn()}
+        onForget={onForget}
+      />,
+    );
+    return { onForget };
+  }
+
+  it("只有一句说明和一个删除入口，不提供续费 / 重建 / 销毁", () => {
+    renderTombstone();
+
+    expect(
+      screen.getByText("这台机器因余额不足已停机销毁，节点不能再连接。删除后不再显示。"),
+    ).toBeTruthy();
+    expect(screen.getByText("已停机删除")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "删除" })).toBeTruthy();
+    // 停机删除压过欠费词：同一台机器不说「已停用」。
+    expect(screen.queryByText("已停用")).toBeNull();
+    expect(screen.queryByRole("button", { name: /销毁/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /重命名/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /重新建一台|重新购买/ })).toBeNull();
+    expect(screen.queryByRole("group", { name: "建机进度" })).toBeNull();
+  });
+
+  it("二次确认后带上 server_id 与 local_node_id 去删节点", async () => {
+    const { onForget } = renderTombstone();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() =>
+      expect(onForget).toHaveBeenCalledWith("srv_1", "local_node_1"),
+    );
+  });
+
+  it("墓碑没有本地节点：删除入口不可点", () => {
+    renderTombstone({ local_node_id: null });
+
+    expect(
+      (screen.getByRole("button", { name: "删除" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("删除失败：详情还在，错误就地说清楚", async () => {
+    const onForget = vi.fn(async () => {
+      throw { code: "NETWORK", message: "连不上。", retryable: true };
+    });
+    renderTombstone({}, onForget);
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    const alert = await screen.findByText(/连不上/);
+    expect(alert.textContent).toContain("没有改动这台服务器");
+    // 墓碑没被乐观移除：说明句还在，确认入口还能再点。
+    expect(
+      screen.getByText("这台机器因余额不足已停机销毁，节点不能再连接。删除后不再显示。"),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "确认删除" })).toBeTruthy();
   });
 });

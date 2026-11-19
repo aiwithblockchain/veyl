@@ -53,6 +53,8 @@ import type {
   NodeCreateInput,
   NodeAttachInput,
   NodeAttachResult,
+  NodeForgetInput,
+  NodeForgetResult,
   NodeImportResult,
   NodeProbeMethod,
   NodeProbePhase,
@@ -162,6 +164,9 @@ export class MockAgentBridge implements AgentBridge {
     // 验收：控制台执行 window.dispatchEvent(new Event("veyl:quit-requested"))。
     if (typeof window !== "undefined") {
       window.addEventListener("veyl:quit-requested", () => this.requestQuitDemo());
+      // demo：造一台「余额不足停机」的墓碑，指向当前配置的第一个节点。
+      // 验收：先加节点，再 window.dispatchEvent(new Event("veyl:seed-tombstone"))，然后刷新。
+      window.addEventListener("veyl:seed-tombstone", () => this.seedTombstoneDemo());
     }
   }
 
@@ -479,6 +484,29 @@ export class MockAgentBridge implements AgentBridge {
         emitted_at: now(),
       },
     });
+  }
+
+  /**
+   * demo：造一台「余额不足停机」的墓碑，`local_node_id` 指向当前配置的第一个节点。
+   * 没有节点时什么都不做——墓碑的悬挂节点是连接页与「我的服务器」之间那条线。
+   */
+  seedTombstoneDemo(): void {
+    try {
+      const raw = localStorage.getItem(MOCK_CONFIG_STORAGE_KEY);
+      if (!raw) return;
+      const store = JSON.parse(raw) as {
+        configs?: ConfigDetail[];
+        activeId?: string | null;
+      };
+      const active =
+        store.configs?.find((config) => config.config_id === store.activeId) ??
+        store.configs?.[0];
+      const node = active?.nodes?.[0];
+      if (!node) return;
+      this.myServers.seedBillingTombstone(node.node_id, `停机删除 · ${node.name}`);
+    } catch {
+      // demo 用，失败就当没发生。
+    }
   }
 
   /** demo：模拟免费节点到期（先把 mock 的试用状态切成 expired，再发事件）。 */
@@ -1979,6 +2007,47 @@ export class MockAgentBridge implements AgentBridge {
   async nodeAttach(_input: NodeAttachInput): Promise<NodeAttachResult> {
     // 浏览器通道的节点池由 useVpnSession 的 mock 分支维护；这里只满足接口。
     throw this.unsupportedConfigCommand("node_attach");
+  }
+
+  async nodeForget(input: NodeForgetInput): Promise<NodeForgetResult> {
+    await sleep(150);
+    // 控制面那边由 Host 顺带 dismiss；浏览器里让 mock 自己把墓碑行也收掉。
+    this.myServers.dismissByNode(input.nodeId);
+    try {
+      const raw = localStorage.getItem(MOCK_CONFIG_STORAGE_KEY);
+      if (!raw) return { forgotten: false };
+      const store = JSON.parse(raw) as {
+        configs?: ConfigDetail[];
+        activeId?: string | null;
+      };
+      let forgotten = false;
+      let total = 0;
+      for (const config of store.configs ?? []) {
+        const nodes = config.nodes ?? [];
+        const next = nodes.filter((node) => node.node_id !== input.nodeId);
+        if (next.length !== nodes.length) forgotten = true;
+        config.nodes = next;
+        config.node_count = next.length;
+        if (config.current_node_id === input.nodeId) config.current_node_id = null;
+        total += next.length;
+      }
+      if (!forgotten) return { forgotten: false };
+      localStorage.setItem(MOCK_CONFIG_STORAGE_KEY, JSON.stringify(store));
+      this.emit({
+        name: AGENT_EVENTS.nodeListChanged,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          reason: "node_deleted",
+          config_id: null,
+          node_count_total: total,
+          changed_node_ids: [input.nodeId],
+          emitted_at: now(),
+        },
+      });
+      return { forgotten: true };
+    } catch {
+      return { forgotten: false };
+    }
   }
 
   async nodeImportUrl(url: string): Promise<NodeImportResult> {

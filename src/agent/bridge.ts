@@ -9,6 +9,8 @@ import type {
   NodeCreateInput,
   NodeAttachInput,
   NodeAttachResult,
+  NodeForgetInput,
+  NodeForgetResult,
   NodeImportResult,
   NodeImportSkipped,
   NodeProbeData,
@@ -23,7 +25,7 @@ import type {
   TrialStatusData,
 } from "./protocol";
 
-export type { NodeAttachInput, NodeAttachResult, TrialStatusData } from "./protocol";
+export type { NodeAttachInput, NodeAttachResult, NodeForgetInput, NodeForgetResult, TrialStatusData } from "./protocol";
 
 export type BridgeMode = "tauri" | "mock";
 
@@ -837,6 +839,8 @@ export interface AgentBridge {
   nodeCreate(input: NodeCreateInput): Promise<NodeSummary>;
   /** 把已存在的节点绑进全局配置；池子为空时由 Host 懒创建。 */
   nodeAttach(input: NodeAttachInput): Promise<NodeAttachResult>;
+  /** 删掉一个本地节点行；停机删除的服务器留下的节点由用户手动清。 */
+  nodeForget(input: NodeForgetInput): Promise<NodeForgetResult>;
   /** 从订阅地址导入节点；只接受 https，拉取失败整体失败。 */
   nodeImportUrl(url: string, configId?: string): Promise<NodeImportResult>;
   /** 导入用户粘贴的 ss:// 文本；不发网络请求。 */

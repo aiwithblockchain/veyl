@@ -11,7 +11,7 @@ import { dataPlaneDown } from "../ui/dataPlane";
 import { formatClock } from "../ui/format";
 import { failureHeadline } from "../ui/middleArea";
 import { displayNodeNames, formatLatency } from "../ui/nodeList";
-import { trialGroupHint, trialPhase } from "../myservers/labels";
+import { NODE_TOMBSTONE_WORD, trialGroupHint, trialPhase } from "../myservers/labels";
 import type { PendingServerNode } from "../myservers/pendingServerNodes";
 import type { ActionCard } from "../ui/actionCard";
 import { StageQuickToggles, type ModeSwitchResult } from "./StageQuickToggles";
@@ -36,6 +36,8 @@ interface Props {
   onActionCardAction?: (action: { id: string; label: string }) => void;
   /** 连接失败时交给 AI 检查（固定前缀，跑 DiagRun）。 */
   onDiagnose?: () => void;
+  /** 服务器已停机删除、只剩本地节点行：灰显、不可点，等用户去「我的服务器」删。 */
+  danglingNodeIds?: ReadonlySet<string>;
   /** 免费节点步骤流完成后的收敛句：已加入 N 个免费节点，最快 Xms。 */
   trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
   /** 试用截止时间（ISO）：免费组标题右侧按剩余天数写到期文案。 */
@@ -97,6 +99,7 @@ export function ConnectionStage({
   actionCards = [],
   onActionCardAction,
   onDiagnose,
+  danglingNodeIds = new Set<string>(),
   trialSummary = null,
   trialExpiresAt = null,
   preselect = null,
@@ -430,12 +433,17 @@ export function ConnectionStage({
 
   const connectTarget =
     nodes.find((node) => node.node_id === connectTargetId) ?? null;
+  /** 选中的正是停机删除留下的节点：机器已经没了，不能拿它去连。 */
+  const connectTargetDangling =
+    connectTarget !== null && danglingNodeIds.has(connectTarget.node_id);
   const connectBlocked =
     (primaryLabel === "连接" || primaryLabel === "重新连接") &&
     connectTarget !== null &&
-    isExpiredSeed(connectTarget);
-  /** 池里还有真正点得动的行才允许说「换一个节点」：过期的都不算。 */
-  const hasUsableNode = nodes.some((node) => !isExpiredSeed(node));
+    (isExpiredSeed(connectTarget) || connectTargetDangling);
+  /** 池里还有真正点得动的行才允许说「换一个节点」：过期的、停机删除的都不算。 */
+  const hasUsableNode = nodes.some(
+    (node) => !isExpiredSeed(node) && !danglingNodeIds.has(node.node_id),
+  );
   const primaryDisabled =
     starting || stopping || helperPreparing || switching !== null || connectBlocked;
 
@@ -443,6 +451,7 @@ export function ConnectionStage({
     const latency = latencies[index];
     const active = node.node_id === selectedId;
     const expired = isExpiredSeed(node);
+    const dangling = danglingNodeIds.has(node.node_id);
     const probe = nodeProbes.results[node.node_id];
     /** 契约上可达必有数值；真遇到「可达却没数值」按测不通处理，别冒称「未测」。
         untested（reachable === null）保持「未测」，不能掉进失败态。 */
@@ -472,17 +481,17 @@ export function ConnectionStage({
         type="button"
         role="option"
         aria-selected={active}
-        aria-disabled={expired || undefined}
+        aria-disabled={expired || dangling || undefined}
         className={`stage-node ${active ? "is-selected" : ""} ${
           expired ? "is-expired" : ""
-        }`}
+        } ${dangling ? "is-dangling" : ""}`}
         onClick={() => {
-          if (!expired) void switchTo(node.node_id);
+          if (!expired && !dangling) void switchTo(node.node_id);
         }}
-        disabled={switching !== null || expired}
+        disabled={switching !== null || expired || dangling}
       >
         <span
-          className={`stage-node__name${expired ? " has-sub" : ""}`}
+          className={`stage-node__name${expired || dangling ? " has-sub" : ""}`}
           title={node.name}
         >
           <span className="stage-node__name-text">
@@ -492,14 +501,19 @@ export function ConnectionStage({
             <span className="stage-node__fastest">最快</span>
           ) : null}
           {expired ? <span className="stage-node__sub">已到期</span> : null}
+          {dangling ? (
+            <span className="stage-node__sub">{NODE_TOMBSTONE_WORD}</span>
+          ) : null}
         </span>
-        <span
-          className={`stage-node__ms${msMuted ? " is-muted" : ""}`}
-          aria-label={probeBad ? "这次没测通" : undefined}
-          title={probeError || undefined}
-        >
-          {msText}
-        </span>
+        {dangling ? null : (
+          <span
+            className={`stage-node__ms${msMuted ? " is-muted" : ""}`}
+            aria-label={probeBad ? "这次没测通" : undefined}
+            title={probeError || undefined}
+          >
+            {msText}
+          </span>
+        )}
       </button>
     );
   };
@@ -673,14 +687,23 @@ export function ConnectionStage({
 
         {connectBlocked ? (
           <p className="stage-note">
-            {hasUsableNode
-              ? "当前节点已到期，换一个节点再连接。"
-              : "试用已到期，免费节点已不可用。"}
+            {connectTargetDangling
+              ? hasUsableNode
+                ? "当前节点已停机删除，换一个节点再连接。"
+                : "节点已停机删除，去我的服务器删除它，或新建一个节点。"
+              : hasUsableNode
+                ? "当前节点已到期，换一个节点再连接。"
+                : "试用已到期，免费节点已不可用。"}
           </p>
         ) : null}
 
         {failed ? (
-          <button type="button" className="stage-secondary" onClick={onStart}>
+          <button
+            type="button"
+            className="stage-secondary"
+            onClick={onStart}
+            disabled={connectTargetDangling}
+          >
             重新连接
           </button>
         ) : null}

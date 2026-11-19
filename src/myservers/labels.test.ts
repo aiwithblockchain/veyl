@@ -216,6 +216,24 @@ describe("serverTone / serverRailState：欠费压过机器状态", () => {
   });
 });
 
+describe("停机删除的墓碑", () => {
+  it("两处都写「已停机删除」并压过欠费词，状态点是 warn", () => {
+    const server = {
+      state: "destroyed" as const,
+      billing_state: "expired" as const,
+    };
+    expect(serverRailState(server)).toBe("已停机删除");
+    expect(serverDetailState(server)).toBe("已停机删除");
+    expect(serverTone(server)).toBe("warn");
+  });
+
+  it("活着的机器不会命中这一档", () => {
+    const server = { state: "active" as const, billing_state: "active" as const };
+    expect(serverRailState(server)).toBe("已开通");
+    expect(serverTone(server)).toBe("ok");
+  });
+});
+
 describe("billingNoticeText", () => {
   it("past_due 不写相对时间词「今天」，宽限天数照旧", () => {
     const noGrace = billingNoticeText(

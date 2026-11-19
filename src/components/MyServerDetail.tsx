@@ -7,10 +7,12 @@ import {
   billingNoticeText,
   formatUsdCents,
   isProvisioning,
+  MY_SERVER_TOMBSTONE_TEXT,
   serverBillingText,
   serverDetailState,
   serverTone,
 } from "../myservers/labels";
+import { isTombstone } from "../myservers/tombstones";
 
 interface Props {
   bridge: AgentBridge;
@@ -30,6 +32,8 @@ interface Props {
   onRebuilt: (serverId: string, state: MyServerState) => void;
   /** 销毁后收起详情。 */
   onGone: () => void;
+  /** 停机删除的墓碑：删掉本地节点并把这一行收起来。 */
+  onForget: (serverId: string, nodeId: string) => Promise<void>;
   /** 改名成功：用返回的完整对象更新列表与详情，不二次拉取。 */
   onRenamed?: (server: MyServer) => void;
 }
@@ -56,6 +60,7 @@ export function MyServerDetail({
   onChanged,
   onRebuilt,
   onGone,
+  onForget,
   onRenamed,
 }: Props) {
   const [confirming, setConfirming] = useState(false);
@@ -159,6 +164,18 @@ export function MyServerDetail({
 
   const destroying = server.state === "destroying";
 
+  /** 停机删除的墓碑：删本地节点，调用方同时把这一行收起。 */
+  const forget = async () => {
+    if (busy || !server.local_node_id) return;
+    setBusy(true);
+    try {
+      await onForget(server.server_id, server.local_node_id);
+    } catch (err) {
+      setError(errorText(err));
+      setBusy(false);
+    }
+  };
+
   useEffect(() => {
     setBusy(false);
     setConfirming(false);
@@ -181,6 +198,74 @@ export function MyServerDetail({
   }, [destroying, server.server_id]);
 
   const locked = readOnly || busy || (destroying && !destroyRetryAllowed);
+
+  // 停机删除的墓碑：只有一句说明和一个删除入口，不提供续费 / 重建 / 恢复。
+  if (isTombstone(server)) {
+    const tone = serverTone(server);
+    return (
+      <div className="myservers__detail">
+        <div className="myservers__detail-head">
+          <div className="myservers__detail-heading">
+            <h2 className="myservers__detail-name">{server.name}</h2>
+          </div>
+          <span className={`myservers__state is-${tone}`}>
+            <span className={`led is-${tone}`} aria-hidden />
+            {serverDetailState(server)}
+          </span>
+        </div>
+
+        <p className="myservers__billing is-expired" role="status">
+          {MY_SERVER_TOMBSTONE_TEXT}
+        </p>
+
+        {error ? (
+          <p className="myservers__error" role="alert">
+            {error}
+          </p>
+        ) : null}
+
+        <div className="myservers__footer">
+          <div className="myservers__danger">
+            {confirming ? (
+              <div className="myservers__confirm" role="alert">
+                <p>删除后这台机器和它的节点都不再显示，也不能恢复。</p>
+                <div className="myservers__actions">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    disabled={busy}
+                    onClick={() => setConfirming(false)}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--danger-ghost"
+                    disabled={busy}
+                    onClick={() => void forget()}
+                  >
+                    {busy ? "正在删除…" : "确认删除"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="btn btn--danger-ghost"
+                disabled={locked || !server.local_node_id}
+                title={
+                  server.local_node_id ? undefined : "这台服务器没有留下本地节点。"
+                }
+                onClick={() => setConfirming(true)}
+              >
+                删除
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const primary = isProvisioning(server.state)
     ? null

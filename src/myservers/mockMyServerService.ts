@@ -314,9 +314,63 @@ export class MockMyServerService {
     advance(store);
     return {
       servers: store.servers
-        .filter((server) => server.state !== "destroyed")
+        // 控制面只保留「余额不足停机」的墓碑行；手动销毁的行不再出现。
+        .filter(
+          (server) =>
+            server.state !== "destroyed" ||
+            server.failure?.code === "billing_unpaid",
+        )
         .map(copyServer),
     };
+  }
+
+  /**
+   * demo：造一台「余额不足停机」的墓碑，`local_node_id` 指向给定节点。
+   * 验收：控制台 `window.dispatchEvent(new Event("veyl:seed-tombstone"))` 后刷新。
+   */
+  seedBillingTombstone(localNodeId: string, name: string): MyServer {
+    const store = readStore();
+    const now = Date.now();
+    const server: StoredServer = {
+      server_id: `srv_tomb_${now}`,
+      name,
+      region: "sgp1",
+      plan: DEFAULT_PLAN.id,
+      state: "destroyed",
+      created_at: new Date(now - 86_400_000).toISOString(),
+      ip: "203.0.113.77",
+      port: null,
+      node_id: `nd_tomb_${now}`,
+      local_node_id: localNodeId,
+      hourly_usd: DEFAULT_PLAN.hourly_usd,
+      monthly_usd: DEFAULT_PLAN.monthly_usd,
+      daily_price_cents: DEFAULT_PLAN.daily_price_cents,
+      paid_until: new Date(now).toISOString(),
+      billing_state: "expired",
+      grace_ends_at: null,
+      transfer_gib: DEFAULT_PLAN.transfer_gib,
+      failure: {
+        stage: "active",
+        code: "billing_unpaid",
+        message: "余额不足，已停机删除",
+        retryable: false,
+      },
+      started_at: now,
+    };
+    store.servers.push(server);
+    writeStore(store);
+    return copyServer(server);
+  }
+
+  /** 用户删掉墓碑留下的节点：这一行以后不再出现（控制面 dismiss 的本地等价物）。 */
+  dismissByNode(nodeId: string): void {
+    const store = readStore();
+    const before = store.servers.length;
+    store.servers = store.servers.filter(
+      (server) =>
+        !(server.state === "destroyed" && server.local_node_id === nodeId),
+    );
+    if (store.servers.length !== before) writeStore(store);
   }
 
   get(serverId: string): MyServer {

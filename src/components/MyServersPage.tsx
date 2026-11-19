@@ -34,6 +34,8 @@ interface Props {
   onChanged: () => void;
   /** 销毁后让 Host 收起详情并刷新列表。 */
   onGone: () => void;
+  /** 停机删除的墓碑：删本地节点，墓碑行随之消失。 */
+  onForget: (serverId: string, nodeId: string) => Promise<void>;
   /** 重建成功：选中新机器并显示安装进度。 */
   onRebuilt: (serverId: string, state: MyServerState) => void;
   onRetryDetail: () => void;
@@ -77,6 +79,7 @@ export function MyServersPage({
   onRetry,
   onChanged,
   onGone,
+  onForget,
   onRebuilt,
   onRetryDetail,
   onAiLocate,
@@ -153,6 +156,7 @@ export function MyServersPage({
             onChanged={onChanged}
             onRebuilt={onRebuilt}
             onGone={onGone}
+            onForget={onForget}
             onRenamed={onRenamed}
           />
         )}

@@ -37,6 +37,7 @@ import { useMyServers } from "./myservers/useMyServers";
 import { useServerNodePooling } from "./myservers/useServerNodePooling";
 import { isProvisioning, trialAvailableHint } from "./myservers/labels";
 import { collectPendingServerNodes } from "./myservers/pendingServerNodes";
+import { collectDanglingNodeIds } from "./myservers/tombstones";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
 import { MyServerWizard } from "./components/MyServerWizard";
@@ -195,6 +196,7 @@ function StartChoice({
   accountLoaded,
   loggedIn,
   accountError,
+  emptyConfig,
 }: {
   busy: boolean;
   onUseFree: () => void;
@@ -202,6 +204,8 @@ function StartChoice({
   trial: TrialFlow | null;
   onRetryTrial: () => void;
   onSkipProbe: () => void;
+  /** 配置还在、只是节点被删光了：底部说明这一条配置已经没有节点。 */
+  emptyConfig: boolean;
   /** 账户还没读到时按已登录的短句显示：不给已登录用户闪一下「要先登录」。 */
   accountLoaded: boolean;
   loggedIn: boolean;
@@ -255,6 +259,9 @@ function StartChoice({
             <span className="start-choice__pick-sub">2 个节点，7 天试用</span>
           </button>
         </div>
+        {emptyConfig ? (
+          <p className="start-choice__empty">这条配置没有节点了</p>
+        ) : null}
       </section>
     </main>
   );
@@ -615,6 +622,16 @@ export default function App() {
     );
     return collectPendingServerNodes(myServers.servers, configured);
   }, [myServers.servers, vpn.activeConfig]);
+
+  // 停机删除的服务器留下的节点：连接页只留一行灰的，不能选、不能测速。
+  const danglingNodeIds = useMemo(
+    () =>
+      collectDanglingNodeIds(
+        myServers.servers,
+        (vpn.activeConfig?.nodes ?? []).map((node) => node.node_id),
+      ),
+    [myServers.servers, vpn.activeConfig],
+  );
 
   /** 当前屏幕：随每条消息带给 Host，是 UI 状态不是用户指令。 */
   const uiScreen: UiScreen = showOnboarding
@@ -1749,6 +1766,11 @@ export default function App() {
     lastActionRef.current = { id: "client.probe" };
     const config = vpn.activeConfig;
     if (!config || config.nodes.length === 0 || nodeProbes.run) return;
+    // 停机删除的悬挂节点不测速：它连不上，测了只会亮一个「测不通」。
+    const targets = config.nodes
+      .map((node) => node.node_id)
+      .filter((nodeId) => !danglingNodeIds.has(nodeId));
+    if (targets.length === 0) return;
     setManualProbedConfigs((current) => {
       if (current.has(config.config_id)) return current;
       const next = new Set(current);
@@ -1757,7 +1779,7 @@ export default function App() {
     });
     void nodeProbes.start(
       config.config_id,
-      config.nodes.map((node) => node.node_id),
+      targets,
     );
   };
 
@@ -2356,6 +2378,11 @@ export default function App() {
           }
           onGoConnect={() => changeDestination("client")}
           pendingServer={myServers.pendingServer}
+          onForget={async (serverId, nodeId) => {
+            await myServers.forgetServer(serverId, nodeId);
+            // 节点真的删掉了：连接页按新配置重读，悬挂行不会留到下次启动。
+            vpn.reload();
+          }}
           onRenamed={myServers.renamed}
         />
       ) : trial?.state === "expired" && !hasNodes ? (
@@ -2380,6 +2407,7 @@ export default function App() {
           onReportProblem={aiReady ? handleReportProblem : undefined}
           reportBusy={reportOpening}
           actionCards={actionCards}
+          danglingNodeIds={danglingNodeIds}
           onActionCardAction={handleActionCardAction}
           onDiagnose={handleDiagnose}
           trialSummary={trialFlow?.summary ?? null}
@@ -2419,6 +2447,7 @@ export default function App() {
           accountLoaded={myServers.accountLoaded}
           loggedIn={myServers.loggedIn}
           accountError={myServers.accountError}
+          emptyConfig={Boolean(vpn.activeConfig)}
         />
       )}
       {settingsOpen && settingsConsulting ? null : panelOpen && shell.docked ? (

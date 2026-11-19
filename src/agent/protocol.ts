@@ -566,6 +566,16 @@ export interface NodeAttachResult {
   current_node_id: string | null;
 }
 
+/** 删掉一个本地节点行（`node_forget`）：停机删除的服务器留下的悬挂节点用它清掉。 */
+export interface NodeForgetInput {
+  nodeId: string;
+}
+
+export interface NodeForgetResult {
+  /** 本地确实删掉了行；节点本来就不在时为 false，不报错。 */
+  forgotten: boolean;
+}
+
 /** 服务分类（commands.md §10.7）。`proxy_selected` 的 targets 只能取这里的 id。 */
 export interface Category {
   id: string;

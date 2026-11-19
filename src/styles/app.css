@@ -4270,6 +4270,14 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
+/* 节点被删光后停在两选一：底部说明这条配置已经没有节点。 */
+.start-choice__empty {
+  margin: 24px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
 .start-choice__picks {
   margin-top: 24px;
   display: flex;
@@ -6314,6 +6322,11 @@ details[open] > .settings-fold__summary::before {
 .stage-node.is-expired .stage-node__name { color: var(--ink-3); }
 
 .stage-node.is-expired { opacity: 0.75; cursor: default; }
+
+/* 停机删除的悬挂节点：服务器已没了，节点行留着等用户去「我的服务器」删。 */
+.stage-node.is-dangling .stage-node__name { color: var(--ink-3); }
+
+.stage-node.is-dangling { opacity: 0.75; cursor: default; }
 
 /* 待接入的服务器节点：已就绪但还没进当前配置（等断开后 attach），灰显且不可点。 */
 .stage-node.is-pending .stage-node__name { color: var(--ink-3); }

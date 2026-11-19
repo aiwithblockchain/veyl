@@ -78,6 +78,8 @@ import type {
   NodeCreateInput,
   NodeAttachInput,
   NodeAttachResult,
+  NodeForgetInput,
+  NodeForgetResult,
   NodeImportResult,
   NodeImportSkipped,
   NodeSummary,
@@ -408,6 +410,11 @@ function normalizeNodeAttach(raw: unknown): NodeAttachResult {
     current_node_id:
       typeof record.current_node_id === "string" ? record.current_node_id : null,
   };
+}
+
+function normalizeNodeForget(raw: unknown): NodeForgetResult {
+  const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return { forgotten: record.forgotten === true };
 }
 
 function normalizeNodeImport(raw: {
@@ -1131,6 +1138,12 @@ export class TauriAgentBridge implements AgentBridge {
         ...(input.nodeIds ? { nodeIds: input.nodeIds } : {}),
         ...(input.configId ? { configId: input.configId } : {}),
       }),
+    );
+  }
+
+  async nodeForget(input: NodeForgetInput): Promise<NodeForgetResult> {
+    return normalizeNodeForget(
+      await call<unknown>("node_forget", { nodeId: input.nodeId }),
     );
   }
 

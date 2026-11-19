@@ -57,6 +57,7 @@ function makeBridge(listRef: { current: MyServer[] }) {
       denominations_cents: [1000],
       updated_at: new Date(0).toISOString(),
     })),
+    nodeForget: vi.fn(async () => ({ forgotten: true })),
     subscribe: vi.fn(() => () => {}),
   } as unknown as AgentBridge;
 }
@@ -162,6 +163,57 @@ describe("「已下单但认不出新机器」的生命周期", () => {
     });
 
     expect(result.current.selected).toBeNull();
+  });
+
+  it("停机删除：删节点、立刻收起墓碑行，后端还在返回时也不再显示", async () => {
+    const list: { current: MyServer[] } = {
+      current: [{ ...SERVER_A, state: "destroyed" }],
+    };
+    const { result, bridge } = await mount(list);
+    await waitFor(() => expect(result.current.selected?.server_id).toBe("srv_a"));
+
+    await act(async () => {
+      await result.current.forgetServer("srv_a", "local_node_a");
+    });
+
+    expect(vi.mocked(bridge.nodeForget)).toHaveBeenCalledWith({
+      nodeId: "local_node_a",
+    });
+    expect(result.current.servers).toHaveLength(0);
+    expect(result.current.selected).toBeNull();
+
+    // 后端还没停止返回墓碑：刷新后依旧不显示。
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.servers).toHaveLength(0);
+  });
+
+  it("nodeForget 抛错：墓碑行保留，不做乐观移除", async () => {
+    const list: { current: MyServer[] } = {
+      current: [{ ...SERVER_A, state: "destroyed" }],
+    };
+    const { result, bridge } = await mount(list);
+    await waitFor(() => expect(result.current.selected?.server_id).toBe("srv_a"));
+    vi.mocked(bridge.nodeForget).mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "连不上。",
+    });
+
+    await expect(
+      result.current.forgetServer("srv_a", "local_node_a"),
+    ).rejects.toBeTruthy();
+
+    // 没删成就什么都没变：那一行还在、选中还在、也没有被记进「已删除」。
+    expect(result.current.servers).toHaveLength(1);
+    expect(result.current.servers[0].server_id).toBe("srv_a");
+    expect(result.current.selected?.server_id).toBe("srv_a");
+
+    // 之后再刷新，墓碑行照常出现。
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.servers).toHaveLength(1);
   });
 });
 

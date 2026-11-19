@@ -18,9 +18,19 @@ export const MY_SERVER_STATE_LABEL: Record<MyServerState, string> = {
   active: "已开通",
   error: "出错了",
   destroying: "正在销毁",
-  destroyed: "已销毁",
+  destroyed: "已停机删除",
   gone: "已失效",
 };
+
+/** 停机删除：到期前扣费失败，后端停机销毁，只留一行墓碑等用户自己删。 */
+export const MY_SERVER_TOMBSTONE_WORD = "已停机删除";
+
+/** 墓碑详情页只写这一句，不提供续费 / 重建 / 恢复。 */
+export const MY_SERVER_TOMBSTONE_TEXT =
+  "这台机器因余额不足已停机销毁，节点不能再连接。删除后不再显示。";
+
+/** 连接页上悬挂节点那一行的词，比左栏短。 */
+export const NODE_TOMBSTONE_WORD = "停机删除";
 
 /** 完成态的四个步骤词：进度块就绪后全部打勾，用完成式，不沿用进行中的状态词。 */
 export const MY_SERVER_STEP_DONE_LABEL: Record<
@@ -51,12 +61,13 @@ function billingStateWord(
 }
 
 /**
- * 左栏状态词：短词，一行放得下；欠费/停用优先于机器状态。
+ * 左栏状态词：短词，一行放得下；停机删除压过欠费词（机器已经没了，不再说欠费）。
  * 进行中的机器 billing_state 是 pending，不会命中这两档。
  */
 export function serverRailState(
   server: Pick<MyServer, "state" | "billing_state">,
 ): string {
+  if (server.state === "destroyed") return MY_SERVER_TOMBSTONE_WORD;
   return (
     billingStateWord(server.billing_state) ??
     MY_SERVER_RAIL_PHASE[server.state] ??
@@ -64,10 +75,11 @@ export function serverRailState(
   );
 }
 
-/** 详情页标题词：用长词；欠费覆盖与左栏同源。 */
+/** 详情页标题词：用长词；停机删除与欠费覆盖同源。 */
 export function serverDetailState(
   server: Pick<MyServer, "state" | "billing_state">,
 ): string {
+  if (server.state === "destroyed") return MY_SERVER_TOMBSTONE_WORD;
   return (
     billingStateWord(server.billing_state) ??
     MY_SERVER_STATE_LABEL[server.state]
@@ -280,6 +292,7 @@ export function stateTone(state: MyServerState): "ok" | "err" | "idle" {
 export function serverTone(
   server: Pick<MyServer, "state" | "billing_state">,
 ): "ok" | "err" | "idle" | "warn" {
+  if (server.state === "destroyed") return "warn";
   if (server.billing_state === "past_due" || server.billing_state === "expired") {
     return "warn";
   }

@@ -246,6 +246,7 @@ function Harness({
         onRetry={() => void state.retry()}
         onChanged={() => void state.refresh()}
         onGone={() => state.ordered(null)}
+        onForget={async () => {}}
         onRebuilt={state.rebuilt}
         onRetryDetail={state.retryDetail}
         trial={trial}
@@ -407,6 +408,7 @@ describe("我的服务器 destination", () => {
         onRetry={vi.fn()}
         onChanged={vi.fn()}
         onGone={vi.fn()}
+        onForget={async () => {}}
         onRebuilt={vi.fn()}
         onRetryDetail={onRetryDetail}
         onGoConnect={vi.fn()}
