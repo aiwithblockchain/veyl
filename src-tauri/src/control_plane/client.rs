@@ -299,6 +299,8 @@ mod tests {
         hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         handle: Option<std::thread::JoinHandle<()>>,
+        /// 桩线程已经进到 accept 循环后才发这一条：父进程用它代替「睡一会儿应该好了」。
+        ready: std::sync::mpsc::Receiver<()>,
         addr: std::net::SocketAddr,
     }
 
@@ -313,17 +315,29 @@ mod tests {
             listener.set_nonblocking(true).unwrap();
             let hits = Arc::new(AtomicUsize::new(0));
             let stop = Arc::new(AtomicBool::new(false));
+            let (ready_tx, ready) = std::sync::mpsc::channel();
             let hits_thread = Arc::clone(&hits);
             let stop_thread = Arc::clone(&stop);
             let handle = std::thread::spawn(move || {
+                // 明确的就绪信号：就绪之前父进程不往下走，不赌调度。
+                let _ = ready_tx.send(());
                 while !stop_thread.load(Ordering::SeqCst) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // macOS/BSD 上 accept() 出来的 socket **继承**监听套接字的
+                            // O_NONBLOCK：不显式改回阻塞，read 会在客户端还没发出请求时
+                            // 立刻 WouldBlock，桩连收 8 次错误就把连接关掉——客户端看到
+                            // 的是 `hyper IncompleteMessage`（偶发、极快）。
+                            let _ = stream.set_nonblocking(false);
                             hits_thread.fetch_add(1, Ordering::SeqCst);
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                             let mut buffer = Vec::new();
                             let mut chunk = [0u8; 1024];
                             let mut complete = false;
+                            let mut saw_bytes = false;
+                            // 结束原因只为诊断记录：下次失败时能一眼区分
+                            // 「对端关了」「读错误」「30 秒没读全」。
+                            let mut end = "deadline";
                             // 整机高负载时对端进程可能被冻结几秒，超时后继续等而不是
                             // 提前关连接；提前回响应/关闭会让 hyper 报
                             // `UnexpectedMessage` / `IncompleteMessage`。
@@ -331,16 +345,22 @@ mod tests {
                             let mut errors = 0u32;
                             while std::time::Instant::now() < deadline {
                                 match stream.read(&mut chunk) {
-                                    Ok(0) => break,
+                                    Ok(0) => {
+                                        end = "eof";
+                                        break;
+                                    }
                                     Ok(n) => {
+                                        saw_bytes = true;
                                         buffer.extend_from_slice(&chunk[..n]);
                                         if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
                                             complete = true;
+                                            end = "complete";
                                             break;
                                         }
                                     }
                                     Err(_) => {
                                         errors += 1;
+                                        end = "read_error";
                                         // 连接被重置时 read 会立刻连续报错，别拿它空转到 30 秒预算。
                                         if errors >= 8 {
                                             break;
@@ -349,11 +369,41 @@ mod tests {
                                     }
                                 }
                             }
-                            if !complete {
-                                continue;
+                            if complete {
+                                match stream.write_all(body) {
+                                    Ok(()) => match stream.flush() {
+                                        Ok(()) => {
+                                            // 显式半关：让内核在 close 前把响应按序发完
+                                            // （响应带 `Connection: close`）。
+                                            let _ = stream
+                                                .shutdown(std::net::Shutdown::Write);
+                                        }
+                                        Err(error) => {
+                                            eprintln!("本地 HTTP 桩：flush 响应失败：{error}");
+                                        }
+                                    },
+                                    Err(error) => {
+                                        eprintln!(
+                                            "本地 HTTP 桩：写响应失败（请求已读 {} 字节）：{error}",
+                                            buffer.len()
+                                        );
+                                    }
+                                }
+                            } else if saw_bytes {
+                                // 请求没读全也必须回一个明确响应：静默关连接会被
+                                // hyper 记成 `IncompleteMessage`，把「桩没读到请求」
+                                // 伪装成「客户端连接出错」——这条用例被误导了一整天
+                                // 就是这个原因。
+                                let _ = stream.write_all(
+                                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                );
+                                let _ = stream.flush();
+                                eprintln!(
+                                    "本地 HTTP 桩：请求未读全 end={end} errors={errors} bytes={}",
+                                    buffer.len()
+                                );
                             }
-                            let _ = stream.write_all(body);
-                            let _ = stream.flush();
+                            // 一个字节都没读到的是空闲探测连接：静默关掉。
                         }
                         Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(5));
@@ -366,8 +416,14 @@ mod tests {
                 hits,
                 stop,
                 handle: Some(handle),
+                ready,
                 addr,
             }
+        }
+
+        /// 等桩线程真的进到 accept 循环。父进程不靠固定时间猜「应该起来了」。
+        fn wait_ready(&self) {
+            self.ready.recv().expect("本地 HTTP 桩没有报就绪就退出了");
         }
 
         fn hits(&self) -> usize {
@@ -390,6 +446,7 @@ mod tests {
         b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     const TARGET: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
 
+
     fn runtime() -> tokio::runtime::Runtime {
         // 独占运行时：不与别的测试共用全局运行时，免得连接被别处的收尾取消。
         tokio::runtime::Builder::new_current_thread()
@@ -407,6 +464,8 @@ mod tests {
     fn the_control_plane_client_never_uses_a_proxy() {
         let poison = Stub::spawn(POISON);
         let target = Stub::spawn(TARGET);
+        poison.wait_ready();
+        target.wait_ready();
         let runtime = runtime();
 
         // 注入代理：请求确实落到代理上，证明这条注入路径真的生效，
@@ -455,14 +514,26 @@ mod tests {
     fn the_control_plane_client_ignores_proxy_environment() {
         let poison = Stub::spawn(POISON);
         let target = Stub::spawn(TARGET);
+        poison.wait_ready();
+        target.wait_ready();
         let exe = std::env::current_exe().unwrap();
-        let status = std::process::Command::new(exe)
+        // 就绪信号走回环 TCP：子进程起来后连回这条监听，父进程 accept 到才继续。
+        // 不用固定时间赌子进程「应该起来了」，也不用 stdio 管道（在测试进程里
+        // 输出可能被 libtest 的捕获层吞掉）。
+        let ready = std::net::TcpListener::bind("127.0.0.1:0").expect("绑定就绪监听");
+        ready.set_nonblocking(true).expect("就绪监听设为非阻塞");
+        let ready_addr = ready.local_addr().expect("读就绪地址");
+        let mut child = std::process::Command::new(&exe)
             .args([
                 "--exact",
                 "control_plane::client::tests::proxy_environment_probe",
                 "--ignored",
                 "--test-threads=1",
+                // panic 直接落到 stderr，父进程的断言一眼能看到原文与行号；
+                // 不开的话 panic 只在 libtest 捕获的 stdout 里。
+                "--nocapture",
             ])
+            .env("VEYL_TEST_PROBE_READY", ready_addr.to_string())
             .env("VEYL_TEST_PROXY_TARGET", format!("http://{}/v1/health", target.addr))
             .env("HTTP_PROXY", format!("http://{}", poison.addr))
             .env("http_proxy", format!("http://{}", poison.addr))
@@ -471,9 +542,54 @@ mod tests {
             .env("ALL_PROXY", format!("http://{}", poison.addr))
             .env_remove("NO_PROXY")
             .env_remove("no_proxy")
-            .status()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("启动子进程失败");
-        assert!(status.success(), "子进程里的控制面客户端没有直连");
+        // 只等「就绪信号」和「子进程退出」两个事件；60 秒上限只当挂死兜底，
+        // 不是判定窗口（调大/调小都不该影响结论）。
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut ready_signaled = false;
+        loop {
+            match ready.accept() {
+                Ok((stream, _)) => {
+                    drop(stream);
+                    ready_signaled = true;
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("就绪监听出错：{error}"),
+            }
+            if child.try_wait().expect("等待子进程").is_some() {
+                // 子进程可能「连上就退出」：排队的就绪连接仍要收一次，
+                // 连着的话说明信号其实已经到了。
+                ready_signaled = ready.accept().is_ok();
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // 等子进程结束，同样有上限：挂死要变成明确失败，不能拖住整套测量。
+        let mut timed_out = false;
+        while child.try_wait().expect("等待子进程").is_none() {
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                timed_out = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().expect("收集子进程输出");
+        assert!(
+            ready_signaled && !timed_out && output.status.success(),
+            "子进程里的控制面客户端没有直连（{}，就绪={ready_signaled}，超时={timed_out}）：\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(target.hits(), 1);
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(poison.hits(), 0, "控制面请求走了环境代理");
@@ -486,8 +602,14 @@ mod tests {
         let Ok(url) = std::env::var("VEYL_TEST_PROXY_TARGET") else {
             return;
         };
-        // 整机高负载时子进程可能被冻结几秒：给 10 秒，避免误判成超时。
-        let client = http_client(Duration::from_secs(10)).unwrap();
+        // 超时只当「进程挂死」的兜底，不再拿 10 秒赌机器负载——原来那条偶发失败
+        // 就是整机高负载时子进程被冻结超过 10 秒。结论由下面的 200 断言给出。
+        let client = http_client(Duration::from_secs(300)).unwrap();
+        // 显式就绪信号：连一下父进程的 ready 监听就断开。父进程 accept 到这个
+        // 连接才继续；信号不到（子进程没起来/提前退出）由父进程按失败处理。
+        if let Ok(addr) = std::env::var("VEYL_TEST_PROBE_READY") {
+            let _ = std::net::TcpStream::connect(addr);
+        }
         let response = runtime()
             .block_on(async { client.get(&url).send().await })
             .expect("设了代理环境变量的子进程里，控制面客户端应该直连目标");

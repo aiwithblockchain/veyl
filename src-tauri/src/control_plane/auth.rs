@@ -643,9 +643,14 @@ pub async fn ensure_access(
 mod tests {
     use super::*;
 
-    /// 令牌与账户标记读写的是进程级共享的 secrets 文件与全局库：本模块里会写它们的
-    /// 测试必须串行，否则通过与失败取决于调度。
-    static AUTH_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// 令牌与账户标记读写的是进程级共享的 secrets 文件与全局库：会写它们的测试
+    /// 必须串行，否则通过与失败取决于调度。锁放在 `test_support`，让别的模块
+    /// 的测试也能拿同一把（见那里的根因说明）。
+    fn auth_state_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_support::AUTH_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
 
     /// 全进程的库（正式启动时由 `lib.rs` 装）；`install_global` 先到先得。
     /// 账户标记读写的是 `store::global()`，测试里必须先装一个，否则永远读不到。
@@ -821,9 +826,7 @@ mod tests {
 
     #[test]
     fn a_rejected_logout_clears_local_state_but_a_network_error_does_not() {
-        let _guard = AUTH_STATE_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = auth_state_lock();
         crate::test_support::install_test_secrets();
         test_store();
         clear_tokens();
