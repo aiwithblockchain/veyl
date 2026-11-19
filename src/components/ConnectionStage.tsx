@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ConfigConnectMode,
   ConfigDetail,
@@ -12,6 +12,7 @@ import { formatClock } from "../ui/format";
 import { failureHeadline } from "../ui/middleArea";
 import { displayNodeNames, formatLatency } from "../ui/nodeList";
 import { trialGroupHint, trialPhase } from "../myservers/labels";
+import type { PendingServerNode } from "../myservers/pendingServerNodes";
 import type { ActionCard } from "../ui/actionCard";
 import { StageQuickToggles, type ModeSwitchResult } from "./StageQuickToggles";
 
@@ -68,7 +69,12 @@ interface Props {
   ) => Promise<{ ok: boolean; message?: string }>;
   /** 接管方式与流量范围的「问 AI」：交给 App 展开右栏并发送固定问题。 */
   onAskAi?: (prompt: string) => void;
+  /** 服务器已就绪、节点还在等断开后 attach：灰显列出，告诉用户重新连接后可用。 */
+  pendingServerNodes?: PendingServerNode[];
 }
+
+/** 待接入节点类型对外导出：调用方与测试都从这里取。 */
+export type { PendingServerNode };
 
 const NO_TRAFFIC_ACTION =
   "网页打不开时，点上面的「重新连接」；还是不行，就换一个节点再试。";
@@ -105,6 +111,7 @@ export function ConnectionStage({
   onSetConnectMode,
   onSetRoutingMode,
   onAskAi,
+  pendingServerNodes = [],
 }: Props) {
   const [now, setNow] = useState(() => Date.now());
   const [switchError, setSwitchError] = useState<string | null>(null);
@@ -394,8 +401,25 @@ export function ConnectionStage({
   const nodeEntries = nodes.map((node, index) => ({ node, index }));
   const freeEntries = nodeEntries.filter(({ node }) => node.source === "seed");
   const ownedEntries = nodeEntries.filter(({ node }) => node.source !== "seed");
+  /**
+   * 待接入行：与配置里的节点按 id 去重——attach 完成后同一节点只留正常行，
+   * 不能既在「你的服务器」里可点、又灰显一份。
+   */
+  const pendingEntries = useMemo(() => {
+    const configured = new Set((config?.nodes ?? []).map((node) => node.node_id));
+    const seen = new Set<string>();
+    const result: PendingServerNode[] = [];
+    for (const pending of pendingServerNodes) {
+      if (configured.has(pending.nodeId) || seen.has(pending.nodeId)) continue;
+      seen.add(pending.nodeId);
+      result.push(pending);
+    }
+    return result;
+  }, [config?.nodes, pendingServerNodes]);
   /** 两类同池才分组；只有一类时与单来源的卡片完全一致。 */
-  const mixedSources = freeEntries.length > 0 && ownedEntries.length > 0;
+  const mixedSources =
+    freeEntries.length > 0 &&
+    (ownedEntries.length > 0 || pendingEntries.length > 0);
   const allSeed = nodes.length > 0 && freeEntries.length === nodes.length;
 
   const trialEnded = trialPhase(null, trialExpiresAt, now).kind === "ended";
@@ -486,6 +510,23 @@ export function ConnectionStage({
       </button>
     );
   };
+
+  /** 待接入行：不是按钮，选不中；右侧的时延位置写清楚什么时候能用。 */
+  const renderPendingNode = (pending: PendingServerNode) => (
+    <div
+      key={pending.nodeId}
+      role="option"
+      aria-selected={false}
+      aria-disabled="true"
+      className="stage-node is-pending"
+      title={pending.name}
+    >
+      <span className="stage-node__name">
+        <span className="stage-node__name-text">{pending.name}</span>
+      </span>
+      <span className="stage-node__note">重新连接后可用</span>
+    </div>
+  );
 
   return (
     <main className="connection-stage" aria-label="连接">
@@ -595,6 +636,7 @@ export function ConnectionStage({
                     <span>你的服务器</span>
                   </div>
                   {ownedEntries.map(renderNode)}
+                  {pendingEntries.map(renderPendingNode)}
                 </div>
                 <div className="stage-node-group" role="group" aria-label="免费节点">
                   <div className="stage-node-group__head">
@@ -604,8 +646,18 @@ export function ConnectionStage({
                   {freeEntries.map(renderNode)}
                 </div>
               </>
+            ) : ownedEntries.length === 0 && pendingEntries.length > 0 ? (
+              <div className="stage-node-group" role="group" aria-label="你的服务器">
+                <div className="stage-node-group__head">
+                  <span>你的服务器</span>
+                </div>
+                {pendingEntries.map(renderPendingNode)}
+              </div>
             ) : (
-              nodeEntries.map(renderNode)
+              <>
+                {nodeEntries.map(renderNode)}
+                {pendingEntries.map(renderPendingNode)}
+              </>
             )}
           </div>
         </section>

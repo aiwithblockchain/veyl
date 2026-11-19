@@ -36,6 +36,7 @@ import { MyServerTopUp } from "./components/MyServerTopUp";
 import { useMyServers } from "./myservers/useMyServers";
 import { useServerNodePooling } from "./myservers/useServerNodePooling";
 import { isProvisioning, trialAvailableHint } from "./myservers/labels";
+import { collectPendingServerNodes } from "./myservers/pendingServerNodes";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
 import { MyServerWizard } from "./components/MyServerWizard";
@@ -610,6 +611,14 @@ export default function App() {
   const hasNodes = Boolean(
     vpn.activeConfig && vpn.activeConfig.node_count > 0,
   );
+  // 已就绪的服务器节点要等断开才 node_attach（见 useServerNodePooling 的 flush 排队），
+  // 这段时间它在配置里不存在；单独算出来交给连接页灰显，免得用户以为没生效。
+  const pendingServerNodes = useMemo(() => {
+    const configured = new Set(
+      (vpn.activeConfig?.nodes ?? []).map((node) => node.node_id),
+    );
+    return collectPendingServerNodes(myServers.servers, configured);
+  }, [myServers.servers, vpn.activeConfig]);
 
   /** 当前屏幕：随每条消息带给 Host，是 UI 状态不是用户指令。 */
   const uiScreen: UiScreen = showOnboarding
@@ -2392,6 +2401,7 @@ export default function App() {
           onDiagnose={handleDiagnose}
           trialSummary={trialFlow?.summary ?? null}
           trialExpiresAt={trial?.expires_at ?? null}
+          pendingServerNodes={pendingServerNodes}
           preselect={trialPreselect}
           onPreselectApplied={(nonce) =>
             setTrialPreselect((current) =>

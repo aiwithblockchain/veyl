@@ -2975,31 +2975,38 @@ body[data-resizing] {
   color: var(--ink-2);
 }
 
+/* 四段与四个阶段词一一对应：已完成填实、当前段流光、未到留空。 */
 .myservers__bar {
+  display: flex;
+  gap: 2px;
   height: 4px;
-  border-radius: 2px;
-  background: var(--hair);
-  overflow: hidden;
 }
 
 .myservers__bar span {
-  display: block;
-  height: 100%;
-  background: var(--accent);
-  transition: width 300ms ease-out;
-}
-
-/* 阶段内「还在动」：一条 1.6 秒的流光；减少动态效果时关掉。 */
-.myservers__bar.is-active {
   position: relative;
+  display: block;
+  flex: 1 1 0;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--hair);
+  transition: background-color 120ms ease-out, opacity 120ms ease-out;
 }
 
-.myservers__bar.is-active::after {
+.myservers__bar span.is-done {
+  background: var(--accent);
+}
+
+/* 当前段：底轨上一条 1.6 秒的流光；减少动态效果时改成半透明实心。 */
+.myservers__bar span.is-current {
+  overflow: hidden;
+  background: var(--hair-strong);
+}
+
+.myservers__bar span.is-current::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent, var(--bg), transparent);
-  opacity: 0.6;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
   animation: myservers-flow 1.6s linear infinite;
 }
 
@@ -3009,7 +3016,11 @@ body[data-resizing] {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .myservers__bar.is-active::after { animation: none; display: none; }
+  .myservers__bar span.is-current::after { animation: none; display: none; }
+  .myservers__bar span.is-current {
+    background: var(--accent);
+    opacity: 0.55;
+  }
   .myservers__bar span { transition: none; }
 }
 
@@ -3034,9 +3045,21 @@ body[data-resizing] {
   color: var(--ink-2);
 }
 
+/* 完成态的勾是真实元素，读屏跳过；状态词本身已说明「已…」。 */
+.myservers__steps .myservers__step-tick {
+  margin-right: 4px;
+}
+
 .myservers__steps li.is-current {
   color: var(--ink);
-  font-weight: 500;
+  font-weight: 600;
+}
+
+/* 完成态与进度块同高（实测进度支 88.8px），就绪那一刻下方的行不位移。 */
+.myservers__progress.is-done {
+  justify-content: center;
+  gap: 10px;
+  padding: 20px 0;
 }
 
 .myservers__failure {
@@ -3097,9 +3120,9 @@ body[data-resizing] {
 }
 
 .myservers__created-in {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--ink-3);
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-2);
 }
 
 .myservers__hint {
@@ -6301,6 +6324,18 @@ details[open] > .settings-fold__summary::before {
 .stage-node.is-expired .stage-node__name { color: var(--ink-3); }
 
 .stage-node.is-expired { opacity: 0.75; cursor: default; }
+
+/* 待接入的服务器节点：已就绪但还没进当前配置（等断开后 attach），灰显且不可点。 */
+.stage-node.is-pending .stage-node__name { color: var(--ink-3); }
+
+.stage-node.is-pending { opacity: 0.75; cursor: default; }
+
+/* 待接入行右侧不是延迟读数：用正文语气，不占等宽数字字体。 */
+.stage-node__note {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--ink-3);
+}
 
 .myservers-topup__link {
   display: block;

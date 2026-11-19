@@ -8,7 +8,7 @@ import type {
   RuntimeView,
 } from "../agent/protocol";import { emptyRuntimeView } from "../agent/bridge";
 import type { NodeProbesController } from "../config/useNodeProbes";
-import { ConnectionStage } from "./ConnectionStage";
+import { ConnectionStage, type PendingServerNode } from "./ConnectionStage";
 
 afterEach(cleanup);
 
@@ -175,6 +175,7 @@ interface StageOverrides {
   ) => Promise<{ ok: boolean; message?: string }>;
   onReportProblem?: () => void;
   reportBusy?: boolean;
+  pendingServerNodes?: PendingServerNode[];
 }
 
 function stageElement(over: StageOverrides = {}) {
@@ -202,6 +203,7 @@ function stageElement(over: StageOverrides = {}) {
       onSetRoutingMode={over.onSetRoutingMode}
       onReportProblem={over.onReportProblem}
       reportBusy={over.reportBusy}
+      pendingServerNodes={over.pendingServerNodes}
     />
   );
 }
@@ -1853,5 +1855,91 @@ describe("免费节点到期后就地拒绝", () => {
 
     fireEvent.click(freeRow);
     expect(freeRow.getAttribute("aria-selected")).toBe("true");
+  });
+});
+
+describe("待接入的服务器节点", () => {
+  const OWNED: ConfigDetail["nodes"][number] = {
+    node_id: "o1",
+    name: "东京 1 号",
+    server: "198.51.100.1",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "owned",
+    created_at: 0,
+  };
+  const FREE: ConfigDetail["nodes"][number] = {
+    node_id: "f2",
+    name: "洛杉矶 02",
+    server: "203.0.113.9",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "seed",
+    created_at: 0,
+  };
+
+  function configWith(
+    nodes: ConfigDetail["nodes"],
+    over: Partial<ConfigDetail> = {},
+  ): ConfigDetail {
+    return {
+      ...CONFIG,
+      node_count: nodes.length,
+      current_node_id: nodes[0]?.node_id ?? null,
+      nodes,
+      ...over,
+    };
+  }
+
+  it("渲染成禁用行，位于「你的服务器」组末尾且带「重新连接后可用」", () => {
+    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
+    renderStage({
+      // node_count 故意写 3：顶部计数只能来自可用节点数，不能读这个字段。
+      config: configWith([FREE, OWNED], { node_count: 3 }),
+      pendingServerNodes: [{ nodeId: "local_pending", name: "我的服务器4gUQ" }],
+      onSwitchNode,
+    });
+
+    const ownedGroup = screen.getByRole("group", { name: "你的服务器" });
+    const pendingRow = within(ownedGroup)
+      .getByText("我的服务器4gUQ")
+      .closest(".stage-node") as HTMLElement;
+    expect(pendingRow).toBeTruthy();
+    // 灰显、不可点、不是按钮：选中态只看配置里的节点。
+    expect(pendingRow.classList.contains("is-pending")).toBe(true);
+    expect(pendingRow.getAttribute("aria-disabled")).toBe("true");
+    // 键盘不可达：没有 tabindex，Tab 会跳过它。
+    expect(pendingRow.getAttribute("tabindex")).toBeNull();
+    expect(pendingRow.tagName).not.toBe("BUTTON");
+    expect(within(pendingRow).getByText("重新连接后可用")).toBeTruthy();
+    // 排在可用节点后面。
+    const rows = within(ownedGroup).getAllByRole("option");
+    expect(rows[rows.length - 1]).toBe(pendingRow);
+    // 计数只算可用节点，待接入不计入。
+    expect(screen.getByText("2 个节点")).toBeTruthy();
+
+    fireEvent.click(pendingRow);
+    expect(onSwitchNode).not.toHaveBeenCalled();
+  });
+
+  it("节点已在配置里时只保留正常行，同一 id 的待接入行不重复", () => {
+    renderStage({
+      config: configWith([FREE, OWNED]),
+      pendingServerNodes: [
+        { nodeId: OWNED.node_id, name: "已入池的服务器" },
+        { nodeId: "local_dup", name: "同一台服务器" },
+        { nodeId: "local_dup", name: "同一台服务器" },
+      ],
+    });
+
+    expect(screen.queryByText("已入池的服务器")).toBeNull();
+    expect(screen.getAllByText("东京 1 号")).toHaveLength(1);
+    expect(screen.getAllByText("同一台服务器")).toHaveLength(1);
+    // 去重后只剩一条待接入行。
+    expect(screen.getAllByText("重新连接后可用")).toHaveLength(1);
+    // 2 个可用节点 + 1 个待接入行。
+    expect(screen.getAllByRole("option")).toHaveLength(3);
   });
 });

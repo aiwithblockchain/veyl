@@ -43,7 +43,14 @@ function ServerRow({
       ? null
       : server.billing_state === "pending" && isProvisioning(server.state)
         ? "开通中"
-        : `${formatDailyPrice(server.daily_price_cents)}/天`;
+        : (
+            <>
+              <span className="num">
+                {formatDailyPrice(server.daily_price_cents)}
+              </span>
+              /天
+            </>
+          );
   return (
     <button
       type="button"
@@ -64,7 +71,7 @@ function ServerRow({
       </span>
       <span className="rail-server__meta">
         {serverRailState(server.state)} · {regionLabel}
-        {billingPart ? ` · ${billingPart}` : null}
+        {billingPart ? <> · {billingPart}</> : null}
       </span>
     </button>
   );

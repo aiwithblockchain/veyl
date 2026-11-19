@@ -277,7 +277,7 @@ describe("服务器详情", () => {
     });
     expect(screen.getByText("已等待 1 分 20 秒")).toBeTruthy();
 
-    // 状态推进（同一台机器）不重置计时。
+    // 状态推进（同一台机器）不重置计时；同一屏状态词统一用 STATE_LABEL。
     view.rerender(
       <MyServerDetail
         {...props}
@@ -285,8 +285,12 @@ describe("服务器详情", () => {
       />,
     );
     expect(screen.getByText("已等待 1 分 20 秒")).toBeTruthy();
+    expect(
+      document.querySelector(".myservers__progress-head")?.textContent,
+    ).toContain("等待开机");
+    expect(document.body.textContent).not.toContain("正在开机");
 
-    // 就绪后进度区整个消失。
+    // 就绪后进度块原地换成完成态：不再计时，四个步骤全打勾。
     view.rerender(
       <MyServerDetail
         {...props}
@@ -294,9 +298,13 @@ describe("服务器详情", () => {
       />,
     );
     expect(screen.queryByText(/已等待/)).toBeNull();
+    expect(screen.getByRole("group", { name: "建机进度" })).toBeTruthy();
+    const doneSteps = [...document.querySelectorAll(".myservers__steps li")];
+    expect(doneSteps).toHaveLength(4);
     expect(
-      screen.queryByRole("group", { name: "建机进度" }),
-    ).toBeNull();
+      doneSteps.every((step) => step.classList.contains("is-done")),
+    ).toBe(true);
+    expect(screen.getByText("用时未记录")).toBeTruthy();
   });
 
   it("重进详情不从零算：以阶段进入时间为基准", () => {
@@ -372,7 +380,9 @@ describe("服务器详情", () => {
       created_at: created,
       ready_at: "2026-11-18T10:02:55.000Z",
     });
-    expect(screen.getByText("创建用时 2 分 55 秒")).toBeTruthy();
+    const createdLine = document.querySelector(".myservers__created-in");
+    expect(createdLine?.textContent).toContain("创建用时 2 分 55 秒");
+    expect(createdLine?.querySelector(".num")?.textContent).toBe("2 分 55 秒");
     view.unmount();
 
     renderDetail({

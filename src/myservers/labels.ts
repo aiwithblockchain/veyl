@@ -22,11 +22,15 @@ export const MY_SERVER_STATE_LABEL: Record<MyServerState, string> = {
   gone: "已失效",
 };
 
-export const MY_SERVER_PHASE_TEXT: Partial<Record<MyServerState, string>> = {
-  creating: "正在建机器",
-  booting: "正在开机",
-  installing: "正在安装",
-  verifying: "正在检查",
+/** 完成态的四个步骤词：进度块就绪后全部打勾，用完成式，不沿用进行中的状态词。 */
+export const MY_SERVER_STEP_DONE_LABEL: Record<
+  "creating" | "booting" | "installing" | "verifying",
+  string
+> = {
+  creating: "已建机器",
+  booting: "已开机",
+  installing: "已安装服务端",
+  verifying: "已检查可用",
 };
 
 /** 左栏状态词：短一些，带百分比时一行放得下。 */

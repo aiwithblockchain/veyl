@@ -6,7 +6,6 @@ import { IconPencil } from "./icons";
 import {
   MY_SERVER_STATE_LABEL,
   billingNoticeText,
-  formatBuildDuration,
   formatUsdCents,
   isProvisioning,
   serverBillingText,
@@ -193,13 +192,8 @@ export function MyServerDetail({
 
   /** 没建成的机器不存在「本期有效至」：费用行只说退款结论。 */
   const failed = server.state === "error";
-  // 只有真正建成的机器才说创建用时；失败与进行中都不显示。
-  const showBuildTime =
-    server.state === "healthy" || server.state === "active";
-  const buildDuration = formatBuildDuration(
-    server.created_at,
-    server.ready_at ?? null,
-  );
+  // 建好之后进度块原地换成完成态（含创建用时），不再另起一段。
+  const ready = server.state === "healthy" || server.state === "active";
   const chargedCents = server.charged_cents;
   const refundedCents = server.refunded_cents;
   /** 就绪后扣费时余额不够：机器没开通，这笔根本没扣。 */
@@ -279,7 +273,9 @@ export function MyServerDetail({
         </span>
       </div>
 
-      {isProvisioning(server.state) ? <ServerProgress server={server} /> : null}
+      {isProvisioning(server.state) || ready ? (
+        <ServerProgress server={server} />
+      ) : null}
 
       <dl className="myservers__facts">
         <div>
@@ -301,12 +297,6 @@ export function MyServerDetail({
           </div>
         ) : null}
       </dl>
-
-      {showBuildTime ? (
-        <p className="myservers__created-in">
-          {buildDuration ? `创建用时 ${buildDuration}` : "用时未记录"}
-        </p>
-      ) : null}
 
       {server.billing_state === "past_due" || server.billing_state === "expired" ? (
         <p
