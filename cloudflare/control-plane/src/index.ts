@@ -7,6 +7,7 @@ import { handleOrders } from "./orders";
 import { handleTopups, startTopupSession } from "./topups";
 import { balanceCents } from "./wallet";
 import { handleServers } from "./servers";
+import { handleMobile } from "./mobile";
 import { handleSeed } from "./seed";
 import { handleDodoWebhook } from "./webhooks/dodo";
 
@@ -18,6 +19,8 @@ export interface Env {
   TOKEN_SIGNING_JWK?: string;
   CREDENTIAL_ENC_KEY?: string;
   CREDENTIAL_KEY_ID?: string;
+  /** 手机导出令牌的 AES-256-GCM 密钥（base64 32 字节），与 CREDENTIAL_ENC_KEY 分开。 */
+  MOBILE_TOKEN_ENC_KEY?: string;
   ENROLL_BASE_URL?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;
@@ -433,6 +436,10 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
   // 服务器：enrollment 回传（无需账户令牌）、列表、详情、销毁、凭据。
   const serverResponse = await handleServers(request, env);
   if (serverResponse) return serverResponse;
+
+  // 手机端导出：账户级令牌（Bearer）与远程配置（Basic）。
+  const mobileResponse = await handleMobile(request, env);
+  if (mobileResponse) return mobileResponse;
 
   // 公开只读目录：不校验登录。目录与年龄判断都存在 D1 里，所有边缘共享同一份数据；
   // `?fresh=1`：打开新建向导时绕过年龄判断直接回源（10 秒内重复打开不重复回源）。

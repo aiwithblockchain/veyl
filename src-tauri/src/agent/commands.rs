@@ -903,6 +903,35 @@ where
     Ok(json!({ "removed": removed }))
 }
 
+/// 手机端导出（仅 UI，契约 §7.21）：幂等取令牌并返回二维码。
+///
+/// 返回的 `url` 含令牌：不记日志、不发事件、不进 AI 上下文（设计 §7.1）。
+#[tauri::command]
+pub async fn mobile_export_get() -> Result<Value, Value> {
+    match crate::control_plane::mobile::get().await {
+        Ok(data) => Ok(json!(data)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+/// 重新生成手机端导出令牌（仅 UI，契约 §7.22）：`confirm` 缺失或为 false 都拒绝。
+#[tauri::command]
+pub async fn mobile_export_rotate(confirm: Option<bool>) -> Result<Value, Value> {
+    if confirm != Some(true) {
+        return Err(crate::control_plane::error::CpError::new(
+            "INVALID_ARGUMENT",
+            "重新生成需要确认",
+            false,
+            json!({ "reason": "confirmation_required" }),
+        )
+        .envelope());
+    }
+    match crate::control_plane::mobile::rotate().await {
+        Ok(data) => Ok(json!(data)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
 /// 显式重新注册设备（§19.2.4）：丢弃当前身份与令牌，生成新的并静默注册。
 /// 旧服务器的本地记录保留为只读；本命令只由界面上的「重新注册设备」触发。
 #[tauri::command]
@@ -2013,18 +2042,32 @@ pub async fn list_pending_questions(session_id: String) -> Result<Value, Value> 
     Ok(crate::agent::questions::list_pending(&session_id))
 }
 
-/// 用系统浏览器打开白名单内的链接（目前只有 DeepSeek 开放平台）。
+/// `open_external` 的白名单：每条都带尾部 `/`，只做前缀匹配。
+///
+/// 不写「域名后缀」判断：`https://apps.apple.com.evil.test/` 会命中后缀规则。
+const OPEN_EXTERNAL_PREFIXES: [&str; 3] = [
+    "https://platform.deepseek.com/",
+    "https://apps.apple.com/",
+    "https://sing-box.sagernet.org/",
+];
+
+fn external_url_allowed(url: &str) -> bool {
+    OPEN_EXTERNAL_PREFIXES
+        .iter()
+        .any(|prefix| url.starts_with(prefix))
+}
+
+/// 用系统浏览器打开白名单内的链接（DeepSeek 开放平台、App Store、sing-box 官网）。
 /// 域名写死在这里，避免变成任意 URL 打开器。
 #[tauri::command]
 pub async fn open_external(app: tauri::AppHandle, url: String) -> Result<Value, Value> {
     use tauri_plugin_opener::OpenerExt;
 
-    const ALLOWED_PREFIX: &str = "https://platform.deepseek.com/";
-    if !url.starts_with(ALLOWED_PREFIX) {
+    if !external_url_allowed(&url) {
         return Err(json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INVALID_ARGUMENT",
-            "message": "只允许打开 DeepSeek 开放平台的链接",
+            "message": "只允许打开白名单内的链接",
             "retryable": false,
             "details": { "reason": "url_not_allowed" },
             "request_id": "",
@@ -3355,5 +3398,36 @@ mod destroy_flow_tests {
         .await;
         assert_eq!(result.unwrap_err().code, "PRECONDITION_FAILED");
         assert_eq!(*log.lock().unwrap(), vec!["destroy"]);
+    }
+}
+
+#[cfg(test)]
+mod open_external_tests {
+    use super::external_url_allowed;
+
+    #[test]
+    fn the_allowlisted_prefixes_are_opened() {
+        for url in [
+            "https://platform.deepseek.com/usage",
+            "https://apps.apple.com/app/sing-box-mt/id6785326793",
+            "https://sing-box.sagernet.org/clients/",
+        ] {
+            assert!(external_url_allowed(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn lookalike_hosts_and_other_schemes_are_rejected() {
+        for url in [
+            "https://apps.apple.com.evil.test/app",
+            "https://platform.deepseek.com.evil.test/",
+            "https://evil.test/https://apps.apple.com/",
+            "http://apps.apple.com/app",
+            "https://apps.apple.com",
+            "https://workers.dev/",
+            "",
+        ] {
+            assert!(!external_url_allowed(url), "{url}");
+        }
     }
 }

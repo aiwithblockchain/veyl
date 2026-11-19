@@ -25,6 +25,7 @@ import type {
   LlmProvider,
   LlmProviderInput,
   LlmProviderTestResult,
+  MobileExportData,
   MyServerCreateInput,
   NetRepairAction,
   NetRepairResult,
@@ -146,6 +147,21 @@ interface MockNodeEntry {
   region: string | null;
   createdAt: string;
   nodeId: string | null;
+}
+
+/** 浏览器预览用的占位二维码：静态 SVG，不含真实令牌，也不发任何请求。 */
+const MOCK_MOBILE_QR =
+  "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyMSAyMSI+PHJlY3Qgd2lkdGg9IjIxIiBoZWlnaHQ9IjIxIiBmaWxsPSIjZmZmIi8+PGcgZmlsbD0iIzE0MTYxYyI+PHJlY3QgeD0iMSIgeT0iMSIgd2lkdGg9IjciIGhlaWdodD0iNyIvPjxyZWN0IHg9IjIiIHk9IjIiIHdpZHRoPSI1IiBoZWlnaHQ9IjUiIGZpbGw9IiNmZmYiLz48cmVjdCB4PSIzIiB5PSIzIiB3aWR0aD0iMyIgaGVpZ2h0PSIzIi8+PHJlY3QgeD0iMTMiIHk9IjEiIHdpZHRoPSI3IiBoZWlnaHQ9IjciLz48cmVjdCB4PSIxNCIgeT0iMiIgd2lkdGg9IjUiIGhlaWdodD0iNSIgZmlsbD0iI2ZmZiIvPjxyZWN0IHg9IjE1IiB5PSIzIiB3aWR0aD0iMyIgaGVpZ2h0PSIzIi8+PHJlY3QgeD0iMSIgeT0iMTMiIHdpZHRoPSI3IiBoZWlnaHQ9IjciLz48cmVjdCB4PSIyIiB5PSIxNCIgd2lkdGg9IjUiIGhlaWdodD0iNSIgZmlsbD0iI2ZmZiIvPjxyZWN0IHg9IjMiIHk9IjE1IiB3aWR0aD0iMyIgaGVpZ2h0PSIzIi8+PHJlY3QgeD0iOSIgeT0iMSIgd2lkdGg9IjEiIGhlaWdodD0iMSIvPjxyZWN0IHg9IjExIiB5PSIyIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iOSIgeT0iNCIgd2lkdGg9IjEiIGhlaWdodD0iMSIvPjxyZWN0IHg9IjExIiB5PSI1IiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iOSIgeT0iNyIgd2lkdGg9IjEiIGhlaWdodD0iMSIvPjxyZWN0IHg9IjEyIiB5PSI3IiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTciIHk9IjkiIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz48cmVjdCB4PSIxOSIgeT0iOSIgd2lkdGg9IjEiIGhlaWdodD0iMSIvPjxyZWN0IHg9IjEwIiB5PSI5IiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTMiIHk9IjkiIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz48cmVjdCB4PSIxNSIgeT0iMTAiIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz48cmVjdCB4PSIxOCIgeT0iMTAiIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz48cmVjdCB4PSI5IiB5PSIxMCIgd2lkdGg9IjEiIGhlaWdodD0iMSIvPjxyZWN0IHg9IjkiIHk9IjEyIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTIiIHk9IjExIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTQiIHk9IjEyIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTgiIHk9IjEyIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTAiIHk9IjE0IiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTIiIHk9IjE0IiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTUiIHk9IjE0IiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTgiIHk9IjE0IiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTEiIHk9IjE2IiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTMiIHk9IjE2IiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTYiIHk9IjE2IiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iMTkiIHk9IjE2IiB3aWR0aD0iMSIgaGVpZ2h0PSIxIi8+PHJlY3QgeD0iOSIgeT0iMTciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz48cmVjdCB4PSIxMiIgeT0iMTgiIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz48cmVjdCB4PSIxNSIgeT0iMTgiIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz48cmVjdCB4PSIxOCIgeT0iMTgiIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz48cmVjdCB4PSI5IiB5PSIxOSIgd2lkdGg9IjEiIGhlaWdodD0iMSIvPjxyZWN0IHg9IjE0IiB5PSIxOSIgd2lkdGg9IjEiIGhlaWdodD0iMSIvPjxyZWN0IHg9IjE3IiB5PSIxOSIgd2lkdGg9IjEiIGhlaWdodD0iMSIvPjwvZz48L3N2Zz4=";
+
+/** 演示数据：示例串不是令牌，界面也不会把它渲染成文本。 */
+function mockMobileExport(nodeCount: number): MobileExportData {
+  return {
+    state: "ok",
+    url: "https://veyl:demo-token@veyl.example/v1/mobile/profile",
+    qr_data_url: MOCK_MOBILE_QR,
+    node_count: nodeCount,
+    created_at: Date.now(),
+  };
 }
 
 export class MockAgentBridge implements AgentBridge {
@@ -645,6 +661,14 @@ export class MockAgentBridge implements AgentBridge {
 
   async myServerTopup(denomination: number) {
     return this.myServers.topup(denomination);
+  }
+
+  async mobileExportGet(): Promise<MobileExportData> {
+    return mockMobileExport(this.myServers.list().servers.length);
+  }
+
+  async mobileExportRotate(): Promise<MobileExportData> {
+    return mockMobileExport(this.myServers.list().servers.length);
   }
 
   async myServerCancelOrder(orderId: string) {

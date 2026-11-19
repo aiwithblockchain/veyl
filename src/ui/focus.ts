@@ -12,8 +12,13 @@ const FOCUSABLE_SELECTOR = [
 /**
  * 浮层焦点管理：打开时把焦点移入、Tab 在内部循环、关闭时归还给触发元素。
  * 只负责 Tab 与焦点，不处理 Esc（各组件自己处理）。
+ * `restoreFocus = false` 用于调用方自己接管归还（例如 App 统一决定回到哪一行）。
  */
-export function useFocusTrap(open: boolean, ref: RefObject<HTMLElement | null>) {
+export function useFocusTrap(
+  open: boolean,
+  ref: RefObject<HTMLElement | null>,
+  restoreFocus = true,
+) {
   useEffect(() => {
     if (!open) return;
     const node = ref.current;
@@ -51,7 +56,7 @@ export function useFocusTrap(open: boolean, ref: RefObject<HTMLElement | null>) 
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
-      previous?.focus();
+      if (restoreFocus) previous?.focus();
     };
-  }, [open, ref]);
+  }, [open, ref, restoreFocus]);
 }

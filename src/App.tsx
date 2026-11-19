@@ -33,6 +33,7 @@ import { MyServersPage } from "./components/MyServersPage";
 import { MyServersRail } from "./components/MyServersRail";
 import { MyServerLogin } from "./components/MyServerLogin";
 import { MyServerTopUp } from "./components/MyServerTopUp";
+import { MobileExport, hasReadyServer } from "./components/MobileExport";
 import { useMyServers } from "./myservers/useMyServers";
 import { useServerNodePooling } from "./myservers/useServerNodePooling";
 import { isProvisioning, trialAvailableHint } from "./myservers/labels";
@@ -319,6 +320,9 @@ export default function App() {
   // 只存一份，和改动前单实例 Composer 的行为一致（切会话也保留）。
   const [composerDraft, setComposerDraft] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 「在手机上使用」弹层：设置行与左栏行共用这一份开关。 */
+  const [mobileExportOpen, setMobileExportOpen] = useState(false);
+  const mobileExportTriggerRef = useRef<HTMLElement | null>(null);
   /** 设置在咨询 AI：右栏助手搬进弹层并排显示，原来的右栏不再渲染。 */
   const [settingsConsulting, setSettingsConsulting] = useState(false);
   /** AI 指路：打开对应段，并把 row 滚到可见、高亮 2 秒。 */
@@ -377,6 +381,12 @@ export default function App() {
     active: destination === "servers",
     rootSignal: serversRootSignal,
   });
+  /** 左栏快捷行：已登录、列表可读、且至少一台服务器节点已就绪。 */
+  const showRailMobileExport =
+    myServers.loggedIn &&
+    !myServers.loading &&
+    !myServers.error &&
+    hasReadyServer(myServers.servers);
   /**
    * 进入「我的服务器」时主动拉一次列表：后台轮询没了，空闲时左栏不会自己长出墓碑。
    * 同一 destination 连点只算一次（1 秒内去重），也不做定时轮询。
@@ -1139,6 +1149,27 @@ export default function App() {
     setSettingsOpen(false);
     setSettingsConsulting(false);
     void refreshAiStatus();
+  };
+
+  const openMobileExport = (trigger: HTMLElement) => {
+    mobileExportTriggerRef.current = trigger;
+    setMobileExportOpen(true);
+  };
+  const closeMobileExport = (returnFocus = true) => {
+    setMobileExportOpen(false);
+    if (!returnFocus) return;
+    // 设置在弹层关闭后重新接管焦点陷阱（会先把焦点放到自己的 ×）：
+    // 等这一轮提交结束后再把焦点还给触发行。
+    window.setTimeout(() => mobileExportReturnFocus()?.focus(), 0);
+  };
+  /** 关闭后焦点：触发行还在就回它；左栏行已消失时回左栏标题行的 ＋。 */
+  const mobileExportReturnFocus = () => {
+    const trigger = mobileExportTriggerRef.current;
+    if (trigger?.isConnected) return trigger;
+    return (
+      document.querySelector<HTMLElement>("#config-rail .rail__add") ??
+      document.querySelector<HTMLElement>("#config-rail .rail__drawer-btn")
+    );
   };
 
   // 退出确认：命令没回执前保持弹窗（后端会一直等这次决定），失败就留在原地重试。
@@ -2312,6 +2343,8 @@ export default function App() {
               : null
           }
           onGoConnect={() => changeDestination("client")}
+          showMobile={showRailMobileExport}
+          onMobile={openMobileExport}
           onSelect={myServers.select}
           onNew={() => openNewNode("servers")}
         />
@@ -2608,7 +2641,30 @@ export default function App() {
           myServers.openTopUp();
         }}
         onViewBills={() => void handleViewBills()}
+        mobileExportOpen={mobileExportOpen}
+        onOpenMobileExport={openMobileExport}
       />
+
+      {mobileExportOpen ? (
+        <MobileExport
+          bridge={bridge}
+          nested={settingsOpen}
+          onClose={closeMobileExport}
+          onLogin={() => {
+            // 登录弹层马上接管焦点：不要再把焦点还给弹层后面的左栏行。
+            closeMobileExport(false);
+            closeSettings();
+            myServers.openLogin();
+          }}
+          onGoServers={() => {
+            // 切 destination 由导航自己接管焦点：不要再还给已经离开的那一行。
+            closeMobileExport(false);
+            closeSettings();
+            changeDestination("servers");
+            refreshServersOnce();
+          }}
+        />
+      ) : null}
 
       <ConnectionOverlay
         connection={vpn.connection}

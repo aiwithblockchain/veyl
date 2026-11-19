@@ -7,4 +7,5 @@ pub mod credentials;
 pub mod env;
 pub mod error;
 pub mod events;
+pub mod mobile;
 pub mod servers;

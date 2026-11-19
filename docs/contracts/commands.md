@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.45.5`
+> 契约版本：`2.46.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -1947,6 +1947,43 @@ type NodeForgetResult = { removed: boolean };  // false = 节点本来就不存�
 - 幂等：节点本来不存在时返回 `{ removed: false }`，不报错、不发事件。
 - 不注册为 AI 工具。
 
+### 7.21 `mobile_export_get {}` → `MobileExportData`（仅 UI，2.46.0）
+
+手机端导出：确保账户级远程配置令牌存在，返回拼好的 URL 与二维码。**幂等**——没有就建、有就回显同一个，重复调用不改 URL（否则手机每打开一次弹层就掉线）。只允许邮箱账户（`account_kind = "email"`）。
+
+```ts
+type MobileExportData =
+  | {
+      state: "ok";
+      url: string;              // https://veyl:<token>@<origin>/v1/mobile/profile，含令牌
+      qr_data_url: string;      // data:image/svg+xml;base64,…
+      node_count: number;       // 本地已就绪的付费节点数
+      created_at: number;       // Unix 毫秒（控制面 mobile_tokens.created_at）
+    }
+  | { state: "login_required" }
+  | { state: "no_ready_server" };
+```
+
+- 门禁：未登录 → `login_required`；没有「节点已就绪」的自建服务器 → `no_ready_server`。两者都是**预期状态**，走 `state`，不报错。
+- URL 的 origin 只取 `control_plane::env` 的解析结果；拼接前校验 `https://` 且 host 不以 `.workers.dev` 结尾，否则 `PRECONDITION_FAILED / insecure_profile_origin`。
+- 二维码在 Host 用 `qrcode` 生成 SVG data URL，内容为 `sing-box://import-remote-profile?url=<urlencoded url>#Veyl`（名称 URL 编码后固定 `Veyl`）。
+- `url` 含令牌：**UI 不得渲染为文本 / `alt` / `title`，不得进入事件、日志或 AI 上下文**；命令不落本地库、不写 `secrets.enc`。
+- 错误：`PRECONDITION_FAILED`（`insecure_profile_origin`；控制面返回 `login_required` 时归一为本命令的 `login_required`）、`RATE_LIMITED`（`retryable = true`）、`UPSTREAM_ERROR`、`TIMEOUT`、`INTERNAL`（`qr_encode_failed` / `mobile_token_corrupt`）。
+- 设置目录行 id `account.mobile` 由 `tools.md` §4.50 的行登记表登记；本文件不另维护行 id。
+
+### 7.22 `mobile_export_rotate { confirm: true }` → `MobileExportData`（仅 UI，2.46.0）
+
+重新生成：覆盖账户级令牌，旧 URL 在手机下一次拉取时失效。
+
+```ts
+type MobileExportRotateArgs = { confirm: true };
+```
+
+- `confirm` 必填且必须为 `true`；缺失或 `false` → `INVALID_ARGUMENT / confirmation_required`（界面已在弹层里做就地确认）。
+- 返回形状与 §7.21 相同；生成前重新检查门禁（期间可能登出、最后一台服务器可能被销毁），三种 `state` 都可能返回。
+- **不提供「只吊销、不重建」**：界面只有「重新生成」。
+- 桌面登出**不吊销**手机链接；吊销的唯一入口是本命令。
+
 ---
 
 ## 8. 种子（官方默认配置，C 组）
@@ -2682,6 +2719,12 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.46.0（未发布，2026-11-19：手机端导出，两条命令）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.46.0`；§7 新增 `mobile_export_get`（幂等取令牌 + URL + 二维码）与 `mobile_export_rotate`（确认后覆盖令牌），返回 `MobileExportData` 三态。URL 的 origin 只取控制面环境解析结果，禁止 `workers.dev`；令牌不得进界面文本、事件、日志或 AI 上下文；不落本地库 | 新增命令 | `docs/design/mobile-export.md`、`mobile-export-technical.md` §5 |
 
 ### 2.45.5（未发布，2026-11-19：`NodeSummary` 增不可用原因）
 

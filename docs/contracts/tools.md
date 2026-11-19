@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.21.4`
+> 契约版本：`3.22.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -1913,6 +1913,7 @@ type OpenSettingsData = {
 | `ai.other` | 其他 AI 服务 |
 | `account.login` | 登录 / 退出登录 |
 | `account.balance` | 余额与充值 |
+| `account.mobile` | 在手机上使用（3.22.0 新增；打开设置 › 账户并高亮这一行，不打开弹层、不读 URL） |
 | `advanced.core` | 运行时核心版本 |
 | `advanced.helper` | 系统助手（helper） |
 | `advanced.logs` | 日志目录 |
@@ -2188,6 +2189,12 @@ type HttpCheckData = {
 ---
 
 ## 8. 变更记录
+
+### 3.22.0（未发布，2026-11-19：`OpenSettings` 行登记表新增 `account.mobile`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `3.22.0`；§4.50 行登记表新增 `account.mobile`（设置 › 账户的「在手机上使用」行），登记表从 11 项变 12 项（`src-tauri/src/tools/settings.rs` 的 `SETTINGS_ROWS` 同步）。**只指路**：AI 能把设置滚到这一行并高亮，不能打开弹层、不能读导出 URL 或令牌；不新增工具 | 行登记扩展 | `docs/design/mobile-export.md` §6、`mobile-export-technical.md` §5.2 |
 
 ### 3.21.4（未发布，2026-11-19：`ConfigDetail` 的 `config_id` 改为可选）
 

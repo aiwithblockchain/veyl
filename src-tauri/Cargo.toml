@@ -100,6 +100,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 aes-gcm = "0.10"
 pbkdf2 = "0.12"
+# 手机端导出：URL 拼接与二维码（mobile-export-technical.md §4.1–§4.3）。
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+url = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

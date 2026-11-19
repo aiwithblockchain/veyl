@@ -131,3 +131,15 @@ export function IconGroups({ size = 16, className }: IconProps) {
     </>,
   );
 }
+
+/** 手机：圆角矩形 + 底部横线；不画任何品牌标志。 */
+export function IconPhone({ size = 16, className }: IconProps) {
+  return base(
+    size,
+    className,
+    <>
+      <rect x="4.5" y="2.5" width="7" height="11" rx="1.6" />
+      <path d="M7 11.2h2" />
+    </>,
+  );
+}

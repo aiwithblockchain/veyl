@@ -90,6 +90,9 @@ interface Props {
   onLogin?: () => void;
   onTopUp?: () => void;
   onViewBills?: () => void;
+  /** 「在手机上使用」弹层叠在设置之上：打开期间设置的焦点陷阱与 Esc 退让。 */
+  mobileExportOpen?: boolean;
+  onOpenMobileExport?: (trigger: HTMLElement) => void;
 }
 
 type SectionId = "ai" | "network" | "account" | "advanced";
@@ -669,6 +672,8 @@ export function Settings({
   onRefreshWallet,
   onLogin,
   onTopUp,
+  mobileExportOpen = false,
+  onOpenMobileExport,
 }: Props) {
   const connected = runtime.state === "running" || runtime.state === "degraded";
   const runtimeActive =
@@ -758,7 +763,10 @@ export function Settings({
   const resetCloseRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef(false);
   const copyTimerRef = useRef<number | null>(null);
-  useFocusTrap(open && !consulting && resetPhase === "idle" && !importOpen, dialogRef);
+  useFocusTrap(
+    open && !consulting && resetPhase === "idle" && !importOpen && !mobileExportOpen,
+    dialogRef,
+  );
   // 咨询 AI 时助手是设置卡的兄弟节点：焦点陷阱改挂遮罩，Tab 能进助手。
   useFocusTrap(open && consulting && resetPhase === "idle" && !importOpen, backdropRef);
   useFocusTrap(resetPhase !== "idle", resetDialogRef);
@@ -1095,6 +1103,8 @@ export function Settings({
       // 输入法取消组合的 Esc 不能冒到关窗逻辑：否则刚填的内容全丢。
       if (isComposingEvent(event)) return;
       if (event.key !== "Escape") return;
+      // 「在手机上使用」弹层在上层：Esc 归它，不关设置。
+      if (mobileExportOpen) return;
       // 导入弹层在设置之上：先关它。
       if (importOpen) {
         setImportOpen(false);
@@ -1114,7 +1124,7 @@ export function Settings({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, closeSettings, resetPhase, closeReset, importOpen, portEditing, cancelProxyPortEdit]);
+  }, [open, closeSettings, resetPhase, closeReset, importOpen, portEditing, cancelProxyPortEdit, mobileExportOpen]);
   useEffect(() => {
     if (resetPhase === "confirm") resetCancelRef.current?.focus();
     if (resetPhase === "result") resetCloseRef.current?.focus();
@@ -2696,6 +2706,24 @@ export function Settings({
                 </button>
               </div>
             )}
+            <div className="settings-row" {...pointAttrs("account.mobile")}>
+              <div>
+                <div className="settings-row__label">在手机上使用</div>
+                <p className="settings-note">
+                  下载 sing-box 官方客户端，扫码导入你的节点。
+                </p>
+              </div>
+              <div className="settings-row__aside">
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={(event) => onOpenMobileExport?.(event.currentTarget)}
+                  disabled={!onOpenMobileExport}
+                >
+                  查看
+                </button>
+              </div>
+            </div>
           </section>
         ) : null}
         </div>

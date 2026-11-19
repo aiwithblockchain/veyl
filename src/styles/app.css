@@ -3704,6 +3704,7 @@ body[data-resizing] {
 .rail--locked .rail-server,
 .rail--locked .rail__add,
 .rail--locked .rail__new-row,
+.rail--locked .rail__action-row,
 .rail--locked .myservers__trial-link,
 .rail--locked .rail-drawer__new {
   opacity: 0.45;
@@ -6154,9 +6155,11 @@ details[open] > .settings-fold__summary::before {
   padding: 0 4px;
 }
 
-/* 列表底部的常驻新建入口：整行可点，次级（不加实心底）。
+/* 列表底部的常驻入口：整行可点，次级（不加实心底）。
+   两行共用同一盒模型（新建节点 / 在手机上使用），各自保留 border-top。
    与上面的行对齐（左右 8px），顶部一条细线把它和滚动内容分开。 */
-.rail__new-row {
+.rail__new-row,
+.rail__action-row {
   flex: none;
   display: flex;
   align-items: center;
@@ -6175,12 +6178,14 @@ details[open] > .settings-fold__summary::before {
   cursor: pointer;
 }
 
-.rail__new-row:hover:not(:disabled) {
+.rail__new-row:hover:not(:disabled),
+.rail__action-row:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--ink);
 }
 
-.rail__new-row:focus-visible {
+.rail__new-row:focus-visible,
+.rail__action-row:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: -2px;
   color: var(--ink);
@@ -6354,4 +6359,187 @@ details[open] > .settings-fold__summary::before {
   color: var(--ink-2);
   font-size: 12px;
   word-break: break-all;
+}
+
+/* ---------- 在手机上使用（弹层） ---------- */
+
+.mobile-export__body {
+  padding: 0 20px 20px;
+}
+
+.mobile-export__intro {
+  margin: 16px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.mobile-export__downloads {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.mobile-export__download {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.mobile-export__platform {
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.mobile-export__caption {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+/* 下载入口是外链：交给系统浏览器，命中区外扩到约 32 高。 */
+.mobile-export__link {
+  position: relative;
+  flex: none;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.6;
+  color: var(--link);
+  text-decoration: none;
+}
+
+.mobile-export__link::after {
+  content: "";
+  position: absolute;
+  inset: -10px -8px;
+}
+
+.mobile-export__link:hover {
+  color: var(--link-hover);
+  text-decoration: underline;
+}
+
+.mobile-export__arrow {
+  margin-left: 4px;
+  font-size: 13px;
+}
+
+.mobile-export__qr-area {
+  display: flex;
+  gap: 24px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--hair);
+}
+
+/* 二维码永远是白底：功能需要，不跟随浅色 / 深色主题。 */
+.mobile-export__qr {
+  flex: none;
+  width: 160px;
+  height: 160px;
+  overflow: hidden;
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.mobile-export__qr-img {
+  display: block;
+  width: 160px;
+  height: 160px;
+}
+
+.mobile-export__qr-skeleton {
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  background: var(--hair);
+  animation: skeleton-pulse 1.8s ease-in-out infinite;
+}
+
+.mobile-export__side {
+  flex: 1;
+  min-width: 220px;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+}
+
+.mobile-export__side-title {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.mobile-export__side-note {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.mobile-export__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.mobile-export__confirm {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--hair);
+  border-radius: var(--r-sm);
+}
+
+.mobile-export__confirm-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.mobile-export__confirm-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.mobile-export__status,
+.mobile-export__error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.mobile-export__status { color: var(--ink-3); }
+.mobile-export__error { color: var(--err-text); }
+
+/* 安全说明固定在右列底部。 */
+.mobile-export__security {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
+.mobile-export__side > .mobile-export__security {
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+@media (max-width: 560px) {
+  .mobile-export__qr-area {
+    flex-direction: column;
+  }
+
+  .mobile-export__qr {
+    align-self: center;
+  }
 }

@@ -24,6 +24,7 @@ import type {
   LlmProvider,
   LlmProviderInput,
   LlmProviderTestResult,
+  MobileExportData,
   MyServer,
   MyServerAccount,
   MyServerCatalog,
@@ -920,6 +921,27 @@ function normalizeMyServerTopup(raw: unknown): MyServerTopup | null {
   };
 }
 
+function normalizeMobileExport(raw: unknown): MobileExportData {
+  if (!raw || typeof raw !== "object") serverDataError();
+  const value = raw as Record<string, unknown>;
+  if (value.state === "login_required") return { state: "login_required" };
+  if (value.state === "no_ready_server") return { state: "no_ready_server" };
+  if (
+    value.state === "ok" &&
+    typeof value.url === "string" &&
+    typeof value.qr_data_url === "string"
+  ) {
+    return {
+      state: "ok",
+      url: value.url,
+      qr_data_url: value.qr_data_url,
+      node_count: typeof value.node_count === "number" ? value.node_count : 0,
+      created_at: typeof value.created_at === "number" ? value.created_at : 0,
+    };
+  }
+  serverDataError();
+}
+
 /** 统一的 invoke 包装：失败一律抛 `BridgeError`，调用方只需要看 code / message。 */
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -1464,6 +1486,16 @@ export class TauriAgentBridge implements AgentBridge {
     );
     if (!topup) serverDataError();
     return topup;
+  }
+
+  async mobileExportGet(): Promise<MobileExportData> {
+    return normalizeMobileExport(await call<unknown>("mobile_export_get"));
+  }
+
+  async mobileExportRotate(): Promise<MobileExportData> {
+    return normalizeMobileExport(
+      await call<unknown>("mobile_export_rotate", { confirm: true }),
+    );
   }
 
   async myServerSshCredentials(

@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { MyServer, MyServerCatalog } from "../agent/bridge";
 import { formatDailyPrice, isProvisioning, serverRailState, serverTone } from "../myservers/labels";
 import { isTombstone } from "../myservers/tombstones";
-import { IconClose, IconPlus } from "./icons";
+import { IconClose, IconPhone, IconPlus } from "./icons";
 
 interface Props {
   servers: MyServer[];
@@ -21,6 +21,9 @@ interface Props {
   trialHint?: string | null;
   /** 旁注里的「去控制台」：切到连接页。 */
   onGoConnect?: () => void;
+  /** 已登录 + 至少一台节点就绪时，底部多一行「在手机上使用」。 */
+  showMobile?: boolean;
+  onMobile?: (trigger: HTMLElement) => void;
   onSelect: (serverId: string) => void;
   onNew: () => void;
 }
@@ -90,6 +93,8 @@ export function MyServersRail({
   compact = false,
   trialHint = null,
   onGoConnect,
+  showMobile = false,
+  onMobile,
   onSelect,
   onNew,
 }: Props) {
@@ -216,6 +221,20 @@ export function MyServersRail({
                 <IconPlus size={14} />
               </span>
               <span>新建节点</span>
+            </button>
+          ) : null}
+          {showMobile && onMobile && !loading && !error ? (
+            <button
+              type="button"
+              className="rail__action-row"
+              aria-haspopup="dialog"
+              disabled={disabled}
+              onClick={(event) => onMobile(event.currentTarget)}
+            >
+              <span className="rail__new-row__icon">
+                <IconPhone size={14} />
+              </span>
+              <span>在手机上使用</span>
             </button>
           ) : null}
         </>

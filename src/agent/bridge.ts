@@ -686,6 +686,18 @@ export interface MyServerTopup {
   denomination_cents: number;
 }
 
+/** 手机端导出（commands.md §7.21 / §7.22）。`url` 含令牌，只能进二维码与剪贴板。 */
+export type MobileExportData =
+  | {
+      state: "ok";
+      url: string;
+      qr_data_url: string;
+      node_count: number;
+      created_at: number;
+    }
+  | { state: "login_required" }
+  | { state: "no_ready_server" };
+
 /**
  * `my_server_checkout` 余额不足的 details（2.37.1）：建机门槛是日价 × 7，
  * 实际只扣 1 天。`shortfall_cents` 是唯一短差字段（不存在 `shortfall`）。
@@ -908,6 +920,10 @@ export interface AgentBridge {
   myServerWallet(): Promise<MyServerWallet>;
   /** 创建充值收银台会话；Host 负责用系统浏览器打开。 */
   myServerTopup(denominationCents: number): Promise<MyServerTopup>;
+  /** 手机端导出（2.46.0）；Host 未接入时不实现，界面按生成失败处理。 */
+  mobileExportGet?(): Promise<MobileExportData>;
+  /** 重新生成手机端导出令牌；确认由界面负责。 */
+  mobileExportRotate?(): Promise<MobileExportData>;
   /** 恢复网络：撤代理 → 停运行时 → 清明文配置（不依赖 AI）。 */
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
   /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */

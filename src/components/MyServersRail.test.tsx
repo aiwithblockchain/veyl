@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { cleanup, render } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MyServer } from "../agent/bridge";
 import { MyServersRail } from "./MyServersRail";
 
@@ -84,5 +84,75 @@ describe("服务器列表左栏", () => {
     expect(ledClass).toContain("is-idle");
     expect(meta).toContain("安装中");
     expect(meta).not.toContain("已欠费");
+  });
+});
+
+describe("左栏底部的在手机上使用", () => {
+  function renderWithMobile(over: {
+    showMobile?: boolean;
+    compact?: boolean;
+    loading?: boolean;
+    error?: string | null;
+    disabled?: boolean;
+    onMobile?: (trigger: HTMLElement) => void;
+  }) {
+    return render(
+      <MyServersRail
+        servers={[server()]}
+        selectedId={null}
+        loading={over.loading ?? false}
+        error={over.error ?? null}
+        compact={over.compact ?? false}
+        disabled={over.disabled ?? false}
+        showMobile={over.showMobile ?? true}
+        onMobile={over.onMobile}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+  }
+
+  it("出现时是可点按钮，带 aria-haspopup，点击把触发行交给 App", () => {
+    const onMobile = vi.fn();
+    const { container } = renderWithMobile({ onMobile });
+
+    const row = container.querySelector<HTMLButtonElement>(".rail__action-row");
+    expect(row).toBeTruthy();
+    expect(row?.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(row?.textContent).toBe("在手机上使用");
+    row?.click();
+    expect(onMobile).toHaveBeenCalledTimes(1);
+    expect(onMobile.mock.calls[0][0]).toBe(row);
+  });
+
+  it("抽屉模式不出现：「新建节点」已在抽屉里", () => {
+    const { container } = renderWithMobile({
+      compact: true,
+      onMobile: () => {},
+    });
+    expect(container.querySelector(".rail__action-row")).toBeNull();
+  });
+
+  it("列表加载中或读取失败时不出现", () => {
+    expect(
+      renderWithMobile({ loading: true, onMobile: () => {} }).container.querySelector(
+        ".rail__action-row",
+      ),
+    ).toBeNull();
+    cleanup();
+    expect(
+      renderWithMobile({ error: "down", onMobile: () => {} }).container.querySelector(
+        ".rail__action-row",
+      ),
+    ).toBeNull();
+  });
+
+  it("向导锁定时保留但禁用", () => {
+    const { container } = renderWithMobile({
+      disabled: true,
+      onMobile: () => {},
+    });
+    const row = container.querySelector<HTMLButtonElement>(".rail__action-row");
+    expect(row?.disabled).toBe(true);
   });
 });
