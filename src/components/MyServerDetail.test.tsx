@@ -62,6 +62,14 @@ afterEach(() => {
 });
 
 describe("服务器详情", () => {
+  it("健康检查失败但 node_id 还在：节点写「未就绪」", () => {
+    renderDetail({ state: "error", node_id: "nd_control_1" });
+
+    const term = screen.getByText("节点");
+    const value = term.parentElement?.querySelector("dd");
+    expect(value?.textContent).toBe("未就绪");
+  });
+
   it("费用按日价与本期有效期展示，不出现时价", () => {
     // 固定「现在」，paid_until 用相对它算出的未来日期，避免写死的日期过期变红。
     vi.useFakeTimers({ now: new Date(2026, 10, 17, 9, 0, 0) });

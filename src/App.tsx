@@ -55,6 +55,7 @@ import { createRuntimeAuthority } from "./config/runtimeAuthority";
 import { actionCardControls, readActionCards } from "./ui/actionCard";
 import { buildUiContext } from "./ui/controlIds";
 import { CONNECT_DIAG_ASK, SERVER_FAILURE_ASK } from "./ui/assistantPrompts";
+import { mobileExportPrompt } from "./ai/advancedPrompts";
 import { useNodeProbes } from "./config/useNodeProbes";
 import {
   assistantColumnWidth,
@@ -2662,6 +2663,11 @@ export default function App() {
             closeSettings();
             changeDestination("servers");
             refreshServersOnce();
+          }}
+          onAskAi={() => {
+            closeMobileExport(false);
+            closeSettings();
+            askAiInPanel(mobileExportPrompt);
           }}
         />
       ) : null}

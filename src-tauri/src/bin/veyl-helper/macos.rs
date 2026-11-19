@@ -1006,7 +1006,7 @@ impl Supervisor {
             )
         };
 
-        ensure_bundle_trusted()?;
+        ensure_bundle_trusted(&|line| self.note(line))?;
 
         let archive = bundled_rules_archive()
             .ok_or_else(|| missing("安装包里没有 veyl-rules-*.tar.zst".into()))?;
@@ -1680,7 +1680,7 @@ impl Supervisor {
         }
         let path = self.resolve_runtime_from(
             bundled_runtime(),
-            ensure_bundle_trusted,
+            || ensure_bundle_trusted(&|line| self.note(line)),
             verify_staged_signature,
             0,
         )?;
@@ -2568,25 +2568,49 @@ fn verify_under_library(path: &Path) -> Result<(), trust::TrustError> {
 ///
 /// **不检查 `/Applications` 自己的写位**——真机实测它是 `root:admin 0775`，
 /// group 可写是系统默认。要保证的是「这个 .app 及其内容不是普通用户可写的」。
-fn ensure_bundle_trusted() -> Result<(), ProtocolError> {
-    let untrusted = |detail: String| {
-        ProtocolError::new(
-            protocol::ERR_RUNTIME_MISSING,
-            format!("安装包所在位置不可信，拒绝从里面取运行时：{detail}"),
-        )
+fn ensure_bundle_trusted(note: &dyn Fn(&str)) -> Result<(), ProtocolError> {
+    // 用户可见的只有这两句。`ProtocolError` 没有 details 字段，真实路径与
+    // 校验结论走 `note`（写用户日志 / 首连前先缓存），不能塞进 message。
+    const OPEN_FROM_APPLICATIONS: &str =
+        "Veyl 需要从「应用程序」文件夹里打开。请先把 Veyl 拖进「应用程序」，再从那里启动。";
+    // 签名失败多半是包被改动或下载不完整——App 可能已经在「应用程序」里，
+    // 再拖一次解决不了，只能说重新下载安装。
+    const SIGNATURE_BROKEN: &str = "Veyl 的安装包不完整或被改动过，请重新下载安装。";
+
+    let untrusted = |message: &'static str, detail: String| {
+        // helper 进程没有 logger，launchd 也没配 stderr 落盘；`note` 是唯一
+        // 真正能留下记录、且在首份用户日志建好之前会先缓存下来的通道。
+        note(&format!("[warn] App bundle 不可信，拒绝从里面取运行时：{detail}"));
+        ProtocolError::new(protocol::ERR_RUNTIME_MISSING, message)
     };
 
-    let exe = std::env::current_exe().map_err(|error| untrusted(format!("{error}")))?;
-    let bundle = exe
-        .ancestors()
-        .nth(3)
-        .ok_or_else(|| untrusted("无法定位 App bundle".into()))?;
+    let exe = std::env::current_exe().map_err(|error| {
+        untrusted(
+            OPEN_FROM_APPLICATIONS,
+            format!("读取当前可执行文件失败：{error}"),
+        )
+    })?;
+    let bundle = exe.ancestors().nth(3).ok_or_else(|| {
+        untrusted(
+            OPEN_FROM_APPLICATIONS,
+            format!("无法从 {} 定位 App bundle", exe.display()),
+        )
+    })?;
 
-    trust::verify_bundle(bundle, Path::new("/Applications"))
-        .map_err(|error| untrusted(error.to_string()))?;
+    trust::verify_bundle(bundle, Path::new("/Applications")).map_err(|error| {
+        untrusted(
+            OPEN_FROM_APPLICATIONS,
+            format!("{}：{}", bundle.display(), error),
+        )
+    })?;
 
     // 属主不作数（拖拽安装的 App 属主是用户本人）。真正决定可信的是签名。
-    bundle_signature_valid(bundle).map_err(untrusted)
+    bundle_signature_valid(bundle).map_err(|detail| {
+        untrusted(
+            SIGNATURE_BROKEN,
+            format!("{}：签名校验失败：{detail}", bundle.display()),
+        )
+    })
 }
 
 /// 安装包里的规则归档：`.../Contents/Resources/resources/rules/veyl-rules-*.tar.zst`。

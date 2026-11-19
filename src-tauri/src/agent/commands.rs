@@ -932,6 +932,15 @@ pub async fn mobile_export_rotate(confirm: Option<bool>) -> Result<Value, Value>
     }
 }
 
+/// 下载 sing-box 官方客户端的二维码（仅 UI，契约 §7.23）：固定链接，不登录、不联网。
+#[tauri::command]
+pub async fn mobile_clients_qr() -> Result<Value, Value> {
+    match crate::control_plane::mobile::clients_qr() {
+        Ok(data) => Ok(json!(data)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
 /// 显式重新注册设备（§19.2.4）：丢弃当前身份与令牌，生成新的并静默注册。
 /// 旧服务器的本地记录保留为只读；本命令只由界面上的「重新注册设备」触发。
 #[tauri::command]

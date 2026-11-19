@@ -6367,25 +6367,62 @@ details[open] > .settings-fold__summary::before {
   padding: 0 20px 20px;
 }
 
-.mobile-export__intro {
-  margin: 16px 0 0;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--ink-2);
+/* 本弹层标题比默认 modal 标题大一档（17 是「复杂弹窗标题」）。 */
+.mobile-export__title {
+  font-size: 17px;
+  font-weight: 600;
 }
 
-.mobile-export__downloads {
+.mobile-export__step {
+  margin-top: 20px;
+}
+
+/* 步骤之间用 32 留白分组，不画分隔线。 */
+.mobile-export__step + .mobile-export__step {
+  margin-top: 32px;
+}
+
+.mobile-export__step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.mobile-export__step-num {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--ink-3);
+}
+
+/* 步骤头 → 内容 16。 */
+.mobile-export__step-head + * {
+  margin-top: 16px;
+}
+
+.mobile-export__install {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.mobile-export__platforms {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  margin-top: 16px;
+  gap: 12px;
 }
 
 .mobile-export__download {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 24px;
+  gap: 16px;
 }
 
 .mobile-export__platform {
@@ -6428,12 +6465,43 @@ details[open] > .settings-fold__summary::before {
   font-size: 13px;
 }
 
+/* 下载码：步骤 1 右侧，静态下载页 URL，不随账户态变化。 */
+.mobile-export__download-qr {
+  flex: none;
+  width: 104px;
+}
+
+.mobile-export__qr-caption {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* 外框 104：1px 描边 + 11px 白边 + 80 码区（静区按 12 设计，边框占 1）。 */
+.mobile-export__download-qr-box {
+  width: 104px;
+  height: 104px;
+  padding: 11px;
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.mobile-export__download-qr-img {
+  display: block;
+  width: 80px;
+  height: 80px;
+}
+
 .mobile-export__qr-area {
   display: flex;
   gap: 24px;
-  margin-top: 24px;
-  padding-top: 20px;
-  border-top: 1px solid var(--hair);
+}
+
+.mobile-export__qr-col {
+  flex: none;
 }
 
 /* 二维码永远是白底：功能需要，不跟随浅色 / 深色主题。 */
@@ -6449,8 +6517,8 @@ details[open] > .settings-fold__summary::before {
 
 .mobile-export__qr-img {
   display: block;
-  width: 160px;
-  height: 160px;
+  width: 100%;
+  height: 100%;
 }
 
 .mobile-export__qr-skeleton {
@@ -6465,6 +6533,8 @@ details[open] > .settings-fold__summary::before {
   flex: 1;
   min-width: 220px;
   min-height: 160px;
+  /* 与右侧导入码的码区顶端对齐：图注 12/1.5 + 8。 */
+  padding-top: 26px;
   display: flex;
   flex-direction: column;
 }
@@ -6534,12 +6604,29 @@ details[open] > .settings-fold__summary::before {
   padding-top: 12px;
 }
 
+/* 底部「问 AI」：距步骤 2 内容 32，与「重新生成」同款文字按钮。 */
+.mobile-export__ask-ai {
+  margin-top: 32px;
+}
+
 @media (max-width: 560px) {
+  .mobile-export__install {
+    flex-direction: column;
+  }
+
+  .mobile-export__download-qr {
+    align-self: flex-start;
+  }
+
   .mobile-export__qr-area {
     flex-direction: column;
   }
 
   .mobile-export__qr {
     align-self: center;
+  }
+
+  .mobile-export__side {
+    padding-top: 0;
   }
 }

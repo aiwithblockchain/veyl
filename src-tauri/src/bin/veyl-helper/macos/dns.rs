@@ -219,6 +219,10 @@ impl RestoreReport {
                 branch_label(self.branch)
             ),
         ];
+        // 判不出是否在线时按在线继续验证：这条必须能写进用户日志，排障时最关键。
+        if self.online.is_none() && self.verify.is_some() {
+            lines.push("[warn] DNS 还原后验证：无法判定本机是否在线，按在线处理".to_string());
+        }
         if let Some(written) = &self.written {
             lines.push(format!("DNS 还原写入 地址={written:?}"));
         }
@@ -665,7 +669,7 @@ fn verify_after_restore(saved: &SavedDns, deadline: Option<Instant>, report: &mu
     }
     if online.is_none() {
         // 判不出来时不当作离线：那会把用户留在坏 DNS 上。按在线继续验证。
-        log::warn!("DNS 还原后验证：无法判定本机是否在线，按在线处理");
+        // helper 没装 logger，这行由 `RestoreReport::lines()` 记进用户日志。
     }
     match system_resolves(end) {
         ResolveProbe::Ok => report.verify = Some("可用".to_string()),

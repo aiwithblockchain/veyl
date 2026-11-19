@@ -698,6 +698,11 @@ export type MobileExportData =
   | { state: "login_required" }
   | { state: "no_ready_server" };
 
+/** 下载页二维码（commands.md §7.23）：固定官方客户端页，与账户状态无关。 */
+export interface MobileClientsQrData {
+  qr_data_url: string;
+}
+
 /**
  * `my_server_checkout` 余额不足的 details（2.37.1）：建机门槛是日价 × 7，
  * 实际只扣 1 天。`shortfall_cents` 是唯一短差字段（不存在 `shortfall`）。
@@ -924,6 +929,8 @@ export interface AgentBridge {
   mobileExportGet?(): Promise<MobileExportData>;
   /** 重新生成手机端导出令牌；确认由界面负责。 */
   mobileExportRotate?(): Promise<MobileExportData>;
+  /** 下载页二维码（2.46.1）；Host 未接入时不实现，界面只留空位。 */
+  mobileClientsQr?(): Promise<MobileClientsQrData>;
   /** 恢复网络：撤代理 → 停运行时 → 清明文配置（不依赖 AI）。 */
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
   /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */

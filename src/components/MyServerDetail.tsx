@@ -7,6 +7,7 @@ import {
   billingNoticeText,
   formatUsdCents,
   isProvisioning,
+  isServerNodeReady,
   MY_SERVER_TOMBSTONE_TEXT,
   serverBillingText,
   serverDetailState,
@@ -369,7 +370,7 @@ export function MyServerDetail({
         </div>
         <div>
           <dt>节点</dt>
-          <dd>{server.node_id ? "已就绪" : "未就绪"}</dd>
+          <dd>{isServerNodeReady(server) ? "已就绪" : "未就绪"}</dd>
         </div>
         <div>
           <dt>费用</dt>

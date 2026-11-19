@@ -380,6 +380,11 @@ trap - EXIT
 touch "$APP_DEST"
 printf '  已安装：%s\n' "$APP_DEST"
 
+# 构建产物被 LaunchServices 注册后，启动台会出现第二个 Veyl；从产物启动时
+# 运行时不在 /Applications 下，连接必然报 runtime_missing。只注销这一个路径，
+# 不碰 /Applications 那份，也不整库重建（-kill -r 会清掉用户的启动台布局）。
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$APP_SRC" 2>/dev/null || true
+
 print_next_steps() {
   cat <<EOF
 

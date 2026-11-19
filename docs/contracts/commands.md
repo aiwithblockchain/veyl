@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.46.0`
+> 契约版本：`2.46.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -1984,6 +1984,14 @@ type MobileExportRotateArgs = { confirm: true };
 - **不提供「只吊销、不重建」**：界面只有「重新生成」。
 - 桌面登出**不吊销**手机链接；吊销的唯一入口是本命令。
 
+### 7.23 `mobile_clients_qr {}` → `{ qr_data_url: string }`（仅 UI，2.46.1）
+
+下载页二维码：返回固定内容 `https://sing-box.sagernet.org/clients/` 的 SVG 二维码，供手机扫码打开官方客户端页。
+
+- **不登录、不调控制面、不涉及令牌**；URL 写死在 Host，不接受前端入参（避免变成任意内容二维码生成器）。
+- 返回 `data:image/svg+xml;base64,…`，尺寸与静区与 §7.21 的二维码同一套生成逻辑。
+- 命令始终可用，与账户状态、服务器状态无关。
+
 ---
 
 ## 8. 种子（官方默认配置，C 组）
@@ -2719,6 +2727,12 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.46.1（未发布，2026-11-19：下载页二维码命令）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.46.1`；§7 新增 `mobile_clients_qr {}` → `{ qr_data_url }`，内容固定为官方客户端页 URL，不登录、不调控制面、不受入参影响 | 新增命令 | 产品负责人 2026-11-19：下载页要能用手机扫码打开 |
 
 ### 2.46.0（未发布，2026-11-19：手机端导出，两条命令）
 

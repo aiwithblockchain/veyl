@@ -7,6 +7,8 @@ import { MobileExport, hasReadyServer } from "./MobileExport";
 const URL_WITH_TOKEN =
   "https://veyl:secret-token@veyl.dessage.xyz/v1/mobile/profile";
 
+const DOWNLOAD_QR = "data:image/svg+xml;base64,PHN2Zy1kb3dubG9hZC8+";
+
 const OK: MobileExportData = {
   state: "ok",
   url: URL_WITH_TOKEN,
@@ -18,15 +20,20 @@ const OK: MobileExportData = {
 function makeBridge(
   get: () => Promise<MobileExportData>,
   rotate: () => Promise<MobileExportData> = get,
+  clientsQr: () => Promise<{ qr_data_url: string }> = async () => ({
+    qr_data_url: DOWNLOAD_QR,
+  }),
 ) {
   return {
     openExternal: vi.fn(async () => {}),
     mobileExportGet: vi.fn(get),
     mobileExportRotate: vi.fn(rotate),
+    mobileClientsQr: vi.fn(clientsQr),
   } as unknown as AgentBridge & {
     openExternal: ReturnType<typeof vi.fn>;
     mobileExportGet: ReturnType<typeof vi.fn>;
     mobileExportRotate: ReturnType<typeof vi.fn>;
+    mobileClientsQr: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -34,16 +41,18 @@ function setup(bridge: AgentBridge) {
   const onClose = vi.fn();
   const onLogin = vi.fn();
   const onGoServers = vi.fn();
+  const onAskAi = vi.fn();
   render(
     <MobileExport
       bridge={bridge}
       onClose={onClose}
       onLogin={onLogin}
       onGoServers={onGoServers}
+      onAskAi={onAskAi}
     />,
   );
   const dialog = screen.getByRole("dialog", { name: "在手机上使用" });
-  return { dialog, onClose, onLogin, onGoServers };
+  return { dialog, onClose, onLogin, onGoServers, onAskAi };
 }
 
 function server(over: Partial<MyServer> = {}): MyServer {
@@ -80,14 +89,75 @@ describe("在手机上使用：弹层", () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
 
-    const img = await within(dialog).findByRole("img", {
+    expect(await within(dialog).findByRole("img", {
       name: "sing-box 导入二维码",
-    });
-    expect(img.getAttribute("alt")).toBe("sing-box 导入二维码");
+    })).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "复制链接" })).toBeTruthy();
-    expect(within(dialog).getByText("你的节点")).toBeTruthy();
+    expect(
+      within(dialog).getByText("节点变化会自动更新，不用重扫。"),
+    ).toBeTruthy();
     expect(dialog.textContent).not.toContain("secret-token");
     expect(dialog.textContent).not.toContain("https://");
+  });
+
+  it("两个编号步骤与两个图注：编号对读屏隐藏", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
+    expect(
+      within(dialog).getByRole("heading", { name: "安装客户端" }),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByRole("heading", { name: "导入节点" }),
+    ).toBeTruthy();
+    const nums = Array.from(
+      dialog.querySelectorAll<HTMLElement>(".mobile-export__step-num"),
+    );
+    expect(nums.map((node) => node.textContent)).toEqual(["1", "2"]);
+    expect(nums.every((node) => node.getAttribute("aria-hidden") === "true")).toBe(
+      true,
+    );
+    expect(within(dialog).getByText("扫码下载")).toBeTruthy();
+    expect(within(dialog).getByText("扫码导入")).toBeTruthy();
+  });
+
+  it("v1 的重复文案已删除", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+    await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
+
+    expect(
+      within(dialog).queryByText(
+        "Veyl 不提供手机客户端，用 sing-box 官方客户端。",
+      ),
+    ).toBeNull();
+    expect(
+      within(dialog).queryByText("Google Play、F-Droid 或 GitHub 任选。"),
+    ).toBeNull();
+    expect(within(dialog).queryByText("导入你的节点")).toBeNull();
+    expect(within(dialog).queryByText("用手机扫码打开下载页")).toBeNull();
+    expect(
+      within(dialog).getByText("需要大陆以外的 Apple 账号。"),
+    ).toBeTruthy();
+  });
+
+  it("底部问 AI：点击交给 App，Tab 顺序以它为最后一站", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog, onAskAi } = setup(bridge);
+    await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
+
+    const ask = within(dialog).getByRole("button", {
+      name: "不会操作？问 AI",
+    });
+    const focusables = Array.from(
+      dialog.querySelectorAll<HTMLElement>('a[href], button:not([disabled])'),
+    );
+    expect(focusables[0]?.getAttribute("aria-label")).toBe("关闭");
+    expect(focusables[focusables.length - 1]).toBe(ask);
+
+    fireEvent.click(ask);
+    expect(onAskAi).toHaveBeenCalledTimes(1);
   });
 
   it("复制成功：同一位置变「已复制」", async () => {
@@ -181,24 +251,87 @@ describe("在手机上使用：弹层", () => {
     ).toBeTruthy();
   });
 
-  it("下载链接交给系统浏览器，不用应用内导航", async () => {
+  it("下载链接都指向官方客户端页，交给系统浏览器打开", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
 
-    const link = await within(dialog).findByRole("link", {
-      name: "在 App Store 打开 sing-box",
+    const iphone = await within(dialog).findByRole("link", {
+      name: "查看 sing-box 的 iPhone 安装说明",
     });
-    fireEvent.click(link);
-    expect(bridge.openExternal).toHaveBeenCalledWith(
-      "https://apps.apple.com/app/sing-box-mt/id6785326793",
+    expect(iphone.textContent).toContain("官方下载页");
+    expect(iphone.getAttribute("href")).toBe(
+      "https://sing-box.sagernet.org/clients/",
     );
-    const android = within(dialog).getByRole("link", {
-      name: "打开 sing-box 官方下载页",
-    });
-    fireEvent.click(android);
+    fireEvent.click(iphone);
     expect(bridge.openExternal).toHaveBeenCalledWith(
       "https://sing-box.sagernet.org/clients/",
     );
+    expect(
+      within(dialog).getByText("需要大陆以外的 Apple 账号。"),
+    ).toBeTruthy();
+    expect(
+      within(dialog).queryByText(
+        "需要大陆以外的 Apple 账号。页内有 App Store 入口。",
+      ),
+    ).toBeNull();
+
+    const android = within(dialog).getByRole("link", {
+      name: "查看 sing-box 的 Android 安装说明",
+    });
+    expect(android.getAttribute("href")).toBe(
+      "https://sing-box.sagernet.org/clients/",
+    );
+    fireEvent.click(android);
+    expect(bridge.openExternal).toHaveBeenCalledTimes(2);
+    expect(bridge.openExternal).toHaveBeenLastCalledWith(
+      "https://sing-box.sagernet.org/clients/",
+    );
+  });
+
+  it("下载码：图注在码上方，80 码区、读屏跳过", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    expect(await within(dialog).findByText("扫码下载")).toBeTruthy();
+    const img =
+      dialog.querySelector<HTMLImageElement>(".mobile-export__download-qr-img");
+    expect(img?.getAttribute("src")).toBe(DOWNLOAD_QR);
+    expect(img?.getAttribute("alt")).toBe("");
+    expect(img?.getAttribute("aria-hidden")).toBe("true");
+    expect(img?.getAttribute("width")).toBe("80");
+    expect(img?.getAttribute("height")).toBe("80");
+    expect(dialog.querySelector(".mobile-export__download-qr-box")).toBeTruthy();
+  });
+
+  it("下载码与账户态无关：未登录也显示，步骤 1 与问 AI 也在", async () => {
+    const bridge = makeBridge(async () => ({ state: "login_required" }));
+    const { dialog } = setup(bridge);
+
+    expect(await within(dialog).findByText("先登录。")).toBeTruthy();
+    expect(
+      dialog.querySelector(".mobile-export__download-qr-img"),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByRole("heading", { name: "安装客户端" }),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByRole("button", { name: "不会操作？问 AI" }),
+    ).toBeTruthy();
+  });
+
+  it("下载码读取失败：不留破图，只保留空位", async () => {
+    const bridge = makeBridge(
+      async () => OK,
+      async () => OK,
+      async () => {
+        throw { code: "TIMEOUT", message: "超时" };
+      },
+    );
+    const { dialog } = setup(bridge);
+
+    await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
+    expect(dialog.querySelector(".mobile-export__download-qr-box")).toBeTruthy();
+    expect(dialog.querySelector(".mobile-export__download-qr-img")).toBeNull();
   });
 
   it("复制失败：原位提示，且不让令牌留在 DOM 里", async () => {
@@ -234,5 +367,10 @@ describe("左栏快捷行的出现条件", () => {
     expect(hasReadyServer([server({ state: "error" })])).toBe(false);
     expect(hasReadyServer([server({ state: "destroyed" })])).toBe(false);
     expect(hasReadyServer([])).toBe(false);
+  });
+
+  it("健康检查失败但 node_id 还在：不算就绪，左栏入口不出现", () => {
+    const failed = server({ state: "error", node_id: "nd_1" });
+    expect(hasReadyServer([failed])).toBe(false);
   });
 });

@@ -95,6 +95,18 @@ export function isProvisioning(state: MyServerState): boolean {
   );
 }
 
+/**
+ * 节点已就绪：机器可用且已关联控制面节点。
+ * 详情事实行、左栏「在手机上使用」与导出端点共用这一条判定——曾经就绪、
+ * 后来健康检查失败的机器 node_id 还在，但节点不能再用。
+ */
+export function isServerNodeReady(server: MyServer): boolean {
+  return (
+    (server.state === "healthy" || server.state === "active") &&
+    server.node_id !== null
+  );
+}
+
 /** 钱包金额：USD 分，固定两位小数。 */
 export function formatUsdCents(cents: number): string {
   return `$${(Math.max(0, cents) / 100).toFixed(2)}`;

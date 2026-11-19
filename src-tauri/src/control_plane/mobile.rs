@@ -1,7 +1,8 @@
 //! 手机端导出：确保账户级令牌 → 拼远程配置 URL → 生成 sing-box 二维码。
 //!
 //! 令牌只在内存里经过一次：不写日志、不进事件、不落本地库（设计 §7.1 / §7.2）。
-//! origin 只取 [`super::env::current`]，本模块不写任何域名常量（§4.1）。
+//! profile 的 origin 只取 [`super::env::current`]，本模块不为它写域名常量（§4.1）；
+//! 下载页二维码用的是产品写死的公开链接，与 profile origin 无关。
 
 use std::time::Duration;
 
@@ -27,6 +28,8 @@ const QR_PIXELS: u32 = 640;
 const TOKEN_LEN: usize = 46;
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+/// 下载页固定 URL。命令不接受前端传入，避免变成任意内容二维码生成器。
+pub const CLIENTS_URL: &str = "https://sing-box.sagernet.org/clients/";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -42,6 +45,11 @@ pub enum MobileExportData {
     NoReadyServer,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MobileClientsQr {
+    pub qr_data_url: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     token: String,
@@ -54,6 +62,13 @@ pub async fn get() -> Result<MobileExportData, CpError> {
 
 pub async fn rotate() -> Result<MobileExportData, CpError> {
     export(true).await
+}
+
+/// 下载页二维码（仅 UI）：不登录、不调控制面、不涉及令牌。
+pub fn clients_qr() -> Result<MobileClientsQr, CpError> {
+    Ok(MobileClientsQr {
+        qr_data_url: qr_data_url(CLIENTS_URL)?,
+    })
 }
 
 async fn export(rotate: bool) -> Result<MobileExportData, CpError> {
@@ -516,6 +531,34 @@ mod tests {
         assert!(svg.contains("<svg"), "{}", &svg[..svg.len().min(80)]);
         assert!(svg.contains("viewBox"), "静区与尺寸由 SVG 自身表达");
         assert!(!svg.contains(TOKEN), "二维码内容不能出现在 SVG 文本里");
+    }
+
+    #[test]
+    fn clients_qr_is_the_fixed_download_page_and_carries_no_token() {
+        let clients = clients_qr().unwrap();
+        assert_eq!(
+            clients.qr_data_url,
+            qr_data_url(CLIENTS_URL).unwrap(),
+            "二维码内容必须是写死的下载页 URL"
+        );
+        let encoded = clients
+            .qr_data_url
+            .strip_prefix("data:image/svg+xml;base64,")
+            .expect("prefix");
+        let svg = String::from_utf8(BASE64.decode(encoded).unwrap()).unwrap();
+        assert!(svg.contains("<svg"), "解码后必须是 SVG");
+        assert!(!clients.qr_data_url.contains("mp_"), "不得含任何令牌");
+        assert_eq!(CLIENTS_URL, "https://sing-box.sagernet.org/clients/");
+    }
+
+    #[test]
+    fn clients_qr_serializes_as_the_contract_shape() {
+        let value = serde_json::to_value(clients_qr().unwrap()).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 1);
+        assert!(value["qr_data_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/svg+xml;base64,"));
     }
 
     #[test]

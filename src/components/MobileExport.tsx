@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentBridge, MobileExportData, MyServer } from "../agent/bridge";
+import { isServerNodeReady } from "../myservers/labels";
 import { copyText } from "../ui/clipboard";
 import { useFocusTrap } from "../ui/focus";
 import { IconClose } from "./icons";
 
-const APP_STORE_URL = "https://apps.apple.com/app/sing-box-mt/id6785326793";
-const ANDROID_URL = "https://sing-box.sagernet.org/clients/";
+// 两行都指向官方客户端页：App Store 网页按 IP 落到大陆区，而该 App 不在大陆区商店。
+const CLIENTS_URL = "https://sing-box.sagernet.org/clients/";
 
 type ExportOk = Extract<MobileExportData, { state: "ok" }>;
 
@@ -22,14 +23,9 @@ function phaseFrom(result: MobileExportData): Phase {
   return { kind: "no_ready_server" };
 }
 
-/** 左栏快捷行的出现条件之一：至少一台服务器节点已就绪（安装中 / 出错 / 墓碑都不算）。 */
+/** 左栏快捷行的出现条件之一：至少一台服务器节点已就绪。 */
 export function hasReadyServer(servers: MyServer[]): boolean {
-  // 与 Host 的门禁同一判定：state active / healthy 且已关联控制面节点。
-  return servers.some(
-    (server) =>
-      (server.state === "healthy" || server.state === "active") &&
-      server.node_id !== null,
-  );
+  return servers.some(isServerNodeReady);
 }
 
 interface Props {
@@ -40,6 +36,8 @@ interface Props {
   /** 先关闭弹层，再打开登录或切到「我的服务器」。 */
   onLogin: () => void;
   onGoServers: () => void;
+  /** 底部「不会操作？问 AI」：由 App 关闭弹层并在右栏发送固定提示词。 */
+  onAskAi: () => void;
 }
 
 type CopyState = "idle" | "ok" | "fail";
@@ -51,8 +49,11 @@ export function MobileExport({
   onClose,
   onLogin,
   onGoServers,
+  onAskAi,
 }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  /** 下载码与账户态无关：独立读取，失败就留空位。 */
+  const [clientsQr, setClientsQr] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<CopyState>("idle");
   const [confirming, setConfirming] = useState(false);
   const [rotating, setRotating] = useState(false);
@@ -97,6 +98,23 @@ export function MobileExport({
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const source = bridge.mobileClientsQr;
+    if (!source) return;
+    let alive = true;
+    source
+      .call(bridge)
+      .then((data) => {
+        if (alive) setClientsQr(data.qr_data_url);
+      })
+      .catch(() => {
+        // 下载码失败不显示破图：上方两行链接仍是等价入口。
+      });
+    return () => {
+      alive = false;
+    };
+  }, [bridge]);
 
   useEffect(() => {
     if (confirming) {
@@ -266,9 +284,8 @@ export function MobileExport({
   } else {
     side = (
       <>
-        <p className="mobile-export__side-title">你的节点</p>
         <p className="mobile-export__side-note">
-          用手机扫码导入。节点变化会自动更新，不用重扫。
+          节点变化会自动更新，不用重扫。
         </p>
         <div className="mobile-export__actions">
           <button
@@ -350,7 +367,10 @@ export function MobileExport({
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="modal__head">
-          <h2 id="mobile-export-title" className="modal__title">
+          <h2
+            id="mobile-export-title"
+            className="modal__title mobile-export__title"
+          >
             在手机上使用
           </h2>
           <button
@@ -364,43 +384,81 @@ export function MobileExport({
         </header>
 
         <div className="mobile-export__body">
-          <p className="mobile-export__intro">
-            Veyl 不提供手机客户端，用 sing-box 官方客户端。
-          </p>
+          <section className="mobile-export__step">
+            <h3 className="mobile-export__step-head">
+              <span className="mobile-export__step-num num" aria-hidden="true">
+                1
+              </span>
+              安装客户端
+            </h3>
 
-          <div className="mobile-export__downloads">
-            <div className="mobile-export__download">
-              <div>
-                <div className="mobile-export__platform">iPhone</div>
-                <p className="mobile-export__caption">
-                  需要大陆以外的 Apple 账号。
-                </p>
+            <div className="mobile-export__install">
+              <div className="mobile-export__platforms">
+                <div className="mobile-export__download">
+                  <div>
+                    <div className="mobile-export__platform">iPhone</div>
+                    <p className="mobile-export__caption">
+                      需要大陆以外的 Apple 账号。
+                    </p>
+                  </div>
+                  {download(
+                    CLIENTS_URL,
+                    "官方下载页",
+                    "查看 sing-box 的 iPhone 安装说明",
+                  )}
+                </div>
+                <div className="mobile-export__download">
+                  <div className="mobile-export__platform">Android</div>
+                  {download(
+                    CLIENTS_URL,
+                    "官方下载页",
+                    "查看 sing-box 的 Android 安装说明",
+                  )}
+                </div>
               </div>
-              {download(
-                APP_STORE_URL,
-                "App Store",
-                "在 App Store 打开 sing-box",
-              )}
-            </div>
-            <div className="mobile-export__download">
-              <div>
-                <div className="mobile-export__platform">Android</div>
-                <p className="mobile-export__caption">
-                  Google Play、F-Droid 或 GitHub 任选。
-                </p>
-              </div>
-              {download(
-                ANDROID_URL,
-                "官方下载页",
-                "打开 sing-box 官方下载页",
-              )}
-            </div>
-          </div>
 
-          <div className="mobile-export__qr-area">
-            <div className="mobile-export__qr">{qr}</div>
-            <div className="mobile-export__side">{side}</div>
-          </div>
+              <div className="mobile-export__download-qr">
+                <p className="mobile-export__qr-caption">扫码下载</p>
+                <div className="mobile-export__download-qr-box">
+                  {clientsQr ? (
+                    <img
+                      className="mobile-export__download-qr-img"
+                      src={clientsQr}
+                      width={80}
+                      height={80}
+                      alt=""
+                      aria-hidden="true"
+                    />
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="mobile-export__step">
+            <h3 className="mobile-export__step-head">
+              <span className="mobile-export__step-num num" aria-hidden="true">
+                2
+              </span>
+              导入节点
+            </h3>
+
+            <div className="mobile-export__qr-area">
+              <div className="mobile-export__qr-col">
+                <p className="mobile-export__qr-caption">扫码导入</p>
+                <div className="mobile-export__qr">{qr}</div>
+              </div>
+              <div className="mobile-export__side">{side}</div>
+            </div>
+          </section>
+
+          <button
+            type="button"
+            className="btn btn--link mobile-export__ask-ai"
+            onClick={onAskAi}
+          >
+            不会操作？问 AI
+          </button>
         </div>
       </div>
     </div>

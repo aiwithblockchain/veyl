@@ -24,6 +24,7 @@ import type {
   LlmProvider,
   LlmProviderInput,
   LlmProviderTestResult,
+  MobileClientsQrData,
   MobileExportData,
   MyServer,
   MyServerAccount,
@@ -942,6 +943,14 @@ function normalizeMobileExport(raw: unknown): MobileExportData {
   serverDataError();
 }
 
+function normalizeMobileClientsQr(raw: unknown): MobileClientsQrData {
+  if (raw && typeof raw === "object") {
+    const value = (raw as Record<string, unknown>).qr_data_url;
+    if (typeof value === "string") return { qr_data_url: value };
+  }
+  serverDataError();
+}
+
 /** 统一的 invoke 包装：失败一律抛 `BridgeError`，调用方只需要看 code / message。 */
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -1496,6 +1505,10 @@ export class TauriAgentBridge implements AgentBridge {
     return normalizeMobileExport(
       await call<unknown>("mobile_export_rotate", { confirm: true }),
     );
+  }
+
+  async mobileClientsQr(): Promise<MobileClientsQrData> {
+    return normalizeMobileClientsQr(await call<unknown>("mobile_clients_qr"));
   }
 
   async myServerSshCredentials(

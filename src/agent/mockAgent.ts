@@ -25,6 +25,7 @@ import type {
   LlmProvider,
   LlmProviderInput,
   LlmProviderTestResult,
+  MobileClientsQrData,
   MobileExportData,
   MyServerCreateInput,
   NetRepairAction,
@@ -669,6 +670,10 @@ export class MockAgentBridge implements AgentBridge {
 
   async mobileExportRotate(): Promise<MobileExportData> {
     return mockMobileExport(this.myServers.list().servers.length);
+  }
+
+  async mobileClientsQr(): Promise<MobileClientsQrData> {
+    return { qr_data_url: MOCK_MOBILE_QR };
   }
 
   async myServerCancelOrder(orderId: string) {

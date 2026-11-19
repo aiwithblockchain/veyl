@@ -26,3 +26,11 @@ export const ADVANCED_FIELDS = {
   apiProtocol: "API 类型与 Base URL",
   model: "模型选择",
 } as const;
+
+/**
+ * 「在手机上使用」弹层的「问 AI」：逐字固定，只讲安装与导入两步。
+ * 改动等同于改产品文案，需走设计与 PM。
+ */
+export const mobileExportPrompt = `我在 Veyl 的「在手机上使用」里，准备把节点装到手机上。
+请只讲两步：先在 iPhone 或 Android 上安装 sing-box 官方客户端（iPhone 需要大陆以外的 Apple 账号），再用 Veyl 里的二维码导入节点。
+不要给通用教程，只说这两步。`;

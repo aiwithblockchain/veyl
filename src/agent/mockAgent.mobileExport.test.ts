@@ -20,4 +20,10 @@ describe("mock 手机端导出", () => {
     const data = await bridge.mobileExportRotate?.();
     expect(data?.state).toBe("ok");
   });
+
+  it("下载码返回静态 SVG 占位图", async () => {
+    const bridge = new MockAgentBridge();
+    const data = await bridge.mobileClientsQr?.();
+    expect(data?.qr_data_url.startsWith("data:image/svg+xml;base64,")).toBe(true);
+  });
 });
