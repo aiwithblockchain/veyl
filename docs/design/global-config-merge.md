@@ -1,7 +1,7 @@
 # 全局单配置收敛：一个配置、一个节点池
 
 > 日期：2026-11-17
-> 状态：设计定稿，待实现。只出设计与契约影响。
+> 状态：设计定稿；§6 的实现项已落地（2026-11-19 复核），剩 C6 验收待执行。只出设计与契约影响。
 > 上游：`ai-first-product.md` §全局配置与设置 / §全局配置与节点池、`docs/design/stage-quick-toggles.md`、`docs/contracts/commands.md` §3 / §4 / §7.19
 > 触发：产品负责人 2026-11-17 拍板——试用不提前结束、到期硬断开、本批补完全局单配置。
 
@@ -177,7 +177,9 @@ node_attach { source?: "seed"; nodeIds?: string[]; configId?: string }
 
 > **`ConfigList` 也退出**（PM 2026-11-17 与后端对齐后的最终口径，覆盖本节早先的保留建议）：`config_list` 命令保留给 UI 读回唯一配置，模型侧不再有列配置 / 切配置的工具；读配置与节点池统一走 `ConfigDetail`。系统提示词里凡引用 `ConfigList` 的句子要同批改掉。
 
-## 6. 待实现项
+## 6. 实现项与验收
+
+**状态（2026-11-19 复核）**：第 1–5 项均已落地——`node_attach`（`services.rs:211`）、`config_create` 的 `config_exists` 拒绝（`services.rs:5508`）、`config_activate` / `config_delete` 退休返回 `only_config`（`services.rs:5758`）、种子刷新并入全局配置（`merge_seed_into_global`，`services.rs:4025`）、迁移合并（`merge_into_global`，`store/configs.rs:316`）、工具层退出（`tools/mod.rs:168`）、`CONTRACT_VERSION`（`envelope.rs:13`）。**第 6 项 C6 验收尚未执行**。
 
 1. **后端命令**：`node_attach`（含懒创建与错误码）；`config_create` 的 `config_exists` 拒绝；`config_activate` / `config_delete` 的退休返回；`node_import_*` / `node_create` 省略 `configId` 时的懒创建 + 绑定；**`default_profile_refresh` / `CatalogRefresh` 刷新后把新种子节点并入全局配置**（与 `node_attach{source:"seed"}` 同语义，幂等、不改 `current_node_id`）——没有这一步，AI 首次配置选免费节点时无法把节点放进池子。
 2. **后端迁移**（§3.6）：合并配置、按 `merge_key` 合并 issues、处理 `COUNT=1 AND is_active=0`、`layout` 随配置删除；事务内完成、幂等、在 UI 读配置之前。
