@@ -84,6 +84,7 @@ npx wrangler d1 execute veyl-control-plane-dev-4 --remote --env dev --command "U
 | E2 | 60 秒轮询的真实时延与休眠恢复行为 | 依赖系统休眠/唤醒 |
 | E3 | DO 删不掉时整轮的重试 | 需要构造上游 500；已有单测覆盖单台行为 |
 | E4 | 迁移 0008 在既有数据上的兼容 | dev 已应用成功；prod 尚未部署 |
+| E5 | 本地删节点失败（SQLite 写失败）后，如果当场没有重试 | 真机无法稳定构造本地写失败。**已知限制**：此时控制面墓碑已 dismiss，下次列表刷新后墓碑行会消失而节点行仍在，界面上不再有删除入口；出现报错时请**立刻再点一次删除**（dismiss 幂等，重试会继续删本地节点） |
 
 ## 6. 已有自动化证据
 
@@ -96,6 +97,7 @@ npx wrangler d1 execute veyl-control-plane-dev-4 --remote --env dev --command "U
 - 迁移列与 schema 守卫：`test/schema_guard.test.ts`
 - 轮询判定（新变 destroyed / 非当前节点 / 已停过）：`src-tauri/src/agent/server_watch.rs`
 - 墓碑判定、悬挂节点推导、删除后空态、删除失败保行：`src/myservers/tombstones.test.ts`、`src/myservers/useMyServers.test.tsx`、`src/components/MyServerDetail.test.tsx`、`src/App.servers.test.tsx`
+- `node_forget` 删除顺序（dismiss 前置、失败时本地不动、`NOT_FOUND` 视为完成、`source_key` 兜底、删节点失败可重试、当前节点先停隧道）：`src-tauri/src/agent/commands.rs` 的 `node_forget_tests`
 - 不可连接三处入口（主按钮、节点行、次级重连）：`src/components/ConnectionStage.test.tsx`
 
 ## 7. 失败时要给我三样

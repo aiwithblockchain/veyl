@@ -638,9 +638,9 @@ pub async fn my_server_credentials(server_id: String) -> Result<Value, Value> {
 
 /// 用户主动删掉一个本地节点（「余额不足停机」留下的墓碑只能这样清，仅 UI）。
 ///
-/// 删节点行后由外键级联清掉 `config_nodes`、把 `configs.current_node_id` 置 NULL。
-/// 正连着它就先停运行时；跟着删掉指向它的已销毁服务器缓存行，并尽力让控制面
-/// 忽略那条墓碑；最后发 `node-list-changed`。节点本来不存在时幂等返回 `removed: false`。
+/// **顺序是有意的**：先让控制面忽略墓碑，全部成功后才动本地（停运行时 → 删镜像行 →
+/// 删节点 → 发事件）。反过来先删本地的话，断网时控制面的墓碑还在，下次列表又把它拉
+/// 回来，而本地节点已经没了，那一行的删除按钮就永远点不动了。
 #[tauri::command]
 pub async fn node_forget(state: State<'_, Arc<AppState>>, node_id: String) -> Result<Value, Value> {
     let Some(store) = crate::store::global().cloned() else {
@@ -652,32 +652,97 @@ pub async fn node_forget(state: State<'_, Arc<AppState>>, node_id: String) -> Re
         }));
     };
 
+    let state = state.inner().clone();
+    forget_owned_node(
+        &store,
+        &node_id,
+        |server_id: String| async move {
+            crate::control_plane::servers::dismiss(&server_id).await
+        },
+        || async {
+            if super::server_watch::runtime_is_live(&state).await {
+                if let Err(error) = state.services.runtime_stop(false).await {
+                    log::warn!("删除节点前停止运行时失败：{error}");
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// `node_forget` 的可测主体：`dismiss` 与 `pause` 由调用方注入，测试不碰网络与运行时。
+pub(crate) async fn forget_owned_node<D, DF, P, PF>(
+    store: &crate::store::Store,
+    node_id: &str,
+    dismiss: D,
+    pause: P,
+) -> Result<Value, Value>
+where
+    D: Fn(String) -> DF,
+    DF: std::future::Future<Output = Result<(), crate::control_plane::error::CpError>>,
+    P: Fn() -> PF,
+    PF: std::future::Future<Output = ()>,
+{
     // 只允许删自己名下（source = 'owned'）的节点：种子 / 手动节点有别的清理路径，
     // 这个命令只服务于「余额不足停机」留下的墓碑。
-    match {
+    // `source_key` 就是控制面服务器 id：镜像行缺失时也靠它找到要 dismiss 的服务器。
+    let dismiss_ids = {
         let conn = store.conn();
-        crate::store::configs::get_node(&conn, &node_id)
-    } {
-        Ok(Some(node)) if node.source == crate::store::configs::SOURCE_OWNED => {}
-        Ok(None) => return Ok(json!({ "removed": false })),
-        Ok(Some(_)) => {
+        let node = match crate::store::configs::get_node(&conn, node_id) {
+            Ok(Some(node)) => node,
+            Ok(None) => return Ok(json!({ "removed": false })),
+            Err(error) => {
+                return Err(json!({
+                    "code": "INTERNAL",
+                    "message": format!("读取本地节点失败：{error}"),
+                    "retryable": true,
+                    "details": { "reason": "store_error" },
+                }))
+            }
+        };
+        if node.source != crate::store::configs::SOURCE_OWNED {
             return Err(json!({
                 "code": "PRECONDITION_FAILED",
                 "message": "只能删除服务器节点",
                 "retryable": false,
                 "details": { "reason": "not_owned" },
-            }))
+            }));
         }
-        Err(error) => {
-            return Err(json!({
-                "code": "INTERNAL",
-                "message": format!("读取本地节点失败：{error}"),
-                "retryable": true,
-                "details": { "reason": "store_error" },
-            }))
+
+        let mut ids: Vec<String> =
+            crate::store::servers::destroyed_with_node(&conn, node_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|grave| grave.id)
+                .collect();
+        if !node.source_key.is_empty() && !ids.iter().any(|id| id == &node.source_key) {
+            ids.push(node.source_key.clone());
+        }
+        ids
+    };
+
+    // 控制面先落定：任何一台没被忽略都整体失败，本地一行都不动（可重试）。
+    for server_id in &dismiss_ids {
+        match dismiss(server_id.clone()).await {
+            Ok(()) => {}
+            Err(error) if error.code == "NOT_FOUND" => {
+                log::debug!("控制面已没有这台服务器 server={server_id}");
+            }
+            Err(error) => {
+                log::warn!("让控制面忽略墓碑失败 server={server_id}：{}", error.message);
+                return Err(json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                    "code": "UPSTREAM_ERROR",
+                    "message": format!("暂时连不上服务器服务：{}", error.message),
+                    "retryable": true,
+                    "details": { "reason": "dismiss_failed", "server_id": server_id },
+                }));
+            }
         }
     }
 
+    // 控制面已经不再返回这条墓碑，才可以断隧道、删本地。
+    // 当前节点必须在网络往返**之后**再读：期间用户可能刚连上这个节点。
     let connected = {
         let conn = store.conn();
         crate::store::configs::active(&conn)
@@ -685,42 +750,48 @@ pub async fn node_forget(state: State<'_, Arc<AppState>>, node_id: String) -> Re
             .flatten()
             .and_then(|config| config.current_node_id)
             .as_deref()
-            == Some(node_id.as_str())
+            == Some(node_id)
     };
-    if connected && super::server_watch::runtime_is_live(state.inner()).await {
-        if let Err(error) = state.services.runtime_stop(false).await {
-            log::warn!("删除节点前停止运行时失败：{error}");
-        }
+    if connected {
+        pause().await;
     }
 
-    // 先取墓碑行再删节点：删节点会把 `my_servers.node_id` 置 NULL，之后按节点 id 就查不到了。
-    let (removed, graves) = {
+    // 先删节点、成功后再删镜像行：出错时尽量不留半截。镜像行按 `server_id` 删，
+    // 不依赖 `node_id`（删节点会把它置 NULL）。
+    let removed = {
         let conn = store.conn();
-        let graves =
-            crate::store::servers::destroyed_with_node(&conn, &node_id).unwrap_or_default();
-        let removed = crate::store::configs::delete_node(&conn, &node_id).unwrap_or(false);
-        for grave in &graves {
-            if let Err(error) = crate::store::servers::delete(&conn, &grave.id) {
-                log::warn!("删除已销毁服务器缓存行失败：{error}");
+        let removed = match crate::store::configs::delete_node(&conn, node_id) {
+            Ok(removed) => removed,
+            Err(error) => {
+                // 控制面已经忽略墓碑了，这里不能再吞掉：报告可重试的错误，让用户再点一次
+                // （dismiss 幂等，重试会走 NOT_FOUND 分支继续删）。
+                log::warn!("删除本地节点失败 node={node_id}：{error}");
+                return Err(json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                    "code": "INTERNAL",
+                    "message": format!("删除本地节点失败：{error}"),
+                    "retryable": true,
+                    "details": { "reason": "store_error" },
+                }));
+            }
+        };
+        for server_id in &dismiss_ids {
+            match crate::store::servers::get(&conn, server_id) {
+                Ok(Some(row)) if row.state == "destroyed" => {
+                    if let Err(error) = crate::store::servers::delete(&conn, server_id) {
+                        log::warn!("删除已销毁服务器缓存行失败：{error}");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("读取已销毁服务器缓存行失败：{error}"),
             }
         }
-        (removed, graves)
+        removed
     };
 
-    // 控制面尽力而为：通知失败不影响本地删除，下次列表也不会再看到这一行。
-    for grave in &graves {
-        if let Err(error) = crate::control_plane::servers::dismiss(&grave.id).await {
-            log::debug!("忽略墓碑失败 server={}：{}", grave.id, error.message);
-        }
-    }
-
     if removed {
-        crate::seed::emit_node_list_changed(
-            &store,
-            "node_deleted",
-            None,
-            std::slice::from_ref(&node_id),
-        );
+        let changed = [node_id.to_string()];
+        crate::seed::emit_node_list_changed(store, "node_deleted", None, &changed);
     }
     Ok(json!({ "removed": removed }))
 }
@@ -2678,5 +2749,282 @@ mod checkout_command_tests {
         let value = finish_topup(topup(), Ok(())).unwrap();
         assert_eq!(value["topup_id"], "topup_1");
         assert_eq!(value["checkout_url"], "https://checkout.example/session");
+    }
+}
+
+#[cfg(test)]
+mod node_forget_tests {
+    use super::forget_owned_node;
+    use crate::control_plane::error::CpError;
+    use crate::store::configs::{self, NewNode, SOURCE_OWNED};
+    use crate::store::servers::{self, NewMyServer};
+    use crate::store::Store;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    fn seeded(with_mirror: bool) -> Store {
+        let store = Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn();
+            configs::upsert_node(
+                &conn,
+                &NewNode {
+                    id: "nd_local",
+                    name: "Tokyo",
+                    server: "203.0.113.10",
+                    port: 20343,
+                    method: "aes-256-gcm",
+                    password_ref: "node:nd_local",
+                    source: SOURCE_OWNED,
+                    source_key: "srv_1",
+                },
+            )
+            .unwrap();
+            if with_mirror {
+                servers::upsert(
+                    &conn,
+                    &NewMyServer {
+                        id: "srv_1",
+                        provider: "digitalocean",
+                        name: "Tokyo",
+                        region: "sgp1",
+                        plan: "basic",
+                        state: "destroyed",
+                        node_id: Some("nd_local"),
+                        hourly_usd: 0.01,
+                        monthly_usd: 6.0,
+                        daily_price_cents: 20,
+                        transfer_gib: 0,
+                        paid_until: 0,
+                        billing_state: "active",
+                        created_at: 1,
+                    },
+                )
+                .unwrap();
+            }
+        }
+        store
+    }
+
+    /// dismiss 失败必须整体失败：节点行、镜像行、运行时都原地不动，错误可重试。
+    #[tokio::test]
+    async fn a_failed_dismiss_leaves_the_node_and_the_mirror_row_in_place() {
+        let store = seeded(true);
+        let pauses = Arc::new(AtomicUsize::new(0));
+        let pauses_in = Arc::clone(&pauses);
+
+        let error = forget_owned_node(
+            &store,
+            "nd_local",
+            |server_id: String| async move {
+                Err(CpError::new(
+                    "UPSTREAM_ERROR",
+                    format!("dismiss {server_id} 失败"),
+                    true,
+                    json!({ "reason": "provider_unavailable" }),
+                ))
+            },
+            move || {
+                let pauses = Arc::clone(&pauses_in);
+                async move {
+                    pauses.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error["code"], "UPSTREAM_ERROR");
+        assert_eq!(error["details"]["reason"], "dismiss_failed");
+        assert_eq!(error["details"]["server_id"], "srv_1");
+        assert_eq!(error["retryable"], true);
+        assert_eq!(pauses.load(Ordering::SeqCst), 0, "失败时不能先断开隧道");
+
+        let conn = store.conn();
+        assert!(
+            configs::get_node(&conn, "nd_local").unwrap().is_some(),
+            "dismiss 失败时节点行必须还在"
+        );
+        assert!(
+            servers::get(&conn, "srv_1").unwrap().is_some(),
+            "dismiss 失败时镜像行必须还在"
+        );
+    }
+
+    /// 控制面回 NOT_FOUND 表示已经没有这条墓碑，按成功处理，本地照常删干净。
+    #[tokio::test]
+    async fn a_not_found_dismiss_still_removes_the_node_and_the_mirror_row() {
+        let store = seeded(true);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_in = Arc::clone(&seen);
+
+        let value = forget_owned_node(
+            &store,
+            "nd_local",
+            move |server_id: String| {
+                let seen = Arc::clone(&seen_in);
+                async move {
+                    seen.lock().unwrap().push(server_id);
+                    Err(CpError::new("NOT_FOUND", "not found", false, json!({})))
+                }
+            },
+            || async {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value["removed"], true);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["srv_1".to_string()],
+            "镜像行与 source_key 是同一台，只能 dismiss 一次"
+        );
+
+        let conn = store.conn();
+        assert!(configs::get_node(&conn, "nd_local").unwrap().is_none());
+        assert!(servers::get(&conn, "srv_1").unwrap().is_none());
+    }
+
+    /// 镜像行缺失时靠 `node.source_key` 找到要 dismiss 的服务器。
+    #[tokio::test]
+    async fn a_missing_mirror_row_falls_back_to_the_node_source_key() {
+        let store = seeded(false);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_in = Arc::clone(&seen);
+
+        let value = forget_owned_node(
+            &store,
+            "nd_local",
+            move |server_id: String| {
+                let seen = Arc::clone(&seen_in);
+                async move {
+                    seen.lock().unwrap().push(server_id);
+                    Ok(())
+                }
+            },
+            || async {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value["removed"], true);
+        assert_eq!(*seen.lock().unwrap(), vec!["srv_1".to_string()]);
+        let conn = store.conn();
+        assert!(configs::get_node(&conn, "nd_local").unwrap().is_none());
+    }
+
+    /// 建好活动配置并把节点挂进去，但 `current_node_id` 先留空——
+    /// 「连接发生在网络往返期间」由测试里的 dismiss 闭包制造。
+    fn make_active_config(store: &Store) {
+        let conn = store.conn();
+        let dns = json!({ "mode": "auto", "local": [], "remote": [] });
+        let excludes = json!([]);
+        configs::create(
+            &conn,
+            &crate::store::NewConfig {
+                id: "cfg_1",
+                name: "A",
+                connection_mode: configs::CONNECTION_SYSTEM_PROXY,
+                routing_mode: configs::ROUTING_PROXY_ALL,
+                listen_port: Some(7890),
+                dns: &dns,
+                tun_excludes: &excludes,
+            },
+        )
+        .unwrap();
+        configs::activate(&conn, "cfg_1").unwrap();
+        configs::attach_node(&conn, "cfg_1", "nd_local").unwrap();
+    }
+
+    /// 控制面已通过、删本地节点却失败时必须报可重试错误，不能假报 `removed: false`
+    /// 让界面乐观收起——否则墓碑已 dismiss，行和节点会各留一半。
+    #[tokio::test]
+    async fn a_failed_local_delete_reports_a_retryable_error_and_keeps_the_node() {
+        let store = seeded(true);
+        {
+            let conn = store.conn();
+            conn.execute_batch(
+                "CREATE TRIGGER node_forget_block BEFORE DELETE ON nodes
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .unwrap();
+        }
+
+        let error = forget_owned_node(
+            &store,
+            "nd_local",
+            |_server_id: String| async { Ok(()) },
+            || async {},
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error["code"], "INTERNAL");
+        assert_eq!(error["details"]["reason"], "store_error");
+        assert_eq!(error["retryable"], true);
+
+        let conn = store.conn();
+        assert!(
+            configs::get_node(&conn, "nd_local").unwrap().is_some(),
+            "删除失败时节点行必须还在"
+        );
+        assert!(
+            servers::get(&conn, "srv_1").unwrap().is_some(),
+            "先删节点、后删镜像行：节点失败时镜像行不动"
+        );
+    }
+
+    /// 当前节点是在 dismiss 往返**期间**才连上的，也必须先停隧道再删。
+    /// 起点 `current_node_id` 为空：把「重读」挪回 dismiss 之前，这条测试就会失败。
+    #[tokio::test]
+    async fn a_node_connected_during_the_dismiss_still_stops_the_runtime() {
+        let store = seeded(true);
+        make_active_config(&store);
+        let store_ref = &store;
+        let pauses = Arc::new(AtomicUsize::new(0));
+
+        let pauses_in = Arc::clone(&pauses);
+        let value = forget_owned_node(
+            &store,
+            "nd_local",
+            |_server_id: String| async move {
+                // 用户就在这次网络往返里连上了这个节点。
+                let conn = store_ref.conn();
+                configs::update(
+                    &conn,
+                    "cfg_1",
+                    &configs::ConfigPatch {
+                        current_node_id: Some(Some("nd_local".into())),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                Ok(())
+            },
+            move || {
+                let pauses = Arc::clone(&pauses_in);
+                async move {
+                    let still_there = {
+                        let conn = store_ref.conn();
+                        configs::get_node(&conn, "nd_local").unwrap().is_some()
+                    };
+                    assert!(still_there, "pause 必须早于删节点");
+                    pauses.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value["removed"], true);
+        assert_eq!(pauses.load(Ordering::SeqCst), 1, "当前节点必须停一次隧道");
+        let conn = store.conn();
+        assert!(configs::get_node(&conn, "nd_local").unwrap().is_none());
+        assert_eq!(
+            configs::active(&conn).unwrap().unwrap().current_node_id,
+            None,
+            "删节点后 current_node_id 由外键置 NULL"
+        );
     }
 }
