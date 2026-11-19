@@ -2108,22 +2108,427 @@ mod runtime_availability_tests {
     }
 }
 
+/// 检查项结论。`Skipped` 是「当前状态不适用、没检查」，**不是失败**
+/// （`tools.md` §4.13）：不计入 `summary.failed`，也不带 remediation / action。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckStatus {
+    Ok,
+    Failed,
+    Skipped,
+}
+
+impl CheckStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
 fn diag_check(
     name: &str,
     group: &str,
-    ok: bool,
+    status: CheckStatus,
     detail: String,
     remediation: Option<&str>,
     action: Option<Value>,
 ) -> Value {
+    // `ok` 是兼容字段，恒等于 `status == "ok"`：只在这一处推导，消费方读两个字段
+    // 不会得到互相矛盾的结论。
+    debug_assert!(
+        status != CheckStatus::Skipped || (remediation.is_none() && action.is_none()),
+        "{name}: skipped 项不得带 remediation / action"
+    );
     json!({
         "name": name,
         "group": group,
-        "ok": ok,
+        "status": status.as_str(),
+        "ok": status == CheckStatus::Ok,
         "detail": detail,
         "remediation": remediation,
         "action": action,
     })
+}
+
+/// 诊断看到的连接情况。四项与连接有关的检查按它选结论与文案：
+/// 未连接时没有可判的对象（`skipped`，不是失败），TUN 与代理各有自己的检查面。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiagConnection {
+    /// 没连接，也没有连接在途。
+    Idle,
+    /// 启动 / 重启 / 停止途中：现在读到的健康值可能是上一轮的。
+    Pending,
+    /// 本机代理（`RuntimeManager` 的 sing-box）。
+    Proxy,
+    /// 全部流量接管（helper 里的 sing-box）。
+    Tun,
+}
+
+/// 从**统一快照**判定连接情况。调用方必须传 `connection_status()` 的结果：
+/// TUN 的进程不归 `RuntimeManager` 管，用 `manager.status()` 会把 TUN 连接说成
+/// 「未连接」——`network.coverage` 就踩过这个坑。
+fn diag_connection(status: &crate::runtime::RuntimeStatus, launching: bool) -> DiagConnection {
+    use crate::runtime::{RuntimeMode, RuntimeState};
+    // 途中状态先拦掉：`RuntimeStatus::tun_pending(Starting)` 同样带 `mode = Tun`，
+    // 但那时隧道进程还没起来，读它的 process / health 会说假话。
+    if matches!(
+        status.state,
+        RuntimeState::Starting | RuntimeState::Restarting | RuntimeState::Stopping
+    ) {
+        return DiagConnection::Pending;
+    }
+    // 已在跑的 TUN 连接：`connection_status()` 只在 `TunSession::status()` 报
+    // Running 时才拼这个快照，所以它说明隧道进程在跑。
+    if status.state == RuntimeState::Running && matches!(status.mode, Some(RuntimeMode::Tun)) {
+        return DiagConnection::Tun;
+    }
+    if matches!(status.state, RuntimeState::Running | RuntimeState::Degraded) {
+        return DiagConnection::Proxy;
+    }
+    if launching {
+        return DiagConnection::Pending;
+    }
+    DiagConnection::Idle
+}
+
+/// `app.process_alive`：判据是进程本身。
+/// 代理模式看 manager 的健康快照，TUN 看 `TunSession`（`status()` 与复核都会
+/// 问 helper）——**不是**「连接成立就算进程活着」。
+fn process_alive_check(connection: DiagConnection, alive: bool) -> Value {
+    match connection {
+        DiagConnection::Idle => diag_check(
+            "app.process_alive",
+            "app",
+            CheckStatus::Skipped,
+            "未连接，未检查进程".into(),
+            None,
+            None,
+        ),
+        DiagConnection::Pending => diag_check(
+            "app.process_alive",
+            "app",
+            CheckStatus::Skipped,
+            "正在连接，稍后再看".into(),
+            None,
+            None,
+        ),
+        DiagConnection::Proxy => diag_check(
+            "app.process_alive",
+            "app",
+            if alive {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
+            if alive {
+                "sing-box 进程存活".into()
+            } else {
+                "进程没在运行".into()
+            },
+            (!alive).then_some("重新连接后再试"),
+            (!alive).then(|| json!({ "kind": "reconnect" })),
+        ),
+        DiagConnection::Tun => diag_check(
+            "app.process_alive",
+            "app",
+            if alive {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
+            if alive {
+                "隧道进程存活".into()
+            } else {
+                "隧道进程没在运行".into()
+            },
+            (!alive).then_some("重新连接后再试"),
+            (!alive).then(|| json!({ "kind": "reconnect" })),
+        ),
+    }
+}
+
+/// `app.config_valid`：运行中的进程是不是带着一套已知配置。
+/// TUN 快照不填配置摘要（`RuntimeStatus::tun`），用启动时记下的配置作证；
+/// 没有摘要也没有记录时如实报 `skipped`，不说「缺配置」。
+fn config_valid_check(
+    connection: DiagConnection,
+    status: &crate::runtime::RuntimeStatus,
+) -> Value {
+    match connection {
+        DiagConnection::Idle => diag_check(
+            "app.config_valid",
+            "app",
+            CheckStatus::Skipped,
+            "未连接，无活动配置".into(),
+            None,
+            None,
+        ),
+        DiagConnection::Pending => diag_check(
+            "app.config_valid",
+            "app",
+            CheckStatus::Skipped,
+            "正在连接，稍后再看".into(),
+            None,
+            None,
+        ),
+        DiagConnection::Tun => {
+            let detail = status
+                .config_name
+                .clone()
+                .map(|name| format!("配置已应用：{name}"));
+            if status.config_id.is_none() && detail.is_none() {
+                return diag_check(
+                    "app.config_valid",
+                    "app",
+                    CheckStatus::Skipped,
+                    "接管模式暂未记录配置信息".into(),
+                    None,
+                    None,
+                );
+            }
+            diag_check(
+                "app.config_valid",
+                "app",
+                CheckStatus::Ok,
+                detail.unwrap_or_else(|| "配置已应用".into()),
+                None,
+                None,
+            )
+        }
+        DiagConnection::Proxy => match status.config_hash.clone() {
+            Some(hash) => diag_check(
+                "app.config_valid",
+                "app",
+                CheckStatus::Ok,
+                hash,
+                None,
+                None,
+            ),
+            None => diag_check(
+                "app.config_valid",
+                "app",
+                CheckStatus::Failed,
+                "缺少配置摘要".into(),
+                None,
+                None,
+            ),
+        },
+    }
+}
+
+/// `app.clash_api`：只有端点、没有探测通道的地方不下结论。
+fn clash_api_check(connection: DiagConnection, available: bool) -> Value {
+    match connection {
+        DiagConnection::Idle => diag_check(
+            "app.clash_api",
+            "app",
+            CheckStatus::Skipped,
+            "未连接".into(),
+            None,
+            None,
+        ),
+        DiagConnection::Pending => diag_check(
+            "app.clash_api",
+            "app",
+            CheckStatus::Skipped,
+            "正在连接".into(),
+            None,
+            None,
+        ),
+        // TUN 的控制面端点固定 `clash_api: false`（没有探测通道），不能说自己坏。
+        DiagConnection::Tun => diag_check(
+            "app.clash_api",
+            "app",
+            CheckStatus::Skipped,
+            "接管模式下不检查控制面".into(),
+            None,
+            None,
+        ),
+        DiagConnection::Proxy => diag_check(
+            "app.clash_api",
+            "app",
+            if available {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
+            if available {
+                "控制面可用".into()
+            } else {
+                "控制面不可用".into()
+            },
+            (!available).then_some("重新连接后再试"),
+            None,
+        ),
+    }
+}
+
+/// `app.data_plane`：TUN 与代理都来自真实探测（TUN 侧连两次失败才翻）。
+fn data_plane_check(connection: DiagConnection, up: bool) -> Value {
+    match connection {
+        DiagConnection::Idle => diag_check(
+            "app.data_plane",
+            "app",
+            CheckStatus::Skipped,
+            "未连接".into(),
+            None,
+            None,
+        ),
+        DiagConnection::Pending => diag_check(
+            "app.data_plane",
+            "app",
+            CheckStatus::Skipped,
+            "正在连接".into(),
+            None,
+            None,
+        ),
+        DiagConnection::Tun => diag_check(
+            "app.data_plane",
+            "app",
+            if up {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
+            if up {
+                "流量探测正常".into()
+            } else {
+                "连续两次探测不通".into()
+            },
+            (!up).then_some("换个节点或稍后重试"),
+            None,
+        ),
+        DiagConnection::Proxy => diag_check(
+            "app.data_plane",
+            "app",
+            if up {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
+            if up {
+                "数据面可用".into()
+            } else {
+                "数据面不可用".into()
+            },
+            (!up).then_some("换个节点或稍后重试"),
+            None,
+        ),
+    }
+}
+
+/// `network.exit_ip`：TUN 不采集出口 IP；代理模式下还没探测到也算 `skipped`。
+fn exit_ip_check(connection: DiagConnection, exit_ip: Option<&str>) -> Value {
+    match connection {
+        DiagConnection::Idle => diag_check(
+            "network.exit_ip",
+            "network",
+            CheckStatus::Skipped,
+            "未连接".into(),
+            None,
+            None,
+        ),
+        DiagConnection::Pending => diag_check(
+            "network.exit_ip",
+            "network",
+            CheckStatus::Skipped,
+            "正在连接".into(),
+            None,
+            None,
+        ),
+        DiagConnection::Tun => diag_check(
+            "network.exit_ip",
+            "network",
+            CheckStatus::Skipped,
+            "接管模式不采集出口 IP".into(),
+            None,
+            None,
+        ),
+        DiagConnection::Proxy => match exit_ip {
+            Some(ip) => diag_check(
+                "network.exit_ip",
+                "network",
+                CheckStatus::Ok,
+                format!("出口 IP {ip}"),
+                None,
+                None,
+            ),
+            None => diag_check(
+                "network.exit_ip",
+                "network",
+                CheckStatus::Skipped,
+                "还没探测到".into(),
+                None,
+                None,
+            ),
+        },
+    }
+}
+
+/// `system.proxy_services`：哪些系统服务挂着代理。
+///
+/// 只有代理模式才拿「必须指向本机端口」判它。TUN 不走系统代理，没有残留设置就是
+/// `skipped`；但指针留在未监听的本地端口仍是真问题（残留设置），照样 `failed`。
+fn proxy_services_check(
+    connection: DiagConnection,
+    endpoints: &[String],
+    expected: Option<&str>,
+    dead_loopback: bool,
+) -> Value {
+    let (status, detail) = if matches!(connection, DiagConnection::Tun) {
+        if dead_loopback {
+            (
+                CheckStatus::Failed,
+                "系统代理指向未监听的本地端口".to_string(),
+            )
+        } else if endpoints.is_empty() {
+            (CheckStatus::Skipped, "接管模式不用系统代理".to_string())
+        } else {
+            (
+                CheckStatus::Skipped,
+                format!(
+                    "接管模式不用系统代理，{} 个服务另有代理设置",
+                    endpoints.len()
+                ),
+            )
+        }
+    } else if matches!(connection, DiagConnection::Proxy) {
+        let matches_runtime = expected
+            .map(|expected| !endpoints.is_empty() && endpoints.iter().all(|item| item == expected))
+            .unwrap_or(false);
+        (
+            if matches_runtime && !dead_loopback {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
+            if endpoints.is_empty() {
+                "系统代理未接管".to_string()
+            } else {
+                format!("{} 个服务指向 {}", endpoints.len(), endpoints[0])
+            },
+        )
+    } else if dead_loopback {
+        (
+            CheckStatus::Failed,
+            "系统代理指向未监听的本地端口".to_string(),
+        )
+    } else {
+        (
+            CheckStatus::Ok,
+            format!("{} 个服务启用了代理", endpoints.len()),
+        )
+    };
+    diag_check(
+        "system.proxy_services",
+        "system",
+        status,
+        detail,
+        (status == CheckStatus::Failed).then_some("点『恢复网络』撤掉代理后再试"),
+        (status == CheckStatus::Failed).then(|| json!({ "kind": "restore_network" })),
+    )
 }
 
 /// `network.coverage`：当前接管方式覆盖哪些流量。
@@ -2143,7 +2548,7 @@ fn network_coverage_check(connected: bool, tun: bool) -> Value {
         return diag_check(
             "network.coverage",
             "network",
-            true,
+            CheckStatus::Ok,
             "未连接，先连接再检查覆盖".into(),
             None,
             None,
@@ -2153,7 +2558,7 @@ fn network_coverage_check(connected: bool, tun: bool) -> Value {
         return diag_check(
             "network.coverage",
             "network",
-            true,
+            CheckStatus::Ok,
             "现在接管全部流量，TCP / UDP / QUIC 都经过 VPN".into(),
             None,
             None,
@@ -2162,7 +2567,7 @@ fn network_coverage_check(connected: bool, tun: bool) -> Value {
     diag_check(
         "network.coverage",
         "network",
-        false,
+        CheckStatus::Failed,
         // 说的是「覆盖范围不同」，不是「当前配置不好」：本机代理是产品的默认选择。
         // 这个结论只能用来解释「UDP / QUIC 应用不通」，不能当成反机器人挑战的解释。
         "覆盖范围不同：现在只为本机软件提供代理，浏览器 HTTP/3 不经过 VPN".into(),
@@ -2178,6 +2583,7 @@ mod diag_coverage_tests {
     #[test]
     fn proxy_mode_reports_partial_coverage_and_offers_the_switch() {
         let check = network_coverage_check(true, false);
+        assert_eq!(check["status"], "failed", "{check}");
         assert_eq!(check["ok"], false, "{check}");
         assert_eq!(check["action"]["kind"], "switch_mode", "{check}");
         assert_eq!(check["action"]["to"], "tun", "{check}");
@@ -2187,6 +2593,7 @@ mod diag_coverage_tests {
     #[test]
     fn tun_mode_is_full_coverage_without_an_action() {
         let check = network_coverage_check(true, true);
+        assert_eq!(check["status"], "ok", "{check}");
         assert_eq!(check["ok"], true, "{check}");
         assert!(check["action"].is_null(), "{check}");
         assert!(check["detail"].as_str().unwrap().contains("QUIC"), "{check}");
@@ -2195,8 +2602,199 @@ mod diag_coverage_tests {
     #[test]
     fn disconnected_asks_to_connect_first() {
         let check = network_coverage_check(false, false);
+        // 契约 §4.13 的覆盖表：未连接仍是 ok（「先连接」不是故障）。
+        assert_eq!(check["status"], "ok", "{check}");
         assert_eq!(check["ok"], true, "{check}");
         assert!(check["detail"].as_str().unwrap().contains("先连接"), "{check}");
+    }
+}
+
+/// 四项按连接状态分流的检查：`tools.md` §4.13 的「各模式适用表」就是这张表。
+/// 字面量全部来自契约/PM 定稿，改字之前先改契约。
+#[cfg(test)]
+mod diag_connection_tests {
+    use super::*;
+
+    fn detail(check: &Value) -> &str {
+        check["detail"].as_str().unwrap_or("")
+    }
+
+    fn assert_no_advice(check: &Value) {
+        assert!(
+            check["remediation"].is_null() && check["action"].is_null(),
+            "skipped 项不得带建议或动作：{check}"
+        );
+    }
+
+    #[test]
+    fn status_and_ok_never_disagree() {
+        for status in [CheckStatus::Ok, CheckStatus::Failed, CheckStatus::Skipped] {
+            let check = diag_check("app.version", "app", status, "x".into(), None, None);
+            assert_eq!(check["status"], status.as_str(), "{check}");
+            assert_eq!(check["ok"], status == CheckStatus::Ok, "{check}");
+        }
+    }
+
+    #[test]
+    fn disconnected_is_not_checked_rather_than_broken() {
+        let process = process_alive_check(DiagConnection::Idle, false);
+        assert_eq!(process["status"], "skipped", "{process}");
+        assert_eq!(detail(&process), "未连接，未检查进程");
+        for check in [
+            clash_api_check(DiagConnection::Idle, false),
+            data_plane_check(DiagConnection::Idle, false),
+            exit_ip_check(DiagConnection::Idle, None),
+        ] {
+            assert_eq!(check["status"], "skipped", "{check}");
+            assert_eq!(detail(&check), "未连接");
+            assert_no_advice(&check);
+        }
+        assert_no_advice(&process);
+    }
+
+    #[test]
+    fn connecting_is_waited_out_not_diagnosed() {
+        let process = process_alive_check(DiagConnection::Pending, false);
+        assert_eq!(process["status"], "skipped", "{process}");
+        assert_eq!(detail(&process), "正在连接，稍后再看");
+        for check in [
+            clash_api_check(DiagConnection::Pending, false),
+            data_plane_check(DiagConnection::Pending, false),
+            exit_ip_check(DiagConnection::Pending, None),
+        ] {
+            assert_eq!(check["status"], "skipped", "{check}");
+            assert_eq!(detail(&check), "正在连接");
+            assert_no_advice(&check);
+        }
+        assert_no_advice(&process);
+    }
+
+    #[test]
+    fn proxy_mode_reports_the_real_health_values() {
+        assert_eq!(
+            detail(&process_alive_check(DiagConnection::Proxy, true)),
+            "sing-box 进程存活"
+        );
+        let dead = process_alive_check(DiagConnection::Proxy, false);
+        assert_eq!(dead["status"], "failed", "{dead}");
+        assert_eq!(detail(&dead), "进程没在运行");
+        assert_eq!(dead["action"]["kind"], "reconnect", "{dead}");
+
+        let clash = clash_api_check(DiagConnection::Proxy, false);
+        assert_eq!(clash["status"], "failed", "{clash}");
+        assert_eq!(detail(&clash), "控制面不可用");
+        assert_eq!(clash["remediation"], "重新连接后再试", "{clash}");
+
+        assert_eq!(
+            detail(&data_plane_check(DiagConnection::Proxy, true)),
+            "数据面可用"
+        );
+
+        let ip = exit_ip_check(DiagConnection::Proxy, Some("203.0.113.7"));
+        assert_eq!(ip["status"], "ok", "{ip}");
+        assert_eq!(detail(&ip), "出口 IP 203.0.113.7");
+        // 还没探测到 = 没检查，不是失败。
+        let unknown = exit_ip_check(DiagConnection::Proxy, None);
+        assert_eq!(unknown["status"], "skipped", "{unknown}");
+        assert_eq!(detail(&unknown), "还没探测到");
+        assert_no_advice(&unknown);
+    }
+
+    #[test]
+    fn tun_mode_skips_what_it_cannot_check() {
+        assert_eq!(
+            detail(&process_alive_check(DiagConnection::Tun, true)),
+            "隧道进程存活"
+        );
+        let clash = clash_api_check(DiagConnection::Tun, false);
+        assert_eq!(clash["status"], "skipped", "{clash}");
+        assert_eq!(detail(&clash), "接管模式下不检查控制面");
+
+        let plane = data_plane_check(DiagConnection::Tun, false);
+        assert_eq!(plane["status"], "failed", "{plane}");
+        assert_eq!(detail(&plane), "连续两次探测不通");
+
+        // 出口 IP 有值也不能在 TUN 下报：接管模式根本不采集。
+        let ip = exit_ip_check(DiagConnection::Tun, Some("203.0.113.7"));
+        assert_eq!(ip["status"], "skipped", "{ip}");
+        assert_eq!(detail(&ip), "接管模式不采集出口 IP");
+        assert_no_advice(&ip);
+    }
+
+    /// 启动中的 TUN 快照同样是 `mode = Tun`，但那时进程还没起来：
+    /// 必须先判途中状态，否则会报「隧道进程没在运行」。
+    #[test]
+    fn a_launching_tunnel_is_pending_not_running() {
+        let status = crate::runtime::RuntimeStatus::tun_pending(
+            crate::runtime::RuntimeState::Starting,
+            Some("cfg_tun".into()),
+            None,
+        );
+        assert_eq!(diag_connection(&status, false), DiagConnection::Pending);
+    }
+
+    /// TUN 不走系统代理：无残留设置是 skipped，死指针仍是 failed。
+    #[test]
+    fn the_tunnel_does_not_judge_the_system_proxy_but_catches_dead_pointers() {
+        let none: Vec<String> = Vec::new();
+        let check = proxy_services_check(DiagConnection::Tun, &none, None, false);
+        assert_eq!(check["status"], "skipped", "{check}");
+        assert_eq!(detail(&check), "接管模式不用系统代理");
+        assert_no_advice(&check);
+
+        let others = vec!["127.0.0.1:1080".to_string()];
+        let check = proxy_services_check(DiagConnection::Tun, &others, None, false);
+        assert_eq!(check["status"], "skipped", "{check}");
+        assert_eq!(detail(&check), "接管模式不用系统代理，1 个服务另有代理设置");
+
+        let check = proxy_services_check(DiagConnection::Tun, &others, None, true);
+        assert_eq!(check["status"], "failed", "{check}");
+        assert_eq!(detail(&check), "系统代理指向未监听的本地端口");
+        assert_eq!(check["action"]["kind"], "restore_network", "{check}");
+    }
+
+    /// 代理模式下每个服务都得指向本次的真实端口，否则算失败。
+    #[test]
+    fn proxy_mode_requires_every_service_to_point_at_our_port() {
+        let ours = vec!["127.0.0.1:7890".to_string()];
+        let check = proxy_services_check(
+            DiagConnection::Proxy,
+            &ours,
+            Some("127.0.0.1:7890"),
+            false,
+        );
+        assert_eq!(check["status"], "ok", "{check}");
+
+        let wrong = vec!["127.0.0.1:1080".to_string()];
+        let check = proxy_services_check(
+            DiagConnection::Proxy,
+            &wrong,
+            Some("127.0.0.1:7890"),
+            false,
+        );
+        assert_eq!(check["status"], "failed", "{check}");
+        assert_eq!(check["action"]["kind"], "restore_network", "{check}");
+    }
+
+    /// 文案禁区（契约 §4.13）：未连接 / 连接中不得说「未运行」「不可用」，
+    /// TUN 下不得说「sing-box 进程未运行」。
+    #[test]
+    fn the_forbidden_wording_never_appears() {
+        for connection in [DiagConnection::Idle, DiagConnection::Pending] {
+            for check in [
+                process_alive_check(connection, false),
+                clash_api_check(connection, false),
+                data_plane_check(connection, false),
+                exit_ip_check(connection, None),
+            ] {
+                let text = detail(&check);
+                assert!(!text.contains("未运行"), "{check}");
+                assert!(!text.contains("不可用"), "{check}");
+            }
+        }
+        let tun = process_alive_check(DiagConnection::Tun, false);
+        assert!(!detail(&tun).contains("sing-box"), "{tun}");
+        assert_eq!(detail(&tun), "隧道进程没在运行");
     }
 }
 
@@ -2996,6 +3594,15 @@ impl WiredServices {
     async fn network_coverage_for(&self) -> Value {
         let connection = self.connection_state().await;
         network_coverage_check(connection.connected, connection.tun)
+    }
+
+    /// 诊断的连接判定：**必须**走 `connection_status()`（TUN 优先的统一快照）。
+    /// 用 `manager.status()` 会把 TUN 连接说成「未连接」，四项检查全部说假话——
+    /// 这就是把取源收成一个方法的原因，也便于用例直接锁住它。
+    async fn diag_connection_snapshot(&self) -> (crate::runtime::RuntimeStatus, DiagConnection) {
+        let status = self.connection_status().await;
+        let connection = diag_connection(&status, self.tun.is_launching());
+        (status, connection)
     }
 
     fn route_state_json(
@@ -6763,11 +7370,8 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn diag_run(&self, include_logs: bool) -> anyhow::Result<Value> {
-        let status = self.manager.status().await;
-        let running = matches!(
-            status.state,
-            crate::runtime::RuntimeState::Running | crate::runtime::RuntimeState::Degraded
-        );
+        let (status, connection) = self.diag_connection_snapshot().await;
+        let running = matches!(connection, DiagConnection::Proxy | DiagConnection::Tun);
         let available_runtime = self.available_runtime().await;
         let available = available_runtime.is_some();
         let net = tokio::task::spawn_blocking(crate::netcfg::read)
@@ -6786,7 +7390,11 @@ impl VpnToolServices for WiredServices {
         checks.push(diag_check(
             "app.runtime_installed",
             "app",
-            available,
+            if available {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
             match &available_runtime {
                 Some((version, source)) => {
                     format!("运行时可用 {version}（{}）", runtime_source_label(source))
@@ -6800,22 +7408,7 @@ impl VpnToolServices for WiredServices {
             },
             None,
         ));
-        checks.push(diag_check(
-            "app.process_alive",
-            "app",
-            status.health.process,
-            if status.health.process {
-                "sing-box 进程存活".into()
-            } else {
-                "sing-box 进程未运行".into()
-            },
-            None,
-            if running && !status.health.process {
-                Some(json!({ "kind": "reconnect" }))
-            } else {
-                None
-            },
-        ));
+        checks.push(process_alive_check(connection, status.health.process));
         let version = status
             .upstream_version
             .clone()
@@ -6823,7 +7416,11 @@ impl VpnToolServices for WiredServices {
         checks.push(diag_check(
             "app.version",
             "app",
-            version.is_some(),
+            if version.is_some() {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
             version
                 .clone()
                 .map(|value| format!("运行时版本 {value}"))
@@ -6831,53 +7428,9 @@ impl VpnToolServices for WiredServices {
             None,
             None,
         ));
-        checks.push(diag_check(
-            "app.config_valid",
-            "app",
-            !running || status.config_hash.is_some(),
-            if running {
-                status
-                    .config_hash
-                    .clone()
-                    .unwrap_or_else(|| "缺少配置摘要".into())
-            } else {
-                "未连接，无活动配置".into()
-            },
-            None,
-            None,
-        ));
-        checks.push(diag_check(
-            "app.clash_api",
-            "app",
-            !running || status.health.clash_api,
-            if status.health.clash_api {
-                "控制面可用".into()
-            } else {
-                "控制面不可用".into()
-            },
-            if running && !status.health.clash_api {
-                Some("重新连接后再试")
-            } else {
-                None
-            },
-            None,
-        ));
-        checks.push(diag_check(
-            "app.data_plane",
-            "app",
-            !running || status.health.data_plane,
-            if status.health.data_plane {
-                "数据面可用".into()
-            } else {
-                "数据面不可用".into()
-            },
-            if running && !status.health.data_plane {
-                Some("换个节点或稍后重试")
-            } else {
-                None
-            },
-            None,
-        ));
+        checks.push(config_valid_check(connection, &status));
+        checks.push(clash_api_check(connection, status.health.clash_api));
+        checks.push(data_plane_check(connection, status.health.data_plane));
 
         match net.as_ref() {
             Some(net) => {
@@ -6898,47 +7451,21 @@ impl VpnToolServices for WiredServices {
                     let port: u16 = port.parse().unwrap_or(0);
                     loopback && !net.listeners.iter().any(|listener| listener.port == port)
                 });
-                let (ok, detail) = if running {
-                    let matches_runtime = expected
-                        .as_ref()
-                        .map(|expected| {
-                            !endpoints.is_empty() && endpoints.iter().all(|item| item == expected)
-                        })
-                        .unwrap_or(false);
-                    (
-                        matches_runtime && !dead_loopback,
-                        if endpoints.is_empty() {
-                            "系统代理未接管".to_string()
-                        } else {
-                            format!("{} 个服务指向 {}", endpoints.len(), endpoints[0])
-                        },
-                    )
-                } else if dead_loopback {
-                    (false, "系统代理指向未监听的本地端口".to_string())
-                } else {
-                    (true, format!("{} 个服务启用了代理", endpoints.len()))
-                };
-                checks.push(diag_check(
-                    "system.proxy_services",
-                    "system",
-                    ok,
-                    detail,
-                    if ok {
-                        None
-                    } else {
-                        Some("点『恢复网络』撤掉代理后再试")
-                    },
-                    if ok {
-                        None
-                    } else {
-                        Some(json!({ "kind": "restore_network" }))
-                    },
+                checks.push(proxy_services_check(
+                    connection,
+                    &endpoints,
+                    expected.as_deref(),
+                    dead_loopback,
                 ));
 
                 checks.push(diag_check(
                     "system.dns",
                     "system",
-                    net.dns.resolvable,
+                    if net.dns.resolvable {
+                        CheckStatus::Ok
+                    } else {
+                        CheckStatus::Failed
+                    },
                     format!(
                         "{} 个解析器，{} {}",
                         net.dns.servers.len(),
@@ -6965,7 +7492,11 @@ impl VpnToolServices for WiredServices {
                 checks.push(diag_check(
                     "system.default_route",
                     "system",
-                    route_ok,
+                    if route_ok {
+                        CheckStatus::Ok
+                    } else {
+                        CheckStatus::Failed
+                    },
                     match (&net.route.default_interface, &net.route.default_gateway) {
                         (Some(interface), Some(gateway)) => {
                             format!("默认接口 {interface}，网关 {gateway}")
@@ -6984,7 +7515,7 @@ impl VpnToolServices for WiredServices {
             None => checks.push(diag_check(
                 "system.proxy_services",
                 "system",
-                false,
+                CheckStatus::Failed,
                 "当前平台无法读取系统网络".into(),
                 None,
                 None,
@@ -6992,25 +7523,7 @@ impl VpnToolServices for WiredServices {
         }
 
         let exit_ip = status.health.exit_ip.clone();
-        checks.push(diag_check(
-            "network.exit_ip",
-            "network",
-            !running || exit_ip.is_some(),
-            exit_ip
-                .clone()
-                .map(|ip| format!("代理出口 {ip}"))
-                .unwrap_or_else(|| "未探测到出口 IP".into()),
-            if running && exit_ip.is_none() {
-                Some("重新连接以重新探测")
-            } else {
-                None
-            },
-            if running && exit_ip.is_none() {
-                Some(json!({ "kind": "reconnect" }))
-            } else {
-                None
-            },
-        ));
+        checks.push(exit_ip_check(connection, exit_ip.as_deref()));
 
         // 接管范围：告诉模型「这次诊断代表哪部分流量」，直接决定它能下什么结论。
         checks.push(self.network_coverage_for().await);
@@ -7019,7 +7532,11 @@ impl VpnToolServices for WiredServices {
         checks.push(diag_check(
             "network.reachable_seed_source",
             "network",
-            source_reachable,
+            if source_reachable {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
             if source_reachable {
                 "Veyl 免费节点源可达".into()
             } else {
@@ -7040,7 +7557,11 @@ impl VpnToolServices for WiredServices {
         checks.push(diag_check(
             "network.reachable_github",
             "network",
-            github,
+            if github {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
             if github {
                 "GitHub 可达".into()
             } else {
@@ -7050,15 +7571,27 @@ impl VpnToolServices for WiredServices {
             None,
         ));
 
-        let has_config = active_config.is_some() || running;
+        // 快照里的配置也是证据：TUN 在跑而 store 没有活动配置时，
+        // 不能报 ok 却写「还没有可用配置」。
+        let config_label = active_config
+            .as_ref()
+            .map(|config| config.name.clone())
+            .or_else(|| status.config_name.clone())
+            .or_else(|| status.config_id.clone());
+        let has_config = active_config.is_some() || status.config_id.is_some() || running;
         checks.push(diag_check(
             "config.current_config",
             "config",
-            has_config,
-            active_config
-                .as_ref()
-                .map(|config| format!("当前配置：{}", config.name))
-                .unwrap_or_else(|| "还没有可用配置".into()),
+            if has_config {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
+            match (&config_label, running) {
+                (Some(name), _) => format!("当前配置：{name}"),
+                (None, true) => "配置已应用".to_string(),
+                (None, false) => "还没有可用配置".to_string(),
+            },
             if has_config {
                 None
             } else {
@@ -7075,7 +7608,11 @@ impl VpnToolServices for WiredServices {
         checks.push(diag_check(
             "config.seed_available",
             "config",
-            seed_available,
+            if seed_available {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
             if seed_available {
                 format!(
                     "Veyl 免费节点 {} 个",
@@ -7107,7 +7644,11 @@ impl VpnToolServices for WiredServices {
         checks.push(diag_check(
             "config.seed_stale",
             "config",
-            !stale,
+            if !stale {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
             if !seed_available {
                 "没有 Veyl 免费节点".into()
             } else if stale {
@@ -7128,15 +7669,23 @@ impl VpnToolServices for WiredServices {
         ));
 
         let total = checks.len();
-        let ok_count = checks
-            .iter()
-            .filter(|check| check.get("ok").and_then(Value::as_bool).unwrap_or(false))
-            .count();
-        let failed = total - ok_count;
-        let verdict = if failed == 0 {
-            "网络状态正常".to_string()
-        } else {
-            format!("发现 {failed} 项需要处理")
+        let count_status = |wanted: &str| {
+            checks
+                .iter()
+                .filter(|check| check.get("status").and_then(Value::as_str) == Some(wanted))
+                .count()
+        };
+        let ok_count = count_status("ok");
+        let skipped = count_status("skipped");
+        // 不适用不是故障：skipped 单列，不并进 failed（`tools.md` §4.13）。
+        let failed = total - ok_count - skipped;
+        let verdict = match (failed, skipped) {
+            (0, 0) => "网络状态正常".to_string(),
+            (0, items) => format!("没有发现异常，{items} 项这次没检查"),
+            (items, 0) => format!("发现 {items} 项需要处理"),
+            (items, skipped_items) => {
+                format!("发现 {items} 项需要处理，另有 {skipped_items} 项没检查")
+            }
         };
 
         let labels = [
@@ -7182,6 +7731,7 @@ impl VpnToolServices for WiredServices {
                 "total": total,
                 "ok": ok_count,
                 "failed": failed,
+                "skipped": skipped,
                 "verdict": verdict,
             },
             "groups": groups,
@@ -14169,6 +14719,42 @@ mod main_flow_tests {
         // 与主状态不矛盾：同一份夹具下 connection_state 也必须是「连着且 TUN」。
         let connection = h.services.connection_state().await;
         assert!(connection.connected && connection.tun, "夹具本身要是 TUN 连接");
+    }
+
+    /// 诊断的取源必须是统一快照：TUN 连接时不能再按「未连接」报。
+    /// 锁的是 `diag_connection_snapshot`——`diag_run` 就是用它拿 status 的；
+    /// 谁改回 `manager.status()`，四项在 TUN 下会全部掉回 skipped。
+    #[tokio::test]
+    async fn diag_reads_the_tun_connection_not_the_manager() {
+        let mut h = harness();
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
+        h.services.tun.force_running_for_test(4242, Some("cfg_tun"));
+        let (status, connection) = h.services.diag_connection_snapshot().await;
+        assert_eq!(connection, DiagConnection::Tun, "{status:?}");
+        assert_eq!(status.mode, Some(crate::runtime::RuntimeMode::Tun));
+        // TUN 快照里的 process 来自 `TunSession::status()`（会问 helper），不是猜的。
+        assert_eq!(
+            process_alive_check(connection, status.health.process)["status"],
+            "ok",
+            "TUN 已连接时不能说进程没在跑"
+        );
+        assert_eq!(
+            clash_api_check(connection, status.health.clash_api)["status"],
+            "skipped",
+            "TUN 没有控制面探测通道"
+        );
+        assert_eq!(
+            exit_ip_check(connection, status.health.exit_ip.as_deref())["status"],
+            "skipped",
+            "TUN 不采集出口 IP"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_says_disconnected_when_nothing_is_running() {
+        let h = harness();
+        let (status, connection) = h.services.diag_connection_snapshot().await;
+        assert_eq!(connection, DiagConnection::Idle, "{status:?}");
     }
 
     /// 重建期间切节点：被闸门拒绝，最终仍是原节点。

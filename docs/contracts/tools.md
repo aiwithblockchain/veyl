@@ -853,7 +853,8 @@ type DiagCheck = {
     // config
     | "config.current_config" | "config.seed" | "config.seed_stale";
   group: DiagGroup;
-  ok: boolean;
+  status: "ok" | "failed" | "skipped";  // 该项的结论；skipped = 当前状态不适用，不是失败
+  ok: boolean;              // 兼容字段：语义恒等于 status == "ok"
   detail: string;              // 实测值或失败原因，已脱敏
   remediation: string | null;  // 一句建议动作；无需动作时为 null
   action: DiagAction | null;   // 可直接渲染成按钮的动作
@@ -870,6 +871,7 @@ type DiagReport = {
     total: number;
     ok: number;
     failed: number;
+    skipped: number;
     verdict: string;           // 一句话结论，由 Host 生成，模型可改写
   };
   groups: Array<{ group: DiagGroup; label: string; checks: DiagCheck[] }>;
@@ -920,6 +922,25 @@ type DiagReport = {
 - 无动作可说时写 `null`，不要写「无」「N/A」这类占位。
 
 **`action` 与 `remediation` 的关系**：`action` 是 `remediation` 的可点击形式，两者要么都为空，要么同时有值且语义一致。UI 只渲染 `action`，模型读 `remediation`。
+
+**`status` 与 `skipped` 的语义（3.21.0）**：
+
+- `status` 三态：`ok` / `failed` / `skipped`。`ok` 字段保留，语义恒等于 `status == "ok"`（**兼容字段**，不要单独判定）。
+- **`skipped` 不是错误**：这一项在当前连接状态下不适用、没有被检查。它**不计入 `failed`**；`summary` 单列 `skipped`，且 `ok + failed + skipped = total`。
+- `skipped` 项的 `remediation` 与 `action` **必须为 `null`**；界面不得用失败色；模型不得据此说「坏了 / 不可用」，只能说「这项没检查」。
+
+**各模式适用表**：
+
+| 检查 | 代理模式已连接 | TUN 模式已连接 | 未连接 / 连接中 |
+|---|---|---|---|
+| `app.process_alive` | 适用 | 适用（真实 pid） | `skipped` |
+| `app.clash_api` | 适用 | **不适用 → `skipped`**（控制面只有端点，没有探测通道） | `skipped` |
+| `app.data_plane` | 适用 | 适用（TUN 侧真实探测） | `skipped` |
+| `network.exit_ip` | 适用；**未探测到算 `skipped`，不算失败** | **不适用 → `skipped`**（出口 IP 不采集） | `skipped` |
+
+未连接 / 连接中的 `detail`：「未连接，未检查」「正在连接，稍后再看」。
+
+- **文案禁区**：未连接与连接中不得出现「进程未运行」「控制面不可用」；TUN 下不得出现「sing-box 进程未运行」——这些项在这些状态下是 `skipped`，不是失败。
 
 **`network.coverage`（3.20.2 新增，`group = "network"`）**——当前接管方式覆盖哪些流量：
 
@@ -2158,6 +2179,15 @@ type HttpCheckData = {
 ---
 
 ## 8. 变更记录
+
+### 3.21.0（未发布：随 AI 自查第一批统一升版）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | §4.13 `DiagCheck` 增 `status: "ok" \| "failed" \| "skipped"`；`ok` 保留为**兼容字段**（语义恒等于 `status == "ok"`）。`DiagReport.summary` 增 `skipped`，并写明 `ok + failed + skipped = total` | 字段扩展 | TUN 模式下部分检查不适用，不能记成失败 |
+| 2 | 新增「`skipped` 的语义」：不是错误、**不计入 `failed`**、`remediation` 与 `action` 必须为 `null`；界面不得用失败色；模型只能说「这项没检查」，不得说「坏了 / 不可用」 | 语义澄清 | 不适用 ≠ 坏 |
+| 3 | 新增各模式适用表：代理模式四项适用（`network.exit_ip` 未探测到算 `skipped`）；TUN 下 `app.process_alive` / `app.data_plane` 适用，`app.clash_api` 与 `network.exit_ip` 为 `skipped`（无探测通道 / 不采集出口 IP）；未连接 / 连接中四项一律 `skipped` | 语义澄清 | 「不适用」必须有一个不撒谎的表示 |
+| 4 | 新增文案禁区：未连接与连接中不得出现「进程未运行」「控制面不可用」；TUN 下不得出现「sing-box 进程未运行」 | 文案约束 | 这些是 `skipped`，不是失败；说成失败会让用户以为坏了 |
 
 ### 3.20.2（未发布：随 AI 自查第一批统一升版）
 
