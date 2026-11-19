@@ -656,7 +656,7 @@ type AskUserQuestionPayload = {
 tool-call-start  (tool = "AskUserQuestion")
       ↓
 ask-user-question          ← 工具在此阻塞
-      ↓  （用户作答 / 300s 超时 / 请求取消）
+      ↓  （用户作答 / 15 分钟超时 / 请求取消）
 tool-call-end    (同一 request_id)
 ```
 
@@ -666,10 +666,11 @@ tool-call-end    (同一 request_id)
 
 #### 4.8.3 超时
 
-- Host 负责计时：`created_at + 300s`。
+- Host 负责计时：`created_at + 900s`（15 分钟）。
+- 为什么是 15 分钟而不是 5 分钟：首启那两个问题是产品主流程，用户去倒杯水回来就没了；但也不能永不超时，否则这一轮对话会一直挂着一个 oneshot。15 分钟是「人可能离开」与「别把会话挂死」之间的折中（`src-tauri/src/agent/questions.rs` 顶部注释）。超时后问题不会恢复——重启后的会话没有历史，答案传不回模型，正确路径是重新发一条消息让 AI 再问一遍。
 - 超时后 Host 以**空字符串**回复工具（等同用户跳过），`tool-call-end` 正常到达，对话继续。
 - **不发额外事件**。理由：超时在界面上与"用户跳过"是同一状态——按钮都要消失；为此单开一个事件，UI 还得为它写和"跳过"完全一样的处理，属于重复。
-- UI 用 `expires_at` **置灰或移除**按钮，不要自己按 `created_at + 300` 算——那等于把超时值在前后端各写一份，Host 改了 UI 不会跟着改（§4.8.5）。
+- UI 用 `expires_at` **置灰或移除**按钮，不要自己按 `created_at + 900` 算——那等于把超时值在前后端各写一份，Host 改了 UI 不会跟着改（§4.8.5）。
 
 #### 4.8.4 作废（必须有，否则 oneshot 永远挂着）
 
@@ -677,9 +678,14 @@ tool-call-end    (同一 request_id)
 
 | 触发 | 范围 |
 |---|---|
-| `ai-request-end`（正常结束 / 取消） | 该 `request_id` 的全部未答问题 |
+| `ai_cancel`（请求取消） | 该 `request_id` 的全部未答问题，**立即作废，不等 `ai-request-end`** |
+| `ai-request-end`（正常结束 / 取消后的兜底） | 该 `request_id` 的全部未答问题（取消路径通常已经清空） |
 | `chat_delete` / 会话被删 | 该 `session_id` 的全部未答问题 |
 | 应用退出 | 全部 |
+
+**取消必须立刻作废，不能等请求收尾。** 非 Anthropic provider（如 DeepSeek）的工具执行不与取消令牌竞速，只在循环顶端检查取消；问题还挂在 oneshot 上时这一轮永远走不到收尾，`ai-request-end` 也就永远不来。作废让工具按「用户跳过」返回空串，循环下一轮看到取消即可收尾。
+
+**取消早于提问登记**（模型刚发出提问、Host 还没登记）时，登记阶段直接回空串，不产生 `ask-user-question` 事件，也不留卡片。
 
 **作废的动作是「回空字符串再移除」，不是直接丢弃 sender。** 直接丢弃会让工具侧收到 channel-closed，被当成"工具执行失败"，模型可能因此重试一个已经不存在的问题；回空串则是正常的"用户跳过"。
 

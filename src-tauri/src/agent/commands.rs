@@ -2330,6 +2330,48 @@ mod send_message_tests {
         state.finish_request(&second);
     }
 
+    /// 点「停止」时还有未答问题：取消必须立刻把工具解开，而不是等 15 分钟超时。
+    ///
+    /// 工具一返回，循环下一轮就能看到取消令牌，这一轮以 cancelled 收尾、
+    /// `ai-request-end` 到达、前端的卡片随之消失。
+    #[tokio::test]
+    async fn cancelling_a_request_frees_the_question_it_was_waiting_on() {
+        let state = test_state();
+        let request = AppState::next_request_id();
+        let token = state.reserve_request(&request, "ses_stop_q").unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        crate::agent::questions::register(
+            "ses_stop_q",
+            &request,
+            claurst_tools::UserQuestionEvent {
+                question: "怎么接管？".into(),
+                options: Some(vec!["Tun 模式".into(), "Proxy 模式".into()]),
+                reply_tx: tx,
+            },
+        );
+        assert_eq!(
+            crate::agent::questions::list_pending("ses_stop_q")["questions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert!(state.cancel_request(&request));
+        assert!(token.is_cancelled());
+
+        assert_eq!(rx.await.unwrap(), "", "工具侧必须立即拿到空串");
+        assert!(
+            crate::agent::questions::list_pending("ses_stop_q")["questions"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "作废后不能再留下可回答的 pending"
+        );
+        state.finish_request(&request);
+        crate::agent::questions::cleanup_request("ses_stop_q", &request);
+    }
+
     fn ui_context_value() -> Value {
         json!({
             "screen": "client",

@@ -58,6 +58,13 @@ fn pending() -> &'static Mutex<HashMap<String, PendingQuestion>> {
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 已被取消的请求。取消可能早于提问登记：登记阶段据此直接回空串，
+/// 不再留下一张无人可答的卡片。请求收尾时清掉。
+fn cancelled_requests() -> &'static Mutex<HashSet<String>> {
+    static CANCELLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    CANCELLED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -283,6 +290,17 @@ pub fn register_with(
         );
     }
 
+    // 取消可能早于这次登记：先入表再查，取消那边要么扫到这一条、要么我们先看到标记，
+    // 两个方向都能作废，不会留下没人能答的 pending。
+    let cancelled = cancelled_requests()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(request_id);
+    if cancelled {
+        settle(&question_id, String::new());
+        return;
+    }
+
     let mut payload = json!({
         "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
         "session_id": session_id,
@@ -479,6 +497,59 @@ pub fn list_pending(session_id: &str) -> Value {
     json!({ "questions": items })
 }
 
+/// 请求被取消：**立刻**作废该请求下未回答的问题，并把请求标记成「已取消」。
+///
+/// 不能等请求收尾再作废：非 Anthropic provider 的工具执行不与取消令牌竞速，
+/// 问题还挂在 oneshot 上时这一轮永远走不到收尾，`ai-request-end` 也就永远不来
+/// （契约 `events.md` §4.8.4）。作废动作是「回空字符串再移除」，工具侧按
+/// 「用户跳过」正常返回，循环下一轮就能看到取消。
+///
+/// 幂等：与 [`reply`] 争同一张 pending 表，谁先认领谁生效，另一个什么都不做。
+/// 取消后登记的问题由 [`register_with`] 直接回空串，不产生事件。
+pub fn cancel_request(request_id: &str) {
+    cancelled_requests()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(request_id.to_string());
+    let ids: Vec<String> = {
+        let guard = pending()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .iter()
+            .filter(|(_, question)| question.request_id == request_id)
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+    for id in ids {
+        settle(&id, String::new());
+    }
+    clear_request_markers(request_id);
+}
+
+/// 清掉某个请求的一次性同意与解释标记。
+///
+/// 只按 `request_id` 过滤：它不是会话内的序号，而是全局唯一的
+/// （`req_<纳秒>_<序号>`），所以不用再带 `session_id`。
+fn clear_request_markers(request_id: &str) {
+    seed_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(_, request)| request.as_str() != request_id);
+    upgrade_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(_, request, _, _)| request.as_str() != request_id);
+    mode_consents()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(_, request, _, _)| request.as_str() != request_id);
+    explain_pendings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(_, request)| request.as_str() != request_id);
+}
+
 /// 请求结束 / 取消：把该请求下未答的问题作废。
 pub fn cleanup_request(session_id: &str, request_id: &str) {
     let ids: Vec<String> = {
@@ -496,30 +567,11 @@ pub fn cleanup_request(session_id: &str, request_id: &str) {
     for id in ids {
         settle(&id, String::new());
     }
-    seed_consents()
+    clear_request_markers(request_id);
+    cancelled_requests()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .retain(|(session, request)| {
-            !(session.as_str() == session_id && request.as_str() == request_id)
-        });
-    upgrade_consents()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .retain(|(session, request, _, _)| {
-            !(session.as_str() == session_id && request.as_str() == request_id)
-        });
-    mode_consents()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .retain(|(session, request, _, _)| {
-            !(session.as_str() == session_id && request.as_str() == request_id)
-        });
-    explain_pendings()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .retain(|(session, request)| {
-            !(session.as_str() == session_id && request.as_str() == request_id)
-        });
+        .remove(request_id);
 }
 
 /// 会话删除：作废该会话所有未答问题。
@@ -1124,5 +1176,102 @@ mod memory_tests {
             "变体选项不能授权：同意必须对应提示词规定的那个选项"
         );
         cleanup_request("ses_variant", "req_variant");
+    }
+
+    /// 取消时问题还没答：工具侧必须立刻拿到空串（不是等 15 分钟），pending 清空。
+    ///
+    /// 这是「点停止后卡片还挂着」的根因用例：不作废问题，这一轮永远走不到收尾。
+    #[tokio::test]
+    async fn cancelling_a_request_frees_the_question_it_is_waiting_on() {
+        let (event, rx) = event("怎么接管？", &["Tun 模式", "Proxy 模式"]);
+        register("ses_cancel_q", "req_cancel_q", event);
+        assert_eq!(
+            list_pending("ses_cancel_q")["questions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        cancel_request("req_cancel_q");
+
+        assert_eq!(rx.await.unwrap(), "", "工具侧必须马上拿到空串");
+        assert!(list_pending("ses_cancel_q")["questions"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        cleanup_request("ses_cancel_q", "req_cancel_q");
+    }
+
+    /// 取消早于登记：登记阶段直接回空串，不弹事件、不留卡。
+    #[tokio::test]
+    async fn a_question_registered_after_the_cancel_is_answered_immediately() {
+        cancel_request("req_cancel_early");
+
+        let (event, rx) = event("怎么接管？", &["Tun 模式", "Proxy 模式"]);
+        register("ses_cancel_early", "req_cancel_early", event);
+
+        assert_eq!(rx.await.unwrap(), "");
+        assert!(list_pending("ses_cancel_early")["questions"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        cleanup_request("ses_cancel_early", "req_cancel_early");
+    }
+
+    /// 作答与取消同时到达：只有一个生效，不 panic、不二次 resolve。
+    ///
+    /// 跑多轮让两种交错都出现；赢的是谁不重要，重要的是通道只收到一个值、
+    /// pending 清空、失败的那一方报 `question_not_pending` 而不是别的错误。
+    #[tokio::test]
+    async fn answering_and_cancelling_settle_exactly_once() {
+        for round in 0..8 {
+            let session = format!("ses_cancel_race_{round}");
+            let request = format!("req_cancel_race_{round}");
+            let (question_event, rx) =
+                event("节点从哪来？", &["Veyl 免费节点（仅供试用）", "其它节点"]);
+            register(&session, &request, question_event);
+            let id = list_pending(&session)["questions"][0]["question_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+
+            let barrier = std::sync::Barrier::new(2);
+            let (answered, _cancelled) = std::thread::scope(|scope| {
+                let answer = scope.spawn(|| {
+                    barrier.wait();
+                    reply(&session, &id, SEED_OPTION)
+                });
+                let cancel = scope.spawn(|| {
+                    barrier.wait();
+                    cancel_request(&request);
+                });
+                (
+                    answer.join().expect("作答线程不该 panic"),
+                    cancel.join().expect("取消线程不该 panic"),
+                )
+            });
+
+            match answered {
+                Ok(()) => assert_eq!(rx.await.unwrap(), SEED_OPTION),
+                Err(error) => {
+                    assert_eq!(error.0, "question_not_pending");
+                    assert_eq!(rx.await.unwrap(), "", "取消赢时应回空串");
+                }
+            }
+            assert!(
+                list_pending(&session)["questions"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "第 {round} 轮：无论谁赢，问题都必须消失"
+            );
+            cleanup_request(&session, &request);
+            // 收尾后取消标记也要清掉，下一个请求不受影响。
+            let (next, _next_rx) = event("再来一次", &["A", "B"]);
+            register(&session, &format!("{request}_next"), next);
+            assert_eq!(list_pending(&session)["questions"].as_array().unwrap().len(), 1);
+            cleanup_request(&session, &format!("{request}_next"));
+        }
     }
 }

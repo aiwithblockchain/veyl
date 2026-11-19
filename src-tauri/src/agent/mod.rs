@@ -186,15 +186,26 @@ impl AppState {
     }
 
     /// 只取消指定请求；已结束或不存在返回 false，不误伤别的请求。
+    ///
+    /// **先取消、再作废问题**：取消令牌是权威状态，作废只是把阻塞在 oneshot 上的
+    /// 工具解开。反过来时工具可能先返回、下一轮模型请求已经在路上，取消会晚一步生效。
+    /// 不作废问题这一轮就永远走不到收尾：非 Anthropic provider 的工具执行
+    /// 不与取消令牌竞速，只在循环顶端检查取消（契约 `events.md` §4.8.4）。
     pub fn cancel_request(&self, request_id: &str) -> bool {
-        let cancels = self.request_cancels.lock();
-        match cancels.get(request_id) {
-            Some(token) => {
-                token.cancel();
-                true
+        let cancelled = {
+            let cancels = self.request_cancels.lock();
+            match cancels.get(request_id) {
+                Some(token) => {
+                    token.cancel();
+                    true
+                }
+                None => false,
             }
-            None => false,
+        };
+        if cancelled {
+            crate::agent::questions::cancel_request(request_id);
         }
+        cancelled
     }
 
     /// 释放会话槽与取消令牌。幂等；RAII guard 的 Drop 会调它。
