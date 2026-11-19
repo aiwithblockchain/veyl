@@ -1261,8 +1261,69 @@ mod prompt_tests {
         assert!(!text.contains("构建时与回访"), "文件头的构建注释应被去掉");
     }
 
+    /// 控制台「问 AI」入口的前置：两根轴的定义必须在系统提示词里（设计 §3.3/§3.4）。
+    /// 入口点了却答不出来等于白加，所以定义缺失要让测试先红。
+    #[test]
+    fn the_two_axes_are_defined_for_the_console() {
+        let text = system_prompt(
+            &[],
+            &crate::rules::Region::Cn,
+            crate::rules::RegionSource::System,
+            &crate::rules::Region::Cn,
+        );
+        for needle in [
+            "# 接管方式与流量范围",
+            "Proxy 模式只让设了代理的软件走节点",
+            "Tun 模式接管全部流量",
+            "才需要切到 Tun",
+            "只让需要的网站走节点，其余的直连",
+            "所有网站都走节点",
+        ] {
+            assert!(text.contains(needle), "提示词缺了两轴定义：{needle}");
+        }
+        // 这一段不得出现内部说法：禁用词会被模型原样转述。
+        let section = text
+            .split("# 接管方式与流量范围")
+            .nth(1)
+            .expect("有两轴定义这一节")
+            .split("\n# ")
+            .next()
+            .unwrap();
+        for word in ["selector", "mixed", "geosite", "规则集", "分流"] {
+            assert!(
+                !section.contains(word),
+                "两轴定义里出现了禁用词：{word}\n{section}"
+            );
+        }
+        // 2026-11-17 拍板：Proxy / Tun 是界面按钮名，本来就该原样说，不是禁词。
+        // 这条守住「下一个人不要把 proxy / TUN 塞回禁词清单」——塞回去就会与
+        // §3.3 的四句定义自相矛盾。
+        let speech = text
+            .split("# 怎么说话")
+            .nth(1)
+            .expect("有「怎么说话」一节")
+            .split("\n# ")
+            .next()
+            .unwrap();
+        assert!(
+            speech.contains("「Proxy 模式」「Tun 模式」「智能」「全局」不在此列"),
+            "要说清按钮名不是禁词：{speech}"
+        );
+        assert!(!speech.contains("proxy、TUN"), "{speech}");
+        assert!(!speech.contains("`proxy`"), "{speech}");
+
+        let rules = text
+            .split("# 文案规则")
+            .nth(1)
+            .expect("有「文案规则」一节")
+            .split("\n# ")
+            .next()
+            .unwrap();
+        assert!(!rules.contains("`proxy`"), "{rules}");
+        assert!(!rules.contains("`TUN`"), "{rules}");
+    }
+
     /// 地区进系统提示：生效值 + 来源 + 系统原始推断；未知时按未知处理，不追问。
-    ///
     /// 这是对 `first-run.md` 「环境信息每轮由系统提供」那份承诺的兑现——
     /// 在那之前宿主什么环境信息都没给过，模型只能自己编。
     #[test]

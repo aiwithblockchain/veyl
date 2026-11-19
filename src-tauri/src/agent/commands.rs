@@ -84,7 +84,12 @@ async fn send_message_for_state(
         None => None,
     };
 
-    let (user_text, task_text) = prepare_message(text, hidden, parsed_context.as_ref())?;
+    let (user_text, task_text) = prepare_message(
+        text,
+        hidden,
+        parsed_context.as_ref(),
+        client_status(parsed_context.as_ref()).as_ref(),
+    )?;
 
     let request_id = AppState::next_request_id();
     let cancel = match state.reserve_request(&request_id, session_id) {
@@ -136,6 +141,27 @@ async fn send_message_for_state(
     Ok(json!({ "request_id": request_id }))
 }
 
+/// `screen = client` 时补上界面 chip 的当前值。
+///
+/// 只读活跃配置（与 chip 同源），**不读运行时**：`runtime_status()` 在 TUN 下
+/// 可能触发一次助手探测（最长 10s），发消息的路径不该被它拖住；芯片显示的就是
+/// 配置值，助手按同一套话说才不会和界面打架。
+///
+/// **不要「顺手改成实际生效路径」**：那会把一次最长 10s 的探测塞进每条消息的
+/// 发送路径，卡顿还很难归因。真要报实际路径，走工具，不在这一层做。
+fn client_status(context: Option<&ui_context::UiContext>) -> Option<ui_context::ClientStatus> {
+    if context?.screen != "client" {
+        return None;
+    }
+    let store = crate::store::global()?;
+    let conn = store.conn();
+    let config = crate::store::configs::active(&conn).ok().flatten()?;
+    Some(ui_context::ClientStatus::from_config(
+        &config.connection_mode,
+        &config.routing_mode,
+    ))
+}
+
 /// 分出「落库/展示的用户文本」与「送给模型的文本」。
 ///
 /// `context` 只进后者：`chat_messages` 里永远只有用户原话或 Host 生成的界面事件。
@@ -143,6 +169,7 @@ fn prepare_message(
     text: Option<&str>,
     hidden: bool,
     context: Option<&ui_context::UiContext>,
+    client: Option<&ui_context::ClientStatus>,
 ) -> Result<(String, String), Value> {
     let trimmed = text.unwrap_or_default().trim();
     let user_text = if trimmed.is_empty() {
@@ -165,7 +192,7 @@ fn prepare_message(
     } else {
         trimmed.to_string()
     };
-    let model_text = ui_context::model_text(context, &user_text);
+    let model_text = ui_context::model_text_with_client(context, client, &user_text);
     Ok((user_text, model_text))
 }
 
@@ -2316,7 +2343,7 @@ mod send_message_tests {
     fn context_is_wrapped_for_the_model_but_not_stored() {
         let context = ui_context::parse(&ui_context_value(), &Default::default()).unwrap();
         let (user_text, model_text) =
-            prepare_message(Some("  你好  "), false, Some(&context)).unwrap();
+            prepare_message(Some("  你好  "), false, Some(&context), None).unwrap();
         assert_eq!(user_text, "你好");
         assert!(!user_text.contains("<ui-context>"));
         assert!(model_text.contains("<ui-context>"));
@@ -2324,15 +2351,54 @@ mod send_message_tests {
         assert!(model_text.contains("你好"));
     }
 
+    /// `screen = client` 时界面块要带上当前接管方式与流量范围；
+    /// 这些事实只进模型文本，落库的仍是用户原话。
+    #[test]
+    fn the_client_screen_block_carries_the_current_settings() {
+        let context = ui_context::parse(&ui_context_value(), &Default::default()).unwrap();
+        let status = ui_context::ClientStatus::from_config("tun", "proxy_all");
+        let (user_text, model_text) = prepare_message(
+            Some("为什么浏览器不走节点"),
+            false,
+            Some(&context),
+            Some(&status),
+        )
+        .unwrap();
+        assert_eq!(user_text, "为什么浏览器不走节点");
+        assert!(model_text.contains("当前接管方式：Tun 模式"), "{model_text}");
+        assert!(model_text.contains("当前流量范围：全局"), "{model_text}");
+        assert!(
+            model_text.contains("要改的话，主按钮下面那行点一下。"),
+            "{model_text}"
+        );
+    }
+
+    /// 没有活跃配置（或不是 client 屏）时不补事实：宁可不提，也不能编一个。
+    #[test]
+    fn the_client_facts_are_only_rendered_when_provided() {
+        let context = ui_context::parse(&ui_context_value(), &Default::default()).unwrap();
+        let (_, model_text) = prepare_message(Some("你好"), false, Some(&context), None).unwrap();
+        assert!(!model_text.contains("当前接管方式"), "{model_text}");
+
+        let servers = ui_context::parse(&json!({ "screen": "servers" }), &Default::default()).unwrap();
+        let status = ui_context::ClientStatus::from_config("system_proxy", "proxy_selected");
+        let (_, model_text) =
+            prepare_message(Some("你好"), false, Some(&servers), Some(&status)).unwrap();
+        assert!(!model_text.contains("当前接管方式"), "{model_text}");
+    }
+
     #[test]
     fn hidden_last_action_can_omit_text_and_host_generates_it() {
         let context = ui_context::parse(&ui_context_value(), &Default::default()).unwrap();
-        let (user_text, model_text) = prepare_message(None, true, Some(&context)).unwrap();
+        let (user_text, model_text) = prepare_message(None, true, Some(&context), None).unwrap();
         assert_eq!(user_text, "界面事件：在「客户端」点了「连接」。");
         assert!(model_text.contains("<ui-context>"));
         assert_eq!(
             model_text,
-            format!("{}\n\n{user_text}", ui_context::model_block(&context))
+            format!(
+                "{}\n\n{user_text}",
+                ui_context::model_block_with_client(&context, None)
+            )
         );
     }
 
@@ -2341,18 +2407,18 @@ mod send_message_tests {
         let context =
             ui_context::parse(&ui_context_value(), &Default::default()).unwrap();
         assert_eq!(
-            prepare_message(None, false, Some(&context)).unwrap_err()["details"]["reason"],
+            prepare_message(None, false, Some(&context), None).unwrap_err()["details"]["reason"],
             "empty_text"
         );
         assert_eq!(
-            prepare_message(None, true, None).unwrap_err()["details"]["reason"],
+            prepare_message(None, true, None, None).unwrap_err()["details"]["reason"],
             "empty_text"
         );
         let no_action =
             ui_context::parse(&json!({ "screen": "client", "controls": [] }), &Default::default())
                 .unwrap();
         assert_eq!(
-            prepare_message(None, true, Some(&no_action)).unwrap_err()["details"]["reason"],
+            prepare_message(None, true, Some(&no_action), None).unwrap_err()["details"]["reason"],
             "empty_text"
         );
     }
