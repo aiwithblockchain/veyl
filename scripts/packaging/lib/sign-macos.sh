@@ -74,17 +74,75 @@ _codesign() {
   fi
 }
 
+# 从证书主体的 OU 读 Team ID。Apple Development 的 CN 括号里是证书 ID 而不是 Team，
+# 只有 OU 是可靠的。
+cert_team_id() {
+  local identity="$1"
+  security find-certificate -c "$identity" -p 2>/dev/null \
+    | openssl x509 -noout -subject -nameopt RFC2253 2>/dev/null \
+    | sed -n 's/.*OU=\([A-Z0-9]\{10\}\).*/\1/p' \
+    | head -1
+}
+
+# 运行时已经由当前身份正确签好时返回空串；否则返回一句重签原因。
+# 判据：验签通过 + identifier 是 sing-box + 签名身份一致 + TeamIdentifier 一致
+# （ad-hoc 身份按 ad-hoc 规则：不要求 Team，identifier 仍须是 sing-box）。
+runtime_resign_reason() {
+  local runtime="$1" identity="$2" identifier authority team expected
+  [ -f "$runtime" ] || { printf '文件缺失，重签'; return 0; }
+  if ! codesign --verify --strict "$runtime" >/dev/null 2>&1; then
+    printf '签名无效或已被覆盖，重签'
+    return 0
+  fi
+  identifier="$(codesign -d --verbose=4 "$runtime" 2>&1 | sed -n 's/^Identifier=//p' | head -1)"
+  team="$(codesign -d --verbose=4 "$runtime" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1)"
+  if [ "$identity" = "-" ]; then
+    if [ "$identifier" != "sing-box" ] || { [ -n "$team" ] && [ "$team" != "not set" ]; }; then
+      printf 'ad-hoc 签名不匹配，重签'
+    fi
+    return 0
+  fi
+  if [ "$identifier" != "sing-box" ]; then
+    printf 'identifier 为 %s，重签' "${identifier:-<空>}"
+    return 0
+  fi
+  authority="$(codesign -d --verbose=4 "$runtime" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
+  if [ "$authority" != "$identity" ]; then
+    printf '签名身份不一致，重签'
+    return 0
+  fi
+  # 期望 Team 以证书为准（签名里的 TeamIdentifier 就来自证书）；
+  # 证书信息读不到时才退回 VEYL_TEAM_ID，两者都没有就跳过 Team 校验。
+  expected="$(cert_team_id "$identity")"
+  [ -n "$expected" ] || expected="${VEYL_TEAM_ID:-}"
+  if [ -n "$expected" ] && [ "$team" != "$expected" ]; then
+    printf 'TeamIdentifier 为 %s，应为 %s，重签' "${team:-<无>}" "$expected"
+  fi
+  return 0
+}
+
 # 构建前签好随包运行时，让 `build.rs` 哈希的是**签名后的字节**。
 #
 # 签名会改写 Mach-O（插入 CodeDirectory、时间戳），字节一变，编译期算出的
 # sha256 就对不上包里的副本，安装时只能回退到下载。所以顺序必须是：
 # 先签运行时 → 再 cargo build（哈希写进主程序与 helper）→ 组装 → 签整个包，
 # 组装阶段不能再碰这个文件。
+#
+# 幂等：已由同一身份正确签好时直接跳过，不重签、不改 mtime。
+# 这不是省一次签名——`src-tauri/build.rs` 把运行时声明为 rerun-if-changed 输入，
+# 每运行一次脚本就重签一次，等于每次都让 build script 失效，
+# 进而把 veyl_lib 与三个 bin 全部重编。只有确实不一致时才重签。
 prepare_bundled_runtime() {
-  local runtime="$1" identity
+  local runtime="$1" identity reason
   identity="$(signing_identity)"
   [ -f "$runtime" ] || return 0
-  printf '  签名随包运行时：%s\n' "$(basename "$runtime")"
+  reason="$(runtime_resign_reason "$runtime" "$identity")"
+  if [ -z "$reason" ]; then
+    printf '  运行时已由同一身份签好，跳过：%s\n' "$(basename "$runtime")"
+    assert_signed_runtime "$runtime" "$identity"
+    return
+  fi
+  printf '  签名随包运行时：%s（%s）\n' "$(basename "$runtime")" "$reason"
   _codesign "$identity" "$runtime" || return 1
   assert_signed_runtime "$runtime" "$identity"
 }

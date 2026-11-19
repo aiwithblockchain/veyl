@@ -255,7 +255,10 @@ prepare_bundled_runtime "$RUNTIME_SRC" || die "签名随包运行时失败：$RU
 [ -d "$APP_SRC" ] || die "找不到构建产物：$APP_SRC"
 
 printf '\n[2/5] 构建特权助手（debug）\n'
-(cd "$ROOT/src-tauri" && cargo build --bin veyl-helper)
+# 特性必须与上面的 `tauri build` 一致：Tauri CLI 会给 cargo 加 tauri/custom-protocol。
+# 少这一个特性，tauri / wry / claurst_* / 插件等下游会因为特性不同各自生成一套指纹，
+# 每次运行都在两套依赖图之间来回重编，看起来就像从头编译。
+(cd "$ROOT/src-tauri" && cargo build --bin veyl-helper --features tauri/custom-protocol)
 HELPER_SRC="$ROOT/src-tauri/target/debug/veyl-helper"
 [ -f "$HELPER_SRC" ] || die "找不到 helper：$HELPER_SRC"
 
@@ -268,7 +271,8 @@ chmod 755 "$APP_SRC/Contents/MacOS/veyl-helper"
 
 # 代理看门狗：App 异常退出后还原系统代理。与 helper 一样必须进 Contents/MacOS/
 # 并签名（sign_app 会签名 Contents 下所有 Mach-O），否则 LaunchAgent 起不来。
-(cd "$ROOT/src-tauri" && cargo build --bin veyl-proxy-guard)
+# 同上：必须带 tauri/custom-protocol，才能复用 tauri build 产出的那份依赖。
+(cd "$ROOT/src-tauri" && cargo build --bin veyl-proxy-guard --features tauri/custom-protocol)
 GUARD_SRC="$ROOT/src-tauri/target/debug/veyl-proxy-guard"
 [ -f "$GUARD_SRC" ] || die "找不到代理看门狗：$GUARD_SRC"
 cp "$GUARD_SRC" "$APP_SRC/Contents/MacOS/veyl-proxy-guard"
