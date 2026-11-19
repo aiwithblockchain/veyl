@@ -257,18 +257,23 @@ prepare_bundled_runtime "$RUNTIME_SRC" || die "签名随包运行时失败：$RU
 
 [ -d "$APP_SRC" ] || die "找不到构建产物：$APP_SRC"
 
-printf '\n[2/5] 构建特权助手（debug）\n'
+printf '\n[2/5] 构建特权助手与看门狗（debug）\n'
 # 这两个 bin 用**独立 target 目录**：`tauri build` 与 `cargo build --bin ...` 选中的
 # 目标集合不同，cargo 对共享依赖（tauri / wry / objc2 …）的特性合并结果就不同，
 # 共用 target/debug 时每运行一次脚本，主目录与助手目录会各自把对方的依赖重编一遍。
 # 实测同一份 objc2 在两处编出两种特性组合（12:02 alloc,std / 12:03 +exception）。
 # 分离后主目录只服务 tauri build，这里只服务助手，两边缓存都不会被对方作废。
 # 代价：这套依赖多编一份（一次性），之后只有改动到的 crate 重编。
+#
+# 两个 bin 必须在**同一次** cargo 调用里构建：分开调用会各自重编一遍 `veyl` 包
+# （实测 10.8s + 0.8s），合起来只编一次。
 DEV_BINS_TARGET="${VEYL_DEV_BINS_TARGET:-$ROOT/src-tauri/target/devbins}"
 (cd "$ROOT/src-tauri" && CARGO_TARGET_DIR="$DEV_BINS_TARGET" \
-  cargo build --bin veyl-helper --features tauri/custom-protocol)
+  cargo build --bin veyl-helper --bin veyl-proxy-guard --features tauri/custom-protocol)
 HELPER_SRC="$DEV_BINS_TARGET/debug/veyl-helper"
+GUARD_SRC="$DEV_BINS_TARGET/debug/veyl-proxy-guard"
 [ -f "$HELPER_SRC" ] || die "找不到 helper：$HELPER_SRC"
+[ -f "$GUARD_SRC" ] || die "找不到代理看门狗：$GUARD_SRC"
 
 # ---- 3. 组装包：helper / LaunchDaemon plist / 运行时 ----
 # Tauri 不会把 [[bin]] 放进包，也不会带 resources/runtime（它只声明了 rules）。
@@ -279,11 +284,6 @@ chmod 755 "$APP_SRC/Contents/MacOS/veyl-helper"
 
 # 代理看门狗：App 异常退出后还原系统代理。与 helper 一样必须进 Contents/MacOS/
 # 并签名（sign_app 会签名 Contents 下所有 Mach-O），否则 LaunchAgent 起不来。
-# 与 helper 同一个独立目录：两条命令形态一致，缓存互不作废。
-(cd "$ROOT/src-tauri" && CARGO_TARGET_DIR="$DEV_BINS_TARGET" \
-  cargo build --bin veyl-proxy-guard --features tauri/custom-protocol)
-GUARD_SRC="$DEV_BINS_TARGET/debug/veyl-proxy-guard"
-[ -f "$GUARD_SRC" ] || die "找不到代理看门狗：$GUARD_SRC"
 cp "$GUARD_SRC" "$APP_SRC/Contents/MacOS/veyl-proxy-guard"
 chmod 755 "$APP_SRC/Contents/MacOS/veyl-proxy-guard"
 
