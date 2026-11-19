@@ -27,6 +27,7 @@
 | B3 | 余额 $10 | 同样的地区与套餐 → 创建 | 先显示「创建中」，**不显示扣费**；开通成功后才显示扣了 **$0.20**（当天日价）、剩余 $9.80 | 刚点击后：**没有** `wallet_ledger` 行；`orders.state=provisioning`、`charge_mode=at_ready`；`servers` 一行 `billing_state='pending'`、`paid_until=NULL`、`billing_anchor_at=0`、`daily_price_cents=0`。开通后：一条 `-20` 扣费，`servers.state='active'`、`billing_state='active'`、`daily_price_cents=20`、`billing_anchor_at≈ready_at`、`paid_until≈ready_at+1天` |
 | M1 | 有一台已扣过费、`state='active'` 的服务器，余额足够（仅 dev） | 把 `paid_until` 改到昨天，再手动跑一轮计费（命令见下方） | 服务器照常可用（不中断） | 落后 1 天会补 **2 天**：两条 `server_day` 扣费（每格一条，`ref=server_day:<id>:<bucket>`）；`paid_until` 补到「超出 now 1 小时」之后；余额相应减少。续费时机与窗口见 `unpaid-tombstone-acceptance.md` §1 |
 | M2 | 一台已扣过两三天的服务器 | 销毁它 | 确认后消失；余额比销毁前多 | `wallet_ledger` 一条正向 `adjustment`（`ref=server_refund:<id>`），金额 = 未开始的整天数 × 日价；同一服务器不会出现第二条 |
+| M3 | 一台**正在连接中**的服务器 | 销毁它并确认 | 隧道随即断开、状态栏回到未连接；节点从连接页消失；配置里还有别的节点时可直接选一个再连，一个都没有时显示「这条配置没有节点了」且主按钮是按规则禁用的「连接」 | `servers.state='destroyed'`；`configs.current_node_id` 变为 NULL；`nodes` / `config_nodes` 已清；应用日志有 `runtime_stop` 相关记录 |
 
 **M1 的具体做法（仅 dev）**
 
@@ -42,7 +43,7 @@ curl -s https://cp-dev.veyl.dessage.xyz/v1/debug/billing
 
 ## 执行顺序
 
-L1 → L2 → B1 → B2 → B3 → M1 → M2
+L1 → L2 → B1 → B2 → B3 → M1 → M2 → M3
 
 ## 失败时要给我三样
 
