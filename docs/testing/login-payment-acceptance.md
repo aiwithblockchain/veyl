@@ -25,7 +25,7 @@
 | B1 | 已登录，余额 $0 | 选地区与套餐 → 点 `创建` | 提示「余额不足，还差 $2.10。」（按日价 × 7），**不开始创建** | **没有** `orders` 行、没有 `servers` 行、没有 `wallet_ledger` 行（预检在建单之前拦下） |
 | B2 | B1 之后 | 导航头像 → 账号菜单 → 充值 → 选 $10 → 浏览器用 **Dodo Test 模式**支付 → 回到应用 | 账号菜单里余额显示 **$10.00**（webhook 到账通常数秒；未到账时点「刷新余额」） | `topups.status=paid`；`payments` 一条 succeeded；`wallet_ledger` 一条 +1000 |
 | B3 | 余额 $10 | 同样的地区与套餐 → 创建 | 先显示「创建中」，**不显示扣费**；开通成功后才显示扣了 **$0.20**（当天日价）、剩余 $9.80 | 刚点击后：**没有** `wallet_ledger` 行；`orders.state=provisioning`、`charge_mode=at_ready`；`servers` 一行 `billing_state='pending'`、`paid_until=NULL`、`billing_anchor_at=0`、`daily_price_cents=0`。开通后：一条 `-20` 扣费，`servers.state='active'`、`billing_state='active'`、`daily_price_cents=20`、`billing_anchor_at≈ready_at`、`paid_until≈ready_at+1天` |
-| M1 | 有一台已扣过费、`state='active'` 的服务器（仅 dev） | 把 `paid_until` 改到昨天，再手动跑一次每日任务（命令见下方） | 服务器照常可用（不中断） | 新增一条 `server_day` 扣费（`ref=server_day:<id>:<bucket>`）；`paid_until` 顺延 **1 天**；余额相应减少 |
+| M1 | 有一台已扣过费、`state='active'` 的服务器，余额足够（仅 dev） | 把 `paid_until` 改到昨天，再手动跑一轮计费（命令见下方） | 服务器照常可用（不中断） | 落后 1 天会补 **2 天**：两条 `server_day` 扣费（每格一条，`ref=server_day:<id>:<bucket>`）；`paid_until` 补到「超出 now 1 小时」之后；余额相应减少。续费时机与窗口见 `unpaid-tombstone-acceptance.md` §1 |
 | M2 | 一台已扣过两三天的服务器 | 销毁它 | 确认后消失；余额比销毁前多 | `wallet_ledger` 一条正向 `adjustment`（`ref=server_refund:<id>`），金额 = 未开始的整天数 × 日价；同一服务器不会出现第二条 |
 
 **M1 的具体做法（仅 dev）**
