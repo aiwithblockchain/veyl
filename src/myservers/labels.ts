@@ -170,7 +170,8 @@ export function formatBuildDuration(
 
 /** 计费截止措辞的唯一出处；定稿后只改这里。 */
 export const PAID_THROUGH_WORDING = "本期有效至";
-export const PAID_EXPIRED_WORDING = "本期已到期，下一轮扣费顺延";
+/** 覆盖期刚结束、下一轮计费任务还没跑：机器照常可用，不能说「到期」。 */
+export const PAID_EXPIRED_WORDING = "本期已过，服务正常";
 /** 建机成功、还没开通扣费时的费用行文案。 */
 export const PENDING_BILLING_WORDING = "创建中，开通后开始计费";
 

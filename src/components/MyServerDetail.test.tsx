@@ -74,7 +74,7 @@ describe("服务器详情", () => {
     expect(detail?.textContent).not.toContain("/小时");
   });
 
-  it("active 但 paid_until 已过去：提示下一轮扣费顺延", () => {
+  it("active 但 paid_until 已过去：说「本期已过，服务正常」，不说到期", () => {
     renderDetail({
       daily_price_cents: 20,
       paid_until: new Date(Date.now() - 86_400_000).toISOString(),
@@ -83,7 +83,7 @@ describe("服务器详情", () => {
     });
 
     expect(document.querySelector(".myservers__facts")?.textContent).toContain(
-      "每天 $0.20 · 本期已到期，下一轮扣费顺延",
+      "每天 $0.20 · 本期已过，服务正常",
     );
   });
 
