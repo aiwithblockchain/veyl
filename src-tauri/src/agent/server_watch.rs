@@ -121,14 +121,21 @@ fn current_node_id() -> Option<String> {
         .and_then(|config| config.current_node_id)
 }
 
+/// `starting` / `restarting` 也算在跑：`runtime_stop` 在启动窗口里会 bump epoch
+/// 取代在途启动（`tools/services.rs`），不把这两个算进来，销毁或删节点就会漏掉
+/// 「隧道马上要起来、`current_node_id` 却已是 NULL」的原症状。
+fn state_is_live(state: &str) -> bool {
+    matches!(state, "running" | "degraded" | "starting" | "restarting")
+}
+
 pub(crate) async fn runtime_is_live(state: &AppState) -> bool {
     let Ok(value) = state.services.runtime_status().await else {
         return false;
     };
-    matches!(
-        value.get("state").and_then(|value| value.as_str()),
-        Some("running" | "degraded")
-    )
+    value
+        .get("state")
+        .and_then(|value| value.as_str())
+        .is_some_and(state_is_live)
 }
 
 /// 有没有「刚变成 destroyed、且本地节点正是当前连接节点」的服务器。
@@ -242,5 +249,17 @@ mod tests {
             &previous,
             Some("nd_1")
         ));
+    }
+
+    /// 启动窗口里销毁/删节点也必须停：`starting` / `restarting` 算在跑。
+    #[test]
+    fn starting_and_restarting_count_as_live() {
+        for state in ["running", "degraded", "starting", "restarting"] {
+            assert!(state_is_live(state), "{state} 应该算在跑");
+        }
+        for state in ["stopping", "failed", "idle"] {
+            assert!(!state_is_live(state), "{state} 不该算在跑");
+        }
+        assert!(!state_is_live(""), "未知状态不该算在跑");
     }
 }

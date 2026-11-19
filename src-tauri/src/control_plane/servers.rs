@@ -818,7 +818,11 @@ pub async fn destroy(server_id: &str, confirm: bool) -> Result<MyServer, CpError
     // 销毁即销毁凭据（§19.8）。节点也一并删掉：已销毁的服务器不再出现在连接页
     // （2026-11-19 产品决定）。删 `nodes` 行由外键级联清掉 `config_nodes`、把
     // `configs.current_node_id` / `my_servers.node_id` 置 NULL（外键已 ON）。
-    // 不重启运行时：远端起效后隧道自己会断，Host 强行 stop 会让用户毫无预期地掉线。
+    //
+    // **不要**指望远端起效后隧道自己断：远端机器已经没了，本地 sing-box 不知道，
+    // 会继续把流量发给一个不存在的节点（真机实测：状态栏仍「已连接」，而
+    // `current_node_id` 已被外键置 NULL，用户没有任何断开入口）。所以命令层在销毁
+    // 成功后，若这台服务器正是当前连接节点，先 `runtime_stop(false)`。
     if let Some(store) = crate::store::global() {
         let removed_node_id = {
             let conn = store.conn();
@@ -838,6 +842,37 @@ pub async fn destroy(server_id: &str, confirm: bool) -> Result<MyServer, CpError
         let _ = crate::secrets::delete_secret(&format!("node:{node_id}"));
     }
     Ok(server)
+}
+
+/// 这台服务器的本地节点是不是活动配置正在用的那个；命中的话返回节点 id。
+///
+/// 必须在控制面销毁**之前**调用：销毁成功会删掉节点行、`current_node_id` 被外键
+/// 置 NULL，之后就无从判断要不要停运行时了。本地节点先看镜像行的 `node_id`，
+/// 镜像行缺失时用 `(source = 'owned', source_key = server_id)` 兜底。
+pub(crate) fn active_node_of_server(
+    store: &crate::store::Store,
+    server_id: &str,
+) -> Option<String> {
+    let conn = store.conn();
+    let node_id = crate::store::servers::get(&conn, server_id)
+        .ok()
+        .flatten()
+        .and_then(|row| row.node_id)
+        .or_else(|| {
+            crate::store::configs::find_node_by_source_key(
+                &conn,
+                crate::store::configs::SOURCE_OWNED,
+                server_id,
+            )
+            .ok()
+            .flatten()
+            .map(|node| node.id)
+        })?;
+    let current = crate::store::configs::active(&conn)
+        .ok()
+        .flatten()
+        .and_then(|config| config.current_node_id);
+    (current.as_deref() == Some(node_id.as_str())).then_some(node_id)
 }
 
 /// 删除某台服务器在本地的节点密码。
@@ -1706,6 +1741,140 @@ mod tests {
         let conn = store.conn();
         let mut server = owned_server(Some("nd_missing"));
         assert_eq!(forget_destroyed_node(&conn, &mut server), None);
+    }
+
+    fn seed_owned_node(conn: &rusqlite::Connection, id: &str, server_id: &str) {
+        crate::store::configs::upsert_node(
+            conn,
+            &crate::store::NewNode {
+                id,
+                name: "Tokyo",
+                server: "203.0.113.10",
+                port: 20343,
+                method: "aes-256-gcm",
+                password_ref: &format!("node:{id}"),
+                source: crate::store::configs::SOURCE_OWNED,
+                source_key: server_id,
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_mirror(conn: &rusqlite::Connection, server_id: &str, node_id: Option<&str>) {
+        crate::store::servers::upsert(
+            conn,
+            &crate::store::NewMyServer {
+                id: server_id,
+                provider: "digitalocean",
+                name: "Tokyo",
+                region: "sgp1",
+                plan: "basic",
+                state: "active",
+                node_id,
+                hourly_usd: 0.01,
+                monthly_usd: 6.0,
+                daily_price_cents: 20,
+                transfer_gib: 0,
+                paid_until: 0,
+                billing_state: "active",
+                created_at: 1,
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_active_config(
+        conn: &rusqlite::Connection,
+        current: Option<&str>,
+        attached: &[&str],
+    ) {
+        let dns = json!({ "mode": "auto", "local": [], "remote": [] });
+        let excludes = json!([]);
+        crate::store::configs::create(
+            conn,
+            &crate::store::NewConfig {
+                id: "cfg_1",
+                name: "A",
+                connection_mode: crate::store::configs::CONNECTION_SYSTEM_PROXY,
+                routing_mode: crate::store::configs::ROUTING_PROXY_ALL,
+                listen_port: Some(7890),
+                dns: &dns,
+                tun_excludes: &excludes,
+            },
+        )
+        .unwrap();
+        crate::store::configs::activate(conn, "cfg_1").unwrap();
+        for id in attached {
+            crate::store::configs::attach_node(conn, "cfg_1", id).unwrap();
+        }
+        if let Some(current) = current {
+            crate::store::configs::update(
+                conn,
+                "cfg_1",
+                &crate::store::configs::ConfigPatch {
+                    current_node_id: Some(Some(current.into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    /// 销毁前判断：这台服务器就是当前连接节点。
+    #[test]
+    fn a_server_that_is_the_current_node_is_reported() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn();
+            seed_owned_node(&conn, "nd_a", "srv_1");
+            seed_mirror(&conn, "srv_1", Some("nd_a"));
+            seed_active_config(&conn, Some("nd_a"), &["nd_a"]);
+        }
+        assert_eq!(
+            active_node_of_server(&store, "srv_1").as_deref(),
+            Some("nd_a")
+        );
+    }
+
+    /// 当前节点是另一台服务器：不能停隧道。
+    #[test]
+    fn a_server_whose_node_is_not_current_is_not_reported() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn();
+            seed_owned_node(&conn, "nd_a", "srv_1");
+            seed_owned_node(&conn, "nd_b", "srv_2");
+            seed_mirror(&conn, "srv_1", Some("nd_a"));
+            seed_active_config(&conn, Some("nd_b"), &["nd_a", "nd_b"]);
+        }
+        assert_eq!(active_node_of_server(&store, "srv_1"), None);
+    }
+
+    /// 这台服务器还没有本地节点行：无从判断，返回 None。
+    #[test]
+    fn a_server_without_a_local_node_is_not_reported() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn();
+            seed_active_config(&conn, None, &[]);
+        }
+        assert_eq!(active_node_of_server(&store, "srv_1"), None);
+    }
+
+    /// 镜像行缺失/没有 `node_id` 时，靠 `source_key` 找到本地节点。
+    #[test]
+    fn a_missing_mirror_node_id_falls_back_to_the_owned_node() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn();
+            seed_owned_node(&conn, "nd_a", "srv_1");
+            seed_mirror(&conn, "srv_1", None);
+            seed_active_config(&conn, Some("nd_a"), &["nd_a"]);
+        }
+        assert_eq!(
+            active_node_of_server(&store, "srv_1").as_deref(),
+            Some("nd_a")
+        );
     }
 
     #[test]

@@ -613,9 +613,28 @@ pub async fn my_server_cancel_order(order_id: String) -> Result<Value, Value> {
 }
 
 #[tauri::command]
-pub async fn my_server_destroy(server_id: String, confirm: bool) -> Result<Value, Value> {
+pub async fn my_server_destroy(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    confirm: bool,
+) -> Result<Value, Value> {
+    // 销毁成功会删掉本地节点行、把 `current_node_id` 置 NULL，之后判断不出来；
+    // 所以先记下这台服务器此刻是不是正在使用的节点。
+    let connected_node = crate::store::global()
+        .and_then(|store| crate::control_plane::servers::active_node_of_server(store, &server_id));
+
     match crate::control_plane::servers::destroy(&server_id, confirm).await {
-        Ok(server) => Ok(json!(server)),
+        Ok(server) => {
+            // 远端机器没了，本地 sing-box 不会自己断，会继续把流量发给不存在的节点。
+            if connected_node.is_some()
+                && super::server_watch::runtime_is_live(state.inner()).await
+            {
+                if let Err(error) = state.services.runtime_stop(false).await {
+                    log::warn!("销毁正在使用的服务器后停止运行时失败：{error}");
+                }
+            }
+            Ok(json!(server))
+        }
         Err(error) => Err(error.envelope()),
     }
 }

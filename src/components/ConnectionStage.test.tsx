@@ -1904,6 +1904,166 @@ describe("待接入的服务器节点", () => {
   });
 });
 
+describe("隧道在跑但没有可用节点", () => {
+  const EMPTY: ConfigDetail = {
+    ...CONFIG,
+    nodes: [],
+    node_count: 0,
+    current_node_id: null,
+  };
+
+  it("running + 没有任何节点：主按钮是「断开」，点它停掉隧道", async () => {
+    const onStop = vi.fn();
+    const onReconnect = vi.fn();
+    renderStage({
+      config: EMPTY,
+      connection: "connected",
+      runtime: runtime({
+        state: "running",
+        connected_since: new Date(Date.now() - 5000).toISOString(),
+        health: {
+          ...emptyRuntimeView().health,
+          data_plane: false,
+          checked_at: new Date().toISOString(),
+        },
+      }),
+      onStop,
+      onReconnect,
+    });
+
+    await screen.findAllByText("已连接，不通");
+    // 指路文案跟着按钮走：没有节点可换，就不再叫用户点不存在的「重新连接」。
+    expect(
+      screen.getByText("没有可用节点了，点「断开」停掉隧道，再去处理节点。"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/点上面的「重新连接」/)).toBeNull();
+    const primary = screen.getByRole("button", {
+      name: "断开连接",
+    }) as HTMLButtonElement;
+    expect(primary.disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: "重新连接" })).toBeNull();
+
+    fireEvent.click(primary);
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(onReconnect).not.toHaveBeenCalled();
+  });
+
+  it("running + 有可用节点 + 不通：仍然是「重新连接」", async () => {
+    const onStop = vi.fn();
+    const onReconnect = vi.fn();
+    renderStage({
+      connection: "connected",
+      runtime: runtime({
+        state: "running",
+        connected_since: new Date(Date.now() - 5000).toISOString(),
+        health: {
+          ...emptyRuntimeView().health,
+          data_plane: false,
+          checked_at: new Date().toISOString(),
+        },
+      }),
+      onStop,
+      onReconnect,
+    });
+
+    await screen.findAllByText("已连接，不通");
+    // 有可用节点：指路文案保持原文案（sr-only 与可见段同句，段里查一次就够）。
+    expect(
+      document.querySelector(".stage-note")?.textContent,
+    ).toContain("点上面的「重新连接」");
+    fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+    expect(onStop).not.toHaveBeenCalled();
+  });
+
+  it("没有任何节点：主按钮是按规则禁用的「连接」", () => {
+    const onStart = vi.fn();
+    renderStage({ config: EMPTY, onStart });
+
+    expect(screen.getByText("这条配置没有节点了")).toBeTruthy();
+    const primary = screen.getByRole("button", {
+      name: "连接节点",
+    }) as HTMLButtonElement;
+    expect(primary.disabled).toBe(true);
+    fireEvent.click(primary);
+    expect(onStart).not.toHaveBeenCalled();
+  });
+
+  it("目标不可用但池里还有别的节点：指路先说断开再选一个", async () => {
+    const DEAD: ConfigDetail["nodes"][number] = {
+      node_id: "local_9",
+      name: "东京 9 号",
+      server: "198.51.100.9",
+      port: 8388,
+      method: "aes-256-gcm",
+      protocol: "shadowsocks",
+      source: "owned",
+      created_at: 0,
+    };
+    const ALIVE: ConfigDetail["nodes"][number] = {
+      ...DEAD,
+      node_id: "local_8",
+      name: "大阪 8 号",
+    };
+    renderStage({
+      config: {
+        ...CONFIG,
+        node_count: 2,
+        current_node_id: DEAD.node_id,
+        nodes: [DEAD, ALIVE],
+      },
+      connection: "connected",
+      danglingNodeIds: new Set([DEAD.node_id]),
+      runtime: runtime({
+        state: "running",
+        connected_since: new Date(Date.now() - 5000).toISOString(),
+        health: {
+          ...emptyRuntimeView().health,
+          data_plane: false,
+          checked_at: new Date().toISOString(),
+        },
+      }),
+    });
+
+    await screen.findAllByText("已连接，不通");
+    expect(
+      screen.getByText("先点「断开」停掉隧道，再选一个节点连接。"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/没有可用节点了/)).toBeNull();
+    expect(
+      (screen.getByRole("button", { name: "断开连接" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+  });
+
+  it("0 个节点但有待接入行：不写「这条配置没有节点了」", () => {
+    renderStage({
+      config: EMPTY,
+      pendingServerNodes: [{ nodeId: "local_pending", name: "我的服务器4gUQ" }],
+    });
+
+    expect(screen.queryByText("这条配置没有节点了")).toBeNull();
+    expect(screen.getByText("重新连接后可用")).toBeTruthy();
+  });
+
+  it("失败态：没有目标行时次级「重新连接」也禁用", () => {
+    const onStart = vi.fn();
+    renderStage({
+      config: EMPTY,
+      runtime: runtime({ state: "failed" }),
+      onStart,
+    });
+
+    const again = document.querySelector(
+      "button.stage-secondary",
+    ) as HTMLButtonElement;
+    expect(again.textContent).toBe("重新连接");
+    expect(again.disabled).toBe(true);
+    fireEvent.click(again);
+    expect(onStart).not.toHaveBeenCalled();
+  });
+});
+
 describe("停机删除的悬挂节点", () => {
   const DEAD: ConfigDetail["nodes"][number] = {
     node_id: "local_9",

@@ -78,6 +78,12 @@ export type { PendingServerNode };
 
 const NO_TRAFFIC_ACTION =
   "网页打不开时，点上面的「重新连接」；还是不行，就换一个节点再试。";
+/** 隧道还在跑、当前目标不能连，但池里还有别的节点可换。 */
+const NO_TRAFFIC_ACTION_OTHER_NODE =
+  "先点「断开」停掉隧道，再选一个节点连接。";
+/** 隧道还在跑但已经没有可用节点：页面上没有「重新连接」可点的目标，只能先断开。 */
+const NO_TRAFFIC_ACTION_NO_NODE =
+  "没有可用节点了，点「断开」停掉隧道，再去处理节点。";
 
 /**
  * 连接舞台：44px 状态带 + 400 居中卡片 + 整宽主按钮。
@@ -329,19 +335,6 @@ export function ConnectionStage({
     }
   };
 
-  const primaryLabel = helperPreparing
-    ? "连接中…"
-    : starting
-      ? "连接中…"
-      : stopping
-        ? "断开中…"
-        : connected && !noTraffic
-          ? "断开"
-          : failed && onDiagnose
-            ? "让 AI 检查"
-            : failed || noTraffic
-              ? "重新连接"
-              : "连接";
   const probeTitle = probeRunning
     ? "测速中"
     : switching !== null || starting || stopping || helperPreparing
@@ -350,7 +343,8 @@ export function ConnectionStage({
 
   const onPrimary = async () => {
     if (primaryDisabled) return;
-    if (connected && !noTraffic) {
+    // 隧道还在跑：只要没有能连的节点，主按钮就是唯一的出口——先断开。
+    if (connected && (!noTraffic || !connectTargetUsable)) {
       onStop();
       return;
     }
@@ -436,16 +430,55 @@ export function ConnectionStage({
   /** 选中的正是停机删除留下的节点：机器已经没了，不能拿它去连。 */
   const connectTargetDangling =
     connectTarget !== null && danglingNodeIds.has(connectTarget.node_id);
-  const connectBlocked =
-    (primaryLabel === "连接" || primaryLabel === "重新连接") &&
+  /**
+   * 当前目标能不能拿去连：没有目标行、已到期、已停机删除都不算。
+   * 隧道还在跑而这个为 false 时，主按钮必须留「断开」——否则用户手上只有
+   * 一个连不上的「重新连接」，就再也关不掉正在运行的隧道。
+   */
+  const connectTargetUsable =
     connectTarget !== null &&
-    (isExpiredSeed(connectTarget) || connectTargetDangling);
+    !isExpiredSeed(connectTarget) &&
+    !connectTargetDangling;
   /** 池里还有真正点得动的行才允许说「换一个节点」：过期的、停机删除的都不算。 */
   const hasUsableNode = nodes.some(
     (node) => !isExpiredSeed(node) && !danglingNodeIds.has(node.node_id),
   );
+  /**
+   * 不通时的指路：跟着页面上真能做的事走。目标可用就按原文案重连；
+   * 目标不可用但池里还有别的节点，断完能换一个；一个都没有就别提换节点。
+   */
+  const noTrafficAction = connectTargetUsable
+    ? NO_TRAFFIC_ACTION
+    : hasUsableNode
+      ? NO_TRAFFIC_ACTION_OTHER_NODE
+      : NO_TRAFFIC_ACTION_NO_NODE;
+
+  const primaryLabel = helperPreparing
+    ? "连接中…"
+    : starting
+      ? "连接中…"
+      : stopping
+        ? "断开中…"
+        : connected && (!noTraffic || !connectTargetUsable)
+          ? "断开"
+          : failed && onDiagnose
+            ? "让 AI 检查"
+            : failed || noTraffic
+              ? "重新连接"
+              : "连接";
+  const connectBlocked =
+    (primaryLabel === "连接" || primaryLabel === "重新连接") &&
+    connectTarget !== null &&
+    (isExpiredSeed(connectTarget) || connectTargetDangling);
   const primaryDisabled =
-    starting || stopping || helperPreparing || switching !== null || connectBlocked;
+    starting ||
+    stopping ||
+    helperPreparing ||
+    switching !== null ||
+    connectBlocked ||
+    // 没有任何节点行可当目标：「连接 / 重新连接」只会空转，按规则禁用。
+    ((primaryLabel === "连接" || primaryLabel === "重新连接") &&
+      connectTarget === null);
 
   const renderNode = ({ node, index }: (typeof nodeEntries)[number]) => {
     const latency = latencies[index];
@@ -542,7 +575,7 @@ export function ConnectionStage({
           <p className="sr-only" role="status">
             {connected
               ? noTraffic
-                ? `已连接，不通。${NO_TRAFFIC_ACTION}`
+                ? `已连接，不通。${noTrafficAction}`
                 : degraded
                   ? "连接不稳定"
                   : "已连接"
@@ -669,6 +702,10 @@ export function ConnectionStage({
           </div>
         </section>
 
+        {config !== null && nodes.length === 0 && pendingEntries.length === 0 ? (
+          <p className="stage-note">这条配置没有节点了</p>
+        ) : null}
+
         <button
           type="button"
           className="stage-primary"
@@ -702,7 +739,7 @@ export function ConnectionStage({
             type="button"
             className="stage-secondary"
             onClick={onStart}
-            disabled={connectTargetDangling}
+            disabled={!connectTargetUsable}
           >
             重新连接
           </button>
@@ -741,7 +778,7 @@ export function ConnectionStage({
           </p>
         ) : noTraffic ? (
           <p className="stage-note">
-            {NO_TRAFFIC_ACTION}
+            {noTrafficAction}
             {onReportProblem ? (
               <button
                 type="button"

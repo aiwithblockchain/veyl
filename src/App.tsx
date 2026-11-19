@@ -614,6 +614,15 @@ export default function App() {
   const hasNodes = Boolean(
     vpn.activeConfig && vpn.activeConfig.node_count > 0,
   );
+  // 与 Host 的 runtime_is_live（server_watch::state_is_live）同一口径：
+  // 隧道还在跑（含启动中）时，即使节点已被删光也要留在连接页——否则用户
+  // 手上连一个「断开」都没有，只能退出 App。
+  const runtimeLive =
+    runtime.state === "running" ||
+    runtime.state === "degraded" ||
+    runtime.state === "starting" ||
+    runtime.state === "restarting";
+  const showsStage = hasNodes || runtimeLive;
   // 已就绪的服务器节点要等断开才 node_attach（见 useServerNodePooling 的 flush 排队），
   // 这段时间它在配置里不存在；单独算出来交给连接页灰显，免得用户以为没生效。
   const pendingServerNodes = useMemo(() => {
@@ -642,9 +651,9 @@ export default function App() {
         ? "new_node"
         : !stageReady
         ? "client"
-        : trial?.state === "expired" && !hasNodes
+        : trial?.state === "expired" && !showsStage
           ? "trial_expired"
-          : !hasNodes
+          : !showsStage
             ? "no_nodes"
             : destination === "servers"
               ? "servers"
@@ -2385,14 +2394,14 @@ export default function App() {
           }}
           onRenamed={myServers.renamed}
         />
-      ) : trial?.state === "expired" && !hasNodes ? (
+      ) : trial?.state === "expired" && !showsStage ? (
         <TrialExpired
           onNewNode={() => {
             lastActionRef.current = { id: "trial_expired.new_node" };
             openNewNode("trial_expired");
           }}
         />
-      ) : hasNodes && !(trialFlow && trialFlow.phase !== "done") ? (
+      ) : showsStage && !(trialFlow && trialFlow.phase !== "done") ? (
         <ConnectionStage
           config={vpn.activeConfig}
           connection={vpn.connection}

@@ -2,10 +2,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { getAgentBridge } from "./agent";
+import { emptyRuntimeView, getAgentBridge } from "./agent";
 import type { MyServer } from "./agent/bridge";
 import { AGENT_EVENTS } from "./agent/protocol";
-import type { ConfigDetail, ConfigSummary } from "./agent/protocol";
+import type { ConfigDetail, ConfigSummary, RuntimeSnapshot } from "./agent/protocol";
 
 const CONFIG_ID = "cfg_1";
 
@@ -950,6 +950,42 @@ describe("停机删除的墓碑与空态", () => {
     expect(await screen.findByText("从哪里开始？")).toBeTruthy();
     expect(screen.queryByText("这条配置没有节点了")).toBeNull();
   });
+
+  it("节点删光但隧道还在跑：连接页照常渲染，能点「断开」", async () => {
+    const { stop } = prepare([]);
+    vi.mocked(bridge.runtimeStop).mockResolvedValue(undefined);
+    vi.mocked(bridge.configList).mockResolvedValue({
+      configs: [{ ...SUMMARY, node_count: 0, current_node_id: null }],
+      active_config_id: CONFIG_ID,
+    });
+    vi.mocked(bridge.configDetail).mockResolvedValue(detailConfig([]));
+    const running: RuntimeSnapshot = {
+      ...emptyRuntimeView(),
+      contract_version: "2.0.0",
+      state: "running",
+      mode: "tun",
+      pid: 123,
+      config_id: CONFIG_ID,
+      config_name: SUMMARY.name,
+      node_id: TOMB_NODE,
+      node_name: "东京 01",
+      connected_since: new Date(Date.now() - 5000).toISOString(),
+      last_transition_at: "",
+    };
+    vi.mocked(bridge.getRuntimeSnapshot).mockResolvedValue(running);
+
+    render(<App />);
+
+    // 没有节点也不再退回 StartChoice：这一页是唯一的断开入口。
+    expect(await screen.findByText("这条配置没有节点了")).toBeTruthy();
+    const disconnect = (await screen.findByRole("button", {
+      name: "断开连接",
+    })) as HTMLButtonElement;
+    expect(disconnect.disabled).toBe(false);
+
+    fireEvent.click(disconnect);
+    await waitFor(() => expect(stop).toHaveBeenCalled());
+  }, 15_000);
 });
 
 describe("新建节点：导航与 Esc", () => {
