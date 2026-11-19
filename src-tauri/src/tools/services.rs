@@ -12161,6 +12161,9 @@ mod config_service_tests {
     #[tokio::test]
     async fn a_seed_refresh_merges_new_nodes_into_the_global_config() {
         let dir = temp_dir();
+        // 这条用例自己写 secrets；不先安装本机凭据存储，单独跑会因
+        // 「凭据存储尚未初始化」失败（整包跑时靠别的用例装上，属于假绿）。
+        crate::secrets::install(&dir);
         let services = services(&dir);
         {
             let body = r#"{

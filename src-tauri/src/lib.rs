@@ -151,7 +151,6 @@ pub fn run() {
     let setup_state = Arc::clone(&state);
     // 工具路径没有 AppState 句柄，热更新凭据靠这个弱引用。
     agent::install_app_state(&state);
-    let watch_state = Arc::clone(&state);
 
     // ---- 启动序列：一行一条，故障时能直接看出「应用此刻认为自己处于什么状态」 ----
     log::info!("启动 data_dir={}", short_path(&data_dir));
@@ -212,8 +211,6 @@ pub fn run() {
         .setup(move |app| {            // 旧 Key 迁移只补元数据，幂等；放在 setup 里，第二实例不会执行。
             crate::llm::ensure_migrated(&setup_store);
             crate::agent::refresh_credentials();
-            // 后台每 60 秒看一眼「我的服务器」：余额不足停机销毁只有靠它发现。
-            crate::agent::server_watch::spawn(watch_state.clone());
 
             // 自建应用菜单：Cmd+Q 必须由我们接管。
             // macOS 默认 Quit 走 NSApp terminate，会绕过 ExitRequested。

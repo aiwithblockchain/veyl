@@ -361,10 +361,27 @@ pub async fn my_server_list() -> Result<Value, Value> {
     }
 }
 
+/// 顺手确认一次服务器是否已被停机销毁。
+///
+/// 超时只包「取详情 + 重读」（在 `ensure_current_server_alive` 内部）；确定为已销毁后的
+/// `runtime_stop` 丢到后台任务，既不进超时、也不让详情请求等它（被取消会把运行时卡在
+/// `stopping`）。
+async fn check_server_alive_quietly(state: &Arc<AppState>, server_id: &str) {
+    let services = Arc::clone(&state.services);
+    super::server_watch::ensure_current_server_alive(services, server_id).await;
+}
+
 #[tauri::command]
-pub async fn my_server_get(server_id: String) -> Result<Value, Value> {
+pub async fn my_server_get(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<Value, Value> {
     match crate::control_plane::servers::get(&server_id).await {
-        Ok(server) => Ok(json!(server)),
+        Ok(server) => {
+            // 点开的就是当前连着的服务器时顺手确认一次：已经被停机销毁的话先把隧道停掉。
+            check_server_alive_quietly(state.inner(), &server_id).await;
+            Ok(json!(server))
+        }
         Err(error) => Err(error.envelope()),
     }
 }
@@ -1432,11 +1449,19 @@ pub async fn node_switch(
 /// 测试单个节点连通性。未连接时起临时运行时；测不了返回 `untested`，不退化成 TCP。
 #[tauri::command]
 pub async fn node_probe(state: State<'_, Arc<AppState>>, node_id: String) -> Result<Value, Value> {
-    state
+    let value = state
         .services
         .node_probe(&node_id)
         .await
-        .map_err(error_value)
+        .map_err(error_value)?;
+    // 探不通的自建服务器节点顺手确认一次：可能是服务器已被停机销毁。
+    // 探通了就不查，避免多打一次控制面。
+    if value.get("status").and_then(Value::as_str) != Some("ok") {
+        if let Some(server_id) = super::server_watch::owned_server_of_node(&node_id) {
+            check_server_alive_quietly(state.inner(), &server_id).await;
+        }
+    }
+    Ok(value)
 }
 
 /// 启动一批节点测速（UI 专用，只读；全局同时只允许一批）。

@@ -1,124 +1,50 @@
-//! 「我的服务器」后台轮询：控制面没有反向推送通道。
+//! 「我的服务器」还活着吗：只在用户 / AI 主动操作时顺手查一次，**不做后台定时轮询**。
 //!
-//! 余额不足停机销毁由控制面在每小时 Cron 里做，客户端只能靠自己发现：
-//! 这里每 60 秒拉一次列表（**只在活动配置里还有 owned 节点时**），
-//! 先把「刚变成 destroyed、且正被当前连接使用」的隧道停掉，再落库发事件。
+//! 余额不足停机销毁由控制面在每小时 Cron 里做，控制面没有反向推送通道。与其让常开
+//! 应用每分钟打一次控制面，不如在「用户正在用这台服务器」的动作里顺便确认一次：
+//! 拉详情、探测连通失败时。发现已经是 `destroyed` 就先停隧道（远端机器没了，本地
+//! sing-box 不会自己断）。
 
-use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
+use crate::control_plane::error::CpError;
 use crate::control_plane::servers::MyServer;
+use crate::tools::services::VpnToolServices;
 
 use super::AppState;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(60);
-
-pub fn spawn(state: Arc<AppState>) {
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(POLL_INTERVAL).await;
-            if let Err(error) = poll_once(&state).await {
-                // 网络失败下一轮再试；不打 warn，免得断网时每分钟刷屏。
-                log::debug!("我的服务器后台刷新失败：{error}");
-            }
-        }
-    });
-}
-
-async fn poll_once(state: &Arc<AppState>) -> Result<(), String> {
-    if !active_config_has_owned_node() {
-        return Ok(());
-    }
-    let mut servers = crate::control_plane::servers::fetch_all()
-        .await
-        .map_err(|error| error.message.clone())?;
-
-    // 必须先停运行时、再落库发事件：事件到达界面时隧道不能还在跑。
-    let previous = previous_mirror(&servers);
-    let current = current_node_id();
-    if runtime_is_live(state).await
-        && pause_needed(&servers, &previous, current.as_deref())
-    {
-        if let Err(error) = state.services.runtime_stop(false).await {
-            log::warn!("停机销毁后停止运行时失败：{error}");
-        }
-    }
-
-    crate::control_plane::servers::cache_all(&mut servers);
-    Ok(())
-}
-
-/// 活动配置里有没有 owned 节点；没有就不需要轮询（种子 / 自建节点不走控制面计费）。
-fn active_config_has_owned_node() -> bool {
-    let Some(store) = crate::store::global() else {
-        return false;
-    };
-    let conn = store.conn();
-    let Ok(Some(config)) = crate::store::configs::active(&conn) else {
-        return false;
-    };
-    crate::store::configs::list_nodes(&conn, &config.id)
-        .map(|nodes| {
-            nodes
-                .iter()
-                .any(|node| node.source == crate::store::configs::SOURCE_OWNED)
-        })
-        .unwrap_or(false)
-}
-
-/// 上次看到的镜像状态 + 关联的本地节点 id（判「刚变成 destroyed」用）。
-struct Previous {
-    state: Option<String>,
-    node_id: Option<String>,
-}
-
-/// 这次快照涉及的服务器在本地镜像里的上一版。
+/// 这个节点对应的自建服务器 id（`source_key` 就是服务器 id）。
 ///
-/// 镜像行可能还不存在（首次轮询、刚重启）：此时按本机的 owned 节点兜底，
-/// 否则「刚启动就连着节点、控制面此时销毁」会漏掉停运行时这一步。
-fn previous_mirror(servers: &[MyServer]) -> HashMap<String, Previous> {
-    let Some(store) = crate::store::global() else {
-        return HashMap::new();
-    };
-    let conn = store.conn();
-    servers
-        .iter()
-        .map(|server| {
-            let row = crate::store::servers::get(&conn, &server.server_id)
-                .ok()
-                .flatten();
-            let node_id = row
-                .as_ref()
-                .and_then(|row| row.node_id.clone())
-                .or_else(|| {
-                    crate::store::configs::find_node_by_source_key(
-                        &conn,
-                        crate::store::configs::SOURCE_OWNED,
-                        &server.server_id,
-                    )
-                    .ok()
-                    .flatten()
-                    .map(|node| node.id)
-                });
-            (
-                server.server_id.clone(),
-                Previous {
-                    state: row.map(|row| row.state),
-                    node_id,
-                },
-            )
-        })
-        .collect()
+/// 先按节点行判，不看 `my_servers` 镜像：镜像行可能还没建（首次连接）或已被清掉，
+/// 而节点行一定在，`source_key` 足以找到服务器。
+fn owned_server_of_node_in(conn: &rusqlite::Connection, node_id: &str) -> Option<String> {
+    let node = crate::store::configs::get_node(conn, node_id)
+        .ok()
+        .flatten()?;
+    (node.source == crate::store::configs::SOURCE_OWNED && !node.source_key.is_empty())
+        .then_some(node.source_key)
 }
 
-fn current_node_id() -> Option<String> {
+pub(crate) fn owned_server_of_node(node_id: &str) -> Option<String> {
     let store = crate::store::global()?;
     let conn = store.conn();
-    crate::store::configs::active(&conn)
+    owned_server_of_node_in(&conn, node_id)
+}
+
+/// 当前正在用的自建服务器（种子 / 手动节点返回 `None`）。
+fn current_owned_server_in(conn: &rusqlite::Connection) -> Option<String> {
+    let current = crate::store::configs::active(conn)
         .ok()
-        .flatten()
-        .and_then(|config| config.current_node_id)
+        .flatten()?
+        .current_node_id?;
+    owned_server_of_node_in(conn, &current)
+}
+
+fn current_owned_server() -> Option<String> {
+    let store = crate::store::global()?;
+    let conn = store.conn();
+    current_owned_server_in(&conn)
 }
 
 /// `starting` / `restarting` 也算在跑：`runtime_stop` 在启动窗口里会 bump epoch
@@ -129,41 +55,134 @@ fn state_is_live(state: &str) -> bool {
 }
 
 pub(crate) async fn runtime_is_live(state: &AppState) -> bool {
-    let Ok(value) = state.services.runtime_status().await else {
-        return false;
-    };
-    value
-        .get("state")
-        .and_then(|value| value.as_str())
+    runtime_state_of(state.services.as_ref())
+        .await
+        .as_deref()
         .is_some_and(state_is_live)
 }
 
-/// 有没有「刚变成 destroyed、且本地节点正是当前连接节点」的服务器。
-fn pause_needed(
-    servers: &[MyServer],
-    previous: &HashMap<String, Previous>,
-    current_node: Option<&str>,
+/// 只依赖服务层：AI 工具路径（`tools/configs.rs`）没有 `AppState`，用的是同一个判据。
+async fn runtime_state_of(services: &dyn crate::tools::services::VpnToolServices) -> Option<String> {
+    let value = services.runtime_status().await.ok()?;
+    value
+        .get("state")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+/// 该不该停隧道：运行时在跑，控制的正是这台服务器，而控制面说它已经销毁。
+fn should_stop(
+    runtime_state: Option<&str>,
+    is_current_owned_server: bool,
+    server_state: &str,
 ) -> bool {
-    let Some(current) = current_node else {
-        return false;
+    is_current_owned_server
+        && server_state == "destroyed"
+        && runtime_state.is_some_and(state_is_live)
+}
+
+/// 用户 / AI 主动操作时顺手检查：`server_id` 正是当前连接的自建服务器才查。
+///
+/// 只查不重试：网络失败按「什么都没发现」处理，不报错、不改任何状态。
+///
+/// **顺序**：详情先落库并（状态变化时）发出既有 `my-server-changed`，随后才停运行时。
+/// 事件比 `runtime_stop` 早几毫秒到界面，用户不可能在这几毫秒里操作，所以不为它
+/// 在 `servers.rs` 另开一条不落库的取数路径。
+///
+/// **超时只包「取详情 + 重读」**：`runtime_stop` 不是取消安全的——`manager.stop()`
+/// 拿到锁后先把状态置 `Stopping` 并取走 child，再 `terminate` 最多等 5 秒；被超时
+/// 砍掉会把运行时永远卡在 `stopping`。所以确定为已销毁后把停运行时丢到后台任务，
+/// 既不进超时，也不让详情 / 探测请求等它。
+pub(crate) async fn ensure_current_server_alive(
+    services: Arc<dyn VpnToolServices>,
+    server_id: &str,
+) {
+    const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    // 联网前先做便宜判断，避免无关的详情调用也打控制面。
+    if current_owned_server().as_deref() != Some(server_id) {
+        return;
+    }
+    if !runtime_state_of(services.as_ref())
+        .await
+        .as_deref()
+        .is_some_and(state_is_live)
+    {
+        return;
+    }
+
+    let fetch = |server_id: String| async move {
+        crate::control_plane::servers::get(&server_id).await
     };
-    servers.iter().any(|server| {
-        server.state == "destroyed"
-            && previous.get(&server.server_id).is_some_and(|prev| {
-                prev.state.as_deref() != Some("destroyed")
-                    && prev.node_id.as_deref() == Some(current)
-            })
-    })
+    // 网络往返之后再读一次：这 1–2 秒里用户可能切了节点或断开重连，
+    // 不能拿请求前的快照把新建的连接停掉。
+    let recheck = {
+        let services = Arc::clone(&services);
+        move || {
+            let services = Arc::clone(&services);
+            async move {
+                let runtime = runtime_state_of(services.as_ref()).await;
+                let still_current = current_owned_server().as_deref() == Some(server_id);
+                (runtime, still_current)
+            }
+        }
+    };
+
+    let stop_needed =
+        match tokio::time::timeout(CHECK_TIMEOUT, decide_stop(server_id, fetch, recheck)).await {
+            Ok(stop_needed) => stop_needed,
+            Err(_) => {
+                log::debug!("顺手检查服务器状态超时 server={server_id}");
+                return;
+            }
+        };
+    if !stop_needed {
+        return;
+    }
+    // 丢到后台：调用方（详情 / 探测）不必等运行时停完才返回，也天然不受取消影响。
+    log::info!("服务器已停机销毁，正在停止运行时 server={server_id}");
+    let server_id = server_id.to_string();
+    let services = Arc::clone(&services);
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = services.runtime_stop(false).await {
+            log::warn!("服务器已停机销毁，停止运行时失败 server={server_id}：{error}");
+        }
+    });
+}
+
+/// 这一轮要不要停隧道：取详情 + 往返后重读，**不含 `runtime_stop`**。
+///
+/// `recheck` 返回 `(运行时状态, 是否仍是当前节点)`，**必须在 `fetch` 之后取值**。
+async fn decide_stop<F, Fut, C, CFut>(server_id: &str, fetch: F, recheck: C) -> bool
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<MyServer, CpError>>,
+    C: Fn() -> CFut,
+    CFut: Future<Output = (Option<String>, bool)>,
+{
+    let server_state = match fetch(server_id.to_string()).await {
+        Ok(server) => server.state,
+        // 控制面明确说没有这台：比网络失败更该停，按 `destroyed` 处理。
+        Err(error) if error.code == "NOT_FOUND" => "destroyed".to_string(),
+        Err(error) => {
+            // 网络失败不等于服务器没了：什么都不做，下一动作再说。
+            log::debug!("顺手检查服务器状态失败 server={server_id}：{}", error.message);
+            return false;
+        }
+    };
+    let (runtime, is_current) = recheck().await;
+    should_stop(runtime.as_deref(), is_current, &server_state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    fn server(id: &str, state: &str) -> MyServer {
+    fn server(state: &str) -> MyServer {
         serde_json::from_value(json!({
-            "server_id": id,
+            "server_id": "srv_1",
             "name": "东京",
             "region": "sgp1",
             "plan": "s-1vcpu-1gb",
@@ -178,79 +197,6 @@ mod tests {
         .unwrap()
     }
 
-    fn prev(state: Option<&str>, node_id: Option<&str>) -> Previous {
-        Previous {
-            state: state.map(str::to_string),
-            node_id: node_id.map(str::to_string),
-        }
-    }
-
-    /// 刚变成 destroyed、且当前连接正用它的节点 → 先停运行时。
-    #[test]
-    fn a_newly_destroyed_server_using_the_current_node_needs_a_stop() {
-        let previous =
-            HashMap::from([("srv_1".to_string(), prev(Some("active"), Some("nd_1")))]);
-        assert!(pause_needed(
-            &[server("srv_1", "destroyed")],
-            &previous,
-            Some("nd_1")
-        ));
-    }
-
-    /// 首次轮询 / 刚重启：镜像行缺失但按 owned 节点兜底到了节点 id，同样要停。
-    #[test]
-    fn a_missing_mirror_row_still_matches_through_the_owned_node() {
-        let previous = HashMap::from([("srv_1".to_string(), prev(None, Some("nd_1")))]);
-        assert!(pause_needed(
-            &[server("srv_1", "destroyed")],
-            &previous,
-            Some("nd_1")
-        ));
-    }
-
-    /// 已经停过一次（镜像里已是 destroyed）不再重复停。
-    #[test]
-    fn an_already_seen_destroyed_server_does_not_need_another_stop() {
-        let previous = HashMap::from([(
-            "srv_1".to_string(),
-            prev(Some("destroyed"), Some("nd_1")),
-        )]);
-        assert!(!pause_needed(
-            &[server("srv_1", "destroyed")],
-            &previous,
-            Some("nd_1")
-        ));
-    }
-
-    /// 当前连接用的是别的节点、或者根本没连：不动隧道。
-    #[test]
-    fn a_destroyed_server_that_is_not_the_current_node_leaves_the_tunnel_alone() {
-        let previous =
-            HashMap::from([("srv_1".to_string(), prev(Some("active"), Some("nd_1")))]);
-        assert!(!pause_needed(
-            &[server("srv_1", "destroyed")],
-            &previous,
-            Some("nd_2")
-        ));
-        assert!(!pause_needed(
-            &[server("srv_1", "destroyed")],
-            &previous,
-            None
-        ));
-    }
-
-    /// 还有没 destroyed 的服务器时不误触发。
-    #[test]
-    fn a_running_server_never_pauses_the_tunnel() {
-        let previous =
-            HashMap::from([("srv_1".to_string(), prev(Some("active"), Some("nd_1")))]);
-        assert!(!pause_needed(
-            &[server("srv_1", "active")],
-            &previous,
-            Some("nd_1")
-        ));
-    }
-
     /// 启动窗口里销毁/删节点也必须停：`starting` / `restarting` 算在跑。
     #[test]
     fn starting_and_restarting_count_as_live() {
@@ -261,5 +207,240 @@ mod tests {
             assert!(!state_is_live(state), "{state} 不该算在跑");
         }
         assert!(!state_is_live(""), "未知状态不该算在跑");
+    }
+
+    /// 运行时没在跑：不停。
+    #[test]
+    fn an_idle_runtime_does_not_stop() {
+        assert!(!should_stop(Some("idle"), true, "destroyed"));
+        assert!(!should_stop(None, true, "destroyed"));
+    }
+
+    /// 连的不是自建服务器节点（或不是当前节点）：不停。
+    #[test]
+    fn a_node_that_is_not_the_current_owned_server_does_not_stop() {
+        assert!(!should_stop(Some("running"), false, "destroyed"));
+    }
+
+    /// 运行时在跑、服务器已被停机销毁、正是当前节点：要停。
+    #[test]
+    fn a_destroyed_server_on_the_current_node_stops_the_tunnel() {
+        assert!(should_stop(Some("running"), true, "destroyed"));
+        assert!(should_stop(Some("starting"), true, "destroyed"));
+    }
+
+    /// 服务器还活着：不动隧道。
+    #[test]
+    fn a_live_server_does_not_stop() {
+        for state in ["active", "healthy", "destroying", "booting"] {
+            assert!(!should_stop(Some("running"), true, state), "{state} 不该停");
+        }
+    }
+
+    /// 拉详情的网络失败：当作什么都没发现，不报错、不停。
+    #[tokio::test]
+    async fn a_network_failure_finds_nothing() {
+        let stop = decide_stop(
+            "srv_1",
+            |_server_id: String| async {
+                Err(CpError::new(
+                    "UPSTREAM_ERROR",
+                    "断网",
+                    true,
+                    json!({ "reason": "provider_unavailable" }),
+                ))
+            },
+            || async { (Some("running".to_string()), true) },
+        )
+        .await;
+        assert!(!stop);
+    }
+
+    /// 控制面明确说没有这台（404）：按已销毁处理，要停。
+    #[tokio::test]
+    async fn a_not_found_server_counts_as_destroyed() {
+        let stop = decide_stop(
+            "srv_1",
+            |_server_id: String| async {
+                Err(CpError::new("NOT_FOUND", "找不到这台服务器", false, json!({})))
+            },
+            || async { (Some("running".to_string()), true) },
+        )
+        .await;
+        assert!(stop);
+    }
+
+    /// 控制面说已销毁、仍是当前节点：要停。
+    #[tokio::test]
+    async fn a_destroyed_server_stops_the_tunnel_once() {
+        let stop = decide_stop(
+            "srv_1",
+            |_server_id: String| async { Ok(server("destroyed")) },
+            || async { (Some("running".to_string()), true) },
+        )
+        .await;
+        assert!(stop);
+    }
+
+    /// 往返期间用户切走了节点：重读必须发生在请求之后，否则会停掉新连接。
+    /// 把重读挪回请求前，这条测试就会失败（`switched` 此时还是 false）。
+    #[tokio::test]
+    async fn a_switch_during_the_round_trip_leaves_the_tunnel_alone() {
+        let switched = Arc::new(AtomicBool::new(false));
+
+        let switched_in = Arc::clone(&switched);
+        let recheck_switched = Arc::clone(&switched);
+        let stop = decide_stop(
+            "srv_1",
+            move |_server_id: String| {
+                let switched = Arc::clone(&switched_in);
+                async move {
+                    // 往返期间：用户切到了别的节点。
+                    switched.store(true, Ordering::SeqCst);
+                    Ok(server("destroyed"))
+                }
+            },
+            move || {
+                let switched = Arc::clone(&recheck_switched);
+                async move {
+                    let still_current = !switched.load(Ordering::SeqCst);
+                    (Some("running".to_string()), still_current)
+                }
+            },
+        )
+        .await;
+        assert!(!stop);
+    }
+
+    /// 往返期间用户断开了：同样不能拿请求前的快照继续停。
+    #[tokio::test]
+    async fn a_disconnect_during_the_round_trip_leaves_the_tunnel_alone() {
+        let disconnected = Arc::new(AtomicBool::new(false));
+
+        let disconnected_in = Arc::clone(&disconnected);
+        let recheck_disconnected = Arc::clone(&disconnected);
+        let stop = decide_stop(
+            "srv_1",
+            move |_server_id: String| {
+                let disconnected = Arc::clone(&disconnected_in);
+                async move {
+                    disconnected.store(true, Ordering::SeqCst);
+                    Ok(server("destroyed"))
+                }
+            },
+            move || {
+                let disconnected = Arc::clone(&recheck_disconnected);
+                async move {
+                    let runtime = if disconnected.load(Ordering::SeqCst) {
+                        Some("idle".to_string())
+                    } else {
+                        Some("running".to_string())
+                    };
+                    (runtime, true)
+                }
+            },
+        )
+        .await;
+        assert!(!stop);
+    }
+
+    fn store_with_node(id: &str, source: &str, source_key: &str) -> crate::store::Store {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn();
+            crate::store::configs::upsert_node(
+                &conn,
+                &crate::store::NewNode {
+                    id,
+                    name: "Tokyo",
+                    server: "203.0.113.10",
+                    port: 20343,
+                    method: "aes-256-gcm",
+                    password_ref: "node:nd",
+                    source,
+                    source_key,
+                },
+            )
+            .unwrap();
+        }
+        store
+    }
+
+    /// 自建节点：`source_key` 就是服务器 id（镜像行还没建也认）。
+    #[test]
+    fn an_owned_node_maps_to_its_server() {
+        let store = store_with_node("nd_a", crate::store::configs::SOURCE_OWNED, "srv_1");
+        let conn = store.conn();
+        assert_eq!(
+            owned_server_of_node_in(&conn, "nd_a").as_deref(),
+            Some("srv_1")
+        );
+    }
+
+    /// 种子 / 手动节点不是服务器节点：不映射。
+    #[test]
+    fn a_seed_node_maps_to_nothing() {
+        let store = store_with_node("nd_seed", "seed", "veyl_seed");
+        let conn = store.conn();
+        assert_eq!(owned_server_of_node_in(&conn, "nd_seed"), None);
+        assert_eq!(owned_server_of_node_in(&conn, "nd_missing"), None);
+    }
+
+    fn activate_config_with_current(conn: &rusqlite::Connection, node_id: Option<&str>) {
+        let dns = json!({ "mode": "auto", "local": [], "remote": [] });
+        let excludes = json!([]);
+        crate::store::configs::create(
+            conn,
+            &crate::store::NewConfig {
+                id: "cfg_1",
+                name: "A",
+                connection_mode: crate::store::configs::CONNECTION_SYSTEM_PROXY,
+                routing_mode: crate::store::configs::ROUTING_PROXY_ALL,
+                listen_port: Some(7890),
+                dns: &dns,
+                tun_excludes: &excludes,
+            },
+        )
+        .unwrap();
+        crate::store::configs::activate(conn, "cfg_1").unwrap();
+        if let Some(node_id) = node_id {
+            crate::store::configs::attach_node(conn, "cfg_1", node_id).unwrap();
+            crate::store::configs::update(
+                conn,
+                "cfg_1",
+                &crate::store::configs::ConfigPatch {
+                    current_node_id: Some(Some(node_id.into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    /// 当前节点是自建服务器节点 → 命中那台服务器。
+    #[test]
+    fn the_current_node_resolves_to_its_server() {
+        let store = store_with_node("nd_a", crate::store::configs::SOURCE_OWNED, "srv_1");
+        let conn = store.conn();
+        activate_config_with_current(&conn, Some("nd_a"));
+        assert_eq!(current_owned_server_in(&conn).as_deref(), Some("srv_1"));
+    }
+
+    /// 当前是种子节点 / 没有当前节点 → 不是服务器，返回 None。
+    #[test]
+    fn a_seed_current_node_is_not_a_server() {
+        let seed = store_with_node("nd_seed", "seed", "veyl_seed");
+        {
+            let conn = seed.conn();
+            activate_config_with_current(&conn, Some("nd_seed"));
+            assert_eq!(current_owned_server_in(&conn), None);
+        }
+
+        let empty = crate::store::Store::open_in_memory().unwrap();
+        {
+            let conn = empty.conn();
+            activate_config_with_current(&conn, None);
+            assert_eq!(current_owned_server_in(&conn), None);
+        }
     }
 }

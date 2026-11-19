@@ -360,7 +360,9 @@ impl Tool for NodeProbeTool {
     }
 
     fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::ReadOnly
+        // 探测本身只读，但探不通时会把「已停机销毁」的隧道停掉（2.45.2），
+        // 不再是纯只读工具。
+        PermissionLevel::Write
     }
 
     fn input_schema(&self) -> Value {
@@ -383,6 +385,7 @@ impl Tool for NodeProbeTool {
             );
         };
         // 未连接时要先起临时运行时（8s 上限），再经 Clash 发一次真实请求。
+        let mut probed_ok = false;
         let outcome = match tokio::time::timeout(
             std::time::Duration::from_secs(15),
             self.services.node_probe(node_id),
@@ -394,6 +397,7 @@ impl Tool for NodeProbeTool {
                     .get("status")
                     .and_then(Value::as_str)
                     .unwrap_or("untested");
+                probed_ok = status == "ok";
                 let message = data
                     .get("error")
                     .and_then(|error| error.get("message"))
@@ -432,6 +436,20 @@ impl Tool for NodeProbeTool {
                 AivpnError::new("TIMEOUT", "测速超过 15 秒，稍后再试").retryable(),
             ),
         };
+        // 探不通时顺手确认服务器是否已被停机销毁（AI 路径，用户原话：「顺便检查」）。
+        // 这里拿不到 `AppState`，所以只依赖服务层；失败一律吞掉，绝不影响探测结果。
+        if !probed_ok {
+            if let Some(server_id) = crate::agent::server_watch::owned_server_of_node(node_id) {
+                // 超时由 `ensure_current_server_alive` 自己包住「取详情 + 重读」；
+                // 确定为已销毁后的 `runtime_stop` 丢到后台任务，既不进超时、也不让
+                // 本次探测等它（被取消会把运行时卡在 stopping）。
+                crate::agent::server_watch::ensure_current_server_alive(
+                    Arc::clone(&self.services),
+                    &server_id,
+                )
+                .await;
+            }
+        }
         envelope::finish(ctx, "NodeProbe", outcome)
     }
 }

@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.21.0`
+> 契约版本：`3.21.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -123,7 +123,7 @@ type NextAction = {
 | `ConfigDelete` | ~~直接删除一套配置~~ | **3.18.0 已移出工具集**，见 §4.17 |
 | `RouteSetMode` | 跨家族切换会断开并重连（需显式确认） | 会短暂断网 |
 
-**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigDetail`、`NodeProbe`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`CategoryList`、`RulesStatus`、`OpenSettings`、`MyServers`、`MyServerFailure`、`CatalogOptions`）在 `PermissionMode::Default` 下直接允许；其余工具由 Host 的 `PermissionHandler` 一律返回 `Allow`。
+**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigDetail`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`CategoryList`、`RulesStatus`、`OpenSettings`、`MyServers`、`MyServerFailure`、`CatalogOptions`）在 `PermissionMode::Default` 下直接允许；其余工具（含 2.45.2 起的 `NodeProbe`：探不通时可能停隧道）由 Host 的 `PermissionHandler` 一律返回 `Allow`。
 
 不再存在的东西：
 
@@ -283,7 +283,7 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 12 | `NodeImportText` | `NodeImportTextTool` | 解析用户粘贴的 `ss://`（不联网） | `Write` | 中 |
 | 13 | `NodeCreate` | `NodeCreateTool` | 手动创建一个节点 | `Write` | 中 |
 | 14 | `NodeSwitch` | `NodeSwitchTool` | 切换某套配置的当前节点 | `Execute` | 中 |
-| 15 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `ReadOnly` | 只读 |
+| 15 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `Write` | 中（探测只读；探不通时会停已停机销毁的隧道，2.45.2） |
 | 16 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 / TUN | `Execute` | 高 |
 | 17 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
 | 18 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
@@ -1449,11 +1449,12 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 - **唯一测得口径**：Clash `GET /proxies/node-<id>/delay`，经 sing-box 真实发一次 HTTP。已连接且测的是当前配置 → 复用运行中的 Clash API；完全空闲 → 先起临时探针运行时（8 秒启动上限，测完保留 60 秒复用）。不再有 TCP 握手。
 - `status` 三态：`ok` / `unreachable` / `untested`；`unreachable` 只在 Clash delay 真的失败时出现。
 - **`untested` 不是工具错误，也不是「连不通」**：工具返回 `ok: true`，`status = "untested"`、`reachable = null`、`error.code = "PROBE_UNAVAILABLE"` + `reason`。模型只能说「这次没测成」并转述原因，**不得说成节点不可达**。
-- **节点不可达也不是工具错误**：`ok: true` + `status = "unreachable"` + `reachable = false` + `error`。只有 `node_id` 不存在才是 `Err`；整次调用超过 15 秒（含探针运行时启动）返回 `TIMEOUT`，可重试。
+- **节点不可达也不是工具错误**：`ok: true` + `status = "unreachable"` + `reachable = false` + `error`。只有 `node_id` 不存在才是 `Err`；探测本身超过 15 秒（含探针运行时启动）返回 `TIMEOUT`，可重试。
+- **探不通时顺手检查服务器（2.45.2）**：`status` 不是 `ok`（含超时与工具报错）且节点是当前连接的自建服务器时，Host 会 `GET /v1/servers/{id}` 一次；判定最多等 5 秒，超时不停；控制面说已销毁（或 404）就把 `runtime_stop` 丢到后台任务，工具立即返回。检查自身失败一律吞掉，不影响探测结果返回。**因此本工具会停止运行时，不再算纯只读。**
 - 不登记问题（J1）：单节点手动测试失败不等于用户被阻断。
 - **一次只测一个**：批量测速是 UI 专用（`commands.md` §4.6–§4.8），没有对应工具；不要循环调用本工具模拟批量。
 
-权限：`ReadOnly`。
+权限：`Write`（探测只读，但探不通时可能停隧道，见上）。
 
 ---
 
@@ -2103,7 +2104,8 @@ type HttpCheckData = {
 
 | 工具 | 重复调用行为 |
 |---|---|
-| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ConfigDetail` / `NodeProbe` / `JobGet` / `OpenSettings` / `MyServers` / `MyServerFailure` / `HttpCheck` | 纯读取，天然幂等 |
+| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ConfigDetail` / `JobGet` / `OpenSettings` / `MyServers` / `MyServerFailure` / `HttpCheck` | 纯读取，天然幂等 |
+| `NodeProbe` | 探测本身幂等；探不通时可能顺手停一次运行时（已停 → `ok: true`），重复调用无副作用 |
 | `RuntimeStart` | 已 `running` 且目标一致 → `ok: true`，`already_running: true` |
 | `RuntimeStop` / `VpnDisconnect` | 已 `idle` → `ok: true` |
 | ~~`ConfigCreate`~~ | **3.18.0 起无此工具**；全局配置由服务层懒创建（`commands.md` §3.1） |
@@ -2123,7 +2125,7 @@ type HttpCheckData = {
 | 工具 | 同步超时 |
 |---|---|
 | 只读工具 | 3s |
-| `NodeProbe` | 15s（含 8s 探针运行时启动） |
+| `NodeProbe` | 20s（15s 探测含 8s 探针运行时启动 + 最多 5s 判定；判为已销毁后的 `runtime_stop` 在后台，不计入；探通了不检查） |
 | `NodeImportUrl` | 15s（抓取 10s + 解析） |
 | `CatalogOptions` | 8s（走缓存，必要时取一次目录） |
 | `HttpCheck` | `timeout_ms`（默认 8s，最大 15s） |
@@ -2181,6 +2183,14 @@ type HttpCheckData = {
 ---
 
 ## 8. 变更记录
+
+### 3.21.1（未发布，2026-11-19：`NodeProbe` 不再纯只读）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `3.21.1`；§2.1 `NodeProbe` 由 `ReadOnly` 改为 `Write`（风险中），§0 的只读清单与 §2.1 列表同步移除；§4.28 增「探不通时顺手检查服务器、已销毁则停运行时」，权限改 `Write` | 权限 / 语义 | 2.45.2 起探测失败会给「已停机销毁」的服务器停隧道，不能再算纯只读 |
+| 2 | §5.2 幂等矩阵：`NodeProbe` 从「纯读取」一行移出，单列「探测幂等；探不通时可能顺手停一次运行时，重复调用无副作用」 | 约束 | 同上 |
+| 3 | §5.3 超时：`NodeProbe` 由 15s 改为 **20s（15s 探测 + 最多 5s 判定；判为已销毁后的 `runtime_stop` 丢后台，不计入）**；探测成功不检查，仍是 15s | 约束 | 同上 |
 
 ### 3.21.0（未发布：随 AI 自查第一批统一升版）
 
