@@ -5327,7 +5327,8 @@ impl VpnToolServices for WiredServices {
                     "name": server.name,
                     "region": server.region,
                     "state": server.state,
-                    "node_ready": server.node_id.is_some(),
+                    // 能否用来建配置看本地节点行，不看控制面 `node_id`（active 后就有值）。
+                    "node_ready": server.local_node_id.is_some(),
                     "monthly_usd": server.monthly_usd,
                     "daily_price_cents": server.daily_price_cents,
                     "transfer_gib": server.transfer_gib,

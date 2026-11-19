@@ -90,8 +90,16 @@ pub struct MyServer {
     pub ip: Option<String>,
     #[serde(default)]
     pub port: Option<u16>,
+    /// 控制面 id（`nd_…`）；机器 active 后就有值，**不代表本地能用**。
     #[serde(default)]
     pub node_id: Option<String>,
+    /// 本地节点镜像里的节点 id；本地已为这台机器建好节点行时才非空。
+    ///
+    /// **为空 = 本地还没有这台机器的节点行 = 用这台机器之前要先去取凭据。**
+    /// 判断「要不要取凭据」只看这个字段，不要看 `node_id`：控制面在 active 之后
+    /// 就会给出 `nd_…`，那时本地节点行往往还不存在，拿它判会永远为真。
+    #[serde(default)]
+    pub local_node_id: Option<String>,
     pub hourly_usd: f64,
     pub monthly_usd: f64,
     /// 售价快照（USD 分 / 天），即每天实际扣多少。
@@ -528,8 +536,8 @@ pub async fn list() -> Result<Vec<MyServer>, CpError> {
     // 否则并发 list 的旧快照可能删掉新快照刚建的行。
     if let Some(store) = crate::store::global() {
         let conn = store.conn();
-        for server in &servers {
-            cache_server(&conn, server);
+        for server in &mut servers {
+            cache_and_link(&conn, server);
         }
         let ids: Vec<&str> = servers
             .iter()
@@ -555,7 +563,7 @@ async fn get_with(client: &ControlPlane, server_id: &str) -> Result<MyServer, Cp
     remember_server_failure(&server);
     if let Some(store) = crate::store::global() {
         let conn = store.conn();
-        cache_server(&conn, &server);
+        cache_and_link(&conn, &mut server);
     }
     Ok(server)
 }
@@ -575,7 +583,7 @@ pub async fn rename(server_id: &str, name: &str) -> Result<MyServer, CpError> {
     remember_server_failure(&server);
     if let Some(store) = crate::store::global() {
         let conn = store.conn();
-        cache_server(&conn, &server);
+        cache_and_link(&conn, &mut server);
     }
     Ok(server)
 }
@@ -777,7 +785,7 @@ pub async fn destroy(server_id: &str, confirm: bool) -> Result<MyServer, CpError
     // 销毁即销毁凭据（§19.8）；节点记录保留并能在界面标「服务器已销毁」。
     if let Some(store) = crate::store::global() {
         let conn = store.conn();
-        cache_server(&conn, &server);
+        cache_and_link(&conn, &mut server);
         forget_credentials(&conn, server_id, server.node_id.as_deref(), |key| {
             let _ = crate::secrets::delete_secret(key);
         });
@@ -856,6 +864,7 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
             ip: None,
             port: None,
             node_id: None,
+            local_node_id: None,
             hourly_usd: old.hourly_usd,
             monthly_usd: old.monthly_usd,
             daily_price_cents: old.daily_price_cents,
@@ -1014,10 +1023,20 @@ fn cache_server(conn: &rusqlite::Connection, server: &MyServer) {
     }
 }
 
+/// 落库后把本地节点关联回填到返回结构里。
+///
+/// 用的是 `cache_server` 里同一个 `linked_node_id`，在落库之后对每台再算一次，
+/// 保证返回结构里的值和本地镜像一致；`node_id` 保持控制面原值不动，只填 `local_node_id`。
+fn cache_and_link(conn: &rusqlite::Connection, server: &mut MyServer) {
+    cache_server(conn, server);
+    server.local_node_id = linked_node_id(conn, &server.server_id, server.node_id.as_deref());
+}
+
 fn local_server(server_id: &str) -> Option<MyServer> {
     let store = crate::store::global()?;
     let conn = store.conn();
     let row = crate::store::servers::get(&conn, server_id).ok().flatten()?;
+    let node_id = linked_node_id(&conn, server_id, row.node_id.as_deref());
     Some(MyServer {
         server_id: row.id,
         name: row.name,
@@ -1030,7 +1049,9 @@ fn local_server(server_id: &str) -> Option<MyServer> {
         verifying_at: None,
         ip: None,
         port: None,
-        node_id: linked_node_id(&conn, server_id, row.node_id.as_deref()),
+        node_id: node_id.clone(),
+        // 本地兜底的这份里两个字段同值：镜像里能用的只有本地节点 id。
+        local_node_id: node_id,
         hourly_usd: row.hourly_usd,
         monthly_usd: row.monthly_usd,
         daily_price_cents: row.daily_price_cents,
@@ -1149,6 +1170,7 @@ mod tests {
             ip: None,
             port: None,
             node_id: None,
+            local_node_id: None,
             hourly_usd: 0.009,
             monthly_usd: 6.0,
             daily_price_cents: 20,
@@ -1557,5 +1579,62 @@ mod tests {
             linked_node_id(&conn, "srv_2", Some("nd_local")),
             Some("nd_local".into())
         );
+    }
+
+    /// active 的机器控制面已经给了 `nd_…`，但本地还没有节点行：
+    /// 必须能从返回里看出「要去取凭据」，并且 `node_id` 仍是控制面 id。
+    #[test]
+    fn an_active_server_without_a_local_node_row_still_needs_credentials() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let mut value = sample_server_json();
+        value["state"] = json!("active");
+        value["node_id"] = json!("nd_abc");
+        let mut server: MyServer = serde_json::from_value(value).unwrap();
+
+        cache_and_link(&conn, &mut server);
+
+        assert_eq!(server.local_node_id, None);
+        assert_eq!(server.node_id.as_deref(), Some("nd_abc"));
+        let returned = serde_json::to_value(&server).unwrap();
+        assert!(returned["local_node_id"].is_null(), "{returned}");
+        assert_eq!(returned["node_id"], json!("nd_abc"));
+    }
+
+    /// 取过凭据（`persist_with` 建本地节点行）之后，同一条列表响应就带上本地节点 id。
+    #[test]
+    fn getting_credentials_fills_the_local_node_id_on_the_next_list() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let mut value = sample_server_json();
+        value["state"] = json!("active");
+        value["node_id"] = json!("nd_abc");
+        let mut before: MyServer = serde_json::from_value(value.clone()).unwrap();
+        cache_and_link(&conn, &mut before);
+        assert_eq!(before.local_node_id, None);
+
+        // 与 `persist_with` 同形：本机建的节点行，`source_key` = server_id。
+        crate::store::configs::upsert_node(
+            &conn,
+            &crate::store::NewNode {
+                id: "nd_local",
+                name: "Tokyo",
+                server: "203.0.113.10",
+                port: 20343,
+                method: "aes-256-gcm",
+                password_ref: "node:nd_local",
+                source: crate::store::configs::SOURCE_OWNED,
+                source_key: "srv_1",
+            },
+        )
+        .unwrap();
+
+        // 下一次列表：控制面给同一条响应，重新解析后走同一条回填路径。
+        let mut after: MyServer = serde_json::from_value(value).unwrap();
+        cache_and_link(&conn, &mut after);
+        assert_eq!(after.local_node_id.as_deref(), Some("nd_local"));
+        assert_eq!(after.node_id.as_deref(), Some("nd_abc"));
+        let returned = serde_json::to_value(&after).unwrap();
+        assert_eq!(returned["local_node_id"], json!("nd_local"));
     }
 }
