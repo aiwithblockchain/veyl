@@ -436,6 +436,24 @@ export function useVpnSession(
         });
         return;
       }
+      if (event.name === AGENT_EVENTS.myServerRenamed) {
+        // 改名事件只带一个节点名：就地替换，不重拉配置。
+        const { local_node_id, name } = event.payload;
+        if (local_node_id) {
+          setActiveConfig((current) => {
+            if (!current?.nodes?.some((n) => n.node_id === local_node_id)) {
+              return current;
+            }
+            return {
+              ...current,
+              nodes: current.nodes.map((n) =>
+                n.node_id === local_node_id ? { ...n, name } : n,
+              ),
+            };
+          });
+        }
+        return;
+      }
       if (
         event.name === AGENT_EVENTS.configChanged ||
         event.name === AGENT_EVENTS.nodeListChanged ||

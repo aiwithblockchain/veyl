@@ -782,6 +782,8 @@ export interface MyServerRenamedPayload {
   contract_version: string;
   server_id: string;
   name: string;
+  /** 本地节点行 id；空 = 本地还没有节点行，连接页本来也没有它。 */
+  local_node_id: string | null;
   emitted_at: string;
 }
 

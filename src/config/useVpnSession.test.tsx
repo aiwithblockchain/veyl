@@ -186,6 +186,83 @@ describe("useVpnSession 状态迁移", () => {
     expect(result.current.connection).toBe("connected");
   });
 
+  it("服务器改名就地更新节点名，不重拉配置详情", async () => {
+    const bus: { emit: ((event: AgentEvent) => void) | null } = { emit: null };
+    let detailCalls = 0;
+    const bridge = {
+      subscribe: (listener: (event: AgentEvent) => void) => {
+        bus.emit = listener;
+        return () => {
+          bus.emit = null;
+        };
+      },
+      configList: async () => ({ configs: [], active_config_id: CONFIG_ID }),
+      configDetail: async () => {
+        detailCalls += 1;
+        return startDetail("tun");
+      },
+      getRuntimeSnapshot: async () => runtimeSnapshot("idle"),
+    } as unknown as AgentBridge;
+
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(detailCalls).toBe(1);
+    expect(result.current.activeConfig?.nodes[0]?.name).toBe("东京 01");
+
+    act(() =>
+      bus.emit?.({
+        name: AGENT_EVENTS.myServerRenamed,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          server_id: "srv_1",
+          name: "改后的名字",
+          local_node_id: "node_1",
+          emitted_at: new Date().toISOString(),
+        },
+      }),
+    );
+
+    await waitFor(() =>
+      expect(result.current.activeConfig?.nodes[0]?.name).toBe("改后的名字"),
+    );
+    // 就地替换，没有退化成重拉。
+    expect(detailCalls).toBe(1);
+  });
+
+  it("改名事件没有本地节点时什么都不做：activeConfig 引用不变", async () => {
+    const bus: { emit: ((event: AgentEvent) => void) | null } = { emit: null };
+    const bridge = {
+      subscribe: (listener: (event: AgentEvent) => void) => {
+        bus.emit = listener;
+        return () => {
+          bus.emit = null;
+        };
+      },
+      configList: async () => ({ configs: [], active_config_id: CONFIG_ID }),
+      configDetail: async () => startDetail("tun"),
+      getRuntimeSnapshot: async () => runtimeSnapshot("idle"),
+    } as unknown as AgentBridge;
+
+    const { result } = renderHook(() => useVpnSession(bridge, false));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const before = result.current.activeConfig;
+
+    act(() =>
+      bus.emit?.({
+        name: AGENT_EVENTS.myServerRenamed,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          server_id: "srv_1",
+          name: "没有节点的名字",
+          local_node_id: null,
+          emitted_at: new Date().toISOString(),
+        },
+      }),
+    );
+
+    expect(result.current.activeConfig).toBe(before);
+  });
+
   it("乱序到达时先到的 idle 事件收尾，迟到的 stopping 不会卡住界面", () => {
     const { bridge, bus } = makeBridge();
     const { result } = renderHook(() => useVpnSession(bridge, false));

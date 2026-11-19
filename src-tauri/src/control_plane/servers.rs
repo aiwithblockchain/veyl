@@ -584,6 +584,14 @@ pub async fn rename(server_id: &str, name: &str) -> Result<MyServer, CpError> {
     if let Some(store) = crate::store::global() {
         let conn = store.conn();
         cache_and_link(&conn, &mut server);
+        // 连接页读的是本地节点行，改名必须跟着落到 `nodes.name`；
+        // 只改展示字段，不重建配置、不碰运行时。节点还没落地（没取过凭据）就跳过——
+        // 首次取凭据时用的就是改名后的服务器名。
+        if let Some(node_id) = server.local_node_id.as_deref() {
+            if let Err(error) = crate::store::configs::rename_node(&conn, node_id, &server.name) {
+                log::warn!("同步节点名失败：{error}");
+            }
+        }
     }
     Ok(server)
 }
