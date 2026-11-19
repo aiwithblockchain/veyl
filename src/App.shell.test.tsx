@@ -933,8 +933,11 @@ describe("三区外壳与连接舞台", () => {
     fireEvent.click(screen.getByRole("button", { name: /新建节点/ }));
     await screen.findByRole("heading", { name: "新建节点" });
 
+    // 助手在窄窗口默认收起：点「让 AI 帮我选」必须先把面板展开，消息不能发进看不见的地方。
+    expect(screen.queryByRole("button", { name: "展开助手" })).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "让 AI 帮我选" }));
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("button", { name: "展开助手" })).toBeNull();
     const call = send.mock.calls[0];
     expect(call[1]).toBe("帮我选一个地区和规格。");
     expect(
@@ -943,6 +946,55 @@ describe("三区外壳与连接舞台", () => {
     ).toMatchObject({ screen: "new_node", last_action: { id: "new_node.ask_ai" } });
     expect(create).not.toHaveBeenCalled();
     expect(localStorage.getItem("veyl.configs.mock.v1")).toBeNull();
+  }, 15_000);
+
+  it("AI 未配置时点「问 AI」只提示并进设置，不展开面板", async () => {
+    seedCardConfig();
+    // 启动时还能读到 Key（进得去主界面），关一次设置重读时变为未配置。
+    vi.spyOn(bridge, "getDeepSeekKey")
+      .mockResolvedValueOnce({
+        masked: "sk-****0123",
+        verified: true,
+        validation: "ok",
+      })
+      .mockResolvedValue({
+        masked: null,
+        verified: false,
+        validation: "unverified",
+      });
+    // mock 运行时内部仍记得 Key，服务商目录会继续报「可用」；这里一并清空。
+    vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
+      providers: [],
+      activeProviderId: null,
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("先做这一步")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "关闭设置" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull(),
+    );
+    // closeSettings 里异步重读 AI 状态，等它落地再点。
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryByRole("button", { name: "展开助手" })).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "问 AI" }));
+
+    expect(
+      await screen.findByText("还没有配置 AI，先配置后再对话。"),
+    ).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
+    // 落在 AI 段，而不是任意一段设置。
+    expect(
+      screen.getByText("AI 助手用这里的服务回答你；换服务或换模型都在这里。"),
+    ).toBeTruthy();
+    // 没有先展开再跳走：助手仍是收起的 tab。
+    expect(screen.queryByRole("button", { name: "展开助手" })).not.toBeNull();
   }, 15_000);
 
   it("控件文案与舞台一致：node_pick 用国家 + 序号", async () => {

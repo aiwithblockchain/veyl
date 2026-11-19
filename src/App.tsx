@@ -1727,27 +1727,22 @@ export default function App() {
     });
   };
 
-  // 「新建节点」暂由 AI 接手：打开右栏并给输入框焦点，后续流程下一阶段接。
-  const handleAskAiFromConsole = () => {
+  const openAssistant = () => {
     panelOpenRef.current = true;
     setPanelOpen(true);
     setAiUnread(false);
+  };
+
+  // 「新建节点」暂由 AI 接手：打开右栏并给输入框焦点，后续流程下一阶段接。
+  const handleAskAiFromConsole = () => {
+    openAssistant();
     setComposerFocusSignal((value) => value + 1);
   };
 
-  // 连接页两个 chip 的「问 AI」：先展开右栏再发固定问题；AI 未配置时 handleAskAi 会提示并打开设置。
-  const handleAskAiFromStage = (prompt: string) => {
-    panelOpenRef.current = true;
-    setPanelOpen(true);
-    setAiUnread(false);
-    handleAskAi(prompt);
-  };
-
-  // 设置页「咨询 AI」：并排展开助手，并立刻发一条当前设置总览。
-  const handleConsultAi = (prompt: string) => {
-    panelOpenRef.current = true;
-    setPanelOpen(true);
-    setAiUnread(false);
+  // 三个「问 AI」入口共用：连接页两个 chip、设置页「咨询 AI」、新建节点向导的「让 AI 帮我选」。
+  // AI 未配置时不展开——handleAskAi 会提示并跳设置，先展开只会白闪一下。
+  const askAiInPanel = (prompt: string) => {
+    if (aiReady) openAssistant();
     handleAskAi(prompt);
   };
 
@@ -1808,7 +1803,7 @@ export default function App() {
   };
 
   const handleDiagnose = () => {
-    handleAskAi(CONNECT_DIAG_ASK);
+    askAiInPanel(CONNECT_DIAG_ASK);
   };
 
   // 查看账单：先确认登录；没登录就拉起登录，成功后回到账户页。
@@ -2313,7 +2308,7 @@ export default function App() {
               onAuthRequired={myServers.openLogin}
               onAskAi={() => {
                 lastActionRef.current = { id: "new_node.ask_ai" };
-                handleAskAi("帮我选一个地区和规格。");
+                askAiInPanel("帮我选一个地区和规格。");
               }}
               onAiLocate={handleAiLocate}
               aiSelection={stageSelect}
@@ -2415,7 +2410,7 @@ export default function App() {
           routingMode={activeRoutingMode}
           onSetConnectMode={handleSetConnectMode}
           onSetRoutingMode={handleSetRoutingMode}
-          onAskAi={handleAskAiFromStage}
+          onAskAi={askAiInPanel}
         />
       ) : (
         <StartChoice
@@ -2535,14 +2530,14 @@ export default function App() {
         onAskAi={(text, section) => {
           setSettingsSection(section);
           closeSettings();
-          handleAskAi(text);
+          askAiInPanel(text);
         }}
         routingMode={activeRoutingMode}
         onSetRoutingMode={handleSetRoutingMode}
         onConnectModeChanged={() => vpn.reload()}
         assistant={aiPanel}
         onConsultingChange={setSettingsConsulting}
-        onConsultAi={handleConsultAi}
+        onConsultAi={askAiInPanel}
         onSectionChange={(section) => {
           setSettingsSection(section);
           lastActionRef.current = {
