@@ -56,7 +56,7 @@ async function clickRailServer(name: RegExp) {
 function detailConnect() {
   const detail = document.querySelector(".myservers__detail");
   if (!(detail instanceof HTMLElement)) throw new Error("详情不在");
-  fireEvent.click(within(detail).getByRole("button", { name: "连接" }));
+  fireEvent.click(within(detail).getByRole("button", { name: "去连接" }));
 }
 
 function navConnect() {
@@ -166,14 +166,16 @@ function prepare(servers: MyServer[] = []) {
   });
   vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers });
   vi.spyOn(bridge, "myServerGet").mockResolvedValue(SERVER);
-  vi.spyOn(bridge, "myServerCredentials").mockResolvedValue({
-    server_id: SERVER.server_id,
-    node_id: "local_node_srv_1",
-    name: "新加坡 1 01",
-    host: "45.76.20.100",
-    port: 8388,
-    method: "aes-256-gcm",
-  });
+  const credentials = vi
+    .spyOn(bridge, "myServerCredentials")
+    .mockResolvedValue({
+      server_id: SERVER.server_id,
+      node_id: "local_node_srv_1",
+      name: "新加坡 1 01",
+      host: "45.76.20.100",
+      port: 8388,
+      method: "aes-256-gcm",
+    });
   const runtimeStart = vi.spyOn(bridge, "runtimeStart");
   const configCreate = vi.spyOn(bridge, "configCreate");
   const stop = vi.spyOn(bridge, "runtimeStop");
@@ -189,7 +191,7 @@ function prepare(servers: MyServer[] = []) {
   const nodeSwitch = vi
     .spyOn(bridge, "nodeSwitch")
     .mockResolvedValue({} as never);
-  return { runtimeStart, configCreate, nodeAttach, nodeSwitch, stop, activate };
+  return { runtimeStart, configCreate, nodeAttach, nodeSwitch, stop, activate, credentials };
 }
 
 beforeAll(async () => {
@@ -391,8 +393,63 @@ describe("destination 与我的服务器", () => {
     expect(configCreate).not.toHaveBeenCalled();
   });
 
-  it("服务器节点绑进全局池：attach → node_switch，不新建配置", async () => {
-    const { configCreate, nodeAttach, nodeSwitch, activate } = prepare([SERVER]);
+  it("未连接点去连接：只取凭据并入池，预选这台，不设当前节点、不启动", async () => {
+    const { configCreate, nodeAttach, nodeSwitch, runtimeStart, activate, credentials } =
+      prepare([SERVER]);
+    const seedNode = {
+      node_id: "node_1",
+      name: "东京 01",
+      server: "203.0.113.1",
+      port: 8388,
+      method: "aes-128-gcm",
+      protocol: "shadowsocks",
+      source: "seed",
+      created_at: 0,
+    };
+    const srvNode = {
+      node_id: "local_node_srv_1",
+      name: "新加坡 1 01",
+      server: "45.76.20.100",
+      port: 8388,
+      method: "aes-256-gcm",
+      protocol: "shadowsocks",
+      source: "server",
+      created_at: 0,
+    };
+    let attached = false;
+    vi.mocked(bridge.configDetail).mockImplementation(
+      async () =>
+        ({
+          config_id: CONFIG_ID,
+          name: SUMMARY.name,
+          connect_mode: "tun",
+          routing_mode: "proxy_all",
+          node_count: attached ? 2 : 1,
+          listen_port: null,
+          is_active: true,
+          current_node_id: "node_1",
+          created_at: 0,
+          updated_at: 0,
+          last_used_at: null,
+          nodes: attached ? [seedNode, srvNode] : [seedNode],
+          dns: { mode: "auto", local: [], remote: [] },
+          tun_excludes: [],
+          layout: null,
+          layout_revision: null,
+        }) as never,
+    );
+    nodeAttach.mockImplementation(async () => {
+      attached = true;
+      return {
+        config_id: CONFIG_ID,
+        created_config: false,
+        attached_node_ids: ["local_node_srv_1"],
+        skipped_node_ids: [],
+        node_count: 2,
+        current_node_id: "node_1",
+      };
+    });
+
     render(<App />);
     await screen.findByRole("button", { name: "连接节点" });
 
@@ -400,14 +457,26 @@ describe("destination 与我的服务器", () => {
     await clickRailServer(/新加坡 1 · DigitalOcean/);
     detailConnect();
 
+    await waitFor(() => expect(credentials).toHaveBeenCalledWith(SERVER.server_id));
     await waitFor(() =>
       expect(nodeAttach).toHaveBeenCalledWith({ nodeIds: ["local_node_srv_1"] }),
     );
-    await waitFor(() =>
-      expect(nodeSwitch).toHaveBeenCalledWith(CONFIG_ID, "local_node_srv_1"),
-    );
+    // 跳到控制台：预选这台，但不标「最快」。
+    await waitFor(() => {
+      const row = screen
+        .getAllByRole("option")
+        .find((item) => item.textContent?.includes("新加坡 1 01"));
+      expect(row?.getAttribute("aria-selected")).toBe("true");
+    });
+    expect(document.querySelector(".stage-node__fastest")).toBeNull();
+    // 不设当前节点、不发起连接、不另建配置。
+    expect(nodeSwitch).not.toHaveBeenCalled();
+    expect(runtimeStart).not.toHaveBeenCalled();
     expect(configCreate).not.toHaveBeenCalled();
     expect(activate).not.toHaveBeenCalled();
+    expect(await bridge.configDetail(CONFIG_ID)).toMatchObject({
+      current_node_id: "node_1",
+    });
   });
 
   it("取凭据期间切走：resolve 后不建配置、不跳回连接屏", async () => {
@@ -505,8 +574,11 @@ describe("destination 与我的服务器", () => {
   });
 });
 
-describe("已连接时改用服务器节点", () => {
-  function prepareConnected() {
+describe("去连接：已连接或启动中一条命令都不发", () => {
+  function prepareConnected(
+    runtimeState: "running" | "starting" = "running",
+    currentNodeId: "node_1" | "node_srv_1" = "node_1",
+  ) {
     const spies = prepare([SERVER]);
     const state = {
       runtimeConfigId: CONFIG_ID as string | null,
@@ -539,14 +611,17 @@ describe("已连接时改用服务器节点", () => {
       name: SUMMARY.name,
       connect_mode: "system_proxy",
       routing_mode: "direct",
-      node_count: state.attached ? 2 : 1,
+      node_count: state.attached || currentNodeId === "node_srv_1" ? 2 : 1,
       listen_port: null,
       is_active: true,
-      current_node_id: state.switched ?? "node_1",
+      current_node_id: state.switched ?? currentNodeId,
       created_at: 0,
       updated_at: 0,
       last_used_at: null,
-      nodes: [seedNode, ...(state.attached ? [serverNode] : [])],
+      nodes: [
+        seedNode,
+        ...(state.attached || currentNodeId === "node_srv_1" ? [serverNode] : []),
+      ],
       dns: { mode: "auto", local: [], remote: [] },
       tun_excludes: [],
       layout: null,
@@ -556,11 +631,14 @@ describe("已连接时改用服务器节点", () => {
     const running = () => {
       state.at += 1000;
       return {
-        state: "running",
+        state: runtimeState,
         config_id: CONFIG_ID,
         config_name: SUMMARY.name,
-        node_id: state.switched ?? "node_1",
-        node_name: state.switched ? "新加坡 1 01" : "东京 01",
+        node_id: state.switched ?? currentNodeId,
+        node_name:
+          (state.switched ?? currentNodeId) === "node_srv_1"
+            ? "新加坡 1 01"
+            : "东京 01",
         connected_since: new Date(state.at).toISOString(),
         last_transition_at: new Date(state.at).toISOString(),
         system_proxy_enabled: true,
@@ -595,57 +673,89 @@ describe("已连接时改用服务器节点", () => {
     return { ...spies, attach, nodeSwitch, state };
   }
 
-  async function openServerDetail() {
+  async function openServerDetail(expected: string) {
     render(<App />);
     await waitFor(() =>
-      expect(
-        document.querySelector(".state-line__label")?.textContent,
-      ).toContain("已连接"),
+      expect(screen.getAllByText(expected).length).toBeGreaterThan(0),
     );
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
     await clickRailServer(/新加坡 1 · DigitalOcean/);
   }
 
-  it("attach → node_switch → 启动，旧连接交给 runtime_start 停", async () => {
-    const { runtimeStart, attach, nodeSwitch, state, activate, stop } =
-      prepareConnected();
+  it("已连接点去连接：五个命令一个都不发，只切页面并提示", async () => {
+    const { runtimeStart, attach, nodeSwitch, stop, credentials, state } =
+      prepareConnected("running");
 
-    await openServerDetail();
+    await openServerDetail("已连接");
     detailConnect();
 
-    await waitFor(() => expect(runtimeStart).toHaveBeenCalledTimes(1));
-    expect(attach).toHaveBeenCalledWith({ nodeIds: ["local_node_srv_1"] });
-    expect(nodeSwitch).toHaveBeenCalledWith(CONFIG_ID, "local_node_srv_1");
-    expect(runtimeStart).toHaveBeenCalledWith(CONFIG_ID);
-    expect(attach.mock.invocationCallOrder[0]).toBeLessThan(
-      nodeSwitch.mock.invocationCallOrder[0],
+    expect(
+      await screen.findByText("当前正在使用另一台，要换成这台，先在控制台断开。"),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /我的服务器/ }).getAttribute("aria-pressed"),
+      ).not.toBe("true"),
     );
-    expect(nodeSwitch.mock.invocationCallOrder[0]).toBeLessThan(
-      runtimeStart.mock.invocationCallOrder[0],
-    );
-    expect(bridge.configCreate).not.toHaveBeenCalled();
-    expect(activate).not.toHaveBeenCalled();
-    // 停旧连接由 runtime_start 自己完成（commands.md §7.1），界面不再额外 stop。
-    expect(stop).not.toHaveBeenCalled();
-    expect(state.runtimeConfigId).toBe(CONFIG_ID);
-  });
-
-  it("attach 失败时旧连接不受影响", async () => {
-    const { runtimeStart, attach, nodeSwitch, state, stop } = prepareConnected();
-    attach.mockRejectedValue({
-      code: "TIMEOUT",
-      message: "请求超时。",
-      retryable: true,
-      details: { reason: "timeout" },
-    });
-
-    await openServerDetail();
-    detailConnect();
-
-    expect(await screen.findByText(/请求超时/)).toBeTruthy();
+    expect(credentials).not.toHaveBeenCalled();
+    expect(attach).not.toHaveBeenCalled();
     expect(nodeSwitch).not.toHaveBeenCalled();
     expect(runtimeStart).not.toHaveBeenCalled();
     expect(stop).not.toHaveBeenCalled();
+    // 连接状态与当前节点都不动。
+    expect(state.switched).toBeNull();
+    expect(state.runtimeConfigId).toBe(CONFIG_ID);
+    expect(document.querySelector(".state-line__label")?.textContent).toContain(
+      "已连接",
+    );
+  });
+
+  it("已连接且连的就是这台：只切页面，不弹提示", async () => {
+    const { runtimeStart, attach, nodeSwitch, stop, credentials, state } =
+      prepareConnected("running", "node_srv_1");
+
+    await openServerDetail("已连接");
+    detailConnect();
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /我的服务器/ }).getAttribute("aria-pressed"),
+      ).not.toBe("true"),
+    );
+    expect(
+      screen.queryByText("当前正在使用另一台，要换成这台，先在控制台断开。"),
+    ).toBeNull();
+    expect(credentials).not.toHaveBeenCalled();
+    expect(attach).not.toHaveBeenCalled();
+    expect(nodeSwitch).not.toHaveBeenCalled();
+    expect(runtimeStart).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+    expect(state.switched).toBeNull();
+    expect(state.runtimeConfigId).toBe(CONFIG_ID);
+    expect(document.querySelector(".state-line__label")?.textContent).toContain(
+      "已连接",
+    );
+  });
+
+  it("启动中点去连接：同样一个命令都不发，连接状态不变", async () => {
+    const { runtimeStart, attach, nodeSwitch, stop, credentials, state } =
+      prepareConnected("starting");
+
+    await openServerDetail("正在连接");
+    detailConnect();
+
+    expect(
+      await screen.findByText("当前正在使用另一台，要换成这台，先在控制台断开。"),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.getAllByText("正在连接").length).toBeGreaterThan(0),
+    );
+    expect(credentials).not.toHaveBeenCalled();
+    expect(attach).not.toHaveBeenCalled();
+    expect(nodeSwitch).not.toHaveBeenCalled();
+    expect(runtimeStart).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+    expect(state.switched).toBeNull();
     expect(state.runtimeConfigId).toBe(CONFIG_ID);
   });
 
@@ -726,7 +836,7 @@ describe("已连接时改用服务器节点", () => {
     detailConnect();
     await waitFor(() => expect(nodeAttach).toHaveBeenCalledTimes(2));
 
-    expect(nodeSwitch).toHaveBeenCalledTimes(2);
+    expect(nodeSwitch).not.toHaveBeenCalled();
     expect(configCreate).not.toHaveBeenCalled();
     expect(detail.nodes.map((node) => node.node_id)).toEqual([
       "node_1",

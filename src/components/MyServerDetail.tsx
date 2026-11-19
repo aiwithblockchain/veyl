@@ -20,18 +20,14 @@ interface Props {
   regionLabel: string;
   /** 身份不可用：只读，不提供任何改动机器的操作。 */
   readOnly?: boolean;
-  /** 当前连接的就是这台。 */
-  connectedHere?: boolean;
   /** 打开充值：就绪后扣费失败（余额不够）时给「去充值」。 */
   onTopUp?: () => void;
   /** 失败时把结构化失败交给 AI。 */
   onAiLocate?: (serverId: string) => void;
   /** 再建一台：打开 client 舞台的新建节点。 */
   onCreateAnother: () => void;
-  /** 可用时去取凭据并连接这台（Host 验签后把节点设为当前）。 */
+  /** 可用时去取凭据并把这台的节点送进全局池，再切到控制台。 */
   onUseServer: (server: MyServer) => void | Promise<void>;
-  /** 连接的就是这台时，主按钮执行断开。 */
-  onDisconnect?: () => void;
   onChanged: () => void;
   /** 重建成功：选中 newServerId，详情继续显示安装进度。 */
   onRebuilt: (serverId: string, state: MyServerState) => void;
@@ -57,12 +53,10 @@ export function MyServerDetail({
   server,
   regionLabel,
   readOnly = false,
-  connectedHere = false,
   onTopUp,
   onAiLocate,
   onCreateAnother,
   onUseServer,
-  onDisconnect,
   onChanged,
   onRebuilt,
   onGone,
@@ -215,17 +209,11 @@ export function MyServerDetail({
       : server.state === "gone"
         ? { label: "重新购买", disabled: locked, onClick: onCreateAnother }
         : ready
-          ? connectedHere
-            ? {
-                label: "断开",
-                disabled: locked || !onDisconnect,
-                onClick: () => onDisconnect?.(),
-              }
-            : {
-                label: "连接",
-                disabled: locked || useBusy,
-                onClick: () => void useServerNow(),
-              }
+          ? {
+              label: "去连接",
+              disabled: locked || useBusy,
+              onClick: () => void useServerNow(),
+            }
           : null;
 
   /** 没建成的机器不存在「本期有效至」：费用行只说退款结论。 */

@@ -148,7 +148,12 @@ interface StageOverrides {
   onReconnect?: () => void;
   failedAfterConnected?: boolean;
   onSwitchNode?: (nodeId: string) => Promise<{ ok: boolean; message?: string }>;
-  preselect?: { configId: string; nodeId: string; nonce: number } | null;
+  preselect?: {
+    configId: string;
+    nodeId: string;
+    nonce: number;
+    markFastest?: boolean;
+  } | null;
   trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
   trialExpiresAt?: string | null;
   destroyedNodeIds?: ReadonlySet<string>;
@@ -432,7 +437,7 @@ describe("连接舞台", () => {
   });
 
   it("试用完成只预选一次，之后测速不重新推导", () => {
-    const preselect = { configId: "cfg_1", nodeId: "n2", nonce: 1 };
+    const preselect = { configId: "cfg_1", nodeId: "n2", nonce: 1, markFastest: true };
     const view = renderStage({
       config: { ...CONFIG, current_node_id: null },
       nodeProbes: probes({
@@ -460,6 +465,20 @@ describe("连接舞台", () => {
     expect(rows[0].querySelector(".stage-node__fastest")).toBeNull();
   });
 
+  it("预选缺省不标「最快」：从服务器详情跳过来没测过速", () => {
+    renderStage({
+      config: { ...CONFIG, current_node_id: null },
+      nodeProbes: probes({
+        results: { n1: probeResult("n1", 90), n2: probeResult("n2", 42) },
+      }),
+      preselect: { configId: "cfg_1", nodeId: "n2", nonce: 1 },
+    });
+
+    const rows = screen.getAllByRole("option");
+    expect(rows[1].getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelectorAll(".stage-node__fastest").length).toBe(0);
+  });
+
   it("本地预选不写任何本地存储", () => {
     localStorage.clear();
     sessionStorage.clear();
@@ -468,7 +487,7 @@ describe("连接舞台", () => {
       nodeProbes: probes({
         results: { n1: probeResult("n1", 90), n2: probeResult("n2", 42) },
       }),
-      preselect: { configId: "cfg_1", nodeId: "n2", nonce: 1 },
+      preselect: { configId: "cfg_1", nodeId: "n2", nonce: 1, markFastest: true },
     });
     expect(document.querySelectorAll(".stage-node__fastest").length).toBe(1);
     expect(localStorage.length).toBe(0);
@@ -710,7 +729,7 @@ describe("连接舞台", () => {
       nodeProbes: probes({
         results: { n1: probeResult("n1", 238), n2: probeResult("n2", 300) },
       }),
-      preselect: { configId: "cfg_1", nodeId: "n1", nonce: 1 },
+      preselect: { configId: "cfg_1", nodeId: "n1", nonce: 1, markFastest: true },
       onProbe,
     };
     const view = renderStage(base);
@@ -749,7 +768,7 @@ describe("连接舞台", () => {
       nodeProbes: probes({
         results: { n1: probeResult("n1", 238), n2: probeResult("n2", 300) },
       }),
-      preselect: { configId: "cfg_1", nodeId: "n1", nonce: 1 },
+      preselect: { configId: "cfg_1", nodeId: "n1", nonce: 1, markFastest: true },
     };
     const view = renderStage(base);
     expect(
@@ -1636,7 +1655,7 @@ describe("混池节点卡：试用 + 自建", () => {
       nodeProbes: probes({
         results: { o1: probeResult("o1", 90), f2: probeResult("f2", 42) },
       }),
-      preselect: { configId: "cfg_1", nodeId: "f2", nonce: 1 },
+      preselect: { configId: "cfg_1", nodeId: "f2", nonce: 1, markFastest: true },
     });
 
     const groups = screen.getAllByRole("group");

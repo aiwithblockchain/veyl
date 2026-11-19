@@ -42,7 +42,13 @@ interface Props {
   /** 试用截止时间（ISO）：免费组标题右侧按剩余天数写到期文案。 */
   trialExpiresAt?: string | null;
   /** 试用步骤流完成时的一次性预选；之后任何测速都不重新推导。 */
-  preselect?: { configId: string; nodeId: string; nonce: number } | null;
+  preselect?: {
+    configId: string;
+    nodeId: string;
+    nonce: number;
+    /** 只有试用流程测过速、标「最快」是实话；其它来路默认不标。 */
+    markFastest?: boolean;
+  } | null;
   /** 预选应用后通知 Host 消费掉，避免切走再回来二次应用。 */
   onPreselectApplied?: (nonce: number) => void;
   /** 手动测速：只更新延迟，不改选中、不连接。 */
@@ -159,7 +165,7 @@ export function ConnectionStage({
     if (!nodes.some((node) => node.node_id === preselect.nodeId)) return;
     appliedPreselect.current = preselect.nonce;
     setPickedId(preselect.nodeId);
-    setFastestMarkId(preselect.nodeId);
+    if (preselect.markFastest === true) setFastestMarkId(preselect.nodeId);
     onPreselectApplied?.(preselect.nonce);
   }, [preselect, config?.config_id, nodes, onPreselectApplied]);
 

@@ -25,8 +25,6 @@ interface Props {
   detailRetrying: boolean;
   /** 身份不可用：详情只读。 */
   readOnly: boolean;
-  /** 当前连接的就是这台。 */
-  connectedHere?: boolean;
   /** 打开充值：就绪后扣费失败时详情给「去充值」。 */
   onTopUp?: () => void;
   onNew: () => void;
@@ -34,7 +32,6 @@ interface Props {
   onRefreshAccount: () => void;
   onRetry: () => void;
   onUseServer: (server: MyServer) => void;
-  onDisconnect?: () => void;
   onChanged: () => void;
   /** 销毁后让 Host 收起详情并刷新列表。 */
   onGone: () => void;
@@ -74,14 +71,12 @@ export function MyServersPage({
   detailError,
   detailRetrying,
   readOnly,
-  connectedHere = false,
   onTopUp,
   onNew,
   onLogin,
   onRefreshAccount,
   onRetry,
   onUseServer,
-  onDisconnect,
   onChanged,
   onGone,
   onRebuilt,
@@ -153,9 +148,7 @@ export function MyServersPage({
               catalog?.regions.find((region) => region.id === selected.region)?.name ??
               selected.region
             }
-            connectedHere={connectedHere}
             onTopUp={onTopUp}
-            onDisconnect={onDisconnect}
             onAiLocate={onAiLocate}
             readOnly={readOnly}
             onCreateAnother={onNew}

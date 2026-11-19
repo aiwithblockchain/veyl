@@ -420,7 +420,7 @@ describe("我的服务器 destination", () => {
     expect(screen.queryByText("1 核 · 1 GB")).toBeNull();
   });
 
-  it("主按钮按状态：可用是连接，出错是重新建一台，安装中不显示", async () => {
+  it("主按钮按状态：可用是去连接，出错是重新建一台，安装中不显示", async () => {
     const bridge = makeBridge([
       server({ server_id: "srv_1", name: "可用的一台" }),
       server({ server_id: "srv_2", name: "出错的一台", state: "error", node_id: null }),
@@ -429,7 +429,7 @@ describe("我的服务器 destination", () => {
     renderHarness(bridge);
 
     await screen.findByRole("heading", { name: "可用的一台" });
-    expect(screen.getByRole("button", { name: "连接" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "去连接" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /出错的一台/ }));
     expect(await screen.findByRole("heading", { name: "出错的一台" })).toBeTruthy();
@@ -439,7 +439,7 @@ describe("我的服务器 destination", () => {
     expect(
       await screen.findByRole("heading", { name: "安装中的一台" }),
     ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "连接" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "去连接" })).toBeNull();
   });
 
   it("左栏底部不再有设置，账号只留导航入口", async () => {

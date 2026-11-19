@@ -427,8 +427,6 @@ export default function App() {
   }, [myServers.loggedIn]);
   /** 取凭据建配置在途：防止连点。 */
   const useServerInFlightRef = useRef(false);
-  /** 从服务器详情点「连接」：先切到新建的这套配置，就绪后再发起连接。 */
-  const pendingServerConnectRef = useRef<string | null>(null);
   /** 最近一次用户操作，随下一条消息的 context 上报。 */
   const lastActionRef = useRef<UiLastAction | null>(null);
   /** 从「查看账单」拉起的登录：成功后回到账户页。 */
@@ -465,6 +463,8 @@ export default function App() {
     configId: string;
     nodeId: string;
     nonce: number;
+    /** 只有试用流程标的「最快」才算数；从服务器详情过来不标。 */
+    markFastest?: boolean;
   } | null>(null);
   const trialPreselectNonceRef = useRef(0);
   /** 本次会话手动测过速的配置：收尾句去掉数字。 */
@@ -598,12 +598,25 @@ export default function App() {
     }
   };
 
-  // 服务器详情「连接」：凭据落库后把节点绑进全局池，切到这台节点，再走既有连接流程。
+  // 服务器详情「去连接」：把人送到控制台。
+  // 连接/启动/断开中一条命令都不发：node_attach 会触发 runtime_rebuild，打断正在用的连接。
   const handleUseServer = async (server: MyServer) => {
     if (useServerInFlightRef.current) return;
     useServerInFlightRef.current = true;
     const startedDestination = destinationRef.current;
     try {
+      if (vpn.connection !== "idle") {
+        // 连着的就是这台时不解释：到控制台看到的就是它。
+        const currentNodeId = vpn.activeConfig?.current_node_id ?? null;
+        if (server.node_id === null || server.node_id !== currentNodeId) {
+          setAppNotice({
+            level: "info",
+            text: "当前正在使用另一台，要换成这台，先在控制台断开。",
+          });
+        }
+        changeDestination("client");
+        return;
+      }
       const node = await bridge.myServerCredentials(server.server_id);
       if (destinationRef.current !== startedDestination) return;
       const attached = await vpn.attachNodes({ nodeIds: [node.node_id] });
@@ -619,16 +632,14 @@ export default function App() {
         setAppNotice({ level: "error", text: "服务器节点已加入，但没找到全局配置。" });
         return;
       }
-      // attach 不改当前节点：显式切到这台，再让下面的启动流程连新节点。
-      const switched = await vpn.switchNode(node.node_id, targetConfigId);
-      if (!switched.ok) {
-        setAppNotice({
-          level: "error",
-          text: switched.message ?? "服务器节点已加入，但没能切过去，可以再点一次连接。",
-        });
-        return;
-      }
-      pendingServerConnectRef.current = targetConfigId;
+      // 只预选，不设当前节点、不发起连接：连哪台由用户在控制台确认。
+      trialPreselectNonceRef.current += 1;
+      setTrialPreselect({
+        configId: targetConfigId,
+        nodeId: node.node_id,
+        nonce: trialPreselectNonceRef.current,
+        markFastest: false,
+      });
       changeDestination("client");
     } catch (error) {
       if (destinationRef.current === startedDestination) {
@@ -638,30 +649,6 @@ export default function App() {
       useServerInFlightRef.current = false;
     }
   };
-
-  // 服务器节点进入配置后再连接；失败只说「没连上」，不丢掉已加进来的节点。
-  useEffect(() => {
-    const targetConfigId = pendingServerConnectRef.current;
-    if (!targetConfigId) return;
-    const config = vpn.activeConfig;
-    if (
-      !config ||
-      config.config_id !== targetConfigId ||
-      config.nodes.length === 0 ||
-      vpn.loading
-    )
-      return;
-    pendingServerConnectRef.current = null;
-    void vpn.start().then((result) => {
-      if (!result.ok) {
-        setAppNotice({
-          level: "error",
-          text:
-            result.message ?? "服务器节点已加入，但没能连上，可以再点一次连接。",
-        });
-      }
-    });
-  }, [vpn.activeConfig, vpn.loading, vpn.start]);
 
   // 健康事件的版本号：防止发出去要的旧快照把刚收到的 exit_ip 覆盖回 null。
   const healthVersion = useRef(0);
@@ -2089,6 +2076,7 @@ export default function App() {
         configId: config.config_id,
         nodeId: fastestNodeId,
         nonce: trialPreselectNonceRef.current,
+        markFastest: true,
       });
       commitTrialFlow({
         ...current,
@@ -2406,18 +2394,12 @@ export default function App() {
           detailError={myServers.detailError}
           detailRetrying={myServers.detailRetrying}
           readOnly={myServers.identityProblem !== null}
-          connectedHere={
-            (runtime.state === "running" || runtime.state === "degraded") &&
-            Boolean(myServers.selected?.node_id) &&
-            runtime.node_id === myServers.selected?.node_id
-          }
           onTopUp={myServers.openTopUp}
           onNew={() => openNewNode("servers")}
           onLogin={myServers.openLogin}
           onRefreshAccount={() => void myServers.refreshAccount()}
           onRetry={() => void myServers.retry()}
           onUseServer={handleUseServer}
-          onDisconnect={() => void handleVpnStop()}
           onChanged={() => void myServers.refresh()}
           onGone={() => myServers.clearSelection()}
           onRebuilt={myServers.rebuilt}

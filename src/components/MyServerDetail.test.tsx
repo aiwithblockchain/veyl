@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentBridge, MyServer } from "../agent/bridge";
+import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { DESTROY_RETRY_MS, MyServerDetail } from "./MyServerDetail";
 
 function server(over: Partial<MyServer> = {}): MyServer {
@@ -33,8 +33,6 @@ function renderDetail(
   onGone = vi.fn(),
   onUseServer: (server: MyServer) => void | Promise<void> = vi.fn(),
   onAiLocate?: (serverId: string) => void,
-  connectedHere = false,
-  onDisconnect?: () => void,
   onTopUp?: () => void,
 ) {
   const destroy = vi.fn(async (id: string) =>
@@ -46,9 +44,7 @@ function renderDetail(
       bridge={{ myServerDestroy: destroy } as unknown as AgentBridge}
       server={server(over)}
       regionLabel="新加坡 1"
-      connectedHere={connectedHere}
       onAiLocate={onAiLocate}
-      onDisconnect={onDisconnect}
       onTopUp={onTopUp}
       onCreateAnother={onCreateAnother}
       onUseServer={onUseServer}
@@ -215,8 +211,6 @@ describe("服务器详情", () => {
       },
       vi.fn(),
       vi.fn(),
-      undefined,
-      false,
       undefined,
       onTopUp,
     );
@@ -469,20 +463,42 @@ describe("服务器详情", () => {
     expect(screen.queryByText(/共用额度|同账户/)).toBeNull();
   });
 
-  it("可用时主按钮不要求控制面 node_id，点击交回服务器", () => {
+  it("可用时主按钮去连接，不要求控制面 node_id，点击交回服务器", () => {
     const { onUseServer } = renderDetail({ node_id: null, state: "healthy" });
 
-    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "去连接" }));
     expect(onUseServer).toHaveBeenCalledWith(
       expect.objectContaining({ server_id: "srv_1" }),
     );
   });
 
-  it("连接的就是这台时主按钮是断开", () => {
-    const onDisconnect = vi.fn();
-    renderDetail({}, vi.fn(), vi.fn(), undefined, true, onDisconnect);
-    fireEvent.click(screen.getByRole("button", { name: "断开" }));
-    expect(onDisconnect).toHaveBeenCalledTimes(1);
+  it("五态主按钮：就绪去连接、建机中没有、失败重建、失效重购；全文没有断开", () => {
+    const cases: Array<[MyServerState, string | null]> = [
+      ["healthy", "去连接"],
+      ["active", "去连接"],
+      ["creating", null],
+      ["booting", null],
+      ["installing", null],
+      ["verifying", null],
+      ["error", "重新建一台"],
+      ["gone", "重新购买"],
+      ["destroying", null],
+    ];
+
+    for (const [state, label] of cases) {
+      const view = renderDetail({ state });
+      const detail = document.querySelector(".myservers__detail");
+      expect(detail?.textContent).not.toContain("断开");
+      const primaries = detail?.querySelectorAll(".btn--primary") ?? [];
+      expect(primaries.length).toBeLessThanOrEqual(1);
+      if (label) {
+        expect(screen.getByRole("button", { name: label })).toBeTruthy();
+        expect(primaries.length).toBe(1);
+      } else {
+        expect(primaries.length).toBe(0);
+      }
+      view.unmount();
+    }
   });
 
   it("取凭据在途时按钮禁用，连点只发一次", async () => {
@@ -494,7 +510,7 @@ describe("服务器详情", () => {
         }),
     );
     renderDetail({}, vi.fn(), onUseServer);
-    const button = screen.getByRole("button", { name: "连接" });
+    const button = screen.getByRole("button", { name: "去连接" });
 
     fireEvent.click(button);
     fireEvent.click(button);
