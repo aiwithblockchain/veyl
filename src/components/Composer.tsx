@@ -13,6 +13,9 @@ interface Props {
   onConfigure?: () => void;
   /** 递增这个值会把焦点移到输入框。 */
   focusSignal?: number;
+  /** 受控草稿：传入时由上层持有，组件重挂载也不丢；不传则自己保存。 */
+  value?: string;
+  onValueChange?: (text: string) => void;
 }
 
 export function Composer({
@@ -24,8 +27,17 @@ export function Composer({
   disabled = false,
   onConfigure,
   focusSignal = 0,
+  value: controlledValue,
+  onValueChange,
 }: Props) {
-  const [value, setValue] = useState("");
+  const [innerValue, setInnerValue] = useState("");
+  const value = controlledValue ?? innerValue;
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  const setValue = (next: string) => {
+    if (onValueChange) onValueChange(next);
+    else setInnerValue(next);
+  };
   const [blockedHint, setBlockedHint] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const submittingRef = useRef(false);
@@ -88,7 +100,7 @@ export function Composer({
     void Promise.resolve(onSend(text))
       .then((accepted) => {
         // 被拦下（例如上一条还在回复）：把刚打的字放回去。
-        if (accepted === false) setValue((current) => current || text);
+        if (accepted === false) setValue(valueRef.current || text);
       })
       .catch(() => {})
       .finally(() => {

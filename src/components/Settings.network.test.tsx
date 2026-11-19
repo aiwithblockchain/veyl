@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, LlmProvider } from "../agent/bridge";
@@ -85,6 +85,7 @@ function renderSettings(
     onSetRoutingMode,
     onConnectModeChanged,
     assistant,
+    onConsultAi,
   }: {
     connectMode?: "tun" | "system_proxy" | null;
     assistant?: ReactNode;
@@ -99,6 +100,7 @@ function renderSettings(
     onAskAi?: (text: string, section: string) => void;
     onNotice?: (notice: { level: "info" | "error"; text: string }) => void;
     onReportProblem?: () => void;
+    onConsultAi?: (prompt: string) => void;
   } = {},
 ) {
   return render(
@@ -122,6 +124,7 @@ function renderSettings(
       onSetRoutingMode={onSetRoutingMode}
       onConnectModeChanged={onConnectModeChanged}
       assistant={assistant}
+      onConsultAi={onConsultAi}
       initialSection={section}
     />,
   );
@@ -599,5 +602,44 @@ describe("咨询 AI 的焦点", () => {
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name: "咨询 AI" }),
     );
+  });
+});
+
+describe("咨询 AI 的设置总览", () => {
+  it("从关闭态打开：回调收到含当前设置的提示词", async () => {
+    const onConsultAi = vi.fn();
+    renderSettings(makeBridge(), {
+      connectMode: "system_proxy",
+      runtimeView: runtime({ state: "running" }),
+      proxyPort: 7891,
+      routingMode: "proxy_all",
+      onConsultAi,
+    });
+    await act(async () => {});
+
+    fireEvent.click(await screen.findByRole("button", { name: "咨询 AI" }));
+
+    expect(onConsultAi).toHaveBeenCalledTimes(1);
+    const prompt = onConsultAi.mock.calls[0][0] as string;
+    expect(prompt).toContain("接管方式：Proxy 模式（默认）");
+    expect(prompt).toContain("流量范围：全局");
+    expect(prompt).toContain("本地代理端口：127.0.0.1:7891");
+    expect(prompt).toContain("当前连接：已连接");
+    expect(prompt).toContain("当前服务：DeepSeek");
+  });
+
+  it("开启态再点只关闭，不再发消息", async () => {
+    const onConsultAi = vi.fn();
+    renderSettings(makeBridge(), { connectMode: "tun", onConsultAi });
+    await act(async () => {});
+
+    const button = await screen.findByRole("button", { name: "咨询 AI" });
+    fireEvent.click(button);
+    expect(onConsultAi).toHaveBeenCalledTimes(1);
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(button);
+    expect(onConsultAi).toHaveBeenCalledTimes(1);
+    expect(button.getAttribute("aria-pressed")).toBe("false");
   });
 });

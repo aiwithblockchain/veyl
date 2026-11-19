@@ -32,6 +32,9 @@ interface Props {
   focusSignal?: number;
   /** 递增这个值会把焦点移到消息流（空态点预制问题后）。 */
   focusMessagesSignal?: number;
+  /** 输入框草稿由上层持有，重挂载不丢。 */
+  composerDraft?: string;
+  onComposerDraftChange?: (text: string) => void;
 }
 
 export function ChatView({
@@ -51,6 +54,8 @@ export function ChatView({
   onConfigureKey,
   focusSignal = 0,
   focusMessagesSignal = 0,
+  composerDraft,
+  onComposerDraftChange,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
@@ -120,6 +125,8 @@ export function ChatView({
         disabled={!hasKey}
         onConfigure={onConfigureKey}
         focusSignal={focusSignal}
+        value={composerDraft}
+        onValueChange={onComposerDraftChange}
       />
     </div>
   );

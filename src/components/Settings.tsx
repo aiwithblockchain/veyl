@@ -23,6 +23,7 @@ import type {
 import { toBridgeError } from "../agent/errors";
 import { formatUsdCents } from "../myservers/labels";
 import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
+import { settingsOverviewPrompt } from "../ai/settingsOverview";
 import { useFocusTrap } from "../ui/focus";
 import { isComposingEvent } from "../ui/ime";
 import { copyText } from "../ui/clipboard";
@@ -73,6 +74,8 @@ interface Props {
   /** 咨询 AI：设置缩左、右侧并排助手；App 据此隐藏原来的右栏。 */
   assistant?: ReactNode;
   onConsultingChange?: (consulting: boolean) => void;
+  /** 从关闭态打开咨询时，带着当前设置总览去发一条消息。 */
+  onConsultAi?: (prompt: string) => void;
   /** 切 tab 时通知 App，重新打开设置能落回原处。 */
   onSectionChange?: (section: SectionId) => void;
   /** AI 指路：section 内的 row 高亮 2 秒；row=null 只切段。 */
@@ -656,6 +659,7 @@ export function Settings({
   onSetConnectMode,
   assistant,
   onConsultingChange,
+  onConsultAi,
   onSectionChange,
   point = null,
   account = null,
@@ -943,9 +947,60 @@ export function Settings({
   });
 
   const toggleConsulting = () => {
-    const next = !consulting;
-    setConsulting(next);
-    onConsultingChange?.(next);
+    if (consulting) {
+      setConsulting(false);
+      onConsultingChange?.(false);
+      return;
+    }
+    setConsulting(true);
+    onConsultingChange?.(true);
+    // 打开即把点击当刻的设置发给 AI，不让它等用户再描述一遍。
+    onConsultAi?.(
+      settingsOverviewPrompt({
+        connection: {
+          connectMode,
+          routingMode,
+          proxyPort: connectMode === "system_proxy" ? proxyPort : null,
+          portFallback:
+            connectMode === "system_proxy" ? runtime.port_fallback : null,
+          runtimeState: runtime.state,
+          cleanupProxyAvailable: showCleanupProxy,
+          hasConfig: configId !== null,
+          seed: seedInfo
+            ? {
+                nodeCount: seedInfo.nodeCount,
+                version: seedInfo.version,
+                newVersionAvailable: seedInfo.newVersionAvailable,
+              }
+            : null,
+        },
+        ai: {
+          providers: providers.map((provider) => ({
+            name: provider.name,
+            model: provider.model,
+            baseUrl: provider.baseUrl,
+            hasKey: provider.hasKey,
+            isActive:
+              provider.isActive || provider.providerId === activeProviderId,
+          })),
+        },
+        account: {
+          loggedIn: account?.logged_in === true,
+          email: account?.email ?? null,
+          balanceCents: wallet?.balance_cents ?? null,
+        },
+        advanced: {
+          includeDomains,
+          appVersion,
+          helper: tunHelper.info
+            ? {
+                state: tunHelper.info.state,
+                version: tunHelper.info.helperVersion,
+              }
+            : null,
+        },
+      }),
+    );
   };
 
   const commitConnectMode = useCallback(

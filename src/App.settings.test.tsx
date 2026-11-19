@@ -180,6 +180,51 @@ describe("设置 → 咨询 AI", () => {
     ).toBe("true");
   }, 15_000);
 
+  it("咨询开场就发一条当前设置总览", async () => {
+    render(<App />);
+    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await act(async () => {});
+
+    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "连接" }));
+    await screen.findByText("接管方式");
+
+    fireEvent.click(screen.getByRole("button", { name: "咨询 AI" }));
+
+    await waitFor(() => expect(bridge.sendMessage).toHaveBeenCalled());
+    const call = (bridge.sendMessage as unknown as ReturnType<typeof vi.fn>)
+      .mock.calls[0];
+    expect(call[1]).toContain("我在 Veyl 的设置页");
+    expect(call[1]).toContain("接管方式：Proxy 模式（默认）");
+    expect(call[1]).toContain("当前连接：未连接");
+  }, 15_000);
+
+  it("咨询开关来回切两次，输入框里的草稿还在", async () => {
+    const { container } = render(<App />);
+    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await act(async () => {});
+
+    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
+    const consult = await screen.findByRole("button", { name: "咨询 AI" });
+    const textarea = () =>
+      container.querySelector<HTMLTextAreaElement>(".settings-assistant textarea");
+
+    fireEvent.click(consult);
+    await waitFor(() => expect(textarea()).toBeTruthy());
+    fireEvent.change(textarea()!, { target: { value: "草稿还在吗" } });
+    expect(textarea()!.value).toBe("草稿还在吗");
+
+    for (let round = 0; round < 2; round += 1) {
+      fireEvent.click(consult);
+      await waitFor(() =>
+        expect(container.querySelector(".settings-assistant")).toBeNull(),
+      );
+      fireEvent.click(consult);
+      await waitFor(() => expect(textarea()).toBeTruthy());
+      expect(textarea()!.value).toBe("草稿还在吗");
+    }
+  }, 15_000);
+
   it("关闭设置后右栏服务名立即刷新", async () => {
     render(<App />);
     await waitFor(() =>

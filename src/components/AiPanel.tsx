@@ -66,6 +66,9 @@ interface Props {
   onConfigureKey: () => void;
   /** 收起助手；宽屏停靠时收成右边缘 tab。 */
   onCollapse: () => void;
+  /** 输入框草稿由上层按会话持有，助手搬到弹层重挂载也不丢。 */
+  composerDraft?: string;
+  onComposerDraftChange?: (text: string) => void;
 }
 
 /** 对话空态的预制问题（assistant-empty-state.md §2）；它们是按钮文案，句末不加问号。 */
@@ -116,6 +119,8 @@ export function AiPanel({
   onOpenSettings,
   onConfigureKey,
   onCollapse,
+  composerDraft,
+  onComposerDraftChange,
 }: Props) {
   const [view, setView] = useState<View>("chat");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -382,6 +387,8 @@ export function AiPanel({
             onConfigureKey={onConfigureKey}
             focusSignal={focusSignal}
             focusMessagesSignal={messagesFocusSignal}
+            composerDraft={composerDraft}
+            onComposerDraftChange={onComposerDraftChange}
           />
         ) : (
           <>
@@ -447,6 +454,8 @@ export function AiPanel({
               disabled={!aiReady}
               onConfigure={onConfigureKey}
               focusSignal={focusSignal}
+              value={composerDraft}
+              onValueChange={onComposerDraftChange}
             />
           </>
         )}

@@ -328,6 +328,9 @@ function credentialErrorText(error: unknown): string {
 export default function App() {
   const bridge = useMemo(() => getAgentBridge(), []);
   const [state, dispatch] = useReducer(chatReducer, undefined, createInitialState);
+  // 输入框草稿存在 App：咨询模式切换会让助手搬进弹层并重挂载，草稿不能跟着丢。
+  // 只存一份，和改动前单实例 Composer 的行为一致（切会话也保留）。
+  const [composerDraft, setComposerDraft] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 设置在咨询 AI：右栏助手搬进弹层并排显示，原来的右栏不再渲染。 */
   const [settingsConsulting, setSettingsConsulting] = useState(false);
@@ -1800,6 +1803,14 @@ export default function App() {
     setComposerFocusSignal((value) => value + 1);
   };
 
+  // 设置页「咨询 AI」：并排展开助手，并立刻发一条当前设置总览。
+  const handleConsultAi = (prompt: string) => {
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
+    handleAskAi(prompt);
+  };
+
   const handleSwitchNode = (nodeId: string) => {
     lastActionRef.current = { id: "client.node_pick", value: nodeId };
     return vpn.switchNode(nodeId);
@@ -2151,6 +2162,8 @@ export default function App() {
       session={session ?? null}
       sessions={state.sessions}
       activeSessionId={state.activeSessionId}
+      composerDraft={composerDraft}
+      onComposerDraftChange={setComposerDraft}
       aiReady={aiReady}
       aiProviderName={aiProviderName}
       hasEverConnected={hasEverConnected}
@@ -2589,6 +2602,7 @@ export default function App() {
         onConnectModeChanged={() => vpn.reload()}
         assistant={aiPanel}
         onConsultingChange={setSettingsConsulting}
+        onConsultAi={handleConsultAi}
         onSectionChange={(section) => {
           setSettingsSection(section);
           lastActionRef.current = {
