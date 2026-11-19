@@ -17,8 +17,17 @@ function envWith(db: FakeD1) {
   return {
     DB: db as unknown as D1Database,
     ENVIRONMENT: "test",
+    // 余额不足停机销毁要走 DO 删除；没有令牌 destroyInstance 会直接还原状态。
+    DO_API_TOKEN: "do-token",
     PLAN_DAILY_PRICE_CENTS: JSON.stringify({ "s-1vcpu-1gb": DAILY }),
   };
+}
+
+function stubDoDeletes() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response(null, { status: 204 })),
+  );
 }
 
 function seedServer(db: FakeD1, overrides: Record<string, unknown> = {}) {
@@ -157,17 +166,20 @@ describe("按天续费", () => {
     expect(db.rows("accounts")[0].balance_cents).toBe(1000 - 6 * DAILY);
   });
 
-  it("只补了一部分：宽限从补齐后的到期时间起算", async () => {
+  it("只补了一部分：补完仍然过期 → 停机销毁，不写 past_due", async () => {
     const db = new FakeD1();
     const env = envWith(db);
+    stubDoDeletes();
     db.rows("accounts")[0].balance_cents = 3 * DAILY; // 只够 3 天
     seedServer(db, { paid_until: Date.now() - 8 * DAY });
 
     const report = await runBilling(env as never);
 
-    // 补 3 天后 paid_until = now-5d，宽限到 now+2d：还在宽限期，不是 expired。
-    expect(report.pastDue).toBe(1);
-    expect(db.rows("servers")[0].billing_state).toBe("past_due");
+    // 补 3 天后 paid_until = now-5d，仍然过期：按新规则直接停机销毁，没有宽限。
+    expect(report.unpaidDestroyed).toBe(1);
+    expect(report.pastDue).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+    expect(db.rows("servers")[0].failure_code).toBe("billing_unpaid");
     expect(db.rows("accounts")[0].balance_cents).toBe(0);
   });
 
@@ -242,7 +254,7 @@ describe("按天续费", () => {
         order_id: `ord_${i}`,
         billing_anchor_at: Date.now() - 2 * DAY,
         created_at: Date.now() - 2 * DAY,
-        paid_until: Date.now() - DAY + 60_000,
+        paid_until: Date.now() - 60_000,
       });
     }
 
@@ -423,35 +435,42 @@ describe("提前续费（到期前 1 小时）", () => {
     expect(Number(db.rows("servers")[0].paid_until)).toBe(paidUntil);
   });
 
-  it("窗口内扣款失败、但还没到期：仍是 active，不转欠费", async () => {
+  it("窗口内扣不动：当场停机销毁，即使机器还没到期", async () => {
     const db = new FakeD1();
     const env = envWith(db);
+    stubDoDeletes();
     db.rows("accounts")[0].balance_cents = 0;
-    const paidUntil = Date.now() + 59 * MIN;
-    seedServer(db, { paid_until: paidUntil });
+    seedServer(db, { paid_until: Date.now() + 59 * MIN });
 
     const report = await runBilling(env as never);
 
-    expect(db.rows("wallet_ledger")).toHaveLength(0);
-    expect(db.rows("servers")[0].billing_state).toBe("active");
-    expect(report.pastDue).toBe(0);
-    expect(report.expired).toBe(0);
+    expect(report.unpaidDestroyed).toBe(1);
+    expect(
+      db.rows("wallet_ledger").filter((row) => row.ref_type === "server_day"),
+    ).toHaveLength(0);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("destroyed");
+    expect(server.failure_code).toBe("billing_unpaid");
+    expect(server.destroyed_at).toBeTruthy();
   });
 
-  it("已到期且扣不动：仍按原规则转 past_due / expired", async () => {
+  it("已到期且扣不动：直接停机销毁，不再转 past_due / expired", async () => {
     const db = new FakeD1();
     const env = envWith(db);
+    stubDoDeletes();
     db.rows("accounts")[0].balance_cents = 0;
     seedServer(db, { id: "srv_past_due000000000", paid_until: Date.now() - 60 * MIN });
     seedServer(db, { id: "srv_expired000000000", paid_until: Date.now() - 8 * DAY });
 
     const report = await runBilling(env as never);
 
-    const [pastDue, expired] = db.rows("servers");
-    expect(pastDue.billing_state).toBe("past_due");
-    expect(expired.billing_state).toBe("expired");
-    expect(report.pastDue).toBe(1);
-    expect(report.expired).toBe(1);
+    expect(report.unpaidDestroyed).toBe(2);
+    expect(report.pastDue).toBe(0);
+    expect(report.expired).toBe(0);
+    for (const server of db.rows("servers")) {
+      expect(server.state).toBe("destroyed");
+      expect(server.failure_code).toBe("billing_unpaid");
+    }
   });
 
   it("同一 bucket 连跑两次只扣一次", async () => {
@@ -469,8 +488,41 @@ describe("提前续费（到期前 1 小时）", () => {
     expect(db.rows("accounts")[0].balance_cents).toBe(1000 - DAILY);
   });
 
-  it("destroying / destroyed 的机器即使进了窗口也不扣", async () => {
+  it("算不出账的行（日价 0）：进了窗口也不扣、不销毁", async () => {
     const db = new FakeD1();
+    const env = envWith(db);
+    stubDoDeletes();
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, { state: "active", paid_until: Date.now() + 59 * MIN });
+    Object.assign(db.rows("servers")[0], { daily_price_cents: 0 });
+
+    const report = await runBilling(env as never);
+
+    expect(report.unpaidDestroyed).toBe(0);
+    expect(report.renewed).toBe(0);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("servers")[0].state).toBe("active");
+  });
+
+  it("账户缺失：记账失败但不当作欠费，不扣、不销毁", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    stubDoDeletes();
+    // 服务器行指向一个不存在的账户：账本只能报 missing_account，不是欠费。
+    seedServer(db, {
+      account_id: "acct_missing000000000000",
+      state: "active",
+      paid_until: Date.now() + 59 * MIN,
+    });
+
+    const report = await runBilling(env as never);
+
+    expect(report.unpaidDestroyed).toBe(0);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("servers")[0].state).toBe("active");
+  });
+
+  it("destroying / destroyed 的机器即使进了窗口也不扣", async () => {    const db = new FakeD1();
     const env = envWith(db);
     db.rows("accounts")[0].balance_cents = 1000;
     const paidUntil = Date.now() + 59 * MIN;

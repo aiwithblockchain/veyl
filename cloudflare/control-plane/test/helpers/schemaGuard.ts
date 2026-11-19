@@ -8,8 +8,9 @@ import progressStagesSql from "../../migrations/0004_progress_stages.sql?raw";
 import serverPortSql from "../../migrations/0005_server_port_unique.sql?raw";
 import webhookSamplesSql from "../../migrations/0006_webhook_samples.sql?raw";
 import atReadySql from "../../migrations/0007_at_ready_settlement.sql?raw";
+import tombstoneDismissSql from "../../migrations/0008_tombstone_dismiss.sql?raw";
 
-const allSchemaSql = `${schemaSql}\n${catalogCacheSql}\n${readyAtSql}\n${progressStagesSql}\n${serverPortSql}\n${webhookSamplesSql}\n${atReadySql}`;
+const allSchemaSql = `${schemaSql}\n${catalogCacheSql}\n${readyAtSql}\n${progressStagesSql}\n${serverPortSql}\n${webhookSamplesSql}\n${atReadySql}\n${tombstoneDismissSql}`;
 
 interface TableShape {
   columns: Set<string>;

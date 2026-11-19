@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { signAccessToken, sha256B64u } from "../src/lib/crypto";
 import { firewallName } from "../src/providers/digitalocean";
-import { handleServers } from "../src/servers";
+import { destroyUnpaidServer, handleServers } from "../src/servers";
 import { FakeD1 } from "./helpers/fakeD1";
 
 const ACCOUNT = "acct_test0000000000000000";
@@ -1149,5 +1149,95 @@ describe("钱的去向（charged_cents / refunded_cents）", () => {
     expect(servers[0].failure).not.toBeNull();
     expect(servers[0].charged_cents).toBe(30);
     expect(servers[0].refunded_cents).toBe(0);
+  });
+});
+
+describe("余额不足停机（墓碑）", () => {
+  function listRequest(token: string) {
+    return new Request("https://example.com/v1/servers", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+  }
+
+  function dismissRequest(token: string, id = SERVER) {
+    return new Request(`https://example.com/v1/servers/${id}/dismiss`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+    });
+  }
+
+  async function seeded() {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    const DAY = 24 * 3600 * 1000;
+    const anchor = Date.now() - 5 * DAY;
+    Object.assign(db.rows("servers")[0], {
+      daily_price_cents: 20,
+      billing_anchor_at: anchor,
+      // 现在正好到期：没有未开始的整天可退。
+      paid_until: anchor + 5 * DAY,
+    });
+    db.rows("accounts")[0].balance_cents = 100;
+    seedCharge(db, 20);
+    db.rows("orders").push({
+      id: "ord_test",
+      account_id: ACCOUNT,
+      amount_cents: 20,
+      paid_via: "wallet",
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_usd: 0.2,
+      hourly_usd: 0,
+      state: "ready",
+      idempotency_key: "idem-billing-unpaid",
+      created_at: Date.now(),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    return { db, env };
+  }
+
+  it("停机销毁退 0：当天已用掉，没有未开始的整天", async () => {
+    const { db, env } = await seeded();
+
+    const ok = await destroyUnpaidServer(env as never, SERVER, ACCOUNT);
+
+    expect(ok).toBe(true);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("destroyed");
+    expect(server.failure_code).toBe("billing_unpaid");
+    expect(
+      db.rows("wallet_ledger").find((row) => row.ref_type === "server_refund"),
+    ).toBeUndefined();
+    expect(db.rows("accounts")[0].balance_cents).toBe(100);
+  });
+
+  it("墓碑出现在列表里；dismiss 后消失，重复调用幂等", async () => {
+    const { db, env } = await seeded();
+    expect(await destroyUnpaidServer(env as never, SERVER, ACCOUNT)).toBe(true);
+    // 手动销毁的行不会出现在列表里，也不能 dismiss。
+    const manual = { ...db.rows("servers")[0], id: "srv_manual000000000000", failure_code: null };
+    db.rows("servers").push(manual);
+
+    const before = await handleServers(listRequest(env.token), env as never);
+    const listed = (await before!.json()) as { servers: Array<{ id: string; state: string; failure: { code?: string } | null }> };
+    expect(listed.servers).toHaveLength(1);
+    expect(listed.servers[0].state).toBe("destroyed");
+    expect(listed.servers[0].failure?.code).toBe("billing_unpaid");
+
+    expect((await handleServers(dismissRequest(env.token), env as never))?.status).toBe(204);
+    const after = await handleServers(listRequest(env.token), env as never);
+    const remaining = (await after!.json()) as { servers: unknown[] };
+    expect(remaining.servers).toHaveLength(0);
+
+    // 重复 dismiss 幂等。
+    expect((await handleServers(dismissRequest(env.token), env as never))?.status).toBe(204);
+    // 手动销毁 / 不存在的行：404。
+    expect(
+      (await handleServers(dismissRequest(env.token, "srv_manual000000000000"), env as never))?.status,
+    ).toBe(404);
   });
 });

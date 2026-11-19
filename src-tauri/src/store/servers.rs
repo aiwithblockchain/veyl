@@ -125,6 +125,20 @@ pub fn get(conn: &Connection, id: &str) -> StoreResult<Option<MyServerRow>> {
     .map_err(StoreError::from)
 }
 
+/// 按本地节点 id 找已销毁的服务器缓存行（余额不足停机留下的墓碑）。
+///
+/// `node_forget` 用它找到要跟着删掉的镜像行、以及要通知控制面忽略的 `server_id`。
+pub fn destroyed_with_node(conn: &Connection, node_id: &str) -> StoreResult<Vec<MyServerRow>> {
+    let mut statement = conn.prepare(
+        "SELECT id, provider, name, region, plan, state, node_id,
+                hourly_usd, monthly_usd, daily_price_cents, transfer_gib, paid_until, billing_state,
+                created_at, updated_at, last_synced_at
+           FROM my_servers WHERE node_id = ?1 AND state = 'destroyed'",
+    )?;
+    let rows = statement.query_map(params![node_id], row_to_server)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+}
+
 pub fn set_node(conn: &Connection, id: &str, node_id: &str) -> StoreResult<()> {
     conn.execute(
         "UPDATE my_servers SET node_id = ?2, updated_at = ?3, last_synced_at = ?3 WHERE id = ?1",
@@ -222,6 +236,39 @@ mod tests {
         upsert(&conn, &new_server("srv_2", "destroyed")).unwrap();
         let ids: Vec<_> = list(&conn).unwrap().into_iter().map(|row| row.id).collect();
         assert_eq!(ids, vec!["srv_1"]);
+    }
+
+    /// 按节点 id 找墓碑：只命中已销毁的行，活着的行和别的节点都不算。
+    #[test]
+    fn a_destroyed_row_can_be_found_by_its_node() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        crate::store::configs::upsert_node(
+            &conn,
+            &crate::store::NewNode {
+                id: "nd_1",
+                name: "Tokyo",
+                server: "203.0.113.10",
+                port: 20343,
+                method: "aes-256-gcm",
+                password_ref: "node:nd_1",
+                source: crate::store::configs::SOURCE_OWNED,
+                source_key: "srv_1",
+            },
+        )
+        .unwrap();
+        let mut tombstone = new_server("srv_1", "destroyed");
+        tombstone.node_id = Some("nd_1");
+        upsert(&conn, &tombstone).unwrap();
+        upsert(&conn, &new_server("srv_2", "active")).unwrap();
+
+        let found: Vec<_> = destroyed_with_node(&conn, "nd_1")
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(found, vec!["srv_1"]);
+        assert!(destroyed_with_node(&conn, "nd_missing").unwrap().is_empty());
     }
 
     #[test]

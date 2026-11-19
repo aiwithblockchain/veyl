@@ -48,6 +48,8 @@ interface ServerRow {
   verifying_at?: number | null;
   failure_code?: string | null;
   failure_stage?: string | null;
+  /** 沿用「余额不足停机」的墓碑行被用户忽略的时刻；手动销毁的行不使用。 */
+  dismissed_at?: number | null;
   daily_price_cents: number;
   billing_anchor_at: number;
   transfer_gib?: number;
@@ -131,7 +133,10 @@ function serverView(
           // 失败阶段以 failure_stage 为准；旧行没有该列时退回当时的状态。
           stage: row.failure_stage ?? row.state,
           code: row.failure_code,
-          message: "这台服务器没有创建成功",
+          message:
+            row.failure_code === "billing_unpaid"
+              ? "余额不足，已停机删除"
+              : "这台服务器没有创建成功",
           retryable: false,
         }
       : null,
@@ -315,21 +320,27 @@ async function refundPlan(
 
   if (daily > 0 && anchor > 0 && paidUntil > 0) {
     const nPaid = Math.floor((paidUntil - anchor) / DAY_MS);
-    if (reason === "user") {
+    // 「余额不足停机」和用户主动销毁同一口径：只退未开始的整天。
+    // 照「非用户原因全额退」等于让欠费停机白送已用天数。
+    const userLike = reason === "user" || reason === "billing_unpaid";
+    if (userLike) {
       // 当天已经用掉，不退；只退还没开始的整天。
       const nNow = Math.floor((now - anchor) / DAY_MS);
       amount = Math.max(0, daily * (nPaid - nNow - 1));
     } else {
       amount = Math.max(0, daily * Math.max(0, nPaid));
     }
-  } else if (reason !== "user") {
+  } else if (reason !== "user" && reason !== "billing_unpaid") {
     amount = chargedCents;
   }
 
   if (amount <= 0) return null;
   return {
     amount,
-    note: reason === "user" ? "销毁退还未使用天数" : `建机失败退款：${reason}`,
+    note:
+      reason === "user" || reason === "billing_unpaid"
+        ? "销毁退还未使用天数"
+        : `建机失败退款：${reason}`,
   };
 }
 
@@ -975,7 +986,9 @@ async function listServers(request: Request, env: ServersEnv): Promise<Response>
 
   const result = await env.DB.prepare(
     "SELECT s.*, o.charge_mode AS charge_mode FROM servers s LEFT JOIN orders o ON o.id = s.order_id " +
-      "WHERE s.account_id = ? AND s.state != 'destroyed' ORDER BY s.created_at DESC",
+      "WHERE s.account_id = ? AND (s.state != 'destroyed' OR " +
+      "(s.state = 'destroyed' AND s.failure_code = 'billing_unpaid' AND s.dismissed_at IS NULL)) " +
+      "ORDER BY s.created_at DESC",
   )
     .bind(identity.accountId)
     .all<ServerRow>();
@@ -1072,6 +1085,25 @@ async function destroy(request: Request, env: ServersEnv, serverId: string): Pro
   return new Response(null, { status: 204 });
 }
 
+/**
+ * 计费窗口内扣不动（余额不足）：停机销毁，没有宽限、不可恢复。
+ *
+ * 由每小时 Cron 触发。销毁失败（DO 暂时删不掉）返回 `false`，状态由
+ * `destroyInstance` 还原，下一轮 Cron 继续试；返回 `true` 表示机器已经不在。
+ */
+export async function destroyUnpaidServer(
+  env: ServersEnv,
+  serverId: string,
+  accountId: string,
+): Promise<boolean> {
+  if (!env.DB) return false;
+  const row = await loadServer(env.DB, accountId, serverId);
+  if (!row) return true;
+  if (row.state === "destroyed") return true;
+  const outcome = await destroyInstance(env, row, "billing_unpaid");
+  return outcome.ok;
+}
+
 async function credentials(request: Request, env: ServersEnv, serverId: string): Promise<Response> {
   const identity = await authenticate(request, env);
   if (isResponse(identity)) return identity;
@@ -1113,6 +1145,32 @@ async function credentials(request: Request, env: ServersEnv, serverId: string):
   return json({ payload, signature, key_id: env.CREDENTIAL_KEY_ID ?? DEFAULT_CREDENTIAL_KEY_ID });
 }
 
+/**
+ * POST /v1/servers/{id}/dismiss：用户忽略「余额不足停机」留下的墓碑行。
+ *
+ * 只对 `state = 'destroyed' AND failure_code = 'billing_unpaid'` 生效；重复调用幂等。
+ * 手动销毁的行不会出现在列表里，也不该有忽略入口。
+ */
+async function dismiss(request: Request, env: ServersEnv, serverId: string): Promise<Response> {
+  const identity = await authenticate(request, env);
+  if (isResponse(identity)) return identity;
+  if (!env.DB) return apiError("INTERNAL", "服务还没准备好", { retryable: true, status: 503 });
+
+  const row = await loadServer(env.DB, identity.accountId, serverId);
+  if (!row || row.state !== "destroyed" || row.failure_code !== "billing_unpaid") {
+    return apiError("NOT_FOUND", "没有这台服务器");
+  }
+  if (row.dismissed_at == null) {
+    const now = Date.now();
+    await env.DB.prepare(
+      "UPDATE servers SET dismissed_at = ?, updated_at = ? WHERE id = ? AND account_id = ?",
+    )
+      .bind(now, now, serverId, identity.accountId)
+      .run();
+  }
+  return new Response(null, { status: 204 });
+}
+
 export async function handleServers(request: Request, env: ServersEnv): Promise<Response | null> {
   const url = new URL(request.url);
   const parts = url.pathname.split("/").filter(Boolean);
@@ -1128,6 +1186,7 @@ export async function handleServers(request: Request, env: ServersEnv): Promise<
   if (parts.length === 3 && request.method === "PATCH") return rename(request, env, parts[2]);
   if (parts.length === 4 && post) {
     if (parts[3] === "destroy") return destroy(request, env, parts[2]);
+    if (parts[3] === "dismiss") return dismiss(request, env, parts[2]);
     if (parts[3] === "credentials") return credentials(request, env, parts[2]);
     if (parts[3] === "rebuild") {
       return apiError("PRECONDITION_FAILED", "重建还没接入", {

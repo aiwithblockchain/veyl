@@ -636,6 +636,95 @@ pub async fn my_server_credentials(server_id: String) -> Result<Value, Value> {
     }
 }
 
+/// 用户主动删掉一个本地节点（「余额不足停机」留下的墓碑只能这样清，仅 UI）。
+///
+/// 删节点行后由外键级联清掉 `config_nodes`、把 `configs.current_node_id` 置 NULL。
+/// 正连着它就先停运行时；跟着删掉指向它的已销毁服务器缓存行，并尽力让控制面
+/// 忽略那条墓碑；最后发 `node-list-changed`。节点本来不存在时幂等返回 `removed: false`。
+#[tauri::command]
+pub async fn node_forget(state: State<'_, Arc<AppState>>, node_id: String) -> Result<Value, Value> {
+    let Some(store) = crate::store::global().cloned() else {
+        return Err(json!({
+            "code": "INTERNAL",
+            "message": "本地数据库还没就绪",
+            "retryable": true,
+            "details": { "reason": "store_unavailable" },
+        }));
+    };
+
+    // 只允许删自己名下（source = 'owned'）的节点：种子 / 手动节点有别的清理路径，
+    // 这个命令只服务于「余额不足停机」留下的墓碑。
+    match {
+        let conn = store.conn();
+        crate::store::configs::get_node(&conn, &node_id)
+    } {
+        Ok(Some(node)) if node.source == crate::store::configs::SOURCE_OWNED => {}
+        Ok(None) => return Ok(json!({ "removed": false })),
+        Ok(Some(_)) => {
+            return Err(json!({
+                "code": "PRECONDITION_FAILED",
+                "message": "只能删除服务器节点",
+                "retryable": false,
+                "details": { "reason": "not_owned" },
+            }))
+        }
+        Err(error) => {
+            return Err(json!({
+                "code": "INTERNAL",
+                "message": format!("读取本地节点失败：{error}"),
+                "retryable": true,
+                "details": { "reason": "store_error" },
+            }))
+        }
+    }
+
+    let connected = {
+        let conn = store.conn();
+        crate::store::configs::active(&conn)
+            .ok()
+            .flatten()
+            .and_then(|config| config.current_node_id)
+            .as_deref()
+            == Some(node_id.as_str())
+    };
+    if connected && super::server_watch::runtime_is_live(state.inner()).await {
+        if let Err(error) = state.services.runtime_stop(false).await {
+            log::warn!("删除节点前停止运行时失败：{error}");
+        }
+    }
+
+    // 先取墓碑行再删节点：删节点会把 `my_servers.node_id` 置 NULL，之后按节点 id 就查不到了。
+    let (removed, graves) = {
+        let conn = store.conn();
+        let graves =
+            crate::store::servers::destroyed_with_node(&conn, &node_id).unwrap_or_default();
+        let removed = crate::store::configs::delete_node(&conn, &node_id).unwrap_or(false);
+        for grave in &graves {
+            if let Err(error) = crate::store::servers::delete(&conn, &grave.id) {
+                log::warn!("删除已销毁服务器缓存行失败：{error}");
+            }
+        }
+        (removed, graves)
+    };
+
+    // 控制面尽力而为：通知失败不影响本地删除，下次列表也不会再看到这一行。
+    for grave in &graves {
+        if let Err(error) = crate::control_plane::servers::dismiss(&grave.id).await {
+            log::debug!("忽略墓碑失败 server={}：{}", grave.id, error.message);
+        }
+    }
+
+    if removed {
+        crate::seed::emit_node_list_changed(
+            &store,
+            "node_deleted",
+            None,
+            std::slice::from_ref(&node_id),
+        );
+    }
+    Ok(json!({ "removed": removed }))
+}
+
 /// 显式重新注册设备（§19.2.4）：丢弃当前身份与令牌，生成新的并静默注册。
 /// 旧服务器的本地记录保留为只读；本命令只由界面上的「重新注册设备」触发。
 #[tauri::command]

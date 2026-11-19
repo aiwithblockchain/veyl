@@ -892,6 +892,16 @@ export class FakeD1 {
       }
       return null;
     }
+    if (sql.startsWith("update servers set dismissed_at")) {
+      const server = this.tables.servers.find(
+        (s) => s.id === a[2] && s.account_id === a[3],
+      );
+      if (server) {
+        server.dismissed_at = a[0];
+        server.updated_at = a[1];
+      }
+      return null;
+    }
     if (sql.startsWith("update servers set enrollment_used_at")) {
       // 原子消费：只有哈希对得上、还没用过的那一次能成功。
       const server = this.tables.servers.find((s) => s.id === a[2]);
@@ -1452,8 +1462,14 @@ export class FakeD1 {
       sql.includes("state != 'destroyed'")
     ) {
       // 列表联订单行取扣费口径：服务器表本身不存 charge_mode。
+      // 「余额不足停机」的墓碑行保留在列表里，直到用户 dismiss。
       return this.tables.servers
-        .filter((row) => row.account_id === a[0] && row.state !== "destroyed")
+        .filter(
+          (row) =>
+            row.account_id === a[0] &&
+            (row.state !== "destroyed" ||
+              (row.failure_code === "billing_unpaid" && row.dismissed_at == null)),
+        )
         .sort((left, right) => Number(right.created_at) - Number(left.created_at))
         .map((server) => {
           const order = this.tables.orders.find((o) => o.id === server.order_id);
@@ -1541,6 +1557,8 @@ export class FakeD1 {
           if (row.destroyed_at != null) return false;
           if (row.provider_id == null) return false;
           if (Number(row.paid_until ?? 0) <= 0) return false;
+          if (Number(row.daily_price_cents ?? 0) <= 0) return false;
+          if (Number(row.billing_anchor_at ?? 0) <= 0) return false;
           if (row.billing_state === "expired") return false;
           if (row.billing_state === "pending") return false;
           if (!["booting", "installing", "verifying", "healthy", "active"].includes(String(row.state))) {
@@ -1588,6 +1606,8 @@ export class FakeD1 {
           if (row.destroyed_at != null) return false;
           if (row.provider_id == null) return false;
           if (Number(row.paid_until ?? 0) <= 0) return false;
+          if (Number(row.daily_price_cents ?? 0) <= 0) return false;
+          if (Number(row.billing_anchor_at ?? 0) <= 0) return false;
           if (row.billing_state === "expired") return false;
           if (row.billing_state === "pending") return false;
           if (!["booting", "installing", "verifying", "healthy", "active"].includes(String(row.state))) {
@@ -1738,6 +1758,16 @@ export class FakeStatement {
             server.state !== "destroyed"))
           ? 1
           : 0;
+    } else if (sql.startsWith("update servers set dismissed_at")) {
+      const [at, updated, id, account] = this.statement.args;
+      const server = this.db
+        .rows("servers")
+        .find((s) => s.id === id && s.account_id === account);
+      if (server) {
+        server.dismissed_at = at;
+        server.updated_at = updated;
+      }
+      changes = server ? 1 : 0;
     } else if (
       sql.startsWith("update servers set state = ?, installing_at") ||
       sql.startsWith("update servers set state = ?, verifying_at")

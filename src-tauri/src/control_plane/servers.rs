@@ -516,7 +516,11 @@ fn parse_order(raw: Value) -> Result<RawOrder, CpError> {
     serde_json::from_value(raw).map_err(|_| CpError::invalid_response("订单响应格式不正确"))
 }
 
-pub async fn list() -> Result<Vec<MyServer>, CpError> {
+/// 拉取并校验控制面的服务器列表；**不碰本地缓存**。
+///
+/// 拆出来给后台轮询用：那边要先看「哪台刚变成 destroyed、是不是正在连着」，
+/// 才能在落库发事件之前停运行时。缓存与事件统一走 [`cache_all`]。
+pub(crate) async fn fetch_all() -> Result<Vec<MyServer>, CpError> {
     let client = ControlPlane::new()?;
     let raw = client.get("/v1/servers").await?;
     let values = raw
@@ -531,23 +535,44 @@ pub async fn list() -> Result<Vec<MyServer>, CpError> {
         remember_server_failure(&server);
         servers.push(server);
     }
-    // 读路径也会顺带维护缓存，这是有意的：一次成功的列表响应是唯一能判断
-    // 「云端已无这台服务器」的完整快照；落库与收敛必须共用同一个连接，
-    // 否则并发 list 的旧快照可能删掉新快照刚建的行。
-    if let Some(store) = crate::store::global() {
-        let conn = store.conn();
-        for server in &mut servers {
-            cache_and_link(&conn, server);
-        }
-        let ids: Vec<&str> = servers
-            .iter()
-            .map(|server| server.server_id.as_str())
-            .collect();
-        if let Err(error) = crate::store::servers::retain_only(&conn, &ids) {
-            log::warn!("收敛我的服务器镜像失败：{error}");
-        }
-    }
     Ok(servers)
+}
+
+/// 把一次列表快照写进本地镜像，状态变了就发 `my-server-changed`。
+///
+/// 读路径也会顺带维护缓存，这是有意的：一次成功的列表响应是唯一能判断
+/// 「云端已无这台服务器」的完整快照；落库与收敛必须共用同一个连接，
+/// 否则并发 list 的旧快照可能删掉新快照刚建的行。
+pub(crate) fn cache_all(servers: &mut [MyServer]) {
+    let Some(store) = crate::store::global() else {
+        return;
+    };
+    let conn = store.conn();
+    for server in servers.iter_mut() {
+        cache_and_link(&conn, server);
+    }
+    let ids: Vec<&str> = servers
+        .iter()
+        .map(|server| server.server_id.as_str())
+        .collect();
+    if let Err(error) = crate::store::servers::retain_only(&conn, &ids) {
+        log::warn!("收敛我的服务器镜像失败：{error}");
+    }
+}
+
+pub async fn list() -> Result<Vec<MyServer>, CpError> {
+    let mut servers = fetch_all().await?;
+    cache_all(&mut servers);
+    Ok(servers)
+}
+
+/// 用户忽略「余额不足停机」留下的墓碑（`POST /v1/servers/{id}/dismiss`，204）。
+pub async fn dismiss(server_id: &str) -> Result<(), CpError> {
+    let client = ControlPlane::new()?;
+    client
+        .post(&format!("/v1/servers/{server_id}/dismiss"), None, None)
+        .await
+        .map(|_| ())
 }
 
 pub async fn get(server_id: &str) -> Result<MyServer, CpError> {
@@ -794,13 +819,12 @@ pub async fn destroy(server_id: &str, confirm: bool) -> Result<MyServer, CpError
     // （2026-11-19 产品决定）。删 `nodes` 行由外键级联清掉 `config_nodes`、把
     // `configs.current_node_id` / `my_servers.node_id` 置 NULL（外键已 ON）。
     // 不重启运行时：远端起效后隧道自己会断，Host 强行 stop 会让用户毫无预期地掉线。
-    let mut removed_node_id = None;
     if let Some(store) = crate::store::global() {
-        {
+        let removed_node_id = {
             let conn = store.conn();
             cache_and_link(&conn, &mut server);
-            removed_node_id = forget_destroyed_node(&conn, &mut server);
-        }
+            forget_destroyed_node(&conn, &mut server)
+        };
         // 连接释放后再发事件：`emit_node_list_changed` 会再拿同一把库锁。
         if let Some(node_id) = removed_node_id {
             crate::seed::emit_node_list_changed(

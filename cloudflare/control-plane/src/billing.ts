@@ -4,7 +4,7 @@
 import { randomId } from "./lib/crypto";
 import { provisionPaidOrder, type OrdersEnv } from "./orders";
 import { refundProvision } from "./provision";
-import { sweepExpiredEnrollments, sweepUnsettledSettlements } from "./servers";
+import { destroyUnpaidServer, sweepExpiredEnrollments, sweepUnsettledSettlements } from "./servers";
 import { reconciliationDrift, recordLedgerEntry } from "./wallet";
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -35,6 +35,8 @@ interface BillingRow {
 
 export interface BillingReport {
   renewed: number;
+  /** 窗口内扣不动、已停机销毁的台数（余额不足）。 */
+  unpaidDestroyed: number;
   pastDue: number;
   expired: number;
   rebuilt: number;
@@ -65,7 +67,7 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, archived: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, archived: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
@@ -80,12 +82,25 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
 
   for (const server of due) {
     try {
-      const result = await settleServer(env, server, now);
+      const result = await settleServer(env, server, now, { delinquent: false });
       // 收集之后才被销毁：销毁已按当时 paid_until 退款，这里不能再扣。
-      if (result.state === "destroyed") continue;
-      if (result.state === "active") report.renewed += 1;
-      else if (result.state === "expired") report.expired += 1;
-      else report.pastDue += 1;
+      if (result.reason === "destroyed") continue;
+      if (result.reason === "ok") {
+        report.renewed += 1;
+        continue;
+      }
+      if (result.reason !== "insufficient") {
+        // 算不出账 / 账户缺失 / 账本暂不可用：不是欠费，不停机，下一轮再试。
+        console.warn(
+          `[billing] skip server=${server.id} reason=${result.reason}`,
+        );
+        continue;
+      }
+      // 可扣窗口内钱不够：当场停机销毁，没有宽限。销毁失败（DO 删不掉）
+      // 时状态由 destroyInstance 还原，下一轮 Cron 再试，不写 past_due / expired。
+      if (await destroyUnpaidServer(env, server.id, server.account_id)) {
+        report.unpaidDestroyed += 1;
+      }
     } catch (error) {
       // 单台出错不能中断整轮；也要留下痕迹，否则这台会永远不扣费且无处可查。
       console.error(`[billing] server_failed id=${server.id} error=${String(error)}`);
@@ -238,6 +253,7 @@ async function collectDue(env: BillingEnv, now: number): Promise<BillingRow[]> {
       .prepare(
         "SELECT id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state FROM servers " +
           "WHERE destroyed_at IS NULL AND provider_id IS NOT NULL AND paid_until > 0 " +
+          "AND daily_price_cents > 0 AND billing_anchor_at > 0 " +
           "AND billing_state <> 'expired' AND billing_state <> 'pending' " +
           "AND state IN ('booting', 'installing', 'verifying', 'healthy', 'active') " +
           "AND paid_until <= ? AND id > ? ORDER BY id LIMIT ?",
@@ -278,17 +294,45 @@ async function liveServerState(
   };
 }
 
+/**
+ * 结算结论。`runBilling` 只对 `insufficient` 停机销毁：
+ * 算不出账（`unbillable`）、账户缺失、账本暂时不可用都不能当成欠费。
+ */
+type SettleReason =
+  | "ok"
+  | "destroyed"
+  | "unbillable"
+  | "missing_account"
+  | "unavailable"
+  | "insufficient";
+
+interface SettleOutcome {
+  state: string;
+  days: number;
+  charged: boolean;
+  paidUntil: number;
+  reason: SettleReason;
+}
+
 /** 把一台服务器的账补到 now 之后；返回最终状态。 */
 async function settleServer(
   env: BillingEnv,
   server: BillingRow,
   now: number,
-): Promise<{ state: string; days: number; paidUntil: number }> {
+  options: { delinquent?: boolean } = {},
+): Promise<SettleOutcome> {
   const db = env.DB!;
   const daily = Number(server.daily_price_cents);
   const anchor = Number(server.billing_anchor_at);
   if (!Number.isFinite(daily) || daily <= 0 || !Number.isFinite(anchor) || anchor <= 0) {
-    return { state: server.billing_state, days: 0, paidUntil: Number(server.paid_until) };
+    // 存量行可能缺日价/锚点：算不出该扣多少，绝不能因此停机删机器。
+    return {
+      state: server.billing_state,
+      days: 0,
+      charged: false,
+      paidUntil: Number(server.paid_until),
+      reason: "unbillable",
+    };
   }
 
   // collectDue 取到行之后、结算之前，用户可能已经开始销毁（destroying）或已销毁。
@@ -297,11 +341,18 @@ async function settleServer(
   // 复查同时带回最新的 paid_until：循环用它起算，不拿循环外的旧值。
   const live = await liveServerState(db, server);
   if (!live.live) {
-    return { state: "destroyed", days: 0, paidUntil: live.paidUntil };
+    return {
+      state: "destroyed",
+      days: 0,
+      charged: false,
+      paidUntil: live.paidUntil,
+      reason: "destroyed",
+    };
   }
 
   let paidUntil = live.paidUntil;
   let days = 0;
+  let failure: SettleReason | null = null;
 
   while (paidUntil - PREPAY_MS <= now && days < MAX_CATCH_UP_DAYS) {
     const bucket = paidUntil;
@@ -350,8 +401,12 @@ async function settleServer(
 
     // 守卫不成立会落到 insufficient：以库里的状态为准，别把正在销毁的机器标成欠费。
     const current = await liveServerState(db, server);
-    if (!current.live) return { state: "destroyed", days, paidUntil };
+    if (!current.live) {
+      return { state: "destroyed", days, charged: days > 0, paidUntil, reason: "destroyed" };
+    }
 
+    // 记账失败要分清原因：只有「钱不够」才停机；账户缺失、账本不可用都是环境问题。
+    failure = result.reason;
     break;
   }
 
@@ -363,18 +418,26 @@ async function settleServer(
       : days >= MAX_CATCH_UP_DAYS || now >= paidUntil + GRACE_MS
         ? "expired"
         : "past_due";
-  if (state !== server.billing_state) {
+  // 新路径不再产生 past_due / expired（扣不动直接停机销毁），但旧行还能被读；
+  // 它们补扣成功时仍要写回 active，所以「只写 active」不受 delinquent 限制。
+  const mayMarkDelinquent = options.delinquent !== false || state === "active";
+  if (state !== server.billing_state && mayMarkDelinquent) {
     await db
       .prepare("UPDATE servers SET billing_state = ?, updated_at = ? WHERE id = ?")
       .bind(state, now, server.id)
       .run();
   }
-  return { state, days, paidUntil };
+  // 扣款失败要按原因区分；补到 30 天上限仍然过期，同样算「钱不够」。
+  const reason: SettleReason = failure ?? (paidUntil > now ? "ok" : "insufficient");
+  return { state, days, charged: days > 0, paidUntil, reason };
 }
 
 /**
  * 充值后的恢复路径（§4.6）：expired 不参与每日扫描，只有充值能把它拉回来。
  * 欠超过 30 天时先豁免到「现在往前 30 天」的锚点格，再正常补 30 天。
+ *
+ * **只服务存量行**：新扣费路径不再产生 past_due / expired（窗口内扣不动直接停机销毁），
+ * 这里补扣失败时仍会写这两种状态，给界面读老数据用。
  */
 export async function recoverExpiredServers(env: BillingEnv, accountId: string): Promise<number> {
   const db = env.DB;

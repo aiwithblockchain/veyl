@@ -17,10 +17,10 @@
 | 3 | 令牌 | 复用现有 `TOKEN_SIGNING_JWK`（Ed25519），只加 `kind` / `amr` claim；access 15 分钟、refresh 30 天滑动 |
 | 4 | 收费 | **M1 只做预付费余额**（USD 分记整数）；Dodo 一次性充值产品，微信可付；订阅不上线（M2） |
 | 4b | 商户 | 与 TweetPilot **同一个 Dodo 商户账号**；充值产品、webhook、回跳页、API key 都按 Veyl 自己的建（§4.8） |
-| 5 | 建机时机 | 下单 → `checkout` **只确认下单、不扣费**（预检余额 ≥ 日价 × 7，不足返回 `insufficient_balance`，不建机）→ 服务器就绪（enroll 确认 sing-box 起成功）时扣第 0 天，之后每天由 Cron 扣一天（§4.14） |
+| 5 | 建机时机 | 下单 → `checkout` **只确认下单、不扣费**（预检余额 ≥ 日价 × 7，不足返回 `insufficient_balance`，不建机）→ 服务器就绪（enroll 确认 sing-box 起成功）时扣第 0 天，之后由每小时 :17 的 Cron 在到期前续一天（§4.14） |
 | 6 | 幂等 | 充值 webhook 用 `webhook-id` + `payment_id` + 账本 ref 唯一；扣费用账本唯一键 + 原子守卫；同一订单 / 同一期只扣一次 |
 | 7 | 价格 | 目录与扣费都用**售价**（成本 × 1.5），存 USD 分；Dodo 只负责把充值换成 USD 入账 |
-| 8 | 到期 | 每日 Cron 扣费续期；扣不动进 **7 天宽限**，结束标 `expired`；不删机器、不删凭据，继续计费（§4.6、§4.11、§8） |
+| 8 | 到期 | 每小时 :17 的 Cron 在到期前 1 小时扣下一天；**扣不动就当场停机销毁**（停隧道、销毁实例、删节点），没有宽限、没有 `expired` 过渡，充值也不能恢复（§4.6、§4.11、§8） |
 
 ---
 
@@ -48,7 +48,7 @@
 | 5 | 没有「一个订单只建一台服务器」的约束 | 加唯一索引 `servers(order_id)` |
 | 6 | 设备注册是静默的，没有登录概念；设备也没有「登出」路径 | 登录 = 设备并入邮箱账户；新增 `logout` 把设备解绑到新的匿名账户（§2.4） |
 | 7 | 只有一次性支付的模型，没有余额、流水与续费 | 新增 `wallet_ledger`、`topups`；`accounts.balance_cents`（§4.2、§4.9） |
-| 8 | 没有到期 / 宽限的任何状态 | `servers.billing_state` + 每日 Cron + 7 天宽限（§4.6） |
+| 8 | 没有到期 / 宽限的任何状态 | `servers.billing_state` + 每小时 :17 的 Cron + 停机销毁（§4.6） |
 
 > 另有一处已知偏差：客户端令牌存在 `secrets.enc`（机器绑定、0600），不读写系统钥匙串。本文沿用实现，不再要求改用钥匙串；`my-servers.md` §19.2.3 的 Keychain 描述视为实现偏差，以本文为准。
 
@@ -262,7 +262,7 @@ type MyServerAccount = {
 | 展开区 | `登出` + 「已有配置和节点不受影响。」+ 预留「余额 / 到期」位置 | 只有 `登录` |
 | 绝不显示 | token、密码、`device_secret`、`account_id` | 同左 |
 
-- **余额 / 到期位置先留空**：口径已定为预付费余额，宽限规则见 §4.11；本轮**不渲染、不编字段**，整体 UI 重构时按 §4.11 的文案补。
+- **余额 / 到期位置先留空**：口径已定为预付费余额，停机销毁规则见 §4.11；本轮**不渲染、不编字段**，整体 UI 重构时按 §4.11 的文案补。
 - 数据只来自 `MyServerAccount`（§2.6），渲染账号块**不再额外打接口**。
 
 #### 3.6.3 交互
@@ -328,8 +328,8 @@ type MyServerAccount = {
   1. **按天扣费**：建机只扣第 0 天，之后每天扣一天；连续扣满 30 天正好等于展示的月价。
   2. **创建门槛**：`checkout` 要求余额 ≥ 日价 × 7（$6 档 `$1.40`、$9 档 `$2.10`、$18 档 `$4.20`），不够就 `insufficient_balance`，不扣钱、不建机。
   3. **销毁退未用整天**：已扣但还没用到的整天按日价退回余额；销毁当天已经用掉，不退。
-  门槛**不是预扣**：`paid_until` 仍是 `created_at + 1d`，余额也不会先冻结 7 天。它只保证建出来的机器至少能按天跑一周，不会第二天就进宽限。余额刚好 7 天费用的用户正常用约 7 天，然后进入既有的 7 天宽限（§4.6 / §4.11）。
-- **不按小时**：`$6/月 ÷ 720` 是 0.833 分/小时，不是整数分，每小时一笔整数分账记不出来；退一步用「每小时扣 0 分 / 1 分」的望远镜取整，账本和界面都会出现「这小时没扣钱」。而且账本量是按天的 24 倍、Cron 要从每天一次改成每 10 分钟一次分批跑。
+  门槛**不是预扣**：`paid_until` 仍是 `created_at + 1d`，余额也不会先冻结 7 天。它只保证建出来的机器至少能按天跑一周，不会第二天就被停机销毁。余额刚好 7 天费用的用户正常用约 7 天，之后扣不动即停机销毁（§4.6 / §4.11）。
+- **不按小时**：`$6/月 ÷ 720` 是 0.833 分/小时，不是整数分，每小时一笔整数分账记不出来；退一步用「每小时扣 0 分 / 1 分」的望远镜取整，账本和界面都会出现「这小时没扣钱」。而且账本量是按天的 24 倍。Cron 现在每小时跑一次**只是为了在到期前提前续费**（§4.6），不是为了按小时扣钱——扣费单位仍是一天。
 - **改粒度不改变我们的成本**：DO 按秒计费、到月度封顶（约 672 小时）、**关机不停止计费，只有销毁才停**。粒度只决定「用户没用满一个月能不能少付」，不决定我们付多少。
 - 代价写在明处：按天扣意味着**中途销毁要退还未用完的天数**（§4.6），按月扣则没有这个动作。选择退，是因为不退等于让只想试几天的用户白付一个月。
 
@@ -429,7 +429,7 @@ checkout
 | 处理失败 | `500` 让 Dodo 重投；处理必须幂等 |
 | 建机 | webhook **不建机**；建机只发生在 `my_server_checkout` 之后的建机流程里，第 0 天由 enroll 回调结算（§4.14） |
 
-### 4.6 续费、宽限与到期
+### 4.6 续费、停机销毁与到期
 
 **Cron 每小时扫一次（每小时 :17 UTC）**，做四件事：按天扣费续期、补建掉队订单、对账、账本归档（§4.12）。`wrangler.jsonc` 的 `triggers.crons = ["17 * * * *"]` 已配好（dev 已验证；prod 部署时一并生效）——没有这一段，`scheduled()` 永远不会触发。
 
@@ -450,10 +450,10 @@ day    = servers.daily_price_cents      # 日价快照，建机时写死，整�
 # A. 逐日续费（每轮分页，一行失败不阻塞其它行）
 cursor = billing_cursor.cursor                       # 上一轮处理到的最后一个 server_id
 batch  = SELECT * FROM servers
-         WHERE paid_until <= :now
+         WHERE paid_until - 1h <= :now               # 到期前 1 小时进入可扣窗口
            AND destroyed_at IS NULL
            AND provider_id IS NOT NULL
-           AND billing_state <> 'expired'            # 已停用的等充值后恢复，不再逐日扫
+           AND billing_state <> 'pending'
            AND state IN ('booting','installing','verifying','healthy','active')
            AND id > :cursor
          ORDER BY id LIMIT 200                       # 每轮上限
@@ -461,20 +461,14 @@ if batch 为空: billing_cursor.cursor = ''            # 回到队首，下一�
 for each server in batch:
   try:
     charged = 0
-    while paid_until <= now and charged < 30:
+    while paid_until - 1h <= now and charged < 30:
       bucket = paid_until                            # 这一天的起点
       原子扣费（ref = server_day:<server_id>:<bucket>，§4.7）
         ├─ 成功 / 已扣过（重跑）→ paid_until = bucket + 1d；charged += 1；continue
-        └─ 余额不足              → break
-    # 状态迁移：三段，顺序写死，后面的覆盖前面的
-    if paid_until > now:                     billing_state = 'active'
-    else if now >= paid_until + 7d:          billing_state = 'expired'
-    else:                                    billing_state = 'past_due'
-    # 覆盖规则：补满 30 天仍追不上，直接停用
-    if charged >= 30 and paid_until <= now:  billing_state = 'expired'
+        └─ 余额不足              → 停机销毁（§4.11）   # 没有宽限，也没有 expired 过渡
     # 写回：单调守卫，bucket 在同一次读里拿到，避免并发把 paid_until 写回去
     UPDATE servers
-       SET paid_until = MAX(paid_until, :newPaidUntil), billing_state = :state, updated_at = :now
+       SET paid_until = MAX(paid_until, :newPaidUntil), billing_state = 'active', updated_at = :now
      WHERE id = :serverId AND paid_until = :bucket
   catch: 记 failure + audit_log，继续下一台
 billing_cursor.cursor = batch 最后一个 id
@@ -505,46 +499,30 @@ for each order with state='paid' and paid_at < now - 5min and no servers row:
 ```
 
 - **B 段的锚点必须是 `order.paid_at`**：第 0 天就是用户付钱那一刻买下的那一天。用 `now` 会在「扣费成功 → 补建」之间平白多算一段时间，而且 `order:<id>` 那笔扣费的流水时间对不上 `billing_anchor_at`，账实不符。`created_at` 同样取 `paid_at`。
-- **补建晚于扣费时，中间空档按「已付到 `now` 那一格」写，但不补扣**：订单 `paid` 后隔 N 天才补建成功（Cron 停摆、建机连续失败后重试），用户只付过一次钱（`order:<id>`，第 0 天的日价）。这时把 `paid_until` 写成 `anchor + (n_now + 1)d`，让机器落进 `active` 而不是一建出来就 `past_due`——空档是我们没建出来造成的，不该让用户的机器一上线就显示欠费。空档天数记 `audit_log('billing.gap_waived', { days })`，不写 `server_day`、不扣余额。
+- **补建晚于扣费时，中间空档按「已付到 `now` 那一格」写，但不补扣**：订单 `paid` 后隔 N 天才补建成功（Cron 停摆、建机连续失败后重试），用户只付过一次钱（`order:<id>`，第 0 天的日价）。这时把 `paid_until` 写成 `anchor + (n_now + 1)d`，让机器落进 `active` 而不是一建出来就被停机销毁——空档是我们没建出来造成的，不该让用户的机器一上线就被收回。空档天数记 `audit_log('billing.gap_waived', { days })`，不写 `server_day`、不扣余额。
   - 与 `max(anchor + 1d, …)` 取大：`n_now = 0`（同一格内补建）时两者相等，落点仍是第 0 天结束；`n_now ≥ 1` 时取到 `now` 那一格的末尾，下一轮 Cron 才继续正常逐日扣。
   - 这条与「销毁不补扣」（§4.6 末）同源：系统自己造成的缺口，不让用户买单，也不在账本里留看不出来源的欠账。
-- **状态迁移只有三种结果，顺序固定**：`active` → 否则 `expired`（已过宽限）→ 否则 `past_due`。不要再写「charged == 0 才是 past_due」这类分支——补了部分天但仍没追上，同样是 `past_due`。
+- **状态只剩两种结果**：覆盖到未来就是 `active`；扣不动就是**停机销毁**。`past_due` / `expired` 不再由新路径产生，只保留读取兼容（存量行与旧版客户端）。
 - **`paid_until` 只能前进**：`MAX(paid_until, :new)` + `WHERE paid_until = :bucket` 是两个方向的保护。前者防「并发写入把值改小」，后者防「两个执行者基于同一个 bucket 各写一次」。`bucket` 必须在**同一次读取**里拿到并用于 WHERE，不能先读、再在别处重算。
-- **分页游标按 `id`，不按 `paid_until`**：余额不足的机器会一直满足 `paid_until <= now`，按 `paid_until` 排序会让它永远占队首，后面的机器饿死。
+- **分页游标按 `id`，不按 `paid_until`**：扣费失败的行会在本轮被销毁并退出扫描，但游标仍按 `id` 走，避免分页时跳过行。
 - **单轮 200 台、每台最多补 30 天**：Cloudflare 的 Cron 是短请求，一轮跑不完不追求跑完；下一轮从游标继续，最坏情况下所有机器在一个扫描周期内都会被看到。
 - **一行失败不阻塞其它行**：单台抛错就记 `failure` + `audit_log` 跳到下一台，不能因为一台的异常让整批停摆。
 
 - **只对真正存在的机器扣费**：`state = 'error'`、`provider_id` 为空、从未建出来的服务器**一律跳过**——这是「为一台从未创建的机器每天扣费」的直接防线。这类行交给「建机失败 → 销毁 / 重建」流程，不进计费；如果它们停在 `paid` 且没有服务器，由 B 段补建或失败处置接手。
 - **一天一扣，账本一天一行**：一台机器每月 30 行，1000 台每月 3 万行。这是选按天而不按小时的直接原因（按小时是 72 万行 + 每小时一个跑批器）。
-- **一次补到 `paid_until > now`，最多 30 天**：Cron 停摆几天后重新上线，要能把欠的天数一次补齐；超过 30 天仍补不到 now → 转 `expired` + 告警，**不再自动扣**。
+- **一次补到 `paid_until` 超出当前时刻 1 小时，最多 30 天**：循环条件是 `paid_until - 1h <= now`，所以「补齐」的终点是 `paid_until > now + 1h`，不是 `paid_until > now`。Cron 停摆几天后重新上线，要能把欠的天数一次补到这个位置；补满 30 天仍到不了 → **停机销毁** + 告警。
 - **同一台服务器同一天只能扣一次**：账本 ref 唯一，`bucket` 就是那一天的时间戳；Cron 重跑、并发执行都只会有第一笔成功（§4.7 的重跑语义）。
 - **「第几天」由锚点决定，不由 UTC 零点决定**：13:50 建机，它的每一天就是 13:50 → 次日 13:50；Cron 每小时跑，在到期前 1 小时就把下一天扣上，不会把用户的日均切到半夜。所以**不存在跨零点该算哪一天的问题**。
-- 余额不足后进入 **7 天宽限**：宽限期内充值 → 下一次 Cron（或充值成功后的即时重试）补扣并顺延，状态回 `active`。
-- `now >= grace_end`：`billing_state = expired`，**只标记停用**；机器与本地凭据都不删。**从这一刻起欠费不再累积**——`paid_until` 冻结、不再写 `server_day`、也就不会再出现一天一笔的欠账。机器照旧在跑，云成本继续由我们承担（§8），但**账面不涨**。
-- **expired 之后充值怎么恢复**（口径写死）：
 
-  ```
-  owed = floor((now - paid_until) / 1d)
-  if owed <= 30:
-    正常逐日补扣 owed 天 → paid_until > now → billing_state = 'active'
-  else:
-    # 冻结期间没有累积欠费，但「从 paid_until 到现在」可能跨过很久
-    # 用户最多只付 30 天；跳到的位置必须仍落在锚点的整天网格上，否则日序 n 会变成小数
-    n_now      = floor((now - anchor) / 1d)
-    paid_until = anchor + max(0, n_now - 30 + 1) * 1d
-    #           = 跳到「now 所在那一格的前一格」，再补 30 天正好落在 anchor+(n_now+1)d > now
-    audit_log('grace_waived', { owed, waived: owed + 1 - 30 })
-    再按上面的正常路径补 30 天 → paid_until = anchor + (n_now+1)d > now → 'active'
-  ```
+**扣费失败即停机销毁（2026-11-19 拍板）**
 
-  - **`+1` 不能省**：写成 `anchor + (n_now - 30)d` 再补 30 天，落点是 `anchor + n_now·d`，而 `now ≥ anchor + n_now·d`，所以 `paid_until ≤ now` 恒成立——机器永远回不到 `active`。这条是实现期发现的差一天错误（2026-11-16 修正）。
-
-  - **默认豁免，不阻塞恢复**：用户充够 30 天的钱就能立刻拿回机器。豁免天数记 `audit_log` 并告警，人工可以事后复核。
-  - **要追缴就走人工**：需要补记的部分用 `manual` 类型的 `adjustment` 单独记一笔，有备注、有痕迹；系统不自动追。
-  - **为什么这样定**：停机期间的账已经不涨了，再让用户背一笔「看不到明细的旧账」既解释不清也收不回来；30 天的上限正好等于一个完整计费周期，用户能自己算清楚。
+- **停机销毁 = 停隧道 → 销毁云实例 → 删控制面节点记录 → `servers.state = 'destroyed'`，`failure_code = 'billing_unpaid'`**。客户端把它当墓碑：左栏写 `已停机删除`，详情只有一句说明 + `删除`（`POST /v1/servers/{id}/dismiss` 只写 `dismissed_at`），节点不可连接、不可测速（`my-servers.md` §7.4、`servers-list-detail.md` §2.4）。
+- **没有宽限期、没有 `expired` 过渡、充值也不能恢复**：扣不动就是结束，要节点只能新建。`recoverExpiredServers` 那条恢复路径随本条一并作废。
+- **由计费任务触发，不是用户操作**：窗口内第一次扣费失败即按失败处理，不再「下一个 :17 再试」。**销毁本身失败**（云厂商暂时删不掉）时状态还原，下一轮 Cron 继续销毁——重复的只有销毁动作，不会再扣钱。
+- **退款按同一条公式**：未用完的整天照退（§4.6 末），当天已经用掉的不退；扣费失败发生在覆盖期内时通常没有可退的整天。
+- **账本不复原**：已经扣过的 `server_day` 保持原样，不写反向流水；停机销毁不是退款事件。
 - **订单 `paid` 但没有服务器**：Cron 每轮补建（B），否则用户付了钱却没机器；`unique(servers.order_id)` 保证不会补出第二台。
-- 到期/宽限的判定基准是 `servers.paid_until`，不是事件到达时间。
-- **不自动销毁任何实例**，Cron 只改状态、记账、补建。
+- 到期判定只看 `servers.paid_until`，不是事件到达时间；Cron 除续费与停机销毁外，还负责补建、对账、账本归档。
 
 **销毁时退还未用完的整天天数**（2026-11-16 拍板）
 
@@ -567,9 +545,9 @@ refundTotal = max(0, (n_paid - (n_now + 1))) * day      # 未开始的整天 × 
 
 - **锚点即就绪时刻**：每台服务器的 `billing_anchor_at` 等于它自己的 `ready_at`（就绪结算那一刻），`paid_until = 锚点 + 24h`。所以「第二天」是按这台机器自己的时间算的：本地 15:35 建好，它的下一天就在次日 15:35 到期，不会在某个日历日零点被统一切天。
 - **计费任务每小时跑一次，扣费点在到期之前**：`wrangler.jsonc` 的 `"crons": ["17 * * * *"]` 是 **UTC**，每小时第 17 分（本地 :17；另有 `/v1/debug/billing` 可手动触发，只用于排查，不算日常路径）。服务器在 `paid_until` **前 1 小时**进入可扣窗口：窗口内每个 :17 尝试续一天，扣成功则 `paid_until += 24h`。正常情况下续费发生在到期之前，不再有「到期后等下一次批量」的滞后。
-- **欠费判定点仍是 `paid_until` 本身，不含提前量**：窗口内扣失败（余额不足）时机器还没到期，`billing_state` 仍是 `active`、照常可用，下一个 :17 再试；只有 `paid_until <= now` 且扣不动，才按下面的规则转 `past_due`（7 天宽限）/ `expired`。**提前扣失败不等于欠费。**
-- **真实样本推演**：服务器 `srv_4zSfRJoTgP5FFc4gOD4gUQ` 的锚点与第 0 天扣费都是 **2026-11-18 15:35:10（本地）**（钱包流水只有一条 `2026-11-18 15:35:10 charge -30`；这是早期数据，`ready_at` 未写，锚点以扣费流水为准），`paid_until = 2026-11-19 15:35:10`。11-19 14:17 起进入可扣窗口，当天 15:17 那次 Cron 把 11-19 这一天扣掉、`paid_until` 顺延到 **11-20 15:35:10**；用户 15:50 销毁时这一天已经收了（按退款规则当天不退）。
-- **这段窗口的界面口径（2026-11-19 定稿）**：`billing_state = 'active'` 且 `paid_until <= now` 时，机器完全可用，最多等 1 小时（下一个 :17）就会补扣；界面写「每天 $X · **本期已过，服务正常**」。**不写**「到期」「欠费」「停用」——那三个词只属于 `past_due` / `expired`；也不写具体扣费时刻。
+- **扣失败的判定点就是扣费那一刻，不再等 `paid_until`**：窗口内一次扣不动就停机销毁（§4.6）；「提前扣失败等于欠费、下一个 :17 再试」的旧口径作废。
+- **真实样本推演**：服务器 `srv_4zSfRJoTgP5FFc4gOD4gUQ` 的锚点与第 0 天扣费都是 **2026-11-18 15:35:10（本地）**（钱包流水只有一条 `2026-11-18 15:35:10 charge -30`；这是早期数据，`ready_at` 未写，锚点以扣费流水为准），`paid_until = 2026-11-19 15:35:10`。11-19 14:17 起进入可扣窗口：当天 15:17 那次 Cron 扣成功则顺延到 **11-20 15:35:10**；余额不足则**在 15:17 当场停机销毁**，不会拖到 15:35。
+- **「本期已过，服务正常」只剩异常窗口**：正常路径下扣失败即销毁，机器不会带着 `active` 又过了覆盖期。这一档文案（`PAID_EXPIRED_WORDING`）只为 Cron 停摆、存量行等异常情况保留，不再是设计上的常规档；界面不得主动制造这个状态。
 
 ### 4.7 幂等、并发与对账
 
@@ -624,7 +602,7 @@ WHERE id = :orderId AND state = 'pending_payment'
 |---|---|---|
 | 0 | 1 | **已扣过**：账本行早已存在，按已扣恢复（续期照做、不重复扣钱） |
 | 1 | 1 | 本次扣费成功 |
-| 0 | 0 | 余额不足（账本没写），进宽限 |
+| 0 | 0 | 余额不足（账本没写）→ 停机销毁（§4.11） |
 | 1 | 0 | 钱扣了但服务没续上（服务器已删等）：告警 + 写一条反向 `adjustment`，人工核对 |
 
 - **`ref_id` 规则**：充值 `dodo_payment:<payment_id>`；首次购买 `order:<order_id>`（rebuild 用新订单 id）；每日续费 `server_day:<server_id>:<bucket>`（`bucket` = 那一天起点的毫秒时间戳，天然单调）；销毁退款 `server_refund:<server_id>:<refundTotal>`（后缀是应退总额，见 §4.6）；人工调整 `manual:<uuid>`（用 uuid，避免撞唯一键）。
@@ -774,54 +752,40 @@ CREATE UNIQUE INDEX servers_order ON servers(order_id);
 订阅代码（12 个事件、`subscriptions` 表、托管 Portal、期末/立即失效判定）**保留在仓库里，但 M1 不启用**：不建 `subscriptions` 表、不订阅 subscription 事件、结账不创建订阅会话。M2 面向国际卡用户启用时，按本文历史版本（2026-11-15 订阅稿）恢复即可，钱包与订阅共用 `payments` 与账本，互不冲突。
 
 
-### 4.11 到期、取消与 7 天宽限
+### 4.11 到期、停机销毁与不可恢复
 
-见 §4.6：由每日 Cron 按 `servers.paid_until` 逐日扣费续期，扣不动进 7 天宽限，宽限结束只标记 `expired`，不删机器与凭据。**`paid_until` 是「已付到哪个时刻」，单位是天，不是月。**
+见 §4.6：每小时 :17（UTC）的 Cron 在 `paid_until` **前 1 小时**进入可扣窗口，窗口内第一次扣下一天；**扣不动就当场停机销毁**——停隧道、销毁实例、删控制面节点，没有 7 天宽限、没有 `expired` 过渡，充值也不能恢复。**`paid_until` 是「已付到哪个时刻」，单位是天，不是月。**
 
 | 时刻 | 状态 | 界面一句话 |
 |---|---|---|
-| `now < paid_until` | `active` | 详情显示「每天 $0.20 · **本期有效至** 11-17 13:50」 |
-| `paid_until ≤ now`，且下一次 Cron 还没跑到（`billing_state` 仍是 `active`） | `active` | 「每天 $0.20 · **本期已过，服务正常**」——不显示那个已经过去的时间点，也不用异常色 |
-| `paid_until ≤ now` 且已扣不动 | `past_due` | 「余额不足，最近一次扣费没成功。7 天内充值可继续使用（还剩 N 天）。」 |
-| `now ≥ paid_until + 7d` | `expired` | 「余额不足，服务已停用。服务器还在，**停机期间不再产生费用**；充值后最多补 30 天即可恢复。」 |
+| `now < paid_until - 1h` | `active` | 详情显示「每天 $0.20 · **本期有效至** 11-21 13:50」 |
+| `paid_until ≤ now`，但计费任务没跑到（**仅异常窗口**：Cron 停摆、任务失败） | `active` | 「每天 $0.20 · **本期已过，服务正常**」——不显示已过去的时间点，也不用异常色 |
+| 到期前 1 小时内的 :17 扣成功 | `active` | 同一句，日期顺延一天 |
+| 窗口内扣失败 | **停机销毁** | 不再有状态文案；下一次刷新后这一行变成墓碑「已停机删除」 |
+| 墓碑（`destroyed`） | — | 「这台机器因余额不足已停机销毁，节点不能再连接。删除后不再显示。」+ `删除` |
 
 - **文案定稿：用「本期有效至」，不用「已付至」，也不用「下次扣费：…」**（2026-11-16 定）。
   - 「已付至」是过去时的记账口吻，用户读成「到这个点就停」，可机器其实还在跑；「本期有效至」说的是覆盖区间，语义对得上 `paid_until` 的定义。
-  - 「下次扣费：<时间>」不采用：扣费发生在每小时 Cron（每小时 :17 UTC，到期前 1 小时起可扣）而不是 `paid_until` 那一刻，报一个具体时刻等于给用户一个不准的承诺，而用户真正想知道的只是「会不会停」。当前窗口里界面写「本期已过，服务正常」（2026-11-19 定稿）：既不报时刻，也不暗示停机。欠费的措辞留给 `past_due`。
-  - 这个窗口现在只会在扣失败的机器上出现：正常情况下续费在到期前 1 小时已扣，`paid_until` 始终在未来；扣不动的机器最多等 1 小时（下一个 :17）再试。期间机器照常可用，`billing_state` 仍是 `active`，用正常色渲染，不当作异常。
+  - 「下次扣费：<时间>」不采用：扣费发生在每小时 :17 的 Cron、到期前 1 小时起可扣，报一个具体时刻等于给用户一个不准的承诺。任何情况下都**不写具体扣费时刻**，也不写会被读成承诺的相对时间词（「下一轮」「今日」「今晚」）。
+  - 正常覆盖期内写 `每天 $X · 本期有效至 <时间>`；扣失败后不再有中间文案，直接进入墓碑。
 
-- **三个词的归属（2026-11-19 定稿，供以后引用）**：「**欠费**」「**停用**」「**到期**」只属于 `past_due` / `expired`。`active` 且覆盖期已过的窗口里，机器完全可用，会在下一次计费任务正常补扣，文案必须表达「正常」，不能表达「停了」。正常覆盖期内仍写 `每天 $X · 本期有效至 <时间>`。任何情况下都**不写具体扣费时刻**，也不写会被读成承诺的相对时间词（「下一轮」「今日」「今晚」）——计费任务固定在每小时 :17 跑，给精确时刻等于给不准的承诺。
+- **三个词的归属（2026-11-19 修订）**：「**欠费**」「**停用**」「**到期**」不再适用于新路径——扣费失败就是停机销毁，没有欠着还能用的阶段。新路径的界面词只有 **「已停机删除」**（墓碑），连接页节点行写 **「停机删除」**。`past_due` / `expired` 两个值只为存量行与旧版客户端保留读取兼容，界面不再主动产生；「不写具体扣费时刻」这条继续保留。
 
-- **「停机期间不产生费用」是实话，必须这么说**：expired 之后 `paid_until` 冻结、不再写 `server_day`（§4.6），所以用户看到的余额会一直停在那一刻，不会越拖越少。这条文案是消除「我不敢离开，怕一直扣钱」的直接手段。
-- **恢复口径要在界面上说清**：`expired` 之后充值，抵扣的是「从停用到现在」最多 30 天，超出部分系统默认豁免；用户只需保证余额够 30 天的日价。**具体剩余天数用 `MyServer` 的 `paid_until` 与 `daily_price_cents` 现算，不在文案里写死数字。**
-- 「服务已停用」目前只是状态标记（隧道凭据在本地，切不断）；等 M2 真停用上线后，这句文案才有对应的实际效果。
-
-**状态迁移（与 §4.6 的三段判定同源，顺序不可换）**
+**状态迁移（与 §4.6 同源）**
 
 | 从 | 条件 | 到 |
 |---|---|---|
-| `active` | `paid_until ≤ now < paid_until + 7d` | `past_due` |
-| `active` / `past_due` | `now ≥ paid_until + 7d` | `expired` |
-| `active` / `past_due` | 单轮补满 30 天仍 `paid_until ≤ now` | `expired` |
-| `past_due` / `expired` | 充值后补扣成功、`paid_until > now` | `active` |
+| `active` | 窗口内扣费成功 | `active`（`paid_until += 1d`） |
+| `active` | 窗口内扣费失败，或补满 30 天仍追不上 | `destroyed`（停机销毁，留墓碑） |
+| `destroyed` | 用户删除墓碑 | 不再显示 |
 
-- **`expired` 只有一个出口：充值后补扣成功**。它不参与每日续费扫描（§4.6 的 `billing_state <> 'expired'`），所以「停机期间不再产生费用」是结构上成立的，不是靠文案。
-- **`expired` 不会再回到 `past_due`**：欠费已经封顶 30 天，不存在「又欠了一点」的中间态。
+- **`destroyed` 是新路径的唯一终态**，而且**不可恢复**：充值不会把它拉回来，`recoverExpiredServers` 的恢复路径作废。要节点只能新建。
+- **存量 `past_due` / `expired` 行**：只读兼容，不参与新扫描、不产生新行；下一次扣费轮次按「扣不动即停机销毁」处置。
+- **停机销毁是真停**：实例被销毁、控制面节点记录被删除；客户端本地节点行标「停机删除」，不可连接、不可测速，等用户在「我的服务器」删掉墓碑时一并删除（`my-servers.md` §7.4、§19）。
 
 - **账户块只显示余额**：`余额 $9.87`。**不显示「约可运行 N 天」**——多台机器、不同套餐时，「余额 ÷ 各机器日价合计」是个把不同消耗混在一起的聚合数，看着像能撑很久，实际任一单台都撑不到那么久；用户据此做的判断是错的。这是 2026-11-16 用户拍板撤掉的（曾设计过 `MyServerWallet.runway_days`，已从契约与各层删除，不留隐藏字段）。
-- **核对到期只看机器详情**：`每天 $X · 本期有效至 …` 是每台机器自己的账，本来就按机器分开，不存在聚合误导。
-- **账户块的三种话术**（欠费天数由 `paid_until` 现算，不写死）：
-  | 状态 | 账户块 |
-  |---|---|
-  | `active` | `余额 $9.87` |
-  | `past_due` | `余额不足 · 还欠 N 天 × $0.30/天，充值后自动补扣` |
-  | `expired` | `已停用 · 需补 N 天 × $0.30/天（最多 30 天），充值后自动补扣` |
-
-  - **`past_due` 的 N 是真实欠的天数**（`ceil((now - paid_until)/1d)`），因为这段还在宽限、账还在涨。
-  - **`expired` 的 N 要封顶 30**：账已冻结，用户最多付 30 天就能恢复（§4.6）。写成「还欠 45 天」会误导——那 15 天系统不会再收。
-  - 两种状态都**必须同时给「× 单价」和「充值后自动补扣」**：只写「还欠 N 天」用户不知道自己差多少钱，只写「余额不足」用户不知道补多少。
-- 「停用」本期只做状态标记，不做真停用（节点凭据在本地，控制面无法即时切断）；M2 用短期凭据或 `veyl-agent` 指令实现。
-- **成本风险**：宽限期与失效后机器继续计费（约 $6–18/月/台，售价档），由我们承担。
+- **核对到期只看机器详情**：`每天 $X · 本期有效至 …` 是每台机器自己的账，本来就按机器分开，不存在聚合误导。账户块**只有 `active` 一种话术**（`余额 $9.87`）；存量 `past_due` / `expired` 行不再有账户块欠费话术。
+- **成本风险消失**：停机销毁后实例被删，云厂商费用随之停止；不再有「宽限期与失效后继续计费」这笔我们承担的成本。
 - **取消 = 销毁**：本期没有「取消下期」这种概念（那是订阅的语义）。不想用了就销毁，未用完的整天按 §4.6 退回余额。
 
 ### 4.12 账本保留期：30 天明细 + 月度快照（2026-11-16 拍板）
@@ -1111,7 +1075,7 @@ type MyServerCharge = {
 - `MyServerOrder.state` 恢复为 `"pending_payment" | "paid" | "provisioning" | "ready" | "cancelled" | "failed"`；**2.27.0 的 `awaiting_payment` / `payment_failed` / `expired` 删除**（没有外部收银台可等）。
 - 金额一律用 `*_cents` 整数；`amount_usd` / `monthly_usd` 若保留只为展示，不参与计算。
 - **`MyServerWallet` 只有余额与档位**：`runway_days` 曾考虑过、已放弃（理由见 §4.11），契约里不留字段，Worker / Host / 前端都不算这份派生值。
-- **`MyServer`（§7.15）同时增四个字段**：`paid_until: string`（**非空**）、`daily_price_cents: number`、`billing_state: "active" | "past_due" | "expired"`、`grace_ends_at: string | null`（**派生值 `paid_until + 7d`，不落库**）。界面靠它们渲染「每天 $X · 本期有效至 …」与欠费天数，不再自己拿 `monthly_usd` 推算。
+- **`MyServer`（§7.15）同时增四个字段**：`paid_until: string`（**非空**）、`daily_price_cents: number`、`billing_state: "active" | "past_due" | "expired"`、`grace_ends_at: string | null`（**派生值 `paid_until + 7d`，不落库**）。界面靠它们渲染「每天 $X · 本期有效至 …」，不再自己拿 `monthly_usd` 推算。**2026-11-19 起 `past_due` / `expired` 只保留读取兼容**，新路径不再产生；`grace_ends_at` 随之不再有界面用途（契约层由 be-lead 处置，本文件只记设计口径）。
 - **`my_server_catalog.plans` 增 `daily_price_cents`**：按天扣之后，向导上「每天多少钱」才是用户能核对的口径；`hourly_usd` 仍保留（它是 DO 的成本口径，不是我们的售价）。
 
 ### 6.2 HTTP 路由（控制面）
@@ -1175,18 +1139,18 @@ type MyServerCharge = {
 | **W3** | **买机：下单不扣费**：余额 ≥ 日价 × 7 → checkout 只写账本 0 行、返回 `provisioning`；服务器行 `billing_state='pending'`、`paid_until=NULL`、`billing_anchor_at=0`、`daily_price_cents=0`；余额不足（包括够 1 天但不足 7 天）→ `insufficient_balance`，`details` 带 `required_cents`（= 日价 × 7）/ `shortfall_cents` / `min_days = 7`，**余额不变、无服务器**，订单仍 `pending_payment`；订单已过期 → 转 `cancelled` 并返回 `order_expired` |
 | **W3-b** | **就绪后结算**：enroll 确认成功后同一 batch 写 `wallet_ledger`（`ref=order:<order_id>`、`-20`）、`orders.state='ready'` / `paid_at` / `paid_via='wallet'`、`servers.state='active'` 且 `billing_state='active'`、`billing_anchor_at = settle_at`、`paid_until = settle_at + 1d`、`daily_price_cents`；守卫失败（余额 < 1 天）→ 不写账本、订单 `failed`、服务器 `error / settle_insufficient`（不写 `destroyed_at`）、DO 实例销毁、审计 `settle_insufficient`；结算进程死掉超过 10 分钟由 Cron `sweepUnsettledSettlements` 同一处置。存量 `charge_mode='upfront'` 订单不进入本流程 |
 | **W4** | **逐日续费与 Cron 幂等**：到期服务器被 Cron 扣当天、`paid_until` 顺延 1 天、账本 `ref=server_day:<id>:<bucket>`；**同一 Cron 重跑 3 次 / 并发执行，只扣一次**；重跑时「扣余额 0、续期 1」按已扣恢复；同一台机器连扣 30 天，账本合计**正好等于月价**（`600 / 900 / 1800` 分） |
-| **W5** | **余额不足进宽限**：续费扣不动 → 不扣费、`billing_state=past_due`、`grace_end = paid_until + 7d`（用当前 paid_until，补齐过则用补齐后的值）、机器与凭据不动 |
-| **W6** | **宽限内恢复**：宽限期内充值 → 下次 Cron（或即时重试）补扣成功 → `paid_until` 顺延、`billing_state=active`、停用标记清除 |
-| **W7** | **到期冻结**：`now ≥ grace_end` → `billing_state=expired`；**服务器行、节点凭据都在**，Cron 没有 `DELETE` 动作，余额不因到期变化；**此后连续 3 天不再新增 `server_day`、`paid_until` 不动** |
+| **W5** | **扣费失败即停机销毁**：窗口内扣不动 → 不扣费、停隧道、销毁实例、删控制面节点、`servers.state='destroyed'`；**服务器行保留为墓碑**，余额不变，不写 `past_due` / `expired` |
+| **W6** | **不可恢复**：对墓碑充值不改变任何状态，没有补扣、没有恢复路径；`recoverExpiredServers` 不再被调用 |
+| **W7** | **墓碑与节点处置**：`my-server-changed(state=destroyed)` 到达后，客户端把本地节点行标「停机删除」，不可连接、不可测速；用户删除墓碑后本地节点一并删除；用户主动销毁的行仍然直接消失 |
 | **W8** | **对账断言**：任意时刻逐账户 `balance_cents == 最新一条 ledger.balance_after_cents`（I1）；快照之后逐行链式成立（I3）；并发两笔扣费只有一笔成功、另一笔余额不足 |
 | **W13** | **账本保留期**：构造一台机器跨两个自然月、共 90 天的 `server_day` 明细 → 每日任务跑完后：只剩 `cutoff` 之后的明细；新增一条 `snapshot`（`amount_cents = 0`、`created_at = cutoff`、`balance_after` = cutoff 时刻余额）；**I1 / I2 / I3 全部成立**；`dodo_payment` / `order` / `server_refund` **一行不少**；**同一任务重跑不重复写快照、不再删行**；快照写失败时该轮一行不删 |
-| **W9** | **欠费补齐**：`paid_until = anchor+1.5d`、`now = anchor+4.5d`（落后 3 个整日）、余额足够 → Cron 一次补 **4 天**到 `paid_until = anchor+5.5d > now`，账本 4 行独立 `bucket`。**是 4 不是 3**：扫描条件是 `paid_until <= now`（含等号），补到第 3 天时 `paid_until = now` 仍满足条件，必须再补 `now` 所在那一格。余额只够 2 天 → 补 2 天后 `past_due`，`grace_end` 用补齐后的 paid_until；超过 30 天仍未补到 now → `expired` 并告警 |
+| **W9** | **停摆后一次补齐**：`paid_until = anchor+1.5d`、`now = anchor+4.5d`（落后 3 个整日）、余额足够 → Cron 一次补 **4 天**到 `paid_until = anchor+5.5d`（比 `now` 多 1 天，已超出 1 小时窗口），账本 4 行独立 `bucket`。**是 4 不是 3**：扫描条件是 `paid_until - 1h <= now`（含等号），补到第 3 天时 `paid_until = now` 仍满足条件，必须再补 `now` 所在那一格。余额只够 2 天 → **停机销毁**；补满 30 天仍未让 `paid_until > now + 1h` → 停机销毁并告警 |
 | **W10** | **订单 provisioning 但无服务器**：确认下单后中断（未完成建机），Cron 5 分钟内补建恰好一台；重跑不产生第二台（`unique(servers.order_id)`） |
 | **W11** | **负向调整**：人工 `adjustment` 为负且余额不足 → 账本不写、余额不变；`ref_id` 用 uuid，重复 uuid 被唯一键挡住 |
 | **W12** | **销毁退款**：`n_paid = 5`（`paid_until = anchor+5d`）、`now` 落在 `n_now = 3` 中间 → `refundTotal = (5 − (3+1)) × 日价 = 1 天`（`$6` 档 = **20 分**）→ 销毁只退**第 4 天**（`n = 4`）的日价、写一条 `adjustment`（`ref=server_refund:<server_id>:20`）、余额增加；**同一 ref 重放不再加钱**；`n_now = 3` 这一天已经用掉、**不退**；**标记 `destroyed` 与退款在同一个 batch 里** |
 | **W12-b** | **销毁不补扣**：`paid_until` 落后 2 天（Cron 还没跑）→ 直接销毁 → **不补扣那 2 天、不产生 `server_day`**、也不因欠费阻塞销毁；`refundTotal` 按 0 计（`n_paid <= n_now+1`），**不写退款行** |
 | **W12-c** | **自动销毁也退**：注入装机失败 → 系统发起销毁 → 第 0 天剩余按 `refundTotal` 退回余额；退款失败重试时 `refunded` 已等于 `refundTotal`，`delta = 0`，不再写行 |
-| **W14** | **超 30 天欠费的恢复**：`expired` 已 45 天 → 充值后恢复路径把 `paid_until` 设成 `anchor + floor((now-anchor)/1d - 30) * 1d`（**仍落在整天网格上**）、记一条 `audit_log('grace_waived')`、再补 30 天到 `paid_until > now`、状态回 `active`；`wallet_ledger` 里**只有 30 条** `server_day`，被豁免的 15 天没有任何流水 |
+| **W14** | **30 天上限即销毁**：补满 30 天仍 `paid_until ≤ now` → 停机销毁 + 告警；**没有豁免、没有恢复路径**，充值不会把机器拉回来 |
 | **W15** | **跑批游标与饿死防护**：1200 台到期服务器、其中 30 台余额为 0 → 一轮只处理 200 台并写回游标；**余额不足的机器不会永远占队首**，后续轮次能推进到其余机器；游标走到末尾后回到队首；单台抛错不影响同批其它机器 |
 | **W16** | **rebuild 计费**：重建一台机器 → 生成**新订单**、扣新的 `order:<new_order_id>` 第 0 天、`billing_anchor_at` 重置为新创建时刻、`paid_until = anchor + 1d`；**旧 `order:<id>` 不会被重放**，重建不会免费 |
 | A11 | **Host 命令层**：未登录或登录过期时，`runtime_start` / `node_switch` / `node_probe` 以及本地已有配置不受影响；只有 `my_server_*` 管理命令返回 `auth_required`。界面部分留到整体 UI 重构 |
@@ -1207,11 +1171,11 @@ type MyServerCharge = {
 | 订阅（自动续费） | M1 不上线；代码保留，M2 给国际卡用户（§4.10） |
 | 多币种钱包 | 钱包只有 USD 分；CNY 只存在于 Dodo 收银台与结算流水，不入账本 |
 | 发票 / 税务 / 对账报表 | M2；本期只做账本自洽（§4.7 W8） |
-| 到期自动回收机器 | **不自动销毁**：7 天宽限后只标记停用，实例与凭据都保留 |
-| 真实停用隧道 | 本期只做状态标记（§4.11）；M2 用短期凭据或 `veyl-agent` 指令实现真停用 |
+| 到期自动回收机器 | **做**：扣费失败即停机销毁（§4.11）；用户主动销毁仍走原流程，不留墓碑 |
+| 真实停用隧道 | **本期做**：停机销毁会停隧道、删实例与节点记录；客户端本地节点行靠「停机删除」墓碑阻止连接与测速 |
 | 多设备管理 / 改邮箱 / 注销账户 | M2 |
 
-**到期策略（2026-11-16 定稿，2026-11-16 改按天 + 冻结欠费）**：`servers.paid_until + 7 天` 为宽限终点。宽限内充值并补扣成功立即恢复；宽限结束后状态标 `expired`，**不删机器、不删凭据**，同时**冻结账面**：`paid_until` 不再前进、不再写 `server_day`，用户不会因为停机时间变长而欠更多。恢复时最多补 30 天，超出部分默认豁免并记 `audit_log`。代价是机器继续在跑、云厂商费用照付（约 $6–18/月/台，售价档），这是为了不误删用户仍在使用的服务器而接受的成本；M2 引入短期凭据后才能做到「到期即断」。
+**到期策略（2026-11-19 拍板：每小时续费 + 停机即销毁）**：Cron 每小时 :17（UTC）跑一次，每台机器在 `paid_until` 前 1 小时进入可扣窗口，窗口内第一次扣下一天；**扣不动就当场停机销毁**——停隧道、销毁实例、删控制面节点，服务器行留作墓碑等用户自己删。没有 7 天宽限、没有 `expired` 过渡，充值也不能恢复；要节点只能新建。停机后实例被删，我们也不再为它承担云成本。
 
 **资金与换汇风险**（写清楚，不藏）：
 
@@ -1244,7 +1208,7 @@ type MyServerCharge = {
 
 | 侧 | 改动 |
 |---|---|
-| **控制面** | `src/auth_email.ts`（发码 / 校验 / 合并 / 登出）、`src/wallet.ts`（账本、原子扣费、对账自检、月末快照）、`src/topups.ts`（充值会话 + webhook 入账）、`src/billing.ts`（每日按天扣费 + 宽限状态机 + 销毁退款 + `server_day` 裁剪）、`src/webhooks/dodo.ts`（支付事件 + 三层幂等）、`src/orders.ts`（checkout 只确认下单不扣费；建机门槛日价 × 7；`charge_mode` 区分存量 upfront，§4.14）、`src/servers.ts`（enroll 回调里结算第 0 天、失败收尾与 10 分钟兜底）、`src/index.ts`（路由）、迁移 `0007_at_ready_settlement.sql`（`orders.charge_mode`、`servers.paid_until` 可空、`servers` 重建）、迁移 `0003_wallet.sql`（`email_codes` / `topups` / `wallet_ledger`（含 `snapshot` 与 `wallet_ledger_prune`）/ `payments` / `webhook_events` / `unmatched_payments` / `accounts.balance_cents` / `orders.amount_cents` / `servers.billing_anchor_at|paid_until|daily_price_cents|billing_state` / `unique(servers.order_id)`） |
-| **Rust Host** | `control_plane/auth.rs`（登录 / 登出 / account_kind）、`control_plane/wallet.rs`（余额 / 充值）、`my_server_login_*` / `account` / `logout` / `wallet` / `topup` / `order_get` 命令、`my_server_checkout` 确认下单并触发建机（返回 `MyServerOrder`，不返回扣费结果）；**2.37.1 起 `control_plane/error.rs` 透传 `required_cents` / `min_days`**（§4.13）；充值由 Host 打开系统浏览器（界面未上线前不依赖前端）；余额与宽限文案在 UI 重构时接入 |
+| **控制面** | `src/auth_email.ts`（发码 / 校验 / 合并 / 登出）、`src/wallet.ts`（账本、原子扣费、对账自检、月末快照）、`src/topups.ts`（充值会话 + webhook 入账）、`src/billing.ts`（每小时续费 + 扣费失败停机销毁 + 销毁退款 + `server_day` 裁剪）、`src/webhooks/dodo.ts`（支付事件 + 三层幂等）、`src/orders.ts`（checkout 只确认下单不扣费；建机门槛日价 × 7；`charge_mode` 区分存量 upfront，§4.14）、`src/servers.ts`（enroll 回调里结算第 0 天、失败收尾与 10 分钟兜底）、`src/index.ts`（路由）、迁移 `0007_at_ready_settlement.sql`（`orders.charge_mode`、`servers.paid_until` 可空、`servers` 重建）、迁移 `0003_wallet.sql`（`email_codes` / `topups` / `wallet_ledger`（含 `snapshot` 与 `wallet_ledger_prune`）/ `payments` / `webhook_events` / `unmatched_payments` / `accounts.balance_cents` / `orders.amount_cents` / `servers.billing_anchor_at|paid_until|daily_price_cents|billing_state` / `unique(servers.order_id)`） |
+| **Rust Host** | `control_plane/auth.rs`（登录 / 登出 / account_kind）、`control_plane/wallet.rs`（余额 / 充值）、`my_server_login_*` / `account` / `logout` / `wallet` / `topup` / `order_get` 命令、`my_server_checkout` 确认下单并触发建机（返回 `MyServerOrder`，不返回扣费结果）；**2.37.1 起 `control_plane/error.rs` 透传 `required_cents` / `min_days`**（§4.13）；充值由 Host 打开系统浏览器（界面未上线前不依赖前端）；余额与「已停机删除」文案在 UI 重构时接入 |
 | **React UI** | **本轮不做，等整体 UI 重构**：统一登录弹窗、左栏底部账号块（§3.6）、`我的服务器` 未登录空态、余额与充值入口、`insufficient_balance` 与到期提示条。**建机向导的 7 天门槛预检见 §4.13** |
 | **契约** | `commands.md` **2.30.0**（`MyServer` 增 `paid_until`（非空）/ `daily_price_cents` / `billing_state` / `grace_ends_at`（派生）；`my_server_catalog.plans` 增 `daily_price_cents`；`checkout` 语义改成扣 1 天；`MyServerWallet` 保持余额 + 档位，不含可运行天数）；**2.37.1 起 `checkout` 门槛改为日价 × 7、`insufficient_balance` 增 `required_cents` / `min_days`**。`check-contracts.mjs` 已全绿（76 项通过、2 项 advisory），`MyServerPlan.daily_price_cents` 的实现侧补齐后红项消失 |
