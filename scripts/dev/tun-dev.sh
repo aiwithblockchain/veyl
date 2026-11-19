@@ -25,6 +25,9 @@
 #   VEYL_DEV_ID_APP   指定签名身份（留空则自动挑：先 Developer ID，再 Apple Development，
 #                     都要求 Team 与 VEYL_TEAM_ID 一致）
 #   VEYL_TEAM_ID      期望的 Team ID，默认 2XYK8RBB6M（与 build.rs 的默认值一致）
+#   VEYL_DEV_BINS_TARGET
+#                     特权助手与看门狗的 target 目录，默认 src-tauri/target/devbins。
+#                     与主构建目录分开是为了避免两套特性配置互相作废缓存。
 #
 # 日志位置：
 #   logs/app-<日期>.log          应用结构化日志（debug 构建写仓库根的 logs/）
@@ -255,11 +258,16 @@ prepare_bundled_runtime "$RUNTIME_SRC" || die "签名随包运行时失败：$RU
 [ -d "$APP_SRC" ] || die "找不到构建产物：$APP_SRC"
 
 printf '\n[2/5] 构建特权助手（debug）\n'
-# 特性必须与上面的 `tauri build` 一致：Tauri CLI 会给 cargo 加 tauri/custom-protocol。
-# 少这一个特性，tauri / wry / claurst_* / 插件等下游会因为特性不同各自生成一套指纹，
-# 每次运行都在两套依赖图之间来回重编，看起来就像从头编译。
-(cd "$ROOT/src-tauri" && cargo build --bin veyl-helper --features tauri/custom-protocol)
-HELPER_SRC="$ROOT/src-tauri/target/debug/veyl-helper"
+# 这两个 bin 用**独立 target 目录**：`tauri build` 与 `cargo build --bin ...` 选中的
+# 目标集合不同，cargo 对共享依赖（tauri / wry / objc2 …）的特性合并结果就不同，
+# 共用 target/debug 时每运行一次脚本，主目录与助手目录会各自把对方的依赖重编一遍。
+# 实测同一份 objc2 在两处编出两种特性组合（12:02 alloc,std / 12:03 +exception）。
+# 分离后主目录只服务 tauri build，这里只服务助手，两边缓存都不会被对方作废。
+# 代价：这套依赖多编一份（一次性），之后只有改动到的 crate 重编。
+DEV_BINS_TARGET="${VEYL_DEV_BINS_TARGET:-$ROOT/src-tauri/target/devbins}"
+(cd "$ROOT/src-tauri" && CARGO_TARGET_DIR="$DEV_BINS_TARGET" \
+  cargo build --bin veyl-helper --features tauri/custom-protocol)
+HELPER_SRC="$DEV_BINS_TARGET/debug/veyl-helper"
 [ -f "$HELPER_SRC" ] || die "找不到 helper：$HELPER_SRC"
 
 # ---- 3. 组装包：helper / LaunchDaemon plist / 运行时 ----
@@ -271,9 +279,10 @@ chmod 755 "$APP_SRC/Contents/MacOS/veyl-helper"
 
 # 代理看门狗：App 异常退出后还原系统代理。与 helper 一样必须进 Contents/MacOS/
 # 并签名（sign_app 会签名 Contents 下所有 Mach-O），否则 LaunchAgent 起不来。
-# 同上：必须带 tauri/custom-protocol，才能复用 tauri build 产出的那份依赖。
-(cd "$ROOT/src-tauri" && cargo build --bin veyl-proxy-guard --features tauri/custom-protocol)
-GUARD_SRC="$ROOT/src-tauri/target/debug/veyl-proxy-guard"
+# 与 helper 同一个独立目录：两条命令形态一致，缓存互不作废。
+(cd "$ROOT/src-tauri" && CARGO_TARGET_DIR="$DEV_BINS_TARGET" \
+  cargo build --bin veyl-proxy-guard --features tauri/custom-protocol)
+GUARD_SRC="$DEV_BINS_TARGET/debug/veyl-proxy-guard"
 [ -f "$GUARD_SRC" ] || die "找不到代理看门狗：$GUARD_SRC"
 cp "$GUARD_SRC" "$APP_SRC/Contents/MacOS/veyl-proxy-guard"
 chmod 755 "$APP_SRC/Contents/MacOS/veyl-proxy-guard"
