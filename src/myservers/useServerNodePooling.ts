@@ -31,7 +31,8 @@ export function useServerNodePooling({
   attach,
 }: Args): void {
   // 在途 / 待绑 / 已绑都用 ref：入队后重渲染会重跑 effect，用 state 会成环。
-  const requested = useRef(new Set<string>());
+  /** 本会话已成功取过凭据的 server_id：旧 Host 不返回 local_node_id 时也不会每 10 秒重复取。 */
+  const credentialedThisSession = useRef(new Set<string>());
   const inFlight = useRef(new Set<string>());
   const queued = useRef(new Set<string>());
   const attached = useRef(new Set<string>());
@@ -87,8 +88,8 @@ export function useServerNodePooling({
     const now = Date.now();
     let earliest = now + CREDENTIAL_RETRY_COOLDOWN_MS;
     for (const server of serversRef.current) {
-      if (!isReady(server.state) || server.node_id !== null) continue;
-      if (requested.current.has(server.server_id)) continue;
+      if (!isReady(server.state) || server.local_node_id !== null) continue;
+      if (credentialedThisSession.current.has(server.server_id)) continue;
       const until = cooldownUntil.current.get(server.server_id);
       if (until !== undefined && until > now) earliest = Math.min(earliest, until);
     }
@@ -141,15 +142,18 @@ export function useServerNodePooling({
     const now = Date.now();
     for (const server of serversRef.current) {
       if (!isReady(server.state)) continue;
-      if (server.node_id !== null) {
-        // 已经取过凭据的机器（含重启前绑失败的）：没绑过就入队；重复 attach 幂等。
-        if (attached.current.has(server.node_id)) continue;
-        if (sentThisSession.current.has(server.node_id)) continue;
-        sentThisSession.current.add(server.node_id);
-        queued.current.add(server.node_id);
+      // 入池判据是「本地是否已有节点行」：控制面 node_id 结算时就有，但不代表本地行已落地；
+      // 首次签发时两者同值（nodes.id = nd_…），只有控制面重签发后才可能不同。attach 用本地行的 id。
+      const localNodeId = server.local_node_id ?? null;
+      if (localNodeId !== null) {
+        // 本地已经有节点行（含重启前绑失败的）：没绑过就入队；重复 attach 幂等。
+        if (attached.current.has(localNodeId)) continue;
+        if (sentThisSession.current.has(localNodeId)) continue;
+        sentThisSession.current.add(localNodeId);
+        queued.current.add(localNodeId);
         continue;
       }
-      if (requested.current.has(server.server_id)) continue;
+      if (credentialedThisSession.current.has(server.server_id)) continue;
       if (inFlight.current.has(server.server_id)) continue;
       if ((cooldownUntil.current.get(server.server_id) ?? 0) > now) {
         scheduleScan();
@@ -158,7 +162,7 @@ export function useServerNodePooling({
       inFlight.current.add(server.server_id);
       void Promise.resolve(credentialsRef.current(server.server_id))
         .then((node) => {
-          requested.current.add(server.server_id);
+          credentialedThisSession.current.add(server.server_id);
           cooldownUntil.current.delete(server.server_id);
           if (node.node_id && !attached.current.has(node.node_id)) {
             queued.current.add(node.node_id);

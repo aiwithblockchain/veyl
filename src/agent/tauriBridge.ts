@@ -773,6 +773,8 @@ function normalizeMyServer(raw: unknown): MyServer | null {
     ip: typeof value.ip === "string" ? value.ip : null,
     port: typeof value.port === "number" ? value.port : null,
     node_id: typeof value.node_id === "string" ? value.node_id : null,
+    local_node_id:
+      typeof value.local_node_id === "string" ? value.local_node_id : null,
     hourly_usd:
       typeof value.hourly_usd === "number" && Number.isFinite(value.hourly_usd)
         ? value.hourly_usd

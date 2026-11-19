@@ -16,6 +16,7 @@ function server(over: Partial<MyServer> = {}): MyServer {
     ip: "45.76.20.100",
     port: 8388,
     node_id: null,
+    local_node_id: null,
     hourly_usd: 0.007,
     monthly_usd: 5,
     daily_price_cents: 30,
@@ -70,7 +71,7 @@ afterEach(() => {
 });
 
 describe("useServerNodePooling", () => {
-  it("active 且还没有 node_id：只取一次凭据，在途不重复", async () => {
+  it("active 且本地还没有节点行：只取一次凭据，在途不重复", async () => {
     const credentials = vi.fn(
       () => new Promise<MyServerCredentialNode>(() => {}),
     );
@@ -277,7 +278,7 @@ describe("useServerNodePooling", () => {
     expect(attach).toHaveBeenLastCalledWith(["node_b"]);
   });
 
-  it("healthy 且还没有 node_id：装好的新机器也会取一次凭据", async () => {
+  it("healthy 且本地还没有节点行：装好的新机器也会取一次凭据", async () => {
     // 生产控制面结算时直接写 active；healthy 只来自 mock 与历史数据。两种都要覆盖。
     const { credentials } = setup({
       servers: [server({ state: "healthy" })],
@@ -287,6 +288,19 @@ describe("useServerNodePooling", () => {
 
     expect(credentials).toHaveBeenCalledTimes(1);
     expect(credentials).toHaveBeenCalledWith("srv_1");
+  });
+
+  it("控制面 node_id 已写但本地还没有节点行：照常取凭据", async () => {
+    // 生产里 active 机器的 node_id 一直是 nd_…（控制面 id），本地镜像另有一套 id。
+    const { credentials, attach } = setup({
+      servers: [server({ state: "active", node_id: "nd_abc123" })],
+      connection: "idle",
+    });
+    await act(async () => {});
+
+    expect(credentials).toHaveBeenCalledTimes(1);
+    expect(credentials).toHaveBeenCalledWith("srv_1");
+    expect(attach).toHaveBeenCalledWith(["local_node_srv_1"]);
   });
 
   it("非 healthy / active 的状态：一个请求都不发", async () => {
@@ -305,20 +319,20 @@ describe("useServerNodePooling", () => {
     expect(attach).not.toHaveBeenCalled();
   });
 
-  it("重启自愈：已就绪且 node_id 非空会入队并绑一次，同会话快照不再发", async () => {
+  it("重启自愈：已就绪且本地有节点行会入队并绑一次，同会话快照不再发", async () => {
     const { credentials, attach, rerender } = setup({
-      servers: [server({ state: "active", node_id: "node_srv_1" })],
+      servers: [server({ state: "active", local_node_id: "local_node_srv_1" })],
       connection: "idle",
     });
     await act(async () => {});
 
-    // node_id 已有：不再取凭据，但上次可能没绑上，直接入队补一次。
+    // 本地节点行已有：不再取凭据，但上次可能没绑上，直接入队补一次。
     expect(credentials).not.toHaveBeenCalled();
     expect(attach).toHaveBeenCalledTimes(1);
-    expect(attach).toHaveBeenCalledWith(["node_srv_1"]);
+    expect(attach).toHaveBeenCalledWith(["local_node_srv_1"]);
 
     rerender({
-      servers: [server({ state: "active", node_id: "node_srv_1" })],
+      servers: [server({ state: "active", local_node_id: "local_node_srv_1" })],
       connection: "idle",
     });
     await act(async () => {});

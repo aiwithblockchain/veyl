@@ -79,6 +79,56 @@ describe("mock 默认数据", () => {
   });
 });
 
+describe("首次取凭据才落本地节点行", () => {
+  const STORE_KEY = "veyl.mock.myServers";
+
+  it("就绪后列表里仍为空，credentials() 落库后下一次列表才可见", () => {
+    localStorage.clear();
+    const started = Date.now() - 60_000;
+    localStorage.setItem(
+      STORE_KEY,
+      JSON.stringify({
+        servers: [
+          {
+            server_id: "srv_1",
+            name: "新加坡 1 · DigitalOcean",
+            region: "sgp1",
+            plan: "s-1vcpu-1gb",
+            state: "creating",
+            created_at: new Date(started).toISOString(),
+            ip: "45.76.10.20",
+            port: null,
+            node_id: null,
+            local_node_id: null,
+            hourly_usd: 0.00893,
+            monthly_usd: 9,
+            daily_price_cents: 30,
+            transfer_gib: 1000,
+            paid_until: null,
+            billing_state: "pending",
+            grace_ends_at: null,
+            failure: null,
+            started_at: started,
+          },
+        ],
+        orders: [],
+        next_id: 2,
+        balance_cents: 0,
+      }),
+    );
+    const service = new MockMyServerService();
+
+    const ready = service.list().servers[0];
+    expect(ready.state).toBe("healthy");
+    // node_id 是控制面 id；本地节点行要等取凭据才落。
+    expect(ready.node_id).toBe("node_srv_1");
+    expect(ready.local_node_id).toBeNull();
+
+    expect(service.credentials("srv_1").node_id).toBe("local_srv_1");
+    expect(service.list().servers[0].local_node_id).toBe("local_srv_1");
+  });
+});
+
 describe("建机余额门槛（日价 × 7）", () => {
   const STORE_KEY = "veyl.mock.myServers";
   const ACCOUNT_KEY = "veyl.mock.account";

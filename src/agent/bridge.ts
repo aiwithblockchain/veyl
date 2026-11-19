@@ -543,8 +543,10 @@ export interface MyServer {
   created_at: string;
   ip: string | null;
   port: number | null;
-  /** 安装成功后才有。 */
+  /** 安装成功后才有；这是**控制面**的节点 id（`nd_…`）。 */
   node_id: string | null;
+  /** 本地节点行的 id；空 = 本地还没有节点行。与 `node_id`（控制面 id）不是一回事。 */
+  local_node_id: string | null;
   hourly_usd: number;
   monthly_usd: number;
   /** 售价快照（USD 分 / 天），即每天实际扣多少。 */

@@ -16,6 +16,7 @@ function server(over: Partial<MyServer> = {}): MyServer {
     ip: "45.76.20.100",
     port: 8388,
     node_id: "nd_control_1",
+    local_node_id: "local_node_1",
     hourly_usd: 0.00893,
     monthly_usd: 6,
     daily_price_cents: 20,

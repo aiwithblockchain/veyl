@@ -719,6 +719,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
             server_id: serverId,
             state,
             node_id: null,
+            local_node_id: null,
             failure: null,
           }
         : current,

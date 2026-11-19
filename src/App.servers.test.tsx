@@ -33,6 +33,7 @@ const SERVER: MyServer = {
   ip: "45.76.20.100",
   port: 8388,
   node_id: "node_srv_1",
+  local_node_id: "local_node_srv_1",
   hourly_usd: 0.007,
   monthly_usd: 5,
   daily_price_cents: 30,

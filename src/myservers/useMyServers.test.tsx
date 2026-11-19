@@ -16,6 +16,7 @@ const SERVER_A: MyServer = {
   ip: "203.0.113.1",
   port: 8388,
   node_id: "node_a",
+  local_node_id: "local_node_a",
   hourly_usd: 0.00893,
   monthly_usd: 9,
   daily_price_cents: 30,
@@ -349,6 +350,33 @@ describe("详情请求失败时的降级", () => {
     });
     expect(result.current.selected?.server_id).toBe("srv_b");
     expect(result.current.detailRetrying).toBe(false);
+  });
+});
+
+describe("重建占位", () => {
+  it("新机器占位帧把 local_node_id 一起置空，不带旧机器的本地节点", async () => {
+    const list = { current: [SERVER_A] };
+    const bridge = makeBridge(list);
+    // 详情比列表多一个可区分的名字：等它落地，确保后面的占位是从详情复制出来的。
+    vi.mocked(bridge.myServerGet).mockResolvedValue({
+      ...SERVER_A,
+      name: "详情里的新加坡 1",
+    });
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() =>
+      expect(view.result.current.selected?.name).toBe("详情里的新加坡 1"),
+    );
+
+    // 新机器详情永远不回来：占位帧原样留在 selected 上。
+    vi.mocked(bridge.myServerGet).mockImplementation(() => new Promise(() => {}));
+    act(() => {
+      view.result.current.rebuilt("srv_c", "creating");
+    });
+
+    expect(view.result.current.selected?.server_id).toBe("srv_c");
+    expect(view.result.current.selected?.local_node_id).toBeNull();
   });
 });
 

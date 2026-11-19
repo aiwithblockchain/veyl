@@ -242,6 +242,7 @@ function advance(store: Store): void {
         server.state = "error";
         server.failure = errorAt(phase);
         server.node_id = null;
+        server.local_node_id = null;
         break;
       }
       index += 1;
@@ -443,6 +444,7 @@ export class MockMyServerService {
       ip: `45.76.${40 + store.next_id}.${80 + store.next_id}`,
       port: null,
       node_id: null,
+      local_node_id: null,
       hourly_usd: plan.hourly_usd,
       monthly_usd: plan.monthly_usd,
       daily_price_cents: plan.daily_price_cents,
@@ -576,6 +578,7 @@ export class MockMyServerService {
       ip: `45.76.${50 + store.next_id}.${90 + store.next_id}`,
       port: null,
       node_id: null,
+      local_node_id: null,
       paid_until: null,
       billing_state: "pending",
       grace_ends_at: null,
@@ -604,6 +607,7 @@ export class MockMyServerService {
       ...copyServer(server),
       state: "destroyed",
       node_id: null,
+      local_node_id: null,
     };
     store.servers = store.servers.filter((item) => item.server_id !== serverId);
     writeStore(store);
@@ -617,6 +621,14 @@ export class MockMyServerService {
         code: "PRECONDITION_FAILED",
         message: "这台服务器还没装好，暂时拿不到凭据。",
       };
+    }
+    // 与真机一致：取凭据时本地才落节点行，下一次 list() 才看得到 local_node_id。
+    const store = readStore();
+    advance(store);
+    const stored = store.servers.find((item) => item.server_id === serverId);
+    if (stored) {
+      stored.local_node_id = `local_${server.server_id}`;
+      writeStore(store);
     }
     return {
       server_id: server.server_id,
