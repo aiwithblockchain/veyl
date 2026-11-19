@@ -925,11 +925,13 @@ type DiagReport = {
 
 | 实际状态 | `ok` | `detail` | `remediation` / `action` |
 |---|---|---|---|
-| 运行时 running 且接管方式为全部流量 | `true` | 「现在接管全部流量，TCP / UDP / QUIC 都经过 VPN」 | 无 |
-| 运行时 running 且为本机代理（只服务选择代理的软件） | `false` | 「现在只为本机软件提供代理，浏览器 HTTP/3 流量不经过代理」 | 「点「切到全部接管」再测一次」 / `{ kind: "switch_mode", to: "tun" }` |
-| 未连接（`idle`，或没有运行中的配置） | `true` | 「未连接，先连接再检查覆盖」 | 无 |
-| 读不到当前配置 / 接管方式 | `false` | 「读不到当前的接管方式」 | `/ { kind: "reconnect" }` |
+| 已连接且为全部接管（TUN） | `true` | 「现在接管全部流量，TCP / UDP / QUIC 都经过 VPN」 | 无 |
+| 已连接且为本机代理 | `false` | 「覆盖范围不同：现在只为本机软件提供代理，浏览器 HTTP/3 不经过 VPN」 | 「要看全部流量的情况，点「切到全部接管」再测一次」 / `{ kind: "switch_mode", to: "tun" }` |
+| 未连接 | `true` | 「未连接，先连接再检查覆盖」 | 无 |
 
+- **判据只用 `(connected, tun)` 两个参数**：`connected && tun` = 全接管；`connected && !tun` = 覆盖范围不同（本机代理）；`!connected` = 先连接。不读 `mode` 参数，也**没有「读不到接管方式」这一档**——那种情况下的实际覆盖是知道的（本机代理），回「读不到」是说假话；留一个会说假话的分支，比少一个分支更糟。
+
+- **本机代理是产品的默认选择，不是缺陷**：这张卡片只能读成「覆盖范围不同」，不能读成「当前配置有问题」；`detail` 与 `remediation` 都按这个口径写。
 - **结论只用于「UDP / QUIC 应用不通」**：本机代理模式下浏览器 HTTP/3 不经过 VPN，这是覆盖范围问题。**不得把它当成反机器人挑战（Cloudflare 等）的解释**——四组对照实验已证伪，挑战与接管范围无关；遇到挑战应引导用户用 `HttpCheck` 看站点的 `cf_mitigated`，而不是断言「切到全部接管就能过」。
 - **`remediation` 用用户语言**，写「切到全部接管」，不出现 `tun` / `system_proxy` 这些内部词；内部值只出现在 `action.to` 里。
 - 不自动切换：`DiagRun` 仍是 `ReadOnly`；`action` 由 UI 渲染成按钮，点击后等价于用户发一条消息，由模型走 `ConfigSetMode`（有确认点）。
@@ -2049,7 +2051,9 @@ type HttpCheckData = {
 - **网络 / TLS / DNS 解析失败都是工具成功返回**：`status: null`、`error.code = "HTTP_CHECK_FAILED"`，`message` 可直接转述；`tls_ok` 说明握手是否成功。**DNS 解析失败（域名不存在、解析超时）属于这一类**；只有「解析成功但地址落在私网」才是 `INVALID_ARGUMENT / private_address`。
 - 参数非法、非 `https`、非 443、解析到私网 → `INVALID_ARGUMENT`（`details.reason` 取 `invalid_url` / `insecure_scheme` / `unsupported_port` / `private_address`）。
 - **SSRF 约束（必须实现）**：只允许 `https://` 且端口 443；解析全部 A/AAAA，任一落在 loopback / 私网 / 链路本地 / ULA / 组播 / unspecified 即拒绝；跟随重定向最多 5 次，**每一跳重新解析并重新校验**（代理路径同样拒绝首跳私网解析）；不发 Cookie / Authorization / 请求体，只发 `User-Agent: Veyl-Check/1.0`；**只读响应头，正文根本不读**（64 KiB 上限只用于响应头）；直连路径（未连接 / TUN）把已校验地址 pin 给连接层并显式 `no_proxy`，rebinding 无效。
-- **经本机代理（Proxy 连接中）时，目标最终由 sing-box 再解析，我们无法 pin**：该路径仍在每跳做静态解析校验，但存在 TOCTOU 窗口。窗口内最多造成**一次到私网 443 的连接尝试**——TLS 证书不可能匹配所请求的域名，握手即失败，读不到任何内容；本工具只读响应头、只允许 https/443。
+- **经本机代理（Proxy 连接中）时，目标最终由 sing-box 再解析，我们无法 pin**：该路径仍在每跳做静态解析校验，但存在 TOCTOU 窗口。窗口内最多造成**一次到私网 443 的连接尝试**——**正常情况下 TLS 证书不可能匹配**所请求的域名，握手即失败，**不能被用来读取**本机或内网的内容。例外：装了企业 MITM 根证书、且 TLS 检查盒正好在被 rebound 的私网地址上时，握手可能成功，但请求落在企业代理上，仍读不到内网内容。本工具只读响应头、只允许 https/443。
+- **「读不到响应内容」不等于「什么也学不到」**：失败文案会区分「连接被拒 / 超时 / TLS 失败」，模型据此能判断某个内网地址的 443 是否通。这是**已接受的残余信息泄露**，不得把它写成「无信息泄露」。
+- **错误文案不携带地址**：失败文案只给粗分类——`等响应超时` / `TLS 握手失败` / `连接没有建立（被拒绝或不可达）` / `响应无法解析` / `请求失败`——**不拼接底层库的原始错误串**，也不回解析到的地址。因此可推断的信息止于「该地址的 443 通不通」，不包含「解析到了哪个内网 IP」。
 - **已知边界与重审触发条件**：一旦将来支持 `http` 或非 443 端口、读正文（哪怕一段）、或允许自定义请求头 / 方法，上述残余风险即不再成立，必须改为「探针专用入站 + 置顶规则 `{inbound:["probe-in"], ip_is_private, action:"reject"}`」。
 - 超时 `timeout_ms` 取 1000–15000（默认 8000）；超时按 `HTTP_CHECK_FAILED` 返回，不重试。
 - **`cf_mitigated` 只转述、不下结论**：值为 `challenge` 说明站点要求人机验证，**不能**据此说 VPN 没生效；它也与 `DiagRun.network.coverage` 无关——接管范围解释不了反机器人挑战（四组对照实验证伪）。
@@ -2159,7 +2163,7 @@ type HttpCheckData = {
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
-| 1 | §4.13 `DiagRun` 新增 `network.coverage` 检查，`DiagAction` 增 `{ kind: "switch_mode"; to: "tun" \| "system_proxy" }`：全部接管 + running → `ok`；本机代理 + running → 不通过并给 `switch_mode`；未连接 → `ok` +「先连接」；读不到模式 → `reconnect`。结论**只用于「UDP / QUIC 应用不通」**，不得用来解释反机器人挑战；`remediation` 用「切到全部接管」，内部值只出现在 `action.to` | 字段扩展 | AI 自查第一批 T2；四组对照实验证伪「切全部接管就能过挑战」 |
+| 1 | §4.13 `DiagRun` 新增 `network.coverage` 检查，`DiagAction` 增 `{ kind: "switch_mode"; to: "tun" \| "system_proxy" }`：全部接管 + running → `ok`；本机代理 + running → 不通过并给 `switch_mode`；未连接 → `ok` +「先连接」。结论**只用于「UDP / QUIC 应用不通」**，不得用来解释反机器人挑战；`remediation` 用「切到全部接管」，内部值只出现在 `action.to` | 字段扩展 | AI 自查第一批 T2；四组对照实验证伪「切全部接管就能过挑战」；判定收敛为 `(connected, tun)` 两参数——**接管方式由实际连接类型决定**，不再有「读不到模式」态；**删除不可达的「读不到接管方式」分支**——该分支在唯一触发场景里实际覆盖是已知的（本机代理），回「读不到」是错误结论；留一个会说假话的分支比少一个更糟 |
 | 2 | §3 工具总表 39 → 40、§3.1 注册清单加 `HttpCheckTool`、新增 §4.54 `HttpCheck`（原计划 §4.53，因被 `CatalogOptions` 占用改为 §4.54）：返回 `url / via / status / elapsed_ms / redirects / server / cf_mitigated / tls_ok / error`；`via` 如实报告走隧道还是直连（全部接管下进程直连也算 `tunnel`；本机代理但拿不到混合端口则退回直连并报 `direct`）；直连的 200 不代表用户经 VPN 的体验；DNS 解析失败归 `HTTP_CHECK_FAILED`，只有解析成功落私网才是 `private_address`；只允许 `https` + 443，解析全部 A/AAAA 并拒私网，重定向逐跳复核，**只读响应头、正文不读**，直连时 pin 已校验 IP 并 `no_proxy`；**已知边界：经本机代理时不做 pin，rebinding 有 TOCTOU 窗口，重审触发条件见 §4.54**，`ReadOnly` | 新增工具 | AI 自查第一批 T4；在错误的路径上得到正确的数字会得出相反结论 |
 | 3 | §5.2 / §5.3 同步：`HttpCheck` 计入纯读取幂等；超时按 `timeout_ms`（默认 8s，最大 15s） | 元数据 | 同 2 |
 

@@ -1,14 +1,27 @@
 //! `HttpCheck`：只读地看一眼某个 https 地址能不能打开，附带 Cloudflare 挑战标记。
 //!
 //! 安全约束（`docs/contracts/tools.md` §4.54）是硬要求，不是「尽量」：模型给的
-//! URL 绝不能被用来访问本机或内网。
+//! URL **不能被用来读取**本机或内网内容。
 //!
 //! 两条路径都做每跳静态解析校验（解析 + 判私网）。差别在「谁最终决定连接目标」：
 //! - **直连**（未连接 / TUN）：校验过的地址 pin 给连接层（`resolve_to_addrs`）并
 //!   `no_proxy`，DNS rebinding 与环境代理都改变不了连接目标。
 //! - **经本机代理**（Proxy 连接中）：目标最终由 sing-box 再解析一次，我们 pin 不住，
-//!   存在 TOCTOU 窗口。窗口内最多造成**一次到私网 443 的连接尝试**——TLS 证书不可能
-//!   匹配所请求的域名，握手即失败，读不到任何内容；本工具只读响应头、只允许 https/443。
+//!   存在 TOCTOU 窗口。窗口内最多造成**一次到私网 443 的连接尝试**——正常情况下
+//!   TLS 证书不可能匹配所请求的域名，握手即失败，读不到响应内容（装了企业 MITM
+//!   根证书、且检查盒正好在那个私网地址上时握手可能成功，但请求落在企业代理上）；
+//!   本工具只读响应头、只允许 https/443。
+//!
+//! **这条残余不能读成「什么也学不到」**：失败文案会区分「连接被拒绝 / 超时 / TLS 失败」，
+//! 模型据此能判断某个内网地址的 443 通不通。这是已接受的残余信息泄露，§4.54 有写明。
+//! 但泄露面到此为止——错误文案**只回粗分类，绝不拼接 reqwest 的原始错误串**，
+//! 因为它可能带出解析到的地址，那会把「可达性」升级成「哪个内网 IP 可达」。
+//!
+//! **两条只能靠代码审、离线测不了**（写在这里，免得后来者以为「没测 = 不重要」）：
+//! - `classify_error`：构造不出真实的 `reqwest::Error`——它要一次真实连接失败才会出现。
+//!   而「错误文案里有没有地址」正是它的性质，所以只能靠读这一处代码保证；
+//! - `no_proxy`：代理行为是 `ClientBuilder` 的结构性保证，离线无法黑盒断言 reqwest
+//!   到底有没有读 `HTTPS_PROXY`。`Route` 的选择本身有用例，环境变量这一层没有。
 //!
 //! **重审触发条件**：一旦支持 `http` 或非 443 端口、读正文（哪怕一段）、或允许自定义
 //! 请求头/方法，上面的残余风险就不再成立，必须回到「探针专用入站 + 置顶规则
@@ -115,7 +128,8 @@ impl HttpProbe for ReqwestProbe {
     async fn resolve(&self, host: &str, port: u16) -> Result<Vec<IpAddr>, String> {
         let addrs = tokio::net::lookup_host((host, port))
             .await
-            .map_err(|error| format!("解析 {host} 失败：{error}"))?;
+            // 只回主机名，不回原始错误串：解析器的报错可能带出解析到的地址。
+            .map_err(|_| format!("解析不了 {host}"))?;
         Ok(addrs.map(|addr| addr.ip()).collect())
     }
 
@@ -155,13 +169,7 @@ impl HttpProbe for ReqwestProbe {
             .header(reqwest::header::USER_AGENT, USER_AGENT)
             .send()
             .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    "等响应超时".to_string()
-                } else {
-                    error.to_string()
-                }
-            })?;
+            .map_err(|error| classify_error(&error))?;
         let header = |name: &str| {
             response
                 .headers()
@@ -182,6 +190,37 @@ impl HttpProbe for ReqwestProbe {
             cf_mitigated: header("cf-mitigated"),
             header_bytes,
         })
+    }
+}
+
+/// 把请求错误压成一句**不含地址**的话。
+///
+/// 分类本身就是我们要给出的信息（拒绝 / 超时 / TLS），但 reqwest 的原始错误串
+/// 可能带出解析到的地址——那会把「可达性」升级成「哪个内网 IP 可达」。所以只回
+/// 粗分类，绝不拼接原始错误文本。
+fn classify_error(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        return "等响应超时".to_string();
+    }
+    // 只看错误链里的关键字，不把它打印出去。
+    let mut tls = false;
+    let mut source = std::error::Error::source(error);
+    while let Some(inner) = source {
+        let text = inner.to_string().to_ascii_lowercase();
+        if text.contains("tls") || text.contains("certificate") || text.contains("handshake") {
+            tls = true;
+            break;
+        }
+        source = inner.source();
+    }
+    if tls {
+        "TLS 握手失败".to_string()
+    } else if error.is_connect() {
+        "连接没有建立（被拒绝或不可达）".to_string()
+    } else if error.is_body() || error.is_decode() {
+        "响应无法解析".to_string()
+    } else {
+        "请求失败".to_string()
     }
 }
 

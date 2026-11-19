@@ -2126,8 +2126,81 @@ fn diag_check(
     })
 }
 
-/// 单节点测速结果的三态：`ok` / `unreachable` / `untested`。
+/// `network.coverage`：当前接管方式覆盖哪些流量。
 ///
+/// 它不判「有没有故障」，而是判「上面那些结论代表哪部分流量」：Proxy 模式下
+/// 浏览器 HTTP/3 不走 VPN，有些站点因此打不开，而其它检查项看起来全都正常。
+///
+/// 判据是**连接是否成立 + 走的是哪条路**，不是 `manager.status().state`：
+/// TUN 的进程不归 manager 管（`publish_state` 只发事件），拿 manager 状态判
+/// 会把 TUN 连接说成「未连接」，把「全接管」这一行变成永远不可达。
+///
+/// 所以只有三行：`!connected` / `connected && tun` / `connected && !tun`。
+/// 「连着但读不到接管方式」不成立——`tun` 已知时，`!tun` 本身就是本机代理；
+/// 那种情况若单列一行回「读不到」，等于在实际覆盖范围已知时给出错误结论。
+fn network_coverage_check(connected: bool, tun: bool) -> Value {
+    if !connected {
+        return diag_check(
+            "network.coverage",
+            "network",
+            true,
+            "未连接，先连接再检查覆盖".into(),
+            None,
+            None,
+        );
+    }
+    if tun {
+        return diag_check(
+            "network.coverage",
+            "network",
+            true,
+            "现在接管全部流量，TCP / UDP / QUIC 都经过 VPN".into(),
+            None,
+            None,
+        );
+    }
+    diag_check(
+        "network.coverage",
+        "network",
+        false,
+        // 说的是「覆盖范围不同」，不是「当前配置不好」：本机代理是产品的默认选择。
+        // 这个结论只能用来解释「UDP / QUIC 应用不通」，不能当成反机器人挑战的解释。
+        "覆盖范围不同：现在只为本机软件提供代理，浏览器 HTTP/3 不经过 VPN".into(),
+        Some("要看全部流量的情况，点「切到全部接管」再测一次"),
+        Some(json!({ "kind": "switch_mode", "to": "tun" })),
+    )
+}
+
+#[cfg(test)]
+mod diag_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn proxy_mode_reports_partial_coverage_and_offers_the_switch() {
+        let check = network_coverage_check(true, false);
+        assert_eq!(check["ok"], false, "{check}");
+        assert_eq!(check["action"]["kind"], "switch_mode", "{check}");
+        assert_eq!(check["action"]["to"], "tun", "{check}");
+        assert!(check["detail"].as_str().unwrap().contains("HTTP/3"), "{check}");
+    }
+
+    #[test]
+    fn tun_mode_is_full_coverage_without_an_action() {
+        let check = network_coverage_check(true, true);
+        assert_eq!(check["ok"], true, "{check}");
+        assert!(check["action"].is_null(), "{check}");
+        assert!(check["detail"].as_str().unwrap().contains("QUIC"), "{check}");
+    }
+
+    #[test]
+    fn disconnected_asks_to_connect_first() {
+        let check = network_coverage_check(false, false);
+        assert_eq!(check["ok"], true, "{check}");
+        assert!(check["detail"].as_str().unwrap().contains("先连接"), "{check}");
+    }
+}
+
+/// 单节点测速结果的三态：`ok` / `unreachable` / `untested`。///
 /// `reachable` 只在测得时是布尔值；`untested` 用 `null`，不能用 `false`
 /// 冒充——「没测成」和「连不通」是两件事。
 pub(crate) fn probe_ok(node_id: &str, latency_ms: u64) -> Value {
@@ -2916,6 +2989,13 @@ impl WiredServices {
             route_region: status.route_region,
             tun: false,
         }
+    }
+
+    /// `network.coverage` 的取值入口。状态必须来自 `connection_state()`（TUN 优先）：
+    /// `manager.status()` 看不见 TUN，用它会把 TUN 连接判成「未连接」。
+    async fn network_coverage_for(&self) -> Value {
+        let connection = self.connection_state().await;
+        network_coverage_check(connection.connected, connection.tun)
     }
 
     fn route_state_json(
@@ -6931,6 +7011,9 @@ impl VpnToolServices for WiredServices {
                 None
             },
         ));
+
+        // 接管范围：告诉模型「这次诊断代表哪部分流量」，直接决定它能下什么结论。
+        checks.push(self.network_coverage_for().await);
 
         let source_reachable = http_reachable(&crate::seed::source_url()).await;
         checks.push(diag_check(
@@ -14066,6 +14149,26 @@ mod main_flow_tests {
             AfterStart::Replaced,
             "别的配置在跑不算这套配置断开"
         );
+    }
+
+    /// 集成用例：TUN 连接时覆盖项必须是「全接管」。
+    /// 锁的是**状态来源**——用 `manager.status()` 判会把 TUN 说成「未连接」，
+    /// 纯函数级用例发现不了这种接错源的问题。
+    #[tokio::test]
+    async fn a_tun_connection_counts_as_full_coverage() {
+        let mut h = harness();
+        inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
+        h.services.tun.force_running_for_test(4242, Some("cfg_tun"));
+        let check = h.services.network_coverage_for().await;
+        assert_eq!(check["ok"], true, "{check}");
+        let detail = check["detail"].as_str().unwrap();
+        assert!(detail.contains("全部流量"), "TUN 连接必须是全接管：{check}");
+        assert!(detail.contains("TCP") && detail.contains("UDP") && detail.contains("QUIC"),
+            "全接管要说清覆盖哪些流量：{check}");
+        assert!(check["action"].is_null(), "{check}");
+        // 与主状态不矛盾：同一份夹具下 connection_state 也必须是「连着且 TUN」。
+        let connection = h.services.connection_state().await;
+        assert!(connection.connected && connection.tun, "夹具本身要是 TUN 连接");
     }
 
     /// 重建期间切节点：被闸门拒绝，最终仍是原节点。
