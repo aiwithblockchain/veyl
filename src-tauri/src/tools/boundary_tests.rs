@@ -213,8 +213,9 @@ impl VpnToolServices for FakeServices {
         self.rec.record("config_list");
         Ok(self.data.clone())
     }
-    async fn config_detail(&self, config_id: &str) -> anyhow::Result<Value> {
-        self.rec.record(format!("config_detail({config_id})"));
+    async fn config_detail(&self, config_id: Option<String>) -> anyhow::Result<Value> {
+        let label = config_id.as_deref().unwrap_or("active");
+        self.rec.record(format!("config_detail({label})"));
         Ok(self.data.clone())
     }
     async fn config_create(&self, input: ConfigCreateInput) -> anyhow::Result<Value> {
@@ -560,7 +561,6 @@ async fn required_fields_must_be_present_and_strings() {
 
     // (工具名, 必填字段, 一份「只有其他字段」的合法底稿)
     let cases: &[(&str, &str, Value)] = &[
-        ("ConfigDetail", "config_id", json!({})),
         ("ConfigUpdate", "config_id", json!({})),
         ("NodeSwitch", "config_id", json!({ "node_id": "nod_1" })),
         ("NodeProbe", "node_id", json!({})),
@@ -795,6 +795,8 @@ fn base_input(name: &str) -> Option<Value> {
         "NodeImportUrl" => json!({ "url": "https://example.com/sub" }),
         "NodeImportText" => json!({ "text": "ss://aes-256-gcm:pw@203.0.113.10:8388#A" }),
         "ConfigUpdate" => json!({ "config_id": "cfg_1" }),
+        // config_id 可选（3.21.4）：最小输入就是空对象。
+        "ConfigDetail" => json!({}),
         "NodeCreate" => json!({
             "name": "东京", "server": "198.51.100.20", "port": 8388,
             "password": "pw", "method": "aes-256-gcm"
@@ -814,6 +816,7 @@ async fn valid_input_reaches_the_service_and_succeeds() {
 
     let cases: &[(&str, Value, &str)] = &[
         ("ConfigDetail", json!({ "config_id": "cfg_1" }), "config_detail(cfg_1)"),
+        ("ConfigDetail", json!({}), "config_detail(active)"),
         ("NodeSwitch", json!({ "config_id": "cfg_1", "node_id": "nod_1" }), "node_switch(cfg_1,nod_1)"),
         ("NodeProbe", json!({ "node_id": "nod_1" }), "node_probe(nod_1)"),
         ("NodeImportUrl", json!({ "url": "https://example.com/sub" }), "node_import_url(None,23chars)"),
@@ -1216,7 +1219,7 @@ async fn service_failure_becomes_a_structured_error_with_next_actions() {
         async fn config_list(&self) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
-        async fn config_detail(&self, _: &str) -> anyhow::Result<Value> {
+        async fn config_detail(&self, _: Option<String>) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn config_create(&self, _: ConfigCreateInput) -> anyhow::Result<Value> {

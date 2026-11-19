@@ -1482,7 +1482,7 @@ mod prompt_tests {
         );
         assert!(prompt.contains("节点以配置为准"), "系统提示缺少节点口径");
         for needle in [
-            "必须先调 `ConfigDetail`",
+            "必须先调 `ConfigDetail`（**不传 id 即当前配置**）",
             "`DefaultProfileStatus` 只代表 Veyl 免费节点的缓存",
             "不得单独用来回答节点数量",
             "source = \"owned\"",

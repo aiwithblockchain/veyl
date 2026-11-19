@@ -1076,7 +1076,7 @@ pub async fn config_detail(
 ) -> Result<Value, Value> {
     state
         .services
-        .config_detail(&config_id)
+        .config_detail(Some(config_id))
         .await
         .map_err(error_value)
 }

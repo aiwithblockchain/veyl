@@ -67,7 +67,9 @@ impl Tool for ConfigDetailTool {
     }
 
     fn description(&self) -> &str {
-        "读取一套配置的节点集、DNS 与布局。不含密码；要测连通性用 NodeProbe。\n配置 ID 只用于你自己匹配，不要念给用户。"
+        "读取一套配置的节点集、DNS 与布局；不传 config_id 就是当前配置。\n\
+         回答「我有几个节点」「当前用的是哪个」时直接不带 id 调用；要测连通性用 NodeProbe。\n\
+         配置 ID 只用于你自己匹配，不要念给用户。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -78,18 +80,14 @@ impl Tool for ConfigDetailTool {
         json!({
             "type": "object",
             "properties": { "config_id": { "type": "string" } },
-            "required": ["config_id"],
             "additionalProperties": false
         })
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let Some(config_id) = input.get("config_id").and_then(Value::as_str) else {
-            return envelope::finish(
-                ctx,
-                "ConfigDetail",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 config_id")),
-            );
+        let config_id = match super::optional_string(&input, "config_id") {
+            Ok(value) => value,
+            Err(error) => return envelope::finish(ctx, "ConfigDetail", ToolOutcome::fail(error)),
         };
         let outcome = match self.services.config_detail(config_id).await {
             Ok(data) => {

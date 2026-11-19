@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.21.3`
+> 契约版本：`3.21.4`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -1289,12 +1289,13 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 {
   "type": "object",
   "properties": { "config_id": { "type": "string" } },
-  "required": ["config_id"],
   "additionalProperties": false
 }
 ```
 
 `data`：`ConfigDetail`（`commands.md` §3.0），含 `nodes` / `dns` / `tun_excludes` / `layout`。
+
+- **`config_id` 可选（3.21.4）**：不传就是当前激活配置。AI 手里没有配置 id（`ConfigList` 已退出工具集），「我有几个节点」必须走这个入口。返回值里的 `config_id` 保留供后续工具使用，但仍不要念给用户。
 
 - 节点按配置内顺序返回，**不重排**。
 - **`current_node_id` 可能为 `null`**：`source = "seed"` 的新建配置在用户点「连接」之前、或节点全部被删之后。这不等于「没有节点」——`nodes` 照实返回，`node_count` 照样准确；**不要把它说成「还没有节点」**，也不要替用户补一次 `NodeSwitch`。
@@ -2187,6 +2188,12 @@ type HttpCheckData = {
 ---
 
 ## 8. 变更记录
+
+### 3.21.4（未发布，2026-11-19：`ConfigDetail` 的 `config_id` 改为可选）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `3.21.4`；§4.23 `ConfigDetail` 的 `config_id` 从必填改为可选，缺省读当前激活配置；描述写明「不传 id 就是当前配置」 | 参数放宽 | 2026-11-19 真机：AI 手里没有配置 id（`ConfigList` 已退出工具集、`<ui-context>` 也没有），必填的 `ConfigDetail` 等于够不着，回答「我没法确认节点总数」 |
 
 ### 3.21.3（未发布，2026-11-19：`MyServers` 给已销毁的人话原因）
 

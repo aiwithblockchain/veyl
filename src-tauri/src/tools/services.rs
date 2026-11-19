@@ -187,7 +187,8 @@ pub trait VpnToolServices: Send + Sync {
     }
 
     async fn config_list(&self) -> anyhow::Result<Value>;
-    async fn config_detail(&self, config_id: &str) -> anyhow::Result<Value>;
+    /// 不传 `config_id` 时读当前激活配置（与 `NodeImportUrl` 等一致）。
+    async fn config_detail(&self, config_id: Option<String>) -> anyhow::Result<Value>;
     async fn config_create(&self, input: ConfigCreateInput) -> anyhow::Result<Value>;
     async fn config_update(
         &self,
@@ -475,7 +476,7 @@ impl VpnToolServices for NotWiredServices {
         Ok(json!({ "configs": [], "active_config_id": null }))
     }
 
-    async fn config_detail(&self, _config_id: &str) -> anyhow::Result<Value> {
+    async fn config_detail(&self, _config_id: Option<String>) -> anyhow::Result<Value> {
         not_wired("读取配置详情")
     }
 
@@ -5431,8 +5432,8 @@ impl VpnToolServices for WiredServices {
         Ok(json!({ "configs": items, "active_config_id": active }))
     }
 
-    async fn config_detail(&self, config_id: &str) -> anyhow::Result<Value> {
-        let config = self.require_config(config_id)?;
+    async fn config_detail(&self, config_id: Option<String>) -> anyhow::Result<Value> {
+        let config = self.resolve_config(config_id)?;
         self.config_detail_json(&config)
     }
 
@@ -10436,7 +10437,7 @@ mod config_service_tests {
             .unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
 
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["layout"], serde_json::json!(null));
         assert_eq!(detail["layout_revision"], serde_json::json!(null));
 
@@ -10451,7 +10452,7 @@ mod config_service_tests {
         };
         assert_eq!(revision, 1);
 
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["layout_revision"], serde_json::json!(1));
         assert_eq!(
             detail["layout"]["blocks"][0]["type"],
@@ -10507,7 +10508,7 @@ mod config_service_tests {
             configs::attach_node(&conn, &config_id, "nd_owned").unwrap();
         }
 
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["node_count"], 2);
         let nodes = detail["nodes"].as_array().unwrap();
         let owned = nodes
@@ -10541,7 +10542,7 @@ mod config_service_tests {
             )
             .unwrap();
         }
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         let owned = detail["nodes"]
             .as_array()
             .unwrap()
@@ -10582,6 +10583,48 @@ mod config_service_tests {
         );
     }
 
+    /// 不传 `config_id` 就读当前激活配置：AI 手上没有配置 id，这必须是可用的入口。
+    #[tokio::test]
+    async fn config_detail_without_an_id_reads_the_active_config() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("当前配置"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        {
+            let conn = services.store.conn();
+            configs::upsert_node(
+                &conn,
+                &crate::store::NewNode {
+                    id: "nd_owned",
+                    name: "纽约-便宜0.2",
+                    server: "203.0.113.11",
+                    port: 8388,
+                    method: "aes-256-gcm",
+                    password_ref: "node:nd_owned",
+                    source: configs::SOURCE_OWNED,
+                    source_key: "srv_x",
+                },
+            )
+            .unwrap();
+            configs::attach_node(&conn, &config_id, "nd_owned").unwrap();
+        }
+
+        let detail = services.config_detail(None).await.unwrap();
+        assert_eq!(detail["config_id"], config_id.as_str());
+        assert!(
+            detail["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["node_id"] == "nd_owned"),
+            "不传 id 也要拿到完整节点列表：{detail}"
+        );
+    }
+
     #[tokio::test]
     async fn config_list_is_summary_only_and_detail_has_the_nodes() {
         crate::test_support::install_test_secrets();
@@ -10616,7 +10659,7 @@ mod config_service_tests {
         let text = list.to_string();
         assert!(!text.contains("pw-secret"), "{text}");
 
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["nodes"][0]["server"], "203.0.113.10");
         assert_eq!(detail["nodes"][0]["protocol"], "shadowsocks");
         // 导入不写当前节点：由用户点选或「连接」时再 `node_switch`。
@@ -10626,7 +10669,7 @@ mod config_service_tests {
 
         let node_id = detail["nodes"][0]["node_id"].as_str().unwrap().to_string();
         services.node_switch(&config_id, &node_id).await.unwrap();
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["current_node_id"], node_id);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -10803,7 +10846,7 @@ mod config_service_tests {
         assert_eq!(data["restored"], true);
         assert_eq!(data["confirmation"], "not_needed");
 
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["connect_mode"], configs::CONNECTION_TUN);
         assert!(detail["listen_port"].is_null(), "全部软件不能留代理端口");
 
@@ -10817,7 +10860,7 @@ mod config_service_tests {
         assert_eq!(again["connected"], false);
         assert_eq!(again["confirmation"], "not_needed");
         assert_eq!(
-            services.config_detail(&config_id).await.unwrap()["updated_at"],
+            services.config_detail(Some(config_id.clone())).await.unwrap()["updated_at"],
             before
         );
 
@@ -10851,7 +10894,7 @@ mod config_service_tests {
             "switch_in_progress"
         );
         assert_eq!(
-            services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY,
             "被拒绝的请求不能写库"
         );
@@ -10879,7 +10922,7 @@ mod config_service_tests {
             "config_unknown"
         );
         assert_eq!(
-            services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY
         );
 
@@ -10906,7 +10949,7 @@ mod config_service_tests {
         assert_eq!(details["will_disconnect"], true);
         assert_eq!(details["config_id"], config_id);
         assert_eq!(
-            services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY,
             "未确认不能写库"
         );
@@ -10930,7 +10973,7 @@ mod config_service_tests {
         assert_eq!(routed["reconnect"], "not_running");
         assert_eq!(routed["effective"], "next_connection");
 
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["routing_mode"], configs::ROUTING_DIRECT);
 
         let route = services.route_get(Some(config_id)).await.unwrap();
@@ -11061,7 +11104,7 @@ mod config_service_tests {
                 .unwrap();
         }
         // 导入不写当前节点，先自己选一个，再在启动窗口里试切到另一个。
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         let ids = detail["nodes"]
             .as_array()
             .unwrap()
@@ -11082,7 +11125,7 @@ mod config_service_tests {
         );
 
         // 库里的选择没被改：界面不能宣布「已切换到 X」。
-        let after = services.config_detail(&config_id).await.unwrap();
+        let after = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(after["current_node_id"], current);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -11292,7 +11335,7 @@ mod config_service_tests {
             .unwrap();
         assert_eq!(data["imported"], 2);
 
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["node_count"], 2);
         let nodes = detail["nodes"].as_array().unwrap();
         assert_eq!(nodes[0]["name"], "A");
@@ -11326,7 +11369,7 @@ mod config_service_tests {
         assert_eq!(data["imported"], 1, "一行坏的不作废整批");
         assert_eq!(data["skipped"][0]["reason"], "unsupported_scheme");
 
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["node_count"], 1, "追加到指定配置后节点数增加");
         assert_eq!(detail["nodes"][0]["name"], "F");
         assert_eq!(detail["nodes"][0]["source"], "manual");
@@ -11564,7 +11607,7 @@ mod config_service_tests {
         assert_eq!(switched["connected"], false);
         assert!(switched["runtime"].is_null());
 
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["current_node_id"], node_id);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -11670,7 +11713,7 @@ mod config_service_tests {
         );
 
         // 失败不写库：不能留下「库里切了、实际没切」的分叉。
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["current_node_id"], old_id);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -12357,7 +12400,7 @@ mod config_service_tests {
         // 重复合并：不重复绑定、不重复建配置。
         services.merge_seed_into_global().unwrap();
         let detail = services
-            .config_detail(configs[0]["config_id"].as_str().unwrap())
+            .config_detail(Some(configs[0]["config_id"].as_str().unwrap().to_string()))
             .await
             .unwrap();
         assert_eq!(detail["node_count"], 2);
@@ -12415,7 +12458,7 @@ mod config_service_tests {
         }
 
         services.merge_seed_into_global().unwrap();
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["node_count"], 2, "种子节点要进池");
         assert_eq!(detail["current_node_id"], owned_id, "不能改当前节点");
 
@@ -12676,7 +12719,7 @@ mod config_service_tests {
             .await
             .unwrap();
         let detail = services
-            .config_detail(configs[0]["config_id"].as_str().unwrap())
+            .config_detail(Some(configs[0]["config_id"].as_str().unwrap().to_string()))
             .await
             .unwrap();
         assert_eq!(detail["node_count"], 2);
@@ -12728,7 +12771,7 @@ mod config_service_tests {
         assert!(configs[0]["current_node_id"].is_null());
 
         let config_id = configs[0]["config_id"].as_str().unwrap().to_string();
-        let detail = services.config_detail(&config_id).await.unwrap();
+        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["nodes"][0]["source"], "manual");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -13323,7 +13366,7 @@ mod main_flow_tests {
         );
 
         // 详情必须能正常返回：空当前节点不是错误，节点集照实给出。
-        let detail = h.services.config_detail(&config_id).await.unwrap();
+        let detail = h.services.config_detail(Some(config_id.clone())).await.unwrap();
         assert!(detail["current_node_id"].is_null());
         assert_eq!(detail["node_count"], 2);
         let nodes = detail["nodes"].as_array().unwrap();
@@ -13975,7 +14018,7 @@ mod main_flow_tests {
         let watcher = spawn_reusable_port_watcher(h.dir.clone());
         let config_id = create_config_with_node(&h.services, "本机代理", "pw-same").await;
         let _ = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
-        let before = h.services.config_detail(&config_id).await.unwrap()["updated_at"].clone();
+        let before = h.services.config_detail(Some(config_id.clone())).await.unwrap()["updated_at"].clone();
 
         let data = h
             .services
@@ -13992,7 +14035,7 @@ mod main_flow_tests {
         );
         assert_eq!(h.services.manager.status().await.state, RuntimeState::Running);
         assert_eq!(
-            h.services.config_detail(&config_id).await.unwrap()["updated_at"],
+            h.services.config_detail(Some(config_id.clone())).await.unwrap()["updated_at"],
             before
         );
         watcher.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -14060,7 +14103,7 @@ mod main_flow_tests {
             "未确认不能停掉连接"
         );
         assert_eq!(
-            h.services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            h.services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY,
             "未确认不能写库"
         );
@@ -14089,7 +14132,7 @@ mod main_flow_tests {
             "必须告诉 UI 连接还在不在：{details}"
         );
         assert_eq!(
-            h.services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            h.services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY
         );
         watcher.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -14120,7 +14163,7 @@ mod main_flow_tests {
         assert_eq!(details["previous_mode"], configs::CONNECTION_SYSTEM_PROXY);
 
         assert_eq!(
-            h.services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            h.services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY,
             "库必须写回旧方式"
         );
@@ -14165,7 +14208,7 @@ mod main_flow_tests {
         assert_eq!(details["previous_mode"], configs::CONNECTION_SYSTEM_PROXY);
 
         assert_eq!(
-            h.services.config_detail(&config_id).await.unwrap()["connect_mode"],
+            h.services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
             configs::CONNECTION_TUN
         );
         assert_eq!(
@@ -14555,7 +14598,7 @@ mod main_flow_tests {
         );
         assert_eq!(attached["runtime_rebuild"]["new_nodes"][0], b_id.as_str());
         assert_eq!(attached["node_count"], 2);
-        let detail = h.services.config_detail(&config_id).await.unwrap();
+        let detail = h.services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["current_node_id"], a_id, "重建不能改当前节点");
 
         let profile = rendered_profiles(&h.dir);
@@ -14939,7 +14982,7 @@ mod main_flow_tests {
         let rebuild = &attached["runtime_rebuild"];
         assert_eq!(rebuild["status"], "failed", "{rebuild}");
         assert_eq!(rebuild["restored"], true);
-        let detail = h.services.config_detail(&config_id).await.unwrap();
+        let detail = h.services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["current_node_id"], a_id, "库里和实际都还是原节点");
         let profile = rendered_profiles(&h.dir);
         assert!(!profile.contains(&format!("node-{spare}")));
@@ -14974,7 +15017,7 @@ mod main_flow_tests {
         let attached = attached.unwrap();
         assert_eq!(attached["runtime_rebuild"]["status"], "failed");
         assert_eq!(attached["runtime_rebuild"]["restored"], true);
-        let detail = h.services.config_detail(&config_id).await.unwrap();
+        let detail = h.services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["current_node_id"], a_id, "选择没被改");
         let profile = rendered_profiles(&h.dir);
         assert!(!profile.contains(&format!("node-{spare}")));
@@ -15031,7 +15074,7 @@ mod main_flow_tests {
             .unwrap();
         let c_id = created["node_id"].as_str().unwrap().to_string();
         assert_eq!(created["runtime_rebuild"]["status"], "applied");
-        let detail = h.services.config_detail(&config_id).await.unwrap();
+        let detail = h.services.config_detail(Some(config_id.clone())).await.unwrap();
         assert_eq!(detail["current_node_id"], a_id);
         let profile = rendered_profiles(&h.dir);
         assert!(profile.contains(&format!("node-{c_id}")));
