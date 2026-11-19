@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.20.1`
+> 契约版本：`3.21.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.20.1`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.21.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -2034,6 +2034,7 @@ type CatalogOptionsData = {
   
   失败时**不要**给出地区名或价格——没读到就是没读到，不许拿印象补一份。
 - **只回 id、名称、大洲与套餐的展示字段**：`hourly_usd` / `monthly_usd` 是内部成本口径，不返回；IP、端口、凭据永不出现在这里。
+- **`content` 携带完整可选清单**：地区逐个写成 `名称（id）`（可按大洲分组），规格逐个写成 `名称（id） 每天 $X.XX · 每月 N GB · 可用地区：…`，日价由 `daily_price_cents` 换算；可用地区严格取自 `plans[].regions`。文本受 2000 字符上限兜底，超长时末尾标注「已截断」。不输出原始 JSON、成本口径或 IP/端口/凭据；失败时不给地区名或价格。
 - **可用性只由 `plans[].regions` 表达（2.38.0）**：每个档位带它真实可用的地区 id（`commands.md` §7.14），严格按这份数据说话；没列出的组合就是不能开，不要推断「应该都行」，也不要自己补一份可用性表。
 - 触发：用户问「有哪些地区 / 多少钱」，或准备调 `StageSelect` 之前。不做「一轮最多一次」限制（只读）。
 - `display`：成功「读到了可选地区与规格」+ `facts` 放地区数 / 套餐数；失败「没读到可选地区，稍后再试」。
@@ -2189,6 +2190,7 @@ type HttpCheckData = {
 | 2 | 新增「`skipped` 的语义」：不是错误、**不计入 `failed`**、`remediation` 与 `action` 必须为 `null`；界面不得用失败色；模型只能说「这项没检查」，不得说「坏了 / 不可用」 | 语义澄清 | 不适用 ≠ 坏 |
 | 3 | 新增各模式适用表：代理模式五项适用（`network.exit_ip` 未探测到算 `skipped`）；TUN 下 `app.process_alive` / `app.data_plane` 适用，`app.clash_api` 与 `network.exit_ip` 为 `skipped`（无探测通道 / 不采集出口 IP），`system.proxy_services` 为 `skipped` 但**残留指向未监听端口仍 `failed`**；未连接 / 连接中除 `system.proxy_services`（照常检查）外一律 `skipped` | 语义澄清 | 「不适用」必须有一个不撒谎的表示 |
 | 4 | 新增文案禁区：未连接与连接中不得出现「进程未运行」「控制面不可用」；TUN 下不得出现「sing-box 进程未运行」 | 文案约束 | 这些是 `skipped`，不是失败；说成失败会让用户以为坏了 |
+| 5 | §4.53 `CatalogOptions`：`content` 改为携带完整可选清单（地区 `名称（id）`、规格含日价与 `plans[].regions` 的可用地区），受 2000 字符上限截断并在末尾标注「已截断」；`display` 文案与 facts 不变 | 模型可见内容 | 模型此前只拿到数量，无法推荐或合法调用 `StageSelect`；§1.2 要求 `content` 自足 |
 
 ### 3.20.2（未发布：随 AI 自查第一批统一升版）
 

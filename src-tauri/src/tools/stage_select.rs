@@ -3,6 +3,7 @@
 //! `StageSelect` 只把地区 / 规格选进「新建节点」舞台：不建机、不扣费、不写业务表。
 //! Host 没有舞台当前选择的镜像，所以只回本次请求的字段，未请求的为 `null`。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -247,6 +248,128 @@ impl Tool for StageSelectTool {
     }
 }
 
+/// 模型只能看到 `ToolResult.content`（`tools.md` §1.2）；目录异常膨胀时截断，
+/// 结构化全量仍在信封 `data` 里给 UI。
+const MAX_CONTENT_CHARS: usize = 2000;
+const TRUNCATION_MARKER: &str = "……（已截断）";
+
+fn usd(cents: i64) -> String {
+    format!("${:.2}", cents as f64 / 100.0)
+}
+
+fn regions_block(catalog: &Catalog) -> String {
+    if catalog.regions.is_empty() {
+        return "地区：暂无".to_string();
+    }
+
+    let mut order: Vec<&str> = Vec::new();
+    let mut groups: HashMap<&str, Vec<String>> = HashMap::new();
+    for region in &catalog.regions {
+        let continent = region.continent.trim();
+        let key = if continent.is_empty() {
+            "其他"
+        } else {
+            continent
+        };
+        if !groups.contains_key(key) {
+            order.push(key);
+        }
+        groups
+            .entry(key)
+            .or_default()
+            .push(format!("{}（{}）", region.name, region.id));
+    }
+
+    let body = order
+        .iter()
+        .copied()
+        .map(|continent| {
+            format!(
+                "{continent}：{}",
+                groups
+                    .get(continent)
+                    .map(|items| items.join("、"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    format!("地区（{} 个）：{body}", catalog.regions.len())
+}
+
+fn plans_block(catalog: &Catalog) -> String {
+    if catalog.plans.is_empty() {
+        return "规格：暂无".to_string();
+    }
+
+    let names: HashMap<&str, &str> = catalog
+        .regions
+        .iter()
+        .map(|region| (region.id.as_str(), region.name.as_str()))
+        .collect();
+    let lines = catalog
+        .plans
+        .iter()
+        .map(|plan| {
+            // 可用性只按 plans[].regions 说话；没列出的组合就是不能开。
+            let availability = if plan.regions.is_empty() {
+                "无".to_string()
+            } else {
+                plan.regions
+                    .iter()
+                    .map(|id| match names.get(id.as_str()) {
+                        Some(name) => format!("{name}（{id}）"),
+                        None => id.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("、")
+            };
+            let transfer = if plan.transfer_gib > 0 {
+                format!("每月 {} GB", plan.transfer_gib)
+            } else {
+                "每月额度未知".to_string()
+            };
+            format!(
+                "- {}（{}） 每天 {} · {} · 可用地区：{}",
+                plan.label,
+                plan.id,
+                usd(plan.daily_price_cents),
+                transfer,
+                availability
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("规格（{} 个）：\n{}", lines.len(), lines.join("\n"))
+}
+
+fn truncate_with_marker(text: &str) -> String {
+    let keep = MAX_CONTENT_CHARS.saturating_sub(TRUNCATION_MARKER.chars().count());
+    let mut out: String = text.chars().take(keep).collect();
+    out.push_str(TRUNCATION_MARKER);
+    out
+}
+
+fn catalog_summary(catalog: &Catalog) -> String {
+    let regions = regions_block(catalog);
+    let plans = plans_block(catalog);
+    let full = format!("{regions}\n{plans}");
+    if full.chars().count() <= MAX_CONTENT_CHARS {
+        return full;
+    }
+
+    // 超长时优先保住规格与「可用地区」，压缩地区清单。
+    let plans_len = plans.chars().count();
+    let marker_len = TRUNCATION_MARKER.chars().count();
+    let budget = MAX_CONTENT_CHARS.saturating_sub(plans_len + 1 + marker_len);
+    if budget > 1 {
+        let regions_keep: String = regions.chars().take(budget).collect();
+        return format!("{regions_keep}\n{plans}{TRUNCATION_MARKER}");
+    }
+
+    // 规格本身已超长：退化为只保留规格前段（首个规格仍带可用地区）。
+    truncate_with_marker(&plans)
+}
+
 pub struct CatalogOptionsTool {
     catalog: Arc<dyn ServerCatalogSource>,
 }
@@ -325,11 +448,7 @@ impl Tool for CatalogOptionsTool {
                         })
                         .collect();
                     ToolOutcome::ok(
-                        format!(
-                            "目录里有 {} 个地区、{} 个规格。",
-                            regions.len(),
-                            plans.len()
-                        ),
+                        catalog_summary(&catalog),
                         json!({ "regions": regions, "plans": plans }),
                     )
                     .with_display(
@@ -384,6 +503,29 @@ mod tests {
                 daily_price_cents: 17,
                 transfer_gib: 1000,
                 regions: vec!["tyo".into()],
+            }],
+        }
+    }
+
+    fn big_catalog() -> Catalog {
+        Catalog {
+            currency: "USD".into(),
+            updated_at: "2026-11-17T00:00:00Z".into(),
+            regions: (0..400)
+                .map(|i| crate::control_plane::catalog::Region {
+                    id: format!("r{i}"),
+                    name: format!("Region {i}"),
+                    continent: "asia".into(),
+                })
+                .collect(),
+            plans: vec![crate::control_plane::catalog::Plan {
+                id: "big-plan".into(),
+                label: "Big".into(),
+                hourly_usd: 0.001,
+                monthly_usd: 1.0,
+                daily_price_cents: 3,
+                transfer_gib: 100,
+                regions: vec!["r0".into()],
             }],
         }
     }
@@ -590,6 +732,70 @@ mod tests {
             "成本口径不能返回"
         );
         assert!(data["plans"][0].get("monthly_usd").is_none());
+    }
+
+    #[tokio::test]
+    async fn catalog_options_content_lists_real_ids_and_daily_price() {
+        let tool = CatalogOptionsTool::new(source(Ok(catalog())));
+        let result = tool
+            .execute(json!({}), &context(&session("options-content"), 1))
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+
+        // 模型必须能直接拿到可调用的 id 与展示价。
+        assert!(
+            result.content.contains("Tokyo（tyo）"),
+            "{}",
+            result.content
+        );
+        assert!(result.content.contains("vc2-1c-1gb"), "{}", result.content);
+        assert!(result.content.contains("$0.17"), "{}", result.content);
+        assert!(
+            result.content.contains("可用地区：Tokyo（tyo）"),
+            "{}",
+            result.content
+        );
+
+        // 成本口径与原始 JSON 不进 content。
+        assert!(!result.content.contains("hourly_usd"), "{}", result.content);
+        assert!(
+            !result.content.contains("monthly_usd"),
+            "{}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("\"regions\""),
+            "{}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_options_truncates_oversized_catalog_but_keeps_availability() {
+        let tool = CatalogOptionsTool::new(source(Ok(big_catalog())));
+        let result = tool
+            .execute(json!({}), &context(&session("options-big"), 1))
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+
+        assert!(
+            result.content.chars().count() <= MAX_CONTENT_CHARS,
+            "content 超过 {} 字符：{}",
+            MAX_CONTENT_CHARS,
+            result.content.chars().count()
+        );
+        assert!(result.content.contains("已截断"), "{}", result.content);
+        assert!(
+            result.content.contains("可用地区：Region 0（r0）"),
+            "截断后仍要保留可用地区：{}",
+            result.content
+        );
+        assert!(result.content.contains("big-plan"), "{}", result.content);
+        assert!(
+            !result.content.contains("Region 399（r399）"),
+            "超长地区清单应被截断：{}",
+            result.content
+        );
     }
 
     #[tokio::test]
