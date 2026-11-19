@@ -30,6 +30,8 @@ const DETAIL_ERROR = "这台服务器的详情暂时读不到。已有服务器�
 const DETAIL_RETRY_DELAYS = [1000, 2000, 4000, 8000];
 /** 没有任何可读数据时，连续失败累计这么久才给错误；首次失败不报。 */
 const DETAIL_ERROR_AFTER_MS = 10_000;
+/** 开通中的阶段在真机上可能只有几秒：列表轮询压到 2 秒，别让 5 秒一跳整段漏掉。 */
+const PROVISIONING_POLL_MS = 2000;
 const WALLET_ERROR = "读不到余额。稍后再试。";
 const LOGOUT_OFFLINE = "没退出登录。需要联网才能退出；服务器没有变化。";
 const LOGOUT_FAILED = "没退出登录。服务器没有变化，可以再试一次。";
@@ -115,6 +117,10 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const selfLogoutAtRef = useRef(0);
   /** 用户已删掉的停机删除墓碑：后端还在返回时也不再显示。 */
   const forgottenRef = useRef<Set<string>>(new Set());
+  /** 最近一次拉到的列表：轮询按它决定节奏，不等下一次渲染。 */
+  const fetchedServersRef = useRef<MyServer[]>([]);
+  /** 上一次 refresh 是否成功：失败时列表是旧的，不能拿它当「还在开通中」压高频。 */
+  const refreshOkRef = useRef(false);
   const [detail, setDetail] = useState<MyServer | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailRetrying, setDetailRetrying] = useState(false);
@@ -186,6 +192,8 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
           : result.servers.filter(
               (server) => !forgottenRef.current.has(server.server_id),
             );
+      fetchedServersRef.current = list;
+      refreshOkRef.current = true;
       setServers(list);
       // 认出新机器就解除「已下单」占位并选中它；还没出现就继续等，别乱选一台旧的。
       const baseline = pendingBaselineRef.current;
@@ -207,6 +215,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       setRevision((value) => value + 1);
       return true;
     } catch (err) {
+      refreshOkRef.current = false;
       const reason = errorReason(err);
       if (AUTH_REASONS.has(reason)) {
         markLoggedOut();
@@ -391,9 +400,11 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
 
   // 开通中与销毁中都要轮询：销毁完成后控制面列表会把 destroyed 过滤掉，
   // 只有再拉一次列表，左栏那一行才会自己消失。`isProvisioning` 的语义被进度块共用，不改它。
+  const hasProvisioning = servers.some((server) => isProvisioning(server.state));
   const shouldPollList =
-    servers.some((server) => isProvisioning(server.state)) ||
-    servers.some((server) => server.state === "destroying");
+    hasProvisioning || servers.some((server) => server.state === "destroying");
+  // 列表刷新本来就会顺带重取详情（refresh 撞 revision）；开通中把节奏压到 2 秒，
+  // 一个周期仍是「列表 + 详情」两个请求，离开开通态回到原节奏。
   const triesRef = useRef(0);
   useEffect(() => {
     // 事件只是加速；只要还有机器在开通中或销毁中就必须轮询——事件可能漏。
@@ -404,7 +415,16 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     let cancelled = false;
     let timer = 0;
     const schedule = () => {
-      const delay = FALLBACK_DELAYS[Math.min(triesRef.current, FALLBACK_DELAYS.length - 1)];
+      const fallback =
+        FALLBACK_DELAYS[Math.min(triesRef.current, FALLBACK_DELAYS.length - 1)];
+      // 用刚拉到的列表判断：这一拍已经是就绪态就直接回落，不等下一次渲染。
+      // 上一次拉取失败时列表是旧的，按兜底节奏退避；成功一次后自然回到 2 秒。
+      const provisioning =
+        refreshOkRef.current &&
+        fetchedServersRef.current.some((server) =>
+          isProvisioning(server.state),
+        );
+      const delay = provisioning ? PROVISIONING_POLL_MS : fallback;
       timer = window.setTimeout(async () => {
         await refresh();
         if (cancelled) return;

@@ -209,6 +209,26 @@ describe("destination 与我的服务器", () => {
     ).toBeNull();
   });
 
+  it("切到「我的服务器」时主动拉一次列表；1 秒内连点只算一次", async () => {
+    prepare([]);
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+
+    const listMock = vi.mocked(bridge.myServerList);
+    const base = listMock.mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    await screen.findByRole("complementary", { name: "服务器列表" });
+    expect(listMock.mock.calls.length).toBe(base + 1);
+
+    // 同一 destination 再点一次：1 秒内不重复拉。
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(listMock.mock.calls.length).toBe(base + 1);
+  });
+
   it("切换 destination 不发运行时命令；安装中的服务器图标带圆点", async () => {
     const { runtimeStart } = prepare([
       SERVER,

@@ -377,6 +377,20 @@ export default function App() {
     active: destination === "servers",
     rootSignal: serversRootSignal,
   });
+  /**
+   * 进入「我的服务器」时主动拉一次列表：后台轮询没了，空闲时左栏不会自己长出墓碑。
+   * 同一 destination 连点只算一次（1 秒内去重），也不做定时轮询。
+   */
+  const serversEnteredAtRef = useRef(0);
+  const refreshServersOnce = useCallback(() => {
+    const now = Date.now();
+    if (now - serversEnteredAtRef.current < 1000) return;
+    serversEnteredAtRef.current = now;
+    void myServers.refresh();
+  }, [myServers.refresh]);
+  useEffect(() => {
+    if (destination === "servers") refreshServersOnce();
+  }, [destination, refreshServersOnce]);
   /** 账号菜单同一时刻只开一个：导航头像或左栏账号行。 */
   const [accountMenu, setAccountMenu] = useState<"nav" | null>(null);
   const userLogoutRef = useRef(false);
@@ -2196,8 +2210,10 @@ export default function App() {
           title="我的服务器"
           disabled={newNodeBusy}
           onClick={() => {
-            if (destination === "servers") setServersRootSignal((value) => value + 1);
-            else {
+            if (destination === "servers") {
+              setServersRootSignal((value) => value + 1);
+              refreshServersOnce();
+            } else {
               changeDestination("servers");
             }
           }}

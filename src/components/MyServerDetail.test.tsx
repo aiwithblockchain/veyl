@@ -323,6 +323,19 @@ describe("服务器详情", () => {
         server={server({ state: "healthy", created_at })}
       />,
     );
+    // 跨格的状态逐格补齐（每格 ≥800ms），补齐后才切完成态。
+    act(() => {
+      vi.advanceTimersByTime(800);
+    });
+    act(() => {
+      vi.advanceTimersByTime(800);
+    });
+    act(() => {
+      vi.advanceTimersByTime(800);
+    });
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
     expect(screen.queryByText(/已等待/)).toBeNull();
     expect(screen.getByRole("group", { name: "建机进度" })).toBeTruthy();
     const doneSteps = [...document.querySelectorAll(".myservers__steps li")];
