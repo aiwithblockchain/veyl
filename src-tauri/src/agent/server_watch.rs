@@ -47,6 +47,104 @@ fn current_owned_server() -> Option<String> {
     current_owned_server_in(&conn)
 }
 
+/// 这台服务器是不是当前节点对应的自建服务器（销毁前决定要不要先停隧道）。
+pub(crate) fn is_current_server(server_id: &str) -> bool {
+    crate::store::global()
+        .and_then(|store| crate::control_plane::servers::active_node_of_server(store, server_id))
+        .is_some()
+}
+
+/// `my_server_list` 成功后的一次收敛：列表里缺失的 owned 节点逐个确认一次。
+///
+/// 只有「销毁请求超时/断网、控制面其实已经删了」才会出现这种节点：镜像行被列表
+/// 对齐清掉，节点却还留在连接页，用户没有任何入口能删。正常情况下没有这类节点，
+/// 零额外请求；这里也不做定时轮询。
+pub(crate) async fn reconcile_orphan_owned_nodes(
+    services: Arc<dyn VpnToolServices>,
+    listed: &[MyServer],
+) {
+    let Some(store) = crate::store::global() else {
+        return;
+    };
+    let orphans = {
+        let conn = store.conn();
+        let ids: Vec<String> = listed.iter().map(|server| server.server_id.clone()).collect();
+        crate::control_plane::servers::orphan_owned_nodes(&conn, &ids)
+    };
+    if orphans.is_empty() {
+        return;
+    }
+    let stop_services = Arc::clone(&services);
+    let recheck_services = Arc::clone(&services);
+    reconcile_orphans_with(
+        orphans,
+        |server_id: String| async move { crate::control_plane::servers::get(&server_id).await },
+        move |server_id: &str| {
+            // 确认「服务器确实没了」之后、删节点之前重读：这 1–2 秒里用户可能切走
+            // 或刚连上这个残留节点。
+            let services = Arc::clone(&recheck_services);
+            let server_id = server_id.to_string();
+            async move {
+                let live = runtime_state_of(services.as_ref())
+                    .await
+                    .as_deref()
+                    .is_some_and(state_is_live);
+                (is_current_server(&server_id), live)
+            }
+        },
+        move || {
+            let services = Arc::clone(&stop_services);
+            async move {
+                if let Err(error) = services.runtime_stop(false).await {
+                    log::warn!("服务器已销毁，停止运行时失败：{error}");
+                }
+            }
+        },
+        |orphan| {
+            if !crate::control_plane::servers::forget_gone_owned_node(store, orphan) {
+                log::warn!("清理残留节点失败 node={}", orphan.node_id);
+            }
+        },
+    )
+    .await;
+}
+
+/// 收敛主体：`fetch` / `recheck` / `stop` / `remove` 由调用方注入，测试不碰网络、
+/// 运行时与库。`recheck` 在确认服务器没了**之后**才调用，返回
+/// `(是否仍是当前节点, 运行时是否在跑)`。
+async fn reconcile_orphans_with<F, Fut, C, CFut, S, SF, R>(
+    orphans: Vec<crate::control_plane::servers::OrphanOwnedNode>,
+    fetch: F,
+    recheck: C,
+    stop: S,
+    remove: R,
+) -> usize
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<MyServer, CpError>>,
+    C: Fn(&str) -> CFut,
+    CFut: Future<Output = (bool, bool)>,
+    S: Fn() -> SF,
+    SF: Future<Output = ()>,
+    R: Fn(&crate::control_plane::servers::OrphanOwnedNode),
+{
+    let mut removed = 0;
+    for orphan in &orphans {
+        let result = fetch(orphan.server_id.clone()).await;
+        // 还活着 / 网络失败：保留——不是「机器没了」。
+        if !crate::control_plane::servers::server_is_gone(&result) {
+            continue;
+        }
+        let (is_current, runtime_live) = recheck(&orphan.server_id).await;
+        if is_current && runtime_live {
+            stop().await;
+        }
+        remove(orphan);
+        removed += 1;
+    }
+    removed
+}
+
 /// `starting` / `restarting` 也算在跑：`runtime_stop` 在启动窗口里会 bump epoch
 /// 取代在途启动（`tools/services.rs`），不把这两个算进来，销毁或删节点就会漏掉
 /// 「隧道马上要起来、`current_node_id` 却已是 NULL」的原症状。
@@ -442,5 +540,165 @@ mod tests {
             activate_config_with_current(&conn, None);
             assert_eq!(current_owned_server_in(&conn), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::reconcile_orphans_with;
+    use crate::control_plane::error::CpError;
+    use crate::control_plane::servers::{MyServer, OrphanOwnedNode};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    fn orphan() -> OrphanOwnedNode {
+        OrphanOwnedNode {
+            node_id: "nd_1".into(),
+            server_id: "srv_1".into(),
+            password_ref: "node:nd_1".into(),
+        }
+    }
+
+    fn server(state: &str) -> MyServer {
+        serde_json::from_value(json!({
+            "server_id": "srv_1",
+            "name": "东京",
+            "region": "sgp1",
+            "plan": "s-1vcpu-1gb",
+            "state": state,
+            "created_at": "2026-11-19T08:00:00Z",
+            "hourly_usd": 0.0,
+            "monthly_usd": 6.0,
+            "daily_price_cents": 20,
+            "transfer_gib": 0,
+            "billing_state": "active",
+        }))
+        .unwrap()
+    }
+
+    fn events() -> Arc<Mutex<Vec<&'static str>>> {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    /// 列表里确认已销毁：删掉残留节点。
+    #[tokio::test]
+    async fn a_destroyed_server_removes_the_orphan_node() {
+        let log = events();
+        let log_remove = Arc::clone(&log);
+        let removed = reconcile_orphans_with(
+            vec![orphan()],
+            |_server_id: String| async { Ok(server("destroyed")) },
+            |_server_id: &str| async { (false, true) },
+            || async {},
+            move |_orphan| log_remove.lock().unwrap().push("remove"),
+        )
+        .await;
+        assert_eq!(removed, 1);
+        assert_eq!(*log.lock().unwrap(), vec!["remove"]);
+    }
+
+    /// 详情 404：同样按「已不存在」处理。
+    #[tokio::test]
+    async fn a_not_found_server_removes_the_orphan_node() {
+        let removed = reconcile_orphans_with(
+            vec![orphan()],
+            |_server_id: String| async {
+                Err(CpError::new("NOT_FOUND", "找不到这台服务器", false, json!({})))
+            },
+            |_server_id: &str| async { (false, true) },
+            || async {},
+            |_orphan| {},
+        )
+        .await;
+        assert_eq!(removed, 1);
+    }
+
+    /// 网络失败 / 服务器还活着：保留，等下一次列表。
+    #[tokio::test]
+    async fn an_uncertain_or_live_server_keeps_the_node() {
+        let removed = reconcile_orphans_with(
+            vec![orphan()],
+            |_server_id: String| async {
+                Err(CpError::new(
+                    "UPSTREAM_ERROR",
+                    "断网",
+                    true,
+                    json!({ "reason": "provider_unavailable" }),
+                ))
+            },
+            |_server_id: &str| async { panic!("没确认没了就不该重读") },
+            || async {},
+            |_orphan| panic!("网络失败时不能删"),
+        )
+        .await;
+        assert_eq!(removed, 0);
+
+        let removed = reconcile_orphans_with(
+            vec![orphan()],
+            |_server_id: String| async { Ok(server("active")) },
+            |_server_id: &str| async { panic!("服务器还活着时不该重读") },
+            || async {},
+            |_orphan| panic!("服务器还活着时不能删"),
+        )
+        .await;
+        assert_eq!(removed, 0);
+    }
+
+    /// 确认没了、且此刻仍是当前节点、运行时在跑：先停运行时，再删节点。
+    #[tokio::test]
+    async fn a_current_orphan_stops_before_it_is_removed() {
+        let log = events();
+        let log_stop = Arc::clone(&log);
+        let log_remove = Arc::clone(&log);
+        let removed = reconcile_orphans_with(
+            vec![orphan()],
+            |_server_id: String| async { Ok(server("destroyed")) },
+            |_server_id: &str| async { (true, true) },
+            move || {
+                let log = Arc::clone(&log_stop);
+                async move {
+                    log.lock().unwrap().push("stop");
+                }
+            },
+            move |_orphan| log_remove.lock().unwrap().push("remove"),
+        )
+        .await;
+        assert_eq!(removed, 1);
+        assert_eq!(*log.lock().unwrap(), vec!["stop", "remove"]);
+    }
+
+    /// 运行时没在跑：不停，只删节点。
+    #[tokio::test]
+    async fn an_idle_runtime_does_not_stop_for_an_orphan() {
+        let log = events();
+        let log_remove = Arc::clone(&log);
+        let removed = reconcile_orphans_with(
+            vec![orphan()],
+            |_server_id: String| async { Ok(server("destroyed")) },
+            |_server_id: &str| async { (true, false) },
+            || async { panic!("运行时没在跑时不该调 stop") },
+            move |_orphan| log_remove.lock().unwrap().push("remove"),
+        )
+        .await;
+        assert_eq!(removed, 1);
+        assert_eq!(*log.lock().unwrap(), vec!["remove"]);
+    }
+
+    /// 请求期间用户切走了节点：确认之后重读不再是当前节点 → 不停，但仍删。
+    /// 把重读挪到请求之前（或用请求前的快照），这条测试就会失败。
+    #[tokio::test]
+    async fn a_switch_during_the_check_keeps_the_tunnel_but_still_removes_the_node() {
+        let log = events();
+        let log_remove = Arc::clone(&log);
+        let removed = reconcile_orphans_with(
+            vec![orphan()],
+            |_server_id: String| async { Ok(server("destroyed")) },
+            |_server_id: &str| async { (false, true) },
+            || async { panic!("已经切走了，不该停隧道") },
+            move |_orphan| log_remove.lock().unwrap().push("remove"),
+        )
+        .await;
+        assert_eq!(removed, 1);
+        assert_eq!(*log.lock().unwrap(), vec!["remove"]);
     }
 }

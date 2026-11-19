@@ -342,10 +342,16 @@ pub async fn my_server_catalog(
 // `control_plane::{auth,servers,credentials}`，AI 工具不经过这里。
 
 #[tauri::command]
-pub async fn my_server_list() -> Result<Value, Value> {
+pub async fn my_server_list(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
     match crate::control_plane::servers::list().await {
         Ok(servers) => {
             log::debug!("我的服务器：列表成功 count={}", servers.len());
+            // 列表对齐后顺手收敛「服务器没了、节点还在」的残留（正常情况下零请求）。
+            super::server_watch::reconcile_orphan_owned_nodes(
+                Arc::clone(&state.services),
+                &servers,
+            )
+            .await;
             Ok(json!({ "servers": servers }))
         }
         Err(error) => {
@@ -635,25 +641,90 @@ pub async fn my_server_destroy(
     server_id: String,
     confirm: bool,
 ) -> Result<Value, Value> {
-    // 销毁成功会删掉本地节点行、把 `current_node_id` 置 NULL，之后判断不出来；
-    // 所以先记下这台服务器此刻是不是正在使用的节点。
-    let connected_node = crate::store::global()
-        .and_then(|store| crate::control_plane::servers::active_node_of_server(store, &server_id));
-
-    match crate::control_plane::servers::destroy(&server_id, confirm).await {
-        Ok(server) => {
-            // 远端机器没了，本地 sing-box 不会自己断，会继续把流量发给不存在的节点。
-            if connected_node.is_some()
-                && super::server_watch::runtime_is_live(state.inner()).await
-            {
-                if let Err(error) = state.services.runtime_stop(false).await {
-                    log::warn!("销毁正在使用的服务器后停止运行时失败：{error}");
+    let stop_services = Arc::clone(&state.services);
+    match destroy_server_with(
+        &server_id,
+        // 没确认就什么都没发生：不能因为一次误调先把隧道停了。
+        || confirm && super::server_watch::is_current_server(&server_id),
+        move || {
+            let services = Arc::clone(&stop_services);
+            async move {
+                match services.runtime_stop(false).await {
+                    Ok(_) => true,
+                    Err(error) => {
+                        log::warn!("停止运行时失败：{error}");
+                        false
+                    }
                 }
             }
-            Ok(json!(server))
-        }
+        },
+        || async { crate::control_plane::servers::destroy(&server_id, confirm).await },
+    )
+    .await
+    {
+        Ok(server) => Ok(json!(server)),
         Err(error) => Err(error.envelope()),
     }
+}
+
+/// 销毁编排：当前节点先停运行时再发请求；没停成就在销毁成功后补停一次。
+///
+/// 先停是因为销毁请求要走网络：控制面同步删 droplet，隧道随机器一起死，请求会被
+/// 自己删掉的隧道掐断。停失败只 warn，继续销毁（用户点销毁已接受断线）。
+///
+/// `stop` 回报的是**真的停成了**（`runtime_stop` 的 `Ok`），不是「试过了」：
+/// 销毁成功后节点行已删、`current_node_id` 已被外键置 NULL，那时再查只会得到
+/// 「不是当前节点」，所以必须用请求前的 `was_current` 决定要不要补停。
+pub(crate) async fn destroy_server_with<C, S, SF, D, DFut>(
+    server_id: &str,
+    is_current: C,
+    stop: S,
+    destroy: D,
+) -> Result<crate::control_plane::servers::MyServer, crate::control_plane::error::CpError>
+where
+    C: Fn() -> bool,
+    S: Fn() -> SF,
+    SF: std::future::Future<Output = bool>,
+    D: Fn() -> DFut,
+    DFut: std::future::Future<
+        Output = Result<crate::control_plane::servers::MyServer, crate::control_plane::error::CpError>,
+    >,
+{
+    let was_current = is_current();
+    let mut stopped = false;
+    if was_current {
+        stopped = stop().await;
+    }
+    match destroy().await {
+        Ok(server) => {
+            // pre-stop 没成功（运行期操作锁超时等）而销毁成功：节点已删、隧道还活着，
+            // 正是 2.45.1 要消灭的症状，补停一次（失败仍只 warn）。
+            if was_current && !stopped {
+                log::warn!("销毁前停止运行时没成功，补停一次 server={server_id}");
+                stop().await;
+            }
+            Ok(server)
+        }
+        Err(error) => {
+            // 结果不确定：远端可能已经删了，隧道不断用户连重试都做不到。
+            if !stopped && is_current() && destroy_outcome_uncertain(&error) {
+                log::warn!("销毁结果不确定，先停止运行时 server={server_id}：{}", error.message);
+                stop().await;
+            }
+            Err(error)
+        }
+    }
+}
+
+/// 没有拿到结构化响应（传输层失败/超时）：请求可能已经在服务端生效。
+/// 服务端明确回的 4xx/5xx 不带 `transport` 标记，不算。
+fn destroy_outcome_uncertain(error: &crate::control_plane::error::CpError) -> bool {
+    error.code == "TIMEOUT"
+        || error
+            .details
+            .get("transport")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -3070,5 +3141,219 @@ mod node_forget_tests {
             None,
             "删节点后 current_node_id 由外键置 NULL"
         );
+    }
+}
+
+#[cfg(test)]
+mod destroy_flow_tests {
+    use super::destroy_server_with;
+    use crate::control_plane::error::CpError;
+    use crate::control_plane::servers::MyServer;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    fn server() -> MyServer {
+        serde_json::from_value(json!({
+            "server_id": "srv_1",
+            "name": "东京",
+            "region": "sgp1",
+            "plan": "s-1vcpu-1gb",
+            "state": "destroying",
+            "created_at": "2026-11-19T08:00:00Z",
+            "hourly_usd": 0.0,
+            "monthly_usd": 6.0,
+            "daily_price_cents": 20,
+            "transfer_gib": 0,
+            "billing_state": "active",
+        }))
+        .unwrap()
+    }
+
+    fn events() -> Arc<Mutex<Vec<&'static str>>> {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    fn recorder(
+        log: &Arc<Mutex<Vec<&'static str>>>,
+        label: &'static str,
+    ) -> impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
+        let log = Arc::clone(log);
+        move || {
+            let log = Arc::clone(&log);
+            Box::pin(async move {
+                log.lock().unwrap().push(label);
+                true
+            })
+        }
+    }
+
+    /// 模拟「停运行时失败」（运行期操作锁超时等），仍然记一次尝试。
+    fn failing_stop(
+        log: &Arc<Mutex<Vec<&'static str>>>,
+        label: &'static str,
+    ) -> impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
+        let log = Arc::clone(log);
+        move || {
+            let log = Arc::clone(&log);
+            Box::pin(async move {
+                log.lock().unwrap().push(label);
+                false
+            })
+        }
+    }
+
+    /// 目标不是当前节点：销毁前不停，失败（明确 4xx）也不停。
+    #[tokio::test]
+    async fn a_server_that_is_not_current_never_stops_the_tunnel() {
+        let log = events();
+        let log_destroy = Arc::clone(&log);
+        let result = destroy_server_with(
+            "srv_1",
+            || false,
+            recorder(&log, "stop"),
+            move || {
+                let log = Arc::clone(&log_destroy);
+                async move {
+                    log.lock().unwrap().push("destroy");
+                    Err(CpError::new(
+                        "PRECONDITION_FAILED",
+                        "当前状态不允许这个操作",
+                        false,
+                        json!({ "reason": "server_busy" }),
+                    ))
+                }
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code, "PRECONDITION_FAILED");
+        assert_eq!(*log.lock().unwrap(), vec!["destroy"]);
+    }
+
+    /// 目标是当前节点：先停运行时，再发销毁请求。
+    #[tokio::test]
+    async fn a_current_node_stops_before_the_destroy_request() {
+        let log = events();
+        let log_destroy = Arc::clone(&log);
+        let result = destroy_server_with(
+            "srv_1",
+            || true,
+            recorder(&log, "stop"),
+            move || {
+                let log = Arc::clone(&log_destroy);
+                async move {
+                    log.lock().unwrap().push("destroy");
+                    Ok(server())
+                }
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(*log.lock().unwrap(), vec!["stop", "destroy"]);
+    }
+
+    /// 销毁超时且此刻仍是当前节点：结果不确定，再停一次。
+    #[tokio::test]
+    async fn an_uncertain_destroy_stops_the_tunnel() {
+        let log = events();
+        let current = Arc::new(AtomicBool::new(false));
+        let current_in_destroy = Arc::clone(&current);
+        let current_in_check = Arc::clone(&current);
+        let log_destroy = Arc::clone(&log);
+        let result = destroy_server_with(
+            "srv_1",
+            move || current_in_check.load(Ordering::SeqCst),
+            recorder(&log, "stop"),
+            move || {
+                let log = Arc::clone(&log_destroy);
+                let current = Arc::clone(&current_in_destroy);
+                async move {
+                    log.lock().unwrap().push("destroy");
+                    // 请求期间用户正好连上了这台（或它一直是当前节点）。
+                    current.store(true, Ordering::SeqCst);
+                    Err(CpError::new("TIMEOUT", "连接服务器服务超时", true, json!({})))
+                }
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code, "TIMEOUT");
+        assert_eq!(*log.lock().unwrap(), vec!["destroy", "stop"]);
+    }
+
+    /// 已经先停过：超时不再重复停。
+    #[tokio::test]
+    async fn an_already_stopped_tunnel_is_not_stopped_twice() {
+        let log = events();
+        let log_destroy = Arc::clone(&log);
+        let result = destroy_server_with(
+            "srv_1",
+            || true,
+            recorder(&log, "stop"),
+            move || {
+                let log = Arc::clone(&log_destroy);
+                async move {
+                    log.lock().unwrap().push("destroy");
+                    Err(CpError::new("TIMEOUT", "连接服务器服务超时", true, json!({})))
+                }
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code, "TIMEOUT");
+        assert_eq!(*log.lock().unwrap(), vec!["stop", "destroy"]);
+    }
+
+    /// 先停没成功（运行期操作锁超时等）但销毁成功：补停一次，别留下
+    /// 「节点已删、隧道还活着」的原症状。
+    #[tokio::test]
+    async fn a_failed_pre_stop_is_retried_after_a_successful_destroy() {
+        let log = events();
+        let log_destroy = Arc::clone(&log);
+        let result = destroy_server_with(
+            "srv_1",
+            || true,
+            failing_stop(&log, "stop"),
+            move || {
+                let log = Arc::clone(&log_destroy);
+                async move {
+                    log.lock().unwrap().push("destroy");
+                    Ok(server())
+                }
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(*log.lock().unwrap(), vec!["stop", "destroy", "stop"]);
+    }
+
+    /// 明确的 4xx（结果确定）即使请求期间用户连上了这台，也不额外停。
+    #[tokio::test]
+    async fn a_definite_error_after_connecting_mid_flight_does_not_stop() {
+        let log = events();
+        let current = Arc::new(AtomicBool::new(false));
+        let current_in_destroy = Arc::clone(&current);
+        let current_in_check = Arc::clone(&current);
+        let log_destroy = Arc::clone(&log);
+        let result = destroy_server_with(
+            "srv_1",
+            move || current_in_check.load(Ordering::SeqCst),
+            recorder(&log, "stop"),
+            move || {
+                let log = Arc::clone(&log_destroy);
+                let current = Arc::clone(&current_in_destroy);
+                async move {
+                    log.lock().unwrap().push("destroy");
+                    current.store(true, Ordering::SeqCst);
+                    Err(CpError::new(
+                        "PRECONDITION_FAILED",
+                        "当前状态不允许这个操作",
+                        false,
+                        json!({ "reason": "server_busy" }),
+                    ))
+                }
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code, "PRECONDITION_FAILED");
+        assert_eq!(*log.lock().unwrap(), vec!["destroy"]);
     }
 }

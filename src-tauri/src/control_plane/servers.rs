@@ -55,6 +55,9 @@ where
 /// 宽限期：`grace_ends_at` 的派生口径（§4.6），控制面不给时由 Host 计算。
 const GRACE_DAYS: i64 = 7;
 
+/// 销毁要同步调 DigitalOcean `deleteDroplet`，本身就要几秒；只有这一个请求放宽到 30 秒。
+const DESTROY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MyServerFailure {
     /// 失败发生在哪个阶段；旧镜像没有这个字段时按 active 兼容。
@@ -566,6 +569,69 @@ pub async fn list() -> Result<Vec<MyServer>, CpError> {
     Ok(servers)
 }
 
+/// 列表里缺失的 owned 节点：`source_key` 不在本次列表里，可能服务器已经没了。
+pub(crate) struct OrphanOwnedNode {
+    pub node_id: String,
+    pub server_id: String,
+    pub password_ref: String,
+}
+
+/// 本地所有 `source = 'owned'` 且 `source_key` 非空、但不在本次列表里的节点。
+///
+/// 正常情况下不会有：只有「销毁请求超时/断网、控制面其实已经删了」才会留下。
+pub(crate) fn orphan_owned_nodes(
+    conn: &rusqlite::Connection,
+    listed: &[String],
+) -> Vec<OrphanOwnedNode> {
+    let Ok(nodes) =
+        crate::store::configs::list_nodes_by_source(conn, crate::store::configs::SOURCE_OWNED)
+    else {
+        return Vec::new();
+    };
+    nodes
+        .into_iter()
+        .filter(|node| !node.source_key.is_empty())
+        .filter(|node| !listed.iter().any(|id| id == &node.source_key))
+        .map(|node| OrphanOwnedNode {
+            node_id: node.id,
+            server_id: node.source_key,
+            password_ref: node.password_ref,
+        })
+        .collect()
+}
+
+/// 详情确认这台服务器确实没了：`destroyed`，或控制面明确 404（已不存在）。
+/// 网络失败不算——可能只是列表口径问题，节点要保留。
+pub(crate) fn server_is_gone(result: &Result<MyServer, CpError>) -> bool {
+    match result {
+        Ok(server) => server.state == "destroyed",
+        Err(error) => error.code == "NOT_FOUND",
+    }
+}
+
+/// 删掉一个确认没了的 owned 节点：密码 + 节点行（外键级联清配置绑定与
+/// `current_node_id`），成功则发 `node-list-changed`（`node_deleted`）。
+pub(crate) fn forget_gone_owned_node(
+    store: &crate::store::Store,
+    orphan: &OrphanOwnedNode,
+) -> bool {
+    let _ = crate::secrets::delete_secret(&orphan.password_ref);
+    let removed = {
+        let conn = store.conn();
+        crate::store::configs::delete_node(&conn, &orphan.node_id).unwrap_or(false)
+    };
+    if removed {
+        // 连接释放后再发事件：`emit_node_list_changed` 会再拿同一把库锁。
+        crate::seed::emit_node_list_changed(
+            store,
+            "node_deleted",
+            None,
+            std::slice::from_ref(&orphan.node_id),
+        );
+    }
+    removed
+}
+
 /// 用户忽略「余额不足停机」留下的墓碑（`POST /v1/servers/{id}/dismiss`，204）。
 pub async fn dismiss(server_id: &str) -> Result<(), CpError> {
     let client = ControlPlane::new()?;
@@ -799,10 +865,11 @@ pub async fn destroy(server_id: &str, confirm: bool) -> Result<MyServer, CpError
         Err(_) => local_server(server_id),
     };
     client
-        .post(
+        .post_with_timeout(
             &format!("/v1/servers/{server_id}/destroy"),
             Some(&json!({ "confirm": true })),
             Some(&new_idempotency_key()),
+            DESTROY_TIMEOUT,
         )
         .await?;
 
@@ -1964,5 +2031,65 @@ mod tests {
         assert_eq!(after.node_id.as_deref(), Some("nd_abc"));
         let returned = serde_json::to_value(&after).unwrap();
         assert_eq!(returned["local_node_id"], json!("nd_local"));
+    }
+}
+
+#[cfg(test)]
+mod orphan_tests {
+    use super::*;
+
+    fn store_with_nodes() -> crate::store::Store {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn();
+            for (id, server_id) in [("nd_a", "srv_1"), ("nd_b", "srv_2")] {
+                crate::store::configs::upsert_node(
+                    &conn,
+                    &crate::store::NewNode {
+                        id,
+                        name: "Tokyo",
+                        server: "203.0.113.10",
+                        port: 20343,
+                        method: "aes-256-gcm",
+                        password_ref: &format!("node:{id}"),
+                        source: crate::store::configs::SOURCE_OWNED,
+                        source_key: server_id,
+                    },
+                )
+                .unwrap();
+            }
+        }
+        store
+    }
+
+    /// 只在列表里缺失的 owned 节点才是残留；列表里有就不管。
+    #[test]
+    fn only_owned_nodes_missing_from_the_list_are_orphans() {
+        let store = store_with_nodes();
+        let conn = store.conn();
+        let orphans = orphan_owned_nodes(&conn, &["srv_1".to_string()]);
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].server_id, "srv_2");
+        assert!(orphan_owned_nodes(&conn, &["srv_1".into(), "srv_2".into()]).is_empty());
+    }
+
+    /// 确认没了的节点：密码与节点行一起删。
+    #[test]
+    fn forgetting_a_gone_owned_node_deletes_its_password_and_row() {
+        crate::test_support::install_test_secrets();
+        let store = store_with_nodes();
+        crate::secrets::set_secret("node:nd_a", "pw-a").unwrap();
+        let orphan = OrphanOwnedNode {
+            node_id: "nd_a".into(),
+            server_id: "srv_1".into(),
+            password_ref: "node:nd_a".into(),
+        };
+        assert!(forget_gone_owned_node(&store, &orphan));
+
+        let conn = store.conn();
+        assert!(crate::store::configs::get_node(&conn, "nd_a")
+            .unwrap()
+            .is_none());
+        assert_eq!(crate::secrets::get_secret("node:nd_a").unwrap(), None);
     }
 }

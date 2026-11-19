@@ -123,6 +123,18 @@ pub(crate) fn warn_transport(operation: &str, method: &str, path: &str, error: &
     );
 }
 
+/// 传输层失败：**没拿到任何 HTTP 响应**，请求可能已经在服务端生效。
+///
+/// `details.transport = true` 让调用方（如销毁）区分「结果不确定」与
+/// 「服务端明确回了错误」；结构化响应走的 `decode` 不带这个标记。
+fn transport_error(error: reqwest::Error) -> CpError {
+    let mut cp = CpError::network(error.is_timeout());
+    if let Some(object) = cp.details.as_object_mut() {
+        object.insert("transport".into(), Value::Bool(true));
+    }
+    cp
+}
+
 pub struct ControlPlane {
     base_url: String,
     http: reqwest::Client,
@@ -144,11 +156,24 @@ impl ControlPlane {
         body: Option<&Value>,
         idempotency_key: Option<&str>,
     ) -> Result<Value, CpError> {
+        self.request_with_timeout(method, path, body, idempotency_key, None)
+            .await
+    }
+
+    /// 同 `request`，但只给**这一次**请求换超时（`None` = 用客户端的全局超时）。
+    pub async fn request_with_timeout(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        idempotency_key: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<Value, CpError> {
         let method_label = method.as_str().to_string();
         log::debug!("控制面请求开始 method={method_label} path={}", log_path(path));
         let token = auth::ensure_access(&self.base_url, &self.http, None).await?;
         let (status, text) = self
-            .send(method.clone(), path, body, idempotency_key, &token)
+            .send(method.clone(), path, body, idempotency_key, &token, timeout)
             .await?;
         if status != 401 {
             return decode_logged(&method_label, path, status, &text);
@@ -161,7 +186,7 @@ impl ControlPlane {
         );
         let refreshed = auth::ensure_access(&self.base_url, &self.http, Some(&token)).await?;
         let (status, text) = self
-            .send(method, path, body, idempotency_key, &refreshed)
+            .send(method, path, body, idempotency_key, &refreshed, timeout)
             .await?;
         decode_logged(&method_label, path, status, &text)
     }
@@ -179,6 +204,18 @@ impl ControlPlane {
         self.request(Method::POST, path, body, idempotency_key).await
     }
 
+    /// 只给这一个 POST 换超时：销毁要同步等 `deleteDroplet`，10 秒不够。
+    pub async fn post_with_timeout(
+        &self,
+        path: &str,
+        body: Option<&Value>,
+        idempotency_key: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Value, CpError> {
+        self.request_with_timeout(Method::POST, path, body, idempotency_key, Some(timeout))
+            .await
+    }
+
     pub async fn patch(&self, path: &str, body: Option<&Value>) -> Result<Value, CpError> {
         self.request(Method::PATCH, path, body, None).await
     }
@@ -190,6 +227,7 @@ impl ControlPlane {
         body: Option<&Value>,
         idempotency_key: Option<&str>,
         token: &str,
+        timeout: Option<Duration>,
     ) -> Result<(u16, String), CpError> {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         let method_label = method.as_str().to_string();
@@ -199,6 +237,9 @@ impl ControlPlane {
             .request(method, url)
             .bearer_auth(token)
             .header(reqwest::header::ACCEPT, "application/json");
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
         if let Some(key) = idempotency_key {
             request = request.header("Idempotency-Key", key);
         }
@@ -211,7 +252,7 @@ impl ControlPlane {
             .await
             .map_err(|error| {
                 warn_transport("api", &method_label, path, &error);
-                CpError::network(error.is_timeout())
+                transport_error(error)
             })?;
         if let Some(length) = response.content_length() {
             if length as usize > MAX_RESPONSE_BYTES {
@@ -227,7 +268,7 @@ impl ControlPlane {
         let bytes = response
             .bytes()
             .await
-            .map_err(|error| CpError::network(error.is_timeout()))?;
+            .map_err(|error| transport_error(error))?;
         if bytes.len() > MAX_RESPONSE_BYTES {
             return Err(CpError::invalid_response("控制面响应过大"));
         }
