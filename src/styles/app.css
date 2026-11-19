@@ -5857,6 +5857,36 @@ details[open] > .settings-fold__summary::before {
   row-gap: 24px;
 }
 
+/* 「问 AI」：常态下划线（用户原话「带下划线的问 AI」），12/500/--ink-3。
+   命中区与 chip 同口径（`-12px -4px`）：8px 间距、24px 行距下两轴都不重叠。 */
+.stage-quick__ask {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.stage-quick__ask:hover,
+.stage-quick__ask:focus-visible {
+  color: var(--link);
+}
+
+.stage-quick__ask::after {
+  content: "";
+  position: absolute;
+  inset: -12px -4px;
+}
+
 /* 两个弱底 chip：形状说明「这是控件」，箭头说明「点开有得选」。 */
 .stage-quick__chip {
   position: relative;

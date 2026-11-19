@@ -66,6 +66,8 @@ interface Props {
   onSetRoutingMode?: (
     mode: "direct" | "proxy_all",
   ) => Promise<{ ok: boolean; message?: string }>;
+  /** 接管方式与流量范围的「问 AI」：交给 App 展开右栏并发送固定问题。 */
+  onAskAi?: (prompt: string) => void;
 }
 
 const NO_TRAFFIC_ACTION =
@@ -102,6 +104,7 @@ export function ConnectionStage({
   routingMode = null,
   onSetConnectMode,
   onSetRoutingMode,
+  onAskAi,
 }: Props) {
   const [now, setNow] = useState(() => Date.now());
   const [switchError, setSwitchError] = useState<string | null>(null);
@@ -649,6 +652,7 @@ export function ConnectionStage({
             onSetRoutingMode={onSetRoutingMode}
             onReportProblem={failed || noTraffic ? undefined : onReportProblem}
             reportBusy={reportBusy}
+            onAskAi={onAskAi}
           />
         ) : null}
 

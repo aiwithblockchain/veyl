@@ -1803,6 +1803,14 @@ export default function App() {
     setComposerFocusSignal((value) => value + 1);
   };
 
+  // 连接页两个 chip 的「问 AI」：先展开右栏再发固定问题；AI 未配置时 handleAskAi 会提示并打开设置。
+  const handleAskAiFromStage = (prompt: string) => {
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
+    handleAskAi(prompt);
+  };
+
   // 设置页「咨询 AI」：并排展开助手，并立刻发一条当前设置总览。
   const handleConsultAi = (prompt: string) => {
     panelOpenRef.current = true;
@@ -2476,6 +2484,7 @@ export default function App() {
           routingMode={activeRoutingMode}
           onSetConnectMode={handleSetConnectMode}
           onSetRoutingMode={handleSetRoutingMode}
+          onAskAi={handleAskAiFromStage}
         />
       ) : (
         <StartChoice

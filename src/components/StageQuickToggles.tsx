@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { ConfigConnectMode, ConfigRouteMode } from "../agent/protocol";
+import { modeScopePrompt } from "../ai/advancedPrompts";
 
 export interface ModeSwitchResult {
   ok: boolean;
@@ -27,6 +28,8 @@ interface Props {
   onSetRoutingMode: (mode: "direct" | "proxy_all") => Promise<{ ok: boolean; message?: string }>;
   onReportProblem?: () => void;
   reportBusy?: boolean;
+  /** 两个 chip 的「问 AI」：把当前接管方式与流量范围交给 AI 解释。 */
+  onAskAi?: (prompt: string) => void;
 }
 
 type Layer = "mode" | "scope";
@@ -72,6 +75,7 @@ export function StageQuickToggles({
   onSetRoutingMode,
   onReportProblem,
   reportBusy = false,
+  onAskAi,
 }: Props) {
   const [openLayer, setOpenLayer] = useState<Layer | null>(null);
   const [pending, setPending] = useState<ConfigConnectMode | null>(null);
@@ -319,6 +323,15 @@ export function StageQuickToggles({
             >
               {scopeLabel(routingMode)}
               <Chevron open={openLayer === "scope"} />
+            </button>
+          ) : null}
+          {scopeSwitchable && onAskAi ? (
+            <button
+              type="button"
+              className="stage-quick__ask"
+              onClick={() => onAskAi(modeScopePrompt(connectMode, routingMode))}
+            >
+              问 AI
             </button>
           ) : null}
         </div>
