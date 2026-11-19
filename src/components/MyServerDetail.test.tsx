@@ -31,7 +31,6 @@ function server(over: Partial<MyServer> = {}): MyServer {
 function renderDetail(
   over: Partial<MyServer> = {},
   onGone = vi.fn(),
-  onUseServer: (server: MyServer) => void | Promise<void> = vi.fn(),
   onAiLocate?: (serverId: string) => void,
   onTopUp?: () => void,
 ) {
@@ -47,13 +46,12 @@ function renderDetail(
       onAiLocate={onAiLocate}
       onTopUp={onTopUp}
       onCreateAnother={onCreateAnother}
-      onUseServer={onUseServer}
       onChanged={() => {}}
       onRebuilt={() => {}}
       onGone={onGone}
     />,
   );
-  return { destroy, onCreateAnother, onUseServer, onGone, unmount: view.unmount };
+  return { destroy, onCreateAnother, onGone, unmount: view.unmount };
 }
 
 afterEach(() => {
@@ -210,7 +208,6 @@ describe("服务器详情", () => {
         },
       },
       vi.fn(),
-      vi.fn(),
       undefined,
       onTopUp,
     );
@@ -262,7 +259,6 @@ describe("服务器详情", () => {
       bridge: {} as AgentBridge,
       regionLabel: "新加坡 1",
       onCreateAnother: vi.fn(),
-      onUseServer: vi.fn(),
       onChanged: () => {},
       onRebuilt: () => {},
       onGone: vi.fn(),
@@ -320,7 +316,6 @@ describe("服务器详情", () => {
       bridge: {} as AgentBridge,
       regionLabel: "新加坡 1",
       onCreateAnother: vi.fn(),
-      onUseServer: vi.fn(),
       onChanged: () => {},
       onRebuilt: () => {},
       onGone: vi.fn(),
@@ -463,19 +458,27 @@ describe("服务器详情", () => {
     expect(screen.queryByText(/共用额度|同账户/)).toBeNull();
   });
 
-  it("可用时主按钮去连接，不要求控制面 node_id，点击交回服务器", () => {
-    const { onUseServer } = renderDetail({ node_id: null, state: "healthy" });
-
-    fireEvent.click(screen.getByRole("button", { name: "去连接" }));
-    expect(onUseServer).toHaveBeenCalledWith(
-      expect.objectContaining({ server_id: "srv_1" }),
-    );
+  it("就绪详情页没有任何连接相关按钮：连接只在控制台", () => {
+    for (const state of ["healthy", "active"] as const) {
+      const view = renderDetail({ node_id: null, state });
+      expect(screen.queryByRole("button", { name: /连接|断开/ })).toBeNull();
+      const detail = document.querySelector(".myservers__detail");
+      expect(detail?.querySelectorAll(".btn--primary").length).toBe(0);
+      view.unmount();
+    }
   });
 
-  it("五态主按钮：就绪去连接、建机中没有、失败重建、失效重购；全文没有断开", () => {
+  it("active 的详情标题写「已开通」，不写「已在使用」", () => {
+    renderDetail({ state: "active" });
+
+    expect(screen.getByText("已开通")).toBeTruthy();
+    expect(screen.queryByText("已在使用")).toBeNull();
+  });
+
+  it("主按钮：建机中没有、失败重建、失效重购；全文没有断开", () => {
     const cases: Array<[MyServerState, string | null]> = [
-      ["healthy", "去连接"],
-      ["active", "去连接"],
+      ["healthy", null],
+      ["active", null],
       ["creating", null],
       ["booting", null],
       ["installing", null],
@@ -489,6 +492,7 @@ describe("服务器详情", () => {
       const view = renderDetail({ state });
       const detail = document.querySelector(".myservers__detail");
       expect(detail?.textContent).not.toContain("断开");
+      expect(screen.queryByRole("button", { name: /连接/ })).toBeNull();
       const primaries = detail?.querySelectorAll(".btn--primary") ?? [];
       expect(primaries.length).toBeLessThanOrEqual(1);
       if (label) {
@@ -499,29 +503,6 @@ describe("服务器详情", () => {
       }
       view.unmount();
     }
-  });
-
-  it("取凭据在途时按钮禁用，连点只发一次", async () => {
-    let release: () => void = () => {};
-    const onUseServer = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          release = resolve;
-        }),
-    );
-    renderDetail({}, vi.fn(), onUseServer);
-    const button = screen.getByRole("button", { name: "去连接" });
-
-    fireEvent.click(button);
-    fireEvent.click(button);
-
-    expect(onUseServer).toHaveBeenCalledTimes(1);
-    expect((button as HTMLButtonElement).disabled).toBe(true);
-
-    await act(async () => {
-      release();
-    });
-    expect((button as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("卸载时清理销毁重试计时器", () => {
@@ -558,7 +539,6 @@ describe("服务器详情", () => {
         state: "error",
         failure: { stage: "installing", code: "install_failed", message: "装环境失败。", retryable: true },
       },
-      vi.fn(),
       vi.fn(),
       onAiLocate,
     );
@@ -598,7 +578,6 @@ describe("服务器重命名", () => {
           server={current}
           regionLabel="新加坡 1"
           onCreateAnother={vi.fn()}
-          onUseServer={vi.fn()}
           onChanged={() => {}}
           onRebuilt={() => {}}
           onGone={vi.fn()}

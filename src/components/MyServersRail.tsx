@@ -18,7 +18,7 @@ interface Props {
   compact?: boolean;
   /** 试用还有免费节点可用时的一行旁注；null/不给则不显示。 */
   trialHint?: string | null;
-  /** 旁注里的「去连接」：切到连接页。 */
+  /** 旁注里的「去控制台」：切到连接页。 */
   onGoConnect?: () => void;
   onSelect: (serverId: string) => void;
   onNew: () => void;
@@ -147,7 +147,7 @@ export function MyServersRail({
             disabled={disabled}
             onClick={onGoConnect}
           >
-            去连接
+            去控制台
           </button>
         ) : null}
       </p>

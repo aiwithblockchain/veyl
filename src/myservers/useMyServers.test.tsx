@@ -186,6 +186,172 @@ describe("开通中的轮询", () => {
   });
 });
 
+describe("详情请求失败时的降级", () => {
+  async function flush() {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  }
+
+  it("有列表快照时失败只在后台重试，不出错误、仍显示服务器", async () => {
+    vi.useFakeTimers();
+    const list = { current: [SERVER_A] };
+    const bridge = makeBridge(list);
+    const get = vi.mocked(bridge.myServerGet);
+    get.mockRejectedValue({ code: "NETWORK", message: "网络不可用" });
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await flush();
+
+    // 切换节点路径时详情读失败：列表快照顶上，不出现错误。
+    expect(view.result.current.selected?.server_id).toBe("srv_a");
+    expect(view.result.current.detailError).toBeNull();
+
+    const firstRound = get.mock.calls.length;
+    expect(firstRound).toBeGreaterThan(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(get.mock.calls.length).toBeGreaterThan(firstRound);
+    expect(view.result.current.detailError).toBeNull();
+
+    // 网络恢复后写回最新详情，重试停下。
+    get.mockResolvedValue({ ...SERVER_A, name: "东京 1（最新）" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(view.result.current.detailError).toBeNull();
+    expect(view.result.current.selected?.name).toBe("东京 1（最新）");
+
+    const settled = get.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(get.mock.calls.length).toBe(settled);
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("没有详情也没有列表快照时，连续失败约 10 秒才报错", async () => {
+    vi.useFakeTimers();
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    vi.mocked(bridge.myServerGet).mockRejectedValue({
+      code: "NETWORK",
+      message: "网络不可用",
+    });
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await flush();
+
+    act(() => {
+      view.result.current.select("srv_gone");
+    });
+    await flush();
+
+    expect(view.result.current.selected).toBeNull();
+    // 首次失败不报。
+    expect(view.result.current.detailError).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9000);
+    });
+    expect(view.result.current.detailError).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(view.result.current.detailError).toBe(
+      "这台服务器的详情暂时读不到。已有服务器和节点不受影响；稍后再试。",
+    );
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("错误出现后网络恢复，不用点重试也会自动清错", async () => {
+    vi.useFakeTimers();
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const get = vi.mocked(bridge.myServerGet);
+    get.mockRejectedValue({ code: "NETWORK", message: "网络不可用" });
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await flush();
+    act(() => {
+      view.result.current.select("srv_a");
+    });
+    await flush();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(view.result.current.detailError).not.toBeNull();
+
+    get.mockResolvedValue(SERVER_A);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+
+    expect(view.result.current.detailError).toBeNull();
+    expect(view.result.current.selected?.server_id).toBe("srv_a");
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("错误出现后重试成功，错误自动消失", async () => {
+    vi.useFakeTimers();
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const get = vi.mocked(bridge.myServerGet);
+    get.mockRejectedValue({ code: "NETWORK", message: "网络不可用" });
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await flush();
+    act(() => {
+      view.result.current.select("srv_a");
+    });
+    await flush();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(view.result.current.detailError).not.toBeNull();
+
+    get.mockResolvedValue(SERVER_A);
+    act(() => {
+      view.result.current.retryDetail();
+    });
+    await flush();
+
+    expect(view.result.current.detailError).toBeNull();
+    expect(view.result.current.detailRetrying).toBe(false);
+    expect(view.result.current.selected?.server_id).toBe("srv_a");
+    view.unmount();
+    vi.useRealTimers();
+  });
+  it("A 重试中切到 B：B 的重试按钮不显示重试中", async () => {
+    const list = { current: [SERVER_A, SERVER_B] };
+    const { bridge, result } = await mount(list);
+    await waitFor(() => expect(result.current.selected?.server_id).toBe("srv_a"));
+
+    // B 的详情请求一直不落地：重试态只能靠切换时复位清掉。
+    vi.mocked(bridge.myServerGet).mockImplementation(() => new Promise(() => {}));
+    act(() => {
+      result.current.retryDetail();
+    });
+    expect(result.current.detailRetrying).toBe(true);
+
+    act(() => {
+      result.current.select("srv_b");
+    });
+    expect(result.current.selected?.server_id).toBe("srv_b");
+    expect(result.current.detailRetrying).toBe(false);
+  });
+});
+
 describe("重命名同步", () => {
   it("用返回的服务器更新列表与详情，不二次拉取", async () => {
     const list = { current: [SERVER_A] };

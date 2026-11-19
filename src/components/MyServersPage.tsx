@@ -31,7 +31,6 @@ interface Props {
   onLogin: () => void;
   onRefreshAccount: () => void;
   onRetry: () => void;
-  onUseServer: (server: MyServer) => void;
   onChanged: () => void;
   /** 销毁后让 Host 收起详情并刷新列表。 */
   onGone: () => void;
@@ -46,7 +45,7 @@ interface Props {
     seedNodeCount: number;
     expiresAt: string | null;
   } | null;
-  /** 空态里的「去连接」：切到连接目的地。 */
+  /** 空态里的「去控制台」：切到连接目的地。 */
   onGoConnect: () => void;
   /** 已下单但还认不出新机器：不选中任何一台，只给一行提示。 */
   pendingServer?: boolean;
@@ -76,7 +75,6 @@ export function MyServersPage({
   onLogin,
   onRefreshAccount,
   onRetry,
-  onUseServer,
   onChanged,
   onGone,
   onRebuilt,
@@ -96,7 +94,7 @@ export function MyServersPage({
       )
     : null;
 
-  /** 空态旁注：只在没有自建服务器时出现，唯一可点的是「去连接」。 */
+  /** 空态旁注：只在没有自建服务器时出现，唯一可点的是「去控制台」。 */
   const trialNote = trialHint ? (
     <p className="myservers__trial-hint">
       {trialHint}
@@ -105,7 +103,7 @@ export function MyServersPage({
         className="myservers__trial-link"
         onClick={onGoConnect}
       >
-        去连接
+        去控制台
       </button>
     </p>
   ) : null;
@@ -128,8 +126,8 @@ export function MyServersPage({
       <div className="myservers">
         {detailError ? (
           <section className="myservers__detail-card" role="alert">
-            <p className="myservers__detail-title">连不上服务器。</p>
-            <p className="myservers__detail-text">没有产生或改动任何服务器。</p>
+            <p className="myservers__detail-title">这台服务器的详情暂时读不到。</p>
+            <p className="myservers__detail-text">已有服务器和节点不受影响；稍后再试。</p>
             <button
               type="button"
               className="btn btn--ghost"
@@ -152,7 +150,6 @@ export function MyServersPage({
             onAiLocate={onAiLocate}
             readOnly={readOnly}
             onCreateAnother={onNew}
-            onUseServer={onUseServer}
             onChanged={onChanged}
             onRebuilt={onRebuilt}
             onGone={onGone}

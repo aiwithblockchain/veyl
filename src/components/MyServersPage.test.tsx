@@ -201,13 +201,11 @@ type TrialProp = NonNullable<
 function Harness({
   bridge,
   rootSignal = 0,
-  onUseServer = vi.fn(),
   trial = null,
   onGoConnect = vi.fn(),
 }: {
   bridge: StubBridge;
   rootSignal?: number;
-  onUseServer?: (server: MyServer) => void;
   trial?: TrialProp | null;
   onGoConnect?: () => void;
 }) {
@@ -245,7 +243,6 @@ function Harness({
         onLogin={state.openLogin}
         onRefreshAccount={() => void state.refreshAccount()}
         onRetry={() => void state.retry()}
-        onUseServer={onUseServer}
         onChanged={() => void state.refresh()}
         onGone={() => state.ordered(null)}
         onRebuilt={state.rebuilt}
@@ -279,7 +276,6 @@ function renderHarness(
   over: {
     trial?: TrialProp | null;
     onGoConnect?: () => void;
-    onUseServer?: (server: MyServer) => void;
   } = {},
 ) {
   const view = render(<Harness bridge={bridge} {...over} />);
@@ -388,6 +384,44 @@ describe("我的服务器 destination", () => {
     expect(screen.getAllByRole("button", { name: "重试" }).length).toBe(1);
   });
 
+  it("详情读取失败：中间给新文案，不再写「连不上服务器」", () => {
+    const onRetryDetail = vi.fn();
+    render(
+      <MyServersPage
+        bridge={makeBridge() as unknown as AgentBridge}
+        catalog={CATALOG}
+        selected={server()}
+        account={ACCOUNT}
+        accountLoaded={true}
+        accountError={false}
+        loading={false}
+        error={null}
+        retrying={false}
+        detailError="这台服务器的详情暂时读不到。已有服务器和节点不受影响；稍后再试。"
+        detailRetrying={false}
+        readOnly={false}
+        onNew={vi.fn()}
+        onLogin={vi.fn()}
+        onRefreshAccount={vi.fn()}
+        onRetry={vi.fn()}
+        onChanged={vi.fn()}
+        onGone={vi.fn()}
+        onRebuilt={vi.fn()}
+        onRetryDetail={onRetryDetail}
+        onGoConnect={vi.fn()}
+      />,
+    );
+
+    const card = screen.getByRole("alert");
+    expect(within(card).getByText("这台服务器的详情暂时读不到。")).toBeTruthy();
+    expect(
+      within(card).getByText("已有服务器和节点不受影响；稍后再试。"),
+    ).toBeTruthy();
+    expect(screen.queryByText("连不上服务器。")).toBeNull();
+    fireEvent.click(within(card).getByRole("button", { name: "重试" }));
+    expect(onRetryDetail).toHaveBeenCalledTimes(1);
+  });
+
   it("账户读取失败：中间账户暂时读不到 + 重试", async () => {
     const bridge = makeBridge();
     bridge.myServerAccount.mockRejectedValue({
@@ -420,7 +454,7 @@ describe("我的服务器 destination", () => {
     expect(screen.queryByText("1 核 · 1 GB")).toBeNull();
   });
 
-  it("主按钮按状态：可用是去连接，出错是重新建一台，安装中不显示", async () => {
+  it("主按钮按状态：就绪没有主按钮，出错是重新建一台，安装中不显示", async () => {
     const bridge = makeBridge([
       server({ server_id: "srv_1", name: "可用的一台" }),
       server({ server_id: "srv_2", name: "出错的一台", state: "error", node_id: null }),
@@ -429,7 +463,7 @@ describe("我的服务器 destination", () => {
     renderHarness(bridge);
 
     await screen.findByRole("heading", { name: "可用的一台" });
-    expect(screen.getByRole("button", { name: "去连接" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /连接|断开/ })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /出错的一台/ }));
     expect(await screen.findByRole("heading", { name: "出错的一台" })).toBeTruthy();
@@ -439,7 +473,7 @@ describe("我的服务器 destination", () => {
     expect(
       await screen.findByRole("heading", { name: "安装中的一台" }),
     ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "去连接" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /连接|断开/ })).toBeNull();
   });
 
   it("左栏底部不再有设置，账号只留导航入口", async () => {
@@ -534,7 +568,7 @@ describe("空态里的免费节点说明", () => {
     await screen.findByRole("heading", { name: "还没有服务器" });
     expect(hint()).toBeNull();
     expect(screen.queryByText(/免费节点/)).toBeNull();
-    expect(screen.queryByRole("button", { name: "去连接" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "去控制台" })).toBeNull();
   });
 
   it("expired 状态不信未来时间：有节点也不显示", async () => {
@@ -544,7 +578,7 @@ describe("空态里的免费节点说明", () => {
 
     await screen.findByRole("heading", { name: "还没有服务器" });
     expect(hint()).toBeNull();
-    expect(screen.queryByRole("button", { name: "去连接" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "去控制台" })).toBeNull();
   });
 
   it("没有到期时间或时间非法：不编造倒计时", async () => {
@@ -588,18 +622,15 @@ describe("空态里的免费节点说明", () => {
     expect(screen.getByRole("button", { name: "登录" })).toBeTruthy();
   });
 
-  it("「去连接」只切目的地：不发起连接、不调 onUseServer", async () => {
+  it("空态旁注「去控制台」只切目的地：不发起连接", async () => {
     const onGoConnect = vi.fn();
-    const onUseServer = vi.fn();
     renderHarness(makeBridge([]), {
       trial: { state: "available", seedNodeCount: 2, expiresAt: null },
       onGoConnect,
-      onUseServer,
     });
 
-    fireEvent.click(await screen.findByRole("button", { name: "去连接" }));
+    fireEvent.click(await screen.findByRole("button", { name: "去控制台" }));
     expect(onGoConnect).toHaveBeenCalledTimes(1);
-    expect(onUseServer).not.toHaveBeenCalled();
   });
 
   it("没有试用状态时整块提示都不渲染", async () => {
@@ -607,7 +638,7 @@ describe("空态里的免费节点说明", () => {
 
     await screen.findByRole("heading", { name: "还没有服务器" });
     expect(hint()).toBeNull();
-    expect(screen.queryByRole("button", { name: "去连接" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "去控制台" })).toBeNull();
   });
 });
 
@@ -635,6 +666,23 @@ describe("服务器列表行的开通状态", () => {
     const meta = document.querySelector(".rail-server__meta");
     expect(meta?.textContent).toContain("开通中");
     expect(meta?.textContent).not.toContain("/天");
+  });
+
+  it("active 行的状态词是「已开通」", () => {
+    render(
+      <MyServersRail
+        servers={[server({ state: "active", node_id: "node_srv_1" })]}
+        selectedId={null}
+        loading={false}
+        catalog={CATALOG}
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    const meta = document.querySelector(".rail-server__meta");
+    expect(meta?.textContent).toContain("已开通");
+    expect(meta?.textContent).not.toContain("已在使用");
   });
 });
 
@@ -674,7 +722,7 @@ describe("待开通机器失败后的列表行", () => {
 });
 
 describe("左栏的试用提示常驻", () => {
-  it("有服务器时在列表底部显示一行只读提示与去连接", () => {
+  it("有服务器时在列表底部显示一行只读提示与去控制台", () => {
     const onGoConnect = vi.fn();
     render(
       <MyServersRail
@@ -691,7 +739,7 @@ describe("左栏的试用提示常驻", () => {
 
     const hint = document.querySelector(".myservers__trial-hint--rail");
     expect(hint?.textContent).toContain("还有 2 个免费节点可用，6 天后到期。");
-    fireEvent.click(screen.getByRole("button", { name: "去连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "去控制台" }));
     expect(onGoConnect).toHaveBeenCalledTimes(1);
   });
 
@@ -710,7 +758,7 @@ describe("左栏的试用提示常驻", () => {
     );
 
     expect(document.querySelector(".myservers__trial-hint--rail")).toBeNull();
-    expect(screen.queryByRole("button", { name: "去连接" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "去控制台" })).toBeNull();
   });
 });
 
@@ -862,7 +910,7 @@ describe("左栏试用旁注的边界", () => {
     expect(document.querySelector(".rail__new-row")).toBeNull();
   });
 
-  it("锁定期间「去连接」也禁用", () => {
+  it("锁定期间「去控制台」也禁用", () => {
     render(
       <MyServersRail
         servers={[server()]}

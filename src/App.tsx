@@ -14,7 +14,6 @@ import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, sn
 import { DEFAULT_PROXY_PORT, isConfirmQuestionKind, isTauri, readQuestionDetail, shouldRefreshSnapshotOnHealth, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
 import type {
   DefaultProfileStatus,
-  MyServer,
   NodeProbeResult,
   PendingQuestion,
   QuitDecisionAction,
@@ -35,6 +34,7 @@ import { MyServersRail } from "./components/MyServersRail";
 import { MyServerLogin } from "./components/MyServerLogin";
 import { MyServerTopUp } from "./components/MyServerTopUp";
 import { useMyServers } from "./myservers/useMyServers";
+import { useServerNodePooling } from "./myservers/useServerNodePooling";
 import { isProvisioning, trialAvailableHint } from "./myservers/labels";
 import { Onboarding } from "./components/Onboarding";
 import { PaneHandle } from "./components/PaneHandle";
@@ -304,27 +304,6 @@ function readInitialPanelOpen(): boolean {
   return readPanelOpen(localStorage, typeof window === "undefined" ? 1440 : window.innerWidth);
 }
 
-/** 取凭据失败的三段式：发生了什么 / 没改动什么 / 现在做什么。 */
-function credentialErrorText(error: unknown): string {
-  const problem = toBridgeError(error);
-  const reason =
-    typeof problem.details?.reason === "string" ? problem.details.reason : "";
-  if (reason === "server_gone") {
-    return "这台服务器已不存在。没有改动任何配置；重新建一台再试。";
-  }
-  if (reason === "auth_required" || reason === "device_identity_lost") {
-    return "这台设备的身份需要重新确认。没有改动任何配置；到左下角的账户里重新登录后再试。";
-  }
-  if (!problem.retryable) {
-    return "这台服务器现在取不了凭据。没有改动任何配置；换一台服务器，或重新建一台。";
-  }
-  const base =
-    problem.message && problem.message !== "操作失败"
-      ? problem.message
-      : "没拿到这台服务器的节点。";
-  return `${base}没有改动任何配置；稍后再试。`;
-}
-
 export default function App() {
   const bridge = useMemo(() => getAgentBridge(), []);
   const [state, dispatch] = useReducer(chatReducer, undefined, createInitialState);
@@ -428,8 +407,6 @@ export default function App() {
     }
     setAppNotice({ level: "info", text: "登录已过期，请重新登录。" });
   }, [myServers.loggedIn]);
-  /** 取凭据建配置在途：防止连点。 */
-  const useServerInFlightRef = useRef(false);
   /** 最近一次用户操作，随下一条消息的 context 上报。 */
   const lastActionRef = useRef<UiLastAction | null>(null);
   /** 从「查看账单」拉起的登录：成功后回到账户页。 */
@@ -540,6 +517,13 @@ export default function App() {
     import.meta.env.VITE_MOCK === "1" || bridge.mode === "mock",
     runtimeAuthorityRef.current,
   );
+  // 就绪的服务器静默进全局池：详情页不再有连接入口，没人取凭据了。
+  useServerNodePooling({
+    servers: myServers.servers,
+    connection: vpn.connection,
+    credentials: (serverId) => bridge.myServerCredentials(serverId),
+    attach: (nodeIds) => vpn.attachNodes({ nodeIds }),
+  });
   const nodeProbes = useNodeProbes({ bridge });
   // 进入连接屏先读缓存，再把整池测一次速；每个配置只自动跑一次。
   const probedConfigsRef = useRef(new Set<string>());
@@ -598,58 +582,6 @@ export default function App() {
     if (settled.size > 200) {
       const oldest = settled.values().next().value;
       if (oldest) settled.delete(oldest);
-    }
-  };
-
-  // 服务器详情「去连接」：把人送到控制台。
-  // 连接/启动/断开中一条命令都不发：node_attach 会触发 runtime_rebuild，打断正在用的连接。
-  const handleUseServer = async (server: MyServer) => {
-    if (useServerInFlightRef.current) return;
-    useServerInFlightRef.current = true;
-    const startedDestination = destinationRef.current;
-    try {
-      if (vpn.connection !== "idle") {
-        // 连着的就是这台时不解释：到控制台看到的就是它。
-        const currentNodeId = vpn.activeConfig?.current_node_id ?? null;
-        if (server.node_id === null || server.node_id !== currentNodeId) {
-          setAppNotice({
-            level: "info",
-            text: "当前正在使用另一台，要换成这台，先在控制台断开。",
-          });
-        }
-        changeDestination("client");
-        return;
-      }
-      const node = await bridge.myServerCredentials(server.server_id);
-      if (destinationRef.current !== startedDestination) return;
-      const attached = await vpn.attachNodes({ nodeIds: [node.node_id] });
-      if (!attached.ok) {
-        setAppNotice({
-          level: "error",
-          text: attached.message ?? "没拿到这台服务器的节点。",
-        });
-        return;
-      }
-      const targetConfigId = attached.configId ?? vpn.activeConfig?.config_id ?? null;
-      if (!targetConfigId) {
-        setAppNotice({ level: "error", text: "服务器节点已加入，但没找到全局配置。" });
-        return;
-      }
-      // 只预选，不设当前节点、不发起连接：连哪台由用户在控制台确认。
-      trialPreselectNonceRef.current += 1;
-      setTrialPreselect({
-        configId: targetConfigId,
-        nodeId: node.node_id,
-        nonce: trialPreselectNonceRef.current,
-        markFastest: false,
-      });
-      changeDestination("client");
-    } catch (error) {
-      if (destinationRef.current === startedDestination) {
-        setAppNotice({ level: "error", text: credentialErrorText(error) });
-      }
-    } finally {
-      useServerInFlightRef.current = false;
     }
   };
 
@@ -2420,7 +2352,6 @@ export default function App() {
           onLogin={myServers.openLogin}
           onRefreshAccount={() => void myServers.refreshAccount()}
           onRetry={() => void myServers.retry()}
-          onUseServer={handleUseServer}
           onChanged={() => void myServers.refresh()}
           onGone={() => myServers.clearSelection()}
           onRebuilt={myServers.rebuilt}

@@ -25,7 +25,11 @@ interface Options {
 const LIST_ERROR = "读不到你的服务器。已有服务器和节点不受影响；稍后再试。";
 /** 设备身份丢了：不是网络问题，重试同一个请求不会变好，只能重新注册。 */
 const REGISTER_ERROR = "没能重新注册设备。账户和服务器都还在，检查网络后再试一次。";
-const DETAIL_ERROR = "读不到这台服务器。已有服务器和节点不受影响；稍后再试。";
+const DETAIL_ERROR = "这台服务器的详情暂时读不到。已有服务器和节点不受影响；稍后再试。";
+/** 详情请求失败后的后台重试节奏：1s → 2s → 4s → 8s，之后封顶 8s。 */
+const DETAIL_RETRY_DELAYS = [1000, 2000, 4000, 8000];
+/** 没有任何可读数据时，连续失败累计这么久才给错误；首次失败不报。 */
+const DETAIL_ERROR_AFTER_MS = 10_000;
 const WALLET_ERROR = "读不到余额。稍后再试。";
 const LOGOUT_OFFLINE = "没退出登录。需要联网才能退出；服务器没有变化。";
 const LOGOUT_FAILED = "没退出登录。服务器没有变化，可以再试一次。";
@@ -408,41 +412,89 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const selectedKey = selectedId;
 
   // 详情以 my_server_get 为准；列表快照只作首帧占位。
+  // 切换节点会改网络路径，在飞的详情请求失败一次是正常的：有数据就保持数据后台重试，
+  // 只有在完全没有数据且连续失败约 10 秒后才落到错误态。
   const lastDetailKeyRef = useRef<string | null>(null);
+  const detailRetryRef = useRef<{
+    key: string;
+    attempt: number;
+    firstFailedAt: number;
+  } | null>(null);
   useEffect(() => {
     if (lastDetailKeyRef.current !== selectedKey) {
       lastDetailKeyRef.current = selectedKey;
       setDetailError(null);
+      // 上一台的「正在重试」不能带到这一台：新机器的请求落地前按钮就该可点。
+      setDetailRetrying(false);
+      detailRetryRef.current = null;
     }
     if (!selectedKey) {
       setDetail(null);
       setDetailError(null);
       setDetailRetrying(false);
+      detailRetryRef.current = null;
       return;
     }
     if (!active) return;
     let alive = true;
-    bridge
-      .myServerGet(selectedKey)
-      .then((server) => {
-        if (!alive) return;
-        setDetail(server);
-        setDetailError(null);
-      })
-      .catch(() => {
-        if (!alive) return;
-        setDetailError(DETAIL_ERROR);
-      })
-      .finally(() => {
-        if (alive) setDetailRetrying(false);
-      });
+    let timer = 0;
+    const record = detailRetryRef.current?.key === selectedKey
+      ? detailRetryRef.current
+      : { key: selectedKey, attempt: 0, firstFailedAt: 0 };
+    detailRetryRef.current = record;
+
+    const run = (): void => {
+      bridge
+        .myServerGet(selectedKey)
+        .then((server) => {
+          if (!alive) return;
+          setDetail(server);
+          setDetailError(null);
+          setDetailRetrying(false);
+          detailRetryRef.current = { key: selectedKey, attempt: 0, firstFailedAt: 0 };
+        })
+        .catch(() => {
+          if (!alive) return;
+          setDetailRetrying(false);
+          const now = Date.now();
+          if (!record.firstFailedAt) record.firstFailedAt = now;
+          const elapsed = now - record.firstFailedAt;
+          const hasData = selectedNowRef.current !== null;
+          const gaveUp = !hasData && elapsed >= DETAIL_ERROR_AFTER_MS;
+          if (hasData) {
+            // 详情或列表快照还能读：保持现有数据，不打扰用户，后台退避重试。
+            setDetailError(null);
+          } else if (gaveUp) {
+            // 错误态也继续重试（8s 封顶）：网络恢复后自动清错，手动重试只是兜底。
+            setDetailError(DETAIL_ERROR);
+          }
+          record.attempt += 1;
+          const backoff =
+            DETAIL_RETRY_DELAYS[
+              Math.min(record.attempt - 1, DETAIL_RETRY_DELAYS.length - 1)
+            ];
+          // 没有可读数据时把下一次尝试对齐到 10 秒整点，别让退避拖后报错时间。
+          const delay =
+            hasData || gaveUp
+              ? backoff
+              : Math.min(backoff, DETAIL_ERROR_AFTER_MS - elapsed);
+          timer = window.setTimeout(run, delay);
+        });
+    };
+    run();
     return () => {
       alive = false;
+      if (timer) window.clearTimeout(timer);
     };
   }, [active, bridge, selectedKey, revision]);
 
   const selected =
     detail && detail.server_id === selectedKey ? detail : selectedFromList;
+  /** 失败时「还有没有可读数据」取最新渲染值；避免把详情状态放进请求依赖。 */
+  const selectedNowRef = useRef<MyServer | null>(selected);
+  useEffect(() => {
+    selectedNowRef.current = selected;
+  }, [selected]);
 
   const retryDetail = () => {
     setDetailRetrying(true);

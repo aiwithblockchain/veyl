@@ -15,7 +15,7 @@ export const MY_SERVER_STATE_LABEL: Record<MyServerState, string> = {
   installing: "安装服务端",
   verifying: "检查是否可用",
   healthy: "可用",
-  active: "已在使用",
+  active: "已开通",
   error: "出错了",
   destroying: "正在销毁",
   destroyed: "已销毁",

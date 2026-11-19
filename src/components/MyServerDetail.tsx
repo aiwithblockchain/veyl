@@ -26,8 +26,6 @@ interface Props {
   onAiLocate?: (serverId: string) => void;
   /** 再建一台：打开 client 舞台的新建节点。 */
   onCreateAnother: () => void;
-  /** 可用时去取凭据并把这台的节点送进全局池，再切到控制台。 */
-  onUseServer: (server: MyServer) => void | Promise<void>;
   onChanged: () => void;
   /** 重建成功：选中 newServerId，详情继续显示安装进度。 */
   onRebuilt: (serverId: string, state: MyServerState) => void;
@@ -56,7 +54,6 @@ export function MyServerDetail({
   onTopUp,
   onAiLocate,
   onCreateAnother,
-  onUseServer,
   onChanged,
   onRebuilt,
   onGone,
@@ -66,8 +63,6 @@ export function MyServerDetail({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [destroyRetryAllowed, setDestroyRetryAllowed] = useState(false);
-  const [useBusy, setUseBusy] = useState(false);
-  const useBusyRef = useRef(false);
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -163,7 +158,6 @@ export function MyServerDetail({
     }
   };
 
-  const ready = server.state === "healthy" || server.state === "active";
   const destroying = server.state === "destroying";
 
   useEffect(() => {
@@ -189,32 +183,13 @@ export function MyServerDetail({
 
   const locked = readOnly || busy || (destroying && !destroyRetryAllowed);
 
-  /** 主按钮在途时只允许一次；取凭据失败也由 App 播报。 */
-  const useServerNow = async () => {
-    if (useBusyRef.current || readOnly) return;
-    useBusyRef.current = true;
-    setUseBusy(true);
-    try {
-      await onUseServer(server);
-    } finally {
-      useBusyRef.current = false;
-      setUseBusy(false);
-    }
-  };
-
   const primary = isProvisioning(server.state)
     ? null
     : server.state === "error"
       ? { label: "重新建一台", disabled: locked, onClick: onCreateAnother }
       : server.state === "gone"
         ? { label: "重新购买", disabled: locked, onClick: onCreateAnother }
-        : ready
-          ? {
-              label: "去连接",
-              disabled: locked || useBusy,
-              onClick: () => void useServerNow(),
-            }
-          : null;
+        : null;
 
   /** 没建成的机器不存在「本期有效至」：费用行只说退款结论。 */
   const failed = server.state === "error";
