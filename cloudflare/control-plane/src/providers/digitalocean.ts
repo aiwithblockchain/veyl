@@ -154,12 +154,18 @@ export async function createFirewall(
     ports: String(input.port),
     sources: { addresses: ["0.0.0.0/0", "::/0"] },
   });
+  // ICMP 入站：诊断用（ping 能区分「包没到 DO」与「到了被丢」）。DO 的 ICMP 端口写 "0"。
+  const icmp = {
+    protocol: "icmp",
+    ports: "0",
+    sources: { addresses: ["0.0.0.0/0", "::/0"] },
+  };
 
   const result = await call<{ firewall: { id: string } }>(token, "/firewalls", {
     method: "POST",
     body: JSON.stringify({
       name: firewallName(input.name),
-      inbound_rules: [rule("tcp"), rule("udp")],
+      inbound_rules: [rule("tcp"), rule("udp"), icmp],
       outbound_rules: [
         { protocol: "tcp", ports: "all", destinations: { addresses: ["0.0.0.0/0", "::/0"] } },
         { protocol: "udp", ports: "all", destinations: { addresses: ["0.0.0.0/0", "::/0"] } },

@@ -532,6 +532,91 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
     });
   }
 
+  // 仅 dev：给已有服务器的防火墙补一条入站 ICMP（诊断用）。新建机器已经默认带。
+  if (url.pathname === "/v1/debug/firewall-icmp") {
+    if (env.ENVIRONMENT !== "dev") return json({ ok: false, error: "not_found" }, 404);
+    if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+    if (!env.DO_API_TOKEN) return json({ ok: false, error: "missing_secret" }, 500);
+    if (!env.DB) return json({ ok: false, error: "missing_db" }, 500);
+    const id = url.searchParams.get("id");
+    if (!id) return json({ ok: false, error: "missing_id" }, 400);
+
+    const row = await env
+      .DB.prepare("SELECT firewall_id FROM servers WHERE id = ?")
+      .bind(id)
+      .first<{ firewall_id: string | null }>();
+    if (!row) return json({ ok: false, error: "not_found" }, 404);
+    const firewallId = row.firewall_id;
+    if (!firewallId) return json({ ok: false, error: "no_firewall" }, 422);
+
+    const headers = {
+      Accept: "application/json",
+      Authorization: `Bearer ${env.DO_API_TOKEN}`,
+      "Content-Type": "application/json",
+      "User-Agent": USER_AGENT,
+    };
+    const endpoint = `https://api.digitalocean.com/v2/firewalls/${encodeURIComponent(firewallId)}`;
+
+    const current = await fetch(endpoint, { headers });
+    const currentText = await current.text();
+    if (!current.ok) {
+      return json(
+        { ok: false, error: "upstream", status: current.status, body: currentText.slice(0, 200) },
+        502,
+      );
+    }
+    const firewall = (
+      JSON.parse(currentText) as {
+        firewall?: {
+          name?: string;
+          inbound_rules?: unknown[];
+          outbound_rules?: unknown[];
+          droplet_ids?: unknown[];
+          tags?: unknown[];
+        };
+      }
+    ).firewall;
+    const inboundRules = firewall?.inbound_rules ?? [];
+    // 只认「面向全网的 icmp」：来源不是全网的规则满足不了 ping 诊断，仍要追加。
+    const publicIcmp = (rule: unknown) => {
+      const entry = rule as { protocol?: string; sources?: { addresses?: unknown } };
+      if (entry.protocol !== "icmp") return false;
+      const addresses = Array.isArray(entry.sources?.addresses) ? entry.sources.addresses : [];
+      return addresses.includes("0.0.0.0/0") && addresses.includes("::/0");
+    };
+    if (inboundRules.some(publicIcmp)) {
+      return json({ ok: true, changed: false, inbound_rules: inboundRules });
+    }
+
+    const icmp = {
+      protocol: "icmp",
+      ports: "0",
+      sources: { addresses: ["0.0.0.0/0", "::/0"] },
+    };
+    const nextInbound = [...inboundRules, icmp];
+    // DO 的 PUT 是全量替换：出站、droplet_ids 与 tags 必须原样带上，
+    // 不能赌「省略 = 保持不变」——真被清空，正在跑的机器会瞬间失去防火墙。
+    const updated = await fetch(endpoint, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        name: firewall?.name,
+        inbound_rules: nextInbound,
+        outbound_rules: firewall?.outbound_rules ?? [],
+        droplet_ids: firewall?.droplet_ids ?? [],
+        tags: firewall?.tags ?? [],
+      }),
+    });
+    const updatedText = await updated.text();
+    if (!updated.ok) {
+      return json(
+        { ok: false, error: "upstream", status: updated.status, body: updatedText.slice(0, 200) },
+        502,
+      );
+    }
+    return json({ ok: true, changed: true, inbound_rules: nextInbound });
+  }
+
   // 仅 dev：输出当前版本的 cloud-init 脚本，供手动建机调试（lab=1 时不关 SSH、不回传）。
   if (url.pathname === "/v1/debug/cloud-init") {
     if (env.ENVIRONMENT !== "dev") return json({ ok: false, error: "not_found" }, 404);
