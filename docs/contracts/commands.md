@@ -523,7 +523,11 @@ type NodeAttachData = {
 - **二选一校验**：两个都没给 → `INVALID_ARGUMENT / source_required`；两个都给 → `INVALID_ARGUMENT / source_and_node_ids_conflict`；`source` 不是 `"seed"` → `INVALID_ARGUMENT / invalid_source`。
 - **懒创建**：库里没有配置时，用 `name = "默认配置"`、`connect_mode = "system_proxy"`、`routing_mode = "direct"`、`dns = auto`、`tun_excludes = []`、`current_node_id = null` 建唯一配置，`created_config = true`。并发靠 `configs.name UNIQUE`（`INSERT … ON CONFLICT DO NOTHING` 后回查），不得先查后插。
 - **幂等**：已绑定的节点进 `skipped_node_ids`，不重复插入、不报错；同一批里的重复 id 只算第一次。
-- **永不改 `current_node_id`**：当前节点为空也保持为空。要改当前节点只能调 `node_switch`（§4.3）；服务器「连接」流程是 `my_server_credentials` → `node_attach` → `node_switch` → `runtime_start`。
+- **永不改 `current_node_id`**：当前节点为空也保持为空。要改当前节点只能调 `node_switch`（§4.3）。
+- **服务器页不承载连接（2026-11-19 起）**：「去连接」只把节点并进池并把人带回控制台，真正的连接只发生在控制台主按钮那一下。
+  - 未连接时点「去连接」：只发 `my_server_credentials` → `node_attach`，随后跳到控制台并**预选**这台节点的节点卡（预选不写库，§3.2）；**不调 `node_switch`、不调 `runtime_start`**。
+  - 非 `idle`（已连接 / 连接中 / 断开中）：**一条命令都不发**，只跳控制台。连的就是这台 → 不提示；不是这台 → 给一句 info 提示（「当前正在使用另一台，要换成这台，先在控制台断开。」）。
+  - 原因：`node_attach` 在连接中会触发 `runtime_rebuild`（§4.0.1，stop → start，中间断流）；点一个「去看看」不该掐断正在用的连接。
 - **与切换接管方式互斥**：同一配置正有 `config_set_mode` 在跑 → `CONFLICT / switch_in_progress`，`retryable: true`。
 - 成功且确有新增时发 `node-list-changed`（`reason = "bindings_changed"`，`config_id` = 全局配置）+ `config-changed(change = "updated")`；全部跳过时不发事件。
 
@@ -2641,6 +2645,12 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.43.2（未发布，2026-11-19：服务器页不再承载连接）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | §4.0 补「服务器页不承载连接（2026-11-19 起）」：未连接时「去连接」只发 `my_server_credentials` → `node_attach`，随后跳控制台并预选该节点的节点卡（不调 `node_switch` / `runtime_start`）；非 `idle`（已连接 / 连接中 / 断开中）一条命令都不发，只跳控制台，连的是同一台不提示、否则给一句 info 提示；连接只发生在控制台主按钮那一下 | 语义修正 | 原文把服务器「连接」写成 `my_server_credentials → node_attach → node_switch → runtime_start`，与实现不符（`src/App.tsx:601-643`）；`node_attach` 在连接中会触发 `runtime_rebuild`（§4.0.1，stop → start 断流），「去看看」不能掐断正在用的连接 |
 
 ### 2.43.1（2026-11-18，启动移出锁：被取代启动的收尾与重建被断开取代）
 

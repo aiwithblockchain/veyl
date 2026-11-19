@@ -61,10 +61,10 @@
 | 流程 | 动作顺序 |
 |---|---|
 | 试用加入种子 | `node_attach({source:"seed"})` → 界面本地预选「最快」，**不写库** → 用户点「连接」时 `node_switch` 再 `runtime_start`（既有口径，`ai-first-product.md` §选中免费节点之后） |
-| 服务器「连接」 | `my_server_credentials` → `node_attach({nodeIds:[id]})` → **`node_switch({configId, nodeId})`** → `vpn.start()`。`node_switch` 是唯一改变当前节点的命令（`commands.md` §4.3），attach 不代替它 |
+| 服务器页「去连接」 | 未连接时只 `my_server_credentials` → `node_attach({nodeIds:[id]})`，随后跳控制台并**预选**这台节点的节点卡（预选不写库）；**不调 `node_switch`、不调 `runtime_start`**。非 idle（已连接 / 连接中 / 断开中）一条命令都不发，只跳控制台。真正的连接只发生在控制台主按钮那一下（2026-11-19 起，`commands.md` §4.0） |
 | 订阅 / 粘贴 / 手填 / 文件 | 只 attach；当前节点由用户点选或点「连接」时再定 |
 
-`node_switch` 在已连接时是热切换（写库 + Clash selector）；`runtime_start` 对同配置幂等。所以「已经连着免费节点、点服务器详情里的连接」的实际顺序是：节点进池 → 当前节点改成服务器 → 热切到新节点（不重启进程）。
+`node_switch`（写库；已连接时是 Clash selector 热切换）与 `runtime_start`（同配置幂等）只由**控制台主按钮**发起。所以「已经连着免费节点、去服务器页点『去连接』」不会切过去：只跳控制台并提示先断开；连接中连 `node_attach` 都不发——它会触发 `runtime_rebuild`（stop → start 断流，`commands.md` §4.0.1）。
 
 ### 3.3 命令取舍
 
@@ -116,7 +116,7 @@ node_attach { source?: "seed"; nodeIds?: string[]; configId?: string }
 ### 3.5 重复导入
 
 - 同一节点（`source` + `source_key`）重复导入：`node_import_*` 按既有规则计入 `skipped(reason="duplicate")`；`node_attach` 幂等跳过。
-- 服务器重复「连接」：`my_server_credentials` 按 `server_id` 覆盖写同一节点；`node_attach` 不重复绑定；**当前节点由随后的 `node_switch` 写到这台**（§3.2），不是 attach 顺带改。
+- 服务器页重复「去连接」：`my_server_credentials` 按 `server_id` 覆盖写同一节点；`node_attach` 不重复绑定；**当前节点不变**——连接只由控制台主按钮发起，attach 从不顺带改 `current_node_id`（§3.2、`commands.md` §4.0）。
 - 同一台服务器换了凭据（重建后 IP 变化）：`my_server_credentials` 覆盖 `nodes` 行，`config_nodes` 关联不变，无需再 attach。
 
 ### 3.6 迁移：已有多个配置
@@ -157,8 +157,8 @@ node_attach { source?: "seed"; nodeIds?: string[]; configId?: string }
 |---|---|
 | 试用流程 · 加入节点 | `config_create(source="seed")` → `node_attach({ source: "seed" })`（`App.tsx:1967`） |
 | 试用流程 · 失败清理 | **删掉 `vpn.deleteConfig(config.config_id)`**（`App.tsx:2001`）：全局配置不能删，attach 失败时池子没变，直接报错重试即可 |
-| 服务器「连接」 · 入池 | `config_create(nodeIds)` → `my_server_credentials` + `node_attach({ nodeIds })`（`App.tsx:590`） |
-| 服务器「连接」 · 切当前 | **删掉 `vpn.selectConfig` 分支**（`App.tsx:604-616`）：单配置下没有「切过去」这回事；改为 `node_switch` → 既有 `pendingServerConnect` 启动流程 |
+| 服务器页「连接」 · 入池 | `config_create(nodeIds)` → `my_server_credentials` + `node_attach({ nodeIds })`（`App.tsx:620-622`） |
+| 服务器页「连接」 · 切当前 | **服务器页不再发起连接**：未连接只入池 + 预选节点卡后跳控制台；非 idle 一条命令都不发，只跳控制台（同一台不提示，否则提示先断开）。`node_switch` / `runtime_start` 只由控制台主按钮发起（`App.tsx:601-643`，2026-11-19 起） |
 | `hasNodes` | 只认 `activeConfig.node_count`（`App.tsx:661`） |
 | 到期屏 | 用户已有节点时不显示 `trial_expired`（PM 已另派最小修复；本设计确认口径：`expired && !hasNodes`） |
 | 节点导入入口 | 省略 `configId` 即绑定全局池；界面不再传配置 id |
@@ -181,7 +181,7 @@ node_attach { source?: "seed"; nodeIds?: string[]; configId?: string }
 
 1. **后端命令**：`node_attach`（含懒创建与错误码）；`config_create` 的 `config_exists` 拒绝；`config_activate` / `config_delete` 的退休返回；`node_import_*` / `node_create` 省略 `configId` 时的懒创建 + 绑定；**`default_profile_refresh` / `CatalogRefresh` 刷新后把新种子节点并入全局配置**（与 `node_attach{source:"seed"}` 同语义，幂等、不改 `current_node_id`）——没有这一步，AI 首次配置选免费节点时无法把节点放进池子。
 2. **后端迁移**（§3.6）：合并配置、按 `merge_key` 合并 issues、处理 `COUNT=1 AND is_active=0`、`layout` 随配置删除；事务内完成、幂等、在 UI 读配置之前。
-3. **前端入口**：`App.tsx:1967`（attach）、`App.tsx:2001`（删掉 `deleteConfig`）、`App.tsx:590`（credentials + attach）、`App.tsx:604-616`（删掉 `selectConfig`，改 `node_switch`）、`App.tsx:661`（`hasNodes`）、到期屏守卫；`useVpnSession.selectConfig/deleteConfig` 标记待清理。
+3. **前端入口**：`App.tsx:1967`（attach）、`App.tsx:2001`（删掉 `deleteConfig`）、`App.tsx:590`（credentials + attach）、`App.tsx:604-616`（删掉 `selectConfig`）、`App.tsx:661`（`hasNodes`）、到期屏守卫；`useVpnSession.selectConfig/deleteConfig` 标记待清理。**2026-11-19 起服务器页不再发起连接**：「去连接」未连接时只 credentials + attach 后跳控制台并预选，非 idle 一条命令都不发（`App.tsx:601-643`；`commands.md` §4.0）。
 4. **工具层**：`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出（`ConfigActivate` 无工具入口）；系统提示词同步（`tools.md` §5.1、`prompt-design.md:315`）；前端 `TOOL_COPY` 映射表与 mock 剧本里的旧工具名同批删掉。
 5. **实现侧版本常量同批升**：`src-tauri/src/tools/envelope.rs:13` 的 `CONTRACT_VERSION` 跟本批 `tools.md` 一起到 **3.18.0**（不是 3.17.5），断言它的 `boundary_tests.rs:542` 同步；`display.rs` 里没有版本常量（已核对），不涉及。另：`claurst_session/events.rs:11`、`runtime/manager.rs:19` 的 `2.16.2 → 2.17.0`（与 §5 `events.md` 2.17.0 一致）。这些不改，`check-contracts` 会一直挂 advisory。
 6. **验收**：C6「试用 + 自建节点并存」——试用中建机、连接后节点池含两类节点；到期后种子节点消失、自建节点与当前节点保留、界面进连接舞台而不是到期屏；重复点同一台服务器的「连接」不再报错；到期时选中项回落写库。
