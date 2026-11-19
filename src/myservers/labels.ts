@@ -41,8 +41,18 @@ export const MY_SERVER_RAIL_PHASE: Partial<Record<MyServerState, string>> = {
   verifying: "检查中",
 };
 
-export function serverRailState(state: MyServerState): string {
-  return MY_SERVER_RAIL_PHASE[state] ?? MY_SERVER_STATE_LABEL[state];
+/**
+ * 左栏状态词：欠费/停用优先于机器状态。
+ * 进行中的机器 billing_state 是 pending，不会命中这两档。
+ */
+export function serverRailState(
+  server: Pick<MyServer, "state" | "billing_state">,
+): string {
+  if (server.billing_state === "past_due") return "已欠费";
+  if (server.billing_state === "expired") return "已停用";
+  return (
+    MY_SERVER_RAIL_PHASE[server.state] ?? MY_SERVER_STATE_LABEL[server.state]
+  );
 }
 
 export function isProvisioning(state: MyServerState): boolean {
@@ -219,8 +229,8 @@ export function billingNoticeText(
   if (server.billing_state === "past_due") {
     const days = graceDaysLeft(server.grace_ends_at, now);
     return days === null
-      ? "余额不足，今天这次没扣上。7 天内充值可继续使用。"
-      : `余额不足，今天这次没扣上。宽限还剩 ${days} 天，7 天内充值可继续使用。`;
+      ? "余额不足，最近一次扣费没成功。7 天内充值可继续使用。"
+      : `余额不足，最近一次扣费没成功。宽限还剩 ${days} 天，7 天内充值可继续使用。`;
   }
   if (server.billing_state === "expired") {
     return "余额不足，服务已停用。服务器还在，停机期间不再产生费用；充值后自动补扣，最多补 30 天即可恢复。";
@@ -242,4 +252,17 @@ export function stateTone(state: MyServerState): "ok" | "err" | "idle" {
   if (state === "healthy" || state === "active") return "ok";
   if (state === "error" || state === "gone") return "err";
   return "idle";
+}
+
+/**
+ * 状态点颜色（看整台机器）：欠费 / 停用是 warn，其余沿用 stateTone。
+ * 欠费存在 billing_state 里，只看 state 会把 past_due 的机器画成绿点。
+ */
+export function serverTone(
+  server: Pick<MyServer, "state" | "billing_state">,
+): "ok" | "err" | "idle" | "warn" {
+  if (server.billing_state === "past_due" || server.billing_state === "expired") {
+    return "warn";
+  }
+  return stateTone(server.state);
 }

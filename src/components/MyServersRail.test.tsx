@@ -30,6 +30,24 @@ function server(over: Partial<MyServer> = {}): MyServer {
 
 afterEach(cleanup);
 
+function renderRail(servers: MyServer[]) {
+  const { container } = render(
+    <MyServersRail
+      servers={servers}
+      selectedId={null}
+      loading={false}
+      onSelect={() => {}}
+      onNew={() => {}}
+    />,
+  );
+  const row = container.querySelector(".rail-server");
+  return {
+    container,
+    ledClass: row?.querySelector(".led")?.className ?? "",
+    meta: row?.querySelector(".rail-server__meta")?.textContent ?? "",
+  };
+}
+
 describe("服务器列表左栏", () => {
   it("日价用等宽数字：金额套 .num，「/天」在数字之外", () => {
     const { container } = render(
@@ -45,5 +63,26 @@ describe("服务器列表左栏", () => {
     const meta = container.querySelector(".rail-server__meta");
     expect(meta?.textContent).toContain("$0.30/天");
     expect(meta?.querySelector(".num")?.textContent).toBe("$0.30");
+  });
+
+  it("active 但欠费：点变 is-warn，状态词写「已欠费」", () => {
+    const { ledClass, meta } = renderRail([server({ billing_state: "past_due" })]);
+    expect(ledClass).toContain("is-warn");
+    expect(meta).toContain("已欠费");
+  });
+
+  it("停用：点变 is-warn，状态词写「已停用」", () => {
+    const { ledClass, meta } = renderRail([server({ billing_state: "expired" })]);
+    expect(ledClass).toContain("is-warn");
+    expect(meta).toContain("已停用");
+  });
+
+  it("进行中的机器不受欠费覆盖：仍是中性点与阶段词", () => {
+    const { ledClass, meta } = renderRail([
+      server({ state: "installing", billing_state: "pending" }),
+    ]);
+    expect(ledClass).toContain("is-idle");
+    expect(meta).toContain("安装中");
+    expect(meta).not.toContain("已欠费");
   });
 });

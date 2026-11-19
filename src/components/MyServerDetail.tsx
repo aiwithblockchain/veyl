@@ -9,7 +9,7 @@ import {
   formatUsdCents,
   isProvisioning,
   serverBillingText,
-  stateTone,
+  serverTone,
 } from "../myservers/labels";
 
 interface Props {
@@ -267,8 +267,8 @@ export function MyServerDetail({
             </button>
           ) : null}
         </div>
-        <span className={`myservers__state is-${stateTone(server.state)}`}>
-          <span className={`led is-${stateTone(server.state)}`} aria-hidden />
+        <span className={`myservers__state is-${serverTone(server)}`}>
+          <span className={`led is-${serverTone(server)}`} aria-hidden />
           {MY_SERVER_STATE_LABEL[server.state]}
         </span>
       </div>

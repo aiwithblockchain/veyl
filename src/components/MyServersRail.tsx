@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { MyServer, MyServerCatalog } from "../agent/bridge";
-import { formatDailyPrice, isProvisioning, serverRailState, stateTone } from "../myservers/labels";
+import { formatDailyPrice, isProvisioning, serverRailState, serverTone } from "../myservers/labels";
 import { IconClose, IconPlus } from "./icons";
 
 interface Props {
@@ -65,12 +65,12 @@ function ServerRow({
           {server.name}
         </span>
         <span
-          className={`led is-${stateTone(server.state)}`}
+          className={`led is-${serverTone(server)}`}
           aria-hidden
         />
       </span>
       <span className="rail-server__meta">
-        {serverRailState(server.state)} · {regionLabel}
+        {serverRailState(server)} · {regionLabel}
         {billingPart ? <> · {billingPart}</> : null}
       </span>
     </button>

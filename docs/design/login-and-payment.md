@@ -782,7 +782,7 @@ CREATE UNIQUE INDEX servers_order ON servers(order_id);
 |---|---|---|
 | `now < paid_until` | `active` | 详情显示「每天 $0.20 · **本期有效至** 11-17 13:50」 |
 | `paid_until ≤ now`，且下一次 Cron 还没跑到（`billing_state` 仍是 `active`） | `active` | 「每天 $0.20 · **本期已过，服务正常**」——不显示那个已经过去的时间点，也不用异常色 |
-| `paid_until ≤ now` 且已扣不动 | `past_due` | 「余额不足，今天这次没扣上。7 天内充值可继续使用（还剩 N 天）。」 |
+| `paid_until ≤ now` 且已扣不动 | `past_due` | 「余额不足，最近一次扣费没成功。7 天内充值可继续使用（还剩 N 天）。」 |
 | `now ≥ paid_until + 7d` | `expired` | 「余额不足，服务已停用。服务器还在，**停机期间不再产生费用**；充值后最多补 30 天即可恢复。」 |
 
 - **文案定稿：用「本期有效至」，不用「已付至」，也不用「下次扣费：…」**（2026-11-16 定）。
