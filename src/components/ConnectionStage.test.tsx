@@ -156,7 +156,6 @@ interface StageOverrides {
   } | null;
   trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
   trialExpiresAt?: string | null;
-  destroyedNodeIds?: ReadonlySet<string>;
   onProbe?: () => void;
   manualProbed?: boolean;
   onProbeAvailabilityChange?: (available: boolean) => void;
@@ -194,7 +193,6 @@ function stageElement(over: StageOverrides = {}) {
       preselect={over.preselect ?? null}
       trialSummary={over.trialSummary ?? null}
       trialExpiresAt={over.trialExpiresAt ?? null}
-      destroyedNodeIds={over.destroyedNodeIds}
       onProbe={over.onProbe}
       manualProbed={over.manualProbed ?? false}
       onProbeAvailabilityChange={over.onProbeAvailabilityChange}
@@ -324,31 +322,6 @@ describe("连接舞台", () => {
     expect(await screen.findByText(/装环境超时/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "报告问题" }));
     expect(onReport).toHaveBeenCalledTimes(1);
-  });
-
-  it("已销毁的节点标「已销毁」且不可点", async () => {
-    const onSwitchNode = vi.fn(async () => ({ ok: true }));
-    render(
-      <ConnectionStage
-        config={CONFIG}
-        connection="idle"
-        runtime={emptyRuntimeView()}
-        onStart={() => {}}
-        onStop={() => {}}
-        onReconnect={() => {}}
-        onSwitchNode={onSwitchNode}
-        nodeProbes={probes()}
-        failedAfterConnected={false}
-        helperPreparing={false}
-        destroyedNodeIds={new Set(["n2"])}
-      />,
-    );
-
-    expect(await screen.findByText("已销毁")).toBeTruthy();
-    const row = screen.getByRole("option", { name: /新加坡 01/ });
-    expect((row as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(row);
-    expect(onSwitchNode).not.toHaveBeenCalled();
   });
 
   it("节点行显示测速结果，未测到写「未测」", async () => {
@@ -1784,21 +1757,6 @@ describe("免费节点到期后就地拒绝", () => {
     renderStage({
       config: configWith([FREE], FREE.node_id),
       trialExpiresAt: inHours(-1),
-    });
-
-    expect(
-      screen.getByText("试用已到期，免费节点已不可用。"),
-    ).toBeTruthy();
-    expect(
-      screen.queryByText("当前节点已到期，换一个节点再连接。"),
-    ).toBeNull();
-  });
-
-  it("已销毁的自建行不算替代节点", () => {
-    renderStage({
-      config: configWith([OWNED, FREE], FREE.node_id),
-      trialExpiresAt: inHours(-1),
-      destroyedNodeIds: new Set([OWNED.node_id]),
     });
 
     expect(

@@ -131,6 +131,38 @@ describe("「已下单但认不出新机器」的生命周期", () => {
     await waitFor(() => expect(result.current.selected?.server_id).toBe("srv_b"));
     expect(result.current.pendingServer).toBe(false);
   });
+
+  it("销毁最后一台：刷新后回到空态，不拿旧列表回填", async () => {
+    const list = { current: [SERVER_A] };
+    const { result } = await mount(list);
+    await waitFor(() => expect(result.current.selected?.server_id).toBe("srv_a"));
+
+    // 控制面列表已把 destroyed 过滤掉：清选中之后刷新回来是空列表。
+    list.current = [];
+    await act(async () => {
+      result.current.clearSelection();
+    });
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(result.current.selected).toBeNull();
+    expect(result.current.pendingServer).toBe(false);
+  });
+
+  it("选中的那台从列表消失：清掉选中回空态，不落到别的机器上", async () => {
+    const list = { current: [SERVER_A, SERVER_B] };
+    const { result } = await mount(list);
+    await waitFor(() => expect(result.current.selected?.server_id).toBe("srv_a"));
+
+    // 没走 clearSelection，选中那台直接不在刷新后的列表里。
+    list.current = [SERVER_B];
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(result.current.selected).toBeNull();
+  });
 });
 
 describe("开通中的轮询", () => {
@@ -174,6 +206,43 @@ describe("开通中的轮询", () => {
 
     // 状态就绪：下一拍刷新看到 healthy，之后不再轮询。
     list.current = [{ ...SERVER_A, state: "healthy" as const }];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    const stopped = listMock.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(listMock.mock.calls.length).toBe(stopped);
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("销毁中也轮询：列表把那一行过滤掉后停止", async () => {
+    vi.useFakeTimers();
+    const list: { current: MyServer[] } = {
+      current: [{ ...SERVER_A, state: "destroying" }],
+    };
+    const bridge = makeBridge(list);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const listMock = vi.mocked(bridge.myServerList);
+    const listBase = listMock.mock.calls.length;
+
+    // 销毁中不再等用户重进页面：第一拍 2 秒就自己去拉列表。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(listMock.mock.calls.length).toBe(listBase + 1);
+
+    // 控制面列表已过滤掉 destroyed：这一行消失后不再轮询。
+    list.current = [];
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });

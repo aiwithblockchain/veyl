@@ -36,8 +36,6 @@ interface Props {
   onActionCardAction?: (action: { id: string; label: string }) => void;
   /** 连接失败时交给 AI 检查（固定前缀，跑 DiagRun）。 */
   onDiagnose?: () => void;
-  /** 服务器已销毁但节点记录还在：只标记，不再发命令。 */
-  destroyedNodeIds?: ReadonlySet<string>;
   /** 免费节点步骤流完成后的收敛句：已加入 N 个免费节点，最快 Xms。 */
   trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
   /** 试用截止时间（ISO）：免费组标题右侧按剩余天数写到期文案。 */
@@ -99,7 +97,6 @@ export function ConnectionStage({
   actionCards = [],
   onActionCardAction,
   onDiagnose,
-  destroyedNodeIds = new Set<string>(),
   trialSummary = null,
   trialExpiresAt = null,
   preselect = null,
@@ -437,17 +434,14 @@ export function ConnectionStage({
     (primaryLabel === "连接" || primaryLabel === "重新连接") &&
     connectTarget !== null &&
     isExpiredSeed(connectTarget);
-  /** 池里还有真正点得动的行才允许说「换一个节点」：过期的、已销毁的都不算。 */
-  const hasUsableNode = nodes.some(
-    (node) => !isExpiredSeed(node) && !destroyedNodeIds.has(node.node_id),
-  );
+  /** 池里还有真正点得动的行才允许说「换一个节点」：过期的都不算。 */
+  const hasUsableNode = nodes.some((node) => !isExpiredSeed(node));
   const primaryDisabled =
     starting || stopping || helperPreparing || switching !== null || connectBlocked;
 
   const renderNode = ({ node, index }: (typeof nodeEntries)[number]) => {
     const latency = latencies[index];
     const active = node.node_id === selectedId;
-    const destroyed = destroyedNodeIds.has(node.node_id);
     const expired = isExpiredSeed(node);
     const probe = nodeProbes.results[node.node_id];
     /** 契约上可达必有数值；真遇到「可达却没数值」按测不通处理，别冒称「未测」。
@@ -480,12 +474,12 @@ export function ConnectionStage({
         aria-selected={active}
         aria-disabled={expired || undefined}
         className={`stage-node ${active ? "is-selected" : ""} ${
-          destroyed ? "is-destroyed" : ""
-        } ${expired ? "is-expired" : ""}`}
+          expired ? "is-expired" : ""
+        }`}
         onClick={() => {
-          if (!destroyed && !expired) void switchTo(node.node_id);
+          if (!expired) void switchTo(node.node_id);
         }}
-        disabled={switching !== null || destroyed || expired}
+        disabled={switching !== null || expired}
       >
         <span
           className={`stage-node__name${expired ? " has-sub" : ""}`}
@@ -497,7 +491,6 @@ export function ConnectionStage({
           {fastestMarkId === node.node_id ? (
             <span className="stage-node__fastest">最快</span>
           ) : null}
-          {destroyed ? <span className="stage-node__badge">已销毁</span> : null}
           {expired ? <span className="stage-node__sub">已到期</span> : null}
         </span>
         <span

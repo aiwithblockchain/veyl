@@ -380,11 +380,15 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     });
   }, [bridge, refresh, markLoggedOut]);
 
-  const provisioning = servers.some((server) => isProvisioning(server.state));
+  // 开通中与销毁中都要轮询：销毁完成后控制面列表会把 destroyed 过滤掉，
+  // 只有再拉一次列表，左栏那一行才会自己消失。`isProvisioning` 的语义被进度块共用，不改它。
+  const shouldPollList =
+    servers.some((server) => isProvisioning(server.state)) ||
+    servers.some((server) => server.state === "destroying");
   const triesRef = useRef(0);
   useEffect(() => {
-    // 事件只是加速；只要还有机器在开通中就必须轮询——事件可能漏（例如建机失败被自动销毁）。
-    if (!provisioning) {
+    // 事件只是加速；只要还有机器在开通中或销毁中就必须轮询——事件可能漏。
+    if (!shouldPollList) {
       triesRef.current = 0;
       return;
     }
@@ -404,7 +408,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [provisioning, refresh, eventsLive]);
+  }, [shouldPollList, refresh, eventsLive]);
 
   const selectedFromList =
     servers.find((server) => server.server_id === selectedId) ?? null;
@@ -740,25 +744,47 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     return () => window.removeEventListener("focus", onFocus);
   }, [active, loggedIn, refreshWallet]);
 
-  // 有服务器就没有「未选中」：进入或刷新后默认选第一台；消失时选下一台。
+  /**
+   * 自动选中只跟列表快照走：`selectedId` 自己变成 null（例如刚销毁完清选中）
+   * 时不能拿**旧列表**回填，否则会选中一台刷新后已经不存在的机器。
+   */
+  const selectedIdRef = useRef(selectedId);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  // 列表刷新后按刷新过的快照决定选中：选中的那台还在就保持；已经不在了就清掉，
+  // 让中间区回到空态；没有选中时默认选第一台。
   // 下单/重建显式选中的新机器在列表刷新前要保住，不能被默认选择盖掉。
   useEffect(() => {
     if (!active) return;
     // 已下单但还认不出是哪台：别把用户扔进任意一台别人的机器。
     if (pendingServer) return;
+    const current = selectedIdRef.current;
     const pinned = pinnedSelectionRef.current;
-    if (pinned) {
-      if (pinned === selectedId) {
-        if (!servers.some((server) => server.server_id === pinned)) return;
+    const inList = (id: string) =>
+      servers.some((server) => server.server_id === id);
+    if (current !== null) {
+      if (inList(current)) {
+        pinnedSelectionRef.current = null;
+        return;
       }
+      // 刚下单/重建的新机器还没进列表：先等它，别当成消失了。
+      if (pinned === current) return;
+      // 列表已刷新且没有它：清掉选中，回空态，不落到别的机器上。
       pinnedSelectionRef.current = null;
-    }
-    if (servers.length === 0) return;
-    if (selectedId && servers.some((server) => server.server_id === selectedId)) {
+      setSelectedId(null);
       return;
     }
+    if (pinned) {
+      if (!inList(pinned)) return;
+      pinnedSelectionRef.current = null;
+      setSelectedId(pinned);
+      return;
+    }
+    if (servers.length === 0) return;
     setSelectedId(servers[0].server_id);
-  }, [active, servers, selectedId, pendingServer]);
+  }, [active, servers, pendingServer]);
 
   const lastRootSignalRef = useRef(rootSignal);
   useEffect(() => {

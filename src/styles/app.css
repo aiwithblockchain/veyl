@@ -6300,16 +6300,6 @@ details[open] > .settings-fold__summary::before {
   border-radius: var(--r-md);
 }
 
-.stage-node__badge {
-  flex: none;
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: var(--bg-hover);
-  color: var(--ink-3);
-  font-size: 10.5px;
-  font-weight: 500;
-}
-
 .stage-node__fastest {
   flex: none;
   padding: 1px 5px;
@@ -6320,11 +6310,7 @@ details[open] > .settings-fold__summary::before {
   font-weight: 500;
 }
 
-.stage-node.is-destroyed .stage-node__name { color: var(--ink-3); }
-
-.stage-node.is-destroyed { opacity: 0.75; cursor: default; }
-
-/* 到期未清池的免费行：与已销毁同一套观感，不引新颜色。 */
+/* 到期未清池的免费行：与待接入同一套观感，不引新颜色。 */
 .stage-node.is-expired .stage-node__name { color: var(--ink-3); }
 
 .stage-node.is-expired { opacity: 0.75; cursor: default; }

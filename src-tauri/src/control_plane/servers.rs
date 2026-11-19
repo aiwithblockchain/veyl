@@ -790,13 +790,26 @@ pub async fn destroy(server_id: &str, confirm: bool) -> Result<MyServer, CpError
         )
     })?;
     server.state = "destroying".into();
-    // 销毁即销毁凭据（§19.8）；节点记录保留并能在界面标「服务器已销毁」。
+    // 销毁即销毁凭据（§19.8）。节点也一并删掉：已销毁的服务器不再出现在连接页
+    // （2026-11-19 产品决定）。删 `nodes` 行由外键级联清掉 `config_nodes`、把
+    // `configs.current_node_id` / `my_servers.node_id` 置 NULL（外键已 ON）。
+    // 不重启运行时：远端起效后隧道自己会断，Host 强行 stop 会让用户毫无预期地掉线。
+    let mut removed_node_id = None;
     if let Some(store) = crate::store::global() {
-        let conn = store.conn();
-        cache_and_link(&conn, &mut server);
-        forget_credentials(&conn, server_id, server.node_id.as_deref(), |key| {
-            let _ = crate::secrets::delete_secret(key);
-        });
+        {
+            let conn = store.conn();
+            cache_and_link(&conn, &mut server);
+            removed_node_id = forget_destroyed_node(&conn, &mut server);
+        }
+        // 连接释放后再发事件：`emit_node_list_changed` 会再拿同一把库锁。
+        if let Some(node_id) = removed_node_id {
+            crate::seed::emit_node_list_changed(
+                store,
+                "node_deleted",
+                None,
+                std::slice::from_ref(&node_id),
+            );
+        }
     } else if let Some(node_id) = server.node_id.as_deref() {
         let _ = crate::secrets::delete_secret(&format!("node:{node_id}"));
     }
@@ -823,6 +836,35 @@ fn forget_credentials(
     }
     if let Some(node_id) = remote_node_id {
         delete(&format!("node:{node_id}"));
+    }
+}
+
+/// 销毁成功后的本地收尾：删密码、删节点行，返回被删掉的节点 id（没删成返回 `None`）。
+///
+/// 删 `nodes` 行后外键会级联清掉 `config_nodes`、把 `current_node_id` /
+/// `my_servers.node_id` 置 NULL。节点本来就不存在时 `delete_node` 返回 false，
+/// 这里按正常情形处理（幂等）。删除失败只记日志——钱已经退了，
+/// 不能因为本地清理把销毁报成失败。
+///
+/// 事件不在这里发：调用方要先释放库连接，`emit_node_list_changed` 会再拿同一把锁。
+fn forget_destroyed_node(
+    conn: &rusqlite::Connection,
+    server: &mut MyServer,
+) -> Option<String> {
+    forget_credentials(conn, &server.server_id, server.node_id.as_deref(), |key| {
+        let _ = crate::secrets::delete_secret(key);
+    });
+    let node_id = server.local_node_id.clone()?;
+    match crate::store::configs::delete_node(conn, &node_id) {
+        Ok(true) => {
+            server.local_node_id = None;
+            Some(node_id)
+        }
+        Ok(false) => None,
+        Err(error) => {
+            log::warn!("销毁后删除本地节点失败：{error}");
+            None
+        }
     }
 }
 
@@ -1555,6 +1597,91 @@ mod tests {
             deleted.push(key.to_string())
         });
         assert_eq!(deleted, vec!["node:nd_remote"]);
+    }
+
+    fn owned_server(local_node_id: Option<&str>) -> MyServer {
+        let mut value = sample_server_json();
+        value["node_id"] = json!("nd_abc");
+        if let Some(id) = local_node_id {
+            value["local_node_id"] = json!(id);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// 销毁后的本地收尾：节点行删掉，配置关联级联清空，当前节点置 NULL。
+    #[test]
+    fn destroying_a_server_deletes_its_node_and_bindings() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let dns = json!({ "mode": "auto", "local": [], "remote": [] });
+        let excludes = json!([]);
+        crate::store::configs::create(
+            &conn,
+            &crate::store::NewConfig {
+                id: "cfg_1",
+                name: "A",
+                connection_mode: crate::store::configs::CONNECTION_SYSTEM_PROXY,
+                routing_mode: crate::store::configs::ROUTING_PROXY_ALL,
+                listen_port: Some(7890),
+                dns: &dns,
+                tun_excludes: &excludes,
+            },
+        )
+        .unwrap();
+        crate::store::configs::upsert_node(
+            &conn,
+            &crate::store::NewNode {
+                id: "nd_local",
+                name: "Tokyo",
+                server: "203.0.113.10",
+                port: 20343,
+                method: "aes-256-gcm",
+                password_ref: "node:nd_local",
+                source: crate::store::configs::SOURCE_OWNED,
+                source_key: "srv_1",
+            },
+        )
+        .unwrap();
+        crate::store::configs::attach_node(&conn, "cfg_1", "nd_local").unwrap();
+        crate::store::configs::update(
+            &conn,
+            "cfg_1",
+            &crate::store::configs::ConfigPatch {
+                current_node_id: Some(Some("nd_local".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut server = owned_server(Some("nd_local"));
+        assert_eq!(
+            forget_destroyed_node(&conn, &mut server).as_deref(),
+            Some("nd_local")
+        );
+
+        assert!(crate::store::configs::get_node(&conn, "nd_local")
+            .unwrap()
+            .is_none());
+        assert!(crate::store::configs::list_nodes(&conn, "cfg_1")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            crate::store::configs::get(&conn, "cfg_1")
+                .unwrap()
+                .unwrap()
+                .current_node_id,
+            None
+        );
+        assert_eq!(server.local_node_id, None);
+    }
+
+    /// 节点本来就不存在（或已经删过）：幂等，不报错、不改返回值。
+    #[test]
+    fn destroying_a_server_without_a_local_node_is_idempotent() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let mut server = owned_server(Some("nd_missing"));
+        assert_eq!(forget_destroyed_node(&conn, &mut server), None);
     }
 
     #[test]

@@ -467,10 +467,6 @@ export default function App() {
     plan: string | null;
   }>({ region: null, plan: null });
   /** AI 选好的地区 / 规格；交给新建节点舞台应用。 */
-  /** 已销毁服务器留下的节点：卡片标「已销毁」，不再发命令。 */
-  const [destroyedNodeIds, setDestroyedNodeIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
   const [stageSelect, setStageSelect] = useState<{
     region: string | null;
     plan: string | null;
@@ -906,18 +902,6 @@ export default function App() {
           seed_node_count: 0,
         });
         setTrialNonce((value) => value + 1);
-      }
-      if (event.name === AGENT_EVENTS.myServerChanged) {
-        const payload = event.payload as { state?: unknown; node_id?: unknown };
-        if (payload.state === "destroyed" && typeof payload.node_id === "string" && payload.node_id) {
-          const nodeId = payload.node_id;
-          setDestroyedNodeIds((current) => {
-            if (current.has(nodeId)) return current;
-            const next = new Set(current);
-            next.add(nodeId);
-            return next;
-          });
-        }
       }
       if (event.name === AGENT_EVENTS.stageSelect) {
         // 只改舞台选择；舞台没开或正在创建时忽略（契约允许的已知残余）。
@@ -2396,7 +2380,6 @@ export default function App() {
           onReportProblem={aiReady ? handleReportProblem : undefined}
           reportBusy={reportOpening}
           actionCards={actionCards}
-          destroyedNodeIds={destroyedNodeIds}
           onActionCardAction={handleActionCardAction}
           onDiagnose={handleDiagnose}
           trialSummary={trialFlow?.summary ?? null}
