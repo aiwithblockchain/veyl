@@ -875,6 +875,22 @@ describe("向导底部计费说明", () => {
       await screen.findByText("开通后开始计费，每天续扣；余额不足会提示充值。"),
     ).toBeTruthy();
   });
+
+  it("地区选择下方提醒线路决定能不能连上，且只出现一次", async () => {
+    render(
+      <MyServerWizard
+        bridge={makeBridge()}
+        catalog={CATALOG}
+        onOrdered={() => {}}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+
+    expect(
+      await screen.findAllByText(/取决于你当前的网络到那个地区的线路/),
+    ).toHaveLength(1);
+  });
 });
 
 describe("结账返回订单（2.39.0）", () => {
@@ -902,8 +918,9 @@ describe("结账返回订单（2.39.0）", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "创建" }));
     await waitFor(() => expect(onOrdered).toHaveBeenCalledWith("srv_1"));
-    // 旧的「已扣 $X，余额 $Y」不再出现。
-    expect(screen.queryByText(/已扣|余额 \$/)).toBeNull();
+    // 旧的「已扣 $X，余额 $Y」不再出现（地区下方的连通性提醒提到「已扣」，
+    // 但那是费用不退的说明，不是扣费金额）。
+    expect(screen.queryByText(/已扣\s*\$|余额 \$/)).toBeNull();
   });
 
   it("结账失败：按原有错误提示停下，不当作已下单", async () => {

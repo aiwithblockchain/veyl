@@ -536,6 +536,9 @@ export function MyServerWizard({
             </div>
           ))}
         </div>
+        <p className="wizard-block__note wizard-block__note--connect">
+          能不能连上，取决于你当前的网络到那个地区的线路。建好后到「连接」里点「测速」确认；连不上可以删掉重建，已扣的当天费用不退。
+        </p>
       </section>
 
       <section className="wizard-block">

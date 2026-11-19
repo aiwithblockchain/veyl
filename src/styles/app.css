@@ -3322,6 +3322,11 @@ body[data-resizing] {
   color: var(--ink-2);
 }
 
+/* 地区下方的连通性提醒：沿用说明文字的颜色，字号按设计定稿放大一档。 */
+.wizard-block__note--connect {
+  font-size: 13px;
+}
+
 .myservers__regions {
   display: flex;
   flex-direction: column;
