@@ -1289,7 +1289,7 @@ mod prompt_tests {
             .split("\n# ")
             .next()
             .unwrap();
-        for word in ["selector", "mixed", "geosite", "规则集", "分流"] {
+        for word in ["selector", "mixed", "geosite", "路由表", "规则集", "分流"] {
             assert!(
                 !section.contains(word),
                 "两轴定义里出现了禁用词：{word}\n{section}"
@@ -1309,18 +1309,36 @@ mod prompt_tests {
             speech.contains("「Proxy 模式」「Tun 模式」「智能」「全局」不在此列"),
             "要说清按钮名不是禁词：{speech}"
         );
-        assert!(!speech.contains("proxy、TUN"), "{speech}");
-        assert!(!speech.contains("`proxy`"), "{speech}");
 
-        let rules = text
-            .split("# 文案规则")
-            .nth(1)
-            .expect("有「文案规则」一节")
-            .split("\n# ")
-            .next()
-            .unwrap();
-        assert!(!rules.contains("`proxy`"), "{rules}");
-        assert!(!rules.contains("`TUN`"), "{rules}");
+        // 「裸词只在正文」：反引号里的 `proxy_all` / `system_proxy` / `tun` 是工具
+        // 参数取值（`RouteSetMode` / `ConfigSetMode` 必须原样传），不是讲给用户的
+        // 技术类型名，所以先剥掉代码段再查。**剥掉是有意为之，不是漏检**；
+        // 模型复述出来的话由 §3.3 的四句边界管。
+        let prose = prose_of(&text);
+        for word in ["proxy", "tun", "TUN"] {
+            assert!(
+                !prose.contains(word),
+                "正文出现了裸词 {word}（代码段里的参数值不算）"
+            );
+        }
+        // 界面按钮是「Tun 模式」，不是「TUN 模式」。
+        assert!(!text.contains("TUN 模式"), "正文还留着 TUN 模式");
+    }
+
+    /// 剥掉反引号代码段（含 ``` 围栏）后的正文，见上面「裸词只在正文」的说明。
+    fn prose_of(text: &str) -> String {
+        let mut prose = String::new();
+        let mut in_code = false;
+        for ch in text.chars() {
+            if ch == '`' {
+                in_code = !in_code;
+                continue;
+            }
+            if !in_code {
+                prose.push(ch);
+            }
+        }
+        prose
     }
 
     /// 地区进系统提示：生效值 + 来源 + 系统原始推断；未知时按未知处理，不追问。
