@@ -4145,6 +4145,10 @@ body[data-resizing] {
   gap: 8px;
   padding: 14px 0 16px;
   background: var(--canvas);
+  /* 与 .rail 的右边界同款：两列都铺 --canvas，缺这条线就糊成一整块。
+     用 inset 阴影而非 border-right：border-box 下 border 把内容盒压到 55px，
+     56px 宽的图标项会溢出被 .app 的 overflow:hidden 裁掉，选中态 2px 竖条只剩 1.5px。 */
+  box-shadow: inset -1px 0 0 var(--hair);
 }
 
 .activity__item {
