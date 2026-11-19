@@ -15,10 +15,11 @@
 	"placement": {
 		"mode": "smart"
 	},
-	// 每日计费：续期扣费、补建「已付没机器」、对账（login-and-payment.md §4.6）。
-	// 没有这一段，scheduled() 永远不会触发；时间是 UTC，避开整点高峰。
+	// 每小时计费：到期前 1 小时进入可扣窗口，续期扣费、补建「已付没机器」、对账
+	// （login-and-payment.md §4.6）。没有这一段，scheduled() 永远不会触发；
+	// 时间是 UTC，避开整点高峰（每小时第 17 分）。
 	"triggers": {
-		"crons": ["17 3 * * *"]
+		"crons": ["17 * * * *"]
 	},
 	// 默认环境 = 生产。部署：npm run deploy
 	"vars": {

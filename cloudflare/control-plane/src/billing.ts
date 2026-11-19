@@ -1,5 +1,5 @@
-// 计费（设计 §4.6 / §4.12）：每天跑一次——按天续费、补建「已付没机器」、对账、账本归档。
-// 只改状态与记账，不销毁任何实例。
+// 计费（设计 §4.6 / §4.12）：每小时跑一次——按天续费、补建「已付没机器」、对账、账本归档。
+// 续费在到期前 1 小时进入可扣窗口，保证扣费发生在到期之前；只改状态与记账，不销毁任何实例。
 
 import { randomId } from "./lib/crypto";
 import { provisionPaidOrder, type OrdersEnv } from "./orders";
@@ -9,6 +9,8 @@ import { reconciliationDrift, recordLedgerEntry } from "./wallet";
 
 const DAY_MS = 24 * 3600 * 1000;
 const GRACE_MS = 7 * DAY_MS;
+/** 到期前多久进入可扣窗口：续费提前到到期之前，不再等过期后才补扣。 */
+const PREPAY_MS = 60 * 60 * 1000;
 const MAX_CATCH_UP_DAYS = 30;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 5;
@@ -240,7 +242,7 @@ async function collectDue(env: BillingEnv, now: number): Promise<BillingRow[]> {
           "AND state IN ('booting', 'installing', 'verifying', 'healthy', 'active') " +
           "AND paid_until <= ? AND id > ? ORDER BY id LIMIT ?",
       )
-      .bind(now, cursor, PAGE_SIZE)
+      .bind(now + PREPAY_MS, cursor, PAGE_SIZE)
       .all<BillingRow>();
     const pageRows = result.results ?? [];
     rows.push(...pageRows);
@@ -301,7 +303,7 @@ async function settleServer(
   let paidUntil = live.paidUntil;
   let days = 0;
 
-  while (paidUntil <= now && days < MAX_CATCH_UP_DAYS) {
+  while (paidUntil - PREPAY_MS <= now && days < MAX_CATCH_UP_DAYS) {
     const bucket = paidUntil;
     const dayIndex = Math.max(0, Math.floor((bucket - anchor) / DAY_MS));
     const amount = chargeForDay(daily, dayIndex);
@@ -354,6 +356,7 @@ async function settleServer(
   }
 
   // 状态只在整轮结束后写一次：中途 break 不会留下「已欠费却显示 active」。
+  // 欠费判定点仍是 `paid_until` 本身，不含提前量：提前扣失败时机器还没到期，必须仍是 active。
   const state =
     paidUntil > now
       ? "active"

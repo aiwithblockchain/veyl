@@ -70,13 +70,13 @@ function seedOrder(db: FakeD1, overrides: Record<string, unknown> = {}) {
   });
 }
 
-describe("每日计费", () => {
+describe("按天续费", () => {
   it("到期扣一天：账本一条 server_day，paid_until 顺延 1 天", async () => {
     const db = new FakeD1();
     const env = envWith(db);
     db.rows("accounts")[0].balance_cents = 1000;
-    // 差一点满一天到期：补一格就回到未来，只扣一天。
-    seedServer(db, { paid_until: Date.now() - DAY + 60_000 });
+    // 刚过到期时刻：补一格就回到未来且不在预热窗口内，只扣一天。
+    seedServer(db, { paid_until: Date.now() - 60_000 });
 
     const report = await runBilling(env as never);
 
@@ -379,6 +379,113 @@ describe("每日计费", () => {
     ]) {
       expect(ids).toContain(kept);
     }
+  });
+});
+
+describe("提前续费（到期前 1 小时）", () => {
+  const MIN = 60 * 1000;
+  const SERVER_ID = "srv_billing0000000000";
+
+  it("到期前 59 分钟：扣一天，paid_until 在原值上顺延 24h", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    const anchor = Date.now() - 60 * DAY;
+    const paidUntil = Date.now() + 59 * MIN;
+    seedServer(db, {
+      billing_anchor_at: anchor,
+      created_at: anchor,
+      paid_until: paidUntil,
+    });
+
+    const report = await runBilling(env as never);
+
+    expect(report.renewed).toBe(1);
+    const ledger = db.rows("wallet_ledger").filter((row) => row.ref_type === "server_day");
+    expect(ledger).toHaveLength(1);
+    // 扣的是原到期时刻那一格，新 paid_until = 原值 + 24h（不是 now + 24h）。
+    expect(ledger[0].ref_id).toBe(`${SERVER_ID}:${paidUntil}`);
+    expect(Number(db.rows("servers")[0].paid_until)).toBe(paidUntil + DAY);
+    expect(db.rows("servers")[0].billing_state).toBe("active");
+  });
+
+  it("到期前 61 分钟：还没进窗口，不扣", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    const paidUntil = Date.now() + 61 * MIN;
+    seedServer(db, { paid_until: paidUntil });
+
+    const report = await runBilling(env as never);
+
+    expect(report.renewed).toBe(0);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(Number(db.rows("servers")[0].paid_until)).toBe(paidUntil);
+  });
+
+  it("窗口内扣款失败、但还没到期：仍是 active，不转欠费", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 0;
+    const paidUntil = Date.now() + 59 * MIN;
+    seedServer(db, { paid_until: paidUntil });
+
+    const report = await runBilling(env as never);
+
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("servers")[0].billing_state).toBe("active");
+    expect(report.pastDue).toBe(0);
+    expect(report.expired).toBe(0);
+  });
+
+  it("已到期且扣不动：仍按原规则转 past_due / expired", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 0;
+    seedServer(db, { id: "srv_past_due000000000", paid_until: Date.now() - 60 * MIN });
+    seedServer(db, { id: "srv_expired000000000", paid_until: Date.now() - 8 * DAY });
+
+    const report = await runBilling(env as never);
+
+    const [pastDue, expired] = db.rows("servers");
+    expect(pastDue.billing_state).toBe("past_due");
+    expect(expired.billing_state).toBe("expired");
+    expect(report.pastDue).toBe(1);
+    expect(report.expired).toBe(1);
+  });
+
+  it("同一 bucket 连跑两次只扣一次", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    const paidUntil = Date.now() + 59 * MIN;
+    seedServer(db, { paid_until: paidUntil });
+
+    await runBilling(env as never);
+    await runBilling(env as never);
+
+    const ledger = db.rows("wallet_ledger").filter((row) => row.ref_type === "server_day");
+    expect(ledger).toHaveLength(1);
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000 - DAILY);
+  });
+
+  it("destroying / destroyed 的机器即使进了窗口也不扣", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    const paidUntil = Date.now() + 59 * MIN;
+    seedServer(db, { id: "srv_destroying0000000", state: "destroying", paid_until: paidUntil });
+    seedServer(db, {
+      id: "srv_destroyed00000000",
+      state: "destroyed",
+      destroyed_at: Date.now(),
+      paid_until: paidUntil,
+    });
+
+    const report = await runBilling(env as never);
+
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(report.renewed).toBe(0);
   });
 });
 
