@@ -444,6 +444,16 @@ export function ConnectionStage({
     (node) => !isExpiredSeed(node) && !danglingNodeIds.has(node.node_id),
   );
   /**
+   * 选中的自建节点这次真的测不通：没测成（untested / reachable 为 null）、
+   * 免费节点、停机删除的悬挂节点都不算——它们各有自己的说法。
+   */
+  const selectedNode = nodes.find((node) => node.node_id === selectedId) ?? null;
+  const selfOwnedUnreachable =
+    selectedNode !== null &&
+    selectedNode.source !== "seed" &&
+    !danglingNodeIds.has(selectedNode.node_id) &&
+    nodeProbes.results[selectedNode.node_id]?.reachable === false;
+  /**
    * 不通时的指路：跟着页面上真能做的事走。目标可用就按原文案重连；
    * 目标不可用但池里还有别的节点，断完能换一个；一个都没有就别提换节点。
    */
@@ -665,6 +675,11 @@ export function ConnectionStage({
             ) : probeMixedUntested ? (
               <p className="stage-card__probe-note">
                 {probeUntestedCount} 个没测成。
+              </p>
+            ) : null}
+            {selfOwnedUnreachable ? (
+              <p className="stage-card__probe-note">
+                连不上不一定是机器的问题，你当前的网络到那个地区的线路不通很常见。可以销毁重建，当天已扣的费用不退。
               </p>
             ) : null}
           </header>

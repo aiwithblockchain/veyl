@@ -1644,6 +1644,83 @@ describe("混池节点卡：试用 + 自建", () => {
         .querySelector(".stage-node__fastest")?.textContent,
     ).toBe("最快");
   });
+
+  it("选中的自建节点测不通：给线路提示；整批测完失败时两行并存", () => {
+    const view = renderStage({
+      config: configWith([OWNED]),
+      nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+    });
+
+    expect(
+      screen.getAllByText(/你当前的网络到那个地区的线路不通很常见/),
+    ).toHaveLength(1);
+
+    // 真实点完测速：整批失败提示与线路提示同时出现，文字可分辨。
+    view.rerender(
+      stageElement({
+        config: configWith([OWNED]),
+        nodeProbes: probes({
+          finished: probeFinished({ ok: 0, failed: 1, total: 1 }),
+          results: { o1: failedProbe("o1") },
+        }),
+      }),
+    );
+    expect(screen.getByText("这次都没测通。")).toBeTruthy();
+    expect(screen.getAllByText(/线路不通很常见/)).toHaveLength(1);
+    expect(document.querySelectorAll(".stage-card__probe-note")).toHaveLength(2);
+  });
+
+  it("免费节点测不通、或自建节点只是没测成：不给线路提示", () => {
+    renderStage({
+      config: configWith([FREE]),
+      nodeProbes: probes({ results: { f2: failedProbe("f2") } }),
+    });
+    expect(screen.queryByText(/线路不通很常见/)).toBeNull();
+    cleanup();
+
+    renderStage({
+      config: configWith([OWNED]),
+      nodeProbes: probes({ results: { o1: untestedProbe("o1") } }),
+    });
+    expect(screen.queryByText(/线路不通很常见/)).toBeNull();
+  });
+
+  it("只按选中的那台判断：别的自建节点失败不算", () => {
+    const OTHER: ConfigDetail["nodes"][number] = {
+      ...OWNED,
+      node_id: "o2",
+      name: "大阪 2 号",
+    };
+
+    // 选中的是免费节点，另一台自建失败：不提示。
+    renderStage({
+      config: configWith([FREE, OTHER]),
+      nodeProbes: probes({
+        results: { f2: probeResult("f2", 50), o2: failedProbe("o2") },
+      }),
+    });
+    expect(screen.queryByText(/线路不通很常见/)).toBeNull();
+    cleanup();
+
+    // 选中的自建没测成，另一台自建失败：不提示。
+    renderStage({
+      config: configWith([OWNED, OTHER]),
+      nodeProbes: probes({
+        results: { o1: untestedProbe("o1"), o2: failedProbe("o2") },
+      }),
+    });
+    expect(screen.queryByText(/线路不通很常见/)).toBeNull();
+    cleanup();
+
+    // 反过来：选中的自建失败，另一台没测成：提示。
+    renderStage({
+      config: configWith([OWNED, OTHER]),
+      nodeProbes: probes({
+        results: { o1: failedProbe("o1"), o2: untestedProbe("o2") },
+      }),
+    });
+    expect(screen.getAllByText(/线路不通很常见/)).toHaveLength(1);
+  });
 });
 
 describe("免费节点到期后就地拒绝", () => {
