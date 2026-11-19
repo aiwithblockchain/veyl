@@ -84,7 +84,7 @@ npx wrangler d1 execute veyl-control-plane-dev-4 --remote --env dev --command "U
 | 编号 | 内容 | 为什么 |
 |---|---|---|
 | E1 | 真机 Cron 在每小时 `:17` 的真实触发 | Cloudflare 调度只能线上观察 |
-| E2 | 60 秒轮询的真实时延与休眠恢复行为 | 依赖系统休眠/唤醒 |
+| E2 | 系统休眠/唤醒后首次打开详情时的检查时机 | 依赖系统休眠/唤醒 |
 | E3 | DO 删不掉时整轮的重试 | 需要构造上游 500；已有单测覆盖单台行为 |
 | E4 | 迁移 0008 在既有数据上的兼容 | dev 已应用成功；prod 尚未部署 |
 | E5 | 本地删节点失败（SQLite 写失败）后，如果当场没有重试 | 真机无法稳定构造本地写失败。**已知限制**：此时控制面墓碑已 dismiss，下次列表刷新后墓碑行会消失而节点行仍在，界面上不再有删除入口；出现报错时请**立刻再点一次删除**（dismiss 幂等，重试会继续删本地节点） |
@@ -98,7 +98,7 @@ npx wrangler d1 execute veyl-control-plane-dev-4 --remote --env dev --command "U
 - 退款口径（窗口内 0、过期后 0、建机失败全额退）：`billing.test.ts`、`servers.test.ts`
 - 墓碑列表、dismiss 鉴权与幂等：`servers.test.ts`
 - 迁移列与 schema 守卫：`test/schema_guard.test.ts`
-- 轮询判定（新变 destroyed / 非当前节点 / 已停过）：`src-tauri/src/agent/server_watch.rs`
+- 按需检查（当前节点判定、往返后重读、404 视为已销毁、网络失败不停、停运行时不受取消影响）：`src-tauri/src/agent/server_watch.rs`
 - 墓碑判定、悬挂节点推导、删除后空态、删除失败保行：`src/myservers/tombstones.test.ts`、`src/myservers/useMyServers.test.tsx`、`src/components/MyServerDetail.test.tsx`、`src/App.servers.test.tsx`
 - `node_forget` 删除顺序（dismiss 前置、失败时本地不动、`NOT_FOUND` 视为完成、`source_key` 兜底、删节点失败可重试、当前节点先停隧道）：`src-tauri/src/agent/commands.rs` 的 `node_forget_tests`
 - 不可连接三处入口（主按钮、节点行、次级重连）：`src/components/ConnectionStage.test.tsx`
