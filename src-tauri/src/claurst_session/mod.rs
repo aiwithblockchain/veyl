@@ -1261,7 +1261,7 @@ mod prompt_tests {
         assert!(!text.contains("构建时与回访"), "文件头的构建注释应被去掉");
     }
 
-    /// 控制台「问 AI」入口的前置：两根轴的定义必须在系统提示词里（设计 §3.3/§3.4）。
+    /// 客户端「问 AI」入口的前置：两根轴的定义必须在系统提示词里（设计 §3.3/§3.4）。
     /// 入口点了却答不出来等于白加，所以定义缺失要让测试先红。
     #[test]
     fn the_two_axes_are_defined_for_the_console() {
@@ -1273,11 +1273,14 @@ mod prompt_tests {
         );
         for needle in [
             "# 接管方式与流量范围",
+            "客户端上有两个设置",
             "Proxy 模式只让设了代理的软件走节点",
             "Tun 模式接管全部流量",
-            "才需要切到 Tun",
+            "才需要切到 Tun 模式",
             "只让需要的网站走节点，其余的直连",
             "所有网站都走节点",
+            "在客户端被问到怎么改时，末尾补一句",
+            "要改的话，主按钮下面那行点一下。",
         ] {
             assert!(text.contains(needle), "提示词缺了两轴定义：{needle}");
         }
@@ -1314,6 +1317,9 @@ mod prompt_tests {
         // 参数取值（`RouteSetMode` / `ConfigSetMode` 必须原样传），不是讲给用户的
         // 技术类型名，所以先剥掉代码段再查。**剥掉是有意为之，不是漏检**；
         // 模型复述出来的话由 §3.3 的四句边界管。
+        //
+        // 只覆盖提示词正文：`system_prompt(&[], …)` 传的是空工具树，渲染后的
+        // 能力清单（工具描述）不在检查范围，那部分由能力清单的用例单独守。
         let prose = prose_of(&text);
         for word in ["proxy", "tun", "TUN"] {
             assert!(
@@ -1323,22 +1329,48 @@ mod prompt_tests {
         }
         // 界面按钮是「Tun 模式」，不是「TUN 模式」。
         assert!(!text.contains("TUN 模式"), "正文还留着 TUN 模式");
+        // 同一屏只有一种叫法：activity bar 上叫「客户端」。
+        assert!(prose.contains("客户端"), "两轴定义要按界面叫「客户端」");
+        assert!(!prose.contains("控制台"), "不要再用「控制台」这个叫法");
+        assert!(!prose.contains("客户端屏"), "不要再用「客户端屏」这个叫法");
     }
 
     /// 剥掉反引号代码段（含 ``` 围栏）后的正文，见上面「裸词只在正文」的说明。
     fn prose_of(text: &str) -> String {
         let mut prose = String::new();
-        let mut in_code = false;
-        for ch in text.chars() {
-            if ch == '`' {
-                in_code = !in_code;
+        let mut in_fence = false;
+        for line in text.lines() {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
                 continue;
             }
-            if !in_code {
-                prose.push(ch);
+            if in_fence {
+                continue;
             }
+            let mut in_code = false;
+            for ch in line.chars() {
+                if ch == '`' {
+                    in_code = !in_code;
+                    continue;
+                }
+                if !in_code {
+                    prose.push(ch);
+                }
+            }
+            prose.push('\n');
         }
         prose
+    }
+
+    /// 围栏要整块跳过：靠单反引号计数会在 ``` 上翻转错位，把代码内容漏进正文。
+    #[test]
+    fn the_prose_helper_skips_fenced_blocks_whole() {
+        let prose = prose_of("正文 `inline` 保留\n```rust\nlet tun = 1;\n```\n尾巴");
+        assert!(prose.contains("正文"));
+        assert!(prose.contains("保留"));
+        assert!(!prose.contains("inline"), "行内代码要剥掉");
+        assert!(!prose.contains("tun"), "围栏内容要整块跳过");
+        assert!(prose.contains("尾巴"));
     }
 
     /// 地区进系统提示：生效值 + 来源 + 系统原始推断；未知时按未知处理，不追问。
