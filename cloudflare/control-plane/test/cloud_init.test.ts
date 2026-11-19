@@ -50,6 +50,21 @@ describe("cloud-init", () => {
     expect(installing).toBeLessThan(download);
   });
 
+  it("installing 在关 SSH 之前就上报：开机与 apt 不再被算成等待开机", () => {
+    const body = script();
+    const firstReport = body.indexOf("report_progress installing");
+    const stopSsh = body.indexOf("systemctl stop ssh");
+    const download = body.indexOf("releases/download");
+    expect(firstReport).toBeGreaterThan(-1);
+    expect(stopSsh).toBeGreaterThan(-1);
+    expect(firstReport).toBeLessThan(stopSsh);
+    expect(firstReport).toBeLessThan(download);
+    // 下载前那次兜底仍保留，且真的在下载之前（不是写完配置才报）。
+    const secondReport = body.lastIndexOf("report_progress installing");
+    expect(secondReport).toBeGreaterThan(firstReport);
+    expect(secondReport).toBeLessThan(download);
+  });
+
   it("三段上报：installing / verifying / active，失败带 failed_stage", () => {
     const body = script();
     expect(body).toContain("report_progress installing");

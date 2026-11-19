@@ -71,6 +71,11 @@ on_error() {
 }
 trap 'on_error \${LINENO}' ERR
 
+# 0. 立即上报 installing：开机、apt、下载这段时间不再被算成「等待开机」。
+#    刚起来网络未必就绪，失败不致命——下载前还会再报一次兜底（控制面幂等）。
+CURRENT_STAGE="installing"
+report_progress installing || true
+
 # 1. 先关掉 SSH：我们永远不登录服务器，也没有 root 密码通道。
 systemctl stop ssh 2>/dev/null || systemctl stop sshd 2>/dev/null || true
 systemctl disable ssh 2>/dev/null || systemctl disable sshd 2>/dev/null || true
@@ -83,6 +88,8 @@ apt-get install -y -qq curl ca-certificates tar >/dev/null 2>&1
 # 3. 下载并校验 sing-box
 # 从这里开始任何失败都算「安装阶段失败」：下载、sha 校验、解包都包括在内。
 CURRENT_STAGE="installing"
+# 下载前的兜底上报：刚开机那次可能因网络未就绪而失败（控制面幂等）。
+report_progress installing || true
 cd /tmp
 curl -fsSL --retry 5 --retry-delay 5 -o sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v\${SING_BOX_VERSION}/sing-box-\${SING_BOX_VERSION}-linux-\${ARCH}.tar.gz"
 echo "\${SING_BOX_SHA256}  sb.tar.gz" | sha256sum -c -
@@ -111,7 +118,6 @@ cat > /usr/local/etc/sing-box/config.json <<EOF
 }
 EOF
 chmod 600 /usr/local/etc/sing-box/config.json
-report_progress installing || true
 
 # 配置先自检：不合法就带着报错原文回传，而不是等 systemd 起不来再猜。
 CURRENT_STAGE="verifying"
