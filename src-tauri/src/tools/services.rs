@@ -3823,6 +3823,16 @@ impl WiredServices {
             let conn = self.store.conn();
             let nodes = configs::list_nodes(&conn, &config.id)
                 .map_err(|error| svc_error(error.code(), error))?;
+            // 节点可用性一并算好（需要读 `my_servers` 镜像）：owned 节点对应的
+            // 服务器已停机销毁时，AI 才能说出「这条为什么用不了」。
+            let nodes: Vec<Value> = nodes
+                .iter()
+                .map(|node| {
+                    let mut value = node_json(node);
+                    value["unavailable_reason"] = node_unavailable_reason(&conn, node);
+                    value
+                })
+                .collect();
             let stored = crate::store::layout::get(&conn, &config.id)
                 .map_err(|error| svc_error(error.code(), error))?;
             match stored {
@@ -3831,7 +3841,7 @@ impl WiredServices {
             }
         };
         let mut detail = self.config_summary_json(config)?;
-        detail["nodes"] = Value::Array(nodes.iter().map(node_json).collect());
+        detail["nodes"] = Value::Array(nodes);
         detail["dns"] = config.dns.clone();
         detail["tun_excludes"] = config.tun_excludes.clone();
         detail["layout"] = layout;
@@ -4285,6 +4295,21 @@ fn node_json(node: &configs::Node) -> Value {
         "source": node.source,
         "created_at": node.created_at,
     })
+}
+
+/// 节点为什么当前不可用；只有能确定时才给原因。
+///
+/// owned 节点的服务器在本地镜像里已是 `destroyed` → `server_destroyed`（镜像层
+/// 分不清是用户销毁还是停机删除，那要实时列表；见 `MyServers` 的人话原因）。
+/// 其它情况（含种子试用、未测过的节点）返回 null——可用性要靠 `NodeProbe` 实测。
+fn node_unavailable_reason(conn: &rusqlite::Connection, node: &configs::Node) -> Value {
+    if node.source != crate::store::configs::SOURCE_OWNED || node.source_key.is_empty() {
+        return Value::Null;
+    }
+    match crate::store::servers::get(conn, &node.source_key) {
+        Ok(Some(row)) if row.state == "destroyed" => json!("server_destroyed"),
+        _ => Value::Null,
+    }
 }
 
 /// 本地直连的判定依据。未知地区没有本地层，不能报 `ip_only`。
@@ -5970,6 +5995,8 @@ impl VpnToolServices for WiredServices {
             None => json!({ "status": "skipped", "reason": "switch_in_progress" }),
         };
         let mut result = node_json(node);
+        // 新节点必然是可用状态；字段与 `NodeSummary` 对齐（2.45.5 起非可选）。
+        result["unavailable_reason"] = Value::Null;
         if let Some(object) = result.as_object_mut() {
             object.insert("runtime_rebuild".into(), runtime_rebuild);
         }
@@ -10432,6 +10459,129 @@ mod config_service_tests {
         );
     }
 
+    /// 配置里有自建节点时，AI 经 `ConfigDetail` 必须看得到它，并知道它为什么不可用。
+    /// 回归：AI 曾只看 `DefaultProfileStatus`，把 3 个节点（含 1 个自建）答成 2 个免费节点。
+    #[tokio::test]
+    async fn config_detail_shows_owned_nodes_and_why_they_are_unavailable() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+
+        let created = services
+            .config_create(create_input("含自建节点"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        {
+            let conn = services.store.conn();
+            configs::upsert_node(
+                &conn,
+                &crate::store::NewNode {
+                    id: "nd_seed",
+                    name: "免费 A",
+                    server: "203.0.113.10",
+                    port: 8388,
+                    method: "aes-256-gcm",
+                    password_ref: "node:nd_seed",
+                    source: "seed",
+                    source_key: "seed-a",
+                },
+            )
+            .unwrap();
+            configs::upsert_node(
+                &conn,
+                &crate::store::NewNode {
+                    id: "nd_owned",
+                    name: "纽约-便宜0.2",
+                    server: "203.0.113.11",
+                    port: 8388,
+                    method: "aes-256-gcm",
+                    password_ref: "node:nd_owned",
+                    source: configs::SOURCE_OWNED,
+                    source_key: "srv_x",
+                },
+            )
+            .unwrap();
+            configs::attach_node(&conn, &config_id, "nd_seed").unwrap();
+            configs::attach_node(&conn, &config_id, "nd_owned").unwrap();
+        }
+
+        let detail = services.config_detail(&config_id).await.unwrap();
+        assert_eq!(detail["node_count"], 2);
+        let nodes = detail["nodes"].as_array().unwrap();
+        let owned = nodes
+            .iter()
+            .find(|node| node["node_id"] == "nd_owned")
+            .expect("ConfigDetail 必须包含自建节点");
+        assert_eq!(owned["source"], "owned");
+        assert_eq!(owned["unavailable_reason"], serde_json::Value::Null);
+
+        // 服务器停机销毁（镜像行 destroyed）：给出原因，AI 才能解释为什么用不了。
+        {
+            let conn = services.store.conn();
+            crate::store::servers::upsert(
+                &conn,
+                &crate::store::NewMyServer {
+                    id: "srv_x",
+                    provider: "digitalocean",
+                    name: "纽约",
+                    region: "nyc1",
+                    plan: "basic",
+                    state: "destroyed",
+                    node_id: Some("nd_owned"),
+                    hourly_usd: 0.01,
+                    monthly_usd: 6.0,
+                    daily_price_cents: 20,
+                    transfer_gib: 0,
+                    paid_until: 0,
+                    billing_state: "active",
+                    created_at: 1,
+                },
+            )
+            .unwrap();
+        }
+        let detail = services.config_detail(&config_id).await.unwrap();
+        let owned = detail["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["node_id"] == "nd_owned")
+            .unwrap()
+            .clone();
+        assert_eq!(owned["unavailable_reason"], "server_destroyed");
+    }
+
+    /// `node_create` 的返回值与 `NodeSummary` 对齐：新节点必然可用，原因为 null。
+    #[tokio::test]
+    async fn node_create_reports_a_null_unavailable_reason() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("新建节点"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        let node = services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id),
+                name: "东京".into(),
+                server: "203.0.113.20".into(),
+                port: 8388,
+                password: "pw-secret".into(), // secret-scan:allow 测试夹具口令
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(node["source"], "manual");
+        assert!(
+            node["unavailable_reason"].is_null(),
+            "新节点的原因必须是 null：{node}"
+        );
+    }
+
     #[tokio::test]
     async fn config_list_is_summary_only_and_detail_has_the_nodes() {
         crate::test_support::install_test_secrets();
@@ -12161,9 +12311,9 @@ mod config_service_tests {
     #[tokio::test]
     async fn a_seed_refresh_merges_new_nodes_into_the_global_config() {
         let dir = temp_dir();
-        // 这条用例自己写 secrets；不先安装本机凭据存储，单独跑会因
-        // 「凭据存储尚未初始化」失败（整包跑时靠别的用例装上，属于假绿）。
-        crate::secrets::install(&dir);
+        // 进程级 secrets 只能有一个根：用共享的测试存储。装到本用例自己的目录、
+        // 再在结尾删掉，会让并行跑的其它用例一起报「凭据存储不可用」。
+        crate::test_support::install_test_secrets();
         let services = services(&dir);
         {
             let body = r#"{
@@ -12212,8 +12362,6 @@ mod config_service_tests {
             .unwrap();
         assert_eq!(detail["node_count"], 2);
         assert!(detail["current_node_id"].is_null());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 合并种子不动当前节点：用户已经选了自建节点时，刷新不能把选择改回种子。

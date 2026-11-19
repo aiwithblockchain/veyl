@@ -254,7 +254,8 @@ impl Tool for DefaultProfileStatusTool {
     }
 
     fn description(&self) -> &str {
-        "读取 Veyl 免费节点缓存状态（不联网）：节点数、内容哈希、检查时间。"
+        "读取 Veyl 免费节点缓存状态（不联网）：节点数、内容哈希、检查时间。\
+         只代表免费节点缓存，不是用户的节点总量；「我有几个节点」要用 ConfigDetail。"
     }
 
     fn permission_level(&self) -> PermissionLevel {

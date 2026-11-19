@@ -35,6 +35,36 @@ fn state_label(state: &str) -> &'static str {
     }
 }
 
+/// 已销毁的服务器为什么没了，用用户能懂的话；**不暴露内部 failure_code**。
+///
+/// 停机删除来自控制面墓碑（`failure.code = "billing_unpaid"`），其余 destroyed
+/// 都是用户自己销毁的。
+fn destroyed_reason(state: &str, failure_code: Option<&str>) -> Option<&'static str> {
+    if state != "destroyed" {
+        return None;
+    }
+    Some(if failure_code == Some("billing_unpaid") {
+        "因余额不足停机删除"
+    } else {
+        "已销毁"
+    })
+}
+
+/// 对模型可见的单条：destroyed 时补人话原因，并把内部 failure 对象抹掉。
+fn visible_server(server: &Value) -> Value {
+    let state = server.get("state").and_then(Value::as_str).unwrap_or("");
+    let failure_code = server
+        .get("failure")
+        .and_then(|failure| failure.get("code"))
+        .and_then(Value::as_str);
+    let mut visible = server.clone();
+    if let Some(reason) = destroyed_reason(state, failure_code) {
+        visible["failure"] = Value::Null;
+        visible["destroyed_reason"] = json!(reason);
+    }
+    visible
+}
+
 pub struct MyServersTool {
     services: Arc<dyn VpnToolServices>,
 }
@@ -52,7 +82,10 @@ impl Tool for MyServersTool {
     }
 
     fn description(&self) -> &str {
-        "查看「我的服务器」列表：名称、地区、状态、是否可用、月费。只读；不返回地址、端口或密码。建机与销毁只能由用户在「我的服务器」页面操作。\n用「服务器」「地区」「安装中」这些词；不出现 server_id、node_id、IP、端口。"
+        "查看「我的服务器」列表：名称、地区、状态、是否可用、月费。只读；不返回地址、端口或密码。\
+         已销毁的会给出人话原因（`destroyed_reason`：因余额不足停机删除 / 已销毁），\
+         不返回内部错误码。建机与销毁只能由用户在「我的服务器」页面操作。\n\
+         用「服务器」「地区」「安装中」这些词；不出现 server_id、node_id、IP、端口。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -66,10 +99,10 @@ impl Tool for MyServersTool {
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match self.services.my_servers().await {
             Ok(data) => {
-                let servers = data
+                let servers: Vec<Value> = data
                     .get("servers")
                     .and_then(Value::as_array)
-                    .cloned()
+                    .map(|servers| servers.iter().map(visible_server).collect())
                     .unwrap_or_default();
                 let facts = if servers.is_empty() {
                     vec!["还没有服务器".to_string()]
@@ -84,11 +117,19 @@ impl Tool for MyServersTool {
                                 .unwrap_or("未命名");
                             let region = server.get("region").and_then(Value::as_str).unwrap_or("");
                             let state = server.get("state").and_then(Value::as_str).unwrap_or("");
-                            format!("{name} · {region} · {}", state_label(state))
+                            let reason = server
+                                .get("destroyed_reason")
+                                .and_then(Value::as_str)
+                                .map(|reason| format!(" · {reason}"))
+                                .unwrap_or_default();
+                            format!("{name} · {region} · {}{reason}", state_label(state))
                         })
                         .collect()
                 };
-                ToolOutcome::ok(format!("共 {} 台服务器。", servers.len()), data).with_facts(facts)
+                let count = servers.len();
+                let mut visible = data;
+                visible["servers"] = Value::Array(servers);
+                ToolOutcome::ok(format!("共 {count} 台服务器。"), visible).with_facts(facts)
             }
             Err(error) => ToolOutcome::fail(failure(error)),
         };
@@ -115,6 +156,37 @@ mod tests {
         assert_eq!(state_label("healthy"), "可用");
         assert_eq!(state_label("destroying"), "正在销毁");
         assert_eq!(state_label("nonsense"), "状态未知");
+    }
+
+    /// 已销毁的服务器给用户能懂的原因；内部 failure_code 不能交给模型。
+    #[test]
+    fn destroyed_servers_carry_a_human_reason() {
+        let tombstone = json!({
+            "server_id": "srv_1",
+            "name": "纽约",
+            "region": "nyc1",
+            "state": "destroyed",
+            "failure": {
+                "code": "billing_unpaid",
+                "message": "余额不足，已停机删除",
+                "stage": "active",
+                "retryable": false
+            }
+        });
+        let visible = visible_server(&tombstone);
+        assert_eq!(visible["destroyed_reason"], "因余额不足停机删除");
+        assert!(
+            visible["failure"].is_null(),
+            "不能把内部 failure_code 交给模型"
+        );
+
+        let user_destroyed = json!({ "server_id": "srv_2", "state": "destroyed" });
+        assert_eq!(visible_server(&user_destroyed)["destroyed_reason"], "已销毁");
+
+        let active = json!({ "server_id": "srv_3", "state": "active" });
+        let visible = visible_server(&active);
+        assert!(visible.get("destroyed_reason").is_none());
+        assert_eq!(visible["state"], "active");
     }
 
     /// `failure: null` 只代表本次进程内没有记录，描述里必须写死这条，防止模型下错结论。

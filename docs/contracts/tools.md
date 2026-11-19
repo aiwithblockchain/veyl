@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.21.1`
+> 契约版本：`3.21.3`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -1254,6 +1254,7 @@ type DefaultProfileStatusData = {
 - `stale` 概念取消：是否该刷新由 Host 的定时器与「连接失败且当前用种子节点」两条规则决定，不需要模型判断。
 - `applied_at` 是「最近一次被用于建立配置的时刻」，不是拉取时刻；拉取时刻在 `checked_at`。
 - 若 `version` 为 `null`（文件没写），照常工作。
+- **只是免费节点缓存，不是用户的节点总量**：回答「我有几个节点 / 当前用哪个」必须用 `ConfigDetail`（2.45.5 起节点的 `source` 与 `unavailable_reason` 都在那里）。
 
 权限：`ReadOnly`。
 
@@ -1298,6 +1299,8 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 - 节点按配置内顺序返回，**不重排**。
 - **`current_node_id` 可能为 `null`**：`source = "seed"` 的新建配置在用户点「连接」之前、或节点全部被删之后。这不等于「没有节点」——`nodes` 照实返回，`node_count` 照样准确；**不要把它说成「还没有节点」**，也不要替用户补一次 `NodeSwitch`。
 - **不含密码**；要判断连通性用 `NodeProbe`，不要试图从详情里推断。
+- **节点问题的唯一口径（2.45.5）**：`nodes[].source` 区分 `seed` / `url` / `manual` / `owned`；`unavailable_reason = "server_destroyed"` 表示这条对应的服务器已停机销毁。回答「有几个节点 / 哪个节点能不能用」以本工具为准，`DefaultProfileStatus` 只代表免费节点缓存。
+- **`unavailable_reason` 的口径边界（3.21.3）**：它来自本地镜像，只能确定「服务器已销毁」，**分不清停机删除与用户自己销毁**——要说是哪一种，去看 `MyServers` 的 `destroyed_reason`。不要在这里猜。
 - 配置不存在 → `NOT_FOUND`。
 
 权限：`ReadOnly`。
@@ -1787,12 +1790,13 @@ type CoreUpgradeData = {
 ```
 
 - `PermissionLevel::ReadOnly`；不访问云厂商 API，只读 Host 已有的服务器列表（与 UI 同一份）。
-- `data`：`{ servers: [{ server_id, name, region, state, node_ready, monthly_usd, failure }] }`。
+- `data`：`{ servers: [{ server_id, name, region, state, node_ready, monthly_usd, failure, destroyed_reason }] }`。
   - `state` 取值见 `commands.md` §7.15；`node_ready` 表示是否已可用来建配置。
+  - **已销毁的行带 `destroyed_reason`（3.21.3）**：`failure.code = "billing_unpaid"` → 「因余额不足停机删除」，其余 destroyed → 「已销毁」。同时把内部 `failure` 置 null，**不给模型原始 `failure_code`**。
   - **不返回 IP、端口、节点 id、密码**；凭据永不进 AI 上下文。
 - 列表为空是合法结果（`ok: true`，`servers: []`）。
 - 身份未就绪 / 控制面不可用 → 按通用错误上报（`UPSTREAM_ERROR` / `PRECONDITION_FAILED`），不编造数据。
-- `display`：成功 `text`「共 N 台服务器」，`facts` 放「名称 · 地区 · 状态」；失败 `text`「没能读到服务器列表，稍后再试」。
+- `display`：成功 `text`「共 N 台服务器」，`facts` 放「名称 · 地区 · 状态（· 人话原因）」；失败 `text`「没能读到服务器列表，稍后再试」。
 
 ---
 
@@ -2183,6 +2187,18 @@ type HttpCheckData = {
 ---
 
 ## 8. 变更记录
+
+### 3.21.3（未发布，2026-11-19：`MyServers` 给已销毁的人话原因）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `3.21.3`；§4.48 `MyServers` 对已销毁的行补 `destroyed_reason`（`billing_unpaid` → 「因余额不足停机删除」，其余 → 「已销毁」），内部 `failure` 置 null，不把 `failure_code` 交给模型；§4.23 注明 `ConfigDetail.unavailable_reason` 只到「已销毁」，分不清停机删除还是用户销毁 | 语义补充 | AI 要能回答「这个节点是不是到期/停机被销毁了」；镜像层没有 `failure_code`，实时列表才有 |
+
+### 3.21.2（未发布，2026-11-19：节点问题以 `ConfigDetail` 为准）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `3.21.2`；§4.21 `DefaultProfileStatus` 与 §4.23 `ConfigDetail` 补口径：回答「有几个节点 / 当前用哪个 / 某个能不能用」以 `ConfigDetail` 的 `nodes`（含 `source`、`unavailable_reason`）为准，`DefaultProfileStatus` 只代表免费节点缓存 | 语义补充 | 2026-11-19 真机：AI 只看免费节点缓存，把 3 个节点（含 1 个自建）答成「2 个免费节点」 |
 
 ### 3.21.1（未发布，2026-11-19：`NodeProbe` 不再纯只读）
 

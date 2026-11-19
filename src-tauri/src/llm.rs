@@ -630,14 +630,9 @@ mod tests {
     }
 
     /// Key 相关用例需要全局 secrets 存储；同一进程只初始化一次。
+    /// 走共享安装（每个测试进程一个目录，永不删除），避免与其它用例抢进程级根。
     fn ensure_secrets() {
-        use std::sync::OnceLock;
-        static ONCE: OnceLock<()> = OnceLock::new();
-        ONCE.get_or_init(|| {
-            let dir = std::env::temp_dir().join("veyl-llm-secrets");
-            let _ = std::fs::create_dir_all(&dir);
-            crate::secrets::install(&dir);
-        });
+        crate::test_support::install_test_secrets();
     }
 
     fn input(protocol: &str, base: Option<&str>, key: Option<&str>) -> ProviderInput {

@@ -1471,9 +1471,33 @@ mod prompt_tests {
         assert!(SAFETY_RULES.contains("用户逐字选「升级」"), "安全规则缺少确认要求");
     }
 
-    /// 节点来源：三条路都要写出来，且必须先问过用户才能建配置。
-    /// 写成「只能来自 CatalogSearch」会让 AI 在种子可用时拒绝配置；
-    /// 写成「默认节点开箱即用」会让它不问就替用户用我们的服务器。
+    /// 回答「我有几个节点」必须以配置为准：只有 `DefaultProfileStatus` 会把自建节点漏掉。
+    #[test]
+    fn node_questions_must_be_answered_from_config_detail() {
+        let prompt = system_prompt(
+            &[],
+            &crate::rules::Region::Cn,
+            crate::rules::RegionSource::System,
+            &crate::rules::Region::Cn,
+        );
+        assert!(prompt.contains("节点以配置为准"), "系统提示缺少节点口径");
+        for needle in [
+            "必须先调 `ConfigDetail`",
+            "`DefaultProfileStatus` 只代表 Veyl 免费节点的缓存",
+            "不得单独用来回答节点数量",
+            "source = \"owned\"",
+            "unavailable_reason",
+            "销毁服务器和新建服务器都没有 AI 工具入口",
+            "销毁后新建一台",
+            "不要代操作",
+            "去「我的服务器」打开这一台",
+            "当天已扣的费用不退",
+            "不能说成「节点坏了」",
+        ] {
+            assert!(prompt.contains(needle), "节点口径缺了：{needle}");
+        }
+    }
+
     /// 表达规则既要在系统提示里，也要落到每个工具描述上：模型转述结果时
     /// 看的是 tool description，只写系统提示会被它忽略。
     #[test]
