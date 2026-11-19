@@ -98,6 +98,30 @@ describe("服务器详情", () => {
     );
   });
 
+  it("进行中的详情标题用长词，与步骤词一致，不出现左栏短词", () => {
+    renderDetail({ state: "installing" });
+
+    const state = document.querySelector(".myservers__state");
+    expect(state?.textContent).toContain("安装服务端");
+    expect(state?.textContent).not.toContain("安装中");
+    expect(document.body.textContent).not.toContain("安装中");
+  });
+
+  it("past_due 的标题词与左栏同源：写「已欠费」，点是 warn", () => {
+    renderDetail({
+      state: "active",
+      billing_state: "past_due",
+      grace_ends_at: new Date(Date.now() + 2.5 * 86_400_000).toISOString(),
+    });
+
+    const state = document.querySelector(".myservers__state");
+    expect(state?.textContent).toContain("已欠费");
+    expect(state?.classList.contains("is-warn")).toBe(true);
+    expect(state?.querySelector(".led")?.classList.contains("is-warn")).toBe(
+      true,
+    );
+  });
+
   it("expired 说明停机不再产生费用，不再显示宽限天数", () => {
     renderDetail({
       billing_state: "expired",

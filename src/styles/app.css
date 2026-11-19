@@ -2959,6 +2959,10 @@ body[data-resizing] {
   color: var(--red);
 }
 
+.myservers__state.is-warn {
+  color: var(--amber);
+}
+
 .myservers__progress {
   display: flex;
   flex-direction: column;

@@ -4,11 +4,11 @@ import { toBridgeError } from "../agent/errors";
 import { ServerProgress } from "./ServerProgress";
 import { IconPencil } from "./icons";
 import {
-  MY_SERVER_STATE_LABEL,
   billingNoticeText,
   formatUsdCents,
   isProvisioning,
   serverBillingText,
+  serverDetailState,
   serverTone,
 } from "../myservers/labels";
 
@@ -269,7 +269,7 @@ export function MyServerDetail({
         </div>
         <span className={`myservers__state is-${serverTone(server)}`}>
           <span className={`led is-${serverTone(server)}`} aria-hidden />
-          {MY_SERVER_STATE_LABEL[server.state]}
+          {serverDetailState(server)}
         </span>
       </div>
 

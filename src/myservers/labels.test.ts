@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   billingNoticeText,
   formatBuildDuration,
+  serverDetailState,
   serverRailState,
   serverTone,
   stateTone,
@@ -204,6 +205,14 @@ describe("serverTone / serverRailState：欠费压过机器状态", () => {
     const server = { state: "installing" as const, billing_state: "pending" as const };
     expect(serverTone(server)).toBe("idle");
     expect(serverRailState(server)).toBe("安装中");
+    // 详情页用长词，与进度块步骤一致。
+    expect(serverDetailState(server)).toBe("安装服务端");
+  });
+
+  it("欠费词两个界面同源：详情与左栏都写「已欠费」", () => {
+    const server = { state: "active" as const, billing_state: "past_due" as const };
+    expect(serverDetailState(server)).toBe("已欠费");
+    expect(serverDetailState(server)).toBe(serverRailState(server));
   });
 });
 

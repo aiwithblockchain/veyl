@@ -41,17 +41,36 @@ export const MY_SERVER_RAIL_PHASE: Partial<Record<MyServerState, string>> = {
   verifying: "检查中",
 };
 
+/** 欠费词只在这里出现一次：左栏与详情页同源，避免同一台机器两个说法。 */
+function billingStateWord(
+  billing: MyServer["billing_state"],
+): "已欠费" | "已停用" | null {
+  if (billing === "past_due") return "已欠费";
+  if (billing === "expired") return "已停用";
+  return null;
+}
+
 /**
- * 左栏状态词：欠费/停用优先于机器状态。
+ * 左栏状态词：短词，一行放得下；欠费/停用优先于机器状态。
  * 进行中的机器 billing_state 是 pending，不会命中这两档。
  */
 export function serverRailState(
   server: Pick<MyServer, "state" | "billing_state">,
 ): string {
-  if (server.billing_state === "past_due") return "已欠费";
-  if (server.billing_state === "expired") return "已停用";
   return (
-    MY_SERVER_RAIL_PHASE[server.state] ?? MY_SERVER_STATE_LABEL[server.state]
+    billingStateWord(server.billing_state) ??
+    MY_SERVER_RAIL_PHASE[server.state] ??
+    MY_SERVER_STATE_LABEL[server.state]
+  );
+}
+
+/** 详情页标题词：用长词；欠费覆盖与左栏同源。 */
+export function serverDetailState(
+  server: Pick<MyServer, "state" | "billing_state">,
+): string {
+  return (
+    billingStateWord(server.billing_state) ??
+    MY_SERVER_STATE_LABEL[server.state]
   );
 }
 
