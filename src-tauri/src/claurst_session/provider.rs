@@ -606,7 +606,8 @@ mod tests {
         });
 
         wrapper.create_message(request.clone()).await.unwrap();
-        wrapper.create_message_stream(request).await.unwrap();
+        // 只验证请求改写；流的消费由各 provider 自己的用例覆盖。
+        let _stream = wrapper.create_message_stream(request).await.unwrap();
 
         let seen = inner.requests.lock().unwrap();
         assert_eq!(seen.len(), 2, "非流式与流式都必须经过包装层");
