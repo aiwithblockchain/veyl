@@ -599,7 +599,7 @@ function confValue(value: string): string {
 }
 
 /**
- * Shadowrocket（Surge 风格）配置：节点、select 组、国内直连与兜底（§3.7.9）。
+ * Shadowrocket（Surge 风格）配置：节点、select 组、国内直连与兜底（技术设计 §3.7.13）。
  *
  * 只发 ss 订阅时它手里只有节点，只能全局；把规则也放进同一份配置，
  * 才能在「全局路由 = 配置」下做到国内直连、其余走节点。
