@@ -215,7 +215,7 @@ export function Onboarding({ bridge, onDone }: Props) {
           <span>{PRODUCT_NAME}</span>
         </div>
         <h1 className="first-run__title">
-          Under the veil, it keeps your line open.
+          Your server. Your line.
         </h1>
 
         <div className={`first-run__switcher ${fading ? "is-fading" : ""}`}>
