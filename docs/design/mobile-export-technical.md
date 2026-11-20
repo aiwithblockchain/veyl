@@ -700,7 +700,7 @@ M1 只对 **sing-box 官方 / Shadowrocket / CMFA / Hiddify** 四个 App 负责�
 
 ### 3.8 手机端智能分流（2026-11-20 定稿）
 
-> 产品要求：手机端不能是全局代理。国内站点直连、被墙站点走节点；**不能静默变全局，也不能塌陷成全部直连**。本节按 2026-11-20 的实现口径收敛：规则集放自有域名、不用 `download_detour`，sing-box 做 DNS 分流，Clash 用 `DOMAIN-SUFFIX,cn` 保底 + 自有域名 provider + 最小 DNS。内核行为均以随包 `sing-box 1.14.4` 实测或源码为依据。
+> 产品要求：手机端不能是全局代理。国内站点直连、被墙站点走节点；**不能静默变全局，也不能塌陷成全部直连**。本节按 2026-11-20 的实现口径收敛：规则集放自有域名、不用 `download_detour`，sing-box 做 DNS 分流，Clash 用自有域名 provider + `DOMAIN-SUFFIX,cn` 兜底、不配 DNS。内核行为均以随包 `sing-box 1.14.4` 实测或源码为依据。
 
 #### 3.8.1 三种格式能不能承载规则
 
@@ -801,14 +801,14 @@ rule-providers:
     behavior: domain
     format: mrs
     url: "https://<origin>/rules/geosite-cn.mrs"
-    path: ./rules/geosite-cn.mrs
+    path: ./providers/cn-domain.mrs
     interval: 86400
   cn-ip:
     type: http
     behavior: ipcidr
     format: mrs
     url: "https://<origin>/rules/geoip-cn.mrs"
-    path: ./rules/geoip-cn.mrs
+    path: ./providers/cn-ip.mrs
     interval: 86400
 
 rules:
@@ -840,7 +840,7 @@ rules:
 
 - **sing-box 不会泄漏**：境外域名从不问国内 DNS；国内 DNS 查询走直连，只把国内域名暴露给本地运营商（直连的预期代价）。
 - **sing-box 不会污染**：境外域名只走经代理的 DoH；国内域名用国内 DNS 得到国内 IP。
-- **Clash 按产品决定不加 `dns` 块**：规则按域名匹配、发生在解析之前，代理出站把域名交给服务端解析，所以被墙站点不依赖本地 DNS；本地 DNS 只影响直连域名的解析。写 `dns` 会覆盖用户在 CMFA 里的设置，收益不抵风险。
+- **Clash 按产品决定不加 `dns` 块**：规则按域名匹配、发生在解析之前，代理出站把域名交给服务端解析，所以被墙站点不依赖本地 DNS；本地 DNS 只影响直连域名的解析。写 `dns` 会覆盖用户在 CMFA 里的设置，还多一个「policy 写错整块失效」的故障面。
 - 残留风险：`223.5.5.5` 的 UDP/53 在极少数网络被劫持；V18 若发现，改为 `https://doh.pub/dns-query` + `domain_resolver` 引导（仍是直连），作为后续修改。
 
 #### 3.8.8 失败模式
@@ -1258,7 +1258,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 ### 必须改（P1）
 
 1. **新增控制面端点**（`/v1/mobile/token`、`/token/rotate`、`/profile`、`/profile/clash`、`/profile/ss`）与 `mobile_tokens` 迁移；所有 profile 响应必须 `no-store`，401 必须带 `WWW-Authenticate`。
-2. **控制面按请求生成配置**：只筛 `source = owned` 对应的 `servers`，排除免费 / 试用；不导出桌面 TUN 参数 / `mixed` 入站 / 本地端口 / Clash API。**非零模板必须带最小 TUN 入站（`auto_route` 为真）、`route.auto_detect_interface: true`、`route.default_domain_resolver`、`experimental.cache_file.enabled: true` 与最小 DNS（国内/境外分流 + `hijack-dns`）；零节点模板不得带 `inbounds` 或 `dns`**。
+2. **控制面按请求生成配置**：只筛 `source = owned` 对应的 `servers`，排除免费 / 试用；不导出桌面 TUN 参数 / `mixed` 入站 / 本地端口 / Clash API。**非零模板必须带最小 TUN 入站（`auto_route` 为真）、`route.auto_detect_interface: true`、`route.default_domain_resolver` 与最小 DNS（国内/境外分流 + `hijack-dns`）；零节点模板不得带 `inbounds` 或 `dns`**。`experimental.cache_file` 未纳入定稿（§3.8.10 的 P2）。
 3. **三种格式的边界**：`/profile` 路径保持不变；Clash YAML 出 `proxies` / `proxy-groups` / `rules`（`RULE-SET` 两条 + `DOMAIN-SUFFIX,cn` 兜底）/ `rule-providers`，**不含** TUN、DNS、端口、`mode`、`GEOIP/GEOSITE`；ss:// 严格按 SIP002（base64url 无填充）逐行输出；零节点按 §3.7.9 各给「合法空配置」，全部凭据不可用统一 503。**ss 行随 Shadowrocket 进 M1**，其二维码 = 订阅 URL 本身（待真机）；`/profile/ss` 与单测必须实现。
 4. **桌面 Rust 生成 URL 与二维码**：origin 只取 `env.rs`，禁止 `workers.dev`；令牌不落本地；三种格式都返回 URL 与二维码，不取 ss 文本。下载码走 `mobile_clients_qr { client }` 的固定映射，不接受任意 URL。
 5. **两个 UI 入口共用同一弹层与命令**；左栏行只在「已登录 + 至少一台节点就绪 + 列表非 loading/error」时出现。
