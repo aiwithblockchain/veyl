@@ -873,6 +873,7 @@ rules:
 2. `experimental.cache_file.enabled` 作为 P2：V18 若确认客户端接受，再加上；不加则冷启动每次都依赖规则源。
 3. Clash 规则顺序固定：`RULE-SET,cn-domain` → `RULE-SET,cn-ip` → `DOMAIN-SUFFIX,cn` 兜底；`.mrs` 兼容性由 V13 / V20 取证，不支持时按 §3.8.6 回退 text，最后才考虑去掉扩展层并记录覆盖率缺口。
 4. Clash **不加 `dns` 块**（产品决定）：规则按域名匹配、代理域名由服务端解析，写 DNS 只会覆盖用户在 CMFA 里的设置。
+5. **手机端不复制 Windows 的 `quic → reject` 规则**。Windows 侧（2026-11-20）因「UDP 经节点没有回包」加过这条；但同一时期 iPhone + sing-box MT 真机实测 YouTube 视频可正常播放，说明手机所在网络下 UDP 经节点可用。若日后手机上出现「页面能开、视频卡住」，先按 V 项确认是不是 UDP 被拦，再考虑加 reject——**不要直接照搬桌面规则**，两者的网络路径不同。
 5. Shadowrocket 保留该行、接受全局；不做 conf 端点；界面必须写「用它只能全部走节点，国内网站也会绕道」（§3.8.1）。
 
 
