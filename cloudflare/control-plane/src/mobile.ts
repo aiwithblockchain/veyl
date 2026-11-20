@@ -588,6 +588,54 @@ function ssList(nodes: ExportedNode[]): string {
   return nodes.length === 0 ? "" : `${nodes.map(ssLink).join("\n")}\n`;
 }
 
+/**
+ * Shadowrocket 配置里的一个值。逗号、等号、引号、首尾空格会破坏行式语法，
+ * 这类值用双引号包住；内部引号换成单引号（它没有转义语法）。
+ */
+function confValue(value: string): string {
+  const trimmed = value.trim();
+  if (/^[^,="]+$/.test(trimmed) && trimmed === value) return value;
+  return `"${trimmed.replace(/"/g, "'")}"`;
+}
+
+/**
+ * Shadowrocket（Surge 风格）配置：节点、select 组、国内直连与兜底（§3.7.9）。
+ *
+ * 只发 ss 订阅时它手里只有节点，只能全局；把规则也放进同一份配置，
+ * 才能在「全局路由 = 配置」下做到国内直连、其余走节点。
+ */
+function shadowrocketConf(nodes: ExportedNode[]): string {
+  const lines: string[] = [];
+  lines.push("[General]");
+  lines.push("bypass-system = true");
+  // 国内 DNS 在前：规则命中要靠解析后的 IP，用境外解析会把国内域名判到海外。
+  lines.push("dns-server = system, 223.5.5.5, 119.29.29.29");
+  lines.push(
+    "skip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10, localhost, *.local",
+  );
+  lines.push("");
+  lines.push("[Proxy]");
+  for (const node of nodes) {
+    lines.push(
+      `${confValue(node.tag)} = ss, ${sip002Host(node.host)}, ${node.port}, ` +
+        `encrypt-method=${SS_METHOD}, password=${confValue(node.password)}, udp-relay=true`,
+    );
+  }
+  lines.push("");
+  if (nodes.length > 0) {
+    lines.push("[Proxy Group]");
+    lines.push(`Veyl = select, ${nodes.map((node) => confValue(node.tag)).join(", ")}`);
+    lines.push("");
+  }
+  lines.push("[Rule]");
+  // 顺序同 Clash：先域名后缀、再 GEOIP，FINAL 兜底。GEOIP 用的是客户端自带的库，
+  // 不像 mihomo 那样默认去 GitHub 拉；拉不到时规则落空，变成全部走节点。
+  lines.push("DOMAIN-SUFFIX,cn,DIRECT");
+  lines.push("GEOIP,CN,DIRECT");
+  lines.push(nodes.length === 0 ? "FINAL,DIRECT" : "FINAL,Veyl");
+  return `${lines.join("\n")}\n`;
+}
+
 /** 规则集与 profile 同一 origin；不写 download_detour（1.14 已废弃，1.16 移除）。 */
 function cnRuleSets(origin: string) {
   return [
@@ -730,6 +778,19 @@ async function ssProfile(
   });
 }
 
+async function shadowrocketProfile(
+  request: Request,
+  env: MobileEnv & { DB: D1Database },
+): Promise<Response> {
+  const loaded = await loadProfileNodes(request, env);
+  if (isResponse(loaded)) return loaded;
+  if (loaded.nodes.length === 0 && loaded.queried > 0) return unavailableProfile();
+  return new Response(shadowrocketConf(loaded.nodes), {
+    status: 200,
+    headers: profileHeaders("text/plain; charset=utf-8"),
+  });
+}
+
 export async function handleMobile(
   request: Request,
   env: MobileEnv,
@@ -743,7 +804,10 @@ export async function handleMobile(
     parts[2] === "profile" && request.method === "GET"
       ? parts.length === 3
         ? "singbox"
-        : parts.length === 4 && (parts[3] === "clash" || parts[3] === "ss")
+        : parts.length === 4 &&
+            (parts[3] === "clash" ||
+              parts[3] === "ss" ||
+              parts[3] === "shadowrocket")
           ? parts[3]
           : null
       : null;
@@ -766,6 +830,7 @@ export async function handleMobile(
 
   if (profileFormat === "clash") return clashProfile(request, ready);
   if (profileFormat === "ss") return ssProfile(request, ready);
+  if (profileFormat === "shadowrocket") return shadowrocketProfile(request, ready);
   if (profileFormat === "singbox") return singboxProfile(request, ready);
   if (parts.length === 4) return rotateToken(request, ready);
   return createToken(request, ready);

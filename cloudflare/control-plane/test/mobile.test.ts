@@ -268,7 +268,7 @@ function tokenRequest(accessToken: string, rotate = false): Request {
 
 function profileRequest(
   password: string | null,
-  options: { user?: string; ip?: string; format?: "clash" | "ss" } = {},
+  options: { user?: string; ip?: string; format?: "clash" | "ss" | "shadowrocket" } = {},
 ): Request {
   const headers: Record<string, string> = { "CF-Connecting-IP": options.ip ?? "203.0.113.7" };
   if (password !== null) {
@@ -931,6 +931,99 @@ describe("GET /v1/mobile/profile", () => {
     expect(response?.status).toBe(503);
     const body = (await response!.json()) as { code: string; details: { reason: string } };
     expect(body.code).toBe("INTERNAL");
+    expect(body.details.reason).toBe("mobile_profile_unavailable");
+  });
+
+  it("Shadowrocket 配置：节点、select 组、国内直连与兜底，精确输出", async () => {
+    const { db, env, accessToken } = await setup();
+    await seedServer(db, {
+      id: "srv_sr",
+      name: "东京 1 号",
+      createdAt: 1,
+      host: "203.0.113.10",
+      port: 20343,
+      password: "s3cret-password",
+    });
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(
+      profileRequest(token, { format: "shadowrocket" }),
+      env,
+    );
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
+    expect(response?.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response!.text()).toBe(
+      "[General]\n" +
+        "bypass-system = true\n" +
+        "dns-server = system, 223.5.5.5, 119.29.29.29\n" +
+        "skip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10, localhost, *.local\n" +
+        "\n" +
+        "[Proxy]\n" +
+        "东京 1 号 = ss, 203.0.113.10, 20343, encrypt-method=aes-256-gcm, password=s3cret-password, udp-relay=true\n" +
+        "\n" +
+        "[Proxy Group]\n" +
+        "Veyl = select, 东京 1 号\n" +
+        "\n" +
+        "[Rule]\n" +
+        "DOMAIN-SUFFIX,cn,DIRECT\n" +
+        "GEOIP,CN,DIRECT\n" +
+        "FINAL,Veyl\n",
+    );
+  });
+
+  it("Shadowrocket 配置：逗号或引号进名字与密码时用双引号包住，行结构不破", async () => {
+    const { db, env, accessToken } = await setup();
+    await seedServer(db, {
+      id: "srv_sr_special",
+      name: "东京,1\n号",
+      createdAt: 1,
+      host: "203.0.113.10",
+      port: 20343,
+      password: "p,a\"ss",
+    });
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(
+      profileRequest(token, { format: "shadowrocket" }),
+      env,
+    );
+    expect(response?.status).toBe(200);
+    const conf = await response!.text();
+
+    // 名字里的换行会被 confValue 保留在引号内，这里只断言引用形式与密码。
+    expect(conf).toContain('password="p,a\'ss", udp-relay=true');
+    // 组列表与规则引用的是同一个名字，且没有裸逗号把列表切碎。
+    const groupLine = conf.split("\n").find((line) => line.startsWith("Veyl = select, "));
+    expect(groupLine).toBeDefined();
+    expect(groupLine!).toContain('"东京,1');
+  });
+
+  it("Shadowrocket 零节点：无 [Proxy Group]，规则兜底 DIRECT", async () => {
+    const { env, accessToken } = await setup();
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(
+      profileRequest(token, { format: "shadowrocket" }),
+      env,
+    );
+    expect(response?.status).toBe(200);
+    const conf = await response!.text();
+    expect(conf).not.toContain("[Proxy Group]");
+    expect(conf.endsWith("FINAL,DIRECT\n")).toBe(true);
+  });
+
+  it("Shadowrocket 全部凭据不可用：503", async () => {
+    const { db, env, accessToken } = await setup();
+    await seedServer(db, { id: "srv_sr_bad", name: "坏凭据", createdAt: 1, corruptCredential: true });
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(
+      profileRequest(token, { format: "shadowrocket" }),
+      env,
+    );
+    expect(response?.status).toBe(503);
+    const body = (await response!.json()) as { details: { reason: string } };
     expect(body.details.reason).toBe("mobile_profile_unavailable");
   });
 
