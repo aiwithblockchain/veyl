@@ -16,6 +16,9 @@ pub mod pipe;
 pub mod process;
 pub mod runtime;
 pub mod scm;
+// 只有服务端在 `start` 前用；主程序编译这份模块时是死代码。
+#[allow(dead_code)]
+pub mod wintun;
 
 // `cidr.rs` 不在这里声明：主程序（`tun/mod.rs`）与服务二进制都直接
 // `#[path]` 引用它，在这里再声明一次会让主程序把同一份源码编两遍。

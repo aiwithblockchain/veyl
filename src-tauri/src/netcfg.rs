@@ -169,7 +169,7 @@ pub fn flush_dns() -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        run("ipconfig", &["/flushdns"])
+        run("ipconfig", &["/flushdns"]).map(|_| ())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {

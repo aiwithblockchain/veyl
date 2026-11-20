@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
   开发用：把一个本地构建的 veyl-service.exe 装成 LocalSystem 服务。

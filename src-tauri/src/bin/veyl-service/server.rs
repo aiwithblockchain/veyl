@@ -29,6 +29,9 @@ const SING_BOX_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// 停子进程最多等这么久，超时就再来一次强制结束。
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 清理旧 Wintun 设备后再等它从网卡列表消失的上限。
+const ADAPTER_RELEASE_WAIT: Duration = Duration::from_secs(10);
+
 struct Running {
     pid: u32,
     clash_addr: String,
@@ -170,6 +173,11 @@ impl Server {
 
         // 3. 替换语义：先停旧实例，再起新的（契约 §2）。
         self.stop_child();
+
+        // 旧 Wintun 设备的删除是异步的；不等它释放就起新的，create adapter 必然失败。
+        if let Err(message) = self.ensure_adapter_free() {
+            return self.fail("tun_start_failed", message);
+        }
 
         let config_file = config_path();
         if let Some(parent) = config_file.parent() {
@@ -313,6 +321,37 @@ impl Server {
             }),
         };
         Response::ok(snapshot)
+    }
+
+    /// 清掉上一个 sing-box 留下的 Wintun 设备，再等它从网卡列表消失。
+    ///
+    /// **不能只看 `adapter_present`**：半删除状态的设备已经不在网卡列表里，
+    /// 但仍占着名字，`WintunCreateAdapter` 会报 ALREADY_EXISTS（2026-11-20 真机）。
+    /// 所以每次启动前都按 `sing-tun` / `sing-box` 标记扫一遍 PnP 设备并移除。
+    fn ensure_adapter_free(&self) -> Result<(), String> {
+        let name = super::win::wintun::ADAPTER_NAME;
+        match super::win::wintun::remove_adapter() {
+            Ok(true) => self
+                .log
+                .info("已移除上一次留下的 sing-tun Wintun 设备（含 phantom）"),
+            Ok(false) => {}
+            // 还有残留却没删掉：继续 start 只会让 sing-box 再报一次难懂的适配器错误。
+            Err(error) => return Err(format!("清理旧的 Wintun 设备失败：{error}")),
+        }
+
+        if !super::win::wintun::adapter_present(name) {
+            return Ok(());
+        }
+        self.log.info(format!(
+            "Wintun 适配器 {name} 还在网卡列表里，等待它消失（最多 {} 秒）",
+            ADAPTER_RELEASE_WAIT.as_secs()
+        ));
+        if super::win::wintun::wait_until_gone(name, ADAPTER_RELEASE_WAIT) {
+            self.log.info(format!("Wintun 适配器 {name} 已释放"));
+            Ok(())
+        } else {
+            Err(format!("上一次的虚拟网卡 {name} 还没有释放完，请稍后再试"))
+        }
     }
 
     fn stop_child(&self) {

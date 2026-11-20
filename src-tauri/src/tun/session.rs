@@ -808,12 +808,17 @@ impl TunSession {
                     TunState::Running { pid }
                 }
                 None => {
+                    // sing-box 自己退出（例如 Wintun 建适配器失败）时，界面必须跟着变。
+                    log::warn!("TUN 后端报告运行时已退出，连接状态回到未连接");
                     self.clear_state();
                     TunState::Stopped
                 }
             },
             // 后端暂时问不到：保留缓存，不把「问不到」当成「已断开」。
-            Err(_) => TunState::Running { pid: cached_pid },
+            Err(error) => {
+                log::debug!("复核 TUN 状态失败，暂时保留已连接（下次再试）：{error}");
+                TunState::Running { pid: cached_pid }
+            }
         }
     }
 

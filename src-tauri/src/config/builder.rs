@@ -311,6 +311,14 @@ pub fn build_routed_multi(
 
     let mut rules = transport_rules(input);
     rules.extend(plan.route_rules.iter().cloned());
+    // Windows 真机（2026-11-20）：YouTube 页面只用 QUIC 发起，UDP 经节点没有回包，
+    // 浏览器一直等 QUIC 也不回退 TCP，表现是「连上了但视频打不开」。
+    // 拒绝放在分流之后：国内直连规则命中的 QUIC 仍走 direct，只有真正要出海的
+    // QUIC 被拒，浏览器随即改走 TCP。系统代理模式不走 TUN，不受影响。
+    #[cfg(target_os = "windows")]
+    if input.connect_mode.is_tun() {
+        rules.push(json!({ "protocol": "quic", "action": "reject" }));
+    }
 
     let mut route = json!({
         "rule_set": plan.rule_sets.clone(),
@@ -785,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn tun_rule_order_is_sniff_hijack_private_then_routing() {
+    fn tun_rule_order_is_sniff_hijack_then_routing() {
         let config = build_routed(&tun_input(), &routed_plan()).unwrap();
         let rules = config["route"]["rules"].as_array().unwrap();
 
@@ -793,6 +801,13 @@ mod tests {
         assert_eq!(rules[1]["protocol"], "dns");
         assert_eq!(rules[1]["action"], "hijack-dns", "DNS 劫持必须早于分流");
         assert_eq!(rules[2]["ip_is_private"], true);
+
+        #[cfg(target_os = "windows")]
+        {
+            let last = rules.last().unwrap();
+            assert_eq!(last["protocol"], "quic");
+            assert_eq!(last["action"], "reject", "Windows TUN 必须在分流后拒绝 QUIC");
+        }
 
         let sniffers = rules[0]["sniffer"].as_array().unwrap();
         assert!(
