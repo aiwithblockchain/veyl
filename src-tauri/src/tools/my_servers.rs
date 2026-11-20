@@ -1,6 +1,6 @@
 //! `MyServers`：只读地列出「我的服务器」与状态（`tools.md` §4.x）。
 //!
-//! 建机 / 销毁 / 凭据只能由用户点界面；本工具不返回 IP、端口、密码或节点 id。
+//! 建机 / 销毁 / 凭据只能由用户点界面；本工具返回地址，不返回端口、密码或节点 id。
 
 use std::sync::Arc;
 
@@ -50,19 +50,39 @@ fn destroyed_reason(state: &str, failure_code: Option<&str>) -> Option<&'static 
     })
 }
 
-/// 对模型可见的单条：destroyed 时补人话原因，并把内部 failure 对象抹掉。
+/// 对模型可见的字段白名单：地址可以给（用户已同意 AI 看到自己服务器的 IP）；
+/// 端口、密码、节点 id、provider id 等内部字段一律不出。
+const VISIBLE_FIELDS: [&str; 10] = [
+    "server_id",
+    "name",
+    "region",
+    "state",
+    "ip",
+    "node_ready",
+    "monthly_usd",
+    "daily_price_cents",
+    "transfer_gib",
+    "failure",
+];
+
+/// 对模型可见的单条：按白名单重建，destroyed 时补人话原因并抹掉内部 failure。
 fn visible_server(server: &Value) -> Value {
     let state = server.get("state").and_then(Value::as_str).unwrap_or("");
     let failure_code = server
         .get("failure")
         .and_then(|failure| failure.get("code"))
         .and_then(Value::as_str);
-    let mut visible = server.clone();
-    if let Some(reason) = destroyed_reason(state, failure_code) {
-        visible["failure"] = Value::Null;
-        visible["destroyed_reason"] = json!(reason);
+    let mut visible = serde_json::Map::new();
+    for field in VISIBLE_FIELDS {
+        if let Some(value) = server.get(field) {
+            visible.insert(field.to_string(), value.clone());
+        }
     }
-    visible
+    if let Some(reason) = destroyed_reason(state, failure_code) {
+        visible.insert("failure".into(), Value::Null);
+        visible.insert("destroyed_reason".into(), json!(reason));
+    }
+    Value::Object(visible)
 }
 
 pub struct MyServersTool {
@@ -82,10 +102,11 @@ impl Tool for MyServersTool {
     }
 
     fn description(&self) -> &str {
-        "查看「我的服务器」列表：名称、地区、状态、是否可用、月费。只读；不返回地址、端口或密码。\
+        "查看「我的服务器」列表：名称、地区、状态、地址、是否可用、月费。\
+         只读；返回地址，不返回端口、密码。用户问这台机器的地址时直接答，不要绕。\
          已销毁的会给出人话原因（`destroyed_reason`：因余额不足停机删除 / 已销毁），\
          不返回内部错误码。建机与销毁只能由用户在「我的服务器」页面操作。\n\
-         用「服务器」「地区」「安装中」这些词；不出现 server_id、node_id、IP、端口。"
+         用「服务器」「地区」「安装中」这些词；不出现 server_id、node_id。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -117,12 +138,17 @@ impl Tool for MyServersTool {
                                 .unwrap_or("未命名");
                             let region = server.get("region").and_then(Value::as_str).unwrap_or("");
                             let state = server.get("state").and_then(Value::as_str).unwrap_or("");
+                            let address = server
+                                .get("ip")
+                                .and_then(Value::as_str)
+                                .map(|ip| format!(" · {ip}"))
+                                .unwrap_or_default();
                             let reason = server
                                 .get("destroyed_reason")
                                 .and_then(Value::as_str)
                                 .map(|reason| format!(" · {reason}"))
                                 .unwrap_or_default();
-                            format!("{name} · {region} · {}{reason}", state_label(state))
+                            format!("{name} · {region} · {}{address}{reason}", state_label(state))
                         })
                         .collect()
                 };
@@ -156,6 +182,32 @@ mod tests {
         assert_eq!(state_label("healthy"), "可用");
         assert_eq!(state_label("destroying"), "正在销毁");
         assert_eq!(state_label("nonsense"), "状态未知");
+    }
+
+    /// 地址保留；端口、密码、节点 id、provider id 等内部字段不得出现。
+    #[test]
+    fn visible_servers_keep_address_and_drop_secrets() {
+        let server = json!({
+            "server_id": "srv_1",
+            "name": "伦敦",
+            "region": "lon1",
+            "state": "active",
+            "ip": "167.99.195.212",
+            "port": 59281,
+            "node_ready": true,
+            "monthly_usd": 6.0,
+            "password": "pw-secret",
+            "node_id": "nd_x",
+            "provider_id": "123",
+        });
+        let visible = visible_server(&server);
+        assert_eq!(visible["ip"], "167.99.195.212");
+        for hidden in ["port", "password", "node_id", "provider_id"] {
+            assert!(
+                visible.get(hidden).is_none(),
+                "内部字段 {hidden} 不能进 AI 上下文：{visible}"
+            );
+        }
     }
 
     /// 已销毁的服务器给用户能懂的原因；内部 failure_code 不能交给模型。

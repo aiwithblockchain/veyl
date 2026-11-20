@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.22.0`
+> 契约版本：`3.22.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -1791,13 +1791,14 @@ type CoreUpgradeData = {
 ```
 
 - `PermissionLevel::ReadOnly`；不访问云厂商 API，只读 Host 已有的服务器列表（与 UI 同一份）。
-- `data`：`{ servers: [{ server_id, name, region, state, node_ready, monthly_usd, failure, destroyed_reason }] }`。
+- `data`：`{ servers: [{ server_id, name, region, state, ip, node_ready, monthly_usd, daily_price_cents, transfer_gib, failure, destroyed_reason }] }`。
   - `state` 取值见 `commands.md` §7.15；`node_ready` 表示是否已可用来建配置。
+  - **`ip` 可以给（3.22.1）**：用户已同意 AI 能说出自己服务器的地址（排障用）。`null` 表示控制面还没给出，如实说未知，不要编造。**端口不给**：界面只显示 IP，AI 说端口会与界面不一致，且对用户没有额外价值。
+  - **密码、节点 id、provider id 等内部字段一律不给**；工具按固定白名单重建每一条。
   - **已销毁的行带 `destroyed_reason`（3.21.3）**：`failure.code = "billing_unpaid"` → 「因余额不足停机删除」，其余 destroyed → 「已销毁」。同时把内部 `failure` 置 null，**不给模型原始 `failure_code`**。
-  - **不返回 IP、端口、节点 id、密码**；凭据永不进 AI 上下文。
 - 列表为空是合法结果（`ok: true`，`servers: []`）。
 - 身份未就绪 / 控制面不可用 → 按通用错误上报（`UPSTREAM_ERROR` / `PRECONDITION_FAILED`），不编造数据。
-- `display`：成功 `text`「共 N 台服务器」，`facts` 放「名称 · 地区 · 状态（· 人话原因）」；失败 `text`「没能读到服务器列表，稍后再试」。
+- `display`：成功 `text`「共 N 台服务器」，`facts` 放「名称 · 地区 · 状态 · IP（· 人话原因）」；失败 `text`「没能读到服务器列表，稍后再试」。
 
 ---
 
@@ -2189,6 +2190,12 @@ type HttpCheckData = {
 ---
 
 ## 8. 变更记录
+
+### 3.22.1（未发布，2026-11-20：`MyServers` 可以给地址）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `3.22.1`；§4.48 `MyServers` 的 `data` 增 `ip`（`null` 表示控制面未给出，如实说未知；**端口仍不给**）；description 从「不返回地址、端口或密码」改为「返回地址，不返回端口、密码；用户问地址就直答」；`facts` 带「IP」。每条按固定白名单重建，密码、节点 id、provider id 等内部字段仍不给 | 字段扩展 / 口径变更 | 用户 2026-11-20 拍板：AI 要能说出自己服务器的 IP（排障）；界面只显示 IP，端口不给 |
 
 ### 3.22.0（未发布，2026-11-19：`OpenSettings` 行登记表新增 `account.mobile`）
 

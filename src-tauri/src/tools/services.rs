@@ -5344,7 +5344,8 @@ impl VpnToolServices for WiredServices {
         let servers = crate::control_plane::servers::list()
             .await
             .map_err(|error| svc_error(&error.code, error.message.clone()))?;
-        // 只给用户能理解的字段：不返回 IP、端口、密码或节点 id。
+        // 只给用户能理解的字段：地址**可以**给（用户已同意 AI 能看到自己服务器的 IP，
+        // 用于排障）；端口、密码、节点 id 与其它内部字段不给。
         let summaries: Vec<Value> = servers
             .into_iter()
             .map(|server| {
@@ -5353,6 +5354,7 @@ impl VpnToolServices for WiredServices {
                     "name": server.name,
                     "region": server.region,
                     "state": server.state,
+                    "ip": server.ip,
                     // 能否用来建配置看本地节点行，不看控制面 `node_id`（active 后就有值）。
                     "node_ready": server.local_node_id.is_some(),
                     "monthly_usd": server.monthly_usd,
