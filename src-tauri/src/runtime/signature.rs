@@ -81,14 +81,17 @@ pub fn verify_installed_runtime(path: &Path, recorded_sha256: &str) -> Result<()
 }
 
 // `tun::trust` 是 unix 专属；Windows 的同类校验在特权通道模块里。
-#[cfg(unix)]
+// 只有非 macOS 的 `verify_installed_runtime` 用它；macOS 走签名校验，这条不编进来。
+#[cfg(not(target_os = "macos"))]
 fn is_full_sha256(value: &str) -> bool {
-    crate::tun::trust::is_full_sha256(value)
-}
-
-#[cfg(target_os = "windows")]
-fn is_full_sha256(value: &str) -> bool {
-    crate::tun::windows::runtime::is_full_sha256(value)
+    #[cfg(unix)]
+    {
+        crate::tun::trust::is_full_sha256(value)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        crate::tun::windows::runtime::is_full_sha256(value)
+    }
 }
 
 /// 从更新源下载并解压出来的运行时：必须在发布前由我们重签，否则拒绝。

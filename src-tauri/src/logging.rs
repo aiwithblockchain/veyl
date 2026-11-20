@@ -34,8 +34,6 @@ const FILE_LEVEL: LevelFilter = LevelFilter::Info;
 /// 需要链路细节时用 `RUST_LOG=debug` 显式打开，文件与终端会一起变详细。
 #[cfg(debug_assertions)]
 const CONSOLE_LEVEL: LevelFilter = LevelFilter::Info;
-#[cfg(not(debug_assertions))]
-const CONSOLE_LEVEL: LevelFilter = LevelFilter::Off;
 
 /// 单个日志文件的写满阈值。
 ///
