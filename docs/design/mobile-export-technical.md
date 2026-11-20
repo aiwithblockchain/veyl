@@ -3,7 +3,7 @@
 > 日期：2026-11-19
 > 状态：**技术设计，待评审**。只出文档：不改代码、不改共享契约文件、不改其它设计稿、不提交。
 > 上游：`mobile-export.md`（需求）、`mobile-export-ui.md`（界面定稿）、`my-servers.md` §16 / §17（凭据模型、用户无 SSH）、`login-and-payment.md` §2.5（令牌模型）、`environments.md`
-> 事实边界：sing-box 配置形状已于 2026-11-19 用随包 `sing-box 1.14.4` 的 `check` 在本地对三份样张实测通过（§3.6）；客户端扫码、Basic 认证、自动更新等外部行为沿用需求文档的「待验证」，本文件 §8 给出可执行步骤，**不凭记忆断言**。
+> 事实边界：sing-box 配置形状已于 2026-11-19 用随包 `sing-box 1.14.4` 的 `check` 在本地实测通过（§3.6，含最小 TUN 入站、最小 DNS 与零节点样张）；真机先后暴露「无 DNS 时 VPN 已连、无法上网」「无 TUN 入站时已连接但流量为 0」「有 TUN 但仍无法出网（出站未绑定物理网卡）」三种现象，据此依次改写模板；TUN 是否创建系统隧道由官方客户端源码确认（§3.5）。**修复后的真机复验（Wi-Fi / 蜂窝）尚未执行**（V8 / V12）。客户端扫码、Basic 认证、自动更新等外部行为沿用需求文档的「待验证」，本文件 §8 给出可执行步骤，**不凭记忆断言**。
 > 契约增量：全部写在本文件 §5 / §6，不直接改 `docs/contracts/*`，由 PM 统一集成。
 
 ---
@@ -17,8 +17,8 @@
 | 3 | profile 的认证 | **HTTP Basic**，用户名固定 `veyl`，密码是导出令牌。官方客户端必须支持 Basic，且这是它唯一能携带凭据的位置；bearer 需要客户端支持自定义头，客户端不提供这个入口 |
 | 4 | 令牌存哪 | 控制面新表 `mobile_tokens`：**`token_hash` 做查找、AES-GCM 密文保存令牌本身以便回显**。哈希保证「库泄露拿不到令牌」，密文保证「弹层每次打开都能显示同一个二维码」；桌面不落盘 |
 | 5 | 令牌生命周期 | 账户级一条，长期有效；「重新生成」= 覆盖同一行，旧值立即失效；不做设备数与到期时间；**不复用** access / refresh 令牌 |
-| 6 | 导出内容 | 该账户名下的控制面服务器（对应桌面 `source = owned`），且 `state ∈ {active, healthy}`、`node_id` 非空、凭据未销毁；只出 shadowsocks 出站 + 一个 selector + direct；**不出** `inbounds`、TUN、系统代理、本地端口、Clash API |
-| 7 | 零节点 | **200 + 只含 `direct` 的合法配置**，不是 4xx。理由与验证见 §1.7 / §3.4 |
+| 6 | 导出内容 | 该账户名下的控制面服务器（对应桌面 `source = owned`），且 `state ∈ {active, healthy}`、`node_id` 非空、凭据未销毁；只出 shadowsocks 出站 + 一个 selector + direct + **最小 TUN 入站（含 `route.auto_detect_interface`）** + **最小 DNS（DoH 经代理 + `hijack-dns`）**；**不出**桌面 TUN 参数、系统代理、本地端口、Clash API |
+| 7 | 零节点 | **200 + 只含 `direct`、不含 DNS 的合法配置**，不是 4xx。理由与验证见 §1.7 / §3.4 |
 | 8 | 二维码在哪生成 | **Rust**：新增 `qrcode` crate，返回 `data:image/svg+xml;base64,…`。两个入口共用一条命令，前端不引入二维码库 |
 | 9 | URL 的 origin | 桌面用 `control_plane::env::current().base_url` 拼，不写第二处常量；控制面只回令牌，不回 URL |
 | 10 | 是否新增事件 | **不新增**。弹层是主动打开的同步请求，结果随命令返回；节点增减不会改变已生成的 URL |
@@ -248,6 +248,24 @@ ORDER BY s.created_at ASC, s.id ASC
 ```json
 {
   "log": { "level": "warn" },
+  "dns": {
+    "servers": [
+      { "type": "https", "tag": "dns", "server": "1.1.1.1", "detour": "proxy" }
+    ],
+    "final": "dns"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+      "mtu": 9000,
+      "dns_mode": "hijack",
+      "dns_address": ["172.18.0.2", "fdfe:dcba:9876::2"],
+      "auto_route": true,
+      "strict_route": true
+    }
+  ],
   "outbounds": [
     {
       "type": "shadowsocks",
@@ -265,22 +283,42 @@ ORDER BY s.created_at ASC, s.id ASC
     },
     { "type": "direct", "tag": "direct" }
   ],
-  "route": { "final": "proxy" }
+  "route": {
+    "final": "proxy",
+    "auto_detect_interface": true,
+    "rules": [{ "protocol": "dns", "action": "hijack-dns" }]
+  }
 }
 ```
 
 - 默认节点 = 按 `created_at ASC` 的第一台；手机端可以在客户端里手动切换，URL 不变。
+- **必须导出最小 TUN 入站（真机现象 + 官方源码，覆盖了初版的「客户端自己建 TUN」假设）**：
+  - 官方客户端**不会**替 profile 注入 TUN。sing-box-for-apple 的 `ExtensionPlatformInterface.openTun` 与 SFA 的 `VPNService.openTun` 都只在配置里存在 TUN 入站时才创建系统隧道；没有 `inbounds` 时客户端仍显示「已连接」，但流量计数为 0、任何地址都打不开。
+  - `auto_route: true` 是让客户端设置 NetworkExtension / VpnService 路由与 MTU 的前提；缺了它同样会出现「连上但不接管流量」。
+  - `dns_mode: "hijack"` + `dns_address` 成组出现：`dns_address` 声明隧道内使用的 DNS 地址，hijack 让 sing-box 在 TUN 上接管发往这些地址的查询，交给上方的 `dns` 模块处理。
+  - `address` 用 IPv4 + IPv6 各一段（`172.18.0.1/30`、`fdfe:dcba:9876::1/126`），`mtu` 9000，`strict_route: true`：按客户端源码的默认形状固定；`strict_route` 的平台行为没有单独拆测，由 V8 覆盖。
+  - 这里导出的是**最小移动端 TUN**；桌面的 TUN 参数（`route_exclude_address`、`interface_name`、平台专属字段）不导出（见下表）。
+- **`route.auto_detect_interface` 必须为 `true`（TUN + 代理出站的必需组合）**：
+  - 该字段默认 `false`，libbox 不会替 profile 打开它。
+  - TUN 客户端的出站 socket 如果不绑定物理网卡，内核会把代理连接本身又按默认路由送回 TUN，形成回环——真机表现是隧道已建立、VPN 标志在，但任何外网地址都出不去。
+  - 因此它和 TUN 入站必须成组出现；零节点没有 TUN，不需要也不应打开。
+- **DNS 必须导出（真机实测覆盖了初版的「不导出 DNS」）**：
+  - 手机的 DNS 通常指向所在 LAN 的路由器（`192.168.x.1` 之类）。没有 DNS 块时，`route.final = "proxy"` 会把这些 DNS 查询送进隧道，服务端再把它发往**自己的** LAN，自然解析失败——真机表现是「VPN 已连接、网页打不开」。
+  - `dns.servers` 用 **DoH（`type: "https"`）+ `detour: "proxy"`**：解析请求经代理从服务端出网，不再依赖手机所在 LAN 的 DNS 服务器；也不依赖 UDP 53，减少部分网络对 UDP / 非标端口的拦截与劫持影响。
+  - `route.rules` 的 **`hijack-dns`** 用于把客户端发出的 DNS 查询交给这份 `dns` 配置处理；没有它，查询可能仍按手机原设置走 LAN。真机验证的是「DNS 块 + `hijack-dns`」整组组合，两项各自的单独行为没有拆测。
+  - `dns.final = "dns"` 让未命中其它服务器的查询统一走 DoH；本配置不声明分流规则集，也没有其它 DNS 服务器。
+  - `1.1.1.1` 是 IP，不需要 bootstrap；它的可达性由**服务端出口**决定，与手机所在网络无关（服务端侧已验证 DoH 可用，§3.6）。
 - **只有 selector，不加 urltest**：urltest 需要一个探测 URL。sing-box 默认用 `https://www.gstatic.com/generate_204`，这个地址在大陆的可达性**未核实**（待验证，不凭印象断言）；一旦不可达，urltest 会把所有节点误判为不可用，反而制造「全部失效」。M1 用 selector 把选择权交给用户，等有了自己可验证的健康端点再评估自动切换，属 v2。
 - **不导出**：
 
 | 不导出 | 原因 |
 |---|---|
-| `inbounds`（TUN / mixed） | iOS 的 NetworkExtension、Android 的 VpnService 由官方客户端自己建；重复声明会冲突 |
-| 本地端口 / `listen` | 手机没有「本机代理端口」这个概念，客户端自己管理 |
+| 桌面 TUN 参数（`route_exclude_address` / `interface_name` / `stack` / 平台专属字段） | 手机客户端自己创建并命名接口；桌面的排除表是本机 LAN 的，带过去会漏掉手机所在网络。只导出上表的最小 TUN |
+| `mixed` 入站 / `listen` / 本地端口 | 手机没有「本机代理端口」这个概念；只保留 TUN 入站 |
 | Clash API / `experimental` | 客户端内部使用；导出会把桌面端的控制面暴露出去，且没有消费方 |
 | 系统代理设置 | 那是桌面模式，不是配置内容 |
-| 分流规则集 / DNS 自定义 | M1 只保证「有代理可用」，不替客户端决定分流与 DNS；这份配置不声明它们，客户端如何处理由 V8 验证 |
-| `route.default_domain_resolver` | 本配置没有域名类规则，节点地址是 IP；不引入 DNS 依赖。若 V8 实测客户端要求，再按实测补 |
+| 分流规则集 / 自定义 DNS 候选 | 只导出**最小 DNS**（DoH 经代理 + `final`）与 `hijack-dns`；不导出域名分流规则集，也不让用户配置 DNS 候选。M1 只保证「能解析、有代理可用」，不替客户端决定分流 |
+| `route.default_domain_resolver` | 已声明 `dns.final`，且节点地址是 IP；不需要再单独指定域名解析器 |
 
 ### 3.3 节点命名
 
@@ -300,6 +338,16 @@ ORDER BY s.created_at ASC, s.id ASC
 
 不是空对象、不是 `null`、不是 204。空对象或空 outbounds 可能让客户端拒绝整份 profile；`direct` 是一个完整可解析的配置，至少能完成一次成功更新。客户端如何呈现「零节点」由 V9 定，不由我们猜。
 
+**零节点分支不包含 `inbounds`，也不包含 `dns`**：
+
+- **不建 TUN**：客户端只在配置里有 TUN 入站时才创建系统隧道。零节点如果也声明 TUN，手机会显示「VPN 已连接」并把全部流量按 `final = "direct"` 直连——这是一个假 VPN，比「没有节点」更容易误导用户（以为在用节点，实际没有）。
+- **不带 DNS**：非零模板的 DoH 服务器带 `detour: "proxy"`，而零节点没有 `proxy` 这个 outbound；把 DNS 一起带过去就是一条指向不存在 outbound 的悬空引用。
+- 规则：
+  - 零节点：只有 `direct`，`route.final = "direct"`，**无 `inbounds`、无 `dns`、无 `route.rules`，也不设 `auto_detect_interface`**；
+  - 非零节点：**TUN 入站 + `auto_detect_interface: true` + `dns` + `hijack-dns` 必须同时出现**，`detour` 只能指向实际存在的 `proxy`。
+
+> 本地实测：`sing-box check` **不会**因为 `detour` 指向不存在的 tag 而失败（零节点 + DNS 样张退出码仍为 0），也不会因为缺少 TUN 入站而失败（非零但无 `inbounds` 的样张同样为 0）。所以这两条都不能靠 `check` 兜底，必须由控制面单测锁定：「零节点无 `inbounds` / 无 `dns`」「非零节点有且只有一个 TUN 入站」。
+
 ### 3.5 为什么在控制面生成，而不是桌面
 
 | 方案 | 问题 |
@@ -308,17 +356,38 @@ ORDER BY s.created_at ASC, s.id ASC
 | 桌面把 URL 指向本地 | 手机不可能访问用户的桌面 |
 | **控制面按请求生成** | 节点变化在下一个周期自然生效；不需要额外存储；与凭据端点同源 |
 
-### 3.6 本地实测（2026-11-19）
+**客户端源码依据（2026-11-19）**：`sing-box-for-apple` 的 `ExtensionPlatformInterface.openTun` 与 `SFA` 的 `VPNService.openTun` 都只在配置里存在 TUN 入站时才创建系统隧道。也就是说，配置内容必须包含 TUN 入站——这是**客户端行为**，与「配置在哪一侧生成」无关；它决定了 §3.2 必须导出最小 TUN，而不是沿用初版「客户端自己注入」的假设。
 
-用仓库随包二进制 `src-tauri/resources/runtime/sing-box 1.14.4`（darwin/arm64）对三份样张执行 `sing-box check -c <file>`，退出码均为 `0`：
+- 所审版本：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。
+- 源码确认的是「有 TUN 入站才建隧道」这一条件；字段的具体行为（`auto_route` / `strict_route` / `dns_mode` / `auto_detect_interface`）在客户端版本间的差异由 V8 真机覆盖。
+- **第三轮真机（2026-11-19 夜 → 20 日晨）**：补上 TUN 入站后 VPN 标志出现，但 `1.1.1.1` 仍打不开；据此在非零模板补 `route.auto_detect_interface: true`。依据：该字段默认 `false`，libbox 不会替配置打开；TUN 客户端的出站 socket 不绑定物理网卡就会回环进隧道。**修复后的真机复验尚未执行**（V8）。
 
-1. 单节点 + selector + direct + `route.final = proxy`；
-2. 同上但**不含** `dns` 与 `route.default_domain_resolver`；
-3. 零节点（只有 `direct`，`route.final = direct`）。
+### 3.6 实测记录（2026-11-19 至 11-20）
 
-含中文 tag 与 `urltest` 的变体也通过 `check`（仅用于确认 tag 合法；本设计不采用 urltest）。
+**配置形状（本地，随包 `sing-box 1.14.4`，darwin/arm64，`sing-box check -c`）**：
 
-**这只证明「配置本身能被 1.14.4 解析」，不证明「SFI / SFA 会接受并连接」**——后者是 V8。
+| # | 样张 | 退出码 | 说明 |
+|---|---|---|---|
+| 1 | 非零生产形状：最小 TUN 入站 + 最小 DNS（DoH `1.1.1.1`、`detour: "proxy"`、`dns.final = "dns"`）+ `route.final = "proxy"` + `auto_detect_interface: true` + `hijack-dns` | 0 | 进生产的非零形状 |
+| 2 | 同上但**去掉 `auto_detect_interface`** | **0** | 反例：`check` **不校验出站回环**，只有真机 V8 才能发现 |
+| 3 | 零节点（只有 `direct`，`final = "direct"`，无 `inbounds` / `dns`） | 0 | 进生产的零节点形状 |
+| 4 | 零节点 + 指向 `proxy` 的 `dns` | **0** | 反例：`check` **不校验 `detour` 悬空**，必须由控制面单测锁定「零节点无 dns」 |
+| 5 | 非零节点 + DNS，但**无 `inbounds`**（初版形状） | **0** | 反例：`check` **不校验「必须有 TUN 入站」**，旧形状也能通过；只有真机 V8 才能发现 |
+| 6 | 含中文 tag 与 `urltest` 的变体 | 0 | 只证明 tag 合法；本设计不采用 urltest |
+
+**真机（iPhone / SFI，2026-11-19 至 11-20）**：
+
+- 现象 A：初版 profile（无 DNS）导入后 **「VPN 已连接、无法上网」**。定位：手机 DNS 通常指向所在 LAN 的路由器；`route.final = "proxy"` 把这些 DNS 查询送进隧道，服务端再发往自己的 LAN，解析失败。
+- 现象 B：补上 DNS 后仍 **「已连接、流量计数 0、1.1.1.1 打不开」**。定位：profile 没有 `inbounds`，官方客户端不创建系统隧道——源码依据见 §3.5。
+- 现象 C：补上 TUN 入站后 **VPN 标志出现，但 `1.1.1.1` 仍打不开**。定位：`route.auto_detect_interface` 默认 `false`，libbox 不替配置打开；出站 socket 不绑定物理网卡会回环进隧道。
+- 旁证（排除节点与凭据）：对节点本身单独验证，**出口 IP 探测、访问 Google、DoH 应答均通过**。
+- 具体节点地址、出口 IP 与 DoH 应答原文未随本组交接留存（交接只保留了「三项均通过」的结论）；本文不复述数字，避免凭记忆写错。原始记录在发起会话 `IOS_Android` 的真机记录里。
+- 修复：非零模板加入 §3.2 的最小 TUN 入站、`route.auto_detect_interface: true`、DNS 块与 `hijack-dns`；零节点保持无 TUN、无 DNS。
+- 验证状态：控制面 `npm run typecheck` 通过、`npm test -- mobile` **16/16 通过**（2026-11-19 22:10，**DNS 修复版本**）；**此后的 TUN 入站（22:40）与 `auto_detect_interface`（11-20 10:06）改动均未重跑 typecheck / vitest**，需执行同一组命令后再谈「可用」。修复后的真机复验（Wi-Fi / 蜂窝）同样未执行，见 V8 / V12。
+
+**所审版本**：代码基线 `a68f82d mobile`；控制面的 TUN + DNS + `auto_detect_interface` 修复与对应测试为工作区未提交改动（`cloudflare/control-plane/src/mobile.ts:436–472`、`test/mobile.test.ts`）。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。本文档本身未提交。
+
+**以上只证明「配置本身能被 1.14.4 解析」与「节点侧可达」；客户端是否建立隧道、出站是否回环、DNS 修复后能否上网，由 V8 / V12 判定。**
 
 ---
 
@@ -560,7 +629,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 
 ---
 
-## 8. 实现前检查单（V1–V7 + 新增）
+## 8. 实现前检查单（V1–V12）
 
 > 每条都要有证据（截图 / 录屏 / 命令输出 / Worker 日志计数），不能只写「试过可以」。测试期间不改工作树（测量冻结）。
 
@@ -573,10 +642,11 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | V5 | SFA 最低 Android 版本 | 从 GitHub Releases 取 APK，`aapt dump badging` 读 `sdkVersion` | 得到准确最低版本；与官方页面口径对照 | 否（只影响下载页文案） |
 | V6 | SFI 收费与区域 | 用大陆以外 Apple 账号打开 App Store 页面 | 记录价格（免费 / 付费）与地区限制；与 `mobile-export.md` §2.1 对齐 | 否 |
 | V7 | 两个自有域名在移动网络可达 | 手机关 Wi-Fi、蜂窝网络下直接打开 profile URL（可先要一个测试令牌） | 证书链完整、无 `workers.dev`、耗时可接受；记录运营商与时间 | 是 |
-| V8 | 客户端接受本设计的配置 | 用 V1/V2 导入真实 profile；连接、切换节点、断开重连 | 能连上；selector 中出现全部付费节点；免费 / 试用节点不在列表 | 是 |
-| V9 | 零节点配置的客户端表现 | 销毁全部服务器（或用只含 `direct` 的测试 profile）后等一次更新 | 记录客户端是「更新成功但无节点」还是「更新失败」；据此决定保持 200 还是改为 4xx | 是 |
+| V8 | 客户端接受本设计的配置 | 用 V1/V2 导入真实 profile；连接、切换节点、断开重连；打开网页 | **系统隧道建立（VPN 已连接且流量计数非 0）**；**出站绑定物理网卡、不出现回环**；**路由生效**（访问外网走节点出口）；**能解析域名并打开网页**；selector 中出现全部付费节点；免费 / 试用节点不在列表 | 是 |
+| V9 | 零节点配置的客户端表现 | 销毁全部服务器（或用只含 `direct` 的测试 profile）后等一次更新 | 记录客户端是「更新成功但无节点」还是「更新失败」；**确认不会建立一条假 VPN 把全部流量直连**；据此决定保持 200 还是改为 4xx | 是 |
 | V10 | 轮换后的旧链接行为 | 点「重新生成」，等客户端下一次拉取 | 旧链接 401 / 更新失败；新二维码导入可用；已导入的旧 profile 不会被静默改写成空 | 是 |
 | V11 | URL Scheme 的 query 编码 | 用含 `@`、`:` 的完整 URL 生成二维码，扫码 | 客户端拿到的 URL 完整（不被 `&` / `#` 截断）；若失败，检查 encode 实现 | 是 |
+| V12 | 蜂窝网络回归（DNS） | 关闭 Wi-Fi，用蜂窝网络重复 V8：手动刷新 profile → 打开网页 → 重启客户端再试一次 | 与 Wi-Fi 同样能解析并打开网页；记录运营商、手机 DNS 设置与客户端日志前 20 行 | 是 |
 
 **V9 的决策后果**：若客户端对「只有 direct」的 profile 报错并保留旧配置，需要改为 `410 Gone` + 明确的错误体（仍无法清除客户端缓存），并在 §1.7 更新；这一条必须在实现前定，不要两边都写一半。
 
@@ -636,7 +706,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 ```
 
 - 三组之间没有文件重叠；`be-desktop` 与 `fe` 可以按本文件的类型先写，联调前不需要等控制面部署。
-- 真机验收（V1–V11）在联调之后、由产品 / 同事执行；AI 只取证与核对（`aivpn-tests-started-by-user`）。
+- 真机验收（V1–V12）在联调之后、由产品 / 同事执行；AI 只取证与核对（`aivpn-tests-started-by-user`）。
 
 ---
 
@@ -645,7 +715,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 ### 必须改（P1）
 
 1. **新增控制面三个端点**与 `mobile_tokens` 迁移；profile 必须 `no-store`，401 必须带 `WWW-Authenticate`。
-2. **控制面按请求生成配置**：只筛 `source = owned` 对应的 `servers`，排除免费 / 试用；不导出任何 `inbounds` / 本地端口 / Clash API。
+2. **控制面按请求生成配置**：只筛 `source = owned` 对应的 `servers`，排除免费 / 试用；不导出桌面 TUN 参数 / `mixed` 入站 / 本地端口 / Clash API。**非零模板必须带最小 TUN 入站（`auto_route` 为真）、`route.auto_detect_interface: true` 与最小 DNS（DoH 经代理 + `hijack-dns`）；零节点模板不得带 `inbounds` 或 `dns`**。
 3. **桌面 Rust 生成 URL 与二维码**：origin 只取 `env.rs`，禁止 `workers.dev`；令牌不落本地。
 4. **两个 UI 入口共用同一弹层与命令**；左栏行只在「已登录 + 至少一台节点就绪 + 列表非 loading/error」时出现。
 5. **契约增量**合并：`commands.md` 版本 `2.46.0`、`tools.md` 版本 `3.22.0`（`account.mobile`）。
@@ -683,6 +753,10 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 4 | Windows 构建是否同样支持 | 代码路径与平台无关；真机验收需 Windows 测一台（调试包）。**PM 已定：排在联调之后，由产品负责人在 Windows 真机执行** | PM 安排 |
 | 5 | 是否要在 M1 提供「吊销但不重建」 | **PM 已定：不做。** 界面只有「重新生成」；多一个端点就是多一条没有入口的路径 | PM |
 | 6 | 下载页 Android 渠道文案 | 已定：只给官方客户端页一条 | 已定，不改 |
+| 7 | 配置是否携带 DNS | **必须携带**：真机实测覆盖了初版「不导出 DNS」。非零模板固定 `1.1.1.1` DoH（`detour: "proxy"`）+ `hijack-dns`；零节点不带 DNS。已落地，不再是待确认项 | 已定（架构师），PM 知会 |
+| 8 | 配置是否携带 TUN 入站 | **必须携带**：官方客户端源码确认只有声明 TUN 入站才创建系统隧道（§3.5）。非零用最小 TUN（`auto_route: true`、`dns_mode: "hijack"`、`dns_address`）+ `route.auto_detect_interface: true`；零节点不建 TUN，避免假 VPN 把全部流量直连 | 已定（架构师），PM 知会 |
+
+**所审版本（2026-11-19 至 11-20）**：本文件的 TUN + DNS + `auto_detect_interface` 改写对应代码基线 `a68f82d mobile` + 工作区未提交的控制面修复（`cloudflare/control-plane/src/mobile.ts:436–472`、`test/mobile.test.ts`）。`npm run typecheck` 与 `npm test -- mobile` 16/16 通过的是 **22:10 的 DNS 修复版本**；**此后的 TUN 入站（22:40）与 `auto_detect_interface`（11-20 10:06）改动均未重跑测试**。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。**修复后的真机复验（Wi-Fi / 蜂窝）尚未执行**，见 V8 / V12；本文档本身未提交。
 
 ---
 

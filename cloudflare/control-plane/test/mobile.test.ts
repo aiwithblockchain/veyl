@@ -326,6 +326,20 @@ async function seedServer(db: MobileD1, seed: SeedServer): Promise<void> {
 
 interface MobileConfig {
   log: { level: string };
+  dns?: {
+    servers: Array<{ type: string; tag: string; server: string; detour?: string }>;
+    final: string;
+  };
+  inbounds?: Array<{
+    type: string;
+    tag: string;
+    address: string[];
+    mtu: number;
+    dns_mode: string;
+    dns_address: string[];
+    auto_route: boolean;
+    strict_route: boolean;
+  }>;
   outbounds: Array<{
     type: string;
     tag: string;
@@ -336,7 +350,7 @@ interface MobileConfig {
     outbounds?: string[];
     default?: string;
   }>;
-  route: { final: string };
+  route: { final: string; rules?: Array<{ protocol: string; action: string }> };
 }
 
 describe("POST /v1/mobile/token", () => {
@@ -500,7 +514,11 @@ describe("GET /v1/mobile/profile", () => {
 
     const config = (await response!.json()) as MobileConfig;
     expect(config.outbounds).toEqual([{ type: "direct", tag: "direct" }]);
-    expect(config.route.final).toBe("direct");
+    expect(config.route).toEqual({ final: "direct" });
+    // 零节点不能带 DNS 块：detour: "proxy" 会指向不存在的 outbound。
+    expect(config.dns).toBeUndefined();
+    // 零节点也不声明 TUN：不建立隧道，避免把所有流量 direct 进一个假 VPN。
+    expect(config.inbounds).toBeUndefined();
   });
 
   it("只出 shadowsocks + selector + direct，坏凭据 / 非 aes-256-gcm 跳过，重名加序号", async () => {
@@ -535,7 +553,25 @@ describe("GET /v1/mobile/profile", () => {
     });
     const direct = config.outbounds.find((outbound) => outbound.type === "direct");
     expect(direct).toEqual({ type: "direct", tag: "direct" });
-    expect(config.route.final).toBe("proxy");
+    expect(config.route).toEqual({
+      final: "proxy",
+      auto_detect_interface: true,
+      rules: [{ protocol: "dns", action: "hijack-dns" }],
+    });
+    // 手机 DNS 常指向 LAN 路由器：DoH 必须走 proxy 从服务端出网。
+    expect(config.dns).toEqual({
+      servers: [{ type: "https", tag: "dns", server: "1.1.1.1", detour: "proxy" }],
+      final: "dns",
+    });
+    // Apple / SFA 只有声明 TUN 入站才会真正建隧道，auto_route 必须为真。
+    expect(config.inbounds).toHaveLength(1);
+    expect(config.inbounds![0]).toMatchObject({
+      type: "tun",
+      tag: "tun-in",
+      address: ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+      dns_mode: "hijack",
+      auto_route: true,
+    });
   });
 
   it("查询到服务器但全部不可用时 503，不伪装成零节点", async () => {

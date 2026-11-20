@@ -6406,7 +6406,7 @@ details[open] > .settings-fold__summary::before {
 
 .mobile-export__install {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 24px;
 }
 
@@ -6600,8 +6600,7 @@ details[open] > .settings-fold__summary::before {
 }
 
 .mobile-export__side > .mobile-export__security {
-  margin-top: auto;
-  padding-top: 12px;
+  margin-top: 16px;
 }
 
 /* 底部「问 AI」：距步骤 2 内容 32，与「重新生成」同款文字按钮。 */
@@ -6612,6 +6611,7 @@ details[open] > .settings-fold__summary::before {
 @media (max-width: 560px) {
   .mobile-export__install {
     flex-direction: column;
+    align-items: stretch;
   }
 
   .mobile-export__download-qr {

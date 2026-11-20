@@ -433,6 +433,26 @@ async function profile(
 
   return configResponse({
     log: { level: "warn" },
+    // 手机 DNS 常指向 LAN 路由器；没有这条，DNS 查询会被 final=proxy 送进隧道发往服务端内网。
+    // DoH 走 proxy 出网，不用 UDP 53（避开运营商对非标端口 UDP 的限制）。
+    dns: {
+      servers: [{ type: "https", tag: "dns", server: "1.1.1.1", detour: "proxy" }],
+      final: "dns",
+    },
+    // Apple / SFA 只在配置声明 TUN 入站时才创建系统隧道；auto_route 必须为真，
+    // 否则客户端不会设置 NE/VpnService 的路由与 MTU（VPN 会显示已连接但没有流量）。
+    inbounds: [
+      {
+        type: "tun",
+        tag: "tun-in",
+        address: ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+        mtu: 9000,
+        dns_mode: "hijack",
+        dns_address: ["172.18.0.2", "fdfe:dcba:9876::2"],
+        auto_route: true,
+        strict_route: true,
+      },
+    ],
     outbounds: [
       ...outbounds,
       {
@@ -443,7 +463,12 @@ async function profile(
       },
       { type: "direct", tag: "direct" },
     ],
-    route: { final: "proxy" },
+    route: {
+      final: "proxy",
+      // TUN 入站 + 代理出站必须打开：否则出站 socket 不绑定物理网卡，会被路由回隧道。
+      auto_detect_interface: true,
+      rules: [{ protocol: "dns", action: "hijack-dns" }],
+    },
   });
 }
 

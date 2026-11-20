@@ -125,9 +125,9 @@ sing-box://import-remote-profile?url=<urlEncodedURL>#<urlEncodedName>
 |---|---|
 | 该账户当前可用的**自建付费服务器**节点（`source = owned`） | 免费种子节点、试用节点 |
 | 节点选择与故障切换所需的最小组件（selector / urltest，具体形态由架构设计定） | 已销毁、到期、安装失败的服务器节点 |
-| 移动端需要的路由与 DNS 基础配置 | 桌面端 TUN 入站、系统代理设置、本地端口等**由客户端自己管理**的部分 |
+| 移动端需要的**最小 TUN 入站**、路由与 DNS 基础配置 | 桌面端 TUN 的具体接入参数、系统代理设置、本地端口、Clash API 等**由客户端自己管理**的部分 |
 
-> 桌面配置里的 TUN inbound 不应原样导出：iOS/Android 客户端通过 NetworkExtension / VpnService 自己建 TUN，重复声明会冲突。具体裁剪规则由架构师给。
+> **2026-11-19 真机修正**：iOS / Android 官方客户端**不会**自动注入 TUN——它们只在配置声明了 TUN 入站时才创建系统隧道（已核对 sing-box-for-apple 与 sing-box-for-android 源码）。因此导出的配置**必须包含一个最小 TUN 入站**：`address`、`mtu`、`dns_mode: "hijack"`、`dns_address`、`auto_route: true`，其余桌面专有项仍不导出。没有它，VPN 会显示已连接但流量为 0。
 
 ### 4.3 一个还是多个
 
