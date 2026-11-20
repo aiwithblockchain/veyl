@@ -1,9 +1,7 @@
-// 环境隔离的硬约束：生产入口不含任何 /v1/debug/*，且三处写路径在 ENVIRONMENT 缺失时一律拒绝。
+// 环境隔离的硬约束：调试路由已整体删除，写路径在 ENVIRONMENT 缺失时一律拒绝。
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import prodWorker from "../src/index";
-import devWorker from "../src/dev";
-import { startTopupSession } from "../src/topups";
 import { handleOrders } from "../src/orders";
 import { handleServers } from "../src/servers";
 import { sealSecret, signAccessToken } from "../src/lib/crypto";
@@ -26,93 +24,21 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("生产入口与 /v1/debug/*（物理不可达）", () => {
-  // 这些断言不依赖 ENVIRONMENT 的取值：路由根本不在生产包里。
-  for (const environment of ["production", "dev", "test", undefined]) {
-    it(`ENVIRONMENT=${String(environment)} 时仍是 404`, async () => {
+describe("调试路由已整体删除", () => {
+  it("/v1/debug/* 一律 404，与 ENVIRONMENT 无关", async () => {
+    for (const environment of ["production", "dev", "test", undefined]) {
       const env = { ENVIRONMENT: environment } as never;
       for (const path of ["/v1/debug/account", "/v1/debug/billing", "/v1/debug/do-scopes"]) {
         const res = await prodWorker.fetch(debugRequest(path), env, ctx());
         expect(res.status).toBe(404);
         expect(await res.json()).toMatchObject({ ok: false, error: "not_found" });
       }
-    });
-  }
-});
-
-describe("dev 入口", () => {
-  it("dev 环境装配了调试路由：没有 D1 时返回 db_unavailable", async () => {
-    const res = await devWorker.fetch(
-      debugRequest("/v1/debug/account?email=a@b.c"),
-      { ENVIRONMENT: "dev" } as never,
-      ctx(),
-    );
-    expect(res.status).toBe(503);
-    expect(await res.json()).toMatchObject({ ok: false, error: "db_unavailable" });
-  });
-
-  it("非 dev 环境即使跑在 dev 入口上，调试路由也不生效", async () => {
-    const res = await devWorker.fetch(
-      debugRequest("/v1/debug/account?email=a@b.c"),
-      { ENVIRONMENT: "production" } as never,
-      ctx(),
-    );
-    expect(res.status).toBe(404);
-  });
-
-  it("其余请求原样交给生产入口", async () => {
-    const res = await devWorker.fetch(
-      new Request("https://control-plane.test/health"),
-      { ENVIRONMENT: "dev" } as never,
-      ctx(),
-    );
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, service: "veyl-control-plane" });
+    }
   });
 });
 
 describe("ENVIRONMENT 缺失时写路径必须拒绝", () => {
-  it("fake 充值：只有明确的 dev 才允许，变量缺失直接拒绝", async () => {
-    const db = new FakeD1();
-    db.rows("accounts").push({
-      id: ACCOUNT,
-      kind: "email",
-      email: "buyer@example.com",
-      status: "active",
-      created_at: 0,
-      balance_cents: 0,
-    });
-    const base = {
-      DB: db as unknown as D1Database,
-      DODO_TOPUP_PRODUCT_IDS: JSON.stringify({ "1000": "pdt_test_product_0001" }),
-    };
-
-    const missing = await startTopupSession({ ...base } as never, {
-      accountId: ACCOUNT,
-      email: "buyer@example.com",
-      cents: 1000,
-      mode: "fake",
-    });
-    expect(missing).toMatchObject({ ok: false, reason: "fake_not_allowed" });
-
-    const typo = await startTopupSession({ ...base, ENVIRONMENT: "prod" } as never, {
-      accountId: ACCOUNT,
-      email: "buyer@example.com",
-      cents: 1000,
-      mode: "fake",
-    });
-    expect(typo).toMatchObject({ ok: false, reason: "fake_not_allowed" });
-
-    const dev = await startTopupSession({ ...base, ENVIRONMENT: "dev" } as never, {
-      accountId: ACCOUNT,
-      email: "buyer@example.com",
-      cents: 1000,
-      mode: "fake",
-    });
-    expect(dev).toMatchObject({ ok: true, checkoutUrl: null, balanceAfterCents: 1000 });
-  });
-
-  it("匿名账户下单：ENVIRONMENT 缺失时按生产处理，要求登录", async () => {
+  it("匿名账户下单：任何环境下都要求登录", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | Request) => {
@@ -172,17 +98,11 @@ describe("ENVIRONMENT 缺失时写路径必须拒绝", () => {
       PLAN_DAILY_PRICE_CENTS: JSON.stringify({ "s-1vcpu-1gb": 30 }),
     };
 
-    const missing = await handleOrders(build(), { ...base } as never);
-    expect(missing?.status).toBe(401);
-    expect(await missing!.json()).toMatchObject({ code: "UNAUTHENTICATED" });
-
-    const typo = await handleOrders(build(), { ...base, ENVIRONMENT: "prod" } as never);
-    expect(typo?.status).toBe(401);
-
-    // dev 才放行匿名建机，这条分支要真的走到 200，不能只证明生产会拒绝。
-    const dev = await handleOrders(build(), { ...base, ENVIRONMENT: "dev" } as never);
-    expect(dev?.status).toBe(200);
-    expect(await dev!.json()).toMatchObject({ region: "sgp1", plan: "s-1vcpu-1gb" });
+    for (const environment of [undefined, "prod", "dev", "production"]) {
+      const res = await handleOrders(build(), { ...base, ENVIRONMENT: environment } as never);
+      expect(res?.status, `ENVIRONMENT=${String(environment)}`).toBe(401);
+      expect(await res!.json()).toMatchObject({ code: "UNAUTHENTICATED" });
+    }
   });
 
   it("凭据签发：生产缺 CREDENTIAL_KEY_ID 拒绝，dev 才回落到默认密钥", async () => {

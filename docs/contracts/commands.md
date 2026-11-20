@@ -219,7 +219,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 88 | `my_server_logout` | `{}` | `MyServerAccount` | **2.27.0 新增（仅 UI）；服务端解绑设备并清本地令牌** |
 | 89 | `my_server_order_get` | `{ orderId }` | `MyServerOrder` | **2.27.0 新增（仅 UI）；支付与开通轮询** |
 | 90 | `my_server_wallet` | `{}` | `MyServerWallet`（`{ balance_cents, currency, denominations_cents, updated_at }`） | **2.28.0 新增（仅 UI）；读余额与充值档位（USD 分）；2.28.1 增 `denominations_cents`** |
-| 91 | `my_server_topup` | `{ denomination, channel? }` | `MyServerTopup`（`{ topup_id, checkout_url, denomination_cents }`） | **2.28.0 新增（仅 UI）；创建充值收银台会话** |
+| 91 | `my_server_topup` | `{ denomination }` | `MyServerTopup`（`{ topup_id, checkout_url, denomination_cents }`） | **2.28.0 新增（仅 UI）；创建充值收银台会话；2.40.0 起去掉 `channel` 参数** |
 | 92 | `config_set_mode` | `{ configId, mode }` | `ConfigSetModeData`（`{ config_id, mode, previous_mode, changed, connected, restored, confirmation }`） | **2.34.0 新增**；在线切换接管方式（会断开重连）；AI 侧经 `ConfigSetMode` 工具且必须确认 |
 | 93 | `quit_decision` | `{ action }` | `{ accepted: boolean }` | **2.35.0 新增（仅 UI）**；应用内退出确认的决策回执，只有第一次生效 |
 | 94 | `trial_status` | `{}` | `TrialStatusData`（`{ state, started_at, expires_at, remaining_ms, seed_node_count }`） | **2.36.0 新增（仅 UI）**；免费节点 7 天试用状态，只读本地 |
@@ -1775,7 +1775,6 @@ type MyServerCredentialNode = {
 | 凭据过期 | `PRECONDITION_FAILED` | `credential_expired` | 是 | 自动重新获取一次凭据，再失败才报错 |
 | 设备被停用 | `PERMISSION_DENIED` | `device_revoked` / `account_blocked` | 否 | 提示「这台设备已被停用」；给「重新注册设备」与客服入口，**不要显示成稍后再试** |
 | 重建端点未接入（仅 `my_server_rebuild`） | `PRECONDITION_FAILED` | `rebuild_not_supported` | 否 | 不展示「重建」入口；若已触发，如实说「暂不支持重建」 |
-| 支付通道不合法（仅 `my_server_topup`） | `INVALID_ARGUMENT` | `channel_invalid` | 否 | 界面只允许 `dodo`（非生产可 `fake`）；正常路径不会出现 |
 
 - 发 `my-server-changed` / `my-server-order-changed`（`events.md` §4.22 / §4.23）；不新增其它事件。
 - **`my_server_rename`（2.40.0）**：`PATCH /v1/servers/{id} { name }`，服务端按 `account_id` 过滤（别人的服务器与不存在一律 `NOT_FOUND`）；name 先 trim，再按 **Unicode 码点**计长 1–24（中文与单个 emoji 各算 1），非法返回 `INVALID_ARGUMENT / invalid_name`。允许重名。**同名请求按 HTTP 幂等处理：视为成功、状态不变；服务端仍会照常 UPDATE，Host 成功即发 `my-server-renamed`，因此不保证同名不发电事件**——界面提交前已短路（同名不发请求），事件消费按 `server_id` 覆盖，重复事件无副作用。成功返回完整 `MyServer` 并同时发 `my-server-renamed`（`events.md` §4.28，只带 server_id 与新名字）；**不暴露给 AI**。
@@ -1850,7 +1849,7 @@ type MyServerTopup = {
 | `my_server_logout {}` | 调控制面 `POST /v1/auth/logout`：作废 refresh、把设备解绑到新的匿名账户；成功后清本地令牌。**离线失败不假装已退出**。服务端明确拒绝（401 `token_invalid`、403 `device_revoked` / `account_blocked`）时清本地令牌与账户标记并返回未登录态——账户被停用时用户也必须能退出去，同时发 `my-server-account-cleared`（`events.md` §4.27） |
 | `my_server_order_get { orderId }` | `GET /v1/orders/{id}`；建机期间轮询，事件不可用时同样用它兜底 |
 | `my_server_wallet {}` | `GET /v1/wallet`；返回余额与可充值档位（`denominations_cents`，USD 分、升序，来自产品表键）。`updated_at` 由 Host 本地取时间，控制面不提供。余额与扣费都由 Host 计算，前端不做金额运算 |
-| `my_server_topup { denomination, channel? }` | `POST /v1/topups` 创建 Dodo 充值会话，返回 `checkout_url` 由系统浏览器打开；`channel` 省略等于 `dodo`，非生产可 `fake`（直接入账）。**收银台在浏览器里打不开时不能报成功**：返回 `INTERNAL / checkout_open_failed`，`details` 带 `topup_id`、`checkout_url` 与 `open_error`，界面据此给「重新打开」和可复制的链接 |
+| `my_server_topup { denomination }` | `POST /v1/topups` 创建 Dodo 充值会话，返回 `checkout_url` 由系统浏览器打开；`fake` 通道已于 2026-11-20 删除，充值只有 Dodo 一条路径。**收银台在浏览器里打不开时不能报成功**：返回 `INTERNAL / checkout_open_failed`，`details` 带 `topup_id`、`checkout_url` 与 `open_error`，界面据此给「重新打开」和可复制的链接 |
 | `my_server_checkout { orderId }` | **2.39.0 起：确认下单并开始建机，不扣费**，返回 `MyServerOrder`（`state = "provisioning"`）。余额 ≥ 日价 × 7 只是预检；不足 → `insufficient_balance`（带 `required_cents` / `shortfall_cents` / `min_days`），不建机、订单保持 `pending_payment`；该档位的 `regions` 不含订单地区 → `plan_unavailable_in_region`。就绪后由控制面在 enroll 回调里扣第 0 天，之后每天由 Cron 扣一天 |
 
 - **计费单位是「天」**（2026-11-16 拍板）：就绪时扣第 0 天，之后控制面每天扣一天，直到余额不足进 7 天宽限。契约里没有「月」的概念，`monthly_usd` 只是展示用的乘法。
@@ -1891,7 +1890,6 @@ type MyServerTopup = {
 | 设备已绑定另一个邮箱 | `PRECONDITION_FAILED` | `account_conflict` | 否 |
 | 需要登录 | `UNAUTHENTICATED` | `auth_required` | 是 |
 | 登录过期 | `UNAUTHENTICATED` | `token_invalid` | 是（自动刷新后重试） |
-| 生产环境用假充值 | `PRECONDITION_FAILED` | `channel_not_allowed` | 否 |
 | 目录价与配置价不一致 | `PRECONDITION_FAILED` | `price_mismatch` | 否 |
 | 目录里这个地区没有该档位 | `PRECONDITION_FAILED` | `plan_unavailable_in_region`；`details` 带 `region`、`plan` | 否（换地区或换档位） |
 | Dodo 充值会话失败 | `UPSTREAM_ERROR` | `checkout_unavailable` | 是 |
@@ -3197,7 +3195,7 @@ type RulesStatus = {
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
 | 1 | 本文件版本升到 `2.27.0`；新增 §7.18 的 5 条命令：`my_server_login_start` / `login_verify` / `account` / `logout` / `order_get`（仅 UI） | 新增命令 | `docs/design/login-and-payment.md` |
-| 2 | `my_server_checkout` 增加可选 `channel`，返回 `MyServerCheckout`（含 `checkout_url` / `session_id` / `expires_at`），**不再同步建机**；生产只允许 `dodo`，非生产可 `fake` | 语义变更 | 收银台跳转 + webhook 确认后才建机 |
+| 2 | `my_server_checkout` 增加可选 `channel`，返回 `MyServerCheckout`（含 `checkout_url` / `session_id` / `expires_at`），**不再同步建机**；生产只允许 `dodo`，非生产可 `fake`（2026-11-20 已移除，仅存历史） | 语义变更 | 收银台跳转 + webhook 确认后才建机 |
 | 3 | `MyServerOrder.state` 增加 `awaiting_payment` / `payment_failed` / `expired`，并增加 `checkout_url` | 数据结构 | 订单状态机补齐支付阶段 |
 | 4 | 新增错误 `details.reason`：`email_invalid` / `email_cooldown` / `email_rate_limited` / `code_invalid` / `code_expired` / `too_many_attempts` / `account_conflict` / `channel_not_allowed` / `price_mismatch` / `checkout_unavailable` / `order_expired` / `payment_pending`；不新造错误码 | 错误语义 | 沿用 `runtime.md` §6.1 通用码 |
 | 5 | 登录门禁：列表 / 详情 / 下单 / 结账 / 销毁 / 重建 / 取凭据在未登录时返回 `UNAUTHENTICATED / auth_required`；目录、身份查询、本地节点与配置不受影响 | 语义 | 产品：登录与支付同批 |

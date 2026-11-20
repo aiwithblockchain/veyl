@@ -181,7 +181,7 @@ fn default_currency() -> String {
     "USD".into()
 }
 
-/// `my_server_topup` 的返回：充值收银台会话；非生产 fake 通道没有 URL。
+/// `my_server_topup` 的返回：充值收银台会话。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MyServerTopup {
     pub topup_id: String,
@@ -724,34 +724,6 @@ pub async fn checkout(order_id: &str) -> Result<MyServerOrder, CpError> {
     Ok(order)
 }
 
-/// 支付通道：省略 = `dodo`；`fake` 只在非生产可用（本地开发与 E2E 的后门）。
-fn resolve_channel<'a>(
-    channel: &'a str,
-    env: crate::control_plane::env::ControlPlaneEnv,
-) -> Result<&'a str, CpError> {
-    let channel = match channel.trim() {
-        "" => "dodo",
-        other => other,
-    };
-    if !matches!(channel, "dodo" | "fake") {
-        return Err(CpError::new(
-            "INVALID_ARGUMENT",
-            "不支持的支付通道",
-            false,
-            json!({ "reason": "channel_invalid" }),
-        ));
-    }
-    if channel == "fake" && env == crate::control_plane::env::ControlPlaneEnv::Prod {
-        return Err(CpError::new(
-            "PRECONDITION_FAILED",
-            "生产环境不支持假充值",
-            false,
-            json!({ "reason": "channel_not_allowed" }),
-        ));
-    }
-    Ok(channel)
-}
-
 /// 读余额（`GET /v1/wallet`，USD 分）。`updated_at` 由 Host 补本地时间。
 pub async fn wallet() -> Result<MyServerWallet, CpError> {
     let client = ControlPlane::new()?;
@@ -775,8 +747,8 @@ fn parse_wallet(raw: Value) -> Result<MyServerWallet, CpError> {
     Ok(wallet)
 }
 
-/// 创建充值会话（`POST /v1/topups`）。面额是整数美分；非生产 `fake` 直接入账。
-pub async fn topup(denomination_cents: i64, channel: &str) -> Result<MyServerTopup, CpError> {
+/// 创建充值会话（`POST /v1/topups`）。面额是整数美分；只有 Dodo 一条通道。
+pub async fn topup(denomination_cents: i64) -> Result<MyServerTopup, CpError> {
     if denomination_cents <= 0 {
         return Err(CpError::new(
             "PRECONDITION_FAILED",
@@ -785,12 +757,8 @@ pub async fn topup(denomination_cents: i64, channel: &str) -> Result<MyServerTop
             json!({ "reason": "invalid_denomination" }),
         ));
     }
-    let channel = resolve_channel(channel, crate::control_plane::env::current().env)?;
     let client = ControlPlane::new()?;
-    let body = json!({
-        "denomination_cents": denomination_cents,
-        "channel": channel,
-    });
+    let body = json!({ "denomination_cents": denomination_cents });
     let raw = client.post("/v1/topups", Some(&body), Some(&new_idempotency_key())).await?;
     parse_topup(raw, denomination_cents)
 }
@@ -1641,7 +1609,7 @@ mod tests {
         assert_eq!(topup.denomination_cents, 2000);
         assert_eq!(topup.checkout_url.as_deref(), Some("https://pay.example/t"));
 
-        // fake 通道直接入账：没有 URL；响应自带面额时以响应为准。
+        // 收银台地址缺失时仍按响应解析；响应自带面额时以响应为准。
         let topup = parse_topup(
             json!({ "topup_id": "tp_2", "checkout_url": null, "denomination_cents": 1000 }),
             2000,
@@ -1652,21 +1620,6 @@ mod tests {
 
         // 缺 topup_id 不可信。
         assert!(parse_topup(json!({ "denomination_cents": 1000 }), 2000).is_err());
-    }
-
-    #[test]
-    fn the_channel_rules_separate_production_from_local_testing() {
-        use crate::control_plane::env::ControlPlaneEnv;
-
-        assert_eq!(resolve_channel("", ControlPlaneEnv::Prod).unwrap(), "dodo");
-        assert_eq!(resolve_channel("fake", ControlPlaneEnv::Dev).unwrap(), "fake");
-
-        let error = resolve_channel("fake", ControlPlaneEnv::Prod).unwrap_err();
-        assert_eq!(error.code, "PRECONDITION_FAILED");
-        assert_eq!(error.reason(), Some("channel_not_allowed"));
-
-        let error = resolve_channel("paypal", ControlPlaneEnv::Dev).unwrap_err();
-        assert_eq!(error.code, "INVALID_ARGUMENT");
     }
 
     #[test]

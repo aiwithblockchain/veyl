@@ -36,10 +36,10 @@ wrangler d1 execute veyl-control-plane-dev-4 --remote --command "UPDATE servers 
 ```
 
 ```bash
-curl -s https://cp-dev.veyl.dessage.xyz/v1/debug/billing
+curl -s https://cp-dev.veyl.dessage.xyz/health
 ```
 
-第二条返回 `{ "ok": true, "report": … }`；prod 上该端点恒 404，M1 不适用。
+第二条只用来确认 dev Worker 在线。改完库**等下一次定时任务**：计费每小时第 17 分跑一次（`wrangler.jsonc` 的 `crons`，UTC），dev 与生产同一套。等待期间可以先用 `npx wrangler tail veyl-control-plane-dev` 观察 `[billing]` 日志。
 
 ## 执行顺序
 

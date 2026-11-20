@@ -152,9 +152,8 @@ async function createOrder(request: Request, env: OrdersEnv): Promise<Response> 
     });
   }
 
-  // 生产环境必须登录后下单；开发环境保留匿名建机，方便没有登录界面时继续测链路。
-  // 白名单式：只有明确是 dev 才放行匿名建机，ENVIRONMENT 缺失或拼错都按生产处理。
-  if (env.ENVIRONMENT !== "dev" && identity.kind !== "email") {
+  // 只有 email 身份能下单：匿名设备一律拒绝，开发环境也不再例外。
+  if (identity.kind !== "email") {
     return apiError("UNAUTHENTICATED", "登录后才能创建服务器", {
       retryable: true,
       reason: "auth_required",

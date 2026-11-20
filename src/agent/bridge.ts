@@ -679,7 +679,7 @@ export interface MyServerWallet {
   updated_at: string;
 }
 
-/** 充值收银台会话（2.27.0）；非生产 fake 通道没有 URL。 */
+/** 充值收银台会话（2.27.0）。 */
 export interface MyServerTopup {
   topup_id: string;
   checkout_url: string | null;

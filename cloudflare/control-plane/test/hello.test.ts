@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import devWorker from "../src/dev";
+import worker from "../src/index";
 import { FakeD1 } from "./helpers/fakeD1";
 
-// 调试路由只装在 dev 入口；其余路径由 dev 入口原样转交生产入口。
+// 现在只有生产入口；调试路由已整体删除。
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
-const route = (request: Request, env: unknown) => devWorker.fetch(request, env as never, ctx);
+const route = (request: Request, env: unknown) => worker.fetch(request, env as never, ctx);
 
 const env = { ENVIRONMENT: "test" };
 
@@ -40,82 +40,6 @@ describe("control plane hello", () => {
   });
 });
 
-describe("do catalog debug route", () => {
-  it("生产环境不暴露", async () => {
-    const res = await route(new Request("https://example.com/v1/debug/do-catalog"), {
-      ENVIRONMENT: "production",
-      DO_API_TOKEN: "t",
-    });
-    expect(res.status).toBe(404);
-  });
-
-  it("dev 但没有 DO_API_TOKEN 时返回 500", async () => {
-    const res = await route(new Request("https://example.com/v1/debug/do-catalog"), {
-      ENVIRONMENT: "dev",
-    });
-    expect(res.status).toBe(500);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe("missing_secret");
-  });
-
-  it("dev 命中时返回地区、最低价套餐与 Ubuntu 镜像，且不回显 token", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string | URL | Request) => {
-        const href = String(input);
-        if (href.includes("/regions")) {
-          return new Response(
-            JSON.stringify({
-              regions: [
-                { slug: "nyc3", name: "New York 3", available: true },
-                { slug: "sgp1", name: "Singapore 1", available: true },
-                { slug: "old1", name: "Retired", available: false },
-              ],
-            }),
-            { status: 200 },
-          );
-        }
-        if (href.includes("/sizes")) {
-          return new Response(
-            JSON.stringify({
-              sizes: [
-                { slug: "s-2vcpu-2gb", memory: 2048, vcpus: 2, price_monthly: 18, regions: [] },
-                { slug: "s-1vcpu-512mb-10gb", memory: 512, vcpus: 1, price_monthly: 4, regions: [] },
-              ],
-            }),
-            { status: 200 },
-          );
-        }
-        return new Response(
-          JSON.stringify({
-            images: [
-              { slug: "ubuntu-22-04-x64", id: 1, name: "22.04" },
-              { slug: "ubuntu-24-04-x64", id: 2, name: "24.04" },
-            ],
-          }),
-          { status: 200 },
-        );
-      }),
-    );
-
-    const res = await route(new Request("https://example.com/v1/debug/do-catalog"), {
-      ENVIRONMENT: "dev",
-      DO_API_TOKEN: "do-secret-token",
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      ok: boolean;
-      regions: { count: number; slugs: string[] };
-      sizes: { cheapest: Array<{ slug: string; usd_per_month: number }> };
-      ubuntu_24_04: { id: number; slug: string } | null;
-    };
-    expect(body.ok).toBe(true);
-    expect(body.regions.slugs).toEqual(["nyc3", "sgp1"]);
-    expect(body.sizes.cheapest[0].slug).toBe("s-1vcpu-512mb-10gb");
-    expect(body.ubuntu_24_04).toEqual({ id: 2, slug: "ubuntu-24-04-x64", name: "24.04" });
-    expect(JSON.stringify(body)).not.toContain("do-secret-token");
-  });
-});
 
 describe("public catalog", () => {
   const doMock = () =>
@@ -502,38 +426,3 @@ describe("public catalog", () => {
   });
 });
 
-describe("do scopes debug route", () => {
-  it("生产环境不暴露", async () => {
-    const res = await route(new Request("https://example.com/v1/debug/do-scopes"), {
-      ENVIRONMENT: "production",
-      DO_API_TOKEN: "t",
-    });
-    expect(res.status).toBe(404);
-  });
-
-  it("区分 allowed 与 denied", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string | URL | Request) => {
-        const href = String(input);
-        const denied = href.includes("/account") || href.includes("/customers/");
-        return denied
-          ? new Response("forbidden", { status: 403 })
-          : new Response(JSON.stringify({ ok: true }), { status: 200 });
-      }),
-    );
-
-    const res = await route(new Request("https://example.com/v1/debug/do-scopes"), {
-      ENVIRONMENT: "dev",
-      DO_API_TOKEN: "do-secret-token",
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      results: Record<string, { verdict: string }>;
-    };
-    expect(body.results.droplets.verdict).toBe("allowed");
-    expect(body.results.firewalls.verdict).toBe("allowed");
-    expect(body.results.account.verdict).toBe("denied");
-    expect(body.results.billing_balance.verdict).toBe("denied");
-  });
-});

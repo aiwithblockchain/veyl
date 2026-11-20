@@ -445,18 +445,12 @@ pub async fn my_server_wallet() -> Result<Value, Value> {
 
 /// 创建充值会话并在系统浏览器打开（仅 UI）。
 #[tauri::command]
-pub async fn my_server_topup(
-    app: tauri::AppHandle,
-    denomination: i64,
-    channel: Option<String>,
-) -> Result<Value, Value> {
-    let channel = channel.unwrap_or_else(|| "dodo".to_string());
-    match crate::control_plane::servers::topup(denomination, &channel).await {
+pub async fn my_server_topup(app: tauri::AppHandle, denomination: i64) -> Result<Value, Value> {
+    match crate::control_plane::servers::topup(denomination).await {
         Ok(topup) => {
             log::info!(
-                "我的服务器：充值会话创建 denomination_cents={} channel={} topup={} checkout_url={}",
+                "我的服务器：充值会话创建 denomination_cents={} topup={} checkout_url={}",
                 topup.denomination_cents,
-                channel,
                 topup.topup_id,
                 if topup.checkout_url.is_some() { "有" } else { "无" }
             );
@@ -475,9 +469,8 @@ pub async fn my_server_topup(
         }
         Err(error) => {
             log::warn!(
-                "我的服务器：充值失败 denomination_cents={} channel={} code={} reason={} retryable={}",
+                "我的服务器：充值失败 denomination_cents={} code={} reason={} retryable={}",
                 denomination,
-                channel,
                 error.code,
                 error.reason().unwrap_or("-"),
                 error.retryable

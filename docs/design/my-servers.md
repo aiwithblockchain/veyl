@@ -226,7 +226,6 @@ pub trait Provider: Send + Sync {
 | GET | `/v1/catalog` | 可售地区 / 套餐 / 时价 / 月价上限（**公开，无需登录**，§3.2） | — | `regions[]`, `plans[]`, `currency`, `updated_at` |
 | POST | `/v1/orders` | 下单 | `region`, `plan`, `idempotency` | `order_id`, `state`, `amount`, `expires_at` |
 | GET | `/v1/orders/{order_id}` | 查订单 | — | `state`, `amount`, `paid_at`, `failure`, `server_id` |
-| POST | `/v1/orders/{order_id}/checkout` | **假支付**：立即标记成功（§3.1） | `channel`（固定 `fake`） | `state = paid` |
 | POST | `/v1/orders/{order_id}/cancel` | 取消订单 | — | 未支付 → `cancelled`；已支付 → 销毁实例后 `cancelled` |
 | GET | `/v1/servers` | 我的服务器列表 | — | `servers[]`（§5.3） |
 | GET | `/v1/servers/{server_id}` | 详情与最新状态 | — | 同上单条 + `install_log_tail_redacted` |
@@ -241,7 +240,7 @@ pub trait Provider: Send + Sync {
 
 ### 3.1 支付：本期只做假的（接口形状保留）
 
-> 2026-11-15 更新：真实支付（Dodo Payments）已与本阶段合并，**生产不再走假支付**；下面的 `FakePaymentProvider` 只保留在非生产环境（`channel: "fake"`）。结账、webhook、订单状态机与幂等的最终设计见 `docs/design/login-and-payment.md` §4。
+> 2026-11-15 更新：真实支付（Dodo Payments）已与本阶段合并，**生产不再走假支付**；2026-11-20 起 `FakePaymentProvider` 与非生产的 `channel: "fake"` 通道一并删除，充值只有 Dodo 一条路径。结账、webhook、订单状态机与幂等的最终设计见 `docs/design/login-and-payment.md` §4。
 
 **明确非目标**：本期不接真实支付、不做对账、不做回调验签、不做退款。支付只是一个能立即成功的假实现，用来跑通后面的建机与装机链路。
 
@@ -1187,7 +1186,7 @@ CREATE TABLE my_servers (
 - `GET /v2/regions` 返回 **16** 个 `available: true` 地区：`nyc1 nyc2 nyc3 sgp1 lon1 ams3 fra1 tor1 sfo2 sfo3 blr1 syd1 atl1 ric1 mkc1 mem1`。
 - `GET /v2/sizes` 返回 **43** 种；最便宜 5 档：`s-1vcpu-512mb-10gb` $4、`s-1vcpu-1gb` $6、`s-1vcpu-1gb-intel` $7、`s-1vcpu-1gb-35gb-intel` $8、`s-1vcpu-2gb` $12（均为月价，USD）。
 - `GET /v2/images?type=distribution` 中 `ubuntu-24-04-x64` 的 **id = `252242095`**，名称 `24.04 (LTS) x64`。
-- 权限边界实测（`/v1/debug/do-scopes`）：`regions` / `sizes` / `images` / `droplets` / `firewalls` 全部 **200 allowed**；`/account` 与 `/customers/my/balance` 都是 **403 denied**——token 恰好停在最小权限，没有多余的账户或计费权限。
+- 权限边界实测（2026-11-15）：`regions` / `sizes` / `images` / `droplets` / `firewalls` 全部 **200 allowed**；`/account` 与 `/customers/my/balance` 都是 **403 denied**——token 恰好停在最小权限，没有多余的账户或计费权限。
 - **scopes 分资源，不能互相替代**（2026-11-15 实测踩坑）：`POST /v2/droplets` 的请求体带 `tags`，即使有 `droplet:admin` 也会因缺 `tag:create` 返回 **403**（订单记 `failure_code = upstream_403`、`failure_stage = creating`）。`droplet:admin` 只覆盖 droplet 资源内部，tag 是独立资源类型。
 - **预装镜像（后续）**：用自定义镜像建机只需 `image:read` + `droplet:create`；上传/导入镜像本身要 `image:create`（2026-11-15 经 DigitalOcean 官方 AI 确认，与 token 管理页的 scope 列表一致）。
 - **打快照的 scope 待实测**：DO 的 AI 说是 `droplet:action`，但 **token 管理页没有这个 scope**（droplet 只有 create/read/update/delete/admin），这条答复不可信。做镜像时用实测确认是 `droplet:update` 还是 `droplet:admin`，不要照抄。
@@ -1683,7 +1682,6 @@ CREATE TABLE rate_limits (
 | `GET /v1/catalog` | — | 目录（已上线） | 公开、可缓存 300s |
 | `POST /v1/orders` | `{ region, plan }` | `{ order_id, state:"pending_payment", amount_usd, expires_at }` | **必须** `Idempotency-Key` |
 | `GET /v1/orders/{id}` | — | 订单 | — |
-| `POST /v1/orders/{id}/checkout` | `{ channel:"fake" }` | `{ state:"paid", server_id }`，同时启动 Workflow | **必须** |
 | `POST /v1/orders/{id}/cancel` | — | `{ state:"cancelled" }`；已支付则先销毁 | **必须** |
 | `GET /v1/servers` | — | `{ servers: MyServer[] }`（按 `created_at` 倒序） | — |
 | `GET /v1/servers/{id}` | — | `MyServer`（含 `install_log_tail_redacted`，≤ 20 行） | — |

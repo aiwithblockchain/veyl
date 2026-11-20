@@ -2,24 +2,22 @@
 // 余额是账本的结果，这里只负责把「要充多少」变成一笔待支付的 topup。
 
 import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
-import { recoverExpiredServers } from "./billing";
 import { randomId } from "./lib/crypto";
 import { apiError, json } from "./lib/http";
 import { paymentReturnUrl, topupDenominations, topupProductId } from "./lib/config";
 import { idempotencyKey, requestHashOf, withIdempotency, type StoredResponse } from "./lib/idempotency";
 import { createCheckoutSession, type DodoEnv } from "./payments/dodo";
-import { balanceCents, recordLedgerEntry } from "./wallet";
+import { balanceCents } from "./wallet";
 
 export interface TopupEnv extends MaybeAuthEnv, DodoEnv {}
 
 export type TopupStart =
-  | { ok: true; topupId: string; checkoutUrl: string | null; denominationCents: number; balanceAfterCents?: number }
+  | { ok: true; topupId: string; checkoutUrl: string; denominationCents: number }
   | {
       ok: false;
       reason:
         | "invalid_denomination"
         | "unavailable"
-        | "fake_not_allowed"
         | "no_return_url"
         | "no_api_key"
         | "checkout_failed";
@@ -27,36 +25,24 @@ export type TopupStart =
       detail?: string;
     };
 
-/**
- * 开一笔充值：非生产直接入账（没有真实收银台也能跑通链路），生产建 Dodo 会话。
- * `/v1/topups` 与 dev 调试入口共用这一处，避免两条路径行为不一致。
- */
+/** 开一笔充值：固定面额 → Dodo 一次性产品 → 收银台会话。只有这一条路径。 */
 export async function startTopupSession(
   env: TopupEnv,
-  input: { accountId: string; email: string; cents: number; mode?: "dodo" | "fake" },
+  input: { accountId: string; email: string; cents: number },
 ): Promise<TopupStart> {
   const db = env.DB;
   if (!db) return { ok: false, reason: "unavailable" };
   const productId = topupProductId(env, input.cents);
   if (!productId) return { ok: false, reason: "invalid_denomination" };
 
+  // 缺 return URL 或 API Key 时根本建不出会话，也就不会有 webhook 先到的竞态——
+  // 在落 pending 行之前失败，别留下永远等不到支付的单子。
+  const returnUrl = paymentReturnUrl(env);
+  if (!returnUrl) return { ok: false, reason: "no_return_url" };
+  if (!env.DODO_API_KEY) return { ok: false, reason: "no_api_key" };
+
   const topupId = randomId("top_");
   const now = Date.now();
-
-  const mode = input.mode ?? "dodo";
-  // 白名单式：只有明确是 dev 才允许 fake 入账。变量缺失或拼错一律拒绝，
-  // 不能写成「等于 production 才拒绝」——那样配置一抖就直接放行。
-  if (mode === "fake" && env.ENVIRONMENT !== "dev") return { ok: false, reason: "fake_not_allowed" };
-
-  // dodo 通道缺 return URL 或 API Key 时根本建不出会话，也就不会有 webhook 先到的
-  // 竞态——在落 pending 行之前失败，别留下永远等不到支付的单子。fake 不走收银台。
-  let dodoReturnUrl = "";
-  if (mode !== "fake") {
-    const configuredReturnUrl = paymentReturnUrl(env);
-    if (!configuredReturnUrl) return { ok: false, reason: "no_return_url" };
-    if (!env.DODO_API_KEY) return { ok: false, reason: "no_api_key" };
-    dodoReturnUrl = configuredReturnUrl;
-  }
 
   // 先落 pending 行再开收银台：webhook 可能比建会话的响应先到，先有行才匹配得上。
   await db
@@ -67,36 +53,10 @@ export async function startTopupSession(
     .bind(topupId, input.accountId, input.cents, productId, now)
     .run();
 
-  if (mode === "fake") {
-    const credited = await recordLedgerEntry(env, {
-      accountId: input.accountId,
-      kind: "topup",
-      amountCents: input.cents,
-      refType: "dodo_payment",
-      refId: `fake:${topupId}`,
-      note: "fake topup",
-    });
-    await db
-      .prepare("UPDATE topups SET status = ?, paid_at = ? WHERE id = ?")
-      .bind(credited.ok ? "paid" : "failed", now, topupId)
-      .run();
-    if (!credited.ok) return { ok: false, reason: "unavailable" };
-    // 充值后立刻尝试把停机中的机器拉回来（§4.6：expired 只由充值恢复）。
-    await recoverExpiredServers(env as never, input.accountId);
-    console.log(`[topup] credited account=${input.accountId} cents=${input.cents} mode=fake`);
-    return {
-      ok: true,
-      topupId,
-      checkoutUrl: null,
-      denominationCents: input.cents,
-      balanceAfterCents: credited.balanceAfterCents,
-    };
-  }
-
   const session = await createCheckoutSession(env, {
     productId,
     email: input.email,
-    returnUrl: dodoReturnUrl,
+    returnUrl,
     metadata: { topup_id: topupId, account_id: input.accountId },
   });
   if (!session.ok) {
@@ -143,7 +103,7 @@ export async function handleTopups(request: Request, env: TopupEnv): Promise<Res
     return apiError("UNAUTHENTICATED", "登录后才能充值", { retryable: true, reason: "auth_required" });
   }
 
-  let body: { denomination_cents?: unknown; channel?: unknown };
+  let body: { denomination_cents?: unknown };
   try {
     body = (await request.json()) as typeof body;
   } catch {
@@ -162,27 +122,13 @@ export async function handleTopups(request: Request, env: TopupEnv): Promise<Res
   }
 
   // 连点、重试都只应该产生一个充值单：有幂等键就按 key 回放。
-  const channel = body.channel === "fake" ? "fake" : "dodo";
-
   const create = async (): Promise<StoredResponse> => {
     const started = await startTopupSession(env, {
       accountId: identity.accountId,
       email: account.email as string,
       cents,
-      mode: channel,
     });
     if (!started.ok) {
-      if (started.reason === "fake_not_allowed") {
-        return {
-          status: 409,
-          body: {
-            code: "PRECONDITION_FAILED",
-            message: "这个支付方式不可用",
-            retryable: false,
-            details: { reason: "channel_not_allowed" },
-          },
-        };
-      }
       return {
         status: 502,
         body: {
@@ -190,9 +136,9 @@ export async function handleTopups(request: Request, env: TopupEnv): Promise<Res
           message: "充值暂时不可用",
           retryable: true,
           details: {
-          reason:
-            started.reason === "invalid_denomination" ? "invalid_denomination" : "checkout_unavailable",
-        },
+            reason:
+              started.reason === "invalid_denomination" ? "invalid_denomination" : "checkout_unavailable",
+          },
         },
       };
     }
@@ -202,7 +148,6 @@ export async function handleTopups(request: Request, env: TopupEnv): Promise<Res
         topup_id: started.topupId,
         denomination_cents: started.denominationCents,
         checkout_url: started.checkoutUrl,
-        ...(started.balanceAfterCents !== undefined ? { balance_cents: started.balanceAfterCents } : {}),
       },
     };
   };

@@ -50,10 +50,8 @@
 	// - RESEND_API_KEY / RESEND_FROM_EMAIL（邮箱验证码）
 	"env": {
 		// 开发 / 联调环境。部署：npm run deploy:dev
-		// main 指向 dev 入口：只有这里装配 /v1/debug/*，生产入口不 import 它。
 		"dev": {
 			"name": "veyl-control-plane-dev",
-			"main": "src/dev.ts",
 			"define": {
 				"__DODO_API_BASE__": "\"https://test.dodopayments.com\""
 			},

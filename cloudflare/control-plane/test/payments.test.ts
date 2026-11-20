@@ -110,16 +110,12 @@ function authed(token: string) {
   return { authorization: `Bearer ${token}` };
 }
 
-function topupRequest(env: TestEnv, cents: number, channel?: string) {
+function topupRequest(env: TestEnv, cents: number) {
   return new Request("https://example.com/v1/topups", {
     method: "POST",
     headers: authed(env.token),
-    body: JSON.stringify(channel ? { denomination_cents: cents, channel } : { denomination_cents: cents }),
+    body: JSON.stringify({ denomination_cents: cents }),
   });
-}
-
-function walletRequest(env: TestEnv) {
-  return new Request("https://example.com/v1/wallet", { headers: authed(env.token) });
 }
 
 async function signWebhook(body: string, id: string, timestamp: string): Promise<string> {
@@ -173,24 +169,6 @@ afterEach(() => {
 });
 
 describe("充值", () => {
-  it("fake 通道直接入账，余额与账本同步", async () => {
-    const db = new FakeD1();
-    const env = await makeEnv(db);
-    stubUpstream();
-
-    const res = await handleTopups(topupRequest(env, 2000, "fake"), env as never);
-    expect(res?.status).toBe(200);
-    const body = (await res!.json()) as { topup_id: string; denomination_cents: number; balance_cents: number };
-    expect(body.denomination_cents).toBe(2000);
-    expect(body.balance_cents).toBe(2000);
-    expect(db.rows("wallet_ledger")).toHaveLength(1);
-
-    const wallet = await handleTopups(walletRequest(env), env as never);
-    const view = (await wallet!.json()) as { balance_cents: number; denominations_cents: number[] };
-    expect(view.balance_cents).toBe(2000);
-    expect(view.denominations_cents).toEqual([1000, 2000]);
-  });
-
   it("同一幂等键连点只产生一个充值单", async () => {
     const db = new FakeD1();
     const env = await makeEnv(db);
@@ -200,14 +178,14 @@ describe("充值", () => {
       new Request("https://example.com/v1/topups", {
         method: "POST",
         headers: { ...authed(env.token), "Idempotency-Key": "idem-topup-0001" },
-        body: JSON.stringify({ denomination_cents: 1000, channel: "fake" }),
+        body: JSON.stringify({ denomination_cents: 1000 }),
       });
 
     const first = (await (await handleTopups(withKey(), env as never))!.json()) as { topup_id: string };
     const second = (await (await handleTopups(withKey(), env as never))!.json()) as { topup_id: string };
     expect(second.topup_id).toBe(first.topup_id);
     expect(db.rows("topups")).toHaveLength(1);
-    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+    expect(db.rows("topups")[0].status).toBe("pending");
   });
 
   it("默认走真实收银台，返回 checkout_url", async () => {
@@ -221,16 +199,6 @@ describe("充值", () => {
     expect(body.checkout_url).toBe("https://checkout.test/cs_wallet");
     expect(db.rows("topups")[0].status).toBe("pending");
     expect(db.rows("accounts")[0].balance_cents).toBe(0);
-  });
-
-  it("生产环境拒绝 fake 通道", async () => {
-    const db = new FakeD1();
-    const env = await makeEnv(db, "production");
-    stubUpstream();
-    const res = await handleTopups(topupRequest(env, 1000, "fake"), env as never);
-    expect(res?.status).toBe(409);
-    const body = (await res!.json()) as { details: { reason: string } };
-    expect(body.details.reason).toBe("channel_not_allowed");
   });
 
   it("没配产品的面额被拒绝", async () => {

@@ -95,7 +95,7 @@ etag: "sha256-<hex>"
 - **ETag = 正文的 sha256**，首次请求时用 `crypto.subtle.digest` 算一次缓存在模块作用域（isolate 存活期间复用）。
 - **条件请求**：`If-None-Match` 与当前 ETag 相同 → `304`、空 body、保留 ETag 与 `Cache-Control`。
 - 不返回任何其他节点字段，不返回上游元数据。
-- 路径冲突检查：现有路由只有 `/v1/catalog`、`/v1/debug/*`、`/v1/*` 业务前缀与 `/payment/return`，`/v1/seed` 不冲突。**最终路径用 `/v1/seed`**——沿用 `/v1` 的既有约定，比 `/seed.json` 少一个「静态文件」的误解（它不是文件，是 Worker 直出）。
+- 路径冲突检查：现有路由只有 `/v1/catalog`、`/v1/*` 业务前缀与 `/payment/return`，`/v1/seed` 不冲突。**最终路径用 `/v1/seed`**——沿用 `/v1` 的既有约定，比 `/seed.json` 少一个「静态文件」的误解（它不是文件，是 Worker 直出）。
 
 > **可达性**：`cloudflare/edge/proxy.ts` 把 `veyl.dessage.xyz` 的接口路径经 service binding 转给 control-plane Worker，不按路径挑选，所以 `/v1/seed` 与 `/v1/catalog` 走同一条链路。（`_routes.json` 里的三条静态路径 `/`、`/index.html`、`/favicon.png` 由 Pages 直接返回，不进 Worker；接口路径不受影响。）
 >

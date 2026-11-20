@@ -10,7 +10,7 @@
 - 应用已重建：`bash scripts/dev/tun-dev.sh --kill-existing --no-open`
 - 登录态有效，至少有一台自有节点
 - **准备一台专用测试机**：下面的条目会真的销毁机器，不要拿在用的那台测
-- dev 专用调试端点：`https://cp-dev.veyl.dessage.xyz/v1/debug/billing`（无需鉴权，prod 恒 404）
+- dev 计费由每小时第 17 分的定时任务执行，不再提供手动触发接口；改完 `paid_until` 后等下一次定时任务，或用 `npx wrangler tail veyl-control-plane-dev` 观察日志
 
 改库命令统一在 `cloudflare/control-plane` 目录下执行：
 
