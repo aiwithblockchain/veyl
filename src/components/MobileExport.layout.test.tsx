@@ -33,12 +33,12 @@ describe("在手机上使用的 v6 尺寸", () => {
     expectDecls(".mobile-export__footer", "padding: 14px 28px");
   });
 
-  it("两码：导入 200、下载 104，白卡无内边距、圆角 10、图铺满", () => {
+  it("两码：导入 200、下载 120，白卡无内边距、圆角 10、图铺满", () => {
     expectDecls(".mobile-export__qr", "width: 200px", "height: 200px");
     expectDecls(
       ".mobile-export__download-qr",
-      "width: 104px",
-      "height: 104px",
+      "width: 120px",
+      "height: 120px",
     );
     const cards = rule(".mobile-export__download-qr,\n.mobile-export__qr");
     expect(cards).toContain("border: 1px solid var(--hair)");

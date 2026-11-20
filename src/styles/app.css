@@ -6647,8 +6647,8 @@ details[open] > .settings-fold__summary::before {
 }
 
 .mobile-export__download-qr {
-  width: 104px;
-  height: 104px;
+  width: 120px;
+  height: 120px;
 }
 
 .mobile-export__qr {

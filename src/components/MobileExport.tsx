@@ -505,7 +505,7 @@ export function MobileExport({
     );
   };
 
-  // ① 是 ② 的前提：码 104 + 两行文字，块限宽 380，明显轻于主块。
+  // ① 是 ② 的前提：码 120 + 两行文字，块限宽 380，明显轻于主块。
   const downloadStep = (app: AppDef) => {
     const data = clientQr[app.id];
     return (
@@ -515,8 +515,8 @@ export function MobileExport({
             <img
               className="mobile-export__download-qr-img"
               src={data.qr_data_url}
-              width={104}
-              height={104}
+              width={120}
+              height={120}
               alt=""
               aria-hidden="true"
             />

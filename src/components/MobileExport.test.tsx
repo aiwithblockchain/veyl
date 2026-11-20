@@ -373,7 +373,7 @@ describe("在手机上使用：按 App 分类", () => {
     ).toBeTruthy();
   });
 
-  it("下载码 104、白卡 128：码本身可扫，卡只留静区", async () => {
+  it("下载码 120、白卡同尺寸：码本身可扫，卡只留静区", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
 
@@ -389,8 +389,8 @@ describe("在手机上使用：按 App 分类", () => {
     );
     expect(img?.getAttribute("alt")).toBe("");
     expect(img?.getAttribute("aria-hidden")).toBe("true");
-    expect(img?.getAttribute("width")).toBe("104");
-    expect(img?.getAttribute("height")).toBe("104");
+    expect(img?.getAttribute("width")).toBe("120");
+    expect(img?.getAttribute("height")).toBe("120");
     expect(dialog.querySelector(".mobile-export__download-qr")).toBeTruthy();
     expect(
       within(dialog).getByRole("heading", { name: "还没有 App？先下载" }),
