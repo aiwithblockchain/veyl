@@ -863,6 +863,10 @@ rules:
 | V19 | 被墙走节点与 DNS | 打开 google.com / youtube.com；`ipinfo.io` 显示服务器 IP；sing-box 的 DNS 泄漏测试不出现本地运营商 DNS（国内域名走 `223.5.5.5` 属预期）；CMFA 不加 DNS 块，记录其本地 DNS 表现即可 |
 | V20 | 失败注入与格式兼容 | 把规则 URL 指向不可达地址（测试构建）：sing-box 应冷启动失败且可见；CMFA 的 `.mrs` provider 失败时 `DOMAIN-SUFFIX,cn` 仍应 `DIRECT`、不落全局；另记录 CMFA 当前内核是否支持 `format: mrs`（不支持时报 `unsupported format type`，按 §3.8.6 回退 text） |
 
+> **2026-11-20 真机结论（sing-box 官方 iOS，MT 发行版）**：分流生效——国内站点直连、境外站点经节点，首次冷启动需下载规则集（约 92KB）。验收中使用 `api.ipify.org`（应显示节点 IP）与 `myip.ipip.net`（应显示本地宽带 IP）两个端点判断出口，这个组合可以复用于后续版本。V18 的日志与 `cache_file` 部分未取证；`cache_file` 仍为 P2。
+
+> **同轮修掉的启动缺陷**：`dns-cn` 曾显式 `detour: "direct"`，内核启动即 `FATAL: detour to an empty direct outbound makes no sense`（`sing-box check` 静态通过，只有真跑才暴露）。修复为不写 detour（不写即直连），并新增运行期测试：用随包内核真跑 3 秒断言不立即退出，同时锁定「DNS 服务器不得 detour 到 direct」这条不变量。
+
 #### 3.8.10 定稿后的剩余项
 
 1. sing-box 模板已含 `default_domain_resolver` 与规则集；**不要写 `download_detour`**。
