@@ -3,7 +3,7 @@
 > 日期：2026-11-19（§3.7 多格式增补于 2026-11-20）
 > 状态：**技术设计，待评审**。只出文档：不改代码、不改共享契约文件、不改其它设计稿、不提交。
 > 上游：`mobile-export.md`（需求）、`mobile-export-ui.md`（界面定稿）、`my-servers.md` §16 / §17（凭据模型、用户无 SSH）、`login-and-payment.md` §2.5（令牌模型）、`environments.md`
-> 事实边界：sing-box 配置形状已于 2026-11-19 用随包 `sing-box 1.14.4` 的 `check` 在本地实测通过（§3.6，含最小 TUN 入站、最小 DNS 与零节点样张）；真机先后暴露「无 DNS 时 VPN 已连、无法上网」「无 TUN 入站时已连接但流量为 0」「有 TUN 但仍无法出网（出站未绑定物理网卡）」「有计数、能测速、仍打不开网页（缺 `stack` / 缺 `sniff`、多带 `strict_route`）」四种现象，据此依次改写模板；TUN 是否创建系统隧道由官方客户端源码确认（§3.5）。**2026-11-20：四项修复后在 iPhone 上确认可打开网页（Wi-Fi）；蜂窝网络复验尚未执行**（V12）。多格式（2026-11-20，§3.7）的客户端 Basic 支持已对 Clash Verge / CMFA 主路径与 Hiddify 的 Dart 回退路径源码核实；Karing / Shadowrocket / Stash 未核实。客户端扫码、Basic 认证、自动更新等外部行为沿用需求文档的「待验证」，本文件 §8 给出可执行步骤，**不凭记忆断言**。
+> 事实边界：sing-box 配置形状已于 2026-11-19 用随包 `sing-box 1.14.4` 的 `check` 在本地实测通过（§3.6，含最小 TUN 入站、最小 DNS 与零节点样张）；真机先后暴露「无 DNS 时 VPN 已连、无法上网」「无 TUN 入站时已连接但流量为 0」「有 TUN 但仍无法出网（出站未绑定物理网卡）」「有计数、能测速、仍打不开网页（缺 `stack` / 缺 `sniff`、多带 `strict_route`）」四种现象，据此依次改写模板；TUN 是否创建系统隧道由官方客户端源码确认（§3.5）。**2026-11-20：四项修复后在 iPhone 上确认可打开网页（Wi-Fi）；蜂窝网络复验尚未执行**（V12）。多格式（2026-11-20，§3.7）的客户端 Basic 支持已对 CMFA 主路径与 Hiddify 的 Dart 回退路径源码核实；Shadowrocket / Karing / Stash 未核实（Shadowrocket 由产品拍板先上界面，带撤下条件，§3.7.8）。客户端扫码、Basic 认证、自动更新等外部行为沿用需求文档的「待验证」，本文件 §8 给出可执行步骤，**不凭记忆断言**。
 > 契约增量：全部写在本文件 §5 / §6，不直接改 `docs/contracts/*`，由 PM 统一集成。
 
 ---
@@ -417,8 +417,8 @@ ORDER BY s.created_at ASC, s.id ASC
 | 格式 | 路径 | `Content-Type` | 主要消费者 |
 |---|---|---|---|
 | sing-box JSON | **`GET /v1/mobile/profile`**（保持不变） | `application/json; charset=utf-8` | SFI / SFA |
-| Clash / Mihomo YAML | **`GET /v1/mobile/profile/clash`** | `text/yaml; charset=utf-8` | CMFA / Clash Verge / Stash / Karing / Hiddify |
-| ss:// 链接列表 | **`GET /v1/mobile/profile/ss`** | `text/plain; charset=utf-8` | Hiddify（未核实）；Karing（Basic 未核实）。**M1 不展示 ss 行，但端点与单测照做**（产品 2026-11-20） |
+| Clash / Mihomo YAML | **`GET /v1/mobile/profile/clash`** | `text/yaml; charset=utf-8` | CMFA（M1）、Hiddify（M1 备选）；Clash Verge 仅桌面验证 |
+| ss:// 链接列表 | **`GET /v1/mobile/profile/ss`** | `text/plain; charset=utf-8` | Shadowrocket（M1，Basic 与 body 编码待真机）；v2rayNG（下期，已核实） |
 
 - **三个路径共用同一枚导出令牌**。`POST /v1/mobile/token/rotate` 覆盖唯一一行，旧令牌在三个路径上**同时**失效；不存在「按格式分别轮换」。这里的「失效」指三个端点对旧令牌返回 401；**已经复制 / 保存在外部的 ss 文本不在此列**——它携带节点密码，不受令牌轮换影响。
 - `/v1/mobile/profile` **不改名、不加 `/singbox` 后缀**：已经导入到手机上的旧 profile 永远指向这个路径，改名会让所有已部署的链接在下一次更新时 404。新格式只做**追加路径**。
@@ -504,13 +504,13 @@ ss://YWVzLTI1Ni1nY206czNjcmV0LXBhc3N3b3Jk@203.0.113.10:20343#%E4%B8%9C%E4%BA%AC%
 | 全部凭据不可用 | **503**，与另两种格式一致 |
 | 缓存 | `Cache-Control: no-store` + `X-Content-Type-Options: nosniff` |
 
-> `ss://` 是**内容**，不是订阅协议。它作为 `/profile/ss` 的响应提供给能带 Basic 拉取的客户端；不支持 Basic 的客户端本期不列入（§3.7.5），桌面**不提供**「复制 ss 文本再粘贴」的特例。
+> `ss://` 是**内容**，不是订阅协议。它作为 `/profile/ss` 的响应提供给能带 Basic 拉取的客户端；M1 只有 Shadowrocket 一个例外（Basic 未核实，待 V14，见 §3.7.8），桌面**不提供**「复制 ss 文本再粘贴」的特例。
 
 > **端点返回的 ss 文本可被外部工具保存，轮换不影响它**：它携带的是节点密码，不是导出令牌。`rotate` 只让三个 URL 失效；要让已保存的 ss 链接失效，必须重建服务器（换密码）。M1 不提供桌面粘贴入口，但这是端点固有的残余风险，与「链接可被转发」同级。
 
 #### 3.7.5 认证：Basic 是主路径，路径令牌不进 M1
 
-**结论：三种格式全部使用 HTTP Basic，共用同一枚令牌；不新增路径令牌。M1 列入的客户端必须能走 Basic；Karing / Shadowrocket / Stash 当前未核实，本期不列入，也不提供「仅 ss 文本粘贴」的特例（产品 2026-11-20 决定）。**
+**结论：三种格式全部使用 HTTP Basic，共用同一枚令牌；不新增路径令牌。M1 的四个 App 里，sing-box 官方 / CMFA / Hiddify 的 Basic 已核实；Shadowrocket 是唯一例外——Basic 与返回体编码均未核实，先上界面由产品负责人朋友真机验，失败按 §3.7.8 撤行。Karing / Stash 不列入。**
 
 已核实：
 
@@ -529,7 +529,7 @@ ss://YWVzLTI1Ni1nY206czNjcmV0LXBhc3N3b3Jk@203.0.113.10:20343#%E4%B8%9C%E4%BA%AC%
 - 令牌进入**请求行与路径**，会进 Cloudflare 访问日志、客户端日志、截图、代理日志；与 §7.1「令牌不进日志」直接冲突。
 - 需要**单独一套令牌**（路径令牌）或接受「同一枚令牌同时以 userinfo 和路径出现」，两种都比现在多一份状态与轮换语义。
 - rotate 仍可一次让三种格式失效，但路径令牌的存在会让「令牌只进二维码」这条口径失效。
-- **M1 不实现**。不支持 Basic 的客户端**本期不列入**，也不做「仅 ss 文本粘贴」的特例（产品 2026-11-20 决定：粘贴整段链接对用户是断崖式体验，且不会自动更新）。等核实它们能吃 Basic 订阅后再进客户端列表；若届时仍必须路径令牌，再单独设计，并在 §7.1 明确「路径令牌是另一种凭据，日志与审计规则不同」。
+- **M1 不实现**。除 Shadowrocket（Basic 未核实，先上界面待 V14，§3.7.8）外，不支持 Basic 的客户端不进列表；也不做「仅 ss 文本粘贴」的特例（产品 2026-11-20 决定：粘贴整段链接对用户是断崖式体验，且不会自动更新）。若 Shadowrocket 验不过且它只给路径令牌，再单独设计，并在 §7.1 明确「路径令牌是另一种凭据，日志与审计规则不同」。
 
 #### 3.7.6 限流、缓存、401 / 429
 
@@ -562,7 +562,7 @@ type MobileExportFormat =
   | {
       format: "ss";
       url: string;                 // …/v1/mobile/profile/ss
-      qr_data_url: null;           // 多节点列表不适合一张码，M1 不出
+      qr_data_url: string;         // 二维码内容 = 上面的 URL（Shadowrocket 扫码 / 粘贴一条订阅 URL）
     };
 
 type MobileExportData =
@@ -577,54 +577,87 @@ type MobileExportData =
 ```
 
 - **URL 仍由 Host 用 `env.rs` 的 origin 拼**（§4.1）；控制面只回令牌。
-- 桌面**不取 ss 文本**：不支持 Basic 的客户端本期不列入，粘贴文本的特例不做（§3.7.5）。`ss` 只返回 URL。
-- 二维码：sing-box 沿用 §4.2 的 scheme；Clash 用 URL 本身的二维码（**保留**，由 V13 判定是否可扫、是否退回只给复制链接）；ss 不出码。
+- 桌面**不取 ss 文本**：Shadowrocket 用「扫码 / 粘贴一条订阅 URL」导入，由它自己拉取；粘贴多行文本的特例不做（§3.7.5）。`ss` 返回 URL 与 URL 二维码。
+- 二维码：sing-box 沿用 §4.2 的 scheme；Clash 与 ss 都用 URL 本身的二维码（Clash 的去留由 V13 判；ss 的可用性由 V14 判，扫不通则退回只给复制链接）。
 - 敏感字段：三个 `url` 都含令牌；按 §7.1 处理，不得进日志、事件、AI 上下文或界面文本。
 - **版本**：`commands.md` 2.46.1 已随 prod 上线；`mobile_export_get` 的返回从单值改为 `formats[]` 是线上可见变更，**必须升 `2.47.0`**（产品 2026-11-20 拍板，不并入 2.46.0）。
 
-#### 3.7.8 客户端 × 格式矩阵
+#### 3.7.8 客户端矩阵（M1 四个 App，2026-11-20 定稿）
 
-> 符号：**能吃** = 有官方文档或源码证据能导入；**不能吃** = 该客户端的配置解析器明确只认另一种格式；**未核实** = 没有官方证据，不猜。
-> sagernet 官方页明确不收录第三方项目；下表第三方条目一律以各自的仓库 / 官方站点为依据，不用 sing-box 官方页背书。
+> **证据等级**：真机 > 源码 > 官方文档 > 商店页。商店页只证明「在架 / 价格 / 协议列表」，**不能证明订阅格式或 Basic**；闭源客户端查不到就写「未核实」，不按「它应该支持」推断。
+> 数字是 2026-11-20 的快照（`api.github.com` 与 `itunes.apple.com` 美国区），会变。
 
-| 客户端 | sing-box JSON | Clash YAML | ss 列表 | 核实依据 | M1 手机页 |
-|---|---|---|---|---|---|
-| sing-box 官方 SFI / SFA | **能吃** | **不能吃** | **不能吃** | 官方 clients 文档：Remote Profile 的 body 是 sing-box 配置（`mobile-export.md` §2.3）；没有 Clash / ss 列表解析器 | **列入** |
-| Hiddify | **能吃** | **能吃** | **未核实** | README：sing-box、V2Ray（Base64/plain links）、Clash / Clash Meta；`lib/utils/link_parsers.dart` 只认 `hiddify/v2ray/clash/clashmeta/sing-box`，没有 `ss`。Basic：`dio_http_client.dart` 的 Dart 回退路径 | **列入** |
-| Clash Meta for Android | **不能吃** | **能吃** | **不能吃** | README：Clash.Meta GUI；`service/ProfileProcessor.kt` 的 `fetchProfile` → `Clash.fetchAndValid`（Clash 配置校验）；`NewProfileActivity.kt` 把扫码内容直接作为 `Profile.Type.Url` | **列入** |
-| Clash Verge Rev | **不能吃** | **能吃** | **未核实** | README：Clash Meta GUI；`src-tauri/src/config/prfitem.rs` 的 `from_url` 下载后交给 Clash 核心校验；`utils/network.rs` 支持 URL userinfo → Basic | 桌面验证用，不进手机页 |
-| Karing | **能吃** | **能吃** | **能吃** | README：Compatible with Clash, V2ray/V2fly, Sing-box, Shadowsocks, Sub, Github Subscriptions | 不列入（Basic 未核实） |
-| Shadowrocket | **未核实** | **未核实** | **未核实** | 闭源；App Store 页面只写代理/规则/抓包能力，未列协议或订阅格式 | 不列入（Basic 未核实） |
-| Stash | **不能吃** | **能吃** | **未核实** | App Store：Full adaptation of Clash Premium configuration；<https://stash.wiki/en/configuration/example-config> 是 Clash YAML；订阅页只写 `#SUBSCRIBED <url>`，未提 Basic / ss | 不列入（Basic 未核实） |
+| App | 平台 | M1 格式 | 订阅 Basic | 状态 | 官方下载 | 依据 |
+|---|---|---|---|---|---|---|
+| **sing-box 官方**（iOS 商店名 `sing-box MT`，TestFlight 版即 SFI） | iOS / Android | sing-box JSON | **已核实** | **真机已验证**（iPhone，§3.6） | iOS <https://apps.apple.com/us/app/sing-box-mt/id6785326793>；Android <https://github.com/SagerNet/sing-box-for-android/releases> | 官方 `clients/apple/`、`clients/android/` 页；Remote Profile body 是 sing-box 配置（§3.7.5） |
+| **Shadowrocket** | iOS | ss 列表 | **未核实** | **M1 列入，待真机**（产品负责人朋友） | <https://apps.apple.com/us/app/shadowrocket/id932747118>（美区） | 闭源；商店页与发行方 <https://shadowlaunch.com/> 都没有订阅格式 / Basic 说明；$2.99，4.48 / 12,402，v2.2.93（2026-10-29） |
+| **Clash Meta for Android** | Android | Clash YAML | **已核实**（mihomo `SetBasicAuth`） | 源码核实，缺真机 | <https://github.com/MetaCubeX/ClashMetaForAndroid/releases> | `ProfileProcessor.kt:146` → `Clash.fetchAndValid`；`fetch.go` 的 `openUrl` → mihomo `component/http/http.go:58–60`；49,842 star，2026-11-20 推送 |
+| **Hiddify** | iOS / Android | sing-box JSON（备选 Clash YAML） | **已核实（Dart 回退路径）** | 源码核实，缺真机 | <https://github.com/hiddify/hiddify-app/releases>、App Store `id6596777532` | `dio_http_client.dart:168–184` 显式拼 Basic；README + `link_parsers.dart`；**核心下载路径是否透传 userinfo 未核实**（§3.7.5）；34,196 star |
 
-**这张矩阵对界面的直接结论**：
+> **Hiddify 的 ss 仍然未核实**：`link_parsers.dart` 只认 `hiddify/v2ray/clash/clashmeta/sing-box`。它是列表里唯一两种格式都能吃的 App；Shadowrocket 若验不过，Hiddify 可以接 sing-box / Clash，但**接不了 ss**。
 
-- M1 列入的四个客户端里，**ss 列没有一个是「能吃」**：SFI/CMFA 不能吃，Hiddify/Clash Verge 未核实。**已定（产品 2026-11-20）：ss 行不进 M1 界面，但 `/profile/ss` 端点与单测照做**——它是 V14 之后加 Shadowrocket / Karing 的唯一前置，删了以后还得重来。
-- Clash YAML 有两个「能吃」且 Basic 已核实的客户端（CMFA、Clash Verge），Clash 行可以进界面；Clash 二维码保留，由 V13 判去留。
-- Karing 三列全「能吃」但 Basic 未核实，是最值得优先验证的扩展对象：一旦 V14 确认 Basic，它可以直接进 M1，不需要改格式。
-- 设计师按「M1 列入」列决定手机端客户端行：**SFI/SFA、Hiddify、CMFA** 三个（Clash Verge 是桌面 GUI，不进手机页；Stash 待 Basic 核实）。
+##### 为什么是这四个
 
-按格式给出的界面行建议（供设计会话直接采用）：
+- 不是「最流行的四个」，是「三种格式各至少一个 App，并且每条都有可执行的验证路径」：sing-box 已真机；CMFA 源码已核实、可补真机；Shadowrocket 由产品负责人的朋友真机测；Hiddify 双格式兜底。
+- 四个 App 覆盖三种格式：sing-box JSON（sing-box 官方、Hiddify）、Clash YAML（CMFA、Hiddify）、ss（Shadowrocket 唯一）。
+- Shadowrocket 是当前唯一能让 ss 行上界面的客户端，所以即使 Basic 未核实也先列入；这是 M1 唯一一个「未验证先上」的例外，风险与撤下条件见下。
+- 其余 App 一律走界面兜底行；M1 只对这四个负责。
 
-| 格式 | M1 可列出的手机客户端 |
-|---|---|
-| sing-box JSON | SFI / SFA、Hiddify |
-| Clash YAML | Hiddify、Clash Meta for Android |
-| ss | **M1 不展示**（无已核实能吃的列入客户端）；端点与单测照做，V14 后再定界面 |
+##### Shadowrocket：风险、撤下条件与返回体格式
 
-> **Clash Verge Rev 是桌面 GUI（Windows / macOS / Linux），不是手机客户端**；它列在矩阵里只用于验证 Clash YAML 的兼容性与 Basic 实现，**不应出现在「在手机上使用」的客户端行里**。手机端 Clash 类客户端是 Clash Meta for Android / Stash。
+**风险**
 
-> **引用 mihomo 源码时的注意**：`https://github.com/MetaCubeX/mihomo` 的**默认分支 `main` 是一个无关的 Python 仓库**；代理核心在 **`Alpha` 分支**。看源码必须加 `?ref=Alpha` 或 `/tree/Alpha`，否则会打开错文件。ClashMetaForAndroid 的 `.gitmodules` 也指向该仓库的 `Alpha` 分支。
+1. **Basic 未核实**：订阅 URL 把令牌放在 userinfo（`https://veyl:<token>@…`）。若 Shadowrocket 不把 userinfo 转成 `Authorization: Basic`，拉取会 401，表现为「订阅已添加、列表永远为空」。
+2. **返回体格式未核实**：订阅内容是 `/profile/ss` 返回的纯文本 `ss://` 逐行列表；Shadowrocket 是否接受纯文本、还是必须 base64 包装，**没有官方依据**。
+
+**返回体格式（重点）**
+
+- 已知：Shadowrocket 的导入方式是「扫码 / 粘贴一条订阅 URL」（产品负责人提供），所以二维码内容 = 这条 URL，不是多行节点文本。
+- 未知：URL 返回**纯文本 `ss://` 行**是否被接受，还是必须 **base64**。
+- 查证范围：App Store 描述与版本说明、发行方站点 <https://shadowlaunch.com/> 均无订阅格式说明，也无官方 wiki。结论：**未核实**。
+- **决策门（V14）**：先用现有 `/profile/ss`（`text/plain; charset=utf-8`，纯文本逐行）测。
+  - 导入成功 → 不加变体，保持单一响应形状。
+  - 报「格式错误 / 无法解析」→ 增加 base64 变体：**路径后缀** `/v1/mobile/profile/ss/base64`（沿用 §3.7.2 的路径后缀，不用 query），body = base64(纯文本)，同一枚令牌、同一限流、同一 `no-store`。不默认实现，避免多一条没有客户端消费的路径。
+- **真机报格式错误时，先看这里**：不是令牌问题（那会是 401），是 body 编码问题。
+
+**撤下条件**
+
+- 真机确认**不支持 Basic**：若它提供自定义请求头入口，改实现（令牌改走头）；没有就撤掉这一行，ss 行同时退回「不展示」。ss 的下一步只有 Android 的 v2rayNG（下期，已核实 ss + Basic），**iOS 侧没有同格式替代**。
+- 真机确认**订阅 URL 可用但两种 body 都不吃**：同样撤行。
+- 撤行只改客户端列表与 `mobile_clients_qr` 枚举，不动 `/profile/ss` 端点与令牌。
+- 界面文案：这一行必须带「待验证」；不得把「待验证」写成「可用」。
+
+##### 下期（已核实可用，只差上界面）
+
+- **v2rayNG**（Android）：ss 列表 + Basic 双核实（`AngConfigManager.kt` 解析表含 Shadowsocks；`HttpUtil.kt:214–224`），66,201 star。**Shadowrocket 验不过时，ss 格式的 Android 替代就是它**；iOS 侧没有同格式替代。
+- **FlClash**（Android / 桌面）：Clash YAML + Basic 双核实（`core/config.go:83`；`request.dart:210`），64,260 star。CMFA 的备选。
+- **Karing**：Clash / sing-box / ss 都能吃，但 Basic 未核实（仓库快照缺 `lib/app/utils/http_utils.dart`），16,255 star。
+- **Stash / Loon / Quantumult X**：只有商店页，格式与 Basic 全未核实；均付费。
+- 扩展流程：按本表同一口径补行（平台、格式、Basic 源码依据、官方下载、star / 评分 / 维护、证据等级）；未核实不进界面。
+
+##### sing-box MT 的更正（保留被推翻的旧结论）
+
+- **旧结论（已推翻）**：把 `sing-box MT` 当作第三方客户端，未列入 M1，理由是「sagernet 官方页不收录第三方」。
+- **新证据**：官方 `clients/apple/` 页把 App Store `id6785326793` 直接列为 Apple 平台官方客户端；发行主体 Metamerism LLC 是官方 seller，商店记录的 `sellerUrl` 指向 `sing-box.sagernet.org`。
+- **更正**：它是官方发行，M1 里的「sing-box 官方」在 iOS 上就是它（TestFlight 版是同一客户端的测试轨道）。官方页仍然不收录其他第三方；这条更正不能外推到别的 App。
+- 影响范围：只改 iOS 行的归属，不改配置、令牌或二维码。
+
+##### 界面兜底
+
+M1 只对 **sing-box 官方 / Shadowrocket / CMFA / Hiddify** 四个 App 负责。用户用别的 App 时走界面兜底行（引导到官方客户端页）；正文不承诺「以后可能支持」，扩展名单统一放在上面的「下期」。
+
+> **引用 mihomo 源码时的注意**：`https://github.com/MetaCubeX/mihomo` 的**默认分支 `main` 是一个无关的 Python 仓库**；代理核心在 **`Alpha` 分支**。看源码必须加 `?ref=Alpha` 或 `/tree/Alpha`。ClashMetaForAndroid 的 `.gitmodules` 也指向该仓库的 `Alpha` 分支。
 
 **仓库 / 官方文档链接（矩阵依据）**：
 
-- SFI / SFA：<https://sing-box.sagernet.org/clients/>、<https://github.com/SagerNet/sing-box>
+- sing-box 官方客户端页：<https://sing-box.sagernet.org/clients/>、Apple 页 <https://sing-box.sagernet.org/clients/apple/>、Android 页 <https://sing-box.sagernet.org/clients/android/>
+- sing-box MT（App Store）：<https://apps.apple.com/us/app/sing-box-mt/id6785326793>
+- SFA：<https://github.com/SagerNet/sing-box-for-android>
 - Hiddify：<https://github.com/hiddify/hiddify-app>
 - Clash Meta for Android：<https://github.com/MetaCubeX/ClashMetaForAndroid>
-- Clash Verge Rev：<https://github.com/clash-verge-rev/clash-verge-rev>
-- Karing：<https://github.com/KaringX/karing>
-- Shadowrocket：<https://apps.apple.com/us/app/shadowrocket/id932747118>
-- Stash：<https://apps.apple.com/us/app/stash-rule-based-proxy/id1596063349>、<https://stash.wiki/en/features/service-provider-subscription>、<https://stash.wiki/en/configuration/example-config>
+- Shadowrocket：<https://apps.apple.com/us/app/shadowrocket/id932747118>、发行方 <https://shadowlaunch.com/>
+- 下期：FlClash <https://github.com/chen08209/FlClash>、v2rayNG <https://github.com/2dust/v2rayNG>、Karing <https://github.com/KaringX/karing>、Stash <https://apps.apple.com/us/app/stash-rule-based-proxy/id1596063349>、Loon <https://apps.apple.com/us/app/loon/id1373567447>、Quantumult X <https://apps.apple.com/us/app/quantumult-x/id1443988620>
+
 
 #### 3.7.9 三种格式的零节点 / 故障对照
 
@@ -645,18 +678,21 @@ type MobileExportData =
 |---|---|---|
 | be-cp | `cloudflare/control-plane/src/mobile.ts` | 路由增加 `/clash`、`/ss`；Clash YAML 生成器（手写标量引用）；SIP002 生成器；共用查询、限流、401/429；单测覆盖空态、坏凭据、特殊字符、IPv6、轮换 |
 | be-desktop | `src-tauri/src/control_plane/mobile.rs` | 构建三个 URL；Clash URL 的二维码；命令返回 `formats[]`；单测（编码、origin、零门禁） |
-| fe | 设计会话未定 | 弹层加格式选择（sing-box / Clash / ss），三种格式各自的复制 / 二维码 / 文本；本文件不规定版式 |
+| fe | 设计会话未定 | 弹层按 App 列表（sing-box / Shadowrocket / CMFA / Hiddify），每个 App 绑定一种格式，展示复制 + 二维码；无格式切换器；外加兜底行；本文件不规定版式 |
 
 不新增事件、不新增 AI 工具、不动迁移；`mobile_tokens` 一行同时服务三种格式。
 
-#### 3.7.12 界面格式切换（2026-11-20 拍板）
+#### 3.7.12 界面按 App，格式内部映射（2026-11-20 定稿）
 
-- 界面只做**两段**：`sing-box` / `Clash`，**默认 `sing-box`**；`ss` 不出现在切换里（端点照做，见 §3.7.8）。
-- 两段共用同一个弹层、同一枚令牌、同一个「重新生成」；切换只换展示的 URL / 二维码，不重新请求：
-  - `sing-box`：二维码内容 = `sing-box://import-remote-profile?url=…#Veyl`（§4.2）；
-  - `Clash`：二维码内容 = `/profile/clash` 的 URL 本身（保留，V13 判去留）。
-- 三行客户端（SFI/SFA、Hiddify、CMFA）各出一个下载码：`mobile_clients_qr { client }`，URL 固定映射、不接受任意 URL（§5.1 / `commands.md` §7.23）。
-- `mobile_export_get` 的 `formats[]` 仍可能包含 `ss`；界面**忽略该条目**，不渲染、不展示其 URL。
+- **删掉格式切换器**：v4 设计里没有 `sing-box` / `Clash` 两段；用户只选 App，格式只存在于内部映射（§3.7.8）。`formats[]` 仍然三种都返回。
+- 四个 App 的映射：
+  - sing-box 官方 → `singbox`；二维码 = `sing-box://import-remote-profile?url=…#Veyl`（§4.2）；
+  - Shadowrocket → `ss`；二维码 = `/profile/ss` 的 URL 本身（待真机，§3.7.8）；
+  - CMFA → `clash`；二维码 = `/profile/clash` 的 URL 本身（V13 判去留）；
+  - Hiddify → `singbox`（备选 `clash`；界面默认取 `singbox`）。
+- 同一个弹层、同一枚令牌、同一个「重新生成」；切换 App 只换展示的 URL / 二维码，不重新请求。
+- 每个 App 一个下载码：`mobile_clients_qr { client }`，四个枚举 `singbox` / `hiddify` / `cmfa` / `shadowrocket`，URL 固定映射、不接受任意 URL（§5.1 / `commands.md` §7.23）。`hiddify` 以不带尾斜杠的 `https://hiddify.com` 为准。
+- `mobile_export_get` 的 `formats[]` 仍包含 `ss`；界面只取当前 App 对应的那一条，其余不渲染。
 - **安全文案边界**：不得写「重新生成后旧配置全部失效」这类绝对表述。准确说法是「旧链接失效，手机上的配置下次更新时不再可用」；`/profile/ss` 返回的节点链接一旦被复制/保存，**收不回**，只有重建服务器（换密码）才能让它失效。技术依据见 §3.7.4 / §7.3。
 
 ---
@@ -687,7 +723,7 @@ sing-box://import-remote-profile?url=<percent-encoded 上述 URL>#Veyl
 - fragment（`#` 之后）是 profile 显示名，固定 `Veyl` 并做同样的 encode；界面不展示这个名字。
 - 用 `url::form_urlencoded` 的序列化器生成 query 值，不手写 `encodeURIComponent` 的等价逻辑（Rust 侧没有现成函数，手写容易漏字符）。
 - 这条字符串**只用于二维码**；复制按钮复制的是 §4.1 的 profile URL，不是 scheme URL（与 UI 稿「复制链接」的语义一致）。
-- **只有 sing-box 用这个 scheme**：Clash 的二维码内容是 `/profile/clash` 的 URL 本身（不套 `clash://`，未核实），ss 不出二维码；见 §3.7.7。
+- **只有 sing-box 用这个 scheme**：Clash 与 ss 的二维码内容都是各自订阅 URL 本身（不套 `clash://` / `ss://` 订阅 scheme，未核实）；见 §3.7.7。
 
 ### 4.3 二维码：Rust 出图
 
@@ -753,7 +789,7 @@ sing-box://import-remote-profile?url=<percent-encoded 上述 URL>#Veyl
 
 - §7.21 `mobile_export_get {}` → `MobileExportData`（仅 UI）
 - §7.22 `mobile_export_rotate { confirm: true }` → `MobileExportData`（仅 UI）
-- §7.23 `mobile_clients_qr { client: "singbox" | "hiddify" | "cmfa" }` → `{ url, qr_data_url }`（仅 UI）
+- §7.23 `mobile_clients_qr { client: "singbox" | "hiddify" | "cmfa" | "shadowrocket" }` → `{ url, qr_data_url }`（仅 UI）
 
 ```ts
 type MobileExportFormat =
@@ -770,7 +806,7 @@ type MobileExportFormat =
   | {
       format: "ss";
       url: string;              // …/v1/mobile/profile/ss，敏感
-      qr_data_url: null;
+      qr_data_url: string;      // 二维码内容 = URL 本身（Shadowrocket 订阅入口；待 V14）
     };
 
 type MobileExportData =
@@ -800,15 +836,18 @@ type MobileExportData =
 
 三种格式的形状与零节点行为见 §3.7。
 
-**`mobile_clients_qr`（2.47.0 改枚举）**：只接受 `client: "singbox" | "hiddify" | "cmfa"`，Host 固定映射 URL 并出二维码：
+**`mobile_clients_qr`（2.47.0 改枚举）**：只接受 `client: "singbox" | "hiddify" | "cmfa" | "shadowrocket"`，Host 固定映射 URL 并出二维码：
 
 | `client` | URL |
 |---|---|
 | `singbox` | `https://sing-box.sagernet.org/clients/` |
-| `hiddify` | `https://hiddify.com/` |
+| `hiddify` | `https://hiddify.com` |
 | `cmfa` | `https://github.com/MetaCubeX/ClashMetaForAndroid/releases` |
+| `shadowrocket` | `https://apps.apple.com/us/app/shadowrocket/id932747118` |
 
-未知 / 缺失 / 非枚举值 → `INVALID_ARGUMENT / unknown_client`，**不静默回退**；**不接受调用方传 URL**（否则命令变成通用字符串转二维码工具）。不登录、不调控制面、不涉及令牌。三条对应 §3.7.8 的 M1 手机页客户端。
+> `hiddify` 以**不带尾斜杠**的写法为准（与 Rust 固定映射一致）；调用方不要依赖尾斜杠，Host 侧按归一化后比较。
+
+未知 / 缺失 / 非枚举值 → `INVALID_ARGUMENT / unknown_client`，**不静默回退**；**不接受调用方传 URL**（否则命令变成通用字符串转二维码工具）。不登录、不调控制面、不涉及令牌。四个 id 对应 §3.7.8 的 M1 四行。
 
 ### 5.2 设置目录行 id
 
@@ -953,10 +992,10 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | V10 | 轮换后的旧链接行为 | 点「重新生成」，等客户端下一次拉取 | 旧链接 401 / 更新失败；新二维码导入可用；已导入的旧 profile 不会被静默改写成空 | 是 |
 | V11 | URL Scheme 的 query 编码 | 用含 `@`、`:` 的完整 URL 生成二维码，扫码 | 客户端拿到的 URL 完整（不被 `&` / `#` 截断）；若失败，检查 encode 实现 | 是 |
 | V12 | 蜂窝网络回归（DNS） | 关闭 Wi-Fi，用蜂窝网络重复 V8：手动刷新 profile → 打开网页 → 重启客户端再试一次 | 与 Wi-Fi 同样能解析并打开网页；记录运营商、手机 DNS 设置与客户端日志前 20 行 | 是 |
-| V13 | Clash YAML 被客户端接受 | 在 CMFA / Clash Verge / Stash 中导入 `/profile/clash`（Basic 写在 URL userinfo）；连接、打开网页；clash 二维码若展示，扫一次 | 节点出现在列表；能连上并打开网页；Basic 生效 | 是 |
-| V14 | ss:// 列表与 Basic | 在 Hiddify / Karing / Shadowrocket 中试 `/profile/ss` + Basic（URL userinfo）；**不测试「粘贴文本」特例** | 至少一个客户端能用 URL 导入并连上；记录哪些客户端支持 Basic；通过者才进 M1 客户端列表 | 是 |
+| V13 | Clash YAML 被客户端接受 | 在 CMFA 中导入 `/profile/clash`（Basic 写在 URL userinfo）；连接、打开网页；clash 二维码若展示，扫一次。Clash Verge 仅作桌面对照 | 节点出现在列表；能连上并打开网页；Basic 生效 | 是 |
+| V14 | Shadowrocket：ss 订阅、Basic 与返回体编码 | 用 Shadowrocket 扫 `ss` 二维码（内容 = `/profile/ss` 的 URL，userinfo 带令牌）。**先测纯文本逐行**；若报「格式错误」，再临时构造 base64 包装的同一内容（路径后缀 `/profile/ss/base64`，§3.7.8）。区分 401（Basic 不支持）与格式错误（body 编码） | 能导入节点并连上；记录两种 body 的结果；两者都不行则按 §3.7.8 撤行或改实现 | 是 |
 | V15 | 轮换的全局性 | 三种格式各导入一处，点「重新生成」，等各自下一次拉取 | 三个旧 URL 全部 401；新令牌在三种格式都可用 | 是 |
-| V16 | 零节点表现 | 销毁全部服务器后等一次更新 | sing-box 不建隧道；Clash 是否接受空 `proxies`；ss 空 body 是否被当作成功；记录客户端差异 | 是 |
+| V16 | 零节点表现 | 销毁全部服务器后等一次更新 | sing-box 不建隧道；Clash 是否接受空 `proxies`；Shadowrocket 是否把 ss 空 body 当作成功；记录客户端差异 | 是 |
 | V17 | Clash 的 UDP | 用 Clash 类客户端连接后访问一个 UDP 服务（如 QUIC / DNS over UDP） | 记录 `udp: true` 是否实际可用；不可用则从 YAML 去掉，不影响 TCP | 否 |
 
 **V9 的决策后果**：若客户端对「只有 direct」的 profile 报错并保留旧配置，需要改为 `410 Gone` + 明确的错误体（仍无法清除客户端缓存），并在 §1.7 更新；这一条必须在实现前定，不要两边都写一半。
@@ -1027,12 +1066,12 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 
 1. **新增控制面端点**（`/v1/mobile/token`、`/token/rotate`、`/profile`、`/profile/clash`、`/profile/ss`）与 `mobile_tokens` 迁移；所有 profile 响应必须 `no-store`，401 必须带 `WWW-Authenticate`。
 2. **控制面按请求生成配置**：只筛 `source = owned` 对应的 `servers`，排除免费 / 试用；不导出桌面 TUN 参数 / `mixed` 入站 / 本地端口 / Clash API。**非零模板必须带最小 TUN 入站（`auto_route` 为真）、`route.auto_detect_interface: true` 与最小 DNS（DoH 经代理 + `hijack-dns`）；零节点模板不得带 `inbounds` 或 `dns`**。
-3. **三种格式的边界**：`/profile` 路径保持不变；Clash YAML 只出 `proxies` / `proxy-groups` / `rules`，**不含** TUN、DNS、端口、`mode`；ss:// 严格按 SIP002（base64url 无填充）逐行输出；零节点按 §3.7.9 各给「合法空配置」，全部凭据不可用统一 503。**ss 行不进 M1 界面，但 `/profile/ss` 与单测必须实现**（V14 后加客户端的唯一前置）。
-4. **桌面 Rust 生成 URL 与二维码**：origin 只取 `env.rs`，禁止 `workers.dev`；令牌不落本地；三种格式只返回 URL，不取 ss 文本。三个下载码走 `mobile_clients_qr { client }` 的固定映射，不接受任意 URL。
+3. **三种格式的边界**：`/profile` 路径保持不变；Clash YAML 只出 `proxies` / `proxy-groups` / `rules`，**不含** TUN、DNS、端口、`mode`；ss:// 严格按 SIP002（base64url 无填充）逐行输出；零节点按 §3.7.9 各给「合法空配置」，全部凭据不可用统一 503。**ss 行随 Shadowrocket 进 M1**，其二维码 = 订阅 URL 本身（待真机）；`/profile/ss` 与单测必须实现。
+4. **桌面 Rust 生成 URL 与二维码**：origin 只取 `env.rs`，禁止 `workers.dev`；令牌不落本地；三种格式都返回 URL 与二维码，不取 ss 文本。下载码走 `mobile_clients_qr { client }` 的固定映射，不接受任意 URL。
 5. **两个 UI 入口共用同一弹层与命令**；左栏行只在「已登录 + 至少一台节点就绪 + 列表非 loading/error」时出现。
 6. **契约增量**合并：`commands.md` **固定 `2.47.0`**（`formats[]` + `mobile_clients_qr` 枚举）、`tools.md` 保持 `3.22.x`（这三个命令都是仅 UI，**不新增 AI 工具**；仅有的相关项是 `account.mobile` 行登记）。
 7. **验签 / 解密失败不得泄露凭据**：单台凭据解不开就跳过，不返回错误详情到客户端。
-8. **M1 不列未核实 Basic 的客户端**：Karing / Shadowrocket / Stash 本期不列入，也不做「仅 ss 文本粘贴」特例（§3.7.5）；不新增路径令牌。
+8. **M1 只对四个 App 负责**：sing-box 官方 / Shadowrocket / CMFA / Hiddify（§3.7.8）。Shadowrocket 是唯一例外——Basic 与返回体编码未核实，界面标「待验证」并带撤下条件；Karing / Stash / Loon / Quantumult X / v2rayNG / FlClash 不列入；不做「仅 ss 文本粘贴」特例（§3.7.5）。
 
 ### 建议改（P2）
 
@@ -1054,9 +1093,9 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 不在配置里加 `urltest` | 默认探测 URL 在大陆的可达性未核实；不可达会造成假故障切换 |
 | 不做二维码「另存为」以外的交互 | 与 UI 稿一致 |
 | 不改 `/v1/mobile/profile` 路径、不加 `/singbox` 后缀 | 已导入的旧 profile 永远指向它；改名会让所有手机下一次更新 404 |
-| M1 不做路径令牌 | 令牌会进请求行与日志，违反 §7.1；不支持 Basic 的客户端本期不列入，也不做 ss 文本粘贴特例 |
+| M1 不做路径令牌 | 令牌会进请求行与日志，违反 §7.1；不支持 Basic 的客户端不进列表，也不做 ss 文本粘贴特例 |
 | 不预先砍 Clash 二维码 | 产品 2026-11-20 决定保留，码内容 = 带凭据的订阅 URL；能否扫通由 V13 判定，扫不通再退回只给复制链接 |
-| 不把未核实 Basic 的客户端列进 M1 | Karing / Shadowrocket / Stash 等核实后再进列表 |
+| 不把未核实 Basic 的客户端列进 M1（Shadowrocket 除外） | Karing / Stash / Loon / Quantumult X 核实后再进；Shadowrocket 由产品拍板先上，界面标「待验证」，带撤下条件（§3.7.8） |
 | 不在 Clash YAML 里塞 TUN / DNS / 端口 / `mode` | 接管方式与 DNS 由 Clash 客户端自己管理；塞进去会覆盖用户设置 |
 
 ---
@@ -1073,13 +1112,15 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 6 | 下载页 Android 渠道文案 | 已定：只给官方客户端页一条 | 已定，不改 |
 | 7 | 配置是否携带 DNS | **必须携带**：真机实测覆盖了初版「不导出 DNS」。非零模板固定 `1.1.1.1` DoH（`detour: "proxy"`）+ `hijack-dns`；零节点不带 DNS。已落地，不再是待确认项 | 已定（架构师），PM 知会 |
 | 8 | 配置是否携带 TUN 入站 | **必须携带**：官方客户端源码确认只有声明 TUN 入站才创建系统隧道（§3.5）。非零用最小 TUN（`auto_route: true`、`dns_mode: "hijack"`、`dns_address`）+ `route.auto_detect_interface: true`；零节点不建 TUN，避免假 VPN 把全部流量直连 | 已定（架构师），PM 知会 |
-| 9 | Karing / Shadowrocket / Stash 是否支持 Basic | **已定（2026-11-20）：本期不列入，不做「仅 ss 文本粘贴」特例。** 等核实 Basic 订阅后再进客户端列表 | PM 已定 |
+| 9 | Shadowrocket / Karing / Stash 的 Basic | **已定（2026-11-20）：Shadowrocket 列入 M1，Basic 与返回体编码均未核实**，V14 由产品负责人朋友真机测；验不过按 §3.7.8 撤行或改实现。Karing / Stash 不列入（Basic 未核实） | PM 已定 |
 | 10 | Clash 的二维码内容 | **已定（2026-11-20）：保留**，码内容 = 带凭据的订阅 URL；能否扫通由 V13 判定，扫不通再退回「只给复制链接」 | PM 已定 |
 | 11 | ss 空 body 的客户端表现 | 零节点返回 200 + 0 字节；是否被客户端当作「更新成功」未核实（V16）。若被当作失败，可改为 204 或保留最后一份空列表 | 验证结论 + 架构师 |
 | 12 | Clash 的 `udp: true` | 服务端 SS 入站与防火墙都支持 UDP，但客户端实际路径未验（V17）。不可用就去掉该字段，TCP 不受影响 | 验证结论 |
-| 13 | ss 行是否进 M1 界面 | **已定（2026-11-20）：不进界面；`/profile/ss` 端点与单测照做**，作为 V14 之后加 Shadowrocket / Karing 的前置。界面格式切换只做 `sing-box` / `Clash` 两段，默认 `sing-box`（§3.7.12） | PM 已定 |
+| 13 | ss 行是否进 M1 界面 | **已改（2026-11-20）：随 Shadowrocket 进 M1**；`formats[]` 的 `ss` 出 URL 二维码，端点与单测照做。真机失败按 §3.7.8 撤行 | PM 已定 |
+| 14 | 是否保留格式切换器 | **已定（2026-11-20）：删除**。v4 设计按 App 分类，格式只做内部映射（§3.7.12） | PM 已定 |
+| 15 | `mobile_clients_qr` 是否加 `shadowrocket` | **已定（2026-11-20）：加，四个 id**（`singbox` / `hiddify` / `cmfa` / `shadowrocket`），`shadowrocket` → App Store 链接；Rust 已实现、本机测试通过 | PM 已定 |
 
-**所审版本（2026-11-19 至 11-20）**：本文件的 TUN + DNS + `auto_detect_interface` 改写对应代码基线 `c1de5b3`；`stack: "gvisor"`、`sniff` 规则组与去掉 `strict_route` 为工作区未提交改动（`cloudflare/control-plane/src/mobile.ts:444–476`、`test/mobile.test.ts`）。`npm run typecheck` 与 `npm test`（212/212）为 2026-11-20 含四项修复的版本。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。真机已在 iPhone（Wi-Fi）确认可打开网页；**蜂窝网络复验尚未执行**（V12）。多格式部分（2026-11-20）的客户端依据与未核实项见 §3.7.5 / §3.7.8 与上表 9–13；多格式实现尚未开始。**矩阵与三条拍板（未核实 Basic 的客户端不列入、Clash 二维码保留、commands 2.47.0）来自产品 2026-11-20 的跨会话决定。**
+**所审版本（2026-11-19 至 11-20）**：本文件的 TUN + DNS + `auto_detect_interface` 改写对应代码基线 `c1de5b3`；`stack: "gvisor"`、`sniff` 规则组与去掉 `strict_route` 为工作区未提交改动（`cloudflare/control-plane/src/mobile.ts:444–476`、`test/mobile.test.ts`）。`npm run typecheck` 与 `npm test`（212/212）为 2026-11-20 含四项修复的版本。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。真机已在 iPhone（Wi-Fi）确认可打开网页；**蜂窝网络复验尚未执行**（V12）。多格式部分（2026-11-20）的客户端依据与未核实项见 §3.7.5 / §3.7.8 与上表 9–15；多格式实现尚未开始。**矩阵与三条拍板（未核实 Basic 的客户端不列入、Clash 二维码保留、commands 2.47.0）来自产品 2026-11-20 的跨会话决定；同日改向「界面按 App」，§3.7.8 已收敛为四个 App（sing-box 官方 / Shadowrocket / CMFA / Hiddify），其余走下期与兜底行；两段格式切换器已删除（§11 #14）。**
 
 ---
 

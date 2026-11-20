@@ -32,12 +32,16 @@ const TOKEN_LEN: usize = 46;
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// 下载页 URL 的固定映射。命令只接受客户端 id，不接受调用方传 URL。
-pub const CLIENTS_URLS: [(&str, &str); 3] = [
+pub const CLIENTS_URLS: [(&str, &str); 4] = [
     ("singbox", "https://sing-box.sagernet.org/clients/"),
     ("hiddify", "https://hiddify.com"),
     (
         "cmfa",
         "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
+    ),
+    (
+        "shadowrocket",
+        "https://apps.apple.com/us/app/shadowrocket/id932747118",
     ),
 ];
 
@@ -57,8 +61,8 @@ pub enum MobileExportFormat {
     },
     Ss {
         url: String,
-        /// 多节点列表不适合一张码，M1 不出。
-        qr_data_url: Option<String>,
+        /// 二维码内容就是该订阅 URL 本身（Shadowrocket 扫码导入）。
+        qr_data_url: String,
     },
 }
 
@@ -68,7 +72,7 @@ impl fmt::Debug for MobileExportFormat {
         let (format, has_qr) = match self {
             Self::SingBox { qr_data_url, .. } => ("singbox", !qr_data_url.is_empty()),
             Self::Clash { qr_data_url, .. } => ("clash", !qr_data_url.is_empty()),
-            Self::Ss { qr_data_url, .. } => ("ss", qr_data_url.is_some()),
+            Self::Ss { qr_data_url, .. } => ("ss", !qr_data_url.is_empty()),
         };
         f.debug_struct("MobileExportFormat")
             .field("format", &format)
@@ -140,7 +144,7 @@ pub fn clients_qr(client: &str) -> Result<MobileClientsQr, CpError> {
         .ok_or_else(|| {
             CpError::new(
                 "INVALID_ARGUMENT",
-                "client 只能是 singbox、hiddify 或 cmfa",
+                "client 只能是 singbox、hiddify、cmfa 或 shadowrocket",
                 false,
                 json!({ "reason": "unknown_client" }),
             )
@@ -189,8 +193,8 @@ fn build_formats(origin: &ProfileOrigin, token: &str) -> Result<Vec<MobileExport
             url: clash_url,
         },
         MobileExportFormat::Ss {
+            qr_data_url: qr_data_url(&ss_url)?,
             url: ss_url,
-            qr_data_url: None,
         },
     ])
 }
@@ -647,6 +651,10 @@ mod tests {
                 "cmfa",
                 "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
             ),
+            (
+                "shadowrocket",
+                "https://apps.apple.com/us/app/shadowrocket/id932747118",
+            ),
         ] {
             let data = clients_qr(id).unwrap();
             assert_eq!(data.url, url, "{id}");
@@ -667,7 +675,7 @@ mod tests {
 
     #[test]
     fn unknown_client_is_rejected_instead_of_falling_back() {
-        for id in ["", "clash", "sing-box", "SINGBOX", "shadowrocket"] {
+        for id in ["", "clash", "sing-box", "SINGBOX", "stash", "Shadowrocket"] {
             let error = clients_qr(id).unwrap_err();
             assert_eq!(error.code, "INVALID_ARGUMENT", "{id:?}");
             assert_eq!(error.reason(), Some("unknown_client"), "{id:?}");
@@ -724,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn clash_qr_is_the_url_itself_and_ss_has_no_qr() {
+    fn clash_and_ss_qr_encode_the_url_itself() {
         let formats = built_formats();
         match &formats[0] {
             MobileExportFormat::SingBox {
@@ -745,9 +753,13 @@ mod tests {
             other => panic!("第二项必须是 clash：{other:?}"),
         }
         match &formats[2] {
-            MobileExportFormat::Ss { url, qr_data_url } => {
+            MobileExportFormat::Ss {
+                url,
+                qr_data_url: qr,
+            } => {
                 assert!(url.ends_with("/v1/mobile/profile/ss"));
-                assert_eq!(*qr_data_url, None, "ss 不出二维码");
+                assert!(!qr.is_empty(), "ss 也要出二维码");
+                assert_eq!(qr, &qr_data_url(url).unwrap(), "ss 的码就是订阅 URL 本身");
             }
             other => panic!("第三项必须是 ss：{other:?}"),
         }
@@ -756,12 +768,11 @@ mod tests {
     #[test]
     fn every_qr_svg_is_valid_and_free_of_the_token_text() {
         for format in built_formats() {
-            let qr: Option<&String> = match &format {
-                MobileExportFormat::SingBox { qr_data_url, .. } => Some(qr_data_url),
-                MobileExportFormat::Clash { qr_data_url, .. } => Some(qr_data_url),
-                MobileExportFormat::Ss { qr_data_url, .. } => qr_data_url.as_ref(),
+            let qr = match &format {
+                MobileExportFormat::SingBox { qr_data_url, .. } => qr_data_url,
+                MobileExportFormat::Clash { qr_data_url, .. } => qr_data_url,
+                MobileExportFormat::Ss { qr_data_url, .. } => qr_data_url,
             };
-            let Some(qr) = qr else { continue };
             let encoded = qr
                 .strip_prefix("data:image/svg+xml;base64,")
                 .expect("prefix");
@@ -799,7 +810,7 @@ mod tests {
         assert_eq!(formats[2]["format"], "ss");
         assert!(formats[0]["qr_data_url"].is_string());
         assert!(formats[1]["qr_data_url"].is_string());
-        assert!(formats[2]["qr_data_url"].is_null(), "ss 的 qr 必须是 null");
+        assert!(formats[2]["qr_data_url"].is_string(), "ss 也要出二维码");
         assert_eq!(
             serde_json::to_value(MobileExportData::LoginRequired).unwrap()["state"],
             "login_required"

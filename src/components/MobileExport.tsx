@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type {
   AgentBridge,
   MobileClientId,
@@ -11,14 +12,12 @@ import { copyText } from "../ui/clipboard";
 import { useFocusTrap } from "../ui/focus";
 import { IconClose } from "./icons";
 
-type FormatId = "singbox" | "clash";
+/** 内部格式：只用于取数据，不出现在任何界面文本里。 */
+type FormatId = "singbox" | "clash" | "ss";
 
-const FORMAT_IDS: FormatId[] = ["singbox", "clash"];
+type RowId = MobileClientId | "other";
 
-const FORMAT_LABELS: Record<FormatId, string> = {
-  singbox: "sing-box",
-  clash: "Clash",
-};
+const OTHER_ID = "other" as const;
 
 interface FormatEntry {
   url: string;
@@ -32,18 +31,15 @@ type Phase =
   | { kind: "no_ready_server" }
   | { kind: "ok"; formats: Partial<Record<FormatId, FormatEntry>> };
 
-/** ss 照契约会返回，但界面只做两段导入格式，忽略 ss。 */
 function phaseFrom(result: MobileExportData): Phase {
   if (result.state === "login_required") return { kind: "login_required" };
   if (result.state === "no_ready_server") return { kind: "no_ready_server" };
   const formats: Partial<Record<FormatId, FormatEntry>> = {};
   for (const item of result.formats) {
-    if (item.format === "singbox" || item.format === "clash") {
-      formats[item.format] = {
-        url: item.url,
-        qr_data_url: item.qr_data_url,
-      };
-    }
+    formats[item.format] = {
+      url: item.url,
+      qr_data_url: item.qr_data_url,
+    };
   }
   return { kind: "ok", formats };
 }
@@ -53,38 +49,49 @@ export function hasReadyServer(servers: MyServer[]): boolean {
   return servers.some(isServerNodeReady);
 }
 
-interface ClientDef {
+interface AppDef {
   id: MobileClientId;
   name: string;
   meta: string;
+  /** 该 App 内部吃哪一份数据；用户看不到这层映射。 */
   format: FormatId;
-  /** 与契约 §7.23 的 Host 固定映射一致；二维码以命令返回为准。 */
+  /** 与契约的 Host 固定映射一致；下载码以命令返回为准。 */
   url: string;
 }
 
-const CLIENTS: ClientDef[] = [
+/** 顺序即界面顺序：按「最可能被用」排，不按平台分组。 */
+const APPS: AppDef[] = [
   {
     id: "singbox",
-    name: "sing-box 官方",
-    meta: "iOS（大陆以外 Apple 账号）/ Android · sing-box",
+    name: "sing-box",
+    meta: "iPhone（需大陆以外 Apple 账号）/ Android",
     format: "singbox",
     url: "https://sing-box.sagernet.org/clients/",
   },
   {
-    id: "hiddify",
-    name: "Hiddify",
-    meta: "iOS / Android · sing-box / Clash",
-    format: "singbox",
-    url: "https://hiddify.com",
+    id: "shadowrocket",
+    name: "Shadowrocket",
+    meta: "iOS",
+    format: "ss",
+    url: "https://apps.apple.com/us/app/shadowrocket/id932747118",
   },
   {
     id: "cmfa",
     name: "Clash Meta for Android",
-    meta: "Android · Clash 格式",
+    meta: "仅 Android",
     format: "clash",
     url: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
   },
+  {
+    id: "hiddify",
+    name: "Hiddify",
+    meta: "iPhone / Android",
+    format: "singbox",
+    url: "https://hiddify.com",
+  },
 ];
+
+const OTHER_NAME = "我的 App 不在列表里";
 
 interface Props {
   bridge: AgentBridge;
@@ -100,7 +107,7 @@ interface Props {
 
 type CopyState = "idle" | "ok" | "fail";
 
-/** 「在手机上使用」弹层：导入码（两格式）+ 客户端列表与二级下载码。 */
+/** 「在手机上使用」弹层：按 App 分类，展开一行才出现该行的导入码与下载入口。 */
 export function MobileExport({
   bridge,
   nested = false,
@@ -110,19 +117,18 @@ export function MobileExport({
   onAskAi,
 }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
-  const [format, setFormat] = useState<FormatId>("singbox");
-  const [announcement, setAnnouncement] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<RowId | null>(null);
   const [copyState, setCopyState] = useState<CopyState>("idle");
   const [confirming, setConfirming] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [rotated, setRotated] = useState(false);
   const [rotateError, setRotateError] = useState<string | null>(null);
-  const [openClient, setOpenClient] = useState<MobileClientId | null>(null);
   const [clientQr, setClientQr] = useState<
     Partial<Record<MobileClientId, MobileClientsQrData>>
   >({});
   const clientQrRef = useRef(clientQr);
   const loadingClientsRef = useRef<Set<MobileClientId>>(new Set());
+  const rowRefs = useRef<Partial<Record<RowId, HTMLButtonElement | null>>>({});
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const rotateLinkRef = useRef<HTMLButtonElement>(null);
@@ -143,6 +149,12 @@ export function MobileExport({
   useEffect(() => {
     clientQrRef.current = clientQr;
   }, [clientQr]);
+
+  // 展开后行标题可能被弹层滚动区遮住：滚到可见，不跳底、不居中。
+  useEffect(() => {
+    if (!openId) return;
+    rowRefs.current[openId]?.scrollIntoView?.({ block: "nearest" });
+  }, [openId]);
 
   const load = useCallback(async () => {
     setPhase({ kind: "loading" });
@@ -191,28 +203,21 @@ export function MobileExport({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      // 就地确认在弹层内：Esc 只取消确认，不关弹层。
+      // 就地确认在展开面板里：Esc 只取消确认，不关弹层、不收面板。
       if (confirming) {
         setConfirming(false);
         return;
       }
-      // 二级面板展开时先收面板，再按一次才关弹层。
-      if (openClient) {
-        setOpenClient(null);
+      // 有展开行时先收面板，再按一次才关弹层。
+      if (openId) {
+        setOpenId(null);
         return;
       }
       onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [confirming, openClient, onClose]);
-
-  const selectFormat = (next: FormatId): boolean => {
-    if (next === format) return false;
-    setFormat(next);
-    setAnnouncement(`已切到 ${FORMAT_LABELS[next]} 格式。`);
-    return true;
-  };
+  }, [confirming, openId, onClose]);
 
   const loadClientQr = (id: MobileClientId) => {
     if (clientQrRef.current[id] || loadingClientsRef.current.has(id)) return;
@@ -235,14 +240,17 @@ export function MobileExport({
       });
   };
 
-  const toggleClient = (client: ClientDef) => {
-    if (openClient === client.id) {
-      setOpenClient(null);
+  const toggleRow = (id: RowId) => {
+    setCopyState("idle");
+    setRotated(false);
+    setRotateError(null);
+    setConfirming(false);
+    if (openId === id) {
+      setOpenId(null);
       return;
     }
-    setOpenClient(client.id);
-    loadClientQr(client.id);
-    selectFormat(client.format);
+    setOpenId(id);
+    if (id !== OTHER_ID) loadClientQr(id);
   };
 
   const copy = async (url: string) => {
@@ -285,6 +293,7 @@ export function MobileExport({
   };
 
   const startRotate = () => {
+    setCopyState("idle");
     setRotated(false);
     setRotateError(null);
     setConfirming(true);
@@ -306,143 +315,231 @@ export function MobileExport({
     </a>
   );
 
-  const active = phase.kind === "ok" ? phase.formats[format] : undefined;
-  const formatFailed = phase.kind === "error" || (phase.kind === "ok" && !active);
-  const qr =
-    phase.kind === "loading" ? (
-      <div className="mobile-export__qr-skeleton" aria-busy="true" />
-    ) : active ? (
-      <img
-        className="mobile-export__qr-img"
-        src={active.qr_data_url}
-        width={160}
-        height={160}
-        alt={`${FORMAT_LABELS[format]} 导入二维码`}
-      />
-    ) : null;
+  const importBlock = (app: AppDef) => {
+    const entry = phase.kind === "ok" ? phase.formats[app.format] : undefined;
+    let qr: ReactNode = null;
+    let side: ReactNode = null;
 
-  let side = null;
-  if (phase.kind === "loading") {
-    side = (
-      <p className="mobile-export__side-title" role="status">
-        正在读取节点…
-      </p>
-    );
-  } else if (formatFailed) {
-    side = (
-      <>
-        <p className="mobile-export__side-title">这个格式暂时生成不了。</p>
-        <div className="mobile-export__actions">
-          <button
-            type="button"
-            className="btn btn--ghost"
-            onClick={() => void load()}
-          >
-            重试
-          </button>
-        </div>
-      </>
-    );
-  } else if (phase.kind === "login_required") {
-    side = (
-      <>
-        <p className="mobile-export__side-title">先登录。</p>
-        <p className="mobile-export__side-note">
-          登录后可以把自己的节点导入手机。
+    if (phase.kind === "loading") {
+      qr = <div className="mobile-export__qr-skeleton" />;
+      side = (
+        <p className="mobile-export__side-title" role="status">
+          正在读取节点…
         </p>
-        <div className="mobile-export__actions">
-          <button type="button" className="btn btn--ghost" onClick={onLogin}>
-            登录
-          </button>
-        </div>
-      </>
-    );
-  } else if (phase.kind === "no_ready_server") {
-    side = (
-      <>
-        <p className="mobile-export__side-title">还没有可用的服务器。</p>
-        <p className="mobile-export__side-note">
-          先在「我的服务器」里创建一台，再回来扫码。
-        </p>
-        <div className="mobile-export__actions">
-          <button
-            type="button"
-            className="btn btn--ghost"
-            onClick={onGoServers}
-          >
-            去我的服务器
-          </button>
-        </div>
-      </>
-    );
-  } else if (active) {
-    side = (
-      <>
-        <div className="mobile-export__actions">
-          <button
-            type="button"
-            className="btn btn--ghost"
-            onClick={() => void copy(active.url)}
-          >
-            <span role="status">
-              {copyState === "ok"
-                ? "已复制"
-                : copyState === "fail"
-                  ? "复制失败"
-                  : "复制链接"}
-            </span>
-          </button>
-          {confirming ? null : (
-            <button
-              ref={rotateLinkRef}
-              type="button"
-              className="btn btn--link"
-              onClick={startRotate}
-            >
-              重新生成
+      );
+    } else if (phase.kind === "login_required") {
+      side = (
+        <>
+          <p className="mobile-export__side-title">先登录。</p>
+          <p className="mobile-export__side-note">
+            登录后可以把自己的节点导入手机。
+          </p>
+          <div className="mobile-export__actions">
+            <button type="button" className="btn btn--ghost" onClick={onLogin}>
+              登录
             </button>
-          )}
-        </div>
-        {confirming ? (
-          <div className="mobile-export__confirm">
-            <p className="mobile-export__confirm-text">
-              重新生成后，手机上的旧配置下次更新时失效。
-            </p>
-            <div className="mobile-export__confirm-actions">
+          </div>
+        </>
+      );
+    } else if (phase.kind === "no_ready_server") {
+      side = (
+        <>
+          <p className="mobile-export__side-title">还没有可用的服务器。</p>
+          <p className="mobile-export__side-note">
+            先在「我的服务器」里创建一台，再回来扫码。
+          </p>
+          <div className="mobile-export__actions">
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={onGoServers}
+            >
+              去我的服务器
+            </button>
+          </div>
+        </>
+      );
+    } else if (phase.kind === "error" || !entry) {
+      side = (
+        <>
+          <p className="mobile-export__side-title">暂时生成不了。</p>
+          <div className="mobile-export__actions">
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={() => void load()}
+            >
+              重试
+            </button>
+          </div>
+        </>
+      );
+    } else {
+      qr = (
+        <img
+          className="mobile-export__qr-img"
+          src={entry.qr_data_url}
+          width={160}
+          height={160}
+          alt="导入二维码"
+        />
+      );
+      side = (
+        <>
+          <div className="mobile-export__actions">
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={() => void copy(entry.url)}
+            >
+              <span role="status">
+                {copyState === "ok"
+                  ? "已复制"
+                  : copyState === "fail"
+                    ? "复制失败"
+                    : "复制链接"}
+              </span>
+            </button>
+            {confirming ? null : (
               <button
-                ref={cancelRef}
+                ref={rotateLinkRef}
                 type="button"
-                className="btn btn--ghost"
-                disabled={rotating}
-                onClick={() => setConfirming(false)}
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                className="btn btn--danger-ghost"
-                disabled={rotating}
-                onClick={() => void rotate()}
+                className="btn btn--link"
+                onClick={startRotate}
               >
                 重新生成
               </button>
+            )}
+          </div>
+          {confirming ? (
+            <div className="mobile-export__confirm">
+              <p className="mobile-export__confirm-text">
+                重新生成后，手机上所有 App 的旧配置下次更新时失效。
+              </p>
+              <div className="mobile-export__confirm-actions">
+                <button
+                  ref={cancelRef}
+                  type="button"
+                  className="btn btn--ghost"
+                  disabled={rotating}
+                  onClick={() => setConfirming(false)}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--danger-ghost"
+                  disabled={rotating}
+                  onClick={() => void rotate()}
+                >
+                  重新生成
+                </button>
+              </div>
             </div>
+          ) : null}
+          {rotated ? (
+            <p className="mobile-export__status" role="status">
+              已重新生成；手机上所有 App 的旧配置下次更新时失效。
+            </p>
+          ) : null}
+          {rotateError ? (
+            <p className="mobile-export__error" role="alert">
+              {rotateError}
+            </p>
+          ) : null}
+          <p className="mobile-export__security">链接相当于密码，别转发。</p>
+        </>
+      );
+    }
+
+    const empty = qr === null;
+    return (
+      <div className="mobile-export__import">
+        <div
+          className={`mobile-export__qr ${empty ? "is-empty" : ""}`.trim()}
+          aria-busy={phase.kind === "loading" ? true : undefined}
+        >
+          {qr}
+        </div>
+        <div className="mobile-export__side">{side}</div>
+      </div>
+    );
+  };
+
+  const downloadBlock = (app: AppDef) => {
+    const data = clientQr[app.id];
+    return (
+      <div className="mobile-export__download">
+        <div className="mobile-export__download-qr">
+          {data ? (
+            <img
+              className="mobile-export__download-qr-img"
+              src={data.qr_data_url}
+              width={80}
+              height={80}
+              alt=""
+              aria-hidden="true"
+            />
+          ) : null}
+        </div>
+        <div className="mobile-export__download-side">
+          <p className="mobile-export__download-title">还没装这个 App？</p>
+          {externalLink(data?.url ?? app.url, "打开下载页")}
+        </div>
+      </div>
+    );
+  };
+
+  const renderRow = (
+    id: RowId,
+    name: string,
+    meta: string | null,
+    panel: ReactNode,
+  ) => {
+    const open = openId === id;
+    const rowId = `mobile-app-${id}`;
+    const panelId = `mobile-app-panel-${id}`;
+    return (
+      <li key={id} className="mobile-export__app">
+        <button
+          id={rowId}
+          ref={(node) => {
+            rowRefs.current[id] = node;
+          }}
+          type="button"
+          className="mobile-export__app-row"
+          aria-expanded={open}
+          aria-controls={panelId}
+          onClick={() => toggleRow(id)}
+        >
+          <span className="mobile-export__app-text">
+            <span className="mobile-export__app-name">{name}</span>
+            {meta ? (
+              <span className="mobile-export__app-meta" title={meta}>
+                {meta}
+              </span>
+            ) : null}
+          </span>
+          <span
+            className={`mobile-export__chevron ${open ? "is-open" : ""}`.trim()}
+            aria-hidden
+          >
+            ›
+          </span>
+        </button>
+        {open ? (
+          <div
+            id={panelId}
+            className="mobile-export__panel"
+            role="region"
+            aria-labelledby={rowId}
+          >
+            {panel}
           </div>
         ) : null}
-        {rotated ? (
-          <p className="mobile-export__status" role="status">
-            已重新生成；手机上的旧配置下次更新时失效。
-          </p>
-        ) : null}
-        {rotateError ? (
-          <p className="mobile-export__error" role="alert">
-            {rotateError}
-          </p>
-        ) : null}
-        <p className="mobile-export__security">链接相当于密码，别转发。</p>
-      </>
+      </li>
     );
-  }
+  };
 
   return (
     <div
@@ -475,98 +572,35 @@ export function MobileExport({
         </header>
 
         <div className="mobile-export__body">
-          <section className="mobile-export__import">
-            <h3 className="mobile-export__section-title">导入节点</h3>
-            <div
-              className="mobile-export__formats"
-              role="group"
-              aria-label="导入格式"
-            >
-              {FORMAT_IDS.map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  className="mobile-export__format"
-                  aria-pressed={format === id}
-                  onClick={() => selectFormat(id)}
-                >
-                  {FORMAT_LABELS[id]}
-                </button>
-              ))}
-            </div>
-            <p className="sr-only" role="status" aria-live="polite">
-              {announcement ?? ""}
-            </p>
+          <p className="mobile-export__intro">
+            选你手机上用的 App，还没有就先装一个。
+          </p>
 
-            <div className="mobile-export__qr-area">
-              <div className="mobile-export__qr">{qr}</div>
-              <div className="mobile-export__side">{side}</div>
-            </div>
-          </section>
+          <ul className="mobile-export__apps">
+            {APPS.map((app) =>
+              renderRow(
+                app.id,
+                app.name,
+                app.meta,
+                <>
+                  {importBlock(app)}
+                  {downloadBlock(app)}
+                </>,
+              ),
+            )}
+            {renderRow(
+              OTHER_ID,
+              OTHER_NAME,
+              null,
+              <p className="mobile-export__fallback">
+                换一个上面列出的 App 就行，节点是同一份。不确定用什么，就问 AI。
+              </p>,
+            )}
+          </ul>
 
-          <section className="mobile-export__clients">
-            <h3 className="mobile-export__clients-title">还没有客户端？</h3>
-            <p className="mobile-export__attribution">
-              客户端不是我们开发的，Veyl 只提供节点。
-            </p>
-            <ul className="mobile-export__client-list">
-              {CLIENTS.map((client) => {
-                const open = openClient === client.id;
-                const data = clientQr[client.id];
-                const rowId = `mobile-client-${client.id}`;
-                const panelId = `mobile-client-panel-${client.id}`;
-                return (
-                  <li key={client.id} className="mobile-export__client">
-                    <button
-                      id={rowId}
-                      type="button"
-                      className="mobile-export__client-row"
-                      aria-expanded={open}
-                      aria-controls={panelId}
-                      onClick={() => toggleClient(client)}
-                    >
-                      <span className="mobile-export__client-text">
-                        <span className="mobile-export__client-name">
-                          {client.name}
-                        </span>
-                        <span className="mobile-export__client-meta">
-                          {client.meta}
-                        </span>
-                      </span>
-                      <span
-                        className={`mobile-export__chevron ${open ? "is-open" : ""}`}
-                        aria-hidden
-                      >
-                        ›
-                      </span>
-                    </button>
-                    {open ? (
-                      <div
-                        id={panelId}
-                        className="mobile-export__client-panel"
-                        role="region"
-                        aria-labelledby={rowId}
-                      >
-                        <div className="mobile-export__client-qr-box">
-                          {data ? (
-                            <img
-                              className="mobile-export__client-qr-img"
-                              src={data.qr_data_url}
-                              width={80}
-                              height={80}
-                              alt=""
-                              aria-hidden="true"
-                            />
-                          ) : null}
-                        </div>
-                        {externalLink(data?.url ?? client.url, "打开下载页")}
-                      </div>
-                    ) : null}
-                  </li>
-                );
-              })}
-            </ul>
-          </section>
+          <p className="mobile-export__attribution">
+            这些 App 不是我们开发的，Veyl 只提供节点。
+          </p>
 
           <button
             type="button"

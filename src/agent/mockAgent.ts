@@ -173,11 +173,11 @@ function mockMobileExport(nodeCount: number): MobileExportData {
         url: `https://veyl:${token}@veyl.example/v1/mobile/profile/clash`,
         qr_data_url: MOCK_MOBILE_QR,
       },
-      // ss 照契约返回，但界面必须忽略它。
+      // ss 的码内容是订阅 URL 本身，与 Clash 同形态。
       {
         format: "ss",
         url: `https://veyl:${token}@veyl.example/v1/mobile/profile/ss`,
-        qr_data_url: null,
+        qr_data_url: MOCK_MOBILE_QR,
       },
     ],
   };
@@ -188,6 +188,7 @@ const MOCK_CLIENT_URLS: Record<MobileClientId, string> = {
   singbox: "https://sing-box.sagernet.org/clients/",
   hiddify: "https://hiddify.com",
   cmfa: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
+  shadowrocket: "https://apps.apple.com/us/app/shadowrocket/id932747118",
 };
 
 export class MockAgentBridge implements AgentBridge {

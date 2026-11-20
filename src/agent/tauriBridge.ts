@@ -930,17 +930,17 @@ function normalizeMobileExportFormat(
   if (!raw || typeof raw !== "object") return null;
   const value = raw as Record<string, unknown>;
   if (typeof value.url !== "string") return null;
-  if (value.format === "singbox" || value.format === "clash") {
+  if (
+    value.format === "singbox" ||
+    value.format === "clash" ||
+    value.format === "ss"
+  ) {
     if (typeof value.qr_data_url !== "string") return null;
     return {
       format: value.format,
       url: value.url,
       qr_data_url: value.qr_data_url,
     };
-  }
-  // ss 不出二维码：契约里固定为 null，界面也不渲染。
-  if (value.format === "ss") {
-    return { format: "ss", url: value.url, qr_data_url: null };
   }
   return null;
 }

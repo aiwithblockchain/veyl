@@ -28,9 +28,9 @@ export const ADVANCED_FIELDS = {
 } as const;
 
 /**
- * 「在手机上使用」弹层的「问 AI」：逐字固定（v3.2），只讲格式选择与安装/导入。
+ * 「在手机上使用」弹层的「问 AI」：逐字固定（v4），只讲 App，不讲格式。
  * 改动等同于改产品文案，需走设计与 PM。
  */
 export const mobileExportPrompt = `我在 Veyl 的「在手机上使用」里，准备把节点装到手机上。
-请只讲两点：如果手机上已经有能导入的客户端，先选对应的导入格式（sing-box / Clash），再用它扫 Veyl 的二维码；没有的话，从列表里挑一个装（sing-box 在 iPhone 上需要大陆以外的 Apple 账号），装好后用同样的方式导入。
+请只讲两点：手机上已经有列表里的 App，就用它扫 Veyl 的二维码导入；没有的话，先从列表里挑一个装上（sing-box 在 iPhone 上需要大陆以外的 Apple 账号），再用它扫同一个码。
 不要给通用教程，只说这两点。`;

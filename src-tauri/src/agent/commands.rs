@@ -2055,14 +2055,16 @@ pub async fn list_pending_questions(session_id: String) -> Result<Value, Value> 
     Ok(crate::agent::questions::list_pending(&session_id))
 }
 
-/// `open_external` 的白名单：前缀匹配；条目本身（裸 origin，如 `https://hiddify.com`）
-/// 按精确相等放行（`hiddify` 的下载页没有路径）。
+/// `open_external` 的白名单：前缀匹配，且必须停在路径段边界；条目本身（裸 origin，
+/// 如 `https://hiddify.com`）按精确相等放行。
 ///
 /// 不写「域名后缀」判断：`https://apps.apple.com.evil.test/` 会命中后缀规则。
-/// GitHub 只放开 ClashMetaForAndroid 仓库，不放开整个 `github.com`。
-const OPEN_EXTERNAL_PREFIXES: [&str; 5] = [
+/// GitHub 只放开 ClashMetaForAndroid 仓库，不放开整个 `github.com`；App Store 只放开
+/// 列表里出现的两个 App，不放开整站。
+const OPEN_EXTERNAL_PREFIXES: [&str; 6] = [
     "https://platform.deepseek.com/",
-    "https://apps.apple.com/",
+    "https://apps.apple.com/app/sing-box-mt",
+    "https://apps.apple.com/us/app/shadowrocket",
     "https://sing-box.sagernet.org/",
     "https://hiddify.com/",
     "https://github.com/MetaCubeX/ClashMetaForAndroid/",
@@ -2081,10 +2083,21 @@ fn external_url_allowed(raw: &str) -> bool {
     if raw != normalized && raw != normalized.trim_end_matches('/') {
         return false;
     }
-    OPEN_EXTERNAL_PREFIXES.iter().any(|prefix| {
-        normalized.starts_with(prefix)
-            || normalized.trim_end_matches('/') == prefix.trim_end_matches('/')
-    })
+    OPEN_EXTERNAL_PREFIXES
+        .iter()
+        .any(|prefix| prefix_matches(normalized, prefix))
+}
+
+/// 前缀必须停在路径段边界：`…/shadowrocket` 不能命中 `…/shadowrocket-other`。
+fn prefix_matches(normalized: &str, prefix: &str) -> bool {
+    let Some(rest) = normalized.strip_prefix(prefix) else {
+        return false;
+    };
+    prefix.ends_with('/')
+        || rest.is_empty()
+        || rest.starts_with('/')
+        || rest.starts_with('?')
+        || rest.starts_with('#')
 }
 
 /// 用系统浏览器打开白名单内的链接（DeepSeek 开放平台、App Store、sing-box 官网）。
@@ -3440,6 +3453,8 @@ mod open_external_tests {
         for url in [
             "https://platform.deepseek.com/usage",
             "https://apps.apple.com/app/sing-box-mt/id6785326793",
+            "https://apps.apple.com/us/app/shadowrocket/id932747118",
+            "https://apps.apple.com/us/app/shadowrocket/id932747118/",
             "https://sing-box.sagernet.org/clients/",
             "https://hiddify.com",
             "https://hiddify.com/",
@@ -3460,6 +3475,11 @@ mod open_external_tests {
             "http://hiddify.com",
             "https://github.com/other/repo",
             "https://github.com/MetaCubeX/sing-box/releases",
+            // App Store 只放行两个 App，其它页面与相邻名字都不行。
+            "https://apps.apple.com/",
+            "https://apps.apple.com/cn/iphone/today",
+            "https://apps.apple.com/us/app/stash-rule-based-proxy/id1596063349",
+            "https://apps.apple.com/us/app/shadowrocket-extra/id1",
             // 点段 / 百分号编码的 `..` / 多重斜杠都不能靠前缀匹配绕过。
             "https://github.com/MetaCubeX/ClashMetaForAndroid/../../evil",
             "https://github.com/MetaCubeX/ClashMetaForAndroid/%2e%2e/%2e%2e/evil",

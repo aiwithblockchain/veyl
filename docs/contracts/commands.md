@@ -1966,7 +1966,7 @@ type MobileExportFormat =
   | {
       format: "ss";
       url: string;              // …/v1/mobile/profile/ss，含令牌
-      qr_data_url: null;        // 多节点列表不出码
+      qr_data_url: string;      // 二维码内容 = 上面的 URL（Shadowrocket 扫码 / 粘贴一条订阅 URL）
     };
 
 type MobileExportData =
@@ -1983,8 +1983,8 @@ type MobileExportData =
 - 门禁：未登录 → `login_required`；没有「节点已就绪」的自建服务器 → `no_ready_server`。两者都是**预期状态**，走 `state`，不报错。
 - URL 的 origin 只取 `control_plane::env` 的解析结果；拼接前校验 `https://` 且 host 不以 `.workers.dev` 结尾，否则 `PRECONDITION_FAILED / insecure_profile_origin`。
 - 三种格式共用同一枚令牌；`mobile_export_rotate` 一次让三个 URL 同时失效（`/profile/ss` **返回过的节点链接**不在此列，见 §7.22）。
-- 二维码：`singbox` 为 `sing-box://import-remote-profile?url=<urlencoded url>#Veyl`；`clash` 为 URL 本身；`ss` 恒为 `null`。三者同一套 SVG 生成逻辑。
-- **界面只展示 `singbox` / `clash` 两段**（默认 `singbox`）；`formats[]` 里的 `ss` 条目由界面忽略，但命令与端点保留（V14 后加客户端的前置）。
+- 二维码：`singbox` 为 `sing-box://import-remote-profile?url=<urlencoded url>#Veyl`；`clash` 与 `ss` 均为 URL 本身；三者同一套 SVG 生成逻辑。
+- **界面按 App 展示**：sing-box 官方 / Shadowrocket / CMFA / Hiddify 四行，格式只做内部映射（技术设计 §3.7.8 / §3.7.12）；`formats[]` 三条都可能被取用。
 - `url` 含令牌：**UI 不得渲染为文本 / `alt` / `title`，不得进入事件、日志或 AI 上下文**；命令不落本地库、不写 `secrets.enc`。
 - 错误：`PRECONDITION_FAILED`（`insecure_profile_origin`；控制面返回 `login_required` 时归一为本命令的 `login_required`）、`RATE_LIMITED`（`retryable = true`）、`UPSTREAM_ERROR`、`TIMEOUT`、`INTERNAL`（`qr_encode_failed` / `mobile_token_corrupt`）。
 - 设置目录行 id `account.mobile` 由 `tools.md` §4.50 的行登记表登记；本文件不另维护行 id。
@@ -2009,7 +2009,7 @@ type MobileExportRotateArgs = { confirm: true };
 
 ```ts
 type MobileClientsQrArgs = {
-  client: "singbox" | "hiddify" | "cmfa";
+  client: "singbox" | "hiddify" | "cmfa" | "shadowrocket";
 };
 
 type MobileClientsQrData = {
@@ -2023,13 +2023,16 @@ type MobileClientsQrData = {
 | `client` | `url` | 对应客户端 |
 |---|---|---|
 | `singbox` | `https://sing-box.sagernet.org/clients/` | sing-box 官方 SFI / SFA |
-| `hiddify` | `https://hiddify.com/` | Hiddify |
+| `hiddify` | `https://hiddify.com` | Hiddify |
 | `cmfa` | `https://github.com/MetaCubeX/ClashMetaForAndroid/releases` | Clash Meta for Android |
+| `shadowrocket` | `https://apps.apple.com/us/app/shadowrocket/id932747118` | Shadowrocket |
+
+> `hiddify` 的地址**以不带尾斜杠的 `https://hiddify.com` 为准**（与 Rust 固定映射一致）。调用方不要依赖尾斜杠；Host 侧按归一化后比较，`https://hiddify.com/` 视为同一个值。
 
 - `client` 缺失、类型不对或不在枚举内 → `INVALID_ARGUMENT`，`details.reason = "unknown_client"`；**不静默回退到默认值**，也不接受 URL / 其它字段。
 - **不登录、不调控制面、不涉及令牌**；命令始终可用，与账户状态、服务器状态无关。
 - 返回的 `qr_data_url` 与 §7.21 的二维码同一套生成逻辑（尺寸、静区一致）；`url` 不含任何凭据。
-- 三行客户端对应技术设计 §3.7.8 的 M1 手机页：SFI/SFA、Hiddify、CMFA。Clash Verge 是桌面 GUI，不在此枚举内。
+- 四个 id 对应技术设计 §3.7.8 的 M1 四行：sing-box 官方、Hiddify、CMFA、Shadowrocket。Clash Verge 是桌面 GUI，不在此枚举内。
 
 ---
 
@@ -2771,10 +2774,11 @@ type RulesStatus = {
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
-| 1 | 本文件版本升到 `2.47.0`；§7.21 `mobile_export_get` 的返回从单 URL 改为 `formats[]`（`singbox` / `clash` / `ss`），§7.22 `mobile_export_rotate` 同步。三种格式共用同一枚令牌；`/profile` 保持不变，新增 `/profile/clash`、`/profile/ss`。**界面只展示 `singbox` / `clash` 两段（默认 `singbox`）**，`ss` 条目保留但界面忽略 | 返回结构变更 | 产品 2026-11-20；技术设计 §3.7 |
-| 2 | §7.23 `mobile_clients_qr` 由 `{}` 改为 `{ client: "singbox" \| "hiddify" \| "cmfa" }` → `{ url, qr_data_url }`；URL 在 Host 固定映射，未知 id → `INVALID_ARGUMENT / unknown_client`，**不接受任意 URL** | 参数变更 | 产品 2026-11-20：三行客户端各出一个下载码 |
+| 1 | 本文件版本升到 `2.47.0`；§7.21 `mobile_export_get` 的返回从单 URL 改为 `formats[]`（`singbox` / `clash` / `ss`），§7.22 `mobile_export_rotate` 同步。三种格式共用同一枚令牌；`/profile` 保持不变，新增 `/profile/clash`、`/profile/ss`。界面展示方式见第 5 行 | 返回结构变更 | 产品 2026-11-20；技术设计 §3.7 |
+| 2 | §7.23 `mobile_clients_qr` 由 `{}` 改为 `{ client: "singbox" \| "hiddify" \| "cmfa" \| "shadowrocket" }` → `{ url, qr_data_url }`；URL 在 Host 固定映射（`hiddify` 为不带尾斜杠的 `https://hiddify.com`），未知 id → `INVALID_ARGUMENT / unknown_client`，**不接受任意 URL** | 参数变更 | 产品 2026-11-20：四个 App 各出一个下载码 |
 | 3 | 失效范围写死：rotate 让三个 URL 同时失效；`/profile/ss` 返回过、已被复制的节点链接携带节点密码，**不受轮换影响**，只有重建服务器能失效。界面安全文案不得写「重新生成后旧配置全部失效」 | 语义补充 | 真机/安全评审：令牌轮换只覆盖 URL |
 | 4 | 2.46.1 已于 2026-11-20 随 prod 上线；本版两项都是线上可见变更，**不并入 2.46.x** | 版本说明 | 产品 2026-11-20 |
+| 5 | §7.21 `ss.qr_data_url` 由 `null` 改为 URL 二维码（Shadowrocket 以「扫码 / 粘贴一条订阅 URL」导入）；客户端矩阵收敛为四个 App：sing-box 官方 / Shadowrocket / CMFA / Hiddify，格式由 App 内部映射，**删除两段格式切换器**。Shadowrocket 的 Basic 与返回体编码标「待真机验证」，带撤下条件 | 语义变更 | 产品 2026-11-20：Shadowrocket 进 M1，朋友可测 |
 
 ### 2.46.1（未发布，2026-11-19：下载页二维码命令）
 

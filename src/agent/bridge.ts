@@ -690,7 +690,7 @@ export interface MyServerTopup {
 export type MobileExportFormat =
   | { format: "singbox"; url: string; qr_data_url: string }
   | { format: "clash"; url: string; qr_data_url: string }
-  | { format: "ss"; url: string; qr_data_url: null };
+  | { format: "ss"; url: string; qr_data_url: string };
 
 export type MobileExportData =
   | {
@@ -702,7 +702,11 @@ export type MobileExportData =
   | { state: "login_required" }
   | { state: "no_ready_server" };
 
-export type MobileClientId = "singbox" | "hiddify" | "cmfa";
+export type MobileClientId =
+  | "singbox"
+  | "hiddify"
+  | "cmfa"
+  | "shadowrocket";
 
 /** 下载页二维码（commands.md §7.23 / 2.47.0）：URL 由 Host 固定映射。 */
 export interface MobileClientsQrData {

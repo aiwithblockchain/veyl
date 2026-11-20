@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { MockAgentBridge } from "./mockAgent";
 
 describe("mock 手机端导出", () => {
-  it("返回三种格式：sing-box / Clash 带码，ss 照契约但不渲染", async () => {
+  it("返回三种格式：sing-box / Clash / ss 都带码", async () => {
     const bridge = new MockAgentBridge();
 
     const data = await bridge.mobileExportGet?.();
@@ -25,7 +25,9 @@ describe("mock 手机端导出", () => {
       true,
     );
     expect(ss?.url).toContain("/ss");
-    expect(ss?.qr_data_url).toBeNull();
+    expect(ss?.qr_data_url?.startsWith("data:image/svg+xml;base64,")).toBe(
+      true,
+    );
     expect(singbox?.url).not.toContain("dessage.xyz");
   });
 
@@ -46,6 +48,11 @@ describe("mock 手机端导出", () => {
     });
     await expect(bridge.mobileClientsQr?.("cmfa")).resolves.toMatchObject({
       url: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
+    });
+    await expect(
+      bridge.mobileClientsQr?.("shadowrocket"),
+    ).resolves.toMatchObject({
+      url: "https://apps.apple.com/us/app/shadowrocket/id932747118",
     });
     const data = await bridge.mobileClientsQr?.("cmfa");
     expect(data?.qr_data_url.startsWith("data:image/svg+xml;base64,")).toBe(
