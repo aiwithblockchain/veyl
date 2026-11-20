@@ -59,10 +59,15 @@ export function topupDenominations(env: PaymentConfigEnv): number[] {
     .sort((a, b) => a - b);
 }
 
-export function dodoApiBase(env: PaymentConfigEnv): string {
-  return env.ENVIRONMENT === "production"
-    ? "https://live.dodopayments.com"
-    : "https://test.dodopayments.com";
+/**
+ * Dodo 收银台基址：**编译期**由 `wrangler define` 定死（`__DODO_API_BASE__`）。
+ *
+ * 不读 `env.ENVIRONMENT`：运行期变量缺失或拼错会把请求静默送到另一个环境的
+ * 收银台。编译期注入后，顶层包只含 live 地址、dev 包只含 test 地址，另一个域名
+ * 在产物里根本不存在（`docs/design/login-and-payment.md` §9）。
+ */
+export function dodoApiBase(): string {
+  return __DODO_API_BASE__;
 }
 
 export function paymentReturnUrl(env: PaymentConfigEnv): string | null {

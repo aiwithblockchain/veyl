@@ -989,7 +989,7 @@ pending_payment ──checkout──▶ provisioning ──enroll + 结算──
 | `DODO_TOPUP_PRODUCT_IDS` | `{"1000":"pdt_…","2000":"pdt_…","5000":"pdt_…","10000":"pdt_…"}` | 充值面额 → Dodo 一次性产品 ID；**键是美分字符串**；可充值面额由这张表的键推导（`topupDenominations`），**不另设面额白名单**；test / live 两套，不沿用 TweetPilot |
 | `PLAN_DAILY_PRICE_CENTS` | `{"s-1vcpu-512mb-10gb":20,"s-1vcpu-1gb":30,"s-1vcpu-2gb":60}` | **日价（USD 分/天），唯一真源**。月价由它派生（`× 30`），只用于展示。**推荐用它替换 `PLAN_PRICES_USD`** |
 | `PLAN_PRICES_USD` | `{"s-1vcpu-512mb-10gb":6,"s-1vcpu-1gb":9,"s-1vcpu-2gb":18}` | 旧口径（月价，美元）。若保留，**必须满足 `月价分 % 30 == 0`**，否则该档不可售（见下）。与 `PLAN_DAILY_PRICE_CENTS` 同时存在时以日价为准 |
-| `DODO_API_BASE` | `https://test.dodopayments.com` / `https://live.dodopayments.com` | 由 `ENVIRONMENT` 决定，不手写 |
+| `__DODO_API_BASE__`（编译期 `wrangler define`） | 顶层 `https://live.dodopayments.com` / `env.dev` `https://test.dodopayments.com` | 构建时写死，运行期不读任何变量；生产包里不存在 test 地址 |
 | `APP_PAYMENT_RETURN_URL` | `https://<control-plane>/payment/return` | 充值完成后的回跳页 |
 
 ### 5.3 必须由人手工创建 / 核对

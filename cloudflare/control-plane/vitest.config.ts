@@ -4,6 +4,10 @@ import { readFileSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // 与 wrangler 顶层包一致：测试按 live 编译期常量运行。
+  define: {
+    __DODO_API_BASE__: JSON.stringify("https://live.dodopayments.com"),
+  },
   plugins: [
     {
       name: "rules-as-arraybuffer",

@@ -48,6 +48,16 @@ export async function startTopupSession(
   // 不能写成「等于 production 才拒绝」——那样配置一抖就直接放行。
   if (mode === "fake" && env.ENVIRONMENT !== "dev") return { ok: false, reason: "fake_not_allowed" };
 
+  // dodo 通道缺 return URL 或 API Key 时根本建不出会话，也就不会有 webhook 先到的
+  // 竞态——在落 pending 行之前失败，别留下永远等不到支付的单子。fake 不走收银台。
+  let dodoReturnUrl = "";
+  if (mode !== "fake") {
+    const configuredReturnUrl = paymentReturnUrl(env);
+    if (!configuredReturnUrl) return { ok: false, reason: "no_return_url" };
+    if (!env.DODO_API_KEY) return { ok: false, reason: "no_api_key" };
+    dodoReturnUrl = configuredReturnUrl;
+  }
+
   // 先落 pending 行再开收银台：webhook 可能比建会话的响应先到，先有行才匹配得上。
   await db
     .prepare(
@@ -83,14 +93,10 @@ export async function startTopupSession(
     };
   }
 
-  const returnUrl = paymentReturnUrl(env);
-  if (!returnUrl) return { ok: false, reason: "no_return_url" };
-  if (!env.DODO_API_KEY) return { ok: false, reason: "no_api_key" };
-
   const session = await createCheckoutSession(env, {
     productId,
     email: input.email,
-    returnUrl,
+    returnUrl: dodoReturnUrl,
     metadata: { topup_id: topupId, account_id: input.accountId },
   });
   if (!session.ok) {

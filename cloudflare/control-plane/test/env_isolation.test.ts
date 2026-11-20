@@ -1,7 +1,7 @@
 // 环境隔离的硬约束：生产入口不含任何 /v1/debug/*，且三处写路径在 ENVIRONMENT 缺失时一律拒绝。
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import prodWorker, { route } from "../src/index";
+import prodWorker from "../src/index";
 import devWorker from "../src/dev";
 import { startTopupSession } from "../src/topups";
 import { handleOrders } from "../src/orders";
@@ -61,9 +61,11 @@ describe("dev 入口", () => {
   });
 
   it("其余请求原样交给生产入口", async () => {
-    const res = await route(new Request("https://control-plane.test/health"), {
-      ENVIRONMENT: "dev",
-    } as never);
+    const res = await devWorker.fetch(
+      new Request("https://control-plane.test/health"),
+      { ENVIRONMENT: "dev" } as never,
+      ctx(),
+    );
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, service: "veyl-control-plane" });
   });
@@ -176,6 +178,11 @@ describe("ENVIRONMENT 缺失时写路径必须拒绝", () => {
 
     const typo = await handleOrders(build(), { ...base, ENVIRONMENT: "prod" } as never);
     expect(typo?.status).toBe(401);
+
+    // dev 才放行匿名建机，这条分支要真的走到 200，不能只证明生产会拒绝。
+    const dev = await handleOrders(build(), { ...base, ENVIRONMENT: "dev" } as never);
+    expect(dev?.status).toBe(200);
+    expect(await dev!.json()).toMatchObject({ region: "sgp1", plan: "s-1vcpu-1gb" });
   });
 
   it("凭据签发：生产缺 CREDENTIAL_KEY_ID 拒绝，dev 才回落到默认密钥", async () => {

@@ -5,6 +5,7 @@ import { handleOrders } from "../src/orders";
 import { handleTopups } from "../src/topups";
 import { handleDodoWebhook } from "../src/webhooks/dodo";
 import { signAccessToken } from "../src/lib/crypto";
+import { dodoApiBase } from "../src/lib/config";
 import { FakeD1 } from "./helpers/fakeD1";
 
 const ACCOUNT = "acct_wallet00000000000000";
@@ -240,6 +241,37 @@ describe("充值", () => {
     expect(res?.status).toBe(409);
     const body = (await res!.json()) as { details: { reason: string } };
     expect(body.details.reason).toBe("invalid_denomination");
+  });
+
+  it("ENVIRONMENT 不参与收银台选路：dev 变量也能建出本包固定环境的会话", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db, "dev");
+    stubUpstream();
+
+    const res = await handleTopups(topupRequest(env, 2000), env as never);
+    expect(res?.status).toBe(200);
+    expect(db.rows("topups")[0].status).toBe("pending");
+  });
+
+  it("缺 return URL 或 API Key 时表里不新增行", async () => {
+    for (const patch of [
+      { APP_PAYMENT_RETURN_URL: undefined },
+      { DODO_API_KEY: undefined },
+    ]) {
+      const db = new FakeD1();
+      const env = await makeEnv(db);
+      stubUpstream();
+
+      const res = await handleTopups(topupRequest(env, 2000), { ...env, ...patch } as never);
+      expect(res?.status).toBe(502);
+      expect(db.rows("topups")).toHaveLength(0);
+    }
+  });
+});
+
+describe("Dodo 收银台基址（编译期常量）", () => {
+  it("只返回本包的地址：测试包注入 live", () => {
+    expect(dodoApiBase()).toBe("https://live.dodopayments.com");
   });
 });
 

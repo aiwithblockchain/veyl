@@ -25,7 +25,7 @@ export async function createCheckoutSession(
   if (!env.DODO_API_KEY || !productId) return { ok: false, reason: "not_configured" };
 
   let response: Response;
-  const url = `${dodoApiBase(env)}/checkouts`;
+  const url = `${dodoApiBase()}/checkouts`;
   try {
     response = await fetch(url, {
       method: "POST",

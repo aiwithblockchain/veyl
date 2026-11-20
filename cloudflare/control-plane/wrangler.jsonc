@@ -3,6 +3,12 @@
 	"name": "veyl-control-plane",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-11-01",
+	// 支付环境在编译期定死：顶层包只含 live 地址，env.dev 只含 test 地址。
+	// 直接注入地址而不是「环境名 + 运行期分支」——esbuild 在未压缩产物里不会把
+	// `if (true) … else …` 折掉，两个域名会同时留在包里。
+	"define": {
+		"__DODO_API_BASE__": "\"https://live.dodopayments.com\""
+	},
 	// 国内分流规则集：import 进 Worker 时按 Data 模块打成 ArrayBuffer（src/rules.ts 只读下发）。
 	// .srs 给 sing-box，.mrs 给 Clash；fallthrough 让默认的 `.bin` 规则继续生效。
 	"rules": [{ "type": "Data", "globs": ["**/*.srs", "**/*.mrs"], "fallthrough": true }],
@@ -48,6 +54,9 @@
 		"dev": {
 			"name": "veyl-control-plane-dev",
 			"main": "src/dev.ts",
+			"define": {
+				"__DODO_API_BASE__": "\"https://test.dodopayments.com\""
+			},
 			"vars": {
 				"ENVIRONMENT": "dev",
 				"ENROLL_BASE_URL": "https://cp-dev.veyl.dessage.xyz",
