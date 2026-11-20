@@ -933,7 +933,8 @@ function normalizeMobileExportFormat(
   if (
     value.format === "singbox" ||
     value.format === "clash" ||
-    value.format === "ss"
+    value.format === "ss" ||
+    value.format === "shadowrocket"
   ) {
     if (typeof value.qr_data_url !== "string") return null;
     return {
