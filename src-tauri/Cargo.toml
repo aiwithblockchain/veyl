@@ -139,8 +139,12 @@ objc2-service-management = { version = "0.3", default-features = false, features
 winreg = "0.52"
 # TUN 特权服务用到的部分：SCM、命名管道、令牌/进程信息、Authenticode。
 windows-sys = { version = "0.59", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinInet",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
