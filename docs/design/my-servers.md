@@ -1717,7 +1717,7 @@ CREATE TABLE rate_limits (
 POST /v2/droplets
 { "name": "veyl-srv_7f3a", "region": "sgp1", "size": "s-1vcpu-1gb",
   "image": "ubuntu-24-04-x64", "ipv6": false, "monitoring": false,
-  "tags": ["veyl:env:prod", "veyl:acct:acct_7Qm2x9Kd4LpRz1Ty", "veyl:srv:srv_7f3a", "veyl:plan:s-1vcpu-1gb"],
+  "tags": ["veyl:env:production", "veyl:acct:acct_7Qm2x9Kd4LpRz1Ty", "veyl:srv:srv_7f3a", "veyl:plan:s-1vcpu-1gb"],
   "user_data": "<cloud-init 明文，≤ 64 KiB，目标 ≤ 16 KiB>" }
 ```
 
@@ -1824,7 +1824,7 @@ D1 servers 表 ───────┘                        │
 
 | tag | 示例 | 用途 | 建机后可变 |
 |---|---|---|---|
-| `veyl:env:<env>` | `veyl:env:prod` | 环境隔离；对账 / 孤儿扫描的入口（§19.6.5 第 4 条） | 否 |
+| `veyl:env:<env>` | `veyl:env:production` | 环境隔离；对账 / 孤儿扫描的入口（§19.6.5 第 4 条） | 否 |
 | `veyl:srv:<server_id>` | `veyl:srv:srv_7f3a…` | **单台反查** D1 | 否 |
 | `veyl:acct:<account_id>` | `veyl:acct:acct_7Qm2x9Kd…`（完整，不截断） | **按用户归集**：一个用户多台机器全靠它 | 否（账户合并也不改） |
 | `veyl:plan:<slug>` | `veyl:plan:s-1vcpu-1gb` | **成本归集**：按档位数台数、核对月成本，不必回 D1 | 否（建机时快照） |

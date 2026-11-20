@@ -29,7 +29,7 @@ function transferGibFor(catalog: CatalogData | null, planId: string): number {
 export interface OrdersEnv extends MaybeAuthEnv {
   DO_API_TOKEN?: string;
   ENROLL_BASE_URL?: string;
-  ENVIRONMENT?: string;
+  ENVIRONMENT: string;
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;
   DODO_API_KEY?: string;
@@ -414,7 +414,7 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
           DB: db,
           DO_API_TOKEN: env.DO_API_TOKEN,
           ENROLL_BASE_URL: env.ENROLL_BASE_URL,
-          ENVIRONMENT: env.ENVIRONMENT ?? "dev",
+          ENVIRONMENT: env.ENVIRONMENT,
         },
         {
           id: confirmedRow.server_id ?? serverId,
@@ -557,7 +557,7 @@ export async function provisionPaidOrder(
       DB: db,
       DO_API_TOKEN: env.DO_API_TOKEN,
       ENROLL_BASE_URL: env.ENROLL_BASE_URL,
-      ENVIRONMENT: env.ENVIRONMENT ?? "dev",
+      ENVIRONMENT: env.ENVIRONMENT,
     },
     {
       id: server.id,

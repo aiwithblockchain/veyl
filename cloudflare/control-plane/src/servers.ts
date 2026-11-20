@@ -8,11 +8,9 @@ import { createFirewall, deleteDroplet, deleteFirewall, getDroplet } from "./pro
 import { recordLedgerEntry } from "./wallet";
 
 // 每个环境用自己的签名密钥：dev 与 prod 的公钥都内置在客户端，靠 key_id 区分。
-const DEFAULT_CREDENTIAL_KEY_ID = "cp-2026-11";
 const CREDENTIAL_TTL_MS = 5 * 60 * 1000;
 
 export interface ServersEnv extends MaybeAuthEnv {
-  ENVIRONMENT?: string;
   DO_API_TOKEN?: string;
   CREDENTIAL_SIGNING_JWK?: string;
   CREDENTIAL_ENC_KEY?: string;
@@ -1142,9 +1140,8 @@ async function credentials(request: Request, env: ServersEnv, serverId: string):
     expires_at: new Date(issuedAt + CREDENTIAL_TTL_MS).toISOString(),
   });
   // key_id 是发给客户端的验签索引：拿错密钥签出去，客户端会直接拒收。
-  // 只有 dev 允许落到默认的开发密钥；生产缺 CREDENTIAL_KEY_ID 就拒绝签发。
-  const keyId =
-    env.CREDENTIAL_KEY_ID ?? (env.ENVIRONMENT === "dev" ? DEFAULT_CREDENTIAL_KEY_ID : null);
+  // 每个环境在 wrangler 里配自己的 key_id；缺了就拒绝签发，不回退到任何默认值。
+  const keyId = env.CREDENTIAL_KEY_ID;
   if (!keyId) {
     return apiError("INTERNAL", "凭据签名密钥未配置", { reason: "credential_key_missing" });
   }

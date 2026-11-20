@@ -7,6 +7,8 @@ export default defineConfig({
   // 与 wrangler 顶层包一致：测试按 live 编译期常量运行。
   define: {
     __DODO_API_BASE__: JSON.stringify("https://live.dodopayments.com"),
+    // 测试要验证 dev 的样本捕获，按 dev 包注入。
+    __WEBHOOK_SAMPLE__: JSON.stringify("1"),
   },
   plugins: [
     {

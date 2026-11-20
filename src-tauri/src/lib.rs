@@ -49,6 +49,9 @@ use crate::tools::services::WiredServices;
 const DEFAULT_CATALOG_URL: &str = "http://127.0.0.1:18090/v1";
 
 fn catalog_base_url(store: &Store) -> String {
+    // 只有 debug 构建认这个环境变量：它的用途是本地假服务，release 里没有生产用途，
+    // 放行等于让启动环境覆盖配置值。真正可持久化的覆盖走下面的 settings。
+    #[cfg(debug_assertions)]
     if let Ok(url) = std::env::var("VEYL_CATALOG_URL") {
         if !url.trim().is_empty() {
             return url;

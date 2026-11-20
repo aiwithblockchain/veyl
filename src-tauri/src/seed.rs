@@ -123,13 +123,16 @@ impl OfflineReason {
     }
 }
 
-/// 调试可用环境变量覆盖；正常构建只认固定地址。
+/// 测试与本地调试可用 `VEYL_SEED_URL` 覆盖；**release 构建忽略它**，只认固定地址。
 pub fn source_url() -> String {
-    std::env::var("VEYL_SEED_URL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_SEED_URL.to_string())
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("VEYL_SEED_URL") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    DEFAULT_SEED_URL.to_string()
 }
 
 pub fn content_sha256(bytes: &[u8]) -> String {

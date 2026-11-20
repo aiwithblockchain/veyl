@@ -105,7 +105,7 @@ describe("ENVIRONMENT 缺失时写路径必须拒绝", () => {
     }
   });
 
-  it("凭据签发：生产缺 CREDENTIAL_KEY_ID 拒绝，dev 才回落到默认密钥", async () => {
+  it("凭据签发：缺 CREDENTIAL_KEY_ID 一律拒绝，不回退默认密钥", async () => {
     const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
       "sign",
       "verify",
@@ -180,7 +180,18 @@ describe("ENVIRONMENT 缺失时写路径必须拒绝", () => {
       details: { reason: "credential_key_missing" },
     });
 
-    const dev = await handleServers(request(), { ...base, ENVIRONMENT: "dev" } as never);
+    // dev 也不再回退：每个环境必须在 wrangler 里显式配好自己的 key_id。
+    const devMissing = await handleServers(request(), { ...base, ENVIRONMENT: "dev" } as never);
+    expect(devMissing?.status).toBe(500);
+    expect(await devMissing!.json()).toMatchObject({
+      code: "INTERNAL",
+      details: { reason: "credential_key_missing" },
+    });
+
+    const dev = await handleServers(
+      request(),
+      { ...base, ENVIRONMENT: "dev", CREDENTIAL_KEY_ID: "cp-2026-11" } as never,
+    );
     expect(dev?.status).toBe(200);
     expect(await dev!.json()).toMatchObject({ key_id: "cp-2026-11" });
 

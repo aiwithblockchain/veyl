@@ -1,8 +1,9 @@
-// Dodo 回调样本捕获（只在 dev）：把验签通过的真实报文脱敏后落进 `webhook_samples`，
+// Dodo 回调样本捕获（只在 dev 包）：把验签通过的真实报文脱敏后落进 `webhook_samples`，
 // 再由 scripts/export-webhook-fixture.mjs 导出成 test/fixtures 的回归样本。
 //
-// 生产绝不捕获：入口先看 ENVIRONMENT，不是 dev 直接返回。
-// 捕获只是辅助手段：任何失败都吞掉并打一行 warn，不能影响回调本身。
+// 开关是**编译期**的 `__WEBHOOK_SAMPLE__`：生产包注入 "0"，这段代码连同表名都被
+// 常量折叠删掉，运行时没有任何判断。捕获只是辅助手段：任何失败都吞掉并打一行 warn，
+// 不能影响回调本身。
 //
 // 脱敏用 **allowlist**：只保留结构、id、金额、时间戳、type/status/currency，
 // 其余字符串一律占位。denylist 永远会漏下一个新字段（billing_address、phone_number、
@@ -174,18 +175,17 @@ export function sanitizeWebhookHeaders(headers: Headers): Record<string, string>
 
 export interface SampleEnv {
   DB?: D1Database;
-  ENVIRONMENT?: string;
 }
 
 /**
- * 把一次验签通过的回调存成脱敏样本。**只在 dev 执行**；
+ * 把一次验签通过的回调存成脱敏样本。**只在注入 `__WEBHOOK_SAMPLE__ = "1"` 的包里存在**；
  * 失败只 warn，绝不把异常抛回回调处理。
  */
 export async function captureWebhookSample(
   env: SampleEnv,
   input: { raw: string; headers: Headers; eventId: string; kind: string },
 ): Promise<void> {
-  if (env.ENVIRONMENT !== "dev" || !env.DB) return;
+  if (__WEBHOOK_SAMPLE__ !== "1" || !env.DB) return;
   try {
     const parsed = JSON.parse(input.raw) as unknown;
     const body = JSON.stringify(sanitizeWebhookBody(parsed), null, 2);

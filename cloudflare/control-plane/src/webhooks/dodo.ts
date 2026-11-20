@@ -249,7 +249,7 @@ export async function handleDodoWebhook(
   const data = (payload.data ?? {}) as PaymentData;
   const paymentId = typeof data.id === "string" ? data.id : "";
 
-  // dev 才留样本（生产直接 no-op）；内部吞掉一切失败，不影响下面的回调处理。
+  // dev 包才留样本（生产包里这段被编译期常量删掉）；内部吞掉一切失败，不影响回调处理。
   await captureWebhookSample(env, {
     raw,
     headers: request.headers,

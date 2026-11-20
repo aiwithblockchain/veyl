@@ -379,7 +379,10 @@ describe("Dodo 回调样本（dev）", () => {
     expect(String(sample.headers)).not.toContain("198.51.100.9");
   });
 
-  it("生产环境绝不捕获", async () => {
+  it("捕获只认编译期开关，不再看 ENVIRONMENT", async () => {
+    // 本测试包注入 __WEBHOOK_SAMPLE__="1"，即使 ENVIRONMENT=production 也会落样本：
+    // 「生产不捕获」由生产包不带这段代码保证（dry-run 后 grep webhook_samples 为 0），
+    // 运行期没有任何 env 判断。
     const db = new FakeD1();
     const env = await makeEnv(db, "production");
     stubUpstream();
@@ -387,7 +390,7 @@ describe("Dodo 回调样本（dev）", () => {
 
     const res = await handleDodoWebhook(await webhookRequest(topupPaidEvent("top_1")), env as never);
     expect(res?.status).toBe(200);
-    expect(db.rows("webhook_samples")).toHaveLength(0);
+    expect(db.rows("webhook_samples")).toHaveLength(1);
     expect(db.rows("accounts")[0].balance_cents).toBe(1000);
   });
 
