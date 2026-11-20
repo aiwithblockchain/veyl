@@ -150,10 +150,10 @@ export function MobileExport({
     clientQrRef.current = clientQr;
   }, [clientQr]);
 
-  // 展开后行标题可能被弹层滚动区遮住：滚到可见，不跳底、不居中。
+  // 展开后把该行标题顶到滚动区顶部，下面的面板才拿得到整屏。
   useEffect(() => {
     if (!openId) return;
-    rowRefs.current[openId]?.scrollIntoView?.({ block: "nearest" });
+    rowRefs.current[openId]?.scrollIntoView?.({ block: "start" });
   }, [openId]);
 
   const load = useCallback(async () => {
@@ -475,8 +475,8 @@ export function MobileExport({
             <img
               className="mobile-export__download-qr-img"
               src={data.qr_data_url}
-              width={80}
-              height={80}
+              width={104}
+              height={104}
               alt=""
               aria-hidden="true"
             />
@@ -513,7 +513,12 @@ export function MobileExport({
           onClick={() => toggleRow(id)}
         >
           <span className="mobile-export__app-text">
-            <span className="mobile-export__app-name">{name}</span>
+            <span className="mobile-export__app-name-row">
+              <span className="mobile-export__app-name">{name}</span>
+              {id === "singbox" ? (
+                <span className="mobile-export__badge">推荐</span>
+              ) : null}
+            </span>
             {meta ? (
               <span className="mobile-export__app-meta" title={meta}>
                 {meta}
@@ -598,15 +603,19 @@ export function MobileExport({
               OTHER_NAME,
               null,
               <p className="mobile-export__fallback">
-                换一个上面列出的 App 就行，节点是同一份。不确定用什么，就问 AI。
+                上面每一行点开都有下载入口；节点是同一份，换 App 不会丢。
               </p>,
             )}
           </ul>
+        </div>
 
-          <p className="mobile-export__attribution">
+        <footer className="mobile-export__footer">
+          <p
+            className="mobile-export__attribution"
+            title="这些 App 不是我们开发的，Veyl 只提供节点。"
+          >
             这些 App 不是我们开发的，Veyl 只提供节点。
           </p>
-
           <button
             type="button"
             className="btn btn--link mobile-export__ask-ai"
@@ -614,7 +623,7 @@ export function MobileExport({
           >
             不会操作？问 AI
           </button>
-        </div>
+        </footer>
       </div>
     </div>
   );

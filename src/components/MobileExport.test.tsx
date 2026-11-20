@@ -134,6 +134,8 @@ function server(over: Partial<MyServer> = {}): MyServer {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  delete (Element.prototype as unknown as Record<string, unknown>)
+    .scrollIntoView;
 });
 
 describe("在手机上使用：按 App 分类", () => {
@@ -189,6 +191,22 @@ describe("在手机上使用：按 App 分类", () => {
 
     fireEvent.click(row(dialog, "Hiddify"));
     expect(dialog.querySelectorAll(".mobile-export__panel")).toHaveLength(0);
+  });
+
+  it("展开靠下的行：把该行标题滚到滚动区顶部", async () => {
+    const scroll = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value: scroll,
+    });
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "Hiddify"));
+    await waitFor(() =>
+      expect(scroll).toHaveBeenCalledWith({ block: "start" }),
+    );
   });
 
   it("Shadowrocket 用 ss 数据：二维码与复制目标都是它", async () => {
@@ -287,7 +305,7 @@ describe("在手机上使用：按 App 分类", () => {
     ).toBeTruthy();
   });
 
-  it("下载块：104 外框里的下载码 + 打开下载页，交给系统浏览器", async () => {
+  it("下载码 104、白卡 128：码本身可扫，卡只留静区", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
 
@@ -303,7 +321,8 @@ describe("在手机上使用：按 App 分类", () => {
     );
     expect(img?.getAttribute("alt")).toBe("");
     expect(img?.getAttribute("aria-hidden")).toBe("true");
-    expect(img?.getAttribute("width")).toBe("80");
+    expect(img?.getAttribute("width")).toBe("104");
+    expect(img?.getAttribute("height")).toBe("104");
     expect(dialog.querySelector(".mobile-export__download-qr")).toBeTruthy();
     expect(within(dialog).getByText("还没装这个 App？")).toBeTruthy();
 
@@ -315,6 +334,49 @@ describe("在手机上使用：按 App 分类", () => {
     expect(bridge.openExternal).toHaveBeenCalledWith(CLIENT_URLS.cmfa);
   });
 
+  it("页脚常驻：归属句与问 AI 都在滚动区之外", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "sing-box"));
+    const importImg = await within(dialog).findByRole("img", {
+      name: "导入二维码",
+    });
+
+    const footer = dialog.querySelector<HTMLElement>(
+      ".mobile-export__footer",
+    ) as HTMLElement;
+    const body = dialog.querySelector<HTMLElement>(
+      ".mobile-export__body",
+    ) as HTMLElement;
+    expect(footer).toBeTruthy();
+    expect(body.contains(footer)).toBe(false);
+    expect(footer.contains(importImg)).toBe(false);
+    expect(footer.textContent).toContain(
+      "这些 App 不是我们开发的，Veyl 只提供节点。",
+    );
+    expect(
+      within(footer).getByRole("button", { name: "不会操作？问 AI" }),
+    ).toBeTruthy();
+  });
+
+  it("sing-box 带推荐标签：纯文本、只有一行、不可聚焦", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    const badges = dialog.querySelectorAll(".mobile-export__badge");
+    expect(badges).toHaveLength(1);
+    expect(row(dialog, "sing-box").contains(badges[0] as Node)).toBe(true);
+    const badge = badges[0] as HTMLElement;
+    expect(badge.tagName).toBe("SPAN");
+    expect(badge.getAttribute("role")).toBeNull();
+    expect(badge.getAttribute("tabindex")).toBeNull();
+    const focusables = Array.from(
+      dialog.querySelectorAll<HTMLElement>('a[href], button:not([disabled])'),
+    );
+    expect(focusables).not.toContain(badge);
+  });
+
   it("兜底行：只有一句说明，不放按钮，也没有下载入口", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
@@ -324,7 +386,7 @@ describe("在手机上使用：按 App 分类", () => {
       ".mobile-export__panel",
     ) as HTMLElement;
     expect(panel.textContent).toContain(
-      "换一个上面列出的 App 就行，节点是同一份。不确定用什么，就问 AI。",
+      "上面每一行点开都有下载入口；节点是同一份，换 App 不会丢。",
     );
     expect(within(panel).queryAllByRole("button")).toHaveLength(0);
     expect(within(panel).queryByRole("link")).toBeNull();

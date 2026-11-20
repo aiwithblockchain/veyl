@@ -6363,8 +6363,18 @@ details[open] > .settings-fold__summary::before {
 
 /* ---------- 在手机上使用（弹层） ---------- */
 
+/* 三段：标题 / 滚动区 / 常驻页脚；只有中间滚动。 */
+.modal.mobile-export {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .mobile-export__body {
-  padding: 0 20px 20px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 20px;
 }
 
 /* 本弹层标题比默认 modal 标题大一档（17 是「复杂弹窗标题」）。 */
@@ -6422,11 +6432,34 @@ details[open] > .settings-fold__summary::before {
   min-width: 0;
 }
 
+.mobile-export__app-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .mobile-export__app-name {
+  overflow: hidden;
   font-size: 14px;
   font-weight: 500;
   line-height: 1.35;
   color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 纯文本弱标签：不可聚焦、不 hover，读屏并入行名。 */
+.mobile-export__badge {
+  flex: none;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid var(--hair-strong);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--ink-2);
 }
 
 /* 副行只写平台 + 硬约束，不写格式。 */
@@ -6505,34 +6538,48 @@ details[open] > .settings-fold__summary::before {
 }
 
 .mobile-export__attribution {
-  margin: 16px 0 0;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
   font-size: 12px;
   line-height: 1.5;
   color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* 下载块：外框 104（不缩），1px 描边 + 11px 白边 + 80 码区。 */
+/* 常驻页脚：一行两件，左侧归属句、右侧 AI 入口。 */
+.mobile-export__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--hair);
+  background: var(--bg-card);
+}
+
+/* 下载块：码图 104，白卡 128（码 + 两侧 12 静区），不描边。 */
 .mobile-export__download {
   display: flex;
   align-items: center;
   gap: 16px;
-  margin-top: 16px;
+  margin-top: 20px;
 }
 
 .mobile-export__download-qr {
   flex: none;
-  width: 104px;
-  height: 104px;
-  padding: 11px;
-  border: 1px solid var(--hair);
+  width: 128px;
+  height: 128px;
+  padding: 12px;
   border-radius: 8px;
   background: #ffffff;
 }
 
 .mobile-export__download-qr-img {
   display: block;
-  width: 80px;
-  height: 80px;
+  width: 104px;
+  height: 104px;
 }
 
 .mobile-export__download-side {
@@ -6656,10 +6703,13 @@ details[open] > .settings-fold__summary::before {
   margin-top: 16px;
 }
 
-/* 底部「问 AI」：距列表 20；链接色 + 下划线。 */
+/* 页脚里的「问 AI」：与归属句同一行，链接色 + 下划线。 */
 .mobile-export__ask-ai {
-  margin-top: 20px;
+  flex: none;
+  height: auto;
+  padding: 0;
   color: var(--link);
+  line-height: 1.4;
 }
 
 .mobile-export__ask-ai:not(:disabled):hover {
