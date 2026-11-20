@@ -325,7 +325,7 @@ interface CredentialSecret {
   method?: string;
 }
 
-interface ExportedNode {
+export interface ExportedNode {
   tag: string;
   host: string;
   port: number;
@@ -625,7 +625,12 @@ async function singboxProfile(
     });
   }
 
-  const outbounds: ShadowsocksOutbound[] = loaded.nodes.map((node) => ({
+  return configResponse(singboxConfig(loaded.nodes, new URL(request.url).origin));
+}
+
+/** 非零节点的 profile。抽成纯函数：运行期测试把这份配置交给真实内核启动。 */
+export function singboxConfig(nodes: ExportedNode[], origin: string): unknown {
+  const outbounds: ShadowsocksOutbound[] = nodes.map((node) => ({
     type: "shadowsocks",
     tag: node.tag,
     server: node.host,
@@ -633,9 +638,8 @@ async function singboxProfile(
     method: SS_METHOD,
     password: node.password,
   }));
-  const origin = new URL(request.url).origin;
 
-  return configResponse({
+  return {
     log: { level: "warn" },
     // 手机 DNS 常指向 LAN 路由器；没有这条，DNS 查询会被 final=proxy 送进隧道发往服务端内网。
     // DoH 走 proxy 出网，不用 UDP 53（避开运营商对非标端口 UDP 的限制）。
@@ -643,7 +647,9 @@ async function singboxProfile(
     dns: {
       servers: [
         { type: "https", tag: "dns", server: "1.1.1.1", detour: "proxy" },
-        { type: "udp", tag: "dns-cn", server: "223.5.5.5", detour: "direct" },
+        // 不能写 `detour: "direct"`：空配置的 direct 出站不允许被显式 detour，
+        // 1.14 启动即 FATAL（`detour to an empty direct outbound makes no sense`）。不写就是直连。
+        { type: "udp", tag: "dns-cn", server: "223.5.5.5" },
       ],
       rules: [{ rule_set: ["geosite-cn"], server: "dns-cn" }],
       final: "dns",
@@ -689,11 +695,13 @@ async function singboxProfile(
       rules: [
         { action: "sniff", sniffer: ["http", "tls", "quic", "dns"], timeout: "300ms" },
         { protocol: "dns", action: "hijack-dns" },
+        // 国内 DNS 的查询必须直连：只靠 geoip-cn 可能不命中，查询就会经节点出去、拿到海外视角的解析结果。
+        { ip_cidr: ["223.5.5.5/32"], action: "route", outbound: "direct" },
         { rule_set: ["geosite-cn", "geoip-cn"], action: "route", outbound: "direct" },
         { ip_is_private: true, action: "route", outbound: "direct" },
       ],
     },
-  });
+  };
 }
 
 async function clashProfile(

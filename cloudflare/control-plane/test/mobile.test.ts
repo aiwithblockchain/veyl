@@ -401,6 +401,7 @@ interface MobileConfig {
       sniffer?: string[];
       timeout?: string;
       rule_set?: string[];
+      ip_cidr?: string[];
       outbound?: string;
       ip_is_private?: boolean;
     }>;
@@ -638,20 +639,22 @@ describe("GET /v1/mobile/profile", () => {
           update_interval: "7d",
         },
       ],
-      // 顺序：sniff → hijack-dns → 国内直连 → 私网直连。
+      // 顺序：sniff → hijack-dns → 国内 DNS 直连 → 国内直连 → 私网直连。
       rules: [
         { action: "sniff", sniffer: ["http", "tls", "quic", "dns"], timeout: "300ms" },
         { protocol: "dns", action: "hijack-dns" },
+        { ip_cidr: ["223.5.5.5/32"], action: "route", outbound: "direct" },
         { rule_set: ["geosite-cn", "geoip-cn"], action: "route", outbound: "direct" },
         { ip_is_private: true, action: "route", outbound: "direct" },
       ],
     });
     // 手机 DNS 常指向 LAN 路由器：DoH 必须走 proxy 从服务端出网。
     // 国内域名交给国内 DNS，否则解析出海外 IP，geoip-cn 规则永远不命中。
+    // dns-cn 不能写 detour: "direct"——空配置的 direct 出站不允许被显式 detour，1.14 启动即 FATAL。
     expect(config.dns).toEqual({
       servers: [
         { type: "https", tag: "dns", server: "1.1.1.1", detour: "proxy" },
-        { type: "udp", tag: "dns-cn", server: "223.5.5.5", detour: "direct" },
+        { type: "udp", tag: "dns-cn", server: "223.5.5.5" },
       ],
       rules: [{ rule_set: ["geosite-cn"], server: "dns-cn" }],
       final: "dns",
@@ -669,6 +672,21 @@ describe("GET /v1/mobile/profile", () => {
     // sniff 必须在 hijack-dns 之前：顺序反了 `protocol: "dns"` 永不命中，静默失效。
     const actions = config.route.rules!.map((rule) => rule.action);
     expect(actions.indexOf("sniff")).toBeLessThan(actions.indexOf("hijack-dns"));
+  });
+
+  it("dns.servers 不得显式 detour 到 direct（1.14 启动即 FATAL）", async () => {
+    const { db, env, accessToken } = await setup();
+    await seedServer(db, { id: "srv_dns_guard", name: "香港 01", createdAt: 1 });
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(profileRequest(token), env);
+    expect(response?.status).toBe(200);
+    const config = (await response!.json()) as MobileConfig;
+    expect(config.dns?.servers.length).toBeGreaterThan(0);
+    // 空配置的 direct 出站不允许被显式 detour：不写 detour 本身就是直连。
+    for (const server of config.dns!.servers) {
+      expect(server.detour).not.toBe("direct");
+    }
   });
 
   it("查询到服务器但全部不可用时 503，不伪装成零节点", async () => {

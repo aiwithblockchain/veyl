@@ -171,6 +171,8 @@ PM 2026-11-02 定案。契约文件当前仍是 1.0.4，落笔后本表清空：
 | [10-console-panel.md](10-console-panel.md) | 右侧状态面板：连接、断开、切换节点、端口真实值 | 4 |
 | [13-sessions.md](13-sessions.md) | 会话管理：删除会话（含生成中删除、半删除检测） | 1 |
 | [14-llm-providers.md](14-llm-providers.md) | LLM provider：基础/高级模式、迁移、删除、Key 不泄漏 | 10 |
+| [15-core-flows.md](15-core-flows.md) | **v1 核心流程测试手册**：新建节点、免费试用到期、销毁、扣费、AI 定位/解决/解释 | 9 |
+| [15-ai-runner-prompt.md](15-ai-runner-prompt.md) | 配合上表执行的助手 AI 指令（角色边界、判定规则、证据要求） | — |
 | [RUNBOOK-p1.5.md](RUNBOOK-p1.5.md) | 执行手册：启动/退出/断网恢复/批次表/记录格式 | — |
 
 执行要求：**应用一律由用户手动启动**；每条用例都要能在不读代码的前提下照着做完。
