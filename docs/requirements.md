@@ -11,7 +11,7 @@
 **v0.7（2026-11-02）**
 
 1. 产品名由 AIVPN 改为 **Veyl**；新增 §11.4「命名决策与已知风险」，记录商标冲突、域名状况与用户已知情下的决定。
-2. 介绍页与下载改走 GitHub Pages，不做自有域名。
+2. 介绍页与下载改走 GitHub Pages，不做自有域名。（2026-11-20 起介绍页迁至 Cloudflare Pages `https://veyl.dessage.xyz/`，下载仍用 GitHub Releases；见 §11.4）
 3. 契约信封键 `metadata.aivpn` **本期保留不改**，等契约升版再统一处理。
 
 **v0.6（2026-10-30）**
@@ -704,7 +704,7 @@ USPTO 上「VEIL」在第 9 类曾有两个注册，均已失效（1995 年注�
 | `veyl.io` | 已注册，处于 `client hold`（注册商侧暂停） |
 | `veyl.net` / `veyl.xyz` / `veyl.app` / `veyl.dev` / `veyl.network` | 均已注册 |
 
-**结论：不依赖自定义域名。** 宣传页用 GitHub Pages（`https://aiwithblockchain.github.io/veyl/`），下载用 GitHub Releases。项目不持有 `veyl.com`，因此 bundle identifier 定为 `io.github.aiwithblockchain.veyl` 这类反向域名形式，而不是 `com.veyl.*`。
+**结论：不依赖自有品牌域名。** 宣传页由 Cloudflare Pages 承接（`https://veyl.dessage.xyz/`，2026-11-20 起；此前是 GitHub Pages），下载用 GitHub Releases。项目不持有 `veyl.com`，因此 bundle identifier 定为 `io.github.aiwithblockchain.veyl` 这类反向域名形式，而不是 `com.veyl.*`。
 
 **风险缓解**：
 

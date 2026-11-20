@@ -102,7 +102,7 @@ scripts/
     release-windows.ps1        # Windows 发布（Bob）
   generate_icons.py            # 图标生成（已由 PM 写好，Bob 接入 npm script）
 
-site/                          # GitHub Pages 站点（纯静态，无构建步骤）
+cloudflare/edge/public/        # 官网静态页（Cloudflare Pages，_routes.json 放行 `/`）
   index.html                   # 落地页
   favicon.png
 
@@ -540,44 +540,42 @@ jobs:
 - macOS universal 必须在同一台机器上构建（`rustup target add x86_64-apple-darwin`），不能用两个 runner 拼接。
 - 缓存 `~/.cargo` 与 `src-tauri/target`，但 tag 构建不缓存 `target`，避免增量构建混入旧产物。
 
-### 6.1 介绍页与下载（GitHub Pages）
+### 6.1 介绍页与下载（Cloudflare Pages）
 
-**不用自有域名。** 介绍页和下载入口都放在 GitHub Pages：
+介绍页与接口共用 `veyl.dessage.xyz`：GoDaddy 的 CNAME 只能指向 `*.pages.dev`，域名由 `veyl-edge`（Cloudflare Pages）承接，页面与 `/v1/*` 等接口在同一域名下共存。
 
 | 项 | 值 |
 |---|---|
-| 站点地址 | `https://aiwithblockchain.github.io/veyl/`（项目页，非组织首页） |
-| 源目录 | `site/`（纯静态 HTML/CSS，**没有构建步骤**） |
-| 部署 | `.github/workflows/pages.yml`，push 到 `main` 且 `site/**` 有变化时触发 |
-| 启用方式 | 仓库 Settings → Pages → Source = GitHub Actions（已启用） |
+| 站点地址 | `https://veyl.dessage.xyz/`（Cloudflare Pages 项目 `veyl-edge`） |
+| 源目录 | `cloudflare/edge/public/`（纯静态 HTML/CSS，**没有构建步骤**） |
+| 部署 | `cd cloudflare/edge && npm ci && npm run deploy`（`wrangler pages deploy`）；需已 `wrangler login` 或设置 `CLOUDFLARE_API_TOKEN` |
+| 路由 | `public/_routes.json`：`/`、`/index.html`、`/favicon.png` 由 Pages 直接返回；其余路径进 `functions/[[path]].ts`，经 service binding 转给控制面 Worker |
 
-为什么不做独立仓库 / 子模块：GitHub Pages 的**项目页** URL 由仓库名决定，`aiwithblockchain/veyl` 天然得到 `/veyl/`。再拆一个 `veyl-site` 仓库只会让地址变成 `/veyl-site/`，还得维护 submodule 指针。除非将来站点需要独立版本节奏或独立写入权限，否则不必拆。
+为什么和接口同域：`veyl.dessage.xyz` 本来就是控制面入口（`docs/design/my-servers.md` §2.3），域名只有一个、CNAME 只能指 Pages，所以页面就放在 Pages 的静态资源里，由 `_routes.json` 把接口路径留给 Function。GitHub Pages 那条线已停用，`site/` 目录已迁走，**单一真源**。
 
-> 组织的 `aiwithblockchain.github.io` 仓库已被占用（是其他产品的主站），**不要往里塞 Veyl 的内容**。
+`_routes.json` 的约束：
 
-`pages.yml` 的约束：
-
-- 只上传 `site/`，不把 `docs/`（内部设计文档）发布出去。
-- 部署前检查 `site/` 里没有 `*.key` / `*.p12` / `*.pem` / `.env*`，命中即中止。
-- `concurrency: pages` 且 `cancel-in-progress: false`，避免并发部署互相覆盖。
-- 不做缓存，站点只有几百 KB，没必要。
+- 只列静态路径。新增静态文件（图标、图片）时一并加进 `exclude`，否则会被 catch-all 转给控制面。
+- `include` 保持 `/*`，接口路径（`/v1/*`、`/rules/*`、`/health`、`/payment/*`）必须继续走转发。
+- `public/` 里不放密钥与安装包：命中即视为发布事故。
+- `/` 自此返回介绍页，**不再返回控制面 JSON**；健康检查与外部监控一律改打 `/health`（其余接口路径未变）。
 
 **下载链接**指向 GitHub Releases，不在 Pages 上托管安装包：
 
-- DMG / MSI 有几十 MB，占用 Pages 仓库配额。
+- DMG / MSI 有几十 MB，Pages 单文件与带宽都有上限。
 - Releases 自带版本归档与校验和，更适合放二进制。
 - 站点上的按钮在**有正式 release 之前显示「即将发布」**，不要放死链。
 
 ### 6.2 分发通道
 
-**产物只通过 GitHub Releases 发布**，宣传页用 GitHub Pages，**不引入自有域名，也不引入对象存储**（S3 / R2 / OSS）。
+**产物只通过 GitHub Releases 发布**，宣传页随接口放在 `veyl.dessage.xyz`（Cloudflare Pages），**不引入对象存储**（S3 / R2 / OSS）。
 
 | 项 | 做法 |
 |---|---|
 | 二进制分发 | `gh release create v<version> --draft`，上传 DMG / MSI |
 | 版本标识 | 必须打 tag `v<version>`，与 `tauri.conf.json` 的 `version` 一致 |
-| 宣传与下载入口 | GitHub Pages（`site/`），下载按钮指向 Releases |
-| 域名 | 无。Pages 的 `github.io` 子路径就是正式地址 |
+| 宣传与下载入口 | Cloudflare Pages（`cloudflare/edge/public/`），下载按钮指向 Releases |
+| 域名 | `veyl.dessage.xyz`（GoDaddy CNAME 指向 `veyl-edge.pages.dev`） |
 | 对象存储 | 无。不维护第二套分发链路 |
 
 理由：Releases 自带版本归档、校验和与访问统计，再加一个对象存储等于多一份要维护的服务和一份账单。等真出现下载瓶颈（例如国内访问不稳定）再考虑镜像，而不是现在预设。
@@ -587,7 +585,7 @@ jobs:
 ## 7. 明确不做
 
 - 不做 updater / 自动更新（P1）。
-- **不买自有域名、不引入对象存储**：宣传页走 GitHub Pages，二进制走 GitHub Releases（见 §6.1、§6.2）。
+- **不引入对象存储**：宣传页随接口走 `veyl.dessage.xyz`（Cloudflare Pages），二进制走 GitHub Releases（见 §6.1、§6.2）。
 - 不做 license / 授权码体系。
 - 不做 Linux 包（`.deb` / `.AppImage`）。
 - 不在 CI 里保存 macOS 公证凭据之外的长期密钥。
@@ -652,7 +650,7 @@ jobs:
 
 ## 9. 开放问题
 
-1. ~~**GitHub 仓库归属与 release 权限**~~：已确定——`aiwithblockchain/veyl`，Pages 站点为 `https://aiwithblockchain.github.io/veyl/`。`release.sh` 需要 `gh` 已登录且有 `contents: write`。
+1. ~~**GitHub 仓库归属与 release 权限**~~：已确定——`aiwithblockchain/veyl`，站点为 `https://veyl.dessage.xyz`。`release.sh` 需要 `gh` 已登录且有 `contents: write`。
 2. **Windows 构建机**：P1 是本地 Windows 机器还是 CI runner？影响 `build-msi.ps1` 的路径假设。
 3. ~~**图标源文件**~~：已解决——`aivpn.png`（1024×1024 RGBA）在仓库根目录，`scripts/generate_icons.py` 已跑通。
 4. **是否需要 `SHA256SUMS`**：未签名阶段对外分发时，至少提供校验和；建议 P1-后置随 `preflight.sh` 一起做。
@@ -671,7 +669,7 @@ jobs:
 5. bash scripts/packaging/build-dmg.sh    # macOS
    pwsh scripts/packaging/build-msi.ps1   # Windows
 6. bash scripts/release/release.sh        # 默认只打印命令，不上传
-7. 发布后在 GitHub 上更新 site/index.html 的下载按钮，指向新 release
+7. 发布后更新 `cloudflare/edge/public/index.html` 的下载按钮，再 `cd cloudflare/edge && npm run deploy`
 ```
 
 第 3 步最容易被漏掉：改了源图但忘记重生成，打出来的包还是旧图标，而且因为 `tauri.conf.json` 没变，从配置上看不出任何异常。`preflight.sh` 落地后应加一条检查——`icon.icns` 的修改时间必须晚于 `aivpn.png`。

@@ -97,7 +97,7 @@ etag: "sha256-<hex>"
 - 不返回任何其他节点字段，不返回上游元数据。
 - 路径冲突检查：现有路由只有 `/v1/catalog`、`/v1/debug/*`、`/v1/*` 业务前缀与 `/payment/return`，`/v1/seed` 不冲突。**最终路径用 `/v1/seed`**——沿用 `/v1` 的既有约定，比 `/seed.json` 少一个「静态文件」的误解（它不是文件，是 Worker 直出）。
 
-> **可达性**：`cloudflare/edge/proxy.ts` 把 `veyl.dessage.xyz` 的所有路径经 service binding 转给 control-plane Worker，不按路径挑选，所以 `/v1/seed` 与 `/v1/catalog` 走同一条链路。
+> **可达性**：`cloudflare/edge/proxy.ts` 把 `veyl.dessage.xyz` 的接口路径经 service binding 转给 control-plane Worker，不按路径挑选，所以 `/v1/seed` 与 `/v1/catalog` 走同一条链路。（`_routes.json` 里的三条静态路径 `/`、`/index.html`、`/favicon.png` 由 Pages 直接返回，不进 Worker；接口路径不受影响。）
 >
 > **挂载位置与方法**：`route()` 是线性 if 链（`index.ts:267` 起），没有 `/v1/*` 统一拦截，鉴权与 webhook 处理器只认各自精确路径。新路由放在 `/v1/catalog`（`index.ts:318`）旁边、最终 404（`index.ts:719`）之前。**只接受 GET / HEAD**：HEAD 返回空 body 但带同样的 `ETag` 与 `Cache-Control`；其它方法 405。它会和其它路由一样进结构化访问日志，属正常。
 
