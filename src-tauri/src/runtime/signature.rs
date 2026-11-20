@@ -67,7 +67,7 @@ pub fn verify_installed_runtime(path: &Path, recorded_sha256: &str) -> Result<()
     }
     #[cfg(not(target_os = "macos"))]
     {
-        if !crate::tun::trust::is_full_sha256(recorded_sha256) {
+        if !is_full_sha256(recorded_sha256) {
             return Err("安装记录里没有完整哈希，无法确认运行时".into());
         }
         let actual = crate::runtime::fsutil::sha256_file(path)
@@ -78,6 +78,17 @@ pub fn verify_installed_runtime(path: &Path, recorded_sha256: &str) -> Result<()
             Err(format!("运行时哈希与安装记录不符（记录 {recorded_sha256}，实际 {actual}）"))
         }
     }
+}
+
+// `tun::trust` 是 unix 专属；Windows 的同类校验在特权通道模块里。
+#[cfg(unix)]
+fn is_full_sha256(value: &str) -> bool {
+    crate::tun::trust::is_full_sha256(value)
+}
+
+#[cfg(target_os = "windows")]
+fn is_full_sha256(value: &str) -> bool {
+    crate::tun::windows::runtime::is_full_sha256(value)
 }
 
 /// 从更新源下载并解压出来的运行时：必须在发布前由我们重签，否则拒绝。

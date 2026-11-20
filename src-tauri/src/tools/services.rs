@@ -5203,7 +5203,7 @@ impl VpnToolServices for WiredServices {
         let https_ok = https.starts_with("HTTP 2") || https.starts_with("HTTP 3");
 
         // ---- 进程 ----
-        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        let alive = crate::runtime::process::is_alive(pid);
         let process = format!("pid={pid} 存活={alive} since={since}");
 
         let conclusion = if !node_reachable {
