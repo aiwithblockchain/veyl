@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
   开发用：给 Veyl 的二进制做 Authenticode 签名并信任开发证书；也负责把证书清干净。

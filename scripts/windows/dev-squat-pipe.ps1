@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
   开发用：先占住 \\.\pipe\veyl-helper，验证服务不会降级/换名字。
