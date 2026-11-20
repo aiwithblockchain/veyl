@@ -13,7 +13,7 @@ import { useFocusTrap } from "../ui/focus";
 import { IconClose } from "./icons";
 
 /** 内部格式：只用于取数据，不出现在任何界面文本里。 */
-type FormatId = "singbox" | "clash" | "ss";
+type FormatId = "singbox" | "clash" | "ss" | "shadowrocket";
 
 type RowId = MobileClientId | "other";
 
@@ -72,7 +72,7 @@ const APPS: AppDef[] = [
     id: "shadowrocket",
     name: "Shadowrocket",
     meta: "iOS",
-    format: "ss",
+    format: "shadowrocket",
     url: "https://apps.apple.com/us/app/shadowrocket/id932747118",
   },
   {
@@ -640,11 +640,6 @@ export function MobileExport({
                   <>
                     {downloadStep(app)}
                     {importStep(app)}
-                    {app.id === "shadowrocket" ? (
-                      <p className="mobile-export__row-note">
-                        用它只能全部走节点，国内网站也会绕道。
-                      </p>
-                    ) : null}
                   </>,
                 ),
               )}

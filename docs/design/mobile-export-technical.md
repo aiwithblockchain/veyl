@@ -690,7 +690,7 @@ M1 只对 **sing-box 官方 / Shadowrocket / CMFA / Hiddify** 四个 App 负责�
 - **删掉格式切换器**：v4 设计里没有 `sing-box` / `Clash` 两段；用户只选 App，格式只存在于内部映射（§3.7.8）。`formats[]` 仍然三种都返回。
 - 四个 App 的映射：
   - sing-box 官方 → `singbox`；二维码 = `sing-box://import-remote-profile?url=…#Veyl`（§4.2）；
-  - Shadowrocket → `ss`；二维码 = `/profile/ss` 的 URL 本身（待真机，§3.7.8）；
+  - Shadowrocket → `shadowrocket`（2026-11-20 改，§3.7.13）；二维码 = `/profile/shadowrocket` 的 URL 本身；
   - CMFA → `clash`；二维码 = `/profile/clash` 的 URL 本身（V13 判去留）；
   - Hiddify → `singbox`（备选 `clash`；界面默认取 `singbox`）。
 - 同一个弹层、同一枚令牌、同一个「重新生成」；切换 App 只换展示的 URL / 二维码，不重新请求。
@@ -891,6 +891,24 @@ rules:
 
 
 ---
+
+
+#### 3.7.13 Shadowrocket 专用配置（2026-11-20 增补）
+
+- **为什么不能只发 `ss`**：`ss` 只是一串节点，Shadowrocket 拿不到任何规则，只能「全局路由 = 代理」——全部流量走节点，产品负责人已明确不可接受。分流规则必须随文件一起发。
+- **形态**：`GET /v1/mobile/profile/shadowrocket`，`text/plain; charset=utf-8`，Surge 风格配置文本，四个段：
+
+  ```
+  [General]  bypass-system / dns-server = system, 223.5.5.5, 119.29.29.29 / skip-proxy
+  [Proxy]    <节点名> = ss, <host>, <port>, encrypt-method=aes-256-gcm, password=…, udp-relay=true
+  [Proxy Group]  Veyl = select, <节点…>
+  [Rule]     DOMAIN-SUFFIX,cn,DIRECT → GEOIP,CN,DIRECT → FINAL,Veyl
+  ```
+
+- **规则顺序与 Clash 同源**：域名后缀先于 GEOIP，`FINAL` 兜底；零节点时 `FINAL,DIRECT` 且不出 `[Proxy Group]`。GEOIP 用的是客户端自带库，不像 mihomo 那样默认去 GitHub 拉。
+- **节点自带**：配置里内联 `[Proxy]`，不引用订阅，也不引用用户其它配置里的分组——所以导入后**不需要删除他原有的订阅或配置**，那些不会被这份配置用到。
+- **值的安全写法**：名字/密码含逗号、等号、引号、首尾空格时用双引号包住，内部引号换单引号（该格式无转义语法）。
+- **未验证**：这份格式没有在真机上跑过。要验三件事——(1) 能否被 Shadowrocket 作为「配置」导入；(2) `GEOIP,CN` 是否按其自带库命中；(3) 扫码这个动作是否直接落到「配置」而不是「订阅」。任一不成立，Shadowrocket 行应撤下，而不是退回全局。
 
 ## 4. 桌面 Host
 

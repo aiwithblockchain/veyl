@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { MockAgentBridge } from "./mockAgent";
 
 describe("mock 手机端导出", () => {
-  it("返回三种格式：sing-box / Clash / ss 都带码", async () => {
+  it("返回四种格式：sing-box / Clash / ss / Shadowrocket 都带码", async () => {
     const bridge = new MockAgentBridge();
 
     const data = await bridge.mobileExportGet?.();
@@ -13,6 +13,7 @@ describe("mock 手机端导出", () => {
       "singbox",
       "clash",
       "ss",
+      "shadowrocket",
     ]);
     const singbox = data.formats.find((item) => item.format === "singbox");
     const clash = data.formats.find((item) => item.format === "clash");
@@ -31,7 +32,7 @@ describe("mock 手机端导出", () => {
     expect(singbox?.url).not.toContain("dessage.xyz");
   });
 
-  it("重新生成同样返回三种格式", async () => {
+  it("重新生成同样返回四种格式", async () => {
     const bridge = new MockAgentBridge();
     const data = await bridge.mobileExportRotate?.();
     expect(data?.state).toBe("ok");

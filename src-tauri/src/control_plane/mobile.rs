@@ -20,6 +20,7 @@ use super::error::CpError;
 pub const PROFILE_PATH: &str = "/v1/mobile/profile";
 const PROFILE_CLASH_PATH: &str = "/v1/mobile/profile/clash";
 const PROFILE_SS_PATH: &str = "/v1/mobile/profile/ss";
+const PROFILE_SHADOWROCKET_PATH: &str = "/v1/mobile/profile/shadowrocket";
 const TOKEN_PATH: &str = "/v1/mobile/token";
 const TOKEN_ROTATE_PATH: &str = "/v1/mobile/token/rotate";
 const PROFILE_USERNAME: &str = "veyl";
@@ -64,6 +65,12 @@ pub enum MobileExportFormat {
         /// 二维码内容就是该订阅 URL 本身（Shadowrocket 扫码导入）。
         qr_data_url: String,
     },
+    /// Shadowrocket 专用配置：节点与国内直连规则在同一份文件里。
+    Shadowrocket {
+        url: String,
+        /// 二维码内容就是该配置 URL 本身。
+        qr_data_url: String,
+    },
 }
 
 /// 手写 Debug：默认 derive 会把含令牌的 `url` 打进日志。
@@ -73,6 +80,9 @@ impl fmt::Debug for MobileExportFormat {
             Self::SingBox { qr_data_url, .. } => ("singbox", !qr_data_url.is_empty()),
             Self::Clash { qr_data_url, .. } => ("clash", !qr_data_url.is_empty()),
             Self::Ss { qr_data_url, .. } => ("ss", !qr_data_url.is_empty()),
+            Self::Shadowrocket { qr_data_url, .. } => {
+                ("shadowrocket", !qr_data_url.is_empty())
+            }
         };
         f.debug_struct("MobileExportFormat")
             .field("format", &format)
@@ -183,6 +193,7 @@ fn build_formats(origin: &ProfileOrigin, token: &str) -> Result<Vec<MobileExport
     let singbox_url = origin.profile_url(PROFILE_PATH, token)?;
     let clash_url = origin.profile_url(PROFILE_CLASH_PATH, token)?;
     let ss_url = origin.profile_url(PROFILE_SS_PATH, token)?;
+    let shadowrocket_url = origin.profile_url(PROFILE_SHADOWROCKET_PATH, token)?;
     Ok(vec![
         MobileExportFormat::SingBox {
             qr_data_url: qr_data_url(&scheme_url(&singbox_url))?,
@@ -195,6 +206,10 @@ fn build_formats(origin: &ProfileOrigin, token: &str) -> Result<Vec<MobileExport
         MobileExportFormat::Ss {
             qr_data_url: qr_data_url(&ss_url)?,
             url: ss_url,
+        },
+        MobileExportFormat::Shadowrocket {
+            qr_data_url: qr_data_url(&shadowrocket_url)?,
+            url: shadowrocket_url,
         },
     ])
 }
@@ -710,17 +725,19 @@ mod tests {
     #[test]
     fn formats_use_their_own_paths_in_the_contract_order() {
         let formats = built_formats();
-        assert_eq!(formats.len(), 3);
+        assert_eq!(formats.len(), 4);
         let expected = [
             ("singbox", "/v1/mobile/profile"),
             ("clash", "/v1/mobile/profile/clash"),
             ("ss", "/v1/mobile/profile/ss"),
+            ("shadowrocket", "/v1/mobile/profile/shadowrocket"),
         ];
         for (index, (format, path)) in expected.into_iter().enumerate() {
             let (actual, url) = match &formats[index] {
                 MobileExportFormat::SingBox { url, .. } => ("singbox", url),
                 MobileExportFormat::Clash { url, .. } => ("clash", url),
                 MobileExportFormat::Ss { url, .. } => ("ss", url),
+                MobileExportFormat::Shadowrocket { url, .. } => ("shadowrocket", url),
             };
             assert_eq!(actual, format);
             let parsed = Url::parse(url).unwrap();
@@ -763,6 +780,16 @@ mod tests {
             }
             other => panic!("第三项必须是 ss：{other:?}"),
         }
+        match &formats[3] {
+            MobileExportFormat::Shadowrocket {
+                url,
+                qr_data_url: qr,
+            } => {
+                assert!(url.ends_with("/v1/mobile/profile/shadowrocket"));
+                assert_eq!(qr, &qr_data_url(url).unwrap(), "Shadowrocket 的码就是配置 URL 本身");
+            }
+            other => panic!("第四项必须是 shadowrocket：{other:?}"),
+        }
     }
 
     #[test]
@@ -772,6 +799,7 @@ mod tests {
                 MobileExportFormat::SingBox { qr_data_url, .. } => qr_data_url,
                 MobileExportFormat::Clash { qr_data_url, .. } => qr_data_url,
                 MobileExportFormat::Ss { qr_data_url, .. } => qr_data_url,
+                MobileExportFormat::Shadowrocket { qr_data_url, .. } => qr_data_url,
             };
             let encoded = qr
                 .strip_prefix("data:image/svg+xml;base64,")
@@ -783,12 +811,12 @@ mod tests {
     }
 
     #[test]
-    fn the_token_only_appears_inside_the_three_urls() {
+    fn the_token_only_appears_inside_the_four_urls() {
         let json = serde_json::to_string(&ok_data()).unwrap();
         assert_eq!(
             json.matches(TOKEN).count(),
-            3,
-            "序列化里只允许三个 url 各带一次令牌"
+            4,
+            "序列化里只允许四个 url 各带一次令牌"
         );
         assert!(
             !format!("{:?}", ok_data()).contains(TOKEN),
@@ -804,13 +832,18 @@ mod tests {
         assert_eq!(ok["node_count"], 2);
         assert_eq!(ok["created_at"], 1_763_596_800_000_i64);
         let formats = ok["formats"].as_array().unwrap();
-        assert_eq!(formats.len(), 3);
+        assert_eq!(formats.len(), 4);
         assert_eq!(formats[0]["format"], "singbox");
         assert_eq!(formats[1]["format"], "clash");
         assert_eq!(formats[2]["format"], "ss");
+        assert_eq!(formats[3]["format"], "shadowrocket");
         assert!(formats[0]["qr_data_url"].is_string());
         assert!(formats[1]["qr_data_url"].is_string());
         assert!(formats[2]["qr_data_url"].is_string(), "ss 也要出二维码");
+        assert!(
+            formats[3]["qr_data_url"].is_string(),
+            "shadowrocket 的码是配置 URL"
+        );
         assert_eq!(
             serde_json::to_value(MobileExportData::LoginRequired).unwrap()["state"],
             "login_required"

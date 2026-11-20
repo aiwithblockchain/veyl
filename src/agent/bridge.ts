@@ -686,11 +686,12 @@ export interface MyServerTopup {
   denomination_cents: number;
 }
 
-/** 手机端导出（commands.md §7.21 / §7.22，2.47.0 起返回 formats[]）。 */
+/** 手机端导出（commands.md §7.21 / §7.22，2.48.0 起含 Shadowrocket 配置）。 */
 export type MobileExportFormat =
   | { format: "singbox"; url: string; qr_data_url: string }
   | { format: "clash"; url: string; qr_data_url: string }
-  | { format: "ss"; url: string; qr_data_url: string };
+  | { format: "ss"; url: string; qr_data_url: string }
+  | { format: "shadowrocket"; url: string; qr_data_url: string };
 
 export type MobileExportData =
   | {

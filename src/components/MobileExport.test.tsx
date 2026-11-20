@@ -17,6 +17,8 @@ const SS_URL = `${SINGBOX_URL}/ss`;
 const SINGBOX_QR = "data:image/svg+xml;base64,PHN2Zy1zaW5nYm94Lz4=";
 const CLASH_QR = "data:image/svg+xml;base64,PHN2Zy1jbGFzaC8+";
 const SS_QR = "data:image/svg+xml;base64,PHN2Zy1zcy8+";
+const SHADOWROCKET_URL = `${SINGBOX_URL}/shadowrocket`;
+const SHADOWROCKET_QR = "data:image/svg+xml;base64,PHN2Zy1zci8+";
 const CLIENT_QR = "data:image/svg+xml;base64,PHN2Zy1jbGllbnQvPg==";
 
 const CLIENT_URLS: Record<MobileClientId, string> = {
@@ -34,8 +36,6 @@ const APP_NAMES = [
   "我的 App 不在列表里",
 ];
 
-const ROW_NOTE = "用它只能全部走节点，国内网站也会绕道。";
-
 const OK: MobileExportData = {
   state: "ok",
   node_count: 2,
@@ -44,6 +44,11 @@ const OK: MobileExportData = {
     { format: "singbox", url: SINGBOX_URL, qr_data_url: SINGBOX_QR },
     { format: "clash", url: CLASH_URL, qr_data_url: CLASH_QR },
     { format: "ss", url: SS_URL, qr_data_url: SS_QR },
+    {
+      format: "shadowrocket",
+      url: SHADOWROCKET_URL,
+      qr_data_url: SHADOWROCKET_QR,
+    },
   ],
 };
 
@@ -171,7 +176,7 @@ describe("在手机上使用：按 App 分类", () => {
         within(dialog).getByRole("img", { name: "导入二维码" }).getAttribute(
           "src",
         ),
-      ).toBe(SS_QR),
+      ).toBe(SHADOWROCKET_QR),
     );
 
     fireEvent.click(row(dialog, "Hiddify"));
@@ -209,7 +214,7 @@ describe("在手机上使用：按 App 分类", () => {
     );
   });
 
-  it("Shadowrocket 用 ss 数据：二维码与复制目标都是它", async () => {
+  it("Shadowrocket 用带规则的专用配置：二维码与复制目标都是它", async () => {
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText: vi.fn(async () => {}) },
@@ -223,65 +228,13 @@ describe("在手机上使用：按 App 分类", () => {
         within(dialog).getByRole("img", { name: "导入二维码" }).getAttribute(
           "src",
         ),
-      ).toBe(SS_QR),
+      ).toBe(SHADOWROCKET_QR),
     );
 
     fireEvent.click(within(dialog).getByRole("button", { name: "复制链接" }));
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(SS_URL);
-  });
-
-  it("「只能全部走节点」只在 Shadowrocket 行出现，且在导入块之外", async () => {
-    const bridge = makeBridge(async () => OK);
-    const { dialog } = setup(bridge);
-
-    for (const name of [
-      "sing-box",
-      "Clash Meta for Android",
-      "Hiddify",
-      "我的 App 不在列表里",
-    ]) {
-      fireEvent.click(row(dialog, name));
-      expect(within(dialog).queryByText(ROW_NOTE)).toBeNull();
-    }
-
-    fireEvent.click(row(dialog, "Shadowrocket"));
-    expect(await within(dialog).findByText(ROW_NOTE)).toBeTruthy();
-    const panel = dialog.querySelector<HTMLElement>(
-      ".mobile-export__panel",
-    ) as HTMLElement;
-    expect(panel.textContent).toContain(ROW_NOTE);
-    expect(
-      panel.querySelector(".mobile-export__import")?.textContent,
-    ).not.toContain(ROW_NOTE);
-  });
-
-  it("「只能全部走节点」与码的状态无关：五态下都在", async () => {
-    const cases: Array<[string, () => Promise<MobileExportData>, string]> = [
-      ["未登录", async () => ({ state: "login_required" }), "先登录。"],
-      [
-        "无服务器",
-        async () => ({ state: "no_ready_server" }),
-        "手机端只能导出你自己创建的付费节点。免费和试用节点不包含。",
-      ],
-      [
-        "失败",
-        async () => {
-          throw { code: "TIMEOUT", message: "超时" };
-        },
-        "暂时生成不了。",
-      ],
-      ["读取中", () => new Promise<MobileExportData>(() => {}), "正在读取节点…"],
-      ["就绪", async () => OK, "链接相当于密码，别转发。"],
-    ];
-
-    for (const [label, get, marker] of cases) {
-      const bridge = makeBridge(get);
-      const { dialog } = setup(bridge);
-      fireEvent.click(row(dialog, "Shadowrocket"));
-      expect(await within(dialog).findByText(marker), label).toBeTruthy();
-      expect(within(dialog).getByText(ROW_NOTE), label).toBeTruthy();
-      cleanup();
-    }
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+      SHADOWROCKET_URL,
+    );
   });
 
   it("展开后是两个编号步骤：① 先下载、② 再导入，标题带 App 名", async () => {

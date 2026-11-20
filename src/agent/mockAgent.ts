@@ -179,6 +179,11 @@ function mockMobileExport(nodeCount: number): MobileExportData {
         url: `https://veyl:${token}@veyl.example/v1/mobile/profile/ss`,
         qr_data_url: MOCK_MOBILE_QR,
       },
+      {
+        format: "shadowrocket",
+        url: `https://veyl:${token}@veyl.example/v1/mobile/profile/shadowrocket`,
+        qr_data_url: MOCK_MOBILE_QR,
+      },
     ],
   };
 }
