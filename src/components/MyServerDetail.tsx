@@ -14,6 +14,7 @@ import {
   serverTone,
 } from "../myservers/labels";
 import { isTombstone } from "../myservers/tombstones";
+import { copyText } from "../ui/clipboard";
 
 interface Props {
   bridge: AgentBridge;
@@ -75,6 +76,26 @@ export function MyServerDetail({
   const nameInputRef = useRef<HTMLInputElement>(null);
   const renameButtonRef = useRef<HTMLButtonElement>(null);
   const focusRenameAfterSave = useRef(false);
+  const [ipCopy, setIpCopy] = useState<"idle" | "copied" | "failed">("idle");
+  const ipCopyTimer = useRef(0);
+  const serverIdRef = useRef(server.server_id);
+  serverIdRef.current = server.server_id;
+
+  // 换一台服务器：复位复制结果，别把上一台的话带过来。
+  useEffect(() => {
+    setIpCopy("idle");
+    return () => window.clearTimeout(ipCopyTimer.current);
+  }, [server.server_id]);
+
+  const copyIp = async () => {
+    const targetId = server.server_id;
+    const copied = await copyText((server.ip ?? "").trim());
+    // 复制在途时换了服务器：结果属于上一台，不能落到新面板上。
+    if (targetId !== serverIdRef.current) return;
+    setIpCopy(copied ? "copied" : "failed");
+    window.clearTimeout(ipCopyTimer.current);
+    ipCopyTimer.current = window.setTimeout(() => setIpCopy("idle"), 1500);
+  };
 
   useEffect(() => {
     if (renaming) {
@@ -368,6 +389,33 @@ export function MyServerDetail({
           <dt>地区</dt>
           <dd>{regionLabel}</dd>
         </div>
+        {ready && (server.ip ?? "").trim() !== "" ? (
+          <div>
+            <dt>IP</dt>
+            <dd className="myservers__ip">
+              <span className="num">{server.ip}</span>
+              <button
+                type="button"
+                className="copy-btn"
+                onClick={() => void copyIp()}
+                aria-label="复制 IP"
+              >
+                {ipCopy === "copied"
+                  ? "已复制"
+                  : ipCopy === "failed"
+                    ? "复制失败"
+                    : "复制"}
+              </button>
+              <span className="sr-only" role="status">
+                {ipCopy === "copied"
+                  ? "已复制"
+                  : ipCopy === "failed"
+                    ? "复制失败"
+                    : ""}
+              </span>
+            </dd>
+          </div>
+        ) : null}
         <div>
           <dt>节点</dt>
           <dd>{isServerNodeReady(server) ? "已就绪" : "未就绪"}</dd>

@@ -859,3 +859,122 @@ describe("停机删除的墓碑", () => {
     expect(screen.getByRole("button", { name: "确认删除" })).toBeTruthy();
   });
 });
+
+describe("事实区的 IP", () => {
+  it("就绪时显示 IP 与复制按钮，不带端口", () => {
+    renderDetail();
+
+    expect(screen.getByText("IP")).toBeTruthy();
+    expect(screen.getByText("45.76.20.100")).toBeTruthy();
+    expect(screen.queryByText(/8388/)).toBeNull();
+    expect(screen.getByRole("button", { name: "复制 IP" })).toBeTruthy();
+
+    // 行序：地区 → IP → 节点。
+    const labels = [...document.querySelectorAll(".myservers__facts dt")].map(
+      (dt) => dt.textContent,
+    );
+    expect(labels.indexOf("地区")).toBeLessThan(labels.indexOf("IP"));
+    expect(labels.indexOf("IP")).toBeLessThan(labels.indexOf("节点"));
+  });
+
+  it("建机中不渲染这一行", () => {
+    renderDetail({ state: "booting" });
+
+    expect(screen.queryByText("IP")).toBeNull();
+    expect(screen.queryByRole("button", { name: "复制 IP" })).toBeNull();
+  });
+
+  it("复制成功变「已复制」，1.5 秒后还原", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => {}) },
+    });
+    renderDetail();
+
+    fireEvent.click(screen.getByRole("button", { name: "复制 IP" }));
+    await act(async () => {});
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("45.76.20.100");
+    expect(
+      screen.getByRole("button", { name: "复制 IP" }).textContent,
+    ).toBe("已复制");
+
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    expect(
+      screen.getByRole("button", { name: "复制 IP" }).textContent,
+    ).toBe("复制");
+  });
+
+  it("复制失败显示「复制失败」，同样 1.5 秒还原", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: vi.fn(async () => {
+          throw new Error("denied");
+        }),
+      },
+    });
+    renderDetail();
+
+    fireEvent.click(screen.getByRole("button", { name: "复制 IP" }));
+    await act(async () => {});
+    expect(
+      screen.getByRole("button", { name: "复制 IP" }).textContent,
+    ).toBe("复制失败");
+
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    expect(
+      screen.getByRole("button", { name: "复制 IP" }).textContent,
+    ).toBe("复制");
+  });
+});
+
+describe("IP 复制在途时切服务器", () => {
+  function detailElement(over: Partial<MyServer>) {
+    return (
+      <MyServerDetail
+        bridge={{ myServerDestroy: vi.fn() } as unknown as AgentBridge}
+        server={server(over)}
+        regionLabel="新加坡 1"
+        onCreateAnother={vi.fn()}
+        onChanged={() => {}}
+        onRebuilt={() => {}}
+        onGone={vi.fn()}
+        onForget={async () => {}}
+      />
+    );
+  }
+
+  it("上一台的复制结果不落到新面板上", async () => {
+    let resolveCopy: () => void = () => {};
+    const pending = new Promise<void>((resolve) => {
+      resolveCopy = resolve;
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(() => pending) },
+    });
+
+    const view = render(detailElement({}));
+    fireEvent.click(screen.getByRole("button", { name: "复制 IP" }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("45.76.20.100");
+
+    // 复制还没回来就换了一台。
+    view.rerender(
+      detailElement({ server_id: "srv_2", ip: "198.51.100.7" }),
+    );
+    expect(screen.getByText("198.51.100.7")).toBeTruthy();
+
+    resolveCopy();
+    await act(async () => {});
+
+    expect(
+      screen.getByRole("button", { name: "复制 IP" }).textContent,
+    ).toBe("复制");
+  });
+});
