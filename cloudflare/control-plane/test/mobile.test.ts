@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { b64u, randomBytes, sealSecret, signAccessToken } from "../src/lib/crypto";
+import { b64u, fromB64u, randomBytes, sealSecret, signAccessToken } from "../src/lib/crypto";
 import { handleMobile, type MobileEnv } from "../src/mobile";
 import { assertSqlMatchesSchema } from "./helpers/schemaGuard";
 
@@ -261,12 +261,16 @@ function tokenRequest(accessToken: string, rotate = false): Request {
   );
 }
 
-function profileRequest(password: string | null, options: { user?: string; ip?: string } = {}): Request {
+function profileRequest(
+  password: string | null,
+  options: { user?: string; ip?: string; format?: "clash" | "ss" } = {},
+): Request {
   const headers: Record<string, string> = { "CF-Connecting-IP": options.ip ?? "203.0.113.7" };
   if (password !== null) {
     headers.authorization = `Basic ${btoa(`${options.user ?? "veyl"}:${password}`)}`;
   }
-  return new Request(PROFILE_URL, { headers });
+  const url = options.format ? `${PROFILE_URL}/${options.format}` : PROFILE_URL;
+  return new Request(url, { headers });
 }
 
 async function createToken(env: MobileEnv, accessToken: string): Promise<string> {
@@ -322,6 +326,30 @@ async function seedServer(db: MobileD1, seed: SeedServer): Promise<void> {
     created_at: seed.createdAt,
     destroyed_at: seed.credentialDestroyedAt ?? null,
   });
+}
+
+/** 取 YAML 里以 prefix 开头的那一行，把后缀当作 JSON 双引号标量解析。 */
+function yamlScalarFrom(yaml: string, prefix: string): unknown {
+  const line = yaml.split("\n").find((entry) => entry.startsWith(prefix));
+  expect(line).toBeTruthy();
+  return JSON.parse(line!.slice(prefix.length));
+}
+
+/** 只取 proxies 段里的节点名，跳过 proxy-groups 的 Veyl。 */
+function clashProxyNames(yaml: string): string[] {
+  const names: string[] = [];
+  let inProxies = false;
+  for (const line of yaml.split("\n")) {
+    if (line === "proxies:") {
+      inProxies = true;
+      continue;
+    }
+    if (line === "proxy-groups:") break;
+    if (inProxies && line.startsWith("  - name: ")) {
+      names.push(JSON.parse(line.slice("  - name: ".length)) as string);
+    }
+  }
+  return names;
 }
 
 interface MobileConfig {
@@ -456,10 +484,12 @@ describe("POST /v1/mobile/token/rotate", () => {
     expect(rotatedBody.token).not.toBe(oldToken);
     expect(rotatedBody.rotated_at).toBeGreaterThan(0);
 
-    const stale = await handleMobile(profileRequest(oldToken), env);
-    expect(stale?.status).toBe(401);
-    const fresh = await handleMobile(profileRequest(rotatedBody.token), env);
-    expect(fresh?.status).toBe(200);
+    for (const format of [undefined, "clash", "ss"] as const) {
+      const stale = await handleMobile(profileRequest(oldToken, { format }), env);
+      expect(stale?.status).toBe(401);
+      const fresh = await handleMobile(profileRequest(rotatedBody.token, { format }), env);
+      expect(fresh?.status).toBe(200);
+    }
 
     const audit = db.audit.find((row) => row.action === "mobile.token_rotate");
     expect(audit).toBeTruthy();
@@ -486,11 +516,16 @@ describe("GET /v1/mobile/profile", () => {
   it("缺失 / 非 Basic / 畸形凭据一律 401 并带 WWW-Authenticate", async () => {
     const { env } = await setup();
 
-    const missing = await handleMobile(profileRequest(null, { ip: "203.0.113.10" }), env);
-    expect(missing?.status).toBe(401);
-    expect(missing?.headers.get("WWW-Authenticate")).toBe('Basic realm="veyl", charset="UTF-8"');
-    expect(missing?.headers.get("Cache-Control")).toBe("no-store");
-    expect(missing?.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    for (const [index, format] of ([undefined, "clash", "ss"] as const).entries()) {
+      const response = await handleMobile(
+        profileRequest(null, { ip: `203.0.113.${20 + index}`, format }),
+        env,
+      );
+      expect(response?.status).toBe(401);
+      expect(response?.headers.get("WWW-Authenticate")).toBe('Basic realm="veyl", charset="UTF-8"');
+      expect(response?.headers.get("Cache-Control")).toBe("no-store");
+      expect(response?.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    }
 
     const bearer = await handleMobile(
       new Request(PROFILE_URL, {
@@ -597,6 +632,8 @@ describe("GET /v1/mobile/profile", () => {
 
     const response = await handleMobile(profileRequest(token), env);
     expect(response?.status).toBe(503);
+    expect(response?.headers.get("Cache-Control")).toBe("no-store");
+    expect(response?.headers.get("X-Content-Type-Options")).toBe("nosniff");
     const body = (await response!.json()) as {
       code: string;
       retryable: boolean;
@@ -620,6 +657,213 @@ describe("GET /v1/mobile/profile", () => {
     expect(nodes.map((node) => node.tag)).toEqual(["节点", "节点 (2)"]);
   });
 
+  it("Clash YAML：最小形状与精确输出", async () => {
+    const { db, env, accessToken } = await setup();
+    await seedServer(db, {
+      id: "srv_clash",
+      name: "东京 1 号",
+      createdAt: 1,
+      host: "203.0.113.10",
+      port: 20343,
+      password: "s3cret-password",
+    });
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(profileRequest(token, { format: "clash" }), env);
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("Content-Type")).toBe("text/yaml; charset=utf-8");
+    expect(response?.headers.get("Cache-Control")).toBe("no-store");
+    expect(response?.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(await response!.text()).toBe(
+      "proxies:\n" +
+        '  - name: "东京 1 号"\n' +
+        "    type: ss\n" +
+        '    server: "203.0.113.10"\n' +
+        "    port: 20343\n" +
+        "    cipher: aes-256-gcm\n" +
+        '    password: "s3cret-password"\n' +
+        "    udp: true\n" +
+        "proxy-groups:\n" +
+        '  - name: "Veyl"\n' +
+        "    type: select\n" +
+        "    proxies:\n" +
+        '      - "东京 1 号"\n' +
+        "rules:\n" +
+        '  - "MATCH,Veyl"\n',
+    );
+  });
+
+  it("Clash YAML：特殊字符保持双引号标量，注释符与换行不破坏结构", async () => {
+    // U+2028 放在中间：String.trim() 会把它当空白，放行尾会被去掉。
+    const name = "-东京:\"1\" # - 换行\n😀\u2028\u0085\u007f尾";
+    const password = "p#a\"ss";
+    const { db, env, accessToken } = await setup();
+    await seedServer(db, {
+      id: "srv_clash_special",
+      name,
+      createdAt: 1,
+      host: "203.0.113.10",
+      port: 20343,
+      password,
+    });
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(profileRequest(token, { format: "clash" }), env);
+    expect(response?.status).toBe(200);
+    const yaml = await response!.text();
+
+    expect(yamlScalarFrom(yaml, "  - name: ")).toBe(name);
+    expect(yamlScalarFrom(yaml, "    password: ")).toBe(password);
+    expect(yamlScalarFrom(yaml, "      - ")).toBe(name);
+    expect(yaml).not.toContain("\u2028");
+    expect(yaml).not.toContain("\u0085");
+    expect(yaml).not.toContain("\u007f");
+    expect(yaml).toContain("\\u2028");
+    expect(yaml).toContain("\\u0085");
+    expect(yaml).toContain("\\u007f");
+    expect(yaml).toContain("    cipher: aes-256-gcm");
+    expect(yaml).toContain("    udp: true");
+    expect(yaml).toContain('  - name: "Veyl"');
+    expect(yaml).toContain('  - "MATCH,Veyl"');
+  });
+
+  it("Clash 零节点：200 + 空 proxies 与 MATCH,DIRECT", async () => {
+    const { env, accessToken } = await setup();
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(profileRequest(token, { format: "clash" }), env);
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response!.text()).toBe('proxies: []\nproxy-groups: []\nrules:\n  - "MATCH,DIRECT"\n');
+  });
+
+  it("Clash 全部凭据不可用：503", async () => {
+    const { db, env, accessToken } = await setup();
+    await seedServer(db, { id: "srv_clash_bad", name: "坏凭据", createdAt: 1, corruptCredential: true });
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(profileRequest(token, { format: "clash" }), env);
+    expect(response?.status).toBe(503);
+    const body = (await response!.json()) as { code: string; details: { reason: string } };
+    expect(body.code).toBe("INTERNAL");
+    expect(body.details.reason).toBe("mobile_profile_unavailable");
+  });
+
+  it("ss SIP002：base64url 与 percent-encode 逐字节", async () => {
+    const { db, env, accessToken } = await setup();
+    await seedServer(db, {
+      id: "srv_ss",
+      name: "东京 1 号",
+      createdAt: 1,
+      host: "203.0.113.10",
+      port: 20343,
+      password: "s3cret-password",
+    });
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(profileRequest(token, { format: "ss" }), env);
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
+    expect(response?.headers.get("Cache-Control")).toBe("no-store");
+    expect(response?.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(await response!.text()).toBe(
+      "ss://YWVzLTI1Ni1nY206czNjcmV0LXBhc3N3b3Jk@203.0.113.10:20343#%E4%B8%9C%E4%BA%AC%201%20%E5%8F%B7\n",
+    );
+  });
+
+  it("ss：IPv6 加方括号，空格与 # 按 RFC 3986 编码", async () => {
+    const { db, env, accessToken } = await setup();
+    await seedServer(db, {
+      id: "srv_ss_v6",
+      name: "东京 1 #😀",
+      createdAt: 1,
+      host: "2001:db8::1",
+      port: 8388,
+      password: "p",
+    });
+    const token = await createToken(env, accessToken);
+
+    const userinfo = b64u(new TextEncoder().encode("aes-256-gcm:p"));
+    const response = await handleMobile(profileRequest(token, { format: "ss" }), env);
+    expect(response?.status).toBe(200);
+    expect(await response!.text()).toBe(
+      `ss://${userinfo}@[2001:db8::1]:8388#%E4%B8%9C%E4%BA%AC%201%20%23%F0%9F%98%80\n`,
+    );
+  });
+
+  it("ss：password 含冒号与非 ASCII 时按 UTF-8 参与 base64url", async () => {
+    const { db, env, accessToken } = await setup();
+    const password = "p:密码 🔑";
+    await seedServer(db, {
+      id: "srv_ss_password",
+      name: "特殊密码",
+      createdAt: 1,
+      host: "203.0.113.10",
+      port: 20343,
+      password,
+    });
+    const token = await createToken(env, accessToken);
+
+    const userinfo = b64u(new TextEncoder().encode(`aes-256-gcm:${password}`));
+    expect(new TextDecoder().decode(fromB64u(userinfo))).toBe(`aes-256-gcm:${password}`);
+    const response = await handleMobile(profileRequest(token, { format: "ss" }), env);
+    expect(response?.status).toBe(200);
+    expect(await response!.text()).toBe(
+      `ss://${userinfo}@203.0.113.10:20343#%E7%89%B9%E6%AE%8A%E5%AF%86%E7%A0%81\n`,
+    );
+  });
+
+  it("ss 零节点：200 + 0 字节 body", async () => {
+    const { env, accessToken } = await setup();
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(profileRequest(token, { format: "ss" }), env);
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response!.text()).toBe("");
+  });
+
+  it("ss 全部凭据不可用：503", async () => {
+    const { db, env, accessToken } = await setup();
+    await seedServer(db, { id: "srv_ss_bad", name: "坏凭据", createdAt: 1, corruptCredential: true });
+    const token = await createToken(env, accessToken);
+
+    const response = await handleMobile(profileRequest(token, { format: "ss" }), env);
+    expect(response?.status).toBe(503);
+    const body = (await response!.json()) as { code: string; details: { reason: string } };
+    expect(body.code).toBe("INTERNAL");
+    expect(body.details.reason).toBe("mobile_profile_unavailable");
+  });
+
+  it("保留名冲突：节点名避开内建名，且三种格式里名字一致", async () => {
+    const { db, env, accessToken } = await setup();
+    const names = ["proxy", "Direct", "Veyl", "REJECT"];
+    for (const [index, name] of names.entries()) {
+      await seedServer(db, { id: `srv_reserved_${index}`, name, createdAt: index + 1 });
+    }
+    const token = await createToken(env, accessToken);
+    const expected = ["proxy (2)", "Direct (2)", "Veyl (2)", "REJECT (2)"];
+
+    const singboxResponse = await handleMobile(profileRequest(token), env);
+    expect(singboxResponse?.status).toBe(200);
+    const singbox = (await singboxResponse!.json()) as MobileConfig;
+    expect(
+      singbox.outbounds.filter((outbound) => outbound.type === "shadowsocks").map((o) => o.tag),
+    ).toEqual(expected);
+
+    const clashResponse = await handleMobile(profileRequest(token, { format: "clash" }), env);
+    expect(clashResponse?.status).toBe(200);
+    expect(clashProxyNames(await clashResponse!.text())).toEqual(expected);
+
+    const ssResponse = await handleMobile(profileRequest(token, { format: "ss" }), env);
+    expect(ssResponse?.status).toBe(200);
+    const ssNames = (await ssResponse!.text())
+      .trim()
+      .split("\n")
+      .map((line) => decodeURIComponent(line.split("#")[1]));
+    expect(ssNames).toEqual(expected);
+  });
+
   it("账户被停用后 profile 返回 403", async () => {
     const { db, env, accessToken } = await setup();
     const token = await createToken(env, accessToken);
@@ -628,19 +872,23 @@ describe("GET /v1/mobile/profile", () => {
 
     const response = await handleMobile(profileRequest(token), env);
     expect(response?.status).toBe(403);
+    expect(response?.headers.get("Cache-Control")).toBe("no-store");
+    expect(response?.headers.get("X-Content-Type-Options")).toBe("nosniff");
     const body = (await response!.json()) as { code: string; details: { reason: string } };
     expect(body.code).toBe("FORBIDDEN");
     expect(body.details.reason).toBe("account_blocked");
   });
 
-  it("每账户每小时 30 次：第 31 次 429 并带 Retry-After", async () => {
+  it("三种格式共享 30 次/小时预算", async () => {
     const { env, accessToken } = await setup();
     const token = await createToken(env, accessToken);
-    for (let attempt = 0; attempt < 30; attempt += 1) {
+    for (let attempt = 0; attempt < 29; attempt += 1) {
       const response = await handleMobile(profileRequest(token), env);
       expect(response?.status).toBe(200);
     }
-    const limited = await handleMobile(profileRequest(token), env);
+    const clash = await handleMobile(profileRequest(token, { format: "clash" }), env);
+    expect(clash?.status).toBe(200);
+    const limited = await handleMobile(profileRequest(token, { format: "ss" }), env);
     expect(limited?.status).toBe(429);
     expect(limited?.headers.get("Retry-After")).toBe("3600");
     expect(limited?.headers.get("Cache-Control")).toBe("no-store");
@@ -660,14 +908,14 @@ describe("GET /v1/mobile/profile", () => {
     expect(limited?.status).toBe(429);
   });
 
-  it("last_used_at 5 分钟内只写一次", async () => {
+  it("last_used_at 5 分钟内只写一次（三种格式共用）", async () => {
     const { db, env, accessToken } = await setup();
     const token = await createToken(env, accessToken);
 
     await handleMobile(profileRequest(token), env);
     const first = db.tokens[0].last_used_at;
     expect(first).not.toBeNull();
-    await handleMobile(profileRequest(token), env);
+    await handleMobile(profileRequest(token, { format: "ss" }), env);
     expect(db.tokens[0].last_used_at).toBe(first);
   });
 });

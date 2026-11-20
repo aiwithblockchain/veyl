@@ -1,9 +1,10 @@
-//! 手机端导出：确保账户级令牌 → 拼远程配置 URL → 生成 sing-box 二维码。
+//! 手机端导出：确保账户级令牌 → 拼三种格式的远程配置 URL → 生成二维码。
 //!
 //! 令牌只在内存里经过一次：不写日志、不进事件、不落本地库（设计 §7.1 / §7.2）。
 //! profile 的 origin 只取 [`super::env::current`]，本模块不为它写域名常量（§4.1）；
 //! 下载页二维码用的是产品写死的公开链接，与 profile origin 无关。
 
+use std::fmt;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -17,6 +18,8 @@ use super::error::CpError;
 
 /// 路径字面量在 Rust 与 Worker 两侧各有一份（跨语言没有共享常量，§4.1）。
 pub const PROFILE_PATH: &str = "/v1/mobile/profile";
+const PROFILE_CLASH_PATH: &str = "/v1/mobile/profile/clash";
+const PROFILE_SS_PATH: &str = "/v1/mobile/profile/ss";
 const TOKEN_PATH: &str = "/v1/mobile/token";
 const TOKEN_ROTATE_PATH: &str = "/v1/mobile/token/rotate";
 const PROFILE_USERNAME: &str = "veyl";
@@ -28,16 +31,58 @@ const QR_PIXELS: u32 = 640;
 const TOKEN_LEN: usize = 46;
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-/// 下载页固定 URL。命令不接受前端传入，避免变成任意内容二维码生成器。
-pub const CLIENTS_URL: &str = "https://sing-box.sagernet.org/clients/";
+/// 下载页 URL 的固定映射。命令只接受客户端 id，不接受调用方传 URL。
+pub const CLIENTS_URLS: [(&str, &str); 3] = [
+    ("singbox", "https://sing-box.sagernet.org/clients/"),
+    ("hiddify", "https://hiddify.com"),
+    (
+        "cmfa",
+        "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
+    ),
+];
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// 单种导出格式（设计 §3.7.7）。`url` 含令牌，Debug 不得原样打印。
+#[derive(Clone, PartialEq, Serialize)]
+#[serde(tag = "format", rename_all = "lowercase")]
+pub enum MobileExportFormat {
+    SingBox {
+        url: String,
+        /// `sing-box://import-remote-profile?url=…#Veyl` 的二维码。
+        qr_data_url: String,
+    },
+    Clash {
+        url: String,
+        /// 二维码内容就是该 URL 本身（V13 再判定去留）。
+        qr_data_url: String,
+    },
+    Ss {
+        url: String,
+        /// 多节点列表不适合一张码，M1 不出。
+        qr_data_url: Option<String>,
+    },
+}
+
+/// 手写 Debug：默认 derive 会把含令牌的 `url` 打进日志。
+impl fmt::Debug for MobileExportFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (format, has_qr) = match self {
+            Self::SingBox { qr_data_url, .. } => ("singbox", !qr_data_url.is_empty()),
+            Self::Clash { qr_data_url, .. } => ("clash", !qr_data_url.is_empty()),
+            Self::Ss { qr_data_url, .. } => ("ss", qr_data_url.is_some()),
+        };
+        f.debug_struct("MobileExportFormat")
+            .field("format", &format)
+            .field("url", &"<redacted>")
+            .field("has_qr", &has_qr)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum MobileExportData {
     Ok {
-        /// 含令牌：UI 不得渲染为文本 / `alt` / `title`。
-        url: String,
-        qr_data_url: String,
+        formats: Vec<MobileExportFormat>,
         node_count: u32,
         created_at: i64,
     },
@@ -45,8 +90,28 @@ pub enum MobileExportData {
     NoReadyServer,
 }
 
+impl fmt::Debug for MobileExportData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ok {
+                formats,
+                node_count,
+                created_at,
+            } => f
+                .debug_struct("Ok")
+                .field("formats", formats)
+                .field("node_count", node_count)
+                .field("created_at", created_at)
+                .finish(),
+            Self::LoginRequired => f.write_str("LoginRequired"),
+            Self::NoReadyServer => f.write_str("NoReadyServer"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MobileClientsQr {
+    pub url: String,
     pub qr_data_url: String,
 }
 
@@ -65,9 +130,24 @@ pub async fn rotate() -> Result<MobileExportData, CpError> {
 }
 
 /// 下载页二维码（仅 UI）：不登录、不调控制面、不涉及令牌。
-pub fn clients_qr() -> Result<MobileClientsQr, CpError> {
+///
+/// 未知 id 直接报错，不静默回退到 sing-box——回退会把错误的客户端码展示给用户。
+pub fn clients_qr(client: &str) -> Result<MobileClientsQr, CpError> {
+    let url = CLIENTS_URLS
+        .iter()
+        .find(|(id, _)| *id == client)
+        .map(|(_, url)| *url)
+        .ok_or_else(|| {
+            CpError::new(
+                "INVALID_ARGUMENT",
+                "client 只能是 singbox、hiddify 或 cmfa",
+                false,
+                json!({ "reason": "unknown_client" }),
+            )
+        })?;
     Ok(MobileClientsQr {
-        qr_data_url: qr_data_url(CLIENTS_URL)?,
+        url: url.to_string(),
+        qr_data_url: qr_data_url(url)?,
     })
 }
 
@@ -85,15 +165,34 @@ async fn export(rotate: bool) -> Result<MobileExportData, CpError> {
         Err(error) if is_login_required(&error) => return Ok(MobileExportData::LoginRequired),
         Err(error) => return Err(error),
     };
-    let url = origin.profile_url(&token.token)?;
-    let qr = qr_data_url(&scheme_url(&url))?;
+    let formats = build_formats(&origin, &token.token)?;
     log::debug!("手机端导出：rotate={rotate} node_count={node_count}");
     Ok(MobileExportData::Ok {
-        url,
-        qr_data_url: qr,
+        formats,
         node_count,
         created_at: token.created_at,
     })
+}
+
+/// 三种格式共用一条令牌；URL 全部由 Host 拼，控制面只回令牌（§3.7.7 / §4.1）。
+fn build_formats(origin: &ProfileOrigin, token: &str) -> Result<Vec<MobileExportFormat>, CpError> {
+    let singbox_url = origin.profile_url(PROFILE_PATH, token)?;
+    let clash_url = origin.profile_url(PROFILE_CLASH_PATH, token)?;
+    let ss_url = origin.profile_url(PROFILE_SS_PATH, token)?;
+    Ok(vec![
+        MobileExportFormat::SingBox {
+            qr_data_url: qr_data_url(&scheme_url(&singbox_url))?,
+            url: singbox_url,
+        },
+        MobileExportFormat::Clash {
+            qr_data_url: qr_data_url(&clash_url)?,
+            url: clash_url,
+        },
+        MobileExportFormat::Ss {
+            url: ss_url,
+            qr_data_url: None,
+        },
+    ])
 }
 
 /// 门禁是预期状态，不是错误（契约 §7.21）。
@@ -283,10 +382,10 @@ impl ProfileOrigin {
         Ok(Self { base })
     }
 
-    /// `https://veyl:<token>@<base 去掉末尾斜杠>/v1/mobile/profile`。
-    fn profile_url(&self, token: &str) -> Result<String, CpError> {
+    /// `https://veyl:<token>@<base 去掉末尾斜杠><profile_path>`。
+    fn profile_url(&self, profile_path: &str, token: &str) -> Result<String, CpError> {
         let mut url = self.base.clone();
-        let path = format!("{}{}", url.path().trim_end_matches('/'), PROFILE_PATH);
+        let path = format!("{}{}", url.path().trim_end_matches('/'), profile_path);
         url.set_path(&path);
         url.set_query(None);
         url.set_fragment(None);
@@ -397,7 +496,7 @@ mod tests {
     #[test]
     fn profile_url_puts_the_token_in_userinfo() {
         let origin = ProfileOrigin::parse("https://veyl.dessage.xyz/").unwrap();
-        let url = origin.profile_url(TOKEN).unwrap();
+        let url = origin.profile_url(PROFILE_PATH, TOKEN).unwrap();
         assert_eq!(
             url,
             format!("https://veyl:{TOKEN}@veyl.dessage.xyz/v1/mobile/profile")
@@ -413,10 +512,16 @@ mod tests {
     #[test]
     fn profile_url_keeps_a_base_path_and_drops_a_trailing_slash() {
         let origin = ProfileOrigin::parse("https://example.test/api/").unwrap();
-        assert_eq!(
-            origin.profile_url(TOKEN).unwrap(),
-            format!("https://veyl:{TOKEN}@example.test/api/v1/mobile/profile")
-        );
+        for (path, expected) in [
+            ("/v1/mobile/profile", "/api/v1/mobile/profile"),
+            ("/v1/mobile/profile/clash", "/api/v1/mobile/profile/clash"),
+            ("/v1/mobile/profile/ss", "/api/v1/mobile/profile/ss"),
+        ] {
+            let parsed = Url::parse(&origin.profile_url(path, TOKEN).unwrap()).unwrap();
+            assert_eq!(parsed.path(), expected);
+            assert_eq!(parsed.username(), "veyl");
+            assert_eq!(parsed.password(), Some(TOKEN));
+        }
     }
 
     #[test]
@@ -522,7 +627,7 @@ mod tests {
     #[test]
     fn qr_is_an_svg_data_url() {
         let origin = ProfileOrigin::parse("https://veyl.dessage.xyz").unwrap();
-        let url = origin.profile_url(TOKEN).unwrap();
+        let url = origin.profile_url(PROFILE_PATH, TOKEN).unwrap();
         let data_url = qr_data_url(&scheme_url(&url)).unwrap();
         let encoded = data_url
             .strip_prefix("data:image/svg+xml;base64,")
@@ -534,45 +639,167 @@ mod tests {
     }
 
     #[test]
-    fn clients_qr_is_the_fixed_download_page_and_carries_no_token() {
-        let clients = clients_qr().unwrap();
-        assert_eq!(
-            clients.qr_data_url,
-            qr_data_url(CLIENTS_URL).unwrap(),
-            "二维码内容必须是写死的下载页 URL"
-        );
-        let encoded = clients
-            .qr_data_url
-            .strip_prefix("data:image/svg+xml;base64,")
-            .expect("prefix");
-        let svg = String::from_utf8(BASE64.decode(encoded).unwrap()).unwrap();
-        assert!(svg.contains("<svg"), "解码后必须是 SVG");
-        assert!(!clients.qr_data_url.contains("mp_"), "不得含任何令牌");
-        assert_eq!(CLIENTS_URL, "https://sing-box.sagernet.org/clients/");
+    fn clients_qr_maps_each_client_to_its_fixed_url() {
+        for (id, url) in [
+            ("singbox", "https://sing-box.sagernet.org/clients/"),
+            ("hiddify", "https://hiddify.com"),
+            (
+                "cmfa",
+                "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
+            ),
+        ] {
+            let data = clients_qr(id).unwrap();
+            assert_eq!(data.url, url, "{id}");
+            assert_eq!(
+                data.qr_data_url,
+                qr_data_url(url).unwrap(),
+                "{id} 的二维码内容必须是该 URL"
+            );
+            let encoded = data
+                .qr_data_url
+                .strip_prefix("data:image/svg+xml;base64,")
+                .expect("prefix");
+            let svg = String::from_utf8(BASE64.decode(encoded).unwrap()).unwrap();
+            assert!(svg.contains("<svg"), "{id} 解码后必须是 SVG");
+            assert!(!data.qr_data_url.contains("mp_"), "{id} 不得含任何令牌");
+        }
+    }
+
+    #[test]
+    fn unknown_client_is_rejected_instead_of_falling_back() {
+        for id in ["", "clash", "sing-box", "SINGBOX", "shadowrocket"] {
+            let error = clients_qr(id).unwrap_err();
+            assert_eq!(error.code, "INVALID_ARGUMENT", "{id:?}");
+            assert_eq!(error.reason(), Some("unknown_client"), "{id:?}");
+        }
     }
 
     #[test]
     fn clients_qr_serializes_as_the_contract_shape() {
-        let value = serde_json::to_value(clients_qr().unwrap()).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 1);
+        let value = serde_json::to_value(clients_qr("hiddify").unwrap()).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), 2, "只有 url 与 qr_data_url");
+        assert_eq!(value["url"], "https://hiddify.com");
         assert!(value["qr_data_url"]
             .as_str()
             .unwrap()
             .starts_with("data:image/svg+xml;base64,"));
     }
 
-    #[test]
-    fn data_serializes_the_contract_shape() {
-        let ok = serde_json::to_value(MobileExportData::Ok {
-            url: "https://veyl:t@host.test/v1/mobile/profile".into(),
-            qr_data_url: "data:image/svg+xml;base64,AA".into(),
+    fn built_formats() -> Vec<MobileExportFormat> {
+        let origin = ProfileOrigin::parse("https://veyl.dessage.xyz").unwrap();
+        build_formats(&origin, TOKEN).unwrap()
+    }
+
+    fn ok_data() -> MobileExportData {
+        MobileExportData::Ok {
+            formats: built_formats(),
             node_count: 2,
             created_at: 1_763_596_800_000,
-        })
-        .unwrap();
+        }
+    }
+
+    #[test]
+    fn formats_use_their_own_paths_in_the_contract_order() {
+        let formats = built_formats();
+        assert_eq!(formats.len(), 3);
+        let expected = [
+            ("singbox", "/v1/mobile/profile"),
+            ("clash", "/v1/mobile/profile/clash"),
+            ("ss", "/v1/mobile/profile/ss"),
+        ];
+        for (index, (format, path)) in expected.into_iter().enumerate() {
+            let (actual, url) = match &formats[index] {
+                MobileExportFormat::SingBox { url, .. } => ("singbox", url),
+                MobileExportFormat::Clash { url, .. } => ("clash", url),
+                MobileExportFormat::Ss { url, .. } => ("ss", url),
+            };
+            assert_eq!(actual, format);
+            let parsed = Url::parse(url).unwrap();
+            assert_eq!(parsed.host_str(), Some("veyl.dessage.xyz"), "{format}");
+            assert_eq!(parsed.username(), "veyl", "{format}");
+            assert_eq!(parsed.password(), Some(TOKEN), "{format}");
+            assert_eq!(parsed.path(), path, "{format}");
+        }
+    }
+
+    #[test]
+    fn clash_qr_is_the_url_itself_and_ss_has_no_qr() {
+        let formats = built_formats();
+        match &formats[0] {
+            MobileExportFormat::SingBox {
+                url,
+                qr_data_url: qr,
+            } => {
+                assert_eq!(qr, &qr_data_url(&scheme_url(url)).unwrap());
+            }
+            other => panic!("第一项必须是 singbox：{other:?}"),
+        }
+        match &formats[1] {
+            MobileExportFormat::Clash {
+                url,
+                qr_data_url: qr,
+            } => {
+                assert_eq!(qr, &qr_data_url(url).unwrap(), "Clash 的码就是 URL 本身");
+            }
+            other => panic!("第二项必须是 clash：{other:?}"),
+        }
+        match &formats[2] {
+            MobileExportFormat::Ss { url, qr_data_url } => {
+                assert!(url.ends_with("/v1/mobile/profile/ss"));
+                assert_eq!(*qr_data_url, None, "ss 不出二维码");
+            }
+            other => panic!("第三项必须是 ss：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_qr_svg_is_valid_and_free_of_the_token_text() {
+        for format in built_formats() {
+            let qr: Option<&String> = match &format {
+                MobileExportFormat::SingBox { qr_data_url, .. } => Some(qr_data_url),
+                MobileExportFormat::Clash { qr_data_url, .. } => Some(qr_data_url),
+                MobileExportFormat::Ss { qr_data_url, .. } => qr_data_url.as_ref(),
+            };
+            let Some(qr) = qr else { continue };
+            let encoded = qr
+                .strip_prefix("data:image/svg+xml;base64,")
+                .expect("prefix");
+            let svg = String::from_utf8(BASE64.decode(encoded).unwrap()).unwrap();
+            assert!(svg.contains("<svg"), "{format:?}");
+            assert!(!svg.contains(TOKEN), "{format:?}");
+        }
+    }
+
+    #[test]
+    fn the_token_only_appears_inside_the_three_urls() {
+        let json = serde_json::to_string(&ok_data()).unwrap();
+        assert_eq!(
+            json.matches(TOKEN).count(),
+            3,
+            "序列化里只允许三个 url 各带一次令牌"
+        );
+        assert!(
+            !format!("{:?}", ok_data()).contains(TOKEN),
+            "Debug 输出不能打印令牌"
+        );
+        assert!(format!("{:?}", ok_data()).contains("<redacted>"));
+    }
+
+    #[test]
+    fn data_serializes_the_contract_shape() {
+        let ok = serde_json::to_value(ok_data()).unwrap();
         assert_eq!(ok["state"], "ok");
         assert_eq!(ok["node_count"], 2);
         assert_eq!(ok["created_at"], 1_763_596_800_000_i64);
+        let formats = ok["formats"].as_array().unwrap();
+        assert_eq!(formats.len(), 3);
+        assert_eq!(formats[0]["format"], "singbox");
+        assert_eq!(formats[1]["format"], "clash");
+        assert_eq!(formats[2]["format"], "ss");
+        assert!(formats[0]["qr_data_url"].is_string());
+        assert!(formats[1]["qr_data_url"].is_string());
+        assert!(formats[2]["qr_data_url"].is_null(), "ss 的 qr 必须是 null");
         assert_eq!(
             serde_json::to_value(MobileExportData::LoginRequired).unwrap()["state"],
             "login_required"

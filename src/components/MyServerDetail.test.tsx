@@ -884,6 +884,17 @@ describe("事实区的 IP", () => {
     expect(screen.queryByRole("button", { name: "复制 IP" })).toBeNull();
   });
 
+  it("出错与已销毁都不占这一行", () => {
+    renderDetail({ state: "error" });
+    expect(screen.queryByText("IP")).toBeNull();
+    expect(screen.queryByRole("button", { name: "复制 IP" })).toBeNull();
+
+    cleanup();
+    renderDetail({ state: "destroyed" });
+    expect(screen.queryByText("IP")).toBeNull();
+    expect(screen.queryByRole("button", { name: "复制 IP" })).toBeNull();
+  });
+
   it("复制成功变「已复制」，1.5 秒后还原", async () => {
     vi.useFakeTimers();
     Object.defineProperty(navigator, "clipboard", {

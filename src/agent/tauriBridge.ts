@@ -24,8 +24,10 @@ import type {
   LlmProvider,
   LlmProviderInput,
   LlmProviderTestResult,
+  MobileClientId,
   MobileClientsQrData,
   MobileExportData,
+  MobileExportFormat,
   MyServer,
   MyServerAccount,
   MyServerCatalog,
@@ -922,22 +924,40 @@ function normalizeMyServerTopup(raw: unknown): MyServerTopup | null {
   };
 }
 
+function normalizeMobileExportFormat(
+  raw: unknown,
+): MobileExportFormat | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.url !== "string") return null;
+  if (value.format === "singbox" || value.format === "clash") {
+    if (typeof value.qr_data_url !== "string") return null;
+    return {
+      format: value.format,
+      url: value.url,
+      qr_data_url: value.qr_data_url,
+    };
+  }
+  // ss 不出二维码：契约里固定为 null，界面也不渲染。
+  if (value.format === "ss") {
+    return { format: "ss", url: value.url, qr_data_url: null };
+  }
+  return null;
+}
+
 function normalizeMobileExport(raw: unknown): MobileExportData {
   if (!raw || typeof raw !== "object") serverDataError();
   const value = raw as Record<string, unknown>;
   if (value.state === "login_required") return { state: "login_required" };
   if (value.state === "no_ready_server") return { state: "no_ready_server" };
-  if (
-    value.state === "ok" &&
-    typeof value.url === "string" &&
-    typeof value.qr_data_url === "string"
-  ) {
+  if (value.state === "ok" && Array.isArray(value.formats)) {
     return {
       state: "ok",
-      url: value.url,
-      qr_data_url: value.qr_data_url,
       node_count: typeof value.node_count === "number" ? value.node_count : 0,
       created_at: typeof value.created_at === "number" ? value.created_at : 0,
+      formats: value.formats
+        .map(normalizeMobileExportFormat)
+        .filter((format): format is MobileExportFormat => format !== null),
     };
   }
   serverDataError();
@@ -945,8 +965,13 @@ function normalizeMobileExport(raw: unknown): MobileExportData {
 
 function normalizeMobileClientsQr(raw: unknown): MobileClientsQrData {
   if (raw && typeof raw === "object") {
-    const value = (raw as Record<string, unknown>).qr_data_url;
-    if (typeof value === "string") return { qr_data_url: value };
+    const value = raw as Record<string, unknown>;
+    if (
+      typeof value.url === "string" &&
+      typeof value.qr_data_url === "string"
+    ) {
+      return { url: value.url, qr_data_url: value.qr_data_url };
+    }
   }
   serverDataError();
 }
@@ -1507,8 +1532,10 @@ export class TauriAgentBridge implements AgentBridge {
     );
   }
 
-  async mobileClientsQr(): Promise<MobileClientsQrData> {
-    return normalizeMobileClientsQr(await call<unknown>("mobile_clients_qr"));
+  async mobileClientsQr(client: MobileClientId): Promise<MobileClientsQrData> {
+    return normalizeMobileClientsQr(
+      await call<unknown>("mobile_clients_qr", { client }),
+    );
   }
 
   async myServerSshCredentials(

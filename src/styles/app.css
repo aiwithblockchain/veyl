@@ -6373,19 +6373,12 @@ details[open] > .settings-fold__summary::before {
   font-weight: 600;
 }
 
-.mobile-export__step {
+/* 导入为主：区块标题 + 两段格式切换 + 160 导入码。 */
+.mobile-export__import {
   margin-top: 20px;
 }
 
-/* 步骤之间用 32 留白分组，不画分隔线。 */
-.mobile-export__step + .mobile-export__step {
-  margin-top: 32px;
-}
-
-.mobile-export__step-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+.mobile-export__section-title {
   margin: 0;
   font-size: 15px;
   line-height: 1.35;
@@ -6393,49 +6386,44 @@ details[open] > .settings-fold__summary::before {
   color: var(--ink);
 }
 
-.mobile-export__step-num {
-  font-size: 12px;
-  line-height: 1.35;
-  color: var(--ink-3);
+.mobile-export__formats {
+  display: inline-flex;
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--hair-strong);
+  border-radius: 6px;
 }
 
-/* 步骤头 → 内容 16。 */
-.mobile-export__step-head + * {
-  margin-top: 16px;
+.mobile-export__format {
+  min-width: 72px;
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
-.mobile-export__install {
-  display: flex;
-  align-items: center;
-  gap: 24px;
+.mobile-export__format + .mobile-export__format {
+  border-left: 1px solid var(--hair-strong);
 }
 
-.mobile-export__platforms {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+.mobile-export__format:hover {
+  background: var(--bg-hover);
 }
 
-.mobile-export__download {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.mobile-export__platform {
-  font-size: 14px;
-  line-height: 1.35;
+.mobile-export__format[aria-pressed="true"] {
+  background: var(--card);
   color: var(--ink);
 }
 
-.mobile-export__caption {
-  margin: 2px 0 0;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ink-3);
+.mobile-export__format:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 
 /* 下载入口是外链：交给系统浏览器，命中区外扩到约 32 高。 */
@@ -6465,22 +6453,102 @@ details[open] > .settings-fold__summary::before {
   font-size: 13px;
 }
 
-/* 下载码：步骤 1 右侧，静态下载页 URL，不随账户态变化。 */
-.mobile-export__download-qr {
-  flex: none;
-  width: 104px;
+/* 客户端列表：条件区，不是步骤；点开一行才出现下载码。 */
+.mobile-export__clients {
+  margin-top: 32px;
 }
 
-.mobile-export__qr-caption {
-  margin: 0 0 8px;
+.mobile-export__clients-title {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+.mobile-export__attribution {
+  margin: 2px 0 0;
   font-size: 12px;
   line-height: 1.5;
   color: var(--ink-3);
-  white-space: nowrap;
+}
+
+.mobile-export__client-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--hair);
+  border-radius: var(--r-md);
+}
+
+.mobile-export__client + .mobile-export__client {
+  border-top: 1px solid var(--hair);
+}
+
+.mobile-export__client-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  min-height: 48px;
+  padding: 4px 12px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mobile-export__client-row:hover {
+  background: var(--bg-hover);
+}
+
+.mobile-export__client-row:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.mobile-export__client-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mobile-export__client-name {
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.mobile-export__client-meta {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+
+.mobile-export__chevron {
+  flex: none;
+  color: var(--ink-3);
+  font-size: 14px;
+  transition: transform 120ms ease-out;
+}
+
+.mobile-export__chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.mobile-export__client-panel {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 12px 16px;
 }
 
 /* 外框 104：1px 描边 + 11px 白边 + 80 码区（静区按 12 设计，边框占 1）。 */
-.mobile-export__download-qr-box {
+.mobile-export__client-qr-box {
+  flex: none;
   width: 104px;
   height: 104px;
   padding: 11px;
@@ -6489,7 +6557,7 @@ details[open] > .settings-fold__summary::before {
   background: #ffffff;
 }
 
-.mobile-export__download-qr-img {
+.mobile-export__client-qr-img {
   display: block;
   width: 80px;
   height: 80px;
@@ -6498,10 +6566,7 @@ details[open] > .settings-fold__summary::before {
 .mobile-export__qr-area {
   display: flex;
   gap: 24px;
-}
-
-.mobile-export__qr-col {
-  flex: none;
+  margin-top: 16px;
 }
 
 /* 二维码永远是白底：功能需要，不跟随浅色 / 深色主题。 */
@@ -6532,9 +6597,6 @@ details[open] > .settings-fold__summary::before {
 .mobile-export__side {
   flex: 1;
   min-width: 220px;
-  min-height: 160px;
-  /* 与右侧导入码的码区顶端对齐：图注 12/1.5 + 8。 */
-  padding-top: 26px;
   display: flex;
   flex-direction: column;
 }
@@ -6559,6 +6621,11 @@ details[open] > .settings-fold__summary::before {
   flex-wrap: wrap;
   gap: 12px;
   margin-top: 12px;
+}
+
+/* 就绪态按钮是右列第一块：顶端与导入码对齐。 */
+.mobile-export__side > .mobile-export__actions:first-child {
+  margin-top: 0;
 }
 
 .mobile-export__confirm {
@@ -6591,7 +6658,7 @@ details[open] > .settings-fold__summary::before {
 .mobile-export__status { color: var(--ink-3); }
 .mobile-export__error { color: var(--err-text); }
 
-/* 安全说明固定在右列底部。 */
+/* 安全说明：紧贴按钮下方 16（不底对齐、不设 min-height）。 */
 .mobile-export__security {
   margin: 12px 0 0;
   font-size: 12px;
@@ -6603,30 +6670,22 @@ details[open] > .settings-fold__summary::before {
   margin-top: 16px;
 }
 
-/* 底部「问 AI」：距步骤 2 内容 32，与「重新生成」同款文字按钮。 */
+/* 底部「问 AI」：距客户端区 32；链接色，不做实心。 */
 .mobile-export__ask-ai {
   margin-top: 32px;
+  color: var(--link);
+}
+
+.mobile-export__ask-ai:not(:disabled):hover {
+  color: var(--link-hover);
 }
 
 @media (max-width: 560px) {
-  .mobile-export__install {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .mobile-export__download-qr {
-    align-self: flex-start;
-  }
-
   .mobile-export__qr-area {
     flex-direction: column;
   }
 
   .mobile-export__qr {
     align-self: center;
-  }
-
-  .mobile-export__side {
-    padding-top: 0;
   }
 }

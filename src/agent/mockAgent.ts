@@ -25,6 +25,7 @@ import type {
   LlmProvider,
   LlmProviderInput,
   LlmProviderTestResult,
+  MobileClientId,
   MobileClientsQrData,
   MobileExportData,
   MyServerCreateInput,
@@ -156,14 +157,38 @@ const MOCK_MOBILE_QR =
 
 /** 演示数据：示例串不是令牌，界面也不会把它渲染成文本。 */
 function mockMobileExport(nodeCount: number): MobileExportData {
+  const token = "demo-token";
   return {
     state: "ok",
-    url: "https://veyl:demo-token@veyl.example/v1/mobile/profile",
-    qr_data_url: MOCK_MOBILE_QR,
     node_count: nodeCount,
     created_at: Date.now(),
+    formats: [
+      {
+        format: "singbox",
+        url: `https://veyl:${token}@veyl.example/v1/mobile/profile`,
+        qr_data_url: MOCK_MOBILE_QR,
+      },
+      {
+        format: "clash",
+        url: `https://veyl:${token}@veyl.example/v1/mobile/profile/clash`,
+        qr_data_url: MOCK_MOBILE_QR,
+      },
+      // ss 照契约返回，但界面必须忽略它。
+      {
+        format: "ss",
+        url: `https://veyl:${token}@veyl.example/v1/mobile/profile/ss`,
+        qr_data_url: null,
+      },
+    ],
   };
 }
+
+/** 与契约 §7.23 的 Host 固定映射一致；这里只用于 mock。 */
+const MOCK_CLIENT_URLS: Record<MobileClientId, string> = {
+  singbox: "https://sing-box.sagernet.org/clients/",
+  hiddify: "https://hiddify.com",
+  cmfa: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
+};
 
 export class MockAgentBridge implements AgentBridge {
   readonly mode = "mock" as const;
@@ -672,8 +697,11 @@ export class MockAgentBridge implements AgentBridge {
     return mockMobileExport(this.myServers.list().servers.length);
   }
 
-  async mobileClientsQr(): Promise<MobileClientsQrData> {
-    return { qr_data_url: MOCK_MOBILE_QR };
+  async mobileClientsQr(client: MobileClientId): Promise<MobileClientsQrData> {
+    return {
+      url: MOCK_CLIENT_URLS[client],
+      qr_data_url: MOCK_MOBILE_QR,
+    };
   }
 
   async myServerCancelOrder(orderId: string) {

@@ -686,20 +686,27 @@ export interface MyServerTopup {
   denomination_cents: number;
 }
 
-/** 手机端导出（commands.md §7.21 / §7.22）。`url` 含令牌，只能进二维码与剪贴板。 */
+/** 手机端导出（commands.md §7.21 / §7.22，2.47.0 起返回 formats[]）。 */
+export type MobileExportFormat =
+  | { format: "singbox"; url: string; qr_data_url: string }
+  | { format: "clash"; url: string; qr_data_url: string }
+  | { format: "ss"; url: string; qr_data_url: null };
+
 export type MobileExportData =
   | {
       state: "ok";
-      url: string;
-      qr_data_url: string;
       node_count: number;
       created_at: number;
+      formats: MobileExportFormat[];
     }
   | { state: "login_required" }
   | { state: "no_ready_server" };
 
-/** 下载页二维码（commands.md §7.23）：固定官方客户端页，与账户状态无关。 */
+export type MobileClientId = "singbox" | "hiddify" | "cmfa";
+
+/** 下载页二维码（commands.md §7.23 / 2.47.0）：URL 由 Host 固定映射。 */
 export interface MobileClientsQrData {
+  url: string;
   qr_data_url: string;
 }
 
@@ -929,8 +936,8 @@ export interface AgentBridge {
   mobileExportGet?(): Promise<MobileExportData>;
   /** 重新生成手机端导出令牌；确认由界面负责。 */
   mobileExportRotate?(): Promise<MobileExportData>;
-  /** 下载页二维码（2.46.1）；Host 未接入时不实现，界面只留空位。 */
-  mobileClientsQr?(): Promise<MobileClientsQrData>;
+  /** 下载页二维码（2.47.0）：入参是客户端枚举，URL 由 Host 固定映射。 */
+  mobileClientsQr?(client: MobileClientId): Promise<MobileClientsQrData>;
   /** 恢复网络：撤代理 → 停运行时 → 清明文配置（不依赖 AI）。 */
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
   /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */

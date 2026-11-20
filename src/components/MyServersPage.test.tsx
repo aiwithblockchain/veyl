@@ -442,7 +442,7 @@ describe("我的服务器 destination", () => {
     expect(bridge.myServerAccount.mock.calls.length).toBeGreaterThan(1);
   });
 
-  it("详情事实只有地区 / 节点 / 费用 / 流量，不显示 IP 与规格", async () => {
+  it("详情事实显示地区 / IP / 节点 / 费用 / 流量，不显示规格", async () => {
     const bridge = makeBridge([
       server({ server_id: "srv_1", name: "新加坡 1 · DigitalOcean" }),
     ]);
@@ -452,8 +452,9 @@ describe("我的服务器 destination", () => {
     const facts = [...document.querySelectorAll(".myservers__facts dt")].map(
       (node) => node.textContent,
     );
-    expect(facts).toEqual(["地区", "节点", "费用", "流量"]);
-    expect(screen.queryByText("45.76.20.100")).toBeNull();
+    expect(facts).toEqual(["地区", "IP", "节点", "费用", "流量"]);
+    expect(screen.getByText("45.76.20.100")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "复制 IP" })).toBeTruthy();
     expect(screen.queryByText("1 核 · 1 GB")).toBeNull();
   });
 

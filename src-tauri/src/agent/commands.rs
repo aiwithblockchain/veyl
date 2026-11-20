@@ -903,9 +903,9 @@ where
     Ok(json!({ "removed": removed }))
 }
 
-/// 手机端导出（仅 UI，契约 §7.21）：幂等取令牌并返回二维码。
+/// 手机端导出（仅 UI，契约 §7.21）：幂等取令牌并返回三种格式的 URL 与二维码。
 ///
-/// 返回的 `url` 含令牌：不记日志、不发事件、不进 AI 上下文（设计 §7.1）。
+/// 返回的每个 `formats[].url` 都含令牌：不记日志、不发事件、不进 AI 上下文（设计 §7.1）。
 #[tauri::command]
 pub async fn mobile_export_get() -> Result<Value, Value> {
     match crate::control_plane::mobile::get().await {
@@ -932,10 +932,14 @@ pub async fn mobile_export_rotate(confirm: Option<bool>) -> Result<Value, Value>
     }
 }
 
-/// 下载 sing-box 官方客户端的二维码（仅 UI，契约 §7.23）：固定链接，不登录、不联网。
+/// 下载指定客户端的二维码（仅 UI，契约 §7.23）：固定链接，不登录、不联网。
+///
+/// `client` 用 `Option<Value>` 接住缺参与类型错误（与 `proxy_port_set` 同风格）：
+/// 两种输入都要走契约里的 `INVALID_ARGUMENT / unknown_client`，不能落到 Tauri 自己的参数错误。
 #[tauri::command]
-pub async fn mobile_clients_qr() -> Result<Value, Value> {
-    match crate::control_plane::mobile::clients_qr() {
+pub async fn mobile_clients_qr(client: Option<Value>) -> Result<Value, Value> {
+    let client = client.as_ref().and_then(Value::as_str).unwrap_or_default();
+    match crate::control_plane::mobile::clients_qr(client) {
         Ok(data) => Ok(json!(data)),
         Err(error) => Err(error.envelope()),
     }
@@ -2051,19 +2055,36 @@ pub async fn list_pending_questions(session_id: String) -> Result<Value, Value> 
     Ok(crate::agent::questions::list_pending(&session_id))
 }
 
-/// `open_external` 的白名单：每条都带尾部 `/`，只做前缀匹配。
+/// `open_external` 的白名单：前缀匹配；条目本身（裸 origin，如 `https://hiddify.com`）
+/// 按精确相等放行（`hiddify` 的下载页没有路径）。
 ///
 /// 不写「域名后缀」判断：`https://apps.apple.com.evil.test/` 会命中后缀规则。
-const OPEN_EXTERNAL_PREFIXES: [&str; 3] = [
+/// GitHub 只放开 ClashMetaForAndroid 仓库，不放开整个 `github.com`。
+const OPEN_EXTERNAL_PREFIXES: [&str; 5] = [
     "https://platform.deepseek.com/",
     "https://apps.apple.com/",
     "https://sing-box.sagernet.org/",
+    "https://hiddify.com/",
+    "https://github.com/MetaCubeX/ClashMetaForAndroid/",
 ];
 
-fn external_url_allowed(url: &str) -> bool {
-    OPEN_EXTERNAL_PREFIXES
-        .iter()
-        .any(|prefix| url.starts_with(prefix))
+/// 白名单匹配：先按 URL 规范归一化，再比前缀。
+///
+/// 归一化会改写地址（`…/ClashMetaForAndroid/../../evil` → `https://github.com/evil`，
+/// `%2e` 也算点段）；这类输入一律拒绝，避免前缀匹配被路径穿越绕过。
+fn external_url_allowed(raw: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return false;
+    };
+    let normalized = parsed.as_str();
+    // 只接受无需改写的输入；裸 origin 允许补一个尾部 `/`（hiddify 的下载页没有路径）。
+    if raw != normalized && raw != normalized.trim_end_matches('/') {
+        return false;
+    }
+    OPEN_EXTERNAL_PREFIXES.iter().any(|prefix| {
+        normalized.starts_with(prefix)
+            || normalized.trim_end_matches('/') == prefix.trim_end_matches('/')
+    })
 }
 
 /// 用系统浏览器打开白名单内的链接（DeepSeek 开放平台、App Store、sing-box 官网）。
@@ -3420,6 +3441,9 @@ mod open_external_tests {
             "https://platform.deepseek.com/usage",
             "https://apps.apple.com/app/sing-box-mt/id6785326793",
             "https://sing-box.sagernet.org/clients/",
+            "https://hiddify.com",
+            "https://hiddify.com/",
+            "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
         ] {
             assert!(external_url_allowed(url), "{url}");
         }
@@ -3430,9 +3454,18 @@ mod open_external_tests {
         for url in [
             "https://apps.apple.com.evil.test/app",
             "https://platform.deepseek.com.evil.test/",
+            "https://hiddify.com.evil.test/",
             "https://evil.test/https://apps.apple.com/",
             "http://apps.apple.com/app",
-            "https://apps.apple.com",
+            "http://hiddify.com",
+            "https://github.com/other/repo",
+            "https://github.com/MetaCubeX/sing-box/releases",
+            // 点段 / 百分号编码的 `..` / 多重斜杠都不能靠前缀匹配绕过。
+            "https://github.com/MetaCubeX/ClashMetaForAndroid/../../evil",
+            "https://github.com/MetaCubeX/ClashMetaForAndroid/%2e%2e/%2e%2e/evil",
+            "https://github.com/MetaCubeX/ClashMetaForAndroid/%2E%2E/evil",
+            "https://github.com/MetaCubeX/ClashMetaForAndroid/./releases",
+            "https://github.com/MetaCubeX/ClashMetaForAndroid//../../evil",
             "https://workers.dev/",
             "",
         ] {

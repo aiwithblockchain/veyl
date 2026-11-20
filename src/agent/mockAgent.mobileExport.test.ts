@@ -3,27 +3,53 @@ import { describe, expect, it } from "vitest";
 import { MockAgentBridge } from "./mockAgent";
 
 describe("mock 手机端导出", () => {
-  it("浏览器预览直接给成功态：静态二维码、示例串不含真令牌", async () => {
+  it("返回三种格式：sing-box / Clash 带码，ss 照契约但不渲染", async () => {
     const bridge = new MockAgentBridge();
 
     const data = await bridge.mobileExportGet?.();
     expect(data?.state).toBe("ok");
     if (data?.state !== "ok") return;
-    expect(data.qr_data_url.startsWith("data:image/svg+xml;base64,")).toBe(true);
-    expect(data.url).toContain("demo-token");
-    expect(data.url).not.toContain("dessage.xyz");
-    expect(data.node_count).toBeGreaterThanOrEqual(0);
+    expect(data.formats.map((item) => item.format)).toEqual([
+      "singbox",
+      "clash",
+      "ss",
+    ]);
+    const singbox = data.formats.find((item) => item.format === "singbox");
+    const clash = data.formats.find((item) => item.format === "clash");
+    const ss = data.formats.find((item) => item.format === "ss");
+    expect(singbox?.qr_data_url?.startsWith("data:image/svg+xml;base64,")).toBe(
+      true,
+    );
+    expect(clash?.url).toContain("/clash");
+    expect(clash?.qr_data_url?.startsWith("data:image/svg+xml;base64,")).toBe(
+      true,
+    );
+    expect(ss?.url).toContain("/ss");
+    expect(ss?.qr_data_url).toBeNull();
+    expect(singbox?.url).not.toContain("dessage.xyz");
   });
 
-  it("重新生成同样返回成功态", async () => {
+  it("重新生成同样返回三种格式", async () => {
     const bridge = new MockAgentBridge();
     const data = await bridge.mobileExportRotate?.();
     expect(data?.state).toBe("ok");
   });
 
-  it("下载码返回静态 SVG 占位图", async () => {
+  it("客户端下载码按枚举返回对应 URL", async () => {
     const bridge = new MockAgentBridge();
-    const data = await bridge.mobileClientsQr?.();
-    expect(data?.qr_data_url.startsWith("data:image/svg+xml;base64,")).toBe(true);
+
+    await expect(bridge.mobileClientsQr?.("singbox")).resolves.toMatchObject({
+      url: "https://sing-box.sagernet.org/clients/",
+    });
+    await expect(bridge.mobileClientsQr?.("hiddify")).resolves.toMatchObject({
+      url: "https://hiddify.com",
+    });
+    await expect(bridge.mobileClientsQr?.("cmfa")).resolves.toMatchObject({
+      url: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
+    });
+    const data = await bridge.mobileClientsQr?.("cmfa");
+    expect(data?.qr_data_url.startsWith("data:image/svg+xml;base64,")).toBe(
+      true,
+    );
   });
 });

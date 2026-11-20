@@ -1,9 +1,9 @@
 # 手机端导出：技术设计与契约增量
 
-> 日期：2026-11-19
+> 日期：2026-11-19（§3.7 多格式增补于 2026-11-20）
 > 状态：**技术设计，待评审**。只出文档：不改代码、不改共享契约文件、不改其它设计稿、不提交。
 > 上游：`mobile-export.md`（需求）、`mobile-export-ui.md`（界面定稿）、`my-servers.md` §16 / §17（凭据模型、用户无 SSH）、`login-and-payment.md` §2.5（令牌模型）、`environments.md`
-> 事实边界：sing-box 配置形状已于 2026-11-19 用随包 `sing-box 1.14.4` 的 `check` 在本地实测通过（§3.6，含最小 TUN 入站、最小 DNS 与零节点样张）；真机先后暴露「无 DNS 时 VPN 已连、无法上网」「无 TUN 入站时已连接但流量为 0」「有 TUN 但仍无法出网（出站未绑定物理网卡）」「有计数、能测速、仍打不开网页（缺 `stack` / 缺 `sniff`、多带 `strict_route`）」四种现象，据此依次改写模板；TUN 是否创建系统隧道由官方客户端源码确认（§3.5）。**2026-11-20：四项修复后在 iPhone 上确认可打开网页（Wi-Fi）；蜂窝网络复验尚未执行**（V12）。客户端扫码、Basic 认证、自动更新等外部行为沿用需求文档的「待验证」，本文件 §8 给出可执行步骤，**不凭记忆断言**。
+> 事实边界：sing-box 配置形状已于 2026-11-19 用随包 `sing-box 1.14.4` 的 `check` 在本地实测通过（§3.6，含最小 TUN 入站、最小 DNS 与零节点样张）；真机先后暴露「无 DNS 时 VPN 已连、无法上网」「无 TUN 入站时已连接但流量为 0」「有 TUN 但仍无法出网（出站未绑定物理网卡）」「有计数、能测速、仍打不开网页（缺 `stack` / 缺 `sniff`、多带 `strict_route`）」四种现象，据此依次改写模板；TUN 是否创建系统隧道由官方客户端源码确认（§3.5）。**2026-11-20：四项修复后在 iPhone 上确认可打开网页（Wi-Fi）；蜂窝网络复验尚未执行**（V12）。多格式（2026-11-20，§3.7）的客户端 Basic 支持已对 Clash Verge / CMFA 主路径与 Hiddify 的 Dart 回退路径源码核实；Karing / Shadowrocket / Stash 未核实。客户端扫码、Basic 认证、自动更新等外部行为沿用需求文档的「待验证」，本文件 §8 给出可执行步骤，**不凭记忆断言**。
 > 契约增量：全部写在本文件 §5 / §6，不直接改 `docs/contracts/*`，由 PM 统一集成。
 
 ---
@@ -13,7 +13,7 @@
 | # | 问题 | 结论 |
 |---|---|---|
 | 1 | 谁生成配置 | **控制面**。节点凭据只在控制面，手机只认 URL；桌面不可达时也能更新 |
-| 2 | 端点 | `GET /v1/mobile/profile`（Basic）读配置；`POST /v1/mobile/token`（Bearer）建/取令牌；`POST /v1/mobile/token/rotate`（Bearer）重新生成 |
+| 2 | 端点 | `GET /v1/mobile/profile`（sing-box，Basic）、`GET /v1/mobile/profile/clash`（Clash YAML，Basic）、`GET /v1/mobile/profile/ss`（ss:// 列表，Basic）；`POST /v1/mobile/token`（Bearer）建/取令牌；`POST /v1/mobile/token/rotate`（Bearer）重新生成 |
 | 3 | profile 的认证 | **HTTP Basic**，用户名固定 `veyl`，密码是导出令牌。官方客户端必须支持 Basic，且这是它唯一能携带凭据的位置；bearer 需要客户端支持自定义头，客户端不提供这个入口 |
 | 4 | 令牌存哪 | 控制面新表 `mobile_tokens`：**`token_hash` 做查找、AES-GCM 密文保存令牌本身以便回显**。哈希保证「库泄露拿不到令牌」，密文保证「弹层每次打开都能显示同一个二维码」；桌面不落盘 |
 | 5 | 令牌生命周期 | 账户级一条，长期有效；「重新生成」= 覆盖同一行，旧值立即失效；不做设备数与到期时间；**不复用** access / refresh 令牌 |
@@ -24,6 +24,7 @@
 | 10 | 是否新增事件 | **不新增**。弹层是主动打开的同步请求，结果随命令返回；节点增减不会改变已生成的 URL |
 | 11 | 是否给 AI 工具 | **不新增**。令牌与 URL 不得进入 AI 上下文；只把 `account.mobile` 加进 `OpenSettings` 行白名单（仍只是指路） |
 | 12 | 桌面本地库 | **不改**。没有新表、没有新列，`data-model.md` 不升版 |
+| 13 | 三种格式（2026-11-20 增补） | sing-box JSON、Clash/Mihomo YAML、ss:// 列表共用**同一枚令牌与 HTTP Basic**；路径 `/profile`、`/profile/clash`、`/profile/ss`；rotate 一次三种格式同时失效。详见 §3.7 |
 
 一句话：**控制面发一条可吊销的账户级 URL，桌面只负责把它变成二维码；手机按自己的节奏来取，我们不连设备、不写移动端 App。**
 
@@ -38,8 +39,12 @@
 | `POST` | `/v1/mobile/token` | **Bearer**（现有 access token） | 桌面 | 幂等：没有就建，有就回显同一个令牌 |
 | `POST` | `/v1/mobile/token/rotate` | **Bearer** | 桌面 | 覆盖令牌，旧值立即失效 |
 | `GET` | `/v1/mobile/profile` | **HTTP Basic** | sing-box 官方客户端 | 返回 sing-box 配置 JSON |
+| `GET` | `/v1/mobile/profile/clash` | **HTTP Basic** | Clash / Mihomo 类客户端 | 返回最小 Clash YAML（§3.7.3） |
+| `GET` | `/v1/mobile/profile/ss` | **HTTP Basic** | SS 客户端 / 桌面取文本 | 返回 SIP002 ss:// 列表（§3.7.4） |
 
 挂载位置：`cloudflare/control-plane/src/index.ts` 的模块链里，放在 `handleServers` 之后新增 `handleMobile`；模块本体是新文件 `src/mobile.ts`。不复用 `/v1/servers/*` 路径：这是账户级能力，不是单台服务器能力。
+
+> `/profile/clash` 与 `/profile/ss` 的**内容形状**见 §3.7；本节下面的认证、限流、缓存、401/429 与错误处理三者共用，不各写一套。
 
 ```
 桌面  --POST /v1/mobile/token (Bearer)-->  控制面  → { token }
@@ -403,19 +408,274 @@ ORDER BY s.created_at ASC, s.id ASC
 
 ---
 
+### 3.7 多格式导出（2026-11-20 增补：sing-box JSON / Clash YAML / ss://）
+
+> 产品负责人 2026-11-20 拍板：同一账户级令牌下提供三种格式。服务器侧不变——每台机器跑的是标准 Shadowsocks 入站（`aes-256-gcm`），协议层所有 SS 客户端都能连；新增工作量全部在**导出格式、认证方式与验收**。本节只增补，不推翻 §3.1–§3.6 的真机结论；sing-box JSON 仍以 §3.2 为准。
+
+#### 3.7.1 三个路径
+
+| 格式 | 路径 | `Content-Type` | 主要消费者 |
+|---|---|---|---|
+| sing-box JSON | **`GET /v1/mobile/profile`**（保持不变） | `application/json; charset=utf-8` | SFI / SFA |
+| Clash / Mihomo YAML | **`GET /v1/mobile/profile/clash`** | `text/yaml; charset=utf-8` | CMFA / Clash Verge / Stash / Karing / Hiddify |
+| ss:// 链接列表 | **`GET /v1/mobile/profile/ss`** | `text/plain; charset=utf-8` | Hiddify（未核实）；Karing（Basic 未核实）。**M1 不展示 ss 行，但端点与单测照做**（产品 2026-11-20） |
+
+- **三个路径共用同一枚导出令牌**。`POST /v1/mobile/token/rotate` 覆盖唯一一行，旧令牌在三个路径上**同时**失效；不存在「按格式分别轮换」。这里的「失效」指三个端点对旧令牌返回 401；**已经复制 / 保存在外部的 ss 文本不在此列**——它携带节点密码，不受令牌轮换影响。
+- `/v1/mobile/profile` **不改名、不加 `/singbox` 后缀**：已经导入到手机上的旧 profile 永远指向这个路径，改名会让所有已部署的链接在下一次更新时 404。新格式只做**追加路径**。
+- 认证仍以 **HTTP Basic** 为主（§3.7.5）；路径里不出现令牌。
+
+#### 3.7.2 为什么用路径后缀，而不是 query 或 `Accept`
+
+| 方案 | 问题 |
+|---|---|
+| `?format=clash` | 部分客户端/中间层会规范化、剥离或重写 query；缓存键也会把可选参数混在一起。路径是客户端唯一会原样保留的部分 |
+| `Accept: application/yaml` | 客户端不保证发这个头，也不保证按它切换格式；无法作为主契约 |
+| 请求体 / POST | Remote Profile 是 GET 更新源，客户端不支持 POST 取配置 |
+| **路径后缀** | 客户端把 URL 当不透明字符串；三种格式各自独立缓存；令牌仍在 userinfo，不进路径 |
+
+#### 3.7.3 Clash / Mihomo YAML
+
+最小形状（节点数与名字随账户变化）：
+
+```yaml
+proxies:
+  - name: "东京 1 号"
+    type: ss
+    server: "203.0.113.10"
+    port: 20343
+    cipher: aes-256-gcm
+    password: "s3cret-password"
+    udp: true
+proxy-groups:
+  - name: "Veyl"
+    type: select
+    proxies:
+      - "东京 1 号"
+rules:
+  - "MATCH,Veyl"
+```
+
+规则：
+
+| 项 | 规则 |
+|---|---|
+| 节点来源与筛选 | 与 §3.1 **完全同一查询**：账户名下 `state ∈ {active, healthy}`、`node_id` 非空、凭据未销毁；免费 / 试用永不出现 |
+| 命名 | 与 §3.3 同一套名字与去重（` (2)` / ` (3)`） |
+| `type` / `cipher` | 固定 `ss` / 服务端实际的 `aes-256-gcm`；`password` 原样 |
+| `udp: true` | 服务端 SS 入站默认同时监听 TCP+UDP（`sing-box` 的 `NetworkList.Build()` 在空值时返回 `tcp`+`udp`，见 `option/types.go`）；DO 防火墙同时放行 tcp/udp（`providers/digitalocean.ts:168`）。M1 只承诺 TCP 可用，UDP 由客户端实际路径决定 |
+| **不导出** | `mixed-port` / `port` / `socks-port` / `allow-lan` / `mode` / `dns` / `tun` / `sniffer` / 规则集：Clash 客户端的接管方式、端口、DNS、TUN 都由**客户端自己**管理。把桌面的模板塞进去会覆盖用户设置，且各家字段并不完全一致 |
+| `proxy-groups` | 一个 `select` 组，名字固定 `Veyl`，列出全部节点；不引入 url-test / fallback（与 §3.2 不用 urltest 的理由相同） |
+| `rules` | 只有一条 `MATCH,Veyl`。不做分流——分流规则是客户端的事 |
+| YAML 生成 | 不引入 YAML 依赖：所有字符串用 `JSON.stringify` 产出双引号标量（JSON 字符串是合法的 YAML 双引号标量），数字与布尔原样；`JSON.stringify` 不转义 U+2028 / U+2029，需再手工把这两个字符替换成 `\u2028` / `\u2029`。必须用带 `:`、`#`、引号、前导 `-`、换行、emoji 的节点名做单测 |
+| 空态 | `proxies: []`、`proxy-groups: []`、`rules: ["MATCH,DIRECT"]`；200，不是 4xx |
+| 全部凭据不可用 | **503** `INTERNAL / mobile_profile_unavailable`，与 sing-box 一致：不能把「凭据坏了」伪装成「没有节点」 |
+| 缓存 | `Cache-Control: no-store` + `X-Content-Type-Options: nosniff` |
+
+> **与 sing-box JSON 的关键差异**：Clash YAML 里**没有**我们那份 TUN / DNS / `auto_detect_interface` 模板。Clash 类客户端的系统接管、DNS 与 TUN 由客户端自己决定；我们只提供节点、一个选择组和一条兜底规则。
+
+> 这份最小 YAML 是否被各客户端直接接受（尤其 Stash 的 `#SUBSCRIBED`、CMFA 的远程 profile 导入）由 V13 验证；除 `proxies` / `proxy-groups` / `rules` 外不写任何字段。文件必须是 UTF-8。
+
+> **不在 YAML body 里写 `#SUBSCRIBED <url>`**：那行会把含令牌的 URL 复制进配置文件（可能被 iCloud / 备份同步），违反 §7.1。URL 由客户端自己保存；Stash 若不写这行就不自动更新，记录在 V13，必要时改用「客户端里手动点更新」而非把令牌写进文件。
+
+#### 3.7.4 ss:// 链接列表（SIP002）
+
+每个节点一行，严格按 SIP002：
+
+```
+ss://<base64url-no-pad(UTF-8("method:password"))>@<host>:<port>#<percent-encoded name>
+```
+
+示例（假数据）：
+
+```
+ss://YWVzLTI1Ni1nY206czNjcmV0LXBhc3N3b3Jk@203.0.113.10:20343#%E4%B8%9C%E4%BA%AC%201%20%E5%8F%B7
+```
+
+| 项 | 规则 |
+|---|---|
+| Base64 | **URL-safe 字母表、无 `=` 填充**；编码的是 `method:password` 的 UTF-8 字节 |
+| Host | 原样；IPv6 必须写成 `[addr]` 再拼 `:port`（当前 DO 节点是 IPv4，仍按规则处理） |
+| Port | 十进制 |
+| 名称 | `#` 后的 fragment，按 RFC 3986 percent-encode（空格 `%20`，不是 `+`）；名字与 §3.3 一致 |
+| Plugin | **不输出** `/?plugin=`；当前没有插件 |
+| 行分隔 | `\n`，末尾建议带一个换行 |
+| 旧格式 | **不输出** `ss://base64(method:password@host:port)` 旧式整体编码；只发 SIP002。只认旧式、不认 SIP002 的客户端不在 M1 支持范围 |
+| 空态 | **200 + 空 body（0 字节）**；不是 4xx。客户端是否把空列表当成「更新成功」由 V16 验证 |
+| 全部凭据不可用 | **503**，与另两种格式一致 |
+| 缓存 | `Cache-Control: no-store` + `X-Content-Type-Options: nosniff` |
+
+> `ss://` 是**内容**，不是订阅协议。它作为 `/profile/ss` 的响应提供给能带 Basic 拉取的客户端；不支持 Basic 的客户端本期不列入（§3.7.5），桌面**不提供**「复制 ss 文本再粘贴」的特例。
+
+> **端点返回的 ss 文本可被外部工具保存，轮换不影响它**：它携带的是节点密码，不是导出令牌。`rotate` 只让三个 URL 失效；要让已保存的 ss 链接失效，必须重建服务器（换密码）。M1 不提供桌面粘贴入口，但这是端点固有的残余风险，与「链接可被转发」同级。
+
+#### 3.7.5 认证：Basic 是主路径，路径令牌不进 M1
+
+**结论：三种格式全部使用 HTTP Basic，共用同一枚令牌；不新增路径令牌。M1 列入的客户端必须能走 Basic；Karing / Shadowrocket / Stash 当前未核实，本期不列入，也不提供「仅 ss 文本粘贴」的特例（产品 2026-11-20 决定）。**
+
+已核实：
+
+| 客户端 | 依据 | 状态 |
+|---|---|---|
+| sing-box 官方（SFI / SFA） | 官方客户端要求「必须支持 HTTP Basic」（`mobile-export.md` §2.3） | **已核实** |
+| Hiddify | `lib/core/http_client/dio_http_client.dart`：`uri.userInfo` → `Authorization: Basic …`（main 分支，约 165–184 行）；`profile_parser.dart` 在核心下载失败时回退到这条 Dart 下载路径。**核心下载路径是否透传 userinfo 未核实** | **已核实（回退路径）** |
+| Clash Verge Rev | `src-tauri/src/utils/network.rs`：解析 URL 的 username/password → `Authorization: Basic …`，随后从 URL 去掉 userinfo（默认 `dev` 分支约 192–204 行；`main` 同实现约 168–183 行） | **已核实（源码）** |
+| Clash Meta for Android | 其内核 mihomo `component/http/http.go`：URL 带 userinfo 时 `req.SetBasicAuth`（`Alpha` 分支，约 58–61 行）；CMFA 的 `native/config/fetch.go` 走这条 `clashHttp.HttpRequest` | **已核实（源码）** |
+| Karing | 公开仓库树里没有 `lib/app/utils/http_utils.dart`，无法读下载实现；README 只列格式 | **未核实** |
+| Shadowrocket | 闭源；App Store 页面是唯一官方说明，未提 Basic | **未核实** |
+| Stash | 闭源；官方 wiki 的订阅页只写 `#SUBSCRIBED <url>` 与 `Subscription-Userinfo` 头，未提 Basic | **未核实** |
+
+路径令牌（`/v1/mobile/profile/<token>/clash`）的代价，写清楚以便将来决策：
+
+- 令牌进入**请求行与路径**，会进 Cloudflare 访问日志、客户端日志、截图、代理日志；与 §7.1「令牌不进日志」直接冲突。
+- 需要**单独一套令牌**（路径令牌）或接受「同一枚令牌同时以 userinfo 和路径出现」，两种都比现在多一份状态与轮换语义。
+- rotate 仍可一次让三种格式失效，但路径令牌的存在会让「令牌只进二维码」这条口径失效。
+- **M1 不实现**。不支持 Basic 的客户端**本期不列入**，也不做「仅 ss 文本粘贴」的特例（产品 2026-11-20 决定：粘贴整段链接对用户是断崖式体验，且不会自动更新）。等核实它们能吃 Basic 订阅后再进客户端列表；若届时仍必须路径令牌，再单独设计，并在 §7.1 明确「路径令牌是另一种凭据，日志与审计规则不同」。
+
+#### 3.7.6 限流、缓存、401 / 429
+
+| 项 | 规则 |
+|---|---|
+| 限流 | 三种格式**共享** `mobile-profile:<account_id>` 的 30 次/小时预算；无效令牌仍按 `mobile-profile-bad:<ip>` 60 次/小时 |
+| 缓存 | 三种格式全部 `Cache-Control: no-store`；`X-Content-Type-Options: nosniff` |
+| 401 | 错误信封 `UNAUTHENTICATED` + `WWW-Authenticate: Basic realm="veyl", charset="UTF-8"`，三种格式一致 |
+| 429 | `RATE_LIMITED`，`Retry-After: 3600`，三种格式一致 |
+| 403 | 账户停用 / 合并，三种格式一致 |
+| `last_used_at` | 三种格式共用同一节流写入（5 分钟） |
+| 审计 | 不新增；令牌 create / rotate 已有审计 |
+
+#### 3.7.7 桌面命令契约增量
+
+`mobile_export_get` / `mobile_export_rotate` 的返回从「一条 URL」扩为「三种格式」，其余状态与错误码不变：
+
+```ts
+type MobileExportFormat =
+  | {
+      format: "singbox";
+      url: string;                 // https://veyl:<token>@<origin>/v1/mobile/profile
+      qr_data_url: string;         // sing-box://import-remote-profile?url=…#Veyl 的二维码
+    }
+  | {
+      format: "clash";
+      url: string;                 // …/v1/mobile/profile/clash
+      qr_data_url: string;         // 二维码内容 = 上面的 URL；保留，V13 判定去留
+    }
+  | {
+      format: "ss";
+      url: string;                 // …/v1/mobile/profile/ss
+      qr_data_url: null;           // 多节点列表不适合一张码，M1 不出
+    };
+
+type MobileExportData =
+  | {
+      state: "ok";
+      node_count: number;
+      created_at: number;
+      formats: MobileExportFormat[];
+    }
+  | { state: "login_required" }
+  | { state: "no_ready_server" };
+```
+
+- **URL 仍由 Host 用 `env.rs` 的 origin 拼**（§4.1）；控制面只回令牌。
+- 桌面**不取 ss 文本**：不支持 Basic 的客户端本期不列入，粘贴文本的特例不做（§3.7.5）。`ss` 只返回 URL。
+- 二维码：sing-box 沿用 §4.2 的 scheme；Clash 用 URL 本身的二维码（**保留**，由 V13 判定是否可扫、是否退回只给复制链接）；ss 不出码。
+- 敏感字段：三个 `url` 都含令牌；按 §7.1 处理，不得进日志、事件、AI 上下文或界面文本。
+- **版本**：`commands.md` 2.46.1 已随 prod 上线；`mobile_export_get` 的返回从单值改为 `formats[]` 是线上可见变更，**必须升 `2.47.0`**（产品 2026-11-20 拍板，不并入 2.46.0）。
+
+#### 3.7.8 客户端 × 格式矩阵
+
+> 符号：**能吃** = 有官方文档或源码证据能导入；**不能吃** = 该客户端的配置解析器明确只认另一种格式；**未核实** = 没有官方证据，不猜。
+> sagernet 官方页明确不收录第三方项目；下表第三方条目一律以各自的仓库 / 官方站点为依据，不用 sing-box 官方页背书。
+
+| 客户端 | sing-box JSON | Clash YAML | ss 列表 | 核实依据 | M1 手机页 |
+|---|---|---|---|---|---|
+| sing-box 官方 SFI / SFA | **能吃** | **不能吃** | **不能吃** | 官方 clients 文档：Remote Profile 的 body 是 sing-box 配置（`mobile-export.md` §2.3）；没有 Clash / ss 列表解析器 | **列入** |
+| Hiddify | **能吃** | **能吃** | **未核实** | README：sing-box、V2Ray（Base64/plain links）、Clash / Clash Meta；`lib/utils/link_parsers.dart` 只认 `hiddify/v2ray/clash/clashmeta/sing-box`，没有 `ss`。Basic：`dio_http_client.dart` 的 Dart 回退路径 | **列入** |
+| Clash Meta for Android | **不能吃** | **能吃** | **不能吃** | README：Clash.Meta GUI；`service/ProfileProcessor.kt` 的 `fetchProfile` → `Clash.fetchAndValid`（Clash 配置校验）；`NewProfileActivity.kt` 把扫码内容直接作为 `Profile.Type.Url` | **列入** |
+| Clash Verge Rev | **不能吃** | **能吃** | **未核实** | README：Clash Meta GUI；`src-tauri/src/config/prfitem.rs` 的 `from_url` 下载后交给 Clash 核心校验；`utils/network.rs` 支持 URL userinfo → Basic | 桌面验证用，不进手机页 |
+| Karing | **能吃** | **能吃** | **能吃** | README：Compatible with Clash, V2ray/V2fly, Sing-box, Shadowsocks, Sub, Github Subscriptions | 不列入（Basic 未核实） |
+| Shadowrocket | **未核实** | **未核实** | **未核实** | 闭源；App Store 页面只写代理/规则/抓包能力，未列协议或订阅格式 | 不列入（Basic 未核实） |
+| Stash | **不能吃** | **能吃** | **未核实** | App Store：Full adaptation of Clash Premium configuration；<https://stash.wiki/en/configuration/example-config> 是 Clash YAML；订阅页只写 `#SUBSCRIBED <url>`，未提 Basic / ss | 不列入（Basic 未核实） |
+
+**这张矩阵对界面的直接结论**：
+
+- M1 列入的四个客户端里，**ss 列没有一个是「能吃」**：SFI/CMFA 不能吃，Hiddify/Clash Verge 未核实。**已定（产品 2026-11-20）：ss 行不进 M1 界面，但 `/profile/ss` 端点与单测照做**——它是 V14 之后加 Shadowrocket / Karing 的唯一前置，删了以后还得重来。
+- Clash YAML 有两个「能吃」且 Basic 已核实的客户端（CMFA、Clash Verge），Clash 行可以进界面；Clash 二维码保留，由 V13 判去留。
+- Karing 三列全「能吃」但 Basic 未核实，是最值得优先验证的扩展对象：一旦 V14 确认 Basic，它可以直接进 M1，不需要改格式。
+- 设计师按「M1 列入」列决定手机端客户端行：**SFI/SFA、Hiddify、CMFA** 三个（Clash Verge 是桌面 GUI，不进手机页；Stash 待 Basic 核实）。
+
+按格式给出的界面行建议（供设计会话直接采用）：
+
+| 格式 | M1 可列出的手机客户端 |
+|---|---|
+| sing-box JSON | SFI / SFA、Hiddify |
+| Clash YAML | Hiddify、Clash Meta for Android |
+| ss | **M1 不展示**（无已核实能吃的列入客户端）；端点与单测照做，V14 后再定界面 |
+
+> **Clash Verge Rev 是桌面 GUI（Windows / macOS / Linux），不是手机客户端**；它列在矩阵里只用于验证 Clash YAML 的兼容性与 Basic 实现，**不应出现在「在手机上使用」的客户端行里**。手机端 Clash 类客户端是 Clash Meta for Android / Stash。
+
+> **引用 mihomo 源码时的注意**：`https://github.com/MetaCubeX/mihomo` 的**默认分支 `main` 是一个无关的 Python 仓库**；代理核心在 **`Alpha` 分支**。看源码必须加 `?ref=Alpha` 或 `/tree/Alpha`，否则会打开错文件。ClashMetaForAndroid 的 `.gitmodules` 也指向该仓库的 `Alpha` 分支。
+
+**仓库 / 官方文档链接（矩阵依据）**：
+
+- SFI / SFA：<https://sing-box.sagernet.org/clients/>、<https://github.com/SagerNet/sing-box>
+- Hiddify：<https://github.com/hiddify/hiddify-app>
+- Clash Meta for Android：<https://github.com/MetaCubeX/ClashMetaForAndroid>
+- Clash Verge Rev：<https://github.com/clash-verge-rev/clash-verge-rev>
+- Karing：<https://github.com/KaringX/karing>
+- Shadowrocket：<https://apps.apple.com/us/app/shadowrocket/id932747118>
+- Stash：<https://apps.apple.com/us/app/stash-rule-based-proxy/id1596063349>、<https://stash.wiki/en/features/service-provider-subscription>、<https://stash.wiki/en/configuration/example-config>
+
+#### 3.7.9 三种格式的零节点 / 故障对照
+
+| 情况 | sing-box JSON | Clash YAML | ss:// |
+|---|---|---|---|
+| 账户没有可用付费节点 | 200 + 只含 `direct` | 200 + `proxies: []`、`proxy-groups: []`、`rules: ["MATCH,DIRECT"]` | 200 + 空 body |
+| 查到了服务器但全部凭据坏 / 解不开 | **503** | **503** | **503** |
+| 令牌无效 / 已轮换 | 401 | 401 | 401 |
+| 超限 | 429 | 429 | 429 |
+
+#### 3.7.10 验证增补
+
+多格式新增的 **V13–V17** 统一列在 §8 的检查单里（不在本节重复一张表）。
+
+#### 3.7.11 实现边界（只列新增）
+
+| 组 | 文件 | 改动 |
+|---|---|---|
+| be-cp | `cloudflare/control-plane/src/mobile.ts` | 路由增加 `/clash`、`/ss`；Clash YAML 生成器（手写标量引用）；SIP002 生成器；共用查询、限流、401/429；单测覆盖空态、坏凭据、特殊字符、IPv6、轮换 |
+| be-desktop | `src-tauri/src/control_plane/mobile.rs` | 构建三个 URL；Clash URL 的二维码；命令返回 `formats[]`；单测（编码、origin、零门禁） |
+| fe | 设计会话未定 | 弹层加格式选择（sing-box / Clash / ss），三种格式各自的复制 / 二维码 / 文本；本文件不规定版式 |
+
+不新增事件、不新增 AI 工具、不动迁移；`mobile_tokens` 一行同时服务三种格式。
+
+#### 3.7.12 界面格式切换（2026-11-20 拍板）
+
+- 界面只做**两段**：`sing-box` / `Clash`，**默认 `sing-box`**；`ss` 不出现在切换里（端点照做，见 §3.7.8）。
+- 两段共用同一个弹层、同一枚令牌、同一个「重新生成」；切换只换展示的 URL / 二维码，不重新请求：
+  - `sing-box`：二维码内容 = `sing-box://import-remote-profile?url=…#Veyl`（§4.2）；
+  - `Clash`：二维码内容 = `/profile/clash` 的 URL 本身（保留，V13 判去留）。
+- 三行客户端（SFI/SFA、Hiddify、CMFA）各出一个下载码：`mobile_clients_qr { client }`，URL 固定映射、不接受任意 URL（§5.1 / `commands.md` §7.23）。
+- `mobile_export_get` 的 `formats[]` 仍可能包含 `ss`；界面**忽略该条目**，不渲染、不展示其 URL。
+- **安全文案边界**：不得写「重新生成后旧配置全部失效」这类绝对表述。准确说法是「旧链接失效，手机上的配置下次更新时不再可用」；`/profile/ss` 返回的节点链接一旦被复制/保存，**收不回**，只有重建服务器（换密码）才能让它失效。技术依据见 §3.7.4 / §7.3。
+
+---
+
 ## 4. 桌面 Host
 
 ### 4.1 URL 构造
 
 ```
-https://veyl:<token>@<base_url 去掉末尾斜杠>/v1/mobile/profile
+https://veyl:<token>@<base_url 去掉末尾斜杠>/v1/mobile/profile        # sing-box JSON
+https://veyl:<token>@<base_url 去掉末尾斜杠>/v1/mobile/profile/clash  # Clash YAML
+https://veyl:<token>@<base_url 去掉末尾斜杠>/v1/mobile/profile/ss     # ss:// 列表
 ```
 
 - `<base_url>` 只来自 `control_plane::env::current().base_url`（`env.rs` 的 `DEV_URL` / `PROD_URL`，或 debug 下的 `VEYL_CONTROL_PLANE_URL`）。**不在新模块里写任何域名常量**。
 - 用 `reqwest::Url` 的 `set_username` / `set_password` 构造，转义交给库；令牌是 base64url，实际不会被转义。
 - 语法检查：必须是 `https://`，host 不得以 `.workers.dev` 结尾。违反 → `PRECONDITION_FAILED`，`details.reason = "insecure_profile_origin"`，不生成二维码。这条兜住 debug 下把 `VEYL_CONTROL_PLANE_URL` 指向 `workers.dev` 的人为配置。
 - 控制面**不返回 URL**：路径与 origin 由桌面决定，端点只回令牌。这样 origin 的唯一来源就是 `env.rs`，正好落实「不写第二处常量」。
-- 唯一无法消除的重复是**路径字面量** `/v1/mobile/profile`：Rust 侧要拼 URL，Worker 侧要匹配路由，跨语言没有共享常量。它只影响可用性（写错就 404），不影响环境安全；用两侧各一条单测固定。
+- 唯一无法消除的重复是**路径字面量**（`/v1/mobile/profile`、`/clash`、`/ss`）：Rust 侧要拼 URL，Worker 侧要匹配路由，跨语言没有共享常量。它只影响可用性（写错就 404），不影响环境安全；用两侧各一条单测固定。
 
 ### 4.2 扫码内容
 
@@ -427,6 +687,7 @@ sing-box://import-remote-profile?url=<percent-encoded 上述 URL>#Veyl
 - fragment（`#` 之后）是 profile 显示名，固定 `Veyl` 并做同样的 encode；界面不展示这个名字。
 - 用 `url::form_urlencoded` 的序列化器生成 query 值，不手写 `encodeURIComponent` 的等价逻辑（Rust 侧没有现成函数，手写容易漏字符）。
 - 这条字符串**只用于二维码**；复制按钮复制的是 §4.1 的 profile URL，不是 scheme URL（与 UI 稿「复制链接」的语义一致）。
+- **只有 sing-box 用这个 scheme**：Clash 的二维码内容是 `/profile/clash` 的 URL 本身（不套 `clash://`，未核实），ss 不出二维码；见 §3.7.7。
 
 ### 4.3 二维码：Rust 出图
 
@@ -488,19 +749,36 @@ sing-box://import-remote-profile?url=<percent-encoded 上述 URL>#Veyl
 
 ### 5.1 新命令
 
-建议插入 `commands.md` §7 的末尾：
+`commands.md` 2.46.1 已随 prod 上线；**多格式修订**（§3.7）把返回从单 URL 改为 `formats[]`，并把 §7.23 下载码改为客户端枚举；两项都是线上可见变更，**统一按 `2.47.0` 合并**（产品 2026-11-20 拍板，不并入 2.46.x）。
 
 - §7.21 `mobile_export_get {}` → `MobileExportData`（仅 UI）
 - §7.22 `mobile_export_rotate { confirm: true }` → `MobileExportData`（仅 UI）
+- §7.23 `mobile_clients_qr { client: "singbox" | "hiddify" | "cmfa" }` → `{ url, qr_data_url }`（仅 UI）
 
 ```ts
+type MobileExportFormat =
+  | {
+      format: "singbox";
+      url: string;              // https://veyl:<token>@<origin>/v1/mobile/profile，敏感
+      qr_data_url: string;      // sing-box://import-remote-profile?… 的二维码
+    }
+  | {
+      format: "clash";
+      url: string;              // …/v1/mobile/profile/clash，敏感
+      qr_data_url: string;      // 二维码内容 = URL 本身；保留，V13 判定去留
+    }
+  | {
+      format: "ss";
+      url: string;              // …/v1/mobile/profile/ss，敏感
+      qr_data_url: null;
+    };
+
 type MobileExportData =
   | {
       state: "ok";
-      url: string;              // https://veyl:<token>@<origin>/v1/mobile/profile，敏感
-      qr_data_url: string;      // data:image/svg+xml;base64,…
       node_count: number;       // 本地已就绪的付费节点数
       created_at: number;       // Unix 毫秒（控制面 mobile_tokens.created_at）
+      formats: MobileExportFormat[];
     }
   | { state: "login_required" }
   | { state: "no_ready_server" };
@@ -510,14 +788,27 @@ type MobileExportData =
 
 | 项 | 规则 |
 |---|---|
-| 幂等 | `mobile_export_get` 幂等：没有令牌就建，有就回显同一个；重复调用不改 URL |
+| 幂等 | `mobile_export_get` 幂等：没有令牌就建，有就回显同一个；重复调用不改任何 URL |
 | `confirm` | `mobile_export_rotate` 必填且必须为 `true`；缺失 / `false` → `INVALID_ARGUMENT`，`details.reason = "confirmation_required"` |
 | 返回的是状态而不是错误 | 「未登录」「没有就绪服务器」是**预期状态**，用 `state` 表达，UI 直接渲染三种态；真正的失败才走错误信封 |
+| 无部分失败 | 三种格式的 URL 由同一枚令牌拼成；不需要再请求任何内容端点，因此没有「某一种取不到」的中间态 |
 | 错误码 | `INVALID_ARGUMENT`（`confirmation_required`）、`PRECONDITION_FAILED`（`insecure_profile_origin`）、`RATE_LIMITED`（`retryable: true`）、`UPSTREAM_ERROR`（控制面 5xx / 网络）、`TIMEOUT`、`INTERNAL`（`qr_encode_failed` / `mobile_token_corrupt`） |
 | 不落库 | 两个命令都不写本地 SQLite、不写 `secrets.enc` |
-| 敏感返回 | `url` 含令牌；UI 不得把它渲染为文本、`alt`、`title`，不得放进事件或对话 |
+| 敏感返回 | 三个 `url` 都含令牌；UI 不得把它们渲染为文本、`alt`、`title`，不得放进事件或对话 |
 
 `mobile_export_rotate` 的 `state` 也是三态：门禁在生成前会重新检查一次（期间账户可能登出、最后一台服务器可能销毁），三个状态都要可能返回。
+
+三种格式的形状与零节点行为见 §3.7。
+
+**`mobile_clients_qr`（2.47.0 改枚举）**：只接受 `client: "singbox" | "hiddify" | "cmfa"`，Host 固定映射 URL 并出二维码：
+
+| `client` | URL |
+|---|---|
+| `singbox` | `https://sing-box.sagernet.org/clients/` |
+| `hiddify` | `https://hiddify.com/` |
+| `cmfa` | `https://github.com/MetaCubeX/ClashMetaForAndroid/releases` |
+
+未知 / 缺失 / 非枚举值 → `INVALID_ARGUMENT / unknown_client`，**不静默回退**；**不接受调用方传 URL**（否则命令变成通用字符串转二维码工具）。不登录、不调控制面、不涉及令牌。三条对应 §3.7.8 的 M1 手机页客户端。
 
 ### 5.2 设置目录行 id
 
@@ -545,8 +836,8 @@ account.mobile
 
 | 文件 | 建议 | 依据 |
 |---|---|---|
-| `docs/contracts/commands.md` | **`2.45.5` → `2.46.0`** | 新增两条命令 + 一个行 id，向后兼容 |
-| `docs/contracts/tools.md` | **`3.21.4` → `3.22.0`** | `OpenSettings` 接受新的 `row` 值；工具数量不变 |
+| `docs/contracts/commands.md` | **`2.46.1` → `2.47.0`**（固定，不并入 2.46.x） | `mobile_export_get` / `mobile_export_rotate` 的返回从单 URL 改为 `formats[]`（§5.1 / §3.7.7）；`mobile_clients_qr` 改客户端枚举；2.46.1 已随 prod 上线，两项都是线上可见变更 |
+| `docs/contracts/tools.md` | **保持 `3.22.1`，无需变更** | 三个命令都是仅 UI，不注册 AI 工具；`OpenSettings` 的 `account.mobile` 行已在 3.22.0 登记 |
 | `docs/contracts/events.md` | **不变** | 无新事件 |
 | `docs/contracts/catalog.md` | **不变** | 与服务端目录协议无关 |
 | `docs/data-model.md` | **不变** | 桌面本地库无变化（控制面 D1 归 `cloudflare/control-plane/migrations/README.md` 管） |
@@ -618,8 +909,10 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 ### 7.3 转发风险与 M1 接受度
 
 - 链接等于「该账户全部可用付费节点的读取权」。转发给他人 → 对方可在任意设备使用。
-- M1 按产品定稿**不做设备数限制、不做技术对抗**；提供「重新生成」作为唯一止损：旧链接立即失效，新链接需重新扫码。
+- M1 按产品定稿**不做设备数限制、不做技术对抗**；提供「重新生成」作为唯一止损：旧链接立即失效，新链接需重新扫码。注意这只覆盖两个展示中的 URL；`/profile/ss` 返回的节点密码不在轮换范围内（§3.7.4 / §7.3）。
 - 链接不能写、不能查账户、不能动钱包；最坏情况是节点被他人使用，不是账户被接管。
+- **三种格式的失效面不同**：sing-box / Clash URL 受令牌轮换控制；`/profile/ss` 返回的节点链接如果被外部工具保存，轮换不影响它——它携带节点密码，要让其失效必须重建服务器（换密码）。M1 不提供粘贴入口，这是端点固有的残余风险，与转发风险同级。
+- **安全文案不得写绝对句**：「重新生成后旧配置全部失效」是错的。准确说法是「旧链接失效，手机上的配置下次更新时不再可用」；ss 文本的不可收回性见上一条。
 - 界面已写「链接相当于密码，别转发」；技术侧不再加二次确认或水印，避免把可恢复动作做成高风险流程。
 
 ### 7.4 域名与 TLS
@@ -634,6 +927,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 风险 | 状态 |
 |---|---|
 | 链接被转发 / 截图 | **接受**（产品定稿）。轮换是唯一止损 |
+| `/profile/ss` 返回的节点链接被外部工具保存 | **接受**：它携带节点密码；失效只能重建服务器（换密码）。M1 不提供粘贴入口，见 §3.7.4 / §7.3 |
 | 控制面整体失守（库 + 密钥） | 已登记（`my-servers.md` §17.7）。令牌不改变该结论 |
 | 设备本地保存了链接（剪贴板、相册） | 我们无法控制；界面只提示 |
 | sing-box 客户端把 Authorization 写进自己的日志 | 未知，客户端行为；V3 / V4 观察 |
@@ -641,7 +935,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 
 ---
 
-## 8. 实现前检查单（V1–V12）
+## 8. 实现前检查单（V1–V17）
 
 > 每条都要有证据（截图 / 录屏 / 命令输出 / Worker 日志计数），不能只写「试过可以」。测试期间不改工作树（测量冻结）。
 
@@ -659,6 +953,11 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | V10 | 轮换后的旧链接行为 | 点「重新生成」，等客户端下一次拉取 | 旧链接 401 / 更新失败；新二维码导入可用；已导入的旧 profile 不会被静默改写成空 | 是 |
 | V11 | URL Scheme 的 query 编码 | 用含 `@`、`:` 的完整 URL 生成二维码，扫码 | 客户端拿到的 URL 完整（不被 `&` / `#` 截断）；若失败，检查 encode 实现 | 是 |
 | V12 | 蜂窝网络回归（DNS） | 关闭 Wi-Fi，用蜂窝网络重复 V8：手动刷新 profile → 打开网页 → 重启客户端再试一次 | 与 Wi-Fi 同样能解析并打开网页；记录运营商、手机 DNS 设置与客户端日志前 20 行 | 是 |
+| V13 | Clash YAML 被客户端接受 | 在 CMFA / Clash Verge / Stash 中导入 `/profile/clash`（Basic 写在 URL userinfo）；连接、打开网页；clash 二维码若展示，扫一次 | 节点出现在列表；能连上并打开网页；Basic 生效 | 是 |
+| V14 | ss:// 列表与 Basic | 在 Hiddify / Karing / Shadowrocket 中试 `/profile/ss` + Basic（URL userinfo）；**不测试「粘贴文本」特例** | 至少一个客户端能用 URL 导入并连上；记录哪些客户端支持 Basic；通过者才进 M1 客户端列表 | 是 |
+| V15 | 轮换的全局性 | 三种格式各导入一处，点「重新生成」，等各自下一次拉取 | 三个旧 URL 全部 401；新令牌在三种格式都可用 | 是 |
+| V16 | 零节点表现 | 销毁全部服务器后等一次更新 | sing-box 不建隧道；Clash 是否接受空 `proxies`；ss 空 body 是否被当作成功；记录客户端差异 | 是 |
+| V17 | Clash 的 UDP | 用 Clash 类客户端连接后访问一个 UDP 服务（如 QUIC / DNS over UDP） | 记录 `udp: true` 是否实际可用；不可用则从 YAML 去掉，不影响 TCP | 否 |
 
 **V9 的决策后果**：若客户端对「只有 direct」的 profile 报错并保留旧配置，需要改为 `410 Gone` + 明确的错误体（仍无法清除客户端缓存），并在 §1.7 更新；这一条必须在实现前定，不要两边都写一半。
 
@@ -673,9 +972,9 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 文件 | 改动 |
 |---|---|
 | `cloudflare/control-plane/migrations/0009_mobile_tokens.sql` | 新表 + 唯一索引（§6.1） |
-| `cloudflare/control-plane/src/mobile.ts` | 新模块：三个端点、令牌生成/加解密、选节点、配置模板、零节点分支、限流、审计 |
+| `cloudflare/control-plane/src/mobile.ts` | 新模块：`/token`、`/token/rotate`、`/profile`、`/profile/clash`、`/profile/ss`；令牌生成/加解密、选节点、三种格式生成器、零节点分支、限流、审计 |
 | `cloudflare/control-plane/src/index.ts` | 模块链加 `handleMobile`；`Env` 加 `MOBILE_TOKEN_ENC_KEY?: string` |
-| `cloudflare/control-plane/test/mobile.test.ts` | 单测：幂等、并发创建、轮换、Basic 解析、零节点、跳过坏凭据、限流 |
+| `cloudflare/control-plane/test/mobile.test.ts` | 单测：幂等、并发创建、轮换、Basic 解析、三种格式形状、零节点、跳过坏凭据、限流、YAML 特殊字符、SIP002 编码 |
 | `cloudflare/control-plane/scripts/schema-check.mjs` | 通常无需改（自动读 migrations）；跑三种库确认 |
 
 不碰 `servers.ts`、`auth.ts`、`lib/crypto.ts` 的实现（复用导出即可）。
@@ -685,10 +984,10 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 文件 | 改动 |
 |---|---|
 | `src-tauri/Cargo.toml` | `qrcode`、`url = "2"` |
-| `src-tauri/src/control_plane/mobile.rs` | 新模块：调两个 token 端点、拼 URL、构造 scheme URL、生成 SVG data URL、origin 校验、单测（固定环境、编码、零门禁） |
+| `src-tauri/src/control_plane/mobile.rs` | 新模块：调两个 token 端点、拼三个 URL、构造 sing-box scheme URL、Clash URL 二维码、三个下载码的固定映射、生成 SVG data URL、origin 校验、单测（固定环境、编码、未知 client、零门禁） |
 | `src-tauri/src/control_plane/mod.rs` | 注册模块 |
-| `src-tauri/src/agent/commands.rs` | `mobile_export_get` / `mobile_export_rotate` |
-| `src-tauri/src/lib.rs` | 两个 handler 列表各加两条（debug / release 保持一致） |
+| `src-tauri/src/agent/commands.rs` | `mobile_export_get` / `mobile_export_rotate` / `mobile_clients_qr` |
+| `src-tauri/src/lib.rs` | 两个 handler 列表各加三条（debug / release 保持一致） |
 | `src-tauri/src/tools/settings.rs` | `SETTINGS_ROWS` 加 `account.mobile`，长度 11 → 12 |
 
 不碰 `config/builder.rs`：桌面运行时配置与手机配置是两份，不共用生成器。
@@ -718,7 +1017,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 ```
 
 - 三组之间没有文件重叠；`be-desktop` 与 `fe` 可以按本文件的类型先写，联调前不需要等控制面部署。
-- 真机验收（V1–V12）在联调之后、由产品 / 同事执行；AI 只取证与核对（`aivpn-tests-started-by-user`）。
+- 真机验收（V1–V17）在联调之后、由产品 / 同事执行；AI 只取证与核对（`aivpn-tests-started-by-user`）。
 
 ---
 
@@ -726,20 +1025,22 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 
 ### 必须改（P1）
 
-1. **新增控制面三个端点**与 `mobile_tokens` 迁移；profile 必须 `no-store`，401 必须带 `WWW-Authenticate`。
+1. **新增控制面端点**（`/v1/mobile/token`、`/token/rotate`、`/profile`、`/profile/clash`、`/profile/ss`）与 `mobile_tokens` 迁移；所有 profile 响应必须 `no-store`，401 必须带 `WWW-Authenticate`。
 2. **控制面按请求生成配置**：只筛 `source = owned` 对应的 `servers`，排除免费 / 试用；不导出桌面 TUN 参数 / `mixed` 入站 / 本地端口 / Clash API。**非零模板必须带最小 TUN 入站（`auto_route` 为真）、`route.auto_detect_interface: true` 与最小 DNS（DoH 经代理 + `hijack-dns`）；零节点模板不得带 `inbounds` 或 `dns`**。
-3. **桌面 Rust 生成 URL 与二维码**：origin 只取 `env.rs`，禁止 `workers.dev`；令牌不落本地。
-4. **两个 UI 入口共用同一弹层与命令**；左栏行只在「已登录 + 至少一台节点就绪 + 列表非 loading/error」时出现。
-5. **契约增量**合并：`commands.md` 版本 `2.46.0`、`tools.md` 版本 `3.22.0`（`account.mobile`）。
-6. **验签 / 解密失败不得泄露凭据**：单台凭据解不开就跳过，不返回错误详情到客户端。
+3. **三种格式的边界**：`/profile` 路径保持不变；Clash YAML 只出 `proxies` / `proxy-groups` / `rules`，**不含** TUN、DNS、端口、`mode`；ss:// 严格按 SIP002（base64url 无填充）逐行输出；零节点按 §3.7.9 各给「合法空配置」，全部凭据不可用统一 503。**ss 行不进 M1 界面，但 `/profile/ss` 与单测必须实现**（V14 后加客户端的唯一前置）。
+4. **桌面 Rust 生成 URL 与二维码**：origin 只取 `env.rs`，禁止 `workers.dev`；令牌不落本地；三种格式只返回 URL，不取 ss 文本。三个下载码走 `mobile_clients_qr { client }` 的固定映射，不接受任意 URL。
+5. **两个 UI 入口共用同一弹层与命令**；左栏行只在「已登录 + 至少一台节点就绪 + 列表非 loading/error」时出现。
+6. **契约增量**合并：`commands.md` **固定 `2.47.0`**（`formats[]` + `mobile_clients_qr` 枚举）、`tools.md` 保持 `3.22.x`（这三个命令都是仅 UI，**不新增 AI 工具**；仅有的相关项是 `account.mobile` 行登记）。
+7. **验签 / 解密失败不得泄露凭据**：单台凭据解不开就跳过，不返回错误详情到客户端。
+8. **M1 不列未核实 Basic 的客户端**：Karing / Shadowrocket / Stash 本期不列入，也不做「仅 ss 文本粘贴」特例（§3.7.5）；不新增路径令牌。
 
 ### 建议改（P2）
 
-7. 轮换限流 10 次/小时、profile 30 次/小时；数值可按实测调整。
-8. `last_used_at` 节流写（5 分钟一次），避免每条请求都写 D1。
-9. 把 origin 校验与 scheme 编码抽成纯函数单测，不靠真机回归。
-10. 同一会话内可在 `App` 内存里保留最近一次成功结果（URL + QR），断网重开弹层不必重新请求；**只存内存，不落盘**，退出应用即丢弃。
-11. `my-servers.md` §16.3 第 5 条改写为「不做一次性下载链接；提供账户级、可吊销的远程配置 URL」。
+9. 轮换限流 10 次/小时、profile 30 次/小时（三种格式共享）；数值可按实测调整。
+10. `last_used_at` 节流写（5 分钟一次），避免每条请求都写 D1。
+11. 把 origin 校验、scheme 编码、SIP002 编码与 YAML 标量引用抽成纯函数单测，不靠真机回归；节点名要覆盖 `:`、`#`、引号、前导 `-`、emoji。
+12. 同一会话内可在 `App` 内存里保留最近一次成功结果（三种 URL + 二维码），断网重开弹层不必重新请求；**只存内存，不落盘**，退出应用即丢弃。
+13. `my-servers.md` §16.3 第 5 条改写为「不做一次性下载链接；提供账户级、可吊销的远程配置 URL（多格式）」。`mobile-export.md` §10 同步补三种格式。
 
 ### 不改
 
@@ -752,6 +1053,11 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 不做单台二维码 | 产品已定账户级一条 |
 | 不在配置里加 `urltest` | 默认探测 URL 在大陆的可达性未核实；不可达会造成假故障切换 |
 | 不做二维码「另存为」以外的交互 | 与 UI 稿一致 |
+| 不改 `/v1/mobile/profile` 路径、不加 `/singbox` 后缀 | 已导入的旧 profile 永远指向它；改名会让所有手机下一次更新 404 |
+| M1 不做路径令牌 | 令牌会进请求行与日志，违反 §7.1；不支持 Basic 的客户端本期不列入，也不做 ss 文本粘贴特例 |
+| 不预先砍 Clash 二维码 | 产品 2026-11-20 决定保留，码内容 = 带凭据的订阅 URL；能否扫通由 V13 判定，扫不通再退回只给复制链接 |
+| 不把未核实 Basic 的客户端列进 M1 | Karing / Shadowrocket / Stash 等核实后再进列表 |
+| 不在 Clash YAML 里塞 TUN / DNS / 端口 / `mode` | 接管方式与 DNS 由 Clash 客户端自己管理；塞进去会覆盖用户设置 |
 
 ---
 
@@ -767,8 +1073,13 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 6 | 下载页 Android 渠道文案 | 已定：只给官方客户端页一条 | 已定，不改 |
 | 7 | 配置是否携带 DNS | **必须携带**：真机实测覆盖了初版「不导出 DNS」。非零模板固定 `1.1.1.1` DoH（`detour: "proxy"`）+ `hijack-dns`；零节点不带 DNS。已落地，不再是待确认项 | 已定（架构师），PM 知会 |
 | 8 | 配置是否携带 TUN 入站 | **必须携带**：官方客户端源码确认只有声明 TUN 入站才创建系统隧道（§3.5）。非零用最小 TUN（`auto_route: true`、`dns_mode: "hijack"`、`dns_address`）+ `route.auto_detect_interface: true`；零节点不建 TUN，避免假 VPN 把全部流量直连 | 已定（架构师），PM 知会 |
+| 9 | Karing / Shadowrocket / Stash 是否支持 Basic | **已定（2026-11-20）：本期不列入，不做「仅 ss 文本粘贴」特例。** 等核实 Basic 订阅后再进客户端列表 | PM 已定 |
+| 10 | Clash 的二维码内容 | **已定（2026-11-20）：保留**，码内容 = 带凭据的订阅 URL；能否扫通由 V13 判定，扫不通再退回「只给复制链接」 | PM 已定 |
+| 11 | ss 空 body 的客户端表现 | 零节点返回 200 + 0 字节；是否被客户端当作「更新成功」未核实（V16）。若被当作失败，可改为 204 或保留最后一份空列表 | 验证结论 + 架构师 |
+| 12 | Clash 的 `udp: true` | 服务端 SS 入站与防火墙都支持 UDP，但客户端实际路径未验（V17）。不可用就去掉该字段，TCP 不受影响 | 验证结论 |
+| 13 | ss 行是否进 M1 界面 | **已定（2026-11-20）：不进界面；`/profile/ss` 端点与单测照做**，作为 V14 之后加 Shadowrocket / Karing 的前置。界面格式切换只做 `sing-box` / `Clash` 两段，默认 `sing-box`（§3.7.12） | PM 已定 |
 
-**所审版本（2026-11-19 至 11-20）**：本文件的 TUN + DNS + `auto_detect_interface` 改写对应代码基线 `c1de5b3`；`stack: "gvisor"`、`sniff` 规则组与去掉 `strict_route` 为工作区未提交改动（`cloudflare/control-plane/src/mobile.ts:444–476`、`test/mobile.test.ts`）。`npm run typecheck` 与 `npm test`（212/212）为 2026-11-20 含四项修复的版本。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。真机已在 iPhone（Wi-Fi）确认可打开网页；**蜂窝网络复验尚未执行**（V12）。
+**所审版本（2026-11-19 至 11-20）**：本文件的 TUN + DNS + `auto_detect_interface` 改写对应代码基线 `c1de5b3`；`stack: "gvisor"`、`sniff` 规则组与去掉 `strict_route` 为工作区未提交改动（`cloudflare/control-plane/src/mobile.ts:444–476`、`test/mobile.test.ts`）。`npm run typecheck` 与 `npm test`（212/212）为 2026-11-20 含四项修复的版本。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。真机已在 iPhone（Wi-Fi）确认可打开网页；**蜂窝网络复验尚未执行**（V12）。多格式部分（2026-11-20）的客户端依据与未核实项见 §3.7.5 / §3.7.8 与上表 9–13；多格式实现尚未开始。**矩阵与三条拍板（未核实 Basic 的客户端不列入、Clash 二维码保留、commands 2.47.0）来自产品 2026-11-20 的跨会话决定。**
 
 ---
 
@@ -781,5 +1092,6 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | `my-servers.md` §17.3「界面不显示 IP / 端口 / 协议」 | 不冲突。导出内容含地址与密码，但界面文本仍不展示；二维码只含 URL |
 | `login-and-payment.md` §2.5 | 需补一句：导出令牌与 access / refresh 完全独立，见本文 §2.4 |
 | `environments.md` §1 / §4.1 | 仍有过期的 `*.workers.dev` 描述；以 `env.rs` 与 `wrangler.jsonc` 为准。本次不改 |
-| `mobile-export.md` §9「端点 / 命令名称占位」 | 以本文为准：`GET /v1/mobile/profile`、`POST /v1/mobile/token`、`POST /v1/mobile/token/rotate`、`mobile_export_get`、`mobile_export_rotate` |
+| `mobile-export.md` §9「端点 / 命令名称占位」 | 以本文为准：`GET /v1/mobile/profile`、`/profile/clash`、`/profile/ss`、`POST /v1/mobile/token`、`POST /v1/mobile/token/rotate`、`mobile_export_get`、`mobile_export_rotate`；`mobile_export_get` 返回 `formats[]` |
+| `mobile-export.md` §4 / §9（只写 sing-box） | 2026-11-20 产品拍板扩为三种格式；需求稿需 PM 回写「三种格式 + 共用令牌 + Basic」，否则实现会按单格式做 |
 | `docs/contracts/commands.md` §9.1.1 / `tools.md` §4.50 | 行 id `account.mobile` 需合并；本文已给增量 |

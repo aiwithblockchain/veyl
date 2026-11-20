@@ -1,34 +1,55 @@
 /** @vitest-environment jsdom */
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentBridge, MobileExportData, MyServer } from "../agent/bridge";
+import type {
+  AgentBridge,
+  MobileClientId,
+  MobileExportData,
+  MyServer,
+} from "../agent/bridge";
+import { MockAgentBridge } from "../agent/mockAgent";
 import { MobileExport, hasReadyServer } from "./MobileExport";
 
-const URL_WITH_TOKEN =
+const SINGBOX_URL =
   "https://veyl:secret-token@veyl.dessage.xyz/v1/mobile/profile";
+const CLASH_URL = `${SINGBOX_URL}/clash`;
+const SS_URL = `${SINGBOX_URL}/ss`;
+const SINGBOX_QR = "data:image/svg+xml;base64,PHN2Zy1zaW5nYm94Lz4=";
+const CLASH_QR = "data:image/svg+xml;base64,PHN2Zy1jbGFzaC8+";
+const CLIENT_QR = "data:image/svg+xml;base64,PHN2Zy1jbGllbnQvPg==";
 
-const DOWNLOAD_QR = "data:image/svg+xml;base64,PHN2Zy1kb3dubG9hZC8+";
+const CLIENT_URLS: Record<MobileClientId, string> = {
+  singbox: "https://sing-box.sagernet.org/clients/",
+  hiddify: "https://hiddify.com",
+  cmfa: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
+};
 
 const OK: MobileExportData = {
   state: "ok",
-  url: URL_WITH_TOKEN,
-  qr_data_url: "data:image/svg+xml;base64,PHN2Zy8+",
   node_count: 2,
   created_at: 1,
+  formats: [
+    { format: "singbox", url: SINGBOX_URL, qr_data_url: SINGBOX_QR },
+    { format: "clash", url: CLASH_URL, qr_data_url: CLASH_QR },
+    { format: "ss", url: SS_URL, qr_data_url: null },
+  ],
 };
 
 function makeBridge(
   get: () => Promise<MobileExportData>,
   rotate: () => Promise<MobileExportData> = get,
-  clientsQr: () => Promise<{ qr_data_url: string }> = async () => ({
-    qr_data_url: DOWNLOAD_QR,
+  clients: (
+    client: MobileClientId,
+  ) => Promise<{ url: string; qr_data_url: string }> = async (client) => ({
+    url: CLIENT_URLS[client],
+    qr_data_url: CLIENT_QR,
   }),
 ) {
   return {
     openExternal: vi.fn(async () => {}),
     mobileExportGet: vi.fn(get),
     mobileExportRotate: vi.fn(rotate),
-    mobileClientsQr: vi.fn(clientsQr),
+    mobileClientsQr: vi.fn(clients),
   } as unknown as AgentBridge & {
     openExternal: ReturnType<typeof vi.fn>;
     mobileExportGet: ReturnType<typeof vi.fn>;
@@ -85,61 +106,179 @@ afterEach(() => {
 });
 
 describe("在手机上使用：弹层", () => {
-  it("有可用服务器：显示二维码与复制，界面文本里没有链接令牌", async () => {
+  it("导入为主：两段切换器、导入码与复制，ss 不出现在界面", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
 
-    expect(await within(dialog).findByRole("img", {
+    const img = await within(dialog).findByRole("img", {
       name: "sing-box 导入二维码",
-    })).toBeTruthy();
+    });
+    expect(img.getAttribute("alt")).toBe("sing-box 导入二维码");
     expect(within(dialog).getByRole("button", { name: "复制链接" })).toBeTruthy();
     expect(
-      within(dialog).getByText("节点变化会自动更新，不用重扫。"),
+      within(dialog).getByRole("heading", { name: "导入节点" }),
     ).toBeTruthy();
+    const formats = within(dialog).getByRole("group", { name: "导入格式" });
+    const formatButtons = within(formats).getAllByRole("button");
+    expect(formatButtons.map((button) => button.textContent)).toEqual([
+      "sing-box",
+      "Clash",
+    ]);
+    expect(within(formats).queryByText("ss://")).toBeNull();
+    expect(dialog.textContent).not.toContain("ss://");
     expect(dialog.textContent).not.toContain("secret-token");
     expect(dialog.textContent).not.toContain("https://");
   });
 
-  it("两个编号步骤与两个图注：编号对读屏隐藏", async () => {
+  it("切换格式：二维码与复制目标同时换，切回不重复请求", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => {}) },
+    });
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
 
     await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Clash" }));
+
     expect(
-      within(dialog).getByRole("heading", { name: "安装客户端" }),
+      within(dialog).getByRole("img", { name: "Clash 导入二维码" }),
     ).toBeTruthy();
+    expect(within(dialog).getByText("已切到 Clash 格式。")).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "复制链接" }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(CLASH_URL);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "sing-box" }));
     expect(
-      within(dialog).getByRole("heading", { name: "导入节点" }),
+      within(dialog).getByRole("img", { name: "sing-box 导入二维码" }),
     ).toBeTruthy();
-    const nums = Array.from(
-      dialog.querySelectorAll<HTMLElement>(".mobile-export__step-num"),
-    );
-    expect(nums.map((node) => node.textContent)).toEqual(["1", "2"]);
-    expect(nums.every((node) => node.getAttribute("aria-hidden") === "true")).toBe(
-      true,
-    );
-    expect(within(dialog).getByText("扫码下载")).toBeTruthy();
-    expect(within(dialog).getByText("扫码导入")).toBeTruthy();
+    expect(bridge.mobileExportGet).toHaveBeenCalledTimes(1);
   });
 
-  it("v1 的重复文案已删除", async () => {
+  it("客户端三行与归属说明", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
     await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
 
     expect(
-      within(dialog).queryByText(
-        "Veyl 不提供手机客户端，用 sing-box 官方客户端。",
-      ),
-    ).toBeNull();
-    expect(
-      within(dialog).queryByText("Google Play、F-Droid 或 GitHub 任选。"),
-    ).toBeNull();
-    expect(within(dialog).queryByText("导入你的节点")).toBeNull();
-    expect(within(dialog).queryByText("用手机扫码打开下载页")).toBeNull();
-    expect(
-      within(dialog).getByText("需要大陆以外的 Apple 账号。"),
+      within(dialog).getByRole("heading", { name: "还没有客户端？" }),
     ).toBeTruthy();
+    expect(
+      within(dialog).getByText("客户端不是我们开发的，Veyl 只提供节点。"),
+    ).toBeTruthy();
+    const rows = dialog.querySelectorAll(".mobile-export__client-row");
+    expect(rows).toHaveLength(3);
+    expect(rows[0]?.textContent).toContain(
+      "iOS（大陆以外 Apple 账号）/ Android · sing-box",
+    );
+    expect(rows[1]?.textContent).toContain("iOS / Android · sing-box / Clash");
+    expect(rows[2]?.textContent).toContain("Android · Clash 格式");
+  });
+
+  it("点行：展开下载码并切到它吃的格式，同时只开一行", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+    await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /Clash Meta for Android/ }),
+    );
+    expect(
+      await within(dialog).findByRole("img", { name: "Clash 导入二维码" }),
+    ).toBeTruthy();
+    expect(within(dialog).getByText("已切到 Clash 格式。")).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        dialog
+          .querySelector<HTMLImageElement>(".mobile-export__client-qr-img")
+          ?.getAttribute("src"),
+      ).toBe(CLIENT_QR),
+    );
+    const panelImg =
+      dialog.querySelector<HTMLImageElement>(".mobile-export__client-qr-img");
+    expect(panelImg?.getAttribute("alt")).toBe("");
+    expect(panelImg?.getAttribute("aria-hidden")).toBe("true");
+    expect(
+      dialog.querySelectorAll(".mobile-export__client-panel"),
+    ).toHaveLength(1);
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /Hiddify/ }),
+    );
+    expect(
+      within(dialog).getByRole("img", { name: "sing-box 导入二维码" }),
+    ).toBeTruthy();
+    expect(
+      dialog.querySelectorAll(".mobile-export__client-panel"),
+    ).toHaveLength(1);
+    expect(bridge.mobileClientsQr).toHaveBeenCalledWith("cmfa");
+    expect(bridge.mobileClientsQr).toHaveBeenCalledWith("hiddify");
+  });
+
+  it("展开行的下载页链接：打开系统浏览器", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+    await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /Clash Meta for Android/ }),
+    );
+    const link = within(dialog).getByRole("link", { name: /打开下载页/ });
+    await waitFor(() =>
+      expect(link.getAttribute("href")).toBe(CLIENT_URLS.cmfa),
+    );
+    fireEvent.click(link);
+    expect(bridge.openExternal).toHaveBeenCalledWith(CLIENT_URLS.cmfa);
+  });
+
+  it("Esc：先收二级面板，再关弹层", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog, onClose } = setup(bridge);
+    await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /Hiddify/ }),
+    );
+    expect(
+      dialog.querySelectorAll(".mobile-export__client-panel"),
+    ).toHaveLength(1);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(
+      dialog.querySelectorAll(".mobile-export__client-panel"),
+    ).toHaveLength(0);
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("客户端兜底 URL 与 bridge 返回一致，防止两边常量漂移", async () => {
+    // 载入失败时面板只能用组件里的兜底 URL；它必须与 Host / mock 的固定映射相同。
+    const reference = new MockAgentBridge();
+    const bridge = makeBridge(
+      async () => OK,
+      async () => OK,
+      async () => {
+        throw { code: "TIMEOUT", message: "超时" };
+      },
+    );
+    const { dialog } = setup(bridge);
+    await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
+
+    for (const [name, id] of [
+      ["sing-box 官方", "singbox"],
+      ["Hiddify", "hiddify"],
+      ["Clash Meta for Android", "cmfa"],
+    ] as const) {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: new RegExp(name) }),
+      );
+      const link = within(dialog).getByRole("link", { name: /打开下载页/ });
+      const expected = await reference.mobileClientsQr?.(id);
+      expect(link.getAttribute("href")).toBe(expected?.url);
+    }
   });
 
   it("底部问 AI：点击交给 App，Tab 顺序以它为最后一站", async () => {
@@ -155,6 +294,11 @@ describe("在手机上使用：弹层", () => {
     );
     expect(focusables[0]?.getAttribute("aria-label")).toBe("关闭");
     expect(focusables[focusables.length - 1]).toBe(ask);
+    expect(
+      focusables.filter((node) =>
+        node.classList.contains("mobile-export__client-row"),
+      ),
+    ).toHaveLength(3);
 
     fireEvent.click(ask);
     expect(onAskAi).toHaveBeenCalledTimes(1);
@@ -168,17 +312,43 @@ describe("在手机上使用：弹层", () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
 
-    fireEvent.click(await within(dialog).findByRole("button", { name: "复制链接" }));
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "复制链接" }),
+    );
 
     expect(await within(dialog).findByText("已复制")).toBeTruthy();
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(URL_WITH_TOKEN);
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(SINGBOX_URL);
   });
 
-  it("未登录：只有登录入口，没有复制与重新生成", async () => {
+  it("复制失败：原位提示，且不让令牌留在 DOM 里", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: vi.fn(async () => {
+          throw new Error("denied");
+        }),
+      },
+    });
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "复制链接" }),
+    );
+
+    expect(await within(dialog).findByText("复制失败")).toBeTruthy();
+    expect(document.querySelector("textarea")).toBeNull();
+    expect(document.body.textContent).not.toContain("secret-token");
+  });
+
+  it("未登录：切换器可用，只有登录入口", async () => {
     const bridge = makeBridge(async () => ({ state: "login_required" }));
     const { dialog, onLogin } = setup(bridge);
 
     expect(await within(dialog).findByText("先登录。")).toBeTruthy();
+    expect(
+      within(dialog).getByRole("group", { name: "导入格式" }),
+    ).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: /复制/ })).toBeNull();
     expect(within(dialog).queryByRole("button", { name: /重新生成/ })).toBeNull();
 
@@ -206,12 +376,37 @@ describe("在手机上使用：弹层", () => {
     const { dialog } = setup(bridge);
 
     expect(
-      await within(dialog).findByText("二维码暂时生成不了。"),
+      await within(dialog).findByText("这个格式暂时生成不了。"),
     ).toBeTruthy();
     fireEvent.click(within(dialog).getByRole("button", { name: "重试" }));
     expect(
       await within(dialog).findByRole("img", { name: "sing-box 导入二维码" }),
     ).toBeTruthy();
+  });
+
+  it("某个格式缺失：只影响该格式", async () => {
+    const onlySingbox: MobileExportData = {
+      state: "ok",
+      node_count: 1,
+      created_at: 1,
+      formats: [
+        { format: "singbox", url: SINGBOX_URL, qr_data_url: SINGBOX_QR },
+        { format: "ss", url: SS_URL, qr_data_url: null },
+      ],
+    };
+    const bridge = makeBridge(async () => onlySingbox);
+    const { dialog } = setup(bridge);
+
+    await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Clash" }));
+
+    expect(
+      within(dialog).getByText("这个格式暂时生成不了。"),
+    ).toBeTruthy();
+    expect(
+      within(dialog).queryByRole("img", { name: "Clash 导入二维码" }),
+    ).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "重试" })).toBeTruthy();
   });
 
   it("重新生成：就地确认，初始焦点在取消，Esc 只取消确认", async () => {
@@ -249,110 +444,6 @@ describe("在手机上使用：弹层", () => {
         "已重新生成；手机上的旧配置下次更新时失效。",
       ),
     ).toBeTruthy();
-  });
-
-  it("下载链接都指向官方客户端页，交给系统浏览器打开", async () => {
-    const bridge = makeBridge(async () => OK);
-    const { dialog } = setup(bridge);
-
-    const iphone = await within(dialog).findByRole("link", {
-      name: "查看 sing-box 的 iPhone 安装说明",
-    });
-    expect(iphone.textContent).toContain("官方下载页");
-    expect(iphone.getAttribute("href")).toBe(
-      "https://sing-box.sagernet.org/clients/",
-    );
-    fireEvent.click(iphone);
-    expect(bridge.openExternal).toHaveBeenCalledWith(
-      "https://sing-box.sagernet.org/clients/",
-    );
-    expect(
-      within(dialog).getByText("需要大陆以外的 Apple 账号。"),
-    ).toBeTruthy();
-    expect(
-      within(dialog).queryByText(
-        "需要大陆以外的 Apple 账号。页内有 App Store 入口。",
-      ),
-    ).toBeNull();
-
-    const android = within(dialog).getByRole("link", {
-      name: "查看 sing-box 的 Android 安装说明",
-    });
-    expect(android.getAttribute("href")).toBe(
-      "https://sing-box.sagernet.org/clients/",
-    );
-    fireEvent.click(android);
-    expect(bridge.openExternal).toHaveBeenCalledTimes(2);
-    expect(bridge.openExternal).toHaveBeenLastCalledWith(
-      "https://sing-box.sagernet.org/clients/",
-    );
-  });
-
-  it("下载码：图注在码上方，80 码区、读屏跳过", async () => {
-    const bridge = makeBridge(async () => OK);
-    const { dialog } = setup(bridge);
-
-    expect(await within(dialog).findByText("扫码下载")).toBeTruthy();
-    const img =
-      dialog.querySelector<HTMLImageElement>(".mobile-export__download-qr-img");
-    expect(img?.getAttribute("src")).toBe(DOWNLOAD_QR);
-    expect(img?.getAttribute("alt")).toBe("");
-    expect(img?.getAttribute("aria-hidden")).toBe("true");
-    expect(img?.getAttribute("width")).toBe("80");
-    expect(img?.getAttribute("height")).toBe("80");
-    expect(dialog.querySelector(".mobile-export__download-qr-box")).toBeTruthy();
-  });
-
-  it("下载码与账户态无关：未登录也显示，步骤 1 与问 AI 也在", async () => {
-    const bridge = makeBridge(async () => ({ state: "login_required" }));
-    const { dialog } = setup(bridge);
-
-    expect(await within(dialog).findByText("先登录。")).toBeTruthy();
-    expect(
-      dialog.querySelector(".mobile-export__download-qr-img"),
-    ).toBeTruthy();
-    expect(
-      within(dialog).getByRole("heading", { name: "安装客户端" }),
-    ).toBeTruthy();
-    expect(
-      within(dialog).getByRole("button", { name: "不会操作？问 AI" }),
-    ).toBeTruthy();
-  });
-
-  it("下载码读取失败：不留破图，只保留空位", async () => {
-    const bridge = makeBridge(
-      async () => OK,
-      async () => OK,
-      async () => {
-        throw { code: "TIMEOUT", message: "超时" };
-      },
-    );
-    const { dialog } = setup(bridge);
-
-    await within(dialog).findByRole("img", { name: "sing-box 导入二维码" });
-    expect(dialog.querySelector(".mobile-export__download-qr-box")).toBeTruthy();
-    expect(dialog.querySelector(".mobile-export__download-qr-img")).toBeNull();
-  });
-
-  it("复制失败：原位提示，且不让令牌留在 DOM 里", async () => {
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: {
-        writeText: vi.fn(async () => {
-          throw new Error("denied");
-        }),
-      },
-    });
-    const bridge = makeBridge(async () => OK);
-    const { dialog } = setup(bridge);
-
-    fireEvent.click(
-      await within(dialog).findByRole("button", { name: "复制链接" }),
-    );
-
-    expect(await within(dialog).findByText("复制失败")).toBeTruthy();
-    expect(document.querySelector("textarea")).toBeNull();
-    expect(document.body.textContent).not.toContain("secret-token");
   });
 });
 

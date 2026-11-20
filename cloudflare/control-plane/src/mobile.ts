@@ -67,11 +67,13 @@ function newToken(): string {
 }
 
 function missingKey(): Response {
-  return apiError("INTERNAL", "手机导出暂时不可用", {
-    retryable: true,
-    status: 503,
-    reason: "mobile_key_missing",
-  });
+  return noStore(
+    apiError("INTERNAL", "手机导出暂时不可用", {
+      retryable: true,
+      status: 503,
+      reason: "mobile_key_missing",
+    }),
+  );
 }
 
 /** 401 必须带 WWW-Authenticate：客户端靠它决定要不要重新携带 Basic。 */
@@ -179,7 +181,13 @@ async function createToken(
 
   const row = await readStoredToken(env.DB, identity.accountId);
   if (!row) {
-    return apiError("INTERNAL", "令牌创建失败", { retryable: true, status: 503, reason: "mobile_token_missing" });
+    return noStore(
+      apiError("INTERNAL", "令牌创建失败", {
+        retryable: true,
+        status: 503,
+        reason: "mobile_token_missing",
+      }),
+    );
   }
   const token = await openSecret(key, row);
   if (!token) return corruptToken();
@@ -245,7 +253,13 @@ async function rotateToken(
 
   const row = await readStoredToken(env.DB, identity.accountId);
   if (!row) {
-    return apiError("INTERNAL", "令牌创建失败", { retryable: true, status: 503, reason: "mobile_token_missing" });
+    return noStore(
+      apiError("INTERNAL", "令牌创建失败", {
+        retryable: true,
+        status: 503,
+        reason: "mobile_token_missing",
+      }),
+    );
   }
   const token = await openSecret(key, row);
   if (!token) return corruptToken();
@@ -263,17 +277,33 @@ async function rotateToken(
   return json({ token, created_at: Number(row.created_at), rotated_at: row.rotated_at ?? now });
 }
 
-/** 重名按出现顺序追加 ` (2)`、` (3)`，保证 JSON 里的 tag 唯一。 */
+/// 模板与客户端的保留名：节点名撞上它们会让整份配置被拒（sing-box 重复 tag、mihomo 内建策略组）。
+const RESERVED_TAGS: ReadonlySet<string> = new Set([
+  "proxy",
+  "direct",
+  "veyl",
+  "reject",
+  "pass",
+  "global",
+  "reject-drop",
+  "compatible",
+  "match",
+  "final",
+]);
+
+/** 重名按出现顺序追加 ` (2)`、` (3)`，并避开模板内建名；三种格式共用这一套。 */
 function uniqueTag(name: string, used: Set<string>): string {
   // 名字为空时仍要给出合法 tag，否则整份配置会因空标签被客户端拒绝。
   const base = name.trim() || "节点";
-  if (!used.has(base)) {
+  const taken = (candidate: string) =>
+    used.has(candidate) || RESERVED_TAGS.has(candidate.toLowerCase());
+  if (!taken(base)) {
     used.add(base);
     return base;
   }
   for (let index = 2; ; index += 1) {
     const candidate = `${base} (${index})`;
-    if (!used.has(candidate)) {
+    if (!taken(candidate)) {
       used.add(candidate);
       return candidate;
     }
@@ -284,11 +314,7 @@ function configResponse(config: unknown): Response {
   // 裸 sing-box 配置，不是 `{data:...}` 信封：官方客户端直接解析 body。
   return new Response(JSON.stringify(config, null, 2), {
     status: 200,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
-    },
+    headers: profileHeaders("application/json; charset=utf-8"),
   });
 }
 
@@ -299,18 +325,41 @@ interface CredentialSecret {
   method?: string;
 }
 
-async function profile(
+interface ExportedNode {
+  tag: string;
+  host: string;
+  port: number;
+  password: string;
+}
+
+interface LoadedProfile {
+  /**
+   * 查询命中且凭据有效的行数（JOIN 已排除缺失 / 已销毁的凭据）。
+   * 为 0 时按「没有可用服务器」返回 200 空态——服务器还在但凭据没了同样不算故障，
+   * 已销毁的服务器本就该从导出里消失。这是口径，不是 bug。
+   */
+  queried: number;
+  nodes: ExportedNode[];
+}
+
+/**
+ * 三种格式共用：Basic 认证、账户状态、共享限流预算、last_used_at 节流、
+ * 节点查询与命名去重。失败时直接返回错误信封。
+ */
+async function loadProfileNodes(
   request: Request,
   env: MobileEnv & { DB: D1Database },
-): Promise<Response> {
+): Promise<LoadedProfile | Response> {
   if (!env.MOBILE_TOKEN_ENC_KEY) return missingKey();
   const credentialKey = env.CREDENTIAL_ENC_KEY;
   if (!credentialKey) {
-    return apiError("INTERNAL", "手机导出暂时不可用", {
-      retryable: true,
-      status: 503,
-      reason: "credential_key_missing",
-    });
+    return noStore(
+      apiError("INTERNAL", "手机导出暂时不可用", {
+        retryable: true,
+        status: 503,
+        reason: "credential_key_missing",
+      }),
+    );
   }
 
   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
@@ -338,10 +387,10 @@ async function profile(
     return unauthorized("token_invalid");
   }
   if (row.merged_into) {
-    return apiError("FORBIDDEN", "账户已合并", { reason: "account_merged" });
+    return noStore(apiError("FORBIDDEN", "账户已合并", { reason: "account_merged" }));
   }
   if (row.status !== "active") {
-    return apiError("FORBIDDEN", "账户已被停用", { reason: "account_blocked" });
+    return noStore(apiError("FORBIDDEN", "账户已被停用", { reason: "account_blocked" }));
   }
   if (
     !(await bumpRateLimit(
@@ -372,7 +421,7 @@ async function profile(
     .bind(row.account_id)
     .all<NodeRow>();
 
-  const outbounds: ShadowsocksOutbound[] = [];
+  const exported: ExportedNode[] = [];
   const usedTags = new Set<string>();
   let skipped = 0;
 
@@ -398,12 +447,10 @@ async function profile(
       skipped += 1;
       continue;
     }
-    outbounds.push({
-      type: "shadowsocks",
+    exported.push({
       tag: uniqueTag(node.name, usedTags),
-      server: host,
-      server_port: secret.port,
-      method: SS_METHOD,
+      host,
+      port: secret.port,
       password: secret.password,
     });
   }
@@ -413,16 +460,116 @@ async function profile(
     console.warn(`[mobile] profile_skipped count=${skipped} account=${row.account_id.slice(0, 8)}`);
   }
 
-  if (outbounds.length === 0) {
-    // 查到了服务器却一台都导不出来：这是控制面/凭据故障，不是「用户没有节点」。
-    // 返回 503 让客户端保留旧配置；伪装成零节点会覆盖掉还能用的旧节点。
-    if (nodes.results.length > 0) {
-      return apiError("INTERNAL", "手机配置暂时无法生成", {
-        retryable: true,
-        status: 503,
-        reason: "mobile_profile_unavailable",
-      });
+  return { queried: nodes.results.length, nodes: exported };
+}
+
+/** 查到了服务器却一台都导不出来：控制面/凭据故障，不能伪装成「没有节点」。 */
+function unavailableProfile(): Response {
+  return noStore(
+    apiError("INTERNAL", "手机配置暂时无法生成", {
+      retryable: true,
+      status: 503,
+      reason: "mobile_profile_unavailable",
+    }),
+  );
+}
+
+function profileHeaders(contentType: string): Record<string, string> {
+  return {
+    "content-type": contentType,
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  };
+}
+
+/** 错误响应也不允许缓存：与成功、401、429 保持同一套头。 */
+function noStore(response: Response): Response {
+  response.headers.set("cache-control", "no-store");
+  response.headers.set("x-content-type-options", "nosniff");
+  return response;
+}
+
+/** JSON 双引号标量就是合法的 YAML 双引号标量；但 JSON.stringify 不管 U+2028/U+2029 与 NEL/DEL。 */
+function yamlScalar(value: string): string {
+  return JSON.stringify(value)
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029")
+    // NEL 在 YAML 1.1 是换行符，DEL 是控制字符；留在双引号标量里会被部分解析器当成断行/非法。
+    .replace(/\u0085/g, "\\u0085")
+    .replace(/\u007f/g, "\\u007f");
+}
+
+/** 最小 Clash 配置：只出节点、一个 select 组与一条兜底规则（§3.7.3）。 */
+function clashYaml(nodes: ExportedNode[]): string {
+  const lines: string[] = [];
+  if (nodes.length === 0) {
+    lines.push("proxies: []");
+    lines.push("proxy-groups: []");
+  } else {
+    lines.push("proxies:");
+    for (const node of nodes) {
+      lines.push(`  - name: ${yamlScalar(node.tag)}`);
+      lines.push("    type: ss");
+      lines.push(`    server: ${yamlScalar(node.host)}`);
+      lines.push(`    port: ${node.port}`);
+      lines.push(`    cipher: ${SS_METHOD}`);
+      lines.push(`    password: ${yamlScalar(node.password)}`);
+      lines.push("    udp: true");
     }
+    lines.push("proxy-groups:");
+    lines.push(`  - name: ${yamlScalar("Veyl")}`);
+    lines.push("    type: select");
+    lines.push("    proxies:");
+    for (const node of nodes) {
+      lines.push(`      - ${yamlScalar(node.tag)}`);
+    }
+  }
+  lines.push("rules:");
+  lines.push(`  - ${yamlScalar(nodes.length === 0 ? "MATCH,DIRECT" : "MATCH,Veyl")}`);
+  return `${lines.join("\n")}\n`;
+}
+
+/** RFC 3986 percent-encode：只保留 unreserved，空格是 %20 不是 +。 */
+function percentEncode(value: string): string {
+  let output = "";
+  for (const byte of new TextEncoder().encode(value)) {
+    const unreserved =
+      (byte >= 0x41 && byte <= 0x5a) ||
+      (byte >= 0x61 && byte <= 0x7a) ||
+      (byte >= 0x30 && byte <= 0x39) ||
+      byte === 0x2d ||
+      byte === 0x2e ||
+      byte === 0x5f ||
+      byte === 0x7e;
+    output += unreserved ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return output;
+}
+
+/** IPv6 必须加方括号再拼端口。 */
+function sip002Host(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+function ssLink(node: ExportedNode): string {
+  const userinfo = b64u(new TextEncoder().encode(`${SS_METHOD}:${node.password}`));
+  return `ss://${userinfo}@${sip002Host(node.host)}:${node.port}#${percentEncode(node.tag)}`;
+}
+
+/** SIP002，每节点一行；空态是 0 字节。 */
+function ssList(nodes: ExportedNode[]): string {
+  return nodes.length === 0 ? "" : `${nodes.map(ssLink).join("\n")}\n`;
+}
+
+async function singboxProfile(
+  request: Request,
+  env: MobileEnv & { DB: D1Database },
+): Promise<Response> {
+  const loaded = await loadProfileNodes(request, env);
+  if (isResponse(loaded)) return loaded;
+
+  if (loaded.nodes.length === 0) {
+    if (loaded.queried > 0) return unavailableProfile();
     // 真的没有可用服务器：零节点必须是合法配置而不是 4xx，否则客户端会保留旧节点。
     return configResponse({
       log: { level: "warn" },
@@ -430,6 +577,15 @@ async function profile(
       route: { final: "direct" },
     });
   }
+
+  const outbounds: ShadowsocksOutbound[] = loaded.nodes.map((node) => ({
+    type: "shadowsocks",
+    tag: node.tag,
+    server: node.host,
+    server_port: node.port,
+    method: SS_METHOD,
+    password: node.password,
+  }));
 
   return configResponse({
     log: { level: "warn" },
@@ -478,6 +634,32 @@ async function profile(
   });
 }
 
+async function clashProfile(
+  request: Request,
+  env: MobileEnv & { DB: D1Database },
+): Promise<Response> {
+  const loaded = await loadProfileNodes(request, env);
+  if (isResponse(loaded)) return loaded;
+  if (loaded.nodes.length === 0 && loaded.queried > 0) return unavailableProfile();
+  return new Response(clashYaml(loaded.nodes), {
+    status: 200,
+    headers: profileHeaders("text/yaml; charset=utf-8"),
+  });
+}
+
+async function ssProfile(
+  request: Request,
+  env: MobileEnv & { DB: D1Database },
+): Promise<Response> {
+  const loaded = await loadProfileNodes(request, env);
+  if (isResponse(loaded)) return loaded;
+  if (loaded.nodes.length === 0 && loaded.queried > 0) return unavailableProfile();
+  return new Response(ssList(loaded.nodes), {
+    status: 200,
+    headers: profileHeaders("text/plain; charset=utf-8"),
+  });
+}
+
 export async function handleMobile(
   request: Request,
   env: MobileEnv,
@@ -487,22 +669,34 @@ export async function handleMobile(
   if (parts[0] !== "v1" || parts[1] !== "mobile") return null;
 
   const post = request.method === "POST";
+  const profileFormat =
+    parts[2] === "profile" && request.method === "GET"
+      ? parts.length === 3
+        ? "singbox"
+        : parts.length === 4 && (parts[3] === "clash" || parts[3] === "ss")
+          ? parts[3]
+          : null
+      : null;
   const matched =
     (parts.length === 3 && parts[2] === "token" && post) ||
     (parts.length === 4 && parts[2] === "token" && parts[3] === "rotate" && post) ||
-    (parts.length === 3 && parts[2] === "profile" && request.method === "GET");
+    profileFormat !== null;
   if (!matched) return null;
 
   if (!env.DB) {
-    return apiError("INTERNAL", "服务还没准备好", {
-      retryable: true,
-      status: 503,
-      reason: "db_unavailable",
-    });
+    return noStore(
+      apiError("INTERNAL", "服务还没准备好", {
+        retryable: true,
+        status: 503,
+        reason: "db_unavailable",
+      }),
+    );
   }
   const ready: MobileEnv & { DB: D1Database } = { ...env, DB: env.DB };
 
-  if (parts[2] === "profile") return profile(request, ready);
+  if (profileFormat === "clash") return clashProfile(request, ready);
+  if (profileFormat === "ss") return ssProfile(request, ready);
+  if (profileFormat === "singbox") return singboxProfile(request, ready);
   if (parts.length === 4) return rotateToken(request, ready);
   return createToken(request, ready);
 }
