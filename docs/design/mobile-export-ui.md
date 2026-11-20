@@ -812,7 +812,7 @@
 |---|---|---|---|
 | **sing-box 官方（SFI / SFA）** | `https://sing-box.sagernet.org/clients/` | iOS / Android · `sing-box` | **上线** |
 | **Karing** | `https://karing.app` | 待架构师矩阵 | **隐藏**：矩阵确认能吃 sing-box JSON 后，与副行一起上线 |
-| **Hiddify** | `https://hiddify.com` | 待架构师矩阵 | **隐藏**：矩阵确认能吃 sing-box JSON 后，与副行一起上线 |
+| **Hiddify** | `https://github.com/hiddify/hiddify-app` | 待架构师矩阵 | **隐藏**：矩阵确认能吃 sing-box JSON 后，与副行一起上线 |
 | Shadowrocket / Clash Meta / Clash Verge / Stash | — | — | **隐藏**，等矩阵 |
 
 - **「地址已核实」不等于「能吃我们的格式」**：Karing / Hiddify 是基于 sing-box 内核，但内核相同不等于认这份 remote profile。上线条件只有一条：**矩阵确认能吃 sing-box JSON**。在此之前列表只放 sing-box 官方一行，宁少不多；空副行对外等于承诺「这个 App 可以用」，一旦用不了就是死链式的坏体验。
@@ -925,7 +925,7 @@
 | 行 | 平台 | 能吃格式 | 点击切到 | 下载地址 |
 |---|---|---|---|---|
 | **sing-box**（官方 SFI / SFA） | `iOS（大陆以外 Apple 账号）/ Android` | `sing-box` | `sing-box` | `https://sing-box.sagernet.org/clients/` |
-| **Hiddify** | `iOS / Android` | `sing-box` / `Clash` | `sing-box`（首选） | `https://hiddify.com` |
+| **Hiddify** | `iOS / Android` | `sing-box` / `Clash` | `sing-box`（首选） | `https://github.com/hiddify/hiddify-app` |
 | **Clash Meta for Android**（CMFA） | `Android` | `Clash` | `Clash` | `https://github.com/MetaCubeX/ClashMetaForAndroid/releases`（不锁具体 tag） |
 
 **不列的客户端（M1 不列，不是「以后可能加」）**
@@ -1144,7 +1144,7 @@
 | 下载码 | 104×104，同一白底规格；`alt=""` + `aria-hidden="true"`（`打开下载页` 是等价入口） |
 | 右列 | `还没装这个 App？` 12 / `--ink-3`；下行 `打开下载页 ↗` 13 / 500 / `--link`（`↗` `aria-hidden`） |
 | 可用性 | **与账号状态无关**，五态下都显示（下载不涉及节点，`mobile-export.md` §3） |
-| 地址 | sing-box：`https://sing-box.sagernet.org/clients/`；Shadowrocket：`https://apps.apple.com/us/app/shadowrocket/id932747118`；CMFA：`https://github.com/MetaCubeX/ClashMetaForAndroid/releases`（不锁 tag）；Hiddify：`https://hiddify.com` |
+| 地址 | sing-box：`https://sing-box.sagernet.org/clients/`；Shadowrocket：`https://apps.apple.com/us/app/shadowrocket/id932747118`；CMFA：`https://github.com/MetaCubeX/ClashMetaForAndroid/releases`（不锁 tag）；Hiddify：`https://github.com/hiddify/hiddify-app` |
 | 可达性 | GitHub 与 sing-box 官方页的 Android 渠道同级；界面**不额外提示**（沿用 `mobile-export.md` §10 第 4 条） |
 
 - **保持 104，不缩。** 内容是 38 个字符的 URL，104 是此前定的下限；白底码区再小时，手机在 25–30cm 处就有识别不稳的风险。布局放不下时**先减间距、不减码**——真机扫码失败一次的代价，远高于省下的十几像素。四条 App 行 + 兜底行让列表更长，也不能拿码的尺寸换空间。

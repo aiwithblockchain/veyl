@@ -1266,7 +1266,19 @@ type NetRepairResult = {
 
 用系统浏览器打开一个外链。**不是通用 URL 打开器。**
 
-- 只允许 **`https`**，且 host 命中 Host 侧白名单常量。当前白名单只有 DeepSeek 平台域名（用于「怎么拿 Key」的引导）。
+- 只允许 **`https`**，且 URL 必须命中 Host 侧的白名单常量（当前 6 条）：
+  - `https://platform.deepseek.com/`——「怎么拿 Key」的指引
+  - `https://sing-box.sagernet.org/`
+  - `https://github.com/MetaCubeX/ClashMetaForAndroid/`
+  - `https://github.com/hiddify/hiddify-app`
+  - `https://apps.apple.com/app/sing-box-mt`
+  - `https://apps.apple.com/us/app/shadowrocket`
+- 匹配是**前缀 + 路径段边界**，不是 host 相等、也不是域名后缀：`…/shadowrocket-other`、
+  `https://apps.apple.com.evil.test/` 都不命中；会被 URL 归一化改写的输入（`..`、`%2e`）
+  一律拒绝；带 userinfo 的 URL 匹配不到前缀；路径里与条目名相邻的段
+  （`…/hiddify-app@evil.test/`、`…/hiddify-app.evil.test/`）由段边界判据拒绝。
+- 条目本身即合法前缀：不带尾斜杠的条目（如 `https://github.com/hiddify/hiddify-app`）放行
+  自身、子路径（`…/hiddify-app/releases`）与 `?` / `#`；带尾斜杠的条目放行该路径下的一切。
 - 不在白名单 → `INVALID_ARGUMENT`，`details.reason = "url_not_allowed"`。
 - 不跟随、不代理、不预取；只把 URL 交给系统 opener。
 - 加域名必须改 Host 常量并同步本节——**不允许由前端或模型传任意域名**。
@@ -2023,11 +2035,11 @@ type MobileClientsQrData = {
 | `client` | `url` | 对应客户端 |
 |---|---|---|
 | `singbox` | `https://sing-box.sagernet.org/clients/` | sing-box 官方 SFI / SFA |
-| `hiddify` | `https://hiddify.com` | Hiddify |
+| `hiddify` | `https://github.com/hiddify/hiddify-app` | Hiddify |
 | `cmfa` | `https://github.com/MetaCubeX/ClashMetaForAndroid/releases` | Clash Meta for Android |
 | `shadowrocket` | `https://apps.apple.com/us/app/shadowrocket/id932747118` | Shadowrocket |
 
-> `hiddify` 的地址**以不带尾斜杠的 `https://hiddify.com` 为准**（与 Rust 固定映射一致）。调用方不要依赖尾斜杠；Host 侧按归一化后比较，`https://hiddify.com/` 视为同一个值。
+> `hiddify` 的地址**以不带尾斜杠的 `https://github.com/hiddify/hiddify-app` 为准**（与 Rust 固定映射一致）。调用方不要依赖尾斜杠；Host 侧 `https://github.com/hiddify/hiddify-app/` 与它的子路径同样放行，视为同一个入口。
 
 - `client` 缺失、类型不对或不在枚举内 → `INVALID_ARGUMENT`，`details.reason = "unknown_client"`；**不静默回退到默认值**，也不接受 URL / 其它字段。
 - **不登录、不调控制面、不涉及令牌**；命令始终可用，与账户状态、服务器状态无关。
@@ -2775,7 +2787,7 @@ type RulesStatus = {
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
 | 1 | 本文件版本升到 `2.47.0`；§7.21 `mobile_export_get` 的返回从单 URL 改为 `formats[]`（`singbox` / `clash` / `ss`），§7.22 `mobile_export_rotate` 同步。三种格式共用同一枚令牌；`/profile` 保持不变，新增 `/profile/clash`、`/profile/ss`。界面展示方式见第 5 行 | 返回结构变更 | 产品 2026-11-20；技术设计 §3.7 |
-| 2 | §7.23 `mobile_clients_qr` 由 `{}` 改为 `{ client: "singbox" \| "hiddify" \| "cmfa" \| "shadowrocket" }` → `{ url, qr_data_url }`；URL 在 Host 固定映射（`hiddify` 为不带尾斜杠的 `https://hiddify.com`），未知 id → `INVALID_ARGUMENT / unknown_client`，**不接受任意 URL** | 参数变更 | 产品 2026-11-20：四个 App 各出一个下载码 |
+| 2 | §7.23 `mobile_clients_qr` 由 `{}` 改为 `{ client: "singbox" \| "hiddify" \| "cmfa" \| "shadowrocket" }` → `{ url, qr_data_url }`；URL 在 Host 固定映射（`hiddify` 为不带尾斜杠的 `https://github.com/hiddify/hiddify-app`），未知 id → `INVALID_ARGUMENT / unknown_client`，**不接受任意 URL** | 参数变更 | 产品 2026-11-20：四个 App 各出一个下载码 |
 | 3 | 失效范围写死：rotate 让三个 URL 同时失效；`/profile/ss` 返回过、已被复制的节点链接携带节点密码，**不受轮换影响**，只有重建服务器能失效。界面安全文案不得写「重新生成后旧配置全部失效」 | 语义补充 | 真机/安全评审：令牌轮换只覆盖 URL |
 | 4 | 2.46.1 已于 2026-11-20 随 prod 上线；本版两项都是线上可见变更，**不并入 2.46.x** | 版本说明 | 产品 2026-11-20 |
 | 5 | §7.21 `ss.qr_data_url` 由 `null` 改为 URL 二维码（Shadowrocket 以「扫码 / 粘贴一条订阅 URL」导入）；客户端矩阵收敛为四个 App：sing-box 官方 / Shadowrocket / CMFA / Hiddify，格式由 App 内部映射，**删除两段格式切换器**。Shadowrocket 的 Basic 与返回体编码标「待真机验证」，带撤下条件 | 语义变更 | 产品 2026-11-20：Shadowrocket 进 M1，朋友可测 |

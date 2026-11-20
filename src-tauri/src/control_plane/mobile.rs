@@ -34,7 +34,7 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// 下载页 URL 的固定映射。命令只接受客户端 id，不接受调用方传 URL。
 pub const CLIENTS_URLS: [(&str, &str); 4] = [
     ("singbox", "https://sing-box.sagernet.org/clients/"),
-    ("hiddify", "https://hiddify.com"),
+    ("hiddify", "https://github.com/hiddify/hiddify-app"),
     (
         "cmfa",
         "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
@@ -646,7 +646,7 @@ mod tests {
     fn clients_qr_maps_each_client_to_its_fixed_url() {
         for (id, url) in [
             ("singbox", "https://sing-box.sagernet.org/clients/"),
-            ("hiddify", "https://hiddify.com"),
+            ("hiddify", "https://github.com/hiddify/hiddify-app"),
             (
                 "cmfa",
                 "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
@@ -687,7 +687,7 @@ mod tests {
         let value = serde_json::to_value(clients_qr("hiddify").unwrap()).unwrap();
         let object = value.as_object().unwrap();
         assert_eq!(object.len(), 2, "只有 url 与 qr_data_url");
-        assert_eq!(value["url"], "https://hiddify.com");
+        assert_eq!(value["url"], "https://github.com/hiddify/hiddify-app");
         assert!(value["qr_data_url"]
             .as_str()
             .unwrap()

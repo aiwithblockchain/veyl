@@ -87,7 +87,7 @@ const APPS: AppDef[] = [
     name: "Hiddify",
     meta: "iPhone / Android",
     format: "singbox",
-    url: "https://hiddify.com",
+    url: "https://github.com/hiddify/hiddify-app",
   },
 ];
 

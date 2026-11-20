@@ -694,7 +694,7 @@ M1 只对 **sing-box 官方 / Shadowrocket / CMFA / Hiddify** 四个 App 负责�
   - CMFA → `clash`；二维码 = `/profile/clash` 的 URL 本身（V13 判去留）；
   - Hiddify → `singbox`（备选 `clash`；界面默认取 `singbox`）。
 - 同一个弹层、同一枚令牌、同一个「重新生成」；切换 App 只换展示的 URL / 二维码，不重新请求。
-- 每个 App 一个下载码：`mobile_clients_qr { client }`，四个枚举 `singbox` / `hiddify` / `cmfa` / `shadowrocket`，URL 固定映射、不接受任意 URL（§5.1 / `commands.md` §7.23）。`hiddify` 以不带尾斜杠的 `https://hiddify.com` 为准。
+- 每个 App 一个下载码：`mobile_clients_qr { client }`，四个枚举 `singbox` / `hiddify` / `cmfa` / `shadowrocket`，URL 固定映射、不接受任意 URL（§5.1 / `commands.md` §7.23）。`hiddify` 以 `https://github.com/hiddify/hiddify-app` 为准（旧域名 `hiddify.com` 在大陆访问 TLS 被重置，2026-11-20 更换）。
 - `mobile_export_get` 的 `formats[]` 仍包含 `ss`；界面只取当前 App 对应的那一条，其余不渲染。
 - **安全文案边界**：不得写「重新生成后旧配置全部失效」这类绝对表述。准确说法是「旧链接失效，手机上的配置下次更新时不再可用」；`/profile/ss` 返回的节点链接一旦被复制/保存，**收不回**，只有重建服务器（换密码）才能让它失效。技术依据见 §3.7.4 / §7.3。
 
@@ -1036,7 +1036,7 @@ type MobileExportData =
 | `client` | URL |
 |---|---|
 | `singbox` | `https://sing-box.sagernet.org/clients/` |
-| `hiddify` | `https://hiddify.com` |
+| `hiddify` | `https://github.com/hiddify/hiddify-app` |
 | `cmfa` | `https://github.com/MetaCubeX/ClashMetaForAndroid/releases` |
 | `shadowrocket` | `https://apps.apple.com/us/app/shadowrocket/id932747118` |
 

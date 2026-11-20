@@ -44,7 +44,7 @@ describe("mock 手机端导出", () => {
       url: "https://sing-box.sagernet.org/clients/",
     });
     await expect(bridge.mobileClientsQr?.("hiddify")).resolves.toMatchObject({
-      url: "https://hiddify.com",
+      url: "https://github.com/hiddify/hiddify-app",
     });
     await expect(bridge.mobileClientsQr?.("cmfa")).resolves.toMatchObject({
       url: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",

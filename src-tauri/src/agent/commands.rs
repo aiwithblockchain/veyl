@@ -2055,18 +2055,21 @@ pub async fn list_pending_questions(session_id: String) -> Result<Value, Value> 
     Ok(crate::agent::questions::list_pending(&session_id))
 }
 
-/// `open_external` 的白名单：前缀匹配，且必须停在路径段边界；条目本身（裸 origin，
-/// 如 `https://hiddify.com`）按精确相等放行。
+/// `open_external` 的白名单：按前缀匹配，前缀必须停在路径段边界。
+///
+/// 条目本身就是合法前缀：不带尾斜杠的条目（如 `https://github.com/hiddify/hiddify-app`）放行它自己、
+/// 子路径以及 `?` / `#`；带尾斜杠的条目（如 `https://sing-box.sagernet.org/`）放行该路径
+/// 下的一切。相邻名字不算命中：`…/shadowrocket-other`、`…/hiddify-app-evil` 都拒绝。
 ///
 /// 不写「域名后缀」判断：`https://apps.apple.com.evil.test/` 会命中后缀规则。
-/// GitHub 只放开 ClashMetaForAndroid 仓库，不放开整个 `github.com`；App Store 只放开
-/// 列表里出现的两个 App，不放开整站。
+/// GitHub 只放开 ClashMetaForAndroid 与 hiddify-app 两个仓库，不放开整个 `github.com`；
+/// App Store 只放开列表里出现的两个 App，不放开整站。
 const OPEN_EXTERNAL_PREFIXES: [&str; 6] = [
     "https://platform.deepseek.com/",
     "https://apps.apple.com/app/sing-box-mt",
     "https://apps.apple.com/us/app/shadowrocket",
     "https://sing-box.sagernet.org/",
-    "https://hiddify.com/",
+    "https://github.com/hiddify/hiddify-app",
     "https://github.com/MetaCubeX/ClashMetaForAndroid/",
 ];
 
@@ -2079,7 +2082,7 @@ fn external_url_allowed(raw: &str) -> bool {
         return false;
     };
     let normalized = parsed.as_str();
-    // 只接受无需改写的输入；裸 origin 允许补一个尾部 `/`（hiddify 的下载页没有路径）。
+    // 只接受无需改写的输入；裸 origin 允许补一个尾部 `/`（如 `https://sing-box.sagernet.org`）。
     if raw != normalized && raw != normalized.trim_end_matches('/') {
         return false;
     }
@@ -3456,8 +3459,9 @@ mod open_external_tests {
             "https://apps.apple.com/us/app/shadowrocket/id932747118",
             "https://apps.apple.com/us/app/shadowrocket/id932747118/",
             "https://sing-box.sagernet.org/clients/",
-            "https://hiddify.com",
-            "https://hiddify.com/",
+            "https://github.com/hiddify/hiddify-app",
+            "https://github.com/hiddify/hiddify-app/",
+            "https://github.com/hiddify/hiddify-app/releases",
             "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
         ] {
             assert!(external_url_allowed(url), "{url}");
@@ -3472,7 +3476,16 @@ mod open_external_tests {
             "https://hiddify.com.evil.test/",
             "https://evil.test/https://apps.apple.com/",
             "http://apps.apple.com/app",
-            "http://hiddify.com",
+            // 旧域名与仿冒路径都不再放行。
+            "https://hiddify.com",
+            "https://hiddify.com/",
+            "http://github.com/hiddify/hiddify-app",
+            "https://github.com/evil/hiddify-app",
+            "https://github.com/hiddify",
+            "https://github.com/hiddify/other-app",
+            "https://github.com/hiddify/hiddify-app-evil",
+            "https://github.com/hiddify/hiddify-app@evil.test/",
+            "https://github.com/hiddify/hiddify-app.evil.test/",
             "https://github.com/other/repo",
             "https://github.com/MetaCubeX/sing-box/releases",
             // App Store 只放行两个 App，其它页面与相邻名字都不行。
@@ -3490,6 +3503,19 @@ mod open_external_tests {
             "",
         ] {
             assert!(!external_url_allowed(url), "{url}");
+        }
+    }
+
+    /// 「打开下载页」把固定映射的 URL 直接交给 `open_external`：两处必须同源，
+    /// 否则换域名只改一处，用户点了没反应。
+    #[test]
+    fn every_download_url_is_openable() {
+        for (client, url) in crate::control_plane::mobile::CLIENTS_URLS {
+            assert!(external_url_allowed(url), "{client} 的下载页 {url} 必须能打开");
+            assert!(
+                external_url_allowed(&format!("{url}/")),
+                "{client} 的尾斜杠写法也必须能打开"
+            );
         }
     }
 }
