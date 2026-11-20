@@ -129,7 +129,9 @@ export function MobileExport({
   const clientQrRef = useRef(clientQr);
   const loadingClientsRef = useRef<Set<MobileClientId>>(new Set());
   const rowRefs = useRef<Partial<Record<RowId, HTMLButtonElement | null>>>({});
+  const scrollRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const [showFade, setShowFade] = useState(false);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const rotateLinkRef = useRef<HTMLButtonElement>(null);
   const wasConfirmingRef = useRef(false);
@@ -178,6 +180,22 @@ export function MobileExport({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 可滚动且未到底时，页脚上方给一条渐隐，提示下面还有内容。
+  const updateFade = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setShowFade(
+      el.scrollHeight > el.clientHeight &&
+        el.scrollTop + el.clientHeight < el.scrollHeight,
+    );
+  }, []);
+
+  useEffect(() => {
+    updateFade();
+    window.addEventListener("resize", updateFade);
+    return () => window.removeEventListener("resize", updateFade);
+  }, [updateFade, openId, phase, confirming, rotated, rotateError, copyState]);
 
   useEffect(() => {
     if (confirming) {
@@ -315,11 +333,21 @@ export function MobileExport({
     </a>
   );
 
-  const importBlock = (app: AppDef) => {
+  const stepTitle = (app: AppDef) => (
+    <h3 className="mobile-export__step-title">
+      <span className="mobile-export__step-num" aria-hidden="true">
+        2
+      </span>
+      用 {app.name} 扫码导入
+    </h3>
+  );
+
+  const importStep = (app: AppDef) => {
     // 没有可用付费服务器：这一步不出现码位，说明与动作代替导入块。
     if (phase.kind === "no_ready_server") {
       return (
-        <>
+        <section className="mobile-export__step">
+          {stepTitle(app)}
           <p className="mobile-export__step-note">
             手机端只能导出你自己创建的付费节点。免费和试用节点不包含。
           </p>
@@ -332,13 +360,14 @@ export function MobileExport({
               去创建服务器
             </button>
           </div>
-        </>
+        </section>
       );
     }
 
     const entry = phase.kind === "ok" ? phase.formats[app.format] : undefined;
     let qr: ReactNode = null;
     let side: ReactNode = null;
+    let secure = false;
 
     if (phase.kind === "loading") {
       qr = <div className="mobile-export__qr-skeleton" />;
@@ -377,12 +406,13 @@ export function MobileExport({
         </>
       );
     } else {
+      secure = true;
       qr = (
         <img
           className="mobile-export__qr-img"
           src={entry.qr_data_url}
-          width={160}
-          height={160}
+          width={200}
+          height={200}
           alt="导入二维码"
         />
       );
@@ -449,29 +479,37 @@ export function MobileExport({
               {rotateError}
             </p>
           ) : null}
-          <p className="mobile-export__security">链接相当于密码，别转发。</p>
         </>
       );
     }
 
     const empty = qr === null;
     return (
-      <div className="mobile-export__import">
-        <div
-          className={`mobile-export__qr ${empty ? "is-empty" : ""}`.trim()}
-          aria-busy={phase.kind === "loading" ? true : undefined}
-        >
-          {qr}
+      <section className="mobile-export__step">
+        <div className="mobile-export__import">
+          <div
+            className={`mobile-export__qr ${empty ? "is-empty" : ""}`.trim()}
+            aria-busy={phase.kind === "loading" ? true : undefined}
+          >
+            {qr}
+          </div>
+          <div className="mobile-export__side">
+            {stepTitle(app)}
+            <div className="mobile-export__side-body">{side}</div>
+          </div>
         </div>
-        <div className="mobile-export__side">{side}</div>
-      </div>
+        {secure ? (
+          <p className="mobile-export__security">链接相当于密码，别转发。</p>
+        ) : null}
+      </section>
     );
   };
 
-  const downloadBlock = (app: AppDef) => {
+  // ① 是 ② 的前提：码 104 + 两行文字，块限宽 380，明显轻于主块。
+  const downloadStep = (app: AppDef) => {
     const data = clientQr[app.id];
     return (
-      <div className="mobile-export__download">
+      <section className="mobile-export__step mobile-export__step--compact">
         <div className="mobile-export__download-qr">
           {data ? (
             <img
@@ -484,10 +522,16 @@ export function MobileExport({
             />
           ) : null}
         </div>
-        <div className="mobile-export__download-side">
+        <div className="mobile-export__step-copy">
+          <h3 className="mobile-export__step-title">
+            <span className="mobile-export__step-num" aria-hidden="true">
+              1
+            </span>
+            还没有 App？先下载
+          </h3>
           {externalLink(data?.url ?? app.url, "打开下载页")}
         </div>
-      </div>
+      </section>
     );
   };
 
@@ -577,53 +621,46 @@ export function MobileExport({
           </button>
         </header>
 
-        <div className="mobile-export__body">
-          <p className="mobile-export__intro">
-            选你手机上用的 App，还没有就先装一个。
-          </p>
+        <div className="mobile-export__scroll">
+          <div
+            ref={scrollRef}
+            className="mobile-export__body"
+            onScroll={updateFade}
+          >
+            <p className="mobile-export__intro">
+              选你手机上用的 App，还没有就先装一个。
+            </p>
 
-          <ul className="mobile-export__apps">
-            {APPS.map((app) =>
-              renderRow(
-                app.id,
-                app.name,
-                app.meta,
-                <>
-                  <section className="mobile-export__step">
-                    <h3 className="mobile-export__step-title">
-                      <span className="mobile-export__step-num" aria-hidden="true">
-                        1
-                      </span>
-                      还没有 App？先下载
-                    </h3>
-                    {downloadBlock(app)}
-                  </section>
-                  <section className="mobile-export__step">
-                    <h3 className="mobile-export__step-title">
-                      <span className="mobile-export__step-num" aria-hidden="true">
-                        2
-                      </span>
-                      用 {app.name} 扫码导入
-                    </h3>
-                    {importBlock(app)}
-                  </section>
-                  {app.id === "shadowrocket" ? (
-                    <p className="mobile-export__row-note">
-                      用它只能全部走节点，国内网站也会绕道。
-                    </p>
-                  ) : null}
-                </>,
-              ),
-            )}
-            {renderRow(
-              OTHER_ID,
-              OTHER_NAME,
-              null,
-              <p className="mobile-export__fallback">
-                上面每一行点开都有下载入口；节点是同一份，换 App 不会丢。
-              </p>,
-            )}
-          </ul>
+            <ul className="mobile-export__apps">
+              {APPS.map((app) =>
+                renderRow(
+                  app.id,
+                  app.name,
+                  app.meta,
+                  <>
+                    {downloadStep(app)}
+                    {importStep(app)}
+                    {app.id === "shadowrocket" ? (
+                      <p className="mobile-export__row-note">
+                        用它只能全部走节点，国内网站也会绕道。
+                      </p>
+                    ) : null}
+                  </>,
+                ),
+              )}
+              {renderRow(
+                OTHER_ID,
+                OTHER_NAME,
+                null,
+                <p className="mobile-export__fallback">
+                  上面每一行点开都有下载入口；节点是同一份，换 App 不会丢。
+                </p>,
+              )}
+            </ul>
+          </div>
+          {showFade ? (
+            <div className="mobile-export__fade" aria-hidden="true" />
+          ) : null}
         </div>
 
         <footer className="mobile-export__footer">

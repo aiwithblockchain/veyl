@@ -318,7 +318,7 @@ describe("在手机上使用：按 App 分类", () => {
     }
   });
 
-  it("导入块：160 导入码 + 复制 / 重新生成 + 安全说明", async () => {
+  it("导入块：200 导入码 + 复制 / 重新生成，安全句在码正下方", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
 
@@ -327,16 +327,49 @@ describe("在手机上使用：按 App 分类", () => {
       name: "导入二维码",
     });
     expect(img.getAttribute("alt")).toBe("导入二维码");
-    expect(img.getAttribute("width")).toBe("160");
-    expect(img.getAttribute("height")).toBe("160");
+    expect(img.getAttribute("width")).toBe("200");
+    expect(img.getAttribute("height")).toBe("200");
     expect(
       within(dialog).getByRole("button", { name: "复制链接" }),
     ).toBeTruthy();
     expect(
       within(dialog).getByRole("button", { name: "重新生成" }),
     ).toBeTruthy();
+
+    const step = img.closest(".mobile-export__step") as HTMLElement;
+    const security = step.querySelector(".mobile-export__security");
+    expect(security?.textContent).toBe("链接相当于密码，别转发。");
+    // 图注紧跟导入块，且不在右列里。
     expect(
-      within(dialog).getByText("链接相当于密码，别转发。"),
+      security?.previousElementSibling?.classList.contains(
+        "mobile-export__import",
+      ),
+    ).toBe(true);
+    expect(
+      step.querySelector(".mobile-export__side")?.contains(security as Node),
+    ).toBe(false);
+  });
+
+  it("① 是紧凑行：码左、标题与下载链接在右", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "sing-box"));
+    await within(dialog).findByRole("img", { name: "导入二维码" });
+    const compact = dialog.querySelector(
+      ".mobile-export__step--compact",
+    ) as HTMLElement;
+    expect(compact).toBeTruthy();
+    expect(compact.querySelector(".mobile-export__download-qr")).toBeTruthy();
+    expect(compact.querySelector(".mobile-export__qr")).toBeNull();
+    const copy = compact.querySelector(
+      ".mobile-export__step-copy",
+    ) as HTMLElement;
+    expect(copy.querySelector(".mobile-export__step-title")?.textContent).toContain(
+      "还没有 App？先下载",
+    );
+    expect(
+      within(copy).getByRole("link", { name: /打开下载页/ }),
     ).toBeTruthy();
   });
 
@@ -369,6 +402,45 @@ describe("在手机上使用：按 App 分类", () => {
     );
     fireEvent.click(link);
     expect(bridge.openExternal).toHaveBeenCalledWith(CLIENT_URLS.cmfa);
+  });
+
+  it("渐隐只在可滚动且未到底时出现", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "sing-box"));
+    await within(dialog).findByRole("img", { name: "导入二维码" });
+    const body = dialog.querySelector(
+      ".mobile-export__body",
+    ) as HTMLElement;
+    Object.defineProperty(body, "scrollHeight", {
+      configurable: true,
+      value: 900,
+    });
+    Object.defineProperty(body, "clientHeight", {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(body, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    fireEvent.scroll(body);
+    expect(dialog.querySelector(".mobile-export__fade")).toBeTruthy();
+
+    body.scrollTop = 600;
+    fireEvent.scroll(body);
+    expect(dialog.querySelector(".mobile-export__fade")).toBeNull();
+
+    Object.defineProperty(body, "scrollHeight", {
+      configurable: true,
+      value: 300,
+    });
+    body.scrollTop = 0;
+    fireEvent.scroll(body);
+    expect(dialog.querySelector(".mobile-export__fade")).toBeNull();
   });
 
   it("页脚常驻：归属句与问 AI 都在滚动区之外", async () => {
