@@ -25,8 +25,8 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
-    OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    CreateFileW, FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE,
+    FILE_FLAG_OVERLAPPED, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId,
@@ -572,6 +572,12 @@ where
     let mut io = PipeIo(pipe.raw());
     let body = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
     let written = ipc::write_frame(&mut io, &body);
+    if written.is_ok() {
+        // `DisconnectNamedPipe` 会丢弃客户端还没读走的数据。回复写完必须等它读走：
+        // 否则下一次连接（状态轮询）抢先接入时，原连接的回复被丢掉，客户端读到 EOF，
+        // 报「与 Veyl 特权服务的连接失败」。
+        flush_reply(pipe);
+    }
 
     // 契约 §1.3：`start` 在时限内没能把回复写完（或客户端已断开）时必须回滚。
     // 回滚由调用方做——只有它知道刚才 spawn 了什么。
@@ -584,6 +590,38 @@ where
 
     written.map_err(|error| format!("写回复失败：{error}"))?;
     Ok(())
+}
+
+/// 等客户端把回复从管道里读走。
+///
+/// 失败（客户端已关闭 / 已断开）不需要处理：回滚判断看的是 `write_frame` 的结果。
+/// 上限 5 秒：客户端是已验证签名的本程序，正常情况下立刻读；超时只让这一条回复
+/// 可能丢失，不能把单线程的服务端锁死。
+fn flush_reply(pipe: &Handle) {
+    const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+    let thread = ThreadHandle(unsafe { OpenThread(THREAD_TERMINATE, 0, GetCurrentThreadId()) });
+    if thread.0.is_null() {
+        unsafe { FlushFileBuffers(pipe.raw()) };
+        return;
+    }
+    let thread_raw = thread.0 as usize;
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = done.clone();
+    let timer = std::thread::spawn(move || {
+        let deadline = Instant::now() + FLUSH_TIMEOUT;
+        while Instant::now() < deadline {
+            if flag.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !flag.load(Ordering::SeqCst) {
+            unsafe { CancelSynchronousIo(thread_raw as HANDLE) };
+        }
+    });
+    unsafe { FlushFileBuffers(pipe.raw()) };
+    done.store(true, Ordering::SeqCst);
+    let _ = timer.join();
 }
 
 /// 服务端首帧读取超时。
