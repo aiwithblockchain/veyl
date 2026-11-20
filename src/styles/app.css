@@ -6516,6 +6516,48 @@ details[open] > .settings-fold__summary::before {
   padding: 12px 0 16px;
 }
 
+/* 展开面板：① 先下载 → ② 再导入，编号与物理顺序一致。 */
+.mobile-export__step + .mobile-export__step {
+  margin-top: 20px;
+}
+
+.mobile-export__step-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--ink);
+}
+
+.mobile-export__step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--hair-strong);
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--ink-2);
+}
+
+.mobile-export__step-title + * {
+  margin-top: 8px;
+}
+
+.mobile-export__step-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
 .mobile-export__import {
   display: flex;
   align-items: flex-start;
@@ -6559,12 +6601,11 @@ details[open] > .settings-fold__summary::before {
   background: var(--bg-card);
 }
 
-/* 下载块：码图 104，白卡 128（码 + 两侧 12 静区），不描边。 */
+/* 下载块：码图 104，白卡 128（码 + 两侧 12 静区），与导入码同一套描边。 */
 .mobile-export__download {
   display: flex;
   align-items: center;
   gap: 16px;
-  margin-top: 20px;
 }
 
 .mobile-export__download-qr {
@@ -6572,6 +6613,7 @@ details[open] > .settings-fold__summary::before {
   width: 128px;
   height: 128px;
   padding: 12px;
+  border: 1px solid var(--hair);
   border-radius: 8px;
   background: #ffffff;
 }
@@ -6587,13 +6629,6 @@ details[open] > .settings-fold__summary::before {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-}
-
-.mobile-export__download-title {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ink-3);
 }
 
 /* 二维码永远是白底：功能需要，不跟随浅色 / 深色主题。 */

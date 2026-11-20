@@ -316,6 +316,26 @@ export function MobileExport({
   );
 
   const importBlock = (app: AppDef) => {
+    // 没有可用付费服务器：这一步不出现码位，说明与动作代替导入块。
+    if (phase.kind === "no_ready_server") {
+      return (
+        <>
+          <p className="mobile-export__step-note">
+            手机端只能导出你自己创建的付费节点。免费和试用节点不包含。
+          </p>
+          <div className="mobile-export__actions">
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={onGoServers}
+            >
+              去创建服务器
+            </button>
+          </div>
+        </>
+      );
+    }
+
     const entry = phase.kind === "ok" ? phase.formats[app.format] : undefined;
     let qr: ReactNode = null;
     let side: ReactNode = null;
@@ -337,24 +357,6 @@ export function MobileExport({
           <div className="mobile-export__actions">
             <button type="button" className="btn btn--ghost" onClick={onLogin}>
               登录
-            </button>
-          </div>
-        </>
-      );
-    } else if (phase.kind === "no_ready_server") {
-      side = (
-        <>
-          <p className="mobile-export__side-title">还没有可用的服务器。</p>
-          <p className="mobile-export__side-note">
-            先在「我的服务器」里创建一台，再回来扫码。
-          </p>
-          <div className="mobile-export__actions">
-            <button
-              type="button"
-              className="btn btn--ghost"
-              onClick={onGoServers}
-            >
-              去我的服务器
             </button>
           </div>
         </>
@@ -483,7 +485,6 @@ export function MobileExport({
           ) : null}
         </div>
         <div className="mobile-export__download-side">
-          <p className="mobile-export__download-title">还没装这个 App？</p>
           {externalLink(data?.url ?? app.url, "打开下载页")}
         </div>
       </div>
@@ -588,13 +589,29 @@ export function MobileExport({
                 app.name,
                 app.meta,
                 <>
-                  {importBlock(app)}
+                  <section className="mobile-export__step">
+                    <h3 className="mobile-export__step-title">
+                      <span className="mobile-export__step-num" aria-hidden="true">
+                        1
+                      </span>
+                      还没有 App？先下载
+                    </h3>
+                    {downloadBlock(app)}
+                  </section>
+                  <section className="mobile-export__step">
+                    <h3 className="mobile-export__step-title">
+                      <span className="mobile-export__step-num" aria-hidden="true">
+                        2
+                      </span>
+                      用 {app.name} 扫码导入
+                    </h3>
+                    {importBlock(app)}
+                  </section>
                   {app.id === "shadowrocket" ? (
                     <p className="mobile-export__row-note">
                       用它只能全部走节点，国内网站也会绕道。
                     </p>
                   ) : null}
-                  {downloadBlock(app)}
                 </>,
               ),
             )}

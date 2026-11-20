@@ -261,7 +261,7 @@ describe("在手机上使用：按 App 分类", () => {
       [
         "无服务器",
         async () => ({ state: "no_ready_server" }),
-        "还没有可用的服务器。",
+        "手机端只能导出你自己创建的付费节点。免费和试用节点不包含。",
       ],
       [
         "失败",
@@ -284,6 +284,40 @@ describe("在手机上使用：按 App 分类", () => {
     }
   });
 
+  it("展开后是两个编号步骤：① 先下载、② 再导入，标题带 App 名", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "sing-box"));
+    const titles = Array.from(
+      dialog.querySelectorAll(".mobile-export__step-title"),
+    );
+    expect(titles).toHaveLength(2);
+    expect(titles[0]?.textContent).toContain("还没有 App？先下载");
+    expect(titles[1]?.textContent).toContain("用 sing-box 扫码导入");
+    const numbers = titles.map(
+      (title) => title.querySelector(".mobile-export__step-num")?.textContent,
+    );
+    expect(numbers).toEqual(["1", "2"]);
+    for (const title of titles) {
+      expect(
+        title.querySelector(".mobile-export__step-num")?.getAttribute(
+          "aria-hidden",
+        ),
+      ).toBe("true");
+    }
+
+    for (const name of [
+      "Shadowrocket",
+      "Clash Meta for Android",
+      "Hiddify",
+    ]) {
+      fireEvent.click(row(dialog, name));
+      const next = dialog.querySelectorAll(".mobile-export__step-title");
+      expect(next[1]?.textContent).toContain(`用 ${name} 扫码导入`);
+    }
+  });
+
   it("导入块：160 导入码 + 复制 / 重新生成 + 安全说明", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
@@ -294,6 +328,7 @@ describe("在手机上使用：按 App 分类", () => {
     });
     expect(img.getAttribute("alt")).toBe("导入二维码");
     expect(img.getAttribute("width")).toBe("160");
+    expect(img.getAttribute("height")).toBe("160");
     expect(
       within(dialog).getByRole("button", { name: "复制链接" }),
     ).toBeTruthy();
@@ -324,7 +359,9 @@ describe("在手机上使用：按 App 分类", () => {
     expect(img?.getAttribute("width")).toBe("104");
     expect(img?.getAttribute("height")).toBe("104");
     expect(dialog.querySelector(".mobile-export__download-qr")).toBeTruthy();
-    expect(within(dialog).getByText("还没装这个 App？")).toBeTruthy();
+    expect(
+      within(dialog).getByRole("heading", { name: "还没有 App？先下载" }),
+    ).toBeTruthy();
 
     const link = within(dialog).getByRole("link", { name: /打开下载页/ });
     await waitFor(() =>
@@ -447,19 +484,36 @@ describe("在手机上使用：按 App 分类", () => {
     expect(onLogin).toHaveBeenCalled();
   });
 
-  it("没有可用服务器：给「去我的服务器」，下载块照常", async () => {
+  it("没有可用付费服务器：① 照常，② 只给说明与「去创建服务器」", async () => {
     const bridge = makeBridge(async () => ({ state: "no_ready_server" }));
     const { dialog, onGoServers } = setup(bridge);
 
     fireEvent.click(row(dialog, "Hiddify"));
-    expect(await within(dialog).findByText("还没有可用的服务器。")).toBeTruthy();
     expect(
-      within(dialog).getByText("先在「我的服务器」里创建一台，再回来扫码。"),
+      await within(dialog).findByText(
+        "手机端只能导出你自己创建的付费节点。免费和试用节点不包含。",
+      ),
+    ).toBeTruthy();
+    // ① 装 App 与服务器状态无关：下载码与链接照常。
+    expect(
+      within(dialog).getByRole("heading", { name: "还没有 App？先下载" }),
     ).toBeTruthy();
     expect(within(dialog).getByRole("link", { name: /打开下载页/ })).toBeTruthy();
+    // ② 不出现空码位、骨架、复制或重新生成。
+    expect(dialog.querySelector(".mobile-export__qr")).toBeNull();
+    expect(dialog.querySelector(".mobile-export__qr-skeleton")).toBeNull();
+    expect(
+      within(dialog).queryByRole("img", { name: "导入二维码" }),
+    ).toBeNull();
+    expect(
+      within(dialog).queryByRole("button", { name: /复制/ }),
+    ).toBeNull();
+    expect(
+      within(dialog).queryByRole("button", { name: "重新生成" }),
+    ).toBeNull();
 
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "去我的服务器" }),
+      within(dialog).getByRole("button", { name: "去创建服务器" }),
     );
     expect(onGoServers).toHaveBeenCalled();
   });
@@ -548,9 +602,9 @@ describe("在手机上使用：按 App 分类", () => {
     const copy = within(dialog).getByRole("button", { name: "复制链接" });
     const rotate = within(dialog).getByRole("button", { name: "重新生成" });
     const download = within(dialog).getByRole("link", { name: /打开下载页/ });
-    expect(index(copy)).toBe(2);
-    expect(index(rotate)).toBe(3);
-    expect(index(download)).toBe(4);
+    expect(index(download)).toBe(2);
+    expect(index(copy)).toBe(3);
+    expect(index(rotate)).toBe(4);
     expect(index(row(dialog, "Shadowrocket"))).toBe(5);
   });
 
