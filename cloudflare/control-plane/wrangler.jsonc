@@ -35,17 +35,19 @@
 		"DODO_TOPUP_PRODUCT_IDS": "{\"1000\":\"pdt_0Ns2WjoaqgohcfZ9r254A\",\"2000\":\"pdt_0Ns2Wjd7xrFjmLr2oZvnL\",\"5000\":\"pdt_0Ns2Wj265kTDA5UA0JmkG\",\"10000\":\"pdt_0Ns2WicUqf6BC786Vv0xG\"}",
 		// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
 		"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":20,\"s-1vcpu-1gb\":30,\"s-1vcpu-2gb\":60}",
-		"APP_PAYMENT_RETURN_URL": "https://veyl.dessage.xyz/payment/return"
+		"APP_PAYMENT_RETURN_URL": "https://veyl.dessage.xyz/"
 	},
 	// Secrets（通过 wrangler secret put 设置，不写在此文件）：
 	// - DO_API_TOKEN（DigitalOcean；缺省时 /v1/catalog 返回 503）
-	// - VULTR_API_KEY（历史遗留，仅旧调试路由使用；供应商已换 DO）
+	// - VULTR_API_KEY（历史遗留，已无路由使用；可从两个 Worker 上删除）
 	// - DODO_API_KEY / DODO_WEBHOOK_SECRET（dev、prod 各一套，test 与 live 不混用）
 	// - RESEND_API_KEY / RESEND_FROM_EMAIL（邮箱验证码）
 	"env": {
 		// 开发 / 联调环境。部署：npm run deploy:dev
+		// main 指向 dev 入口：只有这里装配 /v1/debug/*，生产入口不 import 它。
 		"dev": {
 			"name": "veyl-control-plane-dev",
+			"main": "src/dev.ts",
 			"vars": {
 				"ENVIRONMENT": "dev",
 				"ENROLL_BASE_URL": "https://cp-dev.veyl.dessage.xyz",

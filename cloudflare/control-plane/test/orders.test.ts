@@ -16,7 +16,7 @@ async function signingJwk(): Promise<string> {
 }
 
 async function envWith(db: FakeD1, jwk: string) {
-  db.rows("accounts").push({ id: ACCOUNT, status: "active" });
+  db.rows("accounts").push({ id: ACCOUNT, kind: "email", status: "active" });
   db.rows("devices").push({ id: DEVICE, account_id: ACCOUNT, revoked_at: null });
   const token = await signAccessToken(jwk, {
     sub: ACCOUNT,

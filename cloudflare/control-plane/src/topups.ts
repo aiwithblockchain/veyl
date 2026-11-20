@@ -44,7 +44,9 @@ export async function startTopupSession(
   const now = Date.now();
 
   const mode = input.mode ?? "dodo";
-  if (mode === "fake" && env.ENVIRONMENT === "production") return { ok: false, reason: "fake_not_allowed" };
+  // 白名单式：只有明确是 dev 才允许 fake 入账。变量缺失或拼错一律拒绝，
+  // 不能写成「等于 production 才拒绝」——那样配置一抖就直接放行。
+  if (mode === "fake" && env.ENVIRONMENT !== "dev") return { ok: false, reason: "fake_not_allowed" };
 
   // 先落 pending 行再开收银台：webhook 可能比建会话的响应先到，先有行才匹配得上。
   await db

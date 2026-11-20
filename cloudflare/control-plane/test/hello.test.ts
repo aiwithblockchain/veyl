@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { route } from "../src/index";
+import devWorker from "../src/dev";
 import { FakeD1 } from "./helpers/fakeD1";
+
+// 调试路由只装在 dev 入口；其余路径由 dev 入口原样转交生产入口。
+const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+const route = (request: Request, env: unknown) => devWorker.fetch(request, env as never, ctx);
 
 const env = { ENVIRONMENT: "test" };
 
@@ -33,74 +37,6 @@ describe("control plane hello", () => {
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("not_found");
-  });
-});
-
-describe("vultr debug route", () => {
-  it("生产环境不暴露调试路由", async () => {
-    const res = await route(new Request("https://example.com/v1/debug/vultr"), {
-      ENVIRONMENT: "production",
-      VULTR_API_KEY: "key",
-    });
-    expect(res.status).toBe(404);
-  });
-
-  it("dev 但没有 secret 时返回 500", async () => {
-    const res = await route(new Request("https://example.com/v1/debug/vultr"), {
-      ENVIRONMENT: "dev",
-    });
-    expect(res.status).toBe(500);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe("missing_secret");
-  });
-
-  it("dev 命中 Vultr 时只返回账户摘要，不含邮箱", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(
-          JSON.stringify({
-            account: {
-              name: "Wesley",
-              email: "secret@example.com",
-              balance: "12.34",
-              pending_charges: "0.01",
-            },
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
-      ),
-    );
-
-    const res = await route(new Request("https://example.com/v1/debug/vultr"), {
-      ENVIRONMENT: "dev",
-      VULTR_API_KEY: "key",
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      ok: boolean;
-      account: Record<string, string>;
-    };
-    expect(body.ok).toBe(true);
-    expect(body.account.name).toBe("Wesley");
-    expect(body.account.balance).toBe("12.34");
-    expect(JSON.stringify(body)).not.toContain("secret@example.com");
-  });
-
-  it("Vultr 拒绝时返回 502 且带上游错误", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("unauthorized", { status: 401 })),
-    );
-
-    const res = await route(new Request("https://example.com/v1/debug/vultr"), {
-      ENVIRONMENT: "dev",
-      VULTR_API_KEY: "bad",
-    });
-    expect(res.status).toBe(502);
-    const body = (await res.json()) as { ok: boolean; status: number };
-    expect(body.ok).toBe(false);
-    expect(body.status).toBe(401);
   });
 });
 

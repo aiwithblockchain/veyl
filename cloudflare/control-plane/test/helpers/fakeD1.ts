@@ -1026,6 +1026,12 @@ export class FakeD1 {
       }
       return null;
     }
+    if (sql.startsWith("select iv, ciphertext from credentials where server_id")) {
+      const found = this.tables.credentials.find(
+        (c) => c.server_id === a[0] && (c.destroyed_at ?? null) === null,
+      );
+      return found ? { iv: found.iv, ciphertext: found.ciphertext } : null;
+    }
 
     if (sql.startsWith("insert or ignore into payments")) {
       if (this.tables.payments.some((p) => p.id === a[0])) return null;

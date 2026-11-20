@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { route } from "../src/index";
+import devWorker from "../src/dev";
+import type { Env } from "../src/index";
 
-type Env = Parameters<typeof route>[1];
+const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+const route = (request: Request, env: Env) => devWorker.fetch(request, env, ctx);
 
 function envWith(
   options: { firewallId?: string | null; found?: boolean; withDb?: boolean } = {},
