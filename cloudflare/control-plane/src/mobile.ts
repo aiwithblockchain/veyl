@@ -446,11 +446,12 @@ async function profile(
         type: "tun",
         tag: "tun-in",
         address: ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+        // stack 不能省：默认值下 Apple 平台的 TCP 走内核 NAT，握手不完成（桌面端同源结论）。
+        stack: "gvisor",
         mtu: 9000,
         dns_mode: "hijack",
         dns_address: ["172.18.0.2", "fdfe:dcba:9876::2"],
         auto_route: true,
-        strict_route: true,
       },
     ],
     outbounds: [
@@ -467,7 +468,12 @@ async function profile(
       final: "proxy",
       // TUN 入站 + 代理出站必须打开：否则出站 socket 不绑定物理网卡，会被路由回隧道。
       auto_detect_interface: true,
-      rules: [{ protocol: "dns", action: "hijack-dns" }],
+      // 顺序不可变：sniff 必须在 hijack-dns 之前，否则 `protocol: "dns"` 永不命中，
+      // DNS 查询会被 final=proxy 原样送进隧道（桌面端同源规则，静默失效不报错）。
+      rules: [
+        { action: "sniff", sniffer: ["http", "tls", "quic", "dns"], timeout: "300ms" },
+        { protocol: "dns", action: "hijack-dns" },
+      ],
     },
   });
 }

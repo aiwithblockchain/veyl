@@ -334,11 +334,11 @@ interface MobileConfig {
     type: string;
     tag: string;
     address: string[];
+    stack: string;
     mtu: number;
     dns_mode: string;
     dns_address: string[];
     auto_route: boolean;
-    strict_route: boolean;
   }>;
   outbounds: Array<{
     type: string;
@@ -350,7 +350,16 @@ interface MobileConfig {
     outbounds?: string[];
     default?: string;
   }>;
-  route: { final: string; rules?: Array<{ protocol: string; action: string }> };
+  route: {
+    final: string;
+    auto_detect_interface?: boolean;
+    rules?: Array<{
+      action: string;
+      protocol?: string;
+      sniffer?: string[];
+      timeout?: string;
+    }>;
+  };
 }
 
 describe("POST /v1/mobile/token", () => {
@@ -556,7 +565,10 @@ describe("GET /v1/mobile/profile", () => {
     expect(config.route).toEqual({
       final: "proxy",
       auto_detect_interface: true,
-      rules: [{ protocol: "dns", action: "hijack-dns" }],
+      rules: [
+        { action: "sniff", sniffer: ["http", "tls", "quic", "dns"], timeout: "300ms" },
+        { protocol: "dns", action: "hijack-dns" },
+      ],
     });
     // 手机 DNS 常指向 LAN 路由器：DoH 必须走 proxy 从服务端出网。
     expect(config.dns).toEqual({
@@ -569,9 +581,13 @@ describe("GET /v1/mobile/profile", () => {
       type: "tun",
       tag: "tun-in",
       address: ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+      stack: "gvisor",
       dns_mode: "hijack",
       auto_route: true,
     });
+    // sniff 必须在 hijack-dns 之前：顺序反了 `protocol: "dns"` 永不命中，静默失效。
+    const actions = config.route.rules!.map((rule) => rule.action);
+    expect(actions.indexOf("sniff")).toBeLessThan(actions.indexOf("hijack-dns"));
   });
 
   it("查询到服务器但全部不可用时 503，不伪装成零节点", async () => {

@@ -3,7 +3,7 @@
 > 日期：2026-11-19
 > 状态：**技术设计，待评审**。只出文档：不改代码、不改共享契约文件、不改其它设计稿、不提交。
 > 上游：`mobile-export.md`（需求）、`mobile-export-ui.md`（界面定稿）、`my-servers.md` §16 / §17（凭据模型、用户无 SSH）、`login-and-payment.md` §2.5（令牌模型）、`environments.md`
-> 事实边界：sing-box 配置形状已于 2026-11-19 用随包 `sing-box 1.14.4` 的 `check` 在本地实测通过（§3.6，含最小 TUN 入站、最小 DNS 与零节点样张）；真机先后暴露「无 DNS 时 VPN 已连、无法上网」「无 TUN 入站时已连接但流量为 0」「有 TUN 但仍无法出网（出站未绑定物理网卡）」三种现象，据此依次改写模板；TUN 是否创建系统隧道由官方客户端源码确认（§3.5）。**修复后的真机复验（Wi-Fi / 蜂窝）尚未执行**（V8 / V12）。客户端扫码、Basic 认证、自动更新等外部行为沿用需求文档的「待验证」，本文件 §8 给出可执行步骤，**不凭记忆断言**。
+> 事实边界：sing-box 配置形状已于 2026-11-19 用随包 `sing-box 1.14.4` 的 `check` 在本地实测通过（§3.6，含最小 TUN 入站、最小 DNS 与零节点样张）；真机先后暴露「无 DNS 时 VPN 已连、无法上网」「无 TUN 入站时已连接但流量为 0」「有 TUN 但仍无法出网（出站未绑定物理网卡）」「有计数、能测速、仍打不开网页（缺 `stack` / 缺 `sniff`、多带 `strict_route`）」四种现象，据此依次改写模板；TUN 是否创建系统隧道由官方客户端源码确认（§3.5）。**2026-11-20：四项修复后在 iPhone 上确认可打开网页（Wi-Fi）；蜂窝网络复验尚未执行**（V12）。客户端扫码、Basic 认证、自动更新等外部行为沿用需求文档的「待验证」，本文件 §8 给出可执行步骤，**不凭记忆断言**。
 > 契约增量：全部写在本文件 §5 / §6，不直接改 `docs/contracts/*`，由 PM 统一集成。
 
 ---
@@ -259,11 +259,11 @@ ORDER BY s.created_at ASC, s.id ASC
       "type": "tun",
       "tag": "tun-in",
       "address": ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
+      "stack": "gvisor",
       "mtu": 9000,
       "dns_mode": "hijack",
       "dns_address": ["172.18.0.2", "fdfe:dcba:9876::2"],
-      "auto_route": true,
-      "strict_route": true
+      "auto_route": true
     }
   ],
   "outbounds": [
@@ -286,7 +286,10 @@ ORDER BY s.created_at ASC, s.id ASC
   "route": {
     "final": "proxy",
     "auto_detect_interface": true,
-    "rules": [{ "protocol": "dns", "action": "hijack-dns" }]
+    "rules": [
+      { "action": "sniff", "sniffer": ["http", "tls", "quic", "dns"], "timeout": "300ms" },
+      { "protocol": "dns", "action": "hijack-dns" }
+    ]
   }
 }
 ```
@@ -296,7 +299,9 @@ ORDER BY s.created_at ASC, s.id ASC
   - 官方客户端**不会**替 profile 注入 TUN。sing-box-for-apple 的 `ExtensionPlatformInterface.openTun` 与 SFA 的 `VPNService.openTun` 都只在配置里存在 TUN 入站时才创建系统隧道；没有 `inbounds` 时客户端仍显示「已连接」，但流量计数为 0、任何地址都打不开。
   - `auto_route: true` 是让客户端设置 NetworkExtension / VpnService 路由与 MTU 的前提；缺了它同样会出现「连上但不接管流量」。
   - `dns_mode: "hijack"` + `dns_address` 成组出现：`dns_address` 声明隧道内使用的 DNS 地址，hijack 让 sing-box 在 TUN 上接管发往这些地址的查询，交给上方的 `dns` 模块处理。
-  - `address` 用 IPv4 + IPv6 各一段（`172.18.0.1/30`、`fdfe:dcba:9876::1/126`），`mtu` 9000，`strict_route: true`：按客户端源码的默认形状固定；`strict_route` 的平台行为没有单独拆测，由 V8 覆盖。
+  - `address` 用 IPv4 + IPv6 各一段（`172.18.0.1/30`、`fdfe:dcba:9876::1/126`），`mtu` 9000。
+  - **`stack: "gvisor"` 必须显式写**：不写时 Apple 平台 TCP 走内核 NAT、握手不完成（桌面端 2026-11-09 同源实测）。这是 2026-11-20 真机修复的三项之一。
+  - **不导出 `strict_route`**：桌面只在 Windows 上打开它（WFP 挡泄漏）；Apple 平台上它可能把代理自身的出站连接也纳入隧道，形成「有流量、出不去」。手机模板不再带这个字段。
   - 这里导出的是**最小移动端 TUN**；桌面的 TUN 参数（`route_exclude_address`、`interface_name`、平台专属字段）不导出（见下表）。
 - **`route.auto_detect_interface` 必须为 `true`（TUN + 代理出站的必需组合）**：
   - 该字段默认 `false`，libbox 不会替 profile 打开它。
@@ -305,7 +310,8 @@ ORDER BY s.created_at ASC, s.id ASC
 - **DNS 必须导出（真机实测覆盖了初版的「不导出 DNS」）**：
   - 手机的 DNS 通常指向所在 LAN 的路由器（`192.168.x.1` 之类）。没有 DNS 块时，`route.final = "proxy"` 会把这些 DNS 查询送进隧道，服务端再把它发往**自己的** LAN，自然解析失败——真机表现是「VPN 已连接、网页打不开」。
   - `dns.servers` 用 **DoH（`type: "https"`）+ `detour: "proxy"`**：解析请求经代理从服务端出网，不再依赖手机所在 LAN 的 DNS 服务器；也不依赖 UDP 53，减少部分网络对 UDP / 非标端口的拦截与劫持影响。
-  - `route.rules` 的 **`hijack-dns`** 用于把客户端发出的 DNS 查询交给这份 `dns` 配置处理；没有它，查询可能仍按手机原设置走 LAN。真机验证的是「DNS 块 + `hijack-dns`」整组组合，两项各自的单独行为没有拆测。
+  - `route.rules` 的 **`hijack-dns`** 用于把客户端发出的 DNS 查询交给这份 `dns` 配置处理；没有它，查询可能仍按手机原设置走 LAN。
+  - **`hijack-dns` 之前必须有 `sniff`（sniffer 含 `dns`），顺序不可颠倒**：`protocol: "dns"` 靠嗅探结果匹配，没有 `sniff` 时这条规则永不命中，`hijack-dns` 成为死代码，DNS 又被 `final = proxy` 送进隧道。**这种失效不报错、`sing-box check` 也通过**，只能靠真机发现（2026-11-20 真机根因）。
   - `dns.final = "dns"` 让未命中其它服务器的查询统一走 DoH；本配置不声明分流规则集，也没有其它 DNS 服务器。
   - `1.1.1.1` 是 IP，不需要 bootstrap；它的可达性由**服务端出口**决定，与手机所在网络无关（服务端侧已验证 DoH 可用，§3.6）。
 - **只有 selector，不加 urltest**：urltest 需要一个探测 URL。sing-box 默认用 `https://www.gstatic.com/generate_204`，这个地址在大陆的可达性**未核实**（待验证，不凭印象断言）；一旦不可达，urltest 会把所有节点误判为不可用，反而制造「全部失效」。M1 用 selector 把选择权交给用户，等有了自己可验证的健康端点再评估自动切换，属 v2。
@@ -313,7 +319,7 @@ ORDER BY s.created_at ASC, s.id ASC
 
 | 不导出 | 原因 |
 |---|---|
-| 桌面 TUN 参数（`route_exclude_address` / `interface_name` / `stack` / 平台专属字段） | 手机客户端自己创建并命名接口；桌面的排除表是本机 LAN 的，带过去会漏掉手机所在网络。只导出上表的最小 TUN |
+| 桌面 TUN 参数（`route_exclude_address` / `interface_name` / 平台专属字段） | 手机客户端自己创建并命名接口；桌面的排除表是本机 LAN 的，带过去会漏掉手机所在网络。`stack` 例外：它以 `gvisor` 显式导出，理由见 §3.2 |
 | `mixed` 入站 / `listen` / 本地端口 | 手机没有「本机代理端口」这个概念；只保留 TUN 入站 |
 | Clash API / `experimental` | 客户端内部使用；导出会把桌面端的控制面暴露出去，且没有消费方 |
 | 系统代理设置 | 那是桌面模式，不是配置内容 |
@@ -344,7 +350,7 @@ ORDER BY s.created_at ASC, s.id ASC
 - **不带 DNS**：非零模板的 DoH 服务器带 `detour: "proxy"`，而零节点没有 `proxy` 这个 outbound；把 DNS 一起带过去就是一条指向不存在 outbound 的悬空引用。
 - 规则：
   - 零节点：只有 `direct`，`route.final = "direct"`，**无 `inbounds`、无 `dns`、无 `route.rules`，也不设 `auto_detect_interface`**；
-  - 非零节点：**TUN 入站 + `auto_detect_interface: true` + `dns` + `hijack-dns` 必须同时出现**，`detour` 只能指向实际存在的 `proxy`。
+  - 非零节点：**TUN 入站（含 `stack: "gvisor"`）+ `auto_detect_interface: true` + `dns` + `sniff` 规则 + `hijack-dns` 必须同时出现**，`detour` 只能指向实际存在的 `proxy`，且 `sniff` 必须排在 `hijack-dns` 之前。
 
 > 本地实测：`sing-box check` **不会**因为 `detour` 指向不存在的 tag 而失败（零节点 + DNS 样张退出码仍为 0），也不会因为缺少 TUN 入站而失败（非零但无 `inbounds` 的样张同样为 0）。所以这两条都不能靠 `check` 兜底，必须由控制面单测锁定：「零节点无 `inbounds` / 无 `dns`」「非零节点有且只有一个 TUN 入站」。
 
@@ -359,8 +365,9 @@ ORDER BY s.created_at ASC, s.id ASC
 **客户端源码依据（2026-11-19）**：`sing-box-for-apple` 的 `ExtensionPlatformInterface.openTun` 与 `SFA` 的 `VPNService.openTun` 都只在配置里存在 TUN 入站时才创建系统隧道。也就是说，配置内容必须包含 TUN 入站——这是**客户端行为**，与「配置在哪一侧生成」无关；它决定了 §3.2 必须导出最小 TUN，而不是沿用初版「客户端自己注入」的假设。
 
 - 所审版本：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。
-- 源码确认的是「有 TUN 入站才建隧道」这一条件；字段的具体行为（`auto_route` / `strict_route` / `dns_mode` / `auto_detect_interface`）在客户端版本间的差异由 V8 真机覆盖。
-- **第三轮真机（2026-11-19 夜 → 20 日晨）**：补上 TUN 入站后 VPN 标志出现，但 `1.1.1.1` 仍打不开；据此在非零模板补 `route.auto_detect_interface: true`。依据：该字段默认 `false`，libbox 不会替配置打开；TUN 客户端的出站 socket 不绑定物理网卡就会回环进隧道。**修复后的真机复验尚未执行**（V8）。
+- 源码确认的是「有 TUN 入站才建隧道」这一条件；字段的具体行为（`auto_route` / `stack` / `dns_mode` / `auto_detect_interface`）在客户端版本间的差异由 V8 真机覆盖。
+- **第三轮真机（2026-11-19 夜 → 20 日晨）**：补上 TUN 入站后 VPN 标志出现，但 `1.1.1.1` 仍打不开；据此在非零模板补 `route.auto_detect_interface: true`。依据：该字段默认 `false`，libbox 不会替配置打开；TUN 客户端的出站 socket 不绑定物理网卡就会回环进隧道。
+- **第四轮真机（2026-11-20）**：补 `auto_detect_interface` 后仍是「有入/出站计数、能测速、网页打不开」。与桌面端**正常工作的** TUN 配置逐项对比，发现手机模板缺两项桌面端明确要求的字段，并多一项 Apple 上不该带的字段（详见 §3.6 现象 D）。补齐后真机可正常打开网页。
 
 ### 3.6 实测记录（2026-11-19 至 11-20）
 
@@ -380,14 +387,19 @@ ORDER BY s.created_at ASC, s.id ASC
 - 现象 A：初版 profile（无 DNS）导入后 **「VPN 已连接、无法上网」**。定位：手机 DNS 通常指向所在 LAN 的路由器；`route.final = "proxy"` 把这些 DNS 查询送进隧道，服务端再发往自己的 LAN，解析失败。
 - 现象 B：补上 DNS 后仍 **「已连接、流量计数 0、1.1.1.1 打不开」**。定位：profile 没有 `inbounds`，官方客户端不创建系统隧道——源码依据见 §3.5。
 - 现象 C：补上 TUN 入站后 **VPN 标志出现，但 `1.1.1.1` 仍打不开**。定位：`route.auto_detect_interface` 默认 `false`，libbox 不替配置打开；出站 socket 不绑定物理网卡会回环进隧道。
-- 旁证（排除节点与凭据）：对节点本身单独验证，**出口 IP 探测、访问 Google、DoH 应答均通过**。
+- 现象 D（2026-11-20）：`auto_detect_interface` 之后仍是 **「入站/出站都有计数、节点测速 OK、网页打不开」**。三项对照后确认：
+  - 缺 `stack: "gvisor"`：不写时 Apple 平台 TCP 走内核 NAT、握手不完成（桌面端 2026-11-09 同源实测）。
+  - 缺 `sniff` 规则：`protocol: "dns"` 靠嗅探匹配，没有它 `hijack-dns` 永不命中，DNS 查询被 `final = proxy` 送进隧道——**静默失效，`check` 通过**。
+  - 多带 `strict_route`：Apple 上可能把代理自身的出站连接也纳入隧道。
+  - 三项一次性修掉后真机可正常打开网页。**三项各自的单独贡献未做拆测**：合并修复优先让用户能用，后续如要精简（例如确认 `strict_route` 无害而保留）需再做单变量真机对照。
+- 旁证（排除节点与凭据）：对节点本身单独验证，**出口 IP 探测、访问 Google、DoH 应答均通过**；同一份凭据另用随包 sing-box 起本地代理复测，`api.ipify.org` 返回节点 IP、`1.1.1.1` 301、`www.google.com` 200、DoH 经代理解析 `api.ipify.org` / `www.youtube.com` 均 200。
 - 具体节点地址、出口 IP 与 DoH 应答原文未随本组交接留存（交接只保留了「三项均通过」的结论）；本文不复述数字，避免凭记忆写错。原始记录在发起会话 `IOS_Android` 的真机记录里。
-- 修复：非零模板加入 §3.2 的最小 TUN 入站、`route.auto_detect_interface: true`、DNS 块与 `hijack-dns`；零节点保持无 TUN、无 DNS。
-- 验证状态：控制面 `npm run typecheck` 通过、`npm test -- mobile` **16/16 通过**（2026-11-19 22:10，**DNS 修复版本**）；**此后的 TUN 入站（22:40）与 `auto_detect_interface`（11-20 10:06）改动均未重跑 typecheck / vitest**，需执行同一组命令后再谈「可用」。修复后的真机复验（Wi-Fi / 蜂窝）同样未执行，见 V8 / V12。
+- 修复：非零模板加入 §3.2 的最小 TUN 入站（含 `stack: "gvisor"`）、`route.auto_detect_interface: true`、DNS 块、`sniff` → `hijack-dns` 规则组；去掉 `strict_route`；零节点保持无 TUN、无 DNS。
+- 验证状态：控制面 `npm run typecheck` 通过、`npm test` **212/212 通过**（2026-11-20，含 sniff 顺序与 `stack` 断言）；真机（iPhone / MT）在补齐三项后确认可打开网页。**蜂窝网络下的复验仍未执行**（V12）。
 
-**所审版本**：代码基线 `a68f82d mobile`；控制面的 TUN + DNS + `auto_detect_interface` 修复与对应测试为工作区未提交改动（`cloudflare/control-plane/src/mobile.ts:436–472`、`test/mobile.test.ts`）。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。本文档本身未提交。
+**所审版本**：代码基线 `c1de5b3`（TUN + DNS + `auto_detect_interface` 已提交）；`stack: "gvisor"`、`sniff` 规则组与去掉 `strict_route` 的改动为工作区未提交（`cloudflare/control-plane/src/mobile.ts:444–476`、`test/mobile.test.ts`）。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。
 
-**以上只证明「配置本身能被 1.14.4 解析」与「节点侧可达」；客户端是否建立隧道、出站是否回环、DNS 修复后能否上网，由 V8 / V12 判定。**
+**以上证明「配置能被 1.14.x 解析」「节点侧可达」「iPhone 上补齐三项后可打开网页」。蜂窝网络下的复验由 V12 判定，尚未执行。**
 
 ---
 
@@ -756,7 +768,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 7 | 配置是否携带 DNS | **必须携带**：真机实测覆盖了初版「不导出 DNS」。非零模板固定 `1.1.1.1` DoH（`detour: "proxy"`）+ `hijack-dns`；零节点不带 DNS。已落地，不再是待确认项 | 已定（架构师），PM 知会 |
 | 8 | 配置是否携带 TUN 入站 | **必须携带**：官方客户端源码确认只有声明 TUN 入站才创建系统隧道（§3.5）。非零用最小 TUN（`auto_route: true`、`dns_mode: "hijack"`、`dns_address`）+ `route.auto_detect_interface: true`；零节点不建 TUN，避免假 VPN 把全部流量直连 | 已定（架构师），PM 知会 |
 
-**所审版本（2026-11-19 至 11-20）**：本文件的 TUN + DNS + `auto_detect_interface` 改写对应代码基线 `a68f82d mobile` + 工作区未提交的控制面修复（`cloudflare/control-plane/src/mobile.ts:436–472`、`test/mobile.test.ts`）。`npm run typecheck` 与 `npm test -- mobile` 16/16 通过的是 **22:10 的 DNS 修复版本**；**此后的 TUN 入站（22:40）与 `auto_detect_interface`（11-20 10:06）改动均未重跑测试**。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。**修复后的真机复验（Wi-Fi / 蜂窝）尚未执行**，见 V8 / V12；本文档本身未提交。
+**所审版本（2026-11-19 至 11-20）**：本文件的 TUN + DNS + `auto_detect_interface` 改写对应代码基线 `c1de5b3`；`stack: "gvisor"`、`sniff` 规则组与去掉 `strict_route` 为工作区未提交改动（`cloudflare/control-plane/src/mobile.ts:444–476`、`test/mobile.test.ts`）。`npm run typecheck` 与 `npm test`（212/212）为 2026-11-20 含四项修复的版本。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。真机已在 iPhone（Wi-Fi）确认可打开网页；**蜂窝网络复验尚未执行**（V12）。
 
 ---
 
