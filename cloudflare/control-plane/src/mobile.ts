@@ -589,13 +589,14 @@ function ssList(nodes: ExportedNode[]): string {
 }
 
 /**
- * Shadowrocket 配置里的一个值。逗号、等号、引号、首尾空格会破坏行式语法，
- * 这类值用双引号包住；内部引号换成单引号（它没有转义语法）。
+ * Shadowrocket 配置里的一个值。逗号、等号、引号会破坏行式语法，这类值用双引号
+ * 包住；换行、制表符与其它控制字符会把一整行切断，一律压成单个空格。
  */
 function confValue(value: string): string {
-  const trimmed = value.trim();
-  if (/^[^,="]+$/.test(trimmed) && trimmed === value) return value;
-  return `"${trimmed.replace(/"/g, "'")}"`;
+  const cleaned = value.replace(/[\s\u0000-\u001f\u007f]+/g, " ").trim();
+  if (cleaned === "") return "node";
+  if (!/[,="]/.test(cleaned)) return cleaned;
+  return `"${cleaned.replace(/"/g, "'")}"`;
 }
 
 /**

@@ -991,12 +991,15 @@ describe("GET /v1/mobile/profile", () => {
     expect(response?.status).toBe(200);
     const conf = await response!.text();
 
-    // 名字里的换行会被 confValue 保留在引号内，这里只断言引用形式与密码。
-    expect(conf).toContain('password="p,a\'ss", udp-relay=true');
-    // 组列表与规则引用的是同一个名字，且没有裸逗号把列表切碎。
+    // 换行被压成空格：行式配置里出现裸换行会切断一整行。
+    expect(conf).toContain('"东京,1 号" = ss, ');
+    expect(conf).toContain("password=\"p,a'ss\", udp-relay=true");
     const groupLine = conf.split("\n").find((line) => line.startsWith("Veyl = select, "));
     expect(groupLine).toBeDefined();
-    expect(groupLine!).toContain('"东京,1');
+    expect(groupLine!).toContain('"东京,1 号"');
+    // 每条 [Proxy] 行都必须自带 = 与 ss，没有被换行切成两半。
+    const proxyLines = conf.split("[Proxy]\n")[1].split("\n\n")[0].split("\n");
+    for (const line of proxyLines) expect(line).toContain(" = ss, ");
   });
 
   it("Shadowrocket 零节点：无 [Proxy Group]，规则兜底 DIRECT", async () => {
