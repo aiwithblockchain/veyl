@@ -3,6 +3,9 @@
 	"name": "veyl-control-plane",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-11-01",
+	// 国内分流规则集：import 进 Worker 时按 Data 模块打成 ArrayBuffer（src/rules.ts 只读下发）。
+	// .srs 给 sing-box，.mrs 给 Clash；fallthrough 让默认的 `.bin` 规则继续生效。
+	"rules": [{ "type": "Data", "globs": ["**/*.srs", "**/*.mrs"], "fallthrough": true }],
 	"observability": {
 		"enabled": true,
 		"head_sampling_rate": 1,

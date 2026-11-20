@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import geoipCnMrs from "../assets/rules/geoip-cn.mrs";
+import geoipCn from "../assets/rules/geoip-cn.srs";
+import geositeCnMrs from "../assets/rules/geosite-cn.mrs";
+import geositeCn from "../assets/rules/geosite-cn.srs";
+import { route, type Env } from "../src/index";
 import { b64u, fromB64u, randomBytes, sealSecret, signAccessToken } from "../src/lib/crypto";
 import { handleMobile, type MobileEnv } from "../src/mobile";
 import { assertSqlMatchesSchema } from "./helpers/schemaGuard";
@@ -356,6 +361,7 @@ interface MobileConfig {
   log: { level: string };
   dns?: {
     servers: Array<{ type: string; tag: string; server: string; detour?: string }>;
+    rules?: Array<{ rule_set: string[]; server: string }>;
     final: string;
   };
   inbounds?: Array<{
@@ -381,11 +387,22 @@ interface MobileConfig {
   route: {
     final: string;
     auto_detect_interface?: boolean;
+    rule_set?: Array<{
+      tag: string;
+      type: string;
+      format: string;
+      url: string;
+      update_interval: string;
+      download_detour?: string;
+    }>;
     rules?: Array<{
       action: string;
       protocol?: string;
       sniffer?: string[];
       timeout?: string;
+      rule_set?: string[];
+      outbound?: string;
+      ip_is_private?: boolean;
     }>;
   };
 }
@@ -559,6 +576,8 @@ describe("GET /v1/mobile/profile", () => {
     const config = (await response!.json()) as MobileConfig;
     expect(config.outbounds).toEqual([{ type: "direct", tag: "direct" }]);
     expect(config.route).toEqual({ final: "direct" });
+    // 零节点不能带 rule_set：没有代理出站，规则集只会白下载。
+    expect(config.route.rule_set).toBeUndefined();
     // 零节点不能带 DNS 块：detour: "proxy" 会指向不存在的 outbound。
     expect(config.dns).toBeUndefined();
     // 零节点也不声明 TUN：不建立隧道，避免把所有流量 direct 进一个假 VPN。
@@ -600,14 +619,41 @@ describe("GET /v1/mobile/profile", () => {
     expect(config.route).toEqual({
       final: "proxy",
       auto_detect_interface: true,
+      // 1.14 的 remote rule_set 域名 URL 需要解析器，否则内核直接拒整份配置。
+      default_domain_resolver: "dns-cn",
+      // 规则集必须与 profile 同 origin；remote 不带 download_detour（1.14 废弃）。
+      rule_set: [
+        {
+          tag: "geosite-cn",
+          type: "remote",
+          format: "binary",
+          url: "https://example.com/rules/geosite-cn.srs",
+          update_interval: "7d",
+        },
+        {
+          tag: "geoip-cn",
+          type: "remote",
+          format: "binary",
+          url: "https://example.com/rules/geoip-cn.srs",
+          update_interval: "7d",
+        },
+      ],
+      // 顺序：sniff → hijack-dns → 国内直连 → 私网直连。
       rules: [
         { action: "sniff", sniffer: ["http", "tls", "quic", "dns"], timeout: "300ms" },
         { protocol: "dns", action: "hijack-dns" },
+        { rule_set: ["geosite-cn", "geoip-cn"], action: "route", outbound: "direct" },
+        { ip_is_private: true, action: "route", outbound: "direct" },
       ],
     });
     // 手机 DNS 常指向 LAN 路由器：DoH 必须走 proxy 从服务端出网。
+    // 国内域名交给国内 DNS，否则解析出海外 IP，geoip-cn 规则永远不命中。
     expect(config.dns).toEqual({
-      servers: [{ type: "https", tag: "dns", server: "1.1.1.1", detour: "proxy" }],
+      servers: [
+        { type: "https", tag: "dns", server: "1.1.1.1", detour: "proxy" },
+        { type: "udp", tag: "dns-cn", server: "223.5.5.5", detour: "direct" },
+      ],
+      rules: [{ rule_set: ["geosite-cn"], server: "dns-cn" }],
       final: "dns",
     });
     // Apple / SFA 只有声明 TUN 入站才会真正建隧道，auto_route 必须为真。
@@ -688,7 +734,25 @@ describe("GET /v1/mobile/profile", () => {
         "    type: select\n" +
         "    proxies:\n" +
         '      - "东京 1 号"\n' +
+        "rule-providers:\n" +
+        "  cn-domain:\n" +
+        "    type: http\n" +
+        "    behavior: domain\n" +
+        "    format: mrs\n" +
+        '    url: "https://example.com/rules/geosite-cn.mrs"\n' +
+        '    path: "./providers/cn-domain.mrs"\n' +
+        "    interval: 86400\n" +
+        "  cn-ip:\n" +
+        "    type: http\n" +
+        "    behavior: ipcidr\n" +
+        "    format: mrs\n" +
+        '    url: "https://example.com/rules/geoip-cn.mrs"\n' +
+        '    path: "./providers/cn-ip.mrs"\n' +
+        "    interval: 86400\n" +
         "rules:\n" +
+        '  - "RULE-SET,cn-domain,DIRECT"\n' +
+        '  - "RULE-SET,cn-ip,DIRECT"\n' +
+        '  - "DOMAIN-SUFFIX,cn,DIRECT"\n' +
         '  - "MATCH,Veyl"\n',
     );
   });
@@ -724,7 +788,24 @@ describe("GET /v1/mobile/profile", () => {
     expect(yaml).toContain("    cipher: aes-256-gcm");
     expect(yaml).toContain("    udp: true");
     expect(yaml).toContain('  - name: "Veyl"');
-    expect(yaml).toContain('  - "MATCH,Veyl"');
+    // provider 指向我们自己的域名；顺序固定，`.cn` 是 provider 失败时的兜底，必须留在最后一条 RULE-SET 之后。
+    expect(yaml).toContain('    url: "https://example.com/rules/geosite-cn.mrs"');
+    expect(yaml).toContain('    url: "https://example.com/rules/geoip-cn.mrs"');
+    expect(yaml).toContain("    behavior: domain");
+    expect(yaml).toContain("    behavior: ipcidr");
+    expect(yaml).toContain("    format: mrs");
+    const rules = [
+      '  - "RULE-SET,cn-domain,DIRECT"',
+      '  - "RULE-SET,cn-ip,DIRECT"',
+      '  - "DOMAIN-SUFFIX,cn,DIRECT"',
+      '  - "MATCH,Veyl"',
+    ].map((line) => yaml.indexOf(line));
+    expect(rules).toEqual([...rules].sort((left, right) => left - right));
+    expect(new Set(rules).size).toBe(4);
+    expect(yaml).not.toContain("GEOIP");
+    // Clash 不配 DNS：DOMAIN-SUFFIX 在解析前匹配；加 dns 只会覆盖用户设置并多一层故障面。
+    expect(yaml).not.toContain("\ndns:");
+    expect(yaml).not.toContain("fake-ip");
   });
 
   it("Clash 零节点：200 + 空 proxies 与 MATCH,DIRECT", async () => {
@@ -919,3 +1000,38 @@ describe("GET /v1/mobile/profile", () => {
     expect(db.tokens[0].last_used_at).toBe(first);
   });
 });
+
+describe("GET /rules", () => {
+  const cases = [
+    { path: "/rules/geosite-cn.srs", bytes: geositeCn, size: 57_792 },
+    { path: "/rules/geoip-cn.srs", bytes: geoipCn, size: 34_259 },
+    { path: "/rules/geosite-cn.mrs", bytes: geositeCnMrs, size: 532_882 },
+    { path: "/rules/geoip-cn.mrs", bytes: geoipCnMrs, size: 37_527 },
+  ];
+
+  it.each(cases)("$path 原样下发：字节数、缓存头、无需认证", async ({ path, bytes, size }) => {
+    // 大小与 assets/rules/README.md 记录的上游文件一致。
+    expect(bytes.byteLength).toBe(size);
+
+    // 不带任何 Authorization：规则是公开数据。
+    const response = await route(new Request(`https://cp.example.com${path}`), {} as Env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("application/octet-stream");
+    expect(response.headers.get("Cache-Control")).toBe("public, max-age=86400");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+
+    const body = await response.arrayBuffer();
+    expect(body.byteLength).toBe(size);
+    expect(await sha256Hex(body)).toBe(await sha256Hex(bytes));
+  });
+
+  it("/rules 以外的路径不会被规则路由吞掉", async () => {
+    const response = await route(new Request("https://cp.example.com/rules/other.srs"), {} as Env);
+    expect(response.status).toBe(404);
+  });
+});
+
+async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}

@@ -584,6 +584,11 @@ export function MobileExport({
                 app.meta,
                 <>
                   {importBlock(app)}
+                  {app.id === "shadowrocket" ? (
+                    <p className="mobile-export__row-note">
+                      用它只能全部走节点，国内网站也会绕道。
+                    </p>
+                  ) : null}
                   {downloadBlock(app)}
                 </>,
               ),

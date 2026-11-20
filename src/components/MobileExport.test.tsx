@@ -34,6 +34,8 @@ const APP_NAMES = [
   "我的 App 不在列表里",
 ];
 
+const ROW_NOTE = "用它只能全部走节点，国内网站也会绕道。";
+
 const OK: MobileExportData = {
   state: "ok",
   node_count: 2,
@@ -208,6 +210,60 @@ describe("在手机上使用：按 App 分类", () => {
 
     fireEvent.click(within(dialog).getByRole("button", { name: "复制链接" }));
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(SS_URL);
+  });
+
+  it("「只能全部走节点」只在 Shadowrocket 行出现，且在导入块之外", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    for (const name of [
+      "sing-box",
+      "Clash Meta for Android",
+      "Hiddify",
+      "我的 App 不在列表里",
+    ]) {
+      fireEvent.click(row(dialog, name));
+      expect(within(dialog).queryByText(ROW_NOTE)).toBeNull();
+    }
+
+    fireEvent.click(row(dialog, "Shadowrocket"));
+    expect(await within(dialog).findByText(ROW_NOTE)).toBeTruthy();
+    const panel = dialog.querySelector<HTMLElement>(
+      ".mobile-export__panel",
+    ) as HTMLElement;
+    expect(panel.textContent).toContain(ROW_NOTE);
+    expect(
+      panel.querySelector(".mobile-export__import")?.textContent,
+    ).not.toContain(ROW_NOTE);
+  });
+
+  it("「只能全部走节点」与码的状态无关：五态下都在", async () => {
+    const cases: Array<[string, () => Promise<MobileExportData>, string]> = [
+      ["未登录", async () => ({ state: "login_required" }), "先登录。"],
+      [
+        "无服务器",
+        async () => ({ state: "no_ready_server" }),
+        "还没有可用的服务器。",
+      ],
+      [
+        "失败",
+        async () => {
+          throw { code: "TIMEOUT", message: "超时" };
+        },
+        "暂时生成不了。",
+      ],
+      ["读取中", () => new Promise<MobileExportData>(() => {}), "正在读取节点…"],
+      ["就绪", async () => OK, "链接相当于密码，别转发。"],
+    ];
+
+    for (const [label, get, marker] of cases) {
+      const bridge = makeBridge(get);
+      const { dialog } = setup(bridge);
+      fireEvent.click(row(dialog, "Shadowrocket"));
+      expect(await within(dialog).findByText(marker), label).toBeTruthy();
+      expect(within(dialog).getByText(ROW_NOTE), label).toBeTruthy();
+      cleanup();
+    }
   });
 
   it("导入块：160 导入码 + 复制 / 重新生成 + 安全说明", async () => {

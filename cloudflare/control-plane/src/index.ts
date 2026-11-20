@@ -8,6 +8,7 @@ import { handleTopups, startTopupSession } from "./topups";
 import { balanceCents } from "./wallet";
 import { handleServers } from "./servers";
 import { handleMobile } from "./mobile";
+import { handleRules } from "./rules";
 import { handleSeed } from "./seed";
 import { handleDodoWebhook } from "./webhooks/dodo";
 
@@ -408,6 +409,10 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
 </main></body></html>`;
     return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
   }
+
+  // 国内分流规则集：公开只读，随 Worker 打包；sing-box profile 的 rule_set 从这里拉。
+  const rulesResponse = handleRules(request);
+  if (rulesResponse) return rulesResponse;
 
   // 免费节点种子：匿名只读，随 Worker 部署（seed-publishing.md §4）。
   const seedResponse = await handleSeed(request);

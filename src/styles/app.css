@@ -6496,6 +6496,14 @@ details[open] > .settings-fold__summary::before {
   color: var(--ink-3);
 }
 
+/* 只有 Shadowrocket 行有：整行宽，说明它只能全局。 */
+.mobile-export__row-note {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
 .mobile-export__attribution {
   margin: 16px 0 0;
   font-size: 12px;

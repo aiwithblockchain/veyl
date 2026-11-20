@@ -25,6 +25,7 @@
 | 11 | 是否给 AI 工具 | **不新增**。令牌与 URL 不得进入 AI 上下文；只把 `account.mobile` 加进 `OpenSettings` 行白名单（仍只是指路） |
 | 12 | 桌面本地库 | **不改**。没有新表、没有新列，`data-model.md` 不升版 |
 | 13 | 三种格式（2026-11-20 增补） | sing-box JSON、Clash/Mihomo YAML、ss:// 列表共用**同一枚令牌与 HTTP Basic**；路径 `/profile`、`/profile/clash`、`/profile/ss`；rotate 一次三种格式同时失效。详见 §3.7 |
+| 14 | 智能分流（2026-11-20 定稿） | 手机端不做全局代理：国内直连、其余走节点。sing-box 用同 origin 的 remote `.srs`（约 90 KiB，7 天更新）并把 DNS 分流（国内 `223.5.5.5` direct、境外 DoH 经代理）；Clash 本期只在 `MATCH,Veyl` 前加一条 `GEOIP,CN,DIRECT`，不加 DNS；ss 列表不能承载规则，Shadowrocket 走配置型导入（待验证，验不过就撤行）。详见 §3.8 |
 
 一句话：**控制面发一条可吊销的账户级 URL，桌面只负责把它变成二维码；手机按自己的节奏来取，我们不连设备、不写移动端 App。**
 
@@ -41,6 +42,7 @@
 | `GET` | `/v1/mobile/profile` | **HTTP Basic** | sing-box 官方客户端 | 返回 sing-box 配置 JSON |
 | `GET` | `/v1/mobile/profile/clash` | **HTTP Basic** | Clash / Mihomo 类客户端 | 返回最小 Clash YAML（§3.7.3） |
 | `GET` | `/v1/mobile/profile/ss` | **HTTP Basic** | SS 客户端 / 桌面取文本 | 返回 SIP002 ss:// 列表（§3.7.4） |
+| `GET` | `/rules/geosite-cn.srs`、`/rules/geoip-cn.srs` | **无**（公开数据） | 手机客户端 | sing-box binary rule-set；不含凭据，允许缓存一天（§3.8.6） |
 
 挂载位置：`cloudflare/control-plane/src/index.ts` 的模块链里，放在 `handleServers` 之后新增 `handleMobile`；模块本体是新文件 `src/mobile.ts`。不复用 `/v1/servers/*` 路径：这是账户级能力，不是单台服务器能力。
 
@@ -314,10 +316,10 @@ ORDER BY s.created_at ASC, s.id ASC
   - 因此它和 TUN 入站必须成组出现；零节点没有 TUN，不需要也不应打开。
 - **DNS 必须导出（真机实测覆盖了初版的「不导出 DNS」）**：
   - 手机的 DNS 通常指向所在 LAN 的路由器（`192.168.x.1` 之类）。没有 DNS 块时，`route.final = "proxy"` 会把这些 DNS 查询送进隧道，服务端再把它发往**自己的** LAN，自然解析失败——真机表现是「VPN 已连接、网页打不开」。
-  - `dns.servers` 用 **DoH（`type: "https"`）+ `detour: "proxy"`**：解析请求经代理从服务端出网，不再依赖手机所在 LAN 的 DNS 服务器；也不依赖 UDP 53，减少部分网络对 UDP / 非标端口的拦截与劫持影响。
+  - `dns.servers` 用 **DoH（`type: "https"`）+ `detour: "proxy"`**：解析请求经代理从服务端出网，不再依赖手机所在 LAN 的 DNS 服务器；也不依赖 UDP 53，减少部分网络对 UDP / 非标端口的拦截与劫持影响。**智能分流后境外域名仍走这条；国内域名另走 `dns-cn`（§3.8.4）。**
   - `route.rules` 的 **`hijack-dns`** 用于把客户端发出的 DNS 查询交给这份 `dns` 配置处理；没有它，查询可能仍按手机原设置走 LAN。
   - **`hijack-dns` 之前必须有 `sniff`（sniffer 含 `dns`），顺序不可颠倒**：`protocol: "dns"` 靠嗅探结果匹配，没有 `sniff` 时这条规则永不命中，`hijack-dns` 成为死代码，DNS 又被 `final = proxy` 送进隧道。**这种失效不报错、`sing-box check` 也通过**，只能靠真机发现（2026-11-20 真机根因）。
-  - `dns.final = "dns"` 让未命中其它服务器的查询统一走 DoH；本配置不声明分流规则集，也没有其它 DNS 服务器。
+  - `dns.final = "dns"` 让未命中其它服务器的查询统一走 DoH；这是拆分前的单 DNS 形态，智能分流后另有 `dns-cn` 与 `dns.rules`（§3.8.4）。
   - `1.1.1.1` 是 IP，不需要 bootstrap；它的可达性由**服务端出口**决定，与手机所在网络无关（服务端侧已验证 DoH 可用，§3.6）。
 - **只有 selector，不加 urltest**：urltest 需要一个探测 URL。sing-box 默认用 `https://www.gstatic.com/generate_204`，这个地址在大陆的可达性**未核实**（待验证，不凭印象断言）；一旦不可达，urltest 会把所有节点误判为不可用，反而制造「全部失效」。M1 用 selector 把选择权交给用户，等有了自己可验证的健康端点再评估自动切换，属 v2。
 - **不导出**：
@@ -328,7 +330,7 @@ ORDER BY s.created_at ASC, s.id ASC
 | `mixed` 入站 / `listen` / 本地端口 | 手机没有「本机代理端口」这个概念；只保留 TUN 入站 |
 | Clash API / `experimental` | 客户端内部使用；导出会把桌面端的控制面暴露出去，且没有消费方 |
 | 系统代理设置 | 那是桌面模式，不是配置内容 |
-| 分流规则集 / 自定义 DNS 候选 | 只导出**最小 DNS**（DoH 经代理 + `final`）与 `hijack-dns`；不导出域名分流规则集，也不让用户配置 DNS 候选。M1 只保证「能解析、有代理可用」，不替客户端决定分流 |
+| 分流规则集（桌面版） | 不导出桌面的完整规则集；手机端只带 §3.8 的国内直连最小集（`rule_set` 或 Clash 的一条 `GEOIP` 规则），其余走节点 |
 | `route.default_domain_resolver` | 已声明 `dns.final`，且节点地址是 IP；不需要再单独指定域名解析器 |
 
 ### 3.3 节点命名
@@ -463,7 +465,7 @@ rules:
 | 命名 | 与 §3.3 同一套名字与去重（` (2)` / ` (3)`） |
 | `type` / `cipher` | 固定 `ss` / 服务端实际的 `aes-256-gcm`；`password` 原样 |
 | `udp: true` | 服务端 SS 入站默认同时监听 TCP+UDP（`sing-box` 的 `NetworkList.Build()` 在空值时返回 `tcp`+`udp`，见 `option/types.go`）；DO 防火墙同时放行 tcp/udp（`providers/digitalocean.ts:168`）。M1 只承诺 TCP 可用，UDP 由客户端实际路径决定 |
-| **不导出** | `mixed-port` / `port` / `socks-port` / `allow-lan` / `mode` / `dns` / `tun` / `sniffer` / 规则集：Clash 客户端的接管方式、端口、DNS、TUN 都由**客户端自己**管理。把桌面的模板塞进去会覆盖用户设置，且各家字段并不完全一致 |
+| **不导出** | `mixed-port` / `port` / `socks-port` / `allow-lan` / `mode` / `dns` / `tun` / `sniffer` / 规则集：Clash 的接管方式、端口、DNS、TUN 都由**客户端自己**管理。本期只在规则里加一条 `GEOIP,CN,DIRECT`，不写 DNS（§3.8.6） |
 | `proxy-groups` | 一个 `select` 组，名字固定 `Veyl`，列出全部节点；不引入 url-test / fallback（与 §3.2 不用 urltest 的理由相同） |
 | `rules` | 只有一条 `MATCH,Veyl`。不做分流——分流规则是客户端的事 |
 | YAML 生成 | 不引入 YAML 依赖：所有字符串用 `JSON.stringify` 产出双引号标量（JSON 字符串是合法的 YAML 双引号标量），数字与布尔原样；`JSON.stringify` 不转义 U+2028 / U+2029，需再手工把这两个字符替换成 `\u2028` / `\u2029`。必须用带 `:`、`#`、引号、前导 `-`、换行、emoji 的节点名做单测 |
@@ -471,7 +473,7 @@ rules:
 | 全部凭据不可用 | **503** `INTERNAL / mobile_profile_unavailable`，与 sing-box 一致：不能把「凭据坏了」伪装成「没有节点」 |
 | 缓存 | `Cache-Control: no-store` + `X-Content-Type-Options: nosniff` |
 
-> **与 sing-box JSON 的关键差异**：Clash YAML 里**没有**我们那份 TUN / DNS / `auto_detect_interface` 模板。Clash 类客户端的系统接管、DNS 与 TUN 由客户端自己决定；我们只提供节点、一个选择组和一条兜底规则。
+> **与 sing-box JSON 的关键差异**：Clash YAML **不含** TUN / DNS / `auto_detect_interface`，系统接管、DNS 与 TUN 仍由客户端决定；本轮只加一条 `GEOIP,CN,DIRECT` 做国内直连。我们只提供节点、选择组与这条规则。
 
 > 这份最小 YAML 是否被各客户端直接接受（尤其 Stash 的 `#SUBSCRIBED`、CMFA 的远程 profile 导入）由 V13 验证；除 `proxies` / `proxy-groups` / `rules` 外不写任何字段。文件必须是 UTF-8。
 
@@ -694,6 +696,189 @@ M1 只对 **sing-box 官方 / Shadowrocket / CMFA / Hiddify** 四个 App 负责�
 - 每个 App 一个下载码：`mobile_clients_qr { client }`，四个枚举 `singbox` / `hiddify` / `cmfa` / `shadowrocket`，URL 固定映射、不接受任意 URL（§5.1 / `commands.md` §7.23）。`hiddify` 以不带尾斜杠的 `https://hiddify.com` 为准。
 - `mobile_export_get` 的 `formats[]` 仍包含 `ss`；界面只取当前 App 对应的那一条，其余不渲染。
 - **安全文案边界**：不得写「重新生成后旧配置全部失效」这类绝对表述。准确说法是「旧链接失效，手机上的配置下次更新时不再可用」；`/profile/ss` 返回的节点链接一旦被复制/保存，**收不回**，只有重建服务器（换密码）才能让它失效。技术依据见 §3.7.4 / §7.3。
+
+### 3.8 手机端智能分流（2026-11-20 定稿）
+
+> 产品要求：手机端不能是全局代理。国内站点直连、被墙站点走节点；**不能静默变全局，也不能塌陷成全部直连**。本节按 2026-11-20 的实现口径收敛：规则集放自有域名、不用 `download_detour`，sing-box 做 DNS 分流，Clash 本期只加一条 `GEOIP` 规则。内核行为均以随包 `sing-box 1.14.4` 实测或源码为依据。
+
+#### 3.8.1 三种格式能不能承载规则
+
+| 格式 | 承载规则 | 机制 | 本期做法 |
+|---|---|---|---|
+| sing-box JSON | **能** | `route.rule_set` + `dns.rules` | remote `.srs`，与 profile 同 origin；DNS 同域分流 |
+| Clash / Mihomo YAML | **能** | `rules` + `rule-providers` | `DOMAIN-SUFFIX,cn,DIRECT` 保底 + 自有域名下发的 `.mrs` provider；不加 `GEOIP/GEOSITE`（默认 geodata 源是 GitHub） |
+| ss 列表 | **不能** | 只有节点，没有规则语法 | Shadowrocket 只有两条路：配置型导入（conf），或承认该行全局 |
+
+**Shadowrocket 结论：配置型导入本期不做，这一行是否保留待产品决定。** 它的 conf 语法、是否支持远程配置与自动更新**没有官方文档或源码证据**（闭源，商店页与 `shadowlaunch.com` 均未说明）；猜一个格式比不做更危险。`/profile/ss` 继续保留；在行被保留且 V14 验证通过之前，文档不承诺该行有分流能力，也**不允许把它写成「已分流」**。若产品决定保留且要求分流，再单独立项验证 conf 端点；V14 不通过就撤行，不退回全局。
+
+#### 3.8.2 定稿形状（仅非零分支）
+
+```json
+{
+  "route": {
+    "final": "proxy",
+    "auto_detect_interface": true,
+    "default_domain_resolver": "dns-cn",
+    "rule_set": [
+      { "type": "remote", "tag": "geosite-cn", "format": "binary",
+        "url": "${origin}/rules/geosite-cn.srs", "update_interval": "7d" },
+      { "type": "remote", "tag": "geoip-cn", "format": "binary",
+        "url": "${origin}/rules/geoip-cn.srs", "update_interval": "7d" }
+    ],
+    "rules": [
+      { "action": "sniff", "sniffer": ["http", "tls", "quic", "dns"], "timeout": "300ms" },
+      { "protocol": "dns", "action": "hijack-dns" },
+      { "rule_set": ["geosite-cn", "geoip-cn"], "action": "route", "outbound": "direct" },
+      { "ip_is_private": true, "action": "route", "outbound": "direct" }
+    ]
+  },
+  "dns": {
+    "servers": [
+      { "type": "https", "tag": "dns", "server": "1.1.1.1", "detour": "proxy" },
+      { "type": "udp", "tag": "dns-cn", "server": "223.5.5.5", "detour": "direct" }
+    ],
+    "rules": [{ "rule_set": ["geosite-cn"], "server": "dns-cn" }],
+    "final": "dns"
+  }
+}
+```
+
+- `route.rule_set` 两条 remote，URL 与 profile 同 origin；**不写 `download_detour`**（1.14 废弃、1.16 移除）。
+- 规则顺序固定：`sniff` → `hijack-dns` → `rule_set(geosite-cn,geoip-cn)` → `direct` → `ip_is_private` → `direct`；`final` 仍 `proxy`。`sniff` 必须在 `hijack-dns` 之前，否则 `protocol: "dns"` 永不命中（§3.2 的真机结论）。
+- DNS 分流：`dns-cn` 用 `udp 223.5.5.5`、`detour: "direct"`；`dns.rules` 把 `geosite-cn` 指向它；`dns.final` 仍走经代理的 DoH。
+- `route.default_domain_resolver` 必填：1.14 内核缺它会直接 FATAL（工作区已补 `dns-cn`）。
+- 零节点分支**不带** `rule_set` / `dns` / TUN，保持原样（§3.4）。
+
+#### 3.8.3 时序：为什么这条对「客户端不是我们的」也成立
+
+- **规则集在路由初始化阶段加载，早于隧道建立。** 实测：把 remote rule_set 指向不可达地址，进程直接 `FATAL start service: start router: initialize rule-set[0] …`，不是降级、不是先全局后加载。因此「先全局、连上再加载规则」在 sing-box 里不存在，本设计不采用。
+- **规则源与 profile 同 origin，可达性由导入动作本身证明。** 客户端能拿到 profile，就说明 `veyl.dessage.xyz` / `cp-dev…` 当前可达；规则文件几秒后从同一域名取，失败只可能是瞬时故障。域名不可达时 profile 本身也更新不了——失败是一致的、可见的，不是静默的。
+- **客户端不需要改代码。** `rule_set` 是配置字段，客户端只解析配置；官方 SFA / SFI 内嵌的就是 sing-box 内核（当前 1.14.x），remote rule_set 自 1.8 起支持。本机用随包 `sing-box 1.14.4 check` 验证了整份配置（含两条 remote 规则集、DNS 分流、TUN）通过。客户端版本过旧只会解析报错（可见），不会静默忽略。
+
+#### 3.8.4 硬失败与缓解排序
+
+首次冷启动、规则源不可达 → VPN 完全起不来。这是诚实的失败（不假装分流），但体验是断崖。缓解按性价比排序：
+
+1. **体积已经很小**：`geosite-cn.srs` 57,792 B、`geoip-cn.srs` 34,259 B，合计约 90 KiB；一次下载、7 天更新，流量可以忽略。保持这个体积，不要扩成全量 `geosite.srs`。
+2. **磁盘缓存（唯一有效手段，但本期未纳入定稿形状）**：sing-box 只在 `experimental.cache_file.enabled: true` 时把 remote rule_set 落盘；开启后实测「先成功一次、断源重启」可正常启动（§3.8.5）。是否被官方客户端接受待 V18；接受则建议加上。
+3. **HTTP 缓存**：规则响应已有 `public, max-age=86400`，同一天内的重复拉取可能命中边缘缓存；不解决首次失败。
+4. **内联规则集（否）**：实测把 CN 域名全量内联约 **147.9 KB**（8,937 条后缀 + 79 条完整域名），不是 MB 级，但会让每次 profile 更新都多背 148 KB，且规则无法独立更新；远端 90 KiB + 7 天更新仍更优。**不采用。**
+5. **`download_detour` / 经代理下载（否）**：字段 1.14 废弃、1.16 移除；1.14 的替代是 `rule_set[].http_client: { "detour": "proxy" }`（已用 `check` 验证可用），但这会把「规则源可达」绑到代理可用上，鸡生蛋，反而更脆。**不采用。**
+
+#### 3.8.5 三条事实核实
+
+**1）sing-box 会把 remote rule_set 落盘缓存吗？**
+
+- **只在开启 `experimental.cache_file.enabled` 时。** 源码 `route/rule/rule_set_remote.go` 的 `StartContext`：只有 `service.FromContext[adapter.CacheFile]` 非空才 `LoadRuleSet(tag)`；否则每次启动都 `fetch()`。
+- 实测：不开 `cache_file`，先成功拉取再关掉规则源重启 → **FATAL，重新下载失败**；开启 `cache_file` 后同样操作 → **正常启动**，用 `cache.db` 里的缓存。
+- 缓存按 URL 哈希绑定：URL 变了会重新拉取。`ETag` / `If-None-Match` 也支持（304 时只更新时间）。
+
+**2）`update_interval` 到点后下载失败，是继续用旧规则还是 FATAL？**
+
+- **继续用旧规则，只记错误日志。** 源码 `updateOnce()`：`fetch` 失败 → `logger.Error("fetch rule-set …")`，不 `Cleanup`，内存中旧规则继续生效；只有**启动阶段**且没有任何缓存时才 FATAL。
+- 结论：运行中规则源故障不会打断连接；风险集中在冷启动。
+
+**3）上游更新节奏与我们怎么跟**
+
+- `SagerNet/sing-geosite` 与 `sing-geoip` 目前**每天多次**发新 tag（2026-11-20 当天就有多个：`20261118141523` 等），每次附 `.sha256sum`。
+- 更新责任：控制面维护者（不是客户端）。建议**每月一次**、或随内核升级/规则明显过期时更新；更新时替换 `assets/rules/*.srs`、更新 `assets/rules/README.md` 的体积与 sha256、跑 `npm test`（测试按字节数断言）。
+- 校验：下载上游资产后用其 `.sha256sum` 校验，再提交；不要从 `.db` 取（sing-box 只认 `.srs`，实测 `.db` 报 `invalid sing-box rule-set file`）。
+- 许可证：SagerNet 规则数据为 GPL-3.0，随仓库分发需保留版权声明。
+
+#### 3.8.6 Clash：字符串保底 + 自有域名 provider + 最小 DNS
+
+定稿不再使用 `GEOIP/GEOSITE`：mihomo 的 geodata 默认从 GitHub 下载，CMFA 不带库，provider 初始化失败只记日志、规则落空 → 会静默变全局。改成两层：
+
+1. **保底层（永远有效）**：`DOMAIN-SUFFIX,cn,DIRECT`。纯字符串匹配，不依赖任何外部数据，不会因为下载失败而失效。覆盖 `.cn`；覆盖不全，但不会假装分流。
+2. **扩展层（可选、自有域名）**：`rule-providers` 指向 `${origin}/rules/*.mrs`，补 `.com` 等国内站点。下载失败只丢扩展，保底层仍在。
+
+```yaml
+rule-providers:
+  cn-domain:
+    type: http
+    behavior: domain
+    format: mrs
+    url: "https://<origin>/rules/geosite-cn.mrs"
+    path: ./rules/geosite-cn.mrs
+    interval: 86400
+  cn-ip:
+    type: http
+    behavior: ipcidr
+    format: mrs
+    url: "https://<origin>/rules/geoip-cn.mrs"
+    path: ./rules/geoip-cn.mrs
+    interval: 86400
+
+rules:
+  - "DOMAIN-SUFFIX,cn,DIRECT"
+  - "RULE-SET,cn-domain,DIRECT"
+  - "RULE-SET,cn-ip,DIRECT"
+  - "MATCH,Veyl"
+```
+
+**`.mrs` 的可行性与体积（2026-11-20 实测）**
+
+- mihomo `Alpha` 的 `ParseRuleFormat` 接受 `""` / `yaml` / `text` / **`mrs`**；`rules/provider/mrs_reader.go` 实现 MRSv1（zstd）。
+- CMFA 的 core 以 mihomo `Alpha` 为 submodule（`.gitmodules`），但**发行包实际内核版本需 V13 确认**；不支持时 mihomo 会在初始化时报 `unsupported format type`（可见）。
+- `MetaCubeX/meta-rules-dat` 的 `BundleMRS.7z` 内含：`geo/geosite/cn.mrs` **532,882 B**、`geo/geoip/cn.mrs` **37,527 B**；lite 版 `geo-lite/geosite/cn.mrs` 24,690 B、`geo-lite/geoip/cn.mrs` 34,114 B。手机用 full 即可（约 570 KiB，日更一次），体积敏感时换 lite。
+- 回退顺序：`format: mrs` 不支持 → 改 `format: text` + `behavior: domain` 的纯文本 provider（我们自行从 geosite 生成 `DOMAIN-SUFFIX` 行，托管在同一目录）；两者都不行 → 只保留 `DOMAIN-SUFFIX,cn`，并在文档写明覆盖率缺口。
+
+**最小 DNS（已批准，只写必要项）**
+
+```yaml
+dns:
+  enable: true
+  nameserver: ["https://1.1.1.1/dns-query#Veyl"]   # 其余域名：经代理的 DoH
+  nameserver-policy:
+    "rule-set:cn-domain": ["223.5.5.5"]            # 国内域名：直连 DNS
+  proxy-server-nameserver: ["223.5.5.5"]           # 解析节点域名用
+```
+
+- 不写 `enhanced-mode`、`fake-ip`、`fallback` 等会改变客户端整体行为的字段。
+- `rule-set:NAME` 作为 `nameserver-policy` 的键由 mihomo 支持（`config/config.go` 的 `parseNameServerPolicy` 识别 `rule-set:` 前缀，wiki 也给了同形示例）；`#Veyl` 表示 DoH 查询走同名代理组。
+- provider 拉取失败时，`rule-set` 策略不命中，自动落到默认 DoH；`DOMAIN-SUFFIX,cn` 仍直连。不会 FATAL。
+
+
+#### 3.8.7 DNS 分流与泄漏
+
+| 查询来源 | sing-box | Clash |
+|---|---|---|
+| 国内域名（`geosite-cn` / `rule-set:cn-domain`） | `dns-cn`：`223.5.5.5` UDP，`detour: direct` | `nameserver-policy: "rule-set:cn-domain"` → `223.5.5.5` |
+| 其他域名 | `dns`：`https://1.1.1.1` DoH，`detour: proxy` | `nameserver`：`https://1.1.1.1/dns-query#Veyl` |
+| 节点域名 | 出站 server 是 IP，不涉及 | `proxy-server-nameserver`：`223.5.5.5` |
+
+- **不会泄漏**：境外域名从不问国内 DNS；国内 DNS 查询走直连，只把国内域名暴露给本地运营商（直连的预期代价）。
+- **不会污染**：境外域名只走经代理的 DoH；国内域名用国内 DNS 得到国内 IP。
+- **provider 失败时**：Clash 的 `rule-set` 策略不命中，国内域名回落到默认 DoH（仍能解析，只是解析路径变成经代理）；`DOMAIN-SUFFIX,cn` 的直连规则不受影响。
+- 残留风险：`223.5.5.5` 的 UDP/53 在极少数网络被劫持；V18 若发现，改为 `https://doh.pub/dns-query` + `domain_resolver` 引导（仍是直连），作为后续修改。
+
+#### 3.8.8 失败模式
+
+| 情况 | sing-box | Clash |
+|---|---|---|
+| 冷启动、规则集不可达 | **FATAL，VPN 不启动**（可见，不静默全局） | provider 为空，但 `DOMAIN-SUFFIX,cn` 仍直连；扩展缺失、其余走节点 |
+| 运行中规则集更新失败 | 记错误日志，**旧规则继续生效** | 保留上次内容或为空，保底规则不受影响 |
+| 冷启动、有 `cache_file` 缓存 | 用缓存启动（实测） | 不涉及 |
+| 国内 DNS 不可用 | 国内域名解析失败（连接失败），不转全局 | 同左（策略命中 `223.5.5.5` 时），不转全局 |
+| 代理 DoH 不可用 | 境外域名解析失败，不转直连 | 同左，不转直连 |
+
+**明确不接受**：规则缺失时把 `final` 改成 `proxy`（静默全局）或 `direct`（全直连）。sing-box 侧靠「冷启动 FATAL + 运行中保留旧规则」保证。
+
+#### 3.8.9 验收（V18–V20）
+
+| 编号 | 场景 | 证据 |
+|---|---|---|
+| V18 | 国内直连与首次加载 | 打开 baidu.com / taobao.com / 一个 `gov.cn` 站点；sing-box 日志出现 `outbound/direct`，CMFA 连接面板显示 `DIRECT`；`ip.sb` 显示本地出口；冷启动时观察 `.srs` / `.mrs` 是否拉取成功；如加了 `cache_file`，断网重启一次确认可启动 |
+| V19 | 被墙走节点与 DNS | 打开 google.com / youtube.com；`ipinfo.io` 显示服务器 IP；sing-box 与 CMFA 的 DNS 泄漏测试都不出现本地运营商 DNS（国内域名走 `223.5.5.5` 属预期） |
+| V20 | 失败注入与格式兼容 | 把规则 URL 指向不可达地址（测试构建）：sing-box 应冷启动失败且可见；CMFA 的 `.mrs` provider 失败时 `DOMAIN-SUFFIX,cn` 仍应 `DIRECT`、不落全局；另记录 CMFA 当前内核是否支持 `format: mrs`（不支持时报 `unsupported format type`，按 §3.8.6 回退 text） |
+
+#### 3.8.10 定稿后的剩余项
+
+1. sing-box 模板已含 `default_domain_resolver` 与规则集；**不要写 `download_detour`**。
+2. `experimental.cache_file.enabled` 作为 P2：V18 若确认客户端接受，再加上；不加则冷启动每次都依赖规则源。
+3. Clash 只保留 `GEOIP,CN,DIRECT`；geodata 行为由 V13 / V18 取证，失败再回产品拍板。
+4. Shadowrocket 仍是「conf 或撤行」，不退回全局（§3.8.1）。
+
 
 ---
 
@@ -974,7 +1159,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 
 ---
 
-## 8. 实现前检查单（V1–V17）
+## 8. 实现前检查单（V1–V20）
 
 > 每条都要有证据（截图 / 录屏 / 命令输出 / Worker 日志计数），不能只写「试过可以」。测试期间不改工作树（测量冻结）。
 
@@ -997,6 +1182,9 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | V15 | 轮换的全局性 | 三种格式各导入一处，点「重新生成」，等各自下一次拉取 | 三个旧 URL 全部 401；新令牌在三种格式都可用 | 是 |
 | V16 | 零节点表现 | 销毁全部服务器后等一次更新 | sing-box 不建隧道；Clash 是否接受空 `proxies`；Shadowrocket 是否把 ss 空 body 当作成功；记录客户端差异 | 是 |
 | V17 | Clash 的 UDP | 用 Clash 类客户端连接后访问一个 UDP 服务（如 QUIC / DNS over UDP） | 记录 `udp: true` 是否实际可用；不可用则从 YAML 去掉，不影响 TCP | 否 |
+| V18 | 国内直连与规则集首次加载 | 手机连上后打开 baidu.com / taobao.com / 一个 `gov.cn` 站点；同时打开 `ip.sb`；冷启动时观察规则集拉取；如加了 `cache_file`，断网重启一次 | 国内站点日志显示 `DIRECT`（Clash）或 `outbound/direct`（sing-box）；`ip.sb` 显示本地出口；规则集拉取成功（`cache_file` 是否被客户端接受一并记录） | 是 |
+| V19 | 被墙站点走节点且不泄漏 DNS | 打开 google.com / youtube.com；访问 `ipinfo.io`；做一次 DNS 泄漏测试 | 网站可打开；`ipinfo.io` 显示服务器 IP；sing-box 与 CMFA 的泄漏测试都不出现本地运营商 DNS（国内域名走 `223.5.5.5` 属预期） | 是 |
+| V20 | 失败注入与格式兼容 | 测试构建把规则 URL 指向不可达地址，冷启动一次；CMFA 连上后访问国内站点；记录 CMFA 内核是否支持 `format: mrs` | sing-box 首次应启动失败且在客户端可见；CMFA 的 provider 失败时 `DOMAIN-SUFFIX,cn` 仍应 `DIRECT`、不落全局；不支持 mrs 时按 §3.8.6 回退 text | 是 |
 
 **V9 的决策后果**：若客户端对「只有 direct」的 profile 报错并保留旧配置，需要改为 `410 Gone` + 明确的错误体（仍无法清除客户端缓存），并在 §1.7 更新；这一条必须在实现前定，不要两边都写一半。
 
@@ -1056,7 +1244,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 ```
 
 - 三组之间没有文件重叠；`be-desktop` 与 `fe` 可以按本文件的类型先写，联调前不需要等控制面部署。
-- 真机验收（V1–V17）在联调之后、由产品 / 同事执行；AI 只取证与核对（`aivpn-tests-started-by-user`）。
+- 真机验收（V1–V20）在联调之后、由产品 / 同事执行；AI 只取证与核对（`aivpn-tests-started-by-user`）。
 
 ---
 
@@ -1065,13 +1253,15 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 ### 必须改（P1）
 
 1. **新增控制面端点**（`/v1/mobile/token`、`/token/rotate`、`/profile`、`/profile/clash`、`/profile/ss`）与 `mobile_tokens` 迁移；所有 profile 响应必须 `no-store`，401 必须带 `WWW-Authenticate`。
-2. **控制面按请求生成配置**：只筛 `source = owned` 对应的 `servers`，排除免费 / 试用；不导出桌面 TUN 参数 / `mixed` 入站 / 本地端口 / Clash API。**非零模板必须带最小 TUN 入站（`auto_route` 为真）、`route.auto_detect_interface: true` 与最小 DNS（DoH 经代理 + `hijack-dns`）；零节点模板不得带 `inbounds` 或 `dns`**。
-3. **三种格式的边界**：`/profile` 路径保持不变；Clash YAML 只出 `proxies` / `proxy-groups` / `rules`，**不含** TUN、DNS、端口、`mode`；ss:// 严格按 SIP002（base64url 无填充）逐行输出；零节点按 §3.7.9 各给「合法空配置」，全部凭据不可用统一 503。**ss 行随 Shadowrocket 进 M1**，其二维码 = 订阅 URL 本身（待真机）；`/profile/ss` 与单测必须实现。
+2. **控制面按请求生成配置**：只筛 `source = owned` 对应的 `servers`，排除免费 / 试用；不导出桌面 TUN 参数 / `mixed` 入站 / 本地端口 / Clash API。**非零模板必须带最小 TUN 入站（`auto_route` 为真）、`route.auto_detect_interface: true`、`route.default_domain_resolver`、`experimental.cache_file.enabled: true` 与最小 DNS（国内/境外分流 + `hijack-dns`）；零节点模板不得带 `inbounds` 或 `dns`**。
+3. **三种格式的边界**：`/profile` 路径保持不变；Clash YAML 只出 `proxies` / `proxy-groups` / `rules`（含一条 `GEOIP,CN,DIRECT`），**不含** TUN、DNS、端口、`mode`；ss:// 严格按 SIP002（base64url 无填充）逐行输出；零节点按 §3.7.9 各给「合法空配置」，全部凭据不可用统一 503。**ss 行随 Shadowrocket 进 M1**，其二维码 = 订阅 URL 本身（待真机）；`/profile/ss` 与单测必须实现。
 4. **桌面 Rust 生成 URL 与二维码**：origin 只取 `env.rs`，禁止 `workers.dev`；令牌不落本地；三种格式都返回 URL 与二维码，不取 ss 文本。下载码走 `mobile_clients_qr { client }` 的固定映射，不接受任意 URL。
 5. **两个 UI 入口共用同一弹层与命令**；左栏行只在「已登录 + 至少一台节点就绪 + 列表非 loading/error」时出现。
 6. **契约增量**合并：`commands.md` **固定 `2.47.0`**（`formats[]` + `mobile_clients_qr` 枚举）、`tools.md` 保持 `3.22.x`（这三个命令都是仅 UI，**不新增 AI 工具**；仅有的相关项是 `account.mobile` 行登记）。
 7. **验签 / 解密失败不得泄露凭据**：单台凭据解不开就跳过，不返回错误详情到客户端。
 8. **M1 只对四个 App 负责**：sing-box 官方 / Shadowrocket / CMFA / Hiddify（§3.7.8）。Shadowrocket 是唯一例外——Basic 与返回体编码未核实，界面标「待验证」并带撤下条件；Karing / Stash / Loon / Quantumult X / v2rayNG / FlClash 不列入；不做「仅 ss 文本粘贴」特例（§3.7.5）。
+
+**智能分流（§3.8）的 P1**：sing-box 模板的 `route.default_domain_resolver` 不能回退（缺了 1.14 直接 FATAL）；规则集必须与 profile 同 origin、不写 `download_detour`；Clash 的 `GEOIP` 依赖 mihomo 的 geodata（默认源 GitHub、CMFA 是否内置未核实），是已知风险，由 V18/V20 取证后再决定是否换方案；Shadowrocket 的 ss 列表承载不了规则，规则路径只有配置型导入（待 V14，验不过就撤行）。
 
 ### 建议改（P2）
 
@@ -1096,7 +1286,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | M1 不做路径令牌 | 令牌会进请求行与日志，违反 §7.1；不支持 Basic 的客户端不进列表，也不做 ss 文本粘贴特例 |
 | 不预先砍 Clash 二维码 | 产品 2026-11-20 决定保留，码内容 = 带凭据的订阅 URL；能否扫通由 V13 判定，扫不通再退回只给复制链接 |
 | 不把未核实 Basic 的客户端列进 M1（Shadowrocket 除外） | Karing / Stash / Loon / Quantumult X 核实后再进；Shadowrocket 由产品拍板先上，界面标「待验证」，带撤下条件（§3.7.8） |
-| 不在 Clash YAML 里塞 TUN / DNS / 端口 / `mode` | 接管方式与 DNS 由 Clash 客户端自己管理；塞进去会覆盖用户设置 |
+| Clash YAML 只加一条 `GEOIP,CN,DIRECT`，不塞 DNS / TUN / 端口 / `mode` | 本期 Clash 的 DNS 仍由客户端管理（已知缺口）；TUN 与端口由客户端管理 |
 
 ---
 
@@ -1119,8 +1309,12 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 13 | ss 行是否进 M1 界面 | **已改（2026-11-20）：随 Shadowrocket 进 M1**；`formats[]` 的 `ss` 出 URL 二维码，端点与单测照做。真机失败按 §3.7.8 撤行 | PM 已定 |
 | 14 | 是否保留格式切换器 | **已定（2026-11-20）：删除**。v4 设计按 App 分类，格式只做内部映射（§3.7.12） | PM 已定 |
 | 15 | `mobile_clients_qr` 是否加 `shadowrocket` | **已定（2026-11-20）：加，四个 id**（`singbox` / `hiddify` / `cmfa` / `shadowrocket`），`shadowrocket` → App Store 链接；Rust 已实现、本机测试通过 | PM 已定 |
+| 16 | Shadowrocket 配置型导入（conf） | 只有它能承载分流规则；conf 的键名、是否支持远程配置/自动更新**没有官方依据**。V14 若不通过，撤行而不是退回全局（§3.7.8 / §3.8.1） | 验证结论 |
+| 17 | 官方客户端是否接受 profile 指定 `cache_file` | 定稿形状**未含**（P2）。内核 1.14.4 已验证「开启后有缓存、断源可启动」；SFA / SFI 是否允许配置里开 `experimental.cache_file`、路径是否可写，需真机（V18）。不加则冷启动每次都依赖规则源 | 验证结论 |
+| 18 | 国内 DNS 走 UDP 53 还是国内 DoH | 默认 `223.5.5.5` UDP（`detour: direct`，实现简单）；若 V18 发现运营商劫持 53，改为 `https://doh.pub/dns-query` + `domain_resolver` 引导，仍是直连 | 验证结论 |
+| 19 | Clash 的 `GEOIP,CN` 是否可用 | mihomo 的 geodata 默认源是 GitHub，CMFA 是否内置未核实；geodata 缺失时规则不命中，会落 `MATCH,Veyl` = 全局。V18 / V20 取证；确认失败再回产品拍板（inline provider 或接受全局） | 验证结论 + PM |
 
-**所审版本（2026-11-19 至 11-20）**：本文件的 TUN + DNS + `auto_detect_interface` 改写对应代码基线 `c1de5b3`；`stack: "gvisor"`、`sniff` 规则组与去掉 `strict_route` 为工作区未提交改动（`cloudflare/control-plane/src/mobile.ts:444–476`、`test/mobile.test.ts`）。`npm run typecheck` 与 `npm test`（212/212）为 2026-11-20 含四项修复的版本。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。真机已在 iPhone（Wi-Fi）确认可打开网页；**蜂窝网络复验尚未执行**（V12）。多格式部分（2026-11-20）的客户端依据与未核实项见 §3.7.5 / §3.7.8 与上表 9–15；多格式实现尚未开始。**矩阵与三条拍板（未核实 Basic 的客户端不列入、Clash 二维码保留、commands 2.47.0）来自产品 2026-11-20 的跨会话决定；同日改向「界面按 App」，§3.7.8 已收敛为四个 App（sing-box 官方 / Shadowrocket / CMFA / Hiddify），其余走下期与兜底行；两段格式切换器已删除（§11 #14）。**
+**所审版本（2026-11-19 至 11-20）**：本文件的 TUN + DNS + `auto_detect_interface` 改写对应代码基线 `c1de5b3`；`stack: "gvisor"`、`sniff` 规则组与去掉 `strict_route` 为工作区未提交改动（`cloudflare/control-plane/src/mobile.ts:444–476`、`test/mobile.test.ts`）。`npm run typecheck` 与 `npm test`（212/212）为 2026-11-20 含四项修复的版本。客户端源码依据：`sing-box-for-apple` main、`SFA` main（2026-11-19 取源）。真机已在 iPhone（Wi-Fi）确认可打开网页；**蜂窝网络复验尚未执行**（V12）。多格式部分（2026-11-20）的客户端依据与未核实项见 §3.7.5 / §3.7.8 与上表 9–19；多格式实现尚未开始。**矩阵与三条拍板（未核实 Basic 的客户端不列入、Clash 二维码保留、commands 2.47.0）来自产品 2026-11-20 的跨会话决定；同日改向「界面按 App」，§3.7.8 已收敛为四个 App（sing-box 官方 / Shadowrocket / CMFA / Hiddify），其余走下期与兜底行；两段格式切换器已删除（§11 #14）。智能分流（§3.8）的内核行为用随包 `sing-box 1.14.4` 实测：远程规则集首次不可达会 FATAL、开启 `cache_file` 后可复用缓存、`.db` 会被拒、缺 `default_domain_resolver` 会 FATAL；mihomo 的 geox 默认源为 GitHub（`Alpha` 源码）。智能分流的缓存与更新语义来自 `route/rule/rule_set_remote.go`：仅 `cache_file` 开启时落盘；运行中更新失败只记日志、保留旧规则；启动阶段无缓存失败则 FATAL。**
 
 ---
 

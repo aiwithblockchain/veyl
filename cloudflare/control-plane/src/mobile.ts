@@ -499,8 +499,8 @@ function yamlScalar(value: string): string {
     .replace(/\u007f/g, "\\u007f");
 }
 
-/** 最小 Clash 配置：只出节点、一个 select 组与一条兜底规则（§3.7.3）。 */
-function clashYaml(nodes: ExportedNode[]): string {
+/** 最小 Clash 配置：节点、select 组、国内分流 rule-provider 与兜底规则（§3.7.3）。 */
+function clashYaml(nodes: ExportedNode[], origin: string): string {
   const lines: string[] = [];
   if (nodes.length === 0) {
     lines.push("proxies: []");
@@ -523,8 +523,35 @@ function clashYaml(nodes: ExportedNode[]): string {
     for (const node of nodes) {
       lines.push(`      - ${yamlScalar(node.tag)}`);
     }
+    // 国内分流用我们自己托管的 .mrs（mihomo MRS 格式），不依赖客户端从 GitHub 拉 geodata。
+    lines.push("rule-providers:");
+    lines.push("  cn-domain:");
+    lines.push("    type: http");
+    lines.push("    behavior: domain");
+    lines.push("    format: mrs");
+    lines.push(`    url: ${yamlScalar(`${origin}/rules/geosite-cn.mrs`)}`);
+    lines.push(`    path: ${yamlScalar("./providers/cn-domain.mrs")}`);
+    lines.push("    interval: 86400");
+    lines.push("  cn-ip:");
+    lines.push("    type: http");
+    lines.push("    behavior: ipcidr");
+    lines.push("    format: mrs");
+    lines.push(`    url: ${yamlScalar(`${origin}/rules/geoip-cn.mrs`)}`);
+    lines.push(`    path: ${yamlScalar("./providers/cn-ip.mrs")}`);
+    lines.push("    interval: 86400");
   }
   lines.push("rules:");
+  if (nodes.length > 0) {
+    // 为什么不给 Clash 配 `dns`：`DOMAIN-SUFFIX`/`RULE-SET` 按域名或 IP 匹配，域名规则发生在解析之前，
+    // DNS 走境外也照样直连；dns 块只会覆盖用户在 CMFA 里自己设的 DNS，并多出「policy 写错整块失效」
+    // 的故障面。（sing-box 侧必须配，因为 geoip-cn 要匹配解析后的 IP。）
+    // 不用 GEOIP：mihomo 的 geodata 默认从 GitHub 拉，拉不到时规则落空、全部流量照旧走代理且界面无异常。
+    // provider 初始化失败时 mihomo 也只记日志：最后那条 `DOMAIN-SUFFIX,cn,DIRECT` 是兜底，保证至少
+    // 不比没有 provider 时更差，所以它必须留在 RULE-SET 之后。
+    lines.push(`  - ${yamlScalar("RULE-SET,cn-domain,DIRECT")}`);
+    lines.push(`  - ${yamlScalar("RULE-SET,cn-ip,DIRECT")}`);
+    lines.push(`  - ${yamlScalar("DOMAIN-SUFFIX,cn,DIRECT")}`);
+  }
   lines.push(`  - ${yamlScalar(nodes.length === 0 ? "MATCH,DIRECT" : "MATCH,Veyl")}`);
   return `${lines.join("\n")}\n`;
 }
@@ -561,6 +588,26 @@ function ssList(nodes: ExportedNode[]): string {
   return nodes.length === 0 ? "" : `${nodes.map(ssLink).join("\n")}\n`;
 }
 
+/** 规则集与 profile 同一 origin；不写 download_detour（1.14 已废弃，1.16 移除）。 */
+function cnRuleSets(origin: string) {
+  return [
+    {
+      tag: "geosite-cn",
+      type: "remote",
+      format: "binary",
+      url: `${origin}/rules/geosite-cn.srs`,
+      update_interval: "7d",
+    },
+    {
+      tag: "geoip-cn",
+      type: "remote",
+      format: "binary",
+      url: `${origin}/rules/geoip-cn.srs`,
+      update_interval: "7d",
+    },
+  ];
+}
+
 async function singboxProfile(
   request: Request,
   env: MobileEnv & { DB: D1Database },
@@ -586,13 +633,19 @@ async function singboxProfile(
     method: SS_METHOD,
     password: node.password,
   }));
+  const origin = new URL(request.url).origin;
 
   return configResponse({
     log: { level: "warn" },
     // 手机 DNS 常指向 LAN 路由器；没有这条，DNS 查询会被 final=proxy 送进隧道发往服务端内网。
     // DoH 走 proxy 出网，不用 UDP 53（避开运营商对非标端口 UDP 的限制）。
+    // 国内域名走国内 DNS：否则解析出海外 IP，下面的 geoip-cn 规则永远不会命中。
     dns: {
-      servers: [{ type: "https", tag: "dns", server: "1.1.1.1", detour: "proxy" }],
+      servers: [
+        { type: "https", tag: "dns", server: "1.1.1.1", detour: "proxy" },
+        { type: "udp", tag: "dns-cn", server: "223.5.5.5", detour: "direct" },
+      ],
+      rules: [{ rule_set: ["geosite-cn"], server: "dns-cn" }],
       final: "dns",
     },
     // Apple / SFA 只在配置声明 TUN 入站时才创建系统隧道；auto_route 必须为真，
@@ -624,11 +677,20 @@ async function singboxProfile(
       final: "proxy",
       // TUN 入站 + 代理出站必须打开：否则出站 socket 不绑定物理网卡，会被路由回隧道。
       auto_detect_interface: true,
+      // 1.14 起 remote rule_set 的域名 URL 必须有域名解析器，缺了整份配置被内核拒绝。
+      // 作用域仅限内核自己拨号时的域名解析（规则集 URL、出站服务器域名），**不是**用户流量的 DNS；
+      // 用户域名解析仍由 dns.rules + dns.final 决定。我们节点地址是 IP，所以实际只影响规则集 URL 那一次。
+      // 用直连的国内 DNS，避免规则集下载依赖尚未建立的代理。
+      default_domain_resolver: "dns-cn",
+      rule_set: cnRuleSets(origin),
       // 顺序不可变：sniff 必须在 hijack-dns 之前，否则 `protocol: "dns"` 永不命中，
       // DNS 查询会被 final=proxy 原样送进隧道（桌面端同源规则，静默失效不报错）。
+      // 国内域名 / 国内 IP 直连，其余仍走 proxy。
       rules: [
         { action: "sniff", sniffer: ["http", "tls", "quic", "dns"], timeout: "300ms" },
         { protocol: "dns", action: "hijack-dns" },
+        { rule_set: ["geosite-cn", "geoip-cn"], action: "route", outbound: "direct" },
+        { ip_is_private: true, action: "route", outbound: "direct" },
       ],
     },
   });
@@ -641,7 +703,7 @@ async function clashProfile(
   const loaded = await loadProfileNodes(request, env);
   if (isResponse(loaded)) return loaded;
   if (loaded.nodes.length === 0 && loaded.queried > 0) return unavailableProfile();
-  return new Response(clashYaml(loaded.nodes), {
+  return new Response(clashYaml(loaded.nodes, new URL(request.url).origin), {
     status: 200,
     headers: profileHeaders("text/yaml; charset=utf-8"),
   });
