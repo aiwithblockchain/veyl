@@ -21,7 +21,7 @@
         "http.server",
         "4173",
         "--directory",
-        "site"
+        "cloudflare/edge/public"
       ],
       "port": 4173
     },

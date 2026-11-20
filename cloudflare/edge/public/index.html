@@ -27,7 +27,6 @@
     --link-hover: #9C1249;
     --focus: #E03A66;
     --green: #1C8A57;
-    --amber: #A96A00;
     --btn: #1B1B1A;
     --btn-ink: #FAFAF8;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
@@ -51,7 +50,6 @@
       --link-hover: #F7A8C2;
       --focus: #F06B92;
       --green: #5FBF8A;
-      --amber: #D9A44E;
       --btn: #E9E9EA;
       --btn-ink: #16181B;
     }
@@ -328,7 +326,6 @@
   .trial .num { font: 500 14px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
   .dot { display: inline-block; width: 6px; height: 6px; border-radius: 2px; margin-right: 7px; vertical-align: 1px; }
   .dot--green { background: var(--green); }
-  .dot--amber { background: var(--amber); }
 
   .pricing-grid {
     display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr);
@@ -372,11 +369,9 @@
   .dl__row:last-of-type { border-bottom: 1px solid var(--hair); }
   .dl__name { font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
   .dl__meta { margin-top: 4px; font-size: 13.5px; color: var(--ink-2); }
-  .dl__status { font-size: 13px; color: var(--ink-2); white-space: nowrap; }
   .dl__action { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
   .dl__alt { font-size: 12.5px; color: var(--ink-3); text-decoration: none; }
   .dl__alt:hover { color: var(--ink); text-decoration: underline; }
-  .dl__note { margin: 22px 0 0; max-width: 62ch; font-size: 13.5px; line-height: 1.75; color: var(--ink-3); }
   @media (max-width: 560px) {
     .dl__row { flex-direction: column; align-items: flex-start; gap: 16px; }
     .dl__name { font-size: 19px; }
@@ -437,7 +432,7 @@
         </p>
         <div class="actions">
           <a class="btn" href="https://github.com/aiwithblockchain/veyl/releases/latest">
-            下载 macOS 版 <span class="arrow" aria-hidden="true">↓</span>
+            下载客户端 <span class="arrow" aria-hidden="true">↓</span>
           </a>
           <a class="link-quiet" href="#pricing">先看价格</a>
         </div>
@@ -672,18 +667,16 @@
         <div class="dl__row">
           <div>
             <div class="dl__name">Windows</div>
-            <div class="dl__meta">Windows 10 / 11 · x64</div>
+            <div class="dl__meta">Windows 10 / 11 · x64 · MSI</div>
           </div>
-          <div class="dl__status">
-            <span class="dot dot--amber" aria-hidden="true"></span>尚未在真机验证
+          <div class="dl__action">
+            <a class="btn" href="https://github.com/aiwithblockchain/veyl/releases/latest">
+              从 GitHub 下载 <span class="arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="dl__alt" href="https://github.com/aiwithblockchain/veyl/releases">所有版本 ↗</a>
           </div>
         </div>
       </div>
-      <p class="dl__note">
-        Windows 版还没在真机上跑过，不建议装在日常用的机器上。
-        客户端的源码也在 GitHub；从源码构建的步骤见
-        <a href="https://github.com/aiwithblockchain/veyl/blob/main/docs/build-and-release.md">构建文档</a>。
-      </p>
     </div>
   </section>
 
@@ -693,7 +686,6 @@
         <h2 id="limits-title">先说清楚</h2>
         <ul class="caveats">
           <li><b>能不能连，看你本地的线路。</b>同一个地区，有人连得通，有人连不上。应用里会标出连不通的节点；连不上可以销毁重建，当天已扣的费用不退。</li>
-          <li><b>Windows 还没在真机验证。</b>目前完整验证过的是 macOS。</li>
           <li><b>免费节点不保证稳定。</b>它是让你先试试连接、看看界面，不是长期方案。</li>
         </ul>
       </div>
