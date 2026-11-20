@@ -678,8 +678,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       throw { code: "UNSUPPORTED", message: "这个版本还不支持充值。", retryable: false };
     }
     const result = await source.call(bridge, denominationCents);
-    // fake 通道没有收银台，直接刷新余额；有 URL 时 Host 已打开浏览器。
-    if (!result.checkout_url) await refreshWallet();
+    // 服务端一定返回 checkout_url，Host 已用系统浏览器打开。
     return result;
   };
 
