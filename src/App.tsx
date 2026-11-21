@@ -13,6 +13,7 @@ import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
 import { DEFAULT_PROXY_PORT, isConfirmQuestionKind, isTauri, readQuestionDetail, shouldRefreshSnapshotOnHealth, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
 import type {
+  AgentBridge,
   DefaultProfileStatus,
   NodeProbeResult,
   PendingQuestion,
@@ -605,6 +606,8 @@ export default function App() {
   const panelClosedByUserRef = useRef(readFlag(PANEL_CLOSED_BY_USER_KEY));
   const panelAutoOpenedRef = useRef(readFlag(PANEL_AUTO_OPENED_KEY));
   const aiConfiguredRef = useRef(false);
+  /** 首启开场只发一次：onDone 可能被重复触发。 */
+  const kickoffSentRef = useRef(false);
   const markQuestionSettled = (questionId: string) => {
     const settled = settledQuestionIds.current;
     settled.add(questionId);
@@ -1136,10 +1139,43 @@ export default function App() {
     if (vpn.error) setAppNotice({ level: "error", text: vpn.error });
   }, [vpn.error]);
 
+  /**
+   * 首启开场：打开右栏，把 Host 给的开场提示词当 hidden 消息发出去，
+   * AI 的第一句就是它自己的话。命令缺失 / 空文本 / AI 未就绪都只开面板。
+   */
+  const startKickoff = async () => {
+    if (kickoffSentRef.current) return;
+    kickoffSentRef.current = true;
+    panelOpenRef.current = true;
+    setPanelOpen(true);
+    setAiUnread(false);
+    // 开场词的前提是「还没有任何配置」：删掉 AI 服务后重进首启时，
+    // 用户可能已经有节点 / 服务器，不能再发一句「还没有可用的节点」。
+    if (vpn.configs.length > 0) return;
+    if (!aiConfiguredRef.current) return;
+    const source = (bridge as AgentBridge & {
+      aiSessionKickoff?: () => Promise<{ text: string }>;
+    }).aiSessionKickoff;
+    if (typeof source !== "function") return;
+    let text = "";
+    try {
+      const raw = await source.call(bridge);
+      text = typeof raw?.text === "string" ? raw.text.trim() : "";
+    } catch {
+      // Host 还没接这条命令：只开面板，不打扰用户。
+      return;
+    }
+    if (!text) return;
+    const fresh = createSession();
+    dispatch({ type: "add_session", session: fresh });
+    await sendToSession(fresh.id, text, { hidden: true });
+  };
+
   const completeOnboarding = async () => {
     setShowOnboarding(false);
     setOnboardingLoaded(true);
     await Promise.all([refreshDefaultProfile(), refreshAiStatus()]);
+    void startKickoff();
   };
 
   const finishOnboarding = () => {
@@ -1369,7 +1405,7 @@ export default function App() {
     text: string | undefined,
     options: { hidden?: boolean; lastAction?: UiLastAction } = {},
   ): Promise<boolean> => {
-    if (!aiReady) {
+    if (!aiConfiguredRef.current) {
       setAppNotice({ level: "error", text: "还没有配置 AI，先配置后再对话。" });
       openSettings("ai");
       return false;

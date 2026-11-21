@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import type {
   AgentBridge,
+  AppLanguage,
+  AppLanguageState,
   DefaultProfileStatus,
   ProxyPortAvailability,
   LlmProtocol,
@@ -739,6 +741,12 @@ export function Settings({
   const [pendingDelete, setPendingDelete] = useState<LlmProvider | null>(null);
   const [diagnosticNotice, setDiagnosticNotice] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
+  /** 语言选择；读不到时保持 null（不猜一个档位），写成功才更新。 */
+  const [appLanguage, setAppLanguage] = useState<AppLanguageState | null>(null);
+  const [languageBusy, setLanguageBusy] = useState(false);
+  const [languageError, setLanguageError] = useState<string | null>(null);
+  /** 读取代次：点选写入成功后递增；之前发出的 GET 结果据此丢弃，别把新值覆盖回旧的。 */
+  const languageReadEpochRef = useRef(0);
   const [includeDomains, setIncludeDomains] = useState(false);
   const [domainBusy, setDomainBusy] = useState(false);
   const [domainError, setDomainError] = useState<string | null>(null);
@@ -937,6 +945,7 @@ export function Settings({
     setImportBusy(false);
     setImportResult(null);
     setImportError(null);
+    setLanguageError(null);
     void refreshProviders();
   }, [open, refreshProviders, initialSection]);
 
@@ -1077,6 +1086,22 @@ export function Settings({
     const result = await onSetRoutingMode(mode);
     if (!result.ok) {
       setScopeError(result.message ?? "没切成功，还是原来的范围。");
+    }
+  };
+
+  const changeLanguage = async (lang: AppLanguage) => {
+    if (languageBusy || lang === appLanguage?.selected) return;
+    setLanguageBusy(true);
+    setLanguageError(null);
+    try {
+      setAppLanguage(await bridge.appLanguageSet(lang));
+      // 写入成功后的选中态是新的：之前发出的读取结果已经过时。
+      languageReadEpochRef.current += 1;
+    } catch {
+      // 后端错误码 → 文案的映射（批次 4）未就绪前，统一用这一句。
+      setLanguageError("语言没有切换。本地设置写入失败。再试一次。");
+    } finally {
+      setLanguageBusy(false);
     }
   };
 
@@ -1444,6 +1469,31 @@ export function Settings({
       .catch(() => {
         if (alive) setAppVersion(null);
       });
+    return () => {
+      alive = false;
+    };
+  }, [open, bridge]);
+
+  // 语言选择：每次打开设置读一次；读失败保留已有选中态，首次没有值才保持 null。
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    const epoch = languageReadEpochRef.current;
+    // 后端命令还没落地时也别打断设置页：同步抛错也走 catch。
+    Promise.resolve()
+      .then(() => bridge.appLanguageGet())
+      .then(
+        (state) => {
+          // 等结果期间用户点过档位并写成功了：这次读取已经过时，丢弃。
+          // 等结果期间用户点过档位并写成功了：这次读取已经过时，丢弃。
+          if (alive && epoch === languageReadEpochRef.current) {
+            setAppLanguage(state);
+          }
+        },
+        () => {
+          // 读不到不清空：用户刚选中的那一档不能被一次失败的读取抹掉。
+        },
+      );
     return () => {
       alive = false;
     };
@@ -2471,11 +2521,57 @@ export function Settings({
             id="settings-panel-advanced"
             aria-labelledby="settings-tab-advanced"
           >
+            {/* 批次 1 先直接写中文；批次 2 把这一行迁进 i18n 字典。 */}
+            <div className="settings-row settings-row--stack">
+              <div className="settings-row__main">
+                <div className="settings-row__label">语言</div>
+                <p className="settings-note">已开始的对话保持原语言。</p>
+                {languageError ? (
+                  <p className="settings-feedback settings-feedback--error" role="alert">
+                    {languageError}
+                  </p>
+                ) : null}
+              </div>
+              <div
+                className="settings-seg settings-seg--language"
+                role="group"
+                aria-label="语言"
+              >
+                <button
+                  type="button"
+                  className={appLanguage?.selected === "system" ? "is-selected" : ""}
+                  aria-pressed={appLanguage?.selected === "system"}
+                  disabled={languageBusy}
+                  onClick={() => void changeLanguage("system")}
+                >
+                  跟随系统
+                </button>
+                <button
+                  type="button"
+                  className={appLanguage?.selected === "zh" ? "is-selected" : ""}
+                  aria-pressed={appLanguage?.selected === "zh"}
+                  disabled={languageBusy}
+                  onClick={() => void changeLanguage("zh")}
+                >
+                  中文
+                </button>
+                <button
+                  type="button"
+                  className={appLanguage?.selected === "en" ? "is-selected" : ""}
+                  aria-pressed={appLanguage?.selected === "en"}
+                  disabled={languageBusy}
+                  onClick={() => void changeLanguage("en")}
+                >
+                  English
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-subhead">修复网络</div>
+
             <p className="settings-note">
               这里的东西平时不用改。连不上网、打不开网页时再看。
             </p>
-
-            <div className="settings-subhead">修复网络</div>
 
             {showCleanupProxy ? (
               <div className="settings-row">

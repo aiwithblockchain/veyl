@@ -4,6 +4,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AgentBridge,
+  AppLanguage,
+  AppLanguageState,
   ChatHistory,
   ConfigActivateResult,
   ConfigCreateInput,
@@ -193,6 +195,16 @@ function normalizeProxyPortSave(
       ? raw.availability
       : "free";
   return { port: readPort(raw?.port, fallbackPort), availability };
+}
+
+/** 只兜形状：非法 selected 按 system 处理，系统语言的解析仍在 Rust 一处做。 */
+function normalizeAppLanguageState(raw: unknown): AppLanguageState {
+  const value = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const selected: AppLanguage =
+    value.selected === "zh" || value.selected === "en" || value.selected === "system"
+      ? value.selected
+      : "system";
+  return { selected, resolved: value.resolved === "en" ? "en" : "zh" };
 }
 
 function normalizeConfigDetail(raw: ConfigDetail & { layout_revision?: unknown }): ConfigDetail {
@@ -1059,6 +1071,16 @@ export class TauriAgentBridge implements AgentBridge {
     return getVersion();
   }
 
+  async appLanguageGet(): Promise<AppLanguageState> {
+    return normalizeAppLanguageState(await call<unknown>("app_language_get"));
+  }
+
+  async appLanguageSet(lang: AppLanguage): Promise<AppLanguageState> {
+    return normalizeAppLanguageState(
+      await call<unknown>("app_language_set", { language: lang }),
+    );
+  }
+
   async runtimeStart(configId?: string): Promise<RuntimeStartResult> {
     return call<RuntimeStartResult>(
       "runtime_start",
@@ -1708,6 +1730,12 @@ export class TauriAgentBridge implements AgentBridge {
   async cancel(requestId: string): Promise<boolean> {
     const raw = await call<{ cancelled?: unknown }>("ai_cancel", { requestId });
     return raw?.cancelled === true;
+  }
+
+  /** 首启开场提示词；命令缺失或返回空文本都交给调用方降级（只开面板）。 */
+  async aiSessionKickoff(): Promise<{ text: string }> {
+    const raw = await call<{ text?: unknown }>("ai_session_kickoff");
+    return { text: typeof raw?.text === "string" ? raw.text : "" };
   }
 
   async getChatHistory(sessionId?: string): Promise<ChatHistory> {

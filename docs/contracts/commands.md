@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.49.0`
+> 契约版本：`2.51.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -227,6 +227,9 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 96 | `my_server_rename` | `{ serverId, name }` | `MyServer` | **2.40.0 新增（仅 UI）；只能改自己的、允许重名；名字 trim 后按 Unicode 码点校验 1–24** |
 | 97 | `node_forget` | `{ nodeId }` | `{ removed: boolean }` | **2.44.0 新增（仅 UI）；删除本地节点（余额不足停机的墓碑只能这样清）；级联清配置绑定与 `current_node_id`；先让控制面忽略墓碑，失败则整体失败、本地不动（2.45.0）** |
 | 98 | `ui_log` | `{ level, target, message }` | `null` | **2.49.0 新增（仅 UI）**；前端排障日志；target 白名单、脱敏 + 换行替换 + 300 字符截断、每秒 50 条上限（§7.24） |
+| 99 | `ai_session_kickoff` | `{ lang? }` | `{ text: string }` | **2.50.0 新增（仅 UI）**；首启第一条用户消息的文本；不落库、不发消息（§7.25） |
+| 100 | `app_language_get` | `{}` | `AppLanguageData`（`{ selected, resolved }`） | **2.51.0 新增（仅 UI）**；读语言档位并解析系统语言；读不写库（§7.26） |
+| 101 | `app_language_set` | `{ language }` | `AppLanguageData` | **2.51.0 新增（仅 UI）**；先写库成功再返回新值；失败只回错误码（§7.26） |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -2086,6 +2089,48 @@ type UiLogArgs = {
 - 这是 **UI 专用命令**，`tools.md` 不注册对应工具；模型不得写应用日志。
 - 日志目录用户可打开：调用方只写自己的状态与错误，**不要写用户输入原文、令牌、节点密码**。脱敏只兜住有形态特征的凭据，普通文本里的短密码仍然会原样进日志（`logging.rs` 的脱敏边界）。
 
+### 7.25 `ai_session_kickoff { lang? }` → `{ text: string }`（仅 UI，2.50.0）
+
+用户第一次进主界面时，前端取这段文本，作为**第一条用户消息**发出。命令只给文本：
+不建会话、不落库、不发消息——**发不发、什么时候发由前端决定**，Host 不自动发消息。
+
+```ts
+type AiSessionKickoffArgs = { lang?: "zh" | "en" | "system" };   // 缺省 / 空串 / system = 跟随设置
+type AiSessionKickoffData = { text: string };
+```
+
+- 正文是 `resources/prompts/<lang>/kickoff.md` 编进二进制的那一份：原「首次配置」整段（环境检测 → 两问 → 确认 → 执行 → 完成后的中间区域 → 用户改主意），措辞未改；英文版结构一致。唯一的小节名调整：文内对「# 带选项的提问」的引用改为「# 带选项的卡片」，与现行 `system.md` 对齐，其余措辞未动。
+- 系统提示词里**不再包含首启流程**：`system.md` 只放角色、能力边界、文档指路、措辞与安全底线（`docs/design/ai-prompt-loading.md` §2）。
+- `lang` 缺省或空串时用 `app_language` 解析出的 `resolved`；显式传 `zh` / `en` 时以传入值为准。其它值 → `INVALID_ARGUMENT`，`details.reason = "unsupported_lang"`，`message` 为空串，**不静默回落中文**。
+- 无副作用：同一份文本重复取，结果逐字一致；前端应在「本地没有任何配置、且会话还没有消息」时发一次。
+- Host 在**新建会话**时记一行 `prompt lang=<lang> doc_version=<8 位十六进制> dir=<内容文档目录> working_dir=<会话工作目录>`；只记版本与路径，不记提示词正文。
+
+### 7.26 语言设置（仅 UI，2.51.0）
+
+设置 › 高级第一行的三档分段控件（跟随系统 / 中文 / English）。系统语言**只在 Rust 解析**
+（`zh*` → `zh`，其它 → `en`），前端只消费 `resolved`，不自己读 OS locale。设计见 `docs/design/i18n.md` §3.1。
+
+```ts
+type AppLanguageSelected = "system" | "zh" | "en";
+type AppLanguageData = {
+  selected: AppLanguageSelected;   // 存库档位
+  resolved: "zh" | "en";           // 实际语言；selected=system 时来自系统首选语言
+};
+```
+
+| 命令 | 入参 | 返回 | 规则 |
+|---|---|---|---|
+| `app_language_get` | `{}` | `AppLanguageData` | **读不写库**。缺失或非法存库值一律按 `selected: "system"`。 |
+| `app_language_set` | `{ language: AppLanguageSelected }` | `AppLanguageData` | 只认三个值；其它 → `INVALID_ARGUMENT / invalid_language`。**先写库成功再返回新值**；写库失败 → `INTERNAL`，界面保持原语言。 |
+
+- 存储：`settings` 表键 `app_language`，值 `system` / `zh` / `en`（`data-model.md` §3）。缺失或非法 → 读回 `system`。
+- `store` 未初始化时两条命令都返回 `INTERNAL`（`message` 空串），与写库失败同码；`get` 也一样，不静默回 `system`。
+- **失败只返回稳定错误码，`message` 为空串**（Q4：文案由前端按 code 映射），不返回中文句。
+- `resolved` 在 `set` 返回时按新档位重新解析；前端拿它立即重绘，不需要重启或重新登录。
+- **AI 会话只在新建时读取**：会话创建时定下提示词语言与末尾语言约束，切换语言不影响已开始的会话（Q1）。
+- 不发事件：控件选中态就是反馈；保存成功后的返回值足够前端重绘。
+- AI 不可调用：不在任何工具 schema 里。
+
 ---
 
 ## 8. 种子（官方默认配置，C 组）
@@ -2436,7 +2481,7 @@ UI 侧不依赖模型的措辞：
 - `tool-call-end.display`（`events.md` §3.4）是完成 / 失败的唯一用户文案；缺失时回落到前端映射表，不报错、不丢事件。
 - 前端映射表位于 `src/components/toolDisplay.ts`（`TOOL_COPY`，设计文档里也称 `TOOL_DISPLAY`），键集合必须与 `tools.md` §3 的 44 个工具名**双向相等**；`AskUserQuestion` 虽在表中，但渲染层必须跳过它的工具行（提问由问答浮层承担）。
 - **不做输出正则改写**：静默替换模型正文（例如抹掉 `cfg_` 开头的串）比漏一句更难排查；拦截放在渲染层，不改写生成内容。
-- 工具 description 的表达约束放 `\n` 之后的末尾：`capability_catalog` 只取第一行进系统提示清单，第一行出现约束句会污染能力清单。
+- 工具 description 的表达约束放 `\n` 之后的末尾：第一行是模型挑工具时看到的摘要，第一行出现约束句会让摘要把约束当成用途。
 - running 状态文案来自映射表，不得拼工具名；未知工具固定「正在处理…」（`events.md` §3.5）。
 - 映射表以 `docs/design/tool-display.md` 为准；「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归，删任一条即红。
 
@@ -2726,15 +2771,17 @@ type RulesStatus = {
 | `core_upgrade` | `CoreUpgrade`（**有确认点的工具**，见 `tools.md` §4.45） | **必须共用**，且必须用户逐字确认 |
 | `tun_helper_info` / `tun_helper_restart` | **无**（UI 专用，见 §7.8.1–§7.8.2） | — |
 | `proxy_port_get` / `proxy_port_set` | **无**（UI 专用，见 §7.11；端口是用户自己的设置） | — |
+| `app_language_get` / `app_language_set` | **无**（UI 专用，见 §7.26；语言是用户自己的设置） | — |
 | `proxy_recovery_report` | **无**（UI 专用，见 §7.13；异常退出的恢复结果只用于首屏提示） | — |
 | `ui_log` | **无**（UI 专用，见 §7.24；模型不得写应用日志） | — |
+| `ai_session_kickoff` | **无**（UI 专用，见 §7.25；用户提示词由界面在首启时发出） | — |
 | `my_server_catalog` | **无**（UI 专用，见 §7.14；控制面目录只读） | — |
 | `my_server_list` / `my_server_get` | `MyServers`（只读，仅列表；详情与凭据不进 AI 上下文） | — |
 | `my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` / `my_server_rename` | **无**（§10.5：建机、销毁、凭据只能由用户点界面） | — |
 | `my_server_register_device` | **无**（UI 专用，见 §7.16；身份恢复只能由用户触发） | — |
 | `my_server_identity` | **无**（UI 专用，见 §7.17；只读本地身份状态） | — |
 
-> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` / `my_server_rename`、`my_server_register_device`、`my_server_identity`、`my_server_login_start` / `my_server_login_verify` / `my_server_account` / `my_server_logout` / `my_server_order_get`、`my_server_wallet` / `my_server_topup`、`node_forget`、`trial_status`、`quit_decision`、`ui_log`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
+> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`app_language_get` / `app_language_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` / `my_server_rename`、`my_server_register_device`、`my_server_identity`、`my_server_login_start` / `my_server_login_verify` / `my_server_account` / `my_server_logout` / `my_server_order_get`、`my_server_wallet` / `my_server_topup`、`node_forget`、`trial_status`、`quit_decision`、`ui_log`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
@@ -2804,7 +2851,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.49.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** |
+| `contracts/commands.md` | **2.51.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** |
 | `contracts/events.md` | **2.21.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
 | `contracts/tools.md` | **3.22.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** |
@@ -2822,6 +2869,28 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.51.0（未发布，2026-11-21：语言设置与中英文提示词）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.51.0`；§2 新增 100 `app_language_get` / 101 `app_language_set`，详解见 §7.26 | 新增命令 | `docs/design/i18n.md` §3.1 定稿 |
+| 2 | `settings` 表新增键 `app_language`（`system` / `zh` / `en`，缺失或非法按 `system`）；不新增迁移 | 新增存储 | 设计 §3、§4.2 |
+| 3 | 系统语言解析只在 Rust 一处做：`zh*` → `zh`，其它 → `en`（macOS `AppleLanguages` / Windows `LocaleName` / 其它 unix `LANG`） | 新增行为 | 设计 §3.1 |
+| 4 | AI 会话按设置里的 `resolved` 选 `resources/prompts/zh/` 或 `en/` 的 `system.md`，环境段与安全底线也按语言拆分，并在系统提示词末尾追加语言约束；只影响新会话 | 语义 | 设计 §1、§3（Q1） |
+| 5 | 补齐英文 `system.md` / `kickoff.md`；`ai_session_kickoff` 支持 `en`，`lang` 缺省或空串时跟随设置 | 内容 + 语义 | 设计 §2、§7 已知缺口 |
+| 6 | `ai_session_kickoff` 的 `INVALID_ARGUMENT` 改为 `message` 为空串，只留稳定错误码 | 语义 | Q4 |
+
+### 2.50.0（未发布，2026-11-21：AI 会话提示词拆分与首启 kickoff）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.50.0`；§2 新增 99 `ai_session_kickoff`，详解见 §7.25 | 新增命令 | 用户拍板：每个新建会话加载系统提示词，内容文档只指路、AI 需要时自己读（`docs/design/ai-prompt-loading.md`） |
+| 2 | 系统提示词由 `first-run.md` 拆成两份：`system.md`（角色 / 能力 / 文档指路 / 措辞 / 安全底线）+ `kickoff.md`（原「首次配置」整段，作为首启的第一条用户消息）；`first-run.md` 删除 | 结构变更 | 设计 §2、§4.1 |
+| 3 | 会话工具增加 claurst 基础读写工具（Read / Edit / Write / Bash / Glob / Grep）；提示词里不再重复工具清单（能力清单一节已删，工具定义随请求下发） | 语义 | 参考实现 TweetPilot `build_session_tools`；「指路」要成立必须先有读文件的能力 |
+| 4 | 内容文档（`product.md` / `faq.md`）启动时释放到 `<数据目录>/prompts/<lang>/`，`{{PROMPT_DIR}}` 指向该目录；内容变了才写盘 | 新增行为 | 设计 §3.2、§7 Q2 / Q5 |
+| 5 | 新建会话记一行 `prompt lang=… doc_version=… dir=…`；只记版本与路径，不记提示词正文 | 新增行为 | 设计 §3.6、§8.1 |
+| 6 | §13 标注为 UI 专用；§15.5 矩阵同步本文件 `2.50.0` | 元数据 | — |
 
 ### 2.49.0（未发布，2026-11-21：UI 排障日志命令）
 

@@ -55,6 +55,17 @@ impl Region {
         }
     }
 
+    /// 给英文提示词用的说法；没有英文名的国家回落到大写国家码。
+    pub fn label_en(&self) -> String {
+        match self {
+            Region::Cn => "Mainland China".to_string(),
+            Region::Cc(code) => country_label_en(code)
+                .map(str::to_string)
+                .unwrap_or_else(|| code.to_uppercase()),
+            Region::Unknown => "unknown".to_string(),
+        }
+    }
+
     /// 允许外部（`VEYL_REGION`、时区表）给任意写法；不合法按未知处理。
     pub fn from_code(value: &str) -> Self {
         let code = value.trim().to_ascii_lowercase();
@@ -130,6 +141,63 @@ fn country_label(code: &str) -> Option<&'static str> {
         "nz" => "新西兰",
         "za" => "南非",
         "eg" => "埃及",
+        _ => return None,
+    };
+    Some(name)
+}
+
+/// 与 `country_label` 同一批国家，英文说法；没有英文名的国家回落到大写国家码。
+fn country_label_en(code: &str) -> Option<&'static str> {
+    let name = match code {
+        "hk" => "Hong Kong",
+        "tw" => "Taiwan",
+        "mo" => "Macao",
+        "jp" => "Japan",
+        "kr" => "South Korea",
+        "sg" => "Singapore",
+        "my" => "Malaysia",
+        "th" => "Thailand",
+        "vn" => "Vietnam",
+        "ph" => "Philippines",
+        "id" => "Indonesia",
+        "in" => "India",
+        "ae" => "United Arab Emirates",
+        "sa" => "Saudi Arabia",
+        "il" => "Israel",
+        "tr" => "Türkiye",
+        "ru" => "Russia",
+        "ua" => "Ukraine",
+        "md" => "Moldova",
+        "gb" => "United Kingdom",
+        "ie" => "Ireland",
+        "pt" => "Portugal",
+        "de" => "Germany",
+        "fr" => "France",
+        "nl" => "Netherlands",
+        "es" => "Spain",
+        "it" => "Italy",
+        "ch" => "Switzerland",
+        "at" => "Austria",
+        "cz" => "Czechia",
+        "pl" => "Poland",
+        "se" => "Sweden",
+        "no" => "Norway",
+        "dk" => "Denmark",
+        "fi" => "Finland",
+        "gr" => "Greece",
+        "ca" => "Canada",
+        "us" => "United States",
+        "mx" => "Mexico",
+        "br" => "Brazil",
+        "ar" => "Argentina",
+        "cl" => "Chile",
+        "co" => "Colombia",
+        "pe" => "Peru",
+        "ve" => "Venezuela",
+        "au" => "Australia",
+        "nz" => "New Zealand",
+        "za" => "South Africa",
+        "eg" => "Egypt",
         _ => return None,
     };
     Some(name)
@@ -1036,6 +1104,10 @@ mod region_tests {
         assert_eq!(Region::Unknown.code(), None);
         assert_eq!(Region::Cn.label(), "中国大陆");
         assert_eq!(Region::Cc("jp".into()).label(), "日本");
+        assert_eq!(Region::Cn.label_en(), "Mainland China");
+        assert_eq!(Region::Cc("jp".into()).label_en(), "Japan");
+        assert_eq!(Region::Cc("zz".into()).label_en(), "ZZ");
+        assert_eq!(Region::Unknown.label_en(), "unknown");
     }
 
     #[test]

@@ -1336,6 +1336,11 @@ body[data-resizing] {
   outline-offset: 1px;
 }
 
+/* 语言三档：中文 / English 文案长短不一，最小 72 让三段看起来齐。 */
+.settings-seg--language button {
+  min-width: 72px;
+}
+
 .settings-confirm {
   padding: 12px 14px;
   border: 1px solid var(--line);

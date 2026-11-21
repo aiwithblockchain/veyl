@@ -266,7 +266,10 @@ pub fn refresh_credentials_if_active(provider_id: &str) {
     }
 }
 
-/// 会话工作目录：P1 W1 先用用户主目录下的 `.veyl/sessions`，W3 起改用平台数据目录。
+/// 会话工作目录：固定 `~/.veyl/sessions`（不随平台数据目录变，相对路径的行为才稳定）。
+///
+/// 由本函数在每次取用时创建；创建失败仍返回路径——读写工具执行时自己会报错，
+/// 不能因为建不了目录就连会话都起不来。`HOME` / `USERPROFILE` 都没有时退到临时目录。
 fn working_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))

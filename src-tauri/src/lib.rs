@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod claurst_session;
 pub mod config;
 pub mod control_plane;
+pub mod i18n;
 pub mod lifecycle;
 pub mod llm;
 pub mod logging;
@@ -73,6 +74,8 @@ pub fn run() {
     }
     // 日志最先初始化：后面每一步失败都要能落盘。
     let log_file = crate::logging::init(&data_dir);
+    // 提示词与内容文档：system / kickoff 随包，内容文档释放到数据目录，供 AI 按路径去读。
+    crate::claurst_session::prompts::install(&data_dir);
     // panic 只记日志、不还原：hook 运行时可能握着配置库/数据库锁，
     // 在里面 exec networksetup 的风险大于收益；进程随后死亡，看门狗接管。
     {
@@ -386,6 +389,8 @@ pub fn run() {
                 agent::commands::trial_status,
                 agent::commands::proxy_port_get,
                 agent::commands::proxy_port_set,
+                agent::commands::app_language_get,
+                agent::commands::app_language_set,
                 agent::commands::proxy_recovery_report,
                 agent::commands::my_server_catalog,
                 agent::commands::my_server_list,
@@ -452,6 +457,7 @@ pub fn run() {
                 agent::commands::network_force_reset,
                 agent::commands::open_log_dir,
                 agent::commands::ui_log,
+                claurst_session::ai_session_kickoff,
                 agent::commands::open_external,
                 agent::commands::tun_helper_open_settings,
                 agent::commands::tun_helper_uninstall,
@@ -479,6 +485,8 @@ pub fn run() {
                 agent::commands::trial_status,
                 agent::commands::proxy_port_get,
                 agent::commands::proxy_port_set,
+                agent::commands::app_language_get,
+                agent::commands::app_language_set,
                 agent::commands::proxy_recovery_report,
                 agent::commands::my_server_catalog,
                 agent::commands::my_server_list,
@@ -545,6 +553,7 @@ pub fn run() {
                 agent::commands::network_force_reset,
                 agent::commands::open_log_dir,
                 agent::commands::ui_log,
+                claurst_session::ai_session_kickoff,
                 agent::commands::open_external,
                 agent::commands::tun_helper_open_settings,
                 agent::commands::tun_helper_uninstall,

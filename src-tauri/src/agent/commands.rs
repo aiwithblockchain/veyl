@@ -298,6 +298,54 @@ pub async fn proxy_port_set(port: Value) -> Result<Value, Value> {
     Ok(json!({ "port": port, "availability": availability }))
 }
 
+/// 读语言设置：`selected` 是存库档位，`resolved` 是实际语言。
+/// 系统语言只在 Rust 解析，前端不自己读 OS locale。
+#[tauri::command]
+pub async fn app_language_get() -> Result<Value, Value> {
+    let Some(store) = crate::store::global() else {
+        return Err(command_error("INTERNAL", "", Value::Null));
+    };
+    let selected = {
+        let conn = store.conn();
+        crate::store::settings::app_language(&conn)
+    };
+    Ok(json!({
+        "selected": selected,
+        "resolved": crate::i18n::resolve(selected),
+    }))
+}
+
+/// 保存语言档位。只认 `system` / `zh` / `en`；**先写库成功再返回新值**。
+/// 失败只返回稳定错误码，不带文案（Q4：文案由前端按 code 映射）。
+#[tauri::command]
+pub async fn app_language_set(language: Option<Value>) -> Result<Value, Value> {
+    let language = language
+        .as_ref()
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if language != crate::i18n::SELECTED_SYSTEM && !crate::i18n::LANGUAGES.contains(&language) {
+        return Err(command_error(
+            "INVALID_ARGUMENT",
+            "",
+            json!({ "reason": "invalid_language" }),
+        ));
+    }
+
+    let Some(store) = crate::store::global() else {
+        return Err(command_error("INTERNAL", "", Value::Null));
+    };
+    {
+        let conn = store.conn();
+        crate::store::settings::set_app_language(&conn, language)
+            .map_err(|_| command_error("INTERNAL", "", Value::Null))?;
+    }
+    Ok(json!({
+        "selected": language,
+        "resolved": crate::i18n::resolve(language),
+    }))
+}
+
 /// 本次启动读到的系统代理自动恢复结果（契约 §7.13，仅 UI，只读）。
 ///
 /// 恢复发生在 Host `setup` 阶段、webview 注册监听之前，所以用一次性读取而不是事件。

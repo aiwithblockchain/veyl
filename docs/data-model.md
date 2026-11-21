@@ -349,7 +349,7 @@ CREATE TABLE rules_state (
 
 | 表 | 作用 |
 |---|---|
-| `settings` | `key`/`value`。已知键：`llm_active_provider`、`proxy_port`（本地代理端口，十进制字符串；缺失/损坏时读回 `7890`，读不写库）、`user_region`（AI 确定的地区，见下）。旧 `onboarding_completed` 随引导页删除，无写入方 |
+| `settings` | `key`/`value`。已知键：`llm_active_provider`、`proxy_port`（本地代理端口，十进制字符串；缺失/损坏时读回 `7890`，读不写库）、`app_language`（语言档位 `system` / `zh` / `en`；缺失或非法值读回 `system`，读不写库）、`user_region`（AI 确定的地区，见下）。旧 `onboarding_completed` 随引导页删除，无写入方 |
 | `runtime_versions` | 已安装的 sing-box 版本与状态 |
 | `proxy_backup` | 系统代理备份，E3 重置网络的依据；单行 |
 | `catalog_cache` | 远端目录缓存（AI 工具仍可读；`catalog_list_nodes` 命令已删除） |

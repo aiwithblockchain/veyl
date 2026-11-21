@@ -265,14 +265,14 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 现在 Veyl 的 AI 会话只注册了 39 个自研工具（`run_query_loop` 拿到的就是 `self.tools`），**没有 claurst 默认的文件读写工具**。TweetPilot 的「指路」之所以成立，是它把详细文档装到 `~/.tweetpilot/prompts/...`，AI 用内置文件工具去读。Veyl 要做同样的事：
 
 1. **文档落到磁盘**：启动时把 `resources/prompts/{zh,en}/` 释放到应用数据目录，并把绝对路径写进系统提示词。
-2. **给 AI 读文件的能力**：注册只读文件工具（或引入 claurst 内置 Read / Glob），并把可读范围限制在提示词目录内。
+2. **给 AI 读文件的能力**：注册 claurst 内置的六个基础工具（Read / Edit / Write / Bash / Glob / Grep）。2026-11-21 已拍板：不做只读限制，用户对自己的文件与终端操作不设限；提示词目录只是默认资料位置。
 
 不解决这两点，「指路」只会让 AI 假装读过。
 
 ### 7.2 仍未定的细节
 
 - 文档释放时机与路径：每次启动覆盖，还是版本变了才覆盖。
-- 可读范围：只允许读提示词目录，还是允许读用户目录（用户说对 Word 等「不限制」，需要确认权限边界与提示词怎么表述）。
+- 可读范围：**已定不限制**——AI 可以读用户目录里的文件（Word 等），提示词目录只是文档默认位置。注入风险的缓解见 `ai-prompt-loading.md` §4.1。
 - 系统提示词是每轮重建（现状）还是会话创建时快照。
 
 ### 7.3 参考：TweetPilot 的做法
@@ -295,4 +295,4 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 服务器：`MyServers` `MyServerFailure` `JobGet`
 其它：`SetUserRegion` `OpenSettings` `DeepseekSetupKey` `DeepseekSaveKey` `AskUserQuestionGuard`（包装，不对用户暴露）
 
-> 工具清单由 `tools/mod.rs:154` 的注册表决定；提示词里的 `{{CAPABILITY_CATALOG}}` 每次渲染都从同一份注册表生成，不存在「文档写了、代码里没有」的工具。
+> 工具清单由 `tools/mod.rs:154` 的注册表决定，随每次请求作为工具定义发给模型；2026-11-21 起系统提示词里不再渲染能力清单（`{{CAPABILITY_CATALOG}}` 已移除）。

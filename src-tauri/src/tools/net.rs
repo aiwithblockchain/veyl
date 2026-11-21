@@ -196,7 +196,8 @@ impl Tool for CatalogRefreshTool {
 
     fn description(&self) -> &str {
         "拉取并应用 Veyl 免费节点（veyl_seed.json）。有本地缓存时离线不算错误；\
-         按内容哈希判断是否变化，不依赖 version 字段。"
+         按内容哈希判断是否变化，不依赖 version 字段。\n\
+         用户明确选过节点来源之前，不得凭本工具拉取并应用免费节点；没问过就先问。"
     }
 
     fn permission_level(&self) -> PermissionLevel {

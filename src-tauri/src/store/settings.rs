@@ -11,6 +11,28 @@ pub const PROXY_PORT_KEY: &str = "proxy_port";
 /// 缺失、空串或非法值一律视为「没有用户值」。
 pub const USER_REGION_KEY: &str = "user_region";
 
+/// 界面与 AI 会话的语言档位：`system` / `zh` / `en`。
+pub const APP_LANGUAGE_KEY: &str = "app_language";
+
+/// 读用户选择的语言档位。**读不写库**：缺失或非法值一律按 `system`。
+pub fn app_language(conn: &Connection) -> &'static str {
+    match get(conn, APP_LANGUAGE_KEY)
+        .ok()
+        .flatten()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("zh") => "zh",
+        Some("en") => "en",
+        _ => "system",
+    }
+}
+
+/// 保存用户选择的语言档位。调用方先校验取值，这里只写库。
+pub fn set_app_language(conn: &Connection, value: &str) -> StoreResult<()> {
+    set(conn, APP_LANGUAGE_KEY, value)
+}
+
 /// 读用户设置的代理端口。**读不写库**：从未设置过时返回默认值。
 pub fn proxy_port(conn: &Connection) -> u16 {
     get(conn, PROXY_PORT_KEY)
@@ -84,6 +106,27 @@ mod tests {
         let map = all(&conn).unwrap();
         assert_eq!(map.len(), 2);
         assert_eq!(map["b"], "2");
+    }
+
+    #[test]
+    fn app_language_defaults_to_system_and_round_trips() {
+        let store = super::super::db::Store::open_in_memory().unwrap();
+        let conn = store.conn();
+
+        // 读不产生副作用。
+        assert_eq!(app_language(&conn), "system");
+        assert!(get(&conn, APP_LANGUAGE_KEY).unwrap().is_none());
+
+        set_app_language(&conn, "zh").unwrap();
+        assert_eq!(app_language(&conn), "zh");
+        set_app_language(&conn, "en").unwrap();
+        assert_eq!(app_language(&conn), "en");
+
+        // 非法值按 system 处理，不报错。
+        set(&conn, APP_LANGUAGE_KEY, "fr").unwrap();
+        assert_eq!(app_language(&conn), "system");
+        set(&conn, APP_LANGUAGE_KEY, "  ").unwrap();
+        assert_eq!(app_language(&conn), "system");
     }
 
     #[test]

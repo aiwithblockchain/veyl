@@ -1,5 +1,7 @@
 import type {
   AgentBridge,
+  AppLanguage,
+  AppLanguageState,
   ChatHistory,
   ConfigActivateResult,
   ConfigCreateInput,
@@ -189,6 +191,10 @@ function mockMobileExport(nodeCount: number): MobileExportData {
   };
 }
 
+/** 首启开场：与 Host 同形的用户提示词；AI 收到后应给出两个选项。 */
+const MOCK_KICKOFF_TEXT =
+  "用户刚进入 Veyl，还没有可用的节点。请先打个招呼（一句话），然后问用户想怎么开始：是创建一台属于自己的服务器，还是先用 Veyl 免费节点试试。只问这一个问题，给两个选项，不要推荐、不要替用户选。";
+
 /** 与契约 §7.23 的 Host 固定映射一致；这里只用于 mock。每个平台一条。 */
 const MOCK_CLIENT_URLS: Record<
   MobileClientId,
@@ -258,6 +264,8 @@ export class MockAgentBridge implements AgentBridge {
   private reportSessions = new Set<string>();
   /** 报告是否包含完整域名；mock 只存在内存里，默认关闭。 */
   private reportIncludeDomains = false;
+  /** 界面语言；只存在内存里，刷新相当于回到跟随系统。 */
+  private appLanguage: AppLanguage = "system";
   private activeRequests = new Set<string>();
   private activeBySession = new Map<string, string>();
   private sessionByRequest = new Map<string, string>();
@@ -349,6 +357,26 @@ export class MockAgentBridge implements AgentBridge {
   /** mock 扮演后端：浏览器演示里给一个固定版本。 */
   async getAppVersion(): Promise<string> {
     return "0.1.0";
+  }
+
+  /** 浏览器通道没有 Rust；「跟随系统」只能按 navigator.language 粗略判断。 */
+  async appLanguageGet(): Promise<AppLanguageState> {
+    return { selected: this.appLanguage, resolved: this.resolveLanguage() };
+  }
+
+  async appLanguageSet(lang: AppLanguage): Promise<AppLanguageState> {
+    if (lang !== "system" && lang !== "zh" && lang !== "en") {
+      throw { code: "INVALID_ARGUMENT", message: "不支持的语言。" };
+    }
+    this.appLanguage = lang;
+    return { selected: this.appLanguage, resolved: this.resolveLanguage() };
+  }
+
+  private resolveLanguage(): "zh" | "en" {
+    if (this.appLanguage !== "system") return this.appLanguage;
+    const locale =
+      typeof navigator !== "undefined" ? navigator.language : "en";
+    return locale.toLowerCase().startsWith("zh") ? "zh" : "en";
   }
 
   async runtimeStart(configId?: string): Promise<RuntimeStartResult> {
@@ -1933,6 +1961,10 @@ export class MockAgentBridge implements AgentBridge {
   async getChatHistory(_sessionId?: string): Promise<ChatHistory> {
     // 浏览器通道没有本地数据库，恢复历史只在 Tauri 里生效。
     return { sessions: [], activeSessionId: null, messages: [] };
+  }
+
+  async aiSessionKickoff(): Promise<{ text: string }> {
+    return { text: MOCK_KICKOFF_TEXT };
   }
 
   async configList(): Promise<ConfigListData> {

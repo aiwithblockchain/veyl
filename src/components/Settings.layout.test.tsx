@@ -51,6 +51,12 @@ describe("设置三页的布局规则", () => {
     expectDecls(".settings-row__btn--wide", "min-width: 96px");
   });
 
+  it("语言三档复用 settings-seg，按钮最小宽 72", () => {
+    expectDecls(".settings-seg", "display: inline-flex", "flex: 0 0 auto");
+    expectDecls(".settings-seg button", "height: 32px", "white-space: nowrap");
+    expectDecls(".settings-seg--language button", "min-width: 72px");
+  });
+
   it("重置网络危险卡：圆角 10、正文 13、按钮右下、上一行不画分隔线", () => {
     expectDecls(".danger-zone", "border-radius: var(--r-md)", "margin-top: 20px");
     expectDecls(".danger-zone .settings-row__value", "font-size: 13px", "color: var(--ink-2)");

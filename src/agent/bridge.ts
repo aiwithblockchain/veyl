@@ -322,6 +322,17 @@ export interface ProxyPortSettings {
   defaultPort: number;
 }
 
+/** 界面语言选择；缺省或非法值后端一律按 system 处理。 */
+export type AppLanguage = "system" | "zh" | "en";
+
+/** 实际生效的语言；系统语言解析只在 Rust 一处做，前端不自己读 OS locale。 */
+export type ResolvedLanguage = "zh" | "en";
+
+export interface AppLanguageState {
+  selected: AppLanguage;
+  resolved: ResolvedLanguage;
+}
+
 export type ProxyPortAvailability = "free" | "occupied" | "unavailable";
 
 export interface ProxyPortSaveResult {
@@ -841,6 +852,10 @@ export interface AgentBridge {
   getRuntimeSnapshot(): Promise<RuntimeSnapshot | null>;
   /** 应用自身版本；设置「关于」与诊断信息用。 */
   getAppVersion(): Promise<string>;
+  /** 读取界面语言（设置 › 高级 › 语言）。 */
+  appLanguageGet(): Promise<AppLanguageState>;
+  /** 写入界面语言；写库成功才返回新值，失败抛错、界面保持原语言。 */
+  appLanguageSet(lang: AppLanguage): Promise<AppLanguageState>;
   /** UI 直连：发起连接；不传 configId 时用当前激活配置。返回启动后的快照。 */
   runtimeStart(configId?: string): Promise<RuntimeStartResult>;
   /** UI 直连：断开连接并恢复系统代理。 */
@@ -984,6 +999,8 @@ export interface AgentBridge {
   openExternal(url: string): Promise<void>;
   /** 重启后恢复会话：不传 sessionId 时取最近一个会话。 */
   getChatHistory(sessionId?: string): Promise<ChatHistory>;
+  /** 首启开场的用户提示词（按当前语言）；只在「刚完成首启配置」发一次。 */
+  aiSessionKickoff(): Promise<{ text: string }>;
   /** 重命名会话；标题的 trim 与长度校验都由后端做。 */
   renameSession(sessionId: string, title: string): Promise<RenamedSession>;
   /** 删除会话（R31）：不可恢复；有进行中的请求时先 cancel 再调用。 */
