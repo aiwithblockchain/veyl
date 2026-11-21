@@ -7,6 +7,7 @@ import { apiError, json } from "./lib/http";
 import { monthlyUsdFromDaily, planDailyPriceCents } from "./lib/config";
 import { idempotencyKey, withIdempotency, type StoredResponse } from "./lib/idempotency";
 import { fetchCatalogData, type CatalogData } from "./index";
+import { NODE_PORT_END, NODE_PORT_START } from "./providers/digitalocean";
 import { provisionServer } from "./provision";
 import { balanceCents } from "./wallet";
 
@@ -454,7 +455,11 @@ function isPortConflict(error: unknown): boolean {
   return text.includes("unique constraint failed") && text.includes("node_port");
 }
 
-/** 端口由控制面选定（§19.6.1）：防火墙必须在建机后立刻带端口创建。 */
+/**
+ * 端口由控制面在固定带内选定（§19.6.1 / `shared-firewall.md` §3.2）：
+ * 共享防火墙只放行 `NODE_PORT_START-NODE_PORT_END`，带外端口建出来也连不上。
+ * 只要求账户内唯一（不同 IP 可以重号）。
+ */
 async function pickPort(db: D1Database, accountId: string): Promise<number> {
   const used = await db
     .prepare("SELECT node_port FROM servers WHERE account_id = ? AND destroyed_at IS NULL")
@@ -462,12 +467,13 @@ async function pickPort(db: D1Database, accountId: string): Promise<number> {
     .all<{ node_port: number }>();
   const taken = new Set((used.results ?? []).map((row) => row.node_port));
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const candidate = 10000 + Math.floor(Math.random() * 50000);
-    if (taken.has(candidate)) continue;
-    return candidate;
+  const free: number[] = [];
+  for (let port = NODE_PORT_START; port <= NODE_PORT_END; port += 1) {
+    if (!taken.has(port)) free.push(port);
   }
-  return 10000 + Math.floor(Math.random() * 50000);
+  if (free.length > 0) return free[Math.floor(Math.random() * free.length)];
+  // 带内 1000 个端口全被占用：返回带内端口，交给唯一索引兜底并走换端口重试。
+  return NODE_PORT_START;
 }
 
 /**

@@ -4,7 +4,13 @@
 import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
 import { randomId, sealSecret, sha256B64u, signDetached, openSecret } from "./lib/crypto";
 import { apiError, json } from "./lib/http";
-import { createFirewall, deleteDroplet, deleteFirewall, getDroplet } from "./providers/digitalocean";
+import {
+  deleteDroplet,
+  deleteFirewall,
+  firewallName,
+  getDroplet,
+  listFirewalls,
+} from "./providers/digitalocean";
 import { recordLedgerEntry } from "./wallet";
 
 // 每个环境用自己的签名密钥：dev 与 prod 的公钥都内置在客户端，靠 key_id 区分。
@@ -160,6 +166,46 @@ type DestroyOutcome =
   | { ok: true }
   | { ok: false; status: number; reason: string; retryable: boolean };
 
+/** 防火墙名字由服务器 id 决定：enroll 建规则与销毁找规则必须用同一个算法。 */
+function firewallNameFor(serverId: string): string {
+  return firewallName(`veyl-${serverId.replace(/^srv_/, "").slice(0, 12)}`);
+}
+
+/**
+ * 删掉这台机器名下的防火墙，返回**仍然存在**的 id（null = 已经不在，可以安全清空 `firewall_id`）。
+ *
+ * 已知 id 就直接删；id 没落库（防火墙刚建好、进程就被杀掉）时按确定性命名反查，
+ * 只认「名字完全一致、且没挂在别的机器上」的那一条——不按前缀扫、不猜。
+ * 删除失败或查不到时把 id 留着，下一次销毁（含 `POST /destroy` 的重试）会再来一次。
+ */
+async function removeServerFirewall(
+  env: ServersEnv,
+  serverId: string,
+  knownId: string | null,
+  providerId: string | null,
+): Promise<string | null> {
+  if (!env.DO_API_TOKEN) return knownId;
+  let firewallId = knownId;
+  if (!firewallId) {
+    const listed = await listFirewalls(env.DO_API_TOKEN);
+    // 查不到就当作「没有可删的」：此时库里本来也没有 id，留着也没有下次可试的对象。
+    if (!listed.ok) return null;
+    const name = firewallNameFor(serverId);
+    const match = listed.value.find(
+      (fw) =>
+        fw.name === name &&
+        (fw.droplet_ids.length === 0 ||
+          (providerId !== null && fw.droplet_ids.includes(Number(providerId)))),
+    );
+    firewallId = match?.id ?? null;
+  }
+  if (!firewallId) return null;
+  const removed = await deleteFirewall(env.DO_API_TOKEN, firewallId);
+  if (removed.ok || removed.status === 404) return null;
+  console.warn(`[servers] firewall_delete_failed id=${firewallId} reason=${removed.reason}`);
+  return firewallId;
+}
+
 /**
  * 先删远端再改本地状态。反过来做会在 DO 删除失败时留下一台仍在计费、
  * 界面上却已经看不到的机器（用户无从发现、也无从重试）。
@@ -213,14 +259,14 @@ async function destroyInstance(
 
   // droplet 已经删掉（或本就不在）之后再删防火墙：先删防火墙会让还活着的机器直接裸奔。
   // 激活前就失败时防火墙 id 还没写进库，由调用方通过 options 传进来。
-  // 防火墙删除失败不影响销毁与退款——留着它只是多一条规则，不会继续计费。
-  const firewallId = options.firewallId ?? row.firewall_id ?? null;
-  if (firewallId && env.DO_API_TOKEN) {
-    const removed = await deleteFirewall(env.DO_API_TOKEN, firewallId);
-    if (!removed.ok && removed.status !== 404) {
-      console.warn(`[servers] firewall_delete_failed id=${firewallId} reason=${removed.reason}`);
-    }
-  }
+  // 删除成功才清空 `firewall_id`；失败留着，等下一次显式销毁重试——正常情况下销毁请求
+  // 走不到第二次，所以 `destroy` 对已销毁的行也会补一次。
+  const survivingFirewall = await removeServerFirewall(
+    env,
+    row.id,
+    options.firewallId ?? row.firewall_id ?? null,
+    row.provider_id,
+  );
 
   const now = Date.now();
   const refund = await refundPlan(env, row, reason, now);
@@ -231,8 +277,15 @@ async function destroyInstance(
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
       "UPDATE servers SET state = 'destroyed', destroyed_at = ?, updated_at = ?, failure_code = ?, " +
-        "failure_stage = COALESCE(?, failure_stage) WHERE id = ?",
-    ).bind(now, now, reason === "user" ? null : reason, options.failureStage ?? null, row.id),
+        "failure_stage = COALESCE(?, failure_stage), firewall_id = ? WHERE id = ?",
+    ).bind(
+      now,
+      now,
+      reason === "user" ? null : reason,
+      options.failureStage ?? null,
+      survivingFirewall,
+      row.id,
+    ),
     env.DB.prepare("UPDATE credentials SET destroyed_at = ? WHERE server_id = ?").bind(now, row.id),
     env.DB.prepare(
       "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'server.destroy', ?)",
@@ -348,7 +401,7 @@ async function settleOrder(
   env: ServersEnv,
   row: ServerRow,
   dailyCents: number,
-  info: { nodeId: string; firewallId: string | null; version: string; readyAt: number },
+  info: { nodeId: string; version: string; readyAt: number },
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   if (!Number.isFinite(dailyCents) || dailyCents <= 0) {
     return { ok: false, reason: "invalid_price" };
@@ -377,7 +430,7 @@ async function settleOrder(
         .bind(info.readyAt, row.order_id, ledgerId),
       db
         .prepare(
-          "UPDATE servers SET state = 'active', node_id = ?, firewall_id = ?, singbox_version = ?, " +
+          "UPDATE servers SET state = 'active', node_id = ?, singbox_version = ?, " +
             "ready_at = ?, billing_state = 'active', daily_price_cents = ?, billing_anchor_at = ?, " +
             "paid_until = ?, updated_at = ? " +
             "WHERE id = ? AND destroyed_at IS NULL AND state IN ('booting', 'installing', 'verifying') " +
@@ -385,7 +438,6 @@ async function settleOrder(
         )
         .bind(
           info.nodeId,
-          info.firewallId,
           info.version,
           info.readyAt,
           dailyCents,
@@ -421,12 +473,12 @@ async function settleOrder(
  * 删掉用户刚付过钱的机器。服务器标成 error 但**不写 destroyed**，列表保留错误行给用户看原因。
  *
  * 认领之后、删除之前进程死掉会留下仍在进度阶段的机器：`sweepExpiredEnrollments` 到
- * enrollment 过期时会按 `destroyInstance` 收尾，而防火墙 id 在创建时就已落库，不会留孤儿规则。
+ * enrollment 过期时会按 `destroyInstance` 收尾。新机器用全局共享防火墙、`firewall_id` 恒为
+ * NULL，这里只会为存量行按旧模型删掉它自己的那条规则。
  */
 async function failSettlement(
   env: ServersEnv,
   row: ServerRow,
-  firewallId: string | null,
   reason: string,
 ): Promise<boolean> {
   const db = env.DB!;
@@ -440,27 +492,26 @@ async function failSettlement(
     .run();
   if (Number((claimed as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) return false;
 
-  const remoteFirewall = firewallId ?? row.firewall_id ?? null;
   if (row.provider_id && env.DO_API_TOKEN) {
     const deleted = await deleteDroplet(env.DO_API_TOKEN, row.provider_id);
     if (!deleted.ok && deleted.status !== 404) {
       console.warn(`[servers] settle_cleanup_failed server=${row.id} reason=${deleted.reason}`);
     }
   }
-  if (remoteFirewall && env.DO_API_TOKEN) {
-    const removed = await deleteFirewall(env.DO_API_TOKEN, remoteFirewall);
-    if (!removed.ok && removed.status !== 404) {
-      console.warn(`[servers] settle_firewall_delete_failed id=${remoteFirewall} reason=${removed.reason}`);
-    }
-  }
+  const survivingFirewall = await removeServerFirewall(
+    env,
+    row.id,
+    row.firewall_id ?? null,
+    row.provider_id,
+  );
 
   await db.batch([
     db
       .prepare(
-        "UPDATE servers SET state = 'error', failure_code = ?, failure_stage = 'active', updated_at = ? " +
-          "WHERE id = ? AND destroyed_at IS NULL",
+        "UPDATE servers SET state = 'error', failure_code = ?, failure_stage = 'active', updated_at = ?, " +
+          "firewall_id = ? WHERE id = ? AND destroyed_at IS NULL",
       )
-      .bind(reason, now, row.id),
+      .bind(reason, now, survivingFirewall, row.id),
     db.prepare("UPDATE credentials SET destroyed_at = ? WHERE server_id = ?").bind(now, row.id),
     db
       .prepare(
@@ -646,9 +697,7 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
   if (changed === 0) return json({ ok: false, reason: "already_used" }, 409);
 
   // 从这里往后已经消费了 token：任何失败都必须销毁机器，不能留一台没人管的计费实例。
-  // `firewallId` 声明在 try 外：id 写库失败时会走 catch，销毁路径拿不到库里的值，
-  // 只能靠这个内存变量把刚建好的防火墙删掉。
-  let firewallId: string | null = null;
+  // 防火墙是环境级共享的（建机前由 provision 保证存在），这里不建、不删、也不写 `firewall_id`。
   try {
     await db
       .prepare(
@@ -657,24 +706,6 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
       )
       .bind(row.id, sealed.iv, sealed.ciphertext, Date.now())
       .run();
-
-    if (env.DO_API_TOKEN && row.provider_id) {
-      const firewall = await createFirewall(env.DO_API_TOKEN, {
-        name: `veyl-${row.id.replace(/^srv_/, "").slice(0, 12)}`,
-        port,
-        providerId: row.provider_id,
-      });
-      if (!firewall.ok) {
-        await destroyInstance(env, row, firewall.reason);
-        return json({ ok: false, reason: "firewall_failed" }, 502);
-      }
-      firewallId = firewall.value.id;
-      // 建好就落库：结算失败或进程在中途死掉时，Cron 兜底只能靠库里的 id 删防火墙。
-      await db
-        .prepare("UPDATE servers SET firewall_id = ?, updated_at = ? WHERE id = ?")
-        .bind(firewallId, Date.now(), row.id)
-        .run();
-    }
 
     const nodeId = randomId("nd_", 12);
     const readyAt = Date.now();
@@ -689,13 +720,12 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
     if (orderRow?.charge_mode === "at_ready") {
       const settled = await settleOrder(env, row, Number(orderRow.amount_cents ?? 0), {
         nodeId,
-        firewallId,
         version,
         readyAt,
       });
       if (!settled.ok) {
         // token 已消费、凭据已写：必须显式收尾，不能留一台没开通却在跑、也没人管的实例。
-        await failSettlement(env, row, firewallId, "settle_insufficient");
+        await failSettlement(env, row, "settle_insufficient");
         return json({ ok: false, reason: "settle_insufficient" }, 409);
       }
       activated = 1;
@@ -705,9 +735,9 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
       // 晚到的激活不能把一台 DO 上已删除的机器改回 active（幽灵机器）。
       const activation = await db.batch([
         db.prepare(
-          "UPDATE servers SET state = 'active', node_id = ?, firewall_id = ?, singbox_version = ?, ready_at = ?, updated_at = ? " +
+          "UPDATE servers SET state = 'active', node_id = ?, singbox_version = ?, ready_at = ?, updated_at = ? " +
             "WHERE id = ? AND state IN ('booting', 'installing', 'verifying') AND destroyed_at IS NULL",
-        ).bind(nodeId, firewallId, version, readyAt, readyAt, row.id),
+        ).bind(nodeId, version, readyAt, readyAt, row.id),
         db.prepare(
           "UPDATE orders SET state = 'ready' WHERE id = ? AND state = 'provisioning'",
         ).bind(row.order_id),
@@ -720,10 +750,10 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
       );
     }
     if (activated !== 1) {
-      // 激活被守卫拦下：本次刚插的凭据与刚建的防火墙都要收尾。
+      // 激活被守卫拦下：本次刚插的凭据要收尾。
       // destroyInstance 幂等：DO 删除 404 按成功；退款撞 `(server_refund, server_id)` 唯一键，
       // 不会因为并发销毁已经退过而退第二次。
-      const cleanup = await destroyInstance(env, row, "activation_lost", { firewallId });
+      const cleanup = await destroyInstance(env, row, "activation_lost");
       if (!cleanup.ok) {
         console.warn(
           `[servers] activation_lost_cleanup_failed server=${row.id} reason=${cleanup.reason}`,
@@ -740,7 +770,6 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
           JSON.stringify({
             node_id: nodeId,
             changes: activated,
-            firewall_id: firewallId,
             cleaned: cleanup.ok,
           }),
         )
@@ -788,9 +817,7 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
 
     return json({ ok: true, node_id: nodeId });
   } catch (error) {
-    // 失败点可能就是「防火墙 id 写库」：销毁路径读库拿不到它，把内存里的 id 传进去补删，
-    // 否则 DO 上会留下一条永远没人认领的防火墙规则。
-    await destroyInstance(env, row, "activate_failed", { firewallId });
+    await destroyInstance(env, row, "activate_failed");
     return json({ ok: false, reason: "activate_failed" }, 500);
   }
 }
@@ -884,7 +911,7 @@ export async function sweepUnsettledSettlements(
       .bind(fresh.order_id)
       .first<{ id: string }>();
     if (charged) continue;
-    const claimed = await failSettlement(env, fresh, fresh.firewall_id, "settle_insufficient");
+    const claimed = await failSettlement(env, fresh, "settle_insufficient");
     if (claimed) reaped += 1;
   }
   return reaped;
@@ -1064,7 +1091,20 @@ async function destroy(request: Request, env: ServersEnv, serverId: string): Pro
 
   const row = await loadServer(env.DB, identity.accountId, serverId);
   if (!row) return apiError("NOT_FOUND", "没有这台服务器");
-  if (row.state === "destroyed") return new Response(null, { status: 204 });
+  if (row.state === "destroyed") {
+    // 上一次销毁可能停在「防火墙没删掉」：行已经 destroyed，这里是唯一的重试入口。
+    // 补删失败也不影响 204——用户要的是「这台机器没了」，多一条规则不该变成报错。
+    if (row.firewall_id) {
+      const surviving = await removeServerFirewall(env, row.id, row.firewall_id, null);
+      if (!surviving) {
+        await env.DB.prepare("UPDATE servers SET firewall_id = ?, updated_at = ? WHERE id = ?")
+          .bind(null, Date.now(), row.id)
+          .run()
+          .catch(() => {});
+      }
+    }
+    return new Response(null, { status: 204 });
+  }
 
   await env.DB.prepare("UPDATE servers SET state = 'destroying', updated_at = ? WHERE id = ?")
     .bind(Date.now(), row.id)

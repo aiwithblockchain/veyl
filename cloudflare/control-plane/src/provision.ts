@@ -1,10 +1,15 @@
-// 建机：先建 droplet，把一次性 enrollment 令牌写进 cloud-init（§19.6）。
+// 建机：先确保全局共享防火墙存在，再建 droplet，把一次性 enrollment 令牌写进 cloud-init（§19.6）。
 // 可重试失败（429/5xx/超时）只把服务器标成 error、订单退回 paid，交给每日 Cron 重试——
 // 钱已经收了，订单不能停在终态。非可重试失败（其余 4xx）用户拿不到机器，直接退款关单。
 
 import { buildCloudInit } from "./cloud_init";
 import { randomId, sha256B64u } from "./lib/crypto";
-import { createDroplet, deleteDroplet } from "./providers/digitalocean";
+import {
+  createDroplet,
+  deleteDroplet,
+  ensureSharedFirewall,
+  SHARED_FIREWALL_TAG,
+} from "./providers/digitalocean";
 import { recordLedgerEntry } from "./wallet";
 
 export interface ProvisionEnv {
@@ -200,6 +205,16 @@ export async function provisionServer(
   const enrollUrl = `${env.ENROLL_BASE_URL.replace(/\/$/, "")}/v1/enroll/${enrollToken}`;
   const userData = buildCloudInit({ port: server.node_port, enrollUrl });
 
+  // 防火墙先于 Droplet：ensure 失败就整单失败，绝不建出一台没有防火墙的机器（§3.4）。
+  // Droplet 建机时就带 `veyl:node`，建好即受全局规则保护，没有先建机器后挂规则的裸奔窗口。
+  const firewall = await ensureSharedFirewall(env.DO_API_TOKEN);
+  if (!firewall.ok) {
+    return fail(env, server, "firewall_failed", {
+      retryable: firewall.retryable,
+      upstream: firewall.upstream,
+    });
+  }
+
   const created = await createDroplet(env.DO_API_TOKEN, {
     // DO 要求 name 匹配 ^[a-zA-Z0-9]?[a-z0-9A-Z.\-]*[a-z0-9A-Z]$：
     // 随机 id 是 base64url，可能含 `_`，必须先替换掉，且末位要是字母或数字。
@@ -216,6 +231,8 @@ export async function provisionServer(
       `veyl:srv:${server.id}`,
       `veyl:acct:${server.account_id}`,
       `veyl:env:${env.ENVIRONMENT}`,
+      // 全局共享防火墙按这个 tag 覆盖所有节点，dev / prod 共用同一条。
+      SHARED_FIREWALL_TAG,
     ],
   });
 

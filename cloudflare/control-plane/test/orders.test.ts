@@ -55,6 +55,13 @@ function stubCatalog() {
           { status: 202 },
         );
       }
+      // 建机前先 ensure 全局共享防火墙：列表为空就创建，再建 Droplet。
+      if (href.includes("/firewalls?")) {
+        return new Response(JSON.stringify({ firewalls: [] }), { status: 200 });
+      }
+      if (href.endsWith("/firewalls") && init?.method === "POST") {
+        return new Response(JSON.stringify({ firewall: { id: "fw_shared" } }), { status: 202 });
+      }
       return new Response(
         JSON.stringify({
           sizes: [
@@ -261,8 +268,9 @@ describe("orders", () => {
     expect(db.rows("servers")).toHaveLength(1);
 
     const server = db.rows("servers")[0];
-    expect(server.node_port).toBeGreaterThanOrEqual(10000);
-    expect(server.node_port).toBeLessThan(60000);
+    // 端口落在共享防火墙放行的带内（30000-30999）。
+    expect(server.node_port).toBeGreaterThanOrEqual(30000);
+    expect(server.node_port).toBeLessThanOrEqual(30999);
     expect(server.state).toBe("booting");
     expect(server.provider_id).toBe("424242");
     expect(typeof server.enrollment_hash).toBe("string");
@@ -395,6 +403,146 @@ describe("orders", () => {
     expect(db.rows("accounts")[0].balance_cents).toBe(210);
     expect(db.rows("servers")).toHaveLength(0);
     expect(db.rows("orders")[0].state).toBe("pending_payment");
+  });
+
+  it("已有同名共享防火墙时不再创建，直接建机", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    let firewallPosts = 0;
+    let dropletPosts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const href = String(input);
+        if (href.includes("/regions")) {
+          return new Response(
+            JSON.stringify({ regions: [{ slug: "sgp1", name: "Singapore 1", available: true }] }),
+            { status: 200 },
+          );
+        }
+        if (href.includes("/sizes")) {
+          return new Response(
+            JSON.stringify({
+              sizes: [
+                { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6, regions: ["sgp1"] },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (href.includes("/firewalls?")) {
+          return new Response(
+            JSON.stringify({
+              firewalls: [
+                {
+                  id: "fw_env",
+                  name: "veyl-shared-node-firewall",
+                  // 按名称匹配：tag 为空也认。
+                  tags: [],
+                  created_at: "2026-11-20T00:00:00Z",
+                  droplet_ids: [],
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (href.endsWith("/firewalls") && init?.method === "POST") {
+          firewallPosts += 1;
+          return new Response(JSON.stringify({ firewall: { id: "fw_dup" } }), { status: 202 });
+        }
+        if (href.endsWith("/droplets") && init?.method === "POST") {
+          dropletPosts += 1;
+          return new Response(
+            JSON.stringify({ droplet: { id: 5150, status: "new", networks: { v4: [] } } }),
+            { status: 202 },
+          );
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      }),
+    );
+
+    const created = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-shared-fw"), env as never)
+    )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 2000;
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-shared-fw" },
+      }),
+      env as never,
+    );
+
+    expect(checkout?.status).toBe(200);
+    expect(firewallPosts).toBe(0);
+    expect(dropletPosts).toBe(1);
+    expect(db.rows("servers")[0].state).toBe("booting");
+  });
+
+  it("共享防火墙 ensure 失败：订单失败，绝不建出一台没防火墙的 Droplet", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    let dropletPosts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const href = String(input);
+        if (href.includes("/regions")) {
+          return new Response(
+            JSON.stringify({ regions: [{ slug: "sgp1", name: "Singapore 1", available: true }] }),
+            { status: 200 },
+          );
+        }
+        if (href.includes("/sizes")) {
+          return new Response(
+            JSON.stringify({
+              sizes: [
+                { slug: "s-1vcpu-1gb", memory: 1024, vcpus: 1, price_hourly: 0.00893, price_monthly: 6, regions: ["sgp1"] },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (href.includes("/firewalls?")) {
+          return new Response("upstream down", { status: 500 });
+        }
+        if (href.endsWith("/droplets") && init?.method === "POST") {
+          dropletPosts += 1;
+          return new Response(
+            JSON.stringify({ droplet: { id: 5151, status: "new", networks: { v4: [] } } }),
+            { status: 202 },
+          );
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      }),
+    );
+
+    const created = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-firewall-down"), env as never)
+    )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 2000;
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-firewall-down" },
+      }),
+      env as never,
+    );
+
+    expect(checkout?.status).toBe(502);
+    const body = (await checkout!.json()) as { retryable: boolean; details: { reason: string } };
+    expect(body.details.reason).toBe("firewall_failed");
+    expect(body.retryable).toBe(false);
+    // 防火墙没起来就一台 Droplet 都不能建。
+    expect(dropletPosts).toBe(0);
+    expect(db.rows("servers")).toHaveLength(1);
+    expect(db.rows("servers")[0].state).toBe("error");
+    expect(db.rows("servers")[0].provider_id).toBeNull();
+    expect(db.rows("orders")[0].state).toBe("failed");
+    // at_ready 没扣过钱，也就没有退款。
+    expect(db.rows("accounts")[0].balance_cents).toBe(2000);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
   });
 
   it("目录里这个地区没有该规格时拒绝下单，details 带 region / plan", async () => {
@@ -564,6 +712,12 @@ describe("orders", () => {
             { status: 202 },
           );
         }
+        if (href.includes("/firewalls?")) {
+          return new Response(JSON.stringify({ firewalls: [] }), { status: 200 });
+        }
+        if (href.endsWith("/firewalls") && init?.method === "POST") {
+          return new Response(JSON.stringify({ firewall: { id: "fw_shared" } }), { status: 202 });
+        }
         return new Response(JSON.stringify({ id: "fw_1" }), { status: 202 });
       }),
     );
@@ -582,7 +736,9 @@ describe("orders", () => {
 
     // name 必须匹配 ^[a-zA-Z0-9]?[a-z0-9A-Z.\-]*[a-z0-9A-Z]$，tag 必须匹配 ^[a-zA-Z0-9_\-:]+$。
     expect(dropletBody.name).toMatch(/^[a-zA-Z0-9]?[a-z0-9A-Z.\-]*[a-z0-9A-Z]$/);
-    expect(dropletBody.tags).toHaveLength(3);
+    expect(dropletBody.tags).toHaveLength(4);
+    // 全局共享防火墙按这个 tag 覆盖所有节点。
+    expect(dropletBody.tags).toContain("veyl:node");
     for (const tag of dropletBody.tags ?? []) {
       expect(tag).toMatch(/^[a-zA-Z0-9_\-:]+$/);
     }

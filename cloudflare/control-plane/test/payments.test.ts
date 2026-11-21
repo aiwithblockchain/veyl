@@ -101,6 +101,13 @@ function stubUpstream(options: { droplet?: { status: number; body: string } } = 
           { status: 202 },
         );
       }
+      // 建机前先 ensure 全局共享防火墙。
+      if (href.includes("/firewalls?")) {
+        return new Response(JSON.stringify({ firewalls: [] }), { status: 200 });
+      }
+      if (href.endsWith("/firewalls") && init?.method === "POST") {
+        return new Response(JSON.stringify({ firewall: { id: "fw_shared" } }), { status: 202 });
+      }
       return new Response(JSON.stringify({}), { status: 200 });
     }),
   );

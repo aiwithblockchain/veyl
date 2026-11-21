@@ -52,8 +52,6 @@ export class FakeD1 {
   beforeServerInsert?: () => void;
   /** 测试钩子：结算失败认领订单前触发，用来模拟「并发结算已经把订单置 ready」。 */
   beforeSettleClaim?: () => void;
-  /** 测试钩子：防火墙 id 写库前触发；抛错模拟写失败（防火墙已在 DO 上建好）。 */
-  beforeFirewallWrite?: () => void;
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, { sql, args: [] });
@@ -840,7 +838,6 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("update servers set firewall_id = ?")) {
-      this.beforeFirewallWrite?.();
       const server = this.tables.servers.find((s) => s.id === a[2]);
       if (server) {
         server.firewall_id = a[0];
@@ -849,11 +846,13 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("update servers set state = 'error'")) {
-      // bind(reason, now, id)：失败原因现在也落到 servers 行上。
-      const server = this.tables.servers.find((s) => s.id === a[2]);
+      // 两种形态：provision 失败 bind(reason, now, id)；结算失败多带 firewall_id。
+      const withFirewall = sql.includes("firewall_id = ?");
+      const server = this.tables.servers.find((s) => s.id === a[withFirewall ? 3 : 2]);
       if (server) {
         server.state = "error";
         server.failure_code = a[0];
+        if (withFirewall) server.firewall_id = (a[2] as string | null) ?? null;
         if (sql.includes("failure_stage = 'active'")) server.failure_stage = "active";
       }
       return null;
@@ -947,7 +946,7 @@ export class FakeD1 {
     }
     if (sql.startsWith("update servers set state = 'active'") && sql.includes("billing_state = 'active'")) {
       // 结算批：服务器转 active 并写计费三列；账本行不存在时零行。
-      const [nodeId, firewallId, version, readyAt, daily, anchor, paidUntil, updatedAt, id, ledgerId] = a;
+      const [nodeId, version, readyAt, daily, anchor, paidUntil, updatedAt, id, ledgerId] = a;
       const server = this.tables.servers.find((s) => s.id === id);
       const exists = this.tables.wallet_ledger.some((row) => row.id === ledgerId);
       if (
@@ -958,7 +957,6 @@ export class FakeD1 {
       ) {
         server.state = "active";
         server.node_id = nodeId;
-        server.firewall_id = firewallId;
         server.singbox_version = version;
         server.ready_at = readyAt;
         server.billing_state = "active";
@@ -973,7 +971,7 @@ export class FakeD1 {
       // 行为跟着 SQL 里的守卫走：带 `state IN (...)` 时只允许从这些阶段前进到 active。
       const guarded = sql.includes("state in ('booting', 'installing', 'verifying')");
       const allowed = ["booting", "installing", "verifying"];
-      const server = this.tables.servers.find((s) => s.id === a[5]);
+      const server = this.tables.servers.find((s) => s.id === a[4]);
       if (
         server &&
         (!guarded ||
@@ -981,10 +979,9 @@ export class FakeD1 {
       ) {
         server.state = "active";
         server.node_id = a[0];
-        server.firewall_id = a[1];
-        server.singbox_version = a[2];
-        server.ready_at = a[3];
-        server.updated_at = a[4];
+        server.singbox_version = a[1];
+        server.ready_at = a[2];
+        server.updated_at = a[3];
       }
       return null;
     }
@@ -997,12 +994,15 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("update servers set state = 'destroyed'")) {
-      const server = this.tables.servers.find((s) => s.id === a[4]);
+      // bind(now, now, failure_code, failure_stage, firewall_id, id)
+      const server = this.tables.servers.find((s) => s.id === a[5]);
       if (server) {
         server.state = "destroyed";
         server.destroyed_at = a[0];
         server.updated_at = a[1];
         server.failure_code = a[2] ?? null;
+        // 删成功就清空；删失败把 id 留着，下一次显式销毁再补。
+        server.firewall_id = (a[4] as string | null) ?? null;
         // COALESCE(?, failure_stage)：没给阶段时保留原值。
         if (a[3] != null) server.failure_stage = a[3];
       }
@@ -1787,9 +1787,11 @@ export class FakeStatement {
       this.db.beforeServerActivate?.();
       const guarded = sql.includes("state in ('booting', 'installing', 'verifying')");
       const allowed = ["booting", "installing", "verifying"];
+      // 结算批多三列计费参数（billing_state / daily_price / anchor），id 位置随之后移。
+      const idIndex = sql.includes("billing_state = 'active'") ? 7 : 4;
       const server = this.db
         .rows("servers")
-        .find((s) => s.id === this.statement.args[5]);
+        .find((s) => s.id === this.statement.args[idIndex]);
       changes =
         server &&
         (!guarded || (allowed.includes(String(server.state)) && server.destroyed_at == null))

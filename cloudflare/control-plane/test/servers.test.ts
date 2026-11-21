@@ -243,11 +243,7 @@ describe("就绪后结算（2.39.0）", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-        const url = String(input);
-        calls.push({ url, method: init?.method });
-        if (url.endsWith("/firewalls") && init?.method === "POST") {
-          return new Response(JSON.stringify({ firewall: { id: "fw_test" } }), { status: 202 });
-        }
+        calls.push({ url: String(input), method: init?.method });
         return new Response(null, { status: 204 });
       }),
     );
@@ -260,8 +256,8 @@ describe("就绪后结算（2.39.0）", () => {
     expect(server.state).toBe("error");
     expect(server.failure_code).toBe("settle_insufficient");
     expect(server.failure_stage).toBe("active");
-    // 防火墙 id 建好就落库：结算失败/进程中途死掉时，Cron 兜底只认库里的 id。
-    expect(server.firewall_id).toBe("fw_test");
+    // 新模型：enroll 不建防火墙，firewall_id 恒为 NULL。
+    expect(server.firewall_id ?? null).toBeNull();
     // 不写 destroyed：列表保留错误行，用户能看到原因。
     expect(server.destroyed_at).toBeNull();
     const order = db.rows("orders")[0];
@@ -271,44 +267,31 @@ describe("就绪后结算（2.39.0）", () => {
     expect(db.rows("wallet_ledger")).toHaveLength(0);
     expect(db.rows("accounts")[0].balance_cents).toBe(29);
     expect(db.rows("audit_log").some((row) => row.action === "settle_insufficient")).toBe(true);
-    // 远端实例与防火墙都要删掉。
+    // 远端实例要删掉；共享防火墙不归单台机器管，不能删也不能重建。
     expect(calls.some((call) => call.method === "DELETE" && call.url.includes("/droplets/4242"))).toBe(true);
-    expect(calls.some((call) => call.method === "DELETE" && call.url.includes("/firewalls/fw_test"))).toBe(true);
+    expect(calls.some((call) => call.method === "DELETE" && call.url.includes("/firewalls"))).toBe(false);
+    expect(calls.some((call) => call.method === "POST" && call.url.includes("/firewalls"))).toBe(false);
   });
 
-  it("防火墙 id 写库失败：catch 用内存 id 补删，不留孤儿规则", async () => {
+  it("激活不再创建防火墙，也不把 firewall_id 写进库", async () => {
     const db = new FakeD1();
     const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
-    await seedAtReady(db, { providerId: PROVIDER_ID });
-    db.beforeFirewallWrite = () => {
-      throw new Error("d1 write failed");
-    };
+    await seedAtReady(db);
     const calls: Array<{ url: string; method?: string }> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-        const url = String(input);
-        calls.push({ url, method: init?.method });
-        if (url.endsWith("/firewalls") && init?.method === "POST") {
-          return new Response(JSON.stringify({ firewall: { id: "fw_test" } }), { status: 202 });
-        }
+        calls.push({ url: String(input), method: init?.method });
         return new Response(null, { status: 204 });
       }),
     );
 
     const res = await handleServers(enrollRequest(), env as never);
 
-    expect(res?.status).toBe(500);
-    expect(((await res!.json()) as { reason: string }).reason).toBe("activate_failed");
-    // id 只在内存里：销毁路径读库拿不到，必须用 catch 里传进去的 id 把规则删掉。
-    expect(
-      calls.some((call) => call.method === "DELETE" && call.url.includes("/firewalls/fw_test")),
-    ).toBe(true);
-    expect(
-      calls.some((call) => call.method === "DELETE" && call.url.includes("/droplets/4242")),
-    ).toBe(true);
+    expect(res?.status).toBe(200);
+    expect(db.rows("servers")[0].state).toBe("active");
     expect(db.rows("servers")[0].firewall_id ?? null).toBeNull();
-    expect(db.rows("servers")[0].state).toBe("destroyed");
+    expect(calls.some((call) => call.url.includes("/firewalls"))).toBe(false);
   });
 
   it("并发结算：token 只消费一次，只产生一笔 charge", async () => {
@@ -509,11 +492,11 @@ describe("enroll 激活守卫", () => {
     expect(body.ready_at).toBeNull();
   });
 
-  it("激活丢失要收尾：凭据标记销毁、防火墙删除、不会多退款", async () => {
+  it("激活丢失要收尾：凭据标记销毁、Droplet 删除、不会多退款", async () => {
     const db = new FakeD1();
     const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
     await seedBootingForActivation(db);
-    // 这次是真的有 droplet 与防火墙的路径。
+    // 这次是真的有 droplet 的路径；共享防火墙不归单台机器管。
     Object.assign(db.rows("servers")[0], {
       provider_id: PROVIDER_ID,
       firewall_id: null,
@@ -537,13 +520,13 @@ describe("enroll 激活守卫", () => {
       "fetch",
       vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const href = String(input);
-        if (href.includes("/firewalls") && init?.method === "POST") {
-          return new Response(JSON.stringify({ firewall: { id: "fw_1" } }), { status: 201 });
+        if (href.includes("/firewalls?")) {
+          return new Response(JSON.stringify({ firewalls: [] }), { status: 200 });
         }
         if (init?.method === "DELETE") {
           calls.push(href);
-          // droplet 已被并发销毁删掉；防火墙正常删除。
-          return new Response(null, { status: href.includes("/firewalls/fw_1") ? 204 : 404 });
+          // droplet 已被并发销毁删掉；不存在单机防火墙需要删。
+          return new Response(null, { status: href.includes("/droplets/4242") ? 404 : 204 });
         }
         return new Response(JSON.stringify({}), { status: 200 });
       }),
@@ -571,8 +554,9 @@ describe("enroll 激活守卫", () => {
       ),
     ).toHaveLength(1);
     expect(db.rows("accounts")[0].balance_cents).toBe(600);
-    // 刚建的防火墙被删掉，不留孤儿。
-    expect(calls.some((href) => href.includes("/firewalls/fw_1"))).toBe(true);
+    // 收尾只删 Droplet；共享防火墙留着给下一台机器。
+    expect(calls.some((href) => href.includes("/droplets/4242"))).toBe(true);
+    expect(calls.some((href) => href.includes("/firewalls"))).toBe(false);
     const lost = db.rows("audit_log").find((row) => row.action === "enroll.activation_lost");
     expect(lost).toBeTruthy();
     expect(String(lost?.detail)).toContain('"cleaned":true');
@@ -1075,6 +1059,98 @@ describe("销毁服务器", () => {  it("DO 删除成功后回落本地状态", 
 
     expect(res?.status).toBe(204);
     expect(db.rows("servers")[0].state).toBe("destroyed");
+  });
+
+  it("防火墙删除失败：id 保留，下一次销毁补删成功", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    Object.assign(db.rows("servers")[0], { firewall_id: "fw_keep" });
+    let firewallAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes("/firewalls/fw_keep")) {
+          firewallAttempts += 1;
+          // 第一次删防火墙就失败：销毁本身仍要成功，但规则留着。
+          return firewallAttempts === 1
+            ? new Response("boom", { status: 500 })
+            : new Response(null, { status: 204 });
+        }
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const first = await handleServers(destroyRequest(env.token), env as never);
+    expect(first?.status).toBe(204);
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+    expect(db.rows("servers")[0].firewall_id).toBe("fw_keep");
+
+    // 已经 destroyed 的行再调一次销毁，只补删残留的防火墙。
+    const second = await handleServers(destroyRequest(env.token), env as never);
+    expect(second?.status).toBe(204);
+    expect(firewallAttempts).toBe(2);
+    expect(db.rows("servers")[0].firewall_id ?? null).toBeNull();
+  });
+
+  it("防火墙 id 没落库：按确定性名字找回并删除", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    const deleted: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/firewalls?per_page=200")) {
+          return new Response(
+            JSON.stringify({
+              firewalls: [{ id: "fw_found", name: "veyl-test00000000", droplet_ids: [] }],
+            }),
+            { status: 200 },
+          );
+        }
+        if (init?.method === "DELETE") deleted.push(url);
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const res = await handleServers(destroyRequest(env.token), env as never);
+
+    expect(res?.status).toBe(204);
+    expect(deleted.some((url) => url.includes("/firewalls/fw_found"))).toBe(true);
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+  });
+
+  it("同名防火墙挂在别的机器上时不删", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    const deleted: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/firewalls?per_page=200")) {
+          return new Response(
+            JSON.stringify({
+              firewalls: [
+                { id: "fw_other", name: "veyl-test00000000", droplet_ids: [9999] },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (init?.method === "DELETE") deleted.push(url);
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const res = await handleServers(destroyRequest(env.token), env as never);
+
+    expect(res?.status).toBe(204);
+    expect(deleted.some((url) => url.includes("/firewalls/fw_other"))).toBe(false);
   });
 });
 
