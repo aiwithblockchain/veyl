@@ -116,8 +116,9 @@ describe("账号菜单", () => {
       />,
     );
     expect(screen.getByText(/余额暂时读不到。/)).toBeTruthy();
+    const before = retry.mock.calls.length;
     screen.getByRole("button", { name: "重试" }).click();
-    expect(retry).toHaveBeenCalledTimes(1);
+    expect(retry.mock.calls.length).toBe(before + 1);
   });
 });
 
@@ -252,5 +253,31 @@ describe("设备 / 账户被停用", () => {
     expect(
       screen.queryByRole("button", { name: "退出这台设备" }),
     ).toBeNull();
+  });
+});
+
+describe("账号菜单的余额陈旧提示", () => {
+  it("已有旧值、刷新失败：金额保留，写「没刷新成功」并给重试", () => {
+    const retry = vi.fn();
+    const first = renderMenu({ walletStale: true, onRefreshWallet: retry });
+    expect(screen.getByText("$9.20")).toBeTruthy();
+    expect(
+      screen.getByText(/没刷新成功，显示的是上次的余额。/),
+    ).toBeTruthy();
+    // 浮层克制：没有「刷新」按钮，失败时只给「重试」。
+    expect(screen.queryByRole("button", { name: "刷新" })).toBeNull();
+    const before = retry.mock.calls.length;
+    screen.getByRole("button", { name: "重试" }).click();
+    expect(retry.mock.calls.length).toBe(before + 1);
+    first.unmount();
+
+    renderMenu();
+    expect(screen.queryByText(/没刷新成功/)).toBeNull();
+  });
+
+  it("挂载即打开：触发一次刷新", () => {
+    const refresh = vi.fn();
+    renderMenu({ onRefreshWallet: refresh });
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });

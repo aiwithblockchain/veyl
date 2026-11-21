@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, MyServerAccount, MyServerWallet } from "../agent/bridge";
@@ -115,8 +115,9 @@ describe("设置 › 账户", () => {
 
     expect(screen.getByText(/余额暂时读不到。/)).toBeTruthy();
     expect(screen.queryByText("—")).toBeNull();
+    const before = retry.mock.calls.length;
     screen.getByRole("button", { name: "重试" }).click();
-    expect(retry).toHaveBeenCalledTimes(1);
+    expect(retry.mock.calls.length).toBe(before + 1);
   });
 
   it("没有接线时退化为 —，不崩", () => {
@@ -151,5 +152,79 @@ describe("设置 › 账户", () => {
     expect(
       screen.getByText("下载 sing-box 官方客户端，扫码导入你的节点。"),
     ).toBeTruthy();
+  });
+});
+
+describe("余额刷新入口与陈旧提示", () => {
+  it("余额右侧有「刷新」，点击走强制刷新；刷新中禁用并写「刷新中」", () => {
+    const gated = vi.fn();
+    const force = vi.fn();
+    const first = renderAccount({
+      onRefreshWallet: gated,
+      onForceRefresh: force,
+    });
+    // 打开账户段走门禁版；「刷新」链接走强制版。
+    expect(gated.mock.calls.length).toBe(1);
+    expect(force).not.toHaveBeenCalled();
+    screen.getByRole("button", { name: "刷新" }).click();
+    expect(force).toHaveBeenCalledTimes(1);
+    expect(gated.mock.calls.length).toBe(1);
+    first.unmount();
+
+    renderAccount({ walletRefreshing: true, onForceRefresh: force });
+    const busy = screen.getByRole("button", {
+      name: "刷新中",
+    }) as HTMLButtonElement;
+    expect(busy.disabled).toBe(true);
+  });
+
+  it("已有旧值、刷新失败：金额保留，同屏写「没刷新成功」并保留刷新入口", () => {
+    const first = renderAccount({ walletStale: true });
+    expect(screen.getByText("$9.20")).toBeTruthy();
+    expect(
+      screen.getByText("没刷新成功，显示的是上次的余额。"),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "刷新" })).toBeTruthy();
+    first.unmount();
+
+    renderAccount();
+    expect(screen.queryByText(/没刷新成功/)).toBeNull();
+  });
+
+  it("从未取到值就失败：只写「余额暂时读不到」+ 重试，不出现旧值提示", () => {
+    renderAccount({
+      wallet: null,
+      walletError: "down",
+      onRefreshWallet: vi.fn(),
+    });
+    expect(screen.getByText(/余额暂时读不到。/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    expect(screen.queryByText(/没刷新成功/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "刷新" })).toBeNull();
+  });
+
+  it("打开设置›账户时触发一次刷新", () => {
+    const refresh = vi.fn();
+    renderAccount({ onRefreshWallet: refresh });
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("未登录时停在账户段不发余额请求", () => {
+    const refresh = vi.fn();
+    renderAccount({
+      account: { ...ACCOUNT, logged_in: false, email: null },
+      onRefreshWallet: refresh,
+    });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("AI ↔ 账户来回切：每次都触发门禁版回调（去重由 App 的 hook 负责）", () => {
+    const refresh = vi.fn();
+    renderAccount({ onRefreshWallet: refresh });
+    const base = refresh.mock.calls.length;
+    fireEvent.click(screen.getByRole("tab", { name: "AI" }));
+    fireEvent.click(screen.getByRole("tab", { name: "账户" }));
+    // 组件每次切回账户段都会问一次；30 秒门禁在同一份 refreshWallet 里。
+    expect(refresh.mock.calls.length).toBe(base + 1);
   });
 });

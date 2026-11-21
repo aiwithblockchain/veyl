@@ -84,9 +84,15 @@ interface Props {
   /** 余额与账号菜单共用同一份 wallet 状态；未接线时按「—」显示。 */
   wallet?: MyServerWallet | null;
   walletLoading?: boolean;
+  /** 已有值时的刷新在途：余额行入口写「刷新中」，旧值不动。 */
+  walletRefreshing?: boolean;
   walletError?: string | null;
-  /** 余额读取失败时的重试；与账号菜单的「重试」是同一个动作。 */
+  /** 刷新失败但手上还有旧值：显示旧值并注明「显示的是上次的余额」。 */
+  walletStale?: boolean;
+  /** 余额读取失败时的重试 / 打开账户段时的刷新：走 30 秒门禁。 */
   onRefreshWallet?: () => void;
+  /** 设置里的「刷新」文字链接：强制刷新，不受 30 秒门禁限制。 */
+  onForceRefresh?: () => void;
   onLogin?: () => void;
   onTopUp?: () => void;
   onViewBills?: () => void;
@@ -668,8 +674,11 @@ export function Settings({
   account = null,
   wallet = null,
   walletLoading = false,
+  walletRefreshing = false,
   walletError = null,
+  walletStale = false,
   onRefreshWallet,
+  onForceRefresh,
   onLogin,
   onTopUp,
   mobileExportOpen = false,
@@ -685,6 +694,14 @@ export function Settings({
   const showCleanupProxy =
     !runtimeActive && (connectMode === "system_proxy" || runtime.system_proxy_enabled);
   const [section, setSection] = useState<SectionId>("ai");
+  // 打开设置›账户：触发一次刷新（30 秒节流在 refreshWallet 里）。
+  const refreshWalletRef = useRef(onRefreshWallet);
+  refreshWalletRef.current = onRefreshWallet;
+  useEffect(() => {
+    // 未登录不发：登出时停在这页也不会打余额接口。
+    if (!open || section !== "account" || account?.logged_in !== true) return;
+    refreshWalletRef.current?.();
+  }, [open, section, account?.logged_in]);
   /** 咨询 AI：设置缩左、助手并排。 */
   const [consulting, setConsulting] = useState(false);
   /** AI 指路高亮的行 id；2 秒后自动清掉。 */
@@ -2677,8 +2694,23 @@ export function Settings({
                     <p className="settings-note">
                       余额按天扣费，每台服务器单独计费。
                     </p>
+                    {walletStale && wallet && !walletError ? (
+                      <p className="settings-note">
+                        没刷新成功，显示的是上次的余额。
+                      </p>
+                    ) : null}
                   </div>
                   <div className="settings-row__aside">
+                    {walletError ? null : (
+                      <button
+                        type="button"
+                        className="settings-link"
+                        onClick={onForceRefresh}
+                        disabled={!onForceRefresh || walletRefreshing}
+                      >
+                        {walletRefreshing ? "刷新中" : "刷新"}
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn btn--ghost"

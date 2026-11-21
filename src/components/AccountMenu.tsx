@@ -9,6 +9,8 @@ interface Props {
   email?: string | null;
   wallet: MyServerWallet | null;
   walletError: string | null;
+  /** 显示的是上次的余额：只写一行小字，不加按钮、不加角标。 */
+  walletStale?: boolean;
   disabled?: boolean;
   /** 设备/账户的永久状态：给明确出路，不说「稍后再试」。 */
   identityProblem?: "lost" | "device_revoked" | "account_blocked" | null;
@@ -30,6 +32,7 @@ export function AccountMenu({
   email,
   wallet,
   walletError,
+  walletStale = false,
   disabled = false,
   identityProblem = null,
   onTopUp,
@@ -46,6 +49,11 @@ export function AccountMenu({
   const [switching, setSwitching] = useState(false);
   const [reRegisterError, setReRegisterError] = useState<string | null>(null);
   useFocusTrap(true, panelRef);
+  // 菜单是条件渲染的：挂载即打开。打开即刷，30 秒节流在 refreshWallet 里。
+  const refreshOnMountRef = useRef(onRefreshWallet);
+  useEffect(() => {
+    refreshOnMountRef.current();
+  }, []);
 
   const recovery =
     identityProblem === "lost"
@@ -132,35 +140,49 @@ export function AccountMenu({
         ) : null}
 
         {blocked ? null : (
-          <div className="account-menu__balance">
-            <div className="account-menu__balance-main">
-              <span className="account-menu__label">余额</span>
-              {walletError ? (
-                <span className="account-menu__balance-error">
-                  余额暂时读不到。
-                  <button
-                    type="button"
-                    className="account-menu__link"
-                    onClick={onRefreshWallet}
-                  >
-                    重试
-                  </button>
-                </span>
-              ) : (
-                <span className="account-menu__amount num">
-                  {wallet ? formatUsdCents(wallet.balance_cents) : "读取中"}
-                </span>
-              )}
+          <>
+            <div className="account-menu__balance">
+              <div className="account-menu__balance-main">
+                <span className="account-menu__label">余额</span>
+                {walletError ? (
+                  <span className="account-menu__balance-error">
+                    余额暂时读不到。
+                    <button
+                      type="button"
+                      className="account-menu__link"
+                      onClick={onRefreshWallet}
+                    >
+                      重试
+                    </button>
+                  </span>
+                ) : (
+                  <span className="account-menu__amount num">
+                    {wallet ? formatUsdCents(wallet.balance_cents) : "读取中"}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                className="btn btn--ghost account-menu__topup"
+                disabled={disabled}
+                onClick={onTopUp}
+              >
+                充值
+              </button>
             </div>
-            <button
-              type="button"
-              className="btn btn--ghost account-menu__topup"
-              disabled={disabled}
-              onClick={onTopUp}
-            >
-              充值
-            </button>
-          </div>
+            {walletStale && !walletError ? (
+              <p className="account-menu__balance-error">
+                没刷新成功，显示的是上次的余额。
+                <button
+                  type="button"
+                  className="account-menu__link"
+                  onClick={onRefreshWallet}
+                >
+                  重试
+                </button>
+              </p>
+            ) : null}
+          </>
         )}
 
         <div className="account-menu__divider" />

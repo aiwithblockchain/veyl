@@ -389,3 +389,57 @@ describe("settings-point（AI 指路）", () => {
     expect(row.closest("details")?.open).toBe(true);
   }, 15_000);
 });
+
+describe("余额刷新的门禁（App 接线）", () => {
+  function prepareWallet() {
+    vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
+      logged_in: true,
+      email: "buyer@example.com",
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "email",
+    });
+    vi.spyOn(bridge, "myServerIdentity").mockResolvedValue({
+      has_identity: true,
+      account_id: "acct_1",
+    });
+    vi.spyOn(bridge, "trialStatus").mockResolvedValue({
+      state: "active",
+      started_at: new Date(0).toISOString(),
+      expires_at: new Date(7 * 86_400_000).toISOString(),
+      remaining_ms: 7 * 86_400_000,
+      seed_node_count: 1,
+    });
+    vi.spyOn(bridge, "myServerCatalog").mockResolvedValue({
+      regions: [],
+      plans: [],
+      currency: "USD",
+      updated_at: new Date(0).toISOString(),
+    });
+    vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers: [] });
+    return vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
+      balance_cents: 920,
+      currency: "USD",
+      denominations_cents: [1000],
+      updated_at: new Date(0).toISOString(),
+    });
+  }
+
+  it("设置里 AI ↔ 账户来回切：30 秒内只发一次；「刷新」不受门禁", async () => {
+    const wallet = prepareWallet();
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+
+    fireEvent.click(within(dialog).getByRole("tab", { name: "账户" }));
+    await waitFor(() => expect(wallet.mock.calls.length).toBe(1));
+
+    fireEvent.click(within(dialog).getByRole("tab", { name: "AI" }));
+    fireEvent.click(within(dialog).getByRole("tab", { name: "账户" }));
+    expect(wallet.mock.calls.length).toBe(1);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "刷新" }));
+    await waitFor(() => expect(wallet.mock.calls.length).toBe(2));
+  });
+
+});

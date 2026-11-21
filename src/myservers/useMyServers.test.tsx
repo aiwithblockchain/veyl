@@ -435,8 +435,9 @@ describe("详情请求失败时的降级", () => {
 
     const firstRound = get.mock.calls.length;
     expect(firstRound).toBeGreaterThan(0);
+    // 列表/账户落地可能让详情 effect 重启一次，重试计时从那一拍算起。
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
     });
     expect(get.mock.calls.length).toBeGreaterThan(firstRound);
     expect(view.result.current.detailError).toBeNull();
@@ -444,7 +445,13 @@ describe("详情请求失败时的降级", () => {
     // 网络恢复后写回最新详情，重试停下。
     get.mockResolvedValue({ ...SERVER_A, name: "东京 1（最新）" });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000);
+      for (
+        let i = 0;
+        i < 10 && view.result.current.selected?.name !== "东京 1（最新）";
+        i += 1
+      ) {
+        await vi.advanceTimersByTimeAsync(1000);
+      }
     });
     expect(view.result.current.detailError).toBeNull();
     expect(view.result.current.selected?.name).toBe("东京 1（最新）");
@@ -659,5 +666,266 @@ describe("重命名同步", () => {
 
     expect(view.result.current.servers[0].name).toBe("事件新名");
     expect(view.result.current.selected?.name).toBe("事件新名");
+  });
+});
+
+describe("余额刷新", () => {
+  async function flushWallet() {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  }
+
+  it("打开时 30 秒内用缓存，超过 30 秒才再发请求", async () => {
+    vi.useFakeTimers();
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await flushWallet();
+    const base = wallet.mock.calls.length;
+    expect(base).toBeGreaterThan(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    window.dispatchEvent(new Event("focus"));
+    await flushWallet();
+    expect(wallet.mock.calls.length).toBe(base);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    window.dispatchEvent(new Event("focus"));
+    await flushWallet();
+    expect(wallet.mock.calls.length).toBe(base + 1);
+
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("已登录且窗口可见（不限页面）：15 分钟刷新一次，隐藏暂停，恢复可见补一次", async () => {
+    vi.useFakeTimers();
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: false, rootSignal: 0 }),
+    );
+    await flushWallet();
+    const base = wallet.mock.calls.length;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+    });
+    expect(wallet.mock.calls.length).toBe(base + 1);
+
+    let visibility: "visible" | "hidden" = "hidden";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+    });
+    expect(wallet.mock.calls.length).toBe(base + 1);
+
+    visibility = "visible";
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushWallet();
+    expect(wallet.mock.calls.length).toBe(base + 2);
+
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("陈旧提示：刷新失败标注旧余额，恢复成功后消失", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+    expect(view.result.current.walletStale).toBe(false);
+
+    wallet.mockRejectedValueOnce({ code: "NETWORK", message: "连不上。" });
+    await act(async () => {
+      await view.result.current.refreshWallet({ force: true });
+    });
+    // 旧值还在，但明确标注是上次的；这不是「从未取到值」。
+    expect(view.result.current.wallet).not.toBeNull();
+    expect(view.result.current.walletStale).toBe(true);
+    expect(view.result.current.walletError).toBeNull();
+
+    wallet.mockResolvedValue({
+      balance_cents: 1800,
+      currency: "USD",
+      denominations_cents: [1000],
+      updated_at: new Date().toISOString(),
+    });
+    await act(async () => {
+      await view.result.current.refreshWallet({ force: true });
+    });
+    expect(view.result.current.walletStale).toBe(false);
+  });
+
+  it("从未取到值就失败：报读不到，不算「显示旧值」", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    vi.mocked(bridge.myServerWallet).mockRejectedValue({
+      code: "NETWORK",
+      message: "连不上。",
+    });
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.walletError).not.toBeNull());
+    expect(view.result.current.wallet).toBeNull();
+    expect(view.result.current.walletStale).toBe(false);
+  });
+
+  it("窗口隐藏 1 小时：不发任何钱包请求；恢复可见才补", async () => {
+    vi.useFakeTimers();
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    let visibility: "visible" | "hidden" = "hidden";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: false, rootSignal: 0 }),
+    );
+    await flushWallet();
+    const base = wallet.mock.calls.length;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+    });
+    expect(wallet.mock.calls.length).toBe(base);
+
+    visibility = "visible";
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushWallet();
+    expect(wallet.mock.calls.length).toBe(base + 1);
+
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("停在任意页面 1 小时：按 15 分钟节奏共刷新 4 次", async () => {
+    vi.useFakeTimers();
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: false, rootSignal: 0 }),
+    );
+    await flushWallet();
+    const base = wallet.mock.calls.length;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+    });
+    expect(wallet.mock.calls.length).toBe(base + 4);
+
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("手动刷新不受 30 秒限制", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+    const base = wallet.mock.calls.length;
+
+    // 普通调用（打开面）：30 秒内直接用缓存。
+    await act(async () => {
+      await view.result.current.refreshWallet();
+    });
+    expect(wallet.mock.calls.length).toBe(base);
+
+    // 手动刷新：强制发请求。
+    await act(async () => {
+      await view.result.current.refreshWallet({ force: true });
+    });
+    expect(wallet.mock.calls.length).toBe(base + 1);
+  });
+});
+
+describe("余额请求在途去重", () => {
+  it("两处同时触发只发一次", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    let release: () => void = () => {};
+    wallet.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              balance_cents: 920,
+              currency: "USD",
+              denominations_cents: [1000],
+              updated_at: new Date().toISOString(),
+            });
+        }),
+    );
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(wallet).toHaveBeenCalled());
+    expect(wallet.mock.calls.length).toBe(1);
+
+    let first: Promise<void> = Promise.resolve();
+    let second: Promise<void> = Promise.resolve();
+    act(() => {
+      first = view.result.current.refreshWallet({ force: true });
+      second = view.result.current.refreshWallet({ force: true });
+    });
+    expect(wallet.mock.calls.length).toBe(1);
+
+    await act(async () => {
+      release();
+      await Promise.all([first, second]);
+    });
+  });
+});
+
+describe("打开即刷的 30 秒门禁", () => {
+  it("30 秒内反复打开只发一次", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+    const base = wallet.mock.calls.length;
+
+    // 关掉再打开两次（门禁版）：不再发请求。
+    await act(async () => {
+      await view.result.current.refreshWallet();
+      await view.result.current.refreshWallet();
+    });
+    expect(wallet.mock.calls.length).toBe(base);
   });
 });

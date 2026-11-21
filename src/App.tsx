@@ -378,6 +378,7 @@ export default function App() {
   };
   // 再点一次已激活的「我的服务器」图标：回到列表根（默认第一台）。
   const [serversRootSignal, setServersRootSignal] = useState(0);
+  const [accountMenu, setAccountMenu] = useState<"nav" | null>(null);
   const myServers = useMyServers(bridge, {
     active: destination === "servers",
     rootSignal: serversRootSignal,
@@ -403,7 +404,6 @@ export default function App() {
     if (destination === "servers") refreshServersOnce();
   }, [destination, refreshServersOnce]);
   /** 账号菜单同一时刻只开一个：导航头像或左栏账号行。 */
-  const [accountMenu, setAccountMenu] = useState<"nav" | null>(null);
   const userLogoutRef = useRef(false);
   const wasLoggedInRef = useRef(false);
   // 查看账单拉起的登录成功了：回到账户页，账单入口保持可见。
@@ -2312,6 +2312,7 @@ export default function App() {
               email={myServers.account?.email ?? null}
               wallet={myServers.wallet}
               walletError={myServers.walletError}
+              walletStale={myServers.walletStale}
               identityProblem={myServers.identityProblem}
               onTopUp={() => myServers.openTopUp()}
               onRefreshWallet={() => void myServers.refreshWallet()}
@@ -2631,8 +2632,11 @@ export default function App() {
         account={myServers.account}
         wallet={myServers.wallet}
         walletLoading={myServers.walletLoading}
+        walletRefreshing={myServers.walletRefreshing}
         walletError={myServers.walletError}
+        walletStale={myServers.walletStale}
         onRefreshWallet={() => void myServers.refreshWallet()}
+        onForceRefresh={() => void myServers.refreshWallet({ force: true })}
         onLogin={() => {
           closeSettings();
           myServers.openLogin();

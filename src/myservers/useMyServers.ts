@@ -30,9 +30,13 @@ const DETAIL_ERROR = "这台服务器的详情暂时读不到。已有服务器�
 const DETAIL_RETRY_DELAYS = [1000, 2000, 4000, 8000];
 /** 没有任何可读数据时，连续失败累计这么久才给错误；首次失败不报。 */
 const DETAIL_ERROR_AFTER_MS = 10_000;
+/** 打开任一面时，距上次成功刷新不足这么久就直接用缓存。 */
+export const WALLET_REFRESH_GATE_MS = 30_000;
+/** 余额界面开着、窗口可见时的轮询间隔；隐藏暂停，恢复可见/聚焦时补一次。 */
+export const WALLET_POLL_MS = 15 * 60_000;
 /** 开通中的阶段在真机上可能只有几秒：列表轮询压到 2 秒，别让 5 秒一跳整段漏掉。 */
 const PROVISIONING_POLL_MS = 2000;
-const WALLET_ERROR = "读不到余额。稍后再试。";
+const WALLET_ERROR = "余额暂时读不到。";
 const LOGOUT_OFFLINE = "没退出登录。需要联网才能退出；服务器没有变化。";
 const LOGOUT_FAILED = "没退出登录。服务器没有变化，可以再试一次。";
 const LOGIN_UNSUPPORTED = "这个版本还不支持登录。";
@@ -134,12 +138,23 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   /** 账户命令失败：界面显示「账户暂时读不到」，不冒充未登录。 */
   const [accountError, setAccountError] = useState(false);
   const [wallet, setWallet] = useState<MyServerWallet | null>(null);
-  const [walletLoading, setWalletLoading] = useState(false);
+  /** 请求在途；`walletLoading` 只表示「从未取到值 + 在途」，已有旧值时界面继续显示旧值。 */
+  const [walletInFlight, setWalletInFlight] = useState(false);
   const [walletError, setWalletError] = useState<string | null>(null);
+  /** 上次刷新是否失败：已有旧值时界面据此写「显示的是上次的余额」。 */
+  const [walletFailed, setWalletFailed] = useState(false);
+  const walletSuccessAtRef = useRef(0);
+  const walletInFlightRef = useRef(false);
+  /** 回调里判断「有没有旧值」不依赖闭包里的 wallet。 */
+  const walletRef = useRef<MyServerWallet | null>(null);
+  walletRef.current = wallet;
   const [loginOpen, setLoginOpen] = useState(false);
   const [topupOpen, setTopupOpen] = useState(false);
 
   const loggedIn = account?.logged_in === true;
+  /** 回调里判断登录态用 ref：把 loggedIn 放进依赖会让 refreshWallet 换身份、连带重跑列表加载。 */
+  const loggedInRef = useRef(loggedIn);
+  loggedInRef.current = loggedIn;
 
   const markLoggedOut = useCallback(() => {
     setAccount((current) =>
@@ -159,28 +174,52 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setLoading(false);
   }, []);
 
-  const refreshWallet = useCallback(async () => {
-    const source = (bridge as AccountCapable).myServerWallet;
-    if (!source) return;
-    setWalletLoading(true);
-    setWalletError(null);
-    try {
-      setWallet(await source.call(bridge));
-    } catch (error) {
-      const reason = errorReason(error);
-      if (AUTH_REASONS.has(reason)) {
-        // 登录过期：切回未登录，别让旧邮箱和余额继续显示。
-        markLoggedOut();
-      } else if (reason === "device_revoked" || reason === "account_blocked") {
-        setBlockedState(reason);
-        setWalletError(null);
-      } else {
-        setWalletError(WALLET_ERROR);
+  const refreshWallet = useCallback(
+    async (options: { force?: boolean } = {}) => {
+      const source = (bridge as AccountCapable).myServerWallet;
+      if (!source) return;
+      // 未登录不发：组件可能在登出后的下一拍才卸载。
+      if (!loggedInRef.current) return;
+      // 并发请求没有意义；30 秒内刚成功过就直接用缓存（手动刷新传 force）。
+      if (walletInFlightRef.current) return;
+      if (
+        !options.force &&
+        Date.now() - walletSuccessAtRef.current < WALLET_REFRESH_GATE_MS
+      ) {
+        return;
       }
-    } finally {
-      setWalletLoading(false);
-    }
-  }, [bridge, markLoggedOut]);
+      walletInFlightRef.current = true;
+      // 刷新期间保留旧值：不清空 wallet；读取中只属于「从来没有值」的情况。
+      setWalletInFlight(true);
+      setWalletError(null);
+      try {
+        setWallet(await source.call(bridge));
+        walletSuccessAtRef.current = Date.now();
+        setWalletFailed(false);
+      } catch (error) {
+        setWalletFailed(true);
+        const reason = errorReason(error);
+        if (AUTH_REASONS.has(reason)) {
+          // 登录过期：切回未登录，别让旧邮箱和余额继续显示。
+          markLoggedOut();
+        } else if (
+          reason === "device_revoked" ||
+          reason === "account_blocked"
+        ) {
+          setBlockedState(reason);
+          setWalletError(null);
+        } else if (walletRef.current === null) {
+          // 从未取到值：只能明说读不到。
+          setWalletError(WALLET_ERROR);
+        }
+        // 已有旧值：保留数字，由 walletStale 写「显示的是上次的余额」。
+      } finally {
+        walletInFlightRef.current = false;
+        setWalletInFlight(false);
+      }
+    },
+    [bridge, markLoggedOut],
+  );
 
   const refresh = useCallback(async (): Promise<boolean> => {
     try {
@@ -781,7 +820,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     void refreshWallet();
   };
 
-  // 回到这个 destination、或从浏览器付完款切回来时，刷新余额。
+  /** 进入了「我的服务器」或窗口聚焦：建机向导要用余额判断日价 × 7 门槛。 */
   useEffect(() => {
     if (!active || !loggedIn) return;
     void refreshWallet();
@@ -789,6 +828,27 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [active, loggedIn, refreshWallet]);
+
+  // 已登录且窗口可见：每 15 分钟刷一次，不限在哪个页面（账户菜单随时会被打开，
+  // 先在后台把值刷好）。隐藏时暂停，恢复可见/聚焦时补一次，补刷同走 30 秒门禁。
+  useEffect(() => {
+    if (!loggedIn) return;
+    const maybeRefresh = () => void refreshWallet();
+    const onFocus = () => maybeRefresh();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") maybeRefresh();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") maybeRefresh();
+    }, WALLET_POLL_MS);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [loggedIn, refreshWallet]);
 
   /**
    * 自动选中只跟列表快照走：`selectedId` 自己变成 null（例如刚销毁完清选中）
@@ -842,6 +902,10 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
 
   const identityProblem: "lost" | "device_revoked" | "account_blocked" | null =
     blockedState ?? (identityLostState ? "lost" : null);
+  /** 显示的是旧值：刷新失败且手上还有上次的余额（从没取到值走 walletError）。 */
+  const walletStale = wallet !== null && walletFailed;
+  /** 「读取中」只属于从未取到值的场景；已有值刷新时继续显示旧值。 */
+  const walletLoading = walletInFlight && wallet === null;
 
   return {
     servers,
@@ -866,7 +930,9 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     loggedIn,
     wallet,
     walletLoading,
+    walletRefreshing: walletInFlight,
     walletError,
+    walletStale,
     refreshWallet,
     loginOpen,
     openLogin,
