@@ -33,8 +33,6 @@ const DETAIL_RETRY_DELAYS = [1000, 2000, 4000, 8000];
 const DETAIL_ERROR_AFTER_MS = 10_000;
 /** 打开任一面时，距上次成功刷新不足这么久就直接用缓存。 */
 export const WALLET_REFRESH_GATE_MS = 30_000;
-/** 余额界面开着、窗口可见时的轮询间隔；隐藏暂停，恢复可见/聚焦时补一次。 */
-export const WALLET_POLL_MS = 15 * 60_000;
 /** 开通中的阶段在真机上可能只有几秒：列表轮询压到 2 秒，别让 5 秒一跳整段漏掉。 */
 const PROVISIONING_POLL_MS = 2000;
 const WALLET_ERROR = "余额暂时读不到。";
@@ -43,14 +41,13 @@ const LOGOUT_FAILED = "没退出登录。服务器没有变化，可以再试一
 const LOGIN_UNSUPPORTED = "这个版本还不支持登录。";
 
 /**
- * 谁触发了这次余额刷新。前六个是设计文档点名的来源；后四个是顺带刷新余额的其他用户动作
- * （登录、下单/重建/销毁之后、打开充值弹层、进入我的服务器），单独命名，不冒充 manual。
+ * 谁触发了这次余额刷新。设计文档点名的来源之外，顺带刷新余额的用户动作
+ * （登录、下单/重建/销毁之后、打开充值弹层、进入我的服务器）单独命名，不冒充 manual。
  */
 export type WalletTrigger =
   | "open_menu"
   | "open_settings"
   | "open_servers"
-  | "poll"
   | "visible"
   | "focus"
   | "retry"
@@ -879,14 +876,14 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     void refreshWallet({ trigger: "order" });
   };
 
-  /** 进入了「我的服务器」：建机向导要用余额判断日价 × 7 门槛。聚焦补刷由下面的轮询 effect 统一管。 */
+  /** 进入了「我的服务器」：建机向导要用余额判断日价 × 7 门槛。聚焦补刷由下面的 effect 统一管。 */
   useEffect(() => {
     if (!active || !loggedIn) return;
     void refreshWallet({ trigger: "open_servers" });
   }, [active, loggedIn, refreshWallet]);
 
-  // 已登录且窗口可见：每 15 分钟刷一次，不限在哪个页面（账户菜单随时会被打开，
-  // 先在后台把值刷好）。隐藏时暂停，恢复可见/聚焦时补一次，补刷同走 30 秒门禁。
+  // 不做定时轮询：余额只因充值和每小时第 17 分的 cron 扣费变化，自主变化每天最多一次，
+  // 为它定时发请求不划算。只在窗口重新可见 / 重新聚焦时补刷一次，补刷同走 30 秒门禁。
   useEffect(() => {
     if (!loggedIn) return;
     const onFocus = () => void refreshWallet({ trigger: "focus" });
@@ -895,20 +892,14 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         hiddenLoggedRef.current = false;
         void refreshWallet({ trigger: "visible" });
       } else if (!hiddenLoggedRef.current) {
-        // 只在可见→隐藏的这一刻记一条；隐藏期间不轮询，不会每 15 分钟刷屏。
+        // 只在可见→隐藏的这一刻记一条；隐藏期间没有定时器，不会重复刷屏。
         hiddenLoggedRef.current = true;
         uiLog("debug", "refresh skipped reason=hidden");
       }
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
-    const timer = window.setInterval(() => {
-      if (document.visibilityState !== "hidden") {
-        void refreshWallet({ trigger: "poll" });
-      }
-    }, WALLET_POLL_MS);
     return () => {
-      window.clearInterval(timer);
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
     };

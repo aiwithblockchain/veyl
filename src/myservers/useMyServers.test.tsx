@@ -712,41 +712,77 @@ describe("余额刷新", () => {
     vi.useRealTimers();
   });
 
-  it("已登录且窗口可见（不限页面）：15 分钟刷新一次，隐藏暂停，恢复可见补一次", async () => {
+  it("不做定时轮询：只有窗口重新可见时补一次，补刷受 30 秒门禁", async () => {
     vi.useFakeTimers();
     const list = { current: [] as MyServer[] };
     const bridge = makeBridge(list);
     const wallet = vi.mocked(bridge.myServerWallet);
+    let visibility: "visible" | "hidden" = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
     const view = renderHook(() =>
       useMyServers(bridge, { active: false, rootSignal: 0 }),
     );
     await flushWallet();
     const base = wallet.mock.calls.length;
 
+    // 可见状态下空转 15 分钟：没有任何自动请求。
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15 * 60_000);
     });
-    expect(wallet.mock.calls.length).toBe(base + 1);
+    expect(wallet.mock.calls.length).toBe(base);
 
-    let visibility: "visible" | "hidden" = "hidden";
-    Object.defineProperty(document, "visibilityState", {
-      configurable: true,
-      get: () => visibility,
-    });
+    visibility = "hidden";
+    document.dispatchEvent(new Event("visibilitychange"));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15 * 60_000);
     });
-    expect(wallet.mock.calls.length).toBe(base + 1);
+    expect(wallet.mock.calls.length).toBe(base);
 
+    // 恢复可见：补一次。
     visibility = "visible";
     document.dispatchEvent(new Event("visibilitychange"));
     await flushWallet();
-    expect(wallet.mock.calls.length).toBe(base + 2);
+    expect(wallet.mock.calls.length).toBe(base + 1);
 
-    Object.defineProperty(document, "visibilityState", {
-      configurable: true,
-      get: () => "visible",
+    // 紧接着再来一次「隐藏→可见」：被 30 秒门禁挡掉。
+    visibility = "hidden";
+    document.dispatchEvent(new Event("visibilitychange"));
+    visibility = "visible";
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushWallet();
+    expect(wallet.mock.calls.length).toBe(base + 1);
+
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("进入「我的服务器」destination 会刷新余额（建机门槛依赖它）", async () => {
+    vi.useFakeTimers();
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(
+      ({ active }: { active: boolean }) =>
+        useMyServers(bridge, { active, rootSignal: 0 }),
+      { initialProps: { active: false } },
+    );
+    await flushWallet();
+    const base = wallet.mock.calls.length;
+
+    // 不在那个 destination：空转 31 秒也不补。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(31_000);
     });
+    expect(wallet.mock.calls.length).toBe(base);
+
+    // 进入：过了 30 秒门禁，补一次。
+    view.rerender({ active: true });
+    await flushWallet();
+    expect(wallet.mock.calls.length).toBe(base + 1);
+
     view.unmount();
     vi.useRealTimers();
   });
@@ -832,7 +868,7 @@ describe("余额刷新", () => {
     vi.useRealTimers();
   });
 
-  it("停在任意页面 1 小时：按 15 分钟节奏共刷新 4 次", async () => {
+  it("停在任意页面 30 分钟：除显示刷新外不发任何请求", async () => {
     vi.useFakeTimers();
     const list = { current: [] as MyServer[] };
     const bridge = makeBridge(list);
@@ -844,9 +880,9 @@ describe("余额刷新", () => {
     const base = wallet.mock.calls.length;
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
     });
-    expect(wallet.mock.calls.length).toBe(base + 4);
+    expect(wallet.mock.calls.length).toBe(base);
 
     view.unmount();
     vi.useRealTimers();
@@ -1107,7 +1143,7 @@ describe("余额刷新的日志", () => {
       visibility = "hidden";
       document.dispatchEvent(new Event("visibilitychange"));
       await flush();
-      // 恢复可见用自己的 trigger，和 15 分钟定时（poll）分得开。
+      // 恢复可见用自己的 trigger，和聚焦、打开面分得开。
       expect(matching(/^debug refresh seq=\d+ trigger=visible$/).length).toBe(1);
       expect(matching(/^debug refresh skipped reason=hidden$/).length).toBe(2);
 

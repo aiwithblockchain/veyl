@@ -13,11 +13,11 @@ beforeEach(() => {
 
 describe("uiLog", () => {
   it("按 ui_log 的签名调用，target 默认 wallet", () => {
-    uiLog("debug", "refresh trigger=poll");
+    uiLog("debug", "refresh seq=7 trigger=focus");
     expect(invoke).toHaveBeenCalledWith("ui_log", {
       level: "debug",
       target: "wallet",
-      message: "refresh trigger=poll",
+      message: "refresh seq=7 trigger=focus",
     });
   });
 
