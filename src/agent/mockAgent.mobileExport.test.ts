@@ -38,26 +38,30 @@ describe("mock 手机端导出", () => {
     expect(data?.state).toBe("ok");
   });
 
-  it("客户端下载码按枚举返回对应 URL", async () => {
+  it("客户端下载码按平台各返回一条", async () => {
     const bridge = new MockAgentBridge();
 
-    await expect(bridge.mobileClientsQr?.("singbox")).resolves.toMatchObject({
-      url: "https://sing-box.sagernet.org/clients/",
-    });
-    await expect(bridge.mobileClientsQr?.("hiddify")).resolves.toMatchObject({
-      url: "https://github.com/hiddify/hiddify-app/releases/latest",
-    });
-    await expect(bridge.mobileClientsQr?.("cmfa")).resolves.toMatchObject({
-      url: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
-    });
-    await expect(
-      bridge.mobileClientsQr?.("shadowrocket"),
-    ).resolves.toMatchObject({
-      url: "https://apps.apple.com/us/app/shadowrocket/id932747118",
-    });
-    const data = await bridge.mobileClientsQr?.("cmfa");
-    expect(data?.qr_data_url.startsWith("data:image/svg+xml;base64,")).toBe(
-      true,
+    const singbox = await bridge.mobileClientsQr?.("singbox");
+    expect(singbox?.platforms.map((entry) => entry.platform)).toEqual([
+      "ios",
+      "android",
+    ]);
+    expect(singbox?.platforms[0].url).toBe(
+      "https://apps.apple.com/app/sing-box-mt/id6785326793",
     );
+
+    const cmfa = await bridge.mobileClientsQr?.("cmfa");
+    expect(cmfa?.platforms.map((entry) => entry.platform)).toEqual(["android"]);
+
+    const shadowrocket = await bridge.mobileClientsQr?.("shadowrocket");
+    expect(shadowrocket?.platforms.map((entry) => entry.platform)).toEqual([
+      "ios",
+    ]);
+
+    for (const entry of cmfa?.platforms ?? []) {
+      expect(entry.qr_data_url.startsWith("data:image/svg+xml;base64,")).toBe(
+        true,
+      );
+    }
   });
 });

@@ -32,19 +32,48 @@ const QR_PIXELS: u32 = 640;
 const TOKEN_LEN: usize = 46;
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-/// 下载页 URL 的固定映射。命令只接受客户端 id，不接受调用方传 URL。
-pub const CLIENTS_URLS: [(&str, &str); 4] = [
-    ("singbox", "https://sing-box.sagernet.org/clients/"),
-    ("hiddify", "https://github.com/hiddify/hiddify-app/releases/latest"),
+/// 下载页 URL 的固定映射：每个客户端按平台各给一条，命令只接受客户端 id。
+///
+/// iPhone 与 Android 的安装入口本来就不同，一个地址服务两边必然有一边是死路。
+pub const CLIENT_PLATFORM_URLS: [(&str, MobilePlatform, &str); 6] = [
     (
-        "cmfa",
-        "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
+        "singbox",
+        MobilePlatform::Ios,
+        "https://apps.apple.com/app/sing-box-mt/id6785326793",
+    ),
+    (
+        "singbox",
+        MobilePlatform::Android,
+        "https://github.com/SagerNet/sing-box/releases/latest",
     ),
     (
         "shadowrocket",
+        MobilePlatform::Ios,
         "https://apps.apple.com/us/app/shadowrocket/id932747118",
     ),
+    (
+        "cmfa",
+        MobilePlatform::Android,
+        "https://github.com/MetaCubeX/ClashMetaForAndroid/releases/latest",
+    ),
+    (
+        "hiddify",
+        MobilePlatform::Ios,
+        "https://apps.apple.com/us/app/hiddify-proxy-vpn/id6596777532",
+    ),
+    (
+        "hiddify",
+        MobilePlatform::Android,
+        "https://github.com/hiddify/hiddify-app/releases/latest/download/Hiddify-Android-universal.apk",
+    ),
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MobilePlatform {
+    Ios,
+    Android,
+}
 
 /// 单种导出格式（设计 §3.7.7）。`url` 含令牌，Debug 不得原样打印。
 #[derive(Clone, PartialEq, Serialize)]
@@ -124,9 +153,15 @@ impl fmt::Debug for MobileExportData {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct MobileClientsQr {
+pub struct MobileClientQr {
+    pub platform: MobilePlatform,
     pub url: String,
     pub qr_data_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MobileClientsQr {
+    pub platforms: Vec<MobileClientQr>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,32 +182,29 @@ pub async fn rotate() -> Result<MobileExportData, CpError> {
 ///
 /// 未知 id 直接报错，不静默回退到 sing-box——回退会把错误的客户端码展示给用户。
 pub fn clients_qr(client: &str) -> Result<MobileClientsQr, CpError> {
-    let url = CLIENTS_URLS
+    let entries: Vec<&(&str, MobilePlatform, &str)> = CLIENT_PLATFORM_URLS
         .iter()
-        .find(|(id, _)| *id == client)
-        .map(|(_, url)| *url)
-        .ok_or_else(|| {
-            CpError::new(
-                "INVALID_ARGUMENT",
-                "client 只能是 singbox、hiddify、cmfa 或 shadowrocket",
-                false,
-                json!({ "reason": "unknown_client" }),
-            )
-        })?;
-    // 手机扫的码按设备分流（iPhone → App Store，Android → 安装包），桌面上点的链接落到 release 页。
-    // origin 解析不出来时退回链接本身：拿不到分流也比没有码强。
-    let payload = if client == "hiddify" {
-        match ProfileOrigin::parse(&env::current().base_url) {
-            Ok(origin) => origin.public_url("/dl/hiddify"),
-            Err(_) => url.to_string(),
-        }
-    } else {
-        url.to_string()
-    };
-    Ok(MobileClientsQr {
-        url: url.to_string(),
-        qr_data_url: qr_data_url(&payload)?,
-    })
+        .filter(|(id, _, _)| *id == client)
+        .collect();
+    if entries.is_empty() {
+        return Err(CpError::new(
+            "INVALID_ARGUMENT",
+            "client 只能是 singbox、hiddify、cmfa 或 shadowrocket",
+            false,
+            json!({ "reason": "unknown_client" }),
+        ));
+    }
+    let platforms = entries
+        .into_iter()
+        .map(|(_, platform, url)| {
+            Ok(MobileClientQr {
+                platform: *platform,
+                url: (*url).to_string(),
+                qr_data_url: qr_data_url(url)?,
+            })
+        })
+        .collect::<Result<Vec<_>, CpError>>()?;
+    Ok(MobileClientsQr { platforms })
 }
 
 async fn export(rotate: bool) -> Result<MobileExportData, CpError> {
@@ -409,16 +441,6 @@ impl ProfileOrigin {
             return Err(insecure_origin());
         }
         Ok(Self { base })
-    }
-
-    /// 不带令牌的公开地址：`<base 去掉末尾斜杠><path>`（下载分流用）。
-    fn public_url(&self, path: &str) -> String {
-        let mut url = self.base.clone();
-        let joined = format!("{}{}", url.path().trim_end_matches('/'), path);
-        url.set_path(&joined);
-        url.set_query(None);
-        url.set_fragment(None);
-        url.to_string()
     }
 
     /// `https://veyl:<token>@<base 去掉末尾斜杠><profile_path>`。
@@ -678,46 +700,72 @@ mod tests {
     }
 
     #[test]
-    fn clients_qr_maps_each_client_to_its_fixed_url() {
-        for (id, url) in [
-            ("singbox", "https://sing-box.sagernet.org/clients/"),
+    fn clients_qr_gives_one_entry_per_platform() {
+        // 客户端 → 期望的平台顺序与地址。顺序就是界面顺序。
+        for (id, expected) in [
             (
-                "hiddify",
-                "https://github.com/hiddify/hiddify-app/releases/latest",
-            ),
-            (
-                "cmfa",
-                "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
+                "singbox",
+                vec![
+                    (
+                        MobilePlatform::Ios,
+                        "https://apps.apple.com/app/sing-box-mt/id6785326793",
+                    ),
+                    (
+                        MobilePlatform::Android,
+                        "https://github.com/SagerNet/sing-box/releases/latest",
+                    ),
+                ],
             ),
             (
                 "shadowrocket",
-                "https://apps.apple.com/us/app/shadowrocket/id932747118",
+                vec![(
+                    MobilePlatform::Ios,
+                    "https://apps.apple.com/us/app/shadowrocket/id932747118",
+                )],
+            ),
+            (
+                "cmfa",
+                vec![(
+                    MobilePlatform::Android,
+                    "https://github.com/MetaCubeX/ClashMetaForAndroid/releases/latest",
+                )],
+            ),
+            (
+                "hiddify",
+                vec![
+                    (
+                        MobilePlatform::Ios,
+                        "https://apps.apple.com/us/app/hiddify-proxy-vpn/id6596777532",
+                    ),
+                    (
+                        MobilePlatform::Android,
+                        "https://github.com/hiddify/hiddify-app/releases/latest/download/Hiddify-Android-universal.apk",
+                    ),
+                ],
             ),
         ] {
             let data = clients_qr(id).unwrap();
-            assert_eq!(data.url, url, "{id}");
-            // 只有 Hiddify 的码与链接不同：码要按设备分流到本机控制面，链接落到 release 页。
-            let payload = if id == "hiddify" {
-                let origin = ProfileOrigin::parse(&env::current().base_url).unwrap();
-                let payload = origin.public_url("/dl/hiddify");
-                assert!(payload.ends_with("/dl/hiddify"), "{payload}");
-                assert!(!payload.contains(TOKEN), "下载码不能带令牌：{payload}");
-                payload
-            } else {
-                url.to_string()
-            };
-            assert_eq!(
-                data.qr_data_url,
-                qr_data_url(&payload).unwrap(),
-                "{id} 的二维码内容"
-            );
-            let encoded = data
-                .qr_data_url
-                .strip_prefix("data:image/svg+xml;base64,")
-                .expect("prefix");
-            let svg = String::from_utf8(BASE64.decode(encoded).unwrap()).unwrap();
-            assert!(svg.contains("<svg"), "{id} 解码后必须是 SVG");
-            assert!(!data.qr_data_url.contains("mp_"), "{id} 不得含任何令牌");
+            let actual: Vec<(MobilePlatform, &str)> = data
+                .platforms
+                .iter()
+                .map(|entry| (entry.platform, entry.url.as_str()))
+                .collect();
+            assert_eq!(actual, expected, "{id}");
+
+            for entry in &data.platforms {
+                assert_eq!(
+                    entry.qr_data_url,
+                    qr_data_url(&entry.url).unwrap(),
+                    "{id} 的二维码内容必须是该地址"
+                );
+                let encoded = entry
+                    .qr_data_url
+                    .strip_prefix("data:image/svg+xml;base64,")
+                    .expect("prefix");
+                let svg = String::from_utf8(BASE64.decode(encoded).unwrap()).unwrap();
+                assert!(svg.contains("<svg"), "{id} 解码后必须是 SVG");
+                assert!(!entry.qr_data_url.contains("mp_"), "{id} 不得含任何令牌");
+            }
         }
     }
 
@@ -734,15 +782,18 @@ mod tests {
     fn clients_qr_serializes_as_the_contract_shape() {
         let value = serde_json::to_value(clients_qr("hiddify").unwrap()).unwrap();
         let object = value.as_object().unwrap();
-        assert_eq!(object.len(), 2, "只有 url 与 qr_data_url");
-        assert_eq!(
-            value["url"],
-            "https://github.com/hiddify/hiddify-app/releases/latest"
-        );
-        assert!(value["qr_data_url"]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/svg+xml;base64,"));
+        assert_eq!(object.len(), 1, "只有 platforms");
+        let platforms = value["platforms"].as_array().unwrap();
+        assert_eq!(platforms.len(), 2);
+        assert_eq!(platforms[0]["platform"], "ios");
+        assert_eq!(platforms[1]["platform"], "android");
+        for entry in platforms {
+            assert!(entry["url"].as_str().unwrap().starts_with("https://"));
+            assert!(entry["qr_data_url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/svg+xml;base64,"));
+        }
     }
 
     fn built_formats() -> Vec<MobileExportFormat> {

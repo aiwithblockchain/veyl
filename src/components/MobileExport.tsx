@@ -5,6 +5,7 @@ import type {
   MobileClientId,
   MobileClientsQrData,
   MobileExportData,
+  MobilePlatform,
   MyServer,
 } from "../agent/bridge";
 import { isServerNodeReady } from "../myservers/labels";
@@ -14,6 +15,11 @@ import { IconClose } from "./icons";
 
 /** 内部格式：只用于取数据，不出现在任何界面文本里。 */
 type FormatId = "singbox" | "clash" | "ss" | "shadowrocket";
+
+const PLATFORM_LABELS: Record<MobilePlatform, string> = {
+  ios: "iPhone",
+  android: "Android",
+};
 
 type RowId = MobileClientId | "other";
 
@@ -55,8 +61,6 @@ interface AppDef {
   meta: string;
   /** 该 App 内部吃哪一份数据；用户看不到这层映射。 */
   format: FormatId;
-  /** 与契约的 Host 固定映射一致；下载码以命令返回为准。 */
-  url: string;
 }
 
 /** 顺序即界面顺序：按「最可能被用」排，不按平台分组。 */
@@ -66,32 +70,70 @@ const APPS: AppDef[] = [
     name: "sing-box",
     meta: "iPhone（需大陆以外 Apple 账号）/ Android",
     format: "singbox",
-    url: "https://sing-box.sagernet.org/clients/",
   },
   {
     id: "shadowrocket",
     name: "Shadowrocket",
     meta: "iOS",
     format: "shadowrocket",
-    url: "https://apps.apple.com/us/app/shadowrocket/id932747118",
   },
   {
     id: "cmfa",
     name: "Clash Meta for Android",
     meta: "仅 Android",
     format: "clash",
-    url: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
   },
   {
     id: "hiddify",
     name: "Hiddify",
     meta: "iPhone / Android",
     format: "singbox",
-    url: "https://github.com/hiddify/hiddify-app/releases/latest",
   },
 ];
 
 const OTHER_NAME = "我的 App 不在列表里";
+
+/**
+ * 下载码取不到时的兜底链接：与 Host 的固定映射逐条一致。
+ * 二维码要命令生成，链接不需要——命令失败也至少能点开下载页。
+ */
+const FALLBACK_PLATFORMS: Record<
+  MobileClientId,
+  Array<{ platform: MobilePlatform; url: string }>
+> = {
+  singbox: [
+    {
+      platform: "ios",
+      url: "https://apps.apple.com/app/sing-box-mt/id6785326793",
+    },
+    {
+      platform: "android",
+      url: "https://github.com/SagerNet/sing-box/releases/latest",
+    },
+  ],
+  shadowrocket: [
+    {
+      platform: "ios",
+      url: "https://apps.apple.com/us/app/shadowrocket/id932747118",
+    },
+  ],
+  cmfa: [
+    {
+      platform: "android",
+      url: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases/latest",
+    },
+  ],
+  hiddify: [
+    {
+      platform: "ios",
+      url: "https://apps.apple.com/us/app/hiddify-proxy-vpn/id6596777532",
+    },
+    {
+      platform: "android",
+      url: "https://github.com/hiddify/hiddify-app/releases/latest/download/Hiddify-Android-universal.apk",
+    },
+  ],
+};
 
 interface Props {
   bridge: AgentBridge;
@@ -506,30 +548,43 @@ export function MobileExport({
   };
 
   // ① 是 ② 的前提：码 120 + 两行文字，块限宽 380，明显轻于主块。
+  // ① 每个平台一个码：iPhone 与 Android 的安装入口本来就不同，一个码写死一边就是死路。
   const downloadStep = (app: AppDef) => {
-    const data = clientQr[app.id];
+    // 码没有就跟兜底链接：链接在、码不在，也照样能装上。
+    const platforms =
+      clientQr[app.id]?.platforms ??
+      FALLBACK_PLATFORMS[app.id].map((entry) => ({
+        ...entry,
+        qr_data_url: null,
+      }));
     return (
-      <section className="mobile-export__step mobile-export__step--compact">
-        <div className="mobile-export__download-qr">
-          {data ? (
-            <img
-              className="mobile-export__download-qr-img"
-              src={data.qr_data_url}
-              width={120}
-              height={120}
-              alt=""
-              aria-hidden="true"
-            />
-          ) : null}
-        </div>
-        <div className="mobile-export__step-copy">
-          <h3 className="mobile-export__step-title">
-            <span className="mobile-export__step-num" aria-hidden="true">
-              1
-            </span>
-            还没有 App？先下载
-          </h3>
-          {externalLink(data?.url ?? app.url, "打开下载页")}
+      <section className="mobile-export__step">
+        <h3 className="mobile-export__step-title">
+          <span className="mobile-export__step-num" aria-hidden="true">
+            1
+          </span>
+          还没有 App？先下载
+        </h3>
+        <div className="mobile-export__platforms">
+          {platforms
+            ? platforms.map((entry) => (
+                <div className="mobile-export__platform" key={entry.platform}>
+                  {entry.qr_data_url ? (
+                    <div className="mobile-export__download-qr">
+                      <img
+                        className="mobile-export__download-qr-img"
+                        src={entry.qr_data_url}
+                        width={120}
+                        height={120}
+                        alt=""
+                        aria-hidden="true"
+                      />
+                    </div>
+                  ) : null}
+                  {externalLink(entry.url, PLATFORM_LABELS[entry.platform])}
+                </div>
+              ))
+            : null}
         </div>
       </section>
     );

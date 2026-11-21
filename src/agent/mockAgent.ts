@@ -27,6 +27,7 @@ import type {
   LlmProviderTestResult,
   MobileClientId,
   MobileClientsQrData,
+  MobilePlatform,
   MobileExportData,
   MyServerCreateInput,
   NetRepairAction,
@@ -188,12 +189,43 @@ function mockMobileExport(nodeCount: number): MobileExportData {
   };
 }
 
-/** 与契约 §7.23 的 Host 固定映射一致；这里只用于 mock。 */
-const MOCK_CLIENT_URLS: Record<MobileClientId, string> = {
-  singbox: "https://sing-box.sagernet.org/clients/",
-  hiddify: "https://github.com/hiddify/hiddify-app/releases/latest",
-  cmfa: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
-  shadowrocket: "https://apps.apple.com/us/app/shadowrocket/id932747118",
+/** 与契约 §7.23 的 Host 固定映射一致；这里只用于 mock。每个平台一条。 */
+const MOCK_CLIENT_URLS: Record<
+  MobileClientId,
+  Array<{ platform: MobilePlatform; url: string }>
+> = {
+  singbox: [
+    {
+      platform: "ios",
+      url: "https://apps.apple.com/app/sing-box-mt/id6785326793",
+    },
+    {
+      platform: "android",
+      url: "https://github.com/SagerNet/sing-box/releases/latest",
+    },
+  ],
+  hiddify: [
+    {
+      platform: "ios",
+      url: "https://apps.apple.com/us/app/hiddify-proxy-vpn/id6596777532",
+    },
+    {
+      platform: "android",
+      url: "https://github.com/hiddify/hiddify-app/releases/latest/download/Hiddify-Android-universal.apk",
+    },
+  ],
+  cmfa: [
+    {
+      platform: "android",
+      url: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases/latest",
+    },
+  ],
+  shadowrocket: [
+    {
+      platform: "ios",
+      url: "https://apps.apple.com/us/app/shadowrocket/id932747118",
+    },
+  ],
 };
 
 export class MockAgentBridge implements AgentBridge {
@@ -705,8 +737,11 @@ export class MockAgentBridge implements AgentBridge {
 
   async mobileClientsQr(client: MobileClientId): Promise<MobileClientsQrData> {
     return {
-      url: MOCK_CLIENT_URLS[client],
-      qr_data_url: MOCK_MOBILE_QR,
+      platforms: MOCK_CLIENT_URLS[client].map((entry) => ({
+        platform: entry.platform,
+        url: entry.url,
+        qr_data_url: MOCK_MOBILE_QR,
+      })),
     };
   }
 

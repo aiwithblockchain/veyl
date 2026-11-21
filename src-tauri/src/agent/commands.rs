@@ -2059,11 +2059,13 @@ pub async fn list_pending_questions(session_id: String) -> Result<Value, Value> 
 /// 不写「域名后缀」判断：`https://apps.apple.com.evil.test/` 会命中后缀规则。
 /// GitHub 只放开 ClashMetaForAndroid 与 hiddify-app 两个仓库，不放开整个 `github.com`；
 /// App Store 只放开列表里出现的两个 App，不放开整站。
-const OPEN_EXTERNAL_PREFIXES: [&str; 6] = [
+const OPEN_EXTERNAL_PREFIXES: [&str; 8] = [
     "https://platform.deepseek.com/",
     "https://apps.apple.com/app/sing-box-mt",
     "https://apps.apple.com/us/app/shadowrocket",
+    "https://apps.apple.com/us/app/hiddify-proxy-vpn",
     "https://sing-box.sagernet.org/",
+    "https://github.com/SagerNet/sing-box",
     "https://github.com/hiddify/hiddify-app",
     "https://github.com/MetaCubeX/ClashMetaForAndroid/",
 ];
@@ -3608,11 +3610,14 @@ mod open_external_tests {
     /// 否则换域名只改一处，用户点了没反应。
     #[test]
     fn every_download_url_is_openable() {
-        for (client, url) in crate::control_plane::mobile::CLIENTS_URLS {
-            assert!(external_url_allowed(url), "{client} 的下载页 {url} 必须能打开");
+        for (client, platform, url) in crate::control_plane::mobile::CLIENT_PLATFORM_URLS {
+            assert!(
+                external_url_allowed(url),
+                "{client}/{platform:?} 的下载页 {url} 必须能打开"
+            );
             assert!(
                 external_url_allowed(&format!("{url}/")),
-                "{client} 的尾斜杠写法也必须能打开"
+                "{client}/{platform:?} 的尾斜杠写法也必须能打开"
             );
         }
     }

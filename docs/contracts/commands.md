@@ -2029,23 +2029,32 @@ type MobileClientsQrArgs = {
 };
 
 type MobileClientsQrData = {
-  url: string;          // 固定映射，见下表；桌面点「打开下载页」用它
-  qr_data_url: string;  // data:image/svg+xml;base64,…；除 hiddify 外内容就是 url
+  platforms: Array<{
+    platform: "ios" | "android";
+    url: string;          // 固定映射，见下表
+    qr_data_url: string;  // data:image/svg+xml;base64,…；内容就是该条的 url
+  }>;
 };
 ```
 
 固定映射（Host 写死，不读配置、不联网、不调控制面）：
 
-| `client` | `url` | 对应客户端 |
+每个客户端按平台各一条，**顺序即界面顺序**（ios 在前）：
+
+| `client` | `platform` | `url` |
 |---|---|---|
-| `singbox` | `https://sing-box.sagernet.org/clients/` | sing-box 官方 SFI / SFA |
-| `hiddify` | `https://github.com/hiddify/hiddify-app/releases/latest` | Hiddify |
-| `cmfa` | `https://github.com/MetaCubeX/ClashMetaForAndroid/releases` | Clash Meta for Android |
-| `shadowrocket` | `https://apps.apple.com/us/app/shadowrocket/id932747118` | Shadowrocket |
+| `singbox` | `ios` | `https://apps.apple.com/app/sing-box-mt/id6785326793` |
+| `singbox` | `android` | `https://github.com/SagerNet/sing-box/releases/latest` |
+| `shadowrocket` | `ios` | `https://apps.apple.com/us/app/shadowrocket/id932747118` |
+| `cmfa` | `android` | `https://github.com/MetaCubeX/ClashMetaForAndroid/releases/latest` |
+| `hiddify` | `ios` | `https://apps.apple.com/us/app/hiddify-proxy-vpn/id6596777532` |
+| `hiddify` | `android` | `https://github.com/hiddify/hiddify-app/releases/latest/download/Hiddify-Android-universal.apk` |
 
-> `hiddify` 的地址**以不带尾斜杠的 `…/hiddify-app/releases/latest` 为准**（与 Rust 固定映射一致）。调用方不要依赖尾斜杠；Host 侧 `https://github.com/hiddify/hiddify-app/` 与它的子路径同样放行，视为同一个入口。
-
-> **`hiddify` 的二维码内容与 `url` 不同（2.48.0）**：码里放的是本机控制面 origin 的 `/dl/hiddify`，由 Worker 按 UA 分流——iPhone / iPad / iPod → App Store，Android → 最新版 universal APK，其余 → release 页。原因是它在两个平台上的入口本来就不同，一个码写死任何一边，另一边扫码就是死路。origin 解析失败时退回 `url` 本身，拿不到分流也不至于没有码。
+> **为什么按平台拆（2.48.0）**：iPhone 只有 App Store、Android 只有安装包，一个地址服务两边必然有一边是死路；按设备分流（读 UA）则依赖扫码时的 UA 猜设备，界面也说不清“这个码是给谁的”。所以直接一个平台一个码、一个链接。
+>
+> **为什么有的平台落在 release 页而不是安装包**：只有 Hiddify 的资产名是固定的（`Hiddify-Android-universal.apk`），可以用 GitHub 的 `releases/latest/download/<name>` 拿最新包；`SagerNet/sing-box` 与 CMFA 的资产名带版本号，没有跨版本的稳定地址，只能给 `releases/latest` 页面。不要在客户端里拼版本号。
+>
+> **`hiddify.com` 不可用**（2026-11-21 实测，境外出口 TLS 握手即失败），不得作为任何入口。
 
 - `client` 缺失、类型不对或不在枚举内 → `INVALID_ARGUMENT`，`details.reason = "unknown_client"`；**不静默回退到默认值**，也不接受 URL / 其它字段。
 - **不登录、不调控制面、不涉及令牌**；命令始终可用，与账户状态、服务器状态无关。
@@ -2829,7 +2838,7 @@ type RulesStatus = {
 |---|---|---|---|
 | 1 | 本文件版本升到 `2.48.0`；§7.21 `formats[]` 增第四项 `shadowrocket`（`/v1/mobile/profile/shadowrocket`，Surge 风格配置文本：节点 + `DOMAIN-SUFFIX,cn` / `GEOIP,CN` 直连 + `FINAL,Veyl`），二维码内容为 URL 本身 | 返回结构变更 | 产品 2026-11-20：只发节点时 Shadowrocket 只能全局，全局不可接受 |
 | 2 | `ss` 保留为纯节点列表（兜底），界面不再取用；Shadowrocket 行的「只能全部走节点」说明随之删除 | 语义变更 | 同上 |
-| 3 | §7.23 `hiddify` 的 `url` 改为 `…/releases/latest`（原来指向仓库首页，普通用户不会用 GitHub）；`qr_data_url` 改为本机 origin 的 `/dl/hiddify`，由 Worker 按 UA 分流到 App Store / 最新 APK / release 页。新增公开端点 `GET /dl/:client`（302，不托管安装包） | 语义变更 | 产品 2026-11-21：一个码要服务两个平台 |
+| 3 | §7.23 改为**一个平台一条**：返回值从 `{ url, qr_data_url }` 变成 `{ platforms: [{ platform, url, qr_data_url }] }`。sing-box 的 iPhone 直接给 App Store（sing-box MT），Android 给 `releases/latest`；Hiddify 的 Android 给稳定的 latest APK 地址；CMFA 只有 android、Shadowrocket 只有 ios | 返回结构变更 | 产品 2026-11-21：不同平台用不同二维码 |
 
 ### 2.47.0（未发布，2026-11-20：手机端导出多格式 + 下载码按客户端）
 

@@ -709,10 +709,18 @@ export type MobileClientId =
   | "cmfa"
   | "shadowrocket";
 
-/** 下载页二维码（commands.md §7.23 / 2.47.0）：URL 由 Host 固定映射。 */
-export interface MobileClientsQrData {
+export type MobilePlatform = "ios" | "android";
+
+/** 单个平台的下载入口：iPhone 与 Android 的地址本来就不同（commands.md §7.23）。 */
+export interface MobileClientQrEntry {
+  platform: MobilePlatform;
   url: string;
   qr_data_url: string;
+}
+
+/** 下载页二维码（commands.md §7.23 / 2.50.0）：URL 由 Host 固定映射，一个平台一条。 */
+export interface MobileClientsQrData {
+  platforms: MobileClientQrEntry[];
 }
 
 /**

@@ -6587,20 +6587,18 @@ details[open] > .settings-fold__summary::before {
   color: var(--ink-3);
 }
 
-/* ① 是 ② 的前提：码 + 两行文字、限宽 380，明显轻于主块。 */
-.mobile-export__step--compact {
+/* ① 每个平台一个码：码在上、平台名在下，整块仍明显轻于 ②。 */
+.mobile-export__platforms {
   display: flex;
-  align-items: center;
-  gap: 20px;
-  max-width: 380px;
+  gap: 24px;
+  margin-top: 12px;
 }
 
-.mobile-export__step-copy {
+.mobile-export__platform {
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 8px;
-  min-width: 0;
+  align-items: center;
+  gap: 6px;
 }
 
 .mobile-export__import {
@@ -6784,10 +6782,6 @@ details[open] > .settings-fold__summary::before {
 
   .mobile-export__qr {
     align-self: center;
-  }
-
-  .mobile-export__step--compact {
-    max-width: none;
   }
 
   .mobile-export__security {

@@ -25,6 +25,7 @@ import type {
   LlmProviderInput,
   LlmProviderTestResult,
   MobileClientId,
+  MobileClientQrEntry,
   MobileClientsQrData,
   MobileExportData,
   MobileExportFormat,
@@ -965,14 +966,23 @@ function normalizeMobileExport(raw: unknown): MobileExportData {
 }
 
 function normalizeMobileClientsQr(raw: unknown): MobileClientsQrData {
-  if (raw && typeof raw === "object") {
-    const value = raw as Record<string, unknown>;
-    if (
-      typeof value.url === "string" &&
-      typeof value.qr_data_url === "string"
-    ) {
-      return { url: value.url, qr_data_url: value.qr_data_url };
-    }
+  if (raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).platforms)) {
+    const platforms = ((raw as Record<string, unknown>).platforms as unknown[])
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") return null;
+        const value = entry as Record<string, unknown>;
+        if (value.platform !== "ios" && value.platform !== "android") return null;
+        if (typeof value.url !== "string" || typeof value.qr_data_url !== "string") {
+          return null;
+        }
+        return {
+          platform: value.platform,
+          url: value.url,
+          qr_data_url: value.qr_data_url,
+        };
+      })
+      .filter((entry): entry is MobileClientQrEntry => entry !== null);
+    if (platforms.length > 0) return { platforms };
   }
   serverDataError();
 }

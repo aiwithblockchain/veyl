@@ -52,11 +52,11 @@ describe("在手机上使用的 v6 尺寸", () => {
     );
   });
 
-  it("① 紧凑行限宽 380；安全句在码下 10、宽 200", () => {
+  it("① 每个平台一张卡并排；安全句在码下 10、宽 200", () => {
+    expectDecls(".mobile-export__platforms", "gap: 24px", "margin-top: 12px");
     expectDecls(
-      ".mobile-export__step--compact",
-      "max-width: 380px",
-      "gap: 20px",
+      ".mobile-export__platform",
+      "flex-direction: column",
       "align-items: center",
     );
     expectDecls(

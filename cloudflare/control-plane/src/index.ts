@@ -6,7 +6,6 @@ import { handleOrders } from "./orders";
 import { handleTopups } from "./topups";
 import { handleServers } from "./servers";
 import { handleMobile } from "./mobile";
-import { handleDownload } from "./dl";
 import { handleRules } from "./rules";
 import { handleSeed } from "./seed";
 import { handleDodoWebhook } from "./webhooks/dodo";
@@ -354,10 +353,6 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
 </main></body></html>`;
     return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
   }
-
-  // 客户端下载分流：手机扫同一个码，按 UA 去 App Store / 安装包。
-  const downloadResponse = handleDownload(request);
-  if (downloadResponse) return downloadResponse;
 
   // 国内分流规则集：公开只读，随 Worker 打包；sing-box profile 的 rule_set 从这里拉。
   const rulesResponse = handleRules(request);

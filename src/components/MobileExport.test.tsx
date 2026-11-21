@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   AgentBridge,
   MobileClientId,
+  MobileClientsQrData,
   MobileExportData,
   MyServer,
 } from "../agent/bridge";
@@ -21,12 +22,45 @@ const SHADOWROCKET_URL = `${SINGBOX_URL}/shadowrocket`;
 const SHADOWROCKET_QR = "data:image/svg+xml;base64,PHN2Zy1zci8+";
 const CLIENT_QR = "data:image/svg+xml;base64,PHN2Zy1jbGllbnQvPg==";
 
-const CLIENT_URLS: Record<MobileClientId, string> = {
-  singbox: "https://sing-box.sagernet.org/clients/",
-  shadowrocket: "https://apps.apple.com/us/app/shadowrocket/id932747118",
-  hiddify: "https://github.com/hiddify/hiddify-app/releases/latest",
-  cmfa: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
+const CLIENT_PLATFORMS: Record<
+  MobileClientId,
+  Array<{ platform: "ios" | "android"; url: string }>
+> = {
+  singbox: [
+    {
+      platform: "ios",
+      url: "https://apps.apple.com/app/sing-box-mt/id6785326793",
+    },
+    {
+      platform: "android",
+      url: "https://github.com/SagerNet/sing-box/releases/latest",
+    },
+  ],
+  shadowrocket: [
+    {
+      platform: "ios",
+      url: "https://apps.apple.com/us/app/shadowrocket/id932747118",
+    },
+  ],
+  hiddify: [
+    {
+      platform: "ios",
+      url: "https://apps.apple.com/us/app/hiddify-proxy-vpn/id6596777532",
+    },
+    {
+      platform: "android",
+      url: "https://github.com/hiddify/hiddify-app/releases/latest/download/Hiddify-Android-universal.apk",
+    },
+  ],
+  cmfa: [
+    {
+      platform: "android",
+      url: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases/latest",
+    },
+  ],
 };
+
+const CMFA_ANDROID = CLIENT_PLATFORMS.cmfa[0].url;
 
 const APP_NAMES = [
   "sing-box",
@@ -57,9 +91,12 @@ function makeBridge(
   rotate: () => Promise<MobileExportData> = get,
   clients: (
     client: MobileClientId,
-  ) => Promise<{ url: string; qr_data_url: string }> = async (client) => ({
-    url: CLIENT_URLS[client],
-    qr_data_url: CLIENT_QR,
+  ) => Promise<MobileClientsQrData> = async (client) => ({
+    platforms: CLIENT_PLATFORMS[client].map((entry) => ({
+      platform: entry.platform,
+      url: entry.url,
+      qr_data_url: CLIENT_QR,
+    })),
   }),
 ) {
   return {
@@ -303,27 +340,37 @@ describe("在手机上使用：按 App 分类", () => {
     ).toBe(false);
   });
 
-  it("① 是紧凑行：码左、标题与下载链接在右", async () => {
+  it("① 每个平台一个码：iPhone 与 Android 各一张，各自带链接", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
 
     fireEvent.click(row(dialog, "sing-box"));
     await within(dialog).findByRole("img", { name: "导入二维码" });
-    const compact = dialog.querySelector(
-      ".mobile-export__step--compact",
-    ) as HTMLElement;
-    expect(compact).toBeTruthy();
-    expect(compact.querySelector(".mobile-export__download-qr")).toBeTruthy();
-    expect(compact.querySelector(".mobile-export__qr")).toBeNull();
-    const copy = compact.querySelector(
-      ".mobile-export__step-copy",
-    ) as HTMLElement;
-    expect(copy.querySelector(".mobile-export__step-title")?.textContent).toContain(
-      "还没有 App？先下载",
+
+    await waitFor(() =>
+      expect(dialog.querySelectorAll(".mobile-export__platform")).toHaveLength(2),
     );
     expect(
-      within(copy).getByRole("link", { name: /打开下载页/ }),
-    ).toBeTruthy();
+      within(dialog).getByRole("link", { name: /iPhone/ }).getAttribute("href"),
+    ).toBe(CLIENT_PLATFORMS.singbox[0].url);
+    expect(
+      within(dialog).getByRole("link", { name: /Android/ }).getAttribute("href"),
+    ).toBe(CLIENT_PLATFORMS.singbox[1].url);
+    // 每张卡里只有一个码，且都是下载码，不是导入码。
+    expect(dialog.querySelectorAll(".mobile-export__download-qr")).toHaveLength(2);
+  });
+
+  it("只有一个平台的客户端只出一张码", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "Shadowrocket"));
+    await within(dialog).findByRole("img", { name: "导入二维码" });
+    await waitFor(() =>
+      expect(dialog.querySelectorAll(".mobile-export__platform")).toHaveLength(1),
+    );
+    expect(within(dialog).getByRole("link", { name: /iPhone/ })).toBeTruthy();
+    expect(within(dialog).queryByRole("link", { name: /Android/ })).toBeNull();
   });
 
   it("下载码 120、白卡同尺寸：码本身可扫，卡只留静区", async () => {
@@ -349,12 +396,12 @@ describe("在手机上使用：按 App 分类", () => {
       within(dialog).getByRole("heading", { name: "还没有 App？先下载" }),
     ).toBeTruthy();
 
-    const link = within(dialog).getByRole("link", { name: /打开下载页/ });
+    const link = within(dialog).getByRole("link", { name: /Android/ });
     await waitFor(() =>
-      expect(link.getAttribute("href")).toBe(CLIENT_URLS.cmfa),
+      expect(link.getAttribute("href")).toBe(CMFA_ANDROID),
     );
     fireEvent.click(link);
-    expect(bridge.openExternal).toHaveBeenCalledWith(CLIENT_URLS.cmfa);
+    expect(bridge.openExternal).toHaveBeenCalledWith(CMFA_ANDROID);
   });
 
   it("渐隐只在可滚动且未到底时出现", async () => {
@@ -503,7 +550,8 @@ describe("在手机上使用：按 App 分类", () => {
     expect(
       within(dialog).queryByRole("button", { name: /复制/ }),
     ).toBeNull();
-    expect(within(dialog).getByRole("link", { name: /打开下载页/ })).toBeTruthy();
+    expect(within(dialog).getByRole("link", { name: /iPhone/ })).toBeTruthy();
+    expect(within(dialog).getByRole("link", { name: /Android/ })).toBeTruthy();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "登录" }));
     expect(onLogin).toHaveBeenCalled();
@@ -523,7 +571,7 @@ describe("在手机上使用：按 App 分类", () => {
     expect(
       within(dialog).getByRole("heading", { name: "还没有 App？先下载" }),
     ).toBeTruthy();
-    expect(within(dialog).getByRole("link", { name: /打开下载页/ })).toBeTruthy();
+    expect(within(dialog).getByRole("link", { name: /iPhone/ })).toBeTruthy();
     // ② 不出现空码位、骨架、复制或重新生成。
     expect(dialog.querySelector(".mobile-export__qr")).toBeNull();
     expect(dialog.querySelector(".mobile-export__qr-skeleton")).toBeNull();
@@ -582,7 +630,7 @@ describe("在手机上使用：按 App 分类", () => {
       await within(dialog).findByText("暂时生成不了。"),
     ).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "重试" })).toBeTruthy();
-    expect(within(dialog).getByRole("link", { name: /打开下载页/ })).toBeTruthy();
+    expect(within(dialog).getByRole("link", { name: /iPhone/ })).toBeTruthy();
 
     fireEvent.click(row(dialog, "Hiddify"));
     expect(
@@ -626,11 +674,15 @@ describe("在手机上使用：按 App 分类", () => {
     const index = (needle: HTMLElement) => focusables.indexOf(needle);
     const copy = within(dialog).getByRole("button", { name: "复制链接" });
     const rotate = within(dialog).getByRole("button", { name: "重新生成" });
-    const download = within(dialog).getByRole("link", { name: /打开下载页/ });
-    expect(index(download)).toBe(2);
-    expect(index(copy)).toBe(3);
-    expect(index(rotate)).toBe(4);
-    expect(index(row(dialog, "Shadowrocket"))).toBe(5);
+    const downloadIos = within(dialog).getByRole("link", { name: /iPhone/ });
+    const downloadAndroid = within(dialog).getByRole("link", {
+      name: /Android/,
+    });
+    expect(index(downloadIos)).toBe(2);
+    expect(index(downloadAndroid)).toBe(3);
+    expect(index(copy)).toBe(4);
+    expect(index(rotate)).toBe(5);
+    expect(index(row(dialog, "Shadowrocket"))).toBe(6);
   });
 
   it("底部问 AI：点击交给 App", async () => {
@@ -769,11 +821,13 @@ describe("在手机上使用：按 App 分类", () => {
       ["Hiddify", "hiddify"],
     ] as const) {
       fireEvent.click(row(dialog, name));
-      const link = await within(dialog).findByRole("link", {
-        name: /打开下载页/,
-      });
       const expected = await reference.mobileClientsQr?.(id);
-      expect(link.getAttribute("href")).toBe(expected?.url);
+      for (const entry of expected?.platforms ?? []) {
+        const link = await within(dialog).findByRole("link", {
+          name: new RegExp(entry.platform === "ios" ? "iPhone" : "Android"),
+        });
+        expect(link.getAttribute("href")).toBe(entry.url);
+      }
     }
   });
 });
