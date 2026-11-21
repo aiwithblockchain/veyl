@@ -14,6 +14,7 @@
 | `notes/pending-topics.md` | 记下来但还没讨论的话题 | 有空时挑一个开聊 |
 | `design/ai-docs-management.md` | 「问 AI」入口清单、AI 要讲的产品功能、三份 AI 文档的管理与版本（**梳理稿，待讨论**） | 讨论 AI 提示词与 FAQ 时 |
 | `design/i18n.md` | 界面与 AI 对话的中英文切换（**任务书，待实现**） | 做语言切换时 |
+| `design/ai-prompt-loading.md` | 系统提示词与内容文档的加载方式、会话流程（**任务书，待实现**） | 改 AI 提示词加载或会话入口时 |
 | `user-segments.md` | 四类用户怎么定义、怎么判定 | 任何涉及「面向谁」的判断 |
 | `user-flows.md` | 首次启动、提问、配置确认、DNS 策略 | 做流程 |
 | `configs-and-nav.md` | activity bar、左栏配置列表、配置模型 | 做导航与数据模型 |
