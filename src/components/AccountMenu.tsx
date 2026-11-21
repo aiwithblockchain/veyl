@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { MyServerWallet } from "../agent/bridge";
-import type { LogoutResult } from "../myservers/useMyServers";
+import type { LogoutResult, WalletTrigger } from "../myservers/useMyServers";
 import { useFocusTrap } from "../ui/focus";
 import { formatUsdCents } from "../myservers/labels";
 
@@ -15,7 +15,7 @@ interface Props {
   /** 设备/账户的永久状态：给明确出路，不说「稍后再试」。 */
   identityProblem?: "lost" | "device_revoked" | "account_blocked" | null;
   onTopUp: () => void;
-  onRefreshWallet: () => void;
+  onRefreshWallet: (trigger: WalletTrigger) => void;
   /** 重新注册设备；返回是否恢复成功。 */
   onReRegister?: () => Promise<boolean>;
   /** 账户停用：换一个账户（重新注册设备后再登录）。 */
@@ -52,7 +52,7 @@ export function AccountMenu({
   // 菜单是条件渲染的：挂载即打开。打开即刷，30 秒节流在 refreshWallet 里。
   const refreshOnMountRef = useRef(onRefreshWallet);
   useEffect(() => {
-    refreshOnMountRef.current();
+    refreshOnMountRef.current("open_menu");
   }, []);
 
   const recovery =
@@ -150,7 +150,7 @@ export function AccountMenu({
                     <button
                       type="button"
                       className="account-menu__link"
-                      onClick={onRefreshWallet}
+                      onClick={() => onRefreshWallet("retry")}
                     >
                       重试
                     </button>
@@ -176,7 +176,7 @@ export function AccountMenu({
                 <button
                   type="button"
                   className="account-menu__link"
-                  onClick={onRefreshWallet}
+                  onClick={() => onRefreshWallet("retry")}
                 >
                   重试
                 </button>

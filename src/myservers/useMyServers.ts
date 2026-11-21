@@ -11,6 +11,7 @@ import type {
 } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { AGENT_EVENTS } from "../agent/protocol";
+import { uiLog } from "../log/uiLog";
 import { isProvisioning } from "./labels";
 
 export type ServersView = "detail" | "wizard";
@@ -40,6 +41,36 @@ const WALLET_ERROR = "余额暂时读不到。";
 const LOGOUT_OFFLINE = "没退出登录。需要联网才能退出；服务器没有变化。";
 const LOGOUT_FAILED = "没退出登录。服务器没有变化，可以再试一次。";
 const LOGIN_UNSUPPORTED = "这个版本还不支持登录。";
+
+/**
+ * 谁触发了这次余额刷新。前六个是设计文档点名的来源；后四个是顺带刷新余额的其他用户动作
+ * （登录、下单/重建/销毁之后、打开充值弹层、进入我的服务器），单独命名，不冒充 manual。
+ */
+export type WalletTrigger =
+  | "open_menu"
+  | "open_settings"
+  | "open_servers"
+  | "poll"
+  | "visible"
+  | "focus"
+  | "retry"
+  | "manual"
+  | "login"
+  | "order"
+  | "topup";
+
+/** 进程内单调递增：并发/交错时按 seq 把触发行与结果行配成对。 */
+let walletRefreshSeq = 0;
+
+/** 日志字段只收短枚举：后端给的原文再短也不直接拼进日志。 */
+const LOG_TOKEN = /^[a-z0-9_.-]{1,32}$/;
+
+function walletFailReason(error: unknown): string {
+  const { code, details } = toBridgeError(error);
+  const raw = typeof details?.reason === "string" ? details.reason : code;
+  const token = raw.toLowerCase();
+  return LOG_TOKEN.test(token) ? token : "unknown";
+}
 
 /** 登录门禁：列表 / 下单都要求已登录时返回这个原因。 */
 const AUTH_REASONS = new Set(["auth_required", "token_invalid"]);
@@ -145,6 +176,8 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const [walletFailed, setWalletFailed] = useState(false);
   const walletSuccessAtRef = useRef(0);
   const walletInFlightRef = useRef(false);
+  /** 已经为这次隐藏记过日志：有些平台会连发多次 hidden 事件。 */
+  const hiddenLoggedRef = useRef(false);
   /** 回调里判断「有没有旧值」不依赖闭包里的 wallet。 */
   const walletRef = useRef<MyServerWallet | null>(null);
   walletRef.current = wallet;
@@ -175,29 +208,55 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   }, []);
 
   const refreshWallet = useCallback(
-    async (options: { force?: boolean } = {}) => {
+    async (options: { force?: boolean; trigger?: WalletTrigger } = {}) => {
+      const trigger = options.trigger ?? "manual";
+      const seq = (walletRefreshSeq += 1);
+      // 一次刷新只落「触发」和「结果」两行，中间态不打；两行同 seq。
+      uiLog("debug", `refresh seq=${seq} trigger=${trigger}`);
       const source = (bridge as AccountCapable).myServerWallet;
-      if (!source) return;
-      // 未登录不发：组件可能在登出后的下一拍才卸载。
-      if (!loggedInRef.current) return;
-      // 并发请求没有意义；30 秒内刚成功过就直接用缓存（手动刷新传 force）。
-      if (walletInFlightRef.current) return;
-      if (
-        !options.force &&
-        Date.now() - walletSuccessAtRef.current < WALLET_REFRESH_GATE_MS
-      ) {
+      if (!source) {
+        uiLog("debug", `refresh seq=${seq} skipped reason=unsupported`);
         return;
       }
+      // 未登录不发：组件可能在登出后的下一拍才卸载。
+      if (!loggedInRef.current) {
+        uiLog("debug", `refresh seq=${seq} skipped reason=logged_out`);
+        return;
+      }
+      // 并发请求没有意义；30 秒内刚成功过就直接用缓存（手动刷新传 force）。
+      if (walletInFlightRef.current) {
+        uiLog("debug", `refresh seq=${seq} skipped reason=inflight`);
+        return;
+      }
+      const sinceSuccess = Date.now() - walletSuccessAtRef.current;
+      if (!options.force && sinceSuccess < WALLET_REFRESH_GATE_MS) {
+        uiLog(
+          "debug",
+          `refresh seq=${seq} skipped reason=gate elapsed_ms=${sinceSuccess}`,
+        );
+        return;
+      }
+      const startedAt = Date.now();
       walletInFlightRef.current = true;
       // 刷新期间保留旧值：不清空 wallet；读取中只属于「从来没有值」的情况。
       setWalletInFlight(true);
       setWalletError(null);
       try {
-        setWallet(await source.call(bridge));
+        const next = await source.call(bridge);
+        setWallet(next);
         walletSuccessAtRef.current = Date.now();
         setWalletFailed(false);
+        uiLog(
+          "debug",
+          `refresh seq=${seq} done outcome=ok balance_cents=${next.balance_cents} elapsed_ms=${Date.now() - startedAt}`,
+        );
       } catch (error) {
         setWalletFailed(true);
+        // 失败只记错误码/短原因，不记错误原文。
+        uiLog(
+          "warn",
+          `refresh seq=${seq} done outcome=failed elapsed_ms=${Date.now() - startedAt} reason=${walletFailReason(error)}`,
+        );
         const reason = errorReason(error);
         if (AUTH_REASONS.has(reason)) {
           // 登录过期：切回未登录，别让旧邮箱和余额继续显示。
@@ -291,7 +350,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         setIdentityMissing(false);
         setIdentityPresent(true);
         void refresh();
-        void refreshWallet();
+        void refreshWallet({ trigger: "login" });
       } else {
         setIdentityMissing(true);
         setIdentityPresent(false);
@@ -370,7 +429,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
           setIdentityMissing(false);
           setIdentityPresent(true);
           void refresh();
-          void refreshWallet();
+          void refreshWallet({ trigger: "login" });
         } else {
           setIdentityMissing(true);
           setIdentityPresent(false);
@@ -677,7 +736,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setLoginOpen(false);
     if (next.logged_in) {
       void refresh();
-      void refreshWallet();
+      void refreshWallet({ trigger: "login" });
     }
     return next;
   };
@@ -749,7 +808,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   }, [bridge, loggedIn]);
   const openTopUp = () => {
     setTopupOpen(true);
-    void refreshWallet();
+    void refreshWallet({ trigger: "topup" });
   };
   const closeTopUp = () => setTopupOpen(false);
 
@@ -763,7 +822,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setIdentityMissing(false);
     setIdentityPresent(true);
     void refresh();
-    void refreshWallet();
+    void refreshWallet({ trigger: "order" });
   };
 
   /** 销毁一台服务器之后：没有选中，让默认选择落到剩下的第一台。 */
@@ -774,7 +833,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setSelectedId(null);
     setView("wizard");
     void refresh();
-    void refreshWallet();
+    void refreshWallet({ trigger: "order" });
   };
 
   /**
@@ -817,31 +876,36 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setIdentityMissing(false);
     setIdentityPresent(true);
     void refresh();
-    void refreshWallet();
+    void refreshWallet({ trigger: "order" });
   };
 
-  /** 进入了「我的服务器」或窗口聚焦：建机向导要用余额判断日价 × 7 门槛。 */
+  /** 进入了「我的服务器」：建机向导要用余额判断日价 × 7 门槛。聚焦补刷由下面的轮询 effect 统一管。 */
   useEffect(() => {
     if (!active || !loggedIn) return;
-    void refreshWallet();
-    const onFocus = () => void refreshWallet();
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    void refreshWallet({ trigger: "open_servers" });
   }, [active, loggedIn, refreshWallet]);
 
   // 已登录且窗口可见：每 15 分钟刷一次，不限在哪个页面（账户菜单随时会被打开，
   // 先在后台把值刷好）。隐藏时暂停，恢复可见/聚焦时补一次，补刷同走 30 秒门禁。
   useEffect(() => {
     if (!loggedIn) return;
-    const maybeRefresh = () => void refreshWallet();
-    const onFocus = () => maybeRefresh();
+    const onFocus = () => void refreshWallet({ trigger: "focus" });
     const onVisibility = () => {
-      if (document.visibilityState === "visible") maybeRefresh();
+      if (document.visibilityState === "visible") {
+        hiddenLoggedRef.current = false;
+        void refreshWallet({ trigger: "visible" });
+      } else if (!hiddenLoggedRef.current) {
+        // 只在可见→隐藏的这一刻记一条；隐藏期间不轮询，不会每 15 分钟刷屏。
+        hiddenLoggedRef.current = true;
+        uiLog("debug", "refresh skipped reason=hidden");
+      }
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
     const timer = window.setInterval(() => {
-      if (document.visibilityState !== "hidden") maybeRefresh();
+      if (document.visibilityState !== "hidden") {
+        void refreshWallet({ trigger: "poll" });
+      }
     }, WALLET_POLL_MS);
     return () => {
       window.clearInterval(timer);
@@ -906,6 +970,19 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const walletStale = wallet !== null && walletFailed;
   /** 「读取中」只属于从未取到值的场景；已有值刷新时继续显示旧值。 */
   const walletLoading = walletInFlight && wallet === null;
+  /** 陈旧只在翻转时落一条日志，别每拍刷。 */
+  const staleLoggedRef = useRef(false);
+  useEffect(() => {
+    if (staleLoggedRef.current === walletStale) return;
+    staleLoggedRef.current = walletStale;
+    const idle = walletSuccessAtRef.current
+      ? Date.now() - walletSuccessAtRef.current
+      : 0;
+    uiLog(
+      walletStale ? "warn" : "debug",
+      `stale changed value=${walletStale} idle_ms=${idle}`,
+    );
+  }, [walletStale]);
 
   return {
     servers,

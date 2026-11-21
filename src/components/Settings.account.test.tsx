@@ -118,6 +118,7 @@ describe("设置 › 账户", () => {
     const before = retry.mock.calls.length;
     screen.getByRole("button", { name: "重试" }).click();
     expect(retry.mock.calls.length).toBe(before + 1);
+    expect(retry).toHaveBeenLastCalledWith("retry");
   });
 
   it("没有接线时退化为 —，不崩", () => {
@@ -207,6 +208,7 @@ describe("余额刷新入口与陈旧提示", () => {
     const refresh = vi.fn();
     renderAccount({ onRefreshWallet: refresh });
     expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith("open_settings");
   });
 
   it("未登录时停在账户段不发余额请求", () => {

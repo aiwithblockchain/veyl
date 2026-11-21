@@ -1,6 +1,8 @@
 //! 前端可调用的命令面。命令名已冻结（`docs/contracts/events.md` §5）。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use tauri::State;
@@ -2096,6 +2098,109 @@ fn prefix_matches(normalized: &str, prefix: &str) -> bool {
         || rest.starts_with('#')
 }
 
+/// UI 日志的限速窗口：高 32 位是窗口所在的 Unix 秒，低 32 位是本秒内已放行的条数。
+static UI_LOG_WINDOW: AtomicU64 = AtomicU64::new(0);
+
+/// 每秒最多写多少条 UI 日志。超出的直接丢弃：界面卡住时日志会成串涌来，
+/// 磁盘和界面线程都不该陪它一起忙。
+const UI_LOG_PER_SECOND: u64 = 50;
+
+/// 前端日志：把界面上的关键事件写进文件日志，供真机排障。
+///
+/// 只写日志：不读写任何状态、不返回数据。`target` 与 `message` 都来自 WebView，
+/// 所以 target 不合法就整条丢弃，message 先脱敏、再换掉换行、最后截断到 300 字符。
+#[tauri::command]
+pub fn ui_log(level: String, target: String, message: String) {
+    let Some(target) = ui_log_target(&target) else {
+        return;
+    };
+    if !ui_log_allowed() {
+        return;
+    }
+    let target = format!("ui::{target}");
+    log::log!(
+        target: target.as_str(),
+        ui_log_level(&level),
+        "{}",
+        ui_log_message(&message)
+    );
+}
+
+fn ui_log_allowed() -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() & 0xFFFF_FFFF)
+        .unwrap_or(0);
+    let mut window = UI_LOG_WINDOW.load(Ordering::Relaxed);
+    loop {
+        let (next, allowed) = take_ui_log_budget(window, now);
+        match UI_LOG_WINDOW.compare_exchange_weak(
+            window,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return allowed,
+            Err(actual) => window = actual,
+        }
+    }
+}
+
+/// 纯函数部分：给定窗口值与当前秒，得出新窗口值和是否放行。
+///
+/// 跨秒就整个换窗口、计数从 1 起；同一秒超过配额就不再累加，直接丢。
+fn take_ui_log_budget(window: u64, now: u64) -> (u64, bool) {
+    let (second, used) = (window >> 32, window & 0xFFFF_FFFF);
+    if second != now {
+        ((now << 32) | 1, true)
+    } else if used < UI_LOG_PER_SECOND {
+        ((second << 32) | (used + 1), true)
+    } else {
+        (window, false)
+    }
+}
+
+/// 只认四个 level；白名单外（含大小写不匹配、`trace`）一律按 debug，不报错。
+///
+/// `debug` 映射成 `Info`：文件 logger 的级别就是 INFO，比它更细的日志不会写盘，
+/// 让 UI 的 debug 停在 `Debug` 等于写了一条永远看不见的日志。白名单外的值仍落
+/// `Debug`——前端把级别拼错时宁可不写，也不要借错误输入往文件里刷。
+fn ui_log_level(raw: &str) -> log::Level {
+    match raw {
+        "debug" | "info" => log::Level::Info,
+        "warn" => log::Level::Warn,
+        "error" => log::Level::Error,
+        _ => log::Level::Debug,
+    }
+}
+
+/// target 只允许 `[A-Za-z0-9_-]` 且 1..=32 字符；不合法返回 None，整条日志丢弃。
+fn ui_log_target(raw: &str) -> Option<&str> {
+    let valid = !raw.is_empty()
+        && raw.chars().count() <= 32
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    valid.then_some(raw)
+}
+
+/// message 是唯一可能带自由文本的入口：先掩掉密钥形态的片段，再把换行类字符
+/// 换成空格，最后按 300 字符截断。
+///
+/// 脱敏必须在截断前：先截断会把长密钥切成短片段，短片段不再满足「像密钥」的判定。
+/// 换行必须在截断前：`\r` / `\n` / `\t` 会让人用一条消息在文件里伪造出多行。
+fn ui_log_message(raw: &str) -> String {
+    const MAX_CHARS: usize = 300;
+    crate::logging::mask_secrets(raw)
+        .chars()
+        .map(|c| match c {
+            '\r' | '\n' | '\t' => ' ',
+            other => other,
+        })
+        .take(MAX_CHARS)
+        .collect()
+}
+
 /// 用系统浏览器打开白名单内的链接（DeepSeek 开放平台、App Store、sing-box 官网）。
 /// 域名写死在这里，避免变成任意 URL 打开器。
 #[tauri::command]
@@ -3510,5 +3615,111 @@ mod open_external_tests {
                 "{client} 的尾斜杠写法也必须能打开"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ui_log_tests {
+    use super::{
+        take_ui_log_budget, ui_log, ui_log_level, ui_log_message, ui_log_target, UI_LOG_PER_SECOND,
+    };
+    use log::Level;
+
+    #[test]
+    fn the_four_levels_are_accepted_and_anything_else_is_debug() {
+        assert_eq!(
+            ui_log_level("debug"),
+            Level::Info,
+            "UI 的 debug 视为文件可见级，否则真机上永远看不到"
+        );
+        assert_eq!(ui_log_level("info"), Level::Info);
+        assert_eq!(ui_log_level("warn"), Level::Warn);
+        assert_eq!(ui_log_level("error"), Level::Error);
+        assert_eq!(ui_log_level("trace"), Level::Debug, "白名单外的级别按 debug 处理");
+        assert_eq!(ui_log_level("INFO"), Level::Debug, "大小写不匹配也按 debug");
+        assert_eq!(ui_log_level(""), Level::Debug);
+    }
+
+    #[test]
+    fn ui_debug_lands_in_the_default_file_level() {
+        // 文件 logger 的默认级别是 INFO；映射错了这条日志在真机上就是隐形的。
+        assert!(
+            crate::logging::file_accepts(ui_log_level("debug")),
+            "默认文件级别收不到 UI 的 debug"
+        );
+        assert!(crate::logging::file_accepts(ui_log_level("info")));
+        assert!(crate::logging::file_accepts(ui_log_level("warn")));
+        assert!(crate::logging::file_accepts(ui_log_level("error")));
+        assert!(
+            !crate::logging::file_accepts(ui_log_level("trace")),
+            "白名单外的值不应落盘"
+        );
+    }
+
+    #[test]
+    fn only_short_identifier_targets_survive() {
+        assert_eq!(ui_log_target("wallet"), Some("wallet"));
+        assert_eq!(ui_log_target("wallet-refresh_1"), Some("wallet-refresh_1"));
+
+        let max = "a".repeat(32);
+        assert_eq!(ui_log_target(&max), Some(max.as_str()));
+
+        let too_long = "a".repeat(33);
+        for bad in ["", "wallet refresh", "ui::wallet", "钱包", too_long.as_str()] {
+            assert!(ui_log_target(bad).is_none(), "{bad:?} 不该通过");
+        }
+    }
+
+    #[test]
+    fn long_messages_are_cut_at_300_characters() {
+        assert_eq!(ui_log_message(&"x".repeat(400)).chars().count(), 300);
+        assert_eq!(
+            ui_log_message(&"字".repeat(400)).chars().count(),
+            300,
+            "按字符截断，不是按字节"
+        );
+        assert_eq!(ui_log_message("短消息"), "短消息");
+    }
+
+    #[test]
+    fn secret_shaped_fragments_are_masked() {
+        let out = ui_log_message(
+            "key sk-abcdefghijklmnopqrst token AbCdEf0123456789AbCdEf0123456789 done",
+        );
+        assert!(!out.contains("sk-abcdefghijklmnopqrst"), "{out}");
+        assert!(!out.contains("AbCdEf0123456789AbCdEf0123456789"), "{out}");
+        assert!(out.contains("***"), "{out}");
+        assert!(out.contains("done"), "普通文本必须留下：{out}");
+    }
+
+    #[test]
+    fn newlines_cannot_forge_extra_log_lines() {
+        let out = ui_log_message("第一行\n第二行\r\n缩进\t结束");
+        assert_eq!(out, "第一行 第二行  缩进 结束");
+        assert!(!out.contains(['\r', '\n', '\t']), "{out:?}");
+    }
+
+    #[test]
+    fn each_second_allows_at_most_fifty_lines() {
+        let mut window = 0;
+        for _ in 0..UI_LOG_PER_SECOND {
+            let (next, allowed) = take_ui_log_budget(window, 1_000);
+            assert!(allowed, "配额内的日志必须放行");
+            window = next;
+        }
+        let (after, allowed) = take_ui_log_budget(window, 1_000);
+        assert!(!allowed, "第 {} 条要丢弃", UI_LOG_PER_SECOND + 1);
+        assert_eq!(after, window, "丢弃不计数、不排队");
+
+        let (next_second, allowed) = take_ui_log_budget(after, 1_001);
+        assert!(allowed, "下一秒重新开始");
+        assert_eq!(next_second, (1_001 << 32) | 1);
+    }
+
+    #[test]
+    fn the_command_never_panics() {
+        ui_log("info".into(), "wallet".into(), "刷新余额：手动".into());
+        ui_log("nonsense".into(), "bad target".into(), "应被丢弃".into());
+        ui_log("".into(), "wallet".into(), "".into());
     }
 }

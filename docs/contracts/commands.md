@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.48.0`
+> 契约版本：`2.49.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -226,6 +226,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 95 | `node_attach` | `{ source?, nodeIds?, configId? }` | `NodeAttachData`（`{ config_id, created_config, attached_node_ids, skipped_node_ids, node_count, current_node_id, runtime_rebuild }`） | **2.37.0 新增（仅 UI）**；把已存在的节点绑进全局配置，空库时懒创建；幂等；永不改 `current_node_id`；**2.42.0 起返回 `runtime_rebuild`**（§4.0.1） |
 | 96 | `my_server_rename` | `{ serverId, name }` | `MyServer` | **2.40.0 新增（仅 UI）；只能改自己的、允许重名；名字 trim 后按 Unicode 码点校验 1–24** |
 | 97 | `node_forget` | `{ nodeId }` | `{ removed: boolean }` | **2.44.0 新增（仅 UI）；删除本地节点（余额不足停机的墓碑只能这样清）；级联清配置绑定与 `current_node_id`；先让控制面忽略墓碑，失败则整体失败、本地不动（2.45.0）** |
+| 98 | `ui_log` | `{ level, target, message }` | `null` | **2.49.0 新增（仅 UI）**；前端排障日志；target 白名单、脱敏 + 换行替换 + 300 字符截断、每秒 50 条上限（§7.24） |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -2028,8 +2029,8 @@ type MobileClientsQrArgs = {
 };
 
 type MobileClientsQrData = {
-  url: string;          // 固定映射，见下表
-  qr_data_url: string;  // data:image/svg+xml;base64,…；内容就是 url
+  url: string;          // 固定映射，见下表；桌面点「打开下载页」用它
+  qr_data_url: string;  // data:image/svg+xml;base64,…；除 hiddify 外内容就是 url
 };
 ```
 
@@ -2038,16 +2039,43 @@ type MobileClientsQrData = {
 | `client` | `url` | 对应客户端 |
 |---|---|---|
 | `singbox` | `https://sing-box.sagernet.org/clients/` | sing-box 官方 SFI / SFA |
-| `hiddify` | `https://github.com/hiddify/hiddify-app` | Hiddify |
+| `hiddify` | `https://github.com/hiddify/hiddify-app/releases/latest` | Hiddify |
 | `cmfa` | `https://github.com/MetaCubeX/ClashMetaForAndroid/releases` | Clash Meta for Android |
 | `shadowrocket` | `https://apps.apple.com/us/app/shadowrocket/id932747118` | Shadowrocket |
 
-> `hiddify` 的地址**以不带尾斜杠的 `https://github.com/hiddify/hiddify-app` 为准**（与 Rust 固定映射一致）。调用方不要依赖尾斜杠；Host 侧 `https://github.com/hiddify/hiddify-app/` 与它的子路径同样放行，视为同一个入口。
+> `hiddify` 的地址**以不带尾斜杠的 `…/hiddify-app/releases/latest` 为准**（与 Rust 固定映射一致）。调用方不要依赖尾斜杠；Host 侧 `https://github.com/hiddify/hiddify-app/` 与它的子路径同样放行，视为同一个入口。
+
+> **`hiddify` 的二维码内容与 `url` 不同（2.48.0）**：码里放的是本机控制面 origin 的 `/dl/hiddify`，由 Worker 按 UA 分流——iPhone / iPad / iPod → App Store，Android → 最新版 universal APK，其余 → release 页。原因是它在两个平台上的入口本来就不同，一个码写死任何一边，另一边扫码就是死路。origin 解析失败时退回 `url` 本身，拿不到分流也不至于没有码。
 
 - `client` 缺失、类型不对或不在枚举内 → `INVALID_ARGUMENT`，`details.reason = "unknown_client"`；**不静默回退到默认值**，也不接受 URL / 其它字段。
 - **不登录、不调控制面、不涉及令牌**；命令始终可用，与账户状态、服务器状态无关。
-- 返回的 `qr_data_url` 与 §7.21 的二维码同一套生成逻辑（尺寸、静区一致）；`url` 不含任何凭据。
+- 返回的 `qr_data_url` 与 §7.21 的二维码同一套生成逻辑（尺寸、静区一致）；`url` 与码里都不含任何凭据。
 - 四个 id 对应技术设计 §3.7.8 的 M1 四行：sing-box 官方、Hiddify、CMFA、Shadowrocket。Clash Verge 是桌面 GUI，不在此枚举内。
+
+### 7.24 `ui_log { level, target, message }` → `null`（仅 UI，2.49.0）
+
+前端把界面上的关键事件写进 Host 的应用日志文件（`app-YYYY-MM-DD.log`，目录见 §7.5），用于真机排障。
+
+**只写日志**：不读写任何应用状态、不落库、不联网、不返回数据。
+
+```ts
+type UiLogArgs = {
+  level: "debug" | "info" | "warn" | "error";
+  target: string;    // 1–32 字符，只允许 [A-Za-z0-9_-]
+  message: string;   // ≤ 300 字符（截断后）
+};
+```
+
+| 参数 | 规则 |
+|---|---|
+| `level` | 只认四个小写值。**`debug` 与 `info` 在文件里都是 `INFO`**：文件 logger 的级别就是 INFO，比它更细的日志根本不写盘，让 UI 的 debug 停在 `DEBUG` 等于写了一条永远看不见的日志。`warn` / `error` 原样落 `WARN` / `ERROR`。白名单外（含 `INFO`、`trace`、空串）按 `debug` 处理且不报错——默认级别下不落盘，前端拼错级别时宁可不写，也不借错误输入刷盘 |
+| `target` | 必须是 1–32 个 `[A-Za-z0-9_-]`；不合法**整条丢弃**，不返回错误。落盘时统一加 `ui::` 前缀（`wallet` → `ui::wallet`），可直接 grep。**不接受冒号与点号**——防止冒用 `veyl`、`tauri` 等别的模块名 |
+| `message` | 先按 `logging::mask_secrets` 脱敏（`sk-` 前缀令牌、≥16 位 base64/hex、URL 里的 `user:pass@`），再把 `\r` / `\n` / `\t` 换成空格，最后按 **300 字符**截断。顺序不可换：先截断会把长密钥切成短片段，短片段不再满足「像密钥」的判定；不换掉换行，一条消息就能在文件里伪造出多行 |
+
+- 返回 `null`：**没有成败信号**，前端不得据此显示「已写日志」之外的任何结论。
+- **限速**：进程内每秒最多 50 条，超出的直接丢弃（不排队、不报错、不计数）。界面卡住时日志会成串涌来，磁盘和界面线程都不该陪它一起忙。
+- 这是 **UI 专用命令**，`tools.md` 不注册对应工具；模型不得写应用日志。
+- 日志目录用户可打开：调用方只写自己的状态与错误，**不要写用户输入原文、令牌、节点密码**。脱敏只兜住有形态特征的凭据，普通文本里的短密码仍然会原样进日志（`logging.rs` 的脱敏边界）。
 
 ---
 
@@ -2690,13 +2718,14 @@ type RulesStatus = {
 | `tun_helper_info` / `tun_helper_restart` | **无**（UI 专用，见 §7.8.1–§7.8.2） | — |
 | `proxy_port_get` / `proxy_port_set` | **无**（UI 专用，见 §7.11；端口是用户自己的设置） | — |
 | `proxy_recovery_report` | **无**（UI 专用，见 §7.13；异常退出的恢复结果只用于首屏提示） | — |
+| `ui_log` | **无**（UI 专用，见 §7.24；模型不得写应用日志） | — |
 | `my_server_catalog` | **无**（UI 专用，见 §7.14；控制面目录只读） | — |
 | `my_server_list` / `my_server_get` | `MyServers`（只读，仅列表；详情与凭据不进 AI 上下文） | — |
 | `my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` / `my_server_rename` | **无**（§10.5：建机、销毁、凭据只能由用户点界面） | — |
 | `my_server_register_device` | **无**（UI 专用，见 §7.16；身份恢复只能由用户触发） | — |
 | `my_server_identity` | **无**（UI 专用，见 §7.17；只读本地身份状态） | — |
 
-> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` / `my_server_rename`、`my_server_register_device`、`my_server_identity`、`my_server_login_start` / `my_server_login_verify` / `my_server_account` / `my_server_logout` / `my_server_order_get`、`my_server_wallet` / `my_server_topup`、`node_forget`、`trial_status`、`quit_decision`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
+> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` / `my_server_rename`、`my_server_register_device`、`my_server_identity`、`my_server_login_start` / `my_server_login_verify` / `my_server_account` / `my_server_logout` / `my_server_order_get`、`my_server_wallet` / `my_server_topup`、`node_forget`、`trial_status`、`quit_decision`、`ui_log`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
@@ -2766,7 +2795,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.48.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** |
+| `contracts/commands.md` | **2.49.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** |
 | `contracts/events.md` | **2.21.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
 | `contracts/tools.md` | **3.22.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** |
@@ -2785,12 +2814,22 @@ type RulesStatus = {
 
 ## 16. 变更记录
 
+### 2.49.0（未发布，2026-11-21：UI 排障日志命令）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.49.0`；§2 新增 98 `ui_log`（`{ level, target, message }` → `null`），详解见 §7.24 | 新增命令 | PM 2026-11-21：真机排障需要把界面事件写进 Host 的日志文件 |
+| 2 | 三条硬规则：`target` 只允许 `[A-Za-z0-9_-]`、1–32 字符、落盘加 `ui::` 前缀；`message` 先脱敏、再把 `\r`/`\n`/`\t` 换成空格、最后 300 字符截断；进程内每秒最多 50 条，超出直接丢弃 | 约束 | 入口来自 WebView：不校验 target 就能冒用别的模块名，不换行就能伪造日志行，不脱敏就会把令牌写进用户可打开的目录 |
+| 3 | `level` 的 `debug` 在文件里落 `INFO`（文件 logger 级别就是 INFO）；白名单外的值按 `debug` 处理且默认不落盘 | 语义 | 真机排障要看得见；前端拼错级别宁可不写，也不刷盘 |
+| 4 | §13 标注为 UI 专用、不注册 AI 工具；§15.5 矩阵同步本文件 2.49.0 | 元数据 | — |
+
 ### 2.48.0（未发布，2026-11-20：Shadowrocket 专用配置）
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
 | 1 | 本文件版本升到 `2.48.0`；§7.21 `formats[]` 增第四项 `shadowrocket`（`/v1/mobile/profile/shadowrocket`，Surge 风格配置文本：节点 + `DOMAIN-SUFFIX,cn` / `GEOIP,CN` 直连 + `FINAL,Veyl`），二维码内容为 URL 本身 | 返回结构变更 | 产品 2026-11-20：只发节点时 Shadowrocket 只能全局，全局不可接受 |
 | 2 | `ss` 保留为纯节点列表（兜底），界面不再取用；Shadowrocket 行的「只能全部走节点」说明随之删除 | 语义变更 | 同上 |
+| 3 | §7.23 `hiddify` 的 `url` 改为 `…/releases/latest`（原来指向仓库首页，普通用户不会用 GitHub）；`qr_data_url` 改为本机 origin 的 `/dl/hiddify`，由 Worker 按 UA 分流到 App Store / 最新 APK / release 页。新增公开端点 `GET /dl/:client`（302，不托管安装包） | 语义变更 | 产品 2026-11-21：一个码要服务两个平台 |
 
 ### 2.47.0（未发布，2026-11-20：手机端导出多格式 + 下载码按客户端）
 

@@ -1,10 +1,13 @@
 /** @vitest-environment jsdom */
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, MyServer } from "../agent/bridge";
 import { AGENT_EVENTS } from "../agent/protocol";
 import type { AgentEvent } from "../agent/protocol";
+import { uiLog } from "../log/uiLog";
 import { useMyServers } from "./useMyServers";
+
+vi.mock("../log/uiLog", () => ({ uiLog: vi.fn() }));
 
 const SERVER_A: MyServer = {
   server_id: "srv_a",
@@ -63,6 +66,8 @@ function makeBridge(listRef: { current: MyServer[] }) {
 }
 
 afterEach(() => {
+  // 没有 globals，Testing Library 不会自动卸载：上一条用例挂着的 hook 还会听事件。
+  cleanup();
   vi.restoreAllMocks();
   localStorage.clear();
 });
@@ -927,5 +932,237 @@ describe("打开即刷的 30 秒门禁", () => {
       await view.result.current.refreshWallet();
     });
     expect(wallet.mock.calls.length).toBe(base);
+  });
+});
+
+describe("余额刷新的日志", () => {
+  function lines(): string[] {
+    return vi.mocked(uiLog).mock.calls.map(
+      ([level, message]) => `${level} ${message}`,
+    );
+  }
+  function matching(pattern: RegExp): string[] {
+    return lines().filter((line) => pattern.test(line));
+  }
+  async function flush() {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  }
+
+  it("触发与结果各一行：成功带余额与耗时，门禁跳过带距上次成功的间隔", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+    // 启动读完账户就刷一次：触发和结果各一行。
+    expect(matching(/^debug refresh seq=\d+ trigger=login$/).length).toBe(1);
+    expect(
+      matching(/^debug refresh seq=\d+ done outcome=ok balance_cents=1000 elapsed_ms=\d+$/)
+        .length,
+    ).toBe(1);
+    vi.mocked(uiLog).mockClear();
+
+    const before = wallet.mock.calls.length;
+    await act(async () => {
+      await view.result.current.refreshWallet({ trigger: "open_menu" });
+    });
+    expect(wallet.mock.calls.length).toBe(before);
+    expect(matching(/^debug refresh seq=\d+ trigger=open_menu$/).length).toBe(1);
+    expect(
+      matching(/^debug refresh seq=\d+ skipped reason=gate elapsed_ms=\d+$/).length,
+    ).toBe(1);
+
+    await act(async () => {
+      await view.result.current.refreshWallet({ force: true, trigger: "manual" });
+    });
+    expect(wallet.mock.calls.length).toBe(before + 1);
+    expect(matching(/^debug refresh seq=\d+ trigger=manual$/).length).toBe(1);
+    expect(
+      matching(/^debug refresh seq=\d+ done outcome=ok balance_cents=1000 elapsed_ms=\d+$/)
+        .length,
+    ).toBe(1);
+    // 一次刷新只有触发和结果两行，没有中间态。
+    expect(matching(/^debug refresh /).length).toBe(4);
+
+    // 触发行与结果行同 seq：交错时靠它配对。
+    const done = lines().find((line) =>
+      /^debug refresh seq=\d+ done outcome=ok/.test(line),
+    ) as string;
+    const doneSeq = done.match(/seq=(\d+)/)?.[1];
+    expect(lines()).toContain(`debug refresh seq=${doneSeq} trigger=manual`);
+    const gate = lines().find((line) => line.includes("reason=gate")) as string;
+    const gateSeq = gate.match(/seq=(\d+)/)?.[1];
+    expect(lines()).toContain(`debug refresh seq=${gateSeq} trigger=open_menu`);
+  });
+
+  it("在途去重也记一行 skipped", async () => {
+    let release: (value: unknown) => void = () => {};
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+    wallet.mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve)) as never,
+    );
+    vi.mocked(uiLog).mockClear();
+
+    act(() => {
+      void view.result.current.refreshWallet({ force: true, trigger: "retry" });
+      void view.result.current.refreshWallet({ force: true, trigger: "retry" });
+    });
+    expect(matching(/^debug refresh seq=\d+ skipped reason=inflight$/).length).toBe(1);
+
+    await act(async () => {
+      release({
+        balance_cents: 1000,
+        currency: "USD",
+        denominations_cents: [1000],
+        updated_at: new Date(0).toISOString(),
+      });
+    });
+  });
+
+  it("失败只记错误码，不记错误原文；陈旧翻转各一行且只打一次", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+    vi.mocked(uiLog).mockClear();
+
+    wallet.mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "连不上 10.0.0.9:443，令牌 abc123",
+    });
+    await act(async () => {
+      await view.result.current.refreshWallet({ force: true });
+    });
+    expect(
+      matching(/^warn refresh seq=\d+ done outcome=failed elapsed_ms=\d+ reason=network$/)
+        .length,
+    ).toBe(1);
+    expect(lines().some((line) => line.includes("令牌"))).toBe(false);
+    expect(lines().some((line) => line.includes("10.0.0.9"))).toBe(false);
+    expect(matching(/^warn stale changed value=true idle_ms=\d+$/).length).toBe(1);
+
+    await act(async () => {
+      await view.result.current.refreshWallet({ force: true });
+    });
+    expect(matching(/^debug stale changed value=false idle_ms=\d+$/).length).toBe(
+      1,
+    );
+    // 恢复成功后不再重复记 false。
+    await act(async () => {
+      await view.result.current.refreshWallet({ force: true });
+    });
+    expect(matching(/^debug stale changed value=false idle_ms=\d+$/).length).toBe(
+      1,
+    );
+  });
+
+  it("窗口隐藏只在可见→隐藏的那一刻记一条，隐藏期间不刷屏", async () => {
+    vi.useFakeTimers();
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    let visibility: "visible" | "hidden" = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    try {
+      const view = renderHook(() =>
+        useMyServers(bridge, { active: false, rootSignal: 0 }),
+      );
+      await flush();
+      vi.mocked(uiLog).mockClear();
+
+      visibility = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+      await flush();
+      expect(matching(/^debug refresh skipped reason=hidden$/).length).toBe(1);
+
+      // 有些平台会连发多次 hidden：不重复落。
+      document.dispatchEvent(new Event("visibilitychange"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      await flush();
+      expect(matching(/^debug refresh skipped reason=hidden$/).length).toBe(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2 * 15 * 60_000);
+      });
+      expect(matching(/^debug refresh skipped reason=hidden$/).length).toBe(1);
+
+      visibility = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      visibility = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+      await flush();
+      // 恢复可见用自己的 trigger，和 15 分钟定时（poll）分得开。
+      expect(matching(/^debug refresh seq=\d+ trigger=visible$/).length).toBe(1);
+      expect(matching(/^debug refresh skipped reason=hidden$/).length).toBe(2);
+
+      view.unmount();
+    } finally {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      vi.useRealTimers();
+    }
+  });
+
+  it("details.reason 不合规（空格 / 邮箱 / 超长 / 符号）回落 unknown", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+
+    const bad = ["bad reason", "buyer@example.com", "x".repeat(40), "bad:reason!"];
+    for (const reason of bad) {
+      vi.mocked(uiLog).mockClear();
+      wallet.mockRejectedValueOnce({
+        code: "NETWORK",
+        message: "连不上。",
+        details: { reason },
+      });
+      await act(async () => {
+        await view.result.current.refreshWallet({ force: true });
+      });
+      expect(
+        matching(
+          /^warn refresh seq=\d+ done outcome=failed elapsed_ms=\d+ reason=unknown$/,
+        ).length,
+      ).toBe(1);
+      expect(lines().some((line) => line.includes(reason))).toBe(false);
+    }
+
+    // 合规的短枚举照常透出，不被白名单误伤。
+    vi.mocked(uiLog).mockClear();
+    wallet.mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "连不上。",
+      details: { reason: "quota_exhausted" },
+    });
+    await act(async () => {
+      await view.result.current.refreshWallet({ force: true });
+    });
+    expect(
+      matching(
+        /^warn refresh seq=\d+ done outcome=failed elapsed_ms=\d+ reason=quota_exhausted$/,
+      ).length,
+    ).toBe(1);
   });
 });

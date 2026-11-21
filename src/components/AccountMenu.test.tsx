@@ -119,6 +119,7 @@ describe("账号菜单", () => {
     const before = retry.mock.calls.length;
     screen.getByRole("button", { name: "重试" }).click();
     expect(retry.mock.calls.length).toBe(before + 1);
+    expect(retry).toHaveBeenLastCalledWith("retry");
   });
 });
 
@@ -279,5 +280,6 @@ describe("账号菜单的余额陈旧提示", () => {
     const refresh = vi.fn();
     renderMenu({ onRefreshWallet: refresh });
     expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith("open_menu");
   });
 });

@@ -30,6 +30,15 @@ use log::{LevelFilter, Log, Metadata, Record};
 /// 文件里只放 INFO 及以上：磁盘要省，留给真正需要事后追溯的事件。
 const FILE_LEVEL: LevelFilter = LevelFilter::Info;
 
+/// 测试用：这条级别会不会落进文件。
+///
+/// 与 `Logger::log` 里的 `level <= self.file_level` 是同一判据——UI 日志命令
+/// 要保证自己的 debug 真的能被看见，不能靠另写一份等级表去猜。
+#[cfg(test)]
+pub(crate) fn file_accepts(level: log::Level) -> bool {
+    level <= FILE_LEVEL
+}
+
 /// 终端（仅 debug 构建）默认也只放 INFO：不设 `RUST_LOG` 时不刷屏。
 /// 需要链路细节时用 `RUST_LOG=debug` 显式打开，文件与终端会一起变详细。
 #[cfg(debug_assertions)]

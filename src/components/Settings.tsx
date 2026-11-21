@@ -22,6 +22,7 @@ import type {
 } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
 import { formatUsdCents } from "../myservers/labels";
+import type { WalletTrigger } from "../myservers/useMyServers";
 import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
 import { settingsOverviewPrompt } from "../ai/settingsOverview";
 import { useFocusTrap } from "../ui/focus";
@@ -90,7 +91,7 @@ interface Props {
   /** 刷新失败但手上还有旧值：显示旧值并注明「显示的是上次的余额」。 */
   walletStale?: boolean;
   /** 余额读取失败时的重试 / 打开账户段时的刷新：走 30 秒门禁。 */
-  onRefreshWallet?: () => void;
+  onRefreshWallet?: (trigger: WalletTrigger) => void;
   /** 设置里的「刷新」文字链接：强制刷新，不受 30 秒门禁限制。 */
   onForceRefresh?: () => void;
   onLogin?: () => void;
@@ -700,7 +701,7 @@ export function Settings({
   useEffect(() => {
     // 未登录不发：登出时停在这页也不会打余额接口。
     if (!open || section !== "account" || account?.logged_in !== true) return;
-    refreshWalletRef.current?.();
+    refreshWalletRef.current?.("open_settings");
   }, [open, section, account?.logged_in]);
   /** 咨询 AI：设置缩左、助手并排。 */
   const [consulting, setConsulting] = useState(false);
@@ -2676,7 +2677,7 @@ export function Settings({
                         <button
                           type="button"
                           className="settings-link"
-                          onClick={onRefreshWallet}
+                          onClick={() => onRefreshWallet?.("retry")}
                           disabled={!onRefreshWallet}
                         >
                           重试

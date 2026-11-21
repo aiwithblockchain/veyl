@@ -2315,7 +2315,9 @@ export default function App() {
               walletStale={myServers.walletStale}
               identityProblem={myServers.identityProblem}
               onTopUp={() => myServers.openTopUp()}
-              onRefreshWallet={() => void myServers.refreshWallet()}
+              onRefreshWallet={(trigger) =>
+                void myServers.refreshWallet({ trigger })
+              }
               onReRegister={() => myServers.identityAction()}
               onSwitchAccount={handleSwitchAccount}
               onLogout={handleAccountLogout}
@@ -2548,7 +2550,7 @@ export default function App() {
           wallet={myServers.wallet}
           loading={myServers.walletLoading}
           error={myServers.walletError}
-          onRetry={() => void myServers.refreshWallet()}
+          onRetry={() => void myServers.refreshWallet({ trigger: "retry" })}
           onTopUp={myServers.topup}
           onClose={myServers.closeTopUp}
         />
@@ -2635,8 +2637,10 @@ export default function App() {
         walletRefreshing={myServers.walletRefreshing}
         walletError={myServers.walletError}
         walletStale={myServers.walletStale}
-        onRefreshWallet={() => void myServers.refreshWallet()}
-        onForceRefresh={() => void myServers.refreshWallet({ force: true })}
+        onRefreshWallet={(trigger) => void myServers.refreshWallet({ trigger })}
+        onForceRefresh={() =>
+          void myServers.refreshWallet({ force: true, trigger: "manual" })
+        }
         onLogin={() => {
           closeSettings();
           myServers.openLogin();
