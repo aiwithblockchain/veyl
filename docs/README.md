@@ -13,6 +13,7 @@
 | `v2-plan.md` | V1 明确推迟到 V2 的功能与约束（AI 代操作、自动更新等） | 规划 V2 或判断某功能该不该现在做 |
 | `notes/pending-topics.md` | 记下来但还没讨论的话题 | 有空时挑一个开聊 |
 | `design/ai-docs-management.md` | 「问 AI」入口清单、AI 要讲的产品功能、三份 AI 文档的管理与版本（**梳理稿，待讨论**） | 讨论 AI 提示词与 FAQ 时 |
+| `design/i18n.md` | 界面与 AI 对话的中英文切换（**任务书，待实现**） | 做语言切换时 |
 | `user-segments.md` | 四类用户怎么定义、怎么判定 | 任何涉及「面向谁」的判断 |
 | `user-flows.md` | 首次启动、提问、配置确认、DNS 策略 | 做流程 |
 | `configs-and-nav.md` | activity bar、左栏配置列表、配置模型 | 做导航与数据模型 |
