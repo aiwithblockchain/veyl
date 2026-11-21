@@ -603,6 +603,14 @@ type MobileExportData =
 
 - 不是「最流行的四个」，是「三种格式各至少一个 App，并且每条都有可执行的验证路径」：sing-box 已真机；CMFA 源码已核实、可补真机；Shadowrocket 由产品负责人的朋友真机测；Hiddify 双格式兜底。
 - 四个 App 覆盖三种格式：sing-box JSON（sing-box 官方、Hiddify）、Clash YAML（CMFA、Hiddify）、ss（Shadowrocket 唯一）。
+
+> **Hiddify 真机结论（2026-11-21，iPhone）**：扫 `/profile`（sing-box JSON）导入成功、能连上；国内直连**生效**（`baidu.com/s?wd=ip`、`tool.lu/ip` 都是本地 IP），其余走节点。
+>
+> 但**分流不是我们给的**：Hiddify 的路由是它自己的设置项（`lib/singbox/model/singbox_config_option.dart` 的 `routeRule`），导入时我们配置里的 `route` / `rule_set` 不生效，它用「路由」页里的内置规则（默认开着「绕过中国的网站」，按地区选）。所以：
+>
+> - 对我们只有一条承诺——它的默认规则能覆盖国内，用户扫完码不用改设置；
+> - **它的规则集按域名匹配**，`myip.ipip.net` 不在名单里，会走节点。验收探针别用这个域名，用 baidu / tool.lu 这类主流站；
+> - 它的规则集是 URL 拉取，拉不到时会静默退化成全局——与 Clash 的 provider 风险同类，且我们无法从配置侧兜底。
 - Shadowrocket 是当前唯一能让 ss 行上界面的客户端，所以即使 Basic 未核实也先列入；这是 M1 唯一一个「未验证先上」的例外，风险与撤下条件见下。
 - 其余 App 一律走界面兜底行；M1 只对这四个负责。
 
