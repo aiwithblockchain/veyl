@@ -99,9 +99,19 @@ describe("账号菜单", () => {
     expect(screen.queryByText("查看账单")).toBeNull();
   });
 
+  it("没有值也不在途：显示「—」，不冒充「读取中」", () => {
+    renderMenu({ wallet: null });
+    expect(screen.getByText("—")).toBeTruthy();
+    expect(screen.queryByText("读取中")).toBeNull();
+  });
+
   it("余额读取中与失败各自给一句话，失败可重试", () => {
     const retry = vi.fn();
-    const { rerender } = renderMenu({ wallet: null, onRefreshWallet: retry });
+    const { rerender } = renderMenu({
+      wallet: null,
+      walletLoading: true,
+      onRefreshWallet: retry,
+    });
     expect(screen.getByText("读取中")).toBeTruthy();
 
     rerender(

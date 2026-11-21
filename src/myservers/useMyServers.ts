@@ -173,6 +173,10 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const [walletFailed, setWalletFailed] = useState(false);
   const walletSuccessAtRef = useRef(0);
   const walletInFlightRef = useRef(false);
+  /** 在途请求的令牌：只有仍持有令牌的请求才能清掉在途标记。 */
+  const walletTokenRef = useRef(0);
+  /** 账户代次：登出 / 换账号时 +1；晚到的旧账户响应据此丢弃。 */
+  const walletEpochRef = useRef(0);
   /** 已经为这次隐藏记过日志：有些平台会连发多次 hidden 事件。 */
   const hiddenLoggedRef = useRef(false);
   /** 回调里判断「有没有旧值」不依赖闭包里的 wallet。 */
@@ -185,8 +189,25 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   /** 回调里判断登录态用 ref：把 loggedIn 放进依赖会让 refreshWallet 换身份、连带重跑列表加载。 */
   const loggedInRef = useRef(loggedIn);
   loggedInRef.current = loggedIn;
+  /** 账户重读后比较用：回调里拿不到最新的 account state。 */
+  const accountIdRef = useRef<string | null>(null);
+  accountIdRef.current = account?.account_id ?? null;
+
+  /** 账户变了：余额、门禁时间、在途标记都属于上一个账户，整份清掉。 */
+  const resetWallet = useCallback(() => {
+    walletEpochRef.current += 1;
+    walletSuccessAtRef.current = 0;
+    walletInFlightRef.current = false;
+    walletRef.current = null;
+    setWallet(null);
+    setWalletError(null);
+    setWalletFailed(false);
+    setWalletInFlight(false);
+  }, []);
 
   const markLoggedOut = useCallback(() => {
+    loggedInRef.current = false;
+    resetWallet();
     setAccount((current) =>
       current
         ? { ...current, logged_in: false, email: null, account_kind: "device" }
@@ -198,11 +219,9 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setServers([]);
     setSelectedId(null);
     setDetail(null);
-    setWallet(null);
-    setWalletError(null);
     setError(null);
     setLoading(false);
-  }, []);
+  }, [resetWallet]);
 
   const refreshWallet = useCallback(
     async (options: { force?: boolean; trigger?: WalletTrigger } = {}) => {
@@ -225,8 +244,15 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         uiLog("debug", `refresh seq=${seq} skipped reason=inflight`);
         return;
       }
+      // 显式动作不受门禁限制：手动刷新和失败后的「重试」都要立刻发。
+      const forced = options.force === true || trigger === "retry";
       const sinceSuccess = Date.now() - walletSuccessAtRef.current;
-      if (!options.force && sinceSuccess < WALLET_REFRESH_GATE_MS) {
+      // 手上没有值时门禁毫无意义：拦下来只会把界面钉在「读取中」。
+      if (
+        !forced &&
+        walletRef.current !== null &&
+        sinceSuccess < WALLET_REFRESH_GATE_MS
+      ) {
         uiLog(
           "debug",
           `refresh seq=${seq} skipped reason=gate elapsed_ms=${sinceSuccess}`,
@@ -234,13 +260,21 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         return;
       }
       const startedAt = Date.now();
+      const epoch = walletEpochRef.current;
+      const token = (walletTokenRef.current += 1);
       walletInFlightRef.current = true;
       // 刷新期间保留旧值：不清空 wallet；读取中只属于「从来没有值」的情况。
       setWalletInFlight(true);
       setWalletError(null);
       try {
         const next = await source.call(bridge);
+        if (epoch !== walletEpochRef.current) {
+          // 等响应期间登出或换了账户：这是上一个账户的值，丢弃。
+          uiLog("debug", `refresh seq=${seq} discarded reason=account_changed`);
+          return;
+        }
         setWallet(next);
+        walletRef.current = next;
         walletSuccessAtRef.current = Date.now();
         setWalletFailed(false);
         uiLog(
@@ -248,6 +282,10 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
           `refresh seq=${seq} done outcome=ok balance_cents=${next.balance_cents} elapsed_ms=${Date.now() - startedAt}`,
         );
       } catch (error) {
+        if (epoch !== walletEpochRef.current) {
+          uiLog("debug", `refresh seq=${seq} discarded reason=account_changed`);
+          return;
+        }
         setWalletFailed(true);
         // 失败只记错误码/短原因，不记错误原文。
         uiLog(
@@ -270,8 +308,11 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         }
         // 已有旧值：保留数字，由 walletStale 写「显示的是上次的余额」。
       } finally {
-        walletInFlightRef.current = false;
-        setWalletInFlight(false);
+        // 只有仍持有令牌的请求才能清标记：别把后来那次请求的在途状态抹掉。
+        if (walletTokenRef.current === token) {
+          walletInFlightRef.current = false;
+          setWalletInFlight(false);
+        }
       }
     },
     [bridge, markLoggedOut],
@@ -341,6 +382,12 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setAccountError(false);
     try {
       const info = await source.call(bridge);
+      // 重读也可能换到另一个账户：同 id 不清缓存，id 变了走同一套重置。
+      if (info.logged_in && info.account_id !== accountIdRef.current) {
+        resetWallet();
+      }
+      // 同一拍里就要刷新：登录态先进 ref，不等下一次 render。
+      loggedInRef.current = info.logged_in;
       setAccount(info);
       setAccountLoaded(true);
       if (info.logged_in) {
@@ -357,7 +404,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       setAccountLoaded(true);
       setAccountError(true);
     }
-  }, [bridge, refresh, refreshWallet]);
+  }, [bridge, refresh, refreshWallet, resetWallet]);
 
   /** 列表失败后的手动重试；成功就地恢复列表，不跳页。 */
   const retry = useCallback(async () => {
@@ -420,6 +467,8 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       .call(bridge)
       .then((info) => {
         if (!alive) return;
+        // 同一拍里就要刷新：登录态先进 ref，不等下一次 render。
+        loggedInRef.current = info.logged_in;
         setAccount(info);
         setAccountLoaded(true);
         if (info.logged_in) {
@@ -725,6 +774,9 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       throw { code: "UNSUPPORTED", message: LOGIN_UNSUPPORTED, retryable: false };
     }
     const next = await source.call(bridge, email, code);
+    // 换了账户：上一个账户的余额与门禁时间都不能留；同一账户重登沿用缓存。
+    if (next.logged_in && next.account_id !== account?.account_id) resetWallet();
+    loggedInRef.current = next.logged_in;
     setAccount(next);
     setAccountLoaded(true);
     setIdentityLostState(false);

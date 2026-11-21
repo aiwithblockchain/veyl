@@ -8,6 +8,8 @@ interface Props {
   /** 账号邮箱；菜单头部只显示这一行，不重复头像。 */
   email?: string | null;
   wallet: MyServerWallet | null;
+  /** 从未取到值且请求在途：只有这时才写「读取中」，否则写「—」。 */
+  walletLoading?: boolean;
   walletError: string | null;
   /** 显示的是上次的余额：只写一行小字，不加按钮、不加角标。 */
   walletStale?: boolean;
@@ -31,6 +33,7 @@ const RECOVER_FAILED = "这一步没完成。检查网络后再试一次；账�
 export function AccountMenu({
   email,
   wallet,
+  walletLoading = false,
   walletError,
   walletStale = false,
   disabled = false,
@@ -157,7 +160,11 @@ export function AccountMenu({
                   </span>
                 ) : (
                   <span className="account-menu__amount num">
-                    {wallet ? formatUsdCents(wallet.balance_cents) : "读取中"}
+                    {wallet
+                      ? formatUsdCents(wallet.balance_cents)
+                      : walletLoading
+                        ? "读取中"
+                        : "—"}
                   </span>
                 )}
               </div>

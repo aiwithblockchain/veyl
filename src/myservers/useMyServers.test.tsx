@@ -48,6 +48,20 @@ function makeBridge(listRef: { current: MyServer[] }) {
       account_kind: "email",
     })),
     myServerIdentity: vi.fn(async () => ({ has_identity: true, account_id: "acct_1" })),
+    myServerLogout: vi.fn(async () => ({
+      logged_in: false,
+      email: null,
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "device",
+    })),
+    myServerLoginVerify: vi.fn(async (email: string) => ({
+      logged_in: true,
+      email,
+      account_id: "acct_2",
+      device_id: "dev_1",
+      account_kind: "email",
+    })),
     myServerList: vi.fn(async () => ({ servers: listRef.current })),
     myServerGet: vi.fn(async (id: string) => {
       const found = listRef.current.find((server) => server.server_id === id);
@@ -787,6 +801,25 @@ describe("余额刷新", () => {
     vi.useRealTimers();
   });
 
+  it("启动读完账户后，登录那一次刷新真的发出请求（active:false 也一样）", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    vi.mocked(uiLog).mockClear();
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: false, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.accountLoaded).toBe(true));
+    // 不进入「我的服务器」、也不切窗口：只剩登录那条路径能发请求。
+    await waitFor(() => expect(wallet).toHaveBeenCalled());
+    expect(wallet.mock.calls.length).toBe(1);
+    expect(
+      vi.mocked(uiLog).mock.calls.some(([, message]) =>
+        String(message).includes("skipped reason=logged_out"),
+      ),
+    ).toBe(false);
+  });
+
   it("陈旧提示：刷新失败标注旧余额，恢复成功后消失", async () => {
     const list = { current: [] as MyServer[] };
     const bridge = makeBridge(list);
@@ -1200,5 +1233,238 @@ describe("余额刷新的日志", () => {
         /^warn refresh seq=\d+ done outcome=failed elapsed_ms=\d+ reason=quota_exhausted$/,
       ).length,
     ).toBe(1);
+  });
+});
+
+describe("换账户与登出", () => {
+  const WALLET_A = {
+    balance_cents: 1000,
+    currency: "USD",
+    denominations_cents: [1000],
+    updated_at: new Date(0).toISOString(),
+  };
+
+  async function mounted() {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+    // 登录刷新与进入服务器页的刷新共用门禁：挂载只发一次。
+    expect(wallet.mock.calls.length).toBe(1);
+    return { bridge, wallet, view };
+  }
+
+  it("登出清余额与陈旧态；30 秒内重新登录照样能取到新值", async () => {
+    const { wallet, view } = await mounted();
+    expect(view.result.current.wallet?.balance_cents).toBe(WALLET_A.balance_cents);
+
+    await act(async () => {
+      await view.result.current.logout();
+    });
+    expect(view.result.current.wallet).toBeNull();
+    expect(view.result.current.walletError).toBeNull();
+    expect(view.result.current.walletStale).toBe(false);
+
+    // 30 秒门禁跟着账户一起重置：新账户的余额不能被上一个账户的成功时间挡掉。
+    wallet.mockResolvedValue({
+      balance_cents: 500,
+      currency: "USD",
+      denominations_cents: [1000],
+      updated_at: new Date(0).toISOString(),
+    });
+    await act(async () => {
+      await view.result.current.loginVerify("b@example.com", "123456");
+    });
+    await waitFor(() =>
+      expect(view.result.current.wallet?.balance_cents).toBe(500),
+    );
+  });
+
+  it("登出后才回来的余额响应被丢弃，不写回旧账户的值", async () => {
+    let release: (value: unknown) => void = () => {};
+    const { view, wallet } = await mounted();
+    wallet.mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve)) as never,
+    );
+    vi.mocked(uiLog).mockClear();
+
+    act(() => {
+      void view.result.current.refreshWallet({ force: true });
+    });
+    await act(async () => {
+      await view.result.current.logout();
+    });
+    expect(view.result.current.wallet).toBeNull();
+
+    await act(async () => {
+      release({ ...WALLET_A, balance_cents: 4242 });
+      await Promise.resolve();
+    });
+    expect(view.result.current.wallet).toBeNull();
+    expect(
+      vi
+        .mocked(uiLog)
+        .mock.calls.some(([, message]) =>
+          String(message).includes("discarded reason=account_changed"),
+        ),
+    ).toBe(true);
+  });
+
+  it("换账户：旧余额在第一次响应回来之前不显示", async () => {
+    let release: (value: unknown) => void = () => {};
+    const { view, wallet } = await mounted();
+    wallet.mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve)) as never,
+    );
+
+    await act(async () => {
+      await view.result.current.loginVerify("b@example.com", "123456");
+    });
+    // 这是新账户的界面：不能还挂着上一个账户的 $10.00。
+    expect(view.result.current.wallet).toBeNull();
+
+    await act(async () => {
+      release({ ...WALLET_A, balance_cents: 700 });
+      await Promise.resolve();
+    });
+    expect(view.result.current.wallet?.balance_cents).toBe(700);
+  });
+
+  it("旧请求在途时登出再登录新账户：旧响应丢弃，新请求不被旧 finally 清掉", async () => {
+    let releaseOld: (value: unknown) => void = () => {};
+    let releaseNew: (value: unknown) => void = () => {};
+    const { view, wallet } = await mounted();
+
+    wallet.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseOld = resolve)) as never,
+    );
+    act(() => {
+      void view.result.current.refreshWallet({ force: true });
+    });
+    await act(async () => {
+      await view.result.current.logout();
+    });
+    expect(view.result.current.wallet).toBeNull();
+
+    // 新账户的请求也挂住，便于观察在途标记归谁。
+    wallet.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseNew = resolve)) as never,
+    );
+    await act(async () => {
+      await view.result.current.loginVerify("b@example.com", "123456");
+    });
+    expect(view.result.current.walletRefreshing).toBe(true);
+
+    // 旧响应晚到：值丢掉，在途标记不能跟着被清掉。
+    await act(async () => {
+      releaseOld({ ...WALLET_A, balance_cents: 4242 });
+      await Promise.resolve();
+    });
+    expect(view.result.current.wallet).toBeNull();
+    expect(view.result.current.walletRefreshing).toBe(true);
+
+    await act(async () => {
+      releaseNew({ ...WALLET_A, balance_cents: 700 });
+      await Promise.resolve();
+    });
+    expect(view.result.current.wallet?.balance_cents).toBe(700);
+    expect(view.result.current.walletRefreshing).toBe(false);
+  });
+
+  it("登出后同账号重登：不靠进入服务器页也能立刻取到新值", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    vi.mocked(bridge.myServerLoginVerify).mockResolvedValue({
+      logged_in: true,
+      email: "me@example.com",
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "email",
+    });
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: false, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+
+    await act(async () => {
+      await view.result.current.logout();
+    });
+    expect(view.result.current.wallet).toBeNull();
+
+    wallet.mockResolvedValue({ ...WALLET_A, balance_cents: 640 });
+    const before = wallet.mock.calls.length;
+    await act(async () => {
+      await view.result.current.loginVerify("me@example.com", "123456");
+    });
+    await waitFor(() =>
+      expect(view.result.current.wallet?.balance_cents).toBe(640),
+    );
+    expect(wallet.mock.calls.length).toBe(before + 1);
+    expect(view.result.current.walletRefreshing).toBe(false);
+  });
+
+  it("同账号重登不重置余额：已有值保留，30 秒内不重复请求", async () => {
+    const { bridge, view, wallet } = await mounted();
+    vi.mocked(bridge.myServerLoginVerify).mockResolvedValue({
+      logged_in: true,
+      email: "me@example.com",
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "email",
+    });
+
+    const before = wallet.mock.calls.length;
+    await act(async () => {
+      await view.result.current.loginVerify("me@example.com", "123456");
+    });
+    expect(view.result.current.wallet?.balance_cents).toBe(
+      WALLET_A.balance_cents,
+    );
+    expect(wallet.mock.calls.length).toBe(before);
+  });
+
+  it("账户重读换到另一个账户：旧余额不显示", async () => {
+    let release: (value: unknown) => void = () => {};
+    const { bridge, view, wallet } = await mounted();
+    vi.mocked(bridge.myServerAccount).mockResolvedValue({
+      logged_in: true,
+      email: "b@example.com",
+      account_id: "acct_2",
+      device_id: "dev_1",
+      account_kind: "email",
+    });
+    wallet.mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve)) as never,
+    );
+
+    await act(async () => {
+      await view.result.current.refreshAccount();
+    });
+    expect(view.result.current.wallet).toBeNull();
+
+    await act(async () => {
+      release({ ...WALLET_A, balance_cents: 300 });
+      await Promise.resolve();
+    });
+    expect(view.result.current.wallet?.balance_cents).toBe(300);
+  });
+
+  it("失败态点「重试」：不受 30 秒门禁，立刻再发一次", async () => {
+    const { view, wallet } = await mounted();
+    wallet.mockRejectedValueOnce({ code: "NETWORK", message: "连不上。" });
+    await act(async () => {
+      await view.result.current.refreshWallet({ force: true });
+    });
+    expect(view.result.current.walletStale).toBe(true);
+
+    const before = wallet.mock.calls.length;
+    await act(async () => {
+      await view.result.current.refreshWallet({ trigger: "retry" });
+    });
+    expect(wallet.mock.calls.length).toBe(before + 1);
   });
 });

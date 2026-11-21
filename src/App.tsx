@@ -2311,6 +2311,7 @@ export default function App() {
             <AccountMenu
               email={myServers.account?.email ?? null}
               wallet={myServers.wallet}
+              walletLoading={myServers.walletLoading}
               walletError={myServers.walletError}
               walletStale={myServers.walletStale}
               identityProblem={myServers.identityProblem}
