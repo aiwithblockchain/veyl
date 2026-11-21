@@ -24,7 +24,7 @@ const CLIENT_QR = "data:image/svg+xml;base64,PHN2Zy1jbGllbnQvPg==";
 const CLIENT_URLS: Record<MobileClientId, string> = {
   singbox: "https://sing-box.sagernet.org/clients/",
   shadowrocket: "https://apps.apple.com/us/app/shadowrocket/id932747118",
-  hiddify: "https://github.com/hiddify/hiddify-app",
+  hiddify: "https://github.com/hiddify/hiddify-app/releases/latest",
   cmfa: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
 };
 

@@ -893,6 +893,21 @@ rules:
 ---
 
 
+#### 3.7.14 下载码按设备分流（2026-11-21 增补）
+
+- **问题**：Hiddify 在两个平台上的入口不同——iPhone 只有 App Store，Android 只有 APK。一个二维码写死任何一边，另一边扫码就是死路；而原来的链接指向 GitHub 仓库首页，普通用户根本不会用。
+- **做法**：`GET /dl/:client`（公开、302、不托管安装包），按 UA 分流：
+
+  | 设备 | 目标 |
+  |---|---|
+  | iPhone / iPad / iPod | `https://apps.apple.com/us/app/hiddify-proxy-vpn/id6596777532` |
+  | Android | `.../releases/latest/download/Hiddify-Android-universal.apk`（GitHub 的 latest 稳定地址，随版本自动指向新包） |
+  | 其余（含电脑） | `.../releases/latest` |
+
+- **链接与码分工**：桌面点的「打开下载页」仍走固定映射的 `url`（可点击、在白名单内）；二维码里放 `/dl/hiddify`，因为它是在手机上扫的，只有那时才分得出设备。
+- **`hiddify.com` 不能用**：2026-11-21 实测 TLS 握手直接失败（`SSL_ERROR_SYSCALL`），且是在境外出口上测的。官方站点不可达，所以一律不用它作为下载入口。
+- **边界**：Worker 只做 302，发布方仍是官方；APK 文件名变了要跟着改（`Hiddify-Android-universal.apk`）。
+
 #### 3.7.13 Shadowrocket 专用配置（2026-11-20 增补）
 
 - **为什么不能只发 `ss`**：`ss` 只是一串节点，Shadowrocket 拿不到任何规则，只能「全局路由 = 代理」——全部流量走节点，产品负责人已明确不可接受。分流规则必须随文件一起发。

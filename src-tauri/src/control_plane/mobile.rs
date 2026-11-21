@@ -35,7 +35,7 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// 下载页 URL 的固定映射。命令只接受客户端 id，不接受调用方传 URL。
 pub const CLIENTS_URLS: [(&str, &str); 4] = [
     ("singbox", "https://sing-box.sagernet.org/clients/"),
-    ("hiddify", "https://github.com/hiddify/hiddify-app"),
+    ("hiddify", "https://github.com/hiddify/hiddify-app/releases/latest"),
     (
         "cmfa",
         "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
@@ -159,9 +159,19 @@ pub fn clients_qr(client: &str) -> Result<MobileClientsQr, CpError> {
                 json!({ "reason": "unknown_client" }),
             )
         })?;
+    // 手机扫的码按设备分流（iPhone → App Store，Android → 安装包），桌面上点的链接落到 release 页。
+    // origin 解析不出来时退回链接本身：拿不到分流也比没有码强。
+    let payload = if client == "hiddify" {
+        match ProfileOrigin::parse(&env::current().base_url) {
+            Ok(origin) => origin.public_url("/dl/hiddify"),
+            Err(_) => url.to_string(),
+        }
+    } else {
+        url.to_string()
+    };
     Ok(MobileClientsQr {
         url: url.to_string(),
-        qr_data_url: qr_data_url(url)?,
+        qr_data_url: qr_data_url(&payload)?,
     })
 }
 
@@ -399,6 +409,16 @@ impl ProfileOrigin {
             return Err(insecure_origin());
         }
         Ok(Self { base })
+    }
+
+    /// 不带令牌的公开地址：`<base 去掉末尾斜杠><path>`（下载分流用）。
+    fn public_url(&self, path: &str) -> String {
+        let mut url = self.base.clone();
+        let joined = format!("{}{}", url.path().trim_end_matches('/'), path);
+        url.set_path(&joined);
+        url.set_query(None);
+        url.set_fragment(None);
+        url.to_string()
     }
 
     /// `https://veyl:<token>@<base 去掉末尾斜杠><profile_path>`。
@@ -661,7 +681,10 @@ mod tests {
     fn clients_qr_maps_each_client_to_its_fixed_url() {
         for (id, url) in [
             ("singbox", "https://sing-box.sagernet.org/clients/"),
-            ("hiddify", "https://github.com/hiddify/hiddify-app"),
+            (
+                "hiddify",
+                "https://github.com/hiddify/hiddify-app/releases/latest",
+            ),
             (
                 "cmfa",
                 "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
@@ -673,10 +696,20 @@ mod tests {
         ] {
             let data = clients_qr(id).unwrap();
             assert_eq!(data.url, url, "{id}");
+            // 只有 Hiddify 的码与链接不同：码要按设备分流到本机控制面，链接落到 release 页。
+            let payload = if id == "hiddify" {
+                let origin = ProfileOrigin::parse(&env::current().base_url).unwrap();
+                let payload = origin.public_url("/dl/hiddify");
+                assert!(payload.ends_with("/dl/hiddify"), "{payload}");
+                assert!(!payload.contains(TOKEN), "下载码不能带令牌：{payload}");
+                payload
+            } else {
+                url.to_string()
+            };
             assert_eq!(
                 data.qr_data_url,
-                qr_data_url(url).unwrap(),
-                "{id} 的二维码内容必须是该 URL"
+                qr_data_url(&payload).unwrap(),
+                "{id} 的二维码内容"
             );
             let encoded = data
                 .qr_data_url
@@ -702,7 +735,10 @@ mod tests {
         let value = serde_json::to_value(clients_qr("hiddify").unwrap()).unwrap();
         let object = value.as_object().unwrap();
         assert_eq!(object.len(), 2, "只有 url 与 qr_data_url");
-        assert_eq!(value["url"], "https://github.com/hiddify/hiddify-app");
+        assert_eq!(
+            value["url"],
+            "https://github.com/hiddify/hiddify-app/releases/latest"
+        );
         assert!(value["qr_data_url"]
             .as_str()
             .unwrap()

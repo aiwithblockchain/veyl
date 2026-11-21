@@ -191,7 +191,7 @@ function mockMobileExport(nodeCount: number): MobileExportData {
 /** 与契约 §7.23 的 Host 固定映射一致；这里只用于 mock。 */
 const MOCK_CLIENT_URLS: Record<MobileClientId, string> = {
   singbox: "https://sing-box.sagernet.org/clients/",
-  hiddify: "https://github.com/hiddify/hiddify-app",
+  hiddify: "https://github.com/hiddify/hiddify-app/releases/latest",
   cmfa: "https://github.com/MetaCubeX/ClashMetaForAndroid/releases",
   shadowrocket: "https://apps.apple.com/us/app/shadowrocket/id932747118",
 };
