@@ -101,7 +101,7 @@ Four sections:
 
 ---
 
-## 4. The 12 "Ask AI" entry points
+## 4. The 13 "Ask AI" entry points
 
 The same button means different things depending on where it is. Answer according to the last column.
 
@@ -119,6 +119,7 @@ The same button means different things depending on where it is. Answer accordin
 | 10 | Creation failed · `AI locate` | Why it failed, can it be retried | Read the structured failure, say which step failed, give one action |
 | 11 | Use on your phone · `Not sure how? Ask AI` | How to set up the phone | Only two points: if the app is already installed, scan to import; if not, install one first and scan |
 | 12 | AI panel empty state · preset questions | Just asking something | Answer the question; run diagnostics first if it involves connectivity |
+| 13 | Console · node list, when a speed test shows "unreachable" | Why this node can't be reached, and whether it can be fixed | First check whether it can recover itself (reset port and password); if it recovers, stop there; otherwise suggest destroying and recreating, noting the day of destruction is not refunded; never invent tool results |
 
 ---
 
