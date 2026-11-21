@@ -690,6 +690,11 @@ export function singboxConfig(nodes: ExportedNode[], origin: string): unknown {
 
   return {
     log: { level: "warn" },
+    // 1.14 起「规则集默认走默认出站」的隐式 HTTP 客户端已弃用、1.16 移除：
+    // 必须显式给一个 http_client，否则客户端每次启动都会弹弃用警告。
+    // detour 只能是 proxy：detour 到空配置的 direct 出站会 FATAL
+    // （`detour to an empty direct outbound makes no sense`），与 DNS 那条同源。
+    http_clients: [{ tag: "veyl-download", detour: "proxy" }],
     // 手机 DNS 常指向 LAN 路由器；没有这条，DNS 查询会被 final=proxy 送进隧道发往服务端内网。
     // DoH 走 proxy 出网，不用 UDP 53（避开运营商对非标端口 UDP 的限制）。
     // 国内域名走国内 DNS：否则解析出海外 IP，下面的 geoip-cn 规则永远不会命中。
@@ -737,6 +742,7 @@ export function singboxConfig(nodes: ExportedNode[], origin: string): unknown {
       // 用户域名解析仍由 dns.rules + dns.final 决定。我们节点地址是 IP，所以实际只影响规则集 URL 那一次。
       // 用直连的国内 DNS，避免规则集下载依赖尚未建立的代理。
       default_domain_resolver: "dns-cn",
+      default_http_client: "veyl-download",
       rule_set: cnRuleSets(origin),
       // 顺序不可变：sniff 必须在 hijack-dns 之前，否则 `protocol: "dns"` 永不命中，
       // DNS 查询会被 final=proxy 原样送进隧道（桌面端同源规则，静默失效不报错）。

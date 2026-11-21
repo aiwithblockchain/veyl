@@ -727,10 +727,12 @@ M1 只对 **sing-box 官方 / Shadowrocket / CMFA / Hiddify** 四个 App 负责�
 
 ```json
 {
+  "http_clients": [{ "tag": "veyl-download", "detour": "proxy" }],
   "route": {
     "final": "proxy",
     "auto_detect_interface": true,
     "default_domain_resolver": "dns-cn",
+    "default_http_client": "veyl-download",
     "rule_set": [
       { "type": "remote", "tag": "geosite-cn", "format": "binary",
         "url": "${origin}/rules/geosite-cn.srs", "update_interval": "7d" },
@@ -747,7 +749,7 @@ M1 只对 **sing-box 官方 / Shadowrocket / CMFA / Hiddify** 四个 App 负责�
   "dns": {
     "servers": [
       { "type": "https", "tag": "dns", "server": "1.1.1.1", "detour": "proxy" },
-      { "type": "udp", "tag": "dns-cn", "server": "223.5.5.5", "detour": "direct" }
+      { "type": "udp", "tag": "dns-cn", "server": "223.5.5.5" }
     ],
     "rules": [{ "rule_set": ["geosite-cn"], "server": "dns-cn" }],
     "final": "dns"
@@ -756,6 +758,7 @@ M1 只对 **sing-box 官方 / Shadowrocket / CMFA / Hiddify** 四个 App 负责�
 ```
 
 - `route.rule_set` 两条 remote，URL 与 profile 同 origin；**不写 `download_detour`**（1.14 废弃、1.16 移除）。
+- **必须显式给 HTTP 客户端**：1.14 起「规则集隐式走默认出站」已弃用（1.16 移除），不写会**每次启动都在客户端界面弹弃用警告**。做法是顶层 `http_clients` 加一个条目，`route.default_http_client` 指过去。`detour` 只能写 `proxy`——写 `direct` 会 FATAL `detour to an empty direct outbound makes no sense`（与 DNS 那条同源），因此规则集下载走节点，与旧行为一致。2026-11-21 真机出现该警告后修正。
 - 规则顺序固定：`sniff` → `hijack-dns` → `rule_set(geosite-cn,geoip-cn)` → `direct` → `ip_is_private` → `direct`；`final` 仍 `proxy`。`sniff` 必须在 `hijack-dns` 之前，否则 `protocol: "dns"` 永不命中（§3.2 的真机结论）。
 - DNS 分流：`dns-cn` 用 `udp 223.5.5.5`、`detour: "direct"`；`dns.rules` 把 `geosite-cn` 指向它；`dns.final` 仍走经代理的 DoH。
 - `route.default_domain_resolver` 必填：1.14 内核缺它会直接 FATAL（工作区已补 `dns-cn`）。

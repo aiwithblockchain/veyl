@@ -617,11 +617,17 @@ describe("GET /v1/mobile/profile", () => {
     });
     const direct = config.outbounds.find((outbound) => outbound.type === "direct");
     expect(direct).toEqual({ type: "direct", tag: "direct" });
+    // 1.14 起不能靠「隐式默认客户端」下载规则集：必须显式给，并由 route 指到它。
+    expect((config as unknown as { http_clients?: unknown }).http_clients).toEqual([
+      { tag: "veyl-download", detour: "proxy" },
+    ]);
     expect(config.route).toEqual({
       final: "proxy",
       auto_detect_interface: true,
       // 1.14 的 remote rule_set 域名 URL 需要解析器，否则内核直接拒整份配置。
       default_domain_resolver: "dns-cn",
+      // 1.14 起必须显式给 http_client，否则「隐式默认客户端」弃用告警会弹到客户端界面上。
+      default_http_client: "veyl-download",
       // 规则集必须与 profile 同 origin；remote 不带 download_detour（1.14 废弃）。
       rule_set: [
         {
