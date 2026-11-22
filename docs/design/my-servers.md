@@ -1706,6 +1706,7 @@ CREATE TABLE rate_limits (
 > - **端口**：不再取 `10000–60000`，固定为 `30000-30999`（`shared-firewall.md` §3.2）。
 > - **防火墙**：不再按机器创建，改为全局一条 `veyl-shared-node-firewall`、按 tag `veyl:node` 覆盖（`shared-firewall.md` §3）。
 > - **密码**：不再是服务器生成后回传，改为控制面生成、agent 通过 `/v1/agent/enroll` 领取（`node-agent-mcp.md` §5）。
+> - **控制面接口版本 2.40.0（新增，向后兼容）**：新增 `POST /v1/agent/enroll`、`POST /v1/agent/report`、`GET /v1/agent/desired-state`、`POST /v1/servers/{id}/agent-token`，契约、鉴权与响应字段见 `node-agent-mcp.md` §5；旧的 `POST /v1/enroll/{token}` 保留给存量机器，新机器不再使用。
 >
 > 下面 19.6.x 的内容保留为旧实现记录，供对照。
 
